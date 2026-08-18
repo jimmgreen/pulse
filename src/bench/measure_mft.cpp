@@ -153,24 +153,13 @@ static void read_usn_journal(HANDLE hvol, int64_t limit_records) {
     if (ms > 0) std::wcout << L"rate         = " << (records * 1000.0 / ms) << L" rec/s\n";
 }
 
-static void enum_mft(HANDLE hvol, wchar_t /*letter*/, bool full) {
-    std::wcout << L"\n=== " << (full ? L"Full" : L"Low 2GB") << L" MFT Enumeration (FSCTL_ENUM_USN_DATA) ===\n";
+static void enum_mft(HANDLE hvol, wchar_t /*letter*/) {
+    std::wcout << L"\n=== Full MFT Enumeration (FSCTL_ENUM_USN_DATA) ===\n";
 
     MFT_ENUM_DATA_V0 med{};
-    if (!full) {
-        // Restrict to low 48-bit FRN range (within first ~2^48 records).
-        // The real "low 2GB" interpretation is fuzzy; we treat it as a bounded enumeration
-        // using LowUsn/HighUsn to stay within a region. FSCTL_ENUM_USN_DATA uses StartFileReferenceNumber.
-        // We simply enumerate from 0 up to a threshold. The "low 2GB range" wording from the spec
-        // is approximated by limiting total records when not full.
-        med.StartFileReferenceNumber = 0;
-        med.LowUsn = 0;
-        med.HighUsn = _I64_MAX;
-    } else {
-        med.StartFileReferenceNumber = 0;
-        med.LowUsn = 0;
-        med.HighUsn = _I64_MAX;
-    }
+    med.StartFileReferenceNumber = 0;
+    med.LowUsn = 0;
+    med.HighUsn = _I64_MAX;
 
     constexpr DWORD buf_size = 4 * 1024 * 1024;
     std::vector<BYTE> buffer(buf_size);
@@ -179,9 +168,6 @@ static void enum_mft(HANDLE hvol, wchar_t /*letter*/, bool full) {
 
     const auto max_duration = std::chrono::minutes(5);
     auto t0 = std::chrono::steady_clock::now();
-
-    // Cap for "low 2GB" interpretation: stop after a fixed record count.
-    const int64_t low_range_cap = full ? INT64_MAX : 5'000'000;
 
     for (;;) {
         DWORD bytes_read = 0;
@@ -202,10 +188,6 @@ static void enum_mft(HANDLE hvol, wchar_t /*letter*/, bool full) {
         while (remaining > 0) {
             if (rec->RecordLength == 0 || rec->RecordLength > remaining) break;
             ++records;
-            if (!full && records >= low_range_cap) {
-                truncated = true;
-                break;
-            }
             remaining -= rec->RecordLength;
             med.StartFileReferenceNumber = rec->FileReferenceNumber;
             rec = reinterpret_cast<PUSN_RECORD_V2>(reinterpret_cast<BYTE*>(rec) + rec->RecordLength);
@@ -289,19 +271,7 @@ int wmain(int argc, wchar_t* argv[]) {
     query_usn_journal(hvol);
     read_usn_journal(hvol, 10000);
 
-    // Try full enumeration first; if it fails quickly, fall back to bounded "low range" attempt.
-    bool full_ok = false;
-    try {
-        enum_mft(hvol, drive, true);
-        full_ok = true;
-    } catch (...) {
-        std::wcout << L"full MFT enumeration threw.\n";
-    }
-
-    if (!full_ok) {
-        std::wcout << L"  falling back to bounded MFT scan.\n";
-        enum_mft(hvol, drive, false);
-    }
+    enum_mft(hvol, drive);
 
     CloseHandle(hvol);
     return 0;

@@ -98,16 +98,10 @@ enum class CtxMenuGroup {
     Print,
 };
 
-inline std::wstring MenuTextLower(std::wstring_view v) {
-    std::wstring out(v);
-    for (auto& c : out) c = static_cast<wchar_t>(std::towlower(c));
-    return out;
-}
-
 inline bool MenuTextContainsI(std::wstring_view hay, std::wstring_view needle) {
     if (needle.empty()) return true;
-    const std::wstring h = MenuTextLower(hay);
-    const std::wstring n = MenuTextLower(needle);
+    const std::wstring h = ToLowerVerb(hay);
+    const std::wstring n = ToLowerVerb(needle);
     return h.find(n) != std::wstring::npos;
 }
 
@@ -150,12 +144,12 @@ inline CtxMenuGroup GroupOf(CtxMenuCategory c) {
 
 // Catalog key: cleaned lowercase text, flyout vs top-level verb kept distinct.
 inline std::wstring CatalogKey(std::wstring_view text, bool is_flyout) {
-    std::wstring t = MenuTextLower(CleanMenuText(text));
+    std::wstring t = ToLowerVerb(CleanMenuText(text));
     return (is_flyout ? L"f:" : L"v:") + t;
 }
 
 inline bool IsOpenWithPickerText(std::wstring_view text) {
-    const std::wstring t = MenuTextLower(CleanMenuText(text));
+    const std::wstring t = ToLowerVerb(CleanMenuText(text));
     return t.find(L"打开方式") != std::wstring::npos ||
            t.find(L"choose default") != std::wstring::npos ||
            t.find(L"open with\u2026") != std::wstring::npos ||
@@ -164,7 +158,7 @@ inline bool IsOpenWithPickerText(std::wstring_view text) {
 
 inline bool IsOpenWithMruText(std::wstring_view text) {
     if (IsOpenWithPickerText(text)) return false;
-    const std::wstring t = MenuTextLower(CleanMenuText(text));
+    const std::wstring t = ToLowerVerb(CleanMenuText(text));
     if (t.size() >= 2 && t[0] == L'用' && t.find(L"打开") != std::wstring::npos)
         return true;
     if (t.find(L"open with ") == 0 || t.find(L"edit with ") == 0) return true;
@@ -182,7 +176,7 @@ inline bool IsCompressVendorFlyout(std::wstring_view text) {
 }
 
 inline bool IsCompressTopLevel(std::wstring_view text) {
-    const std::wstring t = MenuTextLower(CleanMenuText(text));
+    const std::wstring t = ToLowerVerb(CleanMenuText(text));
     if (t.find(L"压缩为") != std::wstring::npos) return true;
     if (t.find(L"新建压缩包") != std::wstring::npos) return true;
     if (t.find(L"compress to") != std::wstring::npos) return true;
@@ -197,7 +191,7 @@ inline CtxMenuCategory ClassifyExplorerItem(std::wstring_view verb,
                                             std::wstring_view text,
                                             bool is_flyout) {
     const std::wstring v = ToLowerVerb(verb);
-    const std::wstring t = MenuTextLower(CleanMenuText(text));
+    const std::wstring t = ToLowerVerb(CleanMenuText(text));
 
     if (v == L"print" || t == L"打印" || t == L"print" ||
         t.find(L"打印(") == 0 || t.find(L"print(") == 0)

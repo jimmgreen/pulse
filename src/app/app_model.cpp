@@ -384,11 +384,6 @@ std::unique_ptr<SplitContainer> SplitContainer::Join(SplitOrientation orient, fl
     return parent;
 }
 
-std::unique_ptr<SplitContainer> SplitContainer::Split(std::unique_ptr<SplitContainer> root,
-                                                       SplitOrientation orient, float ratio) {
-    return Join(orient, ratio, std::move(root), CreateLeaf(nullptr));
-}
-
 void SplitContainer::CollectPanes(std::vector<Pane*>& out) const {
     if (is_leaf) {
         if (pane) out.push_back(pane);

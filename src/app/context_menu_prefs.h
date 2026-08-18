@@ -41,7 +41,6 @@ struct ContextMenuPrefs {
 
     void ResetToDefaults();
     bool CategoryEnabled(ipc::CtxMenuCategory c) const;
-    void SetCategoryEnabled(ipc::CtxMenuCategory c, bool on);
     bool GroupEnabled(ipc::CtxMenuGroup g) const;
     void SetGroupEnabled(ipc::CtxMenuGroup g, bool on);
     bool ItemEnabled(const std::wstring& key, ipc::CtxMenuCategory c, bool from_com) const;

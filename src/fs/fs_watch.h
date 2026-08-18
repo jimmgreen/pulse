@@ -20,8 +20,6 @@ public:
     bool Start(const std::wstring& path, ChangeCallback cb);
     void Stop();
 
-    bool IsRunning() const { return running_.load(); }
-
 private:
     void WorkerThread();
 

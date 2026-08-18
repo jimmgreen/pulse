@@ -103,16 +103,6 @@ void WorkerPool::EnqueueIo(std::function<void()> task) {
     cv_.notify_one();
 }
 
-void WorkerPool::Cancel(const std::wstring& path) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    std::queue<WorkItem> filtered;
-    while (!queue_.empty()) {
-        if (queue_.front().path != path) filtered.push(queue_.front());
-        queue_.pop();
-    }
-    queue_ = std::move(filtered);
-}
-
 static std::wstring Extension(const std::wstring& name) {
     size_t dot = name.find_last_of(L'.');
     if (dot == std::wstring::npos || dot == 0 || dot + 1 >= name.size()) return L"";

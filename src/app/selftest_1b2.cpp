@@ -752,13 +752,6 @@ void TestSplitLayout() {
     chrome_tab.title = L"Test";
     chrome_tab.active = true;
     chrome_vm.tabs.push_back(chrome_tab);
-    const D2D1_RECT_F chrome_rect = D2D1::RectF(0, 0, 1400, 800);
-    bool saw_cmd_panel = false;
-    for (float x = 0; x < 1400; x += 4.0f) {
-        if (chrome.HitTest(chrome_vm, chrome_rect, x, 20.0f).region == ui::HitTestResult::CmdPanel)
-            saw_cmd_panel = true;
-    }
-    Check(!saw_cmd_panel, L"chrome: title bar has no command search box");
     Check(std::abs(chrome.TitleBarHeight() - ui::kTitleBarHeight) < 0.01f,
           L"chrome: title bar uses kTitleBarHeight");
     D2D1_RECT_F tab_rc{};

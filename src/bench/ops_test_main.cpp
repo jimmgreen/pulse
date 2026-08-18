@@ -190,8 +190,6 @@ int wmain() {
 
     // --- 1. Ping ------------------------------------------------------------
     {
-        uint64_t prev = g_ops.Status().completed_ops;
-        (void)prev;
         Check(ipc::ShellClient::Instance().Ping(), L"IPC ping pulse_shell.exe");
     }
 

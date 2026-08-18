@@ -53,7 +53,6 @@ namespace {
     constexpr const wchar_t* kIconDetailsOpen = L"\xE8A0";
     constexpr const wchar_t* kIconDetailsClose = L"\xE89F";
     constexpr const wchar_t* kIconView = L"\xE700";
-    constexpr const wchar_t* kIconCommand = L"\xE721";
     constexpr const wchar_t* kIconSearch = L"\xE721";
     constexpr const wchar_t* kIconFilter = L"\xE71C";
     constexpr const wchar_t* kIconTheme = L"\xE706";
@@ -64,17 +63,6 @@ namespace {
     constexpr const wchar_t* kIconClose = L"\xE711";
     constexpr const wchar_t* kIconFolder = L"\xE8B7";
     constexpr const wchar_t* kIconFile = L"\xE8A5";
-    constexpr const wchar_t* kIconDrive = L"\xE7F1";
-    constexpr const wchar_t* kIconDesktop = L"\xE7F4";
-    constexpr const wchar_t* kIconDownloads = L"\xE896";
-    constexpr const wchar_t* kIconDocuments = L"\xE8A5";
-    constexpr const wchar_t* kIconPictures = L"\xE91B";
-    constexpr const wchar_t* kIconMusic = L"\xE8D6";
-    constexpr const wchar_t* kIconVideos = L"\xE714";
-    constexpr const wchar_t* kIconStar = L"\xE734";
-    constexpr const wchar_t* kIconClock = L"\xE823";
-    constexpr const wchar_t* kIconTag = L"\xE8EC";
-    constexpr const wchar_t* kIconNetwork = L"\xE968";
     constexpr const wchar_t* kIconTray = L"\xE8A1";
     constexpr const wchar_t* kIconChevronRight = L"\xE76C";
     constexpr const wchar_t* kIconChevronUp = L"\xE70E";
@@ -864,10 +852,6 @@ std::array<float, 3> MainRenderer::ResizeDetailsColumnDivider(
     result[static_cast<size_t>(divider_index)] = divider;
     for (float& edge : result) edge = (edge - layout.left) / total;
     return result;
-}
-
-D2D1_RECT_F MainRenderer::NameCellRect(float window_w, float window_h, int row, float scroll_y) const {
-    return NameCellRect(ContentRect(window_w, window_h), row, scroll_y);
 }
 
 D2D1_RECT_F MainRenderer::NameCellRect(const D2D1_RECT_F& pane_bounds, int view_row, float scroll_y,
@@ -4042,17 +4026,6 @@ float MainRenderer::SettingsMaxScroll(const WindowViewModel& vm, float window_w,
     return (std::max)(0.0f, lay.content_h - view);
 }
 
-float MainRenderer::TotalContentHeight(const PaneViewModel& vm) const {
-    float cell = row_height_;
-    if (vm.view_mode == ViewMode::Content) cell = 76.0f * scale_;
-    else if (vm.view_mode == ViewMode::List) return 0.0f;
-    return (float)vm.EntryCount() * cell;
-}
-
-float MainRenderer::MaxScroll(const PaneViewModel& vm, const D2D1_RECT_F& rect) const {
-    return MaxScrollForPane(vm, ContentRect(rect.right, rect.bottom));
-}
-
 float MainRenderer::MaxScrollForPane(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds) const {
     const float extra = vm.banner_message.empty() ? 0.0f : 36.0f * scale_;
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
@@ -4098,10 +4071,6 @@ std::pair<int, int> MainRenderer::VisibleRangeInPane(
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
     ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, row_height_dip_);
     return layout.VisibleRange();
-}
-
-int MainRenderer::RowFromY(const PaneViewModel& vm, const D2D1_RECT_F& rect, float y) const {
-    return RowFromYInPane(vm, ContentRect(rect.right, rect.bottom), y);
 }
 
 int MainRenderer::RowFromYInPane(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds, float y) const {

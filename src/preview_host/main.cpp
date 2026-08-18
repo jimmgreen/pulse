@@ -1,4 +1,5 @@
 #include "../ipc/preview_protocol.h"
+#include "../common/path_utils.h"
 #include <shobjidl.h>
 #include <shlobj.h>
 #include <shlguid.h>
@@ -40,11 +41,7 @@ std::wstring ExtensionOf(const std::wstring& path) {
 // Shell APIs (SHCreateItemFromParsingName, SHGetPropertyStoreFromParsingName)
 // reject \\?\ extended paths; the fs layer hands them out for long-path support.
 std::wstring ShellPath(const std::wstring& path) {
-    if (path.size() >= 8 && path.compare(0, 8, L"\\\\?\\UNC\\") == 0)
-        return L"\\\\" + path.substr(8);
-    if (path.size() >= 4 && path.compare(0, 4, L"\\\\?\\") == 0)
-        return path.substr(4);
-    return path;
+    return pulse::path::StripExtendedPathPrefix(path);
 }
 
 bool IsOneOf(std::wstring_view extension,

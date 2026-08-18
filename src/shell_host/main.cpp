@@ -10,6 +10,7 @@
 // retries the in-flight request once (see src/ipc/shell_client.cpp).
 #include "../ipc/protocol.h"
 #include "../ipc/ctx_menu_util.h"
+#include "../common/path_utils.h"
 #include <windows.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -53,7 +54,6 @@ struct HostState {
     std::mutex write_mutex;      // reader thread (PONG) vs main thread (progress/done)
     HWND hwnd_msg = nullptr;
     std::atomic<uint32_t> cancel_id{0};
-    std::atomic<uint32_t> current_id{0};
     std::atomic<bool> running{true};
 } g;
 
@@ -243,9 +243,7 @@ private:
 std::wstring ToParsingPath(std::wstring path) {
     // IFileOperation / SHCreateItemFromParsingName reject \\?\ prefixes
     // (ERROR_INVALID_PARAMETER) even for short paths.
-    if (path.starts_with(L"\\\\?\\UNC\\")) return L"\\\\" + path.substr(8);
-    if (path.starts_with(L"\\\\?\\")) return path.substr(4);
-    return path;
+    return pulse::path::StripExtendedPathPrefix(path);
 }
 
 HRESULT MakeItem(const std::wstring& path, IShellItem** out) {
@@ -435,12 +433,9 @@ HRESULT ExecuteRestore(const std::vector<std::wstring>& paths, std::wstring& err
 }
 
 void ExecuteRequest(Request* req) {
-    g.current_id.store(req->id);
-
     if (req->type == REQ_NEW_FOLDER || req->type == REQ_NEW_FILE) {
         HRESULT hr = req->sources.empty() ? E_INVALIDARG
                                           : ExecuteCreate(req->type, req->sources.front());
-        g.current_id.store(0);
         SendDone(req->id, hr, false, FAILED(hr) ? L"create failed" : L"");
         delete req;
         return;
@@ -448,7 +443,6 @@ void ExecuteRequest(Request* req) {
     if (req->type == REQ_RESTORE_RECYCLE) {
         std::wstring error;
         HRESULT hr = ExecuteRestore(req->sources, error);
-        g.current_id.store(0);
         SendDone(req->id, hr, false, FAILED(hr) ? error : L"");
         delete req;
         return;
@@ -537,11 +531,9 @@ void ExecuteRequest(Request* req) {
             if (!error.empty()) error += L" | ";
             error += sink.last_failed_item();
         }
-        (void)setup_failed;
     }
 
     if (g.cancel_id.load() == req->id) g.cancel_id.store(0);
-    g.current_id.store(0);
     SendDone(req->id, hr, cancelled, error);
     delete req;
 }

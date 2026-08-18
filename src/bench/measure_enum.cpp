@@ -9,7 +9,6 @@
 #include <vector>
 #include <chrono>
 #include <algorithm>
-#include <numeric>
 #include <iostream>
 #include <iomanip>
 #include <mutex>

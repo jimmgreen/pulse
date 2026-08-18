@@ -458,7 +458,6 @@ uint64_t OpsManager::Submit(OpRequest req) {
         seq = next_seq_++;
         item.seq = seq;
         queue_.push_back(std::move(item));
-        status_.queued_ops = queue_.size();
     }
     if (notify_) notify_();
     cv_.notify_one();
@@ -788,7 +787,6 @@ void OpsManager::WorkerThread() {
             if (!running_ && queue_.empty()) break;
             item = std::move(queue_.front());
             queue_.pop_front();
-            status_.queued_ops = queue_.size();
         }
 
         if (!item.open_path.empty()) {

@@ -96,7 +96,6 @@ public:
     bool PathHasTag(const std::wstring& path, int tag_index) const;
     std::vector<int> TagsForPath(const std::wstring& path) const;
     const std::vector<int>* TagIndicesForPath(const std::wstring& path) const;
-    std::vector<TagId> TagIdsForPath(const std::wstring& path) const;
     const ColorTag* FindTag(const TagId& id) const;
     int FindTagIndex(const TagId& id) const;
     TagId ResolveTagRef(const std::wstring& ref) const;
@@ -153,7 +152,6 @@ inline std::wstring MakeSettingsPath(std::wstring_view page = L"general") {
 }
 bool ParsePulsePath(const std::wstring& path, std::wstring* kind, std::wstring* rest);
 
-bool WriteTagAds(const std::wstring& path, const std::vector<std::wstring>& tag_names);
 bool WriteTagAdsV2(const std::wstring& path, const std::vector<TagAdsRecord>& tags);
 std::vector<std::wstring> ReadTagAds(const std::wstring& path);
 std::vector<TagAdsRecord> ReadTagAdsV2(const std::wstring& path);

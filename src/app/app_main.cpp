@@ -62,7 +62,6 @@
 
 using namespace pulse;
 
-static void Log(const wchar_t* msg);
 static std::wstring ClipboardPath(const std::wstring& p);
 
 constexpr UINT WM_WORKER_RESULT = WM_APP + 1;

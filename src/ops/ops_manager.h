@@ -85,7 +85,6 @@ struct OpStatus {
     double bytes_per_second = 0.0;
     double peak_bytes_per_second = 0.0;
     uint64_t eta_seconds = 0;
-    size_t queued_ops = 0;
     uint64_t completed_ops = 0; // bumped on every finished op (UI edge detect)
 };
 

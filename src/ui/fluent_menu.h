@@ -95,7 +95,6 @@ public:
     // owner: main window. compositor supplies the D2D device + DWrite factory
     // (drawing happens on the UI thread between its own BeginDraw/EndDraw).
     bool Create(HWND owner, Compositor* compositor, float scale);
-    void SetScale(float scale);
     void SetTheme(bool dark, D2D1_COLOR_F accent);
 
     // Modal; returns the invoked command id, or 0 when dismissed.
@@ -108,7 +107,6 @@ public:
     bool SaveDebugSnapshot(const wchar_t* png_path, std::vector<FluentMenuItem> items);
 
     bool IsOpen() const { return open_; }
-    HWND Hwnd() const { return hwnd_; }
     void Dismiss(); // immediate (no animation); safe anytime
     // Safe from the owner window while TrackPopup's modal loop is running
     // (e.g. async index hits arrived). No-op if the menu is closed.

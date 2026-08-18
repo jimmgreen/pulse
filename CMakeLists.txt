@@ -35,7 +35,6 @@ target_link_libraries(pulse_fluent_gallery PRIVATE
 file(GLOB_RECURSE PULSE_APP_SOURCES CONFIGURE_DEPENDS
     src/app/*.cpp src/ui/*.cpp src/fs/*.cpp src/ops/*.cpp src/ipc/*.cpp src/index/*.cpp)
 list(FILTER PULSE_APP_SOURCES EXCLUDE REGEX "index_host\\.cpp$")
-list(FILTER PULSE_APP_SOURCES EXCLUDE REGEX "settings_window\\.cpp$")
 
 # The in-process index engine exists only for the legacy headless self-test.
 # Production always queries Pulse.Index.exe through index_client.cpp.

@@ -23,9 +23,6 @@ public:
     void Stop();
 
     std::wstring Status() const;
-    size_t Count() const { return count_.load(); }
-    bool Ready() const { return ready_.load(); }
-    bool Connected() const { return connected_.load(); }
 
     // Fire-and-forget. Reply arrives as search_msg (wParam = request id).
     void SearchAsync(const Query& q, uint32_t id);

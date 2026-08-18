@@ -30,9 +30,6 @@ public:
     // Mark dirty (e.g. from DirWatch).
     void MarkDirty(const std::wstring& path);
 
-    // Check if a generation is still current.
-    bool IsCurrent(const std::wstring& path, uint64_t generation);
-
     size_t EntryCount() const;
     size_t ResidentBytes() const;
 

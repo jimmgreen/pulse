@@ -4,6 +4,7 @@
 #include "index_mft.h"
 #include "index_paths.h"
 #include "../fs/fs_enum.h"
+#include "../common/path_utils.h"
 #include <shlobj.h>
 #include <shlwapi.h>
 #include <algorithm>
@@ -38,9 +39,7 @@ uint64_t UnixToFt(uint32_t u) {
 }
 
 std::wstring Display(std::wstring p) {
-    if (p.starts_with(L"\\\\?\\UNC\\")) return L"\\\\" + p.substr(8);
-    if (p.starts_with(L"\\\\?\\")) return p.substr(4);
-    return p;
+    return pulse::path::StripExtendedPathPrefix(p);
 }
 
 bool ShouldSkipName(std::wstring_view name) {
@@ -974,9 +973,6 @@ void Engine::MapFrnLocked(VolState& v, uint64_t frn, int32_t idx) {
     v.frn_new.push_back(DiskFrn{ frn, idx, 0 });
     if (v.frn_build.size() || (!v.frn_base && v.frn_new.size() < kFrnMergeThreshold)) {
         v.frn_build.emplace_back(frn, idx);
-    }
-    if (v.frn_new.size() >= kFrnMergeThreshold && !v.frn_base) {
-        // rebuild-only path: keep frn_build sorted later at write
     }
 }
 

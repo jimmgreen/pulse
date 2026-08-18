@@ -185,8 +185,6 @@ void ClientThread(std::shared_ptr<Client> c) {
                 out = SearchPayload(sr);
             }
             WriteFrame(*c, RSP_IDX_SEARCH, hdr.request_id, out);
-        } else if (hdr.type == REQ_IDX_SHUTDOWN) {
-            if (!g.as_service) break;
         }
     }
     DropClient(c);

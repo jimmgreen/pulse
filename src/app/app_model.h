@@ -158,8 +158,6 @@ struct SplitContainer {
     static std::unique_ptr<SplitContainer> Join(SplitOrientation orient, float ratio,
                                                 std::unique_ptr<SplitContainer> first,
                                                 std::unique_ptr<SplitContainer> second);
-    static std::unique_ptr<SplitContainer> Split(std::unique_ptr<SplitContainer> root,
-                                                  SplitOrientation orient, float ratio);
     void CollectPanes(std::vector<Pane*>& out) const;
 };
 

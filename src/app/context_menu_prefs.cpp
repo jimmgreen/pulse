@@ -61,19 +61,6 @@ bool ContextMenuPrefs::CategoryEnabled(ipc::CtxMenuCategory c) const {
     }
 }
 
-void ContextMenuPrefs::SetCategoryEnabled(ipc::CtxMenuCategory c, bool on) {
-    switch (c) {
-    case ipc::CtxMenuCategory::Share: share = on; break;
-    case ipc::CtxMenuCategory::Wallpaper: wallpaper = on; break;
-    case ipc::CtxMenuCategory::Rotate: rotate = on; break;
-    case ipc::CtxMenuCategory::Shortcut: shortcut = on; break;
-    case ipc::CtxMenuCategory::OpenWith: open_with = on; break;
-    case ipc::CtxMenuCategory::SystemExtra: system_extra = on; break;
-    case ipc::CtxMenuCategory::Print: print = on; break;
-    default: software = on; break;
-    }
-}
-
 bool ContextMenuPrefs::GroupEnabled(ipc::CtxMenuGroup g) const {
     switch (g) {
     case ipc::CtxMenuGroup::OpenWith: return open_with;

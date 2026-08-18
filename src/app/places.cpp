@@ -565,15 +565,6 @@ const std::vector<int>* PlacesCatalog::TagIndicesForPath(const std::wstring& pat
     return it == tag_index_.end() ? nullptr : &it->second;
 }
 
-std::vector<TagId> PlacesCatalog::TagIdsForPath(const std::wstring& path) const {
-    std::vector<TagId> out;
-    for (int index : TagsForPath(path)) {
-        if (index >= 0 && index < static_cast<int>(tags.size()))
-            out.push_back(tags[static_cast<size_t>(index)].id);
-    }
-    return out;
-}
-
 const ColorTag* PlacesCatalog::FindTag(const TagId& id) const {
     const int index = FindTagIndex(id);
     return index < 0 ? nullptr : &tags[static_cast<size_t>(index)];
@@ -949,26 +940,6 @@ void PlacesCatalog::ReadAdsIntoCatalog(const std::wstring& path) {
     const std::wstring n = Norm(path);
     const auto records = ReadTagAdsV2(n);
     MergeAdsRecords(n, records, records.empty() ? ReadTagAds(n) : std::vector<std::wstring>{});
-}
-
-bool WriteTagAds(const std::wstring& path, const std::vector<std::wstring>& tag_names) {
-    std::wstring n = Norm(path);
-    if (n.empty() || fs::IsVirtualPath(n)) return false;
-    std::wstring stream = n + kAdsSuffix;
-    HANDLE h = CreateFileW(stream.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
-                           nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return false;
-    std::wstring payload;
-    for (size_t i = 0; i < tag_names.size(); ++i) {
-        if (i) payload += L",";
-        payload += tag_names[i];
-    }
-    DWORD written = 0;
-    BOOL ok = WriteFile(h, payload.data(),
-                        static_cast<DWORD>(payload.size() * sizeof(wchar_t)), &written, nullptr);
-    CloseHandle(h);
-    if (tag_names.empty()) DeleteFileW(stream.c_str());
-    return ok != 0;
 }
 
 bool WriteTagAdsV2(const std::wstring& path, const std::vector<TagAdsRecord>& tags) {

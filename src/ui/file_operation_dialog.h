@@ -29,7 +29,6 @@ public:
     void Show(bool activate = true);
     void Hide();
     bool IsVisible() const;
-    HWND Hwnd() const { return hwnd_; }
 
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);

@@ -128,14 +128,6 @@ void SnapshotStore::MarkDirty(const std::wstring& path) {
     if (it != map_.end()) it->second.dirty = true;
 }
 
-bool SnapshotStore::IsCurrent(const std::wstring& path, uint64_t generation) {
-    std::wstring key = NormalizePath(path);
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = map_.find(key);
-    if (it == map_.end()) return false;
-    return it->second.generation == generation;
-}
-
 size_t SnapshotStore::EntryCount() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return map_.size();

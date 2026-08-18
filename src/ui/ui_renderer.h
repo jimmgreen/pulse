@@ -361,7 +361,6 @@ struct HitTestResult {
         TabClose,
         TabNew,
         TabGroup,
-        CmdPanel,
         ThemeToggle,
         SettingsButton,
         Minimize,
@@ -442,8 +441,6 @@ public:
     // Layout metrics (DIPs).
     float TitleBarHeight() const { return title_bar_height_; }
     float ToolbarHeight() const { return toolbar_height_; }
-    float StatusBarHeight() const { return status_height_; }
-    float SidebarWidth() const { return sidebar_width_; }
     float EffectiveSidebarWidth(float window_width) const;
     float PaneHeaderHeight() const { return pane_header_height_; }
     float ColumnHeaderHeight() const { return column_header_height_; }
@@ -453,15 +450,10 @@ public:
         row_height_dip_ = std::clamp(dip, 24.0f, 48.0f);
         row_height_ = row_height_dip_ * scale_;
     }
-    float RowHeightDip() const { return row_height_dip_; }
     float Margin() const { return margin_; }
-
-    float ContentLeft() const { return sidebar_width_ + margin_; }
-    float ContentTop() const { return title_bar_height_ + toolbar_height_ + margin_; }
 
     // Right details panel: toggled from the view menu; ContentRect shrinks.
     void SetDetailsPanelVisible(bool visible) { details_visible_ = visible; }
-    bool DetailsPanelVisible() const { return details_visible_; }
     float DetailsPanelWidth(float window_w) const {
         return details_visible_ && window_w >= 1000.0f * scale_
             ? details_width_ * scale_ + margin_ : 0.0f;
@@ -469,7 +461,6 @@ public:
     void SetDetailsPanelWidth(float width_dip) {
         details_width_ = std::clamp(width_dip, 300.0f, 480.0f);
     }
-    float DetailsPanelWidthDip() const { return details_width_; }
     // Cover-mode pan limits of the current details preview bitmap (DIPs);
     // refreshed every frame the preview draws a bitmap.
     float DetailsCoverMaxPanX() const { return cover_max_pan_x_; }
@@ -514,7 +505,6 @@ public:
         const std::array<float, 3>& dividers,
         int divider_index, float cursor_x) const;
 
-    D2D1_RECT_F NameCellRect(float window_w, float window_h, int row, float scroll_y) const;
     D2D1_RECT_F NameCellRect(const D2D1_RECT_F& pane_bounds, int view_row, float scroll_y,
                              float extra_top = 0.0f, ViewMode mode = ViewMode::Details,
                              float scroll_x = 0.0f, size_t item_count = 0,
@@ -548,8 +538,6 @@ public:
     HitTestResult HitTest(const WindowViewModel& vm, const D2D1_RECT_F& rect,
                           float x, float y) const;
 
-    float TotalContentHeight(const PaneViewModel& vm) const;
-    float MaxScroll(const PaneViewModel& vm, const D2D1_RECT_F& rect) const;
     float MaxScrollForPane(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds) const;
     float MaxScrollXForPane(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds) const;
     D2D1_RECT_F ItemRectInPane(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds,
@@ -559,7 +547,6 @@ public:
     int PageDelta(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds) const;
     std::pair<int, int> VisibleRangeInPane(const PaneViewModel& vm,
                                            const D2D1_RECT_F& pane_bounds) const;
-    int RowFromY(const PaneViewModel& vm, const D2D1_RECT_F& rect, float y) const;
     int RowFromYInPane(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds, float y) const;
     int ItemFromPointInPane(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds,
                             float x, float y) const;

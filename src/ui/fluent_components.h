@@ -42,20 +42,9 @@ struct MotionSpec {
 // QFluent motion values. The app can map these directly to DirectComposition curves.
 namespace motion {
 inline constexpr float MenuTravelDip = 8.0f;
-inline constexpr float ScrollbarHoverDelayMs = 350.0f;
-inline constexpr float TooltipShowDelayMs = 300.0f;
 inline constexpr MotionSpec SwitchSlide{120.0f, EasingCurve::Linear};
-inline constexpr MotionSpec TabReorder{250.0f, EasingCurve::InOutQuad};
-inline constexpr MotionSpec MenuDropDown{150.0f, EasingCurve::OutQuad};
-inline constexpr MotionSpec MenuPullUp{200.0f, EasingCurve::OutQuad};
-inline constexpr MotionSpec TooltipFade{150.0f, EasingCurve::Linear};
-inline constexpr MotionSpec ScrollbarExpand{240.0f, EasingCurve::InOutSine};
-inline constexpr MotionSpec ScrollbarRange{250.0f, EasingCurve::OutCubic};
-inline constexpr MotionSpec SmoothScroll{300.0f, EasingCurve::OutSine};
-inline constexpr MotionSpec ProgressValue{150.0f, EasingCurve::OutQuad};
 inline constexpr MotionSpec ProgressShortBar{833.0f, EasingCurve::Linear};
 inline constexpr MotionSpec ProgressLongBar{1167.0f, EasingCurve::OutQuad, 785.0f};
-inline constexpr MotionSpec ProgressRingCycle{2000.0f, EasingCurve::Linear};
 } // namespace motion
 
 float EvaluateMotion(const MotionSpec& motion, float elapsed_ms) noexcept;
@@ -352,8 +341,6 @@ public:
     void DrawTagDot(D2D1_POINT_2F center, float radius, const D2D1_COLOR_F& color);
     void DrawTagDotState(D2D1_POINT_2F center, float radius, const D2D1_COLOR_F& color,
                          bool checked, bool mixed, bool hovered = false);
-    void DrawConnectionDot(D2D1_POINT_2F center, float radius, const D2D1_COLOR_F& color,
-                           bool offline);
     void DrawScrollbar(const ScrollbarSpec& spec);
     void DrawBreadcrumbSegment(const BreadcrumbSegmentSpec& spec);
     void DrawCommandSearchBox(const CommandSearchBoxSpec& spec);

@@ -1,4 +1,5 @@
 #include "preview_handler_host.h"
+#include "../common/path_utils.h"
 #include <shobjidl.h>
 #include <shlobj.h>
 #include <shlwapi.h>
@@ -148,11 +149,7 @@ void DumpHwndTree(HWND root, const wchar_t* tag) {
 }
 
 std::wstring ShellPath(const std::wstring& path) {
-    if (path.size() >= 8 && path.compare(0, 8, L"\\\\?\\UNC\\") == 0)
-        return L"\\\\" + path.substr(8);
-    if (path.size() >= 4 && path.compare(0, 4, L"\\\\?\\") == 0)
-        return path.substr(4);
-    return path;
+    return pulse::path::StripExtendedPathPrefix(path);
 }
 
 void LogZOrder(HWND hwnd) {

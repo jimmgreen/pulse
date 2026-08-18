@@ -1,5 +1,6 @@
 // shell_icons.cpp
 #include "shell_icons.h"
+#include "../common/path_utils.h"
 
 #include <commoncontrols.h>
 #include <shellapi.h>
@@ -22,9 +23,7 @@ std::wstring LowerExt(const std::wstring& name) {
 }
 
 std::wstring ShellPath(const std::wstring& path) {
-    if (path.starts_with(L"\\\\?\\UNC\\")) return L"\\\\" + path.substr(8);
-    if (path.starts_with(L"\\\\?\\")) return path.substr(4);
-    return path;
+    return pulse::path::StripExtendedPathPrefix(path);
 }
 
 } // namespace

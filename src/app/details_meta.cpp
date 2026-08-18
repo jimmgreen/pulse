@@ -1,6 +1,7 @@
 // details_meta.cpp — See details_meta.h. No COM needed (advapi32/win32 only).
 #include "details_meta.h"
 #include "../common/text_format.h"
+#include "../common/path_utils.h"
 #include <windows.h>
 #include <aclapi.h>
 #include <sddl.h>
@@ -10,11 +11,7 @@ namespace pulse::app {
 namespace {
 
 std::wstring ShellPath(const std::wstring& path) {
-    if (path.size() >= 8 && path.compare(0, 8, L"\\\\?\\UNC\\") == 0)
-        return L"\\\\" + path.substr(8);
-    if (path.size() >= 4 && path.compare(0, 4, L"\\\\?\\") == 0)
-        return path.substr(4);
-    return path;
+    return pulse::path::StripExtendedPathPrefix(path);
 }
 
 std::wstring LookupSid(PSID sid) {

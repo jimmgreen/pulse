@@ -188,11 +188,6 @@ bool FluentMenu::Create(HWND owner, Compositor* compositor, float scale) {
     return EnsureWindow();
 }
 
-void FluentMenu::SetScale(float scale) {
-    scale_ = scale;
-    painter_.SetScale(scale);
-}
-
 void FluentMenu::SetTheme(bool dark, D2D1_COLOR_F accent) {
     dark_ = dark;
     accent_ = accent;

@@ -132,7 +132,6 @@ struct Theme {
     D2D1_COLOR_F tab_active_bg;
     D2D1_COLOR_F address_bg;
     D2D1_COLOR_F status_bg;
-    D2D1_COLOR_F border;
     D2D1_COLOR_F icon_folder;
     D2D1_COLOR_F icon_file;
     D2D1_COLOR_F fps_bg;
@@ -274,7 +273,6 @@ inline Theme MakeTheme(bool dark, D2D1_COLOR_F accent) noexcept {
         t.tab_active_bg = HexColor(0x2C2C2C);
         t.address_bg = HexColor(0x202020);
         t.status_bg = HexColor(0x151515);
-        t.border = WithAlpha(HexColor(0xFFFFFF), 0.06f);
         t.icon_folder = HexColor(0xFFCD70);
         t.icon_file = HexColor(0x78B0E8);
         t.fps_bg = WithAlpha(HexColor(0x000000), 0.60f);
@@ -309,7 +307,6 @@ inline Theme MakeTheme(bool dark, D2D1_COLOR_F accent) noexcept {
         t.tab_active_bg = HexColor(0xFFFFFF);
         t.address_bg = HexColor(0xFFFFFF);
         t.status_bg = HexColor(0xEEEEEE);
-        t.border = WithAlpha(HexColor(0x000000), 0.045f);
         t.icon_folder = HexColor(0xF5B041);
         t.icon_file = HexColor(0x2E86DE);
         t.fps_bg = WithAlpha(HexColor(0x000000), 0.55f);
@@ -358,7 +355,6 @@ inline Theme MakeHighContrastTheme() noexcept {
     t.tab_active_bg = sys(COLOR_WINDOW);
     t.address_bg = sys(COLOR_WINDOW);
     t.status_bg = sys(COLOR_BTNFACE);
-    t.border = sys(COLOR_WINDOWFRAME);
     t.icon_folder = sys(COLOR_WINDOWTEXT);
     t.icon_file = sys(COLOR_WINDOWTEXT);
     t.fps_bg = sys(COLOR_WINDOWTEXT);

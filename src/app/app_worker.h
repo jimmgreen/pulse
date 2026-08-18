@@ -55,9 +55,6 @@ public:
 
     void EnqueueIo(std::function<void()> task);
 
-    // Cancel pending work for path (but keep current generation).
-    void Cancel(const std::wstring& path);
-
 private:
     void WorkerThread();
     WorkResult Process(const WorkItem& item);

@@ -1421,16 +1421,6 @@ void Painter::DrawTagDotState(D2D1_POINT_2F center, float radius,
     }
 }
 
-void Painter::DrawConnectionDot(D2D1_POINT_2F center, float radius,
-                                const D2D1_COLOR_F& color, bool offline) {
-    if (!theme_ || !dc_) {
-        return;
-    }
-    const float r = Px(radius);
-    dc_->FillEllipse(D2D1::Ellipse(center, r, r),
-                     ScratchBrush(offline ? theme_->text_disabled : color));
-}
-
 D2D1_RECT_F Painter::ScrollbarThumbRect(const ScrollbarSpec& spec) const noexcept {
     if (!theme_ || !spec.enabled || spec.viewport_extent <= 0.0f ||
         spec.content_extent <= spec.viewport_extent || Height(spec.viewport) <= 0.0f) {

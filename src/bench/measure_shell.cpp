@@ -9,7 +9,6 @@
 #include <shlguid.h>
 #include <combaseapi.h>
 #include <string>
-#include <string_view>
 #include <vector>
 #include <chrono>
 #include <algorithm>
@@ -24,14 +23,6 @@ namespace fs = std::filesystem;
 static double millis(std::chrono::steady_clock::duration d) {
     return std::chrono::duration<double, std::milli>(d).count();
 }
-
-struct Sample {
-    std::wstring path;
-    double smallicon_ms = 0;
-    double sysiconindex_ms = 0;
-    double thumbnail_ms = 0;
-    bool thumb_ok = false;
-};
 
 static double percentile(std::vector<double>& sorted, double p) {
     if (sorted.empty()) return 0;
