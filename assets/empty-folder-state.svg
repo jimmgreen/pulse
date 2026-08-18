@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="360" viewBox="0 0 512 360" fill="none">
+  <title>Empty folder</title>
+  <desc>A soft dark empty-state illustration with a folder, documents, and a paper plane.</desc>
+
+  <defs>
+    <linearGradient id="backgroundGradient" x1="38" y1="18" x2="474" y2="342" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#292C31"/>
+      <stop offset="0.52" stop-color="#202329"/>
+      <stop offset="1" stop-color="#17191E"/>
+    </linearGradient>
+    <radialGradient id="backgroundGlow" cx="0" cy="0" r="1" gradientTransform="translate(225 173) rotate(28) scale(272 214)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8794AD" stop-opacity="0.12"/>
+      <stop offset="0.64" stop-color="#59657B" stop-opacity="0.035"/>
+      <stop offset="1" stop-color="#111318" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="paperGradient" x1="161" y1="126" x2="219" y2="233" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#E6E9EE"/>
+      <stop offset="0.48" stop-color="#B6BEC9"/>
+      <stop offset="1" stop-color="#7C8798"/>
+    </linearGradient>
+    <linearGradient id="paperRearGradient" x1="250" y1="155" x2="273" y2="225" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#9DA8BA"/>
+      <stop offset="1" stop-color="#59677E"/>
+    </linearGradient>
+    <linearGradient id="folderBackGradient" x1="128" y1="146" x2="286" y2="261" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8195B8"/>
+      <stop offset="0.48" stop-color="#5F7398"/>
+      <stop offset="1" stop-color="#34445F"/>
+    </linearGradient>
+    <linearGradient id="folderFrontGradient" x1="166" y1="190" x2="249" y2="315" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7E94BC"/>
+      <stop offset="0.5" stop-color="#52688F"/>
+      <stop offset="1" stop-color="#34445F"/>
+    </linearGradient>
+    <linearGradient id="folderTopHighlight" x1="127" y1="191" x2="343" y2="225" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#B4C1D8" stop-opacity="0.62"/>
+      <stop offset="0.55" stop-color="#8699BB" stop-opacity="0.3"/>
+      <stop offset="1" stop-color="#D1D9E6" stop-opacity="0.12"/>
+    </linearGradient>
+    <linearGradient id="planeGradient" x1="382" y1="69" x2="428" y2="104" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#A9B2C1"/>
+      <stop offset="0.55" stop-color="#6D788B"/>
+      <stop offset="1" stop-color="#465166"/>
+    </linearGradient>
+    <filter id="objectShadow" x="76" y="96" width="308" height="248" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="16" stdDeviation="16" flood-color="#05070B" flood-opacity="0.42"/>
+    </filter>
+    <filter id="planeShadow" x="366" y="51" width="84" height="76" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="5" stdDeviation="5" flood-color="#05070B" flood-opacity="0.35"/>
+    </filter>
+    <filter id="circleBlur" x="72" y="45" width="290" height="262" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="6"/>
+    </filter>
+    <clipPath id="cardClip">
+      <rect width="512" height="360" rx="42"/>
+    </clipPath>
+  </defs>
+
+  <g id="background" clip-path="url(#cardClip)">
+    <rect width="512" height="360" rx="42" fill="url(#backgroundGradient)"/>
+    <rect width="512" height="360" rx="42" fill="url(#backgroundGlow)"/>
+    <path d="M25 18C118 70 181 33 254 35C362 38 430 95 500 91" stroke="#FFFFFF" stroke-opacity="0.025" stroke-width="2"/>
+  </g>
+
+  <g id="illustration">
+    <ellipse cx="227" cy="303" rx="133" ry="30" fill="#090B10" fill-opacity="0.28"/>
+
+    <g id="ambientCircle" filter="url(#circleBlur)">
+      <circle cx="214" cy="164" r="101" fill="#8792A7" fill-opacity="0.12"/>
+    </g>
+    <circle cx="214" cy="164" r="96" fill="#A1ABBD" fill-opacity="0.065"/>
+
+    <path id="flightPath"
+          d="M329 176C359 180 374 163 363 145C351 125 329 138 337 157C348 184 383 168 381 138C380 119 378 107 393 98"
+          stroke="#9BA5B6" stroke-opacity="0.58" stroke-width="2.2" stroke-linecap="round"
+          stroke-dasharray="6 7"/>
+
+    <g id="paperPlane" filter="url(#planeShadow)">
+      <path d="M377 79L432 61L414 109L400 91L386 100L389 86L377 79Z" fill="url(#planeGradient)"/>
+      <path d="M389 86L432 61L400 91L386 100L389 86Z" fill="#697487" fill-opacity="0.8"/>
+      <path d="M400 91L432 61L414 109L400 91Z" fill="#4D586C" fill-opacity="0.9"/>
+      <path d="M389 86L432 61" stroke="#D3D9E3" stroke-opacity="0.35" stroke-width="1.4"/>
+    </g>
+
+    <g id="folderGroup" filter="url(#objectShadow)">
+      <path id="folderBack"
+            d="M121 210V178C121 167 130 158 141 158H174L190 143C194 139 199 137 205 137H247C254 137 260 141 264 147L272 158H328C339 158 348 167 348 178V210H121Z"
+            fill="url(#folderBackGradient)"/>
+      <path d="M121 170C124 164 130 162 138 162H178L194 147C198 143 203 142 208 142H245C251 142 256 145 259 150L267 162H341C349 162 355 166 357 172"
+            stroke="#D3DBE8" stroke-opacity="0.22" stroke-width="2" stroke-linecap="round"/>
+
+      <g id="documents">
+        <g transform="rotate(-12 197 180)">
+          <rect x="142" y="119" width="126" height="123" rx="9" fill="url(#paperGradient)"/>
+          <rect x="160" y="146" width="76" height="10" rx="5" fill="#7B8799" fill-opacity="0.22"/>
+          <rect x="160" y="166" width="87" height="9" rx="4.5" fill="#7B8799" fill-opacity="0.18"/>
+          <rect x="160" y="185" width="62" height="9" rx="4.5" fill="#7B8799" fill-opacity="0.16"/>
+          <path d="M151 128C177 123 216 121 258 127" stroke="#FFFFFF" stroke-opacity="0.3" stroke-width="2" stroke-linecap="round"/>
+        </g>
+        <g transform="rotate(4 273 194)">
+          <rect x="235" y="153" width="76" height="91" rx="9" fill="url(#paperRearGradient)"/>
+          <rect x="249" y="173" width="42" height="8" rx="4" fill="#D2D8E2" fill-opacity="0.16"/>
+          <rect x="249" y="190" width="49" height="7" rx="3.5" fill="#D2D8E2" fill-opacity="0.11"/>
+        </g>
+      </g>
+
+      <path id="folderFront"
+            d="M105 203C104 192 113 183 124 183H350C362 183 371 194 369 206L354 295C352 307 343 315 331 315H137C126 315 117 307 115 296L105 203Z"
+            fill="url(#folderFrontGradient)"/>
+      <path d="M116 198C118 191 124 188 132 188H346C355 188 361 194 361 202"
+            stroke="url(#folderTopHighlight)" stroke-width="2.6" stroke-linecap="round"/>
+      <path d="M123 188H351" stroke="#172033" stroke-opacity="0.15" stroke-width="1.5" stroke-linecap="round"/>
+      <path d="M119 293C121 302 128 308 139 308H329C338 308 344 303 347 295"
+            stroke="#172033" stroke-opacity="0.24" stroke-width="2" stroke-linecap="round"/>
+    </g>
+  </g>
+</svg>

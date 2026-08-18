@@ -1,0 +1,395 @@
+// ui_compositor.cpp
+#include "ui_compositor.h"
+#include <commctrl.h>
+#include <prsht.h>
+#include <shellscalingapi.h>
+#include <shlobj.h>
+#include <algorithm>
+#include <cstdio>
+
+namespace pulse::ui {
+
+Compositor::Compositor() = default;
+Compositor::~Compositor() { Shutdown(); }
+
+bool Compositor::Init(HWND hwnd) {
+    hwnd_ = hwnd;
+    if (!InitD3D()) return false;
+    RECT rc;
+    GetClientRect(hwnd_, &rc);
+    width_ = std::max(1L, rc.right - rc.left);
+    height_ = std::max(1L, rc.bottom - rc.top);
+    if (!CreateSwapChain()) return false;
+    ResizeSwapChain();
+    return true;
+}
+
+void Compositor::Shutdown() {
+    if (!dc_.get() && !d3dDevice_.get()) return; // already shut down
+    targetBitmap_.reset();
+    if (dc_.get()) dc_->SetTarget(nullptr);
+    if (compositionTarget_.get()) compositionTarget_->SetRoot(nullptr);
+    if (compositionDevice_.get()) compositionDevice_->Commit();
+    compositionVisual_.reset();
+    compositionTarget_.reset();
+    compositionDevice_.reset();
+    swapChain_.reset();
+    dc_.reset();
+    d2dDevice_.reset();
+    d2dFactory_.reset();
+    dxgiDevice_.reset();
+    d3dDevice_.reset();
+    dwriteFactory_.reset();
+    textRenderingParams_.reset();
+    ClearCjkFallbackCache();
+    textFormat_.reset();
+    smallFormat_.reset();
+    headerFormat_.reset();
+    tabFormat_.reset();
+    addressFormat_.reset();
+    iconFormat_.reset();
+    transparentComposition_ = false;
+    hwnd_ = nullptr;
+}
+
+bool Compositor::InitD3D() {
+    UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+#ifdef _DEBUG
+    flags |= D3D11_CREATE_DEVICE_DEBUG;
+#endif
+    D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1 };
+    HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,
+        levels, ARRAYSIZE(levels), D3D11_SDK_VERSION,
+        &d3dDevice_, nullptr, nullptr);
+    if (FAILED(hr)) {
+        hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags,
+            levels, ARRAYSIZE(levels), D3D11_SDK_VERSION,
+            &d3dDevice_, nullptr, nullptr);
+    }
+    if (FAILED(hr)) return false;
+
+    d3dDevice_->QueryInterface(&dxgiDevice_);
+    if (!dxgiDevice_.get()) return false;
+
+    D2D1_FACTORY_OPTIONS opts{};
+#ifdef _DEBUG
+    opts.debugLevel = D2D1_DEBUG_LEVEL_INFORMATION;
+#endif
+    hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory3),
+        &opts, reinterpret_cast<void**>(&d2dFactory_));
+    if (FAILED(hr)) return false;
+
+    hr = d2dFactory_->CreateDevice(dxgiDevice_.get(), &d2dDevice_);
+    if (FAILED(hr)) return false;
+
+    hr = d2dDevice_->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc_);
+    if (FAILED(hr)) return false;
+
+    dc_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+    dc_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+
+    hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory3),
+        reinterpret_cast<IUnknown**>(&dwriteFactory_));
+    if (FAILED(hr)) return false;
+
+    ComPtr<IDWriteRenderingParams> base;
+    dwriteFactory_->CreateRenderingParams(&base);
+    if (base.get()) {
+        ComPtr<IDWriteRenderingParams3> custom;
+        dwriteFactory_->CreateCustomRenderingParams(
+            base->GetGamma(),
+            base->GetEnhancedContrast(),
+            1.0f,
+            base->GetClearTypeLevel(),
+            base->GetPixelGeometry(),
+            DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC,
+            DWRITE_GRID_FIT_MODE_DEFAULT,
+            &custom);
+        if (custom.get()) {
+            textRenderingParams_.reset();
+            textRenderingParams_.p = custom.p;
+            custom.p = nullptr;
+            dc_->SetTextRenderingParams(textRenderingParams_.get());
+        }
+    }
+
+    return true;
+}
+
+bool Compositor::CreateSwapChain() {
+    ComPtr<IDXGIAdapter> adapter;
+    dxgiDevice_->GetAdapter(&adapter);
+    ComPtr<IDXGIFactory2> factory;
+    adapter->GetParent(IID_PPV_ARGS(&factory));
+
+    DXGI_SWAP_CHAIN_DESC1 desc{};
+    desc.Width = static_cast<UINT>(std::max(1, width_));
+    desc.Height = static_cast<UINT>(std::max(1, height_));
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    desc.BufferCount = 2;
+    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    desc.Scaling = DXGI_SCALING_STRETCH;
+    desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+
+    HRESULT hr = DCompositionCreateDevice(dxgiDevice_.get(), __uuidof(IDCompositionDevice),
+        reinterpret_cast<void**>(&compositionDevice_));
+    if (SUCCEEDED(hr)) {
+        hr = factory->CreateSwapChainForComposition(
+            d3dDevice_.get(), &desc, nullptr, &swapChain_);
+    }
+    if (SUCCEEDED(hr)) hr = compositionDevice_->CreateTargetForHwnd(hwnd_, TRUE, &compositionTarget_);
+    if (SUCCEEDED(hr)) hr = compositionDevice_->CreateVisual(&compositionVisual_);
+    if (SUCCEEDED(hr)) hr = compositionVisual_->SetContent(swapChain_.get());
+    if (SUCCEEDED(hr)) hr = compositionTarget_->SetRoot(compositionVisual_.get());
+    if (SUCCEEDED(hr)) hr = compositionDevice_->Commit();
+
+    if (SUCCEEDED(hr)) {
+        transparentComposition_ = true;
+    } else {
+        compositionVisual_.reset();
+        compositionTarget_.reset();
+        compositionDevice_.reset();
+        swapChain_.reset();
+        desc.Scaling = DXGI_SCALING_NONE;
+        desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+        hr = factory->CreateSwapChainForHwnd(d3dDevice_.get(), hwnd_, &desc,
+            nullptr, nullptr, &swapChain_);
+        if (FAILED(hr)) return false;
+    }
+
+    dxgiDevice_->SetMaximumFrameLatency(1);
+    return true;
+}
+
+void Compositor::ResizeSwapChain() {
+    if (!swapChain_.get() || width_ <= 0 || height_ <= 0) return;
+    targetBitmap_.reset();
+    dc_->SetTarget(nullptr);
+    HRESULT hr = swapChain_->ResizeBuffers(0, (UINT)width_, (UINT)height_,
+        DXGI_FORMAT_UNKNOWN, 0);
+    if (FAILED(hr)) return;
+
+    ComPtr<IDXGISurface> surface;
+    swapChain_->GetBuffer(0, IID_PPV_ARGS(&surface));
+    // Layout, hit-testing, and text formats already apply the window scale.
+    // Keep the D2D target at 96 DPI so per-monitor scaling happens exactly once.
+    // Using the monitor DPI here as well produced scale^2 sizing and clipped
+    // off-screen flyout text on 125/150/200% displays.
+    D2D1_BITMAP_PROPERTIES1 props = D2D1::BitmapProperties1(
+        D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
+            transparentComposition_ ? D2D1_ALPHA_MODE_PREMULTIPLIED : D2D1_ALPHA_MODE_IGNORE),
+        96.0f, 96.0f);
+    dc_->CreateBitmapFromDxgiSurface(surface.get(), &props, &targetBitmap_);
+    dc_->SetTarget(targetBitmap_.get());
+}
+
+void Compositor::Resize(int width, int height) {
+    width_ = width;
+    height_ = height;
+    if (swapChain_.get()) ResizeSwapChain();
+}
+
+void Compositor::Present() {
+    if (swapChain_.get()) swapChain_->Present(1, 0);
+    if (compositionDevice_.get()) compositionDevice_->Commit();
+}
+
+bool Compositor::SaveSnapshot(const wchar_t* path) {
+    if (!swapChain_.get() || !d3dDevice_.get()) return false;
+
+    ComPtr<ID3D11Texture2D> backBuffer;
+    HRESULT hr = swapChain_->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
+    if (FAILED(hr)) return false;
+
+    D3D11_TEXTURE2D_DESC desc{};
+    backBuffer->GetDesc(&desc);
+
+    ComPtr<ID3D11DeviceContext> ctx;
+    d3dDevice_->GetImmediateContext(&ctx);
+
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    desc.MiscFlags = 0;
+    ComPtr<ID3D11Texture2D> staging;
+    hr = d3dDevice_->CreateTexture2D(&desc, nullptr, &staging);
+    if (FAILED(hr)) return false;
+
+    ctx->CopyResource(staging.get(), backBuffer.get());
+
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    hr = ctx->Map(staging.get(), 0, D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(hr)) return false;
+
+    ComPtr<IWICImagingFactory> wic;
+    hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(&wic));
+    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
+
+    ComPtr<IWICStream> stream;
+    hr = wic->CreateStream(&stream);
+    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
+    hr = stream->InitializeFromFilename(path, GENERIC_WRITE);
+    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
+
+    ComPtr<IWICBitmapEncoder> encoder;
+    hr = wic->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder);
+    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
+    hr = encoder->Initialize(stream.get(), WICBitmapEncoderNoCache);
+    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
+
+    ComPtr<IWICBitmapFrameEncode> frame;
+    hr = encoder->CreateNewFrame(&frame, nullptr);
+    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
+    hr = frame->Initialize(nullptr);
+    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
+
+    hr = frame->SetSize(desc.Width, desc.Height);
+    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
+
+    WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
+    hr = frame->SetPixelFormat(&format);
+    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
+
+    hr = frame->WritePixels(desc.Height, mapped.RowPitch, mapped.RowPitch * desc.Height,
+        static_cast<BYTE*>(mapped.pData));
+    ctx->Unmap(staging.get(), 0);
+    if (FAILED(hr)) return false;
+
+    hr = frame->Commit();
+    if (FAILED(hr)) return false;
+    hr = encoder->Commit();
+    return SUCCEEDED(hr);
+}
+
+static void CreateFormat(IDWriteFactory3* factory, float size, DWRITE_FONT_WEIGHT weight,
+                         const wchar_t* name, ComPtr<IDWriteTextFormat>& fmt) {
+    if (!factory) return;
+    factory->CreateTextFormat(name, nullptr, weight,
+        DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size,
+        Compositor::UiLocaleName(), &fmt);
+    if (!fmt.get()) {
+        factory->CreateTextFormat(L"Microsoft YaHei UI", nullptr, weight,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size,
+            Compositor::UiLocaleName(), &fmt);
+    }
+    if (!fmt.get()) {
+        factory->CreateTextFormat(L"Segoe UI", nullptr, weight,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size,
+            Compositor::UiLocaleName(), &fmt);
+    }
+    if (fmt.get()) {
+        fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        DWRITE_TRIMMING trimming{ DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0 };
+        fmt->SetTrimming(&trimming, nullptr);
+        Compositor::ApplyCjkFallback(factory, fmt.get());
+    }
+}
+
+namespace {
+
+struct CjkFallbackCache {
+    IDWriteFactory3* factory = nullptr;
+    ComPtr<IDWriteFontFallback> fallback;
+};
+
+CjkFallbackCache g_cjkFallback;
+
+bool BuildCjkFallback(IDWriteFactory3* factory, ComPtr<IDWriteFontFallback>& out) {
+    if (!factory) return false;
+    ComPtr<IDWriteFontFallbackBuilder> builder;
+    if (FAILED(factory->CreateFontFallbackBuilder(&builder)) || !builder.get()) {
+        return false;
+    }
+    const DWRITE_UNICODE_RANGE cjk[] = {
+        { 0x2E80, 0x303F },
+        { 0x3400, 0x4DBF },
+        { 0x4E00, 0x9FFF },
+        { 0xF900, 0xFAFF },
+        { 0xFF00, 0xFFEF },
+        { 0x20000, 0x2FA1F },
+    };
+    const wchar_t* families[] = { L"Microsoft YaHei UI", L"Microsoft YaHei" };
+    builder->AddMapping(cjk, ARRAYSIZE(cjk), families, ARRAYSIZE(families),
+                        nullptr, L"zh-CN");
+    ComPtr<IDWriteFontFallback> systemFallback;
+    factory->GetSystemFontFallback(&systemFallback);
+    if (systemFallback.get()) {
+        builder->AddMappings(systemFallback.get());
+    }
+    return SUCCEEDED(builder->CreateFontFallback(&out)) && out.get() != nullptr;
+}
+
+} // namespace
+
+const wchar_t* Compositor::UiLocaleName() {
+    static wchar_t locale[LOCALE_NAME_MAX_LENGTH] = L"zh-CN";
+    static bool initialized = false;
+    if (!initialized) {
+        if (GetUserDefaultLocaleName(locale, LOCALE_NAME_MAX_LENGTH) <= 0) {
+            wcscpy_s(locale, L"zh-CN");
+        }
+        initialized = true;
+    }
+    return locale;
+}
+
+void Compositor::ApplyCjkFallback(IDWriteFactory3* factory, IDWriteTextFormat* format) {
+    if (!factory || !format) return;
+    if (g_cjkFallback.factory != factory || !g_cjkFallback.fallback.get()) {
+        g_cjkFallback.fallback.reset();
+        g_cjkFallback.factory = factory;
+        BuildCjkFallback(factory, g_cjkFallback.fallback);
+    }
+    if (!g_cjkFallback.fallback.get()) return;
+    ComPtr<IDWriteTextFormat1> format1;
+    format->QueryInterface(&format1);
+    if (format1.get()) {
+        format1->SetFontFallback(g_cjkFallback.fallback.get());
+    }
+}
+
+void Compositor::ClearCjkFallbackCache() {
+    g_cjkFallback.factory = nullptr;
+    g_cjkFallback.fallback.reset();
+}
+
+void Compositor::RecreateTextFormats(float scale) {
+    textFormat_.reset();
+    smallFormat_.reset();
+    headerFormat_.reset();
+    tabFormat_.reset();
+    addressFormat_.reset();
+    iconFormat_.reset();
+    const wchar_t* textFont = L"Segoe UI Variable Text";
+    CreateFormat(dwriteFactory_.get(), 14.0f * scale, DWRITE_FONT_WEIGHT_NORMAL, textFont, textFormat_);
+    if (textFormat_.get()) textFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    CreateFormat(dwriteFactory_.get(), 12.0f * scale, DWRITE_FONT_WEIGHT_NORMAL, textFont, smallFormat_);
+    if (smallFormat_.get()) smallFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    CreateFormat(dwriteFactory_.get(), 14.0f * scale, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+        L"Segoe UI Variable Display", headerFormat_);
+    CreateFormat(dwriteFactory_.get(), 13.0f * scale, DWRITE_FONT_WEIGHT_NORMAL, textFont, tabFormat_);
+    if (tabFormat_.get()) {
+        tabFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        tabFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    }
+    CreateFormat(dwriteFactory_.get(), 14.0f * scale, DWRITE_FONT_WEIGHT_NORMAL, textFont, addressFormat_);
+
+    // Icon font for Fluent glyphs.
+    const wchar_t* iconFonts[] = { L"Segoe Fluent Icons", L"Segoe MDL2 Assets", L"Segoe UI" };
+    for (const wchar_t* iconFont : iconFonts) {
+        dwriteFactory_->CreateTextFormat(iconFont, nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 16.0f * scale, L"en-us", &iconFormat_);
+        if (iconFormat_.get()) break;
+    }
+    if (iconFormat_.get()) {
+        iconFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+        iconFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    }
+}
+
+} // namespace pulse::ui

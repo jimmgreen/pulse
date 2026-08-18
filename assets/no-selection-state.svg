@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="240" viewBox="0 0 320 240" fill="none">
+  <title>No selection</title>
+  <desc>Layered documents and a pointer in the Pulse empty-state style.</desc>
+  <defs>
+    <linearGradient id="rearPaper" x1="77" y1="61" x2="167" y2="190" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#AAB5C7"/>
+      <stop offset="1" stop-color="#52627C"/>
+    </linearGradient>
+    <linearGradient id="frontPaper" x1="116" y1="48" x2="219" y2="196" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#E5E9EF"/>
+      <stop offset="0.5" stop-color="#AEB8C8"/>
+      <stop offset="1" stop-color="#66758D"/>
+    </linearGradient>
+    <linearGradient id="fold" x1="193" y1="50" x2="225" y2="84" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#CBD3DF"/>
+      <stop offset="1" stop-color="#7C899E"/>
+    </linearGradient>
+    <linearGradient id="pot" x1="235" y1="166" x2="261" y2="206" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#EEF1F4"/>
+      <stop offset="0.48" stop-color="#B8C0CB"/>
+      <stop offset="1" stop-color="#778397"/>
+    </linearGradient>
+    <linearGradient id="leafLeft" x1="219" y1="128" x2="248" y2="152" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#55C7A9"/>
+      <stop offset="1" stop-color="#2C8878"/>
+    </linearGradient>
+    <linearGradient id="leafRight" x1="250" y1="122" x2="278" y2="148" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#68D0AF"/>
+      <stop offset="1" stop-color="#31927D"/>
+    </linearGradient>
+  </defs>
+
+  <ellipse cx="159" cy="205" rx="91" ry="18" fill="#080A0F" fill-opacity="0.25"/>
+  <circle cx="158" cy="121" r="82" fill="#9BA6BA" fill-opacity="0.07"/>
+  <circle cx="158" cy="121" r="76" stroke="#AEB8C9" stroke-opacity="0.055" stroke-width="2"/>
+
+  <g transform="rotate(-10 121 128)">
+    <rect x="69" y="65" width="105" height="132" rx="10" fill="url(#rearPaper)"/>
+    <path d="M85 93H145" stroke="#E0E5ED" stroke-opacity="0.16" stroke-width="9" stroke-linecap="round"/>
+    <path d="M85 116H151" stroke="#E0E5ED" stroke-opacity="0.11" stroke-width="8" stroke-linecap="round"/>
+    <path d="M85 138H132" stroke="#E0E5ED" stroke-opacity="0.09" stroke-width="8" stroke-linecap="round"/>
+  </g>
+
+  <g>
+    <path d="M108 49H192L225 82V194C225 201 219 207 212 207H108C101 207 95 201 95 194V62C95 55 101 49 108 49Z"
+          fill="url(#frontPaper)"/>
+    <path d="M192 49V70C192 77 198 83 205 83H225L192 49Z" fill="url(#fold)"/>
+    <path d="M192 50V70C192 77 198 82 205 82H224" stroke="#F2F4F8" stroke-opacity="0.34" stroke-width="1.6"/>
+    <path d="M119 100H190" stroke="#738097" stroke-opacity="0.25" stroke-width="10" stroke-linecap="round"/>
+    <path d="M119 127H198" stroke="#738097" stroke-opacity="0.2" stroke-width="9" stroke-linecap="round"/>
+    <path d="M119 153H177" stroke="#738097" stroke-opacity="0.17" stroke-width="9" stroke-linecap="round"/>
+    <path d="M105 62C130 56 158 55 188 59" stroke="#FFFFFF" stroke-opacity="0.26" stroke-width="2" stroke-linecap="round"/>
+  </g>
+
+  <g id="plant">
+    <ellipse cx="251" cy="207" rx="29" ry="8" fill="#080A0F" fill-opacity="0.2"/>
+    <path d="M251 168C251 155 250 144 248 135" stroke="#3E8F7D" stroke-width="4" stroke-linecap="round"/>
+    <path d="M249 149C235 149 224 141 221 128C236 125 247 133 249 149Z" fill="url(#leafLeft)"/>
+    <path d="M251 143C254 129 264 122 278 124C277 139 266 147 251 143Z" fill="url(#leafRight)"/>
+    <path d="M227 131C235 133 242 139 248 147" stroke="#A4E2D0" stroke-opacity="0.25" stroke-width="1.5" stroke-linecap="round"/>
+    <path d="M272 127C263 130 257 135 252 141" stroke="#B3E8D8" stroke-opacity="0.23" stroke-width="1.5" stroke-linecap="round"/>
+    <rect x="228" y="164" width="46" height="10" rx="5" fill="#D7DDE5"/>
+    <path d="M232 171H270L266 195C265 202 260 206 251 206C242 206 237 202 236 195L232 171Z" fill="url(#pot)"/>
+    <path d="M234 173H268" stroke="#FFFFFF" stroke-opacity="0.38" stroke-width="1.8" stroke-linecap="round"/>
+    <path d="M239 195C241 201 245 203 251 203" stroke="#FFFFFF" stroke-opacity="0.16" stroke-width="1.5" stroke-linecap="round"/>
+  </g>
+</svg>

@@ -1,0 +1,319 @@
+// index_client.cpp — Connect to Pulse.Index (service or spawned helper).
+#include "index_client.h"
+#include <chrono>
+#include <shellapi.h>
+#include <winsvc.h>
+
+namespace pulse::index {
+
+std::wstring IndexClient::ExePath() {
+    wchar_t exe[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, exe, ARRAYSIZE(exe));
+    wchar_t* slash = wcsrchr(exe, L'\\');
+    if (!slash) return L"Pulse.Index.exe";
+    return std::wstring(exe, slash + 1) + L"Pulse.Index.exe";
+}
+
+void IndexClient::Start(HWND notify, UINT status_msg, UINT search_msg) {
+    Stop();
+    notify_ = notify;
+    status_msg_ = status_msg;
+    search_msg_ = search_msg;
+    running_ = true;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        status_ = L"索引未连接";
+    }
+    worker_ = std::thread([this] { Worker(); });
+    writer_ = std::thread([this] { Writer(); });
+}
+
+void IndexClient::Stop() {
+    running_ = false;
+    pending_cv_.notify_all();
+    HANDLE pipe = INVALID_HANDLE_VALUE;
+    {
+        std::lock_guard<std::mutex> lock(pipe_mu_);
+        pipe = pipe_;
+    }
+    if (pipe != INVALID_HANDLE_VALUE) CancelIoEx(pipe, nullptr);
+    if (worker_.joinable()) worker_.join();
+    if (writer_.joinable()) writer_.join();
+    {
+        std::lock_guard<std::mutex> lock(pipe_mu_);
+        if (pipe_ != INVALID_HANDLE_VALUE) CloseHandle(pipe_);
+        pipe_ = INVALID_HANDLE_VALUE;
+    }
+    if (child_proc_) {
+        CloseHandle(child_proc_);
+        child_proc_ = nullptr;
+    }
+    if (child_thread_) {
+        CloseHandle(child_thread_);
+        child_thread_ = nullptr;
+    }
+    connected_ = false;
+}
+
+bool IndexClient::SpawnHelper() {
+    const std::wstring exe = ExePath();
+    if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        std::lock_guard<std::mutex> lock(mu_);
+        status_ = L"找不到 Pulse.Index.exe";
+        return false;
+    }
+    std::wstring cmd = L"\"" + exe + L"\" " + std::to_wstring(GetCurrentProcessId());
+    STARTUPINFOW si{ sizeof(si) };
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE,
+                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        return false;
+    }
+    if (child_proc_) CloseHandle(child_proc_);
+    if (child_thread_) CloseHandle(child_thread_);
+    child_proc_ = pi.hProcess;
+    child_thread_ = pi.hThread;
+    return true;
+}
+
+bool IndexClient::EnsureConnected() {
+    {
+        std::lock_guard<std::mutex> lock(pipe_mu_);
+        if (pipe_ != INVALID_HANDLE_VALUE) return true;
+    }
+    auto try_open = [&]() -> HANDLE {
+        HANDLE h = CreateFileW(kPipeName, GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                               OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return INVALID_HANDLE_VALUE;
+        DWORD mode = PIPE_READMODE_BYTE;
+        SetNamedPipeHandleState(h, &mode, nullptr, nullptr);
+        return h;
+    };
+    HANDLE h = try_open();
+    if (h == INVALID_HANDLE_VALUE) {
+        SpawnHelper();
+        const ULONGLONG deadline = GetTickCount64() + 8000;
+        while (running_ && h == INVALID_HANDLE_VALUE && GetTickCount64() < deadline) {
+            DWORD err = GetLastError();
+            if (err == ERROR_PIPE_BUSY) WaitNamedPipeW(kPipeName, 200);
+            else Sleep(50);
+            h = try_open();
+        }
+    }
+    if (h == INVALID_HANDLE_VALUE) {
+        connected_ = false;
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(pipe_mu_);
+        if (!running_) {
+            CloseHandle(h);
+            return false;
+        }
+        pipe_ = h;
+    }
+    connected_ = true;
+    pending_cv_.notify_one();
+    return true;
+}
+
+bool IndexClient::WriteMsg(uint32_t type, uint32_t id, const std::vector<uint8_t>& payload) {
+    std::lock_guard<std::mutex> lock(write_mu_);
+    HANDLE pipe = INVALID_HANDLE_VALUE;
+    {
+        std::lock_guard<std::mutex> pipe_lock(pipe_mu_);
+        pipe = pipe_;
+    }
+    if (pipe == INVALID_HANDLE_VALUE) return false;
+    auto hdr = MakeIndexHdr(type, id, static_cast<uint32_t>(payload.size()));
+    if (!ipc::PipeWrite(pipe, reinterpret_cast<const uint8_t*>(&hdr), sizeof(hdr)))
+        return false;
+    if (!payload.empty() &&
+        !ipc::PipeWrite(pipe, payload.data(), static_cast<DWORD>(payload.size())))
+        return false;
+    return true;
+}
+
+bool IndexClient::ReadMsg(ipc::MsgHeader& hdr, std::vector<uint8_t>& payload) {
+    HANDLE pipe;
+    {
+        std::lock_guard<std::mutex> lock(pipe_mu_);
+        pipe = pipe_;
+    }
+    if (pipe == INVALID_HANDLE_VALUE) return false;
+    if (!ipc::PipeRead(pipe, reinterpret_cast<uint8_t*>(&hdr), sizeof(hdr))) return false;
+    if (hdr.magic != kIndexMagic || hdr.payload_size > kIndexMaxPayload) return false;
+    payload.resize(hdr.payload_size);
+    if (hdr.payload_size &&
+        !ipc::PipeRead(pipe, payload.data(), hdr.payload_size))
+        return false;
+    return true;
+}
+
+void IndexClient::HandleStatus(const uint8_t* p, size_t n) {
+    ipc::PayloadReader r(p, n);
+    uint32_t ready = 0, count = 0;
+    std::wstring text;
+    if (!r.GetU32(ready) || !r.GetU32(count) || !r.GetString(text)) return;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        status_ = std::move(text);
+    }
+    ready_.store(ready != 0);
+    count_.store(count);
+    if (notify_ && status_msg_) PostMessageW(notify_, status_msg_, 0, 0);
+}
+
+void IndexClient::HandleSearch(uint32_t id, const uint8_t* p, size_t n) {
+    if (id != latest_search_id_.load()) return;
+    ipc::PayloadReader r(p, n);
+    uint32_t total = 0, nh = 0;
+    if (!r.GetU32(total) || !r.GetU32(nh)) return;
+    SearchResult sr;
+    sr.total = total;
+    sr.hits.reserve(nh);
+    for (uint32_t i = 0; i < nh; ++i) {
+        Hit h;
+        uint32_t flags = 0, size_lo = 0, size_hi = 0, mt_lo = 0, mt_hi = 0;
+        if (!r.GetString(h.path) || !r.GetString(h.name) || !r.GetU32(flags) ||
+            !r.GetU32(size_lo) || !r.GetU32(size_hi) ||
+            !r.GetU32(mt_lo) || !r.GetU32(mt_hi))
+            return;
+        h.is_dir = (flags & 1) != 0;
+        h.size = (static_cast<uint64_t>(size_hi) << 32) | size_lo;
+        h.mtime = (static_cast<uint64_t>(mt_hi) << 32) | mt_lo;
+        sr.hits.push_back(std::move(h));
+    }
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        result_id_ = id;
+        result_ = std::move(sr);
+    }
+    if (notify_ && search_msg_) PostMessageW(notify_, search_msg_, id, 0);
+}
+
+void IndexClient::FlushPendingSearch() {
+    Query q;
+    uint32_t id = 0;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (!have_pending_) return;
+        q = pending_q_;
+        id = pending_id_;
+    }
+    ipc::PayloadWriter w;
+    uint32_t flags = 0;
+    if (q.rank) flags |= 1;
+    if (q.folders_only) flags |= 2;
+    if (q.sort_desc) flags |= 4;
+    w.PutU32(flags);
+    w.PutU32(static_cast<uint32_t>(q.sort));
+    w.PutU32(static_cast<uint32_t>(q.limit));
+    w.PutU32(static_cast<uint32_t>(q.offset));
+    w.PutString(q.needle);
+    w.PutString(q.path_prefix);
+    if (WriteMsg(REQ_IDX_SEARCH, id, w.data())) {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (pending_id_ == id) have_pending_ = false;
+    }
+}
+
+void IndexClient::Writer() {
+    while (running_) {
+        {
+            std::unique_lock<std::mutex> lock(mu_);
+            pending_cv_.wait_for(lock, std::chrono::milliseconds(100),
+                [this] { return !running_ || have_pending_; });
+            if (!running_) return;
+            if (!have_pending_) continue;
+        }
+        if (connected_) FlushPendingSearch();
+    }
+}
+
+void IndexClient::Worker() {
+    while (running_) {
+        if (!EnsureConnected()) {
+            {
+                std::lock_guard<std::mutex> lock(mu_);
+                if (status_ != L"找不到 Pulse.Index.exe")
+                    status_ = L"索引未连接";
+            }
+            for (int i = 0; i < 10 && running_; ++i) Sleep(100);
+            continue;
+        }
+        WriteMsg(REQ_IDX_STATUS, 0, {});
+        pending_cv_.notify_one();
+        while (running_) {
+            ipc::MsgHeader hdr{};
+            std::vector<uint8_t> payload;
+            if (!ReadMsg(hdr, payload)) {
+                std::lock_guard<std::mutex> write_lock(write_mu_);
+                std::lock_guard<std::mutex> pipe_lock(pipe_mu_);
+                if (pipe_ != INVALID_HANDLE_VALUE) {
+                    CloseHandle(pipe_);
+                    pipe_ = INVALID_HANDLE_VALUE;
+                }
+                connected_ = false;
+                break;
+            }
+            if (hdr.type == RSP_IDX_STATUS)
+                HandleStatus(payload.data(), payload.size());
+            else if (hdr.type == RSP_IDX_SEARCH)
+                HandleSearch(hdr.request_id, payload.data(), payload.size());
+        }
+    }
+}
+
+std::wstring IndexClient::Status() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return status_;
+}
+
+void IndexClient::SearchAsync(const Query& q, uint32_t id) {
+    if (!running_) return;
+    latest_search_id_.store(id);
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        pending_q_ = q;
+        pending_id_ = id;
+        have_pending_ = true;
+    }
+    pending_cv_.notify_one();
+}
+
+bool IndexClient::TakeResult(uint32_t id, SearchResult& out) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (result_id_ != id) return false;
+    out = std::move(result_);
+    result_id_ = 0;
+    return true;
+}
+
+bool IndexClient::ServiceInstalled() const {
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm) return false;
+    SC_HANDLE svc = OpenServiceW(scm, kServiceName, SERVICE_QUERY_STATUS);
+    const bool ok = svc != nullptr;
+    if (svc) CloseServiceHandle(svc);
+    CloseServiceHandle(scm);
+    return ok;
+}
+
+bool IndexClient::RequestInstallService() {
+    const std::wstring exe = ExePath();
+    SHELLEXECUTEINFOW sei{ sizeof(sei) };
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb = L"runas";
+    sei.lpFile = exe.c_str();
+    sei.lpParameters = L"--install";
+    sei.nShow = SW_HIDE;
+    if (!ShellExecuteExW(&sei)) return false;
+    if (sei.hProcess) {
+        WaitForSingleObject(sei.hProcess, 15000);
+        CloseHandle(sei.hProcess);
+    }
+    return ServiceInstalled();
+}
+
+} // namespace pulse::index

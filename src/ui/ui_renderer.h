@@ -1,0 +1,666 @@
+// ui_renderer.h — Full-window Fluent renderer (title bar, toolbar, sidebar, pane, tray).
+#pragma once
+#include "ui_compositor.h"
+#include "window_material.h"
+#include "fluent_components.h"
+#include "shell_icons.h"
+#include "view_layout.h"
+#include "thumbnail_cache.h"
+#include "preview_handler_host.h"
+#include "../fs/fs_enum.h"
+#include "../fs/fs_snapshot.h"
+#include <algorithm>
+#include <array>
+#include <memory>
+#include <deque>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+namespace pulse::app { class PlacesCatalog; }
+
+namespace pulse::ui {
+
+enum class SortColumn { Name, Mtime, Type, Size };
+enum class SortDirection { Asc, Desc };
+
+struct TabView {
+    std::wstring title;
+    bool active = false;
+    float x_offset = 0.0f; // slot units: sibling slide during tab reorder
+    uint32_t color_rgb = 0; // resolved group color (0 = ungrouped)
+    int group = -1;         // index into WindowViewModel::tab_groups
+};
+
+// A named, colored tab group shown as a chip at the start of its run.
+struct TabGroupView {
+    int id = 0;             // app::TabGroup::id
+    std::wstring name;
+    uint32_t color_rgb = 0;
+};
+
+struct ListEntryView {
+    std::wstring name;
+    std::wstring size_text;
+    std::wstring date_text;
+    std::wstring type_text;
+    std::wstring path;
+    DWORD attrs = 0;
+    uint64_t size_value = 0;
+    uint64_t modified_value = 0;
+    bool is_dir = false;
+    bool is_reparse = false;
+    bool cloud_recall = false;
+    bool cut = false;
+    bool starred = false;
+    D2D1_COLOR_F tag_dots[3]{};
+    int tag_dot_count = 0;
+};
+
+struct RowPresentationCache {
+    fs::SnapshotPtr snapshot;
+    std::unordered_map<size_t, ListEntryView> rows;
+    std::deque<size_t> order;
+};
+
+struct PaneViewModel {
+    using FilterMap = std::vector<int>;
+    using TagDots = std::unordered_map<int, std::vector<D2D1_COLOR_F>>;
+
+    std::wstring path;
+    std::wstring header_text;
+    std::wstring filter_text;
+    float filter_expand = 0.0f;
+    std::wstring banner_title;
+    std::wstring banner_message;
+    int banner_kind = 0; // 0 info, 1 success, 2 warning, 3 error
+    // Derived data is shared with the tab cache. Search views can contain
+    // 100k rows, so copying these containers for every animation frame is not
+    // acceptable.
+    std::shared_ptr<const FilterMap> filter_map;
+    std::vector<ListEntryView> entries;
+    // Real directory views retain the immutable filesystem snapshot and only
+    // materialize visible rows. entries remains available to gallery/tests.
+    fs::SnapshotPtr snapshot;
+    mutable std::shared_ptr<RowPresentationCache> row_cache;
+    const app::PlacesCatalog* tag_catalog = nullptr;
+    std::unordered_set<std::wstring> cut_names;
+    std::shared_ptr<const TagDots> tag_dots;
+    bool loading = false;
+    bool can_create = false;
+    bool is_file_system = false;
+    int selected_index = -1;
+    int selected_count = 0;
+    bool all_selected = false;
+    const std::unordered_set<int>* selected_indices = nullptr;
+    int hover_index = -1;
+    int drop_target_index = -1;   // folder row under an OLE drag (accent 2px stroke)
+    int rename_index = -1;        // name column is in edit mode; do not draw the label
+    float scroll_y = 0.0f;
+    float scroll_x = 0.0f;
+    ViewMode view_mode = ViewMode::Details;
+    uint64_t view_generation = 1;
+    SortColumn sort_column = SortColumn::Name;
+    SortDirection sort_direction = SortDirection::Asc;
+    // Cumulative column divider positions in the details view, normalized to
+    // the usable header width. All zeroes select the responsive defaults.
+    std::array<float, 3> details_column_dividers{};
+    bool focused = true;
+    bool marquee_active = false;
+    D2D1_RECT_F marquee_rect{};
+
+    bool IsRowSelected(int index) const {
+        if (index < 0) return false;
+        if (all_selected) return true;
+        if (index == selected_index) return true;
+        return selected_indices && selected_indices->contains(index);
+    }
+
+    size_t EntryCount() const {
+        if (!filter_text.empty()) return filter_map ? filter_map->size() : 0;
+        return snapshot ? snapshot->size() : entries.size();
+    }
+
+    int SourceIndex(int view_row) const {
+        if (view_row < 0) return -1;
+        if (!filter_text.empty()) {
+            if (!filter_map || view_row >= static_cast<int>(filter_map->size())) return -1;
+            return (*filter_map)[static_cast<size_t>(view_row)];
+        }
+        return view_row;
+    }
+
+    int ViewIndex(int source_index) const {
+        if (source_index < 0) return -1;
+        if (filter_text.empty()) return source_index;
+        if (!filter_map) return -1;
+        const auto it = std::lower_bound(filter_map->begin(), filter_map->end(), source_index);
+        return it != filter_map->end() && *it == source_index
+            ? static_cast<int>(it - filter_map->begin()) : -1;
+    }
+};
+
+// One clickable breadcrumb segment (display text + its full path).
+struct BreadcrumbSegment {
+    std::wstring text;
+    std::wstring path;
+};
+
+// Splits "C:\Users\SS" into [{C:\, C:\}, {Users, C:\Users}, ...].
+// UNC roots collapse to one "\\server\share" segment. Pure; unit-tested.
+std::vector<BreadcrumbSegment> SplitBreadcrumb(const std::wstring& path);
+
+struct SidebarItem {
+    std::wstring label;
+    std::wstring detail;
+    std::wstring icon_glyph;       // Segoe Fluent Icons codepoint string.
+    std::wstring fallback_text;
+    std::wstring badge;            // e.g. "Git"
+    D2D1_COLOR_F icon_color = {};
+    D2D1_COLOR_F tag_dot = {};
+    bool danger = false;
+    bool is_tag = false;
+    bool show_count = false;
+    int count = 0;
+    std::wstring path;
+    bool is_drive = false;
+    float used_ratio = 0.0f;       // For drives: 0..1.
+    float y_offset = 0.0f;         // Tags: slide-animation offset added at layout.
+    int indent = 0;
+    bool status_dot = false;
+    D2D1_COLOR_F status_color = {};
+    bool editing = false;
+};
+
+struct SidebarGroup {
+    std::wstring header;
+    std::vector<SidebarItem> items;
+    bool collapsed = false;
+    bool add_action = false;
+};
+
+// Fan deck inside the staging tray panel. Poses arrive pre-smoothed from the
+// app-side animation state; the renderer only maps slots to geometry, so
+// draw and hit-test can never disagree.
+struct TrayCardView {
+    std::wstring path;
+    std::wstring name;
+    DWORD attrs = 0;
+    bool is_dir = false;
+    bool missing = false;
+    int batch = -1;            // staging-tray batch index (live cards only)
+    int sub = -1;              // item index inside the batch (live cards only)
+    uint64_t batch_total_size = 0;
+    float slot = 0.0f;         // fan slot: 0 = center, ±k = k positions out
+    float hover = 0.0f;        // 0..1 raise + straighten
+    float appear = 0.0f;       // 0 = just collected, 1 = settled in the fan
+    float opacity = 1.0f;      // ghosts (exiting cards) fade toward 0
+    bool ghost = false;        // exiting: drawn, never hit-tested
+};
+
+struct TrayDeckView {
+    std::vector<TrayCardView> cards; // live cards (newest batch first) + ghosts
+    int live_count = 0;              // leading non-ghost entries in cards
+    int total_count = 0;             // all staged items (for the +N badge)
+    int offset = 0;                  // window start into the newest-first list
+    uint64_t total_size = 0;         // sum over all batches (footer text)
+    int batch_count = 0;
+    float open = 0.0f;               // 0..1 drag-over fan spread
+    int hovered = -1;                // live display index under the cursor
+};
+
+// Right-side details panel for the current selection (ui.md §7.2 视图簇).
+struct DetailsPanelView {
+    bool has_selection = false;
+    int multi_count = 0;            // >1 => multi-selection summary mode
+    std::wstring name, path, type_text;
+    bool is_dir = false;
+    DWORD attrs = 0;
+    uint64_t modified_value = 0;    // thumbnail cache key parts
+    uint64_t size_value = 0;
+    uint64_t view_generation = 1;
+    float scroll_y = 0.0f;
+    float preview_scroll_y = 0.0f;
+    float preview_pan_x = 0.0f;     // bitmap cover-mode pan offset (DIPs)
+    float preview_pan_y = 0.0f;
+    uint32_t collapsed_mask = 0;    // bit per section: 0基本信息 1属性 2标签 3安全 4其他
+    std::wstring location_text, size_text, contains_text;
+    std::wstring created_text, modified_text, accessed_text;
+    std::wstring attributes_text;
+    std::vector<PreviewProperty> preview_properties;
+    // Async-fetched meta (details_meta.cpp); empty until ready.
+    std::wstring owner_text, permissions_text;
+    std::wstring drive_text, fs_text, free_space_text;
+    bool size_pending = false;      // folder size still computing
+    bool starred = false;
+    struct TagChip {
+        std::wstring name;
+        D2D1_COLOR_F color{};
+        int tag_index = -1;         // index into PlacesCatalog::tags
+    };
+    std::vector<TagChip> tags;
+};
+
+// Interactive rects inside the details panel, shared by draw and hit-test.
+struct DetailsHitRects {
+    D2D1_RECT_F open{}, new_tab{}, copy_path{}, more{}, star{}, rename{};
+    D2D1_RECT_F tag_add{}, preview{};
+    D2D1_RECT_F attr_readonly{}, attr_hidden{}, attr_advanced{};
+    D2D1_RECT_F security_change{};
+    std::vector<D2D1_RECT_F> tag_chips;
+    std::vector<D2D1_RECT_F> section_headers;
+    std::vector<int> section_ids;   // bit index into collapsed_mask
+    float content_height_dip = 0.0f; // unclipped content height for wheel clamp
+};
+
+struct StatusBarView {
+    std::wstring status_text;
+    std::wstring selection_text;
+    std::wstring mode_text;
+    std::wstring task_text;        // active/completed op summary; empty = idle
+    float task_progress = -1.0f;   // 0..100 while an op runs; <0 hides the bar
+    std::wstring performance_text; // development diagnostics; empty hides it
+    std::wstring performance_compact_text;
+};
+
+struct PaneSlotView {
+    PaneViewModel pane;
+    D2D1_RECT_F rect{};
+    bool focused = false;
+    bool target = false;
+};
+
+struct SplitterView {
+    D2D1_RECT_F hit_rect{};
+    D2D1_RECT_F parent_bounds{};
+    bool vertical = true; // vertical divider between left/right panes
+};
+
+struct SettingsRowView {
+    std::wstring key;
+    std::wstring text;
+    int group = 0; // 0 software, 1 open-with, 2 share, 3 system, 4 print
+    bool on = false;
+};
+
+struct WindowViewModel {
+    std::wstring window_title;
+    std::vector<TabView> tabs;
+    std::vector<TabGroupView> tab_groups;
+    int active_tab = 0;
+
+    bool can_go_back = false;
+    bool can_go_forward = false;
+
+    PaneViewModel pane;
+    std::vector<PaneSlotView> pane_slots;
+    std::vector<SplitterView> splitters;
+    std::vector<SidebarGroup> sidebar;
+    TrayDeckView tray_deck;
+    bool details_visible = false;   // right details panel toggle (view menu)
+    DetailsPanelView details;
+    StatusBarView status;
+
+    // OLE drag feedback (1B-2). Indices follow HitTestResult indexing.
+    int breadcrumb_hover = -1;    // placed segment under the mouse
+    int breadcrumb_drop = -1;     // placed segment under a drag
+    int sidebar_drop_index = -1;  // sidebar item under a drag
+    // Tag drag-reorder gesture (group/item = dragged tag, tag_drag_y = cursor).
+    int tag_drag_group = -1;
+    int tag_drag_item = -1;
+    float tag_drag_y = 0.0f;
+    // Title-bar tab drag: floating tab follows the cursor (QFluent TabBar).
+    int tab_drag_index = -1; // display index of the raised tab, or -1
+    float tab_drag_x = 0.0f; // left edge of the floating tab (px)
+    bool tray_drop = false;       // staging tray under a drag
+    std::wstring drag_badge;      // action badge text near the cursor
+    float drag_badge_x = 0.0f;
+    float drag_badge_y = 0.0f;
+    int hover_region = 0;         // numeric HitTestResult::Region
+    int hover_control_index = -1;
+    std::wstring tooltip_text;
+    float tooltip_x = 0.0f;
+    float tooltip_y = 0.0f;
+
+    bool focused = true;
+    bool maximized = false;
+    bool dark = false;
+    bool backdrop_enabled = false;
+    WindowEffect window_effect = WindowEffect::MicaAlt;
+    std::wstring background_image;
+    bool address_editing = false;
+    bool filter_editing = false;
+    bool splitter_pressed = false;
+    bool details_resize_pressed = false;
+    bool details_preview_resize_pressed = false;
+    bool column_resize_pressed = false;
+    int hover_pane_index = -1;
+
+    bool settings_open = false;
+    int settings_page = 0; // 0 general, 1 context menu
+    float settings_scroll = 0.0f;
+    bool settings_launch_on_startup = false;
+    bool settings_keep_running = false;
+    bool settings_group_on[5] = { true, true, false, false, true };
+    std::vector<SettingsRowView> settings_items;
+};
+
+struct HitTestResult {
+    enum Region {
+        None,
+        Tab,
+        TabClose,
+        TabNew,
+        TabGroup,
+        CmdPanel,
+        ThemeToggle,
+        SettingsButton,
+        Minimize,
+        Maximize,
+        Close,
+        NavBack,
+        NavForward,
+        NavUp,
+        NavRefresh,
+        NewButton,
+        Cut,
+        Copy,
+        Paste,
+        Rename,
+        Delete,
+        SplitButton,
+        DetailsToggle,
+        PaneMediumIcons,
+        PaneViewButton,
+        AddressBar,
+        BreadcrumbSegment,
+        ColumnHeader,
+        ColumnDivider,
+        FilterBox,
+        Splitter,
+        Scrollbar,
+        Row,
+        Pane,
+        SidebarHeader,
+        SidebarHeaderAction,
+        SidebarItem,
+        SidebarItemAction,
+        TrayRelease,
+        TrayClose,
+        TrayItemRemove,
+        TrayCard,
+        TrayClear,
+        RowStar,
+        RowMore,
+        PaneEmptyNewFolder,
+        DetailsOpen,
+        DetailsStar,
+        DetailsMore,
+        DetailsRename,
+        DetailsTagAdd,
+        DetailsTagChip,
+        DetailsNewTab,
+        DetailsCopyPath,
+        DetailsSection,
+        DetailsAttrToggle,
+        DetailsSecurityChange,
+        DetailsPreview,
+        DetailsResize,
+        StatusBar,
+        SettingsNav,
+        SettingsToggle,
+        SettingsRestore,
+        SettingsEffect,
+        SettingsWallpaper
+    } region = None;
+    int index = -1;          // tab/row/sidebar item/tray batch/tray item.
+    int sub_index = -1;      // tray item inside batch, breadcrumb segment.
+    int pane_index = -1;     // leaf in pane_slots, or -1 outside the content area.
+    SortColumn column = SortColumn::Name;
+    std::wstring path;
+};
+
+class MainRenderer {
+public:
+    MainRenderer();
+
+    void SetScale(float scale);
+    void SetCompositor(Compositor* comp);
+    void SetIconNotifyWindow(HWND hwnd);
+    void NotifyPreviewActivate(bool active) { preview_handler_.NotifyAppActivate(active); }
+
+    // Layout metrics (DIPs).
+    float TitleBarHeight() const { return title_bar_height_; }
+    float ToolbarHeight() const { return toolbar_height_; }
+    float StatusBarHeight() const { return status_height_; }
+    float SidebarWidth() const { return sidebar_width_; }
+    float EffectiveSidebarWidth(float window_width) const;
+    float PaneHeaderHeight() const { return pane_header_height_; }
+    float ColumnHeaderHeight() const { return column_header_height_; }
+    float RowHeight() const { return row_height_; }
+    float Margin() const { return margin_; }
+
+    float ContentLeft() const { return sidebar_width_ + margin_; }
+    float ContentTop() const { return title_bar_height_ + toolbar_height_ + margin_; }
+
+    // Right details panel: toggled from the view menu; ContentRect shrinks.
+    void SetDetailsPanelVisible(bool visible) { details_visible_ = visible; }
+    bool DetailsPanelVisible() const { return details_visible_; }
+    float DetailsPanelWidth(float window_w) const {
+        return details_visible_ && window_w >= 1000.0f * scale_
+            ? details_width_ * scale_ + margin_ : 0.0f;
+    }
+    void SetDetailsPanelWidth(float width_dip) {
+        details_width_ = std::clamp(width_dip, 300.0f, 480.0f);
+    }
+    float DetailsPanelWidthDip() const { return details_width_; }
+    // Cover-mode pan limits of the current details preview bitmap (DIPs);
+    // refreshed every frame the preview draws a bitmap.
+    float DetailsCoverMaxPanX() const { return cover_max_pan_x_; }
+    float DetailsCoverMaxPanY() const { return cover_max_pan_y_; }
+    bool CachedPreviewProperties(const std::wstring& path, uint64_t modified, uint64_t size,
+                                 std::vector<PreviewProperty>& properties) {
+        return thumbnail_cache_.CachedProperties(path, modified, size, properties);
+    }
+    D2D1_RECT_F DetailsPanelRect(float w, float h) const;
+
+    D2D1_RECT_F ContentRect(float w, float h) const;
+    D2D1_RECT_F PaneListRect(const D2D1_RECT_F& pane_bounds, float extra_top = 0.0f,
+                             ViewMode mode = ViewMode::Details) const;
+    D2D1_RECT_F FilterBoxRect(const D2D1_RECT_F& pane_bounds,
+                              float expand = 1.0f) const;
+    D2D1_RECT_F PaneMediumIconsRect(const D2D1_RECT_F& pane_bounds,
+                                    float filter_expand = 1.0f) const;
+    D2D1_RECT_F PaneViewButtonRect(const D2D1_RECT_F& pane_bounds,
+                                   float filter_expand = 1.0f) const;
+    D2D1_RECT_F FilterEditRect(const D2D1_RECT_F& pane_bounds,
+                               float expand = 1.0f) const;
+
+    struct DetailsColumnLayout {
+        float left = 0.0f;
+        float right = 0.0f;
+        std::array<float, 4> widths{};
+
+        float DividerX(int index) const {
+            float x = left;
+            for (int i = 0; i <= index && i < 3; ++i)
+                x += widths[static_cast<size_t>(i)];
+            return x;
+        }
+    };
+    DetailsColumnLayout DetailsColumns(
+        const D2D1_RECT_F& pane_bounds,
+        const std::array<float, 3>& dividers = {}) const;
+    std::array<float, 3> ResizeDetailsColumnDivider(
+        const D2D1_RECT_F& pane_bounds,
+        const std::array<float, 3>& dividers,
+        int divider_index, float cursor_x) const;
+
+    D2D1_RECT_F NameCellRect(float window_w, float window_h, int row, float scroll_y) const;
+    D2D1_RECT_F NameCellRect(const D2D1_RECT_F& pane_bounds, int view_row, float scroll_y,
+                             float extra_top = 0.0f, ViewMode mode = ViewMode::Details,
+                             float scroll_x = 0.0f, size_t item_count = 0,
+                             const std::array<float, 3>& column_dividers = {}) const;
+    bool PointInItemName(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds,
+                         int source_index, float x, float y) const;
+    D2D1_RECT_F SidebarRect(float w, float h) const;
+    D2D1_RECT_F StagingTrayRect(const WindowViewModel& vm, float w, float h) const;
+    D2D1_RECT_F TitleBarRect(float w) const;
+    D2D1_RECT_F ToolbarRect(float w) const;
+    D2D1_RECT_F AddressBarRect(float w) const;
+
+    // One placed breadcrumb segment (after left-truncation to fit the bar).
+    struct BreadcrumbPlaced {
+        D2D1_RECT_F rc{};
+        std::wstring text;
+        std::wstring path;
+    };
+    // Shared by DrawToolbar, HitTest and the drop-target logic so the three
+    // can never disagree about segment positions.
+    void BreadcrumbLayout(const PaneViewModel& vm, float w,
+                          std::vector<BreadcrumbPlaced>& out) const;
+
+    void Render(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
+    void InvalidateWallpaper() { material_.Invalidate(); }
+
+    HitTestResult HitTest(const WindowViewModel& vm, const D2D1_RECT_F& rect,
+                          float x, float y) const;
+
+    float TotalContentHeight(const PaneViewModel& vm) const;
+    float MaxScroll(const PaneViewModel& vm, const D2D1_RECT_F& rect) const;
+    float MaxScrollForPane(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds) const;
+    float MaxScrollXForPane(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds) const;
+    D2D1_RECT_F ItemRectInPane(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds,
+                               int view_index) const;
+    int MoveViewIndex(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds,
+                      int current, int dx, int dy) const;
+    int PageDelta(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds) const;
+    std::pair<int, int> VisibleRangeInPane(const PaneViewModel& vm,
+                                           const D2D1_RECT_F& pane_bounds) const;
+    int RowFromY(const PaneViewModel& vm, const D2D1_RECT_F& rect, float y) const;
+    int RowFromYInPane(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds, float y) const;
+    int ItemFromPointInPane(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds,
+                            float x, float y) const;
+    // Current layout rect of a tag sidebar slot (for drag-reorder geometry).
+    bool TagItemRect(const WindowViewModel& vm, float w, float h, int group, int item,
+                     D2D1_RECT_F* out) const;
+    // Rest-slot rect of a title-bar tab (display index, no drag float).
+    bool TabItemRect(const WindowViewModel& vm, float window_w, int index, D2D1_RECT_F* out) const;
+    // Uniform tab pitch (excludes group-chip offsets); used by drag math.
+    float TabPitchPx(const WindowViewModel& vm, float window_w) const;
+    float SettingsMaxScroll(const WindowViewModel& vm, float window_w, float window_h) const;
+
+private:
+    struct TabStripMetrics {
+        float x0 = 0.0f;
+        float y = 0.0f;
+        float w = 0.0f;
+        float h = 0.0f;
+        float pitch = 0.0f;
+        std::vector<float> extra; // per tab: px shift from group chips before it
+        struct Chip {
+            float left = 0.0f;
+            float width = 0.0f;
+            int group = -1; // index into WindowViewModel::tab_groups
+        };
+        std::vector<Chip> chips;  // one chip at the start of each same-group run
+    };
+    TabStripMetrics ComputeTabStrip(const WindowViewModel& vm, float window_w) const;
+    void DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
+    void DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
+    void DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
+    void DrawPane(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
+    void DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
+    void DrawSinglePane(const WindowViewModel& vm, const PaneViewModel& pane,
+                        const D2D1_RECT_F& bounds, int pane_index, bool focused, bool target,
+                        const Theme& theme);
+    void DrawPaneEmptyState(const WindowViewModel& vm, const PaneViewModel& pane,
+                            const D2D1_RECT_F& bounds, int pane_index, const Theme& theme);
+    void DrawStatusBar(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
+    void DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
+
+    void DrawList(const PaneViewModel& vm, float x, float y, float w, float h, const Theme& theme,
+                  int hover_region = 0, int hover_control_index = -1);
+    void DrawScrollbar(const PaneViewModel& vm, float x, float y, float w, float h, const Theme& theme);
+    // Fan deck of staged files inside the tray panel (draw + hit-test share
+    // the geometry helpers in ui_renderer.cpp).
+    void DrawTrayDeck(const WindowViewModel& vm, const D2D1_RECT_F& panel_rc,
+                      const Theme& theme);
+
+    void UpdateBrushes(const Theme& theme);
+    void DrawButton(const D2D1_RECT_F& rc, const Theme& theme, const D2D1_COLOR_F& bg,
+                    const std::wstring& glyph, const std::wstring& fallback,
+                    const D2D1_COLOR_F& fg, bool round_right = false, bool round_left = false,
+                    float size_factor = 1.0f);
+    void DrawIconText(float x, float y, float w, float h, const std::wstring& glyph,
+                      const std::wstring& fallback, const D2D1_COLOR_F& color, float size_factor = 1.0f);
+    void DrawFolderIcon(float x, float y, float size, const Theme& theme);
+    void DrawFileIcon(float x, float y, float size, const Theme& theme);
+    void DrawEntryIcon(const ListEntryView& entry, float x, float y, float size, const Theme& theme);
+    bool DrawEmptyStateSvg(const D2D1_RECT_F& bounds, float opacity = 1.0f);
+    bool EnsureEmptyStateSvg();
+    bool DrawNoSelectionSvg(const D2D1_RECT_F& bounds, float opacity = 1.0f);
+    bool EnsureNoSelectionSvg();
+    void DrawTruncatedName(const std::wstring& name, float x, float y, float w, float h,
+                           const Theme& theme, bool selected);
+    void DrawCenteredIconName(const std::wstring& name, const D2D1_RECT_F& bounds,
+                              const D2D1_COLOR_F& color);
+    // Title-bar product mark from the app icon resource (nullptr until loaded).
+    ID2D1Bitmap* LogoBitmap();
+
+    WindowMaterial material_;
+    Compositor* compositor_ = nullptr;
+    fluent::Painter painter_;
+    ShellIconCache icon_cache_;
+    ThumbnailCache thumbnail_cache_;
+    PreviewHandlerHost preview_handler_;
+    HWND notify_hwnd_ = nullptr;
+    float scale_ = 1.0f;
+    float title_bar_height_ = kTitleBarHeight;
+    float toolbar_height_ = 44.0f;
+    float status_height_ = 28.0f;
+    float sidebar_width_ = 224.0f;
+    float pane_header_height_ = 40.0f;
+    float column_header_height_ = 32.0f;
+    float row_height_ = 28.0f;
+    float margin_ = 4.0f;
+    float control_gap_ = 4.0f;
+    bool details_visible_ = false;
+    float details_width_ = 340.0f;
+    float cover_max_pan_x_ = 0.0f;
+    float cover_max_pan_y_ = 0.0f;
+
+    mutable ComPtr<ID2D1SolidColorBrush> brBg_;
+    mutable ComPtr<ID2D1SolidColorBrush> brText_;
+    mutable ComPtr<ID2D1SolidColorBrush> brTextSecondary_;
+    mutable ComPtr<ID2D1SolidColorBrush> brTextDisabled_;
+    mutable ComPtr<ID2D1SolidColorBrush> brFillHover_;
+    mutable ComPtr<ID2D1SolidColorBrush> brFillPressed_;
+    mutable ComPtr<ID2D1SolidColorBrush> brFillSelected_;
+    mutable ComPtr<ID2D1SolidColorBrush> brFillInput_;
+    mutable ComPtr<ID2D1SolidColorBrush> brStrokeCard_;
+    mutable ComPtr<ID2D1SolidColorBrush> brStrokeDivider_;
+    mutable ComPtr<ID2D1SolidColorBrush> brAccent_;
+    mutable ComPtr<ID2D1SolidColorBrush> brAccentHover_;
+    mutable ComPtr<ID2D1SolidColorBrush> brAccentText_;
+    mutable ComPtr<ID2D1SolidColorBrush> brDanger_;
+    mutable ComPtr<ID2D1SolidColorBrush> brDangerHover_;
+    mutable ComPtr<ID2D1SolidColorBrush> brScrollbar_;
+    mutable ComPtr<ID2D1SolidColorBrush> brIconFolder_;
+    mutable ComPtr<ID2D1SolidColorBrush> brIconFile_;
+    mutable ComPtr<ID2D1StrokeStyle> dashStroke_;
+    mutable ComPtr<ID2D1SolidColorBrush> brFpsBg_;
+    mutable ComPtr<ID2D1SolidColorBrush> brFpsText_;
+
+    ComPtr<ID2D1Bitmap> logo_bitmap_;
+    ComPtr<IDWriteTextFormat> preview_mono_format_;
+    ComPtr<ID2D1DeviceContext5> empty_state_svg_dc_;
+    ComPtr<ID2D1SvgDocument> empty_state_svg_;
+    ComPtr<ID2D1SvgDocument> no_selection_svg_;
+    ID2D1DeviceContext* logo_dc_ = nullptr;
+    float logo_scale_ = 0.0f;
+
+};
+
+} // namespace pulse::ui

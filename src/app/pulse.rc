@@ -1,0 +1,7 @@
+// Common Controls v6, Windows 11 activation context, and the app icon.
+#include "resource.h"
+1 24 "pulse.manifest"
+IDI_PULSE ICON "pulse.ico"
+// Empty-state illustrations are embedded so rendering never depends on loose assets.
+IDR_EMPTY_FOLDER_SVG RCDATA "../../assets/empty-folder-state.svg"
+IDR_NO_SELECTION_SVG RCDATA "../../assets/no-selection-state.svg"

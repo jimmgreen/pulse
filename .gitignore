@@ -1,0 +1,51 @@
+# Build trees
+/build/
+/build_selftest/
+/out/
+CMakeCache.txt
+CMakeFiles/
+build.ninja
+.ninja_log
+.ninja_deps
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+
+# Binaries and MSVC leftovers
+*.exe
+*.pdb
+*.ilk
+*.obj
+*.lib
+*.dll
+*.exp
+*.idb
+*.iobj
+*.ipdb
+*.pch
+*.res
+
+# Logs and crash dumps
+*.log
+*.dmp
+*.timing.txt
+
+# IDE / OS
+.vs/
+.vscode/
+*.user
+*.suo
+*.sdf
+Thumbs.db
+Desktop.ini
+
+# Generated ops-test leftovers (~80MB binaries)
+/bench_data/opstest/
+
+# NTFS ADS probe artifact
+/bench_data/ads_probe.txt*
+
+# Local backups and console artifacts
+*.kimi-backup
+*.bak
+CONERR$
