@@ -3274,8 +3274,8 @@ static float TagStepForLeftover(int n, float diameter, float spread_gap, float l
 }
 
 // Name column: filename compresses first. Tags sit after the name — spread
-// when leftover room fits every dot, otherwise overlap. Star / more dock to
-// the column's right edge so trailing chrome stays a fixed width.
+// when leftover room fits every dot, otherwise overlap. Star / new tab / more
+// dock to the column's right edge so trailing chrome stays a fixed width.
 struct NameTrail {
     float name_x = 0.0f;
     float name_w = 0.0f;
@@ -3285,19 +3285,22 @@ struct NameTrail {
     float tag_x0 = 0.0f;
     float tag_cy = 0.0f;
     D2D1_RECT_F star{};
+    D2D1_RECT_F new_tab{};
     D2D1_RECT_F more{};
     bool show_star = false;
+    bool show_new_tab = false;
     bool show_more = false;
 };
 
 static NameTrail LayoutNameTrail(float name_x, float text_y, float text_h,
                                  float col_right, float cell_top, float cell_bottom,
                                  float scale, const std::wstring& name, int tag_n,
-                                 bool show_star, bool show_more,
+                                 bool show_star, bool show_new_tab, bool show_more,
                                  IDWriteFactory3* factory, IDWriteTextFormat* fmt) {
     NameTrail t;
     t.name_x = name_x;
     t.show_star = show_star;
+    t.show_new_tab = show_new_tab;
     t.show_more = show_more;
     t.tag_n = std::clamp(tag_n, 0, 3);
     t.tag_r = 4.0f * scale;
@@ -3309,8 +3312,8 @@ static NameTrail LayoutNameTrail(float name_x, float text_y, float text_h,
     const float by = cell_top + (cell_bottom - cell_top - btn) * 0.5f;
     const float diameter = t.tag_r * 2.0f;
 
-    // Star / more dock to the right edge of the name column so every row
-    // lines up, independent of filename length.
+    // Star / new tab / more dock to the right edge of the name column so
+    // every row lines up, independent of filename length.
     float dock = col_right - pad;
     if (show_more) {
         t.more = D2D1::RectF(dock - btn, by, dock, by + btn);
@@ -3319,6 +3322,10 @@ static NameTrail LayoutNameTrail(float name_x, float text_y, float text_h,
     if (show_star) {
         t.star = D2D1::RectF(dock - btn, by, dock, by + btn);
         dock = t.star.left - gap;
+    }
+    if (show_new_tab) {
+        t.new_tab = D2D1::RectF(dock - btn, by, dock, by + btn);
+        dock = t.new_tab.left - gap;
     }
 
     // Reserve the compact (overlapped) cluster so a long name still
@@ -3383,7 +3390,7 @@ D2D1_RECT_F MainRenderer::RenameFieldRect(const PaneViewModel& vm, const D2D1_RE
     }
     const NameTrail trail = LayoutNameTrail(
         nameX, textY, textH, nameColRight, cell.top, cell.bottom, scale_,
-        e.name, tagDotCount, false, false,
+        e.name, tagDotCount, false, false, false,
         compositor_->DwriteFactory(), compositor_->TextFormat());
     const float field_w = std::max(40.0f * scale_, trail.name_w);
     const float field_h = std::max(22.0f * scale_, std::min(textH, 30.0f * scale_));
@@ -3498,6 +3505,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             ? detailsColumns.DividerX(0) - margin_
             : nameRc.right;
         const bool showStar = showRowActions;
+        const bool showNewTab = showRowActions && hover && e.is_dir;
         const bool showMore = showRowActions && (hover || (selected && vm.selected_count == 1));
         if (iconGrid && tagDotCount > 0) {
             const float fullNameW = MeasureTextWidth(
@@ -3516,7 +3524,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
         }
         const NameTrail trail = LayoutNameTrail(
             nameX, textY, textH, nameColRight, cell.top, cell.bottom, scale_,
-            e.name, tagDotCount, showStar, showMore,
+            e.name, tagDotCount, showStar, showNewTab, showMore,
             compositor_->DwriteFactory(), compositor_->TextFormat());
         if (src == vm.rename_index) {
             const D2D1_RECT_F fieldRc = RenameFieldRect(vm, viewport, src);
@@ -3583,9 +3591,11 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                 std::max(0.0f, nameRc.right - nameRc.left), 22.0f * scale_);
         }
 
-        if (trail.show_star || trail.show_more) {
+        if (trail.show_star || trail.show_new_tab || trail.show_more) {
             const bool starHot = hover_region == static_cast<int>(HitTestResult::RowStar) &&
                                  hover_control_index == src;
+            const bool newTabHot = hover_region == static_cast<int>(HitTestResult::RowNewTab) &&
+                                   hover_control_index == src;
             const bool moreHot = hover_region == static_cast<int>(HitTestResult::RowMore) &&
                                  hover_control_index == src;
             auto draw_action = [&](const D2D1_RECT_F& rc, bool hot, const wchar_t* glyph,
@@ -3611,6 +3621,9 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                             e.starred ? theme.accent : theme.text_secondary,
                             1.0f);
             }
+            if (trail.show_new_tab)
+                draw_action(trail.new_tab, newTabHot, L"\xE8A0", L"\x2197",
+                            theme.text_secondary, 0.9f);
             if (trail.show_more)
                 draw_action(trail.more, moreHot, L"\xE712", L"...", theme.text_secondary, 0.72f);
         }
@@ -4666,10 +4679,16 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                             nameRc.left, nameRc.top, nameRc.bottom - nameRc.top,
                             columns.DividerX(0) - margin_, cell.top, cell.bottom, scale_,
                             entry.name, static_cast<int>(std::min<size_t>(3, tagCount)),
-                            showActions, showActions && rowHot,
+                            showActions, showActions && paneVm.hover_index == idx && entry.is_dir,
+                            showActions && rowHot,
                             compositor_->DwriteFactory(), compositor_->TextFormat());
                         if (ContainsPt(trail.star, x, y)) {
                             out.region = HitTestResult::RowStar;
+                            out.index = idx;
+                            return out;
+                        }
+                        if (ContainsPt(trail.new_tab, x, y)) {
+                            out.region = HitTestResult::RowNewTab;
                             out.index = idx;
                             return out;
                         }

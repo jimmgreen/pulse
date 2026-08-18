@@ -1353,6 +1353,7 @@ static std::wstring TooltipForHover(AppState& s) {
         }
     case R::DetailsSecurityChange: return L"系统属性";
     case R::RowStar: return L"星标";
+    case R::RowNewTab: return L"在新标签打开";
     case R::RowMore: return L"更多操作";
     case R::SidebarItemAction: return L"取消钉住";
     case R::Row: {
@@ -5847,6 +5848,7 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         }
         int newHover = (hit.region == ui::HitTestResult::Row ||
                         hit.region == ui::HitTestResult::RowStar ||
+                        hit.region == ui::HitTestResult::RowNewTab ||
                         hit.region == ui::HitTestResult::RowMore) ? hit.index : -1;
         if (newHover != s->hoverRow || hit.pane_index != s->hoverPaneIndex) {
             s->hoverRow = newHover;
@@ -6089,6 +6091,11 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             if (app::Tab* tab = ActiveTab(*s)) {
                 const std::wstring p = EntryFullPath(*tab, hit.index);
                 if (!p.empty()) ToggleStarred(*s, p);
+            }
+        } else if (hit.region == ui::HitTestResult::RowNewTab && hit.index >= 0) {
+            if (app::Tab* tab = ActiveTab(*s)) {
+                const std::wstring p = EntryFullPath(*tab, hit.index);
+                if (!p.empty()) NewTab(*s, p);
             }
         } else if (hit.region == ui::HitTestResult::RowMore && hit.index >= 0) {
             if (app::Tab* tab = ActiveTab(*s)) {

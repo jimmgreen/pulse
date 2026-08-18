@@ -399,6 +399,7 @@ struct HitTestResult {
         TrayCard,
         TrayClear,
         RowStar,
+        RowNewTab,
         RowMore,
         PaneEmptyNewFolder,
         DetailsOpen,
