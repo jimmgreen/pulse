@@ -11,6 +11,7 @@ struct AppPrefs {
     // none / acrylic-material / mica / mica-alt  (legacy dwm-blur → acrylic)
     std::wstring window_effect = L"mica-alt";
     std::wstring background_image;
+    int row_height = 34; // file-list row height in DIPs (24..48)
 
     void ResetToDefaults();
     bool Load();

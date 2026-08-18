@@ -50,6 +50,17 @@ enum MenuCmd : int {
     CmdTabGroupUngroup,
     CmdTabGroupClose,
     CmdDetailsPanel,        // view menu: right details panel toggle
+    CmdDetailsComputeSize,  // details "更多": compute folder size in place
+    CmdDetailsShellMenu,    // details "更多": open the Explorer context menu
+    CmdTabNewRight,         // tab menu: new tab to the right
+    CmdTabDuplicate,        // tab menu: duplicate this tab
+    CmdTabPin,              // tab menu: pin/unpin toggle
+    CmdTabClose,            // tab menu: close this tab
+    CmdTabAddToNewGroup,    // tab menu: create a group with this tab
+    CmdTabRemoveFromGroup,  // tab menu: leave the group (group survives)
+    CmdTabCloseOthers,
+    CmdTabCloseRight,
+    CmdTabJoinGroupBase = 130, // + index into Pane::tab_groups (clear of 98-129)
     CmdRecentBase = 200,
     CmdIndexBase = 1000,
     // Explorer integration (优化.md §7): registry static verbs bound to the

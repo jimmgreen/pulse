@@ -14,6 +14,7 @@
 #include "context_menu.h"
 #include "shell_verbs.h"
 #include "places.h"
+#include "details_meta.h"
 #include "context_menu_prefs.h"
 #include "app_prefs.h"
 #ifdef PULSE_WITH_SELFTEST
@@ -62,6 +63,7 @@
 using namespace pulse;
 
 static void Log(const wchar_t* msg);
+static std::wstring ClipboardPath(const std::wstring& p);
 
 constexpr UINT WM_WORKER_RESULT = WM_APP + 1;
 constexpr UINT WM_OPS_NOTIFY = WM_APP + 2;
@@ -73,6 +75,7 @@ constexpr UINT WM_TAG_ADS_DISCOVERED = WM_APP + 44;
 // Explorer context-menu integration (优化.md §7). lParam owns a heap payload.
 constexpr UINT WM_SHELLCTX_ITEMS = WM_APP + 45;  // std::vector<ops::ShellMenuItem>*
 constexpr UINT WM_SHELL_VERBS = WM_APP + 46;     // ShellVerbsResult*
+constexpr UINT WM_DETAILS_META = WM_APP + 47;    // DetailsMetaResult*
 constexpr UINT WM_TRAYICON = WM_APP + 50;
 constexpr UINT kTimerUi = 1;
 
@@ -198,6 +201,11 @@ struct AppState {
     float tabSlotW = 0.0f;
     float tabPitch = 0.0f;
     std::vector<int> tabOrder;           // display position -> pane.tabs index
+    int tabDragRunPos = 0;               // run start within tabOrder (group drags)
+    int tabDragRunLen = 1;               // >1: the whole group run moves as a block
+    bool tabDragFromChip = false;        // drag started on the group chip
+    int tabDragGroupId = 0;              // chip drag: app::TabGroup::id
+    float tabDragSlots = 1.0f;           // visual width of the drag block in slots
     struct TabTrack { float start = 0.0f; int durationMs = 150; std::chrono::steady_clock::time_point t0; };
     std::unordered_map<const app::Tab*, TabTrack> tabTracks;
     std::unordered_map<const app::Tab*, float> tabOffsets;
@@ -348,15 +356,25 @@ struct AppState {
     bool showDetailsPanel = false;
     float detailsPanelWidth = 340.0f;
     bool detailsPanelResizing = false;
-    float detailsPreviewHeight = 420.0f;
-    bool detailsPreviewResizing = false;
     float detailsScroll = 0.0f;
     float detailsPreviewScroll = 0.0f;
+    // Cover-mode preview pan (DIPs) + drag state.
+    float detailsPreviewPanX = 0.0f;
+    float detailsPreviewPanY = 0.0f;
+    bool detailsPreviewPanning = false;
+    POINT detailsPreviewPanLast{};
+    // Collapsible sections: bit 0基本信息 1属性 2标签 3安全 4其他; 安全/其他 default collapsed.
+    uint32_t detailsCollapsedMask = (1u << 3) | (1u << 4);
     // Per-selection probe cache (file times + star state), keyed by path.
     std::wstring detailsSelPath;
     bool detailsSelValid = false;
     FILETIME detailsCreated{}, detailsModified{}, detailsAccessed{};
     bool detailsStarred = false;
+    std::wstring detailsTypeName; // shell type name (SHGFI_TYPENAME)
+    // Async security/volume meta for the 安全/其他 sections (WM_DETAILS_META).
+    std::wstring detailsMetaPath;
+    std::wstring detailsOwner, detailsPermissions;
+    std::wstring detailsDrive, detailsFileSystem, detailsFreeSpace;
     // Folder size walk (background; cancelled and restarted on selection change).
     std::mutex detailsSizeMutex;
     std::condition_variable detailsSizeCv;
@@ -410,8 +428,24 @@ struct ShellVerbsResult {
     std::vector<app::StaticVerb> verbs;
 };
 
+// WM_DETAILS_META heap payload (posted by the security/volume fetch thread).
+struct DetailsMetaResult {
+    std::wstring path;
+    app::DetailsMeta meta;
+};
+
 static AppState* GetAppState(HWND hwnd) {
     return reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+}
+
+// Security/volume facts must never be fetched on the UI thread; results
+// arrive as WM_DETAILS_META and are applied only if still current.
+static void PrefetchDetailsMeta(HWND hwnd, const std::wstring& path) {
+    std::thread([hwnd, path] {
+        auto* result = new DetailsMetaResult{ path, app::FetchDetailsMeta(path) };
+        if (!PostMessageW(hwnd, WM_DETAILS_META, 0, reinterpret_cast<LPARAM>(result)))
+            delete result;
+    }).detach();
 }
 
 static void NewTab(AppState& s, const std::wstring& path);
@@ -559,6 +593,7 @@ static void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
             vm.settings_scroll = s.settingsScroll;
             vm.settings_launch_on_startup = s.appPrefs.launch_on_startup;
             vm.settings_keep_running = s.appPrefs.keep_running_on_close;
+            vm.settings_row_height = s.appPrefs.row_height;
             static constexpr ipc::CtxMenuGroup kGroups[] = {
                 ipc::CtxMenuGroup::Software, ipc::CtxMenuGroup::OpenWith,
                 ipc::CtxMenuGroup::Share, ipc::CtxMenuGroup::System, ipc::CtxMenuGroup::Print
@@ -962,7 +997,6 @@ static ui::WindowViewModel BuildVm(AppState& s) {
     vm.address_editing = s.addressEditing;
     vm.splitter_pressed = s.splitterDragging;
     vm.details_resize_pressed = s.detailsPanelResizing;
-    vm.details_preview_resize_pressed = s.detailsPreviewResizing;
     if (s.marqueeActive) {
         vm.pane.marquee_active = true;
         vm.pane.marquee_rect = D2D1::RectF(
@@ -1017,6 +1051,9 @@ static ui::WindowViewModel BuildVm(AppState& s) {
                 if (s.tabOrder[pos] == s.tabDragIndex) { vm.tab_drag_index = pos; break; }
             }
             vm.tab_drag_x = s.tabDragFloatLeft;
+            vm.tab_drag_count = s.tabDragRunLen;
+            vm.tab_drag_chip = s.tabDragFromChip;
+            if (s.tabDragRunLen > 1) vm.tab_drag_index = s.tabDragRunPos;
             const int origActive = static_cast<int>(s.pane->active_tab);
             for (int pos = 0; pos < static_cast<int>(s.tabOrder.size()); ++pos) {
                 const bool isActive = s.tabOrder[pos] == origActive;
@@ -1092,6 +1129,9 @@ static ui::WindowViewModel BuildVm(AppState& s) {
         ui::DetailsPanelView& dv = vm.details;
         dv.scroll_y = s.detailsScroll;
         dv.preview_scroll_y = s.detailsPreviewScroll;
+        dv.preview_pan_x = s.detailsPreviewPanX;
+        dv.preview_pan_y = s.detailsPreviewPanY;
+        dv.collapsed_mask = s.detailsCollapsedMask;
         app::Tab* tab = ActiveTab(s);
         const int selCount = tab ? tab->SelectedCount() : 0;
         if (tab && selCount >= 1) {
@@ -1141,8 +1181,12 @@ static ui::WindowViewModel BuildVm(AppState& s) {
                 s.detailsSelPath = dv.path;
                 s.detailsScroll = 0.0f;
                 s.detailsPreviewScroll = 0.0f;
+                s.detailsPreviewPanX = 0.0f;
+                s.detailsPreviewPanY = 0.0f;
                 dv.scroll_y = 0.0f;
                 dv.preview_scroll_y = 0.0f;
+                dv.preview_pan_x = 0.0f;
+                dv.preview_pan_y = 0.0f;
                 WIN32_FILE_ATTRIBUTE_DATA fad{};
                 s.detailsSelValid =
                     GetFileAttributesExW(dv.path.c_str(), GetFileExInfoStandard, &fad) != 0;
@@ -1151,6 +1195,22 @@ static ui::WindowViewModel BuildVm(AppState& s) {
                     s.detailsModified = fad.ftLastWriteTime;
                     s.detailsAccessed = fad.ftLastAccessTime;
                 }
+                // Shell type name ("MP4 视频文件"); user-paced one-shot call.
+                s.detailsTypeName.clear();
+                const std::wstring shell_path = ClipboardPath(dv.path);
+                SHFILEINFOW sfi{};
+                if (SHGetFileInfoW(shell_path.c_str(), 0, &sfi, sizeof(sfi),
+                                   SHGFI_TYPENAME) && sfi.szTypeName[0])
+                    s.detailsTypeName = sfi.szTypeName;
+                // 安全/其他 sections: clear stale meta and refetch off-thread.
+                s.detailsMetaPath.clear();
+                s.detailsOwner.clear();
+                s.detailsPermissions.clear();
+                s.detailsDrive.clear();
+                s.detailsFileSystem.clear();
+                s.detailsFreeSpace.clear();
+                if (s.detailsSelValid && !fs::IsVirtualPath(dv.path))
+                    PrefetchDetailsMeta(s.hwnd, dv.path);
             }
             s.detailsStarred = s.places.IsStarred(dv.path);
             dv.starred = s.detailsStarred;
@@ -1161,18 +1221,32 @@ static ui::WindowViewModel BuildVm(AppState& s) {
             }
             dv.location_text = TrayDisplayPath(fs::ParentPath(dv.path));
             dv.attributes_text = DetailsAttributeText(dv.attrs);
-            if (!dv.is_dir) dv.size_text = pulse::format::ByteSize(dv.size_value, true);
+            dv.type_text = s.detailsTypeName;
+            if (!dv.is_dir) {
+                dv.subtitle_text = s.detailsTypeName;
+                if (!dv.subtitle_text.empty()) dv.subtitle_text += L" · ";
+                dv.subtitle_text += pulse::format::ByteSize(dv.size_value, true);
+                dv.size_text = pulse::format::ByteSize(dv.size_value, true) + L" (" +
+                               pulse::format::GroupedInt(dv.size_value) +
+                               L" \u5B57\u8282)";
+            }
+            if (s.detailsMetaPath == dv.path) {
+                dv.owner_text = s.detailsOwner;
+                dv.permissions_text = s.detailsPermissions;
+                dv.drive_text = s.detailsDrive;
+                dv.fs_text = s.detailsFileSystem;
+                dv.free_space_text = s.detailsFreeSpace;
+            }
             s.renderer.CachedPreviewProperties(dv.path, dv.modified_value, dv.size_value,
                                                dv.preview_properties);
-            if (const auto* indices = s.places.TagIndicesForPath(dv.path)) {
-                for (int idx : *indices) {
-                    if (idx < 0 || idx >= static_cast<int>(s.places.tags.size())) continue;
-                    ui::DetailsPanelView::TagChip chip;
-                    chip.name = s.places.tags[static_cast<size_t>(idx)].name;
-                    chip.color = ui::HexColor(s.places.tags[static_cast<size_t>(idx)].rgb);
-                    chip.tag_index = idx;
-                    dv.tags.push_back(std::move(chip));
-                }
+            dv.preset_tags.clear();
+            for (int idx = 0; idx < static_cast<int>(s.places.tags.size()); ++idx) {
+                ui::DetailsPanelView::TagChip chip;
+                chip.name = s.places.tags[static_cast<size_t>(idx)].name;
+                chip.color = ui::HexColor(s.places.tags[static_cast<size_t>(idx)].rgb);
+                chip.tag_index = idx;
+                chip.assigned = s.places.PathHasTag(dv.path, idx);
+                dv.preset_tags.push_back(std::move(chip));
             }
             if (dv.is_dir) sizeTarget = dv.path;
         }
@@ -1241,6 +1315,7 @@ static std::wstring TooltipForHover(AppState& s) {
     }
     case R::SettingsWallpaper:
         return s.hoverControlIndex == 1 ? L"清除背景图" : L"选择背景图";
+    case R::SettingsDensity: return L"列表行高";
     case R::Minimize: return L"最小化";
     case R::Maximize: return s.maximized ? L"还原" : L"最大化";
     case R::Close: return L"关闭";
@@ -1266,16 +1341,18 @@ static std::wstring TooltipForHover(AppState& s) {
     case R::DetailsRename: return L"重命名";
     case R::DetailsTagAdd: return L"添加标签";
     case R::DetailsResize: return L"拖动调整详情栏宽度";
-    case R::DetailsPreviewResize: return L"拖动调整预览高度";
-    case R::DetailsQuick:
+    case R::DetailsNewTab: return L"在新标签打开";
+    case R::DetailsCopyPath: return L"复制路径";
+    case R::DetailsPreview: return L"拖动平移预览";
+    case R::DetailsSection: return L"展开/折叠";
+    case R::DetailsAttrToggle:
         switch (s.hoverControlIndex) {
-        case 0: return L"复制路径";
-        case 1: return L"在终端打开";
-        case 2: return L"计算大小";
-        case 3: return L"系统属性";
-        case 4: return L"更多操作";
+        case 0: return L"只读";
+        case 1: return L"隐藏";
+        case 2: return L"系统属性";
         default: return L"";
         }
+    case R::DetailsSecurityChange: return L"系统属性";
     case R::RowStar: return L"星标";
     case R::RowMore: return L"更多操作";
     case R::SidebarItemAction: return L"取消钉住";
@@ -3369,33 +3446,61 @@ static app::TabGroup* FindTabGroup(app::Pane& pane, int id) {
     return nullptr;
 }
 
-// Right-click an ungrouped tab: pick a color to start a group with it.
-static void ShowTabCreateGroupMenu(AppState& s, int tab_index, POINT screen_pt) {
+static void ShowTabGroupMenu(AppState& s, int group_id, POINT screen_pt);
+
+// Chip click (Chromium): collapse hides member tabs; expanding restores them.
+// Collapsing the group that holds the active tab moves activation to the
+// nearest visible tab outside the group.
+static void ToggleTabGroupCollapse(AppState& s, int group_id) {
+    if (!s.pane) return;
+    app::TabGroup* g = FindTabGroup(*s.pane, group_id);
+    if (!g) return;
+    g->collapsed = !g->collapsed;
+    app::Pane& pane = *s.pane;
+    if (g->collapsed && pane.active_tab < pane.tabs.size() &&
+        pane.tabs[pane.active_tab]->tab_group == group_id) {
+        auto visible = [&](size_t i) {
+            const int tg = pane.tabs[i]->tab_group;
+            if (tg == 0) return true;
+            const app::TabGroup* tg_group = FindTabGroup(pane, tg);
+            return !tg_group || !tg_group->collapsed;
+        };
+        const size_t cur = pane.active_tab;
+        size_t target = pane.tabs.size();
+        for (size_t i = cur + 1; i < pane.tabs.size(); ++i)
+            if (visible(i)) { target = i; break; }
+        if (target == pane.tabs.size())
+            for (size_t i = cur; i-- > 0;)
+                if (visible(i)) { target = i; break; }
+        if (target < pane.tabs.size()) pane.SwitchTab(target);
+    }
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
+// Right-click an ungrouped tab: create a group on the spot (first unused
+// palette color, empty name) and open the Edge-style editor so the user can
+// type the group name immediately (app_main.cpp ShowTabGroupMenu).
+static uint32_t FirstUnusedGroupColor(const app::Pane& pane) {
+    for (uint32_t color : kTabGroupPalette) {
+        bool used = false;
+        for (const auto& g : pane.tab_groups)
+            if (g.color_rgb == color) { used = true; break; }
+        if (!used) return color;
+    }
+    return kTabGroupPalette[pane.tab_groups.size() % std::size(kTabGroupPalette)];
+}
+
+static void CreateTabGroupAndEdit(AppState& s, int tab_index, POINT screen_pt) {
     if (!s.pane || tab_index < 0 || tab_index >= static_cast<int>(s.pane->tabs.size()))
         return;
-    if (!EnsureMenu(s)) return;
-    std::vector<ui::FluentMenuItem> items;
-    ui::FluentMenuItem strip;
-    for (int i = 0; i < 8; ++i) {
-        ui::FluentMenuSwatch sw;
-        sw.command = app::CmdTabColorBase + i;
-        sw.color = ui::HexColor(kTabGroupPalette[i]);
-        strip.quick_swatches.push_back(sw);
-    }
-    items.push_back(std::move(strip));
-    ui::FluentMenuItem hint;
-    hint.text = L"选择颜色创建标签组";
-    hint.enabled = false;
-    items.push_back(std::move(hint));
-    const int cmd = s.menu->TrackPopup(screen_pt, std::move(items));
-    if (cmd < app::CmdTabColorBase || cmd >= app::CmdTabColorBase + 8) return;
     app::Pane& pane = *s.pane;
     app::TabGroup group;
     group.id = pane.next_tab_group_id++;
-    group.color_rgb = kTabGroupPalette[cmd - app::CmdTabColorBase];
+    group.color_rgb = FirstUnusedGroupColor(pane);
     pane.tab_groups.push_back(group);
     pane.tabs[static_cast<size_t>(tab_index)]->tab_group = group.id;
     InvalidateRect(s.hwnd, nullptr, FALSE);
+    ShowTabGroupMenu(s, group.id, screen_pt);
 }
 
 // Group popup modeled on the browser: name field on top (live rename), a
@@ -3482,6 +3587,138 @@ static void ShowTabGroupMenu(AppState& s, int group_id, POINT screen_pt) {
             pane.tab_groups.end());
     }
     InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
+// Drop groups with no remaining members (after mass closes / leave operations).
+static void PruneEmptyTabGroups(app::Pane& pane) {
+    for (auto git = pane.tab_groups.begin(); git != pane.tab_groups.end();) {
+        bool used = false;
+        for (const auto& t : pane.tabs)
+            if (t->tab_group == git->id) { used = true; break; }
+        if (used) ++git; else git = pane.tab_groups.erase(git);
+    }
+}
+
+// Chrome SetTabPinnedImpl: pin moves the tab to the end of the pinned block,
+// unpin moves it to the pinned/unpinned boundary. Pinning a grouped tab
+// ungroups it (pin and group do not coexist in Chromium either).
+static void TogglePinTab(AppState& s, int index) {
+    if (!s.pane || index < 0 || index >= static_cast<int>(s.pane->tabs.size())) return;
+    app::Pane& pane = *s.pane;
+    app::Tab& tab = *pane.tabs[static_cast<size_t>(index)];
+    // Boundary is computed against the pre-flip state, as in Chromium.
+    size_t first_unpinned = 0;
+    while (first_unpinned < pane.tabs.size() && pane.tabs[first_unpinned]->pinned)
+        ++first_unpinned;
+    const bool pin = !tab.pinned;
+    if (pin && tab.tab_group != 0) tab.tab_group = 0;
+    tab.pinned = pin;
+    const size_t target = pin ? first_unpinned
+                              : (first_unpinned > 0 ? first_unpinned - 1 : 0);
+    pane.MoveTab(static_cast<size_t>(index), target);
+    PruneEmptyTabGroups(pane);
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
+// Edge-style tab context menu: tab actions + group membership.
+static void ShowTabContextMenu(AppState& s, int tab_index, POINT screen_pt) {
+    if (!s.pane || tab_index < 0 || tab_index >= static_cast<int>(s.pane->tabs.size()))
+        return;
+    if (!EnsureMenu(s)) return;
+    app::Pane& pane = *s.pane;
+    app::Tab& tab = *pane.tabs[static_cast<size_t>(tab_index)];
+    const bool grouped = tab.tab_group != 0;
+
+    auto item = [](int cmd, const wchar_t* text, const wchar_t* glyph) {
+        ui::FluentMenuItem it;
+        it.command = cmd;
+        it.text = text;
+        if (glyph) it.glyph = glyph;
+        return it;
+    };
+    std::vector<ui::FluentMenuItem> items;
+    items.push_back(item(app::CmdTabNewRight, L"在右侧新建标签页", L"\xE710"));
+    items.push_back(item(app::CmdTabDuplicate, L"复制标签页", L"\xE8C8"));
+    items.push_back(item(app::CmdTabPin,
+                         tab.pinned ? L"取消固定标签页" : L"固定标签页", L"\xE718"));
+    auto& pinItem = items.back();
+    pinItem.separator_after = true;
+    if (!grouped) {
+        // No groups yet: this IS the create-group entry (opens the editor).
+        items.push_back(item(app::CmdTabAddToNewGroup,
+                             pane.tab_groups.empty() ? L"创建新组" : L"将标签页添加到新组",
+                             nullptr));
+        if (!pane.tab_groups.empty()) {
+            ui::FluentMenuItem join;
+            join.text = L"将标签页添加到";
+            for (size_t gi = 0; gi < pane.tab_groups.size(); ++gi) {
+                ui::FluentMenuItem child;
+                child.command = app::CmdTabJoinGroupBase + static_cast<int>(gi);
+                child.text = pane.tab_groups[gi].name.empty()
+                    ? L"(未命名组)" : pane.tab_groups[gi].name;
+                join.children.push_back(std::move(child));
+            }
+            items.push_back(std::move(join));
+        }
+        items.back().separator_after = true;
+    } else {
+        items.push_back(item(app::CmdTabRemoveFromGroup, L"从组中移除该标签页", nullptr));
+        items.back().separator_after = true;
+    }
+    items.push_back(item(app::CmdTabClose, L"关闭标签页", L"\xE711"));
+    items.back().enabled = !tab.pinned && pane.tabs.size() > 1;
+    items.push_back(item(app::CmdTabCloseOthers, L"关闭其他标签页", nullptr));
+    items.push_back(item(app::CmdTabCloseRight, L"关闭右侧标签页", nullptr));
+
+    const int cmd = s.menu->TrackPopup(screen_pt, std::move(items));
+    switch (cmd) {
+    case app::CmdTabNewRight:
+        pane.NewTabAt(static_cast<size_t>(tab_index) + 1,
+                      ActiveTab(s) ? ActiveTab(s)->current_path : L"C:\\");
+        StartLoadingPath(s, *pane.ActiveTab(), pane.ActiveTab()->current_path);
+        break;
+    case app::CmdTabDuplicate:
+        pane.NewTabAt(static_cast<size_t>(tab_index) + 1, tab.current_path);
+        StartLoadingPath(s, *pane.ActiveTab(), pane.ActiveTab()->current_path);
+        break;
+    case app::CmdTabPin:
+        TogglePinTab(s, tab_index);
+        return;
+    case app::CmdTabAddToNewGroup:
+        CreateTabGroupAndEdit(s, tab_index, screen_pt);
+        return;
+    case app::CmdTabRemoveFromGroup:
+        tab.tab_group = 0;
+        app::NormalizeGroupRuns(pane);
+        PruneEmptyTabGroups(pane);
+        InvalidateRect(s.hwnd, nullptr, FALSE);
+        return;
+    case app::CmdTabClose:
+        pane.CloseTab(static_cast<size_t>(tab_index));
+        PruneEmptyTabGroups(pane);
+        InvalidateRect(s.hwnd, nullptr, FALSE);
+        return;
+    case app::CmdTabCloseOthers:
+        for (int i = static_cast<int>(pane.tabs.size()) - 1; i >= 0; --i)
+            if (i != tab_index) pane.CloseTab(static_cast<size_t>(i));
+        PruneEmptyTabGroups(pane);
+        InvalidateRect(s.hwnd, nullptr, FALSE);
+        return;
+    case app::CmdTabCloseRight:
+        for (int i = static_cast<int>(pane.tabs.size()) - 1; i > tab_index; --i)
+            pane.CloseTab(static_cast<size_t>(i));
+        PruneEmptyTabGroups(pane);
+        InvalidateRect(s.hwnd, nullptr, FALSE);
+        return;
+    default:
+        break;
+    }
+    if (cmd >= app::CmdTabJoinGroupBase &&
+        cmd < app::CmdTabJoinGroupBase + static_cast<int>(pane.tab_groups.size())) {
+        tab.tab_group = pane.tab_groups[static_cast<size_t>(cmd - app::CmdTabJoinGroupBase)].id;
+        app::NormalizeGroupRuns(pane);
+        InvalidateRect(s.hwnd, nullptr, FALSE);
+    }
 }
 
 static void SetViewMode(AppState& s, ui::ViewMode mode) {
@@ -3842,6 +4079,15 @@ static void HandleSettingsEffect(AppState& s, int index) {
     ApplyAppWindowChrome(s);
 }
 
+static void HandleSettingsDensity(AppState& s, int index) {
+    static constexpr int kDips[] = { 28, 34, 40 };
+    if (index < 0 || index >= static_cast<int>(std::size(kDips))) return;
+    if (s.appPrefs.row_height == kDips[index]) return;
+    s.appPrefs.row_height = kDips[index];
+    s.appPrefs.Save();
+    s.renderer.SetRowHeightDip(static_cast<float>(kDips[index]));
+}
+
 static void HandleSettingsWallpaper(AppState& s, int index) {
     if (index == 0) {
         std::wstring path;
@@ -4118,16 +4364,20 @@ static void LayoutRenameOverlay(AppState& s) {
     if (!s.hwndRenameEdit || s.renameIndex < 0 || !s.hwnd) return;
     app::Tab* tab = ActiveTab(s);
     if (!tab) return;
-    int viewRow = s.renameIndex;
     ui::WindowViewModel vm = BuildVm(s);
-    viewRow = vm.pane.ViewIndex(s.renameIndex);
-    if (viewRow < 0) viewRow = s.renameIndex;
-    PlaceHostedEdit(s.hwndRenameEdit, s.hwnd, s.renderer.NameCellRect(
-        FocusedPaneRect(s), viewRow, tab->scroll_y,
-        tab->banner_message.empty() ? 0.0f : 36.0f * s.scale,
-        tab->view_mode, tab->scroll_x, vm.pane.EntryCount(),
-        vm.pane.details_column_dividers),
-        s.scale, 2, 4);
+    const D2D1_RECT_F pane = FocusedPaneRect(s);
+    const D2D1_RECT_F list = s.renderer.PaneListRect(pane,
+        tab->banner_message.empty() ? 0.0f : 36.0f * s.scale, tab->view_mode);
+    D2D1_RECT_F field = s.renderer.RenameFieldRect(vm.pane, list, s.renameIndex);
+    if (field.right <= field.left) return;
+    // Seat the EDIT inside the Fluent frame: frame stroke + text padding.
+    const float insetX = 3.0f * s.scale;
+    const float insetY = 2.0f * s.scale;
+    field.left += insetX;
+    field.right -= insetX;
+    field.top += insetY;
+    field.bottom -= insetY;
+    PlaceHostedEdit(s.hwndRenameEdit, s.hwnd, field, s.scale, 4, 4);
 }
 
 static void ShowRenameOverlay(AppState& s) {
@@ -4527,8 +4777,10 @@ static void UpdateOperationWindow(AppState& s, bool allow_conflict_dialog) {
 
     if (status.active) {
         if (status.phase == ops::OpPhase::WaitingForConflict) return;
+        // Operations that finish quickly (e.g. deleting an empty folder) never
+        // surface a window; only long-running work gets the progress dialog.
         if (!s.operationAutoShown &&
-            now - s.operationStartedAt >= std::chrono::milliseconds(400)) {
+            now - s.operationStartedAt >= std::chrono::milliseconds(2000)) {
             s.operationWindow->Show(false);
             s.operationAutoShown = true;
         }
@@ -4611,6 +4863,7 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         s->places.Load();
         s->ctxMenuPrefs.Load();
         s->appPrefs.Load();
+        s->renderer.SetRowHeightDip(static_cast<float>(s->appPrefs.row_height));
         ApplyAppWindowChrome(*s);
         if (s->appPrefs.keep_running_on_close) EnsureTrayIcon(*s, true);
         s->index.Start(hwnd, WM_INDEX_NOTIFY, WM_INDEX_SEARCH);
@@ -4710,7 +4963,6 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         s->lastFrameTime = std::chrono::steady_clock::now();
         s->renderer.SetDetailsPanelVisible(s->showDetailsPanel);
         s->renderer.SetDetailsPanelWidth(s->detailsPanelWidth);
-        s->renderer.SetDetailsPreviewHeight(s->detailsPreviewHeight);
         SetTimer(hwnd, kTimerUi, 16, nullptr);
         SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER |
@@ -5065,8 +5317,8 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
             return TRUE;
         }
-        if (s->detailsPreviewResizing || hit.region == ui::HitTestResult::DetailsPreviewResize) {
-            SetCursor(LoadCursorW(nullptr, IDC_SIZENS));
+        if (s->detailsPreviewPanning || hit.region == ui::HitTestResult::DetailsPreview) {
+            SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
             return TRUE;
         }
         if (s->columnResizing || hit.region == ui::HitTestResult::ColumnDivider) {
@@ -5142,18 +5394,18 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             return 0;
         }
 
-        if (s->detailsPreviewResizing) {
+        if (s->detailsPreviewPanning) {
             if ((GetKeyState(VK_LBUTTON) & 0x8000) == 0) {
-                s->detailsPreviewResizing = false;
+                s->detailsPreviewPanning = false;
                 if (GetCapture() == hwnd) ReleaseCapture();
             } else {
-                const D2D1_RECT_F panel = s->renderer.DetailsPanelRect(
-                    static_cast<float>(s->compositor.Width()),
-                    static_cast<float>(s->compositor.Height()));
-                const float pad = 12.0f * s->scale;
-                const float height = (static_cast<float>(my) - panel.top - pad) / s->scale;
-                s->detailsPreviewHeight = std::clamp(height, 200.0f, 1200.0f);
-                s->renderer.SetDetailsPreviewHeight(s->detailsPreviewHeight);
+                const float dx = static_cast<float>(mx - s->detailsPreviewPanLast.x) / s->scale;
+                const float dy = static_cast<float>(my - s->detailsPreviewPanLast.y) / s->scale;
+                s->detailsPreviewPanLast = POINT{ mx, my };
+                const float maxX = s->renderer.DetailsCoverMaxPanX();
+                const float maxY = s->renderer.DetailsCoverMaxPanY();
+                s->detailsPreviewPanX = std::clamp(s->detailsPreviewPanX - dx, 0.0f, maxX);
+                s->detailsPreviewPanY = std::clamp(s->detailsPreviewPanY - dy, 0.0f, maxY);
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
@@ -5205,6 +5457,11 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 s->tabDragPending = false;
                 s->tabDragging = false;
                 s->tabDragIndex = -1;
+                s->tabDragRunPos = 0;
+                s->tabDragRunLen = 1;
+                s->tabDragFromChip = false;
+                s->tabDragGroupId = 0;
+                s->tabDragSlots = 1.0f;
                 s->tabOrder.clear();
                 if (GetCapture() == hwnd) ReleaseCapture();
             } else if (s->tabDragging ||
@@ -5217,14 +5474,53 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     const float w0 = static_cast<float>(s->compositor.Width());
                     const int n0 = static_cast<int>(vm0.tabs.size());
                     D2D1_RECT_F first{}, last{}, self{};
+                    bool haveEnds = false;
+                    for (int i = 0; i < n0; ++i) {
+                        D2D1_RECT_F rc{};
+                        if (!s->renderer.TabItemRect(vm0, w0, i, &rc)) continue; // hidden
+                        if (!haveEnds) first = rc;
+                        last = rc;
+                        haveEnds = true;
+                    }
+                    bool selfOk = s->renderer.TabItemRect(vm0, w0, s->tabDragIndex, &self);
+                    bool chipBlock = false;
+                    if (!selfOk && s->tabDragFromChip) {
+                        // Collapsed group: the chip itself is the drag block.
+                        for (int gi = 0; gi < static_cast<int>(vm0.tab_groups.size()); ++gi) {
+                            if (vm0.tab_groups[static_cast<size_t>(gi)].id == s->tabDragGroupId &&
+                                s->renderer.TabGroupChipRect(vm0, w0, gi, &self)) {
+                                selfOk = true;
+                                chipBlock = true;
+                                break;
+                            }
+                        }
+                    }
                     if (n0 >= 2 && n0 == static_cast<int>(s->pane->tabs.size()) &&
-                        s->renderer.TabItemRect(vm0, w0, 0, &first) &&
-                        s->renderer.TabItemRect(vm0, w0, n0 - 1, &last) &&
-                        s->renderer.TabItemRect(vm0, w0, s->tabDragIndex, &self)) {
+                        haveEnds && selfOk) {
                         s->tabDragging = true;
                         s->tabFlowLeft = first.left;
                         s->tabFlowRight = last.right;
                         s->tabSlotW = self.right - self.left;
+                        // Chrome ConstrainMoveIndex: pinned and unpinned tabs
+                        // each stay within their own region while dragging.
+                        {
+                            const bool dragPinned = s->tabDragFromChip
+                                ? false // groups never contain pinned tabs
+                                : s->pane->tabs[static_cast<size_t>(s->tabDragIndex)]->pinned;
+                            int firstUnpinned = -1;
+                            for (int i = 0; i < n0; ++i)
+                                if (!s->pane->tabs[static_cast<size_t>(i)]->pinned) {
+                                    firstUnpinned = i;
+                                    break;
+                                }
+                            if (firstUnpinned > 0) {
+                                D2D1_RECT_F b{};
+                                if (s->renderer.TabItemRect(vm0, w0, firstUnpinned, &b)) {
+                                    if (dragPinned) s->tabFlowRight = b.left;
+                                    else s->tabFlowLeft = b.left;
+                                }
+                            }
+                        }
                         // Uniform pitch excludes group-chip offsets; rest
                         // rects come from TabItemRect where chips matter.
                         s->tabPitch = s->renderer.TabPitchPx(vm0, w0);
@@ -5237,6 +5533,36 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                         s->tabOffsets.clear();
                         s->tabOrder.resize(static_cast<size_t>(n0));
                         for (int i = 0; i < n0; ++i) s->tabOrder[static_cast<size_t>(i)] = i;
+                        // Whole-group drags start from the chip; member tabs
+                        // always drag solo (Chromium semantics).
+                        s->tabDragRunPos = s->tabDragIndex;
+                        s->tabDragRunLen = 1;
+                        s->tabDragSlots = 1.0f;
+                        if (s->tabDragFromChip) {
+                            const int dragGroup =
+                                s->pane->tabs[static_cast<size_t>(s->tabDragIndex)]->tab_group;
+                            int pos = s->tabDragIndex;
+                            while (pos > 0 &&
+                                   s->pane->tabs[static_cast<size_t>(pos - 1)]->tab_group == dragGroup)
+                                --pos;
+                            int end = s->tabDragIndex;
+                            while (end + 1 < n0 &&
+                                   s->pane->tabs[static_cast<size_t>(end + 1)]->tab_group == dragGroup)
+                                ++end;
+                            s->tabDragRunPos = pos;
+                            s->tabDragRunLen = end - pos + 1;
+                            if (chipBlock) {
+                                s->tabDragSlots = s->tabPitch > 0.0f
+                                    ? (self.right - self.left) / s->tabPitch : 1.0f;
+                            } else {
+                                s->tabDragSlots = static_cast<float>(s->tabDragRunLen);
+                                if (s->tabDragRunLen > 1) {
+                                    D2D1_RECT_F runRc{};
+                                    if (s->renderer.TabItemRect(vm0, w0, pos, &runRc))
+                                        s->tabDragPressLeft = runRc.left;
+                                }
+                            }
+                        }
                     } else {
                         s->tabDragPending = false; // geometry unavailable: plain click
                     }
@@ -5246,7 +5572,60 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     s->tabDragFloatLeft = std::clamp(
                         s->tabDragPressLeft + static_cast<float>(mx - s->tabDragStartPt.x),
                         s->tabFlowLeft,
-                        std::max(s->tabFlowLeft, s->tabFlowRight - s->tabSlotW));
+                        std::max(s->tabFlowLeft,
+                                 s->tabFlowRight - s->tabSlotW * s->tabDragSlots));
+                    if (std::abs(dx) >= 2 && s->tabDragFromChip) {
+                        // Whole-group drag: rotate the run as a block when its
+                        // leading/trailing edge crosses the neighbor's center.
+                        s->tabDragLastX = mx;
+                        const int n = static_cast<int>(s->tabOrder.size());
+                        const int runPos = s->tabDragRunPos;
+                        const int runLen = s->tabDragRunLen;
+                        int blockShift = 0; // -1 left, +1 right, 0 none
+                        int siblingPos = -1;
+                        if (dx < 0 && runPos > 0) siblingPos = runPos - 1;
+                        else if (dx > 0 && runPos + runLen < n) siblingPos = runPos + runLen;
+                        if (siblingPos >= 0) {
+                            const int adjIdx = s->tabOrder[static_cast<size_t>(siblingPos)];
+                            const app::Tab* adjTab =
+                                (adjIdx >= 0 && adjIdx < static_cast<int>(s->pane->tabs.size()))
+                                    ? s->pane->tabs[static_cast<size_t>(adjIdx)].get() : nullptr;
+                            const float adjOff = [&]() {
+                                if (!adjTab) return 0.0f;
+                                const auto oit = s->tabOffsets.find(adjTab);
+                                return oit != s->tabOffsets.end() ? oit->second : 0.0f;
+                            }();
+                            float adjRest = s->tabFlowLeft
+                                + static_cast<float>(siblingPos) * s->tabPitch;
+                            {
+                                ui::WindowViewModel vmNow = BuildVm(*s);
+                                D2D1_RECT_F adjRc{};
+                                if (s->renderer.TabItemRect(vmNow,
+                                        static_cast<float>(s->compositor.Width()),
+                                        siblingPos, &adjRc))
+                                    adjRest = adjRc.left;
+                            }
+                            const float adjCenter = adjRest + adjOff * s->tabPitch
+                                + s->tabSlotW * 0.5f;
+                            if (dx < 0 && s->tabDragFloatLeft < adjCenter) blockShift = -1;
+                            else if (dx > 0 && s->tabDragFloatLeft
+                                     + s->tabDragSlots * s->tabSlotW > adjCenter)
+                                blockShift = 1;
+                            if (blockShift != 0 && adjTab) {
+                                s->tabDragRunPos = app::MoveTabRun(
+                                    s->tabOrder, runPos, runLen, blockShift);
+                                const float start = static_cast<float>(-blockShift * runLen)
+                                    + adjOff;
+                                if (std::abs(start) >= 0.01f) {
+                                    s->tabTracks[adjTab] = AppState::TabTrack{
+                                        start, 150, std::chrono::steady_clock::now() };
+                                    s->tabOffsets[adjTab] = start;
+                                }
+                            }
+                        }
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                        return 0;
+                    }
                     if (std::abs(dx) >= 2) { // 2px deadzone against jitter, as in TabBar
                         s->tabDragLastX = mx;
                         int cur = -1;
@@ -5528,9 +5907,16 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             SetCapture(hwnd);
             return 0;
         }
-        if (hit.region == ui::HitTestResult::DetailsPreviewResize) {
+        if (hit.region == ui::HitTestResult::DetailsPreview) {
+            // Begin a cover-mode pan. Clamp against the current bitmap limits
+            // first so a stale state (resized window, new bitmap) can't stick.
             s->dragPending = false;
-            s->detailsPreviewResizing = true;
+            s->detailsPreviewPanX = std::clamp(s->detailsPreviewPanX, 0.0f,
+                                               s->renderer.DetailsCoverMaxPanX());
+            s->detailsPreviewPanY = std::clamp(s->detailsPreviewPanY, 0.0f,
+                                               s->renderer.DetailsCoverMaxPanY());
+            s->detailsPreviewPanning = true;
+            s->detailsPreviewPanLast = POINT{ mx, my };
             SetCapture(hwnd);
             return 0;
         } else if (hit.region == ui::HitTestResult::ColumnDivider) {
@@ -5611,16 +5997,32 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             SetCapture(hwnd);
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (hit.region == ui::HitTestResult::TabGroup) {
-            // Strip chip: open the group popup (same as browser group labels).
-            if (hit.index >= 0 && hit.index < static_cast<int>(vm.tab_groups.size())) {
-                POINT point{ mx, my };
-                ClientToScreen(hwnd, &point);
-                ShowTabGroupMenu(*s, vm.tab_groups[static_cast<size_t>(hit.index)].id, point);
+            // Group chip (Chromium behavior): press arms a whole-group drag;
+            // a plain release toggles collapse; right-click opens the editor.
+            if (hit.index >= 0 && hit.index < static_cast<int>(vm.tab_groups.size()) &&
+                s->pane) {
+                const int gid = vm.tab_groups[static_cast<size_t>(hit.index)].id;
+                int first = -1;
+                for (int i = 0; i < static_cast<int>(s->pane->tabs.size()); ++i)
+                    if (s->pane->tabs[static_cast<size_t>(i)]->tab_group == gid) {
+                        first = i;
+                        break;
+                    }
+                if (first >= 0) {
+                    s->tabDragPending = true;
+                    s->tabDragging = false;
+                    s->tabDragFromChip = true;
+                    s->tabDragGroupId = gid;
+                    s->tabDragIndex = first;
+                    s->tabDragStartPt = POINT{ mx, my };
+                    SetCapture(hwnd);
+                }
             }
         } else if (hit.region == ui::HitTestResult::Tab && hit.index >= 0) {
             SwitchTab(*s, hit.index);
             s->tabDragPending = true;
             s->tabDragging = false;
+            s->tabDragFromChip = false;
             s->tabDragIndex = hit.index;
             s->tabDragStartPt = POINT{ mx, my };
             SetCapture(hwnd);
@@ -5640,6 +6042,9 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (hit.region == ui::HitTestResult::SettingsEffect) {
             HandleSettingsEffect(*s, hit.index);
+            InvalidateRect(hwnd, nullptr, FALSE);
+        } else if (hit.region == ui::HitTestResult::SettingsDensity) {
+            HandleSettingsDensity(*s, hit.index);
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (hit.region == ui::HitTestResult::SettingsWallpaper) {
             HandleSettingsWallpaper(*s, hit.index);
@@ -5701,48 +6106,104 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             const std::wstring p = SelectedFullPath(*s);
             if (!p.empty()) ToggleStarred(*s, p);
         } else if (hit.region == ui::HitTestResult::DetailsMore) {
-            POINT point{ mx, my };
-            ClientToScreen(hwnd, &point);
-            ShowItemContextMenu(*s, point);
+            if (EnsureMenu(*s)) {
+                std::vector<ui::FluentMenuItem> items;
+                ui::FluentMenuItem terminal;
+                terminal.command = app::CmdOpenTerminal;
+                terminal.text = L"在终端打开";
+                terminal.glyph = L"\xE756";
+                items.push_back(std::move(terminal));
+                if (vm.details.is_dir) {
+                    ui::FluentMenuItem size;
+                    size.command = app::CmdDetailsComputeSize;
+                    size.text = L"计算大小";
+                    size.glyph = L"\xE8EF";
+                    items.push_back(std::move(size));
+                }
+                ui::FluentMenuItem props;
+                props.command = app::CmdProperties;
+                props.text = L"属性";
+                props.glyph = L"\xE946";
+                props.separator_after = true;
+                items.push_back(std::move(props));
+                ui::FluentMenuItem shell;
+                shell.command = app::CmdDetailsShellMenu;
+                shell.text = L"系统菜单…";
+                shell.glyph = L"\xE712";
+                items.push_back(std::move(shell));
+                POINT point{ mx, my };
+                ClientToScreen(hwnd, &point);
+                const int cmd = s->menu->TrackPopup(point, std::move(items));
+                if (cmd == app::CmdOpenTerminal) {
+                    std::wstring p = vm.details.path;
+                    if (!p.empty() && !vm.details.is_dir) p = fs::ParentPath(p);
+                    if (!p.empty()) s->ops.OpenTerminal(ClipboardPath(p));
+                } else if (cmd == app::CmdDetailsComputeSize) {
+                    if (!vm.details.path.empty()) StartDetailsSizeWalk(*s, vm.details.path);
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                } else if (cmd == app::CmdProperties) {
+                    DispatchMenuCommand(*s, app::CmdProperties);
+                } else if (cmd == app::CmdDetailsShellMenu) {
+                    ShowItemContextMenu(*s, point);
+                }
+            }
+        } else if (hit.region == ui::HitTestResult::DetailsNewTab) {
+            if (!vm.details.path.empty()) {
+                const std::wstring target = vm.details.path;
+                if (vm.details.is_dir) {
+                    NewTab(*s, target);
+                } else {
+                    NewTab(*s, fs::ParentPath(target));
+                    if (app::Tab* tab = ActiveTab(*s)) {
+                        std::wstring leaf = target;
+                        if (leaf.starts_with(L"\\\\?\\UNC\\")) leaf = L"\\\\" + leaf.substr(8);
+                        else if (leaf.starts_with(L"\\\\?\\")) leaf = leaf.substr(4);
+                        const auto slash = leaf.find_last_of(L"\\/");
+                        if (slash != std::wstring::npos) leaf = leaf.substr(slash + 1);
+                        tab->pending_selected_name = leaf;
+                        tab->pending_selected_names = { leaf };
+                    }
+                }
+            }
+        } else if (hit.region == ui::HitTestResult::DetailsCopyPath) {
+            if (!vm.details.path.empty())
+                ops::WriteClipboardText(ClipboardPath(vm.details.path));
+        } else if (hit.region == ui::HitTestResult::DetailsSection) {
+            if (hit.index >= 0 && hit.index < 32) {
+                s->detailsCollapsedMask ^= (1u << hit.index);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+        } else if (hit.region == ui::HitTestResult::DetailsAttrToggle) {
+            if (hit.index == 2) {
+                DispatchMenuCommand(*s, app::CmdProperties);
+            } else if (!vm.details.path.empty() &&
+                       (hit.index == 0 || hit.index == 1)) {
+                const DWORD flag = hit.index == 0 ? FILE_ATTRIBUTE_READONLY
+                                                  : FILE_ATTRIBUTE_HIDDEN;
+                DWORD attrs = GetFileAttributesW(vm.details.path.c_str());
+                if (attrs != INVALID_FILE_ATTRIBUTES) {
+                    attrs = (attrs & flag) ? (attrs & ~flag) : (attrs | flag);
+                    if (SetFileAttributesW(vm.details.path.c_str(), attrs))
+                        RefreshActiveTab(*s);
+                }
+            }
+        } else if (hit.region == ui::HitTestResult::DetailsSecurityChange) {
+            DispatchMenuCommand(*s, app::CmdProperties);
         } else if (hit.region == ui::HitTestResult::DetailsRename) {
             ShowRenameOverlay(*s);
         } else if (hit.region == ui::HitTestResult::DetailsTagAdd) {
             POINT point{ mx, my };
             ClientToScreen(hwnd, &point);
             ShowTagPicker(*s, point);
-        } else if (hit.region == ui::HitTestResult::DetailsTagChip) {
-            if (hit.index >= 0 &&
-                hit.index < static_cast<int>(vm.details.tags.size())) {
-                const int ti = vm.details.tags[static_cast<size_t>(hit.index)].tag_index;
-                if (ti >= 0 && ti < static_cast<int>(s->places.tags.size()))
-                    NavigateTo(*s, app::MakeTagPath(s->places.tags[static_cast<size_t>(ti)].id));
-            }
-        } else if (hit.region == ui::HitTestResult::DetailsQuick) {
-            switch (hit.index) {
-            case 0: DispatchMenuCommand(*s, app::CmdCopyPath); break;
-            case 1: {
-                std::wstring p = SelectedFullPath(*s);
-                if (p.empty()) break;
-                app::Tab* tab = ActiveTab(*s);
-                if (tab && tab->snapshot && tab->selected_index >= 0 &&
-                    tab->selected_index < static_cast<int>(tab->snapshot->size()) &&
-                    !(*tab->snapshot)[static_cast<size_t>(tab->selected_index)].is_dir)
-                    p = fs::ParentPath(p);
-                if (!p.empty()) s->ops.OpenTerminal(ClipboardPath(p));
-                break;
-            }
-            case 2:
-                if (!vm.details.path.empty()) StartDetailsSizeWalk(*s, vm.details.path);
+        } else if (hit.region == ui::HitTestResult::DetailsPresetTag) {
+            if (hit.index >= 0 && hit.index < static_cast<int>(s->places.tags.size()) &&
+                !vm.details.path.empty()) {
+                const bool assigned = s->places.PathHasTag(vm.details.path, hit.index);
+                std::vector<app::TagAdsUpdate> ads_updates;
+                s->places.SetTaggedBatch(hit.index, { vm.details.path }, !assigned,
+                                         &ads_updates);
+                QueueTagAds(*s, std::move(ads_updates));
                 InvalidateRect(hwnd, nullptr, FALSE);
-                break;
-            case 3: DispatchMenuCommand(*s, app::CmdProperties); break;
-            case 4: {
-                POINT point{ mx, my };
-                ClientToScreen(hwnd, &point);
-                ShowItemContextMenu(*s, point);
-                break;
-            }
-            default: break;
             }
         } else if (hit.region == ui::HitTestResult::SplitButton) {
             ShowSplitDropdown(*s);
@@ -5962,7 +6423,9 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     // Browser-style grouping: a tab dropped inside a
                     // same-group run (or against its end) joins it; a grouped
                     // tab dropped away from every member leaves the group.
-                    if (cur >= 0 && cur < static_cast<int>(s->pane->tabs.size())) {
+                    // Chip drags move the whole group by construction, so
+                    // these rules only apply to member-tab drags.
+                    if (!s->tabDragFromChip && cur >= 0 && cur < static_cast<int>(s->pane->tabs.size())) {
                         app::Tab* moved = s->pane->tabs[static_cast<size_t>(cur)].get();
                         const int prevG = cur > 0
                             ? s->pane->tabs[static_cast<size_t>(cur - 1)]->tab_group : 0;
@@ -5988,9 +6451,17 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                         }
                     }
                 }
+                // Plain chip click (press without drag): toggle collapse.
+                if (s->tabDragFromChip && !wasActive && s->tabDragGroupId != 0)
+                    ToggleTabGroupCollapse(*s, s->tabDragGroupId);
                 s->tabDragPending = false;
                 s->tabDragging = false;
                 s->tabDragIndex = -1;
+                s->tabDragRunPos = 0;
+                s->tabDragRunLen = 1;
+                s->tabDragFromChip = false;
+                s->tabDragGroupId = 0;
+                s->tabDragSlots = 1.0f;
                 s->tabOrder.clear();
                 if (GetCapture() == hwnd) ReleaseCapture();
                 InvalidateRect(hwnd, nullptr, FALSE);
@@ -6030,7 +6501,7 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             s->scrollbarHorizontal = false;
             s->splitterDragging = false;
             s->detailsPanelResizing = false;
-            s->detailsPreviewResizing = false;
+            s->detailsPreviewPanning = false;
             s->columnResizing = false;
             s->columnResizeIndex = -1;
             s->columnResizePane = -1;
@@ -6136,12 +6607,15 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         POINT sp{ mx, my };
         ClientToScreen(hwnd, &sp);
         bool shown = false;
-        if (hit.region == ui::HitTestResult::Tab && hit.index >= 0) {
-            app::Tab* tab = s->pane &&
-                    hit.index < static_cast<int>(s->pane->tabs.size())
-                ? s->pane->tabs[static_cast<size_t>(hit.index)].get() : nullptr;
-            if (tab && tab->tab_group != 0) ShowTabGroupMenu(*s, tab->tab_group, sp);
-            else if (tab) ShowTabCreateGroupMenu(*s, hit.index, sp);
+        if (hit.region == ui::HitTestResult::TabGroup && hit.index >= 0 &&
+            hit.index < static_cast<int>(vm.tab_groups.size())) {
+            // Group chip right-click: the Edge-style editor bubble.
+            ShowTabGroupMenu(*s, vm.tab_groups[static_cast<size_t>(hit.index)].id, sp);
+            shown = true;
+        } else if (hit.region == ui::HitTestResult::Tab && hit.index >= 0) {
+            // Every tab gets the Edge-style tab menu; group editing lives on
+            // the chip (right-click) and in the editor bubble.
+            ShowTabContextMenu(*s, hit.index, sp);
             shown = true;
         } else if (hit.region == ui::HitTestResult::Row && hit.index >= 0) {
             app::Tab* tab = ActiveTab(*s);
@@ -6202,16 +6676,14 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             pt.x < detailsRc.right && pt.y >= detailsRc.top && pt.y < detailsRc.bottom) {
             const float steps = static_cast<float>(GET_WHEEL_DELTA_WPARAM(wParam)) /
                                 static_cast<float>(WHEEL_DELTA);
-            const float previewBottom = detailsRc.top +
-                (12.0f + 176.0f - s->detailsScroll) * s->scale;
             if (wheelVm.details.multi_count <= 1 && !wheelVm.details.is_dir &&
-                pt.y < previewBottom) {
+                wheelHit.region == ui::HitTestResult::DetailsPreview) {
                 s->detailsPreviewScroll = std::clamp(
                     s->detailsPreviewScroll - steps * 48.0f, 0.0f, 4000.0f);
             } else {
                 const float visibleDip = (detailsRc.bottom - detailsRc.top) / s->scale;
-                const float contentDip = wheelVm.details.multi_count > 1 ? 390.0f
-                    : (wheelVm.details.is_dir ? 680.0f : 644.0f);
+                const float contentDip = s->renderer.DetailsContentHeightDip(
+                    wheelVm, wheelRect.right, wheelRect.bottom);
                 s->detailsScroll = std::clamp(s->detailsScroll - steps * 48.0f,
                     0.0f, std::max(0.0f, contentDip - visibleDip));
             }
@@ -6551,6 +7023,21 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         return 0;
     }
 
+    case WM_DETAILS_META: {
+        auto* result = reinterpret_cast<DetailsMetaResult*>(lParam);
+        if (s && result && result->path == s->detailsSelPath) {
+            s->detailsMetaPath = result->path;
+            s->detailsOwner = std::move(result->meta.owner);
+            s->detailsPermissions = std::move(result->meta.permissions);
+            s->detailsDrive = std::move(result->meta.drive);
+            s->detailsFileSystem = std::move(result->meta.file_system);
+            s->detailsFreeSpace = std::move(result->meta.free_space);
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        delete result;
+        return 0;
+    }
+
     case WM_INDEX_NOTIFY: {
         if (s) InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
@@ -6712,8 +7199,6 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 snap.sidebar_collapsed = static_cast<int>(s->sidebarCollapsedMask);
                 snap.details_panel = s->showDetailsPanel;
                 snap.details_panel_width = static_cast<int>(std::lround(s->detailsPanelWidth));
-                snap.details_preview_height =
-                    static_cast<int>(std::lround(s->detailsPreviewHeight));
                 app::SaveSession(snap);
                 s->places.Save();
                 s->ctxMenuPrefs.Save();
@@ -6875,8 +7360,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         state.showDetailsPanel = session.details_panel;
         state.detailsPanelWidth = static_cast<float>(session.details_panel_width);
         state.renderer.SetDetailsPanelWidth(state.detailsPanelWidth);
-        state.detailsPreviewHeight = static_cast<float>(session.details_preview_height);
-        state.renderer.SetDetailsPreviewHeight(state.detailsPreviewHeight);
         if (state.darkMode) state.themeOverride = ui::ThemeMode::Dark;
     }
 

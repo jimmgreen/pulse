@@ -37,4 +37,17 @@ inline std::wstring LocalFileTime(const FILETIME& time,
     return text;
 }
 
+// 2895851315 -> "2,895,851,315"
+inline std::wstring GroupedInt(uint64_t value) {
+    wchar_t digits[24];
+    swprintf_s(digits, L"%llu", value);
+    std::wstring out;
+    const size_t len = wcslen(digits);
+    for (size_t i = 0; i < len; ++i) {
+        if (i > 0 && (len - i) % 3 == 0) out += L',';
+        out += digits[i];
+    }
+    return out;
+}
+
 } // namespace pulse::format

@@ -39,7 +39,8 @@ struct ViewLayoutMetrics {
 class ViewLayout {
 public:
     ViewLayout(ViewMode mode, D2D1_RECT_F viewport, size_t item_count,
-               float scroll_x, float scroll_y, float scale);
+               float scroll_x, float scroll_y, float scale,
+               float row_height_dip = 0.0f); // >0: Details-mode row height override
 
     ViewMode Mode() const noexcept { return mode_; }
     const ViewLayoutMetrics& Metrics() const noexcept { return metrics_; }

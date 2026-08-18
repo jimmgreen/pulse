@@ -23,7 +23,6 @@ struct SessionSnapshot {
     int sidebar_collapsed = 0; // bitmask over WindowViewModel::sidebar group order
     bool details_panel = false;  // right details panel visible
     int details_panel_width = 340;
-    int details_preview_height = 420;
     std::array<float, 3> details_column_dividers{}; // version 3 migration only
 };
 

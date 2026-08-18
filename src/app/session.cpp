@@ -51,8 +51,6 @@ bool SaveSession(const SessionSnapshot& snap) {
     f << L"  \"detailsPanel\":" << (snap.details_panel ? 1 : 0) << L",\n";
     f << L"  \"detailsPanelWidth\":" << std::clamp(snap.details_panel_width, 300, 480)
       << L",\n";
-    f << L"  \"detailsPreviewHeight\":"
-      << std::clamp(snap.details_preview_height, 200, 1200) << L",\n";
     f << L"  \"panes\":[";
     for (size_t i = 0; i < snap.pane_paths.size(); ++i) {
         if (i) f << L",";
@@ -122,9 +120,6 @@ bool LoadSession(SessionSnapshot& snap) {
     snap.details_panel_width = pulse::json::ExtractInt(json, L"detailsPanelWidth");
     if (snap.details_panel_width < 300 || snap.details_panel_width > 480)
         snap.details_panel_width = 340;
-    snap.details_preview_height = pulse::json::ExtractInt(json, L"detailsPreviewHeight");
-    if (snap.details_preview_height < 200 || snap.details_preview_height > 1200)
-        snap.details_preview_height = 420;
     const std::array<int, 3> columnEdges{
         pulse::json::ExtractInt(json, L"detailsColumn0"),
         pulse::json::ExtractInt(json, L"detailsColumn1"),

@@ -27,6 +27,7 @@ namespace {
     constexpr D2D1_COLOR_F kTransparent{0.0f, 0.0f, 0.0f, 0.0f};
     constexpr float kTabMinW = 72.0f;
     constexpr float kTabMaxW = 240.0f;
+    constexpr float kTabPinnedW = 36.0f; // Chrome pinned tab: icon-only square
     constexpr float kTabCloseAlwaysW = 96.0f;
     constexpr float kTabClosePadDip = 10.0f;
     constexpr float kTabCloseSizeDip = 16.0f;
@@ -501,8 +502,8 @@ namespace {
         }
         y += 22.0f * s + 16.0f * s + 8.0f * s; // name + type + gap
         if (d.multi_count <= 1) {
-            // Button row: 打开 / 在新标签打开 / 复制路径 / 更多 (4 equal cells).
-            const float rowH = 28.0f * s;
+            // Button row: 打开 / 在新标签打开 / 复制路径 / 更多 (icon over label).
+            const float rowH = 48.0f * s;
             const float gap = 6.0f * s;
             const float cellW = (w - gap * 3.0f) / 4.0f;
             out.open = D2D1::RectF(x, y, x + cellW, y + rowH);
@@ -512,12 +513,13 @@ namespace {
                                         x + (cellW + gap) * 2.0f + cellW, y + rowH);
             out.more = D2D1::RectF(x + (cellW + gap) * 3.0f, y,
                                    x + (cellW + gap) * 3.0f + cellW, y + rowH);
-            y += rowH + 12.0f * s;
+            y += rowH + 4.0f * s;
 
             for (const auto& def : kDetailsSections) {
-                out.section_headers.push_back(D2D1::RectF(x, y, x + w, y + 20.0f * s));
+                y += 8.0f * s; // separator gap (line drawn inside DrawDetailsPanel)
+                out.section_headers.push_back(D2D1::RectF(x, y, x + w, y + 28.0f * s));
                 out.section_ids.push_back(def.id);
-                y += 20.0f * s;
+                y += 28.0f * s;
                 if ((d.collapsed_mask >> def.id) & 1u) { y += 6.0f * s; continue; }
                 switch (def.id) {
                 case 0: { // 基本信息
@@ -526,26 +528,36 @@ namespace {
                     y += static_cast<float>(rows) * 18.0f * s + 8.0f * s;
                     break;
                 }
-                case 1: // 属性: 只读/隐藏 checkbox rows + 高级… on the second row
-                    out.attr_readonly = D2D1::RectF(x, y, x + w, y + 18.0f * s);
-                    out.attr_hidden = D2D1::RectF(x, y + 18.0f * s, x + w,
-                                                  y + 36.0f * s);
-                    out.attr_advanced = D2D1::RectF(x + w - 64.0f * s, y + 16.0f * s,
-                                                    x + w, y + 40.0f * s);
-                    y += 36.0f * s + 8.0f * s;
+                case 1: // 属性: 只读/隐藏 checkbox rows (24 DIP) + 高级… on row two
+                    out.attr_readonly = D2D1::RectF(x, y, x + w, y + 24.0f * s);
+                    out.attr_hidden = D2D1::RectF(x, y + 24.0f * s, x + w,
+                                                  y + 48.0f * s);
+                    out.attr_advanced = D2D1::RectF(x + w - 64.0f * s, y + 24.0f * s,
+                                                    x + w, y + 48.0f * s);
+                    y += 48.0f * s + 8.0f * s;
                     break;
-                case 2: { // 标签 chips + add
+                case 2: { // 标签: 添加标签 row + preset chip grid (wraps)
+                    out.tag_add = D2D1::RectF(x, y, x + w, y + 26.0f * s);
+                    y += 26.0f * s + 6.0f * s;
                     float cx = x;
-                    for (const auto& chip : d.tags) {
-                        const float tw = std::min(64.0f * s,
+                    const float chipH = 22.0f * s;
+                    bool any = false;
+                    for (const auto& chip : d.preset_tags) {
+                        const float tw = std::min(72.0f * s,
                             MeasureTextWidth(dwrite, small_fmt, chip.name));
-                        const float cw = tw + 22.0f * s;
-                        if (cx + cw > panel.right - pad) break; // single row only
-                        out.tag_chips.push_back(D2D1::RectF(cx, y, cx + cw, y + 22.0f * s));
-                        cx += cw + 6.0f * s;
+                        const float cw = tw + 24.0f * s;
+                        if (cx + cw > panel.right - pad) {
+                            cx = x;
+                            y += chipH + 6.0f * s; // next row
+                        }
+                        out.preset_chips.push_back(D2D1::RectF(cx, y, cx + cw,
+                                                               y + chipH));
+                        out.preset_ids.push_back(chip.tag_index);
+                        cx += cw + 8.0f * s;
+                        any = true;
                     }
-                    out.tag_add = D2D1::RectF(cx, y, cx + 22.0f * s, y + 22.0f * s);
-                    y += 22.0f * s + 8.0f * s;
+                    if (any) y += chipH;
+                    y += 8.0f * s;
                     break;
                 }
                 case 3: // 安全: 所有者(+更改) / 权限
@@ -708,7 +720,7 @@ void MainRenderer::SetScale(float scale) {
     sidebar_width_ = 224.0f * scale;
     pane_header_height_ = 40.0f * scale;
     column_header_height_ = 32.0f * scale;
-    row_height_ = 28.0f * scale;
+    row_height_ = row_height_dip_ * scale;
     margin_ = 4.0f * scale;
     control_gap_ = 4.0f * scale;
     painter_.SetScale(scale);
@@ -864,7 +876,7 @@ D2D1_RECT_F MainRenderer::NameCellRect(const D2D1_RECT_F& pane_bounds, int view_
                                        const std::array<float, 3>& column_dividers) const {
     const D2D1_RECT_F list = PaneListRect(pane_bounds, extra_top, mode);
     if (mode != ViewMode::Details) {
-        ViewLayout layout(mode, list, item_count, scroll_x, scroll_y, scale_);
+        ViewLayout layout(mode, list, item_count, scroll_x, scroll_y, scale_, row_height_dip_);
         return layout.NameRect(view_row);
     }
     const float list_x = list.left;
@@ -891,7 +903,6 @@ bool MainRenderer::PointInItemName(const PaneViewModel& vm, const D2D1_RECT_F& p
         pane_bounds, view_index, vm.scroll_y,
         vm.banner_message.empty() ? 0.0f : 36.0f * scale_,
         vm.view_mode, vm.scroll_x, vm.EntryCount(), vm.details_column_dividers);
-
     const bool icon_grid = vm.view_mode == ViewMode::ExtraLargeIcons ||
                            vm.view_mode == ViewMode::LargeIcons ||
                            vm.view_mode == ViewMode::MediumIcons;
@@ -1181,6 +1192,8 @@ struct SettingsLayout {
     D2D1_RECT_F nav_row[2]{};
     D2D1_RECT_F effect_card{};
     D2D1_RECT_F effect_row[kWindowEffectCount]{};
+    D2D1_RECT_F density_card{};
+    D2D1_RECT_F density_row[3]{};
     D2D1_RECT_F wallpaper_card{};
     D2D1_RECT_F wallpaper_preview{};
     D2D1_RECT_F wallpaper_choose{};
@@ -1227,6 +1240,14 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
             l.effect_row[i] = D2D1::RectF(card_left, ry, card_right, ry + radio_h);
         }
         y += effect_h + 12.0f * scale;
+
+        const float density_h = effect_header + 3 * radio_h + 8.0f * scale;
+        l.density_card = D2D1::RectF(card_left, y, card_right, y + density_h);
+        for (int i = 0; i < 3; ++i) {
+            const float ry = y + effect_header + static_cast<float>(i) * radio_h;
+            l.density_row[i] = D2D1::RectF(card_left, ry, card_right, ry + radio_h);
+        }
+        y += density_h + 12.0f * scale;
 
         const float wall_h = 88.0f * scale;
         l.wallpaper_card = D2D1::RectF(card_left, y, card_right, y + wall_h);
@@ -1278,6 +1299,9 @@ static bool IsHovered(const WindowViewModel& vm, HitTestResult::Region region, i
 }
 
 static bool TabCloseVisible(const WindowViewModel& vm, int index, float tab_w, float scale) {
+    if (index >= 0 && index < static_cast<int>(vm.tabs.size()) &&
+        vm.tabs[static_cast<size_t>(index)].pinned)
+        return false; // Chrome: pinned tabs have no close affordance
     if (tab_w >= kTabCloseAlwaysW * scale) return true;
     if (index >= 0 && index < static_cast<int>(vm.tabs.size()) && vm.tabs[static_cast<size_t>(index)].active)
         return true;
@@ -1542,9 +1566,10 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
     const TabStripMetrics strip = ComputeTabStrip(vm, rect.right);
     const float tabH = strip.h;
     const float tabY = strip.y;
-    const float tabW = strip.w;
     auto drawTab = [&](size_t i, float left, bool raised) {
         const bool active = vm.tabs[i].active;
+        const bool pinned = vm.tabs[i].pinned;
+        const float tabW = pinned ? kTabPinnedW * scale_ : strip.w;
         const bool hovered = IsHovered(vm, HitTestResult::Tab, static_cast<int>(i)) ||
                              IsHovered(vm, HitTestResult::TabClose, static_cast<int>(i));
         const bool connect = active || raised;
@@ -1573,19 +1598,37 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
             MakeBrush(dc, fill, brFillSelected_);
             FillChromeTab(dc, brFillSelected_.get(), tabRc, shape);
         } else {
-            MakeBrush(dc, hovered ? theme.fill_hover : theme.tab_bg, brFillHover_);
+            // Grouped tabs get a tinted body; ungrouped keep the stock look.
+            const bool has_color = vm.tabs[i].color_rgb != 0;
+            if (has_color) {
+                D2D1_COLOR_F tint = HexColor(vm.tabs[i].color_rgb);
+                tint.a *= hovered ? 0.16f : 0.10f;
+                MakeBrush(dc, tint, brFillHover_);
+            } else {
+                MakeBrush(dc, hovered ? theme.fill_hover : theme.tab_bg, brFillHover_);
+            }
             FillChromeTab(dc, brFillHover_.get(), tabRc, shape);
         }
-        // Active indicator strip: kept inside the rounded corners (it used to
-        // cross the corner arcs). A custom tab color replaces the accent and
-        // stays visible, dimmed, on inactive tabs — browser tab-group style.
+        // Ungrouped active tabs keep the top accent strip; grouped tabs anchor
+        // their group color to the bottom edge (browser tab-group style).
         const float r = shape.top_radius;
         const bool has_color = vm.tabs[i].color_rgb != 0;
-        if (active || has_color) {
-            D2D1_COLOR_F line = has_color ? HexColor(vm.tabs[i].color_rgb) : theme.accent;
+        if (has_color) {
+            D2D1_COLOR_F line = HexColor(vm.tabs[i].color_rgb);
             if (!active) line.a *= 0.55f;
             MakeBrush(dc, line, brAccent_);
+            FillChromeTabAccent(dc, brAccent_.get(), tabRc, shape, 2.0f * scale_, true);
+        } else if (active) {
+            MakeBrush(dc, theme.accent, brAccent_);
             FillChromeTabAccent(dc, brAccent_.get(), tabRc, shape, 2.0f * scale_);
+        }
+        if (pinned) {
+            // Chrome pinned tab: centered icon, no title, no close button.
+            DrawIconText(left, tabY, tabW, tabH,
+                vm.tabs[i].title.empty() ? kIconFolder
+                    : vm.tabs[i].title == L"设置" ? kIconSettings : kIconFolder, L"[]",
+                active ? theme.icon_folder : theme.text_secondary, 0.85f);
+            return;
         }
         DrawIconText(left + 6.0f * scale_, tabY, 16.0f * scale_, tabH,
             vm.tabs[i].title == L"\u8BBE\u7F6E" ? kIconSettings : kIconFolder, L"[]",
@@ -1612,38 +1655,53 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
         }
     };
     const int dragI = vm.tab_drag_index;
-    // Group chips sit at run starts; tabs draw after so slides can overlap.
+    // Group chips sit at run starts: Edge-style solid blocks, not pill badges.
+    auto brighten = [&](const D2D1_COLOR_F& c) {
+        // Toward white (dark theme) or black (light) for readable chip text.
+        D2D1_COLOR_F out = c;
+        const float t = 0.35f;
+        const float target = vm.dark ? 1.0f : 0.0f;
+        out.r += (target - out.r) * t;
+        out.g += (target - out.g) * t;
+        out.b += (target - out.b) * t;
+        out.a = 1.0f;
+        return out;
+    };
     for (const auto& chip : strip.chips) {
         if (chip.group < 0 || chip.group >= static_cast<int>(vm.tab_groups.size())) continue;
         const TabGroupView& gv = vm.tab_groups[static_cast<size_t>(chip.group)];
         const D2D1_COLOR_F gc = HexColor(gv.color_rgb);
         const float ch = strip.h - 8.0f * scale_;
-        const D2D1_RECT_F rc = D2D1::RectF(chip.left, strip.y + 4.0f * scale_,
-                                           chip.left + chip.width,
+        // Chip drag: the group's chip floats with its run (alone if collapsed).
+        float chipLeft = chip.left;
+        if (vm.tab_drag_chip && dragI >= 0 && dragI < static_cast<int>(vm.tabs.size()) &&
+            vm.tabs[static_cast<size_t>(dragI)].group == chip.group) {
+            chipLeft = gv.collapsed ? vm.tab_drag_x
+                                    : vm.tab_drag_x - chip.width - 4.0f * scale_;
+        }
+        const D2D1_RECT_F rc = D2D1::RectF(chipLeft, strip.y + 4.0f * scale_,
+                                           chipLeft + chip.width,
                                            strip.y + 4.0f * scale_ + ch);
         const bool chip_hovered = IsHovered(vm, HitTestResult::TabGroup, chip.group);
+        const bool named = !gv.name.empty();
         D2D1_COLOR_F fill = gc;
-        fill.a *= chip_hovered ? 0.30f : (vm.dark ? 0.20f : 0.12f);
-        D2D1_COLOR_F border = gc;
-        border.a *= 0.55f;
+        fill.a *= named ? (chip_hovered ? 0.42f : 0.32f)
+                        : (chip_hovered ? 1.0f : 0.85f);
         MakeBrush(dc, fill, brFillHover_);
-        FillRoundedRect(dc, brFillHover_.get(), rc.left, rc.top, chip.width, ch, ch * 0.5f);
-        MakeBrush(dc, border, brStrokeCard_);
-        dc->DrawRoundedRectangle(D2D1::RoundedRect(rc, ch * 0.5f, ch * 0.5f),
-                                 brStrokeCard_.get(), 1.0f);
-        const float dotR = 4.0f * scale_;
-        MakeBrush(dc, gc, brAccent_);
-        dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(rc.left + 10.0f * scale_,
-                        strip.y + strip.h * 0.5f), dotR, dotR), brAccent_.get());
-        if (!gv.name.empty()) {
-            MakeBrush(dc, gc, brText_);
+        FillRoundedRect(dc, brFillHover_.get(), rc.left, rc.top, chip.width, ch,
+                        5.0f * scale_);
+        if (named) {
+            MakeBrush(dc, brighten(gc), brText_);
             DrawTextRect(dc, compositor_->SmallFormat(), brText_.get(), gv.name,
-                rc.left + 18.0f * scale_, rc.top, chip.width - 24.0f * scale_, ch);
+                rc.left + 8.0f * scale_, rc.top, chip.width - 16.0f * scale_, ch);
         }
     }
     int activeI = -1;
+    const int dragN = std::max(1, vm.tab_drag_count);
+    auto inDragRun = [&](int i) { return dragI >= 0 && i >= dragI && i < dragI + dragN; };
     for (size_t i = 0; i < vm.tabs.size(); ++i) {
-        if (static_cast<int>(i) == dragI) continue;
+        if (vm.tabs[i].hidden) continue;
+        if (inDragRun(static_cast<int>(i))) continue;
         if (vm.tabs[i].active) {
             activeI = static_cast<int>(i);
             continue;
@@ -1653,18 +1711,26 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
             + (static_cast<float>(i) + vm.tabs[i].x_offset) * strip.pitch + extra;
         drawTab(i, left, false);
     }
-    if (activeI >= 0 && activeI != dragI) {
+    if (activeI >= 0 && !inDragRun(activeI) && !vm.tabs[static_cast<size_t>(activeI)].hidden) {
         const size_t i = static_cast<size_t>(activeI);
         const float extra = i < strip.extra.size() ? strip.extra[i] : 0.0f;
         const float left = strip.x0
             + (static_cast<float>(i) + vm.tabs[i].x_offset) * strip.pitch + extra;
         drawTab(i, left, false);
     }
-    if (dragI >= 0 && dragI < static_cast<int>(vm.tabs.size()))
-        drawTab(static_cast<size_t>(dragI), vm.tab_drag_x, true);
+    // The dragged run floats as one block (browser group drag); collapsed
+    // members stay hidden and do not take float width.
+    if (dragI >= 0 && dragI < static_cast<int>(vm.tabs.size())) {
+        float floatX = vm.tab_drag_x;
+        for (int k = 0; k < dragN && dragI + k < static_cast<int>(vm.tabs.size()); ++k) {
+            if (vm.tabs[static_cast<size_t>(dragI + k)].hidden) continue;
+            drawTab(static_cast<size_t>(dragI + k), floatX, true);
+            floatX += strip.pitch;
+        }
+    }
 
     auto tab_left_at = [&](int i) -> float {
-        if (i == dragI) return vm.tab_drag_x;
+        if (inDragRun(i)) return vm.tab_drag_x + static_cast<float>(i - dragI) * strip.pitch;
         const float extra = i < static_cast<int>(strip.extra.size())
             ? strip.extra[static_cast<size_t>(i)] : 0.0f;
         return strip.x0
@@ -1673,9 +1739,11 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
     };
     const int connected = dragI >= 0 ? dragI : activeI;
     if (connected >= 0 && connected < static_cast<int>(vm.tabs.size())) {
+        const float connW = vm.tabs[static_cast<size_t>(connected)].pinned
+            ? kTabPinnedW * scale_ : strip.w;
         const float shoulder = 8.0f * scale_;
         const float cut_l = tab_left_at(connected) - shoulder;
-        const float cut_r = tab_left_at(connected) + tabW + shoulder;
+        const float cut_r = tab_left_at(connected) + connW + shoulder;
         if (cut_l > 0.0f)
             FillRect(dc, brStrokeDivider_.get(), 0.0f, h - 1.0f, cut_l, 1.0f);
         if (cut_r < rect.right)
@@ -2325,14 +2393,27 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
         if (hovered) {
             MakeBrush(dc, theme.fill_hover, brFillHover_);
             FillRoundedRect(dc, brFillHover_.get(), panel.left + 6.0f * s, y,
-                            panel.right - panel.left - 12.0f * s, 20.0f * s, 5.0f * s);
+                            panel.right - panel.left - 12.0f * s, 28.0f * s, 6.0f * s);
         }
+        // Vector chevron: icon fonts on some machines lack the right-chevron glyph.
         const bool collapsed = (d.collapsed_mask >> id) & 1u;
-        DrawIconText(panel.left + 10.0f * s, y, 14.0f * s, 20.0f * s,
-                     collapsed ? L"\xE96C" : L"\xE96E", L">",
-                     theme.text_secondary, 0.8f);
-        text(label, D2D1::RectF(panel.left + 28.0f * s, y, panel.right - 12.0f * s,
-                                y + 20.0f * s),
+        MakeBrush(dc, theme.text_secondary, brText_);
+        const float cx = panel.left + 17.0f * s;
+        const float cy = y + 14.0f * s;
+        const float t = 1.3f * s;
+        if (collapsed) {
+            dc->DrawLine(D2D1::Point2F(cx - 2.0f * s, cy - 4.0f * s),
+                         D2D1::Point2F(cx + 2.0f * s, cy), brText_.get(), t);
+            dc->DrawLine(D2D1::Point2F(cx + 2.0f * s, cy),
+                         D2D1::Point2F(cx - 2.0f * s, cy + 4.0f * s), brText_.get(), t);
+        } else {
+            dc->DrawLine(D2D1::Point2F(cx - 4.0f * s, cy - 2.0f * s),
+                         D2D1::Point2F(cx, cy + 2.0f * s), brText_.get(), t);
+            dc->DrawLine(D2D1::Point2F(cx, cy + 2.0f * s),
+                         D2D1::Point2F(cx + 4.0f * s, cy - 2.0f * s), brText_.get(), t);
+        }
+        text(label, D2D1::RectF(panel.left + 28.0f * s, y + 4.0f * s,
+                                panel.right - 12.0f * s, y + 24.0f * s),
              compositor_->SmallFormat(), theme.accent);
     };
     auto centeredText = [&](const std::wstring& str, const D2D1_RECT_F& rc,
@@ -2550,156 +2631,256 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
         panel.right, panel.bottom);
     dc->PushAxisAlignedClip(restClip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
-    // Name + rename pencil + type.
+    // Name + star + rename pencil + subtitle.
     {
-        const bool renHot = d.multi_count <= 1 && IsHovered(vm, HitTestResult::DetailsRename);
-        if (renHot) {
-            MakeBrush(dc, theme.fill_hover, brFillHover_);
-            FillRoundedRect(dc, brFillHover_.get(), hit.rename.left, hit.rename.top,
-                            22.0f * s, 22.0f * s, 5.0f * s);
-        }
-        if (d.multi_count <= 1)
+        if (d.multi_count <= 1) {
+            const bool starHot = IsHovered(vm, HitTestResult::DetailsStar);
+            const bool renHot = IsHovered(vm, HitTestResult::DetailsRename);
+            if (starHot || d.starred) {
+                MakeBrush(dc, d.starred ? WithAlpha(theme.accent, starHot ? 0.28f : 0.18f)
+                                        : theme.fill_hover, brFillHover_);
+                FillRoundedRect(dc, brFillHover_.get(), hit.star.left, hit.star.top,
+                                22.0f * s, 22.0f * s, 5.0f * s);
+            }
+            if (renHot) {
+                MakeBrush(dc, theme.fill_hover, brFillHover_);
+                FillRoundedRect(dc, brFillHover_.get(), hit.rename.left, hit.rename.top,
+                                22.0f * s, 22.0f * s, 5.0f * s);
+            }
+            DrawIconText(hit.star.left, hit.star.top, 22.0f * s, 22.0f * s,
+                         d.starred ? L"\xE735" : L"\xE734", L"*",
+                         d.starred ? theme.accent : theme.text_secondary, 1.0f);
             DrawIconText(hit.rename.left, hit.rename.top, 22.0f * s, 22.0f * s,
                          L"\xE8AC", L"ren", theme.text_secondary, 0.72f);
+        }
         std::wstring shown = d.multi_count > 1
             ? (std::wstring(L"\u5DF2\u9009\u4E2D ") + std::to_wstring(d.multi_count) + L" \u9879")
             : d.name;
-        const float nameRight = d.multi_count <= 1 ? hit.rename.left - 4.0f * s
+        const float nameRight = d.multi_count <= 1 ? hit.star.left - 4.0f * s
                                                    : panel.right - pad;
         text(shown, D2D1::RectF(panel.left + pad, y, nameRight,
                                 y + 22.0f * s),
              compositor_->HeaderFormat(), theme.text);
-        // Type line derives from the name/dir flag when the model leaves it blank.
-        const std::wstring typeText = d.type_text.empty()
-            ? FormatListType(d.name, d.is_dir) : d.type_text;
-        if (!typeText.empty())
-            text(typeText, D2D1::RectF(panel.left + pad, y + 22.0f * s,
+        std::wstring subtitle = d.subtitle_text;
+        if (subtitle.empty())
+            subtitle = d.type_text.empty() ? FormatListType(d.name, d.is_dir) : d.type_text;
+        if (!subtitle.empty())
+            text(subtitle, D2D1::RectF(panel.left + pad, y + 22.0f * s,
                                        panel.right - pad, y + 38.0f * s),
                  compositor_->SmallFormat(), theme.text_secondary);
     }
     y += 22.0f * s + 16.0f * s + 8.0f * s;
 
-    // Single-item action row: multi-select intentionally omits unsafe single-item actions.
+    // Button row: 打开 / 在新标签打开 / 复制路径 / 更多 (icon over label).
     if (d.multi_count <= 1) {
-        MakeBrush(dc, IsHovered(vm, HitTestResult::DetailsOpen) ? theme.accent_hover
-                                                                : theme.accent, brAccent_);
-        FillRoundedRect(dc, brAccent_.get(), hit.open.left, hit.open.top,
-                        hit.open.right - hit.open.left, hit.open.bottom - hit.open.top,
-                        6.0f * s);
-        const float ow = hit.open.right - hit.open.left;
-        IDWriteTextFormat* fmt = compositor_->TextFormat();
-        const auto old = fmt ? fmt->GetTextAlignment() : DWRITE_TEXT_ALIGNMENT_LEADING;
-        if (fmt) {
-            fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-            MakeBrush(dc, theme.accent_text, brAccentText_);
-            DrawTextRect(dc, fmt, brAccentText_.get(), L"\u6253\u5F00", hit.open.left, hit.open.top,
-                         ow, hit.open.bottom - hit.open.top);
-            fmt->SetTextAlignment(old);
-        }
-        {
-            const bool starHot = IsHovered(vm, HitTestResult::DetailsStar);
-            if (d.starred || starHot) {
-                MakeBrush(dc, d.starred ? WithAlpha(theme.accent, starHot ? 0.28f : 0.18f)
-                                        : theme.fill_hover, brFillHover_);
-                FillRoundedRect(dc, brFillHover_.get(), hit.star.left, hit.star.top,
-                                hit.star.right - hit.star.left, hit.star.bottom - hit.star.top,
-                                6.0f * s);
+        auto rowButton = [&](const D2D1_RECT_F& rc, const wchar_t* glyph,
+                             const wchar_t* fallback, const wchar_t* label, bool hovered,
+                             bool primary) {
+            if (primary) {
+                MakeBrush(dc, hovered ? theme.accent_hover : theme.accent, brAccent_);
+                FillRoundedRect(dc, brAccent_.get(), rc.left, rc.top, rc.right - rc.left,
+                                rc.bottom - rc.top, 6.0f * s);
+            } else {
+                if (hovered) {
+                    MakeBrush(dc, theme.fill_hover, brFillHover_);
+                    FillRoundedRect(dc, brFillHover_.get(), rc.left, rc.top,
+                                    rc.right - rc.left, rc.bottom - rc.top, 6.0f * s);
+                }
+                MakeBrush(dc, theme.stroke_card, brStrokeCard_);
+                dc->DrawRoundedRectangle(D2D1::RoundedRect(rc, 6.0f * s, 6.0f * s),
+                                         brStrokeCard_.get(), 1.0f);
             }
-            MakeBrush(dc, d.starred ? theme.accent : theme.stroke_card, brStrokeCard_);
-            dc->DrawRoundedRectangle(D2D1::RoundedRect(hit.star, 6.0f * s, 6.0f * s),
-                                     brStrokeCard_.get(), 1.0f);
-            DrawIconText(hit.star.left, hit.star.top, hit.star.right - hit.star.left,
-                         hit.star.bottom - hit.star.top,
-                         d.starred ? L"\xE735" : L"\xE734", L"*",
-                         d.starred ? theme.accent : theme.text_secondary, 1.0f);
-        }
-        ghostButton(hit.more, nullptr, L"", IsHovered(vm, HitTestResult::DetailsMore));
-        DrawIconText(hit.more.left, hit.more.top, hit.more.right - hit.more.left,
-                     hit.more.bottom - hit.more.top,
-                     L"\xE712", L"...", theme.text_secondary, 0.72f);
+            const D2D1_COLOR_F fg = primary ? theme.accent_text : theme.text;
+            DrawIconText(rc.left, rc.top + 5.0f * s, rc.right - rc.left, 18.0f * s,
+                         glyph, fallback, primary ? theme.accent_text
+                                                  : theme.text_secondary, 1.0f);
+            IDWriteTextFormat* fmt = compositor_->SmallFormat();
+            if (!fmt) return;
+            const auto old = fmt->GetTextAlignment();
+            fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            MakeBrush(dc, fg, brText_);
+            DrawTextRect(dc, fmt, brText_.get(), label, rc.left + 2.0f * s,
+                         rc.top + 26.0f * s, rc.right - rc.left - 4.0f * s,
+                         rc.bottom - rc.top - 28.0f * s);
+            fmt->SetTextAlignment(old);
+        };
+        rowButton(hit.open, L"\xE8B7", L"O", L"\u6253\u5F00",
+                  IsHovered(vm, HitTestResult::DetailsOpen), true);
+        rowButton(hit.new_tab, L"\xE8A0", L"T", L"\u5728\u65B0\u6807\u7B7E\u6253\u5F00",
+                  IsHovered(vm, HitTestResult::DetailsNewTab), false);
+        rowButton(hit.copy_path, L"\xE8C8", L"C", L"\u590D\u5236\u8DEF\u5F84",
+                  IsHovered(vm, HitTestResult::DetailsCopyPath), false);
+        rowButton(hit.more, L"\xE712", L"...", L"\u66F4\u591A",
+                  IsHovered(vm, HitTestResult::DetailsMore), false);
+        y += 48.0f * s + 4.0f * s;
     }
-    if (d.multi_count <= 1) y += 26.0f * s + 12.0f * s;
+
+    auto infoRow = [&](const wchar_t* label, const std::wstring& value, float& iy) {
+        text(label, D2D1::RectF(panel.left + pad, iy, panel.left + pad + 96.0f * s,
+                                iy + 18.0f * s),
+             compositor_->SmallFormat(), theme.text_secondary);
+        text(value, D2D1::RectF(panel.left + pad + 100.0f * s, iy, panel.right - pad,
+                                iy + 18.0f * s),
+             compositor_->SmallFormat(), theme.text);
+        iy += 18.0f * s;
+    };
 
     if (d.multi_count > 1) {
-        section(L"信息", y);
+        text(L"\u4FE1\u606F", D2D1::RectF(panel.left + 12.0f * s, y, panel.right - 12.0f * s,
+                                          y + 20.0f * s),
+             compositor_->SmallFormat(), theme.accent);
         float iy = y + 20.0f * s;
-        auto summaryRow = [&](const wchar_t* label, const std::wstring& value) {
-            text(label, D2D1::RectF(panel.left + pad, iy, panel.left + pad + 64.0f * s,
-                                    iy + 18.0f * s),
-                 compositor_->SmallFormat(), theme.text_secondary);
-            text(value, D2D1::RectF(panel.left + pad + 68.0f * s, iy,
-                                    panel.right - pad, iy + 18.0f * s),
-                 compositor_->SmallFormat(), theme.text, true);
-            iy += 18.0f * s;
-        };
-        summaryRow(L"位置", d.location_text);
-        summaryRow(L"已知大小", d.size_text);
+        infoRow(L"位置", d.location_text, iy);
+        infoRow(L"已知大小", d.size_text, iy);
         y = iy + 8.0f * s;
     }
 
     if (d.multi_count <= 1) {
-        // 信息
-        section(L"\u4FE1\u606F", y);
-        float iy = y + 20.0f * s;
-        auto infoRow = [&](const wchar_t* label, const std::wstring& value) {
-            text(label, D2D1::RectF(panel.left + pad, iy, panel.left + pad + 64.0f * s,
-                                    iy + 18.0f * s),
-                 compositor_->SmallFormat(), theme.text_secondary);
-            text(value, D2D1::RectF(panel.left + pad + 68.0f * s, iy, panel.right - pad,
-                                    iy + 18.0f * s),
-                 compositor_->SmallFormat(), theme.text, true);
-            iy += 18.0f * s;
-        };
-        infoRow(L"\u4F4D\u7F6E", d.location_text);
-        infoRow(L"\u5927\u5C0F", d.size_pending ? std::wstring(L"\u8BA1\u7B97\u4E2D\u2026") : d.size_text);
-        if (d.is_dir) infoRow(L"\u5305\u542B", d.contains_text);
-        infoRow(L"\u521B\u5EFA\u65F6\u95F4", d.created_text);
-        infoRow(L"\u4FEE\u6539\u65F6\u95F4", d.modified_text);
-        infoRow(L"\u6700\u540E\u8BBF\u95EE", d.accessed_text);
-        infoRow(L"属性", d.attributes_text);
-        for (const auto& property : d.preview_properties)
-            infoRow(property.label.c_str(), property.value);
-        y = iy + 8.0f * s;
-
-        // 标签
-        section(L"\u6807\u7B7E", y);
-        const float chipY = y + 20.0f * s;
-        for (size_t i = 0; i < hit.tag_chips.size(); ++i) {
-            const auto& rc = hit.tag_chips[i];
-            const auto& chip = d.tags[i];
-            D2D1_COLOR_F fill = chip.color;
-            fill.a *= IsHovered(vm, HitTestResult::DetailsTagChip, static_cast<int>(i))
-                ? 0.30f : 0.14f;
-            MakeBrush(dc, fill, brFillHover_);
-            FillRoundedRect(dc, brFillHover_.get(), rc.left, rc.top,
-                            rc.right - rc.left, rc.bottom - rc.top, 11.0f * s);
-            D2D1_COLOR_F border = chip.color;
-            border.a *= 0.55f;
-            MakeBrush(dc, border, brStrokeCard_);
-            dc->DrawRoundedRectangle(D2D1::RoundedRect(rc, 11.0f * s, 11.0f * s),
-                                     brStrokeCard_.get(), 1.0f);
-            MakeBrush(dc, chip.color, brAccent_);
-            dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(rc.left + 10.0f * s,
-                (rc.top + rc.bottom) * 0.5f), 3.5f * s, 3.5f * s), brAccent_.get());
-            text(chip.name, D2D1::RectF(rc.left + 18.0f * s, rc.top, rc.right - 4.0f * s,
-                                        rc.bottom),
-                 compositor_->SmallFormat(), theme.text);
+        for (const auto& def : kDetailsSections) {
+            // Section separator (matches the 8 DIP gap in LayoutDetailsPanel).
+            y += 8.0f * s;
+            MakeBrush(dc, theme.stroke_card, brStrokeCard_);
+            FillRect(dc, brStrokeCard_.get(), panel.left + pad, y - 4.5f * s,
+                     panel.right - panel.left - pad * 2.0f, 1.0f);
+            section(def.label, y, def.id);
+            y += 28.0f * s;
+            if ((d.collapsed_mask >> def.id) & 1u) { y += 6.0f * s; continue; }
+            switch (def.id) {
+            case 0: { // 基本信息
+                float iy = y;
+                infoRow(L"位置", d.location_text, iy);
+                infoRow(L"类型", !d.type_text.empty()
+                            ? d.type_text : FormatListType(d.name, d.is_dir), iy);
+                infoRow(L"大小", d.size_pending ? std::wstring(L"\u8BA1\u7B97\u4E2D\u2026")
+                                                : d.size_text, iy);
+                if (d.is_dir) infoRow(L"\u5305\u542B", d.contains_text, iy);
+                infoRow(L"\u521B\u5EFA\u65F6\u95F4", d.created_text, iy);
+                infoRow(L"\u4FEE\u6539\u65F6\u95F4", d.modified_text, iy);
+                infoRow(L"\u6700\u540E\u8BBF\u95EE", d.accessed_text, iy);
+                for (const auto& property : d.preview_properties)
+                    infoRow(property.label.c_str(), property.value, iy);
+                y = iy + 8.0f * s;
+                break;
+            }
+            case 1: { // 属性: writable checkboxes + 高级…
+                fluent::ControlState roState;
+                roState.checked = (d.attrs & FILE_ATTRIBUTE_READONLY) != 0;
+                roState.hovered = IsHovered(vm, HitTestResult::DetailsAttrToggle, 0);
+                painter_.DrawCheckBox(D2D1::RectF(panel.left + pad, y, panel.right - pad,
+                                                  y + 24.0f * s),
+                                      L"\u53EA\u8BFB", roState);
+                fluent::ControlState hidState;
+                hidState.checked = (d.attrs & FILE_ATTRIBUTE_HIDDEN) != 0;
+                hidState.hovered = IsHovered(vm, HitTestResult::DetailsAttrToggle, 1);
+                painter_.DrawCheckBox(D2D1::RectF(panel.left + pad, y + 24.0f * s,
+                                                  panel.right - pad, y + 48.0f * s),
+                                      L"\u9690\u85CF", hidState);
+                {
+                    const bool hot = IsHovered(vm, HitTestResult::DetailsAttrToggle, 2);
+                    const auto& rc = hit.attr_advanced;
+                    if (hot) {
+                        MakeBrush(dc, theme.fill_hover, brFillHover_);
+                        FillRoundedRect(dc, brFillHover_.get(), rc.left, rc.top,
+                                        rc.right - rc.left, rc.bottom - rc.top, 6.0f * s);
+                    }
+                    MakeBrush(dc, theme.stroke_card, brStrokeCard_);
+                    dc->DrawRoundedRectangle(D2D1::RoundedRect(rc, 6.0f * s, 6.0f * s),
+                                             brStrokeCard_.get(), 1.0f);
+                    IDWriteTextFormat* fmt = compositor_->SmallFormat();
+                    if (fmt) {
+                        const auto old = fmt->GetTextAlignment();
+                        fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                        MakeBrush(dc, theme.text, brText_);
+                        DrawTextRect(dc, fmt, brText_.get(), L"\u9AD8\u7EA7\u2026",
+                                     rc.left, rc.top, rc.right - rc.left,
+                                     rc.bottom - rc.top);
+                        fmt->SetTextAlignment(old);
+                    }
+                }
+                y += 48.0f * s + 8.0f * s;
+                break;
+            }
+            case 2: { // 标签: 添加标签 row + preset chips (toggle on click)
+                ghostButton(hit.tag_add, kIconAdd, L"\u6DFB\u52A0\u6807\u7B7E",
+                            IsHovered(vm, HitTestResult::DetailsTagAdd));
+                for (size_t i = 0; i < hit.preset_chips.size(); ++i) {
+                    const auto& rc = hit.preset_chips[i];
+                    const auto& chip = d.preset_tags[i];
+                    const bool hot = IsHovered(vm, HitTestResult::DetailsPresetTag,
+                                               chip.tag_index);
+                    D2D1_COLOR_F fill = chip.color;
+                    fill.a *= chip.assigned ? (hot ? 0.34f : 0.24f)
+                                            : (hot ? 0.10f : 0.05f);
+                    MakeBrush(dc, fill, brFillHover_);
+                    FillRoundedRect(dc, brFillHover_.get(), rc.left, rc.top,
+                                    rc.right - rc.left, rc.bottom - rc.top, 11.0f * s);
+                    D2D1_COLOR_F border = chip.color;
+                    border.a *= chip.assigned ? 0.55f : 0.22f;
+                    MakeBrush(dc, border, brStrokeCard_);
+                    dc->DrawRoundedRectangle(D2D1::RoundedRect(rc, 11.0f * s, 11.0f * s),
+                                             brStrokeCard_.get(), 1.0f);
+                    MakeBrush(dc, chip.color, brAccent_);
+                    dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(rc.left + 11.0f * s,
+                        (rc.top + rc.bottom) * 0.5f), 3.5f * s, 3.5f * s), brAccent_.get());
+                    text(chip.name, D2D1::RectF(rc.left + 19.0f * s, rc.top,
+                                                rc.right - 4.0f * s, rc.bottom),
+                         compositor_->SmallFormat(),
+                         chip.assigned ? theme.text : theme.text_secondary);
+                }
+                y = hit.preset_chips.empty() ? (y + 26.0f * s + 6.0f * s + 8.0f * s)
+                    : (hit.preset_chips.back().bottom + 8.0f * s);
+                break;
+            }
+            case 3: { // 安全
+                float iy = y;
+                infoRow(L"\u6240\u6709\u8005",
+                        d.owner_text.empty() ? std::wstring(L"\u52A0\u8F7D\u4E2D\u2026")
+                                             : d.owner_text, iy);
+                {
+                    const bool hot = IsHovered(vm, HitTestResult::DetailsSecurityChange);
+                    text(L"\u66F4\u6539",
+                         D2D1::RectF(hit.security_change.left, y,
+                                     hit.security_change.right, y + 18.0f * s),
+                         compositor_->SmallFormat(),
+                         hot ? theme.accent_hover : theme.accent, true);
+                }
+                infoRow(L"\u6743\u9650",
+                        d.permissions_text.empty() ? std::wstring(L"\u52A0\u8F7D\u4E2D\u2026")
+                                                   : d.permissions_text, iy);
+                y = iy + 8.0f * s;
+                break;
+            }
+            case 4: { // 其他
+                float iy = y;
+                infoRow(L"\u9A71\u52A8\u5668",
+                        d.drive_text.empty() ? std::wstring(L"\u52A0\u8F7D\u4E2D\u2026")
+                                             : d.drive_text, iy);
+                infoRow(L"\u6587\u4EF6\u7CFB\u7EDF",
+                        d.fs_text.empty() ? std::wstring(L"\u52A0\u8F7D\u4E2D\u2026")
+                                          : d.fs_text, iy);
+                infoRow(L"\u53EF\u7528\u7A7A\u95F4",
+                        d.free_space_text.empty() ? std::wstring(L"\u52A0\u8F7D\u4E2D\u2026")
+                                                  : d.free_space_text, iy);
+                y = iy + 8.0f * s;
+                break;
+            }
+            default: break;
+            }
         }
-        ghostButton(hit.tag_add, nullptr, L"", IsHovered(vm, HitTestResult::DetailsTagAdd));
-        DrawIconText(hit.tag_add.left, hit.tag_add.top, 22.0f * s, 22.0f * s,
-                     kIconAdd, L"+", theme.text_secondary, 0.72f);
-        y = chipY + 22.0f * s + 8.0f * s;
     }
+    dc->PopAxisAlignedClip();
+    dc->PopAxisAlignedClip();
+}
 
-    // 快速操作
-    section(L"\u5FEB\u901F\u64CD\u4F5C", y);
-    for (size_t i = 0; i < hit.quick.size(); ++i) {
-        const int id = hit.quick_ids[i];
-        ghostButton(hit.quick[i], kQuickActionLabels[id].glyph, kQuickActionLabels[id].label,
-                    IsHovered(vm, HitTestResult::DetailsQuick, id));
-    }
-    dc->PopAxisAlignedClip();
-    dc->PopAxisAlignedClip();
+float MainRenderer::DetailsContentHeightDip(const WindowViewModel& vm, float w, float h) {
+    const D2D1_RECT_F panel = DetailsPanelRect(w, h);
+    if (panel.right - panel.left <= 1.0f) return 0.0f;
+    DetailsHitRects hit;
+    LayoutDetailsPanel(panel, scale_, vm.details,
+                       compositor_ ? compositor_->DwriteFactory() : nullptr,
+                       compositor_ ? compositor_->SmallFormat() : nullptr,
+                       DetailsPreviewHeight(panel, scale_), hit);
+    return hit.content_height_dip;
 }
 
 void MainRenderer::DrawPane(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme) {
@@ -3171,6 +3352,60 @@ static NameTrail LayoutNameTrail(float name_x, float text_y, float text_h,
     return t;
 }
 
+D2D1_RECT_F MainRenderer::RenameFieldRect(const PaneViewModel& vm, const D2D1_RECT_F& list,
+                                          int source_index) {
+    // Mirror of the frame geometry in DrawList for vm.rename_index — keep in sync.
+    if (!compositor_ || !compositor_->DwriteFactory() || source_index < 0) return {};
+    const int view = vm.ViewIndex(source_index);
+    if (view < 0) return {};
+    const ListEntryView& e = MakeVisibleEntry(vm, static_cast<size_t>(source_index));
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y,
+                      scale_, row_height_dip_);
+    const D2D1_RECT_F cell = layout.ItemRect(view);
+    const D2D1_RECT_F nameRc = layout.NameRect(view);
+    const bool iconGrid = vm.view_mode == ViewMode::ExtraLargeIcons ||
+                          vm.view_mode == ViewMode::LargeIcons ||
+                          vm.view_mode == ViewMode::MediumIcons;
+    float nameX = nameRc.left;
+    float textY = nameRc.top;
+    float textH = std::max(1.0f, nameRc.bottom - nameRc.top);
+    const float dot = 8.0f * scale_;
+    const std::vector<D2D1_COLOR_F>* tagDots = nullptr;
+    const std::vector<int>* tagIndices = vm.tag_catalog
+        ? vm.tag_catalog->TagIndicesForPath(e.path) : nullptr;
+    if (!tagIndices && vm.tag_dots) {
+        const auto found = vm.tag_dots->find(source_index);
+        if (found != vm.tag_dots->end()) tagDots = &found->second;
+    }
+    const size_t totalTags = tagIndices ? tagIndices->size() : (tagDots ? tagDots->size() : 0);
+    const int tagDotCount = static_cast<int>(std::min<size_t>(3, totalTags));
+    const float nameColRight = vm.view_mode == ViewMode::Details
+        ? DetailsColumns(list, vm.details_column_dividers).DividerX(0) - margin_
+        : nameRc.right;
+    if (iconGrid && tagDotCount > 0) {
+        const float fullNameW = MeasureTextWidth(
+            compositor_->DwriteFactory(), compositor_->TextFormat(), e.name);
+        const float nameGap = 4.0f * scale_;
+        const float cellW = nameRc.right - nameRc.left;
+        const float leftover = std::max(0.0f, cellW - fullNameW - nameGap);
+        const float dotsW = SpreadTagsWidth(tagDotCount, dot, nameGap) <= leftover + 0.5f
+            ? SpreadTagsWidth(tagDotCount, dot, nameGap)
+            : OverlapTagsWidth(tagDotCount, dot);
+        const float groupW = std::min(cellW, fullNameW + nameGap + dotsW);
+        nameX = nameRc.left + std::max(0.0f, (cellW - groupW) * 0.5f);
+        const float lineH = std::min(textH, 24.0f * scale_);
+        textY = nameRc.top + (textH - lineH) * 0.5f;
+        textH = lineH;
+    }
+    const NameTrail trail = LayoutNameTrail(
+        nameX, textY, textH, nameColRight, cell.top, cell.bottom, scale_,
+        e.name, tagDotCount, false, false,
+        compositor_->DwriteFactory(), compositor_->TextFormat());
+    const float field_w = std::max(40.0f * scale_, trail.name_w);
+    const float field_h = std::max(22.0f * scale_, std::min(textH, 30.0f * scale_));
+    return D2D1::RectF(nameX, textY, nameX + field_w, textY + field_h);
+}
+
 void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, float h,
                             const Theme& theme, int hover_region, int hover_control_index) {
     ID2D1DeviceContext* dc = compositor_->Dc();
@@ -3185,7 +3420,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
     const size_t entryCount = vm.EntryCount();
     if (entryCount == 0) return;
     const D2D1_RECT_F viewport = D2D1::RectF(x, y, x + w, y + h);
-    ViewLayout layout(vm.view_mode, viewport, entryCount, vm.scroll_x, vm.scroll_y, scale_);
+    ViewLayout layout(vm.view_mode, viewport, entryCount, vm.scroll_x, vm.scroll_y, scale_, row_height_dip_);
     const auto [startIdx, endIdx] = layout.VisibleRange();
     const DetailsColumnLayout detailsColumns = DetailsColumns(
         viewport, vm.details_column_dividers);
@@ -3300,13 +3535,10 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             e.name, tagDotCount, showStar, showMore,
             compositor_->DwriteFactory(), compositor_->TextFormat());
         if (src == vm.rename_index) {
-            const float field_w = std::max(40.0f * scale_, trail.name_w);
-            const float field_h = std::max(22.0f * scale_, std::min(textH, 30.0f * scale_));
+            const D2D1_RECT_F fieldRc = RenameFieldRect(vm, viewport, src);
             fluent::ControlState fieldState{};
             fieldState.focused = true;
-            painter_.DrawTextFieldFrame(
-                D2D1::RectF(nameX, textY, nameX + field_w, textY + field_h),
-                fieldState);
+            painter_.DrawTextFieldFrame(fieldRc, fieldState);
         } else {
             D2D1_COLOR_F nameColor = cut ? WithAlpha(theme.text, 0.55f) : theme.text;
             MakeBrush(dc, nameColor, brText_);
@@ -3445,7 +3677,7 @@ void MainRenderer::DrawScrollbar(const PaneViewModel& vm, float x, float y, floa
     (void)theme;
     ID2D1DeviceContext* dc = compositor_->Dc();
     ViewLayout layout(vm.view_mode, D2D1::RectF(x, y, x + w, y + h), vm.EntryCount(),
-                      vm.scroll_x, vm.scroll_y, scale_);
+                      vm.scroll_x, vm.scroll_y, scale_, row_height_dip_);
     const float totalH = layout.ContentHeight();
     auto sb = ComputeScrollbar(h, totalH, vm.scroll_y, layout.Metrics().cell_height);
     if (!sb.valid) return;
@@ -3600,6 +3832,36 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
             painter_.DrawRadioButton(D2D1::RectF(row.left + 16.0f * scale_, row.top,
                                                  row.right - 16.0f * scale_, row.bottom),
                                      WindowEffectLabel(effect), st);
+        }
+
+        draw_card(lay.density_card);
+        MakeBrush(dc, theme.text, brText_);
+        DrawTextRect(dc, compositor_->TextFormat(), brText_.get(), L"列表行高",
+                     lay.density_card.left + 16.0f * scale_, lay.density_card.top + 10.0f * scale_,
+                     lay.density_card.right - lay.density_card.left - 32.0f * scale_, 22.0f * scale_);
+        MakeBrush(dc, theme.text_secondary, brTextSecondary_);
+        DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(),
+                     L"调整文件列表每一行的高度，立即生效",
+                     lay.density_card.left + 16.0f * scale_, lay.density_card.top + 32.0f * scale_,
+                     lay.density_card.right - lay.density_card.left - 32.0f * scale_, 18.0f * scale_);
+        static constexpr const wchar_t* kDensityLabels[] = {
+            L"紧凑（28 像素）", L"标准（34 像素）", L"舒适（40 像素）"
+        };
+        static constexpr int kDensityDips[] = { 28, 34, 40 };
+        for (int i = 0; i < 3; ++i) {
+            const auto& row = lay.density_row[i];
+            if (IsHovered(vm, HitTestResult::SettingsDensity, i)) {
+                MakeBrush(dc, theme.fill_hover, brFillHover_);
+                FillRoundedRect(dc, brFillHover_.get(), row.left + 4.0f * scale_, row.top,
+                                row.right - row.left - 8.0f * scale_, row.bottom - row.top,
+                                4.0f * scale_);
+            }
+            fluent::ControlState st{};
+            st.checked = vm.settings_row_height == kDensityDips[i];
+            st.hovered = IsHovered(vm, HitTestResult::SettingsDensity, i);
+            painter_.DrawRadioButton(D2D1::RectF(row.left + 16.0f * scale_, row.top,
+                                                 row.right - 16.0f * scale_, row.bottom),
+                                     kDensityLabels[i], st);
         }
 
         draw_card(lay.wallpaper_card);
@@ -3794,7 +4056,7 @@ float MainRenderer::MaxScroll(const PaneViewModel& vm, const D2D1_RECT_F& rect) 
 float MainRenderer::MaxScrollForPane(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds) const {
     const float extra = vm.banner_message.empty() ? 0.0f : 36.0f * scale_;
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
-    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_);
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, row_height_dip_);
     return layout.MaxScrollY();
 }
 
@@ -3802,7 +4064,7 @@ float MainRenderer::MaxScrollXForPane(const PaneViewModel& vm,
                                       const D2D1_RECT_F& pane_bounds) const {
     const float extra = vm.banner_message.empty() ? 0.0f : 36.0f * scale_;
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
-    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_);
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, row_height_dip_);
     return layout.MaxScrollX();
 }
 
@@ -3811,7 +4073,7 @@ D2D1_RECT_F MainRenderer::ItemRectInPane(const PaneViewModel& vm,
                                          int view_index) const {
     const float extra = vm.banner_message.empty() ? 0.0f : 36.0f * scale_;
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
-    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_);
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, row_height_dip_);
     return layout.ItemRect(view_index);
 }
 
@@ -3819,14 +4081,14 @@ int MainRenderer::MoveViewIndex(const PaneViewModel& vm, const D2D1_RECT_F& pane
                                 int current, int dx, int dy) const {
     const float extra = vm.banner_message.empty() ? 0.0f : 36.0f * scale_;
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
-    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_);
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, row_height_dip_);
     return layout.MoveIndex(current, dx, dy);
 }
 
 int MainRenderer::PageDelta(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds) const {
     const float extra = vm.banner_message.empty() ? 0.0f : 36.0f * scale_;
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
-    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_);
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, row_height_dip_);
     return layout.PageDelta();
 }
 
@@ -3834,7 +4096,7 @@ std::pair<int, int> MainRenderer::VisibleRangeInPane(
     const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds) const {
     const float extra = vm.banner_message.empty() ? 0.0f : 36.0f * scale_;
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
-    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_);
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, row_height_dip_);
     return layout.VisibleRange();
 }
 
@@ -3851,7 +4113,7 @@ int MainRenderer::ItemFromPointInPane(const PaneViewModel& vm,
                                       float x, float y) const {
     const float extra = vm.banner_message.empty() ? 0.0f : 36.0f * scale_;
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
-    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_);
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, row_height_dip_);
     int idx = layout.HitTest(x, y);
     if (idx < 0) return -1;
     return vm.SourceIndex(idx);
@@ -3875,13 +4137,13 @@ MainRenderer::TabStripMetrics MainRenderer::ComputeTabStrip(
         const int g = vm.tabs[i].group;
         const bool runStart = g >= 0 && (i == 0 || vm.tabs[i - 1].group != g);
         if (!runStart) continue;
-        float cw = 22.0f * scale_; // dot-only chip
+        float cw = 8.0f * scale_; // unnamed group: slim color bar
         if (g < static_cast<int>(vm.tab_groups.size()) &&
             !vm.tab_groups[static_cast<size_t>(g)].name.empty()) {
             const float tw = std::min(88.0f * scale_,
                 MeasureTextWidth(compositor_->DwriteFactory(), chipFmt,
                                  vm.tab_groups[static_cast<size_t>(g)].name));
-            cw = tw + 26.0f * scale_; // dot + gaps + padding
+            cw = tw + 16.0f * scale_; // Edge-style block: text + side padding
         }
         TabStripMetrics::Chip chip;
         chip.width = cw;
@@ -3892,14 +4154,25 @@ MainRenderer::TabStripMetrics MainRenderer::ComputeTabStrip(
     m.extra.assign(vm.tabs.size(), 0.0f);
 
     const float available = std::max(0.0f, tabsRight - m.x0 - 36.0f * scale_ - chipsTotal);
-    m.w = vm.tabs.empty() ? 0.0f
+    size_t visibleCount = 0;
+    size_t pinnedCount = 0; // visible pinned tabs get a fixed narrow slot
+    for (const auto& t : vm.tabs) {
+        if (t.hidden) continue;
+        if (t.pinned) ++pinnedCount; else ++visibleCount;
+    }
+    const float pinnedW = kTabPinnedW * scale_;
+    const float pinnedTotal = static_cast<float>(pinnedCount) * (pinnedW + control_gap_);
+    m.w = visibleCount == 0 ? 0.0f
         : std::min(kTabMaxW * scale_, std::max(kTabMinW * scale_,
-            available / std::max(1.0f, static_cast<float>(vm.tabs.size())) - control_gap_));
+            std::max(0.0f, available - pinnedTotal)
+                / static_cast<float>(visibleCount) - control_gap_));
     m.y = 4.0f * scale_;
     m.h = title_bar_height_ - 8.0f * scale_;
     m.pitch = m.w + control_gap_;
 
-    // Final pass: per-tab extra offset + definitive chip positions.
+    // Final pass: per-tab extra offset + definitive chip positions. Collapsed
+    // members contribute zero width (chip stays visible at the fold point);
+    // pinned tabs use the fixed narrow slot.
     float acc = 0.0f;
     size_t chipIdx = 0;
     for (size_t i = 0; i < vm.tabs.size(); ++i) {
@@ -3910,6 +4183,8 @@ MainRenderer::TabStripMetrics MainRenderer::ComputeTabStrip(
             chip.left = m.x0 + static_cast<float>(i) * m.pitch + acc;
             acc += chip.width + chipGap;
         }
+        if (vm.tabs[i].hidden) acc -= m.pitch;
+        else if (vm.tabs[i].pinned) acc += pinnedW - m.w; // narrower than a slot
         m.extra[i] = acc;
     }
     return m;
@@ -3918,11 +4193,27 @@ MainRenderer::TabStripMetrics MainRenderer::ComputeTabStrip(
 bool MainRenderer::TabItemRect(const WindowViewModel& vm, float window_w, int index,
                                D2D1_RECT_F* out) const {
     if (!out || index < 0 || index >= static_cast<int>(vm.tabs.size())) return false;
+    if (vm.tabs[static_cast<size_t>(index)].hidden) return false; // collapsed group
     const TabStripMetrics m = ComputeTabStrip(vm, window_w);
     const float left = m.x0 + static_cast<float>(index) * m.pitch
         + (index < static_cast<int>(m.extra.size()) ? m.extra[static_cast<size_t>(index)] : 0.0f);
-    *out = D2D1::RectF(left, m.y, left + m.w, m.y + m.h);
+    const float w = vm.tabs[static_cast<size_t>(index)].pinned
+        ? kTabPinnedW * scale_ : m.w;
+    *out = D2D1::RectF(left, m.y, left + w, m.y + m.h);
     return true;
+}
+
+bool MainRenderer::TabGroupChipRect(const WindowViewModel& vm, float window_w,
+                                    int group_index, D2D1_RECT_F* out) const {
+    if (!out) return false;
+    const TabStripMetrics m = ComputeTabStrip(vm, window_w);
+    for (const auto& chip : m.chips) {
+        if (chip.group != group_index) continue;
+        *out = D2D1::RectF(chip.left, m.y + 4.0f * scale_, chip.left + chip.width,
+                           m.y + m.h - 4.0f * scale_);
+        return true;
+    }
+    return false;
 }
 
 float MainRenderer::TabPitchPx(const WindowViewModel& vm, float window_w) const {
@@ -3953,24 +4244,38 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
         const TitleChrome chrome = MakeTitleChrome(rect.right, scale_, title_bar_height_);
         const TabStripMetrics strip = ComputeTabStrip(vm, rect.right);
         auto hitTab = [&](int i) -> bool {
+            if (vm.tabs[static_cast<size_t>(i)].hidden) return false;
+            const float tabW = vm.tabs[static_cast<size_t>(i)].pinned
+                ? kTabPinnedW * scale_ : strip.w;
             const float extra = i < static_cast<int>(strip.extra.size())
                 ? strip.extra[static_cast<size_t>(i)] : 0.0f;
             float tabLeft = strip.x0
                 + (static_cast<float>(i) + vm.tabs[static_cast<size_t>(i)].x_offset) * strip.pitch
                 + extra;
-            if (i == vm.tab_drag_index) tabLeft = vm.tab_drag_x;
-            if (x < tabLeft || x >= tabLeft + strip.w) return false;
+            if (vm.tab_drag_index >= 0 && i >= vm.tab_drag_index &&
+                i < vm.tab_drag_index + std::max(1, vm.tab_drag_count)) {
+                // Floating run: positions follow the drag cursor, skipping
+                // hidden (collapsed) members just like the draw path.
+                float fx = vm.tab_drag_x;
+                for (int k = vm.tab_drag_index; k < i; ++k)
+                    if (!vm.tabs[static_cast<size_t>(k)].hidden) fx += strip.pitch;
+                tabLeft = fx;
+            }
+            if (x < tabLeft || x >= tabLeft + tabW) return false;
             r.index = i;
-            const bool show_close = TabCloseVisible(vm, i, strip.w, scale_);
+            const bool show_close = TabCloseVisible(vm, i, tabW, scale_);
             const float close_hit = (kTabClosePadDip + kTabCloseSizeDip) * scale_;
-            r.region = show_close && x >= tabLeft + strip.w - close_hit
+            r.region = show_close && x >= tabLeft + tabW - close_hit
                 ? HitTestResult::TabClose : HitTestResult::Tab;
             return true;
         };
-        // Raised tab is on top, so it wins overlapping hits.
-        if (vm.tab_drag_index >= 0 && vm.tab_drag_index < static_cast<int>(vm.tabs.size()) &&
-            hitTab(vm.tab_drag_index))
-            return r;
+        // Raised run is on top, so it wins overlapping hits.
+        if (vm.tab_drag_index >= 0 && vm.tab_drag_index < static_cast<int>(vm.tabs.size())) {
+            const int dragN = std::max(1, vm.tab_drag_count);
+            for (int k = vm.tab_drag_index;
+                 k < vm.tab_drag_index + dragN && k < static_cast<int>(vm.tabs.size()); ++k)
+                if (hitTab(k)) return r;
+        }
         // Group chips: strip slots between tabs, click opens the group popup.
         for (const auto& chip : strip.chips) {
             if (x >= chip.left && x < chip.left + chip.width &&
@@ -3981,7 +4286,8 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             }
         }
         for (int i = 0; i < static_cast<int>(vm.tabs.size()); ++i) {
-            if (i == vm.tab_drag_index) continue;
+            if (vm.tab_drag_index >= 0 && i >= vm.tab_drag_index &&
+                i < vm.tab_drag_index + std::max(1, vm.tab_drag_count)) continue;
             if (hitTab(i)) return r;
         }
         const float extraEnd = strip.extra.empty() ? 0.0f : strip.extra.back();
@@ -4023,6 +4329,13 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
         }
         if (ContainsPt(lay.content, x, y)) {
             if (vm.settings_page == 0) {
+                for (int i = 0; i < 3; ++i) {
+                    if (ContainsPt(lay.density_row[i], x, y)) {
+                        r.region = HitTestResult::SettingsDensity;
+                        r.index = i;
+                        return r;
+                    }
+                }
                 for (int i = 0; i < kWindowEffectCount; ++i) {
                     if (ContainsPt(lay.effect_row[i], x, y)) {
                         r.region = HitTestResult::SettingsEffect;
@@ -4236,31 +4549,34 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
         if (panel.right > panel.left && x >= panel.left && x < panel.right &&
             y >= panel.top && y < panel.bottom) {
             DetailsHitRects hitRects;
-            const float previewH = DetailsPreviewHeight(panel, scale_, details_preview_height_);
+            const float previewH = DetailsPreviewHeight(panel, scale_);
             LayoutDetailsPanel(panel, scale_, vm.details,
                                compositor_ ? compositor_->DwriteFactory() : nullptr,
                                compositor_ ? compositor_->SmallFormat() : nullptr,
                                previewH, hitRects);
-            if (RectContains(hitRects.preview_resize, x, y)) {
-                r.region = HitTestResult::DetailsPreviewResize;
-                return r;
-            }
+            if (RectContains(hitRects.preview, x, y)) { r.region = HitTestResult::DetailsPreview; return r; }
             if (RectContains(hitRects.rename, x, y)) { r.region = HitTestResult::DetailsRename; return r; }
             if (RectContains(hitRects.open, x, y)) { r.region = HitTestResult::DetailsOpen; return r; }
             if (RectContains(hitRects.star, x, y)) { r.region = HitTestResult::DetailsStar; return r; }
+            if (RectContains(hitRects.new_tab, x, y)) { r.region = HitTestResult::DetailsNewTab; return r; }
+            if (RectContains(hitRects.copy_path, x, y)) { r.region = HitTestResult::DetailsCopyPath; return r; }
             if (RectContains(hitRects.more, x, y)) { r.region = HitTestResult::DetailsMore; return r; }
             if (RectContains(hitRects.tag_add, x, y)) { r.region = HitTestResult::DetailsTagAdd; return r; }
-            for (size_t i = 0; i < hitRects.tag_chips.size(); ++i) {
-                if (RectContains(hitRects.tag_chips[i], x, y)) {
-                    r.region = HitTestResult::DetailsTagChip;
-                    r.index = static_cast<int>(i);
+            if (RectContains(hitRects.attr_advanced, x, y)) { r.region = HitTestResult::DetailsAttrToggle; r.index = 2; return r; }
+            if (RectContains(hitRects.attr_readonly, x, y)) { r.region = HitTestResult::DetailsAttrToggle; r.index = 0; return r; }
+            if (RectContains(hitRects.attr_hidden, x, y)) { r.region = HitTestResult::DetailsAttrToggle; r.index = 1; return r; }
+            if (RectContains(hitRects.security_change, x, y)) { r.region = HitTestResult::DetailsSecurityChange; return r; }
+            for (size_t i = 0; i < hitRects.preset_chips.size(); ++i) {
+                if (RectContains(hitRects.preset_chips[i], x, y)) {
+                    r.region = HitTestResult::DetailsPresetTag;
+                    r.index = hitRects.preset_ids[i];
                     return r;
                 }
             }
-            for (size_t i = 0; i < hitRects.quick.size(); ++i) {
-                if (RectContains(hitRects.quick[i], x, y)) {
-                    r.region = HitTestResult::DetailsQuick;
-                    r.index = hitRects.quick_ids[static_cast<size_t>(i)];
+            for (size_t i = 0; i < hitRects.section_headers.size(); ++i) {
+                if (RectContains(hitRects.section_headers[i], x, y)) {
+                    r.region = HitTestResult::DetailsSection;
+                    r.index = hitRects.section_ids[i];
                     return r;
                 }
             }
@@ -4362,7 +4678,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                         const DetailsColumnLayout columns = DetailsColumns(
                             list, paneVm.details_column_dividers);
                         ViewLayout layout(paneVm.view_mode, list, paneVm.EntryCount(),
-                                          paneVm.scroll_x, paneVm.scroll_y, scale_);
+                                          paneVm.scroll_x, paneVm.scroll_y, scale_, row_height_dip_);
                         const D2D1_RECT_F nameRc = layout.NameRect(viewRow);
                         const D2D1_RECT_F cell = layout.ItemRect(viewRow);
                         const ListEntryView& entry = MakeVisibleEntry(paneVm, static_cast<size_t>(idx));

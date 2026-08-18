@@ -48,7 +48,8 @@ bool UsesThumbnails(ViewMode mode) noexcept {
 }
 
 ViewLayout::ViewLayout(ViewMode mode, D2D1_RECT_F viewport, size_t item_count,
-                       float scroll_x, float scroll_y, float scale)
+                       float scroll_x, float scroll_y, float scale,
+                       float row_height_dip)
     : mode_(mode), viewport_(viewport), count_(item_count),
       scroll_x_(std::max(0.0f, scroll_x)), scroll_y_(std::max(0.0f, scroll_y)),
       scale_(std::max(0.5f, scale)) {
@@ -88,7 +89,7 @@ ViewLayout::ViewLayout(ViewMode mode, D2D1_RECT_F viewport, size_t item_count,
     }
     case ViewMode::Details:
         metrics_.cell_width = width;
-        metrics_.cell_height = 28.0f * scale_;
+        metrics_.cell_height = (row_height_dip > 0.0f ? row_height_dip : 28.0f) * scale_;
         metrics_.icon_size = 16.0f * scale_;
         content_width_ = width;
         content_height_ = static_cast<float>(count_) * metrics_.cell_height;

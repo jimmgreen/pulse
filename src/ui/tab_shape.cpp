@@ -90,7 +90,7 @@ void FillChromeTab(ID2D1DeviceContext* dc, ID2D1Brush* brush,
 
 void FillChromeTabAccent(ID2D1DeviceContext* dc, ID2D1Brush* brush,
                          const D2D1_RECT_F& bounds, const ChromeTabShape& shape,
-                         float thickness) {
+                         float thickness, bool bottom) {
     if (!dc || !brush || thickness < 0.5f) return;
     ID2D1Factory* factory = nullptr;
     dc->GetFactory(&factory);
@@ -100,10 +100,13 @@ void FillChromeTabAccent(ID2D1DeviceContext* dc, ID2D1Brush* brush,
     if (FAILED(CreateChromeTabGeometry(factory, bounds, shape, &tab)) || !tab.get())
         return;
 
-    const D2D1_RECT_F strip = D2D1::RectF(bounds.left - shape.bottom_radius,
-                                          bounds.top,
-                                          bounds.right + shape.bottom_radius,
-                                          bounds.top + thickness);
+    const D2D1_RECT_F strip = bottom
+        ? D2D1::RectF(bounds.left - shape.bottom_radius,
+                      bounds.bottom - thickness,
+                      bounds.right + shape.bottom_radius, bounds.bottom)
+        : D2D1::RectF(bounds.left - shape.bottom_radius,
+                      bounds.top,
+                      bounds.right + shape.bottom_radius, bounds.top + thickness);
     ComPtr<ID2D1RectangleGeometry> strip_geo;
     if (FAILED(factory->CreateRectangleGeometry(strip, &strip_geo))) return;
 

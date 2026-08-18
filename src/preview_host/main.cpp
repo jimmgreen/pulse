@@ -200,7 +200,7 @@ struct PreviewPropertyValue { std::wstring label, value; };
 
 void AddProperty(IPropertyStore* store, REFPROPERTYKEY key, const wchar_t* label,
                  std::vector<PreviewPropertyValue>& out) {
-    if (!store || out.size() >= 3) return;
+    if (!store || out.size() >= 6) return;
     PROPVARIANT value{};
     PropVariantInit(&value);
     if (SUCCEEDED(store->GetValue(key, &value)) && value.vt != VT_EMPTY && value.vt != VT_NULL) {
@@ -214,6 +214,19 @@ void AddProperty(IPropertyStore* store, REFPROPERTYKEY key, const wchar_t* label
     PropVariantClear(&value);
 }
 
+bool ReadUintProperty(IPropertyStore* store, REFPROPERTYKEY key, uint32_t& value) {
+    if (!store) return false;
+    PROPVARIANT pv{};
+    PropVariantInit(&pv);
+    bool ok = false;
+    if (SUCCEEDED(store->GetValue(key, &pv))) {
+        if (pv.vt == VT_UI4) { value = pv.uintVal; ok = true; }
+        else if (pv.vt == VT_I4 && pv.lVal > 0) { value = static_cast<uint32_t>(pv.lVal); ok = true; }
+    }
+    PropVariantClear(&pv);
+    return ok;
+}
+
 std::vector<PreviewPropertyValue> ReadProperties(const std::wstring& path) {
     std::vector<PreviewPropertyValue> out;
     const std::wstring shell_path = ShellPath(path);
@@ -225,7 +238,19 @@ std::vector<PreviewPropertyValue> ReadProperties(const std::wstring& path) {
         AddProperty(store.Get(), PKEY_Image_Dimensions, L"尺寸", out);
         AddProperty(store.Get(), PKEY_Photo_DateTaken, L"拍摄时间", out);
         AddProperty(store.Get(), PKEY_Photo_CameraModel, L"相机", out);
-    } else if (IsOneOf(extension, {L".mp3", L".wav", L".flac", L".m4a", L".aac", L".mp4", L".mkv", L".mov", L".avi", L".webm"})) {
+    } else if (IsOneOf(extension, {L".mp4", L".mkv", L".mov", L".avi", L".webm", L".wmv", L".m4v"})) {
+        AddProperty(store.Get(), PKEY_Media_Duration, L"时长", out);
+        uint32_t width = 0, height = 0;
+        if (out.size() < 6 && ReadUintProperty(store.Get(), PKEY_Video_FrameWidth, width) &&
+            ReadUintProperty(store.Get(), PKEY_Video_FrameHeight, height) &&
+            width > 0 && height > 0) {
+            wchar_t dims[64];
+            swprintf_s(dims, L"%u x %u", width, height);
+            out.push_back({ L"分辨率", dims });
+        }
+        AddProperty(store.Get(), PKEY_Video_FrameRate, L"帧率", out);
+        AddProperty(store.Get(), PKEY_Video_Compression, L"编码格式", out);
+    } else if (IsOneOf(extension, {L".mp3", L".wav", L".flac", L".m4a", L".aac"})) {
         AddProperty(store.Get(), PKEY_Media_Duration, L"时长", out);
         AddProperty(store.Get(), PKEY_Music_Artist, L"艺术家", out);
         AddProperty(store.Get(), PKEY_Music_AlbumTitle, L"专辑", out);

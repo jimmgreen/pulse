@@ -43,6 +43,7 @@ void AppPrefs::ResetToDefaults() {
     keep_running_on_close = false;
     window_effect = L"mica-alt";
     background_image.clear();
+    row_height = 34;
 }
 
 std::wstring AppPrefs::ToJson() const {
@@ -58,7 +59,9 @@ std::wstring AppPrefs::ToJson() const {
     out += escaped_effect;
     out += L"\",\n  \"background_image\":\"";
     out += escaped_image;
-    out += L"\"\n}\n";
+    out += L"\",\n  \"row_height\":";
+    out += std::to_wstring(row_height);
+    out += L"\n}\n";
     return out;
 }
 
@@ -70,6 +73,8 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     if (window_effect == L"dwm-blur") window_effect = L"acrylic-material";
     else if (window_effect.empty()) window_effect = L"mica-alt";
     background_image = pulse::json::ExtractString(json, L"background_image");
+    row_height = pulse::json::ExtractInt(json, L"row_height", 34);
+    if (row_height < 24 || row_height > 48) row_height = 34;
     return true;
 }
 

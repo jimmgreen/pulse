@@ -14,6 +14,7 @@
 #include "shell_verbs.h"
 #include "places.h"
 #include "link_resolve.h"
+#include "details_meta.h"
 #include "../ipc/ctx_menu_util.h"
 #include "../index/index_engine.h"
 #include "../fs/fs_enum.h"
@@ -23,6 +24,7 @@
 #include "../ui/ui_renderer.h"
 #include "../ops/ops_manager.h"
 #include "../ops/clipboard.h"
+#include "../common/text_format.h"
 
 #include <windows.h>
 #include <shellapi.h>
@@ -196,6 +198,11 @@ void TestMenuModel() {
     // Item menu: 打开 + icon strip (cut/copy/delete/rename) + verbs + undo.
     auto items = BuildItemMenu(false, L"");
     Check(items.size() == 9, L"menu: item menu is 打开+图标条+verbs+undo");
+    // Command-id ranges must not overlap: CmdTabJoinGroupBase once collided
+    // with CmdTabCloseOthers and "join group" closed every other tab.
+    static_assert(CmdTabJoinGroupBase > CmdTabCloseRight &&
+                  CmdTabJoinGroupBase + 32 <= CmdRecentBase,
+                  "join-group ids must sit between tab commands and recents");
     std::vector<int> want{ CmdOpen, CmdNone, CmdCopyPath, CmdOpenTerminal, CmdProperties,
                            CmdPinWorkspace, CmdPinNetwork, CmdTags, CmdUndo };
     bool ids_ok = items.size() >= want.size();
@@ -466,6 +473,15 @@ void TestAppPrefsAndSettingsPath() {
     Check(json.find(L"\"launch_on_startup\":false") != std::wstring::npos &&
           json.find(L"\"keep_running_on_close\":true") != std::wstring::npos,
           L"appprefs: json contains both flags");
+    AppPrefs density;
+    density.persist = false;
+    density.row_height = 40;
+    AppPrefs density_loaded;
+    density_loaded.persist = false;
+    Check(density_loaded.FromJson(density.ToJson()) && density_loaded.row_height == 40,
+          L"appprefs: row_height round-trip");
+    Check(density_loaded.FromJson(L"{\"row_height\":99}") && density_loaded.row_height == 34,
+          L"appprefs: row_height out of range falls back to default");
 
     bool effect_ids_ok = true;
     for (int i = 0; i < ui::kWindowEffectCount; ++i) {
@@ -1252,6 +1268,81 @@ void TestLinkResolve() {
     RemoveDirectoryW(dir.c_str());
 }
 
+void TestDetailsMeta() {
+    Check(pulse::format::GroupedInt(0) == L"0", L"meta: grouped int zero");
+    Check(pulse::format::GroupedInt(12345) == L"12,345", L"meta: grouped int small");
+    Check(pulse::format::GroupedInt(2895851315ull) == L"2,895,851,315",
+          L"meta: grouped int large");
+    Check(FormatAccessMask(FILE_ALL_ACCESS, false) == L"完全控制",
+          L"meta: mask full control");
+    Check(FormatAccessMask(FILE_GENERIC_READ | FILE_GENERIC_WRITE, false) == L"修改",
+          L"meta: mask modify");
+    Check(FormatAccessMask(FILE_GENERIC_READ | FILE_GENERIC_EXECUTE, true) ==
+          L"读取和执行、列出文件夹内容、读取", L"meta: mask read-execute dir");
+    Check(FormatAccessMask(FILE_GENERIC_WRITE, false) == L"写入", L"meta: mask write only");
+    Check(FormatAccessMask(DELETE, false) == L"删除", L"meta: mask delete only");
+    Check(FormatAccessMask(0, false) == L"特殊权限", L"meta: mask empty");
+}
+
+void TestMoveTabRun() {
+    std::vector<int> order{ 0, 1, 2, 3, 4, 5 };
+    Check(MoveTabRun(order, 1, 2, -1) == 0 &&
+          order == (std::vector<int>{ 1, 2, 0, 3, 4, 5 }),
+          L"tabrun: rotate left moves block");
+    Check(MoveTabRun(order, 0, 2, 1) == 1 &&
+          order == (std::vector<int>{ 0, 1, 2, 3, 4, 5 }),
+          L"tabrun: rotate right restores");
+    Check(MoveTabRun(order, 2, 2, 1) == 3 &&
+          order == (std::vector<int>{ 0, 1, 4, 2, 3, 5 }),
+          L"tabrun: rotate right displaces single");
+    order = { 0, 1, 2, 3 };
+    Check(MoveTabRun(order, 0, 2, -1) == 0 &&
+          order == (std::vector<int>{ 0, 1, 2, 3 }),
+          L"tabrun: left edge is a no-op");
+    Check(MoveTabRun(order, 2, 2, 1) == 2 &&
+          order == (std::vector<int>{ 0, 1, 2, 3 }),
+          L"tabrun: right edge is a no-op");
+    Check(MoveTabRun(order, 0, 1, 1) == 1 &&
+          order == (std::vector<int>{ 1, 0, 2, 3 }),
+          L"tabrun: len-1 degenerates to a swap");
+}
+
+void TestNormalizeGroupRuns() {
+    auto make = [](int group) {
+        auto t = std::make_unique<Tab>();
+        t->tab_group = group;
+        return t;
+    };
+    {   // Split run: 1,0,1,2 -> 1,1,0,2 and active tab follows its pointer.
+        app::Pane pane;
+        pane.tabs.push_back(make(1)); pane.tabs.push_back(make(0));
+        pane.tabs.push_back(make(1)); pane.tabs.push_back(make(2));
+        pane.active_tab = 2;
+        const Tab* active = pane.tabs[2].get();
+        NormalizeGroupRuns(pane);
+        Check(pane.tabs.size() == 4 &&
+              pane.tabs[0]->tab_group == 1 && pane.tabs[1]->tab_group == 1 &&
+              pane.tabs[2]->tab_group == 0 && pane.tabs[3]->tab_group == 2,
+              L"tabgroup: split run collapses into one run");
+        Check(pane.ActiveTab() == active, L"tabgroup: active tab survives normalize");
+    }
+    {   // Interleaved groups: 1,2,1,2 -> 1,1,2,2 (first-appearance order kept).
+        app::Pane pane;
+        for (int g : { 1, 2, 1, 2 }) pane.tabs.push_back(make(g));
+        NormalizeGroupRuns(pane);
+        Check(pane.tabs[0]->tab_group == 1 && pane.tabs[1]->tab_group == 1 &&
+              pane.tabs[2]->tab_group == 2 && pane.tabs[3]->tab_group == 2,
+              L"tabgroup: interleaved groups normalize pairwise");
+    }
+    {   // Already contiguous: untouched.
+        app::Pane pane;
+        for (int g : { 0, 1, 1, 0 }) pane.tabs.push_back(make(g));
+        NormalizeGroupRuns(pane);
+        Check(pane.tabs[0]->tab_group == 0 && pane.tabs[2]->tab_group == 1 &&
+              pane.tabs[3]->tab_group == 0, L"tabgroup: contiguous runs untouched");
+    }
+}
+
 int RunSelfTest1B2() {
     // Attach to the parent console (started from a terminal); GUI subsystem exe.
     if (AttachConsole(ATTACH_PARENT_PROCESS)) {
@@ -1280,6 +1371,9 @@ int RunSelfTest1B2() {
     TestViewLayouts();
     TestPlacesAndIndex();
     TestLinkResolve();
+    TestDetailsMeta();
+    TestMoveTabRun();
+    TestNormalizeGroupRuns();
     TestOpsThroughShell();
 
     // Cleanup: real-delete the whole sandbox via the ops layer is overkill;

@@ -31,6 +31,8 @@ struct TabView {
     float x_offset = 0.0f; // slot units: sibling slide during tab reorder
     uint32_t color_rgb = 0; // resolved group color (0 = ungrouped)
     int group = -1;         // index into WindowViewModel::tab_groups
+    bool hidden = false;    // member of a collapsed group: zero width, not drawn
+    bool pinned = false;    // narrow icon-only slot, left cluster, no close
 };
 
 // A named, colored tab group shown as a chip at the start of its run.
@@ -38,6 +40,7 @@ struct TabGroupView {
     int id = 0;             // app::TabGroup::id
     std::wstring name;
     uint32_t color_rgb = 0;
+    bool collapsed = false;
 };
 
 struct ListEntryView {
@@ -215,6 +218,7 @@ struct DetailsPanelView {
     bool has_selection = false;
     int multi_count = 0;            // >1 => multi-selection summary mode
     std::wstring name, path, type_text;
+    std::wstring subtitle_text;     // under-name line: type · size short form
     bool is_dir = false;
     DWORD attrs = 0;
     uint64_t modified_value = 0;    // thumbnail cache key parts
@@ -238,8 +242,9 @@ struct DetailsPanelView {
         std::wstring name;
         D2D1_COLOR_F color{};
         int tag_index = -1;         // index into PlacesCatalog::tags
+        bool assigned = false;      // current selection already has this tag
     };
-    std::vector<TagChip> tags;
+    std::vector<TagChip> preset_tags; // full catalog with per-selection state
 };
 
 // Interactive rects inside the details panel, shared by draw and hit-test.
@@ -248,7 +253,8 @@ struct DetailsHitRects {
     D2D1_RECT_F tag_add{}, preview{};
     D2D1_RECT_F attr_readonly{}, attr_hidden{}, attr_advanced{};
     D2D1_RECT_F security_change{};
-    std::vector<D2D1_RECT_F> tag_chips;
+    std::vector<D2D1_RECT_F> preset_chips;
+    std::vector<int> preset_ids;    // tag_index per chip
     std::vector<D2D1_RECT_F> section_headers;
     std::vector<int> section_ids;   // bit index into collapsed_mask
     float content_height_dip = 0.0f; // unclipped content height for wheel clamp
@@ -311,7 +317,9 @@ struct WindowViewModel {
     int tag_drag_item = -1;
     float tag_drag_y = 0.0f;
     // Title-bar tab drag: floating tab follows the cursor (QFluent TabBar).
-    int tab_drag_index = -1; // display index of the raised tab, or -1
+    int tab_drag_index = -1; // display index of the run's first tab, or -1
+    int tab_drag_count = 1;  // >1: a whole group run floats as one block
+    bool tab_drag_chip = false; // drag started from the group chip (collapse-safe)
     float tab_drag_x = 0.0f; // left edge of the floating tab (px)
     bool tray_drop = false;       // staging tray under a drag
     std::wstring drag_badge;      // action badge text near the cursor
@@ -333,7 +341,6 @@ struct WindowViewModel {
     bool filter_editing = false;
     bool splitter_pressed = false;
     bool details_resize_pressed = false;
-    bool details_preview_resize_pressed = false;
     bool column_resize_pressed = false;
     int hover_pane_index = -1;
 
@@ -342,6 +349,7 @@ struct WindowViewModel {
     float settings_scroll = 0.0f;
     bool settings_launch_on_startup = false;
     bool settings_keep_running = false;
+    int settings_row_height = 34; // current row-height pref (DIPs) for density radios
     bool settings_group_on[5] = { true, true, false, false, true };
     std::vector<SettingsRowView> settings_items;
 };
@@ -399,12 +407,12 @@ struct HitTestResult {
         DetailsMore,
         DetailsRename,
         DetailsTagAdd,
-        DetailsTagChip,
         DetailsNewTab,
         DetailsCopyPath,
         DetailsSection,
         DetailsAttrToggle,
         DetailsSecurityChange,
+        DetailsPresetTag,
         DetailsPreview,
         DetailsResize,
         StatusBar,
@@ -412,7 +420,8 @@ struct HitTestResult {
         SettingsToggle,
         SettingsRestore,
         SettingsEffect,
-        SettingsWallpaper
+        SettingsWallpaper,
+        SettingsDensity
     } region = None;
     int index = -1;          // tab/row/sidebar item/tray batch/tray item.
     int sub_index = -1;      // tray item inside batch, breadcrumb segment.
@@ -439,6 +448,12 @@ public:
     float PaneHeaderHeight() const { return pane_header_height_; }
     float ColumnHeaderHeight() const { return column_header_height_; }
     float RowHeight() const { return row_height_; }
+    // File-list row height preference (DIPs); survives SetScale recompute.
+    void SetRowHeightDip(float dip) {
+        row_height_dip_ = std::clamp(dip, 24.0f, 48.0f);
+        row_height_ = row_height_dip_ * scale_;
+    }
+    float RowHeightDip() const { return row_height_dip_; }
     float Margin() const { return margin_; }
 
     float ContentLeft() const { return sidebar_width_ + margin_; }
@@ -459,6 +474,8 @@ public:
     // refreshed every frame the preview draws a bitmap.
     float DetailsCoverMaxPanX() const { return cover_max_pan_x_; }
     float DetailsCoverMaxPanY() const { return cover_max_pan_y_; }
+    // Unclipped content height (DIPs) of the details panel, for wheel clamping.
+    float DetailsContentHeightDip(const WindowViewModel& vm, float w, float h);
     bool CachedPreviewProperties(const std::wstring& path, uint64_t modified, uint64_t size,
                                  std::vector<PreviewProperty>& properties) {
         return thumbnail_cache_.CachedProperties(path, modified, size, properties);
@@ -504,6 +521,10 @@ public:
                              const std::array<float, 3>& column_dividers = {}) const;
     bool PointInItemName(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds,
                          int source_index, float x, float y) const;
+    // Exact geometry of the Fluent frame drawn for the rename row; the hosted
+    // EDIT control is placed inside this rect (must stay in sync with DrawList).
+    D2D1_RECT_F RenameFieldRect(const PaneViewModel& vm, const D2D1_RECT_F& list,
+                                int source_index);
     D2D1_RECT_F SidebarRect(float w, float h) const;
     D2D1_RECT_F StagingTrayRect(const WindowViewModel& vm, float w, float h) const;
     D2D1_RECT_F TitleBarRect(float w) const;
@@ -547,6 +568,9 @@ public:
                      D2D1_RECT_F* out) const;
     // Rest-slot rect of a title-bar tab (display index, no drag float).
     bool TabItemRect(const WindowViewModel& vm, float window_w, int index, D2D1_RECT_F* out) const;
+    // Group chip rect (title-bar space); false when the group has no chip.
+    bool TabGroupChipRect(const WindowViewModel& vm, float window_w, int group_index,
+                          D2D1_RECT_F* out) const;
     // Uniform tab pitch (excludes group-chip offsets); used by drag math.
     float TabPitchPx(const WindowViewModel& vm, float window_w) const;
     float SettingsMaxScroll(const WindowViewModel& vm, float window_w, float window_h) const;
@@ -623,7 +647,8 @@ private:
     float sidebar_width_ = 224.0f;
     float pane_header_height_ = 40.0f;
     float column_header_height_ = 32.0f;
-    float row_height_ = 28.0f;
+    float row_height_ = 34.0f;
+    float row_height_dip_ = 34.0f;
     float margin_ = 4.0f;
     float control_gap_ = 4.0f;
     bool details_visible_ = false;

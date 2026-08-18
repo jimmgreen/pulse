@@ -44,6 +44,7 @@ struct Tab {
     bool net_readonly = false;
     uint64_t cache_unix = 0;
     int tab_group = 0; // 0 = none; TabGroup::id of the owning group
+    bool pinned = false; // Chrome semantics: icon-only, left cluster, no close
 
     // Transient UI state.
     bool loading = false;
@@ -102,7 +103,12 @@ struct TabGroup {
     int id = 0;
     std::wstring name;
     uint32_t color_rgb = 0;
+    bool collapsed = false; // header shows only the chip; member tabs hide
 };
+
+// Move a contiguous run of len items at pos one slot left (dir<0) or right
+// (dir>0). Returns the new run position (unchanged when out of range).
+int MoveTabRun(std::vector<int>& order, int pos, int len, int dir);
 
 struct Pane {
     std::vector<std::unique_ptr<Tab>> tabs;
@@ -117,10 +123,17 @@ struct Pane {
     const Tab* ActiveTab() const { return active_tab < tabs.size() ? tabs[active_tab].get() : nullptr; }
 
     void NewTab(const std::wstring& path);
+    void NewTabAt(size_t index, const std::wstring& path); // insert + activate
     void CloseTab(size_t idx);
     void SwitchTab(size_t idx);
     void MoveTab(size_t from, size_t to);
 };
+
+// Pull every group's members into one contiguous run (group order by first
+// appearance; member order preserved). Chromium keeps groups always
+// contiguous (TabGroup::ListTabs contract); call after membership changes
+// that can split a run. Remaps Pane::active_tab by pointer identity.
+void NormalizeGroupRuns(Pane& pane);
 
 enum class SplitOrientation { Horizontal, Vertical };
 

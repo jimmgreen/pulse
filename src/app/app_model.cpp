@@ -12,6 +12,58 @@
 
 namespace pulse::app {
 
+int MoveTabRun(std::vector<int>& order, int pos, int len, int dir) {
+    const int n = static_cast<int>(order.size());
+    if (pos < 0 || len < 1 || pos + len > n) return pos;
+    if (dir < 0 && pos > 0) {
+        std::rotate(order.begin() + pos - 1, order.begin() + pos,
+                    order.begin() + pos + len);
+        return pos - 1;
+    }
+    if (dir > 0 && pos + len < n) {
+        std::rotate(order.begin() + pos, order.begin() + pos + len,
+                    order.begin() + pos + len + 1);
+        return pos + 1;
+    }
+    return pos;
+}
+
+void NormalizeGroupRuns(Pane& pane) {
+    // Group ids in first-appearance order.
+    std::vector<int> groups;
+    for (const auto& t : pane.tabs) {
+        const int g = t->tab_group;
+        if (g != 0 && std::find(groups.begin(), groups.end(), g) == groups.end())
+            groups.push_back(g);
+    }
+    if (groups.empty()) return;
+    const Tab* active = pane.ActiveTab() ? pane.ActiveTab() : nullptr;
+    for (const int gid : groups) {
+        std::vector<size_t> members;
+        for (size_t i = 0; i < pane.tabs.size(); ++i)
+            if (pane.tabs[i]->tab_group == gid) members.push_back(i);
+        if (members.size() < 2) continue;
+        if (members.back() - members.front() + 1 == members.size()) continue;
+        // Extract members (descending erase keeps lower indices valid), then
+        // reinsert the run at the first member's slot.
+        std::vector<std::unique_ptr<Tab>> held;
+        held.reserve(members.size());
+        for (auto it = members.rbegin(); it != members.rend(); ++it) {
+            held.push_back(std::move(pane.tabs[*it]));
+            pane.tabs.erase(pane.tabs.begin() + static_cast<ptrdiff_t>(*it));
+        }
+        std::reverse(held.begin(), held.end());
+        const size_t at = std::min(members.front(), pane.tabs.size());
+        pane.tabs.insert(pane.tabs.begin() + static_cast<ptrdiff_t>(at),
+                         std::make_move_iterator(held.begin()),
+                         std::make_move_iterator(held.end()));
+    }
+    if (active) {
+        for (size_t i = 0; i < pane.tabs.size(); ++i)
+            if (pane.tabs[i].get() == active) { pane.active_tab = i; break; }
+    }
+}
+
 std::wstring NavigationReturnChildName(const std::wstring& from_path,
                                        const std::wstring& destination_path) {
     if (from_path.empty() || destination_path.empty() ||
@@ -268,9 +320,27 @@ void Pane::NewTab(const std::wstring& path) {
     active_tab = tabs.size() - 1;
 }
 
+void Pane::NewTabAt(size_t index, const std::wstring& path) {
+    auto t = std::make_unique<Tab>();
+    if (const Tab* source = ActiveTab()) {
+        t->view_mode = source->view_mode;
+        t->details_column_dividers = source->details_column_dividers;
+    }
+    t->current_path = fs::NormalizePath(path);
+    t->loading = true;
+    // New tabs are never pinned: the pinned block is a prefix (Chrome).
+    size_t first_unpinned = 0;
+    while (first_unpinned < tabs.size() && tabs[first_unpinned]->pinned)
+        ++first_unpinned;
+    index = std::clamp(index, first_unpinned, tabs.size());
+    tabs.insert(tabs.begin() + static_cast<ptrdiff_t>(index), std::move(t));
+    active_tab = index;
+}
+
 void Pane::CloseTab(size_t idx) {
     if (idx >= tabs.size()) return;
     if (tabs.size() <= 1) return;
+    if (tabs[idx]->pinned) return; // pinned tabs refuse to close (Chrome)
     tabs.erase(tabs.begin() + idx);
     if (active_tab >= tabs.size()) active_tab = tabs.size() - 1;
 }
@@ -917,6 +987,7 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
         gv.id = g.id;
         gv.name = g.name;
         gv.color_rgb = g.color_rgb;
+        gv.collapsed = g.collapsed;
         vm.tab_groups.push_back(std::move(gv));
     }
     vm.tabs.reserve(pane.tabs.size());
@@ -925,11 +996,13 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
         tv.title = pane.tabs[i]->virtual_title.empty()
             ? TabTitle(pane.tabs[i]->current_path) : pane.tabs[i]->virtual_title;
         tv.active = i == pane.active_tab;
+        tv.pinned = pane.tabs[i]->pinned;
         if (pane.tabs[i]->tab_group != 0) {
             for (size_t gi = 0; gi < pane.tab_groups.size(); ++gi) {
                 if (pane.tab_groups[gi].id == pane.tabs[i]->tab_group) {
                     tv.group = static_cast<int>(gi);
                     tv.color_rgb = pane.tab_groups[gi].color_rgb;
+                    tv.hidden = pane.tab_groups[gi].collapsed;
                     break;
                 }
             }
