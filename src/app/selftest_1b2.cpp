@@ -127,14 +127,20 @@ void CleanSandbox() {
 
 void TestBreadcrumb() {
     auto segs = ui::SplitBreadcrumb(L"C:\\Users\\SS\\Desktop");
-    Check(segs.size() == 4, L"breadcrumb: C:\\Users\\SS\\Desktop -> 4 segments");
-    if (segs.size() == 4) {
-        Check(segs[0].text == L"C:" && segs[0].path == L"C:\\", L"breadcrumb: root segment");
-        Check(segs[1].path == L"C:\\Users" && segs[3].path == L"C:\\Users\\SS\\Desktop",
+    Check(segs.size() == 5, L"breadcrumb: C:\\Users\\SS\\Desktop -> 5 segments");
+    if (segs.size() == 5) {
+        Check(segs[0].text == L"此电脑" && segs[0].path.empty(),
+              L"breadcrumb: This PC root segment");
+        Check(segs[1].text == L"C:" && segs[1].path == L"C:\\", L"breadcrumb: drive segment");
+        Check(segs[2].path == L"C:\\Users" && segs[4].path == L"C:\\Users\\SS\\Desktop",
               L"breadcrumb: cumulative paths");
     }
     auto one = ui::SplitBreadcrumb(L"C:\\");
-    Check(one.size() == 1 && one[0].path == L"C:\\", L"breadcrumb: drive root only");
+    Check(one.size() == 2 && one[0].path.empty() && one[1].path == L"C:\\",
+          L"breadcrumb: drive root sits under This PC");
+    auto pc = ui::SplitBreadcrumb(L"");
+    Check(pc.size() == 1 && pc[0].text == L"此电脑" && pc[0].path.empty(),
+          L"breadcrumb: empty path -> This PC only");
     auto unc = ui::SplitBreadcrumb(L"\\\\server\\share\\dir");
     Check(unc.size() == 2 && unc[0].path == L"\\\\server\\share" &&
           unc[1].path == L"\\\\server\\share\\dir", L"breadcrumb: UNC root collapses");
@@ -143,7 +149,7 @@ void TestBreadcrumb() {
           uncLong[1].path == L"\\\\192.168.0.254\\share\\dir",
           L"breadcrumb: \\\\?\\UNC prefix restores leading \\\\");
     auto longp = ui::SplitBreadcrumb(L"\\\\?\\C:\\A\\B");
-    Check(longp.size() == 3 && longp[2].path == L"C:\\A\\B",
+    Check(longp.size() == 4 && longp[3].path == L"C:\\A\\B",
           L"breadcrumb: long-path prefix stripped");
 
     Pane pane;
@@ -157,6 +163,22 @@ void TestBreadcrumb() {
     Check(fromVm.size() == 2 && fromVm[0].path == L"\\\\192.168.0.254\\share" &&
           fromVm[1].path == L"\\\\192.168.0.254\\share\\folder",
           L"breadcrumb: click target stays UNC not CWD-relative");
+}
+
+void TestThisPcEnumeration() {
+    std::vector<fs::DirEntry> entries;
+    fs::EnumerateDirectory(L"", entries);
+    Check(!entries.empty(), L"thispc: empty path enumerates at least one drive");
+    bool all_dirs = true;
+    bool has_c = false;
+    for (const auto& e : entries) {
+        if (!e.is_dir) all_dirs = false;
+        if (e.name.find(L"C:") != std::wstring::npos ||
+            e.full_path.starts_with(L"\\\\?\\C:\\"))
+            has_c = true;
+    }
+    Check(all_dirs, L"thispc: all entries are directories");
+    Check(has_c, L"thispc: contains the C: drive");
 }
 
 void TestLoadingPresentation() {
@@ -1500,6 +1522,7 @@ int RunSelfTest1B2() {
         ? g_log_local : nullptr;
 
     TestBreadcrumb();
+    TestThisPcEnumeration();
     TestLoadingPresentation();
     TestNavigationReturnSelection();
     TestMenuModel();

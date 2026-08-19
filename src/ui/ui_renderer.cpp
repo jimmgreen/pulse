@@ -989,11 +989,23 @@ std::vector<BreadcrumbSegment> SplitBreadcrumb(const std::wstring& path) {
     if (p.starts_with(L"\\\\?\\UNC\\")) p = L"\\\\" + p.substr(8);
     else if (p.starts_with(L"\\\\?\\")) p = p.substr(4);
     while (p.size() > 1 && p.back() == L'\\') p.pop_back();
-    if (p.empty()) return out;
+    if (p.empty()) {
+        // Empty path = This PC: a single segment that navigates to "".
+        BreadcrumbSegment seg;
+        seg.text = L"此电脑";
+        seg.path = L"";
+        out.push_back(seg);
+        return out;
+    }
 
     std::wstring prefix; // full path of the segments emitted so far
     size_t i = 0;
     if (p.size() >= 2 && p[1] == L':') {
+        // Explorer-style: drives live under This PC.
+        BreadcrumbSegment pc;
+        pc.text = L"此电脑";
+        pc.path = L"";
+        out.push_back(pc);
         // Drive root, e.g. "C:\": single segment with the drive icon text.
         prefix = p.substr(0, 2);
         BreadcrumbSegment seg;

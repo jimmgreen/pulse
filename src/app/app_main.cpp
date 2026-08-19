@@ -3209,7 +3209,7 @@ static void StartLoadingPath(AppState& s, app::Tab& tab, const std::wstring& pat
     }
 
     if (focused && s.watcher) {
-        if (fs::IsUncPath(normalized)) {
+        if (normalized.empty() || fs::IsUncPath(normalized)) {
             s.watcher->Stop();
         } else {
             s.watcher->Start(path, [&s]() {
@@ -3435,6 +3435,10 @@ static void FocusPane(AppState& s, app::Pane* p) {
         s.scrollTargetY = tab->scroll_y;
         s.scrollAnimating = false;
         if (s.watcher && tab && !fs::IsVirtualPath(tab->current_path)) {
+            if (tab->current_path.empty()) {
+                // This PC view has no directory to watch.
+                s.watcher->Stop();
+            } else {
             s.watcher->Start(tab->current_path, [&s]() {
                 app::Tab* t = ActiveTab(s);
                 if (t && !fs::IsVirtualPath(t->current_path)) {
@@ -3442,6 +3446,7 @@ static void FocusPane(AppState& s, app::Pane* p) {
                     s.watchDirty.store(true, std::memory_order_release);
                 }
             });
+            }
         }
     }
     InvalidateRect(s.hwnd, nullptr, FALSE);
@@ -4034,6 +4039,7 @@ static void GoUp(AppState& s) {
     }
     const std::wstring up = fs::ParentPath(tab->current_path);
     if (_wcsicmp(up.c_str(), tab->current_path.c_str()) != 0) NavigateTo(s, up);
+    else if (!tab->current_path.empty()) NavigateTo(s, L""); // drive root -> This PC
 }
 
 static void GoBack(AppState& s) {
@@ -6418,7 +6424,8 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         } else if (hit.region == ui::HitTestResult::NewButton) {
             ShowNewDropdown(*s);
         } else if (hit.region == ui::HitTestResult::BreadcrumbSegment) {
-            if (!hit.path.empty()) NavigateTo(*s, hit.path);
+            // Empty path is the This PC segment; NavigateTo handles it.
+            NavigateTo(*s, hit.path);
         } else if (hit.region == ui::HitTestResult::Copy) {
             CollectToTray(*s, false);
         } else if (hit.region == ui::HitTestResult::Cut) {

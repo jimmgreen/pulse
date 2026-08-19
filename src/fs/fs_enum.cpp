@@ -316,8 +316,32 @@ static void EnumerateNtQuery(const std::wstring& path, std::vector<DirEntry>& ou
     CloseHandle(h);
 }
 
+// "This PC" view (empty path): one entry per logical drive, label matches
+// the sidebar ("Label (C:)" or a localized fallback). full_path is set so
+// the app layer can navigate/open without joining parent+name.
+static void EnumerateThisPc(std::vector<DirEntry>& out) {
+    DWORD drives = GetLogicalDrives();
+    for (int i = 0; i < 26; ++i) {
+        if (!(drives & (1 << i))) continue;
+        wchar_t root[4] = { wchar_t(L'A' + i), L':', L'\\', L'\0' };
+        wchar_t volName[MAX_PATH + 1] = {};
+        GetVolumeInformationW(root, volName, MAX_PATH, nullptr, nullptr, nullptr, nullptr, 0);
+        DirEntry e;
+        e.name = std::wstring(volName[0] ? volName : L"本地磁盘") +
+                 L" (" + root[0] + L":)"; // 本地磁盘
+        e.full_path = NormalizePath(root);
+        e.is_dir = true;
+        e.attrs = FILE_ATTRIBUTE_DIRECTORY;
+        out.push_back(std::move(e));
+    }
+}
+
 void EnumerateDirectory(const std::wstring& path, std::vector<DirEntry>& out) {
     out.clear();
+    if (path.empty()) {
+        EnumerateThisPc(out);
+        return;
+    }
     std::wstring normalized = NormalizePath(path);
     try {
         EnumerateNtQuery(normalized, out);
