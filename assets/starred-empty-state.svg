@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="360" viewBox="0 0 512 360" fill="none">
+  <title>No starred projects</title>
+  <desc>A metallic star rising from a blue folder in the Pulse empty-state style.</desc>
+  <defs>
+    <radialGradient id="ambient" cx="0" cy="0" r="1" gradientTransform="translate(256 154) rotate(90) scale(121)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#AAB4C6" stop-opacity="0.13"/>
+      <stop offset="1" stop-color="#7D899F" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="folderBack" x1="139" y1="174" x2="369" y2="273" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8298BC"/>
+      <stop offset="0.52" stop-color="#60779D"/>
+      <stop offset="1" stop-color="#354763"/>
+    </linearGradient>
+    <linearGradient id="folderFront" x1="145" y1="205" x2="343" y2="323" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8499BC"/>
+      <stop offset="0.48" stop-color="#586E92"/>
+      <stop offset="1" stop-color="#35465F"/>
+    </linearGradient>
+    <linearGradient id="folderEdge" x1="133" y1="205" x2="374" y2="231" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#D3DCEB" stop-opacity="0.55"/>
+      <stop offset="0.55" stop-color="#9CAAC1" stop-opacity="0.24"/>
+      <stop offset="1" stop-color="#E0E6EF" stop-opacity="0.1"/>
+    </linearGradient>
+    <linearGradient id="starFace" x1="213" y1="74" x2="304" y2="225" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F1F3F6"/>
+      <stop offset="0.43" stop-color="#C2C9D3"/>
+      <stop offset="1" stop-color="#727E91"/>
+    </linearGradient>
+    <linearGradient id="starShade" x1="256" y1="125" x2="256" y2="231" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7D899B" stop-opacity="0"/>
+      <stop offset="1" stop-color="#4F5C71" stop-opacity="0.72"/>
+    </linearGradient>
+    <filter id="shadow" x="92" y="55" width="328" height="284" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="10" stdDeviation="11" flood-color="#05070B" flood-opacity="0.22"/>
+    </filter>
+  </defs>
+
+  <ellipse cx="256" cy="304" rx="122" ry="21" fill="#080A0F" fill-opacity="0.16"/>
+  <circle cx="256" cy="154" r="118" fill="url(#ambient)"/>
+  <circle cx="256" cy="154" r="103" stroke="#B5BECE" stroke-opacity="0.055" stroke-width="2"/>
+
+  <g opacity="0.52">
+    <path d="M168 100L172 111L183 115L172 119L168 130L164 119L153 115L164 111L168 100Z" fill="#C5CCD8"/>
+    <path d="M355 84L359 95L370 99L359 103L355 114L351 103L340 99L351 95L355 84Z" fill="#C5CCD8"/>
+    <circle cx="143" cy="178" r="4" fill="#9EA9BA"/>
+    <circle cx="378" cy="168" r="3" fill="#9EA9BA"/>
+  </g>
+
+  <g filter="url(#shadow)">
+    <path d="M126 222V188C126 177 135 168 146 168H188L203 153C207 149 212 147 218 147H260C267 147 273 151 277 157L285 168H365C376 168 385 177 385 188V222H126Z" fill="url(#folderBack)"/>
+    <path d="M128 181C132 175 138 173 147 173H192L207 158C211 154 216 153 221 153H258C264 153 269 156 272 161L280 173H379" stroke="#D6DEEB" stroke-opacity="0.2" stroke-width="2" stroke-linecap="round"/>
+
+    <g id="star">
+      <path d="M256 69C261 69 265 72 267 77L287 119L333 126C338 127 342 130 343 135C345 139 343 144 340 147L306 181L314 228C315 233 313 238 309 240C305 243 300 243 296 241L256 219L216 241C212 243 207 243 203 240C199 238 197 233 198 228L206 181L172 147C169 144 167 139 169 135C170 130 174 127 179 126L225 119L245 77C247 72 251 69 256 69Z" fill="url(#starFace)"/>
+      <path d="M256 125L306 181L314 228C315 233 313 238 309 240C305 243 300 243 296 241L256 219V125Z" fill="url(#starShade)"/>
+      <path d="M249 79L228 123L181 131" stroke="#FFFFFF" stroke-opacity="0.34" stroke-width="3" stroke-linecap="round"/>
+    </g>
+
+    <path d="M109 215C108 204 117 195 128 195H384C396 195 405 206 403 218L389 297C387 309 378 317 366 317H146C135 317 126 309 124 298L109 215Z" fill="url(#folderFront)" fill-opacity="0.93"/>
+    <path d="M120 210C122 202 129 199 137 199H380C389 199 395 205 395 213" stroke="url(#folderEdge)" stroke-width="2.6" stroke-linecap="round"/>
+    <path d="M126 296C129 305 136 311 147 311H364C374 311 380 306 382 298" stroke="#172033" stroke-opacity="0.22" stroke-width="2" stroke-linecap="round"/>
+  </g>
+</svg>

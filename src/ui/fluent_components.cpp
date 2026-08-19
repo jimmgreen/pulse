@@ -1231,9 +1231,18 @@ void Painter::DrawSidebarItem(const SidebarItemSpec& spec) {
     content.left += icon_slot + Px(8.0f);
     if (!spec.badge_text.empty()) {
         const float badge_width = MeasureBadgeWidth(spec.badge_text);
-        DrawBadge({D2D1::RectF(content.right - badge_width, content.top,
-                               content.right, content.bottom),
-                   spec.badge_text, BadgeKind::Success});
+        BadgeSpec badge;
+        badge.bounds = D2D1::RectF(content.right - badge_width, content.top,
+                                   content.right, content.bottom);
+        badge.text = spec.badge_text;
+        badge.kind = BadgeKind::Success;
+        if (spec.custom_badge_color && spec.badge_color.a > 0.0f) {
+            badge.use_custom_colors = true;
+            badge.custom_background = spec.badge_color;
+            badge.custom_background.a = dark_ ? 0.30f : 0.18f;
+            badge.custom_foreground = theme_->text;
+        }
+        DrawBadge(badge);
         content.right -= badge_width + Px(6.0f);
     } else if (spec.show_count || spec.badge_count > 0) {
         const auto count = std::to_wstring(std::min(spec.badge_count, 99));

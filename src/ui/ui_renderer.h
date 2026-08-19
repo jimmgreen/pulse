@@ -58,6 +58,8 @@ struct ListEntryView {
     bool cloud_recall = false;
     bool cut = false;
     bool starred = false;
+    std::wstring badge;
+    D2D1_COLOR_F badge_color{};
     D2D1_COLOR_F tag_dots[3]{};
     int tag_dot_count = 0;
 };
@@ -94,6 +96,12 @@ struct PaneViewModel {
     bool loading = false;
     bool can_create = false;
     bool is_file_system = false;
+    bool curated_order = false;
+    bool is_starred = false;
+    bool is_recent = false;
+    int recent_filter = 0;
+    size_t recent_total = 0;
+    std::wstring date_column_label;
     int selected_index = -1;
     int selected_count = 0;
     bool all_selected = false;
@@ -161,6 +169,7 @@ struct SidebarItem {
     std::wstring icon_glyph;       // Segoe Fluent Icons codepoint string.
     std::wstring fallback_text;
     std::wstring badge;            // e.g. "Git"
+    D2D1_COLOR_F badge_color = {};
     D2D1_COLOR_F icon_color = {};
     D2D1_COLOR_F tag_dot = {};
     bool danger = false;
@@ -175,6 +184,9 @@ struct SidebarItem {
     bool status_dot = false;
     D2D1_COLOR_F status_color = {};
     bool editing = false;
+    bool expandable = false;
+    bool expanded = false;
+    bool starred_child = false;
 };
 
 struct SidebarGroup {
@@ -184,9 +196,10 @@ struct SidebarGroup {
     bool add_action = false;
 };
 
-// Fan deck inside the staging tray panel. Poses arrive pre-smoothed from the
-// app-side animation state; the renderer only maps slots to geometry, so
-// draw and hit-test can never disagree.
+// Scatter deck inside the staging tray panel. Poses arrive pre-smoothed from
+// the app-side animation state; the renderer maps slots to geometry and adds
+// a deterministic per-card jitter (path-keyed), so draw and hit-test can
+// never disagree. Neighboring cards overlap by at most 50%.
 struct TrayCardView {
     std::wstring path;
     std::wstring name;
@@ -196,9 +209,9 @@ struct TrayCardView {
     int batch = -1;            // staging-tray batch index (live cards only)
     int sub = -1;              // item index inside the batch (live cards only)
     uint64_t batch_total_size = 0;
-    float slot = 0.0f;         // fan slot: 0 = center, ±k = k positions out
+    float slot = 0.0f;         // deck slot: 0 = center, ±k = k positions out
     float hover = 0.0f;        // 0..1 raise + straighten
-    float appear = 0.0f;       // 0 = just collected, 1 = settled in the fan
+    float appear = 0.0f;       // 0 = just collected, 1 = settled in the deck
     float opacity = 1.0f;      // ghosts (exiting cards) fade toward 0
     bool ghost = false;        // exiting: drawn, never hit-tested
 };
@@ -210,7 +223,7 @@ struct TrayDeckView {
     int offset = 0;                  // window start into the newest-first list
     uint64_t total_size = 0;         // sum over all batches (footer text)
     int batch_count = 0;
-    float open = 0.0f;               // 0..1 drag-over fan spread
+    float open = 0.0f;               // 0..1 drag-over scatter boost
     int hovered = -1;                // live display index under the cursor
 };
 
@@ -323,6 +336,7 @@ struct WindowViewModel {
     std::vector<PaneSlotView> pane_slots;
     std::vector<SplitterView> splitters;
     std::vector<SidebarGroup> sidebar;
+    float sidebar_scroll = 0.0f;
     TrayDeckView tray_deck;
     bool details_visible = false;   // right details panel toggle (view menu)
     DetailsPanelView details;
@@ -370,6 +384,7 @@ struct WindowViewModel {
     bool settings_launch_on_startup = false;
     bool settings_keep_running = false;
     int settings_row_height = 34; // current row-height pref (DIPs) for density radios
+    int settings_tray_icon = 48;  // current tray-deck icon pref (DIPs) for size radios
     bool settings_group_on[5] = { true, true, false, false, true };
     std::vector<SettingsRowView> settings_items;
     bool settings_index_service = false;
@@ -420,6 +435,7 @@ struct HitTestResult {
         SidebarHeaderAction,
         SidebarItem,
         SidebarItemAction,
+        SidebarItemExpand,
         TrayRelease,
         TrayClose,
         TrayItemRemove,
@@ -428,6 +444,8 @@ struct HitTestResult {
         RowStar,
         RowNewTab,
         RowMore,
+        RecentFilter,
+        RecentClear,
         PaneEmptyNewFolder,
         DetailsOpen,
         DetailsStar,
@@ -449,6 +467,7 @@ struct HitTestResult {
         SettingsEffect,
         SettingsWallpaper,
         SettingsDensity,
+        SettingsTrayIcon,
         SettingsIndexVolume,
         SettingsIndexAction,
         SettingsNetworkAction,
@@ -482,6 +501,9 @@ public:
         row_height_dip_ = std::clamp(dip, 24.0f, 48.0f);
         row_height_ = row_height_dip_ * scale_;
     }
+    // Staging-tray deck icon edge preference (DIPs); single-item decks add 8.
+    void SetTrayIconDip(float dip) { tray_icon_dip_ = std::clamp(dip, 32.0f, 64.0f); }
+    float TrayIconDip() const { return tray_icon_dip_; }
     float Margin() const { return margin_; }
 
     // Right details panel: toggled from the view menu; ContentRect shrinks.
@@ -593,6 +615,10 @@ public:
     // Uniform tab pitch (excludes group-chip offsets); used by drag math.
     float TabPitchPx(const WindowViewModel& vm, float window_w) const;
     float SettingsMaxScroll(const WindowViewModel& vm, float window_w, float window_h) const;
+    float SidebarMaxScroll(const WindowViewModel& vm, float window_w, float window_h) const;
+    // How many deck cards the tray panel fits at the current sidebar width
+    // without breaking the max-50%-overlap rule (>= 1).
+    int TrayDeckCapacity(float window_w) const;
 
 private:
     struct TabStripMetrics {
@@ -626,8 +652,8 @@ private:
     void DrawList(const PaneViewModel& vm, float x, float y, float w, float h, const Theme& theme,
                   int hover_region = 0, int hover_control_index = -1);
     void DrawScrollbar(const PaneViewModel& vm, float x, float y, float w, float h, const Theme& theme);
-    // Fan deck of staged files inside the tray panel (draw + hit-test share
-    // the geometry helpers in ui_renderer.cpp).
+    // Scatter deck of staged files inside the tray panel (draw + hit-test
+    // share the geometry helpers in ui_renderer.cpp).
     void DrawTrayDeck(const WindowViewModel& vm, const D2D1_RECT_F& panel_rc,
                       const Theme& theme);
 
@@ -645,6 +671,9 @@ private:
     bool EnsureEmptyStateSvg();
     bool DrawNoSelectionSvg(const D2D1_RECT_F& bounds, float opacity = 1.0f);
     bool EnsureNoSelectionSvg();
+    bool DrawCuratedEmptyStateSvg(bool starred, const D2D1_RECT_F& bounds,
+                                  float opacity = 1.0f);
+    bool EnsureCuratedEmptyStateSvg(bool starred);
     void DrawTruncatedName(const std::wstring& name, float x, float y, float w, float h,
                            const Theme& theme, bool selected);
     void DrawCenteredIconName(const std::wstring& name, const D2D1_RECT_F& bounds,
@@ -668,6 +697,7 @@ private:
     float column_header_height_ = 32.0f;
     float row_height_ = 34.0f;
     float row_height_dip_ = 34.0f;
+    float tray_icon_dip_ = 48.0f;
     float margin_ = 4.0f;
     float control_gap_ = 4.0f;
     bool details_visible_ = false;
@@ -702,6 +732,8 @@ private:
     ComPtr<ID2D1DeviceContext5> empty_state_svg_dc_;
     ComPtr<ID2D1SvgDocument> empty_state_svg_;
     ComPtr<ID2D1SvgDocument> no_selection_svg_;
+    ComPtr<ID2D1SvgDocument> recent_empty_svg_;
+    ComPtr<ID2D1SvgDocument> starred_empty_svg_;
     ID2D1DeviceContext* logo_dc_ = nullptr;
     float logo_scale_ = 0.0f;
 

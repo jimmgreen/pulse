@@ -41,6 +41,7 @@ struct SessionSnapshot {
     StagingTray tray;
     std::wstring undo_json; // ops::OpsManager undo stack (serialized array)
     int sidebar_collapsed = 0; // bitmask over WindowViewModel::sidebar group order
+    bool starred_expanded = true;
     bool details_panel = false;  // right details panel visible
     int details_panel_width = 340;
     std::array<float, 3> details_column_dividers{}; // version 3 migration only

@@ -61,6 +61,9 @@ enum MenuCmd : int {
     CmdTabCloseOthers,
     CmdTabCloseRight,
     CmdTabJoinGroupBase = 130, // + index into Pane::tab_groups (clear of 98-129)
+    CmdEditStarBadge = 170,
+    CmdRemoveStarred,
+    CmdRemoveRecent,
     CmdRecentBase = 200,
     CmdIndexBase = 1000,
     // Explorer integration (优化.md §7): registry static verbs bound to the

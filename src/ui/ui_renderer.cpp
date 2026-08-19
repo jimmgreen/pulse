@@ -33,6 +33,7 @@ namespace {
     constexpr float kTabCloseSizeDip = 16.0f;
     constexpr float kCommandIconButtonDip = 32.0f;
     constexpr float kCommandIconStepDip = 34.0f;
+    constexpr float kRecentControlsDip = 40.0f;
     // d2d1.lib does not export the effect CLSIDs; define the shadow one locally.
     // (CLSID_D2D1Shadow from d2d1effects.h; same idiom as fluent_menu.cpp.)
     constexpr GUID kShadowEffectClsid = { 0xC67EA361, 0x1863, 0x4e69,
@@ -114,19 +115,35 @@ namespace {
             ? (source.link_target_is_dir ? L"" : pulse::format::ByteSize(source.link_target_size, true))
             : (source.is_dir ? L"" : pulse::format::ByteSize(source.size, true));
         entry.date_text = pulse::format::LocalFileTime(source.mtime);
-        entry.type_text = FormatListType(entry.name,
-            penetrated ? source.link_target_is_dir : source.is_dir);
         entry.path = !source.full_path.empty() ? source.full_path
                      : (fs::IsVirtualPath(vm.path) ? L"" : JoinDirName(vm.path, source.name));
         entry.attrs = source.attrs;
         entry.size_value = source.size;
         entry.modified_value = (static_cast<uint64_t>(source.mtime.dwHighDateTime) << 32) |
                                source.mtime.dwLowDateTime;
-        entry.is_dir = source.is_dir;
+        entry.is_dir = penetrated ? source.link_target_is_dir : source.is_dir;
         entry.is_reparse = source.is_reparse;
         entry.cloud_recall = source.cloud_recall;
+        if (vm.tag_catalog && source.attrs == 0 && !entry.path.empty()) {
+            app::PlaceItemKind known_kind = app::PlaceItemKind::Unknown;
+            if (const app::StarredItem* starred = vm.tag_catalog->FindStarred(entry.path))
+                known_kind = starred->kind;
+            else if (const app::RecentItem* recent = vm.tag_catalog->FindRecent(entry.path))
+                known_kind = recent->kind;
+            if (known_kind != app::PlaceItemKind::Unknown)
+                entry.is_dir = known_kind == app::PlaceItemKind::Folder;
+            entry.type_text = L"不可用";
+        } else {
+            entry.type_text = FormatListType(entry.name, entry.is_dir);
+        }
         entry.starred = vm.tag_catalog && !entry.path.empty() &&
             vm.tag_catalog->IsStarred(entry.path);
+        if (entry.starred) {
+            if (const app::StarredItem* starred = vm.tag_catalog->FindStarred(entry.path)) {
+                entry.badge = starred->badge;
+                entry.badge_color = HexColor(starred->badge_rgb);
+            }
+        }
         constexpr size_t kMaxCachedRows = 512;
         if (cache.rows.size() >= kMaxCachedRows && !cache.order.empty()) {
             cache.rows.erase(cache.order.front());
@@ -157,7 +174,7 @@ namespace {
     struct SidebarMetrics {
         float scale = 1.0f;
         float pad = 8.0f;
-        float headerH = 26.0f;
+        float headerH = 36.0f;
         float itemH = 32.0f;
         float driveH = 48.0f;
         float tagH = 26.0f;
@@ -175,7 +192,7 @@ namespace {
         SidebarMetrics m;
         m.scale = scale;
         m.pad = 8.0f * scale;
-        m.headerH = 26.0f * scale;
+        m.headerH = 36.0f * scale;
         m.itemH = 32.0f * scale;
         m.driveH = 48.0f * scale;
         m.tagH = 26.0f * scale;
@@ -198,27 +215,26 @@ namespace {
 
     int TrayTotalCount(const WindowViewModel& vm) { return vm.tray_deck.total_count; }
 
-    std::vector<int> TrayCardPaintOrder(const TrayDeckView& deck) {
-        std::vector<int> order(deck.cards.size());
-        for (int i = 0; i < static_cast<int>(order.size()); ++i)
-            order[static_cast<size_t>(i)] = i;
-        std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
-            const TrayCardView& ca = deck.cards[static_cast<size_t>(a)];
-            const TrayCardView& cb = deck.cards[static_cast<size_t>(b)];
-            if (ca.ghost != cb.ghost) return ca.ghost && !cb.ghost;
-            const bool ha = a == deck.hovered, hb = b == deck.hovered;
-            if (ha != hb) return hb;
-            return std::abs(ca.slot) > std::abs(cb.slot);
-        });
-        return order;
-    }
-
     float ExpandedTrayHeight(const WindowViewModel& vm, const SidebarMetrics& m) {
         const float base = m.trayInner * 2.0f + m.trayHeaderH;
         if (vm.tray_deck.cards.empty())
             return std::max(base + m.trayHelperH + 8.0f * m.scale, 112.0f * m.scale);
-        // Fan deck: header + icon lane + footer (totals + clear action).
+        // Card deck: header + icon lane + footer (totals + clear action).
         return base + 4.0f * m.scale + m.trayDeckH + 18.0f * m.scale;
+    }
+
+    float SidebarContentHeight(const WindowViewModel& vm, const SidebarMetrics& m) {
+        float height = m.pad;
+        for (const auto& group : vm.sidebar) {
+            if (group.items.empty() && !group.add_action) continue;
+            height += m.headerH + 4.0f * m.scale;
+            if (!group.collapsed) {
+                for (const auto& item : group.items)
+                    height += SidebarItemHeight(item, m) + m.itemGap;
+                height += m.groupGap - m.itemGap;
+            }
+        }
+        return height + m.pad;
     }
 
     void LayoutSidebar(const WindowViewModel& vm, const D2D1_RECT_F& sb, float scale,
@@ -237,6 +253,7 @@ namespace {
                 const auto& group = vm.sidebar[g];
                 if (group.collapsed) continue;
                 for (int i = 0; i < static_cast<int>(group.items.size()); ++i) {
+                    if (group.items[i].starred_child) continue;
                     if (y + rowH > sb.bottom - trayH) break;
                     SidebarSlot slot;
                     slot.kind = group.items[i].is_drive ? SidebarSlot::Drive
@@ -264,24 +281,25 @@ namespace {
         const float innerL = sb.left + m.pad;
         const float innerR = sb.right - m.pad;
 
-        float y = sb.top + m.pad;
+        float y = sb.top + m.pad - std::max(0.0f, vm.sidebar_scroll);
         int run = 0;
         for (int g = 0; g < static_cast<int>(vm.sidebar.size()); ++g) {
             const auto& group = vm.sidebar[g];
             if (group.items.empty() && !group.add_action) continue;
-            if (y + m.headerH > contentBottom) break;
+            if (y >= contentBottom) break;
             SidebarSlot header;
             header.kind = SidebarSlot::Header;
             header.rc = D2D1::RectF(innerL, y, innerR, y + m.headerH);
             header.group = g;
-            out.push_back(header);
+            if (header.rc.bottom > sb.top && header.rc.bottom <= contentBottom)
+                out.push_back(header);
             y += m.headerH + 4.0f * scale;
             if (group.collapsed) continue;
             for (int i = 0; i < static_cast<int>(group.items.size()); ++i) {
                 const auto& item = group.items[i];
                 if (g == vm.tag_drag_group && i == vm.tag_drag_item) continue; // drawn floating
                 const float h = SidebarItemHeight(item, m);
-                if (y + h > contentBottom) break;
+                if (y >= contentBottom) break;
                 SidebarSlot slot;
                 slot.kind = item.is_drive ? SidebarSlot::Drive
                           : item.is_tag ? SidebarSlot::Tag : SidebarSlot::Item;
@@ -292,7 +310,8 @@ namespace {
                 slot.group = g;
                 slot.item = i;
                 slot.run = run++;
-                out.push_back(slot);
+                if (slot.rc.bottom > sb.top && slot.rc.bottom <= contentBottom)
+                    out.push_back(slot);
                 y += h + m.itemGap;
             }
             y += m.groupGap - m.itemGap;
@@ -355,6 +374,25 @@ namespace {
         return x >= rc.left && x < rc.right && y >= rc.top && y < rc.bottom;
     }
 
+    float PaneExtraTop(const PaneViewModel& pane, float scale) {
+        return (pane.banner_message.empty() ? 0.0f : 36.0f * scale) +
+               (pane.is_recent ? kRecentControlsDip * scale : 0.0f);
+    }
+
+    D2D1_RECT_F RecentFilterRect(const D2D1_RECT_F& pane, float header_height,
+                                 float scale, int index) {
+        const float top = pane.top + header_height + 5.0f * scale;
+        const float left = pane.left + 10.0f * scale + index * 72.0f * scale;
+        return D2D1::RectF(left, top, left + 72.0f * scale, top + 30.0f * scale);
+    }
+
+    D2D1_RECT_F RecentClearRect(const D2D1_RECT_F& pane, float header_height,
+                                float scale) {
+        const float top = pane.top + header_height + 5.0f * scale;
+        return D2D1::RectF(pane.right - 42.0f * scale, top,
+                           pane.right - 10.0f * scale, top + 30.0f * scale);
+    }
+
     bool SidebarItemHasUnpin(const SidebarItem& item) {
         return item.indent == 0 && item.path.starts_with(L"pulse:workspace:");
     }
@@ -363,6 +401,13 @@ namespace {
         const float size = 18.0f * scale;
         const float pad = 8.0f * scale;
         const float right = row.right - pad;
+        const float top = row.top + ((row.bottom - row.top) - size) * 0.5f;
+        return D2D1::RectF(right - size, top, right, top + size);
+    }
+
+    D2D1_RECT_F SidebarExpandRect(const D2D1_RECT_F& row, float scale) {
+        const float size = 22.0f * scale;
+        const float right = row.right - 6.0f * scale;
         const float top = row.top + ((row.bottom - row.top) - size) * 0.5f;
         return D2D1::RectF(right - size, top, right, top + size);
     }
@@ -377,23 +422,29 @@ namespace {
     }
 
     // ---------------------------------------------------------------------
-    // Tray fan deck geometry. Shared by DrawTrayDeck and HitTest so the two
-    // can never disagree about where an icon is.
+    // Tray scatter deck geometry. Shared by DrawTrayDeck and HitTest so the
+    // two can never disagree about where an icon is. Cards sit on eased
+    // slots but each gets a deterministic per-card offset/rotation/size
+    // jitter (keyed by path) for an irregular stacked look; slot spacing
+    // never closes past half an icon, so every card keeps >=50% of its face
+    // visible and clickable.
     // ---------------------------------------------------------------------
     struct TrayFanGeom {
         float icon = 0.0f;     // icon edge, DIPs
-        float cx = 0.0f;       // fan center
+        float cx = 0.0f;       // deck center
         float cy = 0.0f;       // resting center y of slot 0
         float step_x = 0.0f;   // horizontal spacing per slot
-        float tilt = 0.0f;     // degrees per slot
-        float droop = 0.0f;    // edge icons sit slot^2 * droop lower
+        float tilt = 0.0f;     // max per-card rotation, degrees
+        float hjit = 0.0f;     // horizontal jitter amplitude
+        float vjit = 0.0f;     // vertical jitter amplitude
+        float spread = 1.0f;   // 1 + drag-over scatter boost
     };
 
     TrayFanGeom TrayFanGeometry(const D2D1_RECT_F& panel, int live_count, float open,
-                                float scale) {
+                                float scale, float icon_dip) {
         TrayFanGeom g;
         const bool single = live_count <= 1;
-        g.icon = (single ? 56.0f : 48.0f) * scale;
+        g.icon = (single ? icon_dip + 8.0f : icon_dip) * scale;
         const float deckTop = panel.top + 4.0f * scale + 22.0f * scale + 4.0f * scale;
         // The footer row (totals + clear) reserves the bottom 18px.
         const float deckBottom = panel.bottom - 8.0f * scale - 18.0f * scale - 4.0f * scale;
@@ -402,9 +453,31 @@ namespace {
         const float avail = (panel.right - panel.left) - 24.0f * scale - g.icon;
         g.step_x = live_count > 1
             ? std::min(g.icon * 0.72f, avail / static_cast<float>(live_count - 1)) : 0.0f;
-        g.tilt = 8.5f * (1.0f + 0.30f * std::clamp(open, 0.0f, 1.0f));
-        g.droop = 3.0f * scale;
+        // Worst-case center distance is step_x - 2*hjit; clamp hjit so it
+        // stays >= icon/2 (max 50% overlap between neighbors).
+        g.hjit = std::clamp((g.step_x - g.icon * 0.5f) * 0.5f, 0.0f, g.icon * 0.08f);
+        g.vjit = std::max(0.0f, (deckBottom - deckTop) * 0.5f - g.icon * 0.62f);
+        g.spread = 1.0f + 0.25f * std::clamp(open, 0.0f, 1.0f);
+        g.tilt = 13.0f;
         return g;
+    }
+
+    // Deterministic per-card scatter seed: keyed by path so a card keeps its
+    // jitter for its whole lifetime (eased slot changes and ghosts included).
+    uint32_t TrayCardSeed(const std::wstring& path) {
+        uint32_t h = 2166136261u; // FNV-1a
+        for (const wchar_t c : path) {
+            h ^= static_cast<uint32_t>(c);
+            h *= 16777619u;
+        }
+        return h;
+    }
+
+    // Independent hash stream -> [0, 1).
+    float TraySeedFrac(uint32_t seed, uint32_t stream) {
+        uint32_t x = seed + stream * 0x9E3779B9u;
+        x ^= x >> 16; x *= 0x7FEB352Du; x ^= x >> 15; x *= 0x846CA68Bu; x ^= x >> 16;
+        return static_cast<float>(x >> 8) * (1.0f / 16777216.0f);
     }
 
     struct TrayCardPose {
@@ -418,14 +491,41 @@ namespace {
         const float hover = std::clamp(card.hover, 0.0f, 1.0f);
         const float appear = std::clamp(card.appear, 0.0f, 1.0f);
         const float opacity = std::clamp(card.opacity, 0.0f, 1.0f);
+        const uint32_t seed = TrayCardSeed(card.path);
+        const float jx = (TraySeedFrac(seed, 1) * 2.0f - 1.0f) * g.hjit;
+        const float jy = (TraySeedFrac(seed, 2) * 2.0f - 1.0f) * g.vjit * g.spread;
+        const float ja = (TraySeedFrac(seed, 3) * 2.0f - 1.0f) * g.tilt * g.spread;
+        const float js = 0.94f + 0.12f * TraySeedFrac(seed, 4); // 0.94..1.06
         TrayCardPose p;
         p.center = D2D1::Point2F(
-            g.cx + card.slot * g.step_x,
-            g.cy + card.slot * card.slot * g.droop - hover * 10.0f * scale
+            g.cx + card.slot * g.step_x + jx,
+            g.cy + jy - hover * 10.0f * scale
                  + (1.0f - opacity) * 14.0f * scale); // ghosts sink while fading
-        p.angle = card.slot * g.tilt * (1.0f - 0.9f * hover); // straighten on hover
-        p.scale_f = (0.55f + 0.45f * appear) * (1.0f + 0.10f * hover);
+        p.angle = ja * (1.0f - 0.9f * hover); // straighten on hover
+        p.scale_f = (0.55f + 0.45f * appear) * js * (1.0f + 0.10f * hover);
         return p;
+    }
+
+    // Back-to-front paint order: ghosts underneath, then by resting y so a
+    // lower card overlaps the ones above it; the hovered card draws last.
+    std::vector<int> TrayCardPaintOrder(const TrayDeckView& deck, const TrayFanGeom& g,
+                                        float scale) {
+        std::vector<int> order(deck.cards.size());
+        std::vector<float> ys(deck.cards.size());
+        for (int i = 0; i < static_cast<int>(order.size()); ++i) {
+            order[static_cast<size_t>(i)] = i;
+            ys[static_cast<size_t>(i)] =
+                TrayCardPoseOf(g, deck.cards[static_cast<size_t>(i)], scale).center.y;
+        }
+        std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
+            const TrayCardView& ca = deck.cards[static_cast<size_t>(a)];
+            const TrayCardView& cb = deck.cards[static_cast<size_t>(b)];
+            if (ca.ghost != cb.ghost) return ca.ghost && !cb.ghost;
+            const bool ha = a == deck.hovered, hb = b == deck.hovered;
+            if (ha != hb) return hb;
+            return ys[static_cast<size_t>(a)] < ys[static_cast<size_t>(b)];
+        });
+        return order;
     }
 
     // Hit test a point against a posed icon (inverse-rotate around center).
@@ -600,6 +700,8 @@ MainRenderer::MainRenderer() = default;
 void MainRenderer::SetCompositor(Compositor* comp) {
     empty_state_svg_.reset();
     no_selection_svg_.reset();
+    recent_empty_svg_.reset();
+    starred_empty_svg_.reset();
     empty_state_svg_dc_.reset();
     compositor_ = comp;
     material_.SetCompositor(comp);
@@ -716,6 +818,62 @@ bool MainRenderer::DrawNoSelectionSvg(const D2D1_RECT_F& bounds, float opacity) 
         D2D1::Matrix3x2F::Scale(artWidth / 320.0f, artHeight / 240.0f) *
         D2D1::Matrix3x2F::Translation(left, top) * previous);
     empty_state_svg_dc_->DrawSvgDocument(no_selection_svg_.get());
+    empty_state_svg_dc_->SetTransform(previous);
+    return true;
+}
+
+bool MainRenderer::EnsureCuratedEmptyStateSvg(bool starred) {
+    ComPtr<ID2D1SvgDocument>& document = starred ? starred_empty_svg_ : recent_empty_svg_;
+    if (document.get() && empty_state_svg_dc_.get()) return true;
+    if (!compositor_ || !compositor_->Dc()) return false;
+    if (!empty_state_svg_dc_.get() &&
+        FAILED(compositor_->Dc()->QueryInterface(IID_PPV_ARGS(&empty_state_svg_dc_)))) {
+        return false;
+    }
+
+    const int resource_id = starred ? IDR_STARRED_EMPTY_SVG : IDR_RECENT_EMPTY_SVG;
+    const HMODULE module = GetModuleHandleW(nullptr);
+    const HRSRC resource = FindResourceW(
+        module, MAKEINTRESOURCEW(resource_id), RT_RCDATA);
+    if (!resource) return false;
+    const HGLOBAL loaded = LoadResource(module, resource);
+    const DWORD byte_count = SizeofResource(module, resource);
+    const void* bytes = loaded ? LockResource(loaded) : nullptr;
+    if (!bytes || byte_count == 0) return false;
+
+    ComPtr<IStream> stream;
+    stream.p = SHCreateMemStream(static_cast<const BYTE*>(bytes), byte_count);
+    if (!stream.get()) return false;
+    if (FAILED(empty_state_svg_dc_->CreateSvgDocument(
+            stream.get(), D2D1::SizeF(512.0f, 360.0f), &document))) {
+        document.reset();
+        return false;
+    }
+    return true;
+}
+
+bool MainRenderer::DrawCuratedEmptyStateSvg(bool starred, const D2D1_RECT_F& bounds,
+                                             float opacity) {
+    if (!EnsureCuratedEmptyStateSvg(starred)) return false;
+    ComPtr<ID2D1SvgDocument>& document = starred ? starred_empty_svg_ : recent_empty_svg_;
+    ComPtr<ID2D1SvgElement> root;
+    document->GetRoot(&root);
+    if (root.get())
+        root->SetAttributeValue(L"opacity", std::clamp(opacity, 0.0f, 1.0f));
+    const float available_width = std::max(0.0f, bounds.right - bounds.left);
+    const float art_width = std::min(available_width, 280.0f * scale_);
+    if (art_width <= 1.0f) return false;
+    const float art_height = art_width * 360.0f / 512.0f;
+    const float left = (bounds.left + bounds.right - art_width) * 0.5f;
+    const float top = (bounds.top + bounds.bottom - art_height) * 0.5f;
+
+    document->SetViewportSize(D2D1::SizeF(512.0f, 360.0f));
+    D2D1_MATRIX_3X2_F previous{};
+    empty_state_svg_dc_->GetTransform(&previous);
+    empty_state_svg_dc_->SetTransform(
+        D2D1::Matrix3x2F::Scale(art_width / 512.0f, art_height / 360.0f) *
+        D2D1::Matrix3x2F::Translation(left, top) * previous);
+    empty_state_svg_dc_->DrawSvgDocument(document.get());
     empty_state_svg_dc_->SetTransform(previous);
     return true;
 }
@@ -966,6 +1124,16 @@ D2D1_RECT_F MainRenderer::StagingTrayRect(const WindowViewModel& vm, float w, fl
         if (slot.kind == SidebarSlot::TrayPanel) return slot.rc;
     }
     return D2D1::RectF();
+}
+
+int MainRenderer::TrayDeckCapacity(float window_w) const {
+    // Mirror TrayFanGeometry's available width: tray panel rect is the
+    // sidebar minus 8px padding on each side, and the deck lane reserves
+    // 24px of horizontal padding. Neighbors may overlap by at most 50%, so
+    // every card beyond the first needs icon/2 of room.
+    const float icon = tray_icon_dip_ * scale_;
+    const float avail = EffectiveSidebarWidth(window_w) - 40.0f * scale_ - icon;
+    return std::max(1, static_cast<int>(std::floor(avail / (icon * 0.5f))) + 1);
 }
 
 D2D1_RECT_F MainRenderer::TitleBarRect(float w) const {
@@ -1231,6 +1399,8 @@ struct SettingsLayout {
     D2D1_RECT_F effect_row[kWindowEffectCount]{};
     D2D1_RECT_F density_card{};
     D2D1_RECT_F density_row[3]{};
+    D2D1_RECT_F tray_icon_card{};
+    D2D1_RECT_F tray_icon_row[3]{};
     D2D1_RECT_F wallpaper_card{};
     D2D1_RECT_F wallpaper_preview{};
     D2D1_RECT_F wallpaper_choose{};
@@ -1291,6 +1461,13 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
         for (int i = 0; i < 3; ++i) {
             const float ry = y + effect_header + static_cast<float>(i) * radio_h;
             l.density_row[i] = D2D1::RectF(card_left, ry, card_right, ry + radio_h);
+        }
+        y += density_h + 12.0f * scale;
+
+        l.tray_icon_card = D2D1::RectF(card_left, y, card_right, y + density_h);
+        for (int i = 0; i < 3; ++i) {
+            const float ry = y + effect_header + static_cast<float>(i) * radio_h;
+            l.tray_icon_row[i] = D2D1::RectF(card_left, ry, card_right, ry + radio_h);
         }
         y += density_h + 12.0f * scale;
 
@@ -2129,7 +2306,8 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
         fluent::ControlState state;
         state.selected = PathIsSelfOrChild(item.path, vm.pane.path);
         state.hovered = IsHovered(vm, HitTestResult::SidebarItem, slot.run) ||
-            IsHovered(vm, HitTestResult::SidebarItemAction, slot.run);
+            IsHovered(vm, HitTestResult::SidebarItemAction, slot.run) ||
+            IsHovered(vm, HitTestResult::SidebarItemExpand, slot.run);
         if (vm.tag_drag_group >= 0) state.hovered = false; // run indices shift mid-drag
         if (slot.kind == SidebarSlot::Drive) {
             fluent::DriveSidebarItemSpec drive;
@@ -2183,6 +2361,8 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             row.text = item.label;
             row.glyph = item.icon_glyph;
             row.badge_text = item.badge;
+            row.badge_color = item.badge_color;
+            row.custom_badge_color = !item.badge.empty() && item.badge_color.a > 0.0f;
             row.state = state;
             row.badge_count = item.count;
             row.show_count = item.show_count;
@@ -2195,9 +2375,13 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             row.suppress_text = item.editing;
             const bool unpin = SidebarItemHasUnpin(item);
             const auto unpin_rc = WorkspaceUnpinRect(slot.rc, scale_);
+            const auto expand_rc = SidebarExpandRect(slot.rc, scale_);
             if (unpin)
                 row.trailing_reserve = (std::max)(0.0f,
                     (slot.rc.right - unpin_rc.left) - 6.0f * scale_);
+            else if (item.expandable)
+                row.trailing_reserve = (std::max)(0.0f,
+                    (slot.rc.right - expand_rc.left) - 4.0f * scale_);
             painter_.DrawSidebarItem(row);
             if (unpin) {
                 const bool unpin_hot = IsHovered(vm, HitTestResult::SidebarItemAction, slot.run);
@@ -2209,9 +2393,39 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
                 }
                 DrawIconText(unpin_rc.left, unpin_rc.top,
                     unpin_rc.right - unpin_rc.left, unpin_rc.bottom - unpin_rc.top,
-                    kIconPinFilled, L"P", unpin_hot ? theme.accent_hover : theme.accent, 0.72f);
+                             kIconPinFilled, L"P", unpin_hot ? theme.accent_hover : theme.accent, 0.72f);
+            } else if (item.expandable) {
+                const bool expand_hot = IsHovered(vm, HitTestResult::SidebarItemExpand, slot.run);
+                if (expand_hot) {
+                    MakeBrush(dc, theme.fill_hover, brFillHover_);
+                    FillRoundedRect(dc, brFillHover_.get(), expand_rc.left, expand_rc.top,
+                        expand_rc.right - expand_rc.left, expand_rc.bottom - expand_rc.top,
+                        4.0f * scale_);
+                }
+                DrawIconText(expand_rc.left, expand_rc.top,
+                    expand_rc.right - expand_rc.left, expand_rc.bottom - expand_rc.top,
+                    item.expanded ? kIconChevronDown : kIconChevronRight,
+                    item.expanded ? L"v" : L">", theme.text_secondary, 0.68f);
             }
         }
+    }
+
+    const float max_scroll = SidebarMaxScroll(vm, rect.right, rect.bottom);
+    if (max_scroll > 0.0f) {
+        const SidebarMetrics metrics = MakeSidebarMetrics(scale_);
+        float tray_height = ExpandedTrayHeight(vm, metrics);
+        tray_height = std::min(tray_height,
+            std::max(120.0f * scale_, (sb.bottom - sb.top) * 0.52f));
+        const float bottom = sb.bottom - metrics.pad - tray_height - metrics.pad;
+        const float viewport_extent = std::max(0.0f, bottom - sb.top);
+        fluent::ScrollbarSpec bar;
+        bar.viewport = D2D1::RectF(sb.right - 8.0f * scale_, sb.top,
+                                   sb.right - 2.0f * scale_, bottom);
+        bar.offset = std::clamp(vm.sidebar_scroll, 0.0f, max_scroll);
+        bar.viewport_extent = viewport_extent;
+        bar.content_extent = viewport_extent + max_scroll;
+        bar.expand_progress = 1.0f;
+        painter_.DrawScrollbar(bar);
     }
 }
 
@@ -2220,11 +2434,11 @@ void MainRenderer::DrawTrayDeck(const WindowViewModel& vm, const D2D1_RECT_F& pa
     if (vm.tray_deck.cards.empty() || !compositor_ || !compositor_->Dc()) return;
     ID2D1DeviceContext* dc = compositor_->Dc();
     const TrayFanGeom g = TrayFanGeometry(panel_rc, vm.tray_deck.live_count,
-                                          vm.tray_deck.open, scale_);
+                                          vm.tray_deck.open, scale_, tray_icon_dip_);
 
-    // Ghosts (exiting) underneath; live icons outermost-first so the fan
-    // center stays on top; the hovered entry always draws last.
-    const std::vector<int> order = TrayCardPaintOrder(vm.tray_deck);
+    // Ghosts (exiting) underneath; live icons top-to-bottom so lower cards
+    // overlap the ones above; the hovered entry always draws last.
+    const std::vector<int> order = TrayCardPaintOrder(vm.tray_deck, g, scale_);
 
     for (const int idx : order) {
         const TrayCardView& card = vm.tray_deck.cards[static_cast<size_t>(idx)];
@@ -2395,8 +2609,8 @@ void MainRenderer::DrawTrayDeck(const WindowViewModel& vm, const D2D1_RECT_F& pa
                           fluent::HorizontalAlignment::Center);
     }
 
-    // Name text: a single staged item always shows name + size/type; with a
-    // fan out, only the hovered icon gets a small pill label.
+    // Name text: a single staged item always shows name + size/type; with
+    // several cards, only the hovered icon gets a small pill label.
     if (vm.tray_deck.live_count == 1 && !vm.tray_deck.cards.empty() &&
         !vm.tray_deck.cards.front().ghost) {
         const TrayCardView& card = vm.tray_deck.cards.front();
@@ -3071,6 +3285,33 @@ void MainRenderer::DrawPaneEmptyState(const WindowViewModel& vm, const PaneViewM
         return;
     }
     if (!pane.is_file_system) {
+        if (pane.is_starred || pane.is_recent) {
+            const PaneEmptyLayout layout = MakePaneEmptyLayout(bounds, scale_, false);
+            const float svg_opacity = theme.bg.r > 0.5f ? 0.68f : 1.0f;
+            if (!DrawCuratedEmptyStateSvg(pane.is_starred, layout.art, svg_opacity)) {
+                fluent::EmptyStateSpec fallback;
+                fallback.bounds = bounds;
+                fallback.glyph = pane.is_starred ? L"\xE735" : L"\xE823";
+                fallback.title = pane.is_starred ? L"暂无星标项目" : L"暂无最近使用记录";
+                painter_.DrawEmptyState(fallback);
+                return;
+            }
+            const std::wstring title = pane.is_starred ? L"暂无星标项目"
+                : pane.recent_filter != 0 ? L"此筛选下暂无记录"
+                                          : L"暂无最近使用记录";
+            const std::wstring message = pane.is_starred
+                ? L"还没有添加任何星标项目"
+                : pane.recent_filter != 0 ? L"尝试选择其他类型"
+                                          : L"最近还没有打开任何文件或文件夹";
+            painter_.DrawText(title, layout.title, compositor_->HeaderFormat(), theme.text,
+                              fluent::HorizontalAlignment::Center);
+            if (layout.show_message) {
+                painter_.DrawText(message, layout.message, compositor_->SmallFormat(),
+                                  theme.text_secondary,
+                                  fluent::HorizontalAlignment::Center);
+            }
+            return;
+        }
         fluent::EmptyStateSpec empty;
         empty.bounds = bounds;
         empty.glyph = kIconFile;
@@ -3194,6 +3435,29 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
         y += bannerH;
     }
 
+    if (pane.is_recent) {
+        static constexpr const wchar_t* labels[] = { L"全部", L"文件夹", L"文件" };
+        for (int i = 0; i < 3; ++i) {
+            fluent::SegmentedItemSpec segment;
+            segment.bounds = RecentFilterRect(bounds, pane_header_height_ + bannerH, scale_, i);
+            segment.text = labels[i];
+            segment.position = i == 0 ? fluent::SegmentPosition::First
+                             : i == 2 ? fluent::SegmentPosition::Last
+                                      : fluent::SegmentPosition::Middle;
+            segment.state.selected = pane.recent_filter == i;
+            segment.state.hovered = IsHovered(vm, HitTestResult::RecentFilter, i) &&
+                                    vm.hover_pane_index == pane_index;
+            painter_.DrawSegmentedItem(segment);
+        }
+        const D2D1_RECT_F clear = RecentClearRect(bounds, pane_header_height_ + bannerH, scale_);
+        fluent::ControlState clear_state;
+        clear_state.enabled = pane.recent_total > 0;
+        clear_state.hovered = IsHovered(vm, HitTestResult::RecentClear, pane_index);
+        painter_.DrawButton({ clear, {}, kIconDelete,
+            fluent::ButtonKind::Transparent, clear_state, true });
+        y += kRecentControlsDip * scale_;
+    }
+
     if (ShowsColumnHeader(pane.view_mode)) {
         // Re-set the brush: earlier drawing (tray deck pills, toolbar) may
         // have left a different color on this shared member.
@@ -3204,7 +3468,7 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
             bounds, pane.details_column_dividers);
         float cx = columns.left;
         auto drawCol = [&](const std::wstring& label, SortColumn col, float cw, bool right = false) {
-            const bool active = pane.sort_column == col;
+            const bool active = !pane.curated_order && pane.sort_column == col;
             MakeBrush(dc, active ? theme.accent : theme.text, brText_);
             IDWriteTextFormat* fmt = compositor_->HeaderFormat();
             const float textInset = 8.0f * scale_;
@@ -3233,7 +3497,9 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
             cx += cw;
         };
         drawCol(L"\u540D\u79F0", SortColumn::Name, columns.widths[0], false);
-        drawCol(L"\u4FEE\u6539\u65E5\u671F", SortColumn::Mtime, columns.widths[1], false);
+        drawCol(pane.date_column_label.empty() ? L"\u4FEE\u6539\u65E5\u671F"
+                                                : pane.date_column_label,
+                SortColumn::Mtime, columns.widths[1], false);
         drawCol(L"\u7C7B\u578B", SortColumn::Type, columns.widths[2], false);
         drawCol(L"\u5927\u5C0F", SortColumn::Size, columns.widths[3], true);
         if ((vm.hover_region == static_cast<int>(HitTestResult::ColumnDivider) ||
@@ -3405,6 +3671,7 @@ struct NameTrail {
     float tag_step = 0.0f;
     float tag_x0 = 0.0f;
     float tag_cy = 0.0f;
+    D2D1_RECT_F badge{};
     D2D1_RECT_F star{};
     D2D1_RECT_F new_tab{};
     D2D1_RECT_F more{};
@@ -3416,6 +3683,7 @@ struct NameTrail {
 static NameTrail LayoutNameTrail(float name_x, float text_y, float text_h,
                                  float col_right, float cell_top, float cell_bottom,
                                  float scale, const std::wstring& name, int tag_n,
+                                 float badge_w,
                                  bool show_star, bool show_new_tab, bool show_more,
                                  IDWriteFactory3* factory, IDWriteTextFormat* fmt) {
     NameTrail t;
@@ -3451,13 +3719,24 @@ static NameTrail LayoutNameTrail(float name_x, float text_y, float text_h,
 
     // Reserve the compact (overlapped) cluster so a long name still
     // compresses first. Spread only if leftover after the fitted name fits.
+    badge_w = std::max(0.0f, badge_w);
+    const float badge_gap = badge_w > 0.0f ? gap : 0.0f;
     const float tags_w = OverlapTagsWidth(t.tag_n, diameter);
     const float tags_gap = t.tag_n > 0 ? gap : 0.0f;
-    const float budget = std::max(0.0f, dock - name_x - tags_gap - tags_w);
+    const float budget = std::max(0.0f,
+        dock - name_x - badge_gap - badge_w - tags_gap - tags_w);
     const std::wstring fitted = FitFileName(factory, fmt, name, budget);
     t.name_w = std::min(budget, MeasureTextWidth(factory, fmt, fitted));
+    float trail_x = name_x + t.name_w;
+    if (badge_w > 0.0f) {
+        trail_x += badge_gap;
+        const float badge_h = std::min(20.0f * scale, cell_bottom - cell_top - 4.0f * scale);
+        const float badge_y = cell_top + (cell_bottom - cell_top - badge_h) * 0.5f;
+        t.badge = D2D1::RectF(trail_x, badge_y, trail_x + badge_w, badge_y + badge_h);
+        trail_x += badge_w;
+    }
     if (t.tag_n > 0) {
-        t.tag_x0 = name_x + t.name_w + gap;
+        t.tag_x0 = trail_x + gap;
         const float leftover = std::max(0.0f, dock - t.tag_x0);
         t.tag_step = TagStepForLeftover(t.tag_n, diameter, gap, leftover);
     }
@@ -3511,7 +3790,7 @@ D2D1_RECT_F MainRenderer::RenameFieldRect(const PaneViewModel& vm, const D2D1_RE
     }
     const NameTrail trail = LayoutNameTrail(
         nameX, textY, textH, nameColRight, cell.top, cell.bottom, scale_,
-        e.name, tagDotCount, false, false, false,
+        e.name, tagDotCount, 0.0f, false, false, false,
         compositor_->DwriteFactory(), compositor_->TextFormat());
     const float field_w = std::max(40.0f * scale_, trail.name_w);
     const float field_h = std::max(22.0f * scale_, std::min(textH, 30.0f * scale_));
@@ -3643,9 +3922,11 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             textY = nameRc.top + (textH - lineH) * 0.5f;
             textH = lineH;
         }
+        const float badgeW = vm.view_mode == ViewMode::Details && !e.badge.empty()
+            ? std::min(108.0f * scale_, painter_.MeasureBadgeWidth(e.badge)) : 0.0f;
         const NameTrail trail = LayoutNameTrail(
             nameX, textY, textH, nameColRight, cell.top, cell.bottom, scale_,
-            e.name, tagDotCount, showStar, showNewTab, showMore,
+            e.name, tagDotCount, badgeW, showStar, showNewTab, showMore,
             compositor_->DwriteFactory(), compositor_->TextFormat());
         if (src == vm.rename_index) {
             const D2D1_RECT_F fieldRc = RenameFieldRect(vm, viewport, src);
@@ -3659,6 +3940,18 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                 DrawCenteredIconName(e.name, nameRc, nameColor);
             } else {
                 DrawTruncatedName(e.name, trail.name_x, textY, trail.name_w, textH, theme, selected);
+            }
+            if (!e.badge.empty() && trail.badge.right > trail.badge.left) {
+                fluent::BadgeSpec badge;
+                badge.bounds = trail.badge;
+                badge.text = e.badge;
+                badge.use_custom_colors = true;
+                badge.custom_background = WithAlpha(e.badge_color, 0.90f);
+                const float luminance = e.badge_color.r * 0.2126f +
+                    e.badge_color.g * 0.7152f + e.badge_color.b * 0.0722f;
+                badge.custom_foreground = luminance < 0.48f
+                    ? HexColor(0xFFFFFF) : HexColor(0x202020);
+                painter_.DrawBadge(badge);
             }
             D2D1_COLOR_F halo = theme.bg;
             halo.a = 1.0f;
@@ -3983,6 +4276,36 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
                                      kDensityLabels[i], st);
         }
 
+        draw_card(lay.tray_icon_card);
+        MakeBrush(dc, theme.text, brText_);
+        DrawTextRect(dc, compositor_->TextFormat(), brText_.get(), L"暂存区图标",
+                     lay.tray_icon_card.left + 16.0f * scale_, lay.tray_icon_card.top + 10.0f * scale_,
+                     lay.tray_icon_card.right - lay.tray_icon_card.left - 32.0f * scale_, 22.0f * scale_);
+        MakeBrush(dc, theme.text_secondary, brTextSecondary_);
+        DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(),
+                     L"调整暂存托盘里文件图标的大小，立即生效",
+                     lay.tray_icon_card.left + 16.0f * scale_, lay.tray_icon_card.top + 32.0f * scale_,
+                     lay.tray_icon_card.right - lay.tray_icon_card.left - 32.0f * scale_, 18.0f * scale_);
+        static constexpr const wchar_t* kTrayIconLabels[] = {
+            L"小（40 像素）", L"标准（48 像素）", L"大（56 像素）"
+        };
+        static constexpr int kTrayIconDips[] = { 40, 48, 56 };
+        for (int i = 0; i < 3; ++i) {
+            const auto& row = lay.tray_icon_row[i];
+            if (IsHovered(vm, HitTestResult::SettingsTrayIcon, i)) {
+                MakeBrush(dc, theme.fill_hover, brFillHover_);
+                FillRoundedRect(dc, brFillHover_.get(), row.left + 4.0f * scale_, row.top,
+                                row.right - row.left - 8.0f * scale_, row.bottom - row.top,
+                                4.0f * scale_);
+            }
+            fluent::ControlState st{};
+            st.checked = vm.settings_tray_icon == kTrayIconDips[i];
+            st.hovered = IsHovered(vm, HitTestResult::SettingsTrayIcon, i);
+            painter_.DrawRadioButton(D2D1::RectF(row.left + 16.0f * scale_, row.top,
+                                                 row.right - 16.0f * scale_, row.bottom),
+                                     kTrayIconLabels[i], st);
+        }
+
         draw_card(lay.wallpaper_card);
         const auto& preview = lay.wallpaper_preview;
         MakeBrush(dc, theme.fill_hover, brFillHover_);
@@ -4295,8 +4618,21 @@ float MainRenderer::SettingsMaxScroll(const WindowViewModel& vm, float window_w,
     return (std::max)(0.0f, lay.content_h - view);
 }
 
+float MainRenderer::SidebarMaxScroll(const WindowViewModel& vm, float window_w,
+                                     float window_h) const {
+    const D2D1_RECT_F sb = SidebarRect(window_w, window_h);
+    if (sb.right - sb.left <= 60.0f * scale_) return 0.0f;
+    const SidebarMetrics metrics = MakeSidebarMetrics(scale_);
+    float tray_height = ExpandedTrayHeight(vm, metrics);
+    tray_height = std::min(tray_height,
+        std::max(120.0f * scale_, (sb.bottom - sb.top) * 0.52f));
+    const float available = std::max(0.0f,
+        sb.bottom - metrics.pad - tray_height - metrics.pad - sb.top);
+    return std::max(0.0f, SidebarContentHeight(vm, metrics) - available);
+}
+
 float MainRenderer::MaxScrollForPane(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds) const {
-    const float extra = vm.banner_message.empty() ? 0.0f : 36.0f * scale_;
+    const float extra = PaneExtraTop(vm, scale_);
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
     ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, row_height_dip_);
     return layout.MaxScrollY();
@@ -4304,7 +4640,7 @@ float MainRenderer::MaxScrollForPane(const PaneViewModel& vm, const D2D1_RECT_F&
 
 float MainRenderer::MaxScrollXForPane(const PaneViewModel& vm,
                                       const D2D1_RECT_F& pane_bounds) const {
-    const float extra = vm.banner_message.empty() ? 0.0f : 36.0f * scale_;
+    const float extra = PaneExtraTop(vm, scale_);
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
     ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, row_height_dip_);
     return layout.MaxScrollX();
@@ -4313,7 +4649,7 @@ float MainRenderer::MaxScrollXForPane(const PaneViewModel& vm,
 D2D1_RECT_F MainRenderer::ItemRectInPane(const PaneViewModel& vm,
                                          const D2D1_RECT_F& pane_bounds,
                                          int view_index) const {
-    const float extra = vm.banner_message.empty() ? 0.0f : 36.0f * scale_;
+    const float extra = PaneExtraTop(vm, scale_);
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
     ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, row_height_dip_);
     return layout.ItemRect(view_index);
@@ -4321,14 +4657,14 @@ D2D1_RECT_F MainRenderer::ItemRectInPane(const PaneViewModel& vm,
 
 int MainRenderer::MoveViewIndex(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds,
                                 int current, int dx, int dy) const {
-    const float extra = vm.banner_message.empty() ? 0.0f : 36.0f * scale_;
+    const float extra = PaneExtraTop(vm, scale_);
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
     ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, row_height_dip_);
     return layout.MoveIndex(current, dx, dy);
 }
 
 int MainRenderer::PageDelta(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds) const {
-    const float extra = vm.banner_message.empty() ? 0.0f : 36.0f * scale_;
+    const float extra = PaneExtraTop(vm, scale_);
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
     ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, row_height_dip_);
     return layout.PageDelta();
@@ -4336,7 +4672,7 @@ int MainRenderer::PageDelta(const PaneViewModel& vm, const D2D1_RECT_F& pane_bou
 
 std::pair<int, int> MainRenderer::VisibleRangeInPane(
     const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds) const {
-    const float extra = vm.banner_message.empty() ? 0.0f : 36.0f * scale_;
+    const float extra = PaneExtraTop(vm, scale_);
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
     ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, row_height_dip_);
     return layout.VisibleRange();
@@ -4349,7 +4685,7 @@ int MainRenderer::RowFromYInPane(const PaneViewModel& vm, const D2D1_RECT_F& pan
 int MainRenderer::ItemFromPointInPane(const PaneViewModel& vm,
                                       const D2D1_RECT_F& pane_bounds,
                                       float x, float y) const {
-    const float extra = vm.banner_message.empty() ? 0.0f : 36.0f * scale_;
+    const float extra = PaneExtraTop(vm, scale_);
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
     ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, row_height_dip_);
     int idx = layout.HitTest(x, y);
@@ -4574,6 +4910,13 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                         return r;
                     }
                 }
+                for (int i = 0; i < 3; ++i) {
+                    if (ContainsPt(lay.tray_icon_row[i], x, y)) {
+                        r.region = HitTestResult::SettingsTrayIcon;
+                        r.index = i;
+                        return r;
+                    }
+                }
                 for (int i = 0; i < kWindowEffectCount; ++i) {
                     if (ContainsPt(lay.effect_row[i], x, y)) {
                         r.region = HitTestResult::SettingsEffect;
@@ -4757,13 +5100,14 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 return r;
             }
             if (slot.kind == SidebarSlot::TrayPanel) {
-                // Fan deck: inverse-rotate the point into each icon's local
-                // space; hovered (topmost) first, then center-out. Ghosts
-                // are inert.
+                // Scatter deck: inverse-rotate the point into each icon's
+                // local space; hovered (topmost) first, then bottom-up.
+                // Ghosts are inert.
                 if (!compact) {
                     const TrayFanGeom g = TrayFanGeometry(slot.rc, vm.tray_deck.live_count,
-                                                          vm.tray_deck.open, scale_);
-                    const std::vector<int> order = TrayCardPaintOrder(vm.tray_deck);
+                                                          vm.tray_deck.open, scale_,
+                                                          tray_icon_dip_);
+                    const std::vector<int> order = TrayCardPaintOrder(vm.tray_deck, g, scale_);
                     for (auto it = order.rbegin(); it != order.rend(); ++it) {
                         const int c = *it;
                         const TrayCardView& card = vm.tray_deck.cards[static_cast<size_t>(c)];
@@ -4790,6 +5134,13 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                     if (!compact && SidebarItemHasUnpin(item) &&
                         RectContains(WorkspaceUnpinRect(slot.rc, scale_), x, y)) {
                         r.region = HitTestResult::SidebarItemAction;
+                        r.index = slot.run;
+                        r.path = item.path;
+                        return r;
+                    }
+                    if (!compact && item.expandable &&
+                        RectContains(SidebarExpandRect(slot.rc, scale_), x, y)) {
+                        r.region = HitTestResult::SidebarItemExpand;
                         r.index = slot.run;
                         r.path = item.path;
                         return r;
@@ -4888,15 +5239,39 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             out.index = paneIndex;
             return out;
         }
-        const float extra = paneVm.banner_message.empty() ? 0.0f : 36.0f * scale_;
+        const float banner = paneVm.banner_message.empty() ? 0.0f : 36.0f * scale_;
+        const float extra = PaneExtraTop(paneVm, scale_);
+        const float recentTop = paneRc.top + pane_header_height_ + banner;
+        const float columnTop = recentTop + (paneVm.is_recent ? kRecentControlsDip * scale_ : 0.0f);
         float listTop = paneRc.top + pane_header_height_ + extra +
                         (ShowsColumnHeader(paneVm.view_mode) ? column_header_height_ : 0.0f);
         if (y >= paneRc.top && y < paneRc.top + pane_header_height_) {
             out.region = HitTestResult::Pane;
             return out;
         }
-        if (ShowsColumnHeader(paneVm.view_mode) &&
-            y >= paneRc.top + pane_header_height_ && y < listTop) {
+        if (paneVm.is_recent && y >= recentTop && y < columnTop) {
+            for (int i = 0; i < 3; ++i) {
+                if (RectContains(RecentFilterRect(
+                        paneRc, pane_header_height_ + banner, scale_, i), x, y)) {
+                    out.region = HitTestResult::RecentFilter;
+                    out.index = i;
+                    return out;
+                }
+            }
+            if (RectContains(RecentClearRect(
+                    paneRc, pane_header_height_ + banner, scale_), x, y)) {
+                out.region = HitTestResult::RecentClear;
+                out.index = paneIndex;
+                return out;
+            }
+            out.region = HitTestResult::Pane;
+            return out;
+        }
+        if (ShowsColumnHeader(paneVm.view_mode) && y >= columnTop && y < listTop) {
+            if (paneVm.curated_order) {
+                out.region = HitTestResult::Pane;
+                return out;
+            }
             const DetailsColumnLayout columns = DetailsColumns(
                 paneRc, paneVm.details_column_dividers);
             for (int divider = 0; divider < 3; ++divider) {
@@ -4960,10 +5335,13 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                             (paneVm.selected_index == idx && paneVm.selected_count == 1);
                         const bool showActions = idx != paneVm.rename_index &&
                             (rowHot || entry.starred);
+                        const float badgeW = !entry.badge.empty()
+                            ? std::min(108.0f * scale_, painter_.MeasureBadgeWidth(entry.badge))
+                            : 0.0f;
                         const NameTrail trail = LayoutNameTrail(
                             nameRc.left, nameRc.top, nameRc.bottom - nameRc.top,
                             columns.DividerX(0) - margin_, cell.top, cell.bottom, scale_,
-                            entry.name, static_cast<int>(std::min<size_t>(3, tagCount)),
+                            entry.name, static_cast<int>(std::min<size_t>(3, tagCount)), badgeW,
                             showActions, showActions && paneVm.hover_index == idx && entry.is_dir,
                             showActions && rowHot,
                             compositor_->DwriteFactory(), compositor_->TextFormat());

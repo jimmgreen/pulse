@@ -23,7 +23,9 @@ struct WorkItem {
     ui::SortColumn sort_column;
     ui::SortDirection sort_direction;
     bool load_paths = false;
+    bool preserve_order = false;
     std::vector<std::wstring> paths;
+    std::vector<uint64_t> display_times;
 };
 
 struct WorkResult {
@@ -51,7 +53,9 @@ public:
     uint64_t Refresh(const std::wstring& path, ui::SortColumn col, ui::SortDirection dir);
 
     uint64_t LoadPaths(const std::wstring& view_path, std::vector<std::wstring> paths,
-                       ui::SortColumn col, ui::SortDirection dir);
+                       ui::SortColumn col, ui::SortDirection dir,
+                       bool preserve_order = false,
+                       std::vector<uint64_t> display_times = {});
 
     void EnqueueIo(std::function<void()> task);
 

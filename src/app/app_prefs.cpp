@@ -44,6 +44,7 @@ void AppPrefs::ResetToDefaults() {
     window_effect = L"mica-alt";
     background_image.clear();
     row_height = 34;
+    tray_icon_size = 48;
 }
 
 std::wstring AppPrefs::ToJson() const {
@@ -61,6 +62,8 @@ std::wstring AppPrefs::ToJson() const {
     out += escaped_image;
     out += L"\",\n  \"row_height\":";
     out += std::to_wstring(row_height);
+    out += L",\n  \"tray_icon_size\":";
+    out += std::to_wstring(tray_icon_size);
     out += L"\n}\n";
     return out;
 }
@@ -75,6 +78,8 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     background_image = pulse::json::ExtractString(json, L"background_image");
     row_height = pulse::json::ExtractInt(json, L"row_height", 34);
     if (row_height < 24 || row_height > 48) row_height = 34;
+    tray_icon_size = pulse::json::ExtractInt(json, L"tray_icon_size", 48);
+    if (tray_icon_size < 32 || tray_icon_size > 64) tray_icon_size = 48;
     return true;
 }
 

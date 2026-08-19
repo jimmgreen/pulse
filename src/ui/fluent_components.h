@@ -120,6 +120,8 @@ struct SidebarItemSpec {
     std::wstring_view detail;
     std::wstring_view glyph;
     std::wstring_view badge_text;
+    D2D1_COLOR_F badge_color{};
+    bool custom_badge_color = false;
     ControlState state{};
     int badge_count = 0;
     bool show_count = false;

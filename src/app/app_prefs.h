@@ -12,6 +12,7 @@ struct AppPrefs {
     std::wstring window_effect = L"mica-alt";
     std::wstring background_image;
     int row_height = 34; // file-list row height in DIPs (24..48)
+    int tray_icon_size = 48; // staging-tray deck icon edge in DIPs (32..64)
 
     void ResetToDefaults();
     bool Load();

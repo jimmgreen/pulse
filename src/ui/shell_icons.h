@@ -35,7 +35,7 @@ public:
 
     // Icon bitmap at (about) desired_dips, or nullptr while unresolved —
     // caller draws the glyph fallback. Lets owners apply their own opacity
-    // and transforms (tray fan deck) instead of the fixed Draw path.
+    // and transforms (tray card deck) instead of the fixed Draw path.
     ID2D1Bitmap* BitmapFor(const std::wstring& path, const std::wstring& name,
                            bool is_dir, DWORD attrs, float desired_dips);
 

@@ -76,7 +76,9 @@ uint64_t WorkerPool::Refresh(const std::wstring& path, ui::SortColumn col, ui::S
 
 uint64_t WorkerPool::LoadPaths(const std::wstring& view_path,
                                std::vector<std::wstring> paths,
-                               ui::SortColumn col, ui::SortDirection dir) {
+                               ui::SortColumn col, ui::SortDirection dir,
+                               bool preserve_order,
+                               std::vector<uint64_t> display_times) {
     std::lock_guard<std::mutex> lock(mutex_);
     const uint64_t gen = ++global_gen_;
     const std::wstring key = WorkKey(view_path, col, dir);
@@ -89,7 +91,9 @@ uint64_t WorkerPool::LoadPaths(const std::wstring& view_path,
     queue_ = std::move(filtered);
     WorkItem item{ view_path, key, gen, col, dir };
     item.load_paths = true;
+    item.preserve_order = preserve_order;
     item.paths = std::move(paths);
+    item.display_times = std::move(display_times);
     queue_.push(std::move(item));
     cv_.notify_one();
     return gen;
@@ -196,6 +200,10 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
                              data.nFileSizeLow;
                 entry.mtime = data.ftLastWriteTime;
             }
+            if (i < item.display_times.size() && item.display_times[i] != 0) {
+                entry.mtime.dwLowDateTime = static_cast<DWORD>(item.display_times[i]);
+                entry.mtime.dwHighDateTime = static_cast<DWORD>(item.display_times[i] >> 32);
+            }
             entries->push_back(std::move(entry));
         }
     } else {
@@ -232,20 +240,22 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
     // For simplicity do full sort here; generation check after.
     size_t comparisons = 0;
     struct SortCancelled {};
-    try {
-        std::sort(entries->begin(), entries->end(),
-            [&](const fs::DirEntry& a, const fs::DirEntry& b) {
-                if ((++comparisons & 8191u) == 0) {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    const auto it = current_gen_.find(item.request_key);
-                    if (!running_ || it == current_gen_.end() || it->second != item.generation)
-                        throw SortCancelled{};
-                }
-                return CompareEntries(a, b, item.sort_column, item.sort_direction);
-            });
-    } catch (const SortCancelled&) {
-        res.cancelled = true;
-        return res;
+    if (!item.preserve_order) {
+        try {
+            std::sort(entries->begin(), entries->end(),
+                [&](const fs::DirEntry& a, const fs::DirEntry& b) {
+                    if ((++comparisons & 8191u) == 0) {
+                        std::lock_guard<std::mutex> lock(mutex_);
+                        const auto it = current_gen_.find(item.request_key);
+                        if (!running_ || it == current_gen_.end() || it->second != item.generation)
+                            throw SortCancelled{};
+                    }
+                    return CompareEntries(a, b, item.sort_column, item.sort_direction);
+                });
+        } catch (const SortCancelled&) {
+            res.cancelled = true;
+            return res;
+        }
     }
     auto t3 = std::chrono::steady_clock::now();
     res.sort_ms = std::chrono::duration<double, std::milli>(t3 - t2).count();

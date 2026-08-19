@@ -595,7 +595,8 @@ static std::wstring TabTitle(const std::wstring& path) {
     std::wstring kind, rest;
     if (ParsePulsePath(path, &kind, &rest)) {
         if (kind == L"settings") return L"设置";
-        if (kind == L"starred") return L"星标常用文件";
+        if (kind == L"starred") return L"星标项目";
+        if (kind == L"recent") return L"最近使用";
         if (kind == L"search") return rest.empty() ? L"搜索" : L"搜索";
         if (kind == L"tag") return rest.empty() ? L"标签" : rest;
     }
@@ -772,11 +773,17 @@ SidebarModel BuildSidebarModel() {
     starred.glyph = L"\xE735";
     starred.fallback = L"Starred";
     starred.color = ui::HexColor(0xFBBF24);
-    starred.label = L"\u661F\u6807\u5E38\u7528\u6587\u4EF6"; // 星标常用文件
+    starred.label = L"星标项目";
     starred.path = MakeStarredPath();
+    starred.expandable = true;
     m.quick_access.push_back(std::move(starred));
-    m.quick_access.push_back(MakeKnownEntry(FOLDERID_Recent, L"\xE823", L"Recent",
-        ui::HexColor(0x60A5FA), L"\u6700\u8FD1\u4F7F\u7528")); // 最近使用
+    SidebarEntry recent;
+    recent.glyph = L"\xE823";
+    recent.fallback = L"Recent";
+    recent.color = ui::HexColor(0x60A5FA);
+    recent.label = L"最近使用";
+    recent.path = MakeRecentPath();
+    m.quick_access.push_back(std::move(recent));
     m.quick_access.push_back(MakeKnownEntry(FOLDERID_Downloads, L"\xE896", L"Downloads",
         ui::HexColor(0xC084FC), L"Downloads"));
 
@@ -862,6 +869,7 @@ static ui::SidebarGroup ConvertGroup(const std::wstring& header, const std::vect
         it.show_count = e.show_count;
         it.count = e.count;
         it.tag_dot = e.tag_dot;
+        it.expandable = e.expandable;
         g.items.push_back(std::move(it));
     }
     return g;
@@ -926,6 +934,14 @@ void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCat
     out.loading = tab->loading;
     out.is_file_system = !tab->current_path.empty() && !fs::IsVirtualPath(tab->current_path);
     out.can_create = out.is_file_system && !tab->net_readonly;
+    std::wstring virtual_kind;
+    ParsePulsePath(tab->current_path, &virtual_kind, nullptr);
+    out.curated_order = virtual_kind == L"starred" || virtual_kind == L"recent";
+    out.is_starred = virtual_kind == L"starred";
+    out.is_recent = virtual_kind == L"recent";
+    out.recent_filter = tab->recent_filter;
+    out.recent_total = out.is_recent && places ? places->recent_items.size() : 0;
+    out.date_column_label = out.is_recent ? L"最近打开" : L"修改日期";
     out.selected_index = tab->selected_index;
     out.selected_count = tab->SelectedCount();
     out.all_selected = tab->all_selected;
@@ -1000,7 +1016,8 @@ void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCat
 ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
                                          const SidebarModel& sidebar, bool focused,
                                          bool maximized, bool dark, const PlacesCatalog* places,
-                                         uint32_t sidebar_collapsed_mask) {
+                                         uint32_t sidebar_collapsed_mask,
+                                         bool starred_expanded) {
     ui::WindowViewModel vm;
     const Tab* tab = pane.ActiveTab();
     if (!tab) return vm;
@@ -1081,8 +1098,31 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
 
     ui::SidebarGroup access = ConvertGroup(
         L"\u5FEB\u901F\u8BBF\u95EE", sidebar.quick_access, false); // 快速访问
+    if (!access.items.empty()) {
+        access.items[0].expandable = true;
+        access.items[0].expanded = starred_expanded;
+    }
+    size_t access_insert = 1;
+    if (places && starred_expanded) {
+        for (const auto& starred : places->starred_items) {
+            if (starred.kind != PlaceItemKind::Folder) continue;
+            ui::SidebarItem child;
+            child.label = TabTitle(starred.path);
+            child.path = starred.path;
+            child.indent = 1;
+            child.starred_child = true;
+            child.icon_glyph = L"\xE8B7";
+            child.fallback_text = L"Dir";
+            child.icon_color = ui::HexColor(0xFBBF24);
+            child.badge = starred.badge;
+            child.badge_color = ui::HexColor(starred.badge_rgb);
+            access.items.insert(access.items.begin() + static_cast<std::ptrdiff_t>(access_insert),
+                                std::move(child));
+            ++access_insert;
+        }
+    }
     const std::wstring& gitRoot = tab->git_root;
-    if (!gitRoot.empty()) {
+    if (!gitRoot.empty() && (!places || !places->IsStarred(gitRoot))) {
         ui::SidebarItem project;
         project.label = L"\u9879\u76EE " + TabTitle(gitRoot); // 项目
         project.path = gitRoot;
@@ -1090,7 +1130,8 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
         project.fallback_text = L"Repo";
         project.icon_color = ui::HexColor(0x34D399);
         project.badge = L"Git";
-        access.items.insert(access.items.begin(), std::move(project));
+        access.items.insert(access.items.begin() + static_cast<std::ptrdiff_t>(access_insert),
+                            std::move(project));
     }
     vm.sidebar.push_back(std::move(access));
     vm.sidebar.push_back(ConvertGroup(L"\u78C1\u76D8", sidebar.drives, false)); // 磁盘

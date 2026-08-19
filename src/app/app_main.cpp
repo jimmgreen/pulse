@@ -126,6 +126,8 @@ struct AppState {
 
     app::SidebarModel sidebar;
     uint32_t sidebarCollapsedMask = 0;
+    bool starredExpanded = true;
+    float sidebarScroll = 0.0f;
     app::StagingTray tray;
     app::PlacesCatalog places;
     app::ContextMenuPrefs ctxMenuPrefs;
@@ -246,13 +248,12 @@ struct AppState {
     int session_layout = 0;
     int session_focused = 0;
     int session_target = -1;
-    std::vector<std::wstring> recentPaths;
     std::unordered_map<std::wstring, std::wstring> gitRoots;
 
     // 1B-2 GUI verification: render the context menu to a PNG, no interaction.
     bool menushot = false;
     std::wstring menushot_out;
-    // GUI verification for the tray fan deck: stage a few files pre-shot.
+    // GUI verification for the tray card deck: stage a few files pre-shot.
     bool shot_tray = false;
     int shot_tray_count = 4;
     // GUI verification for tab colors: three tabs, red/yellow/blue strips.
@@ -310,6 +311,7 @@ struct AppState {
     ULONGLONG hoverSince = 0;
     POINT hoverPoint{};
     std::wstring tooltipText;
+    std::wstring hoverPath;
 
     // Drag-over feedback state (rendered via WindowViewModel).
     int dropRow = -1;
@@ -353,22 +355,29 @@ struct AppState {
     std::unordered_map<std::wstring, TagTrack> tagTracks; // label -> slide track (slot units)
     std::unordered_map<std::wstring, float> tagOffsets;   // label -> current offset (slot units)
 
-    // Staging tray fan deck: eased per-card poses keyed by item path. The
+    bool starDragPending = false;
+    bool starDragActive = false;
+    POINT starDragStartPt{};
+    std::wstring starDragPath;
+    size_t starDragTarget = 0;
+
+    // Staging tray card deck: eased per-card poses keyed by item path. The
     // tick below smooths them toward layout targets; the renderer receives
-    // the current values through WindowViewModel::tray_deck.
+    // the current values through WindowViewModel::tray_deck and adds the
+    // deterministic per-card scatter jitter.
     struct TrayCardAnim {
         std::wstring name;      // cached so exiting ghosts can still draw
         DWORD attrs = 0;
         bool is_dir = false;
         bool missing = false;
         bool ghost = false;     // removed from the tray, fading out
-        float slot = 0.0f;      // fan slot (0 = center); eases toward layout
+        float slot = 0.0f;      // deck slot (0 = center); eases toward layout
         float hover = 0.0f;     // 0..1 raise + straighten
         float appear = 0.0f;    // 0 = just collected, eases to 1
         float opacity = 1.0f;   // ghosts ease to 0, then the entry is dropped
     };
     std::unordered_map<std::wstring, TrayCardAnim> trayCards;
-    float trayOpen = 0.0f;      // eased drag-over fan spread
+    float trayOpen = 0.0f;      // eased drag-over scatter boost
     int trayDeckOffset = 0;     // window start into the newest-first item list
     int trayWheelAccum = 0;     // sub-notch wheel delta accumulator
     size_t trayDeckLastTotal = 0; // collect detection (window resets to newest)
@@ -532,6 +541,11 @@ static D2D1_RECT_F ListRect(const AppState& s) {
     float extra = 0.0f;
     const app::Tab* tab = s.pane ? s.pane->ActiveTab() : nullptr;
     if (tab && !tab->banner_message.empty()) extra = 36.0f * s.scale;
+    std::wstring virtual_kind;
+    if (tab && app::ParsePulsePath(tab->current_path, &virtual_kind, nullptr) &&
+        virtual_kind == L"recent") {
+        extra += 40.0f * s.scale;
+    }
     const ui::ViewMode mode = tab ? tab->view_mode : ui::ViewMode::Details;
     pane.top += s.renderer.PaneHeaderHeight() + extra +
                 (ui::ShowsColumnHeader(mode) ? s.renderer.ColumnHeaderHeight() : 0.0f);
@@ -596,10 +610,12 @@ static void RememberPath(AppState& s, const std::wstring& path) {
     if (path.empty() || fs::IsVirtualPath(path)) return;
     std::wstring n = fs::NormalizePath(path);
     if (n.empty()) return;
-    s.recentPaths.erase(std::remove(s.recentPaths.begin(), s.recentPaths.end(), n), s.recentPaths.end());
-    s.recentPaths.insert(s.recentPaths.begin(), n);
-    if (s.recentPaths.size() > 16) s.recentPaths.resize(16);
     s.places.RecordVisit(n);
+}
+
+static void RecordRecentOpen(AppState& s, const std::wstring& path,
+                             app::PlaceItemKind kind) {
+    s.places.RecordRecent(path, kind);
 }
 
 static void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
@@ -622,6 +638,7 @@ static void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
             vm.settings_launch_on_startup = s.appPrefs.launch_on_startup;
             vm.settings_keep_running = s.appPrefs.keep_running_on_close;
             vm.settings_row_height = s.appPrefs.row_height;
+            vm.settings_tray_icon = s.appPrefs.tray_icon_size;
             vm.settings_index_service = s.index.ServiceMode();
             vm.settings_index_installed = s.indexServiceInstalled;
             vm.settings_index_status = s.index.Status();
@@ -756,9 +773,15 @@ static bool UpdateSplitterDrag(AppState& s, int mx, int my) {
 }
 
 // ---------------------------------------------------------------------------
-// Staging tray fan deck: display entries (newest batch first) + eased poses.
+// Staging tray card deck: display entries (newest batch first) + eased poses.
 // ---------------------------------------------------------------------------
-static constexpr size_t kTrayDeckCap = 5;
+
+// Deck window size: as many cards as the tray panel width fits at the
+// current icon size without breaking the max-50%-overlap rule; anything
+// beyond that stays behind the +N overflow and the wheel paged window.
+static int TrayDeckCap(const AppState& s) {
+    return s.renderer.TrayDeckCapacity(static_cast<float>(s.compositor.Width()));
+}
 
 struct TrayDeckEntry {
     int batch = -1;
@@ -767,7 +790,7 @@ struct TrayDeckEntry {
 };
 
 static std::vector<TrayDeckEntry> TrayDeckEntries(const app::StagingTray& tray, size_t offset,
-                                                  size_t cap = kTrayDeckCap) {
+                                                  size_t cap) {
     std::vector<TrayDeckEntry> out;
     const auto& batches = tray.batches();
     size_t skipped = 0;
@@ -806,7 +829,8 @@ static int TrayDeckHoverIndex(const AppState& s) {
     if (s.hoverRegion == static_cast<int>(ui::HitTestResult::TrayCard))
         return s.hoverControlIndex;
     if (s.hoverRegion == static_cast<int>(ui::HitTestResult::TrayItemRemove)) {
-        const auto entries = TrayDeckEntries(s.tray, static_cast<size_t>(s.trayDeckOffset));
+        const auto entries = TrayDeckEntries(s.tray, static_cast<size_t>(s.trayDeckOffset),
+                                             static_cast<size_t>(TrayDeckCap(s)));
         for (int i = 0; i < static_cast<int>(entries.size()); ++i) {
             if (entries[static_cast<size_t>(i)].batch == s.hoverControlIndex &&
                 entries[static_cast<size_t>(i)].sub == s.hoverSubIndex)
@@ -819,7 +843,7 @@ static int TrayDeckHoverIndex(const AppState& s) {
 // ---------------------------------------------------------------------------
 // Details panel helpers: star shortcuts, byte/time formatting, size walk.
 // ---------------------------------------------------------------------------
-// "星标常用文件" is a path index in places.json, not copies or .lnk shortcuts.
+// Starred projects are path records in places.json, not copies or .lnk shortcuts.
 static void RefreshStarredViews(AppState& s) {
     for (auto& pane : s.panes) {
         if (!pane) continue;
@@ -833,9 +857,23 @@ static void RefreshStarredViews(AppState& s) {
     }
 }
 
-static bool ToggleStarred(AppState& s, const std::wstring& target) {
+static void RefreshRecentViews(AppState& s) {
+    for (auto& pane : s.panes) {
+        if (!pane) continue;
+        for (auto& owned : pane->tabs) {
+            app::Tab* tab = owned.get();
+            if (!tab) continue;
+            std::wstring kind;
+            if (app::ParsePulsePath(tab->current_path, &kind, nullptr) && kind == L"recent")
+                LoadVirtualView(s, *tab, tab->current_path);
+        }
+    }
+}
+
+static bool ToggleStarred(AppState& s, const std::wstring& target,
+                          app::PlaceItemKind kind = app::PlaceItemKind::Unknown) {
     if (target.empty() || fs::IsVirtualPath(target)) return false;
-    const bool on = s.places.ToggleStarred(target);
+    const bool on = s.places.ToggleStarred(target, kind);
     s.detailsStarred = on;
     RefreshStarredViews(s);
     InvalidateRect(s.hwnd, nullptr, FALSE);
@@ -972,14 +1010,16 @@ static bool TickTrayDeck(AppState& s) {
     // Window into the newest-first list; a fresh collect always jumps back
     // to the newest items.
     const int total = TrayItemTotalCount(s.tray);
-    const int max_offset = std::max(0, total - static_cast<int>(kTrayDeckCap));
+    const int cap = TrayDeckCap(s);
+    const int max_offset = std::max(0, total - cap);
     const int clamped_offset = std::clamp(s.trayDeckOffset, 0, max_offset);
     if (clamped_offset != s.trayDeckOffset) { s.trayDeckOffset = clamped_offset; dirty = true; }
     const bool grew = total > static_cast<int>(s.trayDeckLastTotal);
     if (grew && s.trayDeckOffset != 0) { s.trayDeckOffset = 0; dirty = true; }
     s.trayDeckLastTotal = static_cast<size_t>(total);
 
-    const auto entries = TrayDeckEntries(s.tray, static_cast<size_t>(s.trayDeckOffset));
+    const auto entries = TrayDeckEntries(s.tray, static_cast<size_t>(s.trayDeckOffset),
+                                         static_cast<size_t>(cap));
     const int n = static_cast<int>(entries.size());
     const int hovered = TrayDeckHoverIndex(s);
 
@@ -992,7 +1032,7 @@ static bool TickTrayDeck(AppState& s) {
         auto [it, inserted] = s.trayCards.try_emplace(item.path);
         AppState::TrayCardAnim& a = it->second;
         if (inserted) {
-            // Collected items fan out from the center; items revealed by
+            // Collected items slide out from the center; items revealed by
             // wheel-scrolling fade in directly at their slot.
             a.slot = grew ? 0.0f : target_slot;
         }
@@ -1025,7 +1065,16 @@ static bool TickTrayDeck(AppState& s) {
 static ui::WindowViewModel BuildVm(AppState& s) {
     if (!s.pane) return {};
     ui::WindowViewModel vm = app::BuildWindowViewModel(*s.pane, s.sidebar,
-        s.pane->focused, s.maximized, s.darkMode, &s.places, s.sidebarCollapsedMask);
+        s.pane->focused, s.maximized, s.darkMode, &s.places, s.sidebarCollapsedMask,
+        s.starredExpanded);
+    vm.sidebar_scroll = s.sidebarScroll;
+    const float sidebar_max = s.renderer.SidebarMaxScroll(
+        vm, static_cast<float>(s.compositor.Width()),
+        static_cast<float>(s.compositor.Height()));
+    if (s.sidebarScroll > sidebar_max) {
+        s.sidebarScroll = sidebar_max;
+        vm.sidebar_scroll = sidebar_max;
+    }
     ops::OpStatus st = s.ops.Status();
     if (st.active || !st.last_error.empty() || !st.summary.empty()) {
         vm.status.task_text = st.last_error.empty() ? st.summary
@@ -1151,9 +1200,10 @@ static ui::WindowViewModel BuildVm(AppState& s) {
             if (off != s.chipOffsets.end()) vm.tab_groups[gi].x_offset = off->second;
         }
     }
-    // Staging tray fan deck: live cards (newest batch first) + exiting ghosts.
+    // Staging tray card deck: live cards (newest batch first) + exiting ghosts.
     {
-        const auto entries = TrayDeckEntries(s.tray, static_cast<size_t>(s.trayDeckOffset));
+        const auto entries = TrayDeckEntries(s.tray, static_cast<size_t>(s.trayDeckOffset),
+                                             static_cast<size_t>(TrayDeckCap(s)));
         ui::TrayDeckView& deck = vm.tray_deck;
         deck.open = s.trayOpen;
         deck.offset = s.trayDeckOffset;
@@ -1397,6 +1447,7 @@ static std::wstring TooltipForHover(AppState& s) {
     case R::SettingsWallpaper:
         return s.hoverControlIndex == 1 ? L"清除背景图" : L"选择背景图";
     case R::SettingsDensity: return L"列表行高";
+    case R::SettingsTrayIcon: return L"暂存区图标";
     case R::Minimize: return L"最小化";
     case R::Maximize: return s.maximized ? L"还原" : L"最大化";
     case R::Close: return L"关闭";
@@ -1438,6 +1489,13 @@ static std::wstring TooltipForHover(AppState& s) {
     case R::RowNewTab: return L"在新标签打开";
     case R::RowMore: return L"更多操作";
     case R::SidebarItemAction: return L"取消钉住";
+    case R::SidebarItem: {
+        if (const app::StarredItem* starred = s.places.FindStarred(s.hoverPath);
+            starred && !starred->badge.empty()) {
+            return starred->badge;
+        }
+        return L"";
+    }
     case R::Row: {
         app::Pane* pane = PaneAtSlot(s, s.hoverPaneIndex);
         app::Tab* tab = pane ? pane->ActiveTab() : ActiveTab(s);
@@ -1461,12 +1519,17 @@ static std::wstring TooltipForHover(AppState& s) {
                     first = false;
                 }
             }
+            if (const app::StarredItem* starred = s.places.FindStarred(full);
+                starred && !starred->badge.empty()) {
+                tooltip += L"\n徽章：" + starred->badge;
+            }
             return tooltip;
         }
         return L"";
     }
     case R::TrayCard: {
-        const auto entries = TrayDeckEntries(s.tray, static_cast<size_t>(s.trayDeckOffset));
+        const auto entries = TrayDeckEntries(s.tray, static_cast<size_t>(s.trayDeckOffset),
+                                             static_cast<size_t>(TrayDeckCap(s)));
         if (s.hoverControlIndex >= 0 &&
             s.hoverControlIndex < static_cast<int>(entries.size()))
             return TrayDisplayPath(entries[static_cast<size_t>(s.hoverControlIndex)].item->path);
@@ -2018,17 +2081,21 @@ static void DispatchMenuCommand(AppState& s, int cmd) {
         OpenSettingsTab(s, 2);
         break;
     default:
-        if (cmd >= app::CmdIndexBase) {
-            const int idx = cmd - app::CmdIndexBase;
-            if (idx >= 0 && idx < static_cast<int>(s.paletteHits.size())) {
-                const auto& hit = s.paletteHits[static_cast<size_t>(idx)];
-                if (hit.is_dir) NavigateTo(s, hit.path);
-                else s.ops.OpenWith(hit.path);
-            }
+            if (cmd >= app::CmdIndexBase) {
+                const int idx = cmd - app::CmdIndexBase;
+                if (idx >= 0 && idx < static_cast<int>(s.paletteHits.size())) {
+                    const auto& hit = s.paletteHits[static_cast<size_t>(idx)];
+                    if (hit.is_dir) NavigateTo(s, hit.path);
+                    else {
+                        s.ops.OpenWith(hit.path);
+                        RecordRecentOpen(s, hit.path, app::PlaceItemKind::File);
+                    }
+                }
         } else if (cmd >= app::CmdRecentBase) {
             const int idx = cmd - app::CmdRecentBase;
-            if (idx >= 0 && idx < static_cast<int>(s.recentPaths.size()))
-                NavigateTo(s, s.recentPaths[static_cast<size_t>(idx)]);
+            const auto recent = s.places.RecentFolderPaths();
+            if (idx >= 0 && idx < static_cast<int>(recent.size()))
+                NavigateTo(s, recent[static_cast<size_t>(idx)]);
         }
         break;
     }
@@ -3225,11 +3292,32 @@ static void LoadVirtualView(AppState& s, app::Tab& tab, const std::wstring& path
         RequestSearchPage(s, tab, rest, true);
         return;
     } else if (kind == L"starred") {
-        tab.virtual_title = L"星标常用文件";
+        tab.virtual_title = L"星标项目";
         tab.loading = true;
+        tab.view_mode = ui::ViewMode::Details;
         tab.SetSnapshot(nullptr);
         tab.pending_generation = s.worker.LoadPaths(
-            path, s.places.starred, tab.sort_column, tab.sort_direction);
+            path, s.places.StarredPaths(), tab.sort_column, tab.sort_direction, true);
+        return;
+    } else if (kind == L"recent") {
+        tab.virtual_title = L"最近使用";
+        tab.loading = true;
+        tab.view_mode = ui::ViewMode::Details;
+        tab.SetSnapshot(nullptr);
+        const auto filter = static_cast<app::RecentFilter>(
+            std::clamp(tab.recent_filter, 0, 2));
+        const auto recent = s.places.RecentItems(filter);
+        std::vector<std::wstring> paths;
+        std::vector<uint64_t> opened;
+        paths.reserve(recent.size());
+        opened.reserve(recent.size());
+        for (const auto& item : recent) {
+            paths.push_back(item.path);
+            opened.push_back(item.opened_at);
+        }
+        tab.pending_generation = s.worker.LoadPaths(
+            path, std::move(paths), tab.sort_column, tab.sort_direction, true,
+            std::move(opened));
         return;
     } else if (kind == L"settings") {
         tab.virtual_title = L"设置";
@@ -3403,6 +3491,20 @@ static void ApplyWorkerResult(AppState& s, app::WorkResult& res) {
                     renameTarget = (*tab->snapshot)[s.renameIndex].name;
                 }
             }
+            std::wstring virtual_kind;
+            if (res.snapshot && app::ParsePulsePath(
+                    tab->current_path, &virtual_kind, nullptr) &&
+                (virtual_kind == L"starred" || virtual_kind == L"recent")) {
+                for (const auto& entry : *res.snapshot) {
+                    if (entry.full_path.empty() || entry.attrs == 0) continue;
+                    const auto item_kind = entry.is_dir
+                        ? app::PlaceItemKind::Folder : app::PlaceItemKind::File;
+                    if (virtual_kind == L"starred")
+                        s.places.SetStarredKind(entry.full_path, item_kind);
+                    else
+                        s.places.SetRecentKind(entry.full_path, item_kind);
+                }
+            }
             tab->SetSnapshot(res.snapshot);
             tab->git_root = res.git_root;
             tab->loading = false;
@@ -3551,6 +3653,7 @@ static void NavigateTo(AppState& s, const std::wstring& path) {
     StartLoadingPath(s, *tab, normalized);
     RestoreNavigationReturnSelection(s, *tab, returnedChild);
     RememberPath(s, normalized);
+    RecordRecentOpen(s, normalized, app::PlaceItemKind::Folder);
     s.timing.first_frame_recorded = false;
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
@@ -3823,6 +3926,87 @@ static void ShowTabGroupMenu(AppState& s, int group_id, POINT screen_pt) {
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
+static void ShowStarredBadgeEditor(AppState& s, const std::wstring& path,
+                                    POINT screen_pt) {
+    const app::StarredItem* initial = s.places.FindStarred(path);
+    if (!initial || !EnsureMenu(s)) return;
+    uint32_t color = initial->badge_rgb;
+    s.menu->SetFilterPlaceholder(L"徽章文字（最多 12 个字符）…");
+    s.menu->SetInitialFilterText(initial->badge);
+    s.menu->SetFilterMinWidth(260.0f);
+    auto build = [&](const std::wstring& query) {
+        s.places.SetStarredBadge(path, query, color);
+        InvalidateRect(s.hwnd, nullptr, FALSE);
+        std::vector<ui::FluentMenuItem> items;
+        ui::FluentMenuItem strip;
+        for (int i = 0; i < 8; ++i) {
+            ui::FluentMenuSwatch sw;
+            sw.command = app::CmdTabColorBase + i;
+            sw.color = ui::HexColor(kTabGroupPalette[i]);
+            sw.checked = color == kTabGroupPalette[i];
+            strip.quick_swatches.push_back(sw);
+        }
+        items.push_back(std::move(strip));
+        return items;
+    };
+    const int cmd = s.menu->TrackPopup(screen_pt, build(initial->badge),
+        [&](const std::wstring& query) { return build(query); });
+    if (cmd >= app::CmdTabColorBase && cmd < app::CmdTabColorBase + 8) {
+        color = kTabGroupPalette[cmd - app::CmdTabColorBase];
+        s.places.SetStarredBadge(path, s.menu->LastFilterQuery(), color);
+    }
+    s.menu->SetFilterPlaceholder(L"搜索命令、文件夹…");
+    RefreshStarredViews(s);
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
+static void ShowCuratedItemMenu(AppState& s, const std::wstring& path,
+                                bool recent, POINT screen_pt) {
+    if (path.empty() || !EnsureMenu(s)) return;
+    std::vector<ui::FluentMenuItem> items;
+    ui::FluentMenuItem open;
+    open.command = app::CmdOpen;
+    open.text = L"打开";
+    open.glyph = L"\xE8A0";
+    items.push_back(std::move(open));
+    if (recent) {
+        ui::FluentMenuItem remove;
+        remove.command = app::CmdRemoveRecent;
+        remove.text = L"从最近使用中移除";
+        remove.glyph = L"\xE711";
+        items.push_back(std::move(remove));
+    } else {
+        ui::FluentMenuItem badge;
+        badge.command = app::CmdEditStarBadge;
+        badge.text = L"编辑徽章";
+        badge.glyph = L"\xE8D2";
+        items.push_back(std::move(badge));
+        ui::FluentMenuItem remove;
+        remove.command = app::CmdRemoveStarred;
+        remove.text = L"取消星标";
+        remove.glyph = L"\xE735";
+        items.push_back(std::move(remove));
+    }
+    const int cmd = s.menu->TrackPopup(screen_pt, std::move(items));
+    if (cmd == app::CmdOpen) {
+        const DWORD attrs = GetFileAttributesW(path.c_str());
+        const bool is_dir = attrs != INVALID_FILE_ATTRIBUTES &&
+                            (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        if (is_dir) NavigateTo(s, path);
+        else if (attrs != INVALID_FILE_ATTRIBUTES) {
+            s.ops.OpenWith(path);
+            RecordRecentOpen(s, path, app::PlaceItemKind::File);
+        }
+    } else if (cmd == app::CmdEditStarBadge) {
+        ShowStarredBadgeEditor(s, path, screen_pt);
+    } else if (cmd == app::CmdRemoveStarred) {
+        if (s.places.IsStarred(path)) ToggleStarred(s, path);
+    } else if (cmd == app::CmdRemoveRecent) {
+        if (s.places.RemoveRecent(path)) RefreshRecentViews(s);
+    }
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
 // Drop groups with no remaining members (after mass closes / leave operations).
 static void PruneEmptyTabGroups(app::Pane& pane) {
     for (auto git = pane.tab_groups.begin(); git != pane.tab_groups.end();) {
@@ -4079,7 +4263,7 @@ static void ShowOmnibar(AppState& s, OmnibarMode mode) {
             s.paletteSearching = false;
         }
         const std::wstring current = ActiveTab(s) ? ActiveTab(s)->current_path : L"";
-        auto items = app::BuildCommandPalette(query, s.recentPaths, s.paletteHits,
+        auto items = app::BuildCommandPalette(query, s.places.RecentFolderPaths(), s.paletteHits,
                                               project_only, s.paletteTotal, current);
         if (s.paletteSearching) {
             ui::FluentMenuItem wait;
@@ -4121,6 +4305,11 @@ static void ShowOmnibar(AppState& s, OmnibarMode mode) {
 static void SortBy(AppState& s, ui::SortColumn col) {
     app::Tab* tab = ActiveTab(s);
     if (!tab) return;
+    std::wstring kind;
+    if (app::ParsePulsePath(tab->current_path, &kind, nullptr) &&
+        (kind == L"starred" || kind == L"recent")) {
+        return;
+    }
     if (tab->sort_column == col) {
         tab->sort_direction = (tab->sort_direction == ui::SortDirection::Asc)
             ? ui::SortDirection::Desc : ui::SortDirection::Asc;
@@ -4141,23 +4330,35 @@ static void OpenSelected(AppState& s) {
         const fs::DirEntry& e = (*tab->snapshot)[static_cast<size_t>(indices[0])];
         if (!e.link_target.empty()) {
             if (e.link_target_is_dir) NavigateTo(s, e.link_target);
-            else s.ops.OpenWith(e.link_target);
+            else {
+                s.ops.OpenWith(e.link_target);
+                RecordRecentOpen(s, e.link_target, app::PlaceItemKind::File);
+            }
             return;
         }
         std::wstring full = EntryFullPath(*tab, indices[0]);
         if (e.is_dir) NavigateTo(s, full);
-        else s.ops.OpenWith(full);
+        else {
+            s.ops.OpenWith(full);
+            RecordRecentOpen(s, full, app::PlaceItemKind::File);
+        }
         return;
     }
     for (int index : indices) {
         const fs::DirEntry& e = (*tab->snapshot)[static_cast<size_t>(index)];
         if (!e.link_target.empty()) {
-            if (!e.link_target_is_dir) s.ops.OpenWith(e.link_target);
+            if (!e.link_target_is_dir) {
+                s.ops.OpenWith(e.link_target);
+                RecordRecentOpen(s, e.link_target, app::PlaceItemKind::File);
+            }
             continue;
         }
         if (e.is_dir) continue;
         std::wstring full = EntryFullPath(*tab, index);
-        if (!full.empty()) s.ops.OpenWith(full);
+        if (!full.empty()) {
+            s.ops.OpenWith(full);
+            RecordRecentOpen(s, full, app::PlaceItemKind::File);
+        }
     }
 }
 
@@ -4179,6 +4380,7 @@ static void GoBack(AppState& s) {
     const std::wstring from = tab->current_path;
     std::wstring path = tab->GoBack();
     StartLoadingPath(s, *tab, path);
+    RecordRecentOpen(s, path, app::PlaceItemKind::Folder);
     RestoreNavigationReturnSelection(
         s, *tab, app::NavigationReturnChildName(from, path));
     s.timing.first_frame_recorded = false;
@@ -4190,6 +4392,7 @@ static void GoForward(AppState& s) {
     if (!tab || !tab->CanGoForward()) return;
     std::wstring path = tab->GoForward();
     StartLoadingPath(s, *tab, path);
+    RecordRecentOpen(s, path, app::PlaceItemKind::Folder);
     s.timing.first_frame_recorded = false;
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
@@ -4214,8 +4417,10 @@ static const wchar_t* SettingsPageName(int page) {
 
 static std::wstring NewTabPath(const AppState& s) {
     const app::Tab* tab = s.pane ? s.pane->ActiveTab() : nullptr;
-    if (!tab || IsSettingsTab(tab) || tab->current_path.empty())
-        return s.recentPaths.empty() ? L"C:\\" : s.recentPaths.front();
+    if (!tab || IsSettingsTab(tab) || tab->current_path.empty()) {
+        const auto recent = s.places.RecentFolderPaths(1);
+        return recent.empty() ? L"C:\\" : recent.front();
+    }
     return tab->current_path;
 }
 
@@ -4223,6 +4428,7 @@ static void NewTab(AppState& s, const std::wstring& path) {
     if (!s.pane) return;
     s.pane->NewTab(path.empty() ? L"C:\\" : path);
     StartLoadingPath(s, *s.pane->ActiveTab(), s.pane->ActiveTab()->current_path);
+    RecordRecentOpen(s, s.pane->ActiveTab()->current_path, app::PlaceItemKind::Folder);
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
@@ -4354,6 +4560,15 @@ static void HandleSettingsDensity(AppState& s, int index) {
     s.appPrefs.row_height = kDips[index];
     s.appPrefs.Save();
     s.renderer.SetRowHeightDip(static_cast<float>(kDips[index]));
+}
+
+static void HandleSettingsTrayIcon(AppState& s, int index) {
+    static constexpr int kDips[] = { 40, 48, 56 };
+    if (index < 0 || index >= static_cast<int>(std::size(kDips))) return;
+    if (s.appPrefs.tray_icon_size == kDips[index]) return;
+    s.appPrefs.tray_icon_size = kDips[index];
+    s.appPrefs.Save();
+    s.renderer.SetTrayIconDip(static_cast<float>(kDips[index]));
 }
 
 static void HandleSettingsWallpaper(AppState& s, int index) {
@@ -4704,8 +4919,13 @@ static void LayoutRenameOverlay(AppState& s) {
     if (!tab) return;
     ui::WindowViewModel vm = BuildVm(s);
     const D2D1_RECT_F pane = FocusedPaneRect(s);
-    const D2D1_RECT_F list = s.renderer.PaneListRect(pane,
-        tab->banner_message.empty() ? 0.0f : 36.0f * s.scale, tab->view_mode);
+    float extra = tab->banner_message.empty() ? 0.0f : 36.0f * s.scale;
+    std::wstring virtual_kind;
+    if (app::ParsePulsePath(tab->current_path, &virtual_kind, nullptr) &&
+        virtual_kind == L"recent") {
+        extra += 40.0f * s.scale;
+    }
+    const D2D1_RECT_F list = s.renderer.PaneListRect(pane, extra, tab->view_mode);
     D2D1_RECT_F field = s.renderer.RenameFieldRect(vm.pane, list, s.renameIndex);
     if (field.right <= field.left) return;
     // Seat the EDIT inside the Fluent frame: frame stroke + text padding.
@@ -5219,6 +5439,7 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         s->ctxMenuPrefs.Load();
         s->appPrefs.Load();
         s->renderer.SetRowHeightDip(static_cast<float>(s->appPrefs.row_height));
+        s->renderer.SetTrayIconDip(static_cast<float>(s->appPrefs.tray_icon_size));
         ApplyAppWindowChrome(*s);
         if (s->appPrefs.keep_running_on_close) EnsureTrayIcon(*s, true);
         s->index.Start(hwnd, WM_INDEX_NOTIFY, WM_INDEX_SEARCH);
@@ -5413,6 +5634,7 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             s->hoverRegion = region;
             s->hoverControlIndex = hit.index;
             s->hoverSubIndex = hit.sub_index;
+            s->hoverPath = hit.path;
             s->hoverSince = GetTickCount64();
             s->tooltipText.clear();
             InvalidateRect(hwnd, nullptr, FALSE);
@@ -5595,6 +5817,7 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 RefreshActiveTab(*s);
                 dirty = true;
             }
+            s->places.FlushPendingSave(false);
             if (s->renameClickCandidate && s->renameClickDue != 0 &&
                 now >= s->renameClickDue) {
                 app::Tab* tab = ActiveTab(*s);
@@ -5680,7 +5903,7 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
     case WM_SETCURSOR: {
         if (!s || LOWORD(lParam) != HTCLIENT) break;
-        if (s->tagDragActive || s->tabDragging) { // QFluent TabBar grabs a drag cursor while reordering
+        if (s->starDragActive || s->tagDragActive || s->tabDragging) {
             SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
             return TRUE;
         }
@@ -6316,6 +6539,60 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             }
         }
 
+        if (s->starDragPending || s->starDragActive) {
+            if ((GetKeyState(VK_LBUTTON) & 0x8000) == 0) {
+                s->starDragPending = false;
+                s->starDragActive = false;
+                s->starDragPath.clear();
+                s->dropSidebar = -1;
+            } else {
+                if (!s->starDragActive &&
+                    (std::abs(mx - s->starDragStartPt.x) >= GetSystemMetrics(SM_CXDRAG) ||
+                     std::abs(my - s->starDragStartPt.y) >= GetSystemMetrics(SM_CYDRAG))) {
+                    s->starDragActive = true;
+                    s->starDragPending = false;
+                }
+                if (s->starDragActive) {
+                    ui::WindowViewModel dragVm = BuildVm(*s);
+                    const D2D1_RECT_F dragRect = D2D1::RectF(
+                        0, 0, static_cast<float>(s->compositor.Width()),
+                        static_cast<float>(s->compositor.Height()));
+                    const D2D1_RECT_F sidebar = s->renderer.SidebarRect(
+                        dragRect.right, dragRect.bottom);
+                    const float max_scroll = s->renderer.SidebarMaxScroll(
+                        dragVm, dragRect.right, dragRect.bottom);
+                    if (my < sidebar.top + 28.0f * s->scale) {
+                        s->sidebarScroll = std::max(
+                            0.0f, s->sidebarScroll - 8.0f * s->scale);
+                        dragVm = BuildVm(*s);
+                    } else if (my > sidebar.bottom - 170.0f * s->scale) {
+                        s->sidebarScroll = std::min(
+                            max_scroll, s->sidebarScroll + 8.0f * s->scale);
+                        dragVm = BuildVm(*s);
+                    }
+                    const ui::HitTestResult target = s->renderer.HitTest(
+                        dragVm, dragRect, static_cast<float>(mx), static_cast<float>(my));
+                    const app::StarredItem* item = s->places.FindStarred(target.path);
+                    if (target.region == ui::HitTestResult::SidebarItem && item &&
+                        item->kind == app::PlaceItemKind::Folder) {
+                        const auto folders = s->places.StarredFolderPaths();
+                        const auto found = std::find_if(
+                            folders.begin(), folders.end(), [&](const auto& path) {
+                                return _wcsicmp(path.c_str(), target.path.c_str()) == 0;
+                            });
+                        if (found != folders.end()) {
+                            s->starDragTarget = static_cast<size_t>(found - folders.begin());
+                            s->dropSidebar = target.index;
+                        }
+                    } else {
+                        s->dropSidebar = -1;
+                    }
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                    return 0;
+                }
+            }
+        }
+
         // Tag reorder drag (QFluentKit TabBar model): the dragged tag follows
         // cursor deltas 1:1 and swaps with a sibling on center crossing.
         if (s->tagDragPending || s->tagDragActive) {
@@ -6457,7 +6734,12 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         }
         D2D1_RECT_F content = s->renderer.ContentRect((float)s->compositor.Width(), (float)s->compositor.Height());
         float extra = 0.0f;
-        if (app::Tab* tab = ActiveTab(*s); tab && !tab->banner_message.empty()) extra = 36.0f * s->scale;
+        if (app::Tab* tab = ActiveTab(*s); tab) {
+            if (!tab->banner_message.empty()) extra = 36.0f * s->scale;
+            std::wstring kind;
+            if (app::ParsePulsePath(tab->current_path, &kind, nullptr) && kind == L"recent")
+                extra += 40.0f * s->scale;
+        }
         float listTop = content.top + s->renderer.PaneHeaderHeight() + extra + s->renderer.ColumnHeaderHeight();
         bool sbHit = (mx >= content.right - 14 * s->scale && mx < content.right &&
                       my >= listTop && my < content.bottom);
@@ -6477,6 +6759,7 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             s->hoverRegion = 0;
             s->hoverControlIndex = -1;
             s->hoverSubIndex = -1;
+            s->hoverPath.clear();
             s->hoverSince = 0;
             s->tooltipText.clear();
             if (GetCapture() != hwnd) s->dragPending = false;
@@ -6642,6 +6925,9 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         } else if (hit.region == ui::HitTestResult::SettingsDensity) {
             HandleSettingsDensity(*s, hit.index);
             InvalidateRect(hwnd, nullptr, FALSE);
+        } else if (hit.region == ui::HitTestResult::SettingsTrayIcon) {
+            HandleSettingsTrayIcon(*s, hit.index);
+            InvalidateRect(hwnd, nullptr, FALSE);
         } else if (hit.region == ui::HitTestResult::SettingsWallpaper) {
             HandleSettingsWallpaper(*s, hit.index);
             InvalidateRect(hwnd, nullptr, FALSE);
@@ -6698,7 +6984,12 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         } else if (hit.region == ui::HitTestResult::RowStar && hit.index >= 0) {
             if (app::Tab* tab = ActiveTab(*s)) {
                 const std::wstring p = EntryFullPath(*tab, hit.index);
-                if (!p.empty()) ToggleStarred(*s, p);
+                if (!p.empty() && tab->snapshot &&
+                    hit.index < static_cast<int>(tab->snapshot->size())) {
+                    const auto& entry = (*tab->snapshot)[static_cast<size_t>(hit.index)];
+                    ToggleStarred(*s, p, entry.is_dir
+                        ? app::PlaceItemKind::Folder : app::PlaceItemKind::File);
+                }
             }
         } else if (hit.region == ui::HitTestResult::RowNewTab && hit.index >= 0) {
             if (app::Tab* tab = ActiveTab(*s)) {
@@ -6718,7 +7009,8 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             OpenSelected(*s);
         } else if (hit.region == ui::HitTestResult::DetailsStar) {
             const std::wstring p = SelectedFullPath(*s);
-            if (!p.empty()) ToggleStarred(*s, p);
+            if (!p.empty()) ToggleStarred(*s, p, vm.details.is_dir
+                ? app::PlaceItemKind::Folder : app::PlaceItemKind::File);
         } else if (hit.region == ui::HitTestResult::DetailsMore) {
             if (EnsureMenu(*s)) {
                 std::vector<ui::FluentMenuItem> items;
@@ -6833,6 +7125,22 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             ShowFilterEditor(*s);
         } else if (hit.region == ui::HitTestResult::AddressBar) {
             ShowOmnibar(*s, OmnibarMode::Path);
+        } else if (hit.region == ui::HitTestResult::RecentFilter) {
+            if (app::Tab* tab = ActiveTab(*s)) {
+                const int filter = std::clamp(hit.index, 0, 2);
+                if (tab->recent_filter != filter) {
+                    tab->recent_filter = filter;
+                    LoadVirtualView(*s, *tab, tab->current_path);
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+            }
+        } else if (hit.region == ui::HitTestResult::RecentClear) {
+            if (MessageBoxW(hwnd, L"确定清空全部最近使用记录吗？", L"清空最近使用",
+                            MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2) == IDOK &&
+                s->places.ClearRecent()) {
+                RefreshRecentViews(*s);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
         } else if (hit.region == ui::HitTestResult::ColumnHeader) {
             SortBy(*s, hit.column);
         } else if (hit.region == ui::HitTestResult::SidebarHeaderAction) {
@@ -6858,8 +7166,26 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             if (app::ParsePulsePath(hit.path, &kind, &rest) && kind == L"workspace")
                 s->places.UnpinWorkspace(_wtoi(rest.c_str()));
             InvalidateRect(hwnd, nullptr, FALSE);
+        } else if (hit.region == ui::HitTestResult::SidebarItemExpand) {
+            if (hit.path == app::MakeStarredPath()) {
+                s->starredExpanded = !s->starredExpanded;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
         } else if (hit.region == ui::HitTestResult::SidebarItem) {
-            if (hit.path.starts_with(L"pulse:tag:")) {
+            const app::StarredItem* starred = s->places.FindStarred(hit.path);
+            if (starred && starred->kind == app::PlaceItemKind::Folder) {
+                s->starDragPending = true;
+                s->starDragActive = false;
+                s->starDragStartPt = POINT{ mx, my };
+                s->starDragPath = hit.path;
+                const auto folders = s->places.StarredFolderPaths();
+                const auto found = std::find_if(folders.begin(), folders.end(), [&](const auto& p) {
+                    return _wcsicmp(p.c_str(), hit.path.c_str()) == 0;
+                });
+                s->starDragTarget = found == folders.end()
+                    ? 0 : static_cast<size_t>(found - folders.begin());
+                SetCapture(hwnd);
+            } else if (hit.path.starts_with(L"pulse:tag:")) {
                 // Tags defer navigation to release; a press may become a reorder drag.
                 s->tagDragPending = true;
                 s->tagDragStartPt = POINT{ mx, my };
@@ -6935,6 +7261,20 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
     case WM_LBUTTONUP: {
         if (s) {
+            if (s->starDragPending || s->starDragActive) {
+                const bool was_active = s->starDragActive;
+                const std::wstring path = s->starDragPath;
+                if (was_active && s->dropSidebar >= 0)
+                    s->places.ReorderStarredFolder(path, s->starDragTarget);
+                s->starDragPending = false;
+                s->starDragActive = false;
+                s->starDragPath.clear();
+                s->dropSidebar = -1;
+                if (GetCapture() == hwnd) ReleaseCapture();
+                if (!was_active && !path.empty()) NavigateTo(*s, path);
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
             if (s->tagDragPending || s->tagDragActive) {
                 const bool wasActive = s->tagDragActive;
                 const std::wstring path = s->tagDragPath;
@@ -7172,6 +7512,13 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             s->columnResizePane = -1;
             if (s->renameClickCandidate && s->renameClickDue == 0)
                 CancelRenameClick(*s);
+            if (s->starDragPending || s->starDragActive) {
+                s->starDragPending = false;
+                s->starDragActive = false;
+                s->starDragPath.clear();
+                s->dropSidebar = -1;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
             if (s->tagDragPending || s->tagDragActive) {
                 // Capture lost mid-gesture: cancel the reorder, keep places.tags.
                 s->tagDragPending = false;
@@ -7276,7 +7623,16 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 else tab->selected_index = hit.index;
             }
             InvalidateRect(hwnd, nullptr, FALSE);
-            ShowItemContextMenu(*s, sp);
+            std::wstring virtual_kind;
+            const bool curated = tab && app::ParsePulsePath(
+                tab->current_path, &virtual_kind, nullptr) &&
+                (virtual_kind == L"starred" || virtual_kind == L"recent");
+            if (curated) {
+                ShowCuratedItemMenu(*s, EntryFullPath(*tab, hit.index),
+                                    virtual_kind == L"recent", sp);
+            } else {
+                ShowItemContextMenu(*s, sp);
+            }
             shown = true;
         } else if (hit.region == ui::HitTestResult::SidebarItem &&
                    hit.path.starts_with(L"pulse:tag:")) {
@@ -7284,6 +7640,13 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             app::ParsePulsePath(hit.path, &kind, &rest);
             const app::TagId id = s->places.ResolveTagRef(rest);
             if (!id.empty()) ShowTagSidebarMenu(*s, id, sp);
+            shown = true;
+        } else if (hit.region == ui::HitTestResult::SidebarItem) {
+            const app::StarredItem* starred = s->places.FindStarred(hit.path);
+            if (starred && starred->kind == app::PlaceItemKind::Folder) {
+                ShowCuratedItemMenu(*s, hit.path, false, sp);
+                shown = true;
+            }
         } else if (!IsSettingsTab(ActiveTab(*s)) &&
                    (hit.region == ui::HitTestResult::Pane ||
                    hit.region == ui::HitTestResult::FilterBox ||
@@ -7322,6 +7685,19 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         ui::WindowViewModel wheelVm = BuildVm(*s);
         D2D1_RECT_F wheelRect = D2D1::RectF(0, 0, (float)s->compositor.Width(), (float)s->compositor.Height());
         ui::HitTestResult wheelHit = s->renderer.HitTest(wheelVm, wheelRect, (float)pt.x, (float)pt.y);
+        const D2D1_RECT_F sidebarRc = s->renderer.SidebarRect(wheelRect.right, wheelRect.bottom);
+        if (pt.x >= sidebarRc.left && pt.x < sidebarRc.right &&
+            pt.y >= sidebarRc.top && pt.y < sidebarRc.bottom &&
+            s->renderer.EffectiveSidebarWidth(wheelRect.right) > 60.0f * s->scale) {
+            const float max_scroll = s->renderer.SidebarMaxScroll(
+                wheelVm, wheelRect.right, wheelRect.bottom);
+            const float steps = static_cast<float>(GET_WHEEL_DELTA_WPARAM(wParam)) /
+                                static_cast<float>(WHEEL_DELTA);
+            s->sidebarScroll = std::clamp(
+                s->sidebarScroll - steps * 48.0f * s->scale, 0.0f, max_scroll);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
         const D2D1_RECT_F detailsRc = s->renderer.DetailsPanelRect(
             wheelRect.right, wheelRect.bottom);
         if (detailsRc.right > detailsRc.left && pt.x >= detailsRc.left &&
@@ -7343,7 +7719,8 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             return 0;
         }
         // Tray deck: wheel over the panel pages the icon window.
-        if (TrayItemTotalCount(s->tray) > static_cast<int>(kTrayDeckCap)) {
+        const int tray_cap = TrayDeckCap(*s);
+        if (TrayItemTotalCount(s->tray) > tray_cap) {
             const D2D1_RECT_F tray_rc = s->renderer.StagingTrayRect(
                 wheelVm, wheelRect.right, wheelRect.bottom);
             if (pt.x >= tray_rc.left && pt.x < tray_rc.right &&
@@ -7354,8 +7731,7 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 while (s->trayWheelAccum <= -WHEEL_DELTA) { s->trayWheelAccum += WHEEL_DELTA; ++steps; }
                 while (s->trayWheelAccum >= WHEEL_DELTA) { s->trayWheelAccum -= WHEEL_DELTA; --steps; }
                 if (steps != 0) {
-                    const int max_off = std::max(0, TrayItemTotalCount(s->tray) -
-                        static_cast<int>(kTrayDeckCap));
+                    const int max_off = std::max(0, TrayItemTotalCount(s->tray) - tray_cap);
                     const int next = std::clamp(s->trayDeckOffset + steps, 0, max_off);
                     if (next != s->trayDeckOffset) {
                         s->trayDeckOffset = next;
@@ -7624,10 +8000,13 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                                                  completed.destinations[i]);
                             tag_metadata_paths.push_back(completed.destinations[i]);
                         }
-                    } else if (completed.type == ops::OpType::RealDelete) {
+                    } else if (completed.type == ops::OpType::RecycleDelete ||
+                               completed.type == ops::OpType::RealDelete) {
                         for (const auto& source : completed.sources)
                             s->places.RemoveAssignments(source, true);
                     }
+                    RefreshStarredViews(*s);
+                    RefreshRecentViews(*s);
                 }
                 if (!tag_metadata_paths.empty())
                     QueueTagAds(*s, BuildTagAdsUpdates(s->places, tag_metadata_paths, true));
@@ -7887,6 +8266,7 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 snap.tray = s->tray;
                 snap.undo_json = s->ops.UndoToJson();
                 snap.sidebar_collapsed = static_cast<int>(s->sidebarCollapsedMask);
+                snap.starred_expanded = s->starredExpanded;
                 snap.details_panel = s->showDetailsPanel;
                 snap.details_panel_width = static_cast<int>(std::lround(s->detailsPanelWidth));
                 app::SaveSession(snap);
@@ -8047,6 +8427,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         state.tray = session.tray;
         state.darkMode = session.dark;
         state.sidebarCollapsedMask = static_cast<uint32_t>(session.sidebar_collapsed);
+        state.starredExpanded = session.starred_expanded;
         state.pending_undo_json = session.undo_json;
         state.showDetailsPanel = session.details_panel;
         state.detailsPanelWidth = static_cast<float>(session.details_panel_width);
@@ -8076,7 +8457,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
             state.shot_details_multi = true;
         } else if (wcscmp(__wargv[i], L"--shot-scale") == 0 && i + 1 < __argc) {
             state.shot_scale_override = std::clamp(
-                static_cast<float>(_wtof(__wargv[++i])), 1.0f, 2.0f);
+                static_cast<float>(_wtof(__wargv[++i])), 1.0f, 2.5f);
         } else if (wcscmp(__wargv[i], L"--shot-high-contrast") == 0) {
             state.shot_high_contrast = true;
         } else if (wcscmp(__wargv[i], L"--dark") == 0) {
@@ -8182,7 +8563,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 
     if (state.shot.active) {
         if (state.shot_tray) {
-            // Stage a few real files from the shot folder so the fan deck is
+            // Stage a few real files from the shot folder so the deck is
             // visible in the verification screenshot. Drop any restored
             // session tray first so the shot is deterministic.
             state.tray.Clear();

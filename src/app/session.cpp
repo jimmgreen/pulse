@@ -197,6 +197,7 @@ bool SaveSession(const SessionSnapshot& snap) {
     f << L"  \"focused\":" << snap.focused_pane << L",\n";
     f << L"  \"target\":" << snap.target_pane << L",\n";
     f << L"  \"sidebarCollapsed\":" << snap.sidebar_collapsed << L",\n";
+    f << L"  \"starredExpanded\":" << (snap.starred_expanded ? L"true" : L"false") << L",\n";
     f << L"  \"detailsPanel\":" << (snap.details_panel ? 1 : 0) << L",\n";
     f << L"  \"detailsPanelWidth\":" << std::clamp(snap.details_panel_width, 300, 480)
       << L",\n";
@@ -266,6 +267,8 @@ bool LoadSession(SessionSnapshot& snap) {
     snap.target_pane = pulse::json::ExtractInt(json, L"target");
     if (json.find(L"\"target\"") == std::wstring::npos) snap.target_pane = -1;
     snap.sidebar_collapsed = pulse::json::ExtractInt(json, L"sidebarCollapsed");
+    snap.starred_expanded = json.find(L"\"starredExpanded\"") == std::wstring::npos
+        ? true : pulse::json::ExtractBool(json, L"starredExpanded");
     snap.details_panel = pulse::json::ExtractInt(json, L"detailsPanel") != 0;
     snap.details_panel_width = pulse::json::ExtractInt(json, L"detailsPanelWidth");
     if (snap.details_panel_width < 300 || snap.details_panel_width > 480)

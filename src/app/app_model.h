@@ -45,6 +45,7 @@ struct Tab {
     uint64_t cache_unix = 0;
     int tab_group = 0; // 0 = none; TabGroup::id of the owning group
     bool pinned = false; // Chrome semantics: icon-only, left cluster, no close
+    int recent_filter = 0; // RecentFilter; transient per tab.
 
     // Transient UI state.
     bool loading = false;
@@ -259,6 +260,7 @@ struct SidebarEntry {
     std::wstring path;
     bool is_drive = false;
     float used_ratio = 0.0f;
+    bool expandable = false;
 };
 
 struct SidebarModel {
@@ -275,6 +277,7 @@ std::wstring FindGitRoot(const std::wstring& path);
 ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
                                          const SidebarModel& sidebar, bool focused, bool maximized, bool dark,
                                          const PlacesCatalog* places = nullptr,
-                                         uint32_t sidebar_collapsed_mask = 0);
+                                         uint32_t sidebar_collapsed_mask = 0,
+                                         bool starred_expanded = true);
 
 } // namespace pulse::app

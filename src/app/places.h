@@ -50,6 +50,23 @@ struct NetworkPlace {
     DWORD rtt_ms = 0;
 };
 
+enum class PlaceItemKind { Unknown = 0, File, Folder };
+
+struct StarredItem {
+    std::wstring path;
+    PlaceItemKind kind = PlaceItemKind::Unknown;
+    std::wstring badge;
+    uint32_t badge_rgb = 0x0078D4;
+};
+
+struct RecentItem {
+    std::wstring path;
+    PlaceItemKind kind = PlaceItemKind::Unknown;
+    uint64_t opened_at = 0; // UTC FILETIME ticks.
+};
+
+enum class RecentFilter { All = 0, Folders, Files };
+
 struct TagAdsUpdate {
     std::wstring path;
     std::vector<std::wstring> tag_names;
@@ -63,7 +80,8 @@ public:
     std::vector<Workspace> workspaces;
     std::vector<ColorTag> tags;
     std::vector<NetworkPlace> networks;
-    std::vector<std::wstring> starred;
+    std::vector<StarredItem> starred_items;
+    std::vector<RecentItem> recent_items;
     int active_workspace = -1;
     bool persist = true; // self-test can disable disk writes
 
@@ -114,7 +132,25 @@ public:
     void RemoveAssignments(const std::wstring& path, bool include_descendants);
 
     bool IsStarred(const std::wstring& path) const;
-    bool ToggleStarred(const std::wstring& path);
+    const StarredItem* FindStarred(const std::wstring& path) const;
+    StarredItem* FindStarred(const std::wstring& path);
+    bool ToggleStarred(const std::wstring& path,
+                       PlaceItemKind kind = PlaceItemKind::Unknown);
+    bool SetStarredBadge(const std::wstring& path, const std::wstring& text,
+                         uint32_t rgb);
+    bool SetStarredKind(const std::wstring& path, PlaceItemKind kind);
+    bool ReorderStarredFolder(const std::wstring& path, size_t folder_position);
+    std::vector<std::wstring> StarredPaths() const;
+    std::vector<std::wstring> StarredFolderPaths() const;
+
+    void RecordRecent(const std::wstring& path, PlaceItemKind kind);
+    const RecentItem* FindRecent(const std::wstring& path) const;
+    bool SetRecentKind(const std::wstring& path, PlaceItemKind kind);
+    bool RemoveRecent(const std::wstring& path);
+    bool ClearRecent();
+    std::vector<RecentItem> RecentItems(RecentFilter filter = RecentFilter::All) const;
+    std::vector<std::wstring> RecentFolderPaths(size_t limit = 16) const;
+    bool FlushPendingSave(bool force = false) const;
 
     void MergeAdsRecords(const std::wstring& path,
                          const std::vector<TagAdsRecord>& records,
@@ -134,6 +170,7 @@ private:
 
     std::unordered_map<std::wstring, std::vector<int>> tag_index_;
     std::unordered_set<std::wstring> starred_index_;
+    mutable ULONGLONG places_save_due_ = 0;
     uint64_t tag_revision_ = 1;
     mutable std::mutex tag_save_mutex_;
     mutable std::condition_variable tag_save_cv_;
@@ -143,6 +180,7 @@ private:
 };
 
 inline std::wstring MakeStarredPath() { return L"pulse:starred"; }
+inline std::wstring MakeRecentPath() { return L"pulse:recent"; }
 inline std::wstring MakeTagPath(const TagId& id) { return L"pulse:tag:" + id; }
 inline std::wstring MakeTagPath(int i) { return L"pulse:tag:" + std::to_wstring(i); }
 inline std::wstring MakeSearchPath(const std::wstring& q) { return L"pulse:search:" + q; }

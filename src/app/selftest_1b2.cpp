@@ -854,6 +854,8 @@ void TestPlacesAndIndex() {
     Check(ParsePulsePath(L"pulse:starred", &kind, &rest) && kind == L"starred" && rest.empty(),
           L"places: parse starred virtual path");
     Check(MakeStarredPath() == L"pulse:starred", L"places: starred path helper");
+    Check(ParsePulsePath(L"pulse:recent", &kind, &rest) && kind == L"recent" && rest.empty() &&
+          MakeRecentPath() == L"pulse:recent", L"places: recent virtual path");
 
     PlacesCatalog cat;
     cat.persist = false;
@@ -880,21 +882,42 @@ void TestPlacesAndIndex() {
           L"places: toggle tag on");
     Check(cat.ToggleTag(0, L"C:\\proj\\a.txt") && !cat.PathHasTag(L"C:\\proj\\a.txt", 0),
           L"places: toggle tag off");
-    Check(cat.ToggleStarred(L"C:\\proj\\a.txt") && cat.IsStarred(L"C:\\proj\\a.txt") &&
-          cat.IsStarred(L"\\\\?\\C:\\proj\\a.txt") && cat.starred.size() == 1 &&
-          cat.starred[0].find(L".lnk") == std::wstring::npos &&
-          cat.starred[0].find(L"a.txt") != std::wstring::npos,
+    Check(cat.ToggleStarred(L"C:\\proj\\a.txt", PlaceItemKind::File) &&
+          cat.IsStarred(L"C:\\proj\\a.txt") && cat.IsStarred(L"\\\\?\\C:\\proj\\a.txt") &&
+          cat.starred_items.size() == 1 &&
+          cat.starred_items[0].path.find(L".lnk") == std::wstring::npos &&
+          cat.starred_items[0].path.find(L"a.txt") != std::wstring::npos,
           L"places: star indexes the real path, not a .lnk");
-    Check(cat.ToggleStarred(L"C:\\proj\\folder") && cat.IsStarred(L"C:\\proj\\folder") &&
-          cat.starred.size() == 2,
+    Check(cat.ToggleStarred(L"C:\\proj\\folder", PlaceItemKind::Folder) &&
+          cat.IsStarred(L"C:\\proj\\folder") && cat.starred_items.size() == 2 &&
+          cat.starred_items[0].kind == PlaceItemKind::Folder,
           L"places: folders are indexed the same way as files");
+    Check(cat.SetStarredBadge(L"C:\\proj\\folder", L"  xx项目  ", 0x123456) &&
+          cat.FindStarred(L"c:\\PROJ\\folder") &&
+          cat.FindStarred(L"c:\\PROJ\\folder")->badge == L"xx项目" &&
+          cat.FindStarred(L"C:\\proj\\folder")->badge_rgb == 0x123456,
+          L"places: starred badge trims text and preserves color");
     Check(!cat.ToggleStarred(L"C:\\proj\\a.txt") && !cat.IsStarred(L"C:\\proj\\a.txt") &&
           cat.IsStarred(L"C:\\proj\\folder"),
           L"places: unstar removes only that index");
-    Check(!cat.ToggleStarred(L"C:\\proj\\folder") && cat.starred.empty(),
+    Check(!cat.ToggleStarred(L"C:\\proj\\folder") && cat.starred_items.empty(),
           L"places: unstar last folder clears the index");
-    Check(!cat.ToggleStarred(L"pulse:starred") && cat.starred.empty(),
+    Check(!cat.ToggleStarred(L"pulse:starred") && cat.starred_items.empty(),
           L"places: virtual paths cannot be starred");
+    for (int i = 0; i < 105; ++i)
+        cat.RecordRecent(L"C:\\recent\\item" + std::to_wstring(i), PlaceItemKind::File);
+    Check(cat.recent_items.size() == 100 &&
+          cat.recent_items.front().path.find(L"item104") != std::wstring::npos,
+          L"places: recent list caps at 100 and keeps newest first");
+    cat.RecordRecent(L"C:\\recent\\item50", PlaceItemKind::Folder);
+    Check(cat.recent_items.front().path.find(L"item50") != std::wstring::npos &&
+          cat.recent_items.front().kind == PlaceItemKind::Folder &&
+          cat.RecentItems(RecentFilter::Folders).size() == 1,
+          L"places: repeated recent item moves to front and updates kind");
+    Check(cat.RemoveRecent(L"c:\\RECENT\\item50") &&
+          cat.RecentItems(RecentFilter::Folders).empty(),
+          L"places: remove recent is case insensitive");
+    Check(cat.ClearRecent() && cat.recent_items.empty(), L"places: clear recent");
     Check(cat.SetTagged(1, L"C:\\proj\\a.txt", true) && cat.PathHasTag(L"C:\\proj\\a.txt", 1),
           L"places: set tagged");
     const uint64_t tag_revision = cat.TagRevision();

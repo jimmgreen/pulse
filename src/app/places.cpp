@@ -93,9 +93,66 @@ static bool PathIsOrDescendant(const std::wstring& path, const std::wstring& roo
     return root.ends_with(L"\\") || path[root.size()] == L'\\' || path[root.size()] == L'/';
 }
 
+static std::vector<std::wstring> ExtractObjectArray(const std::wstring& json,
+                                                     const wchar_t* key) {
+    std::vector<std::wstring> out;
+    size_t pos = pulse::json::ValuePosition(json, key);
+    if (pos == std::wstring::npos || pos >= json.size() || json[pos] != L'[') return out;
+    int array_depth = 0;
+    int object_depth = 0;
+    bool in_string = false;
+    size_t object_start = std::wstring::npos;
+    for (size_t i = pos; i < json.size(); ++i) {
+        const wchar_t c = json[i];
+        if (in_string) {
+            if (c == L'\\') ++i;
+            else if (c == L'"') in_string = false;
+            continue;
+        }
+        if (c == L'"') in_string = true;
+        else if (c == L'[') ++array_depth;
+        else if (c == L']') {
+            if (--array_depth == 0) break;
+        } else if (c == L'{') {
+            if (object_depth++ == 0) object_start = i;
+        } else if (c == L'}' && object_depth > 0) {
+            if (--object_depth == 0 && object_start != std::wstring::npos) {
+                out.push_back(json.substr(object_start, i - object_start + 1));
+                object_start = std::wstring::npos;
+            }
+        }
+    }
+    return out;
+}
+
+static const wchar_t* KindName(PlaceItemKind kind) {
+    if (kind == PlaceItemKind::Folder) return L"folder";
+    if (kind == PlaceItemKind::File) return L"file";
+    return L"unknown";
+}
+
+static PlaceItemKind ParseKind(const std::wstring& value) {
+    if (value == L"folder") return PlaceItemKind::Folder;
+    if (value == L"file") return PlaceItemKind::File;
+    return PlaceItemKind::Unknown;
+}
+
+static uint64_t NowFileTime() {
+    FILETIME time{};
+    GetSystemTimeAsFileTime(&time);
+    return (static_cast<uint64_t>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
+}
+
+static std::wstring TrimBadge(std::wstring value) {
+    value = TrimTagName(std::move(value));
+    if (value.size() > 12) value.resize(12);
+    return value;
+}
+
 } // namespace
 
 PlacesCatalog::~PlacesCatalog() {
+    FlushPendingSave(true);
     StopTagWriter();
 }
 
@@ -201,7 +258,8 @@ bool PlacesCatalog::Load() {
     workspaces.clear();
     tags.clear();
     networks.clear();
-    starred.clear();
+    starred_items.clear();
+    recent_items.clear();
     starred_index_.clear();
     active_workspace = -1;
     std::wstring dir = GetPulseDataDir();
@@ -297,7 +355,46 @@ bool PlacesCatalog::Load() {
         }
     }
 
-    starred = pulse::json::ExtractStringArray(json, L"starred");
+    const bool has_starred_items = pulse::json::ValuePosition(
+        json, L"starred_items") != std::wstring::npos;
+    for (const auto& block : ExtractObjectArray(json, L"starred_items")) {
+        StarredItem item;
+        item.path = Norm(pulse::json::ExtractString(block, L"path"));
+        item.kind = ParseKind(pulse::json::ExtractString(block, L"kind"));
+        item.badge = TrimBadge(pulse::json::ExtractString(block, L"badge"));
+        item.badge_rgb = ExtractRgb(block);
+        if (!item.path.empty() && !fs::IsVirtualPath(item.path) &&
+            std::none_of(starred_items.begin(), starred_items.end(), [&](const StarredItem& old) {
+                return EqualI(old.path, item.path);
+            })) {
+            starred_items.push_back(std::move(item));
+        }
+    }
+    if (!has_starred_items) {
+        for (const auto& path : pulse::json::ExtractStringArray(json, L"starred")) {
+            const std::wstring normalized = Norm(path);
+            if (!normalized.empty() && !fs::IsVirtualPath(normalized))
+                starred_items.push_back({ normalized });
+        }
+    }
+    for (const auto& block : ExtractObjectArray(json, L"recent_items")) {
+        RecentItem item;
+        item.path = Norm(pulse::json::ExtractString(block, L"path"));
+        item.kind = ParseKind(pulse::json::ExtractString(block, L"kind"));
+        const std::wstring opened = pulse::json::ExtractString(block, L"opened_at");
+        item.opened_at = opened.empty() ? 0 : _wcstoui64(opened.c_str(), nullptr, 10);
+        if (!item.path.empty() && !fs::IsVirtualPath(item.path) &&
+            std::none_of(recent_items.begin(), recent_items.end(), [&](const RecentItem& old) {
+                return EqualI(old.path, item.path);
+            })) {
+            recent_items.push_back(std::move(item));
+        }
+    }
+    std::stable_sort(recent_items.begin(), recent_items.end(),
+        [](const RecentItem& a, const RecentItem& b) { return a.opened_at > b.opened_at; });
+    if (recent_items.size() > 100) recent_items.resize(100);
+    std::stable_partition(starred_items.begin(), starred_items.end(),
+        [](const StarredItem& item) { return item.kind == PlaceItemKind::Folder; });
 
     bool tags_loaded = false;
     std::wifstream tag_file(dir + L"\\tags.json", std::wifstream::binary);
@@ -371,7 +468,7 @@ bool PlacesCatalog::Save() const {
         }
         f << L"]";
     };
-    f << L"{\n  \"tag_version\":2,\n  \"active_workspace\":" << active_workspace
+    f << L"{\n  \"places_version\":2,\n  \"tag_version\":2,\n  \"active_workspace\":" << active_workspace
       << L",\n  \"workspaces\":[\n";
     for (size_t i = 0; i < workspaces.size(); ++i) {
         const auto& w = workspaces[i];
@@ -421,11 +518,49 @@ bool PlacesCatalog::Save() const {
         if (i + 1 < networks.size()) f << L",";
         f << L"\n";
     }
+    std::vector<std::wstring> legacy_starred;
+    legacy_starred.reserve(starred_items.size());
+    for (const auto& item : starred_items) legacy_starred.push_back(item.path);
     f << L"  ],\n  \"starred\":";
-    writeArr(starred);
-    f << L"\n}\n";
+    writeArr(legacy_starred);
+    f << L",\n  \"starred_items\":[\n";
+    for (size_t i = 0; i < starred_items.size(); ++i) {
+        const auto& item = starred_items[i];
+        std::wstring path, badge;
+        pulse::json::Escape(item.path, path);
+        pulse::json::Escape(item.badge, badge);
+        wchar_t rgb[16]{};
+        swprintf_s(rgb, L"0x%06X", item.badge_rgb & 0xFFFFFFu);
+        f << L"    {\"path\":\"" << path << L"\",\"kind\":\""
+          << KindName(item.kind) << L"\",\"badge\":\"" << badge
+          << L"\",\"rgb\":" << rgb << L"}";
+        if (i + 1 < starred_items.size()) f << L",";
+        f << L"\n";
+    }
+    f << L"  ],\n  \"recent_items\":[\n";
+    for (size_t i = 0; i < recent_items.size(); ++i) {
+        const auto& item = recent_items[i];
+        std::wstring path;
+        pulse::json::Escape(item.path, path);
+        f << L"    {\"path\":\"" << path << L"\",\"kind\":\""
+          << KindName(item.kind) << L"\",\"opened_at\":\""
+          << item.opened_at << L"\"}";
+        if (i + 1 < recent_items.size()) f << L",";
+        f << L"\n";
+    }
+    f << L"  ]\n}\n";
     f.close();
-    return MoveFileExW(tmp.c_str(), final.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    if (!f) return false;
+    const bool saved = MoveFileExW(tmp.c_str(), final.c_str(),
+        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    if (saved) places_save_due_ = 0;
+    return saved;
+}
+
+bool PlacesCatalog::FlushPendingSave(bool force) const {
+    if (!places_save_due_) return true;
+    if (!force && GetTickCount64() < places_save_due_) return true;
+    return Save();
 }
 
 int PlacesCatalog::FindWorkspace(const std::wstring& root) const {
@@ -659,9 +794,9 @@ void PlacesCatalog::RebuildTagIndex() {
 
 void PlacesCatalog::RebuildStarIndex() {
     starred_index_.clear();
-    starred_index_.reserve(starred.size());
-    for (const auto& path : starred) {
-        const std::wstring key = TagKey(path);
+    starred_index_.reserve(starred_items.size());
+    for (const auto& item : starred_items) {
+        const std::wstring key = TagKey(item.path);
         if (!key.empty()) starred_index_.insert(key);
     }
 }
@@ -671,23 +806,182 @@ bool PlacesCatalog::IsStarred(const std::wstring& path) const {
     return starred_index_.contains(TagKey(path));
 }
 
-bool PlacesCatalog::ToggleStarred(const std::wstring& path) {
+const StarredItem* PlacesCatalog::FindStarred(const std::wstring& path) const {
+    const std::wstring key = TagKey(path);
+    const auto it = std::find_if(starred_items.begin(), starred_items.end(),
+        [&](const StarredItem& item) { return TagKey(item.path) == key; });
+    return it == starred_items.end() ? nullptr : &*it;
+}
+
+StarredItem* PlacesCatalog::FindStarred(const std::wstring& path) {
+    return const_cast<StarredItem*>(std::as_const(*this).FindStarred(path));
+}
+
+bool PlacesCatalog::ToggleStarred(const std::wstring& path, PlaceItemKind kind) {
     const std::wstring n = Norm(path);
     if (n.empty() || fs::IsVirtualPath(n)) return false;
     const std::wstring key = TagKey(n);
-    const auto it = std::find_if(starred.begin(), starred.end(),
-        [&](const std::wstring& existing) { return TagKey(existing) == key; });
+    const auto it = std::find_if(starred_items.begin(), starred_items.end(),
+        [&](const StarredItem& existing) { return TagKey(existing.path) == key; });
     bool now_starred = false;
-    if (it != starred.end()) {
-        starred.erase(it);
+    if (it != starred_items.end()) {
+        starred_items.erase(it);
     } else {
-        starred.push_back(n);
+        StarredItem item;
+        item.path = n;
+        item.kind = kind;
+        item.badge_rgb = 0x0078D4;
+        if (kind == PlaceItemKind::Folder) {
+            const auto first_non_folder = std::find_if(starred_items.begin(), starred_items.end(),
+                [](const StarredItem& existing) {
+                    return existing.kind != PlaceItemKind::Folder;
+                });
+            starred_items.insert(first_non_folder, std::move(item));
+        } else {
+            starred_items.push_back(std::move(item));
+        }
         now_starred = true;
     }
     RebuildStarIndex();
     ++tag_revision_;
     Save();
     return now_starred;
+}
+
+bool PlacesCatalog::SetStarredBadge(const std::wstring& path, const std::wstring& text,
+                                    uint32_t rgb) {
+    StarredItem* item = FindStarred(path);
+    if (!item) return false;
+    const std::wstring badge = TrimBadge(text);
+    rgb &= 0xFFFFFFu;
+    if (item->badge == badge && item->badge_rgb == rgb) return false;
+    item->badge = badge;
+    item->badge_rgb = rgb;
+    ++tag_revision_;
+    Save();
+    return true;
+}
+
+bool PlacesCatalog::SetStarredKind(const std::wstring& path, PlaceItemKind kind) {
+    StarredItem* item = FindStarred(path);
+    if (!item || kind == PlaceItemKind::Unknown || item->kind == kind) return false;
+    item->kind = kind;
+    std::stable_partition(starred_items.begin(), starred_items.end(),
+        [](const StarredItem& candidate) { return candidate.kind == PlaceItemKind::Folder; });
+    ++tag_revision_;
+    places_save_due_ = GetTickCount64() + 1000;
+    return true;
+}
+
+bool PlacesCatalog::ReorderStarredFolder(const std::wstring& path, size_t folder_position) {
+    const std::wstring key = TagKey(path);
+    std::vector<size_t> folders;
+    for (size_t i = 0; i < starred_items.size(); ++i)
+        if (starred_items[i].kind == PlaceItemKind::Folder) folders.push_back(i);
+    const auto found = std::find_if(folders.begin(), folders.end(), [&](size_t index) {
+        return TagKey(starred_items[index].path) == key;
+    });
+    if (found == folders.end() || folders.empty()) return false;
+    folder_position = std::min(folder_position, folders.size() - 1);
+    const size_t old_position = static_cast<size_t>(found - folders.begin());
+    if (old_position == folder_position) return false;
+    StarredItem moved = std::move(starred_items[folders[old_position]]);
+    starred_items.erase(starred_items.begin() + folders[old_position]);
+    const size_t insert_index = folder_position >= starred_items.size()
+        ? starred_items.size() : folder_position;
+    starred_items.insert(starred_items.begin() + insert_index, std::move(moved));
+    ++tag_revision_;
+    Save();
+    return true;
+}
+
+std::vector<std::wstring> PlacesCatalog::StarredPaths() const {
+    std::vector<std::wstring> out;
+    out.reserve(starred_items.size());
+    for (const auto& item : starred_items)
+        if (item.kind == PlaceItemKind::Folder) out.push_back(item.path);
+    for (const auto& item : starred_items)
+        if (item.kind != PlaceItemKind::Folder) out.push_back(item.path);
+    return out;
+}
+
+std::vector<std::wstring> PlacesCatalog::StarredFolderPaths() const {
+    std::vector<std::wstring> out;
+    for (const auto& item : starred_items)
+        if (item.kind == PlaceItemKind::Folder) out.push_back(item.path);
+    return out;
+}
+
+void PlacesCatalog::RecordRecent(const std::wstring& path, PlaceItemKind kind) {
+    const std::wstring normalized = Norm(path);
+    if (normalized.empty() || fs::IsVirtualPath(normalized)) return;
+    const std::wstring key = TagKey(normalized);
+    RecentItem item{ normalized, kind, NowFileTime() };
+    const auto found = std::find_if(recent_items.begin(), recent_items.end(),
+        [&](const RecentItem& old) { return TagKey(old.path) == key; });
+    if (found != recent_items.end()) {
+        if (kind == PlaceItemKind::Unknown) item.kind = found->kind;
+        recent_items.erase(found);
+    }
+    recent_items.insert(recent_items.begin(), std::move(item));
+    if (recent_items.size() > 100) recent_items.resize(100);
+    places_save_due_ = GetTickCount64() + 1000;
+}
+
+const RecentItem* PlacesCatalog::FindRecent(const std::wstring& path) const {
+    const std::wstring key = TagKey(path);
+    const auto found = std::find_if(recent_items.begin(), recent_items.end(),
+        [&](const RecentItem& item) { return TagKey(item.path) == key; });
+    return found == recent_items.end() ? nullptr : &*found;
+}
+
+bool PlacesCatalog::SetRecentKind(const std::wstring& path, PlaceItemKind kind) {
+    if (kind == PlaceItemKind::Unknown) return false;
+    const std::wstring key = TagKey(path);
+    const auto found = std::find_if(recent_items.begin(), recent_items.end(),
+        [&](const RecentItem& item) { return TagKey(item.path) == key; });
+    if (found == recent_items.end() || found->kind == kind) return false;
+    found->kind = kind;
+    places_save_due_ = GetTickCount64() + 1000;
+    return true;
+}
+
+bool PlacesCatalog::RemoveRecent(const std::wstring& path) {
+    const std::wstring key = TagKey(path);
+    const size_t before = recent_items.size();
+    std::erase_if(recent_items, [&](const RecentItem& item) {
+        return TagKey(item.path) == key;
+    });
+    if (before == recent_items.size()) return false;
+    Save();
+    return true;
+}
+
+bool PlacesCatalog::ClearRecent() {
+    if (recent_items.empty()) return false;
+    recent_items.clear();
+    Save();
+    return true;
+}
+
+std::vector<RecentItem> PlacesCatalog::RecentItems(RecentFilter filter) const {
+    std::vector<RecentItem> out;
+    for (const auto& item : recent_items) {
+        if (filter == RecentFilter::Folders && item.kind != PlaceItemKind::Folder) continue;
+        if (filter == RecentFilter::Files && item.kind != PlaceItemKind::File) continue;
+        out.push_back(item);
+    }
+    return out;
+}
+
+std::vector<std::wstring> PlacesCatalog::RecentFolderPaths(size_t limit) const {
+    std::vector<std::wstring> out;
+    for (const auto& item : recent_items) {
+        if (item.kind != PlaceItemKind::Folder) continue;
+        out.push_back(item.path);
+        if (out.size() >= limit) break;
+    }
+    return out;
 }
 
 void PlacesCatalog::TagsReordered() {
@@ -802,9 +1096,14 @@ void PlacesCatalog::RemapPaths(const std::wstring& old_path, const std::wstring&
         std::sort(tag.paths.begin(), tag.paths.end());
         tag.paths.erase(std::unique(tag.paths.begin(), tag.paths.end()), tag.paths.end());
     }
-    for (auto& path : starred) {
-        if (!PathIsOrDescendant(path, old_norm)) continue;
-        path = new_norm + path.substr(old_norm.size());
+    for (auto& item : starred_items) {
+        if (!PathIsOrDescendant(item.path, old_norm)) continue;
+        item.path = new_norm + item.path.substr(old_norm.size());
+        changed = true;
+    }
+    for (auto& item : recent_items) {
+        if (!PathIsOrDescendant(item.path, old_norm)) continue;
+        item.path = new_norm + item.path.substr(old_norm.size());
         changed = true;
     }
     if (changed) {
@@ -833,13 +1132,16 @@ void PlacesCatalog::CloneAssignments(const std::wstring& source,
             }
         }
     }
-    std::vector<std::wstring> star_clones;
-    for (const auto& path : starred) {
-        if (PathIsOrDescendant(path, src)) star_clones.push_back(dst + path.substr(src.size()));
+    std::vector<StarredItem> star_clones;
+    for (const auto& item : starred_items) {
+        if (!PathIsOrDescendant(item.path, src)) continue;
+        StarredItem clone = item;
+        clone.path = dst + item.path.substr(src.size());
+        star_clones.push_back(std::move(clone));
     }
     for (auto& clone : star_clones) {
-        if (std::find(starred.begin(), starred.end(), clone) == starred.end()) {
-            starred.push_back(std::move(clone));
+        if (!FindStarred(clone.path)) {
+            starred_items.push_back(std::move(clone));
             changed = true;
         }
     }
@@ -863,12 +1165,18 @@ void PlacesCatalog::RemoveAssignments(const std::wstring& path, bool include_des
         });
         changed = changed || before != tag.paths.size();
     }
-    const size_t starred_before = starred.size();
-    std::erase_if(starred, [&](const std::wstring& candidate) {
-        return include_descendants ? PathIsOrDescendant(candidate, normalized)
-                                   : EqualI(candidate, normalized);
+    const size_t starred_before = starred_items.size();
+    std::erase_if(starred_items, [&](const StarredItem& item) {
+        return include_descendants ? PathIsOrDescendant(item.path, normalized)
+                                   : EqualI(item.path, normalized);
     });
-    changed = changed || starred_before != starred.size();
+    changed = changed || starred_before != starred_items.size();
+    const size_t recent_before = recent_items.size();
+    std::erase_if(recent_items, [&](const RecentItem& item) {
+        return include_descendants ? PathIsOrDescendant(item.path, normalized)
+                                   : EqualI(item.path, normalized);
+    });
+    changed = changed || recent_before != recent_items.size();
     if (changed) {
         RebuildTagIndex();
         RebuildStarIndex();
