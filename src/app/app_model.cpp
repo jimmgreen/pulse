@@ -28,6 +28,41 @@ int MoveTabRun(std::vector<int>& order, int pos, int len, int dir) {
     return pos;
 }
 
+float CollapsedChipBlockW(float chip_w, float chip_gap) {
+    return chip_w + chip_gap;
+}
+
+bool ChipBlockCrossed(float block_left, float block_w, float neighbor_center, int dir) {
+    if (dir < 0) return block_left < neighbor_center;
+    if (dir > 0) return block_left + block_w > neighbor_center;
+    return false;
+}
+
+float DisplacedRestDelta(float old_rest, float cur_off, float new_rest) {
+    return old_rest + cur_off - new_rest;
+}
+
+GroupRun FindGroupRun(const std::vector<int>& order,
+                      const std::vector<int>& tab_group_of,
+                      int at, int gid) {
+    const int n = static_cast<int>(order.size());
+    if (gid == 0 || at < 0 || at >= n) return {};
+    const int tab = order[static_cast<size_t>(at)];
+    if (tab < 0 || tab >= static_cast<int>(tab_group_of.size()) ||
+        tab_group_of[static_cast<size_t>(tab)] != gid)
+        return {};
+    auto groupAt = [&](int p) {
+        const int t = order[static_cast<size_t>(p)];
+        return t >= 0 && t < static_cast<int>(tab_group_of.size())
+            ? tab_group_of[static_cast<size_t>(t)] : 0;
+    };
+    int pos = at;
+    while (pos > 0 && groupAt(pos - 1) == gid) --pos;
+    int end = at;
+    while (end + 1 < n && groupAt(end + 1) == gid) ++end;
+    return GroupRun{ pos, end - pos + 1 };
+}
+
 void NormalizeGroupRuns(Pane& pane) {
     // Group ids in first-appearance order.
     std::vector<int> groups;

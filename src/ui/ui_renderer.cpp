@@ -1593,15 +1593,15 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
             }
             FillChromeTab(dc, brFillHover_.get(), tabRc, shape);
         }
-        // Ungrouped active tabs keep the top accent strip; grouped tabs anchor
-        // their group color to the bottom edge (browser tab-group style).
+        // Grouped tabs draw the same top strip as the ungrouped active tab,
+        // just in their group color instead of the accent.
         const float r = shape.top_radius;
         const bool has_color = vm.tabs[i].color_rgb != 0;
         if (has_color) {
             D2D1_COLOR_F line = HexColor(vm.tabs[i].color_rgb);
             if (!active) line.a *= 0.55f;
             MakeBrush(dc, line, brAccent_);
-            FillChromeTabAccent(dc, brAccent_.get(), tabRc, shape, 2.0f * scale_, true);
+            FillChromeTabAccent(dc, brAccent_.get(), tabRc, shape, 2.0f * scale_);
         } else if (active) {
             MakeBrush(dc, theme.accent, brAccent_);
             FillChromeTabAccent(dc, brAccent_.get(), tabRc, shape, 2.0f * scale_);
@@ -1657,7 +1657,7 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
         const D2D1_COLOR_F gc = HexColor(gv.color_rgb);
         const float ch = strip.h - 8.0f * scale_;
         // Chip drag: the group's chip floats with its run (alone if collapsed).
-        float chipLeft = chip.left;
+        float chipLeft = chip.left + gv.x_offset;
         if (vm.tab_drag_chip && dragI >= 0 && dragI < static_cast<int>(vm.tabs.size()) &&
             vm.tabs[static_cast<size_t>(dragI)].group == chip.group) {
             chipLeft = gv.collapsed ? vm.tab_drag_x

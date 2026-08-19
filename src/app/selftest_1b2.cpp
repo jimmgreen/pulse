@@ -8,6 +8,7 @@
 // cleaned up afterwards.
 #include "selftest_1b2.h"
 #include "app_model.h"
+#include "session.h"
 #include "app_prefs.h"
 #include "context_menu.h"
 #include "context_menu_prefs.h"
@@ -1336,8 +1337,158 @@ void TestNormalizeGroupRuns() {
     }
 }
 
+void TestChipBlockDragGeometry() {
+    Check(CollapsedChipBlockW(24.0f, 6.0f) == 30.0f,
+          L"chipdrag: block width is chip plus gap");
+    Check(CollapsedChipBlockW(0.0f, 4.0f) == 4.0f,
+          L"chipdrag: zero-width chip still reserves the gap");
+    // Moving left: the block's left edge must pass the neighbor center.
+    Check(ChipBlockCrossed(100.0f, 30.0f, 120.0f, -1),
+          L"chipdrag: left edge past center crosses");
+    Check(!ChipBlockCrossed(125.0f, 30.0f, 120.0f, -1),
+          L"chipdrag: left edge short of center holds");
+    // Moving right: the block's right edge must pass the neighbor center.
+    Check(ChipBlockCrossed(100.0f, 30.0f, 120.0f, 1),
+          L"chipdrag: right edge past center crosses");
+    Check(!ChipBlockCrossed(100.0f, 30.0f, 140.0f, 1),
+          L"chipdrag: right edge short of center holds");
+    Check(!ChipBlockCrossed(100.0f, 30.0f, 120.0f, 0),
+          L"chipdrag: zero direction never crosses");
+    // Displaced unit track start = where it sits minus where it must land.
+    Check(DisplacedRestDelta(200.0f, 0.0f, 260.0f) == -60.0f,
+          L"chipdrag: displaced unit starts one block back");
+    Check(DisplacedRestDelta(200.0f, -30.0f, 170.0f) == 0.0f,
+          L"chipdrag: in-flight slide that already arrived needs no track");
+    Check(DisplacedRestDelta(170.0f, 30.0f, 260.0f) == -60.0f,
+          L"chipdrag: in-flight slide composes with the new delta");
+}
+
+void TestFindGroupRun() {
+    const std::vector<int> gids{ 0, 7, 7, 7, 0 }; // group 7 = tabs 1..3
+    {   // Identity order: the run spans display positions 1..3.
+        const std::vector<int> order{ 0, 1, 2, 3, 4 };
+        const GroupRun r = FindGroupRun(order, gids, 2, 7);
+        Check(r.pos == 1 && r.len == 3, L"grouprun: run bounds from middle member");
+        Check(FindGroupRun(order, gids, 1, 7).pos == 1 &&
+              FindGroupRun(order, gids, 3, 7).pos == 1,
+              L"grouprun: same run from any member");
+    }
+    {   // Permuted order (mid-drag): lookup follows order indirection.
+        const std::vector<int> order{ 3, 0, 1, 2, 4 };
+        const GroupRun r = FindGroupRun(order, gids, 2, 7);
+        Check(r.pos == 2 && r.len == 2, L"grouprun: permuted run after split");
+        const GroupRun head = FindGroupRun(order, gids, 0, 7);
+        Check(head.pos == 0 && head.len == 1, L"grouprun: split-off member is its own run");
+    }
+    {   // Rejections: ungrouped tab, wrong gid, out of range.
+        const std::vector<int> order{ 0, 1, 2, 3, 4 };
+        Check(FindGroupRun(order, gids, 0, 0).len == 0,
+              L"grouprun: gid 0 is never a run");
+        Check(FindGroupRun(order, gids, 0, 7).len == 0,
+              L"grouprun: tab at pos not in gid");
+        Check(FindGroupRun(order, gids, -1, 7).len == 0 &&
+              FindGroupRun(order, gids, 5, 7).len == 0,
+              L"grouprun: out-of-range pos rejected");
+        Check(FindGroupRun(order, gids, 2, 9).len == 0,
+              L"grouprun: unknown gid rejected");
+    }
+    {   // Whole-strip group: run reaches both edges.
+        const std::vector<int> g2{ 4, 4, 4 };
+        const std::vector<int> order{ 0, 1, 2 };
+        const GroupRun r = FindGroupRun(order, g2, 0, 4);
+        Check(r.pos == 0 && r.len == 3, L"grouprun: edge-to-edge run");
+    }
+    {   // Hop keeps contiguity: MoveTabRun on the found run never inserts the
+        // dragged tab between members.
+        const std::vector<int> g3{ 0, 5, 5, 0 };
+        std::vector<int> order{ 0, 1, 2, 3 }; // tab 0 drags right into group 5
+        const GroupRun r = FindGroupRun(order, g3, 1, 5);
+        MoveTabRun(order, r.pos, r.len, -1); // run slides left past tab 0
+        Check(order == (std::vector<int>{ 1, 2, 0, 3 }),
+              L"grouprun: hop lands the tab past the whole run");
+    }
+}
+
+bool SamePaneTabs(const std::vector<PaneSessionSnapshot>& a,
+                  const std::vector<PaneSessionSnapshot>& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (a[i].active != b[i].active) return false;
+        if (a[i].groups.size() != b[i].groups.size() ||
+            a[i].tabs.size() != b[i].tabs.size()) return false;
+        for (size_t g = 0; g < a[i].groups.size(); ++g) {
+            if (a[i].groups[g].id != b[i].groups[g].id ||
+                a[i].groups[g].name != b[i].groups[g].name ||
+                a[i].groups[g].color_rgb != b[i].groups[g].color_rgb ||
+                a[i].groups[g].collapsed != b[i].groups[g].collapsed) return false;
+        }
+        for (size_t t = 0; t < a[i].tabs.size(); ++t) {
+            if (a[i].tabs[t].path != b[i].tabs[t].path ||
+                a[i].tabs[t].pinned != b[i].tabs[t].pinned ||
+                a[i].tabs[t].group != b[i].tabs[t].group ||
+                a[i].tabs[t].view != b[i].tabs[t].view) return false;
+        }
+    }
+    return true;
+}
+
+void TestSessionPaneTabs() {
+    {   // Round-trip: multiple panes, groups, special characters.
+        std::vector<PaneSessionSnapshot> panes(2);
+        panes[0].active = 1;
+        panes[0].groups.push_back({ 1, L"工作", 0x00CC6639, false });
+        panes[0].groups.push_back({ 2, L"引\"号\\组\n名", 0x003B82F6, true });
+        panes[0].tabs.push_back({ L"C:\\", true, 0, ui::ViewMode::Details });
+        panes[0].tabs.push_back({ L"D:\\代码\\路径 \"quoted\"\\dir", false, 1,
+                                  ui::ViewMode::LargeIcons });
+        panes[0].tabs.push_back({ L"\\\\?\\UNC\\server\\share\\dir", false, 2,
+                                  ui::ViewMode::List });
+        panes[1].active = 0;
+        panes[1].tabs.push_back({ L"C:\\Users", false, 0, ui::ViewMode::Tiles });
+
+        const std::wstring json = PaneTabsToJson(panes);
+        std::vector<PaneSessionSnapshot> back;
+        Check(ParsePaneTabs(json, back), L"sessiontabs: round-trip parses");
+        Check(SamePaneTabs(panes, back), L"sessiontabs: round-trip preserves all fields");
+    }
+    {   // Empty array and empty panes.
+        std::vector<PaneSessionSnapshot> out;
+        Check(ParsePaneTabs(L"[]", out) && out.empty(),
+              L"sessiontabs: empty array");
+        std::vector<PaneSessionSnapshot> panes(1); // no groups, no tabs
+        out.clear();
+        Check(ParsePaneTabs(PaneTabsToJson(panes), out) &&
+              SamePaneTabs(panes, out),
+              L"sessiontabs: empty pane round-trips");
+    }
+    {   // Unknown view falls back to details; out-of-range active survives
+        // parsing (the restore side clamps it).
+        std::vector<PaneSessionSnapshot> out;
+        Check(ParsePaneTabs(
+                  L"[{\"active\":99,\"groups\":[],\"tabs\":["
+                  L"{\"path\":\"C:\\\\x\",\"pinned\":false,\"group\":7,\"view\":\"bogus\"}]}]",
+                  out) &&
+              out.size() == 1 && out[0].active == 99 &&
+              out[0].tabs.size() == 1 && out[0].tabs[0].path == L"C:\\x" &&
+              out[0].tabs[0].group == 7 &&
+              out[0].tabs[0].view == ui::ViewMode::Details,
+              L"sessiontabs: unknown view + active parsed as-is");
+    }
+    {   // Corrupt input: rejects or skips without crashing, never throws.
+        std::vector<PaneSessionSnapshot> out;
+        Check(!ParsePaneTabs(L"", out), L"sessiontabs: empty string rejected");
+        Check(!ParsePaneTabs(L"not json", out), L"sessiontabs: garbage rejected");
+        Check(!ParsePaneTabs(L"[{\"active\":1,\"groups\":[{\"id\":1}]", out),
+              L"sessiontabs: truncated array rejected");
+        Check(!ParsePaneTabs(L"[{\"tabs\":[{\"path\":\"C:\\\\\"}]", out),
+              L"sessiontabs: unbalanced escape rejected");
+        Check(ParsePaneTabs(L"[{\"tabs\":[{}]}]", out) && out.size() == 1 &&
+              out[0].tabs.size() == 1 && out[0].tabs[0].path.empty(),
+              L"sessiontabs: empty object tolerated");
+    }
+}
+
 int RunSelfTest1B2() {
-    // Attach to the parent console (started from a terminal); GUI subsystem exe.
     if (AttachConsole(ATTACH_PARENT_PROCESS)) {
         FILE* f = nullptr;
         freopen_s(&f, "CONOUT$", "w", stdout);
@@ -1367,6 +1518,9 @@ int RunSelfTest1B2() {
     TestDetailsMeta();
     TestMoveTabRun();
     TestNormalizeGroupRuns();
+    TestChipBlockDragGeometry();
+    TestFindGroupRun();
+    TestSessionPaneTabs();
     TestOpsThroughShell();
 
     // Cleanup: real-delete the whole sandbox via the ops layer is overkill;

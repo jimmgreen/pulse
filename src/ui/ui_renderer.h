@@ -41,6 +41,7 @@ struct TabGroupView {
     std::wstring name;
     uint32_t color_rgb = 0;
     bool collapsed = false;
+    float x_offset = 0.0f;  // px: chip slide during collapsed-group reorder
 };
 
 struct ListEntryView {

@@ -205,9 +205,14 @@ struct AppState {
     bool tabDragFromChip = false;        // drag started on the group chip
     int tabDragGroupId = 0;              // chip drag: app::TabGroup::id
     float tabDragSlots = 1.0f;           // visual width of the drag block in slots
+    float tabDragBlockW = 0.0f;          // >0: collapsed chip drag block (chip+gap, px)
     struct TabTrack { float start = 0.0f; int durationMs = 150; std::chrono::steady_clock::time_point t0; };
     std::unordered_map<const app::Tab*, TabTrack> tabTracks;
     std::unordered_map<const app::Tab*, float> tabOffsets;
+    // Chip slide channel (px, key = app::TabGroup::id) for collapsed-group
+    // drags: chips are px-positioned, so slot-unit tab offsets can't move them.
+    std::unordered_map<int, TabTrack> chipTracks;
+    std::unordered_map<int, float> chipOffsets;
 
     // Smooth scroll animation.
     bool scrollAnimating = false;
@@ -221,6 +226,7 @@ struct AppState {
     std::vector<std::wstring> session_pane_paths;
     std::vector<ui::ViewMode> session_pane_views;
     std::vector<std::array<float, 3>> session_pane_columns;
+    std::vector<app::PaneSessionSnapshot> session_pane_tabs;
     int session_layout = 0;
     int session_focused = 0;
     int session_target = -1;
@@ -1068,6 +1074,10 @@ static ui::WindowViewModel BuildVm(AppState& s) {
             if (off != s.tabOffsets.end())
                 vm.tabs[static_cast<size_t>(pos)].x_offset = off->second;
         }
+        for (size_t gi = 0; gi < vm.tab_groups.size(); ++gi) {
+            const auto off = s.chipOffsets.find(vm.tab_groups[gi].id);
+            if (off != s.chipOffsets.end()) vm.tab_groups[gi].x_offset = off->second;
+        }
     }
     // Staging tray fan deck: live cards (newest batch first) + exiting ghosts.
     {
@@ -1738,9 +1748,21 @@ static void ShowTagPicker(AppState& s, POINT screen_pt) {
     };
     for (;;) {
         s.menu->SetFilterPlaceholder(L"搜索或新建标签…");
-        const int command = s.menu->TrackPopup(screen_pt, rebuild(L""), rebuild);
+        int command = s.menu->TrackPopup(screen_pt, rebuild(L""), rebuild);
         const std::wstring query = s.menu->LastFilterQuery();
-        if (command == app::CmdNone) break;
+        if (command == app::CmdNone) {
+            // Enter with no highlighted row commits the typed name: toggle an
+            // exact match, otherwise fall through to the create branch.
+            if (!s.menu->LastFilterCommitted() || query.empty()) break;
+            command = kCreateTag;
+            std::wstring lower = query;
+            for (auto& c : lower) c = static_cast<wchar_t>(std::towlower(c));
+            for (int i = 0; i < static_cast<int>(s.places.tags.size()); ++i) {
+                std::wstring name = s.places.tags[static_cast<size_t>(i)].name;
+                for (auto& c : name) c = static_cast<wchar_t>(std::towlower(c));
+                if (name == lower) { command = kTagPickerBase + i; break; }
+            }
+        }
 
         app::TagId tag_id;
         if (command == kCreateTag) {
@@ -1805,7 +1827,9 @@ static void ShowTagSidebarMenu(AppState& s, const app::TagId& tag_id, POINT scre
         const int apply = s.menu->TrackPopup(screen_pt, rebuild(L""), rebuild);
         const std::wstring name = s.menu->LastFilterQuery();
         s.menu->SetFilterPlaceholder(L"搜索命令、文件夹…");
-        if (apply == kApplyRename) {
+        // Enter without highlighting the row also confirms the typed name.
+        if (apply == kApplyRename ||
+            (apply == app::CmdNone && s.menu->LastFilterCommitted())) {
             const std::vector<std::wstring> affected = s.places.PathsForTag(tag_id);
             if (s.places.RenameTag(tag_id, name))
                 QueueTagAds(s, BuildTagAdsUpdates(s.places, affected));
@@ -2717,6 +2741,31 @@ static void TickTabTransitions(AppState& s) {
         if (!live.count(it->first)) it = s.tabOffsets.erase(it);
         else ++it;
     }
+    // Chip slide channel: same easing, px units, keyed by group id.
+    std::unordered_set<int> liveGroups;
+    if (s.pane) {
+        for (const auto& g : s.pane->tab_groups) liveGroups.insert(g.id);
+    }
+    for (auto it = s.chipTracks.begin(); it != s.chipTracks.end();) {
+        if (!liveGroups.count(it->first)) {
+            s.chipOffsets.erase(it->first);
+            it = s.chipTracks.erase(it);
+            continue;
+        }
+        const float t = std::chrono::duration<float, std::milli>(now - it->second.t0).count()
+            / static_cast<float>(it->second.durationMs);
+        if (t >= 1.0f) {
+            s.chipOffsets.erase(it->first);
+            it = s.chipTracks.erase(it);
+        } else {
+            s.chipOffsets[it->first] = it->second.start * (1.0f - TagEaseInOutQuad(t));
+            ++it;
+        }
+    }
+    for (auto it = s.chipOffsets.begin(); it != s.chipOffsets.end();) {
+        if (!liveGroups.count(it->first)) it = s.chipOffsets.erase(it);
+        else ++it;
+    }
 }
 
 static void UpdateSmoothScroll(AppState& s);
@@ -2822,6 +2871,55 @@ static void WarmupUnc(AppState& s, const std::wstring& path) {
             s.store.Update(path, gen, disk);
     }
     s.worker.Refresh(path, ui::SortColumn::Name, ui::SortDirection::Asc);
+}
+
+// Rebuild a pane's full tab strip and groups from a version-5 session entry.
+static void RestorePaneTabs(AppState& s, app::Pane& pane,
+                            const app::PaneSessionSnapshot& snap) {
+    // Groups first so tab membership ids can be validated against them.
+    pane.tab_groups.clear();
+    int maxGroupId = 0;
+    for (const auto& g : snap.groups) {
+        if (g.id <= 0) continue;
+        app::TabGroup grp;
+        grp.id = g.id;
+        grp.name = g.name;
+        grp.color_rgb = g.color_rgb;
+        grp.collapsed = g.collapsed;
+        pane.tab_groups.push_back(std::move(grp));
+        maxGroupId = std::max(maxGroupId, g.id);
+    }
+    pane.next_tab_group_id = std::max(pane.next_tab_group_id, maxGroupId + 1);
+
+    pane.tabs.clear();
+    pane.active_tab = 0;
+    for (const auto& ts : snap.tabs) {
+        if (ts.path.empty()) continue;
+        auto tab = std::make_unique<app::Tab>();
+        tab->pinned = ts.pinned;
+        tab->view_mode = ts.view;
+        // Drop membership in groups that were not restored.
+        int gid = ts.group;
+        if (gid != 0) {
+            bool known = false;
+            for (const auto& g : pane.tab_groups)
+                if (g.id == gid) { known = true; break; }
+            if (!known) gid = 0;
+        }
+        tab->tab_group = gid;
+        app::Tab* raw = tab.get();
+        pane.tabs.push_back(std::move(tab));
+        WarmupUnc(s, ts.path);
+        StartLoadingPath(s, *raw, ts.path);
+    }
+    if (pane.tabs.empty()) {
+        pane.NewTab(L"C:\\");
+        StartLoadingPath(s, *pane.ActiveTab(), L"C:\\");
+    }
+    size_t active = snap.active >= 0 ? static_cast<size_t>(snap.active) : 0;
+    if (active >= pane.tabs.size()) active = pane.tabs.size() - 1;
+    pane.SwitchTab(active);
+    app::NormalizeGroupRuns(pane);
 }
 
 static std::wstring PinCandidate(AppState& s) {
@@ -4804,7 +4902,12 @@ static void UpdateOperationWindow(AppState& s, bool allow_conflict_dialog) {
 }
 
 static void CrashLog(unsigned int code, const char* where, unsigned int msg = 0, void* addr = nullptr) {
-    if (HANDLE f = CreateFileW(L"pulse_crash.log", FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
+    // Under %LOCALAPPDATA%\Pulse: an installed copy lives in Program Files, where a
+    // relative path (or the exe directory) is not writable for a non-admin user.
+    const std::wstring dir = app::GetPulseDataDir();
+    if (dir.empty()) return;
+    const std::wstring path = dir + L"\\pulse_crash.log";
+    if (HANDLE f = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
             OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr); f != INVALID_HANDLE_VALUE) {
         char buf[192];
         int n = snprintf(buf, sizeof(buf), "crash where=%s code=0x%08X msg=0x%04X addr=%p\n",
@@ -4921,6 +5024,26 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             RegisterDragDrop(hwnd, s->dropTarget);
         }
 
+        if (!s->shot.active && !s->session_pane_tabs.empty()) {
+            // Version-5 session: rebuild every tab and group in every pane.
+            if (s->session_layout > 0)
+                ApplyLayoutPreset(*s, static_cast<app::LayoutPreset>(s->session_layout));
+            for (size_t i = 0; i < s->panes.size() && i < s->session_pane_tabs.size(); ++i)
+                RestorePaneTabs(*s, *s->panes[i], s->session_pane_tabs[i]);
+            if (!s->session_path.empty())
+                RememberPath(*s, s->session_path);
+            else if (app::Tab* t = ActiveTab(*s))
+                RememberPath(*s, t->current_path);
+            if (s->session_focused >= 0 &&
+                s->session_focused < static_cast<int>(s->panes.size())) {
+                FocusPane(*s, s->panes[static_cast<size_t>(s->session_focused)].get());
+            }
+            if (s->session_target >= 0 &&
+                s->session_target < static_cast<int>(s->panes.size())) {
+                s->targetPane = s->panes[static_cast<size_t>(s->session_target)].get();
+                for (auto& p : s->panes) p->target = (p.get() == s->targetPane);
+            }
+        } else {
         std::wstring startPath = s->shot.active ? s->shot.path : L"C:\\";
         if (!s->shot.active && !s->session_path.empty()) startPath = s->session_path;
         s->pane->NewTab(startPath);
@@ -4958,6 +5081,7 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 s->targetPane = s->panes[static_cast<size_t>(s->session_target)].get();
                 for (auto& p : s->panes) p->target = (p.get() == s->targetPane);
             }
+        }
         }
 
         s->lastFrameTime = std::chrono::steady_clock::now();
@@ -5283,7 +5407,7 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 TickTagTransitions(*s);
                 dirty = true;
             }
-            if (!s->tabTracks.empty()) {
+            if (!s->tabTracks.empty() || !s->chipTracks.empty()) {
                 TickTabTransitions(*s);
                 dirty = true;
             }
@@ -5531,6 +5655,8 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                         s->tabDragLastX = mx;
                         s->tabTracks.clear();
                         s->tabOffsets.clear();
+                        s->chipTracks.clear();
+                        s->chipOffsets.clear();
                         s->tabOrder.resize(static_cast<size_t>(n0));
                         for (int i = 0; i < n0; ++i) s->tabOrder[static_cast<size_t>(i)] = i;
                         // Whole-group drags start from the chip; member tabs
@@ -5538,6 +5664,7 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                         s->tabDragRunPos = s->tabDragIndex;
                         s->tabDragRunLen = 1;
                         s->tabDragSlots = 1.0f;
+                        s->tabDragBlockW = 0.0f;
                         if (s->tabDragFromChip) {
                             const int dragGroup =
                                 s->pane->tabs[static_cast<size_t>(s->tabDragIndex)]->tab_group;
@@ -5554,6 +5681,10 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                             if (chipBlock) {
                                 s->tabDragSlots = s->tabPitch > 0.0f
                                     ? (self.right - self.left) / s->tabPitch : 1.0f;
+                                // Collapsed group: the chip alone is the drag
+                                // block; its width is px, not slots.
+                                s->tabDragBlockW = app::CollapsedChipBlockW(
+                                    self.right - self.left, 4.0f * s->scale);
                             } else {
                                 s->tabDragSlots = static_cast<float>(s->tabDragRunLen);
                                 if (s->tabDragRunLen > 1) {
@@ -5569,11 +5700,14 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 }
                 if (s->tabDragging) {
                     const int dx = mx - s->tabDragLastX;
+                    // Collapsed chip drags clamp by the px block width; slot
+                    // math only holds for tab-sized blocks.
+                    const float dragBlockW = s->tabDragBlockW > 0.0f
+                        ? s->tabDragBlockW : s->tabSlotW * s->tabDragSlots;
                     s->tabDragFloatLeft = std::clamp(
                         s->tabDragPressLeft + static_cast<float>(mx - s->tabDragStartPt.x),
                         s->tabFlowLeft,
-                        std::max(s->tabFlowLeft,
-                                 s->tabFlowRight - s->tabSlotW * s->tabDragSlots));
+                        std::max(s->tabFlowLeft, s->tabFlowRight - dragBlockW));
                     if (std::abs(dx) >= 2 && s->tabDragFromChip) {
                         // Whole-group drag: rotate the run as a block when its
                         // leading/trailing edge crosses the neighbor's center.
@@ -5585,7 +5719,97 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                         int siblingPos = -1;
                         if (dx < 0 && runPos > 0) siblingPos = runPos - 1;
                         else if (dx > 0 && runPos + runLen < n) siblingPos = runPos + runLen;
-                        if (siblingPos >= 0) {
+                        if (siblingPos >= 0 && s->tabDragBlockW > 0.0f) {
+                            // Collapsed group: the chip alone is the drag
+                            // block, so all geometry here is px-based (chips
+                            // don't occupy whole slots).
+                            const int adjIdx = s->tabOrder[static_cast<size_t>(siblingPos)];
+                            const app::Tab* adjTab =
+                                (adjIdx >= 0 && adjIdx < static_cast<int>(s->pane->tabs.size()))
+                                    ? s->pane->tabs[static_cast<size_t>(adjIdx)].get() : nullptr;
+                            ui::WindowViewModel vmNow = BuildVm(*s);
+                            const float ww = static_cast<float>(s->compositor.Width());
+                            float adjRest = 0.0f; // neighbor rest left (px)
+                            float adjCur = 0.0f;  // neighbor slide offset (px)
+                            float adjW = 0.0f;    // neighbor visual width (px)
+                            int adjChipGi = -1;   // vm.tab_groups index when the
+                                                  // neighbor is another chip
+                            int adjChipGid = 0;   // app::TabGroup::id of it
+                            D2D1_RECT_F adjRc{};
+                            if (s->renderer.TabItemRect(vmNow, ww, siblingPos, &adjRc)) {
+                                adjRest = adjRc.left;
+                                adjW = adjRc.right - adjRc.left;
+                                if (adjTab) {
+                                    const auto oit = s->tabOffsets.find(adjTab);
+                                    if (oit != s->tabOffsets.end())
+                                        adjCur = oit->second * s->tabPitch;
+                                }
+                            } else if (adjTab && adjTab->tab_group != 0) {
+                                // Hidden member of another collapsed group:
+                                // measure and animate that group's chip.
+                                for (int gi = 0;
+                                     gi < static_cast<int>(vmNow.tab_groups.size()); ++gi) {
+                                    if (vmNow.tab_groups[static_cast<size_t>(gi)].id
+                                            != adjTab->tab_group)
+                                        continue;
+                                    D2D1_RECT_F chipRc{};
+                                    if (s->renderer.TabGroupChipRect(vmNow, ww, gi, &chipRc)) {
+                                        adjChipGi = gi;
+                                        adjChipGid = adjTab->tab_group;
+                                        adjRest = chipRc.left;
+                                        adjW = chipRc.right - chipRc.left;
+                                        const auto oit = s->chipOffsets.find(adjChipGid);
+                                        if (oit != s->chipOffsets.end()) adjCur = oit->second;
+                                    }
+                                    break;
+                                }
+                            }
+                            if (adjTab && adjW > 0.0f) {
+                                const float adjCenter = adjRest + adjCur + adjW * 0.5f;
+                                if (app::ChipBlockCrossed(s->tabDragFloatLeft,
+                                        s->tabDragBlockW, adjCenter, dx))
+                                    blockShift = dx < 0 ? -1 : 1;
+                            }
+                            if (blockShift != 0 && adjTab) {
+                                s->tabDragRunPos = app::MoveTabRun(
+                                    s->tabOrder, runPos, runLen, blockShift);
+                                // Measure the displaced unit's NEW rest with
+                                // the post-move order; the track covers the
+                                // difference from where it visibly sits now.
+                                ui::WindowViewModel vmAfter = BuildVm(*s);
+                                float newRest = 0.0f;
+                                bool haveNew = false;
+                                D2D1_RECT_F newRc{};
+                                if (adjChipGi >= 0) {
+                                    // Group index is stable: pane.tab_groups
+                                    // order does not change with tab order.
+                                    haveNew = s->renderer.TabGroupChipRect(
+                                        vmAfter, ww, adjChipGi, &newRc);
+                                } else {
+                                    haveNew = s->renderer.TabItemRect(vmAfter, ww,
+                                        siblingPos - blockShift * runLen, &newRc);
+                                }
+                                if (haveNew) newRest = newRc.left;
+                                if (haveNew) {
+                                    const float startPx = app::DisplacedRestDelta(
+                                        adjRest, adjCur, newRest);
+                                    if (adjChipGi >= 0) {
+                                        if (std::abs(startPx) >= 1.0f) {
+                                            s->chipTracks[adjChipGid] = AppState::TabTrack{
+                                                startPx, 150, std::chrono::steady_clock::now() };
+                                            s->chipOffsets[adjChipGid] = startPx;
+                                        }
+                                    } else if (s->tabPitch > 0.0f) {
+                                        const float start = startPx / s->tabPitch;
+                                        if (std::abs(start) >= 0.01f) {
+                                            s->tabTracks[adjTab] = AppState::TabTrack{
+                                                start, 150, std::chrono::steady_clock::now() };
+                                            s->tabOffsets[adjTab] = start;
+                                        }
+                                    }
+                                }
+                            }
+                        } else if (siblingPos >= 0) {
                             const int adjIdx = s->tabOrder[static_cast<size_t>(siblingPos)];
                             const app::Tab* adjTab =
                                 (adjIdx >= 0 && adjIdx < static_cast<int>(s->pane->tabs.size()))
@@ -5639,29 +5863,146 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                             const app::Tab* adjTab =
                                 (adjIdx >= 0 && adjIdx < static_cast<int>(s->pane->tabs.size()))
                                     ? s->pane->tabs[static_cast<size_t>(adjIdx)].get() : nullptr;
-                            const float adjOff = [&]() {
-                                if (!adjTab) return 0.0f;
-                                const auto oit = s->tabOffsets.find(adjTab);
-                                return oit != s->tabOffsets.end() ? oit->second : 0.0f;
-                            }();
-                            // Chip offsets make slots non-uniform: ask the
-                            // renderer for this slot's rest rect instead of
-                            // extrapolating from the pitch.
-                            float adjRest = s->tabFlowLeft
-                                + static_cast<float>(adj) * s->tabPitch;
-                            {
-                                ui::WindowViewModel vmNow = BuildVm(*s);
-                                D2D1_RECT_F adjRc{};
-                                if (s->renderer.TabItemRect(vmNow,
-                                        static_cast<float>(s->compositor.Width()),
-                                        adj, &adjRc))
-                                    adjRest = adjRc.left;
+                            const int dragGid =
+                                s->pane->tabs[static_cast<size_t>(s->tabDragIndex)]->tab_group;
+                            const int adjGid = adjTab ? adjTab->tab_group : 0;
+                            if (adjGid != 0 && adjGid != dragGid) {
+                                // Group neighbor: hop the WHOLE run (expanded
+                                // or collapsed) past the dragged tab, so the
+                                // tab can never land between group members.
+                                std::vector<int> groupOf(s->pane->tabs.size());
+                                for (size_t i = 0; i < s->pane->tabs.size(); ++i)
+                                    groupOf[i] = s->pane->tabs[i]->tab_group;
+                                const app::GroupRun run =
+                                    app::FindGroupRun(s->tabOrder, groupOf, adj, adjGid);
+                                if (run.len > 0) {
+                                    ui::WindowViewModel vmNow = BuildVm(*s);
+                                    const float ww = static_cast<float>(s->compositor.Width());
+                                    float blockLeft = 0.0f, blockRight = 0.0f, blockOff = 0.0f;
+                                    bool haveBlock = false;
+                                    int chipGi = -1; // collapsed: vm.tab_groups index
+                                    D2D1_RECT_F rcFirst{}, rcLast{};
+                                    if (s->renderer.TabItemRect(vmNow, ww, run.pos, &rcFirst) &&
+                                        s->renderer.TabItemRect(vmNow, ww,
+                                            run.pos + run.len - 1, &rcLast)) {
+                                        blockLeft = rcFirst.left;
+                                        blockRight = rcLast.right;
+                                        const int fIdx = s->tabOrder[static_cast<size_t>(run.pos)];
+                                        if (fIdx >= 0 &&
+                                            fIdx < static_cast<int>(s->pane->tabs.size())) {
+                                            const auto oit = s->tabOffsets.find(
+                                                s->pane->tabs[static_cast<size_t>(fIdx)].get());
+                                            if (oit != s->tabOffsets.end())
+                                                blockOff = oit->second * s->tabPitch;
+                                        }
+                                        haveBlock = true;
+                                    } else {
+                                        // Collapsed group: the chip is the block.
+                                        for (int gi = 0;
+                                             gi < static_cast<int>(vmNow.tab_groups.size()); ++gi) {
+                                            if (vmNow.tab_groups[static_cast<size_t>(gi)].id
+                                                    != adjGid)
+                                                continue;
+                                            D2D1_RECT_F chipRc{};
+                                            if (s->renderer.TabGroupChipRect(
+                                                    vmNow, ww, gi, &chipRc)) {
+                                                chipGi = gi;
+                                                blockLeft = chipRc.left;
+                                                blockRight = chipRc.right;
+                                                const auto oit = s->chipOffsets.find(adjGid);
+                                                if (oit != s->chipOffsets.end())
+                                                    blockOff = oit->second;
+                                                haveBlock = true;
+                                            }
+                                            break;
+                                        }
+                                    }
+                                    if (haveBlock &&
+                                        app::ChipBlockCrossed(s->tabDragFloatLeft, s->tabSlotW,
+                                            (blockLeft + blockRight) * 0.5f + blockOff, dx)) {
+                                        // The run slides one slot against the
+                                        // drag direction (MoveTabRun keeps the
+                                        // group contiguous by construction).
+                                        const int dir = dx < 0 ? 1 : -1;
+                                        const int newRunPos = app::MoveTabRun(
+                                            s->tabOrder, run.pos, run.len, dir);
+                                        ui::WindowViewModel vmAfter = BuildVm(*s);
+                                        if (chipGi >= 0) {
+                                            D2D1_RECT_F newRc{};
+                                            if (s->renderer.TabGroupChipRect(
+                                                    vmAfter, ww, chipGi, &newRc)) {
+                                                const float startPx = app::DisplacedRestDelta(
+                                                    blockLeft, blockOff, newRc.left);
+                                                if (std::abs(startPx) >= 1.0f) {
+                                                    s->chipTracks[adjGid] = AppState::TabTrack{
+                                                        startPx, 150,
+                                                        std::chrono::steady_clock::now() };
+                                                    s->chipOffsets[adjGid] = startPx;
+                                                }
+                                            }
+                                        } else if (s->tabPitch > 0.0f) {
+                                            // Every visible member slides one
+                                            // slot; track each from where it
+                                            // visibly sits now.
+                                            for (int p = newRunPos;
+                                                 p < newRunPos + run.len && p < n; ++p) {
+                                                const int tIdx = s->tabOrder[static_cast<size_t>(p)];
+                                                if (tIdx < 0 ||
+                                                    tIdx >= static_cast<int>(s->pane->tabs.size()))
+                                                    continue;
+                                                const app::Tab* member =
+                                                    s->pane->tabs[static_cast<size_t>(tIdx)].get();
+                                                float oldRest = s->tabFlowLeft
+                                                    + static_cast<float>(p - dir) * s->tabPitch;
+                                                D2D1_RECT_F oldRc{}, newRc{};
+                                                if (s->renderer.TabItemRect(
+                                                        vmNow, ww, p - dir, &oldRc))
+                                                    oldRest = oldRc.left;
+                                                if (!s->renderer.TabItemRect(
+                                                        vmAfter, ww, p, &newRc))
+                                                    continue; // hidden: no visual to animate
+                                                float memberOff = 0.0f;
+                                                const auto oit = s->tabOffsets.find(member);
+                                                if (oit != s->tabOffsets.end())
+                                                    memberOff = oit->second * s->tabPitch;
+                                                const float startPx = app::DisplacedRestDelta(
+                                                    oldRest, memberOff, newRc.left);
+                                                const float start = startPx / s->tabPitch;
+                                                if (std::abs(start) >= 0.01f) {
+                                                    s->tabTracks[member] = AppState::TabTrack{
+                                                        start, 150,
+                                                        std::chrono::steady_clock::now() };
+                                                    s->tabOffsets[member] = start;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                const float adjOff = [&]() {
+                                    if (!adjTab) return 0.0f;
+                                    const auto oit = s->tabOffsets.find(adjTab);
+                                    return oit != s->tabOffsets.end() ? oit->second : 0.0f;
+                                }();
+                                // Chip offsets make slots non-uniform: ask the
+                                // renderer for this slot's rest rect instead of
+                                // extrapolating from the pitch.
+                                float adjRest = s->tabFlowLeft
+                                    + static_cast<float>(adj) * s->tabPitch;
+                                {
+                                    ui::WindowViewModel vmNow = BuildVm(*s);
+                                    D2D1_RECT_F adjRc{};
+                                    if (s->renderer.TabItemRect(vmNow,
+                                            static_cast<float>(s->compositor.Width()),
+                                            adj, &adjRc))
+                                        adjRest = adjRc.left;
+                                }
+                                const float adjCenter = adjRest + adjOff * s->tabPitch
+                                    + s->tabSlotW * 0.5f;
+                                if ((dx < 0 && s->tabDragFloatLeft < adjCenter) ||
+                                    (dx > 0 && s->tabDragFloatLeft + s->tabSlotW > adjCenter))
+                                    swapWith = adj;
                             }
-                            const float adjCenter = adjRest + adjOff * s->tabPitch
-                                + s->tabSlotW * 0.5f;
-                            if ((dx < 0 && s->tabDragFloatLeft < adjCenter) ||
-                                (dx > 0 && s->tabDragFloatLeft + s->tabSlotW > adjCenter))
-                                swapWith = adj;
                         }
                         if (swapWith >= 0) {
                             const int siblingIdx = s->tabOrder[swapWith];
@@ -6382,24 +6723,51 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                     for (int p = 0; p < static_cast<int>(s->tabOrder.size()); ++p)
                         if (s->tabOrder[p] == s->tabDragIndex) { cur = p; break; }
                     if (cur >= 0 && s->tabPitch > 0.0f) {
+                        // Collapsed chip drag: the drop target is the chip's
+                        // new rest rect, and the settle animation runs on the
+                        // px chip channel (hidden members can't carry it).
+                        const bool chipDrop = s->tabDragFromChip && s->tabDragBlockW > 0.0f;
                         float targetLeft = s->tabFlowLeft + static_cast<float>(cur) * s->tabPitch;
                         {
                             ui::WindowViewModel vmDrop = BuildVm(*s);
-                            D2D1_RECT_F curRc{};
-                            if (s->renderer.TabItemRect(vmDrop,
-                                    static_cast<float>(s->compositor.Width()), cur, &curRc))
-                                targetLeft = curRc.left;
+                            const float wwDrop = static_cast<float>(s->compositor.Width());
+                            if (chipDrop) {
+                                for (int gi = 0;
+                                     gi < static_cast<int>(vmDrop.tab_groups.size()); ++gi) {
+                                    if (vmDrop.tab_groups[static_cast<size_t>(gi)].id
+                                            != s->tabDragGroupId)
+                                        continue;
+                                    D2D1_RECT_F chipRc{};
+                                    if (s->renderer.TabGroupChipRect(vmDrop, wwDrop, gi, &chipRc))
+                                        targetLeft = chipRc.left;
+                                    break;
+                                }
+                            } else {
+                                D2D1_RECT_F curRc{};
+                                if (s->renderer.TabItemRect(vmDrop, wwDrop, cur, &curRc))
+                                    targetLeft = curRc.left;
+                            }
                         }
                         const float dist = std::abs(s->tabDragFloatLeft - targetLeft);
+                        // chipDrop: tabSlotW holds the chip width, so scale the
+                        // duration by the uniform tab pitch instead.
+                        const float durSlot = chipDrop ? s->tabPitch : s->tabSlotW;
                         const int dur = static_cast<int>(
-                            dist * 250.0f / std::max(1.0f, s->tabSlotW));
+                            dist * 250.0f / std::max(1.0f, durSlot));
                         if (dur >= 50) {
-                            const app::Tab* key =
-                                s->pane->tabs[static_cast<size_t>(s->tabDragIndex)].get();
-                            const float start = (s->tabDragFloatLeft - targetLeft) / s->tabPitch;
-                            s->tabTracks[key] = AppState::TabTrack{
-                                start, dur, std::chrono::steady_clock::now() };
-                            s->tabOffsets[key] = start;
+                            if (chipDrop) {
+                                const float start = s->tabDragFloatLeft - targetLeft; // px
+                                s->chipTracks[s->tabDragGroupId] = AppState::TabTrack{
+                                    start, dur, std::chrono::steady_clock::now() };
+                                s->chipOffsets[s->tabDragGroupId] = start;
+                            } else {
+                                const app::Tab* key =
+                                    s->pane->tabs[static_cast<size_t>(s->tabDragIndex)].get();
+                                const float start = (s->tabDragFloatLeft - targetLeft) / s->tabPitch;
+                                s->tabTracks[key] = AppState::TabTrack{
+                                    start, dur, std::chrono::steady_clock::now() };
+                                s->tabOffsets[key] = start;
+                            }
                         }
                     }
                     if (s->tabOrder.size() == s->pane->tabs.size() && !s->tabOrder.empty()) {
@@ -6546,6 +6914,8 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 s->tabOrder.clear();
                 s->tabTracks.clear();
                 s->tabOffsets.clear();
+                s->chipTracks.clear();
+                s->chipOffsets.clear();
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             if (s->marqueeActive) ApplyMarqueeSelection(*s);
@@ -7198,6 +7568,31 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                         snap.pane_views.push_back(t ? t->view_mode : ui::ViewMode::Details);
                         snap.pane_column_dividers.push_back(
                             t ? t->details_column_dividers : std::array<float, 3>{});
+                        // Full tab/group state (version 5).
+                        app::PaneSessionSnapshot ps;
+                        if (p) {
+                            ps.active = static_cast<int>(std::min(
+                                p->active_tab, p->tabs.empty() ? size_t(0) : p->tabs.size() - 1));
+                            for (const auto& g : p->tab_groups) {
+                                app::GroupSessionSnapshot gs;
+                                gs.id = g.id;
+                                gs.name = g.name;
+                                gs.color_rgb = g.color_rgb;
+                                gs.collapsed = g.collapsed;
+                                ps.groups.push_back(std::move(gs));
+                            }
+                            for (const auto& owned : p->tabs) {
+                                app::TabSessionSnapshot ts;
+                                if (owned) {
+                                    ts.path = owned->current_path;
+                                    ts.pinned = owned->pinned;
+                                    ts.group = owned->tab_group;
+                                    ts.view = owned->view_mode;
+                                }
+                                ps.tabs.push_back(std::move(ts));
+                            }
+                        }
+                        snap.pane_tabs.push_back(std::move(ps));
                     }
                 }
                 snap.tray = s->tray;
@@ -7356,6 +7751,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         state.session_pane_paths = session.pane_paths;
         state.session_pane_views = session.pane_views;
         state.session_pane_columns = session.pane_column_dividers;
+        state.session_pane_tabs = std::move(session.pane_tabs);
         state.session_layout = session.layout;
         state.session_focused = session.focused_pane;
         state.session_target = session.target_pane;

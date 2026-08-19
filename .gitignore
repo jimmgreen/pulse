@@ -2,6 +2,7 @@
 /build/
 /build_selftest/
 /out/
+/dist/
 CMakeCache.txt
 CMakeFiles/
 build.ninja

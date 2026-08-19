@@ -58,12 +58,14 @@ struct HostState {
 } g;
 
 // Crash-only diagnostics (plan §11: crashes are a normal design case).
+// Log under %LOCALAPPDATA%\Pulse: an installed copy lives in Program Files,
+// where the exe directory is not writable for a non-admin user.
 void HostLog(const wchar_t* msg) {
     wchar_t dir[MAX_PATH]{};
-    GetModuleFileNameW(nullptr, dir, ARRAYSIZE(dir));
-    wchar_t* slash = wcsrchr(dir, L'\\');
-    if (slash) *(slash + 1) = L'\0';
-    std::wstring path = std::wstring(dir) + L"pulse_shell_host.log";
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, dir))) return;
+    std::wstring path = std::wstring(dir) + L"\\Pulse";
+    CreateDirectoryW(path.c_str(), nullptr);
+    path += L"\\pulse_shell_host.log";
     if (HANDLE f = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
             OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr); f != INVALID_HANDLE_VALUE) {
         char buf[512];

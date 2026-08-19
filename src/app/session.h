@@ -7,6 +7,26 @@
 
 namespace pulse::app {
 
+struct TabSessionSnapshot {
+    std::wstring path;
+    bool pinned = false;
+    int group = 0; // TabGroup::id of the owning group; 0 = none
+    ui::ViewMode view = ui::ViewMode::Details;
+};
+
+struct GroupSessionSnapshot {
+    int id = 0;
+    std::wstring name;
+    uint32_t color_rgb = 0;
+    bool collapsed = false;
+};
+
+struct PaneSessionSnapshot {
+    int active = 0; // index into tabs
+    std::vector<GroupSessionSnapshot> groups;
+    std::vector<TabSessionSnapshot> tabs;
+};
+
 struct SessionSnapshot {
     RECT window_rect = {};
     bool maximized = false;
@@ -24,10 +44,17 @@ struct SessionSnapshot {
     bool details_panel = false;  // right details panel visible
     int details_panel_width = 340;
     std::array<float, 3> details_column_dividers{}; // version 3 migration only
+    std::vector<PaneSessionSnapshot> pane_tabs; // version 5: full tab/group state per pane
 };
 
 std::wstring GetPulseDataDir();
 bool SaveSession(const SessionSnapshot& snap);
 bool LoadSession(SessionSnapshot& snap);
+
+// Serialize/parse the per-pane tab+group array ("paneTabs" key). Pure
+// functions so the selftest can round-trip them without a window.
+std::wstring PaneTabsToJson(const std::vector<PaneSessionSnapshot>& panes);
+bool ParsePaneTabs(const std::wstring& array_json,
+                   std::vector<PaneSessionSnapshot>& out);
 
 } // namespace pulse::app

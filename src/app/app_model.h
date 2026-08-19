@@ -110,6 +110,32 @@ struct TabGroup {
 // (dir>0). Returns the new run position (unchanged when out of range).
 int MoveTabRun(std::vector<int>& order, int pos, int len, int dir);
 
+// Collapsed-group chip drag geometry, in px: chips are px-positioned on the
+// strip, unlike tabs which animate in slot units.
+
+// Visual width of a collapsed group's drag block: the chip plus the gap the
+// strip layout reserves after every chip.
+float CollapsedChipBlockW(float chip_w, float chip_gap);
+
+// True when the floating block ([block_left, block_left+block_w) px) has
+// crossed the neighbor's (animated) center while moving in dir (<0 left,
+// >0 right). Mirrors the expanded-run crossing rule.
+bool ChipBlockCrossed(float block_left, float block_w, float neighbor_center, int dir);
+
+// Track start (px) for a strip unit displaced by a block move: it currently
+// sits at old_rest + cur_off and must land at new_rest.
+float DisplacedRestDelta(float old_rest, float cur_off, float new_rest);
+
+// Contiguous run [pos, pos+len) of group gid's members in a strip order
+// (display position -> tab index; tab_group_of maps tab index -> group id)
+// that contains display position at. {0,0} when at is out of range or the
+// tab there is not in gid. Single tabs hop a whole group by MoveTabRun on
+// this run, so a dragged tab can never land inside a group.
+struct GroupRun { int pos = 0; int len = 0; };
+GroupRun FindGroupRun(const std::vector<int>& order,
+                      const std::vector<int>& tab_group_of,
+                      int at, int gid);
+
 struct Pane {
     std::vector<std::unique_ptr<Tab>> tabs;
     size_t active_tab = 0;
