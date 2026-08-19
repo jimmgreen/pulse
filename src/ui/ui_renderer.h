@@ -152,7 +152,7 @@ struct BreadcrumbSegment {
 };
 
 // Splits "C:\Users\SS" into [{C:\, C:\}, {Users, C:\Users}, ...].
-// UNC roots collapse to one "\\server\share" segment. Pure; unit-tested.
+// UNC roots split into a server segment plus a share segment. Pure; unit-tested.
 std::vector<BreadcrumbSegment> SplitBreadcrumb(const std::wstring& path);
 
 struct SidebarItem {

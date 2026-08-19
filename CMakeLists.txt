@@ -51,7 +51,7 @@ if(PULSE_APP_SOURCES)
     target_sources(pulse PRIVATE src/app/pulse.rc)
     target_link_options(pulse PRIVATE /MANIFEST:NO)
     target_link_libraries(pulse PRIVATE
-        d3d11 d2d1 dwrite dxgi dcomp dwmapi shcore ole32 shell32 uuid comctl32 advapi32 shlwapi version windowscodecs gdi32)
+        d3d11 d2d1 dwrite dxgi dcomp dwmapi shcore ole32 shell32 uuid comctl32 advapi32 shlwapi version windowscodecs gdi32 netapi32)
 endif()
 
 # ---- Pulse.Index.exe: index + query host (session helper or Windows service) ----
@@ -65,7 +65,7 @@ add_executable(pulse_index WIN32
 target_sources(pulse_index PRIVATE src/index/index_host.rc)
 target_link_options(pulse_index PRIVATE /MANIFEST:NO)
 set_target_properties(pulse_index PROPERTIES OUTPUT_NAME "Pulse.Index")
-target_link_libraries(pulse_index PRIVATE advapi32 shlwapi ole32 shell32)
+target_link_libraries(pulse_index PRIVATE advapi32 shlwapi ole32 shell32 netapi32)
 
 # ---- Stage 1B-1 ops self test (console; drives pulse_shell.exe over the pipe) ----
 add_executable(pulse_ops_test

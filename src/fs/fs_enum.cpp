@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <shellapi.h>
 #include <shlwapi.h>
+#include <lm.h>
 #include <algorithm>
 #include <sstream>
 #include <stdexcept>
@@ -336,6 +337,38 @@ static void EnumerateThisPc(std::vector<DirEntry>& out) {
     }
 }
 
+// Server-root view (\\server, normalized as \\?\UNC\server with no further
+// separator): one entry per disk share, enumerated via NetShareEnum. Hidden
+// admin shares (name ends in '$') are skipped. full_path is set so the app
+// layer can navigate into a share without joining parent+name.
+static void EnumerateServerShares(const std::wstring& server, std::vector<DirEntry>& out) {
+    std::wstring host = L"\\\\" + server;
+    BYTE* buf = nullptr;
+    DWORD read = 0, total = 0;
+    NET_API_STATUS status = NetShareEnum(
+        const_cast<LPWSTR>(host.c_str()), 1, &buf, MAX_PREFERRED_LENGTH,
+        &read, &total, nullptr);
+    if (status != NERR_Success) {
+        std::ostringstream oss;
+        oss << "NetShareEnum failed, error=" << status;
+        throw std::runtime_error(oss.str());
+    }
+    const auto* infos = reinterpret_cast<const SHARE_INFO_1*>(buf);
+    for (DWORD i = 0; i < read; ++i) {
+        const DWORD type = infos[i].shi1_type & ~(STYPE_SPECIAL | STYPE_TEMPORARY);
+        if (type != STYPE_DISKTREE) continue;
+        std::wstring name = infos[i].shi1_netname;
+        if (name.empty() || name.back() == L'$') continue;
+        DirEntry e;
+        e.name = name;
+        e.full_path = NormalizePath(host + L"\\" + name);
+        e.is_dir = true;
+        e.attrs = FILE_ATTRIBUTE_DIRECTORY;
+        out.push_back(std::move(e));
+    }
+    NetApiBufferFree(buf);
+}
+
 void EnumerateDirectory(const std::wstring& path, std::vector<DirEntry>& out) {
     out.clear();
     if (path.empty()) {
@@ -343,6 +376,14 @@ void EnumerateDirectory(const std::wstring& path, std::vector<DirEntry>& out) {
         return;
     }
     std::wstring normalized = NormalizePath(path);
+    if (normalized.starts_with(L"\\\\?\\UNC\\")) {
+        std::wstring rest = normalized.substr(8);
+        while (!rest.empty() && rest.back() == L'\\') rest.pop_back();
+        if (!rest.empty() && rest.find(L'\\') == std::wstring::npos) {
+            EnumerateServerShares(rest, out);
+            return;
+        }
+    }
     try {
         EnumerateNtQuery(normalized, out);
         return;

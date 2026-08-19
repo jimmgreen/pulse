@@ -142,11 +142,22 @@ void TestBreadcrumb() {
     Check(pc.size() == 1 && pc[0].text == L"此电脑" && pc[0].path.empty(),
           L"breadcrumb: empty path -> This PC only");
     auto unc = ui::SplitBreadcrumb(L"\\\\server\\share\\dir");
-    Check(unc.size() == 2 && unc[0].path == L"\\\\server\\share" &&
-          unc[1].path == L"\\\\server\\share\\dir", L"breadcrumb: UNC root collapses");
+    Check(unc.size() == 3 && unc[0].text == L"server" && unc[0].path == L"\\\\server" &&
+          unc[1].text == L"share" && unc[1].path == L"\\\\server\\share" &&
+          unc[2].path == L"\\\\server\\share\\dir",
+          L"breadcrumb: UNC splits server and share segments");
+    auto uncRoot = ui::SplitBreadcrumb(L"\\\\server\\share");
+    Check(uncRoot.size() == 2 && uncRoot[0].path == L"\\\\server" &&
+          uncRoot[1].path == L"\\\\server\\share",
+          L"breadcrumb: UNC share root -> server + share");
+    auto uncSrv = ui::SplitBreadcrumb(L"\\\\server");
+    Check(uncSrv.size() == 1 && uncSrv[0].text == L"server" &&
+          uncSrv[0].path == L"\\\\server",
+          L"breadcrumb: bare UNC server -> single segment");
     auto uncLong = ui::SplitBreadcrumb(L"\\\\?\\UNC\\192.168.0.254\\share\\dir");
-    Check(uncLong.size() == 2 && uncLong[0].path == L"\\\\192.168.0.254\\share" &&
-          uncLong[1].path == L"\\\\192.168.0.254\\share\\dir",
+    Check(uncLong.size() == 3 && uncLong[0].path == L"\\\\192.168.0.254" &&
+          uncLong[1].path == L"\\\\192.168.0.254\\share" &&
+          uncLong[2].path == L"\\\\192.168.0.254\\share\\dir",
           L"breadcrumb: \\\\?\\UNC prefix restores leading \\\\");
     auto longp = ui::SplitBreadcrumb(L"\\\\?\\C:\\A\\B");
     Check(longp.size() == 4 && longp[3].path == L"C:\\A\\B",
@@ -160,9 +171,37 @@ void TestBreadcrumb() {
     Check(vm.pane.path == L"\\\\192.168.0.254\\share\\folder",
           L"breadcrumb: pane display path keeps UNC prefix");
     auto fromVm = ui::SplitBreadcrumb(vm.pane.path);
-    Check(fromVm.size() == 2 && fromVm[0].path == L"\\\\192.168.0.254\\share" &&
-          fromVm[1].path == L"\\\\192.168.0.254\\share\\folder",
+    Check(fromVm.size() == 3 && fromVm[0].path == L"\\\\192.168.0.254" &&
+          fromVm[1].path == L"\\\\192.168.0.254\\share" &&
+          fromVm[2].path == L"\\\\192.168.0.254\\share\\folder",
           L"breadcrumb: click target stays UNC not CWD-relative");
+
+    // UNC workspace gets the network glyph/color and a 服务器 badge.
+    auto colorIs = [](const D2D1_COLOR_F& c, uint32_t rgb) {
+        const auto want = ui::HexColor(rgb);
+        return c.r == want.r && c.g == want.g && c.b == want.b;
+    };
+    PlacesCatalog cat;
+    cat.persist = false;
+    cat.PinWorkspace(L"C:\\local", L"local", 0, { L"C:\\local" });
+    cat.PinWorkspace(L"\\\\server\\share", L"nas", 0, { L"\\\\server\\share" });
+    cat.workspaces[1].frequent.push_back({ L"\\\\server\\share\\sub", 3 });
+    const auto wvm = BuildWindowViewModel(pane, sidebar, true, false, true, &cat, 0);
+    Check(!wvm.sidebar.empty() && wvm.sidebar[0].items.size() == 3,
+          L"sidebar: workspace group holds both workspaces + frequent child");
+    if (!wvm.sidebar.empty() && wvm.sidebar[0].items.size() == 3) {
+        const auto& local = wvm.sidebar[0].items[0];
+        const auto& nas = wvm.sidebar[0].items[1];
+        const auto& sub = wvm.sidebar[0].items[2];
+        Check(local.badge.empty() && local.icon_glyph == L"\xE8B7",
+              L"sidebar: local workspace keeps default glyph, no badge");
+        Check(nas.badge == L"当前 · 服务器" && nas.icon_glyph == L"\xE968" &&
+              colorIs(nas.icon_color, 0x38BDF8),
+              L"sidebar: active UNC workspace shows server badge + network glyph");
+        Check(sub.badge.empty() && sub.icon_glyph == L"\xE968" &&
+              colorIs(sub.icon_color, 0x38BDF8),
+              L"sidebar: UNC frequent child gets network glyph, no badge");
+    }
 }
 
 void TestThisPcEnumeration() {

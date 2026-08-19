@@ -1020,17 +1020,30 @@ std::vector<BreadcrumbSegment> SplitBreadcrumb(const std::wstring& path) {
         while (i < p.size() && p[i] == L'\\') ++i;
         prefix += L"\\";
     } else if (p.size() >= 2 && p[0] == L'\\' && p[1] == L'\\') {
-        // UNC: collapse \\server\share into one segment.
+        // UNC: split the root into a server segment and a share segment.
         auto s3 = p.find(L'\\', 2);           // after server
-        auto s4 = s3 == std::wstring::npos ? std::wstring::npos
-                                           : p.find(L'\\', s3 + 1); // after share
-        std::wstring root = (s4 == std::wstring::npos) ? p : p.substr(0, s4);
-        BreadcrumbSegment seg;
-        seg.text = root;
-        seg.path = root;
-        out.push_back(seg);
-        prefix = root;
-        i = (s4 == std::wstring::npos) ? p.size() : s4 + 1;
+        std::wstring server = (s3 == std::wstring::npos) ? p.substr(2)
+                                                         : p.substr(2, s3 - 2);
+        BreadcrumbSegment srv;
+        srv.text = server;
+        srv.path = L"\\\\" + server;
+        out.push_back(srv);
+        prefix = srv.path;
+        if (s3 == std::wstring::npos) {
+            i = p.size();
+        } else {
+            auto s4 = p.find(L'\\', s3 + 1);  // after share
+            std::wstring share = (s4 == std::wstring::npos) ? p.substr(s3 + 1)
+                                                            : p.substr(s3 + 1, s4 - s3 - 1);
+            if (!share.empty()) {
+                BreadcrumbSegment seg;
+                seg.text = share;
+                seg.path = prefix + L"\\" + share;
+                out.push_back(seg);
+                prefix = seg.path;
+            }
+            i = (s4 == std::wstring::npos) ? p.size() : s4 + 1;
+        }
     }
     while (i <= p.size() && i < p.size()) {
         auto sep = p.find(L'\\', i);

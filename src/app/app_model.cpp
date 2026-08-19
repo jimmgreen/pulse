@@ -1057,19 +1057,22 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
             it.label = w.name.empty() ? TabTitle(w.root) : w.name;
             it.detail = DisplayPath(w.root);
             it.path = MakeWorkspacePath(i);
-            it.icon_glyph = L"\xE8B7";
+            const bool unc = fs::IsUncPath(w.root);
+            it.icon_glyph = unc ? L"\xE968" : L"\xE8B7";
             it.fallback_text = L"WS";
-            it.icon_color = ui::HexColor(0x34D399);
-            if (i == places->active_workspace) it.badge = L"当前";
+            it.icon_color = ui::HexColor(unc ? 0x38BDF8 : 0x34D399);
+            if (unc) it.badge = L"服务器";
+            if (i == places->active_workspace)
+                it.badge = unc ? L"当前 · 服务器" : L"当前";
             workspaces.items.push_back(std::move(it));
             for (const auto& child : places->FrequentChildren(i, 8)) {
                 ui::SidebarItem sub;
                 sub.label = TabTitle(child);
                 sub.path = child;
                 sub.indent = 1;
-                sub.icon_glyph = L"\xE8B7";
+                sub.icon_glyph = unc ? L"\xE968" : L"\xE8B7";
                 sub.fallback_text = L"Dir";
-                sub.icon_color = ui::HexColor(0x94A3B8);
+                sub.icon_color = ui::HexColor(unc ? 0x38BDF8 : 0x94A3B8);
                 workspaces.items.push_back(std::move(sub));
             }
         }
@@ -1112,6 +1115,7 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
 
     ui::SidebarGroup nets;
     nets.header = L"\u7F51\u7EDC\u4F4D\u7F6E"; // 网络位置
+    nets.add_action = true;
     if (places) {
         for (const auto& n : places->networks) {
             ui::SidebarItem it;

@@ -6588,9 +6588,18 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         } else if (hit.region == ui::HitTestResult::ColumnHeader) {
             SortBy(*s, hit.column);
         } else if (hit.region == ui::HitTestResult::SidebarHeaderAction) {
-            POINT point{ mx, my };
-            ClientToScreen(hwnd, &point);
-            ShowTagPicker(*s, point);
+            // Sidebar groups are pushed in a fixed order; group 4 is 网络位置.
+            if (hit.index == 4) {
+                app::Tab* tab = ActiveTab(*s);
+                if (tab && fs::IsUncPath(tab->current_path)) {
+                    s->places.PinNetwork(tab->current_path, L"");
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+            } else {
+                POINT point{ mx, my };
+                ClientToScreen(hwnd, &point);
+                ShowTagPicker(*s, point);
+            }
         } else if (hit.region == ui::HitTestResult::SidebarHeader) {
             if (hit.index >= 0 && hit.index < 32) {
                 s->sidebarCollapsedMask ^= (1u << hit.index);
