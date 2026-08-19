@@ -4,6 +4,7 @@
 // read-only; USN/RDCW mutations append to a small heap delta. Search takes a
 // shared lock and never waits on Status()/Count().
 #pragma once
+#include "index_config.h"
 #include "index_query.h"
 #include <atomic>
 #include <cstdint>
@@ -77,16 +78,22 @@ struct DiskHeader {
     uint64_t vols_off;
     uint64_t frn_off;
     uint64_t frn_count;
+    uint64_t child_order_off;
+    uint64_t name_order_off;
+    uint64_t size_order_off;
+    uint64_t mtime_order_off;
 };
 struct DiskVol {
     uint16_t letter = 0;
-    uint16_t pad = 0;
+    uint16_t kind = 0;
     uint32_t frn_count = 0;
+    uint64_t item_count = 0;
     uint64_t journal_id = 0;
     int64_t next_usn = 0;
     int32_t root_idx = -1;
     int32_t pad2 = 0;
     uint64_t frn_off = 0;
+    wchar_t volume_id[64]{};
 };
 struct DiskFrn {
     uint64_t frn = 0;
@@ -108,10 +115,13 @@ public:
     void Start(HWND notify, UINT msg);
     void Stop();
 
-    SearchResult Search(const Query& q) const;
+    SearchResult Search(const Query& q, const std::atomic<uint32_t>* latest = nullptr,
+                        uint32_t expected = 0) const;
     size_t Count() const { return indexed_.load(); }
     bool Ready() const { return ready_.load(); }
     std::wstring Status() const;
+    std::vector<VolumeInfo> Volumes() const;
+    void RequestRebuild();
     void AddForTest(std::wstring path, std::wstring name, bool is_dir,
                     uint64_t size = 0, uint64_t mtime = 0);
 
@@ -142,6 +152,10 @@ private:
         uint32_t nvol = 0;
         const DiskFrn* frns = nullptr;
         uint32_t nfrn = 0;
+        const int32_t* child_order = nullptr;
+        const int32_t* name_order = nullptr;
+        const int32_t* size_order = nullptr;
+        const int32_t* mtime_order = nullptr;
         void Close();
         ~MappedFile() { Close(); }
         MappedFile() = default;
@@ -151,6 +165,9 @@ private:
 
     struct VolState {
         wchar_t letter = 0;
+        VolumeKind kind = VolumeKind::Other;
+        std::wstring volume_id;
+        uint64_t item_count = 0;
         uint64_t journal_id = 0;
         int64_t next_usn = 0;
         int32_t root_idx = -1;
@@ -175,7 +192,9 @@ private:
     bool TryLoadCache();
     void SaveCache();
     void FullRebuild();
-    bool IndexVolumeMft(wchar_t letter);
+    void PreserveOfflineVolumesLocked(const std::vector<VolumeInfo>& active,
+                                      const IndexConfig& config);
+    bool IndexVolumeMft(const VolumeInfo& volume);
     void WalkTree(int32_t parent, const std::wstring& dir, int depth);
     void CompactLocked();
     bool FlattenLocked(Store& out, std::vector<VolState>& vols_out) const;
@@ -188,7 +207,8 @@ private:
 
     void CollectMatchesLocked(const CompiledQuery& cq, int32_t prefix_node,
                               bool folders_only, bool use_attrs,
-                              std::vector<int32_t>& ids) const;
+                              std::vector<int32_t>& ids,
+                              const std::atomic<uint32_t>* latest, uint32_t expected) const;
     void SortIdsLocked(std::vector<int32_t>& ids, ResultSort sort, bool desc) const;
 
     void StartWalkWatches(const std::vector<std::wstring>& roots);
@@ -213,6 +233,7 @@ private:
     int32_t ResolvePathLocked(const std::wstring& path) const;
     bool MatchNodeLocked(int32_t i, const CompiledQuery& q, int32_t prefix_node,
                          bool folders_only, bool use_attrs) const;
+    void UpdateVolumeVisibilityLocked(const std::vector<VolumeInfo>& active, bool only_hide = false);
     void InvalidateFilterLocked() { ++filter_epoch_; }
     void SetStatus(std::wstring s);
     void PingNotify(bool force = false);
@@ -232,10 +253,12 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> ready_{false};
     std::atomic<bool> building_{false};
+    std::atomic<bool> rebuild_requested_{false};
     std::atomic<size_t> indexed_{0};
     std::atomic<ULONGLONG> last_notify_{0};
 
     mutable std::shared_mutex mutex_;
+    mutable std::mutex query_mu_;
     mutable std::mutex status_mu_;
     std::wstring status_;
 
@@ -244,6 +267,7 @@ private:
     Store build_;
     std::vector<VolState> vols_;
     std::vector<VolState> build_vols_;
+    std::vector<int32_t> inactive_volume_roots_;
     std::unordered_set<int32_t> tombstones_;
     std::unordered_map<int32_t, Patch> patches_;
     std::unordered_multimap<uint64_t, int32_t> child_map_;

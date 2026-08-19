@@ -192,6 +192,38 @@ void IndexClient::HandleSearch(uint32_t id, const uint8_t* p, size_t n) {
     if (notify_ && search_msg_) PostMessageW(notify_, search_msg_, id, 0);
 }
 
+void IndexClient::HandleVolumes(const uint8_t* p, size_t n) {
+    ipc::PayloadReader r(p, n);
+    uint32_t service = 0, count = 0;
+    std::wstring path;
+    if (!r.GetU32(service) || !r.GetString(path) || !r.GetU32(count)) return;
+    std::vector<VolumeInfo> volumes;
+    volumes.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        VolumeInfo volume;
+        uint32_t flags = 0, kind = 0, progress = 0, lo = 0, hi = 0;
+        if (!r.GetString(volume.id) || !r.GetString(volume.label) ||
+            !r.GetString(volume.mount_point) || !r.GetString(volume.file_system) ||
+            !r.GetString(volume.state) || !r.GetString(volume.error) ||
+            !r.GetU32(flags) || !r.GetU32(kind) || !r.GetU32(progress) ||
+            !r.GetU32(lo) || !r.GetU32(hi)) return;
+        volume.online = (flags & 1u) != 0;
+        volume.supported = (flags & 2u) != 0;
+        volume.enabled = (flags & 4u) != 0;
+        volume.kind = static_cast<VolumeKind>(kind);
+        volume.progress = progress;
+        volume.indexed_items = (static_cast<uint64_t>(hi) << 32) | lo;
+        volumes.push_back(std::move(volume));
+    }
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        service_mode_ = service != 0;
+        index_path_ = std::move(path);
+        volumes_ = std::move(volumes);
+    }
+    if (notify_ && status_msg_) PostMessageW(notify_, status_msg_, 0, 0);
+}
+
 void IndexClient::FlushPendingSearch() {
     Query q;
     uint32_t id = 0;
@@ -223,11 +255,23 @@ void IndexClient::Writer() {
         {
             std::unique_lock<std::mutex> lock(mu_);
             pending_cv_.wait_for(lock, std::chrono::milliseconds(100),
-                [this] { return !running_ || have_pending_; });
+                [this] { return !running_ || have_pending_ || volume_refresh_requested_; });
             if (!running_) return;
-            if (!have_pending_) continue;
+            if (!have_pending_ && !volume_refresh_requested_) continue;
         }
-        if (connected_) FlushPendingSearch();
+        if (connected_) {
+            bool refresh = false;
+            {
+                std::lock_guard<std::mutex> lock(mu_);
+                refresh = volume_refresh_requested_;
+                volume_refresh_requested_ = false;
+            }
+            if (refresh && !WriteMsg(REQ_IDX_VOLUMES, 0, {})) {
+                std::lock_guard<std::mutex> lock(mu_);
+                volume_refresh_requested_ = true;
+            }
+            FlushPendingSearch();
+        }
     }
 }
 
@@ -261,6 +305,8 @@ void IndexClient::Worker() {
                 HandleStatus(payload.data(), payload.size());
             else if (hdr.type == RSP_IDX_SEARCH)
                 HandleSearch(hdr.request_id, payload.data(), payload.size());
+            else if (hdr.type == RSP_IDX_VOLUMES)
+                HandleVolumes(payload.data(), payload.size());
         }
     }
 }
@@ -278,6 +324,29 @@ void IndexClient::SearchAsync(const Query& q, uint32_t id) {
         pending_q_ = q;
         pending_id_ = id;
         have_pending_ = true;
+    }
+    pending_cv_.notify_one();
+}
+
+std::wstring IndexClient::IndexPath() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return index_path_;
+}
+
+bool IndexClient::ServiceMode() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return service_mode_;
+}
+
+std::vector<VolumeInfo> IndexClient::Volumes() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return volumes_;
+}
+
+void IndexClient::RefreshVolumesAsync() {
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        volume_refresh_requested_ = true;
     }
     pending_cv_.notify_one();
 }
@@ -301,19 +370,66 @@ bool IndexClient::ServiceInstalled() const {
 }
 
 bool IndexClient::RequestInstallService() {
-    const std::wstring exe = ExePath();
+    return InstallServiceElevated();
+}
+
+namespace {
+
+std::wstring QuoteCommandArg(const std::wstring& value) {
+    std::wstring out = L"\"";
+    for (wchar_t c : value) {
+        if (c == L'\"') out += L'\\';
+        out += c;
+    }
+    out += L'\"';
+    return out;
+}
+
+bool RunElevatedIndexCommand(const std::wstring& exe, const std::wstring& parameters) {
     SHELLEXECUTEINFOW sei{ sizeof(sei) };
     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
     sei.lpVerb = L"runas";
     sei.lpFile = exe.c_str();
-    sei.lpParameters = L"--install";
+    sei.lpParameters = parameters.c_str();
     sei.nShow = SW_HIDE;
     if (!ShellExecuteExW(&sei)) return false;
+    DWORD code = ERROR_GEN_FAILURE;
     if (sei.hProcess) {
-        WaitForSingleObject(sei.hProcess, 15000);
+        WaitForSingleObject(sei.hProcess, 30000);
+        GetExitCodeProcess(sei.hProcess, &code);
         CloseHandle(sei.hProcess);
     }
-    return ServiceInstalled();
+    return code == 0;
+}
+
+} // namespace
+
+bool IndexClient::RequestConfigureVolume(const std::wstring& volume_id, bool enabled) {
+    const bool ok = ConfigureVolumeElevated(volume_id, enabled);
+    if (ok) RefreshVolumesAsync();
+    return ok;
+}
+
+bool IndexClient::ConfigureVolumeElevated(const std::wstring& volume_id, bool enabled) {
+    const std::wstring parameters = L"--configure-volume " + QuoteCommandArg(volume_id) +
+                                    (enabled ? L" --enable" : L" --disable");
+    return RunElevatedIndexCommand(ExePath(), parameters);
+}
+
+bool IndexClient::RequestRebuild() {
+    return RebuildElevated();
+}
+
+bool IndexClient::RebuildElevated() {
+    return RunElevatedIndexCommand(ExePath(), L"--rebuild-index");
+}
+
+bool IndexClient::InstallServiceElevated() {
+    return RunElevatedIndexCommand(ExePath(), L"--install");
+}
+
+bool IndexClient::ConfigureIndexPathElevated(const std::wstring& path) {
+    return RunElevatedIndexCommand(ExePath(), L"--set-index-path " + QuoteCommandArg(path));
 }
 
 } // namespace pulse::index

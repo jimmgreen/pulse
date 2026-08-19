@@ -4,6 +4,8 @@
 
 namespace pulse::index {
 
+void SetMachineIndexScope(bool machine_scope);
+bool MachineIndexScope();
 std::wstring DataDir();
 std::wstring CacheFilePath();
 

@@ -7,8 +7,8 @@
 ;     starts the PulseIndex service, so full-disk MFT/USN indexing works out of
 ;     the box without a runtime UAC prompt.
 ;   - Uninstall stops and removes the service before deleting files.
-; User data under %LOCALAPPDATA%\Pulse (settings, session, index) is kept on
-; uninstall.
+; User settings/session stay under %LOCALAPPDATA%\Pulse. The service index
+; defaults to %ProgramData%\Pulse\Index and is kept on uninstall.
 
 #define AppVersion "1.0.0"
 
@@ -68,6 +68,7 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 ; no further UAC prompt. net-start failures are non-fatal (AUTO_START picks it
 ; up on the next boot).
 Filename: "{app}\Pulse.Index.exe"; Parameters: "--install"; StatusMsg: "正在安装全盘索引服务… / Installing the index service…"; Flags: runhidden waituntilterminated; Tasks: indexservice
+Filename: "{app}\Pulse.Index.exe"; Parameters: "--set-index-path ""{code:GetIndexPath}"""; StatusMsg: "正在配置索引位置… / Configuring the index location…"; Flags: runhidden waituntilterminated; Tasks: indexservice
 Filename: "{cmd}"; Parameters: "/c net start PulseIndex >nul 2>&1 & exit /b 0"; Flags: runhidden waituntilterminated; Tasks: indexservice
 Filename: "{app}\pulse.exe"; Description: "{cm:LaunchProgram,Pulse}"; Flags: nowait postinstall skipifsilent
 
@@ -77,6 +78,25 @@ Filename: "{cmd}"; Parameters: "/c net stop PulseIndex >nul 2>&1 & exit /b 0"; F
 Filename: "{app}\Pulse.Index.exe"; Parameters: "--uninstall"; Flags: runhidden waituntilterminated; RunOnceId: "RemovePulseIndex"
 
 [Code]
+var
+  IndexDirPage: TInputDirWizardPage;
+
+procedure InitializeWizard;
+begin
+  IndexDirPage := CreateInputDirPage(wpSelectTasks,
+    '搜索索引位置 / Search index location',
+    '选择 Pulse 索引数据库的存储目录 / Choose where Pulse stores its index database',
+    '默认覆盖全部本地 NTFS 固定盘和移动盘。服务器文件夹可稍后在 Pulse 设置中按当前 Windows 用户凭据添加。',
+    False, '');
+  IndexDirPage.Add('索引目录 / Index directory:');
+  IndexDirPage.Values[0] := ExpandConstant('{commonappdata}\Pulse\Index');
+end;
+
+function GetIndexPath(Param: String): String;
+begin
+  Result := IndexDirPage.Values[0];
+end;
+
 // Stop the index service before replacing files on upgrade; Pulse.Index.exe
 // is locked while the service runs. Failure is fine (service not installed).
 function PrepareToInstall(var NeedsRestart: Boolean): String;

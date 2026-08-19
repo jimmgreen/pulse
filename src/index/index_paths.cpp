@@ -1,17 +1,33 @@
 #include "index_paths.h"
+#include "index_config.h"
+#include <atomic>
 #include <shlobj.h>
 #include <windows.h>
 
 namespace pulse::index {
 
+namespace {
+std::atomic<bool> g_machine_scope{false};
+}
+
+void SetMachineIndexScope(bool machine_scope) {
+    g_machine_scope.store(machine_scope);
+}
+
+bool MachineIndexScope() {
+    return g_machine_scope.load();
+}
+
 std::wstring DataDir() {
-    wchar_t path[MAX_PATH] = {};
-    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, path))) {
-        std::wstring dir = std::wstring(path) + L"\\Pulse";
-        CreateDirectoryW(dir.c_str(), nullptr);
-        return dir;
+    if (MachineIndexScope()) {
+        IndexConfig config;
+        if (LoadMachineConfig(config, nullptr) && !config.index_path.empty()) {
+            CreateDirectoryW(config.index_path.c_str(), nullptr);
+            return config.index_path;
+        }
+        return MachineIndexRoot();
     }
-    return L"";
+    return UserIndexRoot();
 }
 
 std::wstring CacheFilePath() {

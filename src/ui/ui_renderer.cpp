@@ -1226,7 +1226,7 @@ struct SettingsLayout {
     D2D1_RECT_F body{};
     D2D1_RECT_F nav{};
     D2D1_RECT_F content{};
-    D2D1_RECT_F nav_row[2]{};
+    D2D1_RECT_F nav_row[3]{};
     D2D1_RECT_F effect_card{};
     D2D1_RECT_F effect_row[kWindowEffectCount]{};
     D2D1_RECT_F density_card{};
@@ -1236,6 +1236,14 @@ struct SettingsLayout {
     D2D1_RECT_F wallpaper_choose{};
     D2D1_RECT_F wallpaper_clear{};
     D2D1_RECT_F startup_row[2]{};
+    D2D1_RECT_F index_info{};
+    D2D1_RECT_F index_status{};
+    D2D1_RECT_F index_path{};
+    D2D1_RECT_F index_action[3]{};
+    std::vector<D2D1_RECT_F> index_volume_rows;
+    D2D1_RECT_F network_action[2]{};
+    std::vector<D2D1_RECT_F> network_rows;
+    std::vector<D2D1_RECT_F> network_remove;
     float content_origin = 0.0f;
     float content_h = 0.0f;
 };
@@ -1253,7 +1261,7 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
     l.content = D2D1::RectF(l.nav.right, l.body.top, l.body.right, l.body.bottom);
     const float row_h = 40.0f * scale;
     const float nav_pad = 12.0f * scale;
-    for (int i = 0; i < 2; ++i) {
+    for (int i = 0; i < 3; ++i) {
         const float y = l.nav.top + nav_pad + 8.0f * scale + i * (row_h + 4.0f * scale);
         l.nav_row[i] = D2D1::RectF(l.nav.left + 8.0f * scale, y,
                                    l.nav.right - 8.0f * scale, y + row_h);
@@ -1306,11 +1314,65 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
         y += 22.0f * scale;
         y += 8.0f * scale;
         const float startup_h = 56.0f * scale;
-        for (int i = 0; i < 2; ++i) {
+        for (int i = 0; i < 3; ++i) {
             l.startup_row[i] = D2D1::RectF(card_left, y + static_cast<float>(i) * startup_h,
                                            card_right, y + static_cast<float>(i + 1) * startup_h);
         }
         y += startup_h * 2 + 24.0f * scale;
+    } else if (vm.settings_page == 1) {
+        const float card_left = l.content.left + pad;
+        const float card_right = l.content.right - pad;
+        l.index_info = D2D1::RectF(card_left, y, card_right, y + 58.0f * scale);
+        y += 70.0f * scale;
+        l.index_status = D2D1::RectF(card_left, y, card_right, y + 82.0f * scale);
+        y += 94.0f * scale;
+        const float action_w = 92.0f * scale;
+        const bool compact_actions = card_right - card_left < 650.0f * scale;
+        const float path_h = compact_actions ? 116.0f * scale : 64.0f * scale;
+        l.index_path = D2D1::RectF(card_left, y, card_right, y + path_h);
+        if (compact_actions) {
+            const float gap = 8.0f * scale;
+            const float available = card_right - card_left - 32.0f * scale - gap * 2.0f;
+            const float width = available / 3.0f;
+            for (int i = 0; i < 3; ++i) {
+                const float left = card_left + 16.0f * scale + i * (width + gap);
+                l.index_action[i] = D2D1::RectF(left, y + 68.0f * scale,
+                                                left + width, y + 100.0f * scale);
+            }
+        } else {
+            for (int i = 0; i < 3; ++i) {
+                const float right = card_right - 12.0f * scale - i * (action_w + 8.0f * scale);
+                l.index_action[i] = D2D1::RectF(right - action_w, y + 16.0f * scale,
+                                                right, y + 48.0f * scale);
+            }
+        }
+        y += path_h + 44.0f * scale;
+        l.index_volume_rows.reserve(vm.settings_index_volumes.size());
+        for (size_t i = 0; i < vm.settings_index_volumes.size(); ++i) {
+            l.index_volume_rows.push_back(D2D1::RectF(card_left, y, card_right,
+                                                       y + 58.0f * scale));
+            y += 58.0f * scale;
+        }
+        y += 44.0f * scale;
+        const float network_button_w = 104.0f * scale;
+        for (int i = 0; i < 2; ++i) {
+            const float right = card_right - i * (network_button_w + 8.0f * scale);
+            l.network_action[i] = D2D1::RectF(right - network_button_w, y - 36.0f * scale,
+                                              right, y - 4.0f * scale);
+        }
+        l.network_rows.reserve(vm.settings_network_roots.size());
+        l.network_remove.reserve(vm.settings_network_roots.size());
+        for (size_t i = 0; i < vm.settings_network_roots.size(); ++i) {
+            const D2D1_RECT_F row = D2D1::RectF(card_left, y, card_right, y + 64.0f * scale);
+            l.network_rows.push_back(row);
+            l.network_remove.push_back(D2D1::RectF(row.right - 82.0f * scale,
+                                                   row.top + 16.0f * scale,
+                                                   row.right - 12.0f * scale,
+                                                   row.top + 48.0f * scale));
+            y += 64.0f * scale;
+        }
+        if (vm.settings_network_roots.empty()) y += 44.0f * scale;
+        y += 24.0f * scale;
     } else {
         int counts[5] = {};
         for (const auto& row : vm.settings_items) {
@@ -3818,9 +3880,9 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
     FillRect(dc, brStrokeDivider_.get(), lay.nav.right - 1.0f, lay.nav.top, 1.0f,
              lay.nav.bottom - lay.nav.top);
 
-    static constexpr const wchar_t* kNav[] = { L"\u901A\u7528", L"\u672C\u5730\u53F3\u952E\u83DC\u5355" };
-    static constexpr const wchar_t* kNavIcon[] = { kIconHome, kIconSettings };
-    for (int i = 0; i < 2; ++i) {
+    static constexpr const wchar_t* kNav[] = { L"\u901A\u7528", L"\u641C\u7D22\u4E0E\u7D22\u5F15", L"\u672C\u5730\u53F3\u952E\u83DC\u5355" };
+    static constexpr const wchar_t* kNavIcon[] = { kIconHome, kIconSearch, kIconSettings };
+    for (int i = 0; i < 3; ++i) {
         const bool active = vm.settings_page == i;
         const bool hovered = IsHovered(vm, HitTestResult::SettingsNav, i);
         const auto& rc = lay.nav_row[i];
@@ -3843,7 +3905,8 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
     const float switch_w = 42.0f * scale_;
     const float switch_h = 32.0f * scale_;
 
-    const wchar_t* page_title = vm.settings_page == 0 ? L"\u901A\u7528" : L"\u672C\u5730\u53F3\u952E\u83DC\u5355";
+    const wchar_t* page_title = vm.settings_page == 0 ? L"\u901A\u7528" :
+        vm.settings_page == 1 ? L"\u641C\u7D22\u4E0E\u7D22\u5F15" : L"\u672C\u5730\u53F3\u952E\u83DC\u5355";
     MakeBrush(dc, theme.text, brText_);
     DrawTextRect(dc, compositor_->HeaderFormat(), brText_.get(), page_title,
                  lay.content.left + pad, origin + pad,
@@ -3994,6 +4057,140 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
         draw_row(lay.startup_row[1], L"\u5173\u95ED\u540E\u7EE7\u7EED\u8FD0\u884C",
                  L"\u70B9\u5173\u95ED\u65F6\u7F29\u5230\u6258\u76D8\uFF0C\u590D\u5236\u7B49\u4EFB\u52A1\u7EE7\u7EED",
                  vm.settings_keep_running, 2);
+    } else if (vm.settings_page == 1) {
+        fluent::InfoBarSpec info;
+        info.bounds = lay.index_info;
+        info.title = vm.settings_index_service ? L"全机索引" : L"当前用户模式";
+        info.message = vm.settings_index_service
+            ? L"本地 NTFS 由系统服务索引；服务器文件夹使用当前 Windows 登录凭据。"
+            : L"本地仅索引用户目录；服务器文件夹使用当前 Windows 登录凭据。安装服务可启用全盘索引。";
+        info.kind = vm.settings_index_error.empty() ? fluent::InfoBarKind::Informational
+                                                     : fluent::InfoBarKind::Error;
+        if (!vm.settings_index_error.empty()) info.message = vm.settings_index_error;
+        info.show_close = false;
+        painter_.DrawInfoBar(info);
+
+        auto draw_card = [&](const D2D1_RECT_F& card) {
+            MakeBrush(dc, theme.fill_input, brFillInput_);
+            FillRoundedRect(dc, brFillInput_.get(), card.left, card.top,
+                            card.right - card.left, card.bottom - card.top, 8.0f * scale_);
+            MakeBrush(dc, theme.stroke_card, brStrokeCard_);
+            dc->DrawRoundedRectangle(D2D1::RoundedRect(card, 8.0f * scale_, 8.0f * scale_),
+                                     brStrokeCard_.get(), 1.0f);
+        };
+        draw_card(lay.index_status);
+        MakeBrush(dc, theme.text, brText_);
+        DrawTextRect(dc, compositor_->TextFormat(), brText_.get(), L"索引状态",
+                     lay.index_status.left + 16.0f * scale_, lay.index_status.top + 12.0f * scale_,
+                     lay.index_status.right - lay.index_status.left - 32.0f * scale_, 22.0f * scale_);
+        MakeBrush(dc, theme.text_secondary, brTextSecondary_);
+        DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(), vm.settings_index_status,
+                     lay.index_status.left + 16.0f * scale_, lay.index_status.top + 40.0f * scale_,
+                     lay.index_status.right - lay.index_status.left - 32.0f * scale_, 24.0f * scale_);
+
+        draw_card(lay.index_path);
+        MakeBrush(dc, theme.text, brText_);
+        DrawTextRect(dc, compositor_->TextFormat(), brText_.get(), L"索引位置",
+                     lay.index_path.left + 16.0f * scale_, lay.index_path.top + 8.0f * scale_,
+                     100.0f * scale_, 22.0f * scale_);
+        MakeBrush(dc, theme.text_secondary, brTextSecondary_);
+        DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(), vm.settings_index_path,
+                     lay.index_path.left + 16.0f * scale_, lay.index_path.top + 32.0f * scale_,
+                     lay.index_action[0].top > lay.index_path.top + 60.0f * scale_
+                         ? lay.index_path.right - lay.index_path.left - 32.0f * scale_
+                         : lay.index_action[2].left - lay.index_path.left - 28.0f * scale_,
+                     20.0f * scale_);
+        const wchar_t* actions[] = { L"重建", L"打开位置",
+                                     vm.settings_index_service ? L"更改位置" : L"安装服务" };
+        for (int i = 0; i < 3; ++i) {
+            fluent::ControlState st{};
+            st.enabled = i == 2 || vm.settings_index_service;
+            st.hovered = st.enabled && IsHovered(vm, HitTestResult::SettingsIndexAction, i);
+            painter_.DrawButton({ lay.index_action[i], actions[i], {},
+                                  i == 2 ? fluent::ButtonKind::Primary : fluent::ButtonKind::Standard,
+                                  st });
+        }
+
+        MakeBrush(dc, theme.text_secondary, brTextSecondary_);
+        const float header_y = lay.index_volume_rows.empty()
+            ? lay.index_path.bottom + 18.0f * scale_
+            : lay.index_volume_rows.front().top - 30.0f * scale_;
+        DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(), L"本地磁盘",
+                     lay.content.left + pad, header_y, 200.0f * scale_, 22.0f * scale_);
+        for (size_t i = 0; i < vm.settings_index_volumes.size() && i < lay.index_volume_rows.size(); ++i) {
+            const auto& volume = vm.settings_index_volumes[i];
+            const auto& row = lay.index_volume_rows[i];
+            if (IsHovered(vm, HitTestResult::SettingsIndexVolume, static_cast<int>(i))) {
+                MakeBrush(dc, theme.fill_hover, brFillHover_);
+                FillRoundedRect(dc, brFillHover_.get(), row.left, row.top,
+                                row.right - row.left, row.bottom - row.top, 6.0f * scale_);
+            }
+            fluent::ControlState check{};
+            check.checked = volume.checked;
+            check.enabled = volume.enabled && !volume.pending;
+            check.hovered = IsHovered(vm, HitTestResult::SettingsIndexVolume, static_cast<int>(i));
+            painter_.DrawCheckBox(D2D1::RectF(row.left + 12.0f * scale_, row.top,
+                                              row.left + 44.0f * scale_, row.bottom), L"", check);
+            MakeBrush(dc, check.enabled ? theme.text : theme.text_disabled, brText_);
+            DrawTextRect(dc, compositor_->TextFormat(), brText_.get(), volume.title,
+                         row.left + 48.0f * scale_, row.top + 6.0f * scale_,
+                         row.right - row.left - 200.0f * scale_, 22.0f * scale_);
+            MakeBrush(dc, theme.text_secondary, brTextSecondary_);
+            DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(), volume.detail,
+                         row.left + 48.0f * scale_, row.top + 30.0f * scale_,
+                         row.right - row.left - 200.0f * scale_, 18.0f * scale_);
+            DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(), volume.state,
+                         row.right - 144.0f * scale_, row.top,
+                         128.0f * scale_, row.bottom - row.top);
+            MakeBrush(dc, theme.stroke_divider, brStrokeDivider_);
+            FillRect(dc, brStrokeDivider_.get(), row.left + 12.0f * scale_, row.bottom - 1.0f,
+                     row.right - row.left - 24.0f * scale_, 1.0f);
+        }
+
+        const float network_header_y = lay.network_action[0].top + 5.0f * scale_;
+        MakeBrush(dc, theme.text_secondary, brTextSecondary_);
+        DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(), L"服务器文件夹",
+                     lay.content.left + pad, network_header_y, 160.0f * scale_, 22.0f * scale_);
+        const wchar_t* network_actions[] = { L"添加文件夹", L"重新扫描" };
+        for (int i = 0; i < 2; ++i) {
+            fluent::ControlState state{};
+            state.enabled = i == 0 || !vm.settings_network_roots.empty();
+            state.hovered = state.enabled && IsHovered(vm, HitTestResult::SettingsNetworkAction, i);
+            painter_.DrawButton({ lay.network_action[i], network_actions[i], {},
+                                  i == 0 ? fluent::ButtonKind::Primary : fluent::ButtonKind::Standard,
+                                  state });
+        }
+        if (vm.settings_network_roots.empty()) {
+            const float empty_y = lay.network_action[0].bottom + 10.0f * scale_;
+            DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(),
+                         L"尚未添加。可索引服务器共享中所选文件夹下的全部文件。",
+                         lay.content.left + pad, empty_y,
+                         lay.content.right - lay.content.left - pad * 2, 22.0f * scale_);
+        }
+        for (size_t i = 0; i < vm.settings_network_roots.size() && i < lay.network_rows.size(); ++i) {
+            const auto& network = vm.settings_network_roots[i];
+            const auto& row = lay.network_rows[i];
+            draw_card(row);
+            MakeBrush(dc, theme.text, brText_);
+            DrawTextRect(dc, compositor_->TextFormat(), brText_.get(), network.path,
+                         row.left + 16.0f * scale_, row.top + 8.0f * scale_,
+                         (std::max)(40.0f * scale_, row.right - row.left - 116.0f * scale_),
+                         22.0f * scale_);
+            MakeBrush(dc, network.online ? theme.text_secondary : theme.text_disabled,
+                      brTextSecondary_);
+            const std::wstring detail = network.detail.empty() ? network.state
+                                                               : network.state + L" · " + network.detail;
+            DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(), detail,
+                         row.left + 16.0f * scale_, row.top + 34.0f * scale_,
+                         (std::max)(40.0f * scale_, row.right - row.left - 116.0f * scale_),
+                         18.0f * scale_);
+            fluent::ControlState remove{};
+            remove.enabled = true;
+            remove.hovered = remove.enabled &&
+                IsHovered(vm, HitTestResult::SettingsNetworkRemove, static_cast<int>(i));
+            painter_.DrawButton({ lay.network_remove[i], L"移除", {},
+                                  fluent::ButtonKind::Standard, remove });
+        }
     } else {
         float y = origin + pad + 44.0f * scale_;
         MakeBrush(dc, theme.text_secondary, brTextSecondary_);
@@ -4361,7 +4558,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             r.region = HitTestResult::StatusBar;
             return r;
         }
-        for (int i = 0; i < 2; ++i) {
+        for (int i = 0; i < 3; ++i) {
             if (ContainsPt(lay.nav_row[i], x, y)) {
                 r.region = HitTestResult::SettingsNav;
                 r.index = i;
@@ -4398,6 +4595,35 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                     if (ContainsPt(lay.startup_row[i], x, y)) {
                         r.region = HitTestResult::SettingsToggle;
                         r.index = i + 1;
+                        return r;
+                    }
+                }
+            } else if (vm.settings_page == 1) {
+                for (int i = 0; i < 3; ++i) {
+                    if (ContainsPt(lay.index_action[i], x, y)) {
+                        r.region = HitTestResult::SettingsIndexAction;
+                        r.index = i;
+                        return r;
+                    }
+                }
+                for (size_t i = 0; i < lay.index_volume_rows.size(); ++i) {
+                    if (ContainsPt(lay.index_volume_rows[i], x, y)) {
+                        r.region = HitTestResult::SettingsIndexVolume;
+                        r.index = static_cast<int>(i);
+                        return r;
+                    }
+                }
+                for (int i = 0; i < 2; ++i) {
+                    if (ContainsPt(lay.network_action[i], x, y)) {
+                        r.region = HitTestResult::SettingsNetworkAction;
+                        r.index = i;
+                        return r;
+                    }
+                }
+                for (size_t i = 0; i < lay.network_remove.size(); ++i) {
+                    if (ContainsPt(lay.network_remove[i], x, y)) {
+                        r.region = HitTestResult::SettingsNetworkRemove;
+                        r.index = static_cast<int>(i);
                         return r;
                     }
                 }

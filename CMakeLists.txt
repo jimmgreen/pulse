@@ -18,6 +18,13 @@ add_executable(pulse_bench_shell src/bench/measure_shell.cpp)
 target_link_libraries(pulse_bench_shell PRIVATE ole32 shell32 uuid comctl32)
 add_executable(pulse_bench_mft src/bench/measure_mft.cpp)
 
+add_executable(pulse_index_test
+    src/bench/index_test_main.cpp
+    src/index/index_config.cpp
+    src/index/index_query.cpp
+    src/index/network_index.cpp)
+target_link_libraries(pulse_index_test PRIVATE shell32 mpr)
+
 # ---- Stage 0 visual/perf sample: D2D virtual list (GUI) ----
 add_executable(pulse_d2d_list WIN32 src/bench/d2d_list.cpp)
 target_link_libraries(pulse_d2d_list PRIVATE d3d11 d2d1 dwrite dxgi dcomp dwmapi shcore)
@@ -36,12 +43,12 @@ file(GLOB_RECURSE PULSE_APP_SOURCES CONFIGURE_DEPENDS
     src/app/*.cpp src/ui/*.cpp src/fs/*.cpp src/ops/*.cpp src/ipc/*.cpp src/index/*.cpp)
 list(FILTER PULSE_APP_SOURCES EXCLUDE REGEX "index_host\\.cpp$")
 
-# The in-process index engine exists only for the legacy headless self-test.
-# Production always queries Pulse.Index.exe through index_client.cpp.
+# The local-volume engine runs in Pulse.Index.exe. Production keeps only the
+# lightweight query parser and per-user network index inside pulse.exe.
 option(PULSE_WITH_SELFTEST "Embed the legacy --selftest suite in Pulse.exe" OFF)
 if(NOT PULSE_WITH_SELFTEST)
     list(FILTER PULSE_APP_SOURCES EXCLUDE REGEX "selftest_1b2\\.cpp$")
-    list(FILTER PULSE_APP_SOURCES EXCLUDE REGEX "index_(engine|mft|paths|query)\\.cpp$")
+    list(FILTER PULSE_APP_SOURCES EXCLUDE REGEX "index_(engine|mft|paths)\\.cpp$")
 endif()
 if(PULSE_APP_SOURCES)
     add_executable(pulse WIN32 ${PULSE_APP_SOURCES})
@@ -51,13 +58,14 @@ if(PULSE_APP_SOURCES)
     target_sources(pulse PRIVATE src/app/pulse.rc)
     target_link_options(pulse PRIVATE /MANIFEST:NO)
     target_link_libraries(pulse PRIVATE
-        d3d11 d2d1 dwrite dxgi dcomp dwmapi shcore ole32 shell32 uuid comctl32 advapi32 shlwapi version windowscodecs gdi32 netapi32)
+        d3d11 d2d1 dwrite dxgi dcomp dwmapi shcore ole32 shell32 uuid comctl32 advapi32 shlwapi version windowscodecs gdi32 netapi32 mpr)
 endif()
 
 # ---- Pulse.Index.exe: index + query host (session helper or Windows service) ----
 add_executable(pulse_index WIN32
     src/index/index_host.cpp
     src/index/index_engine.cpp
+    src/index/index_config.cpp
     src/index/index_query.cpp
     src/index/index_mft.cpp
     src/index/index_paths.cpp

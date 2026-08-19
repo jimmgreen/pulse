@@ -513,10 +513,15 @@ void TestAppPrefsAndSettingsPath() {
     Check(ParsePulsePath(L"pulse:settings:context", &kind, &rest) &&
           kind == L"settings" && rest == L"context",
           L"settings: parse context path");
+    Check(ParsePulsePath(L"pulse:settings:index", &kind, &rest) &&
+          kind == L"settings" && rest == L"index",
+          L"settings: parse index path");
     Check(MakeSettingsPath() == L"pulse:settings:general",
           L"settings: default page is general");
     Check(MakeSettingsPath(L"context") == L"pulse:settings:context",
           L"settings: context page path");
+    Check(MakeSettingsPath(L"index") == L"pulse:settings:index",
+          L"settings: index page path");
     Check(fs::IsVirtualPath(L"pulse:settings:general"),
           L"settings: pulse:settings is virtual");
 
@@ -612,7 +617,12 @@ void TestDataObject() {
 void TestClipboardText() {
     Check(ops::WriteClipboardText(L"C:\\A\\B"), L"clipboard: write text");
     bool ok = false;
-    if (OpenClipboard(nullptr)) {
+    bool opened = false;
+    for (int attempt = 0; attempt < 20 && !opened; ++attempt) {
+        opened = OpenClipboard(nullptr) != FALSE;
+        if (!opened) Sleep(5);
+    }
+    if (opened) {
         if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
             if (auto* p = static_cast<const wchar_t*>(GlobalLock(h))) {
                 ok = (p == std::wstring(L"C:\\A\\B"));

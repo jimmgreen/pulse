@@ -23,6 +23,16 @@ public:
     void Stop();
 
     std::wstring Status() const;
+    std::wstring IndexPath() const;
+    bool ServiceMode() const;
+    std::vector<VolumeInfo> Volumes() const;
+    void RefreshVolumesAsync();
+    bool RequestConfigureVolume(const std::wstring& volume_id, bool enabled);
+    bool RequestRebuild();
+    static bool ConfigureVolumeElevated(const std::wstring& volume_id, bool enabled);
+    static bool RebuildElevated();
+    static bool InstallServiceElevated();
+    static bool ConfigureIndexPathElevated(const std::wstring& path);
 
     // Fire-and-forget. Reply arrives as search_msg (wParam = request id).
     void SearchAsync(const Query& q, uint32_t id);
@@ -42,6 +52,7 @@ private:
     bool ReadMsg(ipc::MsgHeader& hdr, std::vector<uint8_t>& payload);
     void HandleStatus(const uint8_t* p, size_t n);
     void HandleSearch(uint32_t id, const uint8_t* p, size_t n);
+    void HandleVolumes(const uint8_t* p, size_t n);
     void FlushPendingSearch();
 
     HWND notify_ = nullptr;
@@ -59,6 +70,9 @@ private:
     std::atomic<uint32_t> latest_search_id_{0};
     mutable std::mutex mu_;
     std::wstring status_ = L"索引未连接";
+    std::wstring index_path_;
+    bool service_mode_ = false;
+    std::vector<VolumeInfo> volumes_;
     uint32_t result_id_ = 0;
     SearchResult result_;
     std::mutex pipe_mu_;
@@ -66,6 +80,7 @@ private:
     Query pending_q_;
     uint32_t pending_id_ = 0;
     bool have_pending_ = false;
+    bool volume_refresh_requested_ = true;
     std::condition_variable pending_cv_;
 };
 

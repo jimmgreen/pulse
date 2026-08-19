@@ -22,6 +22,7 @@
 #endif
 #include "resource.h"
 #include "../index/index_client.h"
+#include "../index/network_index.h"
 #include "../ops/ops_manager.h"
 #include "../ops/clipboard.h"
 #include "../ipc/ctx_menu_util.h"
@@ -75,7 +76,10 @@ constexpr UINT WM_TAG_ADS_DISCOVERED = WM_APP + 44;
 constexpr UINT WM_SHELLCTX_ITEMS = WM_APP + 45;  // std::vector<ops::ShellMenuItem>*
 constexpr UINT WM_SHELL_VERBS = WM_APP + 46;     // ShellVerbsResult*
 constexpr UINT WM_DETAILS_META = WM_APP + 47;    // DetailsMetaResult*
+constexpr UINT WM_INDEX_CONFIG_RESULT = WM_APP + 48;
 constexpr UINT WM_TRAYICON = WM_APP + 50;
+constexpr UINT WM_NETWORK_INDEX_NOTIFY = WM_APP + 51;
+constexpr UINT WM_NETWORK_INDEX_SEARCH = WM_APP + 52;
 constexpr UINT kTimerUi = 1;
 
 struct TagAdsDiscovery {
@@ -128,6 +132,9 @@ struct AppState {
     app::AppPrefs appPrefs;
     int settingsPage = 0;
     float settingsScroll = 0.0f;
+    std::unordered_set<std::wstring> indexConfigPending;
+    std::wstring indexConfigError;
+    bool indexServiceInstalled = false;
     bool trayIconAdded = false;
     std::unordered_set<std::wstring> tagFallbackVolumes;
     std::unordered_set<std::wstring> tagAdsDiscoveryQueued;
@@ -138,6 +145,15 @@ struct AppState {
     int tagAdsLastFirstRow = -1;
     int tagAdsLastLastRow = -1;
     index::IndexClient index;
+    index::NetworkIndex networkIndex;
+    struct PendingIndexSearch {
+        index::Query query;
+        index::SearchResult local;
+        index::SearchResult network;
+        bool local_ready = false;
+        bool network_ready = false;
+    };
+    std::unordered_map<uint32_t, PendingIndexSearch> pendingIndexSearches;
     std::vector<index::Hit> paletteHits;
     size_t paletteTotal = 0;
     std::wstring paletteQuery;
@@ -439,6 +455,12 @@ struct DetailsMetaResult {
     app::DetailsMeta meta;
 };
 
+struct IndexConfigResult {
+    std::wstring volume_id;
+    bool ok = false;
+    bool rebuild = false;
+};
+
 static AppState* GetAppState(HWND hwnd) {
     return reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
 }
@@ -455,6 +477,7 @@ static void PrefetchDetailsMeta(HWND hwnd, const std::wstring& path) {
 
 static void NewTab(AppState& s, const std::wstring& path);
 static void OpenSettingsTab(AppState& s, int page);
+static int SettingsPageFromName(std::wstring_view name);
 static void EnsureTrayIcon(AppState& s, bool show);
 static bool IsSettingsTab(const app::Tab* tab);
 static void ApplyAppWindowChrome(AppState& s);
@@ -594,11 +617,60 @@ static void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
         std::wstring kind, rest;
         if (app::ParsePulsePath(tab->current_path, &kind, &rest) && kind == L"settings") {
             vm.settings_open = true;
-            vm.settings_page = (rest == L"context") ? 1 : 0;
+            vm.settings_page = SettingsPageFromName(rest);
             vm.settings_scroll = s.settingsScroll;
             vm.settings_launch_on_startup = s.appPrefs.launch_on_startup;
             vm.settings_keep_running = s.appPrefs.keep_running_on_close;
             vm.settings_row_height = s.appPrefs.row_height;
+            vm.settings_index_service = s.index.ServiceMode();
+            vm.settings_index_installed = s.indexServiceInstalled;
+            vm.settings_index_status = s.index.Status();
+            vm.settings_index_path = s.index.IndexPath();
+            vm.settings_index_error = s.indexConfigError;
+            vm.settings_index_volumes.clear();
+            vm.settings_network_roots.clear();
+            auto index_volumes = s.index.Volumes();
+            if (s.shot.active && vm.settings_page == 1 && index_volumes.empty()) {
+                index::IndexConfig defaults;
+                index_volumes = index::EnumerateLocalVolumes(defaults);
+                vm.settings_index_service = true;
+                vm.settings_index_path = L"C:\\ProgramData\\Pulse\\Index";
+            }
+            for (const auto& volume : index_volumes) {
+                ui::IndexVolumeRowView row;
+                row.id = volume.id;
+                row.title = volume.label.empty() ? L"本地磁盘" : volume.label;
+                if (!volume.mount_point.empty()) {
+                    row.title += L" (" + volume.mount_point.substr(0, 2) + L")";
+                }
+                row.detail = volume.file_system.empty() ? L"NTFS" : volume.file_system;
+                row.detail += volume.kind == index::VolumeKind::Removable
+                    ? L" · 移动磁盘" : L" · 固定磁盘";
+                if (volume.indexed_items)
+                    row.detail += L" · " + std::to_wstring(volume.indexed_items) + L" 项";
+                row.state = volume.state;
+                row.checked = volume.enabled;
+                row.enabled = vm.settings_index_service && volume.supported;
+                row.pending = s.indexConfigPending.contains(volume.id);
+                row.progress = volume.progress;
+                vm.settings_index_volumes.push_back(std::move(row));
+            }
+            for (const auto& root : s.networkIndex.Roots()) {
+                ui::NetworkRootRowView row;
+                row.path = root.path;
+                row.state = root.state;
+                row.detail = root.error;
+                row.online = root.online;
+                row.building = root.building;
+                vm.settings_network_roots.push_back(std::move(row));
+            }
+            if (s.shot.active && vm.settings_page == 1 && vm.settings_network_roots.empty()) {
+                ui::NetworkRootRowView row;
+                row.path = L"\\\\fileserver\\projects\\设计资料";
+                row.state = L"已同步 · 128,420 项";
+                row.online = true;
+                vm.settings_network_roots.push_back(std::move(row));
+            }
             static constexpr ipc::CtxMenuGroup kGroups[] = {
                 ipc::CtxMenuGroup::Software, ipc::CtxMenuGroup::OpenWith,
                 ipc::CtxMenuGroup::Share, ipc::CtxMenuGroup::System, ipc::CtxMenuGroup::Print
@@ -1943,7 +2015,7 @@ static void DispatchMenuCommand(AppState& s, int cmd) {
         OpenSettingsTab(s, 0);
         break;
     case app::CmdSettingsContextMenu:
-        OpenSettingsTab(s, 1);
+        OpenSettingsTab(s, 2);
         break;
     default:
         if (cmd >= app::CmdIndexBase) {
@@ -2990,6 +3062,22 @@ static index::Query MakeSearchPageQuery(const app::Tab& tab, const std::wstring&
     return q;
 }
 
+static void DispatchIndexSearch(AppState& s, const index::Query& query, uint32_t id) {
+    // Both providers return candidates from the beginning of their own ordering.
+    // The UI then merges, globally sorts and applies the requested page offset.
+    index::Query provider_query = query;
+    provider_query.offset = 0;
+    provider_query.limit = (std::min)(index::kSearchPageCap,
+        query.offset > index::kSearchPageCap - (std::min)(query.limit, index::kSearchPageCap)
+            ? index::kSearchPageCap : query.offset + query.limit);
+    s.pendingIndexSearches.clear();
+    AppState::PendingIndexSearch pending;
+    pending.query = query;
+    s.pendingIndexSearches.emplace(id, std::move(pending));
+    s.index.SearchAsync(provider_query, id);
+    s.networkIndex.SearchAsync(provider_query, id);
+}
+
 static void RequestSearchPage(AppState& s, app::Tab& tab, const std::wstring& rest,
                               bool reset) {
     const size_t offset = reset ? 0 : tab.search_next_offset;
@@ -3006,7 +3094,7 @@ static void RequestSearchPage(AppState& s, app::Tab& tab, const std::wstring& re
     const uint32_t id = ++s.nextIndexReq;
     tab.pending_generation = id;
     tab.pending_search_offset = offset;
-    s.index.SearchAsync(MakeSearchPageQuery(tab, rest, offset), id);
+    DispatchIndexSearch(s, MakeSearchPageQuery(tab, rest, offset), id);
 }
 
 static void ApplySearchHits(app::Tab& tab, const std::wstring& rest,
@@ -3046,6 +3134,49 @@ static void ApplySearchHits(app::Tab& tab, const std::wstring& rest,
     tab.search_loading_more = false;
     tab.pending_generation = 0;
     if (offset == 0 && tab.snapshot && !tab.snapshot->empty()) tab.SelectOnly(0);
+}
+
+static void DeliverIndexSearchResult(AppState& s, uint32_t id,
+                                     index::SearchResult&& result) {
+    if (id == s.paletteSearchId) {
+        s.paletteHits = std::move(result.hits);
+        s.paletteTotal = result.total;
+        s.paletteSearching = false;
+        if (s.menu && s.menu->IsOpen()) s.menu->RequestFilterRefresh();
+        InvalidateRect(s.hwnd, nullptr, FALSE);
+        return;
+    }
+    for (auto& pane : s.panes) {
+        for (auto& owned : pane->tabs) {
+            app::Tab* tab = owned.get();
+            if (!tab || tab->pending_generation != id) continue;
+            std::wstring kind, rest;
+            app::ParsePulsePath(tab->current_path, &kind, &rest);
+            if (kind != L"search") continue;
+            ApplySearchHits(*tab, rest, std::move(result));
+            InvalidateRect(s.hwnd, nullptr, FALSE);
+            return;
+        }
+    }
+}
+
+static void AcceptIndexProviderResult(AppState& s, uint32_t id,
+                                      index::SearchResult&& result, bool network) {
+    auto found = s.pendingIndexSearches.find(id);
+    if (found == s.pendingIndexSearches.end()) return;
+    auto& pending = found->second;
+    if (network) {
+        pending.network = std::move(result);
+        pending.network_ready = true;
+    } else {
+        pending.local = std::move(result);
+        pending.local_ready = true;
+    }
+    if (!pending.local_ready || !pending.network_ready) return;
+    index::SearchResult merged = index::MergeSearchResults(
+        pending.query, std::move(pending.local), std::move(pending.network));
+    s.pendingIndexSearches.erase(found);
+    DeliverIndexSearchResult(s, id, std::move(merged));
 }
 
 static void MaybePrefetchSearchPage(AppState& s) {
@@ -3104,7 +3235,7 @@ static void LoadVirtualView(AppState& s, app::Tab& tab, const std::wstring& path
         tab.virtual_title = L"设置";
         tab.loading = false;
         tab.SetSnapshot(std::make_shared<std::vector<fs::DirEntry>>());
-        s.settingsPage = (rest == L"context") ? 1 : 0;
+        s.settingsPage = SettingsPageFromName(rest);
         s.settingsScroll = 0.0f;
         return;
     }
@@ -3937,7 +4068,7 @@ static void ShowOmnibar(AppState& s, OmnibarMode mode) {
                 q.limit = 24;
                 q.rank = true;
                 s.paletteSearchId = ++s.nextIndexReq;
-                s.index.SearchAsync(q, s.paletteSearchId);
+                DispatchIndexSearch(s, q, s.paletteSearchId);
             }
         } else {
             s.paletteIssuedNeedle.clear();
@@ -4069,6 +4200,18 @@ static bool IsSettingsTab(const app::Tab* tab) {
     return app::ParsePulsePath(tab->current_path, &kind, nullptr) && kind == L"settings";
 }
 
+static int SettingsPageFromName(std::wstring_view name) {
+    if (name == L"index") return 1;
+    if (name == L"context") return 2;
+    return 0;
+}
+
+static const wchar_t* SettingsPageName(int page) {
+    if (page == 1) return L"index";
+    if (page == 2) return L"context";
+    return L"general";
+}
+
 static std::wstring NewTabPath(const AppState& s) {
     const app::Tab* tab = s.pane ? s.pane->ActiveTab() : nullptr;
     if (!tab || IsSettingsTab(tab) || tab->current_path.empty())
@@ -4084,8 +4227,9 @@ static void NewTab(AppState& s, const std::wstring& path) {
 }
 
 static void OpenSettingsTab(AppState& s, int page) {
-    const std::wstring path = app::MakeSettingsPath(page == 1 ? L"context" : L"general");
+    const std::wstring path = app::MakeSettingsPath(SettingsPageName(page));
     s.settingsPage = page;
+    if (page == 1) s.index.RefreshVolumesAsync();
     if (s.pane) {
         for (size_t i = 0; i < s.pane->tabs.size(); ++i) {
             if (!IsSettingsTab(s.pane->tabs[i].get())) continue;
@@ -4096,6 +4240,7 @@ static void OpenSettingsTab(AppState& s, int page) {
                 tab->virtual_title = L"设置";
             }
             s.settingsScroll = 0.0f;
+            if (page == 1) s.index.RefreshVolumesAsync();
             InvalidateRect(s.hwnd, nullptr, FALSE);
             return;
         }
@@ -4173,6 +4318,25 @@ static bool PickImageFile(HWND owner, std::wstring& path) {
     return !path.empty();
 }
 
+static bool PickFolder(HWND owner, std::wstring& path,
+                       const wchar_t* title = L"选择索引存储位置") {
+    ui::ComPtr<IFileOpenDialog> dialog;
+    if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&dialog)))) return false;
+    dialog->SetTitle(title);
+    FILEOPENDIALOGOPTIONS options = 0;
+    dialog->GetOptions(&options);
+    dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+    if (FAILED(dialog->Show(owner))) return false;
+    ui::ComPtr<IShellItem> item;
+    if (FAILED(dialog->GetResult(&item))) return false;
+    PWSTR folder = nullptr;
+    if (FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &folder)) || !folder) return false;
+    path.assign(folder);
+    CoTaskMemFree(folder);
+    return !path.empty();
+}
+
 static void HandleSettingsEffect(AppState& s, int index) {
     if (index < 0 || index >= ui::kWindowEffectCount) return;
     const auto effect = static_cast<ui::WindowEffect>(index);
@@ -4241,6 +4405,76 @@ static void HandleSettingsToggle(AppState& s, int index) {
         s.ctxMenuPrefs.SetItemEnabled(seen.key, !on);
         s.ctxMenuPrefs.Save();
     }
+}
+
+static void StartIndexVolumeConfig(AppState& s, int index) {
+    const auto volumes = s.index.Volumes();
+    if (index < 0 || index >= static_cast<int>(volumes.size())) return;
+    const auto& volume = volumes[static_cast<size_t>(index)];
+    if (!s.index.ServiceMode() || !volume.supported ||
+        s.indexConfigPending.contains(volume.id)) return;
+    const std::wstring id = volume.id;
+    const bool enable = !volume.enabled;
+    s.indexConfigPending.insert(id);
+    s.indexConfigError.clear();
+    const HWND hwnd = s.hwnd;
+    std::thread([hwnd, id, enable] {
+        auto* result = new IndexConfigResult;
+        result->volume_id = id;
+        result->ok = index::IndexClient::ConfigureVolumeElevated(id, enable);
+        if (!PostMessageW(hwnd, WM_INDEX_CONFIG_RESULT, 0,
+                          reinterpret_cast<LPARAM>(result))) delete result;
+    }).detach();
+}
+
+static void HandleIndexAction(AppState& s, int action) {
+    if (action == 1) {
+        const std::wstring path = s.index.IndexPath();
+        if (!path.empty()) ShellExecuteW(s.hwnd, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        return;
+    }
+    if (action != 0 && action != 2) return;
+    std::wstring new_path;
+    const bool set_path = action == 2 && s.index.ServiceMode();
+    if (set_path && !PickFolder(s.hwnd, new_path)) return;
+    const HWND hwnd = s.hwnd;
+    s.indexConfigError.clear();
+    std::thread([hwnd, action, set_path, new_path] {
+        auto* result = new IndexConfigResult;
+        result->rebuild = action == 0 || set_path;
+        result->ok = action == 0 ? index::IndexClient::RebuildElevated() :
+                     set_path ? index::IndexClient::ConfigureIndexPathElevated(new_path)
+                              : index::IndexClient::InstallServiceElevated();
+        if (!PostMessageW(hwnd, WM_INDEX_CONFIG_RESULT, 0,
+                          reinterpret_cast<LPARAM>(result))) delete result;
+    }).detach();
+}
+
+static void HandleNetworkIndexAction(AppState& s, int action) {
+    if (action == 1) {
+        s.indexConfigError.clear();
+        s.networkIndex.Rebuild();
+        return;
+    }
+    if (action != 0) return;
+    std::wstring path;
+    if (!PickFolder(s.hwnd, path, L"选择要索引的服务器文件夹")) return;
+    std::wstring error;
+    if (!s.networkIndex.AddRoot(path, &error)) {
+        s.indexConfigError = error.empty() ? L"无法添加服务器文件夹。" : error;
+    } else {
+        s.indexConfigError.clear();
+    }
+}
+
+static void RemoveNetworkIndexRoot(AppState& s, int index) {
+    const auto roots = s.networkIndex.Roots();
+    if (index < 0 || index >= static_cast<int>(roots.size())) return;
+    std::wstring error;
+    if (!s.networkIndex.RemoveRoot(roots[static_cast<size_t>(index)].path, &error))
+        s.indexConfigError = error.empty() ? L"无法移除服务器文件夹。" : error;
+    else
+        s.indexConfigError.clear();
 }
 
 static void CloseActiveTab(AppState& s) {
@@ -4988,6 +5222,8 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         ApplyAppWindowChrome(*s);
         if (s->appPrefs.keep_running_on_close) EnsureTrayIcon(*s, true);
         s->index.Start(hwnd, WM_INDEX_NOTIFY, WM_INDEX_SEARCH);
+        s->networkIndex.Start(hwnd, WM_NETWORK_INDEX_NOTIFY, WM_NETWORK_INDEX_SEARCH);
+        s->indexServiceInstalled = s->index.ServiceInstalled();
 
         s->worker.Start([s](app::WorkResult res) { PostWorkerResult(*s, std::move(res)); });
         s->watcher = std::make_unique<fs::DirWatch>();
@@ -6409,6 +6645,18 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         } else if (hit.region == ui::HitTestResult::SettingsWallpaper) {
             HandleSettingsWallpaper(*s, hit.index);
             InvalidateRect(hwnd, nullptr, FALSE);
+        } else if (hit.region == ui::HitTestResult::SettingsIndexVolume) {
+            StartIndexVolumeConfig(*s, hit.index);
+            InvalidateRect(hwnd, nullptr, FALSE);
+        } else if (hit.region == ui::HitTestResult::SettingsIndexAction) {
+            HandleIndexAction(*s, hit.index);
+            InvalidateRect(hwnd, nullptr, FALSE);
+        } else if (hit.region == ui::HitTestResult::SettingsNetworkAction) {
+            HandleNetworkIndexAction(*s, hit.index);
+            InvalidateRect(hwnd, nullptr, FALSE);
+        } else if (hit.region == ui::HitTestResult::SettingsNetworkRemove) {
+            RemoveNetworkIndexRoot(*s, hit.index);
+            InvalidateRect(hwnd, nullptr, FALSE);
         } else if (hit.region == ui::HitTestResult::SettingsRestore) {
             s->ctxMenuPrefs.ResetToDefaults();
             s->ctxMenuPrefs.Save();
@@ -7447,31 +7695,43 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         return 0;
     }
 
+    case WM_NETWORK_INDEX_NOTIFY: {
+        if (s) InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
+
+    case WM_INDEX_CONFIG_RESULT: {
+        auto* result = reinterpret_cast<IndexConfigResult*>(lParam);
+        if (s && result) {
+            if (!result->volume_id.empty()) s->indexConfigPending.erase(result->volume_id);
+            if (result->ok) {
+                s->indexConfigError.clear();
+                s->indexServiceInstalled = s->index.ServiceInstalled();
+                s->index.RefreshVolumesAsync();
+            } else {
+                s->indexConfigError = L"操作未完成。管理员授权可能已取消，或索引服务无法更新配置。";
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        delete result;
+        return 0;
+    }
+
     case WM_INDEX_SEARCH: {
         if (!s) return 0;
         const uint32_t id = static_cast<uint32_t>(wParam);
         index::SearchResult result;
         if (!s->index.TakeResult(id, result)) return 0;
-        if (id == s->paletteSearchId) {
-            s->paletteHits = std::move(result.hits);
-            s->paletteTotal = result.total;
-            s->paletteSearching = false;
-            if (s->menu && s->menu->IsOpen()) s->menu->RequestFilterRefresh();
-            InvalidateRect(hwnd, nullptr, FALSE);
-            return 0;
-        }
-        for (auto& pane : s->panes) {
-            for (auto& owned : pane->tabs) {
-                app::Tab* tab = owned.get();
-                if (!tab || tab->pending_generation != id) continue;
-                std::wstring kind, rest;
-                app::ParsePulsePath(tab->current_path, &kind, &rest);
-                if (kind != L"search") continue;
-                ApplySearchHits(*tab, rest, std::move(result));
-                InvalidateRect(hwnd, nullptr, FALSE);
-                return 0;
-            }
-        }
+        AcceptIndexProviderResult(*s, id, std::move(result), false);
+        return 0;
+    }
+
+    case WM_NETWORK_INDEX_SEARCH: {
+        if (!s) return 0;
+        const uint32_t id = static_cast<uint32_t>(wParam);
+        index::SearchResult result;
+        if (!s->networkIndex.TakeResult(id, result)) return 0;
+        AcceptIndexProviderResult(*s, id, std::move(result), true);
         return 0;
     }
 
@@ -7537,6 +7797,7 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_DESTROY: {
         if (s) {
             if (s->watcher) s->watcher->Stop();
+            s->networkIndex.Stop();
             s->index.Stop();
             s->worker.Stop();
             ShutdownDetailsSizeWalk(*s);

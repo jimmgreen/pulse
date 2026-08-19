@@ -291,6 +291,25 @@ struct SettingsRowView {
     bool on = false;
 };
 
+struct IndexVolumeRowView {
+    std::wstring id;
+    std::wstring title;
+    std::wstring detail;
+    std::wstring state;
+    bool checked = false;
+    bool enabled = false;
+    bool pending = false;
+    uint32_t progress = 0;
+};
+
+struct NetworkRootRowView {
+    std::wstring path;
+    std::wstring detail;
+    std::wstring state;
+    bool online = false;
+    bool building = false;
+};
+
 struct WindowViewModel {
     std::wstring window_title;
     std::vector<TabView> tabs;
@@ -346,13 +365,20 @@ struct WindowViewModel {
     int hover_pane_index = -1;
 
     bool settings_open = false;
-    int settings_page = 0; // 0 general, 1 context menu
+    int settings_page = 0; // 0 general, 1 search/index, 2 context menu
     float settings_scroll = 0.0f;
     bool settings_launch_on_startup = false;
     bool settings_keep_running = false;
     int settings_row_height = 34; // current row-height pref (DIPs) for density radios
     bool settings_group_on[5] = { true, true, false, false, true };
     std::vector<SettingsRowView> settings_items;
+    bool settings_index_service = false;
+    bool settings_index_installed = false;
+    std::wstring settings_index_status;
+    std::wstring settings_index_path;
+    std::wstring settings_index_error;
+    std::vector<IndexVolumeRowView> settings_index_volumes;
+    std::vector<NetworkRootRowView> settings_network_roots;
 };
 
 struct HitTestResult {
@@ -422,7 +448,11 @@ struct HitTestResult {
         SettingsRestore,
         SettingsEffect,
         SettingsWallpaper,
-        SettingsDensity
+        SettingsDensity,
+        SettingsIndexVolume,
+        SettingsIndexAction,
+        SettingsNetworkAction,
+        SettingsNetworkRemove
     } region = None;
     int index = -1;          // tab/row/sidebar item/tray batch/tray item.
     int sub_index = -1;      // tray item inside batch, breadcrumb segment.

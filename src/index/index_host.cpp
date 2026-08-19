@@ -9,6 +9,8 @@
 //   Pulse.Index.exe --uninstall  removes the service
 #include "index_protocol.h"
 #include "index_engine.h"
+#include "index_config.h"
+#include "index_paths.h"
 #include <windows.h>
 #include <sddl.h>
 #include <shellapi.h>
@@ -37,6 +39,7 @@ namespace {
 
 constexpr UINT WM_ENGINE_NOTIFY = WM_APP + 1;
 constexpr UINT WM_QUIT_HOST = WM_APP + 2;
+constexpr DWORD kServiceReloadControl = 128;
 constexpr UINT kIdleTimer = 1;
 constexpr UINT kIdleMs = 15000;
 
@@ -44,6 +47,7 @@ struct Client {
     HANDLE pipe = INVALID_HANDLE_VALUE;
     std::mutex write_mu;
     std::atomic<bool> alive{true};
+    std::atomic<uint32_t> latest_search{0};
 };
 
 struct Host {
@@ -53,6 +57,7 @@ struct Host {
     HANDLE stop = nullptr;
     HANDLE mutex = nullptr;
     std::atomic<bool> running{true};
+    std::atomic<uint32_t> active_queries{0};
     bool as_service = false;
     SERVICE_STATUS_HANDLE svc = nullptr;
     SERVICE_STATUS status{};
@@ -132,6 +137,33 @@ std::vector<uint8_t> SearchPayload(const SearchResult& sr) {
     return w.data();
 }
 
+std::vector<uint8_t> VolumesPayload() {
+    PayloadWriter w;
+    IndexConfig config;
+    if (g.as_service) LoadMachineConfig(config, nullptr);
+    const auto volumes = g.engine.Volumes();
+    w.PutU32(g.as_service ? 1u : 0u);
+    w.PutString(g.as_service ? config.index_path : DataDir());
+    w.PutU32(static_cast<uint32_t>(volumes.size()));
+    for (const auto& volume : volumes) {
+        w.PutString(volume.id);
+        w.PutString(volume.label);
+        w.PutString(volume.mount_point);
+        w.PutString(volume.file_system);
+        w.PutString(volume.state);
+        w.PutString(volume.error);
+        uint32_t flags = volume.online ? 1u : 0u;
+        if (volume.supported) flags |= 2u;
+        if (volume.enabled) flags |= 4u;
+        w.PutU32(flags);
+        w.PutU32(static_cast<uint32_t>(volume.kind));
+        w.PutU32(volume.progress);
+        w.PutU32(static_cast<uint32_t>(volume.indexed_items));
+        w.PutU32(static_cast<uint32_t>(volume.indexed_items >> 32));
+    }
+    return w.data();
+}
+
 Query ParseQuery(const uint8_t* p, size_t n) {
     Query q;
     PayloadReader r(p, n);
@@ -152,6 +184,7 @@ Query ParseQuery(const uint8_t* p, size_t n) {
 void DropClient(const std::shared_ptr<Client>& c) {
     if (!c) return;
     c->alive = false;
+    ++c->latest_search;
     {
         std::lock_guard<std::mutex> lock(c->write_mu);
         if (c->pipe != INVALID_HANDLE_VALUE) {
@@ -177,14 +210,25 @@ void ClientThread(std::shared_ptr<Client> c) {
             break;
         if (hdr.type == REQ_IDX_STATUS) {
             WriteFrame(*c, RSP_IDX_STATUS, hdr.request_id, StatusPayload());
+        } else if (hdr.type == REQ_IDX_VOLUMES) {
+            WriteFrame(*c, RSP_IDX_VOLUMES, hdr.request_id, VolumesPayload());
         } else if (hdr.type == REQ_IDX_SEARCH) {
-            SearchResult sr = g.engine.Search(ParseQuery(payload.data(), payload.size()));
-            auto out = SearchPayload(sr);
-            if (out.size() > kIndexMaxPayload) {
-                sr.hits.clear();
-                out = SearchPayload(sr);
-            }
-            WriteFrame(*c, RSP_IDX_SEARCH, hdr.request_id, out);
+            const uint32_t id = hdr.request_id;
+            c->latest_search.store(id);
+            Query query = ParseQuery(payload.data(), payload.size());
+            ++g.active_queries;
+            std::thread([c, id, query = std::move(query)] {
+                SearchResult sr = g.engine.Search(query, &c->latest_search, id);
+                if (c->alive && c->latest_search.load() == id) {
+                    auto out = SearchPayload(sr);
+                    if (out.size() > kIndexMaxPayload) {
+                        sr.hits.clear();
+                        out = SearchPayload(sr);
+                    }
+                    WriteFrame(*c, RSP_IDX_SEARCH, id, out);
+                }
+                --g.active_queries;
+            }).detach();
         }
     }
     DropClient(c);
@@ -282,6 +326,7 @@ HWND CreateMsgWindow() {
 
 int RunHost(bool as_service) {
     g.as_service = as_service;
+    SetMachineIndexScope(as_service);
     g.running = true;
     g.idle_since = GetTickCount64();
 
@@ -325,6 +370,7 @@ int RunHost(bool as_service) {
         }
     }
     if (g.accept_thread.joinable()) g.accept_thread.join();
+    for (int i = 0; i < 100 && g.active_queries.load() != 0; ++i) Sleep(50);
     g.engine.Stop();
     if (g.mutex) {
         ReleaseMutex(g.mutex);
@@ -340,6 +386,10 @@ int RunHost(bool as_service) {
 }
 
 DWORD WINAPI SvcCtrl(DWORD ctrl, DWORD, LPVOID, LPVOID) {
+    if (ctrl == kServiceReloadControl) {
+        g.engine.RequestRebuild();
+        return NO_ERROR;
+    }
     if (ctrl == SERVICE_CONTROL_STOP || ctrl == SERVICE_CONTROL_SHUTDOWN) {
         SetSvc(SERVICE_STOP_PENDING);
         if (g.hwnd) PostMessageW(g.hwnd, WM_QUIT_HOST, 0, 0);
@@ -360,6 +410,10 @@ std::wstring SelfPath() {
 }
 
 int InstallService() {
+    SetMachineIndexScope(true);
+    IndexConfig config;
+    LoadMachineConfig(config, nullptr);
+    SaveMachineConfig(config, nullptr);
     const std::wstring bin = L"\"" + SelfPath() + L"\" --service";
     SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE);
     if (!scm) return static_cast<int>(GetLastError());
@@ -385,6 +439,53 @@ int InstallService() {
     return 0;
 }
 
+bool IsElevated() {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
+    TOKEN_ELEVATION elevation{};
+    DWORD bytes = 0;
+    const bool elevated = GetTokenInformation(token, TokenElevation, &elevation,
+                                               sizeof(elevation), &bytes) &&
+                          elevation.TokenIsElevated != 0;
+    CloseHandle(token);
+    return elevated;
+}
+
+bool ReloadService() {
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm) return false;
+    SC_HANDLE svc = OpenServiceW(scm, kServiceName, SERVICE_USER_DEFINED_CONTROL);
+    if (!svc) {
+        CloseServiceHandle(scm);
+        return false;
+    }
+    SERVICE_STATUS status{};
+    const bool ok = ControlService(svc, kServiceReloadControl, &status) != FALSE;
+    CloseServiceHandle(svc);
+    CloseServiceHandle(scm);
+    return ok;
+}
+
+int ConfigureCommand(const std::vector<std::wstring>& args) {
+    if (!IsElevated()) return ERROR_ELEVATION_REQUIRED;
+    SetMachineIndexScope(true);
+    std::wstring error;
+    bool ok = false;
+    if (args.size() >= 3 && args[1] == L"--configure-volume") {
+        const bool enabled = args.size() >= 4 && args[3] == L"--enable";
+        const bool disabled = args.size() >= 4 && args[3] == L"--disable";
+        if (!enabled && !disabled) return ERROR_INVALID_PARAMETER;
+        ok = ConfigureVolume(args[2], enabled, &error);
+    } else if (args.size() >= 3 && args[1] == L"--set-index-path") {
+        ok = ConfigureIndexPath(args[2], &error);
+    } else if (args.size() >= 2 && args[1] == L"--rebuild-index") {
+        ok = true;
+    }
+    if (!ok) return ERROR_INVALID_DATA;
+    ReloadService();
+    return 0;
+}
+
 int UninstallService() {
     SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
     if (!scm) return static_cast<int>(GetLastError());
@@ -407,11 +508,18 @@ int UninstallService() {
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    std::wstring a1 = (argv && argc >= 2) ? argv[1] : L"";
+    std::vector<std::wstring> args;
+    if (argv) {
+        args.reserve(static_cast<size_t>(argc));
+        for (int i = 0; i < argc; ++i) args.emplace_back(argv[i]);
+    }
+    std::wstring a1 = args.size() >= 2 ? args[1] : L"";
     if (argv) LocalFree(argv);
 
     if (a1 == L"--install") return InstallService();
     if (a1 == L"--uninstall") return UninstallService();
+    if (a1 == L"--configure-volume" || a1 == L"--set-index-path" ||
+        a1 == L"--rebuild-index") return ConfigureCommand(args);
     if (a1 == L"--service") {
         SERVICE_TABLE_ENTRYW table[] = {
             { const_cast<LPWSTR>(kServiceName), SvcMain },

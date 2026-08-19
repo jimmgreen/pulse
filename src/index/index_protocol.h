@@ -14,8 +14,10 @@ inline constexpr size_t kIndexMaxPayload = 48 * 1024 * 1024;
 enum IndexMsg : uint32_t {
     REQ_IDX_STATUS = 1,
     REQ_IDX_SEARCH = 2,
+    REQ_IDX_VOLUMES = 3,
     RSP_IDX_STATUS = 101,
     RSP_IDX_SEARCH = 102,
+    RSP_IDX_VOLUMES = 103,
 };
 
 inline ipc::MsgHeader MakeIndexHdr(uint32_t type, uint32_t id, uint32_t size) {
