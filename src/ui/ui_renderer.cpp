@@ -461,9 +461,11 @@ namespace {
         return preview_h + 12.0f * scale;
     }
 
+    // Display order: 基本信息 / 标签 / 属性 / 安全 / 其他. Collapsed state is
+    // keyed by def.id, so reordering is safe.
     struct DetailsSectionDef { int id; const wchar_t* label; };
     constexpr DetailsSectionDef kDetailsSections[] = {
-        { 0, L"基本信息" }, { 1, L"属性" }, { 2, L"标签" },
+        { 0, L"基本信息" }, { 2, L"标签" }, { 1, L"属性" },
         { 3, L"安全" }, { 4, L"其他" },
     };
 
@@ -540,14 +542,16 @@ namespace {
                     y += static_cast<float>(rows) * 18.0f * s + 8.0f * s;
                     break;
                 }
-                case 1: // 属性: 只读/隐藏 checkbox rows (24 DIP) + 高级… on row two
-                    out.attr_readonly = D2D1::RectF(x, y, x + w, y + 24.0f * s);
-                    out.attr_hidden = D2D1::RectF(x, y + 24.0f * s, x + w,
-                                                  y + 48.0f * s);
-                    out.attr_advanced = D2D1::RectF(x + w - 64.0f * s, y + 24.0f * s,
-                                                    x + w, y + 48.0f * s);
-                    y += 48.0f * s + 8.0f * s;
+                case 1: { // 属性: 只读 / 隐藏 checkboxes + 高级… on one row
+                    const float advW = 64.0f * s, attrRowH = 24.0f * s, g = 8.0f * s;
+                    const float cbW = (w - advW - g * 2.0f) / 2.0f;
+                    out.attr_readonly = D2D1::RectF(x, y, x + cbW, y + attrRowH);
+                    out.attr_hidden = D2D1::RectF(x + cbW + g, y,
+                                                  x + cbW + g + cbW, y + attrRowH);
+                    out.attr_advanced = D2D1::RectF(x + w - advW, y, x + w, y + attrRowH);
+                    y += attrRowH + 8.0f * s;
                     break;
+                }
                 case 2: { // 标签: 添加标签 row + preset chip grid (wraps)
                     out.tag_add = D2D1::RectF(x, y, x + w, y + 26.0f * s);
                     y += 26.0f * s + 6.0f * s;
@@ -2736,7 +2740,7 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
         };
         rowButton(hit.open, L"\xE8B7", L"O", kDetailsButtonLabels[0],
                   IsHovered(vm, HitTestResult::DetailsOpen), true);
-        rowButton(hit.new_tab, L"\xE8A0", L"T", kDetailsButtonLabels[1],
+        rowButton(hit.new_tab, L"\xE8A7", L"\x2197", kDetailsButtonLabels[1],
                   IsHovered(vm, HitTestResult::DetailsNewTab), false);
         rowButton(hit.copy_path, L"\xE8C8", L"C", kDetailsButtonLabels[2],
                   IsHovered(vm, HitTestResult::DetailsCopyPath), false);
@@ -2792,19 +2796,15 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
                 y = iy + 8.0f * s;
                 break;
             }
-            case 1: { // 属性: writable checkboxes + 高级…
+            case 1: { // 属性: writable checkboxes + 高级… on one row
                 fluent::ControlState roState;
                 roState.checked = (d.attrs & FILE_ATTRIBUTE_READONLY) != 0;
                 roState.hovered = IsHovered(vm, HitTestResult::DetailsAttrToggle, 0);
-                painter_.DrawCheckBox(D2D1::RectF(panel.left + pad, y, panel.right - pad,
-                                                  y + 24.0f * s),
-                                      L"\u53EA\u8BFB", roState);
+                painter_.DrawCheckBox(hit.attr_readonly, L"只读", roState);
                 fluent::ControlState hidState;
                 hidState.checked = (d.attrs & FILE_ATTRIBUTE_HIDDEN) != 0;
                 hidState.hovered = IsHovered(vm, HitTestResult::DetailsAttrToggle, 1);
-                painter_.DrawCheckBox(D2D1::RectF(panel.left + pad, y + 24.0f * s,
-                                                  panel.right - pad, y + 48.0f * s),
-                                      L"\u9690\u85CF", hidState);
+                painter_.DrawCheckBox(hit.attr_hidden, L"隐藏", hidState);
                 {
                     const bool hot = IsHovered(vm, HitTestResult::DetailsAttrToggle, 2);
                     const auto& rc = hit.attr_advanced;
@@ -2827,7 +2827,7 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
                         fmt->SetTextAlignment(old);
                     }
                 }
-                y += 48.0f * s + 8.0f * s;
+                y += 24.0f * s + 8.0f * s;
                 break;
             }
             case 2: { // 标签: 添加标签 row + preset chips (toggle on click)
@@ -3668,7 +3668,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                             1.0f);
             }
             if (trail.show_new_tab)
-                draw_action(trail.new_tab, newTabHot, L"\xE8A0", L"\x2197",
+                draw_action(trail.new_tab, newTabHot, L"\xE8A7", L"\x2197",
                             theme.text_secondary, 0.9f);
             if (trail.show_more)
                 draw_action(trail.more, moreHot, L"\xE712", L"...", theme.text_secondary, 0.72f);

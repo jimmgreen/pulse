@@ -369,7 +369,7 @@ struct AppState {
     bool detailsPreviewPanning = false;
     POINT detailsPreviewPanLast{};
     // Collapsible sections: bit 0基本信息 1属性 2标签 3安全 4其他; 安全/其他 default collapsed.
-    uint32_t detailsCollapsedMask = (1u << 3) | (1u << 4);
+    uint32_t detailsCollapsedMask = (1u << 1) | (1u << 3) | (1u << 4);
     // Per-selection probe cache (file times + star state), keyed by path.
     std::wstring detailsSelPath;
     bool detailsSelValid = false;
