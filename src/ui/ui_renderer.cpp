@@ -467,6 +467,11 @@ namespace {
         { 3, L"安全" }, { 4, L"其他" },
     };
 
+    // Button row labels, shared between layout (width measurement) and drawing.
+    constexpr const wchar_t* kDetailsButtonLabels[4] = {
+        L"打开", L"在新标签打开", L"复制路径", L"更多"
+    };
+
     void LayoutDetailsPanel(const D2D1_RECT_F& panel, float scale,
                             const DetailsPanelView& d, IDWriteFactory3* dwrite,
                             IDWriteTextFormat* small_fmt, float preview_h,
@@ -491,16 +496,35 @@ namespace {
         y += 22.0f * s + 16.0f * s + 8.0f * s; // name + type + gap
         if (d.multi_count <= 1) {
             // Button row: 打开 / 在新标签打开 / 复制路径 / 更多 (icon over label).
+            // Buttons size to their measured label width; leftover space is
+            // shared equally so the row still spans the panel. Very narrow
+            // panels shrink proportionally (labels then ellipsize on draw).
             const float rowH = 48.0f * s;
             const float gap = 6.0f * s;
-            const float cellW = (w - gap * 3.0f) / 4.0f;
-            out.open = D2D1::RectF(x, y, x + cellW, y + rowH);
-            out.new_tab = D2D1::RectF(x + (cellW + gap), y,
-                                      x + (cellW + gap) + cellW, y + rowH);
-            out.copy_path = D2D1::RectF(x + (cellW + gap) * 2.0f, y,
-                                        x + (cellW + gap) * 2.0f + cellW, y + rowH);
-            out.more = D2D1::RectF(x + (cellW + gap) * 3.0f, y,
-                                   x + (cellW + gap) * 3.0f + cellW, y + rowH);
+            const float avail = w - gap * 3.0f;
+            const float equal = avail / 4.0f;
+            float bw[4] = { equal, equal, equal, equal };
+            if (dwrite && small_fmt) {
+                float needed_total = 0.0f;
+                for (int i = 0; i < 4; ++i) {
+                    bw[i] = MeasureTextWidth(dwrite, small_fmt, kDetailsButtonLabels[i])
+                        + 12.0f * s; // 4s text padding + slack around the label
+                    needed_total += bw[i];
+                }
+                if (needed_total < avail) {
+                    const float extra = (avail - needed_total) / 4.0f;
+                    for (auto& v : bw) v += extra;
+                } else if (needed_total > 0.0f) {
+                    const float shrink = avail / needed_total;
+                    for (auto& v : bw) v = std::max(40.0f * s, v * shrink);
+                }
+            }
+            D2D1_RECT_F* cells[4] = { &out.open, &out.new_tab, &out.copy_path, &out.more };
+            float bx = x;
+            for (int i = 0; i < 4; ++i) {
+                *cells[i] = D2D1::RectF(bx, y, bx + bw[i], y + rowH);
+                bx += bw[i] + gap;
+            }
             y += rowH + 4.0f * s;
 
             for (const auto& def : kDetailsSections) {
@@ -2680,21 +2704,31 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
                                                   : theme.text_secondary, 1.0f);
             IDWriteTextFormat* fmt = compositor_->SmallFormat();
             if (!fmt) return;
-            const auto old = fmt->GetTextAlignment();
-            fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-            MakeBrush(dc, fg, brText_);
-            DrawTextRect(dc, fmt, brText_.get(), label, rc.left + 2.0f * s,
-                         rc.top + 26.0f * s, rc.right - rc.left - 4.0f * s,
-                         rc.bottom - rc.top - 28.0f * s);
-            fmt->SetTextAlignment(old);
+            // Draw through a private text layout so the shared format is never
+            // mutated; narrow cells ellipsize (hover tooltip keeps full text).
+            const float textW = rc.right - rc.left - 4.0f * s;
+            const float textH = rc.bottom - rc.top - 28.0f * s;
+            ComPtr<IDWriteTextLayout> tl;
+            if (compositor_->DwriteFactory() &&
+                SUCCEEDED(compositor_->DwriteFactory()->CreateTextLayout(
+                    label, static_cast<UINT32>(wcslen(label)), fmt,
+                    textW, textH, &tl)) && tl.get()) {
+                tl->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                tl->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                const DWRITE_TRIMMING trim{ DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0 };
+                tl->SetTrimming(&trim, nullptr);
+                MakeBrush(dc, fg, brText_);
+                dc->DrawTextLayout(D2D1::Point2F(rc.left + 2.0f * s, rc.top + 26.0f * s),
+                                   tl.get(), brText_.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+            }
         };
-        rowButton(hit.open, L"\xE8B7", L"O", L"\u6253\u5F00",
+        rowButton(hit.open, L"\xE8B7", L"O", kDetailsButtonLabels[0],
                   IsHovered(vm, HitTestResult::DetailsOpen), true);
-        rowButton(hit.new_tab, L"\xE8A0", L"T", L"\u5728\u65B0\u6807\u7B7E\u6253\u5F00",
+        rowButton(hit.new_tab, L"\xE8A0", L"T", kDetailsButtonLabels[1],
                   IsHovered(vm, HitTestResult::DetailsNewTab), false);
-        rowButton(hit.copy_path, L"\xE8C8", L"C", L"\u590D\u5236\u8DEF\u5F84",
+        rowButton(hit.copy_path, L"\xE8C8", L"C", kDetailsButtonLabels[2],
                   IsHovered(vm, HitTestResult::DetailsCopyPath), false);
-        rowButton(hit.more, L"\xE712", L"...", L"\u66F4\u591A",
+        rowButton(hit.more, L"\xE712", L"...", kDetailsButtonLabels[3],
                   IsHovered(vm, HitTestResult::DetailsMore), false);
         y += 48.0f * s + 4.0f * s;
     }

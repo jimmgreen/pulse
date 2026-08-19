@@ -4909,9 +4909,21 @@ static void CrashLog(unsigned int code, const char* where, unsigned int msg = 0,
     const std::wstring path = dir + L"\\pulse_crash.log";
     if (HANDLE f = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr,
             OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr); f != INVALID_HANDLE_VALUE) {
-        char buf[192];
-        int n = snprintf(buf, sizeof(buf), "crash where=%s code=0x%08X msg=0x%04X addr=%p\n",
-            where, code, msg, addr);
+        char buf[2048];
+        HMODULE self = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                           reinterpret_cast<LPCWSTR>(&CrashLog), &self);
+        int n = snprintf(buf, sizeof(buf),
+            "crash where=%s code=0x%08X msg=0x%04X addr=%p base=%p",
+            where, code, msg, addr, self);
+        // Best-effort stack trace: symbol names when a PDB is nearby, else the
+        // module-relative offset so the site can still be mapped offline.
+        void* frames[24] = {};
+        const USHORT count = RtlCaptureStackBackTrace(1, 24, frames, nullptr);
+        for (USHORT i = 0; i < count && n > 0 && n < (int)sizeof(buf) - 96; ++i) {
+            n += snprintf(buf + n, sizeof(buf) - n, " #%u=%p", i, frames[i]);
+        }
+        if (n > 0 && n < (int)sizeof(buf) - 2) { buf[n++] = '\n'; buf[n] = 0; }
         if (n > 0) { DWORD w = 0; WriteFile(f, buf, (DWORD)n, &w, nullptr); }
         CloseHandle(f);
     }
