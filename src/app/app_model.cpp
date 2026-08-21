@@ -952,6 +952,10 @@ void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCat
     out.filter_map.reset();
     out.tag_dots.reset();
     out.loading = tab->loading;
+    out.can_go_back = tab->CanGoBack();
+    out.can_go_forward = tab->CanGoForward();
+    out.can_go_up = fs::IsVirtualPath(tab->current_path)
+        ? tab->CanGoBack() : !tab->current_path.empty();
     out.is_file_system = !tab->current_path.empty() && !fs::IsVirtualPath(tab->current_path);
     out.can_create = out.is_file_system && !tab->net_readonly;
     std::wstring virtual_kind;

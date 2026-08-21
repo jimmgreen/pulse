@@ -94,6 +94,9 @@ struct PaneViewModel {
     std::unordered_set<std::wstring> cut_names;
     std::shared_ptr<const TagDots> tag_dots;
     bool loading = false;
+    bool can_go_back = false;
+    bool can_go_forward = false;
+    bool can_go_up = false;
     bool can_create = false;
     bool is_file_system = false;
     bool curated_order = false;
@@ -538,6 +541,12 @@ public:
                                     float filter_expand = 1.0f) const;
     D2D1_RECT_F PaneViewButtonRect(const D2D1_RECT_F& pane_bounds,
                                    float filter_expand = 1.0f) const;
+    D2D1_RECT_F PaneNavUpRect(const D2D1_RECT_F& pane_bounds,
+                              float filter_expand = 1.0f) const;
+    D2D1_RECT_F PaneNavForwardRect(const D2D1_RECT_F& pane_bounds,
+                                   float filter_expand = 1.0f) const;
+    D2D1_RECT_F PaneNavBackRect(const D2D1_RECT_F& pane_bounds,
+                                float filter_expand = 1.0f) const;
     D2D1_RECT_F FilterEditRect(const D2D1_RECT_F& pane_bounds,
                                float expand = 1.0f) const;
 

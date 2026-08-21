@@ -978,6 +978,27 @@ D2D1_RECT_F MainRenderer::PaneMediumIconsRect(const D2D1_RECT_F& pane_bounds,
                        view.bottom);
 }
 
+static D2D1_RECT_F StepLeftHeaderButton(const D2D1_RECT_F& rc, float scale) {
+    const float step = kCommandIconStepDip * scale;
+    const float btn = kCommandIconButtonDip * scale;
+    return D2D1::RectF(rc.left - step, rc.top, rc.left - (step - btn), rc.bottom);
+}
+
+D2D1_RECT_F MainRenderer::PaneNavUpRect(const D2D1_RECT_F& pane_bounds,
+                                        float filter_expand) const {
+    return StepLeftHeaderButton(PaneMediumIconsRect(pane_bounds, filter_expand), scale_);
+}
+
+D2D1_RECT_F MainRenderer::PaneNavForwardRect(const D2D1_RECT_F& pane_bounds,
+                                             float filter_expand) const {
+    return StepLeftHeaderButton(PaneNavUpRect(pane_bounds, filter_expand), scale_);
+}
+
+D2D1_RECT_F MainRenderer::PaneNavBackRect(const D2D1_RECT_F& pane_bounds,
+                                          float filter_expand) const {
+    return StepLeftHeaderButton(PaneNavForwardRect(pane_bounds, filter_expand), scale_);
+}
+
 D2D1_RECT_F MainRenderer::FilterEditRect(const D2D1_RECT_F& pane_bounds, float expand) const {
     D2D1_RECT_F rc = FilterBoxRect(pane_bounds, expand);
     rc.left += 34.0f * scale_;
@@ -2191,7 +2212,8 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
                       HitTestResult::Region region) {
         D2D1_RECT_F rc = D2D1::RectF(x, commandTop,
                                      x + kCommandIconButtonDip * scale_, commandBottom);
-        DrawButton(rc, theme, IsHovered(vm, region) ? theme.fill_hover : kTransparent,
+        const bool hovered = IsHovered(vm, region) && vm.hover_control_index < 0;
+        DrawButton(rc, theme, hovered ? theme.fill_hover : kTransparent,
             glyph, fallback, enabled ? theme.text : theme.text_disabled, true, true, 0.8f);
         x += kCommandIconStepDip * scale_;
     };
@@ -3496,8 +3518,11 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
     const D2D1_RECT_F filterRc = FilterBoxRect(bounds, pane.filter_expand);
     const D2D1_RECT_F mediumRc = PaneMediumIconsRect(bounds, pane.filter_expand);
     const D2D1_RECT_F viewRc = PaneViewButtonRect(bounds, pane.filter_expand);
+    const D2D1_RECT_F navBackRc = PaneNavBackRect(bounds, pane.filter_expand);
+    const D2D1_RECT_F navForwardRc = PaneNavForwardRect(bounds, pane.filter_expand);
+    const D2D1_RECT_F navUpRc = PaneNavUpRect(bounds, pane.filter_expand);
     const float textLeft = x + 8.0f * scale_;
-    const float textRight = std::max(textLeft, mediumRc.left - 8.0f * scale_);
+    const float textRight = std::max(textLeft, navBackRc.left - 8.0f * scale_);
     const float textWidth = textRight - textLeft;
     MakeBrush(dc, theme.text, brText_);
     DrawTextRect(dc, compositor_->HeaderFormat(), brText_.get(), title,
@@ -3515,6 +3540,19 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
                    active ? theme.accent : theme.text,
                    true, true, glyphScale);
     };
+    auto headerNavButton = [&](const D2D1_RECT_F& rc, HitTestResult::Region region,
+                               const wchar_t* glyph, const wchar_t* fallback, bool enabled) {
+        const bool hovered = enabled &&
+                             vm.hover_region == static_cast<int>(region) &&
+                             vm.hover_control_index == pane_index;
+        DrawButton(rc, theme, hovered ? theme.fill_hover : kTransparent,
+                   glyph, fallback, enabled ? theme.text : theme.text_disabled,
+                   true, true, 0.76f);
+    };
+    headerNavButton(navBackRc, HitTestResult::NavBack, kIconBack, L"<", pane.can_go_back);
+    headerNavButton(navForwardRc, HitTestResult::NavForward, kIconForward, L">",
+                    pane.can_go_forward);
+    headerNavButton(navUpRc, HitTestResult::NavUp, kIconUp, L"^", pane.can_go_up);
     headerIconButton(mediumRc, HitTestResult::PaneMediumIcons,
                      L"\xE7F4", L"M", pane.view_mode == ViewMode::MediumIcons, 0.66f);
     headerIconButton(viewRc, HitTestResult::PaneViewButton,
@@ -5371,6 +5409,24 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
         const D2D1_RECT_F viewRc = PaneViewButtonRect(paneRc, paneVm.filter_expand);
         if (RectContains(viewRc, x, y)) {
             out.region = HitTestResult::PaneViewButton;
+            out.index = paneIndex;
+            return out;
+        }
+        const D2D1_RECT_F navBackRc = PaneNavBackRect(paneRc, paneVm.filter_expand);
+        if (RectContains(navBackRc, x, y)) {
+            out.region = HitTestResult::NavBack;
+            out.index = paneIndex;
+            return out;
+        }
+        const D2D1_RECT_F navForwardRc = PaneNavForwardRect(paneRc, paneVm.filter_expand);
+        if (RectContains(navForwardRc, x, y)) {
+            out.region = HitTestResult::NavForward;
+            out.index = paneIndex;
+            return out;
+        }
+        const D2D1_RECT_F navUpRc = PaneNavUpRect(paneRc, paneVm.filter_expand);
+        if (RectContains(navUpRc, x, y)) {
+            out.region = HitTestResult::NavUp;
             out.index = paneIndex;
             return out;
         }
