@@ -2131,6 +2131,18 @@ static void DispatchMenuCommand(AppState& s, int cmd) {
     }
     switch (cmd) {
     case app::CmdOpen: OpenSelected(s); break;
+    case app::CmdOpenInNewTab: {
+        app::Tab* tab = ActiveTab(s);
+        if (!tab || !tab->snapshot) break;
+        for (int index : tab->SelectedIndices()) {
+            if (index < 0 || index >= static_cast<int>(tab->snapshot->size())) continue;
+            const fs::DirEntry& entry = (*tab->snapshot)[static_cast<size_t>(index)];
+            if (!entry.is_dir) continue;
+            const std::wstring path = EntryFullPath(*tab, index);
+            if (!path.empty()) NewTab(s, path);
+        }
+        break;
+    }
     case app::CmdOpenPath: {
         // Reveal the hit in its containing folder (search results).
         app::Tab* tab = ActiveTab(s);
@@ -2273,7 +2285,17 @@ static void ApplyWorkspacePinLabel(std::vector<ui::FluentMenuItem>& items, AppSt
 
 static std::vector<ui::FluentMenuItem> BuildFinderItemMenu(
         AppState& s, bool can_undo, const std::wstring& undo_label) {
-    std::vector<ui::FluentMenuItem> items = app::BuildItemMenu(can_undo, undo_label);
+    bool folder = false;
+    if (const app::Tab* tab = ActiveTab(s); tab && tab->snapshot) {
+        for (int index : tab->SelectedIndices()) {
+            if (index >= 0 && index < static_cast<int>(tab->snapshot->size()) &&
+                (*tab->snapshot)[static_cast<size_t>(index)].is_dir) {
+                folder = true;
+                break;
+            }
+        }
+    }
+    std::vector<ui::FluentMenuItem> items = app::BuildItemMenu(can_undo, undo_label, folder);
     ApplyWorkspacePinLabel(items, s);
     const std::vector<std::wstring> paths = ActiveTab(s)
         ? SelectedFullPaths(*ActiveTab(s)) : std::vector<std::wstring>{};

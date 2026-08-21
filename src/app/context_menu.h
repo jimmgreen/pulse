@@ -30,6 +30,7 @@ enum MenuCmd : int {
     CmdNewTextFile,
     CmdCopyAsPath,      // unused alias guard — keep ids stable
     CmdOpenPath,        // search results: reveal in containing folder
+    CmdOpenInNewTab,    // folder: open selection in a new tab
     CmdLayoutSingle = 50,
     CmdLayoutTwoVertical,
     CmdLayoutTwoHorizontal,
@@ -89,7 +90,8 @@ struct ShellMenuEntry {
 // Context menu for a selected entry: 打开 + icon strip (cut/copy/delete/
 // rename) + built-in verbs + undo. Explorer rows are appended afterwards via
 // AppendShellSection (they grow the menu downward so open rows never move).
-std::vector<ui::FluentMenuItem> BuildItemMenu(bool can_undo, const std::wstring& undo_label);
+std::vector<ui::FluentMenuItem> BuildItemMenu(bool can_undo, const std::wstring& undo_label,
+                                              bool folder = false);
 
 // Appends the merged Explorer section at the very bottom: separator, then one
 // row per entry. Software submenus become one-level flyout headers (children

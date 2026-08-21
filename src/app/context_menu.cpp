@@ -28,6 +28,7 @@ constexpr const wchar_t* kGlyphNewFile = L"\xE8A5";
 constexpr const wchar_t* kGlyphSplit = L"\xE8A9";
 constexpr const wchar_t* kGlyphLayout = L"\xE8A9";
 constexpr const wchar_t* kGlyphFolder = L"\xE8B7";
+constexpr const wchar_t* kGlyphOpenInNewTab = L"\xE8A7";
 constexpr const wchar_t* kGlyphSearch = L"\xE721";
 constexpr const wchar_t* kGlyphTag = L"\xE8EC";
 constexpr const wchar_t* kGlyphSettings = L"\xE713";
@@ -53,7 +54,8 @@ ui::FluentMenuItem UndoItem(bool can_undo, const std::wstring& undo_label) {
 
 } // namespace
 
-std::vector<ui::FluentMenuItem> BuildItemMenu(bool can_undo, const std::wstring& undo_label) {
+std::vector<ui::FluentMenuItem> BuildItemMenu(bool can_undo, const std::wstring& undo_label,
+                                              bool folder) {
     std::vector<ui::FluentMenuItem> items;
     items.push_back(Item(CmdOpen, L"打开", kGlyphOpen));
 
@@ -72,6 +74,8 @@ std::vector<ui::FluentMenuItem> BuildItemMenu(bool can_undo, const std::wstring&
     strip.separator_after = true;
     items.push_back(std::move(strip));
 
+    if (folder)
+        items.push_back(Item(CmdOpenInNewTab, L"在新标签打开", kGlyphOpenInNewTab));
     items.push_back(Item(CmdCopyPath, L"复制路径", kGlyphLink, L"Ctrl+Shift+C"));
     items.push_back(Item(CmdOpenTerminal, L"在此处打开终端", kGlyphTerminal));
     items.push_back(Item(CmdProperties, L"属性", kGlyphProperties, L"Alt+Enter"));
@@ -257,12 +261,6 @@ static std::wstring DisplayPath(const std::wstring& path) {
     return path;
 }
 
-static std::wstring TruncatePath(const std::wstring& path, size_t max_chars) {
-    const std::wstring shown = DisplayPath(path);
-    if (shown.size() <= max_chars) return shown;
-    return shown.substr(0, max_chars - 1) + L"\u2026";
-}
-
 static std::wstring FolderTitle(const std::wstring& path) {
     if (path.empty()) return L"This PC";
     std::wstring shown = DisplayPath(path);
@@ -364,7 +362,7 @@ std::vector<ui::FluentMenuItem> BuildCommandPalette(const std::wstring& query,
             items.push_back(Item(CmdIndexBase + static_cast<int>(i),
                 hits[i].name.c_str(), hits[i].is_dir ? kGlyphFolder : kGlyphNewFile));
             items.back().text = hits[i].name;
-            items.back().shortcut = TruncatePath(hits[i].path, 48);
+            items.back().shortcut = DisplayPath(hits[i].path);
             const std::wstring n = fs::NormalizePath(hits[i].path);
             if (!n.empty()) seen_paths.insert(n);
         }

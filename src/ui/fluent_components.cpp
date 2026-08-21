@@ -1116,14 +1116,31 @@ void Painter::DrawMenuItem(const MenuItemSpec& spec) {
                    spec.badge_text, BadgeKind::Neutral});
         content.right -= badge_width + Px(8.0f);
     } else if (!spec.shortcut.empty()) {
-        const float shortcut_width = std::clamp(
-            MeasureTextWidth(compositor_->DwriteFactory(), CaptionFormat(), spec.shortcut) + Px(4.0f),
-            Px(24.0f), Px(84.0f));
+        IDWriteTextFormat* cap = CaptionFormat();
+        const float measured = MeasureTextWidth(
+            compositor_->DwriteFactory(), cap, spec.shortcut) + Px(4.0f);
+        const float min_label = Px(80.0f);
+        const float max_shortcut = std::max(Px(24.0f), Width(content) - min_label - Px(8.0f));
+        const float shortcut_width = std::clamp(measured, Px(24.0f), max_shortcut);
+        DWRITE_WORD_WRAPPING old_wrap = DWRITE_WORD_WRAPPING_WRAP;
+        DWRITE_TRIMMING old_trim{};
+        ComPtr<IDWriteInlineObject> old_sign;
+        if (cap) {
+            old_wrap = cap->GetWordWrapping();
+            cap->GetTrimming(&old_trim, &old_sign);
+            cap->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            DWRITE_TRIMMING trim{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+            cap->SetTrimming(&trim, ellipsis_sign_.get());
+        }
         DrawText(spec.shortcut,
                  D2D1::RectF(content.right - shortcut_width, content.top,
                              content.right, content.bottom),
-                 CaptionFormat(), theme_->text_secondary,
+                 cap, theme_->text_secondary,
                  HorizontalAlignment::Right);
+        if (cap) {
+            cap->SetTrimming(&old_trim, old_sign.get());
+            cap->SetWordWrapping(old_wrap);
+        }
         content.right -= shortcut_width + Px(8.0f);
     }
     // Long undo labels / Explorer verbs must ellipsize inside the fixed menu
