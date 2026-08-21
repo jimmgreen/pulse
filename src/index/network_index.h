@@ -26,11 +26,16 @@ struct NetworkRootInfo {
 
 std::wstring NormalizeNetworkRoot(std::wstring path);
 std::wstring NetworkConfigPath();
+bool LoadNetworkRootsFile(const std::wstring& path, std::vector<std::wstring>& roots,
+                          std::wstring* error = nullptr);
+bool SaveNetworkRootsFile(const std::wstring& path, const std::vector<std::wstring>& roots,
+                          std::wstring* error = nullptr);
 bool LoadNetworkRoots(std::vector<std::wstring>& roots, std::wstring* error = nullptr);
 bool SaveNetworkRoots(const std::vector<std::wstring>& roots, std::wstring* error = nullptr);
 
-// Per-user SMB index. It intentionally runs in pulse.exe so Windows can use the
-// interactive user's existing SMB session without Pulse storing credentials.
+// Per-user SMB index. It intentionally runs in Pulse.Index.exe's
+// --network-agent mode so Windows can use the interactive user's existing SMB
+// session without the SYSTEM service storing credentials.
 class NetworkIndex {
 public:
     NetworkIndex() = default;

@@ -56,7 +56,7 @@ struct FluentMenuItem {
     float glyph_scale = 1.0f;      // Per-item visual scale inside the fixed icon slot.
 };
 
-// Windowless menu layout + hit-testing (theme.row_menu = 32 DIP rows).
+// Windowless menu layout + hit-testing (theme.row_menu = 36 DIP rows).
 class FluentMenuModel {
 public:
     void SetItems(std::vector<FluentMenuItem> items);

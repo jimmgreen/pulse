@@ -285,17 +285,51 @@ bool OperationPostconditionSatisfied(const Request& req) {
     return false;
 }
 
+std::wstring DescribeCreateError(HRESULT hr) {
+    const DWORD code = HRESULT_FACILITY(hr) == FACILITY_WIN32
+        ? HRESULT_CODE(hr) : static_cast<DWORD>(hr);
+    switch (code) {
+    case ERROR_ACCESS_DENIED:
+    case ERROR_WRITE_PROTECT:
+    case ERROR_PRIVILEGE_NOT_HELD:
+        return L"没有权限在此位置新建";
+    case ERROR_PATH_NOT_FOUND:
+    case ERROR_FILE_NOT_FOUND:
+        return L"目标文件夹不存在";
+    case ERROR_FILE_EXISTS:
+    case ERROR_ALREADY_EXISTS:
+        return L"已存在同名项目";
+    case ERROR_INVALID_NAME:
+        return L"名称无效";
+    default:
+        break;
+    }
+    LPWSTR msg = nullptr;
+    std::wstring text;
+    if (FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM |
+                           FORMAT_MESSAGE_IGNORE_INSERTS,
+                       nullptr, code, 0, reinterpret_cast<LPWSTR>(&msg), 0, nullptr) && msg) {
+        text = msg;
+        LocalFree(msg);
+        while (!text.empty() && (text.back() == L'\r' || text.back() == L'\n'))
+            text.pop_back();
+    }
+    return text.empty() ? L"新建失败" : text;
+}
+
 // REQ_NEW_FOLDER / REQ_NEW_FILE: plain Win32 creation (no conflict UI, the UI
 // side already picked a unique name). Runs on the STA thread like other ops.
 HRESULT ExecuteCreate(const uint32_t type, const std::wstring& path) {
     if (path.empty()) return E_INVALIDARG;
-    if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES)
+    const std::wstring parsed = ToParsingPath(path);
+    const wchar_t* create_path = parsed.empty() ? path.c_str() : parsed.c_str();
+    if (GetFileAttributesW(create_path) != INVALID_FILE_ATTRIBUTES)
         return HRESULT_FROM_WIN32(ERROR_FILE_EXISTS);
     if (type == REQ_NEW_FOLDER) {
-        return CreateDirectoryW(path.c_str(), nullptr)
+        return CreateDirectoryW(create_path, nullptr)
             ? S_OK : HRESULT_FROM_WIN32(GetLastError());
     }
-    HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+    HANDLE f = CreateFileW(create_path, GENERIC_WRITE, 0, nullptr,
                            CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (f == INVALID_HANDLE_VALUE) return HRESULT_FROM_WIN32(GetLastError());
     CloseHandle(f);
@@ -438,7 +472,7 @@ void ExecuteRequest(Request* req) {
     if (req->type == REQ_NEW_FOLDER || req->type == REQ_NEW_FILE) {
         HRESULT hr = req->sources.empty() ? E_INVALIDARG
                                           : ExecuteCreate(req->type, req->sources.front());
-        SendDone(req->id, hr, false, FAILED(hr) ? L"create failed" : L"");
+        SendDone(req->id, hr, false, FAILED(hr) ? DescribeCreateError(hr) : L"");
         delete req;
         return;
     }
@@ -926,7 +960,19 @@ DWORD WINAPI CtxSessionThreadImpl(LPVOID param) {
     IContextMenu* menu = nullptr;
     HMENU hmenu = nullptr;
     std::vector<CtxItemOut> items;
+    const ULONGLONG started = GetTickCount64();
     BuildCtxMenu(*data, &menu, &hmenu, items);
+    const uint32_t elapsed = static_cast<uint32_t>(GetTickCount64() - started);
+    wchar_t timing[160];
+    swprintf_s(timing, L"QueryContextMenu %ums items=%zu background=%d",
+               elapsed, items.size(), data->background ? 1 : 0);
+    HostLog(timing);
+    if (elapsed >= 500) {
+        wchar_t slow[192];
+        swprintf_s(slow, L"slow handler %ums path=%ls", elapsed,
+                   data->paths.empty() ? L"" : data->paths.front().c_str());
+        HostLog(slow);
+    }
     SendCtxItems(sid, items);
 
     // Session loop: wait for invoke/close; auto-expire as a leak guard.

@@ -205,6 +205,8 @@ float ClampSplitRatio(float ratio, const D2D1_RECT_F& bounds, SplitOrientation o
                       float gap);
 void ApplySplitRatio(SplitContainer& node, const D2D1_RECT_F& parent_bounds, float gap,
                      float pointer_x, float pointer_y);
+void CollectSplitRatios(const SplitContainer& node, std::vector<float>& out);
+void ApplySplitRatios(SplitContainer& node, const std::vector<float>& ratios);
 void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane,
                        const PlacesCatalog* places = nullptr);
 

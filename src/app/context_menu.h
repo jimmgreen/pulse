@@ -29,6 +29,7 @@ enum MenuCmd : int {
     CmdNewFolder,
     CmdNewTextFile,
     CmdCopyAsPath,      // unused alias guard — keep ids stable
+    CmdOpenPath,        // search results: reveal in containing folder
     CmdLayoutSingle = 50,
     CmdLayoutTwoVertical,
     CmdLayoutTwoHorizontal,

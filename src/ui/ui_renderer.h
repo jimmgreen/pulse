@@ -22,7 +22,7 @@ namespace pulse::app { class PlacesCatalog; }
 
 namespace pulse::ui {
 
-enum class SortColumn { Name, Mtime, Type, Size };
+enum class SortColumn { Name, Mtime, Type, Size, Path };
 enum class SortDirection { Asc, Desc };
 
 struct TabView {
@@ -99,6 +99,7 @@ struct PaneViewModel {
     bool curated_order = false;
     bool is_starred = false;
     bool is_recent = false;
+    bool is_search = false;   // search results add a display-only 路径 column
     int recent_filter = 0;
     size_t recent_total = 0;
     std::wstring date_column_label;
@@ -350,6 +351,7 @@ struct WindowViewModel {
     int tag_drag_group = -1;
     int tag_drag_item = -1;
     float tag_drag_y = 0.0f;
+    float tag_gap_line_y = 0.0f; // insertion indicator position (px, 0 = hidden)
     // Title-bar tab drag: floating tab follows the cursor (QFluent TabBar).
     int tab_drag_index = -1; // display index of the run's first tab, or -1
     int tab_drag_count = 1;  // >1: a whole group run floats as one block
@@ -542,18 +544,20 @@ public:
     struct DetailsColumnLayout {
         float left = 0.0f;
         float right = 0.0f;
-        std::array<float, 4> widths{};
+        std::array<float, 5> widths{};
+        int count = 4; // 5 in search views (extra 路径 column)
 
         float DividerX(int index) const {
             float x = left;
-            for (int i = 0; i <= index && i < 3; ++i)
+            for (int i = 0; i <= index && i < count - 1; ++i)
                 x += widths[static_cast<size_t>(i)];
             return x;
         }
     };
     DetailsColumnLayout DetailsColumns(
         const D2D1_RECT_F& pane_bounds,
-        const std::array<float, 3>& dividers = {}) const;
+        const std::array<float, 3>& dividers = {},
+        bool search_view = false) const;
     std::array<float, 3> ResizeDetailsColumnDivider(
         const D2D1_RECT_F& pane_bounds,
         const std::array<float, 3>& dividers,
@@ -562,7 +566,8 @@ public:
     D2D1_RECT_F NameCellRect(const D2D1_RECT_F& pane_bounds, int view_row, float scroll_y,
                              float extra_top = 0.0f, ViewMode mode = ViewMode::Details,
                              float scroll_x = 0.0f, size_t item_count = 0,
-                             const std::array<float, 3>& column_dividers = {}) const;
+                             const std::array<float, 3>& column_dividers = {},
+                             bool search_view = false) const;
     bool PointInItemName(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds,
                          int source_index, float x, float y) const;
     // Exact geometry of the Fluent frame drawn for the rename row; the hosted

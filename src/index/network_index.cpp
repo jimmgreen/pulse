@@ -36,6 +36,7 @@ struct NetworkRecord {
 
 constexpr uint32_t kNetworkVersion = 1;
 constexpr uint16_t kRecordDirectory = 1;
+constexpr uint64_t kMaxConfigBytes = 4ull * 1024 * 1024;
 constexpr auto kReconcileInterval = std::chrono::minutes(5);
 constexpr auto kCrawlWakeInterval = std::chrono::milliseconds(250);
 
@@ -57,6 +58,114 @@ std::wstring Win32Message(DWORD code) {
         LocalFree(message);
     }
     return out;
+}
+
+bool DecodeUtf8(const std::vector<uint8_t>& bytes, std::wstring& text) {
+    size_t offset = 0;
+    if (bytes.size() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF)
+        offset = 3;
+    if (offset == bytes.size()) {
+        text.clear();
+        return true;
+    }
+    const int byte_count = static_cast<int>(bytes.size() - offset);
+    const int chars = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                                           reinterpret_cast<const char*>(bytes.data() + offset),
+                                           byte_count, nullptr, 0);
+    if (chars <= 0) return false;
+    text.resize(static_cast<size_t>(chars));
+    return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                               reinterpret_cast<const char*>(bytes.data() + offset), byte_count,
+                               text.data(), chars) == chars;
+}
+
+bool EncodeUtf8(const std::wstring& text, std::vector<uint8_t>& bytes) {
+    if (text.empty()) {
+        bytes.clear();
+        return true;
+    }
+    const int size = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text.data(),
+                                         static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+    if (size <= 0) return false;
+    bytes.resize(static_cast<size_t>(size));
+    return WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text.data(),
+                               static_cast<int>(text.size()),
+                               reinterpret_cast<char*>(bytes.data()), size,
+                               nullptr, nullptr) == size;
+}
+
+bool ReadBytes(const std::wstring& path, std::vector<uint8_t>& bytes, std::wstring* error) {
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        SetError(error, Win32Message(GetLastError()));
+        return false;
+    }
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(file, &size) || size.QuadPart < 0 ||
+        static_cast<uint64_t>(size.QuadPart) > kMaxConfigBytes) {
+        const DWORD code = GetLastError() == ERROR_SUCCESS ? ERROR_FILE_TOO_LARGE : GetLastError();
+        CloseHandle(file);
+        SetError(error, Win32Message(code));
+        return false;
+    }
+    bytes.resize(static_cast<size_t>(size.QuadPart));
+    size_t done = 0;
+    while (done < bytes.size()) {
+        DWORD read = 0;
+        const DWORD remaining = static_cast<DWORD>((std::min)(
+            bytes.size() - done, static_cast<size_t>(UINT32_MAX)));
+        if (!ReadFile(file, bytes.data() + done, remaining, &read, nullptr) || read == 0) {
+            const DWORD code = GetLastError() == ERROR_SUCCESS ? ERROR_HANDLE_EOF : GetLastError();
+            CloseHandle(file);
+            SetError(error, Win32Message(code));
+            return false;
+        }
+        done += read;
+    }
+    CloseHandle(file);
+    return true;
+}
+
+bool WriteBytesAtomic(const std::wstring& path, const std::vector<uint8_t>& bytes,
+                      std::wstring* error) {
+    const std::wstring temp = path + L".tmp";
+    HANDLE file = CreateFileW(temp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        SetError(error, Win32Message(GetLastError()));
+        return false;
+    }
+    size_t done = 0;
+    while (done < bytes.size()) {
+        DWORD written = 0;
+        const DWORD remaining = static_cast<DWORD>((std::min)(
+            bytes.size() - done, static_cast<size_t>(UINT32_MAX)));
+        if (!WriteFile(file, bytes.data() + done, remaining, &written, nullptr) || written == 0) {
+            const DWORD code = GetLastError() == ERROR_SUCCESS ? ERROR_WRITE_FAULT : GetLastError();
+            CloseHandle(file);
+            DeleteFileW(temp.c_str());
+            SetError(error, Win32Message(code));
+            return false;
+        }
+        done += written;
+    }
+    if (!FlushFileBuffers(file)) {
+        const DWORD code = GetLastError();
+        CloseHandle(file);
+        DeleteFileW(temp.c_str());
+        SetError(error, Win32Message(code));
+        return false;
+    }
+    CloseHandle(file);
+    if (!MoveFileExW(temp.c_str(), path.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        SetError(error, Win32Message(GetLastError()));
+        DeleteFileW(temp.c_str());
+        return false;
+    }
+    return true;
 }
 
 bool EqualPath(const std::wstring& a, const std::wstring& b) {
@@ -428,21 +537,27 @@ std::wstring NetworkConfigPath() {
 }
 
 bool LoadNetworkRoots(std::vector<std::wstring>& roots, std::wstring* error) {
-    roots.clear();
     const std::wstring path = NetworkConfigPath();
     if (path.empty()) {
+        roots.clear();
         SetError(error, L"无法定位当前用户配置目录");
         return false;
     }
-    std::wifstream file(path, std::wifstream::binary);
-    if (!file) {
-        if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return true;
-        SetError(error, L"无法读取网络索引配置");
+    return LoadNetworkRootsFile(path, roots, error);
+}
+
+bool LoadNetworkRootsFile(const std::wstring& path, std::vector<std::wstring>& roots,
+                          std::wstring* error) {
+    roots.clear();
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES &&
+        GetLastError() == ERROR_FILE_NOT_FOUND) return true;
+    std::vector<uint8_t> bytes;
+    if (!ReadBytes(path, bytes, error)) return false;
+    std::wstring json;
+    if (!DecodeUtf8(bytes, json)) {
+        SetError(error, L"网络索引配置不是有效的 UTF-8 文件");
         return false;
     }
-    std::wstringstream stream;
-    stream << file.rdbuf();
-    const std::wstring json = stream.str();
     if (json.find(L'{') == std::wstring::npos) {
         SetError(error, L"网络索引配置已损坏");
         return false;
@@ -463,6 +578,11 @@ bool SaveNetworkRoots(const std::vector<std::wstring>& roots, std::wstring* erro
         SetError(error, L"无法定位当前用户配置目录");
         return false;
     }
+    return SaveNetworkRootsFile(path, roots, error);
+}
+
+bool SaveNetworkRootsFile(const std::wstring& path, const std::vector<std::wstring>& roots,
+                          std::wstring* error) {
     std::wstring json = L"{\n  \"version\":1,\n  \"roots\":[";
     for (size_t i = 0; i < roots.size(); ++i) {
         std::wstring escaped;
@@ -472,20 +592,12 @@ bool SaveNetworkRoots(const std::vector<std::wstring>& roots, std::wstring* erro
     }
     if (!roots.empty()) json += L"\n  ";
     json += L"]\n}\n";
-    const std::wstring temp = path + L".tmp";
-    std::wofstream file(temp, std::wofstream::out | std::wofstream::trunc | std::wofstream::binary);
-    if (!file) {
-        SetError(error, L"无法创建网络索引配置");
+    std::vector<uint8_t> bytes;
+    if (!EncodeUtf8(json, bytes)) {
+        SetError(error, L"无法将网络索引配置编码为 UTF-8");
         return false;
     }
-    file << json;
-    file.close();
-    if (!MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        SetError(error, Win32Message(GetLastError()));
-        DeleteFileW(temp.c_str());
-        return false;
-    }
-    return true;
+    return WriteBytesAtomic(path, bytes, error);
 }
 
 void NetworkIndex::Start(HWND notify, UINT status_msg, UINT search_msg) {

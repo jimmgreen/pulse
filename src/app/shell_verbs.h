@@ -9,6 +9,7 @@
 // friendly app names: call it off the UI thread and cache per extension.
 #pragma once
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace pulse::app {
@@ -29,5 +30,13 @@ std::vector<StaticVerb> EnumerateStaticVerbs(const std::wstring& ext);
 std::vector<StaticVerb> DedupeStaticVerbs(std::vector<StaticVerb> verbs,
                                           const std::vector<std::wstring>& builtin_texts,
                                           size_t cap);
+
+std::wstring MachineStaticVerbCachePath();
+bool LoadMachineStaticVerbCache(std::unordered_map<std::wstring, std::vector<StaticVerb>>& out);
+bool SaveMachineStaticVerbCache(
+    const std::unordered_map<std::wstring, std::vector<StaticVerb>>& cache);
+// Walks HKCR file extensions and writes ProgramData\Pulse\shell-verbs.bin.
+// Safe to run from the installer (elevated) or Pulse.exe --seed-shell-verbs.
+bool SeedMachineStaticVerbCache();
 
 } // namespace pulse::app

@@ -297,7 +297,13 @@ namespace {
             if (group.collapsed) continue;
             for (int i = 0; i < static_cast<int>(group.items.size()); ++i) {
                 const auto& item = group.items[i];
-                if (g == vm.tag_drag_group && i == vm.tag_drag_item) continue; // drawn floating
+                if (g == vm.tag_drag_group && i == vm.tag_drag_item) {
+                    // Keep the tentative slot open (SortableJS-style gap); the
+                    // dragged card itself is drawn floating below. Packing the
+                    // flow instead would teleport every sibling on grab/drop.
+                    y += SidebarItemHeight(item, m) + m.itemGap;
+                    continue;
+                }
                 const float h = SidebarItemHeight(item, m);
                 if (y >= contentBottom) break;
                 SidebarSlot slot;
@@ -324,13 +330,26 @@ namespace {
                 float minTop = 1e30f, maxBottom = -1e30f;
                 for (const auto& slot : out) {
                     if (slot.kind == SidebarSlot::Tag && slot.group == vm.tag_drag_group) {
-                        minTop = std::min(minTop, slot.rc.top);
-                        maxBottom = std::max(maxBottom, slot.rc.bottom);
+                        // Clamp against the *rest* geometry: slide offsets are
+                        // baked into slot.rc, and a mid-flight sibling would
+                        // otherwise shrink/extend the range on that side.
+                        float base = slot.rc.top;
+                        const auto& sib = dgroup.items[static_cast<size_t>(slot.item)];
+                        if (sib.y_offset != 0.0f)
+                            base -= sib.y_offset * (m.tagH + m.itemGap);
+                        minTop = std::min(minTop, base);
+                        maxBottom = std::max(maxBottom, base + (slot.rc.bottom - slot.rc.top));
                     }
                 }
                 float cy = vm.tag_drag_y;
-                if (minTop <= maxBottom)
-                    cy = std::clamp(cy, minTop + m.tagH * 0.5f, maxBottom - m.tagH * 0.5f);
+                if (minTop <= maxBottom) {
+                    // The gap slot contributes no rect, so extend the clamp by
+                    // one pitch: the float must still reach the first/last
+                    // position. The gesture clamps to the exact range anyway.
+                    const float pitch = m.tagH + m.itemGap;
+                    cy = std::clamp(cy, minTop + m.tagH * 0.5f - pitch,
+                                    maxBottom - m.tagH * 0.5f + pitch);
+                }
                 SidebarSlot dragged;
                 dragged.kind = SidebarSlot::Tag;
                 dragged.rc = D2D1::RectF(innerL, cy - m.tagH * 0.5f, innerR, cy + m.tagH * 0.5f);
@@ -969,12 +988,44 @@ D2D1_RECT_F MainRenderer::FilterEditRect(const D2D1_RECT_F& pane_bounds, float e
 
 MainRenderer::DetailsColumnLayout MainRenderer::DetailsColumns(
     const D2D1_RECT_F& pane_bounds,
-    const std::array<float, 3>& dividers) const {
+    const std::array<float, 3>& dividers,
+    bool search_view) const {
     DetailsColumnLayout out;
     out.left = pane_bounds.left + margin_;
     out.right = std::max(out.left, pane_bounds.right - margin_ * 3.0f);
     const float total = out.right - out.left;
     if (total <= 0.0f) return out;
+
+    if (search_view) {
+        // Search results: 名称 / 路径 / 修改日期 / 类型 / 大小. The 路径 column
+        // is display-only, so the persisted 4-column dividers do not apply.
+        out.count = 5;
+        std::array<float, 5> minimums{
+            80.0f * scale_, 110.0f * scale_, 92.0f * scale_, 64.0f * scale_,
+            72.0f * scale_ };
+        const float minimumTotal = minimums[0] + minimums[1] + minimums[2] +
+                                   minimums[3] + minimums[4];
+        if (minimumTotal > total) {
+            const float shrink = total / minimumTotal;
+            for (float& width : minimums) width *= shrink;
+        }
+        const float fixed = (130.0f + 90.0f + 90.0f) * scale_;
+        const float flexible = (std::max)(0.0f, total - fixed);
+        const float edge0 = std::clamp(
+            flexible * 0.55f, minimums[0],
+            total - minimums[1] - minimums[2] - minimums[3] - minimums[4]);
+        const float edge1 = std::clamp(
+            flexible, edge0 + minimums[1],
+            total - minimums[2] - minimums[3] - minimums[4]);
+        const float edge2 = std::clamp(
+            edge1 + 130.0f * scale_, edge1 + minimums[2],
+            total - minimums[3] - minimums[4]);
+        const float edge3 = std::clamp(
+            edge2 + 90.0f * scale_, edge2 + minimums[3], total - minimums[4]);
+        out.widths = { edge0, edge1 - edge0, edge2 - edge1, edge3 - edge2,
+                       total - edge3 };
+        return out;
+    }
 
     std::array<float, 4> minimums{
         80.0f * scale_, 92.0f * scale_, 64.0f * scale_, 72.0f * scale_ };
@@ -1043,7 +1094,8 @@ std::array<float, 3> MainRenderer::ResizeDetailsColumnDivider(
 D2D1_RECT_F MainRenderer::NameCellRect(const D2D1_RECT_F& pane_bounds, int view_row, float scroll_y,
                                        float extra_top, ViewMode mode, float scroll_x,
                                        size_t item_count,
-                                       const std::array<float, 3>& column_dividers) const {
+                                       const std::array<float, 3>& column_dividers,
+                                       bool search_view) const {
     const D2D1_RECT_F list = PaneListRect(pane_bounds, extra_top, mode);
     if (mode != ViewMode::Details) {
         ViewLayout layout(mode, list, item_count, scroll_x, scroll_y, scale_, row_height_dip_);
@@ -1051,7 +1103,7 @@ D2D1_RECT_F MainRenderer::NameCellRect(const D2D1_RECT_F& pane_bounds, int view_
     }
     const float list_x = list.left;
     const float list_y = list.top;
-    const float name_w = DetailsColumns(list, column_dividers).widths[0];
+    const float name_w = DetailsColumns(list, column_dividers, search_view).widths[0];
     const float icon_size = 16.0f * scale_;
     const float row_y = list_y + static_cast<float>(view_row) * row_height_ - scroll_y;
     const float name_x = list_x + margin_ + icon_size + margin_ + 4.0f * scale_;
@@ -1072,7 +1124,8 @@ bool MainRenderer::PointInItemName(const PaneViewModel& vm, const D2D1_RECT_F& p
     D2D1_RECT_F name = NameCellRect(
         pane_bounds, view_index, vm.scroll_y,
         vm.banner_message.empty() ? 0.0f : 36.0f * scale_,
-        vm.view_mode, vm.scroll_x, vm.EntryCount(), vm.details_column_dividers);
+        vm.view_mode, vm.scroll_x, vm.EntryCount(), vm.details_column_dividers,
+        vm.is_search);
     const bool icon_grid = vm.view_mode == ViewMode::ExtraLargeIcons ||
                            vm.view_mode == ViewMode::LargeIcons ||
                            vm.view_mode == ViewMode::MediumIcons;
@@ -1300,6 +1353,48 @@ static float MeasureTextWidth(IDWriteFactory3* factory, IDWriteTextFormat* fmt, 
     DWRITE_OVERHANG_METRICS om{};
     layout->GetOverhangMetrics(&om);
     return m.widthIncludingTrailingWhitespace + std::max(0.0f, om.right) + 1.0f;
+}
+
+// Containing folder of a full item path, for the search-results path column.
+static std::wstring FolderOf(const std::wstring& path) {
+    if (path.empty()) return {};
+    std::wstring p = path;
+    if (p.starts_with(L"\\\\?\\UNC\\")) p = L"\\\\" + p.substr(8);
+    else if (p.starts_with(L"\\\\?\\")) p = p.substr(4);
+    while (p.size() > 1 && (p.back() == L'\\' || p.back() == L'/')) p.pop_back();
+    const size_t slash = p.find_last_of(L"\\/");
+    if (slash == std::wstring::npos) return {};
+    if (slash == 0) return p.substr(0, 1);
+    // "C:\" roots keep the backslash; UNC "\\server\share" keeps both slashes.
+    if (slash == 2 && p[1] == L':') return p.substr(0, slash + 1);
+    if (slash == 1 && p[0] == L'\\') return p.substr(0, 2);
+    return p.substr(0, slash);
+}
+
+// Single-line text with end ellipsis (character granularity) when too wide.
+static void DrawTextEndEllipsis(ID2D1DeviceContext* dc, IDWriteFactory3* factory,
+    IDWriteTextFormat* fmt, ID2D1SolidColorBrush* br, const std::wstring& text,
+    float x, float y, float w, float h) {
+    if (!dc || !fmt || text.empty() || w <= 1.0f || h <= 0.0f) return;
+    const D2D1_RECT_F rc = D2D1::RectF(x, y, x + w, y + h);
+    if (!factory || MeasureTextWidth(factory, fmt, text) <= w) {
+        dc->DrawText(text.c_str(), (UINT32)text.size(), fmt, &rc, br,
+                     D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+        return;
+    }
+    ComPtr<IDWriteTextLayout> layout;
+    if (FAILED(factory->CreateTextLayout(text.c_str(), (UINT32)text.size(), fmt,
+                                         w, h, &layout)) || !layout.get()) {
+        dc->DrawText(text.c_str(), (UINT32)text.size(), fmt, &rc, br,
+                     D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+        return;
+    }
+    layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    DWRITE_TRIMMING trimming{ DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0 };
+    ComPtr<IDWriteInlineObject> ellipsis;
+    factory->CreateEllipsisTrimmingSign(layout.get(), &ellipsis);
+    layout->SetTrimming(&trimming, ellipsis.get());
+    dc->DrawTextLayout(D2D1::Point2F(x, y), layout.get(), br, D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
 static void DrawTabTitle(ID2D1DeviceContext* dc, IDWriteFactory3* factory,
@@ -2325,8 +2420,21 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             const bool draggedTag =
                 slot.group == vm.tag_drag_group && slot.item == vm.tag_drag_item;
             if (draggedTag) {
-                // Raised while dragging (QFluent TabBar: raise + soft drop
-                // shadow, no outline) — real gaussian shadow via command list.
+                // Insertion indicator under the lifted card: accent line with a
+                // leading dot at the tentative gap's top edge.
+                if (vm.tag_gap_line_y > 0.0f) {
+                    const float th = 2.5f * scale_;
+                    const float lx0 = slot.rc.left + 2.0f * scale_;
+                    const float lx1 = slot.rc.right - 2.0f * scale_;
+                    MakeBrush(dc, theme.accent, brAccent_);
+                    FillRoundedRect(dc, brAccent_.get(), lx0,
+                        vm.tag_gap_line_y - th * 0.5f, lx1 - lx0, th, th * 0.5f);
+                    dc->FillEllipse(D2D1::Ellipse(
+                        D2D1::Point2F(lx0 + 4.0f * scale_, vm.tag_gap_line_y),
+                        3.0f * scale_, 3.0f * scale_), brAccent_.get());
+                }
+                // Raised while dragging: a clearly deeper shadow + brighter card
+                // than a plain selected row, so the lift reads at a glance.
                 const float r = theme.radius_control * scale_;
                 ComPtr<ID2D1CommandList> card;
                 dc->CreateCommandList(&card);
@@ -2334,7 +2442,7 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
                     ComPtr<ID2D1Image> prev;
                     dc->GetTarget(&prev);
                     dc->SetTarget(card.get());
-                    MakeBrush(dc, vm.dark ? HexColor(0x282828) : HexColor(0xF9F9F9), brFillSelected_);
+                    MakeBrush(dc, vm.dark ? HexColor(0x303030) : HexColor(0xFFFFFF), brFillSelected_);
                     FillRoundedRect(dc, brFillSelected_.get(),
                         slot.rc.left + 1.0f, slot.rc.top + 1.0f,
                         slot.rc.right - slot.rc.left - 2.0f,
@@ -2344,10 +2452,10 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
                     ComPtr<ID2D1Effect> shadow;
                     if (SUCCEEDED(dc->CreateEffect(kShadowEffectClsid, &shadow)) && shadow.get()) {
                         shadow->SetInput(0, card.get());
-                        shadow->SetValue(D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, 3.0f * scale_);
+                        shadow->SetValue(D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, 8.0f * scale_);
                         shadow->SetValue(D2D1_SHADOW_PROP_COLOR,
-                            D2D1::Vector4F(0.0f, 0.0f, 0.0f, 0.22f));
-                        dc->DrawImage(shadow.get(), D2D1::Point2F(0.0f, 1.0f * scale_),
+                            D2D1::Vector4F(0.0f, 0.0f, 0.0f, vm.dark ? 0.44f : 0.28f));
+                        dc->DrawImage(shadow.get(), D2D1::Point2F(0.0f, 3.0f * scale_),
                             D2D1_INTERPOLATION_MODE_LINEAR);
                     }
                     dc->DrawImage(card.get());
@@ -2383,6 +2491,20 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
                 row.trailing_reserve = (std::max)(0.0f,
                     (slot.rc.right - expand_rc.left) - 4.0f * scale_);
             painter_.DrawSidebarItem(row);
+            if (item.editing) {
+                // In-place tag rename: give the hosted edit a real TextField
+                // frame. Geometry must match TagRenameCell in app_main.cpp.
+                D2D1_RECT_F cell = slot.rc;
+                cell.left += 34.0f * scale_;
+                cell.right -= 38.0f * scale_;
+                cell.top += 2.0f * scale_;
+                cell.bottom -= 2.0f * scale_;
+                if (cell.right > cell.left && cell.bottom > cell.top) {
+                    fluent::ControlState field;
+                    field.focused = true;
+                    painter_.DrawTextFieldFrame(cell, field);
+                }
+            }
             if (unpin) {
                 const bool unpin_hot = IsHovered(vm, HitTestResult::SidebarItemAction, slot.run);
                 if (unpin_hot) {
@@ -3465,7 +3587,7 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
         FillRect(dc, brFillInput_.get(), x, y, w, column_header_height_);
         FillRect(dc, brStrokeDivider_.get(), x, y + column_header_height_ - 1, w, 1);
         const DetailsColumnLayout columns = DetailsColumns(
-            bounds, pane.details_column_dividers);
+            bounds, pane.details_column_dividers, pane.is_search);
         float cx = columns.left;
         auto drawCol = [&](const std::wstring& label, SortColumn col, float cw, bool right = false) {
             const bool active = !pane.curated_order && pane.sort_column == col;
@@ -3497,11 +3619,15 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
             cx += cw;
         };
         drawCol(L"\u540D\u79F0", SortColumn::Name, columns.widths[0], false);
+        int col_index = 1;
+        // The path column is display-only: never an active/clickable sort.
+        if (pane.is_search)
+            drawCol(L"\u8DEF\u5F84", SortColumn::Path, columns.widths[col_index++], false);
         drawCol(pane.date_column_label.empty() ? L"\u4FEE\u6539\u65E5\u671F"
                                                 : pane.date_column_label,
-                SortColumn::Mtime, columns.widths[1], false);
-        drawCol(L"\u7C7B\u578B", SortColumn::Type, columns.widths[2], false);
-        drawCol(L"\u5927\u5C0F", SortColumn::Size, columns.widths[3], true);
+                SortColumn::Mtime, columns.widths[col_index++], false);
+        drawCol(L"\u7C7B\u578B", SortColumn::Type, columns.widths[col_index++], false);
+        drawCol(L"\u5927\u5C0F", SortColumn::Size, columns.widths[col_index], true);
         if ((vm.hover_region == static_cast<int>(HitTestResult::ColumnDivider) ||
              vm.column_resize_pressed) && vm.hover_pane_index == pane_index) {
             const int divider = std::clamp(vm.hover_control_index, 0, 2);
@@ -3771,7 +3897,7 @@ D2D1_RECT_F MainRenderer::RenameFieldRect(const PaneViewModel& vm, const D2D1_RE
     const size_t totalTags = tagIndices ? tagIndices->size() : (tagDots ? tagDots->size() : 0);
     const int tagDotCount = static_cast<int>(std::min<size_t>(3, totalTags));
     const float nameColRight = vm.view_mode == ViewMode::Details
-        ? DetailsColumns(list, vm.details_column_dividers).DividerX(0) - margin_
+        ? DetailsColumns(list, vm.details_column_dividers, vm.is_search).DividerX(0) - margin_
         : nameRc.right;
     if (iconGrid && tagDotCount > 0) {
         const float fullNameW = MeasureTextWidth(
@@ -3814,10 +3940,10 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
     ViewLayout layout(vm.view_mode, viewport, entryCount, vm.scroll_x, vm.scroll_y, scale_, row_height_dip_);
     const auto [startIdx, endIdx] = layout.VisibleRange();
     const DetailsColumnLayout detailsColumns = DetailsColumns(
-        viewport, vm.details_column_dividers);
-    const float dateW = detailsColumns.widths[1];
-    const float typeW = detailsColumns.widths[2];
-    const float sizeW = detailsColumns.widths[3];
+        viewport, vm.details_column_dividers, vm.is_search);
+    const float dateW = detailsColumns.widths[detailsColumns.count - 3];
+    const float typeW = detailsColumns.widths[detailsColumns.count - 2];
+    const float sizeW = detailsColumns.widths[detailsColumns.count - 1];
 
     for (int i = startIdx; i >= 0 && i <= endIdx; ++i) {
         const D2D1_RECT_F cell = layout.ItemRect(i);
@@ -3984,6 +4110,15 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
         if (vm.view_mode == ViewMode::Details) {
             float colX = detailsColumns.DividerX(0);
             const float textInset = 8.0f * scale_;
+            if (vm.is_search) {
+                // Folder portion of the hit's full path, end-ellipsized.
+                const float pathW = detailsColumns.widths[1];
+                DrawTextEndEllipsis(dc, compositor_->DwriteFactory(),
+                    compositor_->TextFormat(), brTextSecondary_.get(),
+                    FolderOf(e.path), colX + textInset, textY,
+                    std::max(0.0f, pathW - textInset * 2.0f), textH);
+                colX += pathW;
+            }
             DrawTextRect(dc, compositor_->TextFormat(), brTextSecondary_.get(), e.date_text,
                 colX + textInset, textY, std::max(0.0f, dateW - textInset * 2.0f), textH);
             colX += dateW;
@@ -5273,18 +5408,26 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 return out;
             }
             const DetailsColumnLayout columns = DetailsColumns(
-                paneRc, paneVm.details_column_dividers);
-            for (int divider = 0; divider < 3; ++divider) {
-                if (std::abs(x - columns.DividerX(divider)) <= 4.0f * scale_) {
-                    out.region = HitTestResult::ColumnDivider;
-                    out.index = divider;
-                    return out;
+                paneRc, paneVm.details_column_dividers, paneVm.is_search);
+            // Divider resize stays 4-column only; the search path column is fixed.
+            if (!paneVm.is_search) {
+                for (int divider = 0; divider < 3; ++divider) {
+                    if (std::abs(x - columns.DividerX(divider)) <= 4.0f * scale_) {
+                        out.region = HitTestResult::ColumnDivider;
+                        out.index = divider;
+                        return out;
+                    }
                 }
             }
             out.region = HitTestResult::ColumnHeader;
             if (x < columns.DividerX(0)) out.column = SortColumn::Name;
-            else if (x < columns.DividerX(1)) out.column = SortColumn::Mtime;
-            else if (x < columns.DividerX(2)) out.column = SortColumn::Type;
+            else if (paneVm.is_search && x < columns.DividerX(1)) {
+                // Path column header: not sortable.
+                out.region = HitTestResult::Pane;
+                return out;
+            }
+            else if (x < columns.DividerX(paneVm.is_search ? 2 : 1)) out.column = SortColumn::Mtime;
+            else if (x < columns.DividerX(paneVm.is_search ? 3 : 2)) out.column = SortColumn::Type;
             else out.column = SortColumn::Size;
             return out;
         }
@@ -5318,7 +5461,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                     if (viewRow >= 0 && compositor_ && compositor_->DwriteFactory()) {
                         const D2D1_RECT_F list = PaneListRect(paneRc, extra, paneVm.view_mode);
                         const DetailsColumnLayout columns = DetailsColumns(
-                            list, paneVm.details_column_dividers);
+                            list, paneVm.details_column_dividers, paneVm.is_search);
                         ViewLayout layout(paneVm.view_mode, list, paneVm.EntryCount(),
                                           paneVm.scroll_x, paneVm.scroll_y, scale_, row_height_dip_);
                         const D2D1_RECT_F nameRc = layout.NameRect(viewRow);

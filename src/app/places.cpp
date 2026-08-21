@@ -3,8 +3,8 @@
 #include "session.h"
 #include "../fs/fs_enum.h"
 #include "../common/json_utils.h"
+#include "../common/utf8_file.h"
 #include <algorithm>
-#include <fstream>
 #include <sstream>
 #include <string_view>
 #include <unordered_set>
@@ -159,10 +159,7 @@ PlacesCatalog::~PlacesCatalog() {
 bool PlacesCatalog::SaveTagFile(const std::vector<ColorTag>& snapshot) {
     const std::wstring dir = GetPulseDataDir();
     if (dir.empty()) return false;
-    const std::wstring tmp = dir + L"\\tags.tmp";
-    const std::wstring final = dir + L"\\tags.json";
-    std::wofstream file(tmp, std::wofstream::out | std::wofstream::trunc);
-    if (!file) return false;
+    std::wostringstream file;
     auto write_array = [&](const std::vector<std::wstring>& values) {
         file << L"[";
         for (size_t i = 0; i < values.size(); ++i) {
@@ -186,9 +183,7 @@ bool PlacesCatalog::SaveTagFile(const std::vector<ColorTag>& snapshot) {
         file << L"}" << (i + 1 < snapshot.size() ? L"," : L"") << L"\n";
     }
     file << L"  ]\n}\n";
-    file.close();
-    return MoveFileExW(tmp.c_str(), final.c_str(),
-        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    return WriteUtf8FileAtomic(dir + L"\\tags.json", file.str());
 }
 
 void PlacesCatalog::QueueTagSave() const {
@@ -264,10 +259,8 @@ bool PlacesCatalog::Load() {
     active_workspace = -1;
     std::wstring dir = GetPulseDataDir();
     if (dir.empty()) { EnsureDefaults(); return false; }
-    std::wifstream f(dir + L"\\places.json", std::wifstream::binary);
-    std::wstringstream ss;
-    if (f) ss << f.rdbuf();
-    const std::wstring json = ss.str();
+    std::wstring json;
+    ReadUtf8File(dir + L"\\places.json", json);
     const bool places_loaded = !json.empty();
 
     active_workspace = pulse::json::ExtractInt(json, L"active_workspace");
@@ -397,11 +390,8 @@ bool PlacesCatalog::Load() {
         [](const StarredItem& item) { return item.kind == PlaceItemKind::Folder; });
 
     bool tags_loaded = false;
-    std::wifstream tag_file(dir + L"\\tags.json", std::wifstream::binary);
-    if (tag_file) {
-        std::wstringstream tag_stream;
-        tag_stream << tag_file.rdbuf();
-        const std::wstring tag_json = tag_stream.str();
+    std::wstring tag_json;
+    if (ReadUtf8File(dir + L"\\tags.json", tag_json) && !tag_json.empty()) {
         std::vector<ColorTag> loaded;
         size_t tag_pos = tag_json.find(L"\"tags\"");
         if (tag_pos != std::wstring::npos) tag_pos = tag_json.find(L'[', tag_pos);
@@ -454,10 +444,7 @@ bool PlacesCatalog::Save() const {
     if (!persist) return true;
     std::wstring dir = GetPulseDataDir();
     if (dir.empty()) return false;
-    std::wstring tmp = dir + L"\\places.tmp";
-    std::wstring final = dir + L"\\places.json";
-    std::wofstream f(tmp, std::wofstream::out | std::wofstream::trunc);
-    if (!f) return false;
+    std::wostringstream f;
     auto writeArr = [&](const std::vector<std::wstring>& arr) {
         f << L"[";
         for (size_t i = 0; i < arr.size(); ++i) {
@@ -549,10 +536,8 @@ bool PlacesCatalog::Save() const {
         f << L"\n";
     }
     f << L"  ]\n}\n";
-    f.close();
-    if (!f) return false;
-    const bool saved = MoveFileExW(tmp.c_str(), final.c_str(),
-        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    DeleteFileW((dir + L"\\places.tmp").c_str());
+    const bool saved = WriteUtf8FileAtomic(dir + L"\\places.json", f.str());
     if (saved) places_save_due_ = 0;
     return saved;
 }

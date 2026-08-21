@@ -494,6 +494,26 @@ void ApplySplitRatio(SplitContainer& node, const D2D1_RECT_F& parent_bounds, flo
                                  parent_bounds, node.orientation, gap);
 }
 
+void CollectSplitRatios(const SplitContainer& node, std::vector<float>& out) {
+    if (node.is_leaf) return;
+    out.push_back(node.ratio);
+    if (node.first) CollectSplitRatios(*node.first, out);
+    if (node.second) CollectSplitRatios(*node.second, out);
+}
+
+static void ApplySplitRatiosAt(SplitContainer& node, const std::vector<float>& ratios,
+                               size_t& index) {
+    if (node.is_leaf) return;
+    if (index < ratios.size()) node.ratio = ratios[index++];
+    if (node.first) ApplySplitRatiosAt(*node.first, ratios, index);
+    if (node.second) ApplySplitRatiosAt(*node.second, ratios, index);
+}
+
+void ApplySplitRatios(SplitContainer& node, const std::vector<float>& ratios) {
+    size_t index = 0;
+    ApplySplitRatiosAt(node, ratios, index);
+}
+
 void LayoutSplitTree(const SplitContainer& node, const D2D1_RECT_F& bounds, float gap,
                      std::vector<std::pair<Pane*, D2D1_RECT_F>>& out,
                      std::vector<SplitterLayout>* splitters) {
@@ -939,6 +959,7 @@ void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCat
     out.curated_order = virtual_kind == L"starred" || virtual_kind == L"recent";
     out.is_starred = virtual_kind == L"starred";
     out.is_recent = virtual_kind == L"recent";
+    out.is_search = virtual_kind == L"search";
     out.recent_filter = tab->recent_filter;
     out.recent_total = out.is_recent && places ? places->recent_items.size() : 0;
     out.date_column_label = out.is_recent ? L"最近打开" : L"修改日期";

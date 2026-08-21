@@ -12,6 +12,7 @@ struct TabSessionSnapshot {
     bool pinned = false;
     int group = 0; // TabGroup::id of the owning group; 0 = none
     ui::ViewMode view = ui::ViewMode::Details;
+    std::array<float, 3> columns{}; // details column divider ratios
 };
 
 struct GroupSessionSnapshot {
@@ -46,6 +47,7 @@ struct SessionSnapshot {
     int details_panel_width = 340;
     std::array<float, 3> details_column_dividers{}; // version 3 migration only
     std::vector<PaneSessionSnapshot> pane_tabs; // version 5: full tab/group state per pane
+    std::vector<float> split_ratios; // preorder non-leaf splitter ratios
 };
 
 std::wstring GetPulseDataDir();

@@ -2,8 +2,7 @@
 #include "app_prefs.h"
 #include "session.h"
 #include "../common/json_utils.h"
-#include <fstream>
-#include <sstream>
+#include "../common/utf8_file.h"
 #include <windows.h>
 #include <shlwapi.h>
 
@@ -64,7 +63,16 @@ std::wstring AppPrefs::ToJson() const {
     out += std::to_wstring(row_height);
     out += L",\n  \"tray_icon_size\":";
     out += std::to_wstring(tray_icon_size);
-    out += L"\n}\n";
+    out += L",\n  \"custom_tag_colors\":[";
+    for (size_t i = 0; i < custom_tag_colors.size(); ++i) {
+        wchar_t hex[8]{};
+        swprintf_s(hex, L"%06X", custom_tag_colors[i] & 0x00FFFFFFu);
+        if (i > 0) out += L",";
+        out += L"\"";
+        out += hex;
+        out += L"\"";
+    }
+    out += L"]\n}\n";
     return out;
 }
 
@@ -80,6 +88,16 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     if (row_height < 24 || row_height > 48) row_height = 34;
     tray_icon_size = pulse::json::ExtractInt(json, L"tray_icon_size", 48);
     if (tray_icon_size < 32 || tray_icon_size > 64) tray_icon_size = 48;
+    custom_tag_colors.clear();
+    for (const std::wstring& entry :
+         pulse::json::ExtractStringArray(json, L"custom_tag_colors")) {
+        const wchar_t* text = entry.c_str();
+        if (*text == L'#') ++text;
+        wchar_t* end = nullptr;
+        const unsigned long v = wcstoul(text, &end, 16);
+        if (end && *end == L'\0' && v <= 0xFFFFFFul && wcslen(text) == 6)
+            custom_tag_colors.push_back(static_cast<uint32_t>(v));
+    }
     return true;
 }
 
@@ -159,12 +177,9 @@ bool AppPrefs::Load() {
         launch_on_startup = ReadLaunchOnStartup();
         return false;
     }
-    std::wifstream f(dir + L"\\app.json", std::wifstream::binary);
-    if (f) {
-        std::wstringstream ss;
-        ss << f.rdbuf();
-        FromJson(ss.str());
-    }
+    std::wstring json;
+    if (ReadUtf8File(dir + L"\\app.json", json) && !json.empty())
+        FromJson(json);
     launch_on_startup = ReadLaunchOnStartup();
     return true;
 }
@@ -173,14 +188,7 @@ bool AppPrefs::Save() const {
     if (!persist) return true;
     const std::wstring dir = GetPulseDataDir();
     if (dir.empty()) return false;
-    const std::wstring tmp = dir + L"\\app.tmp";
-    const std::wstring final_path = dir + L"\\app.json";
-    std::wofstream f(tmp, std::wofstream::out | std::wofstream::trunc);
-    if (!f) return false;
-    f << ToJson();
-    f.close();
-    return MoveFileExW(tmp.c_str(), final_path.c_str(),
-                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    return WriteUtf8FileAtomic(dir + L"\\app.json", ToJson());
 }
 
 } // namespace pulse::app

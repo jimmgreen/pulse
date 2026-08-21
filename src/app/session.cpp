@@ -1,15 +1,63 @@
 // session.cpp
 #include "session.h"
 #include "../common/json_utils.h"
+#include "../common/utf8_file.h"
 #include <commctrl.h>
 #include <prsht.h>
 #include <shlobj.h>
-#include <fstream>
 #include <sstream>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 namespace pulse::app {
+namespace {
+
+std::wstring FormatScaled3(const std::array<float, 3>& edges) {
+    return std::to_wstring(static_cast<int>(std::lround(edges[0] * 10000.0f))) + L","
+         + std::to_wstring(static_cast<int>(std::lround(edges[1] * 10000.0f))) + L","
+         + std::to_wstring(static_cast<int>(std::lround(edges[2] * 10000.0f)));
+}
+
+std::array<float, 3> ParseScaled3(const std::wstring& value) {
+    std::array<int, 3> edges{};
+    std::array<float, 3> ratios{};
+    if (swscanf_s(value.c_str(), L"%d,%d,%d",
+                  &edges[0], &edges[1], &edges[2]) == 3 &&
+        edges[0] > 0 && edges[0] < edges[1] &&
+        edges[1] < edges[2] && edges[2] < 10000) {
+        for (size_t i = 0; i < ratios.size(); ++i)
+            ratios[i] = static_cast<float>(edges[i]) / 10000.0f;
+    }
+    return ratios;
+}
+
+std::wstring FormatScaledList(const std::vector<float>& values) {
+    std::wstring out;
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (i) out += L",";
+        out += std::to_wstring(static_cast<int>(std::lround(values[i] * 10000.0f)));
+    }
+    return out;
+}
+
+std::vector<float> ParseScaledList(const std::wstring& value) {
+    std::vector<float> out;
+    size_t pos = 0;
+    while (pos < value.size()) {
+        const size_t comma = value.find(L',', pos);
+        const std::wstring token = value.substr(
+            pos, comma == std::wstring::npos ? std::wstring::npos : comma - pos);
+        const int scaled = _wtoi(token.c_str());
+        if (scaled > 0 && scaled < 10000)
+            out.push_back(static_cast<float>(scaled) / 10000.0f);
+        if (comma == std::wstring::npos) break;
+        pos = comma + 1;
+    }
+    return out;
+}
+
+} // namespace
 
 std::wstring PaneTabsToJson(const std::vector<PaneSessionSnapshot>& panes) {
     std::wstring out = L"[";
@@ -45,6 +93,8 @@ std::wstring PaneTabsToJson(const std::vector<PaneSessionSnapshot>& panes) {
             out += L",\"group\":" + std::to_wstring(tab.group);
             out += L",\"view\":\"";
             out += ui::ViewModeName(tab.view);
+            out += L"\",\"cols\":\"";
+            out += FormatScaled3(tab.columns);
             out += L"\"}";
         }
         out += L"]}";
@@ -152,6 +202,7 @@ bool ParsePaneTabs(const std::wstring& array_json,
                 tab.group = pulse::json::ExtractInt(tj, L"group");
                 tab.view = ui::ParseViewMode(
                     pulse::json::ExtractString(tj, L"view"));
+                tab.columns = ParseScaled3(pulse::json::ExtractString(tj, L"cols"));
                 pane.tabs.push_back(std::move(tab));
             }
         }
@@ -173,14 +224,11 @@ std::wstring GetPulseDataDir() {
 bool SaveSession(const SessionSnapshot& snap) {
     std::wstring dir = GetPulseDataDir();
     if (dir.empty()) return false;
-    std::wstring tmp = dir + L"\\session.tmp";
-    std::wstring final = dir + L"\\session.json";
 
     std::wstring trayJson;
     snap.tray.ToJson(trayJson);
 
-    std::wofstream f(tmp, std::wofstream::out | std::wofstream::trunc);
-    if (!f) return false;
+    std::wostringstream f;
     f << L"{\n";
     f << L"  \"version\":5,\n";
     f << L"  \"left\":" << snap.window_rect.left << L",\n";
@@ -201,6 +249,7 @@ bool SaveSession(const SessionSnapshot& snap) {
     f << L"  \"detailsPanel\":" << (snap.details_panel ? 1 : 0) << L",\n";
     f << L"  \"detailsPanelWidth\":" << std::clamp(snap.details_panel_width, 300, 480)
       << L",\n";
+    f << L"  \"splitRatios\":\"" << FormatScaledList(snap.split_ratios) << L"\",\n";
     f << L"  \"panes\":[";
     for (size_t i = 0; i < snap.pane_paths.size(); ++i) {
         if (i) f << L",";
@@ -221,39 +270,21 @@ bool SaveSession(const SessionSnapshot& snap) {
         if (i) f << L",";
         const std::array<float, 3> edges = i < snap.pane_column_dividers.size()
             ? snap.pane_column_dividers[i] : std::array<float, 3>{};
-        f << L"\""
-          << static_cast<int>(std::lround(edges[0] * 10000.0f)) << L","
-          << static_cast<int>(std::lround(edges[1] * 10000.0f)) << L","
-          << static_cast<int>(std::lround(edges[2] * 10000.0f)) << L"\"";
+        f << L"\"" << FormatScaled3(edges) << L"\"";
     }
     f << L"],\n";
     f << L"  \"tray\":" << trayJson << L",\n";
     f << L"  \"undo\":" << (snap.undo_json.empty() ? L"[]" : snap.undo_json) << L",\n";
     f << L"  \"paneTabs\":" << PaneTabsToJson(snap.pane_tabs) << L"\n";
     f << L"}\n";
-    f.close();
-    if (!f) return false;
-
-    // Atomic replace.
-    if (!MoveFileExW(tmp.c_str(), final.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-        return false;
-    return true;
-}
-
-static std::wstring ReadFileUtf16(const std::wstring& path) {
-    std::wifstream f(path, std::wifstream::binary);
-    if (!f) return L"";
-    std::wstringstream ss;
-    ss << f.rdbuf();
-    return ss.str();
+    return WriteUtf8FileAtomic(dir + L"\\session.json", f.str());
 }
 
 bool LoadSession(SessionSnapshot& snap) {
     std::wstring dir = GetPulseDataDir();
     if (dir.empty()) return false;
-    std::wstring path = dir + L"\\session.json";
-    std::wstring json = ReadFileUtf16(path);
-    if (json.empty()) return false;
+    std::wstring json;
+    if (!ReadUtf8File(dir + L"\\session.json", json) || json.empty()) return false;
 
     snap.window_rect.left = pulse::json::ExtractInt(json, L"left");
     snap.window_rect.top = pulse::json::ExtractInt(json, L"top");
@@ -263,6 +294,7 @@ bool LoadSession(SessionSnapshot& snap) {
     snap.dark = pulse::json::ExtractBool(json, L"dark");
     snap.active_path = pulse::json::ExtractString(json, L"path");
     snap.layout = pulse::json::ExtractInt(json, L"layout");
+    snap.split_ratios = ParseScaledList(pulse::json::ExtractString(json, L"splitRatios"));
     snap.focused_pane = pulse::json::ExtractInt(json, L"focused");
     snap.target_pane = pulse::json::ExtractInt(json, L"target");
     if (json.find(L"\"target\"") == std::wstring::npos) snap.target_pane = -1;
@@ -292,18 +324,8 @@ bool LoadSession(SessionSnapshot& snap) {
     while (snap.pane_views.size() < snap.pane_paths.size())
         snap.pane_views.push_back(ui::ViewMode::Details);
     snap.pane_column_dividers.clear();
-    for (const auto& value : pulse::json::ExtractStringArray(json, L"paneColumns")) {
-        std::array<int, 3> edges{};
-        std::array<float, 3> ratios{};
-        if (swscanf_s(value.c_str(), L"%d,%d,%d",
-                      &edges[0], &edges[1], &edges[2]) == 3 &&
-            edges[0] > 0 && edges[0] < edges[1] &&
-            edges[1] < edges[2] && edges[2] < 10000) {
-            for (size_t i = 0; i < ratios.size(); ++i)
-                ratios[i] = static_cast<float>(edges[i]) / 10000.0f;
-        }
-        snap.pane_column_dividers.push_back(ratios);
-    }
+    for (const auto& value : pulse::json::ExtractStringArray(json, L"paneColumns"))
+        snap.pane_column_dividers.push_back(ParseScaled3(value));
     if (snap.pane_column_dividers.empty() &&
         snap.details_column_dividers[0] > 0.0f) {
         snap.pane_column_dividers.assign(

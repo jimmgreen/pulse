@@ -1,12 +1,15 @@
 // index_engine.h — Filename index: mmap base + heap delta (优化.md R1).
 //
-// Disk format v6 is the in-memory layout. The process maps pulse-index.bin
-// read-only; USN/RDCW mutations append to a small heap delta. Search takes a
-// shared lock and never waits on Status()/Count().
+// V9 aggregate snapshot layout. The process maps the active V9 base read-only;
+// USN/RDCW mutations append to a small heap delta. Search takes a shared lock
+// and never waits on Status()/Count(). V7/V8 snapshots remain readable for
+// migration and rollback.
 #pragma once
 #include "index_config.h"
 #include "index_query.h"
+#include "index_delta.h"
 #include <atomic>
+#include <bit>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -79,9 +82,11 @@ struct DiskHeader {
     uint64_t frn_off;
     uint64_t frn_count;
     uint64_t child_order_off;
-    uint64_t name_order_off;
-    uint64_t size_order_off;
-    uint64_t mtime_order_off;
+    uint64_t name_order_off;   // 0 = absent (v8+)
+    uint64_t size_order_off;   // 0 = absent
+    uint64_t mtime_order_off;  // 0 = absent
+    uint64_t prefix1_off;      // 65537 u32 starts + posting_count i32 ids
+    uint64_t prefix2_off;
 };
 struct DiskVol {
     uint16_t letter = 0;
@@ -91,7 +96,7 @@ struct DiskVol {
     uint64_t journal_id = 0;
     int64_t next_usn = 0;
     int32_t root_idx = -1;
-    int32_t pad2 = 0;
+    int32_t first_idx = 0; // v9: inclusive start of this volume's DFS span
     uint64_t frn_off = 0;
     wchar_t volume_id[64]{};
 };
@@ -104,6 +109,7 @@ struct DiskFrn {
 
 static_assert(sizeof(Node) == 16, "v6 node is 16 bytes");
 static_assert(sizeof(Attr) == 12, "v6 attr is 12 bytes");
+static_assert(sizeof(DiskHeader) == 128, "v8 header fills the 128-byte prefix");
 
 class Engine {
 public:
@@ -156,11 +162,23 @@ private:
         const int32_t* name_order = nullptr;
         const int32_t* size_order = nullptr;
         const int32_t* mtime_order = nullptr;
+        const uint32_t* prefix1_start = nullptr; // 65537 entries
+        const int32_t* prefix1_ids = nullptr;
+        bool prefix1_all_chars = false;
+        const uint32_t* prefix2_start = nullptr;
+        const int32_t* prefix2_ids = nullptr;
         void Close();
         ~MappedFile() { Close(); }
         MappedFile() = default;
         MappedFile(const MappedFile&) = delete;
         MappedFile& operator=(const MappedFile&) = delete;
+    };
+
+    struct QueryShard {
+        std::wstring volume_id;
+        int32_t first = 0;
+        int32_t last = 0;
+        std::unique_ptr<MappedFile> mapped;
     };
 
     struct VolState {
@@ -171,6 +189,7 @@ private:
         uint64_t journal_id = 0;
         int64_t next_usn = 0;
         int32_t root_idx = -1;
+        int32_t first_idx = 0;
         const DiskFrn* frn_base = nullptr;
         uint32_t frn_base_n = 0;
         std::vector<DiskFrn> frn_new;
@@ -188,36 +207,91 @@ private:
         Attr attr{};
     };
 
+    struct MatchSet {
+        std::vector<int32_t> ids;
+        std::vector<uint64_t> bits;
+        size_t total = 0;
+        int32_t universe = 0;
+        bool dense = false;
+        void Clear();
+        void Begin(int32_t n);
+        void Add(int32_t i);
+        template <class Fn>
+        void ForEach(Fn fn) const {
+            if (!dense) {
+                for (int32_t id : ids) fn(id);
+                return;
+            }
+            for (size_t w = 0; w < bits.size(); ++w) {
+                uint64_t x = bits[w];
+                while (x) {
+                    const unsigned b = static_cast<unsigned>(std::countr_zero(x));
+                    fn(static_cast<int32_t>(w * 64 + b));
+                    x &= x - 1;
+                }
+            }
+        }
+    };
+
     void Worker();
     bool TryLoadCache();
     void SaveCache();
+    void MergeBase(bool force);
+    void FlushDeltas();
+    void OpenDeltasLocked();
+    void CloseDeltas();
+    void ReplayDeltasLocked();
+    DeltaLog* DeltaFor(wchar_t letter);
     void FullRebuild();
     void PreserveOfflineVolumesLocked(const std::vector<VolumeInfo>& active,
                                       const IndexConfig& config);
     bool IndexVolumeMft(const VolumeInfo& volume);
+    bool RebuildVolumeMft(const VolumeInfo& volume);
     void WalkTree(int32_t parent, const std::wstring& dir, int depth);
     void CompactLocked();
     bool FlattenLocked(Store& out, std::vector<VolState>& vols_out) const;
     bool WriteIndexFile(const std::wstring& path, const Store& s,
                         const std::vector<VolState>& vols, uint64_t built_unix) const;
+    void WriteVolumeShards(const Store& aggregate, const std::vector<VolState>& vols,
+                           uint64_t built_unix) const;
     bool MapIndexFile(const std::wstring& path, std::unique_ptr<MappedFile>& out) const;
     void AdoptMappedLocked(std::unique_ptr<MappedFile> mapped);
+    void RefreshQueryShardsLocked();
+    const QueryShard* QueryShardForLocked(int32_t id) const;
+    Node QueryNodeAtLocked(int32_t id) const;
+    Attr QueryAttrAtLocked(int32_t id) const;
+    std::wstring_view QueryNameOfLocked(int32_t id) const;
+    std::wstring BuildQueryPathLocked(int32_t id) const;
+    bool MatchQueryNodeLocked(int32_t id, const CompiledQuery& query, int32_t prefix_node,
+                              bool folders_only, bool use_attrs) const;
     void RebuildChildMapLocked();
     bool CommitMappedFile(const std::wstring& path);
 
     void CollectMatchesLocked(const CompiledQuery& cq, int32_t prefix_node,
                               bool folders_only, bool use_attrs,
-                              std::vector<int32_t>& ids,
-                              const std::atomic<uint32_t>* latest, uint32_t expected) const;
+                              MatchSet& out, const std::atomic<uint32_t>* latest,
+                              uint32_t expected) const;
+    void NarrowMatchesLocked(const CompiledQuery& cq, int32_t prefix_node,
+                             bool folders_only, bool use_attrs,
+                             const MatchSet& prev, MatchSet& out,
+                             const std::atomic<uint32_t>* latest, uint32_t expected) const;
     void SortIdsLocked(std::vector<int32_t>& ids, ResultSort sort, bool desc) const;
+    void PartialSortPage(std::vector<int32_t>& ids, size_t offset, size_t limit,
+                         ResultSort sort, bool desc) const;
 
     void StartWalkWatches(const std::vector<std::wstring>& roots);
     void StopWalkWatches();
     void PollWalkWatches();
     void ApplyNotifyLocked(const std::wstring& root, const BYTE* buf, DWORD len);
 
-    bool CatchUpVolume(VolState& v, bool* changed);
-    void ApplyUsnLocked(VolState& v, const USN_RECORD_V2* rec);
+    bool CatchUpVolume(VolState& v, bool* changed, bool* structural = nullptr);
+    enum class UsnApply : uint8_t { None, Attr, Structure };
+    UsnApply ApplyUsnLocked(VolState& v, const USN_RECORD_V2* rec);
+    bool IsIndexNoiseLocked(const VolState& v, const USN_RECORD_V2* rec) const;
+    void ResolveIndexDirFrn();
+    bool InSubtreeLocked(int32_t node, int32_t ancestor) const;
+    int32_t SubtreeEndLocked(int32_t node) const;
+    bool VolumeSpan(const VolState& v, int32_t& lo, int32_t& hi) const;
     int32_t FindByFrnLocked(const VolState& v, uint64_t frn) const;
     static void MapFrnLocked(VolState& v, uint64_t frn, int32_t idx);
 
@@ -263,6 +337,8 @@ private:
     std::wstring status_;
 
     std::unique_ptr<MappedFile> map_;
+    std::vector<QueryShard> query_shards_;
+    bool query_shards_ready_ = false;
     Store live_;  // tests: full store; after mmap: delta only
     Store build_;
     std::vector<VolState> vols_;
@@ -271,9 +347,17 @@ private:
     std::unordered_set<int32_t> tombstones_;
     std::unordered_map<int32_t, Patch> patches_;
     std::unordered_multimap<uint64_t, int32_t> child_map_;
+    std::unordered_map<wchar_t, std::unique_ptr<DeltaLog>> delta_logs_;
     size_t deleted_ = 0;
     size_t pool_waste_ = 0;
     uint64_t built_unix_ = 0;
+    uint64_t index_dir_frn_ = 0;
+    wchar_t index_dir_letter_ = 0;
+    std::atomic<bool> merging_{false};
+    size_t struct_changes_ = 0;
+    ULONGLONG last_merge_tick_ = 0;
+    ULONGLONG last_struct_tick_ = 0;
+    ULONGLONG last_delta_flush_tick_ = 0;
 
     struct WalkWatch {
         std::wstring path;
@@ -293,7 +377,7 @@ private:
     mutable bool cache_ranked_ = false;
     mutable ResultSort cache_sort_ = ResultSort::Index;
     mutable bool cache_sort_desc_ = false;
-    mutable std::vector<int32_t> cache_ids_;
+    mutable MatchSet cache_set_;
 };
 
 } // namespace pulse::index

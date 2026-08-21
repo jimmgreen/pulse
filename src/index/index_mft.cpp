@@ -245,7 +245,12 @@ bool EnumerateMft(HANDLE volume,
         runs.push_back(r);
     }
 
-    std::vector<BYTE> rec(rec_size);
+    // Read the MFT in large sequential blocks. The previous implementation
+    // moved the volume file pointer and issued one ReadFile per record,
+    // turning a multi-million-record scan into millions of kernel calls.
+    constexpr DWORD kReadChunkBytes = 8u * 1024u * 1024u;
+    const DWORD chunk_bytes = kReadChunkBytes - (kReadChunkBytes % rec_size);
+    std::vector<BYTE> chunk(chunk_bytes);
     size_t count = 0;
     uint64_t file_off = 0;
     for (const Run& run : runs) {
@@ -258,16 +263,21 @@ bool EnumerateMft(HANDLE volume,
         uint64_t left = run.clusters * cluster;
         while (left >= rec_size) {
             if (running && !running->load()) return count > 0;
-            if (!ReadAt(volume, disk, rec.data(), rec_size)) break;
-            const uint64_t index = file_off / rec_size;
-            if (!ParseRecord(rec.data(), rec_size, sector, index, [&](MftFile&& f) {
-                ++count;
-                if (progress && (count % 50000) == 0) progress(count);
-                return emit(std::move(f));
-            })) return count > 0;
-            disk += rec_size;
-            file_off += rec_size;
-            left -= rec_size;
+            const uint64_t wanted = (std::min)(left, static_cast<uint64_t>(chunk_bytes));
+            const DWORD bytes = static_cast<DWORD>(wanted - (wanted % rec_size));
+            if (bytes < rec_size || !ReadAt(volume, disk, chunk.data(), bytes)) break;
+            for (DWORD offset = 0; offset < bytes; offset += rec_size) {
+                const uint64_t index = (file_off + offset) / rec_size;
+                if (!ParseRecord(chunk.data() + offset, rec_size, sector, index,
+                                 [&](MftFile&& f) {
+                    ++count;
+                    if (progress && (count % 50000) == 0) progress(count);
+                    return emit(std::move(f));
+                })) return count > 0;
+            }
+            disk += bytes;
+            file_off += bytes;
+            left -= bytes;
         }
         if (left) file_off += left; // partial cluster padding
     }

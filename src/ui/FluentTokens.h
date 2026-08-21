@@ -144,7 +144,7 @@ struct Theme {
     float spacing_unit = 4.0f;
     float row_list = 28.0f;
     float row_header = 32.0f;
-    float row_menu = 32.0f;
+    float row_menu = 36.0f;
     float padding_cell = 12.0f;
     float titlebar_height = kTitleBarHeight;
     float toolbar_height = 40.0f;

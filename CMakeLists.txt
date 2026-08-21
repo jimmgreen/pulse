@@ -22,8 +22,13 @@ add_executable(pulse_index_test
     src/bench/index_test_main.cpp
     src/index/index_config.cpp
     src/index/index_query.cpp
+    src/index/index_shard.cpp
     src/index/network_index.cpp)
 target_link_libraries(pulse_index_test PRIVATE shell32 mpr)
+
+# End-to-end index latency probe. It talks to the installed/running service so
+# timings include the production pipe, query engine, paging, and serialization.
+add_executable(pulse_index_perf src/bench/index_perf_main.cpp)
 
 # ---- Stage 0 visual/perf sample: D2D virtual list (GUI) ----
 add_executable(pulse_d2d_list WIN32 src/bench/d2d_list.cpp)
@@ -42,14 +47,16 @@ target_link_libraries(pulse_fluent_gallery PRIVATE
 file(GLOB_RECURSE PULSE_APP_SOURCES CONFIGURE_DEPENDS
     src/app/*.cpp src/ui/*.cpp src/fs/*.cpp src/ops/*.cpp src/ipc/*.cpp src/index/*.cpp)
 list(FILTER PULSE_APP_SOURCES EXCLUDE REGEX "index_host\\.cpp$")
+list(FILTER PULSE_APP_SOURCES EXCLUDE REGEX "network_agent_main\\.cpp$")
 
 # The local-volume engine runs in Pulse.Index.exe. Production keeps only the
 # lightweight query parser and per-user network index inside pulse.exe.
 option(PULSE_WITH_SELFTEST "Embed the legacy --selftest suite in Pulse.exe" OFF)
 if(NOT PULSE_WITH_SELFTEST)
     list(FILTER PULSE_APP_SOURCES EXCLUDE REGEX "selftest_1b2\\.cpp$")
-    list(FILTER PULSE_APP_SOURCES EXCLUDE REGEX "index_(engine|mft|paths)\\.cpp$")
+    list(FILTER PULSE_APP_SOURCES EXCLUDE REGEX "index_(engine|mft|paths|delta)\\.cpp$")
 endif()
+list(APPEND PULSE_APP_SOURCES src/index/network_agent_client.cpp)
 if(PULSE_APP_SOURCES)
     add_executable(pulse WIN32 ${PULSE_APP_SOURCES})
     if(PULSE_WITH_SELFTEST)
@@ -64,16 +71,20 @@ endif()
 # ---- Pulse.Index.exe: index + query host (session helper or Windows service) ----
 add_executable(pulse_index WIN32
     src/index/index_host.cpp
+    src/index/network_agent_main.cpp
     src/index/index_engine.cpp
     src/index/index_config.cpp
     src/index/index_query.cpp
     src/index/index_mft.cpp
     src/index/index_paths.cpp
+    src/index/index_delta.cpp
+    src/index/index_shard.cpp
+    src/index/network_index.cpp
     src/fs/fs_enum.cpp)
 target_sources(pulse_index PRIVATE src/index/index_host.rc)
 target_link_options(pulse_index PRIVATE /MANIFEST:NO)
 set_target_properties(pulse_index PROPERTIES OUTPUT_NAME "Pulse.Index")
-target_link_libraries(pulse_index PRIVATE advapi32 shlwapi ole32 shell32 netapi32)
+target_link_libraries(pulse_index PRIVATE advapi32 shlwapi ole32 shell32 netapi32 mpr)
 
 # ---- Stage 1B-1 ops self test (console; drives pulse_shell.exe over the pipe) ----
 add_executable(pulse_ops_test

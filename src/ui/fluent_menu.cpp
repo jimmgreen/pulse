@@ -82,7 +82,7 @@ void FluentMenuModel::SetItems(std::vector<FluentMenuItem> items) {
 
 void FluentMenuModel::Layout(IDWriteFactory3* dwrite, float scale, float min_width_px) {
     scale_ = std::max(0.25f, scale);
-    row_h_ = 32.0f * scale_;     // theme.row_menu
+    row_h_ = 36.0f * scale_;     // theme.row_menu
     pad_v_ = 4.0f * scale_;
     sep_h_ = 5.0f * scale_;
 

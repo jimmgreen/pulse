@@ -11,6 +11,7 @@
 #include "index_engine.h"
 #include "index_config.h"
 #include "index_paths.h"
+#include "network_agent_host.h"
 #include <windows.h>
 #include <sddl.h>
 #include <shellapi.h>
@@ -67,6 +68,24 @@ struct Host {
     ULONGLONG idle_since = 0;
     bool ever_client = false;
 } g;
+
+void ServiceTrace(const wchar_t* text) {
+    if (!g.as_service) return;
+    CreateDirectoryW(L"C:\\ProgramData\\Pulse", nullptr);
+    HANDLE file = CreateFileW(L"C:\\ProgramData\\Pulse\\index-service.log",
+                              FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    wchar_t line[512]{};
+    swprintf_s(line, L"%04u-%02u-%02u %02u:%02u:%02u %s\r\n",
+               now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond, text);
+    DWORD bytes = 0;
+    WriteFile(file, line, static_cast<DWORD>(wcslen(line) * sizeof(wchar_t)), &bytes, nullptr);
+    FlushFileBuffers(file);
+    CloseHandle(file);
+}
 
 void SetSvc(DWORD state, DWORD win32 = NO_ERROR) {
     if (!g.svc) return;
@@ -326,6 +345,7 @@ HWND CreateMsgWindow() {
 
 int RunHost(bool as_service) {
     g.as_service = as_service;
+    ServiceTrace(L"RunHost entered");
     SetMachineIndexScope(as_service);
     g.running = true;
     g.idle_since = GetTickCount64();
@@ -341,12 +361,20 @@ int RunHost(bool as_service) {
     }
 
     g.hwnd = CreateMsgWindow();
-    if (!g.hwnd) return 1;
+    if (!g.hwnd) {
+        ServiceTrace(L"CreateMsgWindow failed");
+        if (as_service) SetSvc(SERVICE_STOPPED, GetLastError());
+        return 1;
+    }
+    ServiceTrace(L"message window ready");
     g.stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (as_service) SetSvc(SERVICE_RUNNING);
+    ServiceTrace(L"service running reported");
     g.engine.Start(g.hwnd, WM_ENGINE_NOTIFY);
+    ServiceTrace(L"engine thread started");
     SetTimer(g.hwnd, kIdleTimer, 1000, nullptr);
     g.accept_thread = std::thread(AcceptLoop);
-    if (as_service) SetSvc(SERVICE_RUNNING);
+    ServiceTrace(L"accept thread started");
 
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
@@ -528,5 +556,6 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         if (!StartServiceCtrlDispatcherW(table)) return static_cast<int>(GetLastError());
         return 0;
     }
+    if (a1 == L"--network-agent") return RunNetworkAgent();
     return RunHost(false);
 }

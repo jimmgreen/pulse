@@ -21,11 +21,13 @@
 #include "../fs/fs_enum.h"
 #include "../fs/fs_net_cache.h"
 #include "../ui/fluent_menu.h"
+#include "../ui/color_picker.h"
 #include "../ui/drag_drop.h"
 #include "../ui/ui_renderer.h"
 #include "../ops/ops_manager.h"
 #include "../ops/clipboard.h"
 #include "../common/text_format.h"
+#include "../common/utf8_file.h"
 
 #include <windows.h>
 #include <shellapi.h>
@@ -35,6 +37,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -286,8 +289,8 @@ void TestMenuModel() {
     model.SetItems(items);
     model.Layout(dwrite.get(), 1.0f);    int seps = 0;
     for (const auto& it : items) if (it.separator_after) ++seps;
-    int expect_h = (int)(4 * 2 + 32.0f * (int)items.size() + 5 * seps + 0.5f);
-    Check(model.HeightPx() == expect_h, L"menu: layout height = rows*32 + separators");
+    int expect_h = (int)(4 * 2 + 36.0f * (int)items.size() + 5 * seps + 0.5f);
+    Check(model.HeightPx() == expect_h, L"menu: layout height = rows*36 + separators");
     Check(model.WidthPx() >= 160 && model.WidthPx() <= 320, L"menu: width within clamp");
 
     auto long_undo = BuildItemMenu(true,
@@ -493,6 +496,22 @@ void TestContextMenuPrefs() {
           loaded.seen.size() == 1 && loaded.seen[0].from_com &&
           loaded.explorer_cap == 12 && !loaded.share && loaded.print,
           L"prefs: JSON round-trip keeps override, seen, and defaults");
+
+    Check(prefs.RecordComTiming(L".dwg", 800) && prefs.ComDeferred(L".dwg") == false, L"prefs: one slow COM hit does not defer");
+    prefs.RecordComTiming(L".dwg", 800);
+    prefs.RecordComTiming(L".dwg", 800);
+    Check(prefs.ComDeferred(L".dwg") && !prefs.ComDisabled(L".dwg"),
+          L"prefs: three 500ms+ COM hits defer the extension");
+    prefs.RecordComTiming(L".cad", 1200);
+    prefs.RecordComTiming(L".cad", 1200);
+    prefs.RecordComTiming(L".cad", 1200);
+    Check(prefs.ComDisabled(L".cad"), L"prefs: three 1000ms+ COM hits disable the extension");
+    const std::wstring json_slow = prefs.ToJson();
+    ContextMenuPrefs slow_loaded;
+    slow_loaded.persist = false;
+    Check(slow_loaded.FromJson(json_slow) && slow_loaded.ComDeferred(L".dwg") &&
+              slow_loaded.ComDisabled(L".cad"),
+          L"prefs: slow COM stats round-trip");
 
     loaded.ResetToDefaults();
     Check(loaded.seen.size() == 1 && loaded.item_enabled.empty() && !loaded.share,
@@ -740,6 +759,15 @@ void TestSplitLayout() {
     Check(laid.size() == 2 && laid[0].second.right < 300.0f &&
           laid[1].second.left > laid[0].second.right,
           L"layout: dragging splitter resizes panes");
+    std::vector<float> ratios;
+    CollectSplitRatios(*tree, ratios);
+    Check(ratios.size() == 1 && ratios[0] < 0.35f, L"layout: collect dragged split ratio");
+    auto restored = MakePresetTree(LayoutPreset::TwoVertical, two);
+    ApplySplitRatios(*restored, ratios);
+    laid.clear();
+    LayoutSplitTree(*restored, bounds, 8.0f, laid);
+    Check(laid.size() == 2 && laid[0].second.right < 300.0f,
+          L"layout: apply saved split ratio");
 
     std::vector<Pane*> four{ &a, &b, &c, &d };
     auto grid = MakePresetTree(LayoutPreset::FourGrid, four);
@@ -1520,7 +1548,8 @@ bool SamePaneTabs(const std::vector<PaneSessionSnapshot>& a,
             if (a[i].tabs[t].path != b[i].tabs[t].path ||
                 a[i].tabs[t].pinned != b[i].tabs[t].pinned ||
                 a[i].tabs[t].group != b[i].tabs[t].group ||
-                a[i].tabs[t].view != b[i].tabs[t].view) return false;
+                a[i].tabs[t].view != b[i].tabs[t].view ||
+                a[i].tabs[t].columns != b[i].tabs[t].columns) return false;
         }
     }
     return true;
@@ -1532,7 +1561,7 @@ void TestSessionPaneTabs() {
         panes[0].active = 1;
         panes[0].groups.push_back({ 1, L"工作", 0x00CC6639, false });
         panes[0].groups.push_back({ 2, L"引\"号\\组\n名", 0x003B82F6, true });
-        panes[0].tabs.push_back({ L"C:\\", true, 0, ui::ViewMode::Details });
+        panes[0].tabs.push_back({ L"C:\\", true, 0, ui::ViewMode::Details, { 0.42f, 0.61f, 0.82f } });
         panes[0].tabs.push_back({ L"D:\\代码\\路径 \"quoted\"\\dir", false, 1,
                                   ui::ViewMode::LargeIcons });
         panes[0].tabs.push_back({ L"\\\\?\\UNC\\server\\share\\dir", false, 2,
@@ -1582,6 +1611,74 @@ void TestSessionPaneTabs() {
     }
 }
 
+void TestUtf8PersistFile() {
+    wchar_t temp_dir[MAX_PATH]{};
+    GetTempPathW(ARRAYSIZE(temp_dir), temp_dir);
+    const std::wstring path = std::wstring(temp_dir) + L"pulse-utf8-persist-test.json";
+    const std::wstring json =
+        L"{\"name\":\"紧急修补\",\"unc\":\"\\\\192.168.0.254\\工程项目盘\"}\n";
+    Check(WriteUtf8FileAtomic(path, json), L"utf8file: write Chinese JSON");
+    std::wstring loaded;
+    Check(ReadUtf8File(path, loaded) && loaded == json, L"utf8file: Chinese round-trip");
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    bool utf8 = false;
+    if (file != INVALID_HANDLE_VALUE) {
+        LARGE_INTEGER size{};
+        if (GetFileSizeEx(file, &size) && size.QuadPart > 0 && size.QuadPart < 4096) {
+            std::vector<char> bytes(static_cast<size_t>(size.QuadPart));
+            DWORD read = 0;
+            if (ReadFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr)) {
+                const std::string raw(bytes.data(), bytes.data() + read);
+                utf8 = raw.find("\xE7\xB4\xA7\xE6\x80\xA5\xE4\xBF\xAE\xE8\xA1\xA5") !=
+                       std::string::npos;
+            }
+        }
+        CloseHandle(file);
+    }
+    Check(utf8, L"utf8file: on-disk bytes are UTF-8");
+    DeleteFileW(path.c_str());
+    DeleteFileW((path + L".tmp").c_str());
+}
+
+void TestColorPickerModel() {
+    // Known value from the QFluent reference screenshot (#2FDFF1).
+    {
+        const ui::HsvColor hsv = ui::HsvFromRgb(0x2FDFF1);
+        Check(hsv.h == 186 && hsv.s == 205 && hsv.v == 241,
+              L"colorpicker: HsvFromRgb(#2FDFF1) -> 186/205/241");
+    }
+    Check(ui::RgbFromHsv(0, 0, 128) == 0x808080, L"colorpicker: gray roundtrip exact");
+    Check(ui::RgbFromHsv(360, 255, 255) == 0xFF0000, L"colorpicker: hue 360 wraps to red");
+    Check(ui::RgbFromHsv(0, 255, 255) == 0xFF0000, L"colorpicker: pure red exact");
+    // Roundtrip within +-2 per channel (hue quantization loses a little).
+    bool roundtrip = true;
+    for (const uint32_t rgb : { 0x000000u, 0xFFFFFFu, 0x2FDFF1u, 0xEF4444u,
+                                0x123456u, 0xA855F7u, 0x94A3B8u, 0x0078D4u }) {
+        const ui::HsvColor hsv = ui::HsvFromRgb(rgb);
+        const uint32_t back = ui::RgbFromHsv(hsv.h, hsv.s, hsv.v);
+        for (int shift = 0; shift < 24; shift += 8) {
+            const int a = static_cast<int>((rgb >> shift) & 0xff);
+            const int b = static_cast<int>((back >> shift) & 0xff);
+            if (std::abs(a - b) > 2) roundtrip = false;
+        }
+    }
+    Check(roundtrip, L"colorpicker: RGB<->HSV roundtrip within tolerance");
+
+    uint32_t argb = 0;
+    Check(ui::ParseHexColor(L"#ff2fdff1", argb) && argb == 0xFF2FDFF1u,
+          L"colorpicker: parse #aarrggbb");
+    Check(ui::ParseHexColor(L"2FDFF1", argb) && argb == 0xFF2FDFF1u,
+          L"colorpicker: parse rrggbb implies opaque alpha");
+    Check(!ui::ParseHexColor(L"#12345", argb), L"colorpicker: reject 5 digits");
+    Check(!ui::ParseHexColor(L"#gggggg", argb), L"colorpicker: reject non-hex");
+    Check(!ui::ParseHexColor(L"", argb), L"colorpicker: reject empty");
+    Check(ui::FormatHexColor(0xFF2FDFF1u, true) == L"#ff2fdff1",
+          L"colorpicker: format #aarrggbb lowercase");
+    Check(ui::FormatHexColor(0xFF2FDFF1u, false) == L"#2fdff1",
+          L"colorpicker: format #rrggbb lowercase");
+}
+
 int RunSelfTest1B2() {
     if (AttachConsole(ATTACH_PARENT_PROCESS)) {
         FILE* f = nullptr;
@@ -1616,6 +1713,8 @@ int RunSelfTest1B2() {
     TestChipBlockDragGeometry();
     TestFindGroupRun();
     TestSessionPaneTabs();
+    TestUtf8PersistFile();
+    TestColorPickerModel();
     TestOpsThroughShell();
 
     // Cleanup: real-delete the whole sandbox via the ops layer is overkill;

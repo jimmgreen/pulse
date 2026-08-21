@@ -2,8 +2,8 @@
 #include "context_menu_prefs.h"
 #include "session.h"
 #include "../common/json_utils.h"
-#include <fstream>
-#include <sstream>
+#include "../common/utf8_file.h"
+#include <algorithm>
 #include <windows.h>
 
 namespace pulse::app {
@@ -46,6 +46,7 @@ void ContextMenuPrefs::ResetToDefaults() {
     explorer_cap = 12;
     open_with_mru = 2;
     item_enabled.clear();
+    slow_ext.clear();
 }
 
 bool ContextMenuPrefs::CategoryEnabled(ipc::CtxMenuCategory c) const {
@@ -113,6 +114,43 @@ bool ContextMenuPrefs::RecordSeen(const std::wstring& key, const std::wstring& t
     return true;
 }
 
+bool ContextMenuPrefs::RecordComTiming(const std::wstring& key, uint32_t elapsed_ms) {
+    if (key.empty()) return false;
+    SlowComExt& st = slow_ext[key];
+    st.last_ms = elapsed_ms;
+    bool changed = false;
+    if (elapsed_ms >= 1000) {
+        ++st.timeout_hits;
+        changed = true;
+        if (st.timeout_hits >= 3 && !st.disabled) {
+            st.disabled = true;
+            st.deferred = true;
+        }
+    } else if (elapsed_ms >= 500) {
+        ++st.slow_hits;
+        changed = true;
+        if (st.slow_hits >= 3 && !st.deferred) st.deferred = true;
+    }
+    return changed;
+}
+
+bool ContextMenuPrefs::ComDeferred(const std::wstring& key) const {
+    auto it = slow_ext.find(key);
+    return it != slow_ext.end() && (it->second.deferred || it->second.disabled);
+}
+
+bool ContextMenuPrefs::ComDisabled(const std::wstring& key) const {
+    auto it = slow_ext.find(key);
+    return it != slow_ext.end() && it->second.disabled;
+}
+
+void ContextMenuPrefs::SetComDisabled(const std::wstring& key, bool on) {
+    if (key.empty()) return;
+    SlowComExt& st = slow_ext[key];
+    st.disabled = on;
+    if (!on) st.timeout_hits = 0;
+}
+
 std::wstring ContextMenuPrefs::ToJson() const {
     std::wstring out;
     out += L"{\n  \"version\":1,\n";
@@ -169,7 +207,28 @@ std::wstring ContextMenuPrefs::ToJson() const {
         out += L"\"}";
         out += (i + 1 == seen.size()) ? L"\n" : L",\n";
     }
-    out += L"  ]\n}\n";
+    out += L"  ],\n  \"slow_ext\":{\n";
+    size_t se = 0;
+    for (const auto& kv : slow_ext) {
+        std::wstring key;
+        pulse::json::Escape(kv.first, key);
+        out += L"    \"";
+        out += key;
+        out += L"\":{\"ms\":";
+        out += std::to_wstring(kv.second.last_ms);
+        out += L",\"slow\":";
+        out += std::to_wstring(kv.second.slow_hits);
+        out += L",\"timeout\":";
+        out += std::to_wstring(kv.second.timeout_hits);
+        out += L",\"deferred\":";
+        out += kv.second.deferred ? L"true" : L"false";
+        out += L",\"disabled\":";
+        out += kv.second.disabled ? L"true" : L"false";
+        out += L"}";
+        ++se;
+        out += (se == slow_ext.size()) ? L"\n" : L",\n";
+    }
+    out += L"  }\n}\n";
     return out;
 }
 
@@ -232,31 +291,50 @@ bool ContextMenuPrefs::FromJson(const std::wstring& json) {
             pos = end + 1;
         }
     }
+
+    slow_ext.clear();
+    const std::wstring slow = ExtractObject(json, L"slow_ext");
+    if (!slow.empty()) {
+        size_t p = 1;
+        while (p < slow.size()) {
+            while (p < slow.size() && slow[p] != L'"' && slow[p] != L'}') ++p;
+            if (p >= slow.size() || slow[p] == L'}') break;
+            ++p;
+            const std::wstring key = pulse::json::UnescapeString(slow, p);
+            size_t obj = slow.find(L'{', p);
+            if (obj == std::wstring::npos) break;
+            size_t end = slow.find(L'}', obj);
+            if (end == std::wstring::npos) break;
+            const std::wstring block = slow.substr(obj, end - obj + 1);
+            SlowComExt st;
+            st.last_ms = static_cast<uint32_t>(
+                std::max(0, pulse::json::ExtractInt(block, L"ms", 0)));
+            st.slow_hits = static_cast<uint32_t>(
+                std::max(0, pulse::json::ExtractInt(block, L"slow", 0)));
+            st.timeout_hits = static_cast<uint32_t>(
+                std::max(0, pulse::json::ExtractInt(block, L"timeout", 0)));
+            st.deferred = pulse::json::ExtractBool(block, L"deferred", false);
+            st.disabled = pulse::json::ExtractBool(block, L"disabled", false);
+            if (!key.empty()) slow_ext[key] = st;
+            p = end + 1;
+        }
+    }
     return true;
 }
 
 bool ContextMenuPrefs::Load() {
     const std::wstring dir = GetPulseDataDir();
     if (dir.empty()) return false;
-    std::wifstream f(dir + L"\\context_menu.json", std::wifstream::binary);
-    if (!f) return false;
-    std::wstringstream ss;
-    ss << f.rdbuf();
-    return FromJson(ss.str());
+    std::wstring json;
+    if (!ReadUtf8File(dir + L"\\context_menu.json", json) || json.empty()) return false;
+    return FromJson(json);
 }
 
 bool ContextMenuPrefs::Save() const {
     if (!persist) return true;
     const std::wstring dir = GetPulseDataDir();
     if (dir.empty()) return false;
-    const std::wstring tmp = dir + L"\\context_menu.tmp";
-    const std::wstring final_path = dir + L"\\context_menu.json";
-    std::wofstream f(tmp, std::wofstream::out | std::wofstream::trunc);
-    if (!f) return false;
-    f << ToJson();
-    f.close();
-    return MoveFileExW(tmp.c_str(), final_path.c_str(),
-                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    return WriteUtf8FileAtomic(dir + L"\\context_menu.json", ToJson());
 }
 
 } // namespace pulse::app

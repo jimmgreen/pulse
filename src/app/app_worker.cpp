@@ -151,6 +151,10 @@ static bool CompareEntries(const fs::DirEntry& a, const fs::DirEntry& b,
         if (cmp == 0) cmp = NameCompare(a.name, b.name);
         break;
     }
+    case ui::SortColumn::Path:
+        cmp = _wcsicmp(a.full_path.c_str(), b.full_path.c_str());
+        if (cmp == 0) cmp = NameCompare(a.name, b.name);
+        break;
     }
     if (dir == ui::SortDirection::Desc) cmp = -cmp;
     return cmp < 0;

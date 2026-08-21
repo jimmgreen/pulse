@@ -20,6 +20,14 @@ struct SeenMenuItem {
     ipc::CtxMenuCategory category = ipc::CtxMenuCategory::Software;
 };
 
+struct SlowComExt {
+    uint32_t last_ms = 0;
+    uint32_t slow_hits = 0;   // times >= 500ms
+    uint32_t timeout_hits = 0; // times >= 1000ms
+    bool deferred = false;     // still query async, never block first frame
+    bool disabled = false;     // skip COM query entirely
+};
+
 struct ContextMenuPrefs {
     bool persist = true;
 
@@ -38,6 +46,7 @@ struct ContextMenuPrefs {
 
     std::unordered_map<std::wstring, bool> item_enabled;
     std::vector<SeenMenuItem> seen;
+    std::unordered_map<std::wstring, SlowComExt> slow_ext;
 
     void ResetToDefaults();
     bool CategoryEnabled(ipc::CtxMenuCategory c) const;
@@ -47,6 +56,11 @@ struct ContextMenuPrefs {
     void SetItemEnabled(const std::wstring& key, bool on);
     bool RecordSeen(const std::wstring& key, const std::wstring& text, bool flyout,
                     ipc::CtxMenuCategory category, bool from_com = false);
+    // key: ".dwg" / ":bg" / ":file". Returns true if prefs changed.
+    bool RecordComTiming(const std::wstring& key, uint32_t elapsed_ms);
+    bool ComDeferred(const std::wstring& key) const;
+    bool ComDisabled(const std::wstring& key) const;
+    void SetComDisabled(const std::wstring& key, bool on);
 
     std::wstring ToJson() const;
     bool FromJson(const std::wstring& json);

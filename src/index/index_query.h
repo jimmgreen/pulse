@@ -51,6 +51,8 @@ struct CompiledQuery {
 CompiledQuery ParseQuery(std::wstring_view raw);
 bool QueryCanNarrow(std::wstring_view prev, std::wstring_view next);
 bool QueryUsesAttrs(const CompiledQuery& q);
+size_t QueryPrimaryNameLen(const CompiledQuery& q);
+bool QueryIsSimpleName(const CompiledQuery& q);
 bool MatchName(const wchar_t* s, uint32_t n, const Term& t);
 bool MatchExt(const wchar_t* s, uint32_t n, const Term& t);
 bool MatchSize(uint64_t bytes, const Term& t);

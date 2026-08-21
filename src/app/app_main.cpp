@@ -17,12 +17,14 @@
 #include "details_meta.h"
 #include "context_menu_prefs.h"
 #include "app_prefs.h"
+#include "../ui/color_picker.h"
 #ifdef PULSE_WITH_SELFTEST
 #include "selftest_1b2.h"
 #endif
 #include "resource.h"
 #include "../index/index_client.h"
 #include "../index/network_index.h"
+#include "../index/network_agent_client.h"
 #include "../ops/ops_manager.h"
 #include "../ops/clipboard.h"
 #include "../ipc/ctx_menu_util.h"
@@ -77,9 +79,11 @@ constexpr UINT WM_SHELLCTX_ITEMS = WM_APP + 45;  // std::vector<ops::ShellMenuIt
 constexpr UINT WM_SHELL_VERBS = WM_APP + 46;     // ShellVerbsResult*
 constexpr UINT WM_DETAILS_META = WM_APP + 47;    // DetailsMetaResult*
 constexpr UINT WM_INDEX_CONFIG_RESULT = WM_APP + 48;
+constexpr UINT WM_SHELL_CACHE_INVALIDATE = WM_APP + 49;
 constexpr UINT WM_TRAYICON = WM_APP + 50;
 constexpr UINT WM_NETWORK_INDEX_NOTIFY = WM_APP + 51;
 constexpr UINT WM_NETWORK_INDEX_SEARCH = WM_APP + 52;
+constexpr UINT WM_NETWORK_CONFIG_RESULT = WM_APP + 53;
 constexpr UINT kTimerUi = 1;
 
 struct TagAdsDiscovery {
@@ -137,6 +141,7 @@ struct AppState {
     std::unordered_set<std::wstring> indexConfigPending;
     std::wstring indexConfigError;
     bool indexServiceInstalled = false;
+    bool networkConfigPending = false;
     bool trayIconAdded = false;
     std::unordered_set<std::wstring> tagFallbackVolumes;
     std::unordered_set<std::wstring> tagAdsDiscoveryQueued;
@@ -147,7 +152,7 @@ struct AppState {
     int tagAdsLastFirstRow = -1;
     int tagAdsLastLastRow = -1;
     index::IndexClient index;
-    index::NetworkIndex networkIndex;
+    index::NetworkAgentClient networkIndex;
     struct PendingIndexSearch {
         index::Query query;
         index::SearchResult local;
@@ -248,16 +253,29 @@ struct AppState {
     int session_layout = 0;
     int session_focused = 0;
     int session_target = -1;
+    std::vector<float> session_split_ratios;
     std::unordered_map<std::wstring, std::wstring> gitRoots;
 
     // 1B-2 GUI verification: render the context menu to a PNG, no interaction.
     bool menushot = false;
     std::wstring menushot_out;
+    // Menushot variant: pretend the active tab is a search results view.
+    bool menushot_search = false;
+    // GUI verification for the color picker popup (QFluent replica).
+    bool colorpickshot = false;
+    bool colorpickshot_dark = true;
+    std::wstring colorpickshot_out;
+    // Smoke test: open the interactive color picker dialog on launch.
+    bool colorpickdialog = false;
     // GUI verification for the tray card deck: stage a few files pre-shot.
     bool shot_tray = false;
     int shot_tray_count = 4;
     // GUI verification for tab colors: three tabs, red/yellow/blue strips.
     bool shot_tab_colors = false;
+    // GUI verification for the in-place tag rename field frame.
+    bool shot_tag_rename = false;
+    // GUI verification for the tag drag-reorder: stage a mid-drag frame.
+    bool shot_tag_drag = false;
     // GUI verification for the details panel: open it with a pre-selection.
     bool shot_details = false;
     bool shot_details_multi = false;
@@ -354,6 +372,13 @@ struct AppState {
     struct TagTrack { float start = 0.0f; int durationMs = 150; std::chrono::steady_clock::time_point t0; };
     std::unordered_map<std::wstring, TagTrack> tagTracks; // label -> slide track (slot units)
     std::unordered_map<std::wstring, float> tagOffsets;   // label -> current offset (slot units)
+    // Insertion indicator line at the tentative gap's top edge; chases the
+    // target slot with the same 180ms easeOutCubic as the sibling slides.
+    bool tagGapVisible = false;
+    float tagGapLineY = 0.0f;            // current animated position (px)
+    float tagGapFrom = 0.0f;
+    float tagGapTo = 0.0f;
+    std::chrono::steady_clock::time_point tagGapT0{};
 
     bool starDragPending = false;
     bool starDragActive = false;
@@ -458,6 +483,9 @@ struct ShellVerbsResult {
     std::vector<app::StaticVerb> verbs;
 };
 
+static HANDLE g_shell_watch_stop = nullptr;
+static HANDLE g_shell_watch_thread = nullptr;
+
 // WM_DETAILS_META heap payload (posted by the security/volume fetch thread).
 struct DetailsMetaResult {
     std::wstring path;
@@ -468,6 +496,14 @@ struct IndexConfigResult {
     std::wstring volume_id;
     bool ok = false;
     bool rebuild = false;
+};
+
+struct NetworkConfigResult {
+    int action = 0;
+    bool ok = false;
+    bool pin = false;
+    std::wstring path;
+    std::wstring error;
 };
 
 static AppState* GetAppState(HWND hwnd) {
@@ -672,7 +708,9 @@ static void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
                 row.progress = volume.progress;
                 vm.settings_index_volumes.push_back(std::move(row));
             }
-            for (const auto& root : s.networkIndex.Roots()) {
+            const auto network_roots = s.networkIndex.Roots();
+            vm.settings_network_roots.reserve(network_roots.size());
+            for (const auto& root : network_roots) {
                 ui::NetworkRootRowView row;
                 row.path = root.path;
                 row.state = root.state;
@@ -1156,6 +1194,7 @@ static ui::WindowViewModel BuildVm(AppState& s) {
             }
             vm.tag_drag_group = tagsGroup;
             vm.tag_drag_y = s.tagDragY;
+            vm.tag_gap_line_y = s.tagGapVisible ? s.tagGapLineY : 0.0f;
         }
         for (auto& it : items) {
             const auto off = s.tagOffsets.find(it.label);
@@ -1844,6 +1883,29 @@ static bool ToggleTagForSelection(AppState& s, const app::TagId& tag_id,
     return true;
 }
 
+// Finder-style tag colors: the seven defaults plus any custom colors the
+// user added through the color dialog (persisted in app prefs, shown last).
+static std::vector<uint32_t>& TagColorPalette(AppState& s) {
+    static std::vector<uint32_t> palette;
+    if (palette.empty()) {
+        palette = { 0xEF4444, 0xF59E0B, 0xEAB308, 0x22C55E, 0x3B82F6, 0xA855F7,
+                    0x94A3B8 };
+        for (uint32_t c : s.appPrefs.custom_tag_colors) {
+            if (std::find(palette.begin(), palette.end(), c) == palette.end())
+                palette.push_back(c);
+        }
+    }
+    return palette;
+}
+
+static void AppendCustomTagColor(AppState& s, uint32_t rgb) {
+    std::vector<uint32_t>& palette = TagColorPalette(s);
+    if (std::find(palette.begin(), palette.end(), rgb) != palette.end()) return;
+    palette.push_back(rgb);
+    s.appPrefs.custom_tag_colors.push_back(rgb);
+    s.appPrefs.Save();
+}
+
 static void ShowTagPicker(AppState& s, POINT screen_pt) {
     if (!EnsureMenu(s)) return;
     const std::vector<std::wstring> paths = ActiveTab(s)
@@ -1883,6 +1945,7 @@ static void ShowTagPicker(AppState& s, POINT screen_pt) {
     };
     for (;;) {
         s.menu->SetFilterPlaceholder(L"搜索或新建标签…");
+        s.menu->SetFilterMinWidth(300.0f);
         int command = s.menu->TrackPopup(screen_pt, rebuild(L""), rebuild);
         const std::wstring query = s.menu->LastFilterQuery();
         if (command == app::CmdNone) {
@@ -1901,11 +1964,9 @@ static void ShowTagPicker(AppState& s, POINT screen_pt) {
 
         app::TagId tag_id;
         if (command == kCreateTag) {
-            static constexpr uint32_t kFinderColors[] = {
-                0xEF4444, 0xF59E0B, 0xEAB308, 0x22C55E, 0x3B82F6, 0xA855F7, 0x94A3B8
-            };
+            const std::vector<uint32_t>& palette = TagColorPalette(s);
             tag_id = s.places.CreateTag(query,
-                kFinderColors[s.places.tags.size() % ARRAYSIZE(kFinderColors)]);
+                palette[s.places.tags.size() % palette.size()]);
         } else if (command >= kTagPickerBase &&
                    command < kTagPickerBase + static_cast<int>(s.places.tags.size())) {
             tag_id = s.places.tags[static_cast<size_t>(command - kTagPickerBase)].id;
@@ -1915,6 +1976,75 @@ static void ShowTagPicker(AppState& s, POINT screen_pt) {
     s.menu->SetFilterPlaceholder(L"搜索命令、文件夹…");
 }
 
+static void ShowCreateTagPicker(AppState& s, POINT screen_pt) {
+    if (!EnsureMenu(s)) return;
+    constexpr int kCreateTag = 29999;
+    constexpr int kColorStrip = 30050;
+    constexpr int kColorBase = 30060;
+    constexpr int kCustomColor = 30070;
+    uint32_t selected_rgb = TagColorPalette(s)[0];
+    auto rebuild = [&](const std::wstring& query) {
+        const std::vector<uint32_t>& palette = TagColorPalette(s);
+        ui::FluentMenuItem colors;
+        colors.command = kColorStrip;
+        colors.separator_after = true;
+        colors.quick_swatches.reserve(palette.size());
+        for (int i = 0; i < static_cast<int>(palette.size()); ++i) {
+            ui::FluentMenuSwatch swatch;
+            swatch.command = kColorBase + i;
+            swatch.color = ui::HexColor(palette[static_cast<size_t>(i)]);
+            swatch.checked = selected_rgb == palette[static_cast<size_t>(i)];
+            colors.quick_swatches.push_back(std::move(swatch));
+        }
+        std::vector<ui::FluentMenuItem> items;
+        items.push_back(std::move(colors));
+        ui::FluentMenuItem create;
+        create.command = kCreateTag;
+        create.text = query.empty() ? L"输入标签名称" : L"创建标签“" + query + L"”";
+        create.glyph = L"\xE710";
+        create.enabled = !query.empty();
+        items.push_back(std::move(create));
+        ui::FluentMenuItem custom;
+        custom.command = kCustomColor;
+        custom.text = L"自定义颜色…";
+        custom.has_swatch = true;
+        custom.swatch_color = ui::HexColor(selected_rgb);
+        custom.separator_after = true;
+        items.push_back(std::move(custom));
+        return items;
+    };
+    std::wstring name;
+    for (;;) {
+        s.menu->SetFilterPlaceholder(L"新建标签…");
+        s.menu->SetFilterMinWidth(300.0f);
+        s.menu->SetInitialFilterText(name);
+        const int command = s.menu->TrackPopup(screen_pt, rebuild(name), rebuild);
+        name = s.menu->LastFilterQuery();
+        if (command >= kColorBase && command < kColorBase +
+            static_cast<int>(TagColorPalette(s).size())) {
+            selected_rgb = TagColorPalette(s)[static_cast<size_t>(command - kColorBase)];
+            continue;
+        }
+        if (command == kCustomColor) {
+            uint32_t picked = selected_rgb;
+            if (ui::ColorPickerPopup::Pick(s.hwnd, &s.compositor, s.menu.get(), s.scale,
+                                           screen_pt, picked, s.darkMode, picked)) {
+                selected_rgb = picked;
+                // Accepted custom colors join the swatch strip (last dot).
+                AppendCustomTagColor(s, picked);
+            }
+            continue;
+        }
+        if ((command == kCreateTag ||
+             (command == app::CmdNone && s.menu->LastFilterCommitted())) && !name.empty()) {
+            s.places.CreateTag(name, selected_rgb);
+        }
+        break;
+    }
+    s.menu->SetFilterPlaceholder(L"搜索命令、文件夹…");
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
 static void ShowTagSidebarMenu(AppState& s, const app::TagId& tag_id, POINT screen_pt) {
     if (!EnsureMenu(s)) return;
     const app::ColorTag* tag = s.places.FindTag(tag_id);
@@ -1922,23 +2052,28 @@ static void ShowTagSidebarMenu(AppState& s, const app::TagId& tag_id, POINT scre
     constexpr int kRename = 31000;
     constexpr int kColorBase = 31100;
     constexpr int kDelete = 31200;
-    static constexpr uint32_t kFinderColors[] = {
-        0xEF4444, 0xF59E0B, 0xEAB308, 0x22C55E, 0x3B82F6, 0xA855F7, 0x94A3B8
-    };
+    const std::vector<uint32_t>& palette = TagColorPalette(s);
     std::vector<ui::FluentMenuItem> items;
     ui::FluentMenuItem rename;
     rename.command = kRename;
     rename.text = L"重命名标签…";
     rename.glyph = L"\xE8AC";
     items.push_back(std::move(rename));
-    for (int i = 0; i < static_cast<int>(ARRAYSIZE(kFinderColors)); ++i) {
+    for (int i = 0; i < static_cast<int>(palette.size()); ++i) {
+        const uint32_t rgb = palette[static_cast<size_t>(i)];
         ui::FluentMenuItem color;
         color.command = kColorBase + i;
-        color.text = i == 0 ? L"红色" : i == 1 ? L"橙色" : i == 2 ? L"黄色"
-                   : i == 3 ? L"绿色" : i == 4 ? L"蓝色" : i == 5 ? L"紫色" : L"灰色";
+        if (i < 7) {
+            color.text = i == 0 ? L"红色" : i == 1 ? L"橙色" : i == 2 ? L"黄色"
+                       : i == 3 ? L"绿色" : i == 4 ? L"蓝色" : i == 5 ? L"紫色" : L"灰色";
+        } else {
+            wchar_t hex[8]{};
+            swprintf_s(hex, L"#%06X", rgb);
+            color.text = hex;
+        }
         color.has_swatch = true;
-        color.swatch_color = ui::HexColor(kFinderColors[i]);
-        color.checked = tag->rgb == kFinderColors[i];
+        color.swatch_color = ui::HexColor(rgb);
+        color.checked = tag->rgb == rgb;
         items.push_back(std::move(color));
     }
     items.back().separator_after = true;
@@ -1959,6 +2094,7 @@ static void ShowTagSidebarMenu(AppState& s, const app::TagId& tag_id, POINT scre
             return std::vector<ui::FluentMenuItem>{ std::move(item) };
         };
         s.menu->SetFilterPlaceholder(tag->name);
+        s.menu->SetFilterMinWidth(300.0f);
         const int apply = s.menu->TrackPopup(screen_pt, rebuild(L""), rebuild);
         const std::wstring name = s.menu->LastFilterQuery();
         s.menu->SetFilterPlaceholder(L"搜索命令、文件夹…");
@@ -1969,9 +2105,9 @@ static void ShowTagSidebarMenu(AppState& s, const app::TagId& tag_id, POINT scre
             if (s.places.RenameTag(tag_id, name))
                 QueueTagAds(s, BuildTagAdsUpdates(s.places, affected));
         }
-    } else if (command >= kColorBase && command < kColorBase + 7) {
+    } else if (command >= kColorBase && command < kColorBase + static_cast<int>(palette.size())) {
         const std::vector<std::wstring> affected = s.places.PathsForTag(tag_id);
-        if (s.places.SetTagColor(tag_id, kFinderColors[command - kColorBase]))
+        if (s.places.SetTagColor(tag_id, palette[static_cast<size_t>(command - kColorBase)]))
             QueueTagAds(s, BuildTagAdsUpdates(s.places, affected));
     } else if (command == kDelete) {
         const size_t count = s.places.PathsForTag(tag_id).size();
@@ -1995,6 +2131,24 @@ static void DispatchMenuCommand(AppState& s, int cmd) {
     }
     switch (cmd) {
     case app::CmdOpen: OpenSelected(s); break;
+    case app::CmdOpenPath: {
+        // Reveal the hit in its containing folder (search results).
+        app::Tab* tab = ActiveTab(s);
+        const std::wstring full = tab ? SelectedFullPath(s) : L"";
+        if (!full.empty()) {
+            const std::wstring parent = fs::ParentPath(full);
+            const size_t slash = full.find_last_of(L"\\/");
+            const std::wstring leaf =
+                slash == std::wstring::npos ? full : full.substr(slash + 1);
+            if (!parent.empty() && !leaf.empty()) {
+                tab->pending_selected_name = leaf;
+                tab->pending_selected_names = { leaf };
+                tab->pending_ensure_selection_visible = true;
+                NavigateTo(s, parent);
+            }
+        }
+        break;
+    }
     case app::CmdCut: CollectToTray(s, true); break;
     case app::CmdCopy: CollectToTray(s, false); break;
     case app::CmdPaste: PasteIntoCurrent(s); break;
@@ -2141,6 +2295,18 @@ static std::vector<ui::FluentMenuItem> BuildFinderItemMenu(
         return item.command == app::CmdTags;
     });
     if (!quick_tags.quick_swatches.empty()) items.insert(picker, std::move(quick_tags));
+    // Search results mix folders, so offer "reveal in containing folder"
+    // right after 打开 (item menus only; pointless in a real folder view).
+    const app::Tab* tab = ActiveTab(s);
+    std::wstring view_kind;
+    if (tab && app::ParsePulsePath(tab->current_path, &view_kind, nullptr) &&
+        view_kind == L"search") {
+        ui::FluentMenuItem open_path;
+        open_path.command = app::CmdOpenPath;
+        open_path.text = L"打开路径";
+        open_path.glyph = L"\xE8B7"; // folder glyph, same family as kGlyphFolder
+        items.insert(items.begin() + 1, std::move(open_path));
+    }
     return items;
 }
 
@@ -2178,6 +2344,83 @@ static void PrefetchStaticVerbs(AppState& s, const std::wstring& ext) {
         auto* result = new ShellVerbsResult{ ext, app::EnumerateStaticVerbs(ext) };
         if (!PostMessageW(hwnd, WM_SHELL_VERBS, 0, reinterpret_cast<LPARAM>(result)))
             delete result;
+    }).detach();
+}
+
+static DWORD WINAPI ShellRegistryWatch(LPVOID param) {
+    HWND hwnd = static_cast<HWND>(param);
+    HANDLE stop = g_shell_watch_stop;
+    if (!stop) return 0;
+    struct Watch {
+        HKEY key = nullptr;
+        HANDLE event = nullptr;
+    };
+    Watch watches[3]{};
+    auto open = [](HKEY root, const wchar_t* sub, Watch& w) {
+        if (RegOpenKeyExW(root, sub, 0, KEY_NOTIFY, &w.key) != ERROR_SUCCESS) return;
+        w.event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        if (w.event)
+            RegNotifyChangeKeyValue(w.key, TRUE, REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET,
+                                    w.event, TRUE);
+    };
+    open(HKEY_CURRENT_USER, L"Software\\Classes", watches[0]);
+    open(HKEY_LOCAL_MACHINE, L"Software\\Classes", watches[1]);
+    open(HKEY_CURRENT_USER,
+         L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts", watches[2]);
+    HANDLE wait[4]{ stop, nullptr, nullptr, nullptr };
+    DWORD count = 1;
+    for (int i = 0; i < 3; ++i)
+        if (watches[i].event) wait[count++] = watches[i].event;
+    while (WaitForMultipleObjects(count, wait, FALSE, INFINITE) != WAIT_OBJECT_0) {
+        if (!IsWindow(hwnd)) break;
+        PostMessageW(hwnd, WM_SHELL_CACHE_INVALIDATE, 0, 0);
+        for (int i = 0; i < 3; ++i) {
+            if (watches[i].key && watches[i].event)
+                RegNotifyChangeKeyValue(watches[i].key, TRUE,
+                                        REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET,
+                                        watches[i].event, TRUE);
+        }
+    }
+    for (auto& w : watches) {
+        if (w.event) CloseHandle(w.event);
+        if (w.key) RegCloseKey(w.key);
+    }
+    return 0;
+}
+
+static void StartShellRegistryWatch(HWND hwnd) {
+    if (g_shell_watch_thread) return;
+    g_shell_watch_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    g_shell_watch_thread = CreateThread(nullptr, 0, ShellRegistryWatch, hwnd, 0, nullptr);
+}
+
+static void StopShellRegistryWatch() {
+    if (g_shell_watch_stop) SetEvent(g_shell_watch_stop);
+    if (g_shell_watch_thread) {
+        WaitForSingleObject(g_shell_watch_thread, 2000);
+        CloseHandle(g_shell_watch_thread);
+        g_shell_watch_thread = nullptr;
+    }
+    if (g_shell_watch_stop) {
+        CloseHandle(g_shell_watch_stop);
+        g_shell_watch_stop = nullptr;
+    }
+}
+
+static void SeedShellVerbCache(AppState& s) {
+    std::unordered_map<std::wstring, std::vector<app::StaticVerb>> machine;
+    if (!app::LoadMachineStaticVerbCache(machine) || machine.empty()) return;
+    for (auto& [ext, verbs] : machine)
+        if (!s.shellVerbCache.count(ext)) s.shellVerbCache[ext] = std::move(verbs);
+    HWND hwnd = s.hwnd;
+    std::thread([hwnd, machine]() mutable {
+        size_t n = 0;
+        for (auto& [ext, ignored] : machine) {
+            if (n++ > 400) break;
+            auto* result = new ShellVerbsResult{ ext, app::EnumerateStaticVerbs(ext) };
+            if (!PostMessageW(hwnd, WM_SHELL_VERBS, 0, reinterpret_cast<LPARAM>(result)))
+                delete result;
+        }
     }).detach();
 }
 
@@ -2220,6 +2463,18 @@ static void StartCtxQuery(AppState& s, std::vector<std::wstring> paths,
         return;
     }
     CloseCtxSession(s);
+    const std::wstring com_key = ComCacheKey(background, background ? L"" : ext);
+    if (s.ctxMenuPrefs.ComDisabled(com_key)) {
+        s.ctxPaths = std::move(paths);
+        s.ctxBackground = background;
+        s.ctxStaticExt = background ? L"" : ext;
+        if (!s.ctxStaticExt.empty()) {
+            auto it = s.shellVerbCache.find(s.ctxStaticExt);
+            if (it != s.shellVerbCache.end()) s.ctxStaticVerbs = it->second;
+            else PrefetchStaticVerbs(s, s.ctxStaticExt);
+        }
+        return;
+    }
     const bool extended = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
     s.ctxToken = s.ops.QueryShellMenu(paths, s.hwnd, background, extended);
     s.ctxPaths = std::move(paths);
@@ -2253,9 +2508,10 @@ static void WaitForShellMenuReady(AppState& s) {
     if (s.ctxComReady) return;
     const bool have_cache =
         s.shellComCache.count(ComCacheKey(s.ctxBackground, s.ctxStaticExt)) != 0;
-    if (have_cache) return; // first frame from cache; live ids replace in place
-    // Cold extension: wait for the real IContextMenu (up to 2s from mouse-up).
-    const ULONGLONG deadline = GetTickCount64() + 2000;
+    if (have_cache) return;
+    // First frame is built-in + static (machine seed / prefetch). COM rows
+    // append via ReplaceItems; never block the popup on a 2s QueryContextMenu.
+    const ULONGLONG deadline = GetTickCount64() + 50;
     while (!s.ctxComReady) {
         const ULONGLONG now = GetTickCount64();
         if (now >= deadline) break;
@@ -2817,21 +3073,12 @@ static void CancelScrollAnimation(AppState& s) {
 }
 
 // --- Tag slide animation ------------------------------------------------------
-// Fluent spring curve shared by QFluentKit Pivot/SegmentedWidget indicators:
-// cubic-bezier(0.34, 1.56, 0.64, 1.0) — y1 > 1 gives the visible overshoot.
-static float TagEaseSpring(float x) {
-    const float x1 = 0.34f, y1 = 1.56f, x2 = 0.64f, y2 = 1.0f;
-    float t = x; // Newton-Raphson: solve x(t) = x for the bezier parameter
-    for (int i = 0; i < 6; ++i) {
-        const float u = 1.0f - t;
-        const float bx = 3.0f * u * u * t * x1 + 3.0f * u * t * t * x2 + t * t * t - x;
-        if (std::abs(bx) < 1e-4f) break;
-        const float dx = 3.0f * u * u * x1 + 6.0f * u * t * (x2 - x1) + 3.0f * t * t * (1.0f - x2);
-        if (std::abs(dx) < 1e-6f) break;
-        t = std::clamp(t - bx / dx, 0.0f, 1.0f);
-    }
-    const float u = 1.0f - t;
-    return 3.0f * u * u * t * y1 + 3.0f * u * t * t * y2 + t * t * t;
+// SortableJS-style reorder motion: a quick easeOutCubic with no overshoot.
+// On 32px rows an overshoot spring (the old Pivot indicator curve) reads as
+// wobble, especially when fast drags restart the track mid-flight.
+static float TagEaseOutCubic(float x) {
+    const float u = 1.0f - x;
+    return 1.0f - u * u * u;
 }
 
 static float TagEaseInOutQuad(float t) { // used by the window-tab slide animation
@@ -2848,8 +3095,20 @@ static void TickTagTransitions(AppState& s) {
             s.tagOffsets.erase(it->first);
             it = s.tagTracks.erase(it);
         } else {
-            s.tagOffsets[it->first] = it->second.start * (1.0f - TagEaseSpring(t));
+            s.tagOffsets[it->first] = it->second.start * (1.0f - TagEaseOutCubic(t));
             ++it;
+        }
+    }
+    // Insertion indicator chase (same 180ms easeOutCubic as the slides).
+    if (s.tagGapFrom != s.tagGapTo) {
+        const float t = std::chrono::duration<float, std::milli>(now - s.tagGapT0).count()
+            / 180.0f;
+        if (t >= 1.0f) {
+            s.tagGapLineY = s.tagGapTo;
+            s.tagGapFrom = s.tagGapTo;
+        } else {
+            s.tagGapLineY = s.tagGapFrom +
+                (s.tagGapTo - s.tagGapFrom) * TagEaseOutCubic(t);
         }
     }
 }
@@ -3037,6 +3296,7 @@ static void RestorePaneTabs(AppState& s, app::Pane& pane,
         auto tab = std::make_unique<app::Tab>();
         tab->pinned = ts.pinned;
         tab->view_mode = ts.view;
+        tab->details_column_dividers = ts.columns;
         // Drop membership in groups that were not restored.
         int gid = ts.group;
         if (gid != 0) {
@@ -4665,31 +4925,57 @@ static void HandleIndexAction(AppState& s, int action) {
     }).detach();
 }
 
-static void HandleNetworkIndexAction(AppState& s, int action) {
+static void HandleNetworkIndexAction(AppState& s, int action, bool pin_after_add = false) {
+    if (s.networkConfigPending) return;
     if (action == 1) {
         s.indexConfigError.clear();
-        s.networkIndex.Rebuild();
+        s.networkConfigPending = true;
+        const HWND hwnd = s.hwnd;
+        auto* client = &s.networkIndex;
+        std::thread([hwnd, client] {
+            client->Rebuild();
+            auto* result = new NetworkConfigResult;
+            result->action = 1;
+            result->ok = true;
+            if (!PostMessageW(hwnd, WM_NETWORK_CONFIG_RESULT, 0,
+                              reinterpret_cast<LPARAM>(result))) delete result;
+        }).detach();
         return;
     }
     if (action != 0) return;
     std::wstring path;
     if (!PickFolder(s.hwnd, path, L"选择要索引的服务器文件夹")) return;
-    std::wstring error;
-    if (!s.networkIndex.AddRoot(path, &error)) {
-        s.indexConfigError = error.empty() ? L"无法添加服务器文件夹。" : error;
-    } else {
-        s.indexConfigError.clear();
-    }
+    s.networkConfigPending = true;
+    s.indexConfigError.clear();
+    const HWND hwnd = s.hwnd;
+    auto* client = &s.networkIndex;
+    std::thread([hwnd, client, pin_after_add, path = std::move(path)] {
+        auto* result = new NetworkConfigResult;
+        result->action = 0;
+        result->pin = pin_after_add;
+        result->path = path;
+        result->ok = client->AddRoot(path, &result->error);
+        if (!PostMessageW(hwnd, WM_NETWORK_CONFIG_RESULT, 0,
+                          reinterpret_cast<LPARAM>(result))) delete result;
+    }).detach();
 }
 
 static void RemoveNetworkIndexRoot(AppState& s, int index) {
+    if (s.networkConfigPending) return;
     const auto roots = s.networkIndex.Roots();
     if (index < 0 || index >= static_cast<int>(roots.size())) return;
-    std::wstring error;
-    if (!s.networkIndex.RemoveRoot(roots[static_cast<size_t>(index)].path, &error))
-        s.indexConfigError = error.empty() ? L"无法移除服务器文件夹。" : error;
-    else
-        s.indexConfigError.clear();
+    s.networkConfigPending = true;
+    s.indexConfigError.clear();
+    const HWND hwnd = s.hwnd;
+    auto* client = &s.networkIndex;
+    const std::wstring path = roots[static_cast<size_t>(index)].path;
+    std::thread([hwnd, client, path] {
+        auto* result = new NetworkConfigResult;
+        result->action = 2;
+        result->ok = client->RemoveRoot(path, &result->error);
+        if (!PostMessageW(hwnd, WM_NETWORK_CONFIG_RESULT, 0,
+                          reinterpret_cast<LPARAM>(result))) delete result;
+    }).detach();
 }
 
 static void CloseActiveTab(AppState& s) {
@@ -5355,9 +5641,42 @@ static void UpdateOperationWindow(AppState& s, bool allow_conflict_dialog) {
     } else if (status.phase == ops::OpPhase::Failed) {
         if (status.last_error == L"已取消") {
             s.operationWindow->Hide();
-        } else if (!s.operationWindow->IsVisible()) {
-            s.operationWindow->Show(true);
+            return;
         }
+        const bool simple = status.type == ops::OpType::CreateFolder
+                         || status.type == ops::OpType::CreateTextFile
+                         || status.type == ops::OpType::Rename;
+        if (simple) {
+            if (s.operationWindow->IsVisible()) s.operationWindow->Hide();
+            if (status.task_id == 0 || status.task_id == s.operationDismissedTaskId)
+                return;
+            s.operationDismissedTaskId = status.task_id;
+            if (status.type == ops::OpType::CreateFolder ||
+                status.type == ops::OpType::CreateTextFile)
+                s.pendingRenameName.clear();
+            const bool folder = status.type == ops::OpType::CreateFolder;
+            const bool file = status.type == ops::OpType::CreateTextFile;
+            std::wstring text = folder ? L"无法新建文件夹"
+                : file ? L"无法新建文本文档" : L"无法重命名";
+            text += L"\n\n";
+            const std::wstring& err = status.last_error;
+            const bool no_access = err.find(L"没有权限") != std::wstring::npos
+                || err.find(L"拒绝访问") != std::wstring::npos
+                || err.find(L"Access is denied") != std::wstring::npos
+                || err == L"create failed";
+            if (no_access) {
+                text += folder || file
+                    ? L"当前文件夹没有写入权限。"
+                    : L"没有权限重命名此项。";
+            } else if (!err.empty()) {
+                text += err;
+            } else {
+                text += L"操作失败。";
+            }
+            MessageBoxW(s.hwnd, text.c_str(), L"Pulse", MB_OK | MB_ICONWARNING);
+            return;
+        }
+        if (!s.operationWindow->IsVisible()) s.operationWindow->Show(true);
     }
 }
 
@@ -5438,6 +5757,8 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         s->places.Load();
         s->ctxMenuPrefs.Load();
         s->appPrefs.Load();
+        SeedShellVerbCache(*s);
+        StartShellRegistryWatch(hwnd);
         s->renderer.SetRowHeightDip(static_cast<float>(s->appPrefs.row_height));
         s->renderer.SetTrayIconDip(static_cast<float>(s->appPrefs.tray_icon_size));
         ApplyAppWindowChrome(*s);
@@ -5503,8 +5824,18 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             // Version-5 session: rebuild every tab and group in every pane.
             if (s->session_layout > 0)
                 ApplyLayoutPreset(*s, static_cast<app::LayoutPreset>(s->session_layout));
+            if (s->root && !s->session_split_ratios.empty())
+                app::ApplySplitRatios(*s->root, s->session_split_ratios);
             for (size_t i = 0; i < s->panes.size() && i < s->session_pane_tabs.size(); ++i)
                 RestorePaneTabs(*s, *s->panes[i], s->session_pane_tabs[i]);
+            for (size_t i = 0; i < s->panes.size() && i < s->session_pane_columns.size(); ++i) {
+                const auto& cols = s->session_pane_columns[i];
+                if (cols[0] <= 0.0f) continue;
+                for (auto& tab : s->panes[i]->tabs) {
+                    if (tab && tab->details_column_dividers[0] <= 0.0f)
+                        tab->details_column_dividers = cols;
+                }
+            }
             if (!s->session_path.empty())
                 RememberPath(*s, s->session_path);
             else if (app::Tab* t = ActiveTab(*s))
@@ -5532,6 +5863,8 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
         if (!s->shot.active && s->session_layout > 0) {
             ApplyLayoutPreset(*s, static_cast<app::LayoutPreset>(s->session_layout));
+            if (s->root && !s->session_split_ratios.empty())
+                app::ApplySplitRatios(*s->root, s->session_split_ratios);
             for (size_t i = 0; i < s->panes.size() && i < s->session_pane_paths.size(); ++i) {
                 const std::wstring& pth = s->session_pane_paths[i];
                 if (pth.empty()) continue;
@@ -5880,7 +6213,7 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 dirty = true;
             }
             // Tag slide animation.
-            if (!s->tagTracks.empty()) {
+            if (!s->tagTracks.empty() || s->tagGapFrom != s->tagGapTo) {
                 TickTagTransitions(*s);
                 dirty = true;
             }
@@ -6602,6 +6935,8 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 s->tagDragTag = -1;
                 s->tagDragPath.clear();
                 s->tagOrder.clear();
+                s->tagGapVisible = false;
+                s->tagGapFrom = s->tagGapTo = s->tagGapLineY = 0.0f;
             } else {
                 if (!s->tagDragActive &&
                     std::abs(my - s->tagDragStartPt.y) >= 2 && // TabBar starts on a 2px delta
@@ -6641,6 +6976,11 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                         s->tagOrder.resize(s->places.tags.size());
                         for (int i = 0; i < static_cast<int>(s->tagOrder.size()); ++i)
                             s->tagOrder[i] = i;
+                        // The indicator starts at the grabbed slot, no chase yet.
+                        s->tagGapVisible = true;
+                        s->tagGapLineY = self.top;
+                        s->tagGapFrom = s->tagGapTo = self.top;
+                        s->tagGapT0 = std::chrono::steady_clock::now();
                     } else {
                         s->tagDragPending = false; // geometry unavailable: plain click
                     }
@@ -6659,38 +6999,53 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                         for (int p = 0; p < static_cast<int>(s->tagOrder.size()); ++p)
                             if (s->tagOrder[p] == s->tagDragTag) { cur = p; break; }
                         const int n = static_cast<int>(s->tagOrder.size());
-                        const int adj = dy < 0 ? cur - 1 : cur + 1;
-                        int swapWith = -1;
-                        if (cur >= 0 && adj >= 0 && adj < n) {
-                            // Compare against the sibling's current (possibly
-                            // mid-slide) center, exactly like QFluent TabBar.
-                            const int adjIdx = s->tagOrder[adj];
-                            const std::wstring& adjLabel =
-                                s->places.tags[static_cast<size_t>(adjIdx)].name;
-                            const auto oit = s->tagOffsets.find(adjLabel);
-                            const float adjOff =
-                                oit != s->tagOffsets.end() ? oit->second : 0.0f;
-                            const float adjCenter = s->tagFlowTop
-                                + (adj + adjOff) * s->tagPitch + s->tagSlotH * 0.5f;
-                            if ((dy < 0 && s->tagDragFloatTop < adjCenter) ||
-                                (dy > 0 && s->tagDragFloatTop + s->tagSlotH > adjCenter))
-                                swapWith = adj;
-                        }
-                        if (swapWith >= 0) {
-                            const int siblingIdx = s->tagOrder[swapWith];
-                            std::swap(s->tagOrder[cur], s->tagOrder[swapWith]);
-                            // The sibling slides from its current visual slot to the
-                            // slot the dragged tag just vacated (spring curve).
-                            const std::wstring& label =
-                                s->places.tags[static_cast<size_t>(siblingIdx)].name;
-                            const auto off = s->tagOffsets.find(label);
-                            const float curOff = off != s->tagOffsets.end() ? off->second : 0.0f;
-                            const float start = static_cast<float>(swapWith) + curOff
-                                - static_cast<float>(cur);
-                            if (std::abs(start) >= 0.01f) {
-                                s->tagTracks[label] = AppState::TagTrack{
-                                    start, 300, std::chrono::steady_clock::now() };
-                                s->tagOffsets[label] = start;
+                        if (cur >= 0 && s->tagPitch > 0.0f) {
+                            // SortableJS-style insertion target: the dragged card's
+                            // center maps straight to a flow slot, so a fast flick
+                            // crosses several rows in a single mouse event.
+                            const int target = std::clamp(
+                                static_cast<int>((s->tagDragY - s->tagFlowTop) / s->tagPitch),
+                                0, n - 1);
+                            if (target != cur) {
+                                const auto now = std::chrono::steady_clock::now();
+                                std::vector<int> next = s->tagOrder;
+                                const int dragged = next[static_cast<size_t>(cur)];
+                                next.erase(next.begin() + cur);
+                                next.insert(next.begin() + target, dragged);
+                                // FLIP: every shifted sibling slides from its current
+                                // (possibly mid-flight) visual position to its new slot.
+                                for (int pos = 0; pos < n; ++pos) {
+                                    const int idx = next[static_cast<size_t>(pos)];
+                                    if (idx == dragged) continue;
+                                    int oldPos = -1;
+                                    for (int p = 0; p < n; ++p)
+                                        if (s->tagOrder[static_cast<size_t>(p)] == idx) {
+                                            oldPos = p;
+                                            break;
+                                        }
+                                    if (oldPos < 0 || oldPos == pos) continue;
+                                    const std::wstring& label =
+                                        s->places.tags[static_cast<size_t>(idx)].name;
+                                    const auto off = s->tagOffsets.find(label);
+                                    const float curOff =
+                                        off != s->tagOffsets.end() ? off->second : 0.0f;
+                                    const float start = static_cast<float>(oldPos) + curOff
+                                        - static_cast<float>(pos);
+                                    if (std::abs(start) >= 0.01f) {
+                                        s->tagTracks[label] = AppState::TagTrack{
+                                            start, 180, now };
+                                        s->tagOffsets[label] = start;
+                                    }
+                                }
+                                s->tagOrder = std::move(next);
+                                // The insertion indicator chases the new gap.
+                                const float lineTarget =
+                                    s->tagFlowTop + static_cast<float>(target) * s->tagPitch;
+                                if (lineTarget != s->tagGapTo) {
+                                    s->tagGapFrom = s->tagGapLineY;
+                                    s->tagGapTo = lineTarget;
+                                    s->tagGapT0 = now;
+                                }
                             }
                         }
                     }
@@ -7146,11 +7501,11 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         } else if (hit.region == ui::HitTestResult::SidebarHeaderAction) {
             // Sidebar groups are pushed in a fixed order; group 4 is 网络位置.
             if (hit.index == 4) {
-                app::Tab* tab = ActiveTab(*s);
-                if (tab && fs::IsUncPath(tab->current_path)) {
-                    s->places.PinNetwork(tab->current_path, L"");
-                    InvalidateRect(hwnd, nullptr, FALSE);
-                }
+                HandleNetworkIndexAction(*s, 0, true);
+            } else if (hit.index == 3) {
+                POINT point{ mx, my };
+                ClientToScreen(hwnd, &point);
+                ShowCreateTagPicker(*s, point);
             } else {
                 POINT point{ mx, my };
                 ClientToScreen(hwnd, &point);
@@ -7290,9 +7645,9 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                         const float dist = std::abs(s->tagDragFloatTop - targetTop);
                         const int raw = static_cast<int>(
                             dist * 250.0f / std::max(1.0f, s->tagSlotH));
-                        // Snap tiny gaps; otherwise spring home with enough time
-                        // for the overshoot to read (Pivot/SegmentedWidget curve).
-                        const int dur = raw < 120 ? 0 : std::clamp(raw, 280, 500);
+                        // Snap tiny gaps; otherwise ease home (easeOutCubic via
+                        // TickTagTransitions), fast enough to feel magnetic.
+                        const int dur = raw < 120 ? 0 : std::clamp(raw, 160, 320);
                         if (dur > 0) {
                             const std::wstring label =
                                 s->places.tags[static_cast<size_t>(s->tagDragTag)].name;
@@ -7326,6 +7681,8 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 s->tagDragTag = -1;
                 s->tagDragPath.clear();
                 s->tagOrder.clear();
+                s->tagGapVisible = false;
+                s->tagGapFrom = s->tagGapTo = s->tagGapLineY = 0.0f;
                 if (GetCapture() == hwnd) ReleaseCapture();
                 if (!wasActive && !path.empty()) NavigateTo(*s, path); // plain click
                 InvalidateRect(hwnd, nullptr, FALSE);
@@ -7526,6 +7883,8 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 s->tagDragTag = -1;
                 s->tagDragPath.clear();
                 s->tagOrder.clear();
+                s->tagGapVisible = false;
+                s->tagGapFrom = s->tagGapTo = s->tagGapLineY = 0.0f;
                 s->tagTracks.clear();
                 s->tagOffsets.clear();
                 InvalidateRect(hwnd, nullptr, FALSE);
@@ -7686,6 +8045,30 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         D2D1_RECT_F wheelRect = D2D1::RectF(0, 0, (float)s->compositor.Width(), (float)s->compositor.Height());
         ui::HitTestResult wheelHit = s->renderer.HitTest(wheelVm, wheelRect, (float)pt.x, (float)pt.y);
         const D2D1_RECT_F sidebarRc = s->renderer.SidebarRect(wheelRect.right, wheelRect.bottom);
+        // Tray deck first: the panel lives inside the sidebar rect, so the
+        // sidebar branch below would swallow every wheel event over it.
+        const int tray_cap = TrayDeckCap(*s);
+        if (TrayItemTotalCount(s->tray) > tray_cap) {
+            const D2D1_RECT_F tray_rc = s->renderer.StagingTrayRect(
+                wheelVm, wheelRect.right, wheelRect.bottom);
+            if (pt.x >= tray_rc.left && pt.x < tray_rc.right &&
+                pt.y >= tray_rc.top && pt.y < tray_rc.bottom) {
+                const int wheel_delta = GET_WHEEL_DELTA_WPARAM(wParam);
+                s->trayWheelAccum += wheel_delta;
+                int steps = 0;
+                while (s->trayWheelAccum <= -WHEEL_DELTA) { s->trayWheelAccum += WHEEL_DELTA; ++steps; }
+                while (s->trayWheelAccum >= WHEEL_DELTA) { s->trayWheelAccum -= WHEEL_DELTA; --steps; }
+                if (steps != 0) {
+                    const int max_off = std::max(0, TrayItemTotalCount(s->tray) - tray_cap);
+                    const int next = std::clamp(s->trayDeckOffset + steps, 0, max_off);
+                    if (next != s->trayDeckOffset) {
+                        s->trayDeckOffset = next;
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                    }
+                }
+                return 0;
+            }
+        }
         if (pt.x >= sidebarRc.left && pt.x < sidebarRc.right &&
             pt.y >= sidebarRc.top && pt.y < sidebarRc.bottom &&
             s->renderer.EffectiveSidebarWidth(wheelRect.right) > 60.0f * s->scale) {
@@ -7718,29 +8101,8 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
-        // Tray deck: wheel over the panel pages the icon window.
-        const int tray_cap = TrayDeckCap(*s);
-        if (TrayItemTotalCount(s->tray) > tray_cap) {
-            const D2D1_RECT_F tray_rc = s->renderer.StagingTrayRect(
-                wheelVm, wheelRect.right, wheelRect.bottom);
-            if (pt.x >= tray_rc.left && pt.x < tray_rc.right &&
-                pt.y >= tray_rc.top && pt.y < tray_rc.bottom) {
-                const int wheel_delta = GET_WHEEL_DELTA_WPARAM(wParam);
-                s->trayWheelAccum += wheel_delta;
-                int steps = 0;
-                while (s->trayWheelAccum <= -WHEEL_DELTA) { s->trayWheelAccum += WHEEL_DELTA; ++steps; }
-                while (s->trayWheelAccum >= WHEEL_DELTA) { s->trayWheelAccum -= WHEEL_DELTA; --steps; }
-                if (steps != 0) {
-                    const int max_off = std::max(0, TrayItemTotalCount(s->tray) - tray_cap);
-                    const int next = std::clamp(s->trayDeckOffset + steps, 0, max_off);
-                    if (next != s->trayDeckOffset) {
-                        s->trayDeckOffset = next;
-                        InvalidateRect(hwnd, nullptr, FALSE);
-                    }
-                }
-                return 0;
-            }
-        }
+        // Tray deck: wheel over the panel pages the icon window (handled above,
+        // ahead of the sidebar branch that contains it).
         if (wheelHit.pane_index >= 0) {
             if (app::Pane* p = PaneAtSlot(*s, wheelHit.pane_index)) FocusPane(*s, p);
         }
@@ -8030,9 +8392,12 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 s->ctxComItems = std::move(*items);
                 s->ctxComReady = true;
                 s->shellComCache[ComCacheKey(s->ctxBackground, s->ctxStaticExt)] = s->ctxComItems;
+                const uint32_t ms = s->ctxQueryAt
+                    ? static_cast<uint32_t>(GetTickCount64() - s->ctxQueryAt) : 0;
+                if (s->ctxMenuPrefs.RecordComTiming(ComCacheKey(s->ctxBackground, s->ctxStaticExt), ms))
+                    s->ctxMenuPrefs.Save();
                 RefreshOpenCtxMenu(*s);
             } else {
-                // Result for a session we already abandoned; free the host thread.
                 s->ops.CloseShellMenu(token);
             }
         }
@@ -8045,12 +8410,22 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         if (s && result) {
             s->shellVerbPending.erase(result->ext);
             s->shellVerbCache[result->ext] = result->verbs;
-            if (s->ctxStaticExt == result->ext && s->ctxStaticVerbs.empty()) {
+            if (s->ctxStaticExt == result->ext) {
                 s->ctxStaticVerbs = std::move(result->verbs);
-                // Apply on the next open; do not grow an already-visible menu.
+                RefreshOpenCtxMenu(*s);
             }
         }
         delete result;
+        return 0;
+    }
+
+    case WM_SHELL_CACHE_INVALIDATE: {
+        if (s) {
+            s->shellVerbCache.clear();
+            s->shellComCache.clear();
+            s->shellVerbPending.clear();
+            SeedShellVerbCache(*s);
+        }
         return 0;
     }
 
@@ -8076,6 +8451,26 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
     case WM_NETWORK_INDEX_NOTIFY: {
         if (s) InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
+
+    case WM_NETWORK_CONFIG_RESULT: {
+        auto* result = reinterpret_cast<NetworkConfigResult*>(lParam);
+        if (s && result) {
+            s->networkConfigPending = false;
+            if (result->ok) {
+                s->indexConfigError.clear();
+                if (result->pin && !result->path.empty())
+                    s->places.PinNetwork(result->path, L"");
+            } else {
+                s->indexConfigError = result->error.empty()
+                    ? (result->action == 2 ? L"无法移除服务器文件夹。"
+                                           : L"无法添加服务器文件夹。")
+                    : result->error;
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        delete result;
         return 0;
     }
 
@@ -8175,6 +8570,7 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
     case WM_DESTROY: {
         if (s) {
+            StopShellRegistryWatch();
             if (s->watcher) s->watcher->Stop();
             s->networkIndex.Stop();
             s->index.Stop();
@@ -8256,6 +8652,7 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                                     ts.pinned = owned->pinned;
                                     ts.group = owned->tab_group;
                                     ts.view = owned->view_mode;
+                                    ts.columns = owned->details_column_dividers;
                                 }
                                 ps.tabs.push_back(std::move(ts));
                             }
@@ -8269,6 +8666,7 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 snap.starred_expanded = s->starredExpanded;
                 snap.details_panel = s->showDetailsPanel;
                 snap.details_panel_width = static_cast<int>(std::lround(s->detailsPanelWidth));
+                if (s->root) app::CollectSplitRatios(*s->root, snap.split_ratios);
                 app::SaveSession(snap);
                 s->places.Save();
                 s->ctxMenuPrefs.Save();
@@ -8323,11 +8721,59 @@ static bool WaitForShotReady(AppState& s) {
     return false;
 }
 
+// Staged tag states for GUI-verification shots. Kept out of ShotModeMain's
+// SEH frame, which forbids C++ locals with destructors.
+static void StageTagShotStates(AppState& state) {
+    if (state.shot_tag_rename && !state.places.tags.empty()) {
+        // Point the rename state at a real loaded tag (read-only): the
+        // renderer draws the Fluent field frame on that row.
+        state.tagRenameId =
+            state.places.tags[1 % state.places.tags.size()].id;
+    }
+    if (state.shot_tag_drag && state.places.tags.size() >= 4) {
+        // Stage a mid-drag frame at slot 0 (the regression case): the third
+        // tag floats at the list top; the first slides down mid-flight.
+        ui::WindowViewModel vm0 = BuildVm(state);
+        int g0 = -1;
+        for (int g = 0; g < static_cast<int>(vm0.sidebar.size()); ++g) {
+            if (!vm0.sidebar[g].items.empty() && vm0.sidebar[g].items[0].is_tag) {
+                g0 = g;
+                break;
+            }
+        }
+        D2D1_RECT_F a{}, b{};
+        const bool okA = g0 >= 0 &&
+            state.renderer.TagItemRect(vm0, static_cast<float>(state.compositor.Width()),
+                                       static_cast<float>(state.compositor.Height()),
+                                       g0, 0, &a);
+        const bool okB = g0 >= 0 &&
+            state.renderer.TagItemRect(vm0, static_cast<float>(state.compositor.Width()),
+                                       static_cast<float>(state.compositor.Height()),
+                                       g0, 1, &b);
+        if (okA && okB) {
+            const float pitch = b.top - a.top;
+            state.tagDragActive = true;
+            state.tagDragTag = 2;
+            state.tagOrder.resize(state.places.tags.size());
+            for (int i = 0; i < static_cast<int>(state.tagOrder.size()); ++i)
+                state.tagOrder[static_cast<size_t>(i)] = i;
+            state.tagOrder[0] = 2;
+            state.tagOrder[1] = 0;
+            state.tagOrder[2] = 1;
+            state.tagDragY = a.top + pitch * 0.5f;
+            state.tagOffsets[state.places.tags[0].name] = -0.5f;
+            state.tagGapVisible = true;
+            state.tagGapLineY = state.tagGapFrom = state.tagGapTo = a.top;
+        }
+    }
+}
+
 // No C++ objects with destructors here: SEH (__try/__except) forbids unwinding.
 static int ShotModeMain(AppState& state, HWND hwnd) {
     bool ok = false;
     __try {
         WaitForShotReady(state);
+        StageTagShotStates(state);
         if (state.shot_details && state.pane && state.pane->ActiveTab() &&
             state.pane->ActiveTab()->snapshot &&
             !state.pane->ActiveTab()->snapshot->empty()) {
@@ -8397,6 +8843,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
             OleUninitialize();
             return rc;
         }
+        if (wcscmp(__wargv[i], L"--seed-shell-verbs") == 0) {
+            const int rc = app::SeedMachineStaticVerbCache() ? 0 : 1;
+            OleUninitialize();
+            return rc;
+        }
     }
 
     AppState state;
@@ -8422,6 +8873,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         state.session_pane_columns = session.pane_column_dividers;
         state.session_pane_tabs = std::move(session.pane_tabs);
         state.session_layout = session.layout;
+        state.session_split_ratios = std::move(session.split_ratios);
         state.session_focused = session.focused_pane;
         state.session_target = session.target_pane;
         state.tray = session.tray;
@@ -8443,6 +8895,17 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         } else if (wcscmp(__wargv[i], L"--menushot") == 0 && i + 1 < __argc) {
             state.menushot = true;
             state.menushot_out = __wargv[++i];
+        } else if (wcscmp(__wargv[i], L"--menushot-search") == 0) {
+            state.menushot_search = true;
+        } else if (wcscmp(__wargv[i], L"--colorpickshot") == 0 && i + 1 < __argc) {
+            state.colorpickshot = true;
+            state.colorpickshot_out = __wargv[++i];
+            if (i + 1 < __argc && wcscmp(__wargv[i + 1], L"light") == 0) {
+                state.colorpickshot_dark = false;
+                ++i;
+            }
+        } else if (wcscmp(__wargv[i], L"--colorpickdialog") == 0) {
+            state.colorpickdialog = true;
         } else if (wcscmp(__wargv[i], L"--shot-tray") == 0) {
             state.shot_tray = true;
             // Optional item count: --shot-tray 1 stages a single file.
@@ -8450,6 +8913,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
                 state.shot_tray_count = std::max(1, _wtoi(__wargv[++i]));
         } else if (wcscmp(__wargv[i], L"--shot-tab-colors") == 0) {
             state.shot_tab_colors = true;
+        } else if (wcscmp(__wargv[i], L"--shot-tag-rename") == 0) {
+            state.shot_tag_rename = true;
+        } else if (wcscmp(__wargv[i], L"--shot-tag-drag") == 0) {
+            state.shot_tag_drag = true;
         } else if (wcscmp(__wargv[i], L"--shot-details") == 0) {
             state.shot_details = true;
         } else if (wcscmp(__wargv[i], L"--shot-details-multi") == 0) {
@@ -8537,6 +9004,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         // Render the built-in item menu to a PNG (GUI verification for 1B-2).
         ui::FluentMenu m;
         bool ok = m.Create(hwnd, &state.compositor, state.scale);
+        if (ok && state.menushot_search && state.pane && state.pane->ActiveTab()) {
+            // BuildFinderItemMenu only checks current_path for the search bit.
+            state.pane->ActiveTab()->current_path = L"pulse:search:widgets.json";
+        }
         if (ok) {
             m.SetTheme(state.darkMode, state.accentColor);
             auto debug_items = BuildFinderItemMenu(state, true, L"撤销移动 a.txt");
@@ -8559,6 +9030,29 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         DestroyWindow(hwnd);
         OleUninitialize();
         return ok ? 0 : 1;
+    }
+
+    if (state.colorpickshot) {
+        // Render the color picker popup to a PNG (GUI verification).
+        const bool ok = ui::ColorPickerPopup::SaveDebugSnapshot(
+            &state.compositor, state.colorpickshot_out.c_str(),
+            state.colorpickshot_dark, state.accentColor, state.scale);
+        DestroyWindow(hwnd);
+        OleUninitialize();
+        return ok ? 0 : 1;
+    }
+
+    if (state.colorpickdialog) {
+        // Interactive smoke test: open the picker centered on the work area.
+        uint32_t rgb = 0x2FDFF1;
+        RECT work{};
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+        POINT pt{ (work.left + work.right) / 2, (work.top + work.bottom) / 2 };
+        ui::ColorPickerPopup::Pick(hwnd, &state.compositor, nullptr, state.scale, pt,
+                                   rgb, state.darkMode, rgb);
+        DestroyWindow(hwnd);
+        OleUninitialize();
+        return 0;
     }
 
     if (state.shot.active) {

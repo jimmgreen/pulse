@@ -3,8 +3,12 @@
 
 #include <windows.h>
 #include <shlwapi.h>
+#include <shlobj.h>
 #include <algorithm>
+#include <cstring>
 #include <cwctype>
+#include <unordered_map>
+#include <vector>
 
 namespace pulse::app {
 
@@ -252,6 +256,133 @@ std::vector<StaticVerb> DedupeStaticVerbs(std::vector<StaticVerb> verbs,
         if (out.size() >= cap) break;
     }
     return out;
+}
+
+namespace {
+
+void PutU32(std::vector<uint8_t>& buf, uint32_t v) {
+    buf.insert(buf.end(), reinterpret_cast<uint8_t*>(&v), reinterpret_cast<uint8_t*>(&v) + 4);
+}
+void PutW(std::vector<uint8_t>& buf, const std::wstring& s) {
+    PutU32(buf, static_cast<uint32_t>(s.size()));
+    buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(s.data()),
+               reinterpret_cast<const uint8_t*>(s.data() + s.size()));
+}
+bool GetU32(const uint8_t*& p, const uint8_t* end, uint32_t& v) {
+    if (p + 4 > end) return false;
+    memcpy(&v, p, 4);
+    p += 4;
+    return true;
+}
+bool GetW(const uint8_t*& p, const uint8_t* end, std::wstring& s) {
+    uint32_t n = 0;
+    if (!GetU32(p, end, n) || n > 4096) return false;
+    if (p + n * 2 > end) return false;
+    s.assign(reinterpret_cast<const wchar_t*>(p), n);
+    p += n * 2;
+    return true;
+}
+
+} // namespace
+
+std::wstring MachineStaticVerbCachePath() {
+    wchar_t dir[MAX_PATH]{};
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_COMMON_APPDATA, nullptr, 0, dir))) return {};
+    std::wstring path = std::wstring(dir) + L"\\Pulse";
+    CreateDirectoryW(path.c_str(), nullptr);
+    return path + L"\\shell-verbs.bin";
+}
+
+bool LoadMachineStaticVerbCache(std::unordered_map<std::wstring, std::vector<StaticVerb>>& out) {
+    out.clear();
+    const std::wstring path = MachineStaticVerbCachePath();
+    if (path.empty()) return false;
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER sz{};
+    if (!GetFileSizeEx(h, &sz) || sz.QuadPart < 16 || sz.QuadPart > 32 * 1024 * 1024) {
+        CloseHandle(h);
+        return false;
+    }
+    std::vector<uint8_t> buf(static_cast<size_t>(sz.QuadPart));
+    DWORD r = 0;
+    const bool ok = ReadFile(h, buf.data(), static_cast<DWORD>(buf.size()), &r, nullptr) &&
+        r == buf.size();
+    CloseHandle(h);
+    if (!ok) return false;
+    const uint8_t* p = buf.data();
+    const uint8_t* end = p + buf.size();
+    if (p + 8 > end || memcmp(p, "PSVC", 4) != 0) return false;
+    p += 4;
+    uint32_t ver = 0, count = 0;
+    if (!GetU32(p, end, ver) || ver != 1 || !GetU32(p, end, count) || count > 8000) return false;
+    for (uint32_t i = 0; i < count; ++i) {
+        std::wstring ext;
+        uint32_t nverb = 0;
+        if (!GetW(p, end, ext) || !GetU32(p, end, nverb) || nverb > 64) return false;
+        std::vector<StaticVerb> verbs;
+        verbs.reserve(nverb);
+        for (uint32_t k = 0; k < nverb; ++k) {
+            StaticVerb v;
+            if (!GetW(p, end, v.verb) || !GetW(p, end, v.display) || !GetW(p, end, v.app_path))
+                return false;
+            verbs.push_back(std::move(v));
+        }
+        if (!ext.empty()) out.emplace(std::move(ext), std::move(verbs));
+    }
+    return true;
+}
+
+bool SaveMachineStaticVerbCache(
+    const std::unordered_map<std::wstring, std::vector<StaticVerb>>& cache) {
+    const std::wstring path = MachineStaticVerbCachePath();
+    if (path.empty()) return false;
+    std::vector<uint8_t> buf;
+    buf.insert(buf.end(), {'P', 'S', 'V', 'C'});
+    PutU32(buf, 1);
+    PutU32(buf, static_cast<uint32_t>(cache.size()));
+    for (const auto& [ext, verbs] : cache) {
+        PutW(buf, ext);
+        PutU32(buf, static_cast<uint32_t>(verbs.size()));
+        for (const auto& v : verbs) {
+            PutW(buf, v.verb);
+            PutW(buf, v.display);
+            PutW(buf, v.app_path);
+        }
+    }
+    const std::wstring tmp = path + L".tmp";
+    HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    DWORD w = 0;
+    const bool ok = WriteFile(h, buf.data(), static_cast<DWORD>(buf.size()), &w, nullptr) &&
+        w == buf.size();
+    CloseHandle(h);
+    if (!ok) {
+        DeleteFileW(tmp.c_str());
+        return false;
+    }
+    return MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+}
+
+bool SeedMachineStaticVerbCache() {
+    std::unordered_map<std::wstring, std::vector<StaticVerb>> cache;
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CLASSES_ROOT, L"", 0, KEY_READ, &key) != ERROR_SUCCESS) return false;
+    for (DWORD i = 0; i < 8000; ++i) {
+        wchar_t name[128];
+        DWORD name_len = ARRAYSIZE(name);
+        if (RegEnumKeyExW(key, i, name, &name_len, nullptr, nullptr, nullptr, nullptr) !=
+            ERROR_SUCCESS)
+            break;
+        if (name_len < 2 || name[0] != L'.') continue;
+        std::wstring ext = ToLower(name);
+        auto verbs = EnumerateStaticVerbs(ext);
+        if (!verbs.empty()) cache.emplace(std::move(ext), std::move(verbs));
+    }
+    RegCloseKey(key);
+    return SaveMachineStaticVerbCache(cache);
 }
 
 } // namespace pulse::app

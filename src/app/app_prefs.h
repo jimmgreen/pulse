@@ -1,6 +1,8 @@
 // app_prefs.h — General app settings (startup, close-to-tray).
 #pragma once
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace pulse::app {
 
@@ -13,6 +15,9 @@ struct AppPrefs {
     std::wstring background_image;
     int row_height = 34; // file-list row height in DIPs (24..48)
     int tray_icon_size = 48; // staging-tray deck icon edge in DIPs (32..64)
+    // Tag colors the user added via the custom color dialog (0xRRGGBB),
+    // appended after the seven Finder defaults in the swatch strip.
+    std::vector<uint32_t> custom_tag_colors;
 
     void ResetToDefaults();
     bool Load();

@@ -427,6 +427,25 @@ bool QueryUsesAttrs(const CompiledQuery& q) {
     return false;
 }
 
+size_t QueryPrimaryNameLen(const CompiledQuery& q) {
+    size_t best = 0;
+    for (const auto& g : q.groups) {
+        for (const auto& t : g) {
+            if (t.name_not || t.name_how == NameHow::Any) continue;
+            if (t.name.size() > best) best = t.name.size();
+        }
+    }
+    return best;
+}
+
+bool QueryIsSimpleName(const CompiledQuery& q) {
+    if (q.groups.size() != 1 || q.groups[0].size() != 1) return false;
+    const Term& t = q.groups[0][0];
+    if (t.name_not || t.name_in_path || t.folder || t.file) return false;
+    if (!t.exts.empty() || t.size_how != SizeHow::Any || t.date_how != DateHow::Any) return false;
+    return t.name_how == NameHow::Substring || t.name_how == NameHow::Exact;
+}
+
 int RankName(const wchar_t* s, uint32_t n, bool is_dir, const CompiledQuery& q) {
     int best = 0;
     for (const auto& g : q.groups) {

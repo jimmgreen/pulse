@@ -1,6 +1,9 @@
 #include "../index/index_config.h"
+#include "../index/index_query.h"
 #include "../index/network_index.h"
+#include "../index/index_shard.h"
 #include <algorithm>
+#include <cstring>
 #include <iostream>
 
 using namespace pulse::index;
@@ -144,6 +147,42 @@ int wmain(int argc, wchar_t** argv) {
     Check(NormalizeNetworkRoot(L"C:\\local").empty(),
           L"network root rejects local path");
 
+    {
+        wchar_t temp_dir[MAX_PATH]{};
+        GetTempPathW(ARRAYSIZE(temp_dir), temp_dir);
+        const std::wstring config_path = std::wstring(temp_dir) +
+            L"pulse-network-index-utf8-test.json";
+        const std::vector<std::wstring> expected{
+            L"\\\\192.168.0.254\\工程项目盘",
+            L"\\\\server\\share\\设计资料"
+        };
+        std::wstring config_error;
+        std::vector<std::wstring> loaded;
+        const bool saved = SaveNetworkRootsFile(config_path, expected, &config_error);
+        const bool loaded_ok = saved && LoadNetworkRootsFile(config_path, loaded, &config_error);
+        Check(loaded_ok && loaded == expected,
+              L"network config UTF-8 Chinese UNC roundtrip");
+        HANDLE config = CreateFileW(config_path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                                    nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        bool contains_utf8 = false;
+        if (config != INVALID_HANDLE_VALUE) {
+            LARGE_INTEGER size{};
+            if (GetFileSizeEx(config, &size) && size.QuadPart > 0 && size.QuadPart < 4096) {
+                std::vector<char> bytes(static_cast<size_t>(size.QuadPart));
+                DWORD read = 0;
+                if (ReadFile(config, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr)) {
+                    const std::string raw(bytes.data(), bytes.data() + read);
+                    contains_utf8 = raw.find("\xE5\xB7\xA5\xE7\xA8\x8B\xE9\xA1\xB9\xE7\x9B\xAE\xE7\x9B\x98") !=
+                                    std::string::npos;
+                }
+            }
+            CloseHandle(config);
+        }
+        Check(contains_utf8, L"network config stores complete UTF-8 bytes");
+        DeleteFileW(config_path.c_str());
+        DeleteFileW((config_path + L".tmp").c_str());
+    }
+
     Query merged_query;
     merged_query.needle = L"report";
     merged_query.offset = 1;
@@ -164,6 +203,91 @@ int wmain(int argc, wchar_t** argv) {
               merged.hits[0].name == L"b-report.txt" &&
               merged.hits[1].name == L"c-report.txt",
           L"local and network result merge pagination");
+
+    {
+        using namespace pulse::index;
+        Check(QueryPrimaryNameLen(ParseQuery(L"a")) == 1, L"query: single-char needle length");
+        Check(QueryIsSimpleName(ParseQuery(L"pulse")), L"query: simple name token");
+        Check(!QueryIsSimpleName(ParseQuery(L"ext:pdf")), L"query: ext filter is not simple name");
+    Check(QueryCanNarrow(L"p", L"pu") && QueryCanNarrow(L"pu", L"pul"),
+          L"query: incremental typing can narrow");
+
+    const auto shard = MakeShardPaths(L"C:\\ProgramData\\Pulse\\Index\\Volumes",
+                                      L"\\\\?\\VOLUME{TEST}");
+    Check(shard.directory.find(L"\\") != std::wstring::npos &&
+              shard.base_a != shard.base_b && shard.wal_a != shard.wal_b,
+          L"shard paths are stable and slot-separated");
+    wchar_t temp_dir[MAX_PATH]{};
+    GetTempPathW(ARRAYSIZE(temp_dir), temp_dir);
+    const std::wstring manifest_path = std::wstring(temp_dir) + L"pulse-shard-manifest-test.json";
+    ShardManifest manifest;
+    manifest.generation = 7;
+    manifest.active_built = 1234;
+    manifest.active_wal_bytes = 56;
+    manifest.active_slot = 1;
+    manifest.active_bytes = 0x123456789abcdef0ull;
+    manifest.active_crc64 = 0xfedcba9876543210ull;
+    manifest.source_id = L"\\\\?\\VOLUME{TEST}";
+    std::wstring manifest_error;
+    const bool saved = SaveShardManifest(manifest_path, manifest, &manifest_error);
+    ShardManifest loaded;
+    const bool loaded_ok = saved && LoadShardManifest(manifest_path, loaded, &manifest_error);
+    DeleteFileW(manifest_path.c_str());
+    Check(loaded_ok && loaded.generation == manifest.generation &&
+              loaded.active_slot == manifest.active_slot && loaded.source_id == manifest.source_id &&
+              loaded.active_bytes == manifest.active_bytes && loaded.active_crc64 == manifest.active_crc64,
+          L"shard manifest atomic roundtrip");
+
+    const std::wstring v9_root = std::wstring(temp_dir) + L"pulse-v9-store-test";
+    const auto v9_paths = MakeShardPaths(v9_root, L"\\\\?\\VOLUME{V9-TEST}");
+    auto write_fake_base = [](const std::wstring& path, uint64_t built) {
+        BYTE bytes[128]{};
+        memcpy(bytes, "PIDX", 4);
+        const uint32_t version = 8;
+        memcpy(bytes + 4, &version, sizeof(version));
+        memcpy(bytes + 16, &built, sizeof(built));
+        HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                               FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return false;
+        DWORD written = 0;
+        const bool ok = WriteFile(h, bytes, sizeof(bytes), &written, nullptr) &&
+                        written == sizeof(bytes) && FlushFileBuffers(h) != FALSE;
+        CloseHandle(h);
+        return ok;
+    };
+    DeleteFileW(v9_paths.manifest.c_str());
+    DeleteFileW(v9_paths.base_a.c_str());
+    DeleteFileW(v9_paths.base_b.c_str());
+    const std::wstring v9_temp_a = v9_paths.base_a + L".tmp";
+    Check(write_fake_base(v9_temp_a, 100) &&
+              PublishShardBase(v9_paths, v9_temp_a, 100, 0, manifest, &manifest_error),
+          L"v9 first base publish");
+    std::wstring active_path;
+    Check(ResolveActiveShard(v9_paths, manifest, active_path, &manifest_error) &&
+              active_path == v9_paths.base_a,
+          L"v9 active slot resolves");
+    const std::wstring v9_temp_b = v9_paths.base_a + L".tmp";
+    Check(write_fake_base(v9_temp_b, 200) &&
+              PublishShardBase(v9_paths, v9_temp_b, 200, 0, manifest, &manifest_error) &&
+              manifest.active_slot == 1,
+          L"v9 second base flips slot");
+    HANDLE corrupt = CreateFileW(v9_paths.base_b.c_str(), GENERIC_WRITE, 0, nullptr,
+                                 OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (corrupt != INVALID_HANDLE_VALUE) {
+        BYTE zero = 0;
+        DWORD written = 0;
+        WriteFile(corrupt, &zero, 1, &written, nullptr);
+        CloseHandle(corrupt);
+    }
+    Check(ResolveActiveShard(v9_paths, manifest, active_path, &manifest_error) &&
+              active_path == v9_paths.base_a && manifest.active_built == 100,
+          L"v9 corrupted active slot falls back");
+    DeleteFileW(v9_paths.manifest.c_str());
+    DeleteFileW(v9_paths.base_a.c_str());
+    DeleteFileW(v9_paths.base_b.c_str());
+    RemoveDirectoryW(v9_paths.directory.c_str());
+    RemoveDirectoryW(v9_root.c_str());
+    }
 
     if (argc == 3 && wcscmp(argv[1], L"--network-root") == 0)
         RunNetworkIntegration(argv[2]);
