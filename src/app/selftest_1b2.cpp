@@ -22,6 +22,7 @@
 #include "../fs/fs_net_cache.h"
 #include "../ui/fluent_menu.h"
 #include "../ui/color_picker.h"
+#include "../ui/bloom_accent_picker.h"
 #include "../ui/drag_drop.h"
 #include "../ui/ui_renderer.h"
 #include "../ops/ops_manager.h"
@@ -38,6 +39,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -205,6 +207,23 @@ void TestBreadcrumb() {
               colorIs(sub.icon_color, 0x38BDF8),
               L"sidebar: UNC frequent child gets network glyph, no badge");
     }
+
+    const auto access = BuildSidebarModel();
+    const ui::SidebarItem* desktop = nullptr;
+    Pane home;
+    home.NewTab(L"C:\\");
+    const auto avm = BuildWindowViewModel(home, access, true, false, false, nullptr, 0);
+    for (const auto& group : avm.sidebar) {
+        if (group.header != L"\u5FEB\u901F\u8BBF\u95EE") continue; // 快速访问
+        for (const auto& item : group.items) {
+            if (item.label == L"\u684C\u9762") { // 桌面
+                desktop = &item;
+                break;
+            }
+        }
+    }
+    Check(desktop && desktop->badge == L"\u684C\u9762" && !desktop->path.empty(),
+          L"sidebar: quick access includes Desktop with 桌面 badge");
 }
 
 void TestThisPcEnumeration() {
@@ -554,18 +573,32 @@ void TestAppPrefsAndSettingsPath() {
     AppPrefs prefs;
     prefs.persist = false;
     Check(prefs.FromJson(L"{\"launch_on_startup\":true,\"keep_running_on_close\":true}") &&
-          prefs.launch_on_startup && prefs.keep_running_on_close,
+          prefs.launch_on_startup && prefs.keep_running_on_close &&
+          !prefs.open_folders_in_pulse,
           L"appprefs: parse json");
     Check(prefs.ApplyLaunchOnStartup(false) && !prefs.launch_on_startup,
           L"appprefs: persist=false toggle does not write Run key");
+    Check(prefs.ApplyFolderOpen(true) && prefs.open_folders_in_pulse,
+          L"appprefs: persist=false folder-open toggle does not write HKCU");
     const std::wstring json = prefs.ToJson();
     AppPrefs loaded;
     loaded.persist = false;
-    Check(loaded.FromJson(json) && !loaded.launch_on_startup && loaded.keep_running_on_close,
+    Check(loaded.FromJson(json) && !loaded.launch_on_startup && loaded.keep_running_on_close &&
+          loaded.open_folders_in_pulse,
           L"appprefs: json round-trip");
     Check(json.find(L"\"launch_on_startup\":false") != std::wstring::npos &&
-          json.find(L"\"keep_running_on_close\":true") != std::wstring::npos,
+          json.find(L"\"keep_running_on_close\":true") != std::wstring::npos &&
+          json.find(L"\"open_folders_in_pulse\":true") != std::wstring::npos,
           L"appprefs: json contains both flags");
+    Check(FolderOpenCommandLine(L"C:\\Pulse\\pulse.exe") ==
+              L"\"C:\\Pulse\\pulse.exe\" \"%1\"",
+          L"appprefs: folder-open command quotes exe and %1");
+    Check(FolderOpenCommandIsOurs(L"\"C:\\Pulse\\pulse.exe\" \"%1\"",
+                                  L"C:\\Pulse\\pulse.exe"),
+          L"appprefs: folder-open command matches our exe");
+    Check(!FolderOpenCommandIsOurs(L"\"C:\\Windows\\explorer.exe\" \"%1\"",
+                                   L"C:\\Pulse\\pulse.exe"),
+          L"appprefs: folder-open command ignores explorer");
     AppPrefs density;
     density.persist = false;
     density.row_height = 40;
@@ -590,6 +623,76 @@ void TestAppPrefsAndSettingsPath() {
           effect_prefs.window_effect == L"none" &&
           effect_prefs.background_image == L"C:\\wall.jpg",
           L"appprefs: parse none effect + background image");
+
+    uint32_t accent = 0;
+    Check(!ParseAccentRgb(L"", accent), L"appprefs: empty accent follows Windows");
+    Check(ParseAccentRgb(L"2FDFF1", accent) && accent == 0x2FDFF1u,
+          L"appprefs: parse accent 2FDFF1");
+    Check(ParseAccentRgb(L"#2fdff1", accent) && accent == 0x2FDFF1u,
+          L"appprefs: parse accent #2fdff1");
+    Check(!ParseAccentRgb(L"xyz", accent), L"appprefs: reject bad accent hex");
+    AppPrefs follow;
+    follow.persist = false;
+    Check(follow.FromJson(L"{}") && follow.accent_rgb.empty(),
+          L"appprefs: missing accent_rgb follows Windows");
+    AppPrefs custom;
+    custom.persist = false;
+    Check(custom.FromJson(L"{\"accent_rgb\":\"2FDFF1\"}") &&
+          custom.accent_rgb == L"2FDFF1",
+          L"appprefs: accent_rgb from json");
+    AppPrefs custom_round;
+    custom_round.persist = false;
+    Check(custom_round.FromJson(custom.ToJson()) && custom_round.accent_rgb == L"2FDFF1" &&
+          custom.ToJson().find(L"\"accent_rgb\":\"2FDFF1\"") != std::wstring::npos,
+          L"appprefs: accent_rgb round-trip");
+    AppPrefs bad_accent;
+    bad_accent.persist = false;
+    Check(bad_accent.FromJson(L"{\"accent_rgb\":\"gggggg\"}") && bad_accent.accent_rgb.empty(),
+          L"appprefs: invalid accent_rgb falls back to follow");
+}
+
+void TestBloomAccentGeometry() {
+    Check(ui::kBloomDotCount == 19, L"bloom: 19 dots");
+    Check(std::fabs(ui::BloomDotHue(1, 0, 6) - 90.0f) < 0.01f,
+          L"bloom: ring1 index0 hue 90");
+    Check(std::fabs(ui::BloomDotHue(2, 0, 12) - 90.0f) < 0.01f,
+          L"bloom: ring2 index0 hue 90");
+    Check(std::fabs(ui::BloomDotHue(1, 3, 6) - 270.0f) < 0.01f,
+          L"bloom: ring1 index3 hue 270");
+    Check(std::fabs(ui::BloomDotHue(1, 1, 6) - 150.0f) < 0.01f,
+          L"bloom: ring1 index1 hue 150");
+    Check(ui::BloomDotRgb(0) == 0xFFFFFFu, L"bloom: center is white");
+    Check(ui::BloomDotAt(0).ring == 0 && ui::BloomDotAt(7).ring == 2,
+          L"bloom: index 0 center, 7 first outer");
+    const uint32_t pastel = ui::BloomDotRgb(1);
+    const uint32_t sat = ui::BloomDotRgb(7);
+    Check(pastel != sat && pastel != 0xFFFFFFu && sat != 0xFFFFFFu,
+          L"bloom: pastel and saturated dots differ");
+}
+
+void TestBloomSpring() {
+    auto run = [](float from, float to, float k, float d, float& peak, float& lo, float& end) {
+        float v = from;
+        float vel = 0.0f;
+        peak = from;
+        lo = from;
+        bool finite = true;
+        for (int i = 0; i < 180; ++i) {
+            ui::BloomStepSpring(v, vel, to, k, d, 0.016f);
+            if (!std::isfinite(v) || !std::isfinite(vel)) finite = false;
+            peak = (std::max)(peak, v);
+            lo = (std::min)(lo, v);
+        }
+        end = v;
+        Check(finite, L"bloom: spring stayed finite");
+    };
+    float peak = 0.0f, lo = 0.0f, end = 0.0f;
+    run(1.0f, 1.18f, 200.0f, 30.0f, peak, lo, end);
+    Check(peak < 1.35f && lo > 0.85f && std::fabs(end - 1.18f) < 0.05f,
+          L"bloom: hover scale must not explode");
+    run(0.0f, 5.0f, 100.0f, 30.0f, peak, lo, end);
+    Check(peak < 6.0f && lo > -1.0f && std::fabs(end - 5.0f) < 0.15f,
+          L"bloom: push spring must not explode");
 }
 
 void TestDragDropPure() {
@@ -1327,6 +1430,18 @@ void TestViewLayouts() {
     Check(menu[0].glyph_scale > menu[1].glyph_scale &&
           menu[1].glyph_scale > menu[2].glyph_scale,
           L"view: icon menu communicates extra-large, large, and medium scale");
+
+    ui::MainRenderer columns;
+    columns.SetScale(1.0f);
+    const D2D1_RECT_F pane = D2D1::RectF(0.0f, 0.0f, 1000.0f, 400.0f);
+    const auto search = columns.DetailsColumns(pane, {}, true);
+    Check(search.count == 5 && search.widths[1] >= 110.0f,
+          L"search: details view has a path column");
+    const float name_path = search.DividerX(0);
+    const auto dragged = columns.ResizeSearchColumnDivider(pane, {}, 0, name_path - 80.0f);
+    const auto widened = columns.DetailsColumns(pane, {}, true, dragged);
+    Check(dragged[0] > 0.0f && dragged[3] < 1.0f && widened.widths[1] > search.widths[1] + 40.0f,
+          L"search: dragging the path divider widens the path column");
 }
 
 } // namespace
@@ -1556,7 +1671,8 @@ bool SamePaneTabs(const std::vector<PaneSessionSnapshot>& a,
                 a[i].tabs[t].pinned != b[i].tabs[t].pinned ||
                 a[i].tabs[t].group != b[i].tabs[t].group ||
                 a[i].tabs[t].view != b[i].tabs[t].view ||
-                a[i].tabs[t].columns != b[i].tabs[t].columns) return false;
+                a[i].tabs[t].columns != b[i].tabs[t].columns ||
+                a[i].tabs[t].search_columns != b[i].tabs[t].search_columns) return false;
         }
     }
     return true;
@@ -1568,7 +1684,8 @@ void TestSessionPaneTabs() {
         panes[0].active = 1;
         panes[0].groups.push_back({ 1, L"工作", 0x00CC6639, false });
         panes[0].groups.push_back({ 2, L"引\"号\\组\n名", 0x003B82F6, true });
-        panes[0].tabs.push_back({ L"C:\\", true, 0, ui::ViewMode::Details, { 0.42f, 0.61f, 0.82f } });
+        panes[0].tabs.push_back({ L"C:\\", true, 0, ui::ViewMode::Details, { 0.42f, 0.61f, 0.82f },
+                                  { 0.28f, 0.52f, 0.70f, 0.86f } });
         panes[0].tabs.push_back({ L"D:\\代码\\路径 \"quoted\"\\dir", false, 1,
                                   ui::ViewMode::LargeIcons });
         panes[0].tabs.push_back({ L"\\\\?\\UNC\\server\\share\\dir", false, 2,
@@ -1580,6 +1697,16 @@ void TestSessionPaneTabs() {
         std::vector<PaneSessionSnapshot> back;
         Check(ParsePaneTabs(json, back), L"sessiontabs: round-trip parses");
         Check(SamePaneTabs(panes, back), L"sessiontabs: round-trip preserves all fields");
+    }
+    {   // Missing searchCols still loads (older sessions).
+        std::vector<PaneSessionSnapshot> out;
+        Check(ParsePaneTabs(
+            L"[{\"active\":0,\"groups\":[],\"tabs\":[{\"path\":\"C:\\\\\",\"pinned\":false,"
+            L"\"group\":0,\"view\":\"details\",\"cols\":\"4200,6100,8200\"}]}]", out) &&
+            !out.empty() && !out[0].tabs.empty() &&
+            out[0].tabs[0].columns[0] > 0.0f &&
+            out[0].tabs[0].search_columns[0] == 0.0f,
+              L"sessiontabs: older JSON without searchCols stays default");
     }
     {   // Empty array and empty panes.
         std::vector<PaneSessionSnapshot> out;
@@ -1722,6 +1849,8 @@ int RunSelfTest1B2() {
     TestSessionPaneTabs();
     TestUtf8PersistFile();
     TestColorPickerModel();
+    TestBloomAccentGeometry();
+    TestBloomSpring();
     TestOpsThroughShell();
 
     // Cleanup: real-delete the whole sandbox via the ops layer is overkill;

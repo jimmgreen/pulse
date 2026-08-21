@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <vector>
 
@@ -35,8 +36,10 @@ struct IndexConfig {
     bool include_removable_ntfs = true;
     std::wstring index_path;
     std::unordered_set<std::wstring> excluded_volume_ids;
+    std::vector<std::wstring> excluded_paths;
 
     bool IsExcluded(const std::wstring& id) const;
+    bool IsPathExcluded(std::wstring_view path) const;
 };
 
 std::wstring NormalizeVolumeId(std::wstring id);
@@ -50,5 +53,6 @@ bool LoadMachineConfig(IndexConfig& config, std::wstring* error = nullptr);
 bool SaveMachineConfig(const IndexConfig& config, std::wstring* error = nullptr);
 bool ConfigureVolume(const std::wstring& id, bool enabled, std::wstring* error = nullptr);
 bool ConfigureIndexPath(const std::wstring& path, std::wstring* error = nullptr);
+bool ConfigureExcludePath(const std::wstring& path, bool enabled, std::wstring* error = nullptr);
 
 } // namespace pulse::index

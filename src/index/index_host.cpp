@@ -180,6 +180,13 @@ std::vector<uint8_t> VolumesPayload() {
         w.PutU32(static_cast<uint32_t>(volume.indexed_items));
         w.PutU32(static_cast<uint32_t>(volume.indexed_items >> 32));
     }
+    if (g.as_service) {
+        // Sent after the volume rows so newer clients receive the exclusion list.
+        w.PutU32(static_cast<uint32_t>(config.excluded_paths.size()));
+        for (const auto& path : config.excluded_paths) w.PutString(path);
+    } else {
+        w.PutU32(0);
+    }
     return w.data();
 }
 
@@ -443,28 +450,45 @@ int InstallService() {
     LoadMachineConfig(config, nullptr);
     SaveMachineConfig(config, nullptr);
     const std::wstring bin = L"\"" + SelfPath() + L"\" --service";
-    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE);
-    if (!scm) return static_cast<int>(GetLastError());
-    SC_HANDLE svc = OpenServiceW(scm, kServiceName, SERVICE_START | SERVICE_CHANGE_CONFIG);
-    if (!svc) {
-        svc = CreateServiceW(scm, kServiceName, L"Pulse Index",
-                             SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS,
-                             SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
-                             bin.c_str(), nullptr, nullptr, nullptr, nullptr, nullptr);
-    }
-    if (!svc) {
-        const DWORD err = GetLastError();
+
+    DWORD last_err = ERROR_GEN_FAILURE;
+    for (int attempt = 0; attempt < 40; ++attempt) {
+        SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE);
+        if (!scm) return static_cast<int>(GetLastError());
+
+        SC_HANDLE svc = OpenServiceW(scm, kServiceName,
+                                     SERVICE_START | SERVICE_STOP | SERVICE_CHANGE_CONFIG);
+        if (!svc) {
+            svc = CreateServiceW(scm, kServiceName, L"Pulse Index",
+                                 SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS,
+                                 SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
+                                 bin.c_str(), nullptr, nullptr, nullptr, nullptr, nullptr);
+        }
+        if (!svc) {
+            last_err = GetLastError();
+            CloseServiceHandle(scm);
+            if (last_err != ERROR_SERVICE_MARKED_FOR_DELETE) break;
+            Sleep(250);
+            continue;
+        }
+
+        ChangeServiceConfigW(svc, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START,
+                             SERVICE_ERROR_NORMAL, bin.c_str(), nullptr, nullptr,
+                             nullptr, nullptr, nullptr, L"Pulse Index");
+        SERVICE_DESCRIPTIONW desc{};
+        wchar_t text[] = L"Pulse file-name index (MFT + USN). UI talks to this over a named pipe.";
+        desc.lpDescription = text;
+        ChangeServiceConfig2W(svc, SERVICE_CONFIG_DESCRIPTION, &desc);
+
+        const BOOL started = StartServiceW(svc, 0, nullptr);
+        last_err = started ? 0 : GetLastError();
+        CloseServiceHandle(svc);
         CloseServiceHandle(scm);
-        return static_cast<int>(err);
+        if (started || last_err == ERROR_SERVICE_ALREADY_RUNNING) return 0;
+        if (last_err != ERROR_SERVICE_MARKED_FOR_DELETE) break;
+        Sleep(250);
     }
-    SERVICE_DESCRIPTIONW desc{};
-    wchar_t text[] = L"Pulse file-name index (MFT + USN). UI talks to this over a named pipe.";
-    desc.lpDescription = text;
-    ChangeServiceConfig2W(svc, SERVICE_CONFIG_DESCRIPTION, &desc);
-    StartServiceW(svc, 0, nullptr);
-    CloseServiceHandle(svc);
-    CloseServiceHandle(scm);
-    return 0;
+    return static_cast<int>(last_err);
 }
 
 bool IsElevated() {
@@ -506,6 +530,11 @@ int ConfigureCommand(const std::vector<std::wstring>& args) {
         ok = ConfigureVolume(args[2], enabled, &error);
     } else if (args.size() >= 3 && args[1] == L"--set-index-path") {
         ok = ConfigureIndexPath(args[2], &error);
+    } else if (args.size() >= 3 && args[1] == L"--configure-exclude") {
+        const bool enabled = args.size() >= 4 && args[3] == L"--enable";
+        const bool disabled = args.size() >= 4 && args[3] == L"--disable";
+        if (!enabled && !disabled) return ERROR_INVALID_PARAMETER;
+        ok = ConfigureExcludePath(args[2], enabled, &error);
     } else if (args.size() >= 2 && args[1] == L"--rebuild-index") {
         ok = true;
     }
@@ -547,6 +576,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     if (a1 == L"--install") return InstallService();
     if (a1 == L"--uninstall") return UninstallService();
     if (a1 == L"--configure-volume" || a1 == L"--set-index-path" ||
+        a1 == L"--configure-exclude" ||
         a1 == L"--rebuild-index") return ConfigureCommand(args);
     if (a1 == L"--service") {
         SERVICE_TABLE_ENTRYW table[] = {

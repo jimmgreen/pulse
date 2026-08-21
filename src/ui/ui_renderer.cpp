@@ -1,6 +1,7 @@
 // ui_renderer.cpp — Full-window Fluent rendering.
 #include "ui_renderer.h"
 #include "tab_shape.h"
+#include "bloom_accent_picker.h"
 #include "../app/resource.h"
 #include "../app/places.h"
 #include "../common/text_format.h"
@@ -721,6 +722,7 @@ void MainRenderer::SetCompositor(Compositor* comp) {
     no_selection_svg_.reset();
     recent_empty_svg_.reset();
     starred_empty_svg_.reset();
+    exclude_empty_svg_.reset();
     empty_state_svg_dc_.reset();
     compositor_ = comp;
     material_.SetCompositor(comp);
@@ -897,6 +899,63 @@ bool MainRenderer::DrawCuratedEmptyStateSvg(bool starred, const D2D1_RECT_F& bou
     return true;
 }
 
+bool MainRenderer::EnsureExcludeEmptySvg() {
+    if (exclude_empty_svg_.get() && empty_state_svg_dc_.get()) return true;
+    if (!compositor_ || !compositor_->Dc()) return false;
+    if (!empty_state_svg_dc_.get() &&
+        FAILED(compositor_->Dc()->QueryInterface(IID_PPV_ARGS(&empty_state_svg_dc_)))) {
+        return false;
+    }
+
+    const HMODULE module = GetModuleHandleW(nullptr);
+    const HRSRC resource = FindResourceW(
+        module, MAKEINTRESOURCEW(IDR_EXCLUDE_EMPTY_SVG), RT_RCDATA);
+    if (!resource) return false;
+    const HGLOBAL loaded = LoadResource(module, resource);
+    const DWORD byte_count = SizeofResource(module, resource);
+    const void* bytes = loaded ? LockResource(loaded) : nullptr;
+    if (!bytes || byte_count == 0) return false;
+
+    ComPtr<IStream> stream;
+    stream.p = SHCreateMemStream(static_cast<const BYTE*>(bytes), byte_count);
+    if (!stream.get()) return false;
+    if (FAILED(empty_state_svg_dc_->CreateSvgDocument(
+            stream.get(), D2D1::SizeF(512.0f, 360.0f), &exclude_empty_svg_))) {
+        exclude_empty_svg_.reset();
+        return false;
+    }
+    return true;
+}
+
+bool MainRenderer::DrawExcludeEmptySvg(const D2D1_RECT_F& bounds, float opacity) {
+    if (!EnsureExcludeEmptySvg()) return false;
+    ComPtr<ID2D1SvgElement> root;
+    exclude_empty_svg_->GetRoot(&root);
+    if (root.get())
+        root->SetAttributeValue(L"opacity", std::clamp(opacity, 0.0f, 1.0f));
+    const float available_width = std::max(0.0f, bounds.right - bounds.left);
+    const float available_height = std::max(0.0f, bounds.bottom - bounds.top);
+    if (available_width <= 1.0f || available_height <= 1.0f) return false;
+    float art_width = available_width;
+    float art_height = art_width * 360.0f / 512.0f;
+    if (art_height > available_height) {
+        art_height = available_height;
+        art_width = art_height * 512.0f / 360.0f;
+    }
+    const float left = (bounds.left + bounds.right - art_width) * 0.5f;
+    const float top = (bounds.top + bounds.bottom - art_height) * 0.5f;
+
+    exclude_empty_svg_->SetViewportSize(D2D1::SizeF(512.0f, 360.0f));
+    D2D1_MATRIX_3X2_F previous{};
+    empty_state_svg_dc_->GetTransform(&previous);
+    empty_state_svg_dc_->SetTransform(
+        D2D1::Matrix3x2F::Scale(art_width / 512.0f, art_height / 360.0f) *
+        D2D1::Matrix3x2F::Translation(left, top) * previous);
+    empty_state_svg_dc_->DrawSvgDocument(exclude_empty_svg_.get());
+    empty_state_svg_dc_->SetTransform(previous);
+    return true;
+}
+
 void MainRenderer::SetIconNotifyWindow(HWND hwnd) {
     notify_hwnd_ = hwnd;
     icon_cache_.SetNotifyWindow(hwnd);
@@ -1008,9 +1067,16 @@ D2D1_RECT_F MainRenderer::FilterEditRect(const D2D1_RECT_F& pane_bounds, float e
 }
 
 MainRenderer::DetailsColumnLayout MainRenderer::DetailsColumns(
+    const D2D1_RECT_F& pane_bounds, const PaneViewModel& vm) const {
+    return DetailsColumns(pane_bounds, vm.details_column_dividers, vm.is_search,
+                          vm.search_column_dividers);
+}
+
+MainRenderer::DetailsColumnLayout MainRenderer::DetailsColumns(
     const D2D1_RECT_F& pane_bounds,
     const std::array<float, 3>& dividers,
-    bool search_view) const {
+    bool search_view,
+    const std::array<float, 4>& search_dividers) const {
     DetailsColumnLayout out;
     out.left = pane_bounds.left + margin_;
     out.right = std::max(out.left, pane_bounds.right - margin_ * 3.0f);
@@ -1018,8 +1084,8 @@ MainRenderer::DetailsColumnLayout MainRenderer::DetailsColumns(
     if (total <= 0.0f) return out;
 
     if (search_view) {
-        // Search results: 名称 / 路径 / 修改日期 / 类型 / 大小. The 路径 column
-        // is display-only, so the persisted 4-column dividers do not apply.
+        // Search results: 名称 / 路径 / 修改日期 / 类型 / 大小. Folder-view
+        // dividers do not apply; search keeps its own 4-edge ratios.
         out.count = 5;
         std::array<float, 5> minimums{
             80.0f * scale_, 110.0f * scale_, 92.0f * scale_, 64.0f * scale_,
@@ -1030,19 +1096,34 @@ MainRenderer::DetailsColumnLayout MainRenderer::DetailsColumns(
             const float shrink = total / minimumTotal;
             for (float& width : minimums) width *= shrink;
         }
-        const float fixed = (130.0f + 90.0f + 90.0f) * scale_;
-        const float flexible = (std::max)(0.0f, total - fixed);
+        const bool customized = search_dividers[0] > 0.0f &&
+            search_dividers[1] > search_dividers[0] &&
+            search_dividers[2] > search_dividers[1] &&
+            search_dividers[3] > search_dividers[2] &&
+            search_dividers[3] < 1.0f;
+        std::array<float, 4> desired{};
+        if (customized) {
+            for (size_t i = 0; i < desired.size(); ++i)
+                desired[i] = search_dividers[i] * total;
+        } else {
+            const float fixed = (130.0f + 90.0f + 90.0f) * scale_;
+            const float flexible = (std::max)(0.0f, total - fixed);
+            desired[0] = flexible * 0.55f;
+            desired[1] = flexible;
+            desired[2] = desired[1] + 130.0f * scale_;
+            desired[3] = desired[2] + 90.0f * scale_;
+        }
         const float edge0 = std::clamp(
-            flexible * 0.55f, minimums[0],
+            desired[0], minimums[0],
             total - minimums[1] - minimums[2] - minimums[3] - minimums[4]);
         const float edge1 = std::clamp(
-            flexible, edge0 + minimums[1],
+            desired[1], edge0 + minimums[1],
             total - minimums[2] - minimums[3] - minimums[4]);
         const float edge2 = std::clamp(
-            edge1 + 130.0f * scale_, edge1 + minimums[2],
+            desired[2], edge1 + minimums[2],
             total - minimums[3] - minimums[4]);
         const float edge3 = std::clamp(
-            edge2 + 90.0f * scale_, edge2 + minimums[3], total - minimums[4]);
+            desired[3], edge2 + minimums[3], total - minimums[4]);
         out.widths = { edge0, edge1 - edge0, edge2 - edge1, edge3 - edge2,
                        total - edge3 };
         return out;
@@ -1112,11 +1193,42 @@ std::array<float, 3> MainRenderer::ResizeDetailsColumnDivider(
     return result;
 }
 
+std::array<float, 4> MainRenderer::ResizeSearchColumnDivider(
+    const D2D1_RECT_F& pane_bounds,
+    const std::array<float, 4>& dividers,
+    int divider_index, float cursor_x) const {
+    DetailsColumnLayout layout = DetailsColumns(pane_bounds, {}, true, dividers);
+    const float total = layout.right - layout.left;
+    if (divider_index < 0 || divider_index >= 4 || total <= 0.0f)
+        return dividers;
+
+    const float adjacentTotal = layout.widths[static_cast<size_t>(divider_index)] +
+        layout.widths[static_cast<size_t>(divider_index + 1)];
+    const float outerLeft = divider_index == 0
+        ? layout.left : layout.DividerX(divider_index - 1);
+    const float minScale = std::min(1.0f, total /
+        ((80.0f + 110.0f + 92.0f + 64.0f + 72.0f) * scale_));
+    static constexpr float minimumDip[5] = {80.0f, 110.0f, 92.0f, 64.0f, 72.0f};
+    const float leftMinimum = minimumDip[divider_index] * scale_ * minScale;
+    const float rightMinimum = minimumDip[divider_index + 1] * scale_ * minScale;
+    const float divider = std::clamp(
+        cursor_x, outerLeft + leftMinimum,
+        outerLeft + adjacentTotal - rightMinimum);
+
+    std::array<float, 4> result{};
+    for (int i = 0; i < 4; ++i)
+        result[static_cast<size_t>(i)] = layout.DividerX(i);
+    result[static_cast<size_t>(divider_index)] = divider;
+    for (float& edge : result) edge = (edge - layout.left) / total;
+    return result;
+}
+
 D2D1_RECT_F MainRenderer::NameCellRect(const D2D1_RECT_F& pane_bounds, int view_row, float scroll_y,
                                        float extra_top, ViewMode mode, float scroll_x,
                                        size_t item_count,
                                        const std::array<float, 3>& column_dividers,
-                                       bool search_view) const {
+                                       bool search_view,
+                                       const std::array<float, 4>& search_dividers) const {
     const D2D1_RECT_F list = PaneListRect(pane_bounds, extra_top, mode);
     if (mode != ViewMode::Details) {
         ViewLayout layout(mode, list, item_count, scroll_x, scroll_y, scale_, row_height_dip_);
@@ -1124,7 +1236,8 @@ D2D1_RECT_F MainRenderer::NameCellRect(const D2D1_RECT_F& pane_bounds, int view_
     }
     const float list_x = list.left;
     const float list_y = list.top;
-    const float name_w = DetailsColumns(list, column_dividers, search_view).widths[0];
+    const float name_w = DetailsColumns(list, column_dividers, search_view,
+                                        search_dividers).widths[0];
     const float icon_size = 16.0f * scale_;
     const float row_y = list_y + static_cast<float>(view_row) * row_height_ - scroll_y;
     const float name_x = list_x + margin_ + icon_size + margin_ + 4.0f * scale_;
@@ -1146,7 +1259,7 @@ bool MainRenderer::PointInItemName(const PaneViewModel& vm, const D2D1_RECT_F& p
         pane_bounds, view_index, vm.scroll_y,
         vm.banner_message.empty() ? 0.0f : 36.0f * scale_,
         vm.view_mode, vm.scroll_x, vm.EntryCount(), vm.details_column_dividers,
-        vm.is_search);
+        vm.is_search, vm.search_column_dividers);
     const bool icon_grid = vm.view_mode == ViewMode::ExtraLargeIcons ||
                            vm.view_mode == ViewMode::LargeIcons ||
                            vm.view_mode == ViewMode::MediumIcons;
@@ -1376,6 +1489,17 @@ static float MeasureTextWidth(IDWriteFactory3* factory, IDWriteTextFormat* fmt, 
     return m.widthIncludingTrailingWhitespace + std::max(0.0f, om.right) + 1.0f;
 }
 
+static fluent::BadgeKind IndexVolumeBadgeKind(const std::wstring& state) {
+    if (state.find(L"失败") != std::wstring::npos) return fluent::BadgeKind::Danger;
+    if (state.find(L"非 NTFS") != std::wstring::npos ||
+        state.find(L"不支持") != std::wstring::npos) return fluent::BadgeKind::Warning;
+    if (state.find(L"正在") != std::wstring::npos ||
+        state.find(L"等待") != std::wstring::npos) return fluent::BadgeKind::Accent;
+    if (state.find(L"就绪") != std::wstring::npos ||
+        state.find(L"实时") != std::wstring::npos) return fluent::BadgeKind::Success;
+    return fluent::BadgeKind::Neutral;
+}
+
 // Containing folder of a full item path, for the search-results path column.
 static std::wstring FolderOf(const std::wstring& path) {
     if (path.empty()) return {};
@@ -1511,6 +1635,8 @@ struct SettingsLayout {
     D2D1_RECT_F nav{};
     D2D1_RECT_F content{};
     D2D1_RECT_F nav_row[3]{};
+    D2D1_RECT_F accent_card{};
+    D2D1_RECT_F accent_picker{};
     D2D1_RECT_F effect_card{};
     D2D1_RECT_F effect_row[kWindowEffectCount]{};
     D2D1_RECT_F density_card{};
@@ -1521,12 +1647,15 @@ struct SettingsLayout {
     D2D1_RECT_F wallpaper_preview{};
     D2D1_RECT_F wallpaper_choose{};
     D2D1_RECT_F wallpaper_clear{};
-    D2D1_RECT_F startup_row[2]{};
+    D2D1_RECT_F startup_row[3]{};
     D2D1_RECT_F index_info{};
     D2D1_RECT_F index_status{};
     D2D1_RECT_F index_path{};
     D2D1_RECT_F index_action[3]{};
     std::vector<D2D1_RECT_F> index_volume_rows;
+    D2D1_RECT_F index_exclude_action{};
+    D2D1_RECT_F index_exclude_empty{};
+    std::vector<D2D1_RECT_F> index_exclude_rows;
     D2D1_RECT_F network_action[2]{};
     std::vector<D2D1_RECT_F> network_rows;
     std::vector<D2D1_RECT_F> network_remove;
@@ -1562,9 +1691,19 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
         y += 8.0f * scale;
         const float radio_h = 36.0f * scale;
         const float effect_header = 56.0f * scale;
-        const float effect_h = effect_header + kWindowEffectCount * radio_h + 8.0f * scale;
         const float card_left = l.content.left + pad;
         const float card_right = l.content.right - pad;
+
+        const float picker = kBloomPickerDip * scale;
+        const float accent_h = 96.0f * scale;
+        l.accent_card = D2D1::RectF(card_left, y, card_right, y + accent_h);
+        l.accent_picker = D2D1::RectF(card_right - 16.0f * scale - picker,
+                                      y + (accent_h - picker) * 0.5f,
+                                      card_right - 16.0f * scale,
+                                      y + (accent_h + picker) * 0.5f);
+        y += accent_h + 12.0f * scale;
+
+        const float effect_h = effect_header + kWindowEffectCount * radio_h + 8.0f * scale;
         l.effect_card = D2D1::RectF(card_left, y, card_right, y + effect_h);
         for (int i = 0; i < kWindowEffectCount; ++i) {
             const float ry = y + effect_header + static_cast<float>(i) * radio_h;
@@ -1611,7 +1750,7 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
             l.startup_row[i] = D2D1::RectF(card_left, y + static_cast<float>(i) * startup_h,
                                            card_right, y + static_cast<float>(i + 1) * startup_h);
         }
-        y += startup_h * 2 + 24.0f * scale;
+        y += startup_h * 3 + 24.0f * scale;
     } else if (vm.settings_page == 1) {
         const float card_left = l.content.left + pad;
         const float card_right = l.content.right - pad;
@@ -1647,11 +1786,26 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
             y += 58.0f * scale;
         }
         y += 44.0f * scale;
-        const float network_button_w = 104.0f * scale;
+        const float section_btn_w = 104.0f * scale;
+        const float section_btn_h = 32.0f * scale;
+        l.index_exclude_action = D2D1::RectF(card_right - section_btn_w, y - 36.0f * scale,
+                                             card_right, y - 36.0f * scale + section_btn_h);
+        l.index_exclude_rows.reserve(vm.settings_index_excluded_paths.size());
+        for (size_t i = 0; i < vm.settings_index_excluded_paths.size(); ++i) {
+            const D2D1_RECT_F row = D2D1::RectF(card_left, y, card_right, y + 56.0f * scale);
+            l.index_exclude_rows.push_back(row);
+            y += 56.0f * scale;
+        }
+        if (vm.settings_index_excluded_paths.empty()) {
+            const float empty_h = 168.0f * scale;
+            l.index_exclude_empty = D2D1::RectF(card_left, y, card_right, y + empty_h);
+            y += empty_h;
+        }
+        y += 44.0f * scale;
         for (int i = 0; i < 2; ++i) {
-            const float right = card_right - i * (network_button_w + 8.0f * scale);
-            l.network_action[i] = D2D1::RectF(right - network_button_w, y - 36.0f * scale,
-                                              right, y - 4.0f * scale);
+            const float right = card_right - i * (section_btn_w + 8.0f * scale);
+            l.network_action[i] = D2D1::RectF(right - section_btn_w, y - 36.0f * scale,
+                                              right, y - 36.0f * scale + section_btn_h);
         }
         l.network_rows.reserve(vm.settings_network_roots.size());
         l.network_remove.reserve(vm.settings_network_roots.size());
@@ -3624,8 +3778,7 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
         MakeBrush(dc, theme.fill_input, brFillInput_);
         FillRect(dc, brFillInput_.get(), x, y, w, column_header_height_);
         FillRect(dc, brStrokeDivider_.get(), x, y + column_header_height_ - 1, w, 1);
-        const DetailsColumnLayout columns = DetailsColumns(
-            bounds, pane.details_column_dividers, pane.is_search);
+        const DetailsColumnLayout columns = DetailsColumns(bounds, pane);
         float cx = columns.left;
         auto drawCol = [&](const std::wstring& label, SortColumn col, float cw, bool right = false) {
             const bool active = !pane.curated_order && pane.sort_column == col;
@@ -3666,10 +3819,22 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
                 SortColumn::Mtime, columns.widths[col_index++], false);
         drawCol(L"\u7C7B\u578B", SortColumn::Type, columns.widths[col_index++], false);
         drawCol(L"\u5927\u5C0F", SortColumn::Size, columns.widths[col_index], true);
-        if ((vm.hover_region == static_cast<int>(HitTestResult::ColumnDivider) ||
-             vm.column_resize_pressed) && vm.hover_pane_index == pane_index) {
-            const int divider = std::clamp(vm.hover_control_index, 0, 2);
+        const bool divider_active =
+            (vm.hover_region == static_cast<int>(HitTestResult::ColumnDivider) ||
+             vm.column_resize_pressed) && vm.hover_pane_index == pane_index;
+        const int active_divider = divider_active
+            ? std::clamp(vm.hover_control_index, 0, std::max(0, columns.count - 2))
+            : -1;
+        MakeBrush(dc, theme.stroke_divider, brStrokeDivider_);
+        for (int divider = 0; divider < columns.count - 1; ++divider) {
             const float dividerX = columns.DividerX(divider);
+            FillRect(dc, brStrokeDivider_.get(),
+                     dividerX, y + 7.0f * scale_,
+                     std::max(1.0f, scale_),
+                     column_header_height_ - 14.0f * scale_);
+        }
+        if (active_divider >= 0) {
+            const float dividerX = columns.DividerX(active_divider);
             FillRect(dc, brAccent_.get(), dividerX - scale_, y + 4.0f * scale_,
                      2.0f * scale_, column_header_height_ - 8.0f * scale_);
         }
@@ -3935,7 +4100,7 @@ D2D1_RECT_F MainRenderer::RenameFieldRect(const PaneViewModel& vm, const D2D1_RE
     const size_t totalTags = tagIndices ? tagIndices->size() : (tagDots ? tagDots->size() : 0);
     const int tagDotCount = static_cast<int>(std::min<size_t>(3, totalTags));
     const float nameColRight = vm.view_mode == ViewMode::Details
-        ? DetailsColumns(list, vm.details_column_dividers, vm.is_search).DividerX(0) - margin_
+        ? DetailsColumns(list, vm).DividerX(0) - margin_
         : nameRc.right;
     if (iconGrid && tagDotCount > 0) {
         const float fullNameW = MeasureTextWidth(
@@ -3977,8 +4142,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
     const D2D1_RECT_F viewport = D2D1::RectF(x, y, x + w, y + h);
     ViewLayout layout(vm.view_mode, viewport, entryCount, vm.scroll_x, vm.scroll_y, scale_, row_height_dip_);
     const auto [startIdx, endIdx] = layout.VisibleRange();
-    const DetailsColumnLayout detailsColumns = DetailsColumns(
-        viewport, vm.details_column_dividers, vm.is_search);
+    const DetailsColumnLayout detailsColumns = DetailsColumns(viewport, vm);
     const float dateW = detailsColumns.widths[detailsColumns.count - 3];
     const float typeW = detailsColumns.widths[detailsColumns.count - 2];
     const float sizeW = detailsColumns.widths[detailsColumns.count - 1];
@@ -4392,6 +4556,24 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
         DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(), L"\u5916\u89c2",
                      lay.content.left + pad, origin + pad + 44.0f * scale_,
                      200.0f * scale_, 22.0f * scale_);
+
+        draw_card(lay.accent_card);
+        const float accent_text_w = (std::max)(40.0f * scale_,
+            lay.accent_picker.left - lay.accent_card.left - 32.0f * scale_);
+        MakeBrush(dc, theme.text, brText_);
+        DrawTextRect(dc, compositor_->TextFormat(), brText_.get(), L"\u4e3b\u9898\u8272",
+                     lay.accent_card.left + 16.0f * scale_, lay.accent_card.top + 16.0f * scale_,
+                     accent_text_w, 22.0f * scale_);
+        MakeBrush(dc, theme.text_secondary, brTextSecondary_);
+        DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(),
+                     L"\u70b9\u9009\u8272\u70b9\uff1b\u4e2d\u95f4\u767d\u70b9\u8ddf\u968f Windows",
+                     lay.accent_card.left + 16.0f * scale_, lay.accent_card.top + 42.0f * scale_,
+                     accent_text_w, 36.0f * scale_);
+        if (vm.settings_bloom) {
+            vm.settings_bloom->SetDisk(lay.accent_picker);
+            vm.settings_bloom->Draw(dc, theme);
+        }
+
         draw_card(lay.effect_card);
         MakeBrush(dc, theme.text, brText_);
         DrawTextRect(dc, compositor_->TextFormat(), brText_.get(), L"\u7a97\u53e3\u6548\u679c",
@@ -4517,7 +4699,7 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
                      lay.content.left + pad, lay.startup_row[0].top - 30.0f * scale_,
                      200.0f * scale_, 22.0f * scale_);
         const D2D1_RECT_F startup_card = D2D1::RectF(lay.startup_row[0].left, lay.startup_row[0].top,
-                                                     lay.startup_row[1].right, lay.startup_row[1].bottom);
+                                                     lay.startup_row[2].right, lay.startup_row[2].bottom);
         draw_card(startup_card);
         auto draw_row = [&](const D2D1_RECT_F& row, const wchar_t* title, const wchar_t* desc,
                             bool on, int hit) {
@@ -4553,6 +4735,12 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
         draw_row(lay.startup_row[1], L"\u5173\u95ED\u540E\u7EE7\u7EED\u8FD0\u884C",
                  L"\u70B9\u5173\u95ED\u65F6\u7F29\u5230\u6258\u76D8\uFF0C\u590D\u5236\u7B49\u4EFB\u52A1\u7EE7\u7EED",
                  vm.settings_keep_running, 2);
+        MakeBrush(dc, theme.stroke_divider, brStrokeDivider_);
+        FillRect(dc, brStrokeDivider_.get(), startup_card.left + 16.0f * scale_,
+                 lay.startup_row[1].bottom, startup_card.right - startup_card.left - 32.0f * scale_, 1.0f);
+        draw_row(lay.startup_row[2], L"\u7528 Pulse \u6253\u5F00\u6587\u4EF6\u5939",
+                 L"\u53CC\u51FB\u6587\u4EF6\u5939\u548C\u76D8\u7B26\u65F6\u7528 Pulse\uFF1BWin+E \u4ECD\u662F\u8D44\u6E90\u7BA1\u7406\u5668",
+                 vm.settings_open_folders, 3);
     } else if (vm.settings_page == 1) {
         fluent::InfoBarSpec info;
         info.bounds = lay.index_info;
@@ -4627,20 +4815,89 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
             check.hovered = IsHovered(vm, HitTestResult::SettingsIndexVolume, static_cast<int>(i));
             painter_.DrawCheckBox(D2D1::RectF(row.left + 12.0f * scale_, row.top,
                                               row.left + 44.0f * scale_, row.bottom), L"", check);
+            const float badge_h = 22.0f * scale_;
+            const float badge_w = volume.state.empty() ? 0.0f
+                : (std::min)(painter_.MeasureBadgeWidth(volume.state), 148.0f * scale_);
+            const float text_w = (std::max)(40.0f * scale_,
+                row.right - row.left - 60.0f * scale_ - (badge_w > 0 ? badge_w + 16.0f * scale_ : 0));
             MakeBrush(dc, check.enabled ? theme.text : theme.text_disabled, brText_);
             DrawTextRect(dc, compositor_->TextFormat(), brText_.get(), volume.title,
                          row.left + 48.0f * scale_, row.top + 6.0f * scale_,
-                         row.right - row.left - 200.0f * scale_, 22.0f * scale_);
+                         text_w, 22.0f * scale_);
             MakeBrush(dc, theme.text_secondary, brTextSecondary_);
             DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(), volume.detail,
                          row.left + 48.0f * scale_, row.top + 30.0f * scale_,
-                         row.right - row.left - 200.0f * scale_, 18.0f * scale_);
-            DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(), volume.state,
-                         row.right - 144.0f * scale_, row.top,
-                         128.0f * scale_, row.bottom - row.top);
+                         text_w, 18.0f * scale_);
+            if (badge_w > 0.0f) {
+                const float badge_x = row.right - 12.0f * scale_ - badge_w;
+                const float badge_y = row.top + ((row.bottom - row.top) - badge_h) * 0.5f;
+                painter_.DrawBadge({ D2D1::RectF(badge_x, badge_y,
+                                                 badge_x + badge_w, badge_y + badge_h),
+                                     volume.state, IndexVolumeBadgeKind(volume.state) });
+            }
             MakeBrush(dc, theme.stroke_divider, brStrokeDivider_);
             FillRect(dc, brStrokeDivider_.get(), row.left + 12.0f * scale_, row.bottom - 1.0f,
                      row.right - row.left - 24.0f * scale_, 1.0f);
+        }
+
+        MakeBrush(dc, theme.text_secondary, brTextSecondary_);
+        DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(), L"排除项",
+                     lay.content.left + pad, lay.index_exclude_action.top + 5.0f * scale_,
+                     160.0f * scale_, 22.0f * scale_);
+        fluent::ControlState add_exclude{};
+        add_exclude.enabled = vm.settings_index_service;
+        add_exclude.hovered = add_exclude.enabled &&
+            IsHovered(vm, HitTestResult::SettingsIndexExcludeAction, 0);
+        painter_.DrawButton({ lay.index_exclude_action, L"添加文件夹", {},
+                              fluent::ButtonKind::Primary, add_exclude });
+        if (vm.settings_index_excluded_paths.empty() &&
+            lay.index_exclude_empty.bottom > lay.index_exclude_empty.top) {
+            draw_card(lay.index_exclude_empty);
+            const float art_top = lay.index_exclude_empty.top + 8.0f * scale_;
+            const float art_bottom = lay.index_exclude_empty.bottom - 48.0f * scale_;
+            const D2D1_RECT_F art = D2D1::RectF(lay.index_exclude_empty.left + 16.0f * scale_,
+                                                art_top,
+                                                lay.index_exclude_empty.right - 16.0f * scale_,
+                                                art_bottom);
+            const float svg_opacity = theme.bg.r > 0.5f ? 0.68f : 1.0f;
+            if (!DrawExcludeEmptySvg(art, svg_opacity)) {
+                fluent::EmptyStateSpec fallback;
+                fallback.bounds = art;
+                fallback.glyph = L"\xE738";
+                fallback.title = L"尚未排除文件夹";
+                painter_.DrawEmptyState(fallback);
+            } else {
+                const D2D1_RECT_F caption = D2D1::RectF(
+                    lay.index_exclude_empty.left + 16.0f * scale_,
+                    art_bottom + 6.0f * scale_,
+                    lay.index_exclude_empty.right - 16.0f * scale_,
+                    lay.index_exclude_empty.bottom - 12.0f * scale_);
+                painter_.DrawText(
+                    L"尚未排除文件夹，它们不会进入全盘索引。",
+                    caption, compositor_->SmallFormat(), theme.text_secondary,
+                    fluent::HorizontalAlignment::Center);
+            }
+        }
+        for (size_t i = 0; i < vm.settings_index_excluded_paths.size() &&
+                           i < lay.index_exclude_rows.size(); ++i) {
+            const auto& row = lay.index_exclude_rows[i];
+            if (IsHovered(vm, HitTestResult::SettingsIndexExcludeRemove, static_cast<int>(i))) {
+                MakeBrush(dc, theme.fill_hover, brFillHover_);
+                FillRoundedRect(dc, brFillHover_.get(), row.left, row.top,
+                                row.right - row.left, row.bottom - row.top, 6.0f * scale_);
+            }
+            MakeBrush(dc, theme.text, brText_);
+            DrawTextRect(dc, compositor_->SmallFormat(), brText_.get(),
+                         vm.settings_index_excluded_paths[i],
+                         row.left + 16.0f * scale_, row.top + 17.0f * scale_,
+                         row.right - row.left - 112.0f * scale_, 22.0f * scale_);
+            fluent::ControlState remove{};
+            remove.enabled = vm.settings_index_service;
+            remove.hovered = remove.enabled &&
+                IsHovered(vm, HitTestResult::SettingsIndexExcludeRemove, static_cast<int>(i));
+            painter_.DrawButton({ D2D1::RectF(row.right - 82.0f * scale_, row.top + 12.0f * scale_,
+                                              row.right - 12.0f * scale_, row.top + 44.0f * scale_),
+                                  L"移除", {}, fluent::ButtonKind::Standard, remove });
         }
 
         const float network_header_y = lay.network_action[0].top + 5.0f * scale_;
@@ -5076,6 +5333,15 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
         }
         if (ContainsPt(lay.content, x, y)) {
             if (vm.settings_page == 0) {
+                if (vm.settings_bloom) {
+                    vm.settings_bloom->SetDisk(lay.accent_picker);
+                    const int dot = vm.settings_bloom->HitDot(x, y);
+                    if (dot >= 0) {
+                        r.region = HitTestResult::SettingsAccent;
+                        r.index = dot;
+                        return r;
+                    }
+                }
                 for (int i = 0; i < 3; ++i) {
                     if (ContainsPt(lay.density_row[i], x, y)) {
                         r.region = HitTestResult::SettingsDensity;
@@ -5107,7 +5373,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                     r.index = 1;
                     return r;
                 }
-                for (int i = 0; i < 2; ++i) {
+                for (int i = 0; i < 3; ++i) {
                     if (ContainsPt(lay.startup_row[i], x, y)) {
                         r.region = HitTestResult::SettingsToggle;
                         r.index = i + 1;
@@ -5125,6 +5391,23 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 for (size_t i = 0; i < lay.index_volume_rows.size(); ++i) {
                     if (ContainsPt(lay.index_volume_rows[i], x, y)) {
                         r.region = HitTestResult::SettingsIndexVolume;
+                        r.index = static_cast<int>(i);
+                        return r;
+                    }
+                }
+                if (ContainsPt(lay.index_exclude_action, x, y)) {
+                    r.region = HitTestResult::SettingsIndexExcludeAction;
+                    r.index = 0;
+                    return r;
+                }
+                for (size_t i = 0; i < lay.index_exclude_rows.size(); ++i) {
+                    const D2D1_RECT_F& row = lay.index_exclude_rows[i];
+                    const D2D1_RECT_F remove = D2D1::RectF(row.right - 82.0f * scale_,
+                                                           row.top + 12.0f * scale_,
+                                                           row.right - 12.0f * scale_,
+                                                           row.top + 44.0f * scale_);
+                    if (ContainsPt(remove, x, y)) {
+                        r.region = HitTestResult::SettingsIndexExcludeRemove;
                         r.index = static_cast<int>(i);
                         return r;
                     }
@@ -5463,16 +5746,12 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 out.region = HitTestResult::Pane;
                 return out;
             }
-            const DetailsColumnLayout columns = DetailsColumns(
-                paneRc, paneVm.details_column_dividers, paneVm.is_search);
-            // Divider resize stays 4-column only; the search path column is fixed.
-            if (!paneVm.is_search) {
-                for (int divider = 0; divider < 3; ++divider) {
-                    if (std::abs(x - columns.DividerX(divider)) <= 4.0f * scale_) {
-                        out.region = HitTestResult::ColumnDivider;
-                        out.index = divider;
-                        return out;
-                    }
+            const DetailsColumnLayout columns = DetailsColumns(paneRc, paneVm);
+            for (int divider = 0; divider < columns.count - 1; ++divider) {
+                if (std::abs(x - columns.DividerX(divider)) <= 4.0f * scale_) {
+                    out.region = HitTestResult::ColumnDivider;
+                    out.index = divider;
+                    return out;
                 }
             }
             out.region = HitTestResult::ColumnHeader;
@@ -5516,8 +5795,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                     int viewRow = paneVm.ViewIndex(idx);
                     if (viewRow >= 0 && compositor_ && compositor_->DwriteFactory()) {
                         const D2D1_RECT_F list = PaneListRect(paneRc, extra, paneVm.view_mode);
-                        const DetailsColumnLayout columns = DetailsColumns(
-                            list, paneVm.details_column_dividers, paneVm.is_search);
+                        const DetailsColumnLayout columns = DetailsColumns(list, paneVm);
                         ViewLayout layout(paneVm.view_mode, list, paneVm.EntryCount(),
                                           paneVm.scroll_x, paneVm.scroll_y, scale_, row_height_dip_);
                         const D2D1_RECT_F nameRc = layout.NameRect(viewRow);

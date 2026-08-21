@@ -18,6 +18,7 @@
 #include "context_menu_prefs.h"
 #include "app_prefs.h"
 #include "../ui/color_picker.h"
+#include "../ui/bloom_accent_picker.h"
 #ifdef PULSE_WITH_SELFTEST
 #include "selftest_1b2.h"
 #endif
@@ -78,6 +79,8 @@ constexpr UINT WM_TAG_ADS_DISCOVERED = WM_APP + 44;
 constexpr UINT WM_SHELLCTX_ITEMS = WM_APP + 45;  // std::vector<ops::ShellMenuItem>*
 constexpr UINT WM_SHELL_VERBS = WM_APP + 46;     // ShellVerbsResult*
 constexpr UINT WM_DETAILS_META = WM_APP + 47;    // DetailsMetaResult*
+constexpr DWORD kPulseCopyDataOpen = 0x50554C53; // 'PULS' — folder path from a second instance
+constexpr const wchar_t* kPulseWindowClass = L"PulseMainWindow";
 constexpr UINT WM_INDEX_CONFIG_RESULT = WM_APP + 48;
 constexpr UINT WM_SHELL_CACHE_INVALIDATE = WM_APP + 49;
 constexpr UINT WM_TRAYICON = WM_APP + 50;
@@ -136,9 +139,11 @@ struct AppState {
     app::PlacesCatalog places;
     app::ContextMenuPrefs ctxMenuPrefs;
     app::AppPrefs appPrefs;
+    ui::BloomAccentPicker bloom_accent;
     int settingsPage = 0;
     float settingsScroll = 0.0f;
     std::unordered_set<std::wstring> indexConfigPending;
+    std::unordered_set<std::wstring> indexExcludePending;
     std::wstring indexConfigError;
     bool indexServiceInstalled = false;
     bool networkConfigPending = false;
@@ -244,6 +249,8 @@ struct AppState {
     static constexpr double kScrollResponseMs = 48.0;
 
     ShotRequest shot;
+    std::wstring open_path;   // folder to open as a new tab after session restore
+    HANDLE singleton = nullptr;
     Timing timing;
     std::wstring session_path;
     std::vector<std::wstring> session_pane_paths;
@@ -494,6 +501,7 @@ struct DetailsMetaResult {
 
 struct IndexConfigResult {
     std::wstring volume_id;
+    std::wstring exclude_path;
     bool ok = false;
     bool rebuild = false;
 };
@@ -521,11 +529,33 @@ static void PrefetchDetailsMeta(HWND hwnd, const std::wstring& path) {
 }
 
 static void NewTab(AppState& s, const std::wstring& path);
+static void RestoreFromTray(AppState& s);
 static void OpenSettingsTab(AppState& s, int page);
 static int SettingsPageFromName(std::wstring_view name);
 static void EnsureTrayIcon(AppState& s, bool show);
 static bool IsSettingsTab(const app::Tab* tab);
 static void ApplyAppWindowChrome(AppState& s);
+
+static std::wstring ResolveOpenFolderPath(std::wstring path) {
+    while (!path.empty() && (path.front() == L'"' || path.back() == L'"')) {
+        if (path.front() == L'"') path.erase(path.begin());
+        if (!path.empty() && path.back() == L'"') path.pop_back();
+    }
+    if (path.empty()) return {};
+    const DWORD attrs = GetFileAttributesW(path.c_str());
+    if (attrs != INVALID_FILE_ATTRIBUTES &&
+        (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        path = fs::ParentPath(path);
+    }
+    return fs::NormalizePath(path);
+}
+
+static void OpenFolderInNewTab(AppState& s, const std::wstring& raw) {
+    RestoreFromTray(s);
+    const std::wstring path = ResolveOpenFolderPath(raw);
+    if (!path.empty()) NewTab(s, path);
+    else InvalidateRect(s.hwnd, nullptr, FALSE);
+}
 
 static void PostWorkerResult(AppState& s, app::WorkResult res) {
     {
@@ -610,6 +640,7 @@ static std::vector<std::wstring> CollectPanePaths(const AppState& s);
 static std::vector<ui::ViewMode> CollectPaneViews(const AppState& s);
 static std::wstring PinCandidate(AppState& s);
 static bool IsUncPath(const std::wstring& p);
+static void RequestUncProbe(AppState& s, std::wstring unc);
 
 static bool ScrollbarGeometry(const AppState& s, const ui::PaneViewModel& pane,
                               D2D1_RECT_F& track, D2D1_RECT_F& thumb, float& maxScroll) {
@@ -673,14 +704,17 @@ static void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
             vm.settings_scroll = s.settingsScroll;
             vm.settings_launch_on_startup = s.appPrefs.launch_on_startup;
             vm.settings_keep_running = s.appPrefs.keep_running_on_close;
+            vm.settings_open_folders = s.appPrefs.open_folders_in_pulse;
             vm.settings_row_height = s.appPrefs.row_height;
             vm.settings_tray_icon = s.appPrefs.tray_icon_size;
+            vm.settings_bloom = &s.bloom_accent;
             vm.settings_index_service = s.index.ServiceMode();
             vm.settings_index_installed = s.indexServiceInstalled;
             vm.settings_index_status = s.index.Status();
             vm.settings_index_path = s.index.IndexPath();
             vm.settings_index_error = s.indexConfigError;
             vm.settings_index_volumes.clear();
+            vm.settings_index_excluded_paths = s.index.ExcludedPaths();
             vm.settings_network_roots.clear();
             auto index_volumes = s.index.Volumes();
             if (s.shot.active && vm.settings_page == 1 && index_volumes.empty()) {
@@ -1487,6 +1521,13 @@ static std::wstring TooltipForHover(AppState& s) {
         return s.hoverControlIndex == 1 ? L"清除背景图" : L"选择背景图";
     case R::SettingsDensity: return L"列表行高";
     case R::SettingsTrayIcon: return L"暂存区图标";
+    case R::SettingsAccent:
+        return s.hoverControlIndex == 0 ? L"跟随 Windows 强调色" : L"主题色";
+    case R::SettingsToggle:
+        if (s.hoverControlIndex == 3) return L"用 Pulse 打开文件夹";
+        return L"";
+    case R::SettingsIndexExcludeAction: return L"添加索引排除文件夹";
+    case R::SettingsIndexExcludeRemove: return L"移除索引排除项";
     case R::Minimize: return L"最小化";
     case R::Maximize: return s.maximized ? L"还原" : L"最大化";
     case R::Close: return L"关闭";
@@ -2228,7 +2269,10 @@ static void DispatchMenuCommand(AppState& s, int cmd) {
             app::Tab* tab = ActiveTab(s);
             if (tab) root = tab->current_path;
         }
-        if (IsUncPath(root)) s.places.PinNetwork(root, L"");
+        if (IsUncPath(root)) {
+            s.places.PinNetwork(root, L"");
+            RequestUncProbe(s, root);
+        }
         break;
     }
     case app::CmdSearchAll: {
@@ -3280,6 +3324,10 @@ static void RequestUncProbe(AppState& s, std::wstring unc) {
     PumpUncProbe(s);
 }
 
+static void ProbePinnedNetworks(AppState& s) {
+    for (const auto& n : s.places.networks) RequestUncProbe(s, n.unc);
+}
+
 static void WarmupUnc(AppState& s, const std::wstring& path) {
     if (!fs::IsUncPath(path)) return;
     RequestUncProbe(s, path);
@@ -3319,6 +3367,7 @@ static void RestorePaneTabs(AppState& s, app::Pane& pane,
         tab->pinned = ts.pinned;
         tab->view_mode = ts.view;
         tab->details_column_dividers = ts.columns;
+        tab->search_column_dividers = ts.search_columns;
         // Drop membership in groups that were not restored.
         int gid = ts.group;
         if (gid != 0) {
@@ -3571,6 +3620,7 @@ static void LoadVirtualView(AppState& s, app::Tab& tab, const std::wstring& path
         }
     } else if (kind == L"search") {
         tab.virtual_title = L"搜索 “" + rest + L"”…";
+        tab.view_mode = ui::ViewMode::Details;
         RequestSearchPage(s, tab, rest, true);
         return;
     } else if (kind == L"starred") {
@@ -3973,11 +4023,13 @@ static void ApplyLayoutPreset(AppState& s, app::LayoutPreset preset) {
     std::wstring clone = L"C:\\";
     ui::ViewMode cloneView = ui::ViewMode::Details;
     std::array<float, 3> cloneColumns{};
+    std::array<float, 4> cloneSearchColumns{};
     if (s.pane && s.pane->ActiveTab() && !s.pane->ActiveTab()->current_path.empty())
         clone = s.pane->ActiveTab()->current_path;
     if (s.pane && s.pane->ActiveTab()) {
         cloneView = s.pane->ActiveTab()->view_mode;
         cloneColumns = s.pane->ActiveTab()->details_column_dividers;
+        cloneSearchColumns = s.pane->ActiveTab()->search_column_dividers;
     }
     while (s.panes.size() < n) {
         auto p = std::make_unique<app::Pane>();
@@ -3987,6 +4039,7 @@ static void ApplyLayoutPreset(AppState& s, app::LayoutPreset preset) {
         if (tab) {
             tab->view_mode = cloneView;
             tab->details_column_dividers = cloneColumns;
+            tab->search_column_dividers = cloneSearchColumns;
         }
         s.panes.push_back(std::move(p));
         if (tab) StartLoadingPath(s, *tab, clone);
@@ -4825,6 +4878,22 @@ static bool PickFolder(HWND owner, std::wstring& path,
     return !path.empty();
 }
 
+static D2D1_COLOR_F ResolveAccentColor(const app::AppPrefs& prefs) {
+    uint32_t rgb = 0;
+    if (app::ParseAccentRgb(prefs.accent_rgb, rgb))
+        return ui::HexColor(rgb);
+    return ui::GetAccentColor();
+}
+
+static void ApplyAccentFromPrefs(AppState& s, bool snap_picker) {
+    uint32_t rgb = 0;
+    const bool follow = !app::ParseAccentRgb(s.appPrefs.accent_rgb, rgb);
+    s.accentColor = ResolveAccentColor(s.appPrefs);
+    s.bloom_accent.SetSelection(follow, rgb, snap_picker);
+    if (s.menu) s.menu->SetTheme(s.darkMode, s.accentColor);
+    if (s.operationWindow) s.operationWindow->SetTheme(s.darkMode, s.accentColor);
+}
+
 static void HandleSettingsEffect(AppState& s, int index) {
     if (index < 0 || index >= ui::kWindowEffectCount) return;
     const auto effect = static_cast<ui::WindowEffect>(index);
@@ -4833,6 +4902,27 @@ static void HandleSettingsEffect(AppState& s, int index) {
     s.appPrefs.Save();
     s.renderer.InvalidateWallpaper();
     ApplyAppWindowChrome(s);
+}
+
+static void HandleSettingsAccent(AppState& s, int index) {
+    if (index < 0 || index >= ui::kBloomDotCount) return;
+    uint32_t current = 0;
+    const bool following = !app::ParseAccentRgb(s.appPrefs.accent_rgb, current);
+    if (index == 0) {
+        if (following) return;
+        s.appPrefs.accent_rgb.clear();
+    } else {
+        const uint32_t rgb = ui::BloomDotRgb(index);
+        if (!following && current == rgb) {
+            s.appPrefs.accent_rgb.clear();
+        } else {
+            wchar_t hex[8]{};
+            swprintf_s(hex, L"%06X", rgb);
+            s.appPrefs.accent_rgb = hex;
+        }
+    }
+    s.appPrefs.Save();
+    ApplyAccentFromPrefs(s, false);
 }
 
 static void HandleSettingsDensity(AppState& s, int index) {
@@ -4888,6 +4978,11 @@ static void HandleSettingsToggle(AppState& s, int index) {
         EnsureTrayIcon(s, s.appPrefs.keep_running_on_close);
         return;
     }
+    if (index == 3) {
+        s.appPrefs.ApplyFolderOpen(!s.appPrefs.open_folders_in_pulse);
+        s.appPrefs.Save();
+        return;
+    }
     if (index >= 10 && index < 15) {
         const auto g = kGroups[index - 10];
         s.ctxMenuPrefs.SetGroupEnabled(g, !s.ctxMenuPrefs.GroupEnabled(g));
@@ -4922,6 +5017,34 @@ static void StartIndexVolumeConfig(AppState& s, int index) {
         if (!PostMessageW(hwnd, WM_INDEX_CONFIG_RESULT, 0,
                           reinterpret_cast<LPARAM>(result))) delete result;
     }).detach();
+}
+
+static void StartIndexExcludeConfig(AppState& s, const std::wstring& path, bool enabled) {
+    if (!s.index.ServiceMode() || path.empty() || s.indexExcludePending.contains(path)) return;
+    s.indexExcludePending.insert(path);
+    s.indexConfigError.clear();
+    const HWND hwnd = s.hwnd;
+    std::thread([hwnd, path, enabled] {
+        auto* result = new IndexConfigResult;
+        result->exclude_path = path;
+        result->ok = index::IndexClient::ConfigureExcludePathElevated(path, enabled);
+        result->rebuild = true;
+        if (!PostMessageW(hwnd, WM_INDEX_CONFIG_RESULT, 0,
+                          reinterpret_cast<LPARAM>(result))) delete result;
+    }).detach();
+}
+
+static void AddIndexExclude(AppState& s) {
+    if (!s.index.ServiceMode()) return;
+    std::wstring path;
+    if (!PickFolder(s.hwnd, path, L"选择要排除的本地文件夹")) return;
+    StartIndexExcludeConfig(s, path, true);
+}
+
+static void RemoveIndexExclude(AppState& s, int index) {
+    const auto paths = s.index.ExcludedPaths();
+    if (index < 0 || index >= static_cast<int>(paths.size())) return;
+    StartIndexExcludeConfig(s, paths[static_cast<size_t>(index)], false);
 }
 
 static void HandleIndexAction(AppState& s, int action) {
@@ -5777,12 +5900,14 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         s->root = app::SplitContainer::CreateLeaf(s->pane);
         s->sidebar = app::BuildSidebarModel();
         s->places.Load();
+        ProbePinnedNetworks(*s);
         s->ctxMenuPrefs.Load();
         s->appPrefs.Load();
         SeedShellVerbCache(*s);
         StartShellRegistryWatch(hwnd);
         s->renderer.SetRowHeightDip(static_cast<float>(s->appPrefs.row_height));
         s->renderer.SetTrayIconDip(static_cast<float>(s->appPrefs.tray_icon_size));
+        ApplyAccentFromPrefs(*s, true);
         ApplyAppWindowChrome(*s);
         if (s->appPrefs.keep_running_on_close) EnsureTrayIcon(*s, true);
         s->index.Start(hwnd, WM_INDEX_NOTIFY, WM_INDEX_SEARCH);
@@ -5874,6 +5999,8 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         } else {
         std::wstring startPath = s->shot.active ? s->shot.path : L"C:\\";
         if (!s->shot.active && !s->session_path.empty()) startPath = s->session_path;
+        else if (!s->shot.active && !s->open_path.empty())
+            startPath = ResolveOpenFolderPath(s->open_path);
         s->pane->NewTab(startPath);
         if (s->shot.active) s->pane->ActiveTab()->view_mode = s->shot.view_mode;
         if (!s->shot.active && !s->session_pane_views.empty())
@@ -5912,6 +6039,11 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 for (auto& p : s->panes) p->target = (p.get() == s->targetPane);
             }
         }
+        }
+
+        if (!s->shot.active && !s->open_path.empty() &&
+            (!s->session_pane_tabs.empty() || !s->session_path.empty())) {
+            NewTab(*s, ResolveOpenFolderPath(s->open_path));
         }
 
         s->lastFrameTime = std::chrono::steady_clock::now();
@@ -6036,6 +6168,20 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         break;
     }
 
+    case WM_COPYDATA: {
+        auto* cds = reinterpret_cast<COPYDATASTRUCT*>(lParam);
+        if (!s || !cds || cds->dwData != kPulseCopyDataOpen) return FALSE;
+        std::wstring path;
+        if (cds->lpData && cds->cbData >= sizeof(wchar_t)) {
+            const auto* p = static_cast<const wchar_t*>(cds->lpData);
+            const size_t n = cds->cbData / sizeof(wchar_t);
+            if (n > 0 && p[n - 1] == 0) path.assign(p, n - 1);
+            else path.assign(p, n);
+        }
+        OpenFolderInNewTab(*s, path);
+        return TRUE;
+    }
+
     case WM_TRAYICON: {
         if (!s) return 0;
         switch (LOWORD(lParam)) {
@@ -6093,6 +6239,8 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                   wcscmp(reinterpret_cast<const wchar_t*>(lParam), L"HighContrast") == 0)) {
             if (s->themeOverride == ui::ThemeMode::Auto)
                 s->darkMode = ui::ShouldUseDarkMode(s->themeOverride);
+            if (s->appPrefs.accent_rgb.empty())
+                ApplyAccentFromPrefs(*s, true);
             ApplyAppWindowChrome(*s);
             InvalidateRect(hwnd, nullptr, FALSE);
         }
@@ -6244,6 +6392,13 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 dirty = true;
             }
             if (TickTrayDeck(*s)) dirty = true;
+            if (app::Tab* tab = ActiveTab(*s)) {
+                std::wstring kind, rest;
+                if (app::ParsePulsePath(tab->current_path, &kind, &rest) &&
+                    kind == L"settings" && SettingsPageFromName(rest) == 0) {
+                    if (s->bloom_accent.Tick(0.016f)) dirty = true;
+                }
+            }
             if (s->hoverRegion != 0 && s->tooltipText.empty() && s->hoverSince != 0 &&
                 GetTickCount64() - s->hoverSince >= 400) {
                 s->tooltipText = TooltipForHover(*s);
@@ -6294,6 +6449,10 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             SetCursor(LoadCursorW(nullptr, IDC_IBEAM));
             return TRUE;
         }
+        if (hit.region == ui::HitTestResult::SettingsAccent) {
+            SetCursor(LoadCursorW(nullptr, IDC_HAND));
+            return TRUE;
+        }
         break;
     }
 
@@ -6302,6 +6461,7 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         int mx = GET_X_LPARAM(lParam);
         int my = GET_Y_LPARAM(lParam);
         s->hoverPoint = POINT{ mx, my };
+        s->bloom_accent.SetPointer(static_cast<float>(mx), static_cast<float>(my), true);
 
         if (s->columnResizing) {
             if ((GetKeyState(VK_LBUTTON) & 0x8000) == 0) {
@@ -6322,10 +6482,19 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                 app::Pane* resizePane = PaneAtSlot(*s, s->columnResizePane);
                 app::Tab* resizeTab = resizePane ? resizePane->ActiveTab() : nullptr;
                 if (resizeTab) {
-                    resizeTab->details_column_dividers =
-                        s->renderer.ResizeDetailsColumnDivider(
-                            paneRect, resizeTab->details_column_dividers,
-                            s->columnResizeIndex, static_cast<float>(mx));
+                    std::wstring kind;
+                    app::ParsePulsePath(resizeTab->current_path, &kind, nullptr);
+                    if (kind == L"search") {
+                        resizeTab->search_column_dividers =
+                            s->renderer.ResizeSearchColumnDivider(
+                                paneRect, resizeTab->search_column_dividers,
+                                s->columnResizeIndex, static_cast<float>(mx));
+                    } else {
+                        resizeTab->details_column_dividers =
+                            s->renderer.ResizeDetailsColumnDivider(
+                                paneRect, resizeTab->details_column_dividers,
+                                s->columnResizeIndex, static_cast<float>(mx));
+                    }
                 }
                 s->hoverRegion = static_cast<int>(ui::HitTestResult::ColumnDivider);
                 s->hoverControlIndex = s->columnResizeIndex;
@@ -7139,6 +7308,7 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             s->hoverPath.clear();
             s->hoverSince = 0;
             s->tooltipText.clear();
+            s->bloom_accent.SetPointer(0.0f, 0.0f, false);
             if (GetCapture() != hwnd) s->dragPending = false;
             InvalidateRect(hwnd, nullptr, FALSE);
         }
@@ -7296,6 +7466,10 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         } else if (hit.region == ui::HitTestResult::SettingsToggle) {
             HandleSettingsToggle(*s, hit.index);
             InvalidateRect(hwnd, nullptr, FALSE);
+        } else if (hit.region == ui::HitTestResult::SettingsAccent) {
+            s->bloom_accent.SetPressed(hit.index);
+            SetCapture(hwnd);
+            InvalidateRect(hwnd, nullptr, FALSE);
         } else if (hit.region == ui::HitTestResult::SettingsEffect) {
             HandleSettingsEffect(*s, hit.index);
             InvalidateRect(hwnd, nullptr, FALSE);
@@ -7313,6 +7487,12 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (hit.region == ui::HitTestResult::SettingsIndexAction) {
             HandleIndexAction(*s, hit.index);
+            InvalidateRect(hwnd, nullptr, FALSE);
+        } else if (hit.region == ui::HitTestResult::SettingsIndexExcludeAction) {
+            AddIndexExclude(*s);
+            InvalidateRect(hwnd, nullptr, FALSE);
+        } else if (hit.region == ui::HitTestResult::SettingsIndexExcludeRemove) {
+            RemoveIndexExclude(*s, hit.index);
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (hit.region == ui::HitTestResult::SettingsNetworkAction) {
             HandleNetworkIndexAction(*s, hit.index);
@@ -7638,6 +7818,23 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
     case WM_LBUTTONUP: {
         if (s) {
+            if (s->bloom_accent.Pressed() >= 0) {
+                const int pressed = s->bloom_accent.Pressed();
+                s->bloom_accent.SetPressed(-1);
+                const int mx = GET_X_LPARAM(lParam);
+                const int my = GET_Y_LPARAM(lParam);
+                ui::WindowViewModel vm = BuildVm(*s);
+                D2D1_RECT_F rect = D2D1::RectF(0, 0,
+                    static_cast<float>(s->compositor.Width()),
+                    static_cast<float>(s->compositor.Height()));
+                const ui::HitTestResult hit =
+                    s->renderer.HitTest(vm, rect, static_cast<float>(mx), static_cast<float>(my));
+                if (hit.region == ui::HitTestResult::SettingsAccent && hit.index == pressed)
+                    HandleSettingsAccent(*s, pressed);
+                if (GetCapture() == hwnd) ReleaseCapture();
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
             if (s->starDragPending || s->starDragActive) {
                 const bool was_active = s->starDragActive;
                 const std::wstring path = s->starDragPath;
@@ -8482,8 +8679,10 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             s->networkConfigPending = false;
             if (result->ok) {
                 s->indexConfigError.clear();
-                if (result->pin && !result->path.empty())
+                if (result->pin && !result->path.empty()) {
                     s->places.PinNetwork(result->path, L"");
+                    RequestUncProbe(*s, result->path);
+                }
             } else {
                 s->indexConfigError = result->error.empty()
                     ? (result->action == 2 ? L"无法移除服务器文件夹。"
@@ -8500,6 +8699,7 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
         auto* result = reinterpret_cast<IndexConfigResult*>(lParam);
         if (s && result) {
             if (!result->volume_id.empty()) s->indexConfigPending.erase(result->volume_id);
+            if (!result->exclude_path.empty()) s->indexExcludePending.erase(result->exclude_path);
             if (result->ok) {
                 s->indexConfigError.clear();
                 s->indexServiceInstalled = s->index.ServiceInstalled();
@@ -8675,6 +8875,7 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
                                     ts.group = owned->tab_group;
                                     ts.view = owned->view_mode;
                                     ts.columns = owned->details_column_dividers;
+                                    ts.search_columns = owned->search_column_dividers;
                                 }
                                 ps.tabs.push_back(std::move(ts));
                             }
@@ -8697,6 +8898,11 @@ static LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
             EnsureTrayIcon(*s, false);
             s->ops.Stop();
+
+            if (s->singleton) {
+                CloseHandle(s->singleton);
+                s->singleton = nullptr;
+            }
 
             s->renderer.SetIconNotifyWindow(nullptr);
             s->renderer.SetCompositor(nullptr);
@@ -8849,6 +9055,38 @@ static int ShotModeMain(AppState& state, HWND hwnd) {
     return ok ? 0 : 1;
 }
 
+static bool SkipSingletonFromArgv() {
+    for (int i = 1; i < __argc; ++i) {
+        if (wcscmp(__wargv[i], L"--selftest") == 0 ||
+            wcscmp(__wargv[i], L"--material-selftest") == 0 ||
+            wcscmp(__wargv[i], L"--seed-shell-verbs") == 0 ||
+            wcscmp(__wargv[i], L"--shot") == 0 ||
+            wcscmp(__wargv[i], L"--menushot") == 0 ||
+            wcscmp(__wargv[i], L"--colorpickshot") == 0 ||
+            wcscmp(__wargv[i], L"--colorpickdialog") == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool ForwardToRunningInstance(const std::wstring& path) {
+    HWND hwnd = nullptr;
+    for (int i = 0; i < 50 && !hwnd; ++i) {
+        hwnd = FindWindowW(kPulseWindowClass, nullptr);
+        if (!hwnd) Sleep(50);
+    }
+    if (!hwnd) return false;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid) AllowSetForegroundWindow(pid);
+    COPYDATASTRUCT cds{};
+    cds.dwData = kPulseCopyDataOpen;
+    cds.cbData = static_cast<DWORD>((path.size() + 1) * sizeof(wchar_t));
+    cds.lpData = const_cast<wchar_t*>(path.c_str());
+    SendMessageW(hwnd, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&cds));
+    return true;
+}
+
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     // OLE init (drag & drop + clipboard); implies STA COM init.
@@ -8975,7 +9213,23 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     if (state.shot.active && state.shot.path.empty()) {
         state.shot.path = L"C:\\";
     }
+    if (!state.shot.active && !state.menushot && !state.colorpickshot &&
+        !state.colorpickdialog) {
+        state.open_path = state.shot.path;
+        state.shot.path.clear();
+    }
     state.shot.start = std::chrono::steady_clock::now();
+
+    if (!SkipSingletonFromArgv()) {
+        state.singleton = CreateMutexW(nullptr, TRUE, L"Local\\Pulse.Singleton");
+        if (state.singleton && GetLastError() == ERROR_ALREADY_EXISTS) {
+            CloseHandle(state.singleton);
+            state.singleton = nullptr;
+            ForwardToRunningInstance(state.open_path);
+            OleUninitialize();
+            return 0;
+        }
+    }
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
@@ -8988,7 +9242,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = nullptr;
-    wc.lpszClassName = L"PulseMainWindow";
+    wc.lpszClassName = kPulseWindowClass;
     RegisterClassExW(&wc);
 
     int x = CW_USEDEFAULT, y = CW_USEDEFAULT, w = (int)(1600 * state.scale), h = (int)(960 * state.scale);

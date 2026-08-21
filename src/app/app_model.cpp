@@ -348,6 +348,7 @@ void Pane::NewTab(const std::wstring& path) {
     if (const Tab* source = ActiveTab()) {
         t->view_mode = source->view_mode;
         t->details_column_dividers = source->details_column_dividers;
+        t->search_column_dividers = source->search_column_dividers;
     }
     t->current_path = fs::NormalizePath(path);
     t->loading = true;
@@ -360,6 +361,7 @@ void Pane::NewTabAt(size_t index, const std::wstring& path) {
     if (const Tab* source = ActiveTab()) {
         t->view_mode = source->view_mode;
         t->details_column_dividers = source->details_column_dividers;
+        t->search_column_dividers = source->search_column_dividers;
     }
     t->current_path = fs::NormalizePath(path);
     t->loading = true;
@@ -804,6 +806,10 @@ SidebarModel BuildSidebarModel() {
     recent.label = L"最近使用";
     recent.path = MakeRecentPath();
     m.quick_access.push_back(std::move(recent));
+    SidebarEntry desktop = MakeKnownEntry(FOLDERID_Desktop, L"\xE7F4", L"Desktop",
+        ui::HexColor(0x38BDF8), L"\u684C\u9762"); // 桌面
+    desktop.badge = L"\u684C\u9762";
+    m.quick_access.push_back(std::move(desktop));
     m.quick_access.push_back(MakeKnownEntry(FOLDERID_Downloads, L"\xE896", L"Downloads",
         ui::HexColor(0xC084FC), L"Downloads"));
 
@@ -978,6 +984,7 @@ void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCat
     out.sort_column = tab->sort_column;
     out.sort_direction = tab->sort_direction;
     out.details_column_dividers = tab->details_column_dividers;
+    out.search_column_dividers = tab->search_column_dividers;
     out.focused = pane.focused;
     out.snapshot = tab->snapshot;
     out.tag_catalog = places;

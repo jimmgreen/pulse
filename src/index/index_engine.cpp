@@ -19,6 +19,7 @@
 #include <numeric>
 #include <iterator>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <utility>
@@ -51,6 +52,26 @@ uint32_t FtToUnix(uint64_t ft) {
 uint64_t UnixToFt(uint32_t u) {
     if (u == 0) return 0;
     return static_cast<uint64_t>(u) * 10000000ull + kUnixFtEpoch;
+}
+
+std::wstring StatusItemCount(uint64_t count, std::wstring_view detail = {}) {
+    std::wstring text = L"已索引 ";
+    text += std::to_wstring(count);
+    text += L" 项";
+    if (!detail.empty()) {
+        text += L" · ";
+        text.append(detail.data(), detail.size());
+    }
+    return text;
+}
+
+std::wstring StatusDriveProgress(wchar_t letter, size_t count) {
+    std::wstring text = L"正在索引 ";
+    text += letter;
+    text += L": ";
+    text += std::to_wstring(count);
+    text += L" 项";
+    return text;
 }
 
 std::wstring Display(std::wstring p) {
@@ -331,6 +352,18 @@ void Engine::SetStatus(std::wstring s) {
     status_ = std::move(s);
 }
 
+bool Engine::IsExcludedPath(std::wstring_view path) const {
+    for (const auto& excluded : excluded_paths_) {
+        if (excluded.empty() || path.size() < excluded.size()) continue;
+        if (CompareStringOrdinal(path.data(), static_cast<int>(excluded.size()),
+                                 excluded.data(), static_cast<int>(excluded.size()), TRUE) !=
+            CSTR_EQUAL) continue;
+        if (path.size() == excluded.size() || path[excluded.size()] == L'\\' ||
+            path[excluded.size()] == L'/') return true;
+    }
+    return false;
+}
+
 std::wstring Engine::Status() const {
     std::lock_guard<std::mutex> lock(status_mu_);
     return status_;
@@ -361,18 +394,12 @@ std::vector<VolumeInfo> Engine::Volumes() const {
         if (it != vols_.end()) {
             volume.indexed_items = it->item_count;
             volume.progress = 100;
-            const bool shard_ready = query_shards_ready_ &&
-                std::any_of(query_shards_.begin(), query_shards_.end(), [&](const QueryShard& shard) {
-                    return NormalizeVolumeId(shard.volume_id) == NormalizeVolumeId(volume.id);
-                });
-            volume.state = volume.online
-                ? (shard_ready ? L"V9 分片 · USN 实时" : L"USN 实时")
-                : L"离线（保留索引）";
+            volume.state = volume.online ? L"已就绪" : L"离线 · 仍可搜索";
         } else if (volume.enabled && building_) {
             volume.state = L"正在建立索引";
         } else if (volume.enabled && ready_) {
             volume.state = L"索引失败";
-            volume.error = L"无法读取该卷的 MFT 或 USN 日志";
+            volume.error = L"无法读取该磁盘的文件变更记录";
         }
     }
     for (const auto& state : vols_) {
@@ -390,7 +417,7 @@ std::vector<VolumeInfo> Engine::Volumes() const {
         offline.enabled = !config.IsExcluded(offline.id);
         offline.indexed_items = state.item_count;
         offline.progress = 100;
-        offline.state = L"离线（保留索引）";
+        offline.state = L"离线 · 仍可搜索";
         result.push_back(std::move(offline));
     }
     return result;
@@ -2137,7 +2164,7 @@ bool Engine::TryLoadCache() {
     AdoptMappedLocked(std::move(mapped));
     ReplayDeltasLocked();
     OpenDeltasLocked();
-    SetStatus(L"缓存 " + std::to_wstring(indexed_.load()) + L" 项");
+    SetStatus(L"已加载 " + std::to_wstring(indexed_.load()) + L" 项");
     ready_ = true;
     return true;
 }
@@ -2266,6 +2293,9 @@ Engine::UsnApply Engine::ApplyUsnLocked(VolState& v, const USN_RECORD_V2* rec) {
 
     uint8_t flags = is_dir ? kFlagDir : 0;
     if (ShouldSkipName(name)) flags |= kFlagHidden;
+    std::wstring parent_path = BuildPathLocked(parent);
+    if (!parent_path.empty() && parent_path.back() != L'\\') parent_path += L'\\';
+    if (IsExcludedPath(parent_path + std::wstring(name))) flags |= kFlagHidden;
     for (int32_t a = parent; a > v.root_idx && a >= 0;) {
         const Node an = NodeAt(a);
         if (an.flags & kFlagHidden) { flags |= kFlagHidden; break; }
@@ -2351,7 +2381,7 @@ bool Engine::CatchUpVolume(VolState& v, bool* changed, bool* structural) {
                 std::unique_lock<std::shared_mutex> state_lock(mutex_);
                 v.journal_id = 0;
                 v.next_usn = 0;
-                SetStatus(std::wstring(L"卷 ") + v.letter + L": USN 日志失效，准备重建该卷索引…");
+                SetStatus(std::wstring(1, v.letter) + L": 的变更跟踪失效，正在重建索引…");
             }
             ok = false;
             break;
@@ -2433,7 +2463,7 @@ bool Engine::IndexVolumeMft(const VolumeInfo& volume) {
     frn_nodes.reserve(256000);
 
     auto progress = [&](size_t n) {
-        SetStatus(std::wstring(L"MFT ") + letter + L": " + std::to_wstring(n));
+        SetStatus(StatusDriveProgress(letter, n));
         PingNotify();
     };
     auto rank = [](uint8_t t) { return (t == 1 || t == 3) ? 0 : (t == 0 ? 1 : 2); };
@@ -2483,7 +2513,7 @@ bool Engine::IndexVolumeMft(const VolumeInfo& volume) {
                 rec = reinterpret_cast<PUSN_RECORD_V2>(reinterpret_cast<BYTE*>(rec) + rec->RecordLength);
             }
             if (frn_nodes.size() >= kIndexCap) break;
-            SetStatus(std::wstring(L"MFT ") + letter + L": " + std::to_wstring(frn_nodes.size()));
+            SetStatus(StatusDriveProgress(letter, frn_nodes.size()));
             PingNotify();
         }
     }
@@ -2529,6 +2559,25 @@ bool Engine::IndexVolumeMft(const VolumeInfo& volume) {
     }
 
     std::vector<FrnNode*> stack;
+    auto build_name = [&](int32_t id) -> std::wstring_view {
+        const Node& node = build_.nodes[static_cast<size_t>(id)];
+        return std::wstring_view(build_.pool.data() + node.off, node.len);
+    };
+    auto build_path = [&](int32_t id) {
+        int32_t chain[64];
+        int depth = 0;
+        for (int32_t current = id; current >= 0 && depth < 64;
+             current = build_.nodes[static_cast<size_t>(current)].parent)
+            chain[depth++] = current;
+        std::wstring path;
+        for (int k = depth - 1; k >= 0; --k) {
+            const std::wstring_view part = build_name(chain[k]);
+            if (!path.empty() && path.back() != L'\\') path += L'\\';
+            path.append(part.data(), part.size());
+            if (k == depth - 1 && part.size() == 2 && part[1] == L':') path += L'\\';
+        }
+        return path;
+    };
     size_t added = 0;
     for (FrnNode& node : frn_nodes) {
         if (!running_ || added >= kIndexCap) break;
@@ -2549,13 +2598,20 @@ bool Engine::IndexVolumeMft(const VolumeInfo& volume) {
             if (current->parent == cur) break;
             cur = current->parent;
         }
+        std::wstring candidate = build_path(parent_idx);
+        bool hidden_parent = parent_idx >= 0 &&
+            (build_.nodes[static_cast<size_t>(parent_idx)].flags & kFlagHidden) != 0;
         for (auto rit = stack.rbegin(); rit != stack.rend(); ++rit) {
             FrnNode& n = **rit;
             if (IsIndexArtifactName(n.name)) continue;
             uint8_t flags = n.is_dir ? kFlagDir : 0;
-            if (ShouldSkipName(n.name)) flags |= kFlagHidden;
+            if (!candidate.empty() && candidate.back() != L'\\') candidate += L'\\';
+            candidate += n.name;
+            if (hidden_parent || ShouldSkipName(n.name) || IsExcludedPath(candidate))
+                flags |= kFlagHidden;
             parent_idx = AddNodeLocked(build_, parent_idx, n.name, flags, n.frn, n.size, n.mtime);
             n.index = parent_idx;
+            hidden_parent = (flags & kFlagHidden) != 0;
             vol.frn_build.emplace_back(n.frn, parent_idx);
             ++added;
         }
@@ -2654,7 +2710,7 @@ bool Engine::RebuildVolumeMft(const VolumeInfo& volume) {
         building_ = true;
         indexed_.store(build_.nodes.size());
     }
-    SetStatus(std::wstring(L"卷 ") + volume.mount_point + L" 正在独立重建…");
+    SetStatus(L"正在重建 " + volume.mount_point + L" 的索引…");
     if (!IndexVolumeMft(volume)) {
         std::unique_lock<std::shared_mutex> lock(mutex_);
         build_.Clear();
@@ -2691,7 +2747,7 @@ bool Engine::RebuildVolumeMft(const VolumeInfo& volume) {
     OpenDeltasLocked();
     building_ = false;
     ready_ = true;
-    SetStatus(L"卷 " + volume.mount_point + L" 已完成独立重建");
+    SetStatus(volume.mount_point + L" 的索引已重建完成");
     PingNotify(true);
     return true;
 }
@@ -2720,6 +2776,7 @@ void Engine::WalkTree(int32_t parent, const std::wstring& dir, int depth) {
     for (const auto& e : entries) {
         if (!running_) return;
         if (ShouldSkipName(e.name) || IsIndexArtifactName(e.name)) continue;
+        if (IsExcludedPath(base + e.name)) continue;
         Child c;
         c.name = e.name;
         c.is_dir = e.is_dir;
@@ -2744,6 +2801,7 @@ void Engine::FullRebuild() {
     const auto configured_volumes = ConfiguredVolumes();
     IndexConfig config;
     if (MachineIndexScope()) LoadMachineConfig(config, nullptr);
+    excluded_paths_ = config.excluded_paths;
     {
         std::unique_lock<std::shared_mutex> lock(mutex_);
         build_.Clear();
@@ -2753,8 +2811,8 @@ void Engine::FullRebuild() {
         build_vols_.clear();
         if (MachineIndexScope()) PreserveOfflineVolumesLocked(configured_volumes, config);
     }
-    if (indexed_.load() == 0) SetStatus(L"正在建索引…");
-    else SetStatus(L"索引 " + std::to_wstring(indexed_.load()) + L" 项，正在重建…");
+    if (indexed_.load() == 0) SetStatus(L"正在建立索引…");
+    else SetStatus(L"已索引 " + std::to_wstring(indexed_.load()) + L" 项，正在重建…");
     PingNotify(true);
 
     bool used_mft = false;
@@ -2792,8 +2850,7 @@ void Engine::FullRebuild() {
                 OpenDeltasLocked();
                 ready_ = true;
                 if (MachineIndexScope())
-                    SetStatus(L"MFT 索引 " + std::to_wstring(indexed_.load()) +
-                              L" 项（正在发布卷分片）");
+                    SetStatus(StatusItemCount(indexed_.load(), L"正在完成"));
             } else {
                 if (map_) { map_->Close(); map_.reset(); }
                 live_ = std::move(build_);
@@ -2821,9 +2878,8 @@ void Engine::FullRebuild() {
             const bool live_tracked = !vols_.empty() &&
                 std::all_of(vols_.begin(), vols_.end(),
                             [](const VolState& v) { return v.journal_id != 0; });
-            SetStatus((used_mft ? L"MFT 索引 " : L"已索引 ") +
-                      std::to_wstring(indexed_.load()) +
-                      (live_tracked ? L" 项（USN 实时）" : L" 项（监听）"));
+            SetStatus(StatusItemCount(indexed_.load(),
+                      live_tracked ? L"实时更新" : L"正在监视"));
             ready_ = true;
             building_ = false;
         }
@@ -2907,7 +2963,7 @@ void Engine::Worker() {
                 }
             }
             if (fresh)
-                SetStatus(L"MFT 索引 " + std::to_wstring(indexed_.load()) + L" 项（USN 实时）");
+                SetStatus(StatusItemCount(indexed_.load(), L"实时更新"));
         }
     } else if (have_cache && !needs_search_rebuild && !IsAdmin()) {
         const uint64_t now = static_cast<uint64_t>(std::time(nullptr));
@@ -2986,8 +3042,8 @@ void Engine::Worker() {
                 if (changed) {
                     const bool live_tracked = std::all_of(vols_.begin(), vols_.end(),
                         [](const VolState& v) { return v.journal_id != 0; });
-                    SetStatus(L"MFT 索引 " + std::to_wstring(indexed_.load()) +
-                              (live_tracked ? L" 项（USN 实时）" : L" 项（部分非实时）"));
+                    SetStatus(StatusItemCount(indexed_.load(),
+                              live_tracked ? L"实时更新" : L"部分磁盘未实时更新"));
                 }
             }
             const size_t n = static_cast<size_t>(LiveCount());
@@ -3010,7 +3066,7 @@ void Engine::Worker() {
                 }
             }
             if (!recovered) {
-                SetStatus(L"USN 日志失效，正在恢复索引…");
+                SetStatus(L"变更跟踪失效，正在恢复索引…");
                 FullRebuild();
             }
             last_merge_tick_ = GetTickCount64();

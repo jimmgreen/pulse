@@ -37,6 +37,7 @@ struct Tab {
     ui::SortColumn sort_column = ui::SortColumn::Name;
     ui::SortDirection sort_direction = ui::SortDirection::Asc;
     std::array<float, 3> details_column_dividers{};
+    std::array<float, 4> search_column_dividers{};
     std::wstring filter_text;
     std::wstring virtual_title; // tag/search views; empty for real folders
     std::wstring banner_title;

@@ -10,11 +10,14 @@ struct AppPrefs {
     bool persist = true;
     bool launch_on_startup = false;
     bool keep_running_on_close = false;
+    bool open_folders_in_pulse = false;
     // none / acrylic-material / mica / mica-alt  (legacy dwm-blur → acrylic)
     std::wstring window_effect = L"mica-alt";
     std::wstring background_image;
     int row_height = 34; // file-list row height in DIPs (24..48)
     int tray_icon_size = 48; // staging-tray deck icon edge in DIPs (32..64)
+    // Empty = follow Windows accent; otherwise "RRGGBB".
+    std::wstring accent_rgb;
     // Tag colors the user added via the custom color dialog (0xRRGGBB),
     // appended after the seven Finder defaults in the swatch strip.
     std::vector<uint32_t> custom_tag_colors;
@@ -29,8 +32,16 @@ struct AppPrefs {
     bool ReadLaunchOnStartup() const;
     bool ApplyLaunchOnStartup(bool on);
 
+    // HKCU Directory/Drive open verbs; call after Load() and on toggle.
+    bool ReadFolderOpen() const;
+    bool ApplyFolderOpen(bool on);
+
     bool StoreBackgroundImage(const std::wstring& source_path);
     void ClearBackgroundImage();
 };
+
+std::wstring FolderOpenCommandLine(const std::wstring& exe);
+bool FolderOpenCommandIsOurs(const std::wstring& command, const std::wstring& exe);
+bool ParseAccentRgb(const std::wstring& text, uint32_t& rgb) noexcept;
 
 } // namespace pulse::app

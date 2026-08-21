@@ -13,6 +13,7 @@ struct TabSessionSnapshot {
     int group = 0; // TabGroup::id of the owning group; 0 = none
     ui::ViewMode view = ui::ViewMode::Details;
     std::array<float, 3> columns{}; // details column divider ratios
+    std::array<float, 4> search_columns{}; // search-results 路径 column dividers
 };
 
 struct GroupSessionSnapshot {

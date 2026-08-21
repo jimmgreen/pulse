@@ -90,6 +90,10 @@ std::wstring ConfigJson(const IndexConfig& config) {
     std::vector<std::wstring> excluded(config.excluded_volume_ids.begin(),
                                        config.excluded_volume_ids.end());
     std::sort(excluded.begin(), excluded.end());
+    std::vector<std::wstring> excluded_paths = config.excluded_paths;
+    std::sort(excluded_paths.begin(), excluded_paths.end(), [](const auto& a, const auto& b) {
+        return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_LESS_THAN;
+    });
     std::wstring out = L"{\n  \"version\":" + std::to_wstring(config.version) +
                        L",\n  \"generation\":" + std::to_wstring(config.generation) +
                        L",\n  \"include_fixed_ntfs\":" +
@@ -105,6 +109,14 @@ std::wstring ConfigJson(const IndexConfig& config) {
         out += L"\n    \"" + escaped + L"\"";
     }
     if (!excluded.empty()) out += L"\n  ";
+    out += L"],\n  \"excluded_paths\":[";
+    for (size_t i = 0; i < excluded_paths.size(); ++i) {
+        std::wstring escaped;
+        pulse::json::Escape(excluded_paths[i], escaped);
+        if (i) out += L",";
+        out += L"\n    \"" + escaped + L"\"";
+    }
+    if (!excluded_paths.empty()) out += L"\n  ";
     out += L"]\n}\n";
     return out;
 }
@@ -117,6 +129,18 @@ bool IsNtfs(const std::wstring& fs) {
 
 bool IndexConfig::IsExcluded(const std::wstring& id) const {
     return excluded_volume_ids.contains(NormalizeVolumeId(id));
+}
+
+bool IndexConfig::IsPathExcluded(std::wstring_view path) const {
+    for (const auto& excluded : excluded_paths) {
+        if (excluded.empty() || path.size() < excluded.size()) continue;
+        if (CompareStringOrdinal(path.data(), static_cast<int>(excluded.size()),
+                                 excluded.data(), static_cast<int>(excluded.size()), TRUE) !=
+            CSTR_EQUAL) continue;
+        if (path.size() == excluded.size() || path[excluded.size()] == L'\\' ||
+            path[excluded.size()] == L'/') return true;
+    }
+    return false;
 }
 
 std::wstring NormalizeVolumeId(std::wstring id) {
@@ -179,6 +203,19 @@ bool LoadMachineConfig(IndexConfig& config, std::wstring* error) {
     if (config.index_path.empty()) config.index_path = MachineIndexRoot();
     for (auto& id : ExtractStringArray(json, L"excluded_volume_ids"))
         config.excluded_volume_ids.insert(NormalizeVolumeId(std::move(id)));
+    for (auto& path_value : ExtractStringArray(json, L"excluded_paths")) {
+        std::replace(path_value.begin(), path_value.end(), L'/', L'\\');
+        while (path_value.size() > 3 && path_value.back() == L'\\') path_value.pop_back();
+        if (!path_value.empty()) config.excluded_paths.push_back(std::move(path_value));
+    }
+    std::sort(config.excluded_paths.begin(), config.excluded_paths.end(),
+              [](const auto& a, const auto& b) {
+                  return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_LESS_THAN;
+              });
+    config.excluded_paths.erase(std::unique(config.excluded_paths.begin(), config.excluded_paths.end(),
+              [](const auto& a, const auto& b) {
+                  return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_EQUAL;
+              }), config.excluded_paths.end());
     return true;
 }
 
@@ -235,6 +272,30 @@ bool ConfigureIndexPath(const std::wstring& path, std::wstring* error) {
     return SaveMachineConfig(config, error);
 }
 
+bool ConfigureExcludePath(const std::wstring& path, bool enabled, std::wstring* error) {
+    std::wstring normalized = path;
+    std::replace(normalized.begin(), normalized.end(), L'/', L'\\');
+    while (normalized.size() > 3 && normalized.back() == L'\\') normalized.pop_back();
+    if (normalized.size() <= 3 || normalized[1] != L':') {
+        SetError(error, L"排除项必须是本地文件夹路径");
+        return false;
+    }
+    IndexConfig config;
+    if (!LoadMachineConfig(config, error)) return false;
+    auto it = std::find_if(config.excluded_paths.begin(), config.excluded_paths.end(),
+                           [&](const auto& value) {
+                               return CompareStringOrdinal(value.c_str(), -1,
+                                                           normalized.c_str(), -1, TRUE) == CSTR_EQUAL;
+                           });
+    if (enabled) {
+        if (it == config.excluded_paths.end()) config.excluded_paths.push_back(normalized);
+    } else if (it != config.excluded_paths.end()) {
+        config.excluded_paths.erase(it);
+    }
+    ++config.generation;
+    return SaveMachineConfig(config, error);
+}
+
 std::vector<VolumeInfo> EnumerateLocalVolumes(const IndexConfig& config) {
     std::vector<VolumeInfo> out;
     wchar_t drives[512]{};
@@ -264,7 +325,7 @@ std::vector<VolumeInfo> EnumerateLocalVolumes(const IndexConfig& config) {
         const bool auto_include = info.kind == VolumeKind::Fixed
             ? config.include_fixed_ntfs : config.include_removable_ntfs;
         info.enabled = info.supported && auto_include && !config.IsExcluded(info.id);
-        info.state = !info.online ? L"离线" : !info.supported ? L"不支持" :
+        info.state = !info.online ? L"离线" : !info.supported ? L"非 NTFS" :
                      info.enabled ? L"等待索引" : L"已排除";
         out.push_back(std::move(info));
     }

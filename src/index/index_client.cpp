@@ -215,11 +215,22 @@ void IndexClient::HandleVolumes(const uint8_t* p, size_t n) {
         volume.indexed_items = (static_cast<uint64_t>(hi) << 32) | lo;
         volumes.push_back(std::move(volume));
     }
+    uint32_t excluded_count = 0;
+    std::vector<std::wstring> excluded_paths;
+    if (r.GetU32(excluded_count)) {
+        excluded_paths.reserve(excluded_count);
+        for (uint32_t i = 0; i < excluded_count; ++i) {
+            std::wstring path_value;
+            if (!r.GetString(path_value)) break;
+            excluded_paths.push_back(std::move(path_value));
+        }
+    }
     {
         std::lock_guard<std::mutex> lock(mu_);
         service_mode_ = service != 0;
         index_path_ = std::move(path);
         volumes_ = std::move(volumes);
+        excluded_paths_ = std::move(excluded_paths);
     }
     if (notify_ && status_msg_) PostMessageW(notify_, status_msg_, 0, 0);
 }
@@ -343,6 +354,11 @@ std::vector<VolumeInfo> IndexClient::Volumes() const {
     return volumes_;
 }
 
+std::vector<std::wstring> IndexClient::ExcludedPaths() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return excluded_paths_;
+}
+
 void IndexClient::RefreshVolumesAsync() {
     {
         std::lock_guard<std::mutex> lock(mu_);
@@ -430,6 +446,12 @@ bool IndexClient::InstallServiceElevated() {
 
 bool IndexClient::ConfigureIndexPathElevated(const std::wstring& path) {
     return RunElevatedIndexCommand(ExePath(), L"--set-index-path " + QuoteCommandArg(path));
+}
+
+bool IndexClient::ConfigureExcludePathElevated(const std::wstring& path, bool enabled) {
+    const std::wstring parameters = L"--configure-exclude " + QuoteCommandArg(path) +
+                                    (enabled ? L" --enable" : L" --disable");
+    return RunElevatedIndexCommand(ExePath(), parameters);
 }
 
 } // namespace pulse::index

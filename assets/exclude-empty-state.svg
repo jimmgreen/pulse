@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="360" viewBox="0 0 512 360" fill="none">
+  <title>No excluded folders</title>
+  <desc>A minus badge rising from a blue folder in the Pulse empty-state style.</desc>
+  <defs>
+    <radialGradient id="ambient" cx="0" cy="0" r="1" gradientTransform="translate(256 154) rotate(90) scale(121)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#AAB4C6" stop-opacity="0.13"/>
+      <stop offset="1" stop-color="#7D899F" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="folderBack" x1="139" y1="174" x2="369" y2="273" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8298BC"/>
+      <stop offset="0.52" stop-color="#60779D"/>
+      <stop offset="1" stop-color="#354763"/>
+    </linearGradient>
+    <linearGradient id="folderFront" x1="145" y1="205" x2="343" y2="323" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8499BC"/>
+      <stop offset="0.48" stop-color="#586E92"/>
+      <stop offset="1" stop-color="#35465F"/>
+    </linearGradient>
+    <linearGradient id="folderEdge" x1="133" y1="205" x2="374" y2="231" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#D3DCEB" stop-opacity="0.55"/>
+      <stop offset="0.55" stop-color="#9CAAC1" stop-opacity="0.24"/>
+      <stop offset="1" stop-color="#E0E6EF" stop-opacity="0.1"/>
+    </linearGradient>
+    <linearGradient id="badgeFace" x1="204" y1="78" x2="312" y2="214" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F1F3F6"/>
+      <stop offset="0.42" stop-color="#C2C9D3"/>
+      <stop offset="1" stop-color="#727E91"/>
+    </linearGradient>
+    <linearGradient id="badgeInner" x1="226" y1="108" x2="286" y2="196" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#B8C1CE"/>
+      <stop offset="1" stop-color="#788397"/>
+    </linearGradient>
+    <linearGradient id="badgeShade" x1="256" y1="118" x2="256" y2="214" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#7D899B" stop-opacity="0"/>
+      <stop offset="1" stop-color="#4F5C71" stop-opacity="0.55"/>
+    </linearGradient>
+    <filter id="shadow" x="92" y="52" width="328" height="288" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="10" stdDeviation="11" flood-color="#05070B" flood-opacity="0.22"/>
+    </filter>
+  </defs>
+
+  <ellipse cx="256" cy="304" rx="122" ry="21" fill="#080A0F" fill-opacity="0.16"/>
+  <circle cx="256" cy="154" r="118" fill="url(#ambient)"/>
+  <circle cx="256" cy="154" r="103" stroke="#B5BECE" stroke-opacity="0.055" stroke-width="2"/>
+
+  <g opacity="0.52">
+    <path d="M168 96L172 107L183 111L172 115L168 126L164 115L153 111L164 107L168 96Z" fill="#C5CCD8"/>
+    <path d="M355 88L359 99L370 103L359 107L355 118L351 107L340 103L351 99L355 88Z" fill="#C5CCD8"/>
+    <circle cx="143" cy="178" r="4" fill="#9EA9BA"/>
+    <circle cx="378" cy="168" r="3" fill="#9EA9BA"/>
+  </g>
+
+  <g filter="url(#shadow)">
+    <path d="M126 222V188C126 177 135 168 146 168H188L203 153C207 149 212 147 218 147H260C267 147 273 151 277 157L285 168H365C376 168 385 177 385 188V222H126Z" fill="url(#folderBack)"/>
+    <path d="M128 181C132 175 138 173 147 173H192L207 158C211 154 216 153 221 153H258C264 153 269 156 272 161L280 173H379" stroke="#D6DEEB" stroke-opacity="0.2" stroke-width="2" stroke-linecap="round"/>
+
+    <g id="minusBadge">
+      <circle cx="256" cy="146" r="74" fill="#566277" fill-opacity="0.55"/>
+      <circle cx="256" cy="146" r="68" fill="url(#badgeFace)"/>
+      <circle cx="256" cy="146" r="52" fill="url(#badgeInner)"/>
+      <circle cx="256" cy="146" r="68" fill="url(#badgeShade)"/>
+      <path d="M214 100C234 86 276 84 300 102" stroke="#FFFFFF" stroke-opacity="0.32" stroke-width="3" stroke-linecap="round"/>
+      <path d="M222 146H290" stroke="#E9EDF2" stroke-width="14" stroke-linecap="round"/>
+    </g>
+
+    <path d="M109 215C108 204 117 195 128 195H384C396 195 405 206 403 218L389 297C387 309 378 317 366 317H146C135 317 126 309 124 298L109 215Z" fill="url(#folderFront)" fill-opacity="0.93"/>
+    <path d="M120 210C122 202 129 199 137 199H380C389 199 395 205 395 213" stroke="url(#folderEdge)" stroke-width="2.6" stroke-linecap="round"/>
+    <path d="M126 296C129 305 136 311 147 311H364C374 311 380 306 382 298" stroke="#172033" stroke-opacity="0.22" stroke-width="2" stroke-linecap="round"/>
+  </g>
+</svg>

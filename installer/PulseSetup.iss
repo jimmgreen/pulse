@@ -37,8 +37,9 @@ OutputBaseFilename=PulseSetup-{#AppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
-; Ask Windows to close running Pulse processes (and their helper hosts) so
-; upgrades can replace locked files.
+; PrepareToInstall stops the service and leftover Pulse hosts before
+; Restart Manager scans. Keep CloseApplications as a fallback prompt if
+; something else still holds a file.
 CloseApplications=yes
 RestartApplications=no
 UninstallDisplayIcon={app}\pulse.exe
@@ -78,7 +79,7 @@ Filename: "{app}\Pulse.Index.exe"; Parameters: "--set-index-path ""{code:GetInde
 ; Write the machine configuration before starting the service. This avoids
 ; launching an initial rebuild and then immediately launching a second rebuild
 ; when the index path command reloads an already-running service.
-Filename: "{app}\Pulse.Index.exe"; Parameters: "--install"; StatusMsg: "正在安装全盘索引服务… / Installing the index service…"; Flags: runhidden waituntilterminated; Tasks: indexservice
+Filename: "{app}\Pulse.Index.exe"; Parameters: "--install"; StatusMsg: "正在安装全盘索引服务… / Installing the index service…"; Flags: waituntilterminated; Tasks: indexservice
 Filename: "{cmd}"; Parameters: "/c net start PulseIndex >nul 2>&1 & exit /b 0"; Flags: runhidden waituntilterminated; Tasks: indexservice
 Filename: "{app}\pulse.exe"; Parameters: "--seed-shell-verbs"; StatusMsg: "正在缓存右键菜单项… / Caching context-menu verbs…"; Flags: runhidden waituntilterminated
 Filename: "{app}\pulse.exe"; Description: "{cm:LaunchProgram,Pulse}"; Flags: nowait postinstall skipifsilent
@@ -246,16 +247,17 @@ begin
     Exit;
   end;
 
-  Form := CreateCustomForm(ScaleX(480), ScaleY(160), False, False);
+  Form := CreateCustomForm(ScaleX(400), ScaleY(220), True, True);
   try
     Form.Caption := 'Pulse';
     Form.CenterOnShow := True;
 
     HeadingLabel := TNewStaticText.Create(Form);
     HeadingLabel.Parent := Form;
-    HeadingLabel.Left := ScaleX(24);
-    HeadingLabel.Top := ScaleY(20);
-    HeadingLabel.Width := ScaleX(432);
+    HeadingLabel.Left := ScaleX(20);
+    HeadingLabel.Top := ScaleY(16);
+    HeadingLabel.Width := ScaleX(360);
+    HeadingLabel.AutoSize := False;
     HeadingLabel.Font.Style := [fsBold];
     if IsChinese then
       HeadingLabel.Caption := '卸载 Pulse'
@@ -264,10 +266,11 @@ begin
 
     DetailLabel := TNewStaticText.Create(Form);
     DetailLabel.Parent := Form;
-    DetailLabel.Left := ScaleX(24);
-    DetailLabel.Top := ScaleY(52);
-    DetailLabel.Width := ScaleX(432);
-    DetailLabel.Height := ScaleY(34);
+    DetailLabel.Left := ScaleX(20);
+    DetailLabel.Top := ScaleY(44);
+    DetailLabel.Width := ScaleX(360);
+    DetailLabel.Height := ScaleY(54);
+    DetailLabel.AutoSize := False;
     DetailLabel.WordWrap := True;
     if IsChinese then
       DetailLabel.Caption := 'Pulse 将停止并移除索引服务。你也可以删除 Pulse 创建的设置、缓存、日志和索引数据。'
@@ -276,9 +279,9 @@ begin
 
     CleanupCheck := TNewCheckBox.Create(Form);
     CleanupCheck.Parent := Form;
-    CleanupCheck.Left := ScaleX(24);
-    CleanupCheck.Top := ScaleY(92);
-    CleanupCheck.Width := ScaleX(432);
+    CleanupCheck.Left := ScaleX(20);
+    CleanupCheck.Top := ScaleY(108);
+    CleanupCheck.Width := ScaleX(360);
     CleanupCheck.Checked := True;
     if IsChinese then
       CleanupCheck.Caption := '同时删除 Pulse 设置、缓存和索引数据（推荐）'
@@ -287,10 +290,10 @@ begin
 
     ContinueButton := TNewButton.Create(Form);
     ContinueButton.Parent := Form;
-    ContinueButton.Width := ScaleX(104);
-    ContinueButton.Height := ScaleY(30);
-    ContinueButton.Left := Form.ClientWidth - ScaleX(232);
-    ContinueButton.Top := Form.ClientHeight - ScaleY(38);
+    ContinueButton.Width := ScaleX(88);
+    ContinueButton.Height := ScaleY(28);
+    ContinueButton.Left := Form.ClientWidth - ScaleX(188);
+    ContinueButton.Top := Form.ClientHeight - ScaleY(44);
     ContinueButton.Default := True;
     ContinueButton.ModalResult := mrOk;
     if IsChinese then
@@ -300,10 +303,10 @@ begin
 
     CancelButton := TNewButton.Create(Form);
     CancelButton.Parent := Form;
-    CancelButton.Width := ScaleX(104);
-    CancelButton.Height := ScaleY(30);
-    CancelButton.Left := Form.ClientWidth - ScaleX(116);
-    CancelButton.Top := Form.ClientHeight - ScaleY(38);
+    CancelButton.Width := ScaleX(88);
+    CancelButton.Height := ScaleY(28);
+    CancelButton.Left := Form.ClientWidth - ScaleX(92);
+    CancelButton.Top := Form.ClientHeight - ScaleY(44);
     CancelButton.Cancel := True;
     CancelButton.ModalResult := mrCancel;
     if IsChinese then
@@ -320,13 +323,37 @@ begin
   end;
 end;
 
+procedure DeleteFolderOpenOverride(const ClassName: String);
+var
+  Cmd: String;
+  Exe: String;
+  DefaultVerb: String;
+begin
+  Exe := Lowercase(ExpandConstant('{app}\pulse.exe'));
+  if RegQueryStringValue(HKCU,
+    'Software\Classes\' + ClassName + '\shell\open\command', '', Cmd) then
+  begin
+    if Pos(Exe, Lowercase(Cmd)) > 0 then
+      RegDeleteKeyIncludingSubkeys(HKCU,
+        'Software\Classes\' + ClassName + '\shell\open');
+  end;
+  if RegQueryStringValue(HKCU,
+    'Software\Classes\' + ClassName + '\shell', '', DefaultVerb) then
+  begin
+    if CompareText(DefaultVerb, 'open') = 0 then
+      RegDeleteValue(HKCU, 'Software\Classes\' + ClassName + '\shell', '');
+  end;
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usPostUninstall then
   begin
-    { The app can create this value after installation, so remove it even when
-      the original installer task was not selected. }
+    { The app can create these values after installation, so remove them even
+      when the original installer task was not selected. }
     RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'Pulse');
+    DeleteFolderOpenOverride('Directory');
+    DeleteFolderOpenOverride('Drive');
     if CleanupUserData then
       CleanupPulseData;
   end;
@@ -434,14 +461,57 @@ begin
       IntToStr(ResultCode) + ').';
 end;
 
-// Stop the index service before replacing files on upgrade; Pulse.Index.exe
-// is locked while the service runs. Failure is fine (service not installed).
+function PulseImageRunning(const ImageName: String): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := Exec('cmd.exe',
+    '/C tasklist /FI "IMAGENAME eq ' + ImageName + '" /NH | find /I "' +
+    ImageName + '" >nul',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+end;
+
+procedure StopPulseApps;
+var
+  ResultCode: Integer;
+begin
+  { Close the UI first so it cannot relaunch Pulse.Index.exe --network-agent. }
+  Exec('taskkill.exe', '/F /IM pulse.exe /T', '', SW_HIDE,
+    ewWaitUntilTerminated, ResultCode);
+  Exec('net.exe', 'stop PulseIndex', '', SW_HIDE, ewWaitUntilTerminated,
+    ResultCode);
+  Exec('taskkill.exe', '/F /IM Pulse.Index.exe /T', '', SW_HIDE,
+    ewWaitUntilTerminated, ResultCode);
+  Exec('taskkill.exe', '/F /IM Pulse.Preview.exe /T', '', SW_HIDE,
+    ewWaitUntilTerminated, ResultCode);
+  Exec('taskkill.exe', '/F /IM pulse_shell.exe /T', '', SW_HIDE,
+    ewWaitUntilTerminated, ResultCode);
+end;
+
+function WaitUntilPulseIndexGone: Boolean;
+var
+  I: Integer;
+begin
+  Result := True;
+  for I := 1 to 40 do
+  begin
+    if not PulseImageRunning('Pulse.Index.exe') then
+      Exit;
+    Sleep(250);
+  end;
+  Result := False;
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   PreviousUninstallError: String;
-  ResultCode: Integer;
 begin
-  Exec('net.exe', 'stop PulseIndex', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  { Called before CloseApplications scans. Stopping only the Windows service
+    leaves the user-mode network agent holding Pulse.Index.exe. }
+  StopPulseApps;
+  WaitUntilPulseIndexGone;
   PreviousUninstallError := UninstallPreviousVersion;
+  StopPulseApps;
+  WaitUntilPulseIndexGone;
   Result := PreviousUninstallError;
 end;

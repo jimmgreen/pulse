@@ -22,6 +22,8 @@ namespace pulse::app { class PlacesCatalog; }
 
 namespace pulse::ui {
 
+class BloomAccentPicker;
+
 enum class SortColumn { Name, Mtime, Type, Size, Path };
 enum class SortDirection { Asc, Desc };
 
@@ -122,6 +124,7 @@ struct PaneViewModel {
     // Cumulative column divider positions in the details view, normalized to
     // the usable header width. All zeroes select the responsive defaults.
     std::array<float, 3> details_column_dividers{};
+    std::array<float, 4> search_column_dividers{};
     bool focused = true;
     bool marquee_active = false;
     D2D1_RECT_F marquee_rect{};
@@ -388,8 +391,10 @@ struct WindowViewModel {
     float settings_scroll = 0.0f;
     bool settings_launch_on_startup = false;
     bool settings_keep_running = false;
+    bool settings_open_folders = false;
     int settings_row_height = 34; // current row-height pref (DIPs) for density radios
     int settings_tray_icon = 48;  // current tray-deck icon pref (DIPs) for size radios
+    BloomAccentPicker* settings_bloom = nullptr;
     bool settings_group_on[5] = { true, true, false, false, true };
     std::vector<SettingsRowView> settings_items;
     bool settings_index_service = false;
@@ -398,6 +403,7 @@ struct WindowViewModel {
     std::wstring settings_index_path;
     std::wstring settings_index_error;
     std::vector<IndexVolumeRowView> settings_index_volumes;
+    std::vector<std::wstring> settings_index_excluded_paths;
     std::vector<NetworkRootRowView> settings_network_roots;
 };
 
@@ -469,12 +475,15 @@ struct HitTestResult {
         SettingsNav,
         SettingsToggle,
         SettingsRestore,
+        SettingsAccent,
         SettingsEffect,
         SettingsWallpaper,
         SettingsDensity,
         SettingsTrayIcon,
         SettingsIndexVolume,
         SettingsIndexAction,
+        SettingsIndexExcludeAction,
+        SettingsIndexExcludeRemove,
         SettingsNetworkAction,
         SettingsNetworkRemove
     } region = None;
@@ -566,17 +575,25 @@ public:
     DetailsColumnLayout DetailsColumns(
         const D2D1_RECT_F& pane_bounds,
         const std::array<float, 3>& dividers = {},
-        bool search_view = false) const;
+        bool search_view = false,
+        const std::array<float, 4>& search_dividers = {}) const;
+    DetailsColumnLayout DetailsColumns(const D2D1_RECT_F& pane_bounds,
+                                       const PaneViewModel& vm) const;
     std::array<float, 3> ResizeDetailsColumnDivider(
         const D2D1_RECT_F& pane_bounds,
         const std::array<float, 3>& dividers,
+        int divider_index, float cursor_x) const;
+    std::array<float, 4> ResizeSearchColumnDivider(
+        const D2D1_RECT_F& pane_bounds,
+        const std::array<float, 4>& dividers,
         int divider_index, float cursor_x) const;
 
     D2D1_RECT_F NameCellRect(const D2D1_RECT_F& pane_bounds, int view_row, float scroll_y,
                              float extra_top = 0.0f, ViewMode mode = ViewMode::Details,
                              float scroll_x = 0.0f, size_t item_count = 0,
                              const std::array<float, 3>& column_dividers = {},
-                             bool search_view = false) const;
+                             bool search_view = false,
+                             const std::array<float, 4>& search_dividers = {}) const;
     bool PointInItemName(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds,
                          int source_index, float x, float y) const;
     // Exact geometry of the Fluent frame drawn for the rename row; the hosted
@@ -688,6 +705,8 @@ private:
     bool DrawCuratedEmptyStateSvg(bool starred, const D2D1_RECT_F& bounds,
                                   float opacity = 1.0f);
     bool EnsureCuratedEmptyStateSvg(bool starred);
+    bool DrawExcludeEmptySvg(const D2D1_RECT_F& bounds, float opacity = 1.0f);
+    bool EnsureExcludeEmptySvg();
     void DrawTruncatedName(const std::wstring& name, float x, float y, float w, float h,
                            const Theme& theme, bool selected);
     void DrawCenteredIconName(const std::wstring& name, const D2D1_RECT_F& bounds,
@@ -748,6 +767,7 @@ private:
     ComPtr<ID2D1SvgDocument> no_selection_svg_;
     ComPtr<ID2D1SvgDocument> recent_empty_svg_;
     ComPtr<ID2D1SvgDocument> starred_empty_svg_;
+    ComPtr<ID2D1SvgDocument> exclude_empty_svg_;
     ID2D1DeviceContext* logo_dc_ = nullptr;
     float logo_scale_ = 0.0f;
 

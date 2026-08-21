@@ -310,6 +310,7 @@ private:
     void UpdateVolumeVisibilityLocked(const std::vector<VolumeInfo>& active, bool only_hide = false);
     void InvalidateFilterLocked() { ++filter_epoch_; }
     void SetStatus(std::wstring s);
+    bool IsExcludedPath(std::wstring_view path) const;
     void PingNotify(bool force = false);
 
     int32_t BaseCount() const { return map_ ? static_cast<int32_t>(map_->n) : 0; }
@@ -368,6 +369,7 @@ private:
     };
     std::vector<WalkWatch> watches_;
     std::vector<std::wstring> walk_roots_;
+    std::vector<std::wstring> excluded_paths_;
 
     mutable uint64_t filter_epoch_ = 1;
     mutable uint64_t cache_epoch_ = 0;

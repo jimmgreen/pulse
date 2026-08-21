@@ -26,6 +26,7 @@ public:
     std::wstring IndexPath() const;
     bool ServiceMode() const;
     std::vector<VolumeInfo> Volumes() const;
+    std::vector<std::wstring> ExcludedPaths() const;
     void RefreshVolumesAsync();
     bool RequestConfigureVolume(const std::wstring& volume_id, bool enabled);
     bool RequestRebuild();
@@ -33,6 +34,7 @@ public:
     static bool RebuildElevated();
     static bool InstallServiceElevated();
     static bool ConfigureIndexPathElevated(const std::wstring& path);
+    static bool ConfigureExcludePathElevated(const std::wstring& path, bool enabled);
 
     // Fire-and-forget. Reply arrives as search_msg (wParam = request id).
     void SearchAsync(const Query& q, uint32_t id);
@@ -73,6 +75,7 @@ private:
     std::wstring index_path_;
     bool service_mode_ = false;
     std::vector<VolumeInfo> volumes_;
+    std::vector<std::wstring> excluded_paths_;
     uint32_t result_id_ = 0;
     SearchResult result_;
     std::mutex pipe_mu_;

@@ -142,10 +142,19 @@ int wmain(int argc, wchar_t** argv) {
               L"\\\\server\\share\\folder",
           L"network long UNC normalization");
     Check(NormalizeNetworkRoot(L"\\\\192.168.0.254\\工程项目盘\\") ==
-              L"\\\\192.168.0.254\\工程项目盘",
+          L"\\\\192.168.0.254\\工程项目盘",
           L"network Chinese UNC root normalization");
     Check(NormalizeNetworkRoot(L"C:\\local").empty(),
           L"network root rejects local path");
+
+    {
+        IndexConfig path_config;
+        path_config.excluded_paths = { L"C:\\Program Files\\Pulse" };
+        Check(path_config.IsPathExcluded(L"C:\\Program Files\\Pulse") &&
+                  path_config.IsPathExcluded(L"c:\\program files\\pulse\\Pulse.Index.exe") &&
+                  !path_config.IsPathExcluded(L"C:\\Program Files\\PulseTools"),
+              L"excluded path matches subtree boundaries");
+    }
 
     {
         wchar_t temp_dir[MAX_PATH]{};
