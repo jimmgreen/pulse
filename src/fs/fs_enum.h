@@ -17,6 +17,7 @@ struct DirEntry {
     bool is_reparse = false;
     bool cloud_recall = false;
     std::wstring full_path; // set for virtual views (search/tag); empty = parent+name
+    std::wstring recycle_path; // $R payload when listing pulse:recycle; not a .lnk target
     // Resolved .lnk target (empty = not a link or unresolvable). The fields
     // above always describe the .lnk file itself; these describe the target.
     std::wstring link_target;

@@ -4,6 +4,7 @@
 #include "../common/json_utils.h"
 #include "../common/utf8_file.h"
 #include <algorithm>
+#include <unordered_set>
 #include <windows.h>
 
 namespace pulse::app {
@@ -46,6 +47,7 @@ void ContextMenuPrefs::ResetToDefaults() {
     explorer_cap = 12;
     open_with_mru = 2;
     item_enabled.clear();
+    seen.clear();
     slow_ext.clear();
 }
 
@@ -96,6 +98,35 @@ bool ContextMenuPrefs::ItemEnabled(const std::wstring& key, ipc::CtxMenuCategory
 void ContextMenuPrefs::SetItemEnabled(const std::wstring& key, bool on) {
     if (key.empty()) return;
     item_enabled[key] = on;
+    if (on) SetComDisabled(key, false);
+}
+
+bool ContextMenuPrefs::HandlerEnabled(const std::wstring& clsid) const {
+    if (clsid.empty()) return true;
+    const std::wstring key = ipc::HandlerCatalogKey(clsid);
+    if (ComDisabled(key)) return false;
+    const auto it = item_enabled.find(key);
+    if (it != item_enabled.end()) return it->second;
+    return true;
+}
+
+std::vector<std::wstring> ContextMenuPrefs::DisabledHandlerClsids() const {
+    std::vector<std::wstring> out;
+    std::unordered_set<std::wstring> listed;
+    auto add = [&](std::wstring clsid) {
+        clsid = ipc::ToLowerVerb(clsid);
+        if (clsid.empty() || !listed.insert(clsid).second) return;
+        out.push_back(std::move(clsid));
+    };
+    for (const auto& kv : item_enabled) {
+        if (!kv.second && ipc::IsHandlerCatalogKey(kv.first))
+            add(ipc::HandlerClsidFromKey(kv.first));
+    }
+    for (const auto& kv : slow_ext) {
+        if (kv.second.disabled && ipc::IsHandlerCatalogKey(kv.first))
+            add(ipc::HandlerClsidFromKey(kv.first));
+    }
+    return out;
 }
 
 bool ContextMenuPrefs::RecordSeen(const std::wstring& key, const std::wstring& text,
@@ -292,6 +323,8 @@ bool ContextMenuPrefs::FromJson(const std::wstring& json) {
         }
     }
 
+    CoalesceCompressCatalog();
+
     slow_ext.clear();
     const std::wstring slow = ExtractObject(json, L"slow_ext");
     if (!slow.empty()) {
@@ -320,6 +353,45 @@ bool ContextMenuPrefs::FromJson(const std::wstring& json) {
         }
     }
     return true;
+}
+
+void ContextMenuPrefs::CoalesceCompressCatalog() {
+    std::vector<SeenMenuItem> kept;
+    kept.reserve(seen.size());
+    bool compress_seen = false;
+    bool compress_forced_on = false;
+    bool compress_forced_off = false;
+    for (auto& item : seen) {
+        if (item.key == ipc::CompressCatalogKey()) {
+            compress_seen = true;
+            kept.push_back(std::move(item));
+            continue;
+        }
+        if (ipc::IsCompressTopLevel(item.text) && !item.flyout) {
+            const auto it = item_enabled.find(item.key);
+            if (it != item_enabled.end()) {
+                if (it->second) compress_forced_on = true;
+                else compress_forced_off = true;
+                item_enabled.erase(it);
+            }
+            continue;
+        }
+        kept.push_back(std::move(item));
+    }
+    if (kept.size() != seen.size() && !compress_seen) {
+        SeenMenuItem row;
+        row.key = ipc::CompressCatalogKey();
+        row.text = ipc::CompressCatalogText();
+        row.from_com = true;
+        row.category = ipc::CtxMenuCategory::Software;
+        kept.push_back(std::move(row));
+        compress_seen = true;
+    }
+    seen = std::move(kept);
+    if (compress_forced_on && !compress_forced_off)
+        item_enabled[ipc::CompressCatalogKey()] = true;
+    else if (compress_forced_off && !compress_forced_on)
+        item_enabled[ipc::CompressCatalogKey()] = false;
 }
 
 bool ContextMenuPrefs::Load() {

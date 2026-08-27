@@ -41,22 +41,22 @@ public:
 
 private:
     static int ImageListId(float desired_pixels) noexcept;
-    bool EnsureImageList(int list_id);
+    IImageList* EnsureImageList(int list_id);
     bool EnsureWic();
     int GenericIndex(const std::wstring& name, bool is_dir, DWORD attrs);
     void RequestExact(const std::wstring& path);
     ID2D1Bitmap* BitmapForIndex(int index, int list_id);
     ComPtr<ID2D1Bitmap> BitmapFromIcon(HICON icon);
     void WorkerLoop();
-    static bool NeedsExactIcon(const std::wstring& name, bool is_dir);
+    static bool NeedsExactIcon(const std::wstring& name, bool is_dir,
+                               const std::wstring& path);
 
     ID2D1DeviceContext2* dc_ = nullptr;
     HWND hwnd_ = nullptr;
     float scale_ = 1.0f;
-    int image_list_id_ = -1;
-    IImageList* image_list_ = nullptr;
+    std::unordered_map<int, IImageList*> image_lists_;
     ComPtr<IWICImagingFactory> wic_;
-    std::unordered_map<int, ComPtr<ID2D1Bitmap>> bitmaps_;
+    std::unordered_map<uint64_t, ComPtr<ID2D1Bitmap>> bitmaps_;
     std::unordered_map<std::wstring, int> generic_index_;
 
     std::mutex mutex_;

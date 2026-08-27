@@ -152,6 +152,7 @@ static std::wstring TrimBadge(std::wstring value) {
 } // namespace
 
 PlacesCatalog::~PlacesCatalog() {
+    StopPlacesWriter();
     FlushPendingSave(true);
     StopTagWriter();
 }
@@ -440,8 +441,92 @@ bool ParsePulsePath(const std::wstring& path, std::wstring* kind, std::wstring* 
     return true;
 }
 
+PlacesCatalog::SaveSnapshot PlacesCatalog::CaptureSaveSnapshot() const {
+    SaveSnapshot snapshot;
+    snapshot.workspaces = workspaces;
+    snapshot.tags = tags;
+    snapshot.networks = networks;
+    snapshot.starred_items = starred_items;
+    snapshot.recent_items = recent_items;
+    snapshot.active_workspace = active_workspace;
+    snapshot.persist = persist;
+    return snapshot;
+}
+
+void PlacesCatalog::MarkPlacesDirty() const {
+    places_save_revision_.fetch_add(1, std::memory_order_relaxed);
+    places_save_due_.store(GetTickCount64() + 1000, std::memory_order_release);
+}
+
+void PlacesCatalog::QueuePlacesSave() const {
+    if (!persist) return;
+    auto snapshot = CaptureSaveSnapshot();
+    const uint64_t revision = places_save_revision_.load(std::memory_order_acquire);
+    {
+        std::lock_guard<std::mutex> lock(places_save_mutex_);
+        pending_places_save_ = std::make_pair(std::move(snapshot), revision);
+        if (!places_save_thread_.joinable()) {
+            places_save_stop_ = false;
+            places_save_thread_ = std::thread([this] {
+                for (;;) {
+                    std::optional<std::pair<SaveSnapshot, uint64_t>> pending;
+                    {
+                        std::unique_lock<std::mutex> lock(places_save_mutex_);
+                        places_save_cv_.wait(lock, [this] {
+                            return places_save_stop_ || pending_places_save_.has_value();
+                        });
+                        if (pending_places_save_) {
+                            pending = std::move(pending_places_save_);
+                            pending_places_save_.reset();
+                        } else if (places_save_stop_) {
+                            return;
+                        }
+                    }
+                    if (pending) {
+                        bool saved = false;
+                        if (places_save_revision_.load(std::memory_order_acquire)
+                                == pending->second) {
+                            std::lock_guard<std::mutex> lock(places_save_io_mutex_);
+                            // A synchronous Save() may have superseded this
+                            // snapshot while it was waiting for the IO lock.
+                            if (places_save_revision_.load(std::memory_order_acquire)
+                                    == pending->second) {
+                                saved = SaveSnapshotFile(pending->first);
+                            }
+                        }
+                        if (saved && places_save_revision_.load(std::memory_order_acquire)
+                                == pending->second) {
+                            places_save_due_.store(0, std::memory_order_release);
+                        }
+                    }
+                    std::lock_guard<std::mutex> lock(places_save_mutex_);
+                    if (places_save_stop_ && !pending_places_save_) return;
+                }
+            });
+        }
+    }
+    places_save_cv_.notify_one();
+}
+
+void PlacesCatalog::StopPlacesWriter() {
+    {
+        std::lock_guard<std::mutex> lock(places_save_mutex_);
+        places_save_stop_ = true;
+    }
+    places_save_cv_.notify_all();
+    if (places_save_thread_.joinable()) places_save_thread_.join();
+}
+
 bool PlacesCatalog::Save() const {
     if (!persist) return true;
+    const SaveSnapshot snapshot = CaptureSaveSnapshot();
+    std::lock_guard<std::mutex> lock(places_save_io_mutex_);
+    const bool saved = SaveSnapshotFile(snapshot);
+    if (saved) places_save_due_.store(0, std::memory_order_release);
+    return saved;
+}
+
+bool PlacesCatalog::SaveSnapshotFile(const SaveSnapshot& snapshot) {
     std::wstring dir = GetPulseDataDir();
     if (dir.empty()) return false;
     std::wostringstream f;
@@ -455,10 +540,10 @@ bool PlacesCatalog::Save() const {
         }
         f << L"]";
     };
-    f << L"{\n  \"places_version\":2,\n  \"tag_version\":2,\n  \"active_workspace\":" << active_workspace
+    f << L"{\n  \"places_version\":2,\n  \"tag_version\":2,\n  \"active_workspace\":" << snapshot.active_workspace
       << L",\n  \"workspaces\":[\n";
-    for (size_t i = 0; i < workspaces.size(); ++i) {
-        const auto& w = workspaces[i];
+    for (size_t i = 0; i < snapshot.workspaces.size(); ++i) {
+        const auto& w = snapshot.workspaces[i];
         std::wstring name, root;
         pulse::json::Escape(w.name, name);
         pulse::json::Escape(w.root, root);
@@ -477,12 +562,12 @@ bool PlacesCatalog::Save() const {
         f << L",\"freq\":";
         writeArr(freq);
         f << L"}";
-        if (i + 1 < workspaces.size()) f << L",";
+        if (i + 1 < snapshot.workspaces.size()) f << L",";
         f << L"\n";
     }
     f << L"  ],\n  \"tags\":[\n";
-    for (size_t i = 0; i < tags.size(); ++i) {
-        const auto& t = tags[i];
+    for (size_t i = 0; i < snapshot.tags.size(); ++i) {
+        const auto& t = snapshot.tags[i];
         std::wstring id, name;
         pulse::json::Escape(t.id, id);
         pulse::json::Escape(t.name, name);
@@ -492,27 +577,27 @@ bool PlacesCatalog::Save() const {
           << L"\",\"rgb\":" << rgb << L",\"paths\":";
         writeArr(t.paths);
         f << L"}";
-        if (i + 1 < tags.size()) f << L",";
+        if (i + 1 < snapshot.tags.size()) f << L",";
         f << L"\n";
     }
     f << L"  ],\n  \"networks\":[\n";
-    for (size_t i = 0; i < networks.size(); ++i) {
-        const auto& n = networks[i];
+    for (size_t i = 0; i < snapshot.networks.size(); ++i) {
+        const auto& n = snapshot.networks[i];
         std::wstring name, unc;
         pulse::json::Escape(n.name, name);
         pulse::json::Escape(n.unc, unc);
         f << L"    {\"name\":\"" << name << L"\",\"unc\":\"" << unc << L"\"}";
-        if (i + 1 < networks.size()) f << L",";
+        if (i + 1 < snapshot.networks.size()) f << L",";
         f << L"\n";
     }
     std::vector<std::wstring> legacy_starred;
-    legacy_starred.reserve(starred_items.size());
-    for (const auto& item : starred_items) legacy_starred.push_back(item.path);
+    legacy_starred.reserve(snapshot.starred_items.size());
+    for (const auto& item : snapshot.starred_items) legacy_starred.push_back(item.path);
     f << L"  ],\n  \"starred\":";
     writeArr(legacy_starred);
     f << L",\n  \"starred_items\":[\n";
-    for (size_t i = 0; i < starred_items.size(); ++i) {
-        const auto& item = starred_items[i];
+    for (size_t i = 0; i < snapshot.starred_items.size(); ++i) {
+        const auto& item = snapshot.starred_items[i];
         std::wstring path, badge;
         pulse::json::Escape(item.path, path);
         pulse::json::Escape(item.badge, badge);
@@ -521,31 +606,32 @@ bool PlacesCatalog::Save() const {
         f << L"    {\"path\":\"" << path << L"\",\"kind\":\""
           << KindName(item.kind) << L"\",\"badge\":\"" << badge
           << L"\",\"rgb\":" << rgb << L"}";
-        if (i + 1 < starred_items.size()) f << L",";
+        if (i + 1 < snapshot.starred_items.size()) f << L",";
         f << L"\n";
     }
     f << L"  ],\n  \"recent_items\":[\n";
-    for (size_t i = 0; i < recent_items.size(); ++i) {
-        const auto& item = recent_items[i];
+    for (size_t i = 0; i < snapshot.recent_items.size(); ++i) {
+        const auto& item = snapshot.recent_items[i];
         std::wstring path;
         pulse::json::Escape(item.path, path);
         f << L"    {\"path\":\"" << path << L"\",\"kind\":\""
           << KindName(item.kind) << L"\",\"opened_at\":\""
           << item.opened_at << L"\"}";
-        if (i + 1 < recent_items.size()) f << L",";
+        if (i + 1 < snapshot.recent_items.size()) f << L",";
         f << L"\n";
     }
     f << L"  ]\n}\n";
     DeleteFileW((dir + L"\\places.tmp").c_str());
-    const bool saved = WriteUtf8FileAtomic(dir + L"\\places.json", f.str());
-    if (saved) places_save_due_ = 0;
-    return saved;
+    return WriteUtf8FileAtomic(dir + L"\\places.json", f.str());
 }
 
 bool PlacesCatalog::FlushPendingSave(bool force) const {
-    if (!places_save_due_) return true;
-    if (!force && GetTickCount64() < places_save_due_) return true;
-    return Save();
+    const ULONGLONG due = places_save_due_.load(std::memory_order_acquire);
+    if (!due) return true;
+    if (!force && GetTickCount64() < due) return true;
+    if (force) return Save();
+    QueuePlacesSave();
+    return true;
 }
 
 int PlacesCatalog::FindWorkspace(const std::wstring& root) const {
@@ -854,7 +940,7 @@ bool PlacesCatalog::SetStarredKind(const std::wstring& path, PlaceItemKind kind)
     std::stable_partition(starred_items.begin(), starred_items.end(),
         [](const StarredItem& candidate) { return candidate.kind == PlaceItemKind::Folder; });
     ++tag_revision_;
-    places_save_due_ = GetTickCount64() + 1000;
+    MarkPlacesDirty();
     return true;
 }
 
@@ -910,7 +996,7 @@ void PlacesCatalog::RecordRecent(const std::wstring& path, PlaceItemKind kind) {
     }
     recent_items.insert(recent_items.begin(), std::move(item));
     if (recent_items.size() > 100) recent_items.resize(100);
-    places_save_due_ = GetTickCount64() + 1000;
+    MarkPlacesDirty();
 }
 
 const RecentItem* PlacesCatalog::FindRecent(const std::wstring& path) const {
@@ -927,7 +1013,7 @@ bool PlacesCatalog::SetRecentKind(const std::wstring& path, PlaceItemKind kind) 
         [&](const RecentItem& item) { return TagKey(item.path) == key; });
     if (found == recent_items.end() || found->kind == kind) return false;
     found->kind = kind;
-    places_save_due_ = GetTickCount64() + 1000;
+    MarkPlacesDirty();
     return true;
 }
 

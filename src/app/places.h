@@ -3,6 +3,7 @@
 #include "../fs/fs_enum.h"
 #include "../ui/view_layout.h"
 #include <cstdint>
+#include <atomic>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -160,6 +161,16 @@ public:
     void TagsReordered();
 
 private:
+    struct SaveSnapshot {
+        std::vector<Workspace> workspaces;
+        std::vector<ColorTag> tags;
+        std::vector<NetworkPlace> networks;
+        std::vector<StarredItem> starred_items;
+        std::vector<RecentItem> recent_items;
+        int active_workspace = -1;
+        bool persist = true;
+    };
+
     void RebuildTagIndex();
     void RebuildStarIndex();
     void CommitTagChanges(const std::vector<std::wstring>& paths,
@@ -167,20 +178,33 @@ private:
     void QueueTagSave() const;
     static bool SaveTagFile(const std::vector<ColorTag>& tags);
     void StopTagWriter();
+    SaveSnapshot CaptureSaveSnapshot() const;
+    static bool SaveSnapshotFile(const SaveSnapshot& snapshot);
+    void QueuePlacesSave() const;
+    void StopPlacesWriter();
+    void MarkPlacesDirty() const;
 
     std::unordered_map<std::wstring, std::vector<int>> tag_index_;
     std::unordered_set<std::wstring> starred_index_;
-    mutable ULONGLONG places_save_due_ = 0;
+    mutable std::atomic<ULONGLONG> places_save_due_{0};
     uint64_t tag_revision_ = 1;
     mutable std::mutex tag_save_mutex_;
     mutable std::condition_variable tag_save_cv_;
     mutable std::optional<std::vector<ColorTag>> pending_tag_save_;
     mutable std::thread tag_save_thread_;
     mutable bool tag_save_stop_ = false;
+    mutable std::mutex places_save_mutex_;
+    mutable std::condition_variable places_save_cv_;
+    mutable std::optional<std::pair<SaveSnapshot, uint64_t>> pending_places_save_;
+    mutable std::thread places_save_thread_;
+    mutable bool places_save_stop_ = false;
+    mutable std::mutex places_save_io_mutex_;
+    mutable std::atomic<uint64_t> places_save_revision_{0};
 };
 
 inline std::wstring MakeStarredPath() { return L"pulse:starred"; }
 inline std::wstring MakeRecentPath() { return L"pulse:recent"; }
+inline std::wstring MakeRecyclePath() { return L"pulse:recycle"; }
 inline std::wstring MakeTagPath(const TagId& id) { return L"pulse:tag:" + id; }
 inline std::wstring MakeTagPath(int i) { return L"pulse:tag:" + std::to_wstring(i); }
 inline std::wstring MakeSearchPath(const std::wstring& q) { return L"pulse:search:" + q; }

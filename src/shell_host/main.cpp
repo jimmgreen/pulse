@@ -10,7 +10,10 @@
 // retries the in-flight request once (see src/ipc/shell_client.cpp).
 #include "../ipc/protocol.h"
 #include "../ipc/ctx_menu_util.h"
+#include "ctx_handlers.h"
+#include "../common/current_user_security.h"
 #include "../common/path_utils.h"
+#include "../common/crash_reporter.h"
 #include <windows.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -36,8 +39,15 @@ namespace {
 constexpr UINT WM_EXEC_REQUEST = WM_APP + 1;
 constexpr UINT WM_QUIT_HOST = WM_APP + 2;
 // Context-menu session thread messages (defined below with the session code).
-constexpr UINT WM_CTX_INVOKE = WM_APP + 10;  // wParam=invoke req id, lParam=item id
+constexpr UINT WM_CTX_INVOKE = WM_APP + 10;  // lParam = CtxInvokeMsg*
 constexpr UINT WM_CTX_CLOSE = WM_APP + 11;
+
+struct CtxInvokeMsg {
+    uint32_t invoke_req_id = 0;
+    uint32_t item_id = 0;
+    std::wstring verb;
+    std::wstring text;
+};
 
 void StartCtxSession(uint32_t session_id, const uint8_t* payload, size_t size);
 void PostCtxMessage(uint32_t session_id, UINT message, WPARAM wParam, LPARAM lParam);
@@ -586,7 +596,8 @@ bool ReadRaw(void* out, DWORD size) {
 DWORD WINAPI ReaderThread(LPVOID) {
     __try {
         return ReaderThreadImpl();
-    } __except (HostLog(L"ReaderThread CRASH"), EXCEPTION_EXECUTE_HANDLER) {
+    } __except (pulse::crash::ReportFatal(GetExceptionInformation(), "shell-reader")) {
+        TerminateProcess(GetCurrentProcess(), GetExceptionCode());
         return 0;
     }
 }
@@ -641,10 +652,17 @@ DWORD WINAPI ReaderThreadImpl() {
             case REQ_CTX_INVOKE: {
                 PayloadReader r(payload.data(), payload.size());
                 uint32_t session = 0, item = 0;
-                if (r.GetU32(session) && r.GetU32(item))
-                    PostCtxMessage(session, WM_CTX_INVOKE, h.request_id, item);
-                else
+                std::wstring verb, text;
+                if (r.GetU32(session) && r.GetU32(item)) {
+                    r.GetString(verb);
+                    r.GetString(text);
+                    auto* inv = new CtxInvokeMsg{ h.request_id, item, std::move(verb),
+                                                  std::move(text) };
+                    PostCtxMessage(session, WM_CTX_INVOKE, 0,
+                                   reinterpret_cast<LPARAM>(inv));
+                } else {
                     SendDone(h.request_id, E_INVALIDARG, false, L"malformed ctx invoke");
+                }
                 break;
             }
             case REQ_CTX_CLOSE: {
@@ -681,7 +699,12 @@ DWORD WINAPI ReaderThreadImpl() {
                     delete req;
                     break;
                 }
-                PostMessageW(g.hwnd_msg, WM_EXEC_REQUEST, 0, reinterpret_cast<LPARAM>(req));
+                if (!PostMessageW(g.hwnd_msg, WM_EXEC_REQUEST, 0,
+                                  reinterpret_cast<LPARAM>(req))) {
+                    SendDone(req->id, HRESULT_FROM_WIN32(GetLastError()), false,
+                             L"host message queue unavailable");
+                    delete req;
+                }
                 break;
             }
             default:
@@ -709,6 +732,7 @@ struct CtxSessionData {
     bool extended = false;
     bool background = false;
     std::vector<std::wstring> paths;
+    std::vector<std::wstring> disabled_clsids;
 };
 
 struct CtxSlot {
@@ -719,31 +743,29 @@ struct CtxSlot {
 std::mutex g_ctx_mutex;
 std::map<uint32_t, CtxSlot> g_ctx_sessions;
 
-struct CtxItemOut {
-    uint32_t id = 0;
-    bool enabled = true;
-    bool separator_after = false;
-    bool has_children = false;  // submenu header row (id not invokable)
-    bool child = false;         // row inside the preceding header's flyout
-    std::wstring verb;
-    std::wstring text;
-};
+using pulse::shell::CtxItemOut;
 
-void SendCtxItems(uint32_t session_id, const std::vector<CtxItemOut>& items) {
+void SendCtxItems(uint32_t session_id, const std::vector<CtxItemOut>& items,
+                  uint32_t flags = 0,
+                  const std::vector<std::wstring>& slow_clsids = {}) {
     PayloadWriter w;
     w.PutU32(session_id);
+    w.PutU32(flags);
     w.PutU32((uint32_t)items.size());
     for (const auto& it : items) {
         w.PutU32(it.id);
-        uint32_t flags = 0;
-        if (it.enabled) flags |= CTX_ITEM_ENABLED;
-        if (it.separator_after) flags |= CTX_ITEM_SEPARATOR_AFTER;
-        if (it.has_children) flags |= CTX_ITEM_HAS_CHILDREN;
-        if (it.child) flags |= CTX_ITEM_CHILD;
-        w.PutU32(flags);
+        uint32_t item_flags = 0;
+        if (it.enabled) item_flags |= CTX_ITEM_ENABLED;
+        if (it.separator_after) item_flags |= CTX_ITEM_SEPARATOR_AFTER;
+        if (it.has_children) item_flags |= CTX_ITEM_HAS_CHILDREN;
+        if (it.child) item_flags |= CTX_ITEM_CHILD;
+        w.PutU32(item_flags);
         w.PutString(it.verb);
         w.PutString(it.text);
+        w.PutString(it.clsid);
+        w.PutString(it.handler);
     }
+    w.PutStringArray(slow_clsids);
     SendMsg(RSP_CTX_ITEMS, session_id, w.data());
 }
 
@@ -803,7 +825,8 @@ void CollectCtxItems(IContextMenu* menu, IContextMenu2* menu2, HMENU hmenu,
         const bool enabled = !(mii.fState & (MFS_DISABLED | MFS_GRAYED));
         if (mii.hSubMenu) {
             const std::wstring parent_verb = CtxVerbOf(menu, mii.wID);
-            if (IsDroppedContextSubmenu(parent_verb)) continue;
+            if (IsBuiltinContextVerb(parent_verb, background) ||
+                IsDroppedContextSubmenu(parent_verb)) continue;
             const std::wstring parent_text = MenuItemText(hmenu, (UINT)i);
             if (parent_text.empty()) continue;
             // Dynamic submenus (Send To, New) populate on WM_INITMENUPOPUP.
@@ -826,6 +849,7 @@ void CollectCtxItems(IContextMenu* menu, IContextMenu2* menu2, HMENU hmenu,
                 item.enabled = enabled && !(sub.fState & (MFS_DISABLED | MFS_GRAYED));
                 item.child = true;
                 item.verb = CtxVerbOf(menu, sub.wID);
+                if (IsBuiltinContextVerb(item.verb, background)) continue;
                 item.text = child_text;
                 kids.push_back(std::move(item));
             }
@@ -908,8 +932,12 @@ HRESULT BuildCtxMenu(const CtxSessionData& d, IContextMenu** out_menu, HMENU* ou
     return S_OK;
 }
 
-void CtxInvoke(const CtxSessionData& d, IContextMenu* menu, uint32_t invoke_req_id,
-               uint32_t item_id) {
+void CtxInvoke(const CtxSessionData& d, IContextMenu* menu, UINT id_first,
+               uint32_t invoke_req_id, uint32_t item_id) {
+    if (!menu || item_id < id_first) {
+        SendDone(invoke_req_id, E_INVALIDARG, false, L"context menu invoke failed");
+        return;
+    }
     std::wstring dir = ToParsingPath(d.paths.front());
     if (!d.background) {
         const auto slash = dir.find_last_of(L'\\');
@@ -919,13 +947,119 @@ void CtxInvoke(const CtxSessionData& d, IContextMenu* menu, uint32_t invoke_req_
     info.cbSize = sizeof(info);
     info.fMask = CMIC_MASK_UNICODE;
     info.hwnd = d.owner;
-    info.lpVerb = MAKEINTRESOURCEA(item_id - kCtxIdFirst);
-    info.lpVerbW = MAKEINTRESOURCEW(item_id - kCtxIdFirst);
+    info.lpVerb = MAKEINTRESOURCEA(item_id - id_first);
+    info.lpVerbW = MAKEINTRESOURCEW(item_id - id_first);
     info.lpDirectoryW = dir.c_str();
     info.nShow = SW_SHOWNORMAL;
     const HRESULT hr = menu->InvokeCommand(reinterpret_cast<CMINVOKECOMMANDINFO*>(&info));
     SendDone(invoke_req_id, hr, false,
              FAILED(hr) ? L"context menu invoke failed" : L"");
+}
+
+bool SessionCloseRequested(uint32_t sid) {
+    std::lock_guard<std::mutex> lock(g_ctx_mutex);
+    auto it = g_ctx_sessions.find(sid);
+    return it == g_ctx_sessions.end() || it->second.close_requested;
+}
+
+struct HandlerWorker {
+    pulse::shell::CtxHandlerDesc desc;
+    std::vector<std::wstring> paths;
+    bool background = false;
+    HWND owner = nullptr;
+    UINT id_first = 0;
+    UINT id_last = 0;
+    UINT qcm_flags = 0;
+    pulse::shell::CtxHandlerSlot slot;
+    std::vector<CtxItemOut> items;
+    HANDLE done_event = nullptr;
+    HANDLE exit_event = nullptr;
+    HANDLE thread = nullptr;
+    DWORD thread_id = 0;
+    uint32_t elapsed_ms = 0;
+};
+
+DWORD HandlerWorkerThreadImpl(LPVOID param) {
+    auto* w = static_cast<HandlerWorker*>(param);
+    if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE))) {
+        if (w->done_event) SetEvent(w->done_event);
+        return 0;
+    }
+    MSG msg;
+    PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
+    w->thread_id = GetCurrentThreadId();
+
+    const ULONGLONG t0 = GetTickCount64();
+    pulse::shell::CtxBind bind;
+    if (pulse::shell::BindCtxSelection(w->paths, w->background, bind)) {
+        const HRESULT hr = pulse::shell::QueryOneHandler(
+            w->desc, bind, w->owner, w->id_first, w->id_last, w->qcm_flags, w->slot);
+        if (SUCCEEDED(hr) && w->slot.menu)
+            pulse::shell::CollectHandlerItems(w->slot, w->background, w->items);
+        else
+            pulse::shell::ReleaseHandlerSlot(w->slot);
+    }
+    w->elapsed_ms = static_cast<uint32_t>(GetTickCount64() - t0);
+    if (w->done_event) SetEvent(w->done_event);
+
+    for (;;) {
+        HANDLE waits[1] = { w->exit_event };
+        const DWORD n = w->exit_event ? 1 : 0;
+        MsgWaitForMultipleObjects(n, n ? waits : nullptr, FALSE, INFINITE, QS_ALLINPUT);
+        const bool exiting = w->exit_event &&
+            WaitForSingleObject(w->exit_event, 0) == WAIT_OBJECT_0;
+        bool invoked = false;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_CTX_INVOKE) {
+                std::unique_ptr<CtxInvokeMsg> inv(
+                    reinterpret_cast<CtxInvokeMsg*>(msg.lParam));
+                CtxSessionData d;
+                d.owner = w->owner;
+                d.paths = w->paths;
+                d.background = w->background;
+                if (w->slot.menu && inv->item_id >= w->id_first)
+                    CtxInvoke(d, w->slot.menu, w->id_first, inv->invoke_req_id, inv->item_id);
+                else
+                    SendDone(inv->invoke_req_id, E_INVALIDARG, false,
+                             L"context menu invoke failed");
+                invoked = true;
+            } else if (msg.message == WM_CTX_CLOSE) {
+                // coordinator uses exit_event; ignore stray close
+            } else {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+        if (invoked || exiting) break;
+    }
+    pulse::shell::ReleaseHandlerSlot(w->slot);
+    CoUninitialize();
+    return 0;
+}
+
+DWORD WINAPI HandlerWorkerThread(LPVOID param) {
+    auto* w = static_cast<HandlerWorker*>(param);
+    __try {
+        return HandlerWorkerThreadImpl(param);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        if (w && w->done_event) SetEvent(w->done_event);
+        return 0;
+    }
+}
+
+void JoinHandlerWorkers(std::vector<std::unique_ptr<HandlerWorker>>& workers) {
+    for (auto& w : workers)
+        if (w && w->exit_event) SetEvent(w->exit_event);
+    for (auto& w : workers)
+        if (w && w->thread) WaitForSingleObject(w->thread, INFINITE);
+    for (auto& w : workers) {
+        if (!w) continue;
+        if (w->done_event) CloseHandle(w->done_event);
+        if (w->exit_event) CloseHandle(w->exit_event);
+        if (w->thread) CloseHandle(w->thread);
+        w->done_event = w->exit_event = w->thread = nullptr;
+    }
+    workers.clear();
 }
 
 DWORD WINAPI CtxSessionThreadImpl(LPVOID param) {
@@ -937,8 +1071,6 @@ DWORD WINAPI CtxSessionThreadImpl(LPVOID param) {
         g_ctx_sessions.erase(sid);
         return 0;
     }
-    // Create the thread message queue, then publish the thread id so the
-    // reader can PostThreadMessage invoke/close at us without racing.
     MSG msg;
     PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
     bool closed_early = false;
@@ -957,15 +1089,117 @@ DWORD WINAPI CtxSessionThreadImpl(LPVOID param) {
         return 0;
     }
 
-    IContextMenu* menu = nullptr;
-    HMENU hmenu = nullptr;
-    std::vector<CtxItemOut> items;
+    constexpr UINT kIdsPerHandler = 256;
+    constexpr DWORD kFastBudgetMs = 80;
     const ULONGLONG started = GetTickCount64();
-    BuildCtxMenu(*data, &menu, &hmenu, items);
+    UINT qcm_flags = CMF_NORMAL;
+    if (data->extended) qcm_flags |= CMF_EXTENDEDVERBS;
+
+    std::vector<std::unique_ptr<HandlerWorker>> workers;
+    std::vector<CtxItemOut> items;
+    IContextMenu* fallback_menu = nullptr;
+    HMENU fallback_hmenu = nullptr;
+    std::unique_ptr<CtxInvokeMsg> pending_invoke;
+
+    auto pump_session_messages = [&] {
+        MSG m{};
+        while (PeekMessageW(&m, nullptr, WM_CTX_CLOSE, WM_CTX_CLOSE, PM_REMOVE)) {
+            std::lock_guard<std::mutex> lock(g_ctx_mutex);
+            auto it = g_ctx_sessions.find(sid);
+            if (it != g_ctx_sessions.end()) it->second.close_requested = true;
+        }
+        while (PeekMessageW(&m, nullptr, WM_CTX_INVOKE, WM_CTX_INVOKE, PM_REMOVE))
+            pending_invoke.reset(reinterpret_cast<CtxInvokeMsg*>(m.lParam));
+    };
+
+    auto handlers = pulse::shell::EnumerateCtxHandlers(
+        data->background, data->paths.front(), data->disabled_clsids);
+    if (handlers.size() > MAXIMUM_WAIT_OBJECTS)
+        handlers.resize(MAXIMUM_WAIT_OBJECTS);
+
+    UINT next_id = kCtxIdFirst;
+    for (const auto& handler : handlers) {
+        if (next_id + kIdsPerHandler > kCtxIdLast) break;
+        auto worker = std::make_unique<HandlerWorker>();
+        worker->desc = handler;
+        worker->paths = data->paths;
+        worker->background = data->background;
+        worker->owner = data->owner;
+        worker->id_first = next_id;
+        worker->id_last = next_id + kIdsPerHandler - 1;
+        worker->qcm_flags = qcm_flags;
+        worker->done_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        worker->exit_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        next_id += kIdsPerHandler;
+        worker->thread = CreateThread(nullptr, 0, HandlerWorkerThread, worker.get(), 0, nullptr);
+        if (!worker->thread || !worker->done_event || !worker->exit_event) {
+            if (worker->done_event) SetEvent(worker->done_event);
+            continue;
+        }
+        workers.push_back(std::move(worker));
+    }
+
+    auto worker_done = [](const HandlerWorker& w) {
+        return w.done_event && WaitForSingleObject(w.done_event, 0) == WAIT_OBJECT_0;
+    };
+    auto all_workers_done = [&] {
+        if (workers.empty()) return true;
+        for (const auto& w : workers)
+            if (w && !worker_done(*w)) return false;
+        return true;
+    };
+    auto collect_items = [&] {
+        std::vector<CtxItemOut> out;
+        for (const auto& w : workers) {
+            if (!w || !worker_done(*w)) continue;
+            out.insert(out.end(), w->items.begin(), w->items.end());
+        }
+        return out;
+    };
+    auto collect_slow = [&] {
+        std::vector<std::wstring> slow;
+        for (const auto& w : workers) {
+            if (!w || !worker_done(*w) || w->elapsed_ms < 1000) continue;
+            if (!w->desc.clsid_text.empty()) slow.push_back(w->desc.clsid_text);
+        }
+        return slow;
+    };
+
+    if (!workers.empty()) {
+        bool sent_partial = false;
+        while (!all_workers_done() && !SessionCloseRequested(sid)) {
+            pump_session_messages();
+            if (SessionCloseRequested(sid)) break;
+            const ULONGLONG elapsed = GetTickCount64() - started;
+            if (!sent_partial && elapsed >= kFastBudgetMs) {
+                items = collect_items();
+                SendCtxItems(sid, items, CTX_ITEMS_PARTIAL);
+                sent_partial = true;
+            }
+            std::vector<HANDLE> waits;
+            waits.reserve(workers.size());
+            for (const auto& w : workers)
+                if (w && w->done_event && !worker_done(*w)) waits.push_back(w->done_event);
+            if (waits.empty()) break;
+            DWORD timeout = 200;
+            if (!sent_partial) {
+                const ULONGLONG left = elapsed >= kFastBudgetMs ? 1 : (kFastBudgetMs - elapsed);
+                timeout = left > 0xFFFFFFFFULL ? 200 : static_cast<DWORD>(left);
+                if (timeout == 0) timeout = 1;
+            }
+            MsgWaitForMultipleObjects(static_cast<DWORD>(waits.size()), waits.data(),
+                                      FALSE, timeout, QS_ALLINPUT);
+        }
+        pump_session_messages();
+        items = collect_items();
+    } else {
+        BuildCtxMenu(*data, &fallback_menu, &fallback_hmenu, items);
+    }
+
     const uint32_t elapsed = static_cast<uint32_t>(GetTickCount64() - started);
     wchar_t timing[160];
-    swprintf_s(timing, L"QueryContextMenu %ums items=%zu background=%d",
-               elapsed, items.size(), data->background ? 1 : 0);
+    swprintf_s(timing, L"QueryContextMenu %ums items=%zu handlers=%zu background=%d",
+               elapsed, items.size(), workers.size(), data->background ? 1 : 0);
     HostLog(timing);
     if (elapsed >= 500) {
         wchar_t slow[192];
@@ -973,11 +1207,47 @@ DWORD WINAPI CtxSessionThreadImpl(LPVOID param) {
                    data->paths.empty() ? L"" : data->paths.front().c_str());
         HostLog(slow);
     }
-    SendCtxItems(sid, items);
+    SendCtxItems(sid, items, 0, collect_slow());
 
-    // Session loop: wait for invoke/close; auto-expire as a leak guard.
+    auto dispatch_invoke = [&](std::unique_ptr<CtxInvokeMsg> inv) {
+        if (!inv) return;
+        uint32_t live = pulse::shell::FindItemId(
+            items, inv->item_id, inv->verb, inv->text);
+        if (!workers.empty()) {
+            HandlerWorker* target = nullptr;
+            for (auto& w : workers) {
+                if (w && live >= w->id_first && live <= w->id_last) {
+                    target = w.get();
+                    break;
+                }
+            }
+            if (target && target->thread_id && live != 0) {
+                CtxInvokeMsg* raw = inv.release();
+                if (!PostThreadMessageW(target->thread_id, WM_CTX_INVOKE, 0,
+                                        reinterpret_cast<LPARAM>(raw))) {
+                    std::unique_ptr<CtxInvokeMsg> back(raw);
+                    SendDone(back->invoke_req_id, HRESULT_FROM_WIN32(GetLastError()),
+                             false, L"context menu session not ready");
+                }
+            } else {
+                SendDone(inv->invoke_req_id, E_INVALIDARG, false,
+                         L"context menu invoke failed");
+            }
+            return;
+        }
+        if (fallback_menu && live != 0)
+            CtxInvoke(*data, fallback_menu, kCtxIdFirst, inv->invoke_req_id, live);
+        else
+            SendDone(inv->invoke_req_id, E_INVALIDARG, false,
+                     L"context menu invoke failed");
+    };
+
+    bool done = workers.empty() && fallback_menu == nullptr;
+    if (pending_invoke) {
+        dispatch_invoke(std::move(pending_invoke));
+        done = true;
+    }
     const ULONGLONG deadline = GetTickCount64() + kCtxSessionExpireMs;
-    bool done = (menu == nullptr);
     while (!done) {
         const ULONGLONG now = GetTickCount64();
         if (now >= deadline) break;
@@ -986,7 +1256,8 @@ DWORD WINAPI CtxSessionThreadImpl(LPVOID param) {
         if (wait == WAIT_TIMEOUT) break;
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_CTX_INVOKE) {
-                CtxInvoke(*data, menu, (uint32_t)msg.wParam, (uint32_t)msg.lParam);
+                dispatch_invoke(std::unique_ptr<CtxInvokeMsg>(
+                    reinterpret_cast<CtxInvokeMsg*>(msg.lParam)));
                 done = true;
                 break;
             }
@@ -1003,8 +1274,9 @@ DWORD WINAPI CtxSessionThreadImpl(LPVOID param) {
         std::lock_guard<std::mutex> lock(g_ctx_mutex);
         g_ctx_sessions.erase(sid);
     }
-    if (hmenu) DestroyMenu(hmenu);
-    if (menu) menu->Release();
+    JoinHandlerWorkers(workers);
+    if (fallback_hmenu) DestroyMenu(fallback_hmenu);
+    if (fallback_menu) fallback_menu->Release();
     CoUninitialize();
     return 0;
 }
@@ -1021,6 +1293,7 @@ int CtxCrashFilter(EXCEPTION_POINTERS* ep) {
                ep->ExceptionRecord->ExceptionCode,
                ep->ExceptionRecord->ExceptionAddress, hm ? mod : L"?");
     HostLog(buf);
+    pulse::crash::ReportRecoverable(ep, "shell-context-menu");
     return EXCEPTION_EXECUTE_HANDLER;
 }
 
@@ -1053,6 +1326,7 @@ void StartCtxSession(uint32_t session_id, const uint8_t* payload, size_t size) {
         SendCtxItems(session_id, {});
         return;
     }
+    r.TryStringArray(data->disabled_clsids);
     data->owner = reinterpret_cast<HWND>(static_cast<uintptr_t>(owner));
     data->extended = (flags & CTXF_EXTENDED) != 0;
     data->background = (flags & CTXF_BACKGROUND) != 0;
@@ -1076,27 +1350,47 @@ void PostCtxMessage(uint32_t session_id, UINT message, WPARAM wParam, LPARAM lPa
     std::lock_guard<std::mutex> lock(g_ctx_mutex);
     auto it = g_ctx_sessions.find(session_id);
     if (it == g_ctx_sessions.end()) {
-        if (message == WM_CTX_INVOKE)
-            SendDone((uint32_t)wParam, HRESULT_FROM_WIN32(ERROR_NOT_FOUND), false,
+        if (message == WM_CTX_INVOKE) {
+            std::unique_ptr<CtxInvokeMsg> inv(reinterpret_cast<CtxInvokeMsg*>(lParam));
+            SendDone(inv->invoke_req_id, HRESULT_FROM_WIN32(ERROR_NOT_FOUND), false,
                      L"context menu session expired");
+        }
         return;
     }
     if (it->second.thread_id == 0) {
-        // Session thread has no queue yet (still building). Invoke cannot
-        // legitimately arrive this early; treat both as an early close.
         it->second.close_requested = true;
-        if (message == WM_CTX_INVOKE)
-            SendDone((uint32_t)wParam, HRESULT_FROM_WIN32(ERROR_NOT_READY), false,
+        if (message == WM_CTX_INVOKE) {
+            std::unique_ptr<CtxInvokeMsg> inv(reinterpret_cast<CtxInvokeMsg*>(lParam));
+            SendDone(inv->invoke_req_id, HRESULT_FROM_WIN32(ERROR_NOT_READY), false,
                      L"context menu session not ready");
+        }
         return;
     }
-    PostThreadMessageW(it->second.thread_id, message, wParam, lParam);
+    if (!PostThreadMessageW(it->second.thread_id, message, wParam, lParam) &&
+        message == WM_CTX_INVOKE) {
+        std::unique_ptr<CtxInvokeMsg> inv(reinterpret_cast<CtxInvokeMsg*>(lParam));
+        SendDone(inv->invoke_req_id, HRESULT_FROM_WIN32(GetLastError()), false,
+                 L"context menu session not ready");
+    }
 }
 
 DWORD WINAPI ParentWatchdog(LPVOID param) {
     DWORD pid = (DWORD)(uintptr_t)param;
-    HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, pid);
+    HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (!h) return 0; // parent already gone or not ours; keep serving standalone
+
+    // A recycled PID must not become an unrelated watchdog target. The real
+    // UI necessarily started before this host, so a candidate created later
+    // cannot be its parent even if the numeric PID matches.
+    FILETIME parent_created{}, parent_exit{}, parent_kernel{}, parent_user{};
+    FILETIME host_created{}, host_exit{}, host_kernel{}, host_user{};
+    if (!GetProcessTimes(h, &parent_created, &parent_exit, &parent_kernel, &parent_user) ||
+        !GetProcessTimes(GetCurrentProcess(), &host_created, &host_exit,
+                         &host_kernel, &host_user) ||
+        CompareFileTime(&parent_created, &host_created) > 0) {
+        CloseHandle(h);
+        return 0;
+    }
     WaitForSingleObject(h, INFINITE);
     CloseHandle(h);
     if (g.running.load()) ExitProcess(0);
@@ -1119,6 +1413,7 @@ LRESULT CALLBACK HostWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
+    pulse::crash::Initialize({pulse::crash::ProcessRole::Shell, false, {}});
     // IFileOperation creates its conflict/confirmation UI in this process.
     // Declare PMv2 before COM or any HWND exists so Windows does not bitmap-scale
     // those dialogs on high-DPI displays.
@@ -1134,10 +1429,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     if (FAILED(hr)) return 1;
 
     std::wstring pipe_name = PipeNameFor(ui_pid);
+    pulse::CurrentUserSecurityAttributes pipe_security;
+    if (!pipe_security) {
+        HostLog(L"Cannot create pipe security descriptor");
+        CoUninitialize();
+        return 2;
+    }
     g.pipe = CreateNamedPipeW(pipe_name.c_str(),
-        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
-        1, 64 * 1024, 64 * 1024, 0, nullptr);
+        1, 64 * 1024, 64 * 1024, 0, pipe_security.get());
     if (g.pipe == INVALID_HANDLE_VALUE) {
         HostLog(L"CreateNamedPipe failed");
         CoUninitialize();

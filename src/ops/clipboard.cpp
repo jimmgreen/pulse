@@ -141,6 +141,37 @@ bool ReadClipboard(ClipboardData& out) {
         }
     }
     CloseClipboard();
+    if (ok) out.sequence = GetClipboardSequenceNumber();
+    return ok;
+}
+
+bool CompleteCutClipboard(uint32_t sequence, const std::vector<std::wstring>& expected_paths) {
+    if (sequence == 0 || expected_paths.empty() || GetClipboardSequenceNumber() != sequence)
+        return false;
+    ClipboardData current;
+    if (!ReadClipboard(current) || !current.cut || current.sequence != sequence ||
+        current.paths.size() != expected_paths.size()) return false;
+    for (size_t i = 0; i < expected_paths.size(); ++i) {
+        if (_wcsicmp(current.paths[i].c_str(), expected_paths[i].c_str()) != 0) return false;
+    }
+    if (!OpenClipboardWithRetry(ClipboardOwner())) return false;
+    if (GetClipboardSequenceNumber() != sequence || !EmptyClipboard()) {
+        CloseClipboard();
+        return false;
+    }
+    const UINT format = RegisterClipboardFormatW(CFSTR_PERFORMEDDROPEFFECT);
+    HGLOBAL value = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, sizeof(DWORD));
+    bool ok = false;
+    if (format && value) {
+        auto* effect = static_cast<DWORD*>(GlobalLock(value));
+        if (effect) {
+            *effect = DROPEFFECT_MOVE;
+            GlobalUnlock(value);
+            ok = SetClipboardData(format, value) != nullptr;
+        }
+        if (!ok) GlobalFree(value);
+    }
+    CloseClipboard();
     return ok;
 }
 

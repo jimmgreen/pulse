@@ -19,7 +19,15 @@ using namespace pulse;
 
 namespace {
 
-const wchar_t* kRoot = L"C:\\Users\\SS\\Desktop\\pulse\\bench_data\\opstest";
+std::wstring SandboxRoot() {
+    std::vector<wchar_t> exe(32768);
+    const DWORD length = GetModuleFileNameW(nullptr, exe.data(),
+                                            static_cast<DWORD>(exe.size()));
+    if (length == 0 || length == exe.size()) return {};
+    const std::filesystem::path build_dir =
+        std::filesystem::path(std::wstring(exe.data(), length)).parent_path();
+    return (build_dir.parent_path() / L"bench_data" / L"opstest").wstring();
+}
 
 int g_pass = 0;
 int g_fail = 0;
@@ -155,8 +163,20 @@ int wmain() {
     setvbuf(stdout, nullptr, _IONBF, 0);
     fprintf(stderr, "[test] start\n");
 
+    Check(ops::TerminalCommandLine(L"C:\\A\\B") == L"-d \"C:\\A\\B\"",
+          L"terminal command quotes a directory");
+    Check(ops::TerminalCommandLine(L"C:\\") == L"-d \"C:\\\\\"",
+          L"terminal command preserves a drive root");
+    Check(ops::TerminalCommandLine(L"C:\\quoted\" folder\\") ==
+              L"-d \"C:\\quoted\\\" folder\\\\\"",
+          L"terminal command escapes quotes and trailing slashes");
+
     // --- Setup sandbox ------------------------------------------------------
-    std::wstring root = kRoot;
+    const std::wstring root = SandboxRoot();
+    if (root.empty()) {
+        fprintf(stderr, "[test] cannot locate bench_data/opstest\n");
+        return 2;
+    }
     std::wstring srcDir = root + L"\\src";
     std::wstring dstDir = root + L"\\dst";
     // Exact, workspace-contained sandbox path.
@@ -223,6 +243,7 @@ int wmain() {
             { (srcDir + L"\\same.txt").c_str() }, srcDir.c_str()));
         Check(Exists(srcDir + L"\\same.txt"), L"move into same folder is a no-op");
         Check(move_st.last_error.empty(), L"same-folder move reported no error");
+        Check(move_st.summary.empty(), L"same-folder move stays silent in status");
     }
 
     // --- 3. Move ------------------------------------------------------------
@@ -415,6 +436,29 @@ int wmain() {
         WaitOpDone(prev);
         Check(Exists(srcDir + L"\\d.txt") && !Exists(srcDir + L"\\d2.txt"),
               L"undo rename: d2.txt back to d.txt");
+
+        MakeFile(srcDir + L"\\batch-a.txt", payload, sizeof(payload) - 1);
+        MakeFile(srcDir + L"\\batch-b.txt", payload, sizeof(payload) - 1);
+        ops::OpRequest batch;
+        batch.type = ops::OpType::BatchRename;
+        batch.sources = { srcDir + L"\\batch-a.txt", srcDir + L"\\batch-b.txt" };
+        batch.new_names = { L"batch-a2.txt", L"batch-b2.txt" };
+        RunOp(std::move(batch));
+        Check(Exists(srcDir + L"\\batch-a2.txt") && Exists(srcDir + L"\\batch-b2.txt") &&
+              !Exists(srcDir + L"\\batch-a.txt") && !Exists(srcDir + L"\\batch-b.txt"),
+              L"batch-rename: two files renamed");
+        prev = g_ops.Status().completed_ops;
+        g_ops.Undo();
+        const auto undo_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (std::chrono::steady_clock::now() < undo_deadline) {
+            if (Exists(srcDir + L"\\batch-a.txt") && Exists(srcDir + L"\\batch-b.txt") &&
+                !Exists(srcDir + L"\\batch-a2.txt") && !Exists(srcDir + L"\\batch-b2.txt"))
+                break;
+            Sleep(10);
+        }
+        Check(Exists(srcDir + L"\\batch-a.txt") && Exists(srcDir + L"\\batch-b.txt") &&
+              !Exists(srcDir + L"\\batch-a2.txt") && !Exists(srcDir + L"\\batch-b2.txt"),
+              L"batch-rename: undo restores original names");
 
         // copy src\d.txt -> dst, then undo (deletes the copy, to recycle bin)
         RunOp(SimpleOp(ops::OpType::Copy, { (srcDir + L"\\d.txt").c_str() }, dstDir.c_str()));

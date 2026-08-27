@@ -10,14 +10,20 @@
 #include "index_protocol.h"
 #include "index_engine.h"
 #include "index_config.h"
+#include "../common/crash_reporter.h"
+#include "../common/diagnostics_exporter.h"
 #include "index_paths.h"
 #include "network_agent_host.h"
+#include "content_agent.h"
 #include <windows.h>
 #include <sddl.h>
 #include <shellapi.h>
 #include <winsvc.h>
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
+#include <cstdio>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -43,12 +49,25 @@ constexpr UINT WM_QUIT_HOST = WM_APP + 2;
 constexpr DWORD kServiceReloadControl = 128;
 constexpr UINT kIdleTimer = 1;
 constexpr UINT kIdleMs = 15000;
+constexpr DWORD kMaxClients = 16;
 
 struct Client {
-    HANDLE pipe = INVALID_HANDLE_VALUE;
+    std::atomic<HANDLE> pipe{INVALID_HANDLE_VALUE};
     std::mutex write_mu;
     std::atomic<bool> alive{true};
     std::atomic<uint32_t> latest_search{0};
+    std::atomic<bool> thread_done{false};
+};
+
+struct SearchTask {
+    std::shared_ptr<Client> client;
+    uint32_t id = 0;
+    Query query;
+};
+
+struct ClientWorker {
+    std::shared_ptr<Client> client;
+    std::thread thread;
 };
 
 struct Host {
@@ -58,31 +77,55 @@ struct Host {
     HANDLE stop = nullptr;
     HANDLE mutex = nullptr;
     std::atomic<bool> running{true};
-    std::atomic<uint32_t> active_queries{0};
     bool as_service = false;
     SERVICE_STATUS_HANDLE svc = nullptr;
     SERVICE_STATUS status{};
     std::mutex clients_mu;
     std::vector<std::shared_ptr<Client>> clients;
+    std::vector<ClientWorker> client_workers;
     std::thread accept_thread;
+    std::mutex search_mu;
+    std::condition_variable search_cv;
+    std::deque<SearchTask> search_queue;
+    std::thread search_thread;
     ULONGLONG idle_since = 0;
     bool ever_client = false;
+    bool test_mode = false;
+    std::wstring pipe_name = kPipeName;
+    std::wstring mutex_name = kMutexName;
 } g;
 
 void ServiceTrace(const wchar_t* text) {
     if (!g.as_service) return;
-    CreateDirectoryW(L"C:\\ProgramData\\Pulse", nullptr);
-    HANDLE file = CreateFileW(L"C:\\ProgramData\\Pulse\\index-service.log",
+    const std::wstring root = MachineDataRoot();
+    if (root.empty()) return;
+    const std::wstring path = root + L"\\index-service.log";
+    HANDLE file = CreateFileW(path.c_str(),
                               FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
                               nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return;
     SYSTEMTIME now{};
     GetLocalTime(&now);
-    wchar_t line[512]{};
-    swprintf_s(line, L"%04u-%02u-%02u %02u:%02u:%02u %s\r\n",
-               now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond, text);
+    char line[768]{};
+    const int prefix = sprintf_s(line, "%04u-%02u-%02u %02u:%02u:%02u ",
+                                 now.wYear, now.wMonth, now.wDay,
+                                 now.wHour, now.wMinute, now.wSecond);
+    if (prefix < 0) {
+        CloseHandle(file);
+        return;
+    }
+    const int body = WideCharToMultiByte(CP_UTF8, 0, text, -1,
+                                         line + prefix, static_cast<int>(sizeof(line) - prefix - 3),
+                                         nullptr, nullptr);
+    if (body <= 1) {
+        CloseHandle(file);
+        return;
+    }
+    const int len = prefix + body - 1;
+    line[len] = '\r';
+    line[len + 1] = '\n';
     DWORD bytes = 0;
-    WriteFile(file, line, static_cast<DWORD>(wcslen(line) * sizeof(wchar_t)), &bytes, nullptr);
+    WriteFile(file, line, static_cast<DWORD>(len + 2), &bytes, nullptr);
     FlushFileBuffers(file);
     CloseHandle(file);
 }
@@ -114,12 +157,13 @@ SECURITY_ATTRIBUTES* PipeSa() {
 
 bool WriteFrame(Client& c, uint32_t type, uint32_t id, const std::vector<uint8_t>& payload) {
     std::lock_guard<std::mutex> lock(c.write_mu);
-    if (c.pipe == INVALID_HANDLE_VALUE) return false;
+    const HANDLE pipe = c.pipe.load();
+    if (pipe == INVALID_HANDLE_VALUE) return false;
     auto hdr = MakeIndexHdr(type, id, static_cast<uint32_t>(payload.size()));
-    if (!PipeWrite(c.pipe, reinterpret_cast<const uint8_t*>(&hdr), sizeof(hdr)))
+    if (!PipeWrite(pipe, reinterpret_cast<const uint8_t*>(&hdr), sizeof(hdr)))
         return false;
     if (!payload.empty() &&
-        !PipeWrite(c.pipe, payload.data(), static_cast<DWORD>(payload.size())))
+        !PipeWrite(pipe, payload.data(), static_cast<DWORD>(payload.size())))
         return false;
     return true;
 }
@@ -134,8 +178,12 @@ std::vector<uint8_t> StatusPayload() {
 
 void BroadcastStatus() {
     auto payload = StatusPayload();
-    std::lock_guard<std::mutex> lock(g.clients_mu);
-    for (auto& c : g.clients) {
+    std::vector<std::shared_ptr<Client>> clients;
+    {
+        std::lock_guard<std::mutex> lock(g.clients_mu);
+        clients = g.clients;
+    }
+    for (auto& c : clients) {
         if (c && c->alive) WriteFrame(*c, RSP_IDX_STATUS, 0, payload);
     }
 }
@@ -190,13 +238,15 @@ std::vector<uint8_t> VolumesPayload() {
     return w.data();
 }
 
-Query ParseQuery(const uint8_t* p, size_t n) {
-    Query q;
+bool ParseQuery(const uint8_t* p, size_t n, Query& q) {
     PayloadReader r(p, n);
     uint32_t flags = 0, sort = 0, limit = 0, offset = 0;
     if (!r.GetU32(flags) || !r.GetU32(sort) || !r.GetU32(limit) || !r.GetU32(offset) ||
         !r.GetString(q.needle) || !r.GetString(q.path_prefix))
-        return q;
+        return false;
+    if (sort > static_cast<uint32_t>(ResultSort::Mtime) ||
+        q.needle.size() > 4096 || q.path_prefix.size() > 32768)
+        return false;
     q.rank = (flags & 1) != 0;
     q.folders_only = (flags & 2) != 0;
     q.sort_desc = (flags & 4) != 0;
@@ -204,7 +254,43 @@ Query ParseQuery(const uint8_t* p, size_t n) {
     q.limit = limit;
     q.offset = offset;
     if (q.limit > kSearchPageCap) q.limit = kSearchPageCap;
-    return q;
+    return true;
+}
+
+void QueueSearch(std::shared_ptr<Client> c, uint32_t id, Query query) {
+    std::lock_guard<std::mutex> lock(g.search_mu);
+    g.search_queue.erase(
+        std::remove_if(g.search_queue.begin(), g.search_queue.end(),
+            [&](const SearchTask& task) { return task.client == c; }),
+        g.search_queue.end());
+    g.search_queue.push_back(SearchTask{std::move(c), id, std::move(query)});
+    g.search_cv.notify_one();
+}
+
+void SearchThread() {
+    for (;;) {
+        SearchTask task;
+        {
+            std::unique_lock<std::mutex> lock(g.search_mu);
+            g.search_cv.wait(lock, [] { return !g.running || !g.search_queue.empty(); });
+            if (!g.running) {
+                g.search_queue.clear();
+                return;
+            }
+            task = std::move(g.search_queue.front());
+            g.search_queue.pop_front();
+        }
+        auto& c = task.client;
+        if (!c || !c->alive || c->latest_search.load() != task.id) continue;
+        SearchResult sr = g.engine.Search(task.query, &c->latest_search, task.id);
+        if (!c->alive || c->latest_search.load() != task.id) continue;
+        auto out = SearchPayload(sr);
+        if (out.size() > kIndexMaxPayload) {
+            sr.hits.clear();
+            out = SearchPayload(sr);
+        }
+        WriteFrame(*c, RSP_IDX_SEARCH, task.id, out);
+    }
 }
 
 void DropClient(const std::shared_ptr<Client>& c) {
@@ -213,10 +299,10 @@ void DropClient(const std::shared_ptr<Client>& c) {
     ++c->latest_search;
     {
         std::lock_guard<std::mutex> lock(c->write_mu);
-        if (c->pipe != INVALID_HANDLE_VALUE) {
-            CancelIoEx(c->pipe, nullptr);
-            CloseHandle(c->pipe);
-            c->pipe = INVALID_HANDLE_VALUE;
+        const HANDLE pipe = c->pipe.exchange(INVALID_HANDLE_VALUE);
+        if (pipe != INVALID_HANDLE_VALUE) {
+            CancelIoEx(pipe, nullptr);
+            CloseHandle(pipe);
         }
     }
     std::lock_guard<std::mutex> lock(g.clients_mu);
@@ -228,11 +314,14 @@ void ClientThread(std::shared_ptr<Client> c) {
     while (g.running && c->alive) {
         MsgHeader hdr{};
         std::vector<uint8_t> payload;
-        if (!PipeRead(c->pipe, reinterpret_cast<uint8_t*>(&hdr), sizeof(hdr))) break;
-        if (hdr.magic != kIndexMagic || hdr.payload_size > kIndexMaxPayload) break;
+        const HANDLE pipe = c->pipe.load();
+        if (pipe == INVALID_HANDLE_VALUE ||
+            !PipeRead(pipe, reinterpret_cast<uint8_t*>(&hdr), sizeof(hdr)))
+            break;
+        if (hdr.magic != kIndexMagic || hdr.payload_size > kIndexMaxRequestPayload) break;
         payload.resize(hdr.payload_size);
         if (hdr.payload_size &&
-            !PipeRead(c->pipe, payload.data(), hdr.payload_size))
+            !PipeRead(pipe, payload.data(), hdr.payload_size))
             break;
         if (hdr.type == REQ_IDX_STATUS) {
             WriteFrame(*c, RSP_IDX_STATUS, hdr.request_id, StatusPayload());
@@ -241,44 +330,61 @@ void ClientThread(std::shared_ptr<Client> c) {
         } else if (hdr.type == REQ_IDX_SEARCH) {
             const uint32_t id = hdr.request_id;
             c->latest_search.store(id);
-            Query query = ParseQuery(payload.data(), payload.size());
-            ++g.active_queries;
-            std::thread([c, id, query = std::move(query)] {
-                SearchResult sr = g.engine.Search(query, &c->latest_search, id);
-                if (c->alive && c->latest_search.load() == id) {
-                    auto out = SearchPayload(sr);
-                    if (out.size() > kIndexMaxPayload) {
-                        sr.hits.clear();
-                        out = SearchPayload(sr);
-                    }
-                    WriteFrame(*c, RSP_IDX_SEARCH, id, out);
-                }
-                --g.active_queries;
-            }).detach();
+            Query query;
+            if (!ParseQuery(payload.data(), payload.size(), query)) break;
+            QueueSearch(c, id, std::move(query));
+        } else if (hdr.type == REQ_IDX_TEST_SHUTDOWN && g.test_mode) {
+            PostMessageW(g.hwnd, WM_QUIT_HOST, 0, 0);
+            break;
         }
     }
     DropClient(c);
+    c->thread_done = true;
+}
+
+void ReapClientWorkers() {
+    for (auto it = g.client_workers.begin(); it != g.client_workers.end();) {
+        if (!it->client->thread_done) {
+            ++it;
+            continue;
+        }
+        if (it->thread.joinable()) it->thread.join();
+        it = g.client_workers.erase(it);
+    }
 }
 
 void AcceptLoop() {
     bool first = true;
+    int first_failures = 0;
     while (g.running && (!g.stop || WaitForSingleObject(g.stop, 0) != WAIT_OBJECT_0)) {
         DWORD flags = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED;
         if (first) flags |= FILE_FLAG_FIRST_PIPE_INSTANCE;
         HANDLE h = CreateNamedPipeW(
-            kPipeName, flags,
-            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-            PIPE_UNLIMITED_INSTANCES, 64 * 1024, 64 * 1024, 0, PipeSa());
+            g.pipe_name.c_str(), flags,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            kMaxClients, 64 * 1024, 64 * 1024, 0, PipeSa());
         if (h == INVALID_HANDLE_VALUE) {
             if (first) {
+                // A leftover user-mode helper may still own the pipe after an
+                // upgrade. Service hosts retry briefly instead of exiting; the
+                // UI helper still yields immediately.
+                ++first_failures;
+                if (g.as_service && first_failures < 40) {
+                    ServiceTrace(L"pipe first-instance busy, retrying");
+                    Sleep(250);
+                    if (g.stop && WaitForSingleObject(g.stop, 0) == WAIT_OBJECT_0) break;
+                    continue;
+                }
+                ServiceTrace(L"pipe first-instance unavailable, quitting");
                 if (g.hwnd) PostMessageW(g.hwnd, WM_QUIT_HOST, 0, 0);
-                break; // another instance already owns the pipe
+                break;
             }
             Sleep(200);
             if (g.stop && WaitForSingleObject(g.stop, 0) == WAIT_OBJECT_0) break;
             continue;
         }
         first = false;
+        first_failures = 0;
         g.listen = h;
         OVERLAPPED ol{};
         ol.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -301,15 +407,26 @@ void AcceptLoop() {
             CloseHandle(h);
             break;
         }
+        ReapClientWorkers();
         auto c = std::make_shared<Client>();
-        c->pipe = h;
+        c->pipe.store(h);
+        bool accepted = false;
         {
             std::lock_guard<std::mutex> lock(g.clients_mu);
-            g.clients.push_back(c);
-            g.idle_since = 0;
-            g.ever_client = true;
+            if (g.clients.size() < kMaxClients) {
+                g.clients.push_back(c);
+                g.idle_since = 0;
+                g.ever_client = true;
+                accepted = true;
+            }
         }
-        std::thread(ClientThread, c).detach();
+        if (!accepted) {
+            CloseHandle(h);
+            c->pipe = INVALID_HANDLE_VALUE;
+            g.listen = INVALID_HANDLE_VALUE;
+            continue;
+        }
+        g.client_workers.push_back(ClientWorker{c, std::thread(ClientThread, c)});
         WriteFrame(*c, RSP_IDX_STATUS, 0, StatusPayload());
         g.listen = INVALID_HANDLE_VALUE;
     }
@@ -350,15 +467,24 @@ HWND CreateMsgWindow() {
                            HWND_MESSAGE, nullptr, wc.hInstance, nullptr);
 }
 
-int RunHost(bool as_service) {
+int RunHost(bool as_service, bool test_mode = false,
+            std::wstring pipe_name = kPipeName,
+            std::wstring mutex_name = kMutexName) {
     g.as_service = as_service;
+    g.test_mode = test_mode;
+    g.pipe_name = std::move(pipe_name);
+    g.mutex_name = std::move(mutex_name);
     ServiceTrace(L"RunHost entered");
     SetMachineIndexScope(as_service);
+    if (as_service) {
+        (void)MachineDataRoot();
+        (void)MachineIndexRoot();
+    }
     g.running = true;
     g.idle_since = GetTickCount64();
 
     if (!as_service) {
-        g.mutex = CreateMutexW(nullptr, TRUE, kMutexName);
+        g.mutex = CreateMutexW(nullptr, TRUE, g.mutex_name.c_str());
         if (!g.mutex) return 1;
         if (GetLastError() == ERROR_ALREADY_EXISTS) {
             CloseHandle(g.mutex);
@@ -377,9 +503,18 @@ int RunHost(bool as_service) {
     g.stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (as_service) SetSvc(SERVICE_RUNNING);
     ServiceTrace(L"service running reported");
-    g.engine.Start(g.hwnd, WM_ENGINE_NOTIFY);
+    if (g.test_mode) {
+        for (uint32_t i = 0; i < 50000; ++i) {
+            const std::wstring name = L"stress-item-" + std::to_wstring(i) + L".txt";
+            g.engine.AddForTest(L"C:\\PulseIndexStress\\" + name, name, false,
+                                i * 17ull, i);
+        }
+    } else {
+        g.engine.Start(g.hwnd, WM_ENGINE_NOTIFY);
+    }
     ServiceTrace(L"engine thread started");
     SetTimer(g.hwnd, kIdleTimer, 1000, nullptr);
+    g.search_thread = std::thread(SearchThread);
     g.accept_thread = std::thread(AcceptLoop);
     ServiceTrace(L"accept thread started");
 
@@ -388,6 +523,7 @@ int RunHost(bool as_service) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+    ServiceTrace(L"message loop exited");
 
     g.running = false;
     if (g.stop) SetEvent(g.stop);
@@ -401,12 +537,18 @@ int RunHost(bool as_service) {
         for (auto& c : g.clients) {
             if (!c) continue;
             c->alive = false;
-            if (c->pipe != INVALID_HANDLE_VALUE) CancelIoEx(c->pipe, nullptr);
+            ++c->latest_search;
+            const HANDLE pipe = c->pipe.load();
+            if (pipe != INVALID_HANDLE_VALUE) CancelIoEx(pipe, nullptr);
         }
     }
+    g.search_cv.notify_all();
     if (g.accept_thread.joinable()) g.accept_thread.join();
-    for (int i = 0; i < 100 && g.active_queries.load() != 0; ++i) Sleep(50);
-    g.engine.Stop();
+    for (auto& worker : g.client_workers)
+        if (worker.thread.joinable()) worker.thread.join();
+    g.client_workers.clear();
+    if (g.search_thread.joinable()) g.search_thread.join();
+    if (!g.test_mode) g.engine.Stop();
     if (g.mutex) {
         ReleaseMutex(g.mutex);
         CloseHandle(g.mutex);
@@ -446,6 +588,10 @@ std::wstring SelfPath() {
 
 int InstallService() {
     SetMachineIndexScope(true);
+    // Repair ProgramData ACLs on every install so older SY/BA-only trees become
+    // readable again for interactive admins and Authenticated Users.
+    (void)MachineDataRoot();
+    (void)MachineIndexRoot();
     IndexConfig config;
     LoadMachineConfig(config, nullptr);
     SaveMachineConfig(config, nullptr);
@@ -457,7 +603,8 @@ int InstallService() {
         if (!scm) return static_cast<int>(GetLastError());
 
         SC_HANDLE svc = OpenServiceW(scm, kServiceName,
-                                     SERVICE_START | SERVICE_STOP | SERVICE_CHANGE_CONFIG);
+                                     SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS |
+                                         SERVICE_CHANGE_CONFIG);
         if (!svc) {
             svc = CreateServiceW(scm, kServiceName, L"Pulse Index",
                                  SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS,
@@ -480,11 +627,64 @@ int InstallService() {
         desc.lpDescription = text;
         ChangeServiceConfig2W(svc, SERVICE_CONFIG_DESCRIPTION, &desc);
 
+        SERVICE_STATUS_PROCESS ssp{};
+        DWORD needed = 0;
+        if (QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO, reinterpret_cast<LPBYTE>(&ssp),
+                                 sizeof(ssp), &needed) &&
+            ssp.dwCurrentState != SERVICE_STOPPED &&
+            ssp.dwCurrentState != SERVICE_STOP_PENDING) {
+            SERVICE_STATUS stop_status{};
+            ControlService(svc, SERVICE_CONTROL_STOP, &stop_status);
+            for (int i = 0; i < 40; ++i) {
+                Sleep(250);
+                if (!QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO,
+                                          reinterpret_cast<LPBYTE>(&ssp), sizeof(ssp),
+                                          &needed) ||
+                    ssp.dwCurrentState == SERVICE_STOPPED) break;
+            }
+        }
+
         const BOOL started = StartServiceW(svc, 0, nullptr);
         last_err = started ? 0 : GetLastError();
+        if (last_err == ERROR_SERVICE_ALREADY_RUNNING) last_err = 0;
+        if (last_err == 0) {
+            // Wait until RUNNING, then confirm it stays up past the early
+            // crash window (corrupt delta replay previously died ~2s in).
+            bool running = false;
+            for (int i = 0; i < 80; ++i) {
+                if (!QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO,
+                                          reinterpret_cast<LPBYTE>(&ssp), sizeof(ssp),
+                                          &needed)) break;
+                if (ssp.dwCurrentState == SERVICE_RUNNING) {
+                    running = true;
+                    break;
+                }
+                if (ssp.dwCurrentState == SERVICE_STOPPED) {
+                    last_err = ssp.dwWin32ExitCode ? ssp.dwWin32ExitCode
+                                                   : ERROR_SERVICE_NOT_ACTIVE;
+                    break;
+                }
+                Sleep(100);
+            }
+            if (running) {
+                Sleep(3500);
+                if (QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO,
+                                         reinterpret_cast<LPBYTE>(&ssp), sizeof(ssp),
+                                         &needed) &&
+                    ssp.dwCurrentState == SERVICE_RUNNING) {
+                    CloseServiceHandle(svc);
+                    CloseServiceHandle(scm);
+                    return 0;
+                }
+                last_err = (ssp.dwCurrentState == SERVICE_STOPPED && ssp.dwWin32ExitCode)
+                    ? ssp.dwWin32ExitCode
+                    : ERROR_SERVICE_NOT_ACTIVE;
+            } else if (last_err == 0) {
+                last_err = ERROR_SERVICE_REQUEST_TIMEOUT;
+            }
+        }
         CloseServiceHandle(svc);
         CloseServiceHandle(scm);
-        if (started || last_err == ERROR_SERVICE_ALREADY_RUNNING) return 0;
         if (last_err != ERROR_SERVICE_MARKED_FOR_DELETE) break;
         Sleep(250);
     }
@@ -543,10 +743,22 @@ int ConfigureCommand(const std::vector<std::wstring>& args) {
     return 0;
 }
 
+int ExportDiagnosticsCommand(const std::vector<std::wstring>& args) {
+    if (args.size() != 3) return ERROR_INVALID_PARAMETER;
+    if (!IsElevated()) return ERROR_ELEVATION_REQUIRED;
+    pulse::diagnostics::ExportOptions options;
+    options.source_root = MachineDataRoot();
+    options.destination = args[2];
+    options.include_dumps = true;
+    options.require_empty_destination = true;
+    std::wstring error;
+    return pulse::diagnostics::Export(options, &error) ? 0 : ERROR_WRITE_FAULT;
+}
+
 int UninstallService() {
     SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
     if (!scm) return static_cast<int>(GetLastError());
-    SC_HANDLE svc = OpenServiceW(scm, kServiceName, SERVICE_STOP | DELETE);
+    SC_HANDLE svc = OpenServiceW(scm, kServiceName, SERVICE_STOP | DELETE | SERVICE_QUERY_STATUS);
     if (!svc) {
         const DWORD err = GetLastError();
         CloseServiceHandle(scm);
@@ -554,10 +766,28 @@ int UninstallService() {
     }
     SERVICE_STATUS st{};
     ControlService(svc, SERVICE_CONTROL_STOP, &st);
+    for (int i = 0; i < 40; ++i) {
+        SERVICE_STATUS_PROCESS ssp{};
+        DWORD needed = 0;
+        if (!QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO,
+                                  reinterpret_cast<LPBYTE>(&ssp), sizeof(ssp), &needed) ||
+            ssp.dwCurrentState == SERVICE_STOPPED) break;
+        Sleep(250);
+    }
     DeleteService(svc);
     CloseServiceHandle(svc);
+    // SCM keeps the name until the last handle/process releases it.
+    for (int i = 0; i < 40; ++i) {
+        SC_HANDLE check = OpenServiceW(scm, kServiceName, SERVICE_QUERY_STATUS);
+        if (!check) {
+            CloseServiceHandle(scm);
+            return 0;
+        }
+        CloseServiceHandle(check);
+        Sleep(250);
+    }
     CloseServiceHandle(scm);
-    return 0;
+    return static_cast<int>(ERROR_SERVICE_MARKED_FOR_DELETE);
 }
 
 } // namespace
@@ -573,8 +803,16 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     std::wstring a1 = args.size() >= 2 ? args[1] : L"";
     if (argv) LocalFree(argv);
 
+    const bool service_mode = a1 == L"--service";
+    const auto role = service_mode ? pulse::crash::ProcessRole::IndexService
+        : a1 == L"--network-agent" ? pulse::crash::ProcessRole::NetworkAgent
+        : a1 == L"--content-agent" ? pulse::crash::ProcessRole::ContentAgent
+        : pulse::crash::ProcessRole::IndexHelper;
+    pulse::crash::Initialize({role, service_mode, {}});
+
     if (a1 == L"--install") return InstallService();
     if (a1 == L"--uninstall") return UninstallService();
+    if (a1 == L"--export-diagnostics") return ExportDiagnosticsCommand(args);
     if (a1 == L"--configure-volume" || a1 == L"--set-index-path" ||
         a1 == L"--configure-exclude" ||
         a1 == L"--rebuild-index") return ConfigureCommand(args);
@@ -587,5 +825,18 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         return 0;
     }
     if (a1 == L"--network-agent") return RunNetworkAgent();
+    if (a1 == L"--content-agent" && args.size() == 3) return RunContentAgent(args[2]);
+    if (a1 == L"--test-host" && args.size() >= 3) {
+        const std::wstring& token = args[2];
+        const bool valid = !token.empty() && token.size() <= 64 &&
+            std::all_of(token.begin(), token.end(), [](wchar_t c) {
+                return (c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'z') ||
+                       (c >= L'A' && c <= L'Z') || c == L'-' || c == L'_';
+            });
+        if (!valid) return ERROR_INVALID_PARAMETER;
+        return RunHost(false, true,
+            L"\\\\.\\pipe\\PulseIndex.Test." + token,
+            L"Local\\Pulse.Index.Test." + token);
+    }
     return RunHost(false);
 }

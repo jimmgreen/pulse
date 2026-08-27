@@ -1,5 +1,8 @@
 // ui_compositor.cpp
 #include "ui_compositor.h"
+#include "../common/localization.h"
+#include "lumatext_renderer.h"
+#include "typography.h"
 #include <commctrl.h>
 #include <prsht.h>
 #include <shellscalingapi.h>
@@ -12,8 +15,14 @@ namespace pulse::ui {
 Compositor::Compositor() = default;
 Compositor::~Compositor() { Shutdown(); }
 
+bool Compositor::IsDeviceLost(HRESULT hr) {
+    return hr == D2DERR_RECREATE_TARGET || hr == DXGI_ERROR_DEVICE_REMOVED ||
+           hr == DXGI_ERROR_DEVICE_RESET || hr == DXGI_ERROR_DRIVER_INTERNAL_ERROR;
+}
+
 bool Compositor::Init(HWND hwnd) {
     hwnd_ = hwnd;
+    device_lost_ = false;
     if (!InitD3D()) return false;
     RECT rc;
     GetClientRect(hwnd_, &rc);
@@ -26,6 +35,7 @@ bool Compositor::Init(HWND hwnd) {
 
 void Compositor::Shutdown() {
     if (!dc_.get() && !d3dDevice_.get()) return; // already shut down
+    if (lumaText_) lumaText_->Shutdown();
     targetBitmap_.reset();
     if (dc_.get()) dc_->SetTarget(nullptr);
     if (compositionTarget_.get()) compositionTarget_->SetRoot(nullptr);
@@ -41,7 +51,8 @@ void Compositor::Shutdown() {
     d3dDevice_.reset();
     dwriteFactory_.reset();
     textRenderingParams_.reset();
-    ClearCjkFallbackCache();
+    text_params_monitor_ = nullptr;
+    typography::InvalidateCaches();
     textFormat_.reset();
     smallFormat_.reset();
     headerFormat_.reset();
@@ -50,6 +61,7 @@ void Compositor::Shutdown() {
     iconFormat_.reset();
     transparentComposition_ = false;
     hwnd_ = nullptr;
+    device_lost_ = false;
 }
 
 bool Compositor::InitD3D() {
@@ -92,28 +104,65 @@ bool Compositor::InitD3D() {
         reinterpret_cast<IUnknown**>(&dwriteFactory_));
     if (FAILED(hr)) return false;
 
-    ComPtr<IDWriteRenderingParams> base;
-    dwriteFactory_->CreateRenderingParams(&base);
-    if (base.get()) {
-        ComPtr<IDWriteRenderingParams3> custom;
-        dwriteFactory_->CreateCustomRenderingParams(
-            base->GetGamma(),
-            base->GetEnhancedContrast(),
-            1.0f,
-            base->GetClearTypeLevel(),
-            base->GetPixelGeometry(),
-            DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC,
-            DWRITE_GRID_FIT_MODE_DEFAULT,
-            &custom);
-        if (custom.get()) {
-            textRenderingParams_.reset();
-            textRenderingParams_.p = custom.p;
-            custom.p = nullptr;
-            dc_->SetTextRenderingParams(textRenderingParams_.get());
-        }
-    }
+    UpdateTextRenderingParams(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST));
+    if (!lumaText_) lumaText_ = std::make_unique<LumaTextRenderer>();
+    lumaText_->Init(dwriteFactory_.get(), dc_.get());
 
     return true;
+}
+
+bool Compositor::DrawLumaText(std::wstring_view text, IDWriteTextFormat* format,
+                              const D2D1_RECT_F& bounds,
+                              const D2D1_COLOR_F& foreground,
+                              const D2D1_COLOR_F& background,
+                              DWRITE_TEXT_ALIGNMENT alignment) {
+    if (!lumaText_ || !lumaText_->Enabled()) return false;
+    if (lumaText_->Draw(text, format, bounds, foreground, background, alignment)) {
+        return true;
+    }
+    lumaText_->RecordFallback();
+    return false;
+}
+
+bool Compositor::MeasureLumaText(std::wstring_view text, IDWriteTextFormat* format,
+                                 float& width, float* height) {
+    if (!lumaText_ || !lumaText_->Enabled()) return false;
+    return lumaText_->Measure(text, format, width, height);
+}
+
+bool Compositor::PaintLumaEdit(HWND hwnd, HDC hdc, IDWriteTextFormat* format,
+                               const D2D1_COLOR_F& foreground,
+                               const D2D1_COLOR_F& background) {
+    if (!lumaText_ || !lumaText_->Enabled()) return false;
+    return lumaText_->PaintEdit(hwnd, hdc, format, foreground, background);
+}
+
+bool Compositor::PresentLumaEdit(HWND hwnd, IDWriteTextFormat* format,
+                                 const D2D1_COLOR_F& foreground,
+                                 const D2D1_COLOR_F& background) {
+    if (!hwnd) return false;
+    const bool ok = PaintLumaEdit(hwnd, nullptr, format, foreground, background);
+    ValidateRect(hwnd, nullptr);
+    return ok;
+}
+
+LRESULT Compositor::CallLumaEditMouse(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                      IDWriteTextFormat* format) {
+    if (lumaText_ && lumaText_->Enabled())
+        return lumaText_->CallEditDefaultMouse(hwnd, msg, wParam, lParam, format);
+    SendMessageW(hwnd, WM_SETREDRAW, FALSE, 0);
+    const LRESULT result = DefSubclassProc(hwnd, msg, wParam, lParam);
+    SendMessageW(hwnd, WM_SETREDRAW, TRUE, 0);
+    HideCaret(hwnd);
+    return result;
+}
+
+bool Compositor::LumaTextEnabled() const noexcept {
+    return lumaText_ && lumaText_->Enabled();
+}
+
+const LumaTextStats* Compositor::GetLumaTextStats() const noexcept {
+    return lumaText_ ? &lumaText_->Stats() : nullptr;
 }
 
 bool Compositor::CreateSwapChain() {
@@ -169,10 +218,17 @@ void Compositor::ResizeSwapChain() {
     dc_->SetTarget(nullptr);
     HRESULT hr = swapChain_->ResizeBuffers(0, (UINT)width_, (UINT)height_,
         DXGI_FORMAT_UNKNOWN, 0);
-    if (FAILED(hr)) return;
+    if (FAILED(hr)) {
+        if (IsDeviceLost(hr)) NotifyDeviceLost(hr);
+        return;
+    }
 
     ComPtr<IDXGISurface> surface;
-    swapChain_->GetBuffer(0, IID_PPV_ARGS(&surface));
+    hr = swapChain_->GetBuffer(0, IID_PPV_ARGS(&surface));
+    if (FAILED(hr)) {
+        if (IsDeviceLost(hr)) NotifyDeviceLost(hr);
+        return;
+    }
     // Layout, hit-testing, and text formats already apply the window scale.
     // Keep the D2D target at 96 DPI so per-monitor scaling happens exactly once.
     // Using the monitor DPI here as well produced scale^2 sizing and clipped
@@ -182,7 +238,11 @@ void Compositor::ResizeSwapChain() {
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM,
             transparentComposition_ ? D2D1_ALPHA_MODE_PREMULTIPLIED : D2D1_ALPHA_MODE_IGNORE),
         96.0f, 96.0f);
-    dc_->CreateBitmapFromDxgiSurface(surface.get(), &props, &targetBitmap_);
+    hr = dc_->CreateBitmapFromDxgiSurface(surface.get(), &props, &targetBitmap_);
+    if (FAILED(hr)) {
+        if (IsDeviceLost(hr)) NotifyDeviceLost(hr);
+        return;
+    }
     dc_->SetTarget(targetBitmap_.get());
 }
 
@@ -192,9 +252,57 @@ void Compositor::Resize(int width, int height) {
     if (swapChain_.get()) ResizeSwapChain();
 }
 
+bool Compositor::UpdateTextRenderingParams(HMONITOR monitor) {
+    if (!dwriteFactory_.get() || !dc_.get()) return false;
+    if (!monitor && hwnd_) monitor = MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST);
+    if (textRenderingParams_.get() && monitor == text_params_monitor_) return true;
+
+    ComPtr<IDWriteRenderingParams3> next;
+    if (FAILED(typography::CreateRenderingParams(dwriteFactory_.get(), monitor, &next)) ||
+        !next.get()) {
+        return false;
+    }
+    const bool monitor_changed = text_params_monitor_ && text_params_monitor_ != monitor;
+    textRenderingParams_ = std::move(next);
+    text_params_monitor_ = monitor;
+    dc_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+    dc_->SetTextRenderingParams(textRenderingParams_.get());
+    if (monitor_changed && hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+    return true;
+}
+
 void Compositor::Present() {
-    if (swapChain_.get()) swapChain_->Present(1, 0);
-    if (compositionDevice_.get()) compositionDevice_->Commit();
+    if (device_lost_) return;
+    if (hwnd_) UpdateTextRenderingParams(
+        MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST));
+    HRESULT hr = S_OK;
+    if (swapChain_.get()) hr = swapChain_->Present(1, 0);
+    if (FAILED(hr)) {
+        if (IsDeviceLost(hr)) NotifyDeviceLost(hr);
+        return;
+    }
+    if (compositionDevice_.get()) {
+        hr = compositionDevice_->Commit();
+        if (FAILED(hr) && IsDeviceLost(hr)) NotifyDeviceLost(hr);
+    }
+}
+
+void Compositor::NotifyDeviceLost(HRESULT) {
+    if (device_lost_) return;
+    device_lost_ = true;
+    if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+bool Compositor::Recover() {
+    if (!device_lost_) return true;
+    const HWND hwnd = hwnd_;
+    if (!hwnd) return false;
+    Shutdown();
+    if (!Init(hwnd)) {
+        device_lost_ = true;
+        return false;
+    }
+    return true;
 }
 
 bool Compositor::SaveSnapshot(const wchar_t* path) {
@@ -266,126 +374,46 @@ bool Compositor::SaveSnapshot(const wchar_t* path) {
 }
 
 static void CreateFormat(IDWriteFactory3* factory, float size, DWRITE_FONT_WEIGHT weight,
-                         const wchar_t* name, ComPtr<IDWriteTextFormat>& fmt) {
+                         typography::FontRole role, ComPtr<IDWriteTextFormat>& fmt) {
     if (!factory) return;
-    factory->CreateTextFormat(name, nullptr, weight,
-        DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size,
-        Compositor::UiLocaleName(), &fmt);
-    if (!fmt.get()) {
-        factory->CreateTextFormat(L"Microsoft YaHei UI", nullptr, weight,
-            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size,
-            Compositor::UiLocaleName(), &fmt);
-    }
-    if (!fmt.get()) {
-        factory->CreateTextFormat(L"Segoe UI", nullptr, weight,
-            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size,
-            Compositor::UiLocaleName(), &fmt);
-    }
+    typography::CreateTextFormat(factory, {role, size, weight}, &fmt);
     if (fmt.get()) {
         fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
         fmt->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         DWRITE_TRIMMING trimming{ DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0 };
         fmt->SetTrimming(&trimming, nullptr);
-        Compositor::ApplyCjkFallback(factory, fmt.get());
     }
-}
-
-namespace {
-
-struct CjkFallbackCache {
-    IDWriteFactory3* factory = nullptr;
-    ComPtr<IDWriteFontFallback> fallback;
-};
-
-CjkFallbackCache g_cjkFallback;
-
-bool BuildCjkFallback(IDWriteFactory3* factory, ComPtr<IDWriteFontFallback>& out) {
-    if (!factory) return false;
-    ComPtr<IDWriteFontFallbackBuilder> builder;
-    if (FAILED(factory->CreateFontFallbackBuilder(&builder)) || !builder.get()) {
-        return false;
-    }
-    const DWRITE_UNICODE_RANGE cjk[] = {
-        { 0x2E80, 0x303F },
-        { 0x3400, 0x4DBF },
-        { 0x4E00, 0x9FFF },
-        { 0xF900, 0xFAFF },
-        { 0xFF00, 0xFFEF },
-        { 0x20000, 0x2FA1F },
-    };
-    const wchar_t* families[] = { L"Microsoft YaHei UI", L"Microsoft YaHei" };
-    builder->AddMapping(cjk, ARRAYSIZE(cjk), families, ARRAYSIZE(families),
-                        nullptr, L"zh-CN");
-    ComPtr<IDWriteFontFallback> systemFallback;
-    factory->GetSystemFontFallback(&systemFallback);
-    if (systemFallback.get()) {
-        builder->AddMappings(systemFallback.get());
-    }
-    return SUCCEEDED(builder->CreateFontFallback(&out)) && out.get() != nullptr;
-}
-
-} // namespace
-
-const wchar_t* Compositor::UiLocaleName() {
-    static wchar_t locale[LOCALE_NAME_MAX_LENGTH] = L"zh-CN";
-    static bool initialized = false;
-    if (!initialized) {
-        if (GetUserDefaultLocaleName(locale, LOCALE_NAME_MAX_LENGTH) <= 0) {
-            wcscpy_s(locale, L"zh-CN");
-        }
-        initialized = true;
-    }
-    return locale;
-}
-
-void Compositor::ApplyCjkFallback(IDWriteFactory3* factory, IDWriteTextFormat* format) {
-    if (!factory || !format) return;
-    if (g_cjkFallback.factory != factory || !g_cjkFallback.fallback.get()) {
-        g_cjkFallback.fallback.reset();
-        g_cjkFallback.factory = factory;
-        BuildCjkFallback(factory, g_cjkFallback.fallback);
-    }
-    if (!g_cjkFallback.fallback.get()) return;
-    ComPtr<IDWriteTextFormat1> format1;
-    format->QueryInterface(&format1);
-    if (format1.get()) {
-        format1->SetFontFallback(g_cjkFallback.fallback.get());
-    }
-}
-
-void Compositor::ClearCjkFallbackCache() {
-    g_cjkFallback.factory = nullptr;
-    g_cjkFallback.fallback.reset();
 }
 
 void Compositor::RecreateTextFormats(float scale) {
+    UpdateTextRenderingParams(hwnd_
+        ? MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST) : nullptr);
     textFormat_.reset();
     smallFormat_.reset();
     headerFormat_.reset();
     tabFormat_.reset();
     addressFormat_.reset();
     iconFormat_.reset();
-    const wchar_t* textFont = L"Segoe UI Variable Text";
-    CreateFormat(dwriteFactory_.get(), 14.0f * scale, DWRITE_FONT_WEIGHT_NORMAL, textFont, textFormat_);
+    CreateFormat(dwriteFactory_.get(), 14.0f * scale, DWRITE_FONT_WEIGHT_NORMAL,
+        typography::FontRole::Text, textFormat_);
     if (textFormat_.get()) textFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-    CreateFormat(dwriteFactory_.get(), 12.0f * scale, DWRITE_FONT_WEIGHT_NORMAL, textFont, smallFormat_);
+    CreateFormat(dwriteFactory_.get(), 12.0f * scale, DWRITE_FONT_WEIGHT_NORMAL,
+        typography::FontRole::Text, smallFormat_);
     if (smallFormat_.get()) smallFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
     CreateFormat(dwriteFactory_.get(), 14.0f * scale, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-        L"Segoe UI Variable Display", headerFormat_);
-    CreateFormat(dwriteFactory_.get(), 13.0f * scale, DWRITE_FONT_WEIGHT_NORMAL, textFont, tabFormat_);
+        typography::FontRole::Display, headerFormat_);
+    CreateFormat(dwriteFactory_.get(), 13.0f * scale, DWRITE_FONT_WEIGHT_NORMAL,
+        typography::FontRole::Text, tabFormat_);
     if (tabFormat_.get()) {
         tabFormat_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         tabFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     }
-    CreateFormat(dwriteFactory_.get(), 14.0f * scale, DWRITE_FONT_WEIGHT_NORMAL, textFont, addressFormat_);
+    CreateFormat(dwriteFactory_.get(), 14.0f * scale, DWRITE_FONT_WEIGHT_NORMAL,
+        typography::FontRole::Text, addressFormat_);
 
     // Icon font for Fluent glyphs.
-    const wchar_t* iconFonts[] = { L"Segoe Fluent Icons", L"Segoe MDL2 Assets", L"Segoe UI" };
-    for (const wchar_t* iconFont : iconFonts) {
-        dwriteFactory_->CreateTextFormat(iconFont, nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 16.0f * scale, L"en-us", &iconFormat_);
-        if (iconFormat_.get()) break;
-    }
+    typography::CreateTextFormat(dwriteFactory_.get(),
+        {typography::FontRole::Icon, 16.0f * scale}, &iconFormat_);
     if (iconFormat_.get()) {
         iconFormat_->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         iconFormat_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);

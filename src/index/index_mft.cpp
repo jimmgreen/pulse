@@ -3,6 +3,7 @@
 #include <winioctl.h>
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 namespace pulse::index {
@@ -56,6 +57,7 @@ struct AttrNonResident {
 #pragma pack(pop)
 
 bool ReadAt(HANDLE h, uint64_t off, void* buf, DWORD len) {
+    if (off > static_cast<uint64_t>((std::numeric_limits<LONGLONG>::max)())) return false;
     LARGE_INTEGER li;
     li.QuadPart = static_cast<LONGLONG>(off);
     if (!SetFilePointerEx(h, li, nullptr, FILE_BEGIN)) return false;
@@ -66,8 +68,20 @@ bool ReadAt(HANDLE h, uint64_t off, void* buf, DWORD len) {
 int64_t ReadLe(const BYTE* p, int n, bool sign) {
     uint64_t v = 0;
     for (int i = 0; i < n; ++i) v |= static_cast<uint64_t>(p[i]) << (8 * i);
-    if (sign && n > 0 && (p[n - 1] & 0x80)) v |= ~0ull << (8 * n);
+    if (sign && n > 0 && n < 8 && (p[n - 1] & 0x80)) v |= ~0ull << (8 * n);
     return static_cast<int64_t>(v);
+}
+
+bool CheckedAdd(uint64_t a, uint64_t b, uint64_t& result) {
+    if (b > (std::numeric_limits<uint64_t>::max)() - a) return false;
+    result = a + b;
+    return true;
+}
+
+bool CheckedMultiply(uint64_t a, uint64_t b, uint64_t& result) {
+    if (a != 0 && b > (std::numeric_limits<uint64_t>::max)() / a) return false;
+    result = a * b;
+    return true;
 }
 
 struct Run {
@@ -82,7 +96,9 @@ bool DecodeRuns(const BYTE* p, const BYTE* end, std::vector<Run>& out) {
         const int len_n = *p & 0x0F;
         const int off_n = (*p >> 4) & 0x0F;
         ++p;
-        if (p + len_n + off_n > end) return false;
+        if (len_n == 0 || len_n > 8 || off_n > 8 ||
+            static_cast<size_t>(end - p) < static_cast<size_t>(len_n + off_n))
+            return false;
         const uint64_t clusters = static_cast<uint64_t>(ReadLe(p, len_n, false));
         p += len_n;
         Run r;
@@ -90,45 +106,64 @@ bool DecodeRuns(const BYTE* p, const BYTE* end, std::vector<Run>& out) {
         if (off_n == 0) {
             r.sparse = true;
         } else {
-            lcn += ReadLe(p, off_n, true);
+            const int64_t delta = ReadLe(p, off_n, true);
+            if ((delta > 0 && lcn > (std::numeric_limits<int64_t>::max)() - delta) ||
+                (delta < 0 && lcn < (std::numeric_limits<int64_t>::min)() - delta))
+                return false;
+            lcn += delta;
+            if (lcn < 0) return false;
             r.lcn = static_cast<uint64_t>(lcn);
             p += off_n;
         }
         if (r.clusters) out.push_back(r);
     }
-    return true;
+    return p < end && *p == 0;
 }
 
 bool ApplyUsa(BYTE* rec, uint32_t rec_size, uint32_t sector) {
+    if (rec_size < sizeof(FileRecord) || sector < 2) return false;
     auto* h = reinterpret_cast<FileRecord*>(rec);
     if (h->usa_off < sizeof(FileRecord) || h->usa_count < 1) return false;
     const uint32_t usa_bytes = static_cast<uint32_t>(h->usa_count) * 2;
     if (static_cast<uint32_t>(h->usa_off) + usa_bytes > rec_size) return false;
     auto* usa = reinterpret_cast<uint16_t*>(rec + h->usa_off);
     for (uint16_t i = 1; i < h->usa_count; ++i) {
-        const uint32_t off = static_cast<uint32_t>(i) * sector - 2;
-        if (off + 2 > rec_size) return false;
-        *reinterpret_cast<uint16_t*>(rec + off) = usa[i];
+        const uint64_t off = static_cast<uint64_t>(i) * sector - 2;
+        if (off > rec_size || rec_size - static_cast<uint32_t>(off) < 2) return false;
+        *reinterpret_cast<uint16_t*>(rec + static_cast<uint32_t>(off)) = usa[i];
     }
     return true;
 }
 
 const BYTE* AttrValue(const BYTE* attr, uint32_t& len) {
     auto* h = reinterpret_cast<const AttrHeader*>(attr);
+    if (h->non_resident ||
+        h->length < sizeof(AttrHeader) + sizeof(AttrResident)) {
+        len = 0;
+        return nullptr;
+    }
     auto* r = reinterpret_cast<const AttrResident*>(attr + sizeof(AttrHeader));
     len = r->value_len;
-    if (r->value_off + len > h->length) { len = 0; return nullptr; }
+    const uint32_t min_off = sizeof(AttrHeader) + sizeof(AttrResident);
+    if (r->value_off < min_off || r->value_off > h->length ||
+        len > h->length - r->value_off) {
+        len = 0;
+        return nullptr;
+    }
     return attr + r->value_off;
 }
 
 bool ParseRecord(BYTE* rec, uint32_t rec_size, uint32_t sector, uint64_t index,
                  const std::function<bool(MftFile&&)>& emit) {
+    if (rec_size < sizeof(FileRecord)) return true;
     auto* hdr = reinterpret_cast<FileRecord*>(rec);
     if (hdr->magic != 0x454C4946) return true; // 'FILE'
     if (!ApplyUsa(rec, rec_size, sector)) return true;
     if ((hdr->flags & 1) == 0) return true; // not in use
     if (hdr->base != 0) return true;        // extension record; base already holds names
-    if (hdr->attr_off >= rec_size) return true;
+    if (hdr->bytes_used > rec_size || hdr->attr_off < sizeof(FileRecord) ||
+        hdr->attr_off > hdr->bytes_used)
+        return true;
 
     MftFile best;
     best.frn = (static_cast<uint64_t>(hdr->seq) << 48) | (index & 0xFFFFFFFFFFFFULL);
@@ -138,11 +173,11 @@ bool ParseRecord(BYTE* rec, uint32_t rec_size, uint32_t sector, uint64_t index,
     bool have_data = false;
 
     const BYTE* p = rec + hdr->attr_off;
-    const BYTE* end = rec + (std::min)(hdr->bytes_used, rec_size);
-    while (p + sizeof(AttrHeader) <= end) {
+    const BYTE* end = rec + hdr->bytes_used;
+    while (static_cast<size_t>(end - p) >= sizeof(AttrHeader)) {
         auto* a = reinterpret_cast<const AttrHeader*>(p);
         if (a->type == kAttrEnd || a->length < sizeof(AttrHeader)) break;
-        if (p + a->length > end) break;
+        if (a->length > static_cast<size_t>(end - p)) break;
         const bool unnamed = a->name_len == 0;
 
         if (a->type == kAttrStdInfo && !a->non_resident) {
@@ -162,21 +197,22 @@ bool ParseRecord(BYTE* rec, uint32_t rec_size, uint32_t sector, uint64_t index,
                 uint64_t parent = 0, fsize = 0;
                 std::memcpy(&parent, v, 8);
                 std::memcpy(&fsize, v + 48, 8);
-                    const BYTE nlen = v[64];
-                    const BYTE ntype = v[65];
-                    const uint32_t nbytes = static_cast<uint32_t>(nlen) * 2;
-                    auto rank = [](uint8_t t) { return (t == 1 || t == 3) ? 0 : (t == 0 ? 1 : 2); };
-                    if (66 + nbytes <= vlen && nlen > 0 &&
-                        (best.name.empty() || rank(ntype) < rank(best_name_type))) {
-                        best.parent = parent;
-                        best.name.assign(reinterpret_cast<const wchar_t*>(v + 66), nlen);
-                        best.name_type = ntype;
-                        best_name_type = ntype;
-                        if (!have_data) best.size = fsize;
-                    }
+                const BYTE nlen = v[64];
+                const BYTE ntype = v[65];
+                const uint32_t nbytes = static_cast<uint32_t>(nlen) * 2;
+                auto rank = [](uint8_t t) { return (t == 1 || t == 3) ? 0 : (t == 0 ? 1 : 2); };
+                if (nbytes <= vlen - 66 && nlen > 0 &&
+                    (best.name.empty() || rank(ntype) < rank(best_name_type))) {
+                    best.parent = parent;
+                    best.name.assign(reinterpret_cast<const wchar_t*>(v + 66), nlen);
+                    best.name_type = ntype;
+                    best_name_type = ntype;
+                    if (!have_data) best.size = fsize;
+                }
             }
         } else if (a->type == kAttrData && unnamed) {
             if (a->non_resident) {
+                if (a->length < sizeof(AttrHeader) + sizeof(AttrNonResident)) break;
                 auto* nr = reinterpret_cast<const AttrNonResident*>(p + sizeof(AttrHeader));
                 data_size = nr->real_size;
                 have_data = true;
@@ -197,17 +233,24 @@ bool ParseRecord(BYTE* rec, uint32_t rec_size, uint32_t sector, uint64_t index,
 
 bool ParseMftRecord0Runs(BYTE* rec, uint32_t rec_size, uint32_t sector,
                          std::vector<Run>& runs) {
+    if (rec_size < sizeof(FileRecord)) return false;
     auto* hdr = reinterpret_cast<FileRecord*>(rec);
     if (hdr->magic != 0x454C4946) return false;
     if (!ApplyUsa(rec, rec_size, sector)) return false;
+    if (hdr->bytes_used > rec_size || hdr->attr_off < sizeof(FileRecord) ||
+        hdr->attr_off > hdr->bytes_used)
+        return false;
     const BYTE* p = rec + hdr->attr_off;
-    const BYTE* end = rec + (std::min)(hdr->bytes_used, rec_size);
-    while (p + sizeof(AttrHeader) <= end) {
+    const BYTE* end = rec + hdr->bytes_used;
+    while (static_cast<size_t>(end - p) >= sizeof(AttrHeader)) {
         auto* a = reinterpret_cast<const AttrHeader*>(p);
         if (a->type == kAttrEnd || a->length < sizeof(AttrHeader)) break;
-        if (p + a->length > end) break;
+        if (a->length > static_cast<size_t>(end - p)) break;
         if (a->type == kAttrData && a->name_len == 0 && a->non_resident) {
+            if (a->length < sizeof(AttrHeader) + sizeof(AttrNonResident)) return false;
             auto* nr = reinterpret_cast<const AttrNonResident*>(p + sizeof(AttrHeader));
+            const uint32_t min_pairs_off = sizeof(AttrHeader) + sizeof(AttrNonResident);
+            if (nr->pairs_off < min_pairs_off || nr->pairs_off >= a->length) return false;
             const BYTE* pairs = p + nr->pairs_off;
             return DecodeRuns(pairs, p + a->length, runs);
         }
@@ -231,9 +274,12 @@ bool EnumerateMft(HANDLE volume,
     const uint32_t cluster = vd.BytesPerCluster;
     const uint32_t sector = vd.BytesPerSector;
     if (rec_size < 512 || rec_size > 4096 || cluster == 0 || sector == 0) return false;
+    if (vd.MftStartLcn.QuadPart < 0 || vd.MftValidDataLength.QuadPart < 0) return false;
 
     std::vector<BYTE> rec0(rec_size);
-    const uint64_t mft_off = static_cast<uint64_t>(vd.MftStartLcn.QuadPart) * cluster;
+    uint64_t mft_off = 0;
+    if (!CheckedMultiply(static_cast<uint64_t>(vd.MftStartLcn.QuadPart), cluster, mft_off))
+        return false;
     if (!ReadAt(volume, mft_off, rec0.data(), rec_size)) return false;
 
     std::vector<Run> runs;
@@ -241,7 +287,8 @@ bool EnumerateMft(HANDLE volume,
         // Contiguous fallback: treat the start LCN as a long run covering ValidDataLength.
         Run r;
         r.lcn = static_cast<uint64_t>(vd.MftStartLcn.QuadPart);
-        r.clusters = static_cast<uint64_t>((vd.MftValidDataLength.QuadPart + cluster - 1) / cluster);
+        const uint64_t valid_bytes = static_cast<uint64_t>(vd.MftValidDataLength.QuadPart);
+        r.clusters = valid_bytes / cluster + (valid_bytes % cluster != 0 ? 1 : 0);
         runs.push_back(r);
     }
 
@@ -256,18 +303,26 @@ bool EnumerateMft(HANDLE volume,
     for (const Run& run : runs) {
         if (running && !running->load()) return count > 0;
         if (run.sparse) {
-            file_off += run.clusters * cluster;
+            uint64_t run_bytes = 0;
+            if (!CheckedMultiply(run.clusters, cluster, run_bytes) ||
+                !CheckedAdd(file_off, run_bytes, file_off))
+                return false;
             continue;
         }
-        uint64_t disk = run.lcn * cluster;
-        uint64_t left = run.clusters * cluster;
+        uint64_t disk = 0;
+        uint64_t left = 0;
+        if (!CheckedMultiply(run.lcn, cluster, disk) ||
+            !CheckedMultiply(run.clusters, cluster, left))
+            return false;
         while (left >= rec_size) {
             if (running && !running->load()) return count > 0;
             const uint64_t wanted = (std::min)(left, static_cast<uint64_t>(chunk_bytes));
             const DWORD bytes = static_cast<DWORD>(wanted - (wanted % rec_size));
             if (bytes < rec_size || !ReadAt(volume, disk, chunk.data(), bytes)) break;
             for (DWORD offset = 0; offset < bytes; offset += rec_size) {
-                const uint64_t index = (file_off + offset) / rec_size;
+                uint64_t record_off = 0;
+                if (!CheckedAdd(file_off, offset, record_off)) return false;
+                const uint64_t index = record_off / rec_size;
                 if (!ParseRecord(chunk.data() + offset, rec_size, sector, index,
                                  [&](MftFile&& f) {
                     ++count;
@@ -275,11 +330,12 @@ bool EnumerateMft(HANDLE volume,
                     return emit(std::move(f));
                 })) return count > 0;
             }
-            disk += bytes;
-            file_off += bytes;
+            if (!CheckedAdd(disk, bytes, disk) ||
+                !CheckedAdd(file_off, bytes, file_off))
+                return false;
             left -= bytes;
         }
-        if (left) file_off += left; // partial cluster padding
+        if (left && !CheckedAdd(file_off, left, file_off)) return false;
     }
     return count > 0;
 }

@@ -3,9 +3,17 @@ rem Build Release binaries, then compile dist\PulseSetup-<version>.exe.
 setlocal
 cd /d "%~dp0"
 
-call "%~dp0build_release.bat" || exit /b 1
+set /p PULSE_VERSION=<version.txt
+if not defined PULSE_VERSION (
+    echo Missing version in version.txt
+    exit /b 1
+)
 
-for %%F in (build\pulse.exe build\Pulse.Index.exe build\Pulse.Preview.exe build\pulse_shell.exe) do (
+if /i "%~1"=="/skipbuild" goto after_release_build
+call "%~dp0build_release.bat" || exit /b 1
+:after_release_build
+
+for %%F in (build\pulse.exe build\Pulse.Index.exe build\Pulse.Preview.exe build\pulse_shell.exe build\lumatext.dll) do (
     if not exist "%%F" (
         echo Missing build output: %%F
         exit /b 1
@@ -22,6 +30,6 @@ if not defined ISCC (
     exit /b 1
 )
 
-"%ISCC%" installer\PulseSetup.iss || exit /b 1
+"%ISCC%" /DAppVersion=%PULSE_VERSION% installer\PulseSetup.iss || exit /b 1
 echo.
 echo Installer written to dist\

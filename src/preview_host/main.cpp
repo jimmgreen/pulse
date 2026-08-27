@@ -1,5 +1,8 @@
 #include "../ipc/preview_protocol.h"
+#include "../common/current_user_security.h"
 #include "../common/path_utils.h"
+#include "../common/preview_extensions.h"
+#include "../common/crash_reporter.h"
 #include <shobjidl.h>
 #include <shlobj.h>
 #include <shlguid.h>
@@ -50,21 +53,11 @@ bool IsOneOf(std::wstring_view extension,
 }
 
 bool IsKnownText(std::wstring_view extension) {
-    return IsOneOf(extension, {
-        L".txt", L".md", L".log", L".json", L".xml", L".yaml", L".yml",
-        L".ini", L".cfg", L".conf", L".csv", L".tsv", L".cpp", L".c",
-        L".h", L".hpp", L".cc", L".cxx", L".cs", L".java", L".js",
-        L".jsx", L".ts", L".tsx", L".py", L".rs", L".go", L".php",
-        L".html", L".htm", L".css", L".scss", L".sql", L".ps1", L".bat",
-        L".cmd", L".sh", L".qml", L".cmake", L".toml", L".properties"
-    });
+    return pulse::preview::IsTextExtension(extension);
 }
 
 bool IsDirectImage(std::wstring_view extension) {
-    return IsOneOf(extension, {
-        L".jpg", L".jpeg", L".png", L".gif", L".bmp", L".tif", L".tiff",
-        L".webp", L".heic", L".ico"
-    });
+    return pulse::preview::IsImageExtension(extension);
 }
 
 bool IsKnownShellPreview(std::wstring_view extension) {
@@ -268,7 +261,8 @@ bool WriteString(HANDLE pipe, const std::wstring& value) {
 } // namespace
 
 static bool DecodeImage(const std::wstring& path, DWORD attrs, UINT pixels,
-                        std::vector<uint8_t>& out, UINT& width, UINT& height, UINT& stride) {
+                        std::vector<uint8_t>& out, UINT& width, UINT& height, UINT& stride,
+                        UINT& source_width, UINT& source_height) {
     if (IsOfflinePlaceholder(attrs)) return false;
     ComPtr<IWICImagingFactory> factory;
     ComPtr<IWICBitmapDecoder> decoder;
@@ -284,6 +278,8 @@ static bool DecodeImage(const std::wstring& path, DWORD attrs, UINT pixels,
     UINT sourceWidth = 0, sourceHeight = 0;
     if (FAILED(frame->GetSize(&sourceWidth, &sourceHeight)) ||
         sourceWidth == 0 || sourceHeight == 0) return false;
+    source_width = sourceWidth;
+    source_height = sourceHeight;
 
     IWICBitmapSource* source = frame.Get();
     const UINT longest = (std::max)(sourceWidth, sourceHeight);
@@ -309,6 +305,149 @@ static bool DecodeImage(const std::wstring& path, DWORD attrs, UINT pixels,
         return false;
     }
     return true;
+}
+
+static bool MetadataUInt(IWICMetadataQueryReader* reader, const wchar_t* name,
+                         uint32_t& value) {
+    if (!reader) return false;
+    PROPVARIANT pv{}; PropVariantInit(&pv);
+    const HRESULT hr = reader->GetMetadataByName(name, &pv);
+    bool ok = SUCCEEDED(hr);
+    if (ok) {
+        if (pv.vt == VT_UI1) value = pv.bVal;
+        else if (pv.vt == VT_UI2) value = pv.uiVal;
+        else if (pv.vt == VT_UI4) value = pv.ulVal;
+        else if (pv.vt == VT_I4 && pv.lVal >= 0) value = static_cast<uint32_t>(pv.lVal);
+        else ok = false;
+    }
+    PropVariantClear(&pv);
+    return ok;
+}
+
+static void GifFrameMetadata(IWICBitmapFrameDecode* frame, uint32_t& left,
+                             uint32_t& top, uint32_t& width, uint32_t& height,
+                             uint32_t& disposal, uint32_t& delay_ms) {
+    left = top = 0; width = height = 0; disposal = 0; delay_ms = 100;
+    ComPtr<IWICMetadataQueryReader> reader;
+    if (FAILED(frame->GetMetadataQueryReader(&reader)) || !reader) {
+        frame->GetSize(&width, &height); return;
+    }
+    MetadataUInt(reader.Get(), L"/imgdesc/Left", left);
+    MetadataUInt(reader.Get(), L"/imgdesc/Top", top);
+    MetadataUInt(reader.Get(), L"/imgdesc/Width", width);
+    MetadataUInt(reader.Get(), L"/imgdesc/Height", height);
+    MetadataUInt(reader.Get(), L"/grctlext/Disposal", disposal);
+    uint32_t delay = 0;
+    if (MetadataUInt(reader.Get(), L"/grctlext/Delay", delay) && delay > 0)
+        delay_ms = std::clamp(delay * 10u, 20u, 2000u);
+    if (!width || !height) frame->GetSize(&width, &height);
+}
+
+static void AlphaBlendPbgra(uint8_t* dst, const uint8_t* src) {
+    const uint32_t sa = src[3];
+    if (sa == 255) { dst[0] = src[0]; dst[1] = src[1]; dst[2] = src[2]; dst[3] = 255; return; }
+    if (sa == 0) return;
+    const uint32_t inv = 255u - sa;
+    dst[0] = static_cast<uint8_t>(src[0] + (dst[0] * inv + 127u) / 255u);
+    dst[1] = static_cast<uint8_t>(src[1] + (dst[1] * inv + 127u) / 255u);
+    dst[2] = static_cast<uint8_t>(src[2] + (dst[2] * inv + 127u) / 255u);
+    dst[3] = static_cast<uint8_t>(sa + (dst[3] * inv + 127u) / 255u);
+}
+
+static bool DecodeGifFrame(const std::wstring& path, DWORD attrs, UINT pixels,
+                           uint32_t frame_index, std::vector<uint8_t>& out,
+                           UINT& width, UINT& height, UINT& stride,
+                           uint32_t& frame_count, uint32_t& delay_ms,
+                           uint32_t& loop_count, UINT& source_width, UINT& source_height) {
+    if (IsOfflinePlaceholder(attrs)) return false;
+    ComPtr<IWICImagingFactory> factory; ComPtr<IWICBitmapDecoder> decoder;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&factory))) ||
+        FAILED(factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
+                                                   WICDecodeMetadataCacheOnLoad, &decoder))) return false;
+    UINT count = 0; if (FAILED(decoder->GetFrameCount(&count)) || !count) return false;
+    frame_count = count; frame_index = (std::min)(frame_index, count - 1);
+    loop_count = 0;
+    ComPtr<IWICMetadataQueryReader> decoder_reader;
+    if (SUCCEEDED(decoder->GetMetadataQueryReader(&decoder_reader)) && decoder_reader) {
+        PROPVARIANT pv{}; PropVariantInit(&pv);
+        if (SUCCEEDED(decoder_reader->GetMetadataByName(L"/appext/Data", &pv)) &&
+            ((pv.vt & VT_VECTOR) != 0) && ((pv.vt & VT_TYPEMASK) == VT_UI1) &&
+            pv.caub.cElems >= 16) {
+            const auto* b = pv.caub.pElems;
+            for (ULONG i = 0; i + 4 < pv.caub.cElems; ++i)
+                if (b[i] == 'N' && b[i + 1] == 'E' && b[i + 2] == 'T' &&
+                    b[i + 3] == 'S' && b[i + 4] == 'C') {
+                    for (ULONG j = i; j + 15 < pv.caub.cElems; ++j)
+                        if (b[j] == 0x03 && b[j + 1] == 0x01) {
+                            loop_count = b[j + 2] | (static_cast<uint32_t>(b[j + 3]) << 8); break;
+                        }
+                    break;
+                }
+        }
+        PropVariantClear(&pv);
+    }
+    ComPtr<IWICBitmapFrameDecode> first; if (FAILED(decoder->GetFrame(0, &first))) return false;
+    UINT canvas_w = 0, canvas_h = 0; first->GetSize(&canvas_w, &canvas_h);
+    ComPtr<IWICMetadataQueryReader> first_reader;
+    if (SUCCEEDED(decoder->GetMetadataQueryReader(&first_reader)) && first_reader) {
+        uint32_t v = 0;
+        if (MetadataUInt(first_reader.Get(), L"/logscrdesc/Width", v) && v) canvas_w = v;
+        if (MetadataUInt(first_reader.Get(), L"/logscrdesc/Height", v) && v) canvas_h = v;
+    }
+    if (!canvas_w || !canvas_h || canvas_w > 16384 || canvas_h > 16384) return false;
+    source_width = canvas_w;
+    source_height = canvas_h;
+    std::vector<uint8_t> canvas(static_cast<size_t>(canvas_w) * canvas_h * 4, 0);
+    std::vector<uint8_t> saved;
+    uint32_t prev_left = 0, prev_top = 0, prev_w = 0, prev_h = 0, prev_disposal = 0;
+    for (uint32_t i = 0; i <= frame_index; ++i) {
+        if (i > 0) {
+            if (prev_disposal == 2) {
+                const uint32_t x0 = (std::min)(prev_left, canvas_w);
+                const uint32_t x1 = (std::min)(canvas_w, prev_left + prev_w);
+                for (uint32_t y = (std::min)(prev_top, canvas_h);
+                     y < (std::min)(canvas_h, prev_top + prev_h); ++y)
+                    std::fill(canvas.begin() + (static_cast<size_t>(y) * canvas_w + x0) * 4,
+                              canvas.begin() + (static_cast<size_t>(y) * canvas_w + x1) * 4, uint8_t{0});
+            } else if (prev_disposal == 3 && saved.size() == canvas.size()) canvas = saved;
+        }
+        ComPtr<IWICBitmapFrameDecode> frame; if (FAILED(decoder->GetFrame(i, &frame))) return false;
+        uint32_t left, top, fw, fh, disposal, current_delay;
+        GifFrameMetadata(frame.Get(), left, top, fw, fh, disposal, current_delay);
+        if (i == frame_index) delay_ms = current_delay;
+        if (disposal == 3) saved = canvas;
+        ComPtr<IWICFormatConverter> converter;
+        if (FAILED(factory->CreateFormatConverter(&converter)) ||
+            FAILED(converter->Initialize(frame.Get(), GUID_WICPixelFormat32bppPBGRA,
+                                         WICBitmapDitherTypeNone, nullptr, 0.0,
+                                         WICBitmapPaletteTypeCustom))) return false;
+        UINT rw = 0, rh = 0; converter->GetSize(&rw, &rh);
+        const UINT copy_w = (std::min)(fw, rw), copy_h = (std::min)(fh, rh);
+        std::vector<uint8_t> pixels_data(static_cast<size_t>(rw) * rh * 4);
+        if (FAILED(converter->CopyPixels(nullptr, rw * 4, static_cast<UINT>(pixels_data.size()), pixels_data.data()))) return false;
+        for (UINT y = 0; y < copy_h && top + y < canvas_h; ++y)
+            for (UINT x = 0; x < copy_w && left + x < canvas_w; ++x)
+                AlphaBlendPbgra(&canvas[(static_cast<size_t>(top + y) * canvas_w + left + x) * 4],
+                                &pixels_data[(static_cast<size_t>(y) * rw + x) * 4]);
+        prev_left = left; prev_top = top; prev_w = fw; prev_h = fh; prev_disposal = disposal;
+    }
+    width = canvas_w; height = canvas_h; stride = canvas_w * 4;
+    const UINT longest = (std::max)(canvas_w, canvas_h);
+    if (longest > pixels) {
+        const double ratio = static_cast<double>(pixels) / longest;
+        width = (std::max)(1u, static_cast<UINT>(canvas_w * ratio + 0.5));
+        height = (std::max)(1u, static_cast<UINT>(canvas_h * ratio + 0.5));
+        ComPtr<IWICBitmap> bitmap;
+        if (FAILED(factory->CreateBitmapFromMemory(canvas_w, canvas_h, GUID_WICPixelFormat32bppPBGRA,
+                                                   canvas_w * 4, static_cast<UINT>(canvas.size()), canvas.data(), &bitmap))) return false;
+        ComPtr<IWICBitmapScaler> scaler;
+        if (FAILED(factory->CreateBitmapScaler(&scaler)) ||
+            FAILED(scaler->Initialize(bitmap.Get(), width, height, WICBitmapInterpolationModeFant))) return false;
+        out.resize(static_cast<size_t>(width) * height * 4); stride = width * 4;
+        return SUCCEEDED(scaler->CopyPixels(nullptr, stride, static_cast<UINT>(out.size()), out.data()));
+    }
+    out = std::move(canvas); return true;
 }
 
 static bool HbitmapToBgra(HBITMAP bitmap, bool own, std::vector<uint8_t>& out,
@@ -414,11 +553,16 @@ static bool MakeShellThumbnail(const std::wstring& path, DWORD attrs, UINT pixel
 }
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
+    crash::Initialize({crash::ProcessRole::Preview, false, {}});
     if (__argc < 2) return 2;
     const DWORD owner = wcstoul(__wargv[1], nullptr, 10);
     const std::wstring pipeName = ipc::PreviewPipeName(owner);
-    HANDLE pipe = CreateNamedPipeW(pipeName.c_str(), PIPE_ACCESS_DUPLEX,
-        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, 1, 64*1024, 64*1024, 0, nullptr);
+    CurrentUserSecurityAttributes pipeSecurity;
+    if (!pipeSecurity) return 3;
+    HANDLE pipe = CreateNamedPipeW(pipeName.c_str(),
+        PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+        1, 64*1024, 64*1024, 0, pipeSecurity.get());
     if (pipe == INVALID_HANDLE_VALUE) return 3;
     if (!ConnectNamedPipe(pipe, nullptr) && GetLastError()!=ERROR_PIPE_CONNECTED) { CloseHandle(pipe); return 4; }
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
@@ -433,6 +577,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
         std::wstring errorText;
         std::vector<PreviewPropertyValue> properties;
         UINT w=0,h=0,stride=0;
+        UINT source_w=0, source_h=0;
         ipc::PreviewResponse response{};
         response.request_id=req.request_id;
         response.generation=req.generation;
@@ -449,13 +594,25 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             uint32_t bytesRead = 0;
             const bool isDirectory = (req.attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
             if (IsDirectImage(extension)) {
-                made = DecodeImage(path, req.attrs, std::clamp(req.pixel_size, 32u, 512u),
-                                   pixels, w, h, stride);
+                uint32_t frame_count = 1, frame_delay = 0, loop_count = 0;
+                const bool gif = extension == L".gif";
+                const UINT cap = ipc::ClampPreviewPixelSize(req.pixel_size, gif);
+                if (gif) {
+                    made = DecodeGifFrame(path, req.attrs, cap, req.frame_index,
+                        pixels, w, h, stride, frame_count, frame_delay, loop_count,
+                        source_w, source_h);
+                } else {
+                    made = DecodeImage(path, req.attrs, cap, pixels, w, h, stride,
+                                       source_w, source_h);
+                }
+                response.frame_count = frame_count;
+                response.frame_delay_ms = frame_delay;
+                response.loop_count = loop_count;
                 if (made) response.kind = ipc::PreviewContentKind::Bitmap;
                 else errorText = L"image-decode-failed";
             } else if (isDirectory || IsKnownShellPreview(extension)) {
                 made = MakeShellThumbnail(path, req.attrs,
-                                          std::clamp(req.pixel_size, 32u, 512u),
+                                          ipc::ClampPreviewPixelSize(req.pixel_size, false),
                                           pixels, w, h, stride);
                 if (made) response.kind = ipc::PreviewContentKind::Bitmap;
                 else errorText = L"provider-failed";
@@ -477,6 +634,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             if (truncated) response.flags |= ipc::kPreviewFlagTruncated;
         }
         response.width=w; response.height=h; response.stride=stride;
+        response.source_width = source_w;
+        response.source_height = source_h;
         HANDLE mapping=nullptr; void* view=nullptr; std::wstring mappingName;
         if (made && response.kind == ipc::PreviewContentKind::Bitmap) {
             mappingName=L"Local\\PulsePreviewMap-"+std::to_wstring(GetCurrentProcessId())+L"-"+

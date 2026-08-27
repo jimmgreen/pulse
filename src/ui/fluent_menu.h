@@ -47,6 +47,8 @@ struct FluentMenuItem {
     bool checked = false;
     bool mixed = false;
     bool radio = false;            // selected single-choice item: filled dot, never a checkmark
+    bool radio_group = false;      // reserve a leading selection-dot column (left of the icon)
+    fluent::MenuPictogram pictogram = fluent::MenuPictogram::None;
     D2D1_COLOR_F swatch_color{};
     std::vector<FluentMenuSwatch> quick_swatches;
     // Non-empty => the row is a one-level flyout header (software-owned
@@ -68,6 +70,8 @@ public:
     float RowHeightPx() const { return row_h_; }
     int Count() const { return (int)items_.size(); }
     const FluentMenuItem* At(int i) const;
+    // Copy command ids from src when display text/structure matches. No layout.
+    bool PatchCommands(const std::vector<FluentMenuItem>& src);
     // Content y (px) of row i's top edge.
     float RowTopPx(int i) const;
     int HitTestRow(float y_px) const;                 // -1 = not on a row
@@ -111,10 +115,10 @@ public:
     // Safe from the owner window while TrackPopup's modal loop is running
     // (e.g. async index hits arrived). No-op if the menu is closed.
     void RequestFilterRefresh();
-    // Swap the item list while the menu is open (Explorer verbs arrived from
-    // pulse_shell). Relayouts, re-derives hover from the cursor and repaints.
-    // Safe only from the owner thread while TrackPopup's modal loop runs.
-    void ReplaceItems(std::vector<FluentMenuItem> items);
+    // Swap command ids while the menu is open if the visible structure matches.
+    // Never grows or shrinks an open menu (Explorer COM arriving late must not
+    // restyle the popup). Returns true when ids were patched.
+    bool ReplaceItems(std::vector<FluentMenuItem> items);
     void SetFilterPlaceholder(std::wstring text) { filter_placeholder_ = std::move(text); }
     const std::wstring& LastFilterQuery() const { return filter_query_; }
     // True when the last TrackPopup closed because Enter was pressed with no

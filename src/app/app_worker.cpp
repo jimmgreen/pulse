@@ -1,15 +1,14 @@
 // app_worker.cpp
 #include "app_worker.h"
 #include "app_model.h"
+#include "entry_sort.h"
 #include "link_resolve.h"
 #include "../fs/fs_enum.h"
+#include "../fs/fs_recycle.h"
 #include "../fs/fs_net_cache.h"
-#include <shlwapi.h>
-#pragma comment(lib, "shlwapi.lib")
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
-#include <cwctype>
 
 namespace pulse::app {
 
@@ -56,7 +55,8 @@ void WorkerPool::Stop() {
     threads_.clear();
 }
 
-uint64_t WorkerPool::Refresh(const std::wstring& path, ui::SortColumn col, ui::SortDirection dir) {
+uint64_t WorkerPool::Refresh(const std::wstring& path, ui::SortColumn col,
+                             ui::SortDirection dir) {
     std::lock_guard<std::mutex> lock(mutex_);
     uint64_t gen = ++global_gen_;
     const std::wstring key = WorkKey(path, col, dir);
@@ -69,7 +69,7 @@ uint64_t WorkerPool::Refresh(const std::wstring& path, ui::SortColumn col, ui::S
         queue_.pop();
     }
     queue_ = std::move(filtered);
-    queue_.push({ path, key, gen, col, dir });
+    queue_.push(WorkItem{ path, key, gen, col, dir });
     cv_.notify_one();
     return gen;
 }
@@ -105,59 +105,6 @@ void WorkerPool::EnqueueIo(std::function<void()> task) {
     if (!running_ || stopped_) return;
     io_queue_.push(std::move(task));
     cv_.notify_one();
-}
-
-static std::wstring Extension(const std::wstring& name) {
-    size_t dot = name.find_last_of(L'.');
-    if (dot == std::wstring::npos || dot == 0 || dot + 1 >= name.size()) return L"";
-    std::wstring ext = name.substr(dot + 1);
-    for (auto& c : ext) c = std::towlower(c);
-    return ext;
-}
-
-static int NameCompare(const std::wstring& a, const std::wstring& b) {
-    // StrCmpLogicalW gives Explorer-like natural sorting (img2 < img10).
-    int cmp = StrCmpLogicalW(a.c_str(), b.c_str());
-    if (cmp == 0) cmp = wcscmp(a.c_str(), b.c_str());
-    return cmp;
-}
-
-static bool CompareEntries(const fs::DirEntry& a, const fs::DirEntry& b,
-                           ui::SortColumn col, ui::SortDirection dir) {
-    bool aDir = a.is_dir;
-    bool bDir = b.is_dir;
-    if (aDir != bDir) {
-        // Directories always on top.
-        return aDir;
-    }
-    int cmp = 0;
-    switch (col) {
-    case ui::SortColumn::Name:
-        cmp = NameCompare(a.name, b.name);
-        break;
-    case ui::SortColumn::Size:
-        if (a.size < b.size) cmp = -1;
-        else if (a.size > b.size) cmp = 1;
-        else cmp = NameCompare(a.name, b.name);
-        break;
-    case ui::SortColumn::Mtime:
-        cmp = CompareFileTime(&a.mtime, &b.mtime);
-        if (cmp == 0) cmp = NameCompare(a.name, b.name);
-        break;
-    case ui::SortColumn::Type: {
-        std::wstring ea = Extension(a.name);
-        std::wstring eb = Extension(b.name);
-        cmp = _wcsicmp(ea.c_str(), eb.c_str());
-        if (cmp == 0) cmp = NameCompare(a.name, b.name);
-        break;
-    }
-    case ui::SortColumn::Path:
-        cmp = _wcsicmp(a.full_path.c_str(), b.full_path.c_str());
-        if (cmp == 0) cmp = NameCompare(a.name, b.name);
-        break;
-    }
-    if (dir == ui::SortDirection::Desc) cmp = -cmp;
-    return cmp < 0;
 }
 
 WorkResult WorkerPool::Process(const WorkItem& item) {
@@ -210,6 +157,14 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
             }
             entries->push_back(std::move(entry));
         }
+    } else if (fs::IsRecycleViewPath(item.path)) {
+        try {
+            fs::EnumerateRecycleBin(*entries, &res.recycle_info);
+        } catch (...) {
+            res.error = true;
+            res.snapshot = nullptr;
+            return res;
+        }
     } else {
         try {
             fs::EnumerateDirectory(item.path, *entries);
@@ -233,11 +188,13 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
     }
 
     // Resolve .lnk targets (Recent folder, desktop shortcuts) before display.
-    ResolveLinksInPlace(item.path, *entries, [&] {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const auto it = current_gen_.find(item.request_key);
-        return !running_ || it == current_gen_.end() || it->second != item.generation;
-    });
+    if (!fs::IsRecycleViewPath(item.path)) {
+        ResolveLinksInPlace(item.path, *entries, [&] {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto it = current_gen_.find(item.request_key);
+            return !running_ || it == current_gen_.end() || it->second != item.generation;
+        });
+    }
 
     auto t2 = std::chrono::steady_clock::now();
     // Interruptible sort: check every 8192 comparisons roughly via chunking.
@@ -254,7 +211,7 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
                         if (!running_ || it == current_gen_.end() || it->second != item.generation)
                             throw SortCancelled{};
                     }
-                    return CompareEntries(a, b, item.sort_column, item.sort_direction);
+                    return EntryLess(a, b, item.sort_column, item.sort_direction);
                 });
         } catch (const SortCancelled&) {
             res.cancelled = true;
@@ -274,6 +231,7 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
     }
 
     res.snapshot = std::move(entries);
+    fs::QueryDirectoryIdentity(item.path, res.identity);
 
     // Timing output for large directories (visible in a debugger or ETW).
     if (res.snapshot && res.snapshot->size() >= 10000) {
@@ -321,6 +279,15 @@ void WorkerPool::WorkerThread() {
             }
             if (cache_snapshot && fs::IsUncPath(cache_path))
                 fs::SaveNetSnapshot(cache_path, cache_snapshot);
+        }
+        // Completed generations no longer participate in cancellation checks.
+        // Remove only when no newer request replaced this key while we were
+        // processing, so a concurrent refresh remains authoritative.
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto it = current_gen_.find(item.request_key);
+            if (it != current_gen_.end() && it->second == item.generation)
+                current_gen_.erase(it);
         }
     }
 }

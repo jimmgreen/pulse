@@ -1,6 +1,8 @@
 // fluent_menu.cpp — See fluent_menu.h for the contract.
 #include "fluent_menu.h"
 #include "FluentTokens.h"
+#include "lumatext_renderer.h"
+#include "typography.h"
 
 #include <windowsx.h>
 #include <commctrl.h>
@@ -35,7 +37,7 @@ float MeasureWidth(IDWriteFactory3* dwrite, IDWriteTextFormat* format,
     if (!layout.get()) return 0.0f;
     DWRITE_TEXT_METRICS m{};
     layout->GetMetrics(&m);
-    return m.width;
+    return (std::max)(m.width, m.widthIncludingTrailingWhitespace);
 }
 
 // Icon-button strips (glyph swatches) need wider slots and hit targets than
@@ -57,17 +59,8 @@ float SwatchHitRadiusDip(const FluentMenuItem& it) {
 ComPtr<IDWriteTextFormat> MakeFormat(IDWriteFactory3* dwrite, float size) {
     ComPtr<IDWriteTextFormat> fmt;
     if (!dwrite) return fmt;
-    dwrite->CreateTextFormat(L"Segoe UI Variable Text", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                             size, Compositor::UiLocaleName(), &fmt);
-    if (!fmt.get()) {
-        dwrite->CreateTextFormat(L"Microsoft YaHei UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                                 DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                                 size, Compositor::UiLocaleName(), &fmt);
-    }
-    if (fmt.get()) {
-        Compositor::ApplyCjkFallback(dwrite, fmt.get());
-    }
+    typography::CreateTextFormat(dwrite,
+        {typography::FontRole::Text, size, DWRITE_FONT_WEIGHT_NORMAL}, &fmt);
     return fmt;
 }
 
@@ -80,6 +73,41 @@ void FluentMenuModel::SetItems(std::vector<FluentMenuItem> items) {
     items_ = std::move(items);
 }
 
+namespace {
+
+bool DisplayEqualItem(const FluentMenuItem& a, const FluentMenuItem& b) {
+    if (a.text != b.text || a.enabled != b.enabled ||
+        a.separator_after != b.separator_after ||
+        a.children.size() != b.children.size() ||
+        a.quick_swatches.size() != b.quick_swatches.size())
+        return false;
+    for (size_t i = 0; i < a.children.size(); ++i) {
+        if (!DisplayEqualItem(a.children[i], b.children[i])) return false;
+    }
+    return true;
+}
+
+void PatchItemCommands(FluentMenuItem& dest, const FluentMenuItem& src) {
+    dest.command = src.command;
+    const size_t n = (std::min)(dest.children.size(), src.children.size());
+    for (size_t i = 0; i < n; ++i)
+        PatchItemCommands(dest.children[i], src.children[i]);
+    const size_t ns = (std::min)(dest.quick_swatches.size(), src.quick_swatches.size());
+    for (size_t i = 0; i < ns; ++i)
+        dest.quick_swatches[i].command = src.quick_swatches[i].command;
+}
+
+} // namespace
+
+bool FluentMenuModel::PatchCommands(const std::vector<FluentMenuItem>& src) {
+    if (items_.size() != src.size()) return false;
+    for (size_t i = 0; i < items_.size(); ++i)
+        if (!DisplayEqualItem(items_[i], src[i])) return false;
+    for (size_t i = 0; i < items_.size(); ++i)
+        PatchItemCommands(items_[i], src[i]);
+    return true;
+}
+
 void FluentMenuModel::Layout(IDWriteFactory3* dwrite, float scale, float min_width_px) {
     scale_ = std::max(0.25f, scale);
     row_h_ = 36.0f * scale_;     // theme.row_menu
@@ -89,15 +117,22 @@ void FluentMenuModel::Layout(IDWriteFactory3* dwrite, float scale, float min_wid
     auto body = MakeFormat(dwrite, 14.0f * scale_);
     auto caption = MakeFormat(dwrite, 12.0f * scale_);
 
-    const float icon_col = 28.0f * scale_;      // left icon column incl. padding
-    const float pad_h = 12.0f * scale_;          // padding.cell
+    // Must match DrawMenuItem: inset 6, content pad 10, icon 20, gap 8, pad 10, inset 6.
+    const float inset = 6.0f * scale_;
+    const float content_pad = 10.0f * scale_;
+    const float icon_w = 20.0f * scale_;
+    const float icon_gap = 8.0f * scale_;
+    const float left_chrome = inset + content_pad + icon_w + icon_gap;
+    const float right_chrome = content_pad + inset;
     const float shortcut_gap = 24.0f * scale_;
 
     float content_w = 160.0f * scale_;
     for (const auto& it : items_) {
-        float w = icon_col + pad_h + MeasureWidth(dwrite, body.get(), it.text) + pad_h;
+        const float radio_col = it.radio_group ? 12.0f * scale_ : 0.0f;
+        const float text_w = std::ceil(MeasureWidth(dwrite, body.get(), it.text) + 2.0f * scale_);
+        float w = radio_col + left_chrome + text_w + right_chrome;
         if (!it.children.empty()) {
-            w += 28.0f * scale_; // Fluent chevron column (has_submenu)
+            w += 26.0f * scale_; // 22px chevron column + 4px gap
         } else if (!it.badge_text.empty()) {
             w += shortcut_gap + MeasureWidth(dwrite, caption.get(), it.badge_text) + 14.0f * scale_;
         } else if (!it.shortcut.empty()) {
@@ -439,6 +474,8 @@ bool FluentMenu::RenderSurface(const FluentMenuModel& model, int hover_row, int 
             spec.checked = it->checked;
             spec.mixed = it->mixed;
             spec.radio = it->radio;
+            spec.radio_group = it->radio_group;
+            spec.pictogram = it->pictogram;
             spec.swatch_color = it->swatch_color;
             painter_.DrawMenuItem(spec);
             if (!it->quick_swatches.empty()) {
@@ -743,12 +780,12 @@ bool FluentMenu::EnsureFilterEdit() {
     if (!edit_font_) {
         const int height = -std::max(14, static_cast<int>(std::lround(14.0f * scale_)));
         edit_font_ = CreateFontW(height, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-            DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Text");
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+            DEFAULT_PITCH | FF_DONTCARE, typography::PreferredTextFamily());
         if (!edit_font_) {
             edit_font_ = CreateFontW(height, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei UI");
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
+                DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
         }
     }
     if (edit_brush_) { DeleteObject(edit_brush_); edit_brush_ = nullptr; }
@@ -761,7 +798,8 @@ bool FluentMenu::EnsureFilterEdit() {
         0, 0, 0, 0, hwnd_, nullptr, GetModuleHandleW(nullptr), nullptr);
     if (!edit_) return false;
     SetWindowTheme(edit_, L"", L"");
-    SetLayeredWindowAttributes(edit_, 0, 255, LWA_ALPHA);
+    if (!compositor_ || !compositor_->LumaTextEnabled())
+        SetLayeredWindowAttributes(edit_, 0, 255, LWA_ALPHA);
     SendMessageW(edit_, WM_SETFONT, (WPARAM)edit_font_, TRUE);
     SendMessageW(edit_, EM_SETCUEBANNER, TRUE,
         reinterpret_cast<LPARAM>(L"\u641C\u7D22\u547D\u4EE4\u3001\u6587\u4EF6\u5939\u2026"));
@@ -827,6 +865,27 @@ LRESULT CALLBACK FluentMenu::FilterEditProc(HWND hwnd, UINT msg, WPARAM wParam, 
     auto* self = reinterpret_cast<FluentMenu*>(dwRefData);
     if (!self) return DefSubclassProc(hwnd, msg, wParam, lParam);
     switch (msg) {
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONDBLCLK:
+    case WM_LBUTTONUP:
+    case WM_MOUSEMOVE:
+    case WM_CAPTURECHANGED:
+        if (self->compositor_ && self->compositor_->LumaTextEnabled()) {
+            const LRESULT result = self->compositor_->CallLumaEditMouse(
+                hwnd, msg, wParam, lParam, self->compositor_->TextFormat());
+            if (msg != WM_MOUSEMOVE || GetCapture() == hwnd) {
+                const D2D1_COLOR_F fg = self->dark_
+                    ? D2D1::ColorF(1.0f, 1.0f, 1.0f)
+                    : D2D1::ColorF(26.0f / 255.0f, 26.0f / 255.0f, 26.0f / 255.0f);
+                const D2D1_COLOR_F bg = self->dark_
+                    ? D2D1::ColorF(30.0f / 255.0f, 30.0f / 255.0f, 30.0f / 255.0f)
+                    : D2D1::ColorF(1.0f, 1.0f, 1.0f);
+                self->compositor_->PresentLumaEdit(hwnd, self->compositor_->TextFormat(),
+                                                   fg, bg);
+            }
+            return result;
+        }
+        break;
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
         if (wParam == VK_ESCAPE || wParam == VK_UP || wParam == VK_DOWN || wParam == VK_RETURN) {
@@ -846,17 +905,84 @@ LRESULT CALLBACK FluentMenu::FilterEditProc(HWND hwnd, UINT msg, WPARAM wParam, 
         {
             LRESULT lr = DefSubclassProc(hwnd, msg, wParam, lParam);
             self->SyncFilterFromEdit();
+            InvalidateRect(hwnd, nullptr, FALSE);
             return lr;
         }
-    case WM_ERASEBKGND: {
-        RECT rc{};
-        GetClientRect(hwnd, &rc);
-        if (!self->edit_brush_) {
-            self->edit_brush_ = CreateSolidBrush(self->dark_ ? RGB(30, 30, 30) : RGB(255, 255, 255));
+    case WM_PAINT: {
+        if (!self->compositor_ || !self->compositor_->LumaTextEnabled()) break;
+        HideCaret(hwnd);
+        const D2D1_COLOR_F fg = self->dark_
+            ? D2D1::ColorF(1.0f, 1.0f, 1.0f)
+            : D2D1::ColorF(26.0f / 255.0f, 26.0f / 255.0f, 26.0f / 255.0f);
+        const D2D1_COLOR_F bg = self->dark_
+            ? D2D1::ColorF(30.0f / 255.0f, 30.0f / 255.0f, 30.0f / 255.0f)
+            : D2D1::ColorF(1.0f, 1.0f, 1.0f);
+        if (!self->compositor_->PresentLumaEdit(hwnd, self->compositor_->TextFormat(),
+                                                fg, bg)) {
+            PAINTSTRUCT ps{};
+            HDC hdc = BeginPaint(hwnd, &ps);
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            if (!self->edit_brush_) {
+                self->edit_brush_ = CreateSolidBrush(
+                    self->dark_ ? RGB(30, 30, 30) : RGB(255, 255, 255));
+            }
+            FillRect(hdc, &rc, self->edit_brush_);
+            EndPaint(hwnd, &ps);
         }
-        FillRect(reinterpret_cast<HDC>(wParam), &rc, self->edit_brush_);
-        return 1;
+        return 0;
     }
+    case WM_SETFOCUS: {
+        LRESULT lr = DefSubclassProc(hwnd, msg, wParam, lParam);
+        HideCaret(hwnd);
+        SetTimer(hwnd, 71, GetCaretBlinkTime(), nullptr);
+        if (self->compositor_ && self->compositor_->LumaTextEnabled()) {
+            const D2D1_COLOR_F fg = self->dark_
+                ? D2D1::ColorF(1.0f, 1.0f, 1.0f)
+                : D2D1::ColorF(26.0f / 255.0f, 26.0f / 255.0f, 26.0f / 255.0f);
+            const D2D1_COLOR_F bg = self->dark_
+                ? D2D1::ColorF(30.0f / 255.0f, 30.0f / 255.0f, 30.0f / 255.0f)
+                : D2D1::ColorF(1.0f, 1.0f, 1.0f);
+            self->compositor_->PresentLumaEdit(hwnd, self->compositor_->TextFormat(),
+                                               fg, bg);
+        } else {
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return lr;
+    }
+    case WM_KILLFOCUS:
+        KillTimer(hwnd, 71);
+        break;
+    case WM_TIMER:
+        if (wParam == 71) {
+            if (GetCapture() != hwnd && self->compositor_ &&
+                self->compositor_->LumaTextEnabled()) {
+                const D2D1_COLOR_F fg = self->dark_
+                    ? D2D1::ColorF(1.0f, 1.0f, 1.0f)
+                    : D2D1::ColorF(26.0f / 255.0f, 26.0f / 255.0f, 26.0f / 255.0f);
+                const D2D1_COLOR_F bg = self->dark_
+                    ? D2D1::ColorF(30.0f / 255.0f, 30.0f / 255.0f, 30.0f / 255.0f)
+                    : D2D1::ColorF(1.0f, 1.0f, 1.0f);
+                self->compositor_->PresentLumaEdit(hwnd, self->compositor_->TextFormat(),
+                                                   fg, bg);
+            } else if (GetCapture() != hwnd) {
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
+        }
+        break;
+    case WM_ERASEBKGND:
+        if (self->compositor_ && self->compositor_->LumaTextEnabled()) return 1;
+        {
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            if (!self->edit_brush_) {
+                self->edit_brush_ = CreateSolidBrush(
+                    self->dark_ ? RGB(30, 30, 30) : RGB(255, 255, 255));
+            }
+            FillRect(reinterpret_cast<HDC>(wParam), &rc, self->edit_brush_);
+            return 1;
+        }
     }
     return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
@@ -1169,23 +1295,10 @@ void FluentMenu::RequestFilterRefresh() {
     if (hwnd_ && open_) PostMessageW(hwnd_, WM_APP, 0, 0);
 }
 
-void FluentMenu::ReplaceItems(std::vector<FluentMenuItem> items) {
-    if (!open_ || animating_out_ || filter_fn_ || !compositor_ || items.empty()) return;
-    HideSubWindow(); // rows may move; the flyout anchor is gone
-    model_.SetItems(std::move(items));
-    model_.Layout(compositor_->DwriteFactory(), scale_);
-    LayoutWindow(popup_pt_);
-    // Re-derive hover from the live cursor: rows may have moved under it.
-    POINT pt{};
-    GetCursorPos(&pt);
-    const float cx = static_cast<float>(pt.x - base_x_);
-    const float cy = static_cast<float>(pt.y - (base_y_ + present_offset_));
-    int row = model_.HitTestRow(cy - static_cast<float>(kShadowMargin) - FilterHeaderPx());
-    const FluentMenuItem* it = model_.At(row);
-    if (!it || !it->enabled) row = -1;
-    hover_row_ = row;
-    hover_swatch_ = HitTestSwatch(row, cx);
-    if (Render()) Present(255, present_offset_);
+bool FluentMenu::ReplaceItems(std::vector<FluentMenuItem> items) {
+    if (!open_ || animating_out_ || filter_fn_ || !compositor_ || items.empty()) return false;
+    if (!model_.PatchCommands(items)) return false;
+    return true;
 }
 
 void FluentMenu::Dismiss() {

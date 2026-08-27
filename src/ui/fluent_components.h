@@ -29,8 +29,17 @@ enum class SegmentPosition { Single, First, Middle, Last };
 enum class SortDirection { None, Ascending, Descending };
 enum class InfoBarKind { Informational, Success, Warning, Error };
 enum class EasingCurve { Linear, OutQuad, OutCubic, InOutQuad, InOutSine, OutSine };
+// Small pane-layout diagrams for the split menu (not Segoe glyphs).
+enum class MenuPictogram {
+    None = 0,
+    LayoutSingle,
+    LayoutSideBySide,
+    LayoutStacked,
+    LayoutThree,
+    LayoutFour,
+};
 
-inline constexpr wchar_t kOmnibarHintBadge[] = L"> \u547D\u4EE4";
+inline constexpr wchar_t kOmnibarHintBadge[] = L"\u547D\u4EE4";
 inline constexpr wchar_t kOmnibarHintKey[] = L"Ctrl+K";
 
 struct MotionSpec {
@@ -57,6 +66,8 @@ struct ButtonSpec {
     ControlState state{};
     bool icon_only = false;
     bool drop_down = false;
+    bool bordered = true;
+    bool skip_glyph = false;
 };
 
 struct TextFieldSpec {
@@ -71,6 +82,8 @@ struct TextFieldSpec {
     std::wstring_view trailing_badge;   // right-side hint, e.g. L"> 命令"
     std::wstring_view trailing_keycap;  // right-most keycap, e.g. L"Ctrl+K"
     bool compact_leading_glyph = false;
+    // Opaque hosted EDIT/Luma overlay sits on the frame; rest fill must match it.
+    bool hosted_edit = false;
 };
 
 struct TabSpec {
@@ -94,6 +107,8 @@ struct MenuItemSpec {
     bool checked = false;
     bool mixed = false;
     bool radio = false;
+    bool radio_group = false;      // reserve a leading selection-dot column
+    MenuPictogram pictogram = MenuPictogram::None;
     D2D1_COLOR_F swatch_color{};
     float glyph_scale = 1.0f;
 };
@@ -129,6 +144,7 @@ struct SidebarItemSpec {
     bool tag_dot = false;
     bool status_dot = false;
     bool suppress_text = false;
+    bool skip_glyph = false;
     float trailing_reserve = 0.0f;
     D2D1_COLOR_F icon_color{};
     D2D1_COLOR_F tag_color{};
@@ -202,6 +218,16 @@ struct BadgeSpec {
     bool dot = false;
 };
 
+// Compact filled tag used for user-assigned labels (starred/quick-access
+// labels and file-row labels). This is intentionally separate from BadgeSpec:
+// badges also cover status pills and keyboard hints with different semantics.
+struct TagSpec {
+    D2D1_RECT_F bounds{};
+    std::wstring_view text;
+    D2D1_COLOR_F color{};
+    bool bordered = true;
+};
+
 struct SidebarSectionHeaderSpec {
     D2D1_RECT_F bounds{};
     std::wstring_view text;
@@ -217,6 +243,7 @@ struct DriveSidebarItemSpec {
     float capacity = 0.0f;
     ControlState state{};
     bool drop_target = false;
+    bool skip_glyph = false;
     D2D1_COLOR_F icon_color{};
     D2D1_COLOR_F bar_color{};
 };
@@ -304,6 +331,7 @@ public:
 
     void SetCompositor(Compositor* compositor) noexcept;
     void SetScale(float scale) noexcept;
+    void InvalidateTypography() noexcept;
     float Scale() const noexcept { return scale_; }
 
     // Call once before drawing a frame. Updating brush colors does not allocate resources.
@@ -316,12 +344,16 @@ public:
     void DrawText(std::wstring_view text, const D2D1_RECT_F& bounds,
                   IDWriteTextFormat* format, const D2D1_COLOR_F& color,
                   HorizontalAlignment alignment = HorizontalAlignment::Left);
+    void DrawText(std::wstring_view text, const D2D1_RECT_F& bounds,
+                  IDWriteTextFormat* format, const D2D1_COLOR_F& color,
+                  HorizontalAlignment alignment, const D2D1_COLOR_F& background);
     void DrawGlyph(std::wstring_view glyph, const D2D1_RECT_F& bounds,
                    const D2D1_COLOR_F& color);
     void DrawFocusRing(const D2D1_RECT_F& bounds, float radius);
 
     void DrawButton(const ButtonSpec& spec);
-    void DrawTextFieldFrame(const D2D1_RECT_F& bounds, const ControlState& state);
+    void DrawTextFieldFrame(const D2D1_RECT_F& bounds, const ControlState& state,
+                           bool hosted_edit = false);
     void DrawTextField(const TextFieldSpec& spec);
     void DrawCheckBox(const D2D1_RECT_F& bounds, std::wstring_view text,
                       const ControlState& state);
@@ -351,9 +383,17 @@ public:
     void DrawSegmentedItem(const SegmentedItemSpec& spec);
     void DrawBadge(const BadgeSpec& spec);
     float MeasureBadgeWidth(std::wstring_view text) const;
+    float MeasureButtonWidth(std::wstring_view text,
+                             std::wstring_view glyph = {},
+                             bool drop_down = false) const;
+    void DrawTag(const TagSpec& spec);
+    float MeasureTagWidth(std::wstring_view text) const;
     float OmnibarHintReservePx() const;
-    void DrawOmnibarHints(const D2D1_RECT_F& field);
+    D2D1_RECT_F DrawOmnibarHints(const D2D1_RECT_F& field, bool skip_search_glyph = false);
+    D2D1_RECT_F ButtonGlyphRect(const D2D1_RECT_F& bounds, bool icon_only) const;
     void DrawSidebarSectionHeader(const SidebarSectionHeaderSpec& spec);
+    D2D1_RECT_F SidebarItemIconRect(const D2D1_RECT_F& bounds, bool status_dot) const;
+    D2D1_RECT_F DriveSidebarItemIconRect(const D2D1_RECT_F& bounds) const;
     void DrawDriveSidebarItem(const DriveSidebarItemSpec& spec);
     void DrawPaneHeader(const PaneHeaderSpec& spec);
     void DrawColumnHeader(const ColumnHeaderSpec& spec);
@@ -411,6 +451,8 @@ private:
     void DrawGlyphWithFormat(std::wstring_view glyph, const D2D1_RECT_F& bounds,
                              const D2D1_COLOR_F& color, IDWriteTextFormat* format);
     void DrawCheckMark(const D2D1_RECT_F& bounds, const D2D1_COLOR_F& color);
+    void DrawPaneLayoutIcon(const D2D1_RECT_F& bounds, MenuPictogram kind,
+                            const D2D1_COLOR_F& color);
     void DrawArc(D2D1_POINT_2F center, float radius, float start_degrees,
                  float span_degrees, float stroke_width, const D2D1_COLOR_F& color);
     void EnsureTextFormats();

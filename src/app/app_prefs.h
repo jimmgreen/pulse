@@ -11,6 +11,9 @@ struct AppPrefs {
     bool launch_on_startup = false;
     bool keep_running_on_close = false;
     bool open_folders_in_pulse = false;
+    bool verify_copies = false;
+    // system / zh-CN / en-US
+    std::wstring language = L"system";
     // none / acrylic-material / mica / mica-alt  (legacy dwm-blur → acrylic)
     std::wstring window_effect = L"mica-alt";
     std::wstring background_image;

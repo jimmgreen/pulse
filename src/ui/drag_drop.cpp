@@ -2,8 +2,13 @@
 #include "drag_drop.h"
 #include <shellapi.h>
 #include <shlobj.h>
-#include <cwctype>
+#include <shobjidl.h>
+#include <shlguid.h>
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
+#include <cwctype>
+#include <vector>
 
 namespace pulse::ui {
 
@@ -17,6 +22,62 @@ UINT PreferredEffectFormat() {
 UINT PerformedEffectFormat() {
     static UINT fmt = RegisterClipboardFormatW(CFSTR_PERFORMEDDROPEFFECT);
     return fmt;
+}
+
+UINT FileNameWFormat() {
+    static UINT fmt = RegisterClipboardFormatW(CFSTR_FILENAMEW);
+    return fmt;
+}
+
+UINT FileNameFormat() {
+    static UINT fmt = RegisterClipboardFormatW(CFSTR_FILENAME);
+    return fmt;
+}
+
+UINT ShellIdListFormat() {
+    static UINT fmt = RegisterClipboardFormatW(CFSTR_SHELLIDLIST);
+    return fmt;
+}
+
+DWORD ReadDwordFormat(IDataObject* obj, CLIPFORMAT format) {
+    if (!obj) return 0;
+    FORMATETC fmt{ format, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+    STGMEDIUM medium{};
+    if (FAILED(obj->GetData(&fmt, &medium)) || !medium.hGlobal) return 0;
+    DWORD value = 0;
+    if (DWORD* p = static_cast<DWORD*>(GlobalLock(medium.hGlobal))) {
+        value = *p;
+        GlobalUnlock(medium.hGlobal);
+    }
+    ReleaseStgMedium(&medium);
+    return value;
+}
+
+HRESULT CreateShellFilesDataObject(const std::vector<std::wstring>& paths,
+                                   IDataObject** out) {
+    if (!out) return E_POINTER;
+    *out = nullptr;
+    if (paths.empty()) return E_INVALIDARG;
+    std::vector<PIDLIST_ABSOLUTE> pidls;
+    pidls.reserve(paths.size());
+    for (const auto& path : paths) {
+        PIDLIST_ABSOLUTE pidl = nullptr;
+        if (FAILED(SHParseDisplayName(path.c_str(), nullptr, &pidl, 0, nullptr)) || !pidl) {
+            for (auto* p : pidls) CoTaskMemFree(p);
+            return E_FAIL;
+        }
+        pidls.push_back(pidl);
+    }
+    IShellItemArray* array = nullptr;
+    HRESULT hr = SHCreateShellItemArrayFromIDLists(
+        static_cast<UINT>(pidls.size()),
+        const_cast<PCIDLIST_ABSOLUTE_ARRAY>(pidls.data()),
+        &array);
+    for (auto* p : pidls) CoTaskMemFree(p);
+    if (FAILED(hr) || !array) return FAILED(hr) ? hr : E_FAIL;
+    hr = array->BindToHandler(nullptr, BHID_DataObject, IID_PPV_ARGS(out));
+    array->Release();
+    return hr;
 }
 
 } // namespace
@@ -62,6 +123,21 @@ DWORD ComputeDropEffect(DWORD key_state, const std::wstring& source_sample,
     return DROPEFFECT_NONE;
 }
 
+std::wstring FirstDroppableFolder(const std::vector<std::wstring>& sources) {
+    for (const auto& path : sources) {
+        if (path.empty()) continue;
+        const DWORD attrs = GetFileAttributesW(path.c_str());
+        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY))
+            return path;
+    }
+    return {};
+}
+
+bool LooksLikeFolderShortcut(const std::wstring& path) {
+    if (path.size() < 4) return false;
+    return _wcsicmp(path.c_str() + (path.size() - 4), L".lnk") == 0;
+}
+
 // ---------------------------------------------------------------------------
 // IDataObject inspection
 // ---------------------------------------------------------------------------
@@ -75,8 +151,10 @@ bool ExtractHDropPaths(IDataObject* obj, std::vector<std::wstring>& out) {
     UINT count = DragQueryFileW(hdrop, 0xFFFFFFFF, nullptr, 0);
     for (UINT i = 0; i < count; ++i) {
         UINT len = DragQueryFileW(hdrop, i, nullptr, 0);
-        std::wstring path(len, L'\0');
-        DragQueryFileW(hdrop, i, path.data(), len + 1);
+        std::wstring path(static_cast<size_t>(len) + 1, L'\0');
+        const UINT copied = DragQueryFileW(hdrop, i, path.data(), len + 1);
+        if (copied != len) continue;
+        path.resize(len);
         out.push_back(std::move(path));
     }
     ReleaseStgMedium(&medium);
@@ -102,6 +180,8 @@ DWORD PreferredDropEffect(IDataObject* obj) {
 // ---------------------------------------------------------------------------
 namespace {
 
+constexpr ULONG kFormatCount = 6;
+
 class FormatEnumerator final : public IEnumFORMATETC {
 public:
     IFACEMETHODIMP QueryInterface(REFIID riid, void** out) override {
@@ -122,7 +202,7 @@ public:
     }
     IFACEMETHODIMP Next(ULONG count, FORMATETC* out, ULONG* fetched) override {
         ULONG n = 0;
-        while (n < count && pos_ < 3) {
+        while (n < count && pos_ < kFormatCount) {
             out[n] = Format(pos_);
             ++pos_;
             ++n;
@@ -131,7 +211,8 @@ public:
         return n == count ? S_OK : S_FALSE;
     }
     IFACEMETHODIMP Skip(ULONG count) override {
-        ULONG skipped = (std::min)(count, 3u - pos_);
+        const ULONG remaining = pos_ < kFormatCount ? kFormatCount - pos_ : 0;
+        ULONG skipped = (std::min)(count, remaining);
         pos_ += skipped;
         return skipped == count ? S_OK : S_FALSE;
     }
@@ -150,9 +231,14 @@ private:
         f.dwAspect = DVASPECT_CONTENT;
         f.lindex = -1;
         f.tymed = TYMED_HGLOBAL;
-        f.cfFormat = i == 0 ? CF_HDROP
-                   : i == 1 ? (CLIPFORMAT)PreferredEffectFormat()
-                            : (CLIPFORMAT)PerformedEffectFormat();
+        switch (i) {
+        case 0: f.cfFormat = CF_HDROP; break;
+        case 1: f.cfFormat = (CLIPFORMAT)PreferredEffectFormat(); break;
+        case 2: f.cfFormat = (CLIPFORMAT)PerformedEffectFormat(); break;
+        case 3: f.cfFormat = (CLIPFORMAT)FileNameWFormat(); break;
+        case 4: f.cfFormat = (CLIPFORMAT)FileNameFormat(); break;
+        default: f.cfFormat = (CLIPFORMAT)ShellIdListFormat(); break;
+        }
         return f;
     }
     LONG ref_ = 1;
@@ -217,11 +303,111 @@ HGLOBAL FileDataObject::RenderDword(DWORD v) const {
     return h;
 }
 
+HGLOBAL FileDataObject::RenderFileNameW() const {
+    if (paths_.empty()) return nullptr;
+    const std::wstring& w = paths_[0];
+    const SIZE_T bytes = (w.size() + 1) * sizeof(wchar_t);
+    HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, bytes);
+    if (!h) return nullptr;
+    std::memcpy(GlobalLock(h), w.c_str(), bytes);
+    GlobalUnlock(h);
+    return h;
+}
+
+HGLOBAL FileDataObject::RenderFileNameA() const {
+    if (paths_.empty()) return nullptr;
+    const int n = WideCharToMultiByte(CP_ACP, 0, paths_[0].c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return nullptr;
+    HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, static_cast<SIZE_T>(n));
+    if (!h) return nullptr;
+    WideCharToMultiByte(CP_ACP, 0, paths_[0].c_str(), -1,
+                        static_cast<char*>(GlobalLock(h)), n, nullptr, nullptr);
+    GlobalUnlock(h);
+    return h;
+}
+
+HGLOBAL FileDataObject::RenderShellIdList() const {
+    if (paths_.empty()) return nullptr;
+    std::vector<PIDLIST_ABSOLUTE> pidls;
+    pidls.reserve(paths_.size());
+    for (const auto& path : paths_) {
+        PIDLIST_ABSOLUTE pidl = nullptr;
+        if (FAILED(SHParseDisplayName(path.c_str(), nullptr, &pidl, 0, nullptr)) || !pidl) {
+            for (auto* p : pidls) CoTaskMemFree(p);
+            return nullptr;
+        }
+        pidls.push_back(pidl);
+    }
+
+    PIDLIST_ABSOLUTE parent = ILClone(pidls[0]);
+    if (parent) ILRemoveLastID(parent);
+    bool same_parent = parent != nullptr;
+    for (size_t i = 1; same_parent && i < pidls.size(); ++i) {
+        PIDLIST_ABSOLUTE other = ILClone(pidls[i]);
+        if (!other) {
+            same_parent = false;
+            break;
+        }
+        ILRemoveLastID(other);
+        same_parent = ILIsEqual(parent, other) != FALSE;
+        CoTaskMemFree(other);
+    }
+
+    const UINT cidl = static_cast<UINT>(pidls.size());
+    const UINT header = static_cast<UINT>(sizeof(UINT) * (cidl + 2));
+    auto pidl_size = [](PCUIDLIST_RELATIVE p) -> UINT {
+        return p ? ILGetSize(p) : 2;
+    };
+
+    std::vector<PCUIDLIST_RELATIVE> children;
+    children.reserve(pidls.size());
+    UINT pidl_bytes = same_parent ? pidl_size(parent) : 2;
+    if (same_parent) {
+        for (auto* p : pidls) children.push_back(ILFindLastID(p));
+    } else {
+        for (auto* p : pidls) children.push_back(p);
+    }
+    for (auto* c : children) pidl_bytes += pidl_size(c);
+
+    HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, header + pidl_bytes);
+    if (!h) {
+        if (parent) CoTaskMemFree(parent);
+        for (auto* p : pidls) CoTaskMemFree(p);
+        return nullptr;
+    }
+    auto* base = static_cast<BYTE*>(GlobalLock(h));
+    auto* ida = reinterpret_cast<CIDA*>(base);
+    ida->cidl = cidl;
+    UINT offset = header;
+    ida->aoffset[0] = offset;
+    if (same_parent && parent) {
+        const UINT sz = ILGetSize(parent);
+        std::memcpy(base + offset, parent, sz);
+        offset += sz;
+    } else {
+        offset += 2;
+    }
+    for (UINT i = 0; i < cidl; ++i) {
+        ida->aoffset[i + 1] = offset;
+        const UINT sz = pidl_size(children[i]);
+        std::memcpy(base + offset, children[i], sz);
+        offset += sz;
+    }
+    GlobalUnlock(h);
+    if (parent) CoTaskMemFree(parent);
+    for (auto* p : pidls) CoTaskMemFree(p);
+    return h;
+}
+
 bool FileDataObject::IsSupportedFormat(const FORMATETC* fmt) const {
-    if (!fmt || fmt->tymed != TYMED_HGLOBAL || fmt->dwAspect != DVASPECT_CONTENT) return false;
+    if (!fmt || fmt->dwAspect != DVASPECT_CONTENT) return false;
+    if ((fmt->tymed & TYMED_HGLOBAL) == 0) return false;
     return fmt->cfFormat == CF_HDROP ||
            fmt->cfFormat == (CLIPFORMAT)PreferredEffectFormat() ||
-           fmt->cfFormat == (CLIPFORMAT)PerformedEffectFormat();
+           fmt->cfFormat == (CLIPFORMAT)PerformedEffectFormat() ||
+           fmt->cfFormat == (CLIPFORMAT)FileNameWFormat() ||
+           fmt->cfFormat == (CLIPFORMAT)FileNameFormat() ||
+           fmt->cfFormat == (CLIPFORMAT)ShellIdListFormat();
 }
 
 HRESULT FileDataObject::QueryGetData(FORMATETC* fmt) {
@@ -233,10 +419,20 @@ HRESULT FileDataObject::GetData(FORMATETC* fmt, STGMEDIUM* out) {
     std::memset(out, 0, sizeof(*out));
     if (!IsSupportedFormat(fmt)) return DV_E_FORMATETC;
     HGLOBAL h = nullptr;
-    if (fmt->cfFormat == CF_HDROP) h = RenderHDrop();
-    else if (fmt->cfFormat == (CLIPFORMAT)PreferredEffectFormat())
+    if (fmt->cfFormat == CF_HDROP) {
+        h = RenderHDrop();
+    } else if (fmt->cfFormat == (CLIPFORMAT)PreferredEffectFormat()) {
         h = RenderDword(DROPEFFECT_COPY | DROPEFFECT_MOVE);
-    else h = RenderDword(performed_effect_);
+    } else if (fmt->cfFormat == (CLIPFORMAT)PerformedEffectFormat()) {
+        h = RenderDword(performed_effect_);
+    } else if (fmt->cfFormat == (CLIPFORMAT)FileNameWFormat()) {
+        h = RenderFileNameW();
+    } else if (fmt->cfFormat == (CLIPFORMAT)FileNameFormat()) {
+        h = RenderFileNameA();
+    } else {
+        h = RenderShellIdList();
+        if (!h) return E_FAIL;
+    }
     if (!h) return E_OUTOFMEMORY;
     out->tymed = TYMED_HGLOBAL;
     out->hGlobal = h;
@@ -296,13 +492,38 @@ HRESULT ListDropSource::QueryContinueDrag(BOOL escape_pressed, DWORD key_state) 
 DWORD DoFileDragDrop(const std::vector<std::wstring>& paths, DWORD allowed_effects,
                      std::function<bool()> esc_consumed) {
     if (paths.empty()) return DROPEFFECT_NONE;
-    FileDataObject* data = FileDataObject::Create(paths);
+
+    IDataObject* data = nullptr;
+    FileDataObject* fallback = nullptr;
+    if (FAILED(CreateShellFilesDataObject(paths, &data)) || !data) {
+        fallback = FileDataObject::Create(paths);
+        data = fallback;
+    } else {
+        FORMATETC fmt{ (CLIPFORMAT)PreferredEffectFormat(), nullptr, DVASPECT_CONTENT, -1,
+                       TYMED_HGLOBAL };
+        STGMEDIUM medium{};
+        medium.tymed = TYMED_HGLOBAL;
+        medium.hGlobal = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, sizeof(DWORD));
+        if (medium.hGlobal) {
+            *static_cast<DWORD*>(GlobalLock(medium.hGlobal)) = allowed_effects;
+            GlobalUnlock(medium.hGlobal);
+            if (FAILED(data->SetData(&fmt, &medium, TRUE))) ReleaseStgMedium(&medium);
+        }
+    }
+
     auto* source = new ListDropSource();
     source->SetEscHook(std::move(esc_consumed));
     DWORD effect = DROPEFFECT_NONE;
     ::DoDragDrop(data, source, allowed_effects, &effect);
-    if (effect == DROPEFFECT_NONE && data->PerformedEffect() != 0)
-        effect = data->PerformedEffect();
+    if (effect == DROPEFFECT_NONE) {
+        if (fallback && fallback->PerformedEffect() != 0) {
+            effect = fallback->PerformedEffect();
+        } else if (!fallback) {
+            const DWORD performed =
+                ReadDwordFormat(data, (CLIPFORMAT)PerformedEffectFormat());
+            if (performed != 0) effect = performed;
+        }
+    }
     source->Release();
     data->Release();
     return effect;

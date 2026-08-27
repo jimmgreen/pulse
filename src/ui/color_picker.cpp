@@ -19,6 +19,8 @@
 #include "fluent_components.h"
 #include "fluent_menu.h"
 #include "ui_compositor.h"
+#include "lumatext_renderer.h"
+#include "typography.h"
 
 #include <windowsx.h>
 #include <commctrl.h>
@@ -882,12 +884,70 @@ bool IsOurs(const State& s, HWND hwnd) {
     return EditIndexFromHwnd(s, hwnd) >= 0;
 }
 
+constexpr UINT_PTR kEditCaretTimer = 71;
+
+bool PaintLumaEditControl(State& s, HWND hwnd, HDC hdc) {
+    (void)hdc;
+    if (!s.compositor || !s.compositor->LumaTextEnabled()) return false;
+    HideCaret(hwnd);
+    const D2D1_COLOR_F fg = s.dark ? D2D1::ColorF(1.0f, 1.0f, 1.0f)
+                                   : D2D1::ColorF(32.0f / 255.0f, 32.0f / 255.0f, 32.0f / 255.0f);
+    const D2D1_COLOR_F bg = s.dark ? D2D1::ColorF(45.0f / 255.0f, 45.0f / 255.0f, 45.0f / 255.0f)
+                                   : D2D1::ColorF(1.0f, 1.0f, 1.0f);
+    return s.compositor->PresentLumaEdit(hwnd, s.compositor->TextFormat(), fg, bg);
+}
+
 LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR,
                           DWORD_PTR ref) {
     auto* hook = reinterpret_cast<EditHook*>(ref);
     State* s = hook ? hook->s : nullptr;
     if (!s) return DefSubclassProc(hwnd, msg, wp, lp);
     switch (msg) {
+    case WM_LBUTTONDOWN:
+    case WM_LBUTTONDBLCLK:
+    case WM_LBUTTONUP:
+    case WM_MOUSEMOVE:
+    case WM_CAPTURECHANGED:
+        if (s->compositor && s->compositor->LumaTextEnabled()) {
+            const LRESULT result = s->compositor->CallLumaEditMouse(
+                hwnd, msg, wp, lp, s->compositor->TextFormat());
+            if (msg != WM_MOUSEMOVE || GetCapture() == hwnd)
+                PaintLumaEditControl(*s, hwnd, nullptr);
+            return result;
+        }
+        break;
+    case WM_PAINT: {
+        if (!s->compositor || !s->compositor->LumaTextEnabled()) break;
+        if (!PaintLumaEditControl(*s, hwnd, nullptr)) {
+            PAINTSTRUCT ps{};
+            HDC hdc = BeginPaint(hwnd, &ps);
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            FillRect(hdc, &rc, s->edit_brush);
+            EndPaint(hwnd, &ps);
+        }
+        return 0;
+    }
+    case WM_SETFOCUS: {
+        LRESULT lr = DefSubclassProc(hwnd, msg, wp, lp);
+        HideCaret(hwnd);
+        SetTimer(hwnd, kEditCaretTimer, GetCaretBlinkTime(), nullptr);
+        if (s->compositor && s->compositor->LumaTextEnabled())
+            PaintLumaEditControl(*s, hwnd, nullptr);
+        else
+            InvalidateRect(hwnd, nullptr, FALSE);
+        return lr;
+    }
+    case WM_KILLFOCUS:
+        KillTimer(hwnd, kEditCaretTimer);
+        break;
+    case WM_TIMER:
+        if (wp == kEditCaretTimer) {
+            if (GetCapture() != hwnd)
+                PaintLumaEditControl(*s, hwnd, nullptr);
+            return 0;
+        }
+        break;
     case WM_KEYDOWN:
         if (wp == VK_ESCAPE) {
             s->done = true;
@@ -1095,13 +1155,13 @@ void CreateEdits(State& s) {
     const int height = -std::lround(14.0f * s.scale);
     s.font = CreateFontW(height, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                          DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                         CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-                         L"Segoe UI Variable Text");
+                         ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                         typography::PreferredTextFamily());
     if (!s.font) {
         s.font = CreateFontW(height, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                              DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
-                             L"Microsoft YaHei UI");
+                             ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                             L"Segoe UI");
     }
     if (s.font) {
         HDC hdc = GetDC(nullptr);
@@ -1119,7 +1179,8 @@ void CreateEdits(State& s) {
                                  GetModuleHandleW(nullptr), nullptr);
         if (!e) continue;
         SetWindowTheme(e, L"", L"");
-        SetLayeredWindowAttributes(e, 0, 255, LWA_ALPHA);
+        if (!s.compositor || !s.compositor->LumaTextEnabled())
+            SetLayeredWindowAttributes(e, 0, 255, LWA_ALPHA);
         if (s.font) SendMessageW(e, WM_SETFONT, reinterpret_cast<WPARAM>(s.font), TRUE);
         SendMessageW(e, EM_SETLIMITTEXT, i < 4 ? 3 : 9, 0);
         s.hooks[static_cast<size_t>(i)].s = &s;

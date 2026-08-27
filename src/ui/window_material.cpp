@@ -13,10 +13,15 @@
 #include <d3d11.h>
 #include <dxgi.h>
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <cstring>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <optional>
 #include <vector>
 
 namespace pulse::ui {
@@ -212,7 +217,123 @@ FILE* MaterialLogFile() {
     return file;
 }
 
+struct DecodedPixels {
+    UINT width = 0;
+    UINT height = 0;
+    UINT stride = 0;
+    std::vector<uint8_t> pixels;
+    HRESULT result = E_FAIL;
+};
+
+DecodedPixels DecodeImageFile(const std::wstring& path) {
+    DecodedPixels decoded;
+    ComPtr<IWICImagingFactory> wic;
+    ComPtr<IWICBitmapDecoder> decoder;
+    ComPtr<IWICBitmapFrameDecode> frame;
+    ComPtr<IWICBitmapScaler> scaler;
+    ComPtr<IWICColorTransform> color;
+    ComPtr<IWICFormatConverter> converter;
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&wic));
+    if (SUCCEEDED(hr)) {
+        hr = wic->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
+                                            WICDecodeMetadataCacheOnDemand, &decoder);
+    }
+    if (SUCCEEDED(hr)) hr = decoder->GetFrame(0, &frame);
+    if (FAILED(hr)) {
+        decoded.result = hr;
+        return decoded;
+    }
+
+    IWICBitmapSource* pixels = ToDisplayPixels(wic.get(), frame.get(), color, converter);
+    if (!pixels) {
+        decoded.result = WINCODEC_ERR_UNSUPPORTEDPIXELFORMAT;
+        return decoded;
+    }
+
+    UINT width = 0;
+    UINT height = 0;
+    hr = pixels->GetSize(&width, &height);
+    if (FAILED(hr) || width == 0 || height == 0) {
+        decoded.result = FAILED(hr) ? hr : WINCODEC_ERR_BADIMAGE;
+        return decoded;
+    }
+
+    IWICBitmapSource* source = pixels;
+    if (width > kMaxSource || height > kMaxSource) {
+        const float scale = (std::min)(
+            static_cast<float>(kMaxSource) / static_cast<float>((std::max)(1u, width)),
+            static_cast<float>(kMaxSource) / static_cast<float>((std::max)(1u, height)));
+        width = (std::max)(1u, static_cast<UINT>(width * scale));
+        height = (std::max)(1u, static_cast<UINT>(height * scale));
+        hr = wic->CreateBitmapScaler(&scaler);
+        if (SUCCEEDED(hr)) {
+            hr = scaler->Initialize(pixels, width, height, WICBitmapInterpolationModeFant);
+        }
+        if (FAILED(hr)) {
+            decoded.result = hr;
+            return decoded;
+        }
+        source = scaler.get();
+    }
+
+    const uint64_t stride = static_cast<uint64_t>(width) * 4u;
+    const uint64_t bytes = stride * static_cast<uint64_t>(height);
+    if (stride > (std::numeric_limits<UINT>::max)() ||
+        bytes > (std::numeric_limits<UINT>::max)() ||
+        bytes > (std::numeric_limits<size_t>::max)()) {
+        decoded.result = E_OUTOFMEMORY;
+        return decoded;
+    }
+    try {
+        decoded.pixels.resize(static_cast<size_t>(bytes));
+    } catch (...) {
+        decoded.result = E_OUTOFMEMORY;
+        return decoded;
+    }
+    hr = source->CopyPixels(nullptr, static_cast<UINT>(stride), static_cast<UINT>(bytes),
+                            decoded.pixels.data());
+    if (FAILED(hr)) {
+        decoded.pixels.clear();
+        decoded.result = hr;
+        return decoded;
+    }
+    decoded.width = width;
+    decoded.height = height;
+    decoded.stride = static_cast<UINT>(stride);
+    decoded.result = S_OK;
+    return decoded;
+}
+
 } // namespace
+
+struct WindowMaterial::DecodeWorker {
+    struct Request {
+        std::wstring path;
+        uint64_t generation = 0;
+        HWND notify = nullptr;
+    };
+    struct Result {
+        std::wstring path;
+        uint64_t generation = 0;
+        DecodedPixels decoded;
+    };
+
+    ~DecodeWorker() {
+        if (thread) CloseHandle(thread);
+        if (wake) CloseHandle(wake);
+    }
+
+    std::mutex mutex;
+    Request request;
+    std::optional<Result> completed;
+    uint64_t next_generation = 0;
+    bool stop = false;
+    HANDLE wake = nullptr;
+    HANDLE thread = nullptr;
+    std::atomic<uint64_t> attempts{0};
+    std::atomic<DWORD> test_delay_ms{0};
+};
 
 void LogWindowMaterial(const char* fmt, ...) {
     FILE* f = MaterialLogFile();
@@ -495,21 +616,165 @@ int RunMaterialSelfTest() {
     return (blur_works && cmd_works && graph_works) ? 0 : 2;
 }
 
-void WindowMaterial::SetCompositor(Compositor* compositor) {
-    compositor_ = compositor;
-    Invalidate();
+WindowMaterial::~WindowMaterial() {
+    auto worker = decode_worker_;
+    if (!worker) return;
+    {
+        std::lock_guard<std::mutex> lock(worker->mutex);
+        worker->stop = true;
+        worker->request.notify = nullptr;
+        ++worker->request.generation;
+    }
+    SetEvent(worker->wake);
+    if (worker->thread) WaitForSingleObject(worker->thread, 100);
+    decode_worker_.reset();
 }
 
-void WindowMaterial::Invalidate() {
+void WindowMaterial::SetCompositor(Compositor* compositor) {
+    compositor_ = compositor;
+    ResetGpuResources();
+    if (decode_worker_) {
+        std::lock_guard<std::mutex> lock(decode_worker_->mutex);
+        decode_worker_->request.notify = compositor ? compositor->Hwnd() : nullptr;
+    }
+}
+
+void WindowMaterial::ResetGpuResources() {
     source_.reset();
     source_path_.clear();
-    source_failed_.clear();
     source_dc_ = nullptr;
     sampled_.reset();
     sampled_path_.clear();
     sampled_dc_ = nullptr;
     sampled_w_ = 0;
     sampled_h_ = 0;
+}
+
+void WindowMaterial::Invalidate() {
+    ResetGpuResources();
+    source_pixels_.clear();
+    source_pixels_path_.clear();
+    source_width_ = 0;
+    source_height_ = 0;
+    source_stride_ = 0;
+    source_failed_.clear();
+    requested_path_.clear();
+    if (decode_worker_) {
+        std::lock_guard<std::mutex> lock(decode_worker_->mutex);
+        requested_generation_ = ++decode_worker_->next_generation;
+        decode_worker_->request = {{}, requested_generation_,
+            compositor_ ? compositor_->Hwnd() : nullptr};
+        decode_worker_->completed.reset();
+        SetEvent(decode_worker_->wake);
+    }
+}
+
+void WindowMaterial::EnsureDecodeWorker() {
+    if (decode_worker_) return;
+    auto worker = std::make_shared<DecodeWorker>();
+    worker->wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!worker->wake) return;
+    auto* argument = new std::shared_ptr<DecodeWorker>(worker);
+    worker->thread = CreateThread(nullptr, 0, DecodeWorkerMain, argument, 0, nullptr);
+    if (!worker->thread) {
+        delete argument;
+        return;
+    }
+    decode_worker_ = std::move(worker);
+}
+
+void WindowMaterial::QueueDecode(const std::wstring& path) {
+    EnsureDecodeWorker();
+    requested_path_ = path;
+    if (!decode_worker_) {
+        source_failed_ = path;
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(decode_worker_->mutex);
+        requested_generation_ = ++decode_worker_->next_generation;
+        decode_worker_->request = {path, requested_generation_,
+            compositor_ ? compositor_->Hwnd() : nullptr};
+        decode_worker_->completed.reset();
+    }
+    SetEvent(decode_worker_->wake);
+}
+
+void WindowMaterial::TakeDecodeResult() {
+    if (!decode_worker_) return;
+    std::optional<DecodeWorker::Result> completed;
+    {
+        std::lock_guard<std::mutex> lock(decode_worker_->mutex);
+        if (decode_worker_->completed) {
+            completed = std::move(decode_worker_->completed);
+            decode_worker_->completed.reset();
+        }
+    }
+    if (!completed || completed->generation != requested_generation_ ||
+        completed->path != requested_path_) {
+        return;
+    }
+
+    ResetGpuResources();
+    if (FAILED(completed->decoded.result)) {
+        source_pixels_.clear();
+        source_pixels_path_.clear();
+        source_width_ = 0;
+        source_height_ = 0;
+        source_stride_ = 0;
+        source_failed_ = completed->path;
+        return;
+    }
+    source_pixels_ = std::move(completed->decoded.pixels);
+    source_pixels_path_ = completed->path;
+    source_width_ = completed->decoded.width;
+    source_height_ = completed->decoded.height;
+    source_stride_ = completed->decoded.stride;
+    source_failed_.clear();
+}
+
+DWORD WINAPI WindowMaterial::DecodeWorkerMain(void* parameter) {
+    std::unique_ptr<std::shared_ptr<DecodeWorker>> argument(
+        static_cast<std::shared_ptr<DecodeWorker>*>(parameter));
+    std::shared_ptr<DecodeWorker> self = *argument;
+    const HRESULT com_result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    uint64_t handled_generation = 0;
+    for (;;) {
+        DecodeWorker::Request request;
+        bool stop = false;
+        {
+            std::lock_guard<std::mutex> lock(self->mutex);
+            stop = self->stop;
+            request = self->request;
+        }
+        if (stop) break;
+        if (request.generation == handled_generation) {
+            WaitForSingleObject(self->wake, INFINITE);
+            continue;
+        }
+        handled_generation = request.generation;
+        if (request.path.empty()) continue;
+
+        self->attempts.fetch_add(1, std::memory_order_relaxed);
+        const DWORD delay = self->test_delay_ms.load(std::memory_order_relaxed);
+        if (delay > 0) Sleep(delay);
+        DecodedPixels decoded;
+        if (SUCCEEDED(com_result)) decoded = DecodeImageFile(request.path);
+        else decoded.result = com_result;
+
+        HWND notify = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(self->mutex);
+            if (!self->stop && self->request.generation == request.generation) {
+                self->completed = DecodeWorker::Result{
+                    request.path, request.generation, std::move(decoded)};
+                notify = self->request.notify;
+            }
+        }
+        if (notify && IsWindow(notify)) InvalidateRect(notify, nullptr, FALSE);
+    }
+    if (SUCCEEDED(com_result)) CoUninitialize();
+    return 0;
 }
 
 WindowMaterial::Recipe WindowMaterial::RecipeFor(WindowEffect effect, bool dark) noexcept {
@@ -540,68 +805,71 @@ WindowMaterial::Recipe WindowMaterial::RecipeFor(WindowEffect effect, bool dark)
 
 ID2D1Bitmap* WindowMaterial::SourceBitmap(const std::wstring& path) {
     ID2D1DeviceContext* dc = compositor_ ? compositor_->Dc() : nullptr;
+    TakeDecodeResult();
     if (!dc || path.empty()) {
-        source_.reset();
-        source_path_.clear();
-        source_dc_ = nullptr;
+        ResetGpuResources();
         return nullptr;
     }
     if (source_.get() && source_dc_ == dc && source_path_ == path)
         return source_.get();
-    if (source_dc_ == dc && source_failed_ == path)
+    if (source_failed_ == path)
         return nullptr;
 
-    source_.reset();
-    source_path_ = path;
-    source_failed_.clear();
-    source_dc_ = dc;
-
-    ComPtr<IWICImagingFactory> wic;
-    ComPtr<IWICBitmapDecoder> decoder;
-    ComPtr<IWICBitmapFrameDecode> frame;
-    ComPtr<IWICBitmapScaler> scaler;
-    ComPtr<IWICColorTransform> color;
-    ComPtr<IWICFormatConverter> converter;
-    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
-                                IID_PPV_ARGS(&wic))) ||
-        FAILED(wic->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
-                                              WICDecodeMetadataCacheOnDemand, &decoder)) ||
-        FAILED(decoder->GetFrame(0, &frame))) {
-        source_failed_ = path;
-        source_path_.clear();
-        return nullptr;
-    }
-
-    IWICBitmapSource* pixels = ToDisplayPixels(wic.get(), frame.get(), color, converter);
-    if (!pixels) {
-        source_failed_ = path;
-        source_path_.clear();
-        return nullptr;
-    }
-
-    UINT width = 0;
-    UINT height = 0;
-    pixels->GetSize(&width, &height);
-    IWICBitmapSource* source = pixels;
-    if (width > kMaxSource || height > kMaxSource) {
-        const float scale = (std::min)(
-            static_cast<float>(kMaxSource) / static_cast<float>((std::max)(1u, width)),
-            static_cast<float>(kMaxSource) / static_cast<float>((std::max)(1u, height)));
-        const UINT nw = (std::max)(1u, static_cast<UINT>(width * scale));
-        const UINT nh = (std::max)(1u, static_cast<UINT>(height * scale));
-        if (SUCCEEDED(wic->CreateBitmapScaler(&scaler)) &&
-            SUCCEEDED(scaler->Initialize(pixels, nw, nh, WICBitmapInterpolationModeFant))) {
-            source = scaler.get();
+    if (source_pixels_path_ == path && !source_pixels_.empty()) {
+        D2D1_BITMAP_PROPERTIES1 props{};
+        props.pixelFormat = {DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED};
+        props.dpiX = 96.0f;
+        props.dpiY = 96.0f;
+        ComPtr<ID2D1Bitmap1> uploaded;
+        const HRESULT hr = dc->CreateBitmap(
+            D2D1::SizeU(source_width_, source_height_), source_pixels_.data(),
+            source_stride_, props, &uploaded);
+        if (FAILED(hr)) {
+            if (compositor_ &&
+                (hr == D2DERR_RECREATE_TARGET || hr == DXGI_ERROR_DEVICE_REMOVED ||
+                 hr == DXGI_ERROR_DEVICE_RESET || hr == DXGI_ERROR_DRIVER_INTERNAL_ERROR)) {
+                compositor_->NotifyDeviceLost(hr);
+            }
+            return nullptr;
         }
+        source_ = std::move(uploaded);
+        source_path_ = path;
+        source_dc_ = dc;
+        return source_.get();
     }
-    if (FAILED(dc->CreateBitmapFromWicBitmap(source, nullptr, &source_))) {
-        source_failed_ = path;
-        source_.reset();
-        source_path_.clear();
-        return nullptr;
+
+    if (requested_path_ != path) {
+        ResetGpuResources();
+        source_pixels_.clear();
+        source_pixels_path_.clear();
+        source_width_ = 0;
+        source_height_ = 0;
+        source_stride_ = 0;
+        source_failed_.clear();
+        QueueDecode(path);
     }
-    return source_.get();
+    return nullptr;
 }
+
+#ifdef PULSE_WINDOW_MATERIAL_TESTING
+void WindowMaterial::SetDecodeDelayForTesting(DWORD delay_ms) {
+    EnsureDecodeWorker();
+    if (decode_worker_) {
+        decode_worker_->test_delay_ms.store(delay_ms, std::memory_order_relaxed);
+    }
+}
+
+uint64_t WindowMaterial::DecodeAttemptsForTesting() const {
+    return decode_worker_
+        ? decode_worker_->attempts.load(std::memory_order_relaxed)
+        : 0;
+}
+
+bool WindowMaterial::DecodeFailedForTesting(const std::wstring& path) {
+    TakeDecodeResult();
+    return source_failed_ == path;
+}
+#endif
 
 bool WindowMaterial::DrawSourceCover(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
                                      const std::wstring& path) {
@@ -631,9 +899,16 @@ ID2D1Bitmap* WindowMaterial::EnsureSampled(ID2D1DeviceContext* dc, const D2D1_RE
     const int sh = (std::max)(2, static_cast<int>(dh * scale + 0.5f));
 
     if (sampled_.get() && sampled_dc_ == dc && sampled_path_ == path &&
-        sampled_effect_ == effect && sampled_dark_ == dark &&
-        sampled_w_ == sw && sampled_h_ == sh) {
-        return sampled_.get();
+        sampled_effect_ == effect && sampled_dark_ == dark) {
+        // Interactive resize can deliver a WM_SIZE for every pixel. Reusing
+        // a nearby sample avoids rebuilding the full blur graph on each tick;
+        // a larger change still refreshes the cache for final quality.
+        const int tolerance_w = (std::max)(16, sw / 8);
+        const int tolerance_h = (std::max)(16, sh / 8);
+        if (std::abs(sampled_w_ - sw) <= tolerance_w &&
+            std::abs(sampled_h_ - sh) <= tolerance_h) {
+            return sampled_.get();
+        }
     }
 
     const Recipe recipe = RecipeFor(effect, dark);

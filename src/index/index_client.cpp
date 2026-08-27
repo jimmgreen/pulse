@@ -411,7 +411,7 @@ bool RunElevatedIndexCommand(const std::wstring& exe, const std::wstring& parame
     if (!ShellExecuteExW(&sei)) return false;
     DWORD code = ERROR_GEN_FAILURE;
     if (sei.hProcess) {
-        WaitForSingleObject(sei.hProcess, 30000);
+        WaitForSingleObject(sei.hProcess, 120000);
         GetExitCodeProcess(sei.hProcess, &code);
         CloseHandle(sei.hProcess);
     }
@@ -452,6 +452,11 @@ bool IndexClient::ConfigureExcludePathElevated(const std::wstring& path, bool en
     const std::wstring parameters = L"--configure-exclude " + QuoteCommandArg(path) +
                                     (enabled ? L" --enable" : L" --disable");
     return RunElevatedIndexCommand(ExePath(), parameters);
+}
+
+bool IndexClient::ExportDiagnosticsElevated(const std::wstring& empty_directory) {
+    return RunElevatedIndexCommand(ExePath(),
+        L"--export-diagnostics " + QuoteCommandArg(empty_directory));
 }
 
 } // namespace pulse::index

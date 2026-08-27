@@ -45,6 +45,7 @@ struct IndexConfig {
 std::wstring NormalizeVolumeId(std::wstring id);
 std::vector<VolumeInfo> EnumerateLocalVolumes(const IndexConfig& config);
 
+std::wstring MachineDataRoot();
 std::wstring MachineIndexRoot();
 std::wstring UserIndexRoot();
 std::wstring MachineConfigPath();

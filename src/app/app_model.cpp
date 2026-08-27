@@ -1,6 +1,7 @@
 // app_model.cpp
 #include "app_model.h"
 #include "../common/json_utils.h"
+#include "../common/localization.h"
 #include "../common/text_format.h"
 #include <commctrl.h>
 #include <prsht.h>
@@ -11,93 +12,6 @@
 #include <utility>
 
 namespace pulse::app {
-
-int MoveTabRun(std::vector<int>& order, int pos, int len, int dir) {
-    const int n = static_cast<int>(order.size());
-    if (pos < 0 || len < 1 || pos + len > n) return pos;
-    if (dir < 0 && pos > 0) {
-        std::rotate(order.begin() + pos - 1, order.begin() + pos,
-                    order.begin() + pos + len);
-        return pos - 1;
-    }
-    if (dir > 0 && pos + len < n) {
-        std::rotate(order.begin() + pos, order.begin() + pos + len,
-                    order.begin() + pos + len + 1);
-        return pos + 1;
-    }
-    return pos;
-}
-
-float CollapsedChipBlockW(float chip_w, float chip_gap) {
-    return chip_w + chip_gap;
-}
-
-bool ChipBlockCrossed(float block_left, float block_w, float neighbor_center, int dir) {
-    if (dir < 0) return block_left < neighbor_center;
-    if (dir > 0) return block_left + block_w > neighbor_center;
-    return false;
-}
-
-float DisplacedRestDelta(float old_rest, float cur_off, float new_rest) {
-    return old_rest + cur_off - new_rest;
-}
-
-GroupRun FindGroupRun(const std::vector<int>& order,
-                      const std::vector<int>& tab_group_of,
-                      int at, int gid) {
-    const int n = static_cast<int>(order.size());
-    if (gid == 0 || at < 0 || at >= n) return {};
-    const int tab = order[static_cast<size_t>(at)];
-    if (tab < 0 || tab >= static_cast<int>(tab_group_of.size()) ||
-        tab_group_of[static_cast<size_t>(tab)] != gid)
-        return {};
-    auto groupAt = [&](int p) {
-        const int t = order[static_cast<size_t>(p)];
-        return t >= 0 && t < static_cast<int>(tab_group_of.size())
-            ? tab_group_of[static_cast<size_t>(t)] : 0;
-    };
-    int pos = at;
-    while (pos > 0 && groupAt(pos - 1) == gid) --pos;
-    int end = at;
-    while (end + 1 < n && groupAt(end + 1) == gid) ++end;
-    return GroupRun{ pos, end - pos + 1 };
-}
-
-void NormalizeGroupRuns(Pane& pane) {
-    // Group ids in first-appearance order.
-    std::vector<int> groups;
-    for (const auto& t : pane.tabs) {
-        const int g = t->tab_group;
-        if (g != 0 && std::find(groups.begin(), groups.end(), g) == groups.end())
-            groups.push_back(g);
-    }
-    if (groups.empty()) return;
-    const Tab* active = pane.ActiveTab() ? pane.ActiveTab() : nullptr;
-    for (const int gid : groups) {
-        std::vector<size_t> members;
-        for (size_t i = 0; i < pane.tabs.size(); ++i)
-            if (pane.tabs[i]->tab_group == gid) members.push_back(i);
-        if (members.size() < 2) continue;
-        if (members.back() - members.front() + 1 == members.size()) continue;
-        // Extract members (descending erase keeps lower indices valid), then
-        // reinsert the run at the first member's slot.
-        std::vector<std::unique_ptr<Tab>> held;
-        held.reserve(members.size());
-        for (auto it = members.rbegin(); it != members.rend(); ++it) {
-            held.push_back(std::move(pane.tabs[*it]));
-            pane.tabs.erase(pane.tabs.begin() + static_cast<ptrdiff_t>(*it));
-        }
-        std::reverse(held.begin(), held.end());
-        const size_t at = std::min(members.front(), pane.tabs.size());
-        pane.tabs.insert(pane.tabs.begin() + static_cast<ptrdiff_t>(at),
-                         std::make_move_iterator(held.begin()),
-                         std::make_move_iterator(held.end()));
-    }
-    if (active) {
-        for (size_t i = 0; i < pane.tabs.size(); ++i)
-            if (pane.tabs[i].get() == active) { pane.active_tab = i; break; }
-    }
-}
 
 std::wstring NavigationReturnChildName(const std::wstring& from_path,
                                        const std::wstring& destination_path) {
@@ -241,6 +155,74 @@ void Tab::SelectAll() {
     if (selection_anchor < 0) selection_anchor = selected_index;
 }
 
+void Tab::SelectIndices(const std::vector<int>& indices) {
+    const int n = CountBound();
+    if (n <= 0 || indices.empty()) {
+        ClearSelection();
+        return;
+    }
+    selected.clear();
+    all_selected = false;
+    selected.reserve(indices.size());
+    int focus = -1;
+    for (int index : indices) {
+        if (index < 0 || index >= n) continue;
+        if (selected.insert(index).second && focus < 0) focus = index;
+    }
+    if (selected.empty()) {
+        selected_index = -1;
+        selection_anchor = -1;
+        return;
+    }
+    if (static_cast<int>(selected.size()) == n) {
+        all_selected = true;
+        selected.clear();
+    }
+    selected_index = focus;
+    selection_anchor = focus;
+}
+
+void Tab::InvertIndices(const std::vector<int>& universe) {
+    const int n = CountBound();
+    if (n <= 0) {
+        ClearSelection();
+        return;
+    }
+    if (universe.empty()) return;
+    MaterializeSelection();
+    std::unordered_set<int> uni;
+    uni.reserve(universe.size());
+    for (int index : universe) {
+        if (index >= 0 && index < n) uni.insert(index);
+    }
+    if (uni.empty()) return;
+    std::unordered_set<int> next;
+    next.reserve(selected.size() + uni.size());
+    for (int index : selected) {
+        if (!uni.contains(index)) next.insert(index);
+    }
+    for (int index : uni) {
+        if (!selected.contains(index)) next.insert(index);
+    }
+    selected = std::move(next);
+    all_selected = static_cast<int>(selected.size()) == n;
+    if (all_selected) selected.clear();
+    if (all_selected) {
+        if (selected_index < 0 || selected_index >= n) selected_index = 0;
+        if (selection_anchor < 0) selection_anchor = selected_index;
+        return;
+    }
+    if (selected.empty()) {
+        selected_index = -1;
+        selection_anchor = -1;
+        return;
+    }
+    if (selected_index < 0 || !IsSelected(selected_index)) {
+        selected_index = *selected.begin();
+        selection_anchor = selected_index;
+    }
+}
+
 void Tab::MoveFocus(int index, bool extend) {
     const int n = CountBound();
     if (n <= 0) {
@@ -344,61 +326,120 @@ std::wstring Tab::GoUp() {
 }
 
 void Pane::NewTab(const std::wstring& path) {
-    auto t = std::make_unique<Tab>();
-    if (const Tab* source = ActiveTab()) {
-        t->view_mode = source->view_mode;
-        t->details_column_dividers = source->details_column_dividers;
-        t->search_column_dividers = source->search_column_dividers;
-    }
-    t->current_path = fs::NormalizePath(path);
-    t->loading = true;
-    tabs.push_back(std::move(t));
-    active_tab = tabs.size() - 1;
+    const ui::ViewMode mode = view.view_mode;
+    const auto columns = view.details_column_dividers;
+    const auto search_columns = view.search_column_dividers;
+    view = Tab{};
+    view.view_mode = mode;
+    view.details_column_dividers = columns;
+    view.search_column_dividers = search_columns;
+    view.current_path = fs::NormalizePath(path);
+    view.loading = true;
 }
 
-void Pane::NewTabAt(size_t index, const std::wstring& path) {
-    auto t = std::make_unique<Tab>();
-    if (const Tab* source = ActiveTab()) {
-        t->view_mode = source->view_mode;
-        t->details_column_dividers = source->details_column_dividers;
-        t->search_column_dividers = source->search_column_dividers;
+Pane* LayoutTab::FocusedPane() {
+    if (panes.empty()) return nullptr;
+    size_t i = focused_index < 0 ? 0 : static_cast<size_t>(focused_index);
+    if (i >= panes.size()) i = panes.size() - 1;
+    return panes[i].get();
+}
+
+const Pane* LayoutTab::FocusedPane() const {
+    if (panes.empty()) return nullptr;
+    size_t i = focused_index < 0 ? 0 : static_cast<size_t>(focused_index);
+    if (i >= panes.size()) i = panes.size() - 1;
+    return panes[i].get();
+}
+
+Tab* LayoutTab::ActiveFolder() {
+    Pane* pane = FocusedPane();
+    return pane ? pane->ActiveTab() : nullptr;
+}
+
+const Tab* LayoutTab::ActiveFolder() const {
+    const Pane* pane = FocusedPane();
+    return pane ? pane->ActiveTab() : nullptr;
+}
+
+std::unique_ptr<LayoutTab> MakeSingleLayoutTab(const std::wstring& path, const Tab* source) {
+    auto tab = std::make_unique<LayoutTab>();
+    auto pane = std::make_unique<Pane>();
+    pane->focused = true;
+    if (source) {
+        pane->view.view_mode = source->view_mode;
+        pane->view.details_column_dividers = source->details_column_dividers;
+        pane->view.search_column_dividers = source->search_column_dividers;
     }
-    t->current_path = fs::NormalizePath(path);
-    t->loading = true;
-    // New tabs are never pinned: the pinned block is a prefix (Chrome).
+    pane->NewTab(path.empty() ? L"C:\\" : path);
+    tab->panes.push_back(std::move(pane));
+    tab->root = SplitContainer::CreateLeaf(tab->panes[0].get());
+    tab->layout = LayoutPreset::Single;
+    tab->focused_index = 0;
+    return tab;
+}
+
+void RebuildLayoutRoot(LayoutTab& tab) {
+    const size_t n = LayoutPresetCount(tab.layout);
+    std::vector<Pane*> used;
+    used.reserve(n);
+    for (size_t i = 0; i < n && i < tab.panes.size(); ++i)
+        used.push_back(tab.panes[i].get());
+    if (used.empty() && !tab.panes.empty()) used.push_back(tab.panes[0].get());
+    tab.root = used.empty() ? nullptr : MakePresetTree(tab.layout, used);
+}
+
+void WindowTabs::EnsureDefault() {
+    if (!items.empty()) return;
+    auto tab = std::make_unique<LayoutTab>();
+    auto pane = std::make_unique<Pane>();
+    pane->focused = true;
+    tab->panes.push_back(std::move(pane));
+    tab->root = SplitContainer::CreateLeaf(tab->panes[0].get());
+    items.push_back(std::move(tab));
+    active = 0;
+}
+
+LayoutTab& WindowTabs::NewTab(const std::wstring& path) {
+    return NewTabAt(items.size(), path);
+}
+
+LayoutTab& WindowTabs::NewTabAt(size_t index, const std::wstring& path) {
+    const Tab* source = Active() ? Active()->ActiveFolder() : nullptr;
+    auto tab = MakeSingleLayoutTab(path, source);
     size_t first_unpinned = 0;
-    while (first_unpinned < tabs.size() && tabs[first_unpinned]->pinned)
+    while (first_unpinned < items.size() && items[first_unpinned]->pinned)
         ++first_unpinned;
-    index = std::clamp(index, first_unpinned, tabs.size());
-    tabs.insert(tabs.begin() + static_cast<ptrdiff_t>(index), std::move(t));
-    active_tab = index;
+    index = std::clamp(index, first_unpinned, items.size());
+    auto it = items.insert(items.begin() + static_cast<ptrdiff_t>(index), std::move(tab));
+    active = index;
+    return **it;
 }
 
-void Pane::CloseTab(size_t idx) {
-    if (idx >= tabs.size()) return;
-    if (tabs.size() <= 1) return;
-    if (tabs[idx]->pinned) return; // pinned tabs refuse to close (Chrome)
-    tabs.erase(tabs.begin() + idx);
-    if (active_tab >= tabs.size()) active_tab = tabs.size() - 1;
+void WindowTabs::CloseTab(size_t idx) {
+    if (idx >= items.size() || items.size() <= 1) return;
+    if (items[idx]->pinned) return;
+    items.erase(items.begin() + static_cast<ptrdiff_t>(idx));
+    if (active >= items.size()) active = items.size() - 1;
+    else if (idx < active) --active;
 }
 
-void Pane::SwitchTab(size_t idx) {
-    if (idx < tabs.size()) active_tab = idx;
+void WindowTabs::SwitchTab(size_t idx) {
+    if (idx < items.size()) active = idx;
 }
 
-void Pane::MoveTab(size_t from, size_t to) {
-    if (from >= tabs.size() || to >= tabs.size() || from == to) return;
+void WindowTabs::MoveTab(size_t from, size_t to) {
+    if (from >= items.size() || to >= items.size() || from == to) return;
 
-    auto moved = std::move(tabs[from]);
-    tabs.erase(tabs.begin() + static_cast<std::ptrdiff_t>(from));
-    tabs.insert(tabs.begin() + static_cast<std::ptrdiff_t>(to), std::move(moved));
+    auto moved = std::move(items[from]);
+    items.erase(items.begin() + static_cast<std::ptrdiff_t>(from));
+    items.insert(items.begin() + static_cast<std::ptrdiff_t>(to), std::move(moved));
 
-    if (active_tab == from) {
-        active_tab = to;
-    } else if (from < active_tab && active_tab <= to) {
-        --active_tab;
-    } else if (to <= active_tab && active_tab < from) {
-        ++active_tab;
+    if (active == from) {
+        active = to;
+    } else if (from < active && active <= to) {
+        --active;
+    } else if (to <= active && active < from) {
+        ++active;
     }
 }
 
@@ -613,14 +654,15 @@ std::wstring FindGitRoot(const std::wstring& path) {
 }
 
 static std::wstring TabTitle(const std::wstring& path) {
-    if (path.empty()) return L"This PC";
+    if (path.empty()) return l10n::Get(l10n::StringId::ThisPc);
     std::wstring kind, rest;
     if (ParsePulsePath(path, &kind, &rest)) {
-        if (kind == L"settings") return L"设置";
-        if (kind == L"starred") return L"星标项目";
-        if (kind == L"recent") return L"最近使用";
-        if (kind == L"search") return rest.empty() ? L"搜索" : L"搜索";
-        if (kind == L"tag") return rest.empty() ? L"标签" : rest;
+        if (kind == L"settings") return l10n::Get(l10n::StringId::Settings);
+        if (kind == L"starred") return l10n::Get(l10n::StringId::StarredItems);
+        if (kind == L"recent") return l10n::Get(l10n::StringId::Recent);
+        if (kind == L"recycle") return l10n::Get(l10n::StringId::RecycleBin);
+        if (kind == L"search") return l10n::Get(l10n::StringId::Search);
+        if (kind == L"tag") return rest.empty() ? l10n::Get(l10n::StringId::Tag) : rest;
     }
     std::wstring_view v = path;
     if (v.size() > 1 && v.back() == L'\\') v.remove_suffix(1);
@@ -631,7 +673,7 @@ static std::wstring TabTitle(const std::wstring& path) {
 }
 
 static std::wstring DisplayPath(const std::wstring& path) {
-    if (path.empty()) return L"This PC";
+    if (path.empty()) return l10n::Get(l10n::StringId::ThisPc);
     // Keep the UNC prefix. Dropping it turns \\server\share into a relative
     // path; breadcrumb clicks then resolve against the process CWD.
     if (path.starts_with(L"\\\\?\\UNC\\")) return L"\\\\" + path.substr(8);
@@ -789,13 +831,13 @@ static SidebarEntry MakeKnownEntry(REFKNOWNFOLDERID fid, const wchar_t* glyph, c
     return e;
 }
 
-SidebarModel BuildSidebarModel() {
+SidebarModel BuildSidebarModel(const fs::RecycleBinInfo* recycle) {
     SidebarModel m;
     SidebarEntry starred;
     starred.glyph = L"\xE735";
     starred.fallback = L"Starred";
     starred.color = ui::HexColor(0xFBBF24);
-    starred.label = L"星标项目";
+    starred.label = l10n::Get(l10n::StringId::StarredItems);
     starred.path = MakeStarredPath();
     starred.expandable = true;
     m.quick_access.push_back(std::move(starred));
@@ -803,15 +845,30 @@ SidebarModel BuildSidebarModel() {
     recent.glyph = L"\xE823";
     recent.fallback = L"Recent";
     recent.color = ui::HexColor(0x60A5FA);
-    recent.label = L"最近使用";
+    recent.label = l10n::Get(l10n::StringId::Recent);
     recent.path = MakeRecentPath();
     m.quick_access.push_back(std::move(recent));
     SidebarEntry desktop = MakeKnownEntry(FOLDERID_Desktop, L"\xE7F4", L"Desktop",
-        ui::HexColor(0x38BDF8), L"\u684C\u9762"); // 桌面
-    desktop.badge = L"\u684C\u9762";
+        ui::HexColor(0x38BDF8), l10n::Get(l10n::StringId::Desktop).c_str());
+    desktop.badge = l10n::Get(l10n::StringId::Desktop);
+    desktop.badge_rgb = 0x0078D4;
     m.quick_access.push_back(std::move(desktop));
     m.quick_access.push_back(MakeKnownEntry(FOLDERID_Downloads, L"\xE896", L"Downloads",
         ui::HexColor(0xC084FC), L"Downloads"));
+    SidebarEntry recycle_bin;
+    recycle_bin.glyph = L"\xE75C";
+    recycle_bin.fallback = L"Bin";
+    recycle_bin.color = ui::HexColor(0x94A3B8);
+    recycle_bin.label = l10n::Get(l10n::StringId::RecycleBin);
+    recycle_bin.path = MakeRecyclePath();
+    if (recycle && recycle->valid) {
+        wchar_t occupancy[96]{};
+        swprintf_s(occupancy, l10n::Get(l10n::StringId::RecycleOccupancyFormat).c_str(),
+                   std::to_wstring(recycle->items).c_str(),
+                   pulse::format::ByteSize(recycle->bytes).c_str());
+        recycle_bin.detail = occupancy;
+    }
+    m.quick_access.push_back(std::move(recycle_bin));
 
     static const uint32_t kDrivePalette[] = { 0x60A5FA, 0x34D399, 0xFBBF24, 0xC084FC };
     DWORD drives = GetLogicalDrives();
@@ -824,7 +881,8 @@ SidebarModel BuildSidebarModel() {
         ULARGE_INTEGER freeBytes{}, totalBytes{};
         GetDiskFreeSpaceExW(root, &freeBytes, &totalBytes, nullptr);
         SidebarEntry e;
-        e.label = std::wstring(volName[0] ? volName : L"\u672C\u5730\u78C1\u76D8") + L" (" + root[0] + L":)"; // 本地磁盘
+        e.label = std::wstring(volName[0] ? volName : l10n::Get(l10n::StringId::LocalDisk).c_str()) +
+                  L" (" + root[0] + L":)";
         uint64_t total = totalBytes.QuadPart;
         uint64_t free = freeBytes.QuadPart;
         uint64_t used = total > free ? total - free : 0;
@@ -853,24 +911,24 @@ static std::wstring PaneHeaderText(const Tab& tab) {
 static std::wstring StatusText(const Tab& tab) {
     if (tab.loading || !tab.snapshot) return L"";
     wchar_t buf[128];
-    swprintf_s(buf, L"%zu \u4E2A\u9879\u76EE (%zu \u6587\u4EF6\u5939, %zu \u6587\u4EF6)",
+    swprintf_s(buf, l10n::Get(l10n::StringId::StatusItemsFormat).c_str(),
         tab.directory_count + tab.file_count, tab.directory_count, tab.file_count);
     return buf;
 }
 
 static std::wstring SelectionText(const Tab& tab) {
     const int count = tab.SelectedCount();
-    if (count <= 0) return L"\u672A\u9009\u4E2D"; // 未选中
+    if (count <= 0) return l10n::Get(l10n::StringId::NotSelected);
     if (count == 1 && tab.snapshot && tab.selected_index >= 0 &&
         tab.selected_index < static_cast<int>(tab.snapshot->size())) {
         const auto& e = (*tab.snapshot)[tab.selected_index];
         wchar_t buf[256];
-        swprintf_s(buf, L"\u5DF2\u9009\u4E2D 1 \u9879: %s  %s", e.name.c_str(),
-                   pulse::format::ByteSize(e.size, true).c_str()); // 已选中 1 项
+        swprintf_s(buf, l10n::Get(l10n::StringId::SelectedOneFormat).c_str(), e.name.c_str(),
+                   pulse::format::ByteSize(e.size, true).c_str());
         return buf;
     }
     wchar_t buf[64];
-    swprintf_s(buf, L"\u5DF2\u9009\u4E2D %d \u9879", count); // 已选中 N 项
+    swprintf_s(buf, l10n::Get(l10n::StringId::SelectedCountFormat).c_str(), count);
     return buf;
 }
 
@@ -891,6 +949,7 @@ static ui::SidebarGroup ConvertGroup(const std::wstring& header, const std::vect
         it.is_drive = e.is_drive;
         it.used_ratio = e.used_ratio;
         it.badge = e.badge;
+        it.badge_color = ui::HexColor(e.badge_rgb);
         it.is_tag = e.is_tag;
         it.show_count = e.show_count;
         it.count = e.count;
@@ -913,6 +972,39 @@ static std::wstring EntryPathOf(const Tab& tab, const fs::DirEntry& e) {
 static std::wstring ToLowerCopy(std::wstring s) {
     for (auto& c : s) c = static_cast<wchar_t>(std::towlower(c));
     return s;
+}
+
+static bool WildcardMatch(const std::wstring& text, const std::wstring& pat) {
+    size_t si = 0, pi = 0, star = static_cast<size_t>(-1), match = 0;
+    const size_t n = text.size();
+    const size_t pn = pat.size();
+    while (si < n) {
+        if (pi < pn && pat[pi] == L'*') {
+            star = pi++;
+            match = si;
+        } else if (pi < pn && (pat[pi] == L'?' || pat[pi] == text[si])) {
+            ++si;
+            ++pi;
+        } else if (star != static_cast<size_t>(-1)) {
+            pi = star + 1;
+            si = ++match;
+        } else {
+            return false;
+        }
+    }
+    while (pi < pn && pat[pi] == L'*') ++pi;
+    return pi == pn;
+}
+
+bool NameMatchesPattern(std::wstring_view name, std::wstring_view needle) {
+    if (needle.empty()) return true;
+    const std::wstring folded_name = ToLowerCopy(std::wstring(name));
+    const std::wstring folded_pat = ToLowerCopy(std::wstring(needle));
+    if (folded_pat.find(L'*') != std::wstring::npos ||
+        folded_pat.find(L'?') != std::wstring::npos) {
+        return WildcardMatch(folded_name, folded_pat);
+    }
+    return folded_name.find(folded_pat) != std::wstring::npos;
 }
 
 static void ParseFilterText(const std::wstring& text, std::wstring& name_needle,
@@ -945,6 +1037,43 @@ static bool TagMatchesNeedle(const ColorTag& tag, int index, const std::wstring&
     return false;
 }
 
+void CollectFilterMatches(const Tab& tab, const PlacesCatalog* places, std::vector<int>& out) {
+    out.clear();
+    if (!tab.snapshot) return;
+    const int n = static_cast<int>(tab.snapshot->size());
+    if (tab.filter_text.empty()) {
+        out.resize(static_cast<size_t>(n));
+        for (int i = 0; i < n; ++i) out[static_cast<size_t>(i)] = i;
+        return;
+    }
+    std::wstring name_needle;
+    std::vector<std::wstring> tag_needles;
+    ParseFilterText(tab.filter_text, name_needle, tag_needles);
+    if (name_needle.empty() && tag_needles.empty())
+        name_needle = ToLowerCopy(tab.filter_text);
+    out.reserve(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        const auto& e = (*tab.snapshot)[static_cast<size_t>(i)];
+        const bool name_ok = NameMatchesPattern(e.name, name_needle);
+        bool tag_ok = tag_needles.empty();
+        if (!tag_ok && places) {
+            const std::wstring full = EntryPathOf(tab, e);
+            const auto ids = places->TagsForPath(full);
+            for (int id : ids) {
+                if (id < 0 || id >= static_cast<int>(places->tags.size())) continue;
+                for (const auto& needle : tag_needles) {
+                    if (TagMatchesNeedle(places->tags[static_cast<size_t>(id)], id, needle)) {
+                        tag_ok = true;
+                        break;
+                    }
+                }
+                if (tag_ok) break;
+            }
+        }
+        if (name_ok && tag_ok) out.push_back(i);
+    }
+}
+
 void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCatalog* places) {
     const Tab* tab = pane.ActiveTab();
     if (!tab) return;
@@ -960,19 +1089,28 @@ void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCat
     out.loading = tab->loading;
     out.can_go_back = tab->CanGoBack();
     out.can_go_forward = tab->CanGoForward();
-    out.can_go_up = fs::IsVirtualPath(tab->current_path)
-        ? tab->CanGoBack() : !tab->current_path.empty();
-    out.is_file_system = !tab->current_path.empty() && !fs::IsVirtualPath(tab->current_path);
-    out.can_create = out.is_file_system && !tab->net_readonly;
     std::wstring virtual_kind;
     ParsePulsePath(tab->current_path, &virtual_kind, nullptr);
+    out.can_go_up = virtual_kind == L"recycle"
+        ? true
+        : (fs::IsVirtualPath(tab->current_path) ? tab->CanGoBack() : !tab->current_path.empty());
+    out.is_file_system = !tab->current_path.empty() && !fs::IsVirtualPath(tab->current_path);
+    out.can_create = out.is_file_system && !tab->net_readonly;
     out.curated_order = virtual_kind == L"starred" || virtual_kind == L"recent";
     out.is_starred = virtual_kind == L"starred";
     out.is_recent = virtual_kind == L"recent";
-    out.is_search = virtual_kind == L"search";
+    out.is_recycle = virtual_kind == L"recycle";
+    out.is_search = virtual_kind == L"search" || virtual_kind == L"saved-search"
+        || virtual_kind == L"recycle";
     out.recent_filter = tab->recent_filter;
     out.recent_total = out.is_recent && places ? places->recent_items.size() : 0;
-    out.date_column_label = out.is_recent ? L"最近打开" : L"修改日期";
+    if (virtual_kind == L"recycle") {
+        out.path = MakeRecyclePath();
+        out.date_column_label = l10n::Get(l10n::StringId::ColumnDeleted);
+    } else {
+        out.date_column_label = l10n::Get(out.is_recent
+            ? l10n::StringId::ColumnRecentOpened : l10n::StringId::ColumnModified);
+    }
     out.selected_index = tab->selected_index;
     out.selected_count = tab->SelectedCount();
     out.all_selected = tab->all_selected;
@@ -1011,38 +1149,59 @@ void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCat
     if (tab->snapshot && !tab->filter_text.empty()) {
         if (!tab->view_filter_map || tab->view_cache_filter_text != tab->filter_text) {
             auto filtered = std::make_shared<ui::PaneViewModel::FilterMap>();
-            std::wstring name_needle;
-            std::vector<std::wstring> tag_needles;
-            ParseFilterText(tab->filter_text, name_needle, tag_needles);
-            if (name_needle.empty() && tag_needles.empty())
-                name_needle = ToLowerCopy(tab->filter_text);
-            filtered->reserve(tab->snapshot->size());
-            for (int i = 0; i < static_cast<int>(tab->snapshot->size()); ++i) {
-                const auto& e = (*tab->snapshot)[static_cast<size_t>(i)];
-                std::wstring name = ToLowerCopy(e.name);
-                const bool name_ok = name_needle.empty() || name.find(name_needle) != std::wstring::npos;
-                bool tag_ok = tag_needles.empty();
-                if (!tag_ok && places) {
-                    const std::wstring full = EntryPathOf(*tab, e);
-                    const auto ids = places->TagsForPath(full);
-                    for (int id : ids) {
-                        if (id < 0 || id >= static_cast<int>(places->tags.size())) continue;
-                        for (const auto& needle : tag_needles) {
-                            if (TagMatchesNeedle(places->tags[static_cast<size_t>(id)], id, needle)) {
-                                tag_ok = true;
-                                break;
-                            }
-                        }
-                        if (tag_ok) break;
-                    }
-                }
-                if (name_ok && tag_ok) filtered->push_back(i);
-            }
+            CollectFilterMatches(*tab, places, *filtered);
             tab->view_cache_filter_text = tab->filter_text;
             tab->view_filter_map = std::move(filtered);
         }
         out.filter_map = tab->view_filter_map;
     }
+}
+
+std::wstring LayoutTabTitle(const LayoutTab& tab) {
+    if (!tab.title.empty()) return tab.title;
+    const Tab* view = tab.ActiveFolder();
+    if (!view) return {};
+    std::wstring name = view->virtual_title.empty()
+        ? TabTitle(view->current_path) : view->virtual_title;
+    const size_t n = LayoutPresetCount(tab.layout);
+    if (n > 1) {
+        name += L" · ";
+        name += std::to_wstring(n);
+    }
+    return name;
+}
+
+void FillWindowTabStrip(ui::WindowViewModel& vm, const WindowTabs& tabs) {
+    vm.tab_groups.clear();
+    vm.tabs.clear();
+    vm.tab_groups.reserve(tabs.tab_groups.size());
+    for (const auto& g : tabs.tab_groups) {
+        ui::TabGroupView gv;
+        gv.id = g.id;
+        gv.name = g.name;
+        gv.color_rgb = g.color_rgb;
+        gv.collapsed = g.collapsed;
+        vm.tab_groups.push_back(std::move(gv));
+    }
+    vm.tabs.reserve(tabs.items.size());
+    for (size_t i = 0; i < tabs.items.size(); ++i) {
+        ui::TabView tv;
+        tv.title = LayoutTabTitle(*tabs.items[i]);
+        tv.active = i == tabs.active;
+        tv.pinned = tabs.items[i]->pinned;
+        if (tabs.items[i]->tab_group != 0) {
+            for (size_t gi = 0; gi < tabs.tab_groups.size(); ++gi) {
+                if (tabs.tab_groups[gi].id == tabs.items[i]->tab_group) {
+                    tv.group = static_cast<int>(gi);
+                    tv.color_rgb = tabs.tab_groups[gi].color_rgb;
+                    tv.hidden = tabs.tab_groups[gi].collapsed;
+                    break;
+                }
+            }
+        }
+        vm.tabs.push_back(std::move(tv));
+    }
+    vm.active_tab = static_cast<int>(tabs.active);
 }
 
 ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
@@ -1060,45 +1219,16 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
     vm.can_go_back = tab->CanGoBack();
     vm.can_go_forward = tab->CanGoForward();
 
-    vm.tab_groups.reserve(pane.tab_groups.size());
-    for (const auto& g : pane.tab_groups) {
-        ui::TabGroupView gv;
-        gv.id = g.id;
-        gv.name = g.name;
-        gv.color_rgb = g.color_rgb;
-        gv.collapsed = g.collapsed;
-        vm.tab_groups.push_back(std::move(gv));
-    }
-    vm.tabs.reserve(pane.tabs.size());
-    for (size_t i = 0; i < pane.tabs.size(); ++i) {
-        ui::TabView tv;
-        tv.title = pane.tabs[i]->virtual_title.empty()
-            ? TabTitle(pane.tabs[i]->current_path) : pane.tabs[i]->virtual_title;
-        tv.active = i == pane.active_tab;
-        tv.pinned = pane.tabs[i]->pinned;
-        if (pane.tabs[i]->tab_group != 0) {
-            for (size_t gi = 0; gi < pane.tab_groups.size(); ++gi) {
-                if (pane.tab_groups[gi].id == pane.tabs[i]->tab_group) {
-                    tv.group = static_cast<int>(gi);
-                    tv.color_rgb = pane.tab_groups[gi].color_rgb;
-                    tv.hidden = pane.tab_groups[gi].collapsed;
-                    break;
-                }
-            }
-        }
-        vm.tabs.push_back(std::move(tv));
-    }
-    vm.active_tab = static_cast<int>(pane.active_tab);
-
     FillPaneViewModel(vm.pane, pane, places);
     vm.pane.focused = focused;
 
     vm.status.status_text = StatusText(*tab);
     vm.status.selection_text = SelectionText(*tab);
-    vm.status.mode_text = dark ? L"Windows 11 Fluent \u6DF1\u8272" : L"Windows 11 Fluent \u6D45\u8272"; // 深色 / 浅色
+    vm.status.mode_text = l10n::Get(dark ? l10n::StringId::ThemeDark
+                                         : l10n::StringId::ThemeLight);
 
     ui::SidebarGroup workspaces;
-    workspaces.header = L"\u5DE5\u4F5C\u533A"; // 工作区
+    workspaces.header = l10n::Get(l10n::StringId::SidebarWorkspaces);
     if (places) {
         for (int i = 0; i < static_cast<int>(places->workspaces.size()); ++i) {
             const auto& w = places->workspaces[static_cast<size_t>(i)];
@@ -1110,9 +1240,10 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
             it.icon_glyph = unc ? L"\xE968" : L"\xE8B7";
             it.fallback_text = L"WS";
             it.icon_color = ui::HexColor(unc ? 0x38BDF8 : 0x34D399);
-            if (unc) it.badge = L"服务器";
+            if (unc) it.badge = l10n::Get(l10n::StringId::Server);
             if (i == places->active_workspace)
-                it.badge = unc ? L"当前 · 服务器" : L"当前";
+                it.badge = l10n::Get(unc ? l10n::StringId::CurrentServer
+                                         : l10n::StringId::Current);
             workspaces.items.push_back(std::move(it));
             for (const auto& child : places->FrequentChildren(i, 8)) {
                 ui::SidebarItem sub;
@@ -1129,7 +1260,7 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
     vm.sidebar.push_back(std::move(workspaces));
 
     ui::SidebarGroup access = ConvertGroup(
-        L"\u5FEB\u901F\u8BBF\u95EE", sidebar.quick_access, false); // 快速访问
+        l10n::Get(l10n::StringId::SidebarQuickAccess), sidebar.quick_access, false);
     if (!access.items.empty()) {
         access.items[0].expandable = true;
         access.items[0].expanded = starred_expanded;
@@ -1156,7 +1287,10 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
     const std::wstring& gitRoot = tab->git_root;
     if (!gitRoot.empty() && (!places || !places->IsStarred(gitRoot))) {
         ui::SidebarItem project;
-        project.label = L"\u9879\u76EE " + TabTitle(gitRoot); // 项目
+        wchar_t project_label[512]{};
+        swprintf_s(project_label, l10n::Get(l10n::StringId::ProjectFormat).c_str(),
+                   TabTitle(gitRoot).c_str());
+        project.label = project_label;
         project.path = gitRoot;
         project.icon_glyph = L"\xE8B7";
         project.fallback_text = L"Repo";
@@ -1166,10 +1300,13 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
                             std::move(project));
     }
     vm.sidebar.push_back(std::move(access));
-    vm.sidebar.push_back(ConvertGroup(L"\u78C1\u76D8", sidebar.drives, false)); // 磁盘
+    vm.sidebar.push_back(ConvertGroup(l10n::Get(l10n::StringId::SidebarSavedSearches),
+                                      sidebar.saved_searches, false));
+    vm.sidebar.push_back(ConvertGroup(l10n::Get(l10n::StringId::SidebarDrives),
+                                      sidebar.drives, false));
 
     ui::SidebarGroup tags;
-    tags.header = L"\u6807\u7B7E"; // 标签
+    tags.header = l10n::Get(l10n::StringId::SidebarTags);
     tags.add_action = true;
     if (places) {
         for (int i = 0; i < static_cast<int>(places->tags.size()); ++i) {
@@ -1187,7 +1324,7 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
     vm.sidebar.push_back(std::move(tags));
 
     ui::SidebarGroup nets;
-    nets.header = L"\u7F51\u7EDC\u4F4D\u7F6E"; // 网络位置
+    nets.header = l10n::Get(l10n::StringId::SidebarNetworkLocations);
     nets.add_action = true;
     if (places) {
         for (const auto& n : places->networks) {

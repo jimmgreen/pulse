@@ -1,8 +1,11 @@
 // window_material.h — DWM backdrop + custom-image sampling for Mica / Acrylic.
 #pragma once
 #include "ui_compositor.h"
+#include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace pulse::ui {
 
@@ -28,6 +31,11 @@ void LogWindowMaterial(const char* fmt, ...);
 // luminosity blend, then color blend). DWM cannot retarget Mica at a bitmap.
 class WindowMaterial {
 public:
+    WindowMaterial() = default;
+    ~WindowMaterial();
+    WindowMaterial(const WindowMaterial&) = delete;
+    WindowMaterial& operator=(const WindowMaterial&) = delete;
+
     void SetCompositor(Compositor* compositor);
     void Invalidate();
 
@@ -40,7 +48,15 @@ public:
     bool DrawBackdrop(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
                       WindowEffect effect, bool dark, const std::wstring& path);
 
+#ifdef PULSE_WINDOW_MATERIAL_TESTING
+    void SetDecodeDelayForTesting(DWORD delay_ms);
+    uint64_t DecodeAttemptsForTesting() const;
+    bool DecodeFailedForTesting(const std::wstring& path);
+#endif
+
 private:
+    struct DecodeWorker;
+
     struct Recipe {
         float blur_std = 80.0f;
         float tint_opacity = 0.5f;
@@ -49,11 +65,24 @@ private:
     };
 
     static Recipe RecipeFor(WindowEffect effect, bool dark) noexcept;
+    void EnsureDecodeWorker();
+    void QueueDecode(const std::wstring& path);
+    void TakeDecodeResult();
+    void ResetGpuResources();
+    static DWORD WINAPI DecodeWorkerMain(void* parameter);
     ID2D1Bitmap* EnsureSampled(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
                                WindowEffect effect, bool dark, const std::wstring& path);
 
     Compositor* compositor_ = nullptr;
-    ComPtr<ID2D1Bitmap> source_;
+    std::shared_ptr<DecodeWorker> decode_worker_;
+    std::wstring requested_path_;
+    uint64_t requested_generation_ = 0;
+    std::vector<uint8_t> source_pixels_;
+    std::wstring source_pixels_path_;
+    UINT source_width_ = 0;
+    UINT source_height_ = 0;
+    UINT source_stride_ = 0;
+    ComPtr<ID2D1Bitmap1> source_;
     std::wstring source_path_;
     std::wstring source_failed_;
     ID2D1DeviceContext* source_dc_ = nullptr;

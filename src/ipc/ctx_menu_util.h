@@ -7,6 +7,7 @@
 #include <cwctype>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace pulse::ipc {
 
@@ -162,6 +163,28 @@ inline bool IsOpenWithMruText(std::wstring_view text) {
     if (t.size() >= 2 && t[0] == L'用' && t.find(L"打开") != std::wstring::npos)
         return true;
     if (t.find(L"open with ") == 0 || t.find(L"edit with ") == 0) return true;
+    return false;
+}
+
+inline const wchar_t* CompressCatalogKey() { return L"v:compress-to"; }
+inline const wchar_t* CompressCatalogText() { return L"压缩为…"; }
+inline const wchar_t* CompressFlyoutText() { return L"压缩"; }
+
+inline std::wstring HandlerCatalogKey(std::wstring_view clsid) {
+    return L"h:" + ToLowerVerb(clsid);
+}
+inline bool IsHandlerCatalogKey(std::wstring_view key) {
+    return key.size() > 2 && key[0] == L'h' && key[1] == L':';
+}
+inline std::wstring HandlerClsidFromKey(std::wstring_view key) {
+    return IsHandlerCatalogKey(key) ? std::wstring(key.substr(2)) : std::wstring{};
+}
+inline bool IsDisabledHandler(std::wstring_view clsid,
+                              const std::vector<std::wstring>& disabled) {
+    const std::wstring c = ToLowerVerb(clsid);
+    if (c.empty()) return false;
+    for (const auto& d : disabled)
+        if (ToLowerVerb(d) == c) return true;
     return false;
 }
 

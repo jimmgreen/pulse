@@ -46,6 +46,8 @@ void AppPrefs::ResetToDefaults() {
     launch_on_startup = false;
     keep_running_on_close = false;
     open_folders_in_pulse = false;
+    verify_copies = false;
+    language = L"system";
     window_effect = L"mica-alt";
     background_image.clear();
     row_height = 34;
@@ -56,14 +58,21 @@ void AppPrefs::ResetToDefaults() {
 std::wstring AppPrefs::ToJson() const {
     std::wstring escaped_effect;
     std::wstring escaped_image;
+    std::wstring escaped_language;
     pulse::json::Escape(window_effect, escaped_effect);
     pulse::json::Escape(background_image, escaped_image);
-    std::wstring out = L"{\n  \"version\":2,\n  \"launch_on_startup\":";
+    pulse::json::Escape(language, escaped_language);
+    std::wstring out = L"{\n  \"version\":4,\n  \"launch_on_startup\":";
     out += launch_on_startup ? L"true" : L"false";
     out += L",\n  \"keep_running_on_close\":";
     out += keep_running_on_close ? L"true" : L"false";
     out += L",\n  \"open_folders_in_pulse\":";
     out += open_folders_in_pulse ? L"true" : L"false";
+    out += L",\n  \"verify_copies\":";
+    out += verify_copies ? L"true" : L"false";
+    out += L",\n  \"language\":\"";
+    out += escaped_language;
+    out += L"\"";
     out += L",\n  \"window_effect\":\"";
     out += escaped_effect;
     out += L"\",\n  \"background_image\":\"";
@@ -96,6 +105,10 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     launch_on_startup = pulse::json::ExtractBool(json, L"launch_on_startup", false);
     keep_running_on_close = pulse::json::ExtractBool(json, L"keep_running_on_close", false);
     open_folders_in_pulse = pulse::json::ExtractBool(json, L"open_folders_in_pulse", false);
+    verify_copies = pulse::json::ExtractBool(json, L"verify_copies", false);
+    language = pulse::json::ExtractString(json, L"language", L"system");
+    if (language != L"system" && language != L"zh-CN" && language != L"en-US")
+        language = L"system";
     window_effect = pulse::json::ExtractString(json, L"window_effect", L"mica-alt");
     if (window_effect == L"dwm-blur") window_effect = L"acrylic-material";
     else if (window_effect.empty()) window_effect = L"mica-alt";
@@ -302,6 +315,22 @@ void NotifyAssocChanged() {
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
 }
 
+bool FolderOpenClassIsConfigured(const wchar_t* cls, const std::wstring& exe) {
+    const std::wstring command = ReadRegDefault(FolderOpenKey(cls) + L"\\command");
+    if (!FolderOpenCommandIsOurs(command, exe)) return false;
+    // Keep the repair path for older installs that wrote the command but left
+    // the class default verb as "none" (the HKLM default).
+    return _wcsicmp(ReadRegDefault(FolderShellKey(cls)).c_str(), L"open") == 0;
+}
+
+bool FolderOpenClassNeedsClear(const wchar_t* cls, const std::wstring& exe) {
+    const std::wstring command = ReadRegDefault(FolderOpenKey(cls) + L"\\command");
+    if (!command.empty()) return FolderOpenCommandIsOurs(command, exe);
+    // A previous cleanup or an interrupted registration can leave only the
+    // HKCU shell default behind; ClearFolderOpenClass removes that residue.
+    return _wcsicmp(ReadRegDefault(FolderShellKey(cls)).c_str(), L"open") == 0;
+}
+
 } // namespace
 
 bool AppPrefs::ReadFolderOpen() const {
@@ -318,11 +347,24 @@ bool AppPrefs::ApplyFolderOpen(bool on) {
     const std::wstring exe = ExePath();
     if (exe.empty()) return false;
     bool ok = true;
+    bool changed = false;
     for (const wchar_t* cls : kFolderOpenClasses) {
-        if (on) ok = WriteFolderOpenClass(cls, exe) && ok;
-        else ok = ClearFolderOpenClass(cls, exe) && ok;
+        if (on) {
+            // Load() calls this to repair old registrations. Avoid rewriting
+            // an already-correct association and rebroadcasting a global
+            // Explorer refresh every time Pulse is launched by the shell.
+            if (!FolderOpenClassIsConfigured(cls, exe)) {
+                changed = true;
+                ok = WriteFolderOpenClass(cls, exe) && ok;
+            }
+        } else {
+            if (FolderOpenClassNeedsClear(cls, exe)) {
+                changed = true;
+                ok = ClearFolderOpenClass(cls, exe) && ok;
+            }
+        }
     }
-    NotifyAssocChanged();
+    if (changed) NotifyAssocChanged();
     return ok;
 }
 

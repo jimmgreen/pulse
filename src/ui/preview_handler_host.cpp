@@ -1,4 +1,5 @@
 #include "preview_handler_host.h"
+#include "../common/preview_extensions.h"
 #include "../common/path_utils.h"
 #include <shobjidl.h>
 #include <shlobj.h>
@@ -6,8 +7,12 @@
 #include <propsys.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cwctype>
+#include <memory>
+#include <mutex>
+#include <optional>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -18,10 +23,7 @@ namespace pulse::ui {
 namespace {
 
 constexpr wchar_t kClassName[] = L"PulsePreviewHandlerHost";
-constexpr UINT kOpenTimer = 1;
-constexpr UINT kFixupTimer = 2;
 constexpr UINT kOpenDelayMs = 100;
-constexpr UINT kFixupDelayMs = 50;
 constexpr wchar_t kPreviewHandlerIid[] = L"{8895b1c6-b41f-4c1c-a562-0d564250836f}";
 constexpr CLSID kQueryAssociations = {
     0xa07034fd, 0x6caa, 0x4954, {0xac, 0x3f, 0x97, 0xa2, 0x72, 0x16, 0xf9, 0x8a}
@@ -43,8 +45,12 @@ struct ClsidEq {
     }
 };
 
-std::unordered_map<CLSID, ComPtr<IClassFactory>, ClsidHash, ClsidEq> g_factories;
-bool g_class_registered = false;
+thread_local std::unordered_map<CLSID, ComPtr<IClassFactory>, ClsidHash, ClsidEq> g_factories;
+std::mutex g_association_mutex;
+std::once_flag g_register_class_once;
+#ifdef PULSE_PREVIEW_HANDLER_TESTING
+std::atomic<uint32_t> g_test_open_attempts{0};
+#endif
 
 std::wstring ShellPath(const std::wstring& path) {
     return pulse::path::StripExtendedPathPrefix(path);
@@ -65,16 +71,7 @@ bool IsOneOf(std::wstring_view extension, std::initializer_list<std::wstring_vie
 }
 
 bool IsNativePreviewExtension(std::wstring_view extension) {
-    return IsOneOf(extension, {
-        L".jpg", L".jpeg", L".png", L".gif", L".bmp", L".tif", L".tiff",
-        L".webp", L".heic", L".ico",
-        L".txt", L".md", L".log", L".json", L".xml", L".yaml", L".yml",
-        L".ini", L".cfg", L".conf", L".csv", L".tsv", L".cpp", L".c",
-        L".h", L".hpp", L".cc", L".cxx", L".cs", L".java", L".js",
-        L".jsx", L".ts", L".tsx", L".py", L".rs", L".go", L".php",
-        L".html", L".htm", L".css", L".scss", L".sql", L".ps1", L".bat",
-        L".cmd", L".sh", L".qml", L".cmake", L".toml", L".properties"
-    });
+    return pulse::preview::IsNativeExtension(extension);
 }
 
 bool IsOfflinePlaceholder(DWORD attrs) {
@@ -87,6 +84,7 @@ bool FindPreviewHandlerClsid(const std::wstring& extension, CLSID& clsid) {
     }
     static std::unordered_map<std::wstring, CLSID> cache;
     static std::unordered_map<std::wstring, bool> negative;
+    std::lock_guard<std::mutex> lock(g_association_mutex);
     if (auto it = cache.find(extension); it != cache.end()) {
         clsid = it->second;
         return true;
@@ -128,13 +126,7 @@ ComPtr<IClassFactory> FactoryFor(const CLSID& clsid) {
     ComPtr<IClassFactory> factory;
     HRESULT hr = CoGetClassObject(clsid, CLSCTX_LOCAL_SERVER, nullptr,
                                   IID_PPV_ARGS(&factory));
-    if (FAILED(hr) || !factory) {
-        factory.Reset();
-        hr = CoGetClassObject(clsid, CLSCTX_INPROC_SERVER | CLSCTX_LOCAL_SERVER | CLSCTX_INPROC_HANDLER,
-                              nullptr, IID_PPV_ARGS(&factory));
-    }
     if (FAILED(hr) || !factory) return {};
-    factory->LockServer(TRUE);
     g_factories[clsid] = factory;
     return factory;
 }
@@ -157,10 +149,6 @@ ComPtr<IUnknown> CreateHandler(const CLSID& clsid) {
         ComPtr<IUnknown> unknown;
         HRESULT hr = CoCreateInstance(clsid, nullptr, CLSCTX_LOCAL_SERVER,
                                       IID_PPV_ARGS(&unknown));
-        if (FAILED(hr) || !unknown) {
-            unknown.Reset();
-            hr = CoCreateInstance(clsid, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&unknown));
-        }
         if (SUCCEEDED(hr) && unknown) return unknown;
         if (hr != kServerExecFailure) break;
     }
@@ -237,14 +225,14 @@ bool InitWithFile(IUnknown* handler, const std::wstring& path) {
 }
 
 void RegisterClassOnce() {
-    if (g_class_registered) return;
-    WNDCLASSEXW wc{sizeof(wc)};
-    wc.lpfnWndProc = PreviewHandlerHost::WndProc;
-    wc.hInstance = GetModuleHandleW(nullptr);
-    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.lpszClassName = kClassName;
-    if (RegisterClassExW(&wc) || GetLastError() == ERROR_CLASS_ALREADY_EXISTS)
-        g_class_registered = true;
+    std::call_once(g_register_class_once, [] {
+        WNDCLASSEXW wc{sizeof(wc)};
+        wc.lpfnWndProc = PreviewHandlerHost::WndProc;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.lpszClassName = kClassName;
+        RegisterClassExW(&wc);
+    });
 }
 
 } // namespace
@@ -256,307 +244,348 @@ bool PreviewHandlerHost::CanHost(const std::wstring& path) {
     return FindPreviewHandlerClsid(extension, clsid);
 }
 
+struct PreviewHandlerHost::WorkerState {
+    struct Command {
+        HWND owner = nullptr;
+        HWND notify = nullptr;
+        RECT bounds{};
+        std::wstring path;
+        std::wstring identity;
+        DWORD attrs = 0;
+        bool enabled = false;
+        bool app_active = true;
+        bool immediate = false;
+    };
+
+    ~WorkerState() {
+        if (thread) CloseHandle(thread);
+        if (wake) CloseHandle(wake);
+    }
+
+    bool EnsureWindow() {
+        if (hwnd && IsWindow(hwnd)) return true;
+        hwnd = nullptr;
+        if (!owner || !IsWindow(owner)) return false;
+        RegisterClassOnce();
+        hwnd = CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kClassName, L"",
+            WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+            0, 0, 0, 0, owner, nullptr, GetModuleHandleW(nullptr), this);
+        return hwnd != nullptr;
+    }
+
+    bool OverlayOwnsForeground() const {
+        HWND foreground = GetForegroundWindow();
+        if (!foreground || !hwnd) return false;
+        if (foreground == hwnd || IsChild(hwnd, foreground) ||
+            GetAncestor(foreground, GA_ROOT) == hwnd) return true;
+        for (HWND walk = foreground; walk; walk = GetWindow(walk, GW_OWNER)) {
+            if (walk == hwnd) return true;
+        }
+        return false;
+    }
+
+    void HideWindow() {
+        if (hwnd) {
+            SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW);
+        }
+        shown = false;
+        placed_x = INT_MIN;
+        placed_y = INT_MIN;
+    }
+
+    void PlaceOverlay() {
+        if (!hwnd || !owner) return;
+        POINT origin{bounds.left, bounds.top};
+        if (!ClientToScreen(owner, &origin)) return;
+        const int width = std::max(1L, bounds.right - bounds.left);
+        const int height = std::max(1L, bounds.bottom - bounds.top);
+        if (shown && !app_active && !OverlayOwnsForeground()) {
+            SetWindowPos(hwnd, HWND_NOTOPMOST, origin.x, origin.y, width, height,
+                         SWP_NOACTIVATE | SWP_HIDEWINDOW);
+            return;
+        }
+        const bool size_changed = width != placed_w || height != placed_h;
+        const bool moved = origin.x != placed_x || origin.y != placed_y || size_changed;
+        if (!moved && shown && IsWindowVisible(hwnd)) return;
+        placed_x = origin.x;
+        placed_y = origin.y;
+        placed_w = width;
+        placed_h = height;
+        SetWindowPos(hwnd, HWND_TOPMOST, origin.x, origin.y, width, height,
+                     SWP_NOACTIVATE | (shown ? SWP_SHOWWINDOW : SWP_NOREDRAW));
+        if (handler && shown && size_changed) {
+            ComPtr<IPreviewHandler> preview;
+            if (SUCCEEDED(handler->QueryInterface(IID_PPV_ARGS(&preview)))) {
+                RECT client{0, 0, width, height};
+                preview->SetRect(&client);
+            }
+        }
+    }
+
+    void Unload() {
+        if (handler) {
+            ComPtr<IPreviewHandler> preview;
+            if (SUCCEEDED(handler->QueryInterface(IID_PPV_ARGS(&preview))))
+                preview->Unload();
+            handler->Release();
+            handler = nullptr;
+        }
+        if (stream) {
+            stream->Release();
+            stream = nullptr;
+        }
+        if (site) {
+            site->Release();
+            site = nullptr;
+        }
+        shown = false;
+    }
+
+    bool OpenCurrent() {
+        Unload();
+        if (path.empty() || !EnsureWindow()) return false;
+        CLSID clsid{};
+        if (!FindPreviewHandlerClsid(ExtensionOf(path), clsid)) return false;
+        ComPtr<IUnknown> unknown = CreateHandler(clsid);
+        if (!unknown) return false;
+
+        site = new PreviewFrame(hwnd);
+        ComPtr<IObjectWithSite> object_with_site;
+        if (SUCCEEDED(unknown.As(&object_with_site)) && object_with_site)
+            object_with_site->SetSite(site);
+
+        const std::wstring open_path = ShellPath(path);
+        const bool file_ok = InitWithFile(unknown.Get(), open_path);
+        const bool item_ok = !file_ok && InitWithItem(unknown.Get(), open_path);
+        const bool stream_ok = !file_ok && !item_ok &&
+            InitWithStream(unknown.Get(), open_path, &stream);
+        ComPtr<IPreviewHandler> preview;
+        if (!(file_ok || item_ok || stream_ok) || FAILED(unknown.As(&preview)) || !preview) {
+            Unload();
+            return false;
+        }
+        handler = unknown.Detach();
+        shown = true;
+        PlaceOverlay();
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        if (client.right <= client.left || client.bottom <= client.top ||
+            FAILED(preview->SetWindow(hwnd, &client))) {
+            Unload();
+            HideWindow();
+            return false;
+        }
+        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        if (FAILED(preview->DoPreview())) {
+            Unload();
+            HideWindow();
+            return false;
+        }
+        preview->SetRect(&client);
+        // Office handlers may paint directly into the host. Wake their child
+        // windows without erasing the pixels DoPreview has already produced.
+        RedrawWindow(hwnd, nullptr, nullptr,
+                     RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_NOERASE);
+        return true;
+    }
+
+    std::mutex mutex;
+    Command command;
+    uint64_t command_version = 0;
+    bool stop = false;
+    HANDLE wake = nullptr;
+    HANDLE thread = nullptr;
+    std::atomic<State> state{State::Idle};
+
+    HWND hwnd = nullptr;
+    HWND owner = nullptr;
+    HWND notify = nullptr;
+    RECT bounds{};
+    std::wstring path;
+    std::wstring identity;
+    std::wstring pending_identity;
+    DWORD attrs = 0;
+    bool app_active = true;
+    bool shown = false;
+    int placed_x = INT_MIN;
+    int placed_y = INT_MIN;
+    int placed_w = 0;
+    int placed_h = 0;
+    IUnknown* handler = nullptr;
+    IUnknown* stream = nullptr;
+    IUnknown* site = nullptr;
+};
+
 PreviewHandlerHost::PreviewHandlerHost() = default;
 
 PreviewHandlerHost::~PreviewHandlerHost() {
-    Reset();
+    auto worker = worker_;
+    if (!worker) return;
+    {
+        std::lock_guard<std::mutex> lock(worker->mutex);
+        worker->stop = true;
+    }
+    SetEvent(worker->wake);
+    if (worker->thread) WaitForSingleObject(worker->thread, 100);
+    worker_.reset();
+}
+
+void PreviewHandlerHost::EnsureWorker() {
+    if (worker_) return;
+    auto worker = std::make_shared<WorkerState>();
+    worker->wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!worker->wake) return;
+    auto* argument = new std::shared_ptr<WorkerState>(worker);
+    worker->thread = CreateThread(nullptr, 0, WorkerMain, argument, 0, nullptr);
+    if (!worker->thread) {
+        delete argument;
+        return;
+    }
+    worker_ = std::move(worker);
+}
+
+PreviewHandlerHost::State PreviewHandlerHost::state() const {
+    return worker_ ? worker_->state.load(std::memory_order_acquire) : State::Idle;
 }
 
 void PreviewHandlerHost::SetNotifyWindow(HWND hwnd) {
     notify_ = hwnd;
-    if (!hwnd) Reset();
+    if (!hwnd) {
+        Reset();
+        return;
+    }
+    if (!worker_) return;
+    {
+        std::lock_guard<std::mutex> lock(worker_->mutex);
+        worker_->command.notify = hwnd;
+        ++worker_->command_version;
+    }
+    SetEvent(worker_->wake);
+}
+
+void PreviewHandlerHost::Publish(bool enabled, HWND owner, const RECT& bounds,
+                                 const std::wstring& path, const std::wstring& identity,
+                                 DWORD attrs, bool immediate) {
+    EnsureWorker();
+    if (!worker_) return;
+    WorkerState::Command command;
+    command.owner = owner;
+    command.notify = notify_;
+    command.bounds = bounds;
+    command.path = path;
+    command.identity = identity;
+    command.attrs = attrs;
+    command.enabled = enabled;
+    command.app_active = app_active_;
+    command.immediate = immediate;
+    {
+        std::lock_guard<std::mutex> lock(worker_->mutex);
+        worker_->command = std::move(command);
+        ++worker_->command_version;
+    }
+    SetEvent(worker_->wake);
 }
 
 void PreviewHandlerHost::Hide() {
-    if (hwnd_) {
-        KillTimer(hwnd_, kOpenTimer);
-        KillTimer(hwnd_, kFixupTimer);
-        SetWindowPos(hwnd_, HWND_NOTOPMOST, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW);
+    if (!worker_) {
+        last_enabled_ = false;
+        last_identity_.clear();
+        return;
     }
-    shown_ = false;
-    placed_x_ = INT_MIN;
-    placed_y_ = INT_MIN;
-    if (state_ == State::Shown) state_ = State::Idle;
+    RECT empty{};
+    worker_->state.store(State::Idle, std::memory_order_release);
+    Publish(false, nullptr, empty, {}, {}, 0, false);
+    last_enabled_ = false;
+    last_identity_.clear();
 }
 
 void PreviewHandlerHost::Reset() {
-    Unload();
-    if (hwnd_) {
-        KillTimer(hwnd_, kOpenTimer);
-        KillTimer(hwnd_, kFixupTimer);
-        HWND victim = hwnd_;
-        hwnd_ = nullptr;
-        DestroyWindow(victim);
-    }
-    owner_ = nullptr;
-    path_.clear();
-    identity_.clear();
-    pending_identity_.clear();
-    state_ = State::Idle;
-    shown_ = false;
+    Hide();
+    last_owner_ = nullptr;
+    last_bounds_ = {};
 }
 
-std::wstring PreviewHandlerHost::Identity(const std::wstring& path, uint64_t generation,
-                                          uint64_t modified, uint64_t size) const {
-    return path + L"\n" + std::to_wstring(generation) + L":" +
-           std::to_wstring(modified) + L":" + std::to_wstring(size);
-}
-
-bool PreviewHandlerHost::EnsureWindow() {
-    if (hwnd_ && IsWindow(hwnd_)) return true;
-    hwnd_ = nullptr;
-    if (!owner_ || !IsWindow(owner_)) return false;
-    RegisterClassOnce();
-    hwnd_ = CreateWindowExW(
-        WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kClassName, L"",
-        WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
-        0, 0, 0, 0, owner_, nullptr, GetModuleHandleW(nullptr), this);
-    return hwnd_ != nullptr;
-}
-
-bool PreviewHandlerHost::OverlayOwnsForeground() const {
-    HWND fg = GetForegroundWindow();
-    if (!fg || !hwnd_) return false;
-    if (fg == hwnd_ || IsChild(hwnd_, fg) || GetAncestor(fg, GA_ROOT) == hwnd_)
-        return true;
-    HWND walk = fg;
-    for (int i = 0; i < 8 && walk; ++i) {
-        if (walk == hwnd_) return true;
-        walk = GetWindow(walk, GW_OWNER);
+void PreviewHandlerHost::Reposition() {
+    auto worker = worker_;
+    if (!worker || !last_enabled_) return;
+    {
+        std::lock_guard<std::mutex> lock(worker->mutex);
+        if (!worker->command.enabled) return;
+        ++worker->command_version;
     }
-    return false;
-}
-
-void PreviewHandlerHost::PlaceOverlay() {
-    if (!hwnd_ || !owner_) return;
-    POINT origin{bounds_.left, bounds_.top};
-    ClientToScreen(owner_, &origin);
-    const int vw = std::max(1L, bounds_.right - bounds_.left);
-    const int vh = std::max(1L, bounds_.bottom - bounds_.top);
-    if (shown_ && !app_active_ && !OverlayOwnsForeground()) {
-        SetWindowPos(hwnd_, HWND_NOTOPMOST, origin.x, origin.y, vw, vh,
-                     SWP_NOACTIVATE | SWP_HIDEWINDOW);
-        return;
-    }
-    const bool moved = origin.x != placed_x_ || origin.y != placed_y_ ||
-        vw != placed_w_ || vh != placed_h_;
-    if (!moved && shown_ && IsWindowVisible(hwnd_)) return;
-    placed_x_ = origin.x;
-    placed_y_ = origin.y;
-    placed_w_ = vw;
-    placed_h_ = vh;
-    // TOPMOST only while Pulse is foreground: DComp would otherwise cover the
-    // overlay, but a sticky topmost window sits on every other app.
-    SetWindowPos(hwnd_, HWND_TOPMOST, origin.x, origin.y, vw, vh,
-                 SWP_NOACTIVATE | (shown_ ? SWP_SHOWWINDOW : SWP_NOREDRAW));
-    if (handler_ && shown_) {
-        ComPtr<IPreviewHandler> preview;
-        if (SUCCEEDED(handler_->QueryInterface(IID_PPV_ARGS(&preview)))) {
-            RECT client{0, 0, vw, vh};
-            preview->SetRect(&client);
-        }
-    }
+    SetEvent(worker->wake);
 }
 
 void PreviewHandlerHost::NotifyAppActivate(bool active) {
+    if (app_active_ == active) return;
     app_active_ = active;
-    if (!hwnd_ || !shown_) return;
-    if (!active) {
-        if (OverlayOwnsForeground()) return;
-        SetWindowPos(hwnd_, HWND_NOTOPMOST, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW);
-        return;
+    if (!worker_) return;
+    {
+        std::lock_guard<std::mutex> lock(worker_->mutex);
+        worker_->command.app_active = active;
+        ++worker_->command_version;
     }
-    placed_x_ = INT_MIN;
-    PlaceOverlay();
-}
-
-void PreviewHandlerHost::Unload() {
-    if (hwnd_) KillTimer(hwnd_, kOpenTimer);
-    if (hwnd_) KillTimer(hwnd_, kFixupTimer);
-    if (handler_) {
-        ComPtr<IPreviewHandler> preview;
-        if (SUCCEEDED(handler_->QueryInterface(IID_PPV_ARGS(&preview)))) {
-            preview->Unload();
-        }
-        handler_->Release();
-        handler_ = nullptr;
-    }
-    if (stream_) {
-        stream_->Release();
-        stream_ = nullptr;
-    }
-    if (site_) {
-        site_->Release();
-        site_ = nullptr;
-    }
-    shown_ = false;
-}
-
-void PreviewHandlerHost::ScheduleOpen() {
-    if (!EnsureWindow()) {
-        state_ = State::Failed;
-        return;
-    }
-    KillTimer(hwnd_, kOpenTimer);
-    SetTimer(hwnd_, kOpenTimer, kOpenDelayMs, nullptr);
-}
-
-bool PreviewHandlerHost::OpenCurrent() {
-    Unload();
-    if (path_.empty() || !EnsureWindow()) {
-        return false;
-    }
-    CLSID clsid{};
-    if (!FindPreviewHandlerClsid(ExtensionOf(path_), clsid)) {
-        return false;
-    }
-
-    ComPtr<IUnknown> unknown = CreateHandler(clsid);
-    if (!unknown) {
-        return false;
-    }
-
-    site_ = new PreviewFrame(hwnd_);
-    ComPtr<IObjectWithSite> object_with_site;
-    HRESULT site_hr = unknown.As(&object_with_site);
-    if (SUCCEEDED(site_hr) && object_with_site)
-        object_with_site->SetSite(site_);
-
-    const std::wstring open_path = ShellPath(path_);
-    const bool file_ok = InitWithFile(unknown.Get(), open_path);
-    const bool item_ok = file_ok ? false : InitWithItem(unknown.Get(), open_path);
-    const bool stream_ok = (file_ok || item_ok)
-        ? false : InitWithStream(unknown.Get(), open_path, &stream_);
-    bool initialized = file_ok || item_ok || stream_ok;
-    ComPtr<IPreviewHandler> preview;
-    HRESULT preview_qi = unknown.As(&preview);
-    if (initialized) initialized = SUCCEEDED(preview_qi) && preview;
-    if (!initialized) {
-        Unload();
-        return false;
-    }
-    handler_ = unknown.Detach();
-
-    shown_ = true;
-    PlaceOverlay();
-    RECT client{};
-    GetClientRect(hwnd_, &client);
-    if (client.right <= client.left || client.bottom <= client.top) {
-        Unload();
-        Hide();
-        return false;
-    }
-    HRESULT hr = preview->SetWindow(hwnd_, &client);
-    ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
-    hr = preview->DoPreview();
-    if (FAILED(hr)) {
-        Unload();
-        Hide();
-        return false;
-    }
-    hr = preview->SetRect(&client);
-    SetTimer(hwnd_, kFixupTimer, kFixupDelayMs, nullptr);
-    return true;
+    SetEvent(worker_->wake);
 }
 
 void PreviewHandlerHost::Sync(HWND owner, const D2D1_RECT_F& bounds, const std::wstring& path,
                               DWORD attrs, uint64_t generation, uint64_t modified, uint64_t size,
-                              bool dark, const D2D1_COLOR_F& bg, const D2D1_COLOR_F& fg, bool enabled) {
-    owner_ = owner;
-    dark_ = dark;
-    bg_ = bg;
-    fg_ = fg;
-    bounds_.left = static_cast<LONG>(std::lround(bounds.left));
-    bounds_.top = static_cast<LONG>(std::lround(bounds.top));
-    bounds_.right = static_cast<LONG>(std::lround(bounds.right));
-    bounds_.bottom = static_cast<LONG>(std::lround(bounds.bottom));
+                              bool dark, const D2D1_COLOR_F& bg, const D2D1_COLOR_F& fg,
+                              bool enabled, bool immediate) {
+    (void)dark;
+    (void)bg;
+    (void)fg;
+    RECT target{};
+    target.left = static_cast<LONG>(std::lround(bounds.left));
+    target.top = static_cast<LONG>(std::lround(bounds.top));
+    target.right = static_cast<LONG>(std::lround(bounds.right));
+    target.bottom = static_cast<LONG>(std::lround(bounds.bottom));
 
     const bool usable = enabled && owner && IsWindow(owner) && !IsIconic(owner) &&
-        IsWindowVisible(owner) && !IsOfflinePlaceholder(attrs) && CanHost(path) &&
-        bounds_.right > bounds_.left + 8 && bounds_.bottom > bounds_.top + 8;
+        IsWindowVisible(owner) && !IsOfflinePlaceholder(attrs) &&
+        target.right > target.left + 8 && target.bottom > target.top + 8;
     if (!usable) {
-        const bool had_content = handler_ != nullptr || state_ == State::Loading;
-        Unload();
-        Hide();
-        path_.clear();
-        identity_.clear();
-        pending_identity_.clear();
-        attrs_ = 0;
-        if (had_content) state_ = State::Idle;
+        if (last_enabled_) Hide();
         return;
     }
 
-    const std::wstring identity = Identity(path, generation, modified, size);
-    const bool same = identity == identity_ && handler_ && shown_;
-    path_ = path;
-    attrs_ = attrs;
-    if (same) {
-        state_ = State::Shown;
-        if (EnsureWindow()) PlaceOverlay();
+    const std::wstring identity = path + L"\n" + std::to_wstring(generation) + L":" +
+        std::to_wstring(modified) + L":" + std::to_wstring(size);
+    const bool same_bounds = EqualRect(&target, &last_bounds_) != FALSE;
+    if (last_enabled_ && owner == last_owner_ && identity == last_identity_ && same_bounds)
         return;
-    }
-    if (identity == pending_identity_ && state_ == State::Loading) {
-        if (EnsureWindow()) PlaceOverlay();
-        return;
-    }
-    if (identity == identity_ && state_ == State::Failed) {
-        Hide();
-        return;
-    }
-
-    Unload();
-    Hide();
-    identity_.clear();
-    pending_identity_ = identity;
-    state_ = State::Loading;
-    ScheduleOpen();
+    const bool new_content = !last_enabled_ || identity != last_identity_;
+    EnsureWorker();
+    if (!worker_) return;
+    last_enabled_ = true;
+    last_owner_ = owner;
+    last_bounds_ = target;
+    last_identity_ = identity;
+    if (new_content) worker_->state.store(State::Loading, std::memory_order_release);
+    Publish(true, owner, target, path, identity, attrs, immediate);
 }
 
 LRESULT CALLBACK PreviewHandlerHost::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    PreviewHandlerHost* self = reinterpret_cast<PreviewHandlerHost*>(
+    WorkerState* self = reinterpret_cast<WorkerState*>(
         GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (msg == WM_NCCREATE) {
         auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
-        self = static_cast<PreviewHandlerHost*>(cs->lpCreateParams);
+        self = static_cast<WorkerState*>(cs->lpCreateParams);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
     if (!self) return DefWindowProcW(hwnd, msg, wParam, lParam);
 
     switch (msg) {
-    case WM_TIMER:
-        if (wParam == kOpenTimer) {
-            KillTimer(hwnd, kOpenTimer);
-            const bool ok = self->OpenCurrent();
-            self->identity_ = self->pending_identity_;
-            self->pending_identity_.clear();
-            self->state_ = ok ? State::Shown : State::Failed;
-            if (!ok) self->Hide();
-            if (self->notify_) InvalidateRect(self->notify_, nullptr, FALSE);
-            return 0;
-        }
-        if (wParam == kFixupTimer) {
-            KillTimer(hwnd, kFixupTimer);
-            if (self->handler_ && self->shown_) {
-                ComPtr<IPreviewHandler> preview;
-                if (SUCCEEDED(self->handler_->QueryInterface(IID_PPV_ARGS(&preview)))) {
-                    RECT client{};
-                    GetClientRect(hwnd, &client);
-                    preview->SetRect(&client);
-                }
-                self->PlaceOverlay();
-            }
-            return 0;
-        }
-        break;
-    case WM_ACTIVATEAPP:
-        self->NotifyAppActivate(wParam != 0);
-        return 0;
     case WM_MOUSEACTIVATE:
         return MA_NOACTIVATE;
     case WM_ERASEBKGND: {
+        // Some Office previewers render into this host instead of an opaque
+        // child. Erasing after DoPreview replaces valid content with white
+        // until the next user input forces the handler to repaint.
+        if (self->handler) return 1;
         RECT rc{};
         GetClientRect(hwnd, &rc);
         HBRUSH brush = CreateSolidBrush(RGB(255, 255, 255));
@@ -565,11 +594,153 @@ LRESULT CALLBACK PreviewHandlerHost::WndProc(HWND hwnd, UINT msg, WPARAM wParam,
         return 1;
     }
     case WM_DESTROY:
-        if (self->hwnd_ == hwnd) self->hwnd_ = nullptr;
+        if (self->hwnd == hwnd) self->hwnd = nullptr;
         return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
-} // namespace pulse::ui
+DWORD WINAPI PreviewHandlerHost::WorkerMain(void* parameter) {
+    std::unique_ptr<std::shared_ptr<WorkerState>> argument(
+        static_cast<std::shared_ptr<WorkerState>*>(parameter));
+    std::shared_ptr<WorkerState> self = *argument;
+    const HRESULT com_result = CoInitializeEx(nullptr,
+        COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    if (FAILED(com_result)) {
+        self->state.store(State::Failed, std::memory_order_release);
+        return 0;
+    }
 
+    MSG message{};
+    PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE);
+    uint64_t applied_version = 0;
+    std::optional<std::chrono::steady_clock::time_point> open_due;
+    for (;;) {
+        WorkerState::Command command;
+        uint64_t version = 0;
+        bool stop = false;
+        {
+            std::lock_guard<std::mutex> lock(self->mutex);
+            stop = self->stop;
+            version = self->command_version;
+            command = self->command;
+        }
+        if (stop) break;
+
+        if (version != applied_version) {
+            if (command.owner != self->owner && self->hwnd) {
+                self->Unload();
+                self->HideWindow();
+                DestroyWindow(self->hwnd);
+                self->hwnd = nullptr;
+            }
+            self->owner = command.owner;
+            self->notify = command.notify;
+            self->bounds = command.bounds;
+            self->path = command.path;
+            self->attrs = command.attrs;
+            self->app_active = command.app_active;
+            if (!command.enabled) {
+                self->Unload();
+                self->HideWindow();
+                self->identity.clear();
+                self->pending_identity.clear();
+                open_due.reset();
+                self->state.store(State::Idle, std::memory_order_release);
+            } else if (command.identity == self->identity) {
+                self->pending_identity.clear();
+                open_due.reset();
+                self->shown = self->handler != nullptr;
+                self->state.store(self->shown ? State::Shown : State::Failed,
+                                  std::memory_order_release);
+                self->PlaceOverlay();
+            } else if (command.identity != self->pending_identity) {
+                self->HideWindow();
+                self->pending_identity = command.identity;
+                open_due = std::chrono::steady_clock::now() + std::chrono::milliseconds(
+                    command.immediate ? 0 : kOpenDelayMs);
+                self->state.store(State::Loading, std::memory_order_release);
+            } else {
+                self->PlaceOverlay();
+            }
+            applied_version = version;
+        }
+
+        if (open_due && std::chrono::steady_clock::now() >= *open_due) {
+            const std::wstring opening_identity = self->pending_identity;
+#ifdef PULSE_PREVIEW_HANDLER_TESTING
+            g_test_open_attempts.fetch_add(1, std::memory_order_relaxed);
+            wchar_t delay_text[16]{};
+            if (GetEnvironmentVariableW(L"PULSE_PREVIEW_HANDLER_TEST_DELAY_MS",
+                                        delay_text, ARRAYSIZE(delay_text)) > 0) {
+                const int delay = _wtoi(delay_text);
+                if (delay > 0) Sleep(static_cast<DWORD>(std::min(delay, 10000)));
+            }
+#endif
+            const bool opened = self->OpenCurrent();
+            bool current = false;
+            {
+                std::lock_guard<std::mutex> lock(self->mutex);
+                current = !self->stop && self->command.enabled &&
+                    self->command.identity == opening_identity;
+            }
+            if (current) {
+                self->identity = opening_identity;
+                self->pending_identity.clear();
+                self->state.store(opened ? State::Shown : State::Failed,
+                                  std::memory_order_release);
+                if (!opened) self->HideWindow();
+                if (self->notify) InvalidateRect(self->notify, nullptr, FALSE);
+            } else {
+                self->Unload();
+                self->HideWindow();
+            }
+            open_due.reset();
+            continue;
+        }
+
+        DWORD timeout = INFINITE;
+        if (open_due) {
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                *open_due - std::chrono::steady_clock::now()).count();
+            timeout = static_cast<DWORD>(std::clamp<int64_t>(remaining, 0, 1000));
+        }
+        const DWORD wait = MsgWaitForMultipleObjectsEx(
+            1, &self->wake, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        if (wait == WAIT_OBJECT_0 + 1) {
+            while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+    }
+
+    self->Unload();
+    self->HideWindow();
+    if (self->hwnd) DestroyWindow(self->hwnd);
+    self->hwnd = nullptr;
+    self->state.store(State::Idle, std::memory_order_release);
+    g_factories.clear();
+    CoUninitialize();
+    return 0;
+}
+
+#ifdef PULSE_PREVIEW_HANDLER_TESTING
+void ResetPreviewHandlerOpenAttemptsForTest() {
+    g_test_open_attempts.store(0, std::memory_order_relaxed);
+}
+
+uint32_t PreviewHandlerOpenAttemptsForTest() {
+    return g_test_open_attempts.load(std::memory_order_relaxed);
+}
+
+bool PreviewHandlerCanActivateIsolatedForTest(const std::wstring& path) {
+    CLSID clsid{};
+    if (!FindPreviewHandlerClsid(ExtensionOf(path), clsid)) return false;
+    ComPtr<IClassFactory> factory;
+    return SUCCEEDED(CoGetClassObject(clsid, CLSCTX_LOCAL_SERVER, nullptr,
+                                     IID_PPV_ARGS(&factory))) && factory;
+}
+#endif
+
+} // namespace pulse::ui

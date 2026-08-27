@@ -11,6 +11,7 @@
 #include <cstdio>
 
 namespace pulse::app {
+
 namespace {
 
 std::wstring FormatScaled3(const std::array<float, 3>& edges) {
@@ -80,47 +81,59 @@ std::vector<float> ParseScaledList(const std::wstring& value) {
 
 } // namespace
 
-std::wstring PaneTabsToJson(const std::vector<PaneSessionSnapshot>& panes) {
+std::wstring LayoutTabsToJson(const std::vector<LayoutTabSnapshot>& tabs) {
     std::wstring out = L"[";
-    for (size_t i = 0; i < panes.size(); ++i) {
+    for (size_t i = 0; i < tabs.size(); ++i) {
         if (i) out += L",";
-        const PaneSessionSnapshot& pane = panes[i];
-        out += L"{\"active\":";
-        out += std::to_wstring(pane.active);
-        out += L",\"groups\":[";
-        for (size_t g = 0; g < pane.groups.size(); ++g) {
-            if (g) out += L",";
-            const GroupSessionSnapshot& grp = pane.groups[g];
-            out += L"{\"id\":" + std::to_wstring(grp.id);
-            out += L",\"name\":\"";
-            std::wstring escaped;
-            pulse::json::Escape(grp.name, escaped);
-            out += escaped;
-            out += L"\",\"color\":" + std::to_wstring(grp.color_rgb);
-            out += L",\"collapsed\":";
-            out += grp.collapsed ? L"true" : L"false";
-            out += L"}";
-        }
-        out += L"],\"tabs\":[";
-        for (size_t t = 0; t < pane.tabs.size(); ++t) {
-            if (t) out += L",";
-            const TabSessionSnapshot& tab = pane.tabs[t];
+        const LayoutTabSnapshot& tab = tabs[i];
+        out += L"{\"pinned\":";
+        out += tab.pinned ? L"true" : L"false";
+        out += L",\"group\":" + std::to_wstring(tab.group);
+        out += L",\"title\":\"";
+        std::wstring escaped;
+        pulse::json::Escape(tab.title, escaped);
+        out += escaped;
+        out += L"\",\"layout\":" + std::to_wstring(tab.layout);
+        out += L",\"focused\":" + std::to_wstring(tab.focused);
+        out += L",\"target\":" + std::to_wstring(tab.target);
+        out += L",\"splitRatios\":\"";
+        out += FormatScaledList(tab.split_ratios);
+        out += L"\",\"panes\":[";
+        for (size_t p = 0; p < tab.panes.size(); ++p) {
+            if (p) out += L",";
+            const PaneFolderSnapshot& pane = tab.panes[p];
             out += L"{\"path\":\"";
-            std::wstring escaped;
-            pulse::json::Escape(tab.path, escaped);
+            escaped.clear();
+            pulse::json::Escape(pane.path, escaped);
             out += escaped;
-            out += L"\",\"pinned\":";
-            out += tab.pinned ? L"true" : L"false";
-            out += L",\"group\":" + std::to_wstring(tab.group);
-            out += L",\"view\":\"";
-            out += ui::ViewModeName(tab.view);
+            out += L"\",\"view\":\"";
+            out += ui::ViewModeName(pane.view);
             out += L"\",\"cols\":\"";
-            out += FormatScaled3(tab.columns);
+            out += FormatScaled3(pane.columns);
             out += L"\",\"searchCols\":\"";
-            out += FormatScaled4(tab.search_columns);
+            out += FormatScaled4(pane.search_columns);
             out += L"\"}";
         }
         out += L"]}";
+    }
+    out += L"]";
+    return out;
+}
+
+std::wstring TabGroupsToJson(const std::vector<GroupSessionSnapshot>& groups) {
+    std::wstring out = L"[";
+    for (size_t g = 0; g < groups.size(); ++g) {
+        if (g) out += L",";
+        const GroupSessionSnapshot& grp = groups[g];
+        out += L"{\"id\":" + std::to_wstring(grp.id);
+        out += L",\"name\":\"";
+        std::wstring escaped;
+        pulse::json::Escape(grp.name, escaped);
+        out += escaped;
+        out += L"\",\"color\":" + std::to_wstring(grp.color_rgb);
+        out += L",\"collapsed\":";
+        out += grp.collapsed ? L"true" : L"false";
+        out += L"}";
     }
     out += L"]";
     return out;
@@ -157,81 +170,91 @@ static bool SplitTopLevelObjects(const std::wstring& body,
     return depth == 0 && !inStr;
 }
 
-bool ParsePaneTabs(const std::wstring& array_json,
-                   std::vector<PaneSessionSnapshot>& out) {
+static bool ExtractJsonArray(const std::wstring& json, const wchar_t* key,
+                             std::wstring& body) {
+    size_t pos = pulse::json::ValuePosition(json, key);
+    if (pos == std::wstring::npos || pos >= json.size() || json[pos] != L'[')
+        return false;
+    int depth = 0;
+    bool inStr = false;
+    for (size_t i = pos; i < json.size(); ++i) {
+        wchar_t c = json[i];
+        if (inStr) {
+            if (c == L'\\') ++i;
+            else if (c == L'"') inStr = false;
+            continue;
+        }
+        if (c == L'"') inStr = true;
+        else if (c == L'[') ++depth;
+        else if (c == L']') {
+            if (--depth == 0) {
+                body = json.substr(pos + 1, i - pos - 1);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool ParseTabGroups(const std::wstring& array_json,
+                    std::vector<GroupSessionSnapshot>& out) {
     out.clear();
     if (array_json.size() < 2 || array_json.front() != L'[' ||
         array_json.back() != L']') {
         return false;
     }
-    std::vector<std::wstring> paneObjs;
-    if (!SplitTopLevelObjects(array_json.substr(1, array_json.size() - 2), paneObjs))
+    std::vector<std::wstring> objs;
+    if (!SplitTopLevelObjects(array_json.substr(1, array_json.size() - 2), objs))
         return false;
-    for (const std::wstring& paneJson : paneObjs) {
-        PaneSessionSnapshot pane;
-        pane.active = pulse::json::ExtractInt(paneJson, L"active");
+    for (const std::wstring& gj : objs) {
+        GroupSessionSnapshot grp;
+        grp.id = pulse::json::ExtractInt(gj, L"id");
+        grp.name = pulse::json::ExtractString(gj, L"name");
+        grp.color_rgb = static_cast<uint32_t>(std::max(
+            0, pulse::json::ExtractInt(gj, L"color")));
+        grp.collapsed = pulse::json::ExtractBool(gj, L"collapsed");
+        out.push_back(std::move(grp));
+    }
+    return true;
+}
 
-        // Nested arrays: locate "groups"/"tabs" keys, then bracket-match.
-        auto extractArray = [&](const wchar_t* key, std::wstring& body) {
-            size_t pos = pulse::json::ValuePosition(paneJson, key);
-            if (pos == std::wstring::npos || pos >= paneJson.size() ||
-                paneJson[pos] != L'[') {
-                return false;
-            }
-            int depth = 0;
-            bool inStr = false;
-            for (size_t i = pos; i < paneJson.size(); ++i) {
-                wchar_t c = paneJson[i];
-                if (inStr) {
-                    if (c == L'\\') ++i;
-                    else if (c == L'"') inStr = false;
-                    continue;
-                }
-                if (c == L'"') inStr = true;
-                else if (c == L'[') ++depth;
-                else if (c == L']') {
-                    if (--depth == 0) {
-                        body = paneJson.substr(pos + 1, i - pos - 1);
-                        return true;
-                    }
-                }
-            }
-            return false;
-        };
+bool ParseLayoutTabs(const std::wstring& array_json,
+                     std::vector<LayoutTabSnapshot>& out) {
+    out.clear();
+    if (array_json.size() < 2 || array_json.front() != L'[' ||
+        array_json.back() != L']') {
+        return false;
+    }
+    std::vector<std::wstring> tabObjs;
+    if (!SplitTopLevelObjects(array_json.substr(1, array_json.size() - 2), tabObjs))
+        return false;
+    for (const std::wstring& tabJson : tabObjs) {
+        LayoutTabSnapshot tab;
+        tab.pinned = pulse::json::ExtractBool(tabJson, L"pinned");
+        tab.group = pulse::json::ExtractInt(tabJson, L"group");
+        tab.title = pulse::json::ExtractString(tabJson, L"title");
+        tab.layout = pulse::json::ExtractInt(tabJson, L"layout");
+        tab.focused = pulse::json::ExtractInt(tabJson, L"focused");
+        tab.target = pulse::json::ExtractInt(tabJson, L"target");
+        if (tabJson.find(L"\"target\"") == std::wstring::npos) tab.target = -1;
+        tab.split_ratios = ParseScaledList(
+            pulse::json::ExtractString(tabJson, L"splitRatios"));
 
-        std::wstring groupsBody;
-        if (extractArray(L"groups", groupsBody)) {
-            std::vector<std::wstring> groupObjs;
-            if (!SplitTopLevelObjects(groupsBody, groupObjs)) return false;
-            for (const std::wstring& gj : groupObjs) {
-                GroupSessionSnapshot grp;
-                grp.id = pulse::json::ExtractInt(gj, L"id");
-                grp.name = pulse::json::ExtractString(gj, L"name");
-                grp.color_rgb = static_cast<uint32_t>(std::max(
-                    0, pulse::json::ExtractInt(gj, L"color")));
-                grp.collapsed = pulse::json::ExtractBool(gj, L"collapsed");
-                pane.groups.push_back(std::move(grp));
+        std::wstring panesBody;
+        if (ExtractJsonArray(tabJson, L"panes", panesBody)) {
+            std::vector<std::wstring> paneObjs;
+            if (!SplitTopLevelObjects(panesBody, paneObjs)) return false;
+            for (const std::wstring& pj : paneObjs) {
+                PaneFolderSnapshot pane;
+                pane.path = pulse::json::ExtractString(pj, L"path");
+                pane.view = ui::ParseViewMode(pulse::json::ExtractString(pj, L"view"));
+                pane.columns = ParseScaled3(pulse::json::ExtractString(pj, L"cols"));
+                pane.search_columns = ParseScaled4(
+                    pulse::json::ExtractString(pj, L"searchCols"));
+                tab.panes.push_back(std::move(pane));
             }
         }
-
-        std::wstring tabsBody;
-        if (extractArray(L"tabs", tabsBody)) {
-            std::vector<std::wstring> tabObjs;
-            if (!SplitTopLevelObjects(tabsBody, tabObjs)) return false;
-            for (const std::wstring& tj : tabObjs) {
-                TabSessionSnapshot tab;
-                tab.path = pulse::json::ExtractString(tj, L"path");
-                tab.pinned = pulse::json::ExtractBool(tj, L"pinned");
-                tab.group = pulse::json::ExtractInt(tj, L"group");
-                tab.view = ui::ParseViewMode(
-                    pulse::json::ExtractString(tj, L"view"));
-                tab.columns = ParseScaled3(pulse::json::ExtractString(tj, L"cols"));
-                tab.search_columns = ParseScaled4(
-                    pulse::json::ExtractString(tj, L"searchCols"));
-                pane.tabs.push_back(std::move(tab));
-            }
-        }
-        out.push_back(std::move(pane));
+        out.push_back(std::move(tab));
     }
     return true;
 }
@@ -255,7 +278,7 @@ bool SaveSession(const SessionSnapshot& snap) {
 
     std::wostringstream f;
     f << L"{\n";
-    f << L"  \"version\":5,\n";
+    f << L"  \"version\":6,\n";
     f << L"  \"left\":" << snap.window_rect.left << L",\n";
     f << L"  \"top\":" << snap.window_rect.top << L",\n";
     f << L"  \"right\":" << snap.window_rect.right << L",\n";
@@ -266,41 +289,16 @@ bool SaveSession(const SessionSnapshot& snap) {
     std::wstring escaped;
     pulse::json::Escape(snap.active_path, escaped);
     f << escaped << L"\",\n";
-    f << L"  \"layout\":" << snap.layout << L",\n";
-    f << L"  \"focused\":" << snap.focused_pane << L",\n";
-    f << L"  \"target\":" << snap.target_pane << L",\n";
     f << L"  \"sidebarCollapsed\":" << snap.sidebar_collapsed << L",\n";
     f << L"  \"starredExpanded\":" << (snap.starred_expanded ? L"true" : L"false") << L",\n";
     f << L"  \"detailsPanel\":" << (snap.details_panel ? 1 : 0) << L",\n";
     f << L"  \"detailsPanelWidth\":" << std::clamp(snap.details_panel_width, 300, 480)
       << L",\n";
-    f << L"  \"splitRatios\":\"" << FormatScaledList(snap.split_ratios) << L"\",\n";
-    f << L"  \"panes\":[";
-    for (size_t i = 0; i < snap.pane_paths.size(); ++i) {
-        if (i) f << L",";
-        f << L"\"";
-        escaped.clear();
-        pulse::json::Escape(snap.pane_paths[i], escaped);
-        f << escaped << L"\"";
-    }
-    f << L"],\n";
-    f << L"  \"paneViews\":[";
-    for (size_t i = 0; i < snap.pane_views.size(); ++i) {
-        if (i) f << L",";
-        f << L"\"" << ui::ViewModeName(snap.pane_views[i]) << L"\"";
-    }
-    f << L"],\n";
-    f << L"  \"paneColumns\":[";
-    for (size_t i = 0; i < snap.pane_paths.size(); ++i) {
-        if (i) f << L",";
-        const std::array<float, 3> edges = i < snap.pane_column_dividers.size()
-            ? snap.pane_column_dividers[i] : std::array<float, 3>{};
-        f << L"\"" << FormatScaled3(edges) << L"\"";
-    }
-    f << L"],\n";
     f << L"  \"tray\":" << trayJson << L",\n";
     f << L"  \"undo\":" << (snap.undo_json.empty() ? L"[]" : snap.undo_json) << L",\n";
-    f << L"  \"paneTabs\":" << PaneTabsToJson(snap.pane_tabs) << L"\n";
+    f << L"  \"activeTab\":" << snap.active_layout_tab << L",\n";
+    f << L"  \"tabGroups\":" << TabGroupsToJson(snap.tab_groups) << L",\n";
+    f << L"  \"layoutTabs\":" << LayoutTabsToJson(snap.layout_tabs) << L"\n";
     f << L"}\n";
     return WriteUtf8FileAtomic(dir + L"\\session.json", f.str());
 }
@@ -318,11 +316,6 @@ bool LoadSession(SessionSnapshot& snap) {
     snap.maximized = pulse::json::ExtractBool(json, L"maximized");
     snap.dark = pulse::json::ExtractBool(json, L"dark");
     snap.active_path = pulse::json::ExtractString(json, L"path");
-    snap.layout = pulse::json::ExtractInt(json, L"layout");
-    snap.split_ratios = ParseScaledList(pulse::json::ExtractString(json, L"splitRatios"));
-    snap.focused_pane = pulse::json::ExtractInt(json, L"focused");
-    snap.target_pane = pulse::json::ExtractInt(json, L"target");
-    if (json.find(L"\"target\"") == std::wstring::npos) snap.target_pane = -1;
     snap.sidebar_collapsed = pulse::json::ExtractInt(json, L"sidebarCollapsed");
     snap.starred_expanded = json.find(L"\"starredExpanded\"") == std::wstring::npos
         ? true : pulse::json::ExtractBool(json, L"starredExpanded");
@@ -340,24 +333,6 @@ bool LoadSession(SessionSnapshot& snap) {
             snap.details_column_dividers[i] =
                 static_cast<float>(columnEdges[i]) / 10000.0f;
     }
-    snap.pane_paths = pulse::json::ExtractStringArray(json, L"panes");
-    snap.pane_views.clear();
-    for (const auto& value : pulse::json::ExtractStringArray(json, L"paneViews"))
-        snap.pane_views.push_back(ui::ParseViewMode(value));
-    if (snap.pane_paths.empty() && !snap.active_path.empty())
-        snap.pane_paths.push_back(snap.active_path);
-    while (snap.pane_views.size() < snap.pane_paths.size())
-        snap.pane_views.push_back(ui::ViewMode::Details);
-    snap.pane_column_dividers.clear();
-    for (const auto& value : pulse::json::ExtractStringArray(json, L"paneColumns"))
-        snap.pane_column_dividers.push_back(ParseScaled3(value));
-    if (snap.pane_column_dividers.empty() &&
-        snap.details_column_dividers[0] > 0.0f) {
-        snap.pane_column_dividers.assign(
-            snap.pane_paths.size(), snap.details_column_dividers);
-    }
-    while (snap.pane_column_dividers.size() < snap.pane_paths.size())
-        snap.pane_column_dividers.push_back({});
 
     size_t trayPos = json.find(L"\"tray\"");
     if (trayPos != std::wstring::npos) {
@@ -393,33 +368,20 @@ bool LoadSession(SessionSnapshot& snap) {
         }
     }
 
-    snap.pane_tabs.clear();
-    size_t paneTabsPos = json.find(L"\"paneTabs\"");
-    if (paneTabsPos != std::wstring::npos) {
-        size_t start = json.find(L'[', paneTabsPos);
-        // The array nests two levels (pane -> groups/tabs -> objects), so
-        // bracket-match with depth counting instead of a plain find(']').
-        if (start != std::wstring::npos) {
-            int depth = 0;
-            size_t end = std::wstring::npos;
-            bool inStr = false;
-            for (size_t i = start; i < json.size(); ++i) {
-                wchar_t c = json[i];
-                if (inStr) {
-                    if (c == L'\\') ++i;
-                    else if (c == L'"') inStr = false;
-                    continue;
-                }
-                if (c == L'"') inStr = true;
-                else if (c == L'[') ++depth;
-                else if (c == L']') { if (--depth == 0) { end = i; break; } }
-            }
-            if (end != std::wstring::npos) {
-                std::vector<PaneSessionSnapshot> parsed;
-                if (ParsePaneTabs(json.substr(start, end - start + 1), parsed))
-                    snap.pane_tabs = std::move(parsed);
-            }
-        }
+    snap.active_layout_tab = pulse::json::ExtractInt(json, L"activeTab");
+    snap.tab_groups.clear();
+    std::wstring groupsBody;
+    if (ExtractJsonArray(json, L"tabGroups", groupsBody)) {
+        std::vector<GroupSessionSnapshot> parsed;
+        if (ParseTabGroups(L"[" + groupsBody + L"]", parsed))
+            snap.tab_groups = std::move(parsed);
+    }
+    snap.layout_tabs.clear();
+    std::wstring layoutBody;
+    if (ExtractJsonArray(json, L"layoutTabs", layoutBody)) {
+        std::vector<LayoutTabSnapshot> parsed;
+        if (ParseLayoutTabs(L"[" + layoutBody + L"]", parsed))
+            snap.layout_tabs = std::move(parsed);
     }
     return true;
 }

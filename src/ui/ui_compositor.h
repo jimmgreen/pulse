@@ -11,6 +11,7 @@
 #include <wincodec.h>
 #include <memory>
 #include <string>
+#include <string_view>
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "d2d1.lib")
@@ -24,6 +25,9 @@
 #pragma comment(lib, "gdi32.lib")
 
 namespace pulse::ui {
+
+class LumaTextRenderer;
+struct LumaTextStats;
 
 template <typename T>
 struct ComPtr {
@@ -49,23 +53,37 @@ public:
     void Shutdown();
     void Resize(int width, int height);
     void Present();
+    void NotifyDeviceLost(HRESULT reason);
+    bool Recover();
+    bool NeedsRecovery() const { return device_lost_; }
     bool SaveSnapshot(const wchar_t* path);
 
     ID2D1DeviceContext2* Dc() const { return dc_.get(); }
     IDWriteFactory3* DwriteFactory() const { return dwriteFactory_.get(); }
+    HWND Hwnd() const { return hwnd_; }
 
     void RecreateTextFormats(float scale);
+    bool UpdateTextRenderingParams(HMONITOR monitor);
     IDWriteTextFormat* TextFormat() const { return textFormat_.get(); }
     IDWriteTextFormat* SmallFormat() const { return smallFormat_.get(); }
     IDWriteTextFormat* HeaderFormat() const { return headerFormat_.get(); }
     IDWriteTextFormat* TabFormat() const { return tabFormat_.get(); }
     IDWriteTextFormat* AddressFormat() const { return addressFormat_.get(); }
     IDWriteTextFormat* IconFormat() const { return iconFormat_.get(); }
-
-    // Shared by Painter / FluentMenu so CJK always falls back to YaHei.
-    static const wchar_t* UiLocaleName();
-    static void ApplyCjkFallback(IDWriteFactory3* factory, IDWriteTextFormat* format);
-    static void ClearCjkFallbackCache();
+    bool DrawLumaText(std::wstring_view text, IDWriteTextFormat* format,
+                      const D2D1_RECT_F& bounds, const D2D1_COLOR_F& foreground,
+                      const D2D1_COLOR_F& background,
+                      DWRITE_TEXT_ALIGNMENT alignment = DWRITE_TEXT_ALIGNMENT_LEADING);
+    bool MeasureLumaText(std::wstring_view text, IDWriteTextFormat* format,
+                         float& width, float* height = nullptr);
+    bool PaintLumaEdit(HWND hwnd, HDC hdc, IDWriteTextFormat* format,
+                       const D2D1_COLOR_F& foreground, const D2D1_COLOR_F& background);
+    bool PresentLumaEdit(HWND hwnd, IDWriteTextFormat* format,
+                         const D2D1_COLOR_F& foreground, const D2D1_COLOR_F& background);
+    LRESULT CallLumaEditMouse(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                              IDWriteTextFormat* format);
+    bool LumaTextEnabled() const noexcept;
+    const LumaTextStats* GetLumaTextStats() const noexcept;
 
     int Width() const { return width_; }
     int Height() const { return height_; }
@@ -75,6 +93,7 @@ private:
     bool InitD3D();
     bool CreateSwapChain();
     void ResizeSwapChain();
+    static bool IsDeviceLost(HRESULT hr);
 
     HWND hwnd_ = nullptr;
     int width_ = 0;
@@ -91,14 +110,17 @@ private:
     ComPtr<ID2D1DeviceContext2> dc_;
     ComPtr<ID2D1Bitmap1> targetBitmap_;
     ComPtr<IDWriteFactory3> dwriteFactory_;
-    ComPtr<IDWriteRenderingParams> textRenderingParams_;
+    ComPtr<IDWriteRenderingParams3> textRenderingParams_;
     ComPtr<IDWriteTextFormat> textFormat_;
     ComPtr<IDWriteTextFormat> smallFormat_;
     ComPtr<IDWriteTextFormat> headerFormat_;
     ComPtr<IDWriteTextFormat> tabFormat_;
     ComPtr<IDWriteTextFormat> addressFormat_;
     ComPtr<IDWriteTextFormat> iconFormat_;
+    std::unique_ptr<LumaTextRenderer> lumaText_;
+    HMONITOR text_params_monitor_ = nullptr;
     bool transparentComposition_ = false;
+    bool device_lost_ = false;
 };
 
 } // namespace pulse::ui

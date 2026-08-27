@@ -11,7 +11,9 @@
 ; logs, and local/network index data. A custom index directory is handled
 ; conservatively: only Pulse-owned index artifacts are removed.
 
-#define AppVersion "1.0.0"
+#ifndef AppVersion
+  #define AppVersion "1.0.0"
+#endif
 
 [Setup]
 AppId={{A3F47C2E-9D1B-4E58-8C6A-2B5D0F9E1734}
@@ -57,6 +59,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "�
 
 [Files]
 Source: "build\pulse.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "build\lumatext.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "build\licenses\LumaText\*"; DestDir: "{app}\licenses\LumaText"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "build\Pulse.Index.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "build\Pulse.Preview.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "build\pulse_shell.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -80,7 +84,9 @@ Filename: "{app}\Pulse.Index.exe"; Parameters: "--set-index-path ""{code:GetInde
 ; launching an initial rebuild and then immediately launching a second rebuild
 ; when the index path command reloads an already-running service.
 Filename: "{app}\Pulse.Index.exe"; Parameters: "--install"; StatusMsg: "正在安装全盘索引服务… / Installing the index service…"; Flags: waituntilterminated; Tasks: indexservice
-Filename: "{cmd}"; Parameters: "/c net start PulseIndex >nul 2>&1 & exit /b 0"; Flags: runhidden waituntilterminated; Tasks: indexservice
+; --install now starts the service and verifies it stays running. Keep a
+; best-effort net start for older builds that only registered the service.
+Filename: "{cmd}"; Parameters: "/c sc.exe query PulseIndex | findstr /I RUNNING >nul || net start PulseIndex"; Flags: runhidden waituntilterminated; Tasks: indexservice
 Filename: "{app}\pulse.exe"; Parameters: "--seed-shell-verbs"; StatusMsg: "正在缓存右键菜单项… / Caching context-menu verbs…"; Flags: runhidden waituntilterminated
 Filename: "{app}\pulse.exe"; Description: "{cm:LaunchProgram,Pulse}"; Flags: nowait postinstall skipifsilent
 
@@ -502,6 +508,29 @@ begin
   Result := False;
 end;
 
+function PulseIndexServiceExists: Boolean;
+var
+  ResultCode: Integer;
+begin
+  Result := Exec('cmd.exe',
+    '/C sc.exe query PulseIndex | findstr /I "SERVICE_NAME" >nul',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+end;
+
+function WaitUntilPulseIndexServiceGone: Boolean;
+var
+  I: Integer;
+begin
+  Result := True;
+  for I := 1 to 40 do
+  begin
+    if not PulseIndexServiceExists then
+      Exit;
+    Sleep(250);
+  end;
+  Result := False;
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   PreviousUninstallError: String;
@@ -513,5 +542,6 @@ begin
   PreviousUninstallError := UninstallPreviousVersion;
   StopPulseApps;
   WaitUntilPulseIndexGone;
+  WaitUntilPulseIndexServiceGone;
   Result := PreviousUninstallError;
 end;

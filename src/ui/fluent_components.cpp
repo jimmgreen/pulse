@@ -1,9 +1,12 @@
 #include "fluent_components.h"
 #include "tab_shape.h"
+#include "typography.h"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <string>
+#include <unordered_map>
 
 namespace pulse::ui::fluent {
 
@@ -51,22 +54,89 @@ float Height(const D2D1_RECT_F& bounds) noexcept {
 
 float MeasureTextWidth(IDWriteFactory3* factory, IDWriteTextFormat* format,
                        std::wstring_view text) {
-    if (!factory || !format || text.empty()) {
-        return 0.0f;
+    return typography::MeasureAdvance(factory, format, text);
+}
+
+float MeasureTextWidth(Compositor* compositor, IDWriteTextFormat* format,
+                       std::wstring_view text) {
+    return typography::MeasureLine(compositor, format, text);
+}
+
+D2D1_COLOR_F TextFieldFillColor(const Theme& theme, const ControlState& state,
+                                bool /*dark*/, bool high_contrast,
+                                bool hosted_edit) noexcept {
+    if (high_contrast) return theme.fill_input;
+    if (hosted_edit) {
+        // Layered EDIT paints an opaque #1E1E1E / white plate. Rest fill_input
+        // is a translucent wash, so the overlay reads as a box inside a box.
+        return theme.fill_input_focus;
     }
-    const float fallback = format->GetFontSize() * static_cast<float>(text.size());
+    if (!state.enabled) return theme.fill_input_disabled;
+    if (state.focused) return theme.fill_input_focus;
+    if (state.hovered) return theme.fill_input_hover;
+    return theme.fill_input;
+}
+
+struct TextLayoutKey {
+    IDWriteTextFormat* format = nullptr;
+    std::wstring text;
+    int width_64 = 0;
+    int height_64 = 0;
+    DWRITE_TEXT_ALIGNMENT alignment = DWRITE_TEXT_ALIGNMENT_LEADING;
+    std::uint64_t generation = 0;
+
+    bool operator==(const TextLayoutKey&) const = default;
+};
+
+struct TextLayoutKeyHash {
+    size_t operator()(const TextLayoutKey& key) const noexcept {
+        size_t value = std::hash<void*>{}(key.format);
+        const auto combine = [&value](size_t next) {
+            value ^= next + 0x9e3779b9u + (value << 6) + (value >> 2);
+        };
+        combine(std::hash<std::wstring>{}(key.text));
+        combine(std::hash<int>{}(key.width_64));
+        combine(std::hash<int>{}(key.height_64));
+        combine(std::hash<int>{}(static_cast<int>(key.alignment)));
+        combine(std::hash<std::uint64_t>{}(key.generation));
+        return value;
+    }
+};
+
+thread_local std::unordered_map<TextLayoutKey, ComPtr<IDWriteTextLayout>, TextLayoutKeyHash>
+    g_text_layout_cache;
+constexpr size_t kTextLayoutCacheLimit = 1024;
+
+void ClearTextLayoutCache() {
+    g_text_layout_cache.clear();
+}
+
+IDWriteTextLayout* GetTextLayout(Compositor* compositor, IDWriteTextFormat* format,
+                                 std::wstring_view text, float width, float height,
+                                 DWRITE_TEXT_ALIGNMENT alignment) {
+    if (!compositor || !compositor->DwriteFactory() || !format || text.empty()) return nullptr;
+    TextLayoutKey key{
+        format,
+        std::wstring(text),
+        static_cast<int>(std::lround(width * 64.0f)),
+        static_cast<int>(std::lround(height * 64.0f)),
+        alignment,
+        typography::Generation(),
+    };
+    if (const auto found = g_text_layout_cache.find(key); found != g_text_layout_cache.end()) {
+        return found->second.get();
+    }
+
     ComPtr<IDWriteTextLayout> layout;
-    factory->CreateTextLayout(text.data(), static_cast<UINT32>(text.size()), format,
-                              10000.0f, 100.0f, &layout);
-    if (!layout.get()) {
-        return fallback;
-    }
-    layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-    DWRITE_TEXT_METRICS metrics{};
-    layout->GetMetrics(&metrics);
-    DWRITE_OVERHANG_METRICS overhang{};
-    layout->GetOverhangMetrics(&overhang);
-    return metrics.widthIncludingTrailingWhitespace + std::max(0.0f, overhang.right) + 1.0f;
+    if (FAILED(compositor->DwriteFactory()->CreateTextLayout(
+            text.data(), static_cast<UINT32>(text.size()), format,
+            width, height, &layout)) || !layout.get()) return nullptr;
+    layout->SetTextAlignment(alignment);
+    layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    if (g_text_layout_cache.size() >= kTextLayoutCacheLimit) g_text_layout_cache.clear();
+    IDWriteTextLayout* result = layout.get();
+    g_text_layout_cache.emplace(std::move(key), std::move(layout));
+    return result;
 }
 
 D2D1_COLOR_F MultiplyAlpha(D2D1_COLOR_F color, float opacity) noexcept {
@@ -114,9 +184,10 @@ float EvaluateMotion(const MotionSpec& motion, float elapsed_ms) noexcept {
 Painter::Painter(Compositor* compositor) noexcept : compositor_(compositor) {}
 
 void Painter::SetCompositor(Compositor* compositor) noexcept {
-    if (compositor_ == compositor) {
+    if (compositor_ == compositor && (!compositor || dc_ == compositor->Dc())) {
         return;
     }
+    ClearTextLayoutCache();
     compositor_ = compositor;
     dc_ = nullptr;
     theme_ = nullptr;
@@ -126,6 +197,8 @@ void Painter::SetCompositor(Compositor* compositor) noexcept {
     scratch_brush_.reset();
     round_stroke_.reset();
     body_format_.reset();
+    nav_format_.reset();
+    section_format_.reset();
     caption_format_.reset();
     small_icon_format_.reset();
     micro_icon_format_.reset();
@@ -136,8 +209,11 @@ void Painter::SetCompositor(Compositor* compositor) noexcept {
 void Painter::SetScale(float scale) noexcept {
     const float resolved = std::max(0.25f, scale);
     if (std::abs(scale_ - resolved) > 0.001f) {
+        ClearTextLayoutCache();
         scale_ = resolved;
         body_format_.reset();
+        nav_format_.reset();
+        section_format_.reset();
         caption_format_.reset();
         small_icon_format_.reset();
         micro_icon_format_.reset();
@@ -204,35 +280,18 @@ void Painter::EnsureTextFormats() {
     ellipsis_sign_.reset();
     auto create = [this](float size, DWRITE_FONT_WEIGHT weight,
                          ComPtr<IDWriteTextFormat>& format) {
-        compositor_->DwriteFactory()->CreateTextFormat(
-            L"Segoe UI Variable Text", nullptr, weight,
-            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-            size * scale_, Compositor::UiLocaleName(), &format);
-        if (!format.get()) {
-            compositor_->DwriteFactory()->CreateTextFormat(
-                L"Microsoft YaHei UI", nullptr, weight,
-                DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                size * scale_, Compositor::UiLocaleName(), &format);
-        }
+        typography::CreateTextFormat(compositor_->DwriteFactory(),
+            {typography::FontRole::Text, size * scale_, weight}, &format);
         if (format.get()) {
             format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
             format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
             format->SetTrimming(&trimming, nullptr);
-            Compositor::ApplyCjkFallback(compositor_->DwriteFactory(), format.get());
         }
     };
     auto create_icon = [this](float size, ComPtr<IDWriteTextFormat>& format) {
-        compositor_->DwriteFactory()->CreateTextFormat(
-            L"Segoe Fluent Icons", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-            size * scale_, L"en-us", &format);
-        if (!format.get()) {
-            compositor_->DwriteFactory()->CreateTextFormat(
-                L"Segoe MDL2 Assets", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
-                DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                size * scale_, L"en-us", &format);
-        }
+        typography::CreateTextFormat(compositor_->DwriteFactory(),
+            {typography::FontRole::Icon, size * scale_}, &format);
         if (format.get()) {
             format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
             format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
@@ -365,47 +424,66 @@ void Painter::StrokeRoundedRect(const D2D1_RECT_F& bounds, float radius,
 void Painter::DrawText(std::wstring_view text, const D2D1_RECT_F& bounds,
                        IDWriteTextFormat* format, const D2D1_COLOR_F& color,
                        HorizontalAlignment alignment) {
-    if (!dc_ || !format || text.empty()) {
+    DrawText(text, bounds, format, color, alignment,
+             theme_ ? theme_->bg : D2D1::ColorF(1.0f, 1.0f, 1.0f, 1.0f));
+}
+
+void Painter::DrawText(std::wstring_view text, const D2D1_RECT_F& bounds,
+                       IDWriteTextFormat* format, const D2D1_COLOR_F& color,
+                       HorizontalAlignment alignment, const D2D1_COLOR_F& background) {
+    if (!dc_ || !format || text.empty() || !compositor_ ||
+        !compositor_->DwriteFactory()) {
         return;
     }
 
-    const auto old_alignment = format->GetTextAlignment();
-    const auto old_paragraph = format->GetParagraphAlignment();
+    const D2D1_RECT_F snapped = typography::SnapVerticalBounds(bounds);
+    const float width = snapped.right - snapped.left;
+    const float height = snapped.bottom - snapped.top;
+    if (width <= 0.0f || height <= 0.0f) return;
     DWRITE_TEXT_ALIGNMENT text_alignment = DWRITE_TEXT_ALIGNMENT_LEADING;
     if (alignment == HorizontalAlignment::Center) {
         text_alignment = DWRITE_TEXT_ALIGNMENT_CENTER;
     } else if (alignment == HorizontalAlignment::Right) {
         text_alignment = DWRITE_TEXT_ALIGNMENT_TRAILING;
     }
-    format->SetTextAlignment(text_alignment);
-    format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-    dc_->DrawTextW(text.data(), static_cast<UINT32>(text.size()), format, bounds,
-                   ScratchBrush(color), D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                   DWRITE_MEASURING_MODE_NATURAL);
-    format->SetTextAlignment(old_alignment);
-    format->SetParagraphAlignment(old_paragraph);
+    if (!high_contrast_ && compositor_->DrawLumaText(
+            text, format, snapped, color, background, text_alignment)) {
+        return;
+    }
+    IDWriteTextLayout* layout = GetTextLayout(
+        compositor_, format, text, width, height, text_alignment);
+    if (!layout) return;
+    dc_->DrawTextLayout(D2D1::Point2F(snapped.left, snapped.top), layout,
+                        ScratchBrush(color), D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
 void Painter::DrawTextWithBrush(std::wstring_view text, const D2D1_RECT_F& bounds,
                                 IDWriteTextFormat* format, BrushId brush,
                                 HorizontalAlignment alignment) {
-    if (!dc_ || !format || text.empty()) {
+    if (!dc_ || !format || text.empty() || !compositor_ ||
+        !compositor_->DwriteFactory()) {
         return;
     }
 
-    const auto old_alignment = format->GetTextAlignment();
-    const auto old_paragraph = format->GetParagraphAlignment();
-    format->SetTextAlignment(alignment == HorizontalAlignment::Center
-                                 ? DWRITE_TEXT_ALIGNMENT_CENTER
-                                 : alignment == HorizontalAlignment::Right
-                                       ? DWRITE_TEXT_ALIGNMENT_TRAILING
-                                       : DWRITE_TEXT_ALIGNMENT_LEADING);
-    format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-    dc_->DrawTextW(text.data(), static_cast<UINT32>(text.size()), format, bounds,
-                   Brush(brush), D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                   DWRITE_MEASURING_MODE_NATURAL);
-    format->SetTextAlignment(old_alignment);
-    format->SetParagraphAlignment(old_paragraph);
+    const D2D1_RECT_F snapped = typography::SnapVerticalBounds(bounds);
+    const float width = snapped.right - snapped.left;
+    const float height = snapped.bottom - snapped.top;
+    if (width <= 0.0f || height <= 0.0f) return;
+    const DWRITE_TEXT_ALIGNMENT text_alignment = alignment == HorizontalAlignment::Center
+        ? DWRITE_TEXT_ALIGNMENT_CENTER
+        : alignment == HorizontalAlignment::Right
+            ? DWRITE_TEXT_ALIGNMENT_TRAILING
+            : DWRITE_TEXT_ALIGNMENT_LEADING;
+    ID2D1SolidColorBrush* text_brush = Brush(brush);
+    if (!high_contrast_ && theme_ && text_brush && compositor_->DrawLumaText(
+            text, format, snapped, text_brush->GetColor(), theme_->bg, text_alignment)) {
+        return;
+    }
+    IDWriteTextLayout* layout = GetTextLayout(
+        compositor_, format, text, width, height, text_alignment);
+    if (!layout) return;
+    dc_->DrawTextLayout(D2D1::Point2F(snapped.left, snapped.top), layout,
+                        text_brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
 void Painter::DrawGlyph(std::wstring_view glyph, const D2D1_RECT_F& bounds,
@@ -444,6 +522,61 @@ void Painter::DrawCheckMark(const D2D1_RECT_F& bounds, const D2D1_COLOR_F& color
     auto* brush = ScratchBrush(color);
     dc_->DrawLine(first, middle, brush, stroke, round_stroke_.get());
     dc_->DrawLine(middle, last, brush, stroke, round_stroke_.get());
+}
+
+void Painter::DrawPaneLayoutIcon(const D2D1_RECT_F& bounds, MenuPictogram kind,
+                                 const D2D1_COLOR_F& color) {
+    if (!dc_ || kind == MenuPictogram::None) {
+        return;
+    }
+    EnsureStrokeStyle();
+    const float box = std::min(Width(bounds), Height(bounds)) * 0.72f;
+    if (box < 6.0f) {
+        return;
+    }
+    const float x0 = bounds.left + (Width(bounds) - box) * 0.5f;
+    const float y0 = bounds.top + (Height(bounds) - box) * 0.5f;
+    const float stroke = std::max(1.0f, Px(1.4f));
+    const float radius = std::min(Px(2.25f), box * 0.18f);
+    StrokeRoundedRect(D2D1::RectF(x0, y0, x0 + box, y0 + box), radius, color, stroke);
+    if (kind == MenuPictogram::LayoutSingle) {
+        return;
+    }
+
+    const float inset = stroke;
+    const float left = x0 + inset;
+    const float top = y0 + inset;
+    const float right = x0 + box - inset;
+    const float bottom = y0 + box - inset;
+    const float mid_x = x0 + box * 0.5f;
+    const float mid_y = y0 + box * 0.5f;
+    auto* brush = ScratchBrush(color);
+    auto vline = [&](float x, float y1, float y2) {
+        dc_->DrawLine(D2D1::Point2F(x, y1), D2D1::Point2F(x, y2),
+                      brush, stroke, round_stroke_.get());
+    };
+    auto hline = [&](float x1, float x2, float y) {
+        dc_->DrawLine(D2D1::Point2F(x1, y), D2D1::Point2F(x2, y),
+                      brush, stroke, round_stroke_.get());
+    };
+    switch (kind) {
+    case MenuPictogram::LayoutSideBySide:
+        vline(mid_x, top, bottom);
+        break;
+    case MenuPictogram::LayoutStacked:
+        hline(left, right, mid_y);
+        break;
+    case MenuPictogram::LayoutThree:
+        vline(mid_x, top, bottom);
+        hline(mid_x, right, mid_y);
+        break;
+    case MenuPictogram::LayoutFour:
+        vline(mid_x, top, bottom);
+        hline(left, right, mid_y);
+        break;
+    default:
+        break;
+    }
 }
 
 void Painter::DrawArc(D2D1_POINT_2F center, float radius, float start_degrees,
@@ -500,12 +633,12 @@ void Painter::DrawButton(const ButtonSpec& spec) {
     D2D1_COLOR_F border{};
     D2D1_COLOR_F edge{};
     bool draw_fill = true;
-    bool draw_border = !transparent;
+    bool draw_border = !transparent && spec.bordered;
     bool edge_on_top = dark_;
 
     if (high_contrast_) {
         draw_fill = !transparent || (state.enabled && (state.hovered || state.pressed));
-        draw_border = !transparent;
+        draw_border = !transparent && spec.bordered;
         fill = !state.enabled ? theme_->fill_input
                : primary ? theme_->accent
                        : state.hovered || state.pressed ? theme_->fill_hover : theme_->fill_input;
@@ -534,6 +667,11 @@ void Painter::DrawButton(const ButtonSpec& spec) {
             foreground = state.pressed ? RgbaF(0xFFFFFF, 0.63f) : HexColor(0xFFFFFF);
         }
         if (spec.kind == ButtonKind::TransparentToggle && state.enabled) {
+            foreground = state.pressed
+                ? MultiplyAlpha(theme_->accent_text, 0.63f)
+                : theme_->accent_text;
+        }
+        if (!spec.bordered && state.enabled) {
             foreground = state.pressed
                 ? MultiplyAlpha(theme_->accent_text, 0.63f)
                 : theme_->accent_text;
@@ -578,16 +716,26 @@ void Painter::DrawButton(const ButtonSpec& spec) {
                       ScratchBrush(edge), 1.0f);
     }
 
-    auto content = Inset(spec.bounds, Px(8.0f));
+    // 8px vertical inset on a 28px footer button leaves ~12px for a 14px CJK
+    // body line. Keep icons on the 8px grid; give the text the remaining pad.
+    const float pad_x = Px(8.0f);
+    const float pad_y = Px(4.0f);
+    D2D1_RECT_F content = spec.bounds;
+    content.left += pad_x;
+    content.right -= pad_x;
+    content.top += pad_y;
+    content.bottom -= pad_y;
     if (spec.icon_only) {
-        DrawGlyph(spec.glyph, content, foreground);
-    } else {
+        if (!spec.skip_glyph) DrawGlyph(spec.glyph, content, foreground);
+    } else if (Width(content) > 0.0f && Height(content) > 0.0f) {
         float left = content.left;
         if (!spec.glyph.empty()) {
             const float icon_width = Px(20.0f);
-            DrawGlyph(spec.glyph,
-                      D2D1::RectF(left, content.top, left + icon_width, content.bottom),
-                      foreground);
+            if (!spec.skip_glyph) {
+                DrawGlyph(spec.glyph,
+                          D2D1::RectF(left, content.top, left + icon_width, content.bottom),
+                          foreground);
+            }
             left += icon_width + Px(4.0f);
         }
         float right = content.right;
@@ -598,10 +746,17 @@ void Painter::DrawButton(const ButtonSpec& spec) {
                       foreground);
             right -= arrow_width + Px(4.0f);
         }
+        IDWriteTextFormat* body = BodyFormat();
+        DWRITE_WORD_WRAPPING old_wrap = DWRITE_WORD_WRAPPING_WRAP;
+        if (body) {
+            old_wrap = body->GetWordWrapping();
+            body->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        }
+        const bool center = spec.glyph.empty() && !spec.drop_down;
         DrawText(spec.text, D2D1::RectF(left, content.top, right, content.bottom),
-                 BodyFormat(), foreground,
-                 spec.glyph.empty() && !spec.drop_down ? HorizontalAlignment::Center
-                                                       : HorizontalAlignment::Left);
+                 body, foreground,
+                 center ? HorizontalAlignment::Center : HorizontalAlignment::Left);
+        if (body) body->SetWordWrapping(old_wrap);
     }
 
     if (state.keyboard_focus) {
@@ -609,32 +764,25 @@ void Painter::DrawButton(const ButtonSpec& spec) {
     }
 }
 
-void Painter::DrawTextFieldFrame(const D2D1_RECT_F& bounds, const ControlState& state) {
+void Painter::DrawTextFieldFrame(const D2D1_RECT_F& bounds, const ControlState& state,
+                                 bool hosted_edit) {
     if (!theme_ || !dc_ || Width(bounds) <= 0.0f || Height(bounds) <= 0.0f) {
         return;
     }
 
     const float radius = Px(theme_->radius_control);
-    D2D1_COLOR_F fill;
+    const D2D1_COLOR_F fill = TextFieldFillColor(*theme_, state, dark_, high_contrast_,
+                                                hosted_edit);
     D2D1_COLOR_F border;
     D2D1_COLOR_F bottom;
     if (high_contrast_) {
-        fill = theme_->fill_input;
         border = theme_->stroke_card;
         bottom = state.focused ? theme_->accent : theme_->stroke_input_bottom;
     } else if (dark_) {
-        fill = !state.enabled ? theme_->fill_input_disabled
-               : state.focused ? theme_->fill_input_focus
-               : state.hovered ? theme_->fill_input_hover
-                               : theme_->fill_input;
         border = !state.enabled ? RgbaF(0xFFFFFF, 0.0698f)
                                 : RgbaF(0xFFFFFF, 0.08f);
         bottom = state.focused ? theme_->accent : theme_->stroke_input_bottom;
     } else {
-        fill = !state.enabled ? theme_->fill_input_disabled
-               : state.focused ? theme_->fill_input_focus
-               : state.hovered ? theme_->fill_input_hover
-                               : theme_->fill_input;
         border = Rgba(0x000000, 13);
         bottom = state.focused ? theme_->accent : theme_->stroke_input_bottom;
     }
@@ -668,7 +816,7 @@ void Painter::DrawTextField(const TextFieldSpec& spec) {
         return;
     }
 
-    DrawTextFieldFrame(spec.bounds, spec.state);
+    DrawTextFieldFrame(spec.bounds, spec.state, spec.hosted_edit);
 
     D2D1_COLOR_F foreground;
     D2D1_COLOR_F placeholder_color;
@@ -728,8 +876,12 @@ void Painter::DrawTextField(const TextFieldSpec& spec) {
     }
     if (!spec.suppress_text) {
         const bool is_placeholder = spec.text.empty();
+        const D2D1_COLOR_F luma_bg = BlendOver(
+            TextFieldFillColor(*theme_, spec.state, dark_, high_contrast_,
+                               spec.hosted_edit), theme_->bg);
         DrawText(is_placeholder ? spec.placeholder : spec.text, content,
-                 BodyFormat(), is_placeholder ? placeholder_color : foreground);
+                 BodyFormat(), is_placeholder ? placeholder_color : foreground,
+                 HorizontalAlignment::Left, luma_bg);
     }
 
     if (spec.state.keyboard_focus) {
@@ -1056,42 +1208,56 @@ void Painter::DrawMenuItem(const MenuItemSpec& spec) {
     // Menu padding is horizontal. Applying it vertically as well leaves only
     // 8-12 px for a 13 px body font at common DPI scales and clips CJK glyphs.
     auto content = item;
-    content.left += Px(10.0f);
+    content.left += spec.radio_group ? Px(4.0f) : Px(10.0f);
     content.right -= Px(10.0f);
+    if (spec.radio_group) {
+        const float radio_col = Px(12.0f);
+        if (spec.radio) {
+            const auto center = D2D1::Point2F(content.left + radio_col * 0.5f,
+                                             (content.top + content.bottom) * 0.5f);
+            dc_->FillEllipse(D2D1::Ellipse(center, Px(3.0f), Px(3.0f)), ScratchBrush(foreground));
+        }
+        content.left += radio_col;
+    }
     const float icon_width = Px(20.0f);
     const auto icon_bounds = D2D1::RectF(content.left, content.top,
                                          content.left + icon_width, content.bottom);
+    auto draw_glyph = [&]() {
+        const float glyph_scale = std::clamp(spec.glyph_scale, 0.6f, 1.2f);
+        if (std::abs(glyph_scale - 1.0f) < 0.001f || spec.glyph.empty()) {
+            DrawGlyph(spec.glyph, icon_bounds, foreground);
+            return;
+        }
+        ComPtr<IDWriteTextLayout> glyphLayout;
+        IDWriteTextFormat* iconFormat = compositor_->IconFormat();
+        const UINT32 length = static_cast<UINT32>(spec.glyph.size());
+        if (iconFormat && SUCCEEDED(compositor_->DwriteFactory()->CreateTextLayout(
+                spec.glyph.data(), length, iconFormat,
+                icon_bounds.right - icon_bounds.left,
+                icon_bounds.bottom - icon_bounds.top, &glyphLayout)) && glyphLayout.get()) {
+            glyphLayout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            glyphLayout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            glyphLayout->SetFontSize(iconFormat->GetFontSize() * glyph_scale,
+                                     DWRITE_TEXT_RANGE{0, length});
+            dc_->DrawTextLayout(D2D1::Point2F(icon_bounds.left, icon_bounds.top),
+                                glyphLayout.get(), ScratchBrush(foreground),
+                                D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        } else {
+            DrawGlyph(spec.glyph, icon_bounds, foreground);
+        }
+    };
     if (spec.has_swatch) {
         const auto center = D2D1::Point2F((icon_bounds.left + icon_bounds.right) * 0.5f,
                                          (icon_bounds.top + icon_bounds.bottom) * 0.5f);
         DrawTagDotState(center, 5.0f, spec.swatch_color, spec.checked, spec.mixed);
-    } else if (spec.radio) {
+    } else if (spec.pictogram != MenuPictogram::None) {
+        DrawPaneLayoutIcon(icon_bounds, spec.pictogram, foreground);
+    } else if (spec.radio && !spec.radio_group) {
         const auto center = D2D1::Point2F((icon_bounds.left + icon_bounds.right) * 0.5f,
                                          (icon_bounds.top + icon_bounds.bottom) * 0.5f);
         dc_->FillEllipse(D2D1::Ellipse(center, Px(3.0f), Px(3.0f)), ScratchBrush(foreground));
     } else {
-        const float glyph_scale = std::clamp(spec.glyph_scale, 0.6f, 1.2f);
-        if (std::abs(glyph_scale - 1.0f) < 0.001f || spec.glyph.empty()) {
-            DrawGlyph(spec.glyph, icon_bounds, foreground);
-        } else {
-            ComPtr<IDWriteTextLayout> glyphLayout;
-            IDWriteTextFormat* iconFormat = compositor_->IconFormat();
-            const UINT32 length = static_cast<UINT32>(spec.glyph.size());
-            if (iconFormat && SUCCEEDED(compositor_->DwriteFactory()->CreateTextLayout(
-                    spec.glyph.data(), length, iconFormat,
-                    icon_bounds.right - icon_bounds.left,
-                    icon_bounds.bottom - icon_bounds.top, &glyphLayout)) && glyphLayout.get()) {
-                glyphLayout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                glyphLayout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                glyphLayout->SetFontSize(iconFormat->GetFontSize() * glyph_scale,
-                                         DWRITE_TEXT_RANGE{0, length});
-                dc_->DrawTextLayout(D2D1::Point2F(icon_bounds.left, icon_bounds.top),
-                                    glyphLayout.get(), ScratchBrush(foreground),
-                                    D2D1_DRAW_TEXT_OPTIONS_CLIP);
-            } else {
-                DrawGlyph(spec.glyph, icon_bounds, foreground);
-            }
-        }
+        draw_glyph();
     }
     content.left += icon_width + Px(8.0f);
     if (spec.has_submenu) {
@@ -1241,25 +1407,28 @@ void Painter::DrawSidebarItem(const SidebarItemSpec& spec) {
         DrawTagDot(D2D1::Point2F((icon_rc.left + icon_rc.right) * 0.5f,
                                 (icon_rc.top + icon_rc.bottom) * 0.5f),
                    5.0f, spec.tag_color);
-    } else if (!spec.glyph.empty()) {
+    } else if (!spec.skip_glyph && !spec.glyph.empty()) {
         const D2D1_COLOR_F icon_color = spec.icon_color.a > 0.0f ? spec.icon_color : foreground;
         DrawGlyph(spec.glyph, icon_rc, icon_color);
     }
     content.left += icon_slot + Px(8.0f);
     if (!spec.badge_text.empty()) {
-        const float badge_width = MeasureBadgeWidth(spec.badge_text);
-        BadgeSpec badge;
-        badge.bounds = D2D1::RectF(content.right - badge_width, content.top,
-                                   content.right, content.bottom);
-        badge.text = spec.badge_text;
-        badge.kind = BadgeKind::Success;
+        const float badge_width = spec.custom_badge_color
+            ? MeasureTagWidth(spec.badge_text) : MeasureBadgeWidth(spec.badge_text);
+        const float badge_height = spec.custom_badge_color
+            ? std::min(Px(22.0f), Height(content) - Px(2.0f)) : Height(content);
+        const float badge_top = content.top + (Height(content) - badge_height) * 0.5f;
+        const auto badge_bounds = D2D1::RectF(content.right - badge_width, badge_top,
+                                              content.right, badge_top + badge_height);
         if (spec.custom_badge_color && spec.badge_color.a > 0.0f) {
-            badge.use_custom_colors = true;
-            badge.custom_background = spec.badge_color;
-            badge.custom_background.a = dark_ ? 0.30f : 0.18f;
-            badge.custom_foreground = theme_->text;
+            DrawTag({badge_bounds, spec.badge_text, spec.badge_color});
+        } else {
+            BadgeSpec badge;
+            badge.bounds = badge_bounds;
+            badge.text = spec.badge_text;
+            badge.kind = BadgeKind::Success;
+            DrawBadge(badge);
         }
-        DrawBadge(badge);
         content.right -= badge_width + Px(6.0f);
     } else if (spec.show_count || spec.badge_count > 0) {
         const auto count = std::to_wstring(std::min(spec.badge_count, 99));
@@ -1748,35 +1917,147 @@ void Painter::DrawBadge(const BadgeSpec& spec) {
     DrawText(spec.text,
              D2D1::RectF(spec.bounds.left + pad_x, spec.bounds.top + pad_y,
                          spec.bounds.right - pad_x, spec.bounds.bottom - pad_y),
-             CaptionFormat(), foreground, HorizontalAlignment::Center);
+             CaptionFormat(), foreground, HorizontalAlignment::Center,
+             BlendOver(background, theme_->bg));
+}
+
+void Painter::InvalidateTypography() noexcept {
+    ClearTextLayoutCache();
+    body_format_.reset();
+    nav_format_.reset();
+    section_format_.reset();
+    caption_format_.reset();
+    small_icon_format_.reset();
+    micro_icon_format_.reset();
+    ellipsis_sign_.reset();
+    format_scale_ = 0.0f;
+}
+
+void Painter::DrawTag(const TagSpec& spec) {
+    if (!theme_ || !compositor_ || spec.text.empty() ||
+        Width(spec.bounds) <= 0.0f || Height(spec.bounds) <= 0.0f) {
+        return;
+    }
+    const D2D1_COLOR_F color = spec.color.a > 0.0f ? spec.color : theme_->accent;
+    const AccentShades shades = DeriveAccentShades(color);
+    D2D1_COLOR_F background;
+    D2D1_COLOR_F foreground;
+    if (high_contrast_) {
+        background = theme_->fill_input;
+        foreground = theme_->text;
+    } else if (dark_) {
+        background = WithAlpha(color, 0.24f);
+        foreground = shades.light2;
+    } else {
+        background = WithAlpha(color, 0.13f);
+        foreground = shades.dark2;
+    }
+    const float radius = std::min(Px(4.0f), Height(spec.bounds) * 0.25f);
+    FillRoundedRect(spec.bounds, radius, background);
+    if (spec.bordered && !high_contrast_) {
+        StrokeRoundedRect(spec.bounds, radius, WithAlpha(color, dark_ ? 0.38f : 0.30f));
+    }
+    const float pad_x = Px(7.0f);
+    const float pad_y = Px(1.5f);
+    DrawText(spec.text,
+             D2D1::RectF(spec.bounds.left + pad_x, spec.bounds.top + pad_y,
+                         spec.bounds.right - pad_x, spec.bounds.bottom - pad_y),
+             CaptionFormat(), foreground, HorizontalAlignment::Center,
+             BlendOver(background, theme_->bg));
+}
+
+float Painter::MeasureButtonWidth(std::wstring_view text, std::wstring_view glyph,
+                                  bool drop_down) const {
+    float width = Px(8.0f) * 2.0f;
+    if (!glyph.empty()) width += Px(20.0f) + Px(4.0f);
+    if (drop_down) width += Px(16.0f) + Px(4.0f);
+    width += typography::MeasureLine(compositor_, BodyFormat(), text);
+    return std::max(Px(32.0f), std::ceil(width));
+}
+
+float Painter::MeasureTagWidth(std::wstring_view text) const {
+    if (text.empty()) return 0.0f;
+    const float text_w = MeasureTextWidth(compositor_, CaptionFormat(), text);
+    const float fallback = Px(12.0f) * static_cast<float>(text.size());
+    return std::max(Px(28.0f), std::ceil((text_w > 0.0f ? text_w : fallback) + Px(14.0f)));
 }
 
 float Painter::MeasureBadgeWidth(std::wstring_view text) const {
     if (text.empty()) return 0.0f;
-    const float text_w = MeasureTextWidth(
-        compositor_ ? compositor_->DwriteFactory() : nullptr, CaptionFormat(), text);
+    const float text_w = MeasureTextWidth(compositor_, CaptionFormat(), text);
     const float fallback = Px(12.0f) * static_cast<float>(text.size());
     return std::max(Px(28.0f), std::ceil((text_w > 0.0f ? text_w : fallback) + Px(14.0f)));
 }
 
 float Painter::OmnibarHintReservePx() const {
-    return MeasureBadgeWidth(kOmnibarHintBadge) + Px(6.0f)
-         + MeasureBadgeWidth(kOmnibarHintKey) + Px(8.0f);
+    const float label = MeasureTextWidth(compositor_, CaptionFormat(), kOmnibarHintBadge);
+    const float label_w = label > 0.0f ? label : Px(24.0f);
+    return Px(8.0f) + Px(8.0f) + Px(16.0f) + Px(6.0f) + label_w + Px(6.0f)
+         + MeasureBadgeWidth(kOmnibarHintKey) + Px(6.0f);
 }
 
-void Painter::DrawOmnibarHints(const D2D1_RECT_F& field) {
-    if (Width(field) <= 0.0f || Height(field) <= 0.0f) return;
-    float right = field.right - Px(8.0f);
-    auto draw = [&](std::wstring_view label) {
-        if (label.empty()) return;
-        const float w = MeasureBadgeWidth(label);
-        DrawBadge({D2D1::RectF(right - w, field.top + Px(3.0f), right,
-                               field.bottom - Px(3.0f)),
-                   label, BadgeKind::Keycap});
-        right -= w + Px(6.0f);
-    };
-    draw(kOmnibarHintKey);
-    draw(kOmnibarHintBadge);
+D2D1_RECT_F Painter::DrawOmnibarHints(const D2D1_RECT_F& field, bool skip_search_glyph) {
+    if (!theme_ || Width(field) <= 0.0f || Height(field) <= 0.0f) return {};
+    const float reserve = OmnibarHintReservePx();
+    if (Width(field) < reserve + Px(48.0f)) return {};
+
+    const float chip_left = field.right - reserve;
+    const float chip_right = field.right - Px(8.0f);
+    const float chip_top = field.top + Px(3.0f);
+    const float chip_bottom = field.bottom - Px(3.0f);
+    const D2D1_RECT_F chip = D2D1::RectF(chip_left, chip_top, chip_right, chip_bottom);
+    const D2D1_COLOR_F chip_fill = high_contrast_ ? theme_->fill_input
+        : dark_ ? Rgba(0xFFFFFF, 18) : Rgba(0x000000, 14);
+    FillRoundedRect(chip, Height(chip) * 0.5f, chip_fill);
+
+    float x = chip_left + Px(8.0f);
+    const float icon = Px(16.0f);
+    const float icon_y = chip_top + (Height(chip) - icon) * 0.5f;
+    const D2D1_RECT_F icon_rc = D2D1::RectF(x, icon_y, x + icon, icon_y + icon);
+    if (!skip_search_glyph) {
+        DrawGlyph(kSearch, icon_rc, theme_->text_secondary);
+    }
+    x += icon + Px(6.0f);
+
+    const float label = MeasureTextWidth(compositor_, CaptionFormat(), kOmnibarHintBadge);
+    const float label_w = label > 0.0f ? label : Px(24.0f);
+    DrawText(kOmnibarHintBadge,
+             D2D1::RectF(x, chip_top, x + label_w, chip_bottom),
+             CaptionFormat(), theme_->text_secondary, HorizontalAlignment::Left,
+             BlendOver(chip_fill, theme_->bg));
+    x += label_w + Px(6.0f);
+
+    const float key_w = MeasureBadgeWidth(kOmnibarHintKey);
+    DrawBadge({D2D1::RectF(x, chip_top + Px(1.0f), x + key_w, chip_bottom - Px(1.0f)),
+               kOmnibarHintKey, BadgeKind::Keycap});
+    return icon_rc;
+}
+
+D2D1_RECT_F Painter::ButtonGlyphRect(const D2D1_RECT_F& bounds, bool icon_only) const {
+    const float icon = Px(20.0f);
+    if (icon_only) {
+        const float cx = (bounds.left + bounds.right) * 0.5f;
+        const float cy = (bounds.top + bounds.bottom) * 0.5f;
+        return D2D1::RectF(cx - icon * 0.5f, cy - icon * 0.5f,
+                           cx + icon * 0.5f, cy + icon * 0.5f);
+    }
+    const float pad_x = Px(8.0f);
+    const float pad_y = Px(4.0f);
+    return D2D1::RectF(bounds.left + pad_x, bounds.top + pad_y,
+                       bounds.left + pad_x + icon, bounds.bottom - pad_y);
+}
+
+D2D1_RECT_F Painter::SidebarItemIconRect(const D2D1_RECT_F& bounds, bool status_dot) const {
+    float left = bounds.left + Px(10.0f);
+    if (status_dot) left += Px(10.0f);
+    const float slot = Px(16.0f);
+    return D2D1::RectF(left, bounds.top + Px(4.0f), left + slot, bounds.bottom - Px(4.0f));
+}
+
+D2D1_RECT_F Painter::DriveSidebarItemIconRect(const D2D1_RECT_F& bounds) const {
+    const float left = bounds.left + Px(10.0f);
+    const float top = bounds.top + Px(6.0f);
+    return D2D1::RectF(left, top, left + Px(16.0f), top + Px(18.0f));
 }
 
 void Painter::DrawSidebarSectionHeader(const SidebarSectionHeaderSpec& spec) {
@@ -1826,10 +2107,12 @@ void Painter::DrawDriveSidebarItem(const DriveSidebarItemSpec& spec) {
     const float icon_slot = Px(16.0f);
     const float text_row = Px(18.0f);
     const D2D1_COLOR_F icon_color = spec.icon_color.a > 0.0f ? spec.icon_color : foreground;
-    DrawGlyph(spec.glyph,
-              D2D1::RectF(content.left, content.top,
-                         content.left + icon_slot, content.top + text_row),
-              icon_color);
+    if (!spec.skip_glyph) {
+        DrawGlyph(spec.glyph,
+                  D2D1::RectF(content.left, content.top,
+                             content.left + icon_slot, content.top + text_row),
+                  icon_color);
+    }
     const float text_left = content.left + icon_slot + Px(8.0f);
     const float detail_width = MeasureTextWidth(compositor_->DwriteFactory(),
                                                 CaptionFormat(), spec.detail) + Px(6.0f);
@@ -2012,9 +2295,8 @@ void Painter::DrawStagingTrayPanel(const StagingTrayPanelSpec& spec) {
     }
     float right = header.right;
     if (!spec.action_text.empty()) {
-        // Primary action: solid accent pill (same button language as the
-        // toolbar's 新建), pinned to the trailing edge.
-        const float action_width = Px(44.0f);
+        // Fill-only pill, same language as toolbar 新建 — no stroke.
+        const float action_width = Px(72.0f);
         const D2D1_RECT_F action_rc =
             D2D1::RectF(right - action_width, header.top + Px(1.5f), right,
                         header.bottom - Px(1.5f));
@@ -2041,10 +2323,47 @@ void Painter::DrawStagingTrayPanel(const StagingTrayPanelSpec& spec) {
              D2D1::RectF(header.left, header.top, right, header.bottom),
              BodyFormat(), theme_->accent);
     if (spec.expanded && !spec.helper.empty()) {
-        DrawText(spec.helper,
-                 D2D1::RectF(spec.bounds.left + Px(10.0f), header.bottom,
-                            spec.bounds.right - Px(10.0f), header.bottom + Px(28.0f)),
-                 CaptionFormat(), theme_->text_secondary);
+        const float helper_left = spec.bounds.left + Px(10.0f);
+        const float helper_right = spec.bounds.right - Px(10.0f);
+        const float helper_width = std::max(0.0f, helper_right - helper_left);
+        const float line_height = Px(18.0f);
+        std::vector<std::wstring> lines;
+        std::wstring line;
+        const auto flush_line = [&]() {
+            if (!line.empty()) {
+                lines.push_back(std::move(line));
+                line.clear();
+            }
+        };
+        size_t cursor = 0;
+        while (cursor < spec.helper.size()) {
+            while (cursor < spec.helper.size() && spec.helper[cursor] == L' ') ++cursor;
+            if (cursor >= spec.helper.size()) break;
+            const size_t word_start = cursor;
+            while (cursor < spec.helper.size() && spec.helper[cursor] != L' ') ++cursor;
+            const std::wstring_view word = spec.helper.substr(word_start, cursor - word_start);
+            const std::wstring candidate = line.empty()
+                ? std::wstring(word) : line + L" " + std::wstring(word);
+            if (!line.empty() && MeasureTextWidth(
+                    compositor_ ? compositor_->DwriteFactory() : nullptr,
+                    CaptionFormat(), candidate) > helper_width) {
+                flush_line();
+                line.assign(word);
+            } else {
+                line = candidate;
+            }
+        }
+        flush_line();
+        const size_t max_lines = static_cast<size_t>(std::max(
+            1.0f, std::floor((Height(spec.bounds) - (header.bottom - spec.bounds.top) - Px(8.0f)) /
+                              line_height)));
+        if (lines.size() > max_lines) lines.resize(max_lines);
+        for (size_t i = 0; i < lines.size(); ++i) {
+            DrawText(lines[i],
+                     D2D1::RectF(helper_left, header.bottom + static_cast<float>(i) * line_height,
+                                 helper_right, header.bottom + static_cast<float>(i + 1) * line_height),
+                     CaptionFormat(), theme_->text_secondary);
+        }
     }
 }
 

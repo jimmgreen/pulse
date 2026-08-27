@@ -107,11 +107,21 @@ bool EqualsI(std::wstring_view a, std::wstring_view b) {
 
 uint32_t NameHash(std::wstring_view name) {
     uint32_t h = 2166136261u;
+    // Empty MSVC vectors yield data()==nullptr; a corrupted view can also be
+    // {nullptr, n>0}. Never walk a null pointer.
+    if (!name.data() || name.empty()) return h;
     for (wchar_t c : name) {
         h ^= FoldChar(c);
         h *= 16777619u;
     }
     return h;
+}
+
+std::wstring_view PoolView(const wchar_t* pool, size_t pool_chars,
+                           uint32_t off, uint16_t len) {
+    if (!pool || len == 0) return {};
+    if (static_cast<size_t>(off) + static_cast<size_t>(len) > pool_chars) return {};
+    return {pool + off, len};
 }
 
 uint64_t ChildKey(int32_t parent, std::wstring_view name) {
@@ -462,9 +472,14 @@ bool Engine::IsTomb(int32_t i) const {
 
 Node Engine::NodeAt(int32_t i) const {
     Node n;
+    if (i < 0 || i >= LiveCount()) return n;
     const int32_t base = BaseCount();
-    if (i < base) n = map_->nodes[static_cast<size_t>(i)];
-    else n = live_.nodes[static_cast<size_t>(i - base)];
+    if (i < base) {
+        if (!map_ || !map_->nodes) return n;
+        n = map_->nodes[static_cast<size_t>(i)];
+    } else {
+        n = live_.nodes[static_cast<size_t>(i - base)];
+    }
     auto it = patches_.find(i);
     if (it != patches_.end()) {
         if (it->second.has_meta) {
@@ -480,24 +495,33 @@ Node Engine::NodeAt(int32_t i) const {
 }
 
 Attr Engine::AttrAt(int32_t i) const {
+    if (i < 0 || i >= LiveCount()) return {};
     auto it = patches_.find(i);
     if (it != patches_.end() && it->second.has_attr) return it->second.attr;
     const int32_t base = BaseCount();
-    if (i < base) return map_->attrs[static_cast<size_t>(i)];
+    if (i < base) {
+        if (!map_ || !map_->attrs) return {};
+        return map_->attrs[static_cast<size_t>(i)];
+    }
     return live_.attrs[static_cast<size_t>(i - base)];
 }
 
 std::wstring_view Engine::NameOf(int32_t i) const {
+    if (i < 0 || i >= LiveCount()) return {};
     auto it = patches_.find(i);
-    if (it != patches_.end() && it->second.has_name)
-        return { live_.pool.data() + it->second.off, it->second.len };
+    if (it != patches_.end() && it->second.has_name) {
+        return PoolView(live_.pool.data(), live_.pool.size(),
+                        it->second.off, it->second.len);
+    }
     const int32_t base = BaseCount();
     if (i < base) {
+        if (!map_ || !map_->pool || !map_->nodes || !map_->hdr) return {};
         const Node& n = map_->nodes[static_cast<size_t>(i)];
-        return { map_->pool + n.off, n.len };
+        return PoolView(map_->pool, static_cast<size_t>(map_->hdr->pool_chars),
+                        n.off, n.len);
     }
     const Node& n = live_.nodes[static_cast<size_t>(i - base)];
-    return { live_.pool.data() + n.off, n.len };
+    return PoolView(live_.pool.data(), live_.pool.size(), n.off, n.len);
 }
 
 void Engine::ChildMapAdd(int32_t parent, std::wstring_view name, int32_t idx) {
@@ -1613,6 +1637,10 @@ bool Engine::MapIndexFile(const std::wstring& path, std::unique_ptr<MappedFile>&
     m->attrs = reinterpret_cast<const Attr*>(m->view + m->hdr->attrs_off);
     m->pool = reinterpret_cast<const wchar_t*>(m->view + m->hdr->pool_off);
     m->n = m->hdr->node_count;
+    for (uint32_t i = 0; i < m->n; ++i) {
+        const Node& node = m->nodes[i];
+        if (static_cast<uint64_t>(node.off) + node.len > m->hdr->pool_chars) return false;
+    }
     m->vols = m->hdr->vol_count
         ? reinterpret_cast<const DiskVol*>(m->view + m->hdr->vols_off) : nullptr;
     m->nvol = m->hdr->vol_count;
@@ -2029,19 +2057,20 @@ void Engine::ReplayDeltasLocked() {
             return;
         }
         if (op == DeltaOp::Tomb) {
-            if (idx >= 0 && !IsTomb(idx)) {
-                ChildMapRemove(NodeAt(idx).parent, NameOf(idx), idx);
-                tombstones_.insert(idx);
-                ++deleted_;
-            }
+            if (idx < 0 || idx >= LiveCount() || IsTomb(idx)) return;
+            ChildMapRemove(NodeAt(idx).parent, NameOf(idx), idx);
+            tombstones_.insert(idx);
+            ++deleted_;
             return;
         }
         if (op == DeltaOp::Add) {
             if (static_cast<size_t>(LiveCount()) >= kIndexCap + 64) return;
+            if (!name.data() && !name.empty()) return;
             AddNodeLocked(live_, parent, name, flags, frn, size, UnixToFt(mtime), true, vol);
             return;
         }
         if (op == DeltaOp::Patch && idx >= 0) {
+            if (idx >= LiveCount()) return;
             Patch& p = patches_[idx];
             if (which & static_cast<uint8_t>(PatchBits::Meta)) {
                 p.parent = parent;
@@ -2055,6 +2084,7 @@ void Engine::ReplayDeltasLocked() {
                 p.has_meta = p.has_meta || true;
             }
             if (which & static_cast<uint8_t>(PatchBits::Name)) {
+                if (!name.data() && !name.empty()) return;
                 p.off = static_cast<uint32_t>(live_.pool.size());
                 p.len = static_cast<uint16_t>(name.size());
                 live_.pool.insert(live_.pool.end(), name.begin(), name.end());
@@ -2275,7 +2305,7 @@ Engine::UsnApply Engine::ApplyUsnLocked(VolState& v, const USN_RECORD_V2* rec) {
     };
 
     if (reason & USN_REASON_FILE_DELETE) {
-        if (idx >= 0 && !IsTomb(idx)) {
+        if (idx >= 0 && idx < LiveCount() && !IsTomb(idx)) {
             ChildMapRemove(NodeAt(idx).parent, NameOf(idx), idx);
             tombstones_.insert(idx);
             ++deleted_;
@@ -2285,7 +2315,7 @@ Engine::UsnApply Engine::ApplyUsnLocked(VolState& v, const USN_RECORD_V2* rec) {
         }
         return UsnApply::None;
     }
-    if (idx >= 0 && attr_reason) refresh(idx);
+    if (idx >= 0 && idx < LiveCount() && attr_reason) refresh(idx);
     if (!structural_reason) return effect;
 
     int32_t parent = FindByFrnLocked(v, rec->ParentFileReferenceNumber);
@@ -2302,7 +2332,7 @@ Engine::UsnApply Engine::ApplyUsnLocked(VolState& v, const USN_RECORD_V2* rec) {
         a = an.parent;
     }
 
-    if (idx >= 0) {
+    if (idx >= 0 && idx < LiveCount()) {
         const Node old = NodeAt(idx);
         ChildMapRemove(old.parent, NameOf(idx), idx);
         if (tombstones_.erase(idx)) --deleted_;

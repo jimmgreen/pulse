@@ -1,0 +1,34 @@
+#include <windows.h>
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+ PRODUCTVERSION @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+ FILEFLAGSMASK 0x3fL
+#ifdef _DEBUG
+ FILEFLAGS VS_FF_DEBUG
+#else
+ FILEFLAGS 0x0L
+#endif
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName", "Pulse Project\0"
+            VALUE "FileDescription", "@PULSE_FILE_DESCRIPTION@\0"
+            VALUE "FileVersion", "@PROJECT_VERSION@\0"
+            VALUE "InternalName", "@PULSE_INTERNAL_NAME@\0"
+            VALUE "OriginalFilename", "@PULSE_ORIGINAL_FILENAME@\0"
+            VALUE "ProductName", "Pulse\0"
+            VALUE "ProductVersion", "@PROJECT_VERSION@\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END
+

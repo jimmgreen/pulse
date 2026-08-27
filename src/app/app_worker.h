@@ -1,6 +1,7 @@
 // app_worker.h — Async enumeration/sort worker with generation tracking.
 #pragma once
 #include "../fs/fs_enum.h"
+#include "../fs/fs_recycle.h"
 #include "../fs/fs_snapshot.h"
 #include "../ui/ui_renderer.h"
 #include <windows.h>
@@ -32,11 +33,13 @@ struct WorkResult {
     std::wstring path;
     uint64_t generation;
     fs::SnapshotPtr snapshot;
+    fs::DirectoryIdentity identity;
     std::wstring git_root;
     bool cancelled = false;
     bool error = false;
     double enum_ms = 0.0;
     double sort_ms = 0.0;
+    fs::RecycleBinInfo recycle_info;
 };
 
 using ResultCallback = std::function<void(WorkResult)>;

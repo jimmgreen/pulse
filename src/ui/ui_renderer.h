@@ -14,6 +14,7 @@
 #include <memory>
 #include <deque>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -23,6 +24,9 @@ namespace pulse::app { class PlacesCatalog; }
 namespace pulse::ui {
 
 class BloomAccentPicker;
+
+// Embedded Fluent Color SVG for a Segoe sidebar/toolbar glyph, or 0.
+int FluentSvgIdForGlyph(std::wstring_view glyph);
 
 enum class SortColumn { Name, Mtime, Type, Size, Path };
 enum class SortDirection { Asc, Desc };
@@ -104,6 +108,7 @@ struct PaneViewModel {
     bool curated_order = false;
     bool is_starred = false;
     bool is_recent = false;
+    bool is_recycle = false;
     bool is_search = false;   // search results add a display-only 路径 column
     int recent_filter = 0;
     size_t recent_total = 0;
@@ -114,6 +119,7 @@ struct PaneViewModel {
     const std::unordered_set<int>* selected_indices = nullptr;
     int hover_index = -1;
     int drop_target_index = -1;   // folder row under an OLE drag (accent 2px stroke)
+    bool header_drop = false;     // pane title bar is a navigate-to-folder target
     int rename_index = -1;        // name column is in edit mode; do not draw the label
     float scroll_y = 0.0f;
     float scroll_x = 0.0f;
@@ -247,8 +253,6 @@ struct DetailsPanelView {
     uint64_t view_generation = 1;
     float scroll_y = 0.0f;
     float preview_scroll_y = 0.0f;
-    float preview_pan_x = 0.0f;     // bitmap cover-mode pan offset (DIPs)
-    float preview_pan_y = 0.0f;
     uint32_t collapsed_mask = 0;    // bit per section: 0基本信息 1属性 2标签 3安全 4其他
     std::wstring location_text, size_text, contains_text;
     std::wstring created_text, modified_text, accessed_text;
@@ -379,6 +383,7 @@ struct WindowViewModel {
     bool backdrop_enabled = false;
     WindowEffect window_effect = WindowEffect::MicaAlt;
     std::wstring background_image;
+    bool safe_mode = false;
     bool address_editing = false;
     bool filter_editing = false;
     bool splitter_pressed = false;
@@ -387,13 +392,14 @@ struct WindowViewModel {
     int hover_pane_index = -1;
 
     bool settings_open = false;
-    int settings_page = 0; // 0 general, 1 search/index, 2 context menu
+    int settings_page = 0; // 0 general, 1 search/index, 2 context menu, 3 about
     float settings_scroll = 0.0f;
     bool settings_launch_on_startup = false;
     bool settings_keep_running = false;
     bool settings_open_folders = false;
     int settings_row_height = 34; // current row-height pref (DIPs) for density radios
     int settings_tray_icon = 48;  // current tray-deck icon pref (DIPs) for size radios
+    int settings_language = 0;    // 0 system, 1 zh-CN, 2 en-US
     BloomAccentPicker* settings_bloom = nullptr;
     bool settings_group_on[5] = { true, true, false, false, true };
     std::vector<SettingsRowView> settings_items;
@@ -405,6 +411,15 @@ struct WindowViewModel {
     std::vector<IndexVolumeRowView> settings_index_volumes;
     std::vector<std::wstring> settings_index_excluded_paths;
     std::vector<NetworkRootRowView> settings_network_roots;
+    std::wstring settings_version;
+    std::wstring settings_build_id;
+    std::wstring settings_update_status;
+    std::wstring settings_update_version;
+    std::wstring settings_update_hash;
+    bool settings_update_enabled = false;
+    bool settings_update_checking = false;
+    bool settings_update_available = false;
+    bool settings_diagnostics_exporting = false;
 };
 
 struct HitTestResult {
@@ -442,6 +457,7 @@ struct HitTestResult {
         Scrollbar,
         Row,
         Pane,
+        PaneHeader,               // split-pane title strip (path + nav/view)
         SidebarHeader,
         SidebarHeaderAction,
         SidebarItem,
@@ -480,12 +496,15 @@ struct HitTestResult {
         SettingsWallpaper,
         SettingsDensity,
         SettingsTrayIcon,
+        SettingsLanguage,
         SettingsIndexVolume,
         SettingsIndexAction,
         SettingsIndexExcludeAction,
         SettingsIndexExcludeRemove,
         SettingsNetworkAction,
-        SettingsNetworkRemove
+        SettingsNetworkRemove,
+        SettingsDiagnosticsAction,
+        SettingsUpdateAction
     } region = None;
     int index = -1;          // tab/row/sidebar item/tray batch/tray item.
     int sub_index = -1;      // tray item inside batch, breadcrumb segment.
@@ -500,8 +519,10 @@ public:
 
     void SetScale(float scale);
     void SetCompositor(Compositor* comp);
+    void InvalidateTypography();
     void SetIconNotifyWindow(HWND hwnd);
     void NotifyPreviewActivate(bool active) { preview_handler_.NotifyAppActivate(active); }
+    void NotifyPreviewOwnerMoved() { preview_handler_.Reposition(); }
 
     // Layout metrics (DIPs).
     float TitleBarHeight() const { return title_bar_height_; }
@@ -529,10 +550,6 @@ public:
     void SetDetailsPanelWidth(float width_dip) {
         details_width_ = std::clamp(width_dip, 300.0f, 480.0f);
     }
-    // Cover-mode pan limits of the current details preview bitmap (DIPs);
-    // refreshed every frame the preview draws a bitmap.
-    float DetailsCoverMaxPanX() const { return cover_max_pan_x_; }
-    float DetailsCoverMaxPanY() const { return cover_max_pan_y_; }
     // Unclipped content height (DIPs) of the details panel, for wheel clamping.
     float DetailsContentHeightDip(const WindowViewModel& vm, float w, float h);
     bool CachedPreviewProperties(const std::wstring& path, uint64_t modified, uint64_t size,
@@ -605,6 +622,7 @@ public:
     D2D1_RECT_F TitleBarRect(float w) const;
     D2D1_RECT_F ToolbarRect(float w) const;
     D2D1_RECT_F AddressBarRect(float w) const;
+    float NewButtonWidthPx(bool compact) const;
 
     // One placed breadcrumb segment (after left-truncation to fit the bar).
     struct BreadcrumbPlaced {
@@ -658,6 +676,7 @@ private:
         float w = 0.0f;
         float h = 0.0f;
         float pitch = 0.0f;
+        float end_x = 0.0f;
         std::vector<float> extra; // per tab: px shift from group chips before it
         struct Chip {
             float left = 0.0f;
@@ -695,6 +714,10 @@ private:
                     float size_factor = 1.0f);
     void DrawIconText(float x, float y, float w, float h, const std::wstring& glyph,
                       const std::wstring& fallback, const D2D1_COLOR_F& color, float size_factor = 1.0f);
+    void DrawTextRect(ID2D1DeviceContext* dc, IDWriteTextFormat* format,
+                      ID2D1SolidColorBrush* brush, std::wstring_view text,
+                      float x, float y, float width, float height,
+                      D2D1_DRAW_TEXT_OPTIONS options = D2D1_DRAW_TEXT_OPTIONS_CLIP);
     void DrawFolderIcon(float x, float y, float size, const Theme& theme);
     void DrawFileIcon(float x, float y, float size, const Theme& theme);
     void DrawEntryIcon(const ListEntryView& entry, float x, float y, float size, const Theme& theme);
@@ -707,6 +730,8 @@ private:
     bool EnsureCuratedEmptyStateSvg(bool starred);
     bool DrawExcludeEmptySvg(const D2D1_RECT_F& bounds, float opacity = 1.0f);
     bool EnsureExcludeEmptySvg();
+    bool EnsureFluentSvg(int resource_id);
+    bool DrawFluentSvg(int resource_id, const D2D1_RECT_F& bounds, float opacity = 1.0f);
     void DrawTruncatedName(const std::wstring& name, float x, float y, float w, float h,
                            const Theme& theme, bool selected);
     void DrawCenteredIconName(const std::wstring& name, const D2D1_RECT_F& bounds,
@@ -733,10 +758,9 @@ private:
     float tray_icon_dip_ = 48.0f;
     float margin_ = 4.0f;
     float control_gap_ = 4.0f;
+    D2D1_COLOR_F text_background_{};
     bool details_visible_ = false;
     float details_width_ = 340.0f;
-    float cover_max_pan_x_ = 0.0f;
-    float cover_max_pan_y_ = 0.0f;
 
     mutable ComPtr<ID2D1SolidColorBrush> brBg_;
     mutable ComPtr<ID2D1SolidColorBrush> brText_;
@@ -751,6 +775,7 @@ private:
     mutable ComPtr<ID2D1SolidColorBrush> brAccent_;
     mutable ComPtr<ID2D1SolidColorBrush> brAccentHover_;
     mutable ComPtr<ID2D1SolidColorBrush> brAccentText_;
+    mutable ComPtr<ID2D1SolidColorBrush> brTagDot_;
     mutable ComPtr<ID2D1SolidColorBrush> brDanger_;
     mutable ComPtr<ID2D1SolidColorBrush> brDangerHover_;
     mutable ComPtr<ID2D1SolidColorBrush> brScrollbar_;
@@ -762,12 +787,15 @@ private:
 
     ComPtr<ID2D1Bitmap> logo_bitmap_;
     ComPtr<IDWriteTextFormat> preview_mono_format_;
+    std::unordered_map<int, ComPtr<IDWriteTextFormat>> sized_icon_formats_;
     ComPtr<ID2D1DeviceContext5> empty_state_svg_dc_;
     ComPtr<ID2D1SvgDocument> empty_state_svg_;
     ComPtr<ID2D1SvgDocument> no_selection_svg_;
     ComPtr<ID2D1SvgDocument> recent_empty_svg_;
     ComPtr<ID2D1SvgDocument> starred_empty_svg_;
     ComPtr<ID2D1SvgDocument> exclude_empty_svg_;
+    std::unordered_map<int, ComPtr<ID2D1SvgDocument>> fluent_svgs_;
+    std::unordered_set<int> fluent_svg_failed_;
     ID2D1DeviceContext* logo_dc_ = nullptr;
     float logo_scale_ = 0.0f;
 

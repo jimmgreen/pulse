@@ -12,6 +12,9 @@ namespace {
 
 constexpr wchar_t kTransferClass[] = L"PulseFileOperationWindow";
 constexpr wchar_t kConflictClass[] = L"PulseFileConflictWindow";
+constexpr wchar_t kConfirmClass[] = L"PulseConfirmWindow";
+constexpr float kConfirmW = 360.0f;
+constexpr float kConfirmH = 176.0f;
 constexpr UINT_PTR kRenderTimer = 1;
 constexpr float kDlgW = 460.0f;
 constexpr float kTitleH = 36.0f;
@@ -39,7 +42,7 @@ TransferChrome MakeTransferChrome(float scale, float width, float height) {
     chrome.minimize = D2D1::RectF(width - btn * 2.0f, 0, width - btn, title);
     const float footer_top = height - ScaleDip(scale, kFooterH);
     chrome.details = D2D1::RectF(ScaleDip(scale, kPadX), footer_top + ScaleDip(scale, 7.0f),
-                                 ScaleDip(scale, kPadX + 108.0f), height - ScaleDip(scale, 7.0f));
+                                 ScaleDip(scale, kPadX + 124.0f), height - ScaleDip(scale, 7.0f));
     chrome.pause = D2D1::RectF(width - ScaleDip(scale, 168.0f), footer_top + ScaleDip(scale, 7.0f),
                                width - ScaleDip(scale, 96.0f), height - ScaleDip(scale, 7.0f));
     chrome.cancel = D2D1::RectF(width - ScaleDip(scale, 88.0f), footer_top + ScaleDip(scale, 7.0f),
@@ -234,7 +237,12 @@ void BeginSurface(Compositor& compositor, fluent::Painter& painter,
 }
 
 void EndSurface(Compositor& compositor) {
-    compositor.Dc()->EndDraw();
+    const HRESULT hr = compositor.Dc()->EndDraw();
+    if (hr == D2DERR_RECREATE_TARGET || hr == DXGI_ERROR_DEVICE_REMOVED ||
+        hr == DXGI_ERROR_DEVICE_RESET || hr == DXGI_ERROR_DRIVER_INTERNAL_ERROR) {
+        compositor.NotifyDeviceLost(hr);
+        return;
+    }
     compositor.Present();
 }
 
@@ -296,7 +304,7 @@ private:
     D2D1_RECT_F CloseRect() const { return Rect(scale_, 434, 0, 46, 44); }
     D2D1_RECT_F CardRect(int index) const { return Rect(scale_, 20, 121 + index * 66.0f, 440, 58); }
     D2D1_RECT_F CheckRect() const { return Rect(scale_, 20, details_ ? 438.0f : 326.0f, 350, 30); }
-    D2D1_RECT_F DetailRect() const { return Rect(scale_, 20, details_ ? 486.0f : 374.0f, 110, 32); }
+    D2D1_RECT_F DetailRect() const { return Rect(scale_, 20, details_ ? 486.0f : 374.0f, 124, 32); }
     D2D1_RECT_F CancelRect() const { return Rect(scale_, 362, details_ ? 482.0f : 370.0f, 98, 34); }
 
     int Hit(float x, float y) const {
@@ -352,6 +360,12 @@ private:
     }
 
     void Render() {
+        if (compositor_.NeedsRecovery()) {
+            if (!compositor_.Recover()) return;
+            compositor_.RecreateTextFormats(scale_);
+            painter_.SetCompositor(&compositor_);
+            painter_.SetScale(scale_);
+        }
         if (!compositor_.Dc()) return;
         const bool high_contrast = IsHighContrast();
         const Theme theme = high_contrast ? MakeHighContrastTheme() : MakeTheme(dark_, accent_);
@@ -449,6 +463,10 @@ private:
         case WM_SIZE:
             if (compositor_.Dc()) compositor_.Resize(LOWORD(lparam), HIWORD(lparam));
             InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        case WM_MOVE:
+            compositor_.UpdateTextRenderingParams(
+                MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST));
             return 0;
         case WM_DPICHANGED: {
             scale_ = HIWORD(wparam) / 96.0f;
@@ -558,6 +576,251 @@ private:
     bool backdrop_enabled_ = false;
     bool details_ = false;
     bool apply_all_ = false;
+    bool done_ = false;
+    int hover_ = 0;
+    int pressed_ = 0;
+    int focus_ = 0;
+};
+
+class ConfirmWindow {
+public:
+    bool Show(HWND owner, const ConfirmDialogSpec& spec, bool dark, D2D1_COLOR_F accent) {
+        owner_ = owner;
+        spec_ = spec;
+        dark_ = dark;
+        accent_ = accent;
+        accepted_ = false;
+        scale_ = static_cast<float>(GetDpiForWindow(owner ? owner : GetDesktopWindow())) / 96.0f;
+
+        WNDCLASSEXW wc{ sizeof(wc) };
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpfnWndProc = WndProc;
+        wc.lpszClassName = kConfirmClass;
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = nullptr;
+        if (!GetClassInfoExW(wc.hInstance, kConfirmClass, &wc)) RegisterClassExW(&wc);
+
+        const int width = static_cast<int>(kConfirmW * scale_);
+        const int height = static_cast<int>(kConfirmH * scale_);
+        hwnd_ = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, kConfirmClass,
+            spec_.title.c_str(), WS_POPUP | WS_THICKFRAME | WS_SYSMENU,
+            CW_USEDEFAULT, CW_USEDEFAULT, width, height, owner, nullptr,
+            wc.hInstance, this);
+        if (!hwnd_) return false;
+        CenterOwnedWindow(hwnd_, owner_, width, height);
+        if (owner_) EnableWindow(owner_, FALSE);
+        ShowWindow(hwnd_, SW_SHOW);
+        SetForegroundWindow(hwnd_);
+
+        MSG message{};
+        while (!done_ && GetMessageW(&message, nullptr, 0, 0) > 0) {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+        if (IsWindow(hwnd_)) DestroyWindow(hwnd_);
+        hwnd_ = nullptr;
+        if (owner_) {
+            EnableWindow(owner_, TRUE);
+            SetActiveWindow(owner_);
+        }
+        return accepted_;
+    }
+
+private:
+    static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+        auto* self = reinterpret_cast<ConfirmWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (message == WM_NCCREATE) {
+            const auto* create = reinterpret_cast<CREATESTRUCTW*>(lparam);
+            self = static_cast<ConfirmWindow*>(create->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+            self->hwnd_ = hwnd;
+        }
+        return self ? self->Handle(message, wparam, lparam)
+                    : DefWindowProcW(hwnd, message, wparam, lparam);
+    }
+
+    D2D1_RECT_F CloseRect() const { return Rect(scale_, 314, 0, 46, 36); }
+    D2D1_RECT_F CancelRect() const { return Rect(scale_, 156, 128, 88, 32); }
+    D2D1_RECT_F ConfirmRect() const { return Rect(scale_, 252, 128, 88, 32); }
+
+    int Hit(float x, float y) const {
+        if (Contains(CloseRect(), x, y)) return 3;
+        if (Contains(ConfirmRect(), x, y)) return 1;
+        if (Contains(CancelRect(), x, y)) return 2;
+        return 0;
+    }
+
+    void Complete(bool accepted) {
+        accepted_ = accepted;
+        done_ = true;
+        if (hwnd_) DestroyWindow(hwnd_);
+    }
+
+    void Render() {
+        if (compositor_.NeedsRecovery()) {
+            if (!compositor_.Recover()) return;
+            compositor_.RecreateTextFormats(scale_);
+            painter_.SetCompositor(&compositor_);
+            painter_.SetScale(scale_);
+        }
+        if (!compositor_.Dc()) return;
+        const bool high_contrast = IsHighContrast();
+        const Theme theme = high_contrast ? MakeHighContrastTheme() : MakeTheme(dark_, accent_);
+        BeginSurface(compositor_, painter_, theme, dark_, high_contrast, backdrop_enabled_,
+                     scale_);
+
+        const D2D1_COLOR_F warning = dark_ ? HexColor(0xF7D154) : HexColor(0x8A5500);
+        painter_.DrawGlyph(L"\xE7BA", Rect(scale_, 14, 8, 22, 22), warning);
+        painter_.DrawText(spec_.title, Rect(scale_, 42, 0, 260, 36),
+                          compositor_.SmallFormat(), theme.text);
+        fluent::ControlState close_state{};
+        close_state.hovered = hover_ == 3;
+        close_state.pressed = pressed_ == 3;
+        painter_.DrawTitleBarButton(CloseRect(), fluent::TitleBarButtonRole::Close,
+                                    {}, close_state);
+        painter_.FillRoundedRect(Rect(scale_, 0, 36, kConfirmW, 1), 0, theme.stroke_divider);
+
+        std::wstring first = spec_.message;
+        std::wstring rest;
+        if (const size_t pos = spec_.message.find(L'\n'); pos != std::wstring::npos) {
+            first = spec_.message.substr(0, pos);
+            rest = spec_.message.substr(pos + 1);
+        }
+        painter_.DrawText(first, Rect(scale_, 20, 52, 320, 26),
+                          compositor_.TextFormat(), theme.text);
+        if (!rest.empty()) {
+            painter_.DrawText(rest, Rect(scale_, 20, 78, 320, 40),
+                              compositor_.SmallFormat(), theme.text_secondary);
+        }
+
+        painter_.FillRoundedRect(Rect(scale_, 0, 120, kConfirmW, 1), 0, theme.stroke_divider);
+
+        fluent::ControlState cancel_state{};
+        cancel_state.hovered = hover_ == 2;
+        cancel_state.pressed = pressed_ == 2;
+        cancel_state.keyboard_focus = focus_ == 1;
+        painter_.DrawButton({ CancelRect(), spec_.cancel_text, {},
+                              fluent::ButtonKind::Transparent, cancel_state });
+
+        const auto confirm = ConfirmRect();
+        const D2D1_COLOR_F confirm_fill = spec_.danger
+            ? (hover_ == 1 || pressed_ == 1 ? theme.danger_hover : theme.danger)
+            : (hover_ == 1 || pressed_ == 1 ? theme.accent_hover : theme.accent);
+        painter_.FillRoundedRect(confirm, theme.radius_control * scale_, confirm_fill);
+        painter_.DrawText(spec_.confirm_text, confirm, compositor_.SmallFormat(),
+                          spec_.danger ? HexColor(0xFFFFFF) : theme.accent_text,
+                          fluent::HorizontalAlignment::Center);
+        if (focus_ == 0)
+            painter_.DrawFocusRing(confirm, theme.radius_control * scale_);
+
+        EndSurface(compositor_);
+    }
+
+    LRESULT Handle(UINT message, WPARAM wparam, LPARAM lparam) {
+        switch (message) {
+        case WM_CREATE:
+            scale_ = static_cast<float>(GetDpiForWindow(hwnd_)) / 96.0f;
+            backdrop_enabled_ = ApplyBackdrop(hwnd_, dark_);
+            if (!compositor_.Init(hwnd_)) return -1;
+            compositor_.RecreateTextFormats(scale_);
+            painter_.SetCompositor(&compositor_);
+            painter_.SetScale(scale_);
+            return 0;
+        case WM_NCCALCSIZE:
+            return 0;
+        case WM_NCHITTEST:
+            return BorderlessHitTest(hwnd_, lparam, 36 * scale_, CloseRect());
+        case WM_SIZE:
+            if (compositor_.Dc()) compositor_.Resize(LOWORD(lparam), HIWORD(lparam));
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        case WM_MOVE:
+            compositor_.UpdateTextRenderingParams(
+                MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST));
+            return 0;
+        case WM_DPICHANGED: {
+            scale_ = HIWORD(wparam) / 96.0f;
+            compositor_.RecreateTextFormats(scale_);
+            painter_.SetScale(scale_);
+            const auto* suggested = reinterpret_cast<RECT*>(lparam);
+            SetWindowPos(hwnd_, nullptr, suggested->left, suggested->top,
+                         suggested->right - suggested->left, suggested->bottom - suggested->top,
+                         SWP_NOZORDER | SWP_NOOWNERZORDER);
+            return 0;
+        }
+        case WM_MOUSEMOVE: {
+            const int next = Hit(static_cast<float>(GET_X_LPARAM(lparam)),
+                                 static_cast<float>(GET_Y_LPARAM(lparam)));
+            if (next != hover_) { hover_ = next; InvalidateRect(hwnd_, nullptr, FALSE); }
+            TRACKMOUSEEVENT track{ sizeof(track), TME_LEAVE, hwnd_, 0 };
+            TrackMouseEvent(&track);
+            return 0;
+        }
+        case WM_MOUSELEAVE:
+            hover_ = 0;
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        case WM_LBUTTONDOWN:
+            pressed_ = Hit(static_cast<float>(GET_X_LPARAM(lparam)),
+                           static_cast<float>(GET_Y_LPARAM(lparam)));
+            SetCapture(hwnd_);
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        case WM_LBUTTONUP: {
+            const int hit = Hit(static_cast<float>(GET_X_LPARAM(lparam)),
+                                static_cast<float>(GET_Y_LPARAM(lparam)));
+            const int pressed = pressed_;
+            pressed_ = 0;
+            ReleaseCapture();
+            if (hit == pressed) {
+                if (hit == 1) Complete(true);
+                else if (hit == 2 || hit == 3) Complete(false);
+            }
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        }
+        case WM_KEYDOWN:
+            if (wparam == VK_ESCAPE) { Complete(false); return 0; }
+            if (wparam == VK_TAB) {
+                focus_ = focus_ == 0 ? 1 : 0;
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return 0;
+            }
+            if (wparam == VK_RETURN || wparam == VK_SPACE) {
+                Complete(focus_ == 0);
+                return 0;
+            }
+            break;
+        case WM_CLOSE:
+            Complete(false);
+            return 0;
+        case WM_PAINT: {
+            PAINTSTRUCT paint{};
+            BeginPaint(hwnd_, &paint);
+            Render();
+            EndPaint(hwnd_, &paint);
+            return 0;
+        }
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_DESTROY:
+            compositor_.Shutdown();
+            done_ = true;
+            return 0;
+        }
+        return DefWindowProcW(hwnd_, message, wparam, lparam);
+    }
+
+    HWND hwnd_ = nullptr;
+    HWND owner_ = nullptr;
+    Compositor compositor_;
+    fluent::Painter painter_;
+    ConfirmDialogSpec spec_;
+    D2D1_COLOR_F accent_ = HexColor(0x0078D4);
+    float scale_ = 1.0f;
+    bool dark_ = false;
+    bool backdrop_enabled_ = false;
+    bool accepted_ = false;
     bool done_ = false;
     int hover_ = 0;
     int pressed_ = 0;
@@ -677,6 +940,12 @@ void FileOperationWindow::RequestClose() {
 }
 
 void FileOperationWindow::Render() {
+    if (compositor_.NeedsRecovery()) {
+        if (!compositor_.Recover()) return;
+        compositor_.RecreateTextFormats(scale_);
+        painter_.SetCompositor(&compositor_);
+        painter_.SetScale(scale_);
+    }
     if (!compositor_.Dc()) return;
     const bool high_contrast = IsHighContrast();
     const Theme theme = high_contrast ? MakeHighContrastTheme() : MakeTheme(dark_, accent_);
@@ -926,6 +1195,10 @@ LRESULT FileOperationWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM l
             compositor_.Resize(LOWORD(lparam), HIWORD(lparam));
         InvalidateRect(hwnd_, nullptr, FALSE);
         return 0;
+    case WM_MOVE:
+        compositor_.UpdateTextRenderingParams(
+            MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST));
+        return 0;
     case WM_DPICHANGED: {
         scale_ = HIWORD(wparam) / 96.0f;
         compositor_.RecreateTextFormats(scale_);
@@ -1025,6 +1298,12 @@ ConflictDialogResult ShowFileConflictDialog(HWND owner,
                                             D2D1_COLOR_F accent) {
     ConflictWindow window;
     return window.Show(owner, conflict, dark, accent);
+}
+
+bool ShowConfirmDialog(HWND owner, const ConfirmDialogSpec& spec, bool dark,
+                       D2D1_COLOR_F accent) {
+    ConfirmWindow window;
+    return window.Show(owner, spec, dark, accent);
 }
 
 } // namespace pulse::ui

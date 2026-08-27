@@ -17,6 +17,25 @@ enum class PreviewRequestKind : uint32_t {
     Properties = 1,
 };
 constexpr uint32_t kPreviewFlagTruncated = 1u << 0;
+constexpr uint32_t kPreviewMinPixelSize = 32;
+constexpr uint32_t kPreviewDefaultPixelSize = 512;
+constexpr uint32_t kPreviewMaxPixelSize = 1024;
+constexpr uint32_t kPreviewGifMaxPixelSize = 512;
+constexpr uint32_t kPreviewPixelBucket = 128;
+
+inline uint32_t ClampPreviewPixelSize(uint32_t requested, bool gif) noexcept {
+    const uint32_t cap = gif ? kPreviewGifMaxPixelSize : kPreviewMaxPixelSize;
+    if (requested < kPreviewMinPixelSize) return kPreviewMinPixelSize;
+    if (requested > cap) return cap;
+    return requested;
+}
+
+inline uint32_t BucketPreviewPixelSize(uint32_t longest_edge) noexcept {
+    if (longest_edge <= kPreviewDefaultPixelSize) return kPreviewDefaultPixelSize;
+    const uint32_t bucket = ((longest_edge + kPreviewPixelBucket - 1u) /
+                             kPreviewPixelBucket) * kPreviewPixelBucket;
+    return bucket > kPreviewMaxPixelSize ? kPreviewMaxPixelSize : bucket;
+}
 struct PreviewRequest {
     uint32_t magic = kPreviewMagic;
     uint32_t request_id = 0;
@@ -25,6 +44,7 @@ struct PreviewRequest {
     uint32_t pixel_size = 0;
     uint32_t attrs = 0;
     uint32_t path_chars = 0;
+    uint32_t frame_index = 0;
 };
 struct PreviewResponse {
     uint32_t magic = kPreviewMagic;
@@ -41,6 +61,11 @@ struct PreviewResponse {
     uint32_t property_count = 0;
     uint32_t flags = 0;
     uint32_t bytes_read = 0;
+    uint32_t frame_count = 1;
+    uint32_t frame_delay_ms = 0;
+    uint32_t loop_count = 0;
+    uint32_t source_width = 0;
+    uint32_t source_height = 0;
 };
 inline std::wstring PreviewPipeName(DWORD pid) {
     return L"\\\\.\\pipe\\PulsePreview-" + std::to_wstring(pid);

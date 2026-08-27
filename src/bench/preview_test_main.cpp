@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -34,6 +35,30 @@ bool WriteBytes(const std::wstring& path, const std::vector<unsigned char>& byte
     }
     CloseHandle(file);
     return ok;
+}
+
+bool WriteBmpRgb(const std::wstring& path, uint32_t width, uint32_t height) {
+    const uint32_t row = (width * 3u + 3u) & ~3u;
+    const uint32_t pixels = row * height;
+    std::vector<unsigned char> file(54 + pixels, 0);
+    file[0] = 'B';
+    file[1] = 'M';
+    const uint32_t total = 54 + pixels;
+    std::memcpy(&file[2], &total, 4);
+    file[10] = 54;
+    file[14] = 40;
+    std::memcpy(&file[18], &width, 4);
+    std::memcpy(&file[22], &height, 4);
+    file[26] = 1;
+    file[28] = 24;
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            file[54 + y * row + x * 3 + 0] = static_cast<unsigned char>(x * 255u / (std::max)(1u, width));
+            file[54 + y * row + x * 3 + 1] = static_cast<unsigned char>(y * 255u / (std::max)(1u, height));
+            file[54 + y * row + x * 3 + 2] = 128;
+        }
+    }
+    return WriteBytes(path, file);
 }
 
 struct Result {
@@ -80,12 +105,13 @@ public:
     }
     ~Host() { Stop(); }
 
-    bool Request(const std::wstring& path, Result& result, DWORD attrs_override = MAXDWORD) {
+    bool Request(const std::wstring& path, Result& result, DWORD attrs_override = MAXDWORD,
+                 uint32_t pixel_size = ipc::kPreviewDefaultPixelSize) {
         ipc::PreviewRequest request{};
         request.request_id = next_++;
         request.generation = request.request_id;
         request.kind = ipc::PreviewRequestKind::Content;
-        request.pixel_size = 512;
+        request.pixel_size = pixel_size;
         request.attrs = attrs_override == MAXDWORD ? GetFileAttributesW(path.c_str())
                                                    : attrs_override;
         request.path_chars = static_cast<uint32_t>(path.size());
@@ -128,6 +154,7 @@ int wmain() {
     std::vector<unsigned char> le = {0xFF,0xFE,'A',0,0x2D,0x4E};
     std::vector<unsigned char> be = {0xFE,0xFF,0, 'B',0x4E,0x2D};
     std::vector<unsigned char> acp = {'A', 0xE9, 'B'};
+    std::vector<unsigned char> lpm = {'[', 'p', 'u', 'l', 's', 'e', ']', '\n'};
     std::vector<unsigned char> binary(400, 0);
     for (size_t i = 0; i < binary.size(); ++i) binary[i] = static_cast<unsigned char>(i);
     std::vector<unsigned char> large(32 * 1024, 'x');
@@ -141,6 +168,7 @@ int wmain() {
     Check(WriteBytes(path(L"utf16le.txt"), le), L"create UTF-16 LE fixture");
     Check(WriteBytes(path(L"utf16be.txt"), be), L"create UTF-16 BE fixture");
     Check(WriteBytes(path(L"acp.txt"), acp), L"create ACP fallback fixture");
+    Check(WriteBytes(path(L"settings.lpm"), lpm), L"create LPM text fixture");
     Check(WriteBytes(path(L"sample.bin"), binary), L"create binary fixture");
     Check(WriteBytes(path(L"image.bmp"), bmp), L"create bitmap fixture");
     Check(WriteBytes(path(L"sparse.txt"), large, 1024ull * 1024ull * 1024ull),
@@ -160,6 +188,7 @@ int wmain() {
     expectText(L"utf16le.txt", L"A");
     expectText(L"utf16be.txt", L"B");
     expectText(L"acp.txt", L"A");
+    expectText(L"settings.lpm", L"pulse");
 
     Result hex;
     Check(host.Request(path(L"sample.bin"), hex) &&
@@ -192,6 +221,33 @@ int wmain() {
     std::wprintf(L"[INFO] bitmap/WIC image decode P95 %.2f ms\n", bitmapP95);
     Check(bitmapTimings.size() == 10 && bitmapP95 <= 500.0,
           L"bitmap/WIC image decode P95 <= 500 ms");
+
+    Result tiny;
+    Check(host.Request(path(L"image.bmp"), tiny) &&
+          tiny.response.kind == ipc::PreviewContentKind::Bitmap &&
+          tiny.response.source_width == 2 && tiny.response.source_height == 2 &&
+          tiny.response.width == 2 && tiny.response.height == 2,
+          L"2x2 bitmap reports source and decoded size");
+
+    Check(WriteBmpRgb(path(L"large.bmp"), 1280, 720), L"create 1280x720 bitmap fixture");
+    Result scaled512;
+    Check(host.Request(path(L"large.bmp"), scaled512, MAXDWORD, 512) &&
+          scaled512.response.kind == ipc::PreviewContentKind::Bitmap &&
+          scaled512.response.source_width == 1280 && scaled512.response.source_height == 720 &&
+          (std::max)(scaled512.response.width, scaled512.response.height) <= 512,
+          L"request 512 keeps decoded longest edge <= 512 and reports source size");
+    Result scaled1024;
+    Check(host.Request(path(L"large.bmp"), scaled1024, MAXDWORD, 1024) &&
+          scaled1024.response.kind == ipc::PreviewContentKind::Bitmap &&
+          scaled1024.response.source_width == 1280 && scaled1024.response.source_height == 720 &&
+          (std::max)(scaled1024.response.width, scaled1024.response.height) <= 1024 &&
+          (std::max)(scaled1024.response.width, scaled1024.response.height) > 512,
+          L"request 1024 keeps decoded longest edge <= 1024");
+    Result clamped;
+    Check(host.Request(path(L"large.bmp"), clamped, MAXDWORD, 2048) &&
+          clamped.response.kind == ipc::PreviewContentKind::Bitmap &&
+          (std::max)(clamped.response.width, clamped.response.height) <= 1024,
+          L"host clamps pixel_size above 1024");
 
     Check(CreateDirectoryW(path(L"subdir").c_str(), nullptr), L"create directory fixture");
     Result dirExtended;
@@ -245,6 +301,7 @@ int wmain() {
     DeleteFileW(path(L"acp.txt").c_str());
     DeleteFileW(path(L"sample.bin").c_str());
     DeleteFileW(path(L"image.bmp").c_str());
+    DeleteFileW(path(L"large.bmp").c_str());
     DeleteFileW(path(L"sparse.txt").c_str());
     RemoveDirectoryW(path(L"subdir").c_str());
     RemoveDirectoryW(root.c_str());

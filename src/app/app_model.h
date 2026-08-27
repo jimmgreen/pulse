@@ -1,12 +1,14 @@
 // app_model.h — Split tree, Pane, Tab, staging tray models.
 #pragma once
 #include "../fs/fs_enum.h"
+#include "../fs/fs_recycle.h"
 #include "../fs/fs_snapshot.h"
 #include "../ui/ui_renderer.h"
 #include "places.h"
 #include <memory>
 #include <array>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 #include <stack>
@@ -44,8 +46,6 @@ struct Tab {
     std::wstring banner_message;
     bool net_readonly = false;
     uint64_t cache_unix = 0;
-    int tab_group = 0; // 0 = none; TabGroup::id of the owning group
-    bool pinned = false; // Chrome semantics: icon-only, left cluster, no close
     int recent_filter = 0; // RecentFilter; transient per tab.
 
     // Transient UI state.
@@ -84,6 +84,8 @@ struct Tab {
     void ToggleSelect(int index);
     void SelectRange(int from, int to);
     void SelectAll();
+    void SelectIndices(const std::vector<int>& indices);
+    void InvertIndices(const std::vector<int>& universe);
     void MoveFocus(int index, bool extend);
     bool IsSelected(int index) const;
     int SelectedCount() const;
@@ -100,7 +102,10 @@ struct Tab {
     void SetSnapshot(fs::SnapshotPtr value);
 };
 
-// A browser-style tab group: named, colored; tabs join via Tab::tab_group.
+bool NameMatchesPattern(std::wstring_view name, std::wstring_view needle);
+void CollectFilterMatches(const Tab& tab, const PlacesCatalog* places, std::vector<int>& out);
+
+// A browser-style tab group: named, colored; window tabs join via LayoutTab::tab_group.
 struct TabGroup {
     int id = 0;
     std::wstring name;
@@ -137,31 +142,22 @@ struct GroupRun { int pos = 0; int len = 0; };
 GroupRun FindGroupRun(const std::vector<int>& order,
                       const std::vector<int>& tab_group_of,
                       int at, int gid);
+bool MoveTabGroupAcrossFreeTab(std::vector<int>& order,
+                               const std::vector<int>& tab_group_of,
+                               int member_pos, int dir);
 
 struct Pane {
-    std::vector<std::unique_ptr<Tab>> tabs;
-    size_t active_tab = 0;
-    bool focused = true;
+    Tab view;
+    bool focused = false;
     bool target = false;
     float filter_expand = 0.0f;
-    std::vector<TabGroup> tab_groups;
-    int next_tab_group_id = 1;
 
-    Tab* ActiveTab() { return active_tab < tabs.size() ? tabs[active_tab].get() : nullptr; }
-    const Tab* ActiveTab() const { return active_tab < tabs.size() ? tabs[active_tab].get() : nullptr; }
+    Tab* ActiveTab() { return &view; }
+    const Tab* ActiveTab() const { return &view; }
 
+    // Open this folder in the pane's single view (replaces the current path).
     void NewTab(const std::wstring& path);
-    void NewTabAt(size_t index, const std::wstring& path); // insert + activate
-    void CloseTab(size_t idx);
-    void SwitchTab(size_t idx);
-    void MoveTab(size_t from, size_t to);
 };
-
-// Pull every group's members into one contiguous run (group order by first
-// appearance; member order preserved). Chromium keeps groups always
-// contiguous (TabGroup::ListTabs contract); call after membership changes
-// that can split a run. Remaps Pane::active_tab by pointer identity.
-void NormalizeGroupRuns(Pane& pane);
 
 enum class SplitOrientation { Horizontal, Vertical };
 
@@ -211,6 +207,52 @@ void ApplySplitRatios(SplitContainer& node, const std::vector<float>& ratios);
 void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane,
                        const PlacesCatalog* places = nullptr);
 
+// One window tab = one working layout (pane count, split ratios, each column).
+struct LayoutTab {
+    std::wstring title; // empty = derive from the focused folder
+    bool pinned = false;
+    int tab_group = 0;
+    LayoutPreset layout = LayoutPreset::Single;
+    std::vector<std::unique_ptr<Pane>> panes;
+    std::unique_ptr<SplitContainer> root;
+    int focused_index = 0;
+    int target_index = -1;
+
+    Pane* FocusedPane();
+    const Pane* FocusedPane() const;
+    Tab* ActiveFolder();
+    const Tab* ActiveFolder() const;
+};
+
+struct WindowTabs {
+    std::vector<std::unique_ptr<LayoutTab>> items;
+    size_t active = 0;
+    std::vector<TabGroup> tab_groups;
+    int next_tab_group_id = 1;
+
+    LayoutTab* Active() { return active < items.size() ? items[active].get() : nullptr; }
+    const LayoutTab* Active() const { return active < items.size() ? items[active].get() : nullptr; }
+
+    void EnsureDefault();
+    LayoutTab& NewTab(const std::wstring& path);
+    LayoutTab& NewTabAt(size_t index, const std::wstring& path);
+    void CloseTab(size_t idx);
+    void SwitchTab(size_t idx);
+    void MoveTab(size_t from, size_t to);
+};
+
+std::unique_ptr<LayoutTab> MakeSingleLayoutTab(const std::wstring& path,
+                                               const Tab* source = nullptr);
+void RebuildLayoutRoot(LayoutTab& tab);
+std::wstring LayoutTabTitle(const LayoutTab& tab);
+void FillWindowTabStrip(ui::WindowViewModel& vm, const WindowTabs& tabs);
+
+// Pull every group's members into one contiguous run (group order by first
+// appearance; member order preserved). Chromium keeps groups always
+// contiguous (TabGroup::ListTabs contract); call after membership changes
+// that can split a run. Remaps WindowTabs::active by pointer identity.
+void NormalizeGroupRuns(WindowTabs& tabs);
+
 // ---------------------------------------------------------------------------
 // Staging tray: collect file paths into batches.
 // ---------------------------------------------------------------------------
@@ -254,6 +296,7 @@ struct SidebarEntry {
     std::wstring glyph;
     std::wstring fallback;
     std::wstring badge;
+    uint32_t badge_rgb = 0x0078D4;
     D2D1_COLOR_F color = {};
     D2D1_COLOR_F tag_dot = {};
     bool danger = false;
@@ -268,10 +311,11 @@ struct SidebarEntry {
 
 struct SidebarModel {
     std::vector<SidebarEntry> quick_access;
+    std::vector<SidebarEntry> saved_searches;
     std::vector<SidebarEntry> drives;
 };
 
-SidebarModel BuildSidebarModel();
+SidebarModel BuildSidebarModel(const fs::RecycleBinInfo* recycle = nullptr);
 
 // ---------------------------------------------------------------------------
 // View-model builders.

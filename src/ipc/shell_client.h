@@ -30,6 +30,8 @@ struct CtxMenuItem {
     bool child = false;           // row inside the preceding header's flyout
     std::wstring verb;            // canonical verb (may be empty)
     std::wstring text;
+    std::wstring clsid;
+    std::wstring handler;
 };
 
 class ShellClient {
@@ -39,7 +41,8 @@ public:
                            uint32_t items_done, uint32_t total_items)> progress;
         std::function<void(uint32_t id, uint32_t hr, bool cancelled, std::wstring error)> done;
         // RSP_CTX_ITEMS for a REQ_CTX_QUERY; id is the query id (== session id).
-        std::function<void(uint32_t id, std::vector<CtxMenuItem> items)> ctx_items;
+        std::function<void(uint32_t id, std::vector<CtxMenuItem> items, bool partial,
+                           std::vector<std::wstring> slow_clsids)> ctx_items;
     };
 
     static ShellClient& Instance();
@@ -54,6 +57,7 @@ public:
     uint32_t CreateFolder(const std::wstring& path);
     uint32_t CreateNewFile(const std::wstring& path);
     void Cancel(uint32_t id);
+    void Abort(uint32_t id);
     bool Ping();
 
     // Explorer context-menu session. Query returns the session id; items come
@@ -61,8 +65,11 @@ public:
     // (the host closes the session afterwards). Close is fire-and-forget for
     // sessions dismissed without invoking.
     uint32_t QueryContextMenu(const std::vector<std::wstring>& paths,
-                              uint32_t owner_hwnd, bool background, bool extended);
-    uint32_t InvokeContextMenu(uint32_t session_id, uint32_t item_id);
+                              uint32_t owner_hwnd, bool background, bool extended,
+                              const std::vector<std::wstring>& disabled_clsids = {});
+    uint32_t InvokeContextMenu(uint32_t session_id, uint32_t item_id,
+                               const std::wstring& verb = {},
+                               const std::wstring& text = {});
     void CloseContextMenu(uint32_t session_id);
 
 private:

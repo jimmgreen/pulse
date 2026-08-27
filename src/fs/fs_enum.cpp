@@ -390,6 +390,7 @@ void EnumerateDirectory(const std::wstring& path, std::vector<DirEntry>& out) {
     } catch (...) {
         // Fall back to FindFirstFileExW.
     }
+    out.clear();
     EnumerateFindFirstFileEx(normalized, out);
 }
 

@@ -7,6 +7,7 @@
 
 #include <deque>
 #include <functional>
+#include <string>
 
 namespace pulse::ui {
 
@@ -65,5 +66,16 @@ ConflictDialogResult ShowFileConflictDialog(HWND owner,
                                             const ops::ConflictItemInfo& conflict,
                                             bool dark,
                                             D2D1_COLOR_F accent);
+
+struct ConfirmDialogSpec {
+    std::wstring title;
+    std::wstring message;
+    std::wstring confirm_text = L"确定";
+    std::wstring cancel_text = L"取消";
+    bool danger = false;
+};
+
+bool ShowConfirmDialog(HWND owner, const ConfirmDialogSpec& spec, bool dark,
+                       D2D1_COLOR_F accent);
 
 } // namespace pulse::ui

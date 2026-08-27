@@ -23,6 +23,17 @@ inline D2D1_COLOR_F WithAlpha(D2D1_COLOR_F c, float a) noexcept {
     return c;
 }
 
+inline D2D1_COLOR_F BlendOver(D2D1_COLOR_F src, D2D1_COLOR_F dst) noexcept {
+    const float a = std::clamp(src.a, 0.0f, 1.0f);
+    const float ia = 1.0f - a;
+    D2D1_COLOR_F out;
+    out.r = src.r * a + dst.r * ia;
+    out.g = src.g * a + dst.g * ia;
+    out.b = src.b * a + dst.b * ia;
+    out.a = 1.0f;
+    return out;
+}
+
 struct AccentShades {
     D2D1_COLOR_F dark3;
     D2D1_COLOR_F dark2;

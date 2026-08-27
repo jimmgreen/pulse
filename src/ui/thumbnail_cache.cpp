@@ -2,6 +2,16 @@
 #include <algorithm>
 
 namespace pulse::ui {
+namespace {
+std::atomic<uint32_t> g_preview_cache_sequence{1};
+}
+
+ThumbnailCache::ThumbnailCache() {
+    const uint32_t sequence = g_preview_cache_sequence.fetch_add(1);
+    pipe_token_ = GetCurrentProcessId() ^ (sequence * 0x9E3779B9u);
+    if (!pipe_token_) pipe_token_ = sequence ? sequence : 1;
+}
+
 ThumbnailCache::~ThumbnailCache() { Reset(); }
 void ThumbnailCache::SetDeviceContext(ID2D1DeviceContext2* dc) {
     if (dc_ == dc) return;
@@ -9,9 +19,10 @@ void ThumbnailCache::SetDeviceContext(ID2D1DeviceContext2* dc) {
     for (auto& [_, item] : items_) item.bitmap.reset();
 }
 std::wstring ThumbnailCache::Key(const std::wstring& path, uint32_t pixels,
-                                 uint64_t modified, uint64_t size) const {
+                                 uint64_t modified, uint64_t size,
+                                 uint32_t frame_index) const {
     return path + L"\n" + std::to_wstring(pixels) + L":" + std::to_wstring(modified) +
-           L":" + std::to_wstring(size);
+           L":" + std::to_wstring(size) + L":" + std::to_wstring(frame_index);
 }
 void ThumbnailCache::StopChild() {
     if (pipe_ != INVALID_HANDLE_VALUE) { CancelIoEx(pipe_, nullptr); CloseHandle(pipe_); pipe_ = INVALID_HANDLE_VALUE; }
@@ -23,15 +34,23 @@ void ThumbnailCache::Reset() {
     if (worker_.joinable()) worker_.join();
     StopChild();
     std::lock_guard lock(mutex_); queue_.clear(); pending_.clear(); items_.clear(); lru_.clear();
-    cache_bytes_ = 0; dc_ = nullptr;
+    cache_bytes_ = 0; dc_ = nullptr; latest_details_identity_.clear();
+    epoch_.fetch_add(1, std::memory_order_relaxed);
+}
+void ThumbnailCache::Evict() {
+    epoch_.fetch_add(1, std::memory_order_relaxed);
+    std::lock_guard lock(mutex_);
+    queue_.clear(); pending_.clear(); items_.clear(); lru_.clear();
+    cache_bytes_ = 0;
+    latest_details_identity_.clear();
 }
 bool ThumbnailCache::Connect() {
     if (pipe_ != INVALID_HANDLE_VALUE) return true;
-    const DWORD pid = GetCurrentProcessId();
-    const std::wstring pipeName = ipc::PreviewPipeName(pid);
+    const std::wstring pipeName = ipc::PreviewPipeName(pipe_token_);
     wchar_t exe[MAX_PATH]{}; GetModuleFileNameW(nullptr, exe, ARRAYSIZE(exe));
     wchar_t* slash = wcsrchr(exe, L'\\'); if (!slash) return false; *(slash + 1) = 0;
-    std::wstring cmd = L"\"" + std::wstring(exe) + L"Pulse.Preview.exe\" " + std::to_wstring(pid);
+    std::wstring cmd = L"\"" + std::wstring(exe) + L"Pulse.Preview.exe\" " +
+        std::to_wstring(pipe_token_);
     STARTUPINFOW si{sizeof(si)};
     if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
                         nullptr, nullptr, &si, &child_)) return false;
@@ -39,7 +58,16 @@ bool ThumbnailCache::Connect() {
     do {
         pipe_ = CreateFileW(pipeName.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
                             OPEN_EXISTING, 0, nullptr);
-        if (pipe_ != INVALID_HANDLE_VALUE) return true;
+        if (pipe_ != INVALID_HANDLE_VALUE) {
+            ULONG server_pid = 0;
+            if (GetNamedPipeServerProcessId(pipe_, &server_pid) &&
+                server_pid == child_.dwProcessId)
+                return true;
+            CloseHandle(pipe_);
+            pipe_ = INVALID_HANDLE_VALUE;
+            StopChild();
+            return false;
+        }
         Sleep(25);
     } while (GetTickCount64() < deadline);
     StopChild(); return false;
@@ -51,9 +79,13 @@ PreviewDrawResult ThumbnailCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F
                                        bool* truncated, uint32_t* bytes_read,
                                        bool direct_preview, std::wstring* error,
                                        float* pan_x, float* pan_y,
-                                       float* pan_max_x, float* pan_max_y) {
+                                       float* pan_max_x, float* pan_max_y,
+                                       uint32_t frame_index, uint32_t* frame_count,
+                                       uint32_t* frame_delay_ms, uint32_t* loop_count,
+                                       uint32_t* decoded_width, uint32_t* decoded_height,
+                                       uint32_t* source_width, uint32_t* source_height) {
     if (!dc || path.empty() || pixels < 24) return PreviewDrawResult::Failed;
-    const std::wstring key = Key(path, pixels, modified, size);
+    const std::wstring key = Key(path, pixels, modified, size, frame_index);
     {
         std::lock_guard lock(mutex_);
         const std::wstring identity = Key(path, 0, modified, size);
@@ -68,12 +100,39 @@ PreviewDrawResult ThumbnailCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F
                 }
             }
         }
+        auto queue_request = [&] {
+            if (pending_.contains(key)) return;
+            pending_.insert(key);
+            Request request;
+            request.id = next_id_++; request.generation = generation;
+            request.pixels = pixels; request.attrs = attrs;
+            request.kind = ipc::PreviewRequestKind::Content;
+            request.details = direct_preview; request.frame_index = frame_index;
+            request.epoch = epoch_.load(std::memory_order_relaxed);
+            request.path = path; request.key = key; request.identity = identity;
+            queue_.push_front(std::move(request));
+            if (queue_.size() > 128) { pending_.erase(queue_.back().key); queue_.pop_back(); }
+            if (!running_.exchange(true)) worker_ = std::thread([this]{ Worker(); });
+            cv_.notify_one();
+        };
         auto it = items_.find(key);
         if (it != items_.end()) {
             Item& item = it->second;
+            if (auto lru_hit = std::find(lru_.begin(), lru_.end(),
+                                         it->first); lru_hit != lru_.end()) {
+                lru_.erase(lru_hit);
+                lru_.push_front(it->first);
+            }
             if (truncated) *truncated = item.truncated;
             if (bytes_read) *bytes_read = item.bytes_read;
             if (error) *error = item.error;
+            if (frame_count) *frame_count = item.frame_count;
+            if (frame_delay_ms) *frame_delay_ms = item.frame_delay_ms;
+            if (loop_count) *loop_count = item.loop_count;
+            if (decoded_width) *decoded_width = item.w;
+            if (decoded_height) *decoded_height = item.h;
+            if (source_width) *source_width = item.source_width;
+            if (source_height) *source_height = item.source_height;
             if (item.kind == ipc::PreviewContentKind::Text ||
                 item.kind == ipc::PreviewContentKind::Hex) {
                 if (text) *text = item.text;
@@ -138,15 +197,7 @@ PreviewDrawResult ThumbnailCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F
             }
             if (item.failed) return PreviewDrawResult::Failed;
         }
-        if (!pending_.contains(key)) {
-            pending_.insert(key);
-            queue_.push_front({next_id_++, generation, pixels, attrs,
-                               ipc::PreviewRequestKind::Content, direct_preview,
-                               path, key, identity});
-            if (queue_.size() > 128) { pending_.erase(queue_.back().key); queue_.pop_back(); }
-            if (!running_.exchange(true)) worker_ = std::thread([this]{ Worker(); });
-            cv_.notify_one();
-        }
+        queue_request();
     }
     return PreviewDrawResult::Pending;
 }
@@ -165,9 +216,13 @@ bool ThumbnailCache::Properties(const std::wstring& path, DWORD attrs, uint64_t 
     }
     if (!pending_.contains(key) && queue_.size() < 128) {
         pending_.insert(key);
-        queue_.push_back({next_id_++, generation, 0, attrs,
-                          ipc::PreviewRequestKind::Properties, true,
-                          path, key, identity});
+        Request request;
+        request.id = next_id_++; request.generation = generation;
+        request.attrs = attrs; request.kind = ipc::PreviewRequestKind::Properties;
+        request.details = true; request.path = path; request.key = key;
+        request.identity = identity;
+        request.epoch = epoch_.load(std::memory_order_relaxed);
+        queue_.push_back(std::move(request));
         if (!running_.exchange(true)) worker_ = std::thread([this]{ Worker(); });
         cv_.notify_one();
     }
@@ -192,6 +247,7 @@ void ThumbnailCache::Worker() {
         Item result; bool ok = Connect();
         ipc::PreviewRequest wire; wire.request_id=req.id; wire.generation=req.generation;
         wire.kind=req.kind; wire.pixel_size=req.pixels; wire.attrs=req.attrs;
+        wire.frame_index = req.frame_index;
         wire.path_chars=(uint32_t)req.path.size();
         if (ok) ok = ipc::WriteAll(pipe_, &wire, sizeof(wire)) &&
                      ipc::WriteAll(pipe_, req.path.data(), wire.path_chars * sizeof(wchar_t));
@@ -262,6 +318,13 @@ void ThumbnailCache::Worker() {
             result.properties = std::move(properties);
             result.truncated = (response.flags & ipc::kPreviewFlagTruncated) != 0;
             result.bytes_read = response.bytes_read;
+            result.frame_count = (std::max)(1u, response.frame_count);
+            result.frame_delay_ms = response.frame_delay_ms;
+            result.loop_count = response.loop_count;
+            result.frame_index = req.frame_index;
+            result.animation_identity = req.identity;
+            result.source_width = response.source_width;
+            result.source_height = response.source_height;
         }
         result.cost = result.text.size() * sizeof(wchar_t)
             + result.error.size() * sizeof(wchar_t)
@@ -271,19 +334,45 @@ void ThumbnailCache::Worker() {
         result.failed = !ok || response.status != 0 ||
             (req.kind == ipc::PreviewRequestKind::Content &&
              result.kind == ipc::PreviewContentKind::Bitmap && result.pixels.empty());
+        bool discard = false;
         {
             std::lock_guard lock(mutex_);
             pending_.erase(req.key);
+            if (req.epoch != epoch_.load(std::memory_order_relaxed)) {
+                discard = true;
+            } else {
             if (auto old = items_.find(req.key); old != items_.end())
                 cache_bytes_ -= (std::min)(cache_bytes_, old->second.cost);
             const bool stale = req.details && req.identity != latest_details_identity_;
             if (!stale) {
+                if (result.frame_count > 1) {
+                    size_t animation_frames = 0;
+                    for (const auto& [cached_key, cached] : items_) {
+                        if (cached.frame_count > 1 && cached.animation_identity == req.identity)
+                            ++animation_frames;
+                    }
+                    if (animation_frames >= 4) {
+                        for (auto lru = lru_.begin(); lru != lru_.end();) {
+                            auto cached = items_.find(*lru);
+                            if (cached != items_.end() && cached->second.frame_count > 1 &&
+                                cached->second.animation_identity == req.identity &&
+                                cached->second.frame_index != req.frame_index) {
+                                cache_bytes_ -= (std::min)(cache_bytes_, cached->second.cost);
+                                items_.erase(cached); lru = lru_.erase(lru); break;
+                            }
+                            ++lru;
+                        }
+                    }
+                }
                 cache_bytes_ += result.cost;
                 items_[req.key] = std::move(result);
                 lru_.push_back(req.key);
             }
-            constexpr size_t kCacheBudget = 96ull * 1024ull * 1024ull;
-            while (!lru_.empty() && (lru_.size() > 512 || cache_bytes_ > kCacheBudget)) {
+            // Preview bitmaps stay a bounded working set. Quick Look may
+            // request up to 1024 px; evicting a cold decode is cheaper than
+            // pinning large bitmaps for the lifetime of the process.
+            constexpr size_t kCacheBudget = 16ull * 1024ull * 1024ull;
+            while (!lru_.empty() && (lru_.size() > 128 || cache_bytes_ > kCacheBudget)) {
                 const std::wstring oldest = std::move(lru_.front());
                 lru_.pop_front();
                 if (auto item = items_.find(oldest); item != items_.end()) {
@@ -291,8 +380,9 @@ void ThumbnailCache::Worker() {
                     items_.erase(item);
                 }
             }
+            }
         }
-        if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+        if (!discard && hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
         if (!ok) StopChild();
     }
 }

@@ -1,8 +1,17 @@
 #include "../ui/preview_handler_host.h"
 #include <ole2.h>
 #include <windows.h>
+#include <algorithm>
+#include <chrono>
 #include <cstdio>
+#include <memory>
 #include <string>
+
+namespace pulse::ui {
+void ResetPreviewHandlerOpenAttemptsForTest();
+uint32_t PreviewHandlerOpenAttemptsForTest();
+bool PreviewHandlerCanActivateIsolatedForTest(const std::wstring& path);
+}
 
 namespace {
 
@@ -17,13 +26,16 @@ LRESULT CALLBACK OwnerProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
-    if (argc < 2) {
-        wprintf(L"usage: pulse_preview_handler_probe.exe <file>\n");
+    if (argc < 2 || ((wcscmp(argv[1], L"--selftest") == 0 ||
+                      wcscmp(argv[1], L"--isolated-test") == 0) && argc < 3)) {
+        wprintf(L"usage: pulse_preview_handler_probe.exe "
+                L"[--selftest|--isolated-test] <file>\n");
         return 1;
     }
-    const std::wstring path = argv[1];
+    const bool self_test = argc >= 3 && wcscmp(argv[1], L"--selftest") == 0;
+    const bool isolated_test = argc >= 3 && wcscmp(argv[1], L"--isolated-test") == 0;
+    const std::wstring path = argv[(self_test || isolated_test) ? 2 : 1];
     wprintf(L"probe file=%s\n", path.c_str());
-    wprintf(L"log: C:\\Users\\SS\\Desktop\\pulse\\bench_data\\preview_handler.log\n");
 
     HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (FAILED(hr)) {
@@ -63,12 +75,78 @@ int wmain(int argc, wchar_t** argv) {
     wprintf(L"attrs=0x%08X exist=%d size=%llu canhost=%d\n",
             attrs, have_fad ? 1 : 0, static_cast<unsigned long long>(size),
             pulse::ui::PreviewHandlerHost::CanHost(path) ? 1 : 0);
+    if (isolated_test) {
+        const bool isolated = pulse::ui::PreviewHandlerCanActivateIsolatedForTest(path);
+        wprintf(L"[%s] preview handler supports isolated local-server activation\n",
+                isolated ? L"PASS" : L"FAIL");
+        DestroyWindow(owner);
+        CoUninitialize();
+        return isolated ? 0 : 5;
+    }
 
-    pulse::ui::PreviewHandlerHost host;
-    host.SetNotifyWindow(owner);
     const D2D1_RECT_F bounds = D2D1::RectF(16.0f, 16.0f, 380.0f, 640.0f);
     const D2D1_COLOR_F bg = D2D1::ColorF(0.12f, 0.12f, 0.12f);
     const D2D1_COLOR_F fg = D2D1::ColorF(0.92f, 0.92f, 0.92f);
+    if (self_test) {
+        SetEnvironmentVariableW(L"PULSE_PREVIEW_HANDLER_TEST_DELAY_MS", L"1500");
+        pulse::ui::ResetPreviewHandlerOpenAttemptsForTest();
+        double max_sync_ms = 0.0;
+        double max_reposition_ms = 0.0;
+        double reset_ms = 0.0;
+        double destroy_ms = 0.0;
+        {
+            auto host = std::make_unique<pulse::ui::PreviewHandlerHost>();
+            host->SetNotifyWindow(owner);
+            for (uint64_t generation = 1; generation <= 64; ++generation) {
+                const auto start = std::chrono::steady_clock::now();
+                host->Sync(owner, bounds, path, attrs, generation, modified, size,
+                           true, bg, fg, true, generation == 64);
+                const double elapsed = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - start).count();
+                max_sync_ms = (std::max)(max_sync_ms, elapsed);
+            }
+            // Let the worker enter the injected slow COM section.
+            Sleep(180);
+            for (int i = 0; i < 64; ++i) {
+                const auto start = std::chrono::steady_clock::now();
+                host->Reposition();
+                const double elapsed = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - start).count();
+                max_reposition_ms = (std::max)(max_reposition_ms, elapsed);
+            }
+            const auto reset_start = std::chrono::steady_clock::now();
+            host->Reset();
+            reset_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - reset_start).count();
+            const auto destroy_start = std::chrono::steady_clock::now();
+            host.reset();
+            destroy_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - destroy_start).count();
+        }
+        SetEnvironmentVariableW(L"PULSE_PREVIEW_HANDLER_TEST_DELAY_MS", nullptr);
+        const bool sync_ok = max_sync_ms < 50.0;
+        const bool reposition_ok = max_reposition_ms < 50.0;
+        const bool reset_ok = reset_ms < 50.0;
+        const bool destroy_ok = destroy_ms < 350.0;
+        const uint32_t open_attempts = pulse::ui::PreviewHandlerOpenAttemptsForTest();
+        const bool coalesced = open_attempts == 1;
+        wprintf(L"[%s] COM preview Sync remains non-blocking (max %.2f ms)\n",
+                sync_ok ? L"PASS" : L"FAIL", max_sync_ms);
+        wprintf(L"[%s] preview reposition remains non-blocking (max %.2f ms)\n",
+                reposition_ok ? L"PASS" : L"FAIL", max_reposition_ms);
+        wprintf(L"[%s] COM preview Reset remains non-blocking (%.2f ms)\n",
+                reset_ok ? L"PASS" : L"FAIL", reset_ms);
+        wprintf(L"[%s] slow handler cannot hang destruction (%.2f ms)\n",
+                destroy_ok ? L"PASS" : L"FAIL", destroy_ms);
+        wprintf(L"[%s] rapid switches coalesce to one open attempt (%u)\n",
+                coalesced ? L"PASS" : L"FAIL", open_attempts);
+        DestroyWindow(owner);
+        CoUninitialize();
+        return sync_ok && reposition_ok && reset_ok && destroy_ok && coalesced ? 0 : 4;
+    }
+
+    pulse::ui::PreviewHandlerHost host;
+    host.SetNotifyWindow(owner);
     host.Sync(owner, bounds, path, attrs, 1, modified, size, true, bg, fg, true);
 
     const ULONGLONG deadline = GetTickCount64() + 6000;

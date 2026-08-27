@@ -38,16 +38,21 @@
 //   REQ_CANCEL / REQ_PING /
 //   REQ_SHUTDOWN             : empty
 //   REQ_CTX_QUERY            : owner_hwnd(u32) + flags(u32, CTXF_*) +
-//                              count(u32) + paths(string * count)
-//   REQ_CTX_INVOKE           : session_id(u32) + item_id(u32)
+//                              paths(string array) + disabled_clsids(string array)
+//   REQ_CTX_INVOKE           : session_id(u32) + item_id(u32) +
+//                              verb(string) + text(string)
 //   REQ_CTX_CLOSE            : session_id(u32)
 //   RSP_PROGRESS             : percent(f32) + current_item(string) +
 //                              items_done(u32) + total_items(u32)
 //   RSP_DONE                 : result_hresult(u32) + cancelled(u32) + error_text(string)
 //   RSP_PONG                 : empty
-//   RSP_CTX_ITEMS            : session_id(u32) + count(u32) + per item:
+//   RSP_CTX_ITEMS            : session_id(u32) + flags(u32, CTX_ITEMS_*) +
+//                              count(u32) + per item:
 //                              item_id(u32) + flags(u32, CTX_ITEM_*) +
-//                              verb(string) + text(string)
+//                              verb(string) + text(string) +
+//                              clsid(string) + handler(string) +
+//                              slow_clsids(string array, optional; handlers that
+//                              took >= 1000ms, final payload only)
 #pragma once
 #include <windows.h>
 #include <cstdint>
@@ -95,6 +100,11 @@ enum CtxItemFlags : uint32_t {
     CTX_ITEM_CHILD = 8,         // belongs to the nearest preceding header
 };
 
+// RSP_CTX_ITEMS message flags (after session_id).
+enum CtxItemsMsgFlags : uint32_t {
+    CTX_ITEMS_PARTIAL = 1,  // more handlers still running; keep the session pending
+};
+
 struct MsgHeader {
     uint32_t magic = kMagic;
     uint32_t type = 0;
@@ -112,6 +122,11 @@ public:
         size_t off = buf_.size();
         buf_.resize(off + 4);
         std::memcpy(buf_.data() + off, &v, 4);
+    }
+    void PutU64(uint64_t v) {
+        size_t off = buf_.size();
+        buf_.resize(off + 8);
+        std::memcpy(buf_.data() + off, &v, 8);
     }
     void PutF32(float v) {
         size_t off = buf_.size();
@@ -142,6 +157,12 @@ public:
         off_ += 4;
         return true;
     }
+    bool GetU64(uint64_t& v) {
+        if (off_ + 8 > size_) return false;
+        std::memcpy(&v, data_ + off_, 8);
+        off_ += 8;
+        return true;
+    }
     bool GetF32(float& v) {
         if (off_ + 4 > size_) return false;
         std::memcpy(&v, data_ + off_, 4);
@@ -168,6 +189,14 @@ public:
         }
         return true;
     }
+    bool TryStringArray(std::vector<std::wstring>& v) {
+        if (off_ >= size_) {
+            v.clear();
+            return true;
+        }
+        return GetStringArray(v);
+    }
+    size_t remaining() const { return off_ < size_ ? size_ - off_ : 0; }
 private:
     const uint8_t* data_ = nullptr;
     size_t size_ = 0;

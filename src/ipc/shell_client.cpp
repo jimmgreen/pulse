@@ -83,45 +83,49 @@ bool ShellClient::EnsureConnected() {
     if (pipe_ != INVALID_HANDLE_VALUE) return true;
 
     std::wstring name = PipeNameFor(GetCurrentProcessId());
-    HANDLE h = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
-                           OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
-    if (h == INVALID_HANDLE_VALUE) {
-        if (!SpawnChild()) return false;
-        // Poll until the child brings the pipe up (WaitNamedPipe alone returns
-        // ERROR_FILE_NOT_FOUND immediately when the server has not created
-        // the pipe yet, so retry in a bounded loop).
-        auto deadline = GetTickCount64() + 8000;
-        while (true) {
-            h = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
-                            OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
-            if (h != INVALID_HANDLE_VALUE) break;
-            DWORD err = GetLastError();
-            if (err == ERROR_PIPE_BUSY) {
-                WaitNamedPipeW(name.c_str(), 200);
-                if (GetTickCount64() > deadline) {
-                    last_error_ = L"pulse_shell.exe \u7BA1\u9053\u5FD9\u788C";
-                    return false;
-                }
-                continue;
-            }
-            if (err == ERROR_FILE_NOT_FOUND) {
-                if (child_started_ && WaitForSingleObject(child_.hProcess, 0) == WAIT_OBJECT_0) {
-                    DWORD code = 0;
-                    GetExitCodeProcess(child_.hProcess, &code);
-                    fprintf(stderr, "[shell_client] child exited early code=%lu\n", code);
-                    last_error_ = L"pulse_shell.exe \u542F\u52A8\u540E\u7ACB\u5373\u9000\u51FA";
-                    return false;
-                }
-                if (GetTickCount64() > deadline) {
-                    last_error_ = L"pulse_shell.exe \u672A\u54CD\u5E94\u7BA1\u9053";
-                    return false;
-                }
-                Sleep(50);
-                continue;
-            }
-            fprintf(stderr, "[shell_client] pipe CreateFile err=%lu\n", err);
+    if (!child_started_ && !SpawnChild()) return false;
+    HANDLE h = INVALID_HANDLE_VALUE;
+    // WaitNamedPipe returns ERROR_FILE_NOT_FOUND before the child creates its
+    // pipe, so retry in a bounded loop.
+    const auto deadline = GetTickCount64() + 8000;
+    while (true) {
+        h = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+                        OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
+        if (h != INVALID_HANDLE_VALUE) {
+            ULONG server_pid = 0;
+            if (GetNamedPipeServerProcessId(h, &server_pid) &&
+                server_pid == child_.dwProcessId)
+                break;
+            CloseHandle(h);
+            last_error_ = L"pulse_shell.exe pipe identity mismatch";
             return false;
         }
+        const DWORD err = GetLastError();
+        if (err == ERROR_PIPE_BUSY) {
+            WaitNamedPipeW(name.c_str(), 200);
+            if (GetTickCount64() > deadline) {
+                last_error_ = L"pulse_shell.exe \u7BA1\u9053\u5FD9\u788C";
+                return false;
+            }
+            continue;
+        }
+        if (err == ERROR_FILE_NOT_FOUND) {
+            if (WaitForSingleObject(child_.hProcess, 0) == WAIT_OBJECT_0) {
+                DWORD code = 0;
+                GetExitCodeProcess(child_.hProcess, &code);
+                fprintf(stderr, "[shell_client] child exited early code=%lu\n", code);
+                last_error_ = L"pulse_shell.exe \u542F\u52A8\u540E\u7ACB\u5373\u9000\u51FA";
+                return false;
+            }
+            if (GetTickCount64() > deadline) {
+                last_error_ = L"pulse_shell.exe \u672A\u54CD\u5E94\u7BA1\u9053";
+                return false;
+            }
+            Sleep(50);
+            continue;
+        }
+        fprintf(stderr, "[shell_client] pipe CreateFile err=%lu\n", err);
+        return false;
     }
     pipe_ = h;
     return true;
@@ -158,25 +162,25 @@ uint32_t ShellClient::Submit(uint32_t type, const std::vector<uint8_t>& payload)
     {
         std::lock_guard<std::mutex> lock(send_mutex_);
         if (EnsureConnected()) {
+            std::lock_guard<std::mutex> pending_lock(pending_mutex_);
+            pending_.emplace(p.id, p);
             sent = SendFrame(p.type, p.id, p.payload);
             if (!sent) {
                 // Pipe broke mid-send: restart the child and retry once.
+                pending_.find(p.id)->second.retried = true;
                 CloseHandle(pipe_);
                 pipe_ = INVALID_HANDLE_VALUE;
                 KillChild();
                 if (EnsureConnected())
                     sent = SendFrame(p.type, p.id, p.payload);
             }
+            if (!sent) pending_.erase(p.id);
         }
     }
     if (!sent) {
         FireDone(p.id, HRESULT_FROM_WIN32(ERROR_PIPE_NOT_CONNECTED), false,
                  UnreachableMessage());
         return p.id;
-    }
-    {
-        std::lock_guard<std::mutex> lock(pending_mutex_);
-        pending_[p.id] = std::move(p);
     }
     return p.id;
 }
@@ -224,8 +228,30 @@ void ShellClient::Cancel(uint32_t id) {
     SendFrame(REQ_CANCEL, id, {});
 }
 
+void ShellClient::Abort(uint32_t id) {
+    bool removed = false;
+    {
+        std::lock_guard<std::mutex> lock(send_mutex_);
+        {
+            std::lock_guard<std::mutex> pending_lock(pending_mutex_);
+            removed = pending_.erase(id) != 0;
+        }
+        if (pipe_ != INVALID_HANDLE_VALUE) {
+            CancelIoEx(pipe_, nullptr);
+            CloseHandle(pipe_);
+            pipe_ = INVALID_HANDLE_VALUE;
+        }
+        KillChild();
+    }
+    if (removed) {
+        FireDone(id, HRESULT_FROM_WIN32(ERROR_TIMEOUT), false,
+                 L"shell host timed out");
+    }
+}
+
 uint32_t ShellClient::QueryContextMenu(const std::vector<std::wstring>& paths,
-                                       uint32_t owner_hwnd, bool background, bool extended) {
+                                       uint32_t owner_hwnd, bool background, bool extended,
+                                       const std::vector<std::wstring>& disabled_clsids) {
     PayloadWriter w;
     w.PutU32(owner_hwnd);
     uint32_t flags = 0;
@@ -233,13 +259,17 @@ uint32_t ShellClient::QueryContextMenu(const std::vector<std::wstring>& paths,
     if (background) flags |= CTXF_BACKGROUND;
     w.PutU32(flags);
     w.PutStringArray(paths);
+    w.PutStringArray(disabled_clsids);
     return Submit(REQ_CTX_QUERY, w.data());
 }
 
-uint32_t ShellClient::InvokeContextMenu(uint32_t session_id, uint32_t item_id) {
+uint32_t ShellClient::InvokeContextMenu(uint32_t session_id, uint32_t item_id,
+                                        const std::wstring& verb, const std::wstring& text) {
     PayloadWriter w;
     w.PutU32(session_id);
     w.PutU32(item_id);
+    w.PutString(verb);
+    w.PutString(text);
     return Submit(REQ_CTX_INVOKE, w.data());
 }
 
@@ -306,36 +336,54 @@ void ShellClient::ReaderThread() {
                 uint32_t hr = 0, cancelled = 0;
                 std::wstring err;
                 if (r.GetU32(hr) && r.GetU32(cancelled) && r.GetString(err)) {
+                    bool pending = false;
                     {
                         std::lock_guard<std::mutex> lock(pending_mutex_);
-                        pending_.erase(h.request_id);
+                        pending = pending_.erase(h.request_id) != 0;
                     }
-                    FireDone(h.request_id, hr, cancelled != 0, err);
+                    if (pending) FireDone(h.request_id, hr, cancelled != 0, err);
                 }
             } else if (h.type == RSP_CTX_ITEMS) {
-                uint32_t session = 0, count = 0;
+                uint32_t session = 0, msg_flags = 0, count = 0;
                 std::vector<CtxMenuItem> items;
-                bool ok = r.GetU32(session) && r.GetU32(count) && count <= 4096;
+                bool ok = r.GetU32(session) && r.GetU32(msg_flags) && r.GetU32(count) &&
+                          count <= 4096;
+                const bool partial = (msg_flags & CTX_ITEMS_PARTIAL) != 0;
                 for (uint32_t i = 0; ok && i < count; ++i) {
                     CtxMenuItem it;
                     uint32_t flags = 0;
                     ok = r.GetU32(it.id) && r.GetU32(flags) &&
                          r.GetString(it.verb) && r.GetString(it.text);
+                    if (ok) {
+                        if (!r.GetString(it.clsid)) it.clsid.clear();
+                        if (!r.GetString(it.handler)) it.handler.clear();
+                    }
                     it.enabled = (flags & CTX_ITEM_ENABLED) != 0;
                     it.separator_after = (flags & CTX_ITEM_SEPARATOR_AFTER) != 0;
                     it.has_children = (flags & CTX_ITEM_HAS_CHILDREN) != 0;
                     it.child = (flags & CTX_ITEM_CHILD) != 0;
                     if (ok) items.push_back(std::move(it));
                 }
+                std::vector<std::wstring> slow_clsids;
+                if (ok) r.TryStringArray(slow_clsids);
                 if (ok) {
+                    bool pending = false;
                     {
                         std::lock_guard<std::mutex> lock(pending_mutex_);
-                        pending_.erase(h.request_id);
+                        if (partial) {
+                            pending = pending_.contains(h.request_id);
+                        } else {
+                            pending = pending_.erase(h.request_id) != 0;
+                        }
                     }
-                    if (cb_.ctx_items) cb_.ctx_items(h.request_id, std::move(items));
+                    if (pending && cb_.ctx_items)
+                        cb_.ctx_items(h.request_id, std::move(items), partial,
+                                      std::move(slow_clsids));
                 }
+            } else if (h.type == RSP_PONG) {
+                std::lock_guard<std::mutex> lock(pending_mutex_);
+                pending_.erase(h.request_id);
             }
-            // RSP_PONG: no state to update.
         }
 
         if (!running_.load()) break;
@@ -368,22 +416,18 @@ void ShellClient::HandleDisconnect() {
         FireDone(p.id, HRESULT_FROM_WIN32(ERROR_BROKEN_PIPE), false,
                  L"shell host died twice on one request");
     for (auto& p : retry) {
-        uint32_t type = p.type, id = p.id;
-        auto payload = std::move(p.payload);
+        const uint32_t id = p.id;
         bool sent = false;
         {
             std::lock_guard<std::mutex> lock(send_mutex_);
-            if (EnsureConnected()) sent = SendFrame(type, id, payload);
+            if (EnsureConnected()) {
+                std::lock_guard<std::mutex> pending_lock(pending_mutex_);
+                pending_.emplace(id, p);
+                sent = SendFrame(p.type, id, p.payload);
+                if (!sent) pending_.erase(id);
+            }
         }
-        if (sent) {
-            Pending again;
-            again.type = type;
-            again.id = id;
-            again.payload = std::move(payload);
-            again.retried = true;
-            std::lock_guard<std::mutex> lock(pending_mutex_);
-            pending_[id] = std::move(again);
-        } else {
+        if (!sent) {
             FireDone(id, HRESULT_FROM_WIN32(ERROR_PIPE_NOT_CONNECTED), false,
                      UnreachableMessage());
         }

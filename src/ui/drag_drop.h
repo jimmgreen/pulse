@@ -1,7 +1,8 @@
 // drag_drop.h — OLE drag & drop for the file list.
 //
-// Drag-out: FileDataObject (CF_HDROP + CFSTR_PREFERREDDROPEFFECT) +
-// ListDropSource, so drags land in Explorer or any OLE target.
+// Drag-out: a Shell IDataObject (CF_HDROP + CFSTR_SHELLIDLIST + FileNameW)
+// with FileDataObject as fallback, plus ListDropSource, so drags land in
+// Explorer, AutoCAD, and other OLE targets.
 // Drop-in: WindowDropTarget registered on the main window; all hit
 // decisions (folder row / breadcrumb segment / sidebar item / tray) are
 // delegated to the app through DropTargetCallbacks.
@@ -28,6 +29,13 @@ std::wstring VolumeRoot(const std::wstring& path);
 // Explorer modifier semantics. allowed is the DoDragDrop dwOKEffects mask.
 DWORD ComputeDropEffect(DWORD key_state, const std::wstring& source_sample,
                         const std::wstring& dest_dir, DWORD allowed);
+
+// First source that is a real directory (not a file or broken path).
+// Used when dropping onto a pane header to navigate instead of copy/move.
+std::wstring FirstDroppableFolder(const std::vector<std::wstring>& sources);
+
+// True when path looks like a .lnk, so a header drop can try to open the target.
+bool LooksLikeFolderShortcut(const std::wstring& path);
 
 // ---------------------------------------------------------------------------
 // IDataObject inspection (drop-in side).
@@ -68,6 +76,9 @@ private:
 
     HGLOBAL RenderHDrop() const;
     HGLOBAL RenderDword(DWORD v) const;
+    HGLOBAL RenderFileNameW() const;
+    HGLOBAL RenderFileNameA() const;
+    HGLOBAL RenderShellIdList() const;
     bool IsSupportedFormat(const FORMATETC* fmt) const;
 
     LONG ref_ = 1;

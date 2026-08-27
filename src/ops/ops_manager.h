@@ -29,10 +29,10 @@
 
 namespace pulse::ops {
 
-enum class OpType { Copy, Move, RecycleDelete, RealDelete, Rename, CreateFolder, CreateTextFile, RestoreRecycle };
+enum class OpType { Copy, Move, RecycleDelete, RealDelete, Rename, CreateFolder, CreateTextFile, RestoreRecycle, EmptyRecycle, BatchRename };
 enum class CollisionPolicy { System, Replace, KeepBoth };
 enum class OpPhase { Queued, Scanning, WaitingForConflict, Running, Paused,
-                     Cancelling, Completed, Failed };
+                     Verifying, Cancelling, Completed, Failed };
 enum class ConflictChoice { Cancel, Replace, Skip, KeepBoth };
 
 struct ConflictItemInfo {
@@ -54,6 +54,7 @@ struct OpRequest {
     std::vector<std::wstring> sources;
     std::wstring dest_dir;    // Copy / Move
     std::wstring new_name;    // Rename
+    std::vector<std::wstring> new_names; // BatchRename, parallel to sources
     CollisionPolicy collision_policy = CollisionPolicy::System; // Copy / Move
     bool is_undo = false;     // undo-originated ops do not re-enter the stack
 };
@@ -94,6 +95,17 @@ struct CompletedOperation {
     std::vector<std::wstring> destinations;
 };
 
+struct RecoveryEntry {
+    uint64_t sequence = 0;
+    OpRequest request;
+    bool was_active = false;
+};
+
+struct RecoverySnapshot {
+    std::vector<RecoveryEntry> entries;
+    bool has_uncertain_destructive = false;
+};
+
 // One Explorer verb coming back from a pulse_shell context-menu session.
 // Software submenus keep one level: header row (has_children) + child rows.
 struct ShellMenuItem {
@@ -104,6 +116,8 @@ struct ShellMenuItem {
     bool child = false;
     std::wstring verb;           // canonical verb (may be empty)
     std::wstring text;
+    std::wstring clsid;
+    std::wstring handler;
 };
 
 class OpsManager {
@@ -115,6 +129,13 @@ public:
     void Start(std::function<void()> notify);
     void Stop();
 
+    void SetJournalPath(std::wstring path);
+    RecoverySnapshot PendingRecovery() const;
+    bool RetryRecovery();
+    void DiscardRecovery();
+    void SetVerifyCopies(bool enabled) noexcept { verify_copies_.store(enabled); }
+    bool VerifyCopies() const noexcept { return verify_copies_.load(); }
+
     uint64_t Submit(OpRequest req);
     void CancelCurrent();
     void PauseCurrent();
@@ -122,15 +143,15 @@ public:
     std::optional<ConflictItemInfo> PendingConflict() const;
     void ResolveConflict(uint64_t token, ConflictChoice choice, bool apply_to_all);
 
-    // Double-click open: ShellExecuteEx on the ops worker thread (plan §6.2).
+    // Double-click open: ShellExecuteEx on a dedicated open thread (plan §6.2).
     void OpenWith(const std::wstring& path);
 
     // Shell "properties" verb on the ops worker thread. Compile-verified only
     // in 1B-2; wired to the context menu but exercised manually.
     void ShowProperties(const std::wstring& path);
 
-    // Any registry shell verb ("print", "edit", "openas", …) via ShellExecuteEx
-    // on the ops worker thread.
+    // Any registry shell verb ("print", "edit", …) via ShellExecuteEx on the
+    // ops worker thread. "openas" / "打开方式…" uses SHOpenWithDialog.
     void ExecuteVerb(const std::wstring& path, const std::wstring& verb);
 
     // Open `file` with a specific application (open-with MRU entry).
@@ -144,12 +165,15 @@ public:
     // in-flight transfer never delays a right-click. The callback fires on the
     // shell client's reader thread; PostMessage from it, do not paint.
     using ShellMenuCallback =
-        std::function<void(uint32_t token, std::vector<ShellMenuItem> items)>;
+        std::function<void(uint32_t token, std::vector<ShellMenuItem> items, bool partial,
+                           std::vector<std::wstring> slow_clsids)>;
     void SetShellMenuCallback(ShellMenuCallback cb);
     // Returns a token identifying the session (0 when the manager is stopped).
     uint32_t QueryShellMenu(std::vector<std::wstring> paths, void* owner_hwnd,
-                            bool background, bool extended);
-    void InvokeShellMenu(uint32_t token, uint32_t item_id); // host auto-closes after
+                            bool background, bool extended,
+                            std::vector<std::wstring> disabled_clsids = {});
+    void InvokeShellMenu(uint32_t token, uint32_t item_id,
+                         std::wstring verb = {}, std::wstring text = {}); // host auto-closes after
     void CloseShellMenu(uint32_t token);                    // dismissed without invoke
     // True if a context-menu InvokeCommand finished since the last take
     // (UI uses this to refresh the folder the verb may have mutated).
@@ -184,35 +208,53 @@ private:
         bool background = false;
         bool extended = false;
         std::vector<std::wstring> paths;
+        std::vector<std::wstring> disabled_clsids;
+        std::wstring verb;
+        std::wstring text;
     };
 
     void WorkerThread();
     void MenuThread();
+    void OpenThread();
+    void EnqueueOpen(QueueItem item);
     void RunShellOp(const OpRequest& req, uint64_t task_id);
+    bool WaitShellDone(uint32_t id, uint32_t& hr, bool& cancelled, std::wstring& error);
     void RunTransfer(const OpRequest& req, uint64_t task_id);
     void SetStatus(const std::function<void(OpStatus&)>& fn);
     void PushUndo(const OpRequest& req,
                   const std::vector<std::wstring>* actual_destinations = nullptr);
+    void LoadRecoveryJournal();
+    void PersistJournal();
+    std::wstring JournalJsonLocked() const;
     bool ConsumeCtxInvokeDone(uint32_t id);   // true = RSP_DONE was a menu invoke
-    void OnCtxItems(uint32_t client_id, std::vector<ShellMenuItem> items);
+    void OnCtxItems(uint32_t client_id, std::vector<ShellMenuItem> items, bool partial,
+                    std::vector<std::wstring> slow_clsids);
 
     std::function<void()> notify_;
 
     mutable std::mutex mutex_;            // guards queue_ + status_ + undo_
     std::condition_variable cv_;
     std::deque<QueueItem> queue_;
+    std::deque<std::wstring> recovery_cleanup_roots_;
+    std::optional<QueueItem> active_item_;
+    std::vector<RecoveryEntry> pending_recovery_;
+    std::wstring journal_path_;
     OpStatus status_;
     std::deque<UndoEntry> undo_;
     std::deque<CompletedOperation> completions_;
 
     std::thread thread_;
     bool running_ = false;
+    std::atomic<bool> stopping_{false};
     uint64_t next_seq_ = 1;
 
     std::atomic<uint32_t> current_req_id_{0};
+    std::atomic<bool> shell_cancel_requested_{false};
+    std::atomic<ULONGLONG> shell_activity_tick_{0};
     std::atomic<bool> transfer_active_{false};
     std::atomic<bool> transfer_cancel_{false};
     std::atomic<bool> transfer_pause_{false};
+    std::atomic<bool> verify_copies_{false};
 
     mutable std::mutex transfer_control_mutex_;
     std::condition_variable transfer_control_cv_;
@@ -243,6 +285,15 @@ private:
     std::map<uint32_t, uint32_t> menu_token_by_session_;  // query req id -> token
     std::set<uint32_t> ctx_invoke_ids_;                   // in-flight invoke req ids
     std::atomic<uint32_t> ctx_invoke_done_{0};
+
+    // ShellExecute / properties: dedicated STA thread so opens never
+    // serialize behind transfers (SEE_MASK_NOASYNC on the transfer
+    // worker made double-click open wait for in-flight copies).
+    std::thread open_thread_;
+    bool open_running_ = false;
+    mutable std::mutex open_mutex_;
+    std::condition_variable open_cv_;
+    std::deque<QueueItem> open_queue_;
 };
 
 // wt.exe argument string for "open terminal here" (unit-tested; launching is

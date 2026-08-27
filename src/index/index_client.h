@@ -35,6 +35,7 @@ public:
     static bool InstallServiceElevated();
     static bool ConfigureIndexPathElevated(const std::wstring& path);
     static bool ConfigureExcludePathElevated(const std::wstring& path, bool enabled);
+    static bool ExportDiagnosticsElevated(const std::wstring& empty_directory);
 
     // Fire-and-forget. Reply arrives as search_msg (wParam = request id).
     void SearchAsync(const Query& q, uint32_t id);

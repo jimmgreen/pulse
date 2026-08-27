@@ -31,6 +31,9 @@ enum MenuCmd : int {
     CmdCopyAsPath,      // unused alias guard — keep ids stable
     CmdOpenPath,        // search results: reveal in containing folder
     CmdOpenInNewTab,    // folder: open selection in a new tab
+    CmdSelectAll,
+    CmdInvertSelection,
+    CmdSelectWildcard,
     CmdLayoutSingle = 50,
     CmdLayoutTwoVertical,
     CmdLayoutTwoHorizontal,
@@ -62,10 +65,14 @@ enum MenuCmd : int {
     CmdTabRemoveFromGroup,  // tab menu: leave the group (group survives)
     CmdTabCloseOthers,
     CmdTabCloseRight,
-    CmdTabJoinGroupBase = 130, // + index into Pane::tab_groups (clear of 98-129)
+    CmdTabJoinGroupBase = 130, // + index into WindowTabs::tab_groups (clear of 98-129)
     CmdEditStarBadge = 170,
     CmdRemoveStarred,
     CmdRemoveRecent,
+    CmdBatchRename,
+    CmdRestoreRecycle,
+    CmdEmptyRecycle,
+    CmdOpenRecycle,
     CmdRecentBase = 200,
     CmdIndexBase = 1000,
     // Explorer integration (优化.md §7): registry static verbs bound to the
@@ -85,6 +92,8 @@ struct ShellMenuEntry {
     std::vector<ShellMenuEntry> children;
     std::wstring verb;      // canonical verb when known (registry / GetCommandString)
     bool from_com = false;  // pulse_shell IContextMenu row (vs registry static)
+    std::wstring clsid;     // handler CLSID when known ("{guid}")
+    std::wstring handler;   // handler display name for the settings catalog
 };
 
 // Context menu for a selected entry: 打开 + icon strip (cut/copy/delete/
@@ -109,6 +118,12 @@ std::vector<ShellMenuEntry> ApplyExplorerPrefs(const ContextMenuPrefs& prefs,
 // Context menu for empty list space (creation / paste / terminal / undo).
 std::vector<ui::FluentMenuItem> BuildBackgroundMenu(bool can_paste, bool can_undo,
                                                     const std::wstring& undo_label);
+std::vector<ui::FluentMenuItem> BuildRecycleItemMenu(bool can_undo,
+                                                     const std::wstring& undo_label);
+std::vector<ui::FluentMenuItem> BuildRecycleBackgroundMenu(bool can_undo,
+                                                           const std::wstring& undo_label,
+                                                           bool can_empty);
+std::vector<ui::FluentMenuItem> BuildRecyclePlaceMenu(bool can_empty);
 
 // Toolbar "新建▾" dropdown (reuses the same FluentMenu component).
 std::vector<ui::FluentMenuItem> BuildNewMenu();

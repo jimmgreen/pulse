@@ -1,6 +1,6 @@
 # Build trees
 /build/
-/build_selftest/
+/build_*/
 /out/
 /dist/
 CMakeCache.txt

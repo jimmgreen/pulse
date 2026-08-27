@@ -54,6 +54,8 @@ struct ContextMenuPrefs {
     void SetGroupEnabled(ipc::CtxMenuGroup g, bool on);
     bool ItemEnabled(const std::wstring& key, ipc::CtxMenuCategory c, bool from_com) const;
     void SetItemEnabled(const std::wstring& key, bool on);
+    bool HandlerEnabled(const std::wstring& clsid) const;
+    std::vector<std::wstring> DisabledHandlerClsids() const;
     bool RecordSeen(const std::wstring& key, const std::wstring& text, bool flyout,
                     ipc::CtxMenuCategory category, bool from_com = false);
     // key: ".dwg" / ":bg" / ":file". Returns true if prefs changed.
@@ -66,6 +68,9 @@ struct ContextMenuPrefs {
     bool FromJson(const std::wstring& json);
     bool Load();
     bool Save() const;
+
+private:
+    void CoalesceCompressCatalog();
 };
 
 } // namespace pulse::app

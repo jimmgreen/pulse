@@ -14,12 +14,30 @@ namespace pulse::ui {
 
 namespace {
 
+// Shell handlers can expose an icon per path (not just per extension). Keep
+// those maps bounded because a long scroll through executable/link files
+// otherwise retains every path seen during the session.
+constexpr size_t kExactIndexLimit = 256;
+constexpr size_t kGenericIndexLimit = 64;
+constexpr size_t kBitmapCacheLimit = 128;
+
 std::wstring LowerExt(const std::wstring& name) {
     const size_t dot = name.find_last_of(L'.');
     if (dot == std::wstring::npos || dot + 1 >= name.size()) return L"";
     std::wstring ext = name.substr(dot);
     for (auto& c : ext) c = static_cast<wchar_t>(std::towlower(c));
     return ext;
+}
+
+bool IsPerFileIconExt(const std::wstring& ext) {
+    return ext == L".exe" || ext == L".lnk" || ext == L".ico" || ext == L".cur" ||
+           ext == L".dll" || ext == L".scr" || ext == L".cpl" || ext == L".msc" ||
+           ext == L".url" || ext == L".appref-ms";
+}
+
+std::wstring PathLeaf(const std::wstring& path) {
+    const size_t slash = path.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? path : path.substr(slash + 1);
 }
 
 std::wstring ShellPath(const std::wstring& path) {
@@ -38,18 +56,11 @@ void ShellIconCache::SetDeviceContext(ID2D1DeviceContext2* dc) {
     if (dc_ == dc) return;
     dc_ = dc;
     bitmaps_.clear();
-    generic_index_.clear();
 }
 
 void ShellIconCache::SetScale(float scale) {
     if (std::abs(scale_ - scale) <= 0.001f) return;
     scale_ = scale;
-    bitmaps_.clear();
-    if (image_list_) {
-        image_list_->Release();
-        image_list_ = nullptr;
-    }
-    image_list_id_ = -1;
 }
 
 void ShellIconCache::SetNotifyWindow(HWND hwnd) {
@@ -65,11 +76,9 @@ void ShellIconCache::Reset() {
     if (worker_.joinable()) worker_.join();
     bitmaps_.clear();
     generic_index_.clear();
-    if (image_list_) {
-        image_list_->Release();
-        image_list_ = nullptr;
-    }
-    image_list_id_ = -1;
+    for (auto& [_, list] : image_lists_)
+        if (list) list->Release();
+    image_lists_.clear();
     wic_.reset();
     dc_ = nullptr;
     std::lock_guard<std::mutex> lock(mutex_);
@@ -85,21 +94,16 @@ int ShellIconCache::ImageListId(float desired_pixels) noexcept {
     return SHIL_JUMBO;
 }
 
-bool ShellIconCache::EnsureImageList(int id) {
-    if (image_list_ && image_list_id_ == id) return true;
-    if (image_list_) {
-        image_list_->Release();
-        image_list_ = nullptr;
-    }
-    bitmaps_.clear();
+IImageList* ShellIconCache::EnsureImageList(int id) {
+    if (const auto cached = image_lists_.find(id); cached != image_lists_.end())
+        return cached->second;
     INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_WIN95_CLASSES };
     InitCommonControlsEx(&icc);
-    if (FAILED(SHGetImageList(id, IID_IImageList, reinterpret_cast<void**>(&image_list_)))
-        || !image_list_) {
-        return false;
-    }
-    image_list_id_ = id;
-    return true;
+    IImageList* list = nullptr;
+    if (FAILED(SHGetImageList(id, IID_IImageList, reinterpret_cast<void**>(&list))) || !list)
+        return nullptr;
+    image_lists_.emplace(id, list);
+    return list;
 }
 
 bool ShellIconCache::EnsureWic() {
@@ -108,12 +112,13 @@ bool ShellIconCache::EnsureWic() {
                                       IID_PPV_ARGS(&wic_))) && wic_.get();
 }
 
-bool ShellIconCache::NeedsExactIcon(const std::wstring& name, bool is_dir) {
-    if (is_dir) return false;
-    const std::wstring ext = LowerExt(name);
-    return ext == L".exe" || ext == L".lnk" || ext == L".ico" || ext == L".cur" ||
-           ext == L".dll" || ext == L".scr" || ext == L".cpl" || ext == L".msc" ||
-           ext == L".url" || ext == L".appref-ms";
+bool ShellIconCache::NeedsExactIcon(const std::wstring& name, bool is_dir,
+                                    const std::wstring& path) {
+    (void)is_dir;
+    // Presentation may treat a resolved folder shortcut as a directory, which
+    // used to skip the .lnk lookup and draw a blank document / generic folder.
+    return IsPerFileIconExt(LowerExt(name)) ||
+           IsPerFileIconExt(LowerExt(PathLeaf(path)));
 }
 
 int ShellIconCache::GenericIndex(const std::wstring& name, bool is_dir, DWORD attrs) {
@@ -169,7 +174,9 @@ void ShellIconCache::WorkerLoop() {
                                SHGFI_SYSICONINDEX | SHGFI_USEFILEATTRIBUTES))
                 index = info.iIcon;
             std::lock_guard<std::mutex> lock(mutex_);
+            if (generic_index_.size() >= kGenericIndexLimit) generic_index_.clear();
             generic_index_[key] = index;
+            if (exact_index_.size() >= kExactIndexLimit) exact_index_.clear();
             exact_index_[path] = index;
         } else {
             const UINT flags = SHGFI_SYSICONINDEX | SHGFI_SMALLICON;
@@ -179,6 +186,7 @@ void ShellIconCache::WorkerLoop() {
                 if (info.hIcon) DestroyIcon(info.hIcon);
             }
             std::lock_guard<std::mutex> lock(mutex_);
+            if (exact_index_.size() >= kExactIndexLimit) exact_index_.clear();
             exact_index_[path] = index;
         }
         if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
@@ -207,18 +215,23 @@ ComPtr<ID2D1Bitmap> ShellIconCache::BitmapFromIcon(HICON icon) {
 }
 
 ID2D1Bitmap* ShellIconCache::BitmapForIndex(int index, int list_id) {
-    if (index < 0 || !EnsureImageList(list_id) || !dc_) return nullptr;
-    auto it = bitmaps_.find(index);
+    if (index < 0 || !dc_) return nullptr;
+    IImageList* image_list = EnsureImageList(list_id);
+    if (!image_list) return nullptr;
+    const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(list_id)) << 32) |
+        static_cast<uint32_t>(index);
+    auto it = bitmaps_.find(key);
     if (it != bitmaps_.end()) return it->second.get();
     HICON icon = nullptr;
-    if (FAILED(image_list_->GetIcon(index, ILD_TRANSPARENT, &icon)) || !icon) {
+    if (FAILED(image_list->GetIcon(index, ILD_TRANSPARENT, &icon)) || !icon) {
         return nullptr;
     }
     ComPtr<ID2D1Bitmap> bitmap = BitmapFromIcon(icon);
     DestroyIcon(icon);
     if (!bitmap.get()) return nullptr;
     ID2D1Bitmap* raw = bitmap.get();
-    bitmaps_[index] = std::move(bitmap);
+    if (bitmaps_.size() >= kBitmapCacheLimit) bitmaps_.clear();
+    bitmaps_[key] = std::move(bitmap);
     return raw;
 }
 
@@ -227,7 +240,7 @@ bool ShellIconCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
                           bool is_dir, DWORD attrs) {
     if (!dc) return false;
     int index = -1;
-    const bool exact = NeedsExactIcon(name, is_dir) && !path.empty();
+    const bool exact = NeedsExactIcon(name, is_dir, path) && !path.empty();
     if (exact) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = exact_index_.find(path);
@@ -247,7 +260,7 @@ bool ShellIconCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
 ID2D1Bitmap* ShellIconCache::BitmapFor(const std::wstring& path, const std::wstring& name,
                                        bool is_dir, DWORD attrs, float desired_dips) {
     int index = -1;
-    const bool exact = NeedsExactIcon(name, is_dir) && !path.empty();
+    const bool exact = NeedsExactIcon(name, is_dir, path) && !path.empty();
     if (exact) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = exact_index_.find(path);

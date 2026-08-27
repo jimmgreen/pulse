@@ -1,5 +1,6 @@
 // context_menu.cpp — See context_menu.h.
 #include "context_menu.h"
+#include "../common/localization.h"
 #include "../fs/fs_enum.h"
 #include "../ipc/ctx_menu_util.h"
 #include <windows.h>
@@ -25,13 +26,15 @@ constexpr const wchar_t* kGlyphLink = L"\xE71B";
 constexpr const wchar_t* kGlyphUndo = L"\xE7A7";
 constexpr const wchar_t* kGlyphNewFolder = L"\xE8F4";
 constexpr const wchar_t* kGlyphNewFile = L"\xE8A5";
-constexpr const wchar_t* kGlyphSplit = L"\xE8A9";
-constexpr const wchar_t* kGlyphLayout = L"\xE8A9";
 constexpr const wchar_t* kGlyphFolder = L"\xE8B7";
 constexpr const wchar_t* kGlyphOpenInNewTab = L"\xE8A7";
 constexpr const wchar_t* kGlyphSearch = L"\xE721";
 constexpr const wchar_t* kGlyphTag = L"\xE8EC";
 constexpr const wchar_t* kGlyphSettings = L"\xE713";
+constexpr const wchar_t* kGlyphRecycle = L"\xE75C";
+constexpr const wchar_t* kGlyphSelectAll = L"\xE8B3";
+constexpr const wchar_t* kGlyphInvert = L"\xE7A1";
+constexpr const wchar_t* kGlyphWildcard = L"\xE71C";
 
 ui::FluentMenuItem Item(int cmd, const wchar_t* text, const wchar_t* glyph,
                         const wchar_t* shortcut = nullptr, bool enabled = true) {
@@ -46,7 +49,8 @@ ui::FluentMenuItem Item(int cmd, const wchar_t* text, const wchar_t* glyph,
 
 ui::FluentMenuItem UndoItem(bool can_undo, const std::wstring& undo_label) {
     auto it = Item(CmdUndo,
-        can_undo && !undo_label.empty() ? undo_label.c_str() : L"撤销",
+        can_undo && !undo_label.empty() ? undo_label.c_str()
+                                        : l10n::Get(l10n::StringId::Undo).c_str(),
         kGlyphUndo, L"Ctrl+Z", can_undo);
     it.separator_after = false;
     return it;
@@ -57,7 +61,7 @@ ui::FluentMenuItem UndoItem(bool can_undo, const std::wstring& undo_label) {
 std::vector<ui::FluentMenuItem> BuildItemMenu(bool can_undo, const std::wstring& undo_label,
                                               bool folder) {
     std::vector<ui::FluentMenuItem> items;
-    items.push_back(Item(CmdOpen, L"打开", kGlyphOpen));
+    items.push_back(Item(CmdOpen, l10n::Get(l10n::StringId::Open).c_str(), kGlyphOpen));
 
     // 剪切/复制/删除/重命名 live on their shortcuts; collapse them into one
     // icon-button row (like the tag swatch strip) to make room for the
@@ -75,129 +79,69 @@ std::vector<ui::FluentMenuItem> BuildItemMenu(bool can_undo, const std::wstring&
     items.push_back(std::move(strip));
 
     if (folder)
-        items.push_back(Item(CmdOpenInNewTab, L"在新标签打开", kGlyphOpenInNewTab));
-    items.push_back(Item(CmdCopyPath, L"复制路径", kGlyphLink, L"Ctrl+Shift+C"));
-    items.push_back(Item(CmdOpenTerminal, L"在此处打开终端", kGlyphTerminal));
-    items.push_back(Item(CmdProperties, L"属性", kGlyphProperties, L"Alt+Enter"));
+        items.push_back(Item(CmdOpenInNewTab, l10n::Get(l10n::StringId::OpenNewTab).c_str(), kGlyphOpenInNewTab));
+    items.push_back(Item(CmdCopyPath, l10n::Get(l10n::StringId::CopyPath).c_str(), kGlyphLink, L"Ctrl+Shift+C"));
+    items.push_back(Item(CmdOpenTerminal, l10n::Get(l10n::StringId::OpenTerminalHere).c_str(), kGlyphTerminal));
+    items.push_back(Item(CmdProperties, l10n::Get(l10n::StringId::Properties).c_str(), kGlyphProperties, L"Alt+Enter"));
     items.back().separator_after = true;
-    items.push_back(Item(CmdPinWorkspace, L"钉为工作区", kGlyphFolder));
-    items.push_back(Item(CmdPinNetwork, L"钉为网络位置", kGlyphLink));
+    items.push_back(Item(CmdPinWorkspace, l10n::Get(l10n::StringId::PinWorkspace).c_str(), kGlyphFolder));
+    items.push_back(Item(CmdPinNetwork, l10n::Get(l10n::StringId::PinNetwork).c_str(), kGlyphLink));
     items.back().separator_after = true;
-    items.push_back(Item(CmdTags, L"标签…", kGlyphTag));
+    items.push_back(Item(CmdTags, l10n::Get(l10n::StringId::TagsEllipsis).c_str(), kGlyphTag));
     items.back().separator_after = true;
     items.push_back(UndoItem(can_undo, undo_label));
     return items;
 }
 
-void AppendShellSection(std::vector<ui::FluentMenuItem>& items,
-                        const std::vector<ShellMenuEntry>& entries) {
-    if (entries.empty()) return;
-    constexpr size_t kSectionCap = 48;
-    auto lower = [](std::wstring s) {
-        for (auto& c : s) c = static_cast<wchar_t>(std::towlower(c));
-        return s;
-    };
-    std::vector<std::wstring> seen;
-    for (const auto& it : items)
-        if (!it.text.empty()) seen.push_back(lower(it.text));
-
-    size_t added = 0;
-    for (const auto& e : entries) {
-        if (added >= kSectionCap) break;
-        const bool header = !e.children.empty();
-        if (e.text.empty() || (e.command == 0 && !header)) continue;
-        const std::wstring key = lower(e.text);
-        bool dup = false;
-        for (const auto& s : seen)
-            if (s == key) { dup = true; break; }
-        if (dup) continue;
-        seen.push_back(key);
-        if (added == 0 && !items.empty()) items.back().separator_after = true;
-        ui::FluentMenuItem row;
-        row.command = e.command;
-        row.text = e.text;
-        row.enabled = e.enabled;
-        // Software-owned submenu: keep the hierarchy as a one-level flyout.
-        for (const auto& c : e.children) {
-            if (c.text.empty() || c.command == 0) continue;
-            ui::FluentMenuItem child;
-            child.command = c.command;
-            child.text = c.text;
-            child.enabled = c.enabled;
-            row.children.push_back(std::move(child));
-        }
-        if (header && row.children.empty()) continue;
-        items.push_back(std::move(row));
-        ++added;
-    }
+std::vector<ui::FluentMenuItem> BuildRecycleItemMenu(bool can_undo,
+                                                     const std::wstring& undo_label) {
+    std::vector<ui::FluentMenuItem> items;
+    items.push_back(Item(CmdRestoreRecycle, l10n::Get(l10n::StringId::Restore).c_str(), kGlyphUndo));
+    items.push_back(Item(CmdDelete, l10n::Get(l10n::StringId::PermanentDelete).c_str(), kGlyphDelete, L"Del"));
+    items.back().separator_after = true;
+    items.push_back(Item(CmdCopyPath, l10n::Get(l10n::StringId::CopyPath).c_str(), kGlyphLink, L"Ctrl+Shift+C"));
+    items.back().separator_after = true;
+    items.push_back(UndoItem(can_undo, undo_label));
+    return items;
 }
 
-std::vector<ShellMenuEntry> ApplyExplorerPrefs(const ContextMenuPrefs& prefs,
-                                               const std::vector<ShellMenuEntry>& entries) {
-    bool has_compress_flyout = false;
-    for (const auto& e : entries) {
-        if (!e.children.empty() && ipc::IsCompressVendorFlyout(e.text)) {
-            has_compress_flyout = true;
-            break;
-        }
-    }
-
-    struct Ranked {
-        ShellMenuEntry entry;
-        int rank = 4;
-    };
-    std::vector<Ranked> kept;
-    kept.reserve(entries.size());
-    int mru_kept = 0;
-    const int mru_cap = (std::max)(0, prefs.open_with_mru);
-
-    for (const auto& e : entries) {
-        if (e.text.empty()) continue;
-        const bool flyout = !e.children.empty();
-        const auto cat = ipc::ClassifyExplorerItem(e.verb, e.text, flyout);
-        const std::wstring key = ipc::CatalogKey(e.text, flyout);
-        const bool explicit_on = prefs.item_enabled.count(key) && prefs.item_enabled.at(key);
-        if (has_compress_flyout && !flyout && ipc::IsCompressTopLevel(e.text) && !explicit_on)
-            continue;
-        if (!prefs.ItemEnabled(key, cat, e.from_com)) continue;
-        if (cat == ipc::CtxMenuCategory::OpenWith && ipc::IsOpenWithMruText(e.text)) {
-            if (mru_kept >= mru_cap) continue;
-            ++mru_kept;
-        }
-        int rank = 4;
-        if (flyout) rank = 0;
-        else if (cat == ipc::CtxMenuCategory::Software) rank = 1;
-        else if (cat == ipc::CtxMenuCategory::OpenWith) rank = 2;
-        else if (cat == ipc::CtxMenuCategory::Print) rank = 3;
-        kept.push_back({ e, rank });
-    }
-
-    std::stable_sort(kept.begin(), kept.end(),
-                     [](const Ranked& a, const Ranked& b) { return a.rank < b.rank; });
-
-    std::vector<ShellMenuEntry> out;
-    const size_t cap = static_cast<size_t>((std::max)(1, prefs.explorer_cap));
-    out.reserve((std::min)(kept.size(), cap));
-    for (auto& row : kept) {
-        if (out.size() >= cap) break;
-        out.push_back(std::move(row.entry));
-    }
-    return out;
+std::vector<ui::FluentMenuItem> BuildRecycleBackgroundMenu(bool can_undo,
+                                                           const std::wstring& undo_label,
+                                                           bool can_empty) {
+    std::vector<ui::FluentMenuItem> items;
+    items.push_back(Item(CmdEmptyRecycle, l10n::Get(l10n::StringId::EmptyRecycleBin).c_str(),
+                         kGlyphRecycle, nullptr, can_empty));
+    items.back().separator_after = true;
+    items.push_back(UndoItem(can_undo, undo_label));
+    return items;
 }
+
+std::vector<ui::FluentMenuItem> BuildRecyclePlaceMenu(bool can_empty) {
+    std::vector<ui::FluentMenuItem> items;
+    items.push_back(Item(CmdOpenRecycle, l10n::Get(l10n::StringId::Open).c_str(), kGlyphOpen));
+    items.push_back(Item(CmdEmptyRecycle, l10n::Get(l10n::StringId::EmptyRecycleBin).c_str(),
+                         kGlyphRecycle, nullptr, can_empty));
+    return items;
+}
+
 
 std::vector<ui::FluentMenuItem> BuildBackgroundMenu(bool can_paste, bool can_undo,
                                                     const std::wstring& undo_label) {
     std::vector<ui::FluentMenuItem> items;
-    items.push_back(Item(CmdNewFolder, L"新建文件夹", kGlyphNewFolder, L"F7"));
-    items.push_back(Item(CmdNewTextFile, L"新建文本文档", kGlyphNewFile));
+    items.push_back(Item(CmdNewFolder, l10n::Get(l10n::StringId::NewFolder).c_str(), kGlyphNewFolder, L"F7"));
+    items.push_back(Item(CmdNewTextFile, l10n::Get(l10n::StringId::NewTextDocument).c_str(), kGlyphNewFile));
     items.back().separator_after = true;
-    items.push_back(Item(CmdPaste, L"粘贴", kGlyphPaste, L"Ctrl+V", can_paste));
-    items.push_back(Item(CmdCopyPath, L"复制路径", kGlyphLink, L"Ctrl+Shift+C"));
+    items.push_back(Item(CmdPaste, l10n::Get(l10n::StringId::Paste).c_str(), kGlyphPaste, L"Ctrl+V", can_paste));
+    items.push_back(Item(CmdCopyPath, l10n::Get(l10n::StringId::CopyPath).c_str(), kGlyphLink, L"Ctrl+Shift+C"));
     items.back().separator_after = true;
-    items.push_back(Item(CmdOpenTerminal, L"在此处打开终端", kGlyphTerminal));
+    items.push_back(Item(CmdSelectAll, l10n::Get(l10n::StringId::SelectAll).c_str(), kGlyphSelectAll, L"Ctrl+A"));
+    items.push_back(Item(CmdInvertSelection, l10n::Get(l10n::StringId::InvertSelection).c_str(), kGlyphInvert, L"Ctrl+I"));
+    items.push_back(Item(CmdSelectWildcard, l10n::Get(l10n::StringId::SelectWildcard).c_str(), kGlyphWildcard, L"Ctrl+Shift+A"));
     items.back().separator_after = true;
-    items.push_back(Item(CmdPinWorkspace, L"钉为工作区", kGlyphFolder));
-    items.push_back(Item(CmdPinNetwork, L"钉为网络位置", kGlyphLink));
+    items.push_back(Item(CmdOpenTerminal, l10n::Get(l10n::StringId::OpenTerminalHere).c_str(), kGlyphTerminal));
+    items.back().separator_after = true;
+    items.push_back(Item(CmdPinWorkspace, l10n::Get(l10n::StringId::PinWorkspace).c_str(), kGlyphFolder));
+    items.push_back(Item(CmdPinNetwork, l10n::Get(l10n::StringId::PinNetwork).c_str(), kGlyphLink));
     items.back().separator_after = true;
     items.push_back(UndoItem(can_undo, undo_label));
     return items;
@@ -205,34 +149,45 @@ std::vector<ui::FluentMenuItem> BuildBackgroundMenu(bool can_paste, bool can_und
 
 std::vector<ui::FluentMenuItem> BuildNewMenu() {
     std::vector<ui::FluentMenuItem> items;
-    items.push_back(Item(CmdNewFolder, L"文件夹", kGlyphNewFolder, L"F7"));
-    items.push_back(Item(CmdNewTextFile, L"文本文档", kGlyphNewFile));
+    items.push_back(Item(CmdNewFolder, l10n::Get(l10n::StringId::Folder).c_str(), kGlyphNewFolder, L"F7"));
+    items.push_back(Item(CmdNewTextFile, l10n::Get(l10n::StringId::TextDocument).c_str(), kGlyphNewFile));
     return items;
 }
 
 std::vector<ui::FluentMenuItem> BuildSplitMenu(int current_preset) {
-    auto mark = [&](int cmd, const wchar_t* text, const wchar_t* shortcut) {
-        auto it = Item(cmd, text, kGlyphSplit, shortcut);
-        if (cmd - CmdLayoutSingle == current_preset)
-            it.text = std::wstring(L"● ") + text;
-        return it;
+    struct Row {
+        int cmd;
+        const wchar_t* shortcut;
+        l10n::StringId label;
+        ui::fluent::MenuPictogram pictogram;
+    };
+    static constexpr Row kRows[] = {
+        { CmdLayoutSingle,        L"Ctrl+1", l10n::StringId::LayoutSingle,     ui::fluent::MenuPictogram::LayoutSingle },
+        { CmdLayoutTwoVertical,   L"Ctrl+2", l10n::StringId::LayoutVertical,   ui::fluent::MenuPictogram::LayoutSideBySide },
+        { CmdLayoutTwoHorizontal, nullptr,   l10n::StringId::LayoutHorizontal, ui::fluent::MenuPictogram::LayoutStacked },
+        { CmdLayoutThree,         L"Ctrl+3", l10n::StringId::LayoutThree,      ui::fluent::MenuPictogram::LayoutThree },
+        { CmdLayoutFourGrid,      L"Ctrl+4", l10n::StringId::LayoutFour,       ui::fluent::MenuPictogram::LayoutFour },
     };
     std::vector<ui::FluentMenuItem> items;
-    items.push_back(mark(CmdLayoutSingle, L"单栏", L"Ctrl+1"));
-    items.push_back(mark(CmdLayoutTwoVertical, L"左右分栏", L"Ctrl+2"));
-    items.push_back(mark(CmdLayoutTwoHorizontal, L"上下分栏", nullptr));
-    items.push_back(mark(CmdLayoutThree, L"三栏", L"Ctrl+3"));
-    items.push_back(mark(CmdLayoutFourGrid, L"四宫格", L"Ctrl+4"));
+    for (const auto& row : kRows) {
+        auto it = Item(row.cmd, l10n::Get(row.label).c_str(), L"", row.shortcut);
+        it.radio_group = true;
+        it.radio = (row.cmd - CmdLayoutSingle == current_preset);
+        it.pictogram = row.pictogram;
+        items.push_back(std::move(it));
+    }
     items.back().separator_after = true;
-    items.push_back(Item(CmdCopyToTarget, L"复制到目标栏", kGlyphCopy, L"Ctrl+Alt+C"));
-    items.push_back(Item(CmdMoveToTarget, L"移动到目标栏", kGlyphCut, L"Ctrl+Alt+X"));
+    items.push_back(Item(CmdCopyToTarget, l10n::Get(l10n::StringId::CopyToTarget).c_str(), kGlyphCopy, L"Ctrl+Alt+C"));
+    items.push_back(Item(CmdMoveToTarget, l10n::Get(l10n::StringId::MoveToTarget).c_str(), kGlyphCut, L"Ctrl+Alt+X"));
     return items;
 }
 
 std::vector<ui::FluentMenuItem> BuildViewMenu(ui::ViewMode current_mode, bool details_panel) {
-    static constexpr const wchar_t* labels[] = {
-        L"超大图标", L"大图标", L"中图标", L"小图标",
-        L"列表", L"详细信息", L"平铺", L"内容"
+    static constexpr l10n::StringId labels[] = {
+        l10n::StringId::ViewExtraLarge, l10n::StringId::ViewLarge,
+        l10n::StringId::MediumIcons, l10n::StringId::ViewSmall,
+        l10n::StringId::ViewList, l10n::StringId::ViewDetails,
+        l10n::StringId::ViewTiles, l10n::StringId::ViewContent,
     };
     static constexpr const wchar_t* glyphs[] = {
         L"\xE7F4", L"\xE7F4", L"\xE7F4", L"\xECA5",
@@ -241,7 +196,7 @@ std::vector<ui::FluentMenuItem> BuildViewMenu(ui::ViewMode current_mode, bool de
     std::vector<ui::FluentMenuItem> items;
     items.reserve(9);
     for (int i = 0; i < 8; ++i) {
-        auto row = Item(CmdViewBase + i, labels[i], glyphs[i]);
+        auto row = Item(CmdViewBase + i, l10n::Get(labels[i]).c_str(), glyphs[i]);
         if (i == 0) row.glyph_scale = 1.16f;
         else if (i == 1) row.glyph_scale = 1.0f;
         else if (i == 2) row.glyph_scale = 0.82f;
@@ -249,7 +204,7 @@ std::vector<ui::FluentMenuItem> BuildViewMenu(ui::ViewMode current_mode, bool de
         items.push_back(std::move(row));
     }
     items.back().separator_after = true;
-    auto panel = Item(CmdDetailsPanel, L"详细信息面板", L"\xE700");
+    auto panel = Item(CmdDetailsPanel, l10n::Get(l10n::StringId::DetailsPane).c_str(), L"\xE700");
     panel.checked = details_panel;
     items.push_back(std::move(panel));
     return items;
@@ -341,19 +296,28 @@ std::vector<ui::FluentMenuItem> BuildCommandPalette(const std::wstring& query,
     const bool search_mode = parsed.kind == OmnibarQuery::Kind::Search;
     const bool path_like = parsed.kind == OmnibarQuery::Kind::Mixed &&
                            LooksLikeFilesystemPath(needle);
-    auto add_cmd = [&](int cmd, const wchar_t* text, const wchar_t* glyph, const wchar_t* shortcut) {
+    auto add_cmd = [&](int cmd, const wchar_t* text, const wchar_t* glyph, const wchar_t* shortcut,
+                       ui::fluent::MenuPictogram pictogram = ui::fluent::MenuPictogram::None) {
         if (!ContainsI(text, needle)) return;
         items.push_back(Item(cmd, text, glyph, shortcut));
+        items.back().pictogram = pictogram;
     };
     if (!project_only && !search_mode && !path_like) {
-        add_cmd(CmdLayoutTwoVertical, L"左右分栏", kGlyphSplit, L"Ctrl+2");
-        add_cmd(CmdLayoutFourGrid, L"四宫格", kGlyphLayout, L"Ctrl+4");
-        add_cmd(CmdCopyToTarget, L"复制所选到目标栏", kGlyphCopy, L"Ctrl+Alt+C");
-        add_cmd(CmdNewFolder, L"新建文件夹", kGlyphNewFolder, L"F7");
-        add_cmd(CmdPinWorkspace, L"钉为工作区", kGlyphFolder, nullptr);
-        add_cmd(CmdCopyPath, L"复制路径", kGlyphLink, L"Ctrl+Shift+C");
+        add_cmd(CmdLayoutTwoVertical, l10n::Get(l10n::StringId::LayoutVertical).c_str(), L"", L"Ctrl+2",
+                ui::fluent::MenuPictogram::LayoutSideBySide);
+        add_cmd(CmdLayoutFourGrid, l10n::Get(l10n::StringId::LayoutFour).c_str(), L"", L"Ctrl+4",
+                ui::fluent::MenuPictogram::LayoutFour);
+        add_cmd(CmdCopyToTarget, l10n::Get(l10n::StringId::CopyToTarget).c_str(), kGlyphCopy, L"Ctrl+Alt+C");
+        add_cmd(CmdNewFolder, l10n::Get(l10n::StringId::NewFolder).c_str(), kGlyphNewFolder, L"F7");
+        add_cmd(CmdPinWorkspace, l10n::Get(l10n::StringId::PinWorkspace).c_str(), kGlyphFolder, nullptr);
+        add_cmd(CmdCopyPath, l10n::Get(l10n::StringId::CopyPath).c_str(), kGlyphLink, L"Ctrl+Shift+C");
         add_cmd(CmdInstallFullIndex, L"启用全盘索引（安装服务）", kGlyphSearch, nullptr);
-        add_cmd(CmdSettings, L"设置", kGlyphSettings, nullptr);
+        add_cmd(CmdSettings, l10n::Get(l10n::StringId::Settings).c_str(), kGlyphSettings, nullptr);
+        add_cmd(CmdOpenRecycle, l10n::Get(l10n::StringId::RecycleBin).c_str(), kGlyphRecycle, nullptr);
+        add_cmd(CmdBatchRename, l10n::Get(l10n::StringId::BatchRename).c_str(), kGlyphRename, L"Ctrl+Shift+R");
+        add_cmd(CmdSelectAll, l10n::Get(l10n::StringId::SelectAll).c_str(), kGlyphSelectAll, L"Ctrl+A");
+        add_cmd(CmdInvertSelection, l10n::Get(l10n::StringId::InvertSelection).c_str(), kGlyphInvert, L"Ctrl+I");
+        add_cmd(CmdSelectWildcard, l10n::Get(l10n::StringId::SelectWildcard).c_str(), kGlyphWildcard, L"Ctrl+Shift+A");
     }
     std::unordered_set<std::wstring> seen_paths;
     if (!command_mode && (!hits.empty() || total > 0)) {
@@ -370,7 +334,8 @@ std::vector<ui::FluentMenuItem> BuildCommandPalette(const std::wstring& query,
             if (!items.empty()) items.back().separator_after = true;
             wchar_t count[64];
             swprintf_s(count, L"%zu 项", total);
-            items.push_back(Item(CmdSearchAll, L"在列表中显示全部结果", kGlyphSearch, count));
+            items.push_back(Item(CmdSearchAll,
+                l10n::Get(l10n::StringId::ShowAllResults).c_str(), kGlyphSearch, count));
         }
     }
 
@@ -392,7 +357,7 @@ std::vector<ui::FluentMenuItem> BuildCommandPalette(const std::wstring& query,
         }
         items.push_back(Item(CmdRecentBase + static_cast<int>(i), title.c_str(), kGlyphFolder));
         items.back().text = title;
-        items.back().badge_text = L"历史路径";
+        items.back().badge_text = l10n::Get(l10n::StringId::HistoryPath);
         ++recent_added;
     }
     return items;

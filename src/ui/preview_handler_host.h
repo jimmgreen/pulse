@@ -1,13 +1,15 @@
 #pragma once
 #include <d2d1.h>
 #include <windows.h>
+#include <atomic>
 #include <cstdint>
+#include <memory>
 #include <string>
 
 namespace pulse::ui {
 
 // Hosts the system IPreviewHandler (Explorer Alt+P) in a WS_POPUP overlay.
-// Office/PDF work stays in prevhost.exe via CLSCTX_LOCAL_SERVER.
+// All third-party COM calls and the overlay HWND live on a dedicated STA.
 // The overlay matches the details preview rect so Word/Excel keep their own
 // scrollbars inside the pane (Explorer behavior).
 class PreviewHandlerHost {
@@ -24,6 +26,9 @@ public:
     void SetNotifyWindow(HWND hwnd);
     void Hide();
     void Reset();
+    // Re-evaluates the popup overlay's screen position after its owner moves.
+    // This only wakes the STA worker; it does not reopen the preview content.
+    void Reposition();
     // Main window WM_ACTIVATE / WM_ACTIVATEAPP. Overlay is WS_EX_NOACTIVATE so
     // it never receives those; TOPMOST must drop here or it covers other apps.
     void NotifyAppActivate(bool active);
@@ -31,42 +36,27 @@ public:
     // enabled=false unloads immediately. bounds are owner-client pixels.
     void Sync(HWND owner, const D2D1_RECT_F& bounds, const std::wstring& path,
               DWORD attrs, uint64_t generation, uint64_t modified, uint64_t size,
-              bool dark, const D2D1_COLOR_F& bg, const D2D1_COLOR_F& fg, bool enabled);
+              bool dark, const D2D1_COLOR_F& bg, const D2D1_COLOR_F& fg, bool enabled,
+              bool immediate = false);
 
-    State state() const { return state_; }
+    State state() const;
     static bool CanHost(const std::wstring& path);
 
 private:
-    bool EnsureWindow();
-    void PlaceOverlay();
-    bool OverlayOwnsForeground() const;
-    void Unload();
-    bool OpenCurrent();
-    void ScheduleOpen();
-    std::wstring Identity(const std::wstring& path, uint64_t generation,
-                          uint64_t modified, uint64_t size) const;
+    struct WorkerState;
+    void EnsureWorker();
+    void Publish(bool enabled, HWND owner, const RECT& bounds,
+                 const std::wstring& path, const std::wstring& identity,
+                 DWORD attrs, bool immediate);
+    static DWORD WINAPI WorkerMain(void* parameter);
 
-    HWND hwnd_ = nullptr;
-    HWND owner_ = nullptr;
+    std::shared_ptr<WorkerState> worker_;
     HWND notify_ = nullptr;
-    RECT bounds_{};
-    std::wstring path_;
-    std::wstring identity_;
-    std::wstring pending_identity_;
-    DWORD attrs_ = 0;
-    bool dark_ = true;
-    D2D1_COLOR_F bg_{};
-    D2D1_COLOR_F fg_{};
-    State state_ = State::Idle;
-    bool shown_ = false;
     bool app_active_ = true;
-    int placed_x_ = INT_MIN;
-    int placed_y_ = INT_MIN;
-    int placed_w_ = 0;
-    int placed_h_ = 0;
-    IUnknown* handler_ = nullptr;
-    IUnknown* stream_ = nullptr;
-    IUnknown* site_ = nullptr;
+    std::wstring last_identity_;
+    RECT last_bounds_{};
+    HWND last_owner_ = nullptr;
+    bool last_enabled_ = false;
 };
 
 } // namespace pulse::ui

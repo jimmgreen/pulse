@@ -1,8 +1,10 @@
 #include "index_config.h"
 #include "../common/json_utils.h"
+#include "../common/utf8_file.h"
 #include <algorithm>
+#include <aclapi.h>
 #include <cwctype>
-#include <fstream>
+#include <sddl.h>
 #include <shlobj.h>
 #include <sstream>
 #include <windows.h>
@@ -12,8 +14,78 @@ namespace {
 
 bool EnsureDirectory(const std::wstring& path) {
     if (path.empty()) return false;
-    if (CreateDirectoryW(path.c_str(), nullptr)) return true;
-    return GetLastError() == ERROR_ALREADY_EXISTS;
+    if (!CreateDirectoryW(path.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS)
+        return false;
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES &&
+        (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+}
+
+bool EnsureMachineDirectory(const std::wstring& path) {
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    // SYSTEM + Administrators full; Authenticated Users can list/read (logs,
+    // diagnostics). Protected DACL still blocks unintended ProgramData inherit.
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            L"O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;AU)",
+            SDDL_REVISION_1, &descriptor, nullptr))
+        return false;
+
+    SECURITY_ATTRIBUTES attributes{sizeof(attributes), descriptor, FALSE};
+    const bool created = CreateDirectoryW(path.c_str(), &attributes) != FALSE;
+    const DWORD create_error = created ? ERROR_SUCCESS : GetLastError();
+    if (!created && create_error != ERROR_ALREADY_EXISTS) {
+        LocalFree(descriptor);
+        return false;
+    }
+
+    HANDLE directory = CreateFileW(
+        path.c_str(), READ_CONTROL | WRITE_DAC | WRITE_OWNER,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (directory == INVALID_HANDLE_VALUE) {
+        directory = CreateFileW(
+            path.c_str(), READ_CONTROL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        if (directory == INVALID_HANDLE_VALUE) {
+            LocalFree(descriptor);
+            return false;
+        }
+    }
+
+    FILE_ATTRIBUTE_TAG_INFO tag{};
+    const bool valid_directory = GetFileInformationByHandleEx(
+        directory, FileAttributeTagInfo, &tag, sizeof(tag)) != FALSE &&
+        (tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+        (tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+
+    PSID owner = nullptr;
+    PSID group = nullptr;
+    PACL dacl = nullptr;
+    BOOL owner_defaulted = FALSE;
+    BOOL group_defaulted = FALSE;
+    BOOL dacl_present = FALSE;
+    BOOL dacl_defaulted = FALSE;
+    const bool have_security =
+        GetSecurityDescriptorOwner(descriptor, &owner, &owner_defaulted) != FALSE &&
+        GetSecurityDescriptorGroup(descriptor, &group, &group_defaulted) != FALSE &&
+        GetSecurityDescriptorDacl(descriptor, &dacl_present, &dacl, &dacl_defaulted) != FALSE &&
+        dacl_present;
+    const DWORD security_error = valid_directory && have_security
+        ? SetSecurityInfo(directory, SE_FILE_OBJECT,
+              OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+                  DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+              owner, group, dacl, nullptr)
+        : ERROR_INVALID_SECURITY_DESCR;
+
+    const DWORD access_error = GetLastError();
+    CloseHandle(directory);
+    LocalFree(descriptor);
+    // A normal user can validate an existing service-owned directory but
+    // cannot rewrite its owner/DACL. The service/installer will repair drift.
+    return valid_directory &&
+        (security_error == ERROR_SUCCESS || access_error == ERROR_ACCESS_DENIED);
 }
 
 std::wstring KnownFolder(int csidl) {
@@ -152,12 +224,19 @@ std::wstring NormalizeVolumeId(std::wstring id) {
     return id;
 }
 
-std::wstring MachineIndexRoot() {
+std::wstring MachineDataRoot() {
     std::wstring root = KnownFolder(CSIDL_COMMON_APPDATA);
     if (root.empty()) return {};
     const std::wstring pulse = root + L"\\Pulse";
+    if (!EnsureMachineDirectory(pulse)) return {};
+    return pulse;
+}
+
+std::wstring MachineIndexRoot() {
+    const std::wstring pulse = MachineDataRoot();
+    if (pulse.empty()) return {};
     const std::wstring index = pulse + L"\\Index";
-    if (!EnsureDirectory(pulse) || !EnsureDirectory(index)) return {};
+    if (!EnsureMachineDirectory(index)) return {};
     return index;
 }
 
@@ -182,15 +261,12 @@ bool LoadMachineConfig(IndexConfig& config, std::wstring* error) {
         SetError(error, L"无法定位 ProgramData 索引目录");
         return false;
     }
-    std::wifstream f(path, std::wifstream::binary);
-    if (!f) {
+    std::wstring json;
+    if (!pulse::ReadUtf8File(path, json)) {
         if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return true;
         SetError(error, L"无法读取索引配置");
         return false;
     }
-    std::wstringstream ss;
-    ss << f.rdbuf();
-    const std::wstring json = ss.str();
     if (json.empty() || json.find(L'{') == std::wstring::npos) {
         SetError(error, L"索引配置为空或损坏");
         return false;
@@ -225,18 +301,8 @@ bool SaveMachineConfig(const IndexConfig& config, std::wstring* error) {
         SetError(error, L"无法定位 ProgramData 索引目录");
         return false;
     }
-    const std::wstring temp = path + L".tmp";
-    std::wofstream f(temp, std::wofstream::out | std::wofstream::trunc | std::wofstream::binary);
-    if (!f) {
-        SetError(error, L"无法创建索引配置临时文件");
-        return false;
-    }
-    f << ConfigJson(config);
-    f.close();
-    if (!MoveFileExW(temp.c_str(), path.c_str(),
-                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+    if (!pulse::WriteUtf8FileAtomic(path, ConfigJson(config))) {
         SetError(error, Win32Error(L"保存索引配置失败"));
-        DeleteFileW(temp.c_str());
         return false;
     }
     return true;
