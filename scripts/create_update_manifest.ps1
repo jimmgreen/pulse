@@ -7,7 +7,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$PrivateKey,
     [uint32]$MinimumWindowsBuild = 19045,
-    [string]$Output = ""
+    [string]$Output = "",
+    [string]$ExpectedPublicKey = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,6 +53,10 @@ try {
     $public[0] = 4
     [Array]::Copy($parameters.Q.X, 0, $public, 1, 32)
     [Array]::Copy($parameters.Q.Y, 0, $public, 33, 32)
+    $publicHex = [Convert]::ToHexString($public).ToLowerInvariant()
+    if ($ExpectedPublicKey -and $publicHex -ne $ExpectedPublicKey.Trim().ToLowerInvariant()) {
+        throw "Signing key does not match the public key embedded in Pulse"
+    }
 
     $manifest = [ordered]@{
         schema = 1
@@ -64,7 +69,7 @@ try {
     [System.IO.File]::WriteAllText(
         $outputPath, $manifest + "`n", [System.Text.UTF8Encoding]::new($false))
     Write-Host "Update manifest written to $outputPath"
-    Write-Host "PULSE_UPDATE_PUBLIC_KEY_HEX=$([Convert]::ToHexString($public).ToLowerInvariant())"
+    Write-Host "PULSE_UPDATE_PUBLIC_KEY_HEX=$publicHex"
 } finally {
     $ecdsa.Dispose()
 }

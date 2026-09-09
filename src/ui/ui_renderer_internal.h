@@ -1465,21 +1465,24 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
         }
         y += diagnostics_h + 12.0f * scale;
 
-        const float update_h = vm.settings_update_available ? 184.0f * scale
-                                                             : 148.0f * scale;
+        const float available_width = std::max(0.0f, card_right - card_left - 32.0f * scale);
+        const float check_w = std::min(available_width, label_btn_w(
+            pulse::l10n::Get(pulse::l10n::StringId::CheckForUpdates)));
+        const float download_w = std::min(available_width, label_btn_w(
+            pulse::l10n::Get(pulse::l10n::StringId::DownloadUpdate)));
+        const bool stack_updates = vm.settings_update_available && check_w + gap + download_w > available_width;
+        const float update_h = 148.0f * scale +
+            (stack_updates ? 40.0f * scale : 0.0f);
         l.update_card = D2D1::RectF(card_left, y, card_right, y + update_h);
-        const float check_w = label_btn_w(
-            pulse::l10n::Get(pulse::l10n::StringId::CheckForUpdates));
-        const float download_w = label_btn_w(
-            pulse::l10n::Get(pulse::l10n::StringId::DownloadUpdate));
+        const float check_y = y + update_h - (stack_updates ? 88.0f : 48.0f) * scale;
         l.update_action[0] = D2D1::RectF(card_left + 16.0f * scale,
-                                         y + update_h - 48.0f * scale,
+                                         check_y,
                                          card_left + 16.0f * scale + check_w,
-                                         y + update_h - 16.0f * scale);
-        l.update_action[1] = D2D1::RectF(l.update_action[0].right + gap,
-                                         l.update_action[0].top,
-                                         l.update_action[0].right + gap + download_w,
-                                         l.update_action[0].bottom);
+                                         check_y + 32.0f * scale);
+        const float download_x = stack_updates ? l.update_action[0].left : l.update_action[0].right + gap;
+        const float download_y = check_y + (stack_updates ? 40.0f * scale : 0.0f);
+        l.update_action[1] = D2D1::RectF(download_x, download_y,
+                                         download_x + download_w, download_y + 32.0f * scale);
         y += update_h + 24.0f * scale;
     } else if (vm.settings_page == 4) {
         const float card_left = l.content.left + pad;

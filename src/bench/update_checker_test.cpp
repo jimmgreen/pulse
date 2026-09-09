@@ -34,6 +34,22 @@ const std::string kManifest =
 
 int main(int argc, char** argv) {
     using namespace pulse::app;
+    if (argc == 2 && std::string_view(argv[1]) == "--check-live") {
+        HWND window = CreateWindowExW(0, L"STATIC", L"Update check test", 0, 0, 0, 0, 0,
+            HWND_MESSAGE, nullptr, GetModuleHandleW(nullptr), nullptr);
+        UpdateChecker checker;
+        const bool started = checker.CheckAsync(window, WM_APP + 1);
+        UpdateResult result;
+        bool received = false;
+        const auto deadline = GetTickCount64() + 60000;
+        while (started && GetTickCount64() < deadline && !(received = checker.TakeResult(result))) Sleep(20);
+        checker.Stop();
+        DestroyWindow(window);
+        const bool passed = started && received && result.error == UpdateError::None && !result.version.empty();
+        std::printf("error=%u diagnostic=%lu\n", static_cast<unsigned>(result.error), result.diagnostic_code);
+        Report("live configured update manifest downloads and verifies", passed);
+        return passed ? 0 : 1;
+    }
     if (argc == 3) {
         std::ifstream input(argv[1], std::ios::binary);
         const std::string document((std::istreambuf_iterator<char>(input)),

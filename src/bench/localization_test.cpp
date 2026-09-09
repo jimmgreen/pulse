@@ -15,6 +15,14 @@ int main() {
     using namespace pulse::l10n;
     bool passed = true;
     Initialize(GetModuleHandleW(nullptr), L"zh-CN");
+    for (const auto language : {L"zh-CN", L"en-US"}) {
+        SetLanguage(language);
+        passed &= Report("update installation states are translated",
+            !Get(StringId::DownloadingUpdate).empty() && !Get(StringId::InstallingUpdate).empty() &&
+            !Get(StringId::UpdateClickToInstall).empty() && !Get(StringId::UpdateCancelled).empty() &&
+            !Get(StringId::UpdateBusy).empty() && !Get(StringId::UpdateInstallFailed).empty());
+    }
+    SetLanguage(L"zh-CN");
     passed &= Report("zh-CN quick access and compatibility resources",
         Get(StringId::PinQuickAccess) == L"固定到快速访问" &&
         Get(StringId::UnpinQuickAccess) == L"从快速访问取消固定" &&
@@ -62,7 +70,7 @@ int main() {
                      Get(StringId::TooltipCloseTab) == L"Close tab" &&
                      Get(StringId::OpenTerminalHere) == L"Open terminal here" &&
                      Get(StringId::SettingsAboutDiagnostics) == L"About & diagnostics" &&
-                     Get(StringId::DownloadUpdate) == L"Open download page");
+                     Get(StringId::DownloadUpdate) == L"Download and install");
     passed &= Report("en-US recycle and batch rename",
                      Get(StringId::RecycleBin) == L"Recycle Bin" &&
                      Get(StringId::BatchRename) == L"Batch rename" &&

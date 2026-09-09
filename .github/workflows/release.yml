@@ -1,0 +1,71 @@
+name: Build and publish Pulse
+
+on:
+  push:
+    tags: ['v[0-9]*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pulse-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [windows, win81]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate release tag
+        shell: pwsh
+        env:
+          RELEASE_REF: ${{ github.ref }}
+        run: |
+          $version = (Get-Content version.txt -Raw).Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+$' -or $env:RELEASE_REF -ne "refs/tags/v$version") {
+            throw 'Push or select a version tag matching version.txt, for example v1.0.3.'
+          }
+      - name: Build, test and package
+        shell: pwsh
+        run: ./scripts/build_release_ci.ps1 -Channel '${{ matrix.channel }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.channel }}
+          path: dist/PulseSetup-*.exe
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: diagnostics-${{ matrix.channel }}
+          path: |
+            bench_data/win81_imports.json
+            build-ci/*.log
+          if-no-files-found: ignore
+
+  publish:
+    needs: build
+    runs-on: windows-2022
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installer-*
+          path: dist
+          merge-multiple: true
+      - name: Sign manifests and publish both installers
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PULSE_UPDATE_PRIVATE_KEY: ${{ secrets.PULSE_UPDATE_PRIVATE_KEY }}
+        run: ./scripts/publish_release.ps1

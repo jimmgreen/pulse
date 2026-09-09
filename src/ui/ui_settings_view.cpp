@@ -765,26 +765,20 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
                      lay.update_card.left + 16.0f * scale_, lay.update_card.top + 40.0f * scale_,
                      lay.update_card.right - lay.update_card.left - 32.0f * scale_,
                      38.0f * scale_);
-        if (vm.settings_update_available && !vm.settings_update_hash.empty()) {
-            DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(),
-                         vm.settings_update_hash,
-                         lay.update_card.left + 16.0f * scale_,
-                         lay.update_card.top + 82.0f * scale_,
-                         lay.update_card.right - lay.update_card.left - 32.0f * scale_,
-                         34.0f * scale_);
-        }
         fluent::ControlState check{};
-        check.enabled = vm.settings_update_enabled && !vm.settings_update_checking;
+        check.enabled = vm.settings_update_enabled && !vm.settings_update_checking &&
+            !vm.settings_update_downloading && !vm.settings_update_installing;
         check.hovered = check.enabled && IsHovered(vm, HitTestResult::SettingsUpdateAction, 0);
         painter_.DrawButton({lay.update_action[0],
             pulse::l10n::Get(pulse::l10n::StringId::CheckForUpdates), {},
             fluent::ButtonKind::Standard, check});
         if (vm.settings_update_available) {
             fluent::ControlState download{};
-            download.enabled = true;
+            download.enabled = !vm.settings_update_installing;
             download.hovered = IsHovered(vm, HitTestResult::SettingsUpdateAction, 1);
             painter_.DrawButton({lay.update_action[1],
-                pulse::l10n::Get(pulse::l10n::StringId::DownloadUpdate), {},
+                pulse::l10n::Get(vm.settings_update_downloading ? pulse::l10n::StringId::Cancel :
+                    pulse::l10n::StringId::DownloadUpdate), {},
                 fluent::ButtonKind::Primary, download});
         }
         if (!vm.settings_index_error.empty()) {

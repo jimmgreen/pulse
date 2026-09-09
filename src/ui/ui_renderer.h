@@ -448,9 +448,10 @@ struct WindowViewModel {
     std::wstring settings_build_id;
     std::wstring settings_update_status;
     std::wstring settings_update_version;
-    std::wstring settings_update_hash;
     bool settings_update_enabled = false;
     bool settings_update_checking = false;
+    bool settings_update_downloading = false;
+    bool settings_update_installing = false;
     bool settings_update_available = false;
     bool settings_diagnostics_exporting = false;
     bool settings_show_performance = false;

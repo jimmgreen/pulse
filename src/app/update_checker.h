@@ -5,7 +5,7 @@
 #include <atomic>
 #include <mutex>
 #include <string>
-#include <thread>
+#include <memory>
 
 namespace pulse::app {
 
@@ -57,16 +57,12 @@ public:
     static bool Enabled() noexcept;
     bool CheckAsync(HWND notify, UINT message);
     bool TakeResult(UpdateResult& result);
-    bool checking() const noexcept { return checking_.load(); }
+    bool checking() const noexcept;
     void Stop();
 
 private:
-    std::atomic<bool> stopping_{false};
-    std::atomic<bool> checking_{false};
-    std::mutex mutex_;
-    std::thread worker_;
-    bool has_result_ = false;
-    UpdateResult result_;
+    struct State;
+    std::shared_ptr<State> state_;
 };
 
 } // namespace pulse::app

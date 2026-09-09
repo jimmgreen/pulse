@@ -27,6 +27,7 @@
 #include "tray_controller.h"
 #include "tab_controller.h"
 #include "update_checker.h"
+#include "update_installer.h"
 #include "session.h"
 #include "duplicate_scan.h"
 #include "../index/index_client.h"
@@ -70,6 +71,8 @@ constexpr UINT WM_QUICK_PREVIEW_OPEN = WM_APP + 55;
 constexpr UINT WM_UPDATE_RESULT = WM_APP + 56;
 constexpr UINT WM_RECYCLE_INFO = WM_APP + 57;
 constexpr UINT WM_DUP_VOLUMES = WM_APP + 59;
+constexpr UINT WM_UPDATE_DOWNLOADED = WM_APP + 60;
+constexpr UINT WM_UPDATE_INSTALL = WM_APP + 61;
 constexpr UINT kTimerUi = 1;
 
 enum class OmnibarMode { Path, Mixed, Command, Project };
@@ -96,6 +99,7 @@ struct ShotRequest {
     ui::ViewMode view_mode = ui::ViewMode::Details;
     std::wstring language;
     bool update_available = false;
+    std::wstring update_state;
     std::chrono::steady_clock::time_point start;
 };
 
@@ -162,6 +166,10 @@ struct AppState {
     app::UpdateChecker update_checker;
     app::UpdateResult update_result;
     bool update_result_ready = false;
+    app::UpdateInstaller update_installer;
+    DWORD update_install_error = ERROR_SUCCESS;
+    ULONGLONG next_update_check = GetTickCount64() + 15000;
+    std::wstring notified_update_version;
     app::TabController tabs;
     app::TrayController tray_controller;
     app::SingleInstanceCoordinator single_instance;

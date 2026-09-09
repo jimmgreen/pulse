@@ -1,4 +1,6 @@
 #include "update_checker.h"
+#include "update_transport.h"
+#include <thread>
 
 #include "pulse_update_config.h"
 #include "pulse_version.h"
@@ -280,85 +282,15 @@ uint32_t CurrentWindowsBuild() {
     return version.dwBuildNumber;
 }
 
-struct HttpHandle {
-    HINTERNET value = nullptr;
-    ~HttpHandle() { if (value) WinHttpCloseHandle(value); }
-};
-
-bool DownloadManifest(std::wstring_view url, std::string& document,
-                      UpdateError& category, DWORD& error) {
-    URL_COMPONENTS parts{};
-    parts.dwStructSize = sizeof(parts);
-    parts.dwSchemeLength = static_cast<DWORD>(-1);
-    parts.dwHostNameLength = static_cast<DWORD>(-1);
-    parts.dwUrlPathLength = static_cast<DWORD>(-1);
-    parts.dwExtraInfoLength = static_cast<DWORD>(-1);
-    if (!WinHttpCrackUrl(url.data(), static_cast<DWORD>(url.size()), 0, &parts) ||
-        parts.nScheme != INTERNET_SCHEME_HTTPS || !parts.dwHostNameLength) {
-        category = UpdateError::InsecureUrl;
-        error = ERROR_WINHTTP_INVALID_URL;
-        return false;
-    }
-    const std::wstring host(parts.lpszHostName, parts.dwHostNameLength);
-    std::wstring path(parts.lpszUrlPath, parts.dwUrlPathLength);
-    path.append(parts.lpszExtraInfo, parts.dwExtraInfoLength);
-    if (path.empty()) path = L"/";
-
-    HttpHandle session{WinHttpOpen(L"Pulse Update/" PULSE_VERSION_STRING,
-        WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
-        WINHTTP_NO_PROXY_BYPASS, 0)};
-    if (!session.value) { error = GetLastError(); return false; }
-    WinHttpSetTimeouts(session.value, 5000, 5000, 10000, 10000);
-    HttpHandle connection{WinHttpConnect(session.value, host.c_str(),
-                                          parts.nPort, 0)};
-    if (!connection.value) { error = GetLastError(); return false; }
-    HttpHandle request{WinHttpOpenRequest(connection.value, L"GET", path.c_str(),
-        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE)};
-    if (!request.value) { error = GetLastError(); return false; }
-    DWORD redirect_policy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
-    WinHttpSetOption(request.value, WINHTTP_OPTION_REDIRECT_POLICY,
-                     &redirect_policy, sizeof(redirect_policy));
-    if (!WinHttpSendRequest(request.value, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) || !WinHttpReceiveResponse(request.value, nullptr)) {
-        error = GetLastError();
-        return false;
-    }
-    DWORD status = 0;
-    DWORD status_size = sizeof(status);
-    if (!WinHttpQueryHeaders(request.value, WINHTTP_QUERY_STATUS_CODE |
-            WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status,
-            &status_size, WINHTTP_NO_HEADER_INDEX) || status != 200) {
-        category = UpdateError::HttpStatus;
-        error = status ? status : GetLastError();
-        return false;
-    }
-    document.clear();
-    std::array<char, 16 * 1024> buffer{};
-    for (;;) {
-        DWORD read = 0;
-        if (!WinHttpReadData(request.value, buffer.data(),
-                static_cast<DWORD>(buffer.size()), &read)) {
-            error = GetLastError();
-            return false;
-        }
-        if (!read) break;
-        if (document.size() + read > kMaximumManifestBytes) {
-            category = UpdateError::ResponseTooLarge;
-            error = ERROR_FILE_TOO_LARGE;
-            return false;
-        }
-        document.append(buffer.data(), read);
-    }
-    return true;
-}
-
-UpdateResult CheckConfiguredManifest() {
+UpdateResult CheckConfiguredManifest(const std::atomic<bool>& cancelled) {
     UpdateResult result;
 #if PULSE_UPDATE_ENABLED
     std::string document;
     UpdateError category = UpdateError::Network;
     DWORD error = ERROR_SUCCESS;
-    if (!DownloadManifest(PULSE_UPDATE_MANIFEST_URL, document, category, error)) {
+    if (!ReadUpdateResponse(PULSE_UPDATE_MANIFEST_URL, kMaximumManifestBytes, cancelled,
+            [&](const void* data, DWORD size) { document.append(static_cast<const char*>(data), size); return true; },
+            category, error)) {
         result.error = category;
         result.diagnostic_code = error;
         return result;
@@ -367,6 +299,7 @@ UpdateResult CheckConfiguredManifest() {
                                   PULSE_VERSION_STRING_A,
                                   CurrentWindowsBuild());
 #else
+    (void)cancelled;
     result.error = UpdateError::Disabled;
     return result;
 #endif
@@ -427,54 +360,56 @@ UpdateResult ValidateUpdateManifest(std::string_view document,
     return result;
 }
 
-UpdateChecker::~UpdateChecker() {
-    Stop();
-}
+struct UpdateChecker::State {
+    std::atomic<bool> cancelled{false};
+    std::atomic<bool> checking{true};
+    std::mutex mutex;
+    bool has_result = false;
+    UpdateResult result;
+};
 
-bool UpdateChecker::Enabled() noexcept {
-    return PULSE_UPDATE_ENABLED != 0;
-}
+UpdateChecker::~UpdateChecker() { Stop(); }
+
+bool UpdateChecker::Enabled() noexcept { return PULSE_UPDATE_ENABLED != 0; }
+bool UpdateChecker::checking() const noexcept { return state_ && state_->checking; }
 
 bool UpdateChecker::CheckAsync(HWND notify, UINT message) {
-    if (!Enabled() || !notify || !message || checking_.exchange(true)) return false;
-    if (worker_.joinable()) worker_.join();
-    stopping_ = false;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        has_result_ = false;
-        result_ = {};
-    }
+    if (!Enabled() || !notify || !message || checking()) return false;
+    Stop();
+    auto state = std::make_shared<State>();
+    state_ = state;
     try {
-        worker_ = std::thread([this, notify, message] {
-            UpdateResult result = CheckConfiguredManifest();
+        std::thread([state, notify, message] {
+            UpdateResult result;
+            try { result = CheckConfiguredManifest(state->cancelled); }
+            catch (...) { result.error = UpdateError::Network; }
             {
-                std::lock_guard<std::mutex> lock(mutex_);
-                result_ = std::move(result);
-                has_result_ = true;
+                std::lock_guard<std::mutex> lock(state->mutex);
+                state->result = std::move(result);
+                state->has_result = true;
             }
-            checking_ = false;
-            if (!stopping_) PostMessageW(notify, message, 0, 0);
-        });
+            state->checking = false;
+            if (!state->cancelled) PostMessageW(notify, message, 0, 0);
+        }).detach();
     } catch (...) {
-        checking_ = false;
+        state->checking = false;
         return false;
     }
     return true;
 }
 
 bool UpdateChecker::TakeResult(UpdateResult& result) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!has_result_) return false;
-    result = std::move(result_);
-    result_ = {};
-    has_result_ = false;
+    if (!state_) return false;
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (!state_->has_result) return false;
+    result = std::move(state_->result);
+    state_->has_result = false;
     return true;
 }
 
 void UpdateChecker::Stop() {
-    stopping_ = true;
-    if (worker_.joinable()) worker_.join();
-    checking_ = false;
+    if (state_) state_->cancelled = true;
+    state_.reset();
 }
 
 } // namespace pulse::app

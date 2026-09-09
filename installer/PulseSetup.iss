@@ -23,7 +23,7 @@ AppId={{A3F47C2E-9D1B-4E58-8C6A-2B5D0F9E1734}
 AppName=Pulse
 AppVersion={#AppVersion}
 #ifdef Win81Candidate
-AppVerName=Pulse {#AppVersion} (Windows 8.1 compatibility candidate)
+AppVerName=Pulse {#AppVersion} (Windows 8.1 x64)
 #else
 AppVerName=Pulse {#AppVersion}
 #endif
@@ -47,7 +47,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 SourceDir=..
 OutputDir=dist
 #ifdef Win81Candidate
-OutputBaseFilename=PulseSetup-{#AppVersion}-win81-candidate
+OutputBaseFilename=PulseSetup-{#AppVersion}-win81
 #else
 OutputBaseFilename=PulseSetup-{#AppVersion}
 #endif

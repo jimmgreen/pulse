@@ -312,8 +312,9 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 }
                 for (int i = 0; i < 2; ++i) {
                     const bool enabled = i == 0
-                        ? vm.settings_update_enabled && !vm.settings_update_checking
-                        : vm.settings_update_available;
+                        ? vm.settings_update_enabled && !vm.settings_update_checking &&
+                            !vm.settings_update_downloading && !vm.settings_update_installing
+                        : vm.settings_update_available && !vm.settings_update_installing;
                     if (enabled && ContainsPt(lay.update_action[i], x, y)) {
                         r.region = HitTestResult::SettingsUpdateAction;
                         r.index = i;

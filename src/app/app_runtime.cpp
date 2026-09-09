@@ -323,12 +323,29 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
             vm.settings_update_enabled = app::UpdateChecker::Enabled() ||
                 s.shot.update_available;
             vm.settings_update_checking = s.update_checker.checking();
+            vm.settings_update_downloading = s.update_installer.downloading();
+            vm.settings_update_installing = s.update_installer.installing();
+            DWORD update_install_error = s.update_install_error;
+            if (s.shot.active) {
+                vm.settings_update_downloading |= s.shot.update_state == L"downloading";
+                vm.settings_update_installing |= s.shot.update_state == L"installing";
+                if (s.shot.update_state == L"cancelled") update_install_error = ERROR_CANCELLED;
+                if (s.shot.update_state == L"failed") update_install_error = ERROR_CRC;
+            }
             vm.settings_update_available = s.update_result_ready &&
                 s.update_result.update_available;
             vm.settings_update_version = s.update_result.version;
             vm.settings_diagnostics_exporting = s.settings.diagnostics_pending();
             vm.settings_show_performance = s.appPrefs.show_status_performance;
-            if (vm.settings_update_checking) {
+            if (vm.settings_update_installing) {
+                vm.settings_update_status = l10n::Get(l10n::StringId::InstallingUpdate);
+            } else if (vm.settings_update_downloading) {
+                vm.settings_update_status = l10n::Get(l10n::StringId::DownloadingUpdate);
+            } else if (update_install_error != ERROR_SUCCESS) {
+                const auto message = update_install_error == ERROR_CANCELLED ? l10n::StringId::UpdateCancelled :
+                    update_install_error == ERROR_BUSY ? l10n::StringId::UpdateBusy : l10n::StringId::UpdateInstallFailed;
+                vm.settings_update_status = l10n::Get(message);
+            } else if (vm.settings_update_checking) {
                 vm.settings_update_status =
                     l10n::Get(l10n::StringId::CheckingUpdates);
             } else if (!vm.settings_update_enabled) {
@@ -346,13 +363,6 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
                     l10n::Get(l10n::StringId::UpdateAvailableFormat).c_str(),
                     s.update_result.version.c_str());
                 vm.settings_update_status = available;
-                std::wstring display_hash = s.update_result.installer_sha256;
-                if (display_hash.size() == 64) display_hash.insert(32, L"\n");
-                wchar_t hash[256]{};
-                swprintf_s(hash,
-                    l10n::Get(l10n::StringId::InstallerHashFormat).c_str(),
-                    display_hash.c_str());
-                vm.settings_update_hash = hash;
             } else {
                 vm.settings_update_status = l10n::Get(l10n::StringId::UpdateUpToDate);
             }

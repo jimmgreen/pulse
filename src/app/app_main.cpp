@@ -37,6 +37,7 @@
 #include "tray_controller.h"
 #include "tab_controller.h"
 #include "update_checker.h"
+#include "app_updates.h"
 #include "link_resolve.h"
 #include "../ui/color_picker.h"
 #include "../ui/bloom_accent_picker.h"
@@ -761,6 +762,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             bool dirty = false;
             DrainDirNotifies(*s);
             const ULONGLONG now = GetTickCount64();
+            TickUpdates(*s, now);
             if (TickAddressSearch(*s, now)) dirty = true;
             const int shell_refreshes = s->context_menu.ConsumeDueRefreshes(now);
             for (int i = 0; i < shell_refreshes; ++i) {
@@ -1219,17 +1221,15 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
 
-    case WM_UPDATE_RESULT: {
-        if (s) {
-            app::UpdateResult result;
-            if (s->update_checker.TakeResult(result)) {
-                s->update_result = std::move(result);
-                s->update_result_ready = true;
-                InvalidateRect(hwnd, nullptr, FALSE);
-            }
-        }
+    case WM_UPDATE_RESULT:
+        if (s) CompleteUpdateCheck(*s);
         return 0;
-    }
+    case WM_UPDATE_DOWNLOADED:
+        if (s) CompleteUpdateDownload(*s);
+        return 0;
+    case WM_UPDATE_INSTALL:
+        if (s) InstallUpdate(*s);
+        return 0;
 
     case WM_CONTENT_SEARCH: {
         if (!s) return 0;
@@ -1329,6 +1329,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             s->settings.ResetUi();
             s->settings.Stop();
             s->update_checker.Stop();
+            s->update_installer.Stop();
             s->contentSearch.Stop();
             s->duplicateSearch.Stop();
             s->networkIndex.Stop();
@@ -1664,6 +1665,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
             state.shot.language = __wargv[++i];
         } else if (wcscmp(__wargv[i], L"--shot-update-available") == 0) {
             state.shot.update_available = true;
+        } else if (wcscmp(__wargv[i], L"--shot-update-state") == 0 && i + 1 < __argc) {
+            state.shot.update_available = true;
+            state.shot.update_state = __wargv[++i];
         } else if (wcscmp(__wargv[i], L"--shot-high-contrast") == 0) {
             state.shot_high_contrast = true;
         } else if (wcscmp(__wargv[i], L"--dark") == 0) {

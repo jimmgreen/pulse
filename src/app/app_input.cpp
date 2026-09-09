@@ -1,5 +1,6 @@
 // app_input.cpp — extracted from app_main.cpp.
 #include "quick_access.h"
+#include "app_updates.h"
 #include "app_internal.h"
 #include "../ui/lumatext_renderer.h"
 #include "../ui/fluent_menu.h"
@@ -1788,16 +1789,8 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             s->settings.DiagnosticsAction(hit.index);
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (hit.region == ui::HitTestResult::SettingsUpdateAction) {
-            if (hit.index == 0 && app::UpdateChecker::Enabled()) {
-                if (s->update_checker.CheckAsync(hwnd, WM_UPDATE_RESULT))
-                    s->update_result_ready = false;
-                InvalidateRect(hwnd, nullptr, FALSE);
-            } else if (hit.index == 1 && s->update_result_ready &&
-                       s->update_result.update_available &&
-                       s->update_result.download_page.starts_with(L"https://")) {
-                ShellExecuteW(hwnd, L"open", s->update_result.download_page.c_str(),
-                              nullptr, nullptr, SW_SHOWNORMAL);
-            }
+            if (hit.index == 0) CheckForUpdates(*s);
+            else if (hit.index == 1) InstallUpdate(*s);
         } else if (hit.region == ui::HitTestResult::SettingsDupScope) {
             if (!s->duplicateScan.scanning && hit.index >= 0 && hit.index <= 2) {
                 s->duplicateScan.scope = static_cast<app::DuplicateScanScope>(hit.index);

@@ -8,10 +8,11 @@ bool Contains(const D2D1_RECT_F& rect, float x, float y) {
     return x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
 }
 }
-void NotificationToast::Show(HWND owner, std::wstring title, std::wstring message, bool persistent) {
+void NotificationToast::Show(HWND owner, std::wstring title, std::wstring message, bool persistent, UINT action_message) {
     title_ = std::move(title);
     message_ = std::move(message);
     persistent_ = persistent;
+    action_message_ = action_message;
     visible_ = true;
     hovered_ = pressed_close_ = pressed_card_ = false;
     born_ = last_tick_ = GetTickCount64();
@@ -72,9 +73,14 @@ bool NotificationToast::HandleMessage(HWND owner, UINT message, WPARAM wparam, L
         return true;
     } else if (message == WM_LBUTTONUP && (pressed_card_ || Contains(card_, x, y))) {
         const bool close = pressed_close_ && Contains(close_, x, y);
+        const bool action = pressed_card_ && !pressed_close_ && Contains(card_, x, y) && action_message_;
         pressed_close_ = pressed_card_ = false;
         if (GetCapture() == owner) ReleaseCapture();
         if (close) Dismiss(owner);
+        else if (action) {
+            PostMessageW(owner, action_message_, 0, 0);
+            Dismiss(owner);
+        }
         return true;
     } else if (message == WM_CAPTURECHANGED) {
         pressed_close_ = pressed_card_ = false;

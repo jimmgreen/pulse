@@ -7,7 +7,7 @@ namespace pulse::l10n {
 namespace {
 
 constexpr UINT kFirstString = IDS_SETTINGS;
-constexpr UINT kLastString = IDS_SETTINGS_SHOW_HIDDEN_DESC;
+constexpr UINT kLastString = IDS_INSTALLING_UPDATE;
 
 HINSTANCE g_module = nullptr;
 Language g_preference = Language::System;
