@@ -57,6 +57,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -2780,8 +2781,10 @@ void TestLinkResolve() {
           make_lnk(lnk_dead, dir + L"\\gone.txt"), L"link: create fixtures");
 
     fs::DirEntry e1;
+    std::error_code link_error;
+    // Shell may expand a short TEMP path; compare the referenced file identity.
     Check(ResolveLink(lnk_file, e1) &&
-          e1.link_target == fs::NormalizePath(target_file) &&
+          std::filesystem::equivalent(e1.link_target, target_file, link_error) &&
           !e1.link_target_is_dir && e1.link_target_size == sizeof(body) - 1,
           L"link: file target resolves with size");
     fs::DirEntry e2;
