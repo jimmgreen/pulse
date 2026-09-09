@@ -1,6 +1,8 @@
 // shell_verbs.cpp — See shell_verbs.h for the contract.
 #include "shell_verbs.h"
 
+#include "../ipc/ctx_menu_util.h"
+
 #include <windows.h>
 #include <shlwapi.h>
 #include <shlobj.h>
@@ -8,6 +10,7 @@
 #include <cstring>
 #include <cwctype>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace pulse::app {
@@ -63,9 +66,9 @@ std::wstring ResolveIndirect(const std::wstring& s) {
 }
 
 // Verbs that duplicate Pulse built-ins or are not user-facing.
-bool IsSkippedStaticVerb(const std::wstring& lower) {
-    return lower == L"open" || lower == L"opennew" || lower == L"openas" ||
-           lower == L"printto" || lower == L"explore" || lower == L"find";
+bool IsSkippedStaticVerb(const std::wstring& lower, bool background) {
+    if (lower == L"opennew" || lower == L"printto" || lower == L"find") return true;
+    return ipc::IsBuiltinContextVerb(lower, background);
 }
 
 std::wstring KnownVerbDisplay(const std::wstring& lower) {
@@ -76,11 +79,98 @@ std::wstring KnownVerbDisplay(const std::wstring& lower) {
     return {};
 }
 
-// Collects HKCR\<key>\shell\* verbs into out.
-void CollectVerbsFrom(const std::wstring& shell_key, std::vector<StaticVerb>& out) {
+bool FillStaticVerbFromKey(HKEY root, const std::wstring& verb_key, const std::wstring& verb,
+                           bool allow_cascade, bool background, StaticVerb& out);
+void CollectCascadeChildren(HKEY parent_root, const std::wstring& subcommands,
+                            const std::wstring& ext_key, bool background,
+                            std::vector<StaticVerb>& children);
+void CollectVerbsFrom(HKEY root, const std::wstring& shell_key, std::vector<StaticVerb>& out,
+                      bool allow_cascade, bool background,
+                      std::unordered_set<std::wstring>* seen);
+
+bool FillStaticVerbFromKey(HKEY root, const std::wstring& verb_key, const std::wstring& verb,
+                           bool allow_cascade, bool background, StaticVerb& out) {
+    const std::wstring lower = ToLower(verb);
+    if (IsSkippedStaticVerb(lower, background)) return false;
+
+    ipc::StaticVerbRegFlags flags;
+    flags.legacy_disable = RegValueExists(root, verb_key, L"LegacyDisable");
+    flags.programmatic = RegValueExists(root, verb_key, L"ProgrammaticAccessOnly");
+    flags.extended = RegValueExists(root, verb_key, L"Extended");
+    const std::wstring command = RegReadString(root, verb_key + L"\\command", nullptr);
+    flags.has_command = !command.empty();
+    flags.has_delegate_execute =
+        !RegReadString(root, verb_key + L"\\command", L"DelegateExecute").empty();
+    flags.has_explorer_command =
+        !RegReadString(root, verb_key, L"ExplorerCommandHandler").empty();
+    const std::wstring subcommands = RegReadString(root, verb_key, L"SubCommands");
+    const std::wstring ext_key = RegReadString(root, verb_key, L"ExtendedSubCommandsKey");
+    flags.has_subcommands = !subcommands.empty();
+    flags.has_extended_subcommands_key = !ext_key.empty();
+    if (!ipc::KeepStaticVerb(flags)) return false;
+
+    std::wstring display = ResolveIndirect(RegReadString(root, verb_key, L"MUIVerb"));
+    if (display.empty()) display = RegReadString(root, verb_key, nullptr);
+    if (!display.empty() && display[0] == L'@') display = ResolveIndirect(display);
+    if (display.empty()) display = KnownVerbDisplay(lower);
+    if (display.empty()) display = verb;
+
+    out.verb = verb;
+    out.display = StripMnemonics(display);
+    out.app_path.clear();
+    out.command = command;
+    out.children.clear();
+    if (allow_cascade)
+        CollectCascadeChildren(root, subcommands, ext_key, background, out.children);
+    if ((flags.has_subcommands || flags.has_extended_subcommands_key) &&
+        out.children.empty() && !flags.has_command)
+        return false;
+    return true;
+}
+
+void CollectCascadeChildren(HKEY parent_root, const std::wstring& subcommands,
+                            const std::wstring& ext_key, bool background,
+                            std::vector<StaticVerb>& children) {
+    if (!subcommands.empty()) {
+        std::wstring cur;
+        auto flush = [&] {
+            if (cur.empty()) return;
+            StaticVerb child;
+            const std::wstring store =
+                L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\CommandStore\\shell\\" +
+                cur;
+            if (FillStaticVerbFromKey(HKEY_LOCAL_MACHINE, store, cur, false, background, child) ||
+                FillStaticVerbFromKey(HKEY_CURRENT_USER, store, cur, false, background, child))
+                children.push_back(std::move(child));
+            cur.clear();
+        };
+        for (wchar_t c : subcommands) {
+            if (c == L' ' || c == L';' || c == L'\t') flush();
+            else cur += c;
+        }
+        flush();
+    }
+    if (!ext_key.empty()) {
+        std::wstring shell_key = ext_key;
+        while (!shell_key.empty() && (shell_key.back() == L'\\' || shell_key.back() == L'/'))
+            shell_key.pop_back();
+        const std::wstring lower = ToLower(shell_key);
+        if (lower.size() < 6 || lower.compare(lower.size() - 6, 6, L"\\shell") != 0)
+            shell_key += L"\\shell";
+        CollectVerbsFrom(parent_root, shell_key, children, false, background, nullptr);
+    }
+    children.erase(std::remove_if(children.begin(), children.end(),
+                                  [](const StaticVerb& child) {
+                                      return child.command.empty() && child.app_path.empty();
+                                  }),
+                   children.end());
+}
+
+void CollectVerbsFrom(HKEY root, const std::wstring& shell_key, std::vector<StaticVerb>& out,
+                      bool allow_cascade, bool background,
+                      std::unordered_set<std::wstring>* seen) {
     HKEY key = nullptr;
-    if (RegOpenKeyExW(HKEY_CLASSES_ROOT, shell_key.c_str(), 0, KEY_READ, &key) !=
-        ERROR_SUCCESS)
+    if (RegOpenKeyExW(root, shell_key.c_str(), 0, KEY_READ, &key) != ERROR_SUCCESS)
         return;
     for (DWORD i = 0;; ++i) {
         wchar_t name[128];
@@ -90,28 +180,13 @@ void CollectVerbsFrom(const std::wstring& shell_key, std::vector<StaticVerb>& ou
             break;
         const std::wstring verb = name;
         const std::wstring lower = ToLower(verb);
-        if (IsSkippedStaticVerb(lower)) continue;
-        const std::wstring verb_key = shell_key + L"\\" + verb;
-        // Hidden / shift-only / programmatic verbs stay hidden in Pulse too.
-        if (RegValueExists(HKEY_CLASSES_ROOT, verb_key, L"LegacyDisable") ||
-            RegValueExists(HKEY_CLASSES_ROOT, verb_key, L"ProgrammaticAccessOnly") ||
-            RegValueExists(HKEY_CLASSES_ROOT, verb_key, L"Extended"))
-            continue;
-        // Only verbs that can actually execute.
-        if (RegReadString(HKEY_CLASSES_ROOT, verb_key + L"\\command", nullptr).empty() &&
-            RegReadString(HKEY_CLASSES_ROOT, verb_key + L"\\command", L"DelegateExecute")
-                .empty())
-            continue;
-        std::wstring display = ResolveIndirect(
-            RegReadString(HKEY_CLASSES_ROOT, verb_key, L"MUIVerb"));
-        if (display.empty())
-            display = RegReadString(HKEY_CLASSES_ROOT, verb_key, nullptr);
-        if (!display.empty() && display[0] == L'@') display = ResolveIndirect(display);
-        if (display.empty()) display = KnownVerbDisplay(lower);
-        if (display.empty()) display = verb;
+        if (seen && !seen->insert(lower).second) continue;
         StaticVerb v;
-        v.verb = verb;
-        v.display = StripMnemonics(display);
+        if (!FillStaticVerbFromKey(root, shell_key + L"\\" + verb, verb, allow_cascade,
+                                   background, v)) {
+            if (seen) seen->erase(lower);
+            continue;
+        }
         out.push_back(std::move(v));
     }
     RegCloseKey(key);
@@ -213,6 +288,22 @@ void CollectOpenWith(const std::wstring& ext_lower, const std::wstring& default_
 
 std::vector<StaticVerb> EnumerateStaticVerbs(const std::wstring& ext) {
     std::vector<StaticVerb> out;
+    if (ipc::IsLocationVerbKey(ext)) {
+        std::unordered_set<std::wstring> seen;
+        const bool background = ext == ipc::kBackgroundVerbKey;
+        if (background) {
+            CollectVerbsFrom(HKEY_CLASSES_ROOT, L"Directory\\Background\\shell", out, true,
+                             true, &seen);
+        } else {
+            CollectVerbsFrom(HKEY_CLASSES_ROOT, L"Directory\\shell", out, true, false, &seen);
+            CollectVerbsFrom(HKEY_CLASSES_ROOT, L"Folder\\shell", out, true, false, &seen);
+            CollectVerbsFrom(HKEY_CLASSES_ROOT, L"AllFilesystemObjects\\shell", out, true,
+                             false, &seen);
+            if (ext == ipc::kDriveVerbKey)
+                CollectVerbsFrom(HKEY_CLASSES_ROOT, L"Drive\\shell", out, true, false, &seen);
+        }
+        return DedupeStaticVerbs(std::move(out), {}, 48);
+    }
     if (ext.size() < 2 || ext[0] != L'.') return out;
     const std::wstring ext_lower = ToLower(ext);
 
@@ -228,9 +319,11 @@ std::vector<StaticVerb> EnumerateStaticVerbs(const std::wstring& ext) {
     if (!progid.empty()) {
         default_exe_lower = ToLower(CommandExePath(RegReadString(
             HKEY_CLASSES_ROOT, progid + L"\\shell\\open\\command", nullptr)));
-        CollectVerbsFrom(progid + L"\\shell", out);
+        CollectVerbsFrom(HKEY_CLASSES_ROOT, progid + L"\\shell", out, true, false, nullptr);
     }
-    CollectVerbsFrom(L"SystemFileAssociations\\" + ext_lower + L"\\shell", out);
+    CollectVerbsFrom(HKEY_CLASSES_ROOT,
+                     L"SystemFileAssociations\\" + ext_lower + L"\\shell", out, true, false,
+                     nullptr);
 
     CollectOpenWith(ext_lower, default_exe_lower, out);
 
@@ -283,6 +376,35 @@ bool GetW(const uint8_t*& p, const uint8_t* end, std::wstring& s) {
     return true;
 }
 
+constexpr uint32_t kStaticVerbCacheVersion = 2;
+
+void PutVerb(std::vector<uint8_t>& buf, const StaticVerb& v, int depth) {
+    PutW(buf, v.verb);
+    PutW(buf, v.display);
+    PutW(buf, v.app_path);
+    PutW(buf, v.command);
+    const uint32_t n = depth > 0 ? 0 : static_cast<uint32_t>(
+        (std::min)(v.children.size(), static_cast<size_t>(ipc::kMaxSubmenuChildren)));
+    PutU32(buf, n);
+    for (uint32_t i = 0; i < n; ++i) PutVerb(buf, v.children[i], depth + 1);
+}
+
+bool GetVerb(const uint8_t*& p, const uint8_t* end, StaticVerb& v, int depth) {
+    if (!GetW(p, end, v.verb) || !GetW(p, end, v.display) || !GetW(p, end, v.app_path) ||
+        !GetW(p, end, v.command))
+        return false;
+    uint32_t n = 0;
+    if (!GetU32(p, end, n) || n > 16 || (depth > 0 && n != 0)) return false;
+    v.children.clear();
+    v.children.reserve(n);
+    for (uint32_t i = 0; i < n; ++i) {
+        StaticVerb child;
+        if (!GetVerb(p, end, child, depth + 1)) return false;
+        v.children.push_back(std::move(child));
+    }
+    return true;
+}
+
 } // namespace
 
 std::wstring MachineStaticVerbCachePath() {
@@ -316,7 +438,9 @@ bool LoadMachineStaticVerbCache(std::unordered_map<std::wstring, std::vector<Sta
     if (p + 8 > end || memcmp(p, "PSVC", 4) != 0) return false;
     p += 4;
     uint32_t ver = 0, count = 0;
-    if (!GetU32(p, end, ver) || ver != 1 || !GetU32(p, end, count) || count > 8000) return false;
+    if (!GetU32(p, end, ver) || ver != kStaticVerbCacheVersion || !GetU32(p, end, count) ||
+        count > 8000)
+        return false;
     for (uint32_t i = 0; i < count; ++i) {
         std::wstring ext;
         uint32_t nverb = 0;
@@ -325,8 +449,7 @@ bool LoadMachineStaticVerbCache(std::unordered_map<std::wstring, std::vector<Sta
         verbs.reserve(nverb);
         for (uint32_t k = 0; k < nverb; ++k) {
             StaticVerb v;
-            if (!GetW(p, end, v.verb) || !GetW(p, end, v.display) || !GetW(p, end, v.app_path))
-                return false;
+            if (!GetVerb(p, end, v, 0)) return false;
             verbs.push_back(std::move(v));
         }
         if (!ext.empty()) out.emplace(std::move(ext), std::move(verbs));
@@ -340,16 +463,12 @@ bool SaveMachineStaticVerbCache(
     if (path.empty()) return false;
     std::vector<uint8_t> buf;
     buf.insert(buf.end(), {'P', 'S', 'V', 'C'});
-    PutU32(buf, 1);
+    PutU32(buf, kStaticVerbCacheVersion);
     PutU32(buf, static_cast<uint32_t>(cache.size()));
     for (const auto& [ext, verbs] : cache) {
         PutW(buf, ext);
         PutU32(buf, static_cast<uint32_t>(verbs.size()));
-        for (const auto& v : verbs) {
-            PutW(buf, v.verb);
-            PutW(buf, v.display);
-            PutW(buf, v.app_path);
-        }
+        for (const auto& v : verbs) PutVerb(buf, v, 0);
     }
     const std::wstring tmp = path + L".tmp";
     HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,

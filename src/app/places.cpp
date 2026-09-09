@@ -254,6 +254,7 @@ bool PlacesCatalog::Load() {
     workspaces.clear();
     tags.clear();
     networks.clear();
+    quick_access_paths.clear();
     starred_items.clear();
     recent_items.clear();
     starred_index_.clear();
@@ -347,6 +348,12 @@ bool PlacesCatalog::Load() {
                 pos = end + 1;
             }
         }
+    }
+
+    for (const auto& path : pulse::json::ExtractStringArray(json, L"quick_access_paths")) {
+        const auto normalized = Norm(path);
+        if (!normalized.empty() && !fs::IsVirtualPath(normalized) &&
+            !IsQuickAccessPinned(normalized)) quick_access_paths.push_back(normalized);
     }
 
     const bool has_starred_items = pulse::json::ValuePosition(
@@ -446,6 +453,7 @@ PlacesCatalog::SaveSnapshot PlacesCatalog::CaptureSaveSnapshot() const {
     snapshot.workspaces = workspaces;
     snapshot.tags = tags;
     snapshot.networks = networks;
+    snapshot.quick_access_paths = quick_access_paths;
     snapshot.starred_items = starred_items;
     snapshot.recent_items = recent_items;
     snapshot.active_workspace = active_workspace;
@@ -595,6 +603,8 @@ bool PlacesCatalog::SaveSnapshotFile(const SaveSnapshot& snapshot) {
     for (const auto& item : snapshot.starred_items) legacy_starred.push_back(item.path);
     f << L"  ],\n  \"starred\":";
     writeArr(legacy_starred);
+    f << L",\n  \"quick_access_paths\":";
+    writeArr(snapshot.quick_access_paths);
     f << L",\n  \"starred_items\":[\n";
     for (size_t i = 0; i < snapshot.starred_items.size(); ++i) {
         const auto& item = snapshot.starred_items[i];
@@ -1153,6 +1163,33 @@ size_t PlacesCatalog::DeleteTag(const TagId& id, std::vector<TagAdsUpdate>* defe
     return affected.size();
 }
 
+bool PlacesCatalog::IsQuickAccessPinned(const std::wstring& path) const {
+    const auto key = TagKey(path);
+    return std::any_of(quick_access_paths.begin(), quick_access_paths.end(),
+        [&](const auto& value) { return TagKey(value) == key; });
+}
+
+bool PlacesCatalog::SetQuickAccessPinned(const std::vector<std::wstring>& paths, bool pinned) {
+    bool changed = false;
+    for (const auto& path : paths) {
+        if (path.empty() || fs::IsVirtualPath(path)) continue;
+        const auto normalized = Norm(path);
+        if (normalized.empty()) continue;
+        if (pinned) {
+            if (!IsQuickAccessPinned(normalized)) {
+                quick_access_paths.push_back(normalized);
+                changed = true;
+            }
+        } else {
+            const auto key = TagKey(normalized);
+            changed |= std::erase_if(quick_access_paths,
+                [&](const auto& value) { return TagKey(value) == key; }) != 0;
+        }
+    }
+    if (changed) Save();
+    return changed;
+}
+
 void PlacesCatalog::RemapPaths(const std::wstring& old_path, const std::wstring& new_path) {
     const std::wstring old_norm = Norm(old_path);
     const std::wstring new_norm = Norm(new_path);
@@ -1167,6 +1204,15 @@ void PlacesCatalog::RemapPaths(const std::wstring& old_path, const std::wstring&
         std::sort(tag.paths.begin(), tag.paths.end());
         tag.paths.erase(std::unique(tag.paths.begin(), tag.paths.end()), tag.paths.end());
     }
+    std::unordered_set<std::wstring> quick_seen;
+    for (auto& path : quick_access_paths) {
+        if (!PathIsOrDescendant(path, old_norm)) continue;
+        path = new_norm + path.substr(old_norm.size());
+        changed = true;
+    }
+    std::erase_if(quick_access_paths, [&](const auto& path) {
+        return !quick_seen.insert(TagKey(path)).second;
+    });
     for (auto& item : starred_items) {
         if (!PathIsOrDescendant(item.path, old_norm)) continue;
         item.path = new_norm + item.path.substr(old_norm.size());

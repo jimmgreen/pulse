@@ -1,3 +1,4 @@
+#include "../common/windows_compat.h"
 // main.cpp — pulse_shell.exe: windowless STA+COM shell-operation proxy.
 //
 // Pipe server on \\.\pipe\pulse_shell_<ui-pid> (ui-pid passed as argv[1],
@@ -769,111 +770,41 @@ void SendCtxItems(uint32_t session_id, const std::vector<CtxItemOut>& items,
     SendMsg(RSP_CTX_ITEMS, session_id, w.data());
 }
 
-// GetCommandString is the classic crash pit: handlers index internal tables
-// with the raw offset, and ids that belong to dynamically populated submenus
-// (Send To, New) routinely AV. Explorer guards this call with SEH; so do we.
-bool SafeGetVerbW(IContextMenu* menu, UINT offset, wchar_t* buf, UINT cch) {
-    __try {
-        return SUCCEEDED(menu->GetCommandString(offset, GCS_VERBW, nullptr,
-                                                reinterpret_cast<CHAR*>(buf), cch));
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
+UINT QueryContextMenuFlags(const CtxSessionData& d) {
+    UINT flags = CMF_NORMAL;
+    if (d.extended) flags |= CMF_EXTENDEDVERBS;
+    if (!d.background) {
+        bool all_dirs = !d.paths.empty();
+        for (const auto& p : d.paths) {
+            const std::wstring path = ToParsingPath(p);
+            const DWORD attr = GetFileAttributesW(path.c_str());
+            if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+                all_dirs = false;
+                break;
+            }
+        }
+        if (all_dirs) flags |= CMF_EXPLORE;
     }
+    return flags;
 }
 
-std::wstring CtxVerbOf(IContextMenu* menu, UINT id) {
-    if (id < kCtxIdFirst) return {};
-    wchar_t buf[128]{};
-    if (SafeGetVerbW(menu, id - kCtxIdFirst, buf, ARRAYSIZE(buf) - 1))
-        return buf;
-    return {};
-}
-
-std::wstring MenuItemText(HMENU menu, UINT pos) {
-    wchar_t buf[512]{};
-    MENUITEMINFOW mii{ sizeof(mii) };
-    mii.fMask = MIIM_STRING;
-    mii.dwTypeData = buf;
-    mii.cch = ARRAYSIZE(buf) - 1;
-    if (!GetMenuItemInfoW(menu, pos, TRUE, &mii)) return {};
-    return CleanMenuText(buf);
-}
-
-// Walks the populated HMENU: top-level verbs pass the built-in filter;
-// software-owned submenus keep their hierarchy as a header row + child rows
-// (one level; deeper nesting is cut). The UI shows them as a flyout.
+// Walks the populated HMENU via the same nested-flyout rules as per-handler
+// collection so fallback and worker paths cannot drift.
 void CollectCtxItems(IContextMenu* menu, IContextMenu2* menu2, HMENU hmenu,
                      bool background, std::vector<CtxItemOut>& out) {
-    const int count = GetMenuItemCount(hmenu);
-    bool pending_separator = false;
-    auto push = [&](CtxItemOut item) {
-        if (item.text.empty()) return;
-        if (pending_separator && !out.empty()) {
-            out.back().separator_after = true;
-            pending_separator = false;
-        }
-        out.push_back(std::move(item));
-    };
-    for (int i = 0; i < count; ++i) {
-        MENUITEMINFOW mii{ sizeof(mii) };
-        mii.fMask = MIIM_ID | MIIM_STATE | MIIM_FTYPE | MIIM_SUBMENU;
-        if (!GetMenuItemInfoW(hmenu, i, TRUE, &mii)) continue;
-        if (mii.fType & MFT_SEPARATOR) {
-            if (!out.empty()) pending_separator = true;
-            continue;
-        }
-        const bool enabled = !(mii.fState & (MFS_DISABLED | MFS_GRAYED));
-        if (mii.hSubMenu) {
-            const std::wstring parent_verb = CtxVerbOf(menu, mii.wID);
-            if (IsBuiltinContextVerb(parent_verb, background) ||
-                IsDroppedContextSubmenu(parent_verb)) continue;
-            const std::wstring parent_text = MenuItemText(hmenu, (UINT)i);
-            if (parent_text.empty()) continue;
-            // Dynamic submenus (Send To, New) populate on WM_INITMENUPOPUP.
-            if (menu2) {
-                menu2->HandleMenuMsg(WM_INITMENUPOPUP,
-                                     reinterpret_cast<WPARAM>(mii.hSubMenu),
-                                     MAKELPARAM(i, TRUE));
-            }
-            const int sub_count = GetMenuItemCount(mii.hSubMenu);
-            std::vector<CtxItemOut> kids;
-            for (int j = 0; j < sub_count && (int)kids.size() < kMaxSubmenuChildren; ++j) {
-                MENUITEMINFOW sub{ sizeof(sub) };
-                sub.fMask = MIIM_ID | MIIM_STATE | MIIM_FTYPE | MIIM_SUBMENU;
-                if (!GetMenuItemInfoW(mii.hSubMenu, j, TRUE, &sub)) continue;
-                if ((sub.fType & MFT_SEPARATOR) || sub.hSubMenu) continue; // one level only
-                const std::wstring child_text = MenuItemText(mii.hSubMenu, (UINT)j);
-                if (child_text.empty()) continue;
-                CtxItemOut item;
-                item.id = sub.wID;
-                item.enabled = enabled && !(sub.fState & (MFS_DISABLED | MFS_GRAYED));
-                item.child = true;
-                item.verb = CtxVerbOf(menu, sub.wID);
-                if (IsBuiltinContextVerb(item.verb, background)) continue;
-                item.text = child_text;
-                kids.push_back(std::move(item));
-            }
-            if (kids.empty()) continue;
-            CtxItemOut header;
-            header.id = 0; // never invoked; children carry the command ids
-            header.enabled = enabled;
-            header.has_children = true;
-            header.verb = parent_verb;
-            header.text = parent_text;
-            push(std::move(header));
-            for (auto& k : kids) out.push_back(std::move(k));
-            continue;
-        }
-        if (mii.wID < kCtxIdFirst || mii.wID > kCtxIdLast) continue;
-        const std::wstring verb = CtxVerbOf(menu, mii.wID);
-        if (IsBuiltinContextVerb(verb, background)) continue;
-        CtxItemOut item;
-        item.id = mii.wID;
-        item.enabled = enabled;
-        item.verb = verb;
-        item.text = MenuItemText(hmenu, (UINT)i);
-        push(std::move(item));
-    }
+    pulse::shell::CtxHandlerSlot slot;
+    slot.menu = menu;
+    slot.menu2 = menu2;
+    slot.hmenu = hmenu;
+    slot.id_first = kCtxIdFirst;
+    slot.id_last = kCtxIdLast;
+    if (menu) menu->QueryInterface(IID_PPV_ARGS(&slot.menu3));
+    pulse::shell::CollectHandlerItems(slot, background, out);
+    if (slot.menu3) slot.menu3->Release();
+    slot.menu = nullptr;
+    slot.menu2 = nullptr;
+    slot.menu3 = nullptr;
+    slot.hmenu = nullptr;
 }
 
 HRESULT BuildCtxMenu(const CtxSessionData& d, IContextMenu** out_menu, HMENU* out_hmenu,
@@ -915,8 +846,7 @@ HRESULT BuildCtxMenu(const CtxSessionData& d, IContextMenu** out_menu, HMENU* ou
     if (FAILED(hr) || !menu) return FAILED(hr) ? hr : E_FAIL;
 
     HMENU hmenu = CreatePopupMenu();
-    UINT flags = CMF_NORMAL;
-    if (d.extended) flags |= CMF_EXTENDEDVERBS;
+    UINT flags = QueryContextMenuFlags(d);
     hr = menu->QueryContextMenu(hmenu, 0, kCtxIdFirst, kCtxIdLast, flags);
     if (FAILED(hr)) {
         DestroyMenu(hmenu);
@@ -1092,8 +1022,7 @@ DWORD WINAPI CtxSessionThreadImpl(LPVOID param) {
     constexpr UINT kIdsPerHandler = 256;
     constexpr DWORD kFastBudgetMs = 80;
     const ULONGLONG started = GetTickCount64();
-    UINT qcm_flags = CMF_NORMAL;
-    if (data->extended) qcm_flags |= CMF_EXTENDEDVERBS;
+    UINT qcm_flags = QueryContextMenuFlags(*data);
 
     std::vector<std::unique_ptr<HandlerWorker>> workers;
     std::vector<CtxItemOut> items;
@@ -1417,7 +1346,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     // IFileOperation creates its conflict/confirmation UI in this process.
     // Declare PMv2 before COM or any HWND exists so Windows does not bitmap-scale
     // those dialogs on high-DPI displays.
-    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    pulse::compat::EnableDpiAwareness();
 
     DWORD ui_pid = GetCurrentProcessId();
     if (__argc > 1) {

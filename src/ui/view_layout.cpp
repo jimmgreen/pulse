@@ -47,12 +47,21 @@ bool UsesThumbnails(ViewMode mode) noexcept {
            mode == ViewMode::Content;
 }
 
+D2D1_RECT_F DetailsContentRect(D2D1_RECT_F bounds, float scale) noexcept {
+    const float unit = std::max(0.5f, scale);
+    const float width = std::max(0.0f, bounds.right - bounds.left);
+    bounds.left += std::min(8.0f * unit, width * 0.25f);
+    bounds.right = std::max(bounds.left, bounds.right - std::min(22.0f * unit, width * 0.5f));
+    return bounds;
+}
+
 ViewLayout::ViewLayout(ViewMode mode, D2D1_RECT_F viewport, size_t item_count,
                        float scroll_x, float scroll_y, float scale,
                        float row_height_dip)
     : mode_(mode), viewport_(viewport), count_(item_count),
       scroll_x_(std::max(0.0f, scroll_x)), scroll_y_(std::max(0.0f, scroll_y)),
       scale_(std::max(0.5f, scale)) {
+    if (mode_ == ViewMode::Details) viewport_ = DetailsContentRect(viewport_, scale_);
     const float width = std::max(1.0f, viewport_.right - viewport_.left);
     const float height = std::max(1.0f, viewport_.bottom - viewport_.top);
     auto grid = [&](float cell_w, float cell_h, float icon, bool fixed_pixel_tier = false) {

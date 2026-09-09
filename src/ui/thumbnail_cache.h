@@ -4,6 +4,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <list>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -21,7 +22,7 @@ class ThumbnailCache {
 public:
     ThumbnailCache();
     ~ThumbnailCache();
-    void SetDeviceContext(ID2D1DeviceContext2* dc);
+    void SetDeviceContext(ID2D1DeviceContext* dc);
     void SetNotifyWindow(HWND hwnd) { hwnd_ = hwnd; }
     void Reset();
     void Evict();
@@ -46,6 +47,7 @@ public:
     bool CachedProperties(const std::wstring& path, uint64_t modified, uint64_t size,
                           std::vector<PreviewProperty>& properties);
 private:
+    friend struct ThumbnailCacheTestAccess;
     struct Item {
         ComPtr<ID2D1Bitmap> bitmap;
         std::vector<uint8_t> pixels;
@@ -65,6 +67,7 @@ private:
         bool truncated = false;
         bool failed = false;
         size_t cost = 0;
+        std::list<std::wstring>::iterator lru_position;
     };
     struct Request {
         uint32_t id = 0;
@@ -78,12 +81,14 @@ private:
         std::wstring path, key, identity;
     };
     void Worker();
+    bool StoreResult(const Request& request, Item result);
+    void Touch(Item& item);
     bool Connect();
     void StopChild();
     std::wstring Key(const std::wstring& path, uint32_t pixels, uint64_t modified,
                      uint64_t size, uint32_t frame_index = 0) const;
-    ID2D1DeviceContext2* dc_ = nullptr;
-    HWND hwnd_ = nullptr;
+    ID2D1DeviceContext* dc_ = nullptr;
+    std::atomic<HWND> hwnd_{nullptr};
     HANDLE pipe_ = INVALID_HANDLE_VALUE;
     PROCESS_INFORMATION child_{};
     std::atomic<bool> running_{false};
@@ -94,7 +99,7 @@ private:
     std::deque<Request> queue_;
     std::unordered_set<std::wstring> pending_;
     std::unordered_map<std::wstring, Item> items_;
-    std::deque<std::wstring> lru_;
+    std::list<std::wstring> lru_;
     size_t cache_bytes_ = 0;
     std::wstring latest_details_identity_;
     std::atomic<uint32_t> epoch_{1};

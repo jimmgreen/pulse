@@ -398,7 +398,7 @@ UpdateResult ValidateUpdateManifest(std::string_view document,
     std::array<uint32_t, 3> current{};
     if (!ParseUpdateManifest(document, manifest) || manifest.schema != 1 ||
         !ParseVersion(manifest.version, available) || !ParseVersion(current_version, current) ||
-        manifest.minimum_windows_build < 10240 || manifest.installer_sha256.size() != 64 ||
+        manifest.minimum_windows_build < 9600 || manifest.installer_sha256.size() != 64 ||
         !IsHex(manifest.installer_sha256)) {
         result.error = UpdateError::InvalidManifest;
         return result;

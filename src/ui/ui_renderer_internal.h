@@ -5,6 +5,7 @@
 #include "../common/localization.h"
 #include "typography.h"
 #include "../app/places.h"
+#include "../app/search_query.h"
 #include "../common/text_format.h"
 #include <algorithm>
 #include <cmath>
@@ -12,6 +13,7 @@
 #include <cwctype>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 namespace pulse::ui {
 
@@ -87,6 +89,7 @@ void ClearTextWidthCache() {
     constexpr float kCommandIconButtonDip = 32.0f;
     constexpr float kCommandIconStepDip = 34.0f;
     constexpr float kRecentControlsDip = 40.0f;
+    constexpr float kSearchFiltersDip = 40.0f;
     // d2d1.lib does not export the effect CLSIDs; define the shadow one locally.
     // (CLSID_D2D1Shadow from d2d1effects.h; same idiom as fluent_menu.cpp.)
     constexpr GUID kShadowEffectClsid = { 0xC67EA361, 0x1863, 0x4e69,
@@ -197,6 +200,8 @@ void ClearTextWidthCache() {
         }
         entry.starred = vm.tag_catalog && !entry.path.empty() &&
             vm.tag_catalog->IsStarred(entry.path);
+        if (vm.search_snippets && index < vm.search_snippets->size())
+            entry.snippet = (*vm.search_snippets)[index];
         if (entry.starred) {
             if (const app::StarredItem* starred = vm.tag_catalog->FindStarred(entry.path)) {
                 entry.badge = starred->badge;
@@ -454,7 +459,99 @@ void ClearTextWidthCache() {
 
     float PaneExtraTop(const PaneViewModel& pane, float scale) {
         return (pane.banner_message.empty() ? 0.0f : 36.0f * scale) +
-               (pane.is_recent ? kRecentControlsDip * scale : 0.0f);
+               (pane.is_recent ? kRecentControlsDip * scale : 0.0f) +
+               (pane.is_query_search ? kSearchFiltersDip * scale : 0.0f);
+    }
+
+    void FillSearchFilterChipLabels(const std::wstring& query, std::wstring labels[5]) {
+        const app::AdvancedSearchSpec spec = app::ParseSearchQuery(query);
+        auto kind_label = [&] {
+            switch (spec.kind) {
+            case pulse::index::SearchKind::Folder:
+                return pulse::l10n::Get(pulse::l10n::StringId::KindFolder);
+            case pulse::index::SearchKind::Document:
+                return pulse::l10n::Get(pulse::l10n::StringId::KindDocument);
+            case pulse::index::SearchKind::Image:
+                return pulse::l10n::Get(pulse::l10n::StringId::KindImage);
+            case pulse::index::SearchKind::Video:
+                return pulse::l10n::Get(pulse::l10n::StringId::KindVideo);
+            case pulse::index::SearchKind::Audio:
+                return pulse::l10n::Get(pulse::l10n::StringId::KindAudio);
+            case pulse::index::SearchKind::Archive:
+                return pulse::l10n::Get(pulse::l10n::StringId::KindArchive);
+            case pulse::index::SearchKind::Code:
+                return pulse::l10n::Get(pulse::l10n::StringId::KindCode);
+            case pulse::index::SearchKind::Custom:
+                return spec.custom_exts.empty()
+                    ? pulse::l10n::Get(pulse::l10n::StringId::KindCustom)
+                    : spec.custom_exts;
+            default:
+                return pulse::l10n::Get(pulse::l10n::StringId::SearchChipType);
+            }
+        };
+        auto date_label = [&] {
+            switch (spec.date) {
+            case app::DatePreset::Today:
+                return pulse::l10n::Get(pulse::l10n::StringId::DateToday);
+            case app::DatePreset::Yesterday:
+                return pulse::l10n::Get(pulse::l10n::StringId::DateYesterday);
+            case app::DatePreset::ThisWeek:
+                return pulse::l10n::Get(pulse::l10n::StringId::DateThisWeek);
+            case app::DatePreset::ThisMonth:
+                return pulse::l10n::Get(pulse::l10n::StringId::DateThisMonth);
+            case app::DatePreset::ThisYear:
+                return pulse::l10n::Get(pulse::l10n::StringId::DateThisYear);
+            default:
+                return pulse::l10n::Get(pulse::l10n::StringId::SearchChipDate);
+            }
+        };
+        auto size_label = [&] {
+            switch (spec.size) {
+            case app::SizePreset::Empty:
+                return pulse::l10n::Get(pulse::l10n::StringId::SizeEmpty);
+            case app::SizePreset::Lt1MB:
+                return pulse::l10n::Get(pulse::l10n::StringId::SizeLt1MB);
+            case app::SizePreset::From1To10MB:
+                return pulse::l10n::Get(pulse::l10n::StringId::Size1To10MB);
+            case app::SizePreset::Gt10MB:
+                return pulse::l10n::Get(pulse::l10n::StringId::SizeGt10MB);
+            default:
+                return pulse::l10n::Get(pulse::l10n::StringId::SearchChipSize);
+            }
+        };
+        labels[0] = kind_label();
+        labels[1] = date_label();
+        labels[2] = size_label();
+        labels[3] = spec.content.empty()
+            ? pulse::l10n::Get(pulse::l10n::StringId::SearchChipContent)
+            : spec.content;
+        labels[4] = pulse::l10n::Get(pulse::l10n::StringId::AdvancedSearch);
+    }
+
+    void SearchFilterChipWidthsPx(const fluent::Painter& painter, float scale,
+                                  const std::wstring labels[5], float widths[5]) {
+        const float cap = 220.0f * scale;
+        const float min_w = 32.0f * scale;
+        for (int i = 0; i < 5; ++i) {
+            float w = painter.MeasureButtonWidth(labels[i], {}, i < 3);
+            if (w < 1.0f) {
+                float dip = 18.0f + (i < 3 ? 20.0f : 0.0f);
+                for (wchar_t c : labels[i]) dip += (c > 0x7F) ? 13.0f : 7.4f;
+                w = dip * scale;
+            }
+            // Hinting can overhang the measured advance by a pixel or two.
+            widths[i] = std::min(cap, std::max(min_w, std::ceil(w + 4.0f * scale)));
+        }
+    }
+
+    D2D1_RECT_F SearchFilterRect(const D2D1_RECT_F& pane, float header_height,
+                                 float scale, int index, const float widths_px[5]) {
+        float x = pane.left + 10.0f * scale;
+        const float gap = 8.0f * scale;
+        for (int i = 0; i < index && i < 5; ++i) x += widths_px[i] + gap;
+        const float top = pane.top + header_height + 5.0f * scale;
+        const float width = widths_px[std::clamp(index, 0, 4)];
+        return D2D1::RectF(x, top, x + width, top + 30.0f * scale);
     }
 
     D2D1_RECT_F RecentFilterRect(const D2D1_RECT_F& pane, float header_height,
@@ -667,14 +764,14 @@ void ClearTextWidthCache() {
     constexpr float kDetailsTypeDip = 128.0f;
     constexpr float kDetailsSizeDip = 90.0f;
 
-    float MeasureLayoutText(Compositor* compositor, IDWriteFactory3* dwrite,
+    float MeasureLayoutText(Compositor* compositor, IDWriteFactory2* dwrite,
                             IDWriteTextFormat* format, const std::wstring& text) {
         (void)dwrite;
         return typography::MeasureLine(compositor, format, text);
     }
 
     void LayoutDetailsPanel(const D2D1_RECT_F& panel, float scale,
-                            const DetailsPanelView& d, IDWriteFactory3* dwrite,
+                            const DetailsPanelView& d, IDWriteFactory2* dwrite,
                             IDWriteTextFormat* small_fmt, Compositor* compositor,
                             float preview_h, DetailsHitRects& out) {
         const float s = scale;
@@ -857,7 +954,7 @@ void FillRoundedRect(ID2D1DeviceContext* dc, ID2D1SolidColorBrush* br,
     D2D1_ROUNDED_RECT rr = D2D1::RoundedRect(D2D1::RectF(x, y, x + w, y + h), r, r);
     dc->FillRoundedRectangle(&rr, br);
 }
-float MeasureTextWidth(IDWriteFactory3* factory, IDWriteTextFormat* fmt, const std::wstring& text) {
+float MeasureTextWidth(IDWriteFactory2* factory, IDWriteTextFormat* fmt, const std::wstring& text) {
     if (!factory || !fmt || text.empty()) return 0.0f;
     const std::uint64_t generation = typography::Generation();
     if (const auto cached = g_text_width_cache.find(TextWidthLookup{fmt, text, generation});
@@ -876,6 +973,44 @@ float MeasureTextWidth(IDWriteFactory3* factory, IDWriteTextFormat* fmt, const s
     if (g_text_width_cache.size() >= kTextWidthCacheLimit) g_text_width_cache.clear();
     g_text_width_cache.emplace(TextWidthKey{fmt, text, generation}, width);
     return width;
+}
+
+// Status-bar columns shared by DrawStatusBar and HitTest. Independent of the
+// global 4 DIP chrome margin so stats sit clear of the resize grip.
+constexpr float kStatusBarPadDip = 12.0f;
+
+struct StatusBarMetrics {
+    D2D1_RECT_F bar{};
+    D2D1_RECT_F task{};
+    float pad = 0.0f;
+    float right_reserved = 0.0f;
+};
+
+StatusBarMetrics MakeStatusBarMetrics(const WindowViewModel& vm, const D2D1_RECT_F& rect,
+                                      float scale, float status_height,
+                                      IDWriteFactory2* factory, IDWriteTextFormat* small_format) {
+    StatusBarMetrics m;
+    m.bar = D2D1::RectF(rect.left, rect.bottom - status_height, rect.right, rect.bottom);
+    m.pad = kStatusBarPadDip * scale;
+    m.right_reserved = m.pad;
+    const std::wstring* trailing = nullptr;
+    if (!vm.status.performance_text.empty()) {
+        trailing = rect.right < 1100.0f * scale
+            ? &vm.status.performance_compact_text : &vm.status.performance_text;
+    } else if (!vm.status.hint_text.empty()) {
+        trailing = &vm.status.hint_text;
+    }
+    if (trailing && factory && small_format) {
+        const float perfWidth = std::min(rect.right * 0.50f,
+            MeasureTextWidth(factory, small_format, *trailing) + 16.0f * scale);
+        m.right_reserved = perfWidth + m.pad;
+    }
+    const bool has_task = !vm.status.task_text.empty() || vm.status.task_progress >= 0.0f;
+    if (has_task) {
+        m.task = D2D1::RectF(rect.right * 0.48f, m.bar.top,
+                             rect.right - m.right_reserved, m.bar.bottom);
+    }
+    return m;
 }
 
 fluent::BadgeKind IndexVolumeBadgeKind(const std::wstring& state) {
@@ -906,7 +1041,7 @@ std::wstring FolderOf(const std::wstring& path) {
 }
 
 // Single-line text with end ellipsis (character granularity) when too wide.
-void DrawTextEndEllipsis(ID2D1DeviceContext* dc, IDWriteFactory3* factory,
+void DrawTextEndEllipsis(ID2D1DeviceContext* dc, IDWriteFactory2* factory,
     IDWriteTextFormat* fmt, ID2D1SolidColorBrush* br, const std::wstring& text,
     float x, float y, float w, float h) {
     if (!dc || !fmt || text.empty() || w <= 1.0f || h <= 0.0f) return;
@@ -932,7 +1067,7 @@ void DrawTextEndEllipsis(ID2D1DeviceContext* dc, IDWriteFactory3* factory,
     dc->DrawTextLayout(D2D1::Point2F(x, y), layout.get(), br, D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
-void DrawTabTitle(ID2D1DeviceContext* dc, IDWriteFactory3* factory,
+void DrawTabTitle(ID2D1DeviceContext* dc, IDWriteFactory2* factory,
                          IDWriteTextFormat* fmt, ID2D1SolidColorBrush* br,
                          const std::wstring& text, float x, float y, float w, float h,
                          float scale) {
@@ -1018,12 +1153,13 @@ TitleChrome MakeTitleChrome(float window_w, float scale, float title_h) {
 }
 
 constexpr float kSettingsNavW = 200.0f;
+constexpr int kSettingsNavCount = 5;
 
 struct SettingsLayout {
     D2D1_RECT_F body{};
     D2D1_RECT_F nav{};
     D2D1_RECT_F content{};
-    D2D1_RECT_F nav_row[4]{};
+    D2D1_RECT_F nav_row[kSettingsNavCount]{};
     D2D1_RECT_F accent_card{};
     D2D1_RECT_F accent_picker{};
     D2D1_RECT_F effect_card{};
@@ -1039,6 +1175,7 @@ struct SettingsLayout {
     D2D1_RECT_F wallpaper_choose{};
     D2D1_RECT_F wallpaper_clear{};
     D2D1_RECT_F startup_row[3]{};
+    D2D1_RECT_F hidden_files_row{};
     D2D1_RECT_F index_info{};
     D2D1_RECT_F index_status{};
     D2D1_RECT_F index_path{};
@@ -1053,9 +1190,26 @@ struct SettingsLayout {
     std::vector<D2D1_RECT_F> network_remove;
     D2D1_RECT_F about_card{};
     D2D1_RECT_F diagnostics_card{};
+    D2D1_RECT_F diagnostics_perf{};
     D2D1_RECT_F diagnostics_action[3]{};
     D2D1_RECT_F update_card{};
     D2D1_RECT_F update_action[2]{};
+    D2D1_RECT_F dup_scope[3]{};
+    D2D1_RECT_F dup_browse{};
+    D2D1_RECT_F dup_scan{};
+    D2D1_RECT_F dup_cancel{};
+    D2D1_RECT_F dup_min_size[3]{};
+    std::vector<D2D1_RECT_F> dup_drives;
+    D2D1_RECT_F dup_progress{};
+    D2D1_RECT_F dup_delete_all{};
+    std::vector<D2D1_RECT_F> dup_group_cards;
+    std::vector<D2D1_RECT_F> dup_keep;
+    std::vector<int> dup_keep_group;
+    std::vector<int> dup_keep_file;
+    std::vector<D2D1_RECT_F> dup_open;
+    std::vector<int> dup_open_group;
+    std::vector<int> dup_open_file;
+    std::vector<D2D1_RECT_F> dup_group_delete;
     float content_origin = 0.0f;
     float content_h = 0.0f;
 };
@@ -1063,6 +1217,10 @@ struct SettingsLayout {
 std::wstring FileNameOf(const std::wstring& path) {
     const size_t slash = path.find_last_of(L"\\/");
     return slash == std::wstring::npos ? path : path.substr(slash + 1);
+}
+
+bool VisibleInContent(const D2D1_RECT_F& rc, const D2D1_RECT_F& content, float pad = 0.0f) {
+    return rc.bottom > content.top - pad && rc.top < content.bottom + pad;
 }
 
 SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& rect,
@@ -1074,7 +1232,7 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
     l.content = D2D1::RectF(l.nav.right, l.body.top, l.body.right, l.body.bottom);
     const float row_h = 40.0f * scale;
     const float nav_pad = 12.0f * scale;
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < kSettingsNavCount; ++i) {
         const float y = l.nav.top + nav_pad + 8.0f * scale + i * (row_h + 4.0f * scale);
         l.nav_row[i] = D2D1::RectF(l.nav.left + 8.0f * scale, y,
                                    l.nav.right - 8.0f * scale, y + row_h);
@@ -1159,7 +1317,9 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
                                         card_right - 16.0f * scale, btn_y + btn_h);
         l.wallpaper_choose = D2D1::RectF(l.wallpaper_clear.left - 8.0f * scale - choose_w, btn_y,
                                          l.wallpaper_clear.left - 8.0f * scale, btn_y + btn_h);
-        y += wall_h + 20.0f * scale;
+        y += wall_h + 12.0f * scale;
+        l.hidden_files_row = D2D1::RectF(card_left, y, card_right, y + 56.0f * scale);
+        y += 76.0f * scale;
 
         y += 22.0f * scale;
         y += 8.0f * scale;
@@ -1262,15 +1422,17 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
                + 8.0f * scale + 12.0f * scale;
         }
         y += 48.0f * scale;
-    } else {
+    } else if (vm.settings_page == 3) {
         const float card_left = l.content.left + pad;
         const float card_right = l.content.right - pad;
         l.about_card = D2D1::RectF(card_left, y, card_right, y + 104.0f * scale);
         y += 116.0f * scale;
 
         const bool compact_diagnostics = card_right - card_left < 650.0f * scale;
-        const float diagnostics_h = (compact_diagnostics ? 232.0f : 152.0f) * scale;
+        const float diagnostics_h = (compact_diagnostics ? 288.0f : 208.0f) * scale;
         l.diagnostics_card = D2D1::RectF(card_left, y, card_right, y + diagnostics_h);
+        l.diagnostics_perf = D2D1::RectF(card_left + 8.0f * scale, y + 86.0f * scale,
+                                         card_right - 8.0f * scale, y + 142.0f * scale);
         const float gap = 8.0f * scale;
         const float action_left = card_left + 16.0f * scale;
         const float action_right = card_right - 16.0f * scale;
@@ -1284,7 +1446,7 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
             diag_w[i] = label_btn_w(pulse::l10n::Get(kDiagLabels[i]));
         if (compact_diagnostics) {
             for (int i = 0; i < 3; ++i) {
-                const float top = y + (96.0f + i * 40.0f) * scale;
+                const float top = y + (152.0f + i * 40.0f) * scale;
                 l.diagnostics_action[i] = D2D1::RectF(action_left, top, action_right,
                                                       top + 32.0f * scale);
             }
@@ -1295,7 +1457,7 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
             float left = action_left;
             for (int i = 0; i < 3; ++i) {
                 const float width = measured_total > available ? equal : diag_w[i];
-                const float top = y + 104.0f * scale;
+                const float top = y + 160.0f * scale;
                 l.diagnostics_action[i] = D2D1::RectF(left, top, left + width,
                                                       top + 32.0f * scale);
                 left += width + gap;
@@ -1319,6 +1481,102 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
                                          l.update_action[0].right + gap + download_w,
                                          l.update_action[0].bottom);
         y += update_h + 24.0f * scale;
+    } else if (vm.settings_page == 4) {
+        const float card_left = l.content.left + pad;
+        const float card_right = l.content.right - pad;
+        const float gap = 8.0f * scale;
+        const float inner = 16.0f * scale;
+        const float btn_h = 32.0f * scale;
+        y += 28.0f * scale;
+        const float scope_w = (card_right - card_left - inner * 2 - gap * 2) / 3.0f;
+        for (int i = 0; i < 3; ++i) {
+            const float left = card_left + inner + i * (scope_w + gap);
+            l.dup_scope[i] = D2D1::RectF(left, y, left + scope_w, y + 36.0f * scale);
+        }
+        y += 48.0f * scale;
+        if (vm.dup_scope == 0) {
+            const float browse_w = label_btn_w(pulse::l10n::Get(pulse::l10n::StringId::DupBrowse));
+            l.dup_browse = D2D1::RectF(card_right - inner - browse_w, y,
+                                       card_right - inner, y + btn_h);
+            y += 44.0f * scale;
+        } else if (vm.dup_scope == 1) {
+            float cx = card_left + inner;
+            float cy = y;
+            l.dup_drives.reserve(vm.dup_drives.size());
+            for (const auto& drive : vm.dup_drives) {
+                const float chip_w = (std::max)(48.0f * scale, label_btn_w(drive.label));
+                if (cx > card_left + inner && cx + chip_w > card_right - inner) {
+                    cx = card_left + inner;
+                    cy += 36.0f * scale;
+                }
+                l.dup_drives.push_back(D2D1::RectF(cx, cy, cx + chip_w, cy + 32.0f * scale));
+                cx += chip_w + gap;
+            }
+            y = cy + 40.0f * scale;
+        }
+        y += 8.0f * scale;
+        y += 40.0f * scale;
+        const float min_w = (card_right - card_left - inner * 2 - gap * 2) / 3.0f;
+        for (int i = 0; i < 3; ++i) {
+            const float left = card_left + inner + i * (min_w + gap);
+            l.dup_min_size[i] = D2D1::RectF(left, y, left + min_w, y + 32.0f * scale);
+        }
+        y += 44.0f * scale;
+        const float scan_w = label_btn_w(pulse::l10n::Get(pulse::l10n::StringId::DupScan));
+        const float cancel_w = label_btn_w(pulse::l10n::Get(pulse::l10n::StringId::Cancel));
+        l.dup_scan = D2D1::RectF(card_left + inner, y, card_left + inner + scan_w, y + btn_h);
+        l.dup_cancel = D2D1::RectF(l.dup_scan.right + gap, y,
+                                   l.dup_scan.right + gap + cancel_w, y + btn_h);
+        y += 48.0f * scale;
+        y += 36.0f * scale;
+        if (vm.dup_show_progress) {
+            l.dup_progress = D2D1::RectF(card_left, y, card_right, y + 72.0f * scale);
+            y += 84.0f * scale;
+        }
+        if (!vm.dup_empty.empty()) y += 36.0f * scale;
+        const float file_h = 32.0f * scale;
+        const float delete_w = label_btn_w(pulse::l10n::Get(pulse::l10n::StringId::DupDeleteExtras));
+        const float vis_pad = 64.0f * scale;
+        l.dup_group_cards.reserve(vm.dup_groups.size());
+        l.dup_group_delete.reserve(vm.dup_groups.size());
+        for (size_t g = 0; g < vm.dup_groups.size(); ++g) {
+            const float card_h = 48.0f * scale +
+                static_cast<float>(vm.dup_groups[g].files.size()) * file_h + 48.0f * scale;
+            const D2D1_RECT_F card = D2D1::RectF(card_left, y, card_right, y + card_h);
+            l.dup_group_cards.push_back(card);
+            l.dup_group_delete.push_back(D2D1::RectF(
+                card.right - inner - delete_w,
+                card.top + 48.0f * scale +
+                    static_cast<float>(vm.dup_groups[g].files.size()) * file_h + 8.0f * scale,
+                card.right - inner,
+                card.top + 48.0f * scale +
+                    static_cast<float>(vm.dup_groups[g].files.size()) * file_h + 8.0f * scale +
+                    btn_h));
+            if (VisibleInContent(card, l.content, vis_pad)) {
+                float fy = y + 48.0f * scale;
+                l.dup_keep.reserve(l.dup_keep.size() + vm.dup_groups[g].files.size());
+                l.dup_open.reserve(l.dup_open.size() + vm.dup_groups[g].files.size());
+                for (size_t f = 0; f < vm.dup_groups[g].files.size(); ++f) {
+                    l.dup_keep.push_back(D2D1::RectF(card.left + inner, fy,
+                                                     card.left + inner + 88.0f * scale, fy + file_h));
+                    l.dup_keep_group.push_back(static_cast<int>(g));
+                    l.dup_keep_file.push_back(static_cast<int>(f));
+                    l.dup_open.push_back(D2D1::RectF(card.left + inner + 92.0f * scale, fy,
+                                                     card.right - inner, fy + file_h));
+                    l.dup_open_group.push_back(static_cast<int>(g));
+                    l.dup_open_file.push_back(static_cast<int>(f));
+                    fy += file_h;
+                }
+            }
+            y += card_h + 12.0f * scale;
+        }
+        if (vm.dup_show_delete_all) {
+            const float all_w = label_btn_w(vm.dup_delete_all.empty()
+                ? pulse::l10n::Get(pulse::l10n::StringId::DupDeleteAllExtras)
+                : vm.dup_delete_all);
+            l.dup_delete_all = D2D1::RectF(card_left, y, card_left + all_w, y + btn_h);
+            y += 48.0f * scale;
+        }
     }
     l.content_h = y - l.content_origin + pad;
     return l;
@@ -1328,9 +1586,22 @@ bool ContainsPt(const D2D1_RECT_F& rc, float x, float y) {
     return x >= rc.left && x < rc.right && y >= rc.top && y < rc.bottom;
 }
 
-bool IsHovered(const WindowViewModel& vm, HitTestResult::Region region, int index = -1) {
+HitTestResult::Region StatusBarHitRegion(const WindowViewModel& vm, const D2D1_RECT_F& rect,
+                                         float x, float y, float scale, float status_height,
+                                         Compositor* compositor) {
+    IDWriteFactory2* factory = compositor ? compositor->DwriteFactory() : nullptr;
+    IDWriteTextFormat* fmt = compositor ? compositor->SmallFormat() : nullptr;
+    const StatusBarMetrics sb = MakeStatusBarMetrics(
+        vm, rect, scale, status_height, factory, fmt);
+    return ContainsPt(sb.task, x, y) ? HitTestResult::StatusBarTask
+                                    : HitTestResult::StatusBar;
+}
+
+bool IsHovered(const WindowViewModel& vm, HitTestResult::Region region, int index = -1,
+               int sub_index = -1) {
     return vm.hover_region == static_cast<int>(region) &&
-        (index < 0 || vm.hover_control_index == index);
+        (index < 0 || vm.hover_control_index == index) &&
+        (sub_index < 0 || vm.hover_sub_index == sub_index);
 }
 
 bool TabCloseVisible(const WindowViewModel& vm, int index, float tab_w, float scale) {
@@ -1347,7 +1618,7 @@ bool TabCloseVisible(const WindowViewModel& vm, int index, float tab_w, float sc
 bool TitleBarCompact(float window_w, float scale, size_t tab_count) {
     return window_w < 900.0f * scale || tab_count >= 4;
 }
-std::wstring FitFileName(Compositor* compositor, IDWriteFactory3* factory,
+std::wstring FitFileName(Compositor* compositor, IDWriteFactory2* factory,
                                 IDWriteTextFormat* fmt, const std::wstring& name, float max_w) {
     if (name.empty() || max_w <= 1.0f) return {};
     const auto measure = [&](const std::wstring& s) {
@@ -1412,12 +1683,54 @@ float TagStepForLeftover(int n, float diameter, float spread_gap, float leftover
     return diameter * 0.52f;
 }
 
+constexpr float kDetailsSnippetMinRowDip = 36.0f;
+
+bool DetailsShowsSnippet(const PaneViewModel& vm) {
+    if (vm.view_mode != ViewMode::Details || !vm.search_snippets) return false;
+    for (const auto& snippet : *vm.search_snippets) {
+        if (!snippet.empty()) return true;
+    }
+    return false;
+}
+
+struct DetailsNameLine {
+    float y = 0.0f;
+    float h = 0.0f;
+    float snippet_y = 0.0f;
+    float snippet_h = 0.0f;
+};
+
+DetailsNameLine MakeDetailsNameLine(const D2D1_RECT_F& name_rc, const D2D1_RECT_F& cell,
+                                    float scale, bool snippet) {
+    DetailsNameLine line;
+    line.y = name_rc.top;
+    line.h = std::max(1.0f, name_rc.bottom - name_rc.top);
+    if (!snippet) return line;
+    const float row = std::max(1.0f, cell.bottom - cell.top);
+    const float name_h = 16.0f * scale;
+    const float snip_h = 14.0f * scale;
+    const float top_pad = 1.0f * scale;
+    const float bot_pad = 1.0f * scale;
+    line.y = cell.top + top_pad;
+    if (name_h + snip_h + top_pad + bot_pad <= row + 0.5f) {
+        line.h = name_h;
+        line.snippet_y = line.y + line.h;
+        line.snippet_h = snip_h;
+    } else {
+        line.h = std::max(12.0f * scale, (row - top_pad - bot_pad) * (16.0f / 30.0f));
+        line.snippet_y = line.y + line.h;
+        line.snippet_h = std::max(10.0f * scale, cell.bottom - bot_pad - line.snippet_y);
+    }
+    return line;
+}
+
 // Name column: filename compresses first. Tags sit after the name — spread
 // when leftover room fits every dot, otherwise overlap. Star / new tab / more
 // dock to the column's right edge so trailing chrome stays a fixed width.
 struct NameTrail {
     float name_x = 0.0f;
     float name_w = 0.0f;
+    float line_w = 0.0f;
     int tag_n = 0;
     float tag_r = 0.0f;
     float tag_step = 0.0f;
@@ -1437,7 +1750,7 @@ NameTrail LayoutNameTrail(float name_x, float text_y, float text_h,
                                  float scale, const std::wstring& name, int tag_n,
                                  float badge_w,
                                  bool show_star, bool show_new_tab, bool show_more,
-                                 Compositor* compositor, IDWriteFactory3* factory,
+                                 Compositor* compositor, IDWriteFactory2* factory,
                                  IDWriteTextFormat* fmt) {
     NameTrail t;
     t.name_x = name_x;
@@ -1469,6 +1782,7 @@ NameTrail LayoutNameTrail(float name_x, float text_y, float text_h,
         t.new_tab = D2D1::RectF(dock - btn, by, dock, by + btn);
         dock = t.new_tab.left - gap;
     }
+    t.line_w = std::max(0.0f, dock - name_x);
 
     // Reserve the compact (overlapped) cluster so a long name still
     // compresses first. Spread only if leftover after the fitted name fits.
@@ -1483,8 +1797,8 @@ NameTrail LayoutNameTrail(float name_x, float text_y, float text_h,
     float trail_x = name_x + t.name_w;
     if (badge_w > 0.0f) {
         trail_x += badge_gap;
-        const float badge_h = std::min(20.0f * scale, cell_bottom - cell_top - 4.0f * scale);
-        const float badge_y = cell_top + (cell_bottom - cell_top - badge_h) * 0.5f;
+        const float badge_h = std::min(20.0f * scale, text_h);
+        const float badge_y = text_y + (text_h - badge_h) * 0.5f;
         t.badge = D2D1::RectF(trail_x, badge_y, trail_x + badge_w, badge_y + badge_h);
         trail_x += badge_w;
     }

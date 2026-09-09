@@ -41,7 +41,7 @@ struct ContextMenuPrefs {
     bool system_extra = false;
     bool print = true;
 
-    int explorer_cap = 12;
+    int explorer_cap = ipc::kDefaultExplorerCap;
     int open_with_mru = 2;
 
     std::unordered_map<std::wstring, bool> item_enabled;
@@ -58,7 +58,7 @@ struct ContextMenuPrefs {
     std::vector<std::wstring> DisabledHandlerClsids() const;
     bool RecordSeen(const std::wstring& key, const std::wstring& text, bool flyout,
                     ipc::CtxMenuCategory category, bool from_com = false);
-    // key: ".dwg" / ":bg" / ":file". Returns true if prefs changed.
+    // key: ".dwg" / ":folder" / ":drive" / ":bg" / ":file". Returns true if prefs changed.
     bool RecordComTiming(const std::wstring& key, uint32_t elapsed_ms);
     bool ComDeferred(const std::wstring& key) const;
     bool ComDisabled(const std::wstring& key) const;

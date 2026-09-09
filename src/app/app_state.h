@@ -2,6 +2,7 @@
 #pragma once
 
 #include "../ui/ui_compositor.h"
+#include "../ui/notification_toast.h"
 #include "../ui/ui_renderer.h"
 #include "../ui/fluent_menu.h"
 #include "../ui/drag_drop.h"
@@ -27,6 +28,7 @@
 #include "tab_controller.h"
 #include "update_checker.h"
 #include "session.h"
+#include "duplicate_scan.h"
 #include "../index/index_client.h"
 #include "../index/network_agent_client.h"
 #include "../index/content_search_client.h"
@@ -62,13 +64,15 @@ constexpr UINT WM_SHELL_CACHE_INVALIDATE = WM_APP + 49;
 constexpr UINT WM_NETWORK_INDEX_NOTIFY = WM_APP + 51;
 constexpr UINT WM_NETWORK_INDEX_SEARCH = WM_APP + 52;
 constexpr UINT WM_CONTENT_SEARCH = WM_APP + 53;
+constexpr UINT WM_DUPLICATE_SCAN = WM_APP + 58;
 constexpr UINT WM_QUICK_PREVIEW_NAVIGATE = WM_APP + 54;
 constexpr UINT WM_QUICK_PREVIEW_OPEN = WM_APP + 55;
 constexpr UINT WM_UPDATE_RESULT = WM_APP + 56;
 constexpr UINT WM_RECYCLE_INFO = WM_APP + 57;
+constexpr UINT WM_DUP_VOLUMES = WM_APP + 59;
 constexpr UINT kTimerUi = 1;
 
-enum class OmnibarMode { Path, Command, Project };
+enum class OmnibarMode { Path, Mixed, Command, Project };
 
 struct TrayDeckEntry {
     int batch = -1;
@@ -110,6 +114,7 @@ struct Timing {
 struct AppState {
     HWND hwnd = nullptr;
     ui::Compositor compositor;
+    ui::NotificationToast notification_toast;
     ui::MainRenderer renderer;
     ui::QuickPreviewWindow quickPreview;
 
@@ -137,6 +142,13 @@ struct AppState {
 
     app::SidebarModel sidebar;
     fs::RecycleBinInfo recycle_info;
+    // SHQueryRecycleBin and $I files lag IFileOperation; retry occupancy/list
+    // after recycle mutations and ignore occupancy that still matches the
+    // pre-mutation count while an optimistic update is showing.
+    ULONGLONG recycle_refresh_at = 0;
+    int recycle_refresh_left = 0;
+    uint64_t recycle_ignore_items = 0;
+    bool recycle_info_guard = false;
     uint32_t sidebarCollapsedMask = 0;
     bool starredExpanded = true;
     float sidebarScroll = 0.0f;
@@ -165,6 +177,14 @@ struct AppState {
     index::IndexClient index;
     index::NetworkAgentClient networkIndex;
     index::ContentSearchClient contentSearch;
+    index::ContentSearchClient duplicateSearch;
+    app::DuplicateScanSession duplicateScan;
+    uint64_t dup_view_epoch = 0;
+    std::wstring dup_view_language;
+    std::vector<ui::DuplicateGroupView> dup_view_cache;
+    std::vector<index::VolumeInfo> dup_volume_cache;
+    ULONGLONG dup_volume_cache_tick = 0;
+    bool dup_volume_cache_pending = false;
     app::SavedSearchStore savedSearches;
     struct PendingIndexSearch {
         index::Query query;
@@ -196,7 +216,8 @@ struct AppState {
     bool maximized = false;
     bool backdropActive = true;
 
-    bool showFps = true;
+    bool showFps = false;
+    bool forceStatusPerformance = false; // --fps for this process only
     double lastFrameMs = 0.0;
     double lastFps = 0.0;
     std::chrono::steady_clock::time_point lastFrameTime;
@@ -305,6 +326,12 @@ struct AppState {
 
     HWND hwndAddressEdit = nullptr;
     bool addressEditing = false;
+    bool addressSearching = false;
+    bool addressSearchCurrent = false;
+    std::wstring addressSearchRoot;
+    float addressSearchAnimation = 0.0f;
+    float addressScopeAnimation = 0.0f;
+    ULONGLONG addressAnimationTick = 0;
     bool addressIgnoreKillFocus = false;
     HWND hwndFilterEdit = nullptr;
     bool filterEditing = false;
@@ -323,6 +350,7 @@ struct AppState {
     uint64_t operationDismissedTaskId = 0;
     uint64_t conflictUiToken = 0;
     bool operationAutoShown = false;
+    bool operationPinnedByUser = false;
     std::chrono::steady_clock::time_point operationStartedAt{};
     std::chrono::steady_clock::time_point operationFinishedAt{};
     HWND hwndRenameEdit = nullptr;
@@ -371,6 +399,7 @@ struct AppState {
     bool dragPending = false;
     POINT dragStartPt{};
     int clickCollapseIndex = -1;
+    bool clickToggleOnRelease = false;
 
     // Tag drag-reorder gesture (sidebar 标签组), QFluentKit TabBar model:
     // the dragged tag follows cursor deltas 1:1, swaps with a sibling when its

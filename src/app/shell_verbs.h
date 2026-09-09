@@ -18,11 +18,13 @@ struct StaticVerb {
     std::wstring verb;      // registry verb key ("print", "edit", "openas")
     std::wstring display;   // menu row text
     std::wstring app_path;  // non-empty => open-with entry: launch this exe
+    std::wstring command;   // raw HKCR command template; CommandStore children need this
+    std::vector<StaticVerb> children; // cascade flyout (SubCommands / ExtendedSubCommandsKey)
 };
 
-// ext is ".dwg" style (with the dot), lowercase not required. Returns static
-// verbs first, then up to three open-with MRU apps ("用 X 打开"), then a
-// trailing "打开方式…" (verb "openas"). Empty for extension-less paths.
+// ext is ".dwg" (file), or a location key ":folder" / ":drive" / ":bg".
+// File keys return progid/OpenWith verbs plus "打开方式…". Location keys
+// return Directory/Folder/Drive/Background shell verbs, including cascades.
 std::vector<StaticVerb> EnumerateStaticVerbs(const std::wstring& ext);
 
 // Pure helper (self-tested): dedupes by display text, drops entries matching

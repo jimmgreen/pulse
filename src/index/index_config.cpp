@@ -249,21 +249,28 @@ std::wstring UserIndexRoot() {
 }
 
 std::wstring MachineConfigPath() {
-    const std::wstring root = MachineIndexRoot();
-    return root.empty() ? L"" : root + L"\\config.json";
+    const std::wstring root = MachineDataRoot();
+    return root.empty() ? L"" : root + L"\\index-config.json";
 }
 
 bool LoadMachineConfig(IndexConfig& config, std::wstring* error) {
     config = {};
-    config.index_path = MachineIndexRoot();
-    const std::wstring path = MachineConfigPath();
+    const std::wstring root = MachineDataRoot();
+    config.index_path = root.empty() ? L"" : root + L"\\Index";
+    std::wstring path = MachineConfigPath();
     if (path.empty()) {
         SetError(error, L"无法定位 ProgramData 索引目录");
         return false;
     }
+    // Older releases kept machine configuration inside the default data directory.
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES && GetLastError() == ERROR_FILE_NOT_FOUND)
+        path = root + L"\\Index\\config.json";
     std::wstring json;
     if (!pulse::ReadUtf8File(path, json)) {
-        if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return true;
+        if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            const DWORD code = GetLastError();
+            if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND) return true;
+        }
         SetError(error, L"无法读取索引配置");
         return false;
     }
@@ -275,8 +282,8 @@ bool LoadMachineConfig(IndexConfig& config, std::wstring* error) {
     config.generation = static_cast<uint64_t>((std::max)(1, pulse::json::ExtractInt(json, L"generation", 1)));
     config.include_fixed_ntfs = pulse::json::ExtractBool(json, L"include_fixed_ntfs", true);
     config.include_removable_ntfs = pulse::json::ExtractBool(json, L"include_removable_ntfs", true);
-    config.index_path = pulse::json::ExtractString(json, L"index_path", MachineIndexRoot());
-    if (config.index_path.empty()) config.index_path = MachineIndexRoot();
+    config.index_path = pulse::json::ExtractString(json, L"index_path", root + L"\\Index");
+    if (config.index_path.empty()) config.index_path = root + L"\\Index";
     for (auto& id : ExtractStringArray(json, L"excluded_volume_ids"))
         config.excluded_volume_ids.insert(NormalizeVolumeId(std::move(id)));
     for (auto& path_value : ExtractStringArray(json, L"excluded_paths")) {
@@ -304,6 +311,14 @@ bool SaveMachineConfig(const IndexConfig& config, std::wstring* error) {
     if (!pulse::WriteUtf8FileAtomic(path, ConfigJson(config))) {
         SetError(error, Win32Error(L"保存索引配置失败"));
         return false;
+    }
+    const std::wstring legacy_root = MachineDataRoot() + L"\\Index";
+    const DWORD attributes = GetFileAttributesW(legacy_root.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        // The new configuration is durable before removing the legacy copy.
+        DeleteFileW((legacy_root + L"\\config.json").c_str());
+        if (CompareStringOrdinal(config.index_path.c_str(), -1, legacy_root.c_str(), -1, TRUE) != CSTR_EQUAL)
+            RemoveDirectoryW(legacy_root.c_str());
     }
     return true;
 }

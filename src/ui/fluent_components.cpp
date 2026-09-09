@@ -1,3 +1,4 @@
+#include "legacy_icons.h"
 #include "fluent_components.h"
 #include "tab_shape.h"
 #include "typography.h"
@@ -52,7 +53,7 @@ float Height(const D2D1_RECT_F& bounds) noexcept {
     return std::max(0.0f, bounds.bottom - bounds.top);
 }
 
-float MeasureTextWidth(IDWriteFactory3* factory, IDWriteTextFormat* format,
+float MeasureTextWidth(IDWriteFactory2* factory, IDWriteTextFormat* format,
                        std::wstring_view text) {
     return typography::MeasureAdvance(factory, format, text);
 }
@@ -436,6 +437,7 @@ void Painter::DrawText(std::wstring_view text, const D2D1_RECT_F& bounds,
         return;
     }
 
+    if (DrawLegacyIcon(dc_, compositor_->DwriteFactory(), text, bounds, ScratchBrush(color), format->GetFontSize())) return;
     const D2D1_RECT_F snapped = typography::SnapVerticalBounds(bounds);
     const float width = snapped.right - snapped.left;
     const float height = snapped.bottom - snapped.top;
@@ -475,6 +477,7 @@ void Painter::DrawTextWithBrush(std::wstring_view text, const D2D1_RECT_F& bound
             ? DWRITE_TEXT_ALIGNMENT_TRAILING
             : DWRITE_TEXT_ALIGNMENT_LEADING;
     ID2D1SolidColorBrush* text_brush = Brush(brush);
+    if (DrawLegacyIcon(dc_, compositor_->DwriteFactory(), text, bounds, text_brush, format->GetFontSize())) return;
     if (!high_contrast_ && theme_ && text_brush && compositor_->DrawLumaText(
             text, format, snapped, text_brush->GetColor(), theme_->bg, text_alignment)) {
         return;
@@ -624,6 +627,7 @@ void Painter::DrawButton(const ButtonSpec& spec) {
     const auto& state = spec.state;
     const bool toggle = spec.kind == ButtonKind::Toggle ||
                         spec.kind == ButtonKind::TransparentToggle;
+    const bool danger = spec.kind == ButtonKind::Danger;
     const bool primary = spec.kind == ButtonKind::Primary || (toggle && state.checked);
     const bool transparent = spec.kind == ButtonKind::Transparent ||
                              (spec.kind == ButtonKind::TransparentToggle && !state.checked);
@@ -641,11 +645,26 @@ void Painter::DrawButton(const ButtonSpec& spec) {
         draw_border = !transparent && spec.bordered;
         fill = !state.enabled ? theme_->fill_input
                : primary ? theme_->accent
+               : danger ? theme_->danger
                        : state.hovered || state.pressed ? theme_->fill_hover : theme_->fill_input;
         border = theme_->stroke_card;
         edge = border;
-        foreground = state.enabled ? (primary ? theme_->accent_text : theme_->text)
-                                   : theme_->text_disabled;
+        foreground = state.enabled
+            ? ((primary || danger) ? theme_->accent_text : theme_->text)
+            : theme_->text_disabled;
+        if (danger && state.enabled) foreground = HexColor(0xFFFFFF);
+    } else if (danger) {
+        if (!state.enabled) {
+            fill = dark_ ? HexColor(0x343434) : HexColor(0xCDCDCD);
+            border = fill;
+            edge = fill;
+            foreground = dark_ ? RgbaF(0xFFFFFF, 0.43f) : RgbaF(0xFFFFFF, 0.90f);
+        } else {
+            fill = state.pressed || state.hovered ? theme_->danger_hover : theme_->danger;
+            border = fill;
+            edge = fill;
+            foreground = HexColor(0xFFFFFF);
+        }
     } else if (primary) {
         const AccentShades shades = DeriveAccentShades(theme_->accent);
         if (!state.enabled) {
@@ -716,10 +735,11 @@ void Painter::DrawButton(const ButtonSpec& spec) {
                       ScratchBrush(edge), 1.0f);
     }
 
-    // 8px vertical inset on a 28px footer button leaves ~12px for a 14px CJK
-    // body line. Keep icons on the 8px grid; give the text the remaining pad.
     const float pad_x = Px(8.0f);
-    const float pad_y = Px(4.0f);
+    const float line = BodyFormat() ? BodyFormat()->GetFontSize() * 1.35f : Px(19.0f);
+    float pad_y = Px(4.0f);
+    if (Height(spec.bounds) - pad_y * 2.0f < line)
+        pad_y = std::max(0.0f, (Height(spec.bounds) - line) * 0.5f);
     D2D1_RECT_F content = spec.bounds;
     content.left += pad_x;
     content.right -= pad_x;
@@ -1288,6 +1308,16 @@ void Painter::DrawMenuItem(const MenuItemSpec& spec) {
         const float min_label = Px(80.0f);
         const float max_shortcut = std::max(Px(24.0f), Width(content) - min_label - Px(8.0f));
         const float shortcut_width = std::clamp(measured, Px(24.0f), max_shortcut);
+        auto shortcut_bounds = D2D1::RectF(content.right - shortcut_width, content.top,
+                                          content.right, content.bottom);
+        float label_right = shortcut_bounds.left - Px(8.0f);
+        if (spec.shortcut_inline) {
+            const float available = std::max(0.0f, Width(content));
+            const float gap = std::min(Px(24.0f), available * 0.25f);
+            const float label_width = std::clamp(spec.inline_label_width, 0.0f, available - gap);
+            label_right = content.left + label_width;
+            shortcut_bounds.left = label_right + gap;
+        }
         DWRITE_WORD_WRAPPING old_wrap = DWRITE_WORD_WRAPPING_WRAP;
         DWRITE_TRIMMING old_trim{};
         ComPtr<IDWriteInlineObject> old_sign;
@@ -1298,16 +1328,14 @@ void Painter::DrawMenuItem(const MenuItemSpec& spec) {
             DWRITE_TRIMMING trim{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
             cap->SetTrimming(&trim, ellipsis_sign_.get());
         }
-        DrawText(spec.shortcut,
-                 D2D1::RectF(content.right - shortcut_width, content.top,
-                             content.right, content.bottom),
+        DrawText(spec.shortcut, shortcut_bounds,
                  cap, theme_->text_secondary,
-                 HorizontalAlignment::Right);
+                 spec.shortcut_inline ? HorizontalAlignment::Left : HorizontalAlignment::Right);
         if (cap) {
             cap->SetTrimming(&old_trim, old_sign.get());
             cap->SetWordWrapping(old_wrap);
         }
-        content.right -= shortcut_width + Px(8.0f);
+        content.right = label_right;
     }
     // Long undo labels / Explorer verbs must ellipsize inside the fixed menu
     // width — they must never stretch the flyout.
@@ -1516,7 +1544,8 @@ void Painter::DrawProgressBar(const ProgressSpec& spec) {
     if (spec.indeterminate && !high_contrast_) {
         const float cycle_ms = motion::ProgressLongBar.delay_ms +
                                motion::ProgressLongBar.duration_ms;
-        const float elapsed = Clamp01(spec.animation_progress) * cycle_ms;
+        const float cycle = spec.animation_progress - std::floor(spec.animation_progress);
+        const float elapsed = cycle * cycle_ms;
         const float short_pos = 1.45f * EvaluateMotion(motion::ProgressShortBar, elapsed);
         const float long_pos = 1.75f * EvaluateMotion(motion::ProgressLongBar, elapsed);
         const auto short_bar = D2D1::RectF(track.left + (short_pos - 0.4f) * Width(track),
@@ -1973,6 +2002,31 @@ float Painter::MeasureButtonWidth(std::wstring_view text, std::wstring_view glyp
     if (drop_down) width += Px(16.0f) + Px(4.0f);
     width += typography::MeasureLine(compositor_, BodyFormat(), text);
     return std::max(Px(32.0f), std::ceil(width));
+}
+
+float Painter::MeasureButtonHeight() const {
+    float text_h = BodyFormat() ? BodyFormat()->GetFontSize() * 1.5f : Px(21.0f);
+    float luma_w = 0.0f;
+    float luma_h = 0.0f;
+    if (compositor_ && BodyFormat() &&
+        compositor_->MeasureLumaText(L"Ag\x6d4b", BodyFormat(), luma_w, &luma_h) &&
+        luma_h > 0.0f) {
+        text_h = std::max(text_h, luma_h);
+    }
+    return std::max(Px(32.0f), std::ceil(text_h + Px(8.0f)));
+}
+
+D2D1_RECT_F Painter::FitButtonBounds(D2D1_RECT_F bounds, std::wstring_view text,
+                                     std::wstring_view glyph, bool drop_down) const {
+    const float width = MeasureButtonWidth(text, glyph, drop_down);
+    const float height = MeasureButtonHeight();
+    if (Width(bounds) < width) bounds.right = bounds.left + width;
+    if (Height(bounds) < height) {
+        const float cy = (bounds.top + bounds.bottom) * 0.5f;
+        bounds.top = cy - height * 0.5f;
+        bounds.bottom = cy + height * 0.5f;
+    }
+    return bounds;
 }
 
 float Painter::MeasureTagWidth(std::wstring_view text) const {
@@ -2444,21 +2498,42 @@ void Painter::DrawInfoBar(const InfoBarSpec& spec) {
         fallback_glyph = kInfo;
         break;
     }
-    const float radius = Px(theme_->radius_control);
-    FillRoundedRect(spec.bounds, radius,
-                    high_contrast_ ? theme_->surface_flyout
-                    : dark_ ? Rgba(0xFFFFFF, 12) : Rgba(0xFFFFFF, 190));
+    const float radius = Px(8.0f);
+    if (!high_contrast_) {
+        auto shadow = spec.bounds;
+        shadow.top += Px(2.0f);
+        shadow.bottom += Px(2.0f);
+        FillRoundedRect(shadow, radius, Rgba(0x000000, dark_ ? 28 : 12));
+    }
+    FillRoundedRect(spec.bounds, radius, theme_->surface_flyout);
     StrokeRoundedRect(spec.bounds, radius,
                       high_contrast_ ? theme_->stroke_card : theme_->stroke_card);
-    FillRoundedRect(D2D1::RectF(spec.bounds.left, spec.bounds.top,
-                               spec.bounds.left + Px(3.0f), spec.bounds.bottom),
-                    Px(1.5f), accent);
-    const auto glyph_bounds = D2D1::RectF(spec.bounds.left + Px(10.0f), spec.bounds.top,
-                                          spec.bounds.left + Px(34.0f), spec.bounds.bottom);
+    FillRoundedAccent(dc_, ScratchBrush(accent), spec.bounds, radius, Px(3.0f), AccentEdge::Left);
+    const bool stacked = Height(spec.bounds) >= Px(56.0f) && !spec.message.empty();
+    const float icon_top = stacked ? spec.bounds.top + Px(12.0f)
+        : (spec.bounds.top + spec.bounds.bottom - Px(28.0f)) * 0.5f;
+    const auto glyph_bounds = D2D1::RectF(spec.bounds.left + Px(14.0f), icon_top,
+                                          spec.bounds.left + Px(42.0f), icon_top + Px(28.0f));
+    auto icon_fill = accent;
+    icon_fill.a = dark_ ? 0.18f : 0.10f;
+    FillRoundedRect(glyph_bounds, Px(14.0f), icon_fill);
     DrawGlyph(spec.glyph.empty() ? fallback_glyph : spec.glyph, glyph_bounds, accent);
     const float close_space = spec.show_close ? Px(32.0f) : Px(8.0f);
-    const auto text_bounds = D2D1::RectF(glyph_bounds.right + Px(4.0f), spec.bounds.top,
+    const auto text_bounds = D2D1::RectF(glyph_bounds.right + Px(10.0f), spec.bounds.top,
                                          spec.bounds.right - close_space, spec.bounds.bottom);
+    if (stacked) {
+        DrawText(spec.title, D2D1::RectF(text_bounds.left, text_bounds.top + Px(10.0f),
+                 text_bounds.right, text_bounds.top + Px(30.0f)), BodyFormat(), theme_->text);
+        ComPtr<IDWriteTextLayout> layout;
+        if (compositor_ && compositor_->DwriteFactory() && SUCCEEDED(compositor_->DwriteFactory()->CreateTextLayout(
+                spec.message.data(), static_cast<UINT32>(spec.message.size()), CaptionFormat(),
+                Width(text_bounds), Height(text_bounds) - Px(36.0f), &layout))) {
+            layout->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+            layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+            dc_->DrawTextLayout(D2D1::Point2F(text_bounds.left, text_bounds.top + Px(32.0f)),
+                                layout.get(), ScratchBrush(theme_->text_secondary), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        }
+    } else {
     const float title_width = std::min(Px(150.0f), Width(text_bounds) * 0.36f);
     DrawText(spec.title,
              D2D1::RectF(text_bounds.left, text_bounds.top,
@@ -2468,7 +2543,13 @@ void Painter::DrawInfoBar(const InfoBarSpec& spec) {
              D2D1::RectF(text_bounds.left + title_width, text_bounds.top,
                         text_bounds.right, text_bounds.bottom),
              CaptionFormat(), theme_->text_secondary);
+    }
     if (spec.show_close) {
+        if (spec.state.hovered) {
+            const float center_y = (spec.bounds.top + spec.bounds.bottom) * 0.5f;
+            FillRoundedRect(D2D1::RectF(spec.bounds.right - Px(30.0f), center_y - Px(14.0f),
+                spec.bounds.right - Px(2.0f), center_y + Px(14.0f)), Px(4.0f), theme_->fill_hover);
+        }
         DrawGlyphWithFormat(kClose,
                             D2D1::RectF(spec.bounds.right - Px(28.0f), spec.bounds.top,
                                        spec.bounds.right - Px(4.0f), spec.bounds.bottom),

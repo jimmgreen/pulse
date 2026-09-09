@@ -81,6 +81,7 @@ public:
     std::vector<Workspace> workspaces;
     std::vector<ColorTag> tags;
     std::vector<NetworkPlace> networks;
+    std::vector<std::wstring> quick_access_paths;
     std::vector<StarredItem> starred_items;
     std::vector<RecentItem> recent_items;
     int active_workspace = -1;
@@ -132,6 +133,9 @@ public:
     void CloneAssignments(const std::wstring& source, const std::wstring& destination);
     void RemoveAssignments(const std::wstring& path, bool include_descendants);
 
+    bool IsQuickAccessPinned(const std::wstring& path) const;
+    bool SetQuickAccessPinned(const std::vector<std::wstring>& paths, bool pinned);
+
     bool IsStarred(const std::wstring& path) const;
     const StarredItem* FindStarred(const std::wstring& path) const;
     StarredItem* FindStarred(const std::wstring& path);
@@ -165,6 +169,7 @@ private:
         std::vector<Workspace> workspaces;
         std::vector<ColorTag> tags;
         std::vector<NetworkPlace> networks;
+        std::vector<std::wstring> quick_access_paths;
         std::vector<StarredItem> starred_items;
         std::vector<RecentItem> recent_items;
         int active_workspace = -1;

@@ -2,6 +2,7 @@
 #include "app_model.h"
 #include "../common/json_utils.h"
 #include "../common/localization.h"
+#include "../common/path_utils.h"
 #include "../common/text_format.h"
 #include <commctrl.h>
 #include <prsht.h>
@@ -66,14 +67,38 @@ void Tab::SetSnapshot(fs::SnapshotPtr value) {
     view_filter_map.reset();
     view_tag_dots.reset();
     snapshot_path = snapshot ? current_path : L"";
+    if (all_selected && !show_hidden_files) MaterializeSelection();
+    std::erase_if(selected, [&](int i) { return !EntryVisible(i); });
+    if (selected_index >= 0 && !EntryVisible(selected_index)) {
+        selected_index = selected.empty() ? -1 : *selected.begin();
+        selection_anchor = selected_index;
+    }
     directory_count = 0;
     file_count = 0;
     if (!snapshot) return;
 
     for (const auto& entry : *snapshot) {
+        if (!show_hidden_files && !current_path.starts_with(L"pulse:recycle") &&
+            (entry.attrs & FILE_ATTRIBUTE_HIDDEN)) continue;
         if (entry.is_dir) ++directory_count;
         else ++file_count;
     }
+}
+
+bool Tab::EntryVisible(int index) const {
+    if (!snapshot || index < 0 || index >= static_cast<int>(snapshot->size())) return false;
+    // Recycle Bin lists payloads whose hidden attributes belong to Windows.
+    return show_hidden_files || current_path.starts_with(L"pulse:recycle") ||
+        (((*snapshot)[static_cast<size_t>(index)].attrs & FILE_ATTRIBUTE_HIDDEN) == 0);
+}
+
+void Tab::SetShowHiddenFiles(bool show) {
+    if (show_hidden_files == show) return;
+    show_hidden_files = show;
+    ClearSelection();
+    SetSnapshot(snapshot);
+    scroll_y = 0.0f;
+    ++view_generation;
 }
 
 void Tab::ClearSelection() {
@@ -84,6 +109,7 @@ void Tab::ClearSelection() {
 }
 
 int Tab::CountBound() const {
+    if (search_retaining_results) return 0;
     return snapshot ? static_cast<int>(snapshot->size()) : 0;
 }
 
@@ -93,14 +119,14 @@ void Tab::MaterializeSelection() {
     selected.clear();
     const int n = CountBound();
     selected.reserve(static_cast<size_t>(n));
-    for (int i = 0; i < n; ++i) selected.insert(i);
+    for (int i = 0; i < n; ++i) if (EntryVisible(i)) selected.insert(i);
 }
 
 void Tab::SelectOnly(int index) {
     selected.clear();
     all_selected = false;
     const int n = CountBound();
-    if (index < 0 || index >= n) {
+    if (index < 0 || index >= n || !EntryVisible(index)) {
         selected_index = -1;
         selection_anchor = -1;
         return;
@@ -112,7 +138,7 @@ void Tab::SelectOnly(int index) {
 
 void Tab::ToggleSelect(int index) {
     const int n = CountBound();
-    if (index < 0 || index >= n) return;
+    if (index < 0 || index >= n || !EntryVisible(index)) return;
     MaterializeSelection();
     if (selected.contains(index)) {
         selected.erase(index);
@@ -138,12 +164,18 @@ void Tab::SelectRange(int from, int to) {
     const int lo = std::min(from, to);
     const int hi = std::max(from, to);
     selected.reserve(static_cast<size_t>(hi - lo + 1));
-    for (int i = lo; i <= hi; ++i) selected.insert(i);
+    for (int i = lo; i <= hi; ++i) if (EntryVisible(i)) selected.insert(i);
     selected_index = to;
     if (selection_anchor < 0) selection_anchor = from;
 }
 
 void Tab::SelectAll() {
+    if (!show_hidden_files) {
+        std::vector<int> visible;
+        for (int i = 0; i < CountBound(); ++i) if (EntryVisible(i)) visible.push_back(i);
+        SelectIndices(visible);
+        return;
+    }
     const int n = CountBound();
     if (n <= 0) {
         ClearSelection();
@@ -166,7 +198,7 @@ void Tab::SelectIndices(const std::vector<int>& indices) {
     selected.reserve(indices.size());
     int focus = -1;
     for (int index : indices) {
-        if (index < 0 || index >= n) continue;
+        if (index < 0 || index >= n || !EntryVisible(index)) continue;
         if (selected.insert(index).second && focus < 0) focus = index;
     }
     if (selected.empty()) {
@@ -193,7 +225,7 @@ void Tab::InvertIndices(const std::vector<int>& universe) {
     std::unordered_set<int> uni;
     uni.reserve(universe.size());
     for (int index : universe) {
-        if (index >= 0 && index < n) uni.insert(index);
+        if (index >= 0 && index < n && EntryVisible(index)) uni.insert(index);
     }
     if (uni.empty()) return;
     std::unordered_set<int> next;
@@ -240,7 +272,7 @@ void Tab::MoveFocus(int index, bool extend) {
 }
 
 bool Tab::IsSelected(int index) const {
-    if (index < 0 || index >= CountBound()) return false;
+    if (index < 0 || index >= CountBound() || !EntryVisible(index)) return false;
     if (all_selected) return true;
     return selected.contains(index);
 }
@@ -254,8 +286,8 @@ std::vector<int> Tab::SelectedIndices() const {
     const int n = CountBound();
     std::vector<int> out;
     if (all_selected) {
-        out.resize(static_cast<size_t>(n));
-        for (int i = 0; i < n; ++i) out[static_cast<size_t>(i)] = i;
+        out.reserve(static_cast<size_t>(n));
+        for (int i = 0; i < n; ++i) if (EntryVisible(i)) out.push_back(i);
         return out;
     }
     out.assign(selected.begin(), selected.end());
@@ -272,7 +304,7 @@ void Tab::RemapSelection(const std::vector<std::wstring>& names, const std::wstr
     }
     std::unordered_set<std::wstring> want(names.begin(), names.end());
     for (int i = 0; i < n; ++i) {
-        if (!want.contains((*snapshot)[static_cast<size_t>(i)].name)) continue;
+        if (!EntryVisible(i) || !want.contains((*snapshot)[static_cast<size_t>(i)].name)) continue;
         selected.insert(i);
         if ((*snapshot)[static_cast<size_t>(i)].name == focus_name) selected_index = i;
     }
@@ -604,32 +636,6 @@ void LayoutSplitTree(const SplitContainer& node, const D2D1_RECT_F& bounds, floa
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-static std::wstring FormatCompactSize(uint64_t size) {
-    if (size == 0) return L"0B";
-    const wchar_t* units[] = { L"B", L"K", L"M", L"G", L"TB" };
-    int unit = 0;
-    double s = static_cast<double>(size);
-    while (s >= 1024.0 && unit < 4) {
-        s /= 1024.0;
-        ++unit;
-    }
-    wchar_t buf[32];
-    if (unit == 0) {
-        swprintf_s(buf, L"%lluB", size);
-    } else if (unit == 4) {
-        if (s >= 10.0) swprintf_s(buf, L"%.0fTB", s);
-        else swprintf_s(buf, L"%.1fTB", s);
-    } else {
-        if (s >= 10.0) swprintf_s(buf, L"%.0f%s", s, units[unit]);
-        else swprintf_s(buf, L"%.1f%s", s, units[unit]);
-    }
-    return buf;
-}
-
-static bool PathExists(const std::wstring& path) {
-    return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
-}
-
 static std::wstring ParentDir(std::wstring path) {
     while (path.size() > 1 && (path.back() == L'\\' || path.back() == L'/')) path.pop_back();
     const auto pos = path.find_last_of(L"\\/");
@@ -641,7 +647,7 @@ static std::wstring FindGitRootImpl(std::wstring path) {
     if (path.starts_with(L"\\\\?\\UNC\\")) path = L"\\\\" + path.substr(8);
     else if (path.starts_with(L"\\\\?\\")) path = path.substr(4);
     for (int i = 0; i < 12 && !path.empty(); ++i) {
-        if (PathExists(path + L"\\.git")) return path;
+        if (pulse::path::Exists(path + L"\\.git")) return path;
         std::wstring parent = ParentDir(path);
         if (parent.empty() || parent == path) break;
         path = std::move(parent);
@@ -886,7 +892,9 @@ SidebarModel BuildSidebarModel(const fs::RecycleBinInfo* recycle) {
         uint64_t total = totalBytes.QuadPart;
         uint64_t free = freeBytes.QuadPart;
         uint64_t used = total > free ? total - free : 0;
-        e.detail = FormatCompactSize(used) + L" / " + FormatCompactSize(total);
+        e.detail = pulse::format::ByteSize(used, false, pulse::format::ByteSizeStyle::Compact)
+                 + L" / " + pulse::format::ByteSize(total, false,
+                                                     pulse::format::ByteSizeStyle::Compact);
         e.glyph = L"\xE7F1"; // HardDrive (Segoe Fluent Icons)
         e.fallback = L"Drive";
         e.path = fs::NormalizePath(std::wstring(root));
@@ -1041,9 +1049,9 @@ void CollectFilterMatches(const Tab& tab, const PlacesCatalog* places, std::vect
     out.clear();
     if (!tab.snapshot) return;
     const int n = static_cast<int>(tab.snapshot->size());
-    if (tab.filter_text.empty()) {
-        out.resize(static_cast<size_t>(n));
-        for (int i = 0; i < n; ++i) out[static_cast<size_t>(i)] = i;
+    if (tab.filter_text.empty() && tab.show_hidden_files) {
+        out.reserve(static_cast<size_t>(n));
+        for (int i = 0; i < n; ++i) if (tab.EntryVisible(i)) out.push_back(i);
         return;
     }
     std::wstring name_needle;
@@ -1054,6 +1062,7 @@ void CollectFilterMatches(const Tab& tab, const PlacesCatalog* places, std::vect
     out.reserve(static_cast<size_t>(n));
     for (int i = 0; i < n; ++i) {
         const auto& e = (*tab.snapshot)[static_cast<size_t>(i)];
+        if (!tab.EntryVisible(i)) continue;
         const bool name_ok = NameMatchesPattern(e.name, name_needle);
         bool tag_ok = tag_needles.empty();
         if (!tag_ok && places) {
@@ -1087,6 +1096,7 @@ void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCat
     out.filter_map.reset();
     out.tag_dots.reset();
     out.loading = tab->loading;
+    out.search_retaining_results = tab->search_retaining_results;
     out.can_go_back = tab->CanGoBack();
     out.can_go_forward = tab->CanGoForward();
     std::wstring virtual_kind;
@@ -1102,6 +1112,15 @@ void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCat
     out.is_recycle = virtual_kind == L"recycle";
     out.is_search = virtual_kind == L"search" || virtual_kind == L"saved-search"
         || virtual_kind == L"recycle";
+    out.is_query_search = virtual_kind == L"search";
+    if (out.is_query_search) {
+        std::wstring rest;
+        ParsePulsePath(tab->current_path, nullptr, &rest);
+        out.search_query = rest;
+        // Keep pulse:search:... so the address bar is one segment, not C:\ splits.
+        out.path = tab->current_path;
+    }
+    out.search_snippets = tab->search_snippets;
     out.recent_filter = tab->recent_filter;
     out.recent_total = out.is_recent && places ? places->recent_items.size() : 0;
     if (virtual_kind == L"recycle") {
@@ -1146,7 +1165,7 @@ void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCat
     }
     out.row_cache = tab->view_row_cache;
     out.tag_dots = tab->view_tag_dots;
-    if (tab->snapshot && !tab->filter_text.empty()) {
+    if (tab->snapshot && (!tab->show_hidden_files || !tab->filter_text.empty())) {
         if (!tab->view_filter_map || tab->view_cache_filter_text != tab->filter_text) {
             auto filtered = std::make_shared<ui::PaneViewModel::FilterMap>();
             CollectFilterMatches(*tab, places, *filtered);
@@ -1224,8 +1243,6 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
 
     vm.status.status_text = StatusText(*tab);
     vm.status.selection_text = SelectionText(*tab);
-    vm.status.mode_text = l10n::Get(dark ? l10n::StringId::ThemeDark
-                                         : l10n::StringId::ThemeLight);
 
     ui::SidebarGroup workspaces;
     workspaces.header = l10n::Get(l10n::StringId::SidebarWorkspaces);
@@ -1298,6 +1315,17 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
         project.badge = L"Git";
         access.items.insert(access.items.begin() + static_cast<std::ptrdiff_t>(access_insert),
                             std::move(project));
+    }
+    if (places) {
+        for (const auto& path : places->quick_access_paths) {
+            ui::SidebarItem item;
+            item.label = TabTitle(path);
+            item.path = path;
+            item.icon_glyph = L"\xE8B7";
+            item.fallback_text = L"Dir";
+            item.icon_color = ui::HexColor(0xFBBF24);
+            access.items.push_back(std::move(item));
+        }
     }
     vm.sidebar.push_back(std::move(access));
     vm.sidebar.push_back(ConvertGroup(l10n::Get(l10n::StringId::SidebarSavedSearches),

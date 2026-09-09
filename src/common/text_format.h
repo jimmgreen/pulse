@@ -8,17 +8,27 @@
 
 namespace pulse::format {
 
-inline std::wstring ByteSize(uint64_t bytes, bool empty_zero = false) {
+enum class ByteSizeStyle { Spaced, Compact };
+
+inline std::wstring ByteSize(uint64_t bytes, bool empty_zero = false,
+                             ByteSizeStyle style = ByteSizeStyle::Spaced) {
     if (empty_zero && bytes == 0) return L"";
-    static constexpr const wchar_t* units[] = { L"B", L"KB", L"MB", L"GB", L"TB" };
+    static constexpr const wchar_t* spaced_units[] = { L"B", L"KB", L"MB", L"GB", L"TB" };
+    static constexpr const wchar_t* compact_units[] = { L"B", L"K", L"M", L"G", L"TB" };
+    const auto* units = style == ByteSizeStyle::Compact ? compact_units : spaced_units;
     double value = static_cast<double>(bytes);
     size_t unit = 0;
-    while (value >= 1024.0 && unit + 1 < std::size(units)) {
+    constexpr size_t unit_count = 5;
+    while (value >= 1024.0 && unit + 1 < unit_count) {
         value /= 1024.0;
         ++unit;
     }
     wchar_t text[64];
-    if (unit == 0) swprintf_s(text, L"%llu %s", bytes, units[unit]);
+    if (style == ByteSizeStyle::Compact) {
+        if (unit == 0) swprintf_s(text, L"%lluB", bytes);
+        else if (value >= 10.0) swprintf_s(text, L"%.0f%s", value, units[unit]);
+        else swprintf_s(text, L"%.1f%s", value, units[unit]);
+    } else if (unit == 0) swprintf_s(text, L"%llu %s", bytes, units[unit]);
     else swprintf_s(text, L"%.1f %s", value, units[unit]);
     return text;
 }

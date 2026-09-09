@@ -75,9 +75,7 @@ SnapshotPtr SnapshotStore::GetOrStart(const std::wstring& path, uint64_t& out_ge
     if (it != map_.end()) {
         if (out_identity) *out_identity = it->second.identity;
         // Move to front of LRU.
-        lru_.erase(it->second.lru_it);
-        lru_.push_front(key);
-        it->second.lru_it = lru_.begin();
+        lru_.splice(lru_.begin(), lru_, it->second.lru_it);
         if (!it->second.dirty && it->second.snapshot) {
             out_generation = it->second.generation;
             return it->second.snapshot;
@@ -132,6 +130,8 @@ bool SnapshotStore::IsDirty(const std::wstring& path) const {
 void SnapshotStore::Update(const std::wstring& path, uint64_t generation,
                            SnapshotPtr snapshot, DirectoryIdentity identity) {
     std::wstring key = NormalizePath(path);
+    // Snapshots are immutable; count large directories before taking the UI-facing lock.
+    const size_t bytes = SnapshotBytes(snapshot);
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = map_.find(key);
     if (it == map_.end()) {
@@ -147,7 +147,7 @@ void SnapshotStore::Update(const std::wstring& path, uint64_t generation,
         e.dirty = false;
         e.snapshot = std::move(snapshot);
         e.identity = identity;
-        e.bytes = SnapshotBytes(e.snapshot);
+        e.bytes = bytes;
         resident_bytes_ += e.bytes;
         lru_.push_front(key);
         e.lru_it = lru_.begin();
@@ -159,18 +159,18 @@ void SnapshotStore::Update(const std::wstring& path, uint64_t generation,
     resident_bytes_ -= (std::min)(resident_bytes_, it->second.bytes);
     it->second.snapshot = std::move(snapshot);
     it->second.identity = identity;
-    it->second.bytes = SnapshotBytes(it->second.snapshot);
+    it->second.bytes = bytes;
     resident_bytes_ += it->second.bytes;
     it->second.generation = generation;
     it->second.dirty = false;
-    lru_.erase(it->second.lru_it);
-    lru_.push_front(key);
-    it->second.lru_it = lru_.begin();
+    lru_.splice(lru_.begin(), lru_, it->second.lru_it);
     EvictToBudget(&key);
 }
 
 uint64_t SnapshotStore::Put(const std::wstring& path, SnapshotPtr snapshot) {
     std::wstring key = NormalizePath(path);
+    // Snapshots are immutable; count large directories before taking the UI-facing lock.
+    const size_t bytes = SnapshotBytes(snapshot);
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = map_.find(key);
     if (it == map_.end()) {
@@ -185,7 +185,7 @@ uint64_t SnapshotStore::Put(const std::wstring& path, SnapshotPtr snapshot) {
         e.generation = 0;
         e.dirty = false;
         e.snapshot = std::move(snapshot);
-        e.bytes = SnapshotBytes(e.snapshot);
+        e.bytes = bytes;
         resident_bytes_ += e.bytes;
         lru_.push_front(key);
         e.lru_it = lru_.begin();
@@ -195,12 +195,10 @@ uint64_t SnapshotStore::Put(const std::wstring& path, SnapshotPtr snapshot) {
     }
     resident_bytes_ -= (std::min)(resident_bytes_, it->second.bytes);
     it->second.snapshot = std::move(snapshot);
-    it->second.bytes = SnapshotBytes(it->second.snapshot);
+    it->second.bytes = bytes;
     resident_bytes_ += it->second.bytes;
     it->second.dirty = false;
-    lru_.erase(it->second.lru_it);
-    lru_.push_front(key);
-    it->second.lru_it = lru_.begin();
+    lru_.splice(lru_.begin(), lru_, it->second.lru_it);
     EvictToBudget(&key);
     return it->second.generation;
 }

@@ -4,8 +4,19 @@
 
 #include <string>
 #include <string_view>
+#include <windows.h>
 
 namespace pulse::path {
+
+inline bool Exists(std::wstring_view p) {
+    const std::wstring path(p);
+    return !path.empty() && GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+inline bool EqualInsensitive(std::wstring_view left, std::wstring_view right) {
+    return CompareStringOrdinal(left.data(), static_cast<int>(left.size()),
+                                right.data(), static_cast<int>(right.size()), TRUE) == CSTR_EQUAL;
+}
 
 // Shell APIs (SHCreateItemFromParsingName, IFileOperation, SHGetFileInfo)
 // reject \\?\ extended paths even for short paths, while the fs layer hands

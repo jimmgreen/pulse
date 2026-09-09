@@ -1,3 +1,4 @@
+#include "../common/windows_compat.h"
 // d2d_list.cpp — Pulse Stage 0: Direct2D virtual list visual/perf sample.
 // Fluent details view: 100k fake rows, Mica, rounded corners, Snap Layouts.
 #include <windows.h>
@@ -93,11 +94,11 @@ struct AppState {
     ComPtr<ID3D11Device> d3dDevice;
     ComPtr<IDXGIDevice1> dxgiDevice;
     ComPtr<IDXGISwapChain1> swapChain;
-    ComPtr<ID2D1Factory3> d2dFactory;
-    ComPtr<ID2D1Device2> d2dDevice;
-    ComPtr<ID2D1DeviceContext2> dc;
+    ComPtr<ID2D1Factory1> d2dFactory;
+    ComPtr<ID2D1Device> d2dDevice;
+    ComPtr<ID2D1DeviceContext> dc;
     ComPtr<ID2D1Bitmap1> targetBitmap;
-    ComPtr<IDWriteFactory3> dwriteFactory;
+    ComPtr<IDWriteFactory2> dwriteFactory;
     ComPtr<IDWriteTextFormat> textFormat;
     ComPtr<IDWriteTextFormat> smallFormat;
     ComPtr<IDWriteTextFormat> headerFormat;
@@ -315,7 +316,7 @@ static bool InitD3D(AppState& s) {
 #ifdef _DEBUG
     opts.debugLevel = D2D1_DEBUG_LEVEL_INFORMATION;
 #endif
-    hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory3),
+    hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory1),
         &opts, reinterpret_cast<void**>(&s.d2dFactory));
     if (FAILED(hr)) return false;
 
@@ -328,7 +329,7 @@ static bool InitD3D(AppState& s) {
     s.dc->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     s.dc->SetAntialiasMode(D2D1_ANTIALIAS_MODE_ALIASED);
 
-    hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory3),
+    hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory2),
         reinterpret_cast<IUnknown**>(&s.dwriteFactory));
     if (FAILED(hr)) return false;
 
@@ -725,7 +726,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(s));
         s->hwnd = hwnd;
 
-        s->dpiX = s->dpiY = GetDpiForWindow(hwnd);
+        s->dpiX = s->dpiY = pulse::compat::WindowDpi(hwnd);
         s->scale = (float)s->dpiX / 96.0f;
 
         s->accentColor = GetAccentColor();
@@ -947,7 +948,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 // Entry point
 // ---------------------------------------------------------------------------
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
-    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    pulse::compat::EnableDpiAwareness();
 
     // Parse command line.
     const wchar_t* shotPath = nullptr;

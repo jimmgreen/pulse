@@ -187,7 +187,8 @@ bool ValidateShardBase(const std::wstring& path, uint64_t expected_bytes,
     const bool size_ok = GetFileSizeEx(h, &size) && size.QuadPart >= 128;
     CloseHandle(h);
     if (!size_ok || size.QuadPart > 0x7fffffffffffffffll) return false;
-    if (!ReadFilePrefix(path, magic, version, built) || memcmp(magic, "PIDX", 4) != 0 || version < 7 || version > 9)
+    if (!ReadFilePrefix(path, magic, version, built) || memcmp(magic, "PIDX", 4) != 0 ||
+        version < 7 || version > kIndexSnapshotVersion)
         return false;
     if (expected_bytes && static_cast<uint64_t>(size.QuadPart) != expected_bytes) return false;
     if (expected_crc64 && FileCrc64(path) != expected_crc64) return false;

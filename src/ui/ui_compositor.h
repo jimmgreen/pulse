@@ -50,6 +50,7 @@ public:
     ~Compositor();
 
     bool Init(HWND hwnd);
+    const std::wstring& InitializationError() const { return initialization_error_; }
     void Shutdown();
     void Resize(int width, int height);
     void Present();
@@ -58,8 +59,8 @@ public:
     bool NeedsRecovery() const { return device_lost_; }
     bool SaveSnapshot(const wchar_t* path);
 
-    ID2D1DeviceContext2* Dc() const { return dc_.get(); }
-    IDWriteFactory3* DwriteFactory() const { return dwriteFactory_.get(); }
+    ID2D1DeviceContext* Dc() const { return dc_.get(); }
+    IDWriteFactory2* DwriteFactory() const { return dwriteFactory_.get(); }
     HWND Hwnd() const { return hwnd_; }
 
     void RecreateTextFormats(float scale);
@@ -90,6 +91,8 @@ public:
     bool UsesTransparentComposition() const { return transparentComposition_; }
 
 private:
+    bool CheckGraphics(HRESULT hr, const wchar_t* stage);
+    std::wstring initialization_error_;
     bool InitD3D();
     bool CreateSwapChain();
     void ResizeSwapChain();
@@ -105,12 +108,12 @@ private:
     ComPtr<IDCompositionDevice> compositionDevice_;
     ComPtr<IDCompositionTarget> compositionTarget_;
     ComPtr<IDCompositionVisual> compositionVisual_;
-    ComPtr<ID2D1Factory3> d2dFactory_;
-    ComPtr<ID2D1Device2> d2dDevice_;
-    ComPtr<ID2D1DeviceContext2> dc_;
+    ComPtr<ID2D1Factory1> d2dFactory_;
+    ComPtr<ID2D1Device> d2dDevice_;
+    ComPtr<ID2D1DeviceContext> dc_;
     ComPtr<ID2D1Bitmap1> targetBitmap_;
-    ComPtr<IDWriteFactory3> dwriteFactory_;
-    ComPtr<IDWriteRenderingParams3> textRenderingParams_;
+    ComPtr<IDWriteFactory2> dwriteFactory_;
+    ComPtr<IDWriteRenderingParams2> textRenderingParams_;
     ComPtr<IDWriteTextFormat> textFormat_;
     ComPtr<IDWriteTextFormat> smallFormat_;
     ComPtr<IDWriteTextFormat> headerFormat_;

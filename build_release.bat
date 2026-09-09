@@ -1,11 +1,22 @@
 @echo off
 call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"
+rem Match CMake/Ninja dependency output encoding, including localized MSVC installs.
+chcp 65001 >nul
+set "VSLANG=1033"
 if not defined LUMATEXT_SOURCE_DIR if exist "%~dp0..\lumatext\CMakeLists.txt" set "LUMATEXT_SOURCE_DIR=%~dp0..\lumatext"
+set "PULSE_CMAKE_FRESH="
+set "PULSE_CMAKE_CLEAN="
+if /i "%~1"=="/clean" (
+    set "PULSE_CMAKE_FRESH=--fresh"
+    set "PULSE_CMAKE_CLEAN=--clean-first"
+)
+set "PULSE_DEPS="
+if exist "%LUMATEXT_SOURCE_DIR%\build-vs18\_deps\harfbuzz-src\src\harfbuzz.cc" set PULSE_DEPS=-DFETCHCONTENT_SOURCE_DIR_HARFBUZZ="%LUMATEXT_SOURCE_DIR%\build-vs18\_deps\harfbuzz-src" -DFETCHCONTENT_SOURCE_DIR_FREETYPE="%LUMATEXT_SOURCE_DIR%\build-vs18\_deps\freetype-src"
 if defined LUMATEXT_SOURCE_DIR (
-    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLUMATEXT_SOURCE_DIR="%LUMATEXT_SOURCE_DIR%" -DPULSE_WITH_LUMATEXT=ON
+    cmake %PULSE_CMAKE_FRESH% -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLUMATEXT_SOURCE_DIR="%LUMATEXT_SOURCE_DIR%" -DPULSE_WITH_LUMATEXT=ON %PULSE_DEPS%
 ) else (
-    cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+    cmake %PULSE_CMAKE_FRESH% -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 )
 if errorlevel 1 exit /b 1
-cmake --build build
+cmake --build build %PULSE_CMAKE_CLEAN%
 if errorlevel 1 exit /b 1

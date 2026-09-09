@@ -5,6 +5,9 @@
 
 namespace pulse::index {
 
+// The V9 storage/manifest layout is unchanged; V10 bases use corrected visibility.
+inline constexpr uint32_t kIndexSnapshotVersion = 10;
+
 struct ShardPaths {
     std::wstring directory;
     std::wstring manifest;

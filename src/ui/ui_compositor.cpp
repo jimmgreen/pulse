@@ -1,5 +1,6 @@
 // ui_compositor.cpp
 #include "ui_compositor.h"
+#include "../common/windows_compat.h"
 #include "../common/localization.h"
 #include "lumatext_renderer.h"
 #include "typography.h"
@@ -15,12 +16,32 @@ namespace pulse::ui {
 Compositor::Compositor() = default;
 Compositor::~Compositor() { Shutdown(); }
 
+bool Compositor::CheckGraphics(HRESULT hr, const wchar_t* stage) {
+    if (SUCCEEDED(hr)) return true;
+    wchar_t message[256]{};
+    swprintf_s(message, L"%s failed (HRESULT 0x%08X)", stage, static_cast<unsigned>(hr));
+    initialization_error_ = message;
+    PWSTR local = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &local))) {
+        const std::wstring directory = std::wstring(local) + L"\\Pulse";
+        CoTaskMemFree(local);
+        CreateDirectoryW(directory.c_str(), nullptr);
+        FILE* log = nullptr;
+        if (_wfopen_s(&log, (directory + L"\\pulse_graphics.log").c_str(), L"a, ccs=UTF-8") == 0) {
+            fwprintf(log, L"%s\n", message);
+            fclose(log);
+        }
+    }
+    return false;
+}
+
 bool Compositor::IsDeviceLost(HRESULT hr) {
     return hr == D2DERR_RECREATE_TARGET || hr == DXGI_ERROR_DEVICE_REMOVED ||
            hr == DXGI_ERROR_DEVICE_RESET || hr == DXGI_ERROR_DRIVER_INTERNAL_ERROR;
 }
 
 bool Compositor::Init(HWND hwnd) {
+    initialization_error_.clear();
     hwnd_ = hwnd;
     device_lost_ = false;
     if (!InitD3D()) return false;
@@ -30,7 +51,7 @@ bool Compositor::Init(HWND hwnd) {
     height_ = std::max(1L, rc.bottom - rc.top);
     if (!CreateSwapChain()) return false;
     ResizeSwapChain();
-    return true;
+    return targetBitmap_.get() != nullptr;
 }
 
 void Compositor::Shutdown() {
@@ -78,31 +99,31 @@ bool Compositor::InitD3D() {
             levels, ARRAYSIZE(levels), D3D11_SDK_VERSION,
             &d3dDevice_, nullptr, nullptr);
     }
-    if (FAILED(hr)) return false;
+    if (!CheckGraphics(hr, L"D3D11CreateDevice (hardware/WARP)")) return false;
 
-    d3dDevice_->QueryInterface(&dxgiDevice_);
-    if (!dxgiDevice_.get()) return false;
+    hr = d3dDevice_->QueryInterface(&dxgiDevice_);
+    if (!CheckGraphics(hr, L"IDXGIDevice1")) return false;
 
     D2D1_FACTORY_OPTIONS opts{};
 #ifdef _DEBUG
     opts.debugLevel = D2D1_DEBUG_LEVEL_INFORMATION;
 #endif
-    hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory3),
+    hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory1),
         &opts, reinterpret_cast<void**>(&d2dFactory_));
-    if (FAILED(hr)) return false;
+    if (!CheckGraphics(hr, L"D2D1CreateFactory")) return false;
 
     hr = d2dFactory_->CreateDevice(dxgiDevice_.get(), &d2dDevice_);
-    if (FAILED(hr)) return false;
+    if (!CheckGraphics(hr, L"D2D CreateDevice")) return false;
 
     hr = d2dDevice_->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc_);
-    if (FAILED(hr)) return false;
+    if (!CheckGraphics(hr, L"D2D CreateDeviceContext")) return false;
 
     dc_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     dc_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
-    hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory3),
+    hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory2),
         reinterpret_cast<IUnknown**>(&dwriteFactory_));
-    if (FAILED(hr)) return false;
+    if (!CheckGraphics(hr, L"DWriteCreateFactory")) return false;
 
     UpdateTextRenderingParams(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST));
     if (!lumaText_) lumaText_ = std::make_unique<LumaTextRenderer>();
@@ -167,9 +188,9 @@ const LumaTextStats* Compositor::GetLumaTextStats() const noexcept {
 
 bool Compositor::CreateSwapChain() {
     ComPtr<IDXGIAdapter> adapter;
-    dxgiDevice_->GetAdapter(&adapter);
+    if (!CheckGraphics(dxgiDevice_->GetAdapter(&adapter), L"DXGI GetAdapter")) return false;
     ComPtr<IDXGIFactory2> factory;
-    adapter->GetParent(IID_PPV_ARGS(&factory));
+    if (!CheckGraphics(adapter->GetParent(IID_PPV_ARGS(&factory)), L"IDXGIFactory2")) return false;
 
     DXGI_SWAP_CHAIN_DESC1 desc{};
     desc.Width = static_cast<UINT>(std::max(1, width_));
@@ -178,7 +199,8 @@ bool Compositor::CreateSwapChain() {
     desc.SampleDesc.Count = 1;
     desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     desc.BufferCount = 2;
-    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    desc.SwapEffect = compat::ModernWindows()
+        ? DXGI_SWAP_EFFECT_FLIP_DISCARD : DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
     desc.Scaling = DXGI_SCALING_STRETCH;
     desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
 
@@ -187,6 +209,11 @@ bool Compositor::CreateSwapChain() {
     if (SUCCEEDED(hr)) {
         hr = factory->CreateSwapChainForComposition(
             d3dDevice_.get(), &desc, nullptr, &swapChain_);
+        if (FAILED(hr) && desc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD) {
+            swapChain_.reset();
+            desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+            hr = factory->CreateSwapChainForComposition(d3dDevice_.get(), &desc, nullptr, &swapChain_);
+        }
     }
     if (SUCCEEDED(hr)) hr = compositionDevice_->CreateTargetForHwnd(hwnd_, TRUE, &compositionTarget_);
     if (SUCCEEDED(hr)) hr = compositionDevice_->CreateVisual(&compositionVisual_);
@@ -201,11 +228,12 @@ bool Compositor::CreateSwapChain() {
         compositionTarget_.reset();
         compositionDevice_.reset();
         swapChain_.reset();
-        desc.Scaling = DXGI_SCALING_NONE;
+        desc.Scaling = DXGI_SCALING_STRETCH;
+        desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
         desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
         hr = factory->CreateSwapChainForHwnd(d3dDevice_.get(), hwnd_, &desc,
             nullptr, nullptr, &swapChain_);
-        if (FAILED(hr)) return false;
+        if (!CheckGraphics(hr, L"CreateSwapChainForHwnd")) return false;
     }
 
     dxgiDevice_->SetMaximumFrameLatency(1);
@@ -219,6 +247,7 @@ void Compositor::ResizeSwapChain() {
     HRESULT hr = swapChain_->ResizeBuffers(0, (UINT)width_, (UINT)height_,
         DXGI_FORMAT_UNKNOWN, 0);
     if (FAILED(hr)) {
+        CheckGraphics(hr, L"ResizeBuffers");
         if (IsDeviceLost(hr)) NotifyDeviceLost(hr);
         return;
     }
@@ -226,6 +255,7 @@ void Compositor::ResizeSwapChain() {
     ComPtr<IDXGISurface> surface;
     hr = swapChain_->GetBuffer(0, IID_PPV_ARGS(&surface));
     if (FAILED(hr)) {
+        CheckGraphics(hr, L"SwapChain GetBuffer");
         if (IsDeviceLost(hr)) NotifyDeviceLost(hr);
         return;
     }
@@ -240,6 +270,7 @@ void Compositor::ResizeSwapChain() {
         96.0f, 96.0f);
     hr = dc_->CreateBitmapFromDxgiSurface(surface.get(), &props, &targetBitmap_);
     if (FAILED(hr)) {
+        CheckGraphics(hr, L"CreateBitmapFromDxgiSurface");
         if (IsDeviceLost(hr)) NotifyDeviceLost(hr);
         return;
     }
@@ -257,7 +288,7 @@ bool Compositor::UpdateTextRenderingParams(HMONITOR monitor) {
     if (!monitor && hwnd_) monitor = MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST);
     if (textRenderingParams_.get() && monitor == text_params_monitor_) return true;
 
-    ComPtr<IDWriteRenderingParams3> next;
+    ComPtr<IDWriteRenderingParams2> next;
     if (FAILED(typography::CreateRenderingParams(dwriteFactory_.get(), monitor, &next)) ||
         !next.get()) {
         return false;
@@ -373,7 +404,7 @@ bool Compositor::SaveSnapshot(const wchar_t* path) {
     return SUCCEEDED(hr);
 }
 
-static void CreateFormat(IDWriteFactory3* factory, float size, DWRITE_FONT_WEIGHT weight,
+static void CreateFormat(IDWriteFactory2* factory, float size, DWRITE_FONT_WEIGHT weight,
                          typography::FontRole role, ComPtr<IDWriteTextFormat>& fmt) {
     if (!factory) return;
     typography::CreateTextFormat(factory, {role, size, weight}, &fmt);

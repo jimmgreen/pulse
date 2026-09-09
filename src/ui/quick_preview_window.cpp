@@ -1,3 +1,5 @@
+#include "legacy_icons.h"
+#include "../common/windows_compat.h"
 #include "quick_preview_window.h"
 #include "../common/localization.h"
 #include "../common/text_format.h"
@@ -974,7 +976,8 @@ void QuickPreviewWindow::Render() {
     dc->CreateSolidColorBrush(close_hover_ ? D2D1::ColorF(0xFFFFFF) : foreground,
                               &close_brush);
     static constexpr wchar_t close_glyph[] = L"\xE711";
-    dc->DrawTextW(close_glyph, 1,
+    if (!DrawLegacyIcon(dc, compositor_.DwriteFactory(), close_glyph, close_rect, close_brush.get()))
+        dc->DrawTextW(close_glyph, 1,
                   close_format_.get() ? close_format_.get() : compositor_.IconFormat(), close_rect,
                   close_brush.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP,
                   DWRITE_MEASURING_MODE_NATURAL);
@@ -1165,7 +1168,7 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
         break;
     }
     case WM_CREATE:
-        scale_ = static_cast<float>(GetDpiForWindow(hwnd_)) / 96.0f;
+        scale_ = static_cast<float>(pulse::compat::WindowDpi(hwnd_)) / 96.0f;
         if (!compositor_.Init(hwnd_)) return -1;
         compositor_.RecreateTextFormats(scale_);
         RecreateFormats();

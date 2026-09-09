@@ -1,5 +1,9 @@
+#include "../common/windows_compat.h"
 #include "file_operation_dialog.h"
+#include "../common/localization.h"
 #include "../common/text_format.h"
+#include "typography.h"
+#include "window_helpers.h"
 
 #include <windowsx.h>
 #include <algorithm>
@@ -13,18 +17,17 @@ namespace {
 constexpr wchar_t kTransferClass[] = L"PulseFileOperationWindow";
 constexpr wchar_t kConflictClass[] = L"PulseFileConflictWindow";
 constexpr wchar_t kConfirmClass[] = L"PulseConfirmWindow";
-constexpr float kConfirmW = 360.0f;
-constexpr float kConfirmH = 176.0f;
+constexpr float kConfirmMinW = 380.0f;
 constexpr UINT_PTR kRenderTimer = 1;
 constexpr float kDlgW = 460.0f;
 constexpr float kTitleH = 36.0f;
 constexpr float kPadX = 20.0f;
-constexpr float kFooterH = 42.0f;
-constexpr float kCollapsedH = 258.0f;
+constexpr float kFooterH = 52.0f;
+constexpr float kCollapsedH = 268.0f;
 constexpr float kGraphBlockH = 156.0f;
 constexpr float kDetailedH = kCollapsedH + kGraphBlockH;
 
-float ScaleDip(float scale, float value) { return value * scale; }
+using pulse::ui::ScaleDip;
 
 struct TransferChrome {
     D2D1_RECT_F minimize{};
@@ -34,20 +37,72 @@ struct TransferChrome {
     D2D1_RECT_F cancel{};
 };
 
-TransferChrome MakeTransferChrome(float scale, float width, float height) {
+struct TransferLabels {
+    std::wstring details;
+    std::wstring pause;
+    std::wstring cancel;
+    bool show_pause = true;
+};
+
+TransferLabels MakeTransferLabels(const ops::OpStatus& status, bool detailed) {
+    TransferLabels labels;
+    labels.details = detailed ? l10n::Get(l10n::StringId::OpSummary)
+                              : l10n::Get(l10n::StringId::OpDetails);
+    labels.pause = status.phase == ops::OpPhase::Paused
+        ? l10n::Get(l10n::StringId::OpResume) : l10n::Get(l10n::StringId::OpPause);
+    const bool emptying = status.type == ops::OpType::EmptyRecycle;
+    labels.show_pause = !emptying;
+    labels.cancel = status.active && !emptying
+        ? l10n::Get(l10n::StringId::Cancel) : l10n::Get(l10n::StringId::Close);
+    return labels;
+}
+
+TransferChrome MakeTransferChrome(float scale, float width, float height,
+                                  const fluent::Painter& painter, const TransferLabels& labels) {
     TransferChrome chrome;
     const float title = ScaleDip(scale, kTitleH);
-    const float btn = ScaleDip(scale, 40.0f);
-    chrome.close = D2D1::RectF(width - btn, 0, width, title);
-    chrome.minimize = D2D1::RectF(width - btn * 2.0f, 0, width - btn, title);
-    const float footer_top = height - ScaleDip(scale, kFooterH);
-    chrome.details = D2D1::RectF(ScaleDip(scale, kPadX), footer_top + ScaleDip(scale, 7.0f),
-                                 ScaleDip(scale, kPadX + 124.0f), height - ScaleDip(scale, 7.0f));
-    chrome.pause = D2D1::RectF(width - ScaleDip(scale, 168.0f), footer_top + ScaleDip(scale, 7.0f),
-                               width - ScaleDip(scale, 96.0f), height - ScaleDip(scale, 7.0f));
-    chrome.cancel = D2D1::RectF(width - ScaleDip(scale, 88.0f), footer_top + ScaleDip(scale, 7.0f),
-                                width - ScaleDip(scale, kPadX), height - ScaleDip(scale, 7.0f));
+    const float caption = ScaleDip(scale, 40.0f);
+    chrome.close = D2D1::RectF(width - caption, 0, width, title);
+    chrome.minimize = D2D1::RectF(width - caption * 2.0f, 0, width - caption, title);
+    const float footer_h = ScaleDip(scale, kFooterH);
+    const float footer_top = height - footer_h;
+    const float pad = ScaleDip(scale, kPadX);
+    const float gap = ScaleDip(scale, 8.0f);
+    const float btn_h = painter.MeasureButtonHeight();
+    const float y0 = footer_top + (footer_h - btn_h) * 0.5f;
+    const float y1 = y0 + btn_h;
+
+    const float cancel_w = painter.MeasureButtonWidth(labels.cancel);
+    chrome.cancel = D2D1::RectF(width - pad - cancel_w, y0, width - pad, y1);
+    if (labels.show_pause) {
+        const float pause_w = painter.MeasureButtonWidth(labels.pause);
+        chrome.pause = D2D1::RectF(chrome.cancel.left - gap - pause_w, y0,
+                                   chrome.cancel.left - gap, y1);
+    }
+    chrome.details = painter.FitButtonBounds(D2D1::RectF(pad, y0, pad, y1),
+                                             labels.details, L"\xE70D");
     return chrome;
+}
+
+void DrawWrappedText(Compositor& compositor, IDWriteTextFormat* format,
+                     const D2D1_RECT_F& bounds, const std::wstring& text,
+                     const D2D1_COLOR_F& color) {
+    auto* factory = compositor.DwriteFactory();
+    auto* dc = compositor.Dc();
+    if (!factory || !dc || !format || text.empty()) return;
+    const float width = bounds.right - bounds.left;
+    const float height = bounds.bottom - bounds.top;
+    if (width <= 0.0f || height <= 0.0f) return;
+    ComPtr<IDWriteTextLayout> layout;
+    if (FAILED(factory->CreateTextLayout(text.c_str(), static_cast<UINT32>(text.size()),
+                                         format, width, height, &layout)) || !layout.get())
+        return;
+    layout->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+    layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+    layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+    ComPtr<ID2D1SolidColorBrush> brush;
+    if (FAILED(dc->CreateSolidColorBrush(color, &brush)) || !brush.get()) return;
+    dc->DrawTextLayout(D2D1::Point2F(bounds.left, bounds.top), layout.get(), brush.get());
 }
 
 void DrawSpeedGraph(ID2D1DeviceContext* dc, const D2D1_RECT_F& plot,
@@ -116,12 +171,7 @@ void DrawSpeedGraph(ID2D1DeviceContext* dc, const D2D1_RECT_F& plot,
 }
 
 D2D1_RECT_F Rect(float scale, float x, float y, float width, float height) {
-    return D2D1::RectF(ScaleDip(scale, x), ScaleDip(scale, y),
-                       ScaleDip(scale, x + width), ScaleDip(scale, y + height));
-}
-
-bool Contains(const D2D1_RECT_F& rect, float x, float y) {
-    return x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
+    return pulse::ui::DipRect(scale, x, y, width, height);
 }
 
 std::wstring LeafName(const std::wstring& path) {
@@ -151,101 +201,6 @@ std::wstring FormatDuration(uint64_t seconds) {
         + std::to_wstring(minutes % 60) + L" 分";
 }
 
-bool ApplyBackdrop(HWND hwnd, bool dark) {
-    UpdateWindowTheme(hwnd, dark);
-    const DWORD corner = DWMWCP_ROUND;
-    DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
-    const bool high_contrast = IsHighContrast();
-    DWORD backdrop = high_contrast ? DWMSBT_NONE : DWMSBT_TABBEDWINDOW;
-    HRESULT backdrop_result = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE,
-                                                     &backdrop, sizeof(backdrop));
-    if (FAILED(backdrop_result) && backdrop == DWMSBT_TABBEDWINDOW) {
-        backdrop = DWMSBT_MAINWINDOW;
-        backdrop_result = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE,
-                                                &backdrop, sizeof(backdrop));
-    }
-    MARGINS margins{ -1 };
-    DwmExtendFrameIntoClientArea(hwnd, &margins);
-    return !high_contrast && SUCCEEDED(backdrop_result);
-}
-
-void CenterOwnedWindow(HWND hwnd, HWND owner, int width, int height) {
-    RECT anchor{};
-    if (!owner || !GetWindowRect(owner, &anchor)) {
-        MONITORINFO monitor{ sizeof(monitor) };
-        GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor);
-        anchor = monitor.rcWork;
-    }
-    int x = anchor.left + ((anchor.right - anchor.left) - width) / 2;
-    int y = anchor.top + ((anchor.bottom - anchor.top) - height) / 2;
-    HMONITOR monitor_handle = MonitorFromRect(&anchor, MONITOR_DEFAULTTONEAREST);
-    MONITORINFO monitor{ sizeof(monitor) };
-    GetMonitorInfoW(monitor_handle, &monitor);
-    const int work_left = static_cast<int>(monitor.rcWork.left);
-    const int work_top = static_cast<int>(monitor.rcWork.top);
-    const int work_right = static_cast<int>(monitor.rcWork.right);
-    const int work_bottom = static_cast<int>(monitor.rcWork.bottom);
-    x = std::clamp(x, work_left, (std::max)(work_left, work_right - width));
-    y = std::clamp(y, work_top, (std::max)(work_top, work_bottom - height));
-    SetWindowPos(hwnd, HWND_TOP, x, y, width, height, SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-}
-
-LRESULT BorderlessHitTest(HWND hwnd, LPARAM lparam, float title_height,
-                          const D2D1_RECT_F& client_buttons) {
-    POINT point{ GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
-    RECT window{};
-    GetWindowRect(hwnd, &window);
-    const UINT dpi = GetDpiForWindow(hwnd);
-    const int frame_x = GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi)
-                      + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
-    const int frame_y = GetSystemMetricsForDpi(SM_CYSIZEFRAME, dpi)
-                      + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
-    const bool left = point.x < window.left + frame_x;
-    const bool right = point.x >= window.right - frame_x;
-    const bool top = point.y < window.top + frame_y;
-    const bool bottom = point.y >= window.bottom - frame_y;
-    if (top && left) return HTTOPLEFT;
-    if (top && right) return HTTOPRIGHT;
-    if (bottom && left) return HTBOTTOMLEFT;
-    if (bottom && right) return HTBOTTOMRIGHT;
-    if (left) return HTLEFT;
-    if (right) return HTRIGHT;
-    if (top) return HTTOP;
-    if (bottom) return HTBOTTOM;
-    ScreenToClient(hwnd, &point);
-    if (point.y >= 0 && point.y < title_height &&
-        !Contains(client_buttons, static_cast<float>(point.x), static_cast<float>(point.y)))
-        return HTCAPTION;
-    return HTCLIENT;
-}
-
-void BeginSurface(Compositor& compositor, fluent::Painter& painter,
-                  const Theme& theme, bool dark, bool high_contrast, bool backdrop_enabled,
-                  float scale) {
-    auto* dc = compositor.Dc();
-    dc->BeginDraw();
-    dc->Clear(D2D1::ColorF(0, 0.0f));
-    painter.BeginFrame(theme, high_contrast);
-    D2D1_COLOR_F tint = theme.bg;
-    tint.a = high_contrast || !backdrop_enabled ? 1.0f : (dark ? 0.76f : 0.82f);
-    const float width = static_cast<float>(compositor.Width());
-    const float height = static_cast<float>(compositor.Height());
-    painter.FillRoundedRect(D2D1::RectF(0, 0, width, height), 0, tint);
-    const float inset = 0.5f;
-    painter.StrokeRoundedRect(D2D1::RectF(inset, inset, width - inset, height - inset),
-                              12.0f * scale, theme.stroke_card);
-}
-
-void EndSurface(Compositor& compositor) {
-    const HRESULT hr = compositor.Dc()->EndDraw();
-    if (hr == D2DERR_RECREATE_TARGET || hr == DXGI_ERROR_DEVICE_REMOVED ||
-        hr == DXGI_ERROR_DEVICE_RESET || hr == DXGI_ERROR_DRIVER_INTERNAL_ERROR) {
-        compositor.NotifyDeviceLost(hr);
-        return;
-    }
-    compositor.Present();
-}
-
 class ConflictWindow {
 public:
     ConflictDialogResult Show(HWND owner, const ops::ConflictItemInfo& conflict,
@@ -254,7 +209,7 @@ public:
         conflict_ = conflict;
         dark_ = dark;
         accent_ = accent;
-        scale_ = static_cast<float>(GetDpiForWindow(owner)) / 96.0f;
+        scale_ = static_cast<float>(pulse::compat::WindowDpi(owner)) / 96.0f;
 
         WNDCLASSEXW wc{ sizeof(wc) };
         wc.hInstance = GetModuleHandleW(nullptr);
@@ -271,7 +226,7 @@ public:
             CW_USEDEFAULT, CW_USEDEFAULT, width, height, owner, nullptr,
             wc.hInstance, this);
         if (!hwnd_) return result_;
-        CenterOwnedWindow(hwnd_, owner_, width, height);
+        pulse::ui::CenterOwnedWindow(hwnd_, owner_, width, height);
         EnableWindow(owner_, FALSE);
         ShowWindow(hwnd_, SW_SHOW);
         SetForegroundWindow(hwnd_);
@@ -308,11 +263,11 @@ private:
     D2D1_RECT_F CancelRect() const { return Rect(scale_, 362, details_ ? 482.0f : 370.0f, 98, 34); }
 
     int Hit(float x, float y) const {
-        if (Contains(CloseRect(), x, y)) return 7;
-        for (int i = 0; i < 3; ++i) if (Contains(CardRect(i), x, y)) return i + 1;
-        if (conflict_.remaining > 1 && Contains(CheckRect(), x, y)) return 4;
-        if (Contains(DetailRect(), x, y)) return 5;
-        if (Contains(CancelRect(), x, y)) return 6;
+        if (pulse::ui::ContainsRect(CloseRect(), x, y)) return 7;
+        for (int i = 0; i < 3; ++i) if (pulse::ui::ContainsRect(CardRect(i), x, y)) return i + 1;
+        if (conflict_.remaining > 1 && pulse::ui::ContainsRect(CheckRect(), x, y)) return 4;
+        if (pulse::ui::ContainsRect(DetailRect(), x, y)) return 5;
+        if (pulse::ui::ContainsRect(CancelRect(), x, y)) return 6;
         return 0;
     }
 
@@ -369,7 +324,7 @@ private:
         if (!compositor_.Dc()) return;
         const bool high_contrast = IsHighContrast();
         const Theme theme = high_contrast ? MakeHighContrastTheme() : MakeTheme(dark_, accent_);
-        BeginSurface(compositor_, painter_, theme, dark_, high_contrast, backdrop_enabled_,
+        pulse::ui::BeginSurface(compositor_, painter_, theme, dark_, high_contrast, backdrop_enabled_,
                      scale_);
 
         painter_.DrawGlyph(L"\xE8C8", Rect(scale_, 14, 11, 22, 22), theme.accent);
@@ -443,14 +398,14 @@ private:
             painter_.DrawText(conflict_.destination, Rect(scale_, 252, top + 55, 196, 38),
                               compositor_.SmallFormat(), theme.text_secondary);
         }
-        EndSurface(compositor_);
+        pulse::ui::EndSurface(compositor_);
     }
 
     LRESULT Handle(UINT message, WPARAM wparam, LPARAM lparam) {
         switch (message) {
         case WM_CREATE:
-            scale_ = static_cast<float>(GetDpiForWindow(hwnd_)) / 96.0f;
-            backdrop_enabled_ = ApplyBackdrop(hwnd_, dark_);
+            scale_ = static_cast<float>(pulse::compat::WindowDpi(hwnd_)) / 96.0f;
+            backdrop_enabled_ = pulse::ui::ApplyBackdrop(hwnd_, dark_);
             if (!compositor_.Init(hwnd_)) return -1;
             compositor_.RecreateTextFormats(scale_);
             painter_.SetCompositor(&compositor_);
@@ -459,7 +414,7 @@ private:
         case WM_NCCALCSIZE:
             return 0;
         case WM_NCHITTEST:
-            return BorderlessHitTest(hwnd_, lparam, 44 * scale_, CloseRect());
+            return pulse::ui::BorderlessHitTest(hwnd_, lparam, 44 * scale_, CloseRect());
         case WM_SIZE:
             if (compositor_.Dc()) compositor_.Resize(LOWORD(lparam), HIWORD(lparam));
             InvalidateRect(hwnd_, nullptr, FALSE);
@@ -590,7 +545,7 @@ public:
         dark_ = dark;
         accent_ = accent;
         accepted_ = false;
-        scale_ = static_cast<float>(GetDpiForWindow(owner ? owner : GetDesktopWindow())) / 96.0f;
+        scale_ = static_cast<float>(pulse::compat::WindowDpi(owner ? owner : GetDesktopWindow())) / 96.0f;
 
         WNDCLASSEXW wc{ sizeof(wc) };
         wc.hInstance = GetModuleHandleW(nullptr);
@@ -600,14 +555,17 @@ public:
         wc.hbrBackground = nullptr;
         if (!GetClassInfoExW(wc.hInstance, kConfirmClass, &wc)) RegisterClassExW(&wc);
 
-        const int width = static_cast<int>(kConfirmW * scale_);
-        const int height = static_cast<int>(kConfirmH * scale_);
+        const int width = static_cast<int>(kConfirmMinW * scale_);
+        const int height = static_cast<int>(188.0f * scale_);
         hwnd_ = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, kConfirmClass,
             spec_.title.c_str(), WS_POPUP | WS_THICKFRAME | WS_SYSMENU,
             CW_USEDEFAULT, CW_USEDEFAULT, width, height, owner, nullptr,
             wc.hInstance, this);
         if (!hwnd_) return false;
-        CenterOwnedWindow(hwnd_, owner_, width, height);
+        RECT placed{};
+        GetWindowRect(hwnd_, &placed);
+        pulse::ui::CenterOwnedWindow(hwnd_, owner_, placed.right - placed.left,
+                          placed.bottom - placed.top);
         if (owner_) EnableWindow(owner_, FALSE);
         ShowWindow(hwnd_, SW_SHOW);
         SetForegroundWindow(hwnd_);
@@ -639,14 +597,62 @@ private:
                     : DefWindowProcW(hwnd, message, wparam, lparam);
     }
 
-    D2D1_RECT_F CloseRect() const { return Rect(scale_, 314, 0, 46, 36); }
-    D2D1_RECT_F CancelRect() const { return Rect(scale_, 156, 128, 88, 32); }
-    D2D1_RECT_F ConfirmRect() const { return Rect(scale_, 252, 128, 88, 32); }
+    D2D1_RECT_F CloseRect() const { return close_rc_; }
+    D2D1_RECT_F CancelRect() const { return cancel_rc_; }
+    D2D1_RECT_F ConfirmRect() const { return confirm_rc_; }
+
+    void LayoutFromSize(float width, float height) {
+        const float pad = ScaleDip(scale_, 20.0f);
+        const float title_h = ScaleDip(scale_, 36.0f);
+        const float close_w = ScaleDip(scale_, 46.0f);
+        const float gap = ScaleDip(scale_, 8.0f);
+        const float btn_h = painter_.MeasureButtonHeight();
+        close_rc_ = D2D1::RectF(width - close_w, 0, width, title_h);
+        const float cancel_w = painter_.MeasureButtonWidth(spec_.cancel_text);
+        const float confirm_w = painter_.MeasureButtonWidth(spec_.confirm_text);
+        const float y1 = height - ScaleDip(scale_, 10.0f);
+        const float y0 = y1 - btn_h;
+        confirm_rc_ = D2D1::RectF(width - pad - confirm_w, y0, width - pad, y1);
+        cancel_rc_ = D2D1::RectF(confirm_rc_.left - gap - cancel_w, y0,
+                                 confirm_rc_.left - gap, y1);
+        const float msg_top = title_h + ScaleDip(scale_, 16.0f);
+        message_rc_ = D2D1::RectF(pad, msg_top, width - pad, y0 - ScaleDip(scale_, 12.0f));
+        divider_top_ = title_h;
+        divider_footer_ = y0 - ScaleDip(scale_, 12.0f);
+        dip_w_ = width / std::max(scale_, 0.001f);
+    }
+
+    void SizeToContent() {
+        if (!hwnd_ || !compositor_.DwriteFactory()) return;
+        const float pad = ScaleDip(scale_, 20.0f);
+        const float title_h = ScaleDip(scale_, 36.0f);
+        const float gap = ScaleDip(scale_, 8.0f);
+        const float btn_h = painter_.MeasureButtonHeight();
+        const float footer_h = btn_h + ScaleDip(scale_, 20.0f);
+        const float cancel_w = painter_.MeasureButtonWidth(spec_.cancel_text);
+        const float confirm_w = painter_.MeasureButtonWidth(spec_.confirm_text);
+        float width = std::max(ScaleDip(scale_, kConfirmMinW),
+                               pad + cancel_w + gap + confirm_w + pad);
+        const float wrap = width - pad * 2.0f;
+        float msg_h = typography::MeasureWrapped(compositor_.DwriteFactory(),
+                                                 compositor_.TextFormat(),
+                                                 spec_.message, wrap);
+        msg_h = std::max(msg_h, ScaleDip(scale_, 22.0f));
+        const float height = title_h + ScaleDip(scale_, 16.0f) + msg_h
+                           + ScaleDip(scale_, 16.0f) + footer_h;
+        SetWindowPos(hwnd_, nullptr, 0, 0,
+                     static_cast<int>(std::ceil(width)),
+                     static_cast<int>(std::ceil(height)),
+                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOOWNERZORDER);
+        compositor_.Resize(static_cast<int>(std::ceil(width)),
+                           static_cast<int>(std::ceil(height)));
+        LayoutFromSize(width, height);
+    }
 
     int Hit(float x, float y) const {
-        if (Contains(CloseRect(), x, y)) return 3;
-        if (Contains(ConfirmRect(), x, y)) return 1;
-        if (Contains(CancelRect(), x, y)) return 2;
+        if (pulse::ui::ContainsRect(CloseRect(), x, y)) return 3;
+        if (pulse::ui::ContainsRect(ConfirmRect(), x, y)) return 1;
+        if (pulse::ui::ContainsRect(CancelRect(), x, y)) return 2;
         return 0;
     }
 
@@ -666,34 +672,30 @@ private:
         if (!compositor_.Dc()) return;
         const bool high_contrast = IsHighContrast();
         const Theme theme = high_contrast ? MakeHighContrastTheme() : MakeTheme(dark_, accent_);
-        BeginSurface(compositor_, painter_, theme, dark_, high_contrast, backdrop_enabled_,
+        pulse::ui::BeginSurface(compositor_, painter_, theme, dark_, high_contrast, backdrop_enabled_,
                      scale_);
 
         const D2D1_COLOR_F warning = dark_ ? HexColor(0xF7D154) : HexColor(0x8A5500);
         painter_.DrawGlyph(L"\xE7BA", Rect(scale_, 14, 8, 22, 22), warning);
-        painter_.DrawText(spec_.title, Rect(scale_, 42, 0, 260, 36),
+        painter_.DrawText(spec_.title, D2D1::RectF(ScaleDip(scale_, 42.0f), 0,
+                                                  close_rc_.left - ScaleDip(scale_, 8.0f),
+                                                  ScaleDip(scale_, 36.0f)),
                           compositor_.SmallFormat(), theme.text);
         fluent::ControlState close_state{};
         close_state.hovered = hover_ == 3;
         close_state.pressed = pressed_ == 3;
         painter_.DrawTitleBarButton(CloseRect(), fluent::TitleBarButtonRole::Close,
                                     {}, close_state);
-        painter_.FillRoundedRect(Rect(scale_, 0, 36, kConfirmW, 1), 0, theme.stroke_divider);
+        painter_.FillRoundedRect(D2D1::RectF(0, divider_top_,
+                                             ScaleDip(scale_, dip_w_), divider_top_ + 1.0f),
+                                 0, theme.stroke_divider);
 
-        std::wstring first = spec_.message;
-        std::wstring rest;
-        if (const size_t pos = spec_.message.find(L'\n'); pos != std::wstring::npos) {
-            first = spec_.message.substr(0, pos);
-            rest = spec_.message.substr(pos + 1);
-        }
-        painter_.DrawText(first, Rect(scale_, 20, 52, 320, 26),
-                          compositor_.TextFormat(), theme.text);
-        if (!rest.empty()) {
-            painter_.DrawText(rest, Rect(scale_, 20, 78, 320, 40),
-                              compositor_.SmallFormat(), theme.text_secondary);
-        }
+        DrawWrappedText(compositor_, compositor_.TextFormat(), message_rc_,
+                        spec_.message, theme.text);
 
-        painter_.FillRoundedRect(Rect(scale_, 0, 120, kConfirmW, 1), 0, theme.stroke_divider);
+        painter_.FillRoundedRect(D2D1::RectF(0, divider_footer_,
+                                             ScaleDip(scale_, dip_w_), divider_footer_ + 1.0f),
+                                 0, theme.stroke_divider);
 
         fluent::ControlState cancel_state{};
         cancel_state.hovered = hover_ == 2;
@@ -702,36 +704,37 @@ private:
         painter_.DrawButton({ CancelRect(), spec_.cancel_text, {},
                               fluent::ButtonKind::Transparent, cancel_state });
 
-        const auto confirm = ConfirmRect();
-        const D2D1_COLOR_F confirm_fill = spec_.danger
-            ? (hover_ == 1 || pressed_ == 1 ? theme.danger_hover : theme.danger)
-            : (hover_ == 1 || pressed_ == 1 ? theme.accent_hover : theme.accent);
-        painter_.FillRoundedRect(confirm, theme.radius_control * scale_, confirm_fill);
-        painter_.DrawText(spec_.confirm_text, confirm, compositor_.SmallFormat(),
-                          spec_.danger ? HexColor(0xFFFFFF) : theme.accent_text,
-                          fluent::HorizontalAlignment::Center);
-        if (focus_ == 0)
-            painter_.DrawFocusRing(confirm, theme.radius_control * scale_);
+        fluent::ControlState confirm_state{};
+        confirm_state.hovered = hover_ == 1;
+        confirm_state.pressed = pressed_ == 1;
+        confirm_state.keyboard_focus = focus_ == 0;
+        painter_.DrawButton({ ConfirmRect(), spec_.confirm_text, {},
+                              spec_.danger ? fluent::ButtonKind::Danger
+                                           : fluent::ButtonKind::Primary,
+                              confirm_state });
 
-        EndSurface(compositor_);
+        pulse::ui::EndSurface(compositor_);
     }
 
     LRESULT Handle(UINT message, WPARAM wparam, LPARAM lparam) {
         switch (message) {
         case WM_CREATE:
-            scale_ = static_cast<float>(GetDpiForWindow(hwnd_)) / 96.0f;
-            backdrop_enabled_ = ApplyBackdrop(hwnd_, dark_);
+            scale_ = static_cast<float>(pulse::compat::WindowDpi(hwnd_)) / 96.0f;
+            backdrop_enabled_ = pulse::ui::ApplyBackdrop(hwnd_, dark_);
             if (!compositor_.Init(hwnd_)) return -1;
             compositor_.RecreateTextFormats(scale_);
             painter_.SetCompositor(&compositor_);
             painter_.SetScale(scale_);
+            SizeToContent();
             return 0;
         case WM_NCCALCSIZE:
             return 0;
         case WM_NCHITTEST:
-            return BorderlessHitTest(hwnd_, lparam, 36 * scale_, CloseRect());
+            return pulse::ui::BorderlessHitTest(hwnd_, lparam, 36 * scale_, CloseRect());
         case WM_SIZE:
             if (compositor_.Dc()) compositor_.Resize(LOWORD(lparam), HIWORD(lparam));
+            LayoutFromSize(static_cast<float>(LOWORD(lparam)),
+                           static_cast<float>(HIWORD(lparam)));
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         case WM_MOVE:
@@ -743,9 +746,11 @@ private:
             compositor_.RecreateTextFormats(scale_);
             painter_.SetScale(scale_);
             const auto* suggested = reinterpret_cast<RECT*>(lparam);
-            SetWindowPos(hwnd_, nullptr, suggested->left, suggested->top,
-                         suggested->right - suggested->left, suggested->bottom - suggested->top,
-                         SWP_NOZORDER | SWP_NOOWNERZORDER);
+            if (suggested) {
+                SetWindowPos(hwnd_, nullptr, suggested->left, suggested->top, 0, 0,
+                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER);
+            }
+            SizeToContent();
             return 0;
         }
         case WM_MOUSEMOVE: {
@@ -825,6 +830,13 @@ private:
     int hover_ = 0;
     int pressed_ = 0;
     int focus_ = 0;
+    D2D1_RECT_F close_rc_{};
+    D2D1_RECT_F cancel_rc_{};
+    D2D1_RECT_F confirm_rc_{};
+    D2D1_RECT_F message_rc_{};
+    float dip_w_ = kConfirmMinW;
+    float divider_top_ = 36.0f;
+    float divider_footer_ = 120.0f;
 };
 
 } // namespace
@@ -846,7 +858,7 @@ bool FileOperationWindow::Create(HWND owner, FileOperationCallbacks callbacks) {
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hbrBackground = nullptr;
     if (!GetClassInfoExW(wc.hInstance, kTransferClass, &wc)) RegisterClassExW(&wc);
-    const UINT owner_dpi = GetDpiForWindow(owner_);
+    const UINT owner_dpi = pulse::compat::WindowDpi(owner_);
     const int width = MulDiv(static_cast<int>(kDlgW), owner_dpi, 96);
     const int height = MulDiv(static_cast<int>(kCollapsedH), owner_dpi, 96);
     hwnd_ = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, kTransferClass, L"文件操作",
@@ -875,6 +887,7 @@ void FileOperationWindow::Update(const ops::OpStatus& status) {
     status_ = status;
     if (new_task) {
         speed_history_.clear();
+        speed_sample_tick_ = 0;
     }
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
 }
@@ -884,7 +897,7 @@ void FileOperationWindow::Show(bool activate) {
     if (!positioned_) {
         RECT rect{};
         GetWindowRect(hwnd_, &rect);
-        CenterOwnedWindow(hwnd_, owner_, rect.right - rect.left, rect.bottom - rect.top);
+        pulse::ui::CenterOwnedWindow(hwnd_, owner_, rect.right - rect.left, rect.bottom - rect.top);
         positioned_ = true;
     }
     if (IsIconic(hwnd_)) ShowWindow(hwnd_, SW_RESTORE);
@@ -903,7 +916,7 @@ bool FileOperationWindow::IsVisible() const {
 }
 
 void FileOperationWindow::ApplyWindowTheme() {
-    backdrop_enabled_ = ApplyBackdrop(hwnd_, dark_);
+    backdrop_enabled_ = pulse::ui::ApplyBackdrop(hwnd_, dark_);
 }
 
 void FileOperationWindow::ResizeForDetails(bool preserve_center) {
@@ -919,19 +932,22 @@ void FileOperationWindow::ResizeForDetails(bool preserve_center) {
 }
 
 int FileOperationWindow::HitTestControl(float x, float y) const {
+    const auto labels = MakeTransferLabels(status_, detailed_);
     const auto chrome = MakeTransferChrome(scale_,
-        static_cast<float>(compositor_.Width()), static_cast<float>(compositor_.Height()));
-    if (Contains(chrome.close, x, y)) return 1;
-    if (Contains(chrome.minimize, x, y)) return 2;
-    if (Contains(chrome.pause, x, y)) return 3;
-    if (Contains(chrome.cancel, x, y)) return 4;
-    if (Contains(chrome.details, x, y)) return 5;
+        static_cast<float>(compositor_.Width()), static_cast<float>(compositor_.Height()),
+        painter_, labels);
+    if (pulse::ui::ContainsRect(chrome.close, x, y)) return 1;
+    if (pulse::ui::ContainsRect(chrome.minimize, x, y)) return 2;
+    if (pulse::ui::ContainsRect(chrome.pause, x, y)) return 3;
+    if (pulse::ui::ContainsRect(chrome.cancel, x, y)) return 4;
+    if (pulse::ui::ContainsRect(chrome.details, x, y)) return 5;
     return 0;
 }
 
 void FileOperationWindow::RequestClose() {
+    const bool emptying = status_.type == ops::OpType::EmptyRecycle;
     if (status_.active && status_.phase != ops::OpPhase::Completed &&
-        status_.phase != ops::OpPhase::Failed) {
+        status_.phase != ops::OpPhase::Failed && !emptying) {
         if (callbacks_.cancel) callbacks_.cancel();
         return;
     }
@@ -949,12 +965,13 @@ void FileOperationWindow::Render() {
     if (!compositor_.Dc()) return;
     const bool high_contrast = IsHighContrast();
     const Theme theme = high_contrast ? MakeHighContrastTheme() : MakeTheme(dark_, accent_);
-    BeginSurface(compositor_, painter_, theme, dark_, high_contrast, backdrop_enabled_,
+    pulse::ui::BeginSurface(compositor_, painter_, theme, dark_, high_contrast, backdrop_enabled_,
                  scale_);
     const float width = static_cast<float>(compositor_.Width());
     const float height = static_cast<float>(compositor_.Height());
     const float dip_w = width / std::max(scale_, 0.001f);
-    const auto chrome = MakeTransferChrome(scale_, width, height);
+    const auto labels = MakeTransferLabels(status_, detailed_);
+    const auto chrome = MakeTransferChrome(scale_, width, height, painter_, labels);
     const bool failed = status_.phase == ops::OpPhase::Failed;
     const bool paused = status_.phase == ops::OpPhase::Paused;
     const bool waiting = status_.phase == ops::OpPhase::WaitingForConflict;
@@ -964,13 +981,18 @@ void FileOperationWindow::Render() {
     const bool deleting = status_.type == ops::OpType::RecycleDelete
                        || status_.type == ops::OpType::RealDelete;
     const bool restoring = status_.type == ops::OpType::RestoreRecycle;
+    const bool emptying = status_.type == ops::OpType::EmptyRecycle;
     const D2D1_COLOR_F sky = dark_ ? HexColor(0x38BDF8) : HexColor(0x0284C7);
 
-    const wchar_t* operation_glyph = deleting ? L"\xE74D" : restoring ? L"\xE777"
-        : (moving ? L"\xE7C2" : L"\xE8C8");
+    const wchar_t* operation_glyph = (deleting || emptying) ? L"\xE74D"
+        : restoring ? L"\xE777" : (moving ? L"\xE7C2" : L"\xE8C8");
     painter_.DrawGlyph(operation_glyph, Rect(scale_, 14, 10, 16, 16), sky);
     std::wstring title;
-    if (failed) {
+    if (emptying) {
+        if (failed) title = l10n::Get(l10n::StringId::OpCannotEmpty);
+        else if (completed) title = l10n::Get(l10n::StringId::OpEmptied);
+        else title = l10n::Get(l10n::StringId::OpEmptying);
+    } else if (failed) {
         title = deleting ? L"无法完成删除" : restoring ? L"无法完成还原"
             : moving ? L"无法完成移动" : L"无法完成复制";
     } else if (completed) {
@@ -1004,10 +1026,12 @@ void FileOperationWindow::Render() {
 
     const std::wstring src = status_.source_label.empty() ? L"源" : status_.source_label;
     const std::wstring dst = status_.destination_label.empty() ? L"目标" : status_.destination_label;
-    const std::wstring subtitle = deleting
-        ? L"正在删除 " + src
-        : moving ? L"正在从 " + src + L" 移动到 " + dst
-                 : L"正在从 " + src + L" 复制到 " + dst;
+    std::wstring subtitle;
+    if (emptying) subtitle = l10n::Get(l10n::StringId::OpEmptyingSub);
+    else if (deleting) subtitle = L"正在删除 " + src;
+    else if (restoring) subtitle = L"正在还原 " + src;
+    else if (moving) subtitle = L"正在从 " + src + L" 移动到 " + dst;
+    else subtitle = L"正在从 " + src + L" 复制到 " + dst;
     painter_.DrawText(subtitle, Rect(scale_, kPadX, 48, dip_w - kPadX - 72.0f, 18),
                       compositor_.SmallFormat(), theme.text);
     wchar_t percent[32];
@@ -1040,13 +1064,17 @@ void FileOperationWindow::Render() {
         file_line = status_.summary.empty() ? L"正在扫描文件…" : status_.summary;
         badge_text = L"准备中";
         badge_kind = fluent::BadgeKind::Neutral;
+    } else if (emptying) {
+        file_line = status_.current_item.empty() ? status_.summary : status_.current_item;
+        badge_text = l10n::Get(l10n::StringId::OpEmptying);
+        badge_kind = fluent::BadgeKind::Warning;
     } else {
         const std::wstring item = status_.current_item.empty() ? status_.summary : status_.current_item;
         file_line = L"项目：" + item;
         badge_text = deleting ? L"正在删除" : moving ? L"正在移动" : L"正在复制";
         badge_kind = fluent::BadgeKind::Success;
     }
-    const float badge_w = badge_text.size() <= 2 ? 48.0f : 78.0f;
+    const float badge_w = std::max(48.0f, painter_.MeasureBadgeWidth(badge_text) / std::max(scale_, 0.001f));
     painter_.DrawText(file_line, Rect(scale_, kPadX, 70, dip_w - kPadX - badge_w - 12.0f, 20),
                       compositor_.SmallFormat(), theme.text);
     painter_.DrawBadge({ Rect(scale_, dip_w - kPadX - badge_w, 70, badge_w, 18),
@@ -1055,17 +1083,28 @@ void FileOperationWindow::Render() {
     const auto track = Rect(scale_, kPadX, 98, dip_w - kPadX * 2.0f, 10);
     painter_.FillRoundedRect(track, ScaleDip(scale_, 5.0f),
         dark_ ? HexColor(0xFFFFFF, 0.10f) : HexColor(0x000000, 0.10f));
-    const float inner = ScaleDip(scale_, 2.0f);
-    D2D1_RECT_F fill = D2D1::RectF(track.left + inner, track.top + inner,
-                                   track.right - inner, track.bottom - inner);
-    const float value = status_.percent < 0.0f ? 0.0f
-        : std::clamp(status_.percent / 100.0f, 0.0f, 1.0f);
-    fill.right = fill.left + (fill.right - fill.left) * value;
-    D2D1_COLOR_F bar = failed ? theme.danger
-        : (paused || waiting) ? HexColor(0xF59E0B)
-        : HexColor(0x0EA5E9);
-    if (fill.right > fill.left) {
-        painter_.FillRoundedRect(fill, ScaleDip(scale_, 3.0f), bar);
+    const bool indeterminate = emptying && status_.active && !failed && !completed
+        && status_.percent < 0.0f;
+    if (indeterminate) {
+        fluent::ProgressSpec bar;
+        bar.bounds = track;
+        bar.indeterminate = true;
+        bar.animation_progress = static_cast<float>(
+            std::fmod(static_cast<double>(GetTickCount64()), 1952.0) / 1952.0);
+        painter_.DrawProgressBar(bar);
+    } else {
+        const float inner = ScaleDip(scale_, 2.0f);
+        D2D1_RECT_F fill = D2D1::RectF(track.left + inner, track.top + inner,
+                                       track.right - inner, track.bottom - inner);
+        const float value = status_.percent < 0.0f ? 0.0f
+            : std::clamp(status_.percent / 100.0f, 0.0f, 1.0f);
+        fill.right = fill.left + (fill.right - fill.left) * value;
+        D2D1_COLOR_F bar = failed ? theme.danger
+            : (paused || waiting) ? HexColor(0xF59E0B)
+            : HexColor(0x0EA5E9);
+        if (fill.right > fill.left) {
+            painter_.FillRoundedRect(fill, ScaleDip(scale_, 3.0f), bar);
+        }
     }
 
     const auto stats = Rect(scale_, kPadX, 118, dip_w - kPadX * 2.0f, 52);
@@ -1077,6 +1116,7 @@ void FileOperationWindow::Render() {
         : completed ? L"已完成"
         : paused ? L"已暂停"
         : waiting ? L"等待处理"
+        : emptying ? l10n::Get(l10n::StringId::OpEmptying)
         : !byte_transfer ? L"无需估算"
         : status_.eta_seconds == 0 ? L"正在估算"
         : L"约 " + FormatDuration(status_.eta_seconds);
@@ -1092,7 +1132,7 @@ void FileOperationWindow::Render() {
         items_text = std::to_wstring(remain_items) + L" 个 ("
             + pulse::format::ByteSize(remain_bytes) + L")";
     else items_text = std::to_wstring(remain_items) + L" 个";
-    const std::wstring speed_text = !byte_transfer ? L"无需估算"
+    const std::wstring speed_text = emptying || !byte_transfer ? L"无需估算"
         : completed || failed || paused || waiting ? L"0 B/s"
         : status_.bytes_per_second <= 0.0 ? L"正在估算"
         : pulse::format::ByteSize(static_cast<uint64_t>(status_.bytes_per_second)) + L"/s";
@@ -1140,22 +1180,24 @@ void FileOperationWindow::Render() {
     fluent::ControlState detail_state{};
     detail_state.hovered = hover_ == 5;
     detail_state.pressed = pressed_ == 5;
-    painter_.DrawButton({ chrome.details, detailed_ ? L"简略信息" : L"详细信息",
+    painter_.DrawButton({ chrome.details, labels.details,
         detailed_ ? L"\xE70E" : L"\xE70D", fluent::ButtonKind::Transparent, detail_state });
-    fluent::ControlState pause_state{};
-    pause_state.enabled = status_.active && !failed && status_.phase != ops::OpPhase::Cancelling
-        && status_.phase != ops::OpPhase::WaitingForConflict;
-    pause_state.hovered = hover_ == 3;
-    pause_state.pressed = pressed_ == 3;
-    painter_.DrawButton({ chrome.pause, paused ? L"继续" : L"暂停", {},
-                          fluent::ButtonKind::Standard, pause_state });
+    if (labels.show_pause) {
+        fluent::ControlState pause_state{};
+        pause_state.enabled = status_.active && !failed && status_.phase != ops::OpPhase::Cancelling
+            && status_.phase != ops::OpPhase::WaitingForConflict;
+        pause_state.hovered = hover_ == 3;
+        pause_state.pressed = pressed_ == 3;
+        painter_.DrawButton({ chrome.pause, labels.pause, {},
+                              fluent::ButtonKind::Standard, pause_state });
+    }
     fluent::ControlState cancel_state{};
     cancel_state.enabled = status_.phase != ops::OpPhase::Cancelling;
     cancel_state.hovered = hover_ == 4;
     cancel_state.pressed = pressed_ == 4;
-    painter_.DrawButton({ chrome.cancel, status_.active ? L"取消" : L"关闭", {},
+    painter_.DrawButton({ chrome.cancel, labels.cancel, {},
                           fluent::ButtonKind::Standard, cancel_state });
-    EndSurface(compositor_);
+    pulse::ui::EndSurface(compositor_);
 }
 
 LRESULT CALLBACK FileOperationWindow::WndProc(HWND hwnd, UINT message,
@@ -1174,20 +1216,22 @@ LRESULT CALLBACK FileOperationWindow::WndProc(HWND hwnd, UINT message,
 LRESULT FileOperationWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
     switch (message) {
     case WM_CREATE:
-        scale_ = static_cast<float>(GetDpiForWindow(hwnd_)) / 96.0f;
+        scale_ = static_cast<float>(pulse::compat::WindowDpi(hwnd_)) / 96.0f;
         ApplyWindowTheme();
         if (!compositor_.Init(hwnd_)) return -1;
         compositor_.RecreateTextFormats(scale_);
         painter_.SetCompositor(&compositor_);
         painter_.SetScale(scale_);
-        SetTimer(hwnd_, kRenderTimer, 250, nullptr);
+        SetTimer(hwnd_, kRenderTimer, 33, nullptr);
         return 0;
     case WM_NCCALCSIZE:
         return 0;
     case WM_NCHITTEST: {
+        const auto labels = MakeTransferLabels(status_, detailed_);
         const auto chrome = MakeTransferChrome(scale_,
-            static_cast<float>(compositor_.Width()), static_cast<float>(compositor_.Height()));
-        return BorderlessHitTest(hwnd_, lparam, ScaleDip(scale_, kTitleH),
+            static_cast<float>(compositor_.Width()), static_cast<float>(compositor_.Height()),
+            painter_, labels);
+        return pulse::ui::BorderlessHitTest(hwnd_, lparam, ScaleDip(scale_, kTitleH),
             D2D1::RectF(chrome.minimize.left, 0, chrome.close.right, chrome.close.bottom));
     }
     case WM_SIZE:
@@ -1212,12 +1256,16 @@ LRESULT FileOperationWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM l
     case WM_TIMER:
         if (wparam == kRenderTimer && IsWindowVisible(hwnd_)) {
             if (status_.active) {
-                const bool running = status_.phase == ops::OpPhase::Running;
-                const bool byte_transfer = status_.type == ops::OpType::Copy
-                    || status_.type == ops::OpType::Move;
-                speed_history_.push_back(running && byte_transfer
-                    ? (std::max)(0.0, status_.bytes_per_second) : 0.0);
-                while (speed_history_.size() > 120) speed_history_.pop_front();
+                const ULONGLONG now = GetTickCount64();
+                if (speed_sample_tick_ == 0 || now - speed_sample_tick_ >= 250) {
+                    speed_sample_tick_ = now;
+                    const bool running = status_.phase == ops::OpPhase::Running;
+                    const bool byte_transfer = status_.type == ops::OpType::Copy
+                        || status_.type == ops::OpType::Move;
+                    speed_history_.push_back(running && byte_transfer
+                        ? (std::max)(0.0, status_.bytes_per_second) : 0.0);
+                    while (speed_history_.size() > 120) speed_history_.pop_front();
+                }
             }
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;

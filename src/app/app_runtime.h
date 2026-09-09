@@ -78,7 +78,12 @@ bool IsRecycleTab(const app::Tab* tab);
 std::wstring RecycleOccupancyText(const fs::RecycleBinInfo& info);
 void ApplyRecycleOccupancy(AppState& s);
 void RequestRecycleOccupancy(AppState& s);
-void RefreshRecycleViews(AppState& s);
+bool ApplyQueriedRecycleInfo(AppState& s, const fs::RecycleBinInfo& info);
+void RefreshRecycleViews(AppState& s, bool query_occupancy = true);
+void ScheduleRecycleRefresh(AppState& s);
+bool PumpRecycleRefresh(AppState& s, ULONGLONG now);
+void BumpRecycleOccupancy(AppState& s, int64_t delta);
+void ClearRecycleOccupancy(AppState& s);
 bool ToggleStarred(AppState& s, const std::wstring& target,
                           app::PlaceItemKind kind = app::PlaceItemKind::Unknown);
 void StopDetailsSizeWalk(AppState& s);

@@ -56,6 +56,7 @@ struct FluentMenuItem {
     // returns a command. Children may not nest further.
     std::vector<FluentMenuItem> children;
     float glyph_scale = 1.0f;      // Per-item visual scale inside the fixed icon slot.
+    bool shortcut_inline = false; // Search paths follow a shared, compact filename column.
 };
 
 // Windowless menu layout + hit-testing (theme.row_menu = 36 DIP rows).
@@ -63,10 +64,11 @@ class FluentMenuModel {
 public:
     void SetItems(std::vector<FluentMenuItem> items);
     // Measures text; dwrite may be nullptr (falls back to an estimate).
-    void Layout(IDWriteFactory3* dwrite, float scale, float min_width_px = 0);
+    void Layout(IDWriteFactory2* dwrite, float scale, float min_width_px = 0);
 
     int WidthPx() const { return width_; }
     int HeightPx() const { return height_; }
+    float InlineLabelWidthPx() const { return inline_label_width_; }
     float RowHeightPx() const { return row_h_; }
     int Count() const { return (int)items_.size(); }
     const FluentMenuItem* At(int i) const;
@@ -84,6 +86,7 @@ private:
     float row_h_ = 32.0f;
     float pad_v_ = 4.0f;      // surface inner padding (DIP*scale)
     float sep_h_ = 5.0f;      // separator slot height (line + gaps)
+    float inline_label_width_ = 0.0f;
     int width_ = 0;
     int height_ = 0;
 };

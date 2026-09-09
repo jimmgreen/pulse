@@ -1,4 +1,5 @@
 // ui_renderer.cpp — Chrome orchestration (title, toolbar, status, render).
+#include "legacy_icons.h"
 #include "ui_renderer.h"
 #include "ui_renderer_internal.h"
 #include "../common/localization.h"
@@ -129,15 +130,35 @@ std::vector<BreadcrumbSegment> SplitBreadcrumb(const std::wstring& path) {
         out.push_back(seg);
         return out;
     }
-    if (p == L"pulse:recycle") {
-        BreadcrumbSegment pc;
-        pc.text = pulse::l10n::Get(pulse::l10n::StringId::ThisPc);
-        pc.path = L"";
-        out.push_back(pc);
-        BreadcrumbSegment bin;
-        bin.text = pulse::l10n::Get(pulse::l10n::StringId::RecycleBin);
-        bin.path = L"pulse:recycle";
-        out.push_back(bin);
+    std::wstring pulse_kind, pulse_rest;
+    if (app::ParsePulsePath(p, &pulse_kind, &pulse_rest)) {
+        if (pulse_kind == L"recycle") {
+            BreadcrumbSegment pc;
+            pc.text = pulse::l10n::Get(pulse::l10n::StringId::ThisPc);
+            pc.path = L"";
+            out.push_back(pc);
+            BreadcrumbSegment bin;
+            bin.text = pulse::l10n::Get(pulse::l10n::StringId::RecycleBin);
+            bin.path = L"pulse:recycle";
+            out.push_back(bin);
+            return out;
+        }
+        BreadcrumbSegment seg;
+        seg.path = path;
+        if (pulse_kind == L"search" || pulse_kind == L"saved-search")
+            seg.text = pulse::l10n::Get(pulse::l10n::StringId::Search);
+        else if (pulse_kind == L"starred")
+            seg.text = pulse::l10n::Get(pulse::l10n::StringId::StarredItems);
+        else if (pulse_kind == L"recent")
+            seg.text = pulse::l10n::Get(pulse::l10n::StringId::Recent);
+        else if (pulse_kind == L"settings")
+            seg.text = pulse::l10n::Get(pulse::l10n::StringId::Settings);
+        else if (pulse_kind == L"tag")
+            seg.text = pulse_rest.empty()
+                ? pulse::l10n::Get(pulse::l10n::StringId::Tag) : pulse_rest;
+        else
+            seg.text = pulse_kind;
+        out.push_back(seg);
         return out;
     }
 
@@ -210,10 +231,10 @@ void MainRenderer::BreadcrumbLayout(const PaneViewModel& vm, float w,
     D2D1_RECT_F addr = AddressBarRect(w);
     const float segPad = 8.0f * scale_;
     const float chevronW = 14.0f * scale_;
-    const float hint = painter_.OmnibarHintReservePx();
+    const float hint = addr.right - AddressSearchButtonRect(w).left + 6.0f * scale_;
     const float avail = std::max(0.0f, addr.right - addr.left - 2 * margin_ - hint);
 
-    IDWriteFactory3* dwrite = compositor_ ? compositor_->DwriteFactory() : nullptr;
+    IDWriteFactory2* dwrite = compositor_ ? compositor_->DwriteFactory() : nullptr;
     IDWriteTextFormat* fmt = compositor_ ? compositor_->AddressFormat() : nullptr;
 
     struct Measured { float w; };
@@ -245,6 +266,7 @@ void MainRenderer::DrawTextRect(ID2D1DeviceContext* dc, IDWriteTextFormat* fmt,
     ID2D1SolidColorBrush* br, std::wstring_view text, float x, float y, float w, float h,
     D2D1_DRAW_TEXT_OPTIONS opts) {
     D2D1_RECT_F rc = typography::SnapVerticalBounds(D2D1::RectF(x, y, x + w, y + h));
+    if (compositor_ && DrawLegacyIcon(dc, compositor_->DwriteFactory(), text, rc, br, fmt->GetFontSize())) return;
     if (!IsHighContrast() && compositor_ && br && compositor_->DrawLumaText(
             text, fmt, rc, br->GetColor(), text_background_, fmt->GetTextAlignment())) {
         return;
@@ -769,7 +791,7 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
     addrState.focused = vm.address_editing;
     addrState.hovered = !vm.address_editing && IsHovered(vm, HitTestResult::AddressBar);
     painter_.DrawTextFieldFrame(addrRc, addrState);
-    if (!vm.address_editing) {
+    if (!vm.address_editing && !vm.address_searching) {
         std::vector<BreadcrumbPlaced> placed;
         BreadcrumbLayout(vm.pane, rect.right, placed);
         for (size_t i = 0; i < placed.size(); ++i) {
@@ -802,16 +824,11 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             MakeBrush(dc, theme.text, brText_);
             DrawTextRect(dc, compositor_->AddressFormat(), brText_.get(), vm.pane.path,
                 addrRc.left + 12.0f * scale_, addrRc.top,
-                addrRc.right - addrRc.left - 12.0f * scale_ - painter_.OmnibarHintReservePx(),
+                AddressSearchButtonRect(rect.right).left - addrRc.left - 18.0f * scale_,
                 addrRc.bottom - addrRc.top);
         }
-        const bool skip_search =
-            !IsHighContrast() && EnsureFluentSvg(IDR_FLUENT_OMNIBAR_SEARCH_SVG);
-        const D2D1_RECT_F search_rc = painter_.DrawOmnibarHints(addrRc, skip_search);
-        if (skip_search) {
-            DrawFluentSvg(IDR_FLUENT_OMNIBAR_SEARCH_SVG, search_rc, 1.0f);
-        }
     }
+    DrawAddressSearchChrome(vm, rect.right, theme);
     x = addrRc.right + margin_;
 
     // Quiet New: standard bordered button + Color add, same weight as op icons.
@@ -875,15 +892,19 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
 }
 void MainRenderer::DrawStatusBar(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme) {
     ID2D1DeviceContext* dc = compositor_->Dc();
-    float y = rect.bottom - status_height_;
+    IDWriteFactory2* factory = compositor_->DwriteFactory();
+    IDWriteTextFormat* small_fmt = compositor_->SmallFormat();
+    const StatusBarMetrics sb = MakeStatusBarMetrics(
+        vm, rect, scale_, status_height_, factory, small_fmt);
+    float y = sb.bar.top;
     D2D1_COLOR_F statusBackground = theme.status_bg;
     if (vm.backdrop_enabled) statusBackground.a = vm.dark ? 0.76f : 0.82f;
     MakeBrush(dc, statusBackground, brFillInput_);
     FillRect(dc, brFillInput_.get(), 0, y, rect.right, status_height_);
     FillRect(dc, brStrokeDivider_.get(), 0, y, rect.right, 1);
     MakeBrush(dc, theme.text_secondary, brTextSecondary_);
-    DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(), vm.status.status_text,
-        margin_, y, rect.right * 0.30f, status_height_);
+    DrawTextRect(dc, small_fmt, brTextSecondary_.get(), vm.status.status_text,
+        sb.pad, y, std::max(0.0f, rect.right * 0.30f - sb.pad), status_height_);
     const bool compact = rect.right < 900.0f * scale_;
     std::wstring selectionText = vm.status.selection_text;
     if (compact && vm.pane.selected_count > 0) {
@@ -893,35 +914,35 @@ void MainRenderer::DrawStatusBar(const WindowViewModel& vm, const D2D1_RECT_F& r
             vm.pane.selected_count);
         selectionText = buf;
     }
-    DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(), selectionText,
+    DrawTextRect(dc, small_fmt, brTextSecondary_.get(), selectionText,
         rect.right * 0.30f, y, rect.right * 0.18f, status_height_);
 
-    float rightReserved = 170.0f * scale_;
+    const float rightReserved = sb.right_reserved;
     if (!vm.status.performance_text.empty()) {
         const std::wstring& perfText = rect.right < 1100.0f * scale_
             ? vm.status.performance_compact_text : vm.status.performance_text;
         const float perfWidth = std::min(rect.right * 0.50f,
-            MeasureTextWidth(compositor_->DwriteFactory(), compositor_->SmallFormat(), perfText)
-                + 16.0f * scale_);
-        rightReserved = perfWidth + margin_;
-        IDWriteTextFormat* perfFormat = compositor_->SmallFormat();
-        perfFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+            MeasureTextWidth(factory, small_fmt, perfText) + 16.0f * scale_);
+        small_fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
         MakeBrush(dc, theme.text_secondary, brTextSecondary_);
-        DrawTextRect(dc, perfFormat, brTextSecondary_.get(), perfText,
+        DrawTextRect(dc, small_fmt, brTextSecondary_.get(), perfText,
             rect.right - rightReserved, y, perfWidth, status_height_);
-        perfFormat->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-    } else {
-        DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(), vm.status.mode_text,
-            rect.right - rightReserved, y, rightReserved - 10.0f * scale_, status_height_);
+        small_fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+    } else if (!vm.status.hint_text.empty()) {
+        const float hintWidth = std::max(0.0f, rightReserved - sb.pad);
+        small_fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+        DrawTextRect(dc, small_fmt, brTextSecondary_.get(), vm.status.hint_text,
+            rect.right - rightReserved, y, hintWidth, status_height_);
+        small_fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
     }
 
     // Ops task summary + self-drawn Fluent progress bar.
-    float taskX = rect.right * 0.48f;
-    float taskRight = rect.right - rightReserved - margin_;
+    const float taskX = sb.task.left;
+    const float taskRight = sb.task.right;
     if (!vm.status.task_text.empty() || vm.status.task_progress >= 0.0f) {
         float barW = (vm.status.task_progress >= 0.0f) ? (100 * scale_ + margin_ * 2) : 0.0f;
         MakeBrush(dc, theme.accent, brAccentText_);
-        DrawTextRect(dc, compositor_->SmallFormat(), brAccentText_.get(), vm.status.task_text,
+        DrawTextRect(dc, small_fmt, brAccentText_.get(), vm.status.task_text,
             taskX, y, std::max(0.0f, taskRight - taskX - barW), status_height_);
         if (barW > 0.0f) {
             float trackH = 4 * scale_;

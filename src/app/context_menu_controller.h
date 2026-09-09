@@ -23,6 +23,7 @@ public:
         std::function<void(uint32_t, uint32_t, std::wstring, std::wstring)> invoke;
         std::function<void(const std::wstring&, const std::wstring&)> execute_verb;
         std::function<void(const std::wstring&, const std::wstring&)> open_with_app;
+        std::function<void(const std::wstring&, const std::wstring&)> execute_command;
     };
     struct QueryCompletion {
         bool accepted = false;

@@ -11,5 +11,6 @@ void RestoreSelected(AppState& s);
 void EmptyRecycleBin(AppState& s);
 void CollectToTray(AppState& s, bool move_intent);
 void ShowBatchRename(AppState& s);
+void PinAndShowOperationWindow(AppState& s);
 void UpdateOperationWindow(AppState& s, bool allow_conflict_dialog);
 } // namespace pulse

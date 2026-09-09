@@ -3,6 +3,7 @@
 #include "app_runtime.h"
 
 namespace pulse {
+bool HandleBrowserNavigation(AppState& s, LPARAM command);
 LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 LRESULT HandleMouseLeave(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -32,6 +33,7 @@ bool PointInList(const AppState& s, int mx, int my);
 void ResetMarquee(AppState& s);
 void ApplyMarqueeSelection(AppState& s);
 void HandleListRowClick(AppState& s, int index, bool ctrl, bool shift);
+void FinishListRowClick(AppState& s);
 void CancelRenameClick(AppState& s);
 bool PointInHitItemName(AppState& s, const ui::WindowViewModel& vm,
                                const ui::HitTestResult& hit, float x, float y);

@@ -24,6 +24,8 @@ enum class SettingsEffect : uint32_t {
     TrayDeckIcon = 1u << 3,
     TrayVisibility = 1u << 4,
     Language = 1u << 5,
+    StatusBarPerformance = 1u << 6,
+    FileVisibility = 1u << 7,
 };
 
 constexpr SettingsEffect operator|(SettingsEffect left, SettingsEffect right) noexcept {
@@ -108,6 +110,7 @@ public:
     bool VolumePending(std::wstring_view id) const;
     bool network_pending() const noexcept;
     bool diagnostics_pending() const noexcept;
+    bool migration_pending() const noexcept;
 
     SettingsTaskEffect CompleteTask(const SettingsTaskResult& result,
                                     bool service_installed);
@@ -147,6 +150,7 @@ private:
         bool local_pending = false;
         bool network_pending = false;
         bool diagnostics_pending = false;
+        bool migration_pending = false;
     };
 
     int page_ = 0;

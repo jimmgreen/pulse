@@ -14,13 +14,20 @@
 #ifndef AppVersion
   #define AppVersion "1.0.0"
 #endif
+#ifndef BuildDir
+  #define BuildDir "build"
+#endif
 
 [Setup]
 AppId={{A3F47C2E-9D1B-4E58-8C6A-2B5D0F9E1734}
 AppName=Pulse
 AppVersion={#AppVersion}
+#ifdef Win81Candidate
+AppVerName=Pulse {#AppVersion} (Windows 8.1 compatibility candidate)
+#else
 AppVerName=Pulse {#AppVersion}
-DefaultDirName={autopf}\Pulse
+#endif
+DefaultDirName={code:DefaultPulseDirectory}
 DefaultGroupName=Pulse
 ; Reuse the existing installation directory and task selections when this is
 ; an upgrade. AppId is intentionally stable so the previous install can be
@@ -29,13 +36,21 @@ UsePreviousAppDir=yes
 UsePreviousTasks=yes
 UsePreviousGroup=yes
 PrivilegesRequired=admin
+#ifdef Win81Candidate
+MinVersion=6.3
+#else
 MinVersion=10.0
+#endif
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ; Sources are referenced relative to the project root (this script's parent).
 SourceDir=..
 OutputDir=dist
+#ifdef Win81Candidate
+OutputBaseFilename=PulseSetup-{#AppVersion}-win81-candidate
+#else
 OutputBaseFilename=PulseSetup-{#AppVersion}
+#endif
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -58,12 +73,12 @@ Name: "startup"; Description: "开机自动启动 Pulse / Launch Pulse at sign-i
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "其他 / Other:"; Flags: unchecked
 
 [Files]
-Source: "build\pulse.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "build\lumatext.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "build\licenses\LumaText\*"; DestDir: "{app}\licenses\LumaText"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "build\Pulse.Index.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "build\Pulse.Preview.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "build\pulse_shell.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BuildDir}\pulse.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BuildDir}\lumatext.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BuildDir}\licenses\LumaText\*"; DestDir: "{app}\licenses\LumaText"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#BuildDir}\Pulse.Index.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BuildDir}\Pulse.Preview.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BuildDir}\pulse_shell.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\Pulse"; Filename: "{app}\pulse.exe"; WorkingDir: "{app}"
@@ -76,17 +91,7 @@ Name: "{autodesktop}\Pulse"; Filename: "{app}\pulse.exe"; WorkingDir: "{app}"; T
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "Pulse"; ValueData: """{app}\pulse.exe"""; Tasks: startup; Flags: uninsdeletevalue
 
 [Run]
-; The installer already runs elevated, so --install registers the service with
-; no further UAC prompt. net-start failures are non-fatal (AUTO_START picks it
-; up on the next boot).
-Filename: "{app}\Pulse.Index.exe"; Parameters: "--set-index-path ""{code:GetIndexPath}"""; StatusMsg: "正在配置索引位置… / Configuring the index location…"; Flags: runhidden waituntilterminated; Tasks: indexservice
-; Write the machine configuration before starting the service. This avoids
-; launching an initial rebuild and then immediately launching a second rebuild
-; when the index path command reloads an already-running service.
-Filename: "{app}\Pulse.Index.exe"; Parameters: "--install"; StatusMsg: "正在安装全盘索引服务… / Installing the index service…"; Flags: waituntilterminated; Tasks: indexservice
-; --install now starts the service and verifies it stays running. Keep a
-; best-effort net start for older builds that only registered the service.
-Filename: "{cmd}"; Parameters: "/c sc.exe query PulseIndex | findstr /I RUNNING >nul || net start PulseIndex"; Flags: runhidden waituntilterminated; Tasks: indexservice
+; Index configuration runs in CurStepChanged so helper failures are not ignored.
 Filename: "{app}\pulse.exe"; Parameters: "--seed-shell-verbs"; StatusMsg: "正在缓存右键菜单项… / Caching context-menu verbs…"; Flags: runhidden waituntilterminated
 Filename: "{app}\pulse.exe"; Description: "{cm:LaunchProgram,Pulse}"; Flags: nowait postinstall skipifsilent
 
@@ -166,10 +171,12 @@ var
   ConfigPath: String;
 begin
   Result := ExpandConstant('{commonappdata}\Pulse\Index');
-  ConfigPath := ExpandConstant('{commonappdata}\Pulse\Index\config.json');
+  ConfigPath := ExpandConstant('{commonappdata}\Pulse\index-config.json');
+  if not FileExists(ConfigPath) then
+    ConfigPath := ExpandConstant('{commonappdata}\Pulse\Index\config.json');
   if LoadStringFromFile(ConfigPath, Json) then
   begin
-    Result := ReadJsonString(String(Json), 'index_path');
+    Result := ReadJsonString(UTF8Decode(Json), 'index_path');
     if Result = '' then
       Result := ExpandConstant('{commonappdata}\Pulse\Index');
   end;
@@ -365,6 +372,53 @@ begin
   end;
 end;
 
+const
+  PulseUninstallKey =
+    'Software\Microsoft\Windows\CurrentVersion\Uninstall\{A3F47C2E-9D1B-4E58-8C6A-2B5D0F9E1734}_is1';
+
+function PreviousPulseRoot(var Root: Integer): Boolean;
+var
+  Command: String;
+begin
+  Root := HKLM64;
+  Result := RegQueryStringValue(Root, PulseUninstallKey, 'UninstallString', Command);
+  if Result then Exit;
+  Root := HKLM32;
+  Result := RegQueryStringValue(Root, PulseUninstallKey, 'UninstallString', Command);
+  if Result then Exit;
+  Root := HKCU64;
+  Result := RegQueryStringValue(Root, PulseUninstallKey, 'UninstallString', Command);
+  if Result then Exit;
+  Root := HKCU32;
+  Result := RegQueryStringValue(Root, PulseUninstallKey, 'UninstallString', Command);
+end;
+
+function DefaultPulseDirectory(Param: String): String;
+var
+  Root: Integer;
+  Previous: String;
+begin
+  Result := ExpandConstant('{autopf}\Pulse');
+  if not PreviousPulseRoot(Root) then Exit;
+  if not RegQueryStringValue(Root, PulseUninstallKey, 'Inno Setup: App Path', Previous) then
+    RegQueryStringValue(Root, PulseUninstallKey, 'InstallLocation', Previous);
+  if (Previous <> '') and FileExists(AddBackslash(Previous) + 'pulse.exe') then
+  begin
+    Result := RemoveBackslashUnlessRoot(Previous);
+    Log('Reusing registered Pulse directory: ' + Result);
+  end;
+end;
+
+function ReadPreviousUninstallCommand(var CommandLine: String): Boolean;
+var
+  Root: Integer;
+begin
+  CommandLine := '';
+  Result := PreviousPulseRoot(Root);
+  if Result then
+    Result := RegQueryStringValue(Root, PulseUninstallKey, 'UninstallString', CommandLine);
+end;
+
 procedure InitializeWizard;
 begin
   IndexDirPage := CreateInputDirPage(wpSelectTasks,
@@ -373,26 +427,14 @@ begin
     '默认覆盖全部本地 NTFS 固定盘和移动盘。服务器文件夹可稍后在 Pulse 设置中按当前 Windows 用户凭据添加。',
     False, '');
   IndexDirPage.Add('索引目录 / Index directory:');
-  IndexDirPage.Values[0] := ExpandConstant('{commonappdata}\Pulse\Index');
+  IndexDirPage.Values[0] := ConfiguredIndexPath;
+  if IndexDirPage.Values[0] = '' then
+    IndexDirPage.Values[0] := ExpandConstant('{commonappdata}\Pulse\Index');
 end;
 
 function GetIndexPath(Param: String): String;
 begin
   Result := IndexDirPage.Values[0];
-end;
-
-const
-  PulseUninstallKey =
-    'Software\Microsoft\Windows\CurrentVersion\Uninstall\{A3F47C2E-9D1B-4E58-8C6A-2B5D0F9E1734}_is1';
-
-function ReadPreviousUninstallCommand(var CommandLine: String): Boolean;
-begin
-  CommandLine := '';
-  Result := RegQueryStringValue(HKLM64, PulseUninstallKey,
-    'UninstallString', CommandLine);
-  if not Result then
-    Result := RegQueryStringValue(HKLM, PulseUninstallKey,
-      'UninstallString', CommandLine);
 end;
 
 function SplitCommandLine(const CommandLine: String; var FileName,
@@ -544,4 +586,28 @@ begin
   WaitUntilPulseIndexGone;
   WaitUntilPulseIndexServiceGone;
   Result := PreviousUninstallError;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  Code: Integer;
+  IndexExe, Path: String;
+begin
+  if (CurStep <> ssPostInstall) or not WizardIsTaskSelected('indexservice') then
+    Exit;
+  IndexExe := ExpandConstant('{app}\Pulse.Index.exe');
+  WizardForm.StatusLabel.Caption := '正在准备索引服务… / Preparing index service…';
+  Code := -1;
+  if not Exec(IndexExe, '--install', '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then
+  begin
+    SuppressibleMsgBox('索引服务启动失败，错误码：' + IntToStr(Code) +
+      '。软件已安装，可稍后在设置中重试。 / Index service setup failed. Retry in Settings.', mbError, MB_OK, IDOK);
+    Exit;
+  end;
+  Path := RemoveBackslashUnlessRoot(GetIndexPath(''));
+  WizardForm.StatusLabel.Caption := '正在迁移索引… / Moving index…';
+  Code := -1;
+  if not Exec(IndexExe, '--set-index-path "' + Path + '"', '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then
+    SuppressibleMsgBox('索引位置设置未完全完成，错误码：' + IntToStr(Code) +
+      '。请在 Pulse 设置中查看实际位置后重试。 / Index relocation needs attention. Check Settings.', mbError, MB_OK, IDOK);
 end;

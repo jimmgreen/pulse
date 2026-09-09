@@ -157,6 +157,9 @@ public:
     // Open `file` with a specific application (open-with MRU entry).
     void OpenWithApp(const std::wstring& app_exe, const std::wstring& file);
 
+    // Expand a registry command template (%1/%L) and launch it on the open thread.
+    void ExecuteCommand(const std::wstring& command, const std::wstring& path);
+
     // `wt.exe -d <dir>` on the ops worker thread. Compile-verified only.
     void OpenTerminal(const std::wstring& dir);
 

@@ -1,20 +1,18 @@
+#include "../common/windows_compat.h"
 #include "batch_rename_dialog.h"
 #include "FluentTokens.h"
 #include "fluent_components.h"
 #include "typography.h"
 #include "ui_compositor.h"
+#include "window_helpers.h"
 #include "../common/localization.h"
 
 #include <commctrl.h>
-#include <dwmapi.h>
-#include <uxtheme.h>
 #include <windowsx.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <string>
-
-#pragma comment(lib, "uxtheme.lib")
 
 namespace pulse::ui {
 namespace {
@@ -27,110 +25,8 @@ constexpr wchar_t kChipNumbered[] = L"{name} ({n}){ext}";
 constexpr wchar_t kChipPadded[] = L"{name}_{n:3}{ext}";
 constexpr wchar_t kChipExt[] = L"{name}.jpg";
 
-float ScaleDip(float scale, float value) { return value * scale; }
-
 D2D1_RECT_F Rect(float scale, float x, float y, float width, float height) {
-    return D2D1::RectF(ScaleDip(scale, x), ScaleDip(scale, y),
-                       ScaleDip(scale, x + width), ScaleDip(scale, y + height));
-}
-
-bool Contains(const D2D1_RECT_F& rect, float x, float y) {
-    return x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
-}
-
-bool ApplyBackdrop(HWND hwnd, bool dark) {
-    UpdateWindowTheme(hwnd, dark);
-    const DWORD corner = DWMWCP_ROUND;
-    DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
-    const bool high_contrast = IsHighContrast();
-    DWORD backdrop = high_contrast ? DWMSBT_NONE : DWMSBT_TABBEDWINDOW;
-    HRESULT backdrop_result = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE,
-                                                     &backdrop, sizeof(backdrop));
-    if (FAILED(backdrop_result) && backdrop == DWMSBT_TABBEDWINDOW) {
-        backdrop = DWMSBT_MAINWINDOW;
-        backdrop_result = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE,
-                                                &backdrop, sizeof(backdrop));
-    }
-    MARGINS margins{ -1 };
-    DwmExtendFrameIntoClientArea(hwnd, &margins);
-    return !high_contrast && SUCCEEDED(backdrop_result);
-}
-
-void CenterOwnedWindow(HWND hwnd, HWND owner, int width, int height) {
-    RECT anchor{};
-    if (!owner || !GetWindowRect(owner, &anchor)) {
-        MONITORINFO monitor{ sizeof(monitor) };
-        GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor);
-        anchor = monitor.rcWork;
-    }
-    int x = anchor.left + ((anchor.right - anchor.left) - width) / 2;
-    int y = anchor.top + ((anchor.bottom - anchor.top) - height) / 2;
-    HMONITOR monitor_handle = MonitorFromRect(&anchor, MONITOR_DEFAULTTONEAREST);
-    MONITORINFO monitor{ sizeof(monitor) };
-    GetMonitorInfoW(monitor_handle, &monitor);
-    const int work_left = static_cast<int>(monitor.rcWork.left);
-    const int work_top = static_cast<int>(monitor.rcWork.top);
-    const int work_right = static_cast<int>(monitor.rcWork.right);
-    const int work_bottom = static_cast<int>(monitor.rcWork.bottom);
-    x = std::clamp(x, work_left, (std::max)(work_left, work_right - width));
-    y = std::clamp(y, work_top, (std::max)(work_top, work_bottom - height));
-    SetWindowPos(hwnd, HWND_TOP, x, y, width, height, SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-}
-
-LRESULT BorderlessHitTest(HWND hwnd, LPARAM lparam, float title_height,
-                          const D2D1_RECT_F& client_buttons) {
-    POINT point{ GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
-    RECT window{};
-    GetWindowRect(hwnd, &window);
-    const UINT dpi = GetDpiForWindow(hwnd);
-    const int frame_x = GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi)
-                      + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
-    const int frame_y = GetSystemMetricsForDpi(SM_CYSIZEFRAME, dpi)
-                      + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
-    const bool left = point.x < window.left + frame_x;
-    const bool right = point.x >= window.right - frame_x;
-    const bool top = point.y < window.top + frame_y;
-    const bool bottom = point.y >= window.bottom - frame_y;
-    if (top && left) return HTTOPLEFT;
-    if (top && right) return HTTOPRIGHT;
-    if (bottom && left) return HTBOTTOMLEFT;
-    if (bottom && right) return HTBOTTOMRIGHT;
-    if (left) return HTLEFT;
-    if (right) return HTRIGHT;
-    if (top) return HTTOP;
-    if (bottom) return HTBOTTOM;
-    ScreenToClient(hwnd, &point);
-    if (point.y >= 0 && point.y < title_height &&
-        !Contains(client_buttons, static_cast<float>(point.x), static_cast<float>(point.y)))
-        return HTCAPTION;
-    return HTCLIENT;
-}
-
-void BeginSurface(Compositor& compositor, fluent::Painter& painter,
-                  const Theme& theme, bool dark, bool high_contrast, bool backdrop_enabled,
-                  float scale) {
-    auto* dc = compositor.Dc();
-    dc->BeginDraw();
-    dc->Clear(D2D1::ColorF(0, 0.0f));
-    painter.BeginFrame(theme, high_contrast);
-    D2D1_COLOR_F tint = theme.bg;
-    tint.a = high_contrast || !backdrop_enabled ? 1.0f : (dark ? 0.76f : 0.82f);
-    const float width = static_cast<float>(compositor.Width());
-    const float height = static_cast<float>(compositor.Height());
-    painter.FillRoundedRect(D2D1::RectF(0, 0, width, height), 0, tint);
-    const float inset = 0.5f;
-    painter.StrokeRoundedRect(D2D1::RectF(inset, inset, width - inset, height - inset),
-                              12.0f * scale, theme.stroke_card);
-}
-
-void EndSurface(Compositor& compositor) {
-    const HRESULT hr = compositor.Dc()->EndDraw();
-    if (hr == D2DERR_RECREATE_TARGET || hr == DXGI_ERROR_DEVICE_REMOVED ||
-        hr == DXGI_ERROR_DEVICE_RESET || hr == DXGI_ERROR_DRIVER_INTERNAL_ERROR) {
-        compositor.NotifyDeviceLost(hr);
-        return;
-    }
-    compositor.Present();
+    return pulse::ui::DipRect(scale, x, y, width, height);
 }
 
 std::wstring StatusLabel(app::BatchRenameStatus status) {
@@ -152,7 +48,7 @@ public:
         paths_ = paths;
         dark_ = dark;
         accent_ = accent;
-        scale_ = static_cast<float>(GetDpiForWindow(owner ? owner : GetDesktopWindow())) / 96.0f;
+        scale_ = static_cast<float>(pulse::compat::WindowDpi(owner ? owner : GetDesktopWindow())) / 96.0f;
         result_ = {};
 
         WNDCLASSEXW wc{ sizeof(wc) };
@@ -171,7 +67,7 @@ public:
             CW_USEDEFAULT, CW_USEDEFAULT, width, height, owner, nullptr,
             wc.hInstance, this);
         if (!hwnd_) return result_;
-        CenterOwnedWindow(hwnd_, owner_, width, height);
+        pulse::ui::CenterOwnedWindow(hwnd_, owner_, width, height);
         if (owner_) EnableWindow(owner_, FALSE);
         ShowWindow(hwnd_, SW_SHOW);
         LayoutEdits();
@@ -465,17 +361,17 @@ private:
     }
 
     int Hit(float x, float y) const {
-        if (Contains(CloseRect(), x, y)) return 3;
-        if (Contains(ApplyRect(), x, y)) return 1;
-        if (Contains(CancelRect(), x, y)) return 2;
-        if (Contains(IncludeExtRect(), x, y)) return 4;
-        if (Contains(ChipRect(0), x, y)) return 5;
-        if (Contains(ChipRect(1), x, y)) return 6;
-        if (Contains(ChipRect(2), x, y)) return 7;
-        if (Contains(FindField(), x, y)) return 10;
-        if (Contains(ReplaceField(), x, y)) return 11;
-        if (Contains(PatternField(), x, y)) return 12;
-        if (UsesIndex() && Contains(StartField(), x, y)) return 13;
+        if (pulse::ui::ContainsRect(CloseRect(), x, y)) return 3;
+        if (pulse::ui::ContainsRect(ApplyRect(), x, y)) return 1;
+        if (pulse::ui::ContainsRect(CancelRect(), x, y)) return 2;
+        if (pulse::ui::ContainsRect(IncludeExtRect(), x, y)) return 4;
+        if (pulse::ui::ContainsRect(ChipRect(0), x, y)) return 5;
+        if (pulse::ui::ContainsRect(ChipRect(1), x, y)) return 6;
+        if (pulse::ui::ContainsRect(ChipRect(2), x, y)) return 7;
+        if (pulse::ui::ContainsRect(FindField(), x, y)) return 10;
+        if (pulse::ui::ContainsRect(ReplaceField(), x, y)) return 11;
+        if (pulse::ui::ContainsRect(PatternField(), x, y)) return 12;
+        if (UsesIndex() && pulse::ui::ContainsRect(StartField(), x, y)) return 13;
         return 0;
     }
 
@@ -497,7 +393,7 @@ private:
         if (!compositor_.Dc()) return;
         const bool high_contrast = IsHighContrast();
         const Theme theme = high_contrast ? MakeHighContrastTheme() : MakeTheme(dark_, accent_);
-        BeginSurface(compositor_, painter_, theme, dark_, high_contrast, backdrop_enabled_,
+        pulse::ui::BeginSurface(compositor_, painter_, theme, dark_, high_contrast, backdrop_enabled_,
                      scale_);
 
         painter_.DrawText(l10n::Get(l10n::StringId::BatchRename),
@@ -619,14 +515,14 @@ private:
                           can_apply_ ? theme.accent_text : theme.text_secondary,
                           fluent::HorizontalAlignment::Center);
 
-        EndSurface(compositor_);
+        pulse::ui::EndSurface(compositor_);
     }
 
     LRESULT Handle(UINT message, WPARAM wparam, LPARAM lparam) {
         switch (message) {
         case WM_CREATE: {
-            scale_ = static_cast<float>(GetDpiForWindow(hwnd_)) / 96.0f;
-            backdrop_enabled_ = ApplyBackdrop(hwnd_, dark_);
+            scale_ = static_cast<float>(pulse::compat::WindowDpi(hwnd_)) / 96.0f;
+            backdrop_enabled_ = pulse::ui::ApplyBackdrop(hwnd_, dark_);
             if (!compositor_.Init(hwnd_)) return -1;
             compositor_.RecreateTextFormats(scale_);
             painter_.SetCompositor(&compositor_);
@@ -653,7 +549,7 @@ private:
         case WM_NCCALCSIZE:
             return 0;
         case WM_NCHITTEST:
-            return BorderlessHitTest(hwnd_, lparam, 36 * scale_, CloseRect());
+            return pulse::ui::BorderlessHitTest(hwnd_, lparam, 36 * scale_, CloseRect());
         case WM_SIZE:
             if (compositor_.Dc()) compositor_.Resize(LOWORD(lparam), HIWORD(lparam));
             LayoutEdits();

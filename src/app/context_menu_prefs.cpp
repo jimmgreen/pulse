@@ -44,7 +44,7 @@ void ContextMenuPrefs::ResetToDefaults() {
     open_with_com = false;
     system_extra = false;
     print = true;
-    explorer_cap = 12;
+    explorer_cap = ipc::kDefaultExplorerCap;
     open_with_mru = 2;
     item_enabled.clear();
     seen.clear();
@@ -265,7 +265,8 @@ std::wstring ContextMenuPrefs::ToJson() const {
 
 bool ContextMenuPrefs::FromJson(const std::wstring& json) {
     if (json.empty()) return false;
-    explorer_cap = ClampCap(pulse::json::ExtractInt(json, L"explorer_cap", 12), 1, 48, 12);
+    explorer_cap = ClampCap(pulse::json::ExtractInt(json, L"explorer_cap", ipc::kDefaultExplorerCap),
+                            1, 48, ipc::kDefaultExplorerCap);
     open_with_mru = ClampCap(pulse::json::ExtractInt(json, L"open_with_mru", 2), 0, 8, 2);
 
     const std::wstring cats = ExtractObject(json, L"categories");

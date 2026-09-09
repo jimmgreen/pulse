@@ -28,7 +28,7 @@ constexpr GUID kShadowEffectClsid = { 0xC67EA361, 0x1863, 0x4e69,
 constexpr UINT_PTR kAnimTimer = 1;
 constexpr wchar_t kMenuClass[] = L"PulseFluentMenu";
 
-float MeasureWidth(IDWriteFactory3* dwrite, IDWriteTextFormat* format,
+float MeasureWidth(IDWriteFactory2* dwrite, IDWriteTextFormat* format,
                    const std::wstring& text) {
     if (!dwrite || !format || text.empty()) return 0.0f;
     ComPtr<IDWriteTextLayout> layout;
@@ -56,7 +56,7 @@ float SwatchHitRadiusDip(const FluentMenuItem& it) {
     return SwatchStripHasGlyphs(it) ? 20.0f : 13.0f;
 }
 
-ComPtr<IDWriteTextFormat> MakeFormat(IDWriteFactory3* dwrite, float size) {
+ComPtr<IDWriteTextFormat> MakeFormat(IDWriteFactory2* dwrite, float size) {
     ComPtr<IDWriteTextFormat> fmt;
     if (!dwrite) return fmt;
     typography::CreateTextFormat(dwrite,
@@ -77,6 +77,7 @@ namespace {
 
 bool DisplayEqualItem(const FluentMenuItem& a, const FluentMenuItem& b) {
     if (a.text != b.text || a.enabled != b.enabled ||
+        a.shortcut_inline != b.shortcut_inline || a.shortcut != b.shortcut ||
         a.separator_after != b.separator_after ||
         a.children.size() != b.children.size() ||
         a.quick_swatches.size() != b.quick_swatches.size())
@@ -108,7 +109,7 @@ bool FluentMenuModel::PatchCommands(const std::vector<FluentMenuItem>& src) {
     return true;
 }
 
-void FluentMenuModel::Layout(IDWriteFactory3* dwrite, float scale, float min_width_px) {
+void FluentMenuModel::Layout(IDWriteFactory2* dwrite, float scale, float min_width_px) {
     scale_ = std::max(0.25f, scale);
     row_h_ = 36.0f * scale_;     // theme.row_menu
     pad_v_ = 4.0f * scale_;
@@ -126,10 +127,13 @@ void FluentMenuModel::Layout(IDWriteFactory3* dwrite, float scale, float min_wid
     const float right_chrome = content_pad + inset;
     const float shortcut_gap = 24.0f * scale_;
 
+    inline_label_width_ = 0.0f;
     float content_w = 160.0f * scale_;
     for (const auto& it : items_) {
         const float radio_col = it.radio_group ? 12.0f * scale_ : 0.0f;
         const float text_w = std::ceil(MeasureWidth(dwrite, body.get(), it.text) + 2.0f * scale_);
+        if (it.shortcut_inline && !it.shortcut.empty())
+            inline_label_width_ = std::max(inline_label_width_, text_w);
         float w = radio_col + left_chrome + text_w + right_chrome;
         if (!it.children.empty()) {
             w += 26.0f * scale_; // 22px chevron column + 4px gap
@@ -147,6 +151,10 @@ void FluentMenuModel::Layout(IDWriteFactory3* dwrite, float scale, float min_wid
     // stretching the flyout. Command palette passes a larger min_width_px.
     const float max_w = (std::max)(min_width_px, 320.0f * scale_);
     width_ = (int)std::ceil((std::max)(min_width_px, (std::min)(content_w, max_w)));
+
+    const float inline_space = std::max(0.0f, static_cast<float>(width_) -
+        left_chrome - right_chrome - shortcut_gap);
+    inline_label_width_ = std::min({inline_label_width_, 240.0f * scale_, inline_space * 0.4f});
 
     float h = pad_v_ * 2.0f;
     for (const auto& it : items_) {
@@ -376,7 +384,7 @@ bool FluentMenu::RenderSub() {
 
 bool FluentMenu::RenderSurface(const FluentMenuModel& model, int hover_row, int hover_swatch,
                                float header_px, bool draw_filter_field, Surface& s) {
-    ID2D1DeviceContext2* dc = compositor_ ? compositor_->Dc() : nullptr;
+    ID2D1DeviceContext* dc = compositor_ ? compositor_->Dc() : nullptr;
     if (!dc || model.Count() == 0) return false;
 
     const int cw = model.WidthPx();
@@ -463,6 +471,8 @@ bool FluentMenu::RenderSurface(const FluentMenuModel& model, int hover_row, int 
             spec.glyph = it->glyph;
             spec.glyph_scale = it->glyph_scale;
             spec.shortcut = it->shortcut;
+            spec.shortcut_inline = it->shortcut_inline;
+            spec.inline_label_width = model.InlineLabelWidthPx();
             spec.badge_text = it->badge_text;
             spec.has_submenu = !it->children.empty();
             spec.state.enabled = it->enabled;

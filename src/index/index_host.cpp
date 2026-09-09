@@ -13,6 +13,7 @@
 #include "../common/crash_reporter.h"
 #include "../common/diagnostics_exporter.h"
 #include "index_paths.h"
+#include "index_path_service.h"
 #include "network_agent_host.h"
 #include "content_agent.h"
 #include <windows.h>
@@ -210,7 +211,7 @@ std::vector<uint8_t> VolumesPayload() {
     if (g.as_service) LoadMachineConfig(config, nullptr);
     const auto volumes = g.engine.Volumes();
     w.PutU32(g.as_service ? 1u : 0u);
-    w.PutString(g.as_service ? config.index_path : DataDir());
+    w.PutString(DataDir());
     w.PutU32(static_cast<uint32_t>(volumes.size()));
     for (const auto& volume : volumes) {
         w.PutString(volume.id);
@@ -478,7 +479,29 @@ int RunHost(bool as_service, bool test_mode = false,
     SetMachineIndexScope(as_service);
     if (as_service) {
         (void)MachineDataRoot();
-        (void)MachineIndexRoot();
+        IndexConfig config;
+        if (!LoadMachineConfig(config, nullptr)) {
+            ServiceTrace(L"Cannot load index directory configuration");
+            SetSvc(SERVICE_STOPPED, ERROR_INVALID_DATA);
+            return ERROR_INVALID_DATA;
+        }
+        if (!CreateDirectoryW(config.index_path.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
+            const DWORD failure = GetLastError();
+            SetSvc(SERVICE_STOPPED, failure);
+            return static_cast<int>(failure);
+        }
+        SetActiveIndexDirectory(config.index_path);
+        const std::wstring probe = config.index_path + L"\\.pulse-write-check-" +
+            std::to_wstring(GetCurrentProcessId());
+        HANDLE check = CreateFileW(probe.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+            FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
+        if (check == INVALID_HANDLE_VALUE) {
+            const DWORD failure = GetLastError();
+            ServiceTrace(L"Index directory is not writable by the service");
+            SetSvc(SERVICE_STOPPED, failure);
+            return static_cast<int>(failure);
+        }
+        CloseHandle(check);
     }
     g.running = true;
     g.idle_since = GetTickCount64();
@@ -504,6 +527,7 @@ int RunHost(bool as_service, bool test_mode = false,
     if (as_service) SetSvc(SERVICE_RUNNING);
     ServiceTrace(L"service running reported");
     if (g.test_mode) {
+        g.engine.AddForTest(L"C:\\PulseIndexStress\\.codex", L".codex", true);
         for (uint32_t i = 0; i < 50000; ++i) {
             const std::wstring name = L"stress-item-" + std::to_wstring(i) + L".txt";
             g.engine.AddForTest(L"C:\\PulseIndexStress\\" + name, name, false,
@@ -720,6 +744,18 @@ bool ReloadService() {
 
 int ConfigureCommand(const std::vector<std::wstring>& args) {
     if (!IsElevated()) return ERROR_ELEVATION_REQUIRED;
+    struct ConfigurationLock {
+        HANDLE handle = CreateMutexW(nullptr, FALSE, L"Global\\PulseIndexConfiguration");
+        bool locked = false;
+        ~ConfigurationLock() {
+            if (locked) ReleaseMutex(handle);
+            if (handle) CloseHandle(handle);
+        }
+    } configuration_lock;
+    if (!configuration_lock.handle) return static_cast<int>(GetLastError());
+    const DWORD wait = WaitForSingleObject(configuration_lock.handle, 0);
+    configuration_lock.locked = wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED;
+    if (!configuration_lock.locked) return ERROR_BUSY;
     SetMachineIndexScope(true);
     std::wstring error;
     bool ok = false;
@@ -729,7 +765,7 @@ int ConfigureCommand(const std::vector<std::wstring>& args) {
         if (!enabled && !disabled) return ERROR_INVALID_PARAMETER;
         ok = ConfigureVolume(args[2], enabled, &error);
     } else if (args.size() >= 3 && args[1] == L"--set-index-path") {
-        ok = ConfigureIndexPath(args[2], &error);
+        return ConfigureServiceIndexPath(args[2]);
     } else if (args.size() >= 3 && args[1] == L"--configure-exclude") {
         const bool enabled = args.size() >= 4 && args[3] == L"--enable";
         const bool disabled = args.size() >= 4 && args[3] == L"--disable";

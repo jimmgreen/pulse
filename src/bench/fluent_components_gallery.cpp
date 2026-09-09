@@ -1,3 +1,4 @@
+#include "../common/windows_compat.h"
 #include "../ui/fluent_components.h"
 
 #include <windows.h>
@@ -379,7 +380,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     if (FAILED(com_result)) {
         return 3;
     }
-    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    pulse::compat::EnableDpiAwareness();
     WNDCLASSW window_class{};
     window_class.hInstance = instance;
     window_class.lpfnWndProc = GalleryWndProc;

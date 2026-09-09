@@ -22,7 +22,7 @@ struct ControlState {
 };
 
 enum class HorizontalAlignment { Left, Center, Right };
-enum class ButtonKind { Standard, Primary, Transparent, Toggle, TransparentToggle };
+enum class ButtonKind { Standard, Primary, Danger, Transparent, Toggle, TransparentToggle };
 enum class TitleBarButtonRole { Custom, Minimize, Maximize, Restore, Close };
 enum class BadgeKind { Neutral, Accent, Success, Warning, Danger, Keycap };
 enum class SegmentPosition { Single, First, Middle, Last };
@@ -111,6 +111,8 @@ struct MenuItemSpec {
     MenuPictogram pictogram = MenuPictogram::None;
     D2D1_COLOR_F swatch_color{};
     float glyph_scale = 1.0f;
+    bool shortcut_inline = false;
+    float inline_label_width = 0.0f;
 };
 
 struct ScrollbarSpec {
@@ -386,6 +388,10 @@ public:
     float MeasureButtonWidth(std::wstring_view text,
                              std::wstring_view glyph = {},
                              bool drop_down = false) const;
+    float MeasureButtonHeight() const;
+    D2D1_RECT_F FitButtonBounds(D2D1_RECT_F bounds, std::wstring_view text,
+                                std::wstring_view glyph = {},
+                                bool drop_down = false) const;
     void DrawTag(const TagSpec& spec);
     float MeasureTagWidth(std::wstring_view text) const;
     float OmnibarHintReservePx() const;
@@ -466,7 +472,7 @@ private:
     float Px(float dips) const noexcept;
 
     Compositor* compositor_ = nullptr;
-    ID2D1DeviceContext2* dc_ = nullptr;
+    ID2D1DeviceContext* dc_ = nullptr;
     const Theme* theme_ = nullptr;
     float scale_ = 1.0f;
     bool high_contrast_ = false;

@@ -12,6 +12,8 @@ struct AppPrefs {
     bool keep_running_on_close = false;
     bool open_folders_in_pulse = false;
     bool verify_copies = false;
+    bool show_status_performance = false;
+    bool show_hidden_files = false;
     // system / zh-CN / en-US
     std::wstring language = L"system";
     // none / acrylic-material / mica / mica-alt  (legacy dwm-blur → acrylic)
@@ -24,6 +26,9 @@ struct AppPrefs {
     // Tag colors the user added via the custom color dialog (0xRRGGBB),
     // appended after the seven Finder defaults in the swatch strip.
     std::vector<uint32_t> custom_tag_colors;
+    int duplicate_scan_scope = 0; // 0 folder, 1 drive, 2 all local disks
+    std::wstring duplicate_scan_folder;
+    std::wstring duplicate_scan_drive;
 
     void ResetToDefaults();
     bool Load();

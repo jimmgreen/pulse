@@ -51,11 +51,26 @@ std::vector<uint8_t> RequestPayload(const ContentSearchRequest& request) {
     writer.PutU32(static_cast<uint32_t>(request.mode));
     uint32_t flags = request.recursive ? 1u : 0u;
     if (request.case_sensitive) flags |= 2u;
+    if (request.skip_system_locations) flags |= 4u;
+    if (request.whole_word) flags |= 8u;
     writer.PutU32(flags);
     writer.PutU64(request.maximum_file_bytes);
     writer.PutU32(static_cast<uint32_t>(request.maximum_hits));
-    writer.PutString(request.root);
+    std::vector<std::wstring> roots = request.roots;
+    if (roots.empty() && !request.root.empty()) roots.push_back(request.root);
+    writer.PutString(roots.empty() ? std::wstring{} : roots.front());
     writer.PutString(request.needle);
+    writer.PutU64(request.minimum_file_bytes);
+    const uint32_t extra = roots.size() > 1 ? static_cast<uint32_t>(roots.size() - 1) : 0;
+    writer.PutU32(extra);
+    for (uint32_t i = 0; i < extra; ++i) writer.PutString(roots[i + 1]);
+    writer.PutU32(static_cast<uint32_t>(request.match_mode));
+    writer.PutU32(static_cast<uint32_t>(request.needles.size()));
+    for (const auto& needle : request.needles) writer.PutString(needle);
+    writer.PutU32(static_cast<uint32_t>(request.excluded_needles.size()));
+    for (const auto& needle : request.excluded_needles) writer.PutString(needle);
+    writer.PutU32(static_cast<uint32_t>(request.candidate_paths.size()));
+    for (const auto& path : request.candidate_paths) writer.PutString(path);
     return writer.data();
 }
 
@@ -63,15 +78,20 @@ bool ParseUpdate(const std::vector<uint8_t>& payload, ContentSearchUpdate& updat
     ipc::PayloadReader reader(payload.data(), payload.size());
     uint32_t flags = 0;
     uint32_t error = 0;
+    uint32_t phase = 0;
     uint32_t count = 0;
     if (!reader.GetU64(update.progress.generation) ||
         !reader.GetU64(update.progress.scanned_files) ||
         !reader.GetU64(update.progress.scanned_bytes) ||
-        !reader.GetU32(flags) || !reader.GetU32(error) || !reader.GetU32(count) ||
+        !reader.GetU32(flags) || !reader.GetU32(error) ||
+        !reader.GetU32(phase) || !reader.GetU64(update.progress.total_files) ||
+        !reader.GetString(update.progress.current_root) || !reader.GetU32(count) ||
         count > 10000) return false;
     update.progress.done = (flags & 1u) != 0;
     update.progress.truncated = (flags & 2u) != 0;
     update.progress.error = error;
+    update.progress.phase = phase <= static_cast<uint32_t>(ContentSearchPhase::Hashing)
+        ? static_cast<ContentSearchPhase>(phase) : ContentSearchPhase::Enumerating;
     update.hits.reserve(count);
     for (uint32_t i = 0; i < count; ++i) {
         ContentHit hit;

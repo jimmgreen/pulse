@@ -27,6 +27,7 @@ void DeliverIndexSearchResult(AppState& s, uint32_t id,
 void AcceptIndexProviderResult(AppState& s, uint32_t id,
                                       index::SearchResult&& result, bool network);
 void MaybePrefetchSearchPage(AppState& s);
+void CancelActiveContentSearch(AppState& s, app::Tab& tab);
 void LoadVirtualView(AppState& s, app::Tab& tab, const std::wstring& path);
 void StartLoadingPath(AppState& s, app::Tab& tab, const std::wstring& path);
 void ApplyWorkerResult(AppState& s, app::WorkResult& res);
@@ -52,6 +53,7 @@ void TransferToTarget(AppState& s, bool move);
 void CycleFocus(AppState& s);
 void MarkTargetPane(AppState& s);
 void SortBy(AppState& s, ui::SortColumn col);
+void SetSort(AppState& s, ui::SortColumn col, ui::SortDirection direction);
 void OpenSelected(AppState& s);
 void GoUp(AppState& s);
 void GoBack(AppState& s);

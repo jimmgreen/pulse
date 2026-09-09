@@ -218,6 +218,67 @@ int wmain(int argc, wchar_t** argv) {
         Check(QueryPrimaryNameLen(ParseQuery(L"a")) == 1, L"query: single-char needle length");
         Check(QueryIsSimpleName(ParseQuery(L"pulse")), L"query: simple name token");
         Check(!QueryIsSimpleName(ParseQuery(L"ext:pdf")), L"query: ext filter is not simple name");
+        const auto content_q = ParseQuery(L"report content:\u53d1\u7968");
+        Check(QueryHasContent(content_q) && QueryHasNameFilter(content_q) &&
+                  content_q.content.needles.size() == 1,
+              L"query: content term is split from filename");
+        Check(FilenameQueryText(L"report content:\u53d1\u7968") == L"report",
+              L"query: filename text strips content tokens");
+        const auto kind_q = ParseQuery(L"\u7c7b\u578b:\u6587\u6863");
+        Check(QueryHasExtFilter(kind_q) && !kind_q.groups.empty() &&
+                  !kind_q.groups[0][0].exts.empty(),
+              L"query: Chinese type:document expands to extensions");
+        const auto colon_q = ParseQuery(L"\u5185\u5bb9\uff1aTODO");
+        Check(QueryHasContent(colon_q) && !colon_q.content.needles.empty(),
+              L"query: fullwidth colon content alias");
+        const auto phrase_q = ParseQuery(L"content:\"hello world\"");
+        Check(phrase_q.content.mode == ContentMatchMode::Phrase &&
+                  phrase_q.content.needles.size() == 1,
+              L"query: quoted content is a phrase");
+        const auto path_q = ParseQuery(L"content:foo path:C:\\Users\\SS");
+        Check(path_q.path_prefix.size() >= 3 && QueryHasContent(path_q) &&
+                  FilenameQueryText(L"content:foo path:C:\\Users\\SS").find(L"path:") ==
+                      std::wstring::npos,
+              L"query: absolute path: becomes path_prefix");
+        const auto long_path_q = ParseQuery(L"path:\\\\?\\C:\\Users\\SS\\Desktop");
+        Check(long_path_q.path_prefix.find(L"\\\\?\\") == std::wstring::npos &&
+                  long_path_q.path_prefix.find(L"C:\\Users\\SS\\Desktop") != std::wstring::npos,
+              L"query: \\\\?\\ path prefix is stripped");
+        const auto two_path_q = ParseQuery(L"path:C:\\a path:C:\\b");
+        bool saw_second_path = false;
+        for (const auto& group : two_path_q.groups) {
+            for (const auto& term : group) {
+                if (term.name_in_path && term.name.find(L"c:\\b") != std::wstring::npos)
+                    saw_second_path = true;
+            }
+        }
+        Check(two_path_q.path_prefix.find(L"C:\\a") != std::wstring::npos && saw_second_path,
+              L"query: extra absolute path: is kept as a path filter");
+        const auto not_path_q = ParseQuery(L"!path:C:\\skip");
+        bool saw_not_path = false;
+        for (const auto& group : not_path_q.groups) {
+            for (const auto& term : group) {
+                if (term.name_in_path && term.name_not) saw_not_path = true;
+            }
+        }
+        Check(not_path_q.path_prefix.empty() && saw_not_path,
+              L"query: negated absolute path: is kept as an exclusion");
+        SYSTEMTIME now{};
+        GetLocalTime(&now);
+        wchar_t month_tok[32]{};
+        swprintf_s(month_tok, L"dm:%04u-%02u", now.wYear, now.wMonth);
+        const auto month_q = ParseQuery(L"dm:thismonth");
+        const auto ymd_q = ParseQuery(month_tok);
+        Check(!month_q.groups.empty() && !month_q.groups[0].empty() &&
+                  !ymd_q.groups.empty() && !ymd_q.groups[0].empty() &&
+                  month_q.groups[0][0].date_lo == ymd_q.groups[0][0].date_lo &&
+                  month_q.groups[0][0].date_hi == ymd_q.groups[0][0].date_hi,
+              L"query: thismonth matches the calendar month");
+        const auto quoted_wild = ParseQuery(L"\"annual report*\"");
+        Check(!quoted_wild.groups.empty() && !quoted_wild.groups[0].empty() &&
+                  quoted_wild.groups[0][0].name_how == NameHow::Wildcard,
+              L"query: quoted wildcard is a wildcard not an exact name");
+    }
     Check(QueryCanNarrow(L"p", L"pu") && QueryCanNarrow(L"pu", L"pul"),
           L"query: incremental typing can narrow");
 
@@ -296,7 +357,6 @@ int wmain(int argc, wchar_t** argv) {
     DeleteFileW(v9_paths.base_b.c_str());
     RemoveDirectoryW(v9_paths.directory.c_str());
     RemoveDirectoryW(v9_root.c_str());
-    }
 
     if (argc == 3 && wcscmp(argv[1], L"--network-root") == 0)
         RunNetworkIntegration(argv[2]);

@@ -1,3 +1,4 @@
+#include "../common/windows_compat.h"
 #include "settings_controller.h"
 #include "../index/index_client.h"
 #include "../index/network_agent_client.h"
@@ -28,6 +29,7 @@ int SettingsController::PageFromName(std::wstring_view name) noexcept {
     if (name == L"index") return 1;
     if (name == L"context") return 2;
     if (name == L"about") return 3;
+    if (name == L"duplicates") return 4;
     return 0;
 }
 
@@ -35,11 +37,12 @@ const wchar_t* SettingsController::PageName(int page) noexcept {
     if (page == 1) return L"index";
     if (page == 2) return L"context";
     if (page == 3) return L"about";
+    if (page == 4) return L"duplicates";
     return L"general";
 }
 
 void SettingsController::SelectPage(int page) noexcept {
-    page_ = std::clamp(page, 0, 3);
+    page_ = std::clamp(page, 0, 4);
     scroll_ = 0.0f;
 }
 
@@ -66,6 +69,11 @@ bool SettingsController::diagnostics_pending() const noexcept {
     return task_state_->diagnostics_pending;
 }
 
+bool SettingsController::migration_pending() const noexcept {
+    std::lock_guard<std::mutex> lock(task_state_->mutex);
+    return task_state_->migration_pending;
+}
+
 bool SettingsController::StartTask(SettingsTask task, SettingsTaskOperation operation,
                                    SettingsTaskCompletion completion) {
     if (!operation || !completion) return false;
@@ -84,6 +92,7 @@ bool SettingsController::StartTask(SettingsTask task, SettingsTaskOperation oper
                 (task.kind == SettingsTaskKind::Volume && task.key.empty()) ||
                 (task.kind == SettingsTaskKind::Exclude && task.path.empty())) return false;
             task_state_->local_pending = true;
+            task_state_->migration_pending = task.kind == SettingsTaskKind::ConfigureIndexPath;
             task_state_->diagnostics_pending =
                 task.kind == SettingsTaskKind::DiagnosticsExport;
             if (task.kind == SettingsTaskKind::Volume)
@@ -112,6 +121,7 @@ bool SettingsController::StartTask(SettingsTask task, SettingsTaskOperation oper
         } else {
             std::lock_guard<std::mutex> lock(state->mutex);
             state->local_pending = false;
+            state->migration_pending = false;
             state->diagnostics_pending = false;
             if (task.kind == SettingsTaskKind::Volume)
                 state->pending_volume.clear();
@@ -123,6 +133,7 @@ bool SettingsController::StartTask(SettingsTask task, SettingsTaskOperation oper
         if (network) state->network_pending = false;
         else {
             state->local_pending = false;
+            state->migration_pending = false;
             state->diagnostics_pending = false;
             state->pending_volume.clear();
         }
@@ -150,7 +161,7 @@ bool SettingsController::StartUiTask(SettingsTask task) {
         case SettingsTaskKind::RebuildIndex:
             return index::IndexClient::RebuildElevated();
         case SettingsTaskKind::ConfigureIndexPath:
-            return index::IndexClient::ConfigureIndexPathElevated(value.path);
+            return index::IndexClient::ConfigureIndexPathElevated(value.path, &error);
         case SettingsTaskKind::NetworkAdd:
             return network->AddRoot(value.path, &error);
         case SettingsTaskKind::NetworkRemove:
@@ -169,6 +180,7 @@ bool SettingsController::StartUiTask(SettingsTask task) {
 SettingsTaskEffect SettingsController::CompleteTask(const SettingsTaskResult& result,
                                                     bool service_installed) {
     SettingsTaskEffect effect;
+    if (result.task.kind == SettingsTaskKind::ConfigureIndexPath) effect.refresh_index = true;
     if (result.ok) {
         error_.clear();
         if (result.task.kind == SettingsTaskKind::NetworkAdd && result.task.pin)
@@ -228,6 +240,7 @@ void SettingsController::SaveAndApply(SettingsEffect effect) const {
 }
 
 void SettingsController::WindowEffect(std::wstring_view effect_id) {
+    if (!compat::ModernWindows() && effect_id != L"none") return;
     static constexpr std::wstring_view ids[] = {
         L"none", L"acrylic-material", L"mica", L"mica-alt"
     };
@@ -296,6 +309,12 @@ void SettingsController::ToggleUi(int index) {
     } else if (index == 3) {
         prefs_->ApplyFolderOpen(!prefs_->open_folders_in_pulse);
         SaveAndApply(SettingsEffect::None);
+    } else if (index == 4) {
+        prefs_->show_status_performance = !prefs_->show_status_performance;
+        SaveAndApply(SettingsEffect::StatusBarPerformance);
+    } else if (index == 5) {
+        prefs_->show_hidden_files = !prefs_->show_hidden_files;
+        SaveAndApply(SettingsEffect::FileVisibility);
     } else if (index >= 10 && index < 15) {
         static constexpr ipc::CtxMenuGroup groups[] = {
             ipc::CtxMenuGroup::Software, ipc::CtxMenuGroup::OpenWith,
@@ -350,6 +369,7 @@ void SettingsController::RemoveExclude(int position) {
 
 void SettingsController::IndexAction(int action) {
     if (!index_) return;
+    if (action != 1 && migration_pending()) return;
     if (action == 1) {
         const std::wstring path = index_->IndexPath();
         if (!path.empty() && ui_.open_path) ui_.open_path(path);

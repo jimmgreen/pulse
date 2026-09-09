@@ -181,11 +181,19 @@ void DeltaLog::QueueUsn(uint64_t journal_id, int64_t next_usn) {
 }
 
 bool DeltaLog::Flush() {
-    if (pending_.empty() || file_ == INVALID_HANDLE_VALUE) return true;
-    if (!WriteAll(file_, pending_.data(), pending_.size())) return false;
+    if (pending_.empty()) return true;
+    if (file_ == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER committed{};
+    committed.QuadPart = static_cast<LONGLONG>(bytes_on_disk_);
+    if (!SetFilePointerEx(file_, committed, nullptr, FILE_BEGIN)) return false;
+    if (!WriteAll(file_, pending_.data(), pending_.size()) || !SetEndOfFile(file_) || !FlushFileBuffers(file_)) {
+        // Retry from the last committed boundary, never append after a partial record.
+        if (SetFilePointerEx(file_, committed, nullptr, FILE_BEGIN)) SetEndOfFile(file_);
+        return false;
+    }
     bytes_on_disk_ += pending_.size();
     pending_.clear();
-    return FlushFileBuffers(file_) != FALSE;
+    return true;
 }
 
 bool DeltaLog::Replay(const std::wstring& path, uint64_t expected_built, ReplayFn fn) {

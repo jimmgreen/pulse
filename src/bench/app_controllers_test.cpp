@@ -103,7 +103,9 @@ int wmain() {
         SettingsController::PageFromName(L"index") == 1 &&
         std::wstring(SettingsController::PageName(2)) == L"context" &&
         SettingsController::PageFromName(L"about") == 3 &&
-        std::wstring(SettingsController::PageName(3)) == L"about");
+        std::wstring(SettingsController::PageName(3)) == L"about" &&
+        SettingsController::PageFromName(L"duplicates") == 4 &&
+        std::wstring(SettingsController::PageName(4)) == L"duplicates");
 
     pulse::app::SettingsTaskResult completed_task;
     completed_task.task.kind = pulse::app::SettingsTaskKind::InstallService;
@@ -165,12 +167,21 @@ int wmain() {
     settings_ui.ToggleUi(2);
     passed &= Report("settings close behavior requests tray synchronization",
         prefs.keep_running_on_close && HasEffect(last_effect, SettingsEffect::TrayVisibility));
+    settings_ui.ToggleUi(4);
+    passed &= Report("settings status performance toggle persists",
+        prefs.show_status_performance &&
+        HasEffect(last_effect, SettingsEffect::StatusBarPerformance));
     settings_ui.WindowEffect(L"mica-alt");
     settings_ui.RowHeight(0);
     settings_ui.AccentChoice(false, 0x2468AC);
     passed &= Report("settings UI controller routes preference commands",
         prefs.window_effect == L"mica-alt" && prefs.row_height == 28 &&
-        prefs.accent_rgb == L"2468AC" && applied_effects == 9);
+        prefs.accent_rgb == L"2468AC" && applied_effects == 10);
+    settings_ui.ToggleUi(5);
+    passed &= Report("settings hidden visibility toggle persists and refreshes panes",
+        prefs.show_hidden_files && HasEffect(last_effect, SettingsEffect::FileVisibility));
+    settings_ui.ToggleUi(5);
+    passed &= Report("settings hidden visibility toggle is reversible", !prefs.show_hidden_files);
     settings_ui.Wallpaper(0);
     passed &= Report("settings UI controller owns image selection flow",
         picked_image);
@@ -381,6 +392,27 @@ int wmain() {
     }
     passed &= Report("settings async task releases network pending state",
         !settings.network_pending());
+
+    {
+        SettingsController migration_ui;
+        pulse::app::SettingsTask task;
+        task.kind = pulse::app::SettingsTaskKind::ConfigureIndexPath;
+        task.path = L"D:\\Index";
+        bool pending_seen = false;
+        pulse::app::SettingsTaskResult result;
+        pulse::app::SettingsControllerTestPeer::Start(migration_ui, task,
+            [&](const pulse::app::SettingsTask&, std::wstring& error) {
+                pending_seen = migration_ui.migration_pending();
+                error = L"cleanup warning";
+                return false;
+            }, [&](pulse::app::SettingsTaskResult completed) { result = std::move(completed); });
+        migration_ui.Stop();
+        passed &= Report("migration displays pending state and clears it on failure",
+            pending_seen && !migration_ui.migration_pending());
+        const auto effect = migration_ui.CompleteTask(result, true);
+        passed &= Report("migration failure preserves message and refreshes actual location",
+            effect.refresh_index && migration_ui.error() == L"cleanup warning");
+    }
 
     bool lifecycle_completed = false;
     {

@@ -172,7 +172,8 @@ void ContextMenuController::StartQuery(
                                   prefs.DisabledHandlerClsids());
     paths_ = std::move(paths);
     background_ = background;
-    extension_ = background ? std::wstring{} : std::move(extension);
+    extension_ = std::move(extension);
+    if (background && extension_.empty()) extension_ = ipc::kBackgroundVerbKey;
     token_ = token;
     com_ready_ = false;
     com_items_.clear();
@@ -252,18 +253,30 @@ bool ContextMenuController::ExecuteShellCommand(
         return true;
     }
     if (command >= CmdShellStaticBase && command < CmdShellComBase) {
-        const size_t index = static_cast<size_t>(command - CmdShellStaticBase);
+        const int packed = command - CmdShellStaticBase;
+        const size_t index = static_cast<size_t>(packed / ipc::kStaticVerbStride);
+        const int child = packed % ipc::kStaticVerbStride;
         if (index < static_verbs_.size()) {
-            const StaticVerb& verb = static_verbs_[index];
+            const StaticVerb* verb = &static_verbs_[index];
+            if (child > 0) {
+                const size_t ci = static_cast<size_t>(child - 1);
+                if (ci < verb->children.size()) verb = &verb->children[ci];
+                else verb = nullptr;
+            }
             constexpr size_t kMaxTargets = 16;
-            for (size_t i = 0; i < paths_.size() && i < kMaxTargets; ++i) {
-                if (!verb.app_path.empty()) {
-                    if (operations_.open_with_app)
-                        operations_.open_with_app(verb.app_path, paths_[i]);
-                } else if (operations_.execute_verb) {
-                    operations_.execute_verb(paths_[i], verb.verb);
+            if (verb) {
+                for (size_t i = 0; i < paths_.size() && i < kMaxTargets; ++i) {
+                    if (!verb->app_path.empty()) {
+                        if (operations_.open_with_app)
+                            operations_.open_with_app(verb->app_path, paths_[i]);
+                    } else if (!verb->command.empty()) {
+                        if (operations_.execute_command)
+                            operations_.execute_command(verb->command, paths_[i]);
+                    } else if (operations_.execute_verb) {
+                        operations_.execute_verb(paths_[i], verb->verb);
+                    }
+                    if (verb->verb == L"openas") break;
                 }
-                if (verb.verb == L"openas") break;
             }
         }
         Close();
@@ -339,11 +352,28 @@ std::vector<ShellMenuEntry> ContextMenuController::ComposeEntries(
     ContextMenuPrefs& prefs, bool& prefs_changed) const {
     std::vector<ShellMenuEntry> entries;
     entries.reserve(static_verbs_.size() + com_items_.size());
-    for (size_t i = 0; i < static_verbs_.size(); ++i) {
+    for (size_t i = 0; i < static_verbs_.size() && i < static_cast<size_t>(ipc::kMaxStaticVerbParents);
+         ++i) {
+        const auto& verb = static_verbs_[i];
         ShellMenuEntry entry;
-        entry.command = CmdShellStaticBase + static_cast<int>(i);
-        entry.text = static_verbs_[i].display;
-        entry.verb = static_verbs_[i].verb;
+        entry.text = verb.display;
+        entry.verb = verb.verb;
+        if (!verb.children.empty()) {
+            entry.command = 0;
+            const size_t n = (std::min)(verb.children.size(),
+                                        static_cast<size_t>(ipc::kMaxSubmenuChildren));
+            for (size_t j = 0; j < n; ++j) {
+                ShellMenuEntry child;
+                child.command = CmdShellStaticBase +
+                    static_cast<int>(i) * ipc::kStaticVerbStride + static_cast<int>(j) + 1;
+                child.text = verb.children[j].display;
+                child.verb = verb.children[j].verb;
+                entry.children.push_back(std::move(child));
+            }
+        } else {
+            entry.command = CmdShellStaticBase +
+                static_cast<int>(i) * ipc::kStaticVerbStride;
+        }
         entries.push_back(std::move(entry));
     }
     for (size_t i = 0; i < com_items_.size(); ++i) {

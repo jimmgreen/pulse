@@ -68,6 +68,7 @@ struct ListEntryView {
     D2D1_COLOR_F badge_color{};
     D2D1_COLOR_F tag_dots[3]{};
     int tag_dot_count = 0;
+    std::wstring snippet;
 };
 
 struct RowPresentationCache {
@@ -100,6 +101,7 @@ struct PaneViewModel {
     std::unordered_set<std::wstring> cut_names;
     std::shared_ptr<const TagDots> tag_dots;
     bool loading = false;
+    bool search_retaining_results = false;
     bool can_go_back = false;
     bool can_go_forward = false;
     bool can_go_up = false;
@@ -110,6 +112,9 @@ struct PaneViewModel {
     bool is_recent = false;
     bool is_recycle = false;
     bool is_search = false;   // search results add a display-only 路径 column
+    bool is_query_search = false;
+    std::wstring search_query;
+    std::shared_ptr<const std::vector<std::wstring>> search_snippets;
     int recent_filter = 0;
     size_t recent_total = 0;
     std::wstring date_column_label;
@@ -143,13 +148,14 @@ struct PaneViewModel {
     }
 
     size_t EntryCount() const {
+        if (filter_map) return filter_map->size();
         if (!filter_text.empty()) return filter_map ? filter_map->size() : 0;
         return snapshot ? snapshot->size() : entries.size();
     }
 
     int SourceIndex(int view_row) const {
         if (view_row < 0) return -1;
-        if (!filter_text.empty()) {
+        if (filter_map || !filter_text.empty()) {
             if (!filter_map || view_row >= static_cast<int>(filter_map->size())) return -1;
             return (*filter_map)[static_cast<size_t>(view_row)];
         }
@@ -158,7 +164,7 @@ struct PaneViewModel {
 
     int ViewIndex(int source_index) const {
         if (source_index < 0) return -1;
-        if (filter_text.empty()) return source_index;
+        if (!filter_map && filter_text.empty()) return source_index;
         if (!filter_map) return -1;
         const auto it = std::lower_bound(filter_map->begin(), filter_map->end(), source_index);
         return it != filter_map->end() && *it == source_index
@@ -288,7 +294,7 @@ struct DetailsHitRects {
 struct StatusBarView {
     std::wstring status_text;
     std::wstring selection_text;
-    std::wstring mode_text;
+    std::wstring hint_text;        // contextual shortcut / hover prompt
     std::wstring task_text;        // active/completed op summary; empty = idle
     float task_progress = -1.0f;   // 0..100 while an op runs; <0 hides the bar
     std::wstring performance_text; // development diagnostics; empty hides it
@@ -334,6 +340,24 @@ struct NetworkRootRowView {
     bool building = false;
 };
 
+struct DuplicateFileView {
+    std::wstring name;
+    std::wstring path;
+    std::wstring detail;
+    bool keep = false;
+};
+
+struct DuplicateGroupView {
+    std::wstring title;
+    std::vector<DuplicateFileView> files;
+};
+
+struct DuplicateDriveView {
+    std::wstring label;
+    std::wstring root;
+    bool selected = false;
+};
+
 struct WindowViewModel {
     std::wstring window_title;
     std::vector<TabView> tabs;
@@ -373,6 +397,7 @@ struct WindowViewModel {
     float drag_badge_y = 0.0f;
     int hover_region = 0;         // numeric HitTestResult::Region
     int hover_control_index = -1;
+    int hover_sub_index = -1;
     std::wstring tooltip_text;
     float tooltip_x = 0.0f;
     float tooltip_y = 0.0f;
@@ -385,6 +410,12 @@ struct WindowViewModel {
     std::wstring background_image;
     bool safe_mode = false;
     bool address_editing = false;
+    bool address_searching = false;
+    bool address_search_current = false;
+    bool address_search_has_text = false;
+    std::wstring address_search_text;
+    float address_search_animation = 0.0f;
+    float address_scope_animation = 0.0f;
     bool filter_editing = false;
     bool splitter_pressed = false;
     bool details_resize_pressed = false;
@@ -392,10 +423,11 @@ struct WindowViewModel {
     int hover_pane_index = -1;
 
     bool settings_open = false;
-    int settings_page = 0; // 0 general, 1 search/index, 2 context menu, 3 about
+    int settings_page = 0; // 0 general, 1 search/index, 2 context menu, 3 about, 4 duplicates
     float settings_scroll = 0.0f;
     bool settings_launch_on_startup = false;
     bool settings_keep_running = false;
+    bool settings_show_hidden_files = false;
     bool settings_open_folders = false;
     int settings_row_height = 34; // current row-height pref (DIPs) for density radios
     int settings_tray_icon = 48;  // current tray-deck icon pref (DIPs) for size radios
@@ -407,6 +439,7 @@ struct WindowViewModel {
     bool settings_index_installed = false;
     std::wstring settings_index_status;
     std::wstring settings_index_path;
+    bool settings_index_migrating = false;
     std::wstring settings_index_error;
     std::vector<IndexVolumeRowView> settings_index_volumes;
     std::vector<std::wstring> settings_index_excluded_paths;
@@ -420,6 +453,24 @@ struct WindowViewModel {
     bool settings_update_checking = false;
     bool settings_update_available = false;
     bool settings_diagnostics_exporting = false;
+    bool settings_show_performance = false;
+    int dup_scope = 0;
+    std::wstring dup_folder;
+    std::vector<DuplicateDriveView> dup_drives;
+    int dup_min_size = 0;
+    bool dup_scanning = false;
+    bool dup_can_scan = false;
+    bool dup_show_progress = false;
+    bool dup_progress_indeterminate = false;
+    float dup_progress_value = 0.0f;
+    float dup_animation = 0.0f;
+    std::wstring dup_status;
+    std::wstring dup_speed;
+    std::wstring dup_hint;
+    std::wstring dup_empty;
+    bool dup_show_delete_all = false;
+    std::wstring dup_delete_all;
+    std::vector<DuplicateGroupView> dup_groups;
 };
 
 struct HitTestResult {
@@ -449,6 +500,10 @@ struct HitTestResult {
         PaneMediumIcons,
         PaneViewButton,
         AddressBar,
+        AddressSearch,
+        AddressSearchScope,
+        AddressSearchClear,
+        AddressSearchClose,
         BreadcrumbSegment,
         ColumnHeader,
         ColumnDivider,
@@ -488,6 +543,7 @@ struct HitTestResult {
         DetailsPreview,
         DetailsResize,
         StatusBar,
+        StatusBarTask,
         SettingsNav,
         SettingsToggle,
         SettingsRestore,
@@ -504,7 +560,18 @@ struct HitTestResult {
         SettingsNetworkAction,
         SettingsNetworkRemove,
         SettingsDiagnosticsAction,
-        SettingsUpdateAction
+        SettingsUpdateAction,
+        SettingsDupScope,
+        SettingsDupDrive,
+        SettingsDupBrowse,
+        SettingsDupScan,
+        SettingsDupCancel,
+        SettingsDupMinSize,
+        SettingsDupKeep,
+        SettingsDupOpen,
+        SettingsDupGroupDelete,
+        SettingsDupDeleteAll,
+        SearchFilter
     } region = None;
     int index = -1;          // tab/row/sidebar item/tray batch/tray item.
     int sub_index = -1;      // tray item inside batch, breadcrumb segment.
@@ -531,6 +598,7 @@ public:
     float PaneHeaderHeight() const { return pane_header_height_; }
     float ColumnHeaderHeight() const { return column_header_height_; }
     float RowHeight() const { return row_height_; }
+    float ListRowHeightDip(const PaneViewModel& vm) const;
     // File-list row height preference (DIPs); survives SetScale recompute.
     void SetRowHeightDip(float dip) {
         row_height_dip_ = std::clamp(dip, 24.0f, 48.0f);
@@ -610,7 +678,8 @@ public:
                              float scroll_x = 0.0f, size_t item_count = 0,
                              const std::array<float, 3>& column_dividers = {},
                              bool search_view = false,
-                             const std::array<float, 4>& search_dividers = {}) const;
+                             const std::array<float, 4>& search_dividers = {},
+                             float row_height_px = 0.0f) const;
     bool PointInItemName(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds,
                          int source_index, float x, float y) const;
     // Exact geometry of the Fluent frame drawn for the rename row; the hosted
@@ -622,6 +691,8 @@ public:
     D2D1_RECT_F TitleBarRect(float w) const;
     D2D1_RECT_F ToolbarRect(float w) const;
     D2D1_RECT_F AddressBarRect(float w) const;
+    D2D1_RECT_F AddressSearchButtonRect(float w) const;
+    void DrawAddressSearchChrome(const WindowViewModel& vm, float w, const Theme& theme);
     float NewButtonWidthPx(bool compact) const;
 
     // One placed breadcrumb segment (after left-truncation to fit the bar).

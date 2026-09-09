@@ -28,11 +28,12 @@ struct TextFormatSpec {
 };
 
 const wchar_t* LocaleName() noexcept;
+bool HasIconFont(IDWriteFactory2* factory);
 const wchar_t* PreferredTextFamily() noexcept;
-HRESULT CreateTextFormat(IDWriteFactory3* factory, const TextFormatSpec& spec,
+HRESULT CreateTextFormat(IDWriteFactory2* factory, const TextFormatSpec& spec,
                          IDWriteTextFormat** format);
-HRESULT CreateRenderingParams(IDWriteFactory3* factory, HMONITOR monitor,
-                              IDWriteRenderingParams3** params);
+HRESULT CreateRenderingParams(IDWriteFactory2* factory, HMONITOR monitor,
+                              IDWriteRenderingParams2** params);
 
 // Invalidate language-dependent fallback and measurement caches.
 void InvalidateCaches();
@@ -47,12 +48,16 @@ D2D1_RECT_F SnapVerticalBounds(const D2D1_RECT_F& bounds) noexcept;
 float InkPad(IDWriteTextFormat* format) noexcept;
 
 // DWrite advance plus right overhang. Empty text is 0.
-float MeasureAdvance(IDWriteFactory3* factory, IDWriteTextFormat* format,
+float MeasureAdvance(IDWriteFactory2* factory, IDWriteTextFormat* format,
                      std::wstring_view text);
 
 // max(DWrite, Luma) plus InkPad so a size-to-content box does not shave
 // the last glyph. Falls back to MeasureAdvance when Luma is off.
 float MeasureLine(Compositor* compositor, IDWriteTextFormat* format,
                   std::wstring_view text);
+
+// Wrapped block height at `width`. Newlines are paragraph breaks.
+float MeasureWrapped(IDWriteFactory2* factory, IDWriteTextFormat* format,
+                     std::wstring_view text, float width);
 
 } // namespace pulse::ui::typography

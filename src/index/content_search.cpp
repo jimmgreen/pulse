@@ -8,9 +8,10 @@
 #include <chrono>
 #include <cstring>
 #include <cwctype>
-#include <filesystem>
+#include <deque>
 #include <map>
 #include <set>
+#include <string_view>
 #include <unordered_map>
 
 namespace pulse::index {
@@ -38,15 +39,75 @@ std::wstring FileName(const std::wstring& path) {
 }
 
 size_t FindText(std::wstring_view text_value, std::wstring_view needle,
-                bool case_sensitive) {
+                bool case_sensitive, bool whole_word) {
     if (needle.empty()) return std::wstring_view::npos;
     auto equal = [case_sensitive](wchar_t left, wchar_t right) {
         return case_sensitive ? left == right : towlower(left) == towlower(right);
     };
-    const auto found = std::search(text_value.begin(), text_value.end(),
-                                   needle.begin(), needle.end(), equal);
-    return found == text_value.end() ? std::wstring_view::npos
-                                     : static_cast<size_t>(found - text_value.begin());
+    auto word_char = [](wchar_t c) {
+        return iswalnum(c) || static_cast<unsigned>(c) > 127;
+    };
+    auto from = text_value.begin();
+    while (from <= text_value.end()) {
+        const auto found = std::search(from, text_value.end(),
+                                       needle.begin(), needle.end(), equal);
+        if (found == text_value.end()) return std::wstring_view::npos;
+        const size_t pos = static_cast<size_t>(found - text_value.begin());
+        if (!whole_word) return pos;
+        const bool left_ok = pos == 0 || !word_char(text_value[pos - 1]);
+        const bool right_ok = pos + needle.size() >= text_value.size() ||
+                              !word_char(text_value[pos + needle.size()]);
+        if (left_ok && right_ok) return pos;
+        from = found + 1;
+    }
+    return std::wstring_view::npos;
+}
+
+std::vector<std::wstring> EffectiveNeedles(const ContentSearchRequest& request) {
+    if (!request.needles.empty()) return request.needles;
+    std::vector<std::wstring> words;
+    size_t i = 0;
+    while (i < request.needle.size()) {
+        while (i < request.needle.size() && iswspace(request.needle[i])) ++i;
+        size_t j = i;
+        while (j < request.needle.size() && !iswspace(request.needle[j])) ++j;
+        if (j > i) words.push_back(request.needle.substr(i, j - i));
+        i = j;
+    }
+    return words;
+}
+
+size_t MatchContent(std::wstring_view text, const ContentSearchRequest& request) {
+    for (const auto& excluded : request.excluded_needles) {
+        if (FindText(text, excluded, request.case_sensitive, request.whole_word) !=
+            std::wstring_view::npos)
+            return std::wstring_view::npos;
+    }
+    if (request.match_mode == ContentMatchMode::Phrase) {
+        std::wstring phrase = request.needle;
+        if (phrase.empty()) {
+            for (const auto& word : request.needles) {
+                if (!phrase.empty()) phrase.push_back(L' ');
+                phrase.append(word);
+            }
+        }
+        return FindText(text, phrase, request.case_sensitive, request.whole_word);
+    }
+    const auto needles = EffectiveNeedles(request);
+    if (needles.empty()) return 0;
+    size_t first = std::wstring_view::npos;
+    size_t any = std::wstring_view::npos;
+    for (const auto& needle : needles) {
+        const size_t found = FindText(text, needle, request.case_sensitive, request.whole_word);
+        if (found == std::wstring_view::npos) {
+            if (request.match_mode != ContentMatchMode::AnyWord) return std::wstring_view::npos;
+            continue;
+        }
+        if (any == std::wstring_view::npos || found < any) any = found;
+        if (first == std::wstring_view::npos || found < first) first = found;
+    }
+    if (request.match_mode == ContentMatchMode::AnyWord) return any;
+    return first;
 }
 
 ContentHit MakeContentHit(const Candidate& file, std::wstring_view content, size_t match) {
@@ -72,79 +133,200 @@ ContentHit MakeContentHit(const Candidate& file, std::wstring_view content, size
     return hit;
 }
 
-bool ReadCandidate(const std::filesystem::directory_entry& item, Candidate& out) {
-    WIN32_FILE_ATTRIBUTE_DATA data{};
-    const std::wstring path = item.path().wstring();
-    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data) ||
-        data.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) ||
+bool NameEquals(std::wstring_view left, std::wstring_view right) {
+    return CompareStringOrdinal(left.data(), static_cast<int>(left.size()),
+                                right.data(), static_cast<int>(right.size()), TRUE) == CSTR_EQUAL;
+}
+
+bool IsSkippedSystemDirectory(std::wstring_view name) {
+    return NameEquals(name, L"$Recycle.Bin") ||
+           NameEquals(name, L"System Volume Information") ||
+           NameEquals(name, L"Windows");
+}
+
+bool IsSkippedSystemFile(std::wstring_view name) {
+    return NameEquals(name, L"pagefile.sys") ||
+           NameEquals(name, L"hiberfil.sys") ||
+           NameEquals(name, L"swapfile.sys");
+}
+
+std::vector<std::wstring> EffectiveRoots(const ContentSearchRequest& request) {
+    if (!request.roots.empty()) return request.roots;
+    if (!request.root.empty()) return {request.root};
+    return {};
+}
+
+std::wstring JoinPath(const std::wstring& dir, const wchar_t* name) {
+    std::wstring value = dir;
+    if (!value.empty() && value.back() != L'\\' && value.back() != L'/') value.push_back(L'\\');
+    value.append(name);
+    return value;
+}
+
+std::wstring NormalizeWalkRoot(std::wstring path) {
+    if (path.size() == 2 && path[1] == L':') path.push_back(L'\\');
+    while (path.size() > 3 && (path.back() == L'\\' || path.back() == L'/')) path.pop_back();
+    return path;
+}
+
+std::wstring Win32Path(const std::wstring& path) {
+    if (path.size() >= 4 && path.compare(0, 4, L"\\\\?\\") == 0) return path;
+    if (path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\')
+        return L"\\\\?\\UNC" + path.substr(1);
+    return L"\\\\?\\" + path;
+}
+
+bool LoadCandidatePaths(const ContentSearchRequest& request,
+                        std::vector<Candidate>& files, ContentSearchProgress& progress,
+                        const ContentBatchCallback& callback) {
+    progress.current_root.clear();
+    progress.total_files = request.candidate_paths.size();
+    if (!callback(progress, {})) return false;
+    for (const auto& path : request.candidate_paths) {
+        WIN32_FILE_ATTRIBUTE_DATA data{};
+        if (!GetFileAttributesExW(Win32Path(path).c_str(), GetFileExInfoStandard, &data))
+            continue;
+        if (data.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT |
+                                     FILE_ATTRIBUTE_DEVICE) ||
+            text::IsOfflinePlaceholder(data.dwFileAttributes)) continue;
+        ULARGE_INTEGER size{data.nFileSizeLow, data.nFileSizeHigh};
+        if (size.QuadPart < request.minimum_file_bytes) continue;
+        Candidate candidate;
+        candidate.path = path;
+        candidate.name = FileName(path);
+        candidate.size = size.QuadPart;
+        candidate.modified = FileTimeValue(data.ftLastWriteTime);
+        files.push_back(std::move(candidate));
+    }
+    progress.total_files = files.size();
+    return callback(progress, {});
+}
+
+bool IsDotOrDotDot(const wchar_t* name) {
+    return name[0] == L'.' && (name[1] == L'\0' || (name[1] == L'.' && name[2] == L'\0'));
+}
+
+bool ReadCandidate(const std::wstring& path, const WIN32_FIND_DATAW& data,
+                   uint64_t minimum_file_bytes, Candidate& out) {
+    if (data.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT |
+                                 FILE_ATTRIBUTE_DEVICE) ||
         text::IsOfflinePlaceholder(data.dwFileAttributes)) return false;
     ULARGE_INTEGER size{data.nFileSizeLow, data.nFileSizeHigh};
+    if (size.QuadPart < minimum_file_bytes) return false;
     out.path = path;
-    out.name = item.path().filename().wstring();
+    out.name = FileName(path);
     out.size = size.QuadPart;
     out.modified = FileTimeValue(data.ftLastWriteTime);
-    HANDLE file = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+    return true;
+}
+
+void EnsureFileId(Candidate& file) {
+    if (file.volume) return;
+    HANDLE handle = CreateFileW(Win32Path(file.path).c_str(), FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file != INVALID_HANDLE_VALUE) {
-        FILE_ID_INFO info{};
-        if (GetFileInformationByHandleEx(file, FileIdInfo, &info, sizeof(info))) {
-            out.volume = info.VolumeSerialNumber;
-            memcpy(out.file_id.data(), info.FileId.Identifier, out.file_id.size());
-        }
-        CloseHandle(file);
+    if (handle == INVALID_HANDLE_VALUE) return;
+    FILE_ID_INFO info{};
+    if (GetFileInformationByHandleEx(handle, FileIdInfo, &info, sizeof(info))) {
+        file.volume = info.VolumeSerialNumber;
+        memcpy(file.file_id.data(), info.FileId.Identifier, file.file_id.size());
     }
-    return true;
+    CloseHandle(handle);
+}
+
+HANDLE OpenDirectoryListing(const std::wstring& dir, WIN32_FIND_DATAW& data) {
+    const std::wstring query = JoinPath(Win32Path(dir), L"*");
+    HANDLE find = FindFirstFileExW(query.c_str(), FindExInfoBasic, &data,
+        FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
+    if (find != INVALID_HANDLE_VALUE) return find;
+    return FindFirstFileExW(query.c_str(), FindExInfoBasic, &data,
+        FindExSearchNameMatch, nullptr, 0);
 }
 
 bool EnumerateCandidates(const ContentSearchRequest& request,
                          const std::atomic<bool>& cancelled,
                          std::vector<Candidate>& files, ContentSearchProgress& progress,
                          const ContentBatchCallback& callback) {
-    namespace fsys = std::filesystem;
-    std::error_code error;
-    const auto options = fsys::directory_options::skip_permission_denied;
+    const auto roots = EffectiveRoots(request);
+    if (roots.empty()) {
+        progress.error = ERROR_INVALID_PARAMETER;
+        return false;
+    }
     auto last_progress = std::chrono::steady_clock::now();
-    auto publish_progress = [&] {
+    uint64_t visited = 0;
+    uint64_t last_published = 0;
+    auto publish_progress = [&](bool force) {
+        if (request.mode == ContentSearchMode::Duplicates)
+            progress.scanned_files = visited;
         const auto now = std::chrono::steady_clock::now();
-        if (now - last_progress < std::chrono::milliseconds(250)) return true;
+        if (!force && visited - last_published < 32 &&
+            now - last_progress < std::chrono::milliseconds(100)) return true;
         last_progress = now;
+        last_published = visited;
         return callback(progress, {});
     };
-    if (request.recursive) {
-        fsys::recursive_directory_iterator it(fsys::path(request.root), options, error);
-        fsys::recursive_directory_iterator end;
-        if (error) { progress.error = error.value(); return false; }
-        for (; it != end && !cancelled.load(); it.increment(error)) {
-            if (error) { error.clear(); continue; }
-            if (it->is_directory(error)) {
-                const DWORD attributes = GetFileAttributesW(it->path().c_str());
-                if (attributes != INVALID_FILE_ATTRIBUTES &&
-                    (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
-                    it.disable_recursion_pending();
-                }
+    DWORD last_error = ERROR_SUCCESS;
+    bool opened = false;
+    for (const auto& root : roots) {
+        if (cancelled.load()) return false;
+        progress.current_root = root;
+        if (!publish_progress(true)) return false;
+        std::deque<std::pair<std::wstring, int>> queue;
+        queue.push_back({NormalizeWalkRoot(root), 0});
+        while (!queue.empty() && !cancelled.load()) {
+            const auto [dir, depth] = queue.front();
+            queue.pop_front();
+            WIN32_FIND_DATAW data{};
+            HANDLE find = OpenDirectoryListing(dir, data);
+            if (find == INVALID_HANDLE_VALUE) {
+                last_error = GetLastError();
                 continue;
             }
-            Candidate candidate;
-            if (ReadCandidate(*it, candidate)) files.push_back(std::move(candidate));
-            if (!publish_progress()) return false;
-        }
-    } else {
-        fsys::directory_iterator it(fsys::path(request.root), options, error);
-        fsys::directory_iterator end;
-        if (error) { progress.error = error.value(); return false; }
-        for (; it != end && !cancelled.load(); it.increment(error)) {
-            if (error) { error.clear(); continue; }
-            Candidate candidate;
-            if (ReadCandidate(*it, candidate)) files.push_back(std::move(candidate));
-            if (!publish_progress()) return false;
+            opened = true;
+            do {
+                if (cancelled.load()) {
+                    FindClose(find);
+                    return false;
+                }
+                if (IsDotOrDotDot(data.cFileName)) continue;
+                const DWORD attributes = data.dwFileAttributes;
+                const bool is_dir = (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                if (is_dir) {
+                    if (request.skip_system_locations && depth == 0 &&
+                        IsSkippedSystemDirectory(data.cFileName)) continue;
+                    if (attributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
+                    if (request.recursive)
+                        queue.push_back({JoinPath(dir, data.cFileName), depth + 1});
+                    continue;
+                }
+                if (request.skip_system_locations && depth == 0 &&
+                    IsSkippedSystemFile(data.cFileName)) continue;
+                ++visited;
+                Candidate candidate;
+                if (ReadCandidate(JoinPath(dir, data.cFileName), data,
+                                  request.minimum_file_bytes, candidate))
+                    files.push_back(std::move(candidate));
+                if (!publish_progress(false)) {
+                    FindClose(find);
+                    return false;
+                }
+            } while (FindNextFileW(find, &data));
+            FindClose(find);
+            if (!publish_progress(false)) return false;
         }
     }
+    if (!opened) {
+        progress.error = last_error ? last_error : ERROR_PATH_NOT_FOUND;
+        return false;
+    }
+    if (request.mode == ContentSearchMode::Duplicates)
+        progress.scanned_files = visited;
+    if (!publish_progress(true)) return false;
     return !cancelled.load();
 }
 
 uint64_t SampleHash(const Candidate& file) {
-    HANDLE handle = CreateFileW(file.path.c_str(), GENERIC_READ,
+    HANDLE handle = CreateFileW(Win32Path(file.path).c_str(), GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS, nullptr);
     if (handle == INVALID_HANDLE_VALUE) return 0;
@@ -186,7 +368,7 @@ bool FullSha256(const Candidate& file, const std::atomic<bool>& cancelled,
         BCryptCloseAlgorithmProvider(algorithm, 0);
         return false;
     }
-    HANDLE handle = CreateFileW(file.path.c_str(), GENERIC_READ,
+    HANDLE handle = CreateFileW(Win32Path(file.path).c_str(), GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
     bool ok = handle != INVALID_HANDLE_VALUE;
@@ -232,36 +414,57 @@ std::wstring FileIdentity(const Candidate& file) {
 
 bool RunDuplicateSearch(const ContentSearchRequest& request,
                         const std::atomic<bool>& cancelled,
-                        const std::vector<Candidate>& files,
+                        std::vector<Candidate>& files,
                         ContentSearchProgress& progress,
                         const ContentBatchCallback& callback) {
-    std::map<uint64_t, std::vector<const Candidate*>> by_size;
-    for (const auto& file : files) by_size[file.size].push_back(&file);
+    std::map<uint64_t, std::vector<Candidate*>> by_size;
+    uint64_t hash_work = 0;
+    for (auto& file : files) by_size[file.size].push_back(&file);
+    for (const auto& [size, candidates] : by_size)
+        if (candidates.size() >= 2) hash_work += candidates.size();
+    progress.phase = ContentSearchPhase::Hashing;
+    progress.total_files = hash_work;
+    progress.scanned_files = 0;
+    if (!callback(progress, {})) return false;
+    auto last_progress = std::chrono::steady_clock::now();
+    auto publish_progress = [&] {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_progress < std::chrono::milliseconds(250)) return true;
+        last_progress = now;
+        return callback(progress, {});
+    };
     uint32_t group_id = 1;
     std::vector<ContentHit> batch;
     size_t total_hits = 0;
     for (auto& [size, candidates] : by_size) {
         if (cancelled.load()) return false;
         if (candidates.size() < 2) continue;
-        std::map<uint64_t, std::vector<const Candidate*>> by_sample;
-        for (const Candidate* candidate : candidates)
+        std::map<uint64_t, std::vector<Candidate*>> by_sample;
+        for (Candidate* candidate : candidates)
             by_sample[SampleHash(*candidate)].push_back(candidate);
         for (auto& [sample, sampled] : by_sample) {
-            if (sampled.size() < 2 || sample == 0) continue;
-            std::map<std::wstring, std::vector<const Candidate*>> exact;
-            for (const Candidate* candidate : sampled) {
+            if (sampled.size() < 2 || sample == 0) {
+                progress.scanned_files += sampled.size();
+                if (!publish_progress()) return false;
+                continue;
+            }
+            std::map<std::wstring, std::vector<Candidate*>> exact;
+            for (Candidate* candidate : sampled) {
                 std::array<uint8_t, 32> digest{};
                 if (FullSha256(*candidate, cancelled, digest))
                     exact[DigestKey(digest)].push_back(candidate);
                 progress.scanned_files++;
                 progress.scanned_bytes += candidate->size;
+                if (!publish_progress()) return false;
             }
             for (auto& [digest, matches] : exact) {
                 if (matches.size() < 2) continue;
                 std::set<std::wstring> identities;
-                std::vector<const Candidate*> unique;
-                for (const Candidate* match : matches)
+                std::vector<Candidate*> unique;
+                for (Candidate* match : matches) {
+                    EnsureFileId(*match);
                     if (identities.insert(FileIdentity(*match)).second) unique.push_back(match);
+                }
                 if (unique.size() < 2) continue;
                 for (const Candidate* match : unique) {
                     ContentHit hit;
@@ -295,14 +498,23 @@ bool RunContentSearch(const ContentSearchRequest& request, const std::atomic<boo
                       ContentBatchCallback callback) {
     ContentSearchProgress progress;
     progress.generation = request.generation;
-    if (request.root.empty() || !callback) {
+    progress.phase = ContentSearchPhase::Enumerating;
+    const bool has_candidates = !request.candidate_paths.empty();
+    if ((!has_candidates && EffectiveRoots(request).empty()) || !callback) {
         progress.done = true;
         progress.error = ERROR_INVALID_PARAMETER;
         if (callback) callback(progress, {});
         return false;
     }
     std::vector<Candidate> files;
-    if (!EnumerateCandidates(request, cancelled, files, progress, callback)) {
+    if (has_candidates) {
+        if (!LoadCandidatePaths(request, files, progress, callback)) {
+            progress.done = true;
+            if (cancelled.load()) progress.error = ERROR_CANCELLED;
+            callback(progress, {});
+            return false;
+        }
+    } else if (!EnumerateCandidates(request, cancelled, files, progress, callback)) {
         progress.done = true;
         if (cancelled.load()) progress.error = ERROR_CANCELLED;
         callback(progress, {});
@@ -323,10 +535,11 @@ bool RunContentSearch(const ContentSearchRequest& request, const std::atomic<boo
         if (file.size > request.maximum_file_bytes) continue;
         std::wstring content;
         uint64_t bytes = 0;
-        if (!text::ReadFile(file.path, request.maximum_file_bytes, content, bytes)) continue;
+        if (!text::ReadFile(Win32Path(file.path), request.maximum_file_bytes, content, bytes) &&
+            !text::ReadFile(file.path, request.maximum_file_bytes, content, bytes)) continue;
         ++progress.scanned_files;
         progress.scanned_bytes += bytes;
-        const size_t match = FindText(content, request.needle, request.case_sensitive);
+        const size_t match = MatchContent(content, request);
         if (match != std::wstring::npos) {
             batch.push_back(MakeContentHit(file, content, match));
             if (++total_hits >= request.maximum_hits) progress.truncated = true;

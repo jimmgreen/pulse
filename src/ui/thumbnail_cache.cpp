@@ -13,7 +13,7 @@ ThumbnailCache::ThumbnailCache() {
 }
 
 ThumbnailCache::~ThumbnailCache() { Reset(); }
-void ThumbnailCache::SetDeviceContext(ID2D1DeviceContext2* dc) {
+void ThumbnailCache::SetDeviceContext(ID2D1DeviceContext* dc) {
     if (dc_ == dc) return;
     std::lock_guard lock(mutex_); dc_ = dc;
     for (auto& [_, item] : items_) item.bitmap.reset();
@@ -30,7 +30,7 @@ void ThumbnailCache::StopChild() {
 }
 void ThumbnailCache::Reset() {
     running_ = false; cv_.notify_all();
-    if (pipe_ != INVALID_HANDLE_VALUE) CancelIoEx(pipe_, nullptr);
+    if (worker_.joinable()) CancelSynchronousIo(worker_.native_handle());
     if (worker_.joinable()) worker_.join();
     StopChild();
     std::lock_guard lock(mutex_); queue_.clear(); pending_.clear(); items_.clear(); lru_.clear();
@@ -69,7 +69,7 @@ bool ThumbnailCache::Connect() {
             return false;
         }
         Sleep(25);
-    } while (GetTickCount64() < deadline);
+    } while (running_ && GetTickCount64() < deadline);
     StopChild(); return false;
 }
 PreviewDrawResult ThumbnailCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
@@ -118,11 +118,7 @@ PreviewDrawResult ThumbnailCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F
         auto it = items_.find(key);
         if (it != items_.end()) {
             Item& item = it->second;
-            if (auto lru_hit = std::find(lru_.begin(), lru_.end(),
-                                         it->first); lru_hit != lru_.end()) {
-                lru_.erase(lru_hit);
-                lru_.push_front(it->first);
-            }
+            Touch(item);
             if (truncated) *truncated = item.truncated;
             if (bytes_read) *bytes_read = item.bytes_read;
             if (error) *error = item.error;
@@ -142,9 +138,11 @@ PreviewDrawResult ThumbnailCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F
             if (!item.bitmap.get() && !item.pixels.empty() && dc_) {
                 auto props = D2D1::BitmapProperties(D2D1::PixelFormat(
                     DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-                dc_->CreateBitmap(D2D1::SizeU(item.w, item.h), item.pixels.data(), item.stride,
-                                  &props, &item.bitmap);
-                item.pixels.clear(); item.pixels.shrink_to_fit();
+                if (SUCCEEDED(dc_->CreateBitmap(D2D1::SizeU(item.w, item.h),
+                        item.pixels.data(), item.stride, &props, &item.bitmap))) {
+                    item.pixels.clear();
+                    item.pixels.shrink_to_fit();
+                }
             }
             if (item.bitmap.get()) {
                 const float destW = std::max(1.0f, dest.right - dest.left);
@@ -165,10 +163,10 @@ PreviewDrawResult ThumbnailCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F
                     *pan_x = std::clamp(*pan_x, 0.0f, maxPanX);
                     *pan_y = std::clamp(*pan_y, 0.0f, maxPanY);
                     const D2D1_RECT_F fitted = D2D1::RectF(
-                        dest.left + (destW - drawW) * 0.5f - *pan_x,
-                        dest.top + (destH - drawH) * 0.5f - *pan_y,
-                        dest.left + (destW - drawW) * 0.5f - *pan_x + drawW,
-                        dest.top + (destH - drawH) * 0.5f - *pan_y + drawH);
+                        dest.left + std::max(0.0f, destW - drawW) * 0.5f - *pan_x,
+                        dest.top + std::max(0.0f, destH - drawH) * 0.5f - *pan_y,
+                        dest.left + std::max(0.0f, destW - drawW) * 0.5f - *pan_x + drawW,
+                        dest.top + std::max(0.0f, destH - drawH) * 0.5f - *pan_y + drawH);
                     dc->PushAxisAlignedClip(dest, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
                     dc->DrawBitmap(item.bitmap.get(), &fitted,
                         std::clamp(opacity, 0.0f, 1.0f),
@@ -211,6 +209,7 @@ bool ThumbnailCache::Properties(const std::wstring& path, DWORD attrs, uint64_t 
     std::lock_guard lock(mutex_);
     if (identity != latest_details_identity_) return false;
     if (auto it = items_.find(key); it != items_.end()) {
+        Touch(it->second);
         properties = it->second.properties;
         return !it->second.failed;
     }
@@ -236,9 +235,58 @@ bool ThumbnailCache::CachedProperties(const std::wstring& path, uint64_t modifie
     std::lock_guard lock(mutex_);
     const auto it = items_.find(key);
     if (it == items_.end() || it->second.failed) return false;
+    Touch(it->second);
     properties = it->second.properties;
     return true;
 }
+void ThumbnailCache::Touch(Item& item) {
+    lru_.splice(lru_.end(), lru_, item.lru_position);
+}
+
+bool ThumbnailCache::StoreResult(const Request& req, Item result) {
+    std::lock_guard lock(mutex_);
+    // An old decode must not remove a replacement request queued after Evict().
+    if (req.epoch != epoch_.load(std::memory_order_relaxed)) return false;
+    pending_.erase(req.key);
+    if (req.details && req.identity != latest_details_identity_) return false;
+
+    if (auto old = items_.find(req.key); old != items_.end()) {
+        cache_bytes_ -= old->second.cost;
+        lru_.erase(old->second.lru_position);
+        items_.erase(old);
+    }
+    if (result.frame_count > 1) {
+        size_t frames = 0;
+        for (const auto& [key, item] : items_) {
+            if (item.frame_count > 1 && item.animation_identity == req.identity) ++frames;
+        }
+        if (frames >= 4) {
+            for (auto lru = lru_.begin(); lru != lru_.end(); ++lru) {
+                auto cached = items_.find(*lru);
+                if (cached->second.frame_count > 1 &&
+                    cached->second.animation_identity == req.identity) {
+                    cache_bytes_ -= cached->second.cost;
+                    items_.erase(cached);
+                    lru_.erase(lru);
+                    break;
+                }
+            }
+        }
+    }
+    cache_bytes_ += result.cost;
+    lru_.push_back(req.key);
+    result.lru_position = std::prev(lru_.end());
+    items_.emplace(req.key, std::move(result));
+    constexpr size_t kCacheBudget = 16ull * 1024ull * 1024ull;
+    while (!lru_.empty() && (lru_.size() > 128 || cache_bytes_ > kCacheBudget)) {
+        auto oldest = items_.find(lru_.front());
+        cache_bytes_ -= oldest->second.cost;
+        items_.erase(oldest);
+        lru_.pop_front();
+    }
+    return true;
+}
+
 void ThumbnailCache::Worker() {
     while (running_) {
         Request req;
@@ -334,55 +382,9 @@ void ThumbnailCache::Worker() {
         result.failed = !ok || response.status != 0 ||
             (req.kind == ipc::PreviewRequestKind::Content &&
              result.kind == ipc::PreviewContentKind::Bitmap && result.pixels.empty());
-        bool discard = false;
-        {
-            std::lock_guard lock(mutex_);
-            pending_.erase(req.key);
-            if (req.epoch != epoch_.load(std::memory_order_relaxed)) {
-                discard = true;
-            } else {
-            if (auto old = items_.find(req.key); old != items_.end())
-                cache_bytes_ -= (std::min)(cache_bytes_, old->second.cost);
-            const bool stale = req.details && req.identity != latest_details_identity_;
-            if (!stale) {
-                if (result.frame_count > 1) {
-                    size_t animation_frames = 0;
-                    for (const auto& [cached_key, cached] : items_) {
-                        if (cached.frame_count > 1 && cached.animation_identity == req.identity)
-                            ++animation_frames;
-                    }
-                    if (animation_frames >= 4) {
-                        for (auto lru = lru_.begin(); lru != lru_.end();) {
-                            auto cached = items_.find(*lru);
-                            if (cached != items_.end() && cached->second.frame_count > 1 &&
-                                cached->second.animation_identity == req.identity &&
-                                cached->second.frame_index != req.frame_index) {
-                                cache_bytes_ -= (std::min)(cache_bytes_, cached->second.cost);
-                                items_.erase(cached); lru = lru_.erase(lru); break;
-                            }
-                            ++lru;
-                        }
-                    }
-                }
-                cache_bytes_ += result.cost;
-                items_[req.key] = std::move(result);
-                lru_.push_back(req.key);
-            }
-            // Preview bitmaps stay a bounded working set. Quick Look may
-            // request up to 1024 px; evicting a cold decode is cheaper than
-            // pinning large bitmaps for the lifetime of the process.
-            constexpr size_t kCacheBudget = 16ull * 1024ull * 1024ull;
-            while (!lru_.empty() && (lru_.size() > 128 || cache_bytes_ > kCacheBudget)) {
-                const std::wstring oldest = std::move(lru_.front());
-                lru_.pop_front();
-                if (auto item = items_.find(oldest); item != items_.end()) {
-                    cache_bytes_ -= (std::min)(cache_bytes_, item->second.cost);
-                    items_.erase(item);
-                }
-            }
-            }
-        }
-        if (!discard && hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+        const bool stored = StoreResult(req, std::move(result));
+        if (const HWND hwnd = hwnd_.load(); stored && hwnd)
+            InvalidateRect(hwnd, nullptr, FALSE);
         if (!ok) StopChild();
     }
 }

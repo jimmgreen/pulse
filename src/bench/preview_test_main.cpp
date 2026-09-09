@@ -142,7 +142,10 @@ private:
 };
 }
 
+bool RunThumbnailCacheTests();
+
 int wmain() {
+    Check(RunThumbnailCacheTests(), L"thumbnail cache regressions");
     wchar_t temp[MAX_PATH]{};
     GetTempPathW(ARRAYSIZE(temp), temp);
     const std::wstring root = std::wstring(temp) + L"PulsePreviewTest-" +

@@ -10,8 +10,14 @@ if(NOT MSVC)
     message(FATAL_ERROR "Pulse requires MSVC (Windows SDK / D2D / NT API)")
 endif()
 
+option(PULSE_WIN81_CANDIDATE "Require a Windows 8.1-capable release toolset" OFF)
+if(PULSE_WIN81_CANDIDATE AND MSVC_VERSION GREATER_EQUAL 1950)
+    message(FATAL_ERROR "Windows 8.1 candidate builds require VS 2022 v143, not VS 2026")
+endif()
+
 add_compile_options(/utf-8 /permissive- /W4 /EHsc)
-add_compile_definitions(UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00 _WIN32_IE=0x0A00 NTDDI_VERSION=NTDDI_WIN10_NI)
+# Expose optional SDK COM interfaces; runtime calls are capability-checked.
+add_compile_definitions(UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0603 WINVER=0x0603 _WIN32_IE=0x0A00 NTDDI_VERSION=NTDDI_WIN10_NI)
 
 option(PULSE_WITH_LUMATEXT "Use LumaText for Pulse-owned single-line text" ON)
 set(LUMATEXT_SOURCE_DIR "" CACHE PATH
@@ -29,6 +35,14 @@ if(PULSE_WITH_LUMATEXT)
         set(LUMATEXT_BUILD_REFERENCE_TOOLS OFF)
         add_subdirectory("${LUMATEXT_SOURCE_DIR}"
             "${CMAKE_BINARY_DIR}/_deps/lumatext" EXCLUDE_FROM_ALL)
+        if(PULSE_WIN81_CANDIDATE)
+            foreach(runtime_target lumatext_shared lumatext_harfbuzz freetype)
+                if(TARGET ${runtime_target})
+                    set_property(TARGET ${runtime_target} PROPERTY MSVC_RUNTIME_LIBRARY
+                        "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+                endif()
+            endforeach()
+        endif()
     else()
         find_package(LumaText 0.1 CONFIG QUIET)
     endif()
@@ -53,7 +67,8 @@ function(pulse_enable_lumatext target)
     target_sources(${target} PRIVATE src/ui/lumatext_renderer.cpp)
     if(PULSE_LUMATEXT_TARGET)
         target_compile_definitions(${target} PRIVATE PULSE_HAS_LUMATEXT=1)
-        target_link_libraries(${target} PRIVATE ${PULSE_LUMATEXT_TARGET})
+        target_link_libraries(${target} PRIVATE ${PULSE_LUMATEXT_TARGET} delayimp)
+        target_link_options(${target} PRIVATE /DELAYLOAD:lumatext.dll)
         if(PULSE_LUMATEXT_RUNTIME_TARGET)
             add_custom_command(TARGET ${target} POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -148,9 +163,29 @@ add_executable(pulse_index_test
     src/bench/index_test_main.cpp
     src/index/index_config.cpp
     src/index/index_query.cpp
+    src/index/search_kinds.cpp
     src/index/index_shard.cpp
     src/index/network_index.cpp)
 target_link_libraries(pulse_index_test PRIVATE shell32 mpr advapi32)
+
+add_executable(pulse_index_migration_test
+    src/bench/index_migration_test.cpp
+    src/index/index_migration.cpp)
+target_link_libraries(pulse_index_migration_test PRIVATE shell32)
+
+add_executable(pulse_index_engine_test
+    src/bench/index_engine_test.cpp
+    src/index/index_engine.cpp
+    src/index/index_visibility.cpp
+    src/index/index_config.cpp
+    src/index/index_query.cpp
+    src/index/search_kinds.cpp
+    src/index/index_mft.cpp
+    src/index/index_paths.cpp
+    src/index/index_delta.cpp
+    src/index/index_shard.cpp
+    src/fs/fs_enum.cpp)
+target_link_libraries(pulse_index_engine_test PRIVATE advapi32 shlwapi ole32 shell32 netapi32 mpr)
 
 # End-to-end index latency probe. It talks to the installed/running service so
 # timings include the production pipe, query engine, paging, and serialization.
@@ -165,10 +200,21 @@ add_executable(pulse_content_search_test
 target_link_libraries(pulse_content_search_test PRIVATE pulse_text bcrypt ole32)
 add_dependencies(pulse_content_search_test pulse_index)
 
+add_executable(pulse_duplicate_scan_test
+    src/bench/duplicate_scan_test.cpp
+    src/app/duplicate_scan.cpp)
+target_link_libraries(pulse_duplicate_scan_test PRIVATE ole32)
+
 add_executable(pulse_saved_search_test
     src/bench/saved_search_test.cpp
     src/app/saved_search.cpp)
 target_link_libraries(pulse_saved_search_test PRIVATE shell32 ole32)
+
+add_executable(pulse_search_query_test
+    src/bench/search_query_test.cpp
+    src/app/search_query.cpp
+    src/index/index_query.cpp
+    src/index/search_kinds.cpp)
 
 add_executable(pulse_update_test
     src/bench/update_checker_test.cpp
@@ -186,9 +232,10 @@ add_executable(pulse_fluent_gallery WIN32
     src/ui/fluent_components.cpp
     src/ui/tab_shape.cpp
     src/ui/typography.cpp
-    src/ui/ui_compositor.cpp)
+    src/ui/ui_compositor.cpp
+    src/ui/window_helpers.cpp)
 target_link_libraries(pulse_fluent_gallery PRIVATE
-    d3d11 d2d1 dwrite dxgi dcomp dwmapi shcore ole32 windowscodecs
+    d3d11 d2d1 dwrite dxgi dcomp dwmapi shcore ole32 windowscodecs comctl32
     pulse_localization)
 pulse_enable_lumatext(pulse_fluent_gallery)
 
@@ -206,7 +253,7 @@ list(FILTER PULSE_APP_SOURCES EXCLUDE REGEX "lumatext_renderer\\.cpp$")
 option(PULSE_WITH_SELFTEST "Embed the legacy --selftest suite in Pulse.exe" OFF)
 if(NOT PULSE_WITH_SELFTEST)
     list(FILTER PULSE_APP_SOURCES EXCLUDE REGEX "selftest_1b2\\.cpp$")
-    list(FILTER PULSE_APP_SOURCES EXCLUDE REGEX "index_(engine|mft|paths|delta)\\.cpp$")
+    list(FILTER PULSE_APP_SOURCES EXCLUDE REGEX "index_(engine|visibility|mft|paths|delta)\\.cpp$")
 endif()
 list(APPEND PULSE_APP_SOURCES src/index/network_agent_client.cpp)
 if(PULSE_APP_SOURCES)
@@ -248,12 +295,16 @@ endif()
 # ---- Pulse.Index.exe: index + query host (session helper or Windows service) ----
 add_executable(pulse_index WIN32
     src/index/index_host.cpp
+    src/index/index_path_service.cpp
+    src/index/index_migration.cpp
     src/index/network_agent_main.cpp
     src/index/content_agent.cpp
     src/index/content_search.cpp
     src/index/index_engine.cpp
+    src/index/index_visibility.cpp
     src/index/index_config.cpp
     src/index/index_query.cpp
+    src/index/search_kinds.cpp
     src/index/index_mft.cpp
     src/index/index_paths.cpp
     src/index/index_delta.cpp
@@ -292,8 +343,12 @@ target_link_libraries(pulse_preview PRIVATE pulse_crash_reporter)
 pulse_add_version_resource(pulse_preview "Pulse preview host" "Pulse.Preview" "Pulse.Preview.exe")
 
 # Preview protocol self test (console; drives Pulse.Preview.exe over the pipe)
-add_executable(pulse_preview_test src/bench/preview_test_main.cpp)
+add_executable(pulse_preview_test src/bench/preview_test_main.cpp
+    src/bench/thumbnail_cache_test.cpp src/ui/thumbnail_cache.cpp)
 add_dependencies(pulse_preview_test pulse_preview)
+
+add_executable(pulse_shell_icons_test src/bench/shell_icons_test.cpp src/ui/shell_icons.cpp)
+target_link_libraries(pulse_shell_icons_test PRIVATE ole32 shell32 comctl32 uuid)
 
 add_executable(pulse_preview_handler_probe
     src/bench/preview_handler_probe.cpp
@@ -312,7 +367,7 @@ target_compile_definitions(pulse_material_test PRIVATE
     PULSE_WINDOW_MATERIAL_TESTING=1)
 target_link_libraries(pulse_material_test PRIVATE
     d3d11 d2d1 dwrite dxgi dcomp dwmapi shcore ole32 windowscodecs user32 gdi32
-    pulse_localization)
+    comctl32 pulse_localization)
 pulse_enable_lumatext(pulse_material_test)
 
 add_executable(pulse_app_controllers_test

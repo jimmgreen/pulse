@@ -1,9 +1,9 @@
 // index_engine.h — Filename index: mmap base + heap delta (优化.md R1).
 //
-// V9 aggregate snapshot layout. The process maps the active V9 base read-only;
+// V10 uses the V9 aggregate snapshot layout with corrected visibility. The base is read-only;
 // USN/RDCW mutations append to a small heap delta. Search takes a shared lock
-// and never waits on Status()/Count(). V7/V8 snapshots remain readable for
-// migration and rollback.
+// and never waits on Status()/Count(). V7-V9 snapshots remain readable and
+// trigger a background rebuild instead of retaining incorrect hidden flags.
 #pragma once
 #include "index_config.h"
 #include "index_query.h"
@@ -132,6 +132,18 @@ public:
                     uint64_t size = 0, uint64_t mtime = 0);
 
 private:
+    friend struct EngineTestAccess;
+
+    struct FrnNode {
+        uint64_t frn = 0;
+        uint64_t parent = 0;
+        uint64_t size = 0;
+        uint64_t mtime = 0;
+        std::wstring name;
+        int32_t index = -1;
+        bool is_dir = false;
+        uint8_t name_type = 0xFF;
+    };
     static constexpr uint8_t kFlagDir = 1;
     static constexpr uint8_t kFlagHidden = 2;
     static constexpr uint8_t kFlagDeleted = 4;
@@ -195,6 +207,9 @@ private:
         std::vector<DiskFrn> frn_new;
         std::vector<std::pair<uint64_t, int32_t>> frn_build; // MFT rebuild only
     };
+
+    bool BuildMftTree(VolState vol, uint64_t root_frn, std::vector<FrnNode> nodes);
+    bool NeedsSearchRebuildLocked() const;
 
     struct Patch {
         int32_t parent = -1;
@@ -311,6 +326,8 @@ private:
     void InvalidateFilterLocked() { ++filter_epoch_; }
     void SetStatus(std::wstring s);
     bool IsExcludedPath(std::wstring_view path) const;
+    static bool ShouldSkipName(std::wstring_view name);
+    void RefreshSubtreeVisibilityLocked(int32_t root, DeltaLog* delta);
     void PingNotify(bool force = false);
 
     int32_t BaseCount() const { return map_ ? static_cast<int32_t>(map_->n) : 0; }

@@ -1,5 +1,6 @@
 // ui_hit_test.cpp — Hit testing and tab-strip queries.
 #include "ui_renderer.h"
+#include "address_search_layout.h"
 #include "ui_renderer_internal.h"
 #include "../common/localization.h"
 #include "tab_shape.h"
@@ -145,10 +146,11 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
         const SettingsLayout lay = MakeSettingsLayout(vm, rect, scale_, title_bar_height_,
                                                       status_height_, &painter_);
         if (y >= rect.bottom - status_height_) {
-            r.region = HitTestResult::StatusBar;
+            r.region = StatusBarHitRegion(vm, rect, x, y, scale_, status_height_,
+                                          compositor_);
             return r;
         }
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < kSettingsNavCount; ++i) {
             if (ContainsPt(lay.nav_row[i], x, y)) {
                 r.region = HitTestResult::SettingsNav;
                 r.index = i;
@@ -202,6 +204,11 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 if (ContainsPt(lay.wallpaper_clear, x, y)) {
                     r.region = HitTestResult::SettingsWallpaper;
                     r.index = 1;
+                    return r;
+                }
+                if (ContainsPt(lay.hidden_files_row, x, y)) {
+                    r.region = HitTestResult::SettingsToggle;
+                    r.index = 5;
                     return r;
                 }
                 for (int i = 0; i < 3; ++i) {
@@ -289,7 +296,12 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                     r.region = HitTestResult::SettingsRestore;
                     return r;
                 }
-            } else {
+            } else if (vm.settings_page == 3) {
+                if (ContainsPt(lay.diagnostics_perf, x, y)) {
+                    r.region = HitTestResult::SettingsToggle;
+                    r.index = 4;
+                    return r;
+                }
                 for (int i = 0; i < 3; ++i) {
                     if (!vm.settings_diagnostics_exporting &&
                         ContainsPt(lay.diagnostics_action[i], x, y)) {
@@ -307,6 +319,67 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                         r.index = i;
                         return r;
                     }
+                }
+            } else if (vm.settings_page == 4) {
+                for (int i = 0; i < 3; ++i) {
+                    if (ContainsPt(lay.dup_scope[i], x, y)) {
+                        r.region = HitTestResult::SettingsDupScope;
+                        r.index = i;
+                        return r;
+                    }
+                }
+                if (ContainsPt(lay.dup_browse, x, y)) {
+                    r.region = HitTestResult::SettingsDupBrowse;
+                    return r;
+                }
+                for (size_t i = 0; i < lay.dup_drives.size(); ++i) {
+                    if (ContainsPt(lay.dup_drives[i], x, y)) {
+                        r.region = HitTestResult::SettingsDupDrive;
+                        r.index = static_cast<int>(i);
+                        return r;
+                    }
+                }
+                for (int i = 0; i < 3; ++i) {
+                    if (ContainsPt(lay.dup_min_size[i], x, y)) {
+                        r.region = HitTestResult::SettingsDupMinSize;
+                        r.index = i;
+                        return r;
+                    }
+                }
+                if (ContainsPt(lay.dup_scan, x, y)) {
+                    r.region = HitTestResult::SettingsDupScan;
+                    return r;
+                }
+                if (ContainsPt(lay.dup_cancel, x, y)) {
+                    r.region = HitTestResult::SettingsDupCancel;
+                    return r;
+                }
+                for (size_t i = 0; i < lay.dup_keep.size(); ++i) {
+                    if (ContainsPt(lay.dup_keep[i], x, y)) {
+                        r.region = HitTestResult::SettingsDupKeep;
+                        r.index = lay.dup_keep_group[i];
+                        r.sub_index = lay.dup_keep_file[i];
+                        return r;
+                    }
+                }
+                for (size_t i = 0; i < lay.dup_open.size(); ++i) {
+                    if (ContainsPt(lay.dup_open[i], x, y)) {
+                        r.region = HitTestResult::SettingsDupOpen;
+                        r.index = lay.dup_open_group[i];
+                        r.sub_index = lay.dup_open_file[i];
+                        return r;
+                    }
+                }
+                for (size_t i = 0; i < lay.dup_group_delete.size(); ++i) {
+                    if (ContainsPt(lay.dup_group_delete[i], x, y)) {
+                        r.region = HitTestResult::SettingsDupGroupDelete;
+                        r.index = static_cast<int>(i);
+                        return r;
+                    }
+                }
+                if (ContainsPt(lay.dup_delete_all, x, y)) {
+                    r.region = HitTestResult::SettingsDupDeleteAll;
+                    return r;
                 }
             }
         }
@@ -330,8 +403,21 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
         if (hitBtn(commandButtonWidth, HitTestResult::NavRefresh)) return r;
         D2D1_RECT_F addrRc = AddressBarRect(rect.right);
         if (x >= addrRc.left && x < addrRc.right) {
+            if (vm.address_searching) {
+                const auto layout = LayoutAddressSearch(addrRc, scale_);
+                if (x < layout.scope.right) r.region = HitTestResult::AddressSearchScope;
+                else if (x >= layout.close.left) r.region = HitTestResult::AddressSearchClose;
+                else if (vm.address_search_has_text && layout.clear.right > layout.clear.left && x >= layout.clear.left)
+                    r.region = HitTestResult::AddressSearchClear;
+                else r.region = HitTestResult::AddressBar;
+                return r;
+            }
             if (vm.address_editing) {
                 r.region = HitTestResult::AddressBar;
+                return r;
+            }
+            if (x >= AddressSearchButtonRect(rect.right).left) {
+                r.region = HitTestResult::AddressSearch;
                 return r;
             }
             std::vector<BreadcrumbPlaced> placed;
@@ -370,8 +456,13 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
         return r;
     }
 
-    // Status bar.
-    if (y >= rect.bottom - status_height_) { r.region = HitTestResult::StatusBar; return r; }
+    // Status bar. Only the transfer summary (center-right) is a control;
+    // the left folder/selection text must not reopen the copy dialog.
+    if (y >= rect.bottom - status_height_) {
+        r.region = StatusBarHitRegion(vm, rect, x, y, scale_, status_height_,
+                                      compositor_);
+        return r;
+    }
 
     // Sidebar.
     D2D1_RECT_F sb = SidebarRect(rect.right, rect.bottom);
@@ -561,7 +652,9 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
         const float banner = paneVm.banner_message.empty() ? 0.0f : 36.0f * scale_;
         const float extra = PaneExtraTop(paneVm, scale_);
         const float recentTop = paneRc.top + pane_header_height_ + banner;
-        const float columnTop = recentTop + (paneVm.is_recent ? kRecentControlsDip * scale_ : 0.0f);
+        const float filterExtra = (paneVm.is_recent ? kRecentControlsDip * scale_ : 0.0f) +
+                                  (paneVm.is_query_search ? kSearchFiltersDip * scale_ : 0.0f);
+        const float columnTop = recentTop + filterExtra;
         float listTop = paneRc.top + pane_header_height_ + extra +
                         (ShowsColumnHeader(paneVm.view_mode) ? column_header_height_ : 0.0f);
         if (y >= paneRc.top && y < paneRc.top + pane_header_height_) {
@@ -582,6 +675,22 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 out.region = HitTestResult::RecentClear;
                 out.index = paneIndex;
                 return out;
+            }
+            out.region = HitTestResult::Pane;
+            return out;
+        }
+        if (paneVm.is_query_search && y >= recentTop && y < recentTop + kSearchFiltersDip * scale_) {
+            std::wstring labels[5];
+            FillSearchFilterChipLabels(paneVm.search_query, labels);
+            float widths[5]{};
+            SearchFilterChipWidthsPx(painter_, scale_, labels, widths);
+            for (int i = 0; i < 5; ++i) {
+                if (RectContains(SearchFilterRect(
+                        paneRc, pane_header_height_ + banner, scale_, i, widths), x, y)) {
+                    out.region = HitTestResult::SearchFilter;
+                    out.index = i;
+                    return out;
+                }
             }
             out.region = HitTestResult::Pane;
             return out;
@@ -612,6 +721,10 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             return out;
         }
         if (y >= listTop && y < paneRc.bottom) {
+            if (paneVm.search_retaining_results) {
+                out.region = HitTestResult::Pane;
+                return out;
+            }
             if (!paneVm.loading && paneVm.EntryCount() == 0 &&
                 paneVm.filter_text.empty() && paneVm.is_file_system && paneVm.can_create) {
                 const PaneEmptyLayout emptyLayout = MakePaneEmptyLayout(
@@ -642,7 +755,8 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                         const D2D1_RECT_F list = PaneListRect(paneRc, extra, paneVm.view_mode);
                         const DetailsColumnLayout columns = DetailsColumns(list, paneVm);
                         ViewLayout layout(paneVm.view_mode, list, paneVm.EntryCount(),
-                                          paneVm.scroll_x, paneVm.scroll_y, scale_, row_height_dip_);
+                                          paneVm.scroll_x, paneVm.scroll_y, scale_,
+                                          ListRowHeightDip(paneVm));
                         const D2D1_RECT_F nameRc = layout.NameRect(viewRow);
                         const D2D1_RECT_F cell = layout.ItemRect(viewRow);
                         const ListEntryView& entry = MakeVisibleEntry(paneVm, static_cast<size_t>(idx));
@@ -660,8 +774,11 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                         const float badgeW = !entry.badge.empty()
                             ? std::min(108.0f * scale_, painter_.MeasureTagWidth(entry.badge))
                             : 0.0f;
+                        const bool rowSnippet = !entry.snippet.empty();
+                        const DetailsNameLine nameLine =
+                            MakeDetailsNameLine(nameRc, cell, scale_, rowSnippet);
                         const NameTrail trail = LayoutNameTrail(
-                            nameRc.left, nameRc.top, nameRc.bottom - nameRc.top,
+                            nameRc.left, nameLine.y, nameLine.h,
                             columns.DividerX(0) - margin_, cell.top, cell.bottom, scale_,
                             entry.name, static_cast<int>(std::min<size_t>(3, tagCount)), badgeW,
                             showActions, showActions && paneVm.hover_index == idx && entry.is_dir,

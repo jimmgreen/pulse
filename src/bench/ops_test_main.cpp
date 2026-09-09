@@ -239,8 +239,13 @@ int wmain() {
         if (!st.last_error.empty()) wprintf(L"       error: %s\n", st.last_error.c_str());
         Check(st.last_error.empty(), L"same-folder copy reported no error");
 
+        const uint64_t before_noop = g_ops.Status().completed_ops;
+        const auto noop_started = std::chrono::steady_clock::now();
         auto move_st = RunOp(SimpleOp(ops::OpType::Move,
             { (srcDir + L"\\same.txt").c_str() }, srcDir.c_str()));
+        Check(move_st.completed_ops == before_noop + 1 &&
+              std::chrono::steady_clock::now() - noop_started < std::chrono::seconds(2),
+              L"same-folder move reports completion promptly");
         Check(Exists(srcDir + L"\\same.txt"), L"move into same folder is a no-op");
         Check(move_st.last_error.empty(), L"same-folder move reported no error");
         Check(move_st.summary.empty(), L"same-folder move stays silent in status");
@@ -451,7 +456,8 @@ int wmain() {
         g_ops.Undo();
         const auto undo_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
         while (std::chrono::steady_clock::now() < undo_deadline) {
-            if (Exists(srcDir + L"\\batch-a.txt") && Exists(srcDir + L"\\batch-b.txt") &&
+            if (g_ops.Status().completed_ops >= prev + 2 &&
+                Exists(srcDir + L"\\batch-a.txt") && Exists(srcDir + L"\\batch-b.txt") &&
                 !Exists(srcDir + L"\\batch-a2.txt") && !Exists(srcDir + L"\\batch-b2.txt"))
                 break;
             Sleep(10);
@@ -459,6 +465,8 @@ int wmain() {
         Check(Exists(srcDir + L"\\batch-a.txt") && Exists(srcDir + L"\\batch-b.txt") &&
               !Exists(srcDir + L"\\batch-a2.txt") && !Exists(srcDir + L"\\batch-b2.txt"),
               L"batch-rename: undo restores original names");
+        Check(g_ops.Status().completed_ops == prev + 2,
+              L"batch-rename: both undo operations finish before the next request");
 
         // copy src\d.txt -> dst, then undo (deletes the copy, to recycle bin)
         RunOp(SimpleOp(ops::OpType::Copy, { (srcDir + L"\\d.txt").c_str() }, dstDir.c_str()));

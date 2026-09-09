@@ -1,6 +1,7 @@
 # Build trees
 /build/
 /build_*/
+/build-*/
 /out/
 /dist/
 CMakeCache.txt
@@ -50,3 +51,11 @@ Desktop.ini
 *.kimi-backup
 *.bak
 CONERR$
+/tools/win81-toolchain/
+/build-win81/
+
+# Local release verification and downloaded build dependencies
+/bench_data/installer-deps/
+/bench_data/*_fix_build.bat
+*.splitbak
+/output/

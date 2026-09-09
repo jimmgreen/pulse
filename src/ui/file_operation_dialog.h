@@ -47,6 +47,7 @@ private:
     FileOperationCallbacks callbacks_;
     ops::OpStatus status_;
     std::deque<double> speed_history_;
+    ULONGLONG speed_sample_tick_ = 0;
     bool dark_ = false;
     bool backdrop_enabled_ = false;
     bool detailed_ = false;

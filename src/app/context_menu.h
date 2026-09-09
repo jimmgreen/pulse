@@ -7,6 +7,7 @@
 #pragma once
 #include "../ui/fluent_menu.h"
 #include "../ui/view_layout.h"
+#include "../ui/ui_renderer.h"
 #include "context_menu_prefs.h"
 #include "../index/index_engine.h"
 #include <string>
@@ -34,6 +35,15 @@ enum MenuCmd : int {
     CmdSelectAll,
     CmdInvertSelection,
     CmdSelectWildcard,
+    CmdRefresh,
+    CmdFolderProperties,
+    CmdSortName,
+    CmdSortModified,
+    CmdSortType,
+    CmdSortSize,
+    CmdSortPath,
+    CmdSortAscending,
+    CmdSortDescending,
     CmdLayoutSingle = 50,
     CmdLayoutTwoVertical,
     CmdLayoutTwoHorizontal,
@@ -70,9 +80,12 @@ enum MenuCmd : int {
     CmdRemoveStarred,
     CmdRemoveRecent,
     CmdBatchRename,
+    CmdAdvancedSearch,
     CmdRestoreRecycle,
     CmdEmptyRecycle,
     CmdOpenRecycle,
+    CmdPinQuickAccess,
+    CmdUnpinQuickAccess,
     CmdRecentBase = 200,
     CmdIndexBase = 1000,
     // Explorer integration (优化.md §7): registry static verbs bound to the
@@ -106,7 +119,7 @@ std::vector<ui::FluentMenuItem> BuildItemMenu(bool can_undo, const std::wstring&
 // row per entry. Software submenus become one-level flyout headers (children
 // on FluentMenuItem); other rows stay flat. Drops entries whose text
 // duplicates an existing row (case-insensitive). Hard safety cap is 48; the
-// user-facing default (12) is applied earlier by ApplyExplorerPrefs.
+// user-facing default (32) is applied earlier by ApplyExplorerPrefs.
 void AppendShellSection(std::vector<ui::FluentMenuItem>& items,
                         const std::vector<ShellMenuEntry>& entries);
 
@@ -118,6 +131,18 @@ std::vector<ShellMenuEntry> ApplyExplorerPrefs(const ContextMenuPrefs& prefs,
 // Context menu for empty list space (creation / paste / terminal / undo).
 std::vector<ui::FluentMenuItem> BuildBackgroundMenu(bool can_paste, bool can_undo,
                                                     const std::wstring& undo_label);
+struct BackgroundViewOptions {
+    ui::ViewMode view_mode = ui::ViewMode::Details;
+    ui::SortColumn sort_column = ui::SortColumn::Name;
+    ui::SortDirection sort_direction = ui::SortDirection::Asc;
+    bool details_panel = false;
+    bool can_sort = true;
+    bool indexed_search = false;
+    bool show_path = false;
+    bool filesystem = true;
+};
+void AppendBackgroundViewCommands(std::vector<ui::FluentMenuItem>& items,
+                                  const BackgroundViewOptions& options);
 std::vector<ui::FluentMenuItem> BuildRecycleItemMenu(bool can_undo,
                                                      const std::wstring& undo_label);
 std::vector<ui::FluentMenuItem> BuildRecycleBackgroundMenu(bool can_undo,
@@ -127,6 +152,8 @@ std::vector<ui::FluentMenuItem> BuildRecyclePlaceMenu(bool can_empty);
 
 // Toolbar "新建▾" dropdown (reuses the same FluentMenu component).
 std::vector<ui::FluentMenuItem> BuildNewMenu();
+
+std::vector<ui::FluentMenuItem> BuildBreadcrumbMenu(bool filesystem);
 
 // Split-button layout presets.
 std::vector<ui::FluentMenuItem> BuildSplitMenu(int current_preset);

@@ -6,6 +6,7 @@
 //                -> Blend(COLOR, flood x tintOpacity)
 // Tint recipes match WinUI MicaController / DesktopAcrylicController.
 #include "window_material.h"
+#include "../common/windows_compat.h"
 
 #include <d2d1_1.h>
 #include <d2d1effects.h>
@@ -394,7 +395,7 @@ bool ApplyWindowEffect(HWND hwnd, WindowEffect effect, bool dark) noexcept {
     const DWORD corner = DWMWCP_ROUND;
     DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
 
-    if (IsHighContrast() || !IsWindows11OrLater()) {
+    if (IsHighContrast() || !compat::ModernWindows() || !IsWindows11OrLater()) {
         effect = WindowEffect::None;
     }
 
@@ -969,7 +970,7 @@ ID2D1Bitmap* WindowMaterial::EnsureSampled(ID2D1DeviceContext* dc, const D2D1_RE
 
 bool WindowMaterial::DrawBackdrop(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
                                   WindowEffect effect, bool dark, const std::wstring& path) {
-    if (!dc || path.empty() || effect == WindowEffect::None || IsHighContrast()) {
+    if (!dc || path.empty() || effect == WindowEffect::None || IsHighContrast() || !compat::ModernWindows()) {
         return false;
     }
     ID2D1Bitmap* sampled = EnsureSampled(dc, dest, effect, dark, path);

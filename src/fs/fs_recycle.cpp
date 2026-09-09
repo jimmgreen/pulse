@@ -161,6 +161,20 @@ void EnumerateRecycleBin(std::vector<DirEntry>& out, RecycleBinInfo* info) {
         } while (FindNextFileW(sid_find, &sid));
         FindClose(sid_find);
     }
+    if (!info) return;
+    uint64_t enum_bytes = 0;
+    for (const auto& entry : out) enum_bytes += entry.size;
+    const uint64_t enum_items = out.size();
+    // SHQueryRecycleBin often lags IFileOperation. Prefer enumerated $I files
+    // when they already show a higher occupancy than Shell reports.
+    if (!info->valid) {
+        info->valid = true;
+        info->items = enum_items;
+        info->bytes = enum_bytes;
+        return;
+    }
+    if (enum_items > info->items) info->items = enum_items;
+    if (enum_bytes > info->bytes) info->bytes = enum_bytes;
 }
 
 } // namespace pulse::fs

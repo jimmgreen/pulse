@@ -17,6 +17,7 @@
 #include "context_menu.h"
 #include "batch_rename.h"
 #include "link_resolve.h"
+#include "duplicate_scan.h"
 #include "resource.h"
 #include "pulse_version.h"
 #include "../ops/clipboard.h"
@@ -37,6 +38,43 @@
 #include <unordered_set>
 
 using namespace pulse;
+
+namespace {
+
+void RefreshDuplicateGroupViews(AppState& s) {
+    constexpr size_t kMaxGroups = 80;
+    constexpr size_t kMaxFiles = 40;
+    s.dup_view_cache.clear();
+    const size_t group_n = (std::min)(s.duplicateScan.groups.size(), kMaxGroups);
+    s.dup_view_cache.reserve(group_n);
+    for (size_t g = 0; g < group_n; ++g) {
+        const auto& group = s.duplicateScan.groups[g];
+        ui::DuplicateGroupView view;
+        wchar_t title[128]{};
+        swprintf_s(title, l10n::Get(l10n::StringId::DupGroupFormat).c_str(),
+                   format::ByteSize(group.size).c_str(),
+                   static_cast<int>(group.files.size()));
+        view.title = title;
+        const size_t file_n = (std::min)(group.files.size(), kMaxFiles);
+        view.files.reserve(file_n);
+        for (size_t f = 0; f < file_n; ++f) {
+            ui::DuplicateFileView file;
+            file.name = group.files[f].name;
+            file.path = group.files[f].path;
+            FILETIME time{};
+            time.dwLowDateTime = static_cast<DWORD>(group.files[f].modified);
+            time.dwHighDateTime = static_cast<DWORD>(group.files[f].modified >> 32);
+            file.detail = group.files[f].path + L" · " + format::LocalFileTime(time);
+            file.keep = f == group.keep_index;
+            view.files.push_back(std::move(file));
+        }
+        s.dup_view_cache.push_back(std::move(view));
+    }
+    s.dup_view_epoch = s.duplicateScan.result_epoch;
+    s.dup_view_language = s.appPrefs.language;
+}
+
+} // namespace
 
 namespace pulse {
 void PrefetchDetailsMeta(HWND hwnd, const std::wstring& path) {
@@ -268,6 +306,7 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
             vm.settings_scroll = s.settings.scroll();
             vm.settings_launch_on_startup = s.appPrefs.launch_on_startup;
             vm.settings_keep_running = s.appPrefs.keep_running_on_close;
+            vm.settings_show_hidden_files = s.appPrefs.show_hidden_files;
             vm.settings_open_folders = s.appPrefs.open_folders_in_pulse;
             vm.settings_row_height = s.appPrefs.row_height;
             vm.settings_tray_icon = s.appPrefs.tray_icon_size;
@@ -288,6 +327,7 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
                 s.update_result.update_available;
             vm.settings_update_version = s.update_result.version;
             vm.settings_diagnostics_exporting = s.settings.diagnostics_pending();
+            vm.settings_show_performance = s.appPrefs.show_status_performance;
             if (vm.settings_update_checking) {
                 vm.settings_update_status =
                     l10n::Get(l10n::StringId::CheckingUpdates);
@@ -320,6 +360,14 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
             vm.settings_index_service = s.index.ServiceMode();
             vm.settings_index_installed = s.settings.service_installed();
             vm.settings_index_status = s.index.Status();
+            vm.settings_index_migrating = s.settings.migration_pending();
+            if (s.shot.active) {
+                wchar_t simulated[2]{};
+                if (GetEnvironmentVariableW(L"PULSE_TEST_INDEX_MIGRATING", simulated, 2) == 1 &&
+                    simulated[0] == L'1') vm.settings_index_migrating = true;
+            }
+            if (vm.settings_index_migrating)
+                vm.settings_index_status = l10n::Get(l10n::StringId::IndexMigrating);
             vm.settings_index_path = s.index.IndexPath();
             vm.settings_index_error = s.settings.error();
             vm.settings_index_volumes.clear();
@@ -393,6 +441,116 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
             }
             if (vm.status.status_text.empty())
                 vm.status.status_text = l10n::Get(l10n::StringId::Settings);
+
+            vm.dup_scope = static_cast<int>(s.duplicateScan.scope);
+            vm.dup_folder = s.duplicateScan.folder_path;
+            vm.dup_min_size = s.duplicateScan.minimum_file_bytes <= 1024 ? 0
+                : s.duplicateScan.minimum_file_bytes <= 1024ull * 1024ull ? 1 : 2;
+            vm.dup_scanning = s.duplicateScan.scanning;
+            vm.dup_hint = l10n::Get(l10n::StringId::DupHint);
+            if (vm.settings_page == 4) {
+            RequestDuplicateVolumeCache(s);
+            const auto& volumes = s.dup_volume_cache;
+            vm.dup_drives.clear();
+            vm.dup_drives.reserve(volumes.size());
+            std::wstring selected_drive =
+                app::DuplicateScanSession::NormalizeDriveRoot(s.duplicateScan.drive_root);
+            if (selected_drive.empty()) {
+                for (const auto& volume : volumes) {
+                    if (volume.mount_point.empty()) continue;
+                    selected_drive =
+                        app::DuplicateScanSession::NormalizeDriveRoot(volume.mount_point);
+                    break;
+                }
+            }
+            for (const auto& volume : volumes) {
+                if (volume.mount_point.empty()) continue;
+                ui::DuplicateDriveView row;
+                row.root = app::DuplicateScanSession::NormalizeDriveRoot(volume.mount_point);
+                row.label = row.root.size() >= 2 ? row.root.substr(0, 2) : row.root;
+                if (!volume.label.empty()) {
+                    row.label += L" ";
+                    row.label += volume.label;
+                }
+                row.selected = CompareStringOrdinal(row.root.c_str(), -1,
+                    selected_drive.c_str(), -1, TRUE) == CSTR_EQUAL;
+                vm.dup_drives.push_back(std::move(row));
+            }
+            const auto roots = app::DuplicateScanSession::ResolveRoots(
+                s.duplicateScan.scope, s.duplicateScan.folder_path,
+                s.duplicateScan.drive_root.empty() ? selected_drive : s.duplicateScan.drive_root,
+                volumes);
+            vm.dup_can_scan = s.duplicateScan.scope == app::DuplicateScanScope::Folder ||
+                              !roots.empty();
+            vm.dup_show_progress = s.duplicateScan.scanning;
+            vm.dup_progress_indeterminate =
+                s.duplicateScan.phase == index::ContentSearchPhase::Enumerating ||
+                s.duplicateScan.total_files == 0;
+            vm.dup_progress_value = s.duplicateScan.total_files
+                ? static_cast<float>(s.duplicateScan.scanned_files) /
+                  static_cast<float>(s.duplicateScan.total_files)
+                : 0.0f;
+            vm.dup_animation = static_cast<float>(
+                std::fmod(static_cast<double>(GetTickCount64()), 1952.0) / 1952.0);
+            std::wstring root_label = s.duplicateScan.current_root;
+            if (root_label.size() >= 2 && root_label[1] == L':')
+                root_label = root_label.substr(0, 2);
+            if (root_label.empty() && s.duplicateScan.scope == app::DuplicateScanScope::Drive)
+                root_label = s.duplicateScan.drive_root.size() >= 2
+                    ? s.duplicateScan.drive_root.substr(0, 2) : s.duplicateScan.drive_root;
+            wchar_t status[192]{};
+            if (s.duplicateScan.phase == index::ContentSearchPhase::Hashing &&
+                s.duplicateScan.total_files) {
+                swprintf_s(status, l10n::Get(l10n::StringId::DupHashingFormat).c_str(),
+                           format::GroupedInt(s.duplicateScan.scanned_files).c_str(),
+                           format::GroupedInt(s.duplicateScan.total_files).c_str());
+            } else {
+                swprintf_s(status, l10n::Get(l10n::StringId::DupListingFormat).c_str(),
+                           root_label.empty() ? L"—" : root_label.c_str(),
+                           format::GroupedInt(s.duplicateScan.scanned_files).c_str());
+            }
+            vm.dup_status = status;
+            wchar_t speed[128]{};
+            if (s.duplicateScan.phase == index::ContentSearchPhase::Hashing) {
+                wchar_t mb[32]{};
+                swprintf_s(mb, L"%.1f", s.duplicateScan.megabytes_per_second);
+                swprintf_s(speed, l10n::Get(l10n::StringId::DupHashSpeedFormat).c_str(),
+                           mb, format::GroupedInt(static_cast<uint64_t>(
+                               s.duplicateScan.files_per_second + 0.5)).c_str());
+            } else {
+                swprintf_s(speed, l10n::Get(l10n::StringId::DupFilesPerSecFormat).c_str(),
+                           format::GroupedInt(static_cast<uint64_t>(
+                               s.duplicateScan.files_per_second + 0.5)).c_str());
+            }
+            vm.dup_speed = speed;
+            vm.dup_empty.clear();
+            if (!s.duplicateScan.scanning && s.duplicateScan.completed) {
+                if (s.duplicateScan.groups.empty() &&
+                    s.duplicateScan.error == ERROR_SUCCESS)
+                    vm.dup_empty = l10n::Get(l10n::StringId::DupNoResults);
+                if (s.duplicateScan.truncated)
+                    vm.dup_empty = l10n::Get(l10n::StringId::DupTruncated);
+                if (s.duplicateScan.error != ERROR_SUCCESS &&
+                    s.duplicateScan.error != ERROR_CANCELLED) {
+                    wchar_t error[64]{};
+                    swprintf_s(error, l10n::Get(l10n::StringId::ErrorCodeFormat).c_str(),
+                               s.duplicateScan.error);
+                    vm.dup_empty = error;
+                }
+            }
+            if (s.dup_view_epoch != s.duplicateScan.result_epoch ||
+                s.dup_view_language != s.appPrefs.language) {
+                RefreshDuplicateGroupViews(s);
+            }
+            vm.dup_groups = s.dup_view_cache;
+            const size_t extras = s.duplicateScan.ExtraCount();
+            vm.dup_show_delete_all = extras > 0 && !s.duplicateScan.scanning;
+            if (vm.dup_show_delete_all) {
+                vm.dup_delete_all = l10n::Get(l10n::StringId::DupDeleteAllExtras);
+                vm.dup_delete_all += L" · ";
+                vm.dup_delete_all += format::GroupedInt(extras);
+            }
+            }
         }
     }
     for (const auto& sp : splitters) {
@@ -570,13 +728,69 @@ void RequestRecycleOccupancy(AppState& s) {
     });
 }
 
-void RefreshRecycleViews(AppState& s) {
-    ForEachPane(s, [&](app::Pane& pane) {
-        app::Tab* tab = pane.ActiveTab();
-        if (!tab) return;
-        if (IsRecycleTab(tab)) LoadVirtualView(s, *tab, tab->current_path);
-    });
-    RequestRecycleOccupancy(s);
+bool ApplyQueriedRecycleInfo(AppState& s, const fs::RecycleBinInfo& info) {
+    if (!info.valid) return false;
+    // Shell often reports the pre-mutation count for a second or two. Keep the
+    // optimistic occupancy until a query actually moves off that baseline.
+    if (s.recycle_info_guard &&
+        info.items == s.recycle_ignore_items &&
+        s.recycle_info.valid &&
+        s.recycle_info.items != s.recycle_ignore_items)
+        return false;
+    s.recycle_info = info;
+    if (info.items != s.recycle_ignore_items)
+        s.recycle_info_guard = false;
+    ApplyRecycleOccupancy(s);
+    return true;
+}
+
+void RefreshRecycleViews(AppState& s, bool query_occupancy) {
+    RefreshPath(s, app::MakeRecyclePath());
+    if (query_occupancy) RequestRecycleOccupancy(s);
+}
+
+void ScheduleRecycleRefresh(AppState& s) {
+    s.recycle_ignore_items = s.recycle_info.valid ? s.recycle_info.items : 0;
+    s.recycle_info_guard = true;
+    s.recycle_refresh_left = 3;
+    const ULONGLONG now = GetTickCount64();
+    if (s.recycle_refresh_at == 0)
+        s.recycle_refresh_at = now + 300;
+}
+
+void BumpRecycleOccupancy(AppState& s, int64_t delta) {
+    if (!s.recycle_info.valid) {
+        s.recycle_info.valid = true;
+        s.recycle_info.items = 0;
+        s.recycle_info.bytes = 0;
+    }
+    if (delta > 0) {
+        s.recycle_info.items += static_cast<uint64_t>(delta);
+    } else if (delta < 0) {
+        const uint64_t sub = static_cast<uint64_t>(-delta);
+        s.recycle_info.items = s.recycle_info.items > sub ? s.recycle_info.items - sub : 0;
+        if (s.recycle_info.items == 0) s.recycle_info.bytes = 0;
+    }
+    ApplyRecycleOccupancy(s);
+}
+
+void ClearRecycleOccupancy(AppState& s) {
+    s.recycle_info.valid = true;
+    s.recycle_info.items = 0;
+    s.recycle_info.bytes = 0;
+    ApplyRecycleOccupancy(s);
+}
+
+bool PumpRecycleRefresh(AppState& s, ULONGLONG now) {
+    if (s.recycle_refresh_left <= 0 || s.recycle_refresh_at == 0 || now < s.recycle_refresh_at)
+        return false;
+    RefreshRecycleViews(s, true);
+    --s.recycle_refresh_left;
+    if (s.recycle_refresh_left > 0)
+        s.recycle_refresh_at = now + (s.recycle_refresh_left == 2 ? 900ull : 1600ull);
+    else
+        s.recycle_refresh_at = 0;
+    return true;
 }
 
 bool ToggleStarred(AppState& s, const std::wstring& target,
@@ -770,11 +984,46 @@ bool TickTrayDeck(AppState& s) {
     return dirty;
 }
 
+static bool HoverHintIsCommand(ui::HitTestResult::Region region) {
+    using R = ui::HitTestResult;
+    switch (region) {
+    case R::None:
+    case R::Row:
+    case R::Pane:
+    case R::Tab:
+    case R::SidebarItem:
+    case R::SidebarHeader:
+    case R::TrayCard:
+    case R::AddressBar:
+    case R::ColumnHeader:
+    case R::StatusBar:
+    case R::StatusBarTask:
+        return false;
+    default:
+        return true;
+    }
+}
+
+static std::wstring ContextStatusHint(const app::Tab* tab) {
+    if (!tab) return {};
+    if (IsSettingsTab(tab)) return l10n::Get(l10n::StringId::Settings);
+    if (IsRecycleTab(tab)) return l10n::Get(l10n::StringId::StatusHintRecycle);
+    std::wstring kind;
+    app::ParsePulsePath(tab->current_path, &kind, nullptr);
+    if (kind == L"search") return l10n::Get(l10n::StringId::StatusHintSearch);
+    if (tab->net_readonly) return l10n::Get(l10n::StringId::StatusHintReadonly);
+    if (tab->SelectedCount() > 0) return l10n::Get(l10n::StringId::StatusHintSelected);
+    return l10n::Get(l10n::StringId::StatusHintIdle);
+}
+
 // View-model wrapper: builds the base VM and layers ops-layer status on top.
 // probe_details=false: hit-test / input paths must not kick off selection
 // probes (or mutate detailsSelPath); paint owns those side effects.
 ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     if (!s.pane) return {};
+    ForEachPane(s, [&](app::Pane& pane) {
+        if (auto* tab = pane.ActiveTab()) tab->SetShowHiddenFiles(s.appPrefs.show_hidden_files);
+    });
     ui::WindowViewModel vm = app::BuildWindowViewModel(*s.pane, s.sidebar,
         s.pane->focused, s.maximized, s.darkMode, &s.places, s.sidebarCollapsedMask,
         s.starredExpanded);
@@ -834,6 +1083,12 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
                 s.lastFps, s.workingSetMb);
         }
         vm.status.performance_compact_text = compactPerf;
+    } else {
+        const auto region = static_cast<ui::HitTestResult::Region>(s.hoverRegion);
+        if (HoverHintIsCommand(region))
+            vm.status.hint_text = TooltipForHover(s);
+        if (vm.status.hint_text.empty())
+            vm.status.hint_text = ContextStatusHint(ActiveTab(s));
     }
     // 1B-2 overlays: cut rows, drag feedback, breadcrumb hover.
     if (!s.cutPaths.empty()) {
@@ -850,6 +1105,13 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     vm.pane.drop_target_index = s.dropRow;
     vm.pane.rename_index = s.renameIndex;
     vm.address_editing = s.addressEditing;
+    vm.address_searching = s.addressSearching;
+    vm.address_search_current = s.addressSearchCurrent;
+    vm.address_search_has_text = s.addressSearching && s.hwndAddressEdit &&
+                                GetWindowTextLengthW(s.hwndAddressEdit) > 0;
+    vm.address_search_animation = s.addressSearchAnimation;
+    vm.address_scope_animation = s.addressScopeAnimation;
+    FillAddressSearchView(s, vm);
     vm.splitter_pressed = s.splitterDragging;
     vm.details_resize_pressed = s.detailsPanelResizing;
     if (s.marqueeActive) {
@@ -1133,6 +1395,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     vm.drag_badge_y = s.dropBadgeY;
     vm.hover_region = s.hoverRegion;
     vm.hover_control_index = s.hoverControlIndex;
+    vm.hover_sub_index = s.hoverSubIndex;
     vm.hover_pane_index = s.hoverPaneIndex;
     vm.column_resize_pressed = s.columnResizing;
     vm.tooltip_text = s.tooltipText;
@@ -1150,6 +1413,15 @@ std::wstring TooltipForHover(AppState& s) {
     using I = l10n::StringId;
     auto text = [](I id) -> const std::wstring& { return l10n::Get(id); };
     switch (static_cast<R::Region>(s.hoverRegion)) {
+    case R::AddressSearch: return text(I::Search);
+    case R::AddressSearchScope: {
+        const auto* tab = ActiveTab(s);
+        const bool current = !s.addressSearching && IsAddressSearchResults(tab)
+            ? tab->search_input_current : s.addressSearchCurrent;
+        return text(current ? I::LocationCurrent : I::LocationIndexed);
+    }
+    case R::AddressSearchClear: return text(I::Clear);
+    case R::AddressSearchClose: return text(I::Back);
     case R::TabClose: return text(I::TooltipCloseTab);
     case R::Tab: {
         if (!s.pane) return L"";
@@ -1185,6 +1457,7 @@ std::wstring TooltipForHover(AppState& s) {
         return text(s.hoverControlIndex == 0 ? I::TooltipFollowAccent : I::SettingsThemeColor);
     case R::SettingsToggle:
         if (s.hoverControlIndex == 3) return text(I::SettingsOpenFolders);
+        if (s.hoverControlIndex == 4) return text(I::SettingsShowPerformance);
         return L"";
     case R::SettingsIndexExcludeAction: return text(I::TooltipAddExclusion);
     case R::SettingsIndexExcludeRemove: return text(I::TooltipRemoveExclusion);
@@ -1222,6 +1495,7 @@ std::wstring TooltipForHover(AppState& s) {
     case R::DetailsRename: return text(I::Rename);
     case R::DetailsTagAdd: return text(I::AddTag);
     case R::DetailsResize: return text(I::ResizeDetails);
+    case R::StatusBarTask: return text(I::OpDetails);
     case R::DetailsNewTab: return text(I::OpenNewTab);
     case R::DetailsCopyPath: return text(I::CopyPath);
     case R::DetailsSection: return text(I::ExpandCollapse);

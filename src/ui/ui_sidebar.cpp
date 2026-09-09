@@ -168,7 +168,7 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             drive.icon_color = item.icon_color;
             if (item.danger) drive.bar_color = theme.danger;
             const int drive_svg = FluentSvgIdForGlyph(item.icon_glyph);
-            drive.skip_glyph = !IsHighContrast() && drive_svg != 0;
+            drive.skip_glyph = !IsHighContrast() && drive_svg != 0 && EnsureFluentSvg(drive_svg);
             painter_.DrawDriveSidebarItem(drive);
             if (drive.skip_glyph) {
                 DrawFluentSvg(drive_svg, painter_.DriveSidebarItemIconRect(slot.rc), 1.0f);
@@ -240,7 +240,7 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             row.icon_color = item.icon_color;
             row.suppress_text = item.editing;
             const int row_svg = item.is_tag ? 0 : FluentSvgIdForGlyph(item.icon_glyph);
-            row.skip_glyph = !IsHighContrast() && row_svg != 0;
+            row.skip_glyph = !IsHighContrast() && row_svg != 0 && EnsureFluentSvg(row_svg);
             const bool unpin = SidebarItemHasUnpin(item);
             const auto unpin_rc = WorkspaceUnpinRect(slot.rc, scale_);
             const auto expand_rc = SidebarExpandRect(slot.rc, scale_);
@@ -342,8 +342,9 @@ void MainRenderer::DrawTrayDeck(const WindowViewModel& vm, const D2D1_RECT_F& pa
                                   static_cast<uint32_t>(std::clamp(
                                       std::lround(g.icon), 32l, 256l)),
                                   0, 0, 0, opacity) == PreviewDrawResult::Bitmap;
-        ID2D1Bitmap* bitmap = drewThumbnail || card.missing ? nullptr
-            : icon_cache_.BitmapFor(card.path, card.name, card.is_dir, card.attrs, g.icon);
+        ID2D1Bitmap* bitmap = drewThumbnail ? nullptr
+            : icon_cache_.BitmapFor(card.missing ? L"" : card.path,
+                                   card.name, card.is_dir, card.attrs, g.icon);
         if (!drewThumbnail && bitmap) {
             // Soft drop shadow straight off the bitmap silhouette, no card.
             ComPtr<ID2D1Effect> shadow;
@@ -358,14 +359,6 @@ void MainRenderer::DrawTrayDeck(const WindowViewModel& vm, const D2D1_RECT_F& pa
             }
             dc->DrawBitmap(bitmap, &dest, opacity,
                            D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, nullptr, nullptr);
-        } else if (!drewThumbnail) {
-            DrawIconText(dest.left, dest.top, dest.right - dest.left, dest.bottom - dest.top,
-                         card.is_dir ? kIconFolder : kIconFile,
-                         card.is_dir ? L"[dir]" : L"[file]",
-                         card.missing ? theme.text_disabled
-                                      : (card.is_dir ? brIconFolder_->GetColor()
-                                                     : brIconFile_->GetColor()),
-                         1.6f);
         }
         if (hovered) {
             // × badge pinned to the icon's top-right corner.

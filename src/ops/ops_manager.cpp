@@ -13,9 +13,12 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cwctype>
 #include <filesystem>
 #include <system_error>
+#include <thread>
+#include <vector>
 #include <winioctl.h>
 
 namespace pulse::ops {
@@ -53,6 +56,34 @@ std::wstring ParentOf(const std::wstring& path) {
     temp.resize(pos);
     if (temp.size() == 2 && temp[1] == L':') temp += L'\\';
     return prefix + temp;
+}
+
+void ReplaceAll(std::wstring& hay, std::wstring_view from, const std::wstring& to) {
+    if (from.empty()) return;
+    size_t i = 0;
+    while ((i = hay.find(from, i)) != std::wstring::npos) {
+        hay.replace(i, from.size(), to);
+        i += to.size();
+    }
+}
+
+std::wstring ExpandShellCommand(std::wstring command, const std::wstring& path) {
+    const std::wstring file = pulse::path::StripExtendedPathPrefix(path);
+    std::wstring quoted = L"\"";
+    quoted += file;
+    quoted += L'"';
+    ReplaceAll(command, L"\"%1\"", quoted);
+    ReplaceAll(command, L"\"%L\"", quoted);
+    ReplaceAll(command, L"\"%l\"", quoted);
+    ReplaceAll(command, L"\"%V\"", quoted);
+    ReplaceAll(command, L"\"%v\"", quoted);
+    ReplaceAll(command, L"%1", quoted);
+    ReplaceAll(command, L"%L", quoted);
+    ReplaceAll(command, L"%l", quoted);
+    ReplaceAll(command, L"%V", quoted);
+    ReplaceAll(command, L"%v", quoted);
+    ReplaceAll(command, L"%*", quoted);
+    return command;
 }
 
 bool IsVolumeRoot(const std::wstring& path) {
@@ -105,6 +136,7 @@ const wchar_t* OpVerb(OpType t) {
 
 std::wstring Describe(const OpRequest& r) {
     std::wstring s = OpVerb(r.type);
+    if (r.type == OpType::EmptyRecycle) return s;
     s += L" ";
     if (!r.sources.empty()) s += FileName(r.sources.front());
     if (r.sources.size() > 1) {
@@ -775,6 +807,16 @@ void OpsManager::OpenWithApp(const std::wstring& app_exe, const std::wstring& fi
     EnqueueOpen(std::move(item));
 }
 
+void OpsManager::ExecuteCommand(const std::wstring& command, const std::wstring& path) {
+    std::wstring expanded = ExpandShellCommand(command, path);
+    if (expanded.empty()) return;
+    QueueItem item;
+    item.open_path = ParentOf(path);
+    item.open_file = expanded;
+    item.open_verb = L"__cmdline";
+    EnqueueOpen(std::move(item));
+}
+
 std::wstring TerminalCommandLine(const std::wstring& dir) {
     std::wstring quoted = L"\"";
     size_t slashes = 0;
@@ -1042,6 +1084,25 @@ void OpsManager::OpenThread() {
             if (open_queue_.empty()) continue;
             item = std::move(open_queue_.front());
             open_queue_.pop_front();
+        }
+
+        if (_wcsicmp(item.open_verb.c_str(), L"__cmdline") == 0) {
+            std::wstring cmd = item.open_file;
+            if (!cmd.empty()) {
+                std::vector<wchar_t> buf(cmd.begin(), cmd.end());
+                buf.push_back(0);
+                STARTUPINFOW si{ sizeof(si) };
+                PROCESS_INFORMATION pi{};
+                si.dwFlags = STARTF_USESHOWWINDOW;
+                si.wShowWindow = SW_SHOWNORMAL;
+                const wchar_t* dir = item.open_path.empty() ? nullptr : item.open_path.c_str();
+                if (CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE, 0, nullptr, dir,
+                                   &si, &pi)) {
+                    CloseHandle(pi.hThread);
+                    CloseHandle(pi.hProcess);
+                }
+            }
+            continue;
         }
 
         if (_wcsicmp(item.open_verb.c_str(), L"openas") == 0 ||
@@ -1480,6 +1541,7 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
     // with "移动 foo → dest 完成" for a no-op Explorer already ignores.
     if (failure.empty() && entries.empty()) {
         SetStatus([&](OpStatus& st) {
+            st.completed_ops++;
             st.active = false;
             st.phase = OpPhase::Completed;
             st.percent = 100.0f;
@@ -1971,17 +2033,65 @@ void OpsManager::RunShellOp(const OpRequest& req, uint64_t task_id) {
         st.last_error.clear();
         st.source_label = req.sources.empty() ? L"" : FileName(req.sources.front());
         st.destination_label.clear();
-        st.current_item = st.source_label;
+        st.current_item = req.type == OpType::EmptyRecycle
+            ? OpVerb(OpType::EmptyRecycle) : st.source_label;
         st.total_bytes = st.transferred_bytes = 0;
-        st.total_items = req.sources.empty() ? 1 : req.sources.size();
+        st.total_items = req.type == OpType::EmptyRecycle ? 0
+            : (req.sources.empty() ? 1 : req.sources.size());
         st.completed_items = 0;
         st.bytes_per_second = st.peak_bytes_per_second = 0.0;
         st.eta_seconds = 0;
+        if (req.type == OpType::EmptyRecycle) st.percent = -1.0f;
     });
 
     if (req.type == OpType::EmptyRecycle) {
+        SHQUERYRBINFO start{};
+        start.cbSize = sizeof(start);
+        const bool have_start = SUCCEEDED(SHQueryRecycleBinW(nullptr, &start))
+            && start.i64NumItems >= 0;
+        const int64_t start_items = have_start ? start.i64NumItems : 0;
+        const int64_t start_bytes = have_start ? start.i64Size : 0;
+        SetStatus([&](OpStatus& st) {
+            st.current_item = OpVerb(OpType::EmptyRecycle);
+            st.summary = st.current_item;
+            st.total_items = start_items > 0 ? static_cast<uint64_t>(start_items) : 0;
+            st.total_bytes = start_bytes > 0 ? static_cast<uint64_t>(start_bytes) : 0;
+            st.percent = have_start && start_items > 0 ? 0.0f : -1.0f;
+        });
+
+        std::atomic<bool> emptying{true};
+        std::thread poller([&] {
+            CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+            while (emptying.load(std::memory_order_relaxed) && !stopping_.load()) {
+                SHQUERYRBINFO now{};
+                now.cbSize = sizeof(now);
+                if (SUCCEEDED(SHQueryRecycleBinW(nullptr, &now)) && have_start && start_items > 0) {
+                    const int64_t left = (std::max)(int64_t{0}, now.i64NumItems);
+                    const int64_t done_items = (std::max)(int64_t{0}, start_items - left);
+                    const int64_t left_bytes = (std::max)(int64_t{0}, now.i64Size);
+                    const int64_t done_bytes = (std::max)(int64_t{0}, start_bytes - left_bytes);
+                    SetStatus([&](OpStatus& st) {
+                        if (!st.active || st.type != OpType::EmptyRecycle) return;
+                        st.completed_items = static_cast<uint64_t>(done_items);
+                        st.total_items = static_cast<uint64_t>(start_items);
+                        st.transferred_bytes = static_cast<uint64_t>(done_bytes);
+                        st.total_bytes = static_cast<uint64_t>((std::max)(start_bytes, int64_t{0}));
+                        st.percent = 100.0f * static_cast<float>(done_items)
+                            / static_cast<float>(start_items);
+                        st.current_item = OpVerb(OpType::EmptyRecycle);
+                    });
+                }
+                for (int i = 0; i < 8 && emptying.load(std::memory_order_relaxed); ++i)
+                    Sleep(50);
+            }
+            CoUninitialize();
+        });
+
         const HRESULT hr = SHEmptyRecycleBinW(nullptr, nullptr,
             SHERB_NOCONFIRMATION | SHERB_NOPROGRESSUI | SHERB_NOSOUND);
+        emptying.store(false, std::memory_order_relaxed);
+        if (poller.joinable()) poller.join();
+
         SetStatus([&](OpStatus& st) {
             st.active = false;
             st.percent = -1.0f;

@@ -25,6 +25,9 @@ ViewMode ViewModeFromIndex(int index) noexcept;
 bool ShowsColumnHeader(ViewMode mode) noexcept;
 bool UsesThumbnails(ViewMode mode) noexcept;
 
+// Reserve a marquee gutter before the name and before the scrollbar.
+D2D1_RECT_F DetailsContentRect(D2D1_RECT_F bounds, float scale) noexcept;
+
 struct ViewLayoutMetrics {
     float cell_width = 0.0f;
     float cell_height = 0.0f;

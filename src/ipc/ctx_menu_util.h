@@ -77,6 +77,76 @@ inline std::wstring CleanMenuText(std::wstring_view raw) {
 
 // At most this many children per software-owned submenu flyout.
 inline constexpr int kMaxSubmenuChildren = 16;
+// Static-verb command packing: parent index * stride + child (0 = parent).
+// Stays inside CmdShellStaticBase..CmdShellComBase (2000 slots).
+inline constexpr int kStaticVerbStride = kMaxSubmenuChildren + 1;
+inline constexpr int kMaxStaticVerbParents = 2000 / kStaticVerbStride;
+inline constexpr int kDefaultExplorerCap = 32;
+
+inline constexpr wchar_t kFolderVerbKey[] = L":folder";
+inline constexpr wchar_t kDriveVerbKey[] = L":drive";
+inline constexpr wchar_t kBackgroundVerbKey[] = L":bg";
+
+inline bool IsLocationVerbKey(std::wstring_view key) {
+    return key == kFolderVerbKey || key == kDriveVerbKey || key == kBackgroundVerbKey;
+}
+
+struct StaticVerbRegFlags {
+    bool legacy_disable = false;
+    bool programmatic = false;
+    bool extended = false;
+    bool has_command = false;
+    bool has_delegate_execute = false;
+    bool has_explorer_command = false;
+    bool has_subcommands = false;
+    bool has_extended_subcommands_key = false;
+};
+
+inline bool KeepStaticVerb(const StaticVerbRegFlags& flags) {
+    if (flags.legacy_disable || flags.programmatic || flags.extended) return false;
+    return flags.has_command || flags.has_delegate_execute ||
+           flags.has_explorer_command || flags.has_subcommands ||
+           flags.has_extended_subcommands_key;
+}
+
+// One row in a COM flyout after QueryContextMenu. Nested submenus are flattened
+// one extra level into leaves so share apps (泛泰快传) are not dropped.
+struct CtxFlyoutChild {
+    uint32_t id = 0;
+    bool enabled = true;
+    bool nested = false;
+    std::wstring verb;
+    std::wstring text;
+    std::vector<CtxFlyoutChild> nested_leaves;
+};
+
+inline void FlattenFlyoutChildren(const std::vector<CtxFlyoutChild>& children,
+                                  bool background,
+                                  std::vector<CtxFlyoutChild>& leaves,
+                                  int max_children = kMaxSubmenuChildren) {
+    for (const auto& child : children) {
+        if (static_cast<int>(leaves.size()) >= max_children) break;
+        if (child.nested) {
+            for (const auto& leaf : child.nested_leaves) {
+                if (static_cast<int>(leaves.size()) >= max_children) break;
+                if (leaf.text.empty() || IsBuiltinContextVerb(leaf.verb, background))
+                    continue;
+                CtxFlyoutChild out = leaf;
+                out.nested = false;
+                out.nested_leaves.clear();
+                leaves.push_back(std::move(out));
+            }
+            continue;
+        }
+        if (child.text.empty() || IsBuiltinContextVerb(child.verb, background)) continue;
+        leaves.push_back(child);
+    }
+}
+
+inline bool KeepFlyoutParentWithoutLeaves(uint32_t parent_id, uint32_t id_first,
+                                          uint32_t id_last) {
+    return parent_id != 0 && parent_id >= id_first && parent_id <= id_last;
+}
 
 // Categories for the Explorer fusion-zone prefs (context_menu.json). Host still
 // returns the full list; the UI process decides enabled from these + overrides.
@@ -226,10 +296,10 @@ inline CtxMenuCategory ClassifyExplorerItem(std::wstring_view verb,
         t.find(L"发送给") != std::wstring::npos ||
         t == L"分享" || t.find(L"share") != std::wstring::npos)
         return CtxMenuCategory::Share;
+    if (t.find(L"泛泰") != std::wstring::npos || t.find(L"快传") != std::wstring::npos)
+        return CtxMenuCategory::Share;
     if (is_flyout && (t.find(L"qq") != std::wstring::npos ||
-                      t.find(L"内网通") != std::wstring::npos ||
-                      t.find(L"泛泰") != std::wstring::npos ||
-                      t.find(L"快传") != std::wstring::npos))
+                      t.find(L"内网通") != std::wstring::npos))
         return CtxMenuCategory::Share;
 
     if (v.find(L"wallpaper") != std::wstring::npos ||

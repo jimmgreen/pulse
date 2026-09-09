@@ -76,12 +76,12 @@ HRESULT CreateChromeTabGeometry(ID2D1Factory* factory, const D2D1_RECT_F& bounds
 void FillChromeTab(ID2D1DeviceContext* dc, ID2D1Brush* brush,
                    const D2D1_RECT_F& bounds, const ChromeTabShape& shape) {
     if (!dc || !brush) return;
-    ID2D1Factory* factory = nullptr;
+    ComPtr<ID2D1Factory> factory;
     dc->GetFactory(&factory);
-    if (!factory) return;
+    if (!factory.get()) return;
 
     ComPtr<ID2D1Geometry> geometry;
-    if (FAILED(CreateChromeTabGeometry(factory, bounds, shape, &geometry)) ||
+    if (FAILED(CreateChromeTabGeometry(factory.get(), bounds, shape, &geometry)) ||
         !geometry.get()) {
         return;
     }
@@ -92,12 +92,12 @@ void FillChromeTabAccent(ID2D1DeviceContext* dc, ID2D1Brush* brush,
                          const D2D1_RECT_F& bounds, const ChromeTabShape& shape,
                          float thickness, bool bottom) {
     if (!dc || !brush || thickness < 0.5f) return;
-    ID2D1Factory* factory = nullptr;
+    ComPtr<ID2D1Factory> factory;
     dc->GetFactory(&factory);
-    if (!factory) return;
+    if (!factory.get()) return;
 
     ComPtr<ID2D1Geometry> tab;
-    if (FAILED(CreateChromeTabGeometry(factory, bounds, shape, &tab)) || !tab.get())
+    if (FAILED(CreateChromeTabGeometry(factory.get(), bounds, shape, &tab)) || !tab.get())
         return;
 
     const D2D1_RECT_F strip = bottom
@@ -107,19 +107,10 @@ void FillChromeTabAccent(ID2D1DeviceContext* dc, ID2D1Brush* brush,
         : D2D1::RectF(bounds.left - shape.bottom_radius,
                       bounds.top,
                       bounds.right + shape.bottom_radius, bounds.top + thickness);
-    ComPtr<ID2D1RectangleGeometry> strip_geo;
-    if (FAILED(factory->CreateRectangleGeometry(strip, &strip_geo))) return;
-
-    ComPtr<ID2D1PathGeometry> clipped;
-    if (FAILED(factory->CreatePathGeometry(&clipped))) return;
-    ComPtr<ID2D1GeometrySink> sink;
-    if (FAILED(clipped->Open(&sink))) return;
-    if (FAILED(tab->CombineWithGeometry(strip_geo.get(), D2D1_COMBINE_MODE_INTERSECT,
-                                        nullptr, sink.get()))) {
-        return;
-    }
-    if (FAILED(sink->Close())) return;
-    dc->FillGeometry(clipped.get(), brush);
+    dc->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), tab.get(),
+        D2D1_ANTIALIAS_MODE_PER_PRIMITIVE), nullptr);
+    dc->FillRectangle(strip, brush);
+    dc->PopLayer();
 }
 
 void FillRoundedAccent(ID2D1DeviceContext* dc, ID2D1Brush* brush,
@@ -130,9 +121,9 @@ void FillRoundedAccent(ID2D1DeviceContext* dc, ID2D1Brush* brush,
     const float h = bounds.bottom - bounds.top;
     if (w < 2.0f || h < 2.0f) return;
 
-    ID2D1Factory* factory = nullptr;
+    ComPtr<ID2D1Factory> factory;
     dc->GetFactory(&factory);
-    if (!factory) return;
+    if (!factory.get()) return;
 
     const float r = (std::min)({ radius, w * 0.5f, h * 0.5f });
     ComPtr<ID2D1RoundedRectangleGeometry> mask;
@@ -147,19 +138,10 @@ void FillRoundedAccent(ID2D1DeviceContext* dc, ID2D1Brush* brush,
     } else {
         strip.bottom = bounds.top + thickness;
     }
-    ComPtr<ID2D1RectangleGeometry> strip_geo;
-    if (FAILED(factory->CreateRectangleGeometry(strip, &strip_geo))) return;
-
-    ComPtr<ID2D1PathGeometry> clipped;
-    if (FAILED(factory->CreatePathGeometry(&clipped))) return;
-    ComPtr<ID2D1GeometrySink> sink;
-    if (FAILED(clipped->Open(&sink))) return;
-    if (FAILED(mask->CombineWithGeometry(strip_geo.get(), D2D1_COMBINE_MODE_INTERSECT,
-                                         nullptr, sink.get()))) {
-        return;
-    }
-    if (FAILED(sink->Close())) return;
-    dc->FillGeometry(clipped.get(), brush);
+    dc->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), mask.get(),
+        D2D1_ANTIALIAS_MODE_PER_PRIMITIVE), nullptr);
+    dc->FillRectangle(strip, brush);
+    dc->PopLayer();
 }
 
 } // namespace pulse::ui

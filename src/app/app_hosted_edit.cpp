@@ -1,5 +1,6 @@
 // app_hosted_edit.cpp — extracted from app_main.cpp.
 #include "app_internal.h"
+#include "../ui/address_search_layout.h"
 #include "../ui/lumatext_renderer.h"
 #include "../ui/fluent_menu.h"
 #include "../ui/drag_drop.h"
@@ -59,6 +60,15 @@ LRESULT CALLBACK FilterEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                                        UINT_PTR /*uIdSubclass*/, DWORD_PTR dwRefData);
 void EnsureEditVisuals(AppState& s);
 
+static bool EraseHostedEditBackground(HWND hwnd, WPARAM wParam, AppState* s) {
+    if (!s) return false;
+    EnsureEditVisuals(*s);
+    RECT rc{};
+    GetClientRect(hwnd, &rc);
+    FillRect(reinterpret_cast<HDC>(wParam), &rc, s->editBrush);
+    return true;
+}
+
 void PlaceHostedEdit(HWND hwnd, HWND owner, const D2D1_RECT_F& cell, float scale,
                             int left_margin_dip, int right_margin_dip) {
     POINT pt{ static_cast<int>(std::lround(cell.left)),
@@ -106,6 +116,11 @@ HWND CreateHostedEdit(AppState& s, SUBCLASSPROC proc) {
 void LayoutAddressEditor(AppState& s) {
     if (!s.hwndAddressEdit || !s.hwnd) return;
     D2D1_RECT_F addr = s.renderer.AddressBarRect((float)s.compositor.Width());
+    if (s.addressSearching) {
+        PlaceHostedEdit(s.hwndAddressEdit, s.hwnd, ui::LayoutAddressSearch(addr, s.scale).input,
+                        s.scale, 0, 0);
+        return;
+    }
     const float insetX = 10.0f * s.scale;
     const float insetY = 2.0f * s.scale;
     PlaceHostedEdit(s.hwndAddressEdit, s.hwnd,
@@ -140,6 +155,7 @@ void ShowAddressEditor(AppState& s) {
     if (s.renameIndex >= 0) HideRenameOverlay(s, false);
     if (!s.tagRenameId.empty()) HideTagRenameOverlay(s, true);
     if (s.filterEditing) HideFilterEditor(s, true);
+    s.addressSearching = false;
     s.addressEditing = true;
     if (s.hwndAddressEdit && (GetWindowLongW(s.hwndAddressEdit, GWL_STYLE) & WS_CHILD)) {
         DestroyWindow(s.hwndAddressEdit);
@@ -153,6 +169,7 @@ void ShowAddressEditor(AppState& s) {
         }
     }
     const std::wstring shown = ClipboardPath(tab->current_path);
+    SendMessageW(s.hwndAddressEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L""));
     s.addressIgnoreKillFocus = true;
     SetWindowTextW(s.hwndAddressEdit, shown.empty() ? L"This PC" : shown.c_str());
     LayoutAddressEditor(s);
@@ -166,6 +183,7 @@ void ShowAddressEditor(AppState& s) {
 
 void HideAddressEditor(AppState& s, bool navigate) {
     if (!s.hwndAddressEdit) return;
+    SaveAddressSearchDraft(s);
     if (navigate) {
         wchar_t buf[MAX_PATH * 4];
         GetWindowTextW(s.hwndAddressEdit, buf, ARRAYSIZE(buf));
@@ -174,6 +192,8 @@ void HideAddressEditor(AppState& s, bool navigate) {
     s.addressIgnoreKillFocus = true;
     ShowWindow(s.hwndAddressEdit, SW_HIDE);
     s.addressEditing = false;
+    s.addressSearching = false;
+    s.addressAnimationTick = GetTickCount64();
     if (s.hwnd) SetFocus(s.hwnd);
     s.addressIgnoreKillFocus = false;
     InvalidateRect(s.hwnd, nullptr, FALSE);
@@ -536,8 +556,19 @@ LRESULT CALLBACK AddressEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
     if (s && HandleHostedEditMessage(*s, hwnd, msg, wParam, lParam, handled)) return handled;
     switch (msg) {
     case WM_KEYDOWN:
+        if (s->addressSearching && (GetKeyState(VK_CONTROL) & 0x8000) &&
+            (wParam == L'K' || wParam == L'L')) {
+            HideAddressEditor(*s, false);
+            ShowOmnibar(*s, wParam == L'K' ? OmnibarMode::Mixed : OmnibarMode::Path);
+            return 0;
+        }
+        if (s->addressSearching && wParam == VK_TAB) {
+            ShowAddressSearchScope(*s);
+            return 0;
+        }
         if (wParam == VK_RETURN) {
-            HideAddressEditor(*s, true);
+            if (s->addressSearching) SubmitAddressSearch(*s);
+            else HideAddressEditor(*s, true);
             return 0;
         }
         if (wParam == VK_ESCAPE) {
@@ -545,16 +576,16 @@ LRESULT CALLBACK AddressEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
             return 0;
         }
         break;
+    case WM_CHAR:
+        if (s->addressSearching && (wParam == VK_RETURN || wParam == VK_ESCAPE || wParam == VK_TAB))
+            return 0;
+        break;
     case WM_KILLFOCUS:
+        if (s->addressSearching && reinterpret_cast<HWND>(wParam) == s->hwnd) break;
         if (!s->addressIgnoreKillFocus) HideAddressEditor(*s, false);
         break;
     case WM_ERASEBKGND: {
-        if (!s) break;
-        EnsureEditVisuals(*s);
-        RECT rc{};
-        GetClientRect(hwnd, &rc);
-        FillRect(reinterpret_cast<HDC>(wParam), &rc, s->editBrush);
-        return 1;
+        return EraseHostedEditBackground(hwnd, wParam, s) ? 1 : 0;
     }
     }
     return DefSubclassProc(hwnd, msg, wParam, lParam);
@@ -588,12 +619,7 @@ LRESULT CALLBACK FilterEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (!s->filterIgnoreKillFocus) HideFilterEditor(*s, true);
         break;
     case WM_ERASEBKGND: {
-        if (!s) break;
-        EnsureEditVisuals(*s);
-        RECT rc{};
-        GetClientRect(hwnd, &rc);
-        FillRect(reinterpret_cast<HDC>(wParam), &rc, s->editBrush);
-        return 1;
+        return EraseHostedEditBackground(hwnd, wParam, s) ? 1 : 0;
     }
     }
     return DefSubclassProc(hwnd, msg, wParam, lParam);
@@ -619,12 +645,7 @@ LRESULT CALLBACK RenameEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (!s->renameIgnoreKillFocus) HideRenameOverlay(*s, true);
         break;
     case WM_ERASEBKGND: {
-        if (!s) break;
-        EnsureEditVisuals(*s);
-        RECT rc{};
-        GetClientRect(hwnd, &rc);
-        FillRect(reinterpret_cast<HDC>(wParam), &rc, s->editBrush);
-        return 1;
+        return EraseHostedEditBackground(hwnd, wParam, s) ? 1 : 0;
     }
     }
     return DefSubclassProc(hwnd, msg, wParam, lParam);
@@ -650,12 +671,7 @@ LRESULT CALLBACK TagRenameEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         if (!s->tagRenameIgnoreKillFocus) HideTagRenameOverlay(*s, true);
         break;
     case WM_ERASEBKGND: {
-        if (!s) break;
-        EnsureEditVisuals(*s);
-        RECT rc{};
-        GetClientRect(hwnd, &rc);
-        FillRect(reinterpret_cast<HDC>(wParam), &rc, s->editBrush);
-        return 1;
+        return EraseHostedEditBackground(hwnd, wParam, s) ? 1 : 0;
     }
     }
     return DefSubclassProc(hwnd, msg, wParam, lParam);

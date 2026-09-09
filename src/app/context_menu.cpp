@@ -1,6 +1,7 @@
 // context_menu.cpp — See context_menu.h.
 #include "context_menu.h"
 #include "../common/localization.h"
+#include "../common/path_utils.h"
 #include "../fs/fs_enum.h"
 #include "../ipc/ctx_menu_util.h"
 #include <windows.h>
@@ -145,6 +146,65 @@ std::vector<ui::FluentMenuItem> BuildBackgroundMenu(bool can_paste, bool can_und
     items.back().separator_after = true;
     items.push_back(UndoItem(can_undo, undo_label));
     return items;
+}
+
+std::vector<ui::FluentMenuItem> BuildBreadcrumbMenu(bool filesystem) {
+    std::vector<ui::FluentMenuItem> items;
+    items.push_back(Item(CmdOpenInNewTab, l10n::Get(l10n::StringId::OpenNewTab).c_str(), kGlyphOpenInNewTab));
+    items.push_back(Item(CmdOpen, l10n::Get(l10n::StringId::Open).c_str(), kGlyphOpen));
+    items.back().separator_after = true;
+    items.push_back(Item(CmdCopyPath, l10n::Get(l10n::StringId::CopyPath).c_str(), kGlyphLink));
+    if (filesystem) {
+        items.push_back(Item(CmdCopy, l10n::Get(l10n::StringId::Copy).c_str(), kGlyphCopy));
+        items.back().separator_after = true;
+        items.push_back(Item(CmdOpenTerminal, l10n::Get(l10n::StringId::OpenTerminalHere).c_str(), kGlyphTerminal));
+        items.push_back(Item(CmdProperties, l10n::Get(l10n::StringId::Properties).c_str(), kGlyphProperties));
+    }
+    return items;
+}
+
+void AppendBackgroundViewCommands(std::vector<ui::FluentMenuItem>& items,
+                                  const BackgroundViewOptions& options) {
+    auto view = Item(CmdNone, l10n::Get(l10n::StringId::View).c_str(), L"\xE8A9");
+    view.children = BuildViewMenu(options.view_mode, options.details_panel);
+    auto sort = Item(CmdNone, l10n::Get(l10n::StringId::SortBy).c_str(), L"\xE8CB",
+                     nullptr, options.can_sort);
+    struct SortRow { int command; ui::SortColumn column; l10n::StringId label; };
+    constexpr SortRow rows[] = {
+        { CmdSortName, ui::SortColumn::Name, l10n::StringId::ColumnName },
+        { CmdSortModified, ui::SortColumn::Mtime, l10n::StringId::ColumnModified },
+        { CmdSortType, ui::SortColumn::Type, l10n::StringId::ColumnType },
+        { CmdSortSize, ui::SortColumn::Size, l10n::StringId::ColumnSize },
+        { CmdSortPath, ui::SortColumn::Path, l10n::StringId::ColumnPath },
+    };
+    for (const auto& row : rows) {
+        if (row.column == ui::SortColumn::Path && !options.show_path) continue;
+        auto child = Item(row.command, l10n::Get(row.label).c_str(), L"", nullptr,
+                          options.can_sort && !(options.indexed_search &&
+                          (row.column == ui::SortColumn::Type || row.column == ui::SortColumn::Path)));
+        child.radio_group = true;
+        child.radio = options.can_sort && options.sort_column == row.column;
+        sort.children.push_back(std::move(child));
+    }
+    sort.children.back().separator_after = true;
+    for (bool ascending : { true, false }) {
+        auto child = Item(ascending ? CmdSortAscending : CmdSortDescending,
+            l10n::Get(ascending ? l10n::StringId::SortAscending
+                               : l10n::StringId::SortDescending).c_str(), L"", nullptr,
+            options.can_sort);
+        child.radio_group = true;
+        child.radio = options.can_sort &&
+            (options.sort_direction == ui::SortDirection::Asc) == ascending;
+        sort.children.push_back(std::move(child));
+    }
+    auto refresh = Item(CmdRefresh, l10n::Get(l10n::StringId::Refresh).c_str(), L"\xE72C", L"F5");
+    refresh.separator_after = true;
+    items.insert(items.begin(), { std::move(view), std::move(sort), std::move(refresh) });
+    if (options.filesystem) {
+        if (!items.empty()) items.back().separator_after = true;
+        items.push_back(Item(CmdFolderProperties,
+            l10n::Get(l10n::StringId::Properties).c_str(), kGlyphProperties));
+    }
 }
 
 std::vector<ui::FluentMenuItem> BuildNewMenu() {
@@ -315,18 +375,21 @@ std::vector<ui::FluentMenuItem> BuildCommandPalette(const std::wstring& query,
         add_cmd(CmdSettings, l10n::Get(l10n::StringId::Settings).c_str(), kGlyphSettings, nullptr);
         add_cmd(CmdOpenRecycle, l10n::Get(l10n::StringId::RecycleBin).c_str(), kGlyphRecycle, nullptr);
         add_cmd(CmdBatchRename, l10n::Get(l10n::StringId::BatchRename).c_str(), kGlyphRename, L"Ctrl+Shift+R");
+        add_cmd(CmdAdvancedSearch, l10n::Get(l10n::StringId::AdvancedSearch).c_str(), kGlyphSearch, L"Ctrl+Shift+F");
         add_cmd(CmdSelectAll, l10n::Get(l10n::StringId::SelectAll).c_str(), kGlyphSelectAll, L"Ctrl+A");
         add_cmd(CmdInvertSelection, l10n::Get(l10n::StringId::InvertSelection).c_str(), kGlyphInvert, L"Ctrl+I");
         add_cmd(CmdSelectWildcard, l10n::Get(l10n::StringId::SelectWildcard).c_str(), kGlyphWildcard, L"Ctrl+Shift+A");
     }
     std::unordered_set<std::wstring> seen_paths;
-    if (!command_mode && (!hits.empty() || total > 0)) {
+    const bool has_content = index::QueryHasContent(index::ParseQuery(needle));
+    if (!command_mode && (!hits.empty() || total > 0 || has_content)) {
         if (!items.empty()) items.back().separator_after = true;
         for (size_t i = 0; i < hits.size() && i < 48; ++i) {
             items.push_back(Item(CmdIndexBase + static_cast<int>(i),
                 hits[i].name.c_str(), hits[i].is_dir ? kGlyphFolder : kGlyphNewFile));
             items.back().text = hits[i].name;
             items.back().shortcut = DisplayPath(hits[i].path);
+            items.back().shortcut_inline = true;
             const std::wstring n = fs::NormalizePath(hits[i].path);
             if (!n.empty()) seen_paths.insert(n);
         }
@@ -335,7 +398,9 @@ std::vector<ui::FluentMenuItem> BuildCommandPalette(const std::wstring& query,
             wchar_t count[64];
             swprintf_s(count, L"%zu 项", total);
             items.push_back(Item(CmdSearchAll,
-                l10n::Get(l10n::StringId::ShowAllResults).c_str(), kGlyphSearch, count));
+                l10n::Get(has_content ? l10n::StringId::SearchContentResults
+                                      : l10n::StringId::ShowAllResults).c_str(),
+                kGlyphSearch, count));
         }
     }
 
@@ -369,7 +434,7 @@ std::wstring UniqueChildName(const std::wstring& dir, const std::wstring& base,
         std::wstring full = dir;
         if (!full.empty() && full.back() != L'\\') full += L'\\';
         full += name;
-        return GetFileAttributesW(full.c_str()) != INVALID_FILE_ATTRIBUTES;
+        return pulse::path::Exists(full);
     };
     std::wstring candidate = base + ext;
     for (int i = 2; exists(candidate); ++i) {

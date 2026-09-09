@@ -17,8 +17,7 @@ namespace {
 // Shell handlers can expose an icon per path (not just per extension). Keep
 // those maps bounded because a long scroll through executable/link files
 // otherwise retains every path seen during the session.
-constexpr size_t kExactIndexLimit = 256;
-constexpr size_t kGenericIndexLimit = 64;
+constexpr size_t kExactIndexLimit = 4096;
 constexpr size_t kBitmapCacheLimit = 128;
 
 std::wstring LowerExt(const std::wstring& name) {
@@ -27,17 +26,6 @@ std::wstring LowerExt(const std::wstring& name) {
     std::wstring ext = name.substr(dot);
     for (auto& c : ext) c = static_cast<wchar_t>(std::towlower(c));
     return ext;
-}
-
-bool IsPerFileIconExt(const std::wstring& ext) {
-    return ext == L".exe" || ext == L".lnk" || ext == L".ico" || ext == L".cur" ||
-           ext == L".dll" || ext == L".scr" || ext == L".cpl" || ext == L".msc" ||
-           ext == L".url" || ext == L".appref-ms";
-}
-
-std::wstring PathLeaf(const std::wstring& path) {
-    const size_t slash = path.find_last_of(L"\\/");
-    return slash == std::wstring::npos ? path : path.substr(slash + 1);
 }
 
 std::wstring ShellPath(const std::wstring& path) {
@@ -52,7 +40,7 @@ ShellIconCache::~ShellIconCache() {
     Reset();
 }
 
-void ShellIconCache::SetDeviceContext(ID2D1DeviceContext2* dc) {
+void ShellIconCache::SetDeviceContext(ID2D1DeviceContext* dc) {
     if (dc_ == dc) return;
     dc_ = dc;
     bitmaps_.clear();
@@ -65,6 +53,10 @@ void ShellIconCache::SetScale(float scale) {
 
 void ShellIconCache::SetNotifyWindow(HWND hwnd) {
     hwnd_ = hwnd;
+    if (hwnd) {
+        GenericIndex(L"", true, FILE_ATTRIBUTE_DIRECTORY);
+        GenericIndex(L"", false, FILE_ATTRIBUTE_NORMAL);
+    }
 }
 
 void ShellIconCache::Reset() {
@@ -83,6 +75,8 @@ void ShellIconCache::Reset() {
     dc_ = nullptr;
     std::lock_guard<std::mutex> lock(mutex_);
     exact_index_.clear();
+    retry_after_.clear();
+    last_used_.clear();
     queued_.clear();
     while (!queue_.empty()) queue_.pop();
 }
@@ -114,11 +108,10 @@ bool ShellIconCache::EnsureWic() {
 
 bool ShellIconCache::NeedsExactIcon(const std::wstring& name, bool is_dir,
                                     const std::wstring& path) {
+    (void)name;
     (void)is_dir;
-    // Presentation may treat a resolved folder shortcut as a directory, which
-    // used to skip the .lnk lookup and draw a blank document / generic folder.
-    return IsPerFileIconExt(LowerExt(name)) ||
-           IsPerFileIconExt(LowerExt(PathLeaf(path)));
+    // Folder customizations and registered icon handlers are path-dependent.
+    return !path.empty();
 }
 
 int ShellIconCache::GenericIndex(const std::wstring& name, bool is_dir, DWORD attrs) {
@@ -138,7 +131,17 @@ void ShellIconCache::RequestExact(const std::wstring& path) {
     if (path.empty()) return;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (exact_index_.contains(path) || queued_.contains(path)) return;
+        if (exact_index_.contains(path)) {
+            last_used_[path] = ++access_clock_;
+            return;
+        }
+        if (queued_.contains(path)) return;
+        if (queue_.size() >= kExactIndexLimit) {
+            queued_.erase(queue_.front());
+            queue_.pop();
+        }
+        if (const auto retry = retry_after_.find(path);
+            retry != retry_after_.end() && GetTickCount64() < retry->second) return;
         queued_.insert(path);
         queue_.push(path);
         if (!running_) {
@@ -151,16 +154,15 @@ void ShellIconCache::RequestExact(const std::wstring& path) {
 }
 
 void ShellIconCache::WorkerLoop() {
-    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    const HRESULT com_hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     for (;;) {
         std::wstring path;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             cv_.wait(lock, [&] { return !running_ || !queue_.empty(); });
-            if (!running_ && queue_.empty()) break;
+            if (!running_) break;
             path = std::move(queue_.front());
             queue_.pop();
-            queued_.erase(path);
         }
         SHFILEINFOW info{};
         int index = -1;
@@ -168,16 +170,20 @@ void ShellIconCache::WorkerLoop() {
         if (path.starts_with(prefix)) {
             const std::wstring key = path.substr(prefix.size());
             const bool dir = key == L"<dir>";
-            const std::wstring query = dir ? L"dummy" : (key == L"<file>" ? L".file" : key);
+            const std::wstring query = dir ? L"dummy" : (key == L"<file>" ? L"dummy" : L"dummy" + key);
             DWORD useAttrs = dir ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
             if (SHGetFileInfoW(query.c_str(), useAttrs, &info, sizeof(info),
                                SHGFI_SYSICONINDEX | SHGFI_USEFILEATTRIBUTES))
                 index = info.iIcon;
             std::lock_guard<std::mutex> lock(mutex_);
-            if (generic_index_.size() >= kGenericIndexLimit) generic_index_.clear();
-            generic_index_[key] = index;
-            if (exact_index_.size() >= kExactIndexLimit) exact_index_.clear();
-            exact_index_[path] = index;
+            if (index >= 0) {
+                if (generic_index_.size() >= 512) {
+                    const auto victim = std::find_if(generic_index_.begin(), generic_index_.end(),
+                        [](const auto& item) { return item.first != L"<dir>" && item.first != L"<file>"; });
+                    if (victim != generic_index_.end()) generic_index_.erase(victim);
+                }
+                generic_index_[key] = index;
+            }
         } else {
             const UINT flags = SHGFI_SYSICONINDEX | SHGFI_SMALLICON;
             const std::wstring query = ShellPath(path);
@@ -185,13 +191,32 @@ void ShellIconCache::WorkerLoop() {
                 index = info.iIcon;
                 if (info.hIcon) DestroyIcon(info.hIcon);
             }
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (exact_index_.size() >= kExactIndexLimit) exact_index_.clear();
-            exact_index_[path] = index;
         }
-        if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            queued_.erase(path);
+            if (index >= 0) {
+                retry_after_.erase(path);
+                if (!path.starts_with(prefix)) {
+                    if (exact_index_.size() >= kExactIndexLimit) {
+                        const auto oldest = std::min_element(last_used_.begin(), last_used_.end(),
+                            [](const auto& a, const auto& b) { return a.second < b.second; });
+                        if (oldest != last_used_.end()) {
+                            exact_index_.erase(oldest->first);
+                            last_used_.erase(oldest);
+                        }
+                    }
+                    exact_index_[path] = index;
+                    last_used_[path] = ++access_clock_;
+                }
+            } else {
+                if (retry_after_.size() >= kExactIndexLimit) retry_after_.erase(retry_after_.begin());
+                retry_after_[path] = GetTickCount64() + 2000;
+            }
+        }
+        if (const HWND hwnd = hwnd_.load()) InvalidateRect(hwnd, nullptr, FALSE);
     }
-    CoUninitialize();
+    if (SUCCEEDED(com_hr)) CoUninitialize();
 }
 
 ComPtr<ID2D1Bitmap> ShellIconCache::BitmapFromIcon(HICON icon) {
@@ -230,7 +255,7 @@ ID2D1Bitmap* ShellIconCache::BitmapForIndex(int index, int list_id) {
     DestroyIcon(icon);
     if (!bitmap.get()) return nullptr;
     ID2D1Bitmap* raw = bitmap.get();
-    if (bitmaps_.size() >= kBitmapCacheLimit) bitmaps_.clear();
+    if (bitmaps_.size() >= kBitmapCacheLimit) bitmaps_.erase(bitmaps_.begin());
     bitmaps_[key] = std::move(bitmap);
     return raw;
 }
@@ -239,17 +264,8 @@ bool ShellIconCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
                           const std::wstring& path, const std::wstring& name,
                           bool is_dir, DWORD attrs) {
     if (!dc) return false;
-    int index = -1;
-    const bool exact = NeedsExactIcon(name, is_dir, path) && !path.empty();
-    if (exact) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = exact_index_.find(path);
-        if (it != exact_index_.end()) index = it->second;
-    }
-    if (index < 0 && exact) RequestExact(path);
-    if (index < 0) index = GenericIndex(name, is_dir, attrs);
     const float desired = std::max(dest.right - dest.left, dest.bottom - dest.top);
-    ID2D1Bitmap* bitmap = BitmapForIndex(index, ImageListId(desired));
+    ID2D1Bitmap* bitmap = BitmapFor(path, name, is_dir, attrs, desired);
     if (!bitmap) return false;
     dc->DrawBitmap(bitmap, &dest, 1.0f, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
                    nullptr, nullptr);
@@ -264,10 +280,15 @@ ID2D1Bitmap* ShellIconCache::BitmapFor(const std::wstring& path, const std::wstr
     if (exact) {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = exact_index_.find(path);
-        if (it != exact_index_.end()) index = it->second;
+        if (it != exact_index_.end()) {
+            index = it->second;
+            last_used_[path] = ++access_clock_;
+        }
     }
     if (index < 0 && exact) RequestExact(path);
     if (index < 0) index = GenericIndex(name, is_dir, attrs);
-    return BitmapForIndex(index, ImageListId(desired_dips));
+    const int list_id = ImageListId(desired_dips);
+    if (auto* bitmap = BitmapForIndex(index, list_id)) return bitmap;
+    return BitmapForIndex(GenericIndex(L"", is_dir, attrs), list_id);
 }
 } // namespace pulse::ui

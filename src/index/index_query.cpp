@@ -1,5 +1,7 @@
 // index_query.cpp — Compile Everything-subset queries into predicate groups.
 #include "index_query.h"
+#include "search_kinds.h"
+#include "../common/path_utils.h"
 #include <windows.h>
 #include <algorithm>
 #include <cwctype>
@@ -155,6 +157,14 @@ void ApplyDateToken(Term& t, std::wstring_view raw) {
                   MidnightLocal(en.wYear, en.wMonth, en.wDay));
         return;
     }
+    if (s == L"thismonth") {
+        int month = now.wMonth + 1;
+        int year = now.wYear;
+        if (month > 12) { month = 1; ++year; }
+        set_range(MidnightLocal(now.wYear, now.wMonth, 1),
+                  MidnightLocal(year, month, 1));
+        return;
+    }
     if (s == L"thisyear") {
         set_range(MidnightLocal(now.wYear, 1, 1), MidnightLocal(now.wYear + 1, 1, 1));
         return;
@@ -213,8 +223,8 @@ void ApplyName(Term& t, std::wstring_view raw, bool quoted) {
     std::wstring folded = Fold(raw);
     if (folded.empty()) return;
     t.name = std::move(folded);
-    if (quoted) t.name_how = NameHow::Exact;
-    else if (HasWild(t.name)) t.name_how = NameHow::Wildcard;
+    if (HasWild(t.name)) t.name_how = NameHow::Wildcard;
+    else if (quoted) t.name_how = NameHow::Exact;
     else t.name_how = NameHow::Substring;
 }
 
@@ -231,49 +241,150 @@ void ApplyExt(Term& t, std::wstring_view raw) {
     }
 }
 
+bool IsColon(wchar_t c) { return c == L':' || c == L'：'; }
+
+bool LooksLikeAbsPath(std::wstring_view s) {
+    if (s.size() >= 2 && ((s[0] >= L'A' && s[0] <= L'Z') || (s[0] >= L'a' && s[0] <= L'z')) &&
+        s[1] == L':') return true;
+    return s.size() >= 2 && s[0] == L'\\' && s[1] == L'\\';
+}
+
+std::wstring_view StripQuotes(std::wstring_view s) {
+    if (s.size() >= 2 && s.front() == L'"' && s.back() == L'"')
+        return s.substr(1, s.size() - 2);
+    return s;
+}
+
 bool IsModifier(std::wstring_view tok, std::wstring_view key, std::wstring_view& val) {
     if (!StartsWithI(tok, key)) return false;
     if (tok.size() == key.size()) { val = {}; return true; }
-    if (tok[key.size()] != L':') return false;
-    val = tok.substr(key.size() + 1);
+    if (!IsColon(tok[key.size()])) return false;
+    val = StripQuotes(tok.substr(key.size() + 1));
     return true;
+}
+
+bool IsContentKey(std::wstring_view tok, std::wstring_view& val) {
+    return IsModifier(tok, L"content", val) || IsModifier(tok, L"\u5185\u5bb9", val) ||
+           IsModifier(tok, L"\u5305\u542b", val);
+}
+
+bool IsTypeKey(std::wstring_view tok, std::wstring_view& val) {
+    return IsModifier(tok, L"type", val) || IsModifier(tok, L"kind", val) ||
+           IsModifier(tok, L"\u7c7b\u578b", val) || IsModifier(tok, L"\u79cd\u7c7b", val);
+}
+
+bool IsFlagToken(std::wstring_view tok, ContentClause& content) {
+    std::wstring_view val;
+    auto flagged = [&](std::wstring_view key) {
+        return tok.size() > key.size() && IsModifier(tok, key, val);
+    };
+    if (flagged(L"ww") || flagged(L"wholeword") || flagged(L"\u5168\u8bcd")) {
+        content.whole_word = true;
+        return true;
+    }
+    if (flagged(L"case") || flagged(L"casesensitive") ||
+        flagged(L"\u533a\u5206\u5927\u5c0f\u5199")) {
+        content.case_sensitive = true;
+        return true;
+    }
+    if (flagged(L"contentmode") || flagged(L"\u5185\u5bb9\u5339\u914d")) {
+        const std::wstring mode = Fold(val);
+        if (mode == L"any" || mode == L"or" || mode == L"\u4efb\u4e00")
+            content.mode = ContentMatchMode::AnyWord;
+        else if (mode == L"phrase" || mode == L"\u77ed\u8bed")
+            content.mode = ContentMatchMode::Phrase;
+        else
+            content.mode = ContentMatchMode::AllWords;
+        return true;
+    }
+    return false;
+}
+
+struct RawToken {
+    std::wstring text;
+    bool quoted = false;
+    bool negated = false;
+};
+
+bool ConsumeContentOrFlag(const RawToken& tok, CompiledQuery& q) {
+    if (tok.quoted) return false;
+    std::wstring_view val;
+    if (IsFlagToken(tok.text, q.content)) return true;
+    if (IsContentKey(tok.text, val)) {
+        std::wstring needle(val);
+        if (needle.empty()) return true;
+        if (tok.negated) q.content.excluded.push_back(std::move(needle));
+        else q.content.needles.push_back(std::move(needle));
+        return true;
+    }
+    if (IsModifier(tok.text, L"path", val) || IsModifier(tok.text, L"\u8def\u5f84", val)) {
+        if (LooksLikeAbsPath(val)) {
+            if (q.path_prefix.empty() && !tok.negated) {
+                q.path_prefix = path::StripExtendedPathPrefix(val);
+                return true;
+            }
+            return false;
+        }
+    }
+    return false;
+}
+
+bool SkipFromFilenameNeedle(const RawToken& tok) {
+    if (tok.quoted) return false;
+    std::wstring_view val;
+    ContentClause unused;
+    if (IsFlagToken(tok.text, unused)) return true;
+    if (IsContentKey(tok.text, val)) return true;
+    return false;
 }
 
 Term ParseTerm(std::wstring_view tok, bool quoted, bool negated) {
     Term t;
     std::wstring_view val;
-    if (!quoted && IsModifier(tok, L"ext", val)) {
+    if (!quoted && (IsModifier(tok, L"ext", val))) {
         ApplyExt(t, val);
         t.ext_not = negated;
         return t;
     }
-    if (!quoted && IsModifier(tok, L"size", val)) {
+    if (!quoted && (IsModifier(tok, L"size", val) || IsModifier(tok, L"\u5927\u5c0f", val))) {
         ApplySizeToken(t, val);
         t.size_not = negated;
         return t;
     }
-    if (!quoted && (IsModifier(tok, L"dm", val) || IsModifier(tok, L"datemodified", val))) {
+    if (!quoted && (IsModifier(tok, L"dm", val) || IsModifier(tok, L"datemodified", val) ||
+                    IsModifier(tok, L"\u4fee\u6539", val) || IsModifier(tok, L"\u65e5\u671f", val))) {
         ApplyDateToken(t, val);
         t.date_not = negated;
         return t;
     }
-    if (!quoted && IsModifier(tok, L"folder", val)) {
+    if (!quoted && (IsModifier(tok, L"folder", val) || IsModifier(tok, L"\u6587\u4ef6\u5939", val))) {
         t.folder = true;
         if (!val.empty()) ApplyName(t, val, false);
         if (negated) t.name_not = true; // !folder:foo → not (folder named foo); lone !folder: → files
         if (negated && val.empty()) { t.folder = false; t.file = true; t.name_not = false; }
         return t;
     }
-    if (!quoted && IsModifier(tok, L"file", val)) {
+    if (!quoted && (IsModifier(tok, L"file", val) || IsModifier(tok, L"\u6587\u4ef6", val))) {
         t.file = true;
         if (!val.empty()) ApplyName(t, val, false);
         if (negated && val.empty()) { t.file = false; t.folder = true; }
         return t;
     }
-    if (!quoted && IsModifier(tok, L"path", val)) {
+    if (!quoted && (IsModifier(tok, L"path", val) || IsModifier(tok, L"\u8def\u5f84", val))) {
         ApplyName(t, val, false);
         t.name_in_path = true;
         t.name_not = negated;
+        return t;
+    }
+    if (!quoted && IsTypeKey(tok, val)) {
+        bool folders_only = false;
+        if (ExpandKindToken(val, t.exts, folders_only)) {
+            if (folders_only) t.folder = true;
+            t.ext_not = negated;
+            return t;
+        }
+        ApplyExt(t, val);
+        t.ext_not = negated;
         return t;
     }
     ApplyName(t, tok, quoted);
@@ -282,6 +393,51 @@ Term ParseTerm(std::wstring_view tok, bool quoted, bool negated) {
         (tok.find(L'\\') != std::wstring_view::npos || tok.find(L'/') != std::wstring_view::npos))
         t.name_in_path = true;
     return t;
+}
+
+std::vector<RawToken> TokenizeQuery(std::wstring_view raw, std::vector<size_t>* or_breaks) {
+    std::vector<RawToken> tokens;
+    size_t i = 0;
+    auto skip_ws = [&] {
+        while (i < raw.size() && (raw[i] == L' ' || raw[i] == L'\t')) ++i;
+    };
+    while (i < raw.size()) {
+        skip_ws();
+        if (i >= raw.size()) break;
+        if (raw[i] == L'|') {
+            if (or_breaks) or_breaks->push_back(tokens.size());
+            ++i;
+            continue;
+        }
+        bool neg = false;
+        while (i < raw.size() && raw[i] == L'!') { neg = !neg; ++i; }
+        skip_ws();
+        if (i >= raw.size()) break;
+        RawToken tok;
+        tok.negated = neg;
+        if (raw[i] == L'"') {
+            tok.quoted = true;
+            ++i;
+            while (i < raw.size() && raw[i] != L'"') tok.text.push_back(raw[i++]);
+            if (i < raw.size() && raw[i] == L'"') ++i;
+        } else {
+            while (i < raw.size() && raw[i] != L' ' && raw[i] != L'\t' && raw[i] != L'|') {
+                const wchar_t c = raw[i++];
+                tok.text.push_back(c);
+                if (IsColon(c)) {
+                    if (i < raw.size() && raw[i] == L'"') {
+                        tok.text.push_back(raw[i++]);
+                        while (i < raw.size() && raw[i] != L'"') tok.text.push_back(raw[i++]);
+                        if (i < raw.size() && raw[i] == L'"') tok.text.push_back(raw[i++]);
+                        break;
+                    }
+                }
+            }
+        }
+        if (tok.text.empty() && !tok.quoted) continue;
+        tokens.push_back(std::move(tok));
+    }
+    return tokens;
 }
 
 } // namespace
@@ -446,6 +602,31 @@ bool QueryIsSimpleName(const CompiledQuery& q) {
     return t.name_how == NameHow::Substring || t.name_how == NameHow::Exact;
 }
 
+bool QueryHasContent(const CompiledQuery& q) {
+    return q.content.present();
+}
+
+bool QueryHasExtFilter(const CompiledQuery& q) {
+    for (const auto& g : q.groups)
+        for (const auto& t : g)
+            if (!t.exts.empty()) return true;
+    return false;
+}
+
+bool QueryHasNameFilter(const CompiledQuery& q) {
+    for (const auto& g : q.groups)
+        for (const auto& t : g)
+            if (t.name_how != NameHow::Any && !t.name_in_path) return true;
+    return false;
+}
+
+bool QueryHasFolderFilter(const CompiledQuery& q) {
+    for (const auto& g : q.groups)
+        for (const auto& t : g)
+            if (t.folder || t.file) return true;
+    return false;
+}
+
 int RankName(const wchar_t* s, uint32_t n, bool is_dir, const CompiledQuery& q) {
     int best = 0;
     for (const auto& g : q.groups) {
@@ -483,38 +664,68 @@ bool QueryCanNarrow(std::wstring_view prev, std::wstring_view next) {
 CompiledQuery ParseQuery(std::wstring_view raw) {
     CompiledQuery q;
     q.groups.emplace_back();
-    size_t i = 0;
-    auto skip_ws = [&] {
-        while (i < raw.size() && (raw[i] == L' ' || raw[i] == L'\t')) ++i;
-    };
-    while (i < raw.size()) {
-        skip_ws();
-        if (i >= raw.size()) break;
-        if (raw[i] == L'|') {
+    std::vector<size_t> or_breaks;
+    const auto tokens = TokenizeQuery(raw, &or_breaks);
+    size_t or_i = 0;
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        while (or_i < or_breaks.size() && or_breaks[or_i] == i) {
             if (!q.groups.back().empty()) q.groups.emplace_back();
-            ++i;
-            continue;
+            ++or_i;
         }
-        bool neg = false;
-        while (i < raw.size() && raw[i] == L'!') { neg = !neg; ++i; }
-        skip_ws();
-        if (i >= raw.size()) break;
-        bool quoted = false;
-        std::wstring tok;
-        if (raw[i] == L'"') {
-            quoted = true;
-            ++i;
-            while (i < raw.size() && raw[i] != L'"') tok.push_back(raw[i++]);
-            if (i < raw.size() && raw[i] == L'"') ++i;
-        } else {
-            while (i < raw.size() && raw[i] != L' ' && raw[i] != L'\t' && raw[i] != L'|')
-                tok.push_back(raw[i++]);
-        }
-        if (tok.empty() && !quoted) continue;
-        q.groups.back().push_back(ParseTerm(tok, quoted, neg));
+        if (ConsumeContentOrFlag(tokens[i], q)) continue;
+        q.groups.back().push_back(ParseTerm(tokens[i].text, tokens[i].quoted, tokens[i].negated));
     }
     while (!q.groups.empty() && q.groups.back().empty()) q.groups.pop_back();
+    if (q.content.needles.size() == 1 && q.content.mode == ContentMatchMode::AllWords &&
+        q.content.needles[0].find(L' ') != std::wstring::npos)
+        q.content.mode = ContentMatchMode::Phrase;
     return q;
+}
+
+std::wstring FilenameQueryText(std::wstring_view raw) {
+    std::vector<size_t> or_breaks;
+    const auto tokens = TokenizeQuery(raw, &or_breaks);
+    std::wstring out;
+    size_t or_i = 0;
+    bool group_has = false;
+    bool skipped_path_prefix = false;
+    auto push_or = [&] {
+        if (!out.empty() && group_has) out.append(L" |");
+        group_has = false;
+    };
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        while (or_i < or_breaks.size() && or_breaks[or_i] == i) {
+            push_or();
+            ++or_i;
+        }
+        std::wstring_view path_val;
+        const bool abs_path = !tokens[i].quoted &&
+            (IsModifier(tokens[i].text, L"path", path_val) ||
+             IsModifier(tokens[i].text, L"\u8def\u5f84", path_val)) &&
+            LooksLikeAbsPath(path_val);
+        if (abs_path && !tokens[i].negated && !skipped_path_prefix) {
+            skipped_path_prefix = true;
+            continue;
+        }
+        if (SkipFromFilenameNeedle(tokens[i])) continue;
+        if (!out.empty() && (group_has || out.ends_with(L'|') || out.ends_with(L' '))) {
+            if (!out.ends_with(L' ') && !out.ends_with(L'|')) out.push_back(L' ');
+            else if (out.ends_with(L'|')) out.push_back(L' ');
+        } else if (!out.empty() && !group_has) {
+            out.push_back(L' ');
+        }
+        if (tokens[i].negated) out.push_back(L'!');
+        if (tokens[i].quoted) {
+            out.push_back(L'"');
+            out.append(tokens[i].text);
+            out.push_back(L'"');
+        } else {
+            out.append(tokens[i].text);
+        }
+        group_has = true;
+    }
+    while (!out.empty() && (out.back() == L' ' || out.back() == L'|')) out.pop_back();
+    return out;
 }
 
 } // namespace pulse::index

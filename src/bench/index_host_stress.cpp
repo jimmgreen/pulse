@@ -81,7 +81,7 @@ std::vector<uint8_t> SearchPayload(std::wstring needle) {
 }
 
 bool WaitForSearch(HANDLE pipe, uint32_t wanted_id, DWORD timeout_ms,
-                   uint32_t* responses = nullptr) {
+                   uint32_t* responses = nullptr, uint32_t* matched = nullptr) {
     const ULONGLONG deadline = GetTickCount64() + timeout_ms;
     uint32_t count = 0;
     while (GetTickCount64() < deadline) {
@@ -97,6 +97,7 @@ bool WaitForSearch(HANDLE pipe, uint32_t wanted_id, DWORD timeout_ms,
             uint32_t total = 0, hits = 0;
             const bool valid = reader.GetU32(total) && reader.GetU32(hits) && hits <= 48;
             if (responses) *responses = count;
+            if (matched) *matched = total;
             return valid;
         }
     }
@@ -150,6 +151,17 @@ int wmain() {
     Check(latest_returned, L"coalesced search returns the newest request");
     Check(latest_returned && response_count < 200,
           L"rapid searches are coalesced instead of all executing");
+
+    uint32_t dot_matches = 0;
+    const bool dot_found = !clients.empty() &&
+        SendFrame(clients[0], REQ_IDX_SEARCH, 300, SearchPayload(L".codex")) &&
+        WaitForSearch(clients[0], 300, 10000, nullptr, &dot_matches);
+    Check(dot_found && dot_matches == 1, L"dot folder survives the search pipe roundtrip");
+    uint32_t empty_matches = 1;
+    const bool empty_found = !clients.empty() &&
+        SendFrame(clients[0], REQ_IDX_SEARCH, 301, SearchPayload(L"nonexistent-dot-folder")) &&
+        WaitForSearch(clients[0], 301, 10000, nullptr, &empty_matches);
+    Check(empty_found && empty_matches == 0, L"zero-result search does not retain dot folder");
 
     bool concurrent_ok = clients.size() == 16;
     for (size_t i = 1; concurrent_ok && i < clients.size(); ++i) {

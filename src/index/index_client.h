@@ -33,7 +33,7 @@ public:
     static bool ConfigureVolumeElevated(const std::wstring& volume_id, bool enabled);
     static bool RebuildElevated();
     static bool InstallServiceElevated();
-    static bool ConfigureIndexPathElevated(const std::wstring& path);
+    static bool ConfigureIndexPathElevated(const std::wstring& path, std::wstring* error = nullptr);
     static bool ConfigureExcludePathElevated(const std::wstring& path, bool enabled);
     static bool ExportDiagnosticsElevated(const std::wstring& empty_directory);
 

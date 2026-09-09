@@ -44,13 +44,62 @@ bool ParseRequest(const std::vector<uint8_t>& payload, ContentSearchRequest& req
         !reader.GetU32(maximum_hits) || !reader.GetString(request.root) ||
         !reader.GetString(request.needle)) return false;
     if (mode > static_cast<uint32_t>(ContentSearchMode::Duplicates) ||
-        request.root.empty() || request.root.size() > 32768 || request.needle.size() > 4096 ||
+        request.root.size() > 32768 || request.needle.size() > 4096 ||
         request.maximum_file_bytes > 64ull * 1024ull * 1024ull ||
         maximum_hits == 0 || maximum_hits > 10000) return false;
     request.mode = static_cast<ContentSearchMode>(mode);
     request.recursive = (flags & 1) != 0;
     request.case_sensitive = (flags & 2) != 0;
+    request.skip_system_locations = (flags & 4) != 0;
+    request.whole_word = (flags & 8) != 0;
     request.maximum_hits = maximum_hits;
+    if (reader.remaining() >= 12) {
+        uint32_t extra_roots = 0;
+        if (!reader.GetU64(request.minimum_file_bytes) || !reader.GetU32(extra_roots) ||
+            extra_roots > 32) return false;
+        std::vector<std::wstring> extras;
+        extras.reserve(extra_roots);
+        for (uint32_t i = 0; i < extra_roots; ++i) {
+            std::wstring extra;
+            if (!reader.GetString(extra) || extra.empty() || extra.size() > 32768) return false;
+            extras.push_back(std::move(extra));
+        }
+        if (!request.root.empty()) request.roots.push_back(request.root);
+        request.roots.insert(request.roots.end(), extras.begin(), extras.end());
+        if (reader.remaining() >= 12) {
+            uint32_t match_mode = 0;
+            uint32_t extra_needles = 0;
+            if (!reader.GetU32(match_mode) || !reader.GetU32(extra_needles) ||
+                extra_needles > 32 || match_mode > 2) return false;
+            request.match_mode = static_cast<ContentMatchMode>(match_mode);
+            request.needles.reserve(extra_needles);
+            for (uint32_t i = 0; i < extra_needles; ++i) {
+                std::wstring needle;
+                if (!reader.GetString(needle) || needle.size() > 4096) return false;
+                if (!needle.empty()) request.needles.push_back(std::move(needle));
+            }
+            uint32_t excluded = 0;
+            if (!reader.GetU32(excluded) || excluded > 32) return false;
+            request.excluded_needles.reserve(excluded);
+            for (uint32_t i = 0; i < excluded; ++i) {
+                std::wstring needle;
+                if (!reader.GetString(needle) || needle.size() > 4096) return false;
+                if (!needle.empty()) request.excluded_needles.push_back(std::move(needle));
+            }
+            uint32_t candidates = 0;
+            if (!reader.GetU32(candidates) || candidates > 10000) return false;
+            request.candidate_paths.reserve(candidates);
+            for (uint32_t i = 0; i < candidates; ++i) {
+                std::wstring path;
+                if (!reader.GetString(path) || path.empty() || path.size() > 32768) return false;
+                request.candidate_paths.push_back(std::move(path));
+            }
+        }
+    } else if (!request.root.empty()) {
+        request.roots.push_back(request.root);
+    }
+    if (request.roots.empty() && request.candidate_paths.empty()) return false;
+    if (request.root.empty() && !request.roots.empty()) request.root = request.roots.front();
     return true;
 }
 
@@ -64,6 +113,9 @@ bool SendBatch(HANDLE pipe, const ContentSearchProgress& progress,
     if (progress.truncated) flags |= 2u;
     writer.PutU32(flags);
     writer.PutU32(progress.error);
+    writer.PutU32(static_cast<uint32_t>(progress.phase));
+    writer.PutU64(progress.total_files);
+    writer.PutString(progress.current_root);
     writer.PutU32(static_cast<uint32_t>(hits.size()));
     for (const auto& hit : hits) {
         writer.PutString(hit.path);

@@ -1,3 +1,5 @@
+#include "../common/windows_compat.h"
+#include "quick_access.h"
 // app_main.cpp — Pulse UI process entry point, window, input, shot mode.
 #include "../ui/ui_compositor.h"
 #include "../ui/lumatext_renderer.h"
@@ -85,6 +87,7 @@
 #pragma comment(lib, "uxtheme.lib")
 #pragma comment(lib, "psapi.lib")
 #include "app_internal.h"
+#include "duplicate_scan.h"
 #include <commctrl.h>
 
 using namespace pulse;
@@ -141,7 +144,7 @@ void Render(AppState& s) {
         }
     }
 
-    ID2D1DeviceContext2* dc = s.compositor.Dc();
+    ID2D1DeviceContext* dc = s.compositor.Dc();
     const auto draw_start = std::chrono::steady_clock::now();
     dc->BeginDraw();
     dc->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
@@ -156,6 +159,7 @@ void Render(AppState& s) {
 
     D2D1_RECT_F rect = D2D1::RectF(0, 0, (float)s.compositor.Width(), (float)s.compositor.Height());
     s.renderer.Render(vm, rect, theme);
+    s.notification_toast.Draw(s.compositor, theme, s.scale, hc);
 
     const HRESULT end_hr = dc->EndDraw();
     const auto draw_end = std::chrono::steady_clock::now();
@@ -166,7 +170,12 @@ void Render(AppState& s) {
         return;
     }
     const auto present_start = std::chrono::steady_clock::now();
-    s.compositor.Present();
+    wchar_t hidden_frame[4]{};
+    const bool hidden_capture = s.shot.active &&
+        GetEnvironmentVariableW(L"PULSE_TEST_HIDDEN_SHOT", hidden_frame, ARRAYSIZE(hidden_frame)) == 1 &&
+        hidden_frame[0] == L'1';
+    // An occluded flip chain advances to an unpainted buffer after Present.
+    if (!hidden_capture) s.compositor.Present();
     const auto present_end = std::chrono::steady_clock::now();
     s.timing.present_ms = std::chrono::duration<double, std::milli>(present_end - present_start).count();
 
@@ -190,16 +199,17 @@ void Render(AppState& s) {
 
 LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     AppState* s = GetAppState(hwnd);
+    if (s && s->notification_toast.HandleMessage(hwnd, msg, wParam, lParam)) return 0;
 
     switch (msg) {
     case WM_NCCALCSIZE: {
         if (wParam && IsZoomed(hwnd)) {
             auto* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(lParam);
-            const UINT dpi = GetDpiForWindow(hwnd);
-            const int frameX = GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi)
-                             + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
-            const int frameY = GetSystemMetricsForDpi(SM_CYSIZEFRAME, dpi)
-                             + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+            const UINT dpi = pulse::compat::WindowDpi(hwnd);
+            const int frameX = pulse::compat::SystemMetricsForDpi(SM_CXSIZEFRAME, dpi)
+                             + pulse::compat::SystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+            const int frameY = pulse::compat::SystemMetricsForDpi(SM_CYSIZEFRAME, dpi)
+                             + pulse::compat::SystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
             params->rgrc[0].left += frameX;
             params->rgrc[0].right -= frameX;
             params->rgrc[0].top += frameY;
@@ -216,16 +226,23 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         s->tray_controller.Attach(hwnd, cs->hInstance);
 
         s->scale = s->shot_scale_override > 0.0f
-            ? s->shot_scale_override : (float)GetDpiForWindow(hwnd) / 96.0f;
+            ? s->shot_scale_override : (float)pulse::compat::WindowDpi(hwnd) / 96.0f;
         s->accentColor = ui::GetAccentColor();
         s->darkMode = ui::ShouldUseDarkMode(s->themeOverride);
         s->backdropActive = ui::ApplyWindowEffect(hwnd, ui::WindowEffect::MicaAlt, s->darkMode);
 
         if (!s->compositor.Init(hwnd)) {
-            MessageBoxW(hwnd, L"Failed to initialize D3D/D2D/DWrite", L"Pulse", MB_OK);
+            const std::wstring message = L"Failed to initialize D3D/D2D/DWrite\n\n" +
+                s->compositor.InitializationError() + L"\n\nLog: %LOCALAPPDATA%\\Pulse\\pulse_graphics.log";
+            MessageBoxW(hwnd, message.c_str(), L"Pulse", MB_OK | MB_ICONERROR);
             return -1;
         }
         s->compositor.RecreateTextFormats(s->scale);
+        if (s->shot.active) {
+            wchar_t toast_test[2]{};
+            if (GetEnvironmentVariableW(L"PULSE_TEST_TOAST", toast_test, 2) == 1 && toast_test[0] == L'1')
+                s->notification_toast.Show(hwnd, L"索引迁移未完成", L"目标磁盘空间不足，原索引已保留。请释放空间后重试。");
+        }
         s->renderer.SetCompositor(&s->compositor);
         s->renderer.SetScale(s->scale);
         s->renderer.SetIconNotifyWindow(hwnd);
@@ -250,6 +267,14 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         ProbePinnedNetworks(*s);
         s->ctxMenuPrefs.Load();
         s->appPrefs.Load();
+        s->showFps = s->forceStatusPerformance || s->appPrefs.show_status_performance;
+        s->duplicateScan.scope = static_cast<app::DuplicateScanScope>(
+            std::clamp(s->appPrefs.duplicate_scan_scope, 0, 2));
+        s->duplicateScan.folder_path = s->appPrefs.duplicate_scan_folder;
+        s->duplicateScan.drive_root =
+            app::DuplicateScanSession::NormalizeDriveRoot(s->appPrefs.duplicate_scan_drive);
+        s->duplicateScan.minimum_file_bytes =
+            app::DuplicateScanSession::DefaultMinimumBytes(s->duplicateScan.scope);
         if (s->shot.active && l10n::IsLanguageId(s->shot.language) &&
             s->shot.language != L"system")
             s->appPrefs.language = s->shot.language;
@@ -281,6 +306,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         s->index.Start(hwnd, WM_INDEX_NOTIFY, WM_INDEX_SEARCH);
         s->networkIndex.Start(hwnd, WM_NETWORK_INDEX_NOTIFY, WM_NETWORK_INDEX_SEARCH);
         s->contentSearch.Start(hwnd, WM_CONTENT_SEARCH);
+        s->duplicateSearch.Start(hwnd, WM_DUPLICATE_SCAN);
         s->settings.SetServiceInstalled(s->index.ServiceInstalled());
         app::SettingsController::UiCallbacks settings_callbacks;
         settings_callbacks.pick_image = [hwnd](std::wstring& path) {
@@ -407,6 +433,9 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             [s](const std::wstring& app_path, const std::wstring& path) {
                 s->ops.OpenWithApp(app_path, path);
             },
+            [s](const std::wstring& command, const std::wstring& path) {
+                s->ops.ExecuteCommand(command, path);
+            },
         });
         // Explorer verbs arrive on the shell client's reader thread; hop to
         // the UI thread with an owned payload (freed by the WM handler).
@@ -433,8 +462,10 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (AppState* state = GetAppState(hwnd)) state->ops.ResumeCurrent();
         };
         operation_callbacks.dismiss = [hwnd] {
-            if (AppState* state = GetAppState(hwnd))
+            if (AppState* state = GetAppState(hwnd)) {
                 state->operationDismissedTaskId = state->ops.Status().task_id;
+                state->operationPinnedByUser = false;
+            }
         };
         s->operationWindow->Create(hwnd, std::move(operation_callbacks));
         s->operationWindow->SetTheme(s->darkMode, s->accentColor);
@@ -525,11 +556,11 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (!IsZoomed(hwnd)) {
             RECT wr{};
             GetWindowRect(hwnd, &wr);
-            const UINT dpi = GetDpiForWindow(hwnd);
-            const int frameX = GetSystemMetricsForDpi(SM_CXSIZEFRAME, dpi)
-                             + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
-            const int frameY = GetSystemMetricsForDpi(SM_CYSIZEFRAME, dpi)
-                             + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+            const UINT dpi = pulse::compat::WindowDpi(hwnd);
+            const int frameX = pulse::compat::SystemMetricsForDpi(SM_CXSIZEFRAME, dpi)
+                             + pulse::compat::SystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+            const int frameY = pulse::compat::SystemMetricsForDpi(SM_CYSIZEFRAME, dpi)
+                             + pulse::compat::SystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
             const bool left = screenPt.x >= wr.left && screenPt.x < wr.left + frameX;
             const bool right = screenPt.x < wr.right && screenPt.x >= wr.right - frameX;
             const bool top = screenPt.y >= wr.top && screenPt.y < wr.top + frameY;
@@ -730,11 +761,13 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             bool dirty = false;
             DrainDirNotifies(*s);
             const ULONGLONG now = GetTickCount64();
+            if (TickAddressSearch(*s, now)) dirty = true;
             const int shell_refreshes = s->context_menu.ConsumeDueRefreshes(now);
             for (int i = 0; i < shell_refreshes; ++i) {
                 RefreshActiveTab(*s);
                 dirty = true;
             }
+            if (PumpRecycleRefresh(*s, now)) dirty = true;
             MaybePrefetchHoverCtxMenu(*s);
             s->places.FlushPendingSave(false);
             if (s->renameClickCandidate && s->renameClickDue != 0 &&
@@ -811,8 +844,10 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (app::Tab* tab = ActiveTab(*s)) {
                 std::wstring kind, rest;
                 if (app::ParsePulsePath(tab->current_path, &kind, &rest) &&
-                    kind == L"settings" && app::SettingsController::PageFromName(rest) == 0) {
-                    if (s->bloom_accent.Tick(0.016f)) dirty = true;
+                    kind == L"settings") {
+                    const int page = app::SettingsController::PageFromName(rest);
+                    if (page == 0 && s->bloom_accent.Tick(0.016f)) dirty = true;
+                    if (page == 4 && s->duplicateScan.scanning) dirty = true;
                 }
             }
             if (s->hoverRegion != 0 && s->tooltipText.empty() && s->hoverSince != 0 &&
@@ -857,8 +892,19 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             SetCursor(LoadCursorW(nullptr, vertical ? IDC_SIZEWE : IDC_SIZENS));
             return TRUE;
         }
+        if (hit.region == ui::HitTestResult::AddressSearch ||
+            hit.region == ui::HitTestResult::AddressSearchScope ||
+            hit.region == ui::HitTestResult::AddressSearchClear ||
+            hit.region == ui::HitTestResult::AddressSearchClose) {
+            SetCursor(LoadCursorW(nullptr, IDC_HAND));
+            return TRUE;
+        }
         if (hit.region == ui::HitTestResult::AddressBar || s->addressEditing) {
             SetCursor(LoadCursorW(nullptr, IDC_IBEAM));
+            return TRUE;
+        }
+        if (hit.region == ui::HitTestResult::StatusBarTask) {
+            SetCursor(LoadCursorW(nullptr, IDC_HAND));
             return TRUE;
         }
         if (hit.region == ui::HitTestResult::SettingsAccent) {
@@ -895,6 +941,11 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case WM_MOUSEWHEEL:
         return HandleMouseWheel(s, hwnd, msg, wParam, lParam);
 
+    case WM_APPCOMMAND:
+        // DefWindowProc translates side-button releases, including child controls.
+        if (s && HandleBrowserNavigation(*s, lParam)) return TRUE;
+        break;
+
     case WM_SYSKEYDOWN:
         if (s && wParam == L'D' && (GetKeyState(VK_MENU) & 0x8000)) {
             ShowOmnibar(*s, OmnibarMode::Path);
@@ -906,6 +957,11 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return HandleKeyDown(s, hwnd, msg, wParam, lParam);
 
     case WM_COMMAND: {
+        if (s && reinterpret_cast<HWND>(lParam) == s->hwndAddressEdit &&
+            (HIWORD(wParam) == EN_CHANGE || HIWORD(wParam) == EN_UPDATE)) {
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
         if (s && wParam == 1001) {
             RefreshActiveTab(*s);
             InvalidateRect(hwnd, nullptr, FALSE);
@@ -925,11 +981,8 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
     case WM_RECYCLE_INFO: {
         auto* info = reinterpret_cast<fs::RecycleBinInfo*>(lParam);
-        if (s && info) {
-            s->recycle_info = *info;
-            ApplyRecycleOccupancy(*s);
+        if (s && info && ApplyQueriedRecycleInfo(*s, *info))
             InvalidateRect(hwnd, nullptr, FALSE);
-        }
         delete info;
         return 0;
     }
@@ -941,6 +994,8 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (s->ops.TakeCtxInvokeDone()) {
                 if (app::Tab* tab = ActiveTab(*s)) s->store.MarkDirty(tab->current_path);
                 RefreshActiveTab(*s);
+                ScheduleRecycleRefresh(*s);
+                RefreshRecycleViews(*s, false);
             }
             if (st.completed_ops != s->opsCompleted) {
                 s->opsCompleted = st.completed_ops;
@@ -1000,12 +1055,27 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                                completed.type == ops::OpType::RealDelete) {
                         for (const auto& source : completed.sources)
                             s->places.RemoveAssignments(source, true);
+                        s->duplicateScan.RemoveDeleted(completed.sources);
                     }
                     if (completed.type == ops::OpType::RecycleDelete ||
                         completed.type == ops::OpType::RealDelete ||
                         completed.type == ops::OpType::RestoreRecycle ||
                         completed.type == ops::OpType::EmptyRecycle) {
-                        RefreshRecycleViews(*s);
+                        bool recycle_visible = false;
+                        ForEachPane(*s, [&](app::Pane& pane) {
+                            if (IsRecycleTab(pane.ActiveTab())) recycle_visible = true;
+                        });
+                        const auto n = static_cast<int64_t>(completed.sources.size());
+                        ScheduleRecycleRefresh(*s);
+                        if (completed.type == ops::OpType::RecycleDelete)
+                            BumpRecycleOccupancy(*s, n);
+                        else if (completed.type == ops::OpType::EmptyRecycle)
+                            ClearRecycleOccupancy(*s);
+                        else if (completed.type == ops::OpType::RestoreRecycle ||
+                                 (completed.type == ops::OpType::RealDelete &&
+                                  recycle_visible))
+                            BumpRecycleOccupancy(*s, -n);
+                        RefreshRecycleViews(*s, false);
                     }
                     RefreshStarredViews(*s);
                     RefreshRecentViews(*s);
@@ -1112,6 +1182,10 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     app::SettingsTaskKind::DiagnosticsExport)
                 result->error = l10n::Get(l10n::StringId::DiagnosticsExportFailed);
             const auto effect = s->settings.CompleteTask(*result, s->index.ServiceInstalled());
+            if (!result->ok && result->task.kind == app::SettingsTaskKind::ConfigureIndexPath &&
+                !result->error.empty()) {
+                s->notification_toast.Show(hwnd, l10n::Get(l10n::StringId::IndexLocation), result->error);
+            }
             if (effect.refresh_index) s->index.RefreshVolumesAsync();
             if (!effect.pin_network.empty()) {
                 s->places.PinNetwork(effect.pin_network, L"");
@@ -1162,6 +1236,22 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         index::ContentSearchUpdate update;
         while (s->contentSearch.TakeUpdate(update))
             ApplyContentSearchUpdate(*s, std::move(update));
+        return 0;
+    }
+
+    case WM_DUPLICATE_SCAN: {
+        if (!s) return 0;
+        index::ContentSearchUpdate update;
+        while (s->duplicateSearch.TakeUpdate(update))
+            s->duplicateScan.ApplyUpdate(update.progress, update.hits);
+        InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+    }
+
+    case WM_DUP_VOLUMES: {
+        auto* payload = reinterpret_cast<std::vector<index::VolumeInfo>*>(lParam);
+        if (s && payload) ApplyDuplicateVolumeCache(*s, std::move(*payload));
+        delete payload;
         return 0;
     }
 
@@ -1240,6 +1330,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             s->settings.Stop();
             s->update_checker.Stop();
             s->contentSearch.Stop();
+            s->duplicateSearch.Stop();
             s->networkIndex.Stop();
             s->index.Stop();
             s->worker.Stop();
@@ -1478,7 +1569,7 @@ bool SkipSingletonFromArgv() {
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     pulse::crash::Initialize({pulse::crash::ProcessRole::App, false, {}});
-    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    pulse::compat::EnableDpiAwareness();
     // OLE init (drag & drop + clipboard); implies STA COM init.
     OleInitialize(nullptr);
     for (int i = 1; i < __argc; ++i) {
@@ -1584,6 +1675,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         } else if (wcscmp(__wargv[i], L"--test-instance") == 0) {
             continue;
         } else if (wcscmp(__wargv[i], L"--fps") == 0) {
+            state.forceStatusPerformance = true;
             state.showFps = true;
         } else if (wcscmp(__wargv[i], L"--view") == 0 && i + 1 < __argc) {
             state.shot.view_mode = ui::ParseViewMode(__wargv[++i]);
@@ -1661,7 +1753,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     if (wc.hIconSm) SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(wc.hIconSm));
 
     if (session.maximized) nCmdShow = SW_SHOWMAXIMIZED;
-    ShowWindow(hwnd, state.shot.active ? SW_SHOWNORMAL : nCmdShow);
+    wchar_t hidden_shot[4]{};
+    const bool test_hidden = (state.shot.active || state.menushot || state.colorpickshot) &&
+        GetEnvironmentVariableW(L"PULSE_TEST_HIDDEN_SHOT", hidden_shot, ARRAYSIZE(hidden_shot)) == 1 &&
+        hidden_shot[0] == L'1';
+    ShowWindow(hwnd, test_hidden ? SW_HIDE : state.shot.active ? SW_SHOWNORMAL : nCmdShow);
     UpdateWindow(hwnd);
 
     if (state.menushot) {
@@ -1675,6 +1771,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         if (ok) {
             m.SetTheme(state.darkMode, state.accentColor);
             auto debug_items = BuildFinderItemMenu(state, true, L"撤销移动 a.txt");
+            wchar_t quick_menu[4]{};
+            if (GetEnvironmentVariableW(L"PULSE_TEST_QUICK_MENU", quick_menu, ARRAYSIZE(quick_menu)) == 1 &&
+                quick_menu[0] == L'1') {
+                debug_items = app::BuildBackgroundMenu(false, true, L"撤销移动 a.txt");
+                app::AppendBackgroundViewCommands(debug_items, {});
+                AppendQuickAccessCommand(state, debug_items,
+                    state.shot.path.empty() ? QuickAccessTargets(ActiveTab(state), true)
+                                            : std::vector<std::wstring>{state.shot.path});
+            }
             for (auto& item : debug_items) {
                 if (item.quick_swatches.empty()) continue;
                 item.quick_swatches.front().checked = true;

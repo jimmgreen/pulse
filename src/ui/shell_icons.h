@@ -23,23 +23,24 @@ public:
     ShellIconCache(const ShellIconCache&) = delete;
     ShellIconCache& operator=(const ShellIconCache&) = delete;
 
-    void SetDeviceContext(ID2D1DeviceContext2* dc);
+    void SetDeviceContext(ID2D1DeviceContext* dc);
     void SetScale(float scale);
     void SetNotifyWindow(HWND hwnd);
     void Reset();
 
-    // Returns false when the caller should draw the glyph fallback.
+    // Returns false while native icons are loading or the device is unavailable.
     bool Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
               const std::wstring& path, const std::wstring& name,
               bool is_dir, DWORD attrs);
 
     // Icon bitmap at (about) desired_dips, or nullptr while unresolved —
-    // caller draws the glyph fallback. Lets owners apply their own opacity
+    // caller leaves the slot empty. Lets owners apply their own opacity
     // and transforms (tray card deck) instead of the fixed Draw path.
     ID2D1Bitmap* BitmapFor(const std::wstring& path, const std::wstring& name,
                            bool is_dir, DWORD attrs, float desired_dips);
 
 private:
+    friend struct ShellIconCacheTestAccess;
     static int ImageListId(float desired_pixels) noexcept;
     IImageList* EnsureImageList(int list_id);
     bool EnsureWic();
@@ -51,8 +52,8 @@ private:
     static bool NeedsExactIcon(const std::wstring& name, bool is_dir,
                                const std::wstring& path);
 
-    ID2D1DeviceContext2* dc_ = nullptr;
-    HWND hwnd_ = nullptr;
+    ID2D1DeviceContext* dc_ = nullptr;
+    std::atomic<HWND> hwnd_{nullptr};
     float scale_ = 1.0f;
     std::unordered_map<int, IImageList*> image_lists_;
     ComPtr<IWICImagingFactory> wic_;
@@ -64,6 +65,9 @@ private:
     std::queue<std::wstring> queue_;
     std::unordered_set<std::wstring> queued_;
     std::unordered_map<std::wstring, int> exact_index_;
+    std::unordered_map<std::wstring, ULONGLONG> retry_after_;
+    std::unordered_map<std::wstring, uint64_t> last_used_;
+    uint64_t access_clock_ = 0;
     std::thread worker_;
     std::atomic<bool> running_{false};
 };

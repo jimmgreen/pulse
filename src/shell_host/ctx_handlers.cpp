@@ -16,6 +16,7 @@ using pulse::ipc::CleanMenuText;
 using pulse::ipc::IsBuiltinContextVerb;
 using pulse::ipc::IsDisabledHandler;
 using pulse::ipc::IsDroppedContextSubmenu;
+using pulse::ipc::KeepFlyoutParentWithoutLeaves;
 using pulse::ipc::kMaxSubmenuChildren;
 using pulse::ipc::ToLowerVerb;
 
@@ -174,6 +175,56 @@ std::wstring MenuItemText(HMENU menu, UINT pos) {
     mii.cch = ARRAYSIZE(buf) - 1;
     if (!GetMenuItemInfoW(menu, pos, TRUE, &mii)) return {};
     return CleanMenuText(buf);
+}
+
+constexpr ULONGLONG kNestedFlyoutBudgetMs = 80;
+
+void InitMenuPopup(IContextMenu2* menu2, IContextMenu3* menu3, HMENU submenu, UINT pos) {
+    if (!submenu) return;
+    __try {
+        if (menu3) {
+            LRESULT ignored = 0;
+            menu3->HandleMenuMsg2(WM_INITMENUPOPUP, reinterpret_cast<WPARAM>(submenu),
+                                  MAKELPARAM(pos, TRUE), &ignored);
+        } else if (menu2) {
+            menu2->HandleMenuMsg(WM_INITMENUPOPUP, reinterpret_cast<WPARAM>(submenu),
+                                 MAKELPARAM(pos, TRUE));
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+void CollectSubmenuLeaves(IContextMenu* menu, IContextMenu2* menu2, IContextMenu3* menu3,
+                          HMENU submenu, UINT pos, bool background, UINT id_first,
+                          bool parent_enabled, int depth, ULONGLONG deadline,
+                          std::vector<CtxItemOut>& kids) {
+    if (GetTickCount64() < deadline) InitMenuPopup(menu2, menu3, submenu, pos);
+    const int sub_count = GetMenuItemCount(submenu);
+    for (int j = 0; j < sub_count && static_cast<int>(kids.size()) < kMaxSubmenuChildren; ++j) {
+        MENUITEMINFOW sub{ sizeof(sub) };
+        sub.fMask = MIIM_ID | MIIM_STATE | MIIM_FTYPE | MIIM_SUBMENU;
+        if (!GetMenuItemInfoW(submenu, j, TRUE, &sub)) continue;
+        if (sub.fType & MFT_SEPARATOR) continue;
+        if (sub.hSubMenu) {
+            if (depth >= 1) continue;
+            const bool nested_enabled =
+                parent_enabled && !(sub.fState & (MFS_DISABLED | MFS_GRAYED));
+            CollectSubmenuLeaves(menu, menu2, menu3, sub.hSubMenu, static_cast<UINT>(j),
+                                 background, id_first, nested_enabled, depth + 1, deadline,
+                                 kids);
+            continue;
+        }
+        const std::wstring child_text = MenuItemText(submenu, static_cast<UINT>(j));
+        if (child_text.empty()) continue;
+        CtxItemOut item;
+        item.id = sub.wID;
+        item.enabled = parent_enabled && !(sub.fState & (MFS_DISABLED | MFS_GRAYED));
+        item.child = true;
+        item.verb = CtxVerbOf(menu, sub.wID, id_first);
+        if (IsBuiltinContextVerb(item.verb, background)) continue;
+        item.text = child_text;
+        kids.push_back(std::move(item));
+    }
 }
 
 } // namespace
@@ -338,6 +389,7 @@ void CollectHandlerItems(const CtxHandlerSlot& slot, bool background,
                          std::vector<CtxItemOut>& out) {
     if (!slot.menu || !slot.hmenu) return;
     const int count = GetMenuItemCount(slot.hmenu);
+    const ULONGLONG deadline = GetTickCount64() + kNestedFlyoutBudgetMs;
     bool pending_separator = false;
     auto push = [&](CtxItemOut item) {
         if (item.text.empty()) return;
@@ -364,34 +416,21 @@ void CollectHandlerItems(const CtxHandlerSlot& slot, bool background,
                 IsDroppedContextSubmenu(parent_verb)) continue;
             const std::wstring parent_text = MenuItemText(slot.hmenu, static_cast<UINT>(i));
             if (parent_text.empty()) continue;
-            if (slot.menu3) {
-                LRESULT ignored = 0;
-                slot.menu3->HandleMenuMsg2(WM_INITMENUPOPUP,
-                    reinterpret_cast<WPARAM>(mii.hSubMenu), MAKELPARAM(i, TRUE), &ignored);
-            } else if (slot.menu2) {
-                slot.menu2->HandleMenuMsg(WM_INITMENUPOPUP,
-                    reinterpret_cast<WPARAM>(mii.hSubMenu), MAKELPARAM(i, TRUE));
-            }
-            const int sub_count = GetMenuItemCount(mii.hSubMenu);
             std::vector<CtxItemOut> kids;
-            for (int j = 0; j < sub_count && static_cast<int>(kids.size()) < kMaxSubmenuChildren;
-                 ++j) {
-                MENUITEMINFOW sub{ sizeof(sub) };
-                sub.fMask = MIIM_ID | MIIM_STATE | MIIM_FTYPE | MIIM_SUBMENU;
-                if (!GetMenuItemInfoW(mii.hSubMenu, j, TRUE, &sub)) continue;
-                if ((sub.fType & MFT_SEPARATOR) || sub.hSubMenu) continue;
-                const std::wstring child_text = MenuItemText(mii.hSubMenu, static_cast<UINT>(j));
-                if (child_text.empty()) continue;
+            CollectSubmenuLeaves(slot.menu, slot.menu2, slot.menu3, mii.hSubMenu,
+                                 static_cast<UINT>(i), background, slot.id_first, enabled, 0,
+                                 deadline, kids);
+            if (kids.empty()) {
+                if (!KeepFlyoutParentWithoutLeaves(mii.wID, slot.id_first, slot.id_last))
+                    continue;
                 CtxItemOut item;
-                item.id = sub.wID;
-                item.enabled = enabled && !(sub.fState & (MFS_DISABLED | MFS_GRAYED));
-                item.child = true;
-                item.verb = CtxVerbOf(slot.menu, sub.wID, slot.id_first);
-                if (IsBuiltinContextVerb(item.verb, background)) continue;
-                item.text = child_text;
-                kids.push_back(std::move(item));
+                item.id = mii.wID;
+                item.enabled = enabled;
+                item.verb = parent_verb;
+                item.text = parent_text;
+                push(std::move(item));
+                continue;
             }
-            if (kids.empty()) continue;
             CtxItemOut header;
             header.id = 0;
             header.enabled = enabled;

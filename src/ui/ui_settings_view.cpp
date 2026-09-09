@@ -1,4 +1,5 @@
 // ui_settings_view.cpp — Settings page layout and painting.
+#include "../common/windows_compat.h"
 #include "ui_renderer.h"
 #include "ui_renderer_internal.h"
 #include "../common/localization.h"
@@ -36,11 +37,12 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
         pulse::l10n::StringId::SettingsSearchIndex,
         pulse::l10n::StringId::SettingsContextMenu,
         pulse::l10n::StringId::SettingsAboutDiagnostics,
+        pulse::l10n::StringId::SettingsDuplicates,
     };
     static constexpr const wchar_t* kNavIcon[] = {
-        kIconHome, kIconSearch, kIconSettings, kIconInfo
+        kIconHome, kIconSearch, kIconSettings, kIconInfo, kIconCopy
     };
-    for (int i = 0; i < 4; ++i) {
+    for (int i = 0; i < kSettingsNavCount; ++i) {
         const bool active = vm.settings_page == i;
         const bool hovered = IsHovered(vm, HitTestResult::SettingsNav, i);
         const auto& rc = lay.nav_row[i];
@@ -67,6 +69,7 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
         ? pulse::l10n::StringId::SettingsGeneral
         : vm.settings_page == 1 ? pulse::l10n::StringId::SettingsSearchIndex
         : vm.settings_page == 2 ? pulse::l10n::StringId::SettingsContextMenu
+        : vm.settings_page == 4 ? pulse::l10n::StringId::SettingsDuplicates
                                 : pulse::l10n::StringId::SettingsAboutDiagnostics;
     MakeBrush(dc, theme.text, brText_);
     DrawTextRect(dc, compositor_->HeaderFormat(), brText_.get(), pulse::l10n::Get(page_title_id),
@@ -98,10 +101,18 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
                      lay.accent_card.left + 16.0f * scale_, lay.accent_card.top + 16.0f * scale_,
                      accent_text_w, 22.0f * scale_);
         MakeBrush(dc, theme.text_secondary, brTextSecondary_);
-        DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(),
-                     pulse::l10n::Get(pulse::l10n::StringId::SettingsThemeColorDesc),
-                     lay.accent_card.left + 16.0f * scale_, lay.accent_card.top + 42.0f * scale_,
-                     accent_text_w, 36.0f * scale_);
+        const auto& accent_help = pulse::l10n::Get(pulse::l10n::StringId::SettingsThemeColorDesc);
+        ComPtr<IDWriteTextLayout> accent_help_layout;
+        compositor_->DwriteFactory()->CreateTextLayout(accent_help.c_str(),
+            static_cast<UINT32>(accent_help.size()), compositor_->SmallFormat(),
+            accent_text_w, 36.0f * scale_, &accent_help_layout);
+        if (accent_help_layout.get()) {
+            accent_help_layout->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+            accent_help_layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+            dc->DrawTextLayout(D2D1::Point2F(lay.accent_card.left + 16.0f * scale_,
+                                           lay.accent_card.top + 42.0f * scale_),
+                accent_help_layout.get(), brTextSecondary_.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        }
         if (vm.settings_bloom) {
             vm.settings_bloom->SetDisk(lay.accent_picker);
             vm.settings_bloom->Draw(dc, theme);
@@ -115,7 +126,7 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
                      lay.effect_card.right - lay.effect_card.left - 32.0f * scale_, 22.0f * scale_);
         MakeBrush(dc, theme.text_secondary, brTextSecondary_);
         DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(),
-                     pulse::l10n::Get(pulse::l10n::StringId::SettingsWindowEffectDesc),
+                     pulse::l10n::Get(compat::ModernWindows() ? pulse::l10n::StringId::SettingsWindowEffectDesc : pulse::l10n::StringId::EffectUnavailable),
                      lay.effect_card.left + 16.0f * scale_, lay.effect_card.top + 32.0f * scale_,
                      lay.effect_card.right - lay.effect_card.left - 32.0f * scale_, 18.0f * scale_);
         for (int i = 0; i < kWindowEffectCount; ++i) {
@@ -128,7 +139,8 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
                                 4.0f * scale_);
             }
             fluent::ControlState st{};
-            st.checked = vm.window_effect == effect;
+            st.enabled = compat::ModernWindows() || effect == WindowEffect::None;
+            st.checked = (compat::ModernWindows() ? vm.window_effect : WindowEffect::None) == effect;
             st.hovered = IsHovered(vm, HitTestResult::SettingsEffect, i);
             static constexpr pulse::l10n::StringId labels[] = {
                 pulse::l10n::StringId::EffectNone, pulse::l10n::StringId::EffectAcrylic,
@@ -329,6 +341,11 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
                  pulse::l10n::Get(pulse::l10n::StringId::SettingsOpenFolders),
                  pulse::l10n::Get(pulse::l10n::StringId::SettingsOpenFoldersDesc),
                  vm.settings_open_folders, 3);
+        draw_card(lay.hidden_files_row);
+        draw_row(lay.hidden_files_row,
+                 pulse::l10n::Get(pulse::l10n::StringId::SettingsShowHidden),
+                 pulse::l10n::Get(pulse::l10n::StringId::SettingsShowHiddenDesc),
+                 vm.settings_show_hidden_files, 5);
     } else if (vm.settings_page == 1) {
         fluent::InfoBarSpec info;
         info.bounds = lay.index_info;
@@ -341,6 +358,8 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
         info.kind = vm.settings_index_error.empty() ? fluent::InfoBarKind::Informational
                                                      : fluent::InfoBarKind::Error;
         if (!vm.settings_index_error.empty()) info.message = vm.settings_index_error;
+        else if (vm.settings_index_migrating)
+            info.message = pulse::l10n::Get(pulse::l10n::StringId::IndexMigratingShort);
         info.show_close = false;
         painter_.DrawInfoBar(info);
 
@@ -385,7 +404,7 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
         };
         for (int i = 0; i < 3; ++i) {
             fluent::ControlState st{};
-            st.enabled = i == 2 || vm.settings_index_service;
+            st.enabled = (i == 2 || vm.settings_index_service) && (!vm.settings_index_migrating || i == 1);
             st.hovered = st.enabled && IsHovered(vm, HitTestResult::SettingsIndexAction, i);
             painter_.DrawButton({ lay.index_action[i], actions[i], {},
                                   i == 2 ? fluent::ButtonKind::Primary : fluent::ButtonKind::Standard,
@@ -647,7 +666,7 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
                                           y + 32.0f * scale_),
                               pulse::l10n::Get(pulse::l10n::StringId::RestoreDefaults), {},
                               fluent::ButtonKind::Standard, restore });
-    } else {
+    } else if (vm.settings_page == 3) {
         auto draw_card = [&](const D2D1_RECT_F& card) {
             MakeBrush(dc, theme.fill_input, brFillInput_);
             FillRoundedRect(dc, brFillInput_.get(), card.left, card.top,
@@ -691,6 +710,33 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
                      lay.diagnostics_card.top + 40.0f * scale_,
                      lay.diagnostics_card.right - lay.diagnostics_card.left - 32.0f * scale_,
                      42.0f * scale_);
+        {
+            const D2D1_RECT_F& row = lay.diagnostics_perf;
+            if (IsHovered(vm, HitTestResult::SettingsToggle, 4)) {
+                MakeBrush(dc, theme.fill_hover, brFillHover_);
+                FillRoundedRect(dc, brFillHover_.get(), row.left + 4.0f * scale_, row.top,
+                                row.right - row.left - 8.0f * scale_, row.bottom - row.top,
+                                4.0f * scale_);
+            }
+            MakeBrush(dc, theme.text, brText_);
+            DrawTextRect(dc, compositor_->TextFormat(), brText_.get(),
+                         pulse::l10n::Get(pulse::l10n::StringId::SettingsShowPerformance),
+                         row.left + 16.0f * scale_, row.top + 8.0f * scale_,
+                         row.right - row.left - 80.0f * scale_, 22.0f * scale_);
+            MakeBrush(dc, theme.text_secondary, brTextSecondary_);
+            DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(),
+                         pulse::l10n::Get(pulse::l10n::StringId::SettingsShowPerformanceDesc),
+                         row.left + 16.0f * scale_, row.top + 30.0f * scale_,
+                         row.right - row.left - 80.0f * scale_, 18.0f * scale_);
+            fluent::ControlState st{};
+            st.checked = vm.settings_show_performance;
+            st.hovered = IsHovered(vm, HitTestResult::SettingsToggle, 4);
+            painter_.DrawSwitch(D2D1::RectF(row.right - 16.0f * scale_ - switch_w,
+                                            row.top + (56.0f * scale_ - switch_h) * 0.5f,
+                                            row.right - 16.0f * scale_,
+                                            row.top + (56.0f * scale_ + switch_h) * 0.5f),
+                                L"", st);
+        }
         static constexpr pulse::l10n::StringId kDiagnosticsActions[] = {
             pulse::l10n::StringId::OpenDiagnostics,
             pulse::l10n::StringId::ClearDiagnostics,
@@ -747,6 +793,194 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
                          vm.settings_index_error,
                          lay.content.left + pad, lay.update_card.bottom + 8.0f * scale_,
                          lay.content.right - lay.content.left - pad * 2, 36.0f * scale_);
+        }
+    } else if (vm.settings_page == 4) {
+        auto draw_card = [&](const D2D1_RECT_F& card) {
+            if (card.right <= card.left || card.bottom <= card.top) return;
+            MakeBrush(dc, theme.fill_input, brFillInput_);
+            FillRoundedRect(dc, brFillInput_.get(), card.left, card.top,
+                            card.right - card.left, card.bottom - card.top, 8.0f * scale_);
+            MakeBrush(dc, theme.stroke_card, brStrokeCard_);
+            dc->DrawRoundedRectangle(D2D1::RoundedRect(card, 8.0f * scale_, 8.0f * scale_),
+                                     brStrokeCard_.get(), 1.0f);
+        };
+        MakeBrush(dc, theme.text_secondary, brTextSecondary_);
+        DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(), vm.dup_hint,
+                     lay.content.left + pad, origin + pad + 44.0f * scale_,
+                     lay.content.right - lay.content.left - pad * 2, 28.0f * scale_);
+        static constexpr pulse::l10n::StringId kScope[] = {
+            pulse::l10n::StringId::DupScopeFolder,
+            pulse::l10n::StringId::DupScopeDrive,
+            pulse::l10n::StringId::DupScopeAll,
+        };
+        for (int i = 0; i < 3; ++i) {
+            fluent::SegmentedItemSpec segment;
+            segment.bounds = lay.dup_scope[i];
+            segment.text = pulse::l10n::Get(kScope[i]);
+            segment.position = i == 0 ? fluent::SegmentPosition::First
+                             : i == 2 ? fluent::SegmentPosition::Last
+                                      : fluent::SegmentPosition::Middle;
+            segment.state.selected = vm.dup_scope == i;
+            segment.state.enabled = !vm.dup_scanning;
+            segment.state.hovered = segment.state.enabled &&
+                IsHovered(vm, HitTestResult::SettingsDupScope, i);
+            painter_.DrawSegmentedItem(segment);
+        }
+        if (vm.dup_scope == 0) {
+            MakeBrush(dc, theme.text, brText_);
+            const std::wstring folder = vm.dup_folder.empty()
+                ? pulse::l10n::Get(pulse::l10n::StringId::DupFolderPlaceholder)
+                : vm.dup_folder;
+            DrawTextRect(dc, compositor_->SmallFormat(), brText_.get(), folder,
+                         lay.content.left + pad + 16.0f * scale_, lay.dup_browse.top,
+                         lay.dup_browse.left - lay.content.left - pad - 28.0f * scale_,
+                         32.0f * scale_);
+            fluent::ControlState browse{};
+            browse.enabled = !vm.dup_scanning;
+            browse.hovered = browse.enabled && IsHovered(vm, HitTestResult::SettingsDupBrowse);
+            painter_.DrawButton({lay.dup_browse,
+                pulse::l10n::Get(pulse::l10n::StringId::DupBrowse), {},
+                fluent::ButtonKind::Standard, browse});
+        } else if (vm.dup_scope == 1) {
+            for (size_t i = 0; i < vm.dup_drives.size() && i < lay.dup_drives.size(); ++i) {
+                fluent::ControlState chip{};
+                chip.checked = vm.dup_drives[i].selected;
+                chip.selected = vm.dup_drives[i].selected;
+                chip.enabled = !vm.dup_scanning;
+                chip.hovered = chip.enabled &&
+                    IsHovered(vm, HitTestResult::SettingsDupDrive, static_cast<int>(i));
+                painter_.DrawButton({lay.dup_drives[i], vm.dup_drives[i].label, {},
+                    fluent::ButtonKind::Toggle, chip});
+            }
+        }
+        static constexpr pulse::l10n::StringId kMin[] = {
+            pulse::l10n::StringId::DupMinSize1KB,
+            pulse::l10n::StringId::DupMinSize1MB,
+            pulse::l10n::StringId::DupMinSize10MB,
+        };
+        {
+            const float label_top = lay.dup_min_size[0].top - 40.0f * scale_;
+            MakeBrush(dc, theme.text, brText_);
+            DrawTextRect(dc, compositor_->TextFormat(), brText_.get(),
+                         pulse::l10n::Get(pulse::l10n::StringId::DupMinSize),
+                         lay.content.left + pad, label_top,
+                         lay.content.right - lay.content.left - pad * 2, 20.0f * scale_);
+            MakeBrush(dc, theme.text_secondary, brTextSecondary_);
+            DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(),
+                         pulse::l10n::Get(pulse::l10n::StringId::DupMinSizeDesc),
+                         lay.content.left + pad, label_top + 20.0f * scale_,
+                         lay.content.right - lay.content.left - pad * 2, 18.0f * scale_);
+        }
+        for (int i = 0; i < 3; ++i) {
+            fluent::SegmentedItemSpec segment;
+            segment.bounds = lay.dup_min_size[i];
+            segment.text = pulse::l10n::Get(kMin[i]);
+            segment.position = i == 0 ? fluent::SegmentPosition::First
+                             : i == 2 ? fluent::SegmentPosition::Last
+                                      : fluent::SegmentPosition::Middle;
+            segment.state.selected = vm.dup_min_size == i;
+            segment.state.enabled = !vm.dup_scanning;
+            segment.state.hovered = segment.state.enabled &&
+                IsHovered(vm, HitTestResult::SettingsDupMinSize, i);
+            painter_.DrawSegmentedItem(segment);
+        }
+        fluent::ControlState scan{};
+        scan.enabled = vm.dup_can_scan && !vm.dup_scanning;
+        scan.hovered = scan.enabled && IsHovered(vm, HitTestResult::SettingsDupScan);
+        painter_.DrawButton({lay.dup_scan, pulse::l10n::Get(pulse::l10n::StringId::DupScan), {},
+            fluent::ButtonKind::Primary, scan});
+        fluent::ControlState cancel{};
+        cancel.enabled = vm.dup_scanning;
+        cancel.hovered = cancel.enabled && IsHovered(vm, HitTestResult::SettingsDupCancel);
+        painter_.DrawButton({lay.dup_cancel, pulse::l10n::Get(pulse::l10n::StringId::Cancel), {},
+            fluent::ButtonKind::Standard, cancel});
+        if (vm.dup_show_progress) {
+            draw_card(lay.dup_progress);
+            MakeBrush(dc, theme.text, brText_);
+            DrawTextRect(dc, compositor_->SmallFormat(), brText_.get(), vm.dup_status,
+                         lay.dup_progress.left + 16.0f * scale_, lay.dup_progress.top + 10.0f * scale_,
+                         lay.dup_progress.right - lay.dup_progress.left - 32.0f * scale_,
+                         18.0f * scale_);
+            MakeBrush(dc, theme.text_secondary, brTextSecondary_);
+            DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(), vm.dup_speed,
+                         lay.dup_progress.left + 16.0f * scale_, lay.dup_progress.top + 28.0f * scale_,
+                         lay.dup_progress.right - lay.dup_progress.left - 32.0f * scale_,
+                         16.0f * scale_);
+            fluent::ProgressSpec bar;
+            bar.bounds = D2D1::RectF(lay.dup_progress.left + 16.0f * scale_,
+                                     lay.dup_progress.bottom - 18.0f * scale_,
+                                     lay.dup_progress.right - 16.0f * scale_,
+                                     lay.dup_progress.bottom - 10.0f * scale_);
+            bar.indeterminate = vm.dup_progress_indeterminate;
+            bar.value = vm.dup_progress_value;
+            bar.animation_progress = vm.dup_animation;
+            painter_.DrawProgressBar(bar);
+        }
+        if (!vm.dup_empty.empty()) {
+            MakeBrush(dc, theme.text_secondary, brTextSecondary_);
+            DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(), vm.dup_empty,
+                         lay.content.left + pad, lay.dup_progress.bottom > lay.dup_progress.top
+                             ? lay.dup_progress.bottom + 8.0f * scale_
+                             : lay.dup_scan.bottom + 12.0f * scale_,
+                         lay.content.right - lay.content.left - pad * 2, 28.0f * scale_);
+        }
+        for (size_t g = 0; g < vm.dup_groups.size() && g < lay.dup_group_cards.size(); ++g) {
+            const auto& card = lay.dup_group_cards[g];
+            if (!VisibleInContent(card, lay.content)) continue;
+            draw_card(card);
+            MakeBrush(dc, theme.text, brText_);
+            DrawTextRect(dc, compositor_->TextFormat(), brText_.get(), vm.dup_groups[g].title,
+                         card.left + 16.0f * scale_, card.top + 12.0f * scale_,
+                         card.right - card.left - 32.0f * scale_, 24.0f * scale_);
+            const float file_h = 32.0f * scale_;
+            const float inner = 16.0f * scale_;
+            float fy = card.top + 48.0f * scale_;
+            for (size_t f = 0; f < vm.dup_groups[g].files.size(); ++f) {
+                if (fy + file_h <= lay.content.top) {
+                    fy += file_h;
+                    continue;
+                }
+                if (fy >= lay.content.bottom) break;
+                const auto& file = vm.dup_groups[g].files[f];
+                const D2D1_RECT_F keep_rc = D2D1::RectF(card.left + inner, fy,
+                    card.left + inner + 88.0f * scale_, fy + file_h);
+                const D2D1_RECT_F open_rc = D2D1::RectF(card.left + inner + 92.0f * scale_, fy,
+                    card.right - inner, fy + file_h);
+                fluent::ControlState radio{};
+                radio.checked = file.keep;
+                radio.enabled = !vm.dup_scanning;
+                radio.hovered = radio.enabled &&
+                    IsHovered(vm, HitTestResult::SettingsDupKeep, static_cast<int>(g),
+                              static_cast<int>(f));
+                painter_.DrawRadioButton(keep_rc,
+                    pulse::l10n::Get(pulse::l10n::StringId::DupKeep), radio);
+                MakeBrush(dc, theme.text, brText_);
+                DrawTextRect(dc, compositor_->SmallFormat(), brText_.get(), file.name,
+                             open_rc.left, open_rc.top, open_rc.right - open_rc.left,
+                             16.0f * scale_);
+                MakeBrush(dc, theme.text_secondary, brTextSecondary_);
+                DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(), file.detail,
+                             open_rc.left, open_rc.top + 14.0f * scale_,
+                             open_rc.right - open_rc.left, 14.0f * scale_);
+                fy += file_h;
+            }
+            if (g < lay.dup_group_delete.size() &&
+                VisibleInContent(lay.dup_group_delete[g], lay.content)) {
+                fluent::ControlState del{};
+                del.enabled = !vm.dup_scanning;
+                del.hovered = del.enabled &&
+                    IsHovered(vm, HitTestResult::SettingsDupGroupDelete, static_cast<int>(g));
+                painter_.DrawButton({lay.dup_group_delete[g],
+                    pulse::l10n::Get(pulse::l10n::StringId::DupDeleteExtras), {},
+                    fluent::ButtonKind::Standard, del});
+            }
+        }
+        if (vm.dup_show_delete_all) {
+            fluent::ControlState all{};
+            all.enabled = !vm.dup_scanning;
+            all.hovered = all.enabled && IsHovered(vm, HitTestResult::SettingsDupDeleteAll);
+            painter_.DrawButton({lay.dup_delete_all, vm.dup_delete_all, {},
+                fluent::ButtonKind::Primary, all});
         }
     }
     dc->PopAxisAlignedClip();

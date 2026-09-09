@@ -17,6 +17,7 @@
 #include "../fs/fs_net_cache.h"
 #include "context_menu.h"
 #include "batch_rename.h"
+#include "search_query.h"
 #include "link_resolve.h"
 #include "resource.h"
 #include "../ops/clipboard.h"
@@ -165,10 +166,44 @@ void OpenWorkspace(AppState& s, int index) {
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
+static void FillContentNeedles(index::ContentSearchRequest& request, const app::SplitSearchQuery& split) {
+    request.needles = split.content.needles;
+    request.excluded_needles = split.content.excluded;
+    request.match_mode = split.content.mode;
+    request.whole_word = split.content.whole_word;
+    request.case_sensitive = split.content.case_sensitive;
+    request.needle.clear();
+    if (split.content.mode == index::ContentMatchMode::Phrase) {
+        for (const auto& word : split.content.needles) {
+            if (!request.needle.empty()) request.needle.push_back(L' ');
+            request.needle.append(word);
+        }
+    } else if (!split.content.needles.empty()) {
+        request.needle = split.content.needles.front();
+    }
+}
+
+static void SetQuerySearchTitle(app::Tab& tab, const std::wstring& rest, size_t count,
+                         size_t loaded = static_cast<size_t>(-1)) {
+    const std::wstring needle = app::SearchDisplayNeedle(rest);
+    const std::wstring shown = needle.empty() ? l10n::Get(l10n::StringId::Search) : needle;
+    wchar_t title[512]{};
+    if (loaded != static_cast<size_t>(-1) && count > loaded) {
+        swprintf_s(title, l10n::Get(l10n::StringId::SearchResultsPartialFormat).c_str(),
+                   shown.c_str(), count, loaded);
+    } else {
+        swprintf_s(title, l10n::Get(l10n::StringId::SearchResultsFormat).c_str(),
+                   shown.c_str(), count);
+    }
+    tab.virtual_title = title;
+}
+
 index::Query MakeSearchPageQuery(const app::Tab& tab, const std::wstring& rest,
                                         size_t offset) {
+    const auto split = app::SplitSearchQueryText(rest);
     index::Query q;
-    q.needle = rest;
+    q.needle = app::ApplyContentSearchGuards(split.filename_needle, split);
+    q.path_prefix = split.path_prefix;
     q.offset = offset;
     q.limit = index::kSearchUiPageSize;
     q.rank = false;
@@ -178,6 +213,12 @@ index::Query MakeSearchPageQuery(const app::Tab& tab, const std::wstring& rest,
     case ui::SortColumn::Size: q.sort = index::ResultSort::Size; break;
     case ui::SortColumn::Mtime: q.sort = index::ResultSort::Mtime; break;
     default: q.sort = index::ResultSort::Name; break;
+    }
+    if (split.content.present()) {
+        q.offset = 0;
+        q.limit = index::kContentCandidateCap;
+        q.rank = true;
+        q.sort = index::ResultSort::Index;
     }
     return q;
 }
@@ -200,14 +241,29 @@ void DispatchIndexSearch(AppState& s, const index::Query& query, uint32_t id) {
 
 void RequestSearchPage(AppState& s, app::Tab& tab, const std::wstring& rest,
                               bool reset) {
+    const auto split = app::SplitSearchQueryText(rest);
     const size_t offset = reset ? 0 : tab.search_next_offset;
-    if (!reset && (tab.search_loading_more || offset >= tab.search_total)) return;
+    if (!reset && (tab.search_loading_more || offset >= tab.search_total ||
+                   tab.search_awaiting_content || tab.search_content_active)) return;
     if (reset) {
         tab.search_entries = std::make_shared<std::vector<fs::DirEntry>>();
+        tab.search_snippets = std::make_shared<std::vector<std::wstring>>();
         tab.search_total = 0;
         tab.search_next_offset = 0;
+        tab.search_awaiting_content = split.content.present();
+        tab.search_content_active = false;
         tab.SetSnapshot(tab.search_entries);
         tab.loading = true;
+        tab.banner_title.clear();
+        tab.banner_message.clear();
+        if (split.content.present() && app::ContentSearchNeedsScope(split)) {
+            tab.loading = false;
+            tab.search_awaiting_content = false;
+            tab.banner_title = l10n::Get(l10n::StringId::AdvancedSearchNeedScopeTitle);
+            tab.banner_message = l10n::Get(l10n::StringId::AdvancedSearchNeedScopeMessage);
+            tab.virtual_title = l10n::Get(l10n::StringId::AdvancedSearch);
+            return;
+        }
     } else {
         tab.search_loading_more = true;
     }
@@ -219,6 +275,7 @@ void RequestSearchPage(AppState& s, app::Tab& tab, const std::wstring& rest,
 
 void ApplySearchHits(app::Tab& tab, const std::wstring& rest,
                             index::SearchResult&& result) {
+    tab.search_retaining_results = false;
     const size_t offset = tab.pending_search_offset;
     if (!tab.search_entries || offset == 0) {
         tab.search_entries = std::make_shared<std::vector<fs::DirEntry>>();
@@ -243,16 +300,12 @@ void ApplySearchHits(app::Tab& tab, const std::wstring& rest,
     }
     tab.search_total = result.total;
     tab.search_next_offset = entries.size();
-    wchar_t search_title[512]{};
-    if (tab.search_total > entries.size()) {
-        swprintf_s(search_title,
-            l10n::Get(l10n::StringId::SearchResultsPartialFormat).c_str(),
-            rest.c_str(), tab.search_total, entries.size());
-    } else {
-        swprintf_s(search_title, l10n::Get(l10n::StringId::SearchResultsFormat).c_str(),
-                   rest.c_str(), tab.search_total);
-    }
-    tab.virtual_title = search_title;
+    if (tab.search_snippets && tab.search_snippets->size() < entries.size())
+        tab.search_snippets->resize(entries.size());
+    if (tab.search_total > entries.size())
+        SetQuerySearchTitle(tab, rest, tab.search_total, entries.size());
+    else
+        SetQuerySearchTitle(tab, rest, tab.search_total);
     tab.SetSnapshot(tab.search_entries);
     tab.loading = false;
     tab.search_loading_more = false;
@@ -284,6 +337,8 @@ void RequestSavedSearch(AppState& s, app::Tab& tab, size_t saved_index) {
         DispatchIndexSearch(s, query, static_cast<uint32_t>(generation));
         return;
     }
+    tab.search_snippets = std::make_shared<std::vector<std::wstring>>();
+    tab.search_content_active = search.mode == app::SavedSearchMode::Content;
     index::ContentSearchRequest request;
     request.generation = generation;
     request.mode = search.mode == app::SavedSearchMode::Duplicates
@@ -294,28 +349,16 @@ void RequestSavedSearch(AppState& s, app::Tab& tab, size_t saved_index) {
     s.contentSearch.SearchAsync(std::move(request));
 }
 
-void ApplyContentSearchUpdate(AppState& s, index::ContentSearchUpdate update) {
-    app::Tab* target = nullptr;
-    size_t saved_index = 0;
-    ForEachPane(s, [&](app::Pane& pane) {
-        if (target) return;
-        app::Tab* tab = pane.ActiveTab();
-        if (!tab || tab->pending_generation != update.progress.generation) return;
-        std::wstring kind, rest;
-        if (!app::ParsePulsePath(tab->current_path, &kind, &rest) ||
-            kind != L"saved-search") return;
-        wchar_t* end = nullptr;
-        const unsigned long long parsed = wcstoull(rest.c_str(), &end, 10);
-        if (!end || *end != L'\0') return;
-        target = tab;
-        saved_index = static_cast<size_t>(parsed);
-    });
-    if (!target || saved_index >= s.savedSearches.items().size()) return;
-    if (!target->search_entries)
-        target->search_entries = std::make_shared<std::vector<fs::DirEntry>>();
-    auto& entries = *target->search_entries;
-    entries.reserve(entries.size() + update.hits.size());
-    for (auto& hit : update.hits) {
+void AppendContentHits(app::Tab& tab, std::vector<index::ContentHit> hits) {
+    if (!tab.search_entries)
+        tab.search_entries = std::make_shared<std::vector<fs::DirEntry>>();
+    if (!tab.search_snippets)
+        tab.search_snippets = std::make_shared<std::vector<std::wstring>>();
+    auto& entries = *tab.search_entries;
+    auto& snippets = *tab.search_snippets;
+    entries.reserve(entries.size() + hits.size());
+    snippets.reserve(snippets.size() + hits.size());
+    for (auto& hit : hits) {
         fs::DirEntry entry;
         entry.full_path = std::move(hit.path);
         entry.name = std::move(hit.name);
@@ -323,15 +366,100 @@ void ApplyContentSearchUpdate(AppState& s, index::ContentSearchUpdate update) {
         entry.mtime.dwLowDateTime = static_cast<DWORD>(hit.modified);
         entry.mtime.dwHighDateTime = static_cast<DWORD>(hit.modified >> 32);
         entry.attrs = FILE_ATTRIBUTE_NORMAL;
+        std::wstring snippet = hit.snippet;
+        if (hit.line) {
+            snippet = L"L" + std::to_wstring(hit.line);
+            if (!hit.snippet.empty()) snippet += L"  " + hit.snippet;
+        }
         entries.push_back(std::move(entry));
+        snippets.push_back(std::move(snippet));
     }
-    target->search_total = entries.size();
-    target->SetSnapshot(target->search_entries);
-    const app::SavedSearch& saved = s.savedSearches.items()[saved_index];
+    tab.search_total = entries.size();
+    tab.SetSnapshot(tab.search_entries);
+}
+
+void StartContentScanFromHits(AppState& s, app::Tab& tab, const std::wstring& rest,
+                              index::SearchResult&& result) {
+    const auto split = app::SplitSearchQueryText(rest);
+    tab.search_awaiting_content = false;
+    tab.search_content_active = true;
+    tab.search_entries = std::make_shared<std::vector<fs::DirEntry>>();
+    tab.search_snippets = std::make_shared<std::vector<std::wstring>>();
+    tab.SetSnapshot(tab.search_entries);
+    std::vector<std::wstring> paths;
+    paths.reserve((std::min)(result.hits.size(), index::kContentCandidateCap));
+    for (auto& hit : result.hits) {
+        if (hit.is_dir) continue;
+        paths.push_back(std::move(hit.path));
+        if (paths.size() >= index::kContentCandidateCap) break;
+    }
+    const bool capped = result.total > paths.size() ||
+                        result.hits.size() >= index::kContentCandidateCap;
+    if (paths.empty()) {
+        if (split.path_prefix.empty()) {
+            tab.loading = false;
+            tab.search_content_active = false;
+            tab.pending_generation = 0;
+            SetQuerySearchTitle(tab, rest, 0);
+            return;
+        }
+        index::ContentSearchRequest request;
+        request.generation = tab.pending_generation;
+        request.mode = index::ContentSearchMode::Content;
+        request.root = split.path_prefix;
+        request.recursive = true;
+        request.skip_system_locations = true;
+        FillContentNeedles(request, split);
+        tab.loading = true;
+        s.contentSearch.SearchAsync(std::move(request));
+        return;
+    }
+    if (capped) {
+        tab.banner_title = l10n::Get(l10n::StringId::ContentSearchCappedTitle);
+        tab.banner_message = l10n::Get(l10n::StringId::ContentSearchCappedMessage);
+    }
+    index::ContentSearchRequest request;
+    request.generation = tab.pending_generation;
+    request.mode = index::ContentSearchMode::Content;
+    request.candidate_paths = std::move(paths);
+    FillContentNeedles(request, split);
+    tab.loading = true;
+    s.contentSearch.SearchAsync(std::move(request));
+}
+
+void ApplyContentSearchUpdate(AppState& s, index::ContentSearchUpdate update) {
+    app::Tab* target = nullptr;
+    size_t saved_index = 0;
+    std::wstring search_kind;
+    ForEachPane(s, [&](app::Pane& pane) {
+        if (target) return;
+        app::Tab* tab = pane.ActiveTab();
+        if (!tab || tab->pending_generation != update.progress.generation) return;
+        std::wstring kind, rest;
+        if (!app::ParsePulsePath(tab->current_path, &kind, &rest)) return;
+        if (kind != L"saved-search" && kind != L"search") return;
+        if (kind == L"saved-search") {
+            wchar_t* end = nullptr;
+            const unsigned long long parsed = wcstoull(rest.c_str(), &end, 10);
+            if (!end || *end != L'\0') return;
+            saved_index = static_cast<size_t>(parsed);
+        }
+        target = tab;
+        search_kind = kind;
+    });
+    if (!target) return;
+    if (search_kind == L"saved-search" && saved_index >= s.savedSearches.items().size()) return;
+    AppendContentHits(*target, std::move(update.hits));
     wchar_t item_count[64]{};
     swprintf_s(item_count, l10n::Get(l10n::StringId::ItemsCountFormat).c_str(),
-               static_cast<int>(entries.size()));
-    target->virtual_title = saved.name + L" · " + item_count;
+               static_cast<int>(target->search_total));
+    if (search_kind == L"saved-search") {
+        target->virtual_title = s.savedSearches.items()[saved_index].name + L" · " + item_count;
+    } else {
+        std::wstring rest;
+        app::ParsePulsePath(target->current_path, nullptr, &rest);
+        SetQuerySearchTitle(*target, rest, target->search_total);
+    }
     if (!update.progress.done) {
         wchar_t scanned[96]{};
         swprintf_s(scanned, l10n::Get(l10n::StringId::ScannedFilesFormat).c_str(),
@@ -339,6 +467,7 @@ void ApplyContentSearchUpdate(AppState& s, index::ContentSearchUpdate update) {
         target->virtual_title += scanned;
     } else {
         target->loading = false;
+        target->search_content_active = false;
         target->pending_generation = 0;
         if (update.progress.truncated) {
             target->banner_title = l10n::Get(l10n::StringId::ResultLimitTitle);
@@ -351,7 +480,9 @@ void ApplyContentSearchUpdate(AppState& s, index::ContentSearchUpdate update) {
                        update.progress.error);
             target->banner_message = error;
         }
-        if (!entries.empty() && target->selected_index < 0) target->SelectOnly(0);
+        if (target->search_entries && !target->search_entries->empty() &&
+            target->selected_index < 0)
+            target->SelectOnly(0);
     }
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
@@ -374,7 +505,10 @@ void DeliverIndexSearchResult(AppState& s, uint32_t id,
         std::wstring kind, rest;
         app::ParsePulsePath(tab->current_path, &kind, &rest);
         if (kind == L"search") {
-            ApplySearchHits(*tab, rest, std::move(result));
+            if (tab->search_awaiting_content)
+                StartContentScanFromHits(s, *tab, rest, std::move(result));
+            else
+                ApplySearchHits(*tab, rest, std::move(result));
         } else if (kind == L"saved-search") {
             wchar_t* end = nullptr;
             const unsigned long long index = wcstoull(rest.c_str(), &end, 10);
@@ -411,7 +545,8 @@ void AcceptIndexProviderResult(AppState& s, uint32_t id,
 void MaybePrefetchSearchPage(AppState& s) {
     app::Tab* tab = ActiveTab(s);
     if (!tab || tab->loading || tab->search_loading_more ||
-        tab->search_next_offset >= tab->search_total) return;
+        tab->search_next_offset >= tab->search_total ||
+        tab->search_awaiting_content || tab->search_content_active) return;
     std::wstring kind, rest;
     if (!app::ParsePulsePath(tab->current_path, &kind, &rest) || kind != L"search") return;
     const D2D1_RECT_F list = ListRect(s);
@@ -420,6 +555,17 @@ void MaybePrefetchSearchPage(AppState& s) {
     const float scroll_y = std::max(tab->scroll_y, s.scrollTargetY);
     if (scroll_y + view_h * 2.0f >= max_scroll)
         RequestSearchPage(s, *tab, rest, false);
+}
+
+void CancelActiveContentSearch(AppState& s, app::Tab& tab) {
+    s.contentSearch.Cancel();
+    tab.search_content_active = false;
+    tab.search_awaiting_content = false;
+    tab.loading = false;
+    tab.pending_generation = 0;
+    std::wstring kind, rest;
+    if (app::ParsePulsePath(tab.current_path, &kind, &rest) && kind == L"search")
+        SetQuerySearchTitle(tab, rest, tab.search_total);
 }
 
 void LoadVirtualView(AppState& s, app::Tab& tab, const std::wstring& path) {
@@ -518,6 +664,7 @@ void LoadVirtualView(AppState& s, app::Tab& tab, const std::wstring& path) {
 }
 
 void StartLoadingPath(AppState& s, app::Tab& tab, const std::wstring& path) {
+    tab.search_retaining_results = false;
     std::wstring normalized = fs::NormalizePath(path);
     tab.current_path = normalized;
     if (const auto git = s.gitRoots.find(normalized); git != s.gitRoots.end())
@@ -536,7 +683,12 @@ void StartLoadingPath(AppState& s, app::Tab& tab, const std::wstring& path) {
     tab.search_total = 0;
     tab.search_next_offset = 0;
     tab.pending_search_offset = 0;
+    if (tab.search_content_active || tab.search_awaiting_content)
+        s.contentSearch.Cancel();
     tab.search_loading_more = false;
+    tab.search_awaiting_content = false;
+    tab.search_content_active = false;
+    tab.search_snippets.reset();
     if (fs::IsVirtualPath(normalized)) {
         LoadVirtualView(s, tab, normalized);
         return;
@@ -679,7 +831,7 @@ void ApplyWorkerResult(AppState& s, app::WorkResult& res) {
             tab->banner_message.clear();
             tab->cache_unix = 0;
             if (virtual_kind == L"recycle" || fs::IsRecycleViewPath(res.path)) {
-                if (res.recycle_info.valid) s.recycle_info = res.recycle_info;
+                ApplyQueriedRecycleInfo(s, res.recycle_info);
                 ApplyRecycleOccupancy(s);
             }
 
@@ -779,7 +931,7 @@ void RefreshPath(AppState& s, const std::wstring& path) {
         if (tab && tab->current_path == normalized) tabs.push_back(tab);
     });
     if (tabs.empty()) return;
-    if (fs::IsVirtualPath(normalized)) {
+    if (fs::IsVirtualPath(normalized) && !fs::IsRecycleViewPath(normalized)) {
         for (app::Tab* tab : tabs) LoadVirtualView(s, *tab, normalized);
         InvalidateRect(s.hwnd, nullptr, FALSE);
         return;
@@ -1004,6 +1156,12 @@ void NavigateTo(AppState& s, const std::wstring& path) {
     app::Tab* tab = ActiveTab(s);
     if (!tab) return;
     std::wstring normalized = fs::NormalizePath(path);
+    std::wstring next_kind;
+    if (!IsAddressSearchResults(tab) && app::ParsePulsePath(normalized, &next_kind, nullptr) &&
+        next_kind == L"search") {
+        tab->search_origin_path = tab->current_path;
+        tab->search_origin_valid = true;
+    }
     const std::wstring returnedChild =
         app::NavigationReturnChildName(tab->current_path, normalized);
     tab->NavigateTo(normalized);
@@ -1017,6 +1175,7 @@ void NavigateTo(AppState& s, const std::wstring& path) {
 
 void FocusPane(AppState& s, app::Pane* p) {
     if (!p || p == s.pane) return;
+    if (s.addressSearching) HideAddressEditor(s, false);
     if (s.renameIndex >= 0) HideRenameOverlay(s, false);
     if (s.filterEditing) HideFilterEditor(s, true);
     for (auto& pane : Panes(s)) pane->focused = (pane.get() == p);
@@ -1112,6 +1271,13 @@ void MarkTargetPane(AppState& s) {
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 void SortBy(AppState& s, ui::SortColumn col) {
+    const app::Tab* tab = ActiveTab(s);
+    if (!tab) return;
+    const auto direction = tab->sort_column == col && tab->sort_direction == ui::SortDirection::Asc
+        ? ui::SortDirection::Desc : ui::SortDirection::Asc;
+    SetSort(s, col, direction);
+}
+void SetSort(AppState& s, ui::SortColumn col, ui::SortDirection direction) {
     app::Tab* tab = ActiveTab(s);
     if (!tab) return;
     std::wstring kind;
@@ -1119,13 +1285,9 @@ void SortBy(AppState& s, ui::SortColumn col) {
         (kind == L"starred" || kind == L"recent")) {
         return;
     }
-    if (tab->sort_column == col) {
-        tab->sort_direction = (tab->sort_direction == ui::SortDirection::Asc)
-            ? ui::SortDirection::Desc : ui::SortDirection::Asc;
-    } else {
-        tab->sort_column = col;
-        tab->sort_direction = ui::SortDirection::Asc;
-    }
+    if (tab->sort_column == col && tab->sort_direction == direction) return;
+    tab->sort_column = col;
+    tab->sort_direction = direction;
     RefreshActiveTab(s);
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
@@ -1282,6 +1444,7 @@ void CloseActiveTab(AppState& s) {
 
 void SwitchTab(AppState& s, size_t idx) {
     if (idx >= s.window_tabs.items.size()) return;
+    if (s.addressSearching) HideAddressEditor(s, false);
     RememberLayoutFocus(s);
     s.window_tabs.SwitchTab(idx);
     BindCurrentLayout(s);

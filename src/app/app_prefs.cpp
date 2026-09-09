@@ -47,12 +47,18 @@ void AppPrefs::ResetToDefaults() {
     keep_running_on_close = false;
     open_folders_in_pulse = false;
     verify_copies = false;
+    show_status_performance = false;
+    show_hidden_files = false;
     language = L"system";
     window_effect = L"mica-alt";
     background_image.clear();
     row_height = 34;
     tray_icon_size = 48;
     accent_rgb.clear();
+    custom_tag_colors.clear();
+    duplicate_scan_scope = 0;
+    duplicate_scan_folder.clear();
+    duplicate_scan_drive.clear();
 }
 
 std::wstring AppPrefs::ToJson() const {
@@ -70,6 +76,10 @@ std::wstring AppPrefs::ToJson() const {
     out += open_folders_in_pulse ? L"true" : L"false";
     out += L",\n  \"verify_copies\":";
     out += verify_copies ? L"true" : L"false";
+    out += L",\n  \"show_status_performance\":";
+    out += show_status_performance ? L"true" : L"false";
+    out += L",\n  \"show_hidden_files\":";
+    out += show_hidden_files ? L"true" : L"false";
     out += L",\n  \"language\":\"";
     out += escaped_language;
     out += L"\"";
@@ -96,7 +106,21 @@ std::wstring AppPrefs::ToJson() const {
         out += hex;
         out += L"\"";
     }
-    out += L"]\n}\n";
+    out += L"],\n  \"duplicate_scan_scope\":";
+    out += std::to_wstring(duplicate_scan_scope);
+    out += L",\n  \"duplicate_scan_folder\":\"";
+    {
+        std::wstring escaped;
+        pulse::json::Escape(duplicate_scan_folder, escaped);
+        out += escaped;
+    }
+    out += L"\",\n  \"duplicate_scan_drive\":\"";
+    {
+        std::wstring escaped;
+        pulse::json::Escape(duplicate_scan_drive, escaped);
+        out += escaped;
+    }
+    out += L"\"\n}\n";
     return out;
 }
 
@@ -106,6 +130,8 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     keep_running_on_close = pulse::json::ExtractBool(json, L"keep_running_on_close", false);
     open_folders_in_pulse = pulse::json::ExtractBool(json, L"open_folders_in_pulse", false);
     verify_copies = pulse::json::ExtractBool(json, L"verify_copies", false);
+    show_status_performance = pulse::json::ExtractBool(json, L"show_status_performance", false);
+    show_hidden_files = pulse::json::ExtractBool(json, L"show_hidden_files", false);
     language = pulse::json::ExtractString(json, L"language", L"system");
     if (language != L"system" && language != L"zh-CN" && language != L"en-US")
         language = L"system";
@@ -136,6 +162,10 @@ bool AppPrefs::FromJson(const std::wstring& json) {
         if (end && *end == L'\0' && v <= 0xFFFFFFul && wcslen(text) == 6)
             custom_tag_colors.push_back(static_cast<uint32_t>(v));
     }
+    duplicate_scan_scope = pulse::json::ExtractInt(json, L"duplicate_scan_scope", 0);
+    if (duplicate_scan_scope < 0 || duplicate_scan_scope > 2) duplicate_scan_scope = 0;
+    duplicate_scan_folder = pulse::json::ExtractString(json, L"duplicate_scan_folder");
+    duplicate_scan_drive = pulse::json::ExtractString(json, L"duplicate_scan_drive");
     return true;
 }
 

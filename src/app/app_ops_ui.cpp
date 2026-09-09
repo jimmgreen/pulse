@@ -177,6 +177,17 @@ void CollectToTray(AppState& s, bool move_intent) {
         InvalidateRect(s.hwnd, nullptr, FALSE);
     }
 }
+void PinAndShowOperationWindow(AppState& s) {
+    if (!s.operationWindow) return;
+    const ops::OpStatus status = s.ops.Status();
+    if (!status.active && status.summary.empty() && status.last_error.empty()) return;
+    s.operationDismissedTaskId = 0;
+    s.operationPinnedByUser = true;
+    s.operationAutoShown = true;
+    s.operationWindow->Update(status);
+    s.operationWindow->Show(true);
+}
+
 void ShowBatchRename(AppState& s) {
     app::Tab* tab = ActiveTab(s);
     if (!tab || IsRecycleTab(tab) || tab->net_readonly) return;
@@ -205,6 +216,7 @@ void UpdateOperationWindow(AppState& s, bool allow_conflict_dialog) {
     if (status.active && status.task_id != s.operationUiTaskId) {
         s.operationUiTaskId = status.task_id;
         s.operationAutoShown = false;
+        s.operationPinnedByUser = false;
         s.operationStartedAt = now;
         s.operationFinishedAt = {};
     }
@@ -219,22 +231,24 @@ void UpdateOperationWindow(AppState& s, bool allow_conflict_dialog) {
         }
     }
 
-    if (status.task_id != 0 && status.task_id == s.operationDismissedTaskId) {
+    if (status.task_id != 0 && status.task_id == s.operationDismissedTaskId &&
+        !s.operationPinnedByUser) {
         if (s.operationWindow->IsVisible()) s.operationWindow->Hide();
         return;
     }
 
     if (status.active) {
         if (status.phase == ops::OpPhase::WaitingForConflict) return;
-        // Operations that finish quickly (e.g. deleting an empty folder) never
-        // surface a window; only long-running work gets the progress dialog.
+        const bool show_now = status.type == ops::OpType::EmptyRecycle;
         if (!s.operationAutoShown &&
-            now - s.operationStartedAt >= std::chrono::milliseconds(2000)) {
+            (show_now || now - s.operationStartedAt >= std::chrono::milliseconds(2000))) {
             s.operationWindow->Show(false);
             s.operationAutoShown = true;
         }
         return;
     }
+
+    if (s.operationPinnedByUser) return;
 
     if (status.phase == ops::OpPhase::Completed) {
         if (s.operationWindow->IsVisible()) {

@@ -1,4 +1,5 @@
 // app_input.cpp — extracted from app_main.cpp.
+#include "quick_access.h"
 #include "app_internal.h"
 #include "../ui/lumatext_renderer.h"
 #include "../ui/fluent_menu.h"
@@ -38,6 +39,19 @@
 using namespace pulse;
 
 namespace pulse {
+bool HandleBrowserNavigation(AppState& s, LPARAM command) {
+    switch (GET_APPCOMMAND_LPARAM(command)) {
+    case APPCOMMAND_BROWSER_BACKWARD:
+        GoBack(s);
+        return true;
+    case APPCOMMAND_BROWSER_FORWARD:
+        GoForward(s);
+        return true;
+    default:
+        return false;
+    }
+}
+
 bool UpdateSplitterDrag(AppState& s, int mx, int my) {
     if (!s.splitterDragging) return false;
     if ((GetKeyState(VK_LBUTTON) & 0x8000) == 0) {
@@ -375,7 +389,7 @@ void EnsureRowVisible(AppState& s, app::Tab& tab, int index) {
     int viewRow = index;
     ui::PaneViewModel pane;
     MaxScrollForActivePane(s, &pane);
-    if (!pane.filter_text.empty()) {
+    if (pane.filter_map || !pane.filter_text.empty()) {
         viewRow = pane.ViewIndex(index);
         if (viewRow < 0) return;
     }
@@ -453,18 +467,36 @@ void HandleListRowClick(AppState& s, int index, bool ctrl, bool shift) {
     app::Tab* tab = ActiveTab(s);
     if (!tab) return;
     s.clickCollapseIndex = -1;
+    s.clickToggleOnRelease = false;
     if (shift) {
         const int anchor = tab->selection_anchor >= 0 ? tab->selection_anchor
             : (tab->selected_index >= 0 ? tab->selected_index : index);
         tab->SelectRange(anchor, index);
     } else if (ctrl) {
-        tab->ToggleSelect(index);
+        // A selected item remains part of the drag payload. Only a completed
+        // Ctrl-click (without a drag) removes it from the selection.
+        if (tab->IsSelected(index)) {
+            tab->selected_index = index;
+            s.clickCollapseIndex = index;
+            s.clickToggleOnRelease = true;
+        } else {
+            tab->ToggleSelect(index);
+        }
     } else if (tab->IsSelected(index) && tab->SelectedCount() > 1) {
         tab->selected_index = index;
         s.clickCollapseIndex = index;
     } else {
         tab->SelectOnly(index);
     }
+}
+
+void FinishListRowClick(AppState& s) {
+    if (app::Tab* tab = ActiveTab(s); tab && s.clickCollapseIndex >= 0) {
+        if (s.clickToggleOnRelease) tab->ToggleSelect(s.clickCollapseIndex);
+        else tab->SelectOnly(s.clickCollapseIndex);
+    }
+    s.clickCollapseIndex = -1;
+    s.clickToggleOnRelease = false;
 }
 
 void CancelRenameClick(AppState& s) {
@@ -1491,6 +1523,7 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         ui::HitTestResult hit = s->renderer.HitTest(vm, rect, (float)mx, (float)my);
         const int newRegion = static_cast<int>(hit.region);
         if (newRegion != s->hoverRegion || hit.index != s->hoverControlIndex ||
+            hit.sub_index != s->hoverSubIndex ||
             hit.pane_index != s->hoverPaneIndex) {
             s->hoverRegion = newRegion;
             s->hoverControlIndex = hit.index;
@@ -1568,6 +1601,12 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
         ui::WindowViewModel vm = BuildVm(*s);
         D2D1_RECT_F rect = D2D1::RectF(0, 0, (float)s->compositor.Width(), (float)s->compositor.Height());
         ui::HitTestResult hit = s->renderer.HitTest(vm, rect, (float)mx, (float)my);
+        if (s->addressSearching && hit.region != ui::HitTestResult::AddressBar &&
+            hit.region != ui::HitTestResult::AddressSearchScope &&
+            hit.region != ui::HitTestResult::AddressSearchClear &&
+            hit.region != ui::HitTestResult::AddressSearchClose) {
+            HideAddressEditor(*s, false);
+        }
         if (hit.pane_index >= 0) {
             if (app::Pane* p = PaneAtSlot(*s, hit.pane_index)) FocusPane(*s, p);
         }
@@ -1759,6 +1798,60 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 ShellExecuteW(hwnd, L"open", s->update_result.download_page.c_str(),
                               nullptr, nullptr, SW_SHOWNORMAL);
             }
+        } else if (hit.region == ui::HitTestResult::SettingsDupScope) {
+            if (!s->duplicateScan.scanning && hit.index >= 0 && hit.index <= 2) {
+                s->duplicateScan.scope = static_cast<app::DuplicateScanScope>(hit.index);
+                s->duplicateScan.minimum_file_bytes =
+                    app::DuplicateScanSession::DefaultMinimumBytes(s->duplicateScan.scope);
+                PersistDuplicateScanPrefs(*s);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+        } else if (hit.region == ui::HitTestResult::SettingsDupDrive) {
+            if (!s->duplicateScan.scanning && hit.index >= 0) {
+                int n = 0;
+                for (const auto& volume : s->dup_volume_cache) {
+                    if (volume.mount_point.empty()) continue;
+                    if (n == hit.index) {
+                        s->duplicateScan.drive_root =
+                            app::DuplicateScanSession::NormalizeDriveRoot(volume.mount_point);
+                        PersistDuplicateScanPrefs(*s);
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                        break;
+                    }
+                    ++n;
+                }
+            }
+        } else if (hit.region == ui::HitTestResult::SettingsDupBrowse) {
+            if (!s->duplicateScan.scanning) {
+                std::wstring path;
+                if (PickFolder(hwnd, path, l10n::Get(l10n::StringId::DupFolderPlaceholder).c_str())) {
+                    s->duplicateScan.folder_path = std::move(path);
+                    PersistDuplicateScanPrefs(*s);
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+            }
+        } else if (hit.region == ui::HitTestResult::SettingsDupMinSize) {
+            static constexpr uint64_t kBytes[] = {1024ull, 1024ull * 1024ull, 10ull * 1024ull * 1024ull};
+            if (!s->duplicateScan.scanning && hit.index >= 0 && hit.index < 3) {
+                s->duplicateScan.minimum_file_bytes = kBytes[hit.index];
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+        } else if (hit.region == ui::HitTestResult::SettingsDupScan) {
+            StartDuplicateScan(*s);
+        } else if (hit.region == ui::HitTestResult::SettingsDupCancel) {
+            CancelDuplicateScan(*s);
+        } else if (hit.region == ui::HitTestResult::SettingsDupKeep) {
+            if (!s->duplicateScan.scanning)
+                s->duplicateScan.SetKeep(static_cast<size_t>(hit.index),
+                                         static_cast<size_t>(hit.sub_index));
+            InvalidateRect(hwnd, nullptr, FALSE);
+        } else if (hit.region == ui::HitTestResult::SettingsDupOpen) {
+            OpenDuplicateLocation(*s, static_cast<size_t>(hit.index),
+                                  static_cast<size_t>(hit.sub_index));
+        } else if (hit.region == ui::HitTestResult::SettingsDupGroupDelete) {
+            RecycleDuplicateGroup(*s, static_cast<size_t>(hit.index));
+        } else if (hit.region == ui::HitTestResult::SettingsDupDeleteAll) {
+            RecycleAllDuplicateExtras(*s);
         } else if (hit.region == ui::HitTestResult::NavBack) {
             GoBack(*s);
         } else if (hit.region == ui::HitTestResult::NavForward) {
@@ -1935,8 +2028,28 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             ShowViewDropdown(*s, hit.pane_index);
         } else if (hit.region == ui::HitTestResult::FilterBox) {
             ShowFilterEditor(*s);
+        } else if (hit.region == ui::HitTestResult::AddressSearch) {
+            ShowAddressSearch(*s);
+        } else if (hit.region == ui::HitTestResult::AddressSearchScope) {
+            if (!s->addressSearching) ShowAddressSearch(*s);
+            ShowAddressSearchScope(*s);
+        } else if (hit.region == ui::HitTestResult::AddressSearchClear) {
+            if (!s->addressSearching) ShowAddressSearch(*s);
+            SetWindowTextW(s->hwndAddressEdit, L"");
+            SetForegroundWindow(s->hwndAddressEdit);
+            SetFocus(s->hwndAddressEdit);
+        } else if (hit.region == ui::HitTestResult::AddressSearchClose) {
+            ExitAddressSearch(*s);
         } else if (hit.region == ui::HitTestResult::AddressBar) {
-            ShowOmnibar(*s, OmnibarMode::Path);
+            if (s->addressSearching) {
+                SetForegroundWindow(s->hwndAddressEdit);
+                SetFocus(s->hwndAddressEdit);
+            } else if (IsAddressSearchResults(ActiveTab(*s))) ShowAddressSearch(*s);
+            else ShowOmnibar(*s, OmnibarMode::Path);
+        } else if (hit.region == ui::HitTestResult::SearchFilter) {
+            POINT point{ mx, my };
+            ClientToScreen(hwnd, &point);
+            ShowSearchFilterMenu(*s, hit.index, point);
         } else if (hit.region == ui::HitTestResult::RecentFilter) {
             if (app::Tab* tab = ActiveTab(*s)) {
                 const int filter = std::clamp(hit.index, 0, 2);
@@ -2013,13 +2126,10 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             } else if (!hit.path.empty()) {
                 NavigateTo(*s, hit.path);
             }
+        } else if (hit.region == ui::HitTestResult::StatusBarTask) {
+            PinAndShowOperationWindow(*s);
         } else if (hit.region == ui::HitTestResult::StatusBar) {
-            const ops::OpStatus status = s->ops.Status();
-            if (s->operationWindow &&
-                (status.active || !status.summary.empty() || !status.last_error.empty())) {
-                s->operationWindow->Update(status);
-                s->operationWindow->Show(true);
-            }
+            // Left/right status text is not a transfer control.
         } else if (!IsSettingsTab(ActiveTab(*s)) &&
                    (hit.region == ui::HitTestResult::Pane ||
                    (PointInList(*s, mx, my) && hit.region == ui::HitTestResult::None))) {
@@ -2293,8 +2403,7 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 if (s->marqueeActive) ApplyMarqueeSelection(*s);
                 ResetMarquee(*s);
             } else if (s->clickCollapseIndex >= 0) {
-                app::Tab* tab = ActiveTab(*s);
-                if (tab) tab->SelectOnly(s->clickCollapseIndex);
+                FinishListRowClick(*s);
             }
             if (s->renameClickCandidate && s->renameClickDue == 0) {
                 const int mx = GET_X_LPARAM(lParam);
@@ -2410,11 +2519,11 @@ LRESULT HandleRButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             std::wstring ext;
             if (tab->IsSelected(hit.index)) {
                 paths = SelectedFullPaths(*tab);
-                ext = CommonExtension(*tab, tab->SelectedIndices());
+                ext = StaticVerbKey(*tab, tab->SelectedIndices());
             } else {
                 std::wstring one = EntryFullPath(*tab, hit.index);
                 if (!one.empty()) paths.push_back(std::move(one));
-                ext = CommonExtension(*tab, { hit.index });
+                ext = StaticVerbKey(*tab, { hit.index });
             }
             if (!paths.empty()) StartCtxQuery(*s, std::move(paths), false, ext);
         } else if (tab && !tab->current_path.empty() &&
@@ -2425,7 +2534,7 @@ LRESULT HandleRButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             D2D1_RECT_F content = s->renderer.ContentRect(rect.right, rect.bottom);
             if (hit.pane_index >= 0 ||
                 (mx >= content.left && mx < content.right && my >= content.top && my < content.bottom)) {
-                StartCtxQuery(*s, { tab->current_path }, true, L"");
+                StartCtxQuery(*s, { tab->current_path }, true, ipc::kBackgroundVerbKey);
             }
         }
         return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -2461,6 +2570,9 @@ LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 BindCurrentLayout(*s);
             }
             shown = true;
+        } else if (hit.region == ui::HitTestResult::BreadcrumbSegment && !hit.path.empty()) {
+            ShowBreadcrumbMenu(*s, hit.path, sp);
+            shown = true;
         } else if (hit.region == ui::HitTestResult::Row && hit.index >= 0) {
             app::Tab* tab = ActiveTab(*s);
             if (tab) {
@@ -2491,6 +2603,11 @@ LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             ShowRecyclePlaceMenu(*s, sp);
             shown = true;
         } else if (hit.region == ui::HitTestResult::SidebarItem) {
+            if (s->places.IsQuickAccessPinned(hit.path)) {
+                ShowQuickAccessMenu(*s, hit.path, sp);
+                s->context_menu.Close();
+                return 0;
+            }
             const app::StarredItem* starred = s->places.FindStarred(hit.path);
             const app::SidebarEntry* quick_access = QuickAccessEntryForPath(*s, hit.path);
             if ((starred && starred->kind == app::PlaceItemKind::Folder) || quick_access) {
@@ -2644,7 +2761,7 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         if (ctrl && wParam == L'T') {
             NewTab(*s, NewTabPath(*s));
         } else if (ctrl && wParam == L'K') {
-            ShowOmnibar(*s, OmnibarMode::Command);
+            ShowOmnibar(*s, OmnibarMode::Mixed);
         } else if (ctrl && wParam == L'P') {
             ShowOmnibar(*s, OmnibarMode::Project);
         } else if (ctrl && shift && wParam >= L'1' && wParam <= L'7') {
@@ -2653,8 +2770,11 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             if (t && tag_index < static_cast<int>(s->places.tags.size()))
                 ToggleTagForSelection(*s, s->places.tags[static_cast<size_t>(tag_index)].id,
                                       SelectedFullPaths(*t));
+        } else if (ctrl && shift && wParam == L'F') {
+            ShowAdvancedSearch(*s);
         } else if (ctrl && wParam == L'F') {
-            ShowFilterEditor(*s);
+            if (IsAddressSearchResults(tab)) ShowAddressSearch(*s);
+            else ShowFilterEditor(*s);
         } else if (ctrl && wParam == L'D') {
             MarkTargetPane(*s);
         } else if (wParam == VK_F6) {
@@ -2711,10 +2831,11 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         } else if (alt && wParam == VK_RIGHT) {
             GoForward(*s);
         } else if (wParam == VK_F5) {
-            s->store.MarkDirty(tab->current_path);
-            RefreshActiveTab(*s);
+            DispatchMenuCommand(*s, app::CmdRefresh);
         } else if (wParam == VK_F1) {
-            s->showFps = !s->showFps;
+            s->appPrefs.show_status_performance = !s->appPrefs.show_status_performance;
+            s->showFps = s->forceStatusPerformance || s->appPrefs.show_status_performance;
+            s->appPrefs.Save();
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (wParam == VK_SPACE) {
             ToggleQuickPreview(*s);
@@ -2725,9 +2846,14 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         } else if (ctrl && wParam == L'I') {
             DispatchMenuCommand(*s, app::CmdInvertSelection);
         } else if (wParam == VK_ESCAPE) {
-            tab->ClearSelection();
-            ResetMarquee(*s);
-            s->clickCollapseIndex = -1;
+            if (tab->search_content_active || tab->search_awaiting_content) {
+                CancelActiveContentSearch(*s, *tab);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            } else {
+                tab->ClearSelection();
+                ResetMarquee(*s);
+                s->clickCollapseIndex = -1;
+            }
         } else if (wParam == VK_DOWN || wParam == VK_UP ||
                    wParam == VK_LEFT || wParam == VK_RIGHT) {
             CancelScrollAnimation(*s);

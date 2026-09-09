@@ -41,6 +41,7 @@ struct Tab {
     std::array<float, 3> details_column_dividers{};
     std::array<float, 4> search_column_dividers{};
     std::wstring filter_text;
+    bool show_hidden_files = false;
     std::wstring virtual_title; // tag/search views; empty for real folders
     std::wstring banner_title;
     std::wstring banner_message;
@@ -65,6 +66,16 @@ struct Tab {
     size_t search_next_offset = 0;
     size_t pending_search_offset = 0;
     bool search_loading_more = false;
+    bool search_awaiting_content = false;
+    bool search_content_active = false;
+    std::shared_ptr<std::vector<std::wstring>> search_snippets;
+    std::wstring search_input_path;
+    std::wstring search_input_text;
+    std::wstring search_input_root;
+    bool search_input_current = false;
+    std::wstring search_origin_path;
+    bool search_origin_valid = false;
+    bool search_retaining_results = false;
 
     // Expensive snapshot-derived presentation data. These caches are mutable
     // because building a read-only view model must not turn an O(visible rows)
@@ -78,6 +89,8 @@ struct Tab {
     mutable std::shared_ptr<ui::RowPresentationCache> view_row_cache;
 
     void ClearSelection();
+    bool EntryVisible(int index) const;
+    void SetShowHiddenFiles(bool show);
     int CountBound() const;
     void MaterializeSelection();
     void SelectOnly(int index);

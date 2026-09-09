@@ -19,8 +19,8 @@ if ($version -notmatch '^\d+\.\d+\.\d+$') {
 if ($DownloadPage.Scheme -ne "https") {
     throw "DownloadPage must use HTTPS"
 }
-if ($MinimumWindowsBuild -lt 10240) {
-    throw "MinimumWindowsBuild must identify a Windows 10 or newer build"
+if ($MinimumWindowsBuild -lt 9600) {
+    throw "MinimumWindowsBuild must identify Windows 8.1 (9600) or newer"
 }
 
 $installerPath = (Resolve-Path -LiteralPath $Installer).Path

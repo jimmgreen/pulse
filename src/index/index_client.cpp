@@ -1,4 +1,5 @@
 // index_client.cpp — Connect to Pulse.Index (service or spawned helper).
+#include "../common/command_line.h"
 #include "index_client.h"
 #include <chrono>
 #include <shellapi.h>
@@ -56,6 +57,14 @@ void IndexClient::Stop() {
 }
 
 bool IndexClient::SpawnHelper() {
+    if (ServiceInstalled()) {
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            status_ = L"正在等待索引服务…";
+        }
+        if (notify_ && status_msg_) PostMessageW(notify_, status_msg_, 0, 0);
+        return false;
+    }
     const std::wstring exe = ExePath();
     if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) {
         std::lock_guard<std::mutex> lock(mu_);
@@ -392,29 +401,28 @@ bool IndexClient::RequestInstallService() {
 namespace {
 
 std::wstring QuoteCommandArg(const std::wstring& value) {
-    std::wstring out = L"\"";
-    for (wchar_t c : value) {
-        if (c == L'\"') out += L'\\';
-        out += c;
-    }
-    out += L'\"';
-    return out;
+    return pulse::QuoteWindowsArgument(value);
 }
 
-bool RunElevatedIndexCommand(const std::wstring& exe, const std::wstring& parameters) {
+bool RunElevatedIndexCommand(const std::wstring& exe, const std::wstring& parameters,
+                            DWORD* result = nullptr) {
     SHELLEXECUTEINFOW sei{ sizeof(sei) };
     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
     sei.lpVerb = L"runas";
     sei.lpFile = exe.c_str();
     sei.lpParameters = parameters.c_str();
     sei.nShow = SW_HIDE;
-    if (!ShellExecuteExW(&sei)) return false;
+    if (!ShellExecuteExW(&sei)) {
+        if (result) *result = GetLastError();
+        return false;
+    }
     DWORD code = ERROR_GEN_FAILURE;
     if (sei.hProcess) {
-        WaitForSingleObject(sei.hProcess, 120000);
-        GetExitCodeProcess(sei.hProcess, &code);
+        if (WaitForSingleObject(sei.hProcess, INFINITE) == WAIT_OBJECT_0)
+            GetExitCodeProcess(sei.hProcess, &code);
         CloseHandle(sei.hProcess);
     }
+    if (result) *result = code;
     return code == 0;
 }
 
@@ -444,8 +452,28 @@ bool IndexClient::InstallServiceElevated() {
     return RunElevatedIndexCommand(ExePath(), L"--install");
 }
 
-bool IndexClient::ConfigureIndexPathElevated(const std::wstring& path) {
-    return RunElevatedIndexCommand(ExePath(), L"--set-index-path " + QuoteCommandArg(path));
+bool IndexClient::ConfigureIndexPathElevated(const std::wstring& path, std::wstring* error) {
+    DWORD code = 0;
+    if (RunElevatedIndexCommand(ExePath(), L"--set-index-path " + QuoteCommandArg(path), &code)) return true;
+    if (error) {
+        switch (code) {
+        case ERROR_CANCELLED: *error = L"已取消索引迁移，原位置保持不变。"; break;
+        case ERROR_BUSY: *error = L"另一项索引设置正在处理，请完成后重试。"; break;
+        case ERROR_DISK_FULL: case ERROR_HANDLE_DISK_FULL:
+            *error = L"目标磁盘空间不足，索引未迁移。请释放空间后重试。"; break;
+        case ERROR_ALREADY_EXISTS: case ERROR_FILE_EXISTS:
+            *error = L"目标位置已有另一份索引。请选择空目录，避免覆盖已有数据。"; break;
+        case ERROR_INVALID_PARAMETER:
+            *error = L"请选择独立的索引文件夹，不能与原位置互相包含，也不能使用链接目录。选择磁盘根目录时会自动使用其中的 Index 文件夹。"; break;
+        case ERROR_PARTIAL_COPY:
+            *error = L"索引已切换到新位置，但部分旧文件被占用，未能清理。新索引可以正常使用。"; break;
+        case ERROR_SERVICE_NOT_ACTIVE: case ERROR_SERVICE_REQUEST_TIMEOUT:
+            *error = L"索引服务未能恢复。原索引文件已保留，请重新启动索引服务后重试。"; break;
+        default:
+            *error = L"索引迁移未完成，原索引已保留。请检查目标目录的权限和磁盘连接后重试。"; break;
+        }
+    }
+    return false;
 }
 
 bool IndexClient::ConfigureExcludePathElevated(const std::wstring& path, bool enabled) {

@@ -24,6 +24,8 @@ std::vector<ui::FluentMenuItem> BuildFinderItemMenu(
         AppState& s, bool can_undo, const std::wstring& undo_label);
 std::wstring CommonExtension(const app::Tab& tab,
                                     const std::vector<int>& indices);
+// Registry/COM cache key for the selection: ".ext", ":folder", ":drive", or "".
+std::wstring StaticVerbKey(const app::Tab& tab, const std::vector<int>& indices);
 void PrefetchStaticVerbs(AppState& s, const std::wstring& ext);
 DWORD WINAPI ShellRegistryWatch(LPVOID param);
 void StartShellRegistryWatch(HWND hwnd);
@@ -41,6 +43,7 @@ void RefreshOpenCtxMenu(AppState& s);
 bool HandleShellMenuCommand(AppState& s, int cmd);
 void ShowItemContextMenu(AppState& s, POINT screen_pt);
 void ShowBackgroundContextMenu(AppState& s, POINT screen_pt);
+void ShowBreadcrumbMenu(AppState& s, std::wstring path, POINT screen_pt);
 void ShowNewDropdown(AppState& s);
 void ShowSplitDropdown(AppState& s);
 app::SidebarEntry* QuickAccessEntryForPath(AppState& s,
@@ -52,6 +55,8 @@ void ShowCuratedItemMenu(AppState& s, const std::wstring& path,
 void SetViewMode(AppState& s, ui::ViewMode mode);
 void ShowViewDropdown(AppState& s, int pane_index);
 void ShowOmnibar(AppState& s, OmnibarMode mode);
+void ShowAdvancedSearch(AppState& s, bool require_scope = false);
+void ShowSearchFilterMenu(AppState& s, int chip, POINT screen_pt);
 void ShowRecyclePlaceMenu(AppState& s, POINT screen_pt);
 void ApplyAppWindowChrome(AppState& s);
 bool PickImageFile(HWND owner, std::wstring& path);

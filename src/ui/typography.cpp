@@ -1,5 +1,6 @@
 #include "typography.h"
 #include "ui_compositor.h"
+#include "../common/windows_compat.h"
 
 #include "../common/localization.h"
 
@@ -12,7 +13,7 @@ namespace pulse::ui::typography {
 namespace {
 
 std::mutex g_fallback_mutex;
-IDWriteFactory3* g_fallback_factory = nullptr;
+IDWriteFactory2* g_fallback_factory = nullptr;
 IDWriteFontFallback* g_fallback = nullptr;
 std::atomic_uint64_t g_generation{1};
 
@@ -22,7 +23,7 @@ void Release(T*& value) noexcept {
     value = nullptr;
 }
 
-bool FamilyExists(IDWriteFactory3* factory, const wchar_t* family) {
+bool FamilyExists(IDWriteFactory2* factory, const wchar_t* family) {
     if (!factory || !family) return false;
     IDWriteFontCollection* collection = nullptr;
     if (FAILED(factory->GetSystemFontCollection(&collection, FALSE)) || !collection) {
@@ -35,7 +36,7 @@ bool FamilyExists(IDWriteFactory3* factory, const wchar_t* family) {
     return SUCCEEDED(result) && exists;
 }
 
-const wchar_t* ResolveFamily(IDWriteFactory3* factory, FontRole role) {
+const wchar_t* ResolveFamily(IDWriteFactory2* factory, FontRole role) {
     const bool chinese = pulse::l10n::effective_language() == pulse::l10n::Language::ZhCN;
     const wchar_t* const text_zh[] = {
         L"Microsoft YaHei UI", L"Microsoft YaHei", L"Segoe UI", nullptr};
@@ -65,7 +66,7 @@ const wchar_t* ResolveFamily(IDWriteFactory3* factory, FontRole role) {
     return L"Segoe UI";
 }
 
-bool BuildFallback(IDWriteFactory3* factory, IDWriteFontFallback** fallback) {
+bool BuildFallback(IDWriteFactory2* factory, IDWriteFontFallback** fallback) {
     if (!factory || !fallback) return false;
     *fallback = nullptr;
     IDWriteFontFallbackBuilder* builder = nullptr;
@@ -92,7 +93,7 @@ bool BuildFallback(IDWriteFactory3* factory, IDWriteFontFallback** fallback) {
     return SUCCEEDED(result) && *fallback;
 }
 
-void ApplyFallbackInternal(IDWriteFactory3* factory, IDWriteTextFormat* format) {
+void ApplyFallbackInternal(IDWriteFactory2* factory, IDWriteTextFormat* format) {
     if (!factory || !format) return;
     std::lock_guard lock(g_fallback_mutex);
     if (g_fallback_factory != factory || !g_fallback) {
@@ -114,12 +115,18 @@ const wchar_t* LocaleName() noexcept {
     return pulse::l10n::LocaleName();
 }
 
+bool HasIconFont(IDWriteFactory2* factory) {
+    static const bool available = FamilyExists(factory, L"Segoe Fluent Icons") ||
+                                   FamilyExists(factory, L"Segoe MDL2 Assets");
+    return available;
+}
+
 const wchar_t* PreferredTextFamily() noexcept {
     return pulse::l10n::effective_language() == pulse::l10n::Language::ZhCN
         ? L"Microsoft YaHei UI" : L"Segoe UI Variable Text";
 }
 
-HRESULT CreateTextFormat(IDWriteFactory3* factory, const TextFormatSpec& spec,
+HRESULT CreateTextFormat(IDWriteFactory2* factory, const TextFormatSpec& spec,
                          IDWriteTextFormat** format) {
     if (!format) return E_POINTER;
     *format = nullptr;
@@ -134,8 +141,8 @@ HRESULT CreateTextFormat(IDWriteFactory3* factory, const TextFormatSpec& spec,
     return result;
 }
 
-HRESULT CreateRenderingParams(IDWriteFactory3* factory, HMONITOR monitor,
-                              IDWriteRenderingParams3** params) {
+HRESULT CreateRenderingParams(IDWriteFactory2* factory, HMONITOR monitor,
+                              IDWriteRenderingParams2** params) {
     if (!params) return E_POINTER;
     *params = nullptr;
     if (!factory) return E_INVALIDARG;
@@ -147,16 +154,31 @@ HRESULT CreateRenderingParams(IDWriteFactory3* factory, HMONITOR monitor,
     if (FAILED(result) || !base) return result;
 
     float grayscale_contrast = base->GetEnhancedContrast();
-    IDWriteRenderingParams3* base3 = nullptr;
+    IDWriteRenderingParams2* base3 = nullptr;
     if (SUCCEEDED(base->QueryInterface(IID_PPV_ARGS(&base3))) && base3) {
         grayscale_contrast = base3->GetGrayscaleEnhancedContrast();
         base3->Release();
     }
 
+    IDWriteFactory3* modern = nullptr;
+    if (!compat::LegacyMode() && SUCCEEDED(factory->QueryInterface(IID_PPV_ARGS(&modern)))) {
+        IDWriteRenderingParams3* modern_params = nullptr;
+        result = modern->CreateCustomRenderingParams(
+            base->GetGamma(), base->GetEnhancedContrast(), grayscale_contrast,
+            base->GetClearTypeLevel(), DWRITE_PIXEL_GEOMETRY_FLAT,
+            DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC, DWRITE_GRID_FIT_MODE_DISABLED,
+            &modern_params);
+        modern->Release();
+        if (SUCCEEDED(result) && modern_params) {
+            *params = modern_params;
+            base->Release();
+            return result;
+        }
+    }
     result = factory->CreateCustomRenderingParams(
         base->GetGamma(), base->GetEnhancedContrast(), grayscale_contrast,
         base->GetClearTypeLevel(), DWRITE_PIXEL_GEOMETRY_FLAT,
-        DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC,
+        DWRITE_RENDERING_MODE_NATURAL_SYMMETRIC,
         DWRITE_GRID_FIT_MODE_DISABLED, params);
     base->Release();
     return result;
@@ -187,7 +209,7 @@ float InkPad(IDWriteTextFormat* format) noexcept {
     return std::max(4.0f, size * 0.25f);
 }
 
-float MeasureAdvance(IDWriteFactory3* factory, IDWriteTextFormat* format,
+float MeasureAdvance(IDWriteFactory2* factory, IDWriteTextFormat* format,
                      std::wstring_view text) {
     if (!factory || !format || text.empty()) return 0.0f;
     const float fallback = format->GetFontSize() * static_cast<float>(text.size());
@@ -215,6 +237,23 @@ float MeasureLine(Compositor* compositor, IDWriteTextFormat* format,
         return std::max(dwrite_w, luma) + InkPad(format);
     }
     return dwrite_w;
+}
+
+float MeasureWrapped(IDWriteFactory2* factory, IDWriteTextFormat* format,
+                     std::wstring_view text, float width) {
+    if (!factory || !format || text.empty() || width <= 0.0f) return 0.0f;
+    IDWriteTextLayout* layout = nullptr;
+    if (FAILED(factory->CreateTextLayout(text.data(), static_cast<UINT32>(text.size()),
+                                         format, width, 4096.0f, &layout)) || !layout) {
+        return format->GetFontSize() * 1.4f;
+    }
+    layout->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+    layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+    DWRITE_TEXT_METRICS metrics{};
+    const HRESULT hr = layout->GetMetrics(&metrics);
+    layout->Release();
+    if (FAILED(hr) || metrics.height <= 0.0f) return format->GetFontSize() * 1.4f;
+    return std::ceil(metrics.height);
 }
 
 } // namespace pulse::ui::typography

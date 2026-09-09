@@ -328,7 +328,7 @@ float RoundedSdf(float px, float py, float hw, float hh, float r) {
     return std::sqrt(ax * ax + ay * ay) + (std::min)((std::max)(qx, qy), 0.0f) - r;
 }
 
-bool EnsureHueBitmap(State& s, ID2D1DeviceContext2* dc) {
+bool EnsureHueBitmap(State& s, ID2D1DeviceContext* dc) {
     const int px = (std::max)(16, static_cast<int>(std::lround(Px(s, kHueSize))));
     if (s.hue_bmp.get() && s.hue_px == px) return true;
     std::vector<uint32_t> buf(static_cast<size_t>(px) * px);
@@ -405,7 +405,7 @@ StopList ChannelStops(const State& s, int ch) {
     return out;
 }
 
-void FillGroove(ID2D1DeviceContext2* dc, const D2D1_RECT_F& r, const StopList& list) {
+void FillGroove(ID2D1DeviceContext* dc, const D2D1_RECT_F& r, const StopList& list) {
     ComPtr<ID2D1GradientStopCollection> coll;
     if (FAILED(dc->CreateGradientStopCollection(list.stops.data(),
                                                 static_cast<UINT32>(list.count),
@@ -421,7 +421,7 @@ void FillGroove(ID2D1DeviceContext2* dc, const D2D1_RECT_F& r, const StopList& l
     dc->FillRoundedRectangle(D2D1::RoundedRect(r, radius, radius), brush.get());
 }
 
-void FillChecker(ID2D1DeviceContext2* dc, const D2D1_RECT_F& r, float cell) {
+void FillChecker(ID2D1DeviceContext* dc, const D2D1_RECT_F& r, float cell) {
     // QFluent checkerboardPixmap: #CCC / white cells.
     ComPtr<ID2D1SolidColorBrush> a, b;
     dc->CreateSolidColorBrush(D2D1::ColorF(0.8f, 0.8f, 0.8f, 1.0f), &a);
@@ -443,7 +443,7 @@ void FillChecker(ID2D1DeviceContext2* dc, const D2D1_RECT_F& r, float cell) {
 // Channel thumb (QFluent SliderHandle, 22px widget): outer r=10 circle
 // (#454545 dark / white light) with a 1px ring, inner accent dot r=5
 // (6.5 hovered, 4 pressed).
-void DrawChannelThumb(State& s, ID2D1DeviceContext2* dc, const D2D1_RECT_F& slot,
+void DrawChannelThumb(State& s, ID2D1DeviceContext* dc, const D2D1_RECT_F& slot,
                       float t, bool hovered, bool pressed) {
     const D2D1_RECT_F g = GrooveRect(s, slot);
     const float cx = g.left + t * (g.right - g.left);
@@ -465,7 +465,7 @@ void DrawChannelThumb(State& s, ID2D1DeviceContext2* dc, const D2D1_RECT_F& slot
 // Brightness thumb (color_dialog.qss ::handle, 16px): 1px border ring, then a
 // solid ring, then the contrasting center dot (white on dark, black on
 // light) at ~55% radius — the QSS radial gradient with hard stops.
-void DrawBrightThumb(State& s, ID2D1DeviceContext2* dc, const D2D1_RECT_F& slot,
+void DrawBrightThumb(State& s, ID2D1DeviceContext* dc, const D2D1_RECT_F& slot,
                      float t) {
     const float r = Px(s, 8.0f);
     const float cx = slot.left + r + t * (slot.right - slot.left - 2.0f * r);
@@ -489,7 +489,7 @@ void DrawBrightThumb(State& s, ID2D1DeviceContext2* dc, const D2D1_RECT_F& slot,
 // Popup field (color_picker.qss): dark #2D2D2D / light white, 1px border,
 // radius 5, focus replaces the bottom edge with a 2px accent bar. Light
 // theme's resting bottom border is darker than the other edges.
-void DrawPopupField(State& s, ID2D1DeviceContext2* dc, const D2D1_RECT_F& rc,
+void DrawPopupField(State& s, ID2D1DeviceContext* dc, const D2D1_RECT_F& rc,
                     bool focused, bool hovered) {
     const float radius = Px(s, 5.0f);
     D2D1_COLOR_F fill = s.dark ? D2D1::ColorF(0.1765f, 0.1765f, 0.1765f, 1.0f) // #2D2D2D
@@ -541,7 +541,7 @@ int HitTest(const State& s, float x, float y) {
 }
 
 bool Render(State& s) {
-    ID2D1DeviceContext2* dc = s.compositor ? s.compositor->Dc() : nullptr;
+    ID2D1DeviceContext* dc = s.compositor ? s.compositor->Dc() : nullptr;
     if (!dc || s.win_w <= 0 || s.win_h <= 0) return false;
     const D2D1_SIZE_U size{ static_cast<UINT32>(s.win_w), static_cast<UINT32>(s.win_h) };
     const auto props = D2D1::BitmapProperties1(

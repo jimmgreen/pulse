@@ -7,6 +7,14 @@
 // All file operations are confined to bench_data/opstest/selftest_1b2 and
 // cleaned up afterwards.
 #include "selftest_1b2.h"
+#include "quick_access.h"
+#include "../common/windows_compat.h"
+#include "app_input.h"
+#include "app_hosted_edit.h"
+#include "app_navigation.h"
+#include "../ui/address_search_layout.h"
+#include "search_query.h"
+#include "../common/localization.h"
 #include "app_model.h"
 #include "app_worker.h"
 #include "snapshot_patch.h"
@@ -210,6 +218,15 @@ void TestBreadcrumb() {
     auto longp = ui::SplitBreadcrumb(L"\\\\?\\C:\\A\\B");
     Check(longp.size() == 4 && longp[3].path == L"C:\\A\\B",
           L"breadcrumb: long-path prefix stripped");
+    const std::wstring search_path =
+        L"pulse:search:path:C:\\Users\\SS\\Desktop\\PulseSearchTest content:\u53d1\u7968";
+    auto search = ui::SplitBreadcrumb(search_path);
+    Check(search.size() == 1, L"breadcrumb: search query is a single segment");
+    if (search.size() == 1) {
+        Check(search[0].path == search_path, L"breadcrumb: search click keeps pulse:search:");
+        Check(search[0].text.find(L'\\') == std::wstring::npos,
+              L"breadcrumb: search label has no backslash");
+    }
 
     Pane pane;
     pane.NewTab(L"\\\\192.168.0.254\\share\\folder");
@@ -298,6 +315,96 @@ void TestLoadingPresentation() {
           L"loading: normal directory does not show search-like status");
 }
 
+LRESULT CALLBACK NavigationTestProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    auto* state = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (msg == WM_APPCOMMAND && state && HandleBrowserNavigation(*state, lparam)) return TRUE;
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+void TestMouseHistoryNavigation() {
+    auto state = std::make_unique<AppState>();
+    state->places.persist = false;
+    Pane pane;
+    pane.NewTab(L"pulse:settings/general");
+    state->pane = &pane;
+    auto* tab = pane.ActiveTab();
+    tab->back_stack.push(L"pulse:settings/about");
+    tab->back_stack.push(L"pulse:settings/appearance");
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = NavigationTestProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"PulseMouseHistorySelftest";
+    RegisterClassW(&wc);
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"", WS_POPUP,
+                                0, 0, 1, 1, nullptr, nullptr, wc.hInstance, nullptr);
+    Check(hwnd != nullptr, L"mouse history: hidden test window created");
+    if (!hwnd) return;
+    state->hwnd = hwnd;
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state.get()));
+    SendMessageW(hwnd, WM_XBUTTONDOWN, MAKEWPARAM(MK_XBUTTON1, XBUTTON1), 0);
+    Check(tab->back_stack.size() == 2, L"mouse history: button down does not navigate");
+    SendMessageW(hwnd, WM_XBUTTONUP, MAKEWPARAM(0, XBUTTON1), 0);
+    Check(tab->current_path == L"pulse:settings/appearance" && tab->back_stack.size() == 1 &&
+          tab->forward_stack.size() == 1, L"mouse history: side button back navigates exactly once");
+    SendMessageW(hwnd, WM_XBUTTONUP, MAKEWPARAM(0, XBUTTON2), 0);
+    Check(tab->current_path == L"pulse:settings/general" && tab->forward_stack.empty(),
+          L"mouse history: side button forward restores location");
+    SendMessageW(hwnd, WM_XBUTTONUP, MAKEWPARAM(0, XBUTTON2), 0);
+    Check(tab->current_path == L"pulse:settings/general" && tab->back_stack.size() == 2,
+          L"mouse history: empty forward history is a no-op");
+    HWND edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD, 0, 0, 1, 1,
+                                hwnd, nullptr, wc.hInstance, nullptr);
+    Check(edit != nullptr, L"mouse history: child edit created");
+    if (edit) SendMessageW(edit, WM_XBUTTONUP, MAKEWPARAM(0, XBUTTON1), 0);
+    Check(tab->current_path == L"pulse:settings/appearance",
+          L"mouse history: side button over child edit reaches navigation");
+    SendMessageW(hwnd, WM_APPCOMMAND, 0, MAKELPARAM(0, APPCOMMAND_BROWSER_FORWARD));
+    Check(tab->current_path == L"pulse:settings/general",
+          L"mouse history: driver browser command navigates forward");
+    Check(!HandleBrowserNavigation(*state, MAKELPARAM(0, APPCOMMAND_VOLUME_UP)),
+          L"mouse history: unrelated commands remain unhandled");
+    tab->back_stack = {};
+    SendMessageW(hwnd, WM_XBUTTONUP, MAKEWPARAM(0, XBUTTON1), 0);
+    Check(tab->current_path == L"pulse:settings/general",
+          L"mouse history: empty back history is a no-op");
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+    DestroyWindow(hwnd);
+    state->hwnd = nullptr;
+    state->pane = nullptr;
+    UnregisterClassW(wc.lpszClassName, wc.hInstance);
+}
+
+void TestNotificationToast() {
+    HWND window = CreateWindowExW(0, L"STATIC", L"", WS_POPUP,
+        0, 0, 640, 480, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    Check(window != nullptr, L"toast: hidden window created");
+    if (!window) return;
+    ui::Compositor compositor;
+    if (compositor.Init(window)) {
+        compositor.RecreateTextFormats(1.0f);
+        ui::NotificationToast toast;
+        toast.Show(window, L"Index", L"The original index is preserved.");
+        compositor.Dc()->BeginDraw();
+        toast.Draw(compositor, ui::MakeTheme(false, D2D1::ColorF(0x0078D4)), 1.0f, false);
+        Check(SUCCEEDED(compositor.Dc()->EndDraw()), L"toast: Fluent card renders");
+        const auto bounds = toast.Bounds();
+        Check(bounds.left >= 0 && bounds.right <= 640 && bounds.top >= 0 && bounds.bottom <= 480,
+              L"toast: card stays inside window");
+        const auto body = MAKELPARAM(static_cast<int>(bounds.left + 60), static_cast<int>(bounds.top + 20));
+        Check(toast.HandleMessage(window, WM_LBUTTONDOWN, 0, body), L"toast: body blocks underlying click");
+        Check(toast.HandleMessage(window, WM_LBUTTONUP, 0, MAKELPARAM(0, 0)) && GetCapture() != window && toast.IsVisible(),
+              L"toast: releasing outside clears capture without dismissing");
+        const auto close = MAKELPARAM(static_cast<int>(bounds.right - 16), static_cast<int>((bounds.top + bounds.bottom) / 2));
+        toast.HandleMessage(window, WM_LBUTTONDOWN, 0, close);
+        toast.HandleMessage(window, WM_LBUTTONUP, 0, close);
+        Check(!toast.IsVisible(), L"toast: close dismisses persistent message");
+        compositor.Shutdown();
+    } else {
+        Check(false, L"toast: graphics initialized");
+    }
+    DestroyWindow(window);
+}
+
 void TestNavigationReturnSelection() {
     Check(NavigationReturnChildName(
               L"C:\\projects\\pulse", L"C:\\projects") == L"pulse",
@@ -318,9 +425,156 @@ void TestNavigationReturnSelection() {
           L"navigation: deep UNC return selects the immediate child");
 }
 
+void TestAddressSearch() {
+    bool layouts_ok = true;
+    for (const float scale : {1.0f, 1.25f, 1.5f, 2.0f, 2.5f}) {
+        for (const float width : {104.0f, 180.0f, 259.0f, 260.0f, 419.0f, 420.0f, 800.0f}) {
+            const auto field = D2D1::RectF(10.0f * scale, 10.0f * scale,
+                                          (10.0f + width) * scale, 46.0f * scale);
+            const auto layout = ui::LayoutAddressSearch(field, scale);
+            layouts_ok &= layout.scope.right <= layout.input.left &&
+                layout.input.right <= layout.clear.left && layout.clear.right <= layout.close.left &&
+                layout.close.right <= field.right && layout.input.right - layout.input.left >= 39.9f * scale;
+        }
+    }
+    Check(layouts_ok, L"address search: controls and input fit narrow and high-DPI layouts");
+    auto state = std::make_unique<AppState>();
+    Check(!state->addressSearchCurrent, L"address search: default scope is entire index");
+    state->addressSearching = true;
+    ULONGLONG now = 1000;
+    bool bounded = true;
+    for (int i = 0; i < 40; ++i) {
+        const float before = state->addressSearchAnimation;
+        TickAddressSearch(*state, now += 16);
+        bounded &= state->addressSearchAnimation >= before && state->addressSearchAnimation <= 1.0f;
+    }
+    Check(bounded && state->addressSearchAnimation == 1.0f,
+          L"address search: entrance animation settles without overshoot");
+    state->addressSearching = false;
+    state->addressScopeAnimation = 1.0f;
+    for (int i = 0; i < 40; ++i) TickAddressSearch(*state, now += 16);
+    Check(state->addressSearchAnimation == 0.0f && state->addressScopeAnimation == 0.0f &&
+          !TickAddressSearch(*state, now + 16), L"address search: exit and scope feedback stop repainting");
+    AdvancedSearchSpec spec;
+    spec.name = L"report 2026";
+    spec.current_folder = L"C:\\Users\\W\\Desktop";
+    Check(SplitSearchQueryText(CompileSearchQuery(spec)).path_prefix.empty(),
+          L"address search: entire index omits current directory constraint");
+    spec.location = LocationScope::CurrentFolder;
+    Check(!SplitSearchQueryText(CompileSearchQuery(spec)).path_prefix.empty(),
+          L"address search: current folder adds recursive directory scope");
+}
+
+void TestContinuousSearch() {
+    auto state = std::make_unique<AppState>();
+    Pane first;
+    Pane second;
+    state->pane = &first;
+    first.view.current_path = MakeSearchPath(L"contract path:C:\\Documents");
+    ui::WindowViewModel vm;
+    FillAddressSearchView(*state, vm);
+    Check(vm.address_searching && vm.address_search_text == L"contract" && vm.address_search_current,
+          L"continuous search: results restore query and current-folder scope");
+    state->hwndAddressEdit = CreateWindowExW(0, L"EDIT", L"invoice", WS_POPUP,
+                                            0, 0, 100, 30, nullptr, nullptr, nullptr, nullptr);
+    Check(state->hwndAddressEdit != nullptr, L"continuous search: create hidden native edit fixture");
+    if (state->hwndAddressEdit) {
+        state->addressSearching = true;
+        state->addressSearchRoot = L"C:\\Documents";
+        state->addressSearchCurrent = false;
+        SaveAddressSearchDraft(*state);
+        state->addressSearching = false;
+        vm = {};
+        FillAddressSearchView(*state, vm);
+        Check(vm.address_search_text == L"invoice" && !vm.address_search_current,
+              L"continuous search: unsubmitted draft and changed scope survive blur");
+        state->pane = &second;
+        second.view.current_path = MakeSearchPath(L"other");
+        vm = {};
+        FillAddressSearchView(*state, vm);
+        Check(vm.address_search_text == L"other" && !vm.address_search_current,
+              L"continuous search: another tab has independent input");
+        state->pane = &first;
+        SetWindowTextW(state->hwndAddressEdit, L"");
+        state->addressSearching = true;
+        SaveAddressSearchDraft(*state);
+        state->addressSearching = false;
+        vm = {};
+        FillAddressSearchView(*state, vm);
+        Check(vm.address_search_text.empty() && !vm.address_search_has_text &&
+              first.view.current_path == MakeSearchPath(L"contract path:C:\\Documents"),
+              L"continuous search: clearing input preserves existing query results");
+        DestroyWindow(state->hwndAddressEdit);
+        state->hwndAddressEdit = nullptr;
+    }
+    auto entries = std::make_shared<std::vector<fs::DirEntry>>(1);
+    (*entries)[0].name = L"old.txt";
+    first.view.SetSnapshot(entries);
+    first.view.loading = true;
+    first.view.search_retaining_results = true;
+    first.view.SelectAll();
+    Check(first.view.snapshot->size() == 1 && first.view.CountBound() == 0 &&
+          first.view.SelectedIndices().empty(), L"continuous search: old results stay visible but inactive");
+    first.view.pending_search_offset = 0;
+    index::SearchResult result;
+    ApplySearchHits(first.view, L"empty", std::move(result));
+    Check(!first.view.loading && !first.view.search_retaining_results && first.view.snapshot->empty(),
+          L"continuous search: empty response replaces old results and completes loading");
+    state->pane = nullptr;
+}
+
+void TestCtrlDragSelection() {
+    auto state = std::make_unique<AppState>();
+    Pane pane;
+    state->pane = &pane;
+    auto& tab = pane.view;
+    tab.SetSnapshot(std::make_shared<std::vector<fs::DirEntry>>(3));
+    tab.SelectOnly(0);
+    HandleListRowClick(*state, 0, true, false);
+    Check(tab.IsSelected(0) && tab.SelectedCount() == 1,
+          L"Ctrl-drag: selected file remains available on press");
+    FinishListRowClick(*state);
+    Check(!tab.IsSelected(0), L"Ctrl-click: release still deselects selected file");
+    tab.SelectOnly(0);
+    tab.ToggleSelect(1);
+    HandleListRowClick(*state, 0, true, false);
+    Check(tab.IsSelected(0) && tab.IsSelected(1) && tab.SelectedCount() == 2,
+          L"Ctrl-drag: preserves all selected files and folders");
+    // Starting a drag clears the deferred click, as does capture cancellation.
+    state->clickCollapseIndex = -1;
+    FinishListRowClick(*state);
+    Check(tab.SelectedCount() == 2, L"Ctrl-drag: drag completion does not deselect source");
+    HandleListRowClick(*state, 2, true, false);
+    FinishListRowClick(*state);
+    Check(tab.IsSelected(2) && tab.SelectedCount() == 3,
+          L"Ctrl-click: unselected item is added exactly once");
+    HandleListRowClick(*state, 1, false, false);
+    Check(tab.SelectedCount() == 3, L"drag: plain press preserves multi-selection");
+    FinishListRowClick(*state);
+    Check(tab.IsSelected(1) && tab.SelectedCount() == 1,
+          L"click: plain release collapses multi-selection");
+    state->pane = nullptr;
+}
+
 void TestMenuModel() {
-    ui::ComPtr<IDWriteFactory3> dwrite;
-    DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory3),
+    const auto breadcrumb = BuildBreadcrumbMenu(true);
+    const std::vector<int> breadcrumb_commands{CmdOpenInNewTab, CmdOpen, CmdCopyPath,
+                                              CmdCopy, CmdOpenTerminal, CmdProperties};
+    bool breadcrumb_ok = breadcrumb.size() == breadcrumb_commands.size();
+    for (size_t i = 0; i < breadcrumb.size() && i < breadcrumb_commands.size(); ++i) {
+        breadcrumb_ok &= breadcrumb[i].command == breadcrumb_commands[i] &&
+                         breadcrumb[i].enabled && !breadcrumb[i].text.empty() &&
+                         breadcrumb[i].shortcut.empty();
+    }
+    Check(breadcrumb_ok, L"breadcrumb: explicit folder actions with new tab first");
+    const auto virtual_breadcrumb = BuildBreadcrumbMenu(false);
+    Check(virtual_breadcrumb.size() == 3 &&
+          virtual_breadcrumb[0].command == CmdOpenInNewTab &&
+          virtual_breadcrumb[1].command == CmdOpen &&
+          virtual_breadcrumb[2].command == CmdCopyPath,
+          L"breadcrumb: virtual locations omit filesystem actions");
+    ui::ComPtr<IDWriteFactory2> dwrite;
+    DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory2),
                         reinterpret_cast<IUnknown**>(&dwrite));
 
     // Item menu: 打开 + icon strip (cut/copy/delete/rename) + verbs + undo.
@@ -412,6 +666,35 @@ void TestMenuModel() {
     wide.Layout(dwrite.get(), 1.0f);
     Check(wide.WidthPx() <= 320, L"menu: long undo label does not stretch the flyout");
 
+    std::vector<index::Hit> path_hits{
+        {L"C:\\Users\\W\\.codex", L".codex", true},
+        {L"C:\\Users\\W\\plugins\\.codex-plugin", L".codex-plugin", true}
+    };
+    auto path_items = BuildCommandPalette(L".codex", {}, path_hits, false, path_hits.size());
+    Check(path_items.size() >= 3 && path_items[0].shortcut_inline &&
+          path_items[1].shortcut_inline && !path_items.back().shortcut_inline,
+          L"menu: search paths use inline captions, result count remains trailing");
+    ui::FluentMenuModel path_model;
+    path_model.SetItems(path_items);
+    path_model.Layout(dwrite.get(), 1.0f, 2600.0f);
+    const float short_column = path_model.InlineLabelWidthPx();
+    Check(short_column > 0.0f && short_column < 160.0f,
+          L"menu: wide search keeps paths near short filenames");
+    path_model.Layout(dwrite.get(), 1.0f, 640.0f);
+    Check(std::abs(path_model.InlineLabelWidthPx() - short_column) < 1.0f,
+          L"menu: window width does not push short-name paths away");
+    path_items[1].text = std::wstring(200, L'W');
+    path_model.SetItems(path_items);
+    path_model.Layout(dwrite.get(), 1.0f, 2600.0f);
+    Check(path_model.InlineLabelWidthPx() <= 240.0f,
+          L"menu: long filename leaves room for path");
+    path_model.Layout(dwrite.get(), 1.0f, 320.0f);
+    Check(path_model.InlineLabelWidthPx() < 100.0f,
+          L"menu: narrow search shares space without overlap");
+    path_model.Layout(dwrite.get(), 2.0f, 5200.0f);
+    Check(std::abs(path_model.InlineLabelWidthPx() - 480.0f) < 1.0f,
+          L"menu: filename column scales at 200 percent DPI");
+
     // Hit-test: first row, separator dead zone, disabled row skipped by nav.
     int row0 = model.HitTestRow(model.RowTopPx(0) + 1.0f);
     Check(row0 == 0, L"menu: hit-test row 0");
@@ -440,6 +723,52 @@ void TestMenuModel() {
     }
     Check(has_select_all && has_invert && has_wildcard,
           L"menu: background has 全选 / 反选 / 通配选择");
+    BackgroundViewOptions options;
+    options.view_mode = ui::ViewMode::LargeIcons;
+    options.sort_column = ui::SortColumn::Size;
+    options.sort_direction = ui::SortDirection::Desc;
+    options.details_panel = true;
+    AppendBackgroundViewCommands(bg, options);
+    Check(bg[0].children.size() == 9 && bg[0].children[1].radio &&
+          bg[0].children.back().checked, L"menu: background reflects view and details pane");
+    const auto& sort = bg[1].children;
+    Check(sort.size() == 6 && sort[3].command == CmdSortSize && sort[3].radio &&
+          !sort[4].radio && sort[5].radio,
+          L"menu: background reflects size descending with separate radio groups");
+    Check(bg[2].command == CmdRefresh && bg[2].shortcut == L"F5" &&
+          bg.back().command == CmdFolderProperties,
+          L"menu: background refresh and explicit folder properties");
+    options.filesystem = false;
+    options.show_path = true;
+    options.sort_column = ui::SortColumn::Path;
+    auto virtual_bg = BuildBackgroundMenu(false, false, L"");
+    AppendBackgroundViewCommands(virtual_bg, options);
+    Check(virtual_bg[1].children.size() == 7 && virtual_bg[1].children[4].radio &&
+          virtual_bg.back().command != CmdFolderProperties,
+          L"menu: search offers path sorting without folder properties");
+    options.indexed_search = true;
+    std::vector<ui::FluentMenuItem> search_menu;
+    AppendBackgroundViewCommands(search_menu, options);
+    Check(search_menu[1].children[0].enabled && !search_menu[1].children[2].enabled &&
+          !search_menu[1].children[4].enabled,
+          L"menu: indexed search disables unsupported type and path sorts");
+    for (float scale : { 1.0f, 1.5f, 2.0f }) {
+        ui::FluentMenuModel sort_model;
+        sort_model.SetItems(sort);
+        sort_model.Layout(dwrite.get(), scale);
+        bool hit_tests_ok = true;
+        for (int i = 0; i < sort_model.Count(); ++i)
+            hit_tests_ok &= sort_model.HitTestRow(sort_model.RowTopPx(i) +
+                sort_model.RowHeightPx() * 0.5f) == i;
+        Check(hit_tests_ok && sort_model.WidthPx() <= static_cast<int>(320 * scale),
+              L"menu: sort flyout layout and hit testing at 100/150/200 percent DPI");
+    }
+    options.can_sort = false;
+    std::vector<ui::FluentMenuItem> curated;
+    AppendBackgroundViewCommands(curated, options);
+    Check(!curated[1].enabled && std::none_of(curated[1].children.begin(),
+          curated[1].children.end(), [](const auto& item) { return item.enabled || item.radio; }),
+          L"menu: curated views disable sorting and do not claim a selected sort");
     auto nw = BuildNewMenu();
     Check(nw.size() == 2 && nw[0].command == CmdNewFolder && nw[1].command == CmdNewTextFile,
           L"menu: 新建▾ dropdown has 文件夹/文本文档");
@@ -545,6 +874,42 @@ void TestShellMenuMerge() {
     Check(deduped.size() == 2 && deduped[0].display == L"打印" &&
           deduped[1].display == L"打开方式…",
           L"shellmenu: static verbs dedupe against built-ins and each other");
+
+    ipc::StaticVerbRegFlags cascade_ok;
+    cascade_ok.has_subcommands = true;
+    Check(ipc::KeepStaticVerb(cascade_ok), L"shellmenu: SubCommands verbs are kept");
+    ipc::StaticVerbRegFlags handler_ok;
+    handler_ok.has_explorer_command = true;
+    Check(ipc::KeepStaticVerb(handler_ok), L"shellmenu: ExplorerCommandHandler verbs are kept");
+    ipc::StaticVerbRegFlags ext_skip;
+    ext_skip.has_command = true;
+    ext_skip.extended = true;
+    Check(!ipc::KeepStaticVerb(ext_skip), L"shellmenu: Extended static verbs stay hidden");
+    ipc::StaticVerbRegFlags empty_skip;
+    Check(!ipc::KeepStaticVerb(empty_skip), L"shellmenu: verbs without a launch path are dropped");
+
+    ipc::CtxFlyoutChild nested;
+    nested.nested = true;
+    nested.text = L"分组";
+    ipc::CtxFlyoutChild leaf;
+    leaf.id = 42;
+    leaf.verb = L"share_phone";
+    leaf.text = L"手机";
+    nested.nested_leaves.push_back(leaf);
+    ipc::CtxFlyoutChild builtin;
+    builtin.verb = L"open";
+    builtin.text = L"打开";
+    std::vector<ipc::CtxFlyoutChild> leaves;
+    ipc::FlattenFlyoutChildren({ nested, builtin }, false, leaves);
+    Check(leaves.size() == 1 && leaves[0].id == 42 && leaves[0].text == L"手机" &&
+          !leaves[0].nested,
+          L"shellmenu: nested flyout children flatten to leaves");
+    Check(ipc::KeepFlyoutParentWithoutLeaves(100, 50, 200),
+          L"shellmenu: parent with a live id is kept when the flyout is empty");
+    Check(!ipc::KeepFlyoutParentWithoutLeaves(0, 50, 200),
+          L"shellmenu: parent id 0 is not kept as a clickable row");
+    Check(!ipc::KeepFlyoutParentWithoutLeaves(10, 50, 200),
+          L"shellmenu: parent ids outside the handler range are dropped");
 }
 
 void TestContextMenuPrefs() {
@@ -566,6 +931,10 @@ void TestContextMenuPrefs() {
           L"prefs: type verb stays software");
     Check(ClassifyExplorerItem(L"", L"Bandizip", true) == CtxMenuCategory::Software,
           L"prefs: vendor flyout stays software");
+    Check(ClassifyExplorerItem(L"", L"泛泰快传", true) == CtxMenuCategory::Share,
+          L"prefs: 泛泰快传 flyout is share");
+    Check(ClassifyExplorerItem(L"", L"泛泰快传", false) == CtxMenuCategory::Share,
+          L"prefs: 泛泰快传 row is share");
     Check(ipc::IsCompressVendorFlyout(L"Bandizip") &&
           ipc::IsCompressTopLevel(L"压缩为「photo.zip」"),
           L"prefs: compress flyout vs top-level zip row");
@@ -707,7 +1076,7 @@ void TestContextMenuPrefs() {
     loaded.persist = false;
     Check(loaded.FromJson(json) && loaded.item_enabled[ipc::CatalogKey(L"发送到", true)] &&
           loaded.seen.size() == 1 && loaded.seen[0].from_com &&
-          loaded.explorer_cap == 12 && !loaded.share && loaded.print,
+          loaded.explorer_cap == 32 && !loaded.share && loaded.print,
           L"prefs: JSON round-trip keeps override, seen, and defaults");
 
     Check(prefs.RecordComTiming(L".dwg", 800) && prefs.ComDeferred(L".dwg") == false, L"prefs: one slow COM hit does not defer");
@@ -729,12 +1098,15 @@ void TestContextMenuPrefs() {
     loaded.ResetToDefaults();
     Check(loaded.seen.empty() && loaded.item_enabled.empty() && !loaded.share,
           L"prefs: restore defaults clears seen and overrides");
+    Check(ContextMenuPrefs{}.explorer_cap == 32 && loaded.explorer_cap == 32,
+          L"prefs: factory Explorer cap is 32");
 
     std::vector<ShellMenuEntry> many;
     for (int i = 0; i < 20; ++i)
         many.push_back({ CmdShellComBase + 200 + i, L"动词 " + std::to_wstring(i), true, {}, L"", true });
+    prefs.explorer_cap = 12;
     auto capped = ApplyExplorerPrefs(prefs, many);
-    Check(capped.size() == 12, L"prefs: Explorer section capped at 12");
+    Check(capped.size() == 12, L"prefs: Explorer section respects explorer_cap");
 }
 
 void TestAppPrefsAndSettingsPath() {
@@ -771,13 +1143,18 @@ void TestAppPrefsAndSettingsPath() {
     AppPrefs loaded;
     loaded.persist = false;
     Check(loaded.FromJson(json) && !loaded.launch_on_startup && loaded.keep_running_on_close &&
-          loaded.open_folders_in_pulse && loaded.language == L"system",
+          loaded.open_folders_in_pulse && loaded.language == L"system" &&
+          !loaded.show_status_performance,
           L"appprefs: json round-trip");
     Check(json.find(L"\"launch_on_startup\":false") != std::wstring::npos &&
           json.find(L"\"keep_running_on_close\":true") != std::wstring::npos &&
           json.find(L"\"open_folders_in_pulse\":true") != std::wstring::npos &&
-          json.find(L"\"language\":\"system\"") != std::wstring::npos,
+          json.find(L"\"language\":\"system\"") != std::wstring::npos &&
+          json.find(L"\"show_status_performance\":false") != std::wstring::npos,
           L"appprefs: json contains both flags");
+    Check(prefs.FromJson(L"{\"show_status_performance\":true}") &&
+          prefs.show_status_performance,
+          L"appprefs: parse show_status_performance");
     Check(FolderOpenCommandLine(L"C:\\Pulse\\pulse.exe") ==
               L"\"C:\\Pulse\\pulse.exe\" \"%1\"",
           L"appprefs: folder-open command quotes exe and %1");
@@ -1344,6 +1721,70 @@ void TestMultiSelect() {
     Check(tab.SelectedCount() == 0, L"select: invert of all_selected clears");
 }
 
+void TestHiddenFiles() {
+    AppPrefs prefs;
+    Check(prefs.FromJson(L"{}") && !prefs.show_hidden_files,
+          L"hidden: old preferences default to hidden off");
+    prefs.show_hidden_files = true;
+    AppPrefs loaded;
+    Check(loaded.FromJson(prefs.ToJson()) && loaded.show_hidden_files,
+          L"hidden: preference JSON roundtrip");
+    Pane pane;
+    auto& tab = pane.view;
+    tab.current_path = L"\\\\server\\share";
+    auto entries = std::make_shared<std::vector<fs::DirEntry>>(4);
+    (*entries)[0].name = L"visible.txt";
+    (*entries)[1].name = L"desktop.ini";
+    (*entries)[1].attrs = FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM;
+    (*entries)[2].name = L".ordinary";
+    (*entries)[3].name = L"hidden-folder";
+    (*entries)[3].attrs = FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_DIRECTORY;
+    (*entries)[3].is_dir = true;
+    tab.SetSnapshot(entries);
+    ui::PaneViewModel vm;
+    FillPaneViewModel(vm, pane);
+    Check(vm.EntryCount() == 2 && vm.SourceIndex(1) == 2 && vm.ViewIndex(1) == -1,
+          L"hidden: cached UNC attributes filter files and folders, not dot names");
+    const auto cached = vm.filter_map;
+    FillPaneViewModel(vm, pane);
+    Check(vm.filter_map == cached && tab.snapshot == entries,
+          L"hidden: visibility reuses map and preserves the complete snapshot");
+    tab.SelectRange(0, 2);
+    Check(tab.SelectedIndices() == std::vector<int>({0, 2}),
+          L"hidden: range selection cannot include invisible files");
+    tab.SelectAll();
+    Check(tab.SelectedIndices() == std::vector<int>({0, 2}),
+          L"hidden: select all excludes invisible files");
+    tab.SetShowHiddenFiles(true);
+    FillPaneViewModel(vm, pane);
+    Check(vm.EntryCount() == 4 && tab.SelectedCount() == 0,
+          L"hidden: toggle restores files without enumeration or stale selection");
+    tab.SelectOnly(1);
+    tab.SetShowHiddenFiles(false);
+    FillPaneViewModel(vm, pane);
+    Check(vm.EntryCount() == 2 && tab.SelectedCount() == 0 && tab.file_count == 2,
+          L"hidden: toggle back resets selection and visible counts");
+    auto changed = std::make_shared<std::vector<fs::DirEntry>>(*entries);
+    tab.SelectOnly(0);
+    (*changed)[0].attrs = FILE_ATTRIBUTE_HIDDEN;
+    tab.SetSnapshot(changed);
+    FillPaneViewModel(vm, pane);
+    Check(vm.EntryCount() == 1 && tab.SelectedCount() == 0,
+          L"hidden: watcher attributes invalidate visibility and stale selection");
+    tab.SetSnapshot(entries);
+    tab.InvertIndices({0, 1, 2, 3});
+    Check(tab.SelectedIndices() == std::vector<int>({0, 2}),
+          L"hidden: inverse selection excludes hidden entries");
+    tab.filter_text = L"*.ini";
+    FillPaneViewModel(vm, pane);
+    Check(vm.EntryCount() == 0, L"hidden: name filtering composes with hidden filtering");
+    tab.filter_text.clear();
+    tab.current_path = L"pulse:recycle";
+    tab.SetSnapshot(entries);
+    FillPaneViewModel(vm, pane);
+    Check(vm.EntryCount() == 4, L"hidden: recycle payloads remain accessible");
+}
+
 void TestSplitLayout() {
     Pane a, b, c, d;
     std::vector<Pane*> two{ &a, &b };
@@ -1419,6 +1860,15 @@ void TestSplitLayout() {
     }
     Check(recent_ok, L"menu: palette shows Windows-style path title");
 
+    const auto qDot = ParseOmnibarQuery(L".codex");
+    Check(qDot.kind == OmnibarQuery::Kind::Mixed && qDot.needle == L".codex" &&
+          !LooksLikeFilesystemPath(qDot.needle), L"omnibar: dot folder uses filename search");
+    const auto qDotCommand = ParseOmnibarQuery(L">.codex");
+    Check(qDotCommand.kind == OmnibarQuery::Kind::Command,
+          L"omnibar: explicit command prefix remains supported");
+    const auto qDotProject = ParseOmnibarQuery(L".codex", true);
+    Check(qDotProject.kind == OmnibarQuery::Kind::Project,
+          L"omnibar: project scope preserved");
     const auto qCmd = ParseOmnibarQuery(L">新建");
     Check(qCmd.kind == OmnibarQuery::Kind::Command && qCmd.needle == L"新建" && qCmd.prefix == L'>',
           L"omnibar: > prefix is command");
@@ -1508,6 +1958,102 @@ void TestSplitLayout() {
         ui::PaneViewModel::FilterMap{ 2, 5, 9 });
     Check(pvm.EntryCount() == 3 && pvm.SourceIndex(1) == 5 && pvm.ViewIndex(9) == 2,
           L"filter: view/source index mapping");
+}
+
+void TestQuickAccess() {
+    PlacesCatalog cat;
+    cat.persist = false;
+    Check(cat.SetQuickAccessPinned({L"C:\\", L"C:\\Projects", L"c:/projects/",
+                                   L"\\\\offline-host\\share\\folder", L"pulse:recent"}, true) &&
+          cat.quick_access_paths.size() == 3, L"quick access: roots, UNC and normalized deduplication");
+    Check(!cat.SetQuickAccessPinned({L"C:\\Projects"}, true), L"quick access: pin is idempotent");
+    cat.ToggleStarred(L"C:\\Projects", PlaceItemKind::Folder);
+    cat.RemapPaths(L"C:\\Projects", L"C:\\Renamed");
+    Check(cat.IsQuickAccessPinned(L"C:\\Renamed") && !cat.IsQuickAccessPinned(L"C:\\Projects"),
+          L"quick access: rename remaps pinned path");
+    cat.SetQuickAccessPinned({L"C:\\Renamed"}, false);
+    Check(cat.IsStarred(L"C:\\Renamed"), L"quick access: unpin preserves independent favorite");
+    cat.SetQuickAccessPinned({L"C:\\tree\\child", L"C:\\other\\child"}, true);
+    cat.RemapPaths(L"C:\\tree", L"C:\\other");
+    Check(cat.quick_access_paths.size() == 3, L"quick access: descendant remap deduplicates destination");
+
+    Tab tab;
+    tab.current_path = L"C:\\";
+    auto entries = std::make_shared<std::vector<fs::DirEntry>>();
+    fs::DirEntry folder; folder.name = L"folder"; folder.is_dir = true;
+    fs::DirEntry file; file.name = L"file.txt";
+    entries->push_back(folder); entries->push_back(folder); entries->push_back(file);
+    tab.snapshot = entries;
+    tab.SelectOnly(0);
+    Check(QuickAccessTargets(&tab, false).size() == 1, L"quick access: selected directory");
+    tab.selected.insert(1);
+    Check(QuickAccessTargets(&tab, false).size() == 2, L"quick access: multiple directories");
+    tab.selected.insert(2);
+    Check(QuickAccessTargets(&tab, false).empty(), L"quick access: mixed selection rejected");
+    Check(QuickAccessTargets(&tab, true) == std::vector<std::wstring>{L"C:\\"},
+          L"quick access: background targets current path, ignores selection");
+    tab.current_path = MakeRecyclePath();
+    Check(QuickAccessTargets(&tab, false).empty() && QuickAccessTargets(&tab, true).empty(),
+          L"quick access: recycle location rejected");
+
+    {
+        AppState state;
+        state.places.persist = false;
+        state.ctxMenuPrefs.persist = false;
+        std::vector<ui::FluentMenuItem> menu;
+        AppendQuickAccessCommand(state, menu, {L"C:\\one", L"C:\\two"});
+        Check(menu.size() == 1 && menu[0].command == CmdPinQuickAccess &&
+              menu[0].text == L"固定到快速访问", L"quick access: menu label and pin command");
+        state.places.SetQuickAccessPinned({L"C:\\one"}, true);
+        menu.clear();
+        AppendQuickAccessCommand(state, menu, {L"C:\\one", L"C:\\two"});
+        Check(menu.size() == 1 && menu[0].command == CmdPinQuickAccess,
+              L"quick access: mixed pin state offers idempotent pin");
+        state.places.SetQuickAccessPinned({L"C:\\two"}, true);
+        menu.clear();
+        AppendQuickAccessCommand(state, menu, {L"C:\\one", L"C:\\two"});
+        Check(menu.size() == 1 && menu[0].command == CmdUnpinQuickAccess &&
+              menu[0].text == L"从快速访问取消固定", L"quick access: all pinned offers unpin");
+        state.ctxMenuPrefs.SetItemEnabled(L"pulse:quick-access", false);
+        menu.clear();
+        AppendQuickAccessCommand(state, menu, {L"C:\\one"});
+        Check(menu.empty(), L"quick access: menu preference is respected");
+        Pane pane; pane.NewTab(L"C:\\");
+        const auto sidebar = BuildSidebarModel();
+        const auto vm = BuildWindowViewModel(pane, sidebar, true, false, false, &state.places, 0);
+        const auto group = std::find_if(vm.sidebar.begin(), vm.sidebar.end(), [](const auto& value) {
+            return !value.items.empty() && std::any_of(value.items.begin(), value.items.end(),
+                [](const auto& item) { return item.path == fs::NormalizePath(L"C:\\two"); });
+        });
+        Check(group != vm.sidebar.end() && group->items.back().indent == 0 &&
+              group->items.back().path == fs::NormalizePath(L"C:\\two"),
+              L"quick access: independent sidebar entry appended at top level");
+    }
+
+    wchar_t previous[32768]{};
+    GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", previous, ARRAYSIZE(previous));
+    const auto test_dir = kSandbox + L"\\quick_access_profile";
+    CreateDirectoryW(test_dir.c_str(), nullptr);
+    SetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", test_dir.c_str());
+    {
+        cat.persist = true;
+        Check(cat.Save(), L"quick access: save profile");
+        PlacesCatalog loaded;
+        Check(loaded.Load() && loaded.quick_access_paths == cat.quick_access_paths,
+              L"quick access: disk roundtrip retains order and offline paths");
+        WriteUtf8FileAtomic(test_dir + L"\\places.json", L"{\"starred_items\":[]}");
+        Check(loaded.Load() && loaded.quick_access_paths.empty(), L"quick access: old profile defaults empty");
+    }
+    SetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", previous[0] ? previous : nullptr);
+    cat.persist = false;
+    Check(compat::WindowDpi(GetDesktopWindow()) > 0 &&
+          compat::SystemMetricsForDpi(SM_CXSIZEFRAME, 144) > 0, L"compat: current DPI path");
+    wchar_t previous_compat[16]{};
+    GetEnvironmentVariableW(L"PULSE_COMPAT_81", previous_compat, ARRAYSIZE(previous_compat));
+    SetEnvironmentVariableW(L"PULSE_COMPAT_81", L"1");
+    Check(!compat::ModernWindows() && compat::WindowDpi(GetDesktopWindow()) > 0 &&
+          compat::SystemMetricsForDpi(SM_CXSIZEFRAME, 144) > 0, L"compat: legacy DPI path");
+    SetEnvironmentVariableW(L"PULSE_COMPAT_81", previous_compat[0] ? previous_compat : nullptr);
 }
 
 void TestPlacesAndIndex() {
@@ -1760,6 +2306,22 @@ void TestPlacesAndIndex() {
     Check(bounded_store.EntryCount() == 1 && !bounded_store.Peek(L"C:\\cache-a") &&
           bounded_store.Peek(L"C:\\cache-b"),
           L"snapshot: byte budget evicts least-recently-used directory");
+
+    fs::SnapshotStore recent_store(2, 0);
+    recent_store.Update(L"C:\\cache-a", 1, cache_sample);
+    recent_store.Update(L"C:\\cache-b", 2, cache_sample);
+    uint64_t recent_generation = 0;
+    Check(recent_store.GetOrStart(L"C:\\cache-a", recent_generation) == cache_sample &&
+          recent_generation == 1, L"snapshot: cache hit retains generation");
+    recent_store.Update(L"C:\\cache-c", 3, cache_sample);
+    Check(recent_store.Peek(L"C:\\cache-a") && !recent_store.Peek(L"C:\\cache-b") &&
+          recent_store.ResidentBytes() == 2 * one_snapshot_bytes,
+          L"snapshot: cache hit protects directory from capacity eviction");
+    recent_store.Put(L"C:\\cache-a", cache_sample);
+    recent_store.Update(L"C:\\cache-d", 4, cache_sample);
+    Check(recent_store.Peek(L"C:\\cache-a") && !recent_store.Peek(L"C:\\cache-c") &&
+          recent_store.ResidentBytes() == 2 * one_snapshot_bytes,
+          L"snapshot: put refreshes recency without inflating memory accounting");
 
     Check(fs::IsUncPath(L"\\\\server\\share") && !fs::IsUncPath(L"C:\\Users"),
           L"net: UNC detection");
@@ -2036,6 +2598,26 @@ void TestOpsThroughShell() {
               L"ops: drop-execute same-volume move lands");
     }
 
+    {
+        const std::wstring target = dir + L"\\ctrl-copy";
+        const std::wstring folder = dir + L"\\dst";
+        const std::wstring file = folder + L"\\新建文本文档.txt";
+        CreateDirectoryW(target.c_str(), nullptr);
+        const DWORD effect = ui::ComputeDropEffect(MK_CONTROL, file, target,
+                                                   DROPEFFECT_COPY | DROPEFFECT_MOVE);
+        ops::OpRequest request;
+        request.type = effect == DROPEFFECT_COPY ? ops::OpType::Copy : ops::OpType::Move;
+        request.sources = {file, folder};
+        request.dest_dir = target;
+        RunOp(std::move(request));
+        Check(Exists(file) && Exists(folder) &&
+              Exists(target + L"\\新建文本文档.txt") &&
+              Exists(target + L"\\dst\\新建文本文档.txt"),
+              L"Ctrl-drop: copies files and folders while preserving sources");
+        Check(ui::ComputeDropEffect(0, file, target, DROPEFFECT_COPY | DROPEFFECT_MOVE)
+              == DROPEFFECT_MOVE, L"Ctrl-drop: releasing Ctrl restores same-volume move");
+    }
+
     // Explorer context-menu session end-to-end: REQ_CTX_QUERY through the pipe,
     // pulse_shell builds the real IContextMenu on its session STA thread, the
     // filtered/flattened items come back via RSP_CTX_ITEMS. No invoke here
@@ -2081,6 +2663,15 @@ void TestOpsThroughShell() {
 }
 
 void TestViewLayouts() {
+    for (float scale : {1.0f, 1.5f, 2.0f}) {
+        ui::ViewLayout gutter(ui::ViewMode::Details, D2D1::RectF(0, 0, 600 * scale, 300 * scale),
+                              20, 0, 0, scale);
+        Check(gutter.HitTest(4 * scale, 10 * scale) == -1 &&
+              gutter.HitTest(582 * scale, 10 * scale) == -1 &&
+              gutter.HitTest(24 * scale, 10 * scale) == 0 &&
+              gutter.ItemRect(0).left == 8 * scale,
+              L"layout: details side gutters are empty hit targets at each DPI");
+    }
     const D2D1_RECT_F viewport = D2D1::RectF(10.0f, 20.0f, 1010.0f, 720.0f);
     for (int i = 0; i < 8; ++i) {
         const ui::ViewMode mode = ui::ViewModeFromIndex(i);
@@ -2580,6 +3171,8 @@ void TestColorPickerModel() {
 }
 
 int RunSelfTest1B2() {
+    // These model assertions use the Chinese resource strings explicitly.
+    l10n::Initialize(GetModuleHandleW(nullptr), L"zh-CN");
     if (AttachConsole(ATTACH_PARENT_PROCESS)) {
         FILE* f = nullptr;
         freopen_s(&f, "CONOUT$", "w", stdout);
@@ -2594,11 +3187,16 @@ int RunSelfTest1B2() {
     TestThisPcEnumeration();
     TestLoadingPresentation();
     TestNavigationReturnSelection();
+    TestMouseHistoryNavigation();
+    TestNotificationToast();
     TestMenuModel();
     TestShellMenuMerge();
     TestContextMenuPrefs();
     TestAppPrefsAndSettingsPath();
     TestDragDropPure();
+    TestAddressSearch();
+    TestContinuousSearch();
+    TestCtrlDragSelection();
     TestDirWatch();
     TestNavigateAlwaysEnumerates();
     TestSnapshotPatch();
@@ -2609,6 +3207,8 @@ int RunSelfTest1B2() {
     TestMultiSelect();
     TestSplitLayout();
     TestViewLayouts();
+    TestHiddenFiles();
+    TestQuickAccess();
     TestPlacesAndIndex();
     TestRecycleAndBatchRename();
     TestLinkResolve();

@@ -1,4 +1,5 @@
 #include "lumatext_renderer.h"
+#include "optional_lumatext.h"
 #include "typography.h"
 
 #include <windows.h>
@@ -1079,7 +1080,7 @@ LRESULT LumaTextRenderer::CallEditDefaultMouse(HWND hwnd, UINT msg, WPARAM wPara
 
 bool LumaTextRenderer::Init(IDWriteFactory* dwrite, ID2D1RenderTarget* target) {
     Shutdown();
-    if (!EnvironmentEnabled() || !dwrite || !target) return false;
+    if (!EnvironmentEnabled() || !dwrite || !target || !LoadOptionalLumaText()) return false;
     return impl_->Init(dwrite, target);
 }
 
