@@ -7,7 +7,8 @@ if not exist "%PULSE_VC_ROOT%\bin\Hostx64\x64\cl.exe" (
     echo Set PULSE_VC_ROOT to a VS 2022 v143 toolset, or run tools\prepare_win81_toolchain.py.
     exit /b 1
 )
-call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat" >nul
+call "%~dp0scripts\vcvars.bat"
+if errorlevel 1 exit /b 1
 set "PATH=%PULSE_VC_ROOT%\bin\Hostx64\x64;%PATH%"
 set "INCLUDE=%PULSE_VC_ROOT%\include;%WindowsSdkDir%Include\%WindowsSDKVersion%ucrt;%WindowsSdkDir%Include\%WindowsSDKVersion%shared;%WindowsSdkDir%Include\%WindowsSDKVersion%um;%WindowsSdkDir%Include\%WindowsSDKVersion%winrt"
 set "LIB=%PULSE_VC_ROOT%\lib\x64;%WindowsSdkDir%Lib\%WindowsSDKVersion%ucrt\x64;%WindowsSdkDir%Lib\%WindowsSDKVersion%um\x64"

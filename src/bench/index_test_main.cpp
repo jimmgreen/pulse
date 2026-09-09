@@ -141,8 +141,8 @@ int wmain(int argc, wchar_t** argv) {
     Check(NormalizeNetworkRoot(L"\\\\?\\UNC\\server\\share\\folder") ==
               L"\\\\server\\share\\folder",
           L"network long UNC normalization");
-    Check(NormalizeNetworkRoot(L"\\\\192.168.0.254\\工程项目盘\\") ==
-          L"\\\\192.168.0.254\\工程项目盘",
+    Check(NormalizeNetworkRoot(L"\\\\192.0.2.10\\示例共享盘\\") ==
+          L"\\\\192.0.2.10\\示例共享盘",
           L"network Chinese UNC root normalization");
     Check(NormalizeNetworkRoot(L"C:\\local").empty(),
           L"network root rejects local path");
@@ -162,7 +162,7 @@ int wmain(int argc, wchar_t** argv) {
         const std::wstring config_path = std::wstring(temp_dir) +
             L"pulse-network-index-utf8-test.json";
         const std::vector<std::wstring> expected{
-            L"\\\\192.168.0.254\\工程项目盘",
+            L"\\\\192.0.2.10\\示例共享盘",
             L"\\\\server\\share\\设计资料"
         };
         std::wstring config_error;
@@ -181,7 +181,7 @@ int wmain(int argc, wchar_t** argv) {
                 DWORD read = 0;
                 if (ReadFile(config, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr)) {
                     const std::string raw(bytes.data(), bytes.data() + read);
-                    contains_utf8 = raw.find("\xE5\xB7\xA5\xE7\xA8\x8B\xE9\xA1\xB9\xE7\x9B\xAE\xE7\x9B\x98") !=
+                    contains_utf8 = raw.find("\xE7\xA4\xBA\xE4\xBE\x8B\xE5\x85\xB1\xE4\xBA\xAB\xE7\x9B\x98") !=
                                     std::string::npos;
                 }
             }
@@ -235,14 +235,14 @@ int wmain(int argc, wchar_t** argv) {
         Check(phrase_q.content.mode == ContentMatchMode::Phrase &&
                   phrase_q.content.needles.size() == 1,
               L"query: quoted content is a phrase");
-        const auto path_q = ParseQuery(L"content:foo path:C:\\Users\\SS");
+        const auto path_q = ParseQuery(L"content:foo path:C:\\Users\\TestUser");
         Check(path_q.path_prefix.size() >= 3 && QueryHasContent(path_q) &&
-                  FilenameQueryText(L"content:foo path:C:\\Users\\SS").find(L"path:") ==
+                  FilenameQueryText(L"content:foo path:C:\\Users\\TestUser").find(L"path:") ==
                       std::wstring::npos,
               L"query: absolute path: becomes path_prefix");
-        const auto long_path_q = ParseQuery(L"path:\\\\?\\C:\\Users\\SS\\Desktop");
+        const auto long_path_q = ParseQuery(L"path:\\\\?\\C:\\Users\\TestUser\\Desktop");
         Check(long_path_q.path_prefix.find(L"\\\\?\\") == std::wstring::npos &&
-                  long_path_q.path_prefix.find(L"C:\\Users\\SS\\Desktop") != std::wstring::npos,
+                  long_path_q.path_prefix.find(L"C:\\Users\\TestUser\\Desktop") != std::wstring::npos,
               L"query: \\\\?\\ path prefix is stripped");
         const auto two_path_q = ParseQuery(L"path:C:\\a path:C:\\b");
         bool saw_second_path = false;

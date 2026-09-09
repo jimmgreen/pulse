@@ -1,28 +1,5 @@
-# Signed release flow
+# 发布流程
 
-Update checks are disabled unless both CMake cache values are supplied:
+正式发布使用 GitHub Actions，同时生成 Windows 10 / 11 和 Windows 8.1 两种安装包。版本、标签、签名密钥和更新清单配置见 [自动更新与发布](../docs/automatic-updates.md)。
 
-```powershell
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release `
-  -DPULSE_UPDATE_MANIFEST_URL=https://example.com/pulse/update-manifest.json `
-  -DPULSE_UPDATE_PUBLIC_KEY_HEX=04...
-```
-
-Keep the ECDSA P-256 manifest private key offline and outside the repository.
-The public key printed by `create_update_manifest.ps1` is the value compiled
-into Pulse. A formal release also requires a Windows code-signing certificate
-available to SignTool and an HTTPS timestamp service.
-
-Run the complete release pipeline from an x64 developer prompt:
-
-```powershell
-pwsh scripts/package_release.ps1 `
-  -CodeSigningThumbprint <certificate-sha1> `
-  -TimestampUrl https://timestamp.example.com `
-  -DownloadPage https://example.com/pulse/download `
-  -ManifestPrivateKey D:\offline\pulse-update-private.pem
-```
-
-The pipeline builds and signs the four executables and installer, archives
-PDBs outside the installer, writes `dist/update-manifest.json`, and creates
-`dist/hashes.json`. Never add the manifest private key or PDBs to the installer.
+本地验证使用 `build_release_ci.ps1`。`package_release.ps1` 为可选的 Authenticode 签名流程，需要自行配置代码签名证书；更新清单的 ECDSA 签名与 Windows 代码签名用途不同。

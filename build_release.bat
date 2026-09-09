@@ -1,5 +1,6 @@
 @echo off
-call "C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat"
+call "%~dp0scripts\vcvars.bat"
+if errorlevel 1 exit /b 1
 rem Match CMake/Ninja dependency output encoding, including localized MSVC installs.
 chcp 65001 >nul
 set "VSLANG=1033"

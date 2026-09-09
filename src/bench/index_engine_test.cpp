@@ -12,7 +12,7 @@ namespace pulse::index {
 struct EngineTestAccess {
     static bool Build(Engine& e) {
         e.running_ = true;
-        e.excluded_paths_ = {L"C:\\Users\\W\\excluded"};
+        e.excluded_paths_ = {L"C:\\Users\\TestUser\\excluded"};
         Engine::VolState volume;
         volume.letter = L'C';
         volume.kind = VolumeKind::Removable;
@@ -29,7 +29,7 @@ struct EngineTestAccess {
         // Deliberately put a descendant before its ancestors in FRN order.
         add(1, 30, L"settings.toml", false);
         add(10, 5, L"Users", true);
-        add(20, 10, L"W", true);
+        add(20, 10, L"TestUser", true);
         add(30, 20, L".codex", true);
         add(40, 20, L"excluded", true);
         add(41, 40, L".codex", true);
@@ -56,7 +56,7 @@ struct EngineTestAccess {
     }
 
     static bool Load(Engine& e, const std::wstring& path) {
-        e.excluded_paths_ = {L"C:\\Users\\W\\excluded"};
+        e.excluded_paths_ = {L"C:\\Users\\TestUser\\excluded"};
         std::unique_ptr<Engine::MappedFile> mapped;
         if (!e.MapIndexFile(path, mapped)) return false;
         e.AdoptMappedLocked(std::move(mapped));
@@ -66,7 +66,7 @@ struct EngineTestAccess {
     static bool NeedsRebuild(const Engine& e) { return e.NeedsSearchRebuildLocked(); }
 
     static void RepairOffline(Engine& e) {
-        e.excluded_paths_ = {L"C:\\Users\\W\\excluded"};
+        e.excluded_paths_ = {L"C:\\Users\\TestUser\\excluded"};
         e.PreserveOfflineVolumesLocked({}, IndexConfig{});
         e.map_.reset();
         e.live_ = std::move(e.build_);
@@ -117,14 +117,14 @@ bool Has(Engine& e, const wchar_t* needle, const wchar_t* path) {
     });
 }
 void CheckSearch(Engine& e) {
-    Check(Has(e, L".codex", L"C:\\Users\\W\\.codex"), "dot folder searchable");
-    Check(Has(e, L"settings", L"C:\\Users\\W\\.codex\\settings.toml"), "descendant searchable");
-    Check(Has(e, L".config", L"C:\\Users\\W\\.config"), "other dot folders searchable");
-    Check(!Has(e, L".codex", L"C:\\Users\\W\\excluded\\.codex"), "excluded subtree hidden");
-    Check(Has(e, L".codex", L"C:\\Users\\W\\excluded-neighbor\\.codex"), "exclusion respects path boundary");
-    Check(!Has(e, L".codex", L"C:\\Users\\W\\node_modules\\.codex"), "dependency subtree hidden");
+    Check(Has(e, L".codex", L"C:\\Users\\TestUser\\.codex"), "dot folder searchable");
+    Check(Has(e, L"settings", L"C:\\Users\\TestUser\\.codex\\settings.toml"), "descendant searchable");
+    Check(Has(e, L".config", L"C:\\Users\\TestUser\\.config"), "other dot folders searchable");
+    Check(!Has(e, L".codex", L"C:\\Users\\TestUser\\excluded\\.codex"), "excluded subtree hidden");
+    Check(Has(e, L".codex", L"C:\\Users\\TestUser\\excluded-neighbor\\.codex"), "exclusion respects path boundary");
+    Check(!Has(e, L".codex", L"C:\\Users\\TestUser\\node_modules\\.codex"), "dependency subtree hidden");
     Check(Search(e, L"folder: \".codex\"").total == 2, "exact folder query");
-    Check(!Has(e, L"file: ext:codex", L"C:\\Users\\W\\.codex"), "extension query excludes dot folder");
+    Check(!Has(e, L"file: ext:codex", L"C:\\Users\\TestUser\\.codex"), "extension query excludes dot folder");
     Check(EngineTestAccess::RootHidden(e), "root stays hidden");
     std::atomic<uint32_t> latest{2};
     Query q;
@@ -208,10 +208,10 @@ int wmain() {
         EngineTestAccess::Usn(mapped, 30, 40, L".codex", USN_REASON_RENAME_NEW_NAME);
         Check(Search(mapped, L"settings.toml").total == 0, "moving directory hides existing descendants");
         EngineTestAccess::Usn(mapped, 30, 20, L".codex", USN_REASON_RENAME_NEW_NAME);
-        Check(Has(mapped, L"settings.toml", L"C:\\Users\\W\\.codex\\settings.toml"),
+        Check(Has(mapped, L"settings.toml", L"C:\\Users\\TestUser\\.codex\\settings.toml"),
               "moving directory restores existing descendants");
         EngineTestAccess::Usn(mapped, 100, 20, L".codex-new", USN_REASON_FILE_CREATE);
-        Check(Has(mapped, L".codex-new", L"C:\\Users\\W\\.codex-new"), "USN create searchable");
+        Check(Has(mapped, L".codex-new", L"C:\\Users\\TestUser\\.codex-new"), "USN create searchable");
         EngineTestAccess::Usn(mapped, 100, 40, L".codex-new", USN_REASON_RENAME_NEW_NAME);
         Check(Search(mapped, L".codex-new").total == 0, "USN move into excluded directory");
         EngineTestAccess::Usn(mapped, 100, 20, L".codex-new", USN_REASON_RENAME_NEW_NAME);

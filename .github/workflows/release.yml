@@ -45,6 +45,7 @@ jobs:
           name: diagnostics-${{ matrix.channel }}
           path: |
             bench_data/win81_imports.json
+            bench_data/selftest_1b2_last.log
             build-ci/*.log
           if-no-files-found: ignore
 

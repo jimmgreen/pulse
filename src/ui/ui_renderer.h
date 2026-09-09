@@ -178,7 +178,7 @@ struct BreadcrumbSegment {
     std::wstring path;
 };
 
-// Splits "C:\Users\SS" into [{C:\, C:\}, {Users, C:\Users}, ...].
+// Splits "C:\Users\TestUser" into [{C:\, C:\}, {Users, C:\Users}, ...].
 // UNC roots split into a server segment plus a share segment. Pure; unit-tested.
 std::vector<BreadcrumbSegment> SplitBreadcrumb(const std::wstring& path);
 

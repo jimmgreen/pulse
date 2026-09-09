@@ -62,3 +62,10 @@ CONERR$
 /.release-sdk/
 /.release-sdk.zip
 /bench_data/lumatext-sdk/
+
+# Local fixtures, screenshots and internal verification notes
+/bench_data/*
+/docs/index-migration-review.md
+/docs/list-visibility-upgrade-r6.md
+/docs/windows-8.1-candidate.md
+/tools/_split_tus.py

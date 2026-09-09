@@ -36,6 +36,9 @@ if (-not (Test-Path $sdkArchive) -or (Get-FileHash $sdkArchive -Algorithm SHA256
 }
 if ((Get-FileHash $sdkArchive -Algorithm SHA256).Hash -ne $sdk.sha256) { throw 'LumaText SDK checksum mismatch' }
 Expand-Archive -LiteralPath $sdkArchive -DestinationPath $sdkRoot -Force
+# ZIP timestamps have no timezone; normalize extracted inputs before Ninja runs.
+$extractedAt = [DateTime]::UtcNow
+Get-ChildItem -LiteralPath $sdkRoot -Recurse -File | ForEach-Object { $_.LastWriteTimeUtc = $extractedAt }
 $candidate = if ($Channel -eq 'win81') { 'ON' } else { 'OFF' }
 $manifest = if ($Channel -eq 'win81') { 'update-manifest-win81.json' } else { 'update-manifest.json' }
 $publicKey = (Get-Content (Join-Path $repo 'cmake/update-public-key.txt') -Raw).Trim()
@@ -66,7 +69,10 @@ foreach ($testName in $testNames) {
 }
 $selftest = Start-Process -FilePath (Join-Path $build 'pulse.exe') -ArgumentList '--selftest' -WindowStyle Hidden -PassThru
 if (-not $selftest.WaitForExit(120000)) { $selftest.Kill(); throw 'Selftest timed out' }
-if ($selftest.ExitCode -ne 0) { throw "Selftest failed: $($selftest.ExitCode)" }
+if ($selftest.ExitCode -ne 0) {
+    Get-Content 'bench_data/selftest_1b2_last.log' -ErrorAction SilentlyContinue | Select-String '\[FAIL\]'
+    throw "Selftest failed: $($selftest.ExitCode)"
+}
 # Strip the embedded test suite from the shipped executable after verification.
 (Get-Content -LiteralPath $batch -Raw).Replace('-DPULSE_WITH_SELFTEST=ON', '-DPULSE_WITH_SELFTEST=OFF') |
     Set-Content -LiteralPath $batch -Encoding ascii

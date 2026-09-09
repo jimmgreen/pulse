@@ -52,7 +52,7 @@ int wmain() {
 
     spec = {};
     spec.location = app::LocationScope::CustomFolder;
-    spec.custom_folder = L"C:\\Users\\SS\\Desktop";
+    spec.custom_folder = L"C:\\Users\\TestUser\\Desktop";
     spec.content = L"alpha";
     const std::wstring located = app::CompileSearchQuery(spec);
     const auto split_loc = app::SplitSearchQueryText(located);
@@ -73,22 +73,22 @@ int wmain() {
 
     spec = {};
     spec.location = app::LocationScope::CustomFolder;
-    spec.custom_folder = L"\\\\?\\C:\\Users\\SS\\Desktop";
+    spec.custom_folder = L"\\\\?\\C:\\Users\\TestUser\\Desktop";
     spec.content = L"alpha";
     const std::wstring stripped = app::CompileSearchQuery(spec);
     Check(stripped.find(L"\\\\?\\") == std::wstring::npos, L"query path drops \\\\?\\ prefix");
-    Check(stripped.find(L"path:C:\\Users\\SS\\Desktop") != std::wstring::npos,
+    Check(stripped.find(L"path:C:\\Users\\TestUser\\Desktop") != std::wstring::npos,
           L"query path uses a display Win32 path");
 
     spec = {};
     spec.content = L"\u53d1\u7968";
     spec.location = app::LocationScope::CustomFolder;
-    spec.custom_folder = L"C:\\Users\\SS\\Desktop\\PulseSearchTest";
+    spec.custom_folder = L"C:\\Users\\TestUser\\Desktop\\PulseSearchTest";
     const std::wstring titled = app::CompileSearchQuery(spec);
     Check(app::SearchDisplayNeedle(titled) == L"\u53d1\u7968",
           L"display needle uses content text not path:");
     Check(app::SearchDisplayNeedle(
-              L"path:C:\\Users\\SS\\Desktop\\PulseSearchTest contentmode:any content:\u53d1\u7968")
+              L"path:C:\\Users\\TestUser\\Desktop\\PulseSearchTest contentmode:any content:\u53d1\u7968")
               == L"\u53d1\u7968",
           L"display needle parses a scoped content query");
 

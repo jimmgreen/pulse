@@ -33,6 +33,6 @@ Release 正文自动提供上述系统说明与两个下载入口。不要重复
 
 清单采用 ECDSA P-256 签名，客户端内置的公钥位于 `cmake/update-public-key.txt`。签名覆盖版本号、最低系统版本、下载地址和安装包 SHA-256。客户端拒绝未通过签名、校验和不匹配、旧版本或不适用的系统版本；下载只允许 HTTPS，支持 GitHub 的 HTTPS 重定向。
 
-签名私钥保存在仓库的 Actions Secret `PULSE_UPDATE_PRIVATE_KEY` 中，本地备份位于发布机器的 `%LOCALAPPDATA%\PulseReleaseKeys\update-signing.pem`，不进入 Git。后续发布沿用此密钥和公钥，避免已安装客户端无法验证新版。
+签名私钥保存在仓库的 Actions Secret `PULSE_UPDATE_PRIVATE_KEY` 中，备份应保存在仓库之外，不进入 Git。后续发布沿用此密钥和公钥，避免已安装客户端无法验证新版。
 
 CI 使用 v143 和静态 VC 运行库，LumaText 使用校验过的固定 SDK，定义见 `cmake/lumatext-sdk.json`。这样构建不依赖本机路径或私有 LumaText 仓库。SDK 仅供构建使用；普通用户下载 Release 顶部对应系统的安装包。

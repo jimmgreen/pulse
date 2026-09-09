@@ -182,13 +182,13 @@ void CleanSandbox() {
 // --- individual test groups -------------------------------------------------
 
 void TestBreadcrumb() {
-    auto segs = ui::SplitBreadcrumb(L"C:\\Users\\SS\\Desktop");
-    Check(segs.size() == 5, L"breadcrumb: C:\\Users\\SS\\Desktop -> 5 segments");
+    auto segs = ui::SplitBreadcrumb(L"C:\\Users\\TestUser\\Desktop");
+    Check(segs.size() == 5, L"breadcrumb: C:\\Users\\TestUser\\Desktop -> 5 segments");
     if (segs.size() == 5) {
         Check(segs[0].text == L"此电脑" && segs[0].path.empty(),
               L"breadcrumb: This PC root segment");
         Check(segs[1].text == L"C:" && segs[1].path == L"C:\\", L"breadcrumb: drive segment");
-        Check(segs[2].path == L"C:\\Users" && segs[4].path == L"C:\\Users\\SS\\Desktop",
+        Check(segs[2].path == L"C:\\Users" && segs[4].path == L"C:\\Users\\TestUser\\Desktop",
               L"breadcrumb: cumulative paths");
     }
     auto one = ui::SplitBreadcrumb(L"C:\\");
@@ -210,16 +210,16 @@ void TestBreadcrumb() {
     Check(uncSrv.size() == 1 && uncSrv[0].text == L"server" &&
           uncSrv[0].path == L"\\\\server",
           L"breadcrumb: bare UNC server -> single segment");
-    auto uncLong = ui::SplitBreadcrumb(L"\\\\?\\UNC\\192.168.0.254\\share\\dir");
-    Check(uncLong.size() == 3 && uncLong[0].path == L"\\\\192.168.0.254" &&
-          uncLong[1].path == L"\\\\192.168.0.254\\share" &&
-          uncLong[2].path == L"\\\\192.168.0.254\\share\\dir",
+    auto uncLong = ui::SplitBreadcrumb(L"\\\\?\\UNC\\192.0.2.10\\share\\dir");
+    Check(uncLong.size() == 3 && uncLong[0].path == L"\\\\192.0.2.10" &&
+          uncLong[1].path == L"\\\\192.0.2.10\\share" &&
+          uncLong[2].path == L"\\\\192.0.2.10\\share\\dir",
           L"breadcrumb: \\\\?\\UNC prefix restores leading \\\\");
     auto longp = ui::SplitBreadcrumb(L"\\\\?\\C:\\A\\B");
     Check(longp.size() == 4 && longp[3].path == L"C:\\A\\B",
           L"breadcrumb: long-path prefix stripped");
     const std::wstring search_path =
-        L"pulse:search:path:C:\\Users\\SS\\Desktop\\PulseSearchTest content:\u53d1\u7968";
+        L"pulse:search:path:C:\\Users\\TestUser\\Desktop\\PulseSearchTest content:\u53d1\u7968";
     auto search = ui::SplitBreadcrumb(search_path);
     Check(search.size() == 1, L"breadcrumb: search query is a single segment");
     if (search.size() == 1) {
@@ -229,16 +229,16 @@ void TestBreadcrumb() {
     }
 
     Pane pane;
-    pane.NewTab(L"\\\\192.168.0.254\\share\\folder");
+    pane.NewTab(L"\\\\192.0.2.10\\share\\folder");
     SidebarModel sidebar;
     const auto vm = BuildWindowViewModel(
         pane, sidebar, true, false, true, nullptr, 0);
-    Check(vm.pane.path == L"\\\\192.168.0.254\\share\\folder",
+    Check(vm.pane.path == L"\\\\192.0.2.10\\share\\folder",
           L"breadcrumb: pane display path keeps UNC prefix");
     auto fromVm = ui::SplitBreadcrumb(vm.pane.path);
-    Check(fromVm.size() == 3 && fromVm[0].path == L"\\\\192.168.0.254" &&
-          fromVm[1].path == L"\\\\192.168.0.254\\share" &&
-          fromVm[2].path == L"\\\\192.168.0.254\\share\\folder",
+    Check(fromVm.size() == 3 && fromVm[0].path == L"\\\\192.0.2.10" &&
+          fromVm[1].path == L"\\\\192.0.2.10\\share" &&
+          fromVm[2].path == L"\\\\192.0.2.10\\share\\folder",
           L"breadcrumb: click target stays UNC not CWD-relative");
 
     // UNC workspace gets the network glyph/color and a 服务器 badge.
@@ -416,12 +416,12 @@ void TestNavigationReturnSelection() {
               L"C:\\projects\\pulse", L"D:\\archive").empty(),
           L"navigation: unrelated destination has no return selection");
     Check(NavigationReturnChildName(
-              L"\\\\192.168.0.254\\工程项目盘-2025\\00_软件",
-              L"\\\\192.168.0.254\\工程项目盘-2025") == L"00_软件",
+              L"\\\\192.0.2.10\\示例共享盘-2025\\00_软件",
+              L"\\\\192.0.2.10\\示例共享盘-2025") == L"00_软件",
           L"navigation: UNC parent return selects the folder just left");
     Check(NavigationReturnChildName(
-              L"\\\\192.168.0.254\\工程项目盘-2025\\00_软件\\工具",
-              L"\\\\192.168.0.254\\工程项目盘-2025") == L"00_软件",
+              L"\\\\192.0.2.10\\示例共享盘-2025\\00_软件\\工具",
+              L"\\\\192.0.2.10\\示例共享盘-2025") == L"00_软件",
           L"navigation: deep UNC return selects the immediate child");
 }
 
@@ -457,7 +457,7 @@ void TestAddressSearch() {
           !TickAddressSearch(*state, now + 16), L"address search: exit and scope feedback stop repainting");
     AdvancedSearchSpec spec;
     spec.name = L"report 2026";
-    spec.current_folder = L"C:\\Users\\W\\Desktop";
+    spec.current_folder = L"C:\\Users\\TestUser\\Desktop";
     Check(SplitSearchQueryText(CompileSearchQuery(spec)).path_prefix.empty(),
           L"address search: entire index omits current directory constraint");
     spec.location = LocationScope::CurrentFolder;
@@ -667,8 +667,8 @@ void TestMenuModel() {
     Check(wide.WidthPx() <= 320, L"menu: long undo label does not stretch the flyout");
 
     std::vector<index::Hit> path_hits{
-        {L"C:\\Users\\W\\.codex", L".codex", true},
-        {L"C:\\Users\\W\\plugins\\.codex-plugin", L".codex-plugin", true}
+        {L"C:\\Users\\TestUser\\.codex", L".codex", true},
+        {L"C:\\Users\\TestUser\\plugins\\.codex-plugin", L".codex-plugin", true}
     };
     auto path_items = BuildCommandPalette(L".codex", {}, path_hits, false, path_hits.size());
     Check(path_items.size() >= 3 && path_items[0].shortcut_inline &&
@@ -1848,14 +1848,14 @@ void TestSplitLayout() {
           L"menu: recent rows use 历史路径 badge");
     auto palQ = BuildCommandPalette(L"四宫", { L"C:\\Users" }, {}, false);
     Check(!palQ.empty() && palQ[0].command == CmdLayoutFourGrid, L"menu: palette filters by query");
-    auto palLong = BuildCommandPalette(L"", { L"\\\\?\\C:\\Users\\W" }, {}, false);
+    auto palLong = BuildCommandPalette(L"", { L"\\\\?\\C:\\Users\\TestUser" }, {}, false);
     bool recent_ok = false;
     for (const auto& it : palLong) {
         if (it.command != CmdRecentBase) continue;
         Check(it.shortcut.find(L"\\\\?\\") == std::wstring::npos,
               L"menu: palette recent must not keep \\\\?\\ prefix");
         Check(it.badge_text == L"历史路径", L"menu: long path recent uses badge");
-        Check(it.text == L"W", L"menu: recent title is folder name");
+        Check(it.text == L"TestUser", L"menu: recent title is folder name");
         recent_ok = true;
     }
     Check(recent_ok, L"menu: palette shows Windows-style path title");
@@ -2396,7 +2396,7 @@ void TestRecycleAndBatchRename() {
     wchar_t temp[MAX_PATH]{};
     GetTempPathW(MAX_PATH, temp);
     const std::wstring index_path = std::wstring(temp) + L"pulse_recycle_index_test.$ITEST";
-    const std::wstring original = L"C:\\Users\\SS\\Desktop\\photo.jpg";
+    const std::wstring original = L"C:\\Users\\TestUser\\Desktop\\photo.jpg";
     FILETIME deleted{};
     deleted.dwLowDateTime = 1;
     deleted.dwHighDateTime = 2;
@@ -3107,7 +3107,7 @@ void TestUtf8PersistFile() {
     GetTempPathW(ARRAYSIZE(temp_dir), temp_dir);
     const std::wstring path = std::wstring(temp_dir) + L"pulse-utf8-persist-test.json";
     const std::wstring json =
-        L"{\"name\":\"紧急修补\",\"unc\":\"\\\\192.168.0.254\\工程项目盘\"}\n";
+        L"{\"name\":\"紧急修补\",\"unc\":\"\\\\192.0.2.10\\示例共享盘\"}\n";
     Check(WriteUtf8FileAtomic(path, json), L"utf8file: write Chinese JSON");
     std::wstring loaded;
     Check(ReadUtf8File(path, loaded) && loaded == json, L"utf8file: Chinese round-trip");

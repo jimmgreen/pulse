@@ -180,7 +180,7 @@ int wmain(int argc, wchar_t* argv[]) {
         return 1;
     }
 
-    run_for_directory(L"C:\\Users\\SS\\Desktop\\pulse\\bench_data\\d10k", n);
+    run_for_directory(std::filesystem::absolute(L"bench_data/d10k").wstring(), n);
     run_for_directory(L"C:\\Windows\\System32", n);
 
     CoUninitialize();
