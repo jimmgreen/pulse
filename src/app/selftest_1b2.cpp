@@ -550,6 +550,22 @@ void TestBlankPaneClickNavigation() {
         release();
         Check(tab->current_path == fs::NormalizePath(L"C:\\PulseBlankClickHistory"),
               L"blank pane: available history takes precedence over parent");
+        const std::wstring folder = tab->current_path;
+        tab->current_path = L"pulse:search:showbox";
+        tab->back_stack.push(folder);
+        const auto history_size = tab->back_stack.size();
+        press();
+        Check(state->marqueePending && !state->blankClickTab,
+              L"blank pane: search results allow selection without arming navigation");
+        release();
+        Check(tab->current_path == L"pulse:search:showbox" && tab->back_stack.size() == history_size,
+              L"blank pane: search results preserve query and back history on blank click");
+        SendMessageW(hwnd, WM_LBUTTONDBLCLK, MK_LBUTTON, point);
+        release();
+        Check(tab->current_path == L"pulse:search:showbox",
+              L"blank pane: double click in search results does not navigate");
+        tab->current_path = folder;
+        tab->back_stack.pop();
         const std::wstring before = tab->current_path;
         press();
         SendMessageW(hwnd, WM_MOUSEMOVE, MK_LBUTTON,

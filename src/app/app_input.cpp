@@ -2145,7 +2145,7 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             s->marqueeActive = false;
             s->marqueeAdditive = ctrl;
             s->blankClickPane = s->pane;
-            s->blankClickTab = tab && !ctrl && PointInList(*s, mx, my) &&
+            s->blankClickTab = tab && !IsAddressSearchResults(tab) && !ctrl && PointInList(*s, mx, my) &&
                 (GetKeyState(VK_SHIFT) & 0x8000) == 0 &&
                 (GetKeyState(VK_MENU) & 0x8000) == 0 ? tab : nullptr;
             s->blankClickGeneration = tab ? tab->view_generation : 0;
@@ -2430,7 +2430,7 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 click.drag_width = GetSystemMetrics(SM_CXDRAG);
                 click.drag_height = GetSystemMetrics(SM_CYDRAG);
                 click.blank_list_hit = PointInList(*s, mx, my);
-                bool goBack = app::IsBlankPaneBackClick(click);
+                bool goBack = !IsAddressSearchResults(tab) && app::IsBlankPaneBackClick(click);
                 if (goBack) {
                     const ui::WindowViewModel vm = BuildVm(*s, false);
                     const D2D1_RECT_F rect = D2D1::RectF(
