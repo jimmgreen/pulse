@@ -529,6 +529,34 @@ void TestBlankPaneClickNavigation() {
         state->pane = state->window_tabs.Active()->panes.front().get();
         auto* tab = state->pane->ActiveTab();
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state.get()));
+        {
+            auto vm = BuildVm(*state, false);
+            bool tag_action = false, network_action = false;
+            for (auto& group : vm.sidebar) {
+                group.collapsed = true;
+                if (group.header == l10n::Get(l10n::StringId::SidebarTags))
+                    tag_action = group.add_action == ui::SidebarAddAction::CreateTag;
+                if (group.header == l10n::Get(l10n::StringId::SidebarNetworkLocations))
+                    network_action = group.add_action == ui::SidebarAddAction::AddNetwork;
+            }
+            Check(tag_action && network_action, L"sidebar: tag and network groups bind their own add actions");
+            for (int order = 0; order < 2; ++order) {
+                if (order) std::reverse(vm.sidebar.begin(), vm.sidebar.end());
+                const auto sidebar = state->renderer.SidebarRect(1000, 700);
+                bool tags_hit = false, network_hit = false, correct = true;
+                for (float y = sidebar.top; y < sidebar.bottom; y += 2.0f) {
+                    const auto hit = state->renderer.HitTest(vm, D2D1::RectF(0, 0, 1000, 700),
+                        sidebar.right - 42.0f, y);
+                    if (hit.region != ui::HitTestResult::SidebarHeaderAction) continue;
+                    correct = correct && hit.index >= 0 && static_cast<size_t>(hit.index) < vm.sidebar.size() &&
+                        hit.sidebar_action == vm.sidebar[hit.index].add_action;
+                    tags_hit |= hit.sidebar_action == ui::SidebarAddAction::CreateTag;
+                    network_hit |= hit.sidebar_action == ui::SidebarAddAction::AddNetwork;
+                }
+                Check(correct && tags_hit && network_hit,
+                    L"sidebar: plus hit targets retain actions when group order changes");
+            }
+        }
         const auto list = ListRect(*state);
         const int x = static_cast<int>(list.left + 30);
         const int y = static_cast<int>(list.bottom - 30);
@@ -1178,13 +1206,14 @@ void CALLBACK AdvancedEditClickTimer(HWND, UINT, UINT_PTR timer, DWORD) {
     for (float y : {264.0f, 324.0f}) {
         for (float x : {140.0f, 22.0f}) {
             POINT point{static_cast<int>(x * scale), static_cast<int>(y * scale)};
-            ClientToScreen(dialog, &point);
-            HWND target = WindowFromPoint(point);
+            // Query this dialog's child tree without depending on other apps' Z order.
+            HWND target = ChildWindowFromPointEx(dialog, point,
+                CWP_SKIPINVISIBLE | CWP_SKIPDISABLED | CWP_SKIPTRANSPARENT);
             if (x == 140.0f) Check(IsChild(dialog, target),
                 L"advanced edit: empty unfocused field has a hittable child surface");
             Check(target == dialog || IsChild(dialog, target), L"advanced edit: click targets dialog or its child");
             if (target != dialog && !IsChild(dialog, target)) continue;
-            ScreenToClient(target, &point);
+            MapWindowPoints(dialog, target, &point, 1);
             SendMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(point.x, point.y));
             HWND edit = GetFocus();
             wchar_t cls[32]{};

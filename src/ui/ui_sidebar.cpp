@@ -121,7 +121,7 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             header.expanded = !vm.sidebar[slot.group].collapsed;
             header.state.hovered = IsHovered(vm, HitTestResult::SidebarHeader, slot.group);
             painter_.DrawSidebarSectionHeader(header);
-            if (vm.sidebar[slot.group].add_action) {
+            if (vm.sidebar[slot.group].add_action != SidebarAddAction::None) {
                 DrawIconText(slot.rc.right - 52.0f * scale_, slot.rc.top,
                     24.0f * scale_, slot.rc.bottom - slot.rc.top,
                     kIconAdd, L"+", theme.text_secondary, 0.72f);

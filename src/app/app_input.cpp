@@ -2074,17 +2074,12 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
         } else if (hit.region == ui::HitTestResult::ColumnHeader) {
             SortBy(*s, hit.column);
         } else if (hit.region == ui::HitTestResult::SidebarHeaderAction) {
-            // Sidebar groups are pushed in a fixed order; group 4 is 网络位置.
-            if (hit.index == 4) {
+            if (hit.sidebar_action == ui::SidebarAddAction::AddNetwork) {
                 s->settings.NetworkAction(0, true);
-            } else if (hit.index == 3) {
+            } else if (hit.sidebar_action == ui::SidebarAddAction::CreateTag) {
                 POINT point{ mx, my };
                 ClientToScreen(hwnd, &point);
                 ShowCreateTagPicker(*s, point);
-            } else {
-                POINT point{ mx, my };
-                ClientToScreen(hwnd, &point);
-                ShowTagPicker(*s, point);
             }
         } else if (hit.region == ui::HitTestResult::SidebarHeader) {
             if (hit.index >= 0 && hit.index < 32) {

@@ -209,11 +209,13 @@ struct SidebarItem {
     bool starred_child = false;
 };
 
+enum class SidebarAddAction { None, CreateTag, AddNetwork };
+
 struct SidebarGroup {
     std::wstring header;
     std::vector<SidebarItem> items;
     bool collapsed = false;
-    bool add_action = false;
+    SidebarAddAction add_action = SidebarAddAction::None;
 };
 
 // Scatter deck inside the staging tray panel. Poses arrive pre-smoothed from
@@ -577,6 +579,7 @@ struct HitTestResult {
         SettingsDupDeleteAll,
         SearchFilter
     } region = None;
+    SidebarAddAction sidebar_action = SidebarAddAction::None;
     int index = -1;          // tab/row/sidebar item/tray batch/tray item.
     int sub_index = -1;      // tray item inside batch, breadcrumb segment.
     int pane_index = -1;     // leaf in pane_slots, or -1 outside the content area.

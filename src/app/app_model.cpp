@@ -1336,7 +1336,7 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
 
     ui::SidebarGroup tags;
     tags.header = l10n::Get(l10n::StringId::SidebarTags);
-    tags.add_action = true;
+    tags.add_action = ui::SidebarAddAction::CreateTag;
     if (places) {
         for (int i = 0; i < static_cast<int>(places->tags.size()); ++i) {
             const auto& t = places->tags[static_cast<size_t>(i)];
@@ -1354,7 +1354,7 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
 
     ui::SidebarGroup nets;
     nets.header = l10n::Get(l10n::StringId::SidebarNetworkLocations);
-    nets.add_action = true;
+    nets.add_action = ui::SidebarAddAction::AddNetwork;
     if (places) {
         for (const auto& n : places->networks) {
             ui::SidebarItem it;
@@ -1373,7 +1373,7 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
     }
     vm.sidebar.push_back(std::move(nets));
 
-    // Groups are pushed in a fixed order (工作区/快速访问/磁盘/标签/网络位置);
+    // Collapse bits follow the displayed group order; actions use explicit identifiers.
     // bit i of the mask collapses group i.
     for (size_t i = 0; i < vm.sidebar.size() && i < 32; ++i)
         vm.sidebar[i].collapsed = ((sidebar_collapsed_mask >> i) & 1u) != 0;

@@ -491,7 +491,8 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             if (slot.kind == SidebarSlot::Header) {
                 const float action_left = slot.rc.right - 56.0f * scale_;
                 const float action_right = slot.rc.right - 28.0f * scale_;
-                r.region = vm.sidebar[slot.group].add_action &&
+                r.sidebar_action = vm.sidebar[slot.group].add_action;
+                r.region = r.sidebar_action != SidebarAddAction::None &&
                            x >= action_left && x < action_right
                     ? HitTestResult::SidebarHeaderAction : HitTestResult::SidebarHeader;
                 r.index = slot.group;

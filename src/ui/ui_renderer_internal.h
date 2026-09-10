@@ -291,7 +291,7 @@ void ClearTextWidthCache() {
     float SidebarContentHeight(const WindowViewModel& vm, const SidebarMetrics& m) {
         float height = m.pad;
         for (const auto& group : vm.sidebar) {
-            if (group.items.empty() && !group.add_action) continue;
+            if (group.items.empty() && group.add_action == SidebarAddAction::None) continue;
             height += m.headerH + 4.0f * m.scale;
             if (!group.collapsed) {
                 for (const auto& item : group.items)
@@ -350,7 +350,7 @@ void ClearTextWidthCache() {
         int run = 0;
         for (int g = 0; g < static_cast<int>(vm.sidebar.size()); ++g) {
             const auto& group = vm.sidebar[g];
-            if (group.items.empty() && !group.add_action) continue;
+            if (group.items.empty() && group.add_action == SidebarAddAction::None) continue;
             if (y >= contentBottom) break;
             SidebarSlot header;
             header.kind = SidebarSlot::Header;
