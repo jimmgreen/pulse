@@ -69,6 +69,14 @@
 
 namespace pulse::ui {
 struct FluentMenuTestPeer {
+    static bool SeedCachedEditor(FluentMenu& menu) {
+        HWND external = menu.external_edit_;
+        menu.external_edit_ = nullptr;
+        const bool created = menu.EnsureFilterEdit();
+        menu.HideFilterEdit();
+        menu.external_edit_ = external;
+        return created;
+    }
     static bool ExternalEditorLayout(const FluentMenu& menu, HWND editor) {
         return menu.external_edit_ == editor && menu.FilterHeaderPx() == 0 &&
             (!menu.edit_ || !IsWindowVisible(menu.edit_)) &&
@@ -821,6 +829,52 @@ void CALLBACK DriveHistoryInteractionTimer(HWND, UINT, UINT_PTR timer, DWORD) {
         KillTimer(nullptr, timer);
         return;
     }
+    if (history_interaction_mode == 4 && history_interaction_state && history_interaction_state->menu) {
+        auto& state = *history_interaction_state;
+        HWND edit = state.hwndAddressEdit;
+        Check(ui::FluentMenuTestPeer::SeedCachedEditor(*state.menu), L"live focus: reproduce previously used menu editor");
+        SetFocus(edit);
+        SetWindowTextW(edit, L"");
+        std::wstring query;
+        bool retained = true, updated = true;
+        for (wchar_t ch : std::wstring(L"showdebug")) {
+            query.push_back(ch);
+            HWND target = GetFocus();
+            if (target) SendMessageW(target, WM_CHAR, ch, 0);
+            QueueAddressSearch(state);
+            TickAddressSearch(state, state.addressLiveDue);
+            auto* tab = ActiveTab(state);
+            if (tab->pending_generation)
+                DeliverIndexSearchResult(state, static_cast<uint32_t>(tab->pending_generation), {});
+            DWORD start = 0, end = 0;
+            SendMessageW(edit, EM_GETSEL, reinterpret_cast<WPARAM>(&start), reinterpret_cast<LPARAM>(&end));
+            retained &= GetFocus() == edit && start == query.size() && end == query.size();
+            updated &= app::SearchDisplayNeedle(tab->current_path.substr(13)) == query;
+        }
+        Check(retained, L"live focus: every character and result refresh retain focus and caret");
+        Check(updated, L"live focus: results keep updating throughout continuous typing");
+        SendMessageW(GetFocus(), WM_CHAR, VK_BACK, 0);
+        QueueAddressSearch(state);
+        TickAddressSearch(state, state.addressLiveDue);
+        Check(GetFocus() == edit && GetWindowTextLengthW(edit) == 8,
+              L"live focus: backspace updates query without losing focus");
+        SendMessageW(edit, WM_IME_STARTCOMPOSITION, 0, 0);
+        const auto generation = ActiveTab(state)->pending_generation;
+        SetWindowTextW(edit, L"中文");
+        QueueAddressSearch(state);
+        TickAddressSearch(state, state.addressLiveDue);
+        Check(GetFocus() == edit && ActiveTab(state)->pending_generation == generation,
+              L"live focus: IME composition retains focus and defers partial search");
+        SendMessageW(edit, WM_IME_ENDCOMPOSITION, 0, 0);
+        TickAddressSearch(state, state.addressLiveDue);
+        Check(GetFocus() == edit && GetWindowTextLengthW(edit) == 2,
+              L"live focus: committed Unicode query retains focus");
+        history_layout_ok = ui::FluentMenuTestPeer::ExternalEditorLayout(*state.menu, edit);
+        history_interaction_driven = true;
+        state.menu->Dismiss();
+        KillTimer(nullptr, timer);
+        return;
+    }
     if (history_interaction_state && history_interaction_state->menu) {
         auto& state = *history_interaction_state;
         history_layout_ok = ui::FluentMenuTestPeer::ExternalEditorLayout(*state.menu, state.hwndAddressEdit);
@@ -936,6 +990,7 @@ void TestAddressSearchHistoryInteraction(float scale = 1.0f, bool dark = false) 
           L"search history: typed continuation keeps restored scope and filters");
     run_popup(3);
     Check(!state->searchScopePending, L"search history: scope transition consumes pending request");
+    run_popup(4);
     HideAddressEditor(*state, false);
     if (state->hwndAddressEdit) DestroyWindow(state->hwndAddressEdit);
     state->hwndAddressEdit = nullptr;

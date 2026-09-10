@@ -977,8 +977,8 @@ LRESULT CALLBACK FluentMenu::ExternalFilterEditProc(HWND hwnd, UINT msg, WPARAM 
     if (!self->filter_composing_ && msg == WM_CHAR && (wParam == VK_RETURN || wParam == VK_ESCAPE || wParam == VK_TAB))
         return 0;
     const auto result = DefSubclassProc(hwnd, msg, wParam, lParam);
-    if (msg == WM_CHAR || msg == WM_SETTEXT || msg == WM_PASTE || msg == WM_CUT ||
-        msg == WM_CLEAR || msg == WM_UNDO || msg == WM_KEYDOWN)
+    if (!self->filter_composing_ && (msg == WM_CHAR || msg == WM_SETTEXT || msg == WM_PASTE || msg == WM_CUT ||
+        msg == WM_CLEAR || msg == WM_UNDO || msg == WM_KEYDOWN || msg == WM_IME_ENDCOMPOSITION))
         self->SyncFilterFromEdit();
     return result;
 }
@@ -1457,7 +1457,8 @@ void FluentMenu::RefreshFilter() {
     hover_swatch_ = -1;
     LayoutWindow(popup_pt_);
     if (Render()) Present(255, present_offset_);
-    if (edit_) SetFocus(edit_);
+    // Refresh only the results; a cached internal editor may be hidden while
+    // an external search field owns input, selection and IME composition.
 }
 
 void FluentMenu::RequestFilterRefresh() {
