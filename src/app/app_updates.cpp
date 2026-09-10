@@ -25,6 +25,13 @@ void CheckForUpdates(AppState& state) {
 }
 
 void TickUpdates(AppState& state, unsigned long long now) {
+    DWORD install_error = ERROR_SUCCESS;
+    if (state.update_installer.TakeInstallResult(install_error)) {
+        state.update_install_error = install_error;
+        if (install_error) ShowInstallError(state);
+        state.update_installer.Stop();
+        InvalidateRect(state.hwnd, nullptr, FALSE);
+    }
     if (state.shot.active || !app::UpdateChecker::Enabled() || now < state.next_update_check) return;
     if (state.update_installer.downloading() || state.update_installer.installing() || state.update_checker.checking()) return;
     state.next_update_check = now + kCheckInterval;

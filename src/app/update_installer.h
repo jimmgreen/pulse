@@ -5,6 +5,7 @@
 namespace pulse::app {
 // The caller must keep this read-only handle open until launching the installer.
 bool VerifyUpdateInstaller(HANDLE file, std::wstring_view expected_hash);
+DWORD UpdateInstallErrorFromExitCode(DWORD exit_code);
 
 class UpdateInstaller {
 public:
@@ -16,6 +17,7 @@ public:
     bool downloading() const noexcept;
     bool installing() const noexcept;
     bool TakeResult(DWORD& error);
+    bool TakeInstallResult(DWORD& error);
     bool Launch(HWND owner, DWORD& error);
     void Stop();
 private:

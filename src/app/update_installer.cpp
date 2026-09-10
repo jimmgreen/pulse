@@ -51,12 +51,20 @@ bool VerifyUpdateInstaller(HANDLE file, std::wstring_view expected_hash) {
     return true;
 }
 
+DWORD UpdateInstallErrorFromExitCode(DWORD exit_code) {
+    if (exit_code == 0) return ERROR_SUCCESS;
+    if (exit_code == 2 || exit_code == 5) return ERROR_CANCELLED;
+    return ERROR_INSTALL_FAILURE;
+}
+
 struct UpdateInstaller::State {
     std::atomic<bool> cancelled{false};
     std::atomic<bool> downloading{true};
     std::atomic<bool> installing{false};
     std::mutex mutex;
     bool has_result = false;
+    bool has_install_result = false;
+    DWORD install_error = ERROR_SUCCESS;
     DWORD error = ERROR_SUCCESS;
     std::wstring directory, file;
     FileHandle guard;
@@ -155,7 +163,7 @@ bool UpdateInstaller::Launch(HWND owner, DWORD& error) {
     execute.hwnd = owner;
     execute.lpVerb = L"runas";
     execute.lpFile = state_->file.c_str();
-    execute.lpParameters = L"/SP- /NORESTART";
+    execute.lpParameters = L"/SP- /NORESTART /LOG";
     execute.nShow = SW_SHOWNORMAL;
     if (!ShellExecuteExW(&execute)) { error = GetLastError(); return false; }
     if (execute.hProcess) {
@@ -163,13 +171,35 @@ bool UpdateInstaller::Launch(HWND owner, DWORD& error) {
         state->installing = true;
         try {
             std::thread([state, process = execute.hProcess] {
-                WaitForSingleObject(process, INFINITE);
+                DWORD exit_code = 0;
+                DWORD failure = ERROR_SUCCESS;
+                if (WaitForSingleObject(process, INFINITE) != WAIT_OBJECT_0 ||
+                    !GetExitCodeProcess(process, &exit_code)) {
+                    failure = GetLastError();
+                    if (!failure) failure = ERROR_GEN_FAILURE;
+                } else {
+                    failure = UpdateInstallErrorFromExitCode(exit_code);
+                }
                 CloseHandle(process);
+                {
+                    std::lock_guard<std::mutex> lock(state->mutex);
+                    state->install_error = failure;
+                    state->has_install_result = true;
+                }
                 state->installing = false;
             }).detach();
         } catch (...) { CloseHandle(execute.hProcess); state->installing = false; }
     }
     error = ERROR_SUCCESS;
+    return true;
+}
+
+bool UpdateInstaller::TakeInstallResult(DWORD& error) {
+    if (!state_) return false;
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (!state_->has_install_result) return false;
+    state_->has_install_result = false;
+    error = state_->install_error;
     return true;
 }
 

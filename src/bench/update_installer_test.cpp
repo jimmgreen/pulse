@@ -60,6 +60,14 @@ int wmain(int argc, wchar_t** argv) {
         error == ERROR_CANCELLED, "cancelled request does not access the network");
     UpdateInstaller installer;
     UpdateResult invalid;
+    check(UpdateInstallErrorFromExitCode(0) == ERROR_SUCCESS, "completed setup succeeds");
+    check(UpdateInstallErrorFromExitCode(2) == ERROR_CANCELLED &&
+        UpdateInstallErrorFromExitCode(5) == ERROR_CANCELLED, "setup cancellation is reported");
+    for (DWORD code : {1ul, 3ul, 4ul, 6ul, 7ul, 8ul, 999ul}) {
+        check(UpdateInstallErrorFromExitCode(code) == ERROR_INSTALL_FAILURE,
+            "failed or unknown setup exit is not mistaken for success");
+    }
+    check(!installer.TakeInstallResult(error), "no completion before installer launch");
     check(!installer.Start(invalid, window, WM_APP + 1), "unverified update cannot start installer download");
     const auto before = GetTickCount64();
     installer.Stop();

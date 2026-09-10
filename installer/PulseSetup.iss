@@ -59,6 +59,7 @@ WizardStyle=modern
 ; something else still holds a file.
 CloseApplications=yes
 RestartApplications=no
+SetupLogging=yes
 UninstallDisplayIcon={app}\pulse.exe
 
 [Languages]
@@ -524,7 +525,10 @@ var
   ResultCode: Integer;
 begin
   { Close the UI first so it cannot relaunch Pulse.Index.exe --network-agent. }
-  Exec('taskkill.exe', '/F /IM pulse.exe /T', '', SW_HIDE,
+  { An in-app update launches Setup as a descendant of pulse.exe. Killing
+    the UI's process tree would also terminate this installer. Hosts are
+    stopped explicitly below, so do not use /T for the UI. }
+  Exec('taskkill.exe', '/F /IM pulse.exe', '', SW_HIDE,
     ewWaitUntilTerminated, ResultCode);
   Exec('net.exe', 'stop PulseIndex', '', SW_HIDE, ewWaitUntilTerminated,
     ResultCode);
