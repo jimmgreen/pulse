@@ -369,6 +369,7 @@ struct AppState {
     app::Tab* renameClickTab = nullptr;
     int renameClickIndex = -1;
     ULONGLONG renameClickDue = 0;
+    ULONGLONG renameClickStarted = 0;
     std::wstring renameClickPath;
     HWND hwndTagRenameEdit = nullptr;
     app::TagId tagRenameId;

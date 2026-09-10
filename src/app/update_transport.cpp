@@ -81,10 +81,66 @@ bool ReadUpdateResponse(std::wstring_view url, uint64_t maximum_bytes,
         }
         received += read;
         if (!consume(buffer.data(), read)) {
+            category = UpdateError::LocalIo;
             error = GetLastError();
             if (!error) error = ERROR_WRITE_FAULT;
             return false;
         }
     }
+}
+
+std::wstring AcceleratedUpdateUrl(std::wstring_view url) {
+    constexpr std::wstring_view prefix = L"https://github.com/";
+    if (!url.starts_with(prefix) || url.find_first_of(L"?#\\") != url.npos) return {};
+    auto path = url.substr(prefix.size());
+    // Only public release asset URLs may be sent to the external accelerator.
+    for (int i = 0; i < 2; ++i) {
+        const auto slash = path.find(L'/');
+        if (slash == path.npos || slash == 0) return {};
+        const auto component = path.substr(0, slash);
+        if (component == L"." || component == L".." ||
+            component.find_first_not_of(L"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.") != component.npos)
+            return {};
+        path.remove_prefix(slash + 1);
+    }
+    if (path.starts_with(L"releases/latest/download/")) {
+        path.remove_prefix(std::wstring_view(L"releases/latest/download/").size());
+    } else if (path.starts_with(L"releases/download/")) {
+        path.remove_prefix(std::wstring_view(L"releases/download/").size());
+        const auto slash = path.find(L'/');
+        if (slash == path.npos || slash == 0) return {};
+        path.remove_prefix(slash + 1);
+    } else return {};
+    if (path.empty() || path.find(L'/') != path.npos) return {};
+    return L"https://ghproxy.net/" + std::wstring(url);
+}
+
+bool ReadUpdateWithFallback(std::wstring_view url, uint64_t maximum_bytes,
+                            const std::atomic<bool>& cancelled,
+                            const std::function<bool()>& reset,
+                            const std::function<bool(const void*, DWORD)>& consume,
+                            UpdateError& category, DWORD& error,
+                            const UpdateResponseReader& read) {
+    const auto accelerated = AcceleratedUpdateUrl(url);
+    const auto secondary = accelerated.empty() ? std::wstring{} : L"https://gh-proxy.com/" + std::wstring(url);
+    const std::array<std::wstring_view, 3> sources{accelerated, secondary, url};
+    for (const auto source : sources) {
+        if (source.empty()) continue;
+        if (cancelled) { category = UpdateError::Network; error = ERROR_CANCELLED; return false; }
+        if (!reset()) {
+            category = UpdateError::LocalIo;
+            error = GetLastError();
+            if (!error) error = ERROR_WRITE_FAULT;
+            return false;
+        }
+        if (read(source, maximum_bytes, cancelled, consume, category, error)) {
+            category = UpdateError::None;
+            error = ERROR_SUCCESS;
+            return true;
+        }
+        if (cancelled || error == ERROR_CANCELLED ||
+            (category != UpdateError::Network && category != UpdateError::HttpStatus)) return false;
+    }
+    return false;
 }
 }

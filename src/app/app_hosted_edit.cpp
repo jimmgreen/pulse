@@ -297,7 +297,7 @@ void LayoutRenameOverlay(AppState& s) {
     if (!s.hwndRenameEdit || s.renameIndex < 0 || !s.hwnd) return;
     app::Tab* tab = ActiveTab(s);
     if (!tab) return;
-    ui::WindowViewModel vm = BuildVm(s);
+    ui::WindowViewModel vm = BuildVm(s, false);
     const D2D1_RECT_F pane = FocusedPaneRect(s);
     float extra = tab->banner_message.empty() ? 0.0f : 36.0f * s.scale;
     std::wstring virtual_kind;

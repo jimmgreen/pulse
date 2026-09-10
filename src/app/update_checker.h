@@ -20,6 +20,7 @@ enum class UpdateError : uint8_t {
     InvalidSignature,
     InsecureUrl,
     UnsupportedWindows,
+    LocalIo,
 };
 
 struct UpdateManifest {

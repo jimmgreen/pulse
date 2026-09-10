@@ -1,4 +1,5 @@
 #include "../app/update_checker.h"
+#include "../app/update_transport.h"
 
 #include <cstdio>
 #include <fstream>
@@ -30,10 +31,113 @@ const std::string kManifest =
         "EdiuecedQ2TAXB8CUt5lRzxA==\"\n"
     "}\n";
 
+bool TestFallback() {
+    using namespace pulse::app;
+    const std::wstring url = L"https://github.com/jimmgreen/pulse/releases/download/v1.0/PulseSetup.exe";
+    const auto proxy = AcceleratedUpdateUrl(url);
+    bool passed = Report("release accelerator preserves original URL", proxy == L"https://ghproxy.net/" + url);
+    passed &= Report("latest manifest supports acceleration", !AcceleratedUpdateUrl(
+        L"https://github.com/jimmgreen/pulse/releases/latest/download/update-manifest.json").empty());
+    for (const auto invalid : {L"https://example.test/a", L"http://github.com/a/b/releases/download/v1/a",
+        L"https://github.com.evil/a/b/releases/download/v1/a", L"https://github.com@evil/a/b/releases/download/v1/a",
+        L"https://github.com/a/b/blob/main/a", L"https://github.com/a/b/releases/latest/download/",
+        L"https://github.com/a/b/releases/download/v1/a?token=secret"})
+        passed &= Report("unrelated or credential-bearing URL is not proxied", AcceleratedUpdateUrl(invalid).empty());
+    std::atomic<bool> cancelled{false};
+    UpdateError category = UpdateError::None;
+    DWORD error = 0;
+    int calls = 0, resets = 0;
+    std::string output;
+    const auto reset = [&] { ++resets; output.clear(); return true; };
+    const auto consume = [&](const void* data, DWORD size) { output.append(static_cast<const char*>(data), size); return true; };
+    UpdateResponseReader reader = [&](std::wstring_view source, uint64_t maximum,
+        const std::atomic<bool>&, const std::function<bool(const void*, DWORD)>& sink,
+        UpdateError& failure, DWORD& code) {
+        ++calls;
+        passed &= Report("attempt preserves response size limit", maximum == 1024);
+        if (calls == 1) {
+            passed &= Report("automatic mode tries ghproxy.net first", source == proxy);
+            sink("partial", 7);
+            failure = UpdateError::Network;
+            code = ERROR_TIMEOUT;
+            return false;
+        }
+        passed &= Report("network failure switches to gh-proxy.com", source == L"https://gh-proxy.com/" + url);
+        return sink("complete", 8);
+    };
+    passed &= Report("partial response is discarded on fallback", ReadUpdateWithFallback(url, 1024,
+        cancelled, reset, consume, category, error, reader) && output == "complete" && resets == 2 &&
+        calls == 2 && category == UpdateError::None && error == 0);
+    calls = resets = 0;
+    reader = [&](std::wstring_view source, uint64_t, const std::atomic<bool>&,
+        const std::function<bool(const void*, DWORD)>& sink, UpdateError&, DWORD&) {
+        ++calls;
+        passed &= Report("default acceleration skips initial GitHub attempt", source == proxy);
+        return sink("ok", 2);
+    };
+    passed &= Report("successful preferred source avoids extra requests", ReadUpdateWithFallback(url, 1024,
+        cancelled, reset, consume, category, error, reader) && calls == 1 && resets == 1);
+    calls = 0;
+    reader = [&](std::wstring_view source, uint64_t, const std::atomic<bool>&,
+        const std::function<bool(const void*, DWORD)>& sink, UpdateError& result, DWORD& code) {
+        ++calls;
+        if (calls == 1) {
+            passed &= Report("preferred accelerator is attempted first", source == proxy);
+            result = UpdateError::HttpStatus; code = 503; return false;
+        }
+        if (calls == 2) {
+            passed &= Report("second accelerator precedes GitHub", source == L"https://gh-proxy.com/" + url);
+            sink("partial", 7);
+            result = UpdateError::HttpStatus; code = 502; return false;
+        }
+        passed &= Report("unavailable accelerators fall back to GitHub", source == url);
+        return sink("ok", 2);
+    };
+    passed &= Report("accelerator HTTP failure recovers", ReadUpdateWithFallback(url, 1024,
+        cancelled, reset, consume, category, error, reader) && calls == 3 && output == "ok");
+    calls = 0;
+    reader = [&](std::wstring_view, uint64_t, const std::atomic<bool>&,
+        const std::function<bool(const void*, DWORD)>&, UpdateError& result, DWORD& code) {
+        ++calls; result = UpdateError::Network; code = ERROR_TIMEOUT; return false;
+    };
+    passed &= Report("all sources failing stops after three attempts", !ReadUpdateWithFallback(url, 1024,
+        cancelled, reset, consume, category, error, reader) && calls == 3 && error == ERROR_TIMEOUT);
+    calls = 0;
+    passed &= Report("custom update hosts never use public accelerator", !ReadUpdateWithFallback(
+        L"https://updates.example.test/manifest.json", 1024, cancelled, reset, consume, category, error,
+        reader) && calls == 1);
+    for (const auto failure : {UpdateError::LocalIo, UpdateError::ResponseTooLarge, UpdateError::InsecureUrl,
+                              UpdateError::InvalidSignature}) {
+        calls = 0;
+        reader = [&](std::wstring_view, uint64_t, const std::atomic<bool>&,
+            const std::function<bool(const void*, DWORD)>&, UpdateError& result, DWORD& code) {
+            ++calls; result = failure; code = ERROR_INVALID_DATA; return false;
+        };
+        passed &= Report("non-network failure never retries", !ReadUpdateWithFallback(url, 1024,
+            cancelled, reset, consume, category, error, reader) && calls == 1);
+    }
+    calls = 0;
+    reader = [&](std::wstring_view, uint64_t, const std::atomic<bool>&,
+        const std::function<bool(const void*, DWORD)>&, UpdateError& result, DWORD& code) {
+        ++calls; cancelled = true; result = UpdateError::Network; code = ERROR_CANCELLED; return false;
+    };
+    passed &= Report("cancellation prevents fallback", !ReadUpdateWithFallback(url, 1024,
+        cancelled, reset, consume, category, error, reader) && calls == 1);
+    calls = resets = 0;
+    passed &= Report("pre-cancelled download never resets or requests", !ReadUpdateWithFallback(url, 1024,
+        cancelled, reset, consume, category, error, reader) && calls == 0 && resets == 0);
+    cancelled = false;
+    passed &= Report("destination reset failure never requests", !ReadUpdateWithFallback(url, 1024,
+        cancelled, [] { SetLastError(ERROR_DISK_FULL); return false; }, consume, category, error, reader) &&
+        calls == 0 && category == UpdateError::LocalIo && error == ERROR_DISK_FULL);
+    return passed;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     using namespace pulse::app;
+    if (!TestFallback()) return 1;
     if (argc == 2 && std::string_view(argv[1]) == "--check-live") {
         HWND window = CreateWindowExW(0, L"STATIC", L"Update check test", 0, 0, 0, 0, 0,
             HWND_MESSAGE, nullptr, GetModuleHandleW(nullptr), nullptr);

@@ -96,7 +96,12 @@ struct UpdateInstaller::State {
             if (output.value == INVALID_HANDLE_VALUE) return GetLastError();
             DWORD failure = ERROR_SUCCESS;
             UpdateError category = UpdateError::None;
-            if (!ReadUpdateResponse(update.download_page, kMaximumInstallerBytes, cancelled,
+            if (!ReadUpdateWithFallback(update.download_page, kMaximumInstallerBytes, cancelled,
+                    [&] {
+                        LARGE_INTEGER start{};
+                        return SetFilePointerEx(output.value, start, nullptr, FILE_BEGIN) &&
+                            SetEndOfFile(output.value);
+                    },
                     [&](const void* data, DWORD size) {
                         DWORD written = 0;
                         return WriteFile(output.value, data, size, &written, nullptr) && written == size;

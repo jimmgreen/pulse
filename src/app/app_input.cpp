@@ -510,6 +510,7 @@ void CancelRenameClick(AppState& s) {
     s.renameClickTab = nullptr;
     s.renameClickIndex = -1;
     s.renameClickDue = 0;
+    s.renameClickStarted = 0;
     s.renameClickPath.clear();
 }
 
@@ -1695,6 +1696,7 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             HandleListRowClick(*s, hit.index, ctrl, shift);
             if (renameCandidate && tab == ActiveTab(*s)) {
                 s->renameClickCandidate = true;
+                s->renameClickStarted = GetTickCount64();
                 s->renameClickPane = s->pane;
                 s->renameClickTab = tab;
                 s->renameClickIndex = hit.index;
@@ -2456,7 +2458,7 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             if (s->renameClickCandidate && s->renameClickDue == 0) {
                 const int mx = GET_X_LPARAM(lParam);
                 const int my = GET_Y_LPARAM(lParam);
-                ui::WindowViewModel vm = BuildVm(*s);
+                ui::WindowViewModel vm = BuildVm(*s, false);
                 D2D1_RECT_F rect = D2D1::RectF(
                     0, 0, static_cast<float>(s->compositor.Width()),
                     static_cast<float>(s->compositor.Height()));
@@ -2469,7 +2471,8 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                     hit.index == s->renameClickIndex &&
                     PointInHitItemName(*s, vm, hit, static_cast<float>(mx), static_cast<float>(my));
                 if (valid) {
-                    s->renameClickDue = GetTickCount64() + GetDoubleClickTime();
+                    // Double-click recognition starts on press, not release.
+                    s->renameClickDue = s->renameClickStarted + GetDoubleClickTime();
                 } else {
                     CancelRenameClick(*s);
                 }

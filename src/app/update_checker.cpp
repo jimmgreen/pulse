@@ -288,7 +288,8 @@ UpdateResult CheckConfiguredManifest(const std::atomic<bool>& cancelled) {
     std::string document;
     UpdateError category = UpdateError::Network;
     DWORD error = ERROR_SUCCESS;
-    if (!ReadUpdateResponse(PULSE_UPDATE_MANIFEST_URL, kMaximumManifestBytes, cancelled,
+    if (!ReadUpdateWithFallback(PULSE_UPDATE_MANIFEST_URL, kMaximumManifestBytes, cancelled,
+            [&] { document.clear(); return true; },
             [&](const void* data, DWORD size) { document.append(static_cast<const char*>(data), size); return true; },
             category, error)) {
         result.error = category;
