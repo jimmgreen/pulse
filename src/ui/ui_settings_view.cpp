@@ -761,8 +761,13 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
                      22.0f * scale_);
         MakeBrush(dc, theme.text_secondary, brTextSecondary_);
         DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(),
-                     vm.settings_update_status,
+                     vm.settings_version,
                      lay.update_card.left + 16.0f * scale_, lay.update_card.top + 40.0f * scale_,
+                     lay.update_card.right - lay.update_card.left - 32.0f * scale_,
+                     22.0f * scale_);
+        DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(),
+                     vm.settings_update_status,
+                     lay.update_card.left + 16.0f * scale_, lay.update_card.top + 66.0f * scale_,
                      lay.update_card.right - lay.update_card.left - 32.0f * scale_,
                      38.0f * scale_);
         fluent::ControlState check{};

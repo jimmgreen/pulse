@@ -1471,7 +1471,7 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
         const float download_w = std::min(available_width, label_btn_w(
             pulse::l10n::Get(pulse::l10n::StringId::DownloadUpdate)));
         const bool stack_updates = vm.settings_update_available && check_w + gap + download_w > available_width;
-        const float update_h = 148.0f * scale +
+        const float update_h = 174.0f * scale +
             (stack_updates ? 40.0f * scale : 0.0f);
         l.update_card = D2D1::RectF(card_left, y, card_right, y + update_h);
         const float check_y = y + update_h - (stack_updates ? 88.0f : 48.0f) * scale;

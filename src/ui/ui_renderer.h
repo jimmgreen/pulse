@@ -220,6 +220,7 @@ struct SidebarGroup {
 // a deterministic per-card jitter (path-keyed), so draw and hit-test can
 // never disagree. Neighboring cards overlap by at most 50%.
 struct TrayCardView {
+    int exit_layout_count = 1;
     std::wstring path;
     std::wstring name;
     DWORD attrs = 0;
@@ -815,6 +816,7 @@ private:
     Compositor* compositor_ = nullptr;
     fluent::Painter painter_;
     ShellIconCache icon_cache_;
+    std::unordered_map<ID2D1Bitmap*, ComPtr<ID2D1Effect>> tray_shadows_;
     ThumbnailCache thumbnail_cache_;
     PreviewHandlerHost preview_handler_;
     HWND notify_hwnd_ = nullptr;

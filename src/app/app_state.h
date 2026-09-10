@@ -454,13 +454,17 @@ struct AppState {
         bool is_dir = false;
         bool missing = false;
         bool ghost = false;     // removed from the tray, fading out
+        ULONGLONG exit_started = 0;
+        float exit_opacity = 1.0f;
+        int layout_count = 1;
         float slot = 0.0f;      // deck slot (0 = center); eases toward layout
         float hover = 0.0f;     // 0..1 raise + straighten
         float appear = 0.0f;    // 0 = just collected, eases to 1
-        float opacity = 1.0f;   // ghosts ease to 0, then the entry is dropped
+        float opacity = 1.0f;
     };
     std::unordered_map<std::wstring, TrayCardAnim> trayCards;
     float trayOpen = 0.0f;      // eased drag-over scatter boost
+    ULONGLONG trayLastTick = 0;
     int trayDeckOffset = 0;     // window start into the newest-first item list
     int trayWheelAccum = 0;     // sub-notch wheel delta accumulator
     size_t trayDeckLastTotal = 0; // collect detection (window resets to newest)

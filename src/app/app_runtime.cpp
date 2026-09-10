@@ -932,8 +932,12 @@ std::wstring DetailsAttributeText(DWORD attrs) {
 // Returns true while anything is still moving (caller invalidates).
 bool TickTrayDeck(AppState& s) {
     bool dirty = false;
-    auto ease = [&dirty](float& cur, float target, float k) {
-        const float next = cur + (target - cur) * k;
+    const ULONGLONG now = GetTickCount64();
+    const float elapsed = s.trayLastTick ? static_cast<float>(now - s.trayLastTick) : 16.0f;
+    s.trayLastTick = now;
+    auto ease = [&dirty, elapsed](float& cur, float target, float k) {
+        const float timed_k = 1.0f - std::pow(1.0f - k, elapsed / 16.0f);
+        const float next = cur + (target - cur) * timed_k;
         if (std::abs(next - cur) > 0.0015f) { cur = next; dirty = true; }
         else if (cur != target) { cur = target; dirty = true; }
     };
@@ -974,6 +978,7 @@ bool TickTrayDeck(AppState& s) {
         a.is_dir = item.is_dir;
         a.missing = !item.exists;
         a.ghost = false;
+        a.layout_count = n;
         ease(a.slot, target_slot, 0.22f);
         ease(a.appear, 1.0f, 0.16f);
         ease(a.hover, i == hovered ? 1.0f : 0.0f, 0.28f);
@@ -985,10 +990,17 @@ bool TickTrayDeck(AppState& s) {
     for (auto it = s.trayCards.begin(); it != s.trayCards.end();) {
         if (live.count(it->first)) { ++it; continue; }
         AppState::TrayCardAnim& a = it->second;
-        if (!a.ghost) { a.ghost = true; a.hover = 0.0f; dirty = true; }
-        ease(a.opacity, 0.0f, 0.22f);
+        if (!a.ghost) {
+            a.ghost = true;
+            a.exit_started = now;
+            a.exit_opacity = a.opacity;
+        }
+        // A bounded, time-based ease-out avoids a long tail at low frame rates.
+        const float progress = std::clamp(static_cast<float>(now - a.exit_started) / 140.0f, 0.0f, 1.0f);
+        a.opacity = a.exit_opacity * (1.0f - progress) * (1.0f - progress);
+        dirty = true;
         ++ghosts;
-        if (a.opacity <= 0.02f || ghosts > 6) { it = s.trayCards.erase(it); dirty = true; }
+        if (progress >= 1.0f || ghosts > 6) { it = s.trayCards.erase(it); dirty = true; }
         else ++it;
     }
     return dirty;
@@ -1249,7 +1261,9 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
             card.attrs = anim.attrs;
             card.missing = anim.missing;
             card.ghost = true;
+            card.exit_layout_count = anim.layout_count;
             card.slot = anim.slot;
+            card.hover = anim.hover;
             card.appear = anim.appear;
             card.opacity = anim.opacity;
             deck.cards.push_back(std::move(card));

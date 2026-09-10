@@ -206,15 +206,13 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case WM_NCCALCSIZE: {
         if (wParam && IsZoomed(hwnd)) {
             auto* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(lParam);
-            const UINT dpi = pulse::compat::WindowDpi(hwnd);
-            const int frameX = pulse::compat::SystemMetricsForDpi(SM_CXSIZEFRAME, dpi)
-                             + pulse::compat::SystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
-            const int frameY = pulse::compat::SystemMetricsForDpi(SM_CYSIZEFRAME, dpi)
-                             + pulse::compat::SystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
-            params->rgrc[0].left += frameX;
-            params->rgrc[0].right -= frameX;
-            params->rgrc[0].top += frameY;
-            params->rgrc[0].bottom -= frameY;
+            MONITORINFO monitor{sizeof(monitor)};
+            if (GetMonitorInfoW(MonitorFromRect(&params->rgrc[0],
+                    MONITOR_DEFAULTTONEAREST), &monitor)) {
+                // Our custom frame has no invisible maximized border to inset.
+                // Use the destination monitor's work area, including taskbar offsets.
+                params->rgrc[0] = monitor.rcWork;
+            }
         }
         return 0;
     }
@@ -549,6 +547,15 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         float sc = s ? s->scale : 1.0f;
         mmi->ptMinTrackSize.x = (LONG)(640 * sc);
         mmi->ptMinTrackSize.y = (LONG)(420 * sc);
+        MONITORINFO monitor{sizeof(monitor)};
+        if (GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &monitor)) {
+            mmi->ptMaxPosition.x = monitor.rcWork.left - monitor.rcMonitor.left;
+            mmi->ptMaxPosition.y = monitor.rcWork.top - monitor.rcMonitor.top;
+            mmi->ptMaxSize.x = monitor.rcWork.right - monitor.rcWork.left;
+            mmi->ptMaxSize.y = monitor.rcWork.bottom - monitor.rcWork.top;
+            mmi->ptMaxTrackSize.x = std::max(mmi->ptMaxTrackSize.x, mmi->ptMaxSize.x);
+            mmi->ptMaxTrackSize.y = std::max(mmi->ptMaxTrackSize.y, mmi->ptMaxSize.y);
+        }
         return 0;
     }
 

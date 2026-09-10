@@ -319,7 +319,13 @@ void MainRenderer::DrawTrayDeck(const WindowViewModel& vm, const D2D1_RECT_F& pa
                                 const Theme& theme) {
     if (vm.tray_deck.cards.empty() || !compositor_ || !compositor_->Dc()) return;
     ID2D1DeviceContext* dc = compositor_->Dc();
-    const TrayFanGeom g = TrayFanGeometry(panel_rc, vm.tray_deck.live_count,
+    int layout_count = vm.tray_deck.live_count;
+    if (layout_count == 0) {
+        // Keep the cleared fan in place instead of collapsing to a single icon.
+        for (const auto& card : vm.tray_deck.cards)
+            layout_count = std::max(layout_count, card.exit_layout_count);
+    }
+    const TrayFanGeom g = TrayFanGeometry(panel_rc, layout_count,
                                           vm.tray_deck.open, scale_, tray_icon_dip_);
 
     // Ghosts (exiting) underneath; live icons top-to-bottom so lower cards
@@ -347,14 +353,24 @@ void MainRenderer::DrawTrayDeck(const WindowViewModel& vm, const D2D1_RECT_F& pa
                                    card.name, card.is_dir, card.attrs, g.icon);
         if (!drewThumbnail && bitmap) {
             // Soft drop shadow straight off the bitmap silhouette, no card.
-            ComPtr<ID2D1Effect> shadow;
-            if (SUCCEEDED(dc->CreateEffect(kShadowEffectClsid, &shadow)) && shadow.get()) {
-                shadow->SetInput(0, bitmap);
+            // Effects retain their inputs, so pointer keys stay valid until eviction.
+            auto found = tray_shadows_.find(bitmap);
+            if (found == tray_shadows_.end()) {
+                if (tray_shadows_.size() >= 32) tray_shadows_.clear();
+                ComPtr<ID2D1Effect> created;
+                if (SUCCEEDED(dc->CreateEffect(kShadowEffectClsid, &created)) && created.get()) {
+                    created->SetInput(0, bitmap);
+                    created->SetValue(D2D1_PROPERTY_CACHED, TRUE);
+                    found = tray_shadows_.emplace(bitmap, std::move(created)).first;
+                }
+            }
+            if (found != tray_shadows_.end()) {
+                ID2D1Effect* shadow = found->second.get();
                 shadow->SetValue(D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION,
                                  (hovered ? 5.0f : 3.0f) * scale_);
                 shadow->SetValue(D2D1_SHADOW_PROP_COLOR,
                     D2D1::Vector4F(0.0f, 0.0f, 0.0f, (vm.dark ? 0.55f : 0.30f) * opacity));
-                dc->DrawImage(shadow.get(), D2D1::Point2F(0.0f, 2.0f * scale_),
+                dc->DrawImage(shadow, D2D1::Point2F(0.0f, 2.0f * scale_),
                               D2D1_INTERPOLATION_MODE_LINEAR);
             }
             dc->DrawBitmap(bitmap, &dest, opacity,
