@@ -1,6 +1,8 @@
 #include "../common/localization.h"
 
 #include <cstdio>
+#include <atomic>
+#include <thread>
 
 namespace {
 
@@ -15,8 +17,81 @@ int main() {
     using namespace pulse::l10n;
     bool passed = true;
     Initialize(GetModuleHandleW(nullptr), L"zh-CN");
+    const auto& held_chinese = Get(StringId::TabRename);
+    SetLanguage(L"en-US");
+    passed &= Report("language switch preserves strings held by worker tasks",
+        held_chinese == L"重命名标签页" && Get(StringId::TabRename) == L"Rename tab");
+    std::atomic<bool> worker_ok{true};
+    std::thread reader([&] {
+        for (int i = 0; i < 1000; ++i) {
+            const auto& label = Get(StringId::TabRename);
+            if (label != L"重命名标签页" && label != L"Rename tab") worker_ok = false;
+        }
+    });
+    for (int i = 0; i < 100; ++i) SetLanguage(i % 2 ? L"en-US" : L"zh-CN");
+    reader.join();
+    passed &= Report("worker localization remains valid during language switches", worker_ok.load());
     for (const auto language : {L"zh-CN", L"en-US"}) {
         SetLanguage(language);
+        bool complete = true;
+        for (UINT id = 1500; id <= 1719; ++id) {
+            if ((id > 1524 && id < 1550) || (id > 1573 && id < 1600) ||
+                (id > 1685 && id < 1700)) continue;
+            complete &= !Get(static_cast<StringId>(id)).empty();
+        }
+        passed &= Report("audited menus dialogs and status strings are present", complete);
+        const bool chinese = std::wstring(language) == L"zh-CN";
+        passed &= Report("tag and badge menus follow display language",
+            Get(StringId::TagSearchHint) == (chinese ? L"搜索或新建标签…" : L"Search or create a tag…") &&
+            Get(StringId::ColorRed) == (chinese ? L"红色" : L"Red") &&
+            Get(StringId::EditBadge) == (chinese ? L"编辑徽章" : L"Edit badge") &&
+            Get(StringId::Unstar) == (chinese ? L"取消星标" : L"Unstar"));
+        wchar_t tag_message[256]{};
+        const auto& tag_pattern = Get(StringId::TagDeleteUsedFormat);
+        swprintf_s(tag_message, tag_pattern.c_str(), L"100% 工作", size_t{3});
+        passed &= Report("tag deletion preserves user names and association count",
+            std::wstring(tag_message) == (chinese
+                ? L"“100% 工作”已用于 3 个项目。\n删除后将移除这些关联。"
+                : L"“100% 工作” is used by 3 items.\nDeleting it will remove these associations."));
+        passed &= Report("tab menu TabNewRight follows display language",
+            Get(StringId::TabNewRight) == (std::wstring(language) == L"zh-CN" ? L"在右侧新建标签页" : L"New tab to the right"));
+        passed &= Report("tab menu TabDuplicate follows display language",
+            Get(StringId::TabDuplicate) == (std::wstring(language) == L"zh-CN" ? L"复制标签页" : L"Duplicate tab"));
+        passed &= Report("tab menu TabPin follows display language",
+            Get(StringId::TabPin) == (std::wstring(language) == L"zh-CN" ? L"固定标签页" : L"Pin tab"));
+        passed &= Report("tab menu TabUnpin follows display language",
+            Get(StringId::TabUnpin) == (std::wstring(language) == L"zh-CN" ? L"取消固定标签页" : L"Unpin tab"));
+        passed &= Report("tab menu TabCreateGroup follows display language",
+            Get(StringId::TabCreateGroup) == (std::wstring(language) == L"zh-CN" ? L"创建新组" : L"Create group"));
+        passed &= Report("tab menu TabNewGroup follows display language",
+            Get(StringId::TabNewGroup) == (std::wstring(language) == L"zh-CN" ? L"将标签页添加到新组" : L"Add tab to new group"));
+        passed &= Report("tab menu TabJoinGroup follows display language",
+            Get(StringId::TabJoinGroup) == (std::wstring(language) == L"zh-CN" ? L"将标签页添加到" : L"Add tab to group"));
+        passed &= Report("tab menu TabUnnamedGroup follows display language",
+            Get(StringId::TabUnnamedGroup) == (std::wstring(language) == L"zh-CN" ? L"(未命名组)" : L"(Unnamed group)"));
+        passed &= Report("tab menu TabRemoveGroup follows display language",
+            Get(StringId::TabRemoveGroup) == (std::wstring(language) == L"zh-CN" ? L"从组中移除该标签页" : L"Remove tab from group"));
+        passed &= Report("tab menu TabClose follows display language",
+            Get(StringId::TabClose) == (std::wstring(language) == L"zh-CN" ? L"关闭标签页" : L"Close tab"));
+        passed &= Report("tab menu TabCloseOthers follows display language",
+            Get(StringId::TabCloseOthers) == (std::wstring(language) == L"zh-CN" ? L"关闭其他标签页" : L"Close other tabs"));
+        passed &= Report("tab menu TabCloseRight follows display language",
+            Get(StringId::TabCloseRight) == (std::wstring(language) == L"zh-CN" ? L"关闭右侧标签页" : L"Close tabs to the right"));
+        passed &= Report("tab menu TabGroupName follows display language",
+            Get(StringId::TabGroupName) == (std::wstring(language) == L"zh-CN" ? L"标签组名称…" : L"Tab group name…"));
+        passed &= Report("tab menu TabGroupNew follows display language",
+            Get(StringId::TabGroupNew) == (std::wstring(language) == L"zh-CN" ? L"在组中新建标签页" : L"New tab in group"));
+        passed &= Report("tab menu TabUngroup follows display language",
+            Get(StringId::TabUngroup) == (std::wstring(language) == L"zh-CN" ? L"取消组合" : L"Ungroup"));
+        passed &= Report("tab menu TabGroupClose follows display language",
+            Get(StringId::TabGroupClose) == (std::wstring(language) == L"zh-CN" ? L"关闭分组标签页" : L"Close group"));
+        passed &= Report("tab menu TabMenuSearch follows display language",
+            Get(StringId::TabMenuSearch) == (std::wstring(language) == L"zh-CN" ? L"搜索命令、文件夹…" : L"Search commands, folders…"));
+        passed &= Report("tab identity menu and settings labels are translated",
+            !Get(StringId::PinnedNames).empty() && !Get(StringId::PinnedNamesDesc).empty() &&
+            !Get(StringId::TabRename).empty() && !Get(StringId::TabNameHint).empty() &&
+            !Get(StringId::TabNameSave).empty() && !Get(StringId::TabNameReset).empty() &&
+            !Get(StringId::TabColor).empty() && !Get(StringId::TabColorNone).empty());
         passed &= Report("update installation states are translated",
             !Get(StringId::DownloadingUpdate).empty() && !Get(StringId::InstallingUpdate).empty() &&
             !Get(StringId::UpdateClickToInstall).empty() && !Get(StringId::UpdateCancelled).empty() &&

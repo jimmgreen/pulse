@@ -371,7 +371,7 @@ std::vector<ui::FluentMenuItem> BuildCommandPalette(const std::wstring& query,
         add_cmd(CmdNewFolder, l10n::Get(l10n::StringId::NewFolder).c_str(), kGlyphNewFolder, L"F7");
         add_cmd(CmdPinWorkspace, l10n::Get(l10n::StringId::PinWorkspace).c_str(), kGlyphFolder, nullptr);
         add_cmd(CmdCopyPath, l10n::Get(l10n::StringId::CopyPath).c_str(), kGlyphLink, L"Ctrl+Shift+C");
-        add_cmd(CmdInstallFullIndex, L"启用全盘索引（安装服务）", kGlyphSearch, nullptr);
+        add_cmd(CmdInstallFullIndex, l10n::Get(l10n::StringId::EnableFullIndex).c_str(), kGlyphSearch, nullptr);
         add_cmd(CmdSettings, l10n::Get(l10n::StringId::Settings).c_str(), kGlyphSettings, nullptr);
         add_cmd(CmdOpenRecycle, l10n::Get(l10n::StringId::RecycleBin).c_str(), kGlyphRecycle, nullptr);
         add_cmd(CmdBatchRename, l10n::Get(l10n::StringId::BatchRename).c_str(), kGlyphRename, L"Ctrl+Shift+R");
@@ -396,7 +396,7 @@ std::vector<ui::FluentMenuItem> BuildCommandPalette(const std::wstring& query,
         if (!needle.empty() && !project_only) {
             if (!items.empty()) items.back().separator_after = true;
             wchar_t count[64];
-            swprintf_s(count, L"%zu 项", total);
+            swprintf_s(count, l10n::Get(l10n::StringId::SearchCount).c_str(), total);
             items.push_back(Item(CmdSearchAll,
                 l10n::Get(has_content ? l10n::StringId::SearchContentResults
                                       : l10n::StringId::ShowAllResults).c_str(),

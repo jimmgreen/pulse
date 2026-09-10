@@ -1,4 +1,5 @@
 #include "../common/windows_compat.h"
+#include "../common/localization.h"
 #include "settings_controller.h"
 #include "../index/index_client.h"
 #include "../index/network_agent_client.h"
@@ -112,7 +113,7 @@ bool SettingsController::StartTask(SettingsTask task, SettingsTaskOperation oper
             result.ok = operation(task, result.error);
         } catch (...) {
             result.ok = false;
-            if (result.error.empty()) result.error = L"设置操作异常终止。";
+            if (result.error.empty()) result.error = l10n::Get(l10n::StringId::SettingsAborted).c_str();
         }
 
         if (network) {
@@ -156,7 +157,7 @@ bool SettingsController::StartUiTask(SettingsTask task) {
             return index::IndexClient::ConfigureExcludePathElevated(value.path, value.enabled);
         case SettingsTaskKind::InstallService:
             if (index::IndexClient::InstallServiceElevated()) return true;
-            error = L"无法安装或启动 PulseIndex 服务。若刚覆盖安装，请查看 C:\\ProgramData\\Pulse\\index-service.log。";
+            error = l10n::Get(l10n::StringId::SettingsServiceStartError).c_str();
             return false;
         case SettingsTaskKind::RebuildIndex:
             return index::IndexClient::RebuildElevated();
@@ -199,14 +200,14 @@ SettingsTaskEffect SettingsController::CompleteTask(const SettingsTaskResult& re
         error_ = result.error;
     } else if (result.task.kind == SettingsTaskKind::InstallService) {
         error_ = result.error.empty()
-            ? L"无法安装或启动索引服务。管理员授权可能已取消，或服务启动后异常退出。"
+            ? l10n::Get(l10n::StringId::SettingsServiceError).c_str()
             : result.error;
     } else if (result.task.kind == SettingsTaskKind::NetworkRemove) {
-        error_ = L"无法移除服务器文件夹。";
+        error_ = l10n::Get(l10n::StringId::SettingsRemoveServerError).c_str();
     } else if (IsNetworkTask(result.task.kind)) {
-        error_ = L"无法添加服务器文件夹。";
+        error_ = l10n::Get(l10n::StringId::SettingsAddServerError).c_str();
     } else {
-        error_ = L"操作未完成。管理员授权可能已取消，或索引服务无法更新配置。";
+        error_ = l10n::Get(l10n::StringId::SettingsOperationError).c_str();
     }
     return effect;
 }
@@ -315,6 +316,9 @@ void SettingsController::ToggleUi(int index) {
     } else if (index == 5) {
         prefs_->show_hidden_files = !prefs_->show_hidden_files;
         SaveAndApply(SettingsEffect::FileVisibility);
+    } else if (index == 6) {
+        prefs_->show_pinned_tab_names = !prefs_->show_pinned_tab_names;
+        SaveAndApply(SettingsEffect::None);
     } else if (index >= 10 && index < 15) {
         static constexpr ipc::CtxMenuGroup groups[] = {
             ipc::CtxMenuGroup::Software, ipc::CtxMenuGroup::OpenWith,
@@ -349,7 +353,7 @@ void SettingsController::ToggleVolume(int position) {
 void SettingsController::AddExclude() {
     if (!index_ || !index_->ServiceMode() || !ui_.pick_folder || !ui_.task_completion) return;
     std::wstring path;
-    if (!ui_.pick_folder(path, L"选择要排除的本地文件夹")) return;
+    if (!ui_.pick_folder(path, l10n::Get(l10n::StringId::SettingsPickExclude).c_str())) return;
     ClearError();
     SettingsTask task{SettingsTaskKind::Exclude};
     task.path = std::move(path);
@@ -379,7 +383,7 @@ void SettingsController::IndexAction(int action) {
     std::wstring path;
     const bool set_path = action == 2 && index_->ServiceMode();
     if (set_path && (!ui_.pick_folder ||
-        !ui_.pick_folder(path, L"选择索引存储位置"))) return;
+        !ui_.pick_folder(path, l10n::Get(l10n::StringId::SettingsPickStorage).c_str()))) return;
     ClearError();
     SettingsTask task{action == 0 ? SettingsTaskKind::RebuildIndex
         : set_path ? SettingsTaskKind::ConfigureIndexPath
@@ -397,7 +401,7 @@ void SettingsController::NetworkAction(int action, bool pin_after_add) {
     }
     if (action != 0 || !ui_.pick_folder) return;
     std::wstring path;
-    if (!ui_.pick_folder(path, L"选择要索引的服务器文件夹")) return;
+    if (!ui_.pick_folder(path, l10n::Get(l10n::StringId::SettingsPickServer).c_str())) return;
     ClearError();
     SettingsTask task{SettingsTaskKind::NetworkAdd};
     task.path = std::move(path);

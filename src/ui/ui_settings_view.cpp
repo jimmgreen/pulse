@@ -237,9 +237,14 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
             pulse::l10n::StringId::LanguageZhCN,
             pulse::l10n::StringId::LanguageEnUS,
         };
+        painter_.DrawSegmentedTrack(D2D1::RectF(lay.language_segment[0].left,
+            lay.language_segment[0].top, lay.language_segment[2].right, lay.language_segment[2].bottom));
         for (int i = 0; i < 3; ++i) {
             fluent::SegmentedItemSpec segment;
             segment.bounds = lay.language_segment[i];
+            segment.bounds = D2D1::RectF(segment.bounds.left + 3 * scale_, segment.bounds.top + 3 * scale_,
+                segment.bounds.right - 3 * scale_, segment.bounds.bottom - 3 * scale_);
+            segment.shared_track = true;
             segment.text = pulse::l10n::Get(kLanguageLabels[i]);
             segment.position = i == 0 ? fluent::SegmentPosition::First
                              : i == 2 ? fluent::SegmentPosition::Last
@@ -346,6 +351,11 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
                  pulse::l10n::Get(pulse::l10n::StringId::SettingsShowHidden),
                  pulse::l10n::Get(pulse::l10n::StringId::SettingsShowHiddenDesc),
                  vm.settings_show_hidden_files, 5);
+        draw_card(lay.pinned_names_row);
+        draw_row(lay.pinned_names_row,
+                 pulse::l10n::Get(pulse::l10n::StringId::PinnedNames),
+                 pulse::l10n::Get(pulse::l10n::StringId::PinnedNamesDesc),
+                 vm.show_pinned_tab_names, 6);
     } else if (vm.settings_page == 1) {
         fluent::InfoBarSpec info;
         info.bounds = lay.index_info;
@@ -815,6 +825,11 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
         for (int i = 0; i < 3; ++i) {
             fluent::SegmentedItemSpec segment;
             segment.bounds = lay.dup_scope[i];
+            if (i == 0) painter_.DrawSegmentedTrack(D2D1::RectF(segment.bounds.left,
+                segment.bounds.top, lay.dup_scope[2].right, lay.dup_scope[2].bottom));
+            segment.bounds = D2D1::RectF(segment.bounds.left + 3 * scale_, segment.bounds.top + 3 * scale_,
+                segment.bounds.right - 3 * scale_, segment.bounds.bottom - 3 * scale_);
+            segment.shared_track = true;
             segment.text = pulse::l10n::Get(kScope[i]);
             segment.position = i == 0 ? fluent::SegmentPosition::First
                              : i == 2 ? fluent::SegmentPosition::Last
@@ -873,6 +888,11 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
         for (int i = 0; i < 3; ++i) {
             fluent::SegmentedItemSpec segment;
             segment.bounds = lay.dup_min_size[i];
+            if (i == 0) painter_.DrawSegmentedTrack(D2D1::RectF(segment.bounds.left,
+                segment.bounds.top, lay.dup_min_size[2].right, lay.dup_min_size[2].bottom));
+            segment.bounds = D2D1::RectF(segment.bounds.left + 3 * scale_, segment.bounds.top + 3 * scale_,
+                segment.bounds.right - 3 * scale_, segment.bounds.bottom - 3 * scale_);
+            segment.shared_track = true;
             segment.text = pulse::l10n::Get(kMin[i]);
             segment.position = i == 0 ? fluent::SegmentPosition::First
                              : i == 2 ? fluent::SegmentPosition::Last

@@ -192,13 +192,13 @@ std::wstring ParentName(const std::wstring& path) {
 }
 
 std::wstring FormatDuration(uint64_t seconds) {
-    if (seconds == 0) return L"正在估算";
-    if (seconds < 60) return std::to_wstring(seconds) + L" 秒";
+    if (seconds == 0) return l10n::Get(l10n::StringId::OpEstimating).c_str();
+    if (seconds < 60) return std::to_wstring(seconds) + l10n::Get(l10n::StringId::OpSeconds).c_str();
     const uint64_t minutes = seconds / 60;
-    if (minutes < 60) return std::to_wstring(minutes) + L" 分 "
-        + std::to_wstring(seconds % 60) + L" 秒";
-    return std::to_wstring(minutes / 60) + L" 小时 "
-        + std::to_wstring(minutes % 60) + L" 分";
+    if (minutes < 60) return std::to_wstring(minutes) + l10n::Get(l10n::StringId::OpMinutes).c_str()
+        + std::to_wstring(seconds % 60) + l10n::Get(l10n::StringId::OpSeconds).c_str();
+    return std::to_wstring(minutes / 60) + l10n::Get(l10n::StringId::OpHours).c_str()
+        + std::to_wstring(minutes % 60) + l10n::Get(l10n::StringId::OpMinutesEnd).c_str();
 }
 
 class ConflictWindow {
@@ -221,7 +221,7 @@ public:
 
         const int width = static_cast<int>(480 * scale_);
         const int height = static_cast<int>(428 * scale_);
-        hwnd_ = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, kConflictClass, L"替换或跳过文件",
+        hwnd_ = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, kConflictClass, l10n::Get(l10n::StringId::OpConflictTitle).c_str(),
             WS_POPUP | WS_THICKFRAME | WS_SYSMENU,
             CW_USEDEFAULT, CW_USEDEFAULT, width, height, owner, nullptr,
             wc.hInstance, this);
@@ -328,7 +328,7 @@ private:
                      scale_);
 
         painter_.DrawGlyph(L"\xE8C8", Rect(scale_, 14, 11, 22, 22), theme.accent);
-        painter_.DrawText(L"替换或跳过文件", Rect(scale_, 42, 0, 260, 44),
+        painter_.DrawText(l10n::Get(l10n::StringId::OpConflictTitle).c_str(), Rect(scale_, 42, 0, 260, 44),
                           compositor_.SmallFormat(), theme.text);
         fluent::ControlState close_state{};
         close_state.hovered = hover_ == 7;
@@ -341,15 +341,15 @@ private:
                                  + ParentName(conflict_.destination);
         painter_.DrawBadge({ Rect(scale_, 20, 58, 250, 24), route,
                              fluent::BadgeKind::Neutral });
-        const std::wstring headline = L"目标中已包含“" + LeafName(conflict_.destination) + L"”";
+        const std::wstring headline = l10n::Get(l10n::StringId::OpConflictLead).c_str() + LeafName(conflict_.destination) + L"”";
         painter_.DrawText(headline, Rect(scale_, 20, 84, 440, 30),
                           compositor_.HeaderFormat(), theme.text);
 
-        DrawCard(theme, 0, L"替换目标中的文件", L"使用来源中的版本覆盖现有文件",
+        DrawCard(theme, 0, l10n::Get(l10n::StringId::OpReplaceFile).c_str(), l10n::Get(l10n::StringId::OpReplaceDesc).c_str(),
                  L"\xE73E", HexColor(0x107C10), L"Alt+R");
-        DrawCard(theme, 1, L"跳过该文件", L"不做更改，保留目标中的现有文件",
+        DrawCard(theme, 1, l10n::Get(l10n::StringId::OpSkipFile).c_str(), l10n::Get(l10n::StringId::OpSkipDesc).c_str(),
                  L"\xE72A", HexColor(0x0078D4), L"Alt+S");
-        DrawCard(theme, 2, L"保留两者", L"自动生成副本名称并继续传输",
+        DrawCard(theme, 2, l10n::Get(l10n::StringId::OpKeepBoth).c_str(), l10n::Get(l10n::StringId::OpKeepBothDesc).c_str(),
                  L"\xE8C8", HexColor(0x6B69D6), L"Alt+K");
 
         if (conflict_.remaining > 1) {
@@ -357,8 +357,8 @@ private:
             check.checked = apply_all_;
             check.hovered = hover_ == 4;
             check.focused = focus_ == 3;
-            const std::wstring label = L"应用于剩余 " + std::to_wstring(conflict_.remaining)
-                                     + L" 个冲突";
+            const std::wstring label = l10n::Get(l10n::StringId::OpApplyLead).c_str() + std::to_wstring(conflict_.remaining)
+                                     + l10n::Get(l10n::StringId::OpApplyEnd).c_str();
             painter_.DrawCheckBox(CheckRect(), label, check);
         }
         painter_.FillRoundedRect(Rect(scale_, 0, details_ ? 474.0f : 360.0f, 480, 1), 0,
@@ -366,14 +366,14 @@ private:
         fluent::ControlState detail_state{};
         detail_state.hovered = hover_ == 5;
         detail_state.focused = focus_ == (conflict_.remaining > 1 ? 4 : 3);
-        painter_.DrawButton({ DetailRect(), details_ ? L"简略信息" : L"详细信息",
+        painter_.DrawButton({ DetailRect(), details_ ? l10n::Get(l10n::StringId::OpBrief).c_str() : l10n::Get(l10n::StringId::OpMore).c_str(),
                               details_ ? L"\xE70E" : L"\xE70D",
                               fluent::ButtonKind::Transparent, detail_state });
         fluent::ControlState cancel_state{};
         cancel_state.hovered = hover_ == 6;
         cancel_state.pressed = pressed_ == 6;
         cancel_state.focused = focus_ == (conflict_.remaining > 1 ? 5 : 4);
-        painter_.DrawButton({ CancelRect(), L"取消", {}, fluent::ButtonKind::Standard,
+        painter_.DrawButton({ CancelRect(), l10n::Get(l10n::StringId::Cancel).c_str(), {}, fluent::ButtonKind::Standard,
                               cancel_state });
 
         if (details_) {
@@ -381,14 +381,14 @@ private:
             painter_.FillRoundedRect(Rect(scale_, 20, top, 440, 104), 7 * scale_,
                                      dark_ ? HexColor(0x161616, 0.62f) : HexColor(0xFFFFFF, 0.62f));
             painter_.StrokeRoundedRect(Rect(scale_, 20, top, 440, 104), 7 * scale_, theme.stroke_card);
-            painter_.DrawText(L"来源", Rect(scale_, 32, top + 8, 190, 20),
+            painter_.DrawText(l10n::Get(l10n::StringId::OpSource).c_str(), Rect(scale_, 32, top + 8, 190, 20),
                               compositor_.SmallFormat(), theme.accent);
-            painter_.DrawText(L"现有", Rect(scale_, 252, top + 8, 190, 20),
+            painter_.DrawText(l10n::Get(l10n::StringId::OpExisting).c_str(), Rect(scale_, 252, top + 8, 190, 20),
                               compositor_.SmallFormat(), theme.text_secondary);
             const std::wstring source_meta = pulse::format::ByteSize(conflict_.source_size) + L"  ·  "
-                                           + pulse::format::LocalFileTime(conflict_.source_modified, L"未知");
+                                           + pulse::format::LocalFileTime(conflict_.source_modified, l10n::Get(l10n::StringId::OpUnknown).c_str());
             const std::wstring target_meta = pulse::format::ByteSize(conflict_.destination_size) + L"  ·  "
-                                           + pulse::format::LocalFileTime(conflict_.destination_modified, L"未知");
+                                           + pulse::format::LocalFileTime(conflict_.destination_modified, l10n::Get(l10n::StringId::OpUnknown).c_str());
             painter_.DrawText(source_meta, Rect(scale_, 32, top + 30, 198, 20),
                               compositor_.SmallFormat(), theme.text);
             painter_.DrawText(target_meta, Rect(scale_, 252, top + 30, 196, 20),
@@ -542,6 +542,8 @@ public:
     bool Show(HWND owner, const ConfirmDialogSpec& spec, bool dark, D2D1_COLOR_F accent) {
         owner_ = owner;
         spec_ = spec;
+        if (spec_.confirm_text.empty()) spec_.confirm_text = pulse::l10n::Get(pulse::l10n::StringId::ConfirmDefault);
+        if (spec_.cancel_text.empty()) spec_.cancel_text = pulse::l10n::Get(pulse::l10n::StringId::Cancel);
         dark_ = dark;
         accent_ = accent;
         accepted_ = false;
@@ -861,7 +863,7 @@ bool FileOperationWindow::Create(HWND owner, FileOperationCallbacks callbacks) {
     const UINT owner_dpi = pulse::compat::WindowDpi(owner_);
     const int width = MulDiv(static_cast<int>(kDlgW), owner_dpi, 96);
     const int height = MulDiv(static_cast<int>(kCollapsedH), owner_dpi, 96);
-    hwnd_ = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, kTransferClass, L"文件操作",
+    hwnd_ = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP, kTransferClass, l10n::Get(l10n::StringId::OpWindow).c_str(),
         WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX,
         CW_USEDEFAULT, CW_USEDEFAULT, width, height, owner_, nullptr,
         wc.hInstance, this);
@@ -993,20 +995,20 @@ void FileOperationWindow::Render() {
         else if (completed) title = l10n::Get(l10n::StringId::OpEmptied);
         else title = l10n::Get(l10n::StringId::OpEmptying);
     } else if (failed) {
-        title = deleting ? L"无法完成删除" : restoring ? L"无法完成还原"
-            : moving ? L"无法完成移动" : L"无法完成复制";
+        title = deleting ? l10n::Get(l10n::StringId::OpDeleteFailed).c_str() : restoring ? l10n::Get(l10n::StringId::OpRestoreFailed).c_str()
+            : moving ? l10n::Get(l10n::StringId::OpMoveFailed).c_str() : l10n::Get(l10n::StringId::OpCopyFailed).c_str();
     } else if (completed) {
-        title = (deleting ? L"已删除 " : restoring ? L"已还原 " : moving ? L"已移动 " : L"已复制 ")
-              + std::to_wstring(status_.completed_items) + L" 个项目";
+        title = (deleting ? l10n::Get(l10n::StringId::OpDeletedPrefix).c_str() : restoring ? l10n::Get(l10n::StringId::OpRestoredPrefix).c_str() : moving ? l10n::Get(l10n::StringId::OpMovedPrefix).c_str() : l10n::Get(l10n::StringId::OpCopiedPrefix).c_str())
+              + std::to_wstring(status_.completed_items) + l10n::Get(l10n::StringId::OpItemsSuffix).c_str();
     } else if (paused) {
-        title = deleting ? L"已暂停删除" : restoring ? L"已暂停还原"
-            : moving ? L"已暂停移动" : L"已暂停复制";
-    } else if (scanning) title = L"正在准备文件列表";
+        title = deleting ? l10n::Get(l10n::StringId::OpDeletePaused).c_str() : restoring ? l10n::Get(l10n::StringId::OpRestorePaused).c_str()
+            : moving ? l10n::Get(l10n::StringId::OpMovePaused).c_str() : l10n::Get(l10n::StringId::OpCopyPaused).c_str();
+    } else if (scanning) title = l10n::Get(l10n::StringId::OpPreparingList).c_str();
     else {
         const uint64_t count = status_.total_items > 0 ? status_.total_items
             : (std::max)(status_.completed_items, static_cast<uint64_t>(1));
-        title = (deleting ? L"正在删除 " : restoring ? L"正在还原 " : moving ? L"正在移动 " : L"正在复制 ")
-              + std::to_wstring(count) + L" 个项目";
+        title = (deleting ? l10n::Get(l10n::StringId::OpDeletingPrefix).c_str() : restoring ? l10n::Get(l10n::StringId::OpRestoringPrefix).c_str() : moving ? l10n::Get(l10n::StringId::OpMovingPrefix).c_str() : l10n::Get(l10n::StringId::OpCopyingPrefix).c_str())
+              + std::to_wstring(count) + l10n::Get(l10n::StringId::OpItemsSuffix).c_str();
     }
     painter_.DrawText(title, D2D1::RectF(ScaleDip(scale_, 36.0f), 0,
                                          chrome.minimize.left - ScaleDip(scale_, 8.0f),
@@ -1024,14 +1026,14 @@ void FileOperationWindow::Render() {
     painter_.FillRoundedRect(D2D1::RectF(0, ScaleDip(scale_, kTitleH), width,
                                          ScaleDip(scale_, kTitleH) + 1.0f), 0, theme.stroke_divider);
 
-    const std::wstring src = status_.source_label.empty() ? L"源" : status_.source_label;
-    const std::wstring dst = status_.destination_label.empty() ? L"目标" : status_.destination_label;
+    const std::wstring src = status_.source_label.empty() ? l10n::Get(l10n::StringId::OpSourceShort).c_str() : status_.source_label;
+    const std::wstring dst = status_.destination_label.empty() ? l10n::Get(l10n::StringId::OpDestination).c_str() : status_.destination_label;
     std::wstring subtitle;
     if (emptying) subtitle = l10n::Get(l10n::StringId::OpEmptyingSub);
-    else if (deleting) subtitle = L"正在删除 " + src;
-    else if (restoring) subtitle = L"正在还原 " + src;
-    else if (moving) subtitle = L"正在从 " + src + L" 移动到 " + dst;
-    else subtitle = L"正在从 " + src + L" 复制到 " + dst;
+    else if (deleting) subtitle = l10n::Get(l10n::StringId::OpDeletingPrefix).c_str() + src;
+    else if (restoring) subtitle = l10n::Get(l10n::StringId::OpRestoringPrefix).c_str() + src;
+    else if (moving) subtitle = l10n::Get(l10n::StringId::OpFromPrefix).c_str() + src + l10n::Get(l10n::StringId::OpMoveTo).c_str() + dst;
+    else subtitle = l10n::Get(l10n::StringId::OpFromPrefix).c_str() + src + l10n::Get(l10n::StringId::OpCopyTo).c_str() + dst;
     painter_.DrawText(subtitle, Rect(scale_, kPadX, 48, dip_w - kPadX - 72.0f, 18),
                       compositor_.SmallFormat(), theme.text);
     wchar_t percent[32];
@@ -1045,24 +1047,24 @@ void FileOperationWindow::Render() {
     std::wstring badge_text;
     fluent::BadgeKind badge_kind = fluent::BadgeKind::Success;
     if (failed) {
-        file_line = status_.last_error.empty() ? L"操作失败" : status_.last_error;
-        badge_text = L"失败";
+        file_line = status_.last_error.empty() ? l10n::Get(l10n::StringId::OpFailed).c_str() : status_.last_error;
+        badge_text = l10n::Get(l10n::StringId::OpFailedBadge).c_str();
         badge_kind = fluent::BadgeKind::Danger;
     } else if (paused) {
-        file_line = L"项目：" + (status_.current_item.empty() ? status_.summary : status_.current_item);
-        badge_text = L"已暂停";
+        file_line = l10n::Get(l10n::StringId::OpItemPrefix).c_str() + (status_.current_item.empty() ? status_.summary : status_.current_item);
+        badge_text = l10n::Get(l10n::StringId::OpPaused).c_str();
         badge_kind = fluent::BadgeKind::Warning;
     } else if (waiting) {
-        file_line = L"项目：" + (status_.current_item.empty() ? status_.summary : status_.current_item);
-        badge_text = L"等待冲突";
+        file_line = l10n::Get(l10n::StringId::OpItemPrefix).c_str() + (status_.current_item.empty() ? status_.summary : status_.current_item);
+        badge_text = l10n::Get(l10n::StringId::OpWaitingConflict).c_str();
         badge_kind = fluent::BadgeKind::Warning;
     } else if (completed) {
-        file_line = status_.summary.empty() ? L"全部项目已完成" : status_.summary;
-        badge_text = L"已完成";
+        file_line = status_.summary.empty() ? l10n::Get(l10n::StringId::OpAllCompleted).c_str() : status_.summary;
+        badge_text = l10n::Get(l10n::StringId::OpCompleted).c_str();
         badge_kind = fluent::BadgeKind::Success;
     } else if (scanning) {
-        file_line = status_.summary.empty() ? L"正在扫描文件…" : status_.summary;
-        badge_text = L"准备中";
+        file_line = status_.summary.empty() ? l10n::Get(l10n::StringId::OpScanning).c_str() : status_.summary;
+        badge_text = l10n::Get(l10n::StringId::OpPreparing).c_str();
         badge_kind = fluent::BadgeKind::Neutral;
     } else if (emptying) {
         file_line = status_.current_item.empty() ? status_.summary : status_.current_item;
@@ -1070,8 +1072,8 @@ void FileOperationWindow::Render() {
         badge_kind = fluent::BadgeKind::Warning;
     } else {
         const std::wstring item = status_.current_item.empty() ? status_.summary : status_.current_item;
-        file_line = L"项目：" + item;
-        badge_text = deleting ? L"正在删除" : moving ? L"正在移动" : L"正在复制";
+        file_line = l10n::Get(l10n::StringId::OpItemPrefix).c_str() + item;
+        badge_text = deleting ? l10n::Get(l10n::StringId::OpDeleting).c_str() : moving ? l10n::Get(l10n::StringId::OpMoving).c_str() : l10n::Get(l10n::StringId::OpCopying).c_str();
         badge_kind = fluent::BadgeKind::Success;
     }
     const float badge_w = std::max(48.0f, painter_.MeasureBadgeWidth(badge_text) / std::max(scale_, 0.001f));
@@ -1112,36 +1114,36 @@ void FileOperationWindow::Render() {
         dark_ ? HexColor(0xFFFFFF, 0.05f) : HexColor(0x000000, 0.05f));
     const bool byte_transfer = status_.type == ops::OpType::Copy
         || status_.type == ops::OpType::Move;
-    const std::wstring time_text = failed ? L"未完成"
-        : completed ? L"已完成"
-        : paused ? L"已暂停"
-        : waiting ? L"等待处理"
+    const std::wstring time_text = failed ? l10n::Get(l10n::StringId::OpIncomplete).c_str()
+        : completed ? l10n::Get(l10n::StringId::OpCompleted).c_str()
+        : paused ? l10n::Get(l10n::StringId::OpPaused).c_str()
+        : waiting ? l10n::Get(l10n::StringId::OpWaiting).c_str()
         : emptying ? l10n::Get(l10n::StringId::OpEmptying)
-        : !byte_transfer ? L"无需估算"
-        : status_.eta_seconds == 0 ? L"正在估算"
-        : L"约 " + FormatDuration(status_.eta_seconds);
+        : !byte_transfer ? l10n::Get(l10n::StringId::OpNoEstimate).c_str()
+        : status_.eta_seconds == 0 ? l10n::Get(l10n::StringId::OpEstimating).c_str()
+        : l10n::Get(l10n::StringId::OpApprox).c_str() + FormatDuration(status_.eta_seconds);
     const uint64_t remain_items = status_.total_items > status_.completed_items
         ? status_.total_items - status_.completed_items : 0;
     const uint64_t remain_bytes = status_.total_bytes > status_.transferred_bytes
         ? status_.total_bytes - status_.transferred_bytes : 0;
     std::wstring items_text;
-    if (failed) items_text = L"0 个";
-    else if (completed) items_text = L"0 个";
-    else if (status_.total_items == 0) items_text = L"正在计算";
+    if (failed) items_text = l10n::Get(l10n::StringId::OpZeroItems).c_str();
+    else if (completed) items_text = l10n::Get(l10n::StringId::OpZeroItems).c_str();
+    else if (status_.total_items == 0) items_text = l10n::Get(l10n::StringId::OpCalculating).c_str();
     else if (byte_transfer && status_.total_bytes > 0)
-        items_text = std::to_wstring(remain_items) + L" 个 ("
+        items_text = std::to_wstring(remain_items) + l10n::Get(l10n::StringId::OpCountBytes).c_str()
             + pulse::format::ByteSize(remain_bytes) + L")";
-    else items_text = std::to_wstring(remain_items) + L" 个";
-    const std::wstring speed_text = emptying || !byte_transfer ? L"无需估算"
+    else items_text = std::to_wstring(remain_items) + l10n::Get(l10n::StringId::OpCountSuffix).c_str();
+    const std::wstring speed_text = emptying || !byte_transfer ? l10n::Get(l10n::StringId::OpNoEstimate).c_str()
         : completed || failed || paused || waiting ? L"0 B/s"
-        : status_.bytes_per_second <= 0.0 ? L"正在估算"
+        : status_.bytes_per_second <= 0.0 ? l10n::Get(l10n::StringId::OpEstimating).c_str()
         : pulse::format::ByteSize(static_cast<uint64_t>(status_.bytes_per_second)) + L"/s";
     const D2D1_COLOR_F time_color = failed ? theme.danger : theme.text;
-    painter_.DrawText(L"剩余时间", Rect(scale_, 32, 124, 120, 14),
+    painter_.DrawText(l10n::Get(l10n::StringId::OpRemainingTime).c_str(), Rect(scale_, 32, 124, 120, 14),
                       compositor_.SmallFormat(), theme.text_secondary);
-    painter_.DrawText(L"剩余项目", Rect(scale_, 176, 124, 140, 14),
+    painter_.DrawText(l10n::Get(l10n::StringId::OpRemainingItems).c_str(), Rect(scale_, 176, 124, 140, 14),
                       compositor_.SmallFormat(), theme.text_secondary);
-    painter_.DrawText(L"当前速度", Rect(scale_, 328, 124, 110, 14),
+    painter_.DrawText(l10n::Get(l10n::StringId::OpCurrentSpeed).c_str(), Rect(scale_, 328, 124, 110, 14),
                       compositor_.SmallFormat(), theme.text_secondary);
     painter_.DrawText(time_text, Rect(scale_, 32, 140, 136, 22),
                       compositor_.SmallFormat(), time_color);
@@ -1156,9 +1158,9 @@ void FileOperationWindow::Render() {
             dark_ ? HexColor(0x000000, 0.30f) : HexColor(0x000000, 0.05f));
         painter_.StrokeRoundedRect(card, ScaleDip(scale_, 12.0f), theme.stroke_card);
         painter_.DrawGlyph(L"\xE8F1", Rect(scale_, 30, 188, 14, 14), sky);
-        painter_.DrawText(L"传输速度变化历史", Rect(scale_, 48, 186, 220, 18),
+        painter_.DrawText(l10n::Get(l10n::StringId::OpSpeedHistory).c_str(), Rect(scale_, 48, 186, 220, 18),
                           compositor_.SmallFormat(), theme.text_secondary);
-        const std::wstring peak = L"峰值: " + pulse::format::ByteSize(
+        const std::wstring peak = l10n::Get(l10n::StringId::OpPeak).c_str() + pulse::format::ByteSize(
             static_cast<uint64_t>(status_.peak_bytes_per_second)) + L"/s";
         painter_.DrawText(peak, Rect(scale_, 280, 186, 156, 18),
                           compositor_.SmallFormat(), theme.text_secondary,

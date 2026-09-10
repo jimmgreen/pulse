@@ -1,6 +1,7 @@
 #include "tab_controller.h"
 
 #include "context_menu.h"
+#include "../common/localization.h"
 
 #include <algorithm>
 #include <memory>
@@ -8,6 +9,12 @@
 namespace pulse::app {
 
 namespace {
+
+const wchar_t* TabText(pulse::l10n::StringId id) {
+    return pulse::l10n::Get(id).c_str();
+}
+
+using Text = pulse::l10n::StringId;
 
 constexpr uint32_t kPalette[] = {
     0xE74856, 0xF7630C, 0xFFB900, 0x6CCB5F,
@@ -105,7 +112,7 @@ void TabController::ShowGroupMenu(WindowTabs& tabs, int group_id, POINT screen_p
     TabGroup* group = FindGroup(tabs, group_id);
     if (!group) return;
     const int id = group->id;
-    menu.SetFilterPlaceholder(L"标签组名称…");
+    menu.SetFilterPlaceholder(TabText(Text::TabGroupName));
     menu.SetInitialFilterText(group->name);
     menu.SetFilterMinWidth(260.0f);
     const auto build = [&](const std::wstring& query) {
@@ -125,13 +132,13 @@ void TabController::ShowGroupMenu(WindowTabs& tabs, int group_id, POINT screen_p
         }
         colors.separator_after = true;
         items.push_back(std::move(colors));
-        items.push_back(MenuItem(CmdTabGroupNewTab, L"在组中新建标签页"));
-        items.push_back(MenuItem(CmdTabGroupUngroup, L"取消组合"));
-        items.push_back(MenuItem(CmdTabGroupClose, L"关闭分组标签页"));
+        items.push_back(MenuItem(CmdTabGroupNewTab, TabText(Text::TabGroupNew)));
+        items.push_back(MenuItem(CmdTabGroupUngroup, TabText(Text::TabUngroup)));
+        items.push_back(MenuItem(CmdTabGroupClose, TabText(Text::TabGroupClose)));
         return items;
     };
     const int command = menu.TrackPopup(screen_pt, build(group->name), build);
-    menu.SetFilterPlaceholder(L"搜索命令、文件夹…");
+    menu.SetFilterPlaceholder(TabText(Text::TabMenuSearch));
 
     if (command >= CmdTabColorBase &&
         command < CmdTabColorBase + static_cast<int>(std::size(kPalette))) {
@@ -208,6 +215,9 @@ void TabController::TogglePin(WindowTabs& tabs, int index) {
     const bool pin = !tab.pinned;
     if (pin) tab.tab_group = 0;
     tab.pinned = pin;
+    if (pin && tab.marker_rgb == 0) {
+        tab.marker_rgb = kPalette[static_cast<size_t>(index) % std::size(kPalette)];
+    }
     tabs.MoveTab(static_cast<size_t>(index),
                  pin ? first_unpinned : (first_unpinned > 0 ? first_unpinned - 1 : 0));
     PruneEmptyGroups(tabs);
@@ -219,20 +229,36 @@ void TabController::ShowTabMenu(WindowTabs& tabs, int tab_index, POINT screen_pt
     if (tab_index < 0 || tab_index >= static_cast<int>(tabs.items.size())) return;
     LayoutTab& tab = *tabs.items[static_cast<size_t>(tab_index)];
     std::vector<ui::FluentMenuItem> items;
-    items.push_back(MenuItem(CmdTabNewRight, L"在右侧新建标签页", L"\xE710"));
-    items.push_back(MenuItem(CmdTabDuplicate, L"复制标签页", L"\xE8C8"));
+    items.push_back(MenuItem(CmdTabNewRight, TabText(Text::TabNewRight), L"\xE710"));
+    items.push_back(MenuItem(CmdTabDuplicate, TabText(Text::TabDuplicate), L"\xE8C8"));
+    items.push_back(MenuItem(CmdTabRename,
+        pulse::l10n::Get(pulse::l10n::StringId::TabRename).c_str(), L"\xE8AC"));
+    ui::FluentMenuItem colors;
+    colors.text = pulse::l10n::Get(pulse::l10n::StringId::TabColor);
+    ui::FluentMenuItem palette;
+    for (int i = 0; i < static_cast<int>(std::size(kPalette)); ++i) {
+        ui::FluentMenuSwatch swatch;
+        swatch.command = CmdTabColorBase + i;
+        swatch.color = ui::HexColor(kPalette[i]);
+        swatch.checked = tab.marker_rgb == kPalette[i];
+        palette.quick_swatches.push_back(swatch);
+    }
+    colors.children.push_back(std::move(palette));
+    colors.children.push_back(MenuItem(CmdTabColorNone,
+        pulse::l10n::Get(pulse::l10n::StringId::TabColorNone).c_str()));
+    items.push_back(std::move(colors));
     items.push_back(MenuItem(CmdTabPin,
-        tab.pinned ? L"取消固定标签页" : L"固定标签页", L"\xE718"));
+        TabText(tab.pinned ? Text::TabUnpin : Text::TabPin), L"\xE718"));
     items.back().separator_after = true;
     if (tab.tab_group == 0) {
         items.push_back(MenuItem(CmdTabAddToNewGroup,
-            tabs.tab_groups.empty() ? L"创建新组" : L"将标签页添加到新组"));
+            TabText(tabs.tab_groups.empty() ? Text::TabCreateGroup : Text::TabNewGroup)));
         if (!tabs.tab_groups.empty()) {
             ui::FluentMenuItem join;
-            join.text = L"将标签页添加到";
+            join.text = TabText(Text::TabJoinGroup);
             for (size_t i = 0; i < tabs.tab_groups.size(); ++i) {
                 auto child = MenuItem(CmdTabJoinGroupBase + static_cast<int>(i),
-                    tabs.tab_groups[i].name.empty() ? L"(未命名组)"
+                    tabs.tab_groups[i].name.empty() ? TabText(Text::TabUnnamedGroup)
                                                     : tabs.tab_groups[i].name.c_str());
                 join.children.push_back(std::move(child));
             }
@@ -240,13 +266,13 @@ void TabController::ShowTabMenu(WindowTabs& tabs, int tab_index, POINT screen_pt
         }
         items.back().separator_after = true;
     } else {
-        items.push_back(MenuItem(CmdTabRemoveFromGroup, L"从组中移除该标签页"));
+        items.push_back(MenuItem(CmdTabRemoveFromGroup, TabText(Text::TabRemoveGroup)));
         items.back().separator_after = true;
     }
-    items.push_back(MenuItem(CmdTabClose, L"关闭标签页", L"\xE711"));
+    items.push_back(MenuItem(CmdTabClose, TabText(Text::TabClose), L"\xE711"));
     items.back().enabled = !tab.pinned && tabs.items.size() > 1;
-    items.push_back(MenuItem(CmdTabCloseOthers, L"关闭其他标签页"));
-    items.push_back(MenuItem(CmdTabCloseRight, L"关闭右侧标签页"));
+    items.push_back(MenuItem(CmdTabCloseOthers, TabText(Text::TabCloseOthers)));
+    items.push_back(MenuItem(CmdTabCloseRight, TabText(Text::TabCloseRight)));
 
     const int command = menu.TrackPopup(screen_pt, std::move(items));
     if (command == CmdTabNewRight || command == CmdTabDuplicate) {
@@ -262,6 +288,31 @@ void TabController::ShowTabMenu(WindowTabs& tabs, int tab_index, POINT screen_pt
             if (Tab* created = tabs.Active()->ActiveFolder())
                 callbacks_.load_tab(*created);
         }
+    } else if (command == CmdTabRename) {
+        std::wstring draft = LayoutTabTitle(tab);
+        menu.SetFilterPlaceholder(pulse::l10n::Get(pulse::l10n::StringId::TabNameHint));
+        menu.SetInitialFilterText(draft);
+        menu.SetFilterMinWidth(320.0f);
+        const auto build = [&](const std::wstring& query) {
+            draft = query;
+            return std::vector<ui::FluentMenuItem>{
+                MenuItem(CmdTabNameSave, pulse::l10n::Get(pulse::l10n::StringId::TabNameSave).c_str()),
+                MenuItem(CmdTabNameReset, pulse::l10n::Get(pulse::l10n::StringId::TabNameReset).c_str())};
+        };
+        const int choice = menu.TrackPopup(screen_pt, build(draft), build);
+        menu.SetFilterPlaceholder(TabText(Text::TabMenuSearch));
+        menu.SetFilterMinWidth(0.0f);
+        if (choice == CmdTabNameSave) {
+            const size_t first = draft.find_first_not_of(L" \t\r\n");
+            tab.title = first == std::wstring::npos ? L""
+                : draft.substr(first, draft.find_last_not_of(L" \t\r\n") - first + 1);
+        } else if (choice == CmdTabNameReset) {
+            tab.title.clear();
+        }
+    } else if (command >= CmdTabColorBase && command < CmdTabColorBase + static_cast<int>(std::size(kPalette))) {
+        tab.marker_rgb = kPalette[command - CmdTabColorBase];
+    } else if (command == CmdTabColorNone) {
+        tab.marker_rgb = 0;
     } else if (command == CmdTabPin) {
         TogglePin(tabs, tab_index);
         return;

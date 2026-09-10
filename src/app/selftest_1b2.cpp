@@ -12,6 +12,7 @@
 #include "app_input.h"
 #include "app_hosted_edit.h"
 #include "app_navigation.h"
+#include "app_runtime.h"
 #include "../ui/address_search_layout.h"
 #include "search_query.h"
 #include "../common/localization.h"
@@ -62,6 +63,55 @@
 #include <mutex>
 #include <string>
 #include <vector>
+
+namespace pulse::ui {
+struct FluentMenuTestPeer {
+    static bool CheckSubmenuColors(float scale) {
+        FluentMenu menu;
+        menu.scale_ = scale;
+        FluentMenuItem strip;
+        for (int i = 0; i < 8; ++i) {
+            FluentMenuSwatch swatch;
+            swatch.command = 90 + i;
+            strip.quick_swatches.push_back(swatch);
+        }
+        FluentMenuItem clear;
+        clear.command = 120;
+        clear.text = L"No color dot";
+        menu.sub_model_.SetItems({strip, clear});
+        menu.sub_model_.Layout(nullptr, scale);
+        // Deliberately different parent width: submenu hits must use its own geometry.
+        menu.model_.SetItems({clear});
+        menu.model_.Layout(nullptr, scale, 800.0f);
+        const int y = menu.kShadowMargin + static_cast<int>(
+            menu.sub_model_.RowTopPx(0) + menu.sub_model_.RowHeightPx() * 0.5f);
+        for (int i = 0; i < 8; ++i) {
+            int x = -1;
+            for (int candidate = 0; candidate < menu.sub_model_.WidthPx() + menu.kShadowMargin; ++candidate) {
+                if (menu.HitTestSwatch(menu.sub_model_, 0, static_cast<float>(candidate)) == i) {
+                    x = candidate;
+                    break;
+                }
+            }
+            if (x < 0) return false;
+            menu.open_ = true;
+            menu.animating_out_ = false;
+            menu.sub_parent_row_ = 0;
+            menu.OnSubMouse(POINT{x, y}, false);
+            if (menu.sub_hover_swatch_ != i) return false;
+            menu.OnSubMouse(POINT{x, y}, true);
+            if (menu.result_ != 90 + i) return false;
+        }
+        menu.open_ = true;
+        menu.animating_out_ = false;
+        menu.sub_parent_row_ = 0;
+        menu.OnSubMouse(POINT{menu.kShadowMargin + 10,
+            menu.kShadowMargin + static_cast<int>(menu.sub_model_.RowTopPx(1) +
+                menu.sub_model_.RowHeightPx() * 0.5f)}, true);
+        return menu.result_ == 120;
+    }
+};
+} // namespace pulse::ui
 
 namespace pulse::app {
 
@@ -375,6 +425,125 @@ void TestMouseHistoryNavigation() {
     UnregisterClassW(wc.lpszClassName, wc.hInstance);
 }
 
+LRESULT CALLBACK BlankPaneTestProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    auto* state = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (state) {
+        switch (msg) {
+        case WM_LBUTTONDOWN: return HandleLButtonDown(state, hwnd, msg, wparam, lparam);
+        case WM_MOUSEMOVE: return HandleMouseMove(state, hwnd, msg, wparam, lparam);
+        case WM_LBUTTONUP: return HandleLButtonUp(state, hwnd, msg, wparam, lparam);
+        case WM_LBUTTONDBLCLK: return HandleLButtonDblClk(state, hwnd, msg, wparam, lparam);
+        case WM_CAPTURECHANGED: return HandleCaptureChanged(state, hwnd, msg, wparam, lparam);
+        }
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+void TestBlankPaneClickNavigation() {
+    auto state = std::make_unique<AppState>();
+    state->places.persist = false;
+    state->appPrefs.persist = false;
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = BlankPaneTestProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"PulseBlankPaneClickSelftest";
+    RegisterClassW(&wc);
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"", WS_POPUP,
+        0, 0, 1000, 700, nullptr, nullptr, wc.hInstance, nullptr);
+    Check(hwnd != nullptr, L"blank pane: hidden event test window created");
+    if (!hwnd) return;
+    state->hwnd = hwnd;
+    const bool graphics = state->compositor.Init(hwnd);
+    Check(graphics, L"blank pane: real hit-test graphics initialized");
+    if (graphics) {
+        state->compositor.RecreateTextFormats(1.0f);
+        state->renderer.SetCompositor(&state->compositor);
+        state->renderer.SetScale(1.0f);
+        state->window_tabs.NewTab(L"C:\\PulseBlankClickTest\\Child");
+        state->pane = state->window_tabs.Active()->panes.front().get();
+        auto* tab = state->pane->ActiveTab();
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state.get()));
+        const auto list = ListRect(*state);
+        const int x = static_cast<int>(list.left + 30);
+        const int y = static_cast<int>(list.bottom - 30);
+        const LPARAM point = MAKELPARAM(x, y);
+        auto press = [&] { SendMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, point); };
+        auto release = [&] { SendMessageW(hwnd, WM_LBUTTONUP, 0, point); };
+        press();
+        Check(state->marqueePending && state->blankClickTab == tab && GetCapture() == hwnd,
+              L"blank pane: real blank hit arms click and captures mouse");
+        SendMessageW(hwnd, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(x + 1, y + 1));
+        Check(state->marqueePending && state->blankClickTab == tab,
+              L"blank pane: held-button move preserves pending click");
+        release();
+        Check(tab->current_path == fs::NormalizePath(L"C:\\PulseBlankClickTest") && GetCapture() != hwnd,
+              L"blank pane: restored folder without history navigates to parent on release");
+        tab->back_stack = {};
+        tab->back_stack.push(L"C:\\PulseBlankClickHistory");
+        press();
+        release();
+        Check(tab->current_path == fs::NormalizePath(L"C:\\PulseBlankClickHistory"),
+              L"blank pane: available history takes precedence over parent");
+        const std::wstring before = tab->current_path;
+        press();
+        SendMessageW(hwnd, WM_MOUSEMOVE, MK_LBUTTON,
+                     MAKELPARAM(x + GetSystemMetrics(SM_CXDRAG) + 1, y));
+        SendMessageW(hwnd, WM_MOUSEMOVE, MK_LBUTTON, point);
+        release();
+        Check(tab->current_path == before,
+              L"blank pane: real marquee returning to origin does not navigate");
+        press();
+        ReleaseCapture();
+        release();
+        Check(tab->current_path == before,
+              L"blank pane: capture cancellation prevents navigation");
+        press();
+        ++tab->view_generation;
+        release();
+        Check(tab->current_path == before,
+              L"blank pane: navigation during press invalidates release");
+        tab->back_stack.push(L"C:\\PulseBlankClickDouble");
+        press();
+        release();
+        SendMessageW(hwnd, WM_LBUTTONDBLCLK, MK_LBUTTON, point);
+        release();
+        Check(tab->current_path == fs::NormalizePath(L"C:\\PulseBlankClickDouble"),
+              L"blank pane: double click release does not navigate twice");
+        tab->back_stack = {};
+        tab->current_path = L"C:\\";
+        press();
+        release();
+        Check(tab->current_path == L"C:\\", L"blank pane: drive root with no history stays put");
+        auto& layout = *state->window_tabs.Active();
+        auto other = std::make_unique<Pane>();
+        other->NewTab(L"C:\\PulseBlankClickSplit\\Child");
+        Pane* right = other.get();
+        layout.panes.push_back(std::move(other));
+        layout.layout = LayoutPreset::TwoVertical;
+        RebuildLayoutRoot(layout);
+        const auto split_vm = BuildVm(*state, false);
+        Check(split_vm.pane_slots.size() == 2, L"blank pane: real split layout exposes both panes");
+        if (split_vm.pane_slots.size() == 2) {
+            const auto bounds = split_vm.pane_slots[1].rect;
+            const LPARAM right_point = MAKELPARAM(static_cast<int>(bounds.left + 30),
+                                                  static_cast<int>(bounds.bottom - 30));
+            SendMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, right_point);
+            Check(state->pane == right && state->blankClickTab == right->ActiveTab(),
+                  L"blank pane: inactive split pane receives click context");
+            SendMessageW(hwnd, WM_LBUTTONUP, 0, right_point);
+            Check(right->ActiveTab()->current_path == fs::NormalizePath(L"C:\\PulseBlankClickSplit") &&
+                  tab->current_path == L"C:\\",
+                  L"blank pane: split click navigates only the clicked pane");
+        }
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        state->renderer.SetCompositor(nullptr);
+        state->compositor.Shutdown();
+    }
+    DestroyWindow(hwnd);
+    state->hwnd = nullptr;
+    UnregisterClassW(wc.lpszClassName, wc.hInstance);
+}
+
 void TestNotificationToast() {
     HWND window = CreateWindowExW(0, L"STATIC", L"", WS_POPUP,
         0, 0, 640, 480, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
@@ -558,6 +727,10 @@ void TestCtrlDragSelection() {
 }
 
 void TestMenuModel() {
+    Check(ui::FluentMenuTestPeer::CheckSubmenuColors(1.0f),
+          L"menu: all submenu color dots hover and dispatch at 100 percent DPI");
+    Check(ui::FluentMenuTestPeer::CheckSubmenuColors(1.5f),
+          L"menu: all submenu color dots hover and dispatch at 150 percent DPI");
     const auto breadcrumb = BuildBreadcrumbMenu(true);
     const std::vector<int> breadcrumb_commands{CmdOpenInNewTab, CmdOpen, CmdCopyPath,
                                               CmdCopy, CmdOpenTerminal, CmdProperties};
@@ -1942,6 +2115,14 @@ void TestSplitLayout() {
     pinned_vm.tabs.push_back(pinned_tab);
     D2D1_RECT_F pinned_rc{};
     Check(chrome.TabItemRect(pinned_vm, 758.0f, 0, &pinned_rc) &&
+          std::abs((pinned_rc.right - pinned_rc.left) - 112.0f) < 0.01f,
+          L"chrome: pinned tab shows a compact name by default");
+    const auto named_hit = chrome.HitTest(pinned_vm, D2D1::RectF(0, 0, 758, 269),
+        pinned_rc.right - 1.0f, (pinned_rc.top + pinned_rc.bottom) * 0.5f);
+    Check(named_hit.region == ui::HitTestResult::Tab,
+          L"chrome: named pinned tab has no close affordance");
+    pinned_vm.show_pinned_tab_names = false;
+    Check(chrome.TabItemRect(pinned_vm, 758.0f, 0, &pinned_rc) &&
           std::abs((pinned_rc.right - pinned_rc.left) - 36.0f) < 0.01f,
           L"chrome: pinned tab keeps its icon-only width");
     const float pinned_y = (pinned_rc.top + pinned_rc.bottom) * 0.5f;
@@ -2975,7 +3156,8 @@ bool SameLayoutTabs(const std::vector<LayoutTabSnapshot>& a,
     if (a.size() != b.size()) return false;
     for (size_t i = 0; i < a.size(); ++i) {
         if (a[i].pinned != b[i].pinned || a[i].group != b[i].group ||
-            a[i].title != b[i].title || a[i].layout != b[i].layout ||
+            a[i].title != b[i].title || a[i].marker_rgb != b[i].marker_rgb ||
+            a[i].layout != b[i].layout ||
             a[i].focused != b[i].focused || a[i].target != b[i].target ||
             a[i].split_ratios != b[i].split_ratios ||
             a[i].panes.size() != b[i].panes.size()) return false;
@@ -2996,6 +3178,7 @@ void TestSessionLayoutTabs() {
         tabs[0].pinned = true;
         tabs[0].group = 1;
         tabs[0].title = L"工作";
+        tabs[0].marker_rgb = 0x0078D4;
         tabs[0].layout = 1;
         tabs[0].focused = 1;
         tabs[0].target = 0;
@@ -3011,6 +3194,8 @@ void TestSessionLayoutTabs() {
         const std::wstring json = LayoutTabsToJson(tabs);
         std::vector<LayoutTabSnapshot> back;
         Check(ParseLayoutTabs(json, back), L"layouttabs: round-trip parses");
+        Check(!back.empty() && back[0].marker_rgb == 0x0078D4,
+              L"layouttabs: individual tab color survives JSON round-trip");
         Check(SameLayoutTabs(tabs, back), L"layouttabs: round-trip preserves all fields");
     }
     {   // Missing searchCols still loads (older sessions).
@@ -3191,6 +3376,7 @@ int RunSelfTest1B2() {
     TestLoadingPresentation();
     TestNavigationReturnSelection();
     TestMouseHistoryNavigation();
+    TestBlankPaneClickNavigation();
     TestNotificationToast();
     TestMenuModel();
     TestShellMenuMerge();

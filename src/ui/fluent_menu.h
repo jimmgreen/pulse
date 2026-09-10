@@ -93,6 +93,7 @@ private:
 
 // The popup window. One instance per app, reused across invocations.
 class FluentMenu {
+    friend struct FluentMenuTestPeer;
 public:
     FluentMenu() = default;
     ~FluentMenu();
@@ -174,8 +175,10 @@ private:
     void OnMouse(POINT client_pt, bool button_up);
     void UpdateHover(int row, int swatch = -1);
     int HitTestSwatch(int row, float client_x) const;
+    int HitTestSwatch(const FluentMenuModel& model, int row, float client_x) const;
     int InvokeRow(int row);        // returns command or 0
     int InvokeAt(int row, float client_x) const;
+    int InvokeAt(const FluentMenuModel& model, int row, float client_x) const;
     float FilterHeaderPx() const;
     bool AppendFilterChar(wchar_t ch);
     bool HandleFilterKey(UINT msg, WPARAM wParam);
@@ -195,7 +198,7 @@ private:
     FluentMenuModel model_;
     FilterFn filter_fn_;
     std::wstring filter_query_;
-    std::wstring filter_placeholder_ = L"搜索命令、文件夹…";
+    std::wstring filter_placeholder_;
     std::wstring initial_filter_text_;   // prefilled into the edit on open
     float filter_min_width_ = 0.0f;      // dips; <= 0 = palette default (440)
     bool select_all_on_open_ = true;
@@ -226,6 +229,7 @@ private:
     FluentMenuModel sub_model_;
     int sub_parent_row_ = -1;      // row in model_ whose children are shown
     int sub_hover_ = -1;
+    int sub_hover_swatch_ = -1;
     int sub_pending_row_ = -1;     // hover-to-open delay target
     std::chrono::steady_clock::time_point sub_pending_since_;
     int sub_x_ = 0;                // flyout window origin (screen px)

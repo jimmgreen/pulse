@@ -223,6 +223,7 @@ void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane,
 // One window tab = one working layout (pane count, split ratios, each column).
 struct LayoutTab {
     std::wstring title; // empty = derive from the focused folder
+    uint32_t marker_rgb = 0;
     bool pinned = false;
     int tab_group = 0;
     LayoutPreset layout = LayoutPreset::Single;

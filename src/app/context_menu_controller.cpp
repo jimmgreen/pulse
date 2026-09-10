@@ -1,4 +1,5 @@
 #include "context_menu_controller.h"
+#include "../common/localization.h"
 
 #include "../ipc/ctx_menu_util.h"
 
@@ -220,7 +221,7 @@ std::vector<ui::FluentMenuItem> ContextMenuController::BuildDisplay(
         prefs, ComposeEntries(prefs, prefs_changed)));
     ui::FluentMenuItem manage;
     manage.command = CmdSettingsContextMenu;
-    manage.text = L"管理右键项…";
+    manage.text = pulse::l10n::Get(pulse::l10n::StringId::ManageContext);
     manage.glyph = L"\xE713";
     if (!display.empty()) display.back().separator_after = true;
     display.push_back(std::move(manage));

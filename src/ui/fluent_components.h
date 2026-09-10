@@ -208,6 +208,7 @@ struct SegmentedItemSpec {
     std::wstring_view glyph;
     ControlState state{};
     SegmentPosition position = SegmentPosition::Single;
+    bool shared_track = false;
 };
 
 struct BadgeSpec {
@@ -383,6 +384,7 @@ public:
     void DrawSplitButton(const SplitButtonSpec& spec);
     void DrawSplitter(const SplitterSpec& spec);
     void DrawSegmentedItem(const SegmentedItemSpec& spec);
+    void DrawSegmentedTrack(const D2D1_RECT_F& bounds);
     void DrawBadge(const BadgeSpec& spec);
     float MeasureBadgeWidth(std::wstring_view text) const;
     float MeasureButtonWidth(std::wstring_view text,

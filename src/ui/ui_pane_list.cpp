@@ -800,6 +800,9 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
     }
 
     if (pane.is_recent) {
+        D2D1_RECT_F track = RecentFilterRect(bounds, pane_header_height_ + bannerH, scale_, 0);
+        track.right = RecentFilterRect(bounds, pane_header_height_ + bannerH, scale_, 2).right;
+        painter_.DrawSegmentedTrack(track);
         static constexpr pulse::l10n::StringId labels[] = {
             pulse::l10n::StringId::FilterAll, pulse::l10n::StringId::FilterFolders,
             pulse::l10n::StringId::FilterFiles,
@@ -807,6 +810,11 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
         for (int i = 0; i < 3; ++i) {
             fluent::SegmentedItemSpec segment;
             segment.bounds = RecentFilterRect(bounds, pane_header_height_ + bannerH, scale_, i);
+            segment.bounds.left += 3.0f * scale_;
+            segment.bounds.right -= 3.0f * scale_;
+            segment.bounds.top += 3.0f * scale_;
+            segment.bounds.bottom -= 3.0f * scale_;
+            segment.shared_track = true;
             segment.text = pulse::l10n::Get(labels[i]);
             segment.position = i == 0 ? fluent::SegmentPosition::First
                              : i == 2 ? fluent::SegmentPosition::Last

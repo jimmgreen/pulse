@@ -121,10 +121,13 @@ void DeleteSelected(AppState& s, bool permanent) {
     if (permanent) {
         std::wstring prompt;
         if (paths.size() == 1) {
-            prompt = L"永久删除（不进回收站）：\n" + ClipboardPath(paths[0]) + L"\n\n确定吗？";
+            prompt = l10n::Get(l10n::StringId::PermanentDeletePath);
+            const size_t path_marker = prompt.find(L"{path}");
+            if (path_marker != std::wstring::npos)
+                prompt.replace(path_marker, 6, ClipboardPath(paths[0]));
         } else {
-            wchar_t buf[96];
-            swprintf_s(buf, L"永久删除（不进回收站）%d 项？\n\n确定吗？", static_cast<int>(paths.size()));
+            wchar_t buf[256]{};
+            swprintf_s(buf, l10n::Get(l10n::StringId::PermanentDeleteCountFormat).c_str(), paths.size());
             prompt = buf;
         }
         if (MessageBoxW(s.hwnd, prompt.c_str(), L"Pulse", MB_YESNO | MB_ICONWARNING) != IDYES)
@@ -276,8 +279,8 @@ void UpdateOperationWindow(AppState& s, bool allow_conflict_dialog) {
                 s.pendingRenameName.clear();
             const bool folder = status.type == ops::OpType::CreateFolder;
             const bool file = status.type == ops::OpType::CreateTextFile;
-            std::wstring text = folder ? L"无法新建文件夹"
-                : file ? L"无法新建文本文档" : L"无法重命名";
+            std::wstring text = l10n::Get(folder ? l10n::StringId::CannotCreateFolder
+                : file ? l10n::StringId::CannotCreateTextFile : l10n::StringId::CannotRename);
             text += L"\n\n";
             const std::wstring& err = status.last_error;
             const bool no_access = err.find(L"没有权限") != std::wstring::npos
@@ -285,13 +288,13 @@ void UpdateOperationWindow(AppState& s, bool allow_conflict_dialog) {
                 || err.find(L"Access is denied") != std::wstring::npos
                 || err == L"create failed";
             if (no_access) {
-                text += folder || file
-                    ? L"当前文件夹没有写入权限。"
-                    : L"没有权限重命名此项。";
+                text += l10n::Get(folder || file
+                    ? l10n::StringId::FolderNoWritePermission
+                    : l10n::StringId::RenameNoPermission);
             } else if (!err.empty()) {
                 text += err;
             } else {
-                text += L"操作失败。";
+                text += l10n::Get(l10n::StringId::OperationFailedMessage);
             }
             MessageBoxW(s.hwnd, text.c_str(), L"Pulse", MB_OK | MB_ICONWARNING);
             return;

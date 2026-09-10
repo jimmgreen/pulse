@@ -71,8 +71,8 @@ ConflictDialogResult ShowFileConflictDialog(HWND owner,
 struct ConfirmDialogSpec {
     std::wstring title;
     std::wstring message;
-    std::wstring confirm_text = L"确定";
-    std::wstring cancel_text = L"取消";
+    std::wstring confirm_text;
+    std::wstring cancel_text;
     bool danger = false;
 };
 

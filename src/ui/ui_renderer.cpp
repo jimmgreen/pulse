@@ -523,7 +523,7 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
     auto drawTab = [&](size_t i, float left, bool raised) {
         const bool active = vm.tabs[i].active;
         const bool pinned = vm.tabs[i].pinned;
-        const float tabW = pinned ? kTabPinnedW * scale_ : strip.w;
+        const float tabW = pinned ? (vm.show_pinned_tab_names ? kTabPinnedNamedW : kTabPinnedW) * scale_ : strip.w;
         const bool hovered = IsHovered(vm, HitTestResult::Tab, static_cast<int>(i)) ||
                              IsHovered(vm, HitTestResult::TabClose, static_cast<int>(i));
         const bool connect = active || raised;
@@ -576,7 +576,7 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
             MakeBrush(dc, theme.accent, brAccent_);
             FillChromeTabAccent(dc, brAccent_.get(), tabRc, shape, 2.0f * scale_);
         }
-        if (pinned) {
+        if (pinned && !vm.show_pinned_tab_names) {
             // Chrome pinned tab: centered icon, no title, no close button.
             DrawIconText(left, tabY, tabW, tabH,
                 vm.tabs[i].title.empty() ? kIconFolder
@@ -585,7 +585,13 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
                 active ? theme.icon_folder : theme.text_secondary, 0.85f);
             return;
         }
-        DrawIconText(left + 6.0f * scale_, tabY, 16.0f * scale_, tabH,
+        const float markerReserve = vm.tabs[i].marker_rgb != 0 ? 12.0f * scale_ : 0.0f;
+        if (markerReserve > 0.0f) {
+            MakeBrush(dc, HexColor(vm.tabs[i].marker_rgb), brAccent_);
+            dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(left + 10.0f * scale_,
+                tabY + tabH * 0.5f), 3.0f * scale_, 3.0f * scale_), brAccent_.get());
+        }
+        DrawIconText(left + 6.0f * scale_ + markerReserve, tabY, 16.0f * scale_, tabH,
             vm.tabs[i].title == pulse::l10n::Get(pulse::l10n::StringId::Settings)
                 ? kIconSettings : kIconFolder, L"[]",
             active ? theme.icon_folder : theme.text_secondary, 0.85f);
@@ -595,10 +601,10 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
         const float closePad = kTabClosePadDip * scale_;
         const float closeReserve = show_close ? (closePad + closeSz + 6.0f * scale_)
                                               : 6.0f * scale_;
-        const float titleLeft = left + 24.0f * scale_;
+        const float titleLeft = left + 24.0f * scale_ + markerReserve;
         DrawTabTitle(dc, compositor_->DwriteFactory(), compositor_->TabFormat(), brText_.get(),
                      vm.tabs[i].title, titleLeft, tabY,
-                     std::max(0.0f, tabW - 24.0f * scale_ - closeReserve), tabH, scale_);
+                     std::max(0.0f, tabW - 24.0f * scale_ - markerReserve - closeReserve), tabH, scale_);
         if (show_close) {
             const float closeY = tabY + (tabH - closeSz) * 0.5f;
             const float closeX = left + tabW - closePad - closeSz;
@@ -696,7 +702,7 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
     const int connected = dragI >= 0 ? dragI : activeI;
     if (connected >= 0 && connected < static_cast<int>(vm.tabs.size())) {
         const float connW = vm.tabs[static_cast<size_t>(connected)].pinned
-            ? kTabPinnedW * scale_ : strip.w;
+            ? (vm.show_pinned_tab_names ? kTabPinnedNamedW : kTabPinnedW) * scale_ : strip.w;
         const float shoulder = 8.0f * scale_;
         const float cut_l = tab_left_at(connected) - shoulder;
         const float cut_r = tab_left_at(connected) + connW + shoulder;
@@ -905,19 +911,16 @@ void MainRenderer::DrawStatusBar(const WindowViewModel& vm, const D2D1_RECT_F& r
     FillRect(dc, brFillInput_.get(), 0, y, rect.right, status_height_);
     FillRect(dc, brStrokeDivider_.get(), 0, y, rect.right, 1);
     MakeBrush(dc, theme.text_secondary, brTextSecondary_);
-    DrawTextRect(dc, small_fmt, brTextSecondary_.get(), vm.status.status_text,
-        sb.pad, y, std::max(0.0f, rect.right * 0.30f - sb.pad), status_height_);
-    const bool compact = rect.right < 900.0f * scale_;
-    std::wstring selectionText = vm.status.selection_text;
-    if (compact && vm.pane.selected_count > 0) {
-        wchar_t buf[64];
-        swprintf_s(buf,
-            pulse::l10n::Get(pulse::l10n::StringId::SelectedCountFormat).c_str(),
-            vm.pane.selected_count);
-        selectionText = buf;
-    }
-    DrawTextRect(dc, small_fmt, brTextSecondary_.get(), selectionText,
-        rect.right * 0.30f, y, rect.right * 0.18f, status_height_);
+    const float gap = 16.0f * scale_;
+    const float statusWidth = std::min(std::max(0.0f, rect.right * 0.30f - sb.pad),
+        MeasureTextWidth(factory, small_fmt, vm.status.status_text));
+    DrawTextEndEllipsis(dc, factory, small_fmt, brTextSecondary_.get(), vm.status.status_text,
+        sb.pad, y, statusWidth, status_height_);
+    const float selectionLeft = sb.pad + statusWidth + gap;
+    const bool hasTask = !vm.status.task_text.empty() || vm.status.task_progress >= 0.0f;
+    const float selectionRight = hasTask ? sb.task.left - gap : rect.right - sb.right_reserved - gap;
+    DrawTextEndEllipsis(dc, factory, small_fmt, brTextSecondary_.get(), vm.status.selection_text,
+        selectionLeft, y, std::max(0.0f, selectionRight - selectionLeft), status_height_);
 
     const float rightReserved = sb.right_reserved;
     if (!vm.status.performance_text.empty()) {
@@ -1002,7 +1005,7 @@ MainRenderer::TabStripMetrics MainRenderer::ComputeTabStrip(
         if (t.hidden) continue;
         if (t.pinned) ++pinnedCount; else ++visibleCount;
     }
-    const float pinnedW = kTabPinnedW * scale_;
+    const float pinnedW = (vm.show_pinned_tab_names ? kTabPinnedNamedW : kTabPinnedW) * scale_;
     const float pinnedTotal = static_cast<float>(pinnedCount) * (pinnedW + control_gap_);
     m.w = visibleCount == 0 ? 0.0f
         : std::min(kTabMaxW * scale_, std::max(kTabMinW * scale_,
@@ -1027,7 +1030,7 @@ MainRenderer::TabStripMetrics MainRenderer::ComputeTabStrip(
         }
         m.extra[i] = acc;
         if (vm.tabs[i].hidden) acc -= m.pitch;
-        else if (vm.tabs[i].pinned) acc += pinnedW - m.w; // narrower than a slot
+        else if (vm.tabs[i].pinned) acc += pinnedW - m.w;
     }
     m.end_x = m.x0 + chipsTotal + static_cast<float>(pinnedCount) *
         (pinnedW + control_gap_) + static_cast<float>(visibleCount) * m.pitch;

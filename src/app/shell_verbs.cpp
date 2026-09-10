@@ -1,3 +1,4 @@
+#include "../common/localization.h"
 // shell_verbs.cpp — See shell_verbs.h for the contract.
 #include "shell_verbs.h"
 
@@ -72,10 +73,10 @@ bool IsSkippedStaticVerb(const std::wstring& lower, bool background) {
 }
 
 std::wstring KnownVerbDisplay(const std::wstring& lower) {
-    if (lower == L"edit") return L"编辑";
-    if (lower == L"print") return L"打印";
-    if (lower == L"preview") return L"预览";
-    if (lower == L"runas") return L"以管理员身份运行";
+    if (lower == L"edit") return pulse::l10n::Get(pulse::l10n::StringId::ShellEdit).c_str();
+    if (lower == L"print") return pulse::l10n::Get(pulse::l10n::StringId::ShellPrint).c_str();
+    if (lower == L"preview") return pulse::l10n::Get(pulse::l10n::StringId::ShellPreview).c_str();
+    if (lower == L"runas") return pulse::l10n::Get(pulse::l10n::StringId::ShellRunAs).c_str();
     return {};
 }
 
@@ -257,7 +258,9 @@ bool ResolveOpenWithApp(const std::wstring& exe_name, StaticVerb& out) {
         HKEY_CLASSES_ROOT, L"Applications\\" + exe_name, L"FriendlyAppName"));
     if (friendly.empty()) friendly = ExeFriendlyName(path);
     if (friendly.empty()) friendly = ExeBaseName(exe_name);
-    out.display = L"用 " + friendly + L" 打开";
+    out.display = pulse::l10n::Get(pulse::l10n::StringId::ShellOpenApp);
+    const size_t placeholder = out.display.find(L"{app}");
+    if (placeholder != std::wstring::npos) out.display.replace(placeholder, 5, friendly);
     out.app_path = path;
     return true;
 }
@@ -329,7 +332,7 @@ std::vector<StaticVerb> EnumerateStaticVerbs(const std::wstring& ext) {
 
     StaticVerb open_as;
     open_as.verb = L"openas";
-    open_as.display = L"打开方式…";
+    open_as.display = pulse::l10n::Get(pulse::l10n::StringId::ShellOpenWith).c_str();
     out.push_back(std::move(open_as));
     return out;
 }

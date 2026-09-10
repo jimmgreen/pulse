@@ -36,6 +36,7 @@ struct TabView {
     bool active = false;
     float x_offset = 0.0f; // slot units: sibling slide during tab reorder
     uint32_t color_rgb = 0; // resolved group color (0 = ungrouped)
+    uint32_t marker_rgb = 0; // individual tab identity, independent of its group
     int group = -1;         // index into WindowViewModel::tab_groups
     bool hidden = false;    // member of a collapsed group: zero width, not drawn
     bool pinned = false;    // narrow icon-only slot, left cluster, no close
@@ -429,6 +430,7 @@ struct WindowViewModel {
     bool settings_launch_on_startup = false;
     bool settings_keep_running = false;
     bool settings_show_hidden_files = false;
+    bool show_pinned_tab_names = true;
     bool settings_open_folders = false;
     int settings_row_height = 34; // current row-height pref (DIPs) for density radios
     int settings_tray_icon = 48;  // current tray-deck icon pref (DIPs) for size radios

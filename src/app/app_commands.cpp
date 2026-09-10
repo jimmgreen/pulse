@@ -44,6 +44,18 @@ namespace pulse {
 HANDLE g_shell_watch_stop = nullptr;
 HANDLE g_shell_watch_thread = nullptr;
 
+namespace {
+std::wstring TagLabel(l10n::StringId id, const std::wstring& name, size_t count = 0) {
+    const auto& pattern = l10n::Get(id);
+    const int length = _scwprintf(pattern.c_str(), name.c_str(), count);
+    if (length < 0) return {};
+    std::wstring text(static_cast<size_t>(length) + 1, L'\0');
+    swprintf_s(text.data(), text.size(), pattern.c_str(), name.c_str(), count);
+    text.resize(static_cast<size_t>(length));
+    return text;
+}
+} // namespace
+
 bool EnsureMenu(AppState& s) {
     if (!s.menu) {
         s.menu = std::make_unique<ui::FluentMenu>();
@@ -91,7 +103,9 @@ void CreateNewItem(AppState& s, bool folder) {
 
 void QueueTagAds(AppState& s, std::vector<app::TagAdsUpdate> updates) {
     const HWND notify = s.hwnd;
-    s.worker.EnqueueIo([updates = std::move(updates), notify] {
+    const auto network_location = l10n::Get(l10n::StringId::TagNetworkLocation);
+    const auto this_location = l10n::Get(l10n::StringId::TagThisLocation);
+    s.worker.EnqueueIo([updates = std::move(updates), notify, network_location, this_location] {
         auto failed = std::make_unique<std::vector<std::wstring>>();
         for (const auto& update : updates) {
             if (app::WriteTagAdsV2(update.path, update.tags)) continue;
@@ -99,9 +113,9 @@ void QueueTagAds(AppState& s, std::vector<app::TagAdsUpdate> updates) {
             if (GetVolumePathNameW(update.path.c_str(), volume, ARRAYSIZE(volume)))
                 failed->push_back(ClipboardPath(volume));
             else if (fs::IsUncPath(update.path))
-                failed->push_back(L"网络位置");
+                failed->push_back(network_location);
             else
-                failed->push_back(L"此位置");
+                failed->push_back(this_location);
         }
         if (!failed->empty() && notify)
             PostMessageW(notify, WM_TAG_ADS_WARNING, 0,
@@ -213,7 +227,7 @@ void ShowTagPicker(AppState& s, POINT screen_pt) {
         if (!needle.empty() && !exact) {
             ui::FluentMenuItem create;
             create.command = kCreateTag;
-            create.text = L"创建标签“" + query + L"”";
+            create.text = TagLabel(l10n::StringId::TagCreateFormat, query);
             create.glyph = L"\xE710";
             if (!items.empty()) items.back().separator_after = true;
             items.push_back(std::move(create));
@@ -221,7 +235,7 @@ void ShowTagPicker(AppState& s, POINT screen_pt) {
         return items;
     };
     for (;;) {
-        s.menu->SetFilterPlaceholder(L"搜索或新建标签…");
+        s.menu->SetFilterPlaceholder(l10n::Get(l10n::StringId::TagSearchHint));
         s.menu->SetFilterMinWidth(300.0f);
         int command = s.menu->TrackPopup(screen_pt, rebuild(L""), rebuild);
         const std::wstring query = s.menu->LastFilterQuery();
@@ -250,7 +264,7 @@ void ShowTagPicker(AppState& s, POINT screen_pt) {
         }
         if (!tag_id.empty()) ToggleTagForSelection(s, tag_id, paths);
     }
-    s.menu->SetFilterPlaceholder(L"搜索命令、文件夹…");
+    s.menu->SetFilterPlaceholder(l10n::Get(l10n::StringId::TabMenuSearch));
 }
 
 void ShowCreateTagPicker(AppState& s, POINT screen_pt) {
@@ -277,13 +291,14 @@ void ShowCreateTagPicker(AppState& s, POINT screen_pt) {
         items.push_back(std::move(colors));
         ui::FluentMenuItem create;
         create.command = kCreateTag;
-        create.text = query.empty() ? L"输入标签名称" : L"创建标签“" + query + L"”";
+        create.text = query.empty() ? l10n::Get(l10n::StringId::TagNameHint)
+                                    : TagLabel(l10n::StringId::TagCreateFormat, query);
         create.glyph = L"\xE710";
         create.enabled = !query.empty();
         items.push_back(std::move(create));
         ui::FluentMenuItem custom;
         custom.command = kCustomColor;
-        custom.text = L"自定义颜色…";
+        custom.text = l10n::Get(l10n::StringId::CustomColor);
         custom.has_swatch = true;
         custom.swatch_color = ui::HexColor(selected_rgb);
         custom.separator_after = true;
@@ -292,7 +307,7 @@ void ShowCreateTagPicker(AppState& s, POINT screen_pt) {
     };
     std::wstring name;
     for (;;) {
-        s.menu->SetFilterPlaceholder(L"新建标签…");
+        s.menu->SetFilterPlaceholder(l10n::Get(l10n::StringId::TagNewHint));
         s.menu->SetFilterMinWidth(300.0f);
         s.menu->SetInitialFilterText(name);
         const int command = s.menu->TrackPopup(screen_pt, rebuild(name), rebuild);
@@ -318,7 +333,7 @@ void ShowCreateTagPicker(AppState& s, POINT screen_pt) {
         }
         break;
     }
-    s.menu->SetFilterPlaceholder(L"搜索命令、文件夹…");
+    s.menu->SetFilterPlaceholder(l10n::Get(l10n::StringId::TabMenuSearch));
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
@@ -333,7 +348,7 @@ void ShowTagSidebarMenu(AppState& s, const app::TagId& tag_id, POINT screen_pt) 
     std::vector<ui::FluentMenuItem> items;
     ui::FluentMenuItem rename;
     rename.command = kRename;
-    rename.text = L"重命名标签…";
+    rename.text = l10n::Get(l10n::StringId::TagRename);
     rename.glyph = L"\xE8AC";
     items.push_back(std::move(rename));
     for (int i = 0; i < static_cast<int>(palette.size()); ++i) {
@@ -341,8 +356,13 @@ void ShowTagSidebarMenu(AppState& s, const app::TagId& tag_id, POINT screen_pt) 
         ui::FluentMenuItem color;
         color.command = kColorBase + i;
         if (i < 7) {
-            color.text = i == 0 ? L"红色" : i == 1 ? L"橙色" : i == 2 ? L"黄色"
-                       : i == 3 ? L"绿色" : i == 4 ? L"蓝色" : i == 5 ? L"紫色" : L"灰色";
+            constexpr l10n::StringId colors[] = {
+                l10n::StringId::ColorRed, l10n::StringId::ColorOrange,
+                l10n::StringId::ColorYellow, l10n::StringId::ColorGreen,
+                l10n::StringId::ColorBlue, l10n::StringId::ColorPurple,
+                l10n::StringId::ColorGray
+            };
+            color.text = l10n::Get(colors[i]);
         } else {
             wchar_t hex[8]{};
             swprintf_s(hex, L"#%06X", rgb);
@@ -356,7 +376,7 @@ void ShowTagSidebarMenu(AppState& s, const app::TagId& tag_id, POINT screen_pt) 
     items.back().separator_after = true;
     ui::FluentMenuItem remove;
     remove.command = kDelete;
-    remove.text = L"删除标签";
+    remove.text = l10n::Get(l10n::StringId::TagDelete);
     remove.glyph = L"\xE74D";
     items.push_back(std::move(remove));
     const int command = s.menu->TrackPopup(screen_pt, std::move(items));
@@ -365,7 +385,8 @@ void ShowTagSidebarMenu(AppState& s, const app::TagId& tag_id, POINT screen_pt) 
         auto rebuild = [](const std::wstring& query) {
             ui::FluentMenuItem item;
             item.command = kApplyRename;
-            item.text = query.empty() ? L"输入新名称" : L"重命名为“" + query + L"”";
+            item.text = query.empty() ? l10n::Get(l10n::StringId::TagRenameHint)
+                                      : TagLabel(l10n::StringId::TagRenameFormat, query);
             item.glyph = L"\xE8AC";
             item.enabled = !query.empty();
             return std::vector<ui::FluentMenuItem>{ std::move(item) };
@@ -374,7 +395,7 @@ void ShowTagSidebarMenu(AppState& s, const app::TagId& tag_id, POINT screen_pt) 
         s.menu->SetFilterMinWidth(300.0f);
         const int apply = s.menu->TrackPopup(screen_pt, rebuild(L""), rebuild);
         const std::wstring name = s.menu->LastFilterQuery();
-        s.menu->SetFilterPlaceholder(L"搜索命令、文件夹…");
+        s.menu->SetFilterPlaceholder(l10n::Get(l10n::StringId::TabMenuSearch));
         // Enter without highlighting the row also confirms the typed name.
         if (apply == kApplyRename ||
             (apply == app::CmdNone && s.menu->LastFilterCommitted())) {
@@ -389,14 +410,13 @@ void ShowTagSidebarMenu(AppState& s, const app::TagId& tag_id, POINT screen_pt) 
     } else if (command == kDelete) {
         const size_t count = s.places.PathsForTag(tag_id).size();
         ui::ConfirmDialogSpec confirm;
-        confirm.title = L"删除标签";
-        confirm.confirm_text = L"删除";
-        confirm.cancel_text = L"取消";
+        confirm.title = l10n::Get(l10n::StringId::TagDelete);
+        confirm.confirm_text = l10n::Get(l10n::StringId::Delete);
+        confirm.cancel_text = l10n::Get(l10n::StringId::Cancel);
         confirm.danger = true;
         confirm.message = count == 0
-            ? L"删除标签“" + tag->name + L"”？"
-            : L"“" + tag->name + L"”已用于 " + std::to_wstring(count)
-                + L" 个项目。\n删除后将移除这些关联。";
+            ? TagLabel(l10n::StringId::TagDeleteConfirmFormat, tag->name)
+            : TagLabel(l10n::StringId::TagDeleteUsedFormat, tag->name, count);
         if (ui::ShowConfirmDialog(s.hwnd, confirm, s.darkMode, s.accentColor)) {
             std::vector<app::TagAdsUpdate> updates;
             s.places.DeleteTag(tag_id, &updates);
@@ -681,7 +701,7 @@ std::vector<ui::FluentMenuItem> BuildFinderItemMenu(
         view_kind == L"search") {
         ui::FluentMenuItem open_path;
         open_path.command = app::CmdOpenPath;
-        open_path.text = L"打开路径";
+        open_path.text = l10n::Get(l10n::StringId::OpenPath);
         open_path.glyph = L"\xE8B7"; // folder glyph, same family as kGlyphFolder
         items.insert(items.begin() + 1, std::move(open_path));
     }
@@ -1040,7 +1060,7 @@ void ShowStarredBadgeEditor(AppState& s, const std::wstring& path,
     constexpr int kCustomColor = 30100;
     uint32_t color = initial ? initial->badge_rgb : quick_access->badge_rgb;
     std::wstring current_text = initial ? initial->badge : quick_access->badge;
-    s.menu->SetFilterPlaceholder(L"徽章文字（最多 12 个字符）…");
+    s.menu->SetFilterPlaceholder(l10n::Get(l10n::StringId::BadgeTextHint));
     s.menu->SetInitialFilterText(initial ? initial->badge : quick_access->badge);
     s.menu->SetFilterMinWidth(260.0f);
     auto build = [&](const std::wstring& query) {
@@ -1064,7 +1084,7 @@ void ShowStarredBadgeEditor(AppState& s, const std::wstring& path,
         items.push_back(std::move(strip));
         ui::FluentMenuItem custom;
         custom.command = kCustomColor;
-        custom.text = L"自定义颜色…";
+        custom.text = l10n::Get(l10n::StringId::CustomColor);
         custom.has_swatch = true;
         custom.swatch_color = ui::HexColor(color);
         custom.separator_after = true;
@@ -1100,7 +1120,7 @@ void ShowStarredBadgeEditor(AppState& s, const std::wstring& path,
         }
         break;
     }
-    s.menu->SetFilterPlaceholder(L"搜索命令、文件夹…");
+    s.menu->SetFilterPlaceholder(l10n::Get(l10n::StringId::TabMenuSearch));
     RefreshStarredViews(s);
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
@@ -1112,19 +1132,19 @@ void ShowCuratedItemMenu(AppState& s, const std::wstring& path,
     std::vector<ui::FluentMenuItem> items;
     ui::FluentMenuItem open;
     open.command = app::CmdOpen;
-    open.text = L"打开";
+    open.text = l10n::Get(l10n::StringId::Open);
     open.glyph = L"\xE8A0";
     items.push_back(std::move(open));
     if (recent) {
         ui::FluentMenuItem remove;
         remove.command = app::CmdRemoveRecent;
-        remove.text = L"从最近使用中移除";
+        remove.text = l10n::Get(l10n::StringId::RemoveRecent);
         remove.glyph = L"\xE711";
         items.push_back(std::move(remove));
     } else {
         ui::FluentMenuItem badge;
         badge.command = app::CmdEditStarBadge;
-        badge.text = L"编辑徽章";
+        badge.text = l10n::Get(l10n::StringId::EditBadge);
         badge.glyph = L"\xE8D2";
         items.push_back(std::move(badge));
         const app::StarredItem* starred = s.places.FindStarred(path);
@@ -1146,7 +1166,7 @@ void ShowCuratedItemMenu(AppState& s, const std::wstring& path,
         items.push_back(std::move(colors));
         ui::FluentMenuItem custom;
         custom.command = kCustomColor;
-        custom.text = L"自定义颜色…";
+        custom.text = l10n::Get(l10n::StringId::CustomColor);
         custom.has_swatch = true;
         custom.swatch_color = ui::HexColor(badge_rgb);
         custom.separator_after = true;
@@ -1154,7 +1174,7 @@ void ShowCuratedItemMenu(AppState& s, const std::wstring& path,
         if (starred) {
             ui::FluentMenuItem remove;
             remove.command = app::CmdRemoveStarred;
-            remove.text = L"取消星标";
+            remove.text = l10n::Get(l10n::StringId::Unstar);
             remove.glyph = L"\xE735";
             items.push_back(std::move(remove));
         }
@@ -1409,7 +1429,7 @@ void ShowOmnibar(AppState& s, OmnibarMode mode) {
         hover_first = false;
         if (tab) {
             prefill = ClipboardPath(tab->current_path);
-            if (prefill.empty()) prefill = L"This PC";
+            if (prefill.empty()) prefill = l10n::Get(l10n::StringId::ThisPc);
         }
     }
 

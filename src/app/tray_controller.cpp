@@ -1,4 +1,5 @@
 #include "tray_controller.h"
+#include "../common/localization.h"
 #include "resource.h"
 
 #include <shellapi.h>
@@ -78,8 +79,8 @@ TrayController::CallbackResult TrayController::HandleCallback(LPARAM event) {
         GetCursorPos(&point);
         HMENU menu = CreatePopupMenu();
         if (!menu) return CallbackResult::Handled;
-        AppendMenuW(menu, MF_STRING, 1, L"打开");
-        AppendMenuW(menu, MF_STRING, 2, L"退出");
+        AppendMenuW(menu, MF_STRING, 1, l10n::Get(l10n::StringId::Open).c_str());
+        AppendMenuW(menu, MF_STRING, 2, l10n::Get(l10n::StringId::TrayExit).c_str());
         SetForegroundWindow(hwnd_);
         const int command = TrackPopupMenu(
             menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,

@@ -3,6 +3,9 @@
 #include "../app/context_menu_controller.h"
 #include "../app/single_instance_coordinator.h"
 #include "../app/tray_controller.h"
+#include "../app/blank_pane_click.h"
+#include "../common/localization.h"
+#include "../common/path_utils.h"
 #include "../index/index_client.h"
 #include "../index/network_agent_client.h"
 
@@ -38,6 +41,7 @@ bool Report(const char* name, bool passed) {
 } // namespace
 
 int wmain() {
+    pulse::l10n::Initialize(GetModuleHandleW(nullptr), L"zh-CN");
     using pulse::app::HasEffect;
     using pulse::app::SettingsController;
     using pulse::app::SettingsEffect;
@@ -46,6 +50,58 @@ int wmain() {
     using pulse::app::TrayController;
 
     bool passed = true;
+    passed &= Report("display paths strip extended UNC prefixes without losing the server",
+        pulse::path::StripExtendedPathPrefix(L"\\\\?\\UNC\\192.168.0.254\\资料\\项目") ==
+            L"\\\\192.168.0.254\\资料\\项目");
+    passed &= Report("display paths preserve normal and long local paths",
+        pulse::path::StripExtendedPathPrefix(L"C:\\资料") == L"C:\\资料" &&
+        pulse::path::StripExtendedPathPrefix(L"\\\\?\\C:\\" + std::wstring(300, L'a')) ==
+            L"C:\\" + std::wstring(300, L'a'));
+    {
+        pulse::app::BlankPaneClickRelease click;
+        click.pending = true;
+        click.owns_capture = true;
+        click.same_context = true;
+        click.blank_list_hit = true;
+        click.drag_width = 4;
+        click.drag_height = 6;
+        const auto accepts = pulse::app::IsBlankPaneBackClick;
+        passed &= Report("blank pane click navigates back on release", accepts(click));
+        auto changed = click;
+        changed.delta_x = -3;
+        changed.delta_y = 5;
+        passed &= Report("blank pane click tolerates motion below drag threshold", accepts(changed));
+        bool rejects_boundary = true;
+        for (const int delta : {-4, 4}) {
+            changed = click;
+            changed.delta_x = delta;
+            rejects_boundary &= !accepts(changed);
+        }
+        for (const int delta : {-6, 6}) {
+            changed = click;
+            changed.delta_y = delta;
+            rejects_boundary &= !accepts(changed);
+        }
+        passed &= Report("blank pane release at either drag threshold never goes back", rejects_boundary);
+        changed = click;
+        changed.marquee_active = true;
+        passed &= Report("marquee returning to its origin never goes back", !accepts(changed));
+        changed = click;
+        changed.modified = true;
+        passed &= Report("modified blank pane release never goes back", !accepts(changed));
+        changed = click;
+        changed.owns_capture = false;
+        passed &= Report("capture loss cancels blank pane back", !accepts(changed));
+        changed = click;
+        changed.same_context = false;
+        passed &= Report("changed pane tab or view cancels blank pane back", !accepts(changed));
+        changed = click;
+        changed.blank_list_hit = false;
+        passed &= Report("row control and outside-list release never go back", !accepts(changed));
+        changed = click;
+        changed.pending = false;
+        passed &= Report("cancelled or second double-click release never goes back", !accepts(changed));
+    }
     const std::wstring mutex_name = L"Local\\Pulse.ControllerTest." +
         std::to_wstring(GetCurrentProcessId()) + L"." + std::to_wstring(GetTickCount64());
     SingleInstanceCoordinator primary;
@@ -91,6 +147,7 @@ int wmain() {
     if (hwnd) DestroyWindow(hwnd);
 
     pulse::app::AppPrefs prefs;
+    passed &= Report("pinned tab names are shown by default", prefs.show_pinned_tab_names);
     pulse::app::ContextMenuPrefs context;
     prefs.persist = false;
     context.persist = false;
@@ -182,6 +239,15 @@ int wmain() {
         prefs.show_hidden_files && HasEffect(last_effect, SettingsEffect::FileVisibility));
     settings_ui.ToggleUi(5);
     passed &= Report("settings hidden visibility toggle is reversible", !prefs.show_hidden_files);
+    settings_ui.ToggleUi(6);
+    pulse::app::AppPrefs parsed_prefs;
+    passed &= Report("pinned tab names toggle off and persist",
+        !prefs.show_pinned_tab_names && parsed_prefs.FromJson(prefs.ToJson()) &&
+        !parsed_prefs.show_pinned_tab_names);
+    settings_ui.ToggleUi(6);
+    passed &= Report("pinned tab names toggle on and persist",
+        prefs.show_pinned_tab_names && parsed_prefs.FromJson(prefs.ToJson()) &&
+        parsed_prefs.show_pinned_tab_names);
     settings_ui.Wallpaper(0);
     passed &= Report("settings UI controller owns image selection flow",
         picked_image);
@@ -191,6 +257,7 @@ int wmain() {
 
     pulse::app::LayoutTabSnapshot saved;
     saved.pinned = true;
+    saved.marker_rgb = 0x0078D4;
     saved.group = 4;
     saved.layout = 1;
     saved.focused = 1;
@@ -210,6 +277,8 @@ int wmain() {
         restored.panes.size() == 2 && restored.focused_index == 1 &&
         loaded_paths.size() >= 2 && loaded_paths[0] == L"C:\\first");
     const auto captured = pulse::app::CaptureLayoutTab(restored);
+    passed &= Report("session layout restore and capture preserve the tab marker",
+        restored.marker_rgb == 0x0078D4 && captured.marker_rgb == 0x0078D4);
     passed &= Report("session layout capture preserves folder presentation state",
         captured.pinned && captured.layout == 1 && captured.panes.size() == 2 &&
         captured.panes[0].view == pulse::ui::ViewMode::Tiles &&

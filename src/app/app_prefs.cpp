@@ -48,6 +48,7 @@ void AppPrefs::ResetToDefaults() {
     open_folders_in_pulse = false;
     verify_copies = false;
     show_status_performance = false;
+    show_pinned_tab_names = true;
     show_hidden_files = false;
     language = L"system";
     window_effect = L"mica-alt";
@@ -78,6 +79,8 @@ std::wstring AppPrefs::ToJson() const {
     out += verify_copies ? L"true" : L"false";
     out += L",\n  \"show_status_performance\":";
     out += show_status_performance ? L"true" : L"false";
+    out += L",\n  \"show_pinned_tab_names\":";
+    out += show_pinned_tab_names ? L"true" : L"false";
     out += L",\n  \"show_hidden_files\":";
     out += show_hidden_files ? L"true" : L"false";
     out += L",\n  \"language\":\"";
@@ -131,6 +134,7 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     open_folders_in_pulse = pulse::json::ExtractBool(json, L"open_folders_in_pulse", false);
     verify_copies = pulse::json::ExtractBool(json, L"verify_copies", false);
     show_status_performance = pulse::json::ExtractBool(json, L"show_status_performance", false);
+    show_pinned_tab_names = pulse::json::ExtractBool(json, L"show_pinned_tab_names", true);
     show_hidden_files = pulse::json::ExtractBool(json, L"show_hidden_files", false);
     language = pulse::json::ExtractString(json, L"language", L"system");
     if (language != L"system" && language != L"zh-CN" && language != L"en-US")

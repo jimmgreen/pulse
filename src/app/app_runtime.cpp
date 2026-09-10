@@ -911,21 +911,21 @@ void ShutdownDetailsSizeWalk(AppState& s) {
 
 std::wstring DetailsAttributeText(DWORD attrs) {
     struct AttributeName { DWORD bit; const wchar_t* name; };
-    constexpr AttributeName values[] = {
-        { FILE_ATTRIBUTE_READONLY, L"只读" },
-        { FILE_ATTRIBUTE_HIDDEN, L"隐藏" },
-        { FILE_ATTRIBUTE_SYSTEM, L"系统" },
-        { FILE_ATTRIBUTE_COMPRESSED, L"压缩" },
-        { FILE_ATTRIBUTE_ENCRYPTED, L"加密" },
-        { FILE_ATTRIBUTE_REPARSE_POINT, L"重解析点" },
+    const AttributeName values[] = {
+        { FILE_ATTRIBUTE_READONLY, pulse::l10n::Get(pulse::l10n::StringId::AttrReadOnly).c_str() },
+        { FILE_ATTRIBUTE_HIDDEN, pulse::l10n::Get(pulse::l10n::StringId::AttrHidden).c_str() },
+        { FILE_ATTRIBUTE_SYSTEM, pulse::l10n::Get(pulse::l10n::StringId::AttrSystem).c_str() },
+        { FILE_ATTRIBUTE_COMPRESSED, pulse::l10n::Get(pulse::l10n::StringId::AttrCompressed).c_str() },
+        { FILE_ATTRIBUTE_ENCRYPTED, pulse::l10n::Get(pulse::l10n::StringId::AttrEncrypted).c_str() },
+        { FILE_ATTRIBUTE_REPARSE_POINT, pulse::l10n::Get(pulse::l10n::StringId::AttrReparse).c_str() },
     };
     std::wstring result;
     for (const auto& value : values) {
         if (!(attrs & value.bit)) continue;
-        if (!result.empty()) result += L"、";
+        if (!result.empty()) result += pulse::l10n::effective_language() == pulse::l10n::Language::ZhCN ? L"、" : L", ";
         result += value.name;
     }
-    return result.empty() ? L"普通" : result;
+    return result.empty() ? pulse::l10n::Get(pulse::l10n::StringId::AttrNormal).c_str() : result;
 }
 
 // Exponential smoothing toward layout targets; runs on the 16 ms UI timer.
@@ -1050,6 +1050,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
         s.pane->focused, s.maximized, s.darkMode, &s.places, s.sidebarCollapsedMask,
         s.starredExpanded);
     app::FillWindowTabStrip(vm, s.window_tabs);
+    vm.show_pinned_tab_names = s.appPrefs.show_pinned_tab_names;
     vm.sidebar_scroll = s.sidebarScroll;
     const float sidebar_max = s.renderer.SidebarMaxScroll(
         vm, static_cast<float>(s.compositor.Width()),
@@ -1455,7 +1456,12 @@ std::wstring TooltipForHover(AppState& s) {
         if (i < 0 || i >= static_cast<int>(s.window_tabs.items.size()) ||
             !s.window_tabs.items[static_cast<size_t>(i)])
             return L"";
-        return app::LayoutTabTitle(*s.window_tabs.items[static_cast<size_t>(i)]);
+        const auto& layout_tab = *s.window_tabs.items[static_cast<size_t>(i)];
+        std::wstring label = app::LayoutTabTitle(layout_tab);
+        const auto* folder = layout_tab.ActiveFolder();
+        if (folder && !folder->current_path.empty())
+            label += L" — " + pulse::path::StripExtendedPathPrefix(folder->current_path);
+        return label;
     }
     case R::TabNew: return text(I::TooltipNewTab);
     case R::ThemeToggle: return text(I::TooltipToggleTheme);
@@ -1556,7 +1562,7 @@ std::wstring TooltipForHover(AppState& s) {
                 full += entry.name;
             }
             if (const auto* indices = s.places.TagIndicesForPath(full); indices && !indices->empty()) {
-                tooltip += L"\n标签：";
+                tooltip += pulse::l10n::Get(pulse::l10n::StringId::TooltipTags).c_str();
                 bool first = true;
                 for (int index : *indices) {
                     if (index < 0 || index >= static_cast<int>(s.places.tags.size())) continue;
@@ -1567,7 +1573,7 @@ std::wstring TooltipForHover(AppState& s) {
             }
             if (const app::StarredItem* starred = s.places.FindStarred(full);
                 starred && !starred->badge.empty()) {
-                tooltip += L"\n徽章：" + starred->badge;
+                tooltip += pulse::l10n::Get(pulse::l10n::StringId::TooltipBadge).c_str() + starred->badge;
             }
             return tooltip;
         }

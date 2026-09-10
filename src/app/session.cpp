@@ -89,6 +89,7 @@ std::wstring LayoutTabsToJson(const std::vector<LayoutTabSnapshot>& tabs) {
         out += L"{\"pinned\":";
         out += tab.pinned ? L"true" : L"false";
         out += L",\"group\":" + std::to_wstring(tab.group);
+        out += L",\"marker_rgb\":" + std::to_wstring(tab.marker_rgb);
         out += L",\"title\":\"";
         std::wstring escaped;
         pulse::json::Escape(tab.title, escaped);
@@ -233,6 +234,8 @@ bool ParseLayoutTabs(const std::wstring& array_json,
         tab.pinned = pulse::json::ExtractBool(tabJson, L"pinned");
         tab.group = pulse::json::ExtractInt(tabJson, L"group");
         tab.title = pulse::json::ExtractString(tabJson, L"title");
+        tab.marker_rgb = static_cast<uint32_t>(std::clamp(
+            pulse::json::ExtractInt(tabJson, L"marker_rgb"), 0, 0xFFFFFF));
         tab.layout = pulse::json::ExtractInt(tabJson, L"layout");
         tab.focused = pulse::json::ExtractInt(tabJson, L"focused");
         tab.target = pulse::json::ExtractInt(tabJson, L"target");

@@ -171,7 +171,7 @@ void ShowAddressEditor(AppState& s) {
     const std::wstring shown = ClipboardPath(tab->current_path);
     SendMessageW(s.hwndAddressEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L""));
     s.addressIgnoreKillFocus = true;
-    SetWindowTextW(s.hwndAddressEdit, shown.empty() ? L"This PC" : shown.c_str());
+    SetWindowTextW(s.hwndAddressEdit, shown.empty() ? l10n::Get(l10n::StringId::ThisPc).c_str() : shown.c_str());
     LayoutAddressEditor(s);
     ShowWindow(s.hwndAddressEdit, SW_SHOW);
     SetForegroundWindow(s.hwndAddressEdit);

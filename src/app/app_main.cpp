@@ -240,7 +240,9 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (s->shot.active) {
             wchar_t toast_test[2]{};
             if (GetEnvironmentVariableW(L"PULSE_TEST_TOAST", toast_test, 2) == 1 && toast_test[0] == L'1')
-                s->notification_toast.Show(hwnd, L"索引迁移未完成", L"目标磁盘空间不足，原索引已保留。请释放空间后重试。");
+                s->notification_toast.Show(hwnd,
+                    l10n::Get(l10n::StringId::IndexMigrationIncomplete),
+                    l10n::Get(l10n::StringId::IndexMigrationNoSpace));
         }
         s->renderer.SetCompositor(&s->compositor);
         s->renderer.SetScale(s->scale);
@@ -405,11 +407,13 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         const ops::RecoverySnapshot recovery = s->isolatedTest
             ? ops::RecoverySnapshot{} : s->ops.PendingRecovery();
         if (!recovery.entries.empty()) {
-            std::wstring prompt = L"检测到上次退出时未完成的文件操作（" +
-                std::to_wstring(recovery.entries.size()) + L" 项）。\n\n是否重试可安全恢复的项目？";
+            wchar_t recovery_message[512]{};
+            swprintf_s(recovery_message, l10n::Get(l10n::StringId::RecoveryPromptFormat).c_str(),
+                recovery.entries.size());
+            std::wstring prompt = recovery_message;
             if (recovery.has_uncertain_destructive)
-                prompt += L"\n\n未确认状态的永久删除不会重试。";
-            if (MessageBoxW(hwnd, prompt.c_str(), L"Pulse 文件操作恢复",
+                prompt += l10n::Get(l10n::StringId::RecoveryDestructiveWarning);
+            if (MessageBoxW(hwnd, prompt.c_str(), l10n::Get(l10n::StringId::RecoveryTitle).c_str(),
                             MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) == IDYES)
                 s->ops.RetryRecovery();
             else
@@ -1281,8 +1285,8 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     if (!tab || tab->current_path != result->unc) return;
                     if (tab->snapshot) {
                         tab->net_readonly = true;
-                        tab->banner_title = L"离线";
-                        tab->banner_message = L"只读浏览上次快照";
+                        tab->banner_title = l10n::Get(l10n::StringId::Offline);
+                        tab->banner_message = l10n::Get(l10n::StringId::OfflineSnapshot);
                     }
                 });
             }
@@ -1301,9 +1305,11 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 const std::wstring shown = ClipboardPath(volume);
                 if (!s->tagFallbackVolumes.insert(shown).second) continue;
                 if (app::Tab* tab = ActiveTab(*s)) {
-                    tab->banner_title = L"标签已保存在本机";
-                    tab->banner_message = shown
-                        + L" 不支持文件标签元数据；换电脑后可能不可见。";
+                    tab->banner_title = l10n::Get(l10n::StringId::TagsSavedLocally);
+                    tab->banner_message = l10n::Get(l10n::StringId::TagMetadataUnsupported);
+                    const size_t path_marker = tab->banner_message.find(L"{path}");
+                    if (path_marker != std::wstring::npos)
+                        tab->banner_message.replace(path_marker, 6, shown);
                 }
             }
             InvalidateRect(hwnd, nullptr, FALSE);
@@ -1874,6 +1880,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         }
         if (state.shot_pinned_tab && !state.window_tabs.items.empty()) {
             state.window_tabs.items[state.window_tabs.active]->pinned = true;
+            state.window_tabs.items[state.window_tabs.active]->title = L"工作";
+            state.window_tabs.items[state.window_tabs.active]->marker_rgb = 0x0078D4;
         }
         if (state.shot_details) {
             state.showDetailsPanel = true;

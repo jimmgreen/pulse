@@ -40,6 +40,7 @@ void CollectTreeRatios(const SplitContainer& node, std::vector<float>& out) {
 LayoutTabSnapshot CaptureLayoutTab(const LayoutTab& tab) {
     LayoutTabSnapshot snapshot;
     snapshot.title = tab.title;
+    snapshot.marker_rgb = tab.marker_rgb;
     snapshot.pinned = tab.pinned;
     snapshot.group = tab.tab_group;
     snapshot.layout = static_cast<int>(tab.layout);
@@ -69,6 +70,7 @@ LayoutTabSnapshot CaptureLayoutTab(const LayoutTab& tab) {
 void RestoreLayoutTab(LayoutTab& tab, const LayoutTabSnapshot& snapshot,
                       const SessionTabLoader& load_tab) {
     tab.title = snapshot.title;
+    tab.marker_rgb = snapshot.marker_rgb;
     tab.pinned = snapshot.pinned;
     tab.tab_group = snapshot.pinned ? 0 : snapshot.group;
     tab.layout = static_cast<LayoutPreset>(std::clamp(snapshot.layout, 0, 4));

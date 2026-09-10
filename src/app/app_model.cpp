@@ -1208,6 +1208,7 @@ void FillWindowTabStrip(ui::WindowViewModel& vm, const WindowTabs& tabs) {
         tv.title = LayoutTabTitle(*tabs.items[i]);
         tv.active = i == tabs.active;
         tv.pinned = tabs.items[i]->pinned;
+        tv.marker_rgb = tabs.items[i]->marker_rgb;
         if (tabs.items[i]->tab_group != 0) {
             for (size_t gi = 0; gi < tabs.tab_groups.size(); ++gi) {
                 if (tabs.tab_groups[gi].id == tabs.items[i]->tab_group) {

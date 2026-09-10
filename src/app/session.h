@@ -24,6 +24,7 @@ struct PaneFolderSnapshot {
 
 struct LayoutTabSnapshot {
     std::wstring title;
+    uint32_t marker_rgb = 0;
     bool pinned = false;
     int group = 0;
     int layout = 0;

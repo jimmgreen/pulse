@@ -1,4 +1,5 @@
 #include "legacy_icons.h"
+#include "../common/localization.h"
 #include "fluent_components.h"
 #include "tab_shape.h"
 #include "typography.h"
@@ -1832,16 +1833,24 @@ void Painter::DrawSplitButton(const SplitButtonSpec& spec) {
     }
 }
 
+void Painter::DrawSegmentedTrack(const D2D1_RECT_F& bounds) {
+    if (!theme_ || !dc_) return;
+    auto fill = theme_->bg;
+    fill.a = high_contrast_ ? 1.0f : 0.55f;
+    FillRoundedRect(bounds, Px(8.0f), fill);
+    StrokeRoundedRect(bounds, Px(8.0f), theme_->stroke_divider);
+}
+
 void Painter::DrawSegmentedItem(const SegmentedItemSpec& spec) {
     if (!theme_ || !dc_ || Width(spec.bounds) <= 0.0f || Height(spec.bounds) <= 0.0f) {
         return;
     }
-    const float radius = spec.position == SegmentPosition::Middle
+    const float radius = !spec.shared_track && spec.position == SegmentPosition::Middle
                              ? 0.0f : Px(theme_->radius_control);
     D2D1_COLOR_F fill = Rgba(0x000000, 0);
     if (spec.state.selected || spec.state.checked) {
         fill = high_contrast_ ? theme_->fill_selected
-                              : dark_ ? Rgba(0xFFFFFF, 22) : Rgba(0xFFFFFF, 214);
+                              : dark_ ? Rgba(0xFFFFFF, spec.shared_track ? 40 : 22) : Rgba(0xFFFFFF, 214);
     } else if (spec.state.enabled && (spec.state.hovered || spec.state.pressed)) {
         fill = spec.state.pressed ? theme_->fill_pressed : theme_->fill_hover;
     }
@@ -1852,12 +1861,14 @@ void Painter::DrawSegmentedItem(const SegmentedItemSpec& spec) {
             dc_->FillRectangle(spec.bounds, ScratchBrush(fill));
         }
     }
-    StrokeRoundedRect(spec.bounds, radius,
-                      high_contrast_ ? theme_->stroke_card : theme_->stroke_divider);
+    if (!spec.shared_track || spec.state.selected || spec.state.checked) {
+        StrokeRoundedRect(spec.bounds, radius,
+                          high_contrast_ ? theme_->stroke_card : theme_->stroke_divider);
+    }
 
     const D2D1_COLOR_F foreground = spec.state.enabled ? theme_->text
                                                         : theme_->text_disabled;
-    auto content = Inset(spec.bounds, Px(6.0f));
+    auto content = Inset(spec.bounds, Px(spec.shared_track ? 3.0f : 6.0f));
     if (!spec.glyph.empty()) {
         const float icon_width = spec.text.empty() ? Width(content) : Px(18.0f);
         DrawGlyph(spec.glyph,
@@ -2228,7 +2239,7 @@ void Painter::DrawPaneHeader(const PaneHeaderSpec& spec) {
     TextFieldSpec filter{};
     filter.bounds = filter_bounds;
     filter.text = spec.filter_text;
-    filter.placeholder = L"Filter";
+    filter.placeholder = l10n::Get(l10n::StringId::FilterPlaceholder);
     filter.leading_glyph = kSearch;
     filter.state = spec.filter_state;
     DrawTextField(filter);

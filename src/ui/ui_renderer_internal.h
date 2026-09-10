@@ -83,6 +83,7 @@ void ClearTextWidthCache() {
     constexpr float kTabMinW = 72.0f;
     constexpr float kTabMaxW = 240.0f;
     constexpr float kTabPinnedW = 36.0f; // Chrome pinned tab: icon-only square
+    constexpr float kTabPinnedNamedW = 112.0f;
     constexpr float kTabCloseAlwaysW = 96.0f;
     constexpr float kTabClosePadDip = 10.0f;
     constexpr float kTabCloseSizeDip = 16.0f;
@@ -1176,6 +1177,7 @@ struct SettingsLayout {
     D2D1_RECT_F wallpaper_clear{};
     D2D1_RECT_F startup_row[3]{};
     D2D1_RECT_F hidden_files_row{};
+    D2D1_RECT_F pinned_names_row{};
     D2D1_RECT_F index_info{};
     D2D1_RECT_F index_status{};
     D2D1_RECT_F index_path{};
@@ -1319,6 +1321,8 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
                                          l.wallpaper_clear.left - 8.0f * scale, btn_y + btn_h);
         y += wall_h + 12.0f * scale;
         l.hidden_files_row = D2D1::RectF(card_left, y, card_right, y + 56.0f * scale);
+        y += 68.0f * scale;
+        l.pinned_names_row = D2D1::RectF(card_left, y, card_right, y + 56.0f * scale);
         y += 76.0f * scale;
 
         y += 22.0f * scale;

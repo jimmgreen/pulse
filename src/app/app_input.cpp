@@ -18,6 +18,7 @@
 #include "session.h"
 #include "context_menu.h"
 #include "batch_rename.h"
+#include "blank_pane_click.h"
 #include "link_resolve.h"
 #include "resource.h"
 #include "../ops/clipboard.h"
@@ -194,7 +195,7 @@ DWORD ResolveDropTarget(AppState& s, const std::vector<std::wstring>& sources,
             s.dropSidebar = hit.index;
             destName.clear();
             s.springRow = -1;
-            s.dropBadge = L"打标签";
+            s.dropBadge = l10n::Get(l10n::StringId::DropTag).c_str();
             s.dropBadgeX = (float)pt.x;
             s.dropBadgeY = (float)pt.y;
             InvalidateRect(s.hwnd, nullptr, FALSE);
@@ -227,7 +228,7 @@ DWORD ResolveDropTarget(AppState& s, const std::vector<std::wstring>& sources,
             s.dropDestDir = folder;
             destName = BaseName(folder);
             s.springRow = -1;
-            s.dropBadge = L"打开 " + destName;
+            s.dropBadge = l10n::Get(l10n::StringId::DropOpen).c_str() + destName;
             s.dropBadgeX = (float)pt.x;
             s.dropBadgeY = (float)pt.y;
             InvalidateRect(s.hwnd, nullptr, FALSE);
@@ -260,7 +261,7 @@ DWORD ResolveDropTarget(AppState& s, const std::vector<std::wstring>& sources,
             pt.y >= trayRc.top && pt.y < trayRc.bottom) {
             s.dropTray = true;
             s.springRow = -1;
-            s.dropBadge = L"暂存到托盘";
+            s.dropBadge = l10n::Get(l10n::StringId::DropStage).c_str();
             s.dropBadgeX = (float)pt.x;
             s.dropBadgeY = (float)pt.y;
             InvalidateRect(s.hwnd, nullptr, FALSE);
@@ -273,7 +274,7 @@ DWORD ResolveDropTarget(AppState& s, const std::vector<std::wstring>& sources,
     }
 
     DWORD effect = ui::ComputeDropEffect(key_state, sources.front(), s.dropDestDir, allowed);
-    s.dropBadge = (effect == DROPEFFECT_MOVE ? L"移动到 " : L"复制到 ") + destName;
+    s.dropBadge = (effect == DROPEFFECT_MOVE ? l10n::Get(l10n::StringId::DropMove).c_str() : l10n::Get(l10n::StringId::DropCopy).c_str()) + destName;
     s.dropBadgeX = (float)pt.x;
     s.dropBadgeY = (float)pt.y;
     InvalidateRect(s.hwnd, nullptr, FALSE);
@@ -412,6 +413,9 @@ void ResetMarquee(AppState& s) {
     s.marqueeActive = false;
     s.marqueeAdditive = false;
     s.marqueeBase.clear();
+    s.blankClickPane = nullptr;
+    s.blankClickTab = nullptr;
+    s.blankClickGeneration = 0;
 }
 
 void ApplyMarqueeSelection(AppState& s) {
@@ -1301,11 +1305,15 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         }
 
         if (s->marqueePending || s->marqueeActive) {
-            if ((GetKeyState(VK_LBUTTON) & 0x8000) == 0) {
+            if ((wParam & MK_LBUTTON) == 0) {
                 if (s->marqueeActive) ApplyMarqueeSelection(*s);
                 ResetMarquee(*s);
             } else {
                 s->marqueeCur = POINT{ mx, my };
+                if ((GetKeyState(VK_CONTROL) & 0x8000) != 0 ||
+                    (GetKeyState(VK_SHIFT) & 0x8000) != 0 ||
+                    (GetKeyState(VK_MENU) & 0x8000) != 0)
+                    s->blankClickTab = nullptr;
                 if (!s->marqueeActive &&
                     (std::abs(mx - s->marqueeStart.x) >= GetSystemMetrics(SM_CXDRAG) ||
                      std::abs(my - s->marqueeStart.y) >= GetSystemMetrics(SM_CYDRAG))) {
@@ -2053,7 +2061,7 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 }
             }
         } else if (hit.region == ui::HitTestResult::RecentClear) {
-            if (MessageBoxW(hwnd, L"确定清空全部最近使用记录吗？", L"清空最近使用",
+            if (MessageBoxW(hwnd, l10n::Get(l10n::StringId::ClearRecentPrompt).c_str(), l10n::Get(l10n::StringId::ClearRecentTitle).c_str(),
                             MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2) == IDOK &&
                 s->places.ClearRecent()) {
                 RefreshRecentViews(*s);
@@ -2132,6 +2140,11 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             s->marqueePending = true;
             s->marqueeActive = false;
             s->marqueeAdditive = ctrl;
+            s->blankClickPane = s->pane;
+            s->blankClickTab = tab && !ctrl && PointInList(*s, mx, my) &&
+                (GetKeyState(VK_SHIFT) & 0x8000) == 0 &&
+                (GetKeyState(VK_MENU) & 0x8000) == 0 ? tab : nullptr;
+            s->blankClickGeneration = tab ? tab->view_generation : 0;
             s->marqueeStart = s->marqueeCur = POINT{ mx, my };
             s->marqueeBase.clear();
             if (tab && ctrl) {
@@ -2146,6 +2159,7 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
 LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
+        s->blankClickTab = nullptr;
         int mx = GET_X_LPARAM(lParam);
         int my = GET_Y_LPARAM(lParam);
         CancelRenameClick(*s);
@@ -2393,8 +2407,49 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 return 0;
             }
             if (s->marqueeActive || s->marqueePending) {
+                const int mx = GET_X_LPARAM(lParam);
+                const int my = GET_Y_LPARAM(lParam);
+                app::Tab* tab = ActiveTab(*s);
+                app::BlankPaneClickRelease click;
+                click.pending = s->marqueePending;
+                click.marquee_active = s->marqueeActive;
+                click.owns_capture = GetCapture() == hwnd;
+                // Stored pointers are identity tokens only; dereference the live active tab.
+                click.same_context = s->pane == s->blankClickPane &&
+                    tab && tab == s->blankClickTab &&
+                    tab->view_generation == s->blankClickGeneration;
+                click.modified = (GetKeyState(VK_CONTROL) & 0x8000) != 0 ||
+                    (GetKeyState(VK_SHIFT) & 0x8000) != 0 ||
+                    (GetKeyState(VK_MENU) & 0x8000) != 0;
+                click.delta_x = mx - s->marqueeStart.x;
+                click.delta_y = my - s->marqueeStart.y;
+                click.drag_width = GetSystemMetrics(SM_CXDRAG);
+                click.drag_height = GetSystemMetrics(SM_CYDRAG);
+                click.blank_list_hit = PointInList(*s, mx, my);
+                bool goBack = app::IsBlankPaneBackClick(click);
+                if (goBack) {
+                    const ui::WindowViewModel vm = BuildVm(*s, false);
+                    const D2D1_RECT_F rect = D2D1::RectF(
+                        0, 0, static_cast<float>(s->compositor.Width()),
+                        static_cast<float>(s->compositor.Height()));
+                    const ui::HitTestResult hit = s->renderer.HitTest(
+                        vm, rect, static_cast<float>(mx), static_cast<float>(my));
+                    goBack = (hit.region == ui::HitTestResult::Pane ||
+                              hit.region == ui::HitTestResult::None) &&
+                        (hit.pane_index < 0 || PaneAtSlot(*s, hit.pane_index) == s->pane);
+                }
                 if (s->marqueeActive) ApplyMarqueeSelection(*s);
                 ResetMarquee(*s);
+                if (goBack) {
+                    if (tab->CanGoBack()) {
+                        GoBack(*s);
+                    } else if (!fs::IsVirtualPath(tab->current_path)) {
+                        const std::wstring current = fs::NormalizePath(tab->current_path);
+                        const std::wstring parent = fs::ParentPath(current);
+                        if (!parent.empty() && _wcsicmp(parent.c_str(), current.c_str()) != 0)
+                            GoUp(*s);
+                    }
+                }
             } else if (s->clickCollapseIndex >= 0) {
                 FinishListRowClick(*s);
             }
@@ -2496,6 +2551,7 @@ LRESULT HandleCaptureChanged(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LP
 
 LRESULT HandleRButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
+        s->blankClickTab = nullptr;
         CancelRenameClick(*s);
         // Prefetch the Explorer verbs for the menu that WM_RBUTTONUP will
         // open: pulse_shell builds the COM menu during the press + fade-in.
@@ -2628,6 +2684,7 @@ LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 
 LRESULT HandleMouseWheel(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
+        s->blankClickTab = nullptr;
         CancelRenameClick(*s);
         if (IsSettingsTab(ActiveTab(*s))) {
             const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
@@ -2742,6 +2799,7 @@ LRESULT HandleMouseWheel(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 
 LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
+        s->blankClickTab = nullptr;
         CancelRenameClick(*s);
         app::Tab* tab = ActiveTab(*s);
         if (!tab) return DefWindowProcW(hwnd, msg, wParam, lParam);

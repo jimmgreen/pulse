@@ -1,3 +1,4 @@
+#include "../common/localization.h"
 // fluent_menu.cpp — See fluent_menu.h for the contract.
 #include "fluent_menu.h"
 #include "FluentTokens.h"
@@ -274,6 +275,7 @@ LRESULT CALLBACK FluentMenu::MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         if (is_sub) {
             if (self->sub_hover_ != -1) {
                 self->sub_hover_ = -1;
+                self->sub_hover_swatch_ = -1;
                 if (self->RenderSub()) self->PresentSub(255);
             }
         } else {
@@ -379,7 +381,7 @@ bool FluentMenu::Render() {
 }
 
 bool FluentMenu::RenderSub() {
-    return RenderSurface(sub_model_, sub_hover_, -1, 0.0f, false, sub_surf_);
+    return RenderSurface(sub_model_, sub_hover_, sub_hover_swatch_, 0.0f, false, sub_surf_);
 }
 
 bool FluentMenu::RenderSurface(const FluentMenuModel& model, int hover_row, int hover_swatch,
@@ -453,7 +455,8 @@ bool FluentMenu::RenderSurface(const FluentMenuModel& model, int hover_row, int 
             fluent::TextFieldSpec field;
             field.bounds = D2D1::RectF(card.left + 8.0f * scale_, card.top + 6.0f * scale_,
                                        card.right - 8.0f * scale_, card.top + (float)header - 4.0f * scale_);
-            field.placeholder = filter_placeholder_;
+            field.placeholder = filter_placeholder_.empty()
+                ? pulse::l10n::Get(pulse::l10n::StringId::TabMenuSearch) : filter_placeholder_;
             field.text = filter_query_;
             field.leading_glyph = L"\xE721";
             field.state.focused = true;
@@ -613,6 +616,7 @@ void FluentMenu::HideSubWindow() {
     sub_pending_row_ = -1;
     sub_parent_row_ = -1;
     sub_hover_ = -1;
+    sub_hover_swatch_ = -1;
     if (sub_hwnd_) ShowWindow(sub_hwnd_, SW_HIDE);
 }
 
@@ -627,6 +631,7 @@ void FluentMenu::OpenSubmenu(int row) {
     sub_model_.Layout(compositor_->DwriteFactory(), scale_);
     sub_parent_row_ = row;
     sub_hover_ = -1;
+    sub_hover_swatch_ = -1;
     sub_pending_row_ = -1;
 
     const int content_w = sub_model_.WidthPx();
@@ -669,14 +674,17 @@ void FluentMenu::OnSubMouse(POINT client_pt, bool button_up) {
         it = nullptr;
     }
     if (button_up) {
-        if (it && it->command != 0) {
-            result_ = it->command;
+        const int command = InvokeAt(sub_model_, row, static_cast<float>(client_pt.x));
+        if (command != 0) {
+            result_ = command;
             Dismiss();
         }
         return;
     }
-    if (row != sub_hover_) {
+    const int swatch = HitTestSwatch(sub_model_, row, static_cast<float>(client_pt.x));
+    if (row != sub_hover_ || swatch != sub_hover_swatch_) {
         sub_hover_ = row;
+        sub_hover_swatch_ = swatch;
         if (RenderSub()) PresentSub(255);
     }
 }
@@ -734,13 +742,17 @@ void FluentMenu::UpdateHover(int row, int swatch) {
 }
 
 int FluentMenu::HitTestSwatch(int row, float client_x) const {
-    const FluentMenuItem* item = model_.At(row);
+    return HitTestSwatch(model_, row, client_x);
+}
+
+int FluentMenu::HitTestSwatch(const FluentMenuModel& model, int row, float client_x) const {
+    const FluentMenuItem* item = model.At(row);
     if (!item || !item->enabled || item->quick_swatches.empty()) return -1;
     const float spacing = SwatchSpacingDip(*item) * scale_;
     const float radius = SwatchHitRadiusDip(*item) * scale_;
     const float strip_width = spacing * static_cast<float>(item->quick_swatches.size() - 1);
     const float first = static_cast<float>(kShadowMargin) +
-        (static_cast<float>(model_.WidthPx()) - strip_width) * 0.5f;
+        (static_cast<float>(model.WidthPx()) - strip_width) * 0.5f;
     for (size_t i = 0; i < item->quick_swatches.size(); ++i) {
         const float center = first + spacing * static_cast<float>(i);
         if (std::abs(client_x - center) <= radius)
@@ -756,19 +768,15 @@ int FluentMenu::InvokeRow(int row) {
 }
 
 int FluentMenu::InvokeAt(int row, float client_x) const {
-    const FluentMenuItem* item = model_.At(row);
+    return InvokeAt(model_, row, client_x);
+}
+
+int FluentMenu::InvokeAt(const FluentMenuModel& model, int row, float client_x) const {
+    const FluentMenuItem* item = model.At(row);
     if (!item || !item->enabled || item->quick_swatches.empty())
         return item && item->enabled ? item->command : 0;
-    const float spacing = SwatchSpacingDip(*item) * scale_;
-    const float radius = SwatchHitRadiusDip(*item) * scale_;
-    const float strip_width = spacing * static_cast<float>(item->quick_swatches.size() - 1);
-    const float first = static_cast<float>(kShadowMargin) +
-        (static_cast<float>(model_.WidthPx()) - strip_width) * 0.5f;
-    for (size_t i = 0; i < item->quick_swatches.size(); ++i) {
-        const float center = first + spacing * static_cast<float>(i);
-        if (std::abs(client_x - center) <= radius)
-            return item->quick_swatches[i].command;
-    }
+    const int swatch = HitTestSwatch(model, row, client_x);
+    if (swatch >= 0) return item->quick_swatches[static_cast<size_t>(swatch)].command;
     return item->command;
 }
 
@@ -1287,7 +1295,7 @@ void FluentMenu::RefreshFilter() {
     auto items = filter_fn_(filter_query_);
     if (items.empty()) {
         FluentMenuItem none;
-        none.text = filter_query_.empty() ? L"输入以搜索命令、文件夹…" : L"无匹配项";
+        none.text = filter_query_.empty() ? pulse::l10n::Get(pulse::l10n::StringId::MenuTypeSearch).c_str() : pulse::l10n::Get(pulse::l10n::StringId::MenuNoMatch).c_str();
         none.enabled = false;
         items.push_back(std::move(none));
     }

@@ -48,6 +48,9 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
     D2D1_RECT_F sb = SidebarRect(rect.right, rect.bottom);
     const float w = sb.right - sb.left;
 
+    // Partially visible scrolled rows must not paint over the toolbar or status bar.
+    dc->PushAxisAlignedClip(sb, D2D1_ANTIALIAS_MODE_ALIASED);
+
     D2D1_COLOR_F sidebarBackground = theme.tab_bg;
     if (vm.backdrop_enabled) sidebarBackground.a = vm.dark ? 0.62f : 0.70f;
     MakeBrush(dc, sidebarBackground, brFillHover_);
@@ -101,6 +104,7 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
                     iconColor, 0.92f);
             }
         }
+        dc->PopAxisAlignedClip();
         return;
     }
 
@@ -313,6 +317,7 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
         bar.expand_progress = 1.0f;
         painter_.DrawScrollbar(bar);
     }
+    dc->PopAxisAlignedClip();
 }
 
 void MainRenderer::DrawTrayDeck(const WindowViewModel& vm, const D2D1_RECT_F& panel_rc,

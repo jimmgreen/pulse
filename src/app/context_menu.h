@@ -75,6 +75,10 @@ enum MenuCmd : int {
     CmdTabRemoveFromGroup,  // tab menu: leave the group (group survives)
     CmdTabCloseOthers,
     CmdTabCloseRight,
+    CmdTabRename,
+    CmdTabNameSave,
+    CmdTabNameReset,
+    CmdTabColorNone,
     CmdTabJoinGroupBase = 130, // + index into WindowTabs::tab_groups (clear of 98-129)
     CmdEditStarBadge = 170,
     CmdRemoveStarred,

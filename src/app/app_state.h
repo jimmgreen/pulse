@@ -504,6 +504,9 @@ struct AppState {
     bool marqueePending = false;
     bool marqueeActive = false;
     bool marqueeAdditive = false;
+    app::Pane* blankClickPane = nullptr;
+    app::Tab* blankClickTab = nullptr;
+    uint64_t blankClickGeneration = 0;
     POINT marqueeStart{};
     POINT marqueeCur{};
     std::unordered_set<int> marqueeBase;

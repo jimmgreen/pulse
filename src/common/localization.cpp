@@ -1,19 +1,24 @@
 #include "localization.h"
 
 #include <array>
+#include <atomic>
 #include <cwchar>
+#include <mutex>
 
 namespace pulse::l10n {
 namespace {
 
 constexpr UINT kFirstString = IDS_SETTINGS;
-constexpr UINT kLastString = IDS_INSTALLING_UPDATE;
+constexpr UINT kLastString = IDS_AUDIT_SEARCHCOUNT;
 
 HINSTANCE g_module = nullptr;
-Language g_preference = Language::System;
-Language g_effective = Language::EnUS;
-std::array<std::wstring, kLastString - kFirstString + 1> g_cache;
-std::array<bool, kLastString - kFirstString + 1> g_loaded{};
+std::atomic<Language> g_preference{Language::System};
+std::atomic<Language> g_effective{Language::EnUS};
+std::mutex g_mutex;
+// Published strings stay immutable when the UI language changes. Workers may
+// still hold references to the previous language while finishing an operation.
+std::array<std::array<std::wstring, kLastString - kFirstString + 1>, 2> g_cache;
+std::array<std::array<bool, kLastString - kFirstString + 1>, 2> g_loaded{};
 const std::wstring g_empty;
 
 Language SystemLanguage() noexcept {
@@ -42,9 +47,8 @@ std::wstring LoadStringResource(UINT id, LANGID language) {
 }
 
 void ApplyLanguage() {
-    g_effective = g_preference == Language::System ? SystemLanguage() : g_preference;
-    g_loaded.fill(false);
-    for (auto& value : g_cache) value.clear();
+    const Language selected = g_preference.load();
+    g_effective = selected == Language::System ? SystemLanguage() : selected;
     SetThreadUILanguage(ResourceLanguage(g_effective));
 }
 
@@ -69,6 +73,7 @@ const wchar_t* LanguageId(Language language) noexcept {
 }
 
 void Initialize(HINSTANCE module, std::wstring_view preference) {
+    std::lock_guard lock(g_mutex);
     g_module = module;
     g_preference = LanguageFromId(preference);
     ApplyLanguage();
@@ -92,14 +97,18 @@ const std::wstring& Get(StringId id) {
     const UINT value = static_cast<UINT>(id);
     if (value < kFirstString || value > kLastString) return g_empty;
     const size_t index = value - kFirstString;
-    if (!g_loaded[index]) {
-        g_cache[index] = LoadStringResource(value, ResourceLanguage(g_effective));
-        if (g_cache[index].empty() && g_effective != Language::EnUS) {
-            g_cache[index] = LoadStringResource(value, ResourceLanguage(Language::EnUS));
+    std::lock_guard lock(g_mutex);
+    if (!g_module) return g_empty;
+    const Language language = g_effective.load();
+    const size_t locale = language == Language::ZhCN ? 0 : 1;
+    if (!g_loaded[locale][index]) {
+        g_cache[locale][index] = LoadStringResource(value, ResourceLanguage(language));
+        if (g_cache[locale][index].empty() && language != Language::EnUS) {
+            g_cache[locale][index] = LoadStringResource(value, ResourceLanguage(Language::EnUS));
         }
-        g_loaded[index] = true;
+        g_loaded[locale][index] = true;
     }
-    return g_cache[index];
+    return g_cache[locale][index];
 }
 
 } // namespace pulse::l10n

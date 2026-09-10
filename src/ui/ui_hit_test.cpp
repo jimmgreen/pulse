@@ -28,7 +28,7 @@ bool MainRenderer::TabItemRect(const WindowViewModel& vm, float window_w, int in
     const float left = m.x0 + static_cast<float>(index) * m.pitch
         + (index < static_cast<int>(m.extra.size()) ? m.extra[static_cast<size_t>(index)] : 0.0f);
     const float w = vm.tabs[static_cast<size_t>(index)].pinned
-        ? kTabPinnedW * scale_ : m.w;
+        ? (vm.show_pinned_tab_names ? kTabPinnedNamedW : kTabPinnedW) * scale_ : m.w;
     *out = D2D1::RectF(left, m.y, left + w, m.y + m.h);
     return true;
 }
@@ -76,7 +76,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
         auto hitTab = [&](int i) -> bool {
             if (vm.tabs[static_cast<size_t>(i)].hidden) return false;
             const float tabW = vm.tabs[static_cast<size_t>(i)].pinned
-                ? kTabPinnedW * scale_ : strip.w;
+                ? (vm.show_pinned_tab_names ? kTabPinnedNamedW : kTabPinnedW) * scale_ : strip.w;
             const float extra = i < static_cast<int>(strip.extra.size())
                 ? strip.extra[static_cast<size_t>(i)] : 0.0f;
             float tabLeft = strip.x0
@@ -209,6 +209,11 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 if (ContainsPt(lay.hidden_files_row, x, y)) {
                     r.region = HitTestResult::SettingsToggle;
                     r.index = 5;
+                    return r;
+                }
+                if (ContainsPt(lay.pinned_names_row, x, y)) {
+                    r.region = HitTestResult::SettingsToggle;
+                    r.index = 6;
                     return r;
                 }
                 for (int i = 0; i < 3; ++i) {

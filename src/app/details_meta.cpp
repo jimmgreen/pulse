@@ -1,3 +1,4 @@
+#include "../common/localization.h"
 // details_meta.cpp — See details_meta.h. No COM needed (advapi32/win32 only).
 #include "details_meta.h"
 #include "../common/text_format.h"
@@ -52,7 +53,7 @@ void FetchPermissions(const std::wstring& shell_path, bool is_dir, DetailsMeta& 
                                       DACL_SECURITY_INFORMATION, nullptr, nullptr,
                                       &dacl, nullptr, &sd) == ERROR_SUCCESS) {
         if (!dacl) {
-            out.permissions = L"完全控制"; // NULL DACL grants everyone full access
+            out.permissions = pulse::l10n::Get(pulse::l10n::StringId::PermFull).c_str(); // NULL DACL grants everyone full access
         } else {
             TRUSTEE_W trustee{};
             trustee.TrusteeForm = TRUSTEE_IS_SID;
@@ -94,23 +95,23 @@ void FetchVolume(const std::wstring& shell_path, DetailsMeta& out) {
 } // namespace
 
 std::wstring FormatAccessMask(unsigned int mask, bool is_dir) {
-    if ((mask & FILE_ALL_ACCESS) == FILE_ALL_ACCESS) return L"完全控制";
+    if ((mask & FILE_ALL_ACCESS) == FILE_ALL_ACCESS) return pulse::l10n::Get(pulse::l10n::StringId::PermFull).c_str();
     // winnt.h has FILE_GENERIC_READ/WRITE/EXECUTE but no FILE_GENERIC_MODIFY.
     const bool read = (mask & FILE_GENERIC_READ) == FILE_GENERIC_READ;
     const bool write = (mask & FILE_GENERIC_WRITE) == FILE_GENERIC_WRITE;
     std::wstring out;
     auto add = [&](const wchar_t* part) {
-        if (!out.empty()) out += L"、";
+        if (!out.empty()) out += pulse::l10n::effective_language() == pulse::l10n::Language::ZhCN ? L"、" : L", ";
         out += part;
     };
-    if (read && write) add(L"修改");
-    if ((mask & FILE_GENERIC_EXECUTE) == FILE_GENERIC_EXECUTE) add(L"读取和执行");
+    if (read && write) add(pulse::l10n::Get(pulse::l10n::StringId::PermModify).c_str());
+    if ((mask & FILE_GENERIC_EXECUTE) == FILE_GENERIC_EXECUTE) add(pulse::l10n::Get(pulse::l10n::StringId::PermReadExecute).c_str());
     if (is_dir && (mask & FILE_LIST_DIRECTORY) == FILE_LIST_DIRECTORY)
-        add(L"列出文件夹内容");
-    if (read && !write) add(L"读取");
-    if (write && !read) add(L"写入");
-    if (mask & DELETE) add(L"删除");
-    if (out.empty()) add(L"特殊权限");
+        add(pulse::l10n::Get(pulse::l10n::StringId::PermList).c_str());
+    if (read && !write) add(pulse::l10n::Get(pulse::l10n::StringId::PermRead).c_str());
+    if (write && !read) add(pulse::l10n::Get(pulse::l10n::StringId::PermWrite).c_str());
+    if (mask & DELETE) add(pulse::l10n::Get(pulse::l10n::StringId::Delete).c_str());
+    if (out.empty()) add(pulse::l10n::Get(pulse::l10n::StringId::PermSpecial).c_str());
     return out;
 }
 

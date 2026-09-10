@@ -386,6 +386,7 @@ pulse_enable_lumatext(pulse_material_test)
 
 add_executable(pulse_app_controllers_test
     src/bench/app_controllers_test.cpp
+    src/bench/localization_test.rc
     src/app/settings_controller.cpp
     src/app/context_menu_controller.cpp
     src/app/session_tab_model.cpp
@@ -398,7 +399,7 @@ add_executable(pulse_app_controllers_test
     src/index/index_client.cpp
     src/index/network_agent_client.cpp)
 target_link_libraries(pulse_app_controllers_test PRIVATE
-    user32 shell32 ole32 uuid advapi32 shlwapi)
+    user32 shell32 ole32 uuid advapi32 shlwapi pulse_localization)
 
 # Shell-only operations (recycle bin, Explorer verbs) go through pulse_shell.exe.
 # Copy/move use the in-process scheduler plus CopyFile2.

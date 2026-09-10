@@ -13,6 +13,7 @@ struct AppPrefs {
     bool open_folders_in_pulse = false;
     bool verify_copies = false;
     bool show_status_performance = false;
+    bool show_pinned_tab_names = true;
     bool show_hidden_files = false;
     // system / zh-CN / en-US
     std::wstring language = L"system";
