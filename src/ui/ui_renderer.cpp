@@ -482,7 +482,7 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
 
     // Product mark: the packaged app icon; the monogram is the fallback.
     float x = 12.0f * scale_;
-    const float mark = 20.0f * scale_;
+    const float mark = 24.0f * scale_;
     const float markY = (h - mark) * 0.5f;
     if (ID2D1Bitmap* logo = LogoBitmap()) {
         dc->DrawBitmap(logo, D2D1::RectF(x, markY, x + mark, markY + mark), 1.0f,

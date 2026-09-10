@@ -276,6 +276,7 @@ if(PULSE_APP_SOURCES)
     endif()
     target_sources(pulse PRIVATE src/app/pulse.rc)
     set_property(SOURCE src/app/pulse.rc APPEND PROPERTY OBJECT_DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/app/pulse.ico"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/common/strings.rcinc"
         "${CMAKE_CURRENT_SOURCE_DIR}/assets/fluent/cut_24_color.svg"
         "${CMAKE_CURRENT_SOURCE_DIR}/assets/fluent/copy_24_color.svg"
