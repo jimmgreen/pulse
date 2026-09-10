@@ -215,7 +215,7 @@ bool Compositor::CreateSwapChain() {
             hr = factory->CreateSwapChainForComposition(d3dDevice_.get(), &desc, nullptr, &swapChain_);
         }
     }
-    if (SUCCEEDED(hr)) hr = compositionDevice_->CreateTargetForHwnd(hwnd_, TRUE, &compositionTarget_);
+    if (SUCCEEDED(hr)) hr = compositionDevice_->CreateTargetForHwnd(hwnd_, FALSE, &compositionTarget_);
     if (SUCCEEDED(hr)) hr = compositionDevice_->CreateVisual(&compositionVisual_);
     if (SUCCEEDED(hr)) hr = compositionVisual_->SetContent(swapChain_.get());
     if (SUCCEEDED(hr)) hr = compositionTarget_->SetRoot(compositionVisual_.get());

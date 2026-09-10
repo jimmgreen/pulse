@@ -1,3 +1,4 @@
+#include "edit_host.h"
 #include "legacy_icons.h"
 #include "../common/windows_compat.h"
 #include "quick_preview_window.h"
@@ -512,7 +513,7 @@ void QuickPreviewWindow::OpenFind() {
     SetWindowTextW(find_edit_, find_query_.c_str());
     LayoutFindEdit();
     ShowWindow(find_edit_, SW_SHOW);
-    SetForegroundWindow(find_edit_);
+    SetForegroundWindow(GetAncestor(find_edit_, GA_ROOT));
     SetFocus(find_edit_);
     SendMessageW(find_edit_, EM_SETSEL, 0, -1);
     if (compositor_.LumaTextEnabled())
@@ -538,10 +539,7 @@ bool QuickPreviewWindow::EnsureFindEdit() {
     if (find_edit_) return true;
     if (!hwnd_) return false;
     if (!find_edit_font_) RecreateFormats();
-    find_edit_ = CreateWindowExW(
-        WS_EX_LAYERED | WS_EX_TOOLWINDOW, L"EDIT", L"",
-        WS_POPUP | ES_AUTOHSCROLL,
-        0, 0, 0, 0, hwnd_, nullptr, GetModuleHandleW(nullptr), nullptr);
+    find_edit_ = CreateChildEdit(hwnd_);
     if (!find_edit_) return false;
     SetWindowTheme(find_edit_, L"", L"");
     if (!compositor_.LumaTextEnabled())
@@ -562,7 +560,7 @@ void QuickPreviewWindow::LayoutFindEdit() {
     const D2D1_RECT_F cell = FindEditCell();
     POINT pt{ static_cast<int>(std::lround(cell.left)),
               static_cast<int>(std::lround(cell.top)) };
-    ClientToScreen(hwnd_, &pt);
+
     const int w = (std::max)(40, static_cast<int>(std::lround(cell.right - cell.left)));
     const int cell_h = (std::max)(18, static_cast<int>(std::lround(cell.bottom - cell.top)));
     int line_h = cell_h;
@@ -579,11 +577,10 @@ void QuickPreviewWindow::LayoutFindEdit() {
     const int y = pt.y + (std::max)(0, (cell_h - line_h) / 2);
     RECT cur{};
     GetWindowRect(find_edit_, &cur);
+    MapWindowPoints(nullptr, hwnd_, reinterpret_cast<POINT*>(&cur), 2);
     const bool moved = cur.left != pt.x || cur.top != y || cur.right != pt.x + w ||
         cur.bottom != y + line_h;
-    // Same stacking as the address EDIT: HWND_TOP after the owner presents,
-    // without SWP_NOZORDER. DComp on the Quick Look window would otherwise
-    // cover this layered popup.
+    // Child coordinates stay local when the preview window moves.
     UINT flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
     if (!moved) flags |= SWP_NOMOVE | SWP_NOSIZE | SWP_NOREDRAW;
     SetWindowPos(find_edit_, HWND_TOP, pt.x, y, w, line_h, flags);

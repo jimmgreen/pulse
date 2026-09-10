@@ -236,10 +236,9 @@ public:
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
-        if (IsWindow(hwnd_)) DestroyWindow(hwnd_);
+        if (IsWindow(hwnd_)) { HideComposedDialog(hwnd_, owner_); DestroyWindow(hwnd_); }
         hwnd_ = nullptr;
         EnableWindow(owner_, TRUE);
-        SetActiveWindow(owner_);
         return result_;
     }
 
@@ -275,7 +274,7 @@ private:
         result_.choice = choice;
         result_.apply_to_all = apply_all_;
         done_ = true;
-        if (hwnd_) DestroyWindow(hwnd_);
+        if (hwnd_) { HideComposedDialog(hwnd_, owner_); DestroyWindow(hwnd_); }
     }
 
     void ToggleDetails() {
@@ -577,11 +576,10 @@ public:
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
-        if (IsWindow(hwnd_)) DestroyWindow(hwnd_);
+        if (IsWindow(hwnd_)) { HideComposedDialog(hwnd_, owner_); DestroyWindow(hwnd_); }
         hwnd_ = nullptr;
         if (owner_) {
             EnableWindow(owner_, TRUE);
-            SetActiveWindow(owner_);
         }
         return accepted_;
     }
@@ -661,7 +659,7 @@ private:
     void Complete(bool accepted) {
         accepted_ = accepted;
         done_ = true;
-        if (hwnd_) DestroyWindow(hwnd_);
+        if (hwnd_) { HideComposedDialog(hwnd_, owner_); DestroyWindow(hwnd_); }
     }
 
     void Render() {
@@ -871,7 +869,7 @@ bool FileOperationWindow::Create(HWND owner, FileOperationCallbacks callbacks) {
 }
 
 void FileOperationWindow::Destroy() {
-    if (hwnd_) DestroyWindow(hwnd_);
+    if (hwnd_) { HideComposedDialog(hwnd_); DestroyWindow(hwnd_); }
     hwnd_ = nullptr;
 }
 

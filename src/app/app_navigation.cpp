@@ -1165,6 +1165,7 @@ void NavigateTo(AppState& s, const std::wstring& path) {
     const std::wstring returnedChild =
         app::NavigationReturnChildName(tab->current_path, normalized);
     tab->NavigateTo(normalized);
+    RecordSearchHistory(s, normalized);
     StartLoadingPath(s, *tab, normalized);
     RestoreNavigationReturnSelection(s, *tab, returnedChild);
     RememberPath(s, normalized);

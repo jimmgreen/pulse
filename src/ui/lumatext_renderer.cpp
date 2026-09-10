@@ -467,7 +467,10 @@ struct LumaTextRenderer::Impl {
             blend.BlendOp = AC_SRC_OVER;
             blend.SourceConstantAlpha = 255;
             blend.AlphaFormat = AC_SRC_ALPHA;
-            const BOOL ok = UpdateLayeredWindow(hwnd, nullptr, &dst_pt, &sz, present_dc,
+            // Layout owns the position. Child coordinates must never be replaced
+            // with the screen-space rectangle during a text repaint.
+            const bool child = (GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CHILD) != 0;
+            const BOOL ok = UpdateLayeredWindow(hwnd, nullptr, child ? nullptr : &dst_pt, &sz, present_dc,
                                                 &src, 0, &blend, ULW_ALPHA);
             return ok != FALSE;
         }

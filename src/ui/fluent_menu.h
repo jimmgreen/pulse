@@ -57,6 +57,8 @@ struct FluentMenuItem {
     std::vector<FluentMenuItem> children;
     float glyph_scale = 1.0f;      // Per-item visual scale inside the fixed icon slot.
     bool shortcut_inline = false; // Search paths follow a shared, compact filename column.
+    int trailing_command = 0;     // Optional hover-revealed close action at the right edge.
+    std::wstring tooltip;
 };
 
 // Windowless menu layout + hit-testing (theme.row_menu = 36 DIP rows).
@@ -112,7 +114,8 @@ public:
                    FilterFn filter = nullptr, bool top_center = false);
 
     // Renders the menu to a PNG without showing it (GUI verification helper).
-    bool SaveDebugSnapshot(const wchar_t* png_path, std::vector<FluentMenuItem> items);
+    bool SaveDebugSnapshot(const wchar_t* png_path, std::vector<FluentMenuItem> items,
+                           int hover_row = -1);
 
     bool IsOpen() const { return open_; }
     void Dismiss(); // immediate (no animation); safe anytime
@@ -138,6 +141,12 @@ public:
     // Override the filter-mode minimum width (dips) for the next TrackPopup;
     // <= 0 restores the palette default. Reset after each popup.
     void SetFilterMinWidth(float dips) { filter_min_width_ = dips; }
+    // Limit the next popup's body to this many rows; wheel/keys reveal the rest.
+    // Non-positive values preserve the ordinary unconstrained menu behavior.
+    void SetMaxVisibleRows(int rows) { max_visible_rows_ = rows > 0 ? rows : 0; }
+
+    // Borrow the search editor; show only results below its screen rect.
+    void SetExternalFilterEdit(HWND edit) { external_edit_ = edit; }
 
     static constexpr int kShadowMargin = 20; // px of transparent border around the card
 
@@ -174,6 +183,8 @@ private:
     int RunModalLoop();
     void OnMouse(POINT client_pt, bool button_up);
     void UpdateHover(int row, int swatch = -1);
+    float BodyHeightPx() const;
+    void UpdateTooltip(int row);
     int HitTestSwatch(int row, float client_x) const;
     int HitTestSwatch(const FluentMenuModel& model, int row, float client_x) const;
     int InvokeRow(int row);        // returns command or 0
@@ -185,6 +196,7 @@ private:
     void PasteFilterText();
 
     static LRESULT CALLBACK MenuWndProc(HWND, UINT, WPARAM, LPARAM);
+    static LRESULT CALLBACK ExternalFilterEditProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
     static LRESULT CALLBACK FilterEditProc(HWND, UINT, WPARAM, LPARAM, UINT_PTR, DWORD_PTR);
 
     HWND owner_ = nullptr;
@@ -204,16 +216,24 @@ private:
     bool select_all_on_open_ = true;
     bool hover_first_on_open_ = true;
     bool filter_committed_ = false;
+    bool filter_composing_ = false;
+    bool forward_tab_key_ = false;
     RECT anchor_rect_{};
     bool anchor_to_rect_ = false;
     POINT popup_pt_{};
     bool top_center_ = false;
+    HWND external_edit_ = nullptr; // borrowed; never moved, hidden or destroyed
     HWND edit_ = nullptr;
     HFONT edit_font_ = nullptr;
     HBRUSH edit_brush_ = nullptr;
     int present_offset_ = 0;
     int hover_row_ = -1;
     int hover_swatch_ = -1;
+    int max_visible_rows_ = 0;
+    float scroll_y_ = 0.0f;
+    float body_limit_px_ = 0.0f;
+    HWND tooltip_ = nullptr;
+    std::wstring tooltip_text_;
     bool open_ = false;
     bool animating_out_ = false;
     int result_ = 0;

@@ -2087,7 +2087,7 @@ void Engine::ReplayDeltasLocked() {
                 p.attr.mtime = mtime;
                 p.attr.size = size;
                 p.has_attr = true;
-                p.has_meta = p.has_meta || true;
+                // Attribute-only records preserve the existing parent and flags.
             }
             if (which & static_cast<uint8_t>(PatchBits::Name)) {
                 if (!name.data() && !name.empty()) return;

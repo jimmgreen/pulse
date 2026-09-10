@@ -40,6 +40,10 @@ struct EngineTestAccess {
         add(70, 20, L".config", true);
         add(80, 20, L".codex-backup", true);
         add(90, 20, L"sample.codex", false);
+        add(110, 20, L"AppData", true);
+        add(111, 110, L"Local", true);
+        add(112, 111, L"Temp", true);
+        add(113, 112, L"ShowBoxDebug.log", false);
         const bool ok = e.BuildMftTree(std::move(volume), 5, std::move(nodes));
         e.live_ = std::move(e.build_);
         e.vols_ = std::move(e.build_vols_);
@@ -64,6 +68,22 @@ struct EngineTestAccess {
     }
 
     static bool NeedsRebuild(const Engine& e) { return e.NeedsSearchRebuildLocked(); }
+
+    static bool ReplayAttrOnly(Engine& e) {
+        const int32_t log = e.FindByFrnLocked(e.vols_.front(), 113);
+        const int32_t folder = e.FindByFrnLocked(e.vols_.front(), 112);
+        if (log < 0 || folder < 0) return false;
+        DeltaLog delta;
+        if (!delta.Open(DeltaFilePathForVolume(e.vols_.front().volume_id), e.built_unix_)) return false;
+        for (int32_t idx : {log, folder})
+            delta.QueuePatch(idx, static_cast<uint8_t>(PatchBits::Attr), 0, 0, 100, 4096, {});
+        if (!delta.Flush()) return false;
+        delta.Close();
+        e.ReplayDeltasLocked();
+        e.InvalidateFilterLocked();
+        return e.AttrAt(log).size == 4096 && e.AttrAt(folder).mtime == 100 &&
+            (e.NodeAt(folder).flags & Engine::kFlagDir) != 0;
+    }
 
     static void RepairOffline(Engine& e) {
         e.excluded_paths_ = {L"C:\\Users\\TestUser\\excluded"};
@@ -117,6 +137,16 @@ bool Has(Engine& e, const wchar_t* needle, const wchar_t* path) {
     });
 }
 void CheckSearch(Engine& e) {
+    constexpr auto log_path = L"C:\\Users\\TestUser\\AppData\\Local\\Temp\\ShowBoxDebug.log";
+    Check(Has(e, L"ShowBoxDebug.log", log_path), "mixed-case dotted temp filename searchable");
+    Check(Has(e, L"showboxdebug.LOG", log_path), "temp filename search ignores case");
+    Check(Has(e, L"\"ShowBoxDebug.log\"", log_path), "quoted exact temp filename searchable");
+    const std::wstring filename = L"ShowBoxDebug.log";
+    bool incremental = true;
+    for (size_t length = 1; length <= filename.size(); ++length)
+        incremental = Has(e, filename.substr(0, length).c_str(), log_path) && incremental;
+    Check(incremental, "incremental filename search preserves temp log result");
+    Check(Has(e, L"Debug.log", log_path), "interior filename bigram finds temp log");
     Check(Has(e, L".codex", L"C:\\Users\\TestUser\\.codex"), "dot folder searchable");
     Check(Has(e, L"settings", L"C:\\Users\\TestUser\\.codex\\settings.toml"), "descendant searchable");
     Check(Has(e, L".config", L"C:\\Users\\TestUser\\.config"), "other dot folders searchable");
@@ -200,6 +230,24 @@ int wmain() {
     const auto base = dir / L"base.bin";
     Check(EngineTestAccess::Save(engine, base.wstring()), "write snapshot");
     Check(ValidateShardBase(base.wstring()), "shard accepts new snapshot");
+    for (bool mapped_fixture : {false, true}) {
+        const auto replay_dir = dir / (mapped_fixture ? L"mapped-attr" : L"live-attr");
+        std::filesystem::create_directory(replay_dir);
+        SetActiveIndexDirectory(replay_dir.wstring());
+        Engine replayed;
+        Check(mapped_fixture ? EngineTestAccess::Load(replayed, base.wstring()) :
+              EngineTestAccess::Build(replayed), "prepare attr-only replay fixture");
+        Check(EngineTestAccess::ReplayAttrOnly(replayed), "attr-only replay updates attributes and preserves directory flags");
+        Check(Has(replayed, L"ShowBoxDebug.log", L"C:\\Users\\TestUser\\AppData\\Local\\Temp\\ShowBoxDebug.log"),
+              "attr-only replay preserves filename search and full path");
+        const auto compact = replay_dir / L"compact.bin";
+        Check(EngineTestAccess::Save(replayed, compact.wstring()), "compact attr-only replay snapshot");
+        Engine reloaded;
+        Check(EngineTestAccess::Load(reloaded, compact.wstring()), "reload attr-only replay snapshot");
+        Check(Has(reloaded, L"ShowBoxDebug.log", L"C:\\Users\\TestUser\\AppData\\Local\\Temp\\ShowBoxDebug.log"),
+              "attr-only replay remains searchable after compact and reload");
+        SetActiveIndexDirectory(L"");
+    }
     {
         Engine mapped;
         Check(EngineTestAccess::Load(mapped, base.wstring()), "load snapshot");
@@ -218,6 +266,18 @@ int wmain() {
         Check(Search(mapped, L".codex-new").total == 1, "USN move out of excluded directory");
         EngineTestAccess::Usn(mapped, 100, 20, L".codex-new", USN_REASON_FILE_DELETE);
         Check(Search(mapped, L".codex-new").total == 0, "USN delete removed");
+    }
+    {
+        std::fstream file(base, std::ios::binary | std::ios::in | std::ios::out);
+        DiskHeader header{};
+        file.read(reinterpret_cast<char*>(&header), sizeof(header));
+        header.ver = 10;
+        file.seekp(0);
+        file.write(reinterpret_cast<const char*>(&header), sizeof(header));
+        file.close();
+        Engine legacy;
+        Check(EngineTestAccess::Load(legacy, base.wstring()) && EngineTestAccess::NeedsRebuild(legacy),
+              "V10 snapshot requests repair for persisted attr-only corruption");
     }
     // Reproduce a persisted V9 index whose root flag contaminated all descendants.
     {

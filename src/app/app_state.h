@@ -22,6 +22,7 @@
 #include "shell_verbs.h"
 #include "app_prefs.h"
 #include "saved_search.h"
+#include "search_history.h"
 #include "settings_controller.h"
 #include "single_instance_coordinator.h"
 #include "tray_controller.h"
@@ -73,6 +74,7 @@ constexpr UINT WM_RECYCLE_INFO = WM_APP + 57;
 constexpr UINT WM_DUP_VOLUMES = WM_APP + 59;
 constexpr UINT WM_UPDATE_DOWNLOADED = WM_APP + 60;
 constexpr UINT WM_UPDATE_INSTALL = WM_APP + 61;
+constexpr UINT WM_SEARCH_HISTORY = WM_APP + 62;
 constexpr UINT kTimerUi = 1;
 
 enum class OmnibarMode { Path, Mixed, Command, Project };
@@ -162,6 +164,8 @@ struct AppState {
     // Explorer COM/static menu session, caches, and delayed refresh state.
     app::ContextMenuController context_menu;
     app::AppPrefs appPrefs;
+    app::SearchHistory searchHistory;
+    app::SearchHistoryWriter searchHistoryWriter;
     app::SettingsController settings;
     app::UpdateChecker update_checker;
     app::UpdateResult update_result;
@@ -335,6 +339,13 @@ struct AppState {
     HWND hwndAddressEdit = nullptr;
     bool addressEditing = false;
     bool addressSearching = false;
+    bool searchHistoryOpen = false;
+    bool searchScopePending = false;
+    bool addressSearchComposing = false;
+    ULONGLONG addressLiveDue = 0;
+    ULONGLONG addressHistoryDue = 0;
+    std::wstring addressLiveContext;
+    std::wstring addressHistoryPath;
     bool addressSearchCurrent = false;
     std::wstring addressSearchRoot;
     float addressSearchAnimation = 0.0f;

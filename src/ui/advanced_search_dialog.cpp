@@ -1,7 +1,9 @@
+#include "edit_host.h"
 #include "../common/windows_compat.h"
 #include "advanced_search_dialog.h"
 #include "FluentTokens.h"
 #include "fluent_components.h"
+#include "fluent_menu.h"
 #include "typography.h"
 #include "ui_compositor.h"
 #include "window_helpers.h"
@@ -22,7 +24,7 @@ namespace {
 
 constexpr wchar_t kClass[] = L"PulseAdvancedSearchWindow";
 constexpr float kDlgW = 560.0f;
-constexpr float kDlgH = 548.0f;
+constexpr float kDlgH = 500.0f;
 constexpr UINT_PTR kEditCaretTimer = 72;
 
 D2D1_RECT_F Rect(float scale, float x, float y, float width, float height) {
@@ -136,6 +138,7 @@ public:
         if (!hwnd_) return result_;
         CenterOwnedWindow(hwnd_, owner_, width, height);
         if (owner_) EnableWindow(owner_, FALSE);
+        Render();
         ShowWindow(hwnd_, SW_SHOW);
         LayoutEdits();
         SetForegroundWindow(hwnd_);
@@ -147,12 +150,13 @@ public:
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
+        done_ = true;
+        if (IsWindow(hwnd_)) HideComposedDialog(hwnd_, owner_);
         DestroyEdits();
         if (IsWindow(hwnd_)) DestroyWindow(hwnd_);
         hwnd_ = nullptr;
         if (owner_) {
             EnableWindow(owner_, TRUE);
-            SetActiveWindow(owner_);
         }
         return result_;
     }
@@ -170,23 +174,25 @@ private:
     }
 
     D2D1_RECT_F CloseRect() const { return Rect(scale_, kDlgW - 46, 0, 46, 36); }
-    D2D1_RECT_F NameField() const { return Rect(scale_, 20, 68, 360, 32); }
-    D2D1_RECT_F NameHowRect() const { return Rect(scale_, 392, 68, 148, 32); }
+    D2D1_RECT_F NameField() const { return Rect(scale_, 20, 68, 328, 32); }
+    D2D1_RECT_F NameHowRect() const { return Rect(scale_, 360, 68, 180, 32); }
     D2D1_RECT_F KindRect() const { return Rect(scale_, 20, 128, 140, 32); }
     D2D1_RECT_F ExtField() const { return Rect(scale_, 168, 128, 104, 32); }
     D2D1_RECT_F LocationRect() const { return Rect(scale_, 284, 128, 168, 32); }
     D2D1_RECT_F BrowseRect() const { return Rect(scale_, 460, 128, 80, 32); }
     D2D1_RECT_F DateRect() const { return Rect(scale_, 20, 188, 252, 32); }
     D2D1_RECT_F SizeRect() const { return Rect(scale_, 284, 188, 256, 32); }
-    D2D1_RECT_F ContentField() const { return Rect(scale_, 20, 248, 360, 32); }
-    D2D1_RECT_F ModeRect() const { return Rect(scale_, 392, 248, 148, 32); }
-    D2D1_RECT_F ExcludeField() const { return Rect(scale_, 20, 308, 360, 32); }
-    D2D1_RECT_F WholeWordRect() const { return Rect(scale_, 392, 308, 148, 32); }
-    D2D1_RECT_F MatchCaseRect() const { return Rect(scale_, 392, 348, 148, 32); }
-    D2D1_RECT_F PreviewRect() const { return Rect(scale_, 20, 392, kDlgW - 40, 56); }
-    D2D1_RECT_F ErrorRect() const { return Rect(scale_, 20, 452, kDlgW - 228, 32); }
+    D2D1_RECT_F ContentField() const { return Rect(scale_, 20, 248, 328, 32); }
+    D2D1_RECT_F ModeRect() const { return Rect(scale_, 360, 248, 180, 32); }
+    D2D1_RECT_F ExcludeField() const { return Rect(scale_, 20, 308, 520, 32); }
+    D2D1_RECT_F WholeWordRect() const { return Rect(scale_, 20, 352, 252, 32); }
+    D2D1_RECT_F MatchCaseRect() const { return Rect(scale_, 284, 352, 256, 32); }
+    D2D1_RECT_F PreviewRect() const { return Rect(scale_, 20, 392, kDlgW - 40, 24); }
+    D2D1_RECT_F ErrorRect() const { return Rect(scale_, 20, 418, kDlgW - 40, 28); }
     D2D1_RECT_F CancelRect() const { return Rect(scale_, kDlgW - 196, kDlgH - 48, 80, 32); }
     D2D1_RECT_F SearchRect() const { return Rect(scale_, kDlgW - 108, kDlgH - 48, 88, 32); }
+
+    D2D1_RECT_F ResetRect() const { return Rect(scale_, 20, kDlgH - 48, 120, 32); }
 
     HWND EditAt(int id) const {
         if (id == 1) return edit_name_;
@@ -221,10 +227,13 @@ private:
     }
 
     HWND CreateField(int id, const std::wstring& text) {
-        HWND edit = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW, L"EDIT", text.c_str(),
-            WS_POPUP | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd_, nullptr, GetModuleHandleW(nullptr), nullptr);
+        HWND edit = CreateChildEdit(hwnd_, text.c_str());
         if (!edit) return nullptr;
         SetWindowTheme(edit, L"", L"");
+        const auto cue = l10n::Get(id == 4 ? l10n::StringId::AdvSearchExtHint
+            : id == 2 ? l10n::StringId::AdvSearchContent
+            : id == 3 ? l10n::StringId::AdvSearchExclude : l10n::StringId::AdvSearchName);
+        SendMessageW(edit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(cue.c_str()));
         if (!compositor_.LumaTextEnabled())
             SetLayeredWindowAttributes(edit, 0, 255, LWA_ALPHA);
         if (font_) SendMessageW(edit, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
@@ -236,7 +245,7 @@ private:
         if (!hwnd || !hwnd_) return;
         POINT pt{ static_cast<int>(std::lround(cell.left + 10.0f * scale_)),
                   static_cast<int>(std::lround(cell.top)) };
-        ClientToScreen(hwnd_, &pt);
+
         const int w = std::max(40, static_cast<int>(std::lround(cell.right - cell.left - 20.0f * scale_)));
         const int cell_h = std::max(18, static_cast<int>(std::lround(cell.bottom - cell.top)));
         int line_h = cell_h;
@@ -252,9 +261,12 @@ private:
         line_h = std::min(line_h, cell_h);
         pt.y += std::max(0, (cell_h - line_h) / 2);
         SetWindowPos(hwnd, HWND_TOP, pt.x, pt.y, w, line_h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        // Layered children need an initial bitmap before they can receive clicks.
+        if (compositor_.LumaTextEnabled()) PaintLumaEdit(hwnd);
     }
 
     void LayoutEdits() {
+        if (done_) return;
         PlaceEdit(edit_name_, NameField());
         PlaceEdit(edit_content_, ContentField());
         PlaceEdit(edit_exclude_, ExcludeField());
@@ -383,10 +395,11 @@ private:
             result_.query = preview_;
         }
         done_ = true;
-        if (hwnd_) DestroyWindow(hwnd_);
+        if (hwnd_) { HideComposedDialog(hwnd_, owner_); DestroyWindow(hwnd_); }
     }
 
     int Hit(float x, float y) const {
+        if (pulse::ui::ContainsRect(ResetRect(), x, y)) return 13;
         if (pulse::ui::ContainsRect(CloseRect(), x, y)) return 3;
         if (pulse::ui::ContainsRect(SearchRect(), x, y)) return 1;
         if (pulse::ui::ContainsRect(CancelRect(), x, y)) return 2;
@@ -402,44 +415,73 @@ private:
         return 0;
     }
 
-    void Cycle(int id) {
+    void Choose(int id) {
         SyncFromEdits();
-        switch (id) {
-        case 4:
-            spec_.name_how = static_cast<app::NameMatchHow>(
-                (static_cast<int>(spec_.name_how) + 1) % 3);
-            break;
-        case 5: {
-            const int next = (static_cast<int>(spec_.kind) + 1) % 9;
-            spec_.kind = static_cast<index::SearchKind>(next);
-            if (spec_.kind != index::SearchKind::Custom) {
-                spec_.custom_exts.clear();
-                if (edit_exts_) SetWindowTextW(edit_exts_, L"");
-            } else if (edit_exts_) {
-                SetFocus(edit_exts_);
+        if (id == 11 || id == 12) {
+            if (id == 11) spec_.whole_word = !spec_.whole_word;
+            else spec_.case_sensitive = !spec_.case_sensitive;
+        } else if (id == 13) {
+            const auto current = spec_.current_folder;
+            spec_ = {};
+            spec_.current_folder = current;
+            for (HWND edit : {edit_name_, edit_content_, edit_exclude_, edit_exts_}) SetWindowTextW(edit, L"");
+            SetFocus(edit_name_);
+        } else {
+            const int count = id == 5 ? 9 : id == 8 ? 6 : id == 9 ? 5 : 3;
+            const int selected = id == 4 ? static_cast<int>(spec_.name_how)
+                : id == 5 ? static_cast<int>(spec_.kind) : id == 6 ? static_cast<int>(spec_.location)
+                : id == 8 ? static_cast<int>(spec_.date) : id == 9 ? static_cast<int>(spec_.size)
+                : static_cast<int>(spec_.content_mode);
+            std::vector<FluentMenuItem> items;
+            for (int i = 0; i < count; ++i) {
+                FluentMenuItem item;
+                item.command = i + 1;
+                item.radio_group = true;
+                item.checked = item.radio = i == selected;
+                auto choice = spec_;
+                choice.kind = static_cast<index::SearchKind>(i);
+                choice.custom_exts.clear();
+                item.text = id == 4 ? NameHowLabel(static_cast<app::NameMatchHow>(i))
+                    : id == 5 ? KindLabel(choice) : id == 6 ? LocationLabel(static_cast<app::LocationScope>(i))
+                    : id == 8 ? DateLabel(static_cast<app::DatePreset>(i))
+                    : id == 9 ? SizeLabel(static_cast<app::SizePreset>(i))
+                    : ModeLabel(static_cast<index::ContentMatchMode>(i));
+                if (id == 6 && i == static_cast<int>(app::LocationScope::CurrentFolder))
+                    item.enabled = !spec_.current_folder.empty();
+                items.push_back(std::move(item));
             }
-            break;
-        }
-        case 6:
-            spec_.location = static_cast<app::LocationScope>(
-                (static_cast<int>(spec_.location) + 1) % 3);
-            break;
-        case 8:
-            spec_.date = static_cast<app::DatePreset>(
-                (static_cast<int>(spec_.date) + 1) % 6);
-            break;
-        case 9:
-            spec_.size = static_cast<app::SizePreset>(
-                (static_cast<int>(spec_.size) + 1) % 5);
-            break;
-        case 10:
-            spec_.content_mode = static_cast<index::ContentMatchMode>(
-                (static_cast<int>(spec_.content_mode) + 1) % 3);
-            break;
-        case 11: spec_.whole_word = !spec_.whole_word; break;
-        case 12: spec_.case_sensitive = !spec_.case_sensitive; break;
+            const auto rect = id == 4 ? NameHowRect() : id == 5 ? KindRect() : id == 6 ? LocationRect()
+                : id == 8 ? DateRect() : id == 9 ? SizeRect() : ModeRect();
+            POINT anchor{static_cast<LONG>(rect.left), static_cast<LONG>(rect.bottom + 4 * scale_)};
+            ClientToScreen(hwnd_, &anchor);
+            anchor.x -= FluentMenu::kShadowMargin;
+            anchor.y -= FluentMenu::kShadowMargin;
+            FluentMenu menu;
+            if (!menu.Create(hwnd_, &compositor_, scale_)) return;
+            menu.SetTheme(dark_, accent_);
+            const int command = menu.TrackPopup(anchor, std::move(items));
+            if (!command) return;
+            const int value = command - 1;
+            if (id == 4) spec_.name_how = static_cast<app::NameMatchHow>(value);
+            else if (id == 5) {
+                spec_.kind = static_cast<index::SearchKind>(value);
+                if (spec_.kind != index::SearchKind::Custom) SetWindowTextW(edit_exts_, L"");
+                else SetFocus(edit_exts_);
+            } else if (id == 6) {
+                if (value == static_cast<int>(app::LocationScope::CustomFolder)) {
+                    std::wstring folder;
+                    if (!PickFolderPath(hwnd_, folder)) return;
+                    spec_.custom_folder = folder;
+                }
+                spec_.location = static_cast<app::LocationScope>(value);
+            } else if (id == 8) spec_.date = static_cast<app::DatePreset>(value);
+            else if (id == 9) spec_.size = static_cast<app::SizePreset>(value);
+            else spec_.content_mode = static_cast<index::ContentMatchMode>(value);
         }
         preview_ = app::CompileSearchQuery(spec_);
+        const auto split = app::SplitSearchQueryText(preview_);
+        scope_error_ = split.content.present() && app::ContentSearchNeedsScope(split) &&
+                       spec_.location == app::LocationScope::Indexed;
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
 
@@ -449,6 +491,7 @@ private:
         spec.bounds = bounds;
         spec.text = text;
         spec.kind = fluent::ButtonKind::Toggle;
+        spec.drop_down = bounds.left != BrowseRect().left;
         spec.state.hovered = hover;
         spec.state.selected = selected;
         spec.state.checked = selected;
@@ -472,6 +515,7 @@ private:
         };
         label(l10n::StringId::AdvSearchName, 20, 50);
         label(l10n::StringId::AdvSearchKind, 20, 110);
+        label(l10n::StringId::AdvSearchExtensions, 168, 110);
         label(l10n::StringId::AdvSearchLocation, 284, 110);
         label(l10n::StringId::AdvSearchDate, 20, 170);
         label(l10n::StringId::AdvSearchSize, 284, 170);
@@ -503,13 +547,22 @@ private:
         DrawButton(SizeRect(), SizeLabel(spec_.size), hover_ == 9,
                    spec_.size != app::SizePreset::Any);
         DrawButton(ModeRect(), ModeLabel(spec_.content_mode), hover_ == 10);
-        DrawButton(WholeWordRect(), l10n::Get(l10n::StringId::AdvSearchWholeWord), hover_ == 11,
-                   spec_.whole_word);
-        DrawButton(MatchCaseRect(), l10n::Get(l10n::StringId::AdvSearchMatchCase), hover_ == 12,
-                   spec_.case_sensitive);
-
-        const std::wstring preview_label = l10n::Get(l10n::StringId::AdvSearchPreview) + L"  " + preview_;
-        painter_.DrawText(preview_label, PreviewRect(), compositor_.SmallFormat(), theme.text_secondary);
+        fluent::ControlState whole_word;
+        whole_word.checked = spec_.whole_word;
+        whole_word.hovered = hover_ == 11;
+        painter_.DrawCheckBox(WholeWordRect(), l10n::Get(l10n::StringId::AdvSearchWholeWord), whole_word);
+        fluent::ControlState match_case;
+        match_case.checked = spec_.case_sensitive;
+        match_case.hovered = hover_ == 12;
+        painter_.DrawCheckBox(MatchCaseRect(), l10n::Get(l10n::StringId::AdvSearchMatchCase), match_case);
+        const auto location = spec_.location == app::LocationScope::CustomFolder ? spec_.custom_folder
+            : spec_.location == app::LocationScope::CurrentFolder ? spec_.current_folder : L"";
+        painter_.DrawText(location, PreviewRect(), compositor_.SmallFormat(), theme.text_secondary);
+        fluent::ButtonSpec reset;
+        reset.bounds = ResetRect();
+        reset.text = l10n::Get(l10n::StringId::ClearAll);
+        reset.state.hovered = hover_ == 13;
+        painter_.DrawButton(reset);
         if (scope_error_) {
             painter_.DrawText(l10n::Get(l10n::StringId::AdvancedSearchNeedScopeMessage),
                               ErrorRect(), compositor_.SmallFormat(), theme.danger);
@@ -640,6 +693,20 @@ private:
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         case WM_LBUTTONDOWN: {
+            const float x = static_cast<float>(GET_X_LPARAM(lparam));
+            const float y = static_cast<float>(GET_Y_LPARAM(lparam));
+            HWND edit = nullptr;
+            if (ContainsRect(NameField(), x, y)) edit = edit_name_;
+            else if (ContainsRect(ContentField(), x, y)) edit = edit_content_;
+            else if (ContainsRect(ExcludeField(), x, y)) edit = edit_exclude_;
+            else if (ContainsRect(ExtField(), x, y)) edit = edit_exts_;
+            if (edit) {
+                // The rounded field includes padding outside the native text line.
+                POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+                MapWindowPoints(hwnd_, edit, &point, 1);
+                SendMessageW(edit, WM_LBUTTONDOWN, wparam, MAKELPARAM(point.x, point.y));
+                return 0;
+            }
             const int hit = Hit(static_cast<float>(GET_X_LPARAM(lparam)),
                                 static_cast<float>(GET_Y_LPARAM(lparam)));
             pressed_ = hit;
@@ -668,7 +735,7 @@ private:
                     InvalidateRect(hwnd_, nullptr, FALSE);
                 }
             } else if (id >= 4) {
-                Cycle(id);
+                Choose(id);
             }
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;

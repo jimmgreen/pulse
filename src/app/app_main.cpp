@@ -268,6 +268,8 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         ProbePinnedNetworks(*s);
         s->ctxMenuPrefs.Load();
         s->appPrefs.Load();
+        s->searchHistory.persist = !s->shot.active && !s->menushot && !s->isolatedTest;
+        if (s->searchHistory.persist) s->searchHistory.Load();
         s->showFps = s->forceStatusPerformance || s->appPrefs.show_status_performance;
         s->duplicateScan.scope = static_cast<app::DuplicateScanScope>(
             std::clamp(s->appPrefs.duplicate_scan_scope, 0, 2));
@@ -821,7 +823,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 LayoutFilterEditor(*s);
                 s->filterIgnoreKillFocus = true;
                 ShowWindow(s->hwndFilterEdit, SW_SHOW);
-                SetForegroundWindow(s->hwndFilterEdit);
+                SetForegroundWindow(GetAncestor(s->hwndFilterEdit, GA_ROOT));
                 SetFocus(s->hwndFilterEdit);
                 SendMessageW(s->hwndFilterEdit, EM_SETSEL, 0, -1);
                 s->filterFocusPending = false;
@@ -972,6 +974,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case WM_COMMAND: {
         if (s && reinterpret_cast<HWND>(lParam) == s->hwndAddressEdit &&
             (HIWORD(wParam) == EN_CHANGE || HIWORD(wParam) == EN_UPDATE)) {
+            if (HIWORD(wParam) == EN_CHANGE) QueueAddressSearch(*s);
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
@@ -1237,6 +1240,10 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     case WM_UPDATE_DOWNLOADED:
         if (s) CompleteUpdateDownload(*s);
+        return 0;
+    case WM_SEARCH_HISTORY:
+        if (s && s->addressSearching && GetFocus() == s->hwndAddressEdit)
+            ShowAddressSearchHistory(*s);
         return 0;
     case WM_UPDATE_INSTALL:
         if (s) InstallUpdate(*s);

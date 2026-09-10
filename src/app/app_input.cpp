@@ -1,5 +1,6 @@
 // app_input.cpp — extracted from app_main.cpp.
 #include "quick_access.h"
+#include "tab_shortcuts.h"
 #include "app_updates.h"
 #include "app_internal.h"
 #include "../ui/lumatext_renderer.h"
@@ -2039,13 +2040,14 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
         } else if (hit.region == ui::HitTestResult::AddressSearchClear) {
             if (!s->addressSearching) ShowAddressSearch(*s);
             SetWindowTextW(s->hwndAddressEdit, L"");
-            SetForegroundWindow(s->hwndAddressEdit);
+            SetForegroundWindow(GetAncestor(s->hwndAddressEdit, GA_ROOT));
             SetFocus(s->hwndAddressEdit);
+
         } else if (hit.region == ui::HitTestResult::AddressSearchClose) {
             ExitAddressSearch(*s);
         } else if (hit.region == ui::HitTestResult::AddressBar) {
             if (s->addressSearching) {
-                SetForegroundWindow(s->hwndAddressEdit);
+                SetForegroundWindow(GetAncestor(s->hwndAddressEdit, GA_ROOT));
                 SetFocus(s->hwndAddressEdit);
             } else if (IsAddressSearchResults(ActiveTab(*s))) ShowAddressSearch(*s);
             else ShowOmnibar(*s, OmnibarMode::Path);
@@ -2812,7 +2814,17 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         bool handled = true;
 
-        if (ctrl && wParam == L'T') {
+        if (app::IsTabShortcut(static_cast<UINT>(wParam), ctrl, shift, alt)) {
+            const auto target = app::TabShortcutTarget(s->window_tabs, shift);
+            if (target && *target != s->window_tabs.active) {
+                if (s->renameIndex >= 0) HideRenameOverlay(*s, false);
+                if (!s->tagRenameId.empty()) HideTagRenameOverlay(*s, false);
+                if (s->filterEditing) HideFilterEditor(*s, true);
+                HideAddressEditor(*s, false);
+                SetFocus(s->hwnd);
+                SwitchTab(*s, *target);
+            }
+        } else if (ctrl && wParam == L'T') {
             NewTab(*s, NewTabPath(*s));
         } else if (ctrl && wParam == L'K') {
             ShowOmnibar(*s, OmnibarMode::Mixed);
@@ -2847,10 +2859,6 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             TransferToTarget(*s, true);
         } else if (ctrl && wParam == L'W') {
             CloseActiveTab(*s);
-        } else if (ctrl && wParam == VK_TAB) {
-            if (!s->window_tabs.items.empty()) {
-                SwitchTab(*s, (s->window_tabs.active + 1) % s->window_tabs.items.size());
-            }
         } else if (ctrl && wParam == L'L') {
             ShowOmnibar(*s, OmnibarMode::Path);
         } else if (wParam == VK_F4) {

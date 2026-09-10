@@ -1,5 +1,7 @@
+#include "../ui/edit_host.h"
 // app_hosted_edit.cpp — extracted from app_main.cpp.
 #include "app_internal.h"
+#include "tab_shortcuts.h"
 #include "../ui/address_search_layout.h"
 #include "../ui/lumatext_renderer.h"
 #include "../ui/fluent_menu.h"
@@ -73,7 +75,7 @@ void PlaceHostedEdit(HWND hwnd, HWND owner, const D2D1_RECT_F& cell, float scale
                             int left_margin_dip, int right_margin_dip) {
     POINT pt{ static_cast<int>(std::lround(cell.left)),
               static_cast<int>(std::lround(cell.top)) };
-    ClientToScreen(owner, &pt);
+    (void)owner; // cell is already in the parent client coordinate space.
     const int w = std::max(40, static_cast<int>(std::lround(cell.right - cell.left)));
     const int cellH = std::max(18, static_cast<int>(std::lround(cell.bottom - cell.top)));
     HFONT font = reinterpret_cast<HFONT>(SendMessageW(hwnd, WM_GETFONT, 0, 0));
@@ -97,10 +99,7 @@ void PlaceHostedEdit(HWND hwnd, HWND owner, const D2D1_RECT_F& cell, float scale
 
 HWND CreateHostedEdit(AppState& s, SUBCLASSPROC proc) {
     EnsureEditVisuals(s);
-    HWND hwnd = CreateWindowExW(
-        WS_EX_LAYERED | WS_EX_TOOLWINDOW, L"EDIT", L"",
-        WS_POPUP | ES_AUTOHSCROLL,
-        0, 0, 0, 0, s.hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+    HWND hwnd = ui::CreateChildEdit(s.hwnd);
     if (!hwnd) return nullptr;
     SetWindowTheme(hwnd, L"", L"");
     // LumaText presents with UpdateLayeredWindow. Mixing that with
@@ -174,7 +173,7 @@ void ShowAddressEditor(AppState& s) {
     SetWindowTextW(s.hwndAddressEdit, shown.empty() ? l10n::Get(l10n::StringId::ThisPc).c_str() : shown.c_str());
     LayoutAddressEditor(s);
     ShowWindow(s.hwndAddressEdit, SW_SHOW);
-    SetForegroundWindow(s.hwndAddressEdit);
+    SetForegroundWindow(GetAncestor(s.hwndAddressEdit, GA_ROOT));
     SetFocus(s.hwndAddressEdit);
     SendMessageW(s.hwndAddressEdit, EM_SETSEL, 0, -1);
     s.addressIgnoreKillFocus = false;
@@ -183,6 +182,7 @@ void ShowAddressEditor(AppState& s) {
 
 void HideAddressEditor(AppState& s, bool navigate) {
     if (!s.hwndAddressEdit) return;
+    FlushAddressSearch(s);
     SaveAddressSearchDraft(s);
     if (navigate) {
         wchar_t buf[MAX_PATH * 4];
@@ -228,7 +228,7 @@ void ShowFilterEditor(AppState& s, bool select_mode) {
     }
     if (s.filterEditing && s.hwndFilterEdit && !s.filterFocusPending) {
         ApplyFilterCue(s);
-        SetForegroundWindow(s.hwndFilterEdit);
+        SetForegroundWindow(GetAncestor(s.hwndFilterEdit, GA_ROOT));
         SetFocus(s.hwndFilterEdit);
         SendMessageW(s.hwndFilterEdit, EM_SETSEL, 0, -1);
         return;
@@ -349,7 +349,7 @@ void ShowRenameOverlay(AppState& s) {
     SetWindowTextW(s.hwndRenameEdit, name.c_str());
     LayoutRenameOverlay(s);
     ShowWindow(s.hwndRenameEdit, SW_SHOW);
-    SetForegroundWindow(s.hwndRenameEdit);
+    SetForegroundWindow(GetAncestor(s.hwndRenameEdit, GA_ROOT));
     SetFocus(s.hwndRenameEdit);
     int stem = (int)name.find_last_of(L'.');
     bool isDir = (*tab->snapshot)[s.renameIndex].is_dir;
@@ -431,7 +431,7 @@ void ShowTagRenameOverlay(AppState& s, const app::TagId& tag_id) {
     SetWindowTextW(s.hwndTagRenameEdit, tag->name.c_str());
     LayoutTagRenameOverlay(s);
     ShowWindow(s.hwndTagRenameEdit, SW_SHOW);
-    SetForegroundWindow(s.hwndTagRenameEdit);
+    SetForegroundWindow(GetAncestor(s.hwndTagRenameEdit, GA_ROOT));
     SetFocus(s.hwndTagRenameEdit);
     SendMessageW(s.hwndTagRenameEdit, EM_SETSEL, 0, -1);
     s.tagRenameIgnoreKillFocus = false;
@@ -479,6 +479,15 @@ IDWriteTextFormat* HostedEditFormat(AppState& s, HWND hwnd) {
 
 bool HandleHostedEditMessage(AppState& s, HWND hwnd, UINT msg, WPARAM wParam,
                                     LPARAM lParam, LRESULT& result) {
+    if ((msg == WM_KEYDOWN || msg == WM_CHAR) &&
+        app::IsTabShortcut(static_cast<UINT>(wParam),
+                           (GetKeyState(VK_CONTROL) & 0x8000) != 0,
+                           (GetKeyState(VK_SHIFT) & 0x8000) != 0,
+                           (GetKeyState(VK_MENU) & 0x8000) != 0)) {
+        if (msg == WM_KEYDOWN) HandleKeyDown(&s, s.hwnd, msg, wParam, lParam);
+        result = 0;
+        return true;
+    }
     if (s.compositor.LumaTextEnabled() &&
         (msg == WM_PRINT || msg == WM_PRINTCLIENT || msg == WM_NCPAINT)) {
         result = 0;
@@ -552,10 +561,24 @@ bool HandleHostedEditMessage(AppState& s, HWND hwnd, UINT msg, WPARAM wParam,
 LRESULT CALLBACK AddressEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
                                         UINT_PTR /*uIdSubclass*/, DWORD_PTR dwRefData) {
     AppState* s = reinterpret_cast<AppState*>(dwRefData);
+    if (s && msg == WM_IME_STARTCOMPOSITION) s->addressSearchComposing = true;
+    if (s && msg == WM_IME_ENDCOMPOSITION) {
+        s->addressSearchComposing = false;
+        QueueAddressSearch(*s);
+    }
+
+    if (s && s->addressSearchComposing && (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN || msg == WM_CHAR))
+        return DefSubclassProc(hwnd, msg, wParam, lParam);
+    if (s && msg == WM_LBUTTONUP && s->addressSearching && !s->searchHistoryOpen)
+        PostMessageW(s->hwnd, WM_SEARCH_HISTORY, 0, 0);
     LRESULT handled = 0;
     if (s && HandleHostedEditMessage(*s, hwnd, msg, wParam, lParam, handled)) return handled;
     switch (msg) {
     case WM_KEYDOWN:
+        if (s->addressSearching && wParam == VK_DOWN) {
+            ShowAddressSearchHistory(*s);
+            return 0;
+        }
         if (s->addressSearching && (GetKeyState(VK_CONTROL) & 0x8000) &&
             (wParam == L'K' || wParam == L'L')) {
             HideAddressEditor(*s, false);

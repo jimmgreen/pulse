@@ -5,8 +5,8 @@
 
 namespace pulse::index {
 
-// The V9 storage/manifest layout is unchanged; V10 bases use corrected visibility.
-inline constexpr uint32_t kIndexSnapshotVersion = 10;
+// The V9 layout is unchanged. V11 rebuilds parent links damaged by old WAL replay.
+inline constexpr uint32_t kIndexSnapshotVersion = 11;
 
 struct ShardPaths {
     std::wstring directory;

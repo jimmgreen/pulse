@@ -62,11 +62,13 @@ $testNames = @('pulse_index_migration_test','pulse_index_test','pulse_index_engi
     'pulse_content_search_test','pulse_duplicate_scan_test','pulse_saved_search_test',
     'pulse_search_query_test','pulse_update_test','pulse_update_installer_test',
     'pulse_ops_test','pulse_preview_test','pulse_app_controllers_test',
-    'pulse_localization_test','pulse_shell_icons_test','pulse_material_test')
+    'pulse_localization_test','pulse_shell_icons_test','pulse_material_test',
+    'pulse_search_history_test','pulse_child_edit_test','pulse_dialog_close_test')
 foreach ($testName in $testNames) {
     & (Join-Path $build "$testName.exe")
     if ($LASTEXITCODE -ne 0) { throw "$testName failed" }
 }
+$env:PULSE_SELFTEST_NO_SCREENSHOTS = '1'
 $selftest = Start-Process -FilePath (Join-Path $build 'pulse.exe') -ArgumentList '--selftest' -WindowStyle Hidden -PassThru
 if (-not $selftest.WaitForExit(120000)) { $selftest.Kill(); throw 'Selftest timed out' }
 if ($selftest.ExitCode -ne 0) {

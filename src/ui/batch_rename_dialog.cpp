@@ -1,3 +1,4 @@
+#include "edit_host.h"
 #include "../common/windows_compat.h"
 #include "batch_rename_dialog.h"
 #include "FluentTokens.h"
@@ -81,12 +82,13 @@ public:
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
+        done_ = true;
+        if (IsWindow(hwnd_)) HideComposedDialog(hwnd_, owner_);
         DestroyEdits();
         if (IsWindow(hwnd_)) DestroyWindow(hwnd_);
         hwnd_ = nullptr;
         if (owner_) {
             EnableWindow(owner_, TRUE);
-            SetActiveWindow(owner_);
         }
         return result_;
     }
@@ -165,10 +167,7 @@ private:
     }
 
     HWND CreateField(int id, const std::wstring& text, bool number = false) {
-        HWND edit = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOOLWINDOW, L"EDIT", text.c_str(),
-            WS_POPUP | ES_AUTOHSCROLL | (number ? ES_NUMBER : 0),
-            0, 0, 0, 0, hwnd_, nullptr, GetModuleHandleW(nullptr), nullptr);
+        HWND edit = CreateChildEdit(hwnd_, text.c_str(), number ? ES_NUMBER : 0);
         if (!edit) return nullptr;
         SetWindowTheme(edit, L"", L"");
         if (!compositor_.LumaTextEnabled())
@@ -188,7 +187,7 @@ private:
         }
         POINT pt{ static_cast<int>(std::lround(cell.left + 10.0f * scale_)),
                   static_cast<int>(std::lround(cell.top)) };
-        ClientToScreen(hwnd_, &pt);
+
         const int w = std::max(40, static_cast<int>(std::lround(
             cell.right - cell.left - 20.0f * scale_)));
         const int cell_h = std::max(18, static_cast<int>(std::lround(cell.bottom - cell.top)));
@@ -210,6 +209,7 @@ private:
     }
 
     void LayoutEdits() {
+        if (done_) return;
         PlaceEdit(edit_find_, FindField(), true);
         PlaceEdit(edit_replace_, ReplaceField(), true);
         PlaceEdit(edit_pattern_, PatternField(), true);
@@ -357,7 +357,7 @@ private:
             result_.items = items_;
         }
         done_ = true;
-        if (hwnd_) DestroyWindow(hwnd_);
+        if (hwnd_) { HideComposedDialog(hwnd_, owner_); DestroyWindow(hwnd_); }
     }
 
     int Hit(float x, float y) const {

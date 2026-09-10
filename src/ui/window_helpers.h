@@ -1,6 +1,7 @@
 #pragma once
 
 #include "FluentTokens.h"
+#include "dialog_lifecycle.h"
 #include "fluent_components.h"
 #include "ui_compositor.h"
 

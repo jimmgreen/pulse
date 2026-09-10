@@ -7,6 +7,7 @@
 // All file operations are confined to bench_data/opstest/selftest_1b2 and
 // cleaned up afterwards.
 #include "selftest_1b2.h"
+#include "tab_shortcuts.h"
 #include "quick_access.h"
 #include "../common/windows_compat.h"
 #include "app_input.h"
@@ -36,6 +37,7 @@
 #include "../fs/fs_watch.h"
 #include "../fs/fs_net_cache.h"
 #include "../ui/fluent_menu.h"
+#include "../ui/advanced_search_dialog.h"
 #include "../ui/typography.h"
 #include "../ui/color_picker.h"
 #include "../ui/bloom_accent_picker.h"
@@ -52,6 +54,7 @@
 #include <shobjidl.h>
 #include <wrl/client.h>
 #include <dwrite_3.h>
+#include <wincodec.h>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -66,6 +69,68 @@
 
 namespace pulse::ui {
 struct FluentMenuTestPeer {
+    static bool ExternalEditorLayout(const FluentMenu& menu, HWND editor) {
+        return menu.external_edit_ == editor && menu.FilterHeaderPx() == 0 &&
+            (!menu.edit_ || !IsWindowVisible(menu.edit_)) &&
+            menu.base_y_ + menu.kShadowMargin >= menu.anchor_rect_.bottom &&
+            IsWindowVisible(editor);
+    }
+    static bool ScopeLayout(const FluentMenu& menu, float left, float bottom) {
+        return menu.open_ && !menu.external_edit_ && !menu.filter_fn_ && !menu.anchor_to_rect_ &&
+            std::abs(menu.base_x_ + menu.kShadowMargin - left) < 2 &&
+            std::abs(menu.base_y_ + menu.kShadowMargin - bottom) < 2;
+    }
+    static bool DriveHistoryInteraction(FluentMenu& menu, int mode) {
+        const HWND edit = menu.external_edit_ ? menu.external_edit_ : menu.edit_;
+        if (!menu.open_ || !edit || menu.animating_out_) return false;
+        if (mode == 2) SetWindowTextW(edit, L"new-unmatched-query-72941");
+        if (mode == 1) SendMessageW(edit, WM_KEYDOWN, VK_DOWN, 0);
+        SendMessageW(edit, WM_KEYDOWN, mode == 0 ? VK_ESCAPE : VK_RETURN, 0);
+        return true;
+    }
+    static bool SaveHistorySnapshot(HWND window, Compositor& compositor,
+                                    const std::wstring& path, bool dark, float scale) {
+        FluentMenu menu;
+        if (!menu.Create(window, &compositor, scale)) return false;
+        menu.SetTheme(dark, D2D1::ColorF(0x0078D4));
+        menu.SetMaxVisibleRows(9);
+        menu.SetFilterMinWidth(440.0f);
+        std::vector<FluentMenuItem> items;
+        for (int i = 0; i < 12; ++i) {
+            FluentMenuItem item;
+            item.command = 10 + i;
+            item.trailing_command = 100 + i;
+            item.text = i == 1 ? L"很长的历史搜索查询 project specification draft" : L"项目搜索 " + std::to_wstring(i + 1);
+            item.shortcut = i % 2 == 0 ? L"当前文件夹" : L"全局";
+            item.glyph = L"\xE81C";
+            items.push_back(std::move(item));
+        }
+        return menu.SaveDebugSnapshot(path.c_str(), std::move(items), 1);
+    }
+    static bool CheckHistoryRows(float scale) {
+        FluentMenu menu;
+        menu.scale_ = scale;
+        FluentMenuItem item;
+        item.command = 10;
+        item.trailing_command = 20;
+        item.text = L"History query";
+        menu.model_.SetItems(std::vector<FluentMenuItem>(51, item));
+        menu.model_.Layout(nullptr, scale, 400.0f * scale);
+        menu.SetMaxVisibleRows(9);
+        if (std::abs(menu.BodyHeightPx() - 332.0f * scale) > 0.01f) return false;
+        const float trailing_x = menu.kShadowMargin + menu.model_.WidthPx() - 20.0f * scale;
+        if (menu.InvokeAt(0, trailing_x) != 20 || menu.InvokeRow(0) != 10 ||
+            menu.InvokeAt(0, menu.kShadowMargin + 50.0f * scale) != 10) return false;
+        menu.UpdateHover(50);
+        if (menu.scroll_y_ <= 0 || menu.model_.RowTopPx(50) + menu.model_.RowHeightPx() >
+            menu.scroll_y_ + menu.BodyHeightPx() + 0.01f) return false;
+        menu.UpdateHover(0);
+        if (menu.scroll_y_ > menu.model_.RowTopPx(0)) return false;
+        item.enabled = false;
+        menu.model_.SetItems({item});
+        menu.model_.Layout(nullptr, scale, 400.0f * scale);
+        return menu.InvokeAt(0, trailing_x) == 0 && menu.InvokeRow(0) == 0;
+    }
     static bool CheckSubmenuColors(float scale) {
         FluentMenu menu;
         menu.scale_ = scale;
@@ -155,6 +220,7 @@ const std::wstring kLogPath = WorkspacePath(L"bench_data\\selftest_1b2_last.log"
 
 int g_pass = 0;
 int g_fail = 0;
+bool g_skip_visual = false;
 FILE* g_log = nullptr; // also mirror output here (no console when piped)
 
 void LogLine(const wchar_t* fmt, ...) {
@@ -635,6 +701,209 @@ void TestAddressSearch() {
           L"address search: current folder adds recursive directory scope");
 }
 
+AppState* history_interaction_state = nullptr;
+int history_interaction_mode = 0;
+bool history_interaction_driven = false;
+int history_interaction_ticks = 0;
+
+bool history_scope_requested = false;
+bool history_layout_ok = false;
+bool history_capture_ok = false;
+
+bool CaptureHistoryFixture(HWND window, const wchar_t* path) {
+    if (g_skip_visual) return false;
+    RECT rect{};
+    GetWindowRect(window, &rect);
+    // Never save another application's pixels if the test window was occluded.
+    const POINT sample{rect.left + 5, rect.top + 5};
+    if (GetAncestor(WindowFromPoint(sample), GA_ROOT) != window) return false;
+    const int width = rect.right - rect.left, height = rect.bottom - rect.top;
+    HDC screen = GetDC(nullptr);
+    HDC memory = CreateCompatibleDC(screen);
+    HBITMAP bitmap = CreateCompatibleBitmap(screen, width, height);
+    HGDIOBJ old = SelectObject(memory, bitmap);
+    const bool copied = BitBlt(memory, 0, 0, width, height, screen, rect.left, rect.top,
+                              SRCCOPY | CAPTUREBLT) != FALSE;
+    SelectObject(memory, old);
+    DeleteDC(memory);
+    ReleaseDC(nullptr, screen);
+    Microsoft::WRL::ComPtr<IWICImagingFactory> factory;
+    Microsoft::WRL::ComPtr<IWICBitmap> source;
+    Microsoft::WRL::ComPtr<IWICStream> stream;
+    Microsoft::WRL::ComPtr<IWICBitmapEncoder> encoder;
+    Microsoft::WRL::ComPtr<IWICBitmapFrameEncode> frame;
+    const bool ok = copied && SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr,
+        CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))) &&
+        SUCCEEDED(factory->CreateBitmapFromHBITMAP(bitmap, nullptr, WICBitmapIgnoreAlpha, &source)) &&
+        SUCCEEDED(factory->CreateStream(&stream)) &&
+        SUCCEEDED(stream->InitializeFromFilename(path, GENERIC_WRITE)) &&
+        SUCCEEDED(factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder)) &&
+        SUCCEEDED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache)) &&
+        SUCCEEDED(encoder->CreateNewFrame(&frame, nullptr)) &&
+        SUCCEEDED(frame->Initialize(nullptr)) &&
+        SUCCEEDED(frame->WriteSource(source.Get(), nullptr)) &&
+        SUCCEEDED(frame->Commit()) && SUCCEEDED(encoder->Commit());
+    DeleteObject(bitmap);
+    return ok;
+}
+
+void CALLBACK DriveHistoryInteractionTimer(HWND, UINT, UINT_PTR timer, DWORD) {
+    if (++history_interaction_ticks > 100) {
+        if (history_interaction_state && history_interaction_state->menu)
+            history_interaction_state->menu->Dismiss();
+        KillTimer(nullptr, timer);
+        return;
+    }
+    if (history_interaction_ticks < 8) return;
+    if (history_interaction_mode == 3 && history_interaction_state && history_interaction_state->menu) {
+        auto& state = *history_interaction_state;
+        if (!history_scope_requested) {
+            history_scope_requested = true;
+            history_interaction_ticks = 0;
+            ShowAddressSearchScope(state);
+            return;
+        }
+        if (state.searchHistoryOpen || !state.menu->IsOpen()) return;
+        const auto scope = ui::LayoutAddressSearch(state.renderer.AddressBarRect(
+            static_cast<float>(state.compositor.Width())), state.scale).scope;
+        POINT expected{static_cast<LONG>(scope.left), static_cast<LONG>(scope.bottom)};
+        ClientToScreen(state.hwnd, &expected);
+        history_layout_ok = ui::FluentMenuTestPeer::ScopeLayout(*state.menu,
+            static_cast<float>(expected.x), static_cast<float>(expected.y) + static_cast<int>(4 * state.scale));
+        history_capture_ok = CaptureHistoryFixture(state.hwnd, state.darkMode
+            ? L"bench_data/history-to-scope-dark-150.png" : L"bench_data/history-to-scope-light-100.png");
+        history_interaction_driven = true;
+        state.menu->Dismiss();
+        KillTimer(nullptr, timer);
+        return;
+    }
+    if (history_interaction_state && history_interaction_state->menu) {
+        auto& state = *history_interaction_state;
+        history_layout_ok = ui::FluentMenuTestPeer::ExternalEditorLayout(*state.menu, state.hwndAddressEdit);
+        if (history_interaction_mode == 0)
+            history_capture_ok = CaptureHistoryFixture(state.hwnd, state.darkMode
+                ? L"bench_data/history-combined-dark-150.png" : L"bench_data/history-combined-light-100.png");
+    }
+    if (history_interaction_state && history_interaction_state->menu &&
+        ui::FluentMenuTestPeer::DriveHistoryInteraction(
+            *history_interaction_state->menu, history_interaction_mode)) {
+        history_interaction_driven = true;
+        KillTimer(nullptr, timer);
+    }
+}
+
+void TestAddressSearchHistoryInteraction(float scale = 1.0f, bool dark = false) {
+    auto state = std::make_unique<AppState>();
+    state->places.persist = false;
+    state->searchHistory.persist = false;
+    state->scale = scale;
+    state->darkMode = dark;
+    WNDCLASSW fixture_class{};
+    fixture_class.lpfnWndProc = DefWindowProcW;
+    fixture_class.hInstance = GetModuleHandleW(nullptr);
+    fixture_class.lpszClassName = L"PulseHistoryTestFixture";
+    RegisterClassW(&fixture_class);
+    state->hwnd = CreateWindowExW(WS_EX_TOPMOST, fixture_class.lpszClassName, L"", WS_POPUP,
+        40, 40, static_cast<int>(1000 * scale), static_cast<int>(600 * scale),
+        nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    const bool graphics_ready = state->hwnd && state->compositor.Init(state->hwnd);
+    Check(graphics_ready, L"search history: initialize application popup fixture");
+    if (!graphics_ready) {
+        if (state->hwnd) DestroyWindow(state->hwnd);
+        return;
+    }
+    state->compositor.RecreateTextFormats(scale);
+    state->renderer.SetCompositor(&state->compositor);
+    state->renderer.SetScale(scale);
+    ShowWindow(state->hwnd, SW_SHOWNORMAL);
+    Pane pane;
+    pane.view.current_path = L"C:\\pulse-history-test-no-disk-access";
+    state->pane = &pane;
+    AdvancedSearchSpec spec;
+    spec.name = L"saved-history-query";
+    spec.kind = index::SearchKind::Custom;
+    spec.location = LocationScope::CurrentFolder;
+    spec.current_folder = pane.view.current_path;
+    spec.custom_exts = L"pdf;txt";
+    spec.exclude_name = L"draft";
+    const auto history_path = MakeSearchPath(CompileSearchQuery(spec));
+    RecordSearchHistory(*state, history_path);
+    RecordSearchHistory(*state, L"C:\\not-a-search");
+    Check(state->searchHistory.entries.size() == 1 &&
+          state->searchHistory.entries.front().path == history_path,
+          L"search history: application records exact search path and ignores folders");
+    ShowAddressSearch(*state);
+    SetWindowTextW(state->hwndAddressEdit, L"ShowBoxDebug.log");
+    const auto original_path = pane.view.current_path;
+    auto* dc = state->compositor.Dc();
+    dc->BeginDraw();
+    dc->Clear(D2D1::ColorF(dark ? 0x202020 : 0xf5f5f5));
+    state->renderer.Render(BuildVm(*state), D2D1::RectF(0, 0, 1000 * scale, 600 * scale),
+                           ui::MakeTheme(dark, D2D1::ColorF(0x0078d4)));
+    dc->EndDraw();
+    state->compositor.Present();
+    auto run_popup = [&](int mode) {
+        MSG pending{};
+        while (PeekMessageW(&pending, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&pending);
+            DispatchMessageW(&pending);
+        }
+        history_interaction_state = state.get();
+        history_interaction_mode = mode;
+        history_interaction_driven = false;
+        history_interaction_ticks = 0;
+        history_layout_ok = false;
+        history_scope_requested = false;
+        history_capture_ok = false;
+        const UINT_PTR timer = SetTimer(nullptr, 0, 30, DriveHistoryInteractionTimer);
+        Check(timer != 0, L"search history: schedule popup keyboard interaction");
+        if (timer) {
+            ShowAddressSearchHistory(*state);
+            KillTimer(nullptr, timer);
+        }
+        history_interaction_state = nullptr;
+        Check(history_layout_ok, mode == 3
+            ? L"search history: switching to scope resets history anchor and aligns scope button"
+            : L"search history: only original editor is visible and results stay below it");
+        if (!g_skip_visual && (mode == 0 || mode == 3)) Check(history_capture_ok, L"search history: capture combined application and popup");
+        Check(history_interaction_driven && !state->searchHistoryOpen,
+              L"search history: real popup processes keyboard and closes");
+    };
+    run_popup(0);
+    Check(pane.view.current_path == original_path && state->pendingIndexSearches.empty() &&
+          state->searchHistory.entries.size() == 1,
+          L"search history: Escape preserves path and does not submit search");
+    run_popup(1);
+    Check(pane.view.current_path == history_path && state->addressSearching &&
+          state->addressSearchCurrent && state->addressSearchRoot == spec.current_folder,
+          L"search history: selected entry restores exact path, scope and filters");
+    // Index clients and filesystem workers are deliberately never started in this fixture.
+    state->pendingIndexSearches.clear();
+    run_popup(2);
+    std::wstring raw;
+    ParsePulsePath(pane.view.current_path, nullptr, &raw);
+    const auto submitted = ParseSearchQuery(raw);
+    Check(submitted.name == L"new-unmatched-query-72941" &&
+          !state->pendingIndexSearches.empty() && state->searchHistory.entries.size() == 2,
+          L"search history: Enter with no matching history submits the typed query");
+    Check(submitted.kind == spec.kind && submitted.custom_exts == spec.custom_exts &&
+          submitted.exclude_name == spec.exclude_name &&
+          SplitSearchQueryText(raw).path_prefix == SplitSearchQueryText(CompileSearchQuery(spec)).path_prefix,
+          L"search history: typed continuation keeps restored scope and filters");
+    run_popup(3);
+    Check(!state->searchScopePending, L"search history: scope transition consumes pending request");
+    HideAddressEditor(*state, false);
+    if (state->hwndAddressEdit) DestroyWindow(state->hwndAddressEdit);
+    state->hwndAddressEdit = nullptr;
+    state->menu.reset();
+    state->compositor.Shutdown();
+    DestroyWindow(state->hwnd);
+    state->hwnd = nullptr;
+    state->pane = nullptr;
+    if (state->editFont) DeleteObject(state->editFont);
+    if (state->editBrush) DeleteObject(state->editBrush);
+}
+
 void TestContinuousSearch() {
     auto state = std::make_unique<AppState>();
     Pane first;
@@ -693,6 +962,245 @@ void TestContinuousSearch() {
     state->pane = nullptr;
 }
 
+void TestLiveAddressSearch() {
+    auto state = std::make_unique<AppState>();
+    state->searchHistory.persist = false;
+    state->places.persist = false;
+    auto& pane = *state->window_tabs.NewTab(L"C:\\live-search-test").FocusedPane();
+    state->pane = &pane;
+    pane.view.current_path = L"C:\\live-search-test";
+    state->hwnd = CreateWindowExW(0, L"STATIC", L"", WS_POPUP,
+        0, 0, 400, 100, nullptr, nullptr, nullptr, nullptr);
+    state->hwndAddressEdit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD,
+        0, 0, 300, 30, state->hwnd, nullptr, nullptr, nullptr);
+    state->addressSearching = state->addressEditing = true;
+    auto type = [&](const wchar_t* query) {
+        SetWindowTextW(state->hwndAddressEdit, query);
+        SendMessageW(state->hwndAddressEdit, EM_SETSEL, wcslen(query), wcslen(query));
+        QueueAddressSearch(*state);
+    };
+    type(L"show");
+    const auto due = state->addressLiveDue;
+    TickAddressSearch(*state, due - 1);
+    Check(state->pendingIndexSearches.empty(), L"live search: debounce waits for short input pause");
+    TickAddressSearch(*state, due);
+    const auto old_generation = static_cast<uint32_t>(pane.view.pending_generation);
+    Check(old_generation != 0 && pane.view.current_path == MakeSearchPath(L"show"),
+          L"live search: typing starts a search without Enter");
+    const auto back_count = pane.view.back_stack.size();
+    type(L"showdebug");
+    TickAddressSearch(*state, state->addressLiveDue);
+    DWORD start = 0, end = 0;
+    SendMessageW(state->hwndAddressEdit, EM_GETSEL, reinterpret_cast<WPARAM>(&start), reinterpret_cast<LPARAM>(&end));
+    Check(pane.view.current_path == MakeSearchPath(L"showdebug") && start == 9 && end == 9 &&
+          state->addressSearching && pane.view.back_stack.size() == back_count,
+          L"live search: continued typing updates query without selecting text or adding back entries");
+    const auto latest = pane.view.pending_generation;
+    DeliverIndexSearchResult(*state, old_generation, {});
+    Check(pane.view.pending_generation == latest && pane.view.loading,
+          L"live search: stale response cannot replace the newer query");
+    DeliverIndexSearchResult(*state, static_cast<uint32_t>(latest), {});
+    Check(!pane.view.loading && pane.view.pending_generation == 0,
+          L"live search: current response replaces displayed results");
+    Check(state->searchHistory.entries.empty(), L"live search: intermediate keystrokes are not saved");
+    TickAddressSearch(*state, state->addressHistoryDue);
+    Check(state->searchHistory.entries.size() == 1 && state->searchHistory.entries.front().query == L"showdebug",
+          L"live search: settled query is recorded once");
+    state->addressSearchComposing = true;
+    type(L"中文");
+    TickAddressSearch(*state, state->addressLiveDue);
+    Check(pane.view.pending_generation == 0, L"live search: IME composition does not dispatch partial text");
+    state->addressSearchComposing = false;
+    QueueAddressSearch(*state);
+    TickAddressSearch(*state, state->addressLiveDue);
+    Check(pane.view.current_path == MakeSearchPath(L"中文"), L"live search: committed IME text searches");
+    type(L"");
+    TickAddressSearch(*state, state->addressLiveDue);
+    Check(pane.view.current_path == MakeSearchPath(L"") && state->addressHistoryDue == 0,
+          L"live search: clearing input updates results without recording an empty query");
+    type(L"cancel-on-context-change");
+    pane.view.current_path = L"C:\\other";
+    TickAddressSearch(*state, state->addressLiveDue);
+    Check(pane.view.current_path == L"C:\\other", L"live search: pending input cannot search a changed context");
+    state->addressSearching = false;
+    DestroyWindow(state->hwndAddressEdit);
+    DestroyWindow(state->hwnd);
+    state->hwndAddressEdit = state->hwnd = nullptr;
+    state->pane = nullptr;
+}
+
+int advanced_test_stage = 0;
+int advanced_test_ticks = 0;
+int advanced_test_mode = 0;
+bool advanced_hidden_on_destroy = false;
+bool advanced_snapshot_ok = false;
+HWND advanced_test_window = nullptr;
+
+LRESULT CALLBACK AdvancedTestWindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam,
+                                       UINT_PTR, DWORD_PTR) {
+    if (msg == WM_DESTROY) advanced_hidden_on_destroy = !IsWindowVisible(hwnd);
+    return DefSubclassProc(hwnd, msg, wparam, lparam);
+}
+
+HWND FindAdvancedTestWindow(const wchar_t* class_name) {
+    struct Context { const wchar_t* name; HWND window = nullptr; } context{class_name};
+    EnumThreadWindows(GetCurrentThreadId(), [](HWND window, LPARAM param) -> BOOL {
+        auto& value = *reinterpret_cast<Context*>(param);
+        wchar_t name[128]{};
+        GetClassNameW(window, name, ARRAYSIZE(name));
+        if (wcscmp(name, value.name) == 0 && IsWindowVisible(window)) {
+            value.window = window;
+            return FALSE;
+        }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&context));
+    return context.window;
+}
+
+void CALLBACK AdvancedTestTimer(HWND, UINT, UINT_PTR timer, DWORD) {
+    if (++advanced_test_ticks > 150) {
+        if (advanced_test_window) PostMessageW(advanced_test_window, WM_CLOSE, 0, 0);
+        KillTimer(nullptr, timer);
+        return;
+    }
+    HWND dialog = FindAdvancedTestWindow(L"PulseAdvancedSearchWindow");
+    if (!dialog) return;
+    RECT rect{};
+    GetClientRect(dialog, &rect);
+    const float scale = rect.right / 560.0f;
+    auto click = [&](float x, float y) {
+        const LPARAM pt = MAKELPARAM(static_cast<int>(x * scale), static_cast<int>(y * scale));
+        PostMessageW(dialog, WM_LBUTTONDOWN, MK_LBUTTON, pt);
+        PostMessageW(dialog, WM_LBUTTONUP, 0, pt);
+    };
+    if (advanced_test_stage == 0) {
+        advanced_test_window = dialog;
+        SetWindowSubclass(dialog, AdvancedTestWindowProc, 80, 0);
+        SetWindowPos(dialog, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        EnumThreadWindows(GetCurrentThreadId(), [](HWND window, LPARAM param) -> BOOL {
+            if (GetWindow(window, GW_OWNER) == reinterpret_cast<HWND>(param)) {
+                SetWindowPos(window, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
+            }
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(dialog));
+        advanced_test_stage = 1;
+        advanced_test_ticks = 0;
+        return;
+    }
+    if (advanced_test_ticks < 8) return;
+    if (advanced_test_stage == 1) {
+        advanced_snapshot_ok = CaptureHistoryFixture(dialog, advanced_test_mode == 2
+            ? L"bench_data/advanced-search-light.png" : L"bench_data/advanced-search-dark.png");
+        if (advanced_test_mode == 0) {
+            PostMessageW(dialog, WM_CLOSE, 0, 0);
+            KillTimer(nullptr, timer);
+        } else if (advanced_test_mode == 1) {
+            advanced_test_stage = 2;
+            click(450, 84);
+        } else {
+            click(70, 468);
+            advanced_test_stage = 4;
+        }
+        return;
+    }
+    if (advanced_test_stage == 2) {
+        HWND menu = FindAdvancedTestWindow(L"PulseFluentMenu");
+        if (!menu || !IsWindowVisible(menu)) return;
+        PostMessageW(menu, WM_KEYDOWN, VK_DOWN, 0);
+        PostMessageW(menu, WM_KEYDOWN, VK_RETURN, 0);
+        advanced_test_stage = 3;
+        return;
+    }
+    if (advanced_test_stage == 3) {
+        HWND menu = FindAdvancedTestWindow(L"PulseFluentMenu");
+        if (menu && IsWindowVisible(menu)) return;
+        click(80, 368);
+        advanced_test_stage = 4;
+        return;
+    }
+    PostMessageW(dialog, WM_COMMAND, IDOK, 0);
+    KillTimer(nullptr, timer);
+}
+
+void TestAdvancedSearchDialog() {
+    const auto language = l10n::preference();
+    for (int mode = 0; mode < 3; ++mode) {
+        l10n::SetLanguage(mode == 2 ? L"en-US" : l10n::LanguageId(language));
+        advanced_test_mode = mode;
+        advanced_test_ticks = advanced_test_stage = 0;
+        advanced_hidden_on_destroy = advanced_snapshot_ok = false;
+        advanced_test_window = nullptr;
+        AdvancedSearchSpec spec;
+        spec.name = L"show";
+        spec.current_folder = L"C:\\Documents";
+        spec.location = LocationScope::CurrentFolder;
+        const UINT_PTR timer = SetTimer(nullptr, 0, 30, AdvancedTestTimer);
+        if (!timer) { Check(false, L"advanced search: timer fixture"); return; }
+        const auto result = ui::ShowAdvancedSearchDialog(nullptr, spec, mode != 2, D2D1::ColorF(0x0078d4));
+        KillTimer(nullptr, timer);
+        Check(advanced_hidden_on_destroy, L"advanced search: cold and repeat close hide before surface teardown");
+        if (!g_skip_visual) Check(advanced_snapshot_ok, L"advanced search: complete form visual capture");
+        if (mode == 0) Check(!result.accepted, L"advanced search: close cancels without executing");
+        else if (mode == 1) {
+            const auto parsed = ParseSearchQuery(result.query);
+            Check(result.accepted && parsed.whole_word && result.query.find(L"show*") != std::wstring::npos,
+                  L"advanced search: dropdown selection and checkbox compile into search");
+        } else Check(result.accepted && result.query.empty(), L"advanced search: clear all resets conditions");
+    }
+    l10n::SetLanguage(l10n::LanguageId(language));
+}
+
+// No image capture: exercise the actual dialog's mouse target and editing path.
+void CALLBACK AdvancedEditClickTimer(HWND, UINT, UINT_PTR timer, DWORD) {
+    HWND dialog = FindAdvancedTestWindow(L"PulseAdvancedSearchWindow");
+    if (!dialog) return;
+    KillTimer(nullptr, timer);
+    RECT rc{};
+    GetClientRect(dialog, &rc);
+    const float scale = rc.right / 560.0f;
+    for (float y : {264.0f, 324.0f}) {
+        for (float x : {140.0f, 22.0f}) {
+            POINT point{static_cast<int>(x * scale), static_cast<int>(y * scale)};
+            ClientToScreen(dialog, &point);
+            HWND target = WindowFromPoint(point);
+            if (x == 140.0f) Check(IsChild(dialog, target),
+                L"advanced edit: empty unfocused field has a hittable child surface");
+            Check(target == dialog || IsChild(dialog, target), L"advanced edit: click targets dialog or its child");
+            if (target != dialog && !IsChild(dialog, target)) continue;
+            ScreenToClient(target, &point);
+            SendMessageW(target, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(point.x, point.y));
+            HWND edit = GetFocus();
+            wchar_t cls[32]{};
+            GetClassNameW(edit, cls, ARRAYSIZE(cls));
+            Check(IsChild(dialog, edit) && wcscmp(cls, L"Edit") == 0,
+                  L"advanced edit: center and padding clicks focus native editor");
+            RECT bounds{};
+            GetWindowRect(edit, &bounds);
+            MapWindowPoints(nullptr, dialog, reinterpret_cast<POINT*>(&bounds), 2);
+            Check(bounds.top < y * scale && bounds.bottom > y * scale,
+                  L"advanced edit: correct content or exclusion field receives focus");
+            SendMessageW(edit, WM_LBUTTONUP, 0, 0);
+            SendMessageW(edit, WM_CHAR, L'中', 0);
+            Check(GetWindowTextLengthW(edit) > 0, L"advanced edit: clicked field accepts Unicode input");
+            SetWindowTextW(edit, L"");
+        }
+    }
+    PostMessageW(dialog, WM_CLOSE, 0, 0);
+}
+
+void TestAdvancedEditClicks() {
+    for (bool dark : {true, false}) {
+        AdvancedSearchSpec spec;
+        spec.name = L"showbox";
+        const UINT_PTR timer = SetTimer(nullptr, 0, 150, AdvancedEditClickTimer);
+        Check(timer != 0, L"advanced edit: create click fixture");
+        if (!timer) return;
+        ui::ShowAdvancedSearchDialog(nullptr, spec, dark, D2D1::ColorF(0x0078d4));
+        KillTimer(nullptr, timer);
+    }
+}
+
 void TestCtrlDragSelection() {
     auto state = std::make_unique<AppState>();
     Pane pane;
@@ -727,6 +1235,32 @@ void TestCtrlDragSelection() {
 }
 
 void TestMenuModel() {
+    if (!g_skip_visual) {
+    HWND snapshot_window = CreateWindowExW(0, L"STATIC", L"", WS_POPUP,
+        0, 0, 800, 600, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    ui::Compositor snapshot_compositor;
+    if (snapshot_window && snapshot_compositor.Init(snapshot_window)) {
+        const auto snapshot_dir = WorkspaceRoot() + L"\\bench_data";
+        CreateDirectoryW(snapshot_dir.c_str(), nullptr);
+        for (bool dark : {false, true}) {
+            for (float scale : {1.0f, 1.5f}) {
+                snapshot_compositor.RecreateTextFormats(scale);
+                const auto path = snapshot_dir + L"\\history-menu-" +
+                    (dark ? L"dark-" : L"light-") + (scale == 1.0f ? L"100.png" : L"150.png");
+                Check(ui::FluentMenuTestPeer::SaveHistorySnapshot(snapshot_window,
+                    snapshot_compositor, path, dark, scale), L"menu: history visual snapshot saved");
+            }
+        }
+        snapshot_compositor.Shutdown();
+    } else {
+        Check(false, L"menu: snapshot graphics initialized");
+    }
+    if (snapshot_window) DestroyWindow(snapshot_window);
+    }
+    Check(ui::FluentMenuTestPeer::CheckHistoryRows(1.0f),
+          L"menu: history actions and scrolling at 100 percent DPI");
+    Check(ui::FluentMenuTestPeer::CheckHistoryRows(1.5f),
+          L"menu: history actions and scrolling at 150 percent DPI");
     Check(ui::FluentMenuTestPeer::CheckSubmenuColors(1.0f),
           L"menu: all submenu color dots hover and dispatch at 100 percent DPI");
     Check(ui::FluentMenuTestPeer::CheckSubmenuColors(1.5f),
@@ -3241,6 +3775,52 @@ void TestSessionLayoutTabs() {
     }
 }
 
+void TestTabShortcuts() {
+    WindowTabs tabs;
+    Check(!TabShortcutTarget(tabs, false), L"tab shortcuts: empty strip has no target");
+    tabs.items.push_back(std::make_unique<LayoutTab>());
+    Check(TabShortcutTarget(tabs, false) == 0 && TabShortcutTarget(tabs, true) == 0,
+          L"tab shortcuts: single tab stays selected in both directions");
+    for (int i = 0; i < 3; ++i) tabs.items.push_back(std::make_unique<LayoutTab>());
+    Check(TabShortcutTarget(tabs, false) == 1 && TabShortcutTarget(tabs, true) == 3,
+          L"tab shortcuts: forward and backward wrap from first tab");
+    tabs.active = 3;
+    Check(TabShortcutTarget(tabs, false) == 0 && TabShortcutTarget(tabs, true) == 2,
+          L"tab shortcuts: forward wraps from last tab");
+    tabs.tab_groups.push_back({ 1, L"Hidden", 0, true });
+    tabs.items[1]->tab_group = 1;
+    tabs.active = 0;
+    Check(TabShortcutTarget(tabs, false) == 2,
+          L"tab shortcuts: follows visible order past collapsed group");
+    tabs.active = 1;
+    Check(TabShortcutTarget(tabs, true) == 0 && TabShortcutTarget(tabs, false) == 2,
+          L"tab shortcuts: hidden active tab navigates to visible neighbors");
+    Check(IsTabShortcut(VK_TAB, true, false, false) &&
+          IsTabShortcut(VK_TAB, true, true, false) &&
+          !IsTabShortcut(VK_TAB, false, false, false) &&
+          !IsTabShortcut(VK_TAB, true, false, true) &&
+          !IsTabShortcut(L'1', true, false, false),
+          L"tab shortcuts: only Ctrl+Tab and Ctrl+Shift+Tab are reserved");
+
+    BYTE saved_keys[256]{};
+    const bool have_keys = GetKeyboardState(saved_keys) != FALSE;
+    BYTE keys[256]{};
+    keys[VK_CONTROL] = 0x80;
+    Check(have_keys && SetKeyboardState(keys), L"tab shortcuts: set edit test modifiers");
+    if (have_keys) {
+        auto state = std::make_unique<AppState>();
+        LRESULT result = -1;
+        Check(HandleHostedEditMessage(*state, nullptr, WM_CHAR, VK_TAB, 0, result) && result == 0,
+              L"tab shortcuts: hosted edits consume Ctrl+Tab character");
+        keys[VK_SHIFT] = 0x80;
+        SetKeyboardState(keys);
+        result = -1;
+        Check(HandleHostedEditMessage(*state, nullptr, WM_CHAR, VK_TAB, 0, result) && result == 0,
+              L"tab shortcuts: hosted edits consume Ctrl+Shift+Tab character");
+        SetKeyboardState(saved_keys);
+    }
+}
+
 void TestLayoutOwnedTabs() {
     WindowTabs tabs;
     tabs.NewTab(L"C:\\work");
@@ -3371,6 +3951,17 @@ int RunSelfTest1B2() {
     g_log = _wfopen_s(&g_log_local, kLogPath.c_str(), L"w, ccs=UTF-8") == 0
         ? g_log_local : nullptr;
 
+    wchar_t skip_visual[8]{};
+    g_skip_visual = GetEnvironmentVariableW(L"PULSE_SELFTEST_NO_SCREENSHOTS", skip_visual, ARRAYSIZE(skip_visual)) > 0;
+    if (g_skip_visual) LogLine(L"[SKIP] Screenshot capture disabled\n");
+    wchar_t test_case[64]{};
+    if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
+        wcscmp(test_case, L"advanced-edit") == 0) {
+        TestAdvancedEditClicks();
+        if (g_log) { fclose(g_log); g_log = nullptr; }
+        return g_fail ? 1 : 0;
+    }
+
     TestBreadcrumb();
     TestThisPcEnumeration();
     TestLoadingPresentation();
@@ -3384,7 +3975,12 @@ int RunSelfTest1B2() {
     TestAppPrefsAndSettingsPath();
     TestDragDropPure();
     TestAddressSearch();
+    TestAddressSearchHistoryInteraction();
+    TestAddressSearchHistoryInteraction(1.5f, true);
     TestContinuousSearch();
+    TestLiveAddressSearch();
+    TestAdvancedSearchDialog();
+    TestAdvancedEditClicks();
     TestCtrlDragSelection();
     TestDirWatch();
     TestNavigateAlwaysEnumerates();
@@ -3407,6 +4003,7 @@ int RunSelfTest1B2() {
     TestChipBlockDragGeometry();
     TestFindGroupRun();
     TestSessionLayoutTabs();
+    TestTabShortcuts();
     TestLayoutOwnedTabs();
     TestUtf8PersistFile();
     TestColorPickerModel();

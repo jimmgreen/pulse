@@ -1,9 +1,9 @@
 // index_engine.h — Filename index: mmap base + heap delta (优化.md R1).
 //
-// V10 uses the V9 aggregate snapshot layout with corrected visibility. The base is read-only;
+// V11 uses the V9 aggregate snapshot layout with corrected attribute replay. The base is read-only;
 // USN/RDCW mutations append to a small heap delta. Search takes a shared lock
-// and never waits on Status()/Count(). V7-V9 snapshots remain readable and
-// trigger a background rebuild instead of retaining incorrect hidden flags.
+// and never waits on Status()/Count(). V7-V10 snapshots remain readable and
+// trigger a background rebuild to repair visibility and disconnected parent links.
 #pragma once
 #include "index_config.h"
 #include "index_query.h"

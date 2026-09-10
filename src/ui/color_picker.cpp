@@ -1,3 +1,4 @@
+#include "edit_host.h"
 // color_picker.cpp — QFluent DropDownColorPickerButton popup replica.
 //
 // 1:1 recreation of QFluentKit's DropDownColorPickerButton popup, rendered
@@ -802,10 +803,10 @@ void PlaceEdits(State& s) {
     for (int i = 0; i < 5; ++i) {
         if (!s.edits[i]) continue;
         const D2D1_RECT_F& rc = i < 4 ? s.r_ch_edit[i] : s.r_hex;
-        const int x = s.base_x + s.present_dx + static_cast<int>(std::lround(rc.left + pad));
+        const int x = static_cast<int>(std::lround(rc.left + pad));
         const int w = (std::max)(20, static_cast<int>(std::lround(rc.right - rc.left - pad * 2.0f)));
         const int line = (std::min)(s.line_h, static_cast<int>(rc.bottom - rc.top));
-        const int y = s.base_y + static_cast<int>(std::lround(rc.top)) +
+        const int y = static_cast<int>(std::lround(rc.top)) +
                       (std::max)(0, static_cast<int>(rc.bottom - rc.top - line) / 2);
         // SWP_NOACTIVATE is essential: an activating SetWindowPos would focus
         // each edit in turn, whose EN_SETFOCUS triggers another repaint and
@@ -1173,10 +1174,7 @@ void CreateEdits(State& s) {
         s.line_h = (std::max)(1, static_cast<int>(tm.tmHeight));
     }
     for (int i = 0; i < 5; ++i) {
-        const DWORD style = WS_POPUP | ES_AUTOHSCROLL | (i < 4 ? ES_NUMBER : 0);
-        HWND e = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW, L"EDIT", L"", style,
-                                 0, 0, 10, 10, s.hwnd, nullptr,
-                                 GetModuleHandleW(nullptr), nullptr);
+        HWND e = CreateChildEdit(s.hwnd, L"", i < 4 ? ES_NUMBER : 0);
         if (!e) continue;
         SetWindowTheme(e, L"", L"");
         if (!s.compositor || !s.compositor->LumaTextEnabled())

@@ -72,7 +72,7 @@ void ExitAddressSearch(AppState& s) {
 
 void ShowAddressSearch(AppState& s) {
     if (s.addressSearching && s.hwndAddressEdit) {
-        SetForegroundWindow(s.hwndAddressEdit);
+        SetForegroundWindow(GetAncestor(s.hwndAddressEdit, GA_ROOT));
         SetFocus(s.hwndAddressEdit);
         SendMessageW(s.hwndAddressEdit, EM_SETSEL, 0, -1);
         return;
@@ -99,17 +99,41 @@ void ShowAddressSearch(AppState& s) {
     SendMessageW(s.hwndAddressEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(cue.c_str()));
     LayoutAddressEditor(s);
     InvalidateRect(s.hwnd, nullptr, FALSE);
+    if (query.empty() && !s.searchHistoryOpen)
+        PostMessageW(s.hwnd, WM_SEARCH_HISTORY, 0, 0);
 }
 
-void SubmitAddressSearch(AppState& s) {
+void QueueAddressSearch(AppState& s) {
+    auto* tab = ActiveTab(s);
+    if (!s.addressSearching || !tab) return;
+    s.addressLiveContext = tab->current_path;
+    s.addressLiveDue = GetTickCount64() + 100;
+    s.addressHistoryDue = 0;
+}
+
+void FlushAddressSearch(AppState& s) {
+    if (s.addressSearching && s.addressLiveDue && !s.addressSearchComposing &&
+        ActiveTab(s) && ActiveTab(s)->current_path == s.addressLiveContext)
+        SubmitAddressSearch(s, true);
+    if (s.addressHistoryDue && ActiveTab(s) && ActiveTab(s)->current_path == s.addressHistoryPath)
+        RecordSearchHistory(s, s.addressHistoryPath);
+    s.addressLiveDue = s.addressHistoryDue = 0;
+    s.addressSearchComposing = false;
+}
+
+void SubmitAddressSearch(AppState& s, bool live) {
     auto* tab = ActiveTab(s);
     if (!tab) return;
     const int length = GetWindowTextLengthW(s.hwndAddressEdit);
     std::wstring query(static_cast<size_t>(length) + 1, L'\0');
     query.resize(GetWindowTextW(s.hwndAddressEdit, query.data(), length + 1));
     const auto first = query.find_first_not_of(L" \t\r\n");
-    if (first == std::wstring::npos) return;
-    query = query.substr(first, query.find_last_not_of(L" \t\r\n") - first + 1);
+    s.addressLiveDue = 0;
+    if (s.addressSearchComposing) return;
+    if (first == std::wstring::npos) {
+        if (!live || !IsAddressSearchResults(tab)) return;
+        query.clear();
+    } else query = query.substr(first, query.find_last_not_of(L" \t\r\n") - first + 1);
     const bool continuing = IsAddressSearchResults(tab);
     std::wstring previous_query;
     if (continuing) app::ParsePulsePath(tab->current_path, nullptr, &previous_query);
@@ -124,9 +148,33 @@ void SubmitAddressSearch(AppState& s) {
         tab->search_origin_path = tab->current_path;
         tab->search_origin_valid = true;
     }
+    if (tab->current_path == path) {
+        if (!query.empty()) {
+            if (live) {
+                s.addressHistoryPath = path;
+                s.addressHistoryDue = GetTickCount64() + 800;
+            } else {
+                s.addressHistoryDue = 0;
+                RecordSearchHistory(s, path);
+            }
+        }
+        return;
+    }
     const auto previous_results = continuing ? tab->snapshot : fs::SnapshotPtr{};
-    HideAddressEditor(s, false);
-    NavigateTo(s, path);
+    if (continuing) {
+        ++tab->view_generation;
+        tab->current_path = path;
+    } else tab->NavigateTo(path);
+    StartLoadingPath(s, *tab, path);
+    if (!query.empty()) {
+        if (live) {
+            s.addressHistoryPath = path;
+            s.addressHistoryDue = GetTickCount64() + 800;
+        } else {
+            s.addressHistoryDue = 0;
+            RecordSearchHistory(s, path);
+        }
+    }
     if (previous_results && !previous_results->empty() && tab->loading) {
         tab->SetSnapshot(previous_results);
         tab->search_retaining_results = true;
@@ -135,10 +183,15 @@ void SubmitAddressSearch(AppState& s) {
     tab->search_input_text = query;
     tab->search_input_root = s.addressSearchRoot;
     tab->search_input_current = s.addressSearchCurrent;
-    ShowAddressSearch(s);
+    InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
 void ShowAddressSearchScope(AppState& s) {
+    if (s.searchHistoryOpen) {
+        s.searchScopePending = true;
+        if (s.menu) s.menu->Dismiss();
+        return;
+    }
     if (!s.addressSearching || !EnsureMenu(s)) return;
     std::vector<ui::FluentMenuItem> items(2);
     items[0].command = 1;
@@ -156,22 +209,38 @@ void ShowAddressSearchScope(AppState& s) {
         s.renderer.AddressBarRect(static_cast<float>(s.compositor.Width())), s.scale);
     POINT anchor{static_cast<LONG>(layout.scope.left), static_cast<LONG>(layout.scope.bottom)};
     ClientToScreen(s.hwnd, &anchor);
+    anchor.x -= ui::FluentMenu::kShadowMargin;
+    anchor.y += static_cast<LONG>(4 * s.scale) - ui::FluentMenu::kShadowMargin;
     s.addressIgnoreKillFocus = true;
     const int command = s.menu->TrackPopup(anchor, std::move(items));
     if (command == 1 || command == 2) {
         s.addressSearchCurrent = command == 1;
         s.addressScopeAnimation = 1.0f;
         s.addressAnimationTick = GetTickCount64();
+        QueueAddressSearch(s);
     }
-    SetForegroundWindow(s.hwndAddressEdit);
+    SetForegroundWindow(GetAncestor(s.hwndAddressEdit, GA_ROOT));
     SetFocus(s.hwndAddressEdit);
     s.addressIgnoreKillFocus = false;
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
 bool TickAddressSearch(AppState& s, ULONGLONG now) {
+    bool searched = false;
+    if (s.addressLiveDue && now >= s.addressLiveDue && !s.addressSearchComposing) {
+        s.addressLiveDue = 0;
+        if (s.addressSearching && ActiveTab(s) && ActiveTab(s)->current_path == s.addressLiveContext) {
+            SubmitAddressSearch(s, true);
+            searched = true;
+        }
+    }
+    if (s.addressHistoryDue && now >= s.addressHistoryDue) {
+        s.addressHistoryDue = 0;
+        if (ActiveTab(s) && ActiveTab(s)->current_path == s.addressHistoryPath)
+            RecordSearchHistory(s, s.addressHistoryPath);
+    }
     const float target = s.addressSearching ? 1.0f : 0.0f;
-    if (s.addressSearchAnimation == target && s.addressScopeAnimation == 0.0f) return false;
+    if (s.addressSearchAnimation == target && s.addressScopeAnimation == 0.0f) return searched;
     BOOL animate = TRUE;
     SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &animate, 0);
     const float dt = s.addressAnimationTick ? static_cast<float>(now - s.addressAnimationTick) : 16.0f;

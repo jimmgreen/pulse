@@ -384,6 +384,10 @@ target_link_libraries(pulse_material_test PRIVATE
     comctl32 pulse_localization)
 pulse_enable_lumatext(pulse_material_test)
 
+add_executable(pulse_search_history_test
+    src/bench/search_history_test.cpp
+    src/app/search_history.cpp)
+
 add_executable(pulse_app_controllers_test
     src/bench/app_controllers_test.cpp
     src/bench/localization_test.rc
@@ -416,3 +420,19 @@ endif()
 if(TARGET pulse_ops_test AND TARGET pulse_shell)
     add_dependencies(pulse_ops_test pulse_shell)
 endif()
+
+# Headless modal lifecycle checks: no screenshots and no foreground activation.
+add_executable(pulse_dialog_close_test src/bench/dialog_close_test.cpp src/ui/dialog_lifecycle.cpp)
+target_compile_features(pulse_dialog_close_test PRIVATE cxx_std_20)
+target_compile_options(pulse_dialog_close_test PRIVATE /W4 /permissive- /utf-8)
+target_compile_definitions(pulse_dialog_close_test PRIVATE UNICODE _UNICODE NOMINMAX)
+target_link_libraries(pulse_dialog_close_test PRIVATE dwmapi user32)
+
+add_executable(pulse_child_edit_test
+    src/bench/child_edit_test.cpp src/bench/child_edit_test.rc
+    src/ui/typography.cpp src/ui/ui_compositor.cpp)
+target_compile_options(pulse_child_edit_test PRIVATE /W4 /permissive- /utf-8)
+target_link_options(pulse_child_edit_test PRIVATE /MANIFEST:NO)
+target_link_libraries(pulse_child_edit_test PRIVATE
+    d3d11 d2d1 dwrite dxgi dcomp dwmapi shcore ole32 windowscodecs user32 gdi32 comctl32 pulse_localization)
+pulse_enable_lumatext(pulse_child_edit_test)
