@@ -90,6 +90,7 @@ enum MenuCmd : int {
     CmdOpenRecycle,
     CmdPinQuickAccess,
     CmdUnpinQuickAccess,
+    CmdViewRecentChanges = 180,
     CmdRecentBase = 200,
     CmdIndexBase = 1000,
     // Explorer integration (优化.md §7): registry static verbs bound to the
@@ -118,6 +119,12 @@ struct ShellMenuEntry {
 // AppendShellSection (they grow the menu downward so open rows never move).
 std::vector<ui::FluentMenuItem> BuildItemMenu(bool can_undo, const std::wstring& undo_label,
                                               bool folder = false);
+
+struct Tab;
+// Uses snapshot metadata only; never probes the filesystem on the UI thread.
+std::wstring RecentChangesMenuPath(const Tab& tab, bool background);
+void AppendRecentChangesCommand(std::vector<ui::FluentMenuItem>& items,
+                                const std::wstring& path);
 
 // Appends the merged Explorer section at the very bottom: separator, then one
 // row per entry. Software submenus become one-level flyout headers (children

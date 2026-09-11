@@ -28,6 +28,8 @@ void LayoutFilterEditor(AppState& s);
 void ShowFilterEditor(AppState& s, bool select_mode = false);
 void ShowWildcardSelect(AppState& s);
 void HideFilterEditor(AppState& s, bool commit);
+void ClearPaneFilter(AppState& s);
+void SyncFilterEditor(AppState& s);
 void LayoutRenameOverlay(AppState& s);
 void ShowRenameOverlay(AppState& s);
 void HideRenameOverlay(AppState& s, bool commit);

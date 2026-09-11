@@ -68,6 +68,15 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
     HitTestResult r;
     if (x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom) return r;
 
+    if (vm.change_popover.visible) {
+        const auto popup = ChangePopoverRect(vm.change_popover, rect, scale_);
+        if (ContainsPt(popup, x, y)) {
+            r.region = HitTestResult::ChangeOpen;
+            r.index = vm.change_popover.row_index;
+            r.pane_index = vm.change_popover.pane_index;
+            return r;
+        }
+    }
     // Title bar.
     if (y < title_bar_height_) {
         const float ctrlW = 46.0f * scale_;
@@ -220,6 +229,12 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                     r.region = HitTestResult::SettingsToggle;
                     r.index = 7;
                     return r;
+                }
+                if (ContainsPt(lay.change_tracking_row, x, y)) {
+                    r.region = HitTestResult::SettingsToggle; r.index = 8; return r;
+                }
+                for (int i = 0; i < 3; ++i) if (ContainsPt(lay.change_days[i], x, y)) {
+                    r.region = HitTestResult::SettingsChangeDays; r.index = i; return r;
                 }
                 for (int i = 0; i < 3; ++i) {
                     if (ContainsPt(lay.startup_row[i], x, y)) {
@@ -637,7 +652,9 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             return out;
         D2D1_RECT_F filterRc = FilterBoxRect(paneRc, paneVm.filter_expand);
         if (RectContains(filterRc, x, y)) {
-            out.region = HitTestResult::FilterBox;
+            out.region = !paneVm.filter_text.empty() && paneVm.filter_expand >= 0.985f &&
+                RectContains(FilterClearRect(paneRc, paneVm.filter_expand), x, y)
+                ? HitTestResult::FilterClear : HitTestResult::FilterBox;
             out.index = paneIndex;
             return out;
         }
@@ -659,6 +676,9 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             out.index = paneIndex;
             return out;
         }
+        if (compositor_ && ContainsPt(ChangeTitleRect(paneRc, navBackRc.left - 8 * scale_, pane_header_height_, paneVm.title_change_badge, scale_, compositor_, paneVm.header_text), x, y)) {
+            out.region = HitTestResult::ChangeBadge; out.index = -1; return out;
+        }
         const D2D1_RECT_F navForwardRc = PaneNavForwardRect(paneRc, paneVm.filter_expand);
         if (RectContains(navForwardRc, x, y)) {
             out.region = HitTestResult::NavForward;
@@ -671,12 +691,21 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             out.index = paneIndex;
             return out;
         }
-        const float banner = paneVm.banner_message.empty() ? 0.0f : 36.0f * scale_;
-        const float extra = PaneExtraTop(paneVm, scale_);
+        const float banner = PaneBannerHeight(paneVm, paneRc.right - paneRc.left, scale_, compositor_);
+        const float extra = PaneExtraTop(paneVm, scale_, paneRc.right - paneRc.left, compositor_);
         const float recentTop = paneRc.top + pane_header_height_ + banner;
         const float filterExtra = (paneVm.is_recent ? kRecentControlsDip * scale_ : 0.0f) +
                                   (paneVm.is_query_search ? kSearchFiltersDip * scale_ : 0.0f);
-        const float columnTop = recentTop + filterExtra;
+        const float changesTop = recentTop + filterExtra;
+        if (paneVm.is_changes && y >= changesTop && y < changesTop + 36 * scale_) {
+            const float cw = std::max(1.0f, (paneRc.right - paneRc.left - 16 * scale_) / 3);
+            const int chip = static_cast<int>((x - paneRc.left - 8 * scale_) / cw);
+            if (chip >= 0 && chip < 3 && (chip < 2 || paneVm.change_has_more)) {
+                out.region = chip == 0 ? HitTestResult::ChangeTimeFilter : chip == 1 ? HitTestResult::ChangeTypeFilter : HitTestResult::ChangeMore;
+                out.index = chip; return out;
+            }
+        }
+        const float columnTop = changesTop + (paneVm.is_changes ? 36 * scale_ : 0);
         float listTop = paneRc.top + pane_header_height_ + extra +
                         (ShowsColumnHeader(paneVm.view_mode) ? column_header_height_ : 0.0f);
         if (y >= paneRc.top && y < paneRc.top + pane_header_height_) {
@@ -752,7 +781,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 const PaneEmptyLayout emptyLayout = MakePaneEmptyLayout(
                     D2D1::RectF(paneRc.left, listTop, paneRc.right, paneRc.bottom),
                     scale_, true);
-                if (emptyLayout.show_action && RectContains(emptyLayout.action, x, y)) {
+                if (!paneVm.is_changes && emptyLayout.show_action && RectContains(emptyLayout.action, x, y)) {
                     out.region = HitTestResult::PaneEmptyNewFolder;
                     out.index = paneIndex;
                     return out;
@@ -771,7 +800,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             }
             int idx = ItemFromPointInPane(paneVm, paneRc, x, y);
             if (idx >= 0) {
-                if (paneVm.view_mode == ViewMode::Details && idx != paneVm.rename_index) {
+                if (idx != paneVm.rename_index) {
                     int viewRow = paneVm.ViewIndex(idx);
                     if (viewRow >= 0 && compositor_ && compositor_->DwriteFactory()) {
                         const D2D1_RECT_F list = PaneListRect(paneRc, extra, paneVm.view_mode);
@@ -791,9 +820,19 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                         }
                         const bool rowHot = paneVm.hover_index == idx ||
                             (paneVm.selected_index == idx && paneVm.selected_count == 1);
-                        const bool showActions = idx != paneVm.rename_index &&
+                        const bool showActions = paneVm.view_mode == ViewMode::Details && idx != paneVm.rename_index &&
                             (rowHot || entry.starred);
-                        const float badgeW = !entry.badge.empty()
+                        const auto changeIt = paneVm.change_badges.find(idx);
+                        const ChangeBadge* change = changeIt != paneVm.change_badges.end() && HasChangeBadge(changeIt->second) ? &changeIt->second : nullptr;
+                        const bool grid = paneVm.view_mode == ViewMode::ExtraLargeIcons || paneVm.view_mode == ViewMode::LargeIcons || paneVm.view_mode == ViewMode::MediumIcons;
+                        if (change && grid) {
+                            const float bw = std::min(ChangeBadgeWidth(*change, scale_, compositor_), cell.right - cell.left - 12 * scale_);
+                            const float bx = (cell.left + cell.right - bw) * 0.5f;
+                            if (ContainsPt(D2D1::RectF(bx, cell.top + 2 * scale_, bx + bw, cell.top + 20 * scale_), x, y)) {
+                                out.region = HitTestResult::ChangeBadge; out.index = idx; return out;
+                            }
+                        }
+                        const float badgeW = change && !grid ? ChangeBadgeWidth(*change, scale_, compositor_) : !entry.badge.empty()
                             ? std::min(108.0f * scale_, painter_.MeasureTagWidth(entry.badge))
                             : 0.0f;
                         const bool rowSnippet = !entry.snippet.empty();
@@ -801,11 +840,15 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                             MakeDetailsNameLine(nameRc, cell, scale_, rowSnippet);
                         const NameTrail trail = LayoutNameTrail(
                             nameRc.left, nameLine.y, nameLine.h,
-                            columns.DividerX(0) - margin_, cell.top, cell.bottom, scale_,
+                            paneVm.view_mode == ViewMode::Details ? columns.DividerX(0) - margin_ : nameRc.right, cell.top, cell.bottom, scale_,
                             entry.name, static_cast<int>(std::min<size_t>(3, tagCount)), badgeW,
                             showActions, showActions && paneVm.hover_index == idx && entry.is_dir,
                             showActions && rowHot,
-                            compositor_, compositor_->DwriteFactory(), compositor_->TextFormat());
+                            compositor_, compositor_->DwriteFactory(), compositor_->TextFormat(), change != nullptr,
+                            paneVm.view_mode == ViewMode::Details ? (entry.is_dir ? 3 : 2) : 0);
+                        if (change && !grid && ContainsPt(trail.badge, x, y)) {
+                            out.region = HitTestResult::ChangeBadge; out.index = idx; return out;
+                        }
                         if (ContainsPt(trail.star, x, y)) {
                             out.region = HitTestResult::RowStar;
                             out.index = idx;

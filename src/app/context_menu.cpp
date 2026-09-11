@@ -1,5 +1,6 @@
 // context_menu.cpp — See context_menu.h.
 #include "context_menu.h"
+#include "app_model.h"
 #include "../common/localization.h"
 #include "../common/path_utils.h"
 #include "../fs/fs_enum.h"
@@ -92,6 +93,32 @@ std::vector<ui::FluentMenuItem> BuildItemMenu(bool can_undo, const std::wstring&
     items.back().separator_after = true;
     items.push_back(UndoItem(can_undo, undo_label));
     return items;
+}
+
+std::wstring RecentChangesMenuPath(const Tab& tab, bool background) {
+    auto filesystem = [](const std::wstring& path) { return !path.empty() && !fs::IsVirtualPath(path); };
+    if (background) return filesystem(tab.current_path) ? tab.current_path : std::wstring{};
+    if (!tab.snapshot) return {};
+    const auto selected = tab.SelectedIndices();
+    if (selected.size() != 1 || selected[0] < 0 ||
+        static_cast<size_t>(selected[0]) >= tab.snapshot->size()) return {};
+    const auto& entry = (*tab.snapshot)[static_cast<size_t>(selected[0])];
+    if (entry.change_record_only || !entry.recycle_path.empty()) return {};
+    if (!entry.link_target.empty())
+        return entry.link_target_is_dir && filesystem(entry.link_target) ? entry.link_target : std::wstring{};
+    if (!entry.is_dir) return {};
+    if (!entry.full_path.empty()) return filesystem(entry.full_path) ? entry.full_path : std::wstring{};
+    if (!filesystem(tab.current_path)) return {};
+    auto path = tab.current_path;
+    if (!path.ends_with(L"\\")) path += L"\\";
+    return path + entry.name;
+}
+
+void AppendRecentChangesCommand(std::vector<ui::FluentMenuItem>& items,
+                                const std::wstring& path) {
+    if (path.empty() || fs::IsVirtualPath(path)) return;
+    auto item = Item(CmdViewRecentChanges, l10n::Get(l10n::StringId::ChangeView).c_str(), L"\xE81C");
+    items.insert(items.begin() + (items.empty() ? 0 : 1), std::move(item));
 }
 
 std::vector<ui::FluentMenuItem> BuildRecycleItemMenu(bool can_undo,

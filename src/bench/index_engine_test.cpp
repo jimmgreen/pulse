@@ -6,10 +6,49 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <chrono>
 
 namespace pulse::index {
 
 struct EngineTestAccess {
+    static bool CoverageBenchmark() {
+        constexpr uint32_t siblings = 1000000;
+        std::vector<Node> nodes(siblings + 2);
+        std::vector<Attr> attrs(siblings + 2);
+        std::vector<int32_t> order(siblings + 2);
+        std::vector<wchar_t> pool;
+        pool.reserve(static_cast<size_t>(siblings) * 16);
+        auto add = [&](uint32_t index, int32_t parent, const std::wstring& name) {
+            auto& node = nodes[index]; node.parent = parent; node.flags = Engine::kFlagDir;
+            node.off = static_cast<uint32_t>(pool.size()); node.len = static_cast<uint16_t>(name.size());
+            pool.insert(pool.end(), name.begin(), name.end()); order[index] = static_cast<int32_t>(index);
+        };
+        add(0, -1, L"C:"); add(1, 0, L"Large");
+        for (uint32_t i = 0; i < siblings; ++i) {
+            wchar_t name[32]{}; swprintf_s(name, L"folder%08u", i); add(i + 2, 1, name);
+        }
+        DiskHeader header{}; header.pool_chars = pool.size(); header.node_count = static_cast<uint32_t>(nodes.size());
+        Engine engine; engine.map_ = std::make_unique<Engine::MappedFile>();
+        engine.map_->hdr = &header;
+        engine.map_->n = static_cast<uint32_t>(nodes.size()); engine.map_->nodes = nodes.data();
+        engine.map_->attrs = attrs.data(); engine.map_->pool = pool.data(); engine.map_->child_order = order.data();
+        engine.ready_ = true;
+        std::vector<std::wstring> paths;
+        for (uint32_t i = siblings - 6; i < siblings; ++i) {
+            wchar_t name[64]{}; swprintf_s(name, L"\\\\?\\C:\\Large\\folder%08u", i); paths.emplace_back(name);
+        }
+        bool valid = true;
+        const auto start = std::chrono::steady_clock::now();
+        for (const auto& path : paths) valid &= engine.ChangeCoverage(path) == ChangeState::Gap;
+        const double milliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        std::cout << "[INFO] 1000000 mapped siblings / 6 coverage paths: " << milliseconds << " ms\n";
+        engine.tombstones_.insert(siblings + 1);
+        valid &= engine.ChangeCoverage(paths.back()) == ChangeState::NotCovered;
+        valid &= engine.ChangeCoverage(L"C:\\Large\\missing") == ChangeState::NotCovered;
+        std::cout << (valid && milliseconds < 1500.0 ? "[PASS] " : "[FAIL] ") << "mapped coverage bounded lookup and tombstone/missing path checks\n";
+        return valid && milliseconds < 1500.0;
+    }
+
     static bool Build(Engine& e) {
         e.running_ = true;
         e.excluded_paths_ = {L"C:\\Users\\TestUser\\excluded"};
@@ -99,6 +138,22 @@ struct EngineTestAccess {
         return (e.NodeAt(e.vols_.front().root_idx).flags & Engine::kFlagHidden) != 0;
     }
 
+    static bool RecycleFixture() {
+        Engine engine; if (!Build(engine)) return false;
+        Usn(engine, 200, 5, L"$Recycle.Bin", USN_REASON_FILE_CREATE);
+        Usn(engine, 201, 200, L"S-1-5-21-123", USN_REASON_FILE_CREATE);
+        engine.changes_.Lease(L"fixture", true);
+        Usn(engine, 90, 201, L"$Rsample.codex", USN_REASON_RENAME_NEW_NAME);
+        auto result = engine.changes_.Details(L"fixture", L"C:\\Users\\TestUser", 0, 0, 200);
+        const bool deleted = result.records.size() == 1 && result.records[0].kind == ChangeKind::Deleted &&
+            result.records[0].path == L"C:\\Users\\TestUser\\sample.codex";
+        Usn(engine, 90, 20, L"sample.codex", USN_REASON_RENAME_NEW_NAME);
+        result = engine.changes_.Details(L"fixture", L"C:\\Users\\TestUser", 0, 0, 200);
+        const bool restored = result.records.size() == 1 && result.records[0].kind == ChangeKind::Created;
+        std::cout << (deleted && restored ? "[PASS]" : "[FAIL]") << " USN recycle and restore original path\n";
+        return deleted && restored;
+    }
+
     static void Usn(Engine& e, uint64_t id, uint64_t parent, const wchar_t* name, DWORD reason) {
         const auto length = static_cast<WORD>(wcslen(name) * sizeof(wchar_t));
         std::vector<BYTE> bytes(sizeof(USN_RECORD_V2) + length);
@@ -110,6 +165,8 @@ struct EngineTestAccess {
         rec->FileNameLength = length;
         rec->FileAttributes = FILE_ATTRIBUTE_DIRECTORY;
         rec->Reason = reason;
+        FILETIME now{}; GetSystemTimeAsFileTime(&now);
+        rec->TimeStamp.QuadPart = (static_cast<uint64_t>(now.dwHighDateTime) << 32) | now.dwLowDateTime;
         memcpy(bytes.data() + rec->FileNameOffset, name, length);
         e.ApplyUsnLocked(e.vols_.front(), rec);
     }
@@ -163,7 +220,9 @@ void CheckSearch(Engine& e) {
 }
 }
 
-int wmain() {
+int wmain(int argc, wchar_t** argv) {
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--recycle-only") return EngineTestAccess::RecycleFixture() ? 0 : 1;
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--coverage-only") return EngineTestAccess::CoverageBenchmark() ? 0 : 1;
     std::cout << std::unitbuf;
     Engine engine;
     Check(EngineTestAccess::Build(engine), "actual MFT tree builder accepts fixture");

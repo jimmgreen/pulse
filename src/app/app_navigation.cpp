@@ -577,6 +577,10 @@ void LoadVirtualView(AppState& s, app::Tab& tab, const std::wstring& path) {
 
     std::wstring kind, rest;
     app::ParsePulsePath(path, &kind, &rest);
+    if (kind == L"changes") {
+        LoadChangeView(s, tab, rest);
+        return;
+    }
     if (kind == L"workspace") {
         OpenWorkspace(s, _wtoi(rest.c_str()));
         return;
@@ -1303,6 +1307,7 @@ void OpenSelected(AppState& s) {
     if (indices.empty()) return;
     if (indices.size() == 1) {
         const fs::DirEntry& e = (*tab->snapshot)[static_cast<size_t>(indices[0])];
+        if (e.change_record_only) return;
         if (!e.link_target.empty()) {
             if (e.link_target_is_dir) NavigateTo(s, e.link_target);
             else {
@@ -1321,6 +1326,7 @@ void OpenSelected(AppState& s) {
     }
     for (int index : indices) {
         const fs::DirEntry& e = (*tab->snapshot)[static_cast<size_t>(index)];
+        if (e.change_record_only) continue;
         if (!e.link_target.empty()) {
             if (!e.link_target_is_dir) {
                 s.ops.OpenWith(e.link_target);

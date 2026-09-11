@@ -25,7 +25,9 @@ int NameCompare(const std::wstring& a, const std::wstring& b) {
 
 bool EntryLess(const fs::DirEntry& a, const fs::DirEntry& b,
                ui::SortColumn col, ui::SortDirection dir) {
-    if (a.is_dir != b.is_dir) return a.is_dir;
+    const bool a_folder = a.is_dir || (!a.link_target.empty() && a.link_target_is_dir);
+    const bool b_folder = b.is_dir || (!b.link_target.empty() && b.link_target_is_dir);
+    if (a_folder != b_folder) return a_folder;
     int cmp = 0;
     switch (col) {
     case ui::SortColumn::Name:

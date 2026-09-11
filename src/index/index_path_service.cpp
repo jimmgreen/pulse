@@ -66,6 +66,7 @@ int ConfigureServiceIndexPath(const std::wstring& path) {
     SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
     IndexConfig previous;
     if (!LoadMachineConfig(previous, nullptr)) return ERROR_INVALID_DATA;
+    if (SameIndexLocation(previous.index_path, path)) return ERROR_SUCCESS;
     ServiceHandle manager{OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT)};
     if (!manager.value) return static_cast<int>(GetLastError());
     ServiceHandle service{OpenServiceW(manager.value, L"PulseIndex",

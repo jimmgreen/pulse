@@ -416,7 +416,25 @@ void MainRenderer::Render(const WindowViewModel& vm, const D2D1_RECT_F& rect,
         text_background_ = saved_badge_bg;
     }
 
-    if (vm.drag_badge.empty() && !vm.tooltip_text.empty()) {
+    if (vm.change_popover.visible) {
+        const auto rc = ChangePopoverRect(vm.change_popover, rect, scale_);
+        MakeBrush(dc, theme.surface_flyout, brFillHover_);
+        FillRoundedRect(dc, brFillHover_.get(), rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, 8 * scale_);
+        auto content = rc; content.left += 14 * scale_; content.right -= 14 * scale_;
+        content.top += 10 * scale_; content.bottom -= 42 * scale_;
+        size_t begin = 0;
+        for (int line = 0; line < ChangePopoverLineCount(vm.change_popover) && begin < vm.change_popover.summary.size(); ++line) {
+            const auto end = vm.change_popover.summary.find(L'\n', begin);
+            auto line_rc = content; line_rc.top += line * 24 * scale_; line_rc.bottom = line_rc.top + 24 * scale_;
+            painter_.DrawText(std::wstring_view(vm.change_popover.summary).substr(begin,
+                end == std::wstring::npos ? end : end - begin), line_rc, compositor_->SmallFormat(), theme.text);
+            if (end == std::wstring::npos) break;
+            begin = end + 1;
+        }
+        content.top = rc.bottom - 38 * scale_; content.bottom = rc.bottom - 8 * scale_;
+        painter_.DrawText(pulse::l10n::Get(pulse::l10n::StringId::ChangeView), content, compositor_->TextFormat(), theme.accent);
+    }
+    if (!vm.change_popover.visible && vm.drag_badge.empty() && !vm.tooltip_text.empty()) {
         IDWriteTextFormat* fmt = compositor_->SmallFormat();
         const float tw = MeasureLayoutText(compositor_, compositor_->DwriteFactory(), fmt,
                                            vm.tooltip_text);

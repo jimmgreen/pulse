@@ -600,7 +600,84 @@ bool SaveNetworkRootsFile(const std::wstring& path, const std::vector<std::wstri
     return WriteBytesAtomic(path, bytes, error);
 }
 
+ChangeState NetworkIndex::ChangeCoverage(const std::wstring& path) const {
+    const auto normalized = NormalizeNetworkRoot(NormalizeChangePath(path));
+    std::lock_guard lock(mu_);
+    for (const auto& root : roots_) {
+        if (!EqualPath(normalized, root.info.path) &&
+            !(normalized.size() > root.info.path.size() && normalized[root.info.path.size()] == L'\\' &&
+              CompareStringOrdinal(normalized.c_str(), static_cast<int>(root.info.path.size()), root.info.path.c_str(), -1, TRUE) == CSTR_EQUAL)) continue;
+        if (root.info.building) return ChangeState::Scanning;
+        if (!root.info.online) return ChangeState::Offline;
+        return ChangeState::Gap;
+    }
+    return ChangeState::NotCovered;
+}
+
+void NetworkIndex::SetChangeLease(const std::wstring& owner, bool enabled) {
+    const bool seed = changes_.Lease(owner, enabled);
+    std::lock_guard lock(change_seed_mutex_);
+    if (seed) change_seed_owners_.insert(owner);
+    if (!enabled) change_seed_owners_.erase(owner);
+}
+
+void NetworkIndex::SeedPendingChanges() {
+    std::unordered_set<std::wstring> owners;
+    { std::lock_guard lock(change_seed_mutex_); owners.swap(change_seed_owners_); }
+    for (const auto& owner : owners) SeedChanges(owner);
+}
+
+void NetworkIndex::SeedChanges(const std::wstring& owner) {
+    std::vector<ChangeRecord> baseline;
+    const auto since = ChangeTracker::Now() - 7 * 86400;
+    {
+        std::lock_guard lock(mu_);
+        if (std::any_of(roots_.begin(), roots_.end(), [](const auto& root) { return root.info.building; })) return;
+        for (const auto& root : roots_) {
+            if (!root.shard) continue;
+            for (size_t i = 0; i < root.shard->count && baseline.size() < 100000; ++i) {
+                const auto& record = root.shard->records[i];
+                if (IsChangeJournalName(std::wstring_view(root.shard->pool + record.path_off, record.path_len))) continue;
+                const auto seconds = record.mtime > 116444736000000000ULL
+                    ? record.mtime / 10000000 - 11644473600ULL : record.mtime;
+                if (seconds < since) continue;
+                ChangeRecord event; event.path.assign(root.shard->pool + record.path_off, record.path_len);
+                event.time = seconds; event.is_dir = (record.flags & kRecordDirectory) != 0;
+                baseline.push_back(std::move(event));
+            }
+        }
+    }
+    changes_.Seed(owner, std::move(baseline));
+}
+
+void NetworkIndex::ObserveChanges(const std::wstring& root, const BYTE* data, DWORD bytes) {
+    std::wstring old_path;
+    size_t offset = 0;
+    while (offset + offsetof(FILE_NOTIFY_INFORMATION, FileName) <= bytes) {
+        const auto* info = reinterpret_cast<const FILE_NOTIFY_INFORMATION*>(data + offset);
+        if (info->FileNameLength % sizeof(wchar_t) ||
+            info->FileNameLength > bytes - offset - offsetof(FILE_NOTIFY_INFORMATION, FileName)) { changes_.Gap(); break; }
+        ChangeRecord event;
+        event.path = root + L"\\" + std::wstring(info->FileName, info->FileNameLength / sizeof(wchar_t));
+        if (info->Action == FILE_ACTION_RENAMED_OLD_NAME) old_path = event.path;
+        else {
+            const auto attributes = GetFileAttributesW(LongPath(event.path).c_str());
+            event.is_dir = attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            if (info->Action == FILE_ACTION_ADDED) event.kind = ChangeKind::Created;
+            else if (info->Action == FILE_ACTION_REMOVED) event.kind = ChangeKind::Deleted;
+            else if (info->Action == FILE_ACTION_RENAMED_NEW_NAME) { event.kind = ChangeKind::Renamed; event.old_path = std::move(old_path); }
+            changes_.Record(std::move(event));
+        }
+        if (!info->NextEntryOffset) break;
+        if (info->NextEntryOffset > bytes - offset || info->NextEntryOffset < offsetof(FILE_NOTIFY_INFORMATION, FileName)) { changes_.Gap(); break; }
+        offset += info->NextEntryOffset;
+    }
+    // The SMB watcher is rearmed after reconciliation; its gap is explicit.
+    changes_.Gap();
+}
+
 void NetworkIndex::Start(HWND notify, UINT status_msg, UINT search_msg) {
+    changes_.Open(NetworkDataDir());
     Stop();
     notify_ = notify;
     status_msg_ = status_msg;
@@ -644,6 +721,7 @@ void NetworkIndex::Stop() {
     if (crawl_thread_.joinable()) crawl_thread_.join();
     if (watch_thread_.joinable()) watch_thread_.join();
     if (search_thread_.joinable()) search_thread_.join();
+    changes_.Flush();
     if (watch_wake_event_) {
         CloseHandle(watch_wake_event_);
         watch_wake_event_ = nullptr;
@@ -881,6 +959,8 @@ void NetworkIndex::BuildRoot(const std::wstring& path, uint64_t generation) {
 void NetworkIndex::CrawlLoop() {
     auto next_reconcile = std::chrono::steady_clock::now() + kReconcileInterval;
     while (running_) {
+        SeedPendingChanges();
+        changes_.Flush();
         std::vector<std::wstring> work;
         uint64_t generation = 0;
         {
@@ -993,6 +1073,10 @@ void NetworkIndex::WatchLoop() {
         if (wait > WAIT_OBJECT_0 && wait < WAIT_OBJECT_0 + events.size()) {
             const size_t index = static_cast<size_t>(wait - WAIT_OBJECT_0 - 1);
             if (index < watches.size()) {
+                DWORD bytes = 0;
+                if (GetOverlappedResult(watches[index].directory, &watches[index].overlapped, &bytes, FALSE) && bytes)
+                    ObserveChanges(watches[index].path, watches[index].buffer.data(), bytes);
+                else changes_.Gap();
                 {
                     std::lock_guard<std::mutex> lock(mu_);
                     dirty_roots_.insert(watches[index].path);

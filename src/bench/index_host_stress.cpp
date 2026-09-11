@@ -38,7 +38,11 @@ HANDLE Connect(const std::wstring& pipe_name, DWORD timeout_ms) {
         HANDLE pipe = CreateFileW(pipe_name.c_str(), GENERIC_READ | GENERIC_WRITE,
                                   0, nullptr, OPEN_EXISTING, 0, nullptr);
         if (pipe != INVALID_HANDLE_VALUE) return pipe;
-        if (GetTickCount64() >= deadline) return INVALID_HANDLE_VALUE;
+        const DWORD failure = GetLastError();
+        if (GetTickCount64() >= deadline) {
+            std::wcout << L"[INFO] pipe connect error " << failure << L"\n";
+            return INVALID_HANDLE_VALUE;
+        }
         if (GetLastError() == ERROR_PIPE_BUSY) WaitNamedPipeW(pipe_name.c_str(), 50);
         else Sleep(10);
     }
@@ -107,7 +111,8 @@ bool WaitForSearch(HANDLE pipe, uint32_t wanted_id, DWORD timeout_ms,
 
 } // namespace
 
-int wmain() {
+int wmain(int argc, wchar_t** argv) {
+    std::wcout << std::unitbuf;
     const std::wstring token = std::to_wstring(GetCurrentProcessId()) + L"-" +
         std::to_wstring(GetTickCount64());
     const std::wstring pipe_name = L"\\\\.\\pipe\\PulseIndex.Test." + token;
@@ -121,6 +126,45 @@ int wmain() {
     Check(started, L"index stress host starts on an isolated pipe");
     if (!started) return 1;
     CloseHandle(process.hThread);
+
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--shutdown-only") {
+        std::wcout << L"[INFO] test token " << token << L", helper PID " << process.dwProcessId << L"\n";
+        HANDLE stalled_read = Connect(pipe_name, 10000);
+        Check(stalled_read != INVALID_HANDLE_VALUE, L"incomplete-payload client connects");
+        HANDLE stalled_write = Connect(pipe_name, 10000);
+        Check(stalled_write != INVALID_HANDLE_VALUE, L"blocked-response client connects");
+        HANDLE control = Connect(pipe_name, 10000);
+        Check(control != INVALID_HANDLE_VALUE, L"shutdown-control client connects");
+        bool connected = stalled_read != INVALID_HANDLE_VALUE && stalled_write != INVALID_HANDLE_VALUE && control != INVALID_HANDLE_VALUE;
+        for (HANDLE pipe : {stalled_read, stalled_write, control}) {
+            MsgHeader status{}; std::vector<uint8_t> payload;
+            const bool ready = pipe != INVALID_HANDLE_VALUE && ReadFrame(pipe, status, payload, 2000);
+            Check(ready, L"client receives initial ready status");
+            connected = ready && connected;
+        }
+        bool queued = connected;
+        if (connected) {
+            const auto partial = MakeIndexHdr(REQ_IDX_CHANGE_DETAILS, 1, 64);
+            queued = PipeWrite(stalled_read, reinterpret_cast<const uint8_t*>(&partial), sizeof(partial));
+            PayloadWriter large;
+            large.PutU32(0); large.PutU32(static_cast<uint32_t>(ResultSort::Index));
+            large.PutU32(4096); large.PutU32(0); large.PutString(L"stress"); large.PutString(L"");
+            queued = SendFrame(stalled_write, REQ_IDX_SEARCH, 2, large.data()) && queued;
+            Sleep(50);
+        }
+        Check(queued, L"incomplete payload and large unread response queued");
+        const auto start = GetTickCount64();
+        const bool requested = connected && SendFrame(control, REQ_IDX_TEST_SHUTDOWN, 3);
+        Check(requested, L"shutdown control frame sent");
+        const auto result = WaitForSingleObject(process.hProcess, 5000);
+        Check(queued && requested && result == WAIT_OBJECT_0,
+              L"shutdown cancels incomplete tracking payload and blocked response without client cooperation");
+        std::wcout << L"[INFO] shutdown elapsed " << GetTickCount64() - start << L" ms\n";
+        for (HANDLE pipe : {stalled_read, stalled_write, control}) if (pipe != INVALID_HANDLE_VALUE) CloseHandle(pipe);
+        if (result != WAIT_OBJECT_0) WaitForSingleObject(process.hProcess, 1000);
+        CloseHandle(process.hProcess);
+        return failures ? 1 : 0;
+    }
 
     std::vector<HANDLE> clients;
     for (int i = 0; i < 16; ++i) {

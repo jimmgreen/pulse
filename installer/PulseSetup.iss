@@ -600,6 +600,18 @@ begin
   if (CurStep <> ssPostInstall) or not WizardIsTaskSelected('indexservice') then
     Exit;
   IndexExe := ExpandConstant('{app}\Pulse.Index.exe');
+  Path := RemoveBackslashUnlessRoot(GetIndexPath(''));
+  WizardForm.StatusLabel.Caption := '正在设置索引位置… / Configuring index location…';
+  Code := -1;
+  if not Exec(IndexExe, '--set-index-path "' + Path + '"', '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then
+  begin
+    Log('Index location configuration failed: ' + IntToStr(Code));
+    SuppressibleMsgBox('索引位置设置未完全完成，错误码：' + IntToStr(Code) +
+      '。请在 Pulse 设置中查看实际位置后重试。 / Index relocation needs attention. Check Settings.', mbError, MB_OK, IDOK);
+    Exit;
+  end;
+  { Configure the location before starting the service: an upgrade must not
+    start a full scan only to immediately stop it for the same index path. }
   WizardForm.StatusLabel.Caption := '正在准备索引服务… / Preparing index service…';
   Code := -1;
   if not Exec(IndexExe, '--install', '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then
@@ -608,10 +620,4 @@ begin
       '。软件已安装，可稍后在设置中重试。 / Index service setup failed. Retry in Settings.', mbError, MB_OK, IDOK);
     Exit;
   end;
-  Path := RemoveBackslashUnlessRoot(GetIndexPath(''));
-  WizardForm.StatusLabel.Caption := '正在迁移索引… / Moving index…';
-  Code := -1;
-  if not Exec(IndexExe, '--set-index-path "' + Path + '"', '', SW_HIDE, ewWaitUntilTerminated, Code) or (Code <> 0) then
-    SuppressibleMsgBox('索引位置设置未完全完成，错误码：' + IntToStr(Code) +
-      '。请在 Pulse 设置中查看实际位置后重试。 / Index relocation needs attention. Check Settings.', mbError, MB_OK, IDOK);
 end;

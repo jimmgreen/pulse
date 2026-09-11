@@ -132,11 +132,12 @@ void RestoreWindowTabs(WindowTabs& tabs,
     }
     tabs.next_tab_group_id = std::max(1, max_group + 1);
     for (const auto& saved : layout_tabs) {
-        auto tab = std::make_unique<LayoutTab>();
+        // Loading can reuse requests from panes already registered in the window.
+        tabs.items.push_back(std::make_unique<LayoutTab>());
+        auto& tab = tabs.items.back();
         RestoreLayoutTab(*tab, saved, load_tab);
         if (tab->tab_group != 0 && !valid_groups.contains(tab->tab_group))
             tab->tab_group = 0;
-        tabs.items.push_back(std::move(tab));
     }
     if (tabs.items.empty()) {
         auto tab = std::make_unique<LayoutTab>();

@@ -58,6 +58,8 @@ struct Client {
     std::atomic<bool> alive{true};
     std::atomic<uint32_t> latest_search{0};
     std::atomic<bool> thread_done{false};
+    std::wstring tracking_owner;
+    bool tracking_lease = false;
 };
 
 struct SearchTask {
@@ -74,7 +76,6 @@ struct ClientWorker {
 struct Host {
     Engine engine;
     HWND hwnd = nullptr;
-    HANDLE listen = INVALID_HANDLE_VALUE;
     HANDLE stop = nullptr;
     HANDLE mutex = nullptr;
     std::atomic<bool> running{true};
@@ -156,15 +157,42 @@ SECURITY_ATTRIBUTES* PipeSa() {
     return sd ? &sa : nullptr;
 }
 
+bool ClientIo(Client& client, HANDLE pipe, uint8_t* bytes, DWORD size, bool write) {
+    while (size) {
+        if (!g.running || !client.alive || (g.stop && WaitForSingleObject(g.stop, 0) == WAIT_OBJECT_0)) return false;
+        OVERLAPPED operation{};
+        operation.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!operation.hEvent) return false;
+        DWORD transferred = 0;
+        BOOL ok = write ? WriteFile(pipe, bytes, size, &transferred, &operation)
+                        : ReadFile(pipe, bytes, size, &transferred, &operation);
+        if (!ok && GetLastError() == ERROR_IO_PENDING) {
+            HANDLE waits[] = {operation.hEvent, g.stop};
+            const DWORD wait = WaitForMultipleObjects(g.stop ? 2u : 1u, waits, FALSE, INFINITE);
+            if (wait != WAIT_OBJECT_0) {
+                CancelIoEx(pipe, &operation);
+                GetOverlappedResult(pipe, &operation, &transferred, TRUE);
+                CloseHandle(operation.hEvent);
+                return false;
+            }
+            ok = GetOverlappedResult(pipe, &operation, &transferred, FALSE);
+        }
+        CloseHandle(operation.hEvent);
+        if (!ok || !transferred) return false;
+        bytes += transferred; size -= transferred;
+    }
+    return true;
+}
+
 bool WriteFrame(Client& c, uint32_t type, uint32_t id, const std::vector<uint8_t>& payload) {
     std::lock_guard<std::mutex> lock(c.write_mu);
     const HANDLE pipe = c.pipe.load();
-    if (pipe == INVALID_HANDLE_VALUE) return false;
+    if (pipe == INVALID_HANDLE_VALUE || !g.running || !c.alive) return false;
     auto hdr = MakeIndexHdr(type, id, static_cast<uint32_t>(payload.size()));
-    if (!PipeWrite(pipe, reinterpret_cast<const uint8_t*>(&hdr), sizeof(hdr)))
+    if (!ClientIo(c, pipe, reinterpret_cast<uint8_t*>(&hdr), sizeof(hdr), true))
         return false;
     if (!payload.empty() &&
-        !PipeWrite(pipe, payload.data(), static_cast<DWORD>(payload.size())))
+        !ClientIo(c, pipe, const_cast<uint8_t*>(payload.data()), static_cast<DWORD>(payload.size()), true))
         return false;
     return true;
 }
@@ -294,8 +322,18 @@ void SearchThread() {
     }
 }
 
+void SetTrackingLease(Client& c, const std::wstring& owner, bool enabled) {
+    std::lock_guard lock(g.clients_mu);
+    c.tracking_owner = owner; c.tracking_lease = enabled;
+    bool active = enabled;
+    for (const auto& other : g.clients)
+        if (other.get() != &c && other->tracking_lease && other->tracking_owner == owner) active = true;
+    g.engine.SetChangeLease(owner, active);
+}
+
 void DropClient(const std::shared_ptr<Client>& c) {
     if (!c) return;
+    if (!c->tracking_owner.empty()) SetTrackingLease(*c, c->tracking_owner, false);
     c->alive = false;
     ++c->latest_search;
     {
@@ -311,20 +349,94 @@ void DropClient(const std::shared_ptr<Client>& c) {
     if (g.clients.empty()) g.idle_since = GetTickCount64();
 }
 
+// Bind journals to the authenticated pipe token, never a caller supplied name.
+std::wstring TrackingOwner(HANDLE pipe) {
+    if (!ImpersonateNamedPipeClient(pipe)) return {};
+    HANDLE token = nullptr;
+    const BOOL opened = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token);
+    RevertToSelf();
+    if (!opened) return {};
+    DWORD bytes = 0, session = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &bytes);
+    std::vector<BYTE> buffer(bytes);
+    std::wstring owner;
+    if (GetTokenInformation(token, TokenUser, buffer.data(), bytes, &bytes) &&
+        GetTokenInformation(token, TokenSessionId, &session, sizeof(session), &bytes)) {
+        LPWSTR sid = nullptr;
+        if (ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(buffer.data())->User.Sid, &sid)) {
+            owner = sid; LocalFree(sid); owner += L"-" + std::to_wstring(session);
+        }
+    }
+    CloseHandle(token); return owner;
+}
+
+bool HandleChanges(Client& client, const MsgHeader& hdr, const std::vector<uint8_t>& payload) {
+    const auto owner = TrackingOwner(client.pipe.load());
+    if (owner.empty()) return false;
+    PayloadReader r(payload.data(), payload.size()); PayloadWriter w;
+    if (hdr.type == REQ_IDX_CHANGE_LEASE) {
+        uint32_t enabled = 0;
+        if (!r.GetU32(enabled) || enabled > 1 || r.remaining()) return false;
+        SetTrackingLease(client, owner, enabled != 0);
+        return WriteFrame(client, RSP_IDX_CHANGE_LEASE, hdr.request_id, w.data());
+    }
+    ChangeResponse response;
+    if (hdr.type == REQ_IDX_CHANGE_SUMMARIES) {
+        uint64_t since = 0; uint32_t count = 0;
+        if (!r.GetU64(since) || !r.GetU32(count) || count > 256) return false;
+        std::vector<std::wstring> paths;
+        for (uint32_t i = 0; i < count; ++i) {
+            std::wstring path;
+            if (!r.GetString(path) || path.empty() || path.size() > 32767) return false;
+            paths.push_back(std::move(path));
+        }
+        if (r.remaining()) return false;
+        response = g.engine.Changes().Summaries(owner, paths, since);
+        w.PutU32(static_cast<uint32_t>(response.state)); w.PutU32(static_cast<uint32_t>(response.summaries.size()));
+        for (auto& summary : response.summaries) {
+            const auto coverage = g.engine.ChangeCoverage(summary.path);
+            if (coverage != ChangeState::Gap && !(coverage == ChangeState::NotCovered && summary.count)) summary.state = coverage;
+            w.PutString(summary.path); w.PutU64(summary.last_change); w.PutU32(summary.count);
+            w.PutU32(static_cast<uint32_t>(summary.state));
+            for (auto count_kind : summary.counts) w.PutU32(count_kind);
+            w.PutU32(summary.initial_count);
+            w.PutU32(summary.has_deleted ? 1u : 0u); w.PutU32(summary.incomplete ? 1u : 0u);
+        }
+        return WriteFrame(client, RSP_IDX_CHANGE_SUMMARIES, hdr.request_id, w.data());
+    }
+    std::wstring path; uint64_t since = 0, before = 0; uint32_t limit = 0, filter = 0;
+    if (!r.GetString(path) || path.empty() || path.size() > 32767 || !r.GetU64(since) ||
+        !r.GetU64(before) || !r.GetU32(limit) || !r.GetU32(filter) || limit == 0 || limit > 200 ||
+        (filter != UINT32_MAX && filter > 5) || r.remaining()) return false;
+    response = g.engine.Changes().Details(owner, path, since, before, limit, filter);
+    const auto coverage = g.engine.ChangeCoverage(path);
+    if (coverage != ChangeState::Gap && !(coverage == ChangeState::NotCovered && !response.records.empty())) response.state = coverage;
+    w.PutU32(static_cast<uint32_t>(response.state)); w.PutU64(response.next_cursor);
+    w.PutU32(static_cast<uint32_t>(response.records.size()));
+    for (const auto& record : response.records) {
+        w.PutU64(record.id); w.PutU64(record.time); w.PutU32(static_cast<uint32_t>(record.kind));
+        w.PutU32(record.is_dir ? 1u : 0u); w.PutU32(static_cast<uint32_t>(record.source));
+        w.PutString(record.path); w.PutString(record.old_path);
+    }
+    return WriteFrame(client, RSP_IDX_CHANGE_DETAILS, hdr.request_id, w.data());
+}
+
 void ClientThread(std::shared_ptr<Client> c) {
     while (g.running && c->alive) {
         MsgHeader hdr{};
         std::vector<uint8_t> payload;
         const HANDLE pipe = c->pipe.load();
         if (pipe == INVALID_HANDLE_VALUE ||
-            !PipeRead(pipe, reinterpret_cast<uint8_t*>(&hdr), sizeof(hdr)))
+            !ClientIo(*c, pipe, reinterpret_cast<uint8_t*>(&hdr), sizeof(hdr), false))
             break;
         if (hdr.magic != kIndexMagic || hdr.payload_size > kIndexMaxRequestPayload) break;
         payload.resize(hdr.payload_size);
         if (hdr.payload_size &&
-            !PipeRead(pipe, payload.data(), hdr.payload_size))
+            !ClientIo(*c, pipe, payload.data(), hdr.payload_size, false))
             break;
-        if (hdr.type == REQ_IDX_STATUS) {
+        if (hdr.type >= REQ_IDX_CHANGE_LEASE && hdr.type <= REQ_IDX_CHANGE_DETAILS) {
+            if (!HandleChanges(*c, hdr, payload)) break;
+        } else if (hdr.type == REQ_IDX_STATUS) {
             WriteFrame(*c, RSP_IDX_STATUS, hdr.request_id, StatusPayload());
         } else if (hdr.type == REQ_IDX_VOLUMES) {
             WriteFrame(*c, RSP_IDX_VOLUMES, hdr.request_id, VolumesPayload());
@@ -386,7 +498,6 @@ void AcceptLoop() {
         }
         first = false;
         first_failures = 0;
-        g.listen = h;
         OVERLAPPED ol{};
         ol.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         BOOL pending = ConnectNamedPipe(h, &ol) ? FALSE
@@ -397,9 +508,10 @@ void AcceptLoop() {
             DWORD wr = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
             DWORD dummy = 0;
             if (wr != WAIT_OBJECT_0 || !GetOverlappedResult(h, &ol, &dummy, FALSE)) {
+                CancelIoEx(h, &ol);
+                GetOverlappedResult(h, &ol, &dummy, TRUE);
                 CloseHandle(ol.hEvent);
                 CloseHandle(h);
-                g.listen = INVALID_HANDLE_VALUE;
                 break;
             }
         }
@@ -424,12 +536,10 @@ void AcceptLoop() {
         if (!accepted) {
             CloseHandle(h);
             c->pipe = INVALID_HANDLE_VALUE;
-            g.listen = INVALID_HANDLE_VALUE;
             continue;
         }
         g.client_workers.push_back(ClientWorker{c, std::thread(ClientThread, c)});
         WriteFrame(*c, RSP_IDX_STATUS, 0, StatusPayload());
-        g.listen = INVALID_HANDLE_VALUE;
     }
 }
 
@@ -451,7 +561,6 @@ LRESULT CALLBACK HostWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     if (msg == WM_QUIT_HOST) {
         g.running = false;
         if (g.stop) SetEvent(g.stop);
-        if (g.listen != INVALID_HANDLE_VALUE) CancelIoEx(g.listen, nullptr);
         PostQuitMessage(0);
         return 0;
     }
@@ -550,12 +659,8 @@ int RunHost(bool as_service, bool test_mode = false,
     ServiceTrace(L"message loop exited");
 
     g.running = false;
+    g.engine.RequestStop();
     if (g.stop) SetEvent(g.stop);
-    if (g.listen != INVALID_HANDLE_VALUE) {
-        CancelIoEx(g.listen, nullptr);
-        CloseHandle(g.listen);
-        g.listen = INVALID_HANDLE_VALUE;
-    }
     {
         std::lock_guard<std::mutex> lock(g.clients_mu);
         for (auto& c : g.clients) {
@@ -567,12 +672,15 @@ int RunHost(bool as_service, bool test_mode = false,
         }
     }
     g.search_cv.notify_all();
+    ServiceTrace(L"waiting for pipe workers to stop");
     if (g.accept_thread.joinable()) g.accept_thread.join();
     for (auto& worker : g.client_workers)
         if (worker.thread.joinable()) worker.thread.join();
     g.client_workers.clear();
     if (g.search_thread.joinable()) g.search_thread.join();
+    ServiceTrace(L"pipe and search workers stopped; stopping engine");
     if (!g.test_mode) g.engine.Stop();
+    ServiceTrace(L"engine stopped");
     if (g.mutex) {
         ReleaseMutex(g.mutex);
         CloseHandle(g.mutex);

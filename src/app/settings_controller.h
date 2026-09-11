@@ -26,6 +26,7 @@ enum class SettingsEffect : uint32_t {
     Language = 1u << 5,
     StatusBarPerformance = 1u << 6,
     FileVisibility = 1u << 7,
+    ChangeTracking = 1u << 8,
 };
 
 constexpr SettingsEffect operator|(SettingsEffect left, SettingsEffect right) noexcept {
@@ -133,6 +134,7 @@ public:
     void Language(std::wstring_view language_id);
     void Wallpaper(int action);
     void ToggleUi(int index);
+    void ChangeTrackingDays(int days);
     void ToggleVolume(int index);
     void AddExclude();
     void RemoveExclude(int index);

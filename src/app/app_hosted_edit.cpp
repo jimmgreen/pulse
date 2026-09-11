@@ -212,7 +212,8 @@ void LayoutFilterEditor(AppState& s) {
     if (!s.hwndFilterEdit || !s.hwnd || !s.filterEditing) return;
     const float expand = s.pane ? s.pane->filter_expand : 0.0f;
     PlaceHostedEdit(s.hwndFilterEdit, s.hwnd,
-                    s.renderer.FilterEditRect(FocusedPaneRect(s), expand),
+                    s.renderer.FilterEditRect(FocusedPaneRect(s), expand,
+                        ActiveTab(s) && !ActiveTab(s)->filter_text.empty()),
                     s.scale, 0, 0);
 }
 
@@ -258,8 +259,40 @@ void ShowWildcardSelect(AppState& s) {
     ShowFilterEditor(s, true);
 }
 
+void SyncFilterEditor(AppState& s) {
+    if (!s.filterEditing || s.filterIgnoreKillFocus || !s.hwndFilterEdit) return;
+    if (auto* tab = ActiveTab(s)) {
+        wchar_t text[512]{};
+        GetWindowTextW(s.hwndFilterEdit, text, ARRAYSIZE(text));
+        if (tab->filter_text != text) {
+            CancelScrollAnimation(s);
+            tab->filter_text = text;
+            tab->scroll_y = 0;
+            tab->scroll_x = 0;
+            s.scrollTargetY = 0;
+        }
+        if (!s.filterFocusPending) LayoutFilterEditor(s);
+        InvalidateRect(s.hwnd, nullptr, FALSE);
+    }
+}
+
+void ClearPaneFilter(AppState& s) {
+    if (s.filterEditing) HideFilterEditor(s, false);
+    CancelScrollAnimation(s);
+    if (auto* tab = ActiveTab(s)) {
+        tab->filter_text.clear();
+        tab->view_filter_map.reset();
+        tab->view_cache_filter_text.clear();
+        tab->scroll_y = 0;
+        tab->scroll_x = 0;
+        s.scrollTargetY = 0;
+    }
+    if (s.hwnd) { SetFocus(s.hwnd); InvalidateRect(s.hwnd, nullptr, FALSE); }
+}
+
 void HideFilterEditor(AppState& s, bool commit) {
     if (!s.hwndFilterEdit || !s.filterEditing) return;
+    const bool owned_focus = GetFocus() == s.hwndFilterEdit;
     const bool select_mode = s.filterSelectMode;
     const std::wstring restore = s.filterSelectRestore;
     wchar_t buf[512]{};
@@ -270,7 +303,7 @@ void HideFilterEditor(AppState& s, bool commit) {
     s.filterFocusPending = false;
     s.filterSelectMode = false;
     s.filterSelectRestore.clear();
-    if (s.hwnd) SetFocus(s.hwnd);
+    if (s.hwnd && owned_focus) SetFocus(s.hwnd);
     s.filterIgnoreKillFocus = false;
     if (app::Tab* tab = ActiveTab(s)) {
         if (select_mode) {
@@ -320,6 +353,8 @@ void LayoutRenameOverlay(AppState& s) {
 void ShowRenameOverlay(AppState& s) {
     app::Tab* tab = ActiveTab(s);
     if (!tab || !tab->snapshot || tab->selected_index < 0) return;
+    if (tab->selected_index < static_cast<int>(tab->snapshot->size()) &&
+        (*tab->snapshot)[static_cast<size_t>(tab->selected_index)].change_record_only) return;
     if (tab->net_readonly || IsRecycleTab(tab)) return;
     if (tab->SelectedCount() >= 2) {
         ShowBatchRename(s);
@@ -629,12 +664,7 @@ LRESULT CALLBACK FilterEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
     case WM_CHAR:
         if (wParam != VK_RETURN && wParam != VK_ESCAPE) {
             LRESULT lr = DefSubclassProc(hwnd, msg, wParam, lParam);
-            if (app::Tab* tab = ActiveTab(*s)) {
-                wchar_t buf[512];
-                GetWindowTextW(hwnd, buf, ARRAYSIZE(buf));
-                tab->filter_text = buf;
-                InvalidateRect(s->hwnd, nullptr, FALSE);
-            }
+            SyncFilterEditor(*s);
             return lr;
         }
         break;

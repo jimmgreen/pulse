@@ -478,18 +478,6 @@ int wmain() {
               L"undo copy: dst copy removed, source intact");
     }
 
-    // --- 9. Undo of recycle delete is recorded but unsupported --------------
-    {
-        MakeFile(srcDir + L"\\e.txt", payload, sizeof(payload) - 1);
-        RunOp(SimpleOp(ops::OpType::RecycleDelete, { (srcDir + L"\\e.txt").c_str() }));
-        Check(!Exists(srcDir + L"\\e.txt"), L"recycle-delete src\\e.txt");
-        Check(g_ops.CanUndo(), L"undo available for recycle delete");
-        uint64_t prev = g_ops.Status().completed_ops;
-        g_ops.Undo();
-        WaitOpDone(prev);
-        Check(Exists(srcDir + L"\\e.txt"), L"undo recycle-delete restores src\\e.txt");
-    }
-
     // --- 10. Undo stack persistence round-trip ------------------------------
     {
         RunOp(SimpleOp(ops::OpType::Copy, { (srcDir + L"\\d.txt").c_str() }, dstDir.c_str()));

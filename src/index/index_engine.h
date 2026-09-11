@@ -8,6 +8,7 @@
 #include "index_config.h"
 #include "index_query.h"
 #include "index_delta.h"
+#include "change_tracking.h"
 #include <atomic>
 #include <bit>
 #include <cstdint>
@@ -119,6 +120,7 @@ public:
     Engine& operator=(const Engine&) = delete;
 
     void Start(HWND notify, UINT msg);
+    void RequestStop() { running_ = false; }
     void Stop();
 
     SearchResult Search(const Query& q, const std::atomic<uint32_t>* latest = nullptr,
@@ -128,10 +130,19 @@ public:
     std::wstring Status() const;
     std::vector<VolumeInfo> Volumes() const;
     void RequestRebuild();
+    ChangeState ChangeCoverage(const std::wstring& path) const;
+    void SetChangeLease(const std::wstring& owner, bool enabled);
+    ChangeTracker& Changes() { return changes_; }
     void AddForTest(std::wstring path, std::wstring name, bool is_dir,
                     uint64_t size = 0, uint64_t mtime = 0);
 
 private:
+    ChangeTracker changes_;
+    std::mutex change_seed_mutex_;
+    std::unordered_set<std::wstring> change_seed_owners_;
+    void SeedChanges(const std::wstring& owner);
+    void SeedPendingChanges();
+    std::unordered_map<std::wstring, std::wstring> walk_pending_renames_;
     friend struct EngineTestAccess;
 
     struct FrnNode {
@@ -194,6 +205,7 @@ private:
     };
 
     struct VolState {
+        std::unordered_map<uint64_t, std::wstring> tracking_paths;
         wchar_t letter = 0;
         VolumeKind kind = VolumeKind::Other;
         std::wstring volume_id;

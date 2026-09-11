@@ -43,6 +43,12 @@ $candidate = if ($Channel -eq 'win81') { 'ON' } else { 'OFF' }
 $manifest = if ($Channel -eq 'win81') { 'update-manifest-win81.json' } else { 'update-manifest.json' }
 $publicKey = (Get-Content (Join-Path $repo 'cmake/update-public-key.txt') -Raw).Trim()
 New-Item -ItemType Directory -Path $build -Force | Out-Null
+# Release verification is scoped to the changes being shipped. pulse already
+# depends on all three packaged hosts; standalone tests need explicit targets.
+$testNames = @('pulse_change_tracking_test', 'pulse_change_tracking_client_test',
+    'pulse_index_migration_test', 'pulse_localization_test',
+    'pulse_update_test', 'pulse_update_installer_test')
+$testTargets = (@('pulse', 'pulse_index_engine_test') + $testNames) -join ' '
 $batch = Join-Path $build 'compile-release.bat'
 @"
 @echo off
@@ -53,30 +59,43 @@ set "VSLANG=1033"
 $toolsetEnvironment
 cmake -S "$repo" -B "$build" -G Ninja $compilerArguments -DCMAKE_BUILD_TYPE=Release -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DPULSE_WIN81_CANDIDATE=$candidate -DPULSE_WITH_SELFTEST=ON -DPULSE_WITH_LUMATEXT=ON -DLUMATEXT_SOURCE_DIR= -DCMAKE_PREFIX_PATH="$sdkRoot" -DPULSE_UPDATE_MANIFEST_URL="https://github.com/jimmgreen/pulse/releases/latest/download/$manifest" -DPULSE_UPDATE_PUBLIC_KEY_HEX=$publicKey
 if errorlevel 1 exit /b 1
-cmake --build "$build" --parallel 4
+cmake --build "$build" --parallel 4 --target $testTargets
 exit /b %errorlevel%
 "@ | Set-Content -LiteralPath $batch -Encoding ascii
 & $batch
 if ($LASTEXITCODE -ne 0) { throw 'Release compilation failed' }
-$testNames = @('pulse_index_migration_test','pulse_index_test','pulse_index_engine_test',
-    'pulse_content_search_test','pulse_duplicate_scan_test','pulse_saved_search_test',
-    'pulse_search_query_test','pulse_update_test','pulse_update_installer_test',
-    'pulse_ops_test','pulse_preview_test','pulse_preview_handler_pan_test','pulse_app_controllers_test',
-    'pulse_localization_test','pulse_shell_icons_test','pulse_material_test',
-    'pulse_search_history_test','pulse_child_edit_test','pulse_dialog_close_test')
 foreach ($testName in $testNames) {
     & (Join-Path $build "$testName.exe")
     if ($LASTEXITCODE -ne 0) { throw "$testName failed" }
 }
+& (Join-Path $build 'pulse_index_engine_test.exe') --recycle-only
+if ($LASTEXITCODE -ne 0) { throw 'USN recycle regression failed' }
 $env:PULSE_SELFTEST_NO_SCREENSHOTS = '1'
-$selftest = Start-Process -FilePath (Join-Path $build 'pulse.exe') -ArgumentList '--selftest' -WindowStyle Hidden -PassThru
-if (-not $selftest.WaitForExit(120000)) { $selftest.Kill(); throw 'Selftest timed out' }
-if ($selftest.ExitCode -ne 0) {
-    Get-Content 'bench_data/selftest_1b2_last.log' -ErrorAction SilentlyContinue | Select-String '\[FAIL\]'
-    throw "Selftest failed: $($selftest.ExitCode)"
+$selftestCases = @('change-app', 'change-ui', 'filter-controls', 'filter-search-ui',
+    'rename-outside', 'folder-shortcut')
+$selftestLogs = @{
+    'change-app' = 'bench_data/change-app-results.log'
+    'change-ui' = 'bench_data/change-ui/results.log'
+    'filter-search-ui' = 'bench_data/name-highlight/results.log'
 }
+foreach ($testCase in $selftestCases) {
+    $env:PULSE_SELFTEST_CASE = $testCase
+    $selftest = Start-Process -FilePath (Join-Path $build 'pulse.exe') -ArgumentList '--selftest' -WindowStyle Hidden -PassThru
+    $finished = $selftest.WaitForExit(120000)
+    if (-not $finished) { $selftest.Kill(); $selftest.WaitForExit() }
+    $selftest.Refresh()
+    $caseLog = Join-Path $build "selftest-$testCase.log"
+    $sourceLog = if ($selftestLogs.ContainsKey($testCase)) { $selftestLogs[$testCase] } else { 'bench_data/selftest_1b2_last.log' }
+    Copy-Item $sourceLog $caseLog -ErrorAction SilentlyContinue
+    if (-not $finished) { throw "Selftest $testCase timed out" }
+    if ($selftest.ExitCode -ne 0) {
+        Get-Content $caseLog -ErrorAction SilentlyContinue | Select-String '\[FAIL\]'
+        throw "Selftest $testCase failed: $($selftest.ExitCode)"
+    }
+}
+Remove-Item Env:PULSE_SELFTEST_CASE
 # Strip the embedded test suite from the shipped executable after verification.
-(Get-Content -LiteralPath $batch -Raw).Replace('-DPULSE_WITH_SELFTEST=ON', '-DPULSE_WITH_SELFTEST=OFF') |
+(Get-Content -LiteralPath $batch -Raw).Replace('-DPULSE_WITH_SELFTEST=ON', '-DPULSE_WITH_SELFTEST=OFF').Replace("--target $testTargets", '--target pulse') |
     Set-Content -LiteralPath $batch -Encoding ascii
 & $batch
 if ($LASTEXITCODE -ne 0) { throw 'Production compilation failed' }

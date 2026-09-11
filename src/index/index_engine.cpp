@@ -269,7 +269,7 @@ uint32_t PairBucket(std::wstring_view name) {
 }
 
 bool IsIndexArtifactName(std::wstring_view name) {
-    return name.size() >= 11 && _wcsnicmp(name.data(), L"pulse-index", 11) == 0;
+    return IsChangeJournalName(name) || (name.size() >= 11 && _wcsnicmp(name.data(), L"pulse-index", 11) == 0);
 }
 
 uint64_t FileIndexFrn(const std::wstring& path) {
@@ -435,8 +435,57 @@ void Engine::PingNotify(bool force) {
     PostMessageW(notify_, notify_msg_, 0, 0);
 }
 
+ChangeState Engine::ChangeCoverage(const std::wstring& requested_path) const {
+    const auto path = NormalizeChangePath(requested_path);
+    if (!Ready()) return ChangeState::Scanning;
+    if (path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\') return ChangeState::NotCovered;
+    std::shared_lock lock(mutex_);
+    if (path.size() > 1 && path[1] == L':') {
+        for (const auto& volume : vols_)
+            if (towupper(volume.letter) == towupper(path[0]) &&
+                std::find(inactive_volume_roots_.begin(), inactive_volume_roots_.end(), volume.root_idx) != inactive_volume_roots_.end())
+                return ChangeState::Offline;
+    }
+    const auto index = ResolvePathLocked(path);
+    return index >= 0 && !(NodeAt(index).flags & kFlagHidden) && !IsExcludedPath(path) ? ChangeState::Gap : ChangeState::NotCovered;
+}
+
+void Engine::SetChangeLease(const std::wstring& owner, bool enabled) {
+    const bool seed = changes_.Lease(owner, enabled);
+    std::lock_guard lock(change_seed_mutex_);
+    if (seed) change_seed_owners_.insert(owner);
+    if (!enabled) change_seed_owners_.erase(owner);
+}
+
+void Engine::SeedPendingChanges() {
+    std::unordered_set<std::wstring> owners;
+    { std::lock_guard lock(change_seed_mutex_); owners.swap(change_seed_owners_); }
+    for (const auto& owner : owners) {
+        if (!running_) break;
+        SeedChanges(owner);
+    }
+}
+
+void Engine::SeedChanges(const std::wstring& owner) {
+    std::vector<ChangeRecord> baseline;
+    const auto since = ChangeTracker::Now() - 7 * 86400;
+    {
+        std::shared_lock lock(mutex_);
+        for (int32_t i = 0; running_ && i < LiveCount() && baseline.size() < 100000; ++i) {
+            if (IsTomb(i) || (NodeAt(i).flags & kFlagHidden)) continue;
+            const auto attr = AttrAt(i);
+            if (attr.mtime < since) continue;
+            ChangeRecord event; event.path = BuildPathLocked(i); event.time = attr.mtime;
+            event.is_dir = (NodeAt(i).flags & kFlagDir) != 0;
+            baseline.push_back(std::move(event));
+        }
+    }
+    if (running_) changes_.Seed(owner, std::move(baseline));
+}
+
 void Engine::Start(HWND notify, UINT msg) {
     Stop();
+    changes_.Open(DataDir());
     notify_ = notify;
     notify_msg_ = msg;
     running_ = true;
@@ -447,6 +496,7 @@ void Engine::Start(HWND notify, UINT msg) {
 void Engine::Stop() {
     running_ = false;
     if (thread_.joinable()) thread_.join();
+    changes_.Flush();
     StopWalkWatches();
     FlushDeltas();
     CloseDeltas();
@@ -589,12 +639,17 @@ int32_t Engine::FindChildLiveLocked(int32_t parent, std::wstring_view name) cons
     if (map_ && map_->child_order) {
         const int32_t* first = map_->child_order;
         const int32_t* last = first + map_->n;
+        // The immutable child order is sorted by (parent, folded base name).
         auto it = std::lower_bound(first, last, parent, [&](int32_t idx, int32_t value) {
-            return map_->nodes[static_cast<size_t>(idx)].parent < value;
+            const auto& node = map_->nodes[static_cast<size_t>(idx)];
+            if (node.parent != value) return node.parent < value;
+            return CompareFolded(std::wstring_view(map_->pool + node.off, node.len), name) < 0;
         });
         for (; it != last; ++it) {
             const int32_t idx = *it;
-            if (map_->nodes[static_cast<size_t>(idx)].parent != parent) break;
+            const auto& base_node = map_->nodes[static_cast<size_t>(idx)];
+            if (base_node.parent != parent ||
+                CompareFolded(std::wstring_view(map_->pool + base_node.off, base_node.len), name) != 0) break;
             if (IsTomb(idx) || NodeAt(idx).parent != parent) continue;
             if (EqualsI(NameOf(idx), name)) return idx;
         }
@@ -2282,6 +2337,57 @@ Engine::UsnApply Engine::ApplyUsnLocked(VolState& v, const USN_RECORD_V2* rec) {
     const uint64_t frn = rec->FileReferenceNumber;
     const bool is_dir = (rec->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
     int32_t idx = FindByFrnLocked(v, frn);
+    const auto tracked_path = v.tracking_paths.find(frn);
+    const bool had_tracking_path = tracked_path != v.tracking_paths.end();
+    const std::wstring previous_path = had_tracking_path ? tracked_path->second :
+        (idx >= 0 ? BuildPathLocked(idx) : std::wstring());
+    const bool previous_visible = idx >= 0 && !(NodeAt(idx).flags & kFlagHidden) && !IsExcludedPath(previous_path);
+    std::wstring resolved_parent;
+    if ((reason & USN_REASON_RENAME_NEW_NAME) && FindByFrnLocked(v, rec->ParentFileReferenceNumber) < 0) {
+        // Resolve excluded parents by FRN; never infer recycle status from $R names.
+        HANDLE volume = OpenVolume(v.letter);
+        if (volume != INVALID_HANDLE_VALUE) {
+            FILE_ID_DESCRIPTOR id{}; id.dwSize = sizeof(id); id.Type = FileIdType;
+            id.FileId.QuadPart = rec->ParentFileReferenceNumber;
+            HANDLE directory = OpenFileById(volume, &id, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                nullptr, FILE_FLAG_BACKUP_SEMANTICS);
+            if (directory != INVALID_HANDLE_VALUE) {
+                std::wstring buffer(32768, L'\0');
+                const DWORD count = GetFinalPathNameByHandleW(directory, buffer.data(), static_cast<DWORD>(buffer.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+                if (count && count < buffer.size()) { buffer.resize(count); resolved_parent = std::move(buffer); }
+                CloseHandle(directory);
+            }
+            CloseHandle(volume);
+        }
+    }
+    auto track = [&](ChangeKind kind, int32_t target) {
+        if (kind == ChangeKind::Renamed && resolved_parent.empty() &&
+            FindByFrnLocked(v, rec->ParentFileReferenceNumber) < 0) {
+            changes_.Gap(); return;
+        }
+        ChangeRecord event;
+        event.time = FtToUnix(static_cast<uint64_t>(rec->TimeStamp.QuadPart));
+        event.kind = kind; event.is_dir = is_dir;
+        event.file_id = frn ^ (static_cast<uint64_t>(v.letter) << 56);
+        event.path = target >= 0 ? BuildPathLocked(target) : previous_path;
+        if (kind == ChangeKind::Renamed) {
+            event.old_path = previous_path;
+            if (!resolved_parent.empty()) {
+                event.path = resolved_parent + L"\\" + std::wstring(name);
+                if (!v.tracking_paths.contains(frn) && v.tracking_paths.size() >= 1024) {
+                    v.tracking_paths.erase(v.tracking_paths.begin()); changes_.Gap();
+                }
+                v.tracking_paths[frn] = event.path;
+            } else v.tracking_paths.erase(frn);
+        }
+        if (kind != ChangeKind::Renamed && had_tracking_path) event.path = previous_path;
+        const bool visible = target >= 0 && !(NodeAt(target).flags & kFlagHidden) && !IsExcludedPath(event.path);
+        if (!visible && !previous_visible) return;
+        if (kind == ChangeKind::Renamed && !previous_visible && !had_tracking_path) {
+            event.old_path.clear(); event.kind = ChangeKind::Created;
+        }
+        changes_.Record(std::move(event));
+    };
     DeltaLog* delta = DeltaFor(v.letter);
     UsnApply effect = UsnApply::None;
 
@@ -2293,6 +2399,9 @@ Engine::UsnApply Engine::ApplyUsnLocked(VolState& v, const USN_RECORD_V2* rec) {
         a.size = (static_cast<uint64_t>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
         a.mtime = FtToUnix((static_cast<uint64_t>(fad.ftLastWriteTime.dwHighDateTime) << 32) |
                            fad.ftLastWriteTime.dwLowDateTime);
+        const Attr previous = AttrAt(i);
+        if (a.size == previous.size && a.mtime == previous.mtime &&
+            !(reason & (USN_REASON_DATA_EXTEND | USN_REASON_DATA_TRUNCATION | USN_REASON_DATA_OVERWRITE))) return;
         const int32_t base = BaseCount();
         if (i >= base) live_.attrs[static_cast<size_t>(i - base)] = a;
         else {
@@ -2312,6 +2421,8 @@ Engine::UsnApply Engine::ApplyUsnLocked(VolState& v, const USN_RECORD_V2* rec) {
 
     if (reason & USN_REASON_FILE_DELETE) {
         if (idx >= 0 && idx < LiveCount() && !IsTomb(idx)) {
+            track(ChangeKind::Deleted, idx);
+            v.tracking_paths.erase(frn);
             ChildMapRemove(NodeAt(idx).parent, NameOf(idx), idx);
             tombstones_.insert(idx);
             ++deleted_;
@@ -2322,16 +2433,18 @@ Engine::UsnApply Engine::ApplyUsnLocked(VolState& v, const USN_RECORD_V2* rec) {
         return UsnApply::None;
     }
     if (idx >= 0 && idx < LiveCount() && attr_reason) refresh(idx);
-    if (!structural_reason) return effect;
+    if (!structural_reason) { if (effect != UsnApply::None) track(ChangeKind::Modified, idx); return effect; }
 
     int32_t parent = FindByFrnLocked(v, rec->ParentFileReferenceNumber);
     if (parent < 0) parent = v.root_idx;
 
     uint8_t flags = is_dir ? kFlagDir : 0;
+    // A root fallback is not a real indexed location for an unresolved parent.
+    if ((reason & USN_REASON_RENAME_NEW_NAME) && FindByFrnLocked(v, rec->ParentFileReferenceNumber) < 0) flags |= kFlagHidden;
     if (ShouldSkipName(name)) flags |= kFlagHidden;
     std::wstring parent_path = BuildPathLocked(parent);
     if (!parent_path.empty() && parent_path.back() != L'\\') parent_path += L'\\';
-    if (IsExcludedPath(parent_path + std::wstring(name))) flags |= kFlagHidden;
+    if (IsExcludedPath((resolved_parent.empty() ? parent_path : resolved_parent + L"\\") + std::wstring(name))) flags |= kFlagHidden;
     for (int32_t a = parent; a > v.root_idx && a >= 0;) {
         const Node an = NodeAt(a);
         if (an.flags & kFlagHidden) { flags |= kFlagHidden; break; }
@@ -2374,6 +2487,7 @@ Engine::UsnApply Engine::ApplyUsnLocked(VolState& v, const USN_RECORD_V2* rec) {
                                   static_cast<uint8_t>(PatchBits::Attr),
                               parent, flags, a.mtime, a.size, name);
         }
+        track((reason & USN_REASON_RENAME_NEW_NAME) ? ChangeKind::Renamed : ChangeKind::Created, idx);
         return UsnApply::Structure;
     }
     if (static_cast<size_t>(LiveCount()) >= kIndexCap + 64) return effect;
@@ -2384,6 +2498,7 @@ Engine::UsnApply Engine::ApplyUsnLocked(VolState& v, const USN_RECORD_V2* rec) {
         const Attr a = AttrAt(idx);
         delta->QueueAdd(parent, flags, a.mtime, a.size, name, frn);
     }
+    track(ChangeKind::Created, idx);
     return UsnApply::Structure;
 }
 
@@ -2411,6 +2526,7 @@ bool Engine::CatchUpVolume(VolState& v, bool* changed, bool* structural) {
     bool ok = true;
     USN last = start_usn;
     for (;;) {
+        if (!running_) { ok = false; break; }
         DWORD br = 0;
         if (!DeviceIoControl(h, FSCTL_READ_USN_JOURNAL, &rud, sizeof(rud),
                              buf.data(), static_cast<DWORD>(buf.size()), &br, nullptr)) {
@@ -2442,7 +2558,7 @@ bool Engine::CatchUpVolume(VolState& v, bool* changed, bool* structural) {
         if (nrec == 0) break;
     }
     CloseHandle(h);
-    if (!ok) return false;
+    if (!ok || !running_) return false;
 
     std::unique_lock<std::shared_mutex> lock(mutex_);
     BYTE* p = blob.empty() ? nullptr : blob.data();
@@ -2450,6 +2566,7 @@ bool Engine::CatchUpVolume(VolState& v, bool* changed, bool* structural) {
     bool any_struct = false;
     bool any_attr = false;
     while (p && p + sizeof(USN_RECORD_COMMON_HEADER) <= end) {
+        if (!running_) return false;
         auto* hdr = reinterpret_cast<USN_RECORD_COMMON_HEADER*>(p);
         if (hdr->RecordLength == 0 || p + hdr->RecordLength > end) break;
         if (hdr->MajorVersion == 2) {
@@ -3042,10 +3159,12 @@ void Engine::Worker() {
     last_merge_tick_ = GetTickCount64();
     bool struct_dirty = false;
     while (running_) {
+        SeedPendingChanges();
         for (int i = 0; i < 10 && running_; ++i) {
             Sleep(100);
             PollWalkWatches();
         }
+        changes_.Flush();
         if (!running_) break;
         if (rebuild_requested_.exchange(false)) {
             FullRebuild();
@@ -3072,6 +3191,7 @@ void Engine::Worker() {
                     });
                     if (!present) continue;
                     if (!CatchUpVolume(vols_[i], &changed, &structural)) {
+                        changes_.Gap();
                         failed = true;
                         auto it = std::find_if(online.begin(), online.end(), [&](const VolumeInfo& drive) {
                             return NormalizeVolumeId(drive.id) == NormalizeVolumeId(vols_[i].volume_id);
@@ -3192,6 +3312,7 @@ void Engine::PollWalkWatches() {
             if (GetLastError() == ERROR_IO_INCOMPLETE) continue;
             n = 0;
         }
+        if (n == 0) { changes_.Gap(); walk_pending_renames_.erase(w.path); }
         if (n > 0) {
             std::unique_lock<std::shared_mutex> lock(mutex_);
             ApplyNotifyLocked(w.path, w.buf.data(), n);
@@ -3208,15 +3329,32 @@ void Engine::PollWalkWatches() {
 }
 
 void Engine::ApplyNotifyLocked(const std::wstring& root, const BYTE* buf, DWORD len) {
-    std::wstring pending_old;
+    std::wstring& pending_old = walk_pending_renames_[root];
     const BYTE* p = buf;
     const BYTE* end = buf + len;
     while (p + sizeof(FILE_NOTIFY_INFORMATION) <= end) {
         auto* info = reinterpret_cast<const FILE_NOTIFY_INFORMATION*>(p);
+        const auto name_offset = offsetof(FILE_NOTIFY_INFORMATION, FileName);
+        if (info->FileNameLength % sizeof(WCHAR) || info->FileNameLength > static_cast<size_t>(end - p) - name_offset) {
+            changes_.Gap(); break;
+        }
         std::wstring rel(info->FileName, info->FileNameLength / sizeof(WCHAR));
         std::wstring full = root;
         if (!full.empty() && full.back() != L'\\' && !rel.empty()) full += L'\\';
         full += rel;
+        ChangeRecord event; event.path = full;
+        const int32_t known = ResolvePathLocked(full);
+        event.is_dir = known >= 0 && (NodeAt(known).flags & kFlagDir) != 0;
+        if (info->Action == FILE_ACTION_ADDED) {
+            event.kind = ChangeKind::Created;
+            DWORD attributes = GetFileAttributesW(full.c_str());
+            event.is_dir = attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        } else if (info->Action == FILE_ACTION_REMOVED) event.kind = ChangeKind::Deleted;
+        else if (info->Action == FILE_ACTION_RENAMED_NEW_NAME) { event.kind = ChangeKind::Renamed; event.old_path = pending_old;
+            const int32_t old_index = ResolvePathLocked(pending_old);
+            if (old_index >= 0) event.is_dir = (NodeAt(old_index).flags & kFlagDir) != 0;
+            else changes_.Gap(); }
+        if (info->Action != FILE_ACTION_RENAMED_OLD_NAME) changes_.Record(std::move(event));
         switch (info->Action) {
         case FILE_ACTION_ADDED: {
             WIN32_FILE_ATTRIBUTE_DATA fad{};
@@ -3288,17 +3426,19 @@ void Engine::ApplyNotifyLocked(const std::wstring& root, const BYTE* buf, DWORD 
                 std::wstring_view new_name = (slash == std::wstring::npos)
                     ? std::wstring_view(full) : std::wstring_view(full).substr(slash + 1);
                 const Node old = NodeAt(idx);
+                const int32_t new_parent = slash == std::wstring::npos ? old.parent : EnsureChainLocked(live_, full.substr(0, slash), true, true);
                 ChildMapRemove(old.parent, NameOf(idx), idx);
                 const int32_t base = BaseCount();
                 if (idx >= base) {
                     Node& n = live_.nodes[static_cast<size_t>(idx - base)];
+                    n.parent = new_parent;
                     pool_waste_ += n.len;
                     n.off = static_cast<uint32_t>(live_.pool.size());
                     n.len = static_cast<uint16_t>((std::min)(new_name.size(), static_cast<size_t>(65535)));
                     live_.pool.insert(live_.pool.end(), new_name.begin(), new_name.begin() + n.len);
                 } else {
                     Patch& pt = patches_[idx];
-                    pt.parent = old.parent;
+                    pt.parent = new_parent;
                     pt.flags = old.flags;
                     pt.has_meta = true;
                     pt.has_name = true;
@@ -3306,7 +3446,7 @@ void Engine::ApplyNotifyLocked(const std::wstring& root, const BYTE* buf, DWORD 
                     pt.len = static_cast<uint16_t>((std::min)(new_name.size(), static_cast<size_t>(65535)));
                     live_.pool.insert(live_.pool.end(), new_name.begin(), new_name.begin() + pt.len);
                 }
-                ChildMapAdd(old.parent, new_name, idx);
+                ChildMapAdd(new_parent, new_name, idx);
                 InvalidateFilterLocked();
             } else {
                 EnsureChainLocked(live_, full, false, true);
@@ -3318,6 +3458,7 @@ void Engine::ApplyNotifyLocked(const std::wstring& root, const BYTE* buf, DWORD 
         default: break;
         }
         if (info->NextEntryOffset == 0) break;
+        if (info->NextEntryOffset < sizeof(FILE_NOTIFY_INFORMATION) || info->NextEntryOffset > static_cast<size_t>(end - p)) { changes_.Gap(); break; }
         p += info->NextEntryOffset;
     }
 }

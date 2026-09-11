@@ -166,9 +166,9 @@ DWORD ResolveDropTarget(AppState& s, const std::vector<std::wstring>& sources,
     if (hit.region == ui::HitTestResult::Row && hit.index >= 0 &&
         tab->snapshot && hit.index < (int)tab->snapshot->size() &&
         (*tab->snapshot)[hit.index].is_dir) {
-        std::wstring full = tab->current_path;
-        if (!full.ends_with(L"\\")) full += L"\\";
-        full += (*tab->snapshot)[hit.index].name;
+        if ((*tab->snapshot)[hit.index].change_record_only) return DROPEFFECT_NONE;
+        std::wstring full = EntryFullPath(*tab, hit.index);
+        if (full.empty()) return DROPEFFECT_NONE;
         s.dropDestDir = full;
         s.dropRow = hit.index;
         s.dropPaneIndex = hit.pane_index;
@@ -1557,6 +1557,7 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         int newHover = (hit.region == ui::HitTestResult::Row ||
                         hit.region == ui::HitTestResult::RowStar ||
                         hit.region == ui::HitTestResult::RowNewTab ||
+                        hit.region == ui::HitTestResult::ChangeBadge ||
                         hit.region == ui::HitTestResult::RowMore) ? hit.index : -1;
         if (newHover != s->hoverRow || hit.pane_index != s->hoverPaneIndex) {
             s->hoverRow = newHover;
@@ -1566,6 +1567,7 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             InvalidateRect(hwnd, nullptr, FALSE);
         }
         int newCrumb = (hit.region == ui::HitTestResult::BreadcrumbSegment) ? hit.index : -1;
+        UpdateChangeHover(*s, hit, POINT{mx, my});
         if (newCrumb != s->breadcrumbHover) {
             s->breadcrumbHover = newCrumb;
             InvalidateRect(hwnd, nullptr, FALSE);
@@ -1614,10 +1616,15 @@ LRESULT HandleMouseLeave(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 
 LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
+        s->blankDoubleTab = nullptr;
+        s->blankDoublePending = false;
         int mx = GET_X_LPARAM(lParam);
         int my = GET_Y_LPARAM(lParam);
         CancelRenameClick(*s);
         CancelScrollAnimation(*s);
+        // The hosted EDIT is an owned popup; a click on its owner does not
+        // reliably produce WM_KILLFOCUS. Commit before changing pane/selection.
+        if (s->renameIndex >= 0) HideRenameOverlay(*s, true);
         ui::WindowViewModel vm = BuildVm(*s);
         D2D1_RECT_F rect = D2D1::RectF(0, 0, (float)s->compositor.Width(), (float)s->compositor.Height());
         ui::HitTestResult hit = s->renderer.HitTest(vm, rect, (float)mx, (float)my);
@@ -1627,8 +1634,16 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             hit.region != ui::HitTestResult::AddressSearchClose) {
             HideAddressEditor(*s, false);
         }
+        if (s->filterEditing && (hit.region != ui::HitTestResult::FilterBox ||
+            hit.pane_index < 0 || PaneAtSlot(*s, hit.pane_index) != s->pane)) {
+            HideFilterEditor(*s, true);
+        }
         if (hit.pane_index >= 0) {
             if (app::Pane* p = PaneAtSlot(*s, hit.pane_index)) FocusPane(*s, p);
+        }
+        if (HandleChangeClick(*s, hit, POINT{mx, my})) {
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
         }
         if (hit.region == ui::HitTestResult::DetailsResize) {
             s->dragPending = false;
@@ -2056,6 +2071,8 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             ShowViewDropdown(*s, hit.pane_index);
         } else if (hit.region == ui::HitTestResult::FilterBox) {
             ShowFilterEditor(*s);
+        } else if (hit.region == ui::HitTestResult::FilterClear) {
+            ClearPaneFilter(*s);
         } else if (hit.region == ui::HitTestResult::AddressSearch) {
             ShowAddressSearch(*s);
         } else if (hit.region == ui::HitTestResult::AddressSearchScope) {
@@ -2159,12 +2176,13 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                    (PointInList(*s, mx, my) && hit.region == ui::HitTestResult::None))) {
             app::Tab* tab = ActiveTab(*s);
             const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            const bool had_selection = tab && tab->SelectedCount() > 0;
             if (tab && !ctrl) tab->ClearSelection();
             s->marqueePending = true;
             s->marqueeActive = false;
             s->marqueeAdditive = ctrl;
             s->blankClickPane = s->pane;
-            s->blankClickTab = s->appPrefs.blank_click_go_back && tab &&
+            s->blankClickTab = s->appPrefs.blank_click_go_back && tab && !had_selection &&
                 !IsAddressSearchResults(tab) && !ctrl && PointInList(*s, mx, my) &&
                 (GetKeyState(VK_SHIFT) & 0x8000) == 0 &&
                 (GetKeyState(VK_MENU) & 0x8000) == 0 ? tab : nullptr;
@@ -2183,6 +2201,13 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
 LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
+        app::Tab* double_tab = ActiveTab(*s);
+        const bool blank_double = s->blankDoubleTab && double_tab == s->blankDoubleTab &&
+            s->pane == s->blankDoublePane && double_tab->view_generation == s->blankDoubleGeneration &&
+            static_cast<DWORD>(GetMessageTime() - s->blankDoubleTime) <= GetDoubleClickTime() &&
+            abs(GET_X_LPARAM(lParam) - s->blankDoublePoint.x) <= GetSystemMetrics(SM_CXDOUBLECLK) / 2 &&
+            abs(GET_Y_LPARAM(lParam) - s->blankDoublePoint.y) <= GetSystemMetrics(SM_CYDOUBLECLK) / 2;
+        s->blankDoubleTab = nullptr;
         s->blankClickTab = nullptr;
         int mx = GET_X_LPARAM(lParam);
         int my = GET_Y_LPARAM(lParam);
@@ -2192,6 +2217,13 @@ LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPA
         ui::WindowViewModel vm = BuildVm(*s, false);
         D2D1_RECT_F rect = D2D1::RectF(0, 0, (float)s->compositor.Width(), (float)s->compositor.Height());
         ui::HitTestResult hit = s->renderer.HitTest(vm, rect, (float)mx, (float)my);
+        if ((hit.region == ui::HitTestResult::Pane || hit.region == ui::HitTestResult::None) &&
+            PointInList(*s, mx, my) &&
+            (hit.pane_index < 0 || PaneAtSlot(*s, hit.pane_index) == s->pane)) {
+            HandleLButtonDown(s, hwnd, WM_LBUTTONDOWN, wParam, lParam);
+            s->blankDoublePending = blank_double && s->blankClickTab != nullptr;
+            return 0;
+        }
         if (hit.region == ui::HitTestResult::DetailsPreview) {
             s->renderer.ToggleDetailsPreviewFit(static_cast<float>(mx), static_cast<float>(my));
             InvalidateRect(hwnd, nullptr, FALSE);
@@ -2468,6 +2500,14 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                               hit.region == ui::HitTestResult::None) &&
                         (hit.pane_index < 0 || PaneAtSlot(*s, hit.pane_index) == s->pane);
                 }
+                const bool double_click = s->blankDoublePending;
+                s->blankDoublePending = false;
+                s->blankDoubleTab = goBack && !double_click ? tab : nullptr;
+                s->blankDoublePane = s->pane;
+                s->blankDoubleGeneration = tab ? tab->view_generation : 0;
+                s->blankDoubleTime = static_cast<DWORD>(GetMessageTime());
+                s->blankDoublePoint = s->marqueeStart;
+                goBack = goBack && double_click;
                 if (s->marqueeActive) ApplyMarqueeSelection(*s);
                 ResetMarquee(*s);
                 if (goBack) {
@@ -2584,6 +2624,7 @@ LRESULT HandleCaptureChanged(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LP
 
 LRESULT HandleRButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
+        if (s->filterEditing) HideFilterEditor(*s, true);
         s->blankClickTab = nullptr;
         CancelRenameClick(*s);
         // Prefetch the Explorer verbs for the menu that WM_RBUTTONUP will

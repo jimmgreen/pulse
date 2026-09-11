@@ -361,6 +361,18 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
                  pulse::l10n::Get(pulse::l10n::StringId::SettingsBlankClickBack),
                  pulse::l10n::Get(pulse::l10n::StringId::SettingsBlankClickBackDesc),
                  vm.settings_blank_click_go_back, 7);
+        draw_card(lay.change_tracking_row);
+        draw_row(lay.change_tracking_row, pulse::l10n::Get(pulse::l10n::StringId::SettingsChangeTracking), pulse::l10n::Get(pulse::l10n::StringId::SettingsChangeTrackingDesc), vm.settings_change_tracking, 8);
+        draw_card(lay.change_days_row);
+        painter_.DrawText(pulse::l10n::Get(pulse::l10n::StringId::SettingsChangeDays), D2D1::RectF(lay.change_days_row.left + 16 * scale_, lay.change_days_row.top + 8 * scale_, lay.change_days_row.right - 16 * scale_, lay.change_days_row.top + 36 * scale_), compositor_->TextFormat(), theme.text);
+        const std::wstring labels[] = { pulse::l10n::Get(pulse::l10n::StringId::ChangeToday), pulse::l10n::Get(pulse::l10n::StringId::ChangeLast3Days), pulse::l10n::Get(pulse::l10n::StringId::ChangeLast7Days) };
+        const int days[] = { 1, 3, 7 };
+        for (int i = 0; i < 3; ++i) {
+            fluent::ControlState state{};
+            state.checked = vm.settings_change_days == days[i];
+            state.hovered = IsHovered(vm, HitTestResult::SettingsChangeDays, i);
+            painter_.DrawRadioButton(lay.change_days[i], labels[i], state);
+        }
     } else if (vm.settings_page == 1) {
         fluent::InfoBarSpec info;
         info.bounds = lay.index_info;

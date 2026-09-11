@@ -17,6 +17,7 @@
 #include "snapshot_patch.h"
 #include "session.h"
 #include "context_menu.h"
+#include "app_change_tracking.h"
 #include "batch_rename.h"
 #include "search_query.h"
 #include "link_resolve.h"
@@ -461,6 +462,12 @@ void DispatchMenuCommand(AppState& s, int cmd) {
                 ? ui::SortDirection::Asc : ui::SortDirection::Desc);
         break;
     case app::CmdOpen: OpenSelected(s); break;
+    case app::CmdViewRecentChanges:
+        if (const auto* tab = ActiveTab(s)) {
+            const auto path = app::RecentChangesMenuPath(*tab, false);
+            if (!path.empty()) OpenChangeView(s, path);
+        }
+        break;
     case app::CmdOpenInNewTab: {
         app::Tab* tab = ActiveTab(s);
         if (!tab || !tab->snapshot) break;
@@ -671,6 +678,8 @@ std::vector<ui::FluentMenuItem> BuildFinderItemMenu(
         }
     }
     std::vector<ui::FluentMenuItem> items = app::BuildItemMenu(can_undo, undo_label, folder);
+    if (const auto* tab = ActiveTab(s))
+        app::AppendRecentChangesCommand(items, app::RecentChangesMenuPath(*tab, false));
     ApplyWorkspacePinLabel(items, s);
     AppendQuickAccessCommand(s, items, QuickAccessTargets(ActiveTab(s), false));
     const std::vector<std::wstring> paths = ActiveTab(s)
@@ -1002,7 +1011,9 @@ void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
 
     std::wstring undoLabel = s.ops.UndoLabel();
     bool canPaste = !s.tray.batches().empty() || ClipboardHasFiles();
+    const auto recent_changes_path = app::RecentChangesMenuPath(*tab, true);
     auto base_items = app::BuildBackgroundMenu(canPaste, s.ops.CanUndo(), undoLabel);
+    app::AppendRecentChangesCommand(base_items, recent_changes_path);
     app::AppendBackgroundViewCommands(base_items, view_options);
     ApplyWorkspacePinLabel(base_items, s);
     const auto quick_paths = QuickAccessTargets(tab, true);
@@ -1014,6 +1025,7 @@ void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
     s.context_menu.CloseMenu();
     if (HandleShellMenuCommand(s, cmd)) return;
     if (HandleQuickAccessCommand(s, cmd, quick_paths)) return;
+    if (cmd == app::CmdViewRecentChanges) { OpenChangeView(s, recent_changes_path); return; }
     if (cmd != app::CmdNone) DispatchMenuCommand(s, cmd);
 }
 

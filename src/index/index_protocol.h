@@ -16,10 +16,16 @@ enum IndexMsg : uint32_t {
     REQ_IDX_STATUS = 1,
     REQ_IDX_SEARCH = 2,
     REQ_IDX_VOLUMES = 3,
+    REQ_IDX_CHANGE_LEASE = 4,
+    REQ_IDX_CHANGE_SUMMARIES = 5,
+    REQ_IDX_CHANGE_DETAILS = 6,
     REQ_IDX_TEST_SHUTDOWN = 0x7fff0001,
     RSP_IDX_STATUS = 101,
     RSP_IDX_SEARCH = 102,
     RSP_IDX_VOLUMES = 103,
+    RSP_IDX_CHANGE_LEASE = 104,
+    RSP_IDX_CHANGE_SUMMARIES = 105,
+    RSP_IDX_CHANGE_DETAILS = 106,
 };
 
 inline ipc::MsgHeader MakeIndexHdr(uint32_t type, uint32_t id, uint32_t size) {

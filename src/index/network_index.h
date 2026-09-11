@@ -52,8 +52,17 @@ public:
     bool AddRoot(const std::wstring& path, std::wstring* error = nullptr);
     bool RemoveRoot(const std::wstring& path, std::wstring* error = nullptr);
     void Rebuild(const std::wstring& path = {});
+    ChangeTracker& Changes() { return changes_; }
+    void SetChangeLease(const std::wstring& owner, bool enabled);
+    ChangeState ChangeCoverage(const std::wstring& path) const;
 
 private:
+    ChangeTracker changes_;
+    std::mutex change_seed_mutex_;
+    std::unordered_set<std::wstring> change_seed_owners_;
+    void SeedChanges(const std::wstring& owner);
+    void SeedPendingChanges();
+    void ObserveChanges(const std::wstring& root, const BYTE* data, DWORD bytes);
     struct Shard;
     struct RootState {
         NetworkRootInfo info;

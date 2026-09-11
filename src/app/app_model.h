@@ -48,6 +48,11 @@ struct Tab {
     bool net_readonly = false;
     uint64_t cache_unix = 0;
     int recent_filter = 0; // RecentFilter; transient per tab.
+    int change_days = 7;
+    uint32_t change_kind = UINT32_MAX;
+    uint64_t change_cursor = 0;
+    uint32_t change_request = 0;
+    std::wstring change_empty_text, change_status_text;
 
     // Transient UI state.
     bool loading = false;
@@ -164,6 +169,9 @@ struct Pane {
     bool focused = false;
     bool target = false;
     float filter_expand = 0.0f;
+    float filter_animation_from = 0.0f;
+    float filter_animation_target = 0.0f;
+    uint64_t filter_animation_start = 0;
 
     Tab* ActiveTab() { return &view; }
     const Tab* ActiveTab() const { return &view; }
@@ -275,6 +283,7 @@ struct TrayItem {
     bool exists = true;
     bool is_dir = false;
     DWORD attrs = 0;
+    uint64_t size = 0;
 };
 
 struct TrayBatch {
@@ -291,6 +300,7 @@ public:
     void Collect(const std::vector<std::wstring>& paths, bool move_intent);
     void RemoveBatch(size_t idx);
     void RemoveItem(size_t batch_idx, size_t item_idx);
+    void RemoveDeleted(const std::vector<std::wstring>& paths);
     void Clear();
 
     // For serialization.

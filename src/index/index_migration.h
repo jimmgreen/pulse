@@ -18,6 +18,7 @@ struct IndexMigration {
 };
 // Only recognized index artifacts are copied/deleted; config and user files stay put.
 std::wstring ResolveIndexMigrationTarget(const std::wstring& target);
+bool SameIndexLocation(const std::wstring& source, const std::wstring& target);
 bool CopyIndexForMigration(const std::wstring& source, const std::wstring& target,
                            IndexMigration& migration, std::wstring& error);
 bool RemoveMigratedIndexSource(const IndexMigration& migration, std::wstring& error);

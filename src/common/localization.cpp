@@ -9,7 +9,9 @@ namespace pulse::l10n {
 namespace {
 
 constexpr UINT kFirstString = IDS_SETTINGS;
-constexpr UINT kLastString = IDS_AUDIT_SEARCHCOUNT;
+constexpr UINT kLastString = IDS_CHANGE_REFRESH_FAILED;
+static_assert(static_cast<UINT>(StringId::SettingsChangeTracking) >= kFirstString &&
+              static_cast<UINT>(StringId::ChangeDisabled) <= kLastString);
 
 HINSTANCE g_module = nullptr;
 std::atomic<Language> g_preference{Language::System};

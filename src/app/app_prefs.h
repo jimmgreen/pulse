@@ -16,6 +16,8 @@ struct AppPrefs {
     bool show_pinned_tab_names = true;
     bool show_hidden_files = false;
     bool blank_click_go_back = false;
+    bool change_tracking_enabled = false;
+    int change_tracking_days = 7;
     // system / zh-CN / en-US
     std::wstring language = L"system";
     // none / acrylic-material / mica / mica-alt  (legacy dwm-blur → acrylic)

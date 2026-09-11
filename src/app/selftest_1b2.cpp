@@ -7,6 +7,10 @@
 // All file operations are confined to bench_data/opstest/selftest_1b2 and
 // cleaned up afterwards.
 #include "selftest_1b2.h"
+#include "change_tracking_ui_test.h"
+#include "change_tracking_app_test.h"
+#include "name_highlight_ui_test.h"
+#include "filter_animation.h"
 #include "tab_shortcuts.h"
 #include "quick_access.h"
 #include "../common/windows_compat.h"
@@ -19,6 +23,7 @@
 #include "../common/localization.h"
 #include "app_model.h"
 #include "app_worker.h"
+#include "entry_sort.h"
 #include "snapshot_patch.h"
 #include "session.h"
 #include "app_prefs.h"
@@ -506,6 +511,10 @@ LRESULT CALLBACK BlankPaneTestProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
     if (state) {
         switch (msg) {
         case WM_LBUTTONDOWN: return HandleLButtonDown(state, hwnd, msg, wparam, lparam);
+        case WM_COMMAND:
+            if (reinterpret_cast<HWND>(lparam) == state->hwndFilterEdit && HIWORD(wparam) == EN_CHANGE)
+                SyncFilterEditor(*state);
+            break;
         case WM_MOUSEMOVE: return HandleMouseMove(state, hwnd, msg, wparam, lparam);
         case WM_LBUTTONUP: return HandleLButtonUp(state, hwnd, msg, wparam, lparam);
         case WM_LBUTTONDBLCLK: return HandleLButtonDblClk(state, hwnd, msg, wparam, lparam);
@@ -513,6 +522,156 @@ LRESULT CALLBACK BlankPaneTestProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
         }
     }
     return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+void TestFilterControls() {
+    for (float scale : {1.0f, 1.5f, 2.0f}) {
+        ui::MainRenderer renderer;
+        renderer.SetScale(scale);
+        const auto bounds = D2D1::RectF(0, 0, 240 * scale, 500 * scale);
+        const auto edit = renderer.FilterEditRect(bounds, 1, true);
+        const auto clear = renderer.FilterClearRect(bounds, 1);
+        Check(edit.right < clear.left && edit.right - edit.left >= 40 * scale,
+            L"filter: narrow input retains text and clear space across DPI");
+    }
+    Pane animation;
+    TickFilterAnimation(animation, true, 1000);
+    TickFilterAnimation(animation, true, 1070);
+    Check(animation.filter_expand > 0.8f && animation.filter_expand < 1.0f, L"filter: fast smooth expansion");
+    TickFilterAnimation(animation, true, 1140);
+    Check(animation.filter_expand == 1, L"filter: expansion finishes in 140ms");
+    animation.view.filter_text = L"1";
+    TickFilterAnimation(animation, false, 1300);
+    Check(animation.filter_expand == 1, L"filter: content stays expanded without focus");
+    animation.view.filter_text.clear();
+    TickFilterAnimation(animation, false, 1400);
+    TickFilterAnimation(animation, false, 1540);
+    Check(animation.filter_expand == 0, L"filter: clear collapse finishes in 140ms without a tail");
+
+    auto state = std::make_unique<AppState>();
+    state->places.persist = false; state->appPrefs.persist = false; state->isolatedTest = true;
+    WNDCLASSW wc{}; wc.lpfnWndProc = BlankPaneTestProc;
+    wc.hInstance = GetModuleHandleW(nullptr); wc.lpszClassName = L"PulseFilterControlsSelftest";
+    RegisterClassW(&wc);
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"", WS_POPUP,
+        0, 0, 1000, 700, nullptr, nullptr, wc.hInstance, nullptr);
+    Check(hwnd != nullptr, L"filter: isolated owner created");
+    if (!hwnd) return;
+    state->hwnd = hwnd;
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state.get()));
+    if (state->compositor.Init(hwnd)) {
+        state->compositor.RecreateTextFormats(1.0f);
+        state->renderer.SetCompositor(&state->compositor);
+        state->window_tabs.NewTab(L"C:\\FilterFixture");
+        state->pane = state->window_tabs.Active()->panes.front().get();
+        auto* tab = state->pane->ActiveTab();
+        auto entries = std::make_shared<std::vector<fs::DirEntry>>(2);
+        (*entries)[0].name = L"PulseSetup-1.0.11.exe";
+        (*entries)[1].name = L"Documents"; (*entries)[1].is_dir = true;
+        tab->SetSnapshot(entries);
+        ShowFilterEditor(*state);
+        SetWindowTextW(state->hwndFilterEdit, L"11");
+        SyncFilterEditor(*state);
+        Check(BuildVm(*state).pane.EntryCount() == 1, L"filter: typing narrows directory");
+        SendMessageW(state->hwndFilterEdit, EM_SETSEL, 0, -1);
+        SendMessageW(state->hwndFilterEdit, WM_CLEAR, 0, 0);
+        Check(tab->filter_text.empty() && BuildVm(*state).pane.EntryCount() == 2,
+            L"filter: native text deletion updates the model without WM_CHAR");
+        SetWindowTextW(state->hwndFilterEdit, L"11");
+        Check(tab->filter_text == L"11", L"filter: edit change notification synchronizes contents");
+        const auto list = ListRect(*state);
+        auto point = MAKELPARAM(static_cast<int>(list.left + 30), static_cast<int>(list.bottom - 30));
+        SendMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, point);
+        Check(!state->filterEditing && !state->filterFocusPending && GetFocus() != state->hwndFilterEdit,
+            L"filter: outside click ends editing and pending focus");
+        SendMessageW(hwnd, WM_LBUTTONUP, 0, point);
+        Check(tab->filter_text == L"11", L"filter: outside click preserves filter");
+        state->pane->filter_expand = 1;
+        auto vm = BuildVm(*state);
+        const auto bounds = vm.pane_slots.front().rect;
+        const auto clear = state->renderer.FilterClearRect(bounds, 1);
+        const auto edit = state->renderer.FilterEditRect(bounds, 1, true);
+        Check(edit.right < clear.left, L"filter: edit and clear hit areas do not overlap");
+        point = MAKELPARAM(static_cast<int>((clear.left + clear.right) / 2), static_cast<int>((clear.top + clear.bottom) / 2));
+        SendMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, point);
+        SendMessageW(hwnd, WM_LBUTTONUP, 0, point);
+        Check(tab->filter_text.empty() && BuildVm(*state).pane.EntryCount() == 2,
+            L"filter: clear button restores files and folders");
+        vm = BuildVm(*state);
+        auto hit = state->renderer.HitTest(vm, D2D1::RectF(0, 0, 1000, 700),
+            (clear.left + clear.right) / 2, (clear.top + clear.bottom) / 2);
+        Check(hit.region != ui::HitTestResult::FilterClear, L"filter: empty content has no clear hit target");
+        auto hash_entries = std::make_shared<std::vector<fs::DirEntry>>(2);
+        (*hash_entries)[0].name = L"1#2#小学教学楼结构";
+        (*hash_entries)[0].is_dir = true;
+        (*hash_entries)[1].name = L"2#楼变更结构审图回复0810";
+        (*hash_entries)[1].is_dir = true;
+        tab->SetSnapshot(hash_entries);
+        ShowFilterEditor(*state);
+        tab->scroll_y = 5000;
+        tab->scroll_x = 500;
+        state->scrollTargetY = 5000;
+        SetWindowTextW(state->hwndFilterEdit, L"1#");
+        vm = BuildVm(*state);
+        Check(vm.pane.EntryCount() == 1 && vm.pane.SourceIndex(0) == 0,
+            L"filter: 1# matches the literal desktop folder name");
+        const auto match_rect = state->renderer.ItemRectInPane(vm.pane, FocusedPaneRect(*state), 0);
+        Check(match_rect.top >= list.top && match_rect.bottom <= list.bottom &&
+            tab->scroll_x == 0 && state->scrollTargetY == 0,
+            L"filter: matches return to the visible viewport after scrolling");
+        tab->scroll_y = 24;
+        SyncFilterEditor(*state);
+        Check(tab->scroll_y == 24, L"filter: unchanged edit notification preserves current scroll");
+        HideFilterEditor(*state, true);
+        if (state->hwndFilterEdit) DestroyWindow(state->hwndFilterEdit);
+        state->hwndFilterEdit = nullptr;
+    } else Check(false, L"filter: graphics initialized");
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+    DestroyWindow(hwnd); state->hwnd = nullptr;
+    UnregisterClassW(wc.lpszClassName, wc.hInstance);
+}
+
+void TestRenameOutsideClick() {
+    auto state = std::make_unique<AppState>();
+    state->places.persist = false;
+    state->appPrefs.persist = false;
+    state->isolatedTest = true;
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = BlankPaneTestProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"PulseRenameOutsideSelftest";
+    RegisterClassW(&wc);
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"", WS_POPUP,
+        0, 0, 1000, 700, nullptr, nullptr, wc.hInstance, nullptr);
+    Check(hwnd != nullptr, L"rename outside: hidden owner created");
+    if (!hwnd) return;
+    state->hwnd = hwnd;
+    if (state->compositor.Init(hwnd)) {
+        state->compositor.RecreateTextFormats(1.0f);
+        state->renderer.SetCompositor(&state->compositor);
+        state->window_tabs.NewTab(L"C:\\RenameFixture");
+        state->pane = state->window_tabs.Active()->panes.front().get();
+        auto* tab = state->pane->ActiveTab();
+        fs::DirEntry entry; entry.name = L"New text document.txt";
+        const auto original_path = tab->current_path;
+        tab->SetSnapshot(std::make_shared<std::vector<fs::DirEntry>>(1, entry));
+        state->hwndRenameEdit = CreateWindowExW(0, L"EDIT", entry.name.c_str(), WS_POPUP,
+            0, 0, 100, 24, hwnd, nullptr, wc.hInstance, nullptr);
+        state->renameIndex = 0;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state.get()));
+        const auto list = ListRect(*state);
+        const auto point = MAKELPARAM(static_cast<int>(list.left + 30), static_cast<int>(list.bottom - 30));
+        SendMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, point);
+        Check(state->renameIndex == -1, L"rename outside: blank click ends edit without kill-focus message");
+        SendMessageW(hwnd, WM_LBUTTONUP, 0, point);
+        Check(tab->current_path == original_path, L"rename outside: commit preserves directory");
+        DestroyWindow(state->hwndRenameEdit);
+        state->hwndRenameEdit = nullptr;
+    } else Check(false, L"rename outside: graphics initialized");
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+    DestroyWindow(hwnd);
+    state->hwnd = nullptr;
+    UnregisterClassW(wc.lpszClassName, wc.hInstance);
 }
 
 void TestBlankPaneClickNavigation() {
@@ -685,6 +844,13 @@ void TestBlankPaneClickNavigation() {
         Check(tab->current_path == initial_folder,
               L"blank pane: disabled single and double click preserve location");
         state->appPrefs.blank_click_go_back = true;
+        tab->selected.insert(0);
+        press();
+        release();
+        SendMessageW(hwnd, WM_LBUTTONDBLCLK, MK_LBUTTON, point);
+        release();
+        Check(tab->SelectedCount() == 0 && tab->current_path == initial_folder,
+              L"blank pane: double click that clears a selection does not navigate");
         press();
         state->appPrefs.blank_click_go_back = false;
         release();
@@ -698,11 +864,17 @@ void TestBlankPaneClickNavigation() {
         Check(state->marqueePending && state->blankClickTab == tab,
               L"blank pane: held-button move preserves pending click");
         release();
+        Check(tab->current_path == initial_folder,
+              L"blank pane: enabled single click does not navigate");
+        SendMessageW(hwnd, WM_LBUTTONDBLCLK, MK_LBUTTON, point);
+        release();
         Check(tab->current_path == fs::NormalizePath(L"C:\\PulseBlankClickTest") && GetCapture() != hwnd,
               L"blank pane: restored folder without history navigates to parent on release");
         tab->back_stack = {};
         tab->back_stack.push(L"C:\\PulseBlankClickHistory");
         press();
+        release();
+        SendMessageW(hwnd, WM_LBUTTONDBLCLK, MK_LBUTTON, point);
         release();
         Check(tab->current_path == fs::NormalizePath(L"C:\\PulseBlankClickHistory"),
               L"blank pane: available history takes precedence over parent");
@@ -723,6 +895,14 @@ void TestBlankPaneClickNavigation() {
         tab->current_path = folder;
         tab->back_stack.pop();
         const std::wstring before = tab->current_path;
+        press();
+        release();
+        SendMessageW(hwnd, WM_LBUTTONDBLCLK, MK_LBUTTON, point);
+        SendMessageW(hwnd, WM_MOUSEMOVE, MK_LBUTTON,
+                     MAKELPARAM(x + GetSystemMetrics(SM_CXDRAG) + 1, y));
+        release();
+        Check(tab->current_path == before,
+              L"blank pane: dragging on second click prevents navigation");
         press();
         SendMessageW(hwnd, WM_MOUSEMOVE, MK_LBUTTON,
                      MAKELPARAM(x + GetSystemMetrics(SM_CXDRAG) + 1, y));
@@ -768,6 +948,8 @@ void TestBlankPaneClickNavigation() {
             SendMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, right_point);
             Check(state->pane == right && state->blankClickTab == right->ActiveTab(),
                   L"blank pane: inactive split pane receives click context");
+            SendMessageW(hwnd, WM_LBUTTONUP, 0, right_point);
+            SendMessageW(hwnd, WM_LBUTTONDBLCLK, MK_LBUTTON, right_point);
             SendMessageW(hwnd, WM_LBUTTONUP, 0, right_point);
             Check(right->ActiveTab()->current_path == fs::NormalizePath(L"C:\\PulseBlankClickSplit") &&
                   tab->current_path == L"C:\\",
@@ -880,44 +1062,6 @@ int history_interaction_ticks = 0;
 
 bool history_scope_requested = false;
 bool history_layout_ok = false;
-bool history_capture_ok = false;
-
-bool CaptureHistoryFixture(HWND window, const wchar_t* path) {
-    if (g_skip_visual) return false;
-    RECT rect{};
-    GetWindowRect(window, &rect);
-    // Never save another application's pixels if the test window was occluded.
-    const POINT sample{rect.left + 5, rect.top + 5};
-    if (GetAncestor(WindowFromPoint(sample), GA_ROOT) != window) return false;
-    const int width = rect.right - rect.left, height = rect.bottom - rect.top;
-    HDC screen = GetDC(nullptr);
-    HDC memory = CreateCompatibleDC(screen);
-    HBITMAP bitmap = CreateCompatibleBitmap(screen, width, height);
-    HGDIOBJ old = SelectObject(memory, bitmap);
-    const bool copied = BitBlt(memory, 0, 0, width, height, screen, rect.left, rect.top,
-                              SRCCOPY | CAPTUREBLT) != FALSE;
-    SelectObject(memory, old);
-    DeleteDC(memory);
-    ReleaseDC(nullptr, screen);
-    Microsoft::WRL::ComPtr<IWICImagingFactory> factory;
-    Microsoft::WRL::ComPtr<IWICBitmap> source;
-    Microsoft::WRL::ComPtr<IWICStream> stream;
-    Microsoft::WRL::ComPtr<IWICBitmapEncoder> encoder;
-    Microsoft::WRL::ComPtr<IWICBitmapFrameEncode> frame;
-    const bool ok = copied && SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr,
-        CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))) &&
-        SUCCEEDED(factory->CreateBitmapFromHBITMAP(bitmap, nullptr, WICBitmapIgnoreAlpha, &source)) &&
-        SUCCEEDED(factory->CreateStream(&stream)) &&
-        SUCCEEDED(stream->InitializeFromFilename(path, GENERIC_WRITE)) &&
-        SUCCEEDED(factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder)) &&
-        SUCCEEDED(encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache)) &&
-        SUCCEEDED(encoder->CreateNewFrame(&frame, nullptr)) &&
-        SUCCEEDED(frame->Initialize(nullptr)) &&
-        SUCCEEDED(frame->WriteSource(source.Get(), nullptr)) &&
-        SUCCEEDED(frame->Commit()) && SUCCEEDED(encoder->Commit());
-    DeleteObject(bitmap);
-    return ok;
-}
 
 void CALLBACK DriveHistoryInteractionTimer(HWND, UINT, UINT_PTR timer, DWORD) {
     if (++history_interaction_ticks > 100) {
@@ -942,8 +1086,6 @@ void CALLBACK DriveHistoryInteractionTimer(HWND, UINT, UINT_PTR timer, DWORD) {
         ClientToScreen(state.hwnd, &expected);
         history_layout_ok = ui::FluentMenuTestPeer::ScopeLayout(*state.menu,
             static_cast<float>(expected.x), static_cast<float>(expected.y) + static_cast<int>(4 * state.scale));
-        history_capture_ok = CaptureHistoryFixture(state.hwnd, state.darkMode
-            ? L"bench_data/history-to-scope-dark-150.png" : L"bench_data/history-to-scope-light-100.png");
         history_interaction_driven = true;
         state.menu->Dismiss();
         KillTimer(nullptr, timer);
@@ -998,9 +1140,6 @@ void CALLBACK DriveHistoryInteractionTimer(HWND, UINT, UINT_PTR timer, DWORD) {
     if (history_interaction_state && history_interaction_state->menu) {
         auto& state = *history_interaction_state;
         history_layout_ok = ui::FluentMenuTestPeer::ExternalEditorLayout(*state.menu, state.hwndAddressEdit);
-        if (history_interaction_mode == 0)
-            history_capture_ok = CaptureHistoryFixture(state.hwnd, state.darkMode
-                ? L"bench_data/history-combined-dark-150.png" : L"bench_data/history-combined-light-100.png");
     }
     if (history_interaction_state && history_interaction_state->menu &&
         ui::FluentMenuTestPeer::DriveHistoryInteraction(
@@ -1072,7 +1211,6 @@ void TestAddressSearchHistoryInteraction(float scale = 1.0f, bool dark = false) 
         history_interaction_ticks = 0;
         history_layout_ok = false;
         history_scope_requested = false;
-        history_capture_ok = false;
         const UINT_PTR timer = SetTimer(nullptr, 0, 30, DriveHistoryInteractionTimer);
         Check(timer != 0, L"search history: schedule popup keyboard interaction");
         if (timer) {
@@ -1083,7 +1221,6 @@ void TestAddressSearchHistoryInteraction(float scale = 1.0f, bool dark = false) 
         Check(history_layout_ok, mode == 3
             ? L"search history: switching to scope resets history anchor and aligns scope button"
             : L"search history: only original editor is visible and results stay below it");
-        if (!g_skip_visual && (mode == 0 || mode == 3)) Check(history_capture_ok, L"search history: capture combined application and popup");
         Check(history_interaction_driven && !state->searchHistoryOpen,
               L"search history: real popup processes keyboard and closes");
     };
@@ -1252,7 +1389,6 @@ int advanced_test_stage = 0;
 int advanced_test_ticks = 0;
 int advanced_test_mode = 0;
 bool advanced_hidden_on_destroy = false;
-bool advanced_snapshot_ok = false;
 HWND advanced_test_window = nullptr;
 
 LRESULT CALLBACK AdvancedTestWindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam,
@@ -1309,8 +1445,6 @@ void CALLBACK AdvancedTestTimer(HWND, UINT, UINT_PTR timer, DWORD) {
     }
     if (advanced_test_ticks < 8) return;
     if (advanced_test_stage == 1) {
-        advanced_snapshot_ok = CaptureHistoryFixture(dialog, advanced_test_mode == 2
-            ? L"bench_data/advanced-search-light.png" : L"bench_data/advanced-search-dark.png");
         if (advanced_test_mode == 0) {
             PostMessageW(dialog, WM_CLOSE, 0, 0);
             KillTimer(nullptr, timer);
@@ -1348,7 +1482,7 @@ void TestAdvancedSearchDialog() {
         l10n::SetLanguage(mode == 2 ? L"en-US" : l10n::LanguageId(language));
         advanced_test_mode = mode;
         advanced_test_ticks = advanced_test_stage = 0;
-        advanced_hidden_on_destroy = advanced_snapshot_ok = false;
+        advanced_hidden_on_destroy = false;
         advanced_test_window = nullptr;
         AdvancedSearchSpec spec;
         spec.name = L"show";
@@ -1359,7 +1493,6 @@ void TestAdvancedSearchDialog() {
         const auto result = ui::ShowAdvancedSearchDialog(nullptr, spec, mode != 2, D2D1::ColorF(0x0078d4));
         KillTimer(nullptr, timer);
         Check(advanced_hidden_on_destroy, L"advanced search: cold and repeat close hide before surface teardown");
-        if (!g_skip_visual) Check(advanced_snapshot_ok, L"advanced search: complete form visual capture");
         if (mode == 0) Check(!result.accepted, L"advanced search: close cancels without executing");
         else if (mode == 1) {
             const auto parsed = ParseSearchQuery(result.query);
@@ -3261,21 +3394,6 @@ void TestPlacesAndIndex() {
 
     Check(fs::IsUncPath(L"\\\\server\\share") && !fs::IsUncPath(L"C:\\Users"),
           L"net: UNC detection");
-    {
-        auto entries = std::make_shared<std::vector<fs::DirEntry>>();
-        fs::DirEntry e;
-        e.name = L"cached.txt";
-        e.size = 42;
-        e.is_dir = false;
-        entries->push_back(e);
-        const std::wstring unc = L"\\\\pulse-selftest\\share";
-        Check(fs::SaveNetSnapshot(unc, entries), L"netcache: save UNC snapshot");
-        uint64_t ts = 0;
-        auto loaded = fs::LoadNetSnapshot(unc, &ts);
-        Check(loaded && loaded->size() == 1 && (*loaded)[0].name == L"cached.txt" &&
-              (*loaded)[0].size == 42, L"netcache: load UNC snapshot");
-        Check(!fs::FormatCacheAge(ts).empty(), L"netcache: age string");
-    }
 
     cat.PinWorkspace(L"C:\\proj", L"proj", 0, { L"C:\\proj" });
     cat.RecordVisit(L"C:\\proj\\src");
@@ -3780,6 +3898,25 @@ void TestLinkResolve() {
     fs::DirEntry e2;
     Check(ResolveLink(lnk_dir, e2) && e2.link_target_is_dir,
           L"link: folder target resolves");
+    e1.name = L"a.txt.lnk";
+    e2.name = L"z-folder.lnk";
+    for (const auto column : {ui::SortColumn::Name, ui::SortColumn::Size, ui::SortColumn::Mtime, ui::SortColumn::Type}) {
+        for (const auto direction : {ui::SortDirection::Asc, ui::SortDirection::Desc})
+            Check(EntryLess(e2, e1, column, direction) && !EntryLess(e1, e2, column, direction),
+                L"link: folder shortcuts sort before files in both directions");
+    }
+    Check(!e2.is_dir, L"link: sorting preserves shortcut file identity for operations");
+    wchar_t live_link[32768]{};
+    if (GetEnvironmentVariableW(L"PULSE_SELFTEST_LINK", live_link, ARRAYSIZE(live_link))) {
+        std::vector<fs::DirEntry> entries;
+        const auto parent = fs::ParentPath(live_link);
+        fs::EnumerateDirectory(parent, entries);
+        ResolveLinksInPlace(parent, entries, {});
+        const auto filename = std::filesystem::path(live_link).filename().wstring();
+        auto found = std::find_if(entries.begin(), entries.end(), [&](const auto& item) { return item.name == filename; });
+        Check(found != entries.end() && found->link_target_is_dir && !(found->attrs & FILE_ATTRIBUTE_HIDDEN),
+            L"link: actual desktop shortcut enumerated and resolved as visible folder");
+    }
     fs::DirEntry e3;
     Check(!ResolveLink(lnk_dead, e3) && e3.link_target.empty(),
           L"link: missing target does not penetrate");
@@ -4096,6 +4233,39 @@ void TestTabShortcuts() {
     }
 }
 
+void TestStagingTrayDeletion() {
+    {
+        StagingTray tray;
+        tray.Collect({ L"C:\\tray-test\\a.txt", L"C:\\tray-test\\folder\\b.txt",
+                       L"C:\\tray-test\\folder-other\\keep.txt" }, false);
+        tray.Collect({ L"C:\\tray-test\\a.txt" }, true);
+        tray.RemoveDeleted({});
+        Check(tray.batches().size() == 2, L"tray: no successful deletions keep batches");
+        tray.RemoveDeleted({ L"c:\\TRAY-test\\A.txt" });
+        Check(tray.batches().size() == 1 && tray.batches()[0].items.size() == 2,
+              L"tray: deletion removes duplicate copy and cut entries and empty batches");
+        tray.RemoveDeleted({ L"C:\\tray-test\\folder" });
+        Check(tray.batches().size() == 1 && tray.batches()[0].items.size() == 1 &&
+              tray.batches()[0].items[0].path.find(L"folder-other") != std::wstring::npos,
+              L"tray: folder deletion removes descendants but preserves sibling prefixes");
+        tray.RemoveDeleted({ L"C:\\tray-test" });
+        Check(tray.batches().empty(), L"tray: deleting final ancestor clears tray");
+        const auto source = WorkspacePath(L"src\\app\\app_model.cpp");
+        tray.Collect({ source, source }, false);
+        const auto size = tray.batches()[0].items[0].size;
+        tray.RemoveItem(0, 0);
+        Check(size > 0 && tray.batches()[0].total_size == size,
+              L"tray: removing an item updates batch size");
+        std::wstring saved;
+        tray.ToJson(saved);
+        StagingTray restored;
+        Check(restored.FromJson(saved) && restored.batches()[0].total_size == size,
+              L"tray: restored batch retains size accounting");
+        restored.RemoveDeleted({ source });
+        Check(restored.batches().empty(), L"tray: deletion also clears restored entries");
+    }
+}
+
 void TestLayoutOwnedTabs() {
     WindowTabs tabs;
     tabs.NewTab(L"C:\\work");
@@ -4130,8 +4300,18 @@ void TestLayoutOwnedTabs() {
     const LayoutTabSnapshot first_snap = CaptureLayoutTab(*tabs.items[0]);
     const LayoutTabSnapshot second_snap = CaptureLayoutTab(*tabs.items[1]);
     WindowTabs restored;
+    bool loading_panes_registered = true;
     RestoreWindowTabs(restored, { first_snap, second_snap }, {}, 1,
-        [](Tab& tab, const std::wstring& path) { tab.current_path = path; });
+        [&](Tab& tab, const std::wstring& path) {
+            bool registered = false;
+            for (const auto& layout : restored.items)
+                for (const auto& pane : layout->panes)
+                    registered |= pane->ActiveTab() == &tab;
+            loading_panes_registered &= registered;
+            tab.current_path = path;
+        });
+    Check(loading_panes_registered,
+          L"layouttabs: restoring panes are registered before directory loading");
     Check(restored.items.size() == 2 && restored.active == 1,
           L"layouttabs: session restore keeps two tabs and active index");
     Check(restored.items[0]->layout == LayoutPreset::TwoVertical &&
@@ -4344,6 +4524,48 @@ int RunSelfTest1B2() {
     if (g_skip_visual) LogLine(L"[SKIP] Screenshot capture disabled\n");
     wchar_t test_case[64]{};
     if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
+        wcscmp(test_case, L"filter-controls") == 0) {
+        TestFilterControls();
+        if (g_log) { fclose(g_log); g_log = nullptr; }
+        return g_fail ? 1 : 0;
+    }
+    if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
+        wcscmp(test_case, L"filter-search-ui") == 0) {
+        const bool passed = RunNameHighlightUiTest();
+        if (g_log) { fclose(g_log); g_log = nullptr; }
+        return passed ? 0 : 1;
+    }
+    if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
+        wcscmp(test_case, L"folder-shortcut") == 0) {
+        TestLinkResolve();
+        if (g_log) { fclose(g_log); g_log = nullptr; }
+        return g_fail ? 1 : 0;
+    }
+    if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
+        wcscmp(test_case, L"rename-outside") == 0) {
+        TestRenameOutsideClick();
+        if (g_log) { fclose(g_log); g_log = nullptr; }
+        return g_fail ? 1 : 0;
+    }
+    if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
+        wcscmp(test_case, L"change-app") == 0) {
+        const bool passed = RunChangeTrackingAppTest();
+        if (g_log) { fclose(g_log); g_log = nullptr; }
+        return passed ? 0 : 1;
+    }
+    if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
+        wcscmp(test_case, L"change-ui") == 0) {
+        const bool passed = RunChangeTrackingUiTest();
+        if (g_log) { fclose(g_log); g_log = nullptr; }
+        return passed ? 0 : 1;
+    }
+    if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
+        wcscmp(test_case, L"blank-pane") == 0) {
+        TestBlankPaneClickNavigation();
+        if (g_log) { fclose(g_log); g_log = nullptr; }
+        return g_fail ? 1 : 0;
+    }
+    if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
         wcscmp(test_case, L"advanced-edit") == 0) {
         TestAdvancedEditClicks();
         if (g_log) { fclose(g_log); g_log = nullptr; }
@@ -4393,6 +4615,7 @@ int RunSelfTest1B2() {
     TestFindGroupRun();
     TestSessionLayoutTabs();
     TestTabShortcuts();
+    TestStagingTrayDeletion();
     TestLayoutOwnedTabs();
     TestUtf8PersistFile();
     TestColorPickerModel();

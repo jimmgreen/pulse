@@ -9,6 +9,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <unordered_map>
 #include <windows.h>
 #include <sddl.h>
 
@@ -101,16 +102,103 @@ void SearchAndReply(HANDLE pipe, uint32_t id, Query query) {
     }
 }
 
+std::wstring TrackingOwner(HANDLE pipe) {
+    if (!ImpersonateNamedPipeClient(pipe)) return {};
+    HANDLE token = nullptr;
+    const BOOL opened = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token);
+    RevertToSelf();
+    if (!opened) return {};
+    DWORD bytes = 0, session = 0;
+    GetTokenInformation(token, TokenUser, nullptr, 0, &bytes);
+    std::vector<BYTE> buffer(bytes);
+    std::wstring owner;
+    if (GetTokenInformation(token, TokenUser, buffer.data(), bytes, &bytes) &&
+        GetTokenInformation(token, TokenSessionId, &session, sizeof(session), &bytes)) {
+        LPWSTR sid = nullptr;
+        if (ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(buffer.data())->User.Sid, &sid)) {
+            owner = sid; LocalFree(sid); owner += L"-" + std::to_wstring(session);
+        }
+    }
+    CloseHandle(token); return owner;
+}
+
+void SetNetworkTrackingLease(HANDLE pipe, const std::wstring& owner, bool enabled) {
+    static std::unordered_map<std::wstring, uint64_t> leases;
+    ULONG process = 0;
+    if (!GetNamedPipeClientProcessId(pipe, &process)) return;
+    const auto now = ChangeTracker::Now();
+    const auto prefix = owner + L":";
+    const auto key = prefix + std::to_wstring(process);
+    leases[key] = enabled ? now + 90 : 0;
+    std::erase_if(leases, [now](const auto& entry) { return entry.second < now; });
+    bool active = false;
+    for (const auto& [id, expiry] : leases) if (id.starts_with(prefix)) active = true;
+    g.index.SetChangeLease(owner, active);
+}
+
+bool HandleChanges(HANDLE pipe, const MsgHeader& hdr, const std::vector<uint8_t>& payload) {
+    const auto owner = TrackingOwner(pipe);
+    if (owner.empty()) return false;
+    PayloadReader r(payload.data(), payload.size()); PayloadWriter w;
+    if (hdr.type == agent::REQ_CHANGE_LEASE) {
+        uint32_t enabled = 0;
+        if (!r.GetU32(enabled) || enabled > 1 || r.remaining()) return false;
+        SetNetworkTrackingLease(pipe, owner, enabled != 0);
+        return WriteFrame(pipe, agent::RSP_CHANGE_LEASE, hdr.request_id, w.data());
+    }
+    ChangeResponse response;
+    if (hdr.type == agent::REQ_CHANGE_SUMMARIES) {
+        uint64_t since = 0; uint32_t count = 0;
+        if (!r.GetU64(since) || !r.GetU32(count) || count > 256) return false;
+        std::vector<std::wstring> paths;
+        for (uint32_t i = 0; i < count; ++i) {
+            std::wstring path;
+            if (!r.GetString(path) || path.empty() || path.size() > 32767) return false;
+            paths.push_back(std::move(path));
+        }
+        if (r.remaining()) return false;
+        response = g.index.Changes().Summaries(owner, paths, since);
+        w.PutU32(static_cast<uint32_t>(response.state)); w.PutU32(static_cast<uint32_t>(response.summaries.size()));
+        for (auto& summary : response.summaries) {
+            const auto coverage = g.index.ChangeCoverage(summary.path);
+            if (coverage != ChangeState::Gap && !(coverage == ChangeState::NotCovered && summary.count)) summary.state = coverage;
+            w.PutString(summary.path); w.PutU64(summary.last_change); w.PutU32(summary.count);
+            w.PutU32(static_cast<uint32_t>(summary.state));
+            for (auto count_kind : summary.counts) w.PutU32(count_kind);
+            w.PutU32(summary.initial_count);
+            w.PutU32(summary.has_deleted ? 1u : 0u); w.PutU32(summary.incomplete ? 1u : 0u);
+        }
+        return WriteFrame(pipe, agent::RSP_CHANGE_SUMMARIES, hdr.request_id, w.data());
+    }
+    std::wstring path; uint64_t since = 0, before = 0; uint32_t limit = 0, filter = 0;
+    if (!r.GetString(path) || path.empty() || path.size() > 32767 || !r.GetU64(since) ||
+        !r.GetU64(before) || !r.GetU32(limit) || !r.GetU32(filter) || limit == 0 || limit > 200 ||
+        (filter != UINT32_MAX && filter > 5) || r.remaining()) return false;
+    response = g.index.Changes().Details(owner, path, since, before, limit, filter);
+    const auto coverage = g.index.ChangeCoverage(path);
+    if (coverage != ChangeState::Gap && !(coverage == ChangeState::NotCovered && !response.records.empty())) response.state = coverage;
+    w.PutU32(static_cast<uint32_t>(response.state)); w.PutU64(response.next_cursor);
+    w.PutU32(static_cast<uint32_t>(response.records.size()));
+    for (const auto& record : response.records) {
+        w.PutU64(record.id); w.PutU64(record.time); w.PutU32(static_cast<uint32_t>(record.kind));
+        w.PutU32(record.is_dir ? 1u : 0u); w.PutU32(static_cast<uint32_t>(record.source));
+        w.PutString(record.path); w.PutString(record.old_path);
+    }
+    return WriteFrame(pipe, agent::RSP_CHANGE_DETAILS, hdr.request_id, w.data());
+}
+
 void ClientLoop(HANDLE pipe) {
     while (g.running) {
         MsgHeader header{};
         if (!PipeRead(pipe, reinterpret_cast<uint8_t*>(&header), sizeof(header)) ||
-            header.magic != agent::kMagic || header.payload_size > agent::kMaxPayload)
+            header.magic != agent::kMagic || header.payload_size > 256 * 1024)
             break;
         std::vector<uint8_t> payload(header.payload_size);
         if (!payload.empty() && !PipeRead(pipe, payload.data(), header.payload_size)) break;
         PayloadReader reader(payload.data(), payload.size());
-        if (header.type == agent::REQ_ROOTS) {
+        if (header.type >= agent::REQ_CHANGE_LEASE && header.type <= agent::REQ_CHANGE_DETAILS) {
+            if (!HandleChanges(pipe, header, payload)) break;
+        } else if (header.type == agent::REQ_ROOTS) {
             WriteFrame(pipe, agent::RSP_ROOTS, header.request_id, RootsPayload());
         } else if (header.type == agent::REQ_STATUS) {
             PayloadWriter writer;

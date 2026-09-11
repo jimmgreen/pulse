@@ -6,6 +6,7 @@
 #include "shell_icons.h"
 #include "view_layout.h"
 #include "thumbnail_cache.h"
+#include "name_highlight.h"
 #include "preview_handler_host.h"
 #include "../fs/fs_enum.h"
 #include "../fs/fs_snapshot.h"
@@ -63,6 +64,7 @@ struct ListEntryView {
     bool is_dir = false;
     bool is_reparse = false;
     bool cloud_recall = false;
+    bool record_only = false;
     bool cut = false;
     bool starred = false;
     std::wstring badge;
@@ -78,12 +80,33 @@ struct RowPresentationCache {
     std::deque<size_t> order;
 };
 
+struct ChangeBadge {
+    std::wstring label;
+    std::wstring tooltip;
+    int count = 0;
+    bool has_deleted = false;
+    int status = 0; // 0 recent, 1 older, 2 unavailable/scanning/offline
+};
+
+struct ChangePopover {
+    bool visible = false;
+    float x = 0.0f, y = 0.0f;
+    std::wstring summary;
+    int pane_index = -1, row_index = -1;
+};
+
 struct PaneViewModel {
     using FilterMap = std::vector<int>;
     using TagDots = std::unordered_map<int, std::vector<D2D1_COLOR_F>>;
 
     std::wstring path;
     std::wstring header_text;
+    std::unordered_map<int, ChangeBadge> change_badges;
+    ChangeBadge title_change_badge;
+    bool is_changes = false;
+    std::wstring change_empty_text, change_status_text;
+    std::wstring change_time_label, change_type_label;
+    bool change_has_more = false;
     std::wstring filter_text;
     float filter_expand = 0.0f;
     std::wstring banner_title;
@@ -404,6 +427,7 @@ struct WindowViewModel {
     int hover_control_index = -1;
     int hover_sub_index = -1;
     std::wstring tooltip_text;
+    ChangePopover change_popover;
     float tooltip_x = 0.0f;
     float tooltip_y = 0.0f;
 
@@ -436,6 +460,8 @@ struct WindowViewModel {
     bool show_pinned_tab_names = true;
     bool settings_open_folders = false;
     bool settings_blank_click_go_back = false;
+    bool settings_change_tracking = false;
+    int settings_change_days = 3;
     int settings_row_height = 34; // current row-height pref (DIPs) for density radios
     int settings_tray_icon = 48;  // current tray-deck icon pref (DIPs) for size radios
     int settings_language = 0;    // 0 system, 1 zh-CN, 2 en-US
@@ -516,9 +542,15 @@ struct HitTestResult {
         ColumnHeader,
         ColumnDivider,
         FilterBox,
+        FilterClear,
         Splitter,
         Scrollbar,
         Row,
+        ChangeBadge,
+        ChangeOpen,
+        ChangeTimeFilter,
+        ChangeTypeFilter,
+        ChangeMore,
         Pane,
         PaneHeader,               // split-pane title strip (path + nav/view)
         SidebarHeader,
@@ -555,6 +587,7 @@ struct HitTestResult {
         StatusBarTask,
         SettingsNav,
         SettingsToggle,
+        SettingsChangeDays,
         SettingsRestore,
         SettingsAccent,
         SettingsEffect,
@@ -655,7 +688,8 @@ public:
     D2D1_RECT_F PaneNavBackRect(const D2D1_RECT_F& pane_bounds,
                                 float filter_expand = 1.0f) const;
     D2D1_RECT_F FilterEditRect(const D2D1_RECT_F& pane_bounds,
-                               float expand = 1.0f) const;
+                               float expand = 1.0f, bool has_text = false) const;
+    D2D1_RECT_F FilterClearRect(const D2D1_RECT_F& pane_bounds, float expand) const;
 
     bool BeginDetailsPreviewPan(float x, float y);
     void MoveDetailsPreviewPan(float x, float y);
@@ -835,9 +869,10 @@ private:
     bool EnsureFluentSvg(int resource_id);
     bool DrawFluentSvg(int resource_id, const D2D1_RECT_F& bounds, float opacity = 1.0f);
     void DrawTruncatedName(const std::wstring& name, float x, float y, float w, float h,
-                           const Theme& theme, bool selected);
+                           const Theme& theme, bool selected, const std::vector<NameMatchRange>& matches);
     void DrawCenteredIconName(const std::wstring& name, const D2D1_RECT_F& bounds,
-                              const D2D1_COLOR_F& color);
+                              const D2D1_COLOR_F& color, const Theme& theme,
+                              const std::vector<NameMatchRange>& matches);
     // Title-bar product mark from the app icon resource (nullptr until loaded).
     ID2D1Bitmap* LogoBitmap();
 

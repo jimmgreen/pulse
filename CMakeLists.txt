@@ -170,7 +170,8 @@ add_executable(pulse_index_test
     src/index/index_query.cpp
     src/index/search_kinds.cpp
     src/index/index_shard.cpp
-    src/index/network_index.cpp)
+    src/index/network_index.cpp
+    src/index/change_tracking.cpp)
 target_link_libraries(pulse_index_test PRIVATE shell32 mpr advapi32)
 
 add_executable(pulse_index_migration_test
@@ -181,6 +182,7 @@ target_link_libraries(pulse_index_migration_test PRIVATE shell32)
 add_executable(pulse_index_engine_test
     src/bench/index_engine_test.cpp
     src/index/index_engine.cpp
+    src/index/change_tracking.cpp
     src/index/index_visibility.cpp
     src/index/index_config.cpp
     src/index/index_query.cpp
@@ -315,6 +317,7 @@ add_executable(pulse_index WIN32
     src/index/content_agent.cpp
     src/index/content_search.cpp
     src/index/index_engine.cpp
+    src/index/change_tracking.cpp
     src/index/index_visibility.cpp
     src/index/index_config.cpp
     src/index/index_query.cpp
@@ -440,3 +443,7 @@ target_link_options(pulse_child_edit_test PRIVATE /MANIFEST:NO)
 target_link_libraries(pulse_child_edit_test PRIVATE
     d3d11 d2d1 dwrite dxgi dcomp dwmapi shcore ole32 windowscodecs user32 gdi32 comctl32 pulse_localization)
 pulse_enable_lumatext(pulse_child_edit_test)
+
+# Focused folder change tracking regression tests.
+add_executable(pulse_change_tracking_test src/bench/change_tracking_test.cpp src/index/change_tracking.cpp)
+add_executable(pulse_change_tracking_client_test src/bench/change_tracking_client_test.cpp)

@@ -240,6 +240,7 @@ D2D1_RECT_F ListRect(const AppState& s) {
         virtual_kind == L"recent") {
         extra += 40.0f * s.scale;
     }
+    if (virtual_kind == L"changes") extra += 36.0f * s.scale;
     const ui::ViewMode mode = tab ? tab->view_mode : ui::ViewMode::Details;
     pane.top += s.renderer.PaneHeaderHeight() + extra +
                 (ui::ShowsColumnHeader(mode) ? s.renderer.ColumnHeaderHeight() : 0.0f);
@@ -309,6 +310,8 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
             vm.settings_show_hidden_files = s.appPrefs.show_hidden_files;
             vm.settings_open_folders = s.appPrefs.open_folders_in_pulse;
             vm.settings_blank_click_go_back = s.appPrefs.blank_click_go_back;
+            vm.settings_change_tracking = s.appPrefs.change_tracking_enabled;
+            vm.settings_change_days = s.appPrefs.change_tracking_days;
             vm.settings_row_height = s.appPrefs.row_height;
             vm.settings_tray_icon = s.appPrefs.tray_icon_size;
             vm.settings_language = s.appPrefs.language == L"zh-CN" ? 1
@@ -584,6 +587,7 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
             if (slot.focused) slot.pane = vm.pane;
             else app::FillPaneViewModel(slot.pane, *p, &s.places);
             if (app::Tab* tab = p->ActiveTab()) {
+                FillChangePane(s, *tab, slot.pane, slot.rect);
                 for (const auto& cutPath : s.cutPaths) {
                     if (fs::ParentPath(cutPath) != tab->current_path) continue;
                     const size_t slash = cutPath.find_last_of(L"\\/");
@@ -1044,6 +1048,7 @@ static std::wstring ContextStatusHint(const app::Tab* tab) {
 // probes (or mutate detailsSelPath); paint owns those side effects.
 ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     if (!s.pane) return {};
+    s.changes.visible_paths.clear();
     ForEachPane(s, [&](app::Pane& pane) {
         if (auto* tab = pane.ActiveTab()) tab->SetShowHiddenFiles(s.appPrefs.show_hidden_files);
     });
@@ -1426,6 +1431,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     vm.tooltip_x = static_cast<float>(s.hoverPoint.x);
     vm.tooltip_y = static_cast<float>(s.hoverPoint.y);
     FillPaneSlots(s, vm);
+    FillChangePopover(s, vm);
     vm.window_effect = ui::WindowEffectFromId(s.appPrefs.window_effect);
     vm.background_image = s.appPrefs.background_image;
     vm.safe_mode = s.safeMode;
@@ -1517,6 +1523,7 @@ std::wstring TooltipForHover(AppState& s) {
     case R::PaneMediumIcons: return text(I::MediumIcons);
     case R::PaneViewButton: return text(I::View);
     case R::FilterBox: return text(I::FilterCurrent);
+    case R::FilterClear: return text(I::Clear);
     case R::Splitter: return text(I::ResizeSplit);
     case R::DetailsOpen: return text(I::Open);
     case R::DetailsStar: return text(I::Favorite);
@@ -1556,6 +1563,12 @@ std::wstring TooltipForHover(AppState& s) {
             s.hoverControlIndex < static_cast<int>(tab->snapshot->size())) {
             const auto& entry = (*tab->snapshot)[s.hoverControlIndex];
             std::wstring tooltip = entry.name;
+            if (!entry.change_type_text.empty()) {
+                tooltip += L" · " + entry.change_type_text + L" · " + entry.full_path;
+                if (!entry.change_old_path.empty() && entry.change_old_path != entry.full_path)
+                    tooltip += L" (" + entry.change_old_path + L" → " + entry.full_path + L")";
+                return tooltip;
+            }
             std::wstring full = entry.full_path;
             if (full.empty() && !fs::IsVirtualPath(tab->current_path)) {
                 full = tab->current_path;
@@ -1596,6 +1609,7 @@ std::wstring TooltipForHover(AppState& s) {
 std::wstring EntryFullPath(const app::Tab& tab, int index) {
     if (!tab.snapshot || index < 0 || index >= static_cast<int>(tab.snapshot->size())) return L"";
     const fs::DirEntry& e = (*tab.snapshot)[static_cast<size_t>(index)];
+    if (e.change_record_only) return L"";
     if (!e.full_path.empty()) return e.full_path;
     if (fs::IsVirtualPath(tab.current_path)) return L"";
     std::wstring full = tab.current_path;

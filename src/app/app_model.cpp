@@ -708,7 +708,8 @@ void StagingTray::Collect(const std::vector<std::wstring>& paths, bool move_inte
                 ULARGE_INTEGER sz;
                 sz.LowPart = fad.nFileSizeLow;
                 sz.HighPart = fad.nFileSizeHigh;
-                batch.total_size += sz.QuadPart;
+                it.size = sz.QuadPart;
+                batch.total_size += it.size;
             }
         } else {
             it.exists = false;
@@ -725,11 +726,31 @@ void StagingTray::RemoveBatch(size_t idx) {
 void StagingTray::RemoveItem(size_t batch_idx, size_t item_idx) {
     if (batch_idx >= batches_.size()) return;
     auto& b = batches_[batch_idx];
-    if (item_idx < b.items.size()) b.items.erase(b.items.begin() + item_idx);
+    if (item_idx < b.items.size()) {
+        b.total_size -= std::min(b.total_size, b.items[item_idx].size);
+        b.items.erase(b.items.begin() + item_idx);
+    }
     if (b.items.empty()) batches_.erase(batches_.begin() + batch_idx);
 }
 
 void StagingTray::Clear() { batches_.clear(); }
+
+void StagingTray::RemoveDeleted(const std::vector<std::wstring>& paths) {
+    for (const auto& path : paths) {
+        if (path.empty()) continue;
+        const std::wstring deleted = fs::NormalizePath(path);
+        for (size_t b = batches_.size(); b-- > 0;) {
+            for (size_t i = batches_[b].items.size(); i-- > 0;) {
+                const auto& candidate = batches_[b].items[i].path;
+                const bool same = _wcsicmp(candidate.c_str(), deleted.c_str()) == 0;
+                const bool child = candidate.size() > deleted.size() &&
+                    _wcsnicmp(candidate.c_str(), deleted.c_str(), deleted.size()) == 0 &&
+                    (deleted.back() == L'\\' || candidate[deleted.size()] == L'\\');
+                if (same || child) RemoveItem(b, i);
+            }
+        }
+    }
+}
 
 void StagingTray::ToJson(std::wstring& out) const {
     out = L"[\n";
@@ -799,11 +820,17 @@ bool StagingTray::FromJson(const std::wstring& in) {
                     }
                     if (i < in.size()) ++i;
                     TrayItem it;
-                    it.path = path;
-                    const DWORD attrs = GetFileAttributesW(path.c_str());
-                    it.exists = attrs != INVALID_FILE_ATTRIBUTES;
-                    it.attrs = it.exists ? attrs : 0;
-                    it.is_dir = it.exists && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                    it.path = fs::NormalizePath(path);
+                    WIN32_FILE_ATTRIBUTE_DATA data{};
+                    it.exists = GetFileAttributesExW(it.path.c_str(),
+                        GetFileExInfoStandard, &data) != FALSE;
+                    it.attrs = it.exists ? data.dwFileAttributes : 0;
+                    it.is_dir = it.exists && (it.attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                    if (it.exists && !it.is_dir) {
+                        it.size = (static_cast<uint64_t>(data.nFileSizeHigh) << 32) |
+                            data.nFileSizeLow;
+                        batch.total_size += it.size;
+                    }
                     batch.items.push_back(std::move(it));
                 }
                 if (i < in.size()) ++i;
@@ -1106,12 +1133,12 @@ void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCat
         : (fs::IsVirtualPath(tab->current_path) ? tab->CanGoBack() : !tab->current_path.empty());
     out.is_file_system = !tab->current_path.empty() && !fs::IsVirtualPath(tab->current_path);
     out.can_create = out.is_file_system && !tab->net_readonly;
-    out.curated_order = virtual_kind == L"starred" || virtual_kind == L"recent";
+    out.curated_order = virtual_kind == L"starred" || virtual_kind == L"recent" || virtual_kind == L"changes";
     out.is_starred = virtual_kind == L"starred";
     out.is_recent = virtual_kind == L"recent";
     out.is_recycle = virtual_kind == L"recycle";
     out.is_search = virtual_kind == L"search" || virtual_kind == L"saved-search"
-        || virtual_kind == L"recycle";
+        || virtual_kind == L"recycle" || virtual_kind == L"changes";
     out.is_query_search = virtual_kind == L"search";
     if (out.is_query_search) {
         std::wstring rest;

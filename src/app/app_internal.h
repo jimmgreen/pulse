@@ -7,3 +7,4 @@
 #include "app_commands.h"
 #include "app_hosted_edit.h"
 #include "app_input.h"
+#include "app_change_tracking.h"

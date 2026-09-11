@@ -299,6 +299,13 @@ void SettingsController::Wallpaper(int action) {
     }
 }
 
+void SettingsController::ChangeTrackingDays(int days) {
+    if (!prefs_ || (days != 1 && days != 3 && days != 7) ||
+        prefs_->change_tracking_days == days) return;
+    prefs_->change_tracking_days = days;
+    SaveAndApply(SettingsEffect::ChangeTracking);
+}
+
 void SettingsController::ToggleUi(int index) {
     if (!prefs_ || !context_) return;
     if (index == 1) {
@@ -322,6 +329,9 @@ void SettingsController::ToggleUi(int index) {
     } else if (index == 7) {
         prefs_->blank_click_go_back = !prefs_->blank_click_go_back;
         SaveAndApply(SettingsEffect::None);
+    } else if (index == 8) {
+        prefs_->change_tracking_enabled = !prefs_->change_tracking_enabled;
+        SaveAndApply(SettingsEffect::ChangeTracking);
     } else if (index >= 10 && index < 15) {
         static constexpr ipc::CtxMenuGroup groups[] = {
             ipc::CtxMenuGroup::Software, ipc::CtxMenuGroup::OpenWith,

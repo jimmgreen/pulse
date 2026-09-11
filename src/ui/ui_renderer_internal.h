@@ -199,6 +199,8 @@ void ClearTextWidthCache() {
             entry.type_text = FormatListType(
                 penetrated ? fs::StripLnkSuffix(source.name) : source.name, entry.is_dir);
         }
+        entry.record_only = source.change_record_only;
+        if (!source.change_type_text.empty()) entry.type_text = source.change_type_text;
         entry.starred = vm.tag_catalog && !entry.path.empty() &&
             vm.tag_catalog->IsStarred(entry.path);
         if (vm.search_snippets && index < vm.search_snippets->size())
@@ -476,10 +478,37 @@ void ClearTextWidthCache() {
         return x >= rc.left && x < rc.right && y >= rc.top && y < rc.bottom;
     }
 
-    float PaneExtraTop(const PaneViewModel& pane, float scale) {
-        return (pane.banner_message.empty() ? 0.0f : 36.0f * scale) +
+    float ChangeBannerLayout(const PaneViewModel& pane, float width, float scale,
+                             Compositor* compositor, ComPtr<IDWriteTextLayout>& layout) {
+        std::wstring text = pane.banner_message;
+        if (!pane.change_status_text.empty()) {
+            if (!text.empty()) text += L"\n";
+            text += pane.change_status_text;
+        }
+        if (text.empty()) return 0.0f;
+        if (!compositor || !compositor->DwriteFactory()) return 36 * scale;
+        if (FAILED(compositor->DwriteFactory()->CreateTextLayout(text.c_str(),
+            static_cast<UINT32>(text.size()), compositor->SmallFormat(),
+            std::max(1.0f, width - 32 * scale), 10000 * scale, &layout))) return 36 * scale;
+        layout->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+        layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+        layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+        DWRITE_TEXT_METRICS metrics{};
+        layout->GetMetrics(&metrics);
+        return std::max(36 * scale, metrics.height + 16 * scale);
+    }
+
+    float PaneBannerHeight(const PaneViewModel& pane, float width, float scale, Compositor* compositor) {
+        if (!pane.is_changes) return pane.banner_message.empty() ? 0.0f : 36 * scale;
+        ComPtr<IDWriteTextLayout> layout;
+        return ChangeBannerLayout(pane, width, scale, compositor, layout);
+    }
+
+    float PaneExtraTop(const PaneViewModel& pane, float scale, float width, Compositor* compositor) {
+        return PaneBannerHeight(pane, width, scale, compositor) +
                (pane.is_recent ? kRecentControlsDip * scale : 0.0f) +
-               (pane.is_query_search ? kSearchFiltersDip * scale : 0.0f);
+               (pane.is_query_search ? kSearchFiltersDip * scale : 0.0f) +
+               (pane.is_changes ? 36.0f * scale : 0.0f);
     }
 
     void FillSearchFilterChipLabels(const std::wstring& query, std::wstring labels[5]) {
@@ -1205,6 +1234,7 @@ struct SettingsLayout {
     D2D1_RECT_F hidden_files_row{};
     D2D1_RECT_F pinned_names_row{};
     D2D1_RECT_F blank_click_row{};
+    D2D1_RECT_F change_tracking_row{}, change_days_row{}, change_days[3]{};
     D2D1_RECT_F index_info{};
     D2D1_RECT_F index_status{};
     D2D1_RECT_F index_path{};
@@ -1352,7 +1382,13 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
         l.pinned_names_row = D2D1::RectF(card_left, y, card_right, y + 56.0f * scale);
         y += 68.0f * scale;
         l.blank_click_row = D2D1::RectF(card_left, y, card_right, y + 56.0f * scale);
-        y += 76.0f * scale;
+        y += 68.0f * scale;
+        l.change_tracking_row = D2D1::RectF(card_left, y, card_right, y + 56 * scale);
+        y += 68 * scale;
+        l.change_days_row = D2D1::RectF(card_left, y, card_right, y + 88 * scale);
+        const float segment = (card_right - card_left - 32 * scale) / 3;
+        for (int i = 0; i < 3; ++i) l.change_days[i] = D2D1::RectF(card_left + 16 * scale + i * segment, y + 42 * scale, card_left + 16 * scale + (i + 1) * segment, y + 78 * scale);
+        y += 108 * scale;
 
         y += 22.0f * scale;
         y += 8.0f * scale;
@@ -1692,11 +1728,10 @@ std::wstring FitFileName(Compositor* compositor, IDWriteFactory2* factory,
         return lo == 0 ? ellip : name.substr(0, lo) + ellip;
     }
 
-    const float stem_budget = max_w - tail_w;
     size_t lo = 0, hi = stem.size();
     while (lo < hi) {
         const size_t mid = (lo + hi + 1) / 2;
-        if (measure(stem.substr(0, mid)) <= stem_budget) lo = mid;
+        if (measure(stem.substr(0, mid) + tail) <= max_w) lo = mid;
         else hi = mid - 1;
     }
     return stem.substr(0, lo) + tail;
@@ -1787,7 +1822,7 @@ NameTrail LayoutNameTrail(float name_x, float text_y, float text_h,
                                  float badge_w,
                                  bool show_star, bool show_new_tab, bool show_more,
                                  Compositor* compositor, IDWriteFactory2* factory,
-                                 IDWriteTextFormat* fmt) {
+                                 IDWriteTextFormat* fmt, bool change_badge = false, int action_slots = 0) {
     NameTrail t;
     t.name_x = name_x;
     t.show_star = show_star;
@@ -1806,23 +1841,46 @@ NameTrail LayoutNameTrail(float name_x, float text_y, float text_h,
     // Star / new tab / more dock to the right edge of the name column so
     // every row lines up, independent of filename length.
     float dock = col_right - pad;
-    if (show_more) {
+    bool reserve_actions = action_slots > 0 || (change_badge && badge_w > 0.0f);
+    // Choose the action density from content, never hover state. Keep star and
+    // more available; opening in a new tab is also in the more menu.
+    const float full_name_width = MeasureLayoutText(compositor, factory, fmt, name);
+    const float content_width = full_name_width +
+        badge_w + gap + (t.tag_n ? gap + OverlapTagsWidth(t.tag_n, diameter) : 0.0f);
+    const bool compact_actions = action_slots == 2 || (reserve_actions &&
+        content_width + 3 * (btn + gap) > dock - name_x);
+    if (compact_actions) show_new_tab = false;
+    const float readable_name = std::min(full_name_width, 96.0f * scale);
+    const float minimum_tags = t.tag_n ? gap + OverlapTagsWidth(t.tag_n, diameter) : 0.0f;
+    if (dock - name_x < readable_name + minimum_tags + 2 * (btn + gap)) {
+        reserve_actions = false;
+        show_star = show_new_tab = show_more = false;
+    }
+    t.show_star = show_star;
+    t.show_more = show_more;
+    t.show_new_tab = show_new_tab;
+    if (show_more || reserve_actions) {
         t.more = D2D1::RectF(dock - btn, by, dock, by + btn);
         dock = t.more.left - gap;
     }
-    if (show_star) {
+    if (show_star || reserve_actions) {
         t.star = D2D1::RectF(dock - btn, by, dock, by + btn);
         dock = t.star.left - gap;
     }
-    if (show_new_tab) {
+    if (show_new_tab || (reserve_actions && !compact_actions)) {
         t.new_tab = D2D1::RectF(dock - btn, by, dock, by + btn);
         dock = t.new_tab.left - gap;
     }
     t.line_w = std::max(0.0f, dock - name_x);
 
+    while (t.tag_n > 0 && t.line_w < std::min(full_name_width, 24.0f * scale) +
+        gap + OverlapTagsWidth(t.tag_n, diameter)) --t.tag_n;
+
     // Reserve the compact (overlapped) cluster so a long name still
     // compresses first. Spread only if leftover after the fitted name fits.
     badge_w = std::max(0.0f, badge_w);
+    if (change_badge && dock - name_x < badge_w + 48.0f * scale +
+        (t.tag_n ? gap + OverlapTagsWidth(t.tag_n, diameter) : 0.0f)) badge_w = 0.0f;
     const float badge_gap = badge_w > 0.0f ? gap : 0.0f;
     const float tags_w = OverlapTagsWidth(t.tag_n, diameter);
     const float tags_gap = t.tag_n > 0 ? gap : 0.0f;
@@ -1831,7 +1889,7 @@ NameTrail LayoutNameTrail(float name_x, float text_y, float text_h,
     const std::wstring fitted = FitFileName(compositor, factory, fmt, name, budget);
     t.name_w = std::min(budget, MeasureLayoutText(compositor, factory, fmt, fitted));
     float trail_x = name_x + t.name_w;
-    if (badge_w > 0.0f) {
+    if (badge_w > 0.0f && !change_badge) {
         trail_x += badge_gap;
         const float badge_h = std::min(20.0f * scale, text_h);
         const float badge_y = text_y + (text_h - badge_h) * 0.5f;
@@ -1840,10 +1898,73 @@ NameTrail LayoutNameTrail(float name_x, float text_y, float text_h,
     }
     if (t.tag_n > 0) {
         t.tag_x0 = trail_x + gap;
-        const float leftover = std::max(0.0f, dock - t.tag_x0);
+        const float leftover = std::max(0.0f, dock - t.tag_x0 - (change_badge ? badge_w + badge_gap : 0.0f));
         t.tag_step = TagStepForLeftover(t.tag_n, diameter, gap, leftover);
     }
+    if (change_badge && badge_w > 0.0f) {
+        const float bx = t.tag_n > 0 ? t.tag_x0 + diameter + (t.tag_n - 1) * t.tag_step + gap : trail_x + gap;
+        t.badge = D2D1::RectF(bx, text_y, std::min(dock, bx + badge_w), text_y + text_h);
+    }
+    if (!show_star) t.star = {};
+    if (!show_new_tab) t.new_tab = {};
+    if (!show_more) t.more = {};
     return t;
+}
+
+bool HasChangeBadge(const ChangeBadge& badge) {
+    return !badge.label.empty() && badge.count > 0 && badge.status < 2;
+}
+
+float ChangeBadgeWidth(const ChangeBadge& badge, float scale, Compositor* compositor) {
+    if (!HasChangeBadge(badge)) return 0.0f;
+    return MeasureLayoutText(compositor, compositor->DwriteFactory(),
+        compositor->SmallFormat(), badge.label) + (badge.has_deleted ? 48.0f : 34.0f) * scale;
+}
+D2D1_RECT_F ChangeTitleRect(const D2D1_RECT_F& bounds, float text_right, float height,
+                          const ChangeBadge& badge, float scale, Compositor* compositor, const std::wstring& title) {
+    const float width = ChangeBadgeWidth(badge, scale, compositor);
+    if (width <= 0 || text_right - bounds.left < width + 64.0f * scale) return {};
+    const float title_width = MeasureLayoutText(compositor, compositor->DwriteFactory(), compositor->HeaderFormat(), title);
+    const float left = std::min(text_right - width, bounds.left + 14.0f * scale + title_width);
+    return D2D1::RectF(left, bounds.top, left + width, bounds.top + height);
+}
+void DrawChangeBadge(Compositor* compositor, fluent::Painter&, const ChangeBadge& badge,
+                     D2D1_RECT_F rc, const Theme& theme, float scale) {
+    if (!HasChangeBadge(badge) || rc.right <= rc.left) return;
+    auto* dc = compositor->Dc();
+    ComPtr<ID2D1SolidColorBrush> brush;
+    const bool dark = 0.2126f * theme.bg.r + 0.7152f * theme.bg.g + 0.0722f * theme.bg.b < 0.5f;
+    const auto recent_color = HexColor(dark ? 0x65D9E8 : 0x087F99);
+    const auto older_color = HexColor(dark ? 0x85ADB4 : 0x4A7580);
+    const auto color = badge.status == 2 ? theme.text_secondary :
+        badge.status == 1 ? older_color : recent_color;
+    if (FAILED(dc->CreateSolidColorBrush(theme.stroke_card, &brush))) return;
+    const float cy = (rc.top + rc.bottom) * 0.5f;
+    dc->DrawLine({rc.left + 2 * scale, cy - 6 * scale}, {rc.left + 2 * scale, cy + 6 * scale}, brush.get(), scale);
+    brush->SetColor(color);
+    const float cx = rc.left + 14 * scale;
+    dc->DrawEllipse(D2D1::Ellipse({cx, cy}, 4.5f * scale, 4.5f * scale), brush.get(), scale);
+    dc->DrawLine({cx, cy - 3 * scale}, {cx, cy}, brush.get(), scale);
+    dc->DrawLine({cx, cy}, {cx + 2 * scale, cy + scale}, brush.get(), scale);
+    auto text = rc; text.left += 23 * scale;
+    if (badge.has_deleted) text.right -= 14 * scale;
+    brush->SetColor(color);
+    DrawTextEndEllipsis(dc, compositor->DwriteFactory(), compositor->SmallFormat(), brush.get(),
+        badge.label, text.left, text.top, std::max(0.0f, text.right - text.left), text.bottom - text.top);
+    if (badge.has_deleted) {
+        brush->SetColor(badge.status == 2 ? theme.text_secondary : D2D1::ColorF(0xC58A38));
+        dc->DrawLine({rc.right - 10 * scale, cy}, {rc.right - 4 * scale, cy}, brush.get(), 2 * scale);
+    }
+}
+int ChangePopoverLineCount(const ChangePopover& popup) {
+    return std::clamp(1 + static_cast<int>(std::count(popup.summary.begin(), popup.summary.end(), L'\n')), 1, 8);
+}
+D2D1_RECT_F ChangePopoverRect(const ChangePopover& popup, const D2D1_RECT_F& bounds, float scale) {
+    const float w = std::min(320.0f * scale, bounds.right - bounds.left - 16 * scale);
+    const float h = (54.0f + 24.0f * ChangePopoverLineCount(popup)) * scale;
+    const float x = std::clamp(popup.x, bounds.left + 8 * scale, std::max(bounds.left + 8 * scale, bounds.right - w - 8 * scale));
+    const float y = std::clamp(popup.y + 10 * scale, bounds.top + 8 * scale, std::max(bounds.top + 8 * scale, bounds.bottom - h - 8 * scale));
+    return D2D1::RectF(x, y, x + w, y + h);
 }
 struct ScrollbarMetrics {
     float thumbY, thumbH;

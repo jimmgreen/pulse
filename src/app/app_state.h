@@ -32,6 +32,7 @@
 #include "session.h"
 #include "duplicate_scan.h"
 #include "../index/index_client.h"
+#include "app_change_tracking.h"
 #include "../index/network_agent_client.h"
 #include "../index/content_search_client.h"
 #include "../ops/ops_manager.h"
@@ -75,6 +76,7 @@ constexpr UINT WM_DUP_VOLUMES = WM_APP + 59;
 constexpr UINT WM_UPDATE_DOWNLOADED = WM_APP + 60;
 constexpr UINT WM_UPDATE_INSTALL = WM_APP + 61;
 constexpr UINT WM_SEARCH_HISTORY = WM_APP + 62;
+constexpr UINT WM_CHANGE_TRACKING = WM_APP + 63;
 constexpr UINT kTimerUi = 1;
 
 enum class OmnibarMode { Path, Mixed, Command, Project };
@@ -187,6 +189,7 @@ struct AppState {
     int tagAdsLastFirstRow = -1;
     int tagAdsLastLastRow = -1;
     index::IndexClient index;
+    ChangeTrackingUi changes;
     index::NetworkAgentClient networkIndex;
     index::ContentSearchClient contentSearch;
     index::ContentSearchClient duplicateSearch;
@@ -524,6 +527,12 @@ struct AppState {
     app::Pane* blankClickPane = nullptr;
     app::Tab* blankClickTab = nullptr;
     uint64_t blankClickGeneration = 0;
+    app::Pane* blankDoublePane = nullptr;
+    app::Tab* blankDoubleTab = nullptr;
+    uint64_t blankDoubleGeneration = 0;
+    DWORD blankDoubleTime = 0;
+    POINT blankDoublePoint{};
+    bool blankDoublePending = false;
     POINT marqueeStart{};
     POINT marqueeCur{};
     std::unordered_set<int> marqueeBase;

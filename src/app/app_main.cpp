@@ -1,5 +1,6 @@
 #include "../common/windows_compat.h"
 #include "quick_access.h"
+#include "filter_animation.h"
 // app_main.cpp — Pulse UI process entry point, window, input, shot mode.
 #include "../ui/ui_compositor.h"
 #include "../ui/lumatext_renderer.h"
@@ -308,6 +309,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         ApplyAppWindowChrome(*s);
         if (s->appPrefs.keep_running_on_close) s->tray_controller.SetVisible(true);
         s->index.Start(hwnd, WM_INDEX_NOTIFY, WM_INDEX_SEARCH);
+        StartChangeTracking(*s);
         s->networkIndex.Start(hwnd, WM_NETWORK_INDEX_NOTIFY, WM_NETWORK_INDEX_SEARCH);
         s->contentSearch.Start(hwnd, WM_CONTENT_SEARCH);
         s->duplicateSearch.Start(hwnd, WM_DUPLICATE_SCAN);
@@ -779,6 +781,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case WM_TIMER: {
         if (s && wParam == kTimerUi) {
             bool dirty = false;
+            if (TickChangeTracking(*s)) dirty = true;
             DrainDirNotifies(*s);
             const ULONGLONG now = GetTickCount64();
             TickUpdates(*s, now);
@@ -821,19 +824,11 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             // Search affordance: expand only the focused pane, then reveal
             // the hosted edit once it has enough room for stable text layout.
             for (auto& pane : Panes(*s)) {
-                const float filterTarget =
-                    (s->filterEditing && pane.get() == s->pane) ? 1.0f : 0.0f;
-                const float filterStep = (filterTarget - pane->filter_expand) * 0.24f;
-                if (std::abs(filterStep) > 0.008f) {
-                    pane->filter_expand += filterStep;
+                if (app::TickFilterAnimation(*pane, s->filterEditing && pane.get() == s->pane, now))
                     dirty = true;
-                } else if (pane->filter_expand != filterTarget) {
-                    pane->filter_expand = filterTarget;
-                    dirty = true;
-                }
             }
             const float focusedExpand = s->pane ? s->pane->filter_expand : 0.0f;
-            if (s->filterFocusPending && focusedExpand >= 0.985f &&
+            if (s->filterFocusPending && focusedExpand >= 1.0f &&
                 s->hwndFilterEdit) {
                 if (s->pane) s->pane->filter_expand = 1.0f;
                 LayoutFilterEditor(*s);
@@ -932,7 +927,8 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             SetCursor(LoadCursorW(nullptr, vertical ? IDC_SIZEWE : IDC_SIZENS));
             return TRUE;
         }
-        if (hit.region == ui::HitTestResult::AddressSearch ||
+        if (hit.region == ui::HitTestResult::FilterClear ||
+            hit.region == ui::HitTestResult::AddressSearch ||
             hit.region == ui::HitTestResult::AddressSearchScope ||
             hit.region == ui::HitTestResult::AddressSearchClear ||
             hit.region == ui::HitTestResult::AddressSearchClose) {
@@ -1011,6 +1007,11 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return HandleKeyDown(s, hwnd, msg, wParam, lParam);
 
     case WM_COMMAND: {
+        if (s && reinterpret_cast<HWND>(lParam) == s->hwndFilterEdit &&
+            HIWORD(wParam) == EN_CHANGE) {
+            SyncFilterEditor(*s);
+            return 0;
+        }
         if (s && reinterpret_cast<HWND>(lParam) == s->hwndAddressEdit &&
             (HIWORD(wParam) == EN_CHANGE || HIWORD(wParam) == EN_UPDATE)) {
             if (HIWORD(wParam) == EN_CHANGE) QueueAddressSearch(*s);
@@ -1056,6 +1057,10 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 s->opsCompleted = st.completed_ops;
                 std::vector<std::wstring> tag_metadata_paths;
                 for (const auto& completed : s->ops.DrainCompletions()) {
+                    // Ask for confirmed index changes on the next tick. Keep any
+                    // in-flight request and never invent a deletion before capture.
+                    s->changes.last_query = 0;
+                    s->changes.last_detail_refresh = 0;
                     // Invalidate both sides of every successful mutation. The
                     // focused tab refreshes below; background tabs must not
                     // reuse a stale snapshot when they are shown later.
@@ -1111,6 +1116,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                         for (const auto& source : completed.sources)
                             s->places.RemoveAssignments(source, true);
                         s->duplicateScan.RemoveDeleted(completed.sources);
+                        s->tray.RemoveDeleted(completed.sources);
                     }
                     if (completed.type == ops::OpType::RecycleDelete ||
                         completed.type == ops::OpType::RealDelete ||
@@ -1219,6 +1225,10 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         delete result;
         return 0;
     }
+
+    case WM_CHANGE_TRACKING:
+        if (s) ReceiveChangeTracking(*s, static_cast<uint32_t>(wParam), lParam != 0);
+        return 0;
 
     case WM_INDEX_NOTIFY: {
         if (s) InvalidateRect(hwnd, nullptr, FALSE);
@@ -1392,6 +1402,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             s->contentSearch.Stop();
             s->duplicateSearch.Stop();
             s->networkIndex.Stop();
+            s->changes.client.Stop();
             s->index.Stop();
             s->worker.Stop();
             ShutdownDetailsSizeWalk(*s);

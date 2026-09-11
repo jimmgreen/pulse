@@ -148,6 +148,20 @@ std::wstring ResolveIndexMigrationTarget(const std::wstring& target) {
     return path.wstring();
 }
 
+bool SameIndexLocation(const std::wstring& source, const std::wstring& target) {
+    if (source.empty() || target.empty()) return false;
+    try {
+        auto normalize = [](const std::wstring& value) {
+            auto path = fs::path(ResolveIndexMigrationTarget(value));
+            if (!path.is_absolute()) return std::wstring{};
+            while (path != path.root_path() && path.filename().empty()) path = path.parent_path();
+            return Lower(path.wstring());
+        };
+        const auto from = normalize(source), to = normalize(target);
+        return !from.empty() && from == to;
+    } catch (...) { return false; }
+}
+
 bool CopyIndexForMigration(const std::wstring& source, const std::wstring& target,
                            IndexMigration& migration, std::wstring& error) {
     migration = {};

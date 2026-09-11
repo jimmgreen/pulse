@@ -51,6 +51,8 @@ void AppPrefs::ResetToDefaults() {
     show_pinned_tab_names = true;
     show_hidden_files = false;
     blank_click_go_back = false;
+    change_tracking_enabled = false;
+    change_tracking_days = 7;
     language = L"system";
     window_effect = L"mica-alt";
     background_image.clear();
@@ -86,6 +88,10 @@ std::wstring AppPrefs::ToJson() const {
     out += show_hidden_files ? L"true" : L"false";
     out += L",\n  \"blank_click_go_back\":";
     out += blank_click_go_back ? L"true" : L"false";
+    out += L",\n  \"change_tracking_enabled\":";
+    out += change_tracking_enabled ? L"true" : L"false";
+    out += L",\n  \"change_tracking_days\":";
+    out += std::to_wstring(change_tracking_days == 1 || change_tracking_days == 3 ? change_tracking_days : 7);
     out += L",\n  \"language\":\"";
     out += escaped_language;
     out += L"\"";
@@ -140,6 +146,10 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     show_pinned_tab_names = pulse::json::ExtractBool(json, L"show_pinned_tab_names", true);
     show_hidden_files = pulse::json::ExtractBool(json, L"show_hidden_files", false);
     blank_click_go_back = pulse::json::ExtractBool(json, L"blank_click_go_back", false);
+    change_tracking_enabled = pulse::json::ExtractBool(json, L"change_tracking_enabled", false);
+    change_tracking_days = pulse::json::ExtractInt(json, L"change_tracking_days", 7);
+    if (change_tracking_days != 1 && change_tracking_days != 3 && change_tracking_days != 7)
+        change_tracking_days = 7;
     language = pulse::json::ExtractString(json, L"language", L"system");
     if (language != L"system" && language != L"zh-CN" && language != L"en-US")
         language = L"system";
