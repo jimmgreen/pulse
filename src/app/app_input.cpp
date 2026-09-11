@@ -1618,7 +1618,18 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
         int my = GET_Y_LPARAM(lParam);
         CancelRenameClick(*s);
         CancelScrollAnimation(*s);
-        ui::WindowViewModel vm = BuildVm(*s);
+        // A click inside an already-active window does not move keyboard focus,
+        // so a hosted editor (rename, tag rename, filter, address) never saw the
+        // WM_KILLFOCUS that commits and closes it: the box stayed on screen over
+        // the row until focus really left the app. Hand focus back to the list
+        // first; every editor subclass commits through WM_KILLFOCUS.
+        if (s->renameIndex >= 0 || !s->tagRenameId.empty() ||
+            s->filterEditing || s->addressEditing) {
+            SetFocus(hwnd);
+        }
+        // Hit testing must not run selection probes (BuildVm contract in
+        // app_runtime.cpp); paint owns the details probe and its side effects.
+        ui::WindowViewModel vm = BuildVm(*s, false);
         D2D1_RECT_F rect = D2D1::RectF(0, 0, (float)s->compositor.Width(), (float)s->compositor.Height());
         ui::HitTestResult hit = s->renderer.HitTest(vm, rect, (float)mx, (float)my);
         if (s->addressSearching && hit.region != ui::HitTestResult::AddressBar &&

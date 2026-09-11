@@ -156,14 +156,18 @@ void ShowAddressEditor(AppState& s) {
     if (s.filterEditing) HideFilterEditor(s, true);
     s.addressSearching = false;
     s.addressEditing = true;
-    if (s.hwndAddressEdit && (GetWindowLongW(s.hwndAddressEdit, GWL_STYLE) & WS_CHILD)) {
-        DestroyWindow(s.hwndAddressEdit);
+    // Same ordering rule as ShowRenameOverlay: let go of the old editor with
+    // the kill-focus guard already armed, and never keep a dead handle.
+    s.addressIgnoreKillFocus = true;
+    if (s.hwndAddressEdit) {
+        if (IsWindow(s.hwndAddressEdit)) DestroyWindow(s.hwndAddressEdit);
         s.hwndAddressEdit = nullptr;
     }
     if (!s.hwndAddressEdit) {
         s.hwndAddressEdit = CreateHostedEdit(s, AddressEditProc);
         if (!s.hwndAddressEdit) {
             s.addressEditing = false;
+            s.addressIgnoreKillFocus = false;
             return;
         }
     }
@@ -332,20 +336,23 @@ void ShowRenameOverlay(AppState& s) {
     s.renameIndex = tab->selected_index;
     EnsureRowVisible(s, *tab, s.renameIndex);
 
-    if (s.hwndRenameEdit && (GetWindowLongW(s.hwndRenameEdit, GWL_STYLE) & WS_CHILD)) {
-        DestroyWindow(s.hwndRenameEdit);
+    // Arm the kill-focus guard before the old editor is torn down: destroying a
+    // focused EDIT synchronously re-enters HideRenameOverlay through
+    // WM_KILLFOCUS, which would clear renameIndex and leave the lookups below
+    // indexing -1 (and a visible editor that nothing can hide).
+    s.renameIgnoreKillFocus = true;
+    if (s.hwndRenameEdit) {
+        if (IsWindow(s.hwndRenameEdit)) DestroyWindow(s.hwndRenameEdit);
         s.hwndRenameEdit = nullptr;
     }
+    s.hwndRenameEdit = CreateHostedEdit(s, RenameEditProc);
     if (!s.hwndRenameEdit) {
-        s.hwndRenameEdit = CreateHostedEdit(s, RenameEditProc);
-        if (!s.hwndRenameEdit) {
-            s.renameIndex = -1;
-            return;
-        }
+        s.renameIndex = -1;
+        s.renameIgnoreKillFocus = false;
+        return;
     }
 
     const std::wstring& name = (*tab->snapshot)[s.renameIndex].name;
-    s.renameIgnoreKillFocus = true;
     SetWindowTextW(s.hwndRenameEdit, name.c_str());
     LayoutRenameOverlay(s);
     ShowWindow(s.hwndRenameEdit, SW_SHOW);
@@ -359,7 +366,14 @@ void ShowRenameOverlay(AppState& s) {
 }
 
 void HideRenameOverlay(AppState& s, bool commit) {
-    if (!s.hwndRenameEdit || s.renameIndex < 0) return;
+    if (!s.hwndRenameEdit) return;
+    if (s.renameIndex < 0) {
+        // Editor left behind by an interrupted setup (renameIndex cleared while
+        // the box stayed on screen): hide it so it cannot stick over the list.
+        if (IsWindow(s.hwndRenameEdit) && IsWindowVisible(s.hwndRenameEdit))
+            ShowWindow(s.hwndRenameEdit, SW_HIDE);
+        return;
+    }
     const int index = s.renameIndex;
     s.renameIndex = -1;
     if (commit) {
@@ -528,12 +542,16 @@ bool HandleHostedEditMessage(AppState& s, HWND hwnd, UINT msg, WPARAM wParam,
     }
     case WM_SETFOCUS: {
         result = DefSubclassProc(hwnd, msg, wParam, lParam);
-        HideCaret(hwnd);
-        SetTimer(hwnd, kEditCaretTimer, GetCaretBlinkTime(), nullptr);
         if (s.compositor.LumaTextEnabled()) {
+            // LumaText paints the text and its own blinking caret, so the native
+            // caret stays hidden and the blink timer drives the repaints.
+            HideCaret(hwnd);
+            SetTimer(hwnd, kEditCaretTimer, GetCaretBlinkTime(), nullptr);
             s.compositor.PresentLumaEdit(hwnd, HostedEditFormat(s, hwnd),
                                          HostedEditForeground(s), HostedEditBackground(s));
         } else {
+            // Native EDIT fallback: leave its caret alone. Hiding it here left
+            // the field with no insertion point, because nothing shows it again.
             InvalidateRect(hwnd, nullptr, FALSE);
         }
         return true;

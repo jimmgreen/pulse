@@ -156,6 +156,32 @@ std::wstring Describe(const OpRequest& r) {
     return s;
 }
 
+// In-place rename through the filesystem. Renaming inside one directory is a
+// metadata operation: MoveFileW takes a few milliseconds, while the shell round
+// trip (pulse_shell.exe + IFileOperation) costs ~250 ms per item and the listing
+// cannot refresh until it finishes. Callers fall back to the shell path when the
+// filesystem refuses (target in use, protected location, name collision).
+bool RenameInProcess(const std::wstring& source, const std::wstring& new_name,
+                     std::wstring* error) {
+    if (source.empty() || new_name.empty()) {
+        if (error) *error = L"名称无效";
+        return false;
+    }
+    const std::wstring target = JoinPath(ParentOf(source), new_name);
+    if (target.empty()) {
+        if (error) *error = L"名称无效";
+        return false;
+    }
+    if (CompareStringOrdinal(source.c_str(), -1, target.c_str(), -1, TRUE) == CSTR_EQUAL)
+        return true; // already named that way
+    if (!MoveFileW(source.c_str(), target.c_str())) {
+        const DWORD code = GetLastError();
+        if (error) *error = L"重命名失败（错误 " + std::to_wstring(code) + L"）";
+        return false;
+    }
+    return true;
+}
+
 struct TransferEntry {
     std::wstring source;
     std::wstring destination;
@@ -2125,6 +2151,15 @@ void OpsManager::RunShellOp(const OpRequest& req, uint64_t task_id) {
                 if (!req.sources.empty())
                     st.percent = 100.0f * static_cast<float>(i) / static_cast<float>(req.sources.size());
             });
+            // Per-item renames prefer the filesystem and fall back to the shell
+            // (which owns the conflict UI) only when it refuses.
+            std::wstring local_error;
+            if (RenameInProcess(req.sources[i], name, &local_error)) {
+                ok_sources.push_back(req.sources[i]);
+                ok_names.push_back(name);
+                ok_destinations.push_back(JoinPath(ParentOf(req.sources[i]), name));
+                continue;
+            }
             const uint32_t id = client.Rename(req.sources[i], name);
             current_req_id_.store(id);
             if (id == 0) {
@@ -2173,6 +2208,22 @@ void OpsManager::RunShellOp(const OpRequest& req, uint64_t task_id) {
                 if (ok_sources.size() != req.sources.size())
                     st.last_error = last_error;
             }
+        });
+        return;
+    }
+
+    // A single rename runs in place first. The shell path below still covers the
+    // requests the filesystem refuses (see RenameInProcess).
+    if (req.type == OpType::Rename && req.sources.size() == 1 &&
+        RenameInProcess(req.sources.front(), req.new_name, nullptr)) {
+        PushUndo(req);
+        SetStatus([&](OpStatus& st) {
+            st.active = false;
+            st.percent = -1.0f;
+            st.completed_ops++;
+            st.completed_items = st.total_items;
+            st.phase = OpPhase::Completed;
+            st.summary = Describe(req) + L" 完成";
         });
         return;
     }

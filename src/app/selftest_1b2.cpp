@@ -3729,6 +3729,116 @@ void TestViewLayouts() {
           L"search: dragging the path divider widens the path column");
 }
 
+// Measures the in-place rename commit path end to end: opening the editor,
+// typing a name, clicking blank list space (which ends the edit through focus
+// loss) and the shell rename that the commit submits. The breakdown is printed
+// as an [info] line; assertions stay correctness-only so a slow machine cannot
+// turn this case flaky.
+void TestRenameCommitLatency() {
+    CreateDirectoryW(kSandbox.c_str(), nullptr);
+    const std::wstring dir = kSandbox + L"\\latency";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    const std::wstring original = dir + L"\\latency.txt";
+    const std::wstring renamed = dir + L"\\latency-renamed.txt";
+    DeleteFileW(renamed.c_str());
+    {
+        HANDLE file = CreateFileW(original.c_str(), GENERIC_WRITE, 0, nullptr,
+                                  CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    }
+
+    auto state = std::make_unique<AppState>();
+    state->places.persist = false;
+    state->appPrefs.persist = false;
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = BlankPaneTestProc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"PulseRenameLatencySelftest";
+    RegisterClassW(&wc);
+    HWND hwnd = CreateWindowExW(0, wc.lpszClassName, L"", WS_POPUP, 0, 0, 1000, 700,
+                                nullptr, nullptr, wc.hInstance, nullptr);
+    Check(hwnd != nullptr, L"rename latency: hidden event test window created");
+    if (!hwnd) return;
+    state->hwnd = hwnd;
+    const bool graphics = state->compositor.Init(hwnd);
+    Check(graphics, L"rename latency: real hit-test graphics initialized");
+    if (!graphics) {
+        DestroyWindow(hwnd);
+        return;
+    }
+    state->compositor.RecreateTextFormats(1.0f);
+    state->renderer.SetCompositor(&state->compositor);
+    state->renderer.SetScale(1.0f);
+    state->showDetailsPanel = true; // the reported case had the panel open
+    state->window_tabs.NewTab(dir);
+    state->pane = state->window_tabs.Active()->panes.front().get();
+    app::Tab* tab = state->pane->ActiveTab();
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state.get()));
+
+    state->ops.Start([] {});
+    Sleep(800); // let the ops worker bring up pulse_shell.exe
+
+    auto entries = std::make_shared<std::vector<fs::DirEntry>>(1);
+    (*entries)[0].name = L"latency.txt";
+    (*entries)[0].attrs = FILE_ATTRIBUTE_ARCHIVE;
+    (*entries)[0].is_dir = false;
+    tab->SetSnapshot(std::move(entries));
+    tab->SelectOnly(0);
+
+    using clock = std::chrono::steady_clock;
+    auto now = [] { return clock::now(); };
+    auto ms = [](clock::time_point from, clock::time_point to) {
+        return std::chrono::duration<double, std::milli>(to - from).count();
+    };
+
+    const auto t0 = now();
+    ShowRenameOverlay(*state);
+    const auto t1 = now();
+    const bool editor_up = state->renameIndex == 0 && state->hwndRenameEdit != nullptr;
+    if (state->hwndRenameEdit) SetWindowTextW(state->hwndRenameEdit, L"latency-renamed.txt");
+    const auto t2 = now();
+
+    const D2D1_RECT_F list = ListRect(*state);
+    const LPARAM blank = MAKELPARAM(static_cast<int>(list.left + 20.0f),
+                                    static_cast<int>(list.bottom - 20.0f));
+    SendMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, blank);
+    const auto t3 = now();
+    SendMessageW(hwnd, WM_LBUTTONUP, 0, blank);
+    const auto t4 = now();
+
+    // Losing focus is what a click elsewhere delivers to the editor subclass.
+    if (state->renameIndex >= 0) HideRenameOverlay(*state, true);
+    const auto t5 = now();
+
+    const auto deadline = now() + std::chrono::seconds(30);
+    while (!Exists(renamed) && now() < deadline) Sleep(10);
+    const auto t6 = now();
+
+    // Same rename done directly on the filesystem, for comparison: the shell
+    // path (pulse_shell.exe + IFileOperation) is what the ops layer uses today.
+    const std::wstring local_back = dir + L"\\latency-local.txt";
+    DeleteFileW(local_back.c_str());
+    const auto t7 = now();
+    const bool local_ok = MoveFileW(renamed.c_str(), local_back.c_str()) != FALSE;
+    const auto t8 = now();
+    if (local_ok) MoveFileW(local_back.c_str(), renamed.c_str());
+
+    LogLine(L"[info] rename latency ms: open=%.1f set_text=%.1f blank_down=%.1f up=%.1f "
+            L"hide_commit=%.1f commit_to_disk=%.1f local_movefile=%.1f total=%.1f\n",
+            ms(t0, t1), ms(t1, t2), ms(t2, t3), ms(t3, t4), ms(t4, t5), ms(t5, t6),
+            ms(t7, t8), ms(t0, t6));
+    Check(editor_up, L"rename latency: editor opened on the selected row");
+    Check(Exists(renamed), L"rename latency: commit reached the filesystem");
+
+    state->ops.Stop();
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+    state->renderer.SetCompositor(nullptr);
+    state->compositor.Shutdown();
+    DestroyWindow(hwnd);
+    state->hwnd = nullptr;
+    UnregisterClassW(wc.lpszClassName, wc.hInstance);
+}
+
 } // namespace
 
 void TestLinkResolve() {
@@ -4398,6 +4508,7 @@ int RunSelfTest1B2() {
     TestColorPickerModel();
     TestBloomAccentGeometry();
     TestBloomSpring();
+    TestRenameCommitLatency();
     TestOpsThroughShell();
 
     // Cleanup: real-delete the whole sandbox via the ops layer is overkill;

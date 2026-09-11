@@ -598,7 +598,9 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (y >= 0 && y < tbH) {
             D2D1_RECT_F bounds = D2D1::RectF(0, 0,
                 (float)s->compositor.Width(), (float)s->compositor.Height());
-            ui::HitTestResult hit = s->renderer.HitTest(BuildVm(*s), bounds, x, y);
+            // Hit tests in the input/cursor paths must not run selection probes
+            // (BuildVm contract in app_runtime.cpp); paint owns those.
+            ui::HitTestResult hit = s->renderer.HitTest(BuildVm(*s, false), bounds, x, y);
             if (hit.region == ui::HitTestResult::Maximize) return HTMAXBUTTON;
             if (hit.region == ui::HitTestResult::Minimize) return HTMINBUTTON;
             if (hit.region == ui::HitTestResult::Close) return HTCLOSE;
@@ -614,7 +616,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         ScreenToClient(hwnd, &pt);
         D2D1_RECT_F bounds = D2D1::RectF(0, 0,
             (float)s->compositor.Width(), (float)s->compositor.Height());
-        ui::HitTestResult hit = s->renderer.HitTest(BuildVm(*s), bounds,
+        ui::HitTestResult hit = s->renderer.HitTest(BuildVm(*s, false), bounds,
             (float)pt.x, (float)pt.y);
         s->hoverPoint = pt;
         const int region = static_cast<int>(hit.region);
@@ -902,7 +904,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         POINT pt{};
         GetCursorPos(&pt);
         ScreenToClient(hwnd, &pt);
-        ui::WindowViewModel vm = BuildVm(*s);
+        ui::WindowViewModel vm = BuildVm(*s, false);
         D2D1_RECT_F bounds = D2D1::RectF(0, 0,
             (float)s->compositor.Width(), (float)s->compositor.Height());
         ui::HitTestResult hit = s->renderer.HitTest(vm, bounds, (float)pt.x, (float)pt.y);
