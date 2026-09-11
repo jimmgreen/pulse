@@ -12,6 +12,8 @@ void NotificationToast::Show(HWND owner, std::wstring title, std::wstring messag
     title_ = std::move(title);
     message_ = std::move(message);
     persistent_ = persistent;
+    top_center_ = false;
+    kind_ = persistent ? fluent::InfoBarKind::Warning : fluent::InfoBarKind::Informational;
     action_message_ = action_message;
     visible_ = true;
     hovered_ = pressed_close_ = pressed_card_ = false;
@@ -19,6 +21,11 @@ void NotificationToast::Show(HWND owner, std::wstring title, std::wstring messag
     remaining_ = 6000;
     SetTimer(owner, timer, 16, nullptr);
     InvalidateRect(owner, nullptr, FALSE);
+}
+void NotificationToast::ShowError(HWND owner, std::wstring title, std::wstring message) {
+    Show(owner, std::move(title), std::move(message), false);
+    top_center_ = true;
+    kind_ = fluent::InfoBarKind::Error;
 }
 void NotificationToast::Dismiss(HWND owner) {
     visible_ = false;
@@ -99,10 +106,11 @@ void NotificationToast::Draw(Compositor& compositor, const Theme& theme, float s
     const float width = std::min(420.0f * scale, compositor.Width() - 2 * margin);
     if (width < 100.0f * scale) return;
     float body_height = 40.0f * scale;
+    const float close_inset = top_center_ ? 12.0f : 2.0f;
     ComPtr<IDWriteTextLayout> layout;
     if (SUCCEEDED(compositor.DwriteFactory()->CreateTextLayout(message_.c_str(),
             static_cast<UINT32>(message_.size()), compositor.SmallFormat(),
-            width - 84 * scale, 400 * scale, &layout))) {
+            width - (82 + close_inset) * scale, 400 * scale, &layout))) {
         layout->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
         DWRITE_TEXT_METRICS metrics{};
         if (SUCCEEDED(layout->GetMetrics(&metrics))) body_height = metrics.height;
@@ -111,16 +119,19 @@ void NotificationToast::Draw(Compositor& compositor, const Theme& theme, float s
         std::max(72 * scale, compositor.Height() - 110 * scale));
     const float age = std::min(1.0f, static_cast<float>(GetTickCount64() - born_) / 180.0f);
     const float slide = high_contrast ? 0 : 12 * scale * (1 - age) * (1 - age);
-    const float right = compositor.Width() - margin;
-    const float bottom = compositor.Height() - 48 * scale + slide;
-    card_ = D2D1::RectF(right - width, bottom - height, right, bottom);
+    const float right = top_center_ ? (compositor.Width() + width) * 0.5f : compositor.Width() - margin;
+    const float top = top_center_ ? 64 * scale - slide : compositor.Height() - 48 * scale + slide - height;
+    card_ = D2D1::RectF(right - width, top, right, top + height);
     const float center = (card_.top + card_.bottom) * 0.5f;
-    close_ = D2D1::RectF(right - 30 * scale, center - 14 * scale, right - 2 * scale, center + 14 * scale);
+    close_ = D2D1::RectF(right - (28 + close_inset) * scale, center - 14 * scale,
+        right - close_inset * scale, center + 14 * scale);
     fluent::InfoBarSpec spec;
     spec.bounds = card_;
     spec.title = title_;
     spec.message = message_;
-    spec.kind = persistent_ ? fluent::InfoBarKind::Warning : fluent::InfoBarKind::Informational;
+    spec.kind = kind_;
+    spec.show_icon_background = !top_center_;
+    spec.close_inset = close_inset;
     spec.show_close = true;
     POINT cursor{};
     if (GetCursorPos(&cursor) && ScreenToClient(compositor.Hwnd(), &cursor))

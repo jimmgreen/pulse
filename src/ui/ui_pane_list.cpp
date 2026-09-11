@@ -1159,7 +1159,9 @@ D2D1_RECT_F MainRenderer::RenameFieldRect(const PaneViewModel& vm, const D2D1_RE
         nameX, textY, textH, nameColRight, cell.top, cell.bottom, scale_,
         e.name, tagDotCount, 0.0f, false, false, false,
         compositor_, compositor_->DwriteFactory(), compositor_->TextFormat());
-    const float field_w = std::max(40.0f * scale_, trail.name_w);
+    // Reserve the frame inset and EDIT margins as well as the name's ink width.
+    const float field_w = std::max(40.0f * scale_,
+        std::min(nameColRight - nameX, trail.name_w + 14.0f * scale_));
     const float field_h = std::max(22.0f * scale_, std::min(textH, 30.0f * scale_));
     return D2D1::RectF(nameX, textY, nameX + field_w, textY + field_h);
 }

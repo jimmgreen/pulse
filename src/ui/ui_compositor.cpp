@@ -162,7 +162,14 @@ bool Compositor::PresentLumaEdit(HWND hwnd, IDWriteTextFormat* format,
                                  const D2D1_COLOR_F& foreground,
                                  const D2D1_COLOR_F& background) {
     if (!hwnd) return false;
-    const bool ok = PaintLumaEdit(hwnd, nullptr, format, foreground, background);
+    // LWA_ALPHA children use Windows' redirected surface. Mixing that mode
+    // with UpdateLayeredWindow fails; paint our bitmap into their DC instead.
+    DWORD layered_flags = 0;
+    const bool redirected = GetLayeredWindowAttributes(hwnd, nullptr, nullptr, &layered_flags) &&
+        (layered_flags & LWA_ALPHA);
+    HDC hdc = redirected ? GetDC(hwnd) : nullptr;
+    const bool ok = (!redirected || hdc) && PaintLumaEdit(hwnd, hdc, format, foreground, background);
+    if (hdc) ReleaseDC(hwnd, hdc);
     ValidateRect(hwnd, nullptr);
     return ok;
 }

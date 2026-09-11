@@ -451,7 +451,7 @@ struct LumaTextRenderer::Impl {
         const size_t bytes = static_cast<size_t>(w) * static_cast<size_t>(h) * 4u;
         const bool layered =
             (GetWindowLongW(hwnd, GWL_EXSTYLE) & WS_EX_LAYERED) != 0;
-        if (layered) {
+        if (layered && !paint_dc) {
             // Own the redirected bitmap. SetLayeredWindowAttributes + WM_PAINT
             // lets EDIT's GetDC/ClearType selection paint win on mouse-down.
             if (!EnsurePresent(w, h)) return false;

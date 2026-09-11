@@ -45,10 +45,9 @@ $publicKey = (Get-Content (Join-Path $repo 'cmake/update-public-key.txt') -Raw).
 New-Item -ItemType Directory -Path $build -Force | Out-Null
 # Release verification is scoped to the changes being shipped. pulse already
 # depends on all three packaged hosts; standalone tests need explicit targets.
-$testNames = @('pulse_change_tracking_test', 'pulse_change_tracking_client_test',
-    'pulse_index_migration_test', 'pulse_localization_test',
+$testNames = @('pulse_rename_ops_test', 'pulse_child_edit_test', 'pulse_localization_test',
     'pulse_update_test', 'pulse_update_installer_test')
-$testTargets = (@('pulse', 'pulse_index_engine_test') + $testNames) -join ' '
+$testTargets = (@('pulse') + $testNames) -join ' '
 $batch = Join-Path $build 'compile-release.bat'
 @"
 @echo off
@@ -68,18 +67,21 @@ foreach ($testName in $testNames) {
     & (Join-Path $build "$testName.exe")
     if ($LASTEXITCODE -ne 0) { throw "$testName failed" }
 }
-& (Join-Path $build 'pulse_index_engine_test.exe') --recycle-only
-if ($LASTEXITCODE -ne 0) { throw 'USN recycle regression failed' }
+foreach ($mode in @('--startup-stop', '--shell-roundtrip')) {
+    & (Join-Path $build 'pulse_rename_ops_test.exe') $mode
+    if ($LASTEXITCODE -ne 0) { throw "Rename lifecycle check $mode failed" }
+}
 $env:PULSE_SELFTEST_NO_SCREENSHOTS = '1'
-$selftestCases = @('change-app', 'change-ui', 'filter-controls', 'filter-search-ui',
-    'rename-outside', 'folder-shortcut')
+$selftestCases = @('rename-editor', 'rename-editor-native', 'operation-toast',
+    'filter-controls', 'rename-outside')
 $selftestLogs = @{
-    'change-app' = 'bench_data/change-app-results.log'
-    'change-ui' = 'bench_data/change-ui/results.log'
-    'filter-search-ui' = 'bench_data/name-highlight/results.log'
+    'rename-editor' = 'bench_data/rename-editor/results.log'
+    'rename-editor-native' = 'bench_data/rename-editor/results.log'
+    'operation-toast' = 'bench_data/operation-toast/results.log'
 }
 foreach ($testCase in $selftestCases) {
-    $env:PULSE_SELFTEST_CASE = $testCase
+    $env:PULSE_SELFTEST_CASE = if ($testCase -eq 'rename-editor-native') { 'rename-editor' } else { $testCase }
+    $env:PULSE_LUMATEXT = if ($testCase -eq 'rename-editor-native') { '0' } else { '1' }
     $selftest = Start-Process -FilePath (Join-Path $build 'pulse.exe') -ArgumentList '--selftest' -WindowStyle Hidden -PassThru
     $finished = $selftest.WaitForExit(120000)
     if (-not $finished) { $selftest.Kill(); $selftest.WaitForExit() }
@@ -94,6 +96,7 @@ foreach ($testCase in $selftestCases) {
     }
 }
 Remove-Item Env:PULSE_SELFTEST_CASE
+Remove-Item Env:PULSE_LUMATEXT
 # Strip the embedded test suite from the shipped executable after verification.
 (Get-Content -LiteralPath $batch -Raw).Replace('-DPULSE_WITH_SELFTEST=ON', '-DPULSE_WITH_SELFTEST=OFF').Replace("--target $testTargets", '--target pulse') |
     Set-Content -LiteralPath $batch -Encoding ascii

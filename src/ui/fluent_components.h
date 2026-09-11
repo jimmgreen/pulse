@@ -322,6 +322,8 @@ struct InfoBarSpec {
     InfoBarKind kind = InfoBarKind::Informational;
     ControlState state{};
     bool show_close = true;
+    bool show_icon_background = true;
+    float close_inset = 2.0f;
 };
 
 struct EmptyStateSpec {

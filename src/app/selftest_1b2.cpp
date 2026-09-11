@@ -11,6 +11,7 @@
 #include "change_tracking_app_test.h"
 #include "name_highlight_ui_test.h"
 #include "rename_editor_test.h"
+#include "operation_toast_test.h"
 #include "filter_animation.h"
 #include "tab_shortcuts.h"
 #include "quick_access.h"
@@ -4541,6 +4542,13 @@ int RunSelfTest1B2() {
         TestLinkResolve();
         if (g_log) { fclose(g_log); g_log = nullptr; }
         return g_fail ? 1 : 0;
+    }
+    if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
+        wcscmp(test_case, L"operation-toast") == 0) {
+        TestNotificationToast();
+        const bool passed = RunOperationToastTest();
+        if (g_log) { fclose(g_log); g_log = nullptr; }
+        return passed && !g_fail ? 0 : 1;
     }
     if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
         wcscmp(test_case, L"rename-editor") == 0) {

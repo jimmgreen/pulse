@@ -279,24 +279,28 @@ void UpdateOperationWindow(AppState& s, bool allow_conflict_dialog) {
                 s.pendingRenameName.clear();
             const bool folder = status.type == ops::OpType::CreateFolder;
             const bool file = status.type == ops::OpType::CreateTextFile;
-            std::wstring text = l10n::Get(folder ? l10n::StringId::CannotCreateFolder
+            const std::wstring title = l10n::Get(folder ? l10n::StringId::CannotCreateFolder
                 : file ? l10n::StringId::CannotCreateTextFile : l10n::StringId::CannotRename);
-            text += L"\n\n";
+            std::wstring message;
             const std::wstring& err = status.last_error;
             const bool no_access = err.find(L"没有权限") != std::wstring::npos
                 || err.find(L"拒绝访问") != std::wstring::npos
                 || err.find(L"Access is denied") != std::wstring::npos
                 || err == L"create failed";
             if (no_access) {
-                text += l10n::Get(folder || file
+                message = l10n::Get(folder || file
                     ? l10n::StringId::FolderNoWritePermission
                     : l10n::StringId::RenameNoPermission);
+            } else if (err == L"目标名称已存在") {
+                message = l10n::Get(l10n::StringId::RenameTargetExists);
+            } else if (err == L"名称无效") {
+                message = l10n::Get(l10n::StringId::InvalidName);
             } else if (!err.empty()) {
-                text += err;
+                message = err;
             } else {
-                text += l10n::Get(l10n::StringId::OperationFailedMessage);
+                message = l10n::Get(l10n::StringId::OperationFailedMessage);
             }
-            MessageBoxW(s.hwnd, text.c_str(), L"Pulse", MB_OK | MB_ICONWARNING);
+            s.notification_toast.ShowError(s.hwnd, title, std::move(message));
             return;
         }
         if (!s.operationWindow->IsVisible()) s.operationWindow->Show(true);

@@ -683,6 +683,7 @@ enum class StringId : UINT {
     CannotCreateFolder = IDS_CANNOT_CREATE_FOLDER,
     CannotCreateTextFile = IDS_CANNOT_CREATE_TEXT_FILE,
     CannotRename = IDS_CANNOT_RENAME,
+    RenameTargetExists = IDS_RENAME_TARGET_EXISTS,
     FolderNoWritePermission = IDS_FOLDER_NO_WRITE_PERMISSION,
     RenameNoPermission = IDS_RENAME_NO_PERMISSION,
     OperationFailedMessage = IDS_OPERATION_FAILED_MESSAGE,

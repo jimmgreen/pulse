@@ -9,7 +9,7 @@ namespace pulse::l10n {
 namespace {
 
 constexpr UINT kFirstString = IDS_SETTINGS;
-constexpr UINT kLastString = IDS_CHANGE_REFRESH_FAILED;
+constexpr UINT kLastString = IDS_RENAME_TARGET_EXISTS;
 static_assert(static_cast<UINT>(StringId::SettingsChangeTracking) >= kFirstString &&
               static_cast<UINT>(StringId::ChangeDisabled) <= kLastString);
 

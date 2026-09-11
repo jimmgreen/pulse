@@ -2526,15 +2526,17 @@ void Painter::DrawInfoBar(const InfoBarSpec& spec) {
                       high_contrast_ ? theme_->stroke_card : theme_->stroke_card);
     FillRoundedAccent(dc_, ScratchBrush(accent), spec.bounds, radius, Px(3.0f), AccentEdge::Left);
     const bool stacked = Height(spec.bounds) >= Px(56.0f) && !spec.message.empty();
-    const float icon_top = stacked ? spec.bounds.top + Px(12.0f)
+    const float icon_top = stacked ? spec.bounds.top + Px(spec.show_icon_background ? 12.0f : 6.0f)
         : (spec.bounds.top + spec.bounds.bottom - Px(28.0f)) * 0.5f;
     const auto glyph_bounds = D2D1::RectF(spec.bounds.left + Px(14.0f), icon_top,
                                           spec.bounds.left + Px(42.0f), icon_top + Px(28.0f));
-    auto icon_fill = accent;
-    icon_fill.a = dark_ ? 0.18f : 0.10f;
-    FillRoundedRect(glyph_bounds, Px(14.0f), icon_fill);
+    if (spec.show_icon_background) {
+        auto icon_fill = accent;
+        icon_fill.a = dark_ ? 0.18f : 0.10f;
+        FillRoundedRect(glyph_bounds, Px(14.0f), icon_fill);
+    }
     DrawGlyph(spec.glyph.empty() ? fallback_glyph : spec.glyph, glyph_bounds, accent);
-    const float close_space = spec.show_close ? Px(32.0f) : Px(8.0f);
+    const float close_space = spec.show_close ? Px(30.0f + spec.close_inset) : Px(8.0f);
     const auto text_bounds = D2D1::RectF(glyph_bounds.right + Px(10.0f), spec.bounds.top,
                                          spec.bounds.right - close_space, spec.bounds.bottom);
     if (stacked) {
@@ -2561,14 +2563,15 @@ void Painter::DrawInfoBar(const InfoBarSpec& spec) {
              CaptionFormat(), theme_->text_secondary);
     }
     if (spec.show_close) {
+        const float close_right = spec.bounds.right - Px(spec.close_inset);
         if (spec.state.hovered) {
             const float center_y = (spec.bounds.top + spec.bounds.bottom) * 0.5f;
-            FillRoundedRect(D2D1::RectF(spec.bounds.right - Px(30.0f), center_y - Px(14.0f),
-                spec.bounds.right - Px(2.0f), center_y + Px(14.0f)), Px(4.0f), theme_->fill_hover);
+            FillRoundedRect(D2D1::RectF(close_right - Px(28.0f), center_y - Px(14.0f),
+                close_right, center_y + Px(14.0f)), Px(4.0f), theme_->fill_hover);
         }
         DrawGlyphWithFormat(kClose,
-                            D2D1::RectF(spec.bounds.right - Px(28.0f), spec.bounds.top,
-                                       spec.bounds.right - Px(4.0f), spec.bounds.bottom),
+                            D2D1::RectF(close_right - Px(26.0f), spec.bounds.top,
+                                       close_right - Px(2.0f), spec.bounds.bottom),
                             theme_->text_secondary, MicroIconFormat());
     }
 }
