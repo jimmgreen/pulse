@@ -1,5 +1,6 @@
 // index_engine.cpp — mmap v6 base + heap delta (优化.md).
 #include "index_engine.h"
+#include "index_parent_chain.h"
 #include "index_config.h"
 #include "index_query.h"
 #include "index_mft.h"
@@ -726,7 +727,8 @@ bool Engine::InSubtreeLocked(int32_t node, int32_t ancestor) const {
     if (end > ancestor && node >= ancestor && node < end && node < BaseCount() &&
         ancestor < BaseCount())
         return true;
-    for (int32_t i = node; i >= 0;) {
+    ParentChainGuard chain(LiveCount());
+    for (int32_t i = node; chain.Visit(i);) {
         if (i == ancestor) return true;
         i = NodeAt(i).parent;
     }
@@ -828,7 +830,8 @@ bool Engine::MatchNodeLocked(int32_t i, const CompiledQuery& q, int32_t prefix_n
                     std::wstring path = BuildPathLocked(i);
                     ok = WildcardFolded(path.data(), static_cast<uint32_t>(path.size()), t.name);
                 } else {
-                    for (int32_t j = i; j >= 0; j = NodeAt(j).parent) {
+                    ParentChainGuard chain(LiveCount());
+                    for (int32_t j = i; chain.Visit(j); j = NodeAt(j).parent) {
                         std::wstring_view pn = NameOf(j);
                         if (MatchName(pn.data(), static_cast<uint32_t>(pn.size()), t)) {
                             ok = true;
@@ -1864,7 +1867,8 @@ bool Engine::MatchQueryNodeLocked(int32_t id, const CompiledQuery& query,
                                              term.name);
                 } else {
                     name_ok = false;
-                    for (int32_t current = id; current >= 0;
+                    ParentChainGuard chain(LiveCount());
+                    for (int32_t current = id; chain.Visit(current);
                          current = QueryNodeAtLocked(current).parent) {
                         const std::wstring_view part = QueryNameOfLocked(current);
                         if (MatchName(part.data(), static_cast<uint32_t>(part.size()), term)) {
@@ -2322,6 +2326,7 @@ bool Engine::IsIndexNoiseLocked(const VolState& v, const USN_RECORD_V2* rec) con
 }
 
 Engine::UsnApply Engine::ApplyUsnLocked(VolState& v, const USN_RECORD_V2* rec) {
+    if (!running_) return UsnApply::None;
     if (IsIndexNoiseLocked(v, rec)) return UsnApply::None;
     std::wstring_view name(
         reinterpret_cast<const wchar_t*>(reinterpret_cast<const BYTE*>(rec) + rec->FileNameOffset),
@@ -2337,6 +2342,8 @@ Engine::UsnApply Engine::ApplyUsnLocked(VolState& v, const USN_RECORD_V2* rec) {
     const uint64_t frn = rec->FileReferenceNumber;
     const bool is_dir = (rec->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
     int32_t idx = FindByFrnLocked(v, frn);
+    // NTFS reports the volume root with its own FRN as parent.
+    if (idx == v.root_idx) return UsnApply::None;
     const auto tracked_path = v.tracking_paths.find(frn);
     const bool had_tracking_path = tracked_path != v.tracking_paths.end();
     const std::wstring previous_path = had_tracking_path ? tracked_path->second :
@@ -2445,9 +2452,23 @@ Engine::UsnApply Engine::ApplyUsnLocked(VolState& v, const USN_RECORD_V2* rec) {
     std::wstring parent_path = BuildPathLocked(parent);
     if (!parent_path.empty() && parent_path.back() != L'\\') parent_path += L'\\';
     if (IsExcludedPath((resolved_parent.empty() ? parent_path : resolved_parent + L"\\") + std::wstring(name))) flags |= kFlagHidden;
-    for (int32_t a = parent; a > v.root_idx && a >= 0;) {
+    ParentChainGuard chain(LiveCount());
+    for (int32_t a = parent; a != v.root_idx;) {
+        if (!running_) return effect;
+        // Journal rename order can temporarily place an ancestor below its own
+        // descendant. Keep the old location rather than persist a parent cycle.
+        if (a == idx || !chain.Visit(a)) {
+            changes_.Gap();
+            v.journal_id = 0;
+            return effect;
+        }
         const Node an = NodeAt(a);
-        if (an.flags & kFlagHidden) { flags |= kFlagHidden; break; }
+        if (!(an.flags & kFlagDir) || IsTomb(a)) {
+            changes_.Gap();
+            v.journal_id = 0;
+            return effect;
+        }
+        if (an.flags & kFlagHidden) flags |= kFlagHidden;
         a = an.parent;
     }
 
@@ -2571,6 +2592,9 @@ bool Engine::CatchUpVolume(VolState& v, bool* changed, bool* structural) {
         if (hdr->RecordLength == 0 || p + hdr->RecordLength > end) break;
         if (hdr->MajorVersion == 2) {
             const UsnApply apply = ApplyUsnLocked(v, reinterpret_cast<USN_RECORD_V2*>(p));
+            // An invalid parent relation needs a fresh volume snapshot, not a
+            // journal cursor advanced past a change we could not apply safely.
+            if (v.journal_id == 0) return false;
             if (apply == UsnApply::Structure) any_struct = true;
             else if (apply == UsnApply::Attr) any_attr = true;
         }

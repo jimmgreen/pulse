@@ -371,7 +371,7 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
                 vm.settings_update_status = l10n::Get(l10n::StringId::UpdateUpToDate);
             }
             vm.settings_bloom = &s.bloom_accent;
-            vm.settings_index_service = s.index.ServiceMode();
+            vm.settings_index_service = s.index.Connected() && s.index.ServiceMode();
             vm.settings_index_installed = s.settings.service_installed();
             vm.settings_index_status = s.index.Status();
             vm.settings_index_migrating = s.settings.migration_pending();
@@ -391,7 +391,7 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
             if (s.shot.active && vm.settings_page == 1 && index_volumes.empty()) {
                 index::IndexConfig defaults;
                 index_volumes = index::EnumerateLocalVolumes(defaults);
-                vm.settings_index_service = true;
+                if (!vm.settings_index_installed) vm.settings_index_service = true;
                 vm.settings_index_path = L"C:\\ProgramData\\Pulse\\Index";
             }
             for (const auto& volume : index_volumes) {

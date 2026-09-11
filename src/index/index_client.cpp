@@ -319,6 +319,11 @@ void IndexClient::Worker() {
                     pipe_ = INVALID_HANDLE_VALUE;
                 }
                 connected_ = false;
+                {
+                    std::lock_guard<std::mutex> lock(mu_);
+                    status_ = L"索引连接已断开，正在重新连接…";
+                }
+                if (notify_ && status_msg_) PostMessageW(notify_, status_msg_, 0, 0);
                 break;
             }
             if (hdr.type == RSP_IDX_STATUS)
@@ -448,8 +453,8 @@ bool IndexClient::RebuildElevated() {
     return RunElevatedIndexCommand(ExePath(), L"--rebuild-index");
 }
 
-bool IndexClient::InstallServiceElevated() {
-    return RunElevatedIndexCommand(ExePath(), L"--install");
+bool IndexClient::InstallServiceElevated(DWORD* error) {
+    return RunElevatedIndexCommand(ExePath(), L"--install", error);
 }
 
 bool IndexClient::ConfigureIndexPathElevated(const std::wstring& path, std::wstring* error) {

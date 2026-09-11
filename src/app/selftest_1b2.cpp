@@ -4551,6 +4551,12 @@ int RunSelfTest1B2() {
         return passed && !g_fail ? 0 : 1;
     }
     if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
+        wcscmp(test_case, L"address-editor") == 0) {
+        const bool passed = RunAddressEditorTest();
+        if (g_log) { fclose(g_log); g_log = nullptr; }
+        return passed ? 0 : 1;
+    }
+    if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
         wcscmp(test_case, L"rename-editor") == 0) {
         const bool passed = RunRenameEditorTest();
         if (g_log) { fclose(g_log); g_log = nullptr; }

@@ -213,6 +213,7 @@ enum class StringId : UINT {
     PreviewLoadFailed = IDS_PREVIEW_LOAD_FAILED,
     PreviewUnsupported = IDS_PREVIEW_UNSUPPORTED,
     SettingsFullIndex = IDS_SETTINGS_FULL_INDEX,
+    SettingsServiceWaiting = IDS_SETTINGS_SERVICE_WAITING,
     SettingsUserIndex = IDS_SETTINGS_USER_INDEX,
     SettingsFullIndexDesc = IDS_SETTINGS_FULL_INDEX_DESC,
     SettingsUserIndexDesc = IDS_SETTINGS_USER_INDEX_DESC,

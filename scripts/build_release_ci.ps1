@@ -47,7 +47,7 @@ New-Item -ItemType Directory -Path $build -Force | Out-Null
 # depends on all three packaged hosts; standalone tests need explicit targets.
 $testNames = @('pulse_rename_ops_test', 'pulse_child_edit_test', 'pulse_localization_test',
     'pulse_update_test', 'pulse_update_installer_test')
-$testTargets = (@('pulse') + $testNames) -join ' '
+$testTargets = (@('pulse', 'pulse_index_engine_test', 'pulse_index_host_stress') + $testNames) -join ' '
 $batch = Join-Path $build 'compile-release.bat'
 @"
 @echo off
@@ -72,16 +72,24 @@ foreach ($mode in @('--startup-stop', '--shell-roundtrip')) {
     if ($LASTEXITCODE -ne 0) { throw "Rename lifecycle check $mode failed" }
 }
 $env:PULSE_SELFTEST_NO_SCREENSHOTS = '1'
+& (Join-Path $build 'pulse_index_engine_test.exe') --parent-cycle-only
+if ($LASTEXITCODE -ne 0) { throw 'Index parent-cycle regression failed' }
+foreach ($mode in @('--service-start-only', '--shutdown-only')) {
+    & (Join-Path $build 'pulse_index_host_stress.exe') $mode
+    if ($LASTEXITCODE -ne 0) { throw "Index lifecycle check $mode failed" }
+}
 $selftestCases = @('rename-editor', 'rename-editor-native', 'operation-toast',
-    'filter-controls', 'rename-outside')
+    'filter-controls', 'rename-outside', 'address-editor', 'address-editor-native')
 $selftestLogs = @{
     'rename-editor' = 'bench_data/rename-editor/results.log'
     'rename-editor-native' = 'bench_data/rename-editor/results.log'
     'operation-toast' = 'bench_data/operation-toast/results.log'
+    'address-editor' = 'bench_data/address-editor/results.log'
+    'address-editor-native' = 'bench_data/address-editor/results.log'
 }
 foreach ($testCase in $selftestCases) {
-    $env:PULSE_SELFTEST_CASE = if ($testCase -eq 'rename-editor-native') { 'rename-editor' } else { $testCase }
-    $env:PULSE_LUMATEXT = if ($testCase -eq 'rename-editor-native') { '0' } else { '1' }
+    $env:PULSE_SELFTEST_CASE = $testCase -replace '-native$', ''
+    $env:PULSE_LUMATEXT = if ($testCase.EndsWith('-native')) { '0' } else { '1' }
     $selftest = Start-Process -FilePath (Join-Path $build 'pulse.exe') -ArgumentList '--selftest' -WindowStyle Hidden -PassThru
     $finished = $selftest.WaitForExit(120000)
     if (-not $finished) { $selftest.Kill(); $selftest.WaitForExit() }

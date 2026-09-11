@@ -376,12 +376,14 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
     } else if (vm.settings_page == 1) {
         fluent::InfoBarSpec info;
         info.bounds = lay.index_info;
-        info.title = pulse::l10n::Get(vm.settings_index_service
+        info.title = pulse::l10n::Get((vm.settings_index_service || vm.settings_index_installed)
             ? pulse::l10n::StringId::SettingsFullIndex
             : pulse::l10n::StringId::SettingsUserIndex);
         info.message = vm.settings_index_service
             ? pulse::l10n::Get(pulse::l10n::StringId::SettingsFullIndexDesc)
-            : pulse::l10n::Get(pulse::l10n::StringId::SettingsUserIndexDesc);
+            : pulse::l10n::Get(vm.settings_index_installed
+                ? pulse::l10n::StringId::SettingsServiceWaiting
+                : pulse::l10n::StringId::SettingsUserIndexDesc);
         info.kind = vm.settings_index_error.empty() ? fluent::InfoBarKind::Informational
                                                      : fluent::InfoBarKind::Error;
         if (!vm.settings_index_error.empty()) info.message = vm.settings_index_error;

@@ -103,6 +103,7 @@ struct EngineTestAccess {
         std::unique_ptr<Engine::MappedFile> mapped;
         if (!e.MapIndexFile(path, mapped)) return false;
         e.AdoptMappedLocked(std::move(mapped));
+        e.running_ = true;
         return true;
     }
 
@@ -152,6 +153,78 @@ struct EngineTestAccess {
         const bool restored = result.records.size() == 1 && result.records[0].kind == ChangeKind::Created;
         std::cout << (deleted && restored ? "[PASS]" : "[FAIL]") << " USN recycle and restore original path\n";
         return deleted && restored;
+    }
+
+    static bool ParentCycleFixture() {
+        Engine e;
+        if (!Build(e)) return false;
+        auto id = [&](uint64_t frn) { return e.FindByFrnLocked(e.vols_.front(), frn); };
+        const int32_t user = id(20), codex = id(30);
+        const Node original = e.NodeAt(user);
+        bool ok = true;
+        auto check = [&](bool passed, const char* label) {
+            std::cout << (passed ? "[PASS] " : "[FAIL] ") << label << '\n';
+            ok &= passed;
+        };
+        e.vols_.front().journal_id = 123;
+        Usn(e, 20, 20, L"TestUser", USN_REASON_RENAME_NEW_NAME);
+        check(e.NodeAt(user).parent == original.parent && e.vols_.front().journal_id == 0,
+              "reject self-parent USN rename and request volume recovery");
+        Usn(e, 20, 30, L"TestUser", USN_REASON_RENAME_NEW_NAME);
+        check(e.NodeAt(user).parent == original.parent, "reject ancestor moved beneath descendant");
+        Usn(e, 30, 50, L".codex", USN_REASON_RENAME_NEW_NAME);
+        check(e.NodeAt(codex).parent == id(50), "accept valid directory move");
+        Usn(e, 30, 20, L".codex", USN_REASON_RENAME_NEW_NAME);
+        const auto root = e.vols_.front().root_idx;
+        Usn(e, 5, 5, L"root", USN_REASON_FILE_CREATE);
+        check(e.NodeAt(root).parent == -1, "preserve volume root");
+        // Reproduce a cycle already present in an old in-memory/delta tree.
+        e.live_.nodes[user].parent = codex;
+        Usn(e, 200, 20, L"new-folder", USN_REASON_FILE_CREATE);
+        check(id(200) < 0, "existing parent cycle cannot hang USN processing");
+        check(!e.InSubtreeLocked(user, id(50)), "existing cycle cannot hang subtree lookup");
+        Term term;
+        term.name = L"never-present";
+        term.name_how = NameHow::Substring;
+        term.name_in_path = true;
+        CompiledQuery query;
+        query.groups = {{term}};
+        check(!e.MatchNodeLocked(user, query, -1, false, false) &&
+              !e.MatchQueryNodeLocked(user, query, -1, false, false),
+              "existing cycle cannot hang path-name search");
+        e.live_.nodes[user].parent = e.LiveCount() + 100;
+        Usn(e, 201, 20, L"invalid-parent", USN_REASON_FILE_CREATE);
+        check(id(201) < 0, "reject out-of-range ancestor");
+        e.live_.nodes[user].parent = original.parent;
+        e.RequestStop();
+        Usn(e, 202, 20, L"cancelled", USN_REASON_FILE_CREATE);
+        check(id(202) < 0, "stop cancels parent validation");
+        Engine source;
+        const auto file = std::filesystem::path(L"bench_data") /
+            (L"index-parent-cycle-" + std::to_wstring(GetCurrentProcessId()) + L".bin");
+        const bool saved = Build(source) && Save(source, file.wstring());
+        check(saved, "save isolated mapped fixture");
+        if (saved) {
+            Engine mapped;
+            const bool loaded = Load(mapped, file.wstring());
+            check(loaded, "load mapped parent fixture");
+            if (loaded) {
+                const int32_t target = mapped.FindByFrnLocked(mapped.vols_.front(), 30);
+                const int32_t excluded = mapped.FindByFrnLocked(mapped.vols_.front(), 40);
+                Usn(mapped, 30, 40, L".codex", USN_REASON_RENAME_NEW_NAME);
+                check(mapped.NodeAt(target).parent == excluded &&
+                      (mapped.NodeAt(target).flags & Engine::kFlagHidden),
+                      "mapped rename preserves excluded visibility");
+                Usn(mapped, 40, 30, L"excluded", USN_REASON_RENAME_NEW_NAME);
+                check(mapped.NodeAt(excluded).parent != target,
+                      "reject cycle through mapped overlay even when parent is hidden");
+                Usn(mapped, 30, 20, L".codex", USN_REASON_RENAME_NEW_NAME);
+                check(!(mapped.NodeAt(target).flags & Engine::kFlagHidden),
+                      "mapped valid move restores visibility");
+            }
+        }
+        std::filesystem::remove(file);
+        return ok;
     }
 
     static void Usn(Engine& e, uint64_t id, uint64_t parent, const wchar_t* name, DWORD reason) {
@@ -221,6 +294,7 @@ void CheckSearch(Engine& e) {
 }
 
 int wmain(int argc, wchar_t** argv) {
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--parent-cycle-only") return EngineTestAccess::ParentCycleFixture() ? 0 : 1;
     if (argc > 1 && std::wstring_view(argv[1]) == L"--recycle-only") return EngineTestAccess::RecycleFixture() ? 0 : 1;
     if (argc > 1 && std::wstring_view(argv[1]) == L"--coverage-only") return EngineTestAccess::CoverageBenchmark() ? 0 : 1;
     std::cout << std::unitbuf;

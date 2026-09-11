@@ -1,4 +1,5 @@
 #include "../index/index_protocol.h"
+#include "../index/index_service_start.h"
 #include "../ipc/protocol.h"
 
 #include <windows.h>
@@ -113,6 +114,50 @@ bool WaitForSearch(HANDLE pipe, uint32_t wanted_id, DWORD timeout_ms,
 
 int wmain(int argc, wchar_t** argv) {
     std::wcout << std::unitbuf;
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--service-start-only") {
+        auto run = [&](std::vector<DWORD> states, DWORD expected, unsigned expected_starts,
+                       const wchar_t* label, DWORD query_error = 0, DWORD start_error = 0,
+                       DWORD exit_code = 0) {
+            size_t next = 0;
+            unsigned starts = 0;
+            DWORD waited = 0;
+            bool started_stopped = true;
+            DWORD last_state = 0;
+            const DWORD result = EnsureServiceRunning(
+                [&](SERVICE_STATUS_PROCESS& status) -> DWORD {
+                    status.dwCurrentState = states[(std::min)(next++, states.size() - 1)];
+                    last_state = status.dwCurrentState;
+                    status.dwWin32ExitCode = exit_code;
+                    return query_error;
+                },
+                [&]() -> DWORD {
+                    ++starts;
+                    started_stopped &= last_state == SERVICE_STOPPED;
+                    return start_error;
+                },
+                [&](DWORD delay) { waited += delay; });
+            Check(result == expected && starts == expected_starts && started_stopped &&
+                  waited <= 33500, label);
+        };
+        run({SERVICE_RUNNING}, 0, 0, L"running service is reused immediately");
+        run({SERVICE_STOP_PENDING, SERVICE_STOPPED, SERVICE_START_PENDING, SERVICE_RUNNING},
+            0, 1, L"wait for stop before starting once");
+        run({SERVICE_STOP_PENDING}, ERROR_SERVICE_REQUEST_TIMEOUT, 0,
+            L"stuck stop times out without starting or killing the service");
+        run({SERVICE_START_PENDING, SERVICE_RUNNING}, 0, 0,
+            L"an existing startup is allowed to finish");
+        run({SERVICE_STOPPED, SERVICE_START_PENDING}, ERROR_SERVICE_REQUEST_TIMEOUT, 1,
+            L"stuck startup has a bounded wait");
+        run({SERVICE_STOPPED, SERVICE_RUNNING, SERVICE_STOPPED}, ERROR_INVALID_DATA, 1,
+            L"early service failure preserves its exit code", 0, 0, ERROR_INVALID_DATA);
+        run({SERVICE_STOPPED}, ERROR_ACCESS_DENIED, 0,
+            L"query failure preserves its error", ERROR_ACCESS_DENIED);
+        run({SERVICE_STOPPED}, ERROR_ACCESS_DENIED, 1,
+            L"start failure preserves its error", 0, ERROR_ACCESS_DENIED);
+        run({SERVICE_STOPPED, SERVICE_RUNNING}, 0, 1,
+            L"concurrent successful startup is accepted", 0, ERROR_SERVICE_ALREADY_RUNNING);
+        return failures ? 1 : 0;
+    }
     const std::wstring token = std::to_wstring(GetCurrentProcessId()) + L"-" +
         std::to_wstring(GetTickCount64());
     const std::wstring pipe_name = L"\\\\.\\pipe\\PulseIndex.Test." + token;

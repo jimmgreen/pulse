@@ -155,10 +155,18 @@ bool SettingsController::StartUiTask(SettingsTask task) {
             return index::IndexClient::ConfigureVolumeElevated(value.key, value.enabled);
         case SettingsTaskKind::Exclude:
             return index::IndexClient::ConfigureExcludePathElevated(value.path, value.enabled);
-        case SettingsTaskKind::InstallService:
-            if (index::IndexClient::InstallServiceElevated()) return true;
-            error = l10n::Get(l10n::StringId::SettingsServiceStartError).c_str();
+        case SettingsTaskKind::InstallService: {
+            DWORD code = 0;
+            if (index::IndexClient::InstallServiceElevated(&code)) return true;
+            wchar_t detail[512]{};
+            FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                nullptr, code, 0, detail, ARRAYSIZE(detail), nullptr);
+            error = L"(" + std::to_wstring(code) + L") " + (detail[0]
+                ? std::wstring(detail) : l10n::Get(l10n::StringId::SettingsServiceStartError));
+            while (!error.empty() && (error.back() == L'\r' || error.back() == L'\n'))
+                error.pop_back();
             return false;
+        }
         case SettingsTaskKind::RebuildIndex:
             return index::IndexClient::RebuildElevated();
         case SettingsTaskKind::ConfigureIndexPath:

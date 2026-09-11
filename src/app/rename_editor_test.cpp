@@ -3,6 +3,7 @@
 #include "app_hosted_edit.h"
 #include "app_input.h"
 #include "../ui/lumatext_renderer.h"
+#include "../ui/fluent_menu.h"
 #include <cstdio>
 #include <filesystem>
 #include <share.h>
@@ -125,6 +126,129 @@ bool CaptureEditor(HWND edit, const wchar_t* path, AppState* rendered_state = nu
     ReleaseDC(nullptr, screen);
     return ok;
 }
+}
+
+bool RunAddressEditorTest() {
+    const auto output = std::filesystem::absolute(L"bench_data/address-editor");
+    std::filesystem::create_directories(output);
+    FILE* log = _fsopen("bench_data/address-editor/results.log", "wN", _SH_DENYNO);
+    bool ok = log != nullptr;
+    const auto check = [&](bool value, const char* label) {
+        if (log) { fprintf(log, "[%s] %s\n", value ? "PASS" : "FAIL", label); fflush(log); }
+        ok &= value;
+    };
+    auto state = std::make_unique<AppState>();
+    state->isolatedTest = true;
+    state->places.persist = state->appPrefs.persist = state->searchHistory.persist = false;
+    wchar_t option[8]{};
+    const bool capture = GetEnvironmentVariableW(L"PULSE_ADDRESS_EDITOR_CAPTURE", option, ARRAYSIZE(option)) > 0;
+    if (GetEnvironmentVariableW(L"PULSE_ADDRESS_EDITOR_DARK", option, ARRAYSIZE(option)))
+        state->darkMode = option[0] == L'1';
+    if (GetEnvironmentVariableW(L"PULSE_ADDRESS_EDITOR_SCALE", option, ARRAYSIZE(option)) &&
+        wcscmp(option, L"150") == 0) state->scale = 1.5f;
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = TestOwner;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"PulseAddressEditorTest";
+    RegisterClassW(&wc);
+    HWND hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOREDIRECTIONBITMAP, wc.lpszClassName,
+        L"", WS_POPUP, capture ? 0 : -30000, capture ? 0 : -30000, 1000, 700,
+        nullptr, nullptr, wc.hInstance, nullptr);
+    state->hwnd = hwnd;
+    if (hwnd && state->compositor.Init(hwnd)) {
+        state->compositor.RecreateTextFormats(state->scale);
+        state->renderer.SetCompositor(&state->compositor);
+        state->renderer.SetScale(state->scale);
+        state->window_tabs.NewTab(L"C:\\pulse-address-editor-fixture");
+        state->pane = state->window_tabs.Active()->panes.front().get();
+        auto* tab = ActiveTab(*state);
+        tab->loading = false;
+        tab->search_input_path = tab->current_path;
+        tab->search_input_text = L"setup-dia";
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state.get()));
+        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        if (capture) SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        ShowAddressSearch(*state);
+        Pump();
+        check(state->addressSearching && GetFocus() == state->hwndAddressEdit,
+            "production search editor opens with focus");
+        const auto inspect = [&](const wchar_t* name, bool selected) {
+            if (!capture) return;
+            EditorPixels pixels;
+            check(CaptureEditor(state->hwndAddressEdit, (output / name).c_str(), nullptr,
+                &pixels, state->darkMode) && pixels.glyphs > 15 && (!selected || pixels.selection > 20),
+                "screen shows search characters and any requested selection");
+        };
+        inspect(L"initial.bmp", true);
+        for (wchar_t ch : std::wstring(L"setup-dia")) SendMessageW(state->hwndAddressEdit, WM_CHAR, ch, 0);
+        wchar_t text[128]{};
+        GetWindowTextW(state->hwndAddressEdit, text, ARRAYSIZE(text));
+        check(wcscmp(text, L"setup-dia") == 0, "continuous typing replaces the selected query");
+        inspect(L"typed.bmp", false);
+        LayoutAddressEditor(*state);
+        Pump();
+        inspect(L"layout.bmp", false);
+
+        struct HistoryCheck { AppState* state; bool capture; std::filesystem::path output; bool ran = false; bool passed = false; int phase = 0; };
+        static HistoryCheck* history = nullptr;
+        HistoryCheck history_check{state.get(), capture, output};
+        history = &history_check;
+        const UINT_PTR timer = SetTimer(nullptr, 0, 80, [](HWND, UINT, UINT_PTR id, DWORD) {
+            if (!history || !history->state->menu || !history->state->menu->IsOpen()) return;
+            auto& s = *history->state;
+            if (history->phase++ == 0) {
+                SendMessageW(s.hwndAddressEdit, EM_SETSEL, 0, -1);
+                for (wchar_t ch : std::wstring(L"setup-dia")) SendMessageW(s.hwndAddressEdit, WM_CHAR, ch, 0);
+                return;
+            }
+            KillTimer(nullptr, id);
+            history->ran = true;
+            bool valid = GetFocus() == s.hwndAddressEdit;
+            wchar_t text[64]{};
+            GetWindowTextW(s.hwndAddressEdit, text, ARRAYSIZE(text));
+            valid &= wcscmp(text, L"setup-dia") == 0 && GetFocus() == s.hwndAddressEdit;
+            if (history->capture) {
+                EditorPixels pixels;
+                valid &= CaptureEditor(s.hwndAddressEdit, (history->output / L"history.bmp").c_str(),
+                    nullptr, &pixels, s.darkMode) && pixels.glyphs > 15;
+                valid &= CaptureEditor(s.hwnd, (history->output / L"history-owner.bmp").c_str());
+            }
+            history->passed = valid;
+            s.menu->Dismiss();
+        });
+        if (timer) ShowAddressSearchHistory(*state);
+        KillTimer(nullptr, timer);
+        history = nullptr;
+        check(history_check.ran && history_check.passed,
+            "history popup keeps continuously typed search text visible and focused");
+        state->addressLiveDue = state->addressHistoryDue = 0;
+        SendMessageW(state->hwndAddressEdit, EM_SETSEL, 0, -1);
+        SendMessageW(state->hwndAddressEdit, WM_IME_STARTCOMPOSITION, 0, 0);
+        for (wchar_t ch : std::wstring(L"中文搜索")) SendMessageW(state->hwndAddressEdit, WM_CHAR, ch, 0);
+        SendMessageW(state->hwndAddressEdit, WM_IME_ENDCOMPOSITION, 0, 0);
+        GetWindowTextW(state->hwndAddressEdit, text, ARRAYSIZE(text));
+        check(wcscmp(text, L"中文搜索") == 0 && !state->addressSearchComposing,
+            "Unicode query remains editable through composition messages");
+        inspect(L"unicode.bmp", false);
+        state->addressLiveDue = state->addressHistoryDue = 0;
+        HideAddressEditor(*state, false);
+        ShowAddressSearch(*state);
+        Pump();
+        inspect(L"reopened.bmp", true);
+        HideAddressEditor(*state, false);
+        ShowAddressEditor(*state);
+        Pump();
+        inspect(L"address.bmp", true);
+        HideAddressEditor(*state, false);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+    } else check(false, "search owner and graphics initialize");
+    if (hwnd) DestroyWindow(hwnd);
+    state->hwndAddressEdit = nullptr;
+    state->hwnd = nullptr;
+    UnregisterClassW(wc.lpszClassName, wc.hInstance);
+    if (log) fclose(log);
+    return ok;
 }
 
 bool RunRenameEditorTest() {

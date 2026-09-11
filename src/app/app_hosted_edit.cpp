@@ -102,10 +102,10 @@ HWND CreateHostedEdit(AppState& s, SUBCLASSPROC proc) {
     HWND hwnd = ui::CreateChildEdit(s.hwnd);
     if (!hwnd) return nullptr;
     SetWindowTheme(hwnd, L"", L"");
-    // The rename child uses a redirected surface: its uploaded layered bitmap
-    // can disappear under the main composition surface. RenameEditProc suppresses
-    // native drawing while editing, then presents the LumaText pixels to its DC.
-    if (!s.compositor.LumaTextEnabled() || proc == RenameEditProc)
+    // Address/search and rename children use redirected surfaces: uploaded
+    // layered bitmaps can disappear under the main composition surface.
+    // Their procedures suppress native drawing and present LumaText to the DC.
+    if (!s.compositor.LumaTextEnabled() || proc == RenameEditProc || proc == AddressEditProc)
         SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
     SendMessageW(hwnd, WM_SETFONT, (WPARAM)s.editFont, TRUE);
     SetWindowSubclass(hwnd, proc, 1, reinterpret_cast<DWORD_PTR>(&s));
@@ -602,6 +602,24 @@ bool HandleHostedEditMessage(AppState& s, HWND hwnd, UINT msg, WPARAM wParam,
     }
 }
 
+static LRESULT DefPresentedHostedEditProc(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    const bool changes_visual = msg == WM_SETTEXT || msg == EM_SETSEL || msg == EM_REPLACESEL ||
+        msg == WM_KEYDOWN || msg == WM_CHAR || msg == WM_CUT || msg == WM_PASTE ||
+        msg == WM_CLEAR || msg == WM_UNDO || msg == EM_UNDO || msg == WM_IME_COMPOSITION ||
+        msg == WM_IME_ENDCOMPOSITION || msg == WM_SETFONT || msg == WM_SIZE || msg == EM_SETMARGINS ||
+        msg == EM_SETCUEBANNER;
+    const bool custom_paint = changes_visual && s && s->compositor.LumaTextEnabled() && IsWindowVisible(hwnd);
+    if (custom_paint) SendMessageW(hwnd, WM_SETREDRAW, FALSE, 0);
+    const LRESULT result = DefSubclassProc(hwnd, msg, wParam, lParam);
+    if (custom_paint) {
+        SendMessageW(hwnd, WM_SETREDRAW, TRUE, 0);
+        HideCaret(hwnd);
+        s->compositor.PresentLumaEdit(hwnd, HostedEditFormat(*s, hwnd),
+            HostedEditForeground(*s), HostedEditBackground(*s));
+    }
+    return result;
+}
+
 LRESULT CALLBACK AddressEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
                                         UINT_PTR /*uIdSubclass*/, DWORD_PTR dwRefData) {
     AppState* s = reinterpret_cast<AppState*>(dwRefData);
@@ -612,7 +630,7 @@ LRESULT CALLBACK AddressEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
     }
 
     if (s && s->addressSearchComposing && (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN || msg == WM_CHAR))
-        return DefSubclassProc(hwnd, msg, wParam, lParam);
+        return DefPresentedHostedEditProc(s, hwnd, msg, wParam, lParam);
     if (s && msg == WM_LBUTTONUP && s->addressSearching && !s->searchHistoryOpen)
         PostMessageW(s->hwnd, WM_SEARCH_HISTORY, 0, 0);
     LRESULT handled = 0;
@@ -655,7 +673,7 @@ LRESULT CALLBACK AddressEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPar
         return EraseHostedEditBackground(hwnd, wParam, s) ? 1 : 0;
     }
     }
-    return DefSubclassProc(hwnd, msg, wParam, lParam);
+    return DefPresentedHostedEditProc(s, hwnd, msg, wParam, lParam);
 }
 
 LRESULT CALLBACK FilterEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
@@ -710,20 +728,7 @@ LRESULT CALLBACK RenameEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         return EraseHostedEditBackground(hwnd, wParam, s) ? 1 : 0;
     }
     }
-    const bool changes_visual = msg == WM_SETTEXT || msg == EM_SETSEL || msg == EM_REPLACESEL ||
-        msg == WM_KEYDOWN || msg == WM_CHAR || msg == WM_CUT || msg == WM_PASTE ||
-        msg == WM_CLEAR || msg == WM_UNDO || msg == EM_UNDO || msg == WM_IME_COMPOSITION ||
-        msg == WM_IME_ENDCOMPOSITION || msg == WM_SETFONT || msg == WM_SIZE || msg == EM_SETMARGINS;
-    const bool custom_paint = changes_visual && s && s->compositor.LumaTextEnabled() && IsWindowVisible(hwnd);
-    if (custom_paint) SendMessageW(hwnd, WM_SETREDRAW, FALSE, 0);
-    const LRESULT result = DefSubclassProc(hwnd, msg, wParam, lParam);
-    if (custom_paint) {
-        SendMessageW(hwnd, WM_SETREDRAW, TRUE, 0);
-        HideCaret(hwnd);
-        s->compositor.PresentLumaEdit(hwnd, HostedEditFormat(*s, hwnd),
-            HostedEditForeground(*s), HostedEditBackground(*s));
-    }
-    return result;
+    return DefPresentedHostedEditProc(s, hwnd, msg, wParam, lParam);
 }
 
 LRESULT CALLBACK TagRenameEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,

@@ -9,6 +9,7 @@
 //   Pulse.Index.exe --uninstall  removes the service
 #include "index_protocol.h"
 #include "index_engine.h"
+#include "index_service_start.h"
 #include "index_config.h"
 #include "../common/crash_reporter.h"
 #include "../common/diagnostics_exporter.h"
@@ -735,9 +736,9 @@ int InstallService() {
         if (!scm) return static_cast<int>(GetLastError());
 
         SC_HANDLE svc = OpenServiceW(scm, kServiceName,
-                                     SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS |
+                                     SERVICE_START | SERVICE_QUERY_STATUS |
                                          SERVICE_CHANGE_CONFIG);
-        if (!svc) {
+        if (!svc && GetLastError() == ERROR_SERVICE_DOES_NOT_EXIST) {
             svc = CreateServiceW(scm, kServiceName, L"Pulse Index",
                                  SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS,
                                  SERVICE_AUTO_START, SERVICE_ERROR_NORMAL,
@@ -751,69 +752,26 @@ int InstallService() {
             continue;
         }
 
-        ChangeServiceConfigW(svc, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START,
-                             SERVICE_ERROR_NORMAL, bin.c_str(), nullptr, nullptr,
-                             nullptr, nullptr, nullptr, L"Pulse Index");
-        SERVICE_DESCRIPTIONW desc{};
-        wchar_t text[] = L"Pulse file-name index (MFT + USN). UI talks to this over a named pipe.";
-        desc.lpDescription = text;
-        ChangeServiceConfig2W(svc, SERVICE_CONFIG_DESCRIPTION, &desc);
-
-        SERVICE_STATUS_PROCESS ssp{};
-        DWORD needed = 0;
-        if (QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO, reinterpret_cast<LPBYTE>(&ssp),
-                                 sizeof(ssp), &needed) &&
-            ssp.dwCurrentState != SERVICE_STOPPED &&
-            ssp.dwCurrentState != SERVICE_STOP_PENDING) {
-            SERVICE_STATUS stop_status{};
-            ControlService(svc, SERVICE_CONTROL_STOP, &stop_status);
-            for (int i = 0; i < 40; ++i) {
-                Sleep(250);
-                if (!QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO,
-                                          reinterpret_cast<LPBYTE>(&ssp), sizeof(ssp),
-                                          &needed) ||
-                    ssp.dwCurrentState == SERVICE_STOPPED) break;
-            }
-        }
-
-        const BOOL started = StartServiceW(svc, 0, nullptr);
-        last_err = started ? 0 : GetLastError();
-        if (last_err == ERROR_SERVICE_ALREADY_RUNNING) last_err = 0;
-        if (last_err == 0) {
-            // Wait until RUNNING, then confirm it stays up past the early
-            // crash window (corrupt delta replay previously died ~2s in).
-            bool running = false;
-            for (int i = 0; i < 80; ++i) {
-                if (!QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO,
-                                          reinterpret_cast<LPBYTE>(&ssp), sizeof(ssp),
-                                          &needed)) break;
-                if (ssp.dwCurrentState == SERVICE_RUNNING) {
-                    running = true;
-                    break;
-                }
-                if (ssp.dwCurrentState == SERVICE_STOPPED) {
-                    last_err = ssp.dwWin32ExitCode ? ssp.dwWin32ExitCode
-                                                   : ERROR_SERVICE_NOT_ACTIVE;
-                    break;
-                }
-                Sleep(100);
-            }
-            if (running) {
-                Sleep(3500);
-                if (QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO,
-                                         reinterpret_cast<LPBYTE>(&ssp), sizeof(ssp),
-                                         &needed) &&
-                    ssp.dwCurrentState == SERVICE_RUNNING) {
-                    CloseServiceHandle(svc);
-                    CloseServiceHandle(scm);
-                    return 0;
-                }
-                last_err = (ssp.dwCurrentState == SERVICE_STOPPED && ssp.dwWin32ExitCode)
-                    ? ssp.dwWin32ExitCode
-                    : ERROR_SERVICE_NOT_ACTIVE;
-            } else if (last_err == 0) {
-                last_err = ERROR_SERVICE_REQUEST_TIMEOUT;
-            }
+        if (!ChangeServiceConfigW(svc, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START,
+                                  SERVICE_ERROR_NORMAL, bin.c_str(), nullptr, nullptr,
+                                  nullptr, nullptr, nullptr, L"Pulse Index")) {
+            last_err = GetLastError();
+        } else {
+            SERVICE_DESCRIPTIONW desc{};
+            wchar_t text[] = L"Pulse file-name index (MFT + USN). UI talks to this over a named pipe.";
+            desc.lpDescription = text;
+            ChangeServiceConfig2W(svc, SERVICE_CONFIG_DESCRIPTION, &desc);
+            last_err = EnsureServiceRunning(
+                [&](SERVICE_STATUS_PROCESS& status) -> DWORD {
+                    DWORD needed = 0;
+                    return QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO,
+                        reinterpret_cast<LPBYTE>(&status), sizeof(status), &needed)
+                        ? ERROR_SUCCESS : GetLastError();
+                },
+                [&]() -> DWORD {
+                    return StartServiceW(svc, 0, nullptr) ? ERROR_SUCCESS : GetLastError();
+                },
+                [](DWORD delay) { Sleep(delay); });
         }
         CloseServiceHandle(svc);
         CloseServiceHandle(scm);
