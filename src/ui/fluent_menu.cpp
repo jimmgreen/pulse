@@ -1059,9 +1059,9 @@ LRESULT CALLBACK FluentMenu::FilterEditProc(HWND hwnd, UINT msg, WPARAM wParam, 
     }
     case WM_SETFOCUS: {
         LRESULT lr = DefSubclassProc(hwnd, msg, wParam, lParam);
-        HideCaret(hwnd);
-        SetTimer(hwnd, 71, GetCaretBlinkTime(), nullptr);
         if (self->compositor_ && self->compositor_->LumaTextEnabled()) {
+            HideCaret(hwnd);
+            SetTimer(hwnd, 71, GetCaretBlinkTime(), nullptr);
             const D2D1_COLOR_F fg = self->dark_
                 ? D2D1::ColorF(1.0f, 1.0f, 1.0f)
                 : D2D1::ColorF(26.0f / 255.0f, 26.0f / 255.0f, 26.0f / 255.0f);

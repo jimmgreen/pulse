@@ -344,6 +344,10 @@ add_executable(pulse_ops_test
     src/ipc/shell_client.cpp)
 target_link_libraries(pulse_ops_test PRIVATE ole32 shell32 uuid bcrypt)
 
+add_executable(pulse_rename_ops_test src/bench/rename_ops_test.cpp
+    src/ops/ops_manager.cpp src/ipc/shell_client.cpp)
+target_link_libraries(pulse_rename_ops_test PRIVATE ole32 shell32 uuid bcrypt)
+
 # ---- Pulse.Shell.exe: COM isolation process (stage 1: recycle bin / IFileOperation) ----
 file(GLOB_RECURSE PULSE_SHELL_SOURCES CONFIGURE_DEPENDS src/shell_host/*.cpp)
 if(PULSE_SHELL_SOURCES)
@@ -426,6 +430,7 @@ if(TARGET pulse AND TARGET pulse_index)
 endif()
 if(TARGET pulse_ops_test AND TARGET pulse_shell)
     add_dependencies(pulse_ops_test pulse_shell)
+    add_dependencies(pulse_rename_ops_test pulse_shell)
 endif()
 
 # Headless modal lifecycle checks: no screenshots and no foreground activation.

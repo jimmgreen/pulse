@@ -1622,10 +1622,10 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
         int my = GET_Y_LPARAM(lParam);
         CancelRenameClick(*s);
         CancelScrollAnimation(*s);
-        // The hosted EDIT is an owned popup; a click on its owner does not
-        // reliably produce WM_KILLFOCUS. Commit before changing pane/selection.
+        // Commit explicitly before changing pane/selection; a click on a
+        // non-focusable part of the owner need not produce WM_KILLFOCUS.
         if (s->renameIndex >= 0) HideRenameOverlay(*s, true);
-        ui::WindowViewModel vm = BuildVm(*s);
+        ui::WindowViewModel vm = BuildVm(*s, false);
         D2D1_RECT_F rect = D2D1::RectF(0, 0, (float)s->compositor.Width(), (float)s->compositor.Height());
         ui::HitTestResult hit = s->renderer.HitTest(vm, rect, (float)mx, (float)my);
         if (s->addressSearching && hit.region != ui::HitTestResult::AddressBar &&

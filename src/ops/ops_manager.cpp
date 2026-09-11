@@ -156,6 +156,51 @@ std::wstring Describe(const OpRequest& r) {
     return s;
 }
 
+// In-place rename avoids the Shell IPC round trip. Failed renames report their
+// error directly: the current Shell host suppresses confirmation and can
+// overwrite an existing target, so it is not a safe rename fallback.
+bool IsRenameComponent(const std::wstring& name) {
+    if (name.empty() || name == L"." || name == L".." ||
+        name.back() == L'.' || name.back() == L' ') return false;
+    for (const auto c : name)
+        if (c < 32 || std::wstring_view(L"\\/:*?\"<>|").find(c) != std::wstring_view::npos) return false;
+    std::wstring stem = name.substr(0, name.find(L'.'));
+    while (!stem.empty() && stem.back() == L' ') stem.pop_back();
+    for (auto& c : stem) c = static_cast<wchar_t>(towupper(c));
+    if (stem == L"CON" || stem == L"PRN" || stem == L"AUX" || stem == L"NUL" ||
+        stem == L"CONIN$" || stem == L"CONOUT$") return false;
+    if (stem.size() == 4 && (stem.starts_with(L"COM") || stem.starts_with(L"LPT")) &&
+        ((stem[3] >= L'1' && stem[3] <= L'9') || stem[3] == L'\u00b9' || stem[3] == L'\u00b2' || stem[3] == L'\u00b3')) return false;
+    return true;
+}
+
+enum class RenameResult { Completed, Rejected };
+RenameResult RenameInProcess(const std::wstring& source, const std::wstring& new_name,
+                     std::wstring* error) {
+    if (source.empty() || !IsRenameComponent(new_name)) {
+        if (error) *error = L"名称无效";
+        return RenameResult::Rejected;
+    }
+    const std::wstring target = JoinPath(ParentOf(source), new_name);
+    if (target.empty()) {
+        if (error) *error = L"名称无效";
+        return RenameResult::Rejected;
+    }
+    // The current shell host suppresses confirmation UI, so sending an existing
+    // target there could silently overwrite it. Reject that conflict here.
+    if (CompareStringOrdinal(source.c_str(), -1, target.c_str(), -1, TRUE) != CSTR_EQUAL &&
+        GetFileAttributesW(target.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        if (error) *error = L"目标名称已存在";
+        return RenameResult::Rejected;
+    }
+    if (!MoveFileW(source.c_str(), target.c_str())) {
+        const DWORD code = GetLastError();
+        if (error) *error = L"重命名失败（错误 " + std::to_wstring(code) + L"）";
+        return RenameResult::Rejected;
+    }
+    return RenameResult::Completed;
+}
+
 struct TransferEntry {
     std::wstring source;
     std::wstring destination;
@@ -2110,6 +2155,21 @@ void OpsManager::RunShellOp(const OpRequest& req, uint64_t task_id) {
 
     auto& client = ipc::ShellClient::Instance();
 
+    if (req.type == OpType::Rename || req.type == OpType::BatchRename) {
+        bool valid = !req.sources.empty() && (req.type != OpType::Rename || req.sources.size() == 1);
+        for (size_t i = 0; i < req.sources.size(); ++i) {
+            const auto& name = req.type == OpType::BatchRename && i < req.new_names.size() ? req.new_names[i] : req.new_name;
+            valid = valid && !req.sources[i].empty() && IsRenameComponent(name);
+        }
+        if (!valid || shell_cancel_requested_.load() || stopping_.load()) {
+            SetStatus([&](OpStatus& st) {
+                st.active = false; st.phase = OpPhase::Failed; st.percent = -1.0f;
+                ++st.completed_ops; st.last_error = valid ? L"已取消" : L"名称无效";
+            });
+            return;
+        }
+    }
+
     if (req.type == OpType::BatchRename) {
         std::vector<std::wstring> ok_sources;
         std::vector<std::wstring> ok_names;
@@ -2117,7 +2177,7 @@ void OpsManager::RunShellOp(const OpRequest& req, uint64_t task_id) {
         std::wstring last_error;
         bool cancelled = false;
         for (size_t i = 0; i < req.sources.size(); ++i) {
-            if (stopping_.load()) break;
+            if (stopping_.load() || shell_cancel_requested_.load()) { cancelled = true; break; }
             const std::wstring& name = i < req.new_names.size() ? req.new_names[i] : req.new_name;
             SetStatus([&](OpStatus& st) {
                 st.current_item = FileName(req.sources[i]);
@@ -2125,28 +2185,18 @@ void OpsManager::RunShellOp(const OpRequest& req, uint64_t task_id) {
                 if (!req.sources.empty())
                     st.percent = 100.0f * static_cast<float>(i) / static_cast<float>(req.sources.size());
             });
-            const uint32_t id = client.Rename(req.sources[i], name);
-            current_req_id_.store(id);
-            if (id == 0) {
-                last_error = L"操作层未启动";
+            if (stopping_.load() || shell_cancel_requested_.load()) { cancelled = true; break; }
+            // Each item uses the same no-overwrite filesystem rename.
+            std::wstring local_error;
+            const auto local = RenameInProcess(req.sources[i], name, &local_error);
+            if (local == RenameResult::Rejected) { last_error = local_error; continue; }
+            if (local == RenameResult::Completed) {
+                ok_sources.push_back(req.sources[i]);
+                ok_names.push_back(name);
+                ok_destinations.push_back(JoinPath(ParentOf(req.sources[i]), name));
                 continue;
             }
-            if (shell_cancel_requested_.load()) client.Cancel(id);
-            uint32_t hr = 0;
-            bool item_cancelled = false;
-            std::wstring error;
-            if (!WaitShellDone(id, hr, item_cancelled, error)) return;
-            if (item_cancelled) {
-                cancelled = true;
-                break;
-            }
-            if (FAILED(static_cast<HRESULT>(hr))) {
-                last_error = error.empty() ? L"操作失败" : error;
-                continue;
-            }
-            ok_sources.push_back(req.sources[i]);
-            ok_names.push_back(name);
-            ok_destinations.push_back(JoinPath(ParentOf(req.sources[i]), name));
+
         }
         current_req_id_.store(0);
         shell_cancel_requested_ = false;
@@ -2177,6 +2227,31 @@ void OpsManager::RunShellOp(const OpRequest& req, uint64_t task_id) {
         return;
     }
 
+    // A single rename shares the batch path's validation and no-overwrite rules.
+    if (req.type == OpType::Rename && req.sources.size() == 1) {
+        std::wstring local_error;
+        const auto local = RenameInProcess(req.sources.front(), req.new_name, &local_error);
+        if (local == RenameResult::Rejected) {
+            SetStatus([&](OpStatus& st) {
+                st.active = false; st.phase = OpPhase::Failed; st.percent = -1.0f;
+                ++st.completed_ops; st.last_error = local_error;
+            });
+            return;
+        }
+        if (local == RenameResult::Completed) {
+            PushUndo(req);
+            SetStatus([&](OpStatus& st) {
+                st.active = false;
+                st.percent = -1.0f;
+                st.completed_ops++;
+                st.completed_items = st.total_items;
+                st.phase = OpPhase::Completed;
+                st.summary = Describe(req) + L" 完成";
+            });
+            return;
+        }
+    }
+
     uint32_t id = 0;
     switch (req.type) {
     case OpType::Copy:
@@ -2186,8 +2261,7 @@ void OpsManager::RunShellOp(const OpRequest& req, uint64_t task_id) {
         break;
     case OpType::RecycleDelete: id = client.DeleteRecycle(req.sources); break;
     case OpType::RealDelete: id = client.RealDelete(req.sources); break;
-    case OpType::Rename:
-        if (!req.sources.empty()) id = client.Rename(req.sources.front(), req.new_name);
+    case OpType::Rename: // Handled above; never send rename to the Shell host.
         break;
     case OpType::CreateFolder:
         if (!req.sources.empty()) id = client.CreateFolder(req.sources.front());

@@ -20,14 +20,21 @@ void ShellClient::Start(Callbacks cb) {
 
 void ShellClient::Stop() {
     if (!running_.exchange(false)) return;
-    if (pipe_ != INVALID_HANDLE_VALUE) {
-        // Unblock the reader's ReadFile.
-        CancelIoEx(pipe_, nullptr);
-        CloseHandle(pipe_);
-        pipe_ = INVALID_HANDLE_VALUE;
+    {
+        std::lock_guard<std::mutex> lock(send_mutex_);
+        // Connection publication and read initiation use this same lock. Once
+        // cancelled, no reader can issue another operation on this pipe.
+        if (pipe_ != INVALID_HANDLE_VALUE) CancelIoEx(pipe_, nullptr);
     }
     if (reader_.joinable()) reader_.join();
-    KillChild();
+    {
+        std::lock_guard<std::mutex> lock(send_mutex_);
+        if (pipe_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(pipe_);
+            pipe_ = INVALID_HANDLE_VALUE;
+        }
+        KillChild();
+    }
 }
 
 void ShellClient::KillChild() {
@@ -80,6 +87,7 @@ bool ShellClient::SpawnChild() {
 
 // Caller must hold send_mutex_.
 bool ShellClient::EnsureConnected() {
+    if (!running_.load()) return false;
     if (pipe_ != INVALID_HANDLE_VALUE) return true;
 
     std::wstring name = PipeNameFor(GetCurrentProcessId());
@@ -89,6 +97,7 @@ bool ShellClient::EnsureConnected() {
     // pipe, so retry in a bounded loop.
     const auto deadline = GetTickCount64() + 8000;
     while (true) {
+        if (!running_.load()) return false;
         h = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
                         OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
         if (h != INVALID_HANDLE_VALUE) {
@@ -127,12 +136,14 @@ bool ShellClient::EnsureConnected() {
         fprintf(stderr, "[shell_client] pipe CreateFile err=%lu\n", err);
         return false;
     }
+    if (!running_.load()) { CloseHandle(h); return false; }
     pipe_ = h;
     return true;
 }
 
 // Caller must hold send_mutex_.
 bool ShellClient::SendFrame(uint32_t type, uint32_t id, const std::vector<uint8_t>& payload) {
+    if (!running_.load()) return false;
     MsgHeader h;
     h.type = type;
     h.request_id = id;
@@ -296,8 +307,31 @@ const std::wstring& ShellClient::UnreachableMessage() const {
     return last_error_.empty() ? kFallback : last_error_;
 }
 
-static bool ReadFull(HANDLE pipe, void* out, DWORD size) {
-    return PipeRead(pipe, static_cast<uint8_t*>(out), size);
+static bool ReadFull(HANDLE pipe, void* out, DWORD size,
+                     std::mutex& send_mutex, const std::atomic<bool>& running) {
+    auto* bytes = static_cast<uint8_t*>(out);
+    while (size) {
+        OVERLAPPED overlapped{};
+        overlapped.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!overlapped.hEvent) return false;
+        DWORD got = 0, error = ERROR_OPERATION_ABORTED;
+        BOOL ok = FALSE;
+        {
+            std::lock_guard<std::mutex> lock(send_mutex);
+            if (running.load()) {
+                ok = ReadFile(pipe, bytes, size, &got, &overlapped);
+                if (!ok) error = GetLastError();
+            }
+        }
+        // Stop cancels while holding send_mutex, but joins outside it. Keep the
+        // OVERLAPPED and event alive until cancellation has actually completed.
+        if (!ok && error == ERROR_IO_PENDING)
+            ok = GetOverlappedResult(pipe, &overlapped, &got, TRUE);
+        CloseHandle(overlapped.hEvent);
+        if (!ok || !got) return false;
+        bytes += got; size -= got;
+    }
+    return true;
 }
 
 void ShellClient::ReaderThread() {
@@ -313,16 +347,16 @@ void ShellClient::ReaderThread() {
             }
         }
         if (pipe == INVALID_HANDLE_VALUE) {
-            Sleep(1500);
+            for (int i = 0; i < 30 && running_.load(); ++i) Sleep(50);
             continue;
         }
 
-        for (;;) {
+        while (running_.load()) {
             MsgHeader h{};
-            if (!ReadFull(pipe, &h, sizeof(h))) break;
+            if (!ReadFull(pipe, &h, sizeof(h), send_mutex_, running_)) break;
             if (h.magic != kMagic || h.payload_size > kMaxPayload) break;
             std::vector<uint8_t> payload(h.payload_size);
-            if (h.payload_size && !ReadFull(pipe, payload.data(), h.payload_size)) break;
+            if (h.payload_size && !ReadFull(pipe, payload.data(), h.payload_size, send_mutex_, running_)) break;
 
             PayloadReader r(payload.data(), payload.size());
             if (h.type == RSP_PROGRESS) {

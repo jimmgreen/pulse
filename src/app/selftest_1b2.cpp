@@ -10,6 +10,7 @@
 #include "change_tracking_ui_test.h"
 #include "change_tracking_app_test.h"
 #include "name_highlight_ui_test.h"
+#include "rename_editor_test.h"
 #include "filter_animation.h"
 #include "tab_shortcuts.h"
 #include "quick_access.h"
@@ -4540,6 +4541,12 @@ int RunSelfTest1B2() {
         TestLinkResolve();
         if (g_log) { fclose(g_log); g_log = nullptr; }
         return g_fail ? 1 : 0;
+    }
+    if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
+        wcscmp(test_case, L"rename-editor") == 0) {
+        const bool passed = RunRenameEditorTest();
+        if (g_log) { fclose(g_log); g_log = nullptr; }
+        return passed ? 0 : 1;
     }
     if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
         wcscmp(test_case, L"rename-outside") == 0) {

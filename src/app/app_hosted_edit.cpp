@@ -156,20 +156,22 @@ void ShowAddressEditor(AppState& s) {
     if (s.filterEditing) HideFilterEditor(s, true);
     s.addressSearching = false;
     s.addressEditing = true;
-    if (s.hwndAddressEdit && (GetWindowLongW(s.hwndAddressEdit, GWL_STYLE) & WS_CHILD)) {
-        DestroyWindow(s.hwndAddressEdit);
+    // DestroyWindow synchronously sends WM_KILLFOCUS to the old editor.
+    s.addressIgnoreKillFocus = true;
+    if (s.hwndAddressEdit) {
+        if (IsWindow(s.hwndAddressEdit)) DestroyWindow(s.hwndAddressEdit);
         s.hwndAddressEdit = nullptr;
     }
     if (!s.hwndAddressEdit) {
         s.hwndAddressEdit = CreateHostedEdit(s, AddressEditProc);
         if (!s.hwndAddressEdit) {
             s.addressEditing = false;
+            s.addressIgnoreKillFocus = false;
             return;
         }
     }
     const std::wstring shown = ClipboardPath(tab->current_path);
     SendMessageW(s.hwndAddressEdit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L""));
-    s.addressIgnoreKillFocus = true;
     SetWindowTextW(s.hwndAddressEdit, shown.empty() ? l10n::Get(l10n::StringId::ThisPc).c_str() : shown.c_str());
     LayoutAddressEditor(s);
     ShowWindow(s.hwndAddressEdit, SW_SHOW);
@@ -367,20 +369,22 @@ void ShowRenameOverlay(AppState& s) {
     s.renameIndex = tab->selected_index;
     EnsureRowVisible(s, *tab, s.renameIndex);
 
-    if (s.hwndRenameEdit && (GetWindowLongW(s.hwndRenameEdit, GWL_STYLE) & WS_CHILD)) {
-        DestroyWindow(s.hwndRenameEdit);
+    // Protect the new model index before tearing down a focused old editor.
+    s.renameIgnoreKillFocus = true;
+    if (s.hwndRenameEdit) {
+        if (IsWindow(s.hwndRenameEdit)) DestroyWindow(s.hwndRenameEdit);
         s.hwndRenameEdit = nullptr;
     }
     if (!s.hwndRenameEdit) {
         s.hwndRenameEdit = CreateHostedEdit(s, RenameEditProc);
         if (!s.hwndRenameEdit) {
             s.renameIndex = -1;
+            s.renameIgnoreKillFocus = false;
             return;
         }
     }
 
     const std::wstring& name = (*tab->snapshot)[s.renameIndex].name;
-    s.renameIgnoreKillFocus = true;
     SetWindowTextW(s.hwndRenameEdit, name.c_str());
     LayoutRenameOverlay(s);
     ShowWindow(s.hwndRenameEdit, SW_SHOW);
@@ -394,7 +398,12 @@ void ShowRenameOverlay(AppState& s) {
 }
 
 void HideRenameOverlay(AppState& s, bool commit) {
-    if (!s.hwndRenameEdit || s.renameIndex < 0) return;
+    if (!s.hwndRenameEdit) return;
+    if (s.renameIndex < 0) {
+        if (IsWindow(s.hwndRenameEdit) && IsWindowVisible(s.hwndRenameEdit))
+            ShowWindow(s.hwndRenameEdit, SW_HIDE);
+        return;
+    }
     const int index = s.renameIndex;
     s.renameIndex = -1;
     if (commit) {
@@ -563,9 +572,9 @@ bool HandleHostedEditMessage(AppState& s, HWND hwnd, UINT msg, WPARAM wParam,
     }
     case WM_SETFOCUS: {
         result = DefSubclassProc(hwnd, msg, wParam, lParam);
-        HideCaret(hwnd);
-        SetTimer(hwnd, kEditCaretTimer, GetCaretBlinkTime(), nullptr);
         if (s.compositor.LumaTextEnabled()) {
+            HideCaret(hwnd);
+            SetTimer(hwnd, kEditCaretTimer, GetCaretBlinkTime(), nullptr);
             s.compositor.PresentLumaEdit(hwnd, HostedEditFormat(s, hwnd),
                                          HostedEditForeground(s), HostedEditBackground(s));
         } else {
