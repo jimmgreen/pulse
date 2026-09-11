@@ -1647,20 +1647,25 @@ void Painter::DrawTagDotState(D2D1_POINT_2F center, float radius,
 }
 
 D2D1_RECT_F Painter::ScrollbarThumbRect(const ScrollbarSpec& spec) const noexcept {
-    if (!theme_ || !spec.enabled || spec.viewport_extent <= 0.0f ||
+    return theme_ ? fluent::ScrollbarThumbRect(spec, scale_, high_contrast_) : D2D1::RectF();
+}
+
+D2D1_RECT_F ScrollbarThumbRect(const ScrollbarSpec& spec, float scale,
+                              bool high_contrast) noexcept {
+    if (!spec.enabled || spec.viewport_extent <= 0.0f ||
         spec.content_extent <= spec.viewport_extent || Height(spec.viewport) <= 0.0f) {
         return D2D1::RectF();
     }
-    const float progress = high_contrast_ ? 1.0f : Clamp01(spec.expand_progress);
-    const float width = Px(2.5f) + (Px(5.0f) - Px(2.5f)) * progress;
-    const float min_thumb = Px(20.0f);
+    const float progress = high_contrast ? 1.0f : Clamp01(spec.expand_progress);
+    const float width = (2.5f + 2.5f * progress) * scale;
+    const float min_thumb = 20.0f * scale;
     const float thumb_height = std::min(Height(spec.viewport),
         std::max(min_thumb, Height(spec.viewport) * spec.viewport_extent / spec.content_extent));
     const float max_offset = std::max(0.0f, spec.content_extent - spec.viewport_extent);
     const float travel = std::max(0.0f, Height(spec.viewport) - thumb_height);
     const float normalized = max_offset > 0.0f ? Clamp01(spec.offset / max_offset) : 0.0f;
     const float top = spec.viewport.top + travel * normalized;
-    const float right = spec.viewport.right - Px(2.5f);
+    const float right = spec.viewport.right - 2.5f * scale;
     return D2D1::RectF(right - width, top, right, top + thumb_height);
 }
 

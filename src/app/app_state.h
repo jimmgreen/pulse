@@ -247,6 +247,7 @@ struct AppState {
     bool scrollbarHovered = false;
     bool scrollbarDragging = false;
     bool scrollbarHorizontal = false;
+    bool scrollbarSidebar = false;
     int scrollbarDragStartX = 0;
     int scrollbarDragStartY = 0;
     float scrollbarDragStartScroll = 0.0f;
@@ -486,7 +487,11 @@ struct AppState {
     float detailsPanelWidth = 340.0f;
     bool detailsPanelResizing = false;
     float detailsScroll = 0.0f;
-    float detailsPreviewScroll = 0.0f;
+    bool detailsPreviewOnly = false;
+    bool detailsPreviewPanning = false;
+    float detailsPreviewExpansion = 0.0f;
+    float detailsPreviewExpansionFrom = 0.0f;
+    ULONGLONG detailsPreviewFoldStart = 0;
     // Collapsible sections: bit 0基本信息 1属性 2标签 3安全 4其他; 安全/其他 default collapsed.
     uint32_t detailsCollapsedMask = (1u << 1) | (1u << 3) | (1u << 4);
     // Per-selection probe cache (file times + star state), keyed by path.

@@ -409,54 +409,47 @@ bool RestoreOneFromRecycle(const std::wstring& wanted_canon, std::wstring& error
 
     wchar_t bin[32];
     swprintf_s(bin, L"%c:\\$Recycle.Bin", drive);
-    WIN32_FIND_DATAW sidFd{};
-    HANDLE sidFind = FindFirstFileW((std::wstring(bin) + L"\\*").c_str(), &sidFd);
-    if (sidFind == INVALID_HANDLE_VALUE) {
-        error = L"无法打开回收站";
+    const std::wstring sid = pulse::CurrentUserSidString();
+    if (sid.empty()) {
+        error = L"无法确定当前用户的回收站";
         return false;
     }
-
+    const std::wstring sidDir = std::wstring(bin) + L"\\" + sid;
+    WIN32_FIND_DATAW iFd{};
+    HANDLE iFind = FindFirstFileW((sidDir + L"\\$I*").c_str(), &iFd);
+    if (iFind == INVALID_HANDLE_VALUE) {
+        error = L"无法打开当前用户的回收站";
+        return false;
+    }
     bool restored = false;
     do {
-        if (!(sidFd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-        if (sidFd.cFileName[0] == L'.') continue;
-        std::wstring sidDir = std::wstring(bin) + L"\\" + sidFd.cFileName;
-        WIN32_FIND_DATAW iFd{};
-        HANDLE iFind = FindFirstFileW((sidDir + L"\\$I*").c_str(), &iFd);
-        if (iFind == INVALID_HANDLE_VALUE) continue;
-        do {
-            if (iFd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-            std::wstring iPath = sidDir + L"\\" + iFd.cFileName;
-            std::wstring original;
-            if (!ReadRecycleOriginal(iPath, original)) continue;
-            if (CanonPath(original) != wanted_canon) continue;
+        if (iFd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        std::wstring iPath = sidDir + L"\\" + iFd.cFileName;
+        std::wstring original;
+        if (!ReadRecycleOriginal(iPath, original)) continue;
+        if (CanonPath(original) != wanted_canon) continue;
 
-            std::wstring rName = iFd.cFileName;
-            if (rName.size() >= 2) rName[1] = (rName[1] == L'I') ? L'R' : L'r';
-            std::wstring rPath = sidDir + L"\\" + rName;
-            if (GetFileAttributesW(rPath.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
+        std::wstring rName = iFd.cFileName;
+        if (rName.size() >= 2) rName[1] = (rName[1] == L'I') ? L'R' : L'r';
+        std::wstring rPath = sidDir + L"\\" + rName;
+        if (GetFileAttributesW(rPath.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
 
-            std::wstring dest = ToParsingPath(original);
-            if (GetFileAttributesW(dest.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                error = L"还原目标已存在";
-                FindClose(iFind);
-                FindClose(sidFind);
-                return false;
-            }
-            if (!MoveFileExW(rPath.c_str(), dest.c_str(), 0)) {
-                error = L"还原失败";
-                FindClose(iFind);
-                FindClose(sidFind);
-                return false;
-            }
-            DeleteFileW(iPath.c_str());
-            restored = true;
-            break;
-        } while (FindNextFileW(iFind, &iFd));
-        FindClose(iFind);
-        if (restored) break;
-    } while (FindNextFileW(sidFind, &sidFd));
-    FindClose(sidFind);
+        std::wstring dest = ToParsingPath(original);
+        if (GetFileAttributesW(dest.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            error = L"还原目标已存在";
+            FindClose(iFind);
+            return false;
+        }
+        if (!MoveFileExW(rPath.c_str(), dest.c_str(), 0)) {
+            error = L"还原失败";
+            FindClose(iFind);
+            return false;
+        }
+        DeleteFileW(iPath.c_str());
+        restored = true;
+        break;
+    } while (FindNextFileW(iFind, &iFd));
+    FindClose(iFind);
 
     if (!restored) error = L"回收站中未找到该项";
     return restored;

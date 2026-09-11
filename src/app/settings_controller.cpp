@@ -319,6 +319,9 @@ void SettingsController::ToggleUi(int index) {
     } else if (index == 6) {
         prefs_->show_pinned_tab_names = !prefs_->show_pinned_tab_names;
         SaveAndApply(SettingsEffect::None);
+    } else if (index == 7) {
+        prefs_->blank_click_go_back = !prefs_->blank_click_go_back;
+        SaveAndApply(SettingsEffect::None);
     } else if (index >= 10 && index < 15) {
         static constexpr ipc::CtxMenuGroup groups[] = {
             ipc::CtxMenuGroup::Software, ipc::CtxMenuGroup::OpenWith,

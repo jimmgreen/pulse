@@ -1,4 +1,5 @@
 #include "../ipc/preview_protocol.h"
+#include "../preview_host/video_codec.h"
 #include <windows.h>
 #include <winioctl.h>
 #include <algorithm>
@@ -65,6 +66,7 @@ struct Result {
     ipc::PreviewResponse response{};
     std::wstring text;
     std::wstring error;
+    std::vector<std::pair<std::wstring, std::wstring>> properties;
 };
 
 class Host {
@@ -106,11 +108,12 @@ public:
     ~Host() { Stop(); }
 
     bool Request(const std::wstring& path, Result& result, DWORD attrs_override = MAXDWORD,
-                 uint32_t pixel_size = ipc::kPreviewDefaultPixelSize) {
+                 uint32_t pixel_size = ipc::kPreviewDefaultPixelSize,
+                 ipc::PreviewRequestKind kind = ipc::PreviewRequestKind::Content) {
         ipc::PreviewRequest request{};
         request.request_id = next_++;
         request.generation = request.request_id;
-        request.kind = ipc::PreviewRequestKind::Content;
+        request.kind = kind;
         request.pixel_size = pixel_size;
         request.attrs = attrs_override == MAXDWORD ? GetFileAttributesW(path.c_str())
                                                    : attrs_override;
@@ -129,6 +132,19 @@ public:
         result.error.assign(result.response.error_chars, L'\0');
         if (!result.error.empty() && !ipc::ReadAll(pipe_, result.error.data(),
             result.response.error_chars * sizeof(wchar_t))) return false;
+        result.properties.clear();
+        if (result.response.property_count > 6) return false;
+        auto read_string = [&](std::wstring& value) {
+            uint32_t count = 0;
+            if (!ipc::ReadAll(pipe_, &count, sizeof(count)) || count > 32768) return false;
+            value.assign(count, L'\0');
+            return count == 0 || ipc::ReadAll(pipe_, value.data(), count * sizeof(wchar_t));
+        };
+        for (uint32_t i = 0; i < result.response.property_count; ++i) {
+            std::wstring label, value;
+            if (!read_string(label) || !read_string(value)) return false;
+            result.properties.emplace_back(std::move(label), std::move(value));
+        }
         if (!mapping.empty()) {
             const unsigned char ack = 1;
             if (!ipc::WriteAll(pipe_, &ack, 1)) return false;
@@ -144,7 +160,27 @@ private:
 
 bool RunThumbnailCacheTests();
 
-int wmain() {
+int wmain(int argc, wchar_t** argv) {
+    Check(preview::VideoCodecDisplayName(L"{34363248-0000-0010-8000-00AA00389B71}") == L"H.264 (AVC)",
+          L"codec: screenshot H264 subtype is a readable codec name");
+    Check(preview::VideoCodecDisplayName(L" 34363268-0000-0010-8000-00aa00389b71 ") == L"H.264 (AVC)",
+          L"codec: lowercase subtype and missing braces are supported");
+    Check(preview::VideoCodecDisplayName(L"{43564548-0000-0010-8000-00AA00389B71}") == L"H.265 (HEVC)",
+          L"codec: HEVC subtype is recognized");
+    Check(preview::VideoCodecDisplayName(L"avc1") == L"H.264 (AVC)" &&
+          preview::VideoCodecDisplayName(L"hvc1") == L"H.265 (HEVC)" &&
+          preview::VideoCodecDisplayName(L"av01") == L"AV1" &&
+          preview::VideoCodecDisplayName(L"VP90") == L"VP9",
+          L"codec: common video FOURCC aliases are recognized");
+    Check(preview::VideoCodecDisplayName(L"{44434241-0000-0010-8000-00AA00389B71}") == L"ABCD",
+          L"codec: unknown printable FOURCC remains readable without guessing");
+    Check(preview::VideoCodecDisplayName(L"{34363248-1111-0010-8000-00AA00389B71}").empty() &&
+          preview::VideoCodecDisplayName(L"{00000001-0000-0010-8000-00AA00389B71}").empty() &&
+          preview::VideoCodecDisplayName(L"{34363248-broken}").empty(),
+          L"codec: unrelated GUIDs and malformed identifiers are not mislabeled");
+    Check(preview::VideoCodecDisplayName(L"Apple ProRes 422") == L"Apple ProRes 422" &&
+          preview::VideoCodecDisplayName(L" ").empty(),
+          L"codec: existing descriptive names and empty properties are preserved");
     Check(RunThumbnailCacheTests(), L"thumbnail cache regressions");
     wchar_t temp[MAX_PATH]{};
     GetTempPathW(ARRAYSIZE(temp), temp);
@@ -179,6 +215,19 @@ int wmain() {
 
     Host host;
     Check(host.Start(), L"start isolated preview host");
+    // Optional real H.264 fixture exercises the Windows property provider too.
+    if (argc > 1) {
+        Result video;
+        const bool received = host.Request(argv[1], video, MAXDWORD,
+            ipc::kPreviewDefaultPixelSize, ipc::PreviewRequestKind::Properties);
+        bool h264 = false, raw_guid = false;
+        for (const auto& [label, value] : video.properties) {
+            h264 |= value == L"H.264 (AVC)";
+            raw_guid |= value.find(L"34363248-") != std::wstring::npos;
+        }
+        Check(received && h264 && !raw_guid,
+              L"codec: actual H264 file returns friendly name through preview host protocol");
+    }
     auto expectText = [&](const wchar_t* name, const wchar_t* contains) {
         Result result;
         const bool ok = host.Request(path(name), result);

@@ -45,6 +45,7 @@ struct SessionSnapshot {
     bool starred_expanded = true;
     bool details_panel = false;  // right details panel visible
     int details_panel_width = 340;
+    bool details_preview_only = false;
     std::array<float, 3> details_column_dividers{}; // version 3 migration only
     std::vector<LayoutTabSnapshot> layout_tabs;
     std::vector<GroupSessionSnapshot> tab_groups;

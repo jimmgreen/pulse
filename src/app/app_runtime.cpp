@@ -308,6 +308,7 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
             vm.settings_keep_running = s.appPrefs.keep_running_on_close;
             vm.settings_show_hidden_files = s.appPrefs.show_hidden_files;
             vm.settings_open_folders = s.appPrefs.open_folders_in_pulse;
+            vm.settings_blank_click_go_back = s.appPrefs.blank_click_go_back;
             vm.settings_row_height = s.appPrefs.row_height;
             vm.settings_tray_icon = s.appPrefs.tray_icon_size;
             vm.settings_language = s.appPrefs.language == L"zh-CN" ? 1
@@ -1052,13 +1053,6 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     app::FillWindowTabStrip(vm, s.window_tabs);
     vm.show_pinned_tab_names = s.appPrefs.show_pinned_tab_names;
     vm.sidebar_scroll = s.sidebarScroll;
-    const float sidebar_max = s.renderer.SidebarMaxScroll(
-        vm, static_cast<float>(s.compositor.Width()),
-        static_cast<float>(s.compositor.Height()));
-    if (s.sidebarScroll > sidebar_max) {
-        s.sidebarScroll = sidebar_max;
-        vm.sidebar_scroll = sidebar_max;
-    }
     ops::OpStatus st = s.ops.Status();
     if (st.active || !st.last_error.empty() || !st.summary.empty()) {
         vm.status.task_text = st.last_error.empty() ? st.summary
@@ -1270,13 +1264,20 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
             deck.cards.push_back(std::move(card));
         }
     }
+    // The tray (including exiting cards) determines the sidebar viewport.
+    // Clamp only after it is populated, using the same model as draw/hit-test.
+    s.sidebarScroll = std::clamp(s.sidebarScroll, 0.0f, s.renderer.SidebarMaxScroll(
+        vm, static_cast<float>(s.compositor.Width()),
+        static_cast<float>(s.compositor.Height())));
+    vm.sidebar_scroll = s.sidebarScroll;
     // Right details panel: selection info + size walk + tag chips.
     vm.details_visible = s.showDetailsPanel;
     std::wstring sizeTarget; // folder that should be walking ("" = none)
     if (s.showDetailsPanel) {
         ui::DetailsPanelView& dv = vm.details;
         dv.scroll_y = s.detailsScroll;
-        dv.preview_scroll_y = s.detailsPreviewScroll;
+        dv.preview_only = s.detailsPreviewOnly;
+        dv.preview_expansion = s.detailsPreviewExpansion;
         dv.collapsed_mask = s.detailsCollapsedMask;
         app::Tab* tab = ActiveTab(s);
         const int selCount = tab ? tab->SelectedCount() : 0;
@@ -1339,9 +1340,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
             if (probe_details && s.detailsSelPath != dv.path) {
                 s.detailsSelPath = dv.path;
                 s.detailsScroll = 0.0f;
-                s.detailsPreviewScroll = 0.0f;
                 dv.scroll_y = 0.0f;
-                dv.preview_scroll_y = 0.0f;
                 // Clear stale facts immediately; GetFileAttributesEx /
                 // SHGetFileInfo / security APIs run off-thread (WM_DETAILS_META).
                 s.detailsSelValid = false;
@@ -1525,6 +1524,8 @@ std::wstring TooltipForHover(AppState& s) {
     case R::DetailsRename: return text(I::Rename);
     case R::DetailsTagAdd: return text(I::AddTag);
     case R::DetailsResize: return text(I::ResizeDetails);
+    case R::DetailsPreviewToggle: return text(s.detailsPreviewOnly ? I::PreviewExpandDetails : I::PreviewCollapseDetails);
+    case R::DetailsPreview: return L"";
     case R::StatusBarTask: return text(I::OpDetails);
     case R::DetailsNewTab: return text(I::OpenNewTab);
     case R::DetailsCopyPath: return text(I::CopyPath);

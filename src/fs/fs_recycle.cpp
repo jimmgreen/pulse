@@ -1,5 +1,6 @@
 // fs_recycle.cpp
 #include "fs_recycle.h"
+#include "../common/current_user_security.h"
 #include <shellapi.h>
 #include <algorithm>
 #include <cstring>
@@ -89,13 +90,16 @@ std::wstring RecycleIndexPath(const std::wstring& content_path) {
     const size_t slash = content_path.find_last_of(L'\\');
     if (slash == std::wstring::npos || slash + 2 >= content_path.size()) return {};
     std::wstring name = content_path.substr(slash + 1);
-    if (name.size() < 2 || (name[1] != L'R' && name[1] != L'r')) return {};
+    if (name.size() < 3 || name[0] != L'$' || (name[1] != L'R' && name[1] != L'r')) return {};
     name[1] = (name[1] == L'R') ? L'I' : L'i';
     return content_path.substr(0, slash + 1) + name;
 }
 
 bool ReadRecycleIndex(const std::wstring& index_path, RecycleItem& out) {
     out = {};
+    const std::wstring name = FileNameOf(index_path);
+    if (name.size() < 3 || name[0] != L'$' || (name[1] != L'I' && name[1] != L'i'))
+        return false;
     out.index_path = index_path;
     HANDLE handle = CreateFileW(index_path.c_str(), GENERIC_READ,
                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -119,62 +123,64 @@ bool ReadRecycleIndex(const std::wstring& index_path, RecycleItem& out) {
     out.content_path = (slash == std::wstring::npos)
         ? r_name : index_path.substr(0, slash + 1) + r_name;
     WIN32_FILE_ATTRIBUTE_DATA attrs{};
-    if (GetFileAttributesExW(out.content_path.c_str(), GetFileExInfoStandard, &attrs)) {
-        out.is_dir = (attrs.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-        if (!out.is_dir && out.size == 0) {
-            ULARGE_INTEGER bytes;
-            bytes.HighPart = attrs.nFileSizeHigh;
-            bytes.LowPart = attrs.nFileSizeLow;
-            out.size = bytes.QuadPart;
-        }
+    if (!GetFileAttributesExW(out.content_path.c_str(), GetFileExInfoStandard, &attrs))
+        return false; // An orphan $I record is not a restorable recycle item.
+    out.is_dir = (attrs.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    if (!out.is_dir && out.size == 0) {
+        ULARGE_INTEGER bytes;
+        bytes.HighPart = attrs.nFileSizeHigh;
+        bytes.LowPart = attrs.nFileSizeLow;
+        out.size = bytes.QuadPart;
     }
     return true;
+}
+
+bool EnumerateRecycleBinAtRoot(const std::wstring& recycle_root, std::vector<DirEntry>& out) {
+    const std::wstring sid = CurrentUserSidString();
+    if (sid.empty()) return false; // Never fall back to scanning other users.
+    const std::wstring sid_dir = NormalizePath(recycle_root) + L"\\" + sid;
+    WIN32_FIND_DATAW index{};
+    HANDLE find = FindFirstFileW((sid_dir + L"\\$I*").c_str(), &index);
+    if (find == INVALID_HANDLE_VALUE) {
+        const DWORD error = GetLastError();
+        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+    }
+    do {
+        if (index.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        RecycleItem item;
+        if (ReadRecycleIndex(sid_dir + L"\\" + index.cFileName, item))
+            out.push_back(ToDirEntry(item));
+    } while (FindNextFileW(find, &index));
+    const DWORD error = GetLastError();
+    FindClose(find);
+    return error == ERROR_NO_MORE_FILES;
 }
 
 void EnumerateRecycleBin(std::vector<DirEntry>& out, RecycleBinInfo* info) {
     out.clear();
     if (info) QueryRecycleBinInfo(*info);
     const DWORD drives = GetLogicalDrives();
+    bool complete = drives != 0;
     for (int i = 0; i < 26; ++i) {
         if ((drives & (1u << i)) == 0) continue;
         wchar_t root[4] = { static_cast<wchar_t>(L'A' + i), L':', L'\\', 0 };
         const UINT type = GetDriveTypeW(root);
         if (type != DRIVE_FIXED && type != DRIVE_REMOVABLE) continue;
         const std::wstring bin = NormalizePath(std::wstring(root) + L"$Recycle.Bin");
-        WIN32_FIND_DATAW sid{};
-        HANDLE sid_find = FindFirstFileW((bin + L"\\*").c_str(), &sid);
-        if (sid_find == INVALID_HANDLE_VALUE) continue;
-        do {
-            if (!(sid.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-            if (sid.cFileName[0] == L'.') continue;
-            const std::wstring sid_dir = bin + L"\\" + sid.cFileName;
-            WIN32_FIND_DATAW index{};
-            HANDLE index_find = FindFirstFileW((sid_dir + L"\\$I*").c_str(), &index);
-            if (index_find == INVALID_HANDLE_VALUE) continue;
-            do {
-                if (index.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-                RecycleItem item;
-                if (!ReadRecycleIndex(sid_dir + L"\\" + index.cFileName, item)) continue;
-                out.push_back(ToDirEntry(item));
-            } while (FindNextFileW(index_find, &index));
-            FindClose(index_find);
-        } while (FindNextFileW(sid_find, &sid));
-        FindClose(sid_find);
+        if (!EnumerateRecycleBinAtRoot(bin, out)) complete = false;
     }
     if (!info) return;
     uint64_t enum_bytes = 0;
     for (const auto& entry : out) enum_bytes += entry.size;
     const uint64_t enum_items = out.size();
-    // SHQueryRecycleBin often lags IFileOperation. Prefer enumerated $I files
-    // when they already show a higher occupancy than Shell reports.
-    if (!info->valid) {
+    // Use the same live, current-user items as the list, including after clear.
+    // If a volume could not be read, retain Shell's occupancy instead.
+    if (complete) {
         info->valid = true;
         info->items = enum_items;
         info->bytes = enum_bytes;
         return;
     }
-    if (enum_items > info->items) info->items = enum_items;
-    if (enum_bytes > info->bytes) info->bytes = enum_bytes;
 }
 
 } // namespace pulse::fs

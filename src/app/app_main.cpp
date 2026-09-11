@@ -4,6 +4,7 @@
 #include "../ui/ui_compositor.h"
 #include "../ui/lumatext_renderer.h"
 #include "../ui/ui_renderer.h"
+#include "../ui/preview_grab_cursor.h"
 #include "../ui/fluent_menu.h"
 #include "../ui/drag_drop.h"
 #include "../ui/file_operation_dialog.h"
@@ -724,6 +725,11 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         break;
 
     case WM_ACTIVATEAPP:
+        if (s && !wParam) {
+            s->detailsPreviewPanning = false;
+            s->renderer.EndDetailsPreviewPan();
+            if (GetCapture() == hwnd) ReleaseCapture();
+        }
         if (s) s->renderer.NotifyPreviewActivate(wParam != 0);
         return 0;
 
@@ -776,6 +782,16 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             DrainDirNotifies(*s);
             const ULONGLONG now = GetTickCount64();
             TickUpdates(*s, now);
+            if (s->renderer.TickDetailsPreview(now)) dirty = true;
+            if (s->detailsPreviewFoldStart) {
+                const float t = std::min(1.0f, static_cast<float>(now - s->detailsPreviewFoldStart) / 150.0f);
+                const float eased = t * t * (3.0f - 2.0f * t);
+                const float target = s->detailsPreviewOnly ? 1.0f : 0.0f;
+                s->detailsPreviewExpansion = s->detailsPreviewExpansionFrom +
+                    (target - s->detailsPreviewExpansionFrom) * eased;
+                if (t >= 1) s->detailsPreviewFoldStart = 0;
+                dirty = true;
+            }
             if (TickAddressSearch(*s, now)) dirty = true;
             const int shell_refreshes = s->context_menu.ConsumeDueRefreshes(now);
             for (int i = 0; i < shell_refreshes; ++i) {
@@ -890,6 +906,15 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         D2D1_RECT_F bounds = D2D1::RectF(0, 0,
             (float)s->compositor.Width(), (float)s->compositor.Height());
         ui::HitTestResult hit = s->renderer.HitTest(vm, bounds, (float)pt.x, (float)pt.y);
+        if (s->renderer.DetailsPreviewDragging() ||
+            (hit.region == ui::HitTestResult::DetailsPreview && s->renderer.CanDetailsPreviewPan())) {
+            SetCursor(ui::PreviewGrabCursor(s->renderer.DetailsPreviewDragging()));
+            return TRUE;
+        }
+        if (hit.region == ui::HitTestResult::DetailsPreviewToggle) {
+            SetCursor(LoadCursorW(nullptr, IDC_HAND));
+            return TRUE;
+        }
         if (s->detailsPanelResizing || hit.region == ui::HitTestResult::DetailsResize) {
             SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
             return TRUE;
@@ -929,22 +954,30 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         break;
     }
 
+    case WM_CANCELMODE:
+        if (s) { s->detailsPreviewPanning = false; s->renderer.EndDetailsPreviewPan(); }
+        if (GetCapture() == hwnd) ReleaseCapture();
+        break;
     case WM_MOUSEMOVE:
+        if (HandleDetailsPreviewPointer(s, hwnd, msg, wParam, lParam)) return 0;
         return HandleMouseMove(s, hwnd, msg, wParam, lParam);
 
     case WM_MOUSELEAVE:
         return HandleMouseLeave(s, hwnd, msg, wParam, lParam);
 
     case WM_LBUTTONDOWN:
+        if (HandleDetailsPreviewPointer(s, hwnd, msg, wParam, lParam)) return 0;
         return HandleLButtonDown(s, hwnd, msg, wParam, lParam);
 
     case WM_LBUTTONDBLCLK:
         return HandleLButtonDblClk(s, hwnd, msg, wParam, lParam);
 
     case WM_LBUTTONUP:
+        if (HandleDetailsPreviewPointer(s, hwnd, msg, wParam, lParam)) return 0;
         return HandleLButtonUp(s, hwnd, msg, wParam, lParam);
 
     case WM_CAPTURECHANGED:
+        if (s) { s->detailsPreviewPanning = false; s->renderer.EndDetailsPreviewPan(); }
         return HandleCaptureChanged(s, hwnd, msg, wParam, lParam);
 
     case WM_RBUTTONDOWN:
@@ -969,6 +1002,12 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         break;
 
     case WM_KEYDOWN:
+        if (s && wParam == VK_ESCAPE && s->detailsPreviewPanning) {
+            s->detailsPreviewPanning = false;
+            s->renderer.EndDetailsPreviewPan();
+            if (GetCapture() == hwnd) ReleaseCapture();
+            return 0;
+        }
         return HandleKeyDown(s, hwnd, msg, wParam, lParam);
 
     case WM_COMMAND: {
@@ -1412,6 +1451,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 snap.sidebar_collapsed = static_cast<int>(s->sidebarCollapsedMask);
                 snap.starred_expanded = s->starredExpanded;
                 snap.details_panel = s->showDetailsPanel;
+                snap.details_preview_only = s->detailsPreviewOnly;
                 snap.details_panel_width = static_cast<int>(std::lround(s->detailsPanelWidth));
                 app::SaveSession(snap);
                 s->places.Save();
@@ -1636,6 +1676,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         state.starredExpanded = session.starred_expanded;
         state.pending_undo_json = session.undo_json;
         state.showDetailsPanel = session.details_panel;
+        state.detailsPreviewOnly = session.details_preview_only;
+        state.detailsPreviewExpansion = session.details_preview_only ? 1.0f : 0.0f;
         state.detailsPanelWidth = static_cast<float>(session.details_panel_width);
         state.renderer.SetDetailsPanelWidth(state.detailsPanelWidth);
         if (state.darkMode) state.themeOverride = ui::ThemeMode::Dark;

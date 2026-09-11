@@ -216,6 +216,11 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                     r.index = 6;
                     return r;
                 }
+                if (ContainsPt(lay.blank_click_row, x, y)) {
+                    r.region = HitTestResult::SettingsToggle;
+                    r.index = 7;
+                    return r;
+                }
                 for (int i = 0; i < 3; ++i) {
                     if (ContainsPt(lay.startup_row[i], x, y)) {
                         r.region = HitTestResult::SettingsToggle;
@@ -473,6 +478,14 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
     // Sidebar.
     D2D1_RECT_F sb = SidebarRect(rect.right, rect.bottom);
     if (x >= sb.left && x < sb.right && y >= sb.top && y < sb.bottom) {
+        D2D1_RECT_F track{}, thumb{};
+        float max_scroll = 0.0f;
+        if (SidebarScrollbarGeometry(vm, rect.right, rect.bottom, track, thumb, max_scroll) &&
+            RectContains(track, x, y)) {
+            r.region = HitTestResult::Scrollbar;
+            r.sub_index = 2; // Sidebar, independent of pane scrollbars.
+            return r;
+        }
         std::vector<SidebarSlot> slots;
         LayoutSidebar(vm, sb, scale_, slots);
         const bool compact = (sb.right - sb.left) <= 60.0f * scale_;
@@ -566,12 +579,14 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
         if (panel.right > panel.left && x >= panel.left && x < panel.right &&
             y >= panel.top && y < panel.bottom) {
             DetailsHitRects hitRects;
-            const float previewH = DetailsPreviewHeight(panel, scale_);
+            const float previewH = DetailsPreviewHeight(panel, scale_, vm.details.preview_expansion);
             LayoutDetailsPanel(panel, scale_, vm.details,
                                compositor_ ? compositor_->DwriteFactory() : nullptr,
                                compositor_ ? compositor_->SmallFormat() : nullptr,
                                compositor_, previewH, hitRects);
             if (RectContains(hitRects.preview, x, y)) { r.region = HitTestResult::DetailsPreview; return r; }
+            if (RectContains(hitRects.preview_toggle, x, y)) { r.region = HitTestResult::DetailsPreviewToggle; return r; }
+            if (vm.details.preview_only) return r;
             if (RectContains(hitRects.rename, x, y)) { r.region = HitTestResult::DetailsRename; return r; }
             if (RectContains(hitRects.open, x, y)) { r.region = HitTestResult::DetailsOpen; return r; }
             if (RectContains(hitRects.star, x, y)) { r.region = HitTestResult::DetailsStar; return r; }

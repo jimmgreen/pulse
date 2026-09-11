@@ -356,6 +356,11 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
                  pulse::l10n::Get(pulse::l10n::StringId::PinnedNames),
                  pulse::l10n::Get(pulse::l10n::StringId::PinnedNamesDesc),
                  vm.show_pinned_tab_names, 6);
+        draw_card(lay.blank_click_row);
+        draw_row(lay.blank_click_row,
+                 pulse::l10n::Get(pulse::l10n::StringId::SettingsBlankClickBack),
+                 pulse::l10n::Get(pulse::l10n::StringId::SettingsBlankClickBackDesc),
+                 vm.settings_blank_click_go_back, 7);
     } else if (vm.settings_page == 1) {
         fluent::InfoBarSpec info;
         info.bounds = lay.index_info;

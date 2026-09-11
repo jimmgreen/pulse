@@ -83,7 +83,8 @@ PreviewDrawResult ThumbnailCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F
                                        uint32_t frame_index, uint32_t* frame_count,
                                        uint32_t* frame_delay_ms, uint32_t* loop_count,
                                        uint32_t* decoded_width, uint32_t* decoded_height,
-                                       uint32_t* source_width, uint32_t* source_height) {
+                                       uint32_t* source_width, uint32_t* source_height,
+                                       PreviewViewport* viewport) {
     if (!dc || path.empty() || pixels < 24) return PreviewDrawResult::Failed;
     const std::wstring key = Key(path, pixels, modified, size, frame_index);
     {
@@ -145,6 +146,16 @@ PreviewDrawResult ThumbnailCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F
                 }
             }
             if (item.bitmap.get()) {
+                if (viewport) {
+                    viewport->SetContent(dest, static_cast<float>(item.source_width ? item.source_width : item.w),
+                        static_cast<float>(item.source_height ? item.source_height : item.h), true);
+                    const auto target = viewport->ContentRect();
+                    dc->PushAxisAlignedClip(dest, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                    dc->DrawBitmap(item.bitmap.get(), &target, std::clamp(opacity, 0.0f, 1.0f),
+                        D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
+                    dc->PopAxisAlignedClip();
+                    return PreviewDrawResult::Bitmap;
+                }
                 const float destW = std::max(1.0f, dest.right - dest.left);
                 const float destH = std::max(1.0f, dest.bottom - dest.top);
                 if (pan_x && pan_y) {

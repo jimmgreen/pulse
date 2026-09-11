@@ -26,6 +26,9 @@ struct RecycleItem {
 bool QueryRecycleBinInfo(RecycleBinInfo& out);
 bool ReadRecycleIndex(const std::wstring& index_path, RecycleItem& out);
 std::wstring RecycleIndexPath(const std::wstring& content_path);
+// Append live items belonging to the current user under one $Recycle.Bin root.
+// Missing directories are empty; access/enumeration failures return false.
+bool EnumerateRecycleBinAtRoot(const std::wstring& recycle_root, std::vector<DirEntry>& out);
 void EnumerateRecycleBin(std::vector<DirEntry>& out, RecycleBinInfo* info = nullptr);
 
 inline bool IsRecycleViewPath(const std::wstring& path) {

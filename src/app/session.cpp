@@ -305,6 +305,7 @@ bool SaveSession(const SessionSnapshot& snap) {
     f << L"  \"detailsPanel\":" << (snap.details_panel ? 1 : 0) << L",\n";
     f << L"  \"detailsPanelWidth\":" << std::clamp(snap.details_panel_width, 300, 480)
       << L",\n";
+    f << L"  \"detailsPreviewOnly\":" << (snap.details_preview_only ? L"true" : L"false") << L",\n";
     f << L"  \"tray\":" << trayJson << L",\n";
     f << L"  \"undo\":" << (snap.undo_json.empty() ? L"[]" : snap.undo_json) << L",\n";
     f << L"  \"activeTab\":" << snap.active_layout_tab << L",\n";
@@ -331,6 +332,7 @@ bool LoadSession(SessionSnapshot& snap) {
     snap.starred_expanded = json.find(L"\"starredExpanded\"") == std::wstring::npos
         ? true : pulse::json::ExtractBool(json, L"starredExpanded");
     snap.details_panel = pulse::json::ExtractInt(json, L"detailsPanel") != 0;
+    snap.details_preview_only = pulse::json::ExtractBool(json, L"detailsPreviewOnly", false);
     snap.details_panel_width = pulse::json::ExtractInt(json, L"detailsPanelWidth");
     if (snap.details_panel_width < 300 || snap.details_panel_width > 480)
         snap.details_panel_width = 340;

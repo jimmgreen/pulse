@@ -3,6 +3,7 @@
 #include "../common/path_utils.h"
 #include "../common/preview_extensions.h"
 #include "../common/crash_reporter.h"
+#include "video_codec.h"
 #include <shobjidl.h>
 #include <shlobj.h>
 #include <shlguid.h>
@@ -197,7 +198,9 @@ void AddProperty(IPropertyStore* store, REFPROPERTYKEY key, const wchar_t* label
         PWSTR formatted = nullptr;
         if (SUCCEEDED(PSFormatForDisplayAlloc(key, value, PDFF_DEFAULT, &formatted)) &&
             formatted && *formatted) {
-            out.push_back({ label, formatted });
+            const std::wstring display = IsEqualPropertyKey(key, PKEY_Video_Compression)
+                ? preview::VideoCodecDisplayName(formatted) : std::wstring(formatted);
+            if (!display.empty()) out.push_back({ label, display });
         }
         CoTaskMemFree(formatted);
     }

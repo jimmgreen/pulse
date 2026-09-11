@@ -262,7 +262,8 @@ struct DetailsPanelView {
     uint64_t size_value = 0;
     uint64_t view_generation = 1;
     float scroll_y = 0.0f;
-    float preview_scroll_y = 0.0f;
+    bool preview_only = false;
+    float preview_expansion = 0.0f;
     uint32_t collapsed_mask = 0;    // bit per section: 0基本信息 1属性 2标签 3安全 4其他
     std::wstring location_text, size_text, contains_text;
     std::wstring created_text, modified_text, accessed_text;
@@ -285,7 +286,7 @@ struct DetailsPanelView {
 // Interactive rects inside the details panel, shared by draw and hit-test.
 struct DetailsHitRects {
     D2D1_RECT_F open{}, new_tab{}, copy_path{}, more{}, star{}, rename{};
-    D2D1_RECT_F tag_add{}, preview{};
+    D2D1_RECT_F tag_add{}, preview{}, preview_toggle{};
     D2D1_RECT_F attr_readonly{}, attr_hidden{}, attr_advanced{};
     D2D1_RECT_F security_change{};
     std::vector<D2D1_RECT_F> preset_chips;
@@ -434,6 +435,7 @@ struct WindowViewModel {
     bool settings_show_hidden_files = false;
     bool show_pinned_tab_names = true;
     bool settings_open_folders = false;
+    bool settings_blank_click_go_back = false;
     int settings_row_height = 34; // current row-height pref (DIPs) for density radios
     int settings_tray_icon = 48;  // current tray-deck icon pref (DIPs) for size radios
     int settings_language = 0;    // 0 system, 1 zh-CN, 2 en-US
@@ -547,6 +549,7 @@ struct HitTestResult {
         DetailsSecurityChange,
         DetailsPresetTag,
         DetailsPreview,
+        DetailsPreviewToggle,
         DetailsResize,
         StatusBar,
         StatusBarTask,
@@ -617,7 +620,10 @@ public:
     float Margin() const { return margin_; }
 
     // Right details panel: toggled from the view menu; ContentRect shrinks.
-    void SetDetailsPanelVisible(bool visible) { details_visible_ = visible; }
+    void SetDetailsPanelVisible(bool visible) {
+        details_visible_ = visible;
+        if (!visible) { EndDetailsPreviewPan(); details_preview_ready_ = false; }
+    }
     float DetailsPanelWidth(float window_w) const {
         return details_visible_ && window_w >= 1000.0f * scale_
             ? details_width_ * scale_ + margin_ : 0.0f;
@@ -650,6 +656,22 @@ public:
                                 float filter_expand = 1.0f) const;
     D2D1_RECT_F FilterEditRect(const D2D1_RECT_F& pane_bounds,
                                float expand = 1.0f) const;
+
+    bool BeginDetailsPreviewPan(float x, float y);
+    void MoveDetailsPreviewPan(float x, float y);
+    void EndDetailsPreviewPan() { details_preview_dragging_ = false; details_preview_drag_pending_ = false; }
+    bool DetailsPreviewDragging() const { return details_preview_dragging_; }
+    bool DetailsPreviewPointerActive() const { return details_preview_dragging_ || details_preview_drag_pending_; }
+    bool CanDetailsPreviewPan() const { return details_preview_ready_; }
+    bool TickDetailsPreview(ULONGLONG now) {
+        if (details_zoom_label_until_ && now >= details_zoom_label_until_) {
+            details_zoom_label_until_ = 0;
+            return true;
+        }
+        return false;
+    }
+    void ScrollDetailsPreview(float steps, float x, float y, bool horizontal = false);
+    void ToggleDetailsPreviewFit(float x, float y);
 
     struct DetailsColumnLayout {
         float left = 0.0f;
@@ -743,6 +765,8 @@ public:
     float TabPitchPx(const WindowViewModel& vm, float window_w) const;
     float SettingsMaxScroll(const WindowViewModel& vm, float window_w, float window_h) const;
     float SidebarMaxScroll(const WindowViewModel& vm, float window_w, float window_h) const;
+    bool SidebarScrollbarGeometry(const WindowViewModel& vm, float window_w, float window_h,
+                                  D2D1_RECT_F& track, D2D1_RECT_F& thumb, float& max_scroll) const;
     // How many deck cards the tray panel fits at the current sidebar width
     // without breaking the max-50%-overlap rule (>= 1).
     int TrayDeckCapacity(float window_w) const;
@@ -840,6 +864,13 @@ private:
     D2D1_COLOR_F text_background_{};
     bool details_visible_ = false;
     float details_width_ = 340.0f;
+    PreviewViewport details_viewport_;
+    std::wstring details_preview_identity_;
+    bool details_preview_ready_ = false;
+    bool details_preview_dragging_ = false;
+    bool details_preview_drag_pending_ = false;
+    POINT details_preview_pointer_{};
+    ULONGLONG details_zoom_label_until_ = 0;
 
     mutable ComPtr<ID2D1SolidColorBrush> brBg_;
     mutable ComPtr<ID2D1SolidColorBrush> brText_;
@@ -866,6 +897,9 @@ private:
 
     ComPtr<ID2D1Bitmap> logo_bitmap_;
     ComPtr<IDWriteTextFormat> preview_mono_format_;
+    ComPtr<IDWriteTextLayout> details_text_layout_;
+    std::wstring details_layout_text_;
+    float details_layout_scale_ = 0;
     std::unordered_map<int, ComPtr<IDWriteTextFormat>> sized_icon_formats_;
     ComPtr<ID2D1DeviceContext5> empty_state_svg_dc_;
     ComPtr<ID2D1SvgDocument> empty_state_svg_;

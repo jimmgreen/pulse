@@ -249,6 +249,21 @@ int wmain() {
         prefs.show_pinned_tab_names && parsed_prefs.FromJson(prefs.ToJson()) &&
         parsed_prefs.show_pinned_tab_names);
     settings_ui.Wallpaper(0);
+    passed &= Report("blank click navigation defaults off", !prefs.blank_click_go_back);
+    settings_ui.ToggleUi(7);
+    passed &= Report("blank click navigation enables and persists",
+        prefs.blank_click_go_back && parsed_prefs.FromJson(prefs.ToJson()) &&
+        parsed_prefs.blank_click_go_back);
+    settings_ui.ToggleUi(7);
+    passed &= Report("blank click navigation disables and persists",
+        !prefs.blank_click_go_back && parsed_prefs.FromJson(prefs.ToJson()) &&
+        !parsed_prefs.blank_click_go_back);
+    parsed_prefs.blank_click_go_back = true;
+    passed &= Report("legacy preferences leave blank click navigation off",
+        parsed_prefs.FromJson(L"{}") && !parsed_prefs.blank_click_go_back);
+    parsed_prefs.blank_click_go_back = true;
+    parsed_prefs.ResetToDefaults();
+    passed &= Report("reset disables blank click navigation", !parsed_prefs.blank_click_go_back);
     passed &= Report("settings UI controller owns image selection flow",
         picked_image);
     settings_ui.ResetUi();

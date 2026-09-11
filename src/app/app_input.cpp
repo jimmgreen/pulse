@@ -746,19 +746,28 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             if (!tab || (GetKeyState(VK_LBUTTON) & 0x8000) == 0) {
                 s->scrollbarDragging = false;
                 s->scrollbarHorizontal = false;
+                s->scrollbarSidebar = false;
                 if (GetCapture() == hwnd) ReleaseCapture();
             } else {
                 ui::WindowViewModel dragVm = BuildVm(*s);
                 D2D1_RECT_F track{}, thumb{};
                 float maxScroll = 0.0f;
-                if (s->scrollbarHorizontal &&
+                if (s->scrollbarSidebar && s->renderer.SidebarScrollbarGeometry(
+                        dragVm, static_cast<float>(s->compositor.Width()),
+                        static_cast<float>(s->compositor.Height()), track, thumb, maxScroll)) {
+                    const float travel = std::max(1.0f,
+                        (track.bottom - track.top) - (thumb.bottom - thumb.top));
+                    s->sidebarScroll = std::clamp(s->scrollbarDragStartScroll +
+                        (my - s->scrollbarDragStartY) * maxScroll / travel, 0.0f, maxScroll);
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                } else if (!s->scrollbarSidebar && s->scrollbarHorizontal &&
                     HorizontalScrollbarGeometry(*s, dragVm.pane, track, thumb, maxScroll)) {
                     const float travel = std::max(1.0f,
                         (track.right - track.left) - (thumb.right - thumb.left));
                     tab->scroll_x = std::clamp(s->scrollbarDragStartScroll +
                         (mx - s->scrollbarDragStartX) * maxScroll / travel, 0.0f, maxScroll);
                     InvalidateRect(hwnd, nullptr, FALSE);
-                } else if (!s->scrollbarHorizontal &&
+                } else if (!s->scrollbarSidebar && !s->scrollbarHorizontal &&
                            ScrollbarGeometry(*s, dragVm.pane, track, thumb, maxScroll)) {
                     const float travel = std::max(1.0f,
                         (track.bottom - track.top) - (thumb.bottom - thumb.top));
@@ -1627,6 +1636,15 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             SetCapture(hwnd);
             return 0;
         }
+        if (hit.region == ui::HitTestResult::DetailsPreviewToggle) {
+            s->detailsPreviewOnly = !s->detailsPreviewOnly;
+            s->detailsPreviewExpansionFrom = s->detailsPreviewExpansion;
+            s->detailsPreviewFoldStart = GetTickCount64();
+            s->detailsScroll = 0;
+            s->dragPending = false;
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
         if (hit.region == ui::HitTestResult::DetailsPreview) {
             s->dragPending = false;
             return 0;
@@ -1659,7 +1677,11 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             float maxScroll = 0.0f;
             app::Tab* tab = ActiveTab(*s);
             s->scrollbarHorizontal = hit.sub_index == 1;
-            const bool hasGeometry = s->scrollbarHorizontal
+            s->scrollbarSidebar = hit.sub_index == 2;
+            const bool hasGeometry = s->scrollbarSidebar
+                ? s->renderer.SidebarScrollbarGeometry(vm, rect.right, rect.bottom,
+                                                       track, thumb, maxScroll)
+                : s->scrollbarHorizontal
                 ? HorizontalScrollbarGeometry(*s, vm.pane, track, thumb, maxScroll)
                 : ScrollbarGeometry(*s, vm.pane, track, thumb, maxScroll);
             if (tab && hasGeometry) {
@@ -1676,13 +1698,15 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                         ? thumb.right-thumb.left : thumb.bottom-thumb.top;
                     const float value = std::clamp((pointer-thumbExtent*0.5f)*maxScroll/travel,
                                                    0.0f,maxScroll);
-                    if (s->scrollbarHorizontal) tab->scroll_x=value;
+                    if (s->scrollbarSidebar) s->sidebarScroll=value;
+                    else if (s->scrollbarHorizontal) tab->scroll_x=value;
                     else { tab->scroll_y=value; s->scrollTargetY=value; MaybePrefetchSearchPage(*s); }
                 }
                 s->scrollbarDragging = true;
                 s->scrollbarDragStartX = mx;
                 s->scrollbarDragStartY = my;
-                s->scrollbarDragStartScroll = s->scrollbarHorizontal ? tab->scroll_x : tab->scroll_y;
+                s->scrollbarDragStartScroll = s->scrollbarSidebar ? s->sidebarScroll
+                    : s->scrollbarHorizontal ? tab->scroll_x : tab->scroll_y;
                 SetCapture(hwnd);
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
@@ -2140,7 +2164,8 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             s->marqueeActive = false;
             s->marqueeAdditive = ctrl;
             s->blankClickPane = s->pane;
-            s->blankClickTab = tab && !IsAddressSearchResults(tab) && !ctrl && PointInList(*s, mx, my) &&
+            s->blankClickTab = s->appPrefs.blank_click_go_back && tab &&
+                !IsAddressSearchResults(tab) && !ctrl && PointInList(*s, mx, my) &&
                 (GetKeyState(VK_SHIFT) & 0x8000) == 0 &&
                 (GetKeyState(VK_MENU) & 0x8000) == 0 ? tab : nullptr;
             s->blankClickGeneration = tab ? tab->view_generation : 0;
@@ -2167,6 +2192,11 @@ LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPA
         ui::WindowViewModel vm = BuildVm(*s, false);
         D2D1_RECT_F rect = D2D1::RectF(0, 0, (float)s->compositor.Width(), (float)s->compositor.Height());
         ui::HitTestResult hit = s->renderer.HitTest(vm, rect, (float)mx, (float)my);
+        if (hit.region == ui::HitTestResult::DetailsPreview) {
+            s->renderer.ToggleDetailsPreviewFit(static_cast<float>(mx), static_cast<float>(my));
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
         if (hit.region == ui::HitTestResult::SidebarItem &&
             hit.path.starts_with(L"pulse:tag:")) {
             s->tagDragPending = false;
@@ -2425,7 +2455,8 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 click.drag_width = GetSystemMetrics(SM_CXDRAG);
                 click.drag_height = GetSystemMetrics(SM_CYDRAG);
                 click.blank_list_hit = PointInList(*s, mx, my);
-                bool goBack = !IsAddressSearchResults(tab) && app::IsBlankPaneBackClick(click);
+                bool goBack = s->appPrefs.blank_click_go_back &&
+                    !IsAddressSearchResults(tab) && app::IsBlankPaneBackClick(click);
                 if (goBack) {
                     const ui::WindowViewModel vm = BuildVm(*s, false);
                     const D2D1_RECT_F rect = D2D1::RectF(
@@ -2478,6 +2509,7 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             s->dragPending = false;
             s->scrollbarDragging = false;
             s->scrollbarHorizontal = false;
+            s->scrollbarSidebar = false;
             s->splitterDragging = false;
             s->detailsPanelResizing = false;
             s->columnResizing = false;
@@ -2540,6 +2572,7 @@ LRESULT HandleCaptureChanged(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LP
             s->dragPending = false;
             s->scrollbarDragging = false;
             s->scrollbarHorizontal = false;
+            s->scrollbarSidebar = false;
             s->splitterDragging = false;
             s->splitterDragIndex = -1;
             s->tabDragPending = false;
@@ -2746,8 +2779,8 @@ LRESULT HandleMouseWheel(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                                 static_cast<float>(WHEEL_DELTA);
             if (wheelVm.details.multi_count <= 1 && !wheelVm.details.is_dir &&
                 wheelHit.region == ui::HitTestResult::DetailsPreview) {
-                s->detailsPreviewScroll = std::clamp(
-                    s->detailsPreviewScroll - steps * 48.0f, 0.0f, 4000.0f);
+                s->renderer.ScrollDetailsPreview(steps, static_cast<float>(pt.x),
+                    static_cast<float>(pt.y));
             } else {
                 const float visibleDip = (detailsRc.bottom - detailsRc.top) / s->scale;
                 const float contentDip = s->renderer.DetailsContentHeightDip(

@@ -33,6 +33,7 @@
 #include "../index/index_engine.h"
 #include "../fs/fs_enum.h"
 #include "../fs/fs_recycle.h"
+#include "../common/current_user_security.h"
 #include "../fs/fs_snapshot.h"
 #include "../fs/fs_watch.h"
 #include "../fs/fs_net_cache.h"
@@ -43,6 +44,7 @@
 #include "../ui/bloom_accent_picker.h"
 #include "../ui/drag_drop.h"
 #include "../ui/ui_renderer.h"
+#include "../ui/preview_footer_layout.h"
 #include "../ops/ops_manager.h"
 #include "../ops/clipboard.h"
 #include "../common/text_format.h"
@@ -514,6 +516,56 @@ LRESULT CALLBACK BlankPaneTestProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
 }
 
 void TestBlankPaneClickNavigation() {
+    for (float scale : {1.0f, 1.25f, 1.5f, 2.0f}) {
+        for (float height : {380.0f, 720.0f}) {
+            for (bool occupied : {false, true}) {
+                ui::MainRenderer renderer;
+                renderer.SetScale(scale);
+                ui::WindowViewModel vm;
+                for (int g = 0; g < 3; ++g) {
+                    ui::SidebarGroup group;
+                    group.header = L"Scroll fixture";
+                    for (int i = 0; i < 12; ++i) {
+                        ui::SidebarItem item;
+                        item.label = L"Item";
+                        item.path = L"fixture:" + std::to_wstring(g) + L":" + std::to_wstring(i);
+                        item.is_drive = g == 0;
+                        item.is_tag = g == 1;
+                        group.items.push_back(std::move(item));
+                    }
+                    vm.sidebar.push_back(std::move(group));
+                }
+                if (occupied) vm.tray_deck.cards.emplace_back();
+                const float width_px = 1000.0f * scale, height_px = height * scale;
+                vm.sidebar_scroll = renderer.SidebarMaxScroll(vm, width_px, height_px);
+                D2D1_RECT_F track{}, thumb{};
+                float maximum = 0.0f;
+                const bool geometry = renderer.SidebarScrollbarGeometry(
+                    vm, width_px, height_px, track, thumb, maximum);
+                Check(geometry && std::abs(thumb.bottom - track.bottom) < 0.01f,
+                      L"sidebar geometry: thumb reaches track bottom across DPI and tray states");
+                const auto bounds = D2D1::RectF(0, 0, width_px, height_px);
+                const auto thumb_hit = renderer.HitTest(vm, bounds,
+                    (thumb.left + thumb.right) * 0.5f, (thumb.top + thumb.bottom) * 0.5f);
+                Check(thumb_hit.region == ui::HitTestResult::Scrollbar && thumb_hit.sub_index == 2,
+                      L"sidebar geometry: painted thumb has matching hit target");
+                float first = -1.0f, last = -1.0f;
+                for (float y = std::max(track.top, track.bottom - 90.0f * scale);
+                     y < track.bottom; y += scale) {
+                    const auto hit = renderer.HitTest(vm, bounds, 70.0f * scale, y);
+                    if (hit.region == ui::HitTestResult::SidebarItem && hit.path == L"fixture:2:11") {
+                        if (first < 0.0f) first = y;
+                        last = y;
+                    }
+                }
+                Check(first >= track.top && last - first >= 30.0f * scale,
+                      L"sidebar geometry: final network row is fully visible and clickable at end");
+                vm.sidebar[1].collapsed = true;
+                Check(renderer.SidebarMaxScroll(vm, width_px, height_px) < maximum,
+                      L"sidebar geometry: collapsing a group reduces scroll range");
+            }
+        }
+    }
     auto state = std::make_unique<AppState>();
     state->places.persist = false;
     state->appPrefs.persist = false;
@@ -537,6 +589,57 @@ void TestBlankPaneClickNavigation() {
         state->pane = state->window_tabs.Active()->panes.front().get();
         auto* tab = state->pane->ActiveTab();
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state.get()));
+        {
+            const auto saved_sidebar = state->sidebar;
+            for (int i = 0; i < 40; ++i) {
+                SidebarEntry entry;
+                entry.label = L"Scroll fixture " + std::to_wstring(i);
+                entry.path = L"C:\\PulseSidebarFixture\\" + std::to_wstring(i);
+                state->sidebar.quick_access.push_back(std::move(entry));
+            }
+            state->trayCards[L"sidebar-test-ghost"].ghost = true;
+            state->sidebarScroll = 100000.0f;
+            auto vm = BuildVm(*state, false);
+            const float maximum = state->renderer.SidebarMaxScroll(vm, 1000, 700);
+            Check(maximum > 0.0f && std::abs(state->sidebarScroll - maximum) < 0.01f,
+                  L"sidebar: clamp uses final occupied tray height");
+            vm = BuildVm(*state, false);
+            Check(std::abs(vm.sidebar_scroll - maximum) < 0.01f,
+                  L"sidebar: rebuilding view model preserves bottom scroll position");
+            state->sidebarScroll = 0.0f;
+            vm = BuildVm(*state, false);
+            D2D1_RECT_F track{}, thumb{};
+            float max_scroll = 0.0f;
+            Check(state->renderer.SidebarScrollbarGeometry(vm, 1000, 700, track, thumb, max_scroll),
+                  L"sidebar: overflowing view exposes scrollbar geometry");
+            const int sx = static_cast<int>((track.left + track.right) * 0.5f);
+            const int sy = static_cast<int>(track.bottom - 1.0f);
+            SendMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(sx, sy));
+            Check(state->scrollbarDragging && state->scrollbarSidebar &&
+                  std::abs(state->sidebarScroll - max_scroll) < 0.01f,
+                  L"sidebar: clicking track bottom reaches end and captures sidebar drag");
+            BYTE saved_keys[256]{};
+            GetKeyboardState(saved_keys);
+            BYTE drag_keys[256]{};
+            memcpy(drag_keys, saved_keys, sizeof(drag_keys));
+            drag_keys[VK_LBUTTON] |= 0x80;
+            SetKeyboardState(drag_keys);
+            SendMessageW(hwnd, WM_MOUSEMOVE, MK_LBUTTON,
+                MAKELPARAM(sx, static_cast<int>(track.top - 20.0f)));
+            Check(state->sidebarScroll == 0.0f,
+                  L"sidebar: dragging thumb to top reaches zero without scrolling file pane");
+            SendMessageW(hwnd, WM_MOUSEMOVE, MK_LBUTTON,
+                MAKELPARAM(sx, static_cast<int>(track.bottom + 50.0f)));
+            Check(std::abs(state->sidebarScroll - max_scroll) < 0.01f,
+                  L"sidebar: dragging beyond track bottom clamps to full range");
+            SetKeyboardState(saved_keys);
+            SendMessageW(hwnd, WM_LBUTTONUP, 0, MAKELPARAM(sx, sy));
+            Check(!state->scrollbarDragging && !state->scrollbarSidebar && GetCapture() != hwnd,
+                  L"sidebar: releasing thumb clears drag and capture");
+            state->sidebar = saved_sidebar;
+            state->trayCards.clear();
+            state->sidebarScroll = 0.0f;
+        }
         {
             auto vm = BuildVm(*state, false);
             bool tag_action = false, network_action = false;
@@ -571,6 +674,23 @@ void TestBlankPaneClickNavigation() {
         const LPARAM point = MAKELPARAM(x, y);
         auto press = [&] { SendMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, point); };
         auto release = [&] { SendMessageW(hwnd, WM_LBUTTONUP, 0, point); };
+        const std::wstring initial_folder = tab->current_path;
+        Check(!state->appPrefs.blank_click_go_back, L"blank pane: back on empty click defaults off");
+        press();
+        Check(state->marqueePending && !state->blankClickTab,
+              L"blank pane: disabled back still permits marquee selection");
+        release();
+        SendMessageW(hwnd, WM_LBUTTONDBLCLK, MK_LBUTTON, point);
+        release();
+        Check(tab->current_path == initial_folder,
+              L"blank pane: disabled single and double click preserve location");
+        state->appPrefs.blank_click_go_back = true;
+        press();
+        state->appPrefs.blank_click_go_back = false;
+        release();
+        Check(tab->current_path == initial_folder,
+              L"blank pane: disabling during a press prevents pending navigation");
+        state->appPrefs.blank_click_go_back = true;
         press();
         Check(state->marqueePending && state->blankClickTab == tab && GetCapture() == hwnd,
               L"blank pane: real blank hit arms click and captures mouse");
@@ -3211,7 +3331,10 @@ void TestRecycleAndBatchRename() {
 
     wchar_t temp[MAX_PATH]{};
     GetTempPathW(MAX_PATH, temp);
-    const std::wstring index_path = std::wstring(temp) + L"pulse_recycle_index_test.$ITEST";
+    const std::wstring suffix = std::to_wstring(GetCurrentProcessId()) + L"_" +
+                                std::to_wstring(GetTickCount64());
+    const std::wstring index_path = std::wstring(temp) + L"$Ipulse_test_" + suffix;
+    const std::wstring content_path = std::wstring(temp) + L"$Rpulse_test_" + suffix;
     const std::wstring original = L"C:\\Users\\TestUser\\Desktop\\photo.jpg";
     FILETIME deleted{};
     deleted.dwLowDateTime = 1;
@@ -3234,11 +3357,63 @@ void TestRecycleAndBatchRename() {
         }
     }
     fs::RecycleItem item;
+    Check(!fs::ReadRecycleIndex(index_path, item),
+          L"recycle: orphan metadata without a payload is rejected");
+    HANDLE payload = CreateFileW(content_path.c_str(), GENERIC_WRITE, 0, nullptr,
+                                 CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    Check(payload != INVALID_HANDLE_VALUE, L"recycle: create matching payload");
+    if (payload != INVALID_HANDLE_VALUE) CloseHandle(payload);
     Check(fs::ReadRecycleIndex(index_path, item) && item.name == L"photo.jpg" &&
           item.original_path == original && item.size == 4096 &&
           item.deleted.dwHighDateTime == 2,
           L"recycle: parse Windows $I v2 metadata");
+
+    const std::wstring fixture = std::wstring(temp) + L"PulseRecycleFixture_" + suffix;
+    const std::wstring sid = pulse::CurrentUserSidString();
+    const std::wstring own = fixture + L"\\" + sid;
+    const std::wstring other = fixture + L"\\S-1-5-21-111-222-333-9999";
+    const bool fixture_ready = !sid.empty() && CreateDirectoryW(fixture.c_str(), nullptr) &&
+        CreateDirectoryW(own.c_str(), nullptr) && CreateDirectoryW(other.c_str(), nullptr);
+    Check(fixture_ready, L"recycle: create isolated current-user and other-user fixture");
+    if (fixture_ready) {
+        Check(CopyFileW(index_path.c_str(), (other + L"\\$Iother").c_str(), TRUE) &&
+              CopyFileW(content_path.c_str(), (other + L"\\$Rother").c_str(), TRUE) &&
+              CopyFileW(index_path.c_str(), (own + L"\\$Iorphan").c_str(), TRUE),
+              L"recycle: fixture contains foreign live item and own orphan");
+        std::vector<fs::DirEntry> entries;
+        Check(fs::EnumerateRecycleBinAtRoot(fixture, entries) && entries.empty(),
+              L"recycle: empty user bin excludes other users and orphan records");
+        Check(CopyFileW(index_path.c_str(), (own + L"\\$Ilive").c_str(), TRUE) &&
+              CopyFileW(content_path.c_str(), (own + L"\\$Rlive").c_str(), TRUE),
+              L"recycle: create own live file fixture");
+        Check(fs::EnumerateRecycleBinAtRoot(fixture, entries) && entries.size() == 1 &&
+              entries[0].name == L"photo.jpg" && entries[0].size == 4096 &&
+              entries[0].recycle_path == fs::NormalizePath(own + L"\\$Rlive") && !entries[0].is_dir,
+              L"recycle: list contains only current user's restorable file");
+        Check(DeleteFileW((own + L"\\$Rlive").c_str()) != FALSE,
+              L"recycle: simulate externally removed payload");
+        entries.clear();
+        Check(fs::EnumerateRecycleBinAtRoot(fixture, entries) && entries.empty(),
+              L"recycle: refresh removes stale record after payload disappears");
+        Check(CreateDirectoryW((own + L"\\$Rlive").c_str(), nullptr) != FALSE,
+              L"recycle: create directory payload fixture");
+        Check(fs::EnumerateRecycleBinAtRoot(fixture, entries) && entries.size() == 1 &&
+              entries[0].is_dir, L"recycle: directory payload remains supported");
+        entries.clear();
+        Check(fs::EnumerateRecycleBinAtRoot(fixture + L"\\missing", entries) && entries.empty(),
+              L"recycle: missing recycle root is empty");
+        DeleteFileW((own + L"\\$Iorphan").c_str());
+        DeleteFileW((own + L"\\$Ilive").c_str());
+        RemoveDirectoryW((own + L"\\$Rlive").c_str());
+        DeleteFileW((other + L"\\$Iother").c_str());
+        DeleteFileW((other + L"\\$Rother").c_str());
+    }
+    RemoveDirectoryW(own.c_str());
+    RemoveDirectoryW(other.c_str());
+    Check(RemoveDirectoryW(fixture.c_str()) != FALSE,
+          L"recycle: isolated fixture cleaned without touching real recycle bins");
     DeleteFileW(index_path.c_str());
+    DeleteFileW(content_path.c_str());
 
     fs::RecycleBinInfo info;
     fs::QueryRecycleBinInfo(info);
@@ -4038,6 +4213,119 @@ void TestColorPickerModel() {
           L"colorpicker: format #rrggbb lowercase");
 }
 
+
+void TestDetailsPreviewInteraction() {
+    ui::PreviewViewport view;
+    const auto rect = D2D1::RectF(20, 30, 420, 330);
+    view.SetContent(rect, 1600, 1200, true);
+    Check(std::abs(view.zoom - .25f) < .001f && view.MaxX() == 0 && view.MaxY() == 0,
+        L"preview: initial image fits entirely without cropping");
+    view.ZoomAt(1, 120, 130);
+    auto drawn = view.ContentRect();
+    Check(std::abs((120 - drawn.left) / view.zoom - 400) < .01f &&
+          std::abs((130 - drawn.top) / view.zoom - 400) < .01f,
+        L"preview: wheel zoom preserves the source point under the pointer");
+    const float old_x = view.x, old_y = view.y;
+    view.Pan(-77, -43);
+    Check(view.x == old_x + 77 && view.y == old_y + 43,
+        L"preview: diagonal grab follows pointer displacement on both axes");
+    view.Pan(-100000, -100000);
+    drawn = view.ContentRect();
+    Check(std::abs(drawn.right - rect.right) < .01f && std::abs(drawn.bottom - rect.bottom) < .01f,
+        L"preview: grab reaches bottom-right content without overscroll");
+    view.Pan(100000, 100000);
+    drawn = view.ContentRect();
+    Check(drawn.left == rect.left && drawn.top == rect.top,
+        L"preview: grab reaches top-left content without overscroll");
+    view.ToggleFit(200, 180);
+    view.SetContent(D2D1::RectF(20, 30, 820, 630), 1600, 1200, true);
+    Check(view.fit && std::abs(view.zoom - .5f) < .001f,
+        L"preview: fit mode readjusts when the preview panel expands");
+    view.SetContent(rect, 160, 1200, true);
+    view.ZoomAt(1, 220, 180);
+    view.Pan(-300, -300);
+    Check(view.x == 0 && view.y > 0, L"preview: a narrow image pans only in the overflowing direction");
+    view = {};
+    view.SetContent(rect, 2200, 16000, false);
+    view.Pan(-100000, -100000);
+    Check(view.x == 1800 && view.y == 15700,
+        L"preview: long wide text reaches real content beyond the former 4000px limit");
+    view.SetContent(rect, 50, 60, false);
+    Check(view.x == 0 && view.y == 0, L"preview: short content clamps stale pan on resize");
+    view = {};
+    view.SetContent(rect, 800, 600, true);
+    Check(view.fit && view.x == 0 && view.y == 0,
+        L"preview: reset for another file restores fit and clears both offsets");
+
+    for (float scale : {1.0f, 1.25f, 1.5f, 2.0f}) {
+        for (float height : {380.0f, 720.0f}) {
+            for (float width : {300.0f, 480.0f}) {
+                ui::MainRenderer renderer;
+                renderer.SetScale(scale);
+                renderer.SetDetailsPanelVisible(true);
+                renderer.SetDetailsPanelWidth(width);
+                const auto window = D2D1::RectF(0, 0, 1400 * scale, height * scale);
+                const auto panel = renderer.DetailsPanelRect(window.right, window.bottom);
+                ui::WindowViewModel vm;
+                vm.details_visible = true;
+                vm.details.has_selection = true;
+                vm.details.multi_count = 1;
+                vm.details.preview_only = true;
+                vm.details.preview_expansion = 1;
+                const auto footer_bounds = D2D1::RectF(panel.left + 12 * scale,
+                    panel.bottom - 28 * scale, panel.right - 12 * scale, panel.bottom);
+                const auto footer = ui::MakePreviewFooterLayout(footer_bounds, scale);
+                Check(footer.caption.right < footer.chevron.x - 4 * scale &&
+                      std::abs(footer.chevron.x - (footer_bounds.left + footer_bounds.right) * .5f) < .01f,
+                    L"preview footer: filename leaves a gap around the centered chevron");
+                const auto image_footer = ui::MakePreviewFooterLayout(footer_bounds, scale);
+                Check(image_footer.caption.right < image_footer.zoom.left &&
+                      image_footer.zoom.left > image_footer.chevron.x + 4 * scale,
+                    L"preview footer: zoom feedback cannot overlap filename or chevron");
+                const float cx = (panel.left + panel.right) * .5f;
+                Check(renderer.HitTest(vm, window, cx, panel.bottom - 14 * scale).region ==
+                    ui::HitTestResult::DetailsPreviewToggle,
+                    L"preview layout: full preview leaves a reachable bottom fold control at every DPI/size");
+                Check(renderer.HitTest(vm, window, cx, panel.bottom - 32 * scale).region ==
+                    ui::HitTestResult::DetailsPreview &&
+                    std::abs(renderer.DetailsContentHeightDip(vm, window.right, window.bottom) -
+                             (panel.bottom - panel.top) / scale) < .01f,
+                    L"preview layout: full preview fills available height with no hidden metadata scroll");
+                vm.details.preview_only = false;
+                vm.details.preview_expansion = 0;
+                vm.details.scroll_y = 600;
+                int fold_hits = 0;
+                for (float y = panel.top; y < panel.bottom; y += scale) {
+                    const auto hit = renderer.HitTest(vm, window, cx, y);
+                    if (hit.region == ui::HitTestResult::DetailsPreviewToggle) ++fold_hits;
+                }
+                Check(fold_hits >= 27 && fold_hits <= 29,
+                    L"preview layout: fold control stays pinned and clickable while metadata scrolls");
+                vm.details.has_selection = false;
+                Check(renderer.HitTest(vm, window, cx, panel.bottom - 14 * scale).region !=
+                    ui::HitTestResult::DetailsPreviewToggle,
+                    L"preview layout: empty selection does not expose an inactive fold control");
+            }
+        }
+    }
+    wchar_t previous[32768]{};
+    GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", previous, ARRAYSIZE(previous));
+    const auto data_dir = std::wstring(kSandbox) + L"\\preview-session";
+    std::filesystem::create_directories(data_dir);
+    SetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", data_dir.c_str());
+    SessionSnapshot saved, loaded;
+    saved.details_panel = true;
+    saved.details_preview_only = true;
+    saved.details_panel_width = 420;
+    Check(SaveSession(saved) && LoadSession(loaded) && loaded.details_preview_only &&
+        loaded.details_panel_width == 420, L"preview: folded mode and panel width survive session reload");
+    WriteUtf8FileAtomic(data_dir + L"\\session.json", L"{\"detailsPanel\":1,\"version\":4}");
+    SessionSnapshot legacy;
+    LoadSession(legacy);
+    Check(!legacy.details_preview_only, L"preview: older sessions default to expanded details");
+    SetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", previous[0] ? previous : nullptr);
+}
+
 int RunSelfTest1B2() {
     // These model assertions use the Chinese resource strings explicitly.
     l10n::Initialize(GetModuleHandleW(nullptr), L"zh-CN");
@@ -4062,6 +4350,7 @@ int RunSelfTest1B2() {
         return g_fail ? 1 : 0;
     }
 
+    TestDetailsPreviewInteraction();
     TestBreadcrumb();
     TestThisPcEnumeration();
     TestLoadingPresentation();

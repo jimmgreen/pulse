@@ -1,4 +1,5 @@
 #include "preview_handler_host.h"
+#include "preview_handler_pan.h"
 #include "../common/preview_extensions.h"
 #include "../common/path_utils.h"
 #include <shobjidl.h>
@@ -286,6 +287,7 @@ struct PreviewHandlerHost::WorkerState {
     }
 
     void HideWindow() {
+        pan.Disable();
         if (hwnd) {
             SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW);
@@ -302,17 +304,22 @@ struct PreviewHandlerHost::WorkerState {
         const int width = std::max(1L, bounds.right - bounds.left);
         const int height = std::max(1L, bounds.bottom - bounds.top);
         if (shown && !app_active && !OverlayOwnsForeground()) {
+            pan.Disable();
             SetWindowPos(hwnd, HWND_NOTOPMOST, origin.x, origin.y, width, height,
                          SWP_NOACTIVATE | SWP_HIDEWINDOW);
             return;
         }
         const bool size_changed = width != placed_w || height != placed_h;
         const bool moved = origin.x != placed_x || origin.y != placed_y || size_changed;
-        if (!moved && shown && IsWindowVisible(hwnd)) return;
+        if (!moved && shown && IsWindowVisible(hwnd)) {
+            if (handler) pan.Enable(hwnd);
+            return;
+        }
         placed_x = origin.x;
         placed_y = origin.y;
         placed_w = width;
         placed_h = height;
+        pan.Disable();
         SetWindowPos(hwnd, HWND_TOPMOST, origin.x, origin.y, width, height,
                      SWP_NOACTIVATE | (shown ? SWP_SHOWWINDOW : SWP_NOREDRAW));
         if (handler && shown && size_changed) {
@@ -322,9 +329,11 @@ struct PreviewHandlerHost::WorkerState {
                 preview->SetRect(&client);
             }
         }
+        if (handler && shown) pan.Enable(hwnd);
     }
 
     void Unload() {
+        pan.Disable();
         if (handler) {
             ComPtr<IPreviewHandler> preview;
             if (SUCCEEDED(handler->QueryInterface(IID_PPV_ARGS(&preview))))
@@ -369,6 +378,7 @@ struct PreviewHandlerHost::WorkerState {
         handler = unknown.Detach();
         shown = true;
         PlaceOverlay();
+        pan.Disable();
         RECT client{};
         GetClientRect(hwnd, &client);
         if (client.right <= client.left || client.bottom <= client.top ||
@@ -388,6 +398,7 @@ struct PreviewHandlerHost::WorkerState {
         // windows without erasing the pixels DoPreview has already produced.
         RedrawWindow(hwnd, nullptr, nullptr,
                      RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_NOERASE);
+        pan.Enable(hwnd);
         return true;
     }
 
@@ -416,6 +427,7 @@ struct PreviewHandlerHost::WorkerState {
     IUnknown* handler = nullptr;
     IUnknown* stream = nullptr;
     IUnknown* site = nullptr;
+    PreviewHandlerPan pan;
 };
 
 PreviewHandlerHost::PreviewHandlerHost() = default;
@@ -577,6 +589,7 @@ LRESULT CALLBACK PreviewHandlerHost::WndProc(HWND hwnd, UINT msg, WPARAM wParam,
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
     if (!self) return DefWindowProcW(hwnd, msg, wParam, lParam);
+    if (self->pan.HandleMessage(msg, wParam, lParam)) return 1;
 
     switch (msg) {
     case WM_MOUSEACTIVATE:

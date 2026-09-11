@@ -302,6 +302,24 @@ void ClearTextWidthCache() {
         return height + m.pad;
     }
 
+    fluent::ScrollbarSpec SidebarScrollbarSpec(const WindowViewModel& vm,
+                                               const D2D1_RECT_F& sb, float scale) {
+        const SidebarMetrics m = MakeSidebarMetrics(scale);
+        const float tray_height = std::min(ExpandedTrayHeight(vm, m),
+            std::max(120.0f * scale, (sb.bottom - sb.top) * 0.52f));
+        const float bottom = std::max(sb.top, sb.bottom - tray_height - 2.0f * m.pad);
+        fluent::ScrollbarSpec bar;
+        bar.viewport = D2D1::RectF(sb.right - 12.0f * scale, sb.top,
+                                   sb.right - 2.0f * scale, bottom);
+        bar.viewport_extent = bottom - sb.top;
+        bar.content_extent = SidebarContentHeight(vm, m);
+        bar.offset = std::clamp(vm.sidebar_scroll, 0.0f,
+            std::max(0.0f, bar.content_extent - bar.viewport_extent));
+        bar.expand_progress = 1.0f;
+        bar.enabled = sb.right - sb.left > 60.0f * scale;
+        return bar;
+    }
+
     void LayoutSidebar(const WindowViewModel& vm, const D2D1_RECT_F& sb, float scale,
                        std::vector<SidebarSlot>& out) {
         out.clear();
@@ -728,13 +746,15 @@ void ClearTextWidthCache() {
     // ---------------------------------------------------------------------
 
     // Fixed 16:10 band driven by the panel width; no manual resize.
-    float DetailsPreviewHeight(const D2D1_RECT_F& panel, float scale) {
+    float DetailsPreviewHeight(const D2D1_RECT_F& panel, float scale, float expansion = 0.0f) {
         const float w = panel.right - panel.left - 24.0f * scale - 24.0f * scale;
         const float h = w * 10.0f / 16.0f;
-        return std::clamp(h, 160.0f * scale, 360.0f * scale);
+        const float available = std::max(1.0f, panel.bottom - panel.top - 40.0f * scale);
+        const float normal = std::min(available, std::clamp(h, 160.0f * scale, 360.0f * scale));
+        return normal + (available - normal) * std::clamp(expansion, 0.0f, 1.0f);
     }
     float DetailsPreviewBand(float preview_h, float scale) {
-        return preview_h + 12.0f * scale;
+        return preview_h + 32.0f * scale;
     }
 
     // Display order: 基本信息 / 标签 / 属性 / 安全 / 其他. Collapsed state is
@@ -781,10 +801,16 @@ void ClearTextWidthCache() {
         const float w = panel.right - panel.left - pad * 2.0f;
         out = DetailsHitRects{};
         if (!d.has_selection) return;
-        out.preview = D2D1::RectF(x, panel.top + pad, panel.right - 36.0f * s,
+        out.preview = D2D1::RectF(x, panel.top + pad, panel.right - pad,
                                   panel.top + pad + preview_h);
         const float previewBottom = panel.top + pad + preview_h;
-        float y = previewBottom + 12.0f * s - d.scroll_y * s;
+        out.preview_toggle = D2D1::RectF(x, previewBottom, panel.right - pad,
+            std::min(panel.bottom, previewBottom + 28.0f * s));
+        if (d.preview_only) {
+            out.content_height_dip = (panel.bottom - panel.top) / s;
+            return;
+        }
+        float y = previewBottom + 32.0f * s - d.scroll_y * s;
         if (d.multi_count <= 1) {
             // Name row: star then rename pencil on the right edge.
             out.rename = D2D1::RectF(panel.right - pad - 22.0f * s, y,
@@ -1178,6 +1204,7 @@ struct SettingsLayout {
     D2D1_RECT_F startup_row[3]{};
     D2D1_RECT_F hidden_files_row{};
     D2D1_RECT_F pinned_names_row{};
+    D2D1_RECT_F blank_click_row{};
     D2D1_RECT_F index_info{};
     D2D1_RECT_F index_status{};
     D2D1_RECT_F index_path{};
@@ -1323,6 +1350,8 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
         l.hidden_files_row = D2D1::RectF(card_left, y, card_right, y + 56.0f * scale);
         y += 68.0f * scale;
         l.pinned_names_row = D2D1::RectF(card_left, y, card_right, y + 56.0f * scale);
+        y += 68.0f * scale;
+        l.blank_click_row = D2D1::RectF(card_left, y, card_right, y + 56.0f * scale);
         y += 76.0f * scale;
 
         y += 22.0f * scale;

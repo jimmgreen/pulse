@@ -124,6 +124,9 @@ struct ScrollbarSpec {
     bool enabled = true;
 };
 
+D2D1_RECT_F ScrollbarThumbRect(const ScrollbarSpec& spec, float scale,
+                              bool high_contrast = false) noexcept;
+
 struct ListRowSpec {
     D2D1_RECT_F bounds{};
     ControlState state{};

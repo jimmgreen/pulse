@@ -1,5 +1,6 @@
 #pragma once
 #include "ui_compositor.h"
+#include "preview_viewport.h"
 #include "../ipc/preview_protocol.h"
 #include <atomic>
 #include <condition_variable>
@@ -40,7 +41,8 @@ public:
                            uint32_t frame_index = 0, uint32_t* frame_count = nullptr,
                            uint32_t* frame_delay_ms = nullptr, uint32_t* loop_count = nullptr,
                            uint32_t* decoded_width = nullptr, uint32_t* decoded_height = nullptr,
-                           uint32_t* source_width = nullptr, uint32_t* source_height = nullptr);
+                           uint32_t* source_width = nullptr, uint32_t* source_height = nullptr,
+                           PreviewViewport* viewport = nullptr);
     bool Properties(const std::wstring& path, DWORD attrs, uint64_t generation,
                     uint64_t modified, uint64_t size,
                     std::vector<PreviewProperty>& properties);

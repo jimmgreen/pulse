@@ -1,5 +1,6 @@
 // ui_details_panel.cpp — Details panel draw and content height.
 #include "ui_renderer.h"
+#include "preview_footer_layout.h"
 #include "ui_renderer_internal.h"
 #include "../common/localization.h"
 #include "tab_shape.h"
@@ -33,11 +34,21 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
     ID2D1DeviceContext* dc = compositor_->Dc();
     const float s = scale_;
     const DetailsPanelView& d = vm.details;
-    const float previewH = DetailsPreviewHeight(panel, s);
+    const float previewH = DetailsPreviewHeight(panel, s, d.preview_expansion);
     DetailsHitRects hit;
     LayoutDetailsPanel(panel, s, d, compositor_->DwriteFactory(),
                        compositor_->SmallFormat(), compositor_, previewH, hit);
 
+    const std::wstring identity = d.path + L"|" + std::to_wstring(d.modified_value) +
+        L"|" + std::to_wstring(d.size_value);
+    if (identity != details_preview_identity_ || !d.has_selection) {
+        details_preview_identity_ = identity;
+        details_viewport_ = {};
+        details_text_layout_.reset();
+        details_layout_text_.clear();
+        details_preview_ready_ = false;
+        EndDetailsPreviewPan();
+    }
     // Same surface as the list; a left rule separates the column.
     MakeBrush(dc, theme.stroke_card, brStrokeCard_);
     FillRect(dc, brStrokeCard_.get(), panel.left, panel.top, 1.0f, panel.bottom - panel.top);
@@ -158,7 +169,7 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
     // Direct preview stays pinned so the HWND overlay can track it.
     {
         const D2D1_RECT_F previewRc = D2D1::RectF(panel.left + pad, previewTop,
-            panel.right - 36.0f * s, previewTop + previewH);
+            panel.right - pad, previewTop + previewH);
         const bool placeholderOnly = d.is_dir || d.multi_count > 1;
         const bool handlerPreview = !vm.safe_mode && !placeholderOnly &&
             PreviewHandlerHost::CanHost(d.path);
@@ -169,7 +180,7 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
                             previewRc.bottom - previewRc.top, 6.0f * s);
         }
 
-        const float grip = 8.0f * s;
+        const float grip = 2.0f * s;
         const D2D1_RECT_F overlayRc = D2D1::RectF(previewRc.left + 2.0f * s,
             previewRc.top + 2.0f * s, previewRc.right - 2.0f * s,
             previewRc.bottom - grip);
@@ -184,12 +195,18 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
             thumbnail_cache_.Properties(d.path, d.attrs, d.view_generation,
                                         d.modified_value, d.size_value, ignored);
             if (!handlerPreview) {
-                previewResult = thumbnail_cache_.Draw(dc, contentRc, d.path, d.attrs, 512u,
+                previewResult = thumbnail_cache_.Draw(dc, contentRc, d.path, d.attrs, 2048u,
                     d.view_generation, d.modified_value, d.size_value, 1.0f,
-                    &previewText, &truncated, &bytesRead, true, &previewError);
+                    &previewText, &truncated, &bytesRead, true, &previewError,
+                    nullptr, nullptr, nullptr, nullptr, 0, nullptr, nullptr, nullptr,
+                    nullptr, nullptr, nullptr, nullptr, &details_viewport_);
             }
         }
 
+        details_preview_ready_ = !placeholderOnly && !handlerPreview &&
+            (previewResult == PreviewDrawResult::Bitmap || previewResult == PreviewDrawResult::Text ||
+             previewResult == PreviewDrawResult::Hex);
+        if (!details_preview_ready_) EndDetailsPreviewPan();
         preview_handler_.Sync(notify_hwnd_, overlayRc, d.path, d.attrs, d.view_generation,
                               d.modified_value, d.size_value, vm.dark, theme.bg, theme.text,
                               handlerPreview);
@@ -218,20 +235,32 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
                 }
             }
             if (previewText.empty()) {
+                details_viewport_.SetContent(contentRc, 0, 0, false);
                 text(pulse::l10n::Get(pulse::l10n::StringId::EmptyFile), contentRc,
                      compositor_->SmallFormat(), theme.text_secondary);
             } else if (preview_mono_format_.get()) {
                 MakeBrush(dc, theme.text, brText_);
                 D2D1_RECT_F clipRc = contentRc;
                 clipRc.bottom -= 18.0f * s;
-                D2D1_RECT_F textRc = clipRc;
-                textRc.top -= d.preview_scroll_y * s;
-                textRc.bottom += 4000.0f * s;
-                dc->PushAxisAlignedClip(clipRc, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-                dc->DrawTextW(previewText.data(), static_cast<UINT32>(previewText.size()),
-                              preview_mono_format_.get(), textRc, brText_.get(),
-                              D2D1_DRAW_TEXT_OPTIONS_CLIP);
-                dc->PopAxisAlignedClip();
+                if (!details_text_layout_.get() || details_layout_text_ != previewText || details_layout_scale_ != s) {
+                    details_text_layout_.reset();
+                    details_layout_text_ = previewText;
+                    details_layout_scale_ = s;
+                    compositor_->DwriteFactory()->CreateTextLayout(previewText.data(),
+                        static_cast<UINT32>(previewText.size()), preview_mono_format_.get(),
+                        std::max(1.0f, clipRc.right - clipRc.left), 1000000.0f, &details_text_layout_);
+                }
+                if (details_text_layout_.get()) {
+                    DWRITE_TEXT_METRICS metrics{};
+                    details_text_layout_->GetMetrics(&metrics);
+                    details_viewport_.SetContent(clipRc, metrics.widthIncludingTrailingWhitespace,
+                        metrics.height, false);
+                    const auto target = details_viewport_.ContentRect();
+                    dc->PushAxisAlignedClip(clipRc, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                    dc->DrawTextLayout(D2D1::Point2F(target.left, target.top), details_text_layout_.get(),
+                        brText_.get());
+                    dc->PopAxisAlignedClip();
+                }
             }
             std::wstring footer = pulse::l10n::Get(previewResult == PreviewDrawResult::Hex
                 ? pulse::l10n::StringId::HexPrefix : pulse::l10n::StringId::TextPrefix);
@@ -299,9 +328,38 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
             }
         }
     }
+    const auto toggle = hit.preview_toggle;
+    if (IsHovered(vm, HitTestResult::DetailsPreviewToggle)) {
+        MakeBrush(dc, theme.fill_hover, brFillHover_);
+        FillRoundedRect(dc, brFillHover_.get(), toggle.left, toggle.top,
+            toggle.right - toggle.left, toggle.bottom - toggle.top, 4.0f * s);
+    }
+    MakeBrush(dc, theme.stroke_card, brStrokeCard_);
+    dc->DrawLine(D2D1::Point2F(toggle.left, toggle.top),
+                 D2D1::Point2F(toggle.right, toggle.top), brStrokeCard_.get(), 1.0f);
+    MakeBrush(dc, theme.text_secondary, brText_);
+    const auto footer = MakePreviewFooterLayout(toggle, s);
+    const float cx = footer.chevron.x;
+    const float cy = footer.chevron.y;
+    const float direction = d.preview_only ? -1.0f : 1.0f;
+    dc->DrawLine(D2D1::Point2F(cx - 4 * s, cy - direction * 2 * s),
+        D2D1::Point2F(cx, cy + direction * 2 * s), brText_.get(), 1.4f * s);
+    dc->DrawLine(D2D1::Point2F(cx, cy + direction * 2 * s),
+        D2D1::Point2F(cx + 4 * s, cy - direction * 2 * s), brText_.get(), 1.4f * s);
+    if (d.preview_only) {
+        DrawTextEndEllipsis(dc, compositor_->DwriteFactory(), compositor_->SmallFormat(),
+            brText_.get(), d.name, footer.caption.left, footer.caption.top,
+            footer.caption.right - footer.caption.left, footer.caption.bottom - footer.caption.top);
+    }
+    if (details_viewport_.image && GetTickCount64() < details_zoom_label_until_) {
+        const auto label = std::to_wstring(static_cast<int>(std::lround(details_viewport_.zoom * 100))) + L"%";
+        text(label, footer.zoom,
+            compositor_->SmallFormat(), theme.text_secondary, true);
+    }
+    if (d.preview_only) { dc->PopAxisAlignedClip(); return; }
     y = previewTop + DetailsPreviewBand(previewH, s) - d.scroll_y * s;
     const D2D1_RECT_F restClip = D2D1::RectF(
-        panel.left, previewTop + previewH + 4.0f * s,
+        panel.left, hit.preview_toggle.bottom,
         panel.right, panel.bottom);
     dc->PushAxisAlignedClip(restClip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
@@ -566,6 +624,39 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
     dc->PopAxisAlignedClip();
 }
 
+bool MainRenderer::BeginDetailsPreviewPan(float x, float y) {
+    if (!details_preview_ready_) return false;
+    details_preview_dragging_ = false;
+    details_preview_drag_pending_ = true;
+    details_preview_pointer_ = POINT{static_cast<LONG>(x), static_cast<LONG>(y)};
+    return true;
+}
+void MainRenderer::MoveDetailsPreviewPan(float x, float y) {
+    if (details_preview_drag_pending_) {
+        if (std::abs(x - details_preview_pointer_.x) < GetSystemMetrics(SM_CXDRAG) &&
+            std::abs(y - details_preview_pointer_.y) < GetSystemMetrics(SM_CYDRAG)) return;
+        details_preview_drag_pending_ = false;
+        details_preview_dragging_ = true;
+    }
+    if (!details_preview_dragging_) return;
+    details_viewport_.Pan(x - details_preview_pointer_.x, y - details_preview_pointer_.y);
+    details_preview_pointer_ = POINT{static_cast<LONG>(x), static_cast<LONG>(y)};
+}
+void MainRenderer::ScrollDetailsPreview(float steps, float x, float y, bool horizontal) {
+    if (!details_preview_ready_) return;
+    if (details_viewport_.image) {
+        details_viewport_.ZoomAt(details_viewport_.zoom * std::pow(1.15f, steps), x, y);
+        details_zoom_label_until_ = GetTickCount64() + 1200;
+    } else {
+        details_viewport_.Pan(horizontal ? -steps * 48 * scale_ : 0,
+                              horizontal ? 0 : steps * 48 * scale_);
+    }
+}
+void MainRenderer::ToggleDetailsPreviewFit(float x, float y) {
+    if (details_preview_ready_) details_viewport_.ToggleFit(x, y);
+    details_zoom_label_until_ = GetTickCount64() + 1200;
+}
+
 float MainRenderer::DetailsContentHeightDip(const WindowViewModel& vm, float w, float h) {
     const D2D1_RECT_F panel = DetailsPanelRect(w, h);
     if (panel.right - panel.left <= 1.0f) return 0.0f;
@@ -573,7 +664,7 @@ float MainRenderer::DetailsContentHeightDip(const WindowViewModel& vm, float w, 
     LayoutDetailsPanel(panel, scale_, vm.details,
                        compositor_ ? compositor_->DwriteFactory() : nullptr,
                        compositor_ ? compositor_->SmallFormat() : nullptr,
-                       compositor_, DetailsPreviewHeight(panel, scale_), hit);
+                       compositor_, DetailsPreviewHeight(panel, scale_, vm.details.preview_expansion), hit);
     return hit.content_height_dip;
 }
 

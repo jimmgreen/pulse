@@ -61,7 +61,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Release compilation failed' }
 $testNames = @('pulse_index_migration_test','pulse_index_test','pulse_index_engine_test',
     'pulse_content_search_test','pulse_duplicate_scan_test','pulse_saved_search_test',
     'pulse_search_query_test','pulse_update_test','pulse_update_installer_test',
-    'pulse_ops_test','pulse_preview_test','pulse_app_controllers_test',
+    'pulse_ops_test','pulse_preview_test','pulse_preview_handler_pan_test','pulse_app_controllers_test',
     'pulse_localization_test','pulse_shell_icons_test','pulse_material_test',
     'pulse_search_history_test','pulse_child_edit_test','pulse_dialog_close_test')
 foreach ($testName in $testNames) {

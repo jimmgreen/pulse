@@ -300,23 +300,7 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
         }
     }
 
-    const float max_scroll = SidebarMaxScroll(vm, rect.right, rect.bottom);
-    if (max_scroll > 0.0f) {
-        const SidebarMetrics metrics = MakeSidebarMetrics(scale_);
-        float tray_height = ExpandedTrayHeight(vm, metrics);
-        tray_height = std::min(tray_height,
-            std::max(120.0f * scale_, (sb.bottom - sb.top) * 0.52f));
-        const float bottom = sb.bottom - metrics.pad - tray_height - metrics.pad;
-        const float viewport_extent = std::max(0.0f, bottom - sb.top);
-        fluent::ScrollbarSpec bar;
-        bar.viewport = D2D1::RectF(sb.right - 8.0f * scale_, sb.top,
-                                   sb.right - 2.0f * scale_, bottom);
-        bar.offset = std::clamp(vm.sidebar_scroll, 0.0f, max_scroll);
-        bar.viewport_extent = viewport_extent;
-        bar.content_extent = viewport_extent + max_scroll;
-        bar.expand_progress = 1.0f;
-        painter_.DrawScrollbar(bar);
-    }
+    painter_.DrawScrollbar(SidebarScrollbarSpec(vm, sb, scale_));
     dc->PopAxisAlignedClip();
 }
 
@@ -565,14 +549,18 @@ void MainRenderer::DrawTrayDeck(const WindowViewModel& vm, const D2D1_RECT_F& pa
 float MainRenderer::SidebarMaxScroll(const WindowViewModel& vm, float window_w,
                                      float window_h) const {
     const D2D1_RECT_F sb = SidebarRect(window_w, window_h);
-    if (sb.right - sb.left <= 60.0f * scale_) return 0.0f;
-    const SidebarMetrics metrics = MakeSidebarMetrics(scale_);
-    float tray_height = ExpandedTrayHeight(vm, metrics);
-    tray_height = std::min(tray_height,
-        std::max(120.0f * scale_, (sb.bottom - sb.top) * 0.52f));
-    const float available = std::max(0.0f,
-        sb.bottom - metrics.pad - tray_height - metrics.pad - sb.top);
-    return std::max(0.0f, SidebarContentHeight(vm, metrics) - available);
+    const auto bar = SidebarScrollbarSpec(vm, sb, scale_);
+    return bar.enabled ? std::max(0.0f, bar.content_extent - bar.viewport_extent) : 0.0f;
+}
+
+bool MainRenderer::SidebarScrollbarGeometry(const WindowViewModel& vm, float window_w,
+                                            float window_h, D2D1_RECT_F& track,
+                                            D2D1_RECT_F& thumb, float& max_scroll) const {
+    const auto bar = SidebarScrollbarSpec(vm, SidebarRect(window_w, window_h), scale_);
+    track = bar.viewport;
+    thumb = fluent::ScrollbarThumbRect(bar, scale_);
+    max_scroll = bar.enabled ? std::max(0.0f, bar.content_extent - bar.viewport_extent) : 0.0f;
+    return max_scroll > 0.0f && thumb.bottom > thumb.top;
 }
 
 } // namespace pulse::ui
