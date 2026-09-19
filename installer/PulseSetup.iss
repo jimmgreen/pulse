@@ -368,11 +368,21 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usPostUninstall then
   begin
-    { The app can create these values after installation, so remove them even
-      when the original installer task was not selected. }
-    RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'Pulse');
-    DeleteFolderOpenOverride('Directory');
-    DeleteFolderOpenOverride('Drive');
+    { The app can create these values after installation, so a real uninstall
+      removes them even when the original installer task was not selected.
+      An upgrade, however, uninstalls the previous version silently and then
+      reinstalls into the same directory (UsePreviousAppDir=yes), so the Run
+      value and the Directory/Drive open verbs still point at a valid
+      pulse.exe. Deleting them there silently dropped the user's "launch at
+      sign-in" and "open folders with Pulse" choices: AppPrefs::Load() treats
+      those registry entries as the source of truth and overwrote app.json
+      with the cleared state. Only an interactive uninstall clears them. }
+    if not UninstallSilent then
+    begin
+      RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'Pulse');
+      DeleteFolderOpenOverride('Directory');
+      DeleteFolderOpenOverride('Drive');
+    end;
     if CleanupUserData then
       CleanupPulseData;
   end;
