@@ -1,8 +1,17 @@
+#include "../common/preview_extensions.h"
 #include "../ipc/preview_protocol.h"
 #include "../preview_host/video_codec.h"
 #include <windows.h>
 #include <winioctl.h>
+// gdiplus.h needs the OLE interfaces in scope, plus min/max as callable names
+// rather than the macros windows.h brought in.
+#include <objbase.h>
+#undef min
+#undef max
 #include <algorithm>
+using std::max;
+using std::min;
+#include <gdiplus.h>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -62,12 +71,69 @@ bool WriteBmpRgb(const std::wstring& path, uint32_t width, uint32_t height) {
     return WriteBytes(path, file);
 }
 
+// GDI can write an EMF itself, which keeps this regression offline: WIC and the
+// shell both let metafiles down on many machines, so the GDI path needs coverage.
+bool WriteEmfFixture(const std::wstring& path) {
+    HDC reference = GetDC(nullptr);
+    if (!reference) return false;
+    const RECT frame{0, 0, 200, 100};
+    HDC dc = CreateEnhMetaFileW(reference, path.c_str(), &frame, L"Pulse preview test\0");
+    ReleaseDC(nullptr, reference);
+    if (!dc) return false;
+    const HGDIOBJ brush = SelectObject(dc, GetStockObject(DC_BRUSH));
+    SetDCBrushColor(dc, RGB(0, 120, 215));
+    Rectangle(dc, 10, 10, 190, 90);
+    SelectObject(dc, brush);
+    const HENHMETAFILE file = CloseEnhMetaFile(dc);
+    if (!file) return false;
+    DeleteEnhMetaFile(file);
+    return true;
+}
+
+// Office clip art stores its artwork as EMF+ records inside an EMF container,
+// which plain GDI silently skips. GDI+ writes that flavour, so cover it too.
+bool WriteEmfPlusFixture(const std::wstring& path) {
+    HDC reference = GetDC(nullptr);
+    if (!reference) return false;
+    bool ok = false;
+    {
+        Gdiplus::Metafile metafile(path.c_str(), reference, Gdiplus::EmfTypeEmfPlusOnly,
+                                   L"Pulse preview test");
+        if (metafile.GetLastStatus() == Gdiplus::Ok) {
+            Gdiplus::Graphics graphics(&metafile);
+            if (graphics.GetLastStatus() == Gdiplus::Ok) {
+                Gdiplus::SolidBrush brush(Gdiplus::Color(255, 0, 120, 215));
+                ok = graphics.FillRectangle(&brush, 20, 10, 160, 80) == Gdiplus::Ok;
+            }
+        }
+    }
+    ReleaseDC(nullptr, reference);
+    return ok;
+}
+
 struct Result {
     ipc::PreviewResponse response{};
     std::wstring text;
     std::wstring error;
     std::vector<std::pair<std::wstring, std::wstring>> properties;
+    // Bitmaps are read back so a preview that renders nothing can be told apart
+    // from one that renders a blank page.
+    std::vector<unsigned char> pixels;
 };
+
+// True when more than 1% of the raster is darker than near-white, i.e. the
+// preview actually drew something.
+bool HasInk(const Result& result) {
+    const size_t count = result.pixels.size() / 4;
+    if (count == 0) return false;
+    size_t ink = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (result.pixels[i * 4] < 240 || result.pixels[i * 4 + 1] < 240 ||
+            result.pixels[i * 4 + 2] < 240)
+            ++ink;
+    }
+    return ink * 100 > count;
+}
 
 class Host {
 public:
@@ -146,6 +212,19 @@ public:
             result.properties.emplace_back(std::move(label), std::move(value));
         }
         if (!mapping.empty()) {
+            // Read the raster before acknowledging, so tests can tell a preview
+            // that drew nothing from one that drew a blank page.
+            HANDLE file_map = OpenFileMappingW(FILE_MAP_READ, FALSE, mapping.c_str());
+            if (file_map) {
+                const size_t bytes = static_cast<size_t>(result.response.stride) *
+                                     result.response.height;
+                if (auto* view = MapViewOfFile(file_map, FILE_MAP_READ, 0, 0, bytes)) {
+                    result.pixels.assign(static_cast<const unsigned char*>(view),
+                                         static_cast<const unsigned char*>(view) + bytes);
+                    UnmapViewOfFile(view);
+                }
+                CloseHandle(file_map);
+            }
             const unsigned char ack = 1;
             if (!ipc::WriteAll(pipe_, &ack, 1)) return false;
         }
@@ -161,6 +240,14 @@ private:
 bool RunThumbnailCacheTests();
 
 int wmain(int argc, wchar_t** argv) {
+    // GDI+ writes the EMF+ fixture, and the host renders metafiles through it.
+    Gdiplus::GdiplusStartupInput gdiplus_input;
+    ULONG_PTR gdiplus_token = 0;
+    const bool gdiplus_ready =
+        Gdiplus::GdiplusStartup(&gdiplus_token, &gdiplus_input, nullptr) == Gdiplus::Ok;
+    (void)gdiplus_token;
+    Check(gdiplus_ready, L"start GDI+ for the metafile fixtures");
+
     Check(preview::VideoCodecDisplayName(L"{34363248-0000-0010-8000-00AA00389B71}") == L"H.264 (AVC)",
           L"codec: screenshot H264 subtype is a readable codec name");
     Check(preview::VideoCodecDisplayName(L" 34363268-0000-0010-8000-00aa00389b71 ") == L"H.264 (AVC)",
@@ -214,7 +301,41 @@ int wmain(int argc, wchar_t** argv) {
           L"create 1 GB sparse text fixture");
 
     Host host;
-    Check(host.Start(), L"start isolated preview host");
+    const auto host_begin = std::chrono::steady_clock::now();
+    const bool host_started = host.Start();
+    const double host_start_ms =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - host_begin)
+            .count();
+    // Every first preview of a session pays this: Pulse launches the host on
+    // demand and reuses it afterwards.
+    std::wprintf(L"[INFO] preview host start %.2f ms\n", host_start_ms);
+    Check(host_started, L"start isolated preview host");
+
+    // PULSE_PREVIEW_BENCH=<file>: time a real document's first preview against
+    // its repeats. This is where shell providers (Office, PDF) show their
+    // one-time handler load, and it runs on the freshly started host on purpose.
+    wchar_t bench_path[32768]{};
+    if (GetEnvironmentVariableW(L"PULSE_PREVIEW_BENCH", bench_path, ARRAYSIZE(bench_path))) {
+        double bench_first = 0.0;
+        std::vector<double> bench_repeats;
+        for (int i = 0; i < 5; ++i) {
+            Result result;
+            const auto begin = std::chrono::steady_clock::now();
+            const bool ok = host.Request(bench_path, result, MAXDWORD,
+                                         ipc::kPreviewDefaultPixelSize);
+            const double ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - begin).count();
+            if (i == 0) bench_first = ms;
+            else bench_repeats.push_back(ms);
+            std::wprintf(L"[INFO] bench[%d] %.2f ms ok=%d kind=%d status=%d error=%ls\n",
+                         i, ms, ok ? 1 : 0, static_cast<int>(result.response.kind),
+                         result.response.status, result.error.c_str());
+        }
+        std::sort(bench_repeats.begin(), bench_repeats.end());
+        std::wprintf(L"[INFO] bench first %.2f ms, repeats median %.2f ms\n",
+                     bench_first,
+                     bench_repeats.empty() ? 0.0 : bench_repeats[bench_repeats.size() / 2]);
+    }
     // Optional real H.264 fixture exercises the Windows property provider too.
     if (argc > 1) {
         Result video;
@@ -300,6 +421,97 @@ int wmain(int argc, wchar_t** argv) {
           clamped.response.kind == ipc::PreviewContentKind::Bitmap &&
           (std::max)(clamped.response.width, clamped.response.height) <= 1024,
           L"host clamps pixel_size above 1024");
+
+    Check(preview::IsVectorExtension(L".svg") && !preview::IsImageExtension(L".svg") &&
+          preview::IsNativeExtension(L".svg"),
+          L"svg classifies as a vector document, not a WIC image, yet still native");
+    Check(preview::IsMetaFileExtension(L".wmf") && preview::IsMetaFileExtension(L".emf") &&
+          !preview::IsImageExtension(L".wmf") && preview::IsNativeExtension(L".emf"),
+          L"metafiles own a GDI path instead of the WIC image list");
+
+    const std::string svg_text =
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"100\""
+        " viewBox=\"0 0 200 100\"><rect width=\"200\" height=\"100\" fill=\"#3366cc\"/>"
+        "<circle cx=\"50\" cy=\"50\" r=\"40\" fill=\"#ffcc00\"/></svg>";
+    const std::vector<unsigned char> svg(svg_text.begin(), svg_text.end());
+    Check(WriteBytes(path(L"shapes.svg"), svg), L"create SVG fixture");
+
+    std::vector<double> svgTimings;
+    Result svgFirst;
+    double svgFirstMs = 0.0;
+    for (int i = 0; i < 10; ++i) {
+        Result result;
+        const auto begin = std::chrono::steady_clock::now();
+        const bool ok = host.Request(path(L"shapes.svg"), result, MAXDWORD, 256);
+        const auto end = std::chrono::steady_clock::now();
+        const double elapsed =
+            std::chrono::duration<double, std::milli>(end - begin).count();
+        if (i == 0) {
+            svgFirst = result;
+            svgFirstMs = elapsed;
+        } else if (ok && result.response.kind == ipc::PreviewContentKind::Bitmap &&
+                   result.response.width > 0 && result.response.height > 0) {
+            svgTimings.push_back(elapsed);
+        }
+    }
+    Check(svgTimings.size() == 9 &&
+          svgFirst.response.kind == ipc::PreviewContentKind::Bitmap && HasInk(svgFirst),
+          L"svg renders visible artwork instead of falling back to source text");
+    Check(svgFirst.response.source_width == 200 && svgFirst.response.source_height == 100 &&
+          svgFirst.response.width == 200 && svgFirst.response.height == 100,
+          L"svg keeps its intrinsic 200x100 viewBox under pixel_size 256");
+    Result svgScaled;
+    Check(host.Request(path(L"shapes.svg"), svgScaled, MAXDWORD, 128) &&
+          svgScaled.response.kind == ipc::PreviewContentKind::Bitmap &&
+          svgScaled.response.source_width == 200 && svgScaled.response.source_height == 100 &&
+          svgScaled.response.width == 128 && svgScaled.response.height == 64,
+          L"svg scales to the requested pixel_size keeping its aspect ratio");
+    std::sort(svgTimings.begin(), svgTimings.end());
+    const double svgMedian = svgTimings.empty() ? 9999.0
+        : svgTimings[svgTimings.size() / 2];
+    const double svgP95 = svgTimings.empty() ? 9999.0
+        : svgTimings[(svgTimings.size() * 95 - 1) / 100];
+    // The first request also builds the D3D/D2D stack; the rest only parse and
+    // rasterize, which is what a list of SVG thumbnails actually costs.
+    std::wprintf(L"[INFO] svg raster first %.2f ms, warm median %.2f ms, warm P95 %.2f ms\n",
+                 svgFirstMs, svgMedian, svgP95);
+    Check(svgFirstMs <= 900.0 && svgP95 <= 200.0,
+          L"svg rasterization stays well inside the one second preview budget");
+
+    std::vector<unsigned char> oversized(9 * 1024 * 1024, 'x');
+    Check(WriteBytes(path(L"oversized.svg"), oversized), L"create oversized SVG fixture");
+    Result oversizedResult;
+    // Above the budget the renderer refuses rather than risking the request
+    // deadline, but the text fallback still shows the file.
+    Check(host.Request(path(L"oversized.svg"), oversizedResult) &&
+          oversizedResult.response.kind == ipc::PreviewContentKind::Text &&
+          (oversizedResult.response.flags & ipc::kPreviewFlagTruncated),
+          L"an SVG beyond the size budget falls back to a truncated text preview");
+
+    Check(WriteEmfFixture(path(L"shapes.emf")), L"create EMF fixture");
+    Result emf;
+    Check(host.Request(path(L"shapes.emf"), emf, MAXDWORD, 256) &&
+          emf.response.kind == ipc::PreviewContentKind::Bitmap &&
+          emf.response.width > 0 && emf.response.height > 0 &&
+          static_cast<double>(emf.response.width) / emf.response.height > 1.6 &&
+          static_cast<double>(emf.response.width) / emf.response.height < 2.4 &&
+          HasInk(emf),
+          L"EMF renders through GDI+ keeping its 2:1 frame and drawing it");
+    Check(WriteEmfPlusFixture(path(L"clip.emf")), L"create EMF+ fixture");
+    Result clip;
+    Check(host.Request(path(L"clip.emf"), clip, MAXDWORD, 256) &&
+          clip.response.kind == ipc::PreviewContentKind::Bitmap && HasInk(clip),
+          L"EMF+ clip art renders visible artwork instead of a blank page");
+
+    // A document that cannot be rendered (Windows before 1703, damaged markup)
+    // keeps the previous behaviour: show it as text rather than an empty page.
+    const std::vector<unsigned char> broken_svg = {'n', 'o', 't', ' ', 's', 'v', 'g'};
+    Check(WriteBytes(path(L"broken.svg"), broken_svg), L"create unrenderable SVG fixture");
+    Result broken;
+    Check(host.Request(path(L"broken.svg"), broken) &&
+          broken.response.kind == ipc::PreviewContentKind::Text &&
+          broken.text.find(L"not svg") != std::wstring::npos,
+          L"an SVG that cannot be rendered falls back to its text preview");
 
     Check(CreateDirectoryW(path(L"subdir").c_str(), nullptr), L"create directory fixture");
     Result dirExtended;

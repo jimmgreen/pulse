@@ -36,6 +36,7 @@ public:
             }
         }
         input_->host = host;
+        RequestHook(true);
     }
 
     void Disable() {
@@ -45,6 +46,7 @@ public:
             ++input_->generation;
         }
         host_ = nullptr;
+        RequestHook(false);
     }
 
     bool HandleMessage(UINT message, WPARAM wparam, LPARAM lparam) {
@@ -84,6 +86,26 @@ public:
 private:
     friend struct PreviewHandlerPanTest;
 
+    // The low-level hook is machine wide: while it is installed every mouse
+    // event is marshalled into this process, so it must only stay live while a
+    // preview can be panned. Installing it is posted to the hook thread, which
+    // is the only thread that may receive its callbacks.
+    void RequestHook(bool install) {
+        if (!input_) return;
+        const DWORD thread = input_->thread_id.load();
+        if (thread) PostThreadMessageW(thread, kHookCommand, install ? 1 : 0, 0);
+    }
+
+    static void SetHook(HHOOK& hook, bool install) {
+        if (install == (hook != nullptr)) return;
+        if (install) {
+            hook = SetWindowsHookExW(WH_MOUSE_LL, MouseHook, GetModuleHandleW(nullptr), 0);
+        } else {
+            UnhookWindowsHookEx(hook);
+            hook = nullptr;
+        }
+    }
+
     struct InputState {
         ~InputState() { if (thread) CloseHandle(thread); }
         HANDLE thread = nullptr;
@@ -115,6 +137,7 @@ private:
     static constexpr UINT kBegin = WM_APP + 0x504;
     static constexpr UINT kMove = kBegin + 1;
     static constexpr UINT kEnd = kBegin + 2;
+    static constexpr UINT kHookCommand = kBegin + 3;
     inline static thread_local InputState* current_input_ = nullptr;
 
     Axis FindAxis(HWND target, int bar) const {
@@ -293,15 +316,19 @@ private:
         current_input_ = input.get();
         // This thread never calls preview providers. Even a blocked preview STA
         // cannot delay the mouse hook or leak a consumed gesture's release.
+        // The hook starts installed because Enable() may ask for it before this
+        // thread has a message queue to receive the request.
         HHOOK hook = SetWindowsHookExW(WH_MOUSE_LL, MouseHook, GetModuleHandleW(nullptr), 0);
-        if (hook) {
-            while ((!input->stop || input->suppress_left_up) &&
-                   GetMessageW(&message, nullptr, 0, 0) > 0) {
-                TranslateMessage(&message);
-                DispatchMessageW(&message);
+        while ((!input->stop || input->suppress_left_up) &&
+               GetMessageW(&message, nullptr, 0, 0) > 0) {
+            if (message.message == kHookCommand) {
+                SetHook(hook, message.wParam != 0);
+                continue;
             }
-            UnhookWindowsHookEx(hook);
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
         }
+        SetHook(hook, false);
         current_input_ = nullptr;
         return 0;
     }

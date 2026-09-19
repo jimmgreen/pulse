@@ -3,6 +3,8 @@
 #include "../common/path_utils.h"
 #include "../common/preview_extensions.h"
 #include "../common/crash_reporter.h"
+#include "metafile_raster.h"
+#include "svg_raster.h"
 #include "video_codec.h"
 #include <shobjidl.h>
 #include <shlobj.h>
@@ -611,8 +613,56 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
                 response.frame_count = frame_count;
                 response.frame_delay_ms = frame_delay;
                 response.loop_count = loop_count;
+                if (made) {
+                    response.kind = ipc::PreviewContentKind::Bitmap;
+                } else if (!IsOfflinePlaceholder(req.attrs)) {
+                    // WIC has no decoder for every format in the list on every
+                    // machine: WMF/EMF only decode when the metafile codec is
+                    // present, and AVIF/HEIC need the store extension. Fall back
+                    // to the shell thumbnail - the path Explorer itself uses -
+                    // before reporting the preview as unavailable.
+                    pixels.clear();
+                    w = h = stride = 0;
+                    if (MakeShellThumbnail(path, req.attrs,
+                            ipc::ClampPreviewPixelSize(req.pixel_size, false),
+                            pixels, w, h, stride)) {
+                        made = true;
+                        response.kind = ipc::PreviewContentKind::Bitmap;
+                    } else {
+                        errorText = L"image-decode-failed";
+                    }
+                } else {
+                    errorText = L"image-decode-failed";
+                }
+            } else if (preview::IsVectorExtension(extension)) {
+                // WIC has no SVG decoder, so these render through Direct2D into
+                // the same premultiplied BGRA pixels the raster path returns.
+                if (!IsOfflinePlaceholder(req.attrs)) {
+                    made = preview::RasterizeSvgFile(path,
+                        ipc::ClampPreviewPixelSize(req.pixel_size, false),
+                        pixels, w, h, stride, source_w, source_h, &errorText);
+                }
+                if (made) {
+                    response.kind = ipc::PreviewContentKind::Bitmap;
+                } else if (!IsOfflinePlaceholder(req.attrs)) {
+                    // No Direct2D SVG support (Windows before 1703), a document
+                    // too large to parse, or damaged markup: keep the previous
+                    // behaviour and show the file as text instead of an empty
+                    // placeholder.
+                    errorText.clear();
+                    made = MakeTextOrHex(path, req.attrs, response.kind, previewText,
+                                         bytesRead, truncated);
+                    if (!made) errorText = L"svg-render-failed";
+                }
+            } else if (preview::IsMetaFileExtension(extension)) {
+                // WMF/EMF: WIC decodes them only when its codec is installed,
+                // and the shell has no thumbnail provider, so GDI renders them.
+                if (!IsOfflinePlaceholder(req.attrs)) {
+                    made = preview::RasterizeMetaFile(path,
+                        ipc::ClampPreviewPixelSize(req.pixel_size, false),
+                        pixels, w, h, stride, source_w, source_h, &errorText);
+                }
                 if (made) response.kind = ipc::PreviewContentKind::Bitmap;
-                else errorText = L"image-decode-failed";
             } else if (isDirectory || IsKnownShellPreview(extension)) {
                 made = MakeShellThumbnail(path, req.attrs,
                                           ipc::ClampPreviewPixelSize(req.pixel_size, false),

@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <cwctype>
 #include <memory>
 #include <mutex>
@@ -34,6 +35,107 @@ constexpr DWORD kRecallOnData = 0x00400000;
 constexpr DWORD kPinned = 0x00080000;
 constexpr HRESULT kServerExecFailure = static_cast<HRESULT>(0x80080005);
 
+// One apartment hosts the system preview handler and owns the overlay window, so
+// a provider that stays inside its open stalls the pane and every later preview.
+// An apartment that has not started or finished what it was asked for inside
+// this budget is retired: the selection falls back and the next one starts a
+// fresh apartment, which keeps a cold provider from taking the pane down with it.
+constexpr ULONGLONG kCommandBudgetMs = 3000;
+
+// Slow is not the same as stuck. Opening a preview can mean starting a whole
+// application - Office starts Excel the first time an .xlsx is previewed - which
+// takes seconds, so the file the pane is still showing keeps its preview for
+// that long instead of being retired into the "load failed" placeholder. Only a
+// request the pane has moved on from, or a command the apartment never picked
+// up, is cut short on the budget above.
+constexpr ULONGLONG kSlowOpenBudgetMs = 20000;
+
+// A provider that stalled is not asked again for a while; the thumbnail path
+// answers instead, so the pane keeps showing something while the provider warms
+// up. The cooldown grows while the same extension keeps stalling.
+constexpr ULONGLONG kSlowProviderCooldownMs = 2 * 60 * 1000;
+struct SlowProvider {
+    ULONGLONG until = 0;
+    uint32_t strikes = 0;
+};
+std::mutex g_slow_provider_mutex;
+std::unordered_map<std::wstring, SlowProvider> g_slow_providers;
+
+ULONGLONG CommandBudgetMs() {
+#ifdef PULSE_PREVIEW_HANDLER_TESTING
+    // Tests observe a retire without waiting for the production budget.
+    wchar_t text[32]{};
+    if (GetEnvironmentVariableW(L"PULSE_PREVIEW_HANDLER_OPEN_BUDGET_MS", text,
+                                ARRAYSIZE(text)) > 0) {
+        const unsigned long long value = std::wcstoull(text, nullptr, 10);
+        if (value > 0) return static_cast<ULONGLONG>(value);
+    }
+#endif
+    return kCommandBudgetMs;
+}
+
+ULONGLONG SlowOpenBudgetMs() {
+#ifdef PULSE_PREVIEW_HANDLER_TESTING
+    // Tests observe the slow-open give-up without waiting for the real budget.
+    wchar_t text[32]{};
+    if (GetEnvironmentVariableW(L"PULSE_PREVIEW_HANDLER_SLOW_OPEN_BUDGET_MS", text,
+                                ARRAYSIZE(text)) > 0) {
+        const unsigned long long value = std::wcstoull(text, nullptr, 10);
+        if (value > 0) return static_cast<ULONGLONG>(value);
+    }
+#endif
+    return kSlowOpenBudgetMs;
+}
+
+void NoteStalledProvider(const std::wstring& extension) {
+    if (extension.empty()) return;
+    const ULONGLONG now = GetTickCount64();
+    std::lock_guard<std::mutex> lock(g_slow_provider_mutex);
+    SlowProvider& provider = g_slow_providers[extension];
+    provider.strikes = provider.until > now ? provider.strikes + 1 : 1;
+    provider.until = now + kSlowProviderCooldownMs * provider.strikes;
+}
+
+bool ProviderCoolingDown(const std::wstring& extension) {
+    if (extension.empty()) return false;
+    const ULONGLONG now = GetTickCount64();
+    std::lock_guard<std::mutex> lock(g_slow_provider_mutex);
+    const auto it = g_slow_providers.find(extension);
+    if (it == g_slow_providers.end()) return false;
+    if (it->second.until <= now) {
+        g_slow_providers.erase(it);
+        return false;
+    }
+    return true;
+}
+
+void ResetSlowProvidersForTest() {
+    std::lock_guard<std::mutex> lock(g_slow_provider_mutex);
+    g_slow_providers.clear();
+}
+
+// A provider that answered - however long it took, and whether or not the pane
+// still wanted the preview - is working, so it is not kept away from the pane:
+// the open it was retired for can still come back, and the next selection should
+// get the handler rather than the placeholder.
+void ClearSlowProvider(const std::wstring& extension) {
+    if (extension.empty()) return;
+    std::lock_guard<std::mutex> lock(g_slow_provider_mutex);
+    g_slow_providers.erase(extension);
+}
+
+// The overlay belongs to the preview apartment but is owned by our window, and
+// that apartment may be stuck inside a provider call. Hiding the position
+// change is posted, and the owner is dropped, so neither hides an empty box on
+// screen forever nor makes window destruction wait for the stuck thread.
+void DetachOverlay(HWND overlay) {
+    if (!overlay) return;
+    SetWindowPos(overlay, HWND_NOTOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW |
+                 SWP_ASYNCWINDOWPOS);
+    SetWindowLongPtrW(overlay, GWLP_HWNDPARENT, 0);
+}
+
 struct ClsidHash {
     size_t operator()(const CLSID& c) const noexcept {
         const auto* p = reinterpret_cast<const uint64_t*>(&c);
@@ -51,6 +153,11 @@ std::mutex g_association_mutex;
 std::once_flag g_register_class_once;
 #ifdef PULSE_PREVIEW_HANDLER_TESTING
 std::atomic<uint32_t> g_test_open_attempts{0};
+// PlaceOverlay entries and returns. They differ only while the window manager
+// is inside the provider's window, which is what makes a preview trail its
+// owner during a drag.
+std::atomic<uint32_t> g_test_place_calls{0};
+std::atomic<uint32_t> g_test_place_done{0};
 #endif
 
 std::wstring ShellPath(const std::wstring& path) {
@@ -80,20 +187,29 @@ bool IsOfflinePlaceholder(DWORD attrs) {
 }
 
 bool FindPreviewHandlerClsid(const std::wstring& extension, CLSID& clsid) {
-    if (extension.empty()) {
-        return false;
-    }
     static std::unordered_map<std::wstring, CLSID> cache;
-    static std::unordered_map<std::wstring, bool> negative;
-    std::lock_guard<std::mutex> lock(g_association_mutex);
-    if (auto it = cache.find(extension); it != cache.end()) {
-        clsid = it->second;
-        return true;
-    }
-    if (negative.contains(extension)) {
-        return false;
+    // A lookup that found nothing is remembered, but only for a while: the shell
+    // can fail this query while it is busy with something else, and carrying
+    // that answer for the whole session leaves the type unpreviewable until the
+    // application restarts.
+    constexpr ULONGLONG kNegativeTtlMs = 30 * 1000;
+    static std::unordered_map<std::wstring, ULONGLONG> negative;
+    {
+        std::lock_guard<std::mutex> lock(g_association_mutex);
+        if (auto it = cache.find(extension); it != cache.end()) {
+            clsid = it->second;
+            return true;
+        }
+        if (auto it = negative.find(extension); it != negative.end()) {
+            if (GetTickCount64() - it->second < kNegativeTtlMs) return false;
+            negative.erase(it);
+        }
     }
 
+    // The shell lookup runs outside the lock. This is reached from the paint
+    // path too, and a lookup queued behind another thread's slow call used to
+    // freeze the window along with it. Resolving the same extension twice is
+    // harmless.
     ComPtr<IQueryAssociations> assoc;
     HRESULT hr = AssocCreate(kQueryAssociations, IID_PPV_ARGS(&assoc));
     if (FAILED(hr)) {
@@ -105,18 +221,20 @@ bool FindPreviewHandlerClsid(const std::wstring& extension, CLSID& clsid) {
     }
     wchar_t guid[64]{};
     DWORD chars = ARRAYSIZE(guid);
-    hr = assoc->GetString(ASSOCF_NOTRUNCATE, ASSOCSTR_SHELLEXTENSION,
-                          kPreviewHandlerIid, guid, &chars);
-    if (FAILED(hr)) {
-        negative[extension] = true;
+    CLSID resolved{};
+    const bool found =
+        SUCCEEDED(assoc->GetString(ASSOCF_NOTRUNCATE, ASSOCSTR_SHELLEXTENSION,
+                                   kPreviewHandlerIid, guid, &chars)) &&
+        SUCCEEDED(CLSIDFromString(guid, &resolved));
+    {
+        std::lock_guard<std::mutex> lock(g_association_mutex);
+        if (found) cache[extension] = resolved;
+        else negative[extension] = GetTickCount64();
+    }
+    if (!found) {
         return false;
     }
-    hr = CLSIDFromString(guid, &clsid);
-    if (FAILED(hr)) {
-        negative[extension] = true;
-        return false;
-    }
-    cache[extension] = clsid;
+    clsid = resolved;
     return true;
 }
 
@@ -241,6 +359,9 @@ void RegisterClassOnce() {
 bool PreviewHandlerHost::CanHost(const std::wstring& path) {
     const std::wstring extension = ExtensionOf(path);
     if (extension.empty() || IsNativePreviewExtension(extension)) return false;
+    // A provider that just stalled is left alone until it has warmed up: the
+    // caller then takes the thumbnail path, which answers on its own process.
+    if (ProviderCoolingDown(extension)) return false;
     CLSID clsid{};
     return FindPreviewHandlerClsid(extension, clsid);
 }
@@ -266,12 +387,16 @@ struct PreviewHandlerHost::WorkerState {
     bool EnsureWindow() {
         if (hwnd && IsWindow(hwnd)) return true;
         hwnd = nullptr;
+        overlay.store(nullptr, std::memory_order_release);
         if (!owner || !IsWindow(owner)) return false;
         RegisterClassOnce();
         hwnd = CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kClassName, L"",
             WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
             0, 0, 0, 0, owner, nullptr, GetModuleHandleW(nullptr), this);
+        // Published for the owner, which may need to hide it while this thread
+        // is inside a provider call. Cleared on WM_DESTROY so it cannot go stale.
+        overlay.store(hwnd, std::memory_order_release);
         return hwnd != nullptr;
     }
 
@@ -299,6 +424,12 @@ struct PreviewHandlerHost::WorkerState {
 
     void PlaceOverlay() {
         if (!hwnd || !owner) return;
+#ifdef PULSE_PREVIEW_HANDLER_TESTING
+        g_test_place_calls.fetch_add(1, std::memory_order_relaxed);
+        struct PlaceDone {
+            ~PlaceDone() { g_test_place_done.fetch_add(1, std::memory_order_relaxed); }
+        } place_done;
+#endif
         POINT origin{bounds.left, bounds.top};
         if (!ClientToScreen(owner, &origin)) return;
         const int width = std::max(1L, bounds.right - bounds.left);
@@ -320,8 +451,13 @@ struct PreviewHandlerHost::WorkerState {
         placed_w = width;
         placed_h = height;
         pan.Disable();
-        SetWindowPos(hwnd, HWND_TOPMOST, origin.x, origin.y, width, height,
-                     SWP_NOACTIVATE | (shown ? SWP_SHOWWINDOW : SWP_NOREDRAW));
+        // A move keeps the z-order it already has. Re-asserting HWND_TOPMOST on
+        // every step of a window drag only makes the window manager re-evaluate
+        // the topmost band, with the provider's window (another process) inside.
+        const bool raise = !shown || size_changed;
+        SetWindowPos(hwnd, raise ? HWND_TOPMOST : nullptr, origin.x, origin.y, width, height,
+                     SWP_NOACTIVATE | (raise ? 0 : SWP_NOZORDER) |
+                         (shown ? SWP_SHOWWINDOW : SWP_NOREDRAW));
         if (handler && shown && size_changed) {
             ComPtr<IPreviewHandler> preview;
             if (SUCCEEDED(handler->QueryInterface(IID_PPV_ARGS(&preview)))) {
@@ -402,13 +538,27 @@ struct PreviewHandlerHost::WorkerState {
         return true;
     }
 
+    // Callers hold mutex. Bumping the version makes the apartment re-read the
+    // latest command, and the tick lets the owner tell how long it has waited.
+    void BumpLocked() {
+        ++command_version;
+        command_tick = GetTickCount64();
+    }
+
     std::mutex mutex;
     Command command;
     uint64_t command_version = 0;
+    ULONGLONG command_tick = 0;
     bool stop = false;
     HANDLE wake = nullptr;
     HANDLE thread = nullptr;
     std::atomic<State> state{State::Idle};
+    // Read by the owner while this thread is inside a provider call.
+    std::atomic<uint64_t> applied_version{0};
+    std::atomic<uint64_t> opens_started{0};
+    std::atomic<uint64_t> opens_finished{0};
+    std::atomic<ULONGLONG> open_started_tick{0};
+    std::atomic<HWND> overlay{nullptr};
 
     HWND hwnd = nullptr;
     HWND owner = nullptr;
@@ -417,6 +567,10 @@ struct PreviewHandlerHost::WorkerState {
     std::wstring path;
     std::wstring identity;
     std::wstring pending_identity;
+    // The request the apartment is opening right now. Written by the worker and
+    // read by the owner's watchdog, so both sides go through mutex. Empty while
+    // the apartment has nothing in flight.
+    std::wstring working_identity;
     DWORD attrs = 0;
     bool app_active = true;
     bool shown = false;
@@ -434,14 +588,22 @@ PreviewHandlerHost::PreviewHandlerHost() = default;
 
 PreviewHandlerHost::~PreviewHandlerHost() {
     auto worker = worker_;
-    if (!worker) return;
-    {
-        std::lock_guard<std::mutex> lock(worker->mutex);
-        worker->stop = true;
-    }
-    SetEvent(worker->wake);
-    if (worker->thread) WaitForSingleObject(worker->thread, 100);
     worker_.reset();
+    if (worker) {
+        DetachOverlay(worker->overlay.load(std::memory_order_acquire));
+        {
+            std::lock_guard<std::mutex> lock(worker->mutex);
+            worker->stop = true;
+        }
+        SetEvent(worker->wake);
+        if (worker->thread) WaitForSingleObject(worker->thread, 100);
+    }
+    // Retired apartments stop themselves as soon as the provider call they are
+    // inside returns; the references they hold keep them alive until then.
+    for (const auto& retired : retired_) {
+        DetachOverlay(retired->overlay.load(std::memory_order_acquire));
+    }
+    retired_.clear();
 }
 
 void PreviewHandlerHost::EnsureWorker() {
@@ -472,7 +634,7 @@ void PreviewHandlerHost::SetNotifyWindow(HWND hwnd) {
     {
         std::lock_guard<std::mutex> lock(worker_->mutex);
         worker_->command.notify = hwnd;
-        ++worker_->command_version;
+        worker_->BumpLocked();
     }
     SetEvent(worker_->wake);
 }
@@ -480,6 +642,8 @@ void PreviewHandlerHost::SetNotifyWindow(HWND hwnd) {
 void PreviewHandlerHost::Publish(bool enabled, HWND owner, const RECT& bounds,
                                  const std::wstring& path, const std::wstring& identity,
                                  DWORD attrs, bool immediate) {
+    // A hide must not spawn an apartment of its own.
+    if (!enabled && !worker_) return;
     EnsureWorker();
     if (!worker_) return;
     WorkerState::Command command;
@@ -495,7 +659,7 @@ void PreviewHandlerHost::Publish(bool enabled, HWND owner, const RECT& bounds,
     {
         std::lock_guard<std::mutex> lock(worker_->mutex);
         worker_->command = std::move(command);
-        ++worker_->command_version;
+        worker_->BumpLocked();
     }
     SetEvent(worker_->wake);
 }
@@ -525,7 +689,7 @@ void PreviewHandlerHost::Reposition() {
     {
         std::lock_guard<std::mutex> lock(worker->mutex);
         if (!worker->command.enabled) return;
-        ++worker->command_version;
+        worker->BumpLocked();
     }
     SetEvent(worker->wake);
 }
@@ -537,7 +701,7 @@ void PreviewHandlerHost::NotifyAppActivate(bool active) {
     {
         std::lock_guard<std::mutex> lock(worker_->mutex);
         worker_->command.app_active = active;
-        ++worker_->command_version;
+        worker_->BumpLocked();
     }
     SetEvent(worker_->wake);
 }
@@ -546,6 +710,11 @@ void PreviewHandlerHost::Sync(HWND owner, const D2D1_RECT_F& bounds, const std::
                               DWORD attrs, uint64_t generation, uint64_t modified, uint64_t size,
                               bool dark, const D2D1_COLOR_F& bg, const D2D1_COLOR_F& fg,
                               bool enabled, bool immediate) {
+    // Called on every paint: an apartment that stopped answering is retired
+    // first, and this frame falls through to the caller's fallback preview.
+    const std::wstring identity = path + L"\n" + std::to_wstring(generation) + L":" +
+        std::to_wstring(modified) + L":" + std::to_wstring(size);
+    if (RetireStalledApartment(identity, enabled)) return;
     (void)dark;
     (void)bg;
     (void)fg;
@@ -563,8 +732,6 @@ void PreviewHandlerHost::Sync(HWND owner, const D2D1_RECT_F& bounds, const std::
         return;
     }
 
-    const std::wstring identity = path + L"\n" + std::to_wstring(generation) + L":" +
-        std::to_wstring(modified) + L":" + std::to_wstring(size);
     const bool same_bounds = EqualRect(&target, &last_bounds_) != FALSE;
     if (last_enabled_ && owner == last_owner_ && identity == last_identity_ && same_bounds)
         return;
@@ -575,8 +742,75 @@ void PreviewHandlerHost::Sync(HWND owner, const D2D1_RECT_F& bounds, const std::
     last_owner_ = owner;
     last_bounds_ = target;
     last_identity_ = identity;
+    last_path_ = path;
     if (new_content) worker_->state.store(State::Loading, std::memory_order_release);
     Publish(true, owner, target, path, identity, attrs, immediate);
+}
+
+void PreviewHandlerHost::ReapRetired() {
+    for (auto it = retired_.begin(); it != retired_.end();) {
+        const HANDLE thread = (*it)->thread;
+        if (!thread || WaitForSingleObject(thread, 0) == WAIT_OBJECT_0) it = retired_.erase(it);
+        else ++it;
+    }
+}
+
+bool PreviewHandlerHost::RetireStalledApartment(const std::wstring& requested_identity,
+                                               bool requested) {
+    ReapRetired();
+    const auto worker = worker_;
+    if (!worker) return false;
+    const ULONGLONG now = GetTickCount64();
+
+    // The apartment serves one request at a time, so a request the pane has
+    // moved on from must not wait for the provider that is still busy with the
+    // previous one. Only the request the apartment is working on right now - the
+    // one the pane is therefore still showing - keeps the longer budget above.
+    bool superseded = !requested;
+    {
+        std::lock_guard<std::mutex> lock(worker->mutex);
+        if (worker->working_identity != requested_identity) superseded = true;
+    }
+    const ULONGLONG budget = superseded ? CommandBudgetMs() : SlowOpenBudgetMs();
+
+    // An apartment is stuck when either the provider open it started never came
+    // back, or a command sent to it was never applied.
+    bool stalled = worker->opens_started.load(std::memory_order_acquire) >
+            worker->opens_finished.load(std::memory_order_acquire) &&
+        now - worker->open_started_tick.load(std::memory_order_acquire) >= budget;
+    ULONGLONG sent = 0;
+    {
+        std::lock_guard<std::mutex> lock(worker->mutex);
+        if (!stalled && worker->applied_version.load(std::memory_order_relaxed) !=
+                            worker->command_version) {
+            stalled = true;
+            sent = worker->command_tick;
+        }
+    }
+    if (!stalled) return false;
+    if (sent && now - sent < budget) return false;
+
+    // Remember the provider, so the pane asks the thumbnail path instead of
+    // queueing behind the same provider on a fresh apartment.
+    NoteStalledProvider(ExtensionOf(last_path_));
+    DetachOverlay(worker->overlay.load(std::memory_order_acquire));
+    {
+        std::lock_guard<std::mutex> lock(worker->mutex);
+        worker->stop = true;
+    }
+    SetEvent(worker->wake);
+    worker_.reset();
+    // The next paint re-reads CanHost, which now reports the cooldown, and
+    // publishes again only once the provider is allowed back. Ask for that frame
+    // now: this one is already inside the caller's paint and still holds the
+    // handler path it chose before the retire.
+    const HWND wake = notify_ ? notify_ : last_owner_;
+    if (wake && IsWindow(wake)) InvalidateRect(wake, nullptr, FALSE);
+    last_enabled_ = false;
+    last_identity_.clear();
+    last_owner_ = nullptr;
+    retired_.push_back(std::move(worker));
+    return true;
 }
 
 LRESULT CALLBACK PreviewHandlerHost::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -608,6 +842,7 @@ LRESULT CALLBACK PreviewHandlerHost::WndProc(HWND hwnd, UINT msg, WPARAM wParam,
     }
     case WM_DESTROY:
         if (self->hwnd == hwnd) self->hwnd = nullptr;
+        self->overlay.store(nullptr, std::memory_order_release);
         return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -658,6 +893,10 @@ DWORD WINAPI PreviewHandlerHost::WorkerMain(void* parameter) {
                 self->HideWindow();
                 self->identity.clear();
                 self->pending_identity.clear();
+                {
+                    std::lock_guard<std::mutex> lock(self->mutex);
+                    self->working_identity.clear();
+                }
                 open_due.reset();
                 self->state.store(State::Idle, std::memory_order_release);
             } else if (command.identity == self->identity) {
@@ -670,6 +909,10 @@ DWORD WINAPI PreviewHandlerHost::WorkerMain(void* parameter) {
             } else if (command.identity != self->pending_identity) {
                 self->HideWindow();
                 self->pending_identity = command.identity;
+                {
+                    std::lock_guard<std::mutex> lock(self->mutex);
+                    self->working_identity = command.identity;
+                }
                 open_due = std::chrono::steady_clock::now() + std::chrono::milliseconds(
                     command.immediate ? 0 : kOpenDelayMs);
                 self->state.store(State::Loading, std::memory_order_release);
@@ -677,10 +920,15 @@ DWORD WINAPI PreviewHandlerHost::WorkerMain(void* parameter) {
                 self->PlaceOverlay();
             }
             applied_version = version;
+            self->applied_version.store(version, std::memory_order_release);
         }
 
         if (open_due && std::chrono::steady_clock::now() >= *open_due) {
             const std::wstring opening_identity = self->pending_identity;
+            // Bracket the whole open, provider calls included, so the owner can
+            // tell that this apartment is busy and since when.
+            self->open_started_tick.store(GetTickCount64(), std::memory_order_release);
+            self->opens_started.fetch_add(1, std::memory_order_release);
 #ifdef PULSE_PREVIEW_HANDLER_TESTING
             g_test_open_attempts.fetch_add(1, std::memory_order_relaxed);
             wchar_t delay_text[16]{};
@@ -691,9 +939,12 @@ DWORD WINAPI PreviewHandlerHost::WorkerMain(void* parameter) {
             }
 #endif
             const bool opened = self->OpenCurrent();
+            self->opens_finished.fetch_add(1, std::memory_order_release);
+            if (opened) ClearSlowProvider(ExtensionOf(self->path));
             bool current = false;
             {
                 std::lock_guard<std::mutex> lock(self->mutex);
+                self->working_identity.clear();
                 current = !self->stop && self->command.enabled &&
                     self->command.identity == opening_identity;
             }
@@ -745,6 +996,27 @@ void ResetPreviewHandlerOpenAttemptsForTest() {
 
 uint32_t PreviewHandlerOpenAttemptsForTest() {
     return g_test_open_attempts.load(std::memory_order_relaxed);
+}
+
+void ResetOverlayPlaceCountsForTest() {
+    g_test_place_calls.store(0, std::memory_order_relaxed);
+    g_test_place_done.store(0, std::memory_order_relaxed);
+}
+
+uint32_t OverlayPlaceCallsForTest() {
+    return g_test_place_calls.load(std::memory_order_relaxed);
+}
+
+uint32_t OverlayPlaceDoneForTest() {
+    return g_test_place_done.load(std::memory_order_relaxed);
+}
+
+void ResetSlowPreviewProvidersForTest() {
+    ResetSlowProvidersForTest();
+}
+
+HWND PreviewHandlerHost::overlay_window_for_test() const {
+    return worker_ ? worker_->overlay.load(std::memory_order_acquire) : nullptr;
 }
 
 bool PreviewHandlerCanActivateIsolatedForTest(const std::wstring& path) {

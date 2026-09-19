@@ -375,16 +375,22 @@ target_link_libraries(pulse_shell PRIVATE ole32 shell32 uuid advapi32 shlwapi ve
 endif()
 
 # ---- Pulse.Preview.exe: thumbnail decoding / Shell provider isolation ----
-add_executable(pulse_preview WIN32 src/preview_host/main.cpp src/preview_host/video_codec.cpp)
+add_executable(pulse_preview WIN32 src/preview_host/main.cpp src/preview_host/video_codec.cpp
+    src/preview_host/svg_raster.cpp src/preview_host/metafile_raster.cpp)
 set_target_properties(pulse_preview PROPERTIES OUTPUT_NAME "Pulse.Preview")
-target_link_libraries(pulse_preview PRIVATE ole32 shell32 gdi32 uuid windowscodecs propsys advapi32)
+# gdiplus renders WMF/EMF, including the EMF+ records Office clip art uses.
+target_link_libraries(pulse_preview PRIVATE ole32 shell32 gdi32 uuid windowscodecs propsys advapi32 gdiplus)
+# SVG previews are rasterized with Direct2D, but d2d1/d3d11/dxgi are
+# deliberately not linked: implicit imports would load them at every preview
+# host start-up (the first preview of any file type) while only SVG needs them.
+# svg_raster.cpp resolves them on demand with LoadLibraryW instead.
 target_link_libraries(pulse_preview PRIVATE pulse_crash_reporter)
 pulse_add_version_resource(pulse_preview "Pulse preview host" "Pulse.Preview" "Pulse.Preview.exe")
 
 # Preview protocol self test (console; drives Pulse.Preview.exe over the pipe)
 add_executable(pulse_preview_test src/bench/preview_test_main.cpp
     src/bench/thumbnail_cache_test.cpp src/ui/thumbnail_cache.cpp src/preview_host/video_codec.cpp)
-target_link_libraries(pulse_preview_test PRIVATE ole32)
+target_link_libraries(pulse_preview_test PRIVATE ole32 gdi32 gdiplus)
 add_dependencies(pulse_preview_test pulse_preview)
 
 add_executable(pulse_shell_icons_test src/bench/shell_icons_test.cpp src/ui/shell_icons.cpp)

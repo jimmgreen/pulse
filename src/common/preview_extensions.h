@@ -32,8 +32,23 @@ inline bool IsImageExtension(std::wstring_view extension) {
     });
 }
 
+// Vector documents WIC cannot decode but Direct2D renders natively. They are
+// deliberately not part of IsImageExtension: that list feeds the WIC decoder,
+// and sending an SVG there only produced "image-decode-failed".
+inline bool IsVectorExtension(std::wstring_view extension) {
+    return IsOneOf(extension, { L".svg" });
+}
+
+// Windows metafiles: WIC only decodes them where its codec is installed and the
+// shell exposes no thumbnail provider for them, so the host draws them with GDI.
+// Kept out of IsImageExtension for the same reason as SVG.
+inline bool IsMetaFileExtension(std::wstring_view extension) {
+    return IsOneOf(extension, { L".wmf", L".emf" });
+}
+
 inline bool IsNativeExtension(std::wstring_view extension) {
-    return IsTextExtension(extension) || IsImageExtension(extension);
+    return IsTextExtension(extension) || IsImageExtension(extension) ||
+        IsVectorExtension(extension) || IsMetaFileExtension(extension);
 }
 
 } // namespace pulse::preview
