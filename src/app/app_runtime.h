@@ -93,6 +93,9 @@ std::wstring DetailsAttributeText(DWORD attrs);
 bool TickTrayDeck(AppState& s);
 ui::WindowViewModel BuildVm(AppState& s, bool probe_details = true);
 std::wstring TooltipForHover(AppState& s);
+// Records what the pointer is over. Both mouse-move paths (client and frame)
+// must call this, or a hover field silently stops updating.
+void ApplyHoverTarget(AppState& s, const ui::HitTestResult& hit);
 std::wstring EntryFullPath(const app::Tab& tab, int index);
 std::vector<std::wstring> SelectedFullPaths(const app::Tab& tab);
 std::wstring TagDiscoveryKey(std::wstring path);

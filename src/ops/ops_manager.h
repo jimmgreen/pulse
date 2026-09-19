@@ -135,6 +135,12 @@ public:
     void DiscardRecovery();
     void SetVerifyCopies(bool enabled) noexcept { verify_copies_.store(enabled); }
     bool VerifyCopies() const noexcept { return verify_copies_.load(); }
+    // Owner window for the shell dialogs the open thread raises (打开方式…,
+    // 属性). Explorer parents those to the folder window; passing our own HWND
+    // keeps them tied to Pulse instead of whatever happens to be foreground
+    // when the ops thread gets to the request.
+    void SetUiWindow(HWND hwnd) noexcept { ui_hwnd_.store(hwnd); }
+    HWND UiWindow() const noexcept { return ui_hwnd_.load(); }
 
     uint64_t Submit(OpRequest req);
     void CancelCurrent();
@@ -201,6 +207,7 @@ private:
         std::wstring open_args;   // e.g. -d "<dir>" for wt.exe
         std::wstring open_file;   // explicit program (empty => open_path is the file)
         uint64_t seq = 0;
+        ULONGLONG enqueued_at = 0; // diagnostics: queue wait vs shell cost
     };
 
     struct MenuJob {
@@ -219,7 +226,9 @@ private:
     void WorkerThread();
     void MenuThread();
     void OpenThread();
-    void EnqueueOpen(QueueItem item);
+    // front = interactive dialog request (打开方式…, 属性): it jumps ahead of
+    // queued opens so the dialog answers the click. Plain opens keep FIFO order.
+    void EnqueueOpen(QueueItem item, bool front = false);
     void RunShellOp(const OpRequest& req, uint64_t task_id);
     bool WaitShellDone(uint32_t id, uint32_t& hr, bool& cancelled, std::wstring& error);
     void RunTransfer(const OpRequest& req, uint64_t task_id);
@@ -293,6 +302,8 @@ private:
     // serialize behind transfers (SEE_MASK_NOASYNC on the transfer
     // worker made double-click open wait for in-flight copies).
     std::thread open_thread_;
+    // Owner for the shell dialogs above; written by the UI thread only.
+    std::atomic<HWND> ui_hwnd_{nullptr};
     bool open_running_ = false;
     mutable std::mutex open_mutex_;
     std::condition_variable open_cv_;

@@ -31,6 +31,10 @@ struct SlowComExt {
 struct ContextMenuPrefs {
     bool persist = true;
 
+    // Explorer shows 软件功能 / 打开方式 / 打印 and leaves 发送到 plus the image
+    // and system verbs out unless the type registers them; those two groups stay
+    // off by default and the settings page turns them on. Only the COM-sourced
+    // 打开方式 rows stay off — our own 打开方式… already covers them.
     bool software = true;
     bool share = false;
     bool wallpaper = false;
@@ -49,6 +53,9 @@ struct ContextMenuPrefs {
     std::unordered_map<std::wstring, SlowComExt> slow_ext;
 
     void ResetToDefaults();
+    // Re-keys the seen catalog through CatalogKey and carries the per-item
+    // overrides onto the new keys; run whenever the catalog is loaded.
+    void MigrateSeenKeys();
     bool CategoryEnabled(ipc::CtxMenuCategory c) const;
     bool GroupEnabled(ipc::CtxMenuGroup g) const;
     void SetGroupEnabled(ipc::CtxMenuGroup g, bool on);

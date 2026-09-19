@@ -24,12 +24,14 @@
 #include "search_query.h"
 #include "../common/localization.h"
 #include "app_model.h"
+#include "app_commands.h"
 #include "app_worker.h"
 #include "entry_sort.h"
 #include "snapshot_patch.h"
 #include "session.h"
 #include "app_prefs.h"
 #include "context_menu.h"
+#include "context_menu_controller.h"
 #include "context_menu_prefs.h"
 #include "shell_verbs.h"
 #include "places.h"
@@ -386,12 +388,16 @@ void TestBreadcrumb() {
     cat.PinWorkspace(L"\\\\server\\share", L"nas", 0, { L"\\\\server\\share" });
     cat.workspaces[1].frequent.push_back({ L"\\\\server\\share\\sub", 3 });
     const auto wvm = BuildWindowViewModel(pane, sidebar, true, false, true, &cat, 0);
-    Check(!wvm.sidebar.empty() && wvm.sidebar[0].items.size() == 3,
+    const auto workspaces = std::find_if(wvm.sidebar.begin(), wvm.sidebar.end(),
+        [](const auto& section) {
+            return section.id == static_cast<int>(SidebarSectionId::Workspaces);
+        });
+    Check(workspaces != wvm.sidebar.end() && workspaces->items.size() == 3,
           L"sidebar: workspace group holds both workspaces + frequent child");
-    if (!wvm.sidebar.empty() && wvm.sidebar[0].items.size() == 3) {
-        const auto& local = wvm.sidebar[0].items[0];
-        const auto& nas = wvm.sidebar[0].items[1];
-        const auto& sub = wvm.sidebar[0].items[2];
+    if (workspaces != wvm.sidebar.end() && workspaces->items.size() == 3) {
+        const auto& local = workspaces->items[0];
+        const auto& nas = workspaces->items[1];
+        const auto& sub = workspaces->items[2];
         Check(local.badge.empty() && local.icon_glyph == L"\xE8B7",
               L"sidebar: local workspace keeps default glyph, no badge");
         Check(nas.badge == L"当前 · 服务器" && nas.icon_glyph == L"\xE968" &&
@@ -419,6 +425,36 @@ void TestBreadcrumb() {
     Check(desktop && desktop->badge == L"\u684C\u9762" &&
           desktop->badge_color.a > 0.0f && !desktop->path.empty(),
           L"sidebar: quick access Desktop exposes editable badge color");
+
+    // OneDrive only has a known folder while the client is signed in, so this
+    // asserts the wiring on machines that actually have it.
+    PWSTR onedrive = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_OneDrive, 0, nullptr, &onedrive)) && onedrive) {
+        const std::wstring expected = fs::NormalizePath(onedrive);
+        CoTaskMemFree(onedrive);
+        const bool listed = std::any_of(access.cloud.begin(), access.cloud.end(),
+            [&](const auto& entry) { return entry.path == expected; });
+        Check(listed, L"sidebar: OneDrive gets its own section when the client is signed in");
+        const bool still_pinned = std::any_of(access.quick_access.begin(),
+            access.quick_access.end(),
+            [&](const auto& entry) { return entry.path == expected; });
+        Check(!still_pinned, L"sidebar: OneDrive leaves quick access for its own section");
+    }
+
+    // Hiding is a separate mask from collapsing: a hidden group is not laid out.
+    const auto hidden_vm = BuildWindowViewModel(home, access, true, false, false, nullptr, 0,
+        1u << static_cast<int>(SidebarSectionId::QuickAccess));
+    const auto hidden_qa = std::find_if(hidden_vm.sidebar.begin(), hidden_vm.sidebar.end(),
+        [](const auto& section) {
+            return section.id == static_cast<int>(SidebarSectionId::QuickAccess);
+        });
+    const auto visible_starred = std::find_if(hidden_vm.sidebar.begin(), hidden_vm.sidebar.end(),
+        [](const auto& section) {
+            return section.id == static_cast<int>(SidebarSectionId::Starred);
+        });
+    Check(hidden_qa != hidden_vm.sidebar.end() && hidden_qa->hidden &&
+          visible_starred != hidden_vm.sidebar.end() && !visible_starred->hidden,
+          L"sidebar: the hidden mask targets only its own group");
 }
 
 void TestThisPcEnumeration() {
@@ -724,6 +760,96 @@ void TestBlankPaneClickNavigation() {
                 vm.sidebar[1].collapsed = true;
                 Check(renderer.SidebarMaxScroll(vm, width_px, height_px) < maximum,
                       L"sidebar geometry: collapsing a group reduces scroll range");
+                // The section menu hides a whole group instead of folding it.
+                vm.sidebar[1].collapsed = false;
+                vm.sidebar[1].hidden = true;
+                Check(renderer.SidebarMaxScroll(vm, width_px, height_px) < maximum,
+                      L"sidebar geometry: hiding a group removes it from the layout");
+                vm.sidebar[1].hidden = false;
+                // An empty pane must report its background so the menu can open;
+                // with no section under the cursor the index stays -1 (pane menu).
+                ui::WindowViewModel empty;
+                const auto blank_hit = renderer.HitTest(empty, bounds, 70.0f * scale, 200.0f * scale);
+                Check(blank_hit.region == ui::HitTestResult::SidebarBlank && blank_hit.index < 0,
+                      L"sidebar geometry: empty pane background owns the section menu");
+                // Empty space inside a section reports that section, so the
+                // right-click menu matches what the cursor is over.
+                ui::WindowViewModel banded;
+                for (int g = 0; g < 2; ++g) {
+                    ui::SidebarGroup group;
+                    group.id = g;
+                    group.header = L"Band fixture";
+                    ui::SidebarItem item;
+                    item.label = L"Row";
+                    item.path = L"band:" + std::to_wstring(g);
+                    group.items.push_back(std::move(item));
+                    banded.sidebar.push_back(std::move(group));
+                }
+                std::vector<ui::SidebarGroupBand> bands;
+                renderer.SidebarGroupBands(banded, width_px, height_px, bands);
+                bool band_hit = false;
+                for (const auto& band : bands) {
+                    for (float y = band.top; y < band.bottom; y += scale) {
+                        const auto hit = renderer.HitTest(banded, bounds, 70.0f * scale, y);
+                        if (hit.region == ui::HitTestResult::SidebarBlank && hit.index == band.group) {
+                            band_hit = true;
+                            break;
+                        }
+                    }
+                }
+                Check(bands.size() == 2 && band_hit,
+                      L"sidebar geometry: blank space resolves to the section under the cursor");
+                // A row hit reports which section and which row it belongs to, so a
+                // drag can tell a header-less section's row from a pinned row.
+                bool row_identity = false;
+                for (float y = bands.front().top; y < bands.front().bottom; y += scale) {
+                    const auto hit = renderer.HitTest(banded, bounds, 70.0f * scale, y);
+                    if (hit.region != ui::HitTestResult::SidebarItem) continue;
+                    row_identity = hit.sidebar_section == 0 && hit.sidebar_item == 0;
+                    break;
+                }
+                Check(row_identity,
+                      L"sidebar geometry: a row hit carries its section id and row index");
+                // Narrow rail: a folded section keeps one icon row, and that row
+                // still reports the section plus its name (rail tooltips).
+                ui::WindowViewModel folded_vm;
+                for (int g = 0; g < 2; ++g) {
+                    ui::SidebarGroup group;
+                    group.id = g;
+                    group.header = g == 0 ? L"\u6298\u53E0A" : L"\u6298\u53E0B";
+                    group.icon_glyph = L"\xE8A9";
+                    group.collapsed = true;
+                    ui::SidebarItem item;
+                    item.label = L"Row";
+                    item.path = L"fold:" + std::to_wstring(g);
+                    group.items.push_back(std::move(item));
+                    folded_vm.sidebar.push_back(std::move(group));
+                }
+                const float narrow_w = 400.0f * scale;
+                const D2D1_RECT_F narrow_bounds = D2D1::RectF(0, 0, narrow_w, height_px);
+                bool rail_hit = false;
+                for (float y = 0.0f; y < height_px; y += scale) {
+                    const auto hit = renderer.HitTest(folded_vm, narrow_bounds,
+                                                      24.0f * scale, y);
+                    if (hit.region != ui::HitTestResult::SidebarHeader) continue;
+                    rail_hit = hit.sidebar_section == 0 && hit.label == L"\u6298\u53E0A";
+                    break;
+                }
+                Check(rail_hit,
+                      L"sidebar geometry: a folded section keeps a labelled rail row");
+                // The rail row stays put when the section is open, so the user
+                // can fold it again from the same icon.
+                ui::WindowViewModel open_vm = folded_vm;
+                open_vm.sidebar[0].collapsed = false;
+                bool open_rail_hit = false;
+                for (float y = 0.0f; y < height_px; y += scale) {
+                    const auto hit = renderer.HitTest(open_vm, narrow_bounds, 24.0f * scale, y);
+                    if (hit.region != ui::HitTestResult::SidebarHeader) continue;
+                    open_rail_hit = hit.sidebar_section == 0 && hit.label == L"\u6298\u53E0A";
+                    break;
+                }
+                Check(open_rail_hit,
+                      L"sidebar geometry: an expanded section keeps its rail row");
             }
         }
     }
@@ -2036,10 +2162,20 @@ void TestContextMenuPrefs() {
             if (e.text == text) return true;
         return false;
     };
+    // Explorer keeps 软件功能 / 打开方式 / 打印 and hides 发送到 plus the system
+    // verbs; the settings page turns those two groups on when the user wants them.
     Check(!has(L"发送到") && !has(L"设置为桌面背景") && !has(L"向右旋转"),
-          L"prefs: factory drops share / wallpaper / rotate");
+          L"prefs: defaults hide share / wallpaper / rotate");
     Check(has(L"Bandizip") && has(L"合并 PDF") && has(L"打印"),
-          L"prefs: factory keeps vendor flyout, type verb, print");
+          L"prefs: defaults keep vendor flyout, type verb, print");
+    ContextMenuPrefs with_share;
+    with_share.persist = false;
+    with_share.SetGroupEnabled(ipc::CtxMenuGroup::Share, true);
+    const auto sharing = ApplyExplorerPrefs(with_share, raw);
+    bool share_shown = false;
+    for (const auto& e : sharing)
+        if (e.text == L"发送到") share_shown = true;
+    Check(share_shown, L"prefs: switching the share group on shows 发送到");
     Check(!has(L"压缩为「photo.zip」"),
           L"prefs: compress top-level collapsed when flyout exists");
     bool in_bandizip = false;
@@ -2125,21 +2261,23 @@ void TestContextMenuPrefs() {
           filtered[1].text == L"合并 PDF",
           L"prefs: order is flyout then type verb");
 
-    prefs.SetItemEnabled(ipc::CatalogKey(L"发送到", true), true);
+    prefs.SetItemEnabled(ipc::CatalogKey(L"发送到", true), false);
     auto restored = ApplyExplorerPrefs(prefs, raw);
     bool sendto_back = false;
     for (const auto& e : restored)
         if (e.text == L"发送到") sendto_back = true;
-    Check(sendto_back, L"prefs: per-item override re-enables 发送到");
+    Check(!sendto_back,
+          L"prefs: a per-item override hides 发送到 even while its group is on");
 
     prefs.RecordSeen(ipc::CatalogKey(L"Bandizip", true), L"Bandizip", true,
                      CtxMenuCategory::Software, true);
     const std::wstring json = prefs.ToJson();
     ContextMenuPrefs loaded;
     loaded.persist = false;
-    Check(loaded.FromJson(json) && loaded.item_enabled[ipc::CatalogKey(L"发送到", true)] &&
+    Check(loaded.FromJson(json) &&
+          !loaded.item_enabled[ipc::CatalogKey(L"发送到", true)] &&
           loaded.seen.size() == 1 && loaded.seen[0].from_com &&
-          loaded.explorer_cap == 32 && !loaded.share && loaded.print,
+          loaded.explorer_cap == ipc::kDefaultExplorerCap && !loaded.share && loaded.print,
           L"prefs: JSON round-trip keeps override, seen, and defaults");
 
     Check(prefs.RecordComTiming(L".dwg", 800) && prefs.ComDeferred(L".dwg") == false, L"prefs: one slow COM hit does not defer");
@@ -2161,8 +2299,9 @@ void TestContextMenuPrefs() {
     loaded.ResetToDefaults();
     Check(loaded.seen.empty() && loaded.item_enabled.empty() && !loaded.share,
           L"prefs: restore defaults clears seen and overrides");
-    Check(ContextMenuPrefs{}.explorer_cap == 32 && loaded.explorer_cap == 32,
-          L"prefs: factory Explorer cap is 32");
+    Check(ContextMenuPrefs{}.explorer_cap == ipc::kDefaultExplorerCap &&
+          loaded.explorer_cap == ipc::kDefaultExplorerCap,
+          L"prefs: factory Explorer cap keeps the whole shell list");
 
     std::vector<ShellMenuEntry> many;
     for (int i = 0; i < 20; ++i)
@@ -2170,6 +2309,106 @@ void TestContextMenuPrefs() {
     prefs.explorer_cap = 12;
     auto capped = ApplyExplorerPrefs(prefs, many);
     Check(capped.size() == 12, L"prefs: Explorer section respects explorer_cap");
+
+    // Rows seeded from the on-disk cache still need one live pass: that cache is
+    // written at install time, and a build without resources shipped an empty
+    // 打开方式 row that made the menu drop the whole entry.
+    ContextMenuController seeded;
+    StaticVerb empty_row;
+    empty_row.verb = L"openas";
+    seeded.MergeStaticCache({ { L".xlsx", { empty_row } } });
+    Check(seeded.RequestStaticPrefetch(L".xlsx"),
+          L"prefs: a seeded extension still re-enumerates from the registry");
+    seeded.CompleteStaticVerbs(L".xlsx", { empty_row });
+    Check(!seeded.RequestStaticPrefetch(L".xlsx"),
+          L"prefs: a live pass clears the seeded marker");
+
+    // Catalog keys are normalized: one switch then covers every spelling the
+    // shell uses for the same verb, and an older catalog migrates onto them.
+    Check(ipc::CatalogKey(L"用 PDF-XChange Editor 打开", false) ==
+          ipc::CatalogKey(L"用PDF-XChange Editor打开", false),
+          L"prefs: spacing differences collapse into one catalog key");
+    ContextMenuPrefs catalog;
+    catalog.persist = false;
+    Check(catalog.RecordSeen(ipc::CatalogKey(L"新建(N)", false), L"新建(N)", false,
+                             CtxMenuCategory::Software, false) &&
+          !catalog.RecordSeen(ipc::CatalogKey(L"新建(W)", false), L"新建(W)", false,
+                              CtxMenuCategory::Software, false) &&
+          catalog.seen.size() == 1,
+          L"prefs: 新建(N) and 新建(W) share one catalog row");
+    const std::wstring legacy_catalog =
+        L"{\"version\":1,\"items\":{\"v:新建(w)\":{\"enabled\":false}},"
+        L"\"seen\":[{\"key\":\"v:新建(n)\",\"text\":\"新建(N)\",\"kind\":\"verb\","
+        L"\"category\":\"software\",\"source\":\"static\"}]}";
+    ContextMenuPrefs migrated_keys;
+    migrated_keys.persist = false;
+    Check(migrated_keys.FromJson(legacy_catalog) && migrated_keys.seen.size() == 1 &&
+          migrated_keys.seen[0].key == ipc::CatalogKey(L"新建(W)", false) &&
+          migrated_keys.item_enabled[ipc::CatalogKey(L"新建(N)", false)] == false,
+          L"prefs: an older catalog migrates keys and keeps its overrides");
+}
+
+// Diagnostic entry (PULSE_SELFTEST_CASE=context-verbs): dumps the real registry
+// static verbs for a few extensions plus what the UI-side pref filter keeps, so
+// "why is this verb missing from the right-click menu" is answerable without
+// guessing. Read-only: no menu opens and nothing is invoked.
+void DumpContextVerbs() {
+    wchar_t line[600]{};
+    // The machine-level cache seeded at install time is the first suspect when a
+    // verb shows up here but not in the live menu.
+    std::unordered_map<std::wstring, std::vector<StaticVerb>> machine;
+    if (LoadMachineStaticVerbCache(machine)) {
+        swprintf_s(line, L"[DUMP] machine cache: %zu extension(s)\n", machine.size());
+        LogLine(line);
+        const auto found = machine.find(L".xlsx");
+        if (found == machine.end()) {
+            LogLine(L"[DUMP] machine cache: no .xlsx entry\n");
+        } else {
+            swprintf_s(line, L"[DUMP] machine cache .xlsx: %zu verb(s)\n",
+                       found->second.size());
+            LogLine(line);
+            for (const auto& verb : found->second) {
+                swprintf_s(line, L"[DUMP]   cached text=\"%ls\" verb=\"%ls\"\n",
+                           verb.display.c_str(), verb.verb.c_str());
+                LogLine(line);
+            }
+        }
+    } else {
+        LogLine(L"[DUMP] machine cache: missing or unreadable\n");
+    }
+    const std::wstring extensions[] = { L".xlsx", L".txt", L".jpg", L".png" };
+    for (const auto& ext : extensions) {
+        const auto verbs = EnumerateStaticVerbs(ext);
+        wchar_t line[600]{};
+        swprintf_s(line, L"[DUMP] %ls: %zu static verb(s)\n", ext.c_str(), verbs.size());
+        LogLine(line);
+        for (const auto& verb : verbs) {
+            swprintf_s(line,
+                L"[DUMP]   text=\"%ls\" verb=\"%ls\" cmd=%d app=%d children=%zu\n",
+                verb.display.c_str(), verb.verb.c_str(), verb.command.empty() ? 0 : 1,
+                verb.app_path.empty() ? 0 : 1, verb.children.size());
+            LogLine(line);
+        }
+        ContextMenuPrefs prefs;
+        prefs.persist = false;
+        std::vector<ShellMenuEntry> entries;
+        for (size_t i = 0; i < verbs.size(); ++i) {
+            ShellMenuEntry entry;
+            entry.text = verbs[i].display;
+            entry.verb = verbs[i].verb;
+            entry.command = CmdShellStaticBase + static_cast<int>(i) * ipc::kStaticVerbStride;
+            entries.push_back(std::move(entry));
+        }
+        const auto kept = ApplyExplorerPrefs(prefs, entries);
+        swprintf_s(line, L"[DUMP] %ls: %zu kept after Explorer prefs\n", ext.c_str(),
+                   kept.size());
+        LogLine(line);
+        for (const auto& entry : kept) {
+            swprintf_s(line, L"[DUMP]   kept text=\"%ls\" verb=\"%ls\"\n",
+                       entry.text.c_str(), entry.verb.c_str());
+            LogLine(line);
+        }
+    }
 }
 
 void TestAppPrefsAndSettingsPath() {
@@ -3098,6 +3337,74 @@ void TestQuickAccess() {
         menu.clear();
         AppendQuickAccessCommand(state, menu, {L"C:\\one"});
         Check(menu.empty(), L"quick access: menu preference is respected");
+
+        // Section menu: hiding is per section id; the bulk pair owns every bit.
+        state.sidebarHiddenMask = 0;
+        ToggleSidebarSection(state, 3);
+        Check(state.sidebarHiddenMask == (1u << 3), L"sidebar sections: a toggle hides one section");
+        ToggleSidebarSection(state, 3);
+        ToggleSidebarSection(state, -1);
+        ToggleSidebarSection(state, kSidebarSectionCount);
+        Check(state.sidebarHiddenMask == 0, L"sidebar sections: out-of-range sections are ignored");
+        // Unhiding Quick access also restores its built-in links, so the section
+        // can never come back empty with nothing left to right-click.
+        state.sidebarQuickAccessHiddenMask = 0x1Fu;
+        state.sidebarHiddenMask = 1u << static_cast<int>(SidebarSectionId::QuickAccess);
+        ToggleSidebarSection(state, static_cast<int>(SidebarSectionId::QuickAccess));
+        Check(state.sidebarQuickAccessHiddenMask == 0,
+              L"sidebar sections: unhiding quick access restores its built-in links");
+        SetEverySidebarSectionCollapsed(state, true);
+        Check(state.sidebarCollapsedMask == (1u << kSidebarSectionCount) - 1u,
+              L"sidebar sections: collapse all covers every section");
+        SetEverySidebarSectionCollapsed(state, false);
+        Check(state.sidebarCollapsedMask == 0, L"sidebar sections: expand all clears the mask");
+
+        // Section order: the cloud section ships above Drives; a reorder keeps the
+        // masks pointing at the same sections because they are keyed by id.
+        const auto default_order = DefaultSidebarOrder();
+        const auto cloud_pos = std::find(default_order.begin(), default_order.end(),
+            static_cast<int>(SidebarSectionId::Cloud));
+        const auto drives_pos = std::find(default_order.begin(), default_order.end(),
+            static_cast<int>(SidebarSectionId::Drives));
+        Check(cloud_pos != default_order.end() && drives_pos != default_order.end() &&
+              cloud_pos < drives_pos,
+              L"sidebar sections: the cloud section defaults above drives");
+        Check(default_order.front() == static_cast<int>(SidebarSectionId::Cloud) &&
+              default_order[1] == static_cast<int>(SidebarSectionId::Starred) &&
+              default_order.back() == static_cast<int>(SidebarSectionId::Networks),
+              L"sidebar sections: OneDrive leads and network locations close the pane");
+        const auto messy = NormalizeSidebarOrder({ 5, 5, 99, static_cast<int>(SidebarSectionId::Tags) });
+        std::vector<int> unique_ids = messy;
+        std::sort(unique_ids.begin(), unique_ids.end());
+        unique_ids.erase(std::unique(unique_ids.begin(), unique_ids.end()), unique_ids.end());
+        Check(messy.size() == static_cast<size_t>(kSidebarSectionCount) &&
+              messy[0] == 5 && messy[1] == static_cast<int>(SidebarSectionId::Tags) &&
+              unique_ids.size() == messy.size(),
+              L"sidebar sections: order sanitizes duplicates and unknown ids");
+        Check(NormalizeSidebarOrder({}).size() == static_cast<size_t>(kSidebarSectionCount),
+              L"sidebar sections: an empty order falls back to the default");
+        // Pinned folders reorder by dragging; unknown paths and no-ops are safe.
+        {
+            PlacesCatalog pins;
+            pins.persist = false;
+            pins.quick_access_paths = { L"C:\\a", L"C:\\b", L"C:\\c" };
+            Check(pins.ReorderQuickAccessPinned(L"C:\\c", 0) &&
+                  pins.quick_access_paths[0] == L"C:\\c" &&
+                  pins.quick_access_paths[1] == L"C:\\a" &&
+                  pins.quick_access_paths[2] == L"C:\\b",
+                  L"quick access: a dragged pin moves to the requested position");
+            Check(!pins.ReorderQuickAccessPinned(L"C:\\missing", 1) &&
+                  !pins.ReorderQuickAccessPinned(L"C:\\c", 0),
+                  L"quick access: reordering ignores unknown paths and keeps no-ops");
+        }
+
+        // A volume change rebuilds the model: clearing the rows and refreshing
+        // must bring the drives and the quick-access links back.
+        state.sidebar.drives.clear();
+        state.sidebar.quick_access.clear();
+        RefreshSidebarModel(state);
+        Check(!state.sidebar.drives.empty() && !state.sidebar.quick_access.empty(),
+              L"sidebar refresh: a volume change rebuilds the drive and quick-access rows");
         Pane pane; pane.NewTab(L"C:\\");
         const auto sidebar = BuildSidebarModel();
         const auto vm = BuildWindowViewModel(pane, sidebar, true, false, false, &state.places, 0);
@@ -3108,6 +3415,110 @@ void TestQuickAccess() {
         Check(group != vm.sidebar.end() && group->items.back().indent == 0 &&
               group->items.back().path == fs::NormalizePath(L"C:\\two"),
               L"quick access: independent sidebar entry appended at top level");
+        const auto starred_section = std::find_if(vm.sidebar.begin(), vm.sidebar.end(),
+            [](const auto& section) {
+                return section.id == static_cast<int>(SidebarSectionId::Starred);
+            });
+        Check(starred_section != vm.sidebar.end() && starred_section->header.empty() &&
+              !starred_section->items.empty() &&
+              starred_section->items.front().path == MakeStarredPath(),
+              L"sidebar sections: the starred root is a header-less section of its own");
+
+        // Every built-in quick-access link carries its set id, and the starred
+        // root is no longer one of them.
+        const bool quick_access_tagged = !sidebar.quick_access.empty() &&
+            std::all_of(sidebar.quick_access.begin(), sidebar.quick_access.end(),
+                [](const auto& entry) {
+                    return entry.builtin >= 0 &&
+                           entry.builtin < static_cast<int>(BuiltinQuickAccess::Count);
+                });
+        Check(quick_access_tagged && !sidebar.starred.empty() &&
+              sidebar.starred.front().path == MakeStarredPath(),
+              L"sidebar sections: built-in quick-access links are tagged");
+
+        // Rail tooltips: the collapsed sidebar shows icons only, so a hovered row
+        // (or a folded section's icon) names itself.
+        state.hoverRegion = static_cast<int>(ui::HitTestResult::SidebarItem);
+        state.hoverLabel = L"Rail row";
+        Check(TooltipForHover(state) == L"Rail row",
+              L"sidebar rail: a hovered row reports its name");
+        state.hoverRegion = static_cast<int>(ui::HitTestResult::SidebarHeader);
+        Check(TooltipForHover(state) == L"Rail row",
+              L"sidebar rail: a hovered folded section reports its name");
+        state.hoverRegion = 0;
+        state.hoverLabel.clear();
+
+        // Header icons: quick access and the drive list ("This PC") carry one.
+        const int access_index =
+            SidebarSectionIndex(vm, static_cast<int>(SidebarSectionId::QuickAccess));
+        const int drives_index =
+            SidebarSectionIndex(vm, static_cast<int>(SidebarSectionId::Drives));
+        Check(access_index >= 0 && drives_index >= 0 &&
+              !vm.sidebar[static_cast<size_t>(access_index)].icon_glyph.empty() &&
+              vm.sidebar[static_cast<size_t>(drives_index)].icon_glyph == L"\xE977",
+              L"sidebar sections: quick access and This PC carry header icons");
+        // The Desktop row and the This PC section must not share an icon.
+        const auto desktop_entry = std::find_if(sidebar.quick_access.begin(),
+            sidebar.quick_access.end(), [](const auto& entry) {
+                return entry.builtin == static_cast<int>(BuiltinQuickAccess::Desktop);
+            });
+        Check(desktop_entry != sidebar.quick_access.end() &&
+              desktop_entry->glyph != vm.sidebar[static_cast<size_t>(drives_index)].icon_glyph,
+              L"sidebar sections: This PC stays distinguishable from Desktop");
+        Check(vm.sidebar[static_cast<size_t>(drives_index)].header ==
+                  l10n::Get(l10n::StringId::SidebarDrives),
+              L"sidebar sections: the drive section is titled by the resource string");
+
+        // OneDrive rows stand on their own too (no header) when accounts exist.
+        if (!sidebar.cloud.empty()) {
+            const auto cloud_section = std::find_if(vm.sidebar.begin(), vm.sidebar.end(),
+                [](const auto& section) {
+                    return section.id == static_cast<int>(SidebarSectionId::Cloud);
+                });
+            Check(cloud_section != vm.sidebar.end() && cloud_section->header.empty() &&
+                  cloud_section->items.size() == sidebar.cloud.size(),
+                  L"sidebar sections: OneDrive rows stand on their own without a header");
+        }
+
+        // A reorder moves whole sections; masks keep following the section id.
+        const std::vector<int> reordered{
+            static_cast<int>(SidebarSectionId::Drives),
+            static_cast<int>(SidebarSectionId::Cloud),
+            static_cast<int>(SidebarSectionId::Workspaces),
+            static_cast<int>(SidebarSectionId::Starred),
+            static_cast<int>(SidebarSectionId::QuickAccess),
+            static_cast<int>(SidebarSectionId::SavedSearches),
+            static_cast<int>(SidebarSectionId::Tags),
+            static_cast<int>(SidebarSectionId::Networks) };
+        const auto reordered_vm = BuildWindowViewModel(pane, sidebar, true, false, false,
+            &state.places, 0, 1u << static_cast<int>(SidebarSectionId::Cloud), true, &reordered);
+        Check(reordered_vm.sidebar.size() == reordered.size() &&
+              reordered_vm.sidebar[0].id == static_cast<int>(SidebarSectionId::Drives) &&
+              reordered_vm.sidebar[1].id == static_cast<int>(SidebarSectionId::Cloud) &&
+              reordered_vm.sidebar[1].hidden && !reordered_vm.sidebar[0].hidden,
+              L"sidebar sections: a reorder moves sections and the mask follows the id");
+
+        // Built-in quick-access links can be switched off one by one.
+        const auto no_desktop = BuildWindowViewModel(pane, sidebar, true, false, false,
+            &state.places, 0, 0, true, nullptr,
+            1u << static_cast<int>(BuiltinQuickAccess::Desktop));
+        const std::wstring desktop_label = l10n::Get(l10n::StringId::Desktop);
+        bool desktop_present = false;
+        for (const auto& section : no_desktop.sidebar) {
+            for (const auto& item : section.items)
+                if (item.label == desktop_label) desktop_present = true;
+        }
+        Check(!desktop_present && !desktop_label.empty(),
+              L"sidebar sections: a switched-off built-in link leaves the sidebar");
+        const auto with_desktop = BuildWindowViewModel(pane, sidebar, true, false, false,
+            &state.places, 0);
+        bool desktop_default_present = false;
+        for (const auto& section : with_desktop.sidebar) {
+            for (const auto& item : section.items)
+                if (item.label == desktop_label) desktop_default_present = true;
+        }
+        Check(desktop_default_present,
+              L"sidebar sections: built-in links stay visible by default");
     }
 
     wchar_t previous[32768]{};
@@ -3651,8 +4062,12 @@ void TestRecycleAndBatchRename() {
     const auto recycle_vm = BuildWindowViewModel(
         recycle_home, qa_occ, true, false, false, nullptr, 0);
     bool recycle_in_access = false;
-    if (recycle_vm.sidebar.size() > 1) {
-        for (const auto& pin : recycle_vm.sidebar[1].items) {
+    const auto recycle_access = std::find_if(recycle_vm.sidebar.begin(), recycle_vm.sidebar.end(),
+        [](const auto& section) {
+            return section.id == static_cast<int>(SidebarSectionId::QuickAccess);
+        });
+    if (recycle_access != recycle_vm.sidebar.end()) {
+        for (const auto& pin : recycle_access->items) {
             if (pin.path == MakeRecyclePath()) {
                 recycle_in_access = !pin.detail.empty();
                 break;
@@ -4545,6 +4960,42 @@ void TestDetailsPreviewInteraction() {
                 L"panels: collapsed sidebar rail scales exactly once");
         }
     }
+
+    // The preview on/off chip lives on the name row (left of the star), so it is
+    // still reachable once the well collapses; switching it off must remove the
+    // well's hit area entirely.
+    {
+        ui::MainRenderer renderer;
+        renderer.SetScale(1.0f);
+        renderer.SetDetailsPanelVisible(true);
+        renderer.SetDetailsPanelWidth(360.0f);
+        const auto window = D2D1::RectF(0, 0, 1400.0f, 720.0f);
+        const auto panel = renderer.DetailsPanelRect(window.right, window.bottom);
+        const float panel_cx = (panel.left + panel.right) * 0.5f;
+        ui::WindowViewModel vm;
+        vm.details_visible = true;
+        vm.details.has_selection = true;
+        vm.details.multi_count = 1;
+        auto chip_reachable = [&] {
+            for (float yy = panel.top; yy < panel.bottom; yy += 2.0f) {
+                for (float xx = panel.right - 120.0f; xx < panel.right; xx += 2.0f) {
+                    if (renderer.HitTest(vm, window, xx, yy).region ==
+                        ui::HitTestResult::DetailsPreviewEnable) return true;
+                }
+            }
+            return false;
+        };
+        const bool well_open = renderer.HitTest(vm, window, panel_cx, panel.top + 20.0f).region ==
+            ui::HitTestResult::DetailsPreview;
+        const bool chip_on = chip_reachable();
+        vm.details.preview_enabled = false;
+        const bool well_gone = renderer.HitTest(vm, window, panel_cx, panel.top + 20.0f).region !=
+            ui::HitTestResult::DetailsPreview;
+        const bool chip_off_still_there = chip_reachable();
+        Check(well_open && chip_on && well_gone && chip_off_still_there,
+            L"preview layout: the preview switch collapses the well but stays clickable on the name row");
+    }
+
     wchar_t previous[32768]{};
     GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", previous, ARRAYSIZE(previous));
     const auto data_dir = std::wstring(kSandbox) + L"\\preview-session";
@@ -4553,9 +5004,20 @@ void TestDetailsPreviewInteraction() {
     SessionSnapshot saved, loaded;
     saved.details_panel = true;
     saved.details_preview_only = true;
+    saved.details_preview = false;
     saved.details_panel_width = 420;
+    saved.sidebar_collapsed = 0x2;
+    saved.sidebar_hidden = 0x4;
+    saved.sidebar_order = { 3, 6, 0, 7, 1, 2, 4, 5 };
+    saved.quick_access_hidden = (1 << 1) | (1 << 4);
     Check(SaveSession(saved) && LoadSession(loaded) && loaded.details_preview_only &&
-        loaded.details_panel_width == 420, L"preview: folded mode and panel width survive session reload");
+        !loaded.details_preview && loaded.details_panel_width == 420,
+        L"preview: folded mode, preview switch and panel width survive session reload");
+    Check(loaded.sidebar_collapsed == 0x2 && loaded.sidebar_hidden == 0x4,
+        L"session: sidebar collapse and hide masks survive reload");
+    Check(loaded.sidebar_order == saved.sidebar_order &&
+        loaded.quick_access_hidden == saved.quick_access_hidden,
+        L"session: section order and hidden quick-access links survive reload");
     WriteUtf8FileAtomic(data_dir + L"\\session.json", L"{\"detailsPanel\":1,\"version\":4}");
     SessionSnapshot legacy;
     LoadSession(legacy);
@@ -4580,6 +5042,12 @@ int RunSelfTest1B2() {
     g_skip_visual = GetEnvironmentVariableW(L"PULSE_SELFTEST_NO_SCREENSHOTS", skip_visual, ARRAYSIZE(skip_visual)) > 0;
     if (g_skip_visual) LogLine(L"[SKIP] Screenshot capture disabled\n");
     wchar_t test_case[64]{};
+    if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
+        wcscmp(test_case, L"context-verbs") == 0) {
+        DumpContextVerbs();
+        if (g_log) { fclose(g_log); g_log = nullptr; }
+        return g_fail ? 1 : 0;
+    }
     if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
         wcscmp(test_case, L"release-panels-hidden") == 0) {
         TestDetailsPreviewInteraction();

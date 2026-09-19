@@ -272,23 +272,27 @@ bool DrawCompositeGallery(Compositor& compositor, bool dark, bool high_contrast,
 
     painter.FillRoundedRect(Rect(0, 88, 236, 558), 0, sidebar_fill);
     painter.FillRoundedRect(Rect(235, 88, 1, 558), 0, theme.stroke_divider);
-    painter.DrawSidebarSectionHeader({Rect(10, 96, 216, 26), L"WORKSPACES", State(), true});
+    painter.DrawSidebarSectionHeader({.bounds = Rect(10, 96, 216, 26), .text = L"WORKSPACES",
+                                      .state = State(), .expanded = true});
     painter.DrawSidebarItem({.bounds = Rect(10, 124, 216, 38), .text = L"Project Alpha",
                              .glyph = L"\xE8B7", .badge_text = L"Git", .state = selected,
                              .icon_color = HexColor(0x34D399)});
-    painter.DrawSidebarSectionHeader({Rect(10, 170, 216, 26), L"QUICK ACCESS", State(), true});
+    painter.DrawSidebarSectionHeader({.bounds = Rect(10, 170, 216, 26), .text = L"QUICK ACCESS",
+                                      .state = State(), .expanded = true});
     painter.DrawSidebarItem({.bounds = Rect(10, 198, 216, 34), .text = L"Starred",
                              .glyph = L"\xE735", .icon_color = HexColor(0xFBBF24)});
     painter.DrawSidebarItem({.bounds = Rect(10, 234, 216, 34), .text = L"Recent",
                              .glyph = L"\xE823", .icon_color = HexColor(0x60A5FA)});
-    painter.DrawSidebarSectionHeader({Rect(10, 274, 216, 26), L"DRIVES", State(), true});
+    painter.DrawSidebarSectionHeader({.bounds = Rect(10, 274, 216, 26), .text = L"DRIVES",
+                                      .state = State(), .expanded = true});
     painter.DrawDriveSidebarItem({.bounds = Rect(10, 302, 216, 54), .name = L"System (C:)",
                                   .detail = L"120G / 512G", .glyph = L"\xE7F8", .capacity = 0.24f,
                                   .icon_color = HexColor(0x60A5FA)});
     painter.DrawDriveSidebarItem({.bounds = Rect(10, 360, 216, 54), .name = L"Data (D:)",
                                   .detail = L"640G / 1TB", .glyph = L"\xE7F8", .capacity = 0.64f,
                                   .state = State(true), .icon_color = HexColor(0x34D399)});
-    painter.DrawSidebarSectionHeader({Rect(10, 422, 216, 26), L"TAGS", State(), true});
+    painter.DrawSidebarSectionHeader({.bounds = Rect(10, 422, 216, 26), .text = L"TAGS",
+                                      .state = State(), .expanded = true});
     painter.DrawBadge({Rect(18, 454, 8, 8), {}, BadgeKind::Danger,
                        HexColor(0xE74856), HexColor(0xFFFFFF), true, true});
     painter.DrawText(L"Urgent fix", Rect(38, 444, 130, 28), compositor.TextFormat(), theme.text);

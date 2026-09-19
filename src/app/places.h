@@ -135,6 +135,8 @@ public:
 
     bool IsQuickAccessPinned(const std::wstring& path) const;
     bool SetQuickAccessPinned(const std::vector<std::wstring>& paths, bool pinned);
+    // Moves a pinned folder to `position` in the pin list (clamped).
+    bool ReorderQuickAccessPinned(const std::wstring& path, size_t position);
 
     bool IsStarred(const std::wstring& path) const;
     const StarredItem* FindStarred(const std::wstring& path) const;

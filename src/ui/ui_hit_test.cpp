@@ -64,6 +64,22 @@ bool MainRenderer::TagItemRect(const WindowViewModel& vm, float w, float h, int 
     return false;
 }
 
+bool MainRenderer::SidebarRowRect(const WindowViewModel& vm, float w, float h, int section_id,
+                                  int item, D2D1_RECT_F* out) const {
+    if (!out || section_id < 0 || item < 0) return false;
+    std::vector<SidebarSlot> slots;
+    LayoutSidebar(vm, SidebarRect(w, h), scale_, slots);
+    for (const auto& slot : slots) {
+        if (slot.kind != SidebarSlot::Item && slot.kind != SidebarSlot::Drive &&
+            slot.kind != SidebarSlot::Tag) continue;
+        if (slot.group < 0 || slot.group >= static_cast<int>(vm.sidebar.size())) continue;
+        if (vm.sidebar[slot.group].id != section_id || slot.item != item) continue;
+        *out = slot.rc;
+        return true;
+    }
+    return false;
+}
+
 HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F& rect, float x, float y) const {
     HitTestResult r;
     if (x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom) return r;
@@ -505,8 +521,9 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             return r;
         }
         std::vector<SidebarSlot> slots;
-        LayoutSidebar(vm, sb, scale_, slots);
-        const bool compact = (sb.right - sb.left) <= 60.0f * scale_;
+        std::vector<SidebarGroupBand> bands;
+        LayoutSidebar(vm, sb, scale_, slots, &bands);
+        const bool compact = SidebarRailLayout(sb.right - sb.left, scale_);
         for (int i = static_cast<int>(slots.size()) - 1; i >= 0; --i) {
             const auto& slot = slots[i];
             if (!RectContains(slot.rc, x, y)) continue;
@@ -519,6 +536,17 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 r.region = HitTestResult::TrayClear;
                 return r;
             }
+            if (slot.kind == SidebarSlot::Rail) {
+                // Narrow rail: a folded section is one icon row; clicking it
+                // reopens the section.
+                r.region = HitTestResult::SidebarHeader;
+                r.index = slot.group;
+                if (slot.group >= 0 && slot.group < static_cast<int>(vm.sidebar.size())) {
+                    r.sidebar_section = vm.sidebar[slot.group].id;
+                    r.label = vm.sidebar[slot.group].header;
+                }
+                return r;
+            }
             if (slot.kind == SidebarSlot::Header) {
                 const float action_left = slot.rc.right - 56.0f * scale_;
                 const float action_right = slot.rc.right - 28.0f * scale_;
@@ -527,6 +555,8 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                            x >= action_left && x < action_right
                     ? HitTestResult::SidebarHeaderAction : HitTestResult::SidebarHeader;
                 r.index = slot.group;
+                r.sidebar_section = vm.sidebar[slot.group].id;
+                r.label = vm.sidebar[slot.group].header;
                 return r;
             }
             if (slot.kind == SidebarSlot::TrayPanel) {
@@ -579,9 +609,26 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 }
                 r.region = HitTestResult::SidebarItem;
                 r.index = slot.run;
+                if (slot.group >= 0 && slot.group < static_cast<int>(vm.sidebar.size())) {
+                    r.sidebar_section = vm.sidebar[slot.group].id;
+                    r.sidebar_item = slot.item;
+                    if (slot.item >= 0 &&
+                        slot.item < static_cast<int>(vm.sidebar[slot.group].items.size()))
+                        r.label = vm.sidebar[slot.group].items[slot.item].label;
+                }
                 return r;
             }
         }
+        // Empty space that sits inside a section reports that section: the
+        // right-click menu must match what the cursor is over. Space below every
+        // section keeps index -1 and falls back to the pane-wide menu.
+        r.region = HitTestResult::SidebarBlank;
+        for (const auto& band : bands) {
+            if (y >= band.top && y < band.bottom) { r.index = band.group; break; }
+        }
+        // Report the section too, so callers can key off ids everywhere.
+        if (r.index >= 0 && r.index < static_cast<int>(vm.sidebar.size()))
+            r.sidebar_section = vm.sidebar[static_cast<size_t>(r.index)].id;
         return r;
     }
 
@@ -597,14 +644,16 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
         if (panel.right > panel.left && x >= panel.left && x < panel.right &&
             y >= panel.top && y < panel.bottom) {
             DetailsHitRects hitRects;
-            const float previewH = DetailsPreviewHeight(panel, scale_, vm.details.preview_expansion);
+            const float previewH = vm.details.preview_enabled
+                ? DetailsPreviewHeight(panel, scale_, vm.details.preview_expansion) : 0.0f;
             LayoutDetailsPanel(panel, scale_, vm.details,
                                compositor_ ? compositor_->DwriteFactory() : nullptr,
                                compositor_ ? compositor_->SmallFormat() : nullptr,
                                compositor_, previewH, hitRects);
+            if (RectContains(hitRects.preview_enable, x, y)) { r.region = HitTestResult::DetailsPreviewEnable; return r; }
             if (RectContains(hitRects.preview, x, y)) { r.region = HitTestResult::DetailsPreview; return r; }
             if (RectContains(hitRects.preview_toggle, x, y)) { r.region = HitTestResult::DetailsPreviewToggle; return r; }
-            if (vm.details.preview_only) return r;
+            if (vm.details.preview_only && vm.details.preview_enabled) return r;
             if (RectContains(hitRects.rename, x, y)) { r.region = HitTestResult::DetailsRename; return r; }
             if (RectContains(hitRects.open, x, y)) { r.region = HitTestResult::DetailsOpen; return r; }
             if (RectContains(hitRects.star, x, y)) { r.region = HitTestResult::DetailsStar; return r; }

@@ -15,6 +15,12 @@ namespace pulse::app {
 
 namespace {
 
+// Session file version. Bump when a stored field changes meaning: the loader
+// migrates (or discards) values written by older versions.
+//   6 -> 7: BuiltinQuickAccess lost its reserved "starred" bit, so the stored
+//           quick-access mask is dropped for files written before 7.
+constexpr int kSessionVersion = 7;
+
 std::wstring FormatScaled3(const std::array<float, 3>& edges) {
     return std::to_wstring(static_cast<int>(std::lround(edges[0] * 10000.0f))) + L","
          + std::to_wstring(static_cast<int>(std::lround(edges[1] * 10000.0f))) + L","
@@ -290,7 +296,7 @@ bool SaveSession(const SessionSnapshot& snap) {
 
     std::wostringstream f;
     f << L"{\n";
-    f << L"  \"version\":6,\n";
+    f << L"  \"version\":" << kSessionVersion << L",\n";
     f << L"  \"left\":" << snap.window_rect.left << L",\n";
     f << L"  \"top\":" << snap.window_rect.top << L",\n";
     f << L"  \"right\":" << snap.window_rect.right << L",\n";
@@ -302,6 +308,14 @@ bool SaveSession(const SessionSnapshot& snap) {
     pulse::json::Escape(snap.active_path, escaped);
     f << escaped << L"\",\n";
     f << L"  \"sidebarCollapsed\":" << snap.sidebar_collapsed << L",\n";
+    f << L"  \"sidebarHidden\":" << snap.sidebar_hidden << L",\n";
+    f << L"  \"sidebarOrder\":\"";
+    for (size_t i = 0; i < snap.sidebar_order.size(); ++i) {
+        if (i != 0) f << L",";
+        f << snap.sidebar_order[i];
+    }
+    f << L"\",\n";
+    f << L"  \"quickAccessHidden\":" << snap.quick_access_hidden << L",\n";
     f << L"  \"starredExpanded\":" << (snap.starred_expanded ? L"true" : L"false") << L",\n";
     f << L"  \"detailsPanel\":" << (snap.details_panel ? 1 : 0) << L",\n";
     f << L"  \"detailsPanelWidth\":" << std::clamp(snap.details_panel_width,
@@ -309,6 +323,7 @@ bool SaveSession(const SessionSnapshot& snap) {
         static_cast<int>(ui::kPanelWidthMaxDip))
       << L",\n";
     f << L"  \"detailsPreviewOnly\":" << (snap.details_preview_only ? L"true" : L"false") << L",\n";
+    f << L"  \"detailsPreview\":" << (snap.details_preview ? L"true" : L"false") << L",\n";
     f << L"  \"tray\":" << trayJson << L",\n";
     f << L"  \"undo\":" << (snap.undo_json.empty() ? L"[]" : snap.undo_json) << L",\n";
     f << L"  \"activeTab\":" << snap.active_layout_tab << L",\n";
@@ -332,10 +347,52 @@ bool LoadSession(SessionSnapshot& snap) {
     snap.dark = pulse::json::ExtractBool(json, L"dark");
     snap.active_path = pulse::json::ExtractString(json, L"path");
     snap.sidebar_collapsed = pulse::json::ExtractInt(json, L"sidebarCollapsed");
+    snap.sidebar_hidden = pulse::json::ExtractInt(json, L"sidebarHidden");
+    // Section order travels as "0,1,2,6,3,4,5"; anything malformed falls back to
+    // the default order (NormalizeSidebarOrder rebuilds a full permutation).
+    snap.sidebar_order.clear();
+    {
+        const std::wstring order_text = pulse::json::ExtractString(json, L"sidebarOrder");
+        size_t start = 0;
+        while (start < order_text.size()) {
+            size_t end = order_text.find(L',', start);
+            if (end == std::wstring::npos) end = order_text.size();
+            int value = 0;
+            bool digits = end > start;
+            for (size_t i = start; i < end && digits; ++i) {
+                const wchar_t c = order_text[i];
+                if (c < L'0' || c > L'9') { digits = false; break; }
+                value = value * 10 + static_cast<int>(c - L'0');
+            }
+            if (digits && value < kSidebarSectionCount) snap.sidebar_order.push_back(value);
+            start = end + 1;
+        }
+        // Sessions written before the starred section existed lack its id; put it
+        // where the default order has it instead of appending it at the very end.
+        const int starred_id = static_cast<int>(SidebarSectionId::Starred);
+        if (!snap.sidebar_order.empty() &&
+            std::find(snap.sidebar_order.begin(), snap.sidebar_order.end(), starred_id) ==
+                snap.sidebar_order.end()) {
+            const auto cloud = std::find(snap.sidebar_order.begin(), snap.sidebar_order.end(),
+                                         static_cast<int>(SidebarSectionId::Cloud));
+            snap.sidebar_order.insert(
+                cloud == snap.sidebar_order.end() ? snap.sidebar_order.begin() : cloud + 1,
+                starred_id);
+        }
+        snap.sidebar_order = NormalizeSidebarOrder(snap.sidebar_order);
+    }
+    // Bit positions changed in version 7 (the reserved starred bit is gone), so
+    // anything older restarts with every built-in link visible.
+    snap.quick_access_hidden = pulse::json::ExtractInt(json, L"version") >= kSessionVersion
+        ? pulse::json::ExtractInt(json, L"quickAccessHidden") : 0;
     snap.starred_expanded = json.find(L"\"starredExpanded\"") == std::wstring::npos
         ? true : pulse::json::ExtractBool(json, L"starredExpanded");
     snap.details_panel = pulse::json::ExtractInt(json, L"detailsPanel") != 0;
     snap.details_preview_only = pulse::json::ExtractBool(json, L"detailsPreviewOnly", false);
+    // Missing in sessions written before the switch existed: keep the old
+    // always-on behaviour.
+    snap.details_preview = json.find(L"\"detailsPreview\"") == std::wstring::npos
+        ? true : pulse::json::ExtractBool(json, L"detailsPreview", true);
     snap.details_panel_width = pulse::json::ExtractInt(json, L"detailsPanelWidth");
     // The stored value is the user's intent; the window caps it while drawing.
     if (snap.details_panel_width < static_cast<int>(ui::kDetailsMinWidthDip) ||

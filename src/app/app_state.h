@@ -163,6 +163,12 @@ struct AppState {
     uint64_t recycle_ignore_items = 0;
     bool recycle_info_guard = false;
     uint32_t sidebarCollapsedMask = 0;
+    uint32_t sidebarHiddenMask = 0;  // Section menu: hidden groups are not drawn.
+    // Section display order (logical SidebarSectionId values). Header drags
+    // rewrite it; the masks above are indexed by id, so they survive a reorder.
+    std::vector<int> sidebarOrder = app::DefaultSidebarOrder();
+    // Built-in quick-access links switched off in the section menu.
+    uint32_t sidebarQuickAccessHiddenMask = 0;
     bool starredExpanded = true;
     float sidebarScroll = 0.0f;
     app::StagingTray tray;
@@ -342,6 +348,8 @@ struct AppState {
     bool shot_tag_rename = false;
     // GUI verification for the tag drag-reorder: stage a mid-drag frame.
     bool shot_tag_drag = false;
+    // GUI verification for a rail hover hint (staged after the message pump).
+    bool shot_tooltip = false;
     // GUI verification for the details panel: open it with a pre-selection.
     bool shot_details = false;
     bool shot_details_multi = false;
@@ -420,6 +428,9 @@ struct AppState {
     POINT hoverPoint{};
     std::wstring tooltipText;
     std::wstring hoverPath;
+    // Name of the hovered sidebar row or section: the collapsed rail shows icons
+    // only, so its tooltips read this.
+    std::wstring hoverLabel;
 
     // Drag-over feedback state (rendered via WindowViewModel).
     int dropRow = -1;
@@ -477,6 +488,29 @@ struct AppState {
     std::wstring starDragPath;
     size_t starDragTarget = 0;
 
+    // Sidebar section header drag: reorders the sections. The dragged section
+    // stays in place (drawn raised) while an insertion line shows the new slot.
+    bool groupDragPending = false;
+    bool groupDragActive = false;
+    POINT groupDragStartPt{};
+    int groupDragId = -1;                // SidebarSectionId being dragged
+    int groupDragToIndex = -1;           // target slot in sidebarOrder
+    float groupGapLineY = 0.0f;          // insertion indicator (px, 0 = hidden)
+    bool groupGapVisible = false;
+    // Set when the press came from a header-less section's own row (starred root,
+    // OneDrive account): a plain click navigates there instead of folding.
+    std::wstring groupDragPath;
+
+    // Quick-access pin drag: pinned folders reorder inside the section.
+    bool pinDragPending = false;
+    bool pinDragActive = false;
+    POINT pinDragStartPt{};
+    std::wstring pinDragPath;
+    int pinDragRun = -1;                 // slot.run of the dragged row (highlight)
+    int pinDragToIndex = -1;             // target position among the pins
+    float pinGapLineY = 0.0f;
+    bool pinGapVisible = false;
+
     // Staging tray card deck: eased per-card poses keyed by item path. The
     // tick below smooths them toward layout targets; the renderer receives
     // the current values through WindowViewModel::tray_deck and adds the
@@ -508,6 +542,9 @@ struct AppState {
     bool detailsPanelResizing = false;
     float detailsScroll = 0.0f;
     bool detailsPreviewOnly = false;
+    // Preview generation on/off: off skips the preview child process entirely,
+    // so no decode work happens for the selection at all.
+    bool detailsPreviewEnabled = true;
     bool detailsPreviewPanning = false;
     float detailsPreviewExpansion = 0.0f;
     float detailsPreviewExpansionFrom = 0.0f;

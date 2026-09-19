@@ -239,6 +239,11 @@ struct TagSpec {
 struct SidebarSectionHeaderSpec {
     D2D1_RECT_F bounds{};
     std::wstring_view text;
+    // Optional leading icon (Segoe Fluent Icons codepoint). Empty = text only.
+    std::wstring_view glyph;
+    // The caller already painted the embedded vector icon for `glyph`; the text
+    // still leaves room for it.
+    bool skip_glyph = false;
     ControlState state{};
     bool expanded = true;
 };
@@ -408,6 +413,8 @@ public:
     D2D1_RECT_F DrawOmnibarHints(const D2D1_RECT_F& field, bool skip_search_glyph = false);
     D2D1_RECT_F ButtonGlyphRect(const D2D1_RECT_F& bounds, bool icon_only) const;
     void DrawSidebarSectionHeader(const SidebarSectionHeaderSpec& spec);
+    // Leading-icon slot of a section header (valid when its glyph is set).
+    D2D1_RECT_F SidebarSectionHeaderIconRect(const D2D1_RECT_F& bounds) const;
     D2D1_RECT_F SidebarItemIconRect(const D2D1_RECT_F& bounds, bool status_dot) const;
     D2D1_RECT_F DriveSidebarItemIconRect(const D2D1_RECT_F& bounds) const;
     void DrawDriveSidebarItem(const DriveSidebarItemSpec& spec);

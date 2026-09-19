@@ -8,6 +8,9 @@
 #include <commctrl.h>
 #include <prsht.h>
 #include <shlobj.h>
+// GetUserNameExW (account display name for the OneDrive rows) lives in secur32.
+#define SECURITY_WIN32 1
+#include <security.h>
 #include <algorithm>
 #include <cstdio>
 #include <cwctype>
@@ -946,8 +949,117 @@ static SidebarEntry MakeKnownEntry(REFKNOWNFOLDERID fid, const wchar_t* glyph, c
     return e;
 }
 
+// ---------------------------------------------------------------------------
+// OneDrive accounts
+// ---------------------------------------------------------------------------
+// Explorer lists one row per signed-in account. The client records them under
+// HKCU\Software\Microsoft\OneDrive\Accounts ("Personal", "Business1", …) with
+// the synced root in "UserFolder"; the shell namespace would be the other
+// source, but it is not worth a COM round-trip for a folder path.
+constexpr const wchar_t* kOneDriveAccountsKey = L"Software\\Microsoft\\OneDrive\\Accounts";
+
+std::wstring RegStringValue(HKEY root, const std::wstring& subkey, const wchar_t* value) {
+    // One buffer big enough for a path: asking RegGetValue for the size first
+    // (pvData = nullptr) proved unreliable here.
+    std::wstring out(1024, L'\0');
+    DWORD bytes = static_cast<DWORD>(out.size() * sizeof(wchar_t));
+    if (RegGetValueW(root, subkey.c_str(), value, RRF_RT_REG_SZ, nullptr, out.data(), &bytes)
+            != ERROR_SUCCESS || bytes < sizeof(wchar_t))
+        return {};
+    out.resize(bytes / sizeof(wchar_t));
+    while (!out.empty() && out.back() == L'\0') out.pop_back();
+    return out;
+}
+
+// Explorer names the rows "<account name> - <Personal|tenant>"; the prefix is
+// the Windows account's display name.
+std::wstring WindowsAccountDisplayName() {
+    wchar_t name[256]{};
+    ULONG length = ARRAYSIZE(name);
+    if (GetUserNameExW(NameDisplay, name, &length) && name[0]) return name;
+    length = ARRAYSIZE(name);
+    if (GetUserNameW(name, &length) && name[0]) return name;
+    return {};
+}
+
+std::vector<SidebarEntry> BuildOneDriveEntries() {
+    std::vector<SidebarEntry> out;
+    HKEY root = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kOneDriveAccountsKey, 0, KEY_READ, &root)
+            != ERROR_SUCCESS)
+        return out;
+    const std::wstring prefix = WindowsAccountDisplayName();
+    std::vector<std::wstring> keys{ L"Personal" };
+    for (int i = 1; i <= 16; ++i) keys.push_back(L"Business" + std::to_wstring(i));
+    for (const auto& key : keys) {
+        // Relative to the already-opened Accounts key.
+        const std::wstring folder = RegStringValue(root, key, L"UserFolder");
+        if (folder.empty()) continue;
+        const std::wstring path = fs::NormalizePath(folder);
+        if (path.empty()) continue;
+        const bool duplicate = std::any_of(out.begin(), out.end(),
+            [&](const SidebarEntry& entry) {
+                return _wcsicmp(entry.path.c_str(), path.c_str()) == 0;
+            });
+        if (duplicate) continue;
+        std::wstring suffix = key == L"Personal"
+            ? l10n::Get(l10n::StringId::OneDrivePersonal)
+            : RegStringValue(root, key, L"DisplayName");
+        if (suffix.empty()) suffix = RegStringValue(root, key, L"UserName");
+        SidebarEntry entry;
+        entry.glyph = L"\xE753";
+        entry.fallback = L"1D";
+        entry.color = ui::HexColor(0x2B88D8);
+        entry.path = path;
+        entry.label = prefix.empty() ? TabTitle(path)
+            : (suffix.empty() ? prefix : prefix + L" - " + suffix);
+        out.push_back(std::move(entry));
+    }
+    RegCloseKey(root);
+    return out;
+}
+
+std::vector<int> DefaultSidebarOrder() {
+    // Mirrors Explorer's navigation pane: the OneDrive accounts lead, the starred
+    // root follows next to quick access, and the drive list sits near the bottom
+    // ("This PC") with network locations below it. Ids, not positions: the masks
+    // and menus key off them.
+    return { static_cast<int>(SidebarSectionId::Cloud),
+             static_cast<int>(SidebarSectionId::Starred),
+             static_cast<int>(SidebarSectionId::QuickAccess),
+             static_cast<int>(SidebarSectionId::Workspaces),
+             static_cast<int>(SidebarSectionId::SavedSearches),
+             static_cast<int>(SidebarSectionId::Tags),
+             static_cast<int>(SidebarSectionId::Drives),
+             static_cast<int>(SidebarSectionId::Networks) };
+}
+
+int SidebarSectionIndex(const ui::WindowViewModel& vm, int section_id) {
+    for (int i = 0; i < static_cast<int>(vm.sidebar.size()); ++i)
+        if (vm.sidebar[static_cast<size_t>(i)].id == section_id) return i;
+    return -1;
+}
+
+std::vector<int> NormalizeSidebarOrder(const std::vector<int>& order) {
+    std::vector<int> out;
+    out.reserve(static_cast<size_t>(kSidebarSectionCount));
+    std::array<bool, static_cast<size_t>(kSidebarSectionCount)> seen{};
+    for (int id : order) {
+        if (id < 0 || id >= kSidebarSectionCount) continue;
+        if (seen[static_cast<size_t>(id)]) continue;
+        seen[static_cast<size_t>(id)] = true;
+        out.push_back(id);
+    }
+    if (out.empty()) return DefaultSidebarOrder();
+    for (int id = 0; id < kSidebarSectionCount; ++id) {
+        if (!seen[static_cast<size_t>(id)]) out.push_back(id);
+    }
+    return out;
+}
+
 SidebarModel BuildSidebarModel(const fs::RecycleBinInfo* recycle) {
     SidebarModel m;
+    // Starred items lead their own section, next to (not inside) quick access.
     SidebarEntry starred;
     starred.glyph = L"\xE735";
     starred.fallback = L"Starred";
@@ -955,27 +1067,41 @@ SidebarModel BuildSidebarModel(const fs::RecycleBinInfo* recycle) {
     starred.label = l10n::Get(l10n::StringId::StarredItems);
     starred.path = MakeStarredPath();
     starred.expandable = true;
-    m.quick_access.push_back(std::move(starred));
+    m.starred.push_back(std::move(starred));
     SidebarEntry recent;
     recent.glyph = L"\xE823";
     recent.fallback = L"Recent";
     recent.color = ui::HexColor(0x60A5FA);
     recent.label = l10n::Get(l10n::StringId::Recent);
     recent.path = MakeRecentPath();
+    recent.builtin = static_cast<int>(BuiltinQuickAccess::Recent);
     m.quick_access.push_back(std::move(recent));
     SidebarEntry desktop = MakeKnownEntry(FOLDERID_Desktop, L"\xE7F4", L"Desktop",
         ui::HexColor(0x38BDF8), l10n::Get(l10n::StringId::Desktop).c_str());
     desktop.badge = l10n::Get(l10n::StringId::Desktop);
     desktop.badge_rgb = 0x0078D4;
+    desktop.builtin = static_cast<int>(BuiltinQuickAccess::Desktop);
     m.quick_access.push_back(std::move(desktop));
-    m.quick_access.push_back(MakeKnownEntry(FOLDERID_Downloads, L"\xE896", L"Downloads",
-        ui::HexColor(0xC084FC), L"Downloads"));
+    SidebarEntry downloads = MakeKnownEntry(FOLDERID_Downloads, L"\xE896", L"Downloads",
+        ui::HexColor(0xC084FC), L"Downloads");
+    downloads.builtin = static_cast<int>(BuiltinQuickAccess::Downloads);
+    m.quick_access.push_back(std::move(downloads));
+    // OneDrive leads its own section: one row per signed-in account, the way
+    // Explorer lists them. The known folder only resolves for the primary
+    // account, so it stays as the fallback when the registry has nothing.
+    m.cloud = BuildOneDriveEntries();
+    if (m.cloud.empty()) {
+        SidebarEntry onedrive = MakeKnownEntry(FOLDERID_OneDrive, L"\xE753", L"OneDrive",
+            ui::HexColor(0x2B88D8), L"OneDrive");
+        if (!onedrive.path.empty()) m.cloud.push_back(std::move(onedrive));
+    }
     SidebarEntry recycle_bin;
     recycle_bin.glyph = L"\xE75C";
     recycle_bin.fallback = L"Bin";
     recycle_bin.color = ui::HexColor(0x94A3B8);
     recycle_bin.label = l10n::Get(l10n::StringId::RecycleBin);
     recycle_bin.path = MakeRecyclePath();
+    recycle_bin.builtin = static_cast<int>(BuiltinQuickAccess::RecycleBin);
     if (recycle && recycle->valid) {
         wchar_t occupancy[96]{};
         swprintf_s(occupancy, l10n::Get(l10n::StringId::RecycleOccupancyFormat).c_str(),
@@ -1361,10 +1487,31 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
                                          const SidebarModel& sidebar, bool focused,
                                          bool maximized, bool dark, const PlacesCatalog* places,
                                          uint32_t sidebar_collapsed_mask,
-                                         bool starred_expanded) {
+                                         uint32_t sidebar_hidden_mask,
+                                         bool starred_expanded,
+                                         const std::vector<int>* sidebar_order,
+                                         uint32_t quick_access_hidden_mask) {
     ui::WindowViewModel vm;
     const Tab* tab = pane.ActiveTab();
     if (!tab) return vm;
+    // Sections are keyed by logical id and emitted in the user's order, so the
+    // masks stay valid after a header drag reorders them.
+    const std::vector<int> order =
+        NormalizeSidebarOrder(sidebar_order ? *sidebar_order : std::vector<int>());
+    std::array<ui::SidebarGroup, static_cast<size_t>(kSidebarSectionCount)> sections;
+    for (int id = 0; id < kSidebarSectionCount; ++id) {
+        sections[static_cast<size_t>(id)].id = id;
+        sections[static_cast<size_t>(id)].collapsed = ((sidebar_collapsed_mask >> id) & 1u) != 0;
+        sections[static_cast<size_t>(id)].hidden = ((sidebar_hidden_mask >> id) & 1u) != 0;
+    }
+    auto& workspaces = sections[static_cast<size_t>(SidebarSectionId::Workspaces)];
+    auto& access = sections[static_cast<size_t>(SidebarSectionId::QuickAccess)];
+    auto& savedSearches = sections[static_cast<size_t>(SidebarSectionId::SavedSearches)];
+    auto& cloud = sections[static_cast<size_t>(SidebarSectionId::Cloud)];
+    auto& drives = sections[static_cast<size_t>(SidebarSectionId::Drives)];
+    auto& tags = sections[static_cast<size_t>(SidebarSectionId::Tags)];
+    auto& nets = sections[static_cast<size_t>(SidebarSectionId::Networks)];
+    auto& starred_section = sections[static_cast<size_t>(SidebarSectionId::Starred)];
 
     vm.focused = focused;
     vm.maximized = maximized;
@@ -1396,7 +1543,6 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
         }
     }
 
-    ui::SidebarGroup workspaces;
     workspaces.header = l10n::Get(l10n::StringId::SidebarWorkspaces);
     if (places) {
         for (int i = 0; i < static_cast<int>(places->workspaces.size()); ++i) {
@@ -1426,31 +1572,41 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
             }
         }
     }
-    vm.sidebar.push_back(std::move(workspaces));
 
-    ui::SidebarGroup access = ConvertGroup(
-        l10n::Get(l10n::StringId::SidebarQuickAccess), sidebar.quick_access, false);
-    if (!access.items.empty()) {
-        access.items[0].expandable = true;
-        access.items[0].expanded = starred_expanded;
+    // Built-in quick-access links the user switched off in the section menu.
+    std::vector<SidebarEntry> quick_access_visible;
+    quick_access_visible.reserve(sidebar.quick_access.size());
+    for (const auto& entry : sidebar.quick_access) {
+        if (entry.builtin >= 0 &&
+            ((quick_access_hidden_mask >> entry.builtin) & 1u) != 0) continue;
+        quick_access_visible.push_back(entry);
     }
-    size_t access_insert = 1;
+    access = ConvertGroup(
+        l10n::Get(l10n::StringId::SidebarQuickAccess), quick_access_visible, false);
+    starred_section = ConvertGroup(l10n::Get(l10n::StringId::StarredItems),
+                                   sidebar.starred, false);
+    if (!starred_section.items.empty()) {
+        starred_section.items[0].expandable = true;
+        starred_section.items[0].expanded = starred_expanded;
+    }
     if (places && starred_expanded) {
-        for (const auto& starred : places->starred_items) {
-            if (starred.kind != PlaceItemKind::Folder) continue;
+        size_t starred_insert = starred_section.items.size();
+        for (const auto& entry : places->starred_items) {
+            if (entry.kind != PlaceItemKind::Folder) continue;
             ui::SidebarItem child;
-            child.label = TabTitle(starred.path);
-            child.path = starred.path;
+            child.label = TabTitle(entry.path);
+            child.path = entry.path;
             child.indent = 1;
             child.starred_child = true;
             child.icon_glyph = L"\xE8B7";
             child.fallback_text = L"Dir";
             child.icon_color = ui::HexColor(0xFBBF24);
-            child.badge = starred.badge;
-            child.badge_color = ui::HexColor(starred.badge_rgb);
-            access.items.insert(access.items.begin() + static_cast<std::ptrdiff_t>(access_insert),
-                                std::move(child));
-            ++access_insert;
+            child.badge = entry.badge;
+            child.badge_color = ui::HexColor(entry.badge_rgb);
+            starred_section.items.insert(
+                starred_section.items.begin() + static_cast<std::ptrdiff_t>(starred_insert),
+                std::move(child));
+            ++starred_insert;
         }
     }
     const std::wstring& gitRoot = tab->git_root;
@@ -1465,8 +1621,7 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
         project.fallback_text = L"Repo";
         project.icon_color = ui::HexColor(0x34D399);
         project.badge = L"Git";
-        access.items.insert(access.items.begin() + static_cast<std::ptrdiff_t>(access_insert),
-                            std::move(project));
+        access.items.push_back(std::move(project));
     }
     if (places) {
         for (const auto& path : places->quick_access_paths) {
@@ -1479,13 +1634,23 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
             access.items.push_back(std::move(item));
         }
     }
-    vm.sidebar.push_back(std::move(access));
-    vm.sidebar.push_back(ConvertGroup(l10n::Get(l10n::StringId::SidebarSavedSearches),
-                                      sidebar.saved_searches, false));
-    vm.sidebar.push_back(ConvertGroup(l10n::Get(l10n::StringId::SidebarDrives),
-                                      sidebar.drives, false));
+    savedSearches = ConvertGroup(l10n::Get(l10n::StringId::SidebarSavedSearches),
+                                 sidebar.saved_searches, false);
+    // The title is only used by the section menus: the pane itself shows the
+    // account rows without a header (see IsHeaderlessSection).
+    cloud = ConvertGroup(L"OneDrive", sidebar.cloud, false);
+    drives = ConvertGroup(l10n::Get(l10n::StringId::SidebarDrives),
+                          sidebar.drives, false);
+    // Section icons: every header section names itself with a glyph, so the wide
+    // header and the narrow rail read the same. The PC glyph (monitor on a
+    // stand) keeps "This PC" apart from the monitor-only Desktop row.
+    workspaces.icon_glyph = L"\xE8B7";    // folder
+    access.icon_glyph = L"\xE8A9";        // app grid
+    savedSearches.icon_glyph = L"\xE721"; // search
+    tags.icon_glyph = L"\xE8EC";          // tag
+    drives.icon_glyph = L"\xE977";        // this PC
+    nets.icon_glyph = L"\xE968";          // network
 
-    ui::SidebarGroup tags;
     tags.header = l10n::Get(l10n::StringId::SidebarTags);
     tags.add_action = ui::SidebarAddAction::CreateTag;
     if (places) {
@@ -1501,9 +1666,6 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
             tags.items.push_back(std::move(tag));
         }
     }
-    vm.sidebar.push_back(std::move(tags));
-
-    ui::SidebarGroup nets;
     nets.header = l10n::Get(l10n::StringId::SidebarNetworkLocations);
     nets.add_action = ui::SidebarAddAction::AddNetwork;
     if (places) {
@@ -1522,12 +1684,19 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
             nets.items.push_back(std::move(it));
         }
     }
-    vm.sidebar.push_back(std::move(nets));
-
-    // Collapse bits follow the displayed group order; actions use explicit identifiers.
-    // bit i of the mask collapses group i.
-    for (size_t i = 0; i < vm.sidebar.size() && i < 32; ++i)
-        vm.sidebar[i].collapsed = ((sidebar_collapsed_mask >> i) & 1u) != 0;
+    // Emit the sections in the user's order. Ids and the collapse/hide bits are
+    // re-applied here because ConvertGroup builds fresh groups.
+    vm.sidebar.reserve(sections.size());
+    for (int id : order) {
+        auto& section = sections[static_cast<size_t>(id)];
+        section.id = id;
+        // Header-less sections drop the title ConvertGroup set: the rows are the
+        // section, so a header above them would just repeat their own name.
+        if (IsHeaderlessSection(static_cast<SidebarSectionId>(id))) section.header.clear();
+        section.collapsed = ((sidebar_collapsed_mask >> id) & 1u) != 0;
+        section.hidden = ((sidebar_hidden_mask >> id) & 1u) != 0;
+        vm.sidebar.push_back(std::move(section));
+    }
 
     return vm;
 }

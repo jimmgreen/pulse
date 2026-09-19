@@ -25,6 +25,13 @@ inline constexpr float kPanelWidthMaxDip = 4000.0f;
 // Below these window widths the sidebar folds into its rail and the details panel
 // gives way entirely.
 inline constexpr float kSidebarRailWindowDip = 900.0f;
+// A sidebar this narrow is the icon rail: the layout, hit-testing, and the rail
+// tooltips all ask here instead of open-coding the threshold. Slightly above
+// kSidebarRailWidthDip so a rail drawn at a fractional scale still counts.
+inline constexpr float kSidebarRailLayoutDip = 60.0f;
+inline constexpr bool SidebarRailLayout(float sidebar_width_px, float scale) {
+    return sidebar_width_px <= kSidebarRailLayoutDip * scale;
+}
 inline constexpr float kDetailsVisibleWindowDip = 1000.0f;
 
 // Widest the sidebar may become: window minus the open details panel, minus the

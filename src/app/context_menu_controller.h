@@ -92,6 +92,9 @@ private:
     std::wstring extension_;
     std::vector<ui::FluentMenuItem> base_items_;
     std::unordered_map<std::wstring, std::vector<StaticVerb>> static_cache_;
+    // Extensions whose rows came from the on-disk cache: they still re-enumerate
+    // once, so a cache written by an older build heals itself.
+    std::unordered_set<std::wstring> static_seeded_;
     std::unordered_map<std::wstring, std::vector<ops::ShellMenuItem>> com_cache_;
     std::unordered_set<std::wstring> static_pending_;
     uint64_t query_started_at_ = 0;

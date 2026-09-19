@@ -506,6 +506,123 @@ void FinishListRowClick(AppState& s) {
     s.clickToggleOnRelease = false;
 }
 
+// ---- Sidebar section header drag: reorders the sections ---------------------
+// The order lives in AppState::sidebarOrder (logical ids); the masks stay keyed
+// by id, so a reorder never shuffles what is hidden or folded.
+
+// A press must travel this far before it becomes a reorder; below it the
+// gesture stays a click (fold a section, open a row).
+constexpr int kSidebarDragDeadzonePx = 4;
+
+void ResetSidebarGroupDrag(AppState& s) {
+    s.groupDragPending = false;
+    s.groupDragActive = false;
+    s.groupDragId = -1;
+    s.groupDragToIndex = -1;
+    s.groupGapVisible = false;
+    s.groupGapLineY = 0.0f;
+    s.groupDragPath.clear();
+}
+
+// ---- Quick-access pin drag: reorders the pinned folders ---------------------
+
+void ResetSidebarPinDrag(AppState& s) {
+    s.pinDragPending = false;
+    s.pinDragActive = false;
+    s.pinDragPath.clear();
+    s.pinDragRun = -1;
+    s.pinDragToIndex = -1;
+    s.pinGapVisible = false;
+    s.pinGapLineY = 0.0f;
+}
+
+// Insertion slot for the dragged pin, measured against the pinned rows only.
+void UpdateSidebarPinDrag(AppState& s, int my) {
+    if (!s.pinDragActive || s.pinDragPath.empty()) return;
+    ui::WindowViewModel vm = BuildVm(s, false);
+    const float w = static_cast<float>(s.compositor.Width());
+    const float h = static_cast<float>(s.compositor.Height());
+    const int section = static_cast<int>(app::SidebarSectionId::QuickAccess);
+    const auto& pins = s.places.quick_access_paths;
+
+    std::vector<D2D1_RECT_F> rows;
+    rows.reserve(pins.size());
+    const int group = app::SidebarSectionIndex(vm, section);
+    if (group >= 0) {
+        const auto& items = vm.sidebar[static_cast<size_t>(group)].items;
+        for (int i = 0; i < static_cast<int>(items.size()); ++i) {
+            const bool pinned = std::any_of(pins.begin(), pins.end(),
+                [&](const std::wstring& candidate) {
+                    return _wcsicmp(candidate.c_str(), items[static_cast<size_t>(i)].path.c_str()) == 0;
+                });
+            if (!pinned) continue;
+            D2D1_RECT_F rc{};
+            if (s.renderer.SidebarRowRect(vm, w, h, section, i, &rc)) rows.push_back(rc);
+        }
+    }
+
+    const float cursor = static_cast<float>(my);
+    int insert_at = static_cast<int>(rows.size());
+    float line_y = rows.empty() ? 0.0f : rows.back().bottom;
+    for (size_t i = 0; i < rows.size(); ++i) {
+        if (cursor < (rows[i].top + rows[i].bottom) * 0.5f) {
+            insert_at = static_cast<int>(i);
+            line_y = rows[i].top;
+            break;
+        }
+    }
+    s.pinDragToIndex = insert_at;
+    s.pinGapLineY = line_y;
+    s.pinGapVisible = line_y > 0.0f;
+}
+
+// Insertion slot under the cursor plus the indicator line for it. Sections the
+// bands do not cover (hidden, or scrolled past) keep their order.
+void UpdateSidebarGroupDrag(AppState& s, int my) {
+    if (!s.groupDragActive || s.groupDragId < 0) return;
+    ui::WindowViewModel vm = BuildVm(s, false);
+    std::vector<ui::SidebarGroupBand> bands;
+    s.renderer.SidebarGroupBands(vm, static_cast<float>(s.compositor.Width()),
+                                 static_cast<float>(s.compositor.Height()), bands);
+
+    std::vector<int> rest;
+    rest.reserve(s.sidebarOrder.size());
+    for (int id : s.sidebarOrder)
+        if (id != s.groupDragId) rest.push_back(id);
+
+    const float cursor = static_cast<float>(my);
+    int insert_at = static_cast<int>(rest.size());
+    float line_y = 0.0f;
+    for (const auto& band : bands) {
+        if (band.group < 0 || band.group >= static_cast<int>(vm.sidebar.size())) continue;
+        const int id = vm.sidebar[static_cast<size_t>(band.group)].id;
+        if (id == s.groupDragId) continue;
+        const auto it = std::find(rest.begin(), rest.end(), id);
+        if (it == rest.end()) continue;
+        if (cursor < (band.top + band.bottom) * 0.5f) {
+            insert_at = static_cast<int>(it - rest.begin());
+            line_y = band.top;
+            break;
+        }
+    }
+    if (line_y <= 0.0f && !bands.empty()) line_y = bands.back().bottom;
+    s.groupDragToIndex = insert_at;
+    s.groupGapLineY = line_y;
+    s.groupGapVisible = line_y > 0.0f;
+}
+
+void CommitSidebarGroupDrag(AppState& s) {
+    if (!s.groupDragActive || s.groupDragId < 0) return;
+    std::vector<int> rest;
+    rest.reserve(s.sidebarOrder.size());
+    for (int id : s.sidebarOrder)
+        if (id != s.groupDragId) rest.push_back(id);
+    if (s.groupDragToIndex < 0 || s.groupDragToIndex > static_cast<int>(rest.size()))
+        s.groupDragToIndex = static_cast<int>(rest.size());
+    rest.insert(rest.begin() + s.groupDragToIndex, s.groupDragId);
+    s.sidebarOrder = app::NormalizeSidebarOrder(rest);
+}
+
 void CancelRenameClick(AppState& s) {
     s.renameClickCandidate = false;
     s.renameClickPane = nullptr;
@@ -1539,6 +1656,43 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             }
         }
 
+        // Sidebar section header drag: past a small deadzone the press turns into
+        // a reorder and the insertion line follows the cursor.
+        if (s->groupDragPending || s->groupDragActive) {
+            if ((GetKeyState(VK_LBUTTON) & 0x8000) == 0) {
+                ResetSidebarGroupDrag(*s);
+                if (GetCapture() == hwnd) ReleaseCapture();
+                InvalidateRect(hwnd, nullptr, FALSE);
+            } else {
+                if (!s->groupDragActive && s->groupDragId >= 0 &&
+                    std::abs(my - s->groupDragStartPt.y) >= kSidebarDragDeadzonePx) {
+                    s->groupDragActive = true;
+                }
+                if (s->groupDragActive) {
+                    UpdateSidebarGroupDrag(*s, my);
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+            }
+        }
+
+        // Quick-access pin drag: past the deadzone the press becomes a reorder.
+        if (s->pinDragPending || s->pinDragActive) {
+            if ((GetKeyState(VK_LBUTTON) & 0x8000) == 0) {
+                ResetSidebarPinDrag(*s);
+                if (GetCapture() == hwnd) ReleaseCapture();
+                InvalidateRect(hwnd, nullptr, FALSE);
+            } else {
+                if (!s->pinDragActive && !s->pinDragPath.empty() &&
+                    std::abs(my - s->pinDragStartPt.y) >= kSidebarDragDeadzonePx) {
+                    s->pinDragActive = true;
+                }
+                if (s->pinDragActive) {
+                    UpdateSidebarPinDrag(*s, my);
+                    InvalidateRect(hwnd, nullptr, FALSE);
+                }
+            }
+        }
+
         TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, hwnd, 0 };
         TrackMouseEvent(&tme);
 
@@ -1549,11 +1703,7 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         if (newRegion != s->hoverRegion || hit.index != s->hoverControlIndex ||
             hit.sub_index != s->hoverSubIndex ||
             hit.pane_index != s->hoverPaneIndex) {
-            s->hoverRegion = newRegion;
-            s->hoverControlIndex = hit.index;
-            s->hoverSubIndex = hit.sub_index;
-            s->hoverSince = GetTickCount64();
-            s->tooltipText.clear();
+            ApplyHoverTarget(*s, hit);
             if (hit.region == ui::HitTestResult::SidebarItem && fs::IsUncPath(hit.path))
                 RequestUncProbe(*s, hit.path);
             InvalidateRect(hwnd, nullptr, FALSE);
@@ -1609,6 +1759,7 @@ LRESULT HandleMouseLeave(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             s->hoverControlIndex = -1;
             s->hoverSubIndex = -1;
             s->hoverPath.clear();
+            s->hoverLabel.clear();
             s->hoverSince = 0;
             s->tooltipText.clear();
             s->bloom_accent.SetPointer(0.0f, 0.0f, false);
@@ -1657,6 +1808,17 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             s->dragPending = false;
             s->detailsPanelResizing = true;
             SetCapture(hwnd);
+            return 0;
+        }
+        if (hit.region == ui::HitTestResult::DetailsPreviewEnable) {
+            s->detailsPreviewEnabled = !s->detailsPreviewEnabled;
+            s->detailsScroll = 0;
+            if (!s->detailsPreviewEnabled) {
+                s->detailsPreviewPanning = false;
+                s->renderer.EndDetailsPreviewPan();
+            }
+            s->dragPending = false;
+            InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
         if (hit.region == ui::HitTestResult::DetailsPreviewToggle) {
@@ -2150,9 +2312,17 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 ShowCreateTagPicker(*s, point);
             }
         } else if (hit.region == ui::HitTestResult::SidebarHeader) {
-            if (hit.index >= 0 && hit.index < 32) {
-                s->sidebarCollapsedMask ^= (1u << hit.index);
-                InvalidateRect(hwnd, nullptr, FALSE);
+            // Arm the header drag; a release without movement still folds the
+            // section, which keeps the header behaving like a plain toggle.
+            if (hit.index >= 0 && hit.index < static_cast<int>(vm.sidebar.size())) {
+                s->groupDragPending = true;
+                s->groupDragActive = false;
+                s->groupDragId = vm.sidebar[static_cast<size_t>(hit.index)].id;
+                s->groupDragStartPt = POINT{ mx, my };
+                s->groupDragToIndex = -1;
+                s->groupGapVisible = false;
+                s->groupGapLineY = 0.0f;
+                SetCapture(hwnd);
             }
         } else if (hit.region == ui::HitTestResult::SidebarItemAction) {
             std::wstring kind, rest;
@@ -2165,8 +2335,29 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
         } else if (hit.region == ui::HitTestResult::SidebarItem) {
+            // A section whose rows are the section itself (the starred root, the
+            // OneDrive accounts) has no header to grab: dragging a row moves the
+            // whole section, and a plain click still navigates on release.
+            const bool headerless_row =
+                hit.sidebar_section == static_cast<int>(app::SidebarSectionId::Cloud) ||
+                (hit.sidebar_section == static_cast<int>(app::SidebarSectionId::Starred) &&
+                 hit.path == app::MakeStarredPath());
             const app::StarredItem* starred = s->places.FindStarred(hit.path);
-            if (starred && starred->kind == app::PlaceItemKind::Folder) {
+            const bool in_starred =
+                hit.sidebar_section == static_cast<int>(app::SidebarSectionId::Starred);
+            if (headerless_row) {
+                s->groupDragPending = true;
+                s->groupDragActive = false;
+                s->groupDragId = hit.sidebar_section;
+                s->groupDragPath = hit.path;
+                s->groupDragStartPt = POINT{ mx, my };
+                s->groupDragToIndex = -1;
+                s->groupGapVisible = false;
+                s->groupGapLineY = 0.0f;
+                SetCapture(hwnd);
+            } else if (in_starred && starred && starred->kind == app::PlaceItemKind::Folder) {
+                // A starred folder nested under the root row: reorder inside the
+                // starred list (only when the row really is in that section).
                 s->starDragPending = true;
                 s->starDragActive = false;
                 s->starDragStartPt = POINT{ mx, my };
@@ -2177,6 +2368,18 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 });
                 s->starDragTarget = found == folders.end()
                     ? 0 : static_cast<size_t>(found - folders.begin());
+                SetCapture(hwnd);
+            } else if (s->places.IsQuickAccessPinned(hit.path)) {
+                // Pinned rows reorder inside quick access; navigation waits for
+                // the release so a press can become a drag.
+                s->pinDragPending = true;
+                s->pinDragActive = false;
+                s->pinDragStartPt = POINT{ mx, my };
+                s->pinDragPath = hit.path;
+                s->pinDragRun = hit.index;
+                s->pinDragToIndex = -1;
+                s->pinGapVisible = false;
+                s->pinGapLineY = 0.0f;
                 SetCapture(hwnd);
             } else if (hit.path.starts_with(L"pulse:tag:")) {
                 // Tags defer navigation to release; a press may become a reorder drag.
@@ -2298,6 +2501,34 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                         s->settings.AccentChoice(pressed == 0,
                             pressed == 0 ? 0 : ui::BloomDotRgb(pressed));
                 if (GetCapture() == hwnd) ReleaseCapture();
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            if (s->groupDragPending || s->groupDragActive) {
+                const bool was_active = s->groupDragActive;
+                const std::wstring path = s->groupDragPath;
+                const int section = s->groupDragId;
+                if (was_active) CommitSidebarGroupDrag(*s);
+                ResetSidebarGroupDrag(*s);
+                if (GetCapture() == hwnd) ReleaseCapture();
+                if (!was_active) {
+                    // A row of a header-less section navigates on release; a
+                    // header folds its section (masks are keyed by id).
+                    if (!path.empty()) NavigateTo(*s, path);
+                    else if (section >= 0) s->sidebarCollapsedMask ^= 1u << section;
+                }
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            if (s->pinDragPending || s->pinDragActive) {
+                const bool was_active = s->pinDragActive;
+                const std::wstring path = s->pinDragPath;
+                if (was_active && s->pinDragToIndex >= 0)
+                    s->places.ReorderQuickAccessPinned(path,
+                        static_cast<size_t>(s->pinDragToIndex));
+                ResetSidebarPinDrag(*s);
+                if (GetCapture() == hwnd) ReleaseCapture();
+                if (!was_active && !path.empty()) NavigateTo(*s, path);
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
@@ -2612,6 +2843,16 @@ LRESULT HandleCaptureChanged(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LP
                 s->dropSidebar = -1;
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
+            if (s->groupDragPending || s->groupDragActive) {
+                // Capture lost mid-gesture: cancel the reorder, keep the order.
+                ResetSidebarGroupDrag(*s);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            if (s->pinDragPending || s->pinDragActive) {
+                // Same for the pin reorder: abandon it, keep the stored order.
+                ResetSidebarPinDrag(*s);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
             if (s->tagDragPending || s->tagDragActive) {
                 // Capture lost mid-gesture: cancel the reorder, keep places.tags.
                 s->tagDragPending = false;
@@ -2767,6 +3008,17 @@ LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 ShowCuratedItemMenu(*s, hit.path, false, sp);
                 shown = true;
             }
+        } else if (hit.region == ui::HitTestResult::SidebarHeader ||
+                   hit.region == ui::HitTestResult::SidebarBlank) {
+            // The menu must match what the cursor is over: a section header, or
+            // the empty space inside a section, opens that section's own menu.
+            // Only the space below every section opens the pane-wide menu.
+            int section = -1;
+            if (hit.index >= 0 && hit.index < static_cast<int>(vm.sidebar.size()))
+                section = vm.sidebar[static_cast<size_t>(hit.index)].id;
+            if (section >= 0) ShowSidebarSectionMenu(*s, section, sp);
+            else ShowSidebarSectionsMenu(*s, sp);
+            shown = true;
         } else if (!IsSettingsTab(ActiveTab(*s)) &&
                    (hit.region == ui::HitTestResult::Pane ||
                    hit.region == ui::HitTestResult::PaneHeader ||

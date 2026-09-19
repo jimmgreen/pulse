@@ -1127,10 +1127,19 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     });
     ui::WindowViewModel vm = app::BuildWindowViewModel(*s.pane, s.sidebar,
         s.pane->focused, s.maximized, s.darkMode, &s.places, s.sidebarCollapsedMask,
-        s.starredExpanded);
+        s.sidebarHiddenMask, s.starredExpanded, &s.sidebarOrder,
+        s.sidebarQuickAccessHiddenMask);
     app::FillWindowTabStrip(vm, s.window_tabs);
     vm.show_pinned_tab_names = s.appPrefs.show_pinned_tab_names;
     vm.sidebar_scroll = s.sidebarScroll;
+    if (s.groupDragActive) {
+        vm.sidebar_group_drag_id = s.groupDragId;
+        if (s.groupGapVisible) vm.sidebar_group_gap_line_y = s.groupGapLineY;
+    }
+    if (s.pinDragActive) {
+        vm.sidebar_pin_drag_index = s.pinDragRun;
+        if (s.pinGapVisible) vm.sidebar_pin_gap_line_y = s.pinGapLineY;
+    }
     ops::OpStatus st = s.ops.Status();
     if (st.active || !st.last_error.empty() || !st.summary.empty()) {
         vm.status.task_text = st.last_error.empty() ? st.summary
@@ -1356,6 +1365,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
         ui::DetailsPanelView& dv = vm.details;
         dv.scroll_y = s.detailsScroll;
         dv.preview_only = s.detailsPreviewOnly;
+        dv.preview_enabled = s.detailsPreviewEnabled;
         dv.preview_expansion = s.detailsPreviewExpansion;
         dv.collapsed_mask = s.detailsCollapsedMask;
         app::Tab* tab = ActiveTab(s);
@@ -1515,6 +1525,24 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     return vm;
 }
 
+// True while the sidebar is collapsed to its icon rail: rows carry no text, so
+// every hover needs a name hint. EffectiveSidebarWidth returns pixels (the
+// upstream DIP-scaling fix), which is what the rail test expects.
+bool SidebarRailActive(const AppState& s) {
+    return ui::SidebarRailLayout(
+        s.renderer.EffectiveSidebarWidth(static_cast<float>(s.compositor.Width())), s.scale);
+}
+
+void ApplyHoverTarget(AppState& s, const ui::HitTestResult& hit) {
+    s.hoverRegion = static_cast<int>(hit.region);
+    s.hoverControlIndex = hit.index;
+    s.hoverSubIndex = hit.sub_index;
+    s.hoverPath = hit.path;
+    s.hoverLabel = hit.label;
+    s.hoverSince = GetTickCount64();
+    s.tooltipText.clear();
+}
+
 std::wstring TooltipForHover(AppState& s) {
     using R = ui::HitTestResult;
     using I = l10n::StringId;
@@ -1619,6 +1647,9 @@ std::wstring TooltipForHover(AppState& s) {
     case R::DetailsTagAdd: return text(I::AddTag);
     case R::DetailsResize: return text(I::ResizeDetails);
     case R::DetailsPreviewToggle: return text(s.detailsPreviewOnly ? I::PreviewExpandDetails : I::PreviewCollapseDetails);
+    // Names the action, matching the star and rename hints beside it.
+    case R::DetailsPreviewEnable:
+        return text(s.detailsPreviewEnabled ? I::PreviewHide : I::PreviewShow);
     case R::DetailsPreview: return L"";
     case R::StatusBarTask: return text(I::OpDetails);
     case R::StatusBarCancelSearch: return text(I::ContentCancelSearch);
@@ -1637,7 +1668,11 @@ std::wstring TooltipForHover(AppState& s) {
     case R::RowNewTab: return text(I::OpenNewTab);
     case R::RowMore: return text(I::MoreActions);
     case R::SidebarItemAction: return text(I::Unpin);
+    // On the icon rail there is no text to read, so every row (and every folded
+    // section's icon) names itself on hover.
+    case R::SidebarHeader: return SidebarRailActive(s) ? s.hoverLabel : L"";
     case R::SidebarItem: {
+        if (SidebarRailActive(s) && !s.hoverLabel.empty()) return s.hoverLabel;
         if (const app::StarredItem* starred = s.places.FindStarred(s.hoverPath);
             starred && !starred->badge.empty()) {
             return starred->badge;

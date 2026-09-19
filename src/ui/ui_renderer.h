@@ -244,10 +244,25 @@ struct SidebarItem {
 enum class SidebarAddAction { None, CreateTag, AddNetwork };
 
 struct SidebarGroup {
+    // Logical section id (pulse::app::SidebarSectionId). Collapse/hide masks and
+    // the section menus key off this, not off the display position, because the
+    // user can reorder the groups by dragging their headers.
+    int id = -1;
     std::wstring header;
+    std::wstring icon_glyph;       // optional leading icon on the header row
     std::vector<SidebarItem> items;
     bool collapsed = false;
+    bool hidden = false;           // Section menu: the group is not laid out at all.
     SidebarAddAction add_action = SidebarAddAction::None;
+};
+
+// Vertical span a section occupies in the laid-out sidebar (header top through
+// the gap after its last row). Hit-testing uses it to attribute a click on the
+// empty space below the rows to the section the user aimed at.
+struct SidebarGroupBand {
+    int group = -1;      // index into WindowViewModel::sidebar
+    float top = 0.0f;    // header top (px, client space)
+    float bottom = 0.0f; // end of the section's gap (px)
 };
 
 // Scatter deck inside the staging tray panel. Poses arrive pre-smoothed from
@@ -295,6 +310,7 @@ struct DetailsPanelView {
     uint64_t view_generation = 1;
     float scroll_y = 0.0f;
     bool preview_only = false;
+    bool preview_enabled = true;    // off: no preview request, placeholder only
     float preview_expansion = 0.0f;
     uint32_t collapsed_mask = 0;    // bit per section: 0基本信息 1属性 2标签 3安全 4其他
     std::wstring location_text, size_text, contains_text;
@@ -318,7 +334,7 @@ struct DetailsPanelView {
 // Interactive rects inside the details panel, shared by draw and hit-test.
 struct DetailsHitRects {
     D2D1_RECT_F open{}, new_tab{}, copy_path{}, more{}, star{}, rename{};
-    D2D1_RECT_F tag_add{}, preview{}, preview_toggle{};
+    D2D1_RECT_F tag_add{}, preview{}, preview_toggle{}, preview_enable{};
     D2D1_RECT_F attr_readonly{}, attr_hidden{}, attr_advanced{};
     D2D1_RECT_F security_change{};
     std::vector<D2D1_RECT_F> preset_chips;
@@ -427,6 +443,14 @@ struct WindowViewModel {
     int tag_drag_item = -1;
     float tag_drag_y = 0.0f;
     float tag_gap_line_y = 0.0f; // insertion indicator position (px, 0 = hidden)
+    // Sidebar section header drag: the id-identified section floats, the rest
+    // stay put, and the insertion line marks the slot it would land in.
+    int sidebar_group_drag_id = -1;
+    float sidebar_group_gap_line_y = 0.0f; // px, 0 = hidden
+    // Quick-access pin drag: the dragged row (layout index) plus its own
+    // insertion line.
+    int sidebar_pin_drag_index = -1;
+    float sidebar_pin_gap_line_y = 0.0f; // px, 0 = hidden
     // Title-bar tab drag: floating tab follows the cursor (QFluent TabBar).
     int tab_drag_index = -1; // display index of the run's first tab, or -1
     int tab_drag_count = 1;  // >1: a whole group run floats as one block
@@ -592,6 +616,7 @@ struct HitTestResult {
         SidebarItem,
         SidebarItemAction,
         SidebarItemExpand,
+        SidebarBlank,             // empty space in the sidebar: section menu
         TrayRelease,
         TrayClose,
         TrayItemRemove,
@@ -616,6 +641,7 @@ struct HitTestResult {
         DetailsPresetTag,
         DetailsPreview,
         DetailsPreviewToggle,
+        DetailsPreviewEnable,   // preview pane on/off chip inside the well
         DetailsResize,
         StatusBar,
         StatusBarTask,
@@ -655,8 +681,15 @@ struct HitTestResult {
     int index = -1;          // tab/row/sidebar item/tray batch/tray item.
     int sub_index = -1;      // tray item inside batch, breadcrumb segment.
     int pane_index = -1;     // leaf in pane_slots, or -1 outside the content area.
+    // Sidebar hits: the logical section (SidebarSectionId) and the row inside it,
+    // so dragging can tell a pinned row from a section's own row.
+    int sidebar_section = -1;
+    int sidebar_item = -1;
     SortColumn column = SortColumn::Name;
     std::wstring path;
+    // Name of the hovered sidebar row or section. The collapsed rail shows icons
+    // only, so its tooltips read this.
+    std::wstring label;
     D2D1_RECT_F control_bounds{};
 };
 
@@ -836,6 +869,14 @@ public:
     // Current layout rect of a tag sidebar slot (for drag-reorder geometry).
     bool TagItemRect(const WindowViewModel& vm, float w, float h, int group, int item,
                      D2D1_RECT_F* out) const;
+    // Current layout rect of a row, addressed by logical section id + row index
+    // (for the quick-access pin drag).
+    bool SidebarRowRect(const WindowViewModel& vm, float w, float h, int section_id, int item,
+                        D2D1_RECT_F* out) const;
+    // Vertical span of every laid-out sidebar section, in display order (for the
+    // section header drag).
+    void SidebarGroupBands(const WindowViewModel& vm, float window_w, float window_h,
+                           std::vector<SidebarGroupBand>& out) const;
     // Rest-slot rect of a title-bar tab (display index, no drag float).
     bool TabItemRect(const WindowViewModel& vm, float window_w, int index, D2D1_RECT_F* out) const;
     // Group chip rect (title-bar space); false when the group has no chip.

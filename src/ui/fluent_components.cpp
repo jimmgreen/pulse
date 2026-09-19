@@ -2144,6 +2144,12 @@ D2D1_RECT_F Painter::DriveSidebarItemIconRect(const D2D1_RECT_F& bounds) const {
     return D2D1::RectF(left, top, left + Px(16.0f), top + Px(18.0f));
 }
 
+D2D1_RECT_F Painter::SidebarSectionHeaderIconRect(const D2D1_RECT_F& bounds) const {
+    const float left = bounds.left + Px(10.0f);
+    const float inset = Px(4.0f);
+    return D2D1::RectF(left, bounds.top + inset, left + Px(16.0f), bounds.bottom - inset);
+}
+
 void Painter::DrawSidebarSectionHeader(const SidebarSectionHeaderSpec& spec) {
     if (!theme_ || Width(spec.bounds) <= 0.0f || Height(spec.bounds) <= 0.0f) {
         return;
@@ -2154,10 +2160,19 @@ void Painter::DrawSidebarSectionHeader(const SidebarSectionHeaderSpec& spec) {
     }
     const D2D1_COLOR_F foreground = spec.state.enabled ? theme_->text_secondary
                                                         : theme_->text_disabled;
+    // Optional leading icon; the embedded vector variant is painted by the
+    // caller (skip_glyph), but the text leaves room for it either way.
+    const bool has_icon = !spec.glyph.empty();
+    const D2D1_RECT_F icon_rc = SidebarSectionHeaderIconRect(spec.bounds);
+    if (has_icon && !spec.skip_glyph) {
+        DrawGlyphWithFormat(spec.glyph, icon_rc, foreground, SmallIconFormat());
+    }
+    const float text_left = has_icon ? icon_rc.right + Px(6.0f)
+                                     : spec.bounds.left + Px(10.0f);
     // Disclosure chevron sits at the trailing edge and mirrors collapsed state.
     const float chevron_slot = Px(14.0f);
     DrawText(spec.text,
-             D2D1::RectF(spec.bounds.left + Px(10.0f), spec.bounds.top,
+             D2D1::RectF(text_left, spec.bounds.top,
                         spec.bounds.right - chevron_slot - Px(8.0f), spec.bounds.bottom),
              SectionFormat(), foreground);
     DrawGlyphWithFormat(spec.expanded ? kChevronDown : kChevronRight,

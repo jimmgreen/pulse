@@ -840,7 +840,9 @@ void OpsManager::ExecuteVerb(const std::wstring& path, const std::wstring& verb)
     QueueItem item;
     item.open_path = path;
     item.open_verb = verb.empty() ? L"open" : verb;
-    EnqueueOpen(std::move(item));
+    // 打开方式… / 属性 are interactive dialogs: they must answer the click even
+    // when a slow open is still in flight, so they go to the front of the queue.
+    EnqueueOpen(std::move(item), true);
 }
 
 void OpsManager::OpenWithApp(const std::wstring& app_exe, const std::wstring& file) {
@@ -1108,12 +1110,14 @@ void OpsManager::Undo() {
 // Worker thread: serialized queue -> ShellClient -> event wait.
 // ---------------------------------------------------------------------------
 
-void OpsManager::EnqueueOpen(QueueItem item) {
+void OpsManager::EnqueueOpen(QueueItem item, bool front) {
     {
         std::lock_guard<std::mutex> lock(open_mutex_);
         if (!open_running_) return;
         item.seq = next_seq_++;
-        open_queue_.push_back(std::move(item));
+        item.enqueued_at = GetTickCount64();
+        if (front) open_queue_.push_front(std::move(item));
+        else open_queue_.push_back(std::move(item));
     }
     open_cv_.notify_one();
 }
@@ -1130,6 +1134,12 @@ void OpsManager::OpenThread() {
             item = std::move(open_queue_.front());
             open_queue_.pop_front();
         }
+
+        // Dialogs and association errors belong to the Pulse window, the way
+        // Explorer parents them to the folder window. The fallback covers a UI
+        // thread that has not registered its HWND yet.
+        HWND dialog_owner = ui_hwnd_.load();
+        if (!dialog_owner || !IsWindow(dialog_owner)) dialog_owner = GetForegroundWindow();
 
         if (_wcsicmp(item.open_verb.c_str(), L"__cmdline") == 0) {
             std::wstring cmd = item.open_file;
@@ -1157,21 +1167,41 @@ void OpsManager::OpenThread() {
             OPENASINFO info{};
             info.pcszFile = shell_path.c_str();
             info.oaifInFlags = OAIF_ALLOW_REGISTRATION | OAIF_REGISTER_EXT | OAIF_EXEC;
-            const HRESULT hr = SHOpenWithDialog(GetForegroundWindow(), &info);
+            const ULONGLONG dialog_started = GetTickCount64();
+            const HRESULT hr = SHOpenWithDialog(dialog_owner, &info);
+            if (item.enqueued_at != 0) {
+                // Queue wait and dialog cost need different fixes, so report both
+                // (DebugView) instead of guessing which one the user feels.
+                wchar_t timing[192]{};
+                swprintf_s(timing, L"Pulse: open-with queued %llu ms, dialog %llu ms\n",
+                           dialog_started - item.enqueued_at,
+                           GetTickCount64() - dialog_started);
+                OutputDebugStringW(timing);
+            }
             if (FAILED(hr) && hr != HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
                 SHELLEXECUTEINFOW fallback{sizeof(fallback)};
+                fallback.hwnd = dialog_owner;
                 fallback.lpVerb = L"openas";
                 fallback.lpFile = shell_path.c_str();
                 fallback.nShow = SW_SHOWNORMAL;
                 fallback.fMask = SEE_MASK_INVOKEIDLIST;
-                ShellExecuteExW(&fallback);
+                const BOOL opened = ShellExecuteExW(&fallback);
+                if (!opened) {
+                    // Used to fail silently, which read as a dead menu row.
+                    wchar_t message[320]{};
+                    swprintf_s(message,
+                        L"Pulse: open-with failed for %ls (SHOpenWithDialog 0x%08lX, "
+                        L"shell error %lu)\n",
+                        shell_path.c_str(), static_cast<unsigned long>(hr), GetLastError());
+                    OutputDebugStringW(message);
+                }
             }
             continue;
         }
 
         if (_wcsicmp(item.open_verb.c_str(), L"properties") == 0) {
             const std::wstring shell_path = pulse::path::StripExtendedPathPrefix(item.open_path);
-            bool shown = SHObjectProperties(nullptr, SHOP_FILEPATH,
+            bool shown = SHObjectProperties(dialog_owner, SHOP_FILEPATH,
                                             shell_path.c_str(), nullptr) != FALSE;
             if (!shown) {
                 SHELLEXECUTEINFOW fallback{sizeof(fallback)};
@@ -1194,6 +1224,7 @@ void OpsManager::OpenThread() {
         // Dedicated open thread: never wait behind transfers. Omit
         // SEE_MASK_NOASYNC so association handoff does not block this worker.
         SHELLEXECUTEINFOW sei{ sizeof(sei) };
+        sei.hwnd = dialog_owner;
         sei.lpVerb = item.open_verb.empty() ? L"open" : item.open_verb.c_str();
         sei.lpFile = item.open_file.empty() ? item.open_path.c_str()
                                             : item.open_file.c_str();

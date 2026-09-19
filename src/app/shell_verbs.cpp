@@ -332,7 +332,10 @@ std::vector<StaticVerb> EnumerateStaticVerbs(const std::wstring& ext) {
 
     StaticVerb open_as;
     open_as.verb = L"openas";
-    open_as.display = pulse::l10n::Get(pulse::l10n::StringId::ShellOpenWith).c_str();
+    open_as.display = pulse::l10n::Get(pulse::l10n::StringId::ShellOpenWith);
+    // Seeding can run in a process without resources (the installer); an empty
+    // row is dropped by the menu, which hid 打开方式 completely.
+    if (open_as.display.empty()) open_as.display = L"Open with...";
     out.push_back(std::move(open_as));
     return out;
 }

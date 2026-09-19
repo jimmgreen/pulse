@@ -34,7 +34,9 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
     ID2D1DeviceContext* dc = compositor_->Dc();
     const float s = scale_;
     const DetailsPanelView& d = vm.details;
-    const float previewH = DetailsPreviewHeight(panel, s, d.preview_expansion);
+    // Preview off => zero-height well: the panel starts at the name row.
+    const float previewH = d.preview_enabled
+        ? DetailsPreviewHeight(panel, s, d.preview_expansion) : 0.0f;
     DetailsHitRects hit;
     LayoutDetailsPanel(panel, s, d, compositor_->DwriteFactory(),
                        compositor_->SmallFormat(), compositor_, previewH, hit);
@@ -48,6 +50,12 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
         details_layout_text_.clear();
         details_preview_ready_ = false;
         EndDetailsPreviewPan();
+    }
+    if (!d.preview_enabled) {
+        // Collapsed well: drop pan/zoom state so nothing stale paints if the
+        // preview is switched back on for another file.
+        details_viewport_ = {};
+        details_preview_ready_ = false;
     }
     // Same surface as the list; a left rule separates the column.
     MakeBrush(dc, theme.stroke_card, brStrokeCard_);
@@ -171,7 +179,10 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
         const D2D1_RECT_F previewRc = D2D1::RectF(panel.left + pad, previewTop,
             panel.right - pad, previewTop + previewH);
         const bool placeholderOnly = d.is_dir || d.multi_count > 1;
-        const bool handlerPreview = !vm.safe_mode && !placeholderOnly &&
+        // Off: neither the preview child process nor the handler host runs for
+        // this selection, which is the whole point of the switch.
+        const bool preview_on = d.preview_enabled;
+        const bool handlerPreview = preview_on && !vm.safe_mode && !placeholderOnly &&
             PreviewHandlerHost::CanHost(d.path);
         if (!placeholderOnly) {
             MakeBrush(dc, theme.fill_hover, brFillInput_);
@@ -190,7 +201,7 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
         uint32_t bytesRead = 0;
         std::wstring previewError;
         PreviewDrawResult previewResult = PreviewDrawResult::Failed;
-        if (!d.is_dir && d.multi_count <= 1) {
+        if (preview_on && !d.is_dir && d.multi_count <= 1) {
             std::vector<PreviewProperty> ignored;
             thumbnail_cache_.Properties(d.path, d.attrs, d.view_generation,
                                         d.modified_value, d.size_value, ignored);
@@ -271,7 +282,7 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
                  compositor_->SmallFormat(), theme.text_secondary);
         } else if (handlerPreview && handlerState == PreviewHandlerHost::State::Shown) {
             // System preview handler paints into the overlay HWND.
-        } else if (previewResult != PreviewDrawResult::Bitmap) {
+        } else if (preview_on && previewResult != PreviewDrawResult::Bitmap) {
             const bool filePlaceholder = !d.is_dir && d.multi_count <= 1;
             std::wstring state;
             if (d.multi_count > 1)
@@ -379,6 +390,21 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
                 FillRoundedRect(dc, brFillHover_.get(), hit.rename.left, hit.rename.top,
                                 22.0f * s, 22.0f * s, 5.0f * s);
             }
+            // Preview on/off: accent-tinted while on, plain while off. Lives on
+            // the name row so it is reachable with the well collapsed.
+            if (hit.preview_enable.right > hit.preview_enable.left) {
+                const bool prevHot = IsHovered(vm, HitTestResult::DetailsPreviewEnable);
+                if (prevHot || d.preview_enabled) {
+                    MakeBrush(dc, d.preview_enabled
+                        ? WithAlpha(theme.accent, prevHot ? 0.28f : 0.18f) : theme.fill_hover,
+                        brFillHover_);
+                    FillRoundedRect(dc, brFillHover_.get(), hit.preview_enable.left,
+                                    hit.preview_enable.top, 22.0f * s, 22.0f * s, 5.0f * s);
+                }
+                DrawIconText(hit.preview_enable.left, hit.preview_enable.top, 22.0f * s,
+                             22.0f * s, L"\xE890", L"eye",
+                             d.preview_enabled ? theme.accent : theme.text_secondary, 0.72f);
+            }
             DrawIconText(hit.star.left, hit.star.top, 22.0f * s, 22.0f * s,
                          d.starred ? L"\xE735" : L"\xE734", L"*",
                          d.starred ? theme.accent : theme.text_secondary, 1.0f);
@@ -393,8 +419,8 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
                 d.multi_count);
             shown = selected;
         }
-        const float nameRight = d.multi_count <= 1 ? hit.star.left - 4.0f * s
-                                                   : panel.right - pad;
+        const float nameRight = d.multi_count <= 1
+            ? hit.preview_enable.left - 4.0f * s : panel.right - pad;
         text(shown, D2D1::RectF(panel.left + pad, y, nameRight,
                                 y + 22.0f * s),
              compositor_->HeaderFormat(), theme.text);

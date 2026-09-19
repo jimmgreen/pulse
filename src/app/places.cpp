@@ -1169,6 +1169,24 @@ bool PlacesCatalog::IsQuickAccessPinned(const std::wstring& path) const {
         [&](const auto& value) { return TagKey(value) == key; });
 }
 
+bool PlacesCatalog::ReorderQuickAccessPinned(const std::wstring& path, size_t position) {
+    const auto key = TagKey(path);
+    const auto found = std::find_if(quick_access_paths.begin(), quick_access_paths.end(),
+        [&](const std::wstring& candidate) { return TagKey(candidate) == key; });
+    if (found == quick_access_paths.end() || quick_access_paths.empty()) return false;
+    position = std::min(position, quick_access_paths.size() - 1);
+    const size_t current = static_cast<size_t>(found - quick_access_paths.begin());
+    if (current == position) return false;
+    std::wstring moved = std::move(*found);
+    quick_access_paths.erase(found);
+    quick_access_paths.insert(
+        quick_access_paths.begin() +
+            static_cast<std::ptrdiff_t>(std::min(position, quick_access_paths.size())),
+        std::move(moved));
+    Save();
+    return true;
+}
+
 bool PlacesCatalog::SetQuickAccessPinned(const std::vector<std::wstring>& paths, bool pinned) {
     bool changed = false;
     for (const auto& path : paths) {

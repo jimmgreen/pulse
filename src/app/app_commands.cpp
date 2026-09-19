@@ -1056,12 +1056,19 @@ void ShowSplitDropdown(AppState& s) {
 // ---------------------------------------------------------------------------
 // Browser-style tab groups: named + colored; strip chips open the group popup.
 // ---------------------------------------------------------------------------
+void RefreshSidebarModel(AppState& s) {
+    s.sidebar = app::BuildSidebarModel(&s.recycle_info);
+    SyncSavedSearchSidebar(s);
+}
+
 app::SidebarEntry* QuickAccessEntryForPath(AppState& s,
                                                    const std::wstring& path) {
-    for (auto& entry : s.sidebar.quick_access) {
-        if (entry.path.empty() || entry.path == app::MakeRecyclePath()) continue;
-        if (_wcsicmp(entry.path.c_str(), path.c_str()) == 0)
-            return &entry;
+    for (auto* group : { &s.sidebar.quick_access, &s.sidebar.cloud, &s.sidebar.starred }) {
+        for (auto& entry : *group) {
+            if (entry.path.empty() || entry.path == app::MakeRecyclePath()) continue;
+            if (_wcsicmp(entry.path.c_str(), path.c_str()) == 0)
+                return &entry;
+        }
     }
     return nullptr;
 }
@@ -1682,8 +1689,7 @@ void ApplySettingsEffects(AppState& s, app::SettingsEffect effects) {
         s.showFps = s.forceStatusPerformance || s.appPrefs.show_status_performance;
     if (app::HasEffect(effects, app::SettingsEffect::Language)) {
         l10n::SetLanguage(s.appPrefs.language);
-        s.sidebar = app::BuildSidebarModel(&s.recycle_info);
-        SyncSavedSearchSidebar(s);
+        RefreshSidebarModel(s);
         ui::typography::InvalidateCaches();
         s.compositor.RecreateTextFormats(s.scale);
         s.renderer.InvalidateTypography();

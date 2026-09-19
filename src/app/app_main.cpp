@@ -95,6 +95,7 @@
 #include "app_internal.h"
 #include "duplicate_scan.h"
 #include <commctrl.h>
+#include <dbt.h> // WM_DEVICECHANGE / DEV_BROADCAST_HDR
 
 using namespace pulse;
 
@@ -300,8 +301,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             s->update_result.installer_sha256 =
                 L"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         }
-        s->sidebar = app::BuildSidebarModel(&s->recycle_info);
-        SyncSavedSearchSidebar(*s);
+        RefreshSidebarModel(*s);
         ui::typography::InvalidateCaches();
         s->compositor.RecreateTextFormats(s->scale);
         if (s->safeMode) {
@@ -417,6 +417,8 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (!s->isolatedTest && !data_dir.empty())
             s->ops.SetJournalPath(data_dir + L"\\operations.json");
         s->ops.SetVerifyCopies(s->appPrefs.verify_copies);
+        // Shell dialogs (打开方式…/属性) must be owned by the Pulse window.
+        s->ops.SetUiWindow(hwnd);
         s->ops.Start([hwnd] { PostMessageW(hwnd, WM_OPS_NOTIFY, 0, 0); });
         const ops::RecoverySnapshot recovery = s->isolatedTest
             ? ops::RecoverySnapshot{} : s->ops.PendingRecovery();
@@ -634,12 +636,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         s->hoverPoint = pt;
         const int region = static_cast<int>(hit.region);
         if (region != s->hoverRegion || hit.index != s->hoverControlIndex) {
-            s->hoverRegion = region;
-            s->hoverControlIndex = hit.index;
-            s->hoverSubIndex = hit.sub_index;
-            s->hoverPath = hit.path;
-            s->hoverSince = GetTickCount64();
-            s->tooltipText.clear();
+            ApplyHoverTarget(*s, hit);
             InvalidateRect(hwnd, nullptr, FALSE);
         }
         TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE | TME_NONCLIENT, hwnd, 0 };
@@ -735,6 +732,19 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 ApplyAccentFromPrefs(*s, true);
             ApplyAppWindowChrome(*s);
             InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+
+    case WM_DEVICECHANGE:
+        // A USB stick, a mounted image, or any new volume changes the drive
+        // list. The sidebar model is built once, so rebuild it here instead of
+        // waiting for a language switch or a restart.
+        if (s && (wParam == DBT_DEVICEARRIVAL || wParam == DBT_DEVICEREMOVECOMPLETE)) {
+            const auto* header = reinterpret_cast<const DEV_BROADCAST_HDR*>(lParam);
+            if (!header || header->dbch_devicetype == DBT_DEVTYP_VOLUME) {
+                RefreshSidebarModel(*s);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
         }
         return 0;
 
@@ -893,8 +903,10 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     if (page == 4 && s->duplicateScan.scanning) dirty = true;
                 }
             }
+            // 150 ms: the icon rail relies on the hint to name each row, and the
+            // old 400 ms delay read as "no tooltip at all".
             if (s->hoverRegion != 0 && s->tooltipText.empty() && s->hoverSince != 0 &&
-                GetTickCount64() - s->hoverSince >= 400) {
+                GetTickCount64() - s->hoverSince >= 150) {
                 s->tooltipText = TooltipForHover(*s);
                 dirty = !s->tooltipText.empty() || dirty;
             }
@@ -1536,9 +1548,13 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 snap.tray = s->tray;
                 snap.undo_json = s->ops.UndoToJson();
                 snap.sidebar_collapsed = static_cast<int>(s->sidebarCollapsedMask);
+                snap.sidebar_hidden = static_cast<int>(s->sidebarHiddenMask);
+                snap.sidebar_order = app::NormalizeSidebarOrder(s->sidebarOrder);
+                snap.quick_access_hidden = static_cast<int>(s->sidebarQuickAccessHiddenMask);
                 snap.starred_expanded = s->starredExpanded;
                 snap.details_panel = s->showDetailsPanel;
                 snap.details_preview_only = s->detailsPreviewOnly;
+                snap.details_preview = s->detailsPreviewEnabled;
                 snap.details_panel_width = static_cast<int>(std::lround(s->detailsPanelWidth));
                 app::SaveSession(snap);
                 s->places.Save();
@@ -1666,6 +1682,13 @@ int ShotModeMain(AppState& state, HWND hwnd) {
             }
             Sleep(40);
         }
+        if (state.shot_tooltip) {
+            // After the pump: a mouse move during startup would clear this.
+            state.hoverRegion = static_cast<int>(ui::HitTestResult::SidebarItem);
+            state.hoverLabel = L"Project";
+            state.hoverPoint = POINT{ 60, 320 };
+            state.tooltipText = state.hoverLabel;
+        }
         Render(state);
         ok = state.compositor.SaveSnapshot(state.shot.output.c_str());
     } __except (pulse::crash::ReportFatal(GetExceptionInformation(), "shot")) {
@@ -1727,6 +1750,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
             return rc;
         }
         if (wcscmp(__wargv[i], L"--seed-shell-verbs") == 0) {
+            // The cache stores display text, and the synthesized rows (打开方式…)
+            // come from the resource strings: seeding without them wrote empty
+            // rows that the menu then dropped.
+            l10n::Initialize(hInstance, L"system");
             const int rc = app::SeedMachineStaticVerbCache() ? 0 : 1;
             OleUninitialize();
             return rc;
@@ -1762,10 +1789,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         state.tray = session.tray;
         state.darkMode = session.dark;
         state.sidebarCollapsedMask = static_cast<uint32_t>(session.sidebar_collapsed);
+        state.sidebarHiddenMask = static_cast<uint32_t>(session.sidebar_hidden);
+        state.sidebarOrder = session.sidebar_order.empty()
+            ? app::DefaultSidebarOrder() : session.sidebar_order;
+        state.sidebarQuickAccessHiddenMask = static_cast<uint32_t>(session.quick_access_hidden);
         state.starredExpanded = session.starred_expanded;
         state.pending_undo_json = session.undo_json;
         state.showDetailsPanel = session.details_panel;
         state.detailsPreviewOnly = session.details_preview_only;
+        state.detailsPreviewEnabled = session.details_preview;
         state.detailsPreviewExpansion = session.details_preview_only ? 1.0f : 0.0f;
         state.detailsPanelWidth = static_cast<float>(session.details_panel_width);
         state.renderer.SetDetailsPanelWidth(state.detailsPanelWidth);
@@ -1804,6 +1836,18 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
             state.shot_tag_rename = true;
         } else if (wcscmp(__wargv[i], L"--shot-tag-drag") == 0) {
             state.shot_tag_drag = true;
+        } else if (wcscmp(__wargv[i], L"--shot-rail") == 0) {
+            // GUI verification for the icon rail: every section folded, so a
+            // narrow window shows one row per section.
+            state.sidebarCollapsedMask = (1u << app::kSidebarSectionCount) - 1u;
+        } else if (wcscmp(__wargv[i], L"--shot-tooltip") == 0) {
+            // GUI verification for a rail hint; staged right before the shot so
+            // the message pump cannot clear it (see ShotModeMain).
+            state.shot_tooltip = true;
+            state.hoverRegion = static_cast<int>(ui::HitTestResult::SidebarItem);
+            state.hoverLabel = L"Project";
+            state.hoverPoint = POINT{ 60, 320 };
+            state.tooltipText = state.hoverLabel;
         } else if (wcscmp(__wargv[i], L"--shot-details") == 0) {
             state.shot_details = true;
         } else if (wcscmp(__wargv[i], L"--shot-details-multi") == 0) {

@@ -35,6 +35,8 @@ int ClampCap(int v, int lo, int hi, int fallback) {
 } // namespace
 
 void ContextMenuPrefs::ResetToDefaults() {
+    // Explorer parity for the visible groups; 发送到 and the image / system verbs
+    // stay off until the user asks for them from the settings page.
     software = true;
     share = false;
     wallpaper = false;
@@ -324,6 +326,7 @@ bool ContextMenuPrefs::FromJson(const std::wstring& json) {
         }
     }
 
+    MigrateSeenKeys();
     CoalesceCompressCatalog();
 
     slow_ext.clear();
@@ -354,6 +357,47 @@ bool ContextMenuPrefs::FromJson(const std::wstring& json) {
         }
     }
     return true;
+}
+
+// Older builds keyed the catalog by raw display text, so one verb showed up once
+// per file type ("新建(N)" / "新建(W)", "用 X 打开" with and without spaces) and
+// switching one of them off left its siblings on. Re-key every row through
+// CatalogKey, merge the duplicates, and move the stored overrides onto the
+// normalized keys so a switch the user already flipped keeps applying.
+void ContextMenuPrefs::MigrateSeenKeys() {
+    std::vector<SeenMenuItem> merged;
+    merged.reserve(seen.size());
+    for (auto& item : seen) {
+        if (ipc::IsHandlerCatalogKey(item.key)) {
+            merged.push_back(std::move(item));
+            continue;
+        }
+        const std::wstring canonical = ipc::CatalogKey(item.text, item.flyout);
+        if (canonical.empty()) continue;
+        bool duplicate = false;
+        for (const auto& kept : merged) {
+            if (kept.key == canonical) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) continue;
+        item.key = canonical;
+        merged.push_back(std::move(item));
+    }
+    seen = std::move(merged);
+
+    std::unordered_map<std::wstring, bool> moved;
+    moved.reserve(item_enabled.size());
+    for (const auto& kv : item_enabled) {
+        std::wstring key = kv.first;
+        if (!ipc::IsHandlerCatalogKey(key) && key.size() > 2 && key[1] == L':' &&
+            (key[0] == L'v' || key[0] == L'f')) {
+            key = key.substr(0, 2) + ipc::NormalizeCatalogText(key.substr(2));
+        }
+        moved[key] = kv.second;
+    }
+    item_enabled = std::move(moved);
 }
 
 void ContextMenuPrefs::CoalesceCompressCatalog() {

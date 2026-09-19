@@ -98,9 +98,12 @@ std::vector<ShellMenuEntry> ApplyExplorerPrefs(const ContextMenuPrefs& prefs,
             if (mru_kept >= mru_cap) continue;
             ++mru_kept;
         }
+        // Explorer's order: vendor flyouts, then software verbs, 打开方式, 打印,
+        // and 发送到 / image / system verbs last. Ranking by category instead of
+        // "is a flyout" keeps the 发送到 submenu from jumping above the software
+        // section now that the share group defaults to on.
         int rank = 4;
-        if (flyout) rank = 0;
-        else if (cat == ipc::CtxMenuCategory::Software) rank = 1;
+        if (cat == ipc::CtxMenuCategory::Software) rank = flyout ? 0 : 1;
         else if (cat == ipc::CtxMenuCategory::OpenWith) rank = 2;
         else if (cat == ipc::CtxMenuCategory::Print) rank = 3;
         if (flyout && ipc::IsCompressVendorFlyout(e.text))
@@ -289,10 +292,11 @@ bool ContextMenuController::ExecuteShellCommand(
 }
 
 bool ContextMenuController::RequestStaticPrefetch(const std::wstring& extension) {
-    if (extension.empty() || static_cache_.contains(extension) ||
-        static_pending_.contains(extension)) {
-        return false;
-    }
+    if (extension.empty() || static_pending_.contains(extension)) return false;
+    const auto cached = static_cache_.find(extension);
+    // Rows seeded from the on-disk cache still get one live pass: the cache can
+    // be older than the enumeration code (that is how 打开方式 went missing).
+    if (cached != static_cache_.end() && !static_seeded_.contains(extension)) return false;
     static_pending_.insert(extension);
     return true;
 }
@@ -300,15 +304,22 @@ bool ContextMenuController::RequestStaticPrefetch(const std::wstring& extension)
 void ContextMenuController::MergeStaticCache(
     std::unordered_map<std::wstring, std::vector<StaticVerb>> entries) {
     for (auto& [extension, verbs] : entries) {
-        if (!static_cache_.contains(extension)) {
-            static_cache_.emplace(std::move(extension), std::move(verbs));
-        }
+        if (static_cache_.contains(extension)) continue;
+        // Rows with empty display text (written by a build without resources)
+        // would be dropped by the menu anyway; drop them here and let the live
+        // enumeration replace the rest.
+        verbs.erase(std::remove_if(verbs.begin(), verbs.end(),
+                                   [](const StaticVerb& v) { return v.display.empty(); }),
+                    verbs.end());
+        static_cache_.emplace(extension, std::move(verbs));
+        static_seeded_.insert(std::move(extension));
     }
 }
 
 bool ContextMenuController::CompleteStaticVerbs(const std::wstring& extension,
                                                 std::vector<StaticVerb> verbs) {
     static_pending_.erase(extension);
+    static_seeded_.erase(extension);
     static_cache_[extension] = std::move(verbs);
     if (extension_ != extension) return false;
     static_verbs_ = static_cache_[extension];
@@ -317,6 +328,7 @@ bool ContextMenuController::CompleteStaticVerbs(const std::wstring& extension,
 
 void ContextMenuController::InvalidateCaches() {
     static_cache_.clear();
+    static_seeded_.clear();
     com_cache_.clear();
     static_pending_.clear();
 }

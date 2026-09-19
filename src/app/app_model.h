@@ -376,12 +376,59 @@ struct SidebarEntry {
     bool is_drive = false;
     float used_ratio = 0.0f;
     bool expandable = false;
+    // Built-in quick-access link (BuiltinQuickAccess), -1 for user entries.
+    // The quick-access menu toggles these one by one.
+    int builtin = -1;
 };
+
+// Built-in quick-access links, in the order they are listed. The stored mask
+// (session "quickAccessHidden") is indexed by these values, so changing the set
+// or the order needs a session migration (see kSessionVersion in session.cpp).
+enum class BuiltinQuickAccess : int {
+    Recent = 0,
+    Desktop,
+    Downloads,
+    RecycleBin,
+    Count,
+};
+
+// Sidebar sections. The ids are stable: the collapse/hide bitmasks stored in the
+// session are indexed by them, and the user may reorder the groups by dragging.
+enum class SidebarSectionId : int {
+    Workspaces = 0,
+    QuickAccess,
+    SavedSearches,
+    Drives,
+    Tags,
+    Networks,
+    Cloud,   // OneDrive accounts; leads the pane, the way Explorer shows them.
+    Starred, // Starred items: a section of their own, next to quick access.
+    Count,
+};
+
+inline constexpr int kSidebarSectionCount = static_cast<int>(SidebarSectionId::Count);
+
+// Sections whose rows are the section itself: they render without a header and
+// cannot be folded as a whole. Single source of truth — the view-model builder
+// and the section menu both ask here.
+constexpr bool IsHeaderlessSection(SidebarSectionId id) {
+    return id == SidebarSectionId::Starred || id == SidebarSectionId::Cloud;
+}
+
+// Display order used until the user drags a section header to a new position.
+std::vector<int> DefaultSidebarOrder();
+
+// Index of a section inside WindowViewModel::sidebar, or -1 when the model does
+// not carry it. Lets callers address sections by id instead of open-coding a
+// find_if over the group list.
+int SidebarSectionIndex(const ui::WindowViewModel& vm, int section_id);
 
 struct SidebarModel {
     std::vector<SidebarEntry> quick_access;
     std::vector<SidebarEntry> saved_searches;
     std::vector<SidebarEntry> drives;
+    std::vector<SidebarEntry> cloud;   // OneDrive accounts (empty while signed out)
+    std::vector<SidebarEntry> starred; // the "starred items" root row
 };
 
 SidebarModel BuildSidebarModel(const fs::RecycleBinInfo* recycle = nullptr);
@@ -394,6 +441,13 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
                                          const SidebarModel& sidebar, bool focused, bool maximized, bool dark,
                                          const PlacesCatalog* places = nullptr,
                                          uint32_t sidebar_collapsed_mask = 0,
-                                         bool starred_expanded = true);
+                                         uint32_t sidebar_hidden_mask = 0,
+                                         bool starred_expanded = true,
+                                         const std::vector<int>* sidebar_order = nullptr,
+                                         uint32_t quick_access_hidden_mask = 0);
+
+// Sanitizes a stored section order: keeps only known ids, appends the missing
+// ones, drops duplicates. Returns DefaultSidebarOrder() when nothing survives.
+std::vector<int> NormalizeSidebarOrder(const std::vector<int>& order);
 
 } // namespace pulse::app

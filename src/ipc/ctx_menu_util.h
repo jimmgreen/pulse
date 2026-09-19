@@ -81,7 +81,10 @@ inline constexpr int kMaxSubmenuChildren = 16;
 // Stays inside CmdShellStaticBase..CmdShellComBase (2000 slots).
 inline constexpr int kStaticVerbStride = kMaxSubmenuChildren + 1;
 inline constexpr int kMaxStaticVerbParents = 2000 / kStaticVerbStride;
-inline constexpr int kDefaultExplorerCap = 32;
+// Explorer itself has no cap; 48 is our hard ceiling (AppendShellSection also
+// stops there), so the default keeps the whole shell verb list visible instead
+// of truncating it early.
+inline constexpr int kDefaultExplorerCap = 48;
 
 inline constexpr wchar_t kFolderVerbKey[] = L":folder";
 inline constexpr wchar_t kDriveVerbKey[] = L":drive";
@@ -214,9 +217,25 @@ inline CtxMenuGroup GroupOf(CtxMenuCategory c) {
 }
 
 // Catalog key: cleaned lowercase text, flyout vs top-level verb kept distinct.
+// The shell labels the same verb differently per file type ("新建(N)" vs
+// "新建(W)") and COM repeats a registry row with different spacing, so spaces and
+// a single-character accelerator suffix are dropped: one catalog row then
+// controls every spelling, which is what makes the per-item switches stick.
+inline std::wstring NormalizeCatalogText(std::wstring_view text) {
+    const std::wstring cleaned = ToLowerVerb(CleanMenuText(text));
+    std::wstring t;
+    t.reserve(cleaned.size());
+    for (const wchar_t c : cleaned)
+        if (c != L' ' && c != L'\t') t.push_back(c);
+    if (t.size() >= 3 && t.back() == L')') {
+        const size_t open = t.rfind(L'(');
+        if (open != std::wstring::npos && t.size() - open <= 3) t.erase(open);
+    }
+    return t;
+}
+
 inline std::wstring CatalogKey(std::wstring_view text, bool is_flyout) {
-    std::wstring t = ToLowerVerb(CleanMenuText(text));
-    return (is_flyout ? L"f:" : L"v:") + t;
+    return (is_flyout ? L"f:" : L"v:") + NormalizeCatalogText(text);
 }
 
 inline bool IsOpenWithPickerText(std::wstring_view text) {

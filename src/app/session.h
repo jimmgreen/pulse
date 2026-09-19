@@ -41,11 +41,15 @@ struct SessionSnapshot {
     std::wstring active_path;
     StagingTray tray;
     std::wstring undo_json; // ops::OpsManager undo stack (serialized array)
-    int sidebar_collapsed = 0; // bitmask over WindowViewModel::sidebar group order
+    int sidebar_collapsed = 0; // bitmask indexed by SidebarSectionId
+    int sidebar_hidden = 0;    // same ids; hidden sections are not drawn at all
+    std::vector<int> sidebar_order; // display order, empty = DefaultSidebarOrder()
+    int quick_access_hidden = 0;    // bitmask over BuiltinQuickAccess links
     bool starred_expanded = true;
     bool details_panel = false;  // right details panel visible
     int details_panel_width = 340;
     bool details_preview_only = false;
+    bool details_preview = true; // preview pane enabled (session remembers it)
     std::array<float, 3> details_column_dividers{}; // version 3 migration only
     std::vector<LayoutTabSnapshot> layout_tabs;
     std::vector<GroupSessionSnapshot> tab_groups;

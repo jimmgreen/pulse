@@ -58,6 +58,17 @@ void ShowOmnibar(AppState& s, OmnibarMode mode);
 void ShowAdvancedSearch(AppState& s, bool require_scope = false);
 void ShowSearchFilterMenu(AppState& s, int chip, RECT control_rect);
 void ShowRecyclePlaceMenu(AppState& s, POINT screen_pt);
+// Rebuilds the sidebar model (quick access, OneDrive accounts, drives, saved
+// searches). Used on startup, after a language switch, and when the volume set
+// changes (a plugged-in stick, a mounted image).
+void RefreshSidebarModel(AppState& s);
+// Navigation-pane background menu: show or hide sections, expand or collapse them all.
+void ShowSidebarSectionsMenu(AppState& s, POINT screen_pt);
+// Menu for one section (header or empty space inside it): toggle its built-in
+// quick-access links, fold it, or hide it. Both take a SidebarSectionId value.
+void ShowSidebarSectionMenu(AppState& s, int section, POINT screen_pt);
+void ToggleSidebarSection(AppState& s, int group);
+void SetEverySidebarSectionCollapsed(AppState& s, bool collapsed);
 void ApplyAppWindowChrome(AppState& s);
 bool PickImageFile(HWND owner, std::wstring& path);
 bool PickFolder(HWND owner, std::wstring& path, const wchar_t* title);

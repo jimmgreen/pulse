@@ -233,6 +233,9 @@ void ClearTextWidthCache() {
             Item,
             Drive,
             Tag,
+            // Rail only: a section's own icon row (always present, so the icon
+            // never disappears and the section can be folded from it).
+            Rail,
             TrayPanel,
             TrayRelease,
             TrayClear
@@ -300,9 +303,13 @@ void ClearTextWidthCache() {
     float SidebarContentHeight(const WindowViewModel& vm, const SidebarMetrics& m) {
         float height = m.pad;
         for (const auto& group : vm.sidebar) {
+            if (group.hidden) continue;
             if (group.items.empty() && group.add_action == SidebarAddAction::None) continue;
-            height += m.headerH + 4.0f * m.scale;
-            if (!group.collapsed) {
+            // A header-less section (the starred root) is its own first row: it
+            // has nothing to fold, so it never carries the header height.
+            const bool has_header = !group.header.empty();
+            if (has_header) height += m.headerH + 4.0f * m.scale;
+            if (!has_header || !group.collapsed) {
                 for (const auto& item : group.items)
                     height += SidebarItemHeight(item, m) + m.itemGap;
                 height += m.groupGap - m.itemGap;
@@ -325,15 +332,16 @@ void ClearTextWidthCache() {
         bar.offset = std::clamp(vm.sidebar_scroll, 0.0f,
             std::max(0.0f, bar.content_extent - bar.viewport_extent));
         bar.expand_progress = 1.0f;
-        bar.enabled = sb.right - sb.left > 60.0f * scale;
+        bar.enabled = !SidebarRailLayout(sb.right - sb.left, scale);
         return bar;
     }
 
     void LayoutSidebar(const WindowViewModel& vm, const D2D1_RECT_F& sb, float scale,
-                       std::vector<SidebarSlot>& out) {
+                       std::vector<SidebarSlot>& out,
+                       std::vector<SidebarGroupBand>* bands = nullptr) {
         out.clear();
         const float width = sb.right - sb.left;
-        const bool compact = width <= 60.0f * scale;
+        const bool compact = SidebarRailLayout(width, scale);
         const SidebarMetrics m = MakeSidebarMetrics(scale);
 
         if (compact) {
@@ -343,7 +351,25 @@ void ClearTextWidthCache() {
             int run = 0;
             for (int g = 0; g < static_cast<int>(vm.sidebar.size()); ++g) {
                 const auto& group = vm.sidebar[g];
-                if (group.collapsed) continue;
+                if (group.hidden) continue;
+                // Empty sections stay invisible, exactly as in the wide layout.
+                if (group.items.empty() && group.add_action == SidebarAddAction::None) continue;
+                // Header-less sections (starred root, OneDrive accounts) are
+                // their own rows and cannot fold; every other section gets a
+                // permanent rail row that folds and unfolds it, so the section
+                // icon never disappears.
+                if (!group.header.empty()) {
+                    if (y + rowH > sb.bottom - trayH) break;
+                    SidebarSlot slot;
+                    slot.kind = SidebarSlot::Rail;
+                    slot.rc = D2D1::RectF(4.0f * scale, y, width - 4.0f * scale, y + rowH);
+                    slot.group = g;
+                    slot.item = -1;
+                    slot.run = run++;
+                    out.push_back(slot);
+                    y += rowH;
+                    if (group.collapsed) continue;
+                }
                 for (int i = 0; i < static_cast<int>(group.items.size()); ++i) {
                     if (group.items[i].starred_child) continue;
                     if (y + rowH > sb.bottom - trayH) break;
@@ -377,16 +403,27 @@ void ClearTextWidthCache() {
         int run = 0;
         for (int g = 0; g < static_cast<int>(vm.sidebar.size()); ++g) {
             const auto& group = vm.sidebar[g];
+            if (group.hidden) continue;
             if (group.items.empty() && group.add_action == SidebarAddAction::None) continue;
             if (y >= contentBottom) break;
-            SidebarSlot header;
-            header.kind = SidebarSlot::Header;
-            header.rc = D2D1::RectF(innerL, y, innerR, y + m.headerH);
-            header.group = g;
-            if (header.rc.bottom > sb.top && header.rc.bottom <= contentBottom)
-                out.push_back(header);
-            y += m.headerH + 4.0f * scale;
-            if (group.collapsed) continue;
+            const float band_top = y;
+            // Sections without a header (the starred root) show their rows
+            // directly and cannot be folded as a whole.
+            const bool has_header = !group.header.empty();
+            if (has_header) {
+                SidebarSlot header;
+                header.kind = SidebarSlot::Header;
+                header.rc = D2D1::RectF(innerL, y, innerR, y + m.headerH);
+                header.group = g;
+                if (header.rc.bottom > sb.top && header.rc.bottom <= contentBottom)
+                    out.push_back(header);
+                y += m.headerH + 4.0f * scale;
+            }
+            if (has_header && group.collapsed) {
+                if (bands) bands->push_back(
+                    { g, band_top, std::min(y + m.groupGap - m.itemGap, contentBottom) });
+                continue;
+            }
             for (int i = 0; i < static_cast<int>(group.items.size()); ++i) {
                 const auto& item = group.items[i];
                 if (g == vm.tag_drag_group && i == vm.tag_drag_item) {
@@ -413,6 +450,7 @@ void ClearTextWidthCache() {
                 y += h + m.itemGap;
             }
             y += m.groupGap - m.itemGap;
+            if (bands) bands->push_back({ g, band_top, std::min(y, contentBottom) });
         }
 
         // Dragged tag floats at the cursor, clamped to the tag flow range.
@@ -840,9 +878,12 @@ void ClearTextWidthCache() {
         out.preview = D2D1::RectF(x, panel.top + pad, panel.right - pad,
                                   panel.top + pad + preview_h);
         const float previewBottom = panel.top + pad + preview_h;
-        out.preview_toggle = D2D1::RectF(x, previewBottom, panel.right - pad,
-            std::min(panel.bottom, previewBottom + 28.0f * s));
-        if (d.preview_only) {
+        // Preview off: no fold bar and no well to hit up there.
+        if (d.preview_enabled) {
+            out.preview_toggle = D2D1::RectF(x, previewBottom, panel.right - pad,
+                std::min(panel.bottom, previewBottom + 28.0f * s));
+        }
+        if (d.preview_only && d.preview_enabled) {
             out.content_height_dip = (panel.bottom - panel.top) / s;
             return;
         }
@@ -853,6 +894,10 @@ void ClearTextWidthCache() {
                                      panel.right - pad, y + 22.0f * s);
             out.star = D2D1::RectF(out.rename.left - 4.0f * s - 22.0f * s, y,
                                    out.rename.left - 4.0f * s, y + 22.0f * s);
+            // Preview on/off sits left of the star, so it stays reachable after
+            // the well itself collapses.
+            out.preview_enable = D2D1::RectF(out.star.left - 4.0f * s - 22.0f * s, y,
+                                             out.star.left - 4.0f * s, y + 22.0f * s);
         }
         y += 22.0f * s + 16.0f * s + 8.0f * s; // name + type + gap
         if (d.multi_count <= 1) {

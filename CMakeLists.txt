@@ -315,11 +315,12 @@ if(PULSE_APP_SOURCES)
         "${CMAKE_CURRENT_SOURCE_DIR}/assets/fluent/panel_right_24_color.svg"
         "${CMAKE_CURRENT_SOURCE_DIR}/assets/fluent/panel_right_contract_24_color.svg"
         "${CMAKE_CURRENT_SOURCE_DIR}/assets/fluent/add_circle_24_color.svg"
-        "${CMAKE_CURRENT_SOURCE_DIR}/assets/fluent/search_24_color.svg")
+        "${CMAKE_CURRENT_SOURCE_DIR}/assets/fluent/search_24_color.svg"
+        "${CMAKE_CURRENT_SOURCE_DIR}/assets/fluent/pc_24_color.svg")
     target_link_options(pulse PRIVATE /MANIFEST:NO)
     target_link_libraries(pulse PRIVATE
         d3d11 d2d1 dwrite dxgi dcomp dwmapi shcore ole32 shell32 uuid comctl32 advapi32 shlwapi version windowscodecs gdi32 netapi32 mpr bcrypt pulse_crash_reporter)
-    target_link_libraries(pulse PRIVATE winhttp crypt32)
+    target_link_libraries(pulse PRIVATE winhttp crypt32 secur32)
     target_link_libraries(pulse PRIVATE pulse_localization)
     pulse_enable_lumatext(pulse)
     pulse_add_version_resource(pulse "Pulse file manager" "pulse" "pulse.exe")

@@ -19,10 +19,34 @@
 
 namespace pulse::ui {
 
+namespace {
+
+// Accent insertion indicator shared by the two sidebar reorders (sections and
+// quick-access pins).
+void DrawSidebarInsertionLine(ID2D1DeviceContext* dc, ID2D1SolidColorBrush* brush,
+                              const D2D1_RECT_F& sb, float scale, float y) {
+    const SidebarMetrics m = MakeSidebarMetrics(scale);
+    const float th = 2.5f * scale;
+    const float lx0 = sb.left + m.pad + 2.0f * scale;
+    const float lx1 = sb.right - m.pad - 2.0f * scale;
+    FillRoundedRect(dc, brush, lx0, y - th * 0.5f, lx1 - lx0, th, th * 0.5f);
+    dc->FillEllipse(
+        D2D1::Ellipse(D2D1::Point2F(lx0 + 4.0f * scale, y), 3.0f * scale, 3.0f * scale),
+        brush);
+}
+
+} // namespace
+
 D2D1_RECT_F MainRenderer::SidebarRect(float w, float h) const {
     float top = title_bar_height_ + toolbar_height_ + margin_;
     float bottom = h - status_height_ - margin_;
     return D2D1::RectF(0.0f, top, EffectiveSidebarWidth(w), bottom);
+}
+
+void MainRenderer::SidebarGroupBands(const WindowViewModel& vm, float w, float h,
+                                     std::vector<SidebarGroupBand>& out) const {
+    std::vector<SidebarSlot> slots;
+    LayoutSidebar(vm, SidebarRect(w, h), scale_, slots, &out);
 }
 
 D2D1_RECT_F MainRenderer::StagingTrayRect(const WindowViewModel& vm, float w, float h) const {
@@ -59,7 +83,7 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
 
     std::vector<SidebarSlot> slots;
     LayoutSidebar(vm, sb, scale_, slots);
-    const bool compact = w <= 60.0f * scale_;
+    const bool compact = SidebarRailLayout(w, scale_);
     painter_.BeginFrame(theme, IsHighContrast());
 
     if (compact) {
@@ -76,6 +100,43 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
                     MakeBrush(dc, theme.accent, brAccent_);
                     dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(slot.rc.right - 6.0f * scale_,
                         slot.rc.top + 7.0f * scale_), badge * 0.5f, badge * 0.5f), brAccent_.get());
+                }
+                continue;
+            }
+            if (slot.kind == SidebarSlot::Rail) {
+                // The section's own rail row: one icon stands in for the whole
+                // section, and clicking it folds or unfolds the section.
+                const auto& group = vm.sidebar[slot.group];
+                if (IsHovered(vm, HitTestResult::SidebarHeader, slot.group)) {
+                    MakeBrush(dc, theme.fill_hover, brFillSelected_);
+                    FillRoundedRect(dc, brFillSelected_.get(), slot.rc.left, slot.rc.top,
+                        slot.rc.right - slot.rc.left, slot.rc.bottom - slot.rc.top,
+                        theme.radius_control * scale_);
+                }
+                std::wstring glyph = group.icon_glyph;
+                if (glyph.empty() && !group.items.empty())
+                    glyph = group.items.front().icon_glyph;
+                if (glyph.empty()) glyph = kIconFolder;
+                const int rail_svg = FluentSvgIdForGlyph(glyph);
+                const float rail_icon = 20.0f * scale_;
+                const float rail_pad_x = (slot.rc.right - slot.rc.left - rail_icon) * 0.5f;
+                const float rail_pad_y = (slot.rc.bottom - slot.rc.top - rail_icon) * 0.5f;
+                const D2D1_RECT_F rail_rc = D2D1::RectF(
+                    slot.rc.left + rail_pad_x, slot.rc.top + rail_pad_y,
+                    slot.rc.right - rail_pad_x, slot.rc.bottom - rail_pad_y);
+                if (IsHighContrast() || rail_svg == 0 || !DrawFluentSvg(rail_svg, rail_rc, 1.0f)) {
+                    const std::wstring fallback = group.header.empty()
+                        ? std::wstring(L"?") : group.header.substr(0, 1);
+                    DrawIconText(slot.rc.left, slot.rc.top, slot.rc.right - slot.rc.left,
+                        slot.rc.bottom - slot.rc.top, glyph, fallback,
+                        theme.text_secondary, 0.92f);
+                }
+                // Separator between the section row and its expanded rows.
+                if (!group.collapsed) {
+                    MakeBrush(dc, theme.stroke_divider, brStrokeDivider_);
+                    FillRect(dc, brStrokeDivider_.get(), slot.rc.left + 8.0f * scale_,
+                             slot.rc.bottom - 1.0f,
+                             slot.rc.right - slot.rc.left - 16.0f * scale_, 1.0f);
                 }
                 continue;
             }
@@ -119,8 +180,19 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             header.bounds = slot.rc;
             header.text = vm.sidebar[slot.group].header;
             header.expanded = !vm.sidebar[slot.group].collapsed;
-            header.state.hovered = IsHovered(vm, HitTestResult::SidebarHeader, slot.group);
+            header.glyph = vm.sidebar[slot.group].icon_glyph;
+            const int header_svg = FluentSvgIdForGlyph(header.glyph);
+            header.skip_glyph =
+                !IsHighContrast() && header_svg != 0 && EnsureFluentSvg(header_svg);
+            // The section being dragged stays lit for the whole gesture.
+            const bool header_dragging = vm.sidebar_group_drag_id >= 0 &&
+                vm.sidebar[slot.group].id == vm.sidebar_group_drag_id;
+            header.state.hovered =
+                IsHovered(vm, HitTestResult::SidebarHeader, slot.group) || header_dragging;
             painter_.DrawSidebarSectionHeader(header);
+            if (header.skip_glyph) {
+                DrawFluentSvg(header_svg, painter_.SidebarSectionHeaderIconRect(slot.rc), 1.0f);
+            }
             if (vm.sidebar[slot.group].add_action != SidebarAddAction::None) {
                 DrawIconText(slot.rc.right - 52.0f * scale_, slot.rc.top,
                     24.0f * scale_, slot.rc.bottom - slot.rc.top,
@@ -159,6 +231,12 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
         state.hovered = IsHovered(vm, HitTestResult::SidebarItem, slot.run) ||
             IsHovered(vm, HitTestResult::SidebarItemAction, slot.run) ||
             IsHovered(vm, HitTestResult::SidebarItemExpand, slot.run);
+        // Rows of the section being reordered stay lit like its header, and the
+        // dragged pin row reads as held.
+        if (vm.sidebar_group_drag_id >= 0 &&
+            vm.sidebar[slot.group].id == vm.sidebar_group_drag_id) state.hovered = true;
+        if (vm.sidebar_pin_drag_index >= 0 && slot.run == vm.sidebar_pin_drag_index)
+            state.hovered = true;
         if (vm.tag_drag_group >= 0) state.hovered = false; // run indices shift mid-drag
         if (slot.kind == SidebarSlot::Drive) {
             fluent::DriveSidebarItemSpec drive;
@@ -298,6 +376,18 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
                     item.expanded ? L"v" : L">", theme.text_secondary, 0.68f);
             }
         }
+    }
+
+    // Insertion lines for the two reorders: the dragged section and the dragged
+    // quick-access pin share one indicator.
+    if (vm.sidebar_group_gap_line_y > 0.0f || vm.sidebar_pin_gap_line_y > 0.0f) {
+        MakeBrush(dc, theme.accent, brAccent_);
+        if (vm.sidebar_group_gap_line_y > 0.0f)
+            DrawSidebarInsertionLine(dc, brAccent_.get(), sb, scale_,
+                                     vm.sidebar_group_gap_line_y);
+        if (vm.sidebar_pin_gap_line_y > 0.0f)
+            DrawSidebarInsertionLine(dc, brAccent_.get(), sb, scale_,
+                                     vm.sidebar_pin_gap_line_y);
     }
 
     painter_.DrawScrollbar(SidebarScrollbarSpec(vm, sb, scale_));

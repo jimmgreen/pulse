@@ -803,3 +803,20 @@
 // Protected operating system files (hidden + system attributes).
 #define IDS_SETTINGS_SHOW_PROTECTED 1979
 #define IDS_SETTINGS_SHOW_PROTECTED_DESC 1980
+
+// Sidebar section menu, opened on the empty part of the sidebar.
+#define IDS_SIDEBAR_EXPAND_ALL 1981
+#define IDS_SIDEBAR_COLLAPSE_ALL 1982
+#define IDS_SIDEBAR_EXPAND_SECTION 1983
+#define IDS_SIDEBAR_COLLAPSE_SECTION 1984
+#define IDS_SIDEBAR_HIDE_SECTION 1985
+// Details panel preview on/off chip (1986 is taken by the OneDrive rows).
+// The first two are the pane label / placeholder, the last two the tooltip that
+// names what clicking the switch will do.
+#define IDS_PREVIEW_TOGGLE 1988
+#define IDS_PREVIEW_OFF 1989
+#define IDS_PREVIEW_HIDE 1990
+#define IDS_PREVIEW_SHOW 1991
+
+// OneDrive account rows: "<account name> - <Personal|tenant>".
+#define IDS_ONEDRIVE_PERSONAL 1986
