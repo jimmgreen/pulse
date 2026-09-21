@@ -18,6 +18,16 @@ public:
     AcquireResult Acquire(std::wstring_view mutex_name = {});
     void Release();
     bool ForwardOpenPath(const std::wstring& path, DWORD timeout_ms = 2000) const;
+    // The same hand-off to a window the caller already located - a tab dropped
+    // on another Pulse window. The target opens the folder as its own tab.
+    static bool SendOpenPathToWindow(HWND target, const std::wstring& path,
+                                     DWORD timeout_ms = 2000);
+    // The last tab of a window, dropped on another one: the source has nothing
+    // left to show and closes, so the target also takes over the singleton
+    // resources the source is about to release (mutex, tray, hotkey, session).
+    static bool SendTabTransfer(HWND target, const std::wstring& path,
+                                DWORD timeout_ms = 2000);
+    static bool DecodeTabTransfer(const COPYDATASTRUCT* data, std::wstring& path);
 
     static bool DecodeOpenPath(const COPYDATASTRUCT* data, std::wstring& path);
     static ULONG_PTR OpenPathMessageId() noexcept;

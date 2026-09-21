@@ -1,6 +1,7 @@
 #include "tab_controller.h"
 
 #include "context_menu.h"
+#include "instance_launcher.h"
 #include "../common/localization.h"
 
 #include <algorithm>
@@ -86,6 +87,33 @@ void TabController::ToggleGroupCollapse(WindowTabs& tabs, int group_id) {
     Changed();
 }
 
+void TabController::NewTabInGroup(WindowTabs& tabs, int group_id) {
+    if (group_id == 0) return;
+    int last_member = -1;
+    for (int i = 0; i < static_cast<int>(tabs.items.size()); ++i) {
+        if (tabs.items[static_cast<size_t>(i)]->tab_group == group_id) last_member = i;
+    }
+    if (last_member < 0) return;
+    const Tab* folder = tabs.items[static_cast<size_t>(last_member)]->ActiveFolder();
+    const std::wstring path = folder ? folder->current_path : L"C:\\";
+    WillChangeLayout();
+    // A folded group hides its members, so a tab added to it would land on a
+    // strip that shows nothing: unfold first. NewTabAt makes the new tab
+    // active, which is why the unfold has to happen here and not at one of the
+    // two call sites (the group menu and the chip card).
+    if (TabGroup* group = FindGroup(tabs, group_id); group && group->collapsed) {
+        group->collapsed = false;
+        Changed();
+    }
+    tabs.NewTabAt(static_cast<size_t>(last_member + 1), path);
+    tabs.Active()->tab_group = group_id;
+    LayoutChanged();
+    if (callbacks_.load_tab) {
+        if (Tab* created = tabs.Active()->ActiveFolder())
+            callbacks_.load_tab(*created);
+    }
+}
+
 uint32_t TabController::FirstUnusedColor(const WindowTabs& tabs) const {
     for (uint32_t color : kPalette) {
         const bool used = std::any_of(tabs.tab_groups.begin(), tabs.tab_groups.end(),
@@ -146,25 +174,22 @@ void TabController::ShowGroupMenu(WindowTabs& tabs, int group_id, POINT screen_p
             current->color_rgb = kPalette[command - CmdTabColorBase];
         }
     } else if (command == CmdTabGroupNewTab) {
-        int last_member = -1;
-        for (int i = 0; i < static_cast<int>(tabs.items.size()); ++i) {
-            if (tabs.items[static_cast<size_t>(i)]->tab_group == id) last_member = i;
-        }
-        if (last_member >= 0) {
-            const Tab* folder = tabs.items[static_cast<size_t>(last_member)]->ActiveFolder();
-            const std::wstring path = folder ? folder->current_path : L"C:\\";
-            WillChangeLayout();
-            tabs.NewTabAt(static_cast<size_t>(last_member + 1), path);
-            tabs.Active()->tab_group = id;
-            LayoutChanged();
-            if (callbacks_.load_tab) {
-                if (Tab* created = tabs.Active()->ActiveFolder())
-                    callbacks_.load_tab(*created);
-            }
-        }
+        NewTabInGroup(tabs, id);
     } else if (command == CmdTabGroupUngroup) {
         RemoveGroup(tabs, id);
     } else if (command == CmdTabGroupClose) {
+        // Closing a group whose only member is the window's last tab closes the
+        // window: the model refuses to empty the strip, so the owner decides
+        // instead - exactly like the tab's own x. Without an owner the tab stays
+        // and the group is merely ungrouped, as before.
+        bool closes_window = false;
+        for (size_t i = 0; i < tabs.items.size(); ++i) {
+            if (tabs.items[i]->tab_group == id && tabs.ClosingLastTab(i)) closes_window = true;
+        }
+        if (closes_window && callbacks_.close_window) {
+            callbacks_.close_window();
+            return;
+        }
         WillChangeLayout();
         for (int i = static_cast<int>(tabs.items.size()) - 1; i >= 0; --i) {
             if (tabs.items[static_cast<size_t>(i)]->tab_group == id) {
@@ -184,16 +209,6 @@ void TabController::RemoveGroup(WindowTabs& tabs, int group_id) const {
     tabs.tab_groups.erase(std::remove_if(tabs.tab_groups.begin(), tabs.tab_groups.end(),
         [group_id](const TabGroup& group) { return group.id == group_id; }),
         tabs.tab_groups.end());
-}
-
-void TabController::PruneEmptyGroups(WindowTabs& tabs) const {
-    tabs.tab_groups.erase(std::remove_if(tabs.tab_groups.begin(), tabs.tab_groups.end(),
-        [&](const TabGroup& group) {
-            return std::none_of(tabs.items.begin(), tabs.items.end(),
-                [&](const std::unique_ptr<LayoutTab>& tab) {
-                    return tab->tab_group == group.id;
-                });
-        }), tabs.tab_groups.end());
 }
 
 void TabController::CloseTabs(WindowTabs& tabs, int first, int last, int except) const {
@@ -231,6 +246,8 @@ void TabController::ShowTabMenu(WindowTabs& tabs, int tab_index, POINT screen_pt
     std::vector<ui::FluentMenuItem> items;
     items.push_back(MenuItem(CmdTabNewRight, TabText(Text::TabNewRight), L"\xE710"));
     items.push_back(MenuItem(CmdTabDuplicate, TabText(Text::TabDuplicate), L"\xE8C8"));
+    items.push_back(MenuItem(CmdTabOpenInNewWindow,
+        pulse::l10n::Get(pulse::l10n::StringId::TabOpenNewWindow).c_str()));
     items.push_back(MenuItem(CmdTabRename,
         pulse::l10n::Get(pulse::l10n::StringId::TabRename).c_str(), L"\xE8AC"));
     ui::FluentMenuItem colors;
@@ -270,7 +287,8 @@ void TabController::ShowTabMenu(WindowTabs& tabs, int tab_index, POINT screen_pt
         items.back().separator_after = true;
     }
     items.push_back(MenuItem(CmdTabClose, TabText(Text::TabClose), L"\xE711"));
-    items.back().enabled = !tab.pinned && tabs.items.size() > 1;
+    // The window's last tab is closable too: it closes the window.
+    items.back().enabled = !tab.pinned;
     items.push_back(MenuItem(CmdTabCloseOthers, TabText(Text::TabCloseOthers)));
     items.push_back(MenuItem(CmdTabCloseRight, TabText(Text::TabCloseRight)));
 
@@ -288,6 +306,11 @@ void TabController::ShowTabMenu(WindowTabs& tabs, int tab_index, POINT screen_pt
             if (Tab* created = tabs.Active()->ActiveFolder())
                 callbacks_.load_tab(*created);
         }
+    } else if (command == CmdTabOpenInNewWindow) {
+        // A second window for this folder. A virtual view ("最近使用", a search,
+        // the settings page) travels as it is: the new window opens on it.
+        const Tab* folder = tab.ActiveFolder();
+        app::LaunchNewWindow(folder ? folder->current_path : std::wstring{});
     } else if (command == CmdTabRename) {
         std::wstring draft = LayoutTabTitle(tab);
         menu.SetFilterPlaceholder(pulse::l10n::Get(pulse::l10n::StringId::TabNameHint));
@@ -324,6 +347,12 @@ void TabController::ShowTabMenu(WindowTabs& tabs, int tab_index, POINT screen_pt
         NormalizeGroupRuns(tabs);
         PruneEmptyGroups(tabs);
     } else if (command == CmdTabClose) {
+        // Closing the only tab of a window closes the window: the model refuses
+        // to empty the strip, so hand the decision to the window's owner.
+        if (tabs.ClosingLastTab(static_cast<size_t>(tab_index))) {
+            if (callbacks_.close_window) callbacks_.close_window();
+            return;
+        }
         CloseTabs(tabs, tab_index, tab_index);
     } else if (command == CmdTabCloseOthers) {
         CloseTabs(tabs, 0, static_cast<int>(tabs.items.size()) - 1, tab_index);

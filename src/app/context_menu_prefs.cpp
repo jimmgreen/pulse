@@ -32,6 +32,25 @@ int ClampCap(int v, int lo, int hi, int fallback) {
     return v;
 }
 
+// Every key ToJson() writes (except "version"). A file truncated mid-write still
+// parses into a handful of keys, so the count doubles as the completeness test that
+// sends ReadDiskState() to the backup. A new key in ToJson() needs a line here too.
+constexpr const wchar_t* kStoredKeys[] = {
+    L"explorer_cap", L"open_with_mru", L"categories", L"items", L"seen", L"slow_ext"
+};
+
+// Half the keys, rounded up: fewer than this and the file is treated as damaged
+// rather than as the user's configuration.
+constexpr int kMinStoredKeys = (static_cast<int>(ARRAYSIZE(kStoredKeys)) + 1) / 2;
+
+int CountStoredKeys(const std::wstring& json) {
+    int found = 0;
+    for (const wchar_t* key : kStoredKeys) {
+        if (json.find(L"\"" + std::wstring(key) + L"\"") != std::wstring::npos) ++found;
+    }
+    return found;
+}
+
 } // namespace
 
 void ContextMenuPrefs::ResetToDefaults() {
@@ -439,19 +458,118 @@ void ContextMenuPrefs::CoalesceCompressCatalog() {
         item_enabled[ipc::CompressCatalogKey()] = false;
 }
 
-bool ContextMenuPrefs::Load() {
+// The main file first, its backup when the main one is missing, unreadable, or too
+// incomplete to trust. This file is a setting like app.json, so it gets the same set
+// of guarantees: a merge instead of a whole-file overwrite, a backup one step back, a
+// completeness gate on the key count, and no write at all when nothing can be read. A
+// backed-up file also heals a truncated one: the next Save() writes the merged state
+// back over the damaged main file.
+bool ContextMenuPrefs::ReadDiskState(ContextMenuPrefsValues& values, bool& main_exists,
+                                     bool* used_backup) const {
+    main_exists = false;
+    if (used_backup) *used_backup = false;
     const std::wstring dir = GetPulseDataDir();
     if (dir.empty()) return false;
-    std::wstring json;
-    if (!ReadUtf8File(dir + L"\\context_menu.json", json) || json.empty()) return false;
-    return FromJson(json);
+    const std::wstring main_path = dir + L"\\context_menu.json";
+    const std::wstring backup_path = main_path + L".bak";
+    main_exists = GetFileAttributesW(main_path.c_str()) != INVALID_FILE_ATTRIBUTES;
+
+    std::wstring main_json;
+    std::wstring backup_json;
+    const bool main_read = ReadUtf8File(main_path, main_json) && !main_json.empty();
+    const bool backup_read = ReadUtf8File(backup_path, backup_json) && !backup_json.empty();
+    const int main_keys = main_read ? CountStoredKeys(main_json) : 0;
+    const int backup_keys = backup_read ? CountStoredKeys(backup_json) : 0;
+
+    // A complete main file wins outright; anything else is compared key by key, so a
+    // half-written file never hides the copy that still has the settings in it.
+    const std::wstring* source = nullptr;
+    if (main_read && main_keys >= kMinStoredKeys) source = &main_json;
+    else if (backup_read && backup_keys >= kMinStoredKeys) source = &backup_json;
+    else if (main_read && backup_read)
+        source = main_keys >= backup_keys ? &main_json : &backup_json;
+    else if (main_read) source = &main_json;
+    else if (backup_read) source = &backup_json;
+    if (!source) return false;
+    if (used_backup) *used_backup = source == &backup_json;
+
+    ContextMenuPrefs parsed;
+    parsed.persist = false;
+    if (!parsed.FromJson(*source)) return false;
+    values = parsed;
+    return true;
+}
+
+ContextMenuPrefsValues ContextMenuPrefs::MergedWithDisk(
+    const ContextMenuPrefsValues& disk) const {
+    const ContextMenuPrefsValues& mine = *this;
+    const ContextMenuPrefsValues& baseline = disk_state_;
+    ContextMenuPrefsValues merged = mine;
+    if (mine.software == baseline.software) merged.software = disk.software;
+    if (mine.share == baseline.share) merged.share = disk.share;
+    if (mine.wallpaper == baseline.wallpaper) merged.wallpaper = disk.wallpaper;
+    if (mine.rotate == baseline.rotate) merged.rotate = disk.rotate;
+    if (mine.shortcut == baseline.shortcut) merged.shortcut = disk.shortcut;
+    if (mine.open_with == baseline.open_with) merged.open_with = disk.open_with;
+    if (mine.open_with_com == baseline.open_with_com) merged.open_with_com = disk.open_with_com;
+    if (mine.system_extra == baseline.system_extra) merged.system_extra = disk.system_extra;
+    if (mine.print == baseline.print) merged.print = disk.print;
+    if (mine.explorer_cap == baseline.explorer_cap) merged.explorer_cap = disk.explorer_cap;
+    if (mine.open_with_mru == baseline.open_with_mru) merged.open_with_mru = disk.open_with_mru;
+    if (mine.item_enabled == baseline.item_enabled) merged.item_enabled = disk.item_enabled;
+    if (mine.seen == baseline.seen) merged.seen = disk.seen;
+    if (mine.slow_ext == baseline.slow_ext) merged.slow_ext = disk.slow_ext;
+    return merged;
+}
+
+bool ContextMenuPrefs::Load() {
+    const std::wstring dir = GetPulseDataDir();
+    if (dir.empty()) {
+        disk_state_ = *this;
+        loaded_from_file_ = false;
+        return false;
+    }
+    ContextMenuPrefsValues disk;
+    bool main_exists = false;
+    loaded_from_file_ = ReadDiskState(disk, main_exists);
+    if (loaded_from_file_) static_cast<ContextMenuPrefsValues&>(*this) = disk;
+    // What this process runs with is the state the next merge compares against.
+    disk_state_ = *this;
+    return loaded_from_file_;
 }
 
 bool ContextMenuPrefs::Save() const {
     if (!persist) return true;
     const std::wstring dir = GetPulseDataDir();
     if (dir.empty()) return false;
-    return WriteUtf8FileAtomic(dir + L"\\context_menu.json", ToJson());
+    const std::wstring path = dir + L"\\context_menu.json";
+
+    ContextMenuPrefsValues disk;
+    bool main_exists = false;
+    bool used_backup = false;
+    const bool disk_known = ReadDiskState(disk, main_exists, &used_backup);
+
+    bool quarantined = false;
+    if (!disk_known && main_exists) {
+        // The file is there but nothing in it (or its backup) can be read: keep those
+        // bytes as context_menu.json.bad instead of overwriting the only copy. A
+        // failing rename means another process holds the file, so leave it alone.
+        if (!QuarantineUnreadableFile(path)) return false;
+        quarantined = true;
+    }
+
+    ContextMenuPrefs out = *this;
+    if (disk_known) static_cast<ContextMenuPrefsValues&>(out) = MergedWithDisk(disk);
+
+    // One step back for the next Load(); skipped when that file became the .bad
+    // evidence, and when the values came from the backup that just saved us. The
+    // policy has a single copy in utf8_file.h (KeepPreviousFileCopy), shared with
+    // app.json.
+    if (!quarantined && main_exists && !used_backup) KeepPreviousFileCopy(path);
+
+    if (!WriteUtf8FileAtomic(path, out.ToJson())) return false;
+    disk_state_ = *this;
+    return true;
 }
 
 } // namespace pulse::app

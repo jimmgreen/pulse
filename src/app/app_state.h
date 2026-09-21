@@ -6,6 +6,7 @@
 #include "../ui/ui_renderer.h"
 #include "../ui/fluent_menu.h"
 #include "../ui/drag_drop.h"
+#include "../ui/drag_ghost.h"
 #include "../ui/file_operation_dialog.h"
 #include "../ui/quick_preview_window.h"
 #include "../ui/bloom_accent_picker.h"
@@ -242,6 +243,19 @@ struct AppState {
     ui::ThemeMode themeOverride = ui::ThemeMode::Auto;
     bool safeMode = false;
     bool isolatedTest = false;
+    // This process was started as an extra window (`--new-window`): it skips the
+    // singleton, owns no tray icon and no global hotkey, and leaves the persisted
+    // session to the primary instance.
+    bool secondaryInstance = false;
+    // This window took the last tab of a sibling, which closed because of it:
+    // its own session snapshot must not be written any more, and closing it must
+    // not hide it in the tray (there is nothing left to hide).
+    bool mergedAway = false;
+    // Taking over the singleton resources (mutex, tray, hotkey, session) from a
+    // sibling that is closing. Retried from the UI tick until it succeeds.
+    bool adoptPending = false;
+    ULONGLONG adoptDeadline = 0;
+    ULONGLONG adoptLastTry = 0;
     bool contentIndexObserver = false;
     D2D1_COLOR_F accentColor;
     float scale = 1.0f;
@@ -299,6 +313,12 @@ struct AppState {
     int tabDragRunPos = 0;               // run start within tabOrder (group drags)
     int tabDragRunLen = 1;               // >1: the whole group run moves as a block
     bool tabDragFromChip = false;        // drag started on the group chip
+    bool tabDragExternal = false;        // cursor left the window: candidate for another window
+    int tabDragGrabDx = 0;               // where inside the tab the press landed (px)
+    int tabDragGrabDy = 0;
+    // The card that follows the cursor while the tab is over another window: this
+    // window cannot draw outside its own client area.
+    ui::TabDragGhost tabDragGhost;
     int tabDragGroupId = 0;              // chip drag: app::TabGroup::id
     float tabDragSlots = 1.0f;           // visual width of the drag block in slots
     float tabDragBlockW = 0.0f;          // >0: collapsed chip drag block (chip+gap, px)
@@ -432,6 +452,17 @@ struct AppState {
     // Name of the hovered sidebar row or section: the collapsed rail shows icons
     // only, so its tooltips read this.
     std::wstring hoverLabel;
+    // Edge-style hover card for a tab-group chip. groupCardGroupId == 0 means
+    // hidden; chipIndex is the index into WindowTabs::tab_groups it belongs to.
+    int groupCardGroupId = 0;
+    int groupCardChipIndex = -1;
+    int groupCardHoverRow = -1;
+    ULONGLONG groupCardSince = 0;
+    // group id -> the member tab that was active the last time the window left
+    // that group, so its chip card can mark "the tab you last used here". The
+    // pointers are identity tokens only: they are compared, never dereferenced
+    // (see RememberGroupActivation / PruneGroupActivations).
+    std::unordered_map<int, const app::LayoutTab*> lastActiveInGroup;
 
     // Drag-over feedback state (rendered via WindowViewModel).
     int dropRow = -1;

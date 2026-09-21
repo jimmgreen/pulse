@@ -6,8 +6,10 @@
 
 namespace pulse::app {
 
-struct AppPrefs {
-    bool persist = true;
+// Everything app.json stores. Split out of AppPrefs so the object can also hold
+// the state that last agreed with the file and compare the two field by field.
+// A new setting goes here and into AppPrefs::MergedWithDisk() in app_prefs.cpp.
+struct AppPrefsValues {
     bool launch_on_startup = false;
     bool keep_running_on_close = false;
     bool open_folders_in_pulse = false;
@@ -43,6 +45,10 @@ struct AppPrefs {
     int duplicate_scan_scope = 0; // 0 folder, 1 drive, 2 all local disks
     std::wstring duplicate_scan_folder;
     std::wstring duplicate_scan_drive;
+};
+
+struct AppPrefs : AppPrefsValues {
+    bool persist = true;
 
     void ResetToDefaults();
     bool Load();
@@ -50,16 +56,51 @@ struct AppPrefs {
     std::wstring ToJson() const;
     bool FromJson(const std::wstring& json);
 
-    // HKCU Run key is the source of truth; call after Load() and on toggle.
+    // True when the last Load() found a usable state in app.json or its backup.
+    bool loaded_from_file() const noexcept { return loaded_from_file_; }
+
+    // app.json holds the intent; the HKCU Run key is only a projection of it that
+    // ReconcileRegistryWithFile() keeps in step. ReadLaunchOnStartup() reports the
+    // machine's current state, which Load() consults only for the first migration
+    // (when there is no usable file). The settings toggle goes through
+    // ApplyLaunchOnStartup(), which also writes the key.
     bool ReadLaunchOnStartup() const;
     bool ApplyLaunchOnStartup(bool on);
 
-    // HKCU Directory/Drive open verbs; call after Load() and on toggle.
+    // Same split for the HKCU folder-open verbs (Directory and Drive, plus the Folder
+    // class's open and explore): app.json holds the intent, ReadFolderOpen() reports
+    // the current state, Load() consults it only when no usable file exists, and the
+    // toggle goes through ApplyFolderOpen(). Explorer's Win+E entry point (a CLSID of
+    // its own) is deliberately left alone.
     bool ReadFolderOpen() const;
     bool ApplyFolderOpen(bool on);
 
     bool StoreBackgroundImage(const std::wstring& source_path);
     void ClearBackgroundImage();
+
+private:
+    // The values the file held at the last Load() or Save(). Save() merges against
+    // them, so a window that has been open for a while cannot roll back what
+    // another Pulse window wrote in the meantime. mutable: Save() stays const.
+    mutable AppPrefsValues disk_state_;
+    bool loaded_from_file_ = false;
+
+    // Reads the state app.json holds, falling back to app.json.bak. |main_exists|
+    // reports whether app.json itself is there, which is what tells Save() an
+    // unreadable file apart from a missing one; |used_backup| (optional) reports that
+    // the main file was unusable, so its bytes must not overwrite the backup.
+    bool ReadDiskState(AppPrefsValues& values, bool& main_exists,
+                       bool* used_backup = nullptr) const;
+    // Fields that changed here since disk_state_ keep the local value; every other
+    // field takes the value found on disk. Fields missing from this function keep
+    // the old behaviour (local value always wins), never a lost setting.
+    AppPrefsValues MergedWithDisk(const AppPrefsValues& disk) const;
+    // Applies the file's intent to the two registry-backed toggles: writes the key
+    // an install lost, repoints one that still names an older Pulse, clears what the
+    // file no longer wants, and never touches a verb another program owns. Returns
+    // true when a value had to be adopted back from the registry, which means the
+    // file is out of date and has to be written again.
+    bool ReconcileRegistryWithFile();
 };
 
 std::wstring FolderOpenCommandLine(const std::wstring& exe);

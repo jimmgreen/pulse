@@ -385,6 +385,7 @@ bool PlacesCatalog::Load() {
         const std::wstring opened = pulse::json::ExtractString(block, L"opened_at");
         item.opened_at = opened.empty() ? 0 : _wcstoui64(opened.c_str(), nullptr, 10);
         if (!item.path.empty() && !fs::IsVirtualPath(item.path) &&
+            !fs::IsShellNamespacePath(item.path) &&
             std::none_of(recent_items.begin(), recent_items.end(), [&](const RecentItem& old) {
                 return EqualI(old.path, item.path);
             })) {
@@ -995,7 +996,11 @@ std::vector<std::wstring> PlacesCatalog::StarredFolderPaths() const {
 
 void PlacesCatalog::RecordRecent(const std::wstring& path, PlaceItemKind kind) {
     const std::wstring normalized = Norm(path);
-    if (normalized.empty() || fs::IsVirtualPath(normalized)) return;
+    // A namespace ("::{GUID}") used to arrive here as a folder path and stayed in the
+    // list as an entry that cannot be opened; nothing but a real location belongs here.
+    if (normalized.empty() || fs::IsVirtualPath(normalized) ||
+        fs::IsShellNamespacePath(normalized))
+        return;
     const std::wstring key = TagKey(normalized);
     RecentItem item{ normalized, kind, NowFileTime() };
     const auto found = std::find_if(recent_items.begin(), recent_items.end(),

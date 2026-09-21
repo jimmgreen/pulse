@@ -828,3 +828,13 @@
 #define IDS_UPDATE_VERIFYING 1995
 #define IDS_UPDATE_LAUNCHING 1996
 #define IDS_UPDATE_INSTALLING_STATUS 1997
+
+// Second window: tab menu entry and tray menu entry. (Numbered past the shared update
+// progress strings above, which landed on main while this branch was in review.)
+#define IDS_TAB_OPEN_NEW_WINDOW 1998
+#define IDS_TRAY_NEW_WINDOW 1999
+#define IDS_JUMPLIST_PINNED 2000
+// Tab-group hover card.
+#define IDS_TAB_GROUP_EDIT 2001
+// Recent/starred item menu: reveal the row in its containing folder.
+#define IDS_OPEN_ITEM_LOCATION 2002

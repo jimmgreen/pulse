@@ -1969,6 +1969,88 @@ D2D1_RECT_F ChangePopoverRect(const ChangePopover& popup, const D2D1_RECT_F& bou
     const float y = std::clamp(popup.y + 10 * scale, bounds.top + 8 * scale, std::max(bounds.top + 8 * scale, bounds.bottom - h - 8 * scale));
     return D2D1::RectF(x, y, x + w, y + h);
 }
+
+// Group hover card: fixed row/pad metrics shared by the draw and hit-test
+// paths so a click always lands on the row it appears to.
+constexpr float kTabGroupCardRowDip = 32.0f;
+constexpr float kTabGroupCardPadDip = 4.0f;
+constexpr float kTabGroupCardMinWidthDip = 200.0f;
+constexpr float kTabGroupCardInsetDip = 4.0f; // hover fill off the card edge
+constexpr float kTabGroupCardGapDip = 8.0f;   // margin kept to the window
+
+// Top of the first row: the padding below the card's top edge.
+float TabGroupCardRowTop(const D2D1_RECT_F& card, float scale) {
+    return card.top + kTabGroupCardPadDip * scale;
+}
+
+// Rect of the row drawn at display position (0-based). The hover fill and the
+// clickable area are the same rectangle, so a row lights up exactly where it
+// can be hit.
+D2D1_RECT_F TabGroupCardRowRect(const D2D1_RECT_F& card, int row, float scale) {
+    const float row_h = kTabGroupCardRowDip * scale;
+    const float top = TabGroupCardRowTop(card, scale) + static_cast<float>(row) * row_h;
+    return D2D1::RectF(card.left + kTabGroupCardInsetDip * scale, top,
+                       card.right - kTabGroupCardInsetDip * scale, top + row_h);
+}
+
+// Display position of the row under a point, or -1 in the padding or in the
+// insets beside a row.
+int TabGroupCardRowAt(const D2D1_RECT_F& card, float x, float y, float scale) {
+    const float row_h = kTabGroupCardRowDip * scale;
+    if (row_h <= 0.0f) return -1;
+    if (x < card.left + kTabGroupCardInsetDip * scale ||
+        x >= card.right - kTabGroupCardInsetDip * scale) return -1;
+    const float rel = y - TabGroupCardRowTop(card, scale);
+    if (rel < 0.0f) return -1;
+    return static_cast<int>(rel / row_h);
+}
+
+// Index into TabGroupCardView::rows of the row drawn at display position
+// display_row, for a card showing visible_rows of them. A capped card drops
+// member rows from the middle and keeps the trailing action rows pinned last.
+int TabGroupCardRowIndex(const TabGroupCardView& card, int display_row, int visible_rows) {
+    const int total = static_cast<int>(card.rows.size());
+    if (visible_rows >= total) return display_row;
+    const int kept_members = std::max(0, visible_rows - std::min(total, 2));
+    if (display_row < kept_members) return display_row;
+    return total - (visible_rows - display_row);
+}
+
+// Card left edge follows the chip and its top edge is flush with the chip's
+// bottom edge (a gap there would swallow the pointer on its way from the chip
+// into the card and close it). The row count is capped so the card stays below
+// the chip and inside the window; *visible_rows receives how many rows are
+// drawn and hit-tested.
+D2D1_RECT_F TabGroupCardRect(const TabGroupCardView& card, const D2D1_RECT_F& chip_rc,
+                             const D2D1_RECT_F& bounds, float scale,
+                             int* visible_rows = nullptr) {
+    const int total = static_cast<int>(card.rows.size());
+    const float pad = kTabGroupCardPadDip * scale;
+    const float row_h = kTabGroupCardRowDip * scale;
+    const float gap = kTabGroupCardGapDip * scale;
+    // Everything between the chip's bottom edge and the window's bottom margin
+    // can hold rows.
+    const float avail = chip_rc.bottom < bounds.bottom - gap
+        ? bounds.bottom - gap - chip_rc.bottom : 0.0f;
+    int visible = total;
+    if (row_h > 0.0f) {
+        visible = std::min(total,
+            static_cast<int>(std::floor((avail - 2 * pad) / row_h)));
+    }
+    visible = std::max(0, visible);
+    if (visible < total) {
+        // Member rows are the ones that give way: a card that cannot show its
+        // actions is a card that cannot be used.
+        visible = std::max(visible, std::min(total, 2));
+    }
+    const float w = std::min(kTabGroupCardMinWidthDip * scale,
+                             std::max(0.0f, bounds.right - bounds.left - 16 * scale));
+    const float h = 2 * pad + row_h * static_cast<float>(visible);
+    const float x = std::clamp(chip_rc.left, bounds.left + 8 * scale,
+        std::max(bounds.left + 8 * scale, bounds.right - w - 8 * scale));
+    if (visible_rows) *visible_rows = visible;
+    return D2D1::RectF(x, chip_rc.bottom, x + w, chip_rc.bottom + h);
+}
 struct ScrollbarMetrics {
     float thumbY, thumbH;
     bool valid;

@@ -69,6 +69,7 @@ enum MenuCmd : int {
     CmdDetailsShellMenu,    // details "更多": open the Explorer context menu
     CmdTabNewRight,         // tab menu: new tab to the right
     CmdTabDuplicate,        // tab menu: duplicate this tab
+    CmdTabOpenInNewWindow,  // tab menu: open this folder in its own window
     CmdTabPin,              // tab menu: pin/unpin toggle
     CmdTabClose,            // tab menu: close this tab
     CmdTabAddToNewGroup,    // tab menu: create a group with this tab

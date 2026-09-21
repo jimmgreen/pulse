@@ -1,6 +1,7 @@
 #include "quick_access.h"
 #include "app_commands.h"
 #include "app_navigation.h"
+#include "jump_list.h"
 #include "../common/localization.h"
 #include <algorithm>
 
@@ -49,6 +50,7 @@ bool HandleQuickAccessCommand(AppState& s, int command,
                               const std::vector<std::wstring>& paths) {
     if (command != app::CmdPinQuickAccess && command != app::CmdUnpinQuickAccess) return false;
     s.places.SetQuickAccessPinned(paths, command == app::CmdPinQuickAccess);
+    app::RefreshJumpList(s.places.quick_access_paths);
     InvalidateRect(s.hwnd, nullptr, FALSE);
     return true;
 }

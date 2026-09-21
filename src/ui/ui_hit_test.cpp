@@ -84,6 +84,31 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
     HitTestResult r;
     if (x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom) return r;
 
+    // The group hover card floats over the strip and the content area, so it
+    // must win every hit before the title-bar/settings/pane branches.
+    if (vm.tab_group_card.visible && !vm.tab_group_card.rows.empty()) {
+        D2D1_RECT_F chip_rc{};
+        if (vm.tab_group_card.chip_index >= 0 &&
+            TabGroupChipRect(vm, rect.right, vm.tab_group_card.chip_index, &chip_rc)) {
+            int visible = 0;
+            const D2D1_RECT_F card =
+                TabGroupCardRect(vm.tab_group_card, chip_rc, rect, scale_, &visible);
+            if (ContainsPt(card, x, y)) {
+                const int display = TabGroupCardRowAt(card, x, y, scale_);
+                if (display >= 0 && display < visible) {
+                    r.region = HitTestResult::TabGroupCardRow;
+                    // Rows are reported by their index in tab_group_card.rows,
+                    // not by the position they are drawn at: a capped card skips
+                    // the member rows it had to drop.
+                    r.index = TabGroupCardRowIndex(vm.tab_group_card, display, visible);
+                } else {
+                    r.region = HitTestResult::TabGroupCard;
+                }
+                return r;
+            }
+        }
+    }
+
     if (vm.change_popover.visible) {
         const auto popup = ChangePopoverRect(vm.change_popover, rect, scale_);
         if (ContainsPt(popup, x, y)) {

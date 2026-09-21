@@ -462,7 +462,57 @@ void MainRenderer::Render(const WindowViewModel& vm, const D2D1_RECT_F& rect,
         content.top = rc.bottom - 38 * scale_; content.bottom = rc.bottom - 8 * scale_;
         painter_.DrawText(pulse::l10n::Get(pulse::l10n::StringId::ChangeView), content, compositor_->TextFormat(), theme.accent);
     }
-    if (!vm.change_popover.visible && vm.drag_badge.empty() && !vm.tooltip_text.empty()) {
+
+    // Edge-style group hover card: member rows plus the two action rows. Drawn
+    // last so it floats over the pane content and suppresses the tooltip.
+    if (vm.tab_group_card.visible && !vm.tab_group_card.rows.empty()) {
+        D2D1_RECT_F chip_rc{};
+        if (vm.tab_group_card.chip_index >= 0 &&
+            TabGroupChipRect(vm, rect.right, vm.tab_group_card.chip_index, &chip_rc)) {
+            int visible = 0;
+            const D2D1_RECT_F card =
+                TabGroupCardRect(vm.tab_group_card, chip_rc, rect, scale_, &visible);
+            painter_.DrawMenuSurface(card);
+            for (int display = 0; display < visible; ++display) {
+                const int index = TabGroupCardRowIndex(vm.tab_group_card, display, visible);
+                const TabGroupCardRow& row =
+                    vm.tab_group_card.rows[static_cast<size_t>(index)];
+                fluent::MenuItemSpec spec;
+                spec.bounds = TabGroupCardRowRect(card, display, scale_);
+                spec.text = row.text;
+                // MenuItemSpec has no bold/emphasis flag ("checked" only renders
+                // for swatch or toggle rows), so the active member is called out
+                // with a check mark in the icon column, and the tab last used in
+                // this group with the same mark drawn faint below. The glyph is
+                // assigned per branch so the view never binds to a temporary.
+                if (row.active) spec.glyph = L"\xE73E";
+                else if (!row.was_active) spec.glyph = row.glyph;
+                // A capped card can drop the last member row, which is the one
+                // carrying the divider: keep it right above the action rows.
+                spec.separator_after = row.separator_after ||
+                    (row.tab_index >= 0 && display + 3 == visible);
+                spec.state.hovered = index == vm.tab_group_card.hover_row;
+                painter_.DrawMenuItem(spec);
+                if (row.was_active) {
+                    // "You were here": dimmed so it cannot be mistaken for the
+                    // tab the window is on. Giving MenuItemSpec a foreground
+                    // override would touch every menu row, so the check is drawn
+                    // here in the icon column instead; the rect mirrors the
+                    // icon bounds Painter::DrawMenuItem computes.
+                    D2D1_COLOR_F dim = theme.text_secondary;
+                    dim.a *= 0.7f;
+                    const float icon_left = spec.bounds.left + 16.0f * scale_;
+                    painter_.DrawGlyph(L"\xE73E",
+                        D2D1::RectF(icon_left, spec.bounds.top + 2.0f * scale_,
+                                    icon_left + 20.0f * scale_,
+                                    spec.bounds.bottom - 2.0f * scale_),
+                        dim);
+                }
+            }
+        }
+    }
+    if (!vm.change_popover.visible && !vm.tab_group_card.visible &&
+        vm.drag_badge.empty() && !vm.tooltip_text.empty()) {
         IDWriteTextFormat* fmt = compositor_->SmallFormat();
         const float tw = MeasureLayoutText(compositor_, compositor_->DwriteFactory(), fmt,
                                            vm.tooltip_text);
@@ -666,14 +716,19 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
     };
     const int dragI = vm.tab_drag_index;
     // Group chips sit at run starts: Edge-style solid blocks, not pill badges.
-    auto brighten = [&](const D2D1_COLOR_F& c) {
-        // Toward white (dark theme) or black (light) for readable chip text.
+    // Shifts a color toward white (dark theme) or black (light theme); alpha is
+    // preserved so the result can still be layered over the strip.
+    auto toward = [&](const D2D1_COLOR_F& c, float t) {
         D2D1_COLOR_F out = c;
-        const float t = 0.35f;
         const float target = vm.dark ? 1.0f : 0.0f;
         out.r += (target - out.r) * t;
         out.g += (target - out.g) * t;
         out.b += (target - out.b) * t;
+        return out;
+    };
+    auto brighten = [&](const D2D1_COLOR_F& c) {
+        // Opaque variant: keeps chip text readable over the tinted body.
+        D2D1_COLOR_F out = toward(c, 0.35f);
         out.a = 1.0f;
         return out;
     };
@@ -694,14 +749,31 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
                                            strip.y + 4.0f * scale_ + ch);
         const bool chip_hovered = IsHovered(vm, HitTestResult::TabGroup, chip.group);
         const bool named = !gv.name.empty();
+        // A folded chip hides its members, so when its group owns the tab the
+        // user is viewing it takes the selected-tab surface instead of a badge.
+        // The top strip keeps the group's own color so the group stays
+        // identifiable, and the geometry is untouched.
+        const bool selected = gv.collapsed && gv.has_active;
+        const float chip_radius = 5.0f * scale_;
         D2D1_COLOR_F fill = gc;
-        fill.a *= named ? (chip_hovered ? 0.42f : 0.32f)
-                        : (chip_hovered ? 1.0f : 0.85f);
+        if (selected) {
+            fill = theme.header_bg;
+            if (vm.backdrop_enabled) fill.a = vm.dark ? 0.78f : 0.84f;
+            if (chip_hovered) fill = toward(fill, 0.06f);
+        } else {
+            fill.a *= named ? (chip_hovered ? 0.42f : 0.32f)
+                            : (chip_hovered ? 1.0f : 0.85f);
+        }
         MakeBrush(dc, fill, brFillHover_);
         FillRoundedRect(dc, brFillHover_.get(), rc.left, rc.top, chip.width, ch,
-                        5.0f * scale_);
+                        chip_radius);
+        if (selected) {
+            MakeBrush(dc, gc, brAccent_);
+            FillRoundedAccent(dc, brAccent_.get(), rc, chip_radius, 2.0f * scale_,
+                              AccentEdge::Top);
+        }
         if (named) {
-            MakeBrush(dc, brighten(gc), brText_);
+            MakeBrush(dc, selected ? theme.text : brighten(gc), brText_);
             DrawTextRect(dc, compositor_->SmallFormat(), brText_.get(), gv.name,
                 rc.left + 8.0f * scale_, rc.top, chip.width - 16.0f * scale_, ch);
         }

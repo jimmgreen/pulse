@@ -814,6 +814,7 @@ BEGIN
     IDS_TAG_DELETE_CONFIRM_FORMAT "删除标签“%s”？"
     IDS_TAG_DELETE_USED_FORMAT "“%s”已用于 %zu 个项目。\n删除后将移除这些关联。"
     IDS_OPEN_PATH "打开路径"
+    IDS_OPEN_ITEM_LOCATION "打开文件所在位置"
     IDS_BADGE_TEXT_HINT "徽章文字（最多 12 个字符）…"
     IDS_REMOVE_RECENT "从最近使用中移除"
     IDS_EDIT_BADGE "编辑徽章"
@@ -1401,6 +1402,7 @@ BEGIN
     IDS_TAG_DELETE_CONFIRM_FORMAT "Delete tag “%s”?"
     IDS_TAG_DELETE_USED_FORMAT "“%s” is used by %zu items.\nDeleting it will remove these associations."
     IDS_OPEN_PATH "Open path"
+    IDS_OPEN_ITEM_LOCATION "Open file location"
     IDS_BADGE_TEXT_HINT "Badge text (up to 12 characters)…"
     IDS_REMOVE_RECENT "Remove from recent"
     IDS_EDIT_BADGE "Edit badge"
@@ -2012,4 +2014,20 @@ STRINGTABLE
 BEGIN
  IDS_GLOBAL_SEARCH_SAVE_FAILED "Unable to save settings. Try again."
  IDS_GLOBAL_SEARCH_OPEN_FAILED "Unable to open global search. Try again."
+END
+LANGUAGE 0x04, 0x02
+STRINGTABLE
+BEGIN
+ IDS_TAB_OPEN_NEW_WINDOW "在新窗口中打开"
+ IDS_TRAY_NEW_WINDOW "新建窗口"
+ IDS_JUMPLIST_PINNED "已固定"
+ IDS_TAB_GROUP_EDIT "编辑组"
+END
+LANGUAGE 0x09, 0x01
+STRINGTABLE
+BEGIN
+ IDS_TAB_OPEN_NEW_WINDOW "Open in new window"
+ IDS_TRAY_NEW_WINDOW "New window"
+ IDS_JUMPLIST_PINNED "Pinned"
+ IDS_TAB_GROUP_EDIT "Edit group"
 END

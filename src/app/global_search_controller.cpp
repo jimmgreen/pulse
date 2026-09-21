@@ -4,7 +4,9 @@
 
 namespace pulse {
 void ApplyGlobalSearchSettings(AppState& s) {
-    if (s.isolatedTest) return;
+    // Only the primary window owns the global hotkey and the tray icon; a second
+    // window started with --new-window must not fight it for either.
+    if (s.isolatedTest || s.secondaryInstance) return;
     const bool enabled = s.appPrefs.global_search_enabled;
     const bool ok = s.globalSearchHotkey.Update(s.hwnd, enabled,
         s.appPrefs.global_search_modifiers, s.appPrefs.global_search_key);

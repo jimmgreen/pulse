@@ -118,6 +118,17 @@ bool IsVirtualPath(const std::wstring& path) {
     return path.starts_with(L"pulse:");
 }
 
+bool IsShellNamespacePath(const std::wstring& path) {
+    std::wstring_view v = path;
+    // Older versions ran namespaces through the path normalizer, which left the "\\?\"
+    // prefix behind. That leftover is a namespace too, not a folder, so the recent list
+    // still has to recognise and drop it.
+    if (v.starts_with(L"\\\\?\\")) v = v.substr(4);
+    if (v.size() >= 2 && v[0] == L':' && v[1] == L':') return true;
+    if (v.size() < 6) return false;
+    return _wcsnicmp(v.data(), L"shell:", 6) == 0;
+}
+
 bool IsUncPath(const std::wstring& path) {
     return path.starts_with(L"\\\\?\\UNC\\") ||
            (path.starts_with(L"\\\\") && !path.starts_with(L"\\\\?\\"));
@@ -125,7 +136,10 @@ bool IsUncPath(const std::wstring& path) {
 
 std::wstring NormalizePath(std::wstring path) {
     if (path.empty()) return path;
-    if (IsVirtualPath(path)) return path;
+    // Virtual views and shell namespaces are not filesystem paths and must not be
+    // rewritten: "\\?\::{GUID}" is not a folder, and GetFullPathNameW would fold a
+    // "shell:" name into the working directory.
+    if (IsVirtualPath(path) || IsShellNamespacePath(path)) return path;
     // Replace forward slashes with backslashes.
     std::replace(path.begin(), path.end(), L'/', L'\\');
     if (path.starts_with(L"\\\\?\\")) {

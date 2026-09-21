@@ -533,6 +533,8 @@ LayoutTab& WindowTabs::NewTabAt(size_t index, const std::wstring& path) {
 }
 
 void WindowTabs::CloseTab(size_t idx) {
+    // Never empty the window: the last tab goes away by closing the window
+    // (see WindowTabs::ClosingLastTab), and a pinned tab is not closable.
     if (idx >= items.size() || items.size() <= 1) return;
     if (items[idx]->pinned) return;
     items.erase(items.begin() + static_cast<ptrdiff_t>(idx));
@@ -1480,7 +1482,57 @@ void FillWindowTabStrip(ui::WindowViewModel& vm, const WindowTabs& tabs) {
         }
         vm.tabs.push_back(std::move(tv));
     }
+    // A collapsed chip hides its members, so record which group owns the active
+    // tab: the chip renders itself as the selected tab for that group.
+    if (tabs.active < tabs.items.size()) {
+        const int active_group = tabs.items[tabs.active]->tab_group;
+        if (active_group != 0) {
+            for (auto& gv : vm.tab_groups) {
+                if (gv.id == active_group) { gv.has_active = true; break; }
+            }
+        }
+    }
     vm.active_tab = static_cast<int>(tabs.active);
+}
+
+std::vector<ui::TabGroupCardRow> TabGroupCardRows(const WindowTabs& tabs, int group_id,
+                                                  const LayoutTab* group_last_active) {
+    std::vector<ui::TabGroupCardRow> rows;
+    if (group_id == 0) return rows;
+    const TabGroup* group = nullptr;
+    for (const auto& candidate : tabs.tab_groups) {
+        if (candidate.id == group_id) { group = &candidate; break; }
+    }
+    if (!group) return rows;
+    // An expanded group already shows its tabs in the strip; only a collapsed
+    // chip needs the card to name them.
+    if (group->collapsed) {
+        const bool owns_active =
+            tabs.active < tabs.items.size() && tabs.items[tabs.active]->tab_group == group_id;
+        for (size_t i = 0; i < tabs.items.size(); ++i) {
+            if (tabs.items[i]->tab_group != group_id) continue;
+            ui::TabGroupCardRow row;
+            row.text = LayoutTabTitle(*tabs.items[i]);
+            row.tab_index = static_cast<int>(i);
+            // "You are here" wins over "you were here": the memory of the
+            // previous tab only shows while this group has no active tab.
+            row.active = i == tabs.active;
+            row.was_active = !owns_active && tabs.items[i].get() == group_last_active;
+            rows.push_back(std::move(row));
+        }
+        if (!rows.empty()) rows.back().separator_after = true;
+    }
+    ui::TabGroupCardRow new_tab;
+    new_tab.text = pulse::l10n::Get(pulse::l10n::StringId::TabGroupNew);
+    new_tab.glyph = L"\xE710";
+    new_tab.new_tab = true;
+    rows.push_back(std::move(new_tab));
+    ui::TabGroupCardRow edit;
+    edit.text = pulse::l10n::Get(pulse::l10n::StringId::TabGroupEdit);
+    edit.glyph = L"\xE70F";
+    edit.edit = true;
+    rows.push_back(std::move(edit));
+    return rows;
 }
 
 ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
@@ -1609,20 +1661,9 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
             ++starred_insert;
         }
     }
-    const std::wstring& gitRoot = tab->git_root;
-    if (!gitRoot.empty() && (!places || !places->IsStarred(gitRoot))) {
-        ui::SidebarItem project;
-        wchar_t project_label[512]{};
-        swprintf_s(project_label, l10n::Get(l10n::StringId::ProjectFormat).c_str(),
-                   TabTitle(gitRoot).c_str());
-        project.label = project_label;
-        project.path = gitRoot;
-        project.icon_glyph = L"\xE8B7";
-        project.fallback_text = L"Repo";
-        project.icon_color = ui::HexColor(0x34D399);
-        project.badge = L"Git";
-        access.items.push_back(std::move(project));
-    }
+    // The git repository a tab happens to sit in is not a quick-access entry:
+    // the section is what the user pinned, and the command palette's project
+    // search already offers the repository that contains the current folder.
     if (places) {
         for (const auto& path : places->quick_access_paths) {
             ui::SidebarItem item;

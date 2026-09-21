@@ -1,4 +1,5 @@
 #include "../app/settings_controller.h"
+#include "../app/app_model.h"
 #include "../app/session.h"
 #include "../app/context_menu_controller.h"
 #include "../app/single_instance_coordinator.h"
@@ -39,6 +40,31 @@ namespace {
 bool Report(const char* name, bool passed) {
     std::printf("[%s] %s\n", passed ? "PASS" : "FAIL", name);
     return passed;
+}
+
+// A tab handed to another Pulse window arrives as its own message, and it is the
+// receiving window that decides to open a tab of its own even when it already
+// shows that folder. The sink records what the sender put on the wire.
+struct TabTransferSink {
+    std::wstring path;
+    ULONG_PTR message_id = 0;
+    bool decoded = false;
+};
+
+LRESULT CALLBACK TabTransferSinkProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+    if (msg == WM_COPYDATA) {
+        auto* sink = reinterpret_cast<TabTransferSink*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        auto* data = reinterpret_cast<const COPYDATASTRUCT*>(lparam);
+        std::wstring path;
+        if (sink) sink->message_id = data->dwData;
+        if (sink && pulse::app::SingleInstanceCoordinator::DecodeTabTransfer(data, path)) {
+            sink->decoded = true;
+            sink->path = path;
+            return TRUE;
+        }
+        return FALSE;
+    }
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 
 } // namespace
@@ -230,6 +256,38 @@ int wmain(int argc, wchar_t** argv) {
     data.lpData = embedded;
     passed &= Report("single-instance IPC rejects embedded NUL characters",
         !SingleInstanceCoordinator::DecodeOpenPath(&data, decoded));
+
+    // Cross-window tab drag: the folder a dragged tab was showing travels as its
+    // own message, which the receiver opens as a tab of its own even when it
+    // already shows that folder. It must not be mistaken for the shell's "open
+    // this folder" forward, where activating the existing tab is the intent.
+    WNDCLASSW sink_class{};
+    sink_class.lpfnWndProc = TabTransferSinkProc;
+    sink_class.hInstance = GetModuleHandleW(nullptr);
+    sink_class.lpszClassName = L"PulseTabTransferSink";
+    RegisterClassW(&sink_class);
+    HWND sink_hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        sink_class.lpszClassName, L"", WS_POPUP, -32000, -32000, 100, 100,
+        nullptr, nullptr, sink_class.hInstance, nullptr);
+    TabTransferSink sink;
+    SetWindowLongPtrW(sink_hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&sink));
+    const std::wstring transferred = L"D:\\工作\\资料";
+    const bool delivered = sink_hwnd != nullptr &&
+        SingleInstanceCoordinator::SendTabTransfer(sink_hwnd, transferred);
+    passed &= Report("tab transfer reaches the window that takes the tab",
+        delivered && sink.decoded && sink.path == transferred);
+    COPYDATASTRUCT forwarded{};
+    forwarded.dwData = SingleInstanceCoordinator::OpenPathMessageId();
+    forwarded.cbData = static_cast<DWORD>((transferred.size() + 1) * sizeof(wchar_t));
+    forwarded.lpData = const_cast<wchar_t*>(transferred.data());
+    std::wstring ignored;
+    passed &= Report("tab transfer message is not the shell's open-path forward",
+        sink.message_id != 0 && sink.message_id != forwarded.dwData &&
+        !SingleInstanceCoordinator::DecodeTabTransfer(&forwarded, ignored));
+    forwarded.dwData = sink.message_id;
+    passed &= Report("shell open-path forward is not a tab transfer",
+        !SingleInstanceCoordinator::DecodeOpenPath(&forwarded, ignored));
+    if (sink_hwnd) DestroyWindow(sink_hwnd);
 
     HWND hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, L"STATIC",
         L"Pulse tray controller test", WS_POPUP, -32000, -32000, 100, 100,
@@ -427,6 +485,20 @@ int wmain(int argc, wchar_t** argv) {
         restored_tabs.tab_groups.size() == 1 &&
         restored_tabs.next_tab_group_id == 5 && restored_tabs.items.size() == 1 &&
         restored_tabs.items[0]->tab_group == 4);
+
+    // Dragging a tab across a group: an expanded run is crossed at the member
+    // the dragged tab meets (its leading edge only has to pass that member's
+    // centre), while a folded run is a chip crossed at the chip's own centre.
+    {
+        using pulse::app::RunCrossCenter;
+        passed &= Report("group crossing: dragging right crosses at the first member centre",
+            RunCrossCenter(false, 100.0f, 260.0f, 40.0f, 1) == 120.0f);
+        passed &= Report("group crossing: dragging left crosses at the last member centre",
+            RunCrossCenter(false, 100.0f, 260.0f, 40.0f, -1) == 240.0f);
+        passed &= Report("group crossing: a folded group crosses at the block centre",
+            RunCrossCenter(true, 100.0f, 260.0f, 40.0f, 1) == 180.0f &&
+            RunCrossCenter(true, 100.0f, 260.0f, 40.0f, -1) == 180.0f);
+    }
 
     ContextMenuController context_menu;
     uint32_t queried_token = 0;

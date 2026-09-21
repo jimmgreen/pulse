@@ -32,6 +32,10 @@ struct DirEntry {
 // pulse:tag: / pulse:search: / pulse:workspace: — not filesystem paths.
 bool IsVirtualPath(const std::wstring& path);
 bool IsUncPath(const std::wstring& path);
+// ::{GUID} / shell:* — the shell's own namespaces, which are not filesystem paths
+// either. The folder takeover can be handed one (pinned items resolve their open verb
+// through the Folder class), and treating it as a folder only produces an error.
+bool IsShellNamespacePath(const std::wstring& path);
 
 enum class NetStatus { Unknown = 0, Online, Slow, Offline };
 

@@ -91,9 +91,9 @@ Source: "{#BuildDir}\Pulse.Preview.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BuildDir}\pulse_shell.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\Pulse"; Filename: "{app}\pulse.exe"; WorkingDir: "{app}"
+Name: "{group}\Pulse"; Filename: "{app}\pulse.exe"; WorkingDir: "{app}"; AppUserModelID: "Pulse.FileManager"
 Name: "{group}\{cm:UninstallProgram,Pulse}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\Pulse"; Filename: "{app}\pulse.exe"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{autodesktop}\Pulse"; Filename: "{app}\pulse.exe"; WorkingDir: "{app}"; Tasks: desktopicon; AppUserModelID: "Pulse.FileManager"
 
 [Registry]
 ; Same key the in-app preference manages (src/app/app_prefs.cpp).
@@ -415,20 +415,28 @@ begin
   end;
 end;
 
-procedure DeleteFolderOpenOverride(const ClassName: String);
+procedure DeleteFolderOpenVerb(const ClassName, Verb: String);
 var
   Cmd: String;
   Exe: String;
-  DefaultVerb: String;
 begin
   Exe := Lowercase(ExpandConstant('{app}\pulse.exe'));
   if RegQueryStringValue(HKCU,
-    'Software\Classes\' + ClassName + '\shell\open\command', '', Cmd) then
+    'Software\Classes\' + ClassName + '\shell\' + Verb + '\command', '', Cmd) then
   begin
     if Pos(Exe, Lowercase(Cmd)) > 0 then
       RegDeleteKeyIncludingSubkeys(HKCU,
-        'Software\Classes\' + ClassName + '\shell\open');
+        'Software\Classes\' + ClassName + '\shell\' + Verb);
   end;
+end;
+
+procedure DeleteFolderOpenOverride(const ClassName: String);
+var
+  DefaultVerb: String;
+begin
+  DeleteFolderOpenVerb(ClassName, 'open');
+  { Directory and Drive ship the class default verb as "none", so HKCU had to say
+    "open" while Pulse owned the association; Folder has no such value. }
   if RegQueryStringValue(HKCU,
     'Software\Classes\' + ClassName + '\shell', '', DefaultVerb) then
   begin
@@ -446,6 +454,9 @@ begin
     RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'Pulse');
     DeleteFolderOpenOverride('Directory');
     DeleteFolderOpenOverride('Drive');
+    { The Folder class carries the explore verb too. }
+    DeleteFolderOpenVerb('Folder', 'open');
+    DeleteFolderOpenVerb('Folder', 'explore');
     if CleanupUserData then
       CleanupPulseData;
   end;
