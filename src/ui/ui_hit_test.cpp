@@ -193,6 +193,8 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 r.region=HitTestResult::SettingsDropdown;r.index=ContainsPt(lay.effect_choice,x,y) ? 0 : 1;return r;
             }
             if(ContainsPt(lay.performance_row,x,y)) {r.region=HitTestResult::SettingsToggle;r.index=4;return r;}
+            for(int list_row=0;list_row<3;++list_row)
+                if(ContainsPt(lay.list_style_row[list_row],x,y)) {r.region=HitTestResult::SettingsToggle;r.index=17+list_row;return r;}
             const D2D1_RECT_F actions[]={lay.content_pause,lay.content_options,lay.content_rebuild};
             for(int i=0;i<3;++i) if(ContainsPt(actions[i],x,y)) {r.region=HitTestResult::SettingsContentAction;r.index=i+1;return r;}
 
@@ -822,15 +824,18 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 }
             }
             out.region = HitTestResult::ColumnHeader;
-            if (x < columns.DividerX(0)) out.column = SortColumn::Name;
-            else if (paneVm.is_search && x < columns.DividerX(1)) {
-                if(paneVm.content_results) out.column=SortColumn::Path;
-                else out.region=HitTestResult::Pane;
-                return out;
+            int col = 0;
+            while (col < columns.count - 1 && x >= columns.DividerX(col)) ++col;
+            switch (columns.kinds[static_cast<size_t>(col)]) {
+            case ColumnKind::Name: out.column = SortColumn::Name; break;
+            case ColumnKind::Path:
+                if (paneVm.content_results) out.column = SortColumn::Path;
+                else out.region = HitTestResult::Pane;
+                break;
+            case ColumnKind::Date: out.column = SortColumn::Mtime; break;
+            case ColumnKind::Type: out.column = SortColumn::Type; break;
+            case ColumnKind::Size: out.column = SortColumn::Size; break;
             }
-            else if (x < columns.DividerX(paneVm.is_search ? 2 : 1)) out.column = SortColumn::Mtime;
-            else if (x < columns.DividerX(paneVm.is_search ? 3 : 2)) out.column = SortColumn::Type;
-            else out.column = SortColumn::Size;
             return out;
         }
         if (y >= listTop && y < paneRc.bottom) {
@@ -873,7 +878,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                         const DetailsColumnLayout columns = DetailsColumns(list, paneVm);
                         ViewLayout layout(paneVm.view_mode, list, paneVm.EntryCount(),
                                           paneVm.scroll_x, paneVm.scroll_y, scale_,
-                                          ListRowHeightDip(paneVm));
+                                          ListRowHeightDip(paneVm, list));
                         const D2D1_RECT_F nameRc = layout.NameRect(viewRow);
                         const D2D1_RECT_F cell = layout.ItemRect(viewRow);
                         const ListEntryView& entry = MakeVisibleEntry(paneVm, static_cast<size_t>(idx));

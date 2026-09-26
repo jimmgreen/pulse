@@ -28,6 +28,7 @@ enum class SettingsEffect : uint32_t {
     FileVisibility = 1u << 7,
     ChangeTracking = 1u << 8,
     GlobalSearch = 1u << 9,
+    ListStyle = 1u << 10,
 };
 
 constexpr SettingsEffect operator|(SettingsEffect left, SettingsEffect right) noexcept {

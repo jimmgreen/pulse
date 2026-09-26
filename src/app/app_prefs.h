@@ -14,6 +14,10 @@ struct AppPrefs {
     bool verify_copies = false;
     bool show_status_performance = false;
     bool show_pinned_tab_names = true;
+    // Details list presentation.
+    bool list_smart_date = true;
+    bool list_zebra_rows = true;
+    bool list_size_bar = false;
     bool search_pinyin = true;
     bool global_search_enabled = false;
     uint32_t global_search_modifiers = 1; // MOD_ALT

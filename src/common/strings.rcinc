@@ -2013,3 +2013,27 @@ BEGIN
  IDS_GLOBAL_SEARCH_SAVE_FAILED "Unable to save settings. Try again."
  IDS_GLOBAL_SEARCH_OPEN_FAILED "Unable to open global search. Try again."
 END
+LANGUAGE 0x04, 0x02
+STRINGTABLE
+BEGIN
+ IDS_DATE_WEEKDAYS "周日,周一,周二,周三,周四,周五,周六"
+ IDS_DATE_MONTH_DAY_FORMAT "%u月%u日"
+ IDS_LIST_SMART_DATE "智能日期"
+ IDS_LIST_SMART_DATE_DESC "近期时间显示为“今天 14:32”“昨天 09:10”“周三 18:00”"
+ IDS_LIST_ZEBRA "斑马纹行"
+ IDS_LIST_ZEBRA_DESC "详细信息视图隔行加淡底色，长列表更容易横向对齐"
+ IDS_LIST_SIZE_BAR "大小比例条"
+ IDS_LIST_SIZE_BAR_DESC "在大小列下方用细条直观比较文件大小"
+END
+LANGUAGE 0x09, 0x01
+STRINGTABLE
+BEGIN
+ IDS_DATE_WEEKDAYS "Sun,Mon,Tue,Wed,Thu,Fri,Sat"
+ IDS_DATE_MONTH_DAY_FORMAT "%u/%u"
+ IDS_LIST_SMART_DATE "Friendly dates"
+ IDS_LIST_SMART_DATE_DESC "Show recent times as Today 14:32, Yesterday 09:10 or Wed 18:00"
+ IDS_LIST_ZEBRA "Zebra rows"
+ IDS_LIST_ZEBRA_DESC "Tint alternate rows in Details view so wide lists are easier to follow"
+ IDS_LIST_SIZE_BAR "Size bars"
+ IDS_LIST_SIZE_BAR_DESC "Draw a thin bar under file sizes for quick comparison"
+END

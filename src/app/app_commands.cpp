@@ -1686,6 +1686,9 @@ void ApplySettingsEffects(AppState& s, app::SettingsEffect effects) {
     }
     if (app::HasEffect(effects, app::SettingsEffect::RowHeight))
         s.renderer.SetRowHeightDip(static_cast<float>(s.appPrefs.row_height));
+    if (app::HasEffect(effects, app::SettingsEffect::ListStyle))
+        s.renderer.SetListStyle(s.appPrefs.list_smart_date, s.appPrefs.list_zebra_rows,
+                                s.appPrefs.list_size_bar);
     if (app::HasEffect(effects, app::SettingsEffect::TrayDeckIcon))
         s.renderer.SetTrayIconDip(static_cast<float>(s.appPrefs.tray_icon_size));
     if (app::HasEffect(effects, app::SettingsEffect::TrayVisibility))

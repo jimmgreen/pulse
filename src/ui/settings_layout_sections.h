@@ -32,6 +32,7 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
     section(2);
     l.density_card=row(narrow ? 98.0f : 64.0f); segments(l.density_card,l.density_row,3,282);
     l.performance_row=row(64);
+    for(auto& list_row : l.list_style_row) list_row=row(64);
     l.group[2]=D2D1::RectF(left,l.density_card.top,right,y);
     y+=18*scale;
     l.disclosure[0]=row(64);

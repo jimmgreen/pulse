@@ -116,13 +116,17 @@ void DrawNameHighlightBackground(Compositor* compositor, IDWriteTextLayout* layo
     if (!compositor || !layout || ranges.empty()) return;
     ApplyNameHighlightPadding(layout, ranges, scale);
     const bool dark = theme.bg.r < 0.5f;
-    ComPtr<ID2D1SolidColorBrush> background, foreground, outline;
+    // Soft accent wash with an accent underline: the match stays readable
+    // without the heavy amber box of earlier builds.
+    ComPtr<ID2D1SolidColorBrush> background, foreground, underline;
     auto* dc = compositor->Dc();
-    auto fill = HexColor(dark ? 0x674A16 : 0xFFE6A2);
-    fill.a = dark ? 0.78f : 0.88f;
+    auto fill = theme.accent;
+    fill.a = dark ? 0.24f : 0.18f;
+    auto ink = dark ? HexColor(0xFFFFFF) : theme.text;
+    ink.a = 1.0f;
     if (FAILED(dc->CreateSolidColorBrush(fill, &background)) ||
-        FAILED(dc->CreateSolidColorBrush(HexColor(dark ? 0xFFD574 : 0x684400), &foreground)) ||
-        FAILED(dc->CreateSolidColorBrush(HexColor(dark ? 0xD8A441 : 0xBD8B25), &outline))) return;
+        FAILED(dc->CreateSolidColorBrush(ink, &foreground)) ||
+        FAILED(dc->CreateSolidColorBrush(theme.accent, &underline))) return;
     const auto previous_aa = dc->GetAntialiasMode();
     dc->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
     dc->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -136,19 +140,12 @@ void DrawNameHighlightBackground(Compositor* compositor, IDWriteTextLayout* layo
         for (const auto& hit : metrics) {
             if (!hit.isText || hit.isTrimmed || hit.width <= 0 || hit.height <= 0) continue;
             const float inset = std::min(0.5f * scale, hit.width * 0.1f);
-            const auto rect = D2D1::RectF(hit.left + inset, hit.top + 0.5f * scale,
-                hit.left + hit.width - inset, hit.top + hit.height - 0.5f * scale);
-            const float radius = std::min(3.5f * scale, (rect.right - rect.left) * 0.5f);
-            const auto rounded = D2D1::RoundedRect(rect, radius, radius);
-            if (dark) {
-                outline->SetOpacity(0.045f);
-                dc->DrawRoundedRectangle(rounded, outline.get(), 3.0f * scale);
-                outline->SetOpacity(0.08f);
-                dc->DrawRoundedRectangle(rounded, outline.get(), 1.8f * scale);
-            }
-            dc->FillRoundedRectangle(rounded, background.get());
-            outline->SetOpacity(dark ? 0.55f : 0.38f);
-            dc->DrawRoundedRectangle(rounded, outline.get(), 0.75f * scale);
+            const auto rect = D2D1::RectF(hit.left + inset, hit.top + 1.0f * scale,
+                hit.left + hit.width - inset, hit.top + hit.height - 1.0f * scale);
+            const float radius = std::min(3.0f * scale, (rect.right - rect.left) * 0.5f);
+            dc->FillRoundedRectangle(D2D1::RoundedRect(rect, radius, radius), background.get());
+            const float line = std::max(1.0f, 2.0f * scale);
+            dc->FillRectangle(D2D1::RectF(rect.left, rect.bottom - line, rect.right, rect.bottom), underline.get());
         }
         layout->SetDrawingEffect(foreground.get(), {range.start, range.length});
     }

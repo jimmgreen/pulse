@@ -50,6 +50,9 @@ void AppPrefs::ResetToDefaults() {
     verify_copies = false;
     show_status_performance = false;
     show_pinned_tab_names = true;
+    list_smart_date = true;
+    list_zebra_rows = true;
+    list_size_bar = false;
     search_pinyin = true;
     global_search_enabled = false;
     global_search_modifiers = 1;
@@ -94,6 +97,12 @@ std::wstring AppPrefs::ToJson() const {
     out += show_status_performance ? L"true" : L"false";
     out += L",\n  \"show_pinned_tab_names\":";
     out += show_pinned_tab_names ? L"true" : L"false";
+    out += L",\n  \"list_smart_date\":";
+    out += list_smart_date ? L"true" : L"false";
+    out += L",\n  \"list_zebra_rows\":";
+    out += list_zebra_rows ? L"true" : L"false";
+    out += L",\n  \"list_size_bar\":";
+    out += list_size_bar ? L"true" : L"false";
     out += L",\n  \"show_hidden_files\":";
     out += show_hidden_files ? L"true" : L"false";
     out += L",\n  \"show_protected_os_files\":";
@@ -167,6 +176,9 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     verify_copies = pulse::json::ExtractBool(json, L"verify_copies", false);
     show_status_performance = pulse::json::ExtractBool(json, L"show_status_performance", false);
     show_pinned_tab_names = pulse::json::ExtractBool(json, L"show_pinned_tab_names", true);
+    list_smart_date = pulse::json::ExtractBool(json, L"list_smart_date", true);
+    list_zebra_rows = pulse::json::ExtractBool(json, L"list_zebra_rows", true);
+    list_size_bar = pulse::json::ExtractBool(json, L"list_size_bar", false);
     search_pinyin = pulse::json::ExtractBool(json, L"search_pinyin", true);
     global_search_enabled = pulse::json::ExtractBool(json, L"global_search_enabled", false);
     const int modifiers = pulse::json::ExtractInt(json, L"global_search_modifiers", 1);

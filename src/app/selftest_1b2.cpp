@@ -4399,6 +4399,86 @@ void TestViewLayouts() {
           L"search: dragging the path divider widens the path column");
 }
 
+
+// Content-fitted details columns (1.0.39). No compositor here, so fitted
+// widths are the fallbacks: Date 130, Type 128, Size 90 DIP.
+void TestListColumns() {
+    using K = ui::MainRenderer::ColumnKind;
+    for (float scale : {1.0f, 1.5f, 2.0f}) {
+        ui::MainRenderer r;
+        r.SetScale(scale);
+        auto pane = [&](float w) { return D2D1::RectF(0.0f, 0.0f, w * scale, 400.0f * scale); };
+        auto fills = [&](const ui::MainRenderer::DetailsColumnLayout& c) {
+            float sum = 0.0f;
+            bool positive = true;
+            for (int i = 0; i < c.count; ++i) {
+                sum += c.widths[static_cast<size_t>(i)];
+                positive &= c.widths[static_cast<size_t>(i)] > 0.0f;
+            }
+            return positive && std::abs(sum - (c.right - c.left)) < 0.05f;
+        };
+        auto close_to = [&](float px, float dip) { return std::abs(px - dip * scale) < 0.05f; };
+
+        const auto wide = r.DetailsColumns(pane(1200.0f), {}, false);
+        Check(wide.count == 4 && wide.kinds[0] == K::Name && wide.kinds[1] == K::Date &&
+              wide.kinds[2] == K::Type && wide.kinds[3] == K::Size && fills(wide) &&
+              close_to(wide.Width(K::Date), 130.0f) && close_to(wide.Width(K::Size), 90.0f),
+              L"columns: wide details shows name/date/type/size at fitted widths");
+        const auto mid = r.DetailsColumns(pane(540.0f), {}, false);
+        Check(mid.Has(K::Date) && !mid.Has(K::Type) && mid.Has(K::Size) && fills(mid) &&
+              mid.Width(K::Name) >= 210.0f * scale - 0.05f,
+              L"columns: narrowing hides Type first and keeps the name readable");
+        const auto slim = r.DetailsColumns(pane(400.0f), {}, false);
+        Check(!slim.Has(K::Date) && !slim.Has(K::Type) && slim.Has(K::Size) && fills(slim),
+              L"columns: very narrow panes hide Date after Type");
+        const auto tiny = r.DetailsColumns(pane(200.0f), {}, false);
+        Check(tiny.Width(K::Name) >= 80.0f * scale - 0.05f && fills(tiny),
+              L"columns: the name keeps its 80 DIP floor");
+
+        const auto legacy = r.DetailsColumns(pane(1200.0f), {0.42f, 0.61f, 0.82f}, false);
+        Check(close_to(legacy.Width(K::Date), 130.0f) && close_to(legacy.Width(K::Type), 128.0f),
+              L"columns: pre-1.0.39 divider ratios read back as automatic widths");
+        const auto manual = r.DetailsColumns(pane(1200.0f), {200.0f, 0.0f, 0.0f}, false);
+        Check(close_to(manual.Width(K::Date), 200.0f) && close_to(manual.Width(K::Type), 128.0f),
+              L"columns: a manual DIP width is honoured and the rest stay fitted");
+
+        std::array<float, 3> dividers{};
+        dividers = r.ResizeDetailsColumnDivider(pane(1200.0f), dividers, 0, wide.DividerX(0) - 50.0f * scale);
+        const auto grown = r.DetailsColumns(pane(1200.0f), dividers, false);
+        Check(close_to(grown.Width(K::Date), 180.0f) && close_to(grown.Width(K::Size), 90.0f) &&
+              std::abs(grown.DividerX(1) - wide.DividerX(1)) < 0.05f,
+              L"columns: dragging the name divider resizes Date and keeps its right edge");
+        dividers = r.ResizeDetailsColumnDivider(pane(1200.0f), dividers, 1, grown.DividerX(1) + 20.0f * scale);
+        const auto moved = r.DetailsColumns(pane(1200.0f), dividers, false);
+        Check(close_to(moved.Width(K::Date), 200.0f) && close_to(moved.Width(K::Type), 128.0f),
+              L"columns: dragging between metadata columns resizes the left one only");
+        std::array<float, 4> unused{};
+        r.AutoFitColumnDivider(pane(1200.0f), dividers, false, unused, 1);
+        const auto refit = r.DetailsColumns(pane(1200.0f), dividers, false);
+        Check(dividers[0] == 0.0f && dividers[1] == 0.0f && close_to(refit.Width(K::Date), 130.0f),
+              L"columns: double-click auto-fit restores fitted widths");
+
+        const auto search_wide = r.DetailsColumns(pane(1000.0f), {}, true);
+        Check(search_wide.kinds[1] == K::Path && !search_wide.two_line && fills(search_wide),
+              L"columns: wide search keeps a folder column");
+        const auto search_narrow = r.DetailsColumns(pane(700.0f), {}, true);
+        Check(!search_narrow.Has(K::Path) && search_narrow.two_line && search_narrow.Has(K::Type) &&
+              fills(search_narrow),
+              L"columns: narrow search moves the folder under the name");
+        ui::PaneViewModel vm;
+        vm.view_mode = ui::ViewMode::Details;
+        vm.is_search = true;
+        Check(r.ListRowHeightDip(vm, pane(700.0f)) >= 42.0f && r.ListRowHeightDip(vm, pane(1000.0f)) < 42.0f,
+              L"columns: only the two-line search layout grows the row height");
+        std::array<float, 4> search_dividers{};
+        search_dividers = r.ResizeSearchColumnDivider(pane(1000.0f), search_dividers, 0,
+                                                      search_wide.DividerX(0) - 60.0f * scale);
+        const auto search_moved = r.DetailsColumns(pane(1000.0f), {}, true, search_dividers);
+        Check(std::abs(search_moved.widths[1] - search_wide.widths[1] - 60.0f * scale) < 0.05f,
+              L"columns: the name/folder divider keeps the requested width");
+    }
+}
+
 } // namespace
 
 void TestLinkResolve() {
@@ -5207,6 +5287,13 @@ int RunSelfTest1B2() {
         return g_fail ? 1 : 0;
     }
     if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
+        wcscmp(test_case, L"list-columns") == 0) {
+        TestListColumns();
+        TestViewLayouts();
+        if (g_log) { fclose(g_log); g_log = nullptr; }
+        return g_fail ? 1 : 0;
+    }
+    if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
         wcscmp(test_case, L"filter-controls") == 0) {
         TestFilterControls();
         if (g_log) { fclose(g_log); g_log = nullptr; }
@@ -5306,6 +5393,7 @@ int RunSelfTest1B2() {
     TestMultiSelect();
     TestSplitLayout();
     TestViewLayouts();
+    TestListColumns();
     TestHiddenFiles();
     TestQuickAccess();
     TestPlacesAndIndex();

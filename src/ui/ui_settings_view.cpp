@@ -703,6 +703,9 @@ float MainRenderer::SettingsDestinationOffset(const WindowViewModel& vm, int set
     case I::SettingsOpenFolders: target=l.startup_row[2];break;
     case I::SettingsRowHeight: target=l.density_card;break;
     case I::SettingsShowPerformance: target=l.performance_row;break;
+    case I::ListSmartDate: target=l.list_style_row[0];break;
+    case I::ListZebraRows: target=l.list_style_row[1];break;
+    case I::ListSizeBar: target=l.list_style_row[2];break;
     case I::SettingsWallpaper: target=l.wallpaper_card;break;
     case I::SettingsTrayIcon: target=l.tray_icon_card;break;
     case I::SettingsShowHidden: target=l.hidden_files_row;break;

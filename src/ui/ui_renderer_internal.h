@@ -858,6 +858,147 @@ void ClearTextWidthCache() {
     constexpr float kDetailsDateDip = 130.0f;
     constexpr float kDetailsTypeDip = 128.0f;
     constexpr float kDetailsSizeDip = 90.0f;
+    constexpr float kDetailsFitNameDip = 210.0f;     // narrower name: drop Type, then Date
+    constexpr float kDetailsFitPathDip = 150.0f;     // search: narrower path moves under the name
+    constexpr float kDetailsTwoLineMinRowDip = 42.0f;
+    constexpr float kSizeUnitDip = 28.0f;            // unit sub-column ("KB", "MB") of Size
+    constexpr float kTypeChipPadDip = 5.0f;
+    constexpr float kTypeChipGapDip = 6.0f;
+
+    std::wstring WeekdayName(int day) {
+        const std::wstring all = pulse::l10n::Get(pulse::l10n::StringId::DateWeekdays);
+        size_t start = 0;
+        for (int i = 0; i < day; ++i) {
+            const size_t comma = all.find(L',', start);
+            if (comma == std::wstring::npos) return L"";
+            start = comma + 1;
+        }
+        const size_t end = all.find(L',', start);
+        return all.substr(start, end == std::wstring::npos ? std::wstring::npos : end - start);
+    }
+
+    // Recent times read faster relative to today: "今天 14:32", "昨天 09:10",
+    // "周三 18:00", this year "4月13日 22:28", older "2024-04-02".
+    std::wstring SmartListDate(uint64_t filetime) {
+        if (!filetime) return L"";
+        FILETIME ft{static_cast<DWORD>(filetime), static_cast<DWORD>(filetime >> 32)};
+        FILETIME local{};
+        SYSTEMTIME st{};
+        if (!FileTimeToLocalFileTime(&ft, &local) || !FileTimeToSystemTime(&local, &st)) return L"";
+        SYSTEMTIME now{};
+        GetLocalTime(&now);
+        auto day_number = [](SYSTEMTIME day) {
+            day.wHour = day.wMinute = day.wSecond = day.wMilliseconds = 0;
+            FILETIME f{};
+            SystemTimeToFileTime(&day, &f);
+            return static_cast<long long>(((static_cast<uint64_t>(f.dwHighDateTime) << 32) |
+                                           f.dwLowDateTime) / 864000000000ull);
+        };
+        const long long diff = day_number(now) - day_number(st);
+        wchar_t hm[16];
+        swprintf_s(hm, L"%02u:%02u", st.wHour, st.wMinute);
+        using pulse::l10n::StringId;
+        if (diff == 0) return pulse::l10n::Get(StringId::DateToday) + L" " + hm;
+        if (diff == 1) return pulse::l10n::Get(StringId::DateYesterday) + L" " + hm;
+        if (diff > 1 && diff < 7) return WeekdayName(st.wDayOfWeek) + L" " + hm;
+        wchar_t text[64];
+        if (diff > 0 && st.wYear == now.wYear) {
+            swprintf_s(text, pulse::l10n::Get(StringId::DateMonthDayFormat).c_str(), st.wMonth, st.wDay);
+            return std::wstring(text) + L" " + hm;
+        }
+        if (diff < 0) {
+            swprintf_s(text, L"%04u-%02u-%02u %s", st.wYear, st.wMonth, st.wDay, hm);
+            return text;
+        }
+        swprintf_s(text, L"%04u-%02u-%02u", st.wYear, st.wMonth, st.wDay);
+        return text;
+    }
+
+    // Widest strings SmartListDate can produce (column fitting).
+    std::vector<std::wstring> SmartDateSamples() {
+        using pulse::l10n::StringId;
+        std::vector<std::wstring> out{pulse::l10n::Get(StringId::DateToday) + L" 23:59",
+                                      pulse::l10n::Get(StringId::DateYesterday) + L" 23:59",
+                                      L"2026-12-30"};
+        for (int day = 0; day < 7; ++day) out.push_back(WeekdayName(day) + L" 23:59");
+        wchar_t text[64];
+        swprintf_s(text, pulse::l10n::Get(StringId::DateMonthDayFormat).c_str(), 12u, 30u);
+        out.push_back(std::wstring(text) + L" 23:59");
+        return out;
+    }
+
+    // Uppercase extension shown as a colored chip before the type (<= 6 chars).
+    std::wstring TypeChipLabel(const std::wstring& name, bool is_dir) {
+        if (is_dir) return L"";
+        const size_t dot = name.find_last_of(L'.');
+        if (dot == std::wstring::npos || dot == 0 || dot + 1 >= name.size()) return L"";
+        std::wstring ext = name.substr(dot + 1);
+        if (ext.size() > 6) return L"";
+        for (auto& c : ext) {
+            if (!std::iswalnum(c)) return L"";
+            c = static_cast<wchar_t>(std::towupper(c));
+        }
+        return ext;
+    }
+
+    uint32_t TypeChipRgb(const std::wstring& chip) {
+        std::wstring e = chip;
+        for (auto& c : e) c = static_cast<wchar_t>(std::towlower(c));
+        auto in = [&](std::initializer_list<const wchar_t*> list) {
+            for (const wchar_t* x : list) if (e == x) return true;
+            return false;
+        };
+        if (in({L"exe", L"msi", L"appx", L"msix", L"bat", L"cmd", L"com", L"lnk"})) return 0x22C55E;
+        if (in({L"dll", L"sys", L"ocx", L"drv", L"cpl", L"mui", L"efi"})) return 0x3B82F6;
+        if (in({L"png", L"jpg", L"jpeg", L"gif", L"bmp", L"webp", L"svg", L"ico", L"heic", L"tif", L"tiff", L"psd"})) return 0xA855F7;
+        if (in({L"mp4", L"mkv", L"avi", L"mov", L"wmv", L"webm", L"flv"})) return 0xEC4899;
+        if (in({L"mp3", L"wav", L"flac", L"aac", L"ogg", L"m4a", L"wma"})) return 0x14B8A6;
+        if (in({L"zip", L"rar", L"7z", L"tar", L"gz", L"xz", L"cab", L"iso", L"zst"})) return 0xEAB308;
+        if (in({L"pdf", L"doc", L"docx", L"xls", L"xlsx", L"ppt", L"pptx", L"rtf", L"odt", L"dwg", L"dxf"})) return 0xEF4444;
+        if (in({L"txt", L"md", L"log", L"csv"})) return 0x94A3B8;
+        if (in({L"ps1", L"py", L"js", L"ts", L"cpp", L"c", L"h", L"hpp", L"cs", L"java", L"go", L"rs", L"sh",
+                L"json", L"xml", L"yaml", L"yml", L"ini", L"toml", L"cmake", L"html", L"css", L"inf", L"reg"})) return 0xF97316;
+        return 0x64748B;
+    }
+
+    // "C:\a\b\c\d\e" -> head "C:\…\d\", last "e" (last segment kept whole when possible).
+    template <typename Measure>
+    std::pair<std::wstring, std::wstring> MiddleEllipsisPath(const std::wstring& path, float width,
+                                                             Measure measure) {
+        if (path.empty() || measure(path) <= width) return {path, L""};
+        const size_t cut = path.find_last_of(L'\\');
+        if (cut == std::wstring::npos || cut + 1 >= path.size()) return {path, L""};
+        const std::wstring last = path.substr(cut + 1);
+        std::vector<std::wstring> parts;
+        size_t start = 0;
+        while (start < cut) {
+            const size_t next = path.find(L'\\', start);
+            if (next == std::wstring::npos || next > cut) break;
+            parts.push_back(path.substr(start, next - start));
+            start = next + 1;
+        }
+        const std::wstring root = parts.empty() ? L"" : parts.front() + L"\\";
+        for (int keep = std::min<int>(2, static_cast<int>(parts.size()) - 1); keep >= 0; --keep) {
+            std::wstring head = root + L"\u2026\\";
+            for (size_t i = parts.size() - static_cast<size_t>(keep); i < parts.size(); ++i)
+                head += parts[i] + L"\\";
+            if (measure(head + last) <= width) return {head, last};
+        }
+        return {L"\u2026\\", last};
+    }
+
+    // Longest prefix of text that fits with a trailing ellipsis.
+    template <typename Measure>
+    std::wstring FitEndEllipsis(const std::wstring& text, float width, Measure measure) {
+        if (text.empty() || measure(text) <= width) return text;
+        size_t lo = 0, hi = text.size();
+        while (lo < hi) {
+            const size_t mid = (lo + hi + 1) / 2;
+            if (measure(text.substr(0, mid) + L"\u2026") <= width) lo = mid; else hi = mid - 1;
+        }
+        if (lo > 0 && IS_HIGH_SURROGATE(text[lo - 1])) --lo;
+        return text.substr(0, lo) + L"\u2026";
+    }
 
     float MeasureLayoutText(Compositor* compositor, IDWriteFactory2* dwrite,
                             IDWriteTextFormat* format, const std::wstring& text) {
@@ -1249,6 +1390,7 @@ struct SettingsLayout {
     D2D1_RECT_F effect_card{};
     D2D1_RECT_F effect_row[kWindowEffectCount]{};
     D2D1_RECT_F density_card{};
+    D2D1_RECT_F list_style_row[3]{};
     D2D1_RECT_F density_row[3]{};
     D2D1_RECT_F tray_icon_card{};
     D2D1_RECT_F tray_icon_row[3]{};

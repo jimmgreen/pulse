@@ -30,10 +30,11 @@ std::wstring FormatScaled3(const std::array<float, 3>& edges) {
 std::array<float, 3> ParseScaled3(const std::wstring& value) {
     std::array<int, 3> edges{};
     std::array<float, 3> ratios{};
+    // Values <= 1 are pre-1.0.39 divider ratios (read back as "automatic");
+    // larger values are manual column widths in DIP. 0 = automatic.
     if (swscanf_s(value.c_str(), L"%d,%d,%d",
                   &edges[0], &edges[1], &edges[2]) == 3 &&
-        edges[0] > 0 && edges[0] < edges[1] &&
-        edges[1] < edges[2] && edges[2] < 10000) {
+        std::all_of(edges.begin(), edges.end(), [](int v) { return v >= 0 && v <= 40000000; })) {
         for (size_t i = 0; i < ratios.size(); ++i)
             ratios[i] = static_cast<float>(edges[i]) / 10000.0f;
     }
@@ -52,9 +53,7 @@ std::array<float, 4> ParseScaled4(const std::wstring& value) {
     std::array<float, 4> ratios{};
     if (swscanf_s(value.c_str(), L"%d,%d,%d,%d",
                   &edges[0], &edges[1], &edges[2], &edges[3]) == 4 &&
-        edges[0] > 0 && edges[0] < edges[1] &&
-        edges[1] < edges[2] && edges[2] < edges[3] &&
-        edges[3] < 10000) {
+        std::all_of(edges.begin(), edges.end(), [](int v) { return v >= 0 && v <= 40000000; })) {
         for (size_t i = 0; i < ratios.size(); ++i)
             ratios[i] = static_cast<float>(edges[i]) / 10000.0f;
     }

@@ -172,7 +172,7 @@ bool RunNameHighlightUiTest() {
                     const auto list = renderer.PaneListRect(slot.rect, 0, ViewMode::Details);
                     const auto columns = renderer.DetailsColumns(list, slot.pane);
                     ViewLayout positions(ViewMode::Details, list, slot.pane.EntryCount(), 0, 0,
-                        scale, renderer.ListRowHeightDip(slot.pane));
+                        scale, renderer.ListRowHeightDip(slot.pane, list));
                     for (const int row : {0, 1}) {
                         const auto name_rect = positions.NameRect(row);
                         const auto cell = positions.ItemRect(row);

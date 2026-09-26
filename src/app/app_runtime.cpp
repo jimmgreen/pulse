@@ -1152,6 +1152,9 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
         s.sidebarQuickAccessHiddenMask);
     app::FillWindowTabStrip(vm, s.window_tabs);
     vm.show_pinned_tab_names = s.appPrefs.show_pinned_tab_names;
+    vm.settings_list_smart_date = s.appPrefs.list_smart_date;
+    vm.settings_list_zebra_rows = s.appPrefs.list_zebra_rows;
+    vm.settings_list_size_bar = s.appPrefs.list_size_bar;
     vm.sidebar_scroll = s.sidebarScroll;
     if (s.groupDragActive) {
         vm.sidebar_group_drag_id = s.groupDragId;
@@ -1723,6 +1726,23 @@ std::wstring TooltipForHover(AppState& s) {
                 full = tab->current_path;
                 if (!full.empty() && !full.ends_with(L"\\")) full += L"\\";
                 full += entry.name;
+            }
+            // Narrow panes drop columns; keep their facts reachable on hover.
+            if (tab->view_mode == ui::ViewMode::Details) {
+                using K = ui::MainRenderer::ColumnKind;
+                const uint32_t shown = s.renderer.PaintedColumnMask(std::max(0, s.hoverPaneIndex));
+                auto hidden = [&](K kind) { return shown && !(shown & (1u << static_cast<uint32_t>(kind))); };
+                std::wstring view_kind;
+                app::ParsePulsePath(tab->current_path, &view_kind, nullptr);
+                const bool search = view_kind == L"search";
+                if (search && hidden(K::Path) && !full.empty()) {
+                    const size_t slash = full.find_last_of(L'\\');
+                    if (slash != std::wstring::npos && slash > 0)
+                        tooltip += L" · " + full.substr(0, slash);
+                }
+                if (hidden(K::Date))
+                    tooltip += L" · " + pulse::l10n::Get(pulse::l10n::StringId::ColumnModified) + L" " +
+                               pulse::format::LocalFileTime(entry.mtime);
             }
             if (const auto* indices = s.places.TagIndicesForPath(full); indices && !indices->empty()) {
                 tooltip += pulse::l10n::Get(pulse::l10n::StringId::TooltipTags).c_str();

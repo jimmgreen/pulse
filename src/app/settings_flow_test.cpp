@@ -140,28 +140,33 @@ int RunSearchColumnsTest(AppState& s,const wchar_t* output) {
     HandleSettingsControl(s,disclosure);check(!(s.settingsExpanded&2u),"storage can still collapse");
     HandleSettingsControl(s,disclosure);check((s.settingsExpanded&2u)!=0,"storage can reopen");
     Render(s);check(s.compositor.SaveSnapshot((base/L"storage-expanded.png").c_str()),"default expanded storage screenshot captured");
+    // Pre-1.0.39 sessions stored divider ratios; they read back as automatic widths.
     const std::array<float,4> saved{0.31f,0.43f,0.62f,0.82f};
+    using K=ui::MainRenderer::ColumnKind;
     for(float scale:{1.0f,1.25f,1.5f,2.0f}) {
         s.renderer.SetScale(scale);
-        bool compact=true,positive=true,filled=true,dragged=true;
+        bool compact=true,positive=true,filled=true,dragged=true,legacy=true;
         for(float width:{500.0f,800.0f,1440.0f,2400.0f}) {
             const auto pane=D2D1::RectF(0,0,width*scale,600*scale);
+            const auto automatic=s.renderer.DetailsColumns(pane,{},true,{});
             for(const auto& dividers:{std::array<float,4>{},saved}) {
                 const auto c=s.renderer.DetailsColumns(pane,{},true,dividers);
-                compact &= c.widths[2]<=144*scale+0.01f && c.widths[3]<=128*scale+0.01f && c.widths[4]<=90*scale+0.01f;
+                compact &= c.Width(K::Date)<=176*scale+0.01f && c.Width(K::Type)<=196*scale+0.01f && c.Width(K::Size)<=112*scale+0.01f;
                 float sum=0;for(int i=0;i<c.count;++i){positive &= c.widths[i]>0;sum+=c.widths[i];}
                 filled &= std::abs(sum-(c.right-c.left))<0.05f;
-                if(width>=800) {
+                legacy &= c.count==automatic.count && std::abs(c.widths[0]-automatic.widths[0])<0.05f;
+                if(c.Has(K::Path)) {
                     const auto moved=s.renderer.ResizeSearchColumnDivider(pane,dividers,0,c.DividerX(0)-40*scale);
                     const auto after=s.renderer.DetailsColumns(pane,{},true,moved);
                     dragged &= std::abs(after.widths[1]-c.widths[1]-40*scale)<0.05f;
-                    compact &= c.widths[0]+c.widths[1]>c.widths[2]+c.widths[3]+c.widths[4];
                 }
+                if(width>=1440) compact &= c.widths[0]+c.widths[1]>c.Width(K::Date)+c.Width(K::Type)+c.Width(K::Size);
             }
         }
-        check(compact,"default and saved layouts prioritize name/path at narrow and wide sizes");
+        check(compact,"fitted metadata columns stay compact and leave room for name/path");
         check(positive && filled,"columns stay positive and fill the available width");
         check(dragged,"name/path divider drag keeps its requested width");
+        check(legacy,"legacy divider ratios fall back to fitted widths");
     }
     s.renderer.SetScale(s.scale);
     ui::WindowViewModel vm;vm.dark=s.darkMode;vm.window_effect=ui::WindowEffect::None;

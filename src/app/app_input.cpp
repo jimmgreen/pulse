@@ -2463,6 +2463,28 @@ LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPA
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
+        if (hit.region == ui::HitTestResult::ColumnDivider) {
+            // Double-click a column divider: both neighbours return to their
+            // content-fitted widths.
+            s->columnResizing = false;
+            s->columnResizeIndex = -1;
+            s->columnResizePane = -1;
+            if (GetCapture() == hwnd) ReleaseCapture();
+            app::Pane* fitPane = PaneAtSlot(*s, hit.pane_index);
+            app::Tab* fitTab = fitPane ? fitPane->ActiveTab() : nullptr;
+            if (fitTab && hit.pane_index >= 0 &&
+                hit.pane_index < static_cast<int>(vm.pane_slots.size())) {
+                std::wstring kind;
+                app::ParsePulsePath(fitTab->current_path, &kind, nullptr);
+                s->renderer.AutoFitColumnDivider(
+                    vm.pane_slots[static_cast<size_t>(hit.pane_index)].rect,
+                    fitTab->details_column_dividers, kind == L"search",
+                    fitTab->search_column_dividers, hit.index);
+                if (s->renameIndex >= 0) LayoutRenameOverlay(*s);
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
         if (hit.region == ui::HitTestResult::SidebarItem &&
             hit.path.starts_with(L"pulse:tag:")) {
             s->tagDragPending = false;

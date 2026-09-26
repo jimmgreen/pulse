@@ -326,6 +326,90 @@ MainRenderer::DetailsColumnLayout MainRenderer::DetailsColumns(
                           vm.search_column_dividers);
 }
 
+MainRenderer::ColumnAutoWidths MainRenderer::AutoColumnWidths() const {
+    using pulse::l10n::StringId;
+    const std::wstring language = pulse::l10n::Get(StringId::TypeFolder) +
+        pulse::l10n::Get(StringId::DateToday);
+    if (auto_widths_scale_ == scale_ && auto_widths_language_ == language)
+        return auto_widths_;
+    ColumnAutoWidths out;
+    IDWriteFactory2* factory = compositor_ ? compositor_->DwriteFactory() : nullptr;
+    IDWriteTextFormat* fmt = compositor_ ? compositor_->TextFormat() : nullptr;
+    IDWriteTextFormat* header = compositor_ ? compositor_->HeaderFormat() : nullptr;
+    if (factory && fmt && header && scale_ > 0.0f) {
+        // LumaText and DWrite advances differ slightly; fit the wider one.
+        auto measure = [&](IDWriteTextFormat* format, const std::wstring& text) {
+            float luma = 0.0f;
+            compositor_->MeasureLumaText(text, format, luma);
+            return std::max(MeasureTextWidth(factory, format, text), luma) / scale_;
+        };
+        const float pad = 16.0f + 4.0f;   // 8 DIP inset per side + rounding slack
+        const float sort_icon = 15.0f;    // header chevron when the column is sorted
+        auto header_w = [&](StringId id) { return measure(header, pulse::l10n::Get(id)) + sort_icon; };
+        std::vector<std::wstring> dates;
+        if (list_smart_date_) {
+            dates = SmartDateSamples();
+        } else {
+            dates = {L"2026-12-30 23:59"};
+        }
+        float date = header_w(StringId::ColumnModified);
+        for (const auto& d : dates) date = std::max(date, measure(fmt, d));
+        float type = std::max(header_w(StringId::ColumnType), measure(fmt, L"\u2014"));
+        const StringId kinds[] = {StringId::TypeFolder, StringId::TypeFile, StringId::TypeTextDocument,
+            StringId::TypeImage, StringId::TypeVideo, StringId::TypeAudio, StringId::TypeArchive,
+            StringId::TypeApplication, StringId::Unavailable};
+        const float chip = TypeChipWidthDip(L"XLSX");
+        for (StringId id : kinds) type = std::max(type, measure(fmt, pulse::l10n::Get(id)) + chip);
+        type = std::max(type, measure(fmt, L"AutoCAD " + pulse::l10n::Get(StringId::TypeFile)) + chip);
+        float size = std::max(header_w(StringId::ColumnSize), measure(fmt, L"1023.9") + kSizeUnitDip);
+        out.date = std::clamp(date + pad, 72.0f, 176.0f);
+        out.type = std::clamp(type + pad, 64.0f, 196.0f);
+        out.size = std::clamp(size + pad, 60.0f, 112.0f);
+    }
+    auto_widths_ = out;
+    auto_widths_scale_ = scale_;
+    auto_widths_language_ = language;
+    return out;
+}
+
+float MainRenderer::TypeChipWidthDip(const std::wstring& chip) const {
+    if (chip.empty()) return 0.0f;
+    float w = 0.0f;
+    if (compositor_ && compositor_->SmallFormat()) {
+        compositor_->MeasureLumaText(chip, compositor_->SmallFormat(), w);
+        w = std::max(w, MeasureTextWidth(compositor_->DwriteFactory(), compositor_->SmallFormat(), chip));
+        w /= std::max(0.01f, scale_);
+    } else {
+        w = 8.0f * static_cast<float>(chip.size());
+    }
+    return w + 2.0f * kTypeChipPadDip + kTypeChipGapDip;
+}
+
+float MainRenderer::CellTextWidth(const std::wstring& text, bool small_text) const {
+    if (text.empty() || !compositor_) return 0.0f;
+    IDWriteTextFormat* fmt = small_text ? compositor_->SmallFormat() : compositor_->TextFormat();
+    if (!fmt) return 0.0f;
+    if (cell_text_widths_scale_ != scale_ || cell_text_widths_.size() > 8192) {
+        cell_text_widths_.clear();
+        cell_text_widths_scale_ = scale_;
+    }
+    std::wstring key;
+    key.reserve(text.size() + 1);
+    key.push_back(small_text ? L's' : L'n');
+    key += text;
+    if (const auto it = cell_text_widths_.find(key); it != cell_text_widths_.end()) return it->second;
+    float luma = 0.0f;
+    compositor_->MeasureLumaText(text, fmt, luma);
+    const float width = std::max(luma, MeasureTextWidth(compositor_->DwriteFactory(), fmt, text));
+    cell_text_widths_.emplace(std::move(key), width);
+    return width;
+}
+
+namespace {
+// Stored widths are manual DIP widths; 0 (or a legacy ratio <= 1) is automatic.
+float ManualWidthDip(float stored) { return stored > 1.0f ? stored : 0.0f; }
+}
+
 MainRenderer::DetailsColumnLayout MainRenderer::DetailsColumns(
     const D2D1_RECT_F& pane_bounds,
     const std::array<float, 3>& dividers,
@@ -336,165 +420,147 @@ MainRenderer::DetailsColumnLayout MainRenderer::DetailsColumns(
     out.left = content.left + margin_;
     out.right = std::max(out.left, content.right - margin_ * 3.0f);
     const float total = out.right - out.left;
+    out.count = 1;
+    out.kinds[0] = ColumnKind::Name;
+    out.widths[0] = std::max(0.0f, total);
     if (total <= 0.0f) return out;
 
-    if (search_view) {
-        // Search results: 名称 / 路径 / 修改日期 / 类型 / 大小. Folder-view
-        // dividers do not apply; search keeps its own 4-edge ratios.
-        out.count = 5;
-        std::array<float, 5> minimums{
-            kDetailsMinNameDip * scale_, kDetailsMinPathDip * scale_,
-            kDetailsMinDateDip * scale_, kDetailsMinTypeDip * scale_,
-            kDetailsMinSizeDip * scale_ };
-        const float minimumTotal = minimums[0] + minimums[1] + minimums[2] +
-                                   minimums[3] + minimums[4];
-        if (minimumTotal > total) {
-            const float shrink = total / minimumTotal;
-            for (float& width : minimums) width *= shrink;
-        }
-        const bool customized = search_dividers[0] > 0.0f &&
-            search_dividers[1] > search_dividers[0] &&
-            search_dividers[2] > search_dividers[1] &&
-            search_dividers[3] > search_dividers[2] &&
-            search_dividers[3] < 1.0f;
-        // Metadata has bounded content; restored ratios must not make it
-        // consume the extra space when a search pane grows wider.
-        const std::array<float, 3> metadataCaps{144.0f * scale_, 128.0f * scale_, 90.0f * scale_};
-        std::array<float, 4> desired{};
-        if (customized) {
-            for (size_t i = 0; i < desired.size(); ++i)
-                desired[i] = search_dividers[i] * total;
+    const ColumnAutoWidths fitted = AutoColumnWidths();
+    const float manual_date = ManualWidthDip(search_view ? search_dividers[1] : dividers[0]);
+    const float manual_type = ManualWidthDip(search_view ? search_dividers[2] : dividers[1]);
+    const float manual_size = ManualWidthDip(search_view ? search_dividers[3] : dividers[2]);
+    struct Meta { ColumnKind kind; float width; };
+    std::vector<Meta> meta{
+        {ColumnKind::Date, (manual_date > 0.0f ? manual_date : fitted.date) * scale_},
+        {ColumnKind::Type, (manual_type > 0.0f ? manual_type : fitted.type) * scale_},
+        {ColumnKind::Size, (manual_size > 0.0f ? manual_size : fitted.size) * scale_}};
+    auto meta_sum = [&] { float sum = 0.0f; for (const auto& m : meta) sum += m.width; return sum; };
+    auto drop = [&](ColumnKind kind) {
+        for (auto it = meta.begin(); it != meta.end(); ++it)
+            if (it->kind == kind) { meta.erase(it); return true; }
+        return false;
+    };
+    const float min_name = kDetailsFitNameDip * scale_;
+    const float min_path = kDetailsFitPathDip * scale_;
+    bool path_column = search_view;
+    if (search_view && total - meta_sum() < min_name + min_path) {
+        path_column = false;
+        out.two_line = true;
+    }
+    // Low-value columns go first when the name would get too narrow.
+    while (total - meta_sum() < min_name + (path_column ? min_path : 0.0f) && meta.size() > 1) {
+        if (!drop(ColumnKind::Type)) drop(ColumnKind::Date);
+    }
+    const float floor_name = kDetailsMinNameDip * scale_;
+    if (total - meta_sum() < floor_name) {
+        const float scale_down = std::max(0.0f, total - floor_name) / std::max(1.0f, meta_sum());
+        for (auto& m : meta) m.width *= scale_down;
+    }
+    const float flex = std::max(0.0f, total - meta_sum());
+    int n = 0;
+    if (path_column) {
+        const float manual_name = ManualWidthDip(search_dividers[0]) * scale_;
+        float name = 0.0f;
+        if (manual_name > 0.0f) {
+            const float lo = std::min(kDetailsMinNameDip * scale_, flex * 0.5f);
+            name = std::clamp(manual_name, lo, std::max(lo, flex - kDetailsMinPathDip * scale_));
         } else {
-            const float fixed = metadataCaps[0] + metadataCaps[1] + metadataCaps[2];
-            const float flexible = (std::max)(0.0f, total - fixed);
-            desired[0] = flexible * 0.55f;
-            desired[1] = flexible;
-            desired[2] = desired[1] + metadataCaps[0];
-            desired[3] = desired[2] + metadataCaps[1];
+            name = std::clamp(flex * 0.42f, std::min(min_name, flex * 0.5f), std::max(min_name, flex - min_path));
         }
-        const float edge0 = std::clamp(
-            desired[0], minimums[0],
-            total - minimums[1] - minimums[2] - minimums[3] - minimums[4]);
-        const float edge1 = std::clamp(
-            desired[1], edge0 + minimums[1],
-            total - minimums[2] - minimums[3] - minimums[4]);
-        const float edge2 = std::clamp(
-            desired[2], edge1 + minimums[2],
-            total - minimums[3] - minimums[4]);
-        const float edge3 = std::clamp(
-            desired[3], edge2 + minimums[3], total - minimums[4]);
-        out.widths = { edge0, edge1 - edge0, edge2 - edge1, edge3 - edge2,
-                       total - edge3 };
-        float reclaimed = 0.0f;
-        for (size_t i = 0; i < metadataCaps.size(); ++i) {
-            float& width = out.widths[i + 2];
-            const float compact = std::min(width, metadataCaps[i]);
-            reclaimed += width - compact;
-            width = compact;
-        }
-        out.widths[0] += reclaimed * 0.55f;
-        out.widths[1] += reclaimed * 0.45f;
-        return out;
-    }
-
-    std::array<float, 4> minimums{
-        kDetailsMinNameDip * scale_, kDetailsMinDateDip * scale_,
-        kDetailsMinTypeDip * scale_, kDetailsMinSizeDip * scale_ };
-    const float minimumTotal = minimums[0] + minimums[1] +
-                               minimums[2] + minimums[3];
-    if (minimumTotal > total) {
-        const float shrink = total / minimumTotal;
-        for (float& width : minimums) width *= shrink;
-    }
-
-    const bool customized = dividers[0] > 0.0f &&
-        dividers[1] > dividers[0] && dividers[2] > dividers[1] &&
-        dividers[2] < 1.0f;
-    std::array<float, 3> desired{};
-    if (customized) {
-        for (size_t i = 0; i < desired.size(); ++i)
-            desired[i] = dividers[i] * total;
+        name = std::min(name, flex);
+        out.kinds[n] = ColumnKind::Name; out.widths[n++] = name;
+        out.kinds[n] = ColumnKind::Path; out.widths[n++] = flex - name;
     } else {
-        desired[0] = total - (kDetailsDateDip + kDetailsTypeDip + kDetailsSizeDip) * scale_;
-        desired[1] = total - (kDetailsTypeDip + kDetailsSizeDip) * scale_;
-        desired[2] = total - kDetailsSizeDip * scale_;
+        out.kinds[n] = ColumnKind::Name; out.widths[n++] = flex;
     }
-
-    const float edge0 = std::clamp(
-        desired[0], minimums[0],
-        total - minimums[1] - minimums[2] - minimums[3]);
-    const float edge1 = std::clamp(
-        desired[1], edge0 + minimums[1],
-        total - minimums[2] - minimums[3]);
-    const float edge2 = std::clamp(
-        desired[2], edge1 + minimums[2], total - minimums[3]);
-    out.widths = {edge0, edge1 - edge0, edge2 - edge1, total - edge2};
+    for (const auto& m : meta) { out.kinds[n] = m.kind; out.widths[n++] = m.width; }
+    out.count = n;
     return out;
+}
+
+float MainRenderer::ListRowHeightDip(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds) const {
+    const float base = ListRowHeightDip(vm);
+    if (vm.view_mode != ViewMode::Details || !vm.is_search || vm.content_results) return base;
+    return DetailsColumns(pane_bounds, vm).two_line ? std::max(base, kDetailsTwoLineMinRowDip) : base;
+}
+
+namespace {
+// Which stored slot holds the manual width of a column (-1: flexible column).
+int ManualSlot(MainRenderer::ColumnKind kind, bool search_view) {
+    using K = MainRenderer::ColumnKind;
+    switch (kind) {
+    case K::Name: return search_view ? 0 : -1;
+    case K::Date: return search_view ? 1 : 0;
+    case K::Type: return search_view ? 2 : 1;
+    case K::Size: return search_view ? 3 : 2;
+    default: return -1;
+    }
+}
+}
+
+void MainRenderer::AutoFitColumnDivider(const D2D1_RECT_F& pane_bounds,
+                                        std::array<float, 3>& dividers, bool search_view,
+                                        std::array<float, 4>& search_dividers, int divider_index) const {
+    const DetailsColumnLayout layout = DetailsColumns(pane_bounds, dividers, search_view, search_dividers);
+    if (divider_index < 0 || divider_index >= layout.count - 1) return;
+    for (int side : {divider_index, divider_index + 1}) {
+        const int slot = ManualSlot(layout.kinds[static_cast<size_t>(side)], search_view);
+        if (slot < 0) continue;
+        if (search_view) search_dividers[static_cast<size_t>(slot)] = 0.0f;
+        else dividers[static_cast<size_t>(slot)] = 0.0f;
+    }
+}
+
+namespace {
+// Divider drag: a metadata column keeps an absolute width. The divider left
+// of a metadata column resizes that column (its right edge stays put); the
+// search name|path divider sets the name width.
+template <size_t N>
+std::array<float, N> ResizeColumns(const MainRenderer::DetailsColumnLayout& layout,
+                                   std::array<float, N> stored, bool search_view,
+                                   int divider_index, float cursor_x, float scale) {
+    using K = MainRenderer::ColumnKind;
+    if (divider_index < 0 || divider_index >= layout.count - 1 || scale <= 0.0f) return stored;
+    for (float& value : stored) if (value <= 1.0f) value = 0.0f;   // drop legacy ratios
+    const K left = layout.kinds[static_cast<size_t>(divider_index)];
+    const K right = layout.kinds[static_cast<size_t>(divider_index + 1)];
+    const float x0 = divider_index == 0 ? layout.left : layout.DividerX(divider_index - 1);
+    const float x1 = layout.DividerX(divider_index);
+    const float x2 = x1 + layout.widths[static_cast<size_t>(divider_index + 1)];
+    const float min_meta = 48.0f * scale;
+    const float min_flex = kDetailsMinNameDip * scale;
+    auto put = [&](K kind, float px) {
+        const int slot = ManualSlot(kind, search_view);
+        if (slot >= 0 && static_cast<size_t>(slot) < N) stored[static_cast<size_t>(slot)] = std::max(px / scale, 1.01f);
+    };
+    if (left == K::Name && right == K::Path) {
+        put(K::Name, std::clamp(cursor_x, x0 + min_flex, std::max(x0 + min_flex, x2 - kDetailsMinPathDip * scale)) - x0);
+    } else if (left == K::Name || left == K::Path) {
+        // Grow/shrink the metadata column on the right; its right edge is fixed.
+        put(right, x2 - std::clamp(cursor_x, x0 + min_flex, x2 - min_meta));
+    } else {
+        // Between two metadata columns: resize the left one.
+        put(left, std::clamp(cursor_x, x0 + min_meta, x2 - min_meta) - x0);
+        put(right, layout.widths[static_cast<size_t>(divider_index + 1)]);
+    }
+    return stored;
+}
 }
 
 std::array<float, 3> MainRenderer::ResizeDetailsColumnDivider(
     const D2D1_RECT_F& pane_bounds,
     const std::array<float, 3>& dividers,
     int divider_index, float cursor_x) const {
-    DetailsColumnLayout layout = DetailsColumns(pane_bounds, dividers);
-    const float total = layout.right - layout.left;
-    if (divider_index < 0 || divider_index >= 3 || total <= 0.0f)
-        return dividers;
-
-    const float adjacentTotal = layout.widths[static_cast<size_t>(divider_index)] +
-        layout.widths[static_cast<size_t>(divider_index + 1)];
-    const float outerLeft = divider_index == 0
-        ? layout.left : layout.DividerX(divider_index - 1);
-    const float minScale = std::min(1.0f, total /
-        ((kDetailsMinNameDip + kDetailsMinDateDip + kDetailsMinTypeDip +
-          kDetailsMinSizeDip) * scale_));
-    const float minimumDip[4] = {
-        kDetailsMinNameDip, kDetailsMinDateDip, kDetailsMinTypeDip, kDetailsMinSizeDip};
-    const float leftMinimum = minimumDip[divider_index] * scale_ * minScale;
-    const float rightMinimum = minimumDip[divider_index + 1] * scale_ * minScale;
-    const float divider = std::clamp(
-        cursor_x, outerLeft + leftMinimum,
-        outerLeft + adjacentTotal - rightMinimum);
-
-    std::array<float, 3> result{};
-    for (int i = 0; i < 3; ++i)
-        result[static_cast<size_t>(i)] = layout.DividerX(i);
-    result[static_cast<size_t>(divider_index)] = divider;
-    for (float& edge : result) edge = (edge - layout.left) / total;
-    return result;
+    return ResizeColumns(DetailsColumns(pane_bounds, dividers), dividers, false,
+                         divider_index, cursor_x, scale_);
 }
 
 std::array<float, 4> MainRenderer::ResizeSearchColumnDivider(
     const D2D1_RECT_F& pane_bounds,
     const std::array<float, 4>& dividers,
     int divider_index, float cursor_x) const {
-    DetailsColumnLayout layout = DetailsColumns(pane_bounds, {}, true, dividers);
-    const float total = layout.right - layout.left;
-    if (divider_index < 0 || divider_index >= 4 || total <= 0.0f)
-        return dividers;
-
-    const float adjacentTotal = layout.widths[static_cast<size_t>(divider_index)] +
-        layout.widths[static_cast<size_t>(divider_index + 1)];
-    const float outerLeft = divider_index == 0
-        ? layout.left : layout.DividerX(divider_index - 1);
-    const float minScale = std::min(1.0f, total /
-        ((kDetailsMinNameDip + kDetailsMinPathDip + kDetailsMinDateDip +
-          kDetailsMinTypeDip + kDetailsMinSizeDip) * scale_));
-    const float minimumDip[5] = {
-        kDetailsMinNameDip, kDetailsMinPathDip, kDetailsMinDateDip,
-        kDetailsMinTypeDip, kDetailsMinSizeDip};
-    const float leftMinimum = minimumDip[divider_index] * scale_ * minScale;
-    const float rightMinimum = minimumDip[divider_index + 1] * scale_ * minScale;
-    const float divider = std::clamp(
-        cursor_x, outerLeft + leftMinimum,
-        outerLeft + adjacentTotal - rightMinimum);
-
-    std::array<float, 4> result{};
-    for (int i = 0; i < 4; ++i)
-        result[static_cast<size_t>(i)] = layout.DividerX(i);
-    result[static_cast<size_t>(divider_index)] = divider;
-    for (float& edge : result) edge = (edge - layout.left) / total;
-    return result;
+    return ResizeColumns(DetailsColumns(pane_bounds, {}, true, dividers), dividers, true,
+                         divider_index, cursor_x, scale_);
 }
 
 D2D1_RECT_F MainRenderer::NameCellRect(const D2D1_RECT_F& pane_bounds, int view_row, float scroll_y,
@@ -531,11 +597,12 @@ bool MainRenderer::PointInItemName(const PaneViewModel& vm, const D2D1_RECT_F& p
 
     const ListEntryView& entry = MakeVisibleEntry(vm, static_cast<size_t>(source_index));
     if (entry.name.empty()) return false;
+    const float extra_top = PaneExtraTop(vm, scale_, pane_bounds.right - pane_bounds.left, compositor_);
     D2D1_RECT_F name = NameCellRect(
-        pane_bounds, view_index, vm.scroll_y,
-        PaneExtraTop(vm, scale_, pane_bounds.right - pane_bounds.left, compositor_),
+        pane_bounds, view_index, vm.scroll_y, extra_top,
         vm.view_mode, vm.scroll_x, vm.EntryCount(), vm.details_column_dividers,
-        vm.is_search, vm.search_column_dividers, ListRowHeightDip(vm) * scale_);
+        vm.is_search, vm.search_column_dividers,
+        ListRowHeightDip(vm, PaneListRect(pane_bounds, extra_top, vm.view_mode)) * scale_);
     const bool icon_grid = vm.view_mode == ViewMode::ExtraLargeIcons ||
                            vm.view_mode == ViewMode::LargeIcons ||
                            vm.view_mode == ViewMode::MediumIcons;
@@ -963,6 +1030,12 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
         FillRect(dc, brFillInput_.get(), x, y, w, column_header_height_);
         FillRect(dc, brStrokeDivider_.get(), x, y + column_header_height_ - 1, w, 1);
         const DetailsColumnLayout columns = DetailsColumns(bounds, pane);
+        if (pane_index >= 0 && pane_index < static_cast<int>(painted_columns_.size())) {
+            uint32_t mask = columns.two_line ? (1u << 8) : 0u;
+            for (int col = 0; col < columns.count; ++col)
+                mask |= 1u << static_cast<uint32_t>(columns.kinds[static_cast<size_t>(col)]);
+            painted_columns_[static_cast<size_t>(pane_index)] = mask;
+        }
         float cx = columns.left;
         auto drawCol = [&](const std::wstring& label, SortColumn col, float cw, bool right = false) {
             const bool active = !pane.curated_order && pane.sort_column == col;
@@ -1002,21 +1075,30 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
             fmt->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
             cx += cw;
         };
-        drawCol(pulse::l10n::Get(pulse::l10n::StringId::ColumnName),
-                SortColumn::Name, columns.widths[0], false);
-        int col_index = 1;
         // The path column is display-only: never an active/clickable sort.
-        if (pane.is_search)
-            drawCol(pulse::l10n::Get(pulse::l10n::StringId::ColumnPath),
-                    SortColumn::Path, columns.widths[col_index++], false);
-        drawCol(pane.date_column_label.empty()
-                    ? pulse::l10n::Get(pulse::l10n::StringId::ColumnModified)
-                    : pane.date_column_label,
-                SortColumn::Mtime, columns.widths[col_index++], false);
-        drawCol(pulse::l10n::Get(pulse::l10n::StringId::ColumnType),
-                SortColumn::Type, columns.widths[col_index++], false);
-        drawCol(pulse::l10n::Get(pulse::l10n::StringId::ColumnSize),
-                SortColumn::Size, columns.widths[col_index], true);
+        for (int col = 0; col < columns.count; ++col) {
+            const float cw = columns.widths[static_cast<size_t>(col)];
+            switch (columns.kinds[static_cast<size_t>(col)]) {
+            case ColumnKind::Name:
+                drawCol(pulse::l10n::Get(pulse::l10n::StringId::ColumnName), SortColumn::Name, cw, false);
+                break;
+            case ColumnKind::Path:
+                drawCol(pulse::l10n::Get(pulse::l10n::StringId::ColumnPath), SortColumn::Path, cw, false);
+                break;
+            case ColumnKind::Date:
+                drawCol(pane.date_column_label.empty()
+                            ? pulse::l10n::Get(pulse::l10n::StringId::ColumnModified)
+                            : pane.date_column_label,
+                        SortColumn::Mtime, cw, false);
+                break;
+            case ColumnKind::Type:
+                drawCol(pulse::l10n::Get(pulse::l10n::StringId::ColumnType), SortColumn::Type, cw, false);
+                break;
+            case ColumnKind::Size:
+                drawCol(pulse::l10n::Get(pulse::l10n::StringId::ColumnSize), SortColumn::Size, cw, true);
+                break;
+            }
+        }
         const bool divider_active =
             (vm.hover_region == static_cast<int>(HitTestResult::ColumnDivider) ||
              vm.column_resize_pressed) && vm.hover_pane_index == pane_index;
@@ -1077,7 +1159,8 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
 }
 
 void MainRenderer::DrawTruncatedName(const std::wstring& name, float x, float y, float w, float h,
-                                     const Theme& theme, bool selected, const std::vector<NameMatchRange>& matches) {
+                                     const Theme& theme, bool selected, const std::vector<NameMatchRange>& matches,
+                                     bool dim_extension) {
     (void)selected;
     if (!compositor_ || !compositor_->Dc() || !compositor_->DwriteFactory() ||
         !compositor_->TextFormat() || name.empty() || w <= 1.0f) {
@@ -1096,14 +1179,38 @@ void MainRenderer::DrawTruncatedName(const std::wstring& name, float x, float y,
     const std::wstring shown = FitHighlightedFileName(compositor_, factory, fmt, name, w, matches, scale_);
     const D2D1_RECT_F rc = D2D1::RectF(x, y, x + w, y + h);
     const auto visible_matches = VisibleNameMatchRanges(name, shown, matches);
+    // The extension is drawn a step dimmer so the distinguishing stem reads first.
+    size_t ext_at = std::wstring::npos;
+    if (dim_extension && !IsHighContrast()) {
+        const size_t dot = shown.find_last_of(L'.');
+        if (dot != std::wstring::npos && dot > 0 && shown.size() - dot <= 8 &&
+            shown.find(L'\u2026', dot) == std::wstring::npos)
+            ext_at = dot;
+    }
+    const D2D1_COLOR_F ext_color = WithAlpha(theme.text, (theme.bg.r < 0.5f) ? 0.58f : 0.62f);
     ComPtr<IDWriteTextLayout> highlighted;
     if (!visible_matches.empty() && SUCCEEDED(factory->CreateTextLayout(shown.c_str(),
         static_cast<UINT32>(shown.size()), fmt, w, h, &highlighted))) {
         highlighted->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         highlighted->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
         highlighted->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        ComPtr<ID2D1SolidColorBrush> ext_brush;
+        if (ext_at != std::wstring::npos && SUCCEEDED(dc->CreateSolidColorBrush(ext_color, &ext_brush)))
+            highlighted->SetDrawingEffect(ext_brush.get(), {static_cast<UINT32>(ext_at),
+                                                            static_cast<UINT32>(shown.size() - ext_at)});
         DrawNameHighlightBackground(compositor_, highlighted.get(), {x, y}, rc, visible_matches, theme, scale_);
         dc->DrawTextLayout({x, y}, highlighted.get(), brText_.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    } else if (ext_at != std::wstring::npos && !IsHighContrast()) {
+        const std::wstring stem = shown.substr(0, ext_at);
+        const std::wstring ext = shown.substr(ext_at);
+        const float stem_w = std::min(w, CellTextWidth(stem));
+        if (!compositor_->DrawLumaText(stem, fmt, D2D1::RectF(x, y, x + stem_w + 2.0f * scale_, y + h),
+                                       brText_->GetColor(), theme.bg, DWRITE_TEXT_ALIGNMENT_LEADING) ||
+            !compositor_->DrawLumaText(ext, fmt, D2D1::RectF(x + stem_w, y, x + w, y + h),
+                                       ext_color, theme.bg, DWRITE_TEXT_ALIGNMENT_LEADING)) {
+            dc->DrawText(shown.c_str(), (UINT32)shown.size(), fmt, &rc, brText_.get(),
+                         D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+        }
     } else if (IsHighContrast() || !compositor_->DrawLumaText(
             shown, fmt, rc, brText_->GetColor(), theme.bg,
             DWRITE_TEXT_ALIGNMENT_LEADING)) {
@@ -1146,7 +1253,7 @@ D2D1_RECT_F MainRenderer::RenameFieldRect(const PaneViewModel& vm, const D2D1_RE
     if (view < 0) return {};
     const ListEntryView& e = MakeVisibleEntry(vm, static_cast<size_t>(source_index));
     ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y,
-                      scale_, ListRowHeightDip(vm));
+                      scale_, ListRowHeightDip(vm, list));
     const D2D1_RECT_F cell = layout.ItemRect(view);
     const D2D1_RECT_F nameRc = layout.NameRect(view);
     const bool iconGrid = vm.view_mode == ViewMode::ExtraLargeIcons ||
@@ -1209,12 +1316,12 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
     const size_t entryCount = vm.EntryCount();
     if (entryCount == 0) return;
     const D2D1_RECT_F viewport = D2D1::RectF(x, y, x + w, y + h);
-    ViewLayout layout(vm.view_mode, viewport, entryCount, vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm));
+    ViewLayout layout(vm.view_mode, viewport, entryCount, vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, viewport));
     const auto [startIdx, endIdx] = layout.VisibleRange();
     const DetailsColumnLayout detailsColumns = DetailsColumns(viewport, vm);
-    const float dateW = detailsColumns.widths[detailsColumns.count - 3];
-    const float typeW = detailsColumns.widths[detailsColumns.count - 2];
-    const float sizeW = detailsColumns.widths[detailsColumns.count - 1];
+    const bool detailsView = vm.view_mode == ViewMode::Details;
+    D2D1_COLOR_F zebraColor = theme.text;
+    zebraColor.a = (theme.bg.r < 0.5f) ? 0.035f : 0.025f;
 
     for (int i = startIdx; i >= 0 && i <= endIdx; ++i) {
         const D2D1_RECT_F cell = layout.ItemRect(i);
@@ -1237,6 +1344,12 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
         bool cut = e.record_only || vm.cut_names.contains(e.name);
 
         const float inset = 4.0f * scale_;
+        if (detailsView && list_zebra_ && (i & 1) && !selected && !hover && !IsHighContrast()) {
+            MakeBrush(dc, zebraColor, brFillInput_);
+            FillRoundedRect(dc, brFillInput_.get(), cell.left + inset, cell.top,
+                std::max(0.0f, cell.right - cell.left - inset * 2),
+                std::max(0.0f, cell.bottom - cell.top), theme.radius_control * scale_);
+        }
         if (hover) {
             FillRoundedRect(dc, brFillHover_.get(), cell.left + inset, cell.top + scale_,
                 std::max(0.0f, cell.right - cell.left - inset * 2),
@@ -1323,8 +1436,10 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
         const bool showNewTab = showRowActions && hover && e.is_dir;
         const bool showMore = showRowActions && (hover || (selected && vm.selected_count == 1));
         const bool rowSnippet = !e.snippet.empty() && vm.view_mode == ViewMode::Details;
-        DetailsNameLine nameLine = MakeDetailsNameLine(nameRc, cell, scale_, rowSnippet);
-        if (rowSnippet) {
+        // Narrow search panes show the folder under the name instead of a column.
+        const bool rowPathLine = !rowSnippet && detailsView && detailsColumns.two_line;
+        DetailsNameLine nameLine = MakeDetailsNameLine(nameRc, cell, scale_, rowSnippet || rowPathLine);
+        if (rowSnippet || rowPathLine) {
             textY = nameLine.y;
             textH = nameLine.h;
         }
@@ -1365,7 +1480,8 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             } else {
                 Theme name_theme = theme;
                 name_theme.text = nameColor;
-                DrawTruncatedName(e.name, trail.name_x, textY, trail.name_w, textH, name_theme, selected, name_matches);
+                DrawTruncatedName(e.name, trail.name_x, textY, trail.name_w, textH, name_theme, selected, name_matches,
+                                  detailsView && !e.is_dir);
             }
             if (change && !iconGrid) DrawChangeBadge(compositor_, painter_, *change, trail.badge, theme, scale_);
             if (!change && !e.badge.empty() && trail.badge.right > trail.badge.left) {
@@ -1402,6 +1518,14 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                 MakeBrush(dc, theme.text_secondary, brTextSecondary_);
                 DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(), e.snippet,
                     trail.name_x, nameLine.snippet_y, trail.line_w, nameLine.snippet_h);
+            } else if (rowPathLine) {
+                const float lineW = std::max(0.0f, nameColRight - trail.name_x);
+                const auto [head, last] = MiddleEllipsisPath(FolderOf(e.path), lineW,
+                    [&](const std::wstring& s) { return CellTextWidth(s, true); });
+                MakeBrush(dc, theme.text_secondary, brTextSecondary_);
+                DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(),
+                    FitEndEllipsis(head + last, lineW, [&](const std::wstring& s) { return CellTextWidth(s, true); }),
+                    trail.name_x, nameLine.snippet_y, lineW, nameLine.snippet_h);
             }
         }
 
@@ -1427,31 +1551,105 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                 format->SetTextAlignment(previous);
                 format->SetParagraphAlignment(previous_paragraph);
             };
-            float colX = detailsColumns.DividerX(0);
             const float textInset = 8.0f * scale_;
-            if (vm.is_search) {
-                const float pathW = detailsColumns.widths[1];
-                draw_detail_text(FolderOf(e.path), colX + textInset,
-                    std::max(0.0f, pathW - textInset * 2.0f),
-                    DWRITE_TEXT_ALIGNMENT_LEADING);
-                colX += pathW;
+            auto fit = [&](const std::wstring& text, float width) {
+                return FitEndEllipsis(text, width, [&](const std::wstring& s) { return CellTextWidth(s); });
+            };
+            const auto secondary = brTextSecondary_->GetColor();
+            for (int col = 1; col < detailsColumns.count; ++col) {
+                const float colX = detailsColumns.DividerX(col - 1);
+                const float colW = detailsColumns.widths[static_cast<size_t>(col)];
+                const float left = colX + textInset;
+                const float avail = std::max(0.0f, colW - textInset * 2.0f);
+                if (avail <= 1.0f) continue;
+                switch (detailsColumns.kinds[static_cast<size_t>(col)]) {
+                case ColumnKind::Path: {
+                    // Keep the drive and the nearest folders; elide the middle.
+                    const auto [head, last] = MiddleEllipsisPath(FolderOf(e.path), avail,
+                        [&](const std::wstring& s) { return CellTextWidth(s); });
+                    if (last.empty()) {
+                        draw_detail_text(fit(head, avail), left, avail, DWRITE_TEXT_ALIGNMENT_LEADING);
+                    } else {
+                        const float headW = std::min(avail, CellTextWidth(head));
+                        draw_detail_text(head, left, headW + 2.0f * scale_, DWRITE_TEXT_ALIGNMENT_LEADING);
+                        MakeBrush(dc, WithAlpha(theme.text, cut ? 0.5f : 0.82f), brTextSecondary_);
+                        draw_detail_text(fit(last, avail - headW), left + headW, avail - headW,
+                                         DWRITE_TEXT_ALIGNMENT_LEADING);
+                        MakeBrush(dc, secondary, brTextSecondary_);
+                    }
+                    break;
+                }
+                case ColumnKind::Date: {
+                    const std::wstring date = list_smart_date_ && e.modified_value && !e.date_text.empty()
+                        ? SmartListDate(e.modified_value) : e.date_text;
+                    draw_detail_text(fit(date, avail), left, avail, DWRITE_TEXT_ALIGNMENT_LEADING);
+                    break;
+                }
+                case ColumnKind::Type: {
+                    const bool deleted_change = vm.is_changes &&
+                        e.type_text == pulse::l10n::Get(pulse::l10n::StringId::ChangeDeleted);
+                    float typeLeft = left;
+                    const std::wstring chip = vm.is_changes ? std::wstring() : TypeChipLabel(e.name, e.is_dir);
+                    const float chipW = TypeChipWidthDip(chip) * scale_;
+                    if (!chip.empty() && chipW < avail * 0.6f && !IsHighContrast()) {
+                        const float chipBoxW = chipW - kTypeChipGapDip * scale_;
+                        const float chipH = 17.0f * scale_;
+                        const float chipTop = std::round((cell.top + cell.bottom - chipH) * 0.5f);
+                        D2D1_COLOR_F hue = HexColor(TypeChipRgb(chip));
+                        D2D1_COLOR_F ink = hue;
+                        if (!(theme.bg.r < 0.5f)) { ink.r *= 0.62f; ink.g *= 0.62f; ink.b *= 0.62f; }
+                        MakeBrush(dc, WithAlpha(hue, (theme.bg.r < 0.5f) ? 0.18f : 0.14f), brFillInput_);
+                        FillRoundedRect(dc, brFillInput_.get(), left, chipTop, chipBoxW, chipH, 4.0f * scale_);
+                        const auto chipRc = D2D1::RectF(left, chipTop, left + chipBoxW, chipTop + chipH);
+                        if (!compositor_->DrawLumaText(chip, compositor_->SmallFormat(), chipRc,
+                                                       WithAlpha(ink, cut ? 0.55f : 1.0f), theme.bg,
+                                                       DWRITE_TEXT_ALIGNMENT_CENTER)) {
+                            MakeBrush(dc, ink, brTagDot_);
+                            DrawTextRect(dc, compositor_->SmallFormat(), brTagDot_.get(), chip,
+                                         chipRc.left, chipRc.top, chipBoxW, chipH);
+                        }
+                        typeLeft += chipW;
+                    }
+                    if (deleted_change) MakeBrush(dc, HexColor(0xC58A38), brTextSecondary_);
+                    const float typeAvail = std::max(0.0f, left + avail - typeLeft);
+                    draw_detail_text(fit(e.type_text, typeAvail), typeLeft, typeAvail,
+                                     DWRITE_TEXT_ALIGNMENT_LEADING);
+                    if (deleted_change) MakeBrush(dc, secondary, brTextSecondary_);
+                    break;
+                }
+                case ColumnKind::Size: {
+                    // Number right-aligned, unit in its own sub-column: digits line up.
+                    const size_t space = e.size_text.find_last_of(L' ');
+                    const float unitW = kSizeUnitDip * scale_;
+                    if (space != std::wstring::npos && space > 0 && avail > unitW * 1.8f) {
+                        const std::wstring value = e.size_text.substr(0, space);
+                        const std::wstring unit = e.size_text.substr(space + 1);
+                        draw_detail_text(value, left, avail - unitW, DWRITE_TEXT_ALIGNMENT_TRAILING);
+                        MakeBrush(dc, WithAlpha(secondary, secondary.a * 0.72f), brTextSecondary_);
+                        draw_detail_text(unit, left + avail - unitW + 4.0f * scale_, unitW - 4.0f * scale_,
+                                         DWRITE_TEXT_ALIGNMENT_LEADING);
+                        MakeBrush(dc, secondary, brTextSecondary_);
+                    } else {
+                        draw_detail_text(fit(e.size_text, avail), left, avail, DWRITE_TEXT_ALIGNMENT_TRAILING);
+                    }
+                    if (list_size_bar_ && !e.is_dir && e.size_value > 0 && !IsHighContrast()) {
+                        // Log scale: 1 KB .. 100 GB spans the cell.
+                        const double lg = std::log10(static_cast<double>(e.size_value));
+                        const float frac = static_cast<float>(std::clamp((lg - 3.0) / 8.0, 0.02, 1.0));
+                        const float barH = std::max(1.0f, 2.0f * scale_);
+                        const float barY = cell.bottom - 5.0f * scale_;
+                        MakeBrush(dc, WithAlpha(theme.accent, 0.14f), brFillInput_);
+                        FillRoundedRect(dc, brFillInput_.get(), left, barY, avail, barH, barH * 0.5f);
+                        MakeBrush(dc, WithAlpha(theme.accent, 0.7f), brFillInput_);
+                        FillRoundedRect(dc, brFillInput_.get(), left + avail * (1.0f - frac), barY,
+                                        avail * frac, barH, barH * 0.5f);
+                    }
+                    break;
+                }
+                default:
+                    break;
+                }
             }
-            draw_detail_text(e.date_text, colX + textInset,
-                std::max(0.0f, dateW - textInset * 2.0f),
-                DWRITE_TEXT_ALIGNMENT_LEADING);
-            colX += dateW;
-            const bool deleted_change = vm.is_changes &&
-                e.type_text == pulse::l10n::Get(pulse::l10n::StringId::ChangeDeleted);
-            const auto detail_color = brTextSecondary_->GetColor();
-            if (deleted_change) MakeBrush(dc, HexColor(0xC58A38), brTextSecondary_);
-            draw_detail_text(e.type_text, colX + textInset,
-                std::max(0.0f, typeW - textInset * 2.0f),
-                DWRITE_TEXT_ALIGNMENT_LEADING);
-            if (deleted_change) MakeBrush(dc, detail_color, brTextSecondary_);
-            colX += typeW;
-            draw_detail_text(e.size_text, colX + textInset,
-                std::max(0.0f, sizeW - textInset * 2.0f),
-                DWRITE_TEXT_ALIGNMENT_TRAILING);
         } else if (vm.view_mode == ViewMode::Tiles || vm.view_mode == ViewMode::Content) {
             std::wstring meta = !e.snippet.empty() ? e.snippet : e.type_text;
             if (e.snippet.empty() && !e.size_text.empty())
@@ -1532,7 +1730,7 @@ void MainRenderer::DrawScrollbar(const PaneViewModel& vm, float x, float y, floa
     (void)theme;
     ID2D1DeviceContext* dc = compositor_->Dc();
     ViewLayout layout(vm.view_mode, D2D1::RectF(x, y, x + w, y + h), vm.EntryCount(),
-                      vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm));
+                      vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, D2D1::RectF(x, y, x + w, y + h)));
     const float totalH = layout.ContentHeight();
     auto sb = ComputeScrollbar(h, totalH, vm.scroll_y, layout.Metrics().cell_height);
     if (!sb.valid) return;
@@ -1544,7 +1742,7 @@ bool MainRenderer::PaneScrollbarGeometry(const PaneViewModel& vm, const D2D1_REC
                                           D2D1_RECT_F& track, D2D1_RECT_F& thumb, float& max_scroll) const {
     const float extra = PaneExtraTop(vm, scale_, pane_bounds.right - pane_bounds.left, compositor_);
     const auto list = PaneListRect(pane_bounds, extra, vm.view_mode);
-    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm));
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list));
     max_scroll = layout.MaxScrollY();
     const auto metrics = ComputeScrollbar(list.bottom - list.top, layout.ContentHeight(),
                                            vm.scroll_y, layout.Metrics().cell_height);
@@ -1558,7 +1756,7 @@ bool MainRenderer::PaneScrollbarGeometry(const PaneViewModel& vm, const D2D1_REC
 float MainRenderer::MaxScrollForPane(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds) const {
     const float extra = PaneExtraTop(vm, scale_, pane_bounds.right - pane_bounds.left, compositor_);
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
-    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm));
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list));
     return layout.MaxScrollY();
 }
 
@@ -1566,7 +1764,7 @@ float MainRenderer::MaxScrollXForPane(const PaneViewModel& vm,
                                       const D2D1_RECT_F& pane_bounds) const {
     const float extra = PaneExtraTop(vm, scale_, pane_bounds.right - pane_bounds.left, compositor_);
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
-    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm));
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list));
     return layout.MaxScrollX();
 }
 
@@ -1575,7 +1773,7 @@ D2D1_RECT_F MainRenderer::ItemRectInPane(const PaneViewModel& vm,
                                          int view_index) const {
     const float extra = PaneExtraTop(vm, scale_, pane_bounds.right - pane_bounds.left, compositor_);
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
-    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm));
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list));
     return layout.ItemRect(view_index);
 }
 
@@ -1583,14 +1781,14 @@ int MainRenderer::MoveViewIndex(const PaneViewModel& vm, const D2D1_RECT_F& pane
                                 int current, int dx, int dy) const {
     const float extra = PaneExtraTop(vm, scale_, pane_bounds.right - pane_bounds.left, compositor_);
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
-    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm));
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list));
     return layout.MoveIndex(current, dx, dy);
 }
 
 int MainRenderer::PageDelta(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds) const {
     const float extra = PaneExtraTop(vm, scale_, pane_bounds.right - pane_bounds.left, compositor_);
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
-    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm));
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list));
     return layout.PageDelta();
 }
 
@@ -1598,7 +1796,7 @@ std::pair<int, int> MainRenderer::VisibleRangeInPane(
     const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds) const {
     const float extra = PaneExtraTop(vm, scale_, pane_bounds.right - pane_bounds.left, compositor_);
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
-    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm));
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list));
     return layout.VisibleRange();
 }
 
@@ -1611,7 +1809,7 @@ int MainRenderer::ItemFromPointInPane(const PaneViewModel& vm,
                                       float x, float y) const {
     const float extra = PaneExtraTop(vm, scale_, pane_bounds.right - pane_bounds.left, compositor_);
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
-    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm));
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list));
     int idx = layout.HitTest(x, y);
     if (idx < 0) return -1;
     return vm.SourceIndex(idx);
