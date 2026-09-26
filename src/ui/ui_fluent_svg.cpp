@@ -234,6 +234,7 @@ int FluentSvgIdForGlyph(std::wstring_view glyph) {
     if (glyph == L"\xE977") return IDR_FLUENT_PC_SVG;
     if (glyph == L"\xE8EF") return IDR_FLUENT_COPY_SVG;
     if (glyph == L"\xE8A9") return IDR_FLUENT_APPS_SVG;
+    if (glyph == L"\xE8EC") return IDR_FLUENT_TAG_SVG;
     if (glyph == L"\xE8A0") return IDR_FLUENT_PANEL_SVG;
     if (glyph == L"\xE89F") return IDR_FLUENT_PANEL_CLOSE_SVG;
     return 0;
