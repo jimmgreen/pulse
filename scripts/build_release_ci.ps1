@@ -80,7 +80,7 @@ foreach ($mode in @('--parent-cycle-only', '--quiet-maintenance-only', '--name-p
 if ($LASTEXITCODE -ne 0) { throw 'Panel layout/preferences regression failed' }
 & (Join-Path $build 'pulse_change_feed_memory_test.exe') --probe
 if ($LASTEXITCODE -ne 0) { throw 'Opt-in memory probe regression failed' }
-foreach ($mode in @('--service-start-only', '--shutdown-only')) {
+foreach ($mode in @('--service-start-only', '--shutdown-only', '--live-dedup-only')) {
     & (Join-Path $build 'pulse_index_host_stress.exe') $mode
     if ($LASTEXITCODE -ne 0) { throw "Index lifecycle check $mode failed" }
 }

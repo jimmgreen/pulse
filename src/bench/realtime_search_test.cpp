@@ -8,8 +8,8 @@
 int wmain(int argc, wchar_t** argv) {
     using namespace pulse;
     const std::wstring filter = argc == 2 ? argv[1] : L"all";
-    if (argc > 2 || (filter != L"all" && filter != L"content" && filter != L"filename")) {
-        std::cerr << "Usage: pulse_realtime_search_test.exe [all|content|filename]" << std::endl;
+    if (argc > 2 || (filter != L"all" && filter != L"content" && filter != L"filename" && filter != L"dedup")) {
+        std::cerr << "Usage: pulse_realtime_search_test.exe [all|content|filename|dedup]" << std::endl;
         return 2;
     }
     const auto base = std::filesystem::absolute(std::filesystem::path(L"../bench_data") /
@@ -52,7 +52,7 @@ int wmain(int argc, wchar_t** argv) {
     s.index.Start(nullptr,0,0,pipe_name);
     index::ContentIndexConfig config; config.roots = {{root.wstring()}};
     config.shared_scope = true;
-    if (filter != L"filename") {
+    if (filter != L"filename" && filter != L"dedup") {
         s.contentSearch.Start(nullptr, 0);
         s.contentSearch.Configure(config);
     }
@@ -68,6 +68,7 @@ int wmain(int argc, wchar_t** argv) {
             << " connected=" << s.index.Connected() << " revision=" << s.index.Revision() << std::endl;
         std::wcout << L"[INFO] filename status=" << s.index.Status() << std::endl;
     };
+    size_t results_taken = 0;
     auto wait = [&](auto ready, DWORD timeout) {
         const auto until = GetTickCount64() + timeout;
         while (GetTickCount64() < until) {
@@ -75,7 +76,7 @@ int wmain(int argc, wchar_t** argv) {
             while (s.contentSearch.TakeUpdate(update)) ApplyContentSearchUpdate(s, std::move(update));
             std::vector<uint32_t> ids;
             for (const auto& [id,pending] : s.pendingIndexSearches) ids.push_back(id);
-            for (auto id : ids) { index::SearchResult result; if(s.index.TakeResult(id,result)) AcceptIndexProviderResult(s,id,std::move(result),false); }
+            for (auto id : ids) { index::SearchResult result; if(s.index.TakeResult(id,result)) { ++results_taken; AcceptIndexProviderResult(s,id,std::move(result),false); } }
             TickAddressSearch(s, GetTickCount64());
             if (ready()) return true;
             if (WaitForSingleObject(host.hProcess, 0) == WAIT_OBJECT_0) {
@@ -105,7 +106,7 @@ int wmain(int argc, wchar_t** argv) {
         std::cout << "[INFO] " << label << " n=" << values.size() << " P50=" << p(50) << " P95=" << p(95) << " P99=" << p(99) << " ms" << std::endl;
         if (!record_only) check(values.size() == 100 && p(95) <= target, label);
     };
-    if (connected && filter != L"filename") {
+    if (connected && filter != L"filename" && filter != L"dedup") {
         check(wait([&] { auto status = s.contentSearch.GetStatus(); return s.contentSearch.ConfigurationReady() && !status.indexing && !status.pending_files && s.contentSearch.GetConfig().shared_scope && !s.contentSearch.GetConfig().roots.empty(); }, 30000), "isolated shared content agent becomes ready");
         { const auto status = s.contentSearch.GetStatus(); std::cout << "[INFO] status error=" << status.error << " indexed=" << status.indexed_files << " pending=" << status.pending_files << " ready=" << s.contentSearch.ConfigurationReady() << std::endl; }
         RequestSearchPage(s, tab, query, true);
@@ -131,7 +132,46 @@ int wmain(int argc, wchar_t** argv) {
         summarize(removes, "delete -> UI <= 300 ms", 300);
         s.contentSearch.Cancel(tab.search_session_id); tab.search_live_generation = 0;
     }
-    if (connected && filter != L"content") {
+    if (connected && (filter == L"all" || filter == L"dedup")) {
+        const auto dir = root / L"dedup";
+        std::filesystem::create_directories(dir);
+        const std::wstring needle = L"pulsededup";
+        tab.current_path = app::MakeSearchPath(needle);
+        tab.ClearSelection();
+        RequestSearchPage(s, tab, needle, true);
+        check(wait([&] { return !tab.loading && !tab.pending_generation; }, 10000), "dedup: subscription returns initial page");
+        const auto a = dir / L"pulsededup-a.txt", b = dir / L"pulsededup-b.txt";
+        const auto c = dir / L"pulsededup-c.txt", d = dir / L"pulsededup-d.txt";
+        auto write = [](const std::filesystem::path& path) { std::ofstream out(path); out << 1; return out.good(); };
+        auto selected = [&](const std::filesystem::path& path) {
+            for (size_t i = 0; i < tab.EntryCount(); ++i)
+                if (tab.EntryAt(i).full_path == path.wstring()) return tab.IsSelected(static_cast<int>(i));
+            return false;
+        };
+        write(a); write(b);
+        check(wait([&] { return tab.EntryCount() == 2; }, 5000), "dedup: two matching files appear");
+        tab.SelectIndices({0, 1});
+        const size_t before = results_taken;
+        const auto noise = dir / L"unrelated-noise.bin";
+        for (int i = 0; i < 10; ++i) {
+            write(noise); wait([] { return false; }, 60);
+            DeleteFileW(noise.c_str()); wait([] { return false; }, 60);
+        }
+        wait([] { return false; }, 800);
+        std::cout << "[INFO] dedup: pages received during unrelated churn=" << results_taken - before << std::endl;
+        check(results_taken == before, "dedup: unrelated file changes push no unchanged page");
+        write(c);
+        check(wait([&] { return tab.EntryCount() == 3; }, 5000), "dedup: a changed page still arrives");
+        check(tab.SelectedCount() == 2 && selected(a) && selected(b) && !selected(c),
+              "dedup: live refresh keeps a multi-selection by full path");
+        tab.ClearSelection();
+        write(d);
+        check(wait([&] { return tab.EntryCount() == 4; }, 5000) && tab.SelectedCount() == 0,
+              "dedup: live refresh selects nothing when nothing was selected");
+        for (const auto& path : {a, b, c, d}) DeleteFileW(path.c_str());
+        wait([&] { return tab.EntryCount() == 0; }, 5000);
+    }
+    if (connected && filter != L"content" && filter != L"dedup") {
         tab.current_path = app::MakeSearchPath(L"pulserealtime");
         RequestSearchPage(s,tab,L"pulserealtime",true);
         check(wait([&]{return !tab.loading && !tab.pending_generation;},10000),"filename subscription returns initial page");

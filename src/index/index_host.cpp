@@ -60,7 +60,7 @@ struct Client {
     std::mutex write_mu;
     std::atomic<bool> alive{true};
     std::atomic<uint32_t> latest_search{0};
-    struct Subscription { uint32_t id = 0; Query query; std::shared_ptr<std::atomic<uint32_t>> latest = std::make_shared<std::atomic<uint32_t>>(0); };
+    struct Subscription { uint32_t id = 0; Query query; std::shared_ptr<std::atomic<uint32_t>> latest = std::make_shared<std::atomic<uint32_t>>(0); uint32_t sent_id = 0; uint64_t sent_hash = 0; };
     std::mutex subscriptions_mu;
     std::map<uint64_t, Subscription> subscriptions;
     std::atomic<bool> thread_done{false};
@@ -352,6 +352,21 @@ void SearchThread() {
         if (out.size() > kIndexMaxPayload) {
             sr.hits.clear();
             out = SearchPayload(sr);
+        }
+        if (task.query.subscribe) {
+            // Live refreshes rerun on every engine notification. Rows identical
+            // to the last page sent for this request are not pushed again (the
+            // trailing revision is excluded from the comparison).
+            uint64_t hash = 1469598103934665603ull;
+            const size_t hashed = out.size() >= 8 ? out.size() - 8 : out.size();
+            for (size_t i = 0; i < hashed; ++i) { hash ^= out[i]; hash *= 1099511628211ull; }
+            std::lock_guard lock(c->subscriptions_mu);
+            auto found = c->subscriptions.find(task.query.session_id);
+            if (found != c->subscriptions.end() && found->second.id == task.id) {
+                if (found->second.sent_id == task.id && found->second.sent_hash == hash) continue;
+                found->second.sent_id = task.id;
+                found->second.sent_hash = hash;
+            }
         }
         WriteFrame(*c, RSP_IDX_SEARCH, task.id, out);
     }

@@ -286,6 +286,16 @@ void RequestSearchPage(AppState& s, app::Tab& tab, const std::wstring& rest,
 
 void ApplySearchHits(app::Tab& tab, const std::wstring& rest,
                             index::SearchResult&& result) {
+    // No request is pending for a live refresh (the index re-ran the
+    // subscribed query); new pages and load-more set pending_generation.
+    const bool live_refresh = tab.pending_generation == 0;
+    const bool had_selection = tab.SelectedCount() > 0;
+    std::vector<std::wstring> keep_paths;
+    if (tab.SelectedCount() > 1) {
+        for (int i : tab.SelectedIndices())
+            if (i >= 0 && static_cast<size_t>(i) < tab.EntryCount())
+                keep_paths.push_back(tab.EntryAt(static_cast<size_t>(i)).full_path);
+    }
     if (tab.selected_index >= 0 && static_cast<size_t>(tab.selected_index) < tab.EntryCount())
         tab.search_preserve_selection = tab.EntryAt(static_cast<size_t>(tab.selected_index)).full_path;
     tab.search_retaining_results = false;
@@ -323,6 +333,30 @@ void ApplySearchHits(app::Tab& tab, const std::wstring& rest,
     tab.loading = false;
     tab.search_loading_more = false;
     tab.pending_generation = 0;
+    if (offset == 0 && tab.snapshot && tab.EntryCount() != 0 && !keep_paths.empty()) {
+        const std::unordered_set<std::wstring> want(keep_paths.begin(), keep_paths.end());
+        std::vector<int> keep;
+        int focus = -1;
+        for (size_t i = 0; i < tab.EntryCount(); ++i) {
+            const auto& path = tab.EntryAt(i).full_path;
+            if (!want.contains(path)) continue;
+            keep.push_back(static_cast<int>(i));
+            if (path == tab.search_preserve_selection) focus = static_cast<int>(i);
+        }
+        if (!keep.empty()) {
+            tab.SelectIndices(keep);
+            if (focus >= 0 && tab.IsSelected(focus)) {
+                tab.selected_index = focus;
+                tab.selection_anchor = focus;
+            }
+            tab.search_preserve_selection.clear();
+            return;
+        }
+    }
+    if (live_refresh && !had_selection) {
+        tab.search_preserve_selection.clear();
+        return;
+    }
     if (offset == 0 && tab.snapshot && tab.EntryCount() != 0) {
         int selected = 0;
         if (!tab.search_preserve_selection.empty()) {

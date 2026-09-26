@@ -2,7 +2,7 @@
 # so the test exercises the real timer/navigation path without a second UI build.
 param(
     [ValidateSet('content_refresh', 'rename_overlay', 'shared_settings', 'realtime_search', 'content_interaction', 'content_progress_ui', 'address_edit_stability', 'content_lifecycle', 'global_search_settings_ui')][string]$Fixture = 'content_refresh',
-    [ValidateSet('all', 'content', 'filename', 'automatic-refresh')][string]$Filter = 'all',
+    [ValidateSet('all', 'content', 'filename', 'dedup', 'automatic-refresh')][string]$Filter = 'all',
     [string]$BuildDir = 'build',
     [switch]$SkipBuild
 )
