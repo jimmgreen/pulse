@@ -2796,6 +2796,114 @@ void TestSnapshotPatch() {
     RemoveDirectoryW(dir.c_str());
 }
 
+void TestSnapshotPatchBatch() {
+    wchar_t temp[MAX_PATH]{};
+    GetTempPathW(ARRAYSIZE(temp), temp);
+    const std::wstring dir = std::wstring(temp) + L"PulsePatchBatch-" +
+                             std::to_wstring(GetCurrentProcessId());
+    CreateDirectoryW(dir.c_str(), nullptr);
+    const auto full = [&](const wchar_t* name) { return dir + L"\\" + name; };
+    const auto make = [&](const wchar_t* name, DWORD bytes) {
+        HANDLE hf = CreateFileW(full(name).c_str(), GENERIC_WRITE, 0, nullptr,
+                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hf == INVALID_HANDLE_VALUE) return;
+        std::vector<char> data(bytes, 'x');
+        DWORD written = 0;
+        if (bytes) WriteFile(hf, data.data(), bytes, &written, nullptr);
+        CloseHandle(hf);
+    };
+    const struct { const wchar_t* name; DWORD bytes; } seed[] = {
+        {L"alpha.txt", 0}, {L"beta.log", 10}, {L"Gamma.txt", 10}, {L"delta.txt", 20},
+        {L"epsilon.md", 5}, {L"file2.txt", 0}, {L"file10.txt", 30}, {L"zeta.txt", 10}};
+    std::vector<fs::DirEntry> initial;
+    for (const auto& item : seed) {
+        make(item.name, item.bytes);
+        fs::DirEntry entry;
+        if (FillDirEntry(dir, item.name, entry)) initial.push_back(std::move(entry));
+    }
+    CreateDirectoryW(full(L"docs").c_str(), nullptr);
+    {
+        fs::DirEntry entry;
+        if (FillDirEntry(dir, L"docs", entry)) initial.push_back(std::move(entry));
+    }
+
+    // Disk reaches its final state first; both paths then stat the same files.
+    make(L"file3.txt", 7);
+    DeleteFileW(full(L"beta.log").c_str());
+    MoveFileW(full(L"delta.txt").c_str(), full(L"omega.txt").c_str());
+    MoveFileW(full(L"Gamma.txt").c_str(), full(L"gamma.txt").c_str());
+    make(L"zeta.txt", 99);
+    make(L"file20.txt", 1);
+    const auto ev = [](DWORD action, const wchar_t* name, const wchar_t* old_name = L"") {
+        fs::DirNotifyEvent event;
+        event.action = action;
+        event.name = name;
+        event.old_name = old_name;
+        return event;
+    };
+    const std::vector<fs::DirNotifyEvent> events = {
+        ev(FILE_ACTION_ADDED, L"file3.txt"), ev(FILE_ACTION_MODIFIED, L"file3.txt"),
+        ev(FILE_ACTION_REMOVED, L"beta.log"),
+        ev(FILE_ACTION_RENAMED_NEW_NAME, L"omega.txt", L"delta.txt"),
+        ev(FILE_ACTION_RENAMED_NEW_NAME, L"gamma.txt", L"Gamma.txt"),
+        ev(FILE_ACTION_ADDED, L"temp.tmp"), ev(FILE_ACTION_REMOVED, L"temp.tmp"),
+        ev(FILE_ACTION_MODIFIED, L"zeta.txt"), ev(FILE_ACTION_ADDED, L"file20.txt"),
+        ev(FILE_ACTION_ADDED, L"ghost.txt"), ev(FILE_ACTION_REMOVED, L"missing.txt")};
+
+    bool same = true;
+    const ui::SortColumn cols[] = {ui::SortColumn::Name, ui::SortColumn::Size,
+                                   ui::SortColumn::Mtime, ui::SortColumn::Type};
+    const ui::SortDirection dirs[] = {ui::SortDirection::Asc, ui::SortDirection::Desc};
+    std::vector<fs::DirEntry> last;
+    for (const auto col : cols) {
+        for (const auto sort_dir : dirs) {
+            std::vector<fs::DirEntry> base = initial;
+            std::sort(base.begin(), base.end(), [&](const fs::DirEntry& a, const fs::DirEntry& b) {
+                return EntryLess(a, b, col, sort_dir);
+            });
+            std::vector<fs::DirEntry> seq = base;
+            for (const auto& event : events)
+                ApplyDirNotify(seq, dir, event, col, sort_dir);
+            std::vector<fs::DirEntry> batch = base;
+            if (ApplyDirNotifyBatch(batch, dir, events, col, sort_dir) != NotifyPatch::Applied ||
+                batch.size() != seq.size()) {
+                same = false;
+                continue;
+            }
+            for (size_t i = 0; i < seq.size(); ++i) {
+                if (seq[i].name != batch[i].name || seq[i].size != batch[i].size ||
+                    seq[i].is_dir != batch[i].is_dir)
+                    same = false;
+            }
+            last = batch;
+        }
+    }
+    Check(same, L"patch batch: identical to per-event patching for every sort order");
+    const auto has = [&](const wchar_t* name) {
+        return std::any_of(last.begin(), last.end(),
+                           [&](const fs::DirEntry& e) { return e.name == name; });
+    };
+    Check(last.size() == 10 && has(L"file3.txt") && has(L"file20.txt") && has(L"omega.txt") &&
+              has(L"gamma.txt") && !has(L"Gamma.txt") && !has(L"beta.log") &&
+              !has(L"delta.txt") && !has(L"temp.tmp") && !has(L"ghost.txt"),
+          L"patch batch: adds, removes, renames and case-only renames resolve");
+    const std::vector<fs::DirNotifyEvent> nested = {
+        ev(FILE_ACTION_ADDED, L"a.txt"), ev(FILE_ACTION_ADDED, L"b.txt"),
+        ev(FILE_ACTION_ADDED, L"c.txt"), ev(FILE_ACTION_ADDED, L"d.txt"),
+        ev(FILE_ACTION_ADDED, L"sub\\file.txt")};
+    std::vector<fs::DirEntry> scratch = initial;
+    Check(ApplyDirNotifyBatch(scratch, dir, nested, ui::SortColumn::Name,
+                              ui::SortDirection::Asc) == NotifyPatch::NeedFullEnum,
+          L"patch batch: nested names require a full enumeration");
+
+    for (const wchar_t* name : {L"alpha.txt", L"gamma.txt", L"omega.txt", L"epsilon.md",
+                                L"file2.txt", L"file3.txt", L"file10.txt", L"file20.txt",
+                                L"zeta.txt"})
+        DeleteFileW(full(name).c_str());
+    RemoveDirectoryW(full(L"docs").c_str());
+    RemoveDirectoryW(dir.c_str());
+}
+
 void TestSnapshotStorePutKeepsWorkerGeneration() {
     fs::SnapshotStore store(8);
     auto first = std::make_shared<std::vector<fs::DirEntry>>();
@@ -5079,6 +5187,13 @@ int RunSelfTest1B2() {
         return g_fail ? 1 : 0;
     }
     if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
+        wcscmp(test_case, L"snapshot-patch") == 0) {
+        TestSnapshotPatch();
+        TestSnapshotPatchBatch();
+        if (g_log) { fclose(g_log); g_log = nullptr; }
+        return g_fail ? 1 : 0;
+    }
+    if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
         wcscmp(test_case, L"context-verbs") == 0) {
         DumpContextVerbs();
         if (g_log) { fclose(g_log); g_log = nullptr; }
@@ -5183,6 +5298,7 @@ int RunSelfTest1B2() {
     TestDirWatch();
     TestNavigateAlwaysEnumerates();
     TestSnapshotPatch();
+    TestSnapshotPatchBatch();
     TestSnapshotStorePutKeepsWorkerGeneration();
     TestDataObject();
     TestClipboardText();

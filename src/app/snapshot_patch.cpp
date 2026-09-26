@@ -2,7 +2,9 @@
 #include "entry_sort.h"
 #include "../fs/fs_enum.h"
 #include <algorithm>
+#include <cstdint>
 #include <cwctype>
+#include <unordered_map>
 
 namespace pulse::app {
 
@@ -90,6 +92,93 @@ NotifyPatch ApplyDirNotify(std::vector<fs::DirEntry>& entries, const std::wstrin
     }
 
     return NotifyPatch::NeedFullEnum;
+}
+
+namespace {
+
+// Case-insensitive name key, folded per character like _wcsicmp/FindName.
+struct FoldedNameHash {
+    size_t operator()(const std::wstring& name) const noexcept {
+        uint64_t hash = 1469598103934665603ull;
+        for (wchar_t c : name) {
+            hash ^= static_cast<uint64_t>(std::towlower(c));
+            hash *= 1099511628211ull;
+        }
+        return static_cast<size_t>(hash);
+    }
+};
+
+struct FoldedNameEqual {
+    bool operator()(const std::wstring& a, const std::wstring& b) const noexcept {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i)
+            if (std::towlower(a[i]) != std::towlower(b[i])) return false;
+        return true;
+    }
+};
+
+} // namespace
+
+NotifyPatch ApplyDirNotifyBatch(std::vector<fs::DirEntry>& entries, const std::wstring& folder,
+                                const std::vector<fs::DirNotifyEvent>& events,
+                                ui::SortColumn col, ui::SortDirection sort_dir) {
+    constexpr size_t kSequentialLimit = 4;
+    if (events.size() <= kSequentialLimit) {
+        for (const auto& event : events) {
+            if (ApplyDirNotify(entries, folder, event, col, sort_dir) == NotifyPatch::NeedFullEnum)
+                return NotifyPatch::NeedFullEnum;
+        }
+        return NotifyPatch::Applied;
+    }
+
+    // Final state of every touched name: the on-disk name to stat, or empty
+    // when the last event removed it. Later events win, as they would in order.
+    std::unordered_map<std::wstring, std::wstring, FoldedNameHash, FoldedNameEqual> touched;
+    touched.reserve(events.size() * 2);
+    for (const auto& event : events) {
+        if (event.name.empty() || event.name.find_first_of(L"\\/") != std::wstring::npos)
+            return NotifyPatch::NeedFullEnum;
+        switch (event.action) {
+        case FILE_ACTION_REMOVED:
+            touched[event.name].clear();
+            break;
+        case FILE_ACTION_RENAMED_NEW_NAME:
+            if (!event.old_name.empty()) touched[event.old_name].clear();
+            touched[event.name] = event.name;
+            break;
+        case FILE_ACTION_ADDED:
+        case FILE_ACTION_MODIFIED:
+            touched[event.name] = event.name;
+            break;
+        default:
+            return NotifyPatch::NeedFullEnum;
+        }
+    }
+
+    const auto less = [col, sort_dir](const fs::DirEntry& a, const fs::DirEntry& b) {
+        return EntryLess(a, b, col, sort_dir);
+    };
+    std::vector<fs::DirEntry> fresh;
+    fresh.reserve(touched.size());
+    for (const auto& item : touched) {
+        if (item.second.empty()) continue;
+        fs::DirEntry entry;
+        if (FillDirEntry(folder, item.second, entry)) fresh.push_back(std::move(entry));
+    }
+    std::sort(fresh.begin(), fresh.end(), less);
+
+    std::vector<fs::DirEntry> merged;
+    merged.reserve(entries.size() + fresh.size());
+    auto next = fresh.begin();
+    for (auto& entry : entries) {
+        if (touched.find(entry.name) != touched.end()) continue;
+        // InsertSorted places a new entry before the first one not less than it.
+        while (next != fresh.end() && less(*next, entry)) merged.push_back(std::move(*next++));
+        merged.push_back(std::move(entry));
+    }
+    for (; next != fresh.end(); ++next) merged.push_back(std::move(*next));
+    entries = std::move(merged);
+    return NotifyPatch::Applied;
 }
 
 } // namespace pulse::app

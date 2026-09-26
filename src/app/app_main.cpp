@@ -131,6 +131,21 @@ void UpdateProcessMetrics(AppState& s) {
     s.processSampleTick = now;
 }
 
+// Index status only reaches the screen through search views, the palette and
+// the settings page (see BuildVm); other notifications need no repaint.
+static bool IndexStatusVisible(AppState& s) {
+    if (s.paletteSearching) return true;
+    bool visible = false;
+    ForEachPane(s, [&](app::Pane& pane) {
+        const app::Tab* tab = pane.ActiveTab();
+        std::wstring kind;
+        if (tab && app::ParsePulsePath(tab->current_path, &kind, nullptr) &&
+            (kind == L"search" || kind == L"saved-search" || kind == L"settings"))
+            visible = true;
+    });
+    return visible;
+}
+
 void Render(AppState& s) {
     auto t0 = std::chrono::steady_clock::now();
 
@@ -217,6 +232,19 @@ void Render(AppState& s) {
             s.lastFps = static_cast<double>(s.fpsWindow.size() - 1) / span;
     }
     s.lastFrameTime = t1;
+}
+
+// kTimerUi drives animations and light polling. Minimized or hidden to the
+// tray nothing animates, so poll gently instead of 60 wakeups per second.
+constexpr UINT kUiTimerVisibleMs = 16;
+constexpr UINT kUiTimerHiddenMs = 200;
+static UINT g_uiTimerMs = kUiTimerVisibleMs;
+
+static void SyncUiTimerRate(HWND hwnd, bool visible) {
+    const UINT want = visible ? kUiTimerVisibleMs : kUiTimerHiddenMs;
+    if (want == g_uiTimerMs) return;
+    g_uiTimerMs = want;
+    SetTimer(hwnd, kTimerUi, want, nullptr);
 }
 
 LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -763,6 +791,11 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         return 0;
 
+    case WM_SHOWWINDOW:
+        // Sent before the window becomes visible; restore full rate right away.
+        if (s && wParam && !IsIconic(hwnd)) SyncUiTimerRate(hwnd, true);
+        break;
+
     case WM_ACTIVATE:
         if (s) s->renderer.NotifyPreviewActivate(LOWORD(wParam) != WA_INACTIVE);
         break;
@@ -789,6 +822,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (s) {
             s->compositor.Resize(LOWORD(lParam), HIWORD(lParam));
             s->maximized = (wParam == SIZE_MAXIMIZED);
+            if (wParam != SIZE_MINIMIZED && IsWindowVisible(hwnd)) SyncUiTimerRate(hwnd, true);
             if (s->addressEditing) LayoutAddressEditor(*s);
             if (s->filterEditing && !s->filterFocusPending) LayoutFilterEditor(*s);
             if (!s->tagRenameId.empty()) LayoutTagRenameOverlay(*s);
@@ -821,6 +855,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
     case WM_TIMER: {
         if (s && wParam == kTimerUi) {
+            SyncUiTimerRate(hwnd, IsWindowVisible(hwnd) && !IsIconic(hwnd));
             bool dirty = false;
             if (TickChangeTracking(*s)) dirty = true;
             DrainDirNotifies(*s);
@@ -1325,13 +1360,13 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 });
             }
             s->pinyinReadyLast = ready;
-            InvalidateRect(hwnd, nullptr, FALSE);
+            if (IndexStatusVisible(*s)) InvalidateRect(hwnd, nullptr, FALSE);
         }
         return 0;
     }
 
     case WM_NETWORK_INDEX_NOTIFY: {
-        if (s) InvalidateRect(hwnd, nullptr, FALSE);
+        if (s && IndexStatusVisible(*s)) InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     }
 

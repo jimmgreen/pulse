@@ -1623,7 +1623,7 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                                     for (int p = 0; p < n; ++p)
                                         if (s->tagOrder[static_cast<size_t>(p)] == idx) {
                                             oldPos = p;
-                                            return DefWindowProcW(hwnd, msg, wParam, lParam);
+                                            break;
                                         }
                                     if (oldPos < 0 || oldPos == pos) continue;
                                     const std::wstring& label =
@@ -1931,7 +1931,7 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 for (int i = 0; i < static_cast<int>(s->window_tabs.items.size()); ++i)
                     if (s->window_tabs.items[static_cast<size_t>(i)]->tab_group == gid) {
                         first = i;
-                        return DefWindowProcW(hwnd, msg, wParam, lParam);
+                        break;
                     }
                 if (first >= 0) {
                     s->tabDragPending = true;
@@ -2485,6 +2485,8 @@ LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPA
 }
 
 LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        (void)msg;
+        (void)wParam;
         if (s) {
             if (s->bloom_accent.Pressed() >= 0) {
                 const int pressed = s->bloom_accent.Pressed();
@@ -2630,7 +2632,7 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                                     D2D1_RECT_F chipRc{};
                                     if (s->renderer.TabGroupChipRect(vmDrop, wwDrop, gi, &chipRc))
                                         targetLeft = chipRc.left;
-                                    return DefWindowProcW(hwnd, msg, wParam, lParam);
+                                    break;
                                 }
                             } else {
                                 D2D1_RECT_F curRc{};
@@ -2871,6 +2873,11 @@ LRESULT HandleCaptureChanged(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LP
                 s->tabDragPending = false;
                 s->tabDragging = false;
                 s->tabDragIndex = -1;
+                s->tabDragRunPos = 0;
+                s->tabDragRunLen = 1;
+                s->tabDragFromChip = false;
+                s->tabDragGroupId = 0;
+                s->tabDragSlots = 1.0f;
                 s->tabOrder.clear();
                 s->tabTracks.clear();
                 s->tabOffsets.clear();

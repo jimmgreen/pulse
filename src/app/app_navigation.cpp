@@ -36,6 +36,7 @@
 #include <cmath>
 #include <cwctype>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 
 using namespace pulse;
@@ -1102,8 +1103,17 @@ void QueueSnapshotValidation(AppState& s, app::Tab& tab) {
     if (s.store.IsDirty(tab.current_path)) RefreshPath(s, tab.current_path);
 }
 
-bool ApplyNotifyToVisible(AppState& s, const std::wstring& path,
-                                 const fs::DirNotifyEvent& event) {
+// Applies a run of change events for one folder to every visible tab showing
+// it, copying each snapshot once. Returns false when a full enumeration should
+// run instead: an unsupported event, no visible tab, or more patch work than a
+// background re-enumeration costs.
+static bool ApplyNotifiesToVisible(AppState& s, const std::wstring& path,
+                                   const std::vector<fs::DirNotifyEvent>& events) {
+    if (events.empty()) return true;
+    // The batch is merged in one O(entries + events log events) pass, but every
+    // touched file is stat'ed on this thread, so huge bursts go async instead.
+    constexpr size_t kMaxIncrementalEvents = 512;
+    if (events.size() > kMaxIncrementalEvents) return false;
     bool any = false;
     bool need_full = false;
     fs::SnapshotPtr store_snap;
@@ -1112,7 +1122,7 @@ bool ApplyNotifyToVisible(AppState& s, const std::wstring& path,
         app::Tab* tab = pane.ActiveTab();
         if (!tab || tab->current_path != path || !tab->snapshot) return;
         auto copy = std::make_shared<std::vector<fs::DirEntry>>(*tab->snapshot);
-        if (app::ApplyDirNotify(*copy, path, event, tab->sort_column, tab->sort_direction) ==
+        if (app::ApplyDirNotifyBatch(*copy, path, events, tab->sort_column, tab->sort_direction) ==
             app::NotifyPatch::NeedFullEnum) {
             need_full = true;
             return;
@@ -1129,7 +1139,8 @@ bool ApplyNotifyToVisible(AppState& s, const std::wstring& path,
                 focus = tab->EntryAt(static_cast<size_t>(tab->selected_index)).name;
             }
         }
-        if (event.action == FILE_ACTION_RENAMED_NEW_NAME && !event.old_name.empty()) {
+        for (const auto& event : events) {
+            if (event.action != FILE_ACTION_RENAMED_NEW_NAME || event.old_name.empty()) continue;
             for (auto& name : names) {
                 if (_wcsicmp(name.c_str(), event.old_name.c_str()) == 0) name = event.name;
             }
@@ -1145,6 +1156,11 @@ bool ApplyNotifyToVisible(AppState& s, const std::wstring& path,
     if (need_full) return false;
     if (store_snap) s.store.Put(path, store_snap);
     return any;
+}
+
+bool ApplyNotifyToVisible(AppState& s, const std::wstring& path,
+                                 const fs::DirNotifyEvent& event) {
+    return ApplyNotifiesToVisible(s, path, std::vector<fs::DirNotifyEvent>{ event });
 }
 
 void DropSizePatches(AppState& s, const std::wstring& path) {
@@ -1168,6 +1184,48 @@ void QueueSizePatch(AppState& s, const std::wstring& path, const std::wstring& n
     s.size_patches.push_back({path, name, due});
 }
 
+// Batch form of QueueSizePatch: a bulk write queues thousands of MODIFIED
+// names, and the one-by-one scan above is quadratic in that case.
+static void QueueSizePatches(AppState& s, const std::wstring& path,
+                             const std::vector<std::wstring>& names, ULONGLONG due) {
+    constexpr size_t kLinearLimit = 8;
+    if (names.size() <= kLinearLimit) {
+        for (const auto& name : names) QueueSizePatch(s, path, name, due);
+        return;
+    }
+    const auto fold = [](const std::wstring& name) {
+        std::wstring key(name);
+        for (auto& c : key) c = static_cast<wchar_t>(std::towlower(c));
+        return key;
+    };
+    std::unordered_map<std::wstring, size_t> index;
+    index.reserve(s.size_patches.size() + names.size());
+    for (size_t i = 0; i < s.size_patches.size(); ++i) {
+        if (s.size_patches[i].path == path) index.emplace(fold(s.size_patches[i].name), i);
+    }
+    for (const auto& name : names) {
+        std::wstring key = fold(name);
+        const auto found = index.find(key);
+        if (found != index.end()) {
+            auto& patch = s.size_patches[found->second];
+            patch.due = due;
+            patch.name = name;
+        } else {
+            index.emplace(std::move(key), s.size_patches.size());
+            s.size_patches.push_back({path, name, due});
+        }
+    }
+}
+
+template <typename T>
+static T& GroupFor(std::vector<std::pair<std::wstring, T>>& groups, const std::wstring& key) {
+    for (auto& group : groups) {
+        if (group.first == key) return group.second;
+    }
+    groups.emplace_back(key, T{});
+    return groups.back().second;
+}
+
 void DrainDirNotifies(AppState& s) {
     std::vector<AppState::DirNotifyBatch> batch;
     {
@@ -1176,12 +1234,20 @@ void DrainDirNotifies(AppState& s) {
     }
     bool changed = false;
     const ULONGLONG now = GetTickCount64();
+    // The watcher queues one batch per notification buffer; during a slow bulk
+    // copy that is one or two events each, so thousands can pile up behind a
+    // single tick. Group the whole drain per folder and patch each folder once.
+    std::vector<std::pair<std::wstring, std::vector<fs::DirNotifyEvent>>> structural_by_path;
+    std::vector<std::pair<std::wstring, std::vector<std::wstring>>> modified_by_path;
     for (auto& item : batch) {
         const std::wstring path = fs::NormalizePath(item.path);
         if (item.overflow) {
             DropSizePatches(s, path);
             s.store.MarkDirty(path);
             RefreshPath(s, path);
+            // The refresh re-enumerates; this drain's earlier events are moot.
+            GroupFor(structural_by_path, path).clear();
+            GroupFor(modified_by_path, path).clear();
             changed = true;
             continue;
         }
@@ -1189,20 +1255,23 @@ void DrainDirNotifies(AppState& s) {
             s.store.MarkDirty(path);
             continue;
         }
+        auto& structural = GroupFor(structural_by_path, path);
+        auto& modified = GroupFor(modified_by_path, path);
         for (const auto& event : item.events) {
-            if (event.action == FILE_ACTION_MODIFIED) {
-                QueueSizePatch(s, path, event.name, now + 100);
-                continue;
-            }
-            if (!ApplyNotifyToVisible(s, path, event)) {
-                DropSizePatches(s, path);
-                s.store.MarkDirty(path);
-                RefreshPath(s, path);
-                changed = true;
-                break;
-            }
-            changed = true;
+            if (event.action == FILE_ACTION_MODIFIED) modified.push_back(event.name);
+            else structural.push_back(event);
         }
+    }
+    for (const auto& [folder, names] : modified_by_path)
+        QueueSizePatches(s, folder, names, now + 100);
+    for (const auto& [folder, events] : structural_by_path) {
+        if (events.empty()) continue;
+        if (!ApplyNotifiesToVisible(s, folder, events)) {
+            DropSizePatches(s, folder);
+            s.store.MarkDirty(folder);
+            RefreshPath(s, folder);
+        }
+        changed = true;
     }
 
     std::vector<AppState::CoalescedSizePatch> due;
@@ -1214,6 +1283,8 @@ void DrainDirNotifies(AppState& s) {
         else keep.push_back(std::move(patch));
     }
     s.size_patches = std::move(keep);
+    // One snapshot copy per folder, not per modified file.
+    std::vector<std::pair<std::wstring, std::vector<fs::DirNotifyEvent>>> due_by_path;
     for (const auto& patch : due) {
         if (PathHasPendingRefresh(s, patch.path)) {
             s.store.MarkDirty(patch.path);
@@ -1222,9 +1293,16 @@ void DrainDirNotifies(AppState& s) {
         fs::DirNotifyEvent event;
         event.action = FILE_ACTION_MODIFIED;
         event.name = patch.name;
-        if (!ApplyNotifyToVisible(s, patch.path, event)) {
-            s.store.MarkDirty(patch.path);
-            RefreshPath(s, patch.path);
+        size_t group = 0;
+        while (group < due_by_path.size() && due_by_path[group].first != patch.path) ++group;
+        if (group == due_by_path.size())
+            due_by_path.emplace_back(patch.path, std::vector<fs::DirNotifyEvent>{});
+        due_by_path[group].second.push_back(std::move(event));
+    }
+    for (const auto& [patch_path, events] : due_by_path) {
+        if (!ApplyNotifiesToVisible(s, patch_path, events)) {
+            s.store.MarkDirty(patch_path);
+            RefreshPath(s, patch_path);
         }
         changed = true;
     }

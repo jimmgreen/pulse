@@ -7,7 +7,10 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <functional>
 #include <mutex>
+#include <string>
+#include <unordered_map>
 
 namespace pulse::ui::typography {
 namespace {
@@ -228,8 +231,10 @@ float MeasureAdvance(IDWriteFactory2* factory, IDWriteTextFormat* format,
     return metrics.widthIncludingTrailingWhitespace + std::max(0.0f, overhang.right) + 1.0f;
 }
 
-float MeasureLine(Compositor* compositor, IDWriteTextFormat* format,
-                  std::wstring_view text) {
+namespace {
+
+float MeasureLineUncached(Compositor* compositor, IDWriteTextFormat* format,
+                          std::wstring_view text) {
     const float dwrite_w = MeasureAdvance(
         compositor ? compositor->DwriteFactory() : nullptr, format, text);
     float luma = 0.0f;
@@ -237,6 +242,70 @@ float MeasureLine(Compositor* compositor, IDWriteTextFormat* format,
         return std::max(dwrite_w, luma) + InkPad(format);
     }
     return dwrite_w;
+}
+
+struct MeasureKey {
+    const void* compositor = nullptr;
+    const void* format = nullptr;
+    float size = 0.0f;
+    std::uint32_t style = 0; // weight | style << 16 | stretch << 20 | luma << 24
+    std::wstring text;
+    bool operator==(const MeasureKey& other) const noexcept {
+        return compositor == other.compositor && format == other.format &&
+               size == other.size && style == other.style && text == other.text;
+    }
+};
+
+struct MeasureKeyHash {
+    size_t operator()(const MeasureKey& key) const noexcept {
+        size_t h = std::hash<std::wstring>{}(key.text);
+        const auto mix = [&h](size_t v) {
+            h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+        };
+        mix(std::hash<const void*>{}(key.compositor));
+        mix(std::hash<const void*>{}(key.format));
+        mix(std::hash<float>{}(key.size));
+        mix(key.style);
+        return h;
+    }
+};
+
+struct MeasureCache {
+    std::uint64_t generation = 0;
+    std::unordered_map<MeasureKey, float, MeasureKeyHash> widths;
+};
+
+constexpr size_t kMeasureCacheLimit = 16384;
+
+} // namespace
+
+float MeasureLine(Compositor* compositor, IDWriteTextFormat* format,
+                  std::wstring_view text) {
+    if (!format || text.empty() || text.size() > 1024)
+        return MeasureLineUncached(compositor, format, text);
+    // Text measurement runs for every visible row on every paint and on each
+    // hit test; the inputs rarely change, so remember the widths per thread.
+    thread_local MeasureCache cache;
+    const std::uint64_t generation = Generation();
+    if (cache.generation != generation) {
+        cache.widths.clear();
+        cache.generation = generation;
+    }
+    MeasureKey key;
+    key.compositor = compositor;
+    key.format = format;
+    key.size = format->GetFontSize();
+    key.style = static_cast<std::uint32_t>(format->GetFontWeight()) & 0xFFFFu;
+    key.style |= (static_cast<std::uint32_t>(format->GetFontStyle()) & 0xFu) << 16;
+    key.style |= (static_cast<std::uint32_t>(format->GetFontStretch()) & 0xFu) << 20;
+    if (compositor && compositor->LumaTextEnabled()) key.style |= 1u << 24;
+    key.text.assign(text.data(), text.size());
+    if (const auto found = cache.widths.find(key); found != cache.widths.end())
+        return found->second;
+    const float width = MeasureLineUncached(compositor, format, text);
+    if (cache.widths.size() >= kMeasureCacheLimit) cache.widths.clear();
+    cache.widths.emplace(std::move(key), width);
+    return width;
 }
 
 float MeasureWrapped(IDWriteFactory2* factory, IDWriteTextFormat* format,
