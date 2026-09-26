@@ -155,6 +155,9 @@ public:
     // Shell "properties" verb on the ops worker thread. Compile-verified only
     // in 1B-2; wired to the context menu but exercised manually.
     void ShowProperties(const std::wstring& path);
+    // Several items: one merged Explorer sheet (SHMultiFileProperties) on a
+    // short-lived STA thread that pumps messages while the sheet is open.
+    void ShowProperties(const std::vector<std::wstring>& paths);
 
     // Any registry shell verb ("print", "edit", …) via ShellExecuteEx on the
     // ops worker thread. "openas" / "打开方式…" uses SHOpenWithDialog.
@@ -206,6 +209,7 @@ private:
         std::wstring open_verb;   // "open" (default) / "properties" / ...
         std::wstring open_args;   // e.g. -d "<dir>" for wt.exe
         std::wstring open_file;   // explicit program (empty => open_path is the file)
+        std::vector<std::wstring> open_paths; // multi-item "properties"
         uint64_t seq = 0;
         ULONGLONG enqueued_at = 0; // diagnostics: queue wait vs shell cost
     };

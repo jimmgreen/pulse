@@ -370,6 +370,39 @@ std::vector<int> Tab::SelectedIndices() const {
     return out;
 }
 
+void Tab::SelectionSizeSummary(uint64_t* bytes, int* files, int* folders) const {
+    auto& c = selection_size_cache;
+    const int count = SelectedCount();
+    const size_t entries = EntryCount();
+    if (c.revision != selection_revision || c.snapshot != snapshot.get() ||
+        c.entry_count != entries || c.selected_count != count) {
+        c.revision = selection_revision;
+        c.snapshot = snapshot.get();
+        c.entry_count = entries;
+        c.selected_count = count;
+        c.bytes = 0;
+        c.files = 0;
+        c.folders = 0;
+        if (snapshot && !content_results) {
+            const auto add = [&](int index) {
+                if (index < 0 || static_cast<size_t>(index) >= snapshot->size()) return;
+                const fs::DirEntry& entry = (*snapshot)[static_cast<size_t>(index)];
+                if (entry.change_record_only) return;
+                if (entry.is_dir) ++c.folders;
+                else { ++c.files; c.bytes += entry.size; }
+            };
+            if (all_selected) {
+                for (int i = 0; i < CountBound(); ++i) if (EntryVisible(i)) add(i);
+            } else {
+                for (int index : selected) add(index);
+            }
+        }
+    }
+    if (bytes) *bytes = c.bytes;
+    if (files) *files = c.files;
+    if (folders) *folders = c.folders;
+}
+
 void Tab::RemapSelection(const std::vector<std::wstring>& names, const std::wstring& focus_name) {
     ClearSelection();
     const int n = CountBound();
@@ -1177,7 +1210,14 @@ static std::wstring SelectionText(const Tab& tab) {
     }
     wchar_t buf[64];
     swprintf_s(buf, l10n::Get(l10n::StringId::SelectedCountFormat).c_str(), count);
-    return buf;
+    // Content-search selections are summed asynchronously in BuildVm.
+    if (tab.content_results || !tab.snapshot) return buf;
+    uint64_t bytes = 0;
+    int files = 0;
+    tab.SelectionSizeSummary(&bytes, &files, nullptr);
+    // Like Explorer: folder sizes are unknown here, so show the files' total.
+    if (files <= 0) return buf;
+    return std::wstring(buf) + L"  \u00B7  " + pulse::format::ByteSize(bytes, true);
 }
 
 static ui::SidebarGroup ConvertGroup(const std::wstring& header, const std::vector<SidebarEntry>& src,

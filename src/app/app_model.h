@@ -87,6 +87,17 @@ struct Tab {
     std::shared_ptr<ContentSelectionRestore> content_selection_restore;
     uint64_t selection_revision = 0;
     std::shared_ptr<ContentSizeSummary> content_size_summary;
+    // Cached file-size summary of a snapshot selection (see SelectionSizeSummary).
+    struct SelectionSizeCache {
+        uint64_t revision = UINT64_MAX;
+        const void* snapshot = nullptr;
+        size_t entry_count = 0;
+        int selected_count = -1;
+        uint64_t bytes = 0;
+        int files = 0;
+        int folders = 0;
+    };
+    mutable SelectionSizeCache selection_size_cache;
     std::wstring content_filter;
     // Explicit bulk actions resolve off-page selections asynchronously. These
     // rows are pinned only for the duration of the action, not for browsing.
@@ -152,6 +163,10 @@ struct Tab {
     bool IsSelected(int index) const;
     int SelectedCount() const;
     std::vector<int> SelectedIndices() const;
+    // Sum of selected file sizes (folders counted, not sized). Cached per
+    // selection revision + snapshot so the status bar stays O(1) per paint.
+    // Not for content_results tabs (use ContentSelectionSize).
+    void SelectionSizeSummary(uint64_t* bytes, int* files, int* folders) const;
     void RemapSelection(const std::vector<std::wstring>& names, const std::wstring& focus_name);
 
     // Navigation helpers.

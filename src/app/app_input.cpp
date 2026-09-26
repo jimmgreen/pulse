@@ -434,6 +434,7 @@ void ApplyMarqueeSelection(AppState& s) {
     const float clipR = std::min(right, list.right);
     const float clipB = std::min(bottom, list.bottom);
 
+    ++tab->selection_revision;
     tab->all_selected = false;
     tab->selected.clear();
     if (s.marqueeAdditive) tab->selected = s.marqueeBase;

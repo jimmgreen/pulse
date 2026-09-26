@@ -33,6 +33,69 @@ std::wstring FileName(const std::wstring& path) {
     return std::wstring(v);
 }
 
+// Merged Explorer properties sheet for several items. Runs on its own STA
+// thread: the sheet may call back into the data object through COM, so the
+// owning apartment must keep pumping messages while the sheet holds it.
+void ShowMultiFilePropertiesAsync(std::vector<std::wstring> paths) {
+    std::thread([paths = std::move(paths)]() {
+        if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE))) return;
+        std::vector<PIDLIST_ABSOLUTE> pidls;
+        pidls.reserve(paths.size());
+        for (const auto& path : paths) {
+            const std::wstring shell_path = pulse::path::StripExtendedPathPrefix(path);
+            PIDLIST_ABSOLUTE pidl = nullptr;
+            if (SUCCEEDED(SHParseDisplayName(shell_path.c_str(), nullptr, &pidl, 0, nullptr)) && pidl)
+                pidls.push_back(pidl);
+        }
+        IDataObject* data = nullptr;
+        if (pidls.size() > 1) {
+            IShellItemArray* array = nullptr;
+            if (SUCCEEDED(SHCreateShellItemArrayFromIDLists(static_cast<UINT>(pidls.size()),
+                    const_cast<PCIDLIST_ABSOLUTE_ARRAY>(pidls.data()), &array)) && array) {
+                array->BindToHandler(nullptr, BHID_DataObject, IID_PPV_ARGS(&data));
+                array->Release();
+            }
+        }
+        for (auto* pidl : pidls) CoTaskMemFree(pidl);
+        bool shown = data && SUCCEEDED(SHMultiFileProperties(data, 0));
+        if (!shown) {
+            wchar_t message[160]{};
+            swprintf_s(message, L"Pulse: SHMultiFileProperties failed for %zu items\n", paths.size());
+            OutputDebugStringW(message);
+            const std::wstring first = pulse::path::StripExtendedPathPrefix(paths.front());
+            SHObjectProperties(nullptr, SHOP_FILEPATH, first.c_str(), nullptr);
+        }
+        // The sheet may live on this thread (a thread's windows die with it)
+        // or on a shell thread that calls back into `data` through COM. Pump
+        // while either holds on; a short grace covers asynchronous creation.
+        const ULONGLONG started = GetTickCount64();
+        while (shown) {
+            MsgWaitForMultipleObjectsEx(0, nullptr, 200, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+            MSG msg;
+            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                if (!IsDialogMessageW(GetActiveWindow(), &msg)) {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+            }
+            bool owns_window = false;
+            EnumThreadWindows(GetCurrentThreadId(), [](HWND hwnd, LPARAM found) -> BOOL {
+                if (!IsWindowVisible(hwnd)) return TRUE;
+                *reinterpret_cast<bool*>(found) = true;
+                return FALSE;
+            }, reinterpret_cast<LPARAM>(&owns_window));
+            ULONG refs = 1;
+            if (data) {
+                data->AddRef();
+                refs = data->Release();
+            }
+            if (!owns_window && refs <= 1 && GetTickCount64() - started > 3000) break;
+        }
+        if (data) data->Release();
+        CoUninitialize();
+    }).detach();
+}
+
 std::wstring ParentOf(const std::wstring& path) {
     std::wstring p = path;
     while (p.size() > 1 && (p.back() == L'\\' || p.back() == L'/')) p.pop_back();
@@ -836,6 +899,19 @@ void OpsManager::ShowProperties(const std::wstring& path) {
     ExecuteVerb(path, L"properties");
 }
 
+void OpsManager::ShowProperties(const std::vector<std::wstring>& paths) {
+    if (paths.empty()) return;
+    if (paths.size() == 1) {
+        ShowProperties(paths.front());
+        return;
+    }
+    QueueItem item;
+    item.open_path = paths.front();
+    item.open_paths = paths;
+    item.open_verb = L"properties";
+    EnqueueOpen(std::move(item));
+}
+
 void OpsManager::ExecuteVerb(const std::wstring& path, const std::wstring& verb) {
     QueueItem item;
     item.open_path = path;
@@ -1196,6 +1272,11 @@ void OpsManager::OpenThread() {
                     OutputDebugStringW(message);
                 }
             }
+            continue;
+        }
+
+        if (_wcsicmp(item.open_verb.c_str(), L"properties") == 0 && item.open_paths.size() > 1) {
+            ShowMultiFilePropertiesAsync(std::move(item.open_paths));
             continue;
         }
 

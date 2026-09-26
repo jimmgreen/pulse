@@ -14,6 +14,7 @@
 #include "../fs/fs_snapshot.h"
 #include "../fs/fs_watch.h"
 #include "app_model.h"
+#include <deque>
 #include "content_results_ui.h"
 #include "app_worker.h"
 #include "places.h"
@@ -253,6 +254,7 @@ struct AppState {
     double lastFrameMs = 0.0;
     double lastFps = 0.0;
     std::chrono::steady_clock::time_point lastFrameTime;
+    std::deque<std::chrono::steady_clock::time_point> fpsWindow; // recent Present times
     double processCpuPercent = 0.0;
     double workingSetMb = 0.0;
     ULONGLONG processSampleTick = 0;

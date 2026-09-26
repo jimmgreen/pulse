@@ -1161,6 +1161,13 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
         vm.sidebar_pin_drag_index = s.pinDragRun;
         if (s.pinGapVisible) vm.sidebar_pin_gap_line_y = s.pinGapLineY;
     }
+    if (app::Tab* sel_tab = ActiveTab(s); sel_tab && sel_tab->content_results && sel_tab->SelectedCount() > 1) {
+        wchar_t count[64]{};
+        swprintf_s(count, l10n::Get(l10n::StringId::SelectedCountFormat).c_str(), sel_tab->SelectedCount());
+        const std::optional<uint64_t> bytes = ContentSelectionSize(*sel_tab);
+        vm.status.selection_text = std::wstring(count) + L"  \u00B7  " +
+            (bytes ? pulse::format::ByteSize(*bytes, true) : l10n::Get(l10n::StringId::LoadingEllipsis));
+    }
     ops::OpStatus st = s.ops.Status();
     if (st.active || !st.last_error.empty() || !st.summary.empty()) {
         vm.status.task_text = st.last_error.empty() ? st.summary
@@ -1428,11 +1435,8 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
             std::optional<uint64_t> contentSize;
             if(tab->content_results) {
                 files=selCount;contentSize=ContentSelectionSize(*tab);knownSize=contentSize.value_or(0);
-            } else for (int index : tab->SelectedIndices()) {
-                if (index < 0 || index >= static_cast<int>(tab->EntryCount())) continue;
-                const fs::DirEntry& entry = tab->EntryAt(static_cast<size_t>(index));
-                if (entry.is_dir) ++folders;
-                else { ++files; knownSize += entry.size; }
+            } else {
+                tab->SelectionSizeSummary(&knownSize, &files, &folders);
             }
             wchar_t composition[96]{};
             if (files && folders)

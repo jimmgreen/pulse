@@ -199,8 +199,23 @@ void Render(AppState& s) {
 
     auto t1 = std::chrono::steady_clock::now();
     s.lastFrameMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
-    double dt = std::chrono::duration<double>(t1 - s.lastFrameTime).count();
-    if (dt > 0.0) s.lastFps = 1.0 / dt;
+    // FPS = frames presented per second over a sliding ~1 s window of
+    // continuous rendering. Pulse paints on demand: 1/dt of two adjacent
+    // paints reported the idle gap as "1 FPS" and back-to-back paints as
+    // thousands. An idle gap restarts the window instead of being averaged in,
+    // and the value only updates once the window spans enough frames.
+    {
+        using secs = std::chrono::duration<double>;
+        constexpr double kIdleGap = 0.25, kWindow = 1.0, kMinSpan = 0.05;
+        if (!s.fpsWindow.empty() && secs(t1 - s.fpsWindow.back()).count() > kIdleGap)
+            s.fpsWindow.clear();
+        s.fpsWindow.push_back(t1);
+        while (s.fpsWindow.size() > 2 && secs(t1 - s.fpsWindow.front()).count() > kWindow)
+            s.fpsWindow.pop_front();
+        const double span = secs(t1 - s.fpsWindow.front()).count();
+        if (s.fpsWindow.size() >= 3 && span >= kMinSpan)
+            s.lastFps = static_cast<double>(s.fpsWindow.size() - 1) / span;
+    }
     s.lastFrameTime = t1;
 }
 
@@ -1050,6 +1065,14 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             ShowOmnibar(*s, OmnibarMode::Path);
             return 0;
         }
+        // Alt+Enter arrives as WM_SYSKEYDOWN, so HandleKeyDown's advertised
+        // Properties shortcut (alt && VK_RETURN) was unreachable.
+        if (s && wParam == VK_RETURN && (GetKeyState(VK_MENU) & 0x8000))
+            return HandleKeyDown(s, hwnd, msg, wParam, lParam);
+        break;
+
+    case WM_SYSCHAR:
+        if (wParam == L'\r') return 0; // Alt+Enter handled above; no default beep
         break;
 
     case WM_KEYDOWN:

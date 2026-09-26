@@ -535,18 +535,25 @@ void DispatchMenuCommand(AppState& s, int cmd) {
         ShowWildcardSelect(s);
         break;
     case app::CmdProperties: {
-        // Shell verb on the ops pool (plan §6.2); compile-verified in 1B-2.
-        std::wstring full;
+        // Shell properties on the ops open thread. A multi-selection opens one
+        // merged sheet (like Explorer) instead of the focused item's sheet.
+        std::vector<std::wstring> paths;
         if (const app::Tab* tab = ActiveTab(s); IsRecycleTab(tab) && tab->snapshot) {
-            const auto indices = tab->SelectedIndices();
-            if (!indices.empty()) {
-                const fs::DirEntry& entry = tab->EntryAt(static_cast<size_t>(indices[0]));
-                full = entry.recycle_path.empty() ? entry.full_path : entry.recycle_path;
+            for (int index : tab->SelectedIndices()) {
+                if (index < 0 || index >= static_cast<int>(tab->EntryCount())) continue;
+                const fs::DirEntry entry = tab->EntryAt(static_cast<size_t>(index));
+                const std::wstring& full = entry.recycle_path.empty() ? entry.full_path : entry.recycle_path;
+                if (!full.empty()) paths.push_back(ClipboardPath(full));
             }
-        } else {
-            full = SelectedFullPath(s);
+        } else if (tab) {
+            // Focused item first so single-sheet fallbacks show what the user right-clicked.
+            const std::wstring focused = SelectedFullPath(s);
+            if (!focused.empty()) paths.push_back(ClipboardPath(focused));
+            for (const auto& full : SelectedFullPaths(*tab)) {
+                if (full != focused) paths.push_back(ClipboardPath(full));
+            }
         }
-        if (!full.empty()) s.ops.ShowProperties(ClipboardPath(full));
+        if (!paths.empty()) s.ops.ShowProperties(paths);
         break;
     }
     case app::CmdOpenTerminal: {
