@@ -166,7 +166,7 @@ struct ContentResultStore::Impl {
             if (!read.p || rc!=SQLITE_DONE) error=ERROR_DATABASE_FAILURE;
         }
         std::lock_guard lock(mu);
-        ++page_epoch; pending.clear(); pages.swap(replacement); lru.clear();
+        ++page_epoch; ++revision; pending.clear(); pages.swap(replacement); lru.clear();
         for (size_t page : recent) if (pages.contains(page)) lru.push_back(page);
         count=new_count;
     }

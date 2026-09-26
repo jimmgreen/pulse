@@ -534,7 +534,52 @@ int RunContentPagingUiTest(AppState& s,const wchar_t* output) {
     log<<"failures="<<failures<<std::endl;return failures ? 1:0;
 }
 
+int RunContentLiveSelectionTest(AppState& s,const wchar_t* output) {
+    std::ofstream log{std::filesystem::path(output)};int failures=0;
+    auto check=[&](bool ok,const char* label){log<<(ok ? "[PASS] ":"[FAIL] ")<<label<<std::endl;if(!ok)++failures;};
+    s.appPrefs.persist=false;s.searchHistory.persist=false;s.contentSearch.Stop();
+    s.addressLiveDue=s.addressHistoryDue=0;HideAddressEditor(s,false);
+    auto* tab=ActiveTab(s);*tab=app::Tab{};
+    tab->current_path=app::MakeSearchPath(L"content:live");
+    tab->view_mode=ui::ViewMode::Details;tab->pending_generation=900030;tab->search_content_active=true;
+    auto store=std::make_shared<index::ContentResultStore>(s.hwnd,WM_CONTENT_SEARCH);
+    auto path=[](int i){wchar_t v[64]{};swprintf_s(v,L"C:\\LiveFixture\\f%05d.txt",i);return std::wstring(v);};
+    auto hit=[&](int i,bool removed){index::ContentHit h{path(i),path(i).substr(15),L"live content",static_cast<uint64_t>(i),0,1};h.removed=removed;return h;};
+    auto write=[&](std::vector<index::ContentHit> hits,bool live){
+        bool ok=false;
+        std::thread worker([&]{ok=live ? store->ApplyChanges(hits,index::ContentResultSort::Name,false) : store->Append(hits);});
+        worker.join();return ok;
+    };
+    auto pump=[&]{
+        MSG message{};
+        while(PeekMessageW(&message,s.hwnd,WM_CONTENT_SEARCH,WM_CONTENT_SEARCH,PM_REMOVE)) DispatchMessageW(&message);
+        RefreshContentResults(s);
+    };
+    auto wait=[&](auto ready){const auto start=GetTickCount64();while(!ready() && GetTickCount64()-start<10000){pump();Sleep(2);}pump();return ready();};
+    auto deliver=[&](bool delta){index::ContentSearchUpdate update;update.progress.generation=900030;update.progress.done=true;update.progress.delta=delta;update.results=store;ApplyContentSearchUpdate(s,std::move(update));};
+    auto settled=[&]{
+        return tab->selected_index>=0 && !tab->content_selection_restore && tab->search_preserve_selection.empty() &&
+            (store->Prefetch(static_cast<size_t>(tab->selected_index)),store->Ready(static_cast<size_t>(tab->selected_index)));
+    };
+    auto selected_path=[&]{return tab->selected_index>=0 ? tab->EntryAt(static_cast<size_t>(tab->selected_index)).full_path : std::wstring{};};
+    std::vector<index::ContentHit> initial;for(int i=10;i<=200;i+=10) initial.push_back(hit(i,false));
+    check(write(initial,false),"initial hits written off the UI thread");
+    deliver(false);tab->search_live_generation=900030;
+    check(wait([&]{store->Prefetch(0);return store->Ready(0) && tab->EntryAt(5).full_path==path(60);}),"initial rows readable");
+    tab->SelectOnly(5);for(int i=0;i<3;++i){pump();Sleep(5);}
+    check(write({hit(5,false)},true),"live delta inserts a row above the selection");deliver(true);
+    check(wait(settled) && selected_path()==path(60),"selection stays on the same file after a live insert above it");
+    check(write({hit(10,true),hit(20,true)},true),"live delta removes rows above the selection");deliver(true);
+    check(wait(settled) && selected_path()==path(60),"selection stays on the same file after rows above it are removed");
+    tab->ClearSelection();for(int i=0;i<3;++i){pump();Sleep(5);}
+    check(write({hit(1,false)},true),"live delta with nothing selected");deliver(true);
+    for(int i=0;i<10;++i){pump();Sleep(5);}
+    check(tab->selected_index<0 && !tab->IsSelected(0),"live delta does not auto-select the first row");
+    log<<"failures="<<failures<<std::endl;return failures ? 1:0;
+}
+
 int RunSearchFlowTest(AppState& s, const wchar_t* output) {
+    if(GetEnvironmentVariableW(L"PULSE_TEST_CONTENT_LIVE_SELECTION",nullptr,0)) return RunContentLiveSelectionTest(s,output);
     if(GetEnvironmentVariableW(L"PULSE_TEST_CONTENT_PAGING",nullptr,0)) return RunContentPagingUiTest(s,output);
     if(GetEnvironmentVariableW(L"PULSE_TEST_CONTENT_HISTORY",nullptr,0)) return RunContentHistoryTest(s,output);
     if(GetEnvironmentVariableW(L"PULSE_TEST_SEARCH_COLUMN_ALIGNMENT",nullptr,0)) return RunSearchColumnAlignmentTest(s,output);

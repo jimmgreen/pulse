@@ -127,6 +127,11 @@ struct Tab {
     bool search_relevance = true;
     bool search_allow_scan = false;
     std::wstring search_preserve_selection;
+    // Focused content row identity, captured while row indices still match
+    // content_revision; live deltas re-sort the store and are remapped by it.
+    std::wstring content_focus_path;
+    uint64_t content_focus_selection = UINT64_MAX;
+    uint64_t content_focus_revision = UINT64_MAX;
     std::wstring search_origin_path;
     bool search_origin_valid = false;
     bool search_retaining_results = false;

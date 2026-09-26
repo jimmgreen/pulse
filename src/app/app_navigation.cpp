@@ -578,7 +578,10 @@ void ApplyContentSearchUpdate(AppState& s, index::ContentSearchUpdate update) {
                        update.progress.error);
             target->banner_message = error;
         }
-        if (target->EntryCount() && target->selected_index < 0)
+        // A live delta is a refresh, not a new result list: never invent a
+        // selection (and never pre-empt a pending path restore).
+        if (!update.progress.delta && target->EntryCount() && target->selected_index < 0 &&
+            target->search_preserve_selection.empty() && !target->content_selection_restore)
             target->SelectOnly(0);
     }
     if(target->content_results) RefreshContentResults(s);

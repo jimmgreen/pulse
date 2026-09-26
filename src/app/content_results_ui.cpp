@@ -83,6 +83,14 @@ bool RefreshContentResults(AppState& s) {
             store.SetFilter(app::ContentFilter(tab->filter_text,s.places));
         }
         if(tab->content_revision!=store.Revision() || tab->search_total!=store.Count()) {
+            // Live deltas re-sort the store off the UI thread, so index-based
+            // selection would now name other files. Re-find the focused file.
+            if(!tab->search_content_active && tab->selected_index>=0 && tab->search_preserve_selection.empty() &&
+               tab->content_focus_selection==tab->selection_revision &&
+               tab->content_focus_revision==tab->content_revision && !tab->content_focus_path.empty()) {
+                tab->search_preserve_selection=tab->content_focus_path;
+                tab->ClearSelection();
+            }
             tab->content_revision=store.Revision();
             tab->search_total=store.Count(); tab->file_count=store.Count(); tab->directory_count=0;
             tab->loading=tab->search_content_active && !store.Count();
@@ -115,6 +123,15 @@ bool RefreshContentResults(AppState& s) {
                 changed=true;
             }
             tab->content_selection_restore.reset();
+        }
+        if(tab->selected_index>=0 && tab->content_revision==store.Revision() &&
+           (tab->content_focus_selection!=tab->selection_revision || tab->content_focus_revision!=tab->content_revision)) {
+            index::ContentResultStore::Row row;
+            if(store.Get(static_cast<size_t>(tab->selected_index),row) && store.Revision()==tab->content_revision) {
+                tab->content_focus_path=row.entry.full_path;
+                tab->content_focus_selection=tab->selection_revision;
+                tab->content_focus_revision=tab->content_revision;
+            }
         }
         // Rendering/hit testing can ask for any page (including thumb jumps).
         // A small neighborhood is prefetched without walking earlier pages.

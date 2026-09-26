@@ -110,6 +110,19 @@ foreach ($testCase in $selftestCases) {
     }
 }
 Remove-Item Env:PULSE_SELFTEST_CASE
+$liveLog = Join-Path $build 'content-live-selection.log'
+$env:PULSE_TEST_SEARCH_FLOW = $liveLog
+$env:PULSE_TEST_CONTENT_LIVE_SELECTION = '1'
+$live = Start-Process -FilePath (Join-Path $build 'pulse.exe') -ArgumentList '--test-instance', '--shot',
+    (Join-Path $build 'content-live-selection.png'), $env:TEMP -WindowStyle Hidden -PassThru
+$liveDone = $live.WaitForExit(60000)
+if (-not $liveDone) { $live.Kill(); $live.WaitForExit() }
+$live.Refresh()
+Remove-Item Env:PULSE_TEST_SEARCH_FLOW, Env:PULSE_TEST_CONTENT_LIVE_SELECTION
+if (-not $liveDone -or $live.ExitCode -ne 0) {
+    Get-Content $liveLog -ErrorAction SilentlyContinue
+    throw 'Live content selection regression failed'
+}
 Remove-Item Env:PULSE_LUMATEXT
 # Strip the embedded test suite from the shipped executable after verification.
 (Get-Content -LiteralPath $batch -Raw).Replace('-DPULSE_WITH_SELFTEST=ON', '-DPULSE_WITH_SELFTEST=OFF').Replace("--target $testTargets", '--target pulse') |
