@@ -147,6 +147,7 @@ struct LumaTextRenderer::Impl {
     LumaText::Context context;
     LumaText::Renderer renderer;
     LumaText::RenderProfile profile;
+    std::uint8_t raster_filter = LT_RASTER_FILTER_MITCHELL;
     LumaText::FontFace yahei_regular;
     LumaText::FontFace yahei_bold;
     LumaText::FontFace segoe_regular;
@@ -321,6 +322,14 @@ struct LumaTextRenderer::Impl {
     }
 
     bool Init(IDWriteFactory* dwrite, ID2D1RenderTarget* target) {
+        // Test-only opt-in: read once so cached command lists cannot cross policies.
+        // Unset/unknown values preserve the production Mitchell profile.
+        wchar_t filter_override[32]{};
+        const DWORD filter_length = GetEnvironmentVariableW(
+            L"PULSE_LUMATEXT_FILTER", filter_override, ARRAYSIZE(filter_override));
+        raster_filter = filter_length > 0 && filter_length < ARRAYSIZE(filter_override) &&
+            _wcsicmp(filter_override, L"direct") == 0
+                ? LT_RASTER_FILTER_DIRECT : LT_RASTER_FILTER_MITCHELL;
         auto context_desc = LumaText::Descriptor<lt_context_desc>();
         context_desc.dwrite_factory = dwrite;
         context_desc.cpu_cache_limit_bytes = kGlyphCacheLimit;
@@ -391,7 +400,7 @@ struct LumaTextRenderer::Impl {
         profile_desc.light = LumaText::Descriptor<lt_render_config>();
         profile_desc.light.coverage_gamma = 0.85f;
         profile_desc.light.coverage_contrast = 1.00f;
-        profile_desc.light.raster_filter = LT_RASTER_FILTER_MITCHELL;
+        profile_desc.light.raster_filter = raster_filter;
         profile_desc.dark = profile_desc.light;
         profile_desc.regular_optical_weight = 0.0f;
         profile_desc.bold_optical_weight = 0.0f;
@@ -672,7 +681,7 @@ struct LumaTextRenderer::Impl {
         draw.render_config = LumaText::Descriptor<lt_render_config>();
         draw.render_config.coverage_gamma = 0.85f;
         draw.render_config.coverage_contrast = 1.00f;
-        draw.render_config.raster_filter = LT_RASTER_FILTER_MITCHELL;
+        draw.render_config.raster_filter = raster_filter;
         draw.profile = profile.get();
 
         const lt_result result = lt_frame_draw_text_layout(frame.get(), layout->get(), &draw);
