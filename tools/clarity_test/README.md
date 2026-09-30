@@ -35,7 +35,7 @@ in for a user's display tuning. Native uses ordinary snapped D2D layout drawing,
 as Pulse does; the matched column aligns nominal baselines, not raster curves.
 
 The harness fails if Luma falls back, a cold image differs from a warm-cache
-replay, a cache does not hit, a native face mismatches, output is empty/chromatic/
+replay, an eligible short-text cache probe does not hit, a native face mismatches, output is empty/chromatic/
 clipped, or the two filter captures are identical. JSON records per-row settings,
 font paths, baselines, actual rendering route and edge-spread/coverage metrics.
 Edge counts measure spread, not subjective readability or macOS fidelity.
@@ -48,3 +48,7 @@ The standalone link includes two fail-closed guards for unrelated full-app
 `Compositor` methods referenced by unused functions in `typography.cpp`.
 They throw/terminate if accidentally called. None replaces native typography
 policy or the actual Luma renderer under test. `/WX` rejects compiler warnings.
+
+Long diagnostic strings may exceed the production 64 KiB per-surface cache cap.
+All matrix images must still repeat identically; a separate short-text probe
+requires both actual caches to hit and their cached pixels to match cold draws.
