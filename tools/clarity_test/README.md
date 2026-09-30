@@ -43,3 +43,8 @@ Edge counts measure spread, not subjective readability or macOS fidelity.
 Scope limits: no app-wide screenshot automation, user monitor calibration,
 DirectComposition zoom animation, Segoe optical axes, hosted-edit selection,
 or native-only colored/highlighted filename routes. There is no release action.
+
+The standalone link includes two fail-closed guards for unrelated full-app
+`Compositor` methods referenced by unused functions in `typography.cpp`.
+They throw/terminate if accidentally called. None replaces native typography
+policy or the actual Luma renderer under test. `/WX` rejects compiler warnings.

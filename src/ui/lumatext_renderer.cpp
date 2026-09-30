@@ -327,9 +327,10 @@ struct LumaTextRenderer::Impl {
         wchar_t filter_override[32]{};
         const DWORD filter_length = GetEnvironmentVariableW(
             L"PULSE_LUMATEXT_FILTER", filter_override, ARRAYSIZE(filter_override));
-        raster_filter = filter_length > 0 && filter_length < ARRAYSIZE(filter_override) &&
+        raster_filter = static_cast<std::uint8_t>(
+            filter_length > 0 && filter_length < ARRAYSIZE(filter_override) &&
             _wcsicmp(filter_override, L"direct") == 0
-                ? LT_RASTER_FILTER_DIRECT : LT_RASTER_FILTER_MITCHELL;
+                ? LT_RASTER_FILTER_DIRECT : LT_RASTER_FILTER_MITCHELL);
         auto context_desc = LumaText::Descriptor<lt_context_desc>();
         context_desc.dwrite_factory = dwrite;
         context_desc.cpu_cache_limit_bytes = kGlyphCacheLimit;

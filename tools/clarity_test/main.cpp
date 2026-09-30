@@ -222,7 +222,7 @@ int wmain(int argc,wchar_t** argv) {
         Test test; test.Init(); test.metadata.open(output/L"rows.jsonl"); Check(test.metadata.good(),"metadata file");
         std::ofstream config(output/L"config.json");
         config<<"{\"target\":\"D3D11 WARP / D2D1DeviceContext / PREMULTIPLIED\",\"target_dpi\":96,\"frame_dpi\":96,\"column_width\":"<<kColumn<<",\"native_gray\":true,\"native_gamma\":"<<test.params->GetGamma()<<",\"native_gray_contrast\":"<<test.params->GetGrayscaleEnhancedContrast()<<",\"native_mode\":"<<test.params->GetRenderingMode()<<",\"native_geometry\":"<<test.params->GetPixelGeometry()<<",\"native_gridfit\":"<<test.params->GetGridFitMode()<<",\"axes\":[],\"luma_face_index\":0,\"scope\":\"YaHei family only; actual Pulse wrapper and bundled DLL. Native matched column aligns baseline and exact face; native shipped column uses actual typography policy.\"}";
-        for(const auto [dip,scale]:std::array<std::pair<float,float>,6>{{{12,1},{13,1},{14,1},{13,1.25f},{13,1.5f},{13,2}}}) for(bool dark:{false,true}) {
+        for(const auto [dip,scale]:std::array<std::pair<float,float>,6>{{{12.f,1.f},{13.f,1.f},{14.f,1.f},{13.f,1.25f},{13.f,1.5f},{13.f,2.f}}}) for(bool dark:{false,true}) {
             const auto name=std::to_wstring(static_cast<int>(dip))+L"dip-"+std::to_wstring(static_cast<int>(scale*100))+(dark?L"-dark":L"-light");
             test.Page(dip,scale,dark,true); const auto cold=test.Pixels(); test.Save(output/(name+L".png"),cold);
             const auto before_m=test.mitchell.Stats().surface_cache_hits,before_d=test.direct.Stats().surface_cache_hits;
