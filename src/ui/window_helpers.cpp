@@ -61,8 +61,10 @@ bool ApplyBackdrop(HWND hwnd, bool dark) {
         result = DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE,
                                        &backdrop, sizeof(backdrop));
     }
-    MARGINS margins{ -1 };
-    DwmExtendFrameIntoClientArea(hwnd, &margins);
+    // No DwmExtendFrameIntoClientArea(-1): on current Win11 builds it makes
+    // DWM composite system caption buttons over the custom title bar drawn by
+    // these windows (ghost glyphs above the app's own buttons).
+    // DWMWA_SYSTEMBACKDROP_TYPE renders the backdrop on its own.
     return !high_contrast && SUCCEEDED(result);
 }
 

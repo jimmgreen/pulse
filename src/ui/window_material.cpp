@@ -416,16 +416,13 @@ bool ApplyWindowEffect(HWND hwnd, WindowEffect effect, bool dark) noexcept {
         DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop, sizeof(backdrop));
     }
 
-    if (effect == WindowEffect::None) {
-        const COLORREF caption = dark ? RGB(0x1A, 0x1A, 0x1A) : RGB(0xF3, 0xF3, 0xF3);
-        DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
-    } else {
-        const COLORREF caption = 0xFFFFFFFFu;
-        DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
-    }
+    // Do not set DWMWA_CAPTION_COLOR and do not call DwmExtendFrameIntoClientArea
+    // with -1 margins here: WM_NCCALCSIZE already makes the client cover the
+    // whole window, and on current Win11 builds either call makes DWM composite
+    // a system caption (white strip and/or min/max/close buttons) over the
+    // app-drawn title bar. DWMWA_SYSTEMBACKDROP_TYPE renders the backdrop
+    // without the frame being extended.
 
-    const MARGINS margins{ -1 };
-    DwmExtendFrameIntoClientArea(hwnd, &margins);
     return WindowEffectUsesBackdrop(effect) && SUCCEEDED(hr);
 }
 
