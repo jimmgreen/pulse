@@ -142,7 +142,8 @@ std::wstring ResolveHeaderDropFolder(const std::vector<std::wstring>& sources) {
 // and returns the DROPEFFECT_* to report back. Also drives the 800ms
 // spring-loaded folder enter and Esc-back.
 DWORD ResolveDropTarget(AppState& s, const std::vector<std::wstring>& sources,
-                               POINT pt, DWORD key_state, DWORD allowed) {
+                               POINT pt, DWORD key_state, DWORD allowed,
+                               DWORD preferred_effect) {
     s.dropRow = -1;
     s.dropPaneIndex = -1;
     s.dropHeader = false;
@@ -306,7 +307,8 @@ DWORD ResolveDropTarget(AppState& s, const std::vector<std::wstring>& sources,
         return DROPEFFECT_NONE;
     }
 
-    DWORD effect = ui::ComputeDropEffect(key_state, sources.front(), s.dropDestDir, allowed);
+    DWORD effect = ui::ComputeDropEffect(key_state, sources.front(), s.dropDestDir, allowed,
+                                        preferred_effect);
     s.dropBadge = (effect == DROPEFFECT_MOVE ? l10n::Get(l10n::StringId::DropMove).c_str() : l10n::Get(l10n::StringId::DropCopy).c_str()) + destName;
     // Say how to switch before the drop, not after (Explorer rules: Ctrl copies, Shift moves).
     if (effect == DROPEFFECT_MOVE && (allowed & DROPEFFECT_COPY))
@@ -321,12 +323,12 @@ DWORD ResolveDropTarget(AppState& s, const std::vector<std::wstring>& sources,
 }
 
 DWORD DropExecute(AppState& s, const std::vector<std::wstring>& sources,
-                         POINT pt, DWORD key_state, DWORD /*preferred*/) {
+                         POINT pt, DWORD key_state, DWORD preferred) {
     // Resolve once more for the final position.
     // Tray drag-out is copy-only: the staged originals stay where they are.
     const DWORD allowed = s.trayDragOut ? DWORD(DROPEFFECT_COPY)
                                         : DWORD(DROPEFFECT_COPY | DROPEFFECT_MOVE);
-    DWORD effect = ResolveDropTarget(s, sources, pt, key_state, allowed);
+    DWORD effect = ResolveDropTarget(s, sources, pt, key_state, allowed, preferred);
     std::wstring dest = s.dropDestDir;
     bool tray = s.dropTray;
     const bool header = s.dropHeader;
@@ -371,7 +373,7 @@ DWORD DropExecute(AppState& s, const std::vector<std::wstring>& sources,
             if (app::Tab* tab = pane->ActiveTab()) dest = tab->current_path;
         }
         if (dest.empty() || fs::IsVirtualPath(dest)) return DROPEFFECT_NONE;
-        effect = ui::ComputeDropEffect(key_state, sources.front(), dest, allowed);
+        effect = ui::ComputeDropEffect(key_state, sources.front(), dest, allowed, preferred);
     }
 
     if (tray) {

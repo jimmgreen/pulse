@@ -23,7 +23,8 @@ bool PointOnPaneHeader(const AppState& s, const ui::WindowViewModel& vm,
 std::wstring HeaderDropHint(const std::vector<std::wstring>& sources);
 std::wstring ResolveHeaderDropFolder(const std::vector<std::wstring>& sources);
 DWORD ResolveDropTarget(AppState& s, const std::vector<std::wstring>& sources,
-                               POINT pt, DWORD key_state, DWORD allowed);
+                               POINT pt, DWORD key_state, DWORD allowed,
+                               DWORD preferred_effect);
 DWORD DropExecute(AppState& s, const std::vector<std::wstring>& sources,
                          POINT pt, DWORD key_state, DWORD preferred);
 void StartDragOut(AppState& s);

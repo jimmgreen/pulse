@@ -24,6 +24,10 @@ bool OpenClipboardWithRetry(HWND owner) {
 
 } // namespace
 
+bool PreferredEffectIsCut(uint32_t preferred_effect) {
+    return preferred_effect == DROPEFFECT_MOVE;
+}
+
 bool WriteClipboard(const std::vector<std::wstring>& paths, bool cut) {
     if (paths.empty()) return false;
 
@@ -136,7 +140,7 @@ bool ReadClipboard(ClipboardData& out) {
     UINT fmtEffect = RegisterClipboardFormatW(CFSTR_PREFERREDDROPEFFECT);
     if (HANDLE h = GetClipboardData(fmtEffect)) {
         if (DWORD* effect = static_cast<DWORD*>(GlobalLock(h))) {
-            out.cut = (*effect & DROPEFFECT_MOVE) != 0;
+            out.cut = PreferredEffectIsCut(*effect);
             GlobalUnlock(h);
         }
     }

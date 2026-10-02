@@ -2726,6 +2726,27 @@ void TestDragDropPure() {
           L"dnd: falls back to allowed effect");
     Check(ui::ComputeDropEffect(0, L"C:\\a.txt", L"C:\\dst", DROPEFFECT_LINK) == DROPEFFECT_LINK,
           L"dnd: no copy/move allowed -> link");
+    // A source that offers COPY|MOVE but asks for COPY must be copied even on
+    // the same volume: moving it deletes the user's original, which Explorer
+    // never does for browser/Electron/archive drags.
+    Check(ui::ComputeDropEffect(0, L"C:\\a.txt", L"C:\\dst", both, DROPEFFECT_COPY)
+          == DROPEFFECT_COPY, L"dnd: source asking for copy wins over same-volume move");
+    Check(ui::ComputeDropEffect(0, L"C:\\a.txt", L"C:\\dst", both, DROPEFFECT_MOVE)
+          == DROPEFFECT_MOVE, L"dnd: source asking for move still moves on one volume");
+    Check(ui::ComputeDropEffect(0, L"C:\\a.txt", L"C:\\dst", both, 0) == DROPEFFECT_MOVE,
+          L"dnd: source with no preference keeps the same-volume default");
+    Check(ui::ComputeDropEffect(MK_SHIFT, L"C:\\a.txt", L"C:\\dst", both, DROPEFFECT_COPY)
+          == DROPEFFECT_MOVE, L"dnd: Shift still overrides the source preference");
+    Check(ui::ComputeDropEffect(MK_CONTROL, L"C:\\a.txt", L"C:\\dst", both, DROPEFFECT_MOVE)
+          == DROPEFFECT_COPY, L"dnd: Ctrl still overrides the source preference");
+    // Clipboard cut detection: only an exact MOVE is a cut. COPY|MOVE means
+    // "either is fine" and has to paste as a copy, otherwise a plain copy
+    // deletes the user's originals.
+    Check(ops::PreferredEffectIsCut(DROPEFFECT_MOVE), L"clipboard: exact MOVE is a cut");
+    Check(!ops::PreferredEffectIsCut(DROPEFFECT_COPY | DROPEFFECT_MOVE),
+          L"clipboard: COPY|MOVE is not a cut");
+    Check(!ops::PreferredEffectIsCut(DROPEFFECT_COPY), L"clipboard: COPY is not a cut");
+    Check(!ops::PreferredEffectIsCut(0), L"clipboard: no effect is not a cut");
 
     Check(ui::FirstDroppableFolder({}).empty(), L"dnd: no sources -> no header folder");
     Check(ui::FirstDroppableFolder({ L"C:\\pulse_no_such_file.txt" }).empty(),

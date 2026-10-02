@@ -652,9 +652,10 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         {
             ui::DropTargetCallbacks dcb;
             dcb.drag_over = [hwnd](const std::vector<std::wstring>& srcs, POINT pt,
-                                   DWORD keys, DWORD allowed) -> DWORD {
+                                   DWORD keys, DWORD allowed, DWORD preferred) -> DWORD {
                 AppState* st = GetAppState(hwnd);
-                return st ? ResolveDropTarget(*st, srcs, pt, keys, allowed) : DROPEFFECT_NONE;
+                return st ? ResolveDropTarget(*st, srcs, pt, keys, allowed, preferred)
+                          : DROPEFFECT_NONE;
             };
             dcb.drag_leave = [hwnd] {
                 if (AppState* st = GetAppState(hwnd)) ClearDropFeedback(*st);

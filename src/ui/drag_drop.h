@@ -26,9 +26,13 @@ namespace pulse::ui {
 // "C:\" for drive paths, "\\server\share" for UNC, "" when undetermined.
 std::wstring VolumeRoot(const std::wstring& path);
 
-// Explorer modifier semantics. allowed is the DoDragDrop dwOKEffects mask.
+// Explorer modifier semantics. allowed is the DoDragDrop dwOKEffects mask,
+// preferred_effect is the source's Preferred DropEffect (0 when it sets none).
+// Modifiers win; with no modifier the source's preference is honoured before
+// the same-volume default, so a source that asks for COPY is never moved.
 DWORD ComputeDropEffect(DWORD key_state, const std::wstring& source_sample,
-                        const std::wstring& dest_dir, DWORD allowed);
+                        const std::wstring& dest_dir, DWORD allowed,
+                        DWORD preferred_effect = 0);
 
 // First source that is a real directory (not a file or broken path).
 // Used when dropping onto a pane header to navigate instead of copy/move.
@@ -112,9 +116,11 @@ DWORD DoFileDragDrop(const std::vector<std::wstring>& paths, DWORD allowed_effec
 // ---------------------------------------------------------------------------
 struct DropTargetCallbacks {
     // pt in client coordinates; sources already extracted from CF_HDROP.
-    // Return the DROPEFFECT_* to show (badge + cursor follow it).
+    // Return the DROPEFFECT_* to show (badge + cursor follow it). preferred is
+    // the source's Preferred DropEffect, so the badge matches what the drop
+    // will actually do.
     std::function<DWORD(const std::vector<std::wstring>& sources, POINT pt,
-                        DWORD key_state, DWORD allowed)> drag_over;
+                        DWORD key_state, DWORD allowed, DWORD preferred)> drag_over;
     std::function<void()> drag_leave;
     // Returns the performed effect.
     std::function<DWORD(const std::vector<std::wstring>& sources, POINT pt,

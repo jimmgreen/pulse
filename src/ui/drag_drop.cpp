@@ -1,4 +1,4 @@
-// drag_drop.cpp — See drag_drop.h for the contract.
+﻿// drag_drop.cpp — See drag_drop.h for the contract.
 #include "drag_drop.h"
 #include <shellapi.h>
 #include <shlobj.h>
@@ -100,7 +100,8 @@ std::wstring VolumeRoot(const std::wstring& path) {
 }
 
 DWORD ComputeDropEffect(DWORD key_state, const std::wstring& source_sample,
-                        const std::wstring& dest_dir, DWORD allowed) {
+                        const std::wstring& dest_dir, DWORD allowed,
+                        DWORD preferred_effect) {
     const bool ctrl = (key_state & MK_CONTROL) != 0;
     const bool shift = (key_state & MK_SHIFT) != 0;
     DWORD want;
@@ -111,9 +112,19 @@ DWORD ComputeDropEffect(DWORD key_state, const std::wstring& source_sample,
     } else if (ctrl && shift) {
         want = DROPEFFECT_LINK;
     } else {
-        std::wstring sv = VolumeRoot(source_sample);
-        std::wstring dv = VolumeRoot(dest_dir);
-        want = (!sv.empty() && sv == dv) ? DROPEFFECT_MOVE : DROPEFFECT_COPY;
+        // No modifier: the source's Preferred DropEffect wins first. A source
+        // that offers COPY|MOVE but asks for COPY (browser download lists,
+        // Electron-style staged drags, archive tools) must be copied - moving
+        // it deletes the user's original, which is what Explorer never does.
+        if (preferred_effect & DROPEFFECT_COPY) {
+            want = DROPEFFECT_COPY;
+        } else if (preferred_effect & DROPEFFECT_MOVE) {
+            want = DROPEFFECT_MOVE;
+        } else {
+            std::wstring sv = VolumeRoot(source_sample);
+            std::wstring dv = VolumeRoot(dest_dir);
+            want = (!sv.empty() && sv == dv) ? DROPEFFECT_MOVE : DROPEFFECT_COPY;
+        }
     }
     if (want & allowed) return want;
     // Fall back to whatever the source allows.
@@ -568,7 +579,7 @@ HRESULT WindowDropTarget::DragEnter(IDataObject* obj, DWORD key_state, POINTL pt
     }
     preferred_ = PreferredDropEffect(obj);
     DWORD allowed = *effect;
-    *effect = cb_.drag_over ? cb_.drag_over(sources_, ClientPoint(pt), key_state, allowed)
+    *effect = cb_.drag_over ? cb_.drag_over(sources_, ClientPoint(pt), key_state, allowed, preferred_)
                             : DROPEFFECT_NONE;
     return S_OK;
 }
@@ -579,7 +590,7 @@ HRESULT WindowDropTarget::DragOver(DWORD key_state, POINTL pt, DWORD* effect) {
         return S_OK;
     }
     DWORD allowed = *effect;
-    *effect = cb_.drag_over ? cb_.drag_over(sources_, ClientPoint(pt), key_state, allowed)
+    *effect = cb_.drag_over ? cb_.drag_over(sources_, ClientPoint(pt), key_state, allowed, preferred_)
                             : DROPEFFECT_NONE;
     return S_OK;
 }
@@ -616,3 +627,4 @@ HRESULT WindowDropTarget::Drop(IDataObject* obj, DWORD key_state, POINTL pt, DWO
 }
 
 } // namespace pulse::ui
+
