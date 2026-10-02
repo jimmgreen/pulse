@@ -693,6 +693,38 @@ int wmain() {
               L"double-click open runs a batch file in its own folder");
     }
 
+    // --- Recovery sweep only treats our own temporary names as debris -------
+    {
+        // A folder whose *path* contains the marker is not debris: the sweep
+        // matched the whole path before, so every child of such a folder was
+        // removed instead of skipped.
+        const std::wstring sweep = root + L"\\sweep";
+        MakeDir(sweep);
+        const std::wstring decoy = sweep + L"\\x.pulse-backup-y";
+        MakeDir(decoy);
+        const std::wstring decoy_child = decoy + L"\\keep me.txt";
+        const char payload[] = "user data";
+        MakeFile(decoy_child, payload, sizeof(payload) - 1);
+
+        // Real debris: a stranded copy temp and a stranded backup whose
+        // original is gone (that one is restored, not deleted).
+        const std::wstring debris = sweep + L"\\t.txt.pulse-copy-1-0";
+        MakeFile(debris, payload, sizeof(payload) - 1);
+        const std::wstring orphan = sweep + L"\\gone.txt.pulse-backup-1-0";
+        MakeFile(orphan, payload, sizeof(payload) - 1);
+
+        ops::ReconcileTemporaryFiles(sweep);
+
+
+        Check(Exists(decoy_child),
+              L"recovery sweep keeps files under a folder named like a backup");
+        Check(Exists(decoy), L"recovery sweep keeps that folder itself");
+        Check(!Exists(debris), L"recovery sweep removes a stranded copy temp");
+        Check(Exists(sweep + L"\\gone.txt"),
+              L"recovery sweep restores a stranded backup to its original name");
+        Check(!Exists(orphan), L"recovery sweep leaves no backup behind");
+    }
+
     g_ops.Stop();
 
     wprintf(L"\n== ops self test: %d passed, %d failed ==\n", g_pass, g_fail);

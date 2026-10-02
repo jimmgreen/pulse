@@ -323,4 +323,16 @@ private:
 // compile-verified only in 1B-2).
 std::wstring TerminalCommandLine(const std::wstring& dir);
 
+// Position right after `name` when it is one of our own temporary file names
+// ("<target>.pulse-copy-<task>-<n>" / "<target>.pulse-backup-<task>-<n>"),
+// otherwise npos. Only the file name counts, so a folder that merely has the
+// marker earlier in its path is not mistaken for debris.
+size_t TemporaryMarkerOffset(const std::wstring& path);
+
+// Crash-recovery sweep of one operation root: restores stranded
+// ".pulse-backup-" files whose original is gone, deletes the rest of the
+// debris. Normally driven by the recovery queue; exposed so the self-test can
+// drive it on an isolated fixture.
+void ReconcileTemporaryFiles(const std::wstring& root);
+
 } // namespace pulse::ops

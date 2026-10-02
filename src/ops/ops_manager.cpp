@@ -690,40 +690,6 @@ bool ParseRecoveryEntry(const std::wstring& object, RecoveryEntry& entry) {
     return entry.sequence != 0 && !entry.request.sources.empty();
 }
 
-void ReconcileTemporaryFiles(const std::wstring& root) {
-    if (root.empty()) return;
-    namespace fsys = std::filesystem;
-    std::vector<fsys::path> temporary;
-    std::error_code error;
-    fsys::recursive_directory_iterator it(fsys::path(root),
-        fsys::directory_options::skip_permission_denied, error);
-    fsys::recursive_directory_iterator end;
-    for (; !error && it != end; it.increment(error)) {
-        const std::wstring path = it->path().wstring();
-        if (path.find(L".pulse-copy-") != std::wstring::npos ||
-            path.find(L".pulse-backup-") != std::wstring::npos) {
-            temporary.push_back(it->path());
-            if (it->is_directory(error)) it.disable_recursion_pending();
-        }
-    }
-    std::sort(temporary.begin(), temporary.end(), [](const auto& left, const auto& right) {
-        return left.native().size() > right.native().size();
-    });
-    for (const auto& item : temporary) {
-        const std::wstring path = item.wstring();
-        const size_t backup = path.find(L".pulse-backup-");
-        if (backup != std::wstring::npos) {
-            const std::wstring original = path.substr(0, backup);
-            if (!PathExists(original)) {
-                MoveFileExW(path.c_str(), original.c_str(), MOVEFILE_WRITE_THROUGH);
-                continue;
-            }
-        }
-        std::error_code ignored;
-        fsys::remove_all(item, ignored);
-    }
-}
-
 // Folder that contains `path`, for ShellExecuteEx's lpDirectory. Empty for
 // shell namespace paths or when the parent is not an existing directory.
 // Runs on the open thread (the parent may be on a slow network share).
@@ -739,7 +705,93 @@ std::wstring OpenItemWorkingDirectory(const std::wstring& path) {
     return dir;
 }
 
+// "-<task>-<n>" suffix of a temporary name, and the offset of the marker
+// inside the file name. npos when the name is not one of ours.
+struct TemporaryNameParts {
+    size_t marker_in_name = std::wstring::npos; // offset of ".pulse-copy-"/".pulse-backup-"
+    size_t dash_in_name = std::wstring::npos;   // offset of the dash starting "-<task>-<n>"
+};
+
+TemporaryNameParts ParseTemporaryName(const std::wstring& name) {
+    TemporaryNameParts parts;
+    for (const wchar_t* marker : { L".pulse-copy-", L".pulse-backup-" }) {
+        const size_t at = name.rfind(marker);
+        if (at == std::wstring::npos) continue;
+        const size_t dash = name.find(L'-', at + std::wcslen(marker));
+        if (dash == std::wstring::npos) continue;   // user file that merely mentions the marker
+        parts.marker_in_name = at;
+        parts.dash_in_name = dash;
+        return parts;
+    }
+    return parts;
+}
+
+std::wstring FileNameOf(const std::wstring& path) {
+    const size_t separator = path.find_last_of(L"\\/");
+    return separator == std::wstring::npos ? path : path.substr(separator + 1);
+}
+
 } // namespace
+
+// Offset of ".pulse-copy-"/".pulse-backup-" inside `path` when it names one of
+// the temporary files this module creates ("<target>.pulse-copy-<task>-<n>" /
+// "<target>.pulse-backup-<task>-<n>"), otherwise npos. The marker is a literal
+// part of the name, so it may sit anywhere in it - but only the file name is
+// searched, and callers must not cut the path before this offset unless the
+// name really is a temporary one. Searching the whole path used to match every
+// child of a folder called "x.pulse-backup-y".
+size_t TemporaryMarkerOffset(const std::wstring& path) {
+    const size_t separator = path.find_last_of(L"\\/");
+    if (separator == std::wstring::npos) return std::wstring::npos;
+    const TemporaryNameParts parts = ParseTemporaryName(path.substr(separator + 1));
+    return parts.marker_in_name == std::wstring::npos
+        ? std::wstring::npos : separator + 1 + parts.marker_in_name;
+}
+
+// True when the name is a complete temporary name: marker plus a numeric
+// "-<task>-<n>" tail. The sweep uses this instead of a substring test, which
+// also matched ordinary files that merely contained the marker text.
+bool IsTemporaryName(const std::wstring& path) {
+    const std::wstring name = FileNameOf(path);
+    const TemporaryNameParts parts = ParseTemporaryName(name);
+    if (parts.marker_in_name == std::wstring::npos) return false;
+    if (parts.dash_in_name + 1 >= name.size()) return false;
+    for (size_t i = parts.dash_in_name + 1; i < name.size(); ++i)
+        if (!std::iswdigit(name[i])) return false;
+    return true;
+}
+
+void ReconcileTemporaryFiles(const std::wstring& root) {
+    if (root.empty()) return;
+    namespace fsys = std::filesystem;
+    std::vector<fsys::path> temporary;
+    std::error_code error;
+    fsys::recursive_directory_iterator it(fsys::path(root),
+        fsys::directory_options::skip_permission_denied, error);
+    fsys::recursive_directory_iterator end;
+    for (; !error && it != end; it.increment(error)) {
+        if (!IsTemporaryName(it->path().wstring())) continue;
+        temporary.push_back(it->path());
+        if (it->is_directory(error)) it.disable_recursion_pending();
+    }
+    std::sort(temporary.begin(), temporary.end(), [](const auto& left, const auto& right) {
+        return left.native().size() > right.native().size();
+    });
+    for (const auto& item : temporary) {
+        const std::wstring path = item.wstring();
+        const size_t marker = TemporaryMarkerOffset(path);
+        if (marker != std::wstring::npos &&
+            std::wstring_view(path).substr(marker).starts_with(L".pulse-backup-")) {
+            const std::wstring original = path.substr(0, marker);
+            if (!PathExists(original)) {
+                MoveFileExW(path.c_str(), original.c_str(), MOVEFILE_WRITE_THROUGH);
+                continue;
+            }
+        }
+        std::error_code ignored;
+        fsys::remove_all(item, ignored);
+    }
+}
 
 OpsManager::~OpsManager() {
     Stop();
@@ -2135,10 +2187,34 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
             fsys::remove_all(fsys::path(backup.backup), ignored);
         }
     } else {
+        // Roll back the replacements. The old code removed the new destination
+        // first and ignored both results, so when the destination could not be
+        // removed (locked by a scanner or another process) or the backup could
+        // not be moved back, the replacement was gone *and* the original was
+        // left stranded as ".pulse-backup-…" with nothing reported. Now the
+        // destination is only removed once the backup is known to be there, and
+        // anything that cannot be put back is named in the failure text.
+        std::vector<std::wstring> stranded;
         for (auto it = replacement_backups.rbegin(); it != replacement_backups.rend(); ++it) {
-            std::error_code ignored;
-            fsys::remove_all(fsys::path(it->original), ignored);
-            MoveFileExW(it->backup.c_str(), it->original.c_str(), MOVEFILE_WRITE_THROUGH);
+            std::error_code removed;
+            fsys::remove_all(fsys::path(it->original), removed);
+            if (removed) {
+                stranded.push_back(it->original + L" (无法移开: " +
+                                   Win32Message(removed.value()) + L")");
+                continue;
+            }
+            if (!MoveFileExW(it->backup.c_str(), it->original.c_str(), MOVEFILE_WRITE_THROUGH)) {
+                const DWORD error = GetLastError();
+                stranded.push_back(it->original + L" (备份保留在 " + it->backup + L": " +
+                                   Win32Message(error) + L")");
+            }
+        }
+        if (!failure.empty()) {
+            // keep the copy failure as the primary reason
+        } else if (!stranded.empty()) {
+            failure = L"操作失败，且以下目标无法还原：";
+            for (size_t i = 0; i < stranded.size(); ++i)
+                failure += (i ? L"；" : L"") + stranded[i];
         }
         for (size_t i = completed_destinations.size(); i-- > 0;) {
             const bool restored = std::any_of(replacement_backups.begin(),
