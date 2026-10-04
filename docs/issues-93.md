@@ -88,7 +88,15 @@ Run:
 - `pulse_dialogs_test.exe` — 19 checks, all pass (the picker delegation guard).
 - `cmake --build build-ci --target pulse` — clean, no new warnings under `/W4`.
 
-Not run: the in-app checks in section 6.2 of the plan (view modes, grouped/sorted
-order, filtered view, rename focus, IME). Those need a live window; only the pure
-matcher is covered by an executable here, and `pulse.exe --selftest` was deliberately
-not run in full per the repository's scoped-verification rule.
+Not run by me: `pulse.exe --selftest` was deliberately not run in full per the
+repository's scoped-verification rule.
+
+### Manual verification (real machine)
+
+`docs/issue-93-manual-test-checklist.md` holds the hands-on checklist (~40 items:
+view modes, sort/group order, filter and rename focus, search and content-search
+views, a 100k-row folder, IME, and the no-regression pass over Space/quick preview,
+Ctrl and Alt shortcuts, arrow keys and the folder picker).
+
+The checklist was executed on a real machine against a fork build of this branch
+(`v2026.10.5`, `eb473e6`) and **all items passed**.
