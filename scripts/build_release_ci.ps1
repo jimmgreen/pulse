@@ -43,7 +43,7 @@ $testNames = @('pulse_rename_ops_test', 'pulse_child_edit_test', 'pulse_localiza
     'pulse_link_destination_test', 'pulse_link_pill_test', 'pulse_shell_icons_test',
     'pulse_change_tracking_memory_test', 'pulse_change_feed_memory_test', 'pulse_usn_packet_queue_test',
     'pulse_content_progress_ui_test', 'pulse_operation_presentation_test', 'pulse_column_strip_test',
-    'pulse_file_lock_test', 'pulse_dialogs_test')
+    'pulse_file_lock_test', 'pulse_dialogs_test', 'pulse_type_ahead_test')
 $testTargets = (@('pulse', 'pulse_index_engine_test', 'pulse_index_host_stress',
     'pulse_preview_test', 'pulse_preview_handler_probe', 'pulse_playback_controls_test', 'pulse_ops_test') + $testNames) -join ' '
 $batch = Join-Path $build 'compile-release.bat'

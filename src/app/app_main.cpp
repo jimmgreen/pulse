@@ -50,6 +50,7 @@
 #include "tray_controller.h"
 #include "global_search_controller.h"
 #include "tab_controller.h"
+#include "type_ahead.h"
 #include "startup_location.h"
 #include "update_checker.h"
 #include "app_updates.h"
@@ -1385,6 +1386,12 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
     case WM_SYSCHAR:
         if (wParam == L'\r') return 0; // Alt+Enter handled above; no default beep
+        break;
+
+    case WM_CHAR:
+        // Printable characters jump to the next matching entry (issue #93).
+        // WM_SYSCHAR (Alt+letter) has its own case above and must not land here.
+        if (s && app::HandleTypeAheadChar(*s, static_cast<wchar_t>(wParam))) return 0;
         break;
 
     case WM_KEYDOWN:
