@@ -1,8 +1,10 @@
 #include "../common/windows_compat.h"
 #include "folder_picker_model.h"
+#include "type_ahead.h"
 
 #include <algorithm>
 #include <cwctype>
+#include <string_view>
 
 namespace pulse::ui {
 namespace {
@@ -133,14 +135,11 @@ std::wstring PickerChosenPath(PickerMode mode, std::wstring_view current,
 
 int PickerTypeAhead(const std::vector<PickerEntry>& entries, int from, wchar_t ch) {
     const int count = static_cast<int>(entries.size());
-    if (count == 0) return -1;
-    const wchar_t wanted = static_cast<wchar_t>(std::towlower(ch));
-    for (int step = 1; step <= count; ++step) {
-        const int index = ((from < 0 ? -1 : from) + step + count) % count;
-        const std::wstring& name = entries[static_cast<size_t>(index)].name;
-        if (!name.empty() && std::towlower(name.front()) == wanted) return index;
-    }
-    return -1;
+    return NextPrefixMatch(count, from,
+                           [&entries](int index) -> std::wstring_view {
+                               return entries[static_cast<size_t>(index)].name;
+                           },
+                           std::wstring_view(&ch, 1));
 }
 
 void PickerHistory::Navigate(std::wstring from) {
