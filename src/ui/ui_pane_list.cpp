@@ -760,7 +760,8 @@ void MainRenderer::DrawEntryIcon(const ListEntryView& entry, float x, float y, f
         return;
     }
     if (compositor_ && compositor_->Dc() &&
-        icon_cache_.Draw(compositor_->Dc(), dest, entry.path, entry.name, entry.is_dir, entry.attrs)) {
+        icon_cache_.Draw(compositor_->Dc(), dest, entry.path, entry.name, entry.is_dir, entry.attrs,
+                         fs::IsLinkReparse(entry.reparse_kind))) {
         return;
     }
     if (entry.is_dir) DrawFolderIcon(x, y, size, theme);

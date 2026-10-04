@@ -210,11 +210,15 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
 
     // Resolve .lnk targets (Recent folder, desktop shortcuts) before display.
     if (!fs::IsRecycleViewPath(item.path)) {
-        ResolveLinksInPlace(item.path, *entries, [&] {
+        const auto cancelled = [&] {
             std::lock_guard<std::mutex> lock(mutex_);
             const auto it = current_gen_.find(item.request_key);
             return !running_ || it == current_gen_.end() || it->second != item.generation;
-        });
+        };
+        ResolveLinksInPlace(item.path, *entries, cancelled);
+        // Symlinks and junctions: one handle open per reparse entry, so this
+        // only walks directories that actually contain one.
+        ResolveReparsePointsInPlace(item.path, *entries, cancelled);
     }
 
     auto t2 = std::chrono::steady_clock::now();

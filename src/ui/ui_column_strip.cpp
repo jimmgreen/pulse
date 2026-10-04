@@ -222,7 +222,8 @@ void MainRenderer::DrawColumnStripColumn(const WindowViewModel& vm, const PaneVi
         const float iy = std::round(top + (row_height_ - icon) * 0.5f);
         const std::wstring full = JoinDirName(column.path, entry.name);
         const D2D1_RECT_F dest = D2D1::RectF(ix, iy, ix + icon, iy + icon);
-        if (!icon_cache_.Draw(dc, dest, full, entry.name, entry.is_dir, entry.attrs)) {
+        if (!icon_cache_.Draw(dc, dest, full, entry.name, entry.is_dir, entry.attrs,
+                              fs::IsLinkReparse(entry.reparse_kind))) {
             if (entry.is_dir) DrawFolderIcon(ix, iy, icon, theme);
             else DrawFileIcon(ix, iy, icon, theme);
         }

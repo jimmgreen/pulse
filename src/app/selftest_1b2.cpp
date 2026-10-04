@@ -70,6 +70,7 @@
 #include "locked_item_prompt.h"
 
 #include <windows.h>
+#include <winioctl.h>  // FSCTL_SET_REPARSE_POINT for the link fixtures
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
@@ -81,6 +82,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <cmath>
 #include <filesystem>
 #include <memory>
@@ -6188,12 +6190,56 @@ void TestTrayStack() {
     RemoveDirectoryW(dir.c_str());
 }
 
+// Junctions are reparse points that can be created without elevation, unlike
+// CreateSymbolicLinkW (which needs Developer Mode or an elevated process).
+bool MakeTestJunction(const std::wstring& path, const std::wstring& target) {
+    struct JunctionData {
+        DWORD tag;
+        WORD length, reserved;
+        WORD substitute_offset, substitute_length, print_offset, print_length;
+        wchar_t paths[32768];
+    };
+    const std::wstring substitute = L"\\??\\" + target;
+    auto data = std::make_unique<JunctionData>();
+    data->tag = IO_REPARSE_TAG_MOUNT_POINT;
+    data->substitute_length = static_cast<WORD>(substitute.size() * sizeof(wchar_t));
+    data->print_offset = static_cast<WORD>(data->substitute_length + sizeof(wchar_t));
+    data->print_length = static_cast<WORD>(target.size() * sizeof(wchar_t));
+    data->length = static_cast<WORD>(8 + data->print_offset + data->print_length + sizeof(wchar_t));
+    memcpy(data->paths, substitute.c_str(), data->substitute_length + sizeof(wchar_t));
+    memcpy(reinterpret_cast<BYTE*>(data->paths) + data->print_offset, target.c_str(),
+           data->print_length + sizeof(wchar_t));
+    if (!CreateDirectoryW(path.c_str(), nullptr)) return false;
+    HANDLE handle = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        RemoveDirectoryW(path.c_str());
+        return false;
+    }
+    DWORD returned = 0;
+    const bool ok = DeviceIoControl(handle, FSCTL_SET_REPARSE_POINT, data.get(),
+                                    data->length + 8, nullptr, 0, &returned, nullptr) != FALSE;
+    CloseHandle(handle);
+    if (!ok) RemoveDirectoryW(path.c_str());
+    return ok;
+}
+
 void TestLinkResolve() {
     Check(fs::StripLnkSuffix(L"计算图形.dwg.lnk") == L"计算图形.dwg",
           L"link: strip suffix");
     Check(fs::StripLnkSuffix(L"note.txt") == L"note.txt",
           L"link: strip keeps non-lnk name");
     Check(fs::StripLnkSuffix(L"A.LNK") == L"A", L"link: strip is case-insensitive");
+    // Only the tag separates a link from a cloud placeholder or dedup stub, so
+    // the mapping is checked directly: the fixtures further down need real
+    // reparse points, which not every host can create.
+    Check(fs::KindFromTag(static_cast<uint32_t>(IO_REPARSE_TAG_SYMLINK)) ==
+              fs::ReparseKind::Symlink &&
+          fs::KindFromTag(static_cast<uint32_t>(IO_REPARSE_TAG_MOUNT_POINT)) ==
+              fs::ReparseKind::Junction &&
+          fs::KindFromTag(static_cast<uint32_t>(IO_REPARSE_TAG_CLOUD)) ==
+              fs::ReparseKind::Other,
+          L"link: reparse tags map to their display kinds");
 
     wchar_t temp[MAX_PATH]{};
     GetTempPathW(ARRAYSIZE(temp), temp);
@@ -6277,6 +6323,57 @@ void TestLinkResolve() {
           L"link: missing target does not penetrate");
     if (com == S_OK) CoUninitialize();
 
+    // Reparse points: a junction resolves to its target and reports its kind; a
+    // junction whose target is gone keeps the kind and stays unpenetrated.
+    const std::wstring junction = dir + L"\\junction";
+    const std::wstring junction_dead = dir + L"\\junction-dead";
+    const std::wstring symlink = dir + L"\\symlink";
+    const bool junctions_made = MakeTestJunction(junction, target_dir) &&
+                                MakeTestJunction(junction_dead, dir + L"\\gone-folder");
+    Check(junctions_made, L"link: create junction fixtures");
+    // CreateSymbolicLinkW needs Developer Mode or elevation, and some hosts
+    // accept the call yet leave an ordinary directory behind, so the symlink
+    // checks below only run once enumeration sees a reparse point.
+    CreateSymbolicLinkW(symlink.c_str(), target_dir.c_str(),
+                        SYMBOLIC_LINK_FLAG_DIRECTORY |
+                            SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE);
+
+    std::vector<fs::DirEntry> entries;
+    fs::EnumerateDirectory(dir, entries);
+    const auto by_name = [&entries](const std::wstring& name) -> const fs::DirEntry* {
+        const auto it = std::find_if(entries.begin(), entries.end(),
+                                     [&name](const auto& item) { return item.name == name; });
+        return it == entries.end() ? nullptr : &*it;
+    };
+    if (junctions_made) {
+        const fs::DirEntry* const plain = by_name(L"junction");
+        Check(plain && plain->is_reparse, L"link: junction enumerates as a reparse point");
+    }
+    ResolveReparsePointsInPlace(dir, entries, {});
+    const fs::DirEntry* const live = by_name(L"junction");
+    const fs::DirEntry* const dead = by_name(L"junction-dead");
+    Check(live && live->reparse_kind == fs::ReparseKind::Junction &&
+          fs::IsLinkReparse(live->reparse_kind) && live->link_target_is_dir &&
+          !live->link_target.empty(),
+          L"link: junction resolves to its target folder");
+    Check(dead && dead->reparse_kind == fs::ReparseKind::Junction &&
+          dead->link_target.empty(),
+          L"link: dangling junction keeps its kind without a target");
+    const fs::DirEntry* const linked = by_name(L"symlink");
+    if (linked && linked->is_reparse) {
+        Check(linked->reparse_kind == fs::ReparseKind::Symlink && linked->link_target_is_dir &&
+              !linked->link_target.empty(),
+              L"link: directory symlink resolves as a symlink");
+        const fs::DirEntry* const folder = by_name(L"folder");
+        Check(folder && folder->reparse_kind == fs::ReparseKind::None,
+              L"link: an ordinary folder stays unmarked");
+    } else {
+        LogLine(L"[SKIP] link: directory symlink (host has no symlink support)\n");
+    }
+
+    if (junctions_made) RemoveDirectoryW(junction_dead.c_str());
+    if (junctions_made) RemoveDirectoryW(junction.c_str());
+    RemoveDirectoryW(symlink.c_str());
     DeleteFileW(lnk_file.c_str());
     DeleteFileW(lnk_dir.c_str());
     DeleteFileW(lnk_dead.c_str());

@@ -100,6 +100,11 @@ int main() {
             !Get(StringId::DownloadingUpdate).empty() && !Get(StringId::InstallingUpdate).empty() &&
             !Get(StringId::UpdateClickToInstall).empty() && !Get(StringId::UpdateCancelled).empty() &&
             !Get(StringId::UpdateBusy).empty() && !Get(StringId::UpdateInstallFailed).empty());
+        passed &= Report("symlink and junction type labels follow display language",
+            Get(StringId::TypeSymlink) ==
+                (chinese ? L"\u7b26\u53f7\u94fe\u63a5" : L"Symbolic link") &&
+            Get(StringId::TypeJunction) ==
+                (chinese ? L"\u76ee\u5f55\u8054\u63a5" : L"Junction"));
     }
     {
         // Ids above the last one Get() serves come back empty: keep kLastString current.

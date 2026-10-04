@@ -179,6 +179,15 @@ std::wstring StripLnkSuffix(const std::wstring& name) {
     return name.substr(0, name.size() - 4);
 }
 
+ReparseKind KindFromTag(uint32_t tag) {
+    // winnt.h declares both tags as signed longs; compare as the same width.
+    constexpr uint32_t kSymlink = static_cast<uint32_t>(IO_REPARSE_TAG_SYMLINK);
+    constexpr uint32_t kJunction = static_cast<uint32_t>(IO_REPARSE_TAG_MOUNT_POINT);
+    if (tag == kSymlink) return ReparseKind::Symlink;
+    if (tag == kJunction) return ReparseKind::Junction;
+    return ReparseKind::Other;
+}
+
 static void EnumerateFindFirstFileEx(const std::wstring& path, std::vector<DirEntry>& out) {
     std::wstring pattern = path;
     if (!pattern.ends_with(L"\\")) pattern += L"\\";

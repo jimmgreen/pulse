@@ -4,11 +4,13 @@
 
 #include <commoncontrols.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <commctrl.h>
 #include <wincodec.h>
 #include <cwctype>
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace pulse::ui {
 
@@ -19,6 +21,9 @@ namespace {
 // otherwise retains every path seen during the session.
 constexpr size_t kExactIndexLimit = 4096;
 constexpr size_t kBitmapCacheLimit = 128;
+// Marks a cache entry whose icon already carries the link overlay. The list id
+// and image index occupy the low 32 bits, so the sign bit is free.
+constexpr uint64_t kLinkIconBit = 1ull << 63;
 
 std::wstring LowerExt(const std::wstring& name) {
     const size_t dot = name.find_last_of(L'.');
@@ -75,6 +80,26 @@ bool ConvertIconPixels(uint64_t key, std::unordered_map<int, IImageList*>& lists
     data.resize(static_cast<size_t>(width) * height * 4u);
     return SUCCEEDED(converter->CopyPixels(nullptr, width * 4u, static_cast<UINT>(data.size()),
                                            data.data()));
+}
+
+// SHGetIconOverlayIndex hands back an overlay slot, not an image index, so the
+// link badge has no image of its own to look up. The only way to get it is to
+// let the image list composite the overlay while drawing the base icon.
+int LinkOverlaySlot() {
+    static const int slot = SHGetIconOverlayIndexW(nullptr, IDO_SHGIOI_LINK);
+    return slot;
+}
+
+// 0..255 alpha -> 0..65535, then a rounded high-multiply back to 8 bits.
+void PremultiplyBgra(std::vector<uint8_t>& pixels) {
+    for (size_t i = 0; i + 3 < pixels.size(); i += 4) {
+        const uint32_t alpha = pixels[i + 3];
+        if (alpha == 0xFF) continue;
+        const uint32_t scale = alpha * 0x0101u;
+        for (size_t channel = 0; channel < 3; ++channel)
+            pixels[i + channel] = static_cast<uint8_t>(
+                (pixels[i + channel] * scale + 0x8080u) >> 16);
+    }
 }
 
 } // namespace
@@ -321,6 +346,22 @@ ComPtr<ID2D1Bitmap> ShellIconCache::BitmapFromIcon(HICON icon) {
     return bitmap;
 }
 
+int ShellIconCache::IconIndex(const std::wstring& path, const std::wstring& name,
+                              bool is_dir, DWORD attrs, bool touch) {
+    int index = -1;
+    const bool exact = NeedsExactIcon(name, is_dir, path) && !path.empty();
+    if (exact) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (const auto it = exact_index_.find(path); it != exact_index_.end()) {
+            index = it->second;
+            if (touch) last_used_[path] = ++access_clock_;
+        }
+    }
+    if (index < 0 && exact) RequestExact(path);
+    if (index < 0) index = GenericIndex(name, is_dir, attrs);
+    return index;
+}
+
 ID2D1Bitmap* ShellIconCache::BitmapForIndex(int index, int list_id) {
     if (index < 0 || !dc_) return nullptr;
     IImageList* image_list = EnsureImageList(list_id);
@@ -389,10 +430,12 @@ void ShellIconCache::Prefetch(const std::wstring& path, const std::wstring& name
 
 bool ShellIconCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
                           const std::wstring& path, const std::wstring& name,
-                          bool is_dir, DWORD attrs) {
+                          bool is_dir, DWORD attrs, bool link_overlay) {
     if (!dc) return false;
     const float desired = std::max(dest.right - dest.left, dest.bottom - dest.top);
-    ID2D1Bitmap* bitmap = BitmapFor(path, name, is_dir, attrs, desired);
+    ID2D1Bitmap* bitmap = link_overlay
+        ? LinkBitmapFor(path, name, is_dir, attrs, desired)
+        : BitmapFor(path, name, is_dir, attrs, desired);
     if (!bitmap) return false;
     dc->DrawBitmap(bitmap, &dest, 1.0f, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
                    nullptr, nullptr);
@@ -402,21 +445,74 @@ bool ShellIconCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
 
 ID2D1Bitmap* ShellIconCache::BitmapFor(const std::wstring& path, const std::wstring& name,
                                        bool is_dir, DWORD attrs, float desired_dips) {
-    int index = -1;
-    const bool exact = NeedsExactIcon(name, is_dir, path) && !path.empty();
-    if (exact) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto it = exact_index_.find(path);
-        if (it != exact_index_.end()) {
-            index = it->second;
-            last_used_[path] = ++access_clock_;
-        }
-    }
-    if (index < 0 && exact) RequestExact(path);
-    if (index < 0) index = GenericIndex(name, is_dir, attrs);
+    const int index = IconIndex(path, name, is_dir, attrs, true);
     const int list_id = ImageListId(desired_dips);
     if (auto* bitmap = BitmapForIndex(index, list_id)) return bitmap;
     return BitmapForIndex(GenericIndex(L"", is_dir, attrs), list_id);
+}
+
+ID2D1Bitmap* ShellIconCache::LinkBitmapFor(const std::wstring& path, const std::wstring& name,
+                                           bool is_dir, DWORD attrs, float desired_dips) {
+    const int index = IconIndex(path, name, is_dir, attrs, true);
+    const int list_id = ImageListId(desired_dips);
+    if (auto* bitmap = LinkBitmapForIndex(index, list_id)) return bitmap;
+    return LinkBitmapForIndex(GenericIndex(L"", is_dir, attrs), list_id);
+}
+
+// A link icon is the ordinary icon with the Shell's link badge composited on
+// top, which only the image list can do (see LinkOverlaySlot). The composited
+// surface is uploaded and cached like any other icon, under the link key.
+ID2D1Bitmap* ShellIconCache::LinkBitmapForIndex(int index, int list_id) {
+    if (index < 0 || !dc_) return nullptr;
+    IImageList* image_list = EnsureImageList(list_id);
+    if (!image_list) return nullptr;
+    const int overlay_slot = LinkOverlaySlot();
+    if (overlay_slot < 0) return nullptr;
+    const uint64_t key = IconKey(list_id, index) | kLinkIconBit;
+    if (const auto it = bitmaps_.find(key); it != bitmaps_.end()) return it->second.get();
+    int width = 0, height = 0;
+    if (FAILED(image_list->GetIconSize(&width, &height)) || width <= 0 || height <= 0)
+        return nullptr;
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(info.bmiHeader);
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -height;  // top-down, like the rest of the pipeline
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    void* pixels = nullptr;
+    HDC screen = GetDC(nullptr);
+    HBITMAP dib = CreateDIBSection(screen, &info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+    HDC memory = CreateCompatibleDC(screen);
+    ReleaseDC(nullptr, screen);
+    if (!dib || !memory) {
+        if (dib) DeleteObject(dib);
+        if (memory) DeleteDC(memory);
+        return nullptr;
+    }
+    const HGDIOBJ previous = SelectObject(memory, dib);
+    memset(pixels, 0, static_cast<size_t>(width) * height * 4u);
+    const BOOL drawn = ImageList_Draw(reinterpret_cast<HIMAGELIST>(image_list), index, memory,
+                                      0, 0, ILD_TRANSPARENT | INDEXTOOVERLAYMASK(overlay_slot));
+    SelectObject(memory, previous);
+    DeleteDC(memory);
+    std::vector<uint8_t> composited;
+    if (drawn)
+        composited.assign(static_cast<uint8_t*>(pixels),
+                          static_cast<uint8_t*>(pixels) +
+                              static_cast<size_t>(width) * height * 4u);
+    DeleteObject(dib);
+    if (!drawn) return nullptr;
+    PremultiplyBgra(composited);
+    ComPtr<ID2D1Bitmap> bitmap;
+    const D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
+        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+    if (SUCCEEDED(dc_->CreateBitmap(D2D1::SizeU(static_cast<UINT32>(width),
+                                                static_cast<UINT32>(height)),
+                                    composited.data(), static_cast<UINT32>(width) * 4u, props,
+                                    &bitmap)))
+        return StoreBitmap(key, std::move(bitmap));
+    return nullptr;
 }
 
 ID2D1Bitmap* ShellIconCache::CachedBitmapFor(const std::wstring& path, const std::wstring& name,

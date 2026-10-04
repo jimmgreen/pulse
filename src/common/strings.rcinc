@@ -3099,5 +3099,19 @@ BEGIN
     IDS_SIDEBAR_SHOW_HIDDEN "Show hidden sections"
 END
 
+LANGUAGE 0x04, 0x02
+STRINGTABLE
+BEGIN
+    IDS_TYPE_SYMLINK "符号链接"
+    IDS_TYPE_JUNCTION "目录联接"
+END
+
+LANGUAGE 0x09, 0x01
+STRINGTABLE
+BEGIN
+    IDS_TYPE_SYMLINK "Symbolic link"
+    IDS_TYPE_JUNCTION "Junction"
+END
+
 // Traditional Chinese (Taiwan), generated from the Simplified blocks above.
 #include "strings_zh_tw.rcinc"

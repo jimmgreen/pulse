@@ -374,14 +374,10 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
                     ((contentRc.bottom - contentRc.top) - groupHeight) * 0.5f;
                 const D2D1_RECT_F iconRc = D2D1::RectF(contentCenterX - icon * 0.5f,
                     iconTop, contentCenterX + icon * 0.5f, iconTop + icon);
-                if (ID2D1Bitmap* bmp = icon_cache_.BitmapFor(d.path, d.name, d.is_dir, d.attrs,
-                                                             icon)) {
-                    dc->DrawBitmap(bmp, &iconRc, 1.0f,
-                                   D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
-                } else if (d.is_dir) {
-                    DrawFolderIcon(iconRc.left, iconRc.top, icon, theme);
-                } else {
-                    DrawFileIcon(iconRc.left, iconRc.top, icon, theme);
+                if (!icon_cache_.Draw(dc, iconRc, d.path, d.name, d.is_dir, d.attrs,
+                                      fs::IsLinkReparse(d.reparse_kind))) {
+                    if (d.is_dir) DrawFolderIcon(iconRc.left, iconRc.top, icon, theme);
+                    else DrawFileIcon(iconRc.left, iconRc.top, icon, theme);
                 }
                 if (showState && !state.empty())
                     centeredText(state,
@@ -478,7 +474,7 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
              compositor_->HeaderFormat(), theme.text);
         std::wstring subtitle = d.subtitle_text;
         if (subtitle.empty())
-            subtitle = d.type_text.empty() ? FormatListType(d.name, d.is_dir) : d.type_text;
+            subtitle = TypeTextFor(d.name, d.is_dir, d.reparse_kind, d.type_text);
         if (!subtitle.empty())
             text(subtitle, D2D1::RectF(panel.left + pad, y + 22.0f * s,
                                        panel.right - pad, y + 38.0f * s),
@@ -598,8 +594,8 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
             case 0: { // 基本信息
                 float iy = y;
                 infoRow(pulse::l10n::Get(pulse::l10n::StringId::Location).c_str(), d.location_text, iy);
-                infoRow(pulse::l10n::Get(pulse::l10n::StringId::ColumnType).c_str(), !d.type_text.empty()
-                            ? d.type_text : FormatListType(d.name, d.is_dir), iy);
+                infoRow(pulse::l10n::Get(pulse::l10n::StringId::ColumnType).c_str(),
+                        TypeTextFor(d.name, d.is_dir, d.reparse_kind, d.type_text), iy);
                 infoRow(pulse::l10n::Get(pulse::l10n::StringId::ColumnSize).c_str(),
                         d.size_pending ? pulse::l10n::Get(pulse::l10n::StringId::Calculating)
                                                 : d.size_text, iy);

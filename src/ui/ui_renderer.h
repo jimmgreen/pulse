@@ -83,6 +83,7 @@ struct ListEntryView {
     uint64_t accessed_value = 0;
     bool is_dir = false;
     bool is_reparse = false;
+    fs::ReparseKind reparse_kind = fs::ReparseKind::None;
     bool cloud_recall = false;
     bool record_only = false;
     bool cut = false;
@@ -430,6 +431,7 @@ struct DetailsPanelView {
     std::wstring name, path, type_text;
     std::wstring subtitle_text;     // under-name line: type · size short form
     bool is_dir = false;
+    fs::ReparseKind reparse_kind = fs::ReparseKind::None;
     DWORD attrs = 0;
     uint64_t modified_value = 0;    // thumbnail cache key parts
     uint64_t size_value = 0;

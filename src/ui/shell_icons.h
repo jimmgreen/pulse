@@ -31,9 +31,10 @@ public:
     void Reset();
 
     // Returns false while native icons are loading or the device is unavailable.
+    // link_overlay adds the Shell's link badge, for symlinks and junctions.
     bool Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
               const std::wstring& path, const std::wstring& name,
-              bool is_dir, DWORD attrs);
+              bool is_dir, DWORD attrs, bool link_overlay = false);
 
     // Icon bitmap at (about) desired_dips, or nullptr while unresolved —
     // caller leaves the slot empty. Lets owners apply their own opacity
@@ -63,7 +64,13 @@ private:
     bool EnsureWic();
     int GenericIndex(const std::wstring& name, bool is_dir, DWORD attrs);
     void RequestExact(const std::wstring& path);
+    // Exact per-path index when the Shell has one, else the extension/dir one.
+    int IconIndex(const std::wstring& path, const std::wstring& name, bool is_dir,
+                  DWORD attrs, bool touch);
     ID2D1Bitmap* BitmapForIndex(int index, int list_id);
+    ID2D1Bitmap* LinkBitmapFor(const std::wstring& path, const std::wstring& name,
+                               bool is_dir, DWORD attrs, float desired_dips);
+    ID2D1Bitmap* LinkBitmapForIndex(int index, int list_id);
     ComPtr<ID2D1Bitmap> BitmapFromIcon(HICON icon);
     // Worker-converted pixels for key, uploaded to a D2D bitmap and cached.
     ID2D1Bitmap* UploadReady(uint64_t key);

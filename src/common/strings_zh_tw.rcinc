@@ -1572,3 +1572,10 @@ BEGIN
     IDS_SIDEBAR_CLOUD_HIDDEN_HINT "已從側邊欄隱藏。在任一區段標題或側邊欄底部空白處按右鍵，即可重新顯示。"
     IDS_SIDEBAR_SHOW_HIDDEN "顯示已隱藏的區段"
 END
+
+LANGUAGE 0x04, 0x01
+STRINGTABLE
+BEGIN
+    IDS_TYPE_SYMLINK "符號連結"
+    IDS_TYPE_JUNCTION "目錄聯接"
+END

@@ -322,6 +322,8 @@ enum class StringId : UINT {
     TypeAudio = IDS_TYPE_AUDIO,
     TypeArchive = IDS_TYPE_ARCHIVE,
     TypeApplication = IDS_TYPE_APPLICATION,
+    TypeSymlink = IDS_TYPE_SYMLINK,
+    TypeJunction = IDS_TYPE_JUNCTION,
     Unavailable = IDS_UNAVAILABLE,
     NoMatches = IDS_NO_MATCHES,
     NoStarred = IDS_NO_STARRED,

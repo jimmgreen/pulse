@@ -2128,6 +2128,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
             const bool penetrated = !e.link_target.empty();
             dv.name = e.name;
             dv.is_dir = penetrated ? e.link_target_is_dir : e.is_dir;
+            dv.reparse_kind = e.reparse_kind;
             dv.attrs = e.attrs;
             if (penetrated && e.link_target_is_dir) dv.attrs |= FILE_ATTRIBUTE_DIRECTORY;
             dv.size_value = penetrated ? e.link_target_size : e.size;

@@ -209,8 +209,13 @@ void ClearTextWidthCache() {
         return dir + L'\\' + name;
     }
 
-    std::wstring FormatListType(const std::wstring& name, bool isDir) {
+    std::wstring FormatListType(const std::wstring& name, bool isDir,
+                                fs::ReparseKind kind = fs::ReparseKind::None) {
         using pulse::l10n::StringId;
+        // A symlink or junction is a link first: its target's folder/file
+        // nature must not hide that. Other reparse points stay unmarked.
+        if (kind == fs::ReparseKind::Symlink) return pulse::l10n::Get(StringId::TypeSymlink);
+        if (kind == fs::ReparseKind::Junction) return pulse::l10n::Get(StringId::TypeJunction);
         if (isDir) return pulse::l10n::Get(StringId::TypeFolder);
         const size_t dot = name.find_last_of(L'.');
         if (dot == std::wstring::npos || dot == 0 || dot + 1 >= name.size())
@@ -238,6 +243,15 @@ void ClearTextWidthCache() {
         case DRIVE_RAMDISK: return pulse::l10n::Get(StringId::RamDisk);
         default: return pulse::l10n::Get(StringId::Drive);
         }
+    }
+
+    // The details panel describes a penetrated link with the target's shell
+    // type name, which reads "Folder" for a directory symlink; the kind label
+    // wins for symlinks and junctions, and other rows keep the shell name.
+    std::wstring TypeTextFor(const std::wstring& name, bool isDir, fs::ReparseKind kind,
+                             const std::wstring& shell_type) {
+        if (fs::IsLinkReparse(kind)) return FormatListType(name, isDir, kind);
+        return shell_type.empty() ? FormatListType(name, isDir, kind) : shell_type;
     }
 
     const ListEntryView& MakeVisibleEntry(const PaneViewModel& vm, size_t index) {
@@ -288,6 +302,7 @@ void ClearTextWidthCache() {
                                source.mtime.dwLowDateTime;
         entry.is_dir = penetrated ? source.link_target_is_dir : source.is_dir;
         entry.is_reparse = source.is_reparse;
+        entry.reparse_kind = source.reparse_kind;
         entry.cloud_recall = source.cloud_recall;
         if (vm.tag_catalog && source.attrs == 0 && !entry.path.empty()) {
             app::PlaceItemKind known_kind = app::PlaceItemKind::Unknown;
@@ -300,7 +315,8 @@ void ClearTextWidthCache() {
             entry.type_text = pulse::l10n::Get(pulse::l10n::StringId::Unavailable);
         } else {
             entry.type_text = FormatListType(
-                penetrated ? fs::StripLnkSuffix(source.name) : source.name, entry.is_dir);
+                penetrated ? fs::StripLnkSuffix(source.name) : source.name, entry.is_dir,
+                source.reparse_kind);
         }
         if (source.drive_type != 0) entry.type_text = DriveTypeText(source.drive_type);
         if (source.drive_type != 0 && source.drive_total > 0) {

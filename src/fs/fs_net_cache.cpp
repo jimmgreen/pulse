@@ -53,14 +53,16 @@ bool SaveNetSnapshot(const std::wstring& path, const SnapshotPtr& snapshot) {
     std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
     if (!f) return false;
     f.write("PNCH", 4);
-    uint32_t ver = 1;
+    uint32_t ver = 2;
     uint64_t ts = NowUnix();
     uint32_t count = static_cast<uint32_t>(snapshot->size());
     f.write(reinterpret_cast<const char*>(&ver), 4);
     f.write(reinterpret_cast<const char*>(&ts), 8);
     f.write(reinterpret_cast<const char*>(&count), 4);
     for (const auto& e : *snapshot) {
-        uint8_t flags = (e.is_dir ? 1 : 0) | (e.is_reparse ? 2 : 0);
+        // bit0 is_dir, bit1 is_reparse, bits2..3 ReparseKind.
+        uint8_t flags = static_cast<uint8_t>((e.is_dir ? 1 : 0) | (e.is_reparse ? 2 : 0) |
+                                             (static_cast<uint8_t>(e.reparse_kind) << 2));
         uint64_t mtime = (static_cast<uint64_t>(e.mtime.dwHighDateTime) << 32) | e.mtime.dwLowDateTime;
         uint32_t nlen = static_cast<uint32_t>(e.name.size());
         f.write(reinterpret_cast<const char*>(&flags), 1);
@@ -90,7 +92,7 @@ SnapshotPtr LoadNetSnapshot(const std::wstring& path, uint64_t* unix_sec) {
     f.read(reinterpret_cast<char*>(&ver), 4);
     f.read(reinterpret_cast<char*>(&ts), 8);
     f.read(reinterpret_cast<char*>(&count), 4);
-    if (ver != 1 || count > 500000) return nullptr;
+    if (ver != 2 || count > 500000) return nullptr;
     auto entries = std::make_shared<std::vector<DirEntry>>();
     entries->reserve(count);
     for (uint32_t i = 0; i < count; ++i) {
@@ -112,6 +114,7 @@ SnapshotPtr LoadNetSnapshot(const std::wstring& path, uint64_t* unix_sec) {
         e.mtime.dwHighDateTime = static_cast<DWORD>(mtime >> 32);
         e.is_dir = (flags & 1) != 0;
         e.is_reparse = (flags & 2) != 0;
+        e.reparse_kind = static_cast<ReparseKind>((flags >> 2) & 3u);
         entries->push_back(std::move(e));
     }
     if (unix_sec) *unix_sec = ts;
