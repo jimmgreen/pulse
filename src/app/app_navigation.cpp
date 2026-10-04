@@ -843,7 +843,8 @@ void CancelActiveContentSearch(AppState& s, app::Tab& tab) {
     if(tab.content_results) {tab.content_revision=UINT64_MAX;RefreshContentResults(s);}
 }
 
-void LoadVirtualView(AppState& s, app::Tab& tab, const std::wstring& path, PathLoadReason reason) {
+void LoadVirtualView(AppState& s, app::Tab& tab, const std::wstring& path, PathLoadReason reason,
+                     bool quiet) {
     tab.explorer_handoff.reset();
     tab.current_path = path;
     tab.loading = false;
@@ -869,8 +870,10 @@ void LoadVirtualView(AppState& s, app::Tab& tab, const std::wstring& path, PathL
             const auto& tag = s.places.tags[static_cast<size_t>(ti)];
             tab.current_path = app::MakeTagPath(tag.id);
             tab.virtual_title = tag.name;
-            tab.loading = true;
-            tab.SetSnapshot(nullptr);
+            if (!quiet) {
+                tab.loading = true;
+                tab.SetSnapshot(nullptr);
+            }
             tab.pending_generation = s.worker.LoadPaths(
                 path, tag.paths, tab.sort_column, tab.sort_direction, false, {}, tab.EffectiveGroup());
             return;
@@ -912,17 +915,21 @@ void LoadVirtualView(AppState& s, app::Tab& tab, const std::wstring& path, PathL
         return;
     } else if (kind == L"starred") {
         tab.virtual_title = l10n::Get(l10n::StringId::StarredItems);
-        tab.loading = true;
         tab.view_mode = ui::ViewMode::Details;
-        tab.SetSnapshot(nullptr);
+        if (!quiet) {
+            tab.loading = true;
+            tab.SetSnapshot(nullptr);
+        }
         tab.pending_generation = s.worker.LoadPaths(
             path, s.places.StarredPaths(), tab.sort_column, tab.sort_direction, true);
         return;
     } else if (kind == L"recent") {
         tab.virtual_title = l10n::Get(l10n::StringId::Recent);
-        tab.loading = true;
         tab.view_mode = ui::ViewMode::Details;
-        tab.SetSnapshot(nullptr);
+        if (!quiet) {
+            tab.loading = true;
+            tab.SetSnapshot(nullptr);
+        }
         const auto filter = static_cast<app::RecentFilter>(
             std::clamp(tab.recent_filter, 0, 2));
         const auto recent = s.places.RecentItems(filter);
@@ -974,6 +981,39 @@ static std::shared_ptr<const app::FolderSizeLookup> SortFolderSizes(
     tab.folder_size_signature = app::FolderSizeSignature(*sizes);
     tab.folder_size_resorted_at = GetTickCount64();
     return sizes;
+}
+// Recent, starred and tag views are lists of real files from folders that are not open anywhere:
+// the view's own path is "pulse:recent", so no directory notification ever matches it, and a file
+// that was changed, renamed or deleted kept the row it was first loaded with. Re-reading one of
+// these views costs one stat per row on the worker, so the tick can simply do it again - quietly,
+// so the rows on screen stay put, and handing the current rows over as the keys of the arriving
+// snapshot, which is what keeps the selection (and the file open in the preview) where it was.
+void RefreshPathBackedViews(AppState& s, bool allow_network_paths) {
+    ForEachPane(s, [&](app::Pane& pane) {
+        app::Tab* tab = pane.ActiveTab();
+        if (!tab || !tab->snapshot || tab->loading || tab->pending_generation != 0) return;
+        std::wstring kind;
+        if (!app::ParsePulsePath(tab->current_path, &kind, nullptr)) return;
+        if (kind != L"recent" && kind != L"starred" && kind != L"tag") return;
+        // A single network path in the list would cost an SMB timeout on every pass, so those
+        // lists are only re-read when the window comes back to the foreground.
+        if (!allow_network_paths) {
+            for (int i = 0; i < static_cast<int>(tab->EntryCount()); ++i) {
+                if (fs::IsUncPath(tab->EntryAt(static_cast<size_t>(i)).full_path)) return;
+            }
+        }
+        tab->pending_selected_names.clear();
+        tab->pending_selected_name.clear();
+        for (const int index : tab->SelectedIndices()) {
+            std::wstring path = EntryFullPath(*tab, index);
+            if (!path.empty()) tab->pending_selected_names.push_back(std::move(path));
+        }
+        if (tab->selected_index >= 0)
+            tab->pending_selected_name = EntryFullPath(*tab, tab->selected_index);
+        // The rows are the same rows: do not scroll the list to the selection.
+        tab->pending_ensure_selection_visible = false;
+        LoadVirtualView(s, *tab, tab->current_path, PathLoadReason::Navigate, true);
+    });
 }
 
 void StartLoadingPath(AppState& s, app::Tab& tab, const std::wstring& path, PathLoadReason reason) {
@@ -1097,7 +1137,18 @@ void StartLoadingPath(AppState& s, app::Tab& tab, const std::wstring& path, Path
     if (snap) {
         tab.SetSnapshot(snap);
         tab.loading = false;
-        if (tab.snapshot && tab.EntryCount() != 0) tab.SelectOnly(0);
+        // A tab handed over from another window restores its rows here too: this
+        // listing may already be the final one. The pending names stay for the
+        // refreshed result that follows, which restores them again.
+        if (tab.snapshot && tab.EntryCount() != 0) {
+            if (tab.pending_selected_names.empty() && tab.pending_selected_name.empty()) {
+                tab.SelectOnly(0);
+            } else {
+                std::vector<std::wstring> names = tab.pending_selected_names;
+                if (names.empty()) names.push_back(tab.pending_selected_name);
+                tab.RemapSelection(names, tab.pending_selected_name);
+            }
+        }
         if (from_net) {
             tab.cache_unix = disk_ts;
             tab.banner_title = l10n::Get(l10n::StringId::Cache);
@@ -2121,8 +2172,31 @@ void OpenTabAt(AppState& s, const std::wstring& path) {
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
+void RememberGroupActivation(AppState& s, const app::LayoutTab* outgoing) {
+    if (!outgoing) return;
+    const int group_id = outgoing->tab_group;
+    if (group_id == 0) return;
+    s.lastActiveInGroup[group_id] = outgoing;
+}
+
+void PruneGroupActivations(AppState& s) {
+    auto& memory = s.lastActiveInGroup;
+    for (auto it = memory.begin(); it != memory.end();) {
+        bool still_member = false;
+        for (const auto& item : s.window_tabs.items) {
+            if (item.get() == it->second && item->tab_group == it->first) {
+                still_member = true;
+                break;
+            }
+        }
+        if (still_member) ++it;
+        else it = memory.erase(it);
+    }
+}
+
 void NewTab(AppState& s, const std::wstring& path) {
     RememberLayoutFocus(s);
+    RememberGroupActivation(s, s.window_tabs.Active());
     s.window_tabs.NewTab(path.empty() ? L"C:\\" : path);
     BindCurrentLayout(s);
     if (app::Tab* tab = ActiveTab(s)) {
@@ -2285,7 +2359,12 @@ void CloseLayoutTab(AppState& s, size_t idx) {
         return;
     }
     RememberLayoutFocus(s);
+    RememberGroupActivation(s, s.window_tabs.Active());
     s.window_tabs.CloseTab(idx);
+    // The group that lost its last member has nothing left to show.
+    app::PruneEmptyGroups(s.window_tabs);
+    // The closed tab is gone; drop any memory that still points at it.
+    PruneGroupActivations(s);
     BindCurrentLayout(s);
     RevalidateVisibleFolders(s);
     InvalidateRect(s.hwnd, nullptr, FALSE);
@@ -2299,6 +2378,7 @@ void SwitchTab(AppState& s, size_t idx) {
     if (idx >= s.window_tabs.items.size()) return;
     if (s.addressSearching) HideAddressEditor(s, false);
     RememberLayoutFocus(s);
+    RememberGroupActivation(s, s.window_tabs.Active());
     s.window_tabs.SwitchTab(idx);
     BindCurrentLayout(s);
     RevalidateVisibleFolders(s);

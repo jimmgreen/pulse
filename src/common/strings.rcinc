@@ -851,6 +851,7 @@ BEGIN
     IDS_TAG_DELETE_CONFIRM_FORMAT "删除标签“%s”？"
     IDS_TAG_DELETE_USED_FORMAT "“%s”已用于 %zu 个项目。\n删除后将移除这些关联。"
     IDS_OPEN_PATH "打开路径"
+    IDS_OPEN_ITEM_LOCATION "打开文件所在位置"
     IDS_BADGE_TEXT_HINT "徽章文字（最多 12 个字符）…"
     IDS_REMOVE_RECENT "从最近使用中移除"
     IDS_EDIT_BADGE "编辑徽章"
@@ -1451,6 +1452,7 @@ BEGIN
     IDS_TAG_DELETE_CONFIRM_FORMAT "Delete tag “%s”?"
     IDS_TAG_DELETE_USED_FORMAT "“%s” is used by %zu items.\nDeleting it will remove these associations."
     IDS_OPEN_PATH "Open path"
+    IDS_OPEN_ITEM_LOCATION "Open file location"
     IDS_BADGE_TEXT_HINT "Badge text (up to 12 characters)…"
     IDS_REMOVE_RECENT "Remove from recent"
     IDS_EDIT_BADGE "Edit badge"
@@ -2100,6 +2102,9 @@ BEGIN
  IDS_TRAY_PREV "上一张"
  IDS_TRAY_NEXT "下一张"
  IDS_TRAY_FLING_HINT "按住卡片左右甩出，可把它放到最后"
+ IDS_TAB_GROUP_EDIT "编辑组"
+ IDS_SETTINGS_MULTI_INSTANCE "多窗口模式"
+ IDS_SETTINGS_MULTI_INSTANCE_DESC "允许多个 Pulse 窗口：标签页可拖出成新窗口，菜单和任务栏跳转列表可在新窗口打开；关闭时所有入口都在当前窗口新建标签页"
 END
 LANGUAGE 0x09, 0x01
 STRINGTABLE
@@ -2138,6 +2143,9 @@ BEGIN
  IDS_TRAY_PREV "Previous"
  IDS_TRAY_NEXT "Next"
  IDS_TRAY_FLING_HINT "Hold a card and fling it sideways to send it to the back"
+ IDS_TAB_GROUP_EDIT "Edit group"
+ IDS_SETTINGS_MULTI_INSTANCE "Multi-window mode"
+ IDS_SETTINGS_MULTI_INSTANCE_DESC "Allow several Pulse windows at once: tabs can be torn off, and menus and the jump list can open new windows; off keeps every entry as a tab in the running window"
 END
 LANGUAGE 0x04, 0x02
 STRINGTABLE
@@ -3109,6 +3117,22 @@ BEGIN
     IDS_UI_FONT_DEFAULT "Default"
     IDS_UI_FONT_LARGE "Large"
     IDS_UI_FONT_LARGER "Larger"
+END
+
+// Second window: tab and tray menu entries.
+LANGUAGE 0x04, 0x02
+STRINGTABLE
+BEGIN
+    IDS_TAB_OPEN_NEW_WINDOW "在新窗口中打开"
+    IDS_TRAY_NEW_WINDOW "新建窗口"
+    IDS_JUMPLIST_PINNED "已固定"
+END
+LANGUAGE 0x09, 0x01
+STRINGTABLE
+BEGIN
+    IDS_TAB_OPEN_NEW_WINDOW "Open in new window"
+    IDS_TRAY_NEW_WINDOW "New window"
+    IDS_JUMPLIST_PINNED "Pinned"
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified blocks above.

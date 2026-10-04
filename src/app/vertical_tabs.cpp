@@ -263,7 +263,8 @@ bool HandleVerticalTabContextMenu(AppState& s, const ui::HitTestResult& hit, POI
     if ((hit.region == R::SidebarItem || hit.region == R::SidebarItemAction) &&
         IsVerticalTabPath(hit.path, &index)) {
         if (index < s.window_tabs.items.size() && s.pane && EnsureMenu(s)) {
-            s.tabs.ShowTabMenu(s.window_tabs, static_cast<int>(index), screen, *s.menu);
+            s.tabs.ShowTabMenu(s.window_tabs, static_cast<int>(index), screen, *s.menu,
+                               s.appPrefs.multi_instance_mode);
             BindCurrentLayout(s);
             InvalidateRect(s.hwnd, nullptr, FALSE);
         }

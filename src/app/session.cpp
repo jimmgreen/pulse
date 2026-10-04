@@ -179,6 +179,7 @@ std::wstring TabGroupsToJson(const std::vector<GroupSessionSnapshot>& groups) {
         out += L"\",\"color\":" + std::to_wstring(grp.color_rgb);
         out += L",\"collapsed\":";
         out += grp.collapsed ? L"true" : L"false";
+        out += L",\"lastActive\":" + std::to_wstring(grp.last_active);
         out += L"}";
     }
     out += L"]";
@@ -259,6 +260,7 @@ bool ParseTabGroups(const std::wstring& array_json,
         grp.color_rgb = static_cast<uint32_t>(std::max(
             0, pulse::json::ExtractInt(gj, L"color")));
         grp.collapsed = pulse::json::ExtractBool(gj, L"collapsed");
+        grp.last_active = pulse::json::ExtractInt(gj, L"lastActive", -1);
         out.push_back(std::move(grp));
     }
     return true;

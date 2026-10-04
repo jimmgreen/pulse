@@ -13,6 +13,10 @@ struct GroupSessionSnapshot {
     std::wstring name;
     uint32_t color_rgb = 0;
     bool collapsed = false;
+    // Index into SessionSnapshot::layout_tabs of the member tab this group last
+    // used (see RememberGroupActivation), -1 when nothing is remembered. The
+    // live form is a LayoutTab pointer, so the session keeps the position.
+    int last_active = -1;
 };
 
 struct PaneFolderSnapshot {

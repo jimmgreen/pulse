@@ -29,6 +29,9 @@ namespace {
 
 constexpr wchar_t kClassName[] = L"PulsePreviewHandlerHost";
 constexpr UINT kOpenDelayMs = 100;
+// How long an open may keep waiting for a settling preview rect (a panel fold
+// takes 150 ms; a resize drag may keep moving, so the wait is bounded).
+constexpr UINT kOpenSettleCapMs = 400;
 constexpr wchar_t kPreviewHandlerIid[] = L"{8895b1c6-b41f-4c1c-a562-0d564250836f}";
 constexpr CLSID kQueryAssociations = {
     0xa07034fd, 0x6caa, 0x4954, {0xac, 0x3f, 0x97, 0xa2, 0x72, 0x16, 0xf9, 0x8a}
@@ -917,6 +920,8 @@ DWORD WINAPI PreviewHandlerHost::WorkerMain(void* parameter) {
     PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE);
     uint64_t applied_version = 0;
     std::optional<std::chrono::steady_clock::time_point> open_due;
+    // Latest moment the deferred open may wait for the preview rect to settle.
+    std::chrono::steady_clock::time_point open_cap{};
     for (;;) {
         WorkerState::Command command;
         uint64_t version = 0;
@@ -969,8 +974,20 @@ DWORD WINAPI PreviewHandlerHost::WorkerMain(void* parameter) {
                 }
                 open_due = std::chrono::steady_clock::now() + std::chrono::milliseconds(
                     command.immediate ? 0 : kOpenDelayMs);
+                open_cap = std::chrono::steady_clock::now() + std::chrono::milliseconds(
+                    kOpenSettleCapMs);
                 self->state.store(State::Loading, std::memory_order_release);
             } else {
+                // The same pending request with a moved preview rect: a panel fold or a
+                // window resize is still in flight. Providers lay out once and keep their
+                // zoom, so opening into a mid-flight rectangle leaves the page tiny inside
+                // the final one. Wait for the rect to settle, but never past the cap.
+                if (open_due && !EqualRect(&command.bounds, &self->bounds)) {
+                    const auto settled = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(kOpenDelayMs);
+                    *open_due = settled < open_cap ? settled : open_cap;
+                }
+                self->bounds = command.bounds;
                 self->PlaceOverlay();
             }
             applied_version = version;

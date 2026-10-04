@@ -31,6 +31,8 @@
 #include "snapshot_patch.h"
 #include "session.h"
 #include "session_save.h"
+#include "instance_launcher.h"
+#include "jump_list.h"
 #include "context_menu.h"
 #include "context_menu_controller.h"
 #include "shell_verbs.h"
@@ -261,6 +263,19 @@ static bool SessionWritable(const AppState& s) {
     return !s.shot.active && !s.menushot && (!s.isolatedTest || s.isolatedTestPersist) &&
         !ShellTagHeadlessLaunch();
 }
+// Recent, starred and tag views list real files that live in folders nobody has open, so no
+// directory notification ever reaches them: a slow pass re-reads them instead, and coming back
+// to the window does it right away (that is when the user looks at the list again).
+constexpr ULONGLONG kVirtualViewRefreshMs = 10000;
+constexpr ULONGLONG kVirtualViewForegroundRefreshMs = 3000;
+static ULONGLONG virtual_view_refresh_tick = 0;
+
+static void MaybeRefreshVirtualViews(AppState& s, bool allow_network_paths, ULONGLONG min_gap_ms) {
+    const ULONGLONG now = GetTickCount64();
+    if (now - virtual_view_refresh_tick < min_gap_ms) return;
+    virtual_view_refresh_tick = now;
+    RefreshPathBackedViews(s, allow_network_paths);
+}
 
 static app::SessionSnapshot CaptureWindowSession(AppState& s, HWND hwnd) {
     app::SessionSnapshot snap;
@@ -274,8 +289,23 @@ static app::SessionSnapshot CaptureWindowSession(AppState& s, HWND hwnd) {
     if (tab) snap.active_path = tab->current_path;
     RememberLayoutFocus(s);
     snap.active_layout_tab = static_cast<int>(s.window_tabs.active);
-    for (const auto& group : s.window_tabs.tab_groups)
-        snap.tab_groups.push_back({group.id, group.name, group.color_rgb, group.collapsed});
+    for (const auto& group : s.window_tabs.tab_groups) {
+        app::GroupSessionSnapshot group_snap{group.id, group.name, group.color_rgb,
+                                             group.collapsed};
+        // The live memory is a tab pointer; the session stores the position in
+        // the layout list, so the hover card can still mark "the tab you last
+        // used here" after a restart.
+        if (auto it = s.lastActiveInGroup.find(group.id);
+            it != s.lastActiveInGroup.end()) {
+            for (size_t i = 0; i < s.window_tabs.items.size(); ++i) {
+                if (s.window_tabs.items[i].get() == it->second) {
+                    group_snap.last_active = static_cast<int>(i);
+                    break;
+                }
+            }
+        }
+        snap.tab_groups.push_back(std::move(group_snap));
+    }
     for (const auto& layout : s.window_tabs.items)
         snap.layout_tabs.push_back(app::CaptureLayoutTab(*layout));
     snap.tray = s.tray;
@@ -321,6 +351,9 @@ static void TickSessionAutosave(AppState& s, HWND hwnd, ULONGLONG now) {
     // GetKeyState is not used: its queued button state can stay "down" after a click
     // whose button-up a drag-detect loop consumed, which silently stopped autosave.
     if (GetCapture() != nullptr || s.sidebarResizing) return;
+    // A second window owns none of the persisted layout: the autosave must not
+    // replace the primary's session with its own.
+    if (s.secondaryInstance || s.mergedAway) return;
     SaveWindowSession(s, hwnd, false);
 }
 
@@ -431,6 +464,8 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 return true;
             },
             [s] { return s->appPrefs.close_window_with_last_tab; },
+            // The tab menu closes the window through the same WM_CLOSE the title
+            // bar uses, so the tray settings decide hide-versus-exit.
             [hwnd] { PostMessageW(hwnd, WM_CLOSE, 0, 0); },
         });
         if (s->isolatedTest) {
@@ -474,6 +509,17 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         RefreshSidebarModel(*s);
         ui::typography::SetUiFontScale(s->appPrefs.ui_font_scale);
+        // The taskbar jump list mirrors what is pinned to quick access. It needs
+        // the localized category and task names, so it runs after l10n::Initialize;
+        // only the primary window owns the taskbar identity.
+        if (!s->secondaryInstance)
+            app::RefreshJumpList(s->places.quick_access_paths,
+                                 s->appPrefs.multi_instance_mode);
+        // A window that was started as an extra one may be the only one left (a
+        // tab torn out to the desktop closes its window), and then the tray, the
+        // hotkey and the session belong to it. Retried in the background, so a
+        // window with a living owner simply gives up.
+        if (s->secondaryInstance) AdoptSingletonOwnership(*s);
         ui::typography::InvalidateCaches();
         s->compositor.RecreateTextFormats(s->scale);
         if (s->safeMode) {
@@ -711,6 +757,18 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     WarmupUnc(*s, path);
                     StartLoadingPath(*s, tab, path, PathLoadReason::RestoreSession);
                 });
+            // Rebuild the group activation memory: the session kept each group's
+            // last-used tab as a position in the restored layout list.
+            s->lastActiveInGroup.clear();
+            for (const auto& group : s->session_tab_groups) {
+                if (group.last_active < 0 ||
+                    static_cast<size_t>(group.last_active) >= s->window_tabs.items.size())
+                    continue;
+                const app::LayoutTab* tab =
+                    s->window_tabs.items[static_cast<size_t>(group.last_active)].get();
+                // A tab that changed groups since the save must not be claimed.
+                if (tab->tab_group == group.id) s->lastActiveInGroup[group.id] = tab;
+            }
             for (size_t i = 0; i < s->window_tabs.items.size(); ++i) {
                 app::RebuildLayoutRoot(*s->window_tabs.items[i]);
                 if (i < s->session_layout_tabs.size() &&
@@ -733,6 +791,9 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         else if (!s->shot.active && !s->open_path.empty())
             startPath = app::IsThisPcArgument(s->open_path) ? std::wstring()
                                                             : ResolveOpenFolderPath(s->open_path);
+        // A new window nobody aimed anywhere: the recent view, not whatever the
+        // window that spawned it happened to be showing.
+        else if (!s->shot.active && s->secondaryInstance) startPath = app::MakeRecentPath();
         else if (open_default_location)
             startPath = app::DefaultLocation(s->appPrefs); // empty = This PC
         s->pane->NewTab(startPath);
@@ -740,12 +801,22 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         StartLoadingPath(*s, *s->pane->ActiveTab(), startPath,
             !s->shot.active && !s->session_path.empty()
                 ? PathLoadReason::RestoreSession : PathLoadReason::Navigate);
+        // After StartLoadingPath: it clears the pending rows of a fresh load, so the
+        // hand-off has to be armed behind it. A window started by tearing a tab out of
+        // another one then puts the rows that tab had selected back under the cursor
+        // (and its details preview follows the same file).
+        if (app::Tab* opened = s->pane->ActiveTab()) {
+            opened->pending_selected_names = std::move(s->pending_handoff_names);
+            opened->pending_selected_name = std::move(s->pending_handoff_focus);
+        }
         RememberPath(*s, startPath);
         if (!s->shot.active && s->session_path.empty() && !s->open_path.empty())
             SelectLaunchedFile(*s, s->open_path);
         }
 
-        if (!s->shot.active && !s->open_path.empty() &&
+        // The restored-primary case: the requested folder joins the restored tabs.
+        // A new window has exactly one tab, so it never lands here.
+        if (!s->shot.active && !s->secondaryInstance && !s->open_path.empty() &&
             (!s->session_layout_tabs.empty() || !s->session_path.empty())) {
             const bool this_pc = app::IsThisPcArgument(s->open_path);
             const std::wstring open_path = this_pc ? std::wstring() : ResolveOpenFolderPath(s->open_path);
@@ -854,6 +925,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             s->hoverSubIndex = -1;
             s->hoverSince = 0;
             s->tooltipText.clear();
+            HideTabGroupCard(*s);
             InvalidateRect(hwnd, nullptr, FALSE);
         }
         return 0;
@@ -872,7 +944,10 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (wParam == HTCLOSE) {
             SuspendContentSearches(*s);
             s->globalSearchWindow.Hide();
-            if (s->appPrefs.keep_running_on_close || s->appPrefs.global_search_enabled) HideMainWindowToTray(*s);
+            // A second window has no tray icon to hide behind.
+            if (!s->secondaryInstance &&
+                (s->appPrefs.keep_running_on_close || s->appPrefs.global_search_enabled))
+                HideMainWindowToTray(*s);
             else DestroyWindow(hwnd);
             return 0;
         }
@@ -881,7 +956,10 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
     case WM_CLOSE: {
         if (s) { SuspendContentSearches(*s); s->globalSearchWindow.Hide(); }
-        if (s && (s->appPrefs.keep_running_on_close || s->appPrefs.global_search_enabled)) {
+        // A window whose last tab went to a sibling has nothing to hide: it is
+        // closing for good, whether or not it used to keep the tray icon.
+        if (s && !s->mergedAway && !s->secondaryInstance &&
+            (s->appPrefs.keep_running_on_close || s->appPrefs.global_search_enabled)) {
             HideMainWindowToTray(*s);
             return 0;
         }
@@ -905,6 +983,61 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             return TRUE; // acceptance, not a claim that asynchronous enumeration succeeded
         }
         std::wstring path;
+        app::SingleInstanceCoordinator::TabTransfer transfer;
+        if (s && app::SingleInstanceCoordinator::DecodeTabTransfer(cds, transfer)) {
+            // The window that sent this is closing: the tab it could not keep is
+            // ours now, and so are the resources it used to own. Always a new
+            // tab - the tab the user dragged has to show up here, even when this
+            // window already has that folder open (the forwarded path below
+            // activates the existing tab instead).
+            // A virtual location ("pulse:recent", a tag, a search) is opened as
+            // it is; only a real path is resolved to its folder.
+            const std::wstring resolved =
+                fs::IsVirtualPath(transfer.path) ? transfer.path
+                                                 : ResolveOpenFolderPath(transfer.path);
+            if (!resolved.empty()) {
+                NewTab(*s, resolved);
+                if (app::Tab* opened = s->pane ? s->pane->ActiveTab() : nullptr) {
+                    // The rows the user had selected travel too, so this window shows
+                    // the same file under the cursor (and previews it) once its listing
+                    // arrives.
+                    opened->pending_selected_names = std::move(transfer.selected_names);
+                    opened->pending_selected_name = std::move(transfer.focus_name);
+                }
+            }
+            AdoptSingletonOwnership(*s);
+            return TRUE;
+        }
+        if (s && app::SingleInstanceCoordinator::DecodeTabTransfer(cds, path)) {
+            // A window of an older build hands the folder over without its selection.
+            const std::wstring resolved =
+                fs::IsVirtualPath(path) ? path : ResolveOpenFolderPath(path);
+            if (!resolved.empty()) NewTab(*s, resolved);
+            AdoptSingletonOwnership(*s);
+            return TRUE;
+        }
+        HWND drain_sink = nullptr;
+        if (s && app::SingleInstanceCoordinator::DecodeDrainRequest(cds, drain_sink)) {
+            // The multi-window mode was turned off in the window that asked: this
+            // one hands every tab over in order and closes. A tab that cannot
+            // travel keeps the window alive rather than being lost.
+            bool all_sent = true;
+            for (const auto& layout : s->window_tabs.items) {
+                const app::Tab* folder = layout->ActiveFolder();
+                app::SingleInstanceCoordinator::TabTransfer transfer;
+                transfer.path = folder ? folder->current_path : std::wstring{};
+                if (transfer.path.empty() ||
+                    !app::SingleInstanceCoordinator::SendTabTransfer(drain_sink, transfer)) {
+                    all_sent = false;
+                    break;
+                }
+            }
+            if (all_sent) {
+                s->mergedAway = true; // closing now: this window must not be persisted
+                PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            }
+            return TRUE;
+        }
         if (!s || !app::SingleInstanceCoordinator::DecodeOpenPath(cds, path)) return FALSE;
         OpenFolderInNewTab(*s, path);
         return TRUE;
@@ -987,6 +1120,9 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             s->renderer.EndDetailsPreviewPan();
             if (GetCapture() == hwnd) ReleaseCapture();
         }
+        // The user is looking at the window again: a list of files that live elsewhere should
+        // be current by the time they read it (network paths included - they may be back).
+        if (s && wParam) MaybeRefreshVirtualViews(*s, true, kVirtualViewForegroundRefreshMs);
         if (s) s->renderer.NotifyPreviewActivate(wParam != 0);
         return 0;
 
@@ -1004,6 +1140,8 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             s->compositor.Resize(LOWORD(lParam), HIWORD(lParam));
             s->maximized = (wParam == SIZE_MAXIMIZED);
             if (wParam != SIZE_MINIMIZED && IsWindowVisible(hwnd)) NoteUiActivity(hwnd, true);
+            // The card is anchored to the chip; a resize invalidates that.
+            HideTabGroupCard(*s);
             if (s->addressEditing) LayoutAddressEditor(*s);
             if (s->filterEditing && !s->filterFocusPending) LayoutFilterEditor(*s);
             if (!s->tagRenameId.empty()) LayoutTagRenameOverlay(*s);
@@ -1083,6 +1221,8 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             const ULONGLONG now = GetTickCount64();
             TickUpdates(*s, now);
             TickSessionAutosave(*s, hwnd, now);
+            // Path-backed virtual views (Recent, starred, a tag) get re-read on a slow pass.
+            MaybeRefreshVirtualViews(*s, false, kVirtualViewRefreshMs);
             if (s->renderer.TickDetailsPreview(now)) dirty = true;
             if (s->renderer.TickMotion(now)) {
                 // Paced by the frame pump when it runs; the timer only
@@ -1111,6 +1251,13 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (PumpRecycleRefresh(*s, now)) dirty = true;
             MaybePrefetchHoverCtxMenu(*s);
             s->places.FlushPendingSave(false);
+            // A window that took a closing sibling's last tab becomes the window
+            // that owns the tray, the hotkey and the session. The mutex may still
+            // be held for a moment, so the takeover is retried from here.
+            if (s->adoptPending && now - s->adoptLastTry >= 150) {
+                s->adoptLastTry = now;
+                AdoptSingletonOwnership(*s);
+            }
             if (s->renameClickCandidate && s->renameClickDue != 0 &&
                 now >= s->renameClickDue) {
                 app::Tab* tab = ActiveTab(*s);
@@ -1203,10 +1350,48 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     if (page == 4 && s->duplicateScan.scanning) dirty = true;
                 }
             }
+            // Edge-style group hover card: 150 ms dwell on a chip opens it.
+            // Leaving both the chip and the card, or starting a tab drag,
+            // closes it.
+            const bool group_dragging = s->tabDragging || s->tabDragPending;
+            const bool on_chip =
+                s->hoverRegion == static_cast<int>(ui::HitTestResult::TabGroup);
+            const bool on_card =
+                s->hoverRegion == static_cast<int>(ui::HitTestResult::TabGroupCardRow) ||
+                s->hoverRegion == static_cast<int>(ui::HitTestResult::TabGroupCard);
+            if (s->groupCardGroupId != 0 &&
+                (group_dragging || (!on_chip && !on_card))) {
+                HideTabGroupCard(*s);
+                dirty = true;
+            }
+            if (!group_dragging && on_chip && s->groupCardSince != 0 &&
+                now - s->groupCardSince >= 150 && s->hoverControlIndex >= 0 &&
+                s->hoverControlIndex <
+                    static_cast<int>(s->window_tabs.tab_groups.size())) {
+                const int group_id = s->window_tabs.tab_groups[
+                    static_cast<size_t>(s->hoverControlIndex)].id;
+                if (s->groupCardGroupId != group_id) {
+                    s->groupCardGroupId = group_id;
+                    s->groupCardChipIndex = s->hoverControlIndex;
+                    s->groupCardHoverRow = -1;
+                    // The card replaces any hint the chip would have shown.
+                    s->tooltipText.clear();
+                    dirty = true;
+                }
+            }
+            const int card_row =
+                s->hoverRegion == static_cast<int>(ui::HitTestResult::TabGroupCardRow)
+                    ? s->hoverControlIndex : -1;
+            if (s->groupCardGroupId != 0 && card_row != s->groupCardHoverRow) {
+                s->groupCardHoverRow = card_row;
+                dirty = true;
+            }
             // 150 ms: the icon rail relies on the hint to name each row, and the
-            // old 400 ms delay read as "no tooltip at all".
+            // old 400 ms delay read as "no tooltip at all". The group hover card
+            // owns that spot while it is open.
             // No hover tooltip under an open popup menu (it would sit beneath it).
-            if (s->hoverRegion != 0 && s->tooltipText.empty() && s->hoverSince != 0 &&
+            if (s->groupCardGroupId == 0 && s->hoverRegion != 0 &&
+                s->tooltipText.empty() && s->hoverSince != 0 &&
                 !(s->menu && s->menu->IsOpen()) &&
                 GetTickCount64() - s->hoverSince >= 150) {
                 s->tooltipText = TooltipForHover(*s);
@@ -1908,7 +2093,10 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (!s->shot.active && !s->menushot && !s->isolatedTest) {
                 // A hidden tag-only launch must not overwrite the real
                 // window/tab session (SessionWritable); tags and places still save below.
-                if (!s->updateSessionPrepared) SaveWindowSession(*s, hwnd, true);
+                // A second window owns none of that either: saving its own tabs,
+                // tray deck and undo stack would replace the primary's.
+                if (!s->secondaryInstance && !s->mergedAway && !s->updateSessionPrepared)
+                    SaveWindowSession(*s, hwnd, true);
                 s->places.Save();
                 s->ctxMenuPrefs.Save();
                 if (!s->updateSessionPrepared) s->appPrefs.Save();
@@ -2160,6 +2348,7 @@ bool SkipSingletonFromArgv() {
             wcscmp(__wargv[i], L"--shot") == 0 ||
             wcscmp(__wargv[i], L"--menushot") == 0 ||
             wcscmp(__wargv[i], L"--test-instance") == 0 ||
+            wcscmp(__wargv[i], L"--new-window") == 0 ||
             wcscmp(__wargv[i], L"--colorpickshot") == 0 ||
             wcscmp(__wargv[i], L"--colorpickdialog") == 0)
             return true;
@@ -2169,6 +2358,9 @@ bool SkipSingletonFromArgv() {
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     pulse::crash::Initialize({pulse::crash::ProcessRole::App, false, {}});
+    // One taskbar identity for every Pulse window; the installer puts the same
+    // one on the shortcuts so a pinned button and a running window agree.
+    SetCurrentProcessExplicitAppUserModelID(app::kAppUserModelId);
     pulse::compat::EnableDpiAwareness();
     // OLE init (drag & drop + clipboard); implies STA COM init.
     OleInitialize(nullptr);
@@ -2199,6 +2391,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         GetEnvironmentVariableW(L"PULSE_TEST_PERSIST", nullptr, 0) > 0)
         state.isolatedTestPersist = true;
 #endif
+    for (int i = 1; i < __argc; ++i) {
+        if (wcscmp(__wargv[i], L"--new-window") != 0) continue;
+        // A shortcut or jump-list entry built while the mode was on can outlive
+        // it: the launch is then an ordinary one and the running window takes the
+        // folder as a tab. Read the preference here; the full app is not built yet.
+        app::AppPrefs launch_prefs;
+        launch_prefs.persist = false;
+        launch_prefs.Load();
+        if (launch_prefs.multi_instance_mode) state.secondaryInstance = true;
+    }
     for (int i = 1; i < __argc; ++i)
         if (state.isolatedTest && wcscmp(__wargv[i], L"--content-index-observer") == 0) state.contentIndexObserver = true;
 
@@ -2217,6 +2419,34 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     // Load previous session before parsing overrides.
     app::SessionSnapshot session;
     if ((!state.isolatedTest || state.isolatedTestPersist) && app::LoadSession(session)) {
+        // A second window starts where the primary was, but owns its own tabs:
+        // the persisted layout, tray deck and undo stack stay with the primary.
+        if (state.secondaryInstance) {
+            session.layout_tabs.clear();
+            session.tab_groups.clear();
+            session.tray.Clear();
+            session.undo_json.clear();
+            // The window opens what it was asked for - or the recent view - as its
+            // only tab. Starting from the primary's location would hand it a tab
+            // the user never asked for, on top of the one they dropped it on.
+            session.active_path.clear();
+            // Cascade past the Pulse windows that are already open, so the new
+            // one does not land exactly on the window that asked for it.
+            int open_windows = 0;
+            HWND other = nullptr;
+            while (open_windows < 8) {
+                other = FindWindowExW(nullptr, other,
+                                      app::SingleInstanceCoordinator::WindowClassName(),
+                                      nullptr);
+                if (!other) break;
+                ++open_windows;
+            }
+            const LONG step = 32 * static_cast<LONG>(open_windows);
+            session.window_rect.left += step;
+            session.window_rect.top += step;
+            session.window_rect.right += step;
+            session.window_rect.bottom += step;
+        }
         state.session_path = session.active_path;
         state.session_layout_tabs = std::move(session.layout_tabs);
         state.session_tab_groups = std::move(session.tab_groups);
@@ -2288,6 +2518,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         } else if (wcscmp(__wargv[i], L"--shot-details-multi") == 0) {
             state.shot_details = true;
             state.shot_details_multi = true;
+        } else if (wcscmp(__wargv[i], L"--entry") == 0 && i + 1 < __argc) {
+            // A torn-off tab's selection, one flag per entry (mirrors the transfer
+            // message another window sends).
+            state.pending_handoff_names.emplace_back(__wargv[++i]);
+        } else if (wcscmp(__wargv[i], L"--focus") == 0 && i + 1 < __argc) {
+            state.pending_handoff_focus = __wargv[++i];
         } else if (wcscmp(__wargv[i], L"--shot-scale") == 0 && i + 1 < __argc) {
             state.shot_scale_override = std::clamp(
                 static_cast<float>(_wtof(__wargv[++i])), 1.0f, 2.5f);
@@ -2323,7 +2559,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
                 state.shot.width = std::max(320, requestedWidth);
                 state.shot.height = std::max(240, requestedHeight);
             }
-        } else if (i == __argc - 1) {
+        } else if (i == __argc - 1 && __wargv[i][0] != L'-') {
+            // A trailing switch is not a path: `--new-window` with no folder used
+            // to open a tab titled after the flag itself.
             state.shot.path = __wargv[i];
         } else if (__wargv[i][0] != L'-' && state.shot.path.empty()) {
             state.shot.path = __wargv[i]; // tolerate path not being the last argument

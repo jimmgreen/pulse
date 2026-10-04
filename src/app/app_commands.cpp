@@ -26,6 +26,9 @@
 #include "snapshot_patch.h"
 #include "entry_sort.h"
 #include "session.h"
+#include "jump_list.h"
+#include "instance_launcher.h"
+#include "single_instance_coordinator.h"
 #include "context_menu.h"
 #include "app_change_tracking.h"
 #include "batch_rename.h"
@@ -677,6 +680,23 @@ void ShowTagSidebarMenu(AppState& s, const app::TagId& tag_id, POINT screen_pt) 
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
+// Reveal a path in the folder that holds it: the parent becomes the location and the
+// row itself is selected once the listing arrives. The pending selection has to be
+// armed after the load starts - StartLoadingPath clears it.
+void RevealInParent(AppState& s, const std::wstring& full) {
+    app::Tab* tab = ActiveTab(s);
+    if (!tab || full.empty()) return;
+    const std::wstring parent = fs::ParentPath(full);
+    const size_t slash = full.find_last_of(L"\\/");
+    const std::wstring leaf =
+        slash == std::wstring::npos ? full : full.substr(slash + 1);
+    if (parent.empty() || leaf.empty()) return;
+    NavigateTo(s, parent);
+    tab->pending_selected_name = leaf;
+    tab->pending_selected_names = { leaf };
+    tab->pending_ensure_selection_visible = true;
+}
+
 void DispatchMenuCommand(AppState& s, int cmd) {
     const bool needs_files=cmd==app::CmdProperties || cmd==app::CmdOpenPath || cmd==app::CmdOpenInNewTab || cmd==app::CmdRename;
     if(needs_files && DeferContentSelection(s,[cmd](AppState& v){DispatchMenuCommand(v,cmd);})) return;
@@ -765,32 +785,10 @@ void DispatchMenuCommand(AppState& s, int cmd) {
         }
         break;
     }
-    case app::CmdOpenPath: {
-        // Reveal the hit in its containing folder (search results).
-        app::Tab* tab = ActiveTab(s);
-        const std::wstring full = tab ? SelectedFullPath(s) : L"";
-        if (!full.empty()) {
-            const std::wstring parent = fs::ParentPath(full);
-            const size_t slash = full.find_last_of(L"\\/");
-            const std::wstring leaf =
-                slash == std::wstring::npos ? full : full.substr(slash + 1);
-            if (!parent.empty() && !leaf.empty()) {
-                NavigateTo(s, parent);
-                tab->pending_selected_name = leaf;
-                tab->pending_selected_names = { leaf };
-                tab->pending_ensure_selection_visible = true;
-                if (tab->snapshot) {
-                    for (size_t i = 0; i < tab->snapshot->size(); ++i) {
-                        if (_wcsicmp((*tab->snapshot)[i].name.c_str(), leaf.c_str()) != 0) continue;
-                        tab->SelectOnly(static_cast<int>(i));
-                        EnsureRowVisible(s, *tab, static_cast<int>(i));
-                        break;
-                    }
-                }
-            }
-        }
+    case app::CmdOpenPath:
+        // Reveal the hit in its containing folder (search results, recent items).
+        RevealInParent(s, SelectedFullPath(s));
         break;
-    }
     case app::CmdCut: CollectToTray(s, true); break;
     case app::CmdCopy: CollectToTray(s, false); break;
     case app::CmdPaste: PasteIntoCurrent(s); break;
@@ -1519,6 +1517,17 @@ void ShowCuratedItemMenu(AppState& s, const std::wstring& path,
     open.text = l10n::Get(l10n::StringId::Open);
     open.glyph = L"\xE8A0";
     items.push_back(std::move(open));
+    // Only a row whose target is still there can be revealed; a stale one (a recent item
+    // that moved away, a pinned folder that is gone) keeps just the commands that act on
+    // the list it lives in. Starred and pinned rows get this too: the same gesture means
+    // the same thing wherever the row is shown.
+    if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        ui::FluentMenuItem location;
+        location.command = app::CmdOpenPath;
+        location.text = l10n::Get(l10n::StringId::OpenItemLocation);
+        location.glyph = L"\xE8B7";
+        items.push_back(std::move(location));
+    }
     if (recent) {
         ui::FluentMenuItem remove;
         remove.command = app::CmdRemoveRecent;
@@ -1615,6 +1624,8 @@ void ShowCuratedItemMenu(AppState& s, const std::wstring& path,
         if (s.places.IsStarred(path)) ToggleStarred(s, path);
     } else if (cmd == app::CmdRemoveRecent) {
         if (s.places.RemoveRecent(path)) RefreshRecentViews(s);
+    } else if (cmd == app::CmdOpenPath) {
+        RevealInParent(s, path);
     }
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
@@ -2381,6 +2392,17 @@ void ApplySettingsEffects(AppState& s, app::SettingsEffect effects) {
         s.renderer.InvalidateTypography();
         RefreshEditFonts(s);
     }
+    // The jump list is built from the mode, so a change has to rebuild it, and
+    // turning the mode off collects the extra windows back into this one - it
+    // keeps the session, the tray icon and the hotkey. Only the primary window
+    // owns the taskbar identity, so a second window applies neither.
+    if (app::HasEffect(effects, app::SettingsEffect::MultiInstance) && !s.secondaryInstance) {
+        app::RefreshJumpList(s.places.quick_access_paths, s.appPrefs.multi_instance_mode);
+        if (!s.appPrefs.multi_instance_mode) {
+            for (HWND other : app::OtherPulseWindows(s.hwnd))
+                app::SingleInstanceCoordinator::SendDrainRequest(other, s.hwnd);
+        }
+    }
     if (app::HasEffect(effects, app::SettingsEffect::RowHeight) ||
         app::HasEffect(effects, app::SettingsEffect::UiFontSize)) {
         const int row_height = app::EffectiveRowHeightDip(s.appPrefs.row_height, s.appPrefs.ui_font_scale);
@@ -2415,7 +2437,8 @@ void ApplySettingsEffects(AppState& s, app::SettingsEffect effects) {
     if (app::HasEffect(effects, app::SettingsEffect::TrayDeckIcon))
         s.renderer.SetTrayIconDip(static_cast<float>(s.appPrefs.tray_icon_size));
     if (app::HasEffect(effects, app::SettingsEffect::TrayVisibility))
-        s.tray_controller.SetVisible(WantsTrayIcon(s, s.hidden_to_tray));
+        // A second window owns no tray icon: the primary keeps the only one.
+        s.tray_controller.SetVisible(!s.secondaryInstance && WantsTrayIcon(s, s.hidden_to_tray));
     if (app::HasEffect(effects, app::SettingsEffect::GlobalSearch))
         ApplyGlobalSearchSettings(s);
     if (app::HasEffect(effects, app::SettingsEffect::StatusBarPerformance))

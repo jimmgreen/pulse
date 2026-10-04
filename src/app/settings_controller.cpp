@@ -554,6 +554,9 @@ void SettingsController::ToggleUi(int index) {
     } else if (index == 6) {
         prefs_->show_pinned_tab_names = !prefs_->show_pinned_tab_names;
         SaveAndApply(SettingsEffect::None);
+    } else if (index == 34) {
+        prefs_->multi_instance_mode = !prefs_->multi_instance_mode;
+        SaveAndApply(SettingsEffect::MultiInstance);
     } else if (index == 20) {
         IntegrationAction(2);
     } else if (index == 28) {
@@ -577,13 +580,15 @@ void SettingsController::ToggleUi(int index) {
     } else if (index == 9) {
         prefs_->search_pinyin = !prefs_->search_pinyin;
         SaveAndApply(SettingsEffect::None);
-    } else if (index == 17) {
+    } else if (index == 21) {
+        // The list-row switches from main's 1.0.39 rework. Ids 21-23, because 17-19 already
+        // mean tooltips, file hashing and the title-bar mark on this branch.
         prefs_->list_smart_date = !prefs_->list_smart_date;
         SaveAndApply(SettingsEffect::ListStyle);
-    } else if (index == 18) {
+    } else if (index == 22) {
         prefs_->list_zebra_rows = !prefs_->list_zebra_rows;
         SaveAndApply(SettingsEffect::ListStyle);
-    } else if (index == 19) {
+    } else if (index == 23) {
         prefs_->list_size_bar = !prefs_->list_size_bar;
         SaveAndApply(SettingsEffect::ListStyle);
     } else if (index == 22) {

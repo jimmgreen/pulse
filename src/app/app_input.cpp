@@ -2,6 +2,7 @@
 #include "quick_access.h"
 #include "app_prompts.h"
 #include "vertical_tabs.h"
+#include "jump_list.h"
 #include "tab_shortcuts.h"
 #include "app_updates.h"
 #include "app_internal.h"
@@ -26,6 +27,8 @@
 #include "blank_pane_click.h"
 #include "drop_staging.h"
 #include "link_resolve.h"
+#include "instance_launcher.h"
+#include "single_instance_coordinator.h"
 #include "resource.h"
 #include "../ops/clipboard.h"
 #include "../ipc/ctx_menu_util.h"
@@ -481,6 +484,99 @@ static void StartTrayDragOut(AppState& s) {
     s.springEntered = false;
     ClearDropFeedback(s);
     InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
+// Resets every field a tab (or collapsed-chip) drag owns and drops the capture
+// it took. Shared by the plain drop and by the hand-off to another window.
+void ResetTabDrag(AppState& s, HWND hwnd) {
+    s.tabDragPending = false;
+    s.tabDragging = false;
+    s.tabDragIndex = -1;
+    s.tabDragRunPos = 0;
+    s.tabDragRunLen = 1;
+    s.tabDragFromChip = false;
+    s.tabDragGroupId = 0;
+    s.tabDragSlots = 1.0f;
+    s.tabDragExternal = false;
+    s.tabOrder.clear();
+    s.tabDragGhost.Hide();
+    if (GetCapture() == hwnd) ReleaseCapture();
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
+// Moves the dragged tab to the Pulse window under the cursor, the way Explorer
+// moves a tab between its own windows. Returns false when no other Pulse window
+// is there, or when the tab has nothing to hand over. A virtual view ("最近使用",
+// a tag, a search) travels like any other location, and a window that is left
+// without tabs closes instead of staying empty.
+bool HandOffTabUnderCursor(AppState& s, HWND hwnd) {
+    if (s.tabDragIndex < 0 || s.tabDragIndex >= static_cast<int>(s.window_tabs.items.size()))
+        return false;
+    POINT cursor{};
+    if (!GetCursorPos(&cursor)) return false;
+    const HWND target = app::PulseWindowUnderPoint(cursor, hwnd);
+    RECT self{};
+    GetWindowRect(hwnd, &self);
+    // Released away from every Pulse window: the tab becomes a window of its own,
+    // the way Explorer tears a tab out to the desktop. Released back on this
+    // window's own strip, it is still just a reorder.
+    const bool torn_out = target == nullptr && !PtInRect(&self, cursor);
+    if (!target && !torn_out) return false;
+    const app::LayoutTab* layout =
+        s.window_tabs.items[static_cast<size_t>(s.tabDragIndex)].get();
+    const app::Tab* folder = layout ? layout->ActiveFolder() : nullptr;
+    // Virtual views travel too: "最近使用", a tag or a saved search is a location
+    // like any other, and a new window starts on one of them.
+    if (!folder || folder->current_path.empty()) return false;
+    // Handing over the only tab is a merge, not a move: this window has nothing
+    // left to show afterwards, so it closes and the window that took the tab
+    // takes over the tray, the hotkey and the session from it.
+    const bool last_tab = s.window_tabs.items.size() <= 1;
+    // What the user had selected travels with the tab: the receiving window loads
+    // the folder on its own and would otherwise park the selection on the first
+    // row - and preview that file. Keys, not indices: the target sorts and filters
+    // for itself. A real folder hands over entry names; a virtual view (Recent,
+    // starred, a tag, a search) has no folder to join a name onto, so it hands over
+    // the rows' full paths instead. Both are matched back in Tab::RemapSelection.
+    app::SingleInstanceCoordinator::TabTransfer transfer;
+    transfer.path = folder->current_path;
+    const bool virtual_view = fs::IsVirtualPath(folder->current_path);
+    for (const int index : folder->SelectedIndices()) {
+        if (index < 0 || index >= static_cast<int>(folder->EntryCount())) continue;
+        const fs::DirEntry& entry = folder->EntryAt(static_cast<size_t>(index));
+        if (entry.change_record_only) continue;
+        std::wstring key = virtual_view ? EntryFullPath(*folder, index) : entry.name;
+        if (key.empty()) continue;
+        transfer.selected_names.push_back(std::move(key));
+        if (index == folder->selected_index) transfer.focus_name = transfer.selected_names.back();
+    }
+    // The payload has a limit; a huge selection still hands the folder over.
+    if (transfer.selected_names.size() > 512) {
+        transfer.selected_names.resize(512);
+        if (transfer.focus_name.empty()) transfer.focus_name = transfer.selected_names.front();
+    }
+    // Every hand-off uses the transfer message: the target always opens a tab of
+    // its own, even when it already shows that folder. (The "open path" message
+    // is for shell forwards, where activating an existing tab is what the user
+    // means by double-clicking a folder.) The takeover it triggers is moot while
+    // this window stays alive, and it simply gives up after a moment.
+    const bool sent = torn_out
+        ? app::LaunchNewWindow(transfer.path, transfer.selected_names, transfer.focus_name)
+        : (app::SingleInstanceCoordinator::SendTabTransfer(target, transfer) ||
+           app::SingleInstanceCoordinator::SendTabTransfer(target, transfer.path));
+    if (!sent) return false;
+    if (last_tab) {
+        s.mergedAway = true; // closing now: this window must not be persisted
+        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        return true;
+    }
+    s.window_tabs.CloseTab(static_cast<size_t>(s.tabDragIndex));
+    // The group that lost its last member has nothing left to show.
+    app::PruneEmptyGroups(s.window_tabs);
+    // The tab left this window; drop any memory that still points at it.
+    PruneGroupActivations(s);
+    BindCurrentLayout(s);
+    return true;
 }
 
 float MaxScrollForActivePane(AppState& s, ui::PaneViewModel* out) {
@@ -1106,7 +1202,9 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 s->tabOrder.clear();
                 if (GetCapture() == hwnd) ReleaseCapture();
             } else if (s->tabDragging ||
-                       (s->pane && s->window_tabs.items.size() >= 2 &&
+                       // A lone tab is draggable too: dragging it out of the
+                       // window is how a window with one tab is merged away.
+                       (s->pane && !s->window_tabs.items.empty() &&
                         std::abs(mx - s->tabDragStartPt.x) >= 2)) {
                 if (!s->tabDragging && s->pane &&
                     s->tabDragIndex >= 0 &&
@@ -1136,9 +1234,19 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                             }
                         }
                     }
-                    if (n0 >= 2 && n0 == static_cast<int>(s->window_tabs.items.size()) &&
+                    // One tab is enough: there is nothing to reorder, but the drag
+                    // is also how a lone tab leaves for another window.
+                    if (n0 >= 1 && n0 == static_cast<int>(s->window_tabs.items.size()) &&
                         haveEnds && selfOk) {
                         s->tabDragging = true;
+                        // The strip's hover hint belonged to the tab that is being
+                        // carried away, and the pointer leaves the strip while the
+                        // drag is on - so nothing would ever clear it again, and a
+                        // stale path would stay pinned to this window.
+                        s->hoverPath.clear();
+                        s->hoverLabel.clear();
+                        s->tooltipText.clear();
+                        s->hoverSince = 0;
                         s->tabFlowLeft = first.left;
                         s->tabFlowRight = last.right;
                         s->tabSlotW = self.right - self.left;
@@ -1225,7 +1333,48 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                         s->tabDragPressLeft + static_cast<float>(mx - s->tabDragStartPt.x),
                         s->tabFlowLeft,
                         std::max(s->tabFlowLeft, s->tabFlowRight - dragBlockW));
-                    if (std::abs(dx) >= 2 && s->tabDragFromChip) {
+                    // Past the window edge the tab is on its way to another Pulse
+                    // window rather than to a slot in this strip: the floating
+                    // block parks at the strip edge, the reorder math below stays
+                    // out of the way, and the release decides where it lands.
+                    // Without the multi-window mode a drag stays inside this
+                    // window: leaving the edge is a reorder, not a tear-off.
+                    s->tabDragExternal = s->appPrefs.multi_instance_mode &&
+                        (mx < 0 || my < 0 ||
+                         mx >= static_cast<int>(s->compositor.Width()) ||
+                         my >= static_cast<int>(s->compositor.Height()));
+                    // Back inside the window the tab is drawn here again, so the
+                    // card that followed the cursor goes away.
+                    if (!s->tabDragExternal && s->tabDragGhost.visible())
+                        s->tabDragGhost.Hide();
+                    if (s->tabDragExternal) {
+                        POINT cursor{};
+                        const bool have_cursor = GetCursorPos(&cursor) != FALSE;
+                        if (have_cursor && app::PulseWindowUnderPoint(cursor, hwnd))
+                            SetCursor(LoadCursorW(nullptr, IDC_SIZEALL));
+                        // This window cannot draw outside its own client area, so
+                        // the dragged tab becomes a card of its own while the user
+                        // carries it over another window.
+                        const app::LayoutTab* dragged =
+                            (s->tabDragIndex >= 0 &&
+                             s->tabDragIndex < static_cast<int>(s->window_tabs.items.size()))
+                                ? s->window_tabs.items[static_cast<size_t>(s->tabDragIndex)].get()
+                                : nullptr;
+                        if (dragged && have_cursor) {
+                            const app::Tab* folder = dragged->ActiveFolder();
+                            // Same label the strip shows: a renamed tab keeps its
+                            // name, a virtual view its title ("最近使用"), and only
+                            // a plain folder falls back to its own name.
+                            std::wstring title = dragged->title;
+                            if (title.empty() && folder) title = folder->virtual_title;
+                            if (title.empty())
+                                title = BaseName(folder ? folder->current_path : std::wstring{});
+                            if (!s->tabDragGhost.visible())
+                                s->tabDragGhost.Show(s->scale, title, s->darkMode,
+                                                     s->tabDragGrabDx, s->tabDragGrabDy);
+                            s->tabDragGhost.Follow(cursor);
+                        }
+                    } else if (std::abs(dx) >= 2 && s->tabDragFromChip) {
                         // Whole-group drag: rotate the run as a block when its
                         // leading/trailing edge crosses the neighbor's center.
                         s->tabDragLastX = mx;
@@ -1513,9 +1662,20 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                                             break;
                                         }
                                     }
+                                    // Crossing an expanded run costs what crossing
+                                    // one tab costs: the dragged tab's leading edge
+                                    // only has to pass the centre of the member it
+                                    // meets, not the centre of the whole run (a
+                                    // three-tab group asked for ~250 px of travel,
+                                    // which read as "dropping on a group does not
+                                    // work"). A folded run is a chip, and its own
+                                    // centre is already as cheap.
+                                    const float nearCenter = app::RunCrossCenter(
+                                        chipGi >= 0, blockLeft, blockRight,
+                                        s->tabSlotW, dx);
                                     if (haveBlock &&
                                         app::ChipBlockCrossed(s->tabDragFloatLeft, s->tabSlotW,
-                                            (blockLeft + blockRight) * 0.5f + blockOff, dx)) {
+                                            nearCenter + blockOff, dx)) {
                                         // The run slides one slot against the
                                         // drag direction (MoveTabRun keeps the
                                         // group contiguous by construction).
@@ -1954,6 +2114,7 @@ LRESULT HandleMouseLeave(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             s->hoverLabel.clear();
             s->hoverSince = 0;
             s->tooltipText.clear();
+            HideTabGroupCard(*s);
             s->bloom_accent.SetPointer(0.0f, 0.0f, false);
             if (GetCapture() != hwnd) s->dragPending = false;
             InvalidateRect(hwnd, nullptr, FALSE);
@@ -1999,6 +2160,369 @@ static void ClickGroupHeader(AppState& s, int pane_slot, int group, bool select)
         ClampScroll(s);
     }
     InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
+// Sidebar row press: a headerless section drags as a whole, starred folders and
+// quick-access pins reorder in place, and tags, workspaces and plain rows act on
+// release so a press can still become a drag.
+static void BeginSidebarRowPress(AppState* s, HWND hwnd, const ui::HitTestResult& hit,
+                                 int mx, int my) {
+    // A section whose rows are the section itself (the starred root, the
+    // OneDrive accounts) has no header to grab: dragging a row moves the
+    // whole section, and a plain click still navigates on release.
+    const bool headerless_row =
+        hit.sidebar_section == static_cast<int>(app::SidebarSectionId::Cloud) ||
+        (hit.sidebar_section == static_cast<int>(app::SidebarSectionId::Starred) &&
+         hit.path == app::MakeStarredPath());
+    const app::StarredItem* starred = s->places.FindStarred(hit.path);
+    const bool in_starred =
+        hit.sidebar_section == static_cast<int>(app::SidebarSectionId::Starred);
+    if (headerless_row) {
+        s->groupDragPending = true;
+        s->groupDragActive = false;
+        s->groupDragId = hit.sidebar_section;
+        s->groupDragPath = hit.path;
+        s->groupDragStartPt = POINT{ mx, my };
+        s->groupDragToIndex = -1;
+        s->groupGapVisible = false;
+        s->groupGapLineY = 0.0f;
+        SetCapture(hwnd);
+    } else if (in_starred && starred && starred->kind == app::PlaceItemKind::Folder) {
+        // A starred folder nested under the root row: reorder inside the
+        // starred list (only when the row really is in that section).
+        s->starDragPending = true;
+        s->starDragActive = false;
+        s->starDragStartPt = POINT{ mx, my };
+        s->starDragPath = hit.path;
+        const auto folders = s->places.StarredFolderPaths();
+        const auto found = std::find_if(folders.begin(), folders.end(), [&](const auto& p) {
+            return _wcsicmp(p.c_str(), hit.path.c_str()) == 0;
+        });
+        s->starDragTarget = found == folders.end()
+            ? 0 : static_cast<size_t>(found - folders.begin());
+        SetCapture(hwnd);
+    } else if (s->places.IsQuickAccessPinned(hit.path)) {
+        // Pinned rows reorder inside quick access; navigation waits for
+        // the release so a press can become a drag.
+        s->pinDragPending = true;
+        s->pinDragActive = false;
+        s->pinDragStartPt = POINT{ mx, my };
+        s->pinDragPath = hit.path;
+        s->pinDragRun = hit.index;
+        s->pinDragToIndex = -1;
+        s->pinGapVisible = false;
+        s->pinGapLineY = 0.0f;
+        SetCapture(hwnd);
+    } else if (hit.path.starts_with(L"pulse:tag:")) {
+        // Tags defer navigation to release; a press may become a reorder drag.
+        s->tagDragPending = true;
+        s->tagDragStartPt = POINT{ mx, my };
+        s->tagDragPath = hit.path;
+        std::wstring kind, rest;
+        app::ParsePulsePath(hit.path, &kind, &rest);
+        s->tagDragTag = s->places.FindTagIndex(s->places.ResolveTagRef(rest));
+        SetCapture(hwnd);
+    } else if (hit.path.starts_with(L"pulse:workspace:")) {
+        std::wstring kind, rest;
+        app::ParsePulsePath(hit.path, &kind, &rest);
+        OpenWorkspace(*s, _wtoi(rest.c_str()));
+    } else if (!hit.path.empty()) {
+        NavigateTo(*s, hit.path);
+    }
+}
+
+// Mouse-down handling for the lower half of the hit regions (file list, details
+// panel, status bar). Split out of HandleLButtonDown so its if/else chain stays
+// inside the compiler's nesting limit (C1061).
+static void HandleMouseDownRest(AppState* s, HWND hwnd, const ui::WindowViewModel& vm,
+                                const ui::HitTestResult& hit, int mx, int my) {
+    if (hit.region == ui::HitTestResult::DetailsStar) {
+        const std::wstring p = SelectedFullPath(*s);
+        if (!p.empty()) ToggleStarred(*s, p, vm.details.is_dir
+            ? app::PlaceItemKind::Folder : app::PlaceItemKind::File);
+    } else if (hit.region == ui::HitTestResult::DetailsMore) {
+        if (EnsureMenu(*s)) {
+            std::vector<ui::FluentMenuItem> items;
+            ui::FluentMenuItem terminal;
+            terminal.command = app::CmdOpenTerminal;
+            terminal.text = l10n::Get(l10n::StringId::OpenInTerminal);
+            terminal.glyph = L"\xE756";
+            items.push_back(std::move(terminal));
+            if (vm.details.is_dir) {
+                ui::FluentMenuItem size;
+                size.command = app::CmdDetailsComputeSize;
+                size.text = l10n::Get(l10n::StringId::ComputeSize);
+                size.glyph = L"\xE8EF";
+                items.push_back(std::move(size));
+            }
+            ui::FluentMenuItem props;
+            props.command = app::CmdProperties;
+            props.text = l10n::Get(l10n::StringId::Properties);
+            props.glyph = L"\xE946";
+            props.separator_after = true;
+            items.push_back(std::move(props));
+            ui::FluentMenuItem shell;
+            shell.command = app::CmdDetailsShellMenu;
+            shell.text = l10n::Get(l10n::StringId::SystemMenu);
+            shell.glyph = L"\xE712";
+            items.push_back(std::move(shell));
+            POINT point{ mx, my };
+            ClientToScreen(hwnd, &point);
+            const int cmd = s->menu->TrackPopup(point, std::move(items));
+            if (cmd == app::CmdOpenTerminal) {
+                std::wstring p = vm.details.path;
+                if (!p.empty() && !vm.details.is_dir) p = fs::ParentPath(p);
+                if (!p.empty()) s->ops.OpenTerminal(ClipboardPath(p));
+            } else if (cmd == app::CmdDetailsComputeSize) {
+                if (!vm.details.path.empty()) StartDetailsSizeWalk(*s, vm.details.path);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            } else if (cmd == app::CmdProperties) {
+                DispatchMenuCommand(*s, app::CmdProperties);
+            } else if (cmd == app::CmdDetailsShellMenu) {
+                ShowItemContextMenu(*s, point);
+            }
+        }
+    } else if (hit.region == ui::HitTestResult::DetailsNewTab) {
+        if (!vm.details.path.empty()) {
+            const std::wstring target = vm.details.path;
+            if (vm.details.is_dir) {
+                OpenFolderTab(*s, target);
+            } else {
+                OpenFolderTab(*s, fs::ParentPath(target));
+                if (app::Tab* tab = ActiveTab(*s)) {
+                    std::wstring leaf = target;
+                    if (leaf.starts_with(L"\\\\?\\UNC\\")) leaf = L"\\\\" + leaf.substr(8);
+                    else if (leaf.starts_with(L"\\\\?\\")) leaf = leaf.substr(4);
+                    const auto slash = leaf.find_last_of(L"\\/");
+                    if (slash != std::wstring::npos) leaf = leaf.substr(slash + 1);
+                    SelectNameInTab(*s, *tab, leaf);
+                }
+            }
+        }
+    } else if (hit.region == ui::HitTestResult::DetailsCopyPath) {
+        if (!vm.details.path.empty()) {
+            ops::WriteClipboardText(ClipboardPath(vm.details.path));
+            s->renderer.NotifyCopied(static_cast<int>(ui::HitTestResult::DetailsCopyPath), 0);
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+    } else if (hit.region == ui::HitTestResult::DetailsSection) {
+        if (hit.index >= 0 && hit.index < 32) {
+            s->detailsCollapsedMask ^= (1u << hit.index);
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+    } else if (hit.region == ui::HitTestResult::DetailsAttrToggle) {
+        if (hit.index == 2) {
+            DispatchMenuCommand(*s, app::CmdProperties);
+        } else if (!vm.details.path.empty() &&
+                   (hit.index == 0 || hit.index == 1)) {
+            const DWORD flag = hit.index == 0 ? FILE_ATTRIBUTE_READONLY
+                                              : FILE_ATTRIBUTE_HIDDEN;
+            DWORD attrs = GetFileAttributesW(vm.details.path.c_str());
+            if (attrs != INVALID_FILE_ATTRIBUTES) {
+                attrs = (attrs & flag) ? (attrs & ~flag) : (attrs | flag);
+                if (SetFileAttributesW(vm.details.path.c_str(), attrs))
+                    RefreshActiveTab(*s, RefreshReason::FileChange);
+            }
+        }
+    } else if (hit.region == ui::HitTestResult::DetailsSecurityChange) {
+        DispatchMenuCommand(*s, app::CmdProperties);
+    } else if (hit.region == ui::HitTestResult::DetailsRename) {
+        ShowRenameOverlay(*s);
+    } else if (hit.region == ui::HitTestResult::DetailsTagAdd) {
+        POINT point{ mx, my };
+        ClientToScreen(hwnd, &point);
+        ShowTagPicker(*s, point);
+    } else if (hit.region == ui::HitTestResult::DetailsPresetTag) {
+        if (hit.index >= 0 && hit.index < static_cast<int>(s->places.tags.size()) &&
+            !vm.details.path.empty()) {
+            const bool assigned = s->places.PathHasTag(vm.details.path, hit.index);
+            std::vector<app::TagAdsUpdate> ads_updates;
+            s->places.SetTaggedBatch(hit.index, { vm.details.path }, !assigned,
+                                     &ads_updates);
+            QueueTagAds(*s, std::move(ads_updates));
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+    } else if (hit.region == ui::HitTestResult::SplitButton) {
+        ShowSplitDropdown(*s);
+    } else if (hit.region == ui::HitTestResult::DetailsToggle) {
+        s->showDetailsPanel = !s->showDetailsPanel;
+        s->renderer.SetDetailsPanelVisible(s->showDetailsPanel);
+        InvalidateRect(hwnd, nullptr, FALSE);
+    } else if (hit.region == ui::HitTestResult::PaneMediumIcons) {
+        SetViewMode(*s, ui::ViewMode::MediumIcons);
+    } else if (hit.region == ui::HitTestResult::PaneDetails) {
+        SetViewMode(*s, ui::ViewMode::Details);
+    } else if (hit.region == ui::HitTestResult::ToolbarSort ||
+               hit.region == ui::HitTestResult::ToolbarGroup ||
+               hit.region == ui::HitTestResult::ToolbarGroupClear) {
+        // One branch for the Sort/Group pair: this else-if chain sits at
+        // MSVC's nesting limit (C1061).
+        if (hit.region == ui::HitTestResult::ToolbarSort) ShowSortDropdown(*s);
+        else if (hit.region == ui::HitTestResult::ToolbarGroup) ShowGroupDropdown(*s);
+        else SetGroupBy(*s, 0);
+    } else if (hit.region == ui::HitTestResult::ToolbarMore) {
+        ShowToolbarMore(*s);
+    } else if (hit.region == ui::HitTestResult::PaneViewButton) {
+        ShowViewDropdown(*s, hit.pane_index);
+    } else if (hit.region == ui::HitTestResult::FilterBox) {
+        ShowFilterEditor(*s);
+    } else if (hit.region == ui::HitTestResult::FilterClear) {
+        ClearPaneFilter(*s);
+    } else if (hit.region == ui::HitTestResult::AddressSearch) {
+        ShowAddressSearch(*s);
+    } else if (hit.region == ui::HitTestResult::AddressSearchScope) {
+        if (!s->addressSearching) ShowAddressSearch(*s);
+        ShowAddressSearchScope(*s);
+    } else if (hit.region == ui::HitTestResult::AddressSearchMode ||
+               hit.region == ui::HitTestResult::AddressSearchContent) {
+        // The mode chip toggles; the dedicated content target (if any) forces content.
+        if (!s->addressSearching) ShowAddressSearch(*s);
+        SwitchAddressSearchMode(*s, hit.region == ui::HitTestResult::AddressSearchContent ||
+                                    !s->addressSearchContent);
+    } else if (hit.region == ui::HitTestResult::AddressSearchOptions) {
+        if (!s->addressSearching) ShowAddressSearch(*s);
+        ShowSearchOptions(*s);
+    } else if (hit.region == ui::HitTestResult::ContentIndexManage) {
+        ShowSearchOptions(*s, true);
+    } else if (hit.region == ui::HitTestResult::NetworkIndexAdd) {
+        app::Pane* pane = PaneAtSlot(*s, hit.index);
+        if (app::Tab* tab = pane ? pane->ActiveTab() : nullptr) AddLiveNetworkRoot(*s, *tab);
+    } else if (hit.region == ui::HitTestResult::SettingsContentIndex) {
+        ShowSearchOptions(*s);
+    } else if (hit.region == ui::HitTestResult::AddressSearchClear) {
+        if (!s->addressSearching) ShowAddressSearch(*s);
+        SetWindowTextW(s->hwndAddressEdit, L"");
+        SetForegroundWindow(GetAncestor(s->hwndAddressEdit, GA_ROOT));
+        SetFocus(s->hwndAddressEdit);
+
+    } else if (hit.region == ui::HitTestResult::AddressSearchClose) {
+        ExitAddressSearch(*s);
+    } else if (hit.region == ui::HitTestResult::AddressSearchInput) {
+        // A results page shows the query without a live editor: open it at the click.
+        if (!s->addressSearching) BeginSearchEditAt(*s, mx, my);
+        else SetFocus(s->hwndAddressEdit);
+    } else if (hit.region == ui::HitTestResult::AddressBar) {
+        if (s->addressSearching) {
+            SetForegroundWindow(GetAncestor(s->hwndAddressEdit, GA_ROOT));
+            SetFocus(s->hwndAddressEdit);
+        }
+        else ShowOmnibar(*s, OmnibarMode::Path);
+    } else if (hit.region == ui::HitTestResult::SearchFilter) {
+        POINT corners[] = {
+            {static_cast<LONG>(std::lround(hit.control_bounds.left)),
+             static_cast<LONG>(std::lround(hit.control_bounds.top))},
+            {static_cast<LONG>(std::lround(hit.control_bounds.right)),
+             static_cast<LONG>(std::lround(hit.control_bounds.bottom))}};
+        MapWindowPoints(hwnd, nullptr, corners, 2);
+        ShowSearchFilterMenu(*s, hit.index,
+            {corners[0].x, corners[0].y, corners[1].x, corners[1].y});
+    } else if (hit.region == ui::HitTestResult::RecentFilter) {
+        if (app::Tab* tab = ActiveTab(*s)) {
+            const int filter = std::clamp(hit.index, 0, 2);
+            if (tab->recent_filter != filter) {
+                tab->recent_filter = filter;
+                LoadVirtualView(*s, *tab, tab->current_path);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+        }
+    } else if (hit.region == ui::HitTestResult::RecentClear) {
+        if (ConfirmClearRecent(*s) && s->places.ClearRecent()) {
+            RefreshRecentViews(*s);
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+    } else if (hit.region == ui::HitTestResult::ColumnHeader) {
+        SortBy(*s, hit.column);
+    } else if (HandleVerticalTabPress(*s, hit)) {
+        // Tab rows, the tabs header and the sidebar toggle.
+    } else if (hit.region == ui::HitTestResult::SidebarHeaderAction) {
+        if (hit.sidebar_action == ui::SidebarAddAction::AddNetwork) {
+            s->settings.NetworkAction(0, true);
+        } else if (hit.sidebar_action == ui::SidebarAddAction::CreateTag) {
+            POINT point{ mx, my };
+            ClientToScreen(hwnd, &point);
+            ShowCreateTagPicker(*s, point);
+        } else if (hit.sidebar_action == ui::SidebarAddAction::AddQuickAccess) {
+            POINT point{ mx, my };
+            ClientToScreen(hwnd, &point);
+            ShowQuickAccessAddMenu(*s, point);
+        }
+    } else if (hit.region == ui::HitTestResult::SidebarHeader) {
+        // Arm the header drag; a release without movement still folds the
+        // section, which keeps the header behaving like a plain toggle.
+        if (hit.index >= 0 && hit.index < static_cast<int>(vm.sidebar.size())) {
+            s->groupDragPending = true;
+            s->groupDragActive = false;
+            s->groupDragId = vm.sidebar[static_cast<size_t>(hit.index)].id;
+            // #80: the This PC title opens This PC (the empty path) on a
+            // plain click; the chevron and the rest of the header fold.
+            s->groupDragNavigate = hit.sub_index == 1 &&
+                vm.sidebar[static_cast<size_t>(hit.index)].navigable;
+            s->groupDragPath.clear();
+            s->groupDragStartPt = POINT{ mx, my };
+            s->groupDragToIndex = -1;
+            s->groupGapVisible = false;
+            s->groupGapLineY = 0.0f;
+            SetCapture(hwnd);
+        }
+    } else if (hit.region == ui::HitTestResult::SidebarItemAction) {
+        std::wstring kind, rest;
+        if (app::ParsePulsePath(hit.path, &kind, &rest) && kind == L"workspace")
+            s->places.UnpinWorkspace(_wtoi(rest.c_str()));
+        InvalidateRect(hwnd, nullptr, FALSE);
+    } else if (hit.region == ui::HitTestResult::SidebarItemExpand) {
+        if (hit.path == app::MakeStarredPath()) {
+            s->starredExpanded = !s->starredExpanded;
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+    } else if (hit.region == ui::HitTestResult::SidebarItem) {
+        BeginSidebarRowPress(s, hwnd, hit, mx, my);
+    } else if (hit.region == ui::HitTestResult::StatusBarCancelSearch) {
+        if (auto* tab = ActiveTab(*s)) CancelActiveContentSearch(*s, *tab);
+        InvalidateRect(hwnd, nullptr, FALSE);
+    } else if (hit.region == ui::HitTestResult::StatusHintAction) {
+        // Re-derived at click time, so the action always matches the current state.
+        switch (CurrentStatusHintAction(*s)) {
+        case StatusHintAction::Tray: CollectToTray(*s, false); break;
+        case StatusHintAction::Compare: DispatchMenuCommand(*s, app::CmdCompareToggle); break;
+        case StatusHintAction::DiffOnly:
+        case StatusHintAction::ShowAll: DispatchMenuCommand(*s, app::CmdCompareDiffOnly); break;
+        case StatusHintAction::Advanced: DispatchMenuCommand(*s, app::CmdAdvancedSearch); break;
+        case StatusHintAction::Shortcuts: DispatchMenuCommand(*s, app::CmdShortcutHelp); break;
+        case StatusHintAction::OpenPath: DispatchMenuCommand(*s, app::CmdOpenPath); break;
+        case StatusHintAction::SearchSubfolders: SearchFilterInSubfolders(*s); break;
+        default: break;
+        }
+        InvalidateRect(hwnd, nullptr, FALSE);
+    } else if (hit.region == ui::HitTestResult::StatusBarTask) {
+        PinAndShowOperationWindow(*s);
+    } else if (hit.region == ui::HitTestResult::StatusBar) {
+        // Left/right status text is not a transfer control.
+    } else if (!IsSettingsTab(ActiveTab(*s)) &&
+               (hit.region == ui::HitTestResult::Pane ||
+               (PointInList(*s, mx, my) && hit.region == ui::HitTestResult::None))) {
+        app::Tab* tab = ActiveTab(*s);
+        const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        // A selection-clearing first click still counts toward the
+        // blank double click, so the second click navigates back.
+        if (tab && !ctrl) tab->ClearSelection();
+        s->marqueePending = true;
+        s->marqueeActive = false;
+        s->marqueeAdditive = ctrl;
+        s->blankClickPane = s->pane;
+        s->blankClickTab = s->appPrefs.blank_click_action != app::kBlankClickOff && tab &&
+            !IsAddressSearchResults(tab) && !ctrl && PointInList(*s, mx, my) &&
+            (GetKeyState(VK_SHIFT) & 0x8000) == 0 &&
+            (GetKeyState(VK_MENU) & 0x8000) == 0 ? tab : nullptr;
+        s->blankClickGeneration = tab ? tab->view_generation : 0;
+        s->marqueeStart = s->marqueeCur = POINT{ mx, my };
+        s->marqueeBase.clear();
+        if (tab && ctrl) {
+            tab->MaterializeSelection();
+            s->marqueeBase = tab->selected;
+        }
+        SetCapture(hwnd);
+        InvalidateRect(hwnd, nullptr, FALSE);
+    }
 }
 
 LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -2202,6 +2726,39 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             s->dragStartPt = POINT{ mx, my };
             SetCapture(hwnd);
             InvalidateRect(hwnd, nullptr, FALSE);
+        } else if (hit.region == ui::HitTestResult::TabGroupCardRow ||
+                   hit.region == ui::HitTestResult::TabGroupCard) {
+            // Group hover card. Member rows switch to that tab and leave the
+            // group folded - the card is how a folded group is read, and
+            // unfolding on every pick would shuffle the strip for a tab the user
+            // chose out of a list. The trailing rows run the two group actions.
+            // Both cases dismiss the card.
+            const int group_id = vm.tab_group_card.group_id;
+            const ui::TabGroupCardRow* row =
+                hit.region == ui::HitTestResult::TabGroupCardRow && hit.index >= 0 &&
+                hit.index < static_cast<int>(vm.tab_group_card.rows.size())
+                    ? &vm.tab_group_card.rows[static_cast<size_t>(hit.index)] : nullptr;
+            HideTabGroupCard(*s);
+            if (row && group_id != 0) {
+                if (row->tab_index >= 0) {
+                    if (row->tab_index < static_cast<int>(s->window_tabs.items.size()))
+                        SwitchTab(*s, row->tab_index);
+                } else if (row->new_tab) {
+                    RememberGroupActivation(*s, s->window_tabs.Active());
+                    s->tabs.NewTabInGroup(s->window_tabs, group_id);
+                    BindCurrentLayout(*s);
+                } else if (row->edit) {
+                    POINT sp{ mx, my };
+                    ClientToScreen(hwnd, &sp);
+                    if (s->pane && EnsureMenu(*s)) {
+                        RememberGroupActivation(*s, s->window_tabs.Active());
+                        s->tabs.ShowGroupMenu(s->window_tabs, group_id, sp, *s->menu);
+                        BindCurrentLayout(*s);
+                    }
+                }
+            }
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
         } else if (hit.region == ui::HitTestResult::TabGroup) {
             // Group chip (Chromium behavior): press arms a whole-group drag;
             // a plain release toggles collapse; right-click opens the editor.
@@ -2229,8 +2786,21 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             s->tabDragPending = true;
             s->tabDragging = false;
             s->tabDragFromChip = false;
+            s->tabDragExternal = false;
             s->tabDragIndex = hit.index;
             s->tabDragStartPt = POINT{ mx, my };
+            // Where inside the tab the press landed. The card that follows the
+            // cursor to another window hangs by that same offset, so the tab
+            // reads as picked up rather than as a badge beside the pointer.
+            {
+                ui::WindowViewModel grabVm = BuildVm(*s);
+                D2D1_RECT_F tabRc{};
+                if (s->renderer.TabItemRect(grabVm, static_cast<float>(s->compositor.Width()),
+                                            hit.index, &tabRc)) {
+                    s->tabDragGrabDx = mx - static_cast<int>(tabRc.left);
+                    s->tabDragGrabDy = my - static_cast<int>(tabRc.top);
+                }
+            }
             SetCapture(hwnd);
         } else if (hit.region == ui::HitTestResult::TabClose && hit.index >= 0) {
             CloseLayoutTab(*s, static_cast<size_t>(hit.index));
@@ -2504,353 +3074,8 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             CreateNewItem(*s, true);
         } else if (hit.region == ui::HitTestResult::DetailsOpen) {
             OpenSelected(*s);
-        } else if (hit.region == ui::HitTestResult::DetailsStar) {
-            const std::wstring p = SelectedFullPath(*s);
-            if (!p.empty()) ToggleStarred(*s, p, vm.details.is_dir
-                ? app::PlaceItemKind::Folder : app::PlaceItemKind::File);
-        } else if (hit.region == ui::HitTestResult::DetailsMore) {
-            if (EnsureMenu(*s)) {
-                std::vector<ui::FluentMenuItem> items;
-                ui::FluentMenuItem terminal;
-                terminal.command = app::CmdOpenTerminal;
-                terminal.text = l10n::Get(l10n::StringId::OpenInTerminal);
-                terminal.glyph = L"\xE756";
-                items.push_back(std::move(terminal));
-                if (vm.details.is_dir) {
-                    ui::FluentMenuItem size;
-                    size.command = app::CmdDetailsComputeSize;
-                    size.text = l10n::Get(l10n::StringId::ComputeSize);
-                    size.glyph = L"\xE8EF";
-                    items.push_back(std::move(size));
-                }
-                ui::FluentMenuItem props;
-                props.command = app::CmdProperties;
-                props.text = l10n::Get(l10n::StringId::Properties);
-                props.glyph = L"\xE946";
-                props.separator_after = true;
-                items.push_back(std::move(props));
-                ui::FluentMenuItem shell;
-                shell.command = app::CmdDetailsShellMenu;
-                shell.text = l10n::Get(l10n::StringId::SystemMenu);
-                shell.glyph = L"\xE712";
-                items.push_back(std::move(shell));
-                POINT point{ mx, my };
-                ClientToScreen(hwnd, &point);
-                const int cmd = s->menu->TrackPopup(point, std::move(items));
-                if (cmd == app::CmdOpenTerminal) {
-                    std::wstring p = vm.details.path;
-                    if (!p.empty() && !vm.details.is_dir) p = fs::ParentPath(p);
-                    if (!p.empty()) s->ops.OpenTerminal(ClipboardPath(p));
-                } else if (cmd == app::CmdDetailsComputeSize) {
-                    if (!vm.details.path.empty()) StartDetailsSizeWalk(*s, vm.details.path);
-                    InvalidateRect(hwnd, nullptr, FALSE);
-                } else if (cmd == app::CmdProperties) {
-                    DispatchMenuCommand(*s, app::CmdProperties);
-                } else if (cmd == app::CmdDetailsShellMenu) {
-                    ShowItemContextMenu(*s, point);
-                }
-            }
-        } else if (hit.region == ui::HitTestResult::DetailsNewTab) {
-            if (!vm.details.path.empty()) {
-                const std::wstring target = vm.details.path;
-                if (vm.details.is_dir) {
-                    OpenFolderTab(*s, target);
-                } else {
-                    OpenFolderTab(*s, fs::ParentPath(target));
-                    if (app::Tab* tab = ActiveTab(*s)) {
-                        std::wstring leaf = target;
-                        if (leaf.starts_with(L"\\\\?\\UNC\\")) leaf = L"\\\\" + leaf.substr(8);
-                        else if (leaf.starts_with(L"\\\\?\\")) leaf = leaf.substr(4);
-                        const auto slash = leaf.find_last_of(L"\\/");
-                        if (slash != std::wstring::npos) leaf = leaf.substr(slash + 1);
-                        SelectNameInTab(*s, *tab, leaf);
-                    }
-                }
-            }
-        } else if (hit.region == ui::HitTestResult::DetailsCopyPath) {
-            if (!vm.details.path.empty()) {
-                ops::WriteClipboardText(ClipboardPath(vm.details.path));
-                s->renderer.NotifyCopied(static_cast<int>(ui::HitTestResult::DetailsCopyPath), 0);
-                InvalidateRect(hwnd, nullptr, FALSE);
-            }
-        } else if (hit.region == ui::HitTestResult::DetailsSection) {
-            if (hit.index >= 0 && hit.index < 32) {
-                s->detailsCollapsedMask ^= (1u << hit.index);
-                InvalidateRect(hwnd, nullptr, FALSE);
-            }
-        } else if (hit.region == ui::HitTestResult::DetailsAttrToggle) {
-            if (hit.index == 2) {
-                DispatchMenuCommand(*s, app::CmdProperties);
-            } else if (!vm.details.path.empty() &&
-                       (hit.index == 0 || hit.index == 1)) {
-                const DWORD flag = hit.index == 0 ? FILE_ATTRIBUTE_READONLY
-                                                  : FILE_ATTRIBUTE_HIDDEN;
-                DWORD attrs = GetFileAttributesW(vm.details.path.c_str());
-                if (attrs != INVALID_FILE_ATTRIBUTES) {
-                    attrs = (attrs & flag) ? (attrs & ~flag) : (attrs | flag);
-                    if (SetFileAttributesW(vm.details.path.c_str(), attrs))
-                        RefreshActiveTab(*s, RefreshReason::FileChange);
-                }
-            }
-        } else if (hit.region == ui::HitTestResult::DetailsSecurityChange) {
-            DispatchMenuCommand(*s, app::CmdProperties);
-        } else if (hit.region == ui::HitTestResult::DetailsRename) {
-            ShowRenameOverlay(*s);
-        } else if (hit.region == ui::HitTestResult::DetailsTagAdd) {
-            POINT point{ mx, my };
-            ClientToScreen(hwnd, &point);
-            ShowTagPicker(*s, point);
-        } else if (hit.region == ui::HitTestResult::DetailsPresetTag) {
-            if (hit.index >= 0 && hit.index < static_cast<int>(s->places.tags.size()) &&
-                !vm.details.path.empty()) {
-                const bool assigned = s->places.PathHasTag(vm.details.path, hit.index);
-                std::vector<app::TagAdsUpdate> ads_updates;
-                s->places.SetTaggedBatch(hit.index, { vm.details.path }, !assigned,
-                                         &ads_updates);
-                QueueTagAds(*s, std::move(ads_updates));
-                InvalidateRect(hwnd, nullptr, FALSE);
-            }
-        } else if (hit.region == ui::HitTestResult::SplitButton) {
-            ShowSplitDropdown(*s);
-        } else if (hit.region == ui::HitTestResult::DetailsToggle) {
-            s->showDetailsPanel = !s->showDetailsPanel;
-            s->renderer.SetDetailsPanelVisible(s->showDetailsPanel);
-            InvalidateRect(hwnd, nullptr, FALSE);
-        } else if (hit.region == ui::HitTestResult::PaneMediumIcons) {
-            SetViewMode(*s, ui::ViewMode::MediumIcons);
-        } else if (hit.region == ui::HitTestResult::PaneDetails) {
-            SetViewMode(*s, ui::ViewMode::Details);
-        } else if (hit.region == ui::HitTestResult::ToolbarSort ||
-                   hit.region == ui::HitTestResult::ToolbarGroup ||
-                   hit.region == ui::HitTestResult::ToolbarGroupClear) {
-            // One branch for the Sort/Group pair: this else-if chain sits at
-            // MSVC's nesting limit (C1061).
-            if (hit.region == ui::HitTestResult::ToolbarSort) ShowSortDropdown(*s);
-            else if (hit.region == ui::HitTestResult::ToolbarGroup) ShowGroupDropdown(*s);
-            else SetGroupBy(*s, 0);
-        } else if (hit.region == ui::HitTestResult::ToolbarMore) {
-            ShowToolbarMore(*s);
-        } else if (hit.region == ui::HitTestResult::PaneViewButton) {
-            ShowViewDropdown(*s, hit.pane_index);
-        } else if (hit.region == ui::HitTestResult::FilterBox) {
-            ShowFilterEditor(*s);
-        } else if (hit.region == ui::HitTestResult::FilterClear) {
-            ClearPaneFilter(*s);
-        } else if (hit.region == ui::HitTestResult::AddressSearch) {
-            ShowAddressSearch(*s);
-        } else if (hit.region == ui::HitTestResult::AddressSearchScope) {
-            if (!s->addressSearching) ShowAddressSearch(*s);
-            ShowAddressSearchScope(*s);
-        } else if (hit.region == ui::HitTestResult::AddressSearchMode ||
-                   hit.region == ui::HitTestResult::AddressSearchContent) {
-            // The mode chip toggles; the dedicated content target (if any) forces content.
-            if (!s->addressSearching) ShowAddressSearch(*s);
-            SwitchAddressSearchMode(*s, hit.region == ui::HitTestResult::AddressSearchContent ||
-                                        !s->addressSearchContent);
-        } else if (hit.region == ui::HitTestResult::AddressSearchOptions) {
-            if (!s->addressSearching) ShowAddressSearch(*s);
-            ShowSearchOptions(*s);
-        } else if (hit.region == ui::HitTestResult::ContentIndexManage) {
-            ShowSearchOptions(*s, true);
-        } else if (hit.region == ui::HitTestResult::NetworkIndexAdd) {
-            app::Pane* pane = PaneAtSlot(*s, hit.index);
-            if (app::Tab* tab = pane ? pane->ActiveTab() : nullptr) AddLiveNetworkRoot(*s, *tab);
-        } else if (hit.region == ui::HitTestResult::SettingsContentIndex) {
-            ShowSearchOptions(*s);
-        } else if (hit.region == ui::HitTestResult::AddressSearchClear) {
-            if (!s->addressSearching) ShowAddressSearch(*s);
-            SetWindowTextW(s->hwndAddressEdit, L"");
-            SetForegroundWindow(GetAncestor(s->hwndAddressEdit, GA_ROOT));
-            SetFocus(s->hwndAddressEdit);
-
-        } else if (hit.region == ui::HitTestResult::AddressSearchClose) {
-            ExitAddressSearch(*s);
-        } else if (hit.region == ui::HitTestResult::AddressSearchInput) {
-            // A results page shows the query without a live editor: open it at the click.
-            if (!s->addressSearching) BeginSearchEditAt(*s, mx, my);
-            else SetFocus(s->hwndAddressEdit);
-        } else if (hit.region == ui::HitTestResult::AddressBar) {
-            if (s->addressSearching) {
-                SetForegroundWindow(GetAncestor(s->hwndAddressEdit, GA_ROOT));
-                SetFocus(s->hwndAddressEdit);
-            }
-            else ShowOmnibar(*s, OmnibarMode::Path);
-        } else if (hit.region == ui::HitTestResult::SearchFilter) {
-            POINT corners[] = {
-                {static_cast<LONG>(std::lround(hit.control_bounds.left)),
-                 static_cast<LONG>(std::lround(hit.control_bounds.top))},
-                {static_cast<LONG>(std::lround(hit.control_bounds.right)),
-                 static_cast<LONG>(std::lround(hit.control_bounds.bottom))}};
-            MapWindowPoints(hwnd, nullptr, corners, 2);
-            ShowSearchFilterMenu(*s, hit.index,
-                {corners[0].x, corners[0].y, corners[1].x, corners[1].y});
-        } else if (hit.region == ui::HitTestResult::RecentFilter) {
-            if (app::Tab* tab = ActiveTab(*s)) {
-                const int filter = std::clamp(hit.index, 0, 2);
-                if (tab->recent_filter != filter) {
-                    tab->recent_filter = filter;
-                    LoadVirtualView(*s, *tab, tab->current_path);
-                    InvalidateRect(hwnd, nullptr, FALSE);
-                }
-            }
-        } else if (hit.region == ui::HitTestResult::RecentClear) {
-            if (ConfirmClearRecent(*s) && s->places.ClearRecent()) {
-                RefreshRecentViews(*s);
-                InvalidateRect(hwnd, nullptr, FALSE);
-            }
-        } else if (hit.region == ui::HitTestResult::ColumnHeader) {
-            SortBy(*s, hit.column);
-        } else if (HandleVerticalTabPress(*s, hit)) {
-            // Tab rows, the tabs header and the sidebar toggle.
-        } else if (hit.region == ui::HitTestResult::SidebarHeaderAction) {
-            if (hit.sidebar_action == ui::SidebarAddAction::AddNetwork) {
-                s->settings.NetworkAction(0, true);
-            } else if (hit.sidebar_action == ui::SidebarAddAction::CreateTag) {
-                POINT point{ mx, my };
-                ClientToScreen(hwnd, &point);
-                ShowCreateTagPicker(*s, point);
-            } else if (hit.sidebar_action == ui::SidebarAddAction::AddQuickAccess) {
-                POINT point{ mx, my };
-                ClientToScreen(hwnd, &point);
-                ShowQuickAccessAddMenu(*s, point);
-            }
-        } else if (hit.region == ui::HitTestResult::SidebarHeader) {
-            // Arm the header drag; a release without movement still folds the
-            // section, which keeps the header behaving like a plain toggle.
-            if (hit.index >= 0 && hit.index < static_cast<int>(vm.sidebar.size())) {
-                s->groupDragPending = true;
-                s->groupDragActive = false;
-                s->groupDragId = vm.sidebar[static_cast<size_t>(hit.index)].id;
-                // #80: the This PC title opens This PC (the empty path) on a
-                // plain click; the chevron and the rest of the header fold.
-                s->groupDragNavigate = hit.sub_index == 1 &&
-                    vm.sidebar[static_cast<size_t>(hit.index)].navigable;
-                s->groupDragPath.clear();
-                s->groupDragStartPt = POINT{ mx, my };
-                s->groupDragToIndex = -1;
-                s->groupGapVisible = false;
-                s->groupGapLineY = 0.0f;
-                SetCapture(hwnd);
-            }
-        } else if (hit.region == ui::HitTestResult::SidebarItemAction) {
-            std::wstring kind, rest;
-            if (app::ParsePulsePath(hit.path, &kind, &rest) && kind == L"workspace")
-                s->places.UnpinWorkspace(_wtoi(rest.c_str()));
-            InvalidateRect(hwnd, nullptr, FALSE);
-        } else if (hit.region == ui::HitTestResult::SidebarItemExpand) {
-            if (hit.path == app::MakeStarredPath()) {
-                s->starredExpanded = !s->starredExpanded;
-                InvalidateRect(hwnd, nullptr, FALSE);
-            }
-        } else if (hit.region == ui::HitTestResult::SidebarItem) {
-            // A section whose rows are the section itself (the starred root, the
-            // OneDrive accounts) has no header to grab: dragging a row moves the
-            // whole section, and a plain click still navigates on release.
-            const bool headerless_row =
-                hit.sidebar_section == static_cast<int>(app::SidebarSectionId::Cloud) ||
-                (hit.sidebar_section == static_cast<int>(app::SidebarSectionId::Starred) &&
-                 hit.path == app::MakeStarredPath());
-            const app::StarredItem* starred = s->places.FindStarred(hit.path);
-            const bool in_starred =
-                hit.sidebar_section == static_cast<int>(app::SidebarSectionId::Starred);
-            if (headerless_row) {
-                s->groupDragPending = true;
-                s->groupDragActive = false;
-                s->groupDragId = hit.sidebar_section;
-                s->groupDragPath = hit.path;
-                s->groupDragStartPt = POINT{ mx, my };
-                s->groupDragToIndex = -1;
-                s->groupGapVisible = false;
-                s->groupGapLineY = 0.0f;
-                SetCapture(hwnd);
-            } else if (in_starred && starred && starred->kind == app::PlaceItemKind::Folder) {
-                // A starred folder nested under the root row: reorder inside the
-                // starred list (only when the row really is in that section).
-                s->starDragPending = true;
-                s->starDragActive = false;
-                s->starDragStartPt = POINT{ mx, my };
-                s->starDragPath = hit.path;
-                const auto folders = s->places.StarredFolderPaths();
-                const auto found = std::find_if(folders.begin(), folders.end(), [&](const auto& p) {
-                    return _wcsicmp(p.c_str(), hit.path.c_str()) == 0;
-                });
-                s->starDragTarget = found == folders.end()
-                    ? 0 : static_cast<size_t>(found - folders.begin());
-                SetCapture(hwnd);
-            } else if (s->places.IsQuickAccessPinned(hit.path)) {
-                // Pinned rows reorder inside quick access; navigation waits for
-                // the release so a press can become a drag.
-                s->pinDragPending = true;
-                s->pinDragActive = false;
-                s->pinDragStartPt = POINT{ mx, my };
-                s->pinDragPath = hit.path;
-                s->pinDragRun = hit.index;
-                s->pinDragToIndex = -1;
-                s->pinGapVisible = false;
-                s->pinGapLineY = 0.0f;
-                SetCapture(hwnd);
-            } else if (hit.path.starts_with(L"pulse:tag:")) {
-                // Tags defer navigation to release; a press may become a reorder drag.
-                s->tagDragPending = true;
-                s->tagDragStartPt = POINT{ mx, my };
-                s->tagDragPath = hit.path;
-                std::wstring kind, rest;
-                app::ParsePulsePath(hit.path, &kind, &rest);
-                s->tagDragTag = s->places.FindTagIndex(s->places.ResolveTagRef(rest));
-                SetCapture(hwnd);
-            } else if (hit.path.starts_with(L"pulse:workspace:")) {
-                std::wstring kind, rest;
-                app::ParsePulsePath(hit.path, &kind, &rest);
-                OpenWorkspace(*s, _wtoi(rest.c_str()));
-            } else if (!hit.path.empty()) {
-                NavigateTo(*s, hit.path);
-            }
-        } else if (hit.region == ui::HitTestResult::StatusBarCancelSearch) {
-            if (auto* tab = ActiveTab(*s)) CancelActiveContentSearch(*s, *tab);
-            InvalidateRect(hwnd, nullptr, FALSE);
-        } else if (hit.region == ui::HitTestResult::StatusHintAction) {
-            // Re-derived at click time, so the action always matches the current state.
-            switch (CurrentStatusHintAction(*s)) {
-            case StatusHintAction::Tray: CollectToTray(*s, false); break;
-            case StatusHintAction::Compare: DispatchMenuCommand(*s, app::CmdCompareToggle); break;
-            case StatusHintAction::DiffOnly:
-            case StatusHintAction::ShowAll: DispatchMenuCommand(*s, app::CmdCompareDiffOnly); break;
-            case StatusHintAction::Advanced: DispatchMenuCommand(*s, app::CmdAdvancedSearch); break;
-            case StatusHintAction::Shortcuts: DispatchMenuCommand(*s, app::CmdShortcutHelp); break;
-            case StatusHintAction::OpenPath: DispatchMenuCommand(*s, app::CmdOpenPath); break;
-            case StatusHintAction::SearchSubfolders: SearchFilterInSubfolders(*s); break;
-            default: break;
-            }
-            InvalidateRect(hwnd, nullptr, FALSE);
-        } else if (hit.region == ui::HitTestResult::StatusBarTask) {
-            PinAndShowOperationWindow(*s);
-        } else if (hit.region == ui::HitTestResult::StatusBar) {
-            // Left/right status text is not a transfer control.
-        } else if (!IsSettingsTab(ActiveTab(*s)) &&
-                   (hit.region == ui::HitTestResult::Pane ||
-                   (PointInList(*s, mx, my) && hit.region == ui::HitTestResult::None))) {
-            app::Tab* tab = ActiveTab(*s);
-            const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-            // A selection-clearing first click still counts toward the
-            // blank double click, so the second click navigates back.
-            if (tab && !ctrl) tab->ClearSelection();
-            s->marqueePending = true;
-            s->marqueeActive = false;
-            s->marqueeAdditive = ctrl;
-            s->blankClickPane = s->pane;
-            s->blankClickTab = s->appPrefs.blank_click_action != app::kBlankClickOff && tab &&
-                !IsAddressSearchResults(tab) && !ctrl && PointInList(*s, mx, my) &&
-                (GetKeyState(VK_SHIFT) & 0x8000) == 0 &&
-                (GetKeyState(VK_MENU) & 0x8000) == 0 ? tab : nullptr;
-            s->blankClickGeneration = tab ? tab->view_generation : 0;
-            s->marqueeStart = s->marqueeCur = POINT{ mx, my };
-            s->marqueeBase.clear();
-            if (tab && ctrl) {
-                tab->MaterializeSelection();
-                s->marqueeBase = tab->selected;
-            }
-            SetCapture(hwnd);
-            InvalidateRect(hwnd, nullptr, FALSE);
+        } else {
+            HandleMouseDownRest(s, hwnd, vm, hit, mx, my);
         }
         return 0;
 }
@@ -2939,6 +3164,8 @@ LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPA
 }
 
 LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+        // The release is described by the cursor position and the modifiers the
+        // caller already folded into AppState; the raw message is not needed.
         (void)msg;
         (void)wParam;
         if (s) {
@@ -3001,6 +3228,10 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                         s->places.ReorderQuickAccessPinned(path,
                             static_cast<size_t>(s->pinDragToIndex));
                 }
+                // The taskbar jump list keeps the same order.
+                if (was_active && !tab_row)
+                    app::RefreshJumpList(s->places.quick_access_paths,
+                                         s->appPrefs.multi_instance_mode);
                 ResetSidebarPinDrag(*s);
                 if (GetCapture() == hwnd) ReleaseCapture();
                 if (!was_active && !path.empty() && !tab_row) NavigateTo(*s, path);
@@ -3081,6 +3312,16 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             }
             if (s->tabDragPending || s->tabDragging) {
                 const bool wasActive = s->tabDragging;
+                // The card is under the cursor by design, so it must be gone
+                // before the window under the cursor is resolved - otherwise the
+                // drop lands on the card and the hand-off is skipped.
+                s->tabDragGhost.Hide();
+                // Released over another Pulse window: the tab belongs to that
+                // window now, so this one drops it instead of reordering.
+                if (wasActive && HandOffTabUnderCursor(*s, hwnd)) {
+                    ResetTabDrag(*s, hwnd);
+                    return 0;
+                }
                 if (wasActive && s->pane && s->tabDragIndex >= 0 &&
                     s->tabDragIndex < static_cast<int>(s->window_tabs.items.size())) {
                     int cur = -1;
@@ -3175,32 +3416,22 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                         }
                         if (joined != 0) moved->tab_group = joined;
                         if (moved->tab_group != 0) app::NormalizeGroupRuns(s->window_tabs);
+                        // A tab changing groups may be the one a group remembers
+                        // as its last active tab, so the memory has to follow.
+                        PruneGroupActivations(*s);
                         // Groups with no members left disappear.
-                        auto& groups = s->window_tabs.tab_groups;
-                        for (auto git = groups.begin(); git != groups.end();) {
-                            bool used = false;
-                            for (const auto& t : s->window_tabs.items)
-                                if (t->tab_group == git->id) { used = true; break; }
-                            if (used) ++git; else git = groups.erase(git);
-                        }
+                        app::PruneEmptyGroups(s->window_tabs);
                     }
                 }
                 // Plain chip click (press without drag): toggle collapse.
                 if (s->tabDragFromChip && !wasActive && s->tabDragGroupId != 0) {
+                    // Collapsing the group that holds the active tab moves the
+                    // window to a visible one, so remember the tab left behind.
+                    RememberGroupActivation(*s, s->window_tabs.Active());
                     s->tabs.ToggleGroupCollapse(s->window_tabs, s->tabDragGroupId);
                     BindCurrentLayout(*s);
                 }
-                s->tabDragPending = false;
-                s->tabDragging = false;
-                s->tabDragIndex = -1;
-                s->tabDragRunPos = 0;
-                s->tabDragRunLen = 1;
-                s->tabDragFromChip = false;
-                s->tabDragGroupId = 0;
-                s->tabDragSlots = 1.0f;
-                s->tabOrder.clear();
-                if (GetCapture() == hwnd) ReleaseCapture();
-                InvalidateRect(hwnd, nullptr, FALSE);
+                ResetTabDrag(*s, hwnd);
                 return 0;
             }
             if (s->marqueeActive || s->marqueePending) {
@@ -3355,6 +3586,8 @@ LRESULT HandleCaptureChanged(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LP
                 s->tabDragFromChip = false;
                 s->tabDragGroupId = 0;
                 s->tabDragSlots = 1.0f;
+                s->tabDragExternal = false;
+                s->tabDragGhost.Hide();
                 s->tabOrder.clear();
                 s->tabTracks.clear();
                 s->tabOffsets.clear();
@@ -3427,6 +3660,14 @@ LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         ui::WindowViewModel vm = BuildVm(*s);
         D2D1_RECT_F rect = D2D1::RectF(0, 0, (float)s->compositor.Width(), (float)s->compositor.Height());
         ui::HitTestResult hit = s->renderer.HitTest(vm, rect, (float)mx, (float)my);
+        if (hit.region == ui::HitTestResult::TabGroupCardRow ||
+            hit.region == ui::HitTestResult::TabGroupCard) {
+            // The card owns that area while it is open, so a right-click there
+            // dismisses it. The hit is stale from here on, and no branch below
+            // matches a card region, so nothing else happens.
+            HideTabGroupCard(*s);
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
         if (hit.pane_index >= 0) {
             if (app::Pane* p = PaneAtSlot(*s, hit.pane_index)) FocusPane(*s, p);
         }
@@ -3437,6 +3678,7 @@ LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             hit.index < static_cast<int>(vm.tab_groups.size())) {
             // Group chip right-click: the Edge-style editor bubble.
             if (s->pane && EnsureMenu(*s)) {
+                RememberGroupActivation(*s, s->window_tabs.Active());
                 s->tabs.ShowGroupMenu(s->window_tabs,
                     vm.tab_groups[static_cast<size_t>(hit.index)].id, sp, *s->menu);
                 BindCurrentLayout(*s);
@@ -3446,7 +3688,9 @@ LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             // Every tab gets the Edge-style tab menu; group editing lives on
             // the chip (right-click) and in the editor bubble.
             if (s->pane && EnsureMenu(*s)) {
-                s->tabs.ShowTabMenu(s->window_tabs, hit.index, sp, *s->menu);
+                RememberGroupActivation(*s, s->window_tabs.Active());
+                s->tabs.ShowTabMenu(s->window_tabs, hit.index, sp, *s->menu,
+                                    s->appPrefs.multi_instance_mode);
                 BindCurrentLayout(*s);
             }
             shown = true;

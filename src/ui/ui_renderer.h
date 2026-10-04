@@ -66,7 +66,33 @@ struct TabGroupView {
     std::wstring name;
     uint32_t color_rgb = 0;
     bool collapsed = false;
+    bool has_active = false; // owns the active tab; the chip marks it
     float x_offset = 0.0f;  // px: chip slide during collapsed-group reorder
+};
+
+// One row of the Edge-style group hover card. Member rows switch to that tab;
+// the two trailing rows are the actions.
+struct TabGroupCardRow {
+    std::wstring text;
+    std::wstring glyph;      // Segoe Fluent Icons codepoint (action rows)
+    int tab_index = -1;      // >= 0: display index of a member tab
+    bool active = false;     // member row of the tab currently being viewed
+    bool new_tab = false;    // "New tab in group"
+    bool edit = false;       // "Edit group"
+    bool separator_after = false;
+    // Member row of the tab last used inside this group while it does not own
+    // the active tab: drawn with a faint check, never together with `active`.
+    bool was_active = false;
+};
+
+// Hover card for a group chip: member tabs of a collapsed group (nothing when
+// the group is expanded) followed by the action rows.
+struct TabGroupCardView {
+    bool visible = false;
+    int group_id = 0;
+    int chip_index = -1;     // index into WindowViewModel::tab_groups
+    int hover_row = -1;
+    std::vector<TabGroupCardRow> rows;
 };
 
 struct ListEntryView {
@@ -615,6 +641,7 @@ struct WindowViewModel {
         std::wstring title, body, primary, never;
     } teach;
     ChangePopover change_popover;
+    TabGroupCardView tab_group_card;
     float tooltip_x = 0.0f;
     float tooltip_y = 0.0f;
 
@@ -665,6 +692,7 @@ struct WindowViewModel {
     bool settings_show_hidden_files = false;
     bool settings_show_protected_os_files = false;
     bool show_pinned_tab_names = true;
+    bool settings_multi_instance_mode = false;
     bool settings_list_smart_date = true;
     bool settings_list_zebra_rows = true;
     bool settings_list_size_bar = false;
@@ -914,6 +942,8 @@ struct HitTestResult {
         ToolbarGroup,        // toolbar "Group" button / active chip: open the group menu
         ToolbarGroupClear,   // "x" on the active group chip: stop grouping
         SettingsPreviewStore,  // Settings > Quick Look formats: get a missing system extension (index = row)
+        TabGroupCard,             // group hover card surface (padding/gaps)
+        TabGroupCardRow           // one row inside the hover card
     } region = None;
     SidebarAddAction sidebar_action = SidebarAddAction::None;
     int index = -1;          // tab/row/sidebar item/tray batch/tray item.

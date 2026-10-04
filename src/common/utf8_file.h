@@ -75,7 +75,10 @@ inline bool ReadUtf8File(const std::wstring& path, std::wstring& text) {
 inline bool WriteUtf8FileAtomic(const std::wstring& path, const std::wstring& text) {
     std::vector<uint8_t> bytes;
     if (!EncodeUtf8Bytes(text, bytes)) return false;
-    const std::wstring temp = path + L".tmp";
+    // One temp name per process: two Pulse windows saving the same file at once used
+    // to collide on a single "<path>.tmp", and the loser's CreateFileW failed, which
+    // silently dropped that save.
+    const std::wstring temp = path + L".tmp." + std::to_wstring(GetCurrentProcessId());
     HANDLE file = CreateFileW(temp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
     if (file == INVALID_HANDLE_VALUE) return false;
@@ -103,6 +106,24 @@ inline bool WriteUtf8FileAtomic(const std::wstring& path, const std::wstring& te
         return false;
     }
     return true;
+}
+
+// Save() policy shared by the two JSON settings files, one copy so they cannot drift.
+// Sets the unreadable file aside as <path>.bad instead of overwriting the only copy of
+// it; false means the rename failed (another process holds the file) and the caller
+// must leave the file alone.
+inline bool QuarantineUnreadableFile(const std::wstring& path) {
+    const std::wstring quarantine = path + L".bad";
+    DeleteFileW(quarantine.c_str());
+    if (!MoveFileExW(path.c_str(), quarantine.c_str(), MOVEFILE_REPLACE_EXISTING))
+        return false;
+    return true;
+}
+
+// Keeps the previous file one step back as <path>.bak for the next Load() to fall back
+// to. Best effort: a failed copy only costs the fallback.
+inline void KeepPreviousFileCopy(const std::wstring& path) {
+    CopyFileW(path.c_str(), (path + L".bak").c_str(), FALSE);
 }
 
 } // namespace pulse

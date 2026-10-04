@@ -1358,3 +1358,17 @@
 #define IDS_UI_FONT_DEFAULT 2522
 #define IDS_UI_FONT_LARGE 2523
 #define IDS_UI_FONT_LARGER 2524
+
+// Second window: tab menu entry and tray menu entry. (Renumbered past the newest
+// upstream ids, which landed on main after this branch started.)
+#define IDS_TAB_OPEN_NEW_WINDOW 2525
+#define IDS_TRAY_NEW_WINDOW 2526
+#define IDS_JUMPLIST_PINNED 2527
+
+// Tab-group hover card.
+#define IDS_TAB_GROUP_EDIT 2528
+// Recent/starred item menu: reveal the row in its containing folder.
+#define IDS_OPEN_ITEM_LOCATION 2529
+// Settings: several Pulse windows at once (torn-off tabs, jump-list windows).
+#define IDS_SETTINGS_MULTI_INSTANCE 2530
+#define IDS_SETTINGS_MULTI_INSTANCE_DESC 2531

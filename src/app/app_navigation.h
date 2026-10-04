@@ -35,10 +35,15 @@ void MaybePrefetchSearchPage(AppState& s);
 void CancelActiveContentSearch(AppState& s, app::Tab& tab);
 enum class PathLoadReason { Navigate, RestoreSession, History };
 void MarkContentSearchStopped(app::Tab& tab);
+// quiet = false blanks the view and raises its loading state; a background refresh passes true
+// so the rows already on screen stay there while the new list is read.
 void LoadVirtualView(AppState& s, app::Tab& tab, const std::wstring& path,
-                     PathLoadReason reason = PathLoadReason::Navigate);
+                     PathLoadReason reason = PathLoadReason::Navigate, bool quiet = false);
 // Saved "group by" for a folder, else the Downloads/Recent Date default.
 int FolderGroupFor(const AppState& s, const std::wstring& path);
+// Re-reads the path-backed virtual views (Recent, starred, a tag) whose files live in folders
+// that nothing watches. Network paths are skipped unless allow_network_paths is set.
+void RefreshPathBackedViews(AppState& s, bool allow_network_paths);
 void StartLoadingPath(AppState& s, app::Tab& tab, const std::wstring& path,
                       PathLoadReason reason = PathLoadReason::Navigate);
 void ApplyWorkerResult(AppState& s, app::WorkResult& res);
@@ -105,4 +110,15 @@ float TabFlashAmount(const AppState& s, const app::LayoutTab* key);
 bool SyncTagGroups(AppState& s);
 // Advances the pulse; false once it has finished (or none is running).
 bool TickTabFlash(AppState& s);
+
+// Remembers `outgoing`, which has just stopped being the active tab, as the
+// last tab used inside its group. The group chip's hover card draws that tab
+// with a faint check when the group no longer owns the active tab. Passing a
+// tab that is still active is harmless (it is the most recent one in its
+// group); passing an ungrouped or null tab records nothing.
+void RememberGroupActivation(AppState& s, const app::LayoutTab* outgoing);
+// Drops remembered tabs that are no longer members of their group, which covers
+// tabs closed inside the tab controller and groups that lost their members.
+// Addresses are only compared, so a stale pointer is never dereferenced.
+void PruneGroupActivations(AppState& s);
 } // namespace pulse

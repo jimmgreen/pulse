@@ -1577,4 +1577,6 @@ BEGIN
     IDS_UI_FONT_DEFAULT "標準"
     IDS_UI_FONT_LARGE "大"
     IDS_UI_FONT_LARGER "特大"
+ IDS_SETTINGS_MULTI_INSTANCE "多視窗模式"
+ IDS_SETTINGS_MULTI_INSTANCE_DESC "允許多個 Pulse 視窗同時使用：分頁可拖出成新視窗，選單和跳轉清單可在新視窗開啟；關閉時所有入口都在目前的視窗新增分頁"
 END

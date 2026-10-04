@@ -32,6 +32,7 @@ enum class SettingsEffect : uint32_t {
     FolderSort = 1u << 11,
     TextRendering = 1u << 12,
     UiFontSize = 1u << 13,
+    MultiInstance = 1u << 14,
 };
 
 constexpr SettingsEffect operator|(SettingsEffect left, SettingsEffect right) noexcept {
