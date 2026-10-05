@@ -897,3 +897,5 @@ add_executable(pulse_link_destination_test src/bench/link_destination_test.cpp s
 target_link_libraries(pulse_link_destination_test PRIVATE pulse_localization shell32 shlwapi netapi32 ole32 uuid)
 add_executable(pulse_link_pill_test src/bench/link_pill_test.cpp)
 target_link_libraries(pulse_link_pill_test PRIVATE user32)
+add_executable(pulse_quick_preview_follow_test src/bench/quick_preview_follow_test.cpp)
+target_link_libraries(pulse_quick_preview_follow_test PRIVATE user32)

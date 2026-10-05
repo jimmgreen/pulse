@@ -17,6 +17,7 @@
 #include "../ui/batch_rename_dialog.h"
 #include "../ui/advanced_search_dialog.h"
 #include "../ui/quick_preview_window.h"
+#include "quick_preview_follow.h"
 #include "../ui/typography.h"
 #include "../ui/color_picker.h"
 #include "../common/localization.h"
@@ -2337,6 +2338,32 @@ void SyncQuickPreview(AppState& s) {
         }
     }
     s.quickPreview.Close();
+}
+
+void SyncQuickPreviewSelection(AppState& s) {
+    if (!s.quickPreview.visible()) return;
+    app::Tab* tab = ActiveTab(s);
+    if (!tab) return;
+    // Content-search rows are paged in asynchronously, so the focused row can
+    // briefly have no entry yet. The readiness signal is the row itself, not
+    // the tab: EntryAt() hands back a change_record_only placeholder until the
+    // page lands, EntryFullPath() then yields "", and SelectedQuickPreviewItem()
+    // reports "not previewable" below - the window keeps its entry and the next
+    // painted frame follows. Gating on content_action_ready here instead froze
+    // the follow for the whole session: that flag only pins rows around a batch
+    // action (content_results_ui.cpp sets it true and clears it again in the
+    // same function) and is false while merely browsing. DeferContentSelection
+    // is likewise not used here: it enqueues a job per call, and this runs on
+    // every painted frame.
+    ui::QuickPreviewItem item;
+    if (!SelectedQuickPreviewItem(s, item)) return;  // pending or not previewable: keep showing
+    if (app::DecideQuickPreviewFollow(s.quickPreview.item(), item.path, item.modified,
+                                      item.size, item.attrs) == app::QuickPreviewFollow::Stay)
+        return;
+    // The target changed explicitly, so any pending delete anchor is stale;
+    // keeping it would step the next removal from an outdated view row.
+    s.quickPreviewAnchorView = -1;
+    s.quickPreview.Update(item);
 }
 
 void EnsureEditVisuals(AppState& s);
