@@ -108,6 +108,12 @@ void HandleQuickPreviewCommand(AppState& s, ui::QuickPreviewAction action, bool 
 // snapshot refresh or directory notification: reloads a changed file,
 // re-anchors after an in-preview delete, closes when the entry is gone.
 void SyncQuickPreview(AppState& s);
+// Points an open quick preview at the focused row of the active tab (#91).
+// Runs once per painted frame and only reads tab->selected_index, so it never
+// closes the window and never re-anchors: refresh-driven work (reload on disk
+// change, step to the neighbour after a delete, close when the entry is gone)
+// stays with SyncQuickPreview above.
+void SyncQuickPreviewSelection(AppState& s);
 void ApplySettingsEffects(AppState& s, app::SettingsEffect effects);
 app::SettingsTaskCompletion SettingsCompletion(HWND hwnd);
 void SetThemeMode(AppState& s, int mode);

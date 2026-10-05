@@ -17,6 +17,7 @@
 #include "../ui/batch_rename_dialog.h"
 #include "../ui/advanced_search_dialog.h"
 #include "../ui/quick_preview_window.h"
+#include "quick_preview_follow.h"
 #include "../ui/typography.h"
 #include "../ui/color_picker.h"
 #include "../common/localization.h"
@@ -2337,6 +2338,27 @@ void SyncQuickPreview(AppState& s) {
         }
     }
     s.quickPreview.Close();
+}
+
+void SyncQuickPreviewSelection(AppState& s) {
+    if (!s.quickPreview.visible()) return;
+    app::Tab* tab = ActiveTab(s);
+    if (!tab) return;
+    // Content-search rows resolve asynchronously (content_results_ui.cpp), so
+    // right after the selection moves, selected_index can still name the
+    // previous row. Skipping one frame lets the resolve land first.
+    // DeferContentSelection is deliberately not used here: it enqueues a job
+    // per call and this runs on every painted frame.
+    if (tab->content_results && !tab->content_action_ready) return;
+    ui::QuickPreviewItem item;
+    if (!SelectedQuickPreviewItem(s, item)) return;  // not previewable: keep showing
+    if (app::DecideQuickPreviewFollow(s.quickPreview.item(), item.path, item.modified,
+                                      item.size, item.attrs) == app::QuickPreviewFollow::Stay)
+        return;
+    // The target changed explicitly, so any pending delete anchor is stale;
+    // keeping it would step the next removal from an outdated view row.
+    s.quickPreviewAnchorView = -1;
+    s.quickPreview.Update(item);
 }
 
 void EnsureEditVisuals(AppState& s);

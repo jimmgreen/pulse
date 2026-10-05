@@ -193,6 +193,11 @@ void Render(AppState& s) {
 
     UpdateProcessMetrics(s);
     ui::WindowViewModel vm = BuildVm(s);
+    // The quick preview follows tab->selected_index, the same mechanism as the
+    // details pane's detailsSelPath above; it must stay out of BuildVm because
+    // hit-testing calls that with probe_details=false and mouse moves must not
+    // reload the preview.
+    SyncQuickPreviewSelection(s);
     vm.backdrop_enabled = !hc && s.compositor.UsesTransparentComposition() && s.backdropActive;
     vm.pane.hover_index = s.hoverRow;
 
@@ -2551,6 +2556,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
             extern int RunSettingsFlowTest(AppState&,const wchar_t*);
             const int result=RunSettingsFlowTest(state,settings_flow);
             DestroyWindow(hwnd);OleUninitialize();return result;
+        }
+        wchar_t follow_output[32768]{};
+        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_QUICK_PREVIEW_FOLLOW", follow_output, ARRAYSIZE(follow_output))) {
+            extern int RunQuickPreviewFollowTest(AppState&, const wchar_t*);
+            const int result = RunQuickPreviewFollowTest(state, follow_output);
+            DestroyWindow(hwnd);
+            OleUninitialize();
+            return result;
         }
         wchar_t flow_output[32768]{};
         if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_SEARCH_FLOW", flow_output, ARRAYSIZE(flow_output))) {

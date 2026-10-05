@@ -43,7 +43,7 @@ $testNames = @('pulse_rename_ops_test', 'pulse_child_edit_test', 'pulse_localiza
     'pulse_link_destination_test', 'pulse_link_pill_test', 'pulse_shell_icons_test',
     'pulse_change_tracking_memory_test', 'pulse_change_feed_memory_test', 'pulse_usn_packet_queue_test',
     'pulse_content_progress_ui_test', 'pulse_operation_presentation_test', 'pulse_column_strip_test',
-    'pulse_file_lock_test', 'pulse_dialogs_test')
+    'pulse_file_lock_test', 'pulse_dialogs_test', 'pulse_quick_preview_follow_test')
 $testTargets = (@('pulse', 'pulse_index_engine_test', 'pulse_index_host_stress',
     'pulse_preview_test', 'pulse_preview_handler_probe', 'pulse_playback_controls_test', 'pulse_ops_test') + $testNames) -join ' '
 $batch = Join-Path $build 'compile-release.bat'
@@ -134,6 +134,18 @@ Remove-Item Env:PULSE_TEST_SEARCH_FLOW, Env:PULSE_TEST_CONTENT_LIVE_SELECTION
 if (-not $liveDone -or $live.ExitCode -ne 0) {
     Get-Content $liveLog -ErrorAction SilentlyContinue
     throw 'Live content selection regression failed'
+}
+$followLog = Join-Path $build 'quick-preview-follow.log'
+$env:PULSE_TEST_QUICK_PREVIEW_FOLLOW = $followLog
+$follow = Start-Process -FilePath (Join-Path $build 'pulse.exe') -ArgumentList '--test-instance', '--shot',
+    (Join-Path $build 'quick-preview-follow.png'), $env:TEMP -WindowStyle Hidden -PassThru
+$followDone = $follow.WaitForExit(60000)
+if (-not $followDone) { $follow.Kill(); $follow.WaitForExit() }
+$follow.Refresh()
+Remove-Item Env:PULSE_TEST_QUICK_PREVIEW_FOLLOW
+if (-not $followDone -or $follow.ExitCode -ne 0) {
+    Get-Content $followLog -ErrorAction SilentlyContinue
+    throw 'Quick preview follow-selection regression failed'
 }
 Remove-Item Env:PULSE_LUMATEXT
 # Strip the embedded test suite from the shipped executable after verification.
