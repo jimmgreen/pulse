@@ -29,7 +29,7 @@ cd "ffmpeg-${VERSION}"
 
 # Filters: scaling / pixel formats / rotation for thumbnails, tiling for
 # storyboards, resampling for audio playback.
-FILTERS=scale,setsar,format,null,anull,transpose,hflip,vflip,select,fps,tile,pad,thumbnail,aresample,aformat,volume
+FILTERS=scale,setsar,format,null,anull,transpose,hflip,vflip,select,fps,tile,pad,thumbnail,aresample,aformat,volume,atempo
 
 ./configure \
     --prefix="$WORK/prefix" \
@@ -73,3 +73,9 @@ License: GNU Lesser General Public License 2.1 or later (no GPL or nonfree parts
 EOF
 "$OUT/ffmpeg.exe" -hide_banner -buildconf > "$OUT/BUILDCONF.txt"
 echo "built: $(ls -la "$OUT")"
+
+# Playback requires these filters in the shipped binary, not just a developer FFmpeg.
+"$OUT/ffmpeg.exe" -hide_banner -filters > "$WORK/pack-filters.txt"
+for filter in fps scale format atempo; do
+    grep -Eq "[[:space:]]${filter}[[:space:]]" "$WORK/pack-filters.txt"
+done

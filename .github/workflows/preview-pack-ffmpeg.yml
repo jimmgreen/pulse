@@ -12,6 +12,7 @@ on:
         required: true
         default: '7.1.1'
   push:
+    branches: ['codex/pack-download-build']
     tags: ['pack-ffmpeg-[0-9]*']
 
 permissions:
@@ -40,7 +41,7 @@ jobs:
           if [[ "${GITHUB_REF}" == refs/tags/pack-ffmpeg-* ]]; then
             echo "value=${GITHUB_REF#refs/tags/pack-ffmpeg-}" >> "$GITHUB_OUTPUT"
           else
-            echo "value=${{ inputs.ffmpeg_version }}" >> "$GITHUB_OUTPUT"
+            echo "value=${{ inputs.ffmpeg_version || '7.1.1' }}" >> "$GITHUB_OUTPUT"
           fi
       - name: Build
         # Windows runners check out with CRLF; bash needs LF.
