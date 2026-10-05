@@ -131,7 +131,7 @@ void WorkerPool::EnqueueSerialIo(std::function<void()> task) {
     cv_.notify_one();
 }
 
-WorkResult WorkerPool::Process(const WorkItem& item) {
+WorkResult WorkerPool::Process(const WorkItem& item, const ResultCallback& emit) {
     WorkResult res;
     res.path = item.path;
     res.generation = item.generation;
@@ -140,6 +140,46 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
 
     auto t0 = std::chrono::steady_clock::now();
     auto entries = std::make_shared<std::vector<fs::DirEntry>>();
+    // A big folder or bin publishes what it has while the scan runs, so the list fills
+    // in instead of staying empty for the whole read. The first batch is small (the
+    // skeleton is replaced quickly); every next one may grow by half again, which
+    // bounds the total copy/sort work on both threads no matter how many rows there
+    // are. At most one batch goes out per kStreamMinIntervalMs.
+    constexpr size_t kStreamFirstBatch = 2048;
+    constexpr size_t kStreamGrowthNumerator = 3;
+    constexpr size_t kStreamGrowthDenominator = 2;
+    constexpr ULONGLONG kStreamMinIntervalMs = 120;
+    size_t emitted_items = 0;
+    ULONGLONG last_emit_tick = GetTickCount64();
+    const auto emit_partial = [&]() -> bool {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto it = current_gen_.find(item.request_key);
+            if (!running_ || it == current_gen_.end() || it->second != item.generation)
+                return false; // Navigating away: stop the scan instead of feeding rows.
+        }
+        if (!emit) return true;
+        const size_t gathered = entries->size();
+        if (gathered < emitted_items + kStreamFirstBatch ||
+            gathered * kStreamGrowthDenominator < emitted_items * kStreamGrowthNumerator)
+            return true;
+        const ULONGLONG now = GetTickCount64();
+        if (now - last_emit_tick < kStreamMinIntervalMs) return true;
+        last_emit_tick = now;
+        emitted_items = gathered;
+        auto snapshot = std::make_shared<std::vector<fs::DirEntry>>(*entries);
+        std::sort(snapshot->begin(), snapshot->end(),
+            [&](const fs::DirEntry& a, const fs::DirEntry& b) {
+                return EntryLess(a, b, item.sort_column, item.sort_direction);
+            });
+        WorkResult part;
+        part.path = item.path;
+        part.generation = item.generation;
+        part.snapshot = std::move(snapshot);
+        part.partial = true;
+        try { emit(std::move(part)); } catch (...) {}
+        return true;
+    };
     if (item.load_paths) {
         entries->reserve(item.paths.size());
         for (size_t i = 0; i < item.paths.size(); ++i) {
@@ -186,7 +226,12 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
         }
     } else if (fs::IsRecycleViewPath(item.path)) {
         try {
-            fs::EnumerateRecycleBin(*entries, &res.recycle_info);
+            const bool completed = fs::EnumerateRecycleBin(*entries, &res.recycle_info,
+                [&](const std::vector<fs::DirEntry>&) { return emit_partial(); });
+            if (!completed) {
+                res.cancelled = true;
+                return res;
+            }
         } catch (...) {
             res.error = true;
             res.snapshot = nullptr;
@@ -194,7 +239,12 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
         }
     } else {
         try {
-            fs::EnumerateDirectory(item.path, *entries);
+            const bool completed = fs::EnumerateDirectory(item.path, *entries,
+                [&](const std::vector<fs::DirEntry>&) { return emit_partial(); });
+            if (!completed) {
+                res.cancelled = true;
+                return res;
+            }
         } catch (...) {
             res.error = true;
             res.snapshot = nullptr;
@@ -306,7 +356,7 @@ void WorkerPool::WorkerThread() {
         }
         const auto started = GetTickCount64();
         diagnostics::runtime::Event("navigation_start", {{"generation", item.generation}, {"load_paths", item.load_paths}});
-        WorkResult res = Process(item);
+        WorkResult res = Process(item, callback_);
         diagnostics::runtime::Event("navigation_end", {{"generation", item.generation},
             {"cancelled", res.cancelled}, {"error", res.error},
             {"entries", res.snapshot ? res.snapshot->size() : 0},

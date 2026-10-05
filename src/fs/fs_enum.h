@@ -3,6 +3,7 @@
 #pragma once
 #include <windows.h>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -62,8 +63,15 @@ std::wstring ParentPath(const std::wstring& path);
 // "计算图形.dwg.lnk" -> "计算图形.dwg" for display.
 std::wstring StripLnkSuffix(const std::wstring& name);
 
+// Progress hook for a long enumeration: called between batches with everything
+// gathered so far (the vector being filled; do not modify it). Returning false stops
+// the scan, and the call then reports false as well. Failures still throw.
+using EnumerateProgress = std::function<bool(const std::vector<DirEntry>&)>;
+
 // Enumerate a directory into out. Throws std::runtime_error on failure.
-void EnumerateDirectory(const std::wstring& path, std::vector<DirEntry>& out);
+// Returns false when a progress callback asked to stop.
+bool EnumerateDirectory(const std::wstring& path, std::vector<DirEntry>& out,
+                        const EnumerateProgress& progress = {});
 
 // Metadata-only lookup for worker-side updates; never follows the target.
 DWORD ReadReparseTag(const std::wstring& path);

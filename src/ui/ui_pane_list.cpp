@@ -2066,10 +2066,12 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
     MakeBrush(dc, theme.fill_hover, brFillHover_);
     MakeBrush(dc, pane_focused ? theme.fill_selected : theme.fill_selected_inactive, brFillSelected_);
     MakeBrush(dc, theme.accent, brAccent_);
-    if (vm.loading && !vm.search_retaining_results) {
+    if (vm.loading && !vm.search_retaining_results && vm.EntryCount() == 0) {
         // Directory enumeration is asynchronous. Leave the list quiet for its
         // brief initial frame instead of presenting it like a search request;
-        // slow folders get placeholder rows after 150 ms.
+        // slow folders get placeholder rows after 150 ms. Rows that arrive while
+        // the scan still runs are shown instead: a big folder fills in as it is
+        // read rather than staying behind the placeholders to the end.
         DrawListSkeleton(D2D1::RectF(x, y, x + w, y + h), theme, pane_index);
         return;
     }

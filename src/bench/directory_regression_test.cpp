@@ -44,10 +44,10 @@ int main() {
     std::vector<pulse::fs::DirEntry> out;
     next_error = ERROR_ACCESS_DENIED;
     bool threw = false;
-    try { pulse::fs::EnumerateFindFirstFileEx(dir.wstring(), out); } catch (...) { threw = true; }
+    try { pulse::fs::EnumerateFindFirstFileEx(dir.wstring(), out, {}); } catch (...) { threw = true; }
     Check(threw && out.empty(), "DIR-03 fallback enumeration rejects non-EOF and partial snapshot");
     next_error = 0;
-    pulse::fs::EnumerateFindFirstFileEx(dir.wstring(), out);
+    pulse::fs::EnumerateFindFirstFileEx(dir.wstring(), out, {});
     Check(out.size() == 1, "DIR-03 normal EOF succeeds");
     open_entered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     open_release = CreateEventW(nullptr, TRUE, FALSE, nullptr);

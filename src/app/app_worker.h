@@ -43,6 +43,9 @@ struct WorkResult {
     std::wstring git_root;
     bool cancelled = false;
     bool error = false;
+    // Rows gathered so far by a still-running scan (a big folder or bin). A partial
+    // result only refreshes the rows; the final one owns ordering, totals and the store.
+    bool partial = false;
     double enum_ms = 0.0;
     double sort_ms = 0.0;
     fs::RecycleBinInfo recycle_info;
@@ -74,7 +77,9 @@ public:
 
 private:
     void WorkerThread();
-    WorkResult Process(const WorkItem& item);
+    // emit receives the progressive rows of a long scan; it may be called several
+    // times before Process returns the final result (and never for fast scans).
+    WorkResult Process(const WorkItem& item, const ResultCallback& emit);
 
     ResultCallback callback_;
     std::vector<std::thread> threads_;

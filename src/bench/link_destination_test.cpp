@@ -129,6 +129,42 @@ static void TestNotifyRefresh(const std::filesystem::path& root,
     }
 }
 
+static void TestEnumerationProgress(const std::filesystem::path& root) {
+    using namespace pulse;
+    const auto folder = root / L"progress";
+    std::filesystem::create_directories(folder);
+    constexpr int kFiles = 5000;
+    for (int i = 0; i < kFiles; ++i)
+        std::ofstream(folder / (L"p" + std::to_wstring(i) + L".tmp")) << "x";
+
+    size_t calls = 0;
+    size_t last_count = 0;
+    bool increasing = true;
+    std::vector<fs::DirEntry> entries;
+    const bool completed = fs::EnumerateDirectory(folder.wstring(), entries,
+        [&](const std::vector<fs::DirEntry>& gathered) {
+            ++calls;
+            increasing = increasing && gathered.size() >= last_count;
+            last_count = gathered.size();
+            return true;
+        });
+    Check(completed && entries.size() == kFiles,
+        "enumeration progress: every file enumerated");
+    Check(calls >= 2 && increasing && last_count == entries.size(),
+        "enumeration progress: batches grow with the listing");
+
+    // Returning false stops the scan; the call reports it instead of failing.
+    size_t stop_calls = 0;
+    std::vector<fs::DirEntry> stopped;
+    const bool stopped_ok = fs::EnumerateDirectory(folder.wstring(), stopped,
+        [&](const std::vector<fs::DirEntry>&) {
+            ++stop_calls;
+            return false;
+        });
+    Check(!stopped_ok && stop_calls == 1 && !stopped.empty() && stopped.size() < entries.size(),
+        "enumeration progress: a stop request ends the scan and reports it");
+}
+
 int main() {
     using namespace pulse;
     const auto root = std::filesystem::absolute(L"bench_data/link-destination-" +
@@ -208,6 +244,7 @@ int main() {
         "deleted target clears prior penetration metadata while retaining saved destination");
     Check(!app::ResolveLink((root / L"bad.lnk").wstring(), reused) && reused.link_destination.empty(),
         "unreadable shortcut clears prior display destination");
+    TestEnumerationProgress(root);
     if (junction) RemoveDirectoryW((root / L"junction").c_str());
     if (symlink) DeleteFileW((root / L"relative-link").c_str());
     if (cycle) DeleteFileW((root / L"cycle").c_str());

@@ -1157,6 +1157,25 @@ void ApplyWorkerResult(AppState& s, app::WorkResult& res) {
         InvalidateRect(s.hwnd, nullptr, FALSE);
         return;
     }
+    // Progressive rows from a still-running scan (a big folder or bin): show what has
+    // been gathered so far. Selection, generations, the snapshot store and the banners
+    // belong to the final result; loading stays set so the status bar keeps reporting
+    // the growing count and the final result still lands normally.
+    if (res.partial) {
+        if (!res.snapshot) return;
+        ForEachPane(s, [&](app::Pane& pane) {
+            app::Tab* tab = pane.ActiveTab();
+            if (!tab || tab->current_path != res.path) return;
+            if (tab->pending_generation != res.generation) return;
+            if (tab->applied_generation != 0 && res.generation < tab->applied_generation) return;
+            // A refresh that merges into the shown order keeps its rows where they are
+            // until the final result; progressive batches would shuffle them.
+            if (tab->refresh_keeps_order) return;
+            tab->SetSnapshot(res.snapshot);
+        });
+        InvalidateRect(s.hwnd, nullptr, FALSE);
+        return;
+    }
     const bool again = res.snapshot && !fs::IsVirtualPath(res.path) &&
                        s.store.IsDirty(res.path);
     if (res.snapshot && !fs::IsVirtualPath(res.path)) {

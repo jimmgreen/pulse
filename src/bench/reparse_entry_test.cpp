@@ -85,8 +85,8 @@ int main() {
     for (bool native : {true, false}) {
         std::vector<DirEntry> entries;
         try {
-            if (native) EnumerateNtQuery(NormalizePath(root.wstring()), entries);
-            else EnumerateFindFirstFileEx(NormalizePath(root.wstring()), entries);
+            if (native) EnumerateNtQuery(NormalizePath(root.wstring()), entries, {});
+            else EnumerateFindFirstFileEx(NormalizePath(root.wstring()), entries, {});
             bool found = false, ordinary = false, found_dir_link = false, found_file_link = false;
             for (const auto& e : entries) {
                 if (e.name == L"junction") found = e.is_dir &&
