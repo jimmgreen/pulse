@@ -2344,14 +2344,19 @@ void SyncQuickPreviewSelection(AppState& s) {
     if (!s.quickPreview.visible()) return;
     app::Tab* tab = ActiveTab(s);
     if (!tab) return;
-    // Content-search rows resolve asynchronously (content_results_ui.cpp), so
-    // right after the selection moves, selected_index can still name the
-    // previous row. Skipping one frame lets the resolve land first.
-    // DeferContentSelection is deliberately not used here: it enqueues a job
-    // per call and this runs on every painted frame.
-    if (tab->content_results && !tab->content_action_ready) return;
+    // Content-search rows are paged in asynchronously, so the focused row can
+    // briefly have no entry yet. The readiness signal is the row itself, not
+    // the tab: EntryAt() hands back a change_record_only placeholder until the
+    // page lands, EntryFullPath() then yields "", and SelectedQuickPreviewItem()
+    // reports "not previewable" below - the window keeps its entry and the next
+    // painted frame follows. Gating on content_action_ready here instead froze
+    // the follow for the whole session: that flag only pins rows around a batch
+    // action (content_results_ui.cpp sets it true and clears it again in the
+    // same function) and is false while merely browsing. DeferContentSelection
+    // is likewise not used here: it enqueues a job per call, and this runs on
+    // every painted frame.
     ui::QuickPreviewItem item;
-    if (!SelectedQuickPreviewItem(s, item)) return;  // not previewable: keep showing
+    if (!SelectedQuickPreviewItem(s, item)) return;  // pending or not previewable: keep showing
     if (app::DecideQuickPreviewFollow(s.quickPreview.item(), item.path, item.modified,
                                       item.size, item.attrs) == app::QuickPreviewFollow::Stay)
         return;

@@ -165,14 +165,15 @@
   5. `s.quickPreviewAnchorView = -1;` —— 已显式换目标，清掉删除锚点，
      否则下一次删除后的邻接跳转会从过期行号起跳（现有 anchor 语义见
      `app_state.h:176-179`）。
-- **`DeferContentSelection` 怎么办**：内容搜索结果里选中项是异步 resolve 的
-  （`content_results_ui.cpp:164`），选中瞬间 `selected_index` 可能指向旧行。
-  这里**不能**像 `ToggleQuickPreview`（`:2197`）那样把整个动作塞进
-  `DeferContentSelection`——那会为每一帧排一个 job。正确做法是跟随时先判
-  `tab->content_results && !tab->content_action_ready`（或
-  `tab->selection_revision` 在两次 resolve 之间变化）就本次跳过，
-  由 resolve 完成后的下一帧再跟。**这一条必须在实现里显式写注释说明为何不用
-  `DeferContentSelection`。**
+- **`DeferContentSelection` 怎么办**：不能像 `ToggleQuickPreview`（`:2197`）那样把整个动作塞进
+  `DeferContentSelection`——那会为每一帧排一个 job。但也**不能**拿
+  `tab->content_action_ready` 当就绪信号（初稿如此，已在 PR #100 审查回合改正）：
+  该字段只服务于「批量操作期间临时钉住跨页选中的行」，在 `CompleteContentSelection()` 内
+  **置 true 后又在同一个函数内清回 false**（`content_results_ui.cpp:226` / `:231`），
+  正常浏览时恒为 false。用它做守卫 → 内容搜索下无条件早退，预览整场都不跟随。
+  行是否已分页由行自己回答：`EntryAt()` 在页未落地时返回 `change_record_only` 占位，
+  `EntryFullPath()` 随即给空串，`SelectedQuickPreviewItem()` 判为不可预览 → 本帧保持，
+  页落地后的下一帧自然跟上。**实现里写的是这层语义，不再引用 `content_action_ready`。**
 
 ### 步骤 3：挂到渲染循环
 
@@ -238,7 +239,7 @@
 | 预览窗开着用方向键翻页 | 行为与改动前一致（不应双重切换） |
 | 预览窗内 Delete | 仍邻接下一项，不跳错行 |
 | 缩放/滚动到某图后切走再切回 | 缩放回到默认 fit（`ResetView` 语义） |
-| 内容搜索结果里切换选中 | 不出现预览上一帧的错位内容 |
+| 内容搜索结果里切换选中 | 预览**与普通列表一致地跟随**；短暂未分页的行本帧保持，不出现错位内容 |
 | 深色/浅色主题下切换 | 无残留旧画面 |
 | 快速连续点击 10 个不同扩展名 | 无崩溃、无窗口句柄泄漏 |
 
@@ -269,7 +270,7 @@
 | --- | --- | --- |
 | 每帧 paint 调用引入开销 | 预览不可见时是 2 次分支判断，可见时多一次路径比较 | `visible()` 首行早退；纯判定是字符串比较，无 IO、无锁 |
 | 按住方向键时视频反复启停 | 观感卡顿 | 纯判定挡同路径；跨路径切换是用户主动行为，且已有 `generation_` 取消 |
-| 内容搜索异步选中导致显示错位 | 预览显示上一个文件 | §3 步骤 2 的 `content_action_ready` 跳过 |
+| 内容搜索异步分页导致显示错位 | 预览显示上一个文件 | 行未落地时 `EntryAt()` 给占位 → `SelectedQuickPreviewItem()` 判不可预览 → 本帧保持；**不早退整场**（初稿误用 `content_action_ready`，已改） |
 | 与 `SyncQuickPreview` 抢同一份状态 | 预览显示错行 | §2.3 的职责表；两者都以 `item_.path` 为唯一真相来源，同帧必然收敛 |
 | 焦点在别的窗格时误跟随 | 预览跳到非焦点窗格的文件 | 只读 `ActiveTab(s)`，语义与 `SelectedQuickPreviewItem` 一致 |
 | 触碰渲染循环引发回归 | 启动/关闭流程异常 | 只加一行调用，不改`Render()` 其余顺序；按 §4.3 定向验证 |
@@ -326,3 +327,55 @@ $env:PULSE_SELFTEST_CASE='quick-preview-follow'; .\build\pulse.exe --selftest
 - 测试代码与 CI 登记（步骤 5）。
 - 手动验证与`docs/issue-91-manual-test-checklist.md`。
 - draft PR。
+
+---
+
+## 7. 修订记录：PR #100 审查回合（2026-10-05）
+
+上游 PR <https://github.com/jimmgreen/pulse/pull/100> 收到请求修改的审查意见，本轮据此修订。
+
+### 7.1 阻断项：内容搜索下跟随失效（已修）
+
+`SyncQuickPreviewSelection` 的守卫
+
+```cpp
+if (tab->content_results && !tab->content_action_ready) return;   // 已删除
+```
+
+用错了字段（语义见 §3 步骤 2 的更正说明）。实证：内容搜索里打开预览后，
+直接调 `SyncQuickPreviewSelection()` 与经 `Render()` 两条路径都停在原行，
+用户观感与 issue #91 描述的 bug 一致。
+
+**改法**：删掉该行，改为依赖 `SelectedQuickPreviewItem()` 的自然兜底
+（未分页的行 → `change_record_only` 占位 → `EntryFullPath()` 空 → 判为不可预览 → 保持）。
+不引入 `content_results->Ready(selected_index)` 是因为 `Get()` 已先查 `content_action_rows`，
+再加一层页级判断会把「行已可用但页判定未就绪」的情况一起压掉，反而更严于实际需要。
+
+### 7.2 新增回归用例（已补）
+
+`src/app/quick_preview_follow_ui_test.cpp` 增内容搜索段（真实 `ContentResultStore` + 真实 tab）：
+seed 6 行 → 等页落地 → 在 `content_action_ready=true` 的状态下打开预览、
+随后清回 false（复刻 `CompleteContentSelection()` 的时序）→ 断言
+①预览开在焦点行，②直接跟随换行，③经 `Render()` 换行。原 8 例 → 14 例。
+
+### 7.3 验证结果（本地 `build-ci`）
+
+| 检查 | 结果 |
+| --- | --- |
+| `cmake --build build-ci --target pulse pulse_quick_preview_follow_test pulse_app_controllers_test` | 通过，无新增警告 |
+| `pulse_quick_preview_follow_test.exe` | 8 passed, 0 failed |
+| `PULSE_TEST_QUICK_PREVIEW_FOLLOW` 行为用例 | 14 passed, 0 failed（exit 0） |
+| 反向验证：临时加回旧守卫重跑同一用例 | 如期失败（exit 1，仅两条内容搜索用例 FAIL） |
+| 相邻：`pulse_app_controllers_test --layout-search-prefs` | 通过 |
+| 相邻：selftest `release-panels-hidden` / `pr-shell` / `list-columns` | 全部 exit 0，0 FAIL |
+
+### 7.4 第二项（`quickPreviewAnchorView = -1` 时序）结论
+
+**判定为非问题，代码未改。** `quickPreviewAnchorView` 只在
+`HandleQuickPreviewCommand()` 的 Delete 分支设置，而消费它的 `SyncQuickPreview()`
+仅由两处刷新回调调用（`app_navigation.cpp:1256`、`:1451`），
+两处都在**同一个同步函数内**先 `RemapSelection()` 再调 `SyncQuickPreview()`。
+也就是说「selection 已移动」与「anchor 被消费」之间不存在可插入 `Render()` 的窗口：
+anchor 设置后到下一次 `SyncQuickPreview()` 之前，快照未更新、`selected_index`
+仍指向被删行 → 跟随读到与已显示项相同的路径 → `Stay`，不触碰 anchor。
+真机确认项仍保留在 §3.5（预览窗内 Delete 是否邻接）。

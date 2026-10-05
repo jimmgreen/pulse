@@ -86,7 +86,7 @@ New-Item -ItemType Directory -Force -Path "$root\subfolder" | Out-Null
 | 3.5 | 预览开着，在**预览窗内**按 Delete | 仍邻接下一项，不跳错行（`quickPreviewAnchorView` 语义未被跟随逻辑破坏） | ☐ |
 | 3.6 | 预览开着，用外部工具改掉当前显示文件的内容 | 预览重载新内容（`SyncQuickPreview` 的磁盘变更职责未被覆盖） | ☐ |
 | 3.7 | 预览开着，刷新目录（F5） | 行为与改动前一致 | ☐ |
-| 3.8 | 内容搜索结果里上下切换选中项 | 预览跟随正确，**不出现上一帧的错位内容**（异步 resolve 的跳过逻辑生效） | ☐ |
+| 3.8 | 内容搜索结果里上下切换选中项 | 预览**与普通列表一致地跟随**；页码尚未落地的行本帧保持上一项，不出现上一帧的错位内容 | ☐ |
 | 3.9 | 快速连续点击 10 个不同扩展名的文件 | 无崩溃、无窗口句柄泄漏（任务管理器观察句柄数） | ☐ |
 
 > 3.1 与 3.5 是两个 `Update()` 入口最容易互相覆盖的地方，务必实测，不能只靠推理。
@@ -122,8 +122,15 @@ New-Item -ItemType Directory -Force -Path "$root\subfolder" | Out-Null
 | 检查 | 命令 | 结果 |
 | --- | --- | --- |
 | 纯逻辑判定（8 例：空路径 / 同路径全同 /仅 mtime / 仅 size / 仅 attrs / 异路径 / 空 shown） | `build-ci\pulse_quick_preview_follow_test.exe` | ✅ 8 passed, 0 failed |
-| 行为用例（真实 AppState + 真实 snapshot，**经由 `Render()` 走生产挂接点**）：打开 → 换行跟随 → 同路径不重置 → 文件夹行跟随 → 回收站不可预览行保持 → 干净关闭 | `PULSE_TEST_QUICK_PREVIEW_FOLLOW=<log> pulse.exe --test-instance --shot "" $env:TEMP` | ✅ 8 passed, 0 failed |
-| 反向验证（临时注释掉 `Render()` 里的挂接调用后重跑） | 同上 | ✅ 如期失败（exit 1），证明用例真的覆盖了本次改动 |
+| 行为用例（真实 AppState + 真实 snapshot，**经由 `Render()` 走生产挂接点**）：打开 → 换行跟随 → 同路径不重置 → 文件夹行跟随 → 回收站不可预览行保持 → **内容搜索打开/换行跟随（2 例）** → 干净关闭 | `PULSE_TEST_QUICK_PREVIEW_FOLLOW=<log> pulse.exe --test-instance --shot "" %TEMP%` | ✅ 14 passed, 0 failed |
+| 反向验证（临时注释/加回目标代码后重跑） | 同上 | ✅ 如期失败（exit 1）：注释掉 `Render()` 里的挂接调用 → 跟随类用例 FAIL；加回已删除的 `content_action_ready` 守卫 → 2 条内容搜索用例 FAIL |
+| 相邻：`pulse_app_controllers_test --layout-search-prefs` | 直接运行 | ✅ 通过 |
+| 相邻：selftest `release-panels-hidden` / `pr-shell` / `list-columns` | `PULSE_SELFTEST_CASE=<case> pulse.exe --selftest` | ✅ 全部 exit 0，0 FAIL |
+
+> 内容搜索那两条用例是 PR #100 审查回合补的回归：此前实现里用
+> `content_action_ready` 当就绪守卫（该字段浏览时恒为 false），
+> 导致内容搜索下预览整场都不跟随。详见
+> `docs/issue-91-preview-follow-selection-plan.md` §7。
 
 两个检查都已登记进 `scripts/build_release_ci.ps1`：纯逻辑目标进 `$testNames`，
 行为用例按 `PULSE_TEST_*` 方式在 `$selftestCases` 循环之后单独跑。

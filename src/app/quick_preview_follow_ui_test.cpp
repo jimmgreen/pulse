@@ -7,8 +7,10 @@
 #include "app_runtime.h"
 #include "places.h"
 #include "../fs/fs_enum.h"
+#include "../index/content_result_store.h"
 #include <fstream>
 #include <filesystem>
+#include <memory>
 
 #ifdef PULSE_WITH_SELFTEST
 using namespace pulse;
@@ -114,6 +116,61 @@ int RunQuickPreviewFollowTest(AppState& s, const wchar_t* output) {
     SyncQuickPreviewSelection(s);
     check(s.quickPreview.visible() && s.quickPreview.item().path == folder,
         "an unpreviewable recycle-bin row keeps the previous preview open");
+
+    // Content search: the same follow has to work here, but the rows live in a
+    // paged store and complete asynchronously. content_action_ready is false
+    // while the user merely browses (CompleteContentSelection only pins rows
+    // around a batch action), so the follow must not gate on it - gating made
+    // the preview stand still for a whole content search.
+    MakeFollowFixture(6);  // same scratch folder, enough rows to move within
+    auto store = std::make_shared<index::ContentResultStore>(nullptr, 0);
+    std::vector<index::ContentHit> hits;
+    for (int i = 0; i < 6; ++i) {
+        wchar_t name[64]{};
+        swprintf_s(name, L"follow-%02d.txt", i);
+        index::ContentHit hit;
+        hit.path = dir + L"\\" + name;
+        hit.name = name;
+        hit.size = 64;
+        hit.modified = 1000 + i;
+        hits.push_back(hit);
+    }
+    check(store->Append(hits), "content rows are seeded");
+    tab->current_path = app::MakeSearchPath(L"content:follow");
+    tab->content_results = store;
+    tab->content_count_final = true;
+    tab->search_total = store->Count();
+    tab->content_revision = store->Revision();
+    tab->content_order_revision = store->OrderRevision();
+    // The display page lands on the store's own worker, the way a batch does.
+    const uint64_t page_deadline = GetTickCount64() + 5000;
+    index::ContentResultStore::Row probe;
+    while (!store->Get(5, probe) && GetTickCount64() < page_deadline) Sleep(2);
+    check(store->Get(5, probe), "content rows are paged in for the focused listing");
+
+    // Open in the state CompleteContentSelection invokes the action in, then
+    // clear the pin again exactly as that function does right afterwards. The
+    // window is closed first so ToggleQuickPreview opens rather than toggles.
+    s.quickPreview.Close();
+    tab->SelectOnly(0);
+    tab->content_action_ready = true;
+    ToggleQuickPreview(s);
+    tab->content_action_ready = false;
+    check(s.quickPreview.visible() && s.quickPreview.item().path == EntryFullPath(*tab, 0),
+        "content search opens the preview on the focused row");
+    check(!tab->content_action_ready, "browsing a content search leaves the batch pin cleared");
+
+    // The direct path and the production Render() path must both retarget.
+    const std::wstring row3 = EntryFullPath(*tab, 3);
+    tab->SelectOnly(3);
+    SyncQuickPreviewSelection(s);
+    check(s.quickPreview.item().path == row3,
+        "content search: a focused row change retargets the preview");
+    const std::wstring row1 = EntryFullPath(*tab, 1);
+    tab->SelectOnly(1);
+    Render(s);
+    check(s.quickPreview.item().path == row1,
+        "content search: the render loop retargets the preview");
 
     s.quickPreview.Close();
     check(!s.quickPreview.visible(), "preview closes cleanly at the end of the case");
