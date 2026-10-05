@@ -29,7 +29,7 @@ cd "ffmpeg-${VERSION}"
 
 # Filters: scaling / pixel formats / rotation for thumbnails, tiling for
 # storyboards, resampling for audio playback.
-FILTERS=scale,setsar,format,null,anull,transpose,hflip,vflip,select,fps,tile,pad,thumbnail,aresample,aformat,volume,atempo
+FILTERS=scale,setsar,format,null,anull,transpose,hflip,vflip,select,fps,tile,pad,thumbnail,aresample,aformat,volume,atempo,trim,atrim
 
 ./configure \
     --prefix="$WORK/prefix" \
@@ -44,7 +44,7 @@ FILTERS=scale,setsar,format,null,anull,transpose,hflip,vflip,select,fps,tile,pad
     --enable-protocol=file,pipe \
     --enable-demuxers --enable-parsers --enable-decoders --enable-bsfs \
     --enable-encoder=bmp,rawvideo,pcm_s16le,pcm_f32le,wrapped_avframe \
-    --enable-muxer=image2pipe,rawvideo,wav,s16le,f32le,null \
+    --enable-muxer=image2pipe,rawvideo,wav,pcm_s16le,pcm_f32le,null \
     --enable-filter="$FILTERS" \
     --enable-swscale --enable-swresample \
     --extra-version=pulse-pack
@@ -71,11 +71,11 @@ Build script and configuration:
   packs/ffmpeg/build.sh in the Pulse repository
 License: GNU Lesser General Public License 2.1 or later (no GPL or nonfree parts).
 EOF
-"$OUT/ffmpeg.exe" -hide_banner -buildconf > "$OUT/BUILDCONF.txt"
+"$OUT/ffmpeg.exe" -hide_banner -buildconf > "$OUT/BUILDCONF.txt" 2>&1
 echo "built: $(ls -la "$OUT")"
 
 # Playback requires these filters in the shipped binary, not just a developer FFmpeg.
 "$OUT/ffmpeg.exe" -hide_banner -filters > "$WORK/pack-filters.txt"
-for filter in fps scale format atempo; do
+for filter in fps scale format atempo trim atrim; do
     grep -Eq "[[:space:]]${filter}[[:space:]]" "$WORK/pack-filters.txt"
 done

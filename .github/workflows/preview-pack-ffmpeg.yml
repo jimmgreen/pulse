@@ -59,6 +59,37 @@ jobs:
             if ($demuxers -notmatch "\s$([regex]::Escape($m))\s") { throw "missing demuxer: $m" }
           }
           & $ff -hide_banner -buildconf | Select-String -Pattern 'enable-gpl|enable-nonfree' | ForEach-Object { throw "GPL/nonfree flag in build: $_" }
+          $muxers = (& $ff -hide_banner -muxers) -join "`n"
+          foreach ($m in 's16le','f32le','wav','image2pipe') {
+            if ($muxers -notmatch "\s$([regex]::Escape($m))\s") { throw "missing muxer: $m" }
+          }
+          # Exercise PCM playback and accurate seeking without requiring lavfi.
+          $stream = [IO.File]::Create((Join-Path $PWD 'tone.wav'))
+          $writer = [IO.BinaryWriter]::new($stream)
+          try {
+            $dataSize = 32000
+            $writer.Write([Text.Encoding]::ASCII.GetBytes('RIFF'))
+            $writer.Write([int](36 + $dataSize))
+            $writer.Write([Text.Encoding]::ASCII.GetBytes('WAVEfmt '))
+            $writer.Write([int]16); $writer.Write([int16]1); $writer.Write([int16]1)
+            $writer.Write([int]8000); $writer.Write([int]16000)
+            $writer.Write([int16]2); $writer.Write([int16]16)
+            $writer.Write([Text.Encoding]::ASCII.GetBytes('data')); $writer.Write([int]$dataSize)
+            for ($i = 0; $i -lt 16000; $i++) {
+              $writer.Write([int16](12000 * [Math]::Sin(2 * [Math]::PI * 440 * $i / 8000)))
+            }
+          } finally { $writer.Dispose(); $stream.Dispose() }
+          & $ff -v error -y -i tone.wav -ac 1 -ar 8000 -f s16le tone.pcm
+          if ($LASTEXITCODE -ne 0 -or (Get-Item tone.pcm).Length -ne 32000) { throw 'PCM s16le output failed' }
+          & $ff -v error -y -ss 0.5 -i tone.wav -t 0.25 -ac 1 -ar 8000 -f s16le seek.pcm
+          if ($LASTEXITCODE -ne 0 -or (Get-Item seek.pcm).Length -ne 4000) { throw 'PCM input seeking failed' }
+          & $ff -v error -y -i tone.wav -ss 0.5 -t 0.25 -ac 1 -ar 8000 -f f32le seek-float.pcm
+          if ($LASTEXITCODE -ne 0 -or (Get-Item seek-float.pcm).Length -ne 8000) { throw 'PCM float output seeking failed' }
+          & $ff -v error -y -i tone.wav -af atempo=2 -ac 1 -ar 8000 -f s16le tempo.pcm
+          if ($LASTEXITCODE -ne 0 -or (Get-Item tempo.pcm).Length -lt 14400 -or (Get-Item tempo.pcm).Length -gt 17600) { throw 'PCM tempo playback failed' }
+          [IO.File]::WriteAllBytes((Join-Path $PWD 'frames.rgb'), [byte[]]::new(48))
+          & $ff -v error -y -f rawvideo -pixel_format rgb24 -video_size 2x2 -framerate 4 -i frames.rgb -ss 0.25 -t 0.25 -c:v bmp -f image2pipe frame.bmp
+          if ($LASTEXITCODE -ne 0 -or (Get-Item frame.bmp).Length -eq 0) { throw 'Video output seeking failed' }
       - name: Check the pack is self-contained
         run: |
           for exe in pack-out/ffmpeg.exe pack-out/ffprobe.exe; do
