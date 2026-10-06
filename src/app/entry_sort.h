@@ -44,4 +44,17 @@ void SortEntriesBySize(std::vector<fs::DirEntry>& entries, ui::SortDirection dir
 // Order-independent fingerprint of `sizes`, to notice changed totals. Empty is 0.
 uint64_t FolderSizeSignature(const FolderSizeLookup& sizes);
 
+// Audio tags for Title / Artist / Album order (#92), keyed by lower-cased entry
+// name like FolderSizeLookup, because a listing that sorts by tags is one
+// folder. A name that is absent, or present with an empty field, has no tag for
+// that column.
+using AudioMetaLookup = std::unordered_map<std::wstring, ui::AudioMetaValues>;
+// Same contract as SortEntriesBySize, for one audio column: `col` must be
+// Title, Artist or Album. Rows without that tag stay below the tagged ones in
+// either direction and order among themselves by name.
+void SortEntriesByAudioMeta(std::vector<fs::DirEntry>& entries, ui::SortColumn col,
+                            ui::SortDirection dir, const AudioMetaLookup& meta,
+                            const std::function<void()>& tick = {});
+uint64_t AudioMetaSignature(const AudioMetaLookup& meta);
+
 } // namespace pulse::app

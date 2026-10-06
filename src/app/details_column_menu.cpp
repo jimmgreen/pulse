@@ -21,9 +21,17 @@ struct ColumnRow { K kind; I label; };
 constexpr ColumnRow kRows[] = {
     {K::Date, I::ColumnModified}, {K::Created, I::ColumnCreated},
     {K::Accessed, I::ColumnAccessed}, {K::Type, I::ColumnType}, {K::Size, I::ColumnSize},
+    {K::Title, I::ColumnTitle}, {K::Artist, I::ColumnArtist}, {K::Album, I::ColumnAlbum},
 };
 
 constexpr uint32_t Bit(K kind) { return 1u << static_cast<uint32_t>(kind); }
+
+// Columns a search view never shows, whatever the space: search rows carry no
+// creation / access times and no audio properties.
+constexpr bool SearchExcluded(K kind) {
+    return kind == K::Created || kind == K::Accessed ||
+           kind == K::Title || kind == K::Artist || kind == K::Album;
+}
 
 ui::FluentMenuItem CheckRow(int command, I label, bool checked, bool enabled) {
     ui::FluentMenuItem item;
@@ -51,7 +59,7 @@ std::vector<ui::FluentMenuItem> BuildDetailsColumnMenu(uint32_t mask, uint32_t v
         // never a silent no-op. A badge, not a shortcut caption: the caption
         // column is sized for short Latin key names and clips CJK text.
         if (checked && !(visible & Bit(row.kind))) {
-            if (search && (row.kind == K::Created || row.kind == K::Accessed)) {
+            if (search && SearchExcluded(row.kind)) {
                 item.badge_text = l10n::Get(I::DetailsColumnNotInSearch);
             } else {
                 item.badge_text = l10n::Get(I::DetailsColumnNoRoom);

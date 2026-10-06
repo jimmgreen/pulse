@@ -143,4 +143,35 @@ uint32_t ReadMediaDurationMs(const std::wstring& path) {
     return ms;
 }
 
+std::array<std::wstring, 3> ReadAudioMeta(const std::wstring& path) {
+    std::array<std::wstring, 3> out;
+    if (!IsAudioExtension(ExtensionOf(path))) return out;
+    ComPtr<IPropertyStore> store;
+    if (FAILED(SHGetPropertyStoreFromParsingName(ShellPath(path).c_str(), nullptr, GPS_BESTEFFORT,
+                                                 IID_PPV_ARGS(&store))) || !store)
+        return out;
+    // Format rather than read: the shell stores the artist as a string vector,
+    // so a plain VT_LPWSTR path would silently drop every multi-artist tag.
+    auto read = [&](REFPROPERTYKEY key, std::wstring& value) {
+        PROPVARIANT pv{};
+        PropVariantInit(&pv);
+        if (SUCCEEDED(store->GetValue(key, &pv)) && pv.vt != VT_EMPTY && pv.vt != VT_NULL) {
+            PWSTR formatted = nullptr;
+            if (SUCCEEDED(PSFormatForDisplayAlloc(key, pv, PDFF_DEFAULT, &formatted)) && formatted) {
+                std::wstring text(formatted);
+                // Tag editors routinely leave trailing blanks behind, and a
+                // column of them makes the rows look misaligned.
+                const size_t end = text.find_last_not_of(L" \t\r\n");
+                value = end == std::wstring::npos ? std::wstring() : text.substr(0, end + 1);
+            }
+            CoTaskMemFree(formatted);
+        }
+        PropVariantClear(&pv);
+    };
+    read(PKEY_Title, out[0]);
+    read(PKEY_Music_Artist, out[1]);
+    read(PKEY_Music_AlbumTitle, out[2]);
+    return out;
+}
+
 } // namespace pulse::preview

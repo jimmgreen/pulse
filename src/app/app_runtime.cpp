@@ -3,6 +3,7 @@
 #include "vertical_tabs.h"
 #include "app_column_view.h"
 #include "folder_sizes_ui.h"
+#include "audio_meta_ui.h"
 #include "update_status.h"
 #include "about_info.h"
 #include "../ui/lumatext_renderer.h"
@@ -2367,6 +2368,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     FillPaneSlots(s, vm);
     FillChangePopover(s, vm);
     FillFolderSizes(s, vm);
+    FillAudioMeta(s, vm);
     vm.window_effect = ui::WindowEffectFromId(s.appPrefs.window_effect);
     vm.background_image = s.appPrefs.background_image;
     vm.wallpaper_look = s.appPrefs.wallpaper_look;

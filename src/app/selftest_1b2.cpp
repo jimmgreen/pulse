@@ -36,6 +36,7 @@
 #include "tray_reveal.h"
 #include "blank_pane_click.h"
 #include "details_column_menu.h"
+#include "folder_sort_prefs.h"
 #include "entry_group.h"
 #include "context_menu.h"
 #include "context_menu_controller.h"
@@ -5796,24 +5797,28 @@ void TestOptionalColumns() {
           L"optional columns: the renderer starts with modified / type / size");
     r.SetDetailsColumns(ui::kDetailsColumnsAll);
     const auto all = r.DetailsColumns(pane(1600.0f), {}, false);
-    Check(all.count == 6 && all.kinds[0] == K::Name && all.kinds[1] == K::Date &&
+    Check(all.count == 9 && all.kinds[0] == K::Name && all.kinds[1] == K::Date &&
           all.kinds[2] == K::Created && all.kinds[3] == K::Accessed && all.kinds[4] == K::Type &&
-          all.kinds[5] == K::Size && fills(all) && close_to(all.Width(K::Created), 130.0f) &&
+          all.kinds[5] == K::Size && all.kinds[6] == K::Title && all.kinds[7] == K::Artist &&
+          all.kinds[8] == K::Album && fills(all) && close_to(all.Width(K::Created), 130.0f) &&
           close_to(all.Width(K::Accessed), 130.0f),
-          L"optional columns: all shown in order name, modified, created, accessed, type, size");
-    bool order_kept = true, filled = true;
+          L"optional columns: all shown in order name, dates, type, size, audio");
+    bool order_kept = true, filled = true, audio_dropped_first = true;
     for (float w = 260.0f; w <= 1600.0f; w += 20.0f) {
         const auto c = r.DetailsColumns(pane(w), {}, false);
         filled &= fills(c) && c.Width(K::Name) >= 80.0f * scale - 0.05f;
         order_kept &= (c.Has(K::Created) || !c.Has(K::Accessed)) && (c.Has(K::Type) || !c.Has(K::Created)) &&
                       (c.Has(K::Date) || !c.Has(K::Type));
+        audio_dropped_first &= (c.Has(K::Title) || !c.Has(K::Artist)) &&
+                               (c.Has(K::Size) || !c.Has(K::Title));
     }
-    Check(order_kept && filled,
-          L"optional columns: narrowing drops accessed, created, type, then modified");
+    Check(order_kept && filled && audio_dropped_first,
+          L"optional columns: narrowing drops album, artist, title, then accessed, created, type, modified");
     const auto search = r.DetailsColumns(pane(1600.0f), {}, true);
-    Check(!search.Has(K::Created) && !search.Has(K::Accessed) && search.Has(K::Path) &&
+    Check(!search.Has(K::Created) && !search.Has(K::Accessed) && !search.Has(K::Title) &&
+          !search.Has(K::Artist) && !search.Has(K::Album) && search.Has(K::Path) &&
           search.Has(K::Date) && fills(search),
-          L"optional columns: search results never show creation / access times");
+          L"optional columns: search results never show creation / access times or audio");
 
     ui::DetailsColumnWidths widths{};
     widths[3] = 200.0f;
@@ -5905,17 +5910,18 @@ void TestOptionalColumns() {
     // Header menu.
     const auto menu = BuildDetailsColumnMenu(ui::kDetailsColumnsDefault);
     const int created_cmd = kDetailsColumnToggleBase + static_cast<int>(K::Created);
-    Check(menu.size() == 7 && menu[0].checked && !menu[0].enabled && menu[1].checked &&
+    Check(menu.size() == 10 && menu[0].checked && !menu[0].enabled && menu[1].checked &&
           menu[2].command == created_cmd && !menu[2].checked && menu[5].checked &&
-          menu[5].separator_after && menu[6].command == kDetailsColumnsReset && !menu[6].enabled,
-          L"optional columns: header menu lists name (fixed), the five columns and reset");
+          !menu[6].checked && menu[8].separator_after &&
+          menu[9].command == kDetailsColumnsReset && !menu[9].enabled,
+          L"optional columns: header menu lists name (fixed), the eight columns and reset");
     const uint32_t with_created = ApplyDetailsColumnCommand(ui::kDetailsColumnsDefault, created_cmd);
     Check(with_created == (ui::kDetailsColumnsDefault | ui::kDetailsColumnCreated) &&
           ApplyDetailsColumnCommand(with_created, created_cmd) == ui::kDetailsColumnsDefault &&
           ApplyDetailsColumnCommand(with_created, kDetailsColumnsReset) == ui::kDetailsColumnsDefault &&
           ApplyDetailsColumnCommand(with_created, kDetailsColumnToggleBase) == with_created &&
           ApplyDetailsColumnCommand(with_created, 0) == with_created &&
-          BuildDetailsColumnMenu(with_created)[2].checked && BuildDetailsColumnMenu(with_created)[6].enabled,
+          BuildDetailsColumnMenu(with_created)[2].checked && BuildDetailsColumnMenu(with_created)[9].enabled,
           L"optional columns: header menu toggles a column, resets, and ignores name / dismiss");
     const uint32_t drawn = (1u << static_cast<uint32_t>(K::Name)) | ui::kDetailsColumnsDefault;
     const auto narrow_menu = BuildDetailsColumnMenu(with_created, drawn, false);
@@ -5942,6 +5948,125 @@ void TestOptionalColumns() {
     Check(created_row != folder_sort.end() && created_row->radio && has_command(folder_sort, CmdSortAccessed) &&
           !has_command(search_sort, CmdSortCreated) && !has_command(search_sort, CmdSortAccessed),
           L"optional columns: sort menu offers created / accessed for folders only");
+}
+
+// #92: the audio columns sort by tags the preview host brings back, and a row
+// with no tag for the sorted column has nothing to order by.
+void TestAudioColumns() {
+    using K = ui::MainRenderer::ColumnKind;
+    const ScopedEntryGrouping grouping{0};
+    Check(ui::kDetailsColumnAudio == (ui::kDetailsColumnTitle | ui::kDetailsColumnArtist |
+                                      ui::kDetailsColumnAlbum) &&
+          (ui::kDetailsColumnsAll & ui::kDetailsColumnAudio) == ui::kDetailsColumnAudio &&
+          (ui::kDetailsColumnsDefault & ui::kDetailsColumnAudio) == 0u &&
+          ui::NormalizeDetailsColumns(ui::kDetailsColumnAlbum | 1u << 10) == ui::kDetailsColumnAlbum,
+          L"audio columns: title, artist and album are one optional group, off by default");
+    Check(K::Title < K::Artist && K::Artist < K::Album,
+          L"audio columns: title, artist and album keep their mask bit order");
+
+    // A real folder listing leaves full_path empty, so the tags are keyed by name.
+    auto entry = [](const wchar_t* name) {
+        fs::DirEntry e;
+        e.name = name;
+        return e;
+    };
+    auto names = [](const std::vector<fs::DirEntry>& rows) {
+        std::wstring out;
+        for (const auto& e : rows) out += e.name + L",";
+        return out;
+    };
+    auto tags = [](std::wstring title, std::wstring artist = L"", std::wstring album = L"") {
+        return ui::AudioMetaValues{std::move(title), std::move(artist), std::move(album)};
+    };
+    const AudioMetaLookup meta{
+        {L"beta.mp3", tags(L"Zulu", L"b artist", L"Beta Album")},
+        {L"alpha.mp3", tags(L"apple", L"a artist")},
+        {L"tie1.mp3", tags(L"Same")},
+        {L"tie2.mp3", tags(L"same")},
+        {L"empty.mp3", tags(L"", L"", L"Only Album")},
+    };
+    auto rows = [&] {
+        return std::vector<fs::DirEntry>{entry(L"beta.mp3"), entry(L"alpha.mp3"), entry(L"tie1.mp3"),
+                                         entry(L"tie2.mp3"), entry(L"empty.mp3"), entry(L"untagged.mp3")};
+    };
+
+    {
+        auto sorted = rows();
+        SortEntriesByAudioMeta(sorted, ui::SortColumn::Title, ui::SortDirection::Asc, meta);
+        Check(names(sorted) == L"alpha.mp3,tie1.mp3,tie2.mp3,beta.mp3,empty.mp3,untagged.mp3,",
+              L"audio columns: a title sort is case insensitive and the untagged rows trail");
+        sorted = rows();
+        SortEntriesByAudioMeta(sorted, ui::SortColumn::Title, ui::SortDirection::Desc, meta);
+        Check(names(sorted) == L"beta.mp3,tie2.mp3,tie1.mp3,alpha.mp3,untagged.mp3,empty.mp3,",
+              L"audio columns: descending title flips the tags but still keeps the untagged rows last");
+    }
+    {
+        auto sorted = rows();
+        SortEntriesByAudioMeta(sorted, ui::SortColumn::Artist, ui::SortDirection::Asc, meta);
+        Check(names(sorted) == L"alpha.mp3,beta.mp3,empty.mp3,tie1.mp3,tie2.mp3,untagged.mp3,",
+              L"audio columns: an artist sort reads the artist field, not the title");
+        sorted = rows();
+        SortEntriesByAudioMeta(sorted, ui::SortColumn::Album, ui::SortDirection::Asc, meta);
+        Check(names(sorted) == L"beta.mp3,empty.mp3,alpha.mp3,tie1.mp3,tie2.mp3,untagged.mp3,",
+              L"audio columns: an album sort reads the album field, so a title-only tag is unknown");
+    }
+    {
+        // Only a Title / Artist / Album column may reorder by tags.
+        auto sorted = rows();
+        const auto before = names(sorted);
+        SortEntriesByAudioMeta(sorted, ui::SortColumn::Name, ui::SortDirection::Asc, meta);
+        SortEntriesByAudioMeta(sorted, ui::SortColumn::Size, ui::SortDirection::Desc, meta);
+        Check(names(sorted) == before,
+              L"audio columns: any other sort column leaves the rows where they were");
+        bool threw = false;
+        try {
+            SortEntriesByAudioMeta(sorted, ui::SortColumn::Title, ui::SortDirection::Desc, meta,
+                                   [] { throw 1; });
+        } catch (int) { threw = true; }
+        Check(threw && names(sorted) == before,
+              L"audio columns: an abandoned tag sort leaves the rows untouched");
+    }
+    {
+        const auto fixture = rows();
+        using SC = ui::SortColumn;
+        using SD = ui::SortDirection;
+        Check(EntryLess(fixture[1], fixture[0], SC::Title, SD::Asc, FolderSortMode::FoldersFirst) &&
+              !EntryLess(fixture[0], fixture[1], SC::Title, SD::Asc, FolderSortMode::FoldersFirst) &&
+              EntryLess(fixture[0], fixture[2], SC::Album, SD::Asc, FolderSortMode::FoldersFirst),
+              L"audio columns: without a tag lookup an audio column compares by name");
+    }
+
+    AudioMetaLookup grown;
+    Check(AudioMetaSignature(grown) == 0u, L"audio columns: no tags yet gives the empty signature");
+    grown[L"beta.mp3"] = tags(L"Zulu", L"b artist", L"Beta Album");
+    const uint64_t one = AudioMetaSignature(grown);
+    Check(one != AudioMetaSignature({}),
+          L"audio columns: a tag landing changes the signature so the rows get re-sorted");
+    grown[L"alpha.mp3"] = tags(L"apple", L"a artist");
+    Check(AudioMetaSignature(grown) != one, L"audio columns: another tag changes it again");
+    grown[L"alpha.mp3"] = tags(L"apple", L"a artist", L"Second Album");
+    Check(AudioMetaSignature(grown) != one, L"audio columns: an album tag replaces the missing one");
+
+    // A tag sort is remembered per folder like any other column; the memory
+    // used to reject every column past "accessed".
+    FolderSortPrefs prefs;
+    Check(prefs.Set(L"C:\\music", {ui::SortColumn::Title, ui::SortDirection::Desc}),
+          L"audio columns: the per-folder sort memory accepts a title sort");
+    std::wstring saved = L"{\"view\":1";
+    prefs.AppendJson(saved);
+    saved += L"}";
+    FolderSortPrefs reloaded;
+    reloaded.ReadJson(saved);
+    const auto found = reloaded.Find(L"C:\\music");
+    Check(found && found->column == ui::SortColumn::Title &&
+          found->direction == ui::SortDirection::Desc,
+          L"audio columns: a saved title sort survives the preferences round trip");
+    prefs.Clear();
+    Check(prefs.Set(L"C:\\music", {ui::SortColumn::Album, ui::SortDirection::Asc}) &&
+          prefs.Set(L"C:\\sound", {ui::SortColumn::Artist, ui::SortDirection::Asc}) &&
+          prefs.Find(L"C:\\music")->column == ui::SortColumn::Album &&
+          prefs.Find(L"C:\\sound")->column == ui::SortColumn::Artist,
+          L"audio columns: artist and album sorts are stored under their own keys");
 }
 
 } // namespace
@@ -7182,7 +7307,14 @@ int RunSelfTest1B2() {
         wcscmp(test_case, L"list-columns") == 0) {
         TestListColumns();
         TestOptionalColumns();
+        TestAudioColumns();
         TestViewLayouts();
+        if (g_log) { fclose(g_log); g_log = nullptr; }
+        return g_fail ? 1 : 0;
+    }
+    if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
+        wcscmp(test_case, L"audio-columns") == 0) {
+        TestAudioColumns();
         if (g_log) { fclose(g_log); g_log = nullptr; }
         return g_fail ? 1 : 0;
     }
@@ -7304,6 +7436,7 @@ int RunSelfTest1B2() {
     TestViewLayouts();
     TestListColumns();
     TestOptionalColumns();
+    TestAudioColumns();
     TestTrayStack();
     TestHiddenFiles();
     TestQuickAccess();

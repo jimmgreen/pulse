@@ -3,6 +3,7 @@
 #include "app_internal.h"
 #include "shell_window_sync.h"
 #include "app_column_view.h"
+#include "audio_meta_ui.h"
 #include "content_navigation.h"
 #include "../ui/lumatext_renderer.h"
 #include "../ui/fluent_menu.h"
@@ -1130,7 +1131,7 @@ void StartLoadingPath(AppState& s, app::Tab& tab, const std::wstring& path, Path
     tab.pending_generation = shared_generation != 0
         ? shared_generation
         : s.worker.Refresh(normalized, tab.sort_column, tab.sort_direction, tab.EffectiveGroup(),
-                           SortFolderSizes(s, tab, normalized));
+                           SortFolderSizes(s, tab, normalized), SortAudioMeta(s, tab, normalized));
 
     SyncVisibleWatches(s);
     if (fs::IsUncPath(normalized)) RequestUncProbe(s, normalized);
@@ -1374,7 +1375,7 @@ void RefreshPath(AppState& s, const std::wstring& path, RefreshReason reason) {
         if (tab->pending_generation == 0) {
             tab->pending_generation = s.worker.Refresh(
                 normalized, tab->sort_column, tab->sort_direction, tab->EffectiveGroup(),
-                SortFolderSizes(s, *tab, normalized));
+                SortFolderSizes(s, *tab, normalized), SortAudioMeta(s, *tab, normalized));
         }
     }
 }

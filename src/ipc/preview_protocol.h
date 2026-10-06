@@ -28,7 +28,12 @@ enum class PreviewContentKind : uint32_t {
 enum class PreviewRequestKind : uint32_t {
     Content = 0,
     Properties = 1,
+    // Audio columns: title, artist and album as three label/value pairs in a
+    // fixed order, so a row that needs only these never pays for the general
+    // property handler sweep in ReadProperties.
+    AudioMeta = 2,
 };
+constexpr uint32_t kAudioMetaFields = 3;
 constexpr uint32_t kPreviewFlagTruncated = 1u << 0;
 // Source encoding of a Text preview, stored in response flag bits 8..11.
 constexpr uint32_t kPreviewFlagEncodingShift = 8;

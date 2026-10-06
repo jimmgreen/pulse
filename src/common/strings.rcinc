@@ -3139,3 +3139,19 @@ BEGIN
     IDS_OP_AUTHORIZATION_PROMPT "Approve the Windows prompt to continue this operation."
     IDS_OP_AUTHORIZATION_NOT_GRANTED "Administrator permission was not granted. Retry, skip this item, or cancel."
 END
+
+LANGUAGE 0x04, 0x02
+STRINGTABLE
+BEGIN
+    IDS_COLUMN_TITLE                "标题"
+    IDS_COLUMN_ARTIST               "艺人"
+    IDS_COLUMN_ALBUM                "专辑"
+END
+
+LANGUAGE 0x09, 0x01
+STRINGTABLE
+BEGIN
+    IDS_COLUMN_TITLE                "Title"
+    IDS_COLUMN_ARTIST               "Artist"
+    IDS_COLUMN_ALBUM                "Album"
+END

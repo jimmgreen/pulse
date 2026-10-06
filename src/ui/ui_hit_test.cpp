@@ -1080,6 +1080,9 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             case ColumnKind::Size: out.column = SortColumn::Size; break;
             case ColumnKind::Created: out.column = SortColumn::Created; break;
             case ColumnKind::Accessed: out.column = SortColumn::Accessed; break;
+            case ColumnKind::Title: out.column = SortColumn::Title; break;
+            case ColumnKind::Artist: out.column = SortColumn::Artist; break;
+            case ColumnKind::Album: out.column = SortColumn::Album; break;
             }
             return out;
         }
