@@ -47,7 +47,7 @@ class BloomAccentPicker;
 int FluentSvgIdForGlyph(std::wstring_view glyph);
 
 // Values are persisted (folder sort prefs, session): append only.
-enum class SortColumn { Name, Mtime, Type, Size, Path, Created, Accessed };
+enum class SortColumn { Name, Mtime, Type, Size, Path, Created, Accessed, Title, Artist, Album };
 enum class SortDirection { Asc, Desc };
 
 struct TabView {
@@ -1159,23 +1159,29 @@ public:
     void ToggleDetailsPreviewFit(float x, float y);
 
     // Date = modified. Values double as details_column_set.h bits: append only.
-    enum class ColumnKind : uint8_t { Name, Path, Date, Type, Size, Created, Accessed };
-    static constexpr size_t kMaxDetailsColumns = 7;
+    enum class ColumnKind : uint8_t { Name, Path, Date, Type, Size, Created, Accessed,
+                                      Title, Artist, Album };
+    static constexpr size_t kMaxDetailsColumns = 10;
     static_assert(kDetailsColumnModified == 1u << static_cast<uint32_t>(ColumnKind::Date) &&
                   kDetailsColumnType == 1u << static_cast<uint32_t>(ColumnKind::Type) &&
                   kDetailsColumnSize == 1u << static_cast<uint32_t>(ColumnKind::Size) &&
                   kDetailsColumnCreated == 1u << static_cast<uint32_t>(ColumnKind::Created) &&
-                  kDetailsColumnAccessed == 1u << static_cast<uint32_t>(ColumnKind::Accessed));
+                  kDetailsColumnAccessed == 1u << static_cast<uint32_t>(ColumnKind::Accessed) &&
+                  kDetailsColumnTitle == 1u << static_cast<uint32_t>(ColumnKind::Title) &&
+                  kDetailsColumnArtist == 1u << static_cast<uint32_t>(ColumnKind::Artist) &&
+                  kDetailsColumnAlbum == 1u << static_cast<uint32_t>(ColumnKind::Album));
     // Details columns in display order. Name is always first; Path only in
     // wide search views; then the shown metadata columns (modified, created,
-    // accessed, type, size). Accessed, created, type, then modified are
-    // dropped first when space is short.
+    // accessed, type, size, title, artist, album). The audio columns, then
+    // accessed, created, type, then modified are dropped first when space is
+    // short.
     struct DetailsColumnLayout {
         float left = 0.0f;
         float right = 0.0f;
         std::array<float, kMaxDetailsColumns> widths{};
         std::array<ColumnKind, kMaxDetailsColumns> kinds{ColumnKind::Name, ColumnKind::Date,
                                         ColumnKind::Type, ColumnKind::Size, ColumnKind::Size,
+                                        ColumnKind::Size, ColumnKind::Size, ColumnKind::Size,
                                         ColumnKind::Size, ColumnKind::Size};
         int count = 4;
         // Narrow search view: the folder path is drawn under the name.
@@ -1207,6 +1213,7 @@ public:
     // hit testing and painting always agree.
     struct ColumnAutoWidths {
         float date = 130.0f, type = 128.0f, size = 90.0f, created = 130.0f, accessed = 130.0f;
+        float title = 160.0f, artist = 140.0f, album = 160.0f;
     };
     ColumnAutoWidths AutoColumnWidths() const;
     float TypeChipWidthDip(const std::wstring& chip) const;
@@ -1233,7 +1240,7 @@ public:
     // 2 type, 3 size.
     static int ManualColumnSlot(ColumnKind kind, bool search_view) noexcept;
     // Columns shown by the last painted Details header of a pane: bit
-    // (1 << ColumnKind), plus bit 8 for the two-line search layout. 0 = unknown.
+    // (1 << ColumnKind), plus bit 31 for the two-line search layout. 0 = unknown.
     uint32_t PaintedColumnMask(int pane_index) const {
         return pane_index >= 0 && pane_index < static_cast<int>(painted_columns_.size())
             ? painted_columns_[static_cast<size_t>(pane_index)] : 0u;

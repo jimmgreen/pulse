@@ -5796,24 +5796,28 @@ void TestOptionalColumns() {
           L"optional columns: the renderer starts with modified / type / size");
     r.SetDetailsColumns(ui::kDetailsColumnsAll);
     const auto all = r.DetailsColumns(pane(1600.0f), {}, false);
-    Check(all.count == 6 && all.kinds[0] == K::Name && all.kinds[1] == K::Date &&
+    Check(all.count == 9 && all.kinds[0] == K::Name && all.kinds[1] == K::Date &&
           all.kinds[2] == K::Created && all.kinds[3] == K::Accessed && all.kinds[4] == K::Type &&
-          all.kinds[5] == K::Size && fills(all) && close_to(all.Width(K::Created), 130.0f) &&
+          all.kinds[5] == K::Size && all.kinds[6] == K::Title && all.kinds[7] == K::Artist &&
+          all.kinds[8] == K::Album && fills(all) && close_to(all.Width(K::Created), 130.0f) &&
           close_to(all.Width(K::Accessed), 130.0f),
-          L"optional columns: all shown in order name, modified, created, accessed, type, size");
-    bool order_kept = true, filled = true;
+          L"optional columns: all shown in order name, dates, type, size, audio");
+    bool order_kept = true, filled = true, audio_dropped_first = true;
     for (float w = 260.0f; w <= 1600.0f; w += 20.0f) {
         const auto c = r.DetailsColumns(pane(w), {}, false);
         filled &= fills(c) && c.Width(K::Name) >= 80.0f * scale - 0.05f;
         order_kept &= (c.Has(K::Created) || !c.Has(K::Accessed)) && (c.Has(K::Type) || !c.Has(K::Created)) &&
                       (c.Has(K::Date) || !c.Has(K::Type));
+        audio_dropped_first &= (c.Has(K::Title) || !c.Has(K::Artist)) &&
+                               (c.Has(K::Size) || !c.Has(K::Title));
     }
-    Check(order_kept && filled,
-          L"optional columns: narrowing drops accessed, created, type, then modified");
+    Check(order_kept && filled && audio_dropped_first,
+          L"optional columns: narrowing drops album, artist, title, then accessed, created, type, modified");
     const auto search = r.DetailsColumns(pane(1600.0f), {}, true);
-    Check(!search.Has(K::Created) && !search.Has(K::Accessed) && search.Has(K::Path) &&
+    Check(!search.Has(K::Created) && !search.Has(K::Accessed) && !search.Has(K::Title) &&
+          !search.Has(K::Artist) && !search.Has(K::Album) && search.Has(K::Path) &&
           search.Has(K::Date) && fills(search),
-          L"optional columns: search results never show creation / access times");
+          L"optional columns: search results never show creation / access times or audio");
 
     ui::DetailsColumnWidths widths{};
     widths[3] = 200.0f;
@@ -5905,17 +5909,18 @@ void TestOptionalColumns() {
     // Header menu.
     const auto menu = BuildDetailsColumnMenu(ui::kDetailsColumnsDefault);
     const int created_cmd = kDetailsColumnToggleBase + static_cast<int>(K::Created);
-    Check(menu.size() == 7 && menu[0].checked && !menu[0].enabled && menu[1].checked &&
+    Check(menu.size() == 10 && menu[0].checked && !menu[0].enabled && menu[1].checked &&
           menu[2].command == created_cmd && !menu[2].checked && menu[5].checked &&
-          menu[5].separator_after && menu[6].command == kDetailsColumnsReset && !menu[6].enabled,
-          L"optional columns: header menu lists name (fixed), the five columns and reset");
+          !menu[6].checked && menu[8].separator_after &&
+          menu[9].command == kDetailsColumnsReset && !menu[9].enabled,
+          L"optional columns: header menu lists name (fixed), the eight columns and reset");
     const uint32_t with_created = ApplyDetailsColumnCommand(ui::kDetailsColumnsDefault, created_cmd);
     Check(with_created == (ui::kDetailsColumnsDefault | ui::kDetailsColumnCreated) &&
           ApplyDetailsColumnCommand(with_created, created_cmd) == ui::kDetailsColumnsDefault &&
           ApplyDetailsColumnCommand(with_created, kDetailsColumnsReset) == ui::kDetailsColumnsDefault &&
           ApplyDetailsColumnCommand(with_created, kDetailsColumnToggleBase) == with_created &&
           ApplyDetailsColumnCommand(with_created, 0) == with_created &&
-          BuildDetailsColumnMenu(with_created)[2].checked && BuildDetailsColumnMenu(with_created)[6].enabled,
+          BuildDetailsColumnMenu(with_created)[2].checked && BuildDetailsColumnMenu(with_created)[9].enabled,
           L"optional columns: header menu toggles a column, resets, and ignores name / dismiss");
     const uint32_t drawn = (1u << static_cast<uint32_t>(K::Name)) | ui::kDetailsColumnsDefault;
     const auto narrow_menu = BuildDetailsColumnMenu(with_created, drawn, false);

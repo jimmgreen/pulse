@@ -1591,3 +1591,11 @@ BEGIN
     IDS_OP_AUTHORIZATION_PROMPT "請在 Windows 提示中授權，然後繼續此操作。"
     IDS_OP_AUTHORIZATION_NOT_GRANTED "未取得系統管理員權限。可重試授權、略過此項或取消。"
 END
+
+LANGUAGE 0x04, 0x01
+STRINGTABLE
+BEGIN
+    IDS_COLUMN_TITLE                "標題"
+    IDS_COLUMN_ARTIST               "藝人"
+    IDS_COLUMN_ALBUM                "專輯"
+END

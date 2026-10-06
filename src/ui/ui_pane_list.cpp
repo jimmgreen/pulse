@@ -317,11 +317,15 @@ MainRenderer::DetailsColumnLayout MainRenderer::DetailsColumns(
     const bool manual = vm.is_search
         ? std::any_of(vm.search_column_dividers.begin(), vm.search_column_dividers.end(), [](float v) { return v > 1.0f; })
         : std::any_of(vm.details_column_dividers.begin(), vm.details_column_dividers.end(), [](float v) { return v > 1.0f; });
-    // Content fitting covers the classic modified / type / size trio; extra
-    // date columns keep their measured automatic widths.
+    // Content fitting covers the classic modified / type / size trio and
+    // assumes they are the last three columns; extra date and audio columns
+    // keep their measured automatic widths instead. Audio values also arrive
+    // asynchronously, so fitting them would resize the column mid-paint.
     if (manual || !columns.Has(ColumnKind::Date) || !columns.Has(ColumnKind::Type) ||
         !columns.Has(ColumnKind::Size) || columns.Has(ColumnKind::Created) ||
-        columns.Has(ColumnKind::Accessed) || vm.view_mode != ViewMode::Details ||
+        columns.Has(ColumnKind::Accessed) || columns.Has(ColumnKind::Title) ||
+        columns.Has(ColumnKind::Artist) || columns.Has(ColumnKind::Album) ||
+        vm.view_mode != ViewMode::Details ||
         !compositor_ || !compositor_->FileNameFormat()) return columns;
     const std::array<std::wstring, 3> labels{
         vm.date_column_label.empty() ? l10n::Get(l10n::StringId::ColumnModified)
@@ -399,11 +403,23 @@ MainRenderer::ColumnAutoWidths MainRenderer::AutoColumnWidths() const {
         for (StringId id : kinds) type = std::max(type, measure(fmt, pulse::l10n::Get(id)) + chip);
         type = std::max(type, measure(fmt, L"AutoCAD " + pulse::l10n::Get(StringId::TypeFile)) + chip);
         float size = std::max(header_w(StringId::ColumnSize), measure(fmt, L"1023.9") + kSizeUnitDip);
+        // Audio values arrive asynchronously and vary per folder, so these
+        // columns are sized from the header plus a fixed Latin sample rather
+        // than the rows; content fitting would resize them as tags land.
+        const float title = std::max(header_w(StringId::ColumnTitle),
+                                     measure(fmt, L"Sample Song Title"));
+        const float artist = std::max(header_w(StringId::ColumnArtist),
+                                      measure(fmt, L"Sample Artist"));
+        const float album = std::max(header_w(StringId::ColumnAlbum),
+                                     measure(fmt, L"Sample Album Title"));
         out.date = std::clamp(date + pad, 72.0f, 176.0f);
         out.created = std::clamp(created + pad, 72.0f, 176.0f);
         out.accessed = std::clamp(accessed + pad, 72.0f, 176.0f);
         out.type = std::clamp(type + pad, 64.0f, 196.0f);
         out.size = std::clamp(size + pad, 60.0f, 112.0f);
+        out.title = std::clamp(title + pad, 88.0f, 224.0f);
+        out.artist = std::clamp(artist + pad, 80.0f, 196.0f);
+        out.album = std::clamp(album + pad, 88.0f, 224.0f);
     }
     auto_widths_ = out;
     auto_widths_scale_ = scale_;
@@ -469,12 +485,14 @@ MainRenderer::DetailsColumnLayout MainRenderer::DetailsColumns(
     const ColumnAutoWidths fitted = AutoColumnWidths();
     struct Meta { ColumnKind kind; float width; float automatic; };
     std::vector<Meta> meta;
-    meta.reserve(5);
-    // Display order. Search results carry no creation / access times.
+    meta.reserve(8);
+    // Display order. Search results carry no creation / access times and no
+    // audio properties.
     const std::pair<ColumnKind, float> shown[] = {
         {ColumnKind::Date, fitted.date}, {ColumnKind::Created, fitted.created},
         {ColumnKind::Accessed, fitted.accessed}, {ColumnKind::Type, fitted.type},
-        {ColumnKind::Size, fitted.size}};
+        {ColumnKind::Size, fitted.size}, {ColumnKind::Title, fitted.title},
+        {ColumnKind::Artist, fitted.artist}, {ColumnKind::Album, fitted.album}};
     for (const auto& [kind, automatic] : shown) {
         if (!(details_columns_ & (1u << static_cast<uint32_t>(kind)))) continue;
         const int slot = ManualColumnSlot(kind, search_view);
@@ -500,9 +518,12 @@ MainRenderer::DetailsColumnLayout MainRenderer::DetailsColumns(
         path_column = false;
         out.two_line = true;
     }
-    // Low-value columns go first when the name would get too narrow.
+    // Low-value columns go first when the name would get too narrow. The audio
+    // columns are opt-in and often empty, so they give way before the dates.
     while (total - automatic_sum() < min_name + (path_column ? min_path : 0.0f) && meta.size() > 1) {
-        if (!drop(ColumnKind::Accessed) && !drop(ColumnKind::Created) && !drop(ColumnKind::Type) &&
+        if (!drop(ColumnKind::Album) && !drop(ColumnKind::Artist) &&
+            !drop(ColumnKind::Title) && !drop(ColumnKind::Accessed) &&
+            !drop(ColumnKind::Created) && !drop(ColumnKind::Type) &&
             !drop(ColumnKind::Date)) break;
     }
     const float floor_flex = (kDetailsMinNameDip + (path_column ? kDetailsMinPathDip : 0.0f)) * scale_;
@@ -554,6 +575,10 @@ int MainRenderer::ManualColumnSlot(ColumnKind kind, bool search_view) noexcept {
     case K::Size: return search_view ? 3 : 2;
     case K::Created: return search_view ? -1 : 3;
     case K::Accessed: return search_view ? -1 : 4;
+    // Search results carry no audio properties: the columns are not offered.
+    case K::Title: return search_view ? -1 : 5;
+    case K::Artist: return search_view ? -1 : 6;
+    case K::Album: return search_view ? -1 : 7;
     default: return -1;
     }
 }
@@ -1672,7 +1697,7 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
         FillRect(dc, brStrokeDivider_.get(), x, y + column_header_height_ - 1, w, 1);
         const DetailsColumnLayout columns = DetailsColumns(bounds, pane);
         if (pane_index >= 0 && pane_index < static_cast<int>(painted_columns_.size())) {
-            uint32_t mask = columns.two_line ? (1u << 8) : 0u;
+            uint32_t mask = columns.two_line ? (1u << 31) : 0u;
             for (int col = 0; col < columns.count; ++col)
                 mask |= 1u << static_cast<uint32_t>(columns.kinds[static_cast<size_t>(col)]);
             painted_columns_[static_cast<size_t>(pane_index)] = mask;
@@ -1748,6 +1773,15 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
                 break;
             case ColumnKind::Accessed:
                 drawCol(pulse::l10n::Get(pulse::l10n::StringId::ColumnAccessed), SortColumn::Accessed, cw, false);
+                break;
+            case ColumnKind::Title:
+                drawCol(pulse::l10n::Get(pulse::l10n::StringId::ColumnTitle), SortColumn::Title, cw, false);
+                break;
+            case ColumnKind::Artist:
+                drawCol(pulse::l10n::Get(pulse::l10n::StringId::ColumnArtist), SortColumn::Artist, cw, false);
+                break;
+            case ColumnKind::Album:
+                drawCol(pulse::l10n::Get(pulse::l10n::StringId::ColumnAlbum), SortColumn::Album, cw, false);
                 break;
             }
         }
