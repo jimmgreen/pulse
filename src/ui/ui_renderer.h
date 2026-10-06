@@ -1088,6 +1088,7 @@ public:
                          AudioMetaValues& values) {
         return audio_meta_cache_.CachedAudioMeta(path, modified, size, values);
     }
+    bool TakeAudioMetaChanged() { return audio_meta_cache_.TakeAudioMetaChanged(); }
     D2D1_RECT_F DetailsPanelRect(float w, float h) const;
 
     D2D1_RECT_F ContentRect(float w, float h) const;

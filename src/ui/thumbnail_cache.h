@@ -86,6 +86,9 @@ public:
                    uint64_t modified, uint64_t size, AudioMetaValues& values);
     bool CachedAudioMeta(const std::wstring& path, uint64_t modified, uint64_t size,
                          AudioMetaValues& values);
+    // True once per batch of AudioMeta answers that landed, so the frame timer
+    // knows an audio-ordered listing has more to sort by (#92).
+    bool TakeAudioMetaChanged() { return audio_meta_changed_.exchange(false); }
     // Quick Look only: the cover colours of the still bitmap Draw shows for
     // this file (the exact size, else the stale one drawn meanwhile). False
     // until decoded, and for covers without a usable colour.
@@ -177,6 +180,7 @@ private:
     std::unordered_map<std::wstring, uint32_t> transient_failures_;
     std::wstring latest_details_identity_;
     std::atomic<uint32_t> epoch_{1};
+    std::atomic<bool> audio_meta_changed_{false};
     std::thread worker_;
 };
 } // namespace pulse::ui

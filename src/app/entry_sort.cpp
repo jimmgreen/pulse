@@ -75,8 +75,21 @@ struct SizeKey {
     bool known = true;
 };
 
+struct AudioKey {
+    std::wstring value;
+    bool known = false;
+};
+
+// Which of title / artist / album a sort column reads, or -1 for the rest.
+int AudioFieldOf(ui::SortColumn col) noexcept {
+    return col == ui::SortColumn::Title ? 0
+         : col == ui::SortColumn::Artist ? 1
+         : col == ui::SortColumn::Album ? 2 : -1;
+}
+
 bool Less(const fs::DirEntry& a, const fs::DirEntry& b, ui::SortColumn col,
-          ui::SortDirection dir, FolderSortMode folders, const SizeKey* ka, const SizeKey* kb) {
+          ui::SortDirection dir, FolderSortMode folders, const SizeKey* ka, const SizeKey* kb,
+          const AudioKey* aa = nullptr, const AudioKey* ab = nullptr) {
     const bool a_folder = a.is_dir || (!a.link_target.empty() && a.link_target_is_dir);
     const bool b_folder = b.is_dir || (!b.link_target.empty() && b.link_target_is_dir);
     // FoldersFirst pins folders above the direction flip below; FollowDirection
@@ -125,6 +138,19 @@ bool Less(const fs::DirEntry& a, const fs::DirEntry& b, ui::SortColumn col,
     case ui::SortColumn::Path:
         cmp = _wcsicmp(a.full_path.c_str(), b.full_path.c_str());
         if (cmp == 0) cmp = ItemNameCompare(a, b);
+        break;
+    case ui::SortColumn::Title:
+    case ui::SortColumn::Artist:
+    case ui::SortColumn::Album:
+        // A row without that tag has nothing to order by, so it sinks below the
+        // tagged ones in either direction and orders among them by name.
+        if (aa && ab && aa->known != ab->known) return aa->known;
+        if (aa && ab && !aa->value.empty()) {
+            cmp = _wcsicmp(aa->value.c_str(), ab->value.c_str());
+            if (cmp == 0) cmp = ItemNameCompare(a, b);
+        } else {
+            cmp = ItemNameCompare(a, b);
+        }
         break;
     }
     if (dir == ui::SortDirection::Desc) cmp = -cmp;
@@ -180,6 +206,63 @@ uint64_t FolderSizeSignature(const FolderSizeLookup& sizes) {
     uint64_t signature = sizes.size();
     for (const auto& [name, bytes] : sizes) {
         uint64_t x = std::hash<std::wstring>{}(name) ^ (bytes + 0x9E3779B97F4A7C15ull);
+        x ^= x >> 30; x *= 0xBF58476D1CE4E5B9ull;
+        x ^= x >> 27; x *= 0x94D049BB133111EBull;
+        x ^= x >> 31;
+        signature += x;
+    }
+    return signature;
+}
+
+void SortEntriesByAudioMeta(std::vector<fs::DirEntry>& entries, ui::SortColumn col,
+                            ui::SortDirection dir, const AudioMetaLookup& meta,
+                            const std::function<void()>& tick) {
+    const int field = AudioFieldOf(col);
+    if (field < 0) return;
+    const size_t n = entries.size();
+    std::vector<AudioKey> keys(n);
+    std::wstring lower;
+    for (size_t i = 0; i < n; ++i) {
+        const fs::DirEntry& e = entries[i];
+        if (e.is_dir || e.drive_type != 0) continue;
+        // Keyed by name, the same way a folder's known totals are: a listing
+        // that sorts by tags is one folder, and DirEntry::full_path is only
+        // filled for virtual views.
+        lower = e.name;
+        for (auto& c : lower) c = static_cast<wchar_t>(std::towlower(c));
+        const auto it = meta.find(lower);
+        if (it == meta.end()) continue;
+        keys[i].value = it->second[static_cast<size_t>(field)];
+        keys[i].known = !keys[i].value.empty();
+    }
+    // Sort positions, not rows, so a throwing tick leaves the rows as they were.
+    std::vector<size_t> order(n);
+    std::iota(order.begin(), order.end(), size_t{0});
+    const EntryGrouping* grouping = CurrentEntryGrouping();
+    const FolderSortMode mode = CurrentFolderSortMode();
+    std::sort(order.begin(), order.end(), [&](size_t x, size_t y) {
+        if (tick) tick();
+        const fs::DirEntry& a = entries[x];
+        const fs::DirEntry& b = entries[y];
+        if (grouping) {
+            if (const int c = GroupCompare(a, b, grouping->by, grouping->clock, col, dir))
+                return c < 0;
+        }
+        return Less(a, b, col, dir, mode, nullptr, nullptr, &keys[x], &keys[y]);
+    });
+    std::vector<fs::DirEntry> sorted;
+    sorted.reserve(n);
+    for (const size_t i : order) sorted.push_back(std::move(entries[i]));
+    entries.swap(sorted);
+}
+
+uint64_t AudioMetaSignature(const AudioMetaLookup& meta) {
+    uint64_t signature = meta.size();
+    for (const auto& [name, values] : meta) {
+        uint64_t x = std::hash<std::wstring>{}(name);
+        for (const auto& value : values) {
+            x ^= std::hash<std::wstring>{}(value) + 0x9E3779B97F4A7C15ull + (x << 6) + (x >> 2);
+        }
         x ^= x >> 30; x *= 0xBF58476D1CE4E5B9ull;
         x ^= x >> 27; x *= 0x94D049BB133111EBull;
         x ^= x >> 31;

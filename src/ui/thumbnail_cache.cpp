@@ -748,6 +748,8 @@ void ThumbnailCache::Worker() {
         mark("store-begin", ok, response.status);
         const bool stored = StoreResult(req, std::move(result));
         mark("stored", stored, response.status);
+        if (stored && req.kind == ipc::PreviewRequestKind::AudioMeta)
+            audio_meta_changed_ = true;
         if (const HWND hwnd = hwnd_.load(); stored && hwnd)
             InvalidateRect(hwnd, nullptr, FALSE);
         if (!ok) StopChild();

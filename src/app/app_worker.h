@@ -33,6 +33,9 @@ struct WorkItem {
     std::vector<uint64_t> display_times;
     // Known folder totals for a Size sort (#58); null sorts folders as 0 bytes.
     std::shared_ptr<const FolderSizeLookup> folder_sizes;
+    // Known audio tags for a Title / Artist / Album sort (#92); null leaves the
+    // rows in name order, the same answer as a folder no tag has come back for.
+    std::shared_ptr<const AudioMetaLookup> audio_meta;
 };
 
 struct WorkResult {
@@ -61,7 +64,8 @@ public:
     // Enqueue a refresh for path. Returns the generation assigned.
     uint64_t Refresh(const std::wstring& path, ui::SortColumn col, ui::SortDirection dir,
                      int group_by = 0,
-                     std::shared_ptr<const FolderSizeLookup> folder_sizes = nullptr);
+                     std::shared_ptr<const FolderSizeLookup> folder_sizes = nullptr,
+                     std::shared_ptr<const AudioMetaLookup> audio_meta = nullptr);
 
     uint64_t LoadPaths(const std::wstring& view_path, std::vector<std::wstring> paths,
                        ui::SortColumn col, ui::SortDirection dir,

@@ -36,6 +36,7 @@
 #include "tray_reveal.h"
 #include "blank_pane_click.h"
 #include "details_column_menu.h"
+#include "folder_sort_prefs.h"
 #include "entry_group.h"
 #include "context_menu.h"
 #include "context_menu_controller.h"
@@ -5949,6 +5950,125 @@ void TestOptionalColumns() {
           L"optional columns: sort menu offers created / accessed for folders only");
 }
 
+// #92: the audio columns sort by tags the preview host brings back, and a row
+// with no tag for the sorted column has nothing to order by.
+void TestAudioColumns() {
+    using K = ui::MainRenderer::ColumnKind;
+    const ScopedEntryGrouping grouping{0};
+    Check(ui::kDetailsColumnAudio == (ui::kDetailsColumnTitle | ui::kDetailsColumnArtist |
+                                      ui::kDetailsColumnAlbum) &&
+          (ui::kDetailsColumnsAll & ui::kDetailsColumnAudio) == ui::kDetailsColumnAudio &&
+          (ui::kDetailsColumnsDefault & ui::kDetailsColumnAudio) == 0u &&
+          ui::NormalizeDetailsColumns(ui::kDetailsColumnAlbum | 1u << 10) == ui::kDetailsColumnAlbum,
+          L"audio columns: title, artist and album are one optional group, off by default");
+    Check(K::Title < K::Artist && K::Artist < K::Album,
+          L"audio columns: title, artist and album keep their mask bit order");
+
+    // A real folder listing leaves full_path empty, so the tags are keyed by name.
+    auto entry = [](const wchar_t* name) {
+        fs::DirEntry e;
+        e.name = name;
+        return e;
+    };
+    auto names = [](const std::vector<fs::DirEntry>& rows) {
+        std::wstring out;
+        for (const auto& e : rows) out += e.name + L",";
+        return out;
+    };
+    auto tags = [](std::wstring title, std::wstring artist = L"", std::wstring album = L"") {
+        return ui::AudioMetaValues{std::move(title), std::move(artist), std::move(album)};
+    };
+    const AudioMetaLookup meta{
+        {L"beta.mp3", tags(L"Zulu", L"b artist", L"Beta Album")},
+        {L"alpha.mp3", tags(L"apple", L"a artist")},
+        {L"tie1.mp3", tags(L"Same")},
+        {L"tie2.mp3", tags(L"same")},
+        {L"empty.mp3", tags(L"", L"", L"Only Album")},
+    };
+    auto rows = [&] {
+        return std::vector<fs::DirEntry>{entry(L"beta.mp3"), entry(L"alpha.mp3"), entry(L"tie1.mp3"),
+                                         entry(L"tie2.mp3"), entry(L"empty.mp3"), entry(L"untagged.mp3")};
+    };
+
+    {
+        auto sorted = rows();
+        SortEntriesByAudioMeta(sorted, ui::SortColumn::Title, ui::SortDirection::Asc, meta);
+        Check(names(sorted) == L"alpha.mp3,tie1.mp3,tie2.mp3,beta.mp3,empty.mp3,untagged.mp3,",
+              L"audio columns: a title sort is case insensitive and the untagged rows trail");
+        sorted = rows();
+        SortEntriesByAudioMeta(sorted, ui::SortColumn::Title, ui::SortDirection::Desc, meta);
+        Check(names(sorted) == L"beta.mp3,tie2.mp3,tie1.mp3,alpha.mp3,untagged.mp3,empty.mp3,",
+              L"audio columns: descending title flips the tags but still keeps the untagged rows last");
+    }
+    {
+        auto sorted = rows();
+        SortEntriesByAudioMeta(sorted, ui::SortColumn::Artist, ui::SortDirection::Asc, meta);
+        Check(names(sorted) == L"alpha.mp3,beta.mp3,empty.mp3,tie1.mp3,tie2.mp3,untagged.mp3,",
+              L"audio columns: an artist sort reads the artist field, not the title");
+        sorted = rows();
+        SortEntriesByAudioMeta(sorted, ui::SortColumn::Album, ui::SortDirection::Asc, meta);
+        Check(names(sorted) == L"beta.mp3,empty.mp3,alpha.mp3,tie1.mp3,tie2.mp3,untagged.mp3,",
+              L"audio columns: an album sort reads the album field, so a title-only tag is unknown");
+    }
+    {
+        // Only a Title / Artist / Album column may reorder by tags.
+        auto sorted = rows();
+        const auto before = names(sorted);
+        SortEntriesByAudioMeta(sorted, ui::SortColumn::Name, ui::SortDirection::Asc, meta);
+        SortEntriesByAudioMeta(sorted, ui::SortColumn::Size, ui::SortDirection::Desc, meta);
+        Check(names(sorted) == before,
+              L"audio columns: any other sort column leaves the rows where they were");
+        bool threw = false;
+        try {
+            SortEntriesByAudioMeta(sorted, ui::SortColumn::Title, ui::SortDirection::Desc, meta,
+                                   [] { throw 1; });
+        } catch (int) { threw = true; }
+        Check(threw && names(sorted) == before,
+              L"audio columns: an abandoned tag sort leaves the rows untouched");
+    }
+    {
+        const auto fixture = rows();
+        using SC = ui::SortColumn;
+        using SD = ui::SortDirection;
+        Check(EntryLess(fixture[1], fixture[0], SC::Title, SD::Asc, FolderSortMode::FoldersFirst) &&
+              !EntryLess(fixture[0], fixture[1], SC::Title, SD::Asc, FolderSortMode::FoldersFirst) &&
+              EntryLess(fixture[0], fixture[2], SC::Album, SD::Asc, FolderSortMode::FoldersFirst),
+              L"audio columns: without a tag lookup an audio column compares by name");
+    }
+
+    AudioMetaLookup grown;
+    Check(AudioMetaSignature(grown) == 0u, L"audio columns: no tags yet gives the empty signature");
+    grown[L"beta.mp3"] = tags(L"Zulu", L"b artist", L"Beta Album");
+    const uint64_t one = AudioMetaSignature(grown);
+    Check(one != AudioMetaSignature({}),
+          L"audio columns: a tag landing changes the signature so the rows get re-sorted");
+    grown[L"alpha.mp3"] = tags(L"apple", L"a artist");
+    Check(AudioMetaSignature(grown) != one, L"audio columns: another tag changes it again");
+    grown[L"alpha.mp3"] = tags(L"apple", L"a artist", L"Second Album");
+    Check(AudioMetaSignature(grown) != one, L"audio columns: an album tag replaces the missing one");
+
+    // A tag sort is remembered per folder like any other column; the memory
+    // used to reject every column past "accessed".
+    FolderSortPrefs prefs;
+    Check(prefs.Set(L"C:\\music", {ui::SortColumn::Title, ui::SortDirection::Desc}),
+          L"audio columns: the per-folder sort memory accepts a title sort");
+    std::wstring saved = L"{\"view\":1";
+    prefs.AppendJson(saved);
+    saved += L"}";
+    FolderSortPrefs reloaded;
+    reloaded.ReadJson(saved);
+    const auto found = reloaded.Find(L"C:\\music");
+    Check(found && found->column == ui::SortColumn::Title &&
+          found->direction == ui::SortDirection::Desc,
+          L"audio columns: a saved title sort survives the preferences round trip");
+    prefs.Clear();
+    Check(prefs.Set(L"C:\\music", {ui::SortColumn::Album, ui::SortDirection::Asc}) &&
+          prefs.Set(L"C:\\sound", {ui::SortColumn::Artist, ui::SortDirection::Asc}) &&
+          prefs.Find(L"C:\\music")->column == ui::SortColumn::Album &&
+          prefs.Find(L"C:\\sound")->column == ui::SortColumn::Artist,
+          L"audio columns: artist and album sorts are stored under their own keys");
+}
+
 } // namespace
 
 // Staging tray card stack (v1.0.40): cyclic window, top-card-only hit
@@ -7187,7 +7307,14 @@ int RunSelfTest1B2() {
         wcscmp(test_case, L"list-columns") == 0) {
         TestListColumns();
         TestOptionalColumns();
+        TestAudioColumns();
         TestViewLayouts();
+        if (g_log) { fclose(g_log); g_log = nullptr; }
+        return g_fail ? 1 : 0;
+    }
+    if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
+        wcscmp(test_case, L"audio-columns") == 0) {
+        TestAudioColumns();
         if (g_log) { fclose(g_log); g_log = nullptr; }
         return g_fail ? 1 : 0;
     }
@@ -7309,6 +7436,7 @@ int RunSelfTest1B2() {
     TestViewLayouts();
     TestListColumns();
     TestOptionalColumns();
+    TestAudioColumns();
     TestTrayStack();
     TestHiddenFiles();
     TestQuickAccess();

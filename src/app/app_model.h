@@ -107,6 +107,9 @@ struct Tab {
     // with, and when they last moved for new totals (GetTickCount64).
     uint64_t folder_size_signature = 0;
     uint64_t folder_size_resorted_at = 0;
+    // Audio column order (#92): same pair for the tags the rows were sorted with.
+    uint64_t audio_meta_signature = 0;
+    uint64_t audio_meta_resorted_at = 0;
     ColumnStripState column_strip; // listings shown beside the list in column view
     std::wstring git_root;
     std::shared_ptr<std::vector<fs::DirEntry>> search_entries;

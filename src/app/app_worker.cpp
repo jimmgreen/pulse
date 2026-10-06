@@ -63,7 +63,8 @@ void WorkerPool::Stop() {
 
 uint64_t WorkerPool::Refresh(const std::wstring& path, ui::SortColumn col,
                              ui::SortDirection dir, int group_by,
-                             std::shared_ptr<const FolderSizeLookup> folder_sizes) {
+                             std::shared_ptr<const FolderSizeLookup> folder_sizes,
+                             std::shared_ptr<const AudioMetaLookup> audio_meta) {
     std::lock_guard<std::mutex> lock(mutex_);
     uint64_t gen = ++global_gen_;
     const std::wstring key = WorkKey(path, col, dir, group_by);
@@ -80,6 +81,7 @@ uint64_t WorkerPool::Refresh(const std::wstring& path, ui::SortColumn col,
     WorkItem work{ path, key, gen, col, dir };
     work.group_by = group_by;
     work.folder_sizes = std::move(folder_sizes);
+    work.audio_meta = std::move(audio_meta);
     queue_.push(std::move(work));
     diagnostics::runtime::Event("navigation_request", {{"generation", gen}, {"load_paths", 0}});
     cv_.notify_one();
@@ -241,6 +243,9 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
         try {
             if (item.folder_sizes && item.sort_column == ui::SortColumn::Size) {
                 SortEntriesBySize(*entries, item.sort_direction, *item.folder_sizes, tick);
+            } else if (item.audio_meta) {
+                SortEntriesByAudioMeta(*entries, item.sort_column, item.sort_direction,
+                                       *item.audio_meta, tick);
             } else {
                 std::sort(entries->begin(), entries->end(),
                     [&](const fs::DirEntry& a, const fs::DirEntry& b) {

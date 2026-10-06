@@ -45,6 +45,7 @@
 #include "entry_sort.h"
 #include "drop_staging.h"
 #include "folder_sizes_ui.h"
+#include "audio_meta_ui.h"
 #include "saved_search.h"
 #include "search_query.h"
 #include "settings_controller.h"
@@ -1119,6 +1120,10 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             }
             // New totals re-sort Size-ordered listings, paced (#58).
             if (folderSizeResortWaiting) folderSizeResortWaiting = ResortForFolderSizes(*s);
+            static bool audioMetaResortWaiting = false;
+            if (s->renderer.TakeAudioMetaChanged()) audioMetaResortWaiting = true;
+            // New tags re-sort audio-ordered listings, on the same pace (#92).
+            if (audioMetaResortWaiting) audioMetaResortWaiting = ResortForAudioMeta(*s);
             DrainDirNotifies(*s);
             const ULONGLONG now = GetTickCount64();
             TickUpdates(*s, now);
