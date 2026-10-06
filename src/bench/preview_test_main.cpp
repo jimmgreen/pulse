@@ -62,6 +62,55 @@ bool WriteBytes(const std::wstring& path, const std::vector<unsigned char>& byte
     return ok;
 }
 
+// Ten silent MPEG-1 Layer III frames wrapped in an ID3v2.3 tag, plus a legacy
+// ID3v1 trailer. The Windows property handler reads title, artist and album
+// from the ID3v2 text frames; it ignores RIFF INFO on a WAV, so an audio
+// fixture has to be an MP3. Generated here because bench_data is not versioned.
+std::vector<unsigned char> BuildTaggedMp3() {
+    auto be32 = [](std::vector<unsigned char>& b, uint32_t v) {
+        for (int i = 3; i >= 0; --i) b.push_back(static_cast<unsigned char>(v >> (8 * i)));
+    };
+    auto frame = [&](std::vector<unsigned char>& f, const char* id, const wchar_t* text) {
+        std::vector<unsigned char> body;
+        body.push_back(1);              // UTF-16 with byte order mark
+        body.push_back(0xFF); body.push_back(0xFE);
+        for (size_t i = 0; text[i]; ++i) {
+            body.push_back(static_cast<unsigned char>(text[i]));
+            body.push_back(static_cast<unsigned char>(text[i] >> 8));
+        }
+        body.push_back(0); body.push_back(0);
+        for (int i = 0; i < 4; ++i) f.push_back(static_cast<unsigned char>(id[i]));
+        be32(f, static_cast<uint32_t>(body.size()));
+        f.push_back(0); f.push_back(0);
+        f.insert(f.end(), body.begin(), body.end());
+    };
+    std::vector<unsigned char> frames;
+    frame(frames, "TIT2", L"Silent Test");
+    frame(frames, "TPE1", L"Pulse Bench ");
+    frame(frames, "TALB", L"Bench Album");
+    std::vector<unsigned char> out{'I', 'D', '3', 3, 0, 0};
+    const uint32_t tag = static_cast<uint32_t>(frames.size());
+    out.push_back(static_cast<unsigned char>((tag >> 21) & 0x7F));
+    out.push_back(static_cast<unsigned char>((tag >> 14) & 0x7F));
+    out.push_back(static_cast<unsigned char>((tag >> 7) & 0x7F));
+    out.push_back(static_cast<unsigned char>(tag & 0x7F));
+    out.insert(out.end(), frames.begin(), frames.end());
+    for (int i = 0; i < 10; ++i) {
+        const size_t at = out.size();
+        out.insert(out.end(), 417, 0);   // 128 kbps, 44.1 kHz, mono
+        out[at] = 0xFF; out[at + 1] = 0xFB; out[at + 2] = 0x90; out[at + 3] = 0x00;
+    }
+    const auto pad = [&out](const char* text) {
+        size_t i = 0;
+        for (; i < 30 && text[i]; ++i) out.push_back(static_cast<unsigned char>(text[i]));
+        for (; i < 30; ++i) out.push_back(' ');
+    };
+    out.insert(out.end(), {'T', 'A', 'G'});
+    pad("Silent Test"); pad("Pulse Bench"); pad("Bench Album");
+    out.push_back(0); out.push_back(17);
+    return out;
+}
+
 // A minimal Word 97 binary document ([MS-CFB] v3 container holding the
 // WordDocument and 1Table streams, [MS-DOC] FIB, piece table, PAPX / CHPX FKPs,
 // style sheet and SEPX), generated here because bench_data is not versioned.
@@ -535,6 +584,7 @@ int wmain(int argc, wchar_t** argv) {
         Check(WriteBytes(path(L"image.bmp"), bmp), L"create bitmap fixture");
         Check(WriteBytes(path(L"sparse.txt"), large, 1024ull * 1024ull * 1024ull),
               L"create 1 GB sparse text fixture");
+        Check(WriteBytes(path(L"tagged.mp3"), BuildTaggedMp3()), L"create tagged MP3 fixture");
     }
 
     Host host;
@@ -648,6 +698,32 @@ int wmain(int argc, wchar_t** argv) {
             }
             Check(received && h264 && !raw_guid,
                   L"codec: actual H264 file returns friendly name through preview host protocol");
+        }
+        // Audio columns: the host answers an AudioMeta request with exactly
+        // three values in title, artist, album order - empty for anything that
+        // is not audio, so the caller can cache "no tag" as a real answer.
+        {
+            Result meta;
+            const bool ok = host.Request(path(L"tagged.mp3"), meta, MAXDWORD,
+                                         ipc::kPreviewDefaultPixelSize,
+                                         ipc::PreviewRequestKind::AudioMeta);
+            for (const auto& [label, value] : meta.properties)
+                std::wprintf(L"[INFO] audio meta field: [%ls]\n", value.c_str());
+            bool ordered = ok && meta.response.property_count == ipc::kAudioMetaFields &&
+                meta.properties.size() == ipc::kAudioMetaFields &&
+                meta.properties[0].second == L"Silent Test" &&
+                meta.properties[1].second == L"Pulse Bench" &&
+                meta.properties[2].second == L"Bench Album";
+            Check(ordered, L"audio meta: tagged MP3 returns title, artist and album in order");
+            Result not_audio;
+            const bool blank = host.Request(path(L"utf8.txt"), not_audio, MAXDWORD,
+                                            ipc::kPreviewDefaultPixelSize,
+                                            ipc::PreviewRequestKind::AudioMeta) &&
+                not_audio.response.property_count == ipc::kAudioMetaFields &&
+                not_audio.properties.size() == ipc::kAudioMetaFields &&
+                not_audio.properties[0].second.empty() && not_audio.properties[1].second.empty() &&
+                not_audio.properties[2].second.empty();
+            Check(blank, L"audio meta: a text file answers three empty fields, not an error");
         }
         auto expectText = [&](const wchar_t* name, const wchar_t* contains) {
             Result result;

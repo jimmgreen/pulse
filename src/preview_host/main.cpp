@@ -24,6 +24,7 @@ using preview::ExtensionOf;
 using preview::IsOfflinePlaceholder;
 using preview::PreviewPropertyValue;
 using preview::ReadProperties;
+using preview::ReadAudioMeta;
 using preview::ReadMediaDurationMs;
 
 namespace {
@@ -69,6 +70,16 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
         bool made = false;
         if (req.kind == ipc::PreviewRequestKind::Properties) {
             if (!IsOfflinePlaceholder(req.attrs)) properties = ReadProperties(path);
+            response.property_count = static_cast<uint32_t>(properties.size());
+            response.status = 0;
+            made = true;
+        } else if (req.kind == ipc::PreviewRequestKind::AudioMeta) {
+            // The three fields always go on the wire, empty ones included, so
+            // the client can index them and cache a missing tag as a fact.
+            if (!IsOfflinePlaceholder(req.attrs)) {
+                const auto meta = ReadAudioMeta(path);
+                for (const auto& value : meta) properties.push_back({L"", value});
+            }
             response.property_count = static_cast<uint32_t>(properties.size());
             response.status = 0;
             made = true;
