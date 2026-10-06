@@ -1207,6 +1207,18 @@ void MainRenderer::DrawMorphFrom(const PaneViewModel& vm, const motion::ViewMorp
                     }
                     break;
                 }
+                case ColumnKind::Title:
+                case ColumnKind::Artist:
+                case ColumnKind::Album: {
+                    const auto& kind = columns.kinds[static_cast<size_t>(col)];
+                    const size_t field = kind == ColumnKind::Title ? 0 :
+                        kind == ColumnKind::Artist ? 1 : 2;
+                    const auto meta = vm.audio_meta_labels.find(src);
+                    if (meta != vm.audio_meta_labels.end() && !meta->second[field].empty()) {
+                        draw(meta->second[field], left, avail, DWRITE_TEXT_ALIGNMENT_LEADING);
+                    }
+                    break;
+                }
                 default:
                     break;
                 }
@@ -2685,6 +2697,21 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                             MakeBrush(dc, WithAlpha(theme.accent, 0.7f), brFillInput_);
                             FillRoundedRect(dc, brFillInput_.get(), left + avail * (1.0f - frac), barY,
                                             avail * frac, barH, barH * 0.5f);
+                        }
+                        break;
+                    }
+                    case ColumnKind::Title:
+                    case ColumnKind::Artist:
+                    case ColumnKind::Album: {
+                        // Still pending, or genuinely untagged: both draw an
+                        // empty cell, the same as the Shell's own music view.
+                        const auto& kind = detailsColumns.kinds[static_cast<size_t>(col)];
+                        const size_t field = kind == ColumnKind::Title ? 0 :
+                            kind == ColumnKind::Artist ? 1 : 2;
+                        const auto meta = vm.audio_meta_labels.find(src);
+                        if (meta != vm.audio_meta_labels.end() && !meta->second[field].empty()) {
+                            draw_detail_text(fit(meta->second[field], avail), left, avail,
+                                             DWRITE_TEXT_ALIGNMENT_LEADING);
                         }
                         break;
                     }

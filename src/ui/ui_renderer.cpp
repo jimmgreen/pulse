@@ -47,6 +47,7 @@ void MainRenderer::SetCompositor(Compositor* comp) {
         thumbnail_cache_.Reset();
         folder_thumbnail_cache_.Reset();
         details_cache_.Reset();
+        audio_meta_cache_.Reset();
         preview_handler_.Reset();
         preview_mono_format_.reset();
     }
@@ -56,6 +57,7 @@ void MainRenderer::SetCompositor(Compositor* comp) {
         thumbnail_cache_.SetDeviceContext(comp->Dc());
         folder_thumbnail_cache_.SetDeviceContext(comp->Dc());
         details_cache_.SetDeviceContext(comp->Dc());
+        audio_meta_cache_.SetDeviceContext(comp->Dc());
     }
 }
 
@@ -72,6 +74,7 @@ void MainRenderer::SetIconNotifyWindow(HWND hwnd) {
     thumbnail_cache_.SetNotifyWindow(hwnd);
     folder_thumbnail_cache_.SetNotifyWindow(hwnd);
     details_cache_.SetNotifyWindow(hwnd);
+    audio_meta_cache_.SetNotifyWindow(hwnd);
     preview_handler_.SetNotifyWindow(hwnd);
 }
 

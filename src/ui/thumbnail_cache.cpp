@@ -45,7 +45,8 @@ void DrawContained(ID2D1DeviceContext* dc, ID2D1Bitmap* bitmap, uint32_t w, uint
 // timeout restarts the host, so the heavy formats get room to finish.
 uint32_t ThumbnailCache::ResponseTimeoutMs(const std::wstring& path,
                                            ipc::PreviewRequestKind kind) {
-    if (kind == ipc::PreviewRequestKind::Properties) return 4000;
+    if (kind == ipc::PreviewRequestKind::Properties ||
+        kind == ipc::PreviewRequestKind::AudioMeta) return 4000;
     const size_t slash = path.find_last_of(L"\\/");
     const size_t dot = path.find_last_of(L'.');
     std::wstring ext = dot == std::wstring::npos || (slash != std::wstring::npos && dot < slash)
@@ -383,6 +384,57 @@ bool ThumbnailCache::CachedProperties(const std::wstring& path, uint64_t modifie
     if (it == items_.end() || it->second.failed) return false;
     Touch(it->second);
     properties = it->second.properties;
+    return true;
+}
+
+namespace {
+// The host answers an AudioMeta request with three value-only fields; the
+// labels are empty on purpose, so the position carries the meaning.
+void AudioMetaFromProperties(const std::vector<PreviewProperty>& properties,
+                             AudioMetaValues& values) {
+    for (size_t i = 0; i < values.size() && i < properties.size(); ++i) values[i] = properties[i].value;
+}
+} // namespace
+
+bool ThumbnailCache::AudioMeta(const std::wstring& path, DWORD attrs, uint64_t generation,
+                               uint64_t modified, uint64_t size, AudioMetaValues& values) {
+    if (path.empty()) return false;
+    const std::wstring key = Key(path, 0, modified, size) + L":audio";
+    std::lock_guard lock(mutex_);
+    if (auto it = items_.find(key); it != items_.end()) {
+        Touch(it->second);
+        if (it->second.failed) return false;
+        AudioMetaFromProperties(it->second.properties, values);
+        return true;
+    }
+    if (!pending_.contains(key) && queue_.size() < 128) {
+        pending_.insert(key);
+        Request request;
+        request.id = next_id_++; request.generation = generation;
+        request.attrs = attrs; request.kind = ipc::PreviewRequestKind::AudioMeta;
+        // Not "details": that marks a request as belonging to the details pane,
+        // which StoreResult retires as soon as the selection moves. Every
+        // visible row wants these at once, so the answer has to stay.
+        request.path = path; request.key = key;
+        request.identity = Key(path, 0, modified, size);
+        request.timeout_ms = ResponseTimeoutMs(path, request.kind);
+        request.epoch = epoch_.load(std::memory_order_relaxed);
+        queue_.push_back(std::move(request));
+        if (!running_.exchange(true)) worker_ = std::thread([this]{ Worker(); });
+        cv_.notify_one();
+    }
+    return false;
+}
+
+bool ThumbnailCache::CachedAudioMeta(const std::wstring& path, uint64_t modified, uint64_t size,
+                                     AudioMetaValues& values) {
+    if (path.empty()) return false;
+    const std::wstring key = Key(path, 0, modified, size) + L":audio";
+    std::lock_guard lock(mutex_);
+    const auto it = items_.find(key);
+    if (it == items_.end() || it->second.failed) return false;
+    Touch(it->second);
+    AudioMetaFromProperties(it->second.properties, values);
     return true;
 }
 void ThumbnailCache::Touch(Item& item) {

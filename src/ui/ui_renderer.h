@@ -168,6 +168,9 @@ struct PaneViewModel {
     std::unordered_map<int, ChangeBadge> change_badges;
     std::unordered_map<int, std::wstring> folder_size_labels;
     std::unordered_set<int> folder_size_actions;
+    // Row source index -> title / artist / album, filled by audio_meta_ui.cpp
+    // and read by the three audio columns while painting.
+    std::unordered_map<int, AudioMetaValues> audio_meta_labels;
     ChangeBadge title_change_badge;
     bool is_changes = false;
     std::wstring change_empty_text, change_status_text;
@@ -1075,6 +1078,16 @@ public:
                                  std::vector<PreviewProperty>& properties) {
         return details_cache_.CachedProperties(path, modified, size, properties);
     }
+    // Audio columns: ask for one row, or read only what already came back.
+    // Both return false while the answer is still pending or failed.
+    bool RequestAudioMeta(const std::wstring& path, DWORD attrs, uint64_t generation,
+                          uint64_t modified, uint64_t size, AudioMetaValues& values) {
+        return audio_meta_cache_.AudioMeta(path, attrs, generation, modified, size, values);
+    }
+    bool CachedAudioMeta(const std::wstring& path, uint64_t modified, uint64_t size,
+                         AudioMetaValues& values) {
+        return audio_meta_cache_.CachedAudioMeta(path, modified, size, values);
+    }
     D2D1_RECT_F DetailsPanelRect(float w, float h) const;
 
     D2D1_RECT_F ContentRect(float w, float h) const;
@@ -1495,6 +1508,11 @@ private:
     FolderThumbnailCache folder_thumbnail_cache_;
     bool folder_thumbnails_enabled_ = true;
     ThumbnailCache details_cache_{48ull * 1024ull * 1024ull, 24};
+    // The audio columns want every visible row at once and an untagged file is
+    // a permanent answer, so this cache is sized for a whole screenful and is
+    // never retired by a selection change. Values are three short strings, so
+    // the item count, not the byte budget, is what bounds it.
+    ThumbnailCache audio_meta_cache_{4ull * 1024ull * 1024ull, 4096};
     PreviewHandlerHost preview_handler_;
     HWND notify_hwnd_ = nullptr;
     float scale_ = 1.0f;
