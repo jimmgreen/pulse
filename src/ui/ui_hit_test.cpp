@@ -406,6 +406,9 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 if (ContainsPt(lay.close_last_tab_row, x, y)) {
                     r.region = HitTestResult::SettingsToggle; r.index = 26; return r;
                 }
+                if (ContainsPt(lay.close_tab_double_click_row, x, y)) {
+                    r.region = HitTestResult::SettingsToggle; r.index = 35; return r;
+                }
                 if (ContainsPt(lay.confirm_delete_row, x, y)) {
                     r.region = HitTestResult::SettingsToggle; r.index = 32; return r;
                 }

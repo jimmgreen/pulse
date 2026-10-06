@@ -187,6 +187,8 @@ bool HandleVerticalTabPress(AppState& s, const ui::HitTestResult& hit) {
     }
     if (hit.region == R::SidebarItem && IsVerticalTabPath(hit.path, &index)) {
         // Switch on press (like the strip); the press may also become a reorder.
+        if (index < s.window_tabs.items.size())
+            s.tabDoubleClickTarget = s.window_tabs.items[index].get();
         if (index < s.window_tabs.items.size() && index != s.window_tabs.active)
             SwitchTab(s, index);
         POINT pt{};

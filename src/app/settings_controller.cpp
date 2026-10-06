@@ -945,6 +945,9 @@ void SettingsController::ToggleUi(int index) {
     } else if (index == 26) {
         prefs_->close_window_with_last_tab = !prefs_->close_window_with_last_tab;
         SaveAndApply(SettingsEffect::None);
+    } else if (index == 35) {
+        prefs_->close_tab_on_double_click = !prefs_->close_tab_on_double_click;
+        SaveAndApply(SettingsEffect::None);
     } else if (index == 32) {
         prefs_->confirm_recycle_delete = !prefs_->confirm_recycle_delete;
         SaveAndApply(SettingsEffect::None);

@@ -1139,6 +1139,7 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                     if (n0 >= 2 && n0 == static_cast<int>(s->window_tabs.items.size()) &&
                         haveEnds && selfOk) {
                         s->tabDragging = true;
+                        s->tabDoubleClickTarget = nullptr;
                         s->tabFlowLeft = first.left;
                         s->tabFlowRight = last.right;
                         s->tabSlotW = self.right - self.left;
@@ -1874,6 +1875,7 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 if (!s->pinDragActive && !s->pinDragPath.empty() &&
                     std::abs(my - s->pinDragStartPt.y) >= kSidebarDragDeadzonePx) {
                     s->pinDragActive = true;
+                    if (IsVerticalTabPath(s->pinDragPath)) s->tabDoubleClickTarget = nullptr;
                 }
                 if (s->pinDragActive) {
                     UpdateSidebarPinDrag(*s, my);
@@ -2003,6 +2005,7 @@ static void ClickGroupHeader(AppState& s, int pane_slot, int group, bool select)
 
 LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
+        s->tabDoubleClickTarget = nullptr;
         s->blankDoubleTab = nullptr;
         s->blankDoublePending = false;
         int mx = GET_X_LPARAM(lParam);
@@ -2225,6 +2228,8 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 }
             }
         } else if (hit.region == ui::HitTestResult::Tab && hit.index >= 0) {
+            if (static_cast<size_t>(hit.index) < s->window_tabs.items.size())
+                s->tabDoubleClickTarget = s->window_tabs.items[static_cast<size_t>(hit.index)].get();
             SwitchTab(*s, hit.index);
             s->tabDragPending = true;
             s->tabDragging = false;
@@ -2858,6 +2863,8 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
 LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
+        const auto* tab_target = s->tabDoubleClickTarget;
+        s->tabDoubleClickTarget = nullptr;
         if (ColumnStripSwallowDoubleClick(*s)) {
             s->stripClickTick = 0;
             return 0;
@@ -2878,6 +2885,22 @@ LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPA
         ui::WindowViewModel vm = BuildVm(*s, false);
         D2D1_RECT_F rect = D2D1::RectF(0, 0, (float)s->compositor.Width(), (float)s->compositor.Height());
         ui::HitTestResult hit = s->renderer.HitTest(vm, rect, (float)mx, (float)my);
+        size_t tab_index = hit.index >= 0 ? static_cast<size_t>(hit.index) : s->window_tabs.items.size();
+        const bool vertical_tab = hit.region == ui::HitTestResult::SidebarItem &&
+            IsVerticalTabPath(hit.path, &tab_index);
+        if (hit.region == ui::HitTestResult::Tab || vertical_tab) {
+            s->tabDragPending = false;
+            s->tabDragging = false;
+            s->tabDragIndex = -1;
+            if (vertical_tab) ResetSidebarPinDrag(*s);
+            if (GetCapture() == hwnd) ReleaseCapture();
+            // Require both presses on the same tab body: closing an X can move
+            // the next tab under the pointer before the double-click arrives.
+            if (s->appPrefs.close_tab_on_double_click && tab_index < s->window_tabs.items.size() &&
+                s->window_tabs.items[tab_index].get() == tab_target)
+                CloseLayoutTab(*s, tab_index);
+            return 0;
+        }
         if ((hit.region == ui::HitTestResult::Pane || hit.region == ui::HitTestResult::None) &&
             PointInList(*s, mx, my) &&
             (hit.pane_index < 0 || PaneAtSlot(*s, hit.pane_index) == s->pane)) {
