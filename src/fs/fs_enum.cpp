@@ -131,6 +131,21 @@ bool IsVirtualPath(const std::wstring& path) {
     return path.starts_with(L"pulse:");
 }
 
+bool IsShellPath(const std::wstring& path) {
+    return path.starts_with(kShellPathPrefix);
+}
+
+std::wstring MakeShellPath(std::wstring_view parsing_name) {
+    std::wstring path(kShellPathPrefix);
+    path.append(parsing_name);
+    return path;
+}
+
+std::wstring ShellParsingName(const std::wstring& path) {
+    if (!IsShellPath(path)) return {};
+    return path.substr(kShellPathPrefix.size());
+}
+
 bool IsUncPath(const std::wstring& path) {
     return path.starts_with(L"\\\\?\\UNC\\") ||
            (path.starts_with(L"\\\\") && !path.starts_with(L"\\\\?\\"));

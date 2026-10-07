@@ -78,10 +78,16 @@ enum MsgType : uint32_t {
     REQ_CTX_QUERY = 12,
     REQ_CTX_INVOKE = 13,
     REQ_CTX_CLOSE = 14,
+    // Shell namespace items that have no drive letter: the phone, camera or
+    // cloud-drive folder Explorer shows under This PC. The UI process never
+    // touches Shell COM, so both requests are served by pulse_shell's STA.
+    REQ_SHELL_ROOTS = 15,   // empty payload; the non-drive items under This PC
+    REQ_SHELL_LIST = 16,    // payload: one string (a pulse:shell: path)
     RSP_PROGRESS = 100,
     RSP_DONE = 101,
     RSP_PONG = 102,
     RSP_CTX_ITEMS = 103,
+    RSP_SHELL_ITEMS = 104,
 };
 
 // REQ_CTX_QUERY flags.
@@ -205,6 +211,58 @@ private:
 
 inline std::wstring PipeNameFor(uint32_t ui_pid) {
     return L"\\\\.\\pipe\\pulse_shell_" + std::to_wstring(ui_pid);
+}
+
+// ---------------------------------------------------------------------------
+// Shell namespace rows (RSP_SHELL_ITEMS, REQ_SHELL_ROOTS / REQ_SHELL_LIST).
+//
+// One item of a shell folder, as the UI's DirEntry needs it. `parsing_name` is
+// the Desktop-absolute name, which is what a pulse:shell: path stores;
+// `has_filesystem_path` tells the UI to list the item with the ordinary Win32
+// enumerator instead of coming back over the pipe.
+// ---------------------------------------------------------------------------
+struct ShellItem {
+    std::wstring parsing_name;
+    std::wstring display_name;
+    bool is_dir = false;
+    bool has_filesystem_path = false;
+    uint64_t size = 0;
+    uint64_t mtime = 0;   // 100ns units since 1601, 0 when unknown
+    uint64_t total = 0;   // capacity, This PC rows only; 0 = unknown
+    uint64_t free = 0;    // free space, This PC rows only
+};
+
+inline void WriteShellItems(PayloadWriter& w, const std::vector<ShellItem>& items) {
+    w.PutU32(static_cast<uint32_t>(items.size()));
+    for (const auto& item : items) {
+        w.PutString(item.parsing_name);
+        w.PutString(item.display_name);
+        w.PutU32(item.is_dir ? 1u : 0u);
+        w.PutU32(item.has_filesystem_path ? 1u : 0u);
+        w.PutU64(item.size);
+        w.PutU64(item.mtime);
+        w.PutU64(item.total);
+        w.PutU64(item.free);
+    }
+}
+
+inline bool ReadShellItems(PayloadReader& r, std::vector<ShellItem>& items) {
+    uint32_t count = 0;
+    if (!r.GetU32(count)) return false;
+    items.clear();
+    items.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        ShellItem item;
+        uint32_t is_dir = 0, has_fs = 0;
+        if (!r.GetString(item.parsing_name) || !r.GetString(item.display_name) ||
+            !r.GetU32(is_dir) || !r.GetU32(has_fs) || !r.GetU64(item.size) ||
+            !r.GetU64(item.mtime) || !r.GetU64(item.total) || !r.GetU64(item.free))
+            return false;
+        item.is_dir = is_dir != 0;
+        item.has_filesystem_path = has_fs != 0;
+        items.push_back(std::move(item));
+    }
+    return true;
 }
 
 // ---------------------------------------------------------------------------

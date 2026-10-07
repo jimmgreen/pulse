@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.25)
+﻿cmake_minimum_required(VERSION 3.25)
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/version.txt" PULSE_VERSION LIMIT_COUNT 1)
 project(Pulse VERSION ${PULSE_VERSION} LANGUAGES C CXX)
 
@@ -510,20 +510,24 @@ add_executable(pulse_ops_test
     src/ops/ops_manager.cpp
     src/ops/file_lock_owner.cpp
     src/ops/clipboard.cpp
+    src/app/shell_namespace_cache.cpp
     src/ipc/shell_client.cpp)
 target_link_libraries(pulse_ops_test PRIVATE ole32 shell32 uuid bcrypt pulse_localization)
 add_executable(pulse_authorization_flow_test src/bench/authorization_flow_test.cpp
+    src/app/shell_namespace_cache.cpp
     src/ops/ops_manager.cpp src/ops/duplicate_cleanup_guard.cpp src/ops/file_lock_owner.cpp src/ipc/shell_client.cpp)
 target_link_libraries(pulse_authorization_flow_test PRIVATE ole32 shell32 uuid bcrypt advapi32 pulse_localization)
 
 add_executable(pulse_rename_ops_test src/bench/rename_ops_test.cpp
     src/app/batch_rename.cpp
+    src/app/shell_namespace_cache.cpp
     src/ops/duplicate_cleanup_guard.cpp
     src/ops/ops_manager.cpp src/ops/file_lock_owner.cpp src/ipc/shell_client.cpp)
 target_link_libraries(pulse_rename_ops_test PRIVATE ole32 shell32 uuid bcrypt pulse_localization pulse_fs_watch)
 
 # Locked-item lookup (Restart Manager) + end-process-and-retry through OpsManager.
 add_executable(pulse_file_lock_test src/bench/file_lock_owner_test.cpp
+    src/app/shell_namespace_cache.cpp
     src/ops/duplicate_cleanup_guard.cpp
     src/ops/file_lock_owner.cpp src/ops/ops_manager.cpp src/ipc/shell_client.cpp)
 target_link_libraries(pulse_file_lock_test PRIVATE ole32 shell32 uuid bcrypt rstrtmgr pulse_localization)
@@ -1036,6 +1040,14 @@ target_link_libraries(pulse_shell_command_test PRIVATE shell32 user32)
 add_executable(pulse_reparse_entry_test src/bench/reparse_entry_test.cpp)
 target_link_libraries(pulse_reparse_entry_test PRIVATE pulse_localization user32 shell32 shlwapi netapi32)
 
+# Shell namespace paths and the This PC cache (portable devices, cloud folders).
+add_executable(pulse_shell_namespace_test
+    src/bench/shell_namespace_test.cpp
+    src/fs/fs_enum.cpp
+    src/app/shell_namespace_cache.cpp
+    src/ipc/shell_client.cpp)
+target_link_libraries(pulse_shell_namespace_test PRIVATE pulse_localization shell32 shlwapi netapi32 ole32 uuid bcrypt)
+
 add_executable(pulse_link_destination_test src/bench/link_destination_test.cpp src/app/link_resolve.cpp src/fs/fs_enum.cpp
     src/app/snapshot_patch.cpp src/app/entry_order_hold.cpp src/app/entry_group.cpp src/app/entry_sort.cpp)
 target_link_libraries(pulse_link_destination_test PRIVATE pulse_localization shell32 shlwapi netapi32 ole32 uuid)
@@ -1149,3 +1161,4 @@ add_executable(pulse_quicklook_catalog_test src/bench/quicklook_catalog_test.cpp
 target_link_libraries(pulse_quicklook_catalog_test PRIVATE pulse_localization d3d11 d2d1 dwrite
     dxgi dcomp dwmapi shcore ole32 windowscodecs user32 gdi32 shell32 advapi32 comctl32)
 pulse_enable_lumatext(pulse_quicklook_catalog_test)
+

@@ -1,5 +1,6 @@
 // app_model.cpp
 #include "app_model.h"
+#include "shell_namespace_cache.h"
 #include "layout_pane_selection.h"
 #include "network_sidebar.h"
 #include "../common/config_json.h"
@@ -1260,6 +1261,33 @@ SidebarModel BuildSidebarModel(const fs::RecycleBinInfo* recycle) {
         m.drives.push_back(std::move(e));
     }
     RefreshSidebarDriveCapacity(m.drives);
+
+    // Shell namespace items Explorer lists here and GetLogicalDrives() cannot
+    // see: a phone over MTP, a cloud-drive folder, a namespace extension. They
+    // come from pulse_shell through the cache, so on the very first frame - and
+    // in tests, where no host is running - the list is simply empty.
+    for (auto& item : CachedShellRoots()) {
+        if (item.parsing_name.empty()) continue;
+        SidebarEntry e;
+        e.label = item.display_name.empty() ? item.parsing_name : item.display_name;
+        e.glyph = item.has_filesystem_path ? L"\xE7F1" : L"\xE8EA"; // drive / device
+        e.fallback = item.has_filesystem_path ? L"Drive" : L"Device";
+        e.path = fs::MakeShellPath(item.parsing_name);
+        // is_dir only: a shell row is navigable, but it is not a local volume,
+        // so it deliberately does not get the drive badge or capacity ring.
+        e.expandable = false;
+        e.color = ui::HexColor(kDrivePalette[m.drives.size() % 4]);
+        if (item.total) {
+            const uint64_t total = item.total;
+            const uint64_t free = item.free;
+            e.detail = pulse::format::ByteSize(free, false, pulse::format::ByteSizeStyle::Compact)
+                     + L" / " + pulse::format::ByteSize(total, false,
+                                                         pulse::format::ByteSizeStyle::Compact);
+            e.used_ratio = (float)((double)(total - free) / (double)total);
+            if ((double)free / (double)total < 0.10) e.danger = true;
+        }
+        m.drives.push_back(std::move(e));
+    }
     return m;
 }
 
@@ -2043,3 +2071,4 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
 }
 
 } // namespace pulse::app
+
