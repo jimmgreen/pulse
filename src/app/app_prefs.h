@@ -54,6 +54,7 @@ struct AppPrefs {
     int new_tab_open = 0;
     // Closing the only tab closes the window (app/last_tab_close.h).
     bool close_window_with_last_tab = false;
+    bool close_tab_on_double_click = false;
     bool confirm_recycle_delete = false; // ask before Delete moves items to the Recycle Bin
     // Sign-in launches (Run value with --startup) stay hidden behind the tray icon.
     bool start_in_tray = false;

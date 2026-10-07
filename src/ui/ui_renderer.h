@@ -731,6 +731,7 @@ struct WindowViewModel {
     int settings_notify_icon = 0;  // 0 always, 1 in the background, 2 never (#57)
     int settings_new_tab_open = 0; // 0 current folder, 1 default location
     bool settings_close_last_tab = false;
+    bool settings_close_tab_on_double_click = false;
     bool settings_confirm_delete = false;
     std::wstring settings_home_folder; // default location; empty = This PC
     int settings_text_render = 0; // 0 auto, 1 sharp, 2 smooth

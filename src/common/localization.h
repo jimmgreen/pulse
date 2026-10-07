@@ -580,6 +580,8 @@ enum class StringId : UINT {
     SettingsNewTabOpenDesc = IDS_SETTINGS_NEW_TAB_OPEN_DESC,
     SettingsCloseLastTab = IDS_SETTINGS_CLOSE_LAST_TAB,
     SettingsCloseLastTabDesc = IDS_SETTINGS_CLOSE_LAST_TAB_DESC,
+    SettingsCloseTabDoubleClick = IDS_SETTINGS_CLOSE_TAB_DOUBLE_CLICK,
+    SettingsCloseTabDoubleClickDesc = IDS_SETTINGS_CLOSE_TAB_DOUBLE_CLICK_DESC,
     LockedItemTitle = IDS_LOCKED_ITEM_TITLE,
     LockedItemMessage = IDS_LOCKED_ITEM_MESSAGE,
     LockedItemEndHint = IDS_LOCKED_ITEM_END_HINT,

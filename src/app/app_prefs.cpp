@@ -74,6 +74,7 @@ void AppPrefs::ResetToDefaults() {
     startup_open = 0;
     new_tab_open = 0;
     close_window_with_last_tab = false;
+    close_tab_on_double_click = false;
     confirm_recycle_delete = false;
     start_in_tray = false;
     home_folder.clear();
@@ -174,6 +175,8 @@ std::wstring AppPrefs::ToJson() const {
     out += new_tab_open == 1 ? L"1" : L"0";
     out += L",\n  \"close_window_with_last_tab\":";
     out += close_window_with_last_tab ? L"true" : L"false";
+    out += L",\n  \"close_tab_on_double_click\":";
+    out += close_tab_on_double_click ? L"true" : L"false";
     out += L",\n  \"confirm_recycle_delete\":";
     out += confirm_recycle_delete ? L"true" : L"false";
     out += L",\n  \"start_in_tray\":";
@@ -317,6 +320,7 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     startup_open = pulse::json::ExtractInt(json, L"startup_open", 0) == 1 ? 1 : 0;
     new_tab_open = pulse::json::ExtractInt(json, L"new_tab_open", 0) == 1 ? 1 : 0;
     close_window_with_last_tab = pulse::json::ExtractBool(json, L"close_window_with_last_tab", false);
+    close_tab_on_double_click = pulse::json::ExtractBool(json, L"close_tab_on_double_click", false);
     confirm_recycle_delete = pulse::json::ExtractBool(json, L"confirm_recycle_delete", false);
     start_in_tray = pulse::json::ExtractBool(json, L"start_in_tray", false);
     home_folder = pulse::json::ExtractString(json, L"home_folder");

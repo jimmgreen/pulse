@@ -370,6 +370,7 @@ struct AppState {
     float stripHScrollMaxDip = 0.0f;
 
     bool tabDragPending = false;
+    app::LayoutTab* tabDoubleClickTarget = nullptr; // identity only; never dereferenced
     bool tabDragging = false;
     int tabDragIndex = -1;               // window_tabs.items index of the dragged tab
     POINT tabDragStartPt{};
