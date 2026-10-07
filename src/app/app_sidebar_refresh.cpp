@@ -1,6 +1,7 @@
 #include "app_sidebar_refresh.h"
 #include "app_internal.h"
 #include "sidebar_refresh_schedule.h"
+#include "shell_namespace_cache.h"
 #include <atomic>
 #include <mutex>
 
@@ -67,7 +68,6 @@ void StartPending(AppState& state) {
     });
 }
 } // namespace
-
 void RequestSidebarRefresh(AppState& state, bool rebuild) {
     if (!state.sidebarRefresh) state.sidebarRefresh = std::make_shared<SidebarRefreshLoad>();
     if (state.sidebarRefresh->cancelled) return;
@@ -78,6 +78,14 @@ void RequestSidebarRefresh(AppState& state, bool rebuild) {
 bool TickSidebarRefresh(AppState& state, ULONGLONG now) {
     const auto load = state.sidebarRefresh;
     if (!load || load->cancelled) return false;
+
+    // Shell namespace rows for This PC. Asking here means the request rides the
+    // same low-frequency tick as the drive capacities, and the answer arrives on
+    // the shell client's reader thread for the next rebuild to pick up.
+    app::RequestShellRootsRefresh();
+    const bool shell_changed = app::TakeShellRootsChanged();
+    if (shell_changed) RequestSidebarRefresh(state, /*rebuild=*/true);
+
     app::SidebarModel result;
     bool ready = false;
     bool rebuilt = false;

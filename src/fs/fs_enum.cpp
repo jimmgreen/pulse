@@ -145,7 +145,6 @@ std::wstring ShellParsingName(const std::wstring& path) {
     if (!IsShellPath(path)) return {};
     return path.substr(kShellPathPrefix.size());
 }
-}
 
 bool IsUncPath(const std::wstring& path) {
     return path.starts_with(L"\\\\?\\UNC\\") ||

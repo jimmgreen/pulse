@@ -1,5 +1,6 @@
 // app_worker.cpp
 #include "app_worker.h"
+#include "shell_namespace_cache.h"
 #include "app_model.h"
 #include "entry_sort.h"
 #include "entry_group.h"
@@ -192,6 +193,31 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
             res.snapshot = nullptr;
             return res;
         }
+    } else if (fs::IsShellPath(item.path)) {
+        // A shell namespace folder: a phone over MTP, a cloud-drive folder, a
+        // namespace extension. There is no Win32 enumeration for these, so ask
+        // pulse_shell. This runs on the worker thread, which may block on the
+        // pipe; the UI thread never does.
+        std::vector<pulse::ipc::ShellItem> shell_items;
+        if (!ListShellFolderBlocking(item.path, shell_items)) {
+            res.error = true;
+            res.snapshot = nullptr;
+            return res;
+        }
+        entries->reserve(shell_items.size());
+        for (auto& shell_item : shell_items) {
+            fs::DirEntry entry;
+            entry.name = shell_item.display_name.empty() ? shell_item.parsing_name
+                                                         : shell_item.display_name;
+            entry.is_dir = shell_item.is_dir;
+            entry.size = shell_item.size;
+            entry.full_path = fs::MakeShellPath(shell_item.parsing_name);
+            if (shell_item.mtime) {
+                entry.mtime.dwLowDateTime = static_cast<DWORD>(shell_item.mtime);
+                entry.mtime.dwHighDateTime = static_cast<DWORD>(shell_item.mtime >> 32);
+            }
+            entries->push_back(std::move(entry));
+        }
     } else {
         try {
             fs::EnumerateDirectory(item.path, *entries);
@@ -335,3 +361,5 @@ void WorkerPool::WorkerThread() {
 }
 
 } // namespace pulse::app
+
+

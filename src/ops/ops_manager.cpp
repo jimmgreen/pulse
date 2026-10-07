@@ -1,5 +1,6 @@
 // ops_manager.cpp — See ops_manager.h for the contract.
 #include "ops_manager.h"
+#include "../app/shell_namespace_cache.h"
 #include "../common/runtime_log.h"
 #include "operation_presentation.h"
 #include "shell_command.h"
@@ -1560,6 +1561,11 @@ void OpsManager::WorkerThread() {
         }
         OnCtxItems(id, std::move(out), partial, std::move(slow_clsids));
     };
+    // Shell namespace answers feed the This PC cache; the sidebar picks them up
+    // on its next rebuild rather than being woken from this thread.
+    cb.shell_items = [](uint32_t id, std::vector<ipc::ShellItem> items, bool ok) {
+        app::DispatchShellItems(id, std::move(items), ok);
+    };
     ipc::ShellClient::Instance().Start(cb);
 #endif
 
@@ -2992,3 +2998,4 @@ bool OpsManager::UndoFromJson(const std::wstring& in) {
 }
 
 } // namespace pulse::ops
+
