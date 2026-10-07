@@ -1,5 +1,6 @@
 #include "app_sidebar_refresh.h"
 #include "app_internal.h"
+#include "../ipc/shell_client.h"
 #include "sidebar_refresh_schedule.h"
 #include "shell_namespace_cache.h"
 #include <atomic>
@@ -82,7 +83,7 @@ bool TickSidebarRefresh(AppState& state, ULONGLONG now) {
     // Shell namespace rows for This PC. Asking here means the request rides the
     // same low-frequency tick as the drive capacities, and the answer arrives on
     // the shell client's reader thread for the next rebuild to pick up.
-    app::RequestShellRootsRefresh();
+    if (ipc::ShellClient::Instance().IsRunning()) app::RequestShellRootsRefresh();
     const bool shell_changed = app::TakeShellRootsChanged();
     if (shell_changed) RequestSidebarRefresh(state, /*rebuild=*/true);
 
@@ -126,3 +127,5 @@ void CancelSidebarRefresh(AppState& state) {
     if (state.sidebarRefresh) state.sidebarRefresh->cancelled = true;
 }
 } // namespace pulse
+
+

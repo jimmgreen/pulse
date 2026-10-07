@@ -70,6 +70,11 @@ public:
     uint32_t ShellRoots();
     uint32_t ListShellFolder(const std::wstring& shell_path);
 
+    // True once Start() has taken effect and the pipe is usable. Callers that
+    // only want to ride an already-running host - the sidebar refresh - check
+    // this rather than bringing one up as a side effect of drawing a frame.
+    bool IsRunning() const;
+
     // Explorer context-menu session. Query returns the session id; items come
     // back through Callbacks::ctx_items. Invoke completes via Callbacks::done
     // (the host closes the session afterwards). Close is fire-and-forget for

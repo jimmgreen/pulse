@@ -302,6 +302,10 @@ bool ShellClient::Ping() {
     return Submit(REQ_PING, {}) != 0;
 }
 
+bool ShellClient::IsRunning() const {
+    return running_.load();
+}
+
 uint32_t ShellClient::ShellRoots() {
     return Submit(REQ_SHELL_ROOTS, {});
 }
@@ -497,3 +501,4 @@ void ShellClient::HandleDisconnect() {
 }
 
 } // namespace pulse::ipc
+
