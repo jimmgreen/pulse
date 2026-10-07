@@ -302,6 +302,17 @@ bool ShellClient::Ping() {
     return Submit(REQ_PING, {}) != 0;
 }
 
+uint32_t ShellClient::ShellRoots() {
+    return Submit(REQ_SHELL_ROOTS, {});
+}
+
+uint32_t ShellClient::ListShellFolder(const std::wstring& shell_path) {
+    if (shell_path.empty()) return 0;
+    PayloadWriter writer;
+    writer.PutString(shell_path);
+    return Submit(REQ_SHELL_LIST, writer.data());
+}
+
 void ShellClient::FireDone(uint32_t id, uint32_t hr, bool cancelled, const std::wstring& error) {
     if (cb_.done) cb_.done(id, hr, cancelled, error);
 }
@@ -418,6 +429,19 @@ void ShellClient::ReaderThread() {
                         cb_.ctx_items(h.request_id, std::move(items), partial,
                                       std::move(slow_clsids));
                 }
+            } else if (h.type == RSP_SHELL_ITEMS) {
+                std::vector<ShellItem> items;
+                // An empty payload is the host saying "cannot resolve this
+                // path", which the UI must show as a failure: no rows is a
+                // meaningful answer too, so the two cannot be conflated.
+                const bool ok = r.remaining() > 0 && ReadShellItems(r, items);
+                bool pending = false;
+                {
+                    std::lock_guard<std::mutex> lock(pending_mutex_);
+                    pending = pending_.erase(h.request_id) != 0;
+                }
+                if (pending && cb_.shell_items)
+                    cb_.shell_items(h.request_id, std::move(items), ok);
             } else if (h.type == RSP_PONG) {
                 std::lock_guard<std::mutex> lock(pending_mutex_);
                 pending_.erase(h.request_id);

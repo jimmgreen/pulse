@@ -53,6 +53,31 @@ struct DirEntry {
 bool IsVirtualPath(const std::wstring& path);
 bool IsUncPath(const std::wstring& path);
 
+// ---------------------------------------------------------------------------
+// Shell namespace paths (portable devices, cloud-drive shell folders).
+//
+// "This PC" in Explorer is a shell namespace, while Pulse built its drive list
+// from GetLogicalDrives(), which only returns letters. Anything the shell adds
+// without a letter - a phone over MTP, a cloud drive's folder - was invisible.
+//
+// Such an item is identified by its Desktop-absolute parsing name, wrapped in a
+// virtual scheme: pulse:shell:::{GUID}\... or, for the ones that also have one,
+// pulse:shell:C:\path. Parsing names round-trip through SHParseDisplayName, so a
+// plain string stays a usable identity and DirEntry, tabs and sessions need no
+// binary PIDL.
+//
+// The "pulse:shell:" prefix is deliberate: bare "shell:" is already a
+// command-line form (shell:::{20D04FE0-...}, shell:MyComputerFolder) that
+// IsThisPcArgument parses, and the two must not be confused.
+// ---------------------------------------------------------------------------
+constexpr std::wstring_view kShellPathPrefix = L"pulse:shell:";
+
+bool IsShellPath(const std::wstring& path);
+std::wstring MakeShellPath(std::wstring_view parsing_name);
+
+// Parsing name behind a pulse:shell: path; empty when the path is not one.
+std::wstring ShellParsingName(const std::wstring& path);
+
 enum class NetStatus { Unknown = 0, Online, Slow, Offline };
 
 // Canonical long-path prefix for Win32 APIs.

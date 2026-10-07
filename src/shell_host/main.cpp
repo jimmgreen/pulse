@@ -13,6 +13,7 @@
 #include "../ipc/ctx_menu_util.h"
 #include "ctx_handlers.h"
 #include "packaged_ctx_handlers.h"
+#include "shell_items.h"
 #include "../common/current_user_security.h"
 #include "../common/path_utils.h"
 #include "../common/crash_reporter.h"
@@ -639,6 +640,63 @@ bool ClientIsExpected() {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Shell namespace requests (REQ_SHELL_ROOTS / REQ_SHELL_LIST).
+//
+// Explorer's "This PC" is a shell namespace; Pulse listed only what
+// GetLogicalDrives() returns, so a phone over MTP or a cloud-drive folder never
+// appeared. Enumeration runs on its own STA thread, the way the context-menu
+// handlers do, because this reader thread is not an apartment.
+// ---------------------------------------------------------------------------
+struct ShellItemsTask {
+    uint32_t type = 0;
+    uint32_t request_id = 0;
+    std::wstring path;   // pulse:shell: path, REQ_SHELL_LIST only
+};
+
+DWORD WINAPI ShellItemsThreadImpl(LPVOID param) {
+    // The task is intentionally not freed here, matching the handler workers:
+    // a __try guard cannot own objects that need unwinding, and the host
+    // recycles itself once idle and abandoned, so the process reclaims it.
+    auto* task = static_cast<ShellItemsTask*>(param);
+    const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    if (FAILED(hr)) {
+        SendMsg(RSP_SHELL_ITEMS, task->request_id, {});
+        return 0;
+    }
+
+    std::vector<pulse::ipc::ShellItem> items;
+    bool ok = true;
+    if (task->type == REQ_SHELL_ROOTS) {
+        items = pulse::shell::EnumerateThisPcExtras();
+    } else {
+        const std::wstring parsing = pulse::shell::ParsingNameOfPath(task->path);
+        ok = pulse::shell::EnumerateShellFolder(parsing, items);
+    }
+
+    // An unresolvable path answers with an empty payload, which the client
+    // reports as a failure rather than as an empty folder.
+    pulse::ipc::PayloadWriter writer;
+    if (ok) pulse::ipc::WriteShellItems(writer, items);
+    SendMsg(RSP_SHELL_ITEMS, task->request_id, writer.data());
+    CoUninitialize();
+    return 0;
+}
+
+DWORD WINAPI ShellItemsThread(LPVOID param) {
+    // A __try guard cannot live in a function that needs object unwinding
+    // (C2712): building the empty fallback payload allocates, so that happens in
+    // the impl. An exception here means the worker is gone; the UI's own request
+    // timeout reports the failure rather than the host answering twice.
+    DWORD result = 0;
+    __try {
+        result = ShellItemsThreadImpl(param);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return result;
+    }
+    return result;
+}
+
 DWORD WINAPI ReaderThread(LPVOID) {
     __try {
         return ReaderThreadImpl();
@@ -690,6 +748,22 @@ DWORD WINAPI ReaderThreadImpl() {
             switch (h.type) {
             case REQ_PING: {
                 SendMsg(RSP_PONG, h.request_id, {});
+                break;
+            }
+            case REQ_SHELL_ROOTS:
+            case REQ_SHELL_LIST: {
+                // Shell namespace enumeration, so the UI can list the items
+                // Explorer shows under This PC that have no drive letter.
+                // Deferred to a fresh STA thread, like the context-menu
+                // handlers: this reader thread is not an apartment.
+                auto* task = new ShellItemsTask{ h.type, h.request_id, {} };
+                if (h.type == REQ_SHELL_LIST) {
+                    PayloadReader reader(payload.data(), payload.size());
+                    reader.GetString(task->path);
+                }
+                HANDLE thread = CreateThread(nullptr, 0, ShellItemsThread, task, 0, nullptr);
+                if (thread) CloseHandle(thread);
+                else { delete task; SendMsg(RSP_SHELL_ITEMS, h.request_id, {}); }
                 break;
             }
             case REQ_CANCEL: {
@@ -1609,3 +1683,5 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     CoUninitialize();
     return 0;
 }
+
+

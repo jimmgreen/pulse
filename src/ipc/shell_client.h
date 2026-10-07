@@ -43,6 +43,10 @@ public:
         // RSP_CTX_ITEMS for a REQ_CTX_QUERY; id is the query id (== session id).
         std::function<void(uint32_t id, std::vector<CtxMenuItem> items, bool partial,
                            std::vector<std::wstring> slow_clsids)> ctx_items;
+        // RSP_SHELL_ITEMS for REQ_SHELL_ROOTS / REQ_SHELL_LIST. `ok` is false when
+        // the host could not resolve the path at all, which is not the same as an
+        // empty folder and has to read as a failure in the UI.
+        std::function<void(uint32_t id, std::vector<ShellItem> items, bool ok)> shell_items;
     };
 
     static ShellClient& Instance();
@@ -59,6 +63,12 @@ public:
     void Cancel(uint32_t id);
     void Abort(uint32_t id);
     bool Ping();
+
+    // Shell namespace items, answered through Callbacks::shell_items. Roots are
+    // the non-drive items under This PC (a phone over MTP, a cloud-drive folder);
+    // ListShellFolder takes a pulse:shell: path from such a row.
+    uint32_t ShellRoots();
+    uint32_t ListShellFolder(const std::wstring& shell_path);
 
     // Explorer context-menu session. Query returns the session id; items come
     // back through Callbacks::ctx_items. Invoke completes via Callbacks::done
