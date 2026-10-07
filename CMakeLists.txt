@@ -729,6 +729,9 @@ target_link_libraries(pulse_packaged_ctx_test PRIVATE ole32 shell32 uuid shlwapi
 add_executable(pulse_shell_recycle_test src/bench/shell_recycle_test.cpp src/ipc/shell_client.cpp)
 target_link_libraries(pulse_shell_recycle_test PRIVATE ole32 shell32 uuid shlwapi bcrypt pulse_localization)
 
+add_executable(pulse_shell_foreground_test src/bench/shell_foreground_test.cpp src/ipc/shell_client.cpp)
+target_link_libraries(pulse_shell_foreground_test PRIVATE user32 pulse_localization)
+
 add_executable(pulse_ctx_handlers_test src/bench/ctx_handlers_test.cpp
     src/shell_host/ctx_handlers.cpp src/shell_host/packaged_ctx_handlers.cpp)
 target_link_libraries(pulse_ctx_handlers_test PRIVATE ole32 shell32 uuid shlwapi)
