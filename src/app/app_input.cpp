@@ -2437,7 +2437,10 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
         } else if (hit.region == ui::HitTestResult::NavForward) {
             GoForward(*s);
         } else if (hit.region == ui::HitTestResult::NavUp) {
-            GoUp(*s);
+            // Guarded rather than trusting the drawing: at This PC there is no
+            // parent, and a click must never reach a path that can throw out of
+            // the window procedure, which __try/__except cannot catch (#146).
+            if (CanGoUp(*s)) GoUp(*s);
         } else if (hit.region == ui::HitTestResult::NavRefresh) {
             RefreshActiveTab(*s);
         } else if (hit.region == ui::HitTestResult::NewButton) {
