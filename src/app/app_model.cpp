@@ -1,5 +1,6 @@
 // app_model.cpp
 #include "app_model.h"
+#include "app_navigation.h"
 #include "layout_pane_selection.h"
 #include "network_sidebar.h"
 #include "../common/config_json.h"
@@ -1903,6 +1904,7 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
     vm.dark = dark;
     vm.can_go_back = tab->CanGoBack();
     vm.can_go_forward = tab->CanGoForward();
+    vm.can_go_up = TabCanGoUp(tab);
 
     FillPaneViewModel(vm.pane, pane, places);
     vm.pane.focused = focused;
