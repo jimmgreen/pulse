@@ -110,6 +110,7 @@ constexpr UINT WM_EXIT_PULSE = WM_APP + 72;  // palette "Exit Pulse" (#57)  // S
 constexpr UINT kTimerUi = 1;
 constexpr UINT WM_NETWORK_LOCATIONS = WM_APP + 73;
 constexpr UINT WM_ASSOC_CHANGED = WM_APP + 74;  // SHCNE_ASSOCCHANGED: default programs changed
+constexpr UINT WM_PULSE_PREFS_CHANGED = WM_APP + 75;  // another window changed shared preferences
 
 enum class OmnibarMode { Path, Mixed, Command, Project };
 
@@ -407,6 +408,18 @@ struct AppState {
 
     ShotRequest shot;
     std::wstring open_path;   // folder to open as a new tab after session restore
+    // Multi-window: false for every window except the first one created. Only
+    // the primary window owns the tray icon, the single-instance endpoint, the
+    // global hotkeys and the update checker; the rest are plain windows that
+    // share the on-disk preferences.
+    bool primary_window = true;
+    // Set while the window is being created by OpenPulseWindow, so WM_CREATE
+    // skips the process-level one-time work the primary window already did.
+    bool secondary_window = false;
+    // Window rectangle restored from the previous session. Empty when unknown.
+    RECT restored_window_rect{};
+    bool has_restored_window_rect = false;
+    bool restored_maximized = false;
     Timing timing;
     std::wstring session_path;
     std::vector<app::LayoutTabSnapshot> session_layout_tabs;

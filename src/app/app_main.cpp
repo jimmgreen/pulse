@@ -52,6 +52,7 @@
 #include "search_query.h"
 #include "settings_controller.h"
 #include "single_instance_coordinator.h"
+#include "window_registry.h"
 #include "tray_controller.h"
 #include "global_search_controller.h"
 #include "tab_controller.h"
@@ -147,6 +148,20 @@ void UnregisterAssocChangeNotify() {
 #include <dbt.h> // WM_DEVICECHANGE / DEV_BROADCAST_HDR
 
 using namespace pulse;
+
+// The primary window closed but others remain: hand the once-per-app duties
+// (tray icon, shell notification) to `s`, whose window becomes the new primary.
+// `s.primary_window` is kept in sync so later lookups agree with the registry.
+static void TakeOverPrimaryDuties(AppState& s) {
+    if (!s.hwnd) return;
+    s.primary_window = true;
+    s.secondary_window = false;
+    s.tray_controller.Attach(s.hwnd, GetModuleHandleW(nullptr));
+    InstallTrayRevealHook(s);
+    if (WantsTrayIcon(s, s.hidden_to_tray))
+        s.tray_controller.SetVisible(true);
+    RegisterAssocChangeNotify(s.hwnd);
+}
 
 uint64_t FileTimeValue(const FILETIME& value) {
     ULARGE_INTEGER result{};
@@ -296,10 +311,33 @@ static bool SessionWritable(const AppState& s) {
         !ShellTagHeadlessLaunch();
 }
 
+// A window rect is only worth persisting when it names a real on-screen area.
+// A window created with CW_USEDEFAULT reports the sentinel region (a clamped
+// coordinate around -25600) until Windows has placed it; testing against the
+// monitors is stricter than a magic threshold, which would wrongly reject a
+// window on a virtual desktop that extends to negative coordinates.
+static bool WindowRectIsPersistable(const RECT& rc) {
+    if (rc.right <= rc.left || rc.bottom <= rc.top) return false;
+    for (DWORD i = 0; ; ++i) {
+        DISPLAY_DEVICEW device{ sizeof(device) };
+        if (!EnumDisplayDevicesW(nullptr, i, &device, 0)) break;
+        if ((device.StateFlags & DISPLAY_DEVICE_ACTIVE) == 0) continue;
+        DEVMODEW mode{ sizeof(mode) };
+        if (!EnumDisplaySettingsW(device.DeviceName, ENUM_CURRENT_SETTINGS, &mode)) continue;
+        const RECT monitor{ mode.dmPosition.x, mode.dmPosition.y,
+                            mode.dmPosition.x + static_cast<LONG>(mode.dmPelsWidth),
+                            mode.dmPosition.y + static_cast<LONG>(mode.dmPelsHeight) };
+        RECT overlap{};
+        if (IntersectRect(&overlap, &rc, &monitor)) return true;
+    }
+    // No monitor info (unusual): reject only the sentinel area.
+    return rc.left > -24000 && rc.top > -24000;
+}
+
 static app::SessionSnapshot CaptureWindowSession(AppState& s, HWND hwnd) {
     app::SessionSnapshot snap;
     WINDOWPLACEMENT wp{ sizeof(wp) };
-    if (GetWindowPlacement(hwnd, &wp)) {
+    if (GetWindowPlacement(hwnd, &wp) && WindowRectIsPersistable(wp.rcNormalPosition)) {
         snap.window_rect = wp.rcNormalPosition;
         snap.maximized = (wp.showCmd == SW_SHOWMAXIMIZED);
     }
@@ -351,6 +389,10 @@ constexpr ULONGLONG kSessionAutosaveMs = 3000;
 static void TickSessionAutosave(AppState& s, HWND hwnd, ULONGLONG now) {
     if (now < s.sessionAutosaveCheck) return;
     s.sessionAutosaveCheck = now + kSessionAutosaveMs;
+    // One session.json describes every window (see CaptureWindowSession), so a
+    // single writer is enough; letting each window autosave would have them
+    // fight over the same file every three seconds.
+    if (!s.primary_window && !pulse::IsPrimaryPulseWindow(hwnd)) return;
     // A drag (splitter, sidebar, column, system move/size loop) holds mouse capture.
     // GetKeyState is not used: its queued button state can stay "down" after a click
     // whose button-up a drag-detect loop consumed, which silently stopped autosave.
@@ -423,8 +465,12 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         s = reinterpret_cast<AppState*>(cs->lpCreateParams);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(s));
         s->hwnd = hwnd;
-        s->tray_controller.Attach(hwnd, cs->hInstance);
-        InstallTrayRevealHook(*s);
+        // Multi-window: only the primary window owns the tray icon. Extra
+        // windows are plain top-level windows that share the process.
+        if (s->primary_window) {
+            s->tray_controller.Attach(hwnd, cs->hInstance);
+            InstallTrayRevealHook(*s);
+        }
 
         s->scale = s->shot_scale_override > 0.0f
             ? s->shot_scale_override : (float)pulse::compat::WindowDpi(hwnd) / 96.0f;
@@ -483,6 +529,9 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             },
             [s] { return s->appPrefs.close_window_with_last_tab; },
             [hwnd] { PostMessageW(hwnd, WM_CLOSE, 0, 0); },
+            [s](int index) {
+                TearOffLayoutTab(*s, static_cast<size_t>(std::max(0, index)));
+            },
         });
         if (s->isolatedTest) {
             s->places.persist = false;
@@ -556,15 +605,22 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             s->update_result.installer_sha256 =
                 L"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         }
-        ui::typography::SetUiFontScale(s->appPrefs.ui_font_scale);
-        ui::typography::InvalidateCaches();
+        // Language and UI font scale are process-global. A secondary window
+        // reads the same shared preference file, so re-applying identical values
+        // is harmless, but it must not churn the caches the primary initialized.
+        if (!s->secondary_window) {
+            ui::typography::SetUiFontScale(s->appPrefs.ui_font_scale);
+            ui::typography::InvalidateCaches();
+        }
         s->compositor.RecreateTextFormats(s->scale);
         if (s->safeMode) {
             s->appPrefs.window_effect = L"none";
             s->appPrefs.background_image.clear();
         } else {
             SeedShellVerbCache(*s);
-            StartShellRegistryWatch(hwnd);
+            // The shell-registry watch is process-wide; only the primary window
+            // owns it (it is unregistered when the primary window closes).
+            if (!s->secondary_window) StartShellRegistryWatch(hwnd);
         }
         s->renderer.SetRowHeightDip(static_cast<float>(
             app::EffectiveRowHeightDip(s->appPrefs.row_height, s->appPrefs.ui_font_scale)));
@@ -794,10 +850,42 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             RegisterDragDrop(hwnd, s->dropTarget);
         }
 
+        // Multi-window: an extra window opened at runtime starts from the
+        // primary window's live appearance (sidebar layout, details pane,
+        // theme) rather than the stale on-disk session. A window reopened from
+        // a saved session keeps its own tab layout; a freshly opened one starts
+        // empty and falls back to the requested folder only.
+        if (s->secondary_window) {
+            if (AppState* primary = pulse::PrimaryPulseState(); primary && primary != s) {
+                const AppState& p = *primary;
+                s->darkMode = p.darkMode;
+                s->themeOverride = p.themeOverride;
+                s->accentColor = p.accentColor;
+                s->sidebarCollapsedMask = p.sidebarCollapsedMask;
+                s->sidebarHiddenMask = p.sidebarHiddenMask;
+                s->sidebarOrder = p.sidebarOrder;
+                s->sidebarQuickAccessHiddenMask = p.sidebarQuickAccessHiddenMask;
+                s->starredExpanded = p.starredExpanded;
+                s->showDetailsPanel = p.showDetailsPanel;
+                s->detailsPreviewOnly = p.detailsPreviewOnly;
+                s->detailsPreviewEnabled = p.detailsPreviewEnabled;
+                s->detailsPreviewExpansion = p.detailsPreviewExpansion;
+                s->detailsPanelWidth = p.detailsPanelWidth;
+                s->renderer.SetDetailsPanelWidth(s->detailsPanelWidth);
+            }
+            // Opened by the user (Ctrl+N, tab tear-off): one tab, at open_path.
+            if (s->session_layout_tabs.empty()) {
+                s->session_tab_groups.clear();
+                s->session_active_layout_tab = 0;
+                s->session_path.clear();
+            }
+        }
+
         // "Open the default location" drops only the saved tabs; the rest of the
         // session (sidebar, details pane, window state) still applies.
         const bool open_default_location =
-            !s->shot.active && !app::RestoresLastTabs(s->appPrefs, s->restoreUpdateSession);
+            !s->shot.active && !s->secondary_window &&
+            !app::RestoresLastTabs(s->appPrefs, s->restoreUpdateSession);
         if (open_default_location) {
             s->session_layout_tabs.clear();
             s->session_tab_groups.clear();
@@ -860,7 +948,10 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
         // Settings have been loaded (or their own load_failed guard is set),
         // and the saved layouts/undo are now represented by live models.
-        if (!s->isolatedTest && !s->shot.active && !s->menushot) app::CleanupAbandonedUpdateStagesAsync();
+        // The update-stage sweep is a process-level one-shot; the primary
+        // window already ran it.
+        if (!s->isolatedTest && !s->shot.active && !s->menushot && !s->secondary_window)
+            app::CleanupAbandonedUpdateStagesAsync();
         s->startupComplete = true;
         s->lastFrameTime = std::chrono::steady_clock::now();
         s->renderer.SetDetailsPanelVisible(s->showDetailsPanel);
@@ -979,7 +1070,11 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (wParam == HTCLOSE) {
             SuspendContentSearches(*s);
             s->globalSearchWindow.Hide();
-            if (s->appPrefs.keep_running_on_close || s->appPrefs.global_search_enabled) HideMainWindowToTray(*s);
+            // Only the final window can "close to tray"; an extra window is a
+            // plain window and closes the way its X button implies.
+            if (pulse::IsLastPulseWindow(hwnd) &&
+                (s->appPrefs.keep_running_on_close || s->appPrefs.global_search_enabled))
+                HideMainWindowToTray(*s);
             else DestroyWindow(hwnd);
             return 0;
         }
@@ -988,7 +1083,8 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
     case WM_CLOSE: {
         if (s) { SuspendContentSearches(*s); s->globalSearchWindow.Hide(); }
-        if (s && (s->appPrefs.keep_running_on_close || s->appPrefs.global_search_enabled)) {
+        if (s && pulse::IsLastPulseWindow(hwnd) &&
+            (s->appPrefs.keep_running_on_close || s->appPrefs.global_search_enabled)) {
             HideMainWindowToTray(*s);
             return 0;
         }
@@ -1008,28 +1104,62 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (!s || !app::SingleInstanceCoordinator::DecodeOpenRequest(cds, request)) return FALSE;
             const auto accepted = s->single_instance.AcceptOpenRequest(request, GetTickCount64());
             if (accepted == app::SingleInstanceCoordinator::OpenAcceptance::Invalid) return FALSE;
-            if (accepted == app::SingleInstanceCoordinator::OpenAcceptance::New)
-                OpenFolderInNewTab(*s, request.path);
+            if (accepted == app::SingleInstanceCoordinator::OpenAcceptance::New) {
+                // A second launch of pulse.exe asks for another window, matching
+                // File Explorer. An empty path means "just open Pulse", which
+                // reuses the existing window so double-clicking the exe twice
+                // does not spawn an empty duplicate.
+                if (request.path.empty()) {
+                    ShowWindow(hwnd, SW_RESTORE);
+                    SetForegroundWindow(hwnd);
+                } else if (!pulse::OpenPulseWindow(request.path)) {
+                    // Window creation failed: fall back to a tab so the request
+                    // is never silently dropped.
+                    OpenFolderInNewTab(*s, request.path);
+                }
+            }
             return TRUE; // acceptance, not a claim that asynchronous enumeration succeeded
         }
         std::wstring path;
         if (!s || !app::SingleInstanceCoordinator::DecodeOpenPath(cds, path)) return FALSE;
-        OpenFolderInNewTab(*s, path);
+        if (path.empty()) {
+            ShowWindow(hwnd, SW_RESTORE);
+            SetForegroundWindow(hwnd);
+        } else if (!pulse::OpenPulseWindow(path)) {
+            OpenFolderInNewTab(*s, path);
+        }
         return TRUE;
     }
 
     case app::TrayController::kCallbackMessage: {
         if (!s) return 0;
         const auto result = s->tray_controller.HandleCallback(lParam);
-        if (result == app::TrayController::CallbackResult::ExitRequested)
+        if (result == app::TrayController::CallbackResult::ExitRequested) {
+            // The tray icon belongs to the primary window, but its "Exit" ends
+            // the whole application: take every window down with it.
+            for (HWND window : pulse::PulseWindows()) {
+                if (window != hwnd) PostMessageW(window, WM_EXIT_PULSE, 0, 0);
+            }
             DestroyWindow(hwnd);
+        }
         return 0;
     }
 
     case WM_EXIT_PULSE:
-        // Palette "Exit Pulse" (#57): the tray menu's full exit, reachable
-        // when the icon is hidden. Posted so the palette unwinds first.
+        // Palette "Exit Pulse" (#57) and the tray menu's full exit: "exit" means
+        // the whole application, so every other window goes down too and the
+        // last one ends the message loop.
+        for (HWND window : pulse::PulseWindows()) {
+            if (window != hwnd) PostMessageW(window, WM_EXIT_PULSE, 0, 0);
+        }
         DestroyWindow(hwnd);
+        return 0;
+
+    case WM_PULSE_PREFS_CHANGED:
+        // Another window changed shared preferences. Reload the on-disk values
+        // (the writer already persisted them), rebuild what derives from them
+        // and repaint. Nothing here writes, so windows cannot ping-pong.
+        if (s) ApplySharedPreferenceRefresh(*s);
         return 0;
 
     case WM_DPICHANGED: {
@@ -2086,30 +2216,55 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 DeleteObject(s->editBrush);
                 s->editBrush = nullptr;
             }
+            // Multi-window: this window may be one of several. Only the last one
+            // to close may write shared state (session / prefs / places) and
+            // release process-level resources, or closing one window would
+            // clobber the layout of the others.
+            const bool is_primary = pulse::IsPrimaryPulseWindow(hwnd);
+            const bool is_last = pulse::IsLastPulseWindow(hwnd);
             // Visual-regression runs must never overwrite the user's real
             // window, path, tray, or undo session.
             if (s->startupComplete && !s->shot.active && !s->menushot && !s->isolatedTest) {
-                // A hidden tag-only launch must not overwrite the real
-                // window/tab session (SessionWritable); tags and places still save below.
-                if (!s->updateSessionPrepared) SaveWindowSession(*s, hwnd, true);
-                s->places.Save();
-                s->ctxMenuPrefs.Save();
-                if (!s->updateSessionPrepared) s->appPrefs.Save();
+                // A hidden tag-only launch must not overwrite the real session
+                // (SessionWritable); tags and places still save below. The last
+                // window writes session.json.
+                if (is_last && !s->updateSessionPrepared) SaveWindowSession(*s, hwnd, true);
+                if (is_last) {
+                    s->places.Save();
+                    s->ctxMenuPrefs.Save();
+                    if (!s->updateSessionPrepared) s->appPrefs.Save();
+                }
             }
 
-            s->tray_controller.Detach();
             s->ops.Stop();
-            ops::ShutdownElevatedTransferHelper();
-            app::SweepDropStages(app::DropStageRoot(), true);
-            s->single_instance.Release();
+            // Tray icon and shell registration exist once; the single-instance
+            // mutex/endpoint must outlive this window while others remain, or a
+            // second process could start while Pulse is still running.
+            if (is_primary) {
+                s->tray_controller.Detach();
+                UnregisterAssocChangeNotify();
+                if (is_last) {
+                    ops::ShutdownElevatedTransferHelper();
+                    app::SweepDropStages(app::DropStageRoot(), true);
+                    s->single_instance.Release();
+                }
+            }
 
-            UnregisterAssocChangeNotify();
             s->renderer.SetIconNotifyWindow(nullptr);
             s->renderer.SetCompositor(nullptr);
             s->compositor.Shutdown();
             s->hwnd = nullptr;
+            // The next window takes over the process-level duties that exist
+            // once per app (tray icon, shell notification).
+            if (is_primary && !is_last) {
+                if (HWND next = pulse::AnyOtherPulseWindow(hwnd)) {
+                    pulse::ElectPrimaryPulseWindow(next);
+                    if (AppState* next_state = GetAppState(next)) TakeOverPrimaryDuties(*next_state);
+                }
+            }
         }
-        PostQuitMessage(0);
+        const bool last_window = pulse::ReleasePulseWindow(hwnd);
+        if (last_window) PostQuitMessage(0);
         return 0;
     }
     }
@@ -2462,6 +2617,129 @@ int RunUiModuleAuditTest();
 int RunQuickPreviewAuditTest();
 #endif
 
+// Window class is process-wide and registered once, on the first window.
+bool EnsurePulseWindowClass(HINSTANCE instance) {
+    static bool registered = false;
+    if (registered) return true;
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = instance;
+    wc.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_PULSE));
+    wc.hIconSm = reinterpret_cast<HICON>(LoadImageW(
+        instance, MAKEINTRESOURCEW(IDI_PULSE), IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = nullptr;
+    wc.lpszClassName = app::SingleInstanceCoordinator::WindowClassName();
+    if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
+    registered = true;
+    return true;
+}
+
+// Creates one top-level window for `state`. Called by the window registry for
+// the primary window and for every window opened afterwards.
+HWND CreateWindowForState(AppState* state, int show_cmd) {
+    if (!state) return nullptr;
+    HINSTANCE instance = GetModuleHandleW(nullptr);
+    if (!EnsurePulseWindowClass(instance)) return nullptr;
+
+    int w = static_cast<int>(1600 * state->scale), h = static_cast<int>(960 * state->scale);
+    if (state->shot.active && state->shot.width > 0 && state->shot.height > 0) {
+        w = state->shot.width;
+        h = state->shot.height;
+    }
+    // Never hand Windows CW_USEDEFAULT for this window class: the window uses
+    // WS_POPUP, and the sentinel is only reliably resolved for overlapped
+    // windows - here it clamps far off-screen (observed at -25600). So a
+    // concrete position is always produced: a saved rectangle wins, an extra
+    // window cascades off the primary so it does not cover its spawner, and the
+    // primary window is centred on its monitor's work area.
+    int x = 0, y = 0;
+    const bool restored = state->has_restored_window_rect &&
+        state->restored_window_rect.right > state->restored_window_rect.left &&
+        state->restored_window_rect.bottom > state->restored_window_rect.top &&
+        WindowRectIsPersistable(state->restored_window_rect);
+    if (restored) {
+        x = state->restored_window_rect.left;
+        y = state->restored_window_rect.top;
+        w = state->restored_window_rect.right - state->restored_window_rect.left;
+        h = state->restored_window_rect.bottom - state->restored_window_rect.top;
+    } else {
+        // Monitor of the primary window, so a window opened with Ctrl+N lands on
+        // the screen the user is working on. The primary's live rectangle is
+        // only a cascade origin: it can still report the unplaced sentinel, and
+        // the window must not silently collapse to (0,0) when that happens.
+        HWND primary = pulse::PrimaryPulseWindow();
+        const HMONITOR monitor = primary
+            ? MonitorFromWindow(primary, MONITOR_DEFAULTTONEAREST)
+            : MonitorFromPoint(POINT{ 0, 0 }, MONITOR_DEFAULTTOPRIMARY);
+        MONITORINFO mi{ sizeof(mi) };
+        RECT work{};
+        if (GetMonitorInfoW(monitor, &mi)) work = mi.rcWork;
+        const int work_w = static_cast<int>(work.right - work.left);
+        const int work_h = static_cast<int>(work.bottom - work.top);
+        if (state->secondary_window) {
+            // Diagonal cascade; the counter is process-wide so successive
+            // windows keep stepping instead of all landing on one spot.
+            static int cascade = 0;
+            const int step = static_cast<int>(28 * state->scale) * (++cascade);
+            RECT rc{};
+            if (!(primary && GetWindowRect(primary, &rc) && WindowRectIsPersistable(rc))) {
+                rc.left = work.left + std::max(0, (work_w - w) / 2);
+                rc.top = work.top + std::max(0, (work_h - h) / 2);
+            }
+            x = rc.left + step;
+            y = rc.top + step;
+            // Keep the whole window on the monitor however far the cascade runs.
+            x = std::min(x, static_cast<int>(work.right) - w);
+            y = std::min(y, static_cast<int>(work.bottom) - h);
+            x = std::max(x, static_cast<int>(work.left));
+            y = std::max(y, static_cast<int>(work.top));
+        } else {
+            x = work.left + std::max(0, (work_w - w) / 2);
+            y = work.top + std::max(0, (work_h - h) / 2);
+        }
+    }
+
+    constexpr DWORD kMainWindowStyle =
+        WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+    static_assert((kMainWindowStyle & WS_CAPTION) == WS_CAPTION &&
+                  (kMainWindowStyle & WS_SYSMENU) == 0,
+                  "keep the system animations without DWM's duplicate caption buttons");
+    HWND hwnd = CreateWindowExW(
+        WS_EX_NOREDIRECTIONBITMAP,
+        app::SingleInstanceCoordinator::WindowClassName(),
+        L"Pulse",
+        // Pulse paints the entire title bar (WM_NCCALCSIZE makes the whole
+        // window client area). WS_CAPTION is what makes DWM play the system
+        // minimize / maximize / restore animations; WM_NCACTIVATE keeps the
+        // classic caption from being repainted. No WS_SYSMENU: with it DWM
+        // also draws its own min / max / close buttons in the extended frame,
+        // and they show through the Mica title bar behind Pulse's buttons.
+        kMainWindowStyle,
+        x, y, w, h,
+        nullptr, nullptr, instance, state);
+    // The class icon is already set; the big/small variants are only needed
+    // because SendMessageW takes ownership of a non-null handle.
+    HICON big_icon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_PULSE));
+    if (big_icon) SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(big_icon));
+    HICON small_icon = static_cast<HICON>(LoadImageW(
+        instance, MAKEINTRESOURCEW(IDI_PULSE), IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
+    if (small_icon) SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small_icon));
+    if (state->restored_maximized && IsZoomed(hwnd) == FALSE)
+        ShowWindow(hwnd, SW_MAXIMIZE);
+    // The primary window is shown by wWinMain (tray / shot / hidden launches
+    // decide its state there); every other window appears immediately.
+    if (state->secondary_window) {
+        ShowWindow(hwnd, state->restored_maximized ? SW_SHOWMAXIMIZED : show_cmd);
+        UpdateWindow(hwnd);
+    }
+    return hwnd;
+}
+
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 #ifdef PULSE_WITH_SELFTEST
     std::optional<CLSID> tag_com_audit_class;
@@ -2723,58 +3001,21 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 
     if (!state.isolatedTest && !state.shot.active) app::StartUpdateDownloadCleanup();
 
-    WNDCLASSEXW wc{};
-    wc.cbSize = sizeof(wc);
-    wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
-    wc.lpfnWndProc = WndProc;
-    wc.hInstance = hInstance;
-    wc.hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_PULSE));
-    wc.hIconSm = reinterpret_cast<HICON>(LoadImageW(
-        hInstance, MAKEINTRESOURCEW(IDI_PULSE), IMAGE_ICON,
-        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
-    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = nullptr;
-    wc.lpszClassName = app::SingleInstanceCoordinator::WindowClassName();
-    RegisterClassExW(&wc);
-
-    int x = CW_USEDEFAULT, y = CW_USEDEFAULT, w = (int)(1600 * state.scale), h = (int)(960 * state.scale);
-    if (session.window_rect.right > session.window_rect.left) {
-        x = session.window_rect.left;
-        y = session.window_rect.top;
-        w = session.window_rect.right - session.window_rect.left;
-        h = session.window_rect.bottom - session.window_rect.top;
+    // The primary window is the process-level owner: tray icon, single-instance
+    // endpoint, global hotkeys, update checks. Extra windows opened later share
+    // the same process and are registered by the window registry.
+    if (WindowRectIsPersistable(session.window_rect)) {
+        state.restored_window_rect = session.window_rect;
+        state.has_restored_window_rect = true;
     }
-    if (state.shot.active && state.shot.width > 0 && state.shot.height > 0) {
-        w = state.shot.width;
-        h = state.shot.height;
-    }
-
-    constexpr DWORD kMainWindowStyle =
-        WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
-    static_assert((kMainWindowStyle & WS_CAPTION) == WS_CAPTION &&
-                  (kMainWindowStyle & WS_SYSMENU) == 0,
-                  "keep the system animations without DWM's duplicate caption buttons");
-    HWND hwnd = CreateWindowExW(
-        WS_EX_NOREDIRECTIONBITMAP,
-        wc.lpszClassName,
-        L"Pulse",
-        // Pulse paints the entire title bar (WM_NCCALCSIZE makes the whole
-        // window client area). WS_CAPTION is what makes DWM play the system
-        // minimize / maximize / restore animations; WM_NCACTIVATE keeps the
-        // classic caption from being repainted. No WS_SYSMENU: with it DWM
-        // also draws its own min / max / close buttons in the extended frame,
-        // and they show through the Mica title bar behind Pulse's buttons.
-        // Minimize / maximize / close commands, Alt+F4 and resizing do not
-        // need it.
-        kMainWindowStyle,
-        x, y, w, h,
-        nullptr, nullptr, hInstance, &state);
-
+    pulse::SetPulseWindowCreator(&CreateWindowForState);
+    HWND hwnd = pulse::CreatePrimaryPulseWindow(&state, nCmdShow);
     if (!hwnd) return 1;
     if (!SkipSingletonFromArgv() && !state.single_instance.PublishEndpoint(hwnd)) {
         DestroyWindow(hwnd);
         return 1;
     }
+
     // Diagnostics: sample thread stacks while the UI thread is stalled.
     for (int i = 1; i < __argc; ++i) {
         if (wcscmp(__wargv[i], L"--hang-watch") != 0) continue;
@@ -2785,8 +3026,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         pulse::app::hang::Start(hwnd, log);
         break;
     }
-    if (wc.hIcon) SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(wc.hIcon));
-    if (wc.hIconSm) SendMessageW(hwnd, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(wc.hIconSm));
 
     if (session.maximized) nCmdShow = SW_SHOWMAXIMIZED;
     wchar_t hidden_shot[4]{};
@@ -3038,6 +3277,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         DispatchMessageW(&msg);
     }
     pulse::app::hang::Stop();
+    // Every window is gone: free the AppStates the secondary windows owned.
+    pulse::ReclaimRetiredPulseStates();
     OleUninitialize();
     return (int)msg.wParam;
 }

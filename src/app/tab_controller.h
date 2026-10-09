@@ -19,6 +19,8 @@ public:
         // Closing the only tab closes the window when this returns true.
         std::function<bool()> last_tab_closes_window;
         std::function<void()> close_window;
+        // Moves the tab at `index` into a new top-level window.
+        std::function<void(int index)> tear_off_tab;
     };
 
     explicit TabController(Callbacks callbacks = {}) : callbacks_(std::move(callbacks)) {}

@@ -34,6 +34,7 @@
 #include "link_resolve.h"
 #include "startup_location.h"
 #include "last_tab_close.h"
+#include "window_registry.h"
 #include "resource.h"
 #include "../ops/clipboard.h"
 #include "../ipc/ctx_menu_util.h"
@@ -2429,6 +2430,32 @@ void CloseLayoutTab(AppState& s, size_t idx) {
 
 void CloseActiveTab(AppState& s) {
     CloseLayoutTab(s, s.window_tabs.active);
+}
+
+HWND TearOffLayoutTab(AppState& s, size_t idx) {
+    if (idx >= s.window_tabs.items.size()) return nullptr;
+    app::LayoutTab& layout = *s.window_tabs.items[idx];
+    // Only a plain folder tab can move: settings pages and search results carry
+    // virtual paths that mean nothing in a fresh window, and a split layout
+    // showing several folders has no single path to reopen.
+    std::wstring path;
+    for (const auto& pane : layout.panes) {
+        const app::Tab* tab = pane->ActiveTab();
+        if (!tab || tab->current_path.empty()) continue;
+        if (IsSettingsTab(tab) || IsAddressSearchResults(tab)) return nullptr;
+        const std::wstring normalized = fs::NormalizePath(tab->current_path);
+        if (path.empty()) path = normalized;
+        else if (_wcsicmp(path.c_str(), normalized.c_str()) != 0) return nullptr;
+    }
+    if (path.empty()) return nullptr;
+    // Open the new window first: if it fails, the source tab stays put.
+    HWND created = pulse::OpenPulseWindow(path);
+    if (!created) return nullptr;
+    // Closing the source tab may prompt to close the window when it was the
+    // last one; that matches File Explorer, and the tab's folder is already
+    // live in the new window, so nothing is lost.
+    CloseLayoutTab(s, idx);
+    return created;
 }
 
 void SwitchTab(AppState& s, size_t idx) {

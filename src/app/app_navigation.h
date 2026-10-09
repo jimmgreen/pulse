@@ -98,6 +98,11 @@ void OpenSettingsTab(AppState& s, int page);
 void CloseLayoutTab(AppState& s, size_t idx);
 void CloseActiveTab(AppState& s);
 void SwitchTab(AppState& s, size_t idx);
+// Multi-window tear-off: moves the tab at `idx` into a new top-level window
+// (the tab menu's "move to new window"), leaving the source window's other
+// tabs alone. Returns the new window's handle, or null when the tab has no
+// folder to reopen (settings, search results).
+HWND TearOffLayoutTab(AppState& s, size_t idx);
 bool ActivateExistingFolderTab(AppState& s, const std::wstring& path);
 // "Open in new tab": switches to (and pulses) a tab already showing `path`
 // instead of duplicating it.

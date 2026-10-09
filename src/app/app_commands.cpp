@@ -9,6 +9,7 @@
 #include "app_internal.h"
 #include "app_sidebar_refresh.h"
 #include "tray_reveal.h"
+#include "window_registry.h"
 #include "group_wheel_ui.h"
 #include "text_diff.h"
 #include "global_search_controller.h"
@@ -2456,6 +2457,51 @@ void ApplySettingsEffects(AppState& s, app::SettingsEffect effects) {
             });
         }
     }
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+    // Several of the effects above change process-wide state (UI font scale,
+    // text rendering, language, folder-sort mode, accent). Every other window
+    // renders with the same globals, so it has to rebuild its cached formats
+    // and repaint too; PostMessage keeps this out of the setting window's call
+    // stack so a window closing mid-broadcast cannot invalidate the iteration.
+    for (HWND other : pulse::PulseWindows()) {
+        if (other != s.hwnd) PostMessageW(other, WM_PULSE_PREFS_CHANGED, 0, 0);
+    }
+}
+
+void ApplySharedPreferenceRefresh(AppState& s) {
+    s.appPrefs.Load();
+    s.ctxMenuPrefs.Load();
+    if (s.appPrefs.theme_mode >= 0) {
+        s.themeOverride = s.appPrefs.theme_mode == 1 ? ui::ThemeMode::Light :
+            s.appPrefs.theme_mode == 2 ? ui::ThemeMode::Dark : ui::ThemeMode::Auto;
+    }
+    s.darkMode = ui::ShouldUseDarkMode(s.themeOverride);
+    s.showFps = s.forceStatusPerformance || s.appPrefs.show_status_performance;
+    s.searchHistory.persist = !s.shot.active && !s.menushot && !s.isolatedTest;
+    s.renderer.SetRowHeightDip(static_cast<float>(
+        app::EffectiveRowHeightDip(s.appPrefs.row_height, s.appPrefs.ui_font_scale)));
+    s.renderer.SetListStyle(s.appPrefs.list_smart_date, s.appPrefs.list_zebra_rows,
+                            s.appPrefs.list_size_bar, s.appPrefs.list_tag_name_color,
+                            s.appPrefs.list_selection_outline);
+    s.renderer.SetDetailsColumns(s.appPrefs.details_columns);
+    s.renderer.SetRowActions(app::RowActionMask(s.ctxMenuPrefs.builtin_hidden,
+        s.ctxMenuPrefs.BuiltinOrder(app::BuiltinMenuSurface::RowButtons)));
+    s.renderer.SetThumbnailBadges(s.appPrefs.list_thumbnail_badges);
+    s.renderer.SetSidebarWidthDip(static_cast<float>(s.appPrefs.sidebar_width));
+    s.renderer.SetVerticalTabs(s.appPrefs.vertical_tabs);
+    s.renderer.SetSidebarCollapsed(s.appPrefs.sidebar_collapsed);
+    s.renderer.SetTrayIconDip(static_cast<float>(s.appPrefs.tray_icon_size));
+    // Formats and cached widths carried the previous scale / rasterizer.
+    if (!s.secondary_window) ui::typography::SetUiFontScale(s.appPrefs.ui_font_scale);
+    ui::typography::SetTextRenderMode(static_cast<ui::typography::TextRenderMode>(s.appPrefs.text_render));
+    ui::typography::InvalidateCaches();
+    s.compositor.UpdateTextRenderingParams(nullptr);
+    s.renderer.InvalidateWallpaper();
+    s.renderer.InvalidateTypography();
+    s.compositor.RecreateTextFormats(s.scale);
+    ApplyAccentFromPrefs(s, false);
+    ApplyAppWindowChrome(s);
+    RefreshEditFonts(s);
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 

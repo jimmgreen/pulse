@@ -297,8 +297,17 @@ void TabController::ShowTabMenu(WindowTabs& tabs, int tab_index, POINT screen_pt
     items.back().enabled = closes_window || (!tab.pinned && tabs.items.size() > 1);
     items.push_back(MenuItem(CmdTabCloseOthers, TabText(Text::TabCloseOthers)));
     items.push_back(MenuItem(CmdTabCloseRight, TabText(Text::TabCloseRight)));
+    if (callbacks_.tear_off_tab) {
+        items.back().separator_after = true;
+        items.push_back(MenuItem(CmdTearOffTab,
+            pulse::l10n::Get(pulse::l10n::StringId::TabMoveToNewWindow).c_str(), L"\xE8A7"));
+    }
 
     const int command = menu.TrackPopup(screen_pt, std::move(items));
+    if (command == CmdTearOffTab) {
+        callbacks_.tear_off_tab(tab_index);
+        return;
+    }
     if (command == CmdTabDuplicate) {
         DuplicateTab(tabs, static_cast<size_t>(tab_index));
     } else if (command == CmdTabNewRight) {

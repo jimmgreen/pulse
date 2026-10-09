@@ -105,6 +105,9 @@ void ShowCloudPlaceMenu(AppState& s, const std::wstring& path, POINT screen_pt);
 void ToggleSidebarSection(AppState& s, int group);
 void SetEverySidebarSectionCollapsed(AppState& s, bool collapsed);
 void ApplyAppWindowChrome(AppState& s);
+// Re-reads the shared preference files and rebuilds everything derived from
+// them. Called when another window changed them (WM_PULSE_PREFS_CHANGED).
+void ApplySharedPreferenceRefresh(AppState& s);
 // Pulse's own pickers (ui/folder_picker_dialog), owned by the main window.
 bool PickImageFile(AppState& s, std::wstring& path);
 bool PickFolder(AppState& s, std::wstring& path, const wchar_t* title);

@@ -112,6 +112,7 @@ enum MenuCmd : int {
     CmdApplyViewToAllFolders = 194, // view menu: this view + sort become every folder's default
     CmdApplyGroupToAllFolders = 195, // group menu: this grouping becomes every folder's default (#75)
     CmdExitPulse = 196,         // palette: quit even when closing keeps Pulse running (#57)
+    CmdTearOffTab = 197,        // tab menu: move this tab into a new window
     CmdRecentBase = 200,
     CmdIndexBase = 1000,
     // Explorer integration (优化.md §7): registry static verbs bound to the

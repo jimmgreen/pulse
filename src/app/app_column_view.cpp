@@ -476,10 +476,6 @@ void ToggleColumnLayout(AppState& s, int pane_index) {
     tab->column_layout = !tab->column_layout;
     if (!tab->column_layout) {
         tab->column_strip = {};
-    } else if (!s.showDetailsPanel) {
-        // Preview and tags of the selected file live in the details panel.
-        s.showDetailsPanel = true;
-        s.renderer.SetDetailsPanelVisible(true);
     }
     SyncColumnStrips(s);
     if (s.hwnd) InvalidateRect(s.hwnd, nullptr, FALSE);

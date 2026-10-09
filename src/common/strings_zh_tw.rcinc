@@ -690,6 +690,7 @@ BEGIN
     IDS_TAB_CLOSE "關閉分頁"
     IDS_TAB_CLOSE_OTHERS "關閉其他分頁"
     IDS_TAB_CLOSE_RIGHT "關閉右側分頁"
+    IDS_TAB_MOVE_TO_NEW_WINDOW "將分頁移動到新視窗"
     IDS_TAB_GROUP_NAME "標籤組名稱…"
     IDS_TAB_GROUP_NEW "在組中新增分頁"
     IDS_TAB_UNGROUP "取消組合"
