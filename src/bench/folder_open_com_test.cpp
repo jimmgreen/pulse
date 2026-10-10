@@ -116,6 +116,53 @@ int wmain() {
     if (selection) selection->Release();
     if (executable) executable->Release();
 
+    // --- the newest-entry fallback ---
+    // The shell never delivers the file, so the window resolves the target from
+    // the folder. Timestamps are set explicitly so this never depends on
+    // filesystem write-order resolution.
+    {
+        const std::wstring older = std::wstring(kFixtureDir) + L"\\older.txt";
+        const std::wstring newer = std::wstring(kFixtureDir) + L"\\newer.txt";
+        const std::wstring hidden = std::wstring(kFixtureDir) + L"\\hidden.txt";
+        for (const auto* path : {older.c_str(), newer.c_str(), hidden.c_str()}) {
+            HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                      FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+        }
+        SetFileAttributesW(hidden.c_str(), FILE_ATTRIBUTE_HIDDEN);
+
+        const auto stamp = [](const std::wstring& path, int year) {
+            HANDLE file = CreateFileW(path.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ, nullptr,
+                                      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (file == INVALID_HANDLE_VALUE) return;
+            SYSTEMTIME time{};
+            time.wYear = static_cast<WORD>(year); time.wMonth = 1; time.wDay = 1;
+            FILETIME local{};
+            SystemTimeToFileTime(&time, &local);
+            FILETIME utc{};
+            LocalFileTimeToFileTime(&local, &utc);
+            SetFileTime(file, nullptr, nullptr, &utc);
+            CloseHandle(file);
+        };
+        stamp(older, 2020);
+        stamp(newer, 2024);
+        stamp(hidden, 2026); // newer than everything, but hidden
+
+        const std::wstring newest = NewestEntryPath(kFixtureDir);
+        std::wprintf(L"    newest: %ls\n", newest.c_str());
+        Check(newest.find(L"newer.txt") != std::wstring::npos,
+              "delegate: the newest visible entry is the fallback target");
+        Check(newest.find(L"hidden.txt") == std::wstring::npos,
+              "delegate: a hidden entry is never chosen as the fallback target");
+        Check(NewestEntryPath(L"").empty(), "delegate: an empty folder argument yields no target");
+        Check(NewestEntryPath(L"C:\\pulse\\diag\\__no_such_folder__").empty(),
+              "delegate: a missing folder yields no target");
+
+        for (const auto* path : {older.c_str(), newer.c_str()}) DeleteFileW(path);
+        SetFileAttributesW(hidden.c_str(), FILE_ATTRIBUTE_NORMAL);
+        DeleteFileW(hidden.c_str());
+    }
+
     // --- revocation releases the class object ---
     RevokeCommandServer();
     IExecuteCommand* after_revoke = nullptr;

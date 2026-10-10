@@ -486,6 +486,33 @@ bool ShellCommandTargetsExecutable(const std::wstring& command, const std::wstri
                              exe.data(), static_cast<int>(exe.size()), TRUE) == CSTR_EQUAL;
 }
 
+// The delegate value names a CLSID the shell has to be able to instantiate, so
+// the class itself has to exist as well. Only Pulse's own LocalServer32 is
+// touched, and only when it already names this executable, so a foreign class
+// registration is never removed.
+bool ApplyFolderDelegateServer(const std::wstring& exe, bool on) {
+    const std::wstring key = std::wstring(L"Software\\Classes\\CLSID\\") +
+        kFolderOpenDelegateClassId + L"\\LocalServer32";
+    if (on) {
+        HKEY handle = nullptr;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, nullptr, 0, KEY_SET_VALUE,
+                            nullptr, &handle, nullptr) != ERROR_SUCCESS) return false;
+        const std::wstring command = L"\"" + exe + L"\" --folder-open-com";
+        const LONG status = RegSetValueExW(handle, L"", 0, REG_SZ,
+            reinterpret_cast<const BYTE*>(command.c_str()),
+            static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));
+        RegCloseKey(handle);
+        return status == ERROR_SUCCESS;
+    }
+    Value current;
+    if (!Read(key, L"", current)) return false;
+    if (!current.exists) return true;
+    if (!ShellCommandTargetsExecutable(Text(current), exe)) return true; // not ours
+    if (!Write(key, L"", Value{})) return false;
+    DropEmptyKeys(key);
+    return true;
+}
+
 bool ApplyShellIntegration(ShellIntegrationKind kind, const std::wstring& exe, bool on) {
     if (exe.empty()) return false;
     // Do not record damaged legacy overrides as the next "original" state.
@@ -493,6 +520,8 @@ bool ApplyShellIntegration(ShellIntegrationKind kind, const std::wstring& exe, b
     if (on && HasLegacyShellIntegrationResidue()) return false;
     bool ok = true;
     for (const auto& group : Groups(kind)) ok = ApplyGroup(group, exe, on) && ok;
+    for (const auto& group : Groups(kind))
+        if (group == L"Folder") ok = ApplyFolderDelegateServer(exe, on) && ok;
     return ok;
 }
 

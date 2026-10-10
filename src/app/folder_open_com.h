@@ -33,4 +33,16 @@ void RevokeCommandServer();
 std::vector<Request> TakeRequests();
 bool CommandServerBusy();
 
+// The entry to focus when the caller named none. The shell never delivers the
+// file to the delegate (measured; see folder_open_com.cpp), and its
+// IShellView::SelectItem push does not reach a delegate-opened view either, so
+// the window resolves the target itself. A launcher's "open file location" is
+// nearly always about the item it just wrote, which is the newest one here.
+std::wstring NewestEntryPath(const std::wstring& folder);
+
+// Appends one line to %LOCALAPPDATA%\Pulse\pulse_folder_open.log. A folder open
+// that silently does nothing cannot be diagnosed from outside, and the shell
+// reports no error for it.
+void LogDelegate(const wchar_t* format, ...);
+
 } // namespace pulse::app::folder_open

@@ -184,6 +184,8 @@ public:
             std::lock_guard<std::mutex> lock(state_->mutex);
             if (!state_->accepting || state_->pending.size() >= kMaxRequests)
                 return HRESULT_FROM_WIN32(ERROR_BUSY);
+            LogDelegate(L"Execute queued folder=[%s] target=[%s] verb=[%s]", request.folder.c_str(),
+                        request.target.c_str(), request.verb.c_str());
             state_->pending.push_back(std::move(request));
             executed_ = true;
             return S_OK;
@@ -235,6 +237,27 @@ private:
 
 } // namespace
 
+// A folder open that silently does nothing cannot be diagnosed from outside: the
+// shell reports no error for it. Keep a small record next to Pulse's other logs.
+void LogDelegate(const wchar_t* format, ...) {
+    wchar_t buffer[1024]{};
+    va_list args;
+    va_start(args, format);
+    _vsnwprintf_s(buffer, _TRUNCATE, format, args);
+    va_end(args);
+
+    wchar_t directory[MAX_PATH]{};
+    if (GetEnvironmentVariableW(L"LOCALAPPDATA", directory, MAX_PATH) == 0) return;
+    const std::wstring path = std::wstring(directory) + L"\\Pulse\\pulse_folder_open.log";
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path.c_str(), L"a, ccs=UTF-8") != 0 || !file) return;
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    fwprintf(file, L"%04u-%02u-%02u %02u:%02u:%02u pid=%lu %s\n", now.wYear, now.wMonth, now.wDay,
+             now.wHour, now.wMinute, now.wSecond, GetCurrentProcessId(), buffer);
+    fclose(file);
+}
+
 HRESULT RegisterCommandServer(const CLSID* class_override) {
     if (registration) return S_OK;
     try {
@@ -273,6 +296,31 @@ bool CommandServerBusy() {
     if (!current) return false;
     std::lock_guard<std::mutex> lock(current->mutex);
     return current->commands != 0 || !current->pending.empty();
+}
+
+std::wstring NewestEntryPath(const std::wstring& folder) {
+    if (folder.empty()) return {};
+    const std::wstring pattern = folder + (folder.back() == L'\\' ? L"" : L"\\") + L"*";
+    WIN32_FIND_DATAW found{};
+    HANDLE search = FindFirstFileW(pattern.c_str(), &found);
+    if (search == INVALID_HANDLE_VALUE) return {};
+    std::wstring best;
+    ULARGE_INTEGER best_write{};
+    do {
+        const std::wstring name(found.cFileName);
+        if (name == L"." || name == L"..") continue;
+        // Hidden and system entries are not what a launcher just produced.
+        if ((found.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) != 0) continue;
+        ULARGE_INTEGER write{};
+        write.LowPart = found.ftLastWriteTime.dwLowDateTime;
+        write.HighPart = found.ftLastWriteTime.dwHighDateTime;
+        if (best.empty() || write.QuadPart > best_write.QuadPart) {
+            best_write = write;
+            best = folder + (folder.back() == L'\\' ? L"" : L"\\") + name;
+        }
+    } while (FindNextFileW(search, &found));
+    FindClose(search);
+    return best;
 }
 
 } // namespace pulse::app::folder_open

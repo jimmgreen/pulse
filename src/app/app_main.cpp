@@ -1009,8 +1009,14 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (!s || !app::SingleInstanceCoordinator::DecodeOpenRequest(cds, request)) return FALSE;
             const auto accepted = s->single_instance.AcceptOpenRequest(request, GetTickCount64());
             if (accepted == app::SingleInstanceCoordinator::OpenAcceptance::Invalid) return FALSE;
-            if (accepted == app::SingleInstanceCoordinator::OpenAcceptance::New)
+            if (accepted == app::SingleInstanceCoordinator::OpenAcceptance::New) {
+                // A forwarded "open file location" carries the file path the
+                // caller named; OpenFolderInNewTab resolves the folder from it
+                // and selects the entry, so the cursor survives the hand-off
+                // between the delegate process and this one.
+                app::folder_open::LogDelegate(L"primary received forwarded open path=[%s]", request.path.c_str());
                 OpenFolderInNewTab(*s, request.path);
+            }
             return TRUE; // acceptance, not a claim that asynchronous enumeration succeeded
         }
         std::wstring path;
@@ -2706,6 +2712,40 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
             return 1;
         }
         if (result == app::SingleInstanceCoordinator::AcquireResult::Existing) {
+            // The shell launched us only to serve the folder-open delegate. The
+            // directory arrives on a COM call that has not been made yet, so
+            // publishing the server and waiting is what lets the request reach
+            // the running window; forwarding an empty path here would just make
+            // this process exit and the click do nothing.
+            if (folder_open_com) {
+                const HRESULT registered = app::folder_open::RegisterCommandServer();
+                if (SUCCEEDED(registered)) {
+                    const ULONGLONG deadline = GetTickCount64() + 10000;
+                    std::vector<app::folder_open::Request> arrived;
+                    MSG waiting{};
+                    while (arrived.empty() && GetTickCount64() < deadline) {
+                        while (PeekMessageW(&waiting, nullptr, 0, 0, PM_REMOVE)) {
+                            TranslateMessage(&waiting);
+                            DispatchMessageW(&waiting);
+                        }
+                        arrived = app::folder_open::TakeRequests();
+                        if (arrived.empty()) Sleep(20);
+                    }
+                    if (!arrived.empty()) {
+                        app::TraceShellWindows(L"delegate forward folder=[%s]", arrived.front().folder.c_str());
+                        if (!arrived.front().folder.empty()) {
+                            const std::wstring target = arrived.front().target.empty()
+                                ? app::folder_open::NewestEntryPath(arrived.front().folder)
+                                : arrived.front().target;
+                            state.single_instance.ForwardOpenPath(target, 5000);
+                            app::folder_open::LogDelegate(L"forwarding target=[%s]", target.c_str());
+                        }
+                    }
+                }
+                app::folder_open::RevokeCommandServer();
+                OleUninitialize();
+                return 0;
+            }
             bool forwarded = true;
             if (shell_tag) forwarded = app::ForwardShellTagRequest(*shell_tag);
             // A sign-in launch must not pop up the window that is already running.
@@ -3055,8 +3095,17 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         // the way a command-line launch would.
         for (auto& request : app::folder_open::TakeRequests()) {
             if (request.folder.empty()) continue;
-            OpenFolderInNewTab(state, request.folder);
-            if (!request.target.empty()) SelectLaunchedFile(state, request.target);
+            // The shell hands the delegate the folder and nothing else, and its
+            // own selection push does not reach a delegate-opened view, so the
+            // entry the caller meant is resolved here.
+            const std::wstring target = request.target.empty()
+                ? app::folder_open::NewestEntryPath(request.folder)
+                : request.target;
+            app::folder_open::LogDelegate(L"primary opening folder=[%s] target=[%s]", request.folder.c_str(),
+                                          target.c_str());
+            // Passing the file path itself is what makes OpenFolderInNewTab pick
+            // the containing folder and then select the entry (#40).
+            OpenFolderInNewTab(state, target.empty() ? request.folder : target);
         }
     }
     pulse::app::hang::Stop();
