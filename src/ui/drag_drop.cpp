@@ -546,6 +546,9 @@ HRESULT ListDropSource::QueryContinueDrag(BOOL escape_pressed, DWORD key_state) 
         if (esc_hook_ && esc_hook_()) return S_OK; // target consumed Esc (spring-back)
         return DRAGDROP_S_CANCEL;
     }
+    // Right button during a left-drag cancels at once, even while spring-loaded;
+    // an ordinary right-click (no left button) still opens the context menu.
+    if ((key_state & MK_LBUTTON) && (key_state & MK_RBUTTON)) return DRAGDROP_S_CANCEL;
     if (!(key_state & (MK_LBUTTON | MK_RBUTTON))) return DRAGDROP_S_DROP;
     return S_OK;
 }

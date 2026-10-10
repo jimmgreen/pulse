@@ -3666,6 +3666,9 @@ LRESULT HandleRButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
 LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
+        // A right-click while the left button is held is the drag-cancel
+        // gesture (drag_drop.cpp QueryContinueDrag), not a menu request.
+        if (GetKeyState(VK_LBUTTON) & 0x8000) return 0;
         int mx = GET_X_LPARAM(lParam);
         int my = GET_Y_LPARAM(lParam);
         ui::WindowViewModel vm = BuildVm(*s);
