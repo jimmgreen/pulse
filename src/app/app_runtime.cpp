@@ -281,7 +281,14 @@ void SelectLaunchedFile(AppState& s, const std::wstring& raw) {
     const size_t slash = path.find_last_of(L"\\/");
     const std::wstring leaf = slash == std::wstring::npos ? path : path.substr(slash + 1);
     if (leaf.empty()) return;
-    if (app::Tab* tab = ActiveTab(s)) SelectNameInTab(s, *tab, leaf);
+    app::Tab* tab = ActiveTab(s);
+    if (!tab) return;
+    // Remember the request as well as acting on it. The listing may still be
+    // loading, and any navigation before it arrives clears the pending
+    // selection; without this the cursor lands on the first row instead of the
+    // entry the caller asked for.
+    tab->launch_selected_name = leaf;
+    SelectNameInTab(s, *tab, leaf);
 }
 
 void OpenFolderInNewTab(AppState& s, const std::wstring& raw) {

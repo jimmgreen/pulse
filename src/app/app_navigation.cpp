@@ -52,6 +52,7 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 using namespace pulse;
 
@@ -1239,7 +1240,7 @@ void ApplyWorkerResult(AppState& s, app::WorkResult& res) {
             auto selection_restore = app::TakeListingSelection(*tab, res.path);
             auto& pendingNames = selection_restore.names;
             auto& pendingFocus = selection_restore.focus;
-            const bool ensurePendingVisible = selection_restore.ensure_visible;
+            bool ensurePendingVisible = selection_restore.ensure_visible;
             std::wstring renameTarget;
             const bool hasCreateRename = app::PendingCreateRenameIntent(tab->create_rename_intents,
                 tab->current_path, tab->view_generation).has_value();
@@ -1336,6 +1337,19 @@ void ApplyWorkerResult(AppState& s, app::WorkResult& res) {
             }
             if (!startedRename) {
                 app::RestoreListingSelection(*tab, selection_restore, &pane, &s.places);
+            }
+            // A launcher's "open file location" (or another app's equivalent)
+            // names the entry it wants focused. Apply it once its listing is
+            // here, then forget it, so a later refresh does not drag the cursor
+            // back to a stale name.
+            if (!startedRename && !tab->launch_selected_name.empty()) {
+                const std::wstring wanted = std::exchange(tab->launch_selected_name, {});
+                for (size_t i = 0; i < tab->EntryCount(); ++i) {
+                    if (_wcsicmp(tab->EntryAt(i).name.c_str(), wanted.c_str()) != 0) continue;
+                    tab->SelectOnly(static_cast<int>(i));
+                    ensurePendingVisible = true;
+                    break;
+                }
             }
             if (focusedTab && ensurePendingVisible && tab->selected_index >= 0) {
                 EnsureRowVisible(s, *tab, tab->selected_index);

@@ -3837,6 +3837,86 @@ void TestNavigateAlwaysEnumerates() {
     RemoveDirectoryW(parent.c_str());
 }
 
+// Another program's "open file location" (WeChat, a launcher, Explorer's
+// /select) hands Pulse a folder plus the entry to put the cursor on. The
+// request has to survive until the listing that satisfies it arrives, because
+// StartLoadingPath clears the pending selection on every navigation and a
+// window launched onto that folder can navigate again on the way in.
+void TestLaunchSelectionSurvivesNavigation() {
+    wchar_t temp[MAX_PATH]{};
+    GetTempPathW(ARRAYSIZE(temp), temp);
+    // Pulse stores the \\?\ form; normalize up front so the path assertion
+    // below compares like with like.
+    const std::wstring dir = fs::NormalizePath(std::wstring(temp) + L"PulseLaunchSelection-" +
+                                               std::to_wstring(GetCurrentProcessId()));
+    CreateDirectoryW(dir.c_str(), nullptr);
+    const std::wstring target = dir + L"\\f.txt";
+    HANDLE handle = CreateFileW(target.c_str(), GENERIC_WRITE, 0, nullptr,
+                                CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+
+    auto state = std::make_unique<AppState>();
+    state->places.persist = false;
+    state->appPrefs.persist = false;
+    state->isolatedTest = true;
+    HWND hwnd = CreateWindowExW(0, L"STATIC", L"", WS_POPUP,
+        0, 0, 1000, 700, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    Check(hwnd != nullptr, L"open location: isolated owner created");
+    if (hwnd) {
+        state->hwnd = hwnd;
+        state->window_tabs.NewTab(std::wstring());
+        state->pane = state->window_tabs.Active()->panes.front().get();
+        app::Tab* tab = state->window_tabs.Active() ? state->window_tabs.Active()->ActiveFolder() : nullptr;
+        Check(tab != nullptr, L"open location: a tab is active");
+        if (tab) {
+            // The launcher starts the window on the containing folder.
+            StartLoadingPath(*state, *tab, dir);
+            const std::wstring path = tab->current_path;
+            Check(!path.empty() && _wcsicmp(path.c_str(), dir.c_str()) == 0,
+                  L"open location: the launcher's folder becomes the tab path");
+
+            // The entry to focus arrives alongside it, while the listing is
+            // still in flight, so it can only be recorded as a pending request.
+            SelectLaunchedFile(*state, target);
+            Check(tab->pending_selected_name == L"f.txt" || tab->selected_index >= 0,
+                  L"open location: the requested entry is recorded");
+
+            // Anything that navigates again before the listing lands (a
+            // refresh, a re-used tab, a late worker result) used to drop the
+            // request, because StartLoadingPath clears the pending selection.
+            StartLoadingPath(*state, *tab, tab->current_path);
+
+            auto entries = std::make_shared<std::vector<fs::DirEntry>>();
+            for (const wchar_t* name : {L"a.txt", L"f.txt", L"z.txt"}) {
+                fs::DirEntry entry;
+                entry.name = name;
+                entries->push_back(std::move(entry));
+            }
+            WorkResult result;
+            result.path = tab->current_path;
+            result.generation = tab->pending_generation;
+            result.snapshot = entries;
+            Check(result.generation != 0, L"open location: a load is pending");
+            ApplyWorkerResult(*state, result);
+
+            const std::wstring selected =
+                tab->selected_index >= 0 && static_cast<size_t>(tab->selected_index) < tab->EntryCount()
+                    ? tab->EntryAt(static_cast<size_t>(tab->selected_index)).name : std::wstring();
+            Check(selected == L"f.txt",
+                  L"open location: the cursor still lands on the target file after an intervening navigation");
+            // One-shot: a later refresh must not drag the cursor back.
+            Check(tab->launch_selected_name.empty(),
+                  L"open location: the launcher's request is consumed by the listing it asked for");
+        }
+        state->watches.Stop();
+        DestroyWindow(hwnd);
+        state->hwnd = nullptr;
+    }
+    state.reset();
+    DeleteFileW(target.c_str());
+    RemoveDirectoryW(dir.c_str());
+}
+
 void TestSnapshotPatch() {
     wchar_t temp[MAX_PATH]{};
     GetTempPathW(ARRAYSIZE(temp), temp);
@@ -7556,6 +7636,7 @@ int RunSelfTest1B2() {
     TestPreviewCodecProbe();
     TestLockedItemPrompt();
     TestNavigateAlwaysEnumerates();
+    TestLaunchSelectionSurvivesNavigation();
     TestSnapshotPatch();
     TestSnapshotPatchBatch();
     TestSnapshotPatchHoldsRows();
