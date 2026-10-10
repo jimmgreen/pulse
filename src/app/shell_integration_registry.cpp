@@ -142,21 +142,34 @@ std::vector<Binding> Bindings(const std::wstring& group, const std::wstring& exe
         shell = L"Software\\Classes\\CLSID\\{20D04FE0-3AEA-1069-A2D8-08002B30309D}\\shell";
         verb = shell + L"\\open";
         line = L"\"" + exe + L"\" \"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}\"";
+    } else if (group == L"Folder") {
+        // Folder opens ignore (Default) and activate DelegateExecute instead, so
+        // being that delegate is the only way onto this chain. The empty
+        // (Default) keeps a stale command line out of the way if the delegate
+        // ever fails to load.
+        shell = L"Software\\Classes\\Folder\\shell";
+        verb = shell + L"\\open";
+        line.clear();
     } else {
         shell = L"Software\\Classes\\" + group + L"\\shell";
         verb = shell + L"\\open";
         line = L"\"" + exe + L"\" \"%1\"";
     }
+    const std::wstring delegate_value =
+        group == L"Folder" ? std::wstring(kFolderOpenDelegateClassId) : std::wstring();
     std::vector<Binding> result{{verb + L"\\command", L"", String(line)},
-                                {verb + L"\\command", L"DelegateExecute", String(L"")}};
+                                {verb + L"\\command", L"DelegateExecute", String(delegate_value)}};
     if (group != L"WinE") result.push_back({shell, L"", String(L"open")});
-    if (group == L"Directory" || group == L"Drive")
+    if (group == L"Directory" || group == L"Drive" || group == L"Folder")
         result.push_back({verb, L"DelegateExecute", String(L"")}); // compatibility with old Pulse values
     return result;
 }
 
 std::vector<std::wstring> Groups(ShellIntegrationKind kind) {
-    if (kind == ShellIntegrationKind::Folders) return {L"Directory", L"Drive"};
+    // "Folder" is the class behind an actual folder open, which is what a
+    // launcher's "open file location" invokes; Directory/Drive only cover the
+    // right-click verbs on those specific classes.
+    if (kind == ShellIntegrationKind::Folders) return {L"Directory", L"Drive", L"Folder"};
     if (kind == ShellIntegrationKind::Directory) return {L"Directory"};
     if (kind == ShellIntegrationKind::Drive) return {L"Drive"};
     return {kind == ShellIntegrationKind::WinE ? L"WinE" : L"ThisPc"};
