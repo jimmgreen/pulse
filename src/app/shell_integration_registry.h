@@ -10,7 +10,7 @@ void SetIntegrationWriteHookForTesting(IntegrationWriteHook hook);
 #endif
 
 
-enum class ShellIntegrationKind { Folders, WinE, ThisPc, Directory, Drive };
+enum class ShellIntegrationKind { Folders, WinE, ThisPc, Directory, Drive, RecycleBin };
 
 // Uses HKCU (redirectable with RegOverridePredefKey in isolated tests).
 // A false restore result can mean that legacy registrations had no exact

@@ -54,8 +54,9 @@ void AppPrefs::ResetToDefaults() {
     open_folders_in_pulse = false;
     take_over_win_e = false;
     take_over_this_pc = false;
+    take_over_recycle_bin = false;
     integration_enabled = false;
-    integration_folders = integration_win_e = integration_this_pc = true;
+    integration_folders = integration_win_e = integration_this_pc = integration_recycle_bin = true;
     integration_configured = false;
     integration_residual = false;
     integration_incomplete = false;
@@ -139,6 +140,8 @@ std::wstring AppPrefs::ToJson() const {
     out += integration_win_e ? L"true" : L"false";
     out += L",\n  \"integration_this_pc\":";
     out += integration_this_pc ? L"true" : L"false";
+    out += L",\n  \"integration_recycle_bin\":";
+    out += integration_recycle_bin ? L"true" : L"false";
     out += L",\n  \"take_over_explorer_windows\":";
     out += take_over_explorer_windows ? L"true" : L"false";
     out += L",\n  \"shell_tag_menu\":";
@@ -301,6 +304,7 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     integration_folders = pulse::json::ExtractBool(json, L"integration_folders", true);
     integration_win_e = pulse::json::ExtractBool(json, L"integration_win_e", true);
     integration_this_pc = pulse::json::ExtractBool(json, L"integration_this_pc", true);
+    integration_recycle_bin = pulse::json::ExtractBool(json, L"integration_recycle_bin", !integration_configured);
     shell_tag_menu = pulse::json::ExtractBool(json, L"shell_tag_menu", false);
     verify_copies = pulse::json::ExtractBool(json, L"verify_copies", false);
     show_status_performance = pulse::json::ExtractBool(json, L"show_status_performance", false);
@@ -501,13 +505,15 @@ bool AppPrefs::ReadIntegrationResidual() const {
     return HasLegacyShellIntegrationResidue() ||
            HasShellIntegrationOwnership(ShellIntegrationKind::Folders, exe) ||
            HasShellIntegrationOwnership(ShellIntegrationKind::WinE, exe) ||
-           HasShellIntegrationOwnership(ShellIntegrationKind::ThisPc, exe);
+           HasShellIntegrationOwnership(ShellIntegrationKind::ThisPc, exe) ||
+           HasShellIntegrationOwnership(ShellIntegrationKind::RecycleBin, exe);
 }
 
 bool AppPrefs::ReadIntegrationIncomplete() const {
     if (HasLegacyShellIntegrationResidue()) return true;
     const std::wstring exe = ExePath();
-    for (const auto kind : {ShellIntegrationKind::Folders, ShellIntegrationKind::WinE, ShellIntegrationKind::ThisPc})
+    for (const auto kind : {ShellIntegrationKind::Folders, ShellIntegrationKind::WinE, ShellIntegrationKind::ThisPc,
+                            ShellIntegrationKind::RecycleBin})
         if (HasShellIntegrationOwnership(kind, exe) && !ReadShellIntegration(kind, exe)) return true;
     return false;
 }
@@ -574,12 +580,15 @@ void AppPrefs::MigrateIntegration() {
         HasShellIntegrationOwnership(ShellIntegrationKind::WinE, exe));
     const bool this_pc = take_over_this_pc || (integration_residual &&
         HasShellIntegrationOwnership(ShellIntegrationKind::ThisPc, exe));
-    const bool registered = folders || win_e || this_pc;
+    const bool recycle_bin = take_over_recycle_bin || (integration_residual &&
+        HasShellIntegrationOwnership(ShellIntegrationKind::RecycleBin, exe));
+    const bool registered = folders || win_e || this_pc || recycle_bin;
     integration_enabled = registered || take_over_explorer_windows;
     if (registered || take_over_explorer_windows) {
         integration_folders = folders;
         integration_win_e = win_e;
         integration_this_pc = this_pc;
+        integration_recycle_bin = recycle_bin;
     }
     integration_configured = true;
 }
@@ -596,6 +605,7 @@ bool AppPrefs::Load() {
         open_folders_in_pulse = ReadFolderOpen();
         take_over_win_e = ReadWinE();
         take_over_this_pc = ReadThisPcOpen(ExePath());
+        take_over_recycle_bin = ReadRecycleBinOpen(ExePath());
         integration_residual = ReadIntegrationResidual();
         integration_incomplete = ReadIntegrationIncomplete();
         MigrateIntegration();
@@ -620,6 +630,7 @@ bool AppPrefs::Load() {
     if (persist && launch_on_startup && StartupCommandNeedsRepair(ReadRunCommand(), ExePath()))
         ApplyLaunchOnStartup(true);
     take_over_this_pc = ReadThisPcOpen(ExePath());
+    take_over_recycle_bin = ReadRecycleBinOpen(ExePath());
     integration_residual = ReadIntegrationResidual();
     integration_incomplete = ReadIntegrationIncomplete();
     MigrateIntegration();

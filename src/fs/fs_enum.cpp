@@ -7,6 +7,7 @@
 #include <chrono>
 // fs_enum.cpp
 #include "fs_enum.h"
+#include "bitlocker_volume.h"
 #include "bounded_enumeration.h"
 #include "../common/localization.h"
 #include <windows.h>
@@ -379,6 +380,7 @@ struct DriveMedia {
     std::wstring label;
     uint64_t total = 0;
     uint64_t free = 0;
+    bool locked = false;
 };
 
 struct DriveMediaProbe {
@@ -397,6 +399,8 @@ DriveMedia QueryDriveMedia(const wchar_t* root) {
     wchar_t label[MAX_PATH + 1] = {};
     if (GetVolumeInformationW(root, label, MAX_PATH, nullptr, nullptr, nullptr, nullptr, 0))
         media.label = label;
+    else
+        media.locked = IsBitLockerLockedError(GetLastError());
     ULARGE_INTEGER free_bytes{}, total_bytes{};
     if (GetDiskFreeSpaceExW(root, &free_bytes, &total_bytes, nullptr)) {
         media.total = total_bytes.QuadPart;
@@ -465,6 +469,7 @@ static void EnumerateThisPc(std::vector<DirEntry>& out, const std::atomic<bool>*
         if (media) {
             e.drive_total = media->total;
             e.drive_free = media->free;
+            e.drive_locked = media->locked;
         }
         out.push_back(std::move(e));
     }

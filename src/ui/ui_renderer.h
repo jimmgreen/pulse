@@ -761,6 +761,7 @@ struct WindowViewModel {
     bool settings_open_folders = false;
     bool settings_win_e = false;
     bool settings_this_pc = false;
+    bool settings_recycle_bin = false;
     bool settings_explorer_windows = false;   // experimental Explorer window takeover
     // 设为默认文件管理器: 0 off, 1 partial, 2 full; the text lists what is missing.
     int settings_default_manager = 0;
@@ -769,6 +770,7 @@ struct WindowViewModel {
     bool settings_integration_folders = false;
     bool settings_integration_win_e = false;
     bool settings_integration_this_pc = false;
+    bool settings_integration_recycle_bin = false;
     bool settings_integration_experimental = false;
     int settings_integration_state = 0; // 0 off, 1 on, 2 partial, 3 failed
     std::wstring settings_integration_summary;

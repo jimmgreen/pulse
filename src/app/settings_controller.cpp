@@ -907,7 +907,8 @@ std::wstring SettingsController::GlobalSearchHotkeyText() const {
 
 bool SettingsController::IntegrationCanRestore() const noexcept {
     return prefs_ && (prefs_->integration_enabled || prefs_->open_folders_in_pulse ||
-        prefs_->take_over_win_e || prefs_->take_over_this_pc || prefs_->integration_residual ||
+        prefs_->take_over_win_e || prefs_->take_over_this_pc || prefs_->take_over_recycle_bin ||
+        prefs_->integration_residual ||
         IntegrationCanRetry());
 }
 
@@ -917,10 +918,11 @@ int SettingsController::IntegrationState() const noexcept {
     const auto& p = *prefs_;
     if (p.integration_incomplete) return 2;
     const bool active = p.open_folders_in_pulse || p.take_over_win_e || p.take_over_this_pc ||
-        p.integration_residual;
+        p.take_over_recycle_bin || p.integration_residual;
     if (!p.integration_enabled) return active ? 2 : 0;
     if (p.open_folders_in_pulse != p.integration_folders ||
-        p.take_over_win_e != p.integration_win_e || p.take_over_this_pc != p.integration_this_pc)
+        p.take_over_win_e != p.integration_win_e || p.take_over_this_pc != p.integration_this_pc ||
+        p.take_over_recycle_bin != p.integration_recycle_bin)
         return 2;
     return active || p.take_over_explorer_windows ? 1 : 0;
 }
@@ -946,7 +948,7 @@ std::wstring SettingsController::IntegrationSummary() const {
 }
 
 void SettingsController::IntegrationAction(int index) {
-    if (!prefs_ || index < 0 || index > 6) return;
+    if (!prefs_ || index < 0 || index > 7) return;
     if (ui_.integration_changing) ui_.integration_changing();
     auto& p = *prefs_;
     p.integration_configured = true;
@@ -956,6 +958,7 @@ void SettingsController::IntegrationAction(int index) {
     else if (index == 3) p.integration_this_pc = !p.integration_this_pc;
     else if (index == 4) p.take_over_explorer_windows = !p.take_over_explorer_windows;
     else if (index == 6) p.integration_enabled = false;
+    else if (index == 7) p.integration_recycle_bin = !p.integration_recycle_bin;
     // Editing a disabled integration only changes the saved selection.
     if (p.integration_enabled || index == 0 || index == 5 || index == 6) {
         integration_error_.clear();
@@ -979,6 +982,9 @@ void SettingsController::IntegrationAction(int index) {
         const bool this_pc_on = p.integration_enabled && p.integration_this_pc;
         if (!ApplyThisPcOpen(p, this_pc_on))
             failed(l10n::Pick(L"桌面上的「此电脑」", L"This PC on the desktop"), L"this-pc", this_pc_on, true);
+        const bool recycle_bin_on = p.integration_enabled && p.integration_recycle_bin;
+        if (!ApplyRecycleBinOpen(p, recycle_bin_on))
+            failed(l10n::Pick(L"桌面上的「回收站」", L"Recycle Bin on the desktop"), L"recycle-bin", recycle_bin_on, true);
     }
     integration_save_failed_ = !p.Save();
     if (ui_.integration_changed) ui_.integration_changed();

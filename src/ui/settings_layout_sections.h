@@ -3,6 +3,7 @@
 struct IntegrationBadgeInfo { std::wstring text; fluent::BadgeKind kind = fluent::BadgeKind::Neutral; };
 inline int IntegrationSelectedCount(const WindowViewModel& vm) {
     return int(vm.settings_integration_folders)+int(vm.settings_integration_this_pc)+
+        int(vm.settings_integration_recycle_bin)+
         int(vm.settings_integration_win_e)+int(vm.settings_integration_experimental);
 }
 inline IntegrationBadgeInfo MakeIntegrationBadge(const WindowViewModel& vm) {
@@ -136,6 +137,7 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
     };
     l.startup_row[2]=item_row(l10n::StringId::IntegrationFoldersDesc,0);
     l.this_pc_row=item_row(l10n::StringId::SettingsThisPcDesc,0);
+    l.recycle_bin_row=item_row(l10n::StringId::SettingsRecycleBinDesc,0);
     l.win_e_row=item_row(l10n::StringId::SettingsWinEDesc,0);
     {
         // Experimental caveats as compact chips that wrap with the window width.

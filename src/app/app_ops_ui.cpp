@@ -18,6 +18,7 @@
 #include "batch_rename.h"
 #include "link_resolve.h"
 #include "locked_item_prompt.h"
+#include "paste_source.h"
 #include "resource.h"
 #include "../ops/clipboard.h"
 #include "../ipc/ctx_menu_util.h"
@@ -190,18 +191,34 @@ void SendTrayToDest(AppState& s, const std::wstring& dir, bool move) {
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
-// Ctrl+V: release newest tray batch, else paste from the system clipboard.
+// Ctrl+V: release the newest tray batch while it is still the latest copy,
+// else paste from the system clipboard (paste_source.h).
 void PasteIntoCurrent(AppState& s) {
     app::Tab* tab = ActiveTab(s);
     if (!tab || tab->current_path.empty() || fs::IsVirtualPath(tab->current_path) || tab->net_readonly) return;
-    if (!s.tray.batches().empty()) {
-        size_t idx = s.tray.batches().size() - 1;
-        if (s.tray.batches()[idx].move_intent) s.cutPaths.clear();
-        ReleaseTrayBatch(s, idx);
-        return;
-    }
     ops::ClipboardData cb;
-    if (ops::ReadClipboard(cb)) {
+    const bool clipboard_files = ops::ReadClipboard(cb);
+    if (!s.tray.batches().empty()) {
+        const size_t idx = s.tray.batches().size() - 1;
+        const app::TrayBatch& newest = s.tray.batches()[idx];
+        std::vector<std::wstring> batch_paths;
+        batch_paths.reserve(newest.items.size());
+        for (const auto& item : newest.items) batch_paths.push_back(item.path);
+        app::PasteChoiceInput choice;
+        choice.batch_paths = &batch_paths;
+        choice.batch_move = newest.move_intent;
+        choice.clipboard_has_files = clipboard_files;
+        choice.clipboard_paths = &cb.paths;
+        choice.clipboard_cut = cb.cut;
+        choice.clipboard_written_for_batch = clipboard_files && s.trayClipboardSequence != 0 &&
+            s.trayClipboardBatchId == newest.id && cb.sequence == s.trayClipboardSequence;
+        if (app::ChoosePasteSource(choice) == app::PasteSource::TrayBatch) {
+            if (newest.move_intent) s.cutPaths.clear();
+            ReleaseTrayBatch(s, idx);
+            return;
+        }
+    }
+    if (clipboard_files) {
         ops::OpRequest req;
         req.type = cb.cut ? ops::OpType::Move : ops::OpType::Copy;
         req.dest_dir = tab->current_path;
@@ -356,7 +373,11 @@ void CollectPathsToTray(AppState& s, const std::vector<std::wstring>& paths, boo
         std::vector<std::wstring> cbPaths;
         cbPaths.reserve(paths.size());
         for (const auto& p : paths) cbPaths.push_back(ClipboardPath(p));
-        ops::WriteClipboard(cbPaths, move_intent);
+        // Remember which clipboard value belongs to the new batch so Ctrl+V can
+        // tell it from a later copy made elsewhere (paste_source.h).
+        s.trayClipboardBatchId = s.tray.batches().empty() ? 0 : s.tray.batches().back().id;
+        s.trayClipboardSequence =
+            ops::WriteClipboard(cbPaths, move_intent) ? GetClipboardSequenceNumber() : 0;
         InvalidateRect(s.hwnd, nullptr, FALSE);
     }
 }

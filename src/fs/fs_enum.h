@@ -49,6 +49,7 @@ struct DirEntry {
     // (no media). Read on the worker thread with the rest of the listing.
     uint64_t drive_total = 0;
     uint64_t drive_free = 0;
+    bool drive_locked = false; // "This PC" rows: BitLocker volume not unlocked yet
 };
 
 // pulse:tag: / pulse:search: / pulse:workspace: — not filesystem paths.

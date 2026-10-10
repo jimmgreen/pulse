@@ -21,10 +21,14 @@ struct AppPrefs {
     bool open_folders_in_pulse = false;
     bool take_over_win_e = false;
     bool take_over_this_pc = false; // HKCU This PC open verb (default_file_manager.h)
+    bool take_over_recycle_bin = false; // HKCU Recycle Bin open verb (default_file_manager.h)
     bool integration_enabled = false;
     bool integration_folders = true;
     bool integration_win_e = true;
     bool integration_this_pc = true;
+    // New installs take the Recycle Bin over with the rest; preferences saved
+    // before it existed keep it unselected (no false "changed" warning).
+    bool integration_recycle_bin = true;
     bool integration_configured = false; // runtime: new-format preferences were loaded
     bool integration_residual = false; // runtime: some association still belongs to Pulse
     bool integration_incomplete = false;

@@ -172,20 +172,32 @@ bool TestDefaultFileManager() {
             !IsThisPcArgument(L"") && !IsThisPcArgument(L"C:\\") &&
             !IsThisPcArgument(L"::{645FF040-5081-101B-9F08-00AA002F954E}") &&
             !IsThisPcArgument(L"MyComputer") && !IsThisPcArgument(L"shell:"));
+        passed &= Report("default file manager: Recycle Bin launch arguments are recognized",
+            IsRecycleBinArgument(L"::{645ff040-5081-101b-9f08-00aa002f954e}") &&
+            IsRecycleBinArgument(L"\"::{645FF040-5081-101B-9F08-00AA002F954E}\"") &&
+            IsRecycleBinArgument(L"shell:::{645FF040-5081-101B-9F08-00AA002F954E}") &&
+            IsRecycleBinArgument(L"shell:RecycleBinFolder") &&
+            !IsRecycleBinArgument(L"") && !IsRecycleBinArgument(L"C:\\$Recycle.Bin") &&
+            !IsRecycleBinArgument(L"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}") &&
+            !IsRecycleBinArgument(L"RecycleBin") && !IsRecycleBinArgument(L"shell:"));
         AppPrefs flags;
         flags.persist = false;
         const bool off = DefaultFileManagerState(flags) == DefaultManagerState::Off;
         flags.take_over_win_e = true;
         const bool partial = DefaultFileManagerState(flags) == DefaultManagerState::Partial;
         flags.open_folders_in_pulse = flags.take_over_this_pc = true;
-        passed &= Report("default file manager: state is off / partial / full from the three takeovers",
-            off && partial && DefaultFileManagerState(flags) == DefaultManagerState::Full);
+        const bool three_partial = DefaultFileManagerState(flags) == DefaultManagerState::Partial;
+        flags.take_over_recycle_bin = true;
+        passed &= Report("default file manager: state is off / partial / full from the four takeovers",
+            off && partial && three_partial && DefaultFileManagerState(flags) == DefaultManagerState::Full);
         flags.take_over_this_pc = false;
         flags.open_folders_in_pulse = false;
+        flags.take_over_recycle_bin = false;
         const std::wstring summary = DefaultFileManagerSummary(flags);
         passed &= Report("default file manager: a partial takeover names what Explorer still opens",
             summary.find(pulse::l10n::Get(pulse::l10n::StringId::SettingsTakeoverFolders)) != std::wstring::npos &&
             summary.find(pulse::l10n::Get(pulse::l10n::StringId::ThisPc)) != std::wstring::npos &&
+            summary.find(pulse::l10n::Get(pulse::l10n::StringId::SettingsRecycleBin)) != std::wstring::npos &&
             summary.find(L"Win+E") == std::wstring::npos && summary.find(L"%s") == std::wstring::npos &&
             DefaultFileManagerSummary(AppPrefs{}) ==
                 pulse::l10n::Get(pulse::l10n::StringId::SettingsDefaultManagerDesc));
@@ -1119,7 +1131,14 @@ int wmain(int argc, wchar_t** argv) {
         settings.IntegrationAction(0);
         ok &= Report("master applies exactly selected scopes",
             prefs.open_folders_in_pulse && !prefs.take_over_win_e && prefs.take_over_this_pc &&
+            prefs.take_over_recycle_bin && settings.IntegrationState() == 1);
+        settings.IntegrationAction(7);
+        ok &= Report("Recycle Bin scope toggles on its own",
+            !prefs.integration_recycle_bin && !prefs.take_over_recycle_bin && prefs.take_over_this_pc &&
             settings.IntegrationState() == 1);
+        settings.IntegrationAction(7);
+        ok &= Report("Recycle Bin scope turns back on",
+            prefs.integration_recycle_bin && prefs.take_over_recycle_bin && settings.IntegrationState() == 1);
         prefs.take_over_win_e = true;
         ok &= Report("external state mismatch is shown as partial", settings.IntegrationState() == 2);
         settings.IntegrationAction(5);
@@ -1144,7 +1163,19 @@ int wmain(int argc, wchar_t** argv) {
         loaded.MigrateIntegration();
         ok &= Report("legacy partial scope is migrated without adding scopes",
             loaded.integration_enabled && loaded.integration_win_e && !loaded.integration_folders &&
-            !loaded.integration_this_pc);
+            !loaded.integration_this_pc && !loaded.integration_recycle_bin);
+        AppPrefs before_recycle;
+        before_recycle.FromJson(L"{\"integration_enabled\":true,\"integration_folders\":true,"
+            L"\"integration_win_e\":true,\"integration_this_pc\":true}");
+        before_recycle.open_folders_in_pulse = before_recycle.take_over_win_e = before_recycle.take_over_this_pc = true;
+        before_recycle.MigrateIntegration();
+        SettingsController before_settings;
+        before_settings.BindUi(before_recycle, context, index, network, {});
+        ok &= Report("preferences saved before the Recycle Bin scope stay complete",
+            !before_recycle.integration_recycle_bin && before_settings.IntegrationState() == 1);
+        AppPrefs fresh;
+        fresh.FromJson(L"{}");
+        ok &= Report("new preferences select the Recycle Bin scope", fresh.integration_recycle_bin);
         AppPrefs experimental;
         experimental.FromJson(L"{\"take_over_explorer_windows\":true}");
         experimental.MigrateIntegration();

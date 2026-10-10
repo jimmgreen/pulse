@@ -22,6 +22,8 @@ constexpr wchar_t kWinEVerbKey[] =
     L"Software\\Classes\\CLSID\\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}\\shell\\opennewwindow\\command";
 constexpr wchar_t kThisPcCommandKey[] =
     L"Software\\Classes\\CLSID\\{20D04FE0-3AEA-1069-A2D8-08002B30309D}\\shell\\open\\command";
+constexpr wchar_t kRecycleBinCommandKey[] =
+    L"Software\\Classes\\CLSID\\{645FF040-5081-101B-9F08-00AA002F954E}\\shell\\open\\command";
 
 }  // namespace
 
@@ -85,7 +87,7 @@ struct UpgradePrefs {
     bool captured = false;
     std::wstring previous_exe;
     std::optional<std::wstring> startup;
-    bool directory = false, drive = false, win_e = false, this_pc = false;
+    bool directory = false, drive = false, win_e = false, this_pc = false, recycle_bin = false;
 
     std::wstring Flags() const {
         std::wstring p;
@@ -93,6 +95,7 @@ struct UpgradePrefs {
         if (drive) p += L" --drive";
         if (win_e) p += L" --win-e";
         if (this_pc) p += L" --this-pc";
+        if (recycle_bin) p += L" --recycle-bin";
         return p;
     }
 };
@@ -124,6 +127,7 @@ UpgradePrefs CaptureUpgradePrefs(const std::wstring& previous_exe) {
     p.drive = targets(L"Software\\Classes\\Drive\\shell\\open\\command");
     p.win_e = targets(kWinEVerbKey);
     p.this_pc = targets(kThisPcCommandKey);
+    p.recycle_bin = targets(kRecycleBinCommandKey);
     return p;
 }
 

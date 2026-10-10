@@ -45,7 +45,8 @@ $groups = @(
     @{ name = 'Directory'; key = 'Directory'; verb = 'open' },
     @{ name = 'Drive'; key = 'Drive'; verb = 'open' },
     @{ name = 'WinE'; key = 'CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}'; verb = 'opennewwindow' },
-    @{ name = 'ThisPc'; key = 'CLSID\{20D04FE0-3AEA-1069-A2D8-08002B30309D}'; verb = 'open' }
+    @{ name = 'ThisPc'; key = 'CLSID\{20D04FE0-3AEA-1069-A2D8-08002B30309D}'; verb = 'open' },
+    @{ name = 'RecycleBin'; key = 'CLSID\{645FF040-5081-101B-9F08-00AA002F954E}'; verb = 'open' }
 )
 $views = @([Microsoft.Win32.RegistryView]::Registry32)
 if ([Environment]::Is64BitOperatingSystem) {

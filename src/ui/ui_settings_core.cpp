@@ -257,6 +257,7 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
             };
             item(lay.startup_row[2],I::IntegrationFolders,I::IntegrationFoldersDesc,L"\xE8B7",vm.settings_integration_folders,1);
             item(lay.this_pc_row,I::SettingsThisPc,I::SettingsThisPcDesc,L"\xE7F4",vm.settings_integration_this_pc,3);
+            item(lay.recycle_bin_row,I::SettingsRecycleBin,I::SettingsRecycleBinDesc,L"\xE74D",vm.settings_integration_recycle_bin,7);
             item(lay.win_e_row,I::SettingsWinE,I::SettingsWinEDesc,L"\xE765",vm.settings_integration_win_e,2);
             item(lay.explorer_windows_row,I::IntegrationExperimental,I::IntegrationExperimentalDesc,L"\xE8A7",vm.settings_integration_experimental,4);
             for(int i=0;i<4;++i) {

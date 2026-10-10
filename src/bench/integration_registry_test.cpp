@@ -147,6 +147,33 @@ int wmain() {
     Set(pc + L"\\open\\command", L"DelegateExecute", L"");
     Check(!ApplyShellIntegration(ShellIntegrationKind::ThisPc, exe, false) && !KeyExists(pc.substr(0, pc.find(L"\\shell"))),
         "legacy This PC restore releases the system CLSID handler");
+    {
+        // Desktop Recycle Bin: same CLSID verb shape as This PC.
+        const std::wstring bin = L"Software\\Classes\\CLSID\\{645FF040-5081-101B-9F08-00AA002F954E}\\shell";
+        Clear();
+        Check(!ReadShellIntegration(ShellIntegrationKind::RecycleBin, exe) &&
+            ApplyShellIntegration(ShellIntegrationKind::RecycleBin, exe, true) &&
+            ReadShellIntegration(ShellIntegrationKind::RecycleBin, exe) &&
+            HasShellIntegrationOwnership(ShellIntegrationKind::RecycleBin, exe),
+            "Recycle Bin takeover applies and reads back");
+        const Value bin_command = Read(bin + L"\\open\\command");
+        const std::wstring expected = L"\"" + exe + L"\" \"::{645FF040-5081-101B-9F08-00AA002F954E}\"";
+        Check(bin_command.exists && bin_command.bytes.size() == (expected.size() + 1) * sizeof(wchar_t) &&
+            std::wstring(reinterpret_cast<const wchar_t*>(bin_command.bytes.data())) == expected &&
+            Read(bin + L"\\open\\command", L"DelegateExecute").exists && Read(bin).exists,
+            "Recycle Bin open verb runs Pulse with the parsing name and is the default verb");
+        Check(!ReadShellIntegration(ShellIntegrationKind::ThisPc, exe) && !KeyExists(pc),
+            "Recycle Bin takeover leaves This PC alone");
+        Check(ApplyShellIntegration(ShellIntegrationKind::RecycleBin, exe, false) && !KeyExists(bin.substr(0, bin.find(L"\\shell"))) &&
+            !HasShellIntegrationOwnership(ShellIntegrationKind::RecycleBin, exe),
+            "Recycle Bin restore removes the per-user CLSID override it created");
+        Clear();
+        Set(bin, L"", L"empty");
+        const Value before = Read(bin);
+        Check(ApplyShellIntegration(ShellIntegrationKind::RecycleBin, exe, true) &&
+            ApplyShellIntegration(ShellIntegrationKind::RecycleBin, exe, false) && Read(bin) == before &&
+            !Read(bin + L"\\open\\command").exists, "Recycle Bin restore brings back an earlier default verb");
+    }
     for (const bool reenable : {false, true}) {
         Clear();
         Set(win, L"", L"\"" + exe + L"\""); Set(win, L"DelegateExecute", L"");

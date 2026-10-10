@@ -5,6 +5,7 @@
 #include "entry_group.h"
 #include "link_resolve.h"
 #include "../fs/fs_enum.h"
+#include "../fs/bitlocker_volume.h"
 #include "../fs/bounded_enumeration.h"
 #include "../fs/fs_recycle.h"
 #include "../fs/fs_net_cache.h"
@@ -241,6 +242,7 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
                 res.cancelled = !running_ || current == current_gen_.end() || current->second != item.generation;
             }
             res.error = !res.cancelled;
+            res.bitlocker_locked = res.error && fs::IsBitLockerLocked(item.path);
             res.snapshot = nullptr;
             return res;
         }

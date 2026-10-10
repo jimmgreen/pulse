@@ -10,7 +10,8 @@ namespace {
 
 constexpr UINT kFirstString = IDS_SETTINGS;
 // Must stay on the highest allocated string id, otherwise Get() returns empty.
-constexpr UINT kLastString = IDS_SETTINGS_CLOSE_TAB_DOUBLE_CLICK_DESC;
+constexpr UINT kLastString = IDS_DRIVE_LOCKED_CANCELLED;
+static_assert(static_cast<UINT>(StringId::SettingsRecycleBinDesc) <= kLastString);
 static_assert(static_cast<UINT>(StringId::HelpContextMenu) <= kLastString);
 static_assert(static_cast<UINT>(StringId::UiFontLarger) <= kLastString);
 static_assert(static_cast<UINT>(StringId::OpAuthorizationNotGranted) <= kLastString);

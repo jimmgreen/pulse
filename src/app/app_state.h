@@ -112,6 +112,7 @@ constexpr UINT kTimerUi = 1;
 constexpr UINT_PTR kTimerMarqueeScroll = 0x4D51;
 constexpr UINT WM_NETWORK_LOCATIONS = WM_APP + 73;
 constexpr UINT WM_ASSOC_CHANGED = WM_APP + 74;  // SHCNE_ASSOCCHANGED: default programs changed
+constexpr UINT WM_BITLOCKER_UNLOCK = WM_APP + 75;  // app::BitLockerUnlockResult* (bitlocker_unlock.h)
 
 enum class OmnibarMode { Path, Mixed, Command, Project };
 
@@ -777,6 +778,9 @@ struct AppState {
     // Cut state mirrored into list rows (ui.md §5.2 rule 6: 55% opacity).
     std::vector<std::wstring> cutPaths;
     DWORD pendingCutClipboardSequence = 0;
+    // Clipboard value CollectPathsToTray wrote for tray batch trayClipboardBatchId.
+    DWORD trayClipboardSequence = 0;
+    uint64_t trayClipboardBatchId = 0;
     std::vector<std::wstring> pendingCutClipboardPaths;
     std::vector<std::wstring> completedCutClipboardPaths;
 

@@ -2,6 +2,8 @@
 #include "app_window_title.h"
 // app_navigation.cpp — extracted from app_main.cpp.
 #include "app_internal.h"
+#include "bitlocker_unlock.h"
+#include "../fs/bitlocker_volume.h"
 #include "shell_window_sync.h"
 #include "app_column_view.h"
 #include "listing_selection_restore.h"
@@ -1226,7 +1228,14 @@ void ApplyWorkerResult(AppState& s, app::WorkResult& res) {
             tab->banner_message = tab->snapshot
                 ? l10n::Get(l10n::StringId::CachedReadOnly)
                 : l10n::Get(l10n::StringId::DirectoryUnavailable);
+            if (res.bitlocker_locked) {
+                tab->banner_title = l10n::Get(l10n::StringId::DriveLockedTitle);
+                tab->banner_message = l10n::Get(l10n::StringId::DriveLockedMessage);
+            }
         });
+        // As File Explorer does for a locked drive: ask for the password, then
+        // open it (ApplyBitLockerUnlock). One wait per drive at a time.
+        if (res.bitlocker_locked) app::StartBitLockerUnlock(s.hwnd, WM_BITLOCKER_UNLOCK, res.path);
         InvalidateRect(s.hwnd, nullptr, FALSE);
         return;
     }
@@ -1469,6 +1478,34 @@ void RevalidateVisibleFolders(AppState& s) {
         if (empty) StartLoadingPath(s, *empty, path);
         else RefreshPath(s, path);
     }
+}
+
+void ApplyBitLockerUnlock(AppState& s, const std::wstring& root, bool unlocked) {
+    std::vector<std::wstring> paths;
+    ForEachPane(s, [&](app::Pane& pane) {
+        app::Tab* tab = pane.ActiveTab();
+        if (!tab) return;
+        if (tab->current_path.empty()) {  // This PC: the drive's lock label
+            if (unlocked) paths.push_back(tab->current_path);
+            return;
+        }
+        if (_wcsicmp(fs::DriveRootOf(tab->current_path).c_str(), root.c_str()) != 0) return;
+        if (unlocked) paths.push_back(tab->current_path);
+        else if (tab->banner_title == l10n::Get(l10n::StringId::DriveLockedTitle))
+            tab->banner_message = l10n::Get(l10n::StringId::DriveLockedCancelled);
+    });
+    std::sort(paths.begin(), paths.end());
+    paths.erase(std::unique(paths.begin(), paths.end()), paths.end());
+    for (const std::wstring& path : paths) {
+        app::Tab* idle = nullptr;
+        ForEachPane(s, [&](app::Pane& pane) {
+            app::Tab* tab = pane.ActiveTab();
+            if (!idle && tab && tab->current_path == path && !tab->loading) idle = tab;
+        });
+        if (idle) StartLoadingPath(s, *idle, path);
+        else RefreshPath(s, path, RefreshReason::Explicit);
+    }
+    InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
 void RefreshActiveTab(AppState& s, RefreshReason reason) {

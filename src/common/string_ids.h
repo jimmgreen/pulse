@@ -1420,3 +1420,10 @@
 // Settings > Startup and close: double-clicking a tab closes it.
 #define IDS_SETTINGS_CLOSE_TAB_DOUBLE_CLICK 2575
 #define IDS_SETTINGS_CLOSE_TAB_DOUBLE_CLICK_DESC 2576
+// Settings > Default file manager: the desktop Recycle Bin; BitLocker-locked drives.
+#define IDS_SETTINGS_RECYCLE_BIN 2577
+#define IDS_SETTINGS_RECYCLE_BIN_DESC 2578
+#define IDS_DRIVE_BITLOCKER_LOCKED 2579
+#define IDS_DRIVE_LOCKED_TITLE 2580
+#define IDS_DRIVE_LOCKED_MESSAGE 2581
+#define IDS_DRIVE_LOCKED_CANCELLED 2582

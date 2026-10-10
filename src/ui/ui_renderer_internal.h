@@ -384,6 +384,8 @@ void ClearTextWidthCache() {
                 penetrated ? fs::StripLnkSuffix(source.name) : source.name, entry.is_dir);
         }
         if (source.drive_type != 0) entry.type_text = DriveTypeText(source.drive_type);
+        if (source.drive_type != 0 && source.drive_locked)
+            entry.type_text += L" \u00B7 " + pulse::l10n::Get(pulse::l10n::StringId::DriveBitLockerLocked);
         if (entry.link_kind != fs::LinkKind::None) entry.type_text = LinkTypeText(entry.link_kind);
         if (source.drive_type != 0 && source.drive_total > 0) {
             const uint64_t free_bytes = std::min(source.drive_free, source.drive_total);
@@ -2064,6 +2066,7 @@ struct SettingsLayout {
     D2D1_RECT_F blank_click_choice[3]{};
     D2D1_RECT_F win_e_row{};
     D2D1_RECT_F this_pc_row{};
+    D2D1_RECT_F recycle_bin_row{};
     D2D1_RECT_F explorer_windows_row{};
     D2D1_RECT_F default_manager_row{};
     D2D1_RECT_F shell_tags_row{};

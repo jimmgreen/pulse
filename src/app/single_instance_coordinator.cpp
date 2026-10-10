@@ -96,6 +96,8 @@ bool SingleInstanceCoordinator::NormalizeLaunchPath(const std::wstring& input, s
     if (input.empty() || input.starts_with(L"pulse:") || IsThisPcArgument(input)) {
         output = input; return true;
     }
+    // The Recycle Bin verb (设为默认文件管理器) opens Pulse's own view.
+    if (IsRecycleBinArgument(input)) { output = L"pulse:recycle"; return true; }
     auto path = input;
     std::replace(path.begin(), path.end(), L'/', L'\\');
     if (path.size() == 2 && path[1] == L':') path += L'\\';

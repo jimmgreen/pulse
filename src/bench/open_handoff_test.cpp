@@ -115,5 +115,14 @@ int main() {
     ExplorerHandoff ready(1000);
     Check(ready.Ready(20) && ready.ClaimClose(30) && !ready.ClaimClose(31),
           "successful handoff can close at most once");
+    // 设为默认文件管理器: the desktop Recycle Bin verb passes its parsing name.
+    std::wstring launch;
+    Check(C::NormalizeLaunchPath(L"::{645FF040-5081-101B-9F08-00AA002F954E}", launch) && launch == L"pulse:recycle",
+          "Recycle Bin verb argument opens Pulse's recycle view");
+    Check(C::NormalizeLaunchPath(L"\"shell:RecycleBinFolder\"", launch) && launch == L"pulse:recycle" &&
+          C::NormalizeLaunchPath(L"shell:::{645ff040-5081-101b-9f08-00aa002f954e}", launch) && launch == L"pulse:recycle",
+          "shell:RecycleBinFolder and lower-case shell parsing names are accepted");
+    Check(C::NormalizeLaunchPath(L"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}", launch) &&
+          launch == L"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}", "This PC argument is unchanged");
     return failures ? 1 : 0;
 }

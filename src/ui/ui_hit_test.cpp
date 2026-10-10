@@ -254,6 +254,8 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 for(int i=0;i<5;++i) if(ContainsPt(integration_rows[i],x,y)) {
                     r.region=HitTestResult::SettingsIntegration;r.index=i;return r;
                 }
+                // Added after retry (5) and restore (6), so it takes the next action index.
+                if(ContainsPt(lay.recycle_bin_row,x,y)) {r.region=HitTestResult::SettingsIntegration;r.index=7;return r;}
                 if(vm.settings_integration_can_retry && ContainsPt(lay.integration_retry,x,y)) {
                     r.region=HitTestResult::SettingsIntegration;r.index=5;return r;
                 }

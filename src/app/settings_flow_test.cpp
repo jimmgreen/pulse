@@ -458,6 +458,7 @@ int RunSettingsIntegrationUiTest(AppState& s, const wchar_t* output) {
                     vm.settings_integration_enabled = state == 1 || state == 2 || state == 4;
                     vm.settings_integration_folders = vm.settings_integration_win_e = state != 4;
                     vm.settings_integration_this_pc = vm.settings_integration_experimental = state != 4;
+                    vm.settings_integration_recycle_bin = state != 4;
                     vm.settings_integration_can_retry = state == 2 || state == 3;
                     vm.settings_integration_can_restore = state != 0 && state != 4;
                     vm.settings_launch_on_startup = vm.settings_keep_running = false;
@@ -474,9 +475,11 @@ int RunSettingsIntegrationUiTest(AppState& s, const wchar_t* output) {
                         const auto h = hit(r); return h.region == H::SettingsIntegration && h.index == action;
                     };
                     const auto l = ui::MakeSettingsLayout(vm, window, scale, s.renderer.TitleBarHeight(), 28*scale, &painter);
-                    const D2D1_RECT_F rows[] = {l.startup_row[2], l.win_e_row, l.this_pc_row, l.explorer_windows_row};
+                    const D2D1_RECT_F rows[] = {l.startup_row[2], l.win_e_row, l.this_pc_row, l.recycle_bin_row,
+                        l.explorer_windows_row};
                     const I descriptions[] = {I::IntegrationFoldersDesc, I::SettingsWinEDesc,
-                        I::SettingsThisPcDesc, I::IntegrationExperimentalDesc};
+                        I::SettingsThisPcDesc, I::SettingsRecycleBinDesc, I::IntegrationExperimentalDesc};
+                    const int row_actions[] = {1, 2, 3, 7, 4};
                     separate &= l.integration_section.bottom <= l.integration_card.top &&
                         l.integration_card.bottom <= l.section[1].top &&
                         l.group[1].top == l.startup_row[0].top && l.default_manager_row.top == l.integration_card.top;
@@ -490,13 +493,13 @@ int RunSettingsIntegrationUiTest(AppState& s, const wchar_t* output) {
                     pill_fits &= nonempty(badge) && inside(badge, m) && badge.right <= m.right-60*scale+0.5f &&
                         (stacked || badge.left >= l.integration_text_right) &&
                         m.top+35*scale+master_h <= (stacked ? badge.top : m.bottom-12*scale)+0.5f;
-                    for (int i = 0; i < 4; ++i) {
+                    for (int i = 0; i < 5; ++i) {
                         visible &= nonempty(rows[i]) && inside(rows[i], l.integration_card);
-                        scope_hits &= is_action(rows[i], i+1);
+                        scope_hits &= is_action(rows[i], row_actions[i]);
                         const float text_left = rows[i].left+112*scale;
                         const float height = painter.MeasureWrappedCaptionHeight(l10n::Get(descriptions[i]),
                             rows[i].right-16*scale-text_left);
-                        const float limit = i == 3 ? l.integration_chip[0].top-8*scale : rows[i].bottom-12*scale;
+                        const float limit = i == 4 ? l.integration_chip[0].top-8*scale : rows[i].bottom-12*scale;
                         captions &= rows[i].top+31*scale+height <= limit+0.5f;
                     }
                     const auto& experimental = l.explorer_windows_row;
@@ -537,8 +540,8 @@ int RunSettingsIntegrationUiTest(AppState& s, const wchar_t* output) {
     check(labels, "integration resources exist in all three languages");
     check(search, "nonempty localized integration queries find their search destinations");
     check(separate, "integration owns a titled card before startup settings");
-    check(visible, "all four choices stay visible without expanding");
-    check(scope_hits, "all four choices remain editable with the master off at every width and DPI");
+    check(visible, "all five choices stay visible without expanding");
+    check(scope_hits, "all five choices remain editable with the master off at every width and DPI");
     check(action_hits, "master hits always; retry and restore hit only for drift or failure");
     check(pill_fits, "status pill fits beside or below the master text without touching the switch");
     check(captions && chips, "wrapped descriptions and experimental chips fit narrow and high-DPI layouts");
@@ -562,7 +565,7 @@ int RunSettingsIntegrationUiTest(AppState& s, const wchar_t* output) {
             vm.settings_integration_state = state == 4 ? 0 : state;
             vm.settings_integration_enabled = state == 1 || state == 2 || state == 4;
             vm.settings_integration_folders = vm.settings_integration_win_e = state != 4;
-            vm.settings_integration_this_pc = state != 4;
+            vm.settings_integration_this_pc = vm.settings_integration_recycle_bin = state != 4;
             vm.settings_integration_experimental = state == 1 || state == 3;
             vm.settings_launch_on_startup = state == 1; vm.settings_keep_running = false;
             vm.settings_integration_can_restore = state != 0 && state != 4;

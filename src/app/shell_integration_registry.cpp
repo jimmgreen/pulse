@@ -181,6 +181,11 @@ std::vector<Binding> Bindings(const std::wstring& group, const std::wstring& exe
         shell = L"Software\\Classes\\CLSID\\{20D04FE0-3AEA-1069-A2D8-08002B30309D}\\shell";
         verb = shell + L"\\open";
         line = L"\"" + exe + L"\" \"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}\"";
+    } else if (group == L"RecycleBin") {
+        // Same shape as This PC: the desktop icon runs CLSID\...\shell's default verb.
+        shell = L"Software\\Classes\\CLSID\\{645FF040-5081-101B-9F08-00AA002F954E}\\shell";
+        verb = shell + L"\\open";
+        line = L"\"" + exe + L"\" \"::{645FF040-5081-101B-9F08-00AA002F954E}\"";
     } else {
         shell = L"Software\\Classes\\" + group + L"\\shell";
         verb = shell + L"\\open";
@@ -198,6 +203,7 @@ std::vector<std::wstring> Groups(ShellIntegrationKind kind) {
     if (kind == ShellIntegrationKind::Folders) return {L"Directory", L"Drive"};
     if (kind == ShellIntegrationKind::Directory) return {L"Directory"};
     if (kind == ShellIntegrationKind::Drive) return {L"Drive"};
+    if (kind == ShellIntegrationKind::RecycleBin) return {L"RecycleBin"};
     return {kind == ShellIntegrationKind::WinE ? L"WinE" : L"ThisPc"};
 }
 

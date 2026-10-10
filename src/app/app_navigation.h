@@ -50,6 +50,8 @@ enum class RefreshReason { Explicit, Background, ShellNotification, OperationCom
 void RefreshPath(AppState& s, const std::wstring& path, RefreshReason reason = RefreshReason::Background);
 void RevalidateVisibleFolders(AppState& s);
 void RefreshActiveTab(AppState& s, RefreshReason reason = RefreshReason::Explicit);
+// A BitLocker unlock prompt finished: reload the tabs on that drive and This PC.
+void ApplyBitLockerUnlock(AppState& s, const std::wstring& root, bool unlocked);
 void QueueSnapshotValidation(AppState& s, app::Tab& tab);
 bool ApplyNotifyToVisible(AppState& s, const std::wstring& path,
                                  const fs::DirNotifyEvent& event);

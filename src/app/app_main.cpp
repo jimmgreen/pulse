@@ -37,6 +37,8 @@
 #include "snapshot_patch.h"
 #include "session.h"
 #include "session_save.h"
+#include "window_placement.h"
+#include "bitlocker_unlock.h"
 #include "context_menu.h"
 #include "context_menu_controller.h"
 #include "shell_verbs.h"
@@ -1547,6 +1549,13 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (s) ApplyNetworkLocations(*s);
         return 0;
 
+    case WM_BITLOCKER_UNLOCK: {
+        std::unique_ptr<app::BitLockerUnlockResult> result(
+            reinterpret_cast<app::BitLockerUnlockResult*>(lParam));
+        if (s && result) ApplyBitLockerUnlock(*s, result->root, result->unlocked);
+        return 0;
+    }
+
     case WM_RECYCLE_INFO: {
         auto* info = reinterpret_cast<fs::RecycleBinInfo*>(lParam);
         if (s && info && ApplyQueriedRecycleInfo(*s, *info))
@@ -2712,10 +2721,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 
     int x = CW_USEDEFAULT, y = CW_USEDEFAULT, w = (int)(1600 * state.scale), h = (int)(960 * state.scale);
     if (session.window_rect.right > session.window_rect.left) {
-        x = session.window_rect.left;
-        y = session.window_rect.top;
-        w = session.window_rect.right - session.window_rect.left;
-        h = session.window_rect.bottom - session.window_rect.top;
+        // Saved from rcNormalPosition: workspace coordinates (window_placement.h).
+        const RECT restored = app::RestoredWindowRect(session.window_rect);
+        x = restored.left;
+        y = restored.top;
+        w = restored.right - restored.left;
+        h = restored.bottom - restored.top;
     }
     if (state.shot.active && state.shot.width > 0 && state.shot.height > 0) {
         w = state.shot.width;
