@@ -138,6 +138,7 @@ void UnregisterAssocChangeNotify() {
 #include "duplicate_scan.h"
 #include "shell_tag_menu.h"
 #include "shell_tag_com.h"
+#include "folder_open_com.h"
 #include "shell_tag_audit.h"
 #include "hang_watch.h"
 #include "tray_reveal.h"
@@ -2027,6 +2028,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
     case WM_DESTROY: {
         app::shell_tags::RevokeCommandServer();
+        app::folder_open::RevokeCommandServer();
         if (s) {
             s->probe_scheduler.Clear();
             s->probeQueue.clear();
@@ -2677,7 +2679,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     }
     bool shell_tag_com = false;
     for (int i = 1; i < __argc; ++i) if (wcscmp(__wargv[i], L"--shell-tag-com") == 0) shell_tag_com = true;
-    if (shell_tag || shell_tag_com) state.open_path.clear();
+    // Started by the shell as Folder\shell\open's DelegateExecute while Pulse was
+    // closed (folder_open_com.cpp). Stay resident and hidden, the way the tag
+    // server does.
+    bool folder_open_com = false;
+    for (int i = 1; i < __argc; ++i) if (wcscmp(__wargv[i], L"--folder-open-com") == 0) folder_open_com = true;
+    if (shell_tag || shell_tag_com || folder_open_com) state.open_path.clear();
     std::wstring normalized_launch;
     if (!app::SingleInstanceCoordinator::NormalizeLaunchPath(state.open_path, normalized_launch)) {
         MessageBoxW(nullptr, L"Invalid launch path.", L"Pulse", MB_OK | MB_ICONERROR);
@@ -2806,14 +2813,21 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         const HRESULT registered = app::shell_tags::RegisterCommandServer(tag_com_class);
         if (shell_tag_com && FAILED(registered)) { DestroyWindow(hwnd); OleUninitialize(); return 1; }
     } else if (shell_tag_com) { DestroyWindow(hwnd); OleUninitialize(); return 1; }
+    // The folder-open delegate rides the same folder integration the
+    // Directory/Drive registrations do, so the window has to be able to accept
+    // its requests whenever that integration is on.
+    if (!state.isolatedTest && state.appPrefs.integration_enabled && state.appPrefs.open_folders_in_pulse) {
+        const HRESULT registered = app::folder_open::RegisterCommandServer();
+        if (folder_open_com && FAILED(registered)) { DestroyWindow(hwnd); OleUninitialize(); return 1; }
+    } else if (folder_open_com) { DestroyWindow(hwnd); OleUninitialize(); return 1; }
     // Sign-in launch with 开机自启时隐藏到托盘: only the tray icon shows; a
     // click restores the window (maximized if the session was).
-    const bool start_in_tray = !test_hidden && !shell_tag && !shell_tag_com && !state.shot.active && !state.menushot &&
+    const bool start_in_tray = !test_hidden && !shell_tag && !shell_tag_com && !folder_open_com && !state.shot.active && !state.menushot &&
         !state.colorpickshot && !state.colorpickdialog &&
         app::StartsHiddenInTray(startup_launch, state.appPrefs.start_in_tray) &&
         state.tray_controller.StartHidden(nCmdShow == SW_SHOWMAXIMIZED, state.appPrefs.notify_icon_mode != 2);
     if (!start_in_tray)
-        ShowWindow(hwnd, test_hidden || shell_tag || shell_tag_com ? SW_HIDE
+        ShowWindow(hwnd, test_hidden || shell_tag || shell_tag_com || folder_open_com ? SW_HIDE
                                                   : state.shot.active ? SW_SHOWNORMAL : nCmdShow);
     UpdateWindow(hwnd);
 
@@ -3036,6 +3050,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         if (ret == -1) break;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
+        // A launcher's "open file location" activates our Folder\shell\open
+        // delegate, which parks the folder here (folder_open_com.cpp). Open it
+        // the way a command-line launch would.
+        for (auto& request : app::folder_open::TakeRequests()) {
+            if (request.folder.empty()) continue;
+            OpenFolderInNewTab(state, request.folder);
+            if (!request.target.empty()) SelectLaunchedFile(state, request.target);
+        }
     }
     pulse::app::hang::Stop();
     OleUninitialize();
