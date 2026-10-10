@@ -103,6 +103,12 @@ struct Tab {
     std::vector<std::wstring> pending_selected_names;
     uint64_t pending_selection_revision = UINT64_MAX;
     bool pending_ensure_selection_visible = false;
+    // "Open this folder and put the cursor on this entry" - what another app's
+    // "open file location", a launcher, or Explorer's /select asks for. It is
+    // held until the listing that satisfies it arrives, because
+    // StartLoadingPath clears the pending selection above and used to drop this
+    // request whenever anything re-navigated before the listing came back.
+    std::wstring launch_selected_name;
     // File Explorer order hold (#13): change patches and non-explicit
     // refreshes keep rows in place until F5, a new sort or reopening.
     bool refresh_keeps_order = false;      // the pending refresh merges into the shown order

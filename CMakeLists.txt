@@ -744,6 +744,10 @@ add_executable(pulse_integration_registry_test src/bench/integration_registry_te
 target_link_libraries(pulse_integration_registry_test PRIVATE advapi32 shlwapi)
 target_compile_definitions(pulse_integration_registry_test PRIVATE PULSE_INTEGRATION_TEST=1)
 
+add_executable(pulse_folder_open_com_test src/bench/folder_open_com_test.cpp
+    src/app/folder_open_com.cpp)
+target_link_libraries(pulse_folder_open_com_test PRIVATE ole32 oleaut32 shell32 shlwapi advapi32)
+
 add_executable(pulse_preview_handler_probe
     src/bench/preview_handler_probe.cpp
     src/ui/preview_handler_host.cpp)

@@ -142,21 +142,34 @@ std::vector<Binding> Bindings(const std::wstring& group, const std::wstring& exe
         shell = L"Software\\Classes\\CLSID\\{20D04FE0-3AEA-1069-A2D8-08002B30309D}\\shell";
         verb = shell + L"\\open";
         line = L"\"" + exe + L"\" \"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}\"";
+    } else if (group == L"Folder") {
+        // Folder opens ignore (Default) and activate DelegateExecute instead, so
+        // being that delegate is the only way onto this chain. The empty
+        // (Default) keeps a stale command line out of the way if the delegate
+        // ever fails to load.
+        shell = L"Software\\Classes\\Folder\\shell";
+        verb = shell + L"\\open";
+        line.clear();
     } else {
         shell = L"Software\\Classes\\" + group + L"\\shell";
         verb = shell + L"\\open";
         line = L"\"" + exe + L"\" \"%1\"";
     }
+    const std::wstring delegate_value =
+        group == L"Folder" ? std::wstring(kFolderOpenDelegateClassId) : std::wstring();
     std::vector<Binding> result{{verb + L"\\command", L"", String(line)},
-                                {verb + L"\\command", L"DelegateExecute", String(L"")}};
+                                {verb + L"\\command", L"DelegateExecute", String(delegate_value)}};
     if (group != L"WinE") result.push_back({shell, L"", String(L"open")});
-    if (group == L"Directory" || group == L"Drive")
+    if (group == L"Directory" || group == L"Drive" || group == L"Folder")
         result.push_back({verb, L"DelegateExecute", String(L"")}); // compatibility with old Pulse values
     return result;
 }
 
 std::vector<std::wstring> Groups(ShellIntegrationKind kind) {
-    if (kind == ShellIntegrationKind::Folders) return {L"Directory", L"Drive"};
+    // "Folder" is the class behind an actual folder open, which is what a
+    // launcher's "open file location" invokes; Directory/Drive only cover the
+    // right-click verbs on those specific classes.
+    if (kind == ShellIntegrationKind::Folders) return {L"Directory", L"Drive", L"Folder"};
     if (kind == ShellIntegrationKind::Directory) return {L"Directory"};
     if (kind == ShellIntegrationKind::Drive) return {L"Drive"};
     return {kind == ShellIntegrationKind::WinE ? L"WinE" : L"ThisPc"};
@@ -473,6 +486,33 @@ bool ShellCommandTargetsExecutable(const std::wstring& command, const std::wstri
                              exe.data(), static_cast<int>(exe.size()), TRUE) == CSTR_EQUAL;
 }
 
+// The delegate value names a CLSID the shell has to be able to instantiate, so
+// the class itself has to exist as well. Only Pulse's own LocalServer32 is
+// touched, and only when it already names this executable, so a foreign class
+// registration is never removed.
+bool ApplyFolderDelegateServer(const std::wstring& exe, bool on) {
+    const std::wstring key = std::wstring(L"Software\\Classes\\CLSID\\") +
+        kFolderOpenDelegateClassId + L"\\LocalServer32";
+    if (on) {
+        HKEY handle = nullptr;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, nullptr, 0, KEY_SET_VALUE,
+                            nullptr, &handle, nullptr) != ERROR_SUCCESS) return false;
+        const std::wstring command = L"\"" + exe + L"\" --folder-open-com";
+        const LONG status = RegSetValueExW(handle, L"", 0, REG_SZ,
+            reinterpret_cast<const BYTE*>(command.c_str()),
+            static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));
+        RegCloseKey(handle);
+        return status == ERROR_SUCCESS;
+    }
+    Value current;
+    if (!Read(key, L"", current)) return false;
+    if (!current.exists) return true;
+    if (!ShellCommandTargetsExecutable(Text(current), exe)) return true; // not ours
+    if (!Write(key, L"", Value{})) return false;
+    DropEmptyKeys(key);
+    return true;
+}
+
 bool ApplyShellIntegration(ShellIntegrationKind kind, const std::wstring& exe, bool on) {
     if (exe.empty()) return false;
     // Do not record damaged legacy overrides as the next "original" state.
@@ -480,6 +520,8 @@ bool ApplyShellIntegration(ShellIntegrationKind kind, const std::wstring& exe, b
     if (on && HasLegacyShellIntegrationResidue()) return false;
     bool ok = true;
     for (const auto& group : Groups(kind)) ok = ApplyGroup(group, exe, on) && ok;
+    for (const auto& group : Groups(kind))
+        if (group == L"Folder") ok = ApplyFolderDelegateServer(exe, on) && ok;
     return ok;
 }
 
