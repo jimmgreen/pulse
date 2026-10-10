@@ -145,7 +145,7 @@ struct NetworkIndexTestAccess {
             LiveNetworkMatches matches; std::mutex mutex;
             fail_next_after = 2; next_calls = 0;
             LiveNetworkWalk(data.wstring(), L"", false, matches, mutex, {}, {});
-            check(matches.error == ERROR_BAD_NETPATH && !matches.complete, "live walk exposes enumeration failure as incomplete");
+            check(matches.error == ERROR_BAD_NETPATH && matches.finished, "live walk finishes with the enumeration failure as partial-result error");
             fail_next_after = -1;
         }
         {

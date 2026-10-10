@@ -124,8 +124,11 @@ int wmain() {
     for (enum_mode = 1; enum_mode <= 3; ++enum_mode) {
         enum_files = 0;
         const std::vector<std::wstring> batch{(other / L"keep.txt").wstring(), fault_source.wstring()};
+        // The directory whose enumeration failed is reported: the dropped root when
+        // its first lookup fails, else "denied", which NTFS enumerates first.
+        const std::wstring failed_directory = (enum_mode == 1 ? fault_source : fault_source / L"denied").wstring();
         Check(!StageDropSources(batch, temp.wstring(), fault_stage.wstring(), fault_staged, &error, api) &&
-              error.code == static_cast<DWORD>(enum_mode == 2 ? ERROR_CRC : ERROR_ACCESS_DENIED) && error.source == fault_source.wstring() &&
+              error.code == static_cast<DWORD>(enum_mode == 2 ? ERROR_CRC : ERROR_ACCESS_DENIED) && error.source == failed_directory &&
               fault_staged == batch && fsys::is_empty(fault_stage) && Read(fault_source / L"first.txt").size() > 0,
               L"first/middle/deep enumeration error rejects complete batch and removes partial stage");
     }

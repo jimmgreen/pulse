@@ -1203,7 +1203,7 @@ target_sources(pulse_preview PRIVATE src/preview_host/gif_frames.cpp)
 add_executable(pulse_preview_pipeline_audit_test src/bench/preview_pipeline_audit_test.cpp
     src/preview_host/gif_frames.cpp src/preview_host/folder_listing.cpp src/preview_host/preview_file_utils.cpp)
 target_link_libraries(pulse_preview_pipeline_audit_test PRIVATE ole32 windowscodecs uuid shlwapi)
-add_executable(pulse_tray_metadata_audit_test src/bench/tray_metadata_audit_test.cpp)
+add_executable(pulse_tray_metadata_audit_test src/bench/tray_metadata_audit_test.cpp src/app/tray_compare_metadata.cpp)
 add_executable(pulse_network_worker_audit_test src/bench/network_worker_audit_test.cpp
     src/index/index_config.cpp src/index/index_query.cpp src/index/search_kinds.cpp
     src/index/index_shard.cpp src/index/change_tracking.cpp src/index/filename_pinyin.cpp)
