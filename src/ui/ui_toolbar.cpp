@@ -15,7 +15,10 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
         for (int i=0;i<4;++i) {
             const auto r=layout.navigation[i];
             if (r.right<=r.left) continue;
-            const bool enabled=i==0 ? vm.can_go_back : i==1 ? vm.can_go_forward : true;
+            // Up is disabled at the top of the tree (This PC with no history),
+            // the way Back and Forward already are (#146).
+            const bool enabled=i==0 ? vm.can_go_back : i==1 ? vm.can_go_forward
+                                  : i==2 ? vm.can_go_up : true;
             fluent::ButtonSpec button;
             button.bounds = r; button.glyph = nav_glyphs[i];
             button.state.enabled = enabled;

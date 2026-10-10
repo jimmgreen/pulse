@@ -83,6 +83,11 @@ void OpenSelected(AppState& s);
 // Opens one path as if chosen in the list: folders navigate, files launch.
 void OpenPath(AppState& s, const std::wstring& path);
 void GoUp(AppState& s);
+// Whether Up has anywhere to go. False at This PC with no history: there the
+// button must read as disabled instead of looking active and doing nothing
+// (#146). TabCanGoUp is the same question for a tab the caller already holds.
+bool CanGoUp(const AppState& s);
+bool TabCanGoUp(const app::Tab* tab);
 void GoBack(AppState& s);
 void GoForward(AppState& s);
 bool IsSettingsTab(const app::Tab* tab);

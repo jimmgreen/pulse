@@ -607,6 +607,7 @@ struct WindowViewModel {
 
     bool can_go_back = false;
     bool can_go_forward = false;
+    bool can_go_up = false;
 
     PaneViewModel pane;
     std::vector<PaneSlotView> pane_slots;

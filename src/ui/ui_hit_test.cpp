@@ -686,8 +686,12 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
         const HitTestResult::Region nav[] = {HitTestResult::NavBack, HitTestResult::NavForward,
             HitTestResult::NavUp, HitTestResult::NavRefresh};
         const bool searchOverlay=vm.address_searching && rect.right-EffectiveSidebarWidth(rect.right)<480*scale_;
+        // A disabled navigation button takes no clicks, so Up reports no hit at
+        // the top of the tree, where it is now drawn greyed out (#146).
+        const bool nav_enabled[] = {vm.can_go_back, vm.can_go_forward, vm.can_go_up, true};
         if (!searchOverlay)
-            for (int i=0; i<4; ++i) if (ContainsPt(toolbar.navigation[i],x,y)) {r.region=nav[i]; return r;}
+            for (int i=0; i<4; ++i)
+                if (nav_enabled[i] && ContainsPt(toolbar.navigation[i],x,y)) {r.region=nav[i]; return r;}
         // Hit-test the same rect the chrome is drawn in; toolbar.search can be wider,
         // which shifted every chip target (e.g. the options icon toggled the mode).
         const auto searchBounds=searchOverlay || vm.address_searching ? SearchBarRect(rect.right) : toolbar.search;

@@ -1287,6 +1287,23 @@ void TestBlankPaneClickNavigation() {
         SendMessageW(hwnd, WM_LBUTTONDBLCLK, MK_LBUTTON, point);
         release();
         Check(tab->current_path.empty(), L"blank pane: double click at a drive root goes up to This PC");
+        // #146: This PC is the top, so Up has to read as disabled there. Leaving
+        // it enabled made the button look and click active while doing nothing.
+        tab->back_stack = {};
+        Check(!CanGoUp(*state), L"up: disabled at This PC with no history");
+        tab->back_stack.push(L"C:\\PulseUpHistory");
+        Check(CanGoUp(*state), L"up: enabled at This PC when history offers a way back");
+        tab->back_stack = {};
+        tab->current_path = L"C:\\";
+        Check(CanGoUp(*state), L"up: enabled at a drive root, which still has This PC above it");
+        tab->current_path = L"C:\\PulseUpNested";
+        Check(CanGoUp(*state), L"up: enabled in an ordinary folder");
+        tab->current_path = L"pulse:search:pulseUpVirtual";
+        Check(!CanGoUp(*state), L"up: disabled in a virtual view with no history");
+        tab->back_stack.push(L"C:\\PulseUpHistory");
+        Check(CanGoUp(*state), L"up: a virtual view with history can still go back");
+        tab->back_stack = {};
+        tab->current_path = L"C:\\";
         tab->back_stack = {};
         tab->forward_stack = {};
         tab->current_path = L"C:\\";
