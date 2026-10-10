@@ -54,6 +54,9 @@ struct DirEntry {
 
 // pulse:tag: / pulse:search: / pulse:workspace: — not filesystem paths.
 bool IsVirtualPath(const std::wstring& path);
+// ::{GUID} parsing names and shell: links (the desktop's Recycle Bin, a pinned
+// Explorer button) are shell namespaces, not folders; never normalize them.
+bool IsShellNamespacePath(const std::wstring& path);
 bool IsUncPath(const std::wstring& path);
 
 enum class NetStatus { Unknown = 0, Online, Slow, Offline };

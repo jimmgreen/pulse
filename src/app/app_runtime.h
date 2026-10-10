@@ -65,6 +65,11 @@ std::vector<std::wstring> VisibleFolderPaths(const AppState& s);
 void SyncVisibleWatches(AppState& s);
 void BindCurrentLayout(AppState& s);
 std::wstring ResolveOpenFolderPath(std::wstring path);
+// A launch/forwarded argument (command line, single-instance hand-off, shell handoff):
+// shell namespaces ("::{...}", "shell:") are translated to the Pulse view that answers
+// them, or to nothing when Pulse has none; virtual views pass through; anything else is
+// a path and gets ResolveOpenFolderPath.
+std::wstring ResolveIncomingPath(const std::wstring& raw);
 // When `raw` (a launch or forwarded path) names an existing file, selects it
 // in the active tab, which ResolveOpenFolderPath opened on its folder.
 void SelectLaunchedFile(AppState& s, const std::wstring& raw);

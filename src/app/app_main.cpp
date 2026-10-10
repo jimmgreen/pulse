@@ -797,12 +797,26 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 RememberPath(*s, t->current_path);
         } else {
         // Shots accept the This PC arguments too (GUI checks of the drive view).
-        std::wstring startPath = !s->shot.active ? L"C:\\"
-            : app::IsThisPcArgument(s->shot.path) ? std::wstring() : s->shot.path;
-        if (!s->shot.active && !s->session_path.empty()) startPath = s->session_path;
-        else if (!s->shot.active && !s->open_path.empty())
-            startPath = app::IsThisPcArgument(s->open_path) ? std::wstring()
-                                                            : ResolveOpenFolderPath(s->open_path);
+        std::wstring startPath = L"C:\\";
+        if (s->shot.active) {
+            if (app::IsThisPcArgument(s->shot.path)) startPath.clear();
+            else {
+                const std::wstring incoming = ResolveIncomingPath(s->shot.path);
+                if (!incoming.empty()) startPath = incoming;
+            }
+        } else if (!s->session_path.empty()) {
+            startPath = s->session_path;
+        } else if (!s->open_path.empty()) {
+            // A shell namespace (the taskbar's Explorer button, the desktop's Recycle
+            // Bin) becomes its Pulse view; a namespace Pulse has no view for keeps the
+            // default instead of opening a tab named after the CLSID that cannot read.
+            if (app::IsThisPcArgument(s->open_path)) {
+                startPath.clear();
+            } else {
+                const std::wstring incoming = ResolveIncomingPath(s->open_path);
+                if (!incoming.empty()) startPath = incoming;
+            }
+        }
         else if (open_default_location)
             startPath = app::DefaultLocation(s->appPrefs); // empty = This PC
         s->pane->NewTab(startPath);
@@ -818,7 +832,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (!s->shot.active && !s->open_path.empty() &&
             (!s->session_layout_tabs.empty() || !s->session_path.empty())) {
             const bool this_pc = app::IsThisPcArgument(s->open_path);
-            const std::wstring open_path = this_pc ? std::wstring() : ResolveOpenFolderPath(s->open_path);
+            const std::wstring open_path = this_pc ? std::wstring() : ResolveIncomingPath(s->open_path);
             if (this_pc) OpenTabAt(*s, open_path);  // NewTab would open C: for ""
             else if (!open_path.empty() && !ActivateExistingFolderTab(*s, open_path))
                 NewTab(*s, open_path);

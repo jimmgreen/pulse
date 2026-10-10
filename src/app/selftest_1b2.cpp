@@ -627,6 +627,44 @@ void TestThisPcEnumeration() {
     Check(has_c, L"thispc: contains the C: drive");
 }
 
+void TestShellNamespaceForward() {
+    // The folder takeover owns the Folder class, so pinned items that resolve their
+    // open verb through it (the taskbar's Explorer button, the desktop's This PC and
+    // Recycle Bin icons) reach Pulse as a namespace, never as a path.
+    Check(fs::IsShellNamespacePath(L"::{F874310E-B6B7-47DC-BC84-B9E6B38F5903}") &&
+          fs::IsShellNamespacePath(L"shell:RecycleBinFolder") &&
+          fs::IsShellNamespacePath(L"\\\\?\\::{20D04FE0-3AEA-1069-A2D8-08002B30309D}") &&
+          !fs::IsShellNamespacePath(L"C:\\") &&
+          !fs::IsShellNamespacePath(L"pulse:recent"),
+          L"shell namespace: ::{GUID} and shell: are namespaces, paths and views are not");
+
+    // Home (Windows 11) and Quick access are what "open the file manager" means when
+    // nothing in particular is aimed at; Recent is already this app's own answer to that.
+    Check(ResolveIncomingPath(L"::{F874310E-B6B7-47DC-BC84-B9E6B38F5903}") == L"pulse:recent" &&
+          ResolveIncomingPath(L"::{679f85cb-0220-4080-b29b-5540cc05aab6}") == L"pulse:recent",
+          L"shell namespace: Home and Quick access open the recent view");
+    Check(ResolveIncomingPath(L"::{645FF040-5081-101B-9F08-00AA002F954E}") == L"pulse:recycle",
+          L"shell namespace: the Recycle Bin opens the recycle view");
+    // Nothing to open: not a tab named after the CLSID, and no fallback to anywhere else.
+    Check(ResolveIncomingPath(L"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}").empty() &&
+          ResolveIncomingPath(L"shell:AppsFolder").empty() &&
+          ResolveIncomingPath(L"::{").empty(),
+          L"shell namespace: This PC and the rest report nothing to open");
+    Check(ResolveIncomingPath(L"pulse:starred") == L"pulse:starred",
+          L"shell namespace: virtual views still pass through");
+
+    wchar_t temp[MAX_PATH]{};
+    if (GetTempPathW(MAX_PATH, temp)) {
+        const std::wstring folder =
+            fs::NormalizePath(std::wstring(temp) + L"pulse-shell-namespace-test");
+        CreateDirectoryW(folder.c_str(), nullptr);
+        Check(ResolveIncomingPath(folder) == folder &&
+              ResolveIncomingPath(L"\"" + folder + L"\"") == folder,
+              L"shell namespace: a real folder still resolves to itself, quotes and all");
+        RemoveDirectoryW(folder.c_str());
+    }
+}
+
 void TestLoadingPresentation() {
     Pane pane;
     pane.NewTab(L"C:\\pending-folder");
@@ -7390,6 +7428,12 @@ int RunSelfTest1B2() {
         return passed ? 0 : 1;
     }
     if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
+        wcscmp(test_case, L"shell-namespace") == 0) {
+        TestShellNamespaceForward();
+        if (g_log) { fclose(g_log); g_log = nullptr; }
+        return g_fail ? 1 : 0;
+    }
+    if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
         wcscmp(test_case, L"folder-views") == 0) {
         TestFolderViews();
         TestFolderSorts();
@@ -7536,6 +7580,7 @@ int RunSelfTest1B2() {
     TestDetailsPreviewInteraction();
     TestBreadcrumb();
     TestThisPcEnumeration();
+    TestShellNamespaceForward();
     TestLoadingPresentation();
     TestNavigationReturnSelection();
     TestMouseHistoryNavigation();
