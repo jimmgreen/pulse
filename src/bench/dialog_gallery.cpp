@@ -94,10 +94,10 @@ std::vector<ConfirmScene> ConfirmScenes() {
         s.spec.message = L"这些项目不会进入回收站，删除后无法恢复。";
         s.spec.confirm_text = L"永久删除";
         s.spec.danger = true;
-        s.spec.items = {L"C:\\Users\\SS\\Desktop\\报告 2026.docx", L"C:\\Users\\SS\\Desktop\\预算.xlsx",
-                        L"C:\\Users\\SS\\Desktop\\照片", L"C:\\Users\\SS\\Desktop\\notes.md",
-                        L"C:\\Users\\SS\\Desktop\\demo.mp4", L"C:\\Users\\SS\\Desktop\\a.txt",
-                        L"C:\\Users\\SS\\Desktop\\b.txt"};
+        s.spec.items = {L"C:\\Users\\Example\\Desktop\\报告 2026.docx", L"C:\\Users\\Example\\Desktop\\预算.xlsx",
+                        L"C:\\Users\\Example\\Desktop\\照片", L"C:\\Users\\Example\\Desktop\\notes.md",
+                        L"C:\\Users\\Example\\Desktop\\demo.mp4", L"C:\\Users\\Example\\Desktop\\a.txt",
+                        L"C:\\Users\\Example\\Desktop\\b.txt"};
         s.spec.default_choice = ConfirmChoice::Cancel;
         s.visual.focus = kConfirmCancel;
         s.visual.hover = kConfirmPrimary;

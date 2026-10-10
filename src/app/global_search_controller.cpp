@@ -1,6 +1,7 @@
 #include "global_search_controller.h"
 #include "global_search_handoff.h"
 #include "app_internal.h"
+#include "tray_reveal.h"
 #include "../common/localization.h"
 
 namespace pulse {
@@ -27,8 +28,7 @@ void ApplyGlobalSearchSettings(AppState& s) {
         s.globalSearchHotkey.Error() == ERROR_HOTKEY_ALREADY_REGISTERED
             ? l10n::StringId::GlobalSearchConflict : l10n::StringId::GlobalSearchRegisterFailed));
     if (!enabled || !ok) s.globalSearchWindow.Hide();
-    s.tray_controller.SetVisible(app::TrayIconWanted(s.appPrefs.keep_running_on_close || enabled,
-                                                     s.appPrefs.notify_icon_mode, s.hidden_to_tray));
+    s.tray_controller.SetVisible(WantsTrayIcon(s, s.hidden_to_tray));
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 

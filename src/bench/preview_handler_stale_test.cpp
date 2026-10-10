@@ -1,4 +1,7 @@
 #include "../ui/preview_handler_host.h"
+#include "../common/runtime_log.h"
+#include <filesystem>
+#include <fstream>
 #include <shobjidl.h>
 #include <windows.h>
 #include <atomic>
@@ -11,6 +14,7 @@ extern IUnknown* (*g_preview_handler_factory_for_test)();
 namespace {
 HANDLE entered = nullptr, release_preview = nullptr, finished = nullptr;
 std::atomic<HWND> preview_parent{nullptr};
+std::atomic<HRESULT> window_result{S_OK}, preview_result{S_OK}, initialize_result{S_OK};
 class SlowHandler final : public IPreviewHandler, public IInitializeWithFile {
 public:
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
@@ -23,13 +27,13 @@ public:
     }
     ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
     ULONG STDMETHODCALLTYPE Release() override { const auto n = --refs_; if (!n) delete this; return n; }
-    HRESULT STDMETHODCALLTYPE Initialize(LPCWSTR, DWORD) override { return S_OK; }
-    HRESULT STDMETHODCALLTYPE SetWindow(HWND hwnd, const RECT*) override { preview_parent = hwnd; return S_OK; }
+    HRESULT STDMETHODCALLTYPE Initialize(LPCWSTR, DWORD) override { return initialize_result; }
+    HRESULT STDMETHODCALLTYPE SetWindow(HWND hwnd, const RECT*) override { preview_parent = hwnd; return window_result; }
     HRESULT STDMETHODCALLTYPE SetRect(const RECT*) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE DoPreview() override {
         SetEvent(entered);
         WaitForSingleObject(release_preview, 5000);
-        return S_OK;
+        return preview_result;
     }
     HRESULT STDMETHODCALLTYPE Unload() override { SetEvent(finished); return S_OK; }
     HRESULT STDMETHODCALLTYPE SetFocus() override { return S_OK; }
@@ -53,6 +57,9 @@ bool PumpUntil(HANDLE event) {
 }
 }
 int main() {
+    const auto log_root = std::filesystem::absolute(std::filesystem::path(L"bench_data") /
+        (L"handler-diagnostics-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64())));
+    pulse::diagnostics::runtime::Initialize(log_root.wstring(), "handler_test");
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     entered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     release_preview = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -135,10 +142,12 @@ int main() {
         check(overlay && !(GetWindowLongPtrW(overlay, GWL_STYLE) & WS_VISIBLE),
               "provider initializes inside a hidden overlay");
         host.Hide();
+        preview_result = E_ABORT;
         SetEvent(release_preview);
         check(PumpUntil(finished), "cancelled provider is unloaded after returning");
         check(!(GetWindowLongPtrW(overlay, GWL_STYLE) & WS_VISIBLE),
               "late COM completion cannot show cancelled preview");
+        preview_result = S_OK;
         ResetEvent(entered);
         ResetEvent(release_preview);
         host.Sync(owner, bounds, L"next.docx", FILE_ATTRIBUTE_NORMAL, 2, 1, 1,
@@ -157,6 +166,41 @@ int main() {
             (GetWindowLongPtrW(preview_parent.load(), GWL_STYLE) & WS_VISIBLE),
             "current successful preview becomes visible");
     }
+    for (int phase = 0; phase < 3; ++phase) {
+        window_result = phase == 0 ? E_ACCESSDENIED : S_OK;
+        preview_result = phase == 1 ? E_FAIL : S_OK;
+        initialize_result = phase == 2 ? E_ACCESSDENIED : S_OK;
+        pulse::ui::PreviewHandlerHost host;
+        host.Sync(owner, D2D1_RECT_F{0, 0, 200, 200}, L"failure-private.docx", FILE_ATTRIBUTE_NORMAL,
+            3 + phase, 1, 1, true, D2D1::ColorF(D2D1::ColorF::White),
+            D2D1::ColorF(D2D1::ColorF::Black), true, true);
+        const auto deadline = GetTickCount64() + 5000;
+        while (host.state() != pulse::ui::PreviewHandlerHost::State::Failed && GetTickCount64() < deadline) {
+            MSG msg{};
+            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                TranslateMessage(&msg); DispatchMessageW(&msg);
+            }
+            Sleep(5);
+        }
+        check(host.state() == pulse::ui::PreviewHandlerHost::State::Failed,
+            "injected SetWindow, DoPreview or initialization failure reaches failed state");
+    }
+    pulse::diagnostics::runtime::Shutdown();
+    const auto log_path = log_root / L"Diagnostics" / L"Runtime" /
+        (L"handler_test-" + std::to_wstring(GetCurrentProcessId()) + L".jsonl");
+    std::ifstream log_file(log_path, std::ios::binary);
+    const std::string log{std::istreambuf_iterator<char>(log_file), std::istreambuf_iterator<char>()};
+    check(log.find("\"stage\":7,\"hresult\":2147942405") != std::string::npos &&
+        log.find("\"stage\":8,\"hresult\":2147500037") != std::string::npos &&
+        log.find("\"stage\":3,\"hresult\":2147942405") != std::string::npos,
+        "failure records retain raw HRESULT and distinguish initialization, SetWindow and DoPreview");
+    check(log.find("\"event\":\"preview_handler_cancelled\",\"severity\":0") != std::string::npos,
+        "obsolete provider failure is classified as normal cancellation");
+    check(log.find("isolated.docx") == std::string::npos && log.find("failure-private.docx") == std::string::npos,
+        "handler diagnostics omit document paths");
+    log_file.close();
+    if (ok) std::filesystem::remove_all(log_root);
+    else std::wprintf(L"[DIAGNOSTICS] %ls\n", log_root.c_str());
     DestroyWindow(owner);
     CloseHandle(entered); CloseHandle(release_preview); CloseHandle(finished);
     CoUninitialize();

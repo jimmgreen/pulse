@@ -39,6 +39,7 @@ inline bool DrawLegacyIcon(ID2D1DeviceContext* dc, IDWriteFactory2* factory,
     switch (c) {
     case 0xE711: case 0xE8BB: line(5,5,19,19); line(5,19,19,5); break;
     case 0xE710: line(12,3,12,21); line(3,12,21,12); break;
+    case 0xE962: dc->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(6,2,18,22),6,6),brush,1.7f); line(12,2,12,9); break;
     case 0xE921: line(4,17,20,17); break;
     case 0xE922: box(4,4,20,20); break;
     case 0xE923: box(3,7,17,21); line(7,7,7,3); line(7,3,21,3); line(21,3,21,17); line(21,17,17,17); break;

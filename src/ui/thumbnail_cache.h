@@ -154,7 +154,9 @@ private:
     void SelectDetailsLocked(const std::wstring& identity);
     bool StoreResult(const Request& request, Item result);
     void Touch(Item& item);
-    bool Connect();
+    bool Connect(const Request& request, uint64_t started);
+    void LogFailure(const Request& request, uint64_t started, uint32_t stage,
+                    DWORD error, bool cancelled = false);
     void StopChild();
     std::wstring Key(const std::wstring& path, uint32_t pixels, uint64_t modified,
                      uint64_t size, uint32_t frame_index = 0) const;

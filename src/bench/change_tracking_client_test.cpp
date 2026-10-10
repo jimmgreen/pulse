@@ -35,7 +35,7 @@ int main(int argc, char**) {
                 leased = exchange(REQ_IDX_CHANGE_LEASE, lease.data()); renew = GetTickCount64() + 10000;
             }
             ipc::PayloadWriter request; request.PutU64(0); request.PutU32(6);
-            for (const auto* path : {L"C:\\", L"C:\\Users", L"C:\\Users\\SS", L"C:\\Users\\SS\\Desktop", L"C:\\Users\\SS\\Desktop\\pulse", L"C:\\Program Files"}) request.PutString(path);
+            for (const auto* path : {L"C:\\", L"C:\\Users", L"C:\\Users\\Public", L"C:\\Users\\Public\\Desktop", L"C:\\Users\\Public\\Documents", L"C:\\Program Files"}) request.PutString(path);
             if (leased && exchange(REQ_IDX_CHANGE_SUMMARIES, request.data())) {
                 ChangeResponse decoded; const bool ok = Decode(response, false, decoded);
                 std::printf("decode=%d global=%u rows=%zu", ok, static_cast<uint32_t>(decoded.state), decoded.summaries.size());

@@ -2,6 +2,7 @@
 #include "../common/command_line.h"
 #include "index_client.h"
 #include "index_config.h"
+#include "index_executable.h"
 #include "search_trace.h"
 #include <chrono>
 #include <algorithm>
@@ -10,12 +11,34 @@
 
 namespace pulse::index {
 
+namespace {
+
+bool IsFile(const std::wstring& path) {
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+// Index location changes (Pulse.Index.exe --set-index-path, elevated) stop the
+// service while they copy the index and start it again themselves. The mutex
+// exists exactly while one runs; an elevated owner may deny us SYNCHRONIZE.
+bool IndexConfigurationRunning() {
+    HANDLE mutex = OpenMutexW(SYNCHRONIZE, FALSE, L"Global\\PulseIndexConfiguration");
+    if (mutex) {
+        CloseHandle(mutex);
+        return true;
+    }
+    return GetLastError() == ERROR_ACCESS_DENIED;
+}
+
+} // namespace
+
 std::wstring IndexClient::ExePath() {
     wchar_t exe[MAX_PATH]{};
     GetModuleFileNameW(nullptr, exe, ARRAYSIZE(exe));
     wchar_t* slash = wcsrchr(exe, L'\\');
-    if (!slash) return L"Pulse.Index.exe";
-    return std::wstring(exe, slash + 1) + L"Pulse.Index.exe";
+    const std::wstring sibling = slash ? std::wstring(exe, slash + 1) + L"Pulse.Index.exe" : L"Pulse.Index.exe";
+    if (IsFile(sibling)) return sibling;  // common case: no service query
+    return ResolveIndexExecutable(sibling, InstalledServiceCommand(kServiceName), IsFile);
 }
 
 void IndexClient::Start(HWND notify, UINT status_msg, UINT search_msg, std::wstring pipe_name) {
@@ -62,9 +85,34 @@ void IndexClient::Stop() {
     connected_ = false;
 }
 
+// The service is installed but its host is gone: it crashed, setup ended it,
+// or it quit with an error. SCM restarts crashed hosts only after a minute and
+// never restarts one that stopped "cleanly", so start it from here, at most
+// every 30 s. Interactive users have SERVICE_START (InstallService); with an
+// older service DACL this is denied and Pulse keeps waiting as before.
+void IndexClient::StartStoppedService() {
+    const ULONGLONG now = GetTickCount64();
+    if (service_start_tick_ && now - service_start_tick_ < 30000) return;
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm) return;
+    if (SC_HANDLE svc = OpenServiceW(scm, kServiceName, SERVICE_QUERY_STATUS | SERVICE_START)) {
+        SERVICE_STATUS status{};
+        if (QueryServiceStatus(svc, &status) && status.dwCurrentState == SERVICE_STOPPED &&
+            !IndexConfigurationRunning()) {
+            service_start_tick_ = now;
+            StartServiceW(svc, 0, nullptr);   // the pipe shows up once it runs
+        }
+        CloseServiceHandle(svc);
+    } else {
+        service_start_tick_ = now;   // denied (older DACL) or gone: do not ask every second
+    }
+    CloseServiceHandle(scm);
+}
+
 bool IndexClient::SpawnHelper() {
     if (pipe_name_ != kPipeName) return false;
     if (ServiceInstalled()) {
+        StartStoppedService();
         {
             std::lock_guard<std::mutex> lock(mu_);
             status_ = L"正在等待索引服务…";
@@ -487,8 +535,13 @@ std::wstring QuoteCommandArg(const std::wstring& value) {
 
 bool RunElevatedIndexCommand(const std::wstring& exe, const std::wstring& parameters,
                             DWORD* result = nullptr) {
+    // Never let the shell show its own "cannot find the file" box; callers report it.
+    if (!IsFile(exe)) {
+        if (result) *result = ERROR_FILE_NOT_FOUND;
+        return false;
+    }
     SHELLEXECUTEINFOW sei{ sizeof(sei) };
-    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
     sei.lpVerb = L"runas";
     sei.lpFile = exe.c_str();
     sei.lpParameters = parameters.c_str();
@@ -570,9 +623,9 @@ bool IndexClient::ConfigureSystemExclusionElevated(const std::wstring& group, bo
                                    (enabled ? L" --enable" : L" --disable"));
 }
 
-bool IndexClient::ExportDiagnosticsElevated(const std::wstring& empty_directory) {
+bool IndexClient::ExportDiagnosticsElevated(const std::wstring& empty_directory, bool include_dumps) {
     return RunElevatedIndexCommand(ExePath(),
-        L"--export-diagnostics " + QuoteCommandArg(empty_directory));
+        L"--export-diagnostics " + QuoteCommandArg(empty_directory) + (include_dumps ? L" --include-dumps" : L""));
 }
 
 } // namespace pulse::index

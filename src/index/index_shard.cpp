@@ -78,7 +78,10 @@ bool WriteThroughFile(const std::wstring& path, const std::wstring& text) {
     const bool ok = bytes <= 0xffffffffu &&
         WriteFile(h, text.data(), static_cast<DWORD>(bytes), &written, nullptr) &&
         written == bytes && FlushFileBuffers(h) != FALSE;
+    const DWORD write_error = ok ? ERROR_SUCCESS : bytes > 0xffffffffu ? ERROR_FILE_TOO_LARGE :
+        GetLastError() ? GetLastError() : ERROR_WRITE_FAULT;
     CloseHandle(h);
+    if (!ok) SetLastError(write_error);
     return ok;
 }
 }
@@ -142,13 +145,14 @@ bool LoadShardManifest(const std::wstring& path, ShardManifest& out, std::wstrin
 }
 
 bool SaveShardManifest(const std::wstring& path, const ShardManifest& value, std::wstring* error) {
-    if (path.empty() || value.source_id.empty()) { SetError(error, L"分片清单参数无效"); return false; }
+    if (path.empty() || value.source_id.empty()) { SetError(error, L"分片清单参数无效"); SetLastError(ERROR_INVALID_PARAMETER); return false; }
     const std::wstring temp = path + L".tmp";
     if (!WriteThroughFile(temp, ManifestJson(value))) {
         SetError(error, L"无法创建分片清单临时文件"); return false;
     }
     if (!MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        DeleteFileW(temp.c_str()); SetError(error, L"无法发布分片清单"); return false;
+        const DWORD publish_error = GetLastError();
+        DeleteFileW(temp.c_str()); SetError(error, L"无法发布分片清单"); SetLastError(publish_error); return false;
     }
     return true;
 }

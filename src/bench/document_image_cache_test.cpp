@@ -1,5 +1,6 @@
 #include "../ui/thumbnail_cache.h"
 #include "preview_host_client.h"
+#include "../common/runtime_log.h"
 #include <filesystem>
 #include <fstream>
 #include <cstdio>
@@ -21,7 +22,7 @@ int SlowProvider(const std::wstring& id) {
         (req.flags & pulse::ipc::kPreviewRequestFlagDocumentImage);
     std::wstring path(ok ? req.path_chars : 0, L'\0');
     ok = ok && pulse::ipc::ReadAll(pipe, path.data(), static_cast<DWORD>(path.size() * sizeof(wchar_t)));
-    if (ok) { SetEvent(entered); Sleep(INFINITE); }
+    if (ok) { SetEvent(entered); if (id.ends_with(L"-exit")) ExitProcess(77); Sleep(INFINITE); }
     CloseHandle(pipe); CloseHandle(entered); return 2;
 }
 }
@@ -66,9 +67,10 @@ struct ThumbnailCacheTestAccess {
             current->active = false; auto next = std::make_shared<DocumentImageSession>(); draw(cache, next, L"C:\\next.png");
             Check(cache.queue_.size() == 1 && cache.pending_.size() == 1, "new document discards obsolete queued work");
         }
-        for (bool close : {false, true}) {
+        for (int scenario = 0; scenario < 4; ++scenario) {
+            const bool close = scenario == 1;
             ThumbnailCache cache;
-            const auto id = std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()) + (close ? L"-close" : L"-switch");
+            const auto id = std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()) + (scenario == 0 ? L"-switch" : scenario == 1 ? L"-close" : scenario == 2 ? L"-timeout" : L"-exit");
             HANDLE entered = CreateEventW(nullptr, TRUE, FALSE, Event(id).c_str());
             wchar_t exe[32768]{}; GetModuleFileNameW(nullptr, exe, ARRAYSIZE(exe));
             std::wstring cmd = L"\"" + std::wstring(exe) + L"\" --slow-provider " + id;
@@ -91,9 +93,23 @@ struct ThumbnailCacheTestAccess {
             Check(GetTickCount64() - begin < 1000 && WaitForSingleObject(entered, 3000) == WAIT_OBJECT_0,
                 "paint returns while real cache worker waits on controlled provider");
             const auto cancel = GetTickCount64();
-            if (close) cache.Reset(); else session->active = false;
-            Check(process && WaitForSingleObject(process, 2000) == WAIT_OBJECT_0 && GetTickCount64() - cancel < 2000,
-                close ? "close cancels slow metadata without waiting for provider" : "document switch terminates obsolete slow provider");
+            if (close) cache.Reset(); else if (scenario == 0) session->active = false;
+            const DWORD budget = scenario < 2 ? 2000 : 4000;
+            Check(process && WaitForSingleObject(process, budget) == WAIT_OBJECT_0 && GetTickCount64() - cancel < budget,
+                scenario == 0 ? "document switch terminates obsolete slow provider" :
+                scenario == 1 ? "close cancels slow metadata without waiting for provider" :
+                scenario == 2 ? "timed out provider is terminated within request budget" :
+                                "unexpected provider exit completes worker failure");
+            if (scenario >= 2) {
+                const auto stored_deadline = GetTickCount64() + 1000;
+                bool stored = false;
+                do {
+                    { std::lock_guard lock(cache.mutex_); stored = !cache.items_.empty(); }
+                    if (stored) break;
+                    Sleep(5);
+                } while (GetTickCount64() < stored_deadline);
+                Check(stored, "provider failure is recorded and cached before test teardown");
+            }
             cache.Reset(); if (process) CloseHandle(process); CloseHandle(entered);
         }
         return failures ? 1 : 0;
@@ -102,11 +118,32 @@ struct ThumbnailCacheTestAccess {
 }
 int wmain(int argc, wchar_t** argv) {
     if (argc == 3 && wcscmp(argv[1], L"--slow-provider") == 0) return SlowProvider(argv[2]);
-    pulse::ui::ThumbnailCacheTestAccess::Run();
     const auto root = std::filesystem::absolute(std::filesystem::path(L"bench_data") /
         (L"document-image-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64())));
     std::error_code ec; std::filesystem::create_directories(root.parent_path(), ec);
     if (ec || !CreateDirectoryW(root.c_str(), nullptr)) { Check(false, "exclusive fixture created"); return 1; }
+    pulse::diagnostics::runtime::Initialize(root.wstring(), "cache_test");
+    pulse::ui::ThumbnailCacheTestAccess::Run();
+    pulse::diagnostics::runtime::Shutdown();
+    const auto log_path = root / L"Diagnostics" / L"Runtime" /
+        (L"cache_test-" + std::to_wstring(GetCurrentProcessId()) + L".jsonl");
+    std::ifstream log_file(log_path, std::ios::binary);
+    const std::string log{std::istreambuf_iterator<char>(log_file), std::istreambuf_iterator<char>()};
+    Check(log.find("\"event\":\"preview_client_cancelled\",\"severity\":0") != std::string::npos,
+        "normal cancellation has its own non-error classification");
+    Check(log.find("\"stage\":5,\"error\":1460") != std::string::npos &&
+        log.find("\"exit_known\":1,\"exit_code\":259") != std::string::npos,
+        "timeout records capture original live host before termination");
+    Check(log.find("\"exit_known\":1,\"exit_code\":77") != std::string::npos,
+        "unexpected exit retains original process exit code before cleanup");
+    Check(log.find("\"request\":1,\"generation\":1,\"host_pid\":") != std::string::npos &&
+        log.find("synthetic-slow.png") == std::string::npos,
+        "client failures correlate request and host without private paths");
+    log_file.close();
+    if (argc == 2 && wcscmp(argv[1], L"--diagnostics-only") == 0) {
+        std::filesystem::remove_all(root);
+        return failures ? 1 : 0;
+    }
     const auto file = root / L"offline.bmp";
     { std::ofstream out(file, std::ios::binary); out << "private offline fixture"; Check(out.good(), "private fixture written"); }
     Check(SetFileAttributesW(file.c_str(), FILE_ATTRIBUTE_OFFLINE) && (GetFileAttributesW(file.c_str()) & FILE_ATTRIBUTE_OFFLINE), "offline flag set only on private ordinary file");

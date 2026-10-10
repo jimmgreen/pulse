@@ -7,6 +7,7 @@
 // All file operations are confined to bench_data/opstest/selftest_1b2 and
 // cleaned up afterwards.
 #include "selftest_1b2.h"
+#include "scroll_hover_taskbar_test.h"
 #include "change_tracking_ui_test.h"
 #include "change_tracking_app_test.h"
 #include "name_highlight_ui_test.h"
@@ -7296,6 +7297,12 @@ int RunSelfTest1B2() {
     g_skip_visual = GetEnvironmentVariableW(L"PULSE_SELFTEST_NO_SCREENSHOTS", skip_visual, ARRAYSIZE(skip_visual)) > 0;
     if (g_skip_visual) LogLine(L"[SKIP] Screenshot capture disabled\n");
     wchar_t test_case[64]{};
+    if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
+        wcscmp(test_case, L"scroll-hover-taskbar") == 0) {
+        const bool passed = RunScrollHoverTaskbarTest();
+        if (g_log) { fclose(g_log); g_log = nullptr; }
+        return passed ? 0 : 1;
+    }
     if (GetEnvironmentVariableW(L"PULSE_SELFTEST_CASE", test_case, ARRAYSIZE(test_case)) &&
         wcscmp(test_case, L"audit-tabs") == 0) {
         TestAuditTabs();

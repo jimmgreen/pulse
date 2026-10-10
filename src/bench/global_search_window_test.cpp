@@ -139,6 +139,21 @@ int RunSelectionIdentityTests() {
         check(state.selected == 0 && selected_path(state).ends_with(L"fresh.txt"),
               "new query resets selection to first new result");
     }
+    for (bool network_first : {false, true}) {
+        State state;
+        state.providers.ExpectNetwork(false);
+        const auto local = results({L"usable.txt"});
+        const auto failure = results({}, ERROR_CONNECTION_ABORTED);
+        if (network_first) {
+            state.AcceptFilenames(true, state.generation, failure);
+            state.AcceptFilenames(false, state.generation, local);
+        } else {
+            state.AcceptFilenames(false, state.generation, local);
+            state.AcceptFilenames(true, state.generation, failure);
+        }
+        check(!state.busy && state.error.empty() && state.rows.size() == 1u && !state.network_result.error,
+              "no network roots: unreachable agent (1236) leaves a complete local result");
+    }
     for (bool local_has_hit : {false, true}) for (DWORD error : {DWORD{ERROR_CONNECTION_ABORTED}, DWORD{ERROR_INVALID_DATA}})
         for (bool network_first : {false, true}) {
             State state;
@@ -382,7 +397,7 @@ int wmain(int argc, wchar_t** argv) {
     state.rows = {
         {L"2026 年第三季度预算.xlsx", L"D:\\工作\\财务\\2026 年第三季度预算.xlsx", L"本次季度预算总额为 128 万元，主要用于产品研发…", false},
         {L"项目预算评审.pdf", L"D:\\工作\\项目资料\\项目预算评审.pdf", L"季度预算调整方案已通过评审，将于下周执行。", false},
-        {L"预算会议纪要.docx", L"C:\\Users\\SS\\Documents\\预算会议纪要.docx", L"会议确认季度预算与部门年度计划保持一致。", false}
+        {L"预算会议纪要.docx", L"C:\\Users\\Example\\Documents\\预算会议纪要.docx", L"会议确认季度预算与部门年度计划保持一致。", false}
     };
     state.total = state.rows.size();
     check(Capture(state, (output / L"content-dark.png").wstring()), "Capture content dark");
@@ -478,7 +493,7 @@ int wmain(int argc, wchar_t** argv) {
     state.local_result.hits = {{L"C:\\fixture\\same.txt", L"same.txt", false}};
     state.local_result.total = 1;
     state.network_result.hits = {{L"c:\\FIXTURE\\SAME.txt", L"SAME.txt", false}, {L"\\\\server\\share\\network.txt", L"network.txt", false}};
-    state.network_result.total = 2; state.local_ready = state.network_ready = true;
+    state.network_result.total = 2; state.providers.local_ready = state.providers.network_ready = true;
     state.MergeFilenames();
     check(state.rows.size() == 2 && state.total == 2 && !state.busy, "Local and network merge deduplicates Windows paths");
     state.error.clear(); state.content_mode = true; state.current_only = true;

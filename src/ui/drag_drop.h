@@ -42,6 +42,18 @@ std::wstring FirstDroppableFolder(const std::vector<std::wstring>& sources);
 // True when path looks like a .lnk, so a header drop can try to open the target.
 bool LooksLikeFolderShortcut(const std::wstring& path);
 
+// True when dest_dir is one of the sources or lies inside one, e.g. a folder
+// dropped back onto its own row. Path text only: safe during DragOver.
+bool DropIntoOwnFolder(const std::vector<std::wstring>& sources, const std::wstring& dest_dir);
+
+// Programs that take dropped items as arguments, as Explorer's drop handlers
+// for .exe, .com, .bat and .cmd do. Extension only: safe during DragOver.
+bool IsDropLaunchProgram(const std::wstring& path);
+
+// Command line for items handed to such a program: one argument per item,
+// without the \\?\ prefix, quoted only when it contains blanks (as Explorer).
+std::wstring DropLaunchArguments(const std::vector<std::wstring>& sources);
+
 // ---------------------------------------------------------------------------
 // IDataObject inspection (drop-in side).
 // ---------------------------------------------------------------------------

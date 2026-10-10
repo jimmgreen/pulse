@@ -55,11 +55,11 @@ int main() {
             u32(at, type); u32(at + 4, length); u32(at + 16, static_cast<uint32_t>(value.size())); u16(at + 20, 24);
             memcpy(d + at + 24, value.data(), value.size()); at += length;
         }
-        void name(const wchar_t* text, uint64_t stale_size) {
+        void name(const wchar_t* text, uint64_t stale_size, uint64_t parent = 5, BYTE type = 1) {
             const size_t n = wcslen(text);
             std::vector<BYTE> v(66 + n * 2);
-            uint64_t parent = 5; memcpy(v.data(), &parent, 8); memcpy(v.data() + 48, &stale_size, 8);
-            v[64] = static_cast<BYTE>(n); v[65] = 1; memcpy(v.data() + 66, text, n * 2);
+            memcpy(v.data(), &parent, 8); memcpy(v.data() + 48, &stale_size, 8);
+            v[64] = static_cast<BYTE>(n); v[65] = type; memcpy(v.data() + 66, text, n * 2);
             resident(0x30, v);
         }
         void data(uint64_t size) {
@@ -90,6 +90,35 @@ int main() {
                            "extension $DATA before its base record supplies the real file size");
         check(sizes[L"small"] == 7 && sizes.count(L"orphan") && sizes[L"orphan"] == 11,
               "base $DATA and unmatched attribute lists keep their existing sizes");
+    }
+    // Hard links: every distinct Win32/POSIX FILE_NAME is a searchable name,
+    // including names kept in extension records; DOS aliases are not.
+    {
+        geometry.MftValidDataLength.QuadPart = 4 * 512;
+        std::map<std::wstring, MftFile> files;
+        unsigned reads = 0;
+        std::atomic<bool> running{true};
+        const bool complete = EnumerateMftRecords(geometry, [&](uint64_t, void* bytes, DWORD size) {
+            memset(bytes, 0, size);
+            if (++reads != 2 || size < 4 * 512) return true;
+            BYTE* base = static_cast<BYTE*>(bytes);
+            Writer f{base}; f.header(0);
+            f.name(L"a.txt", 0, 5, 1); f.name(L"b.txt", 0, 7, 0); f.name(L"A~1.TXT", 0, 5, 2); f.name(L"A.TXT", 0, 5, 0);
+            f.resident(0x80, std::vector<BYTE>(3, 1)); f.finish();
+            Writer d{base + 512}; d.header(0); d.u16(22, 3); d.name(L"dir", 0, 5, 1); d.name(L"dir2", 0, 9, 1); d.finish();
+            Writer m{base + 2 * 512}; m.header(0); m.resident(0x20, std::vector<BYTE>(8, 0)); m.name(L"m1", 0, 5, 1);
+            m.resident(0x80, std::vector<BYTE>(5, 1)); m.finish();
+            Writer x{base + 3 * 512}; x.header((1ull << 48) | 2); x.name(L"m2", 0, 9, 1); x.name(L"M2~1", 0, 9, 2); x.finish();
+            return true;
+        }, &running, {}, [&](MftFile&& file) { std::wstring key = file.name; files[key] = std::move(file); return true; });
+        const auto& a = files[L"a.txt"];
+        check(complete && files.size() == 3 && a.links.size() == 1 && a.links[0].parent == 7 &&
+              a.links[0].name == L"b.txt" && a.size == 3,
+              "file record yields one primary name plus each distinct hard link");
+        check(files[L"dir"].links.empty(), "directories never report hard links");
+        const auto& m = files[L"m1"];
+        check(m.links.size() == 1 && m.links[0].name == L"m2" && m.links[0].parent == 9 && m.size == 5,
+              "hard link names in extension records are attached to their base file");
     }
     return failures ? 1 : 0;
 }

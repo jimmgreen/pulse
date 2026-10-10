@@ -140,11 +140,16 @@ int main(int argc, char** argv) {
             for (const auto id : {StringId::LanguageZhTW, StringId::SettingsAutoUpdate,
                                   StringId::SettingsAutoUpdateDesc, StringId::UpdateDescManual,
                                   StringId::SettingsUiFontSize, StringId::UiFontLarger,
-                                  StringId::ListThumbnailBadges, StringId::ListThumbnailBadgesDesc})
+                                  StringId::ListThumbnailBadges, StringId::ListThumbnailBadgesDesc,
+                                  StringId::ContextOrderHintRow, StringId::SystemGroupNodeModules,
+                                  StringId::HelpViewMode, StringId::HelpContextMenu})
                 newest &= !Get(id).empty();
         }
         SetLanguage(L"zh-TW");
         newest &= Get(StringId::SettingsAutoUpdate) == L"\u81EA\u52D5\u6AA2\u67E5\u66F4\u65B0";  // 自動檢查更新
+        SetLanguage(L"en-US");
+        newest &= Get(StringId::SystemGroupNodeModules) == L"Development dependencies";
+        newest &= Get(StringId::HelpContextMenu) == L"Open the context menu";
         passed &= Report("newest string ids load in every language", newest);
     }
     SetLanguage(L"zh-CN");

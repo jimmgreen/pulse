@@ -4,8 +4,11 @@
 #include "app_prompts.h"
 #include "vertical_tabs.h"
 #include "tab_shortcuts.h"
+#include "explorer_shortcuts.h"
 #include "app_updates.h"
 #include "app_internal.h"
+#include "app_input.h"
+#include "app_hover.h"
 #include "app_column_view.h"
 #include "details_column_menu.h"
 #include "../ui/lumatext_renderer.h"
@@ -20,6 +23,7 @@
 #include "../common/text_format.h"
 #include "../common/path_utils.h"
 #include "../common/diagnostics_exporter.h"
+#include "../common/runtime_log.h"
 #include "snapshot_patch.h"
 #include "session.h"
 #include "context_menu.h"
@@ -81,6 +85,7 @@ bool UpdateSplitterDrag(AppState& s, int mx, int my) {
     return true;
 }
 void ClearDropFeedback(AppState& s) {
+    s.dropLaunchProgram.clear();
     s.dropRow = -1;
     s.dropPaneIndex = -1;
     s.dropHeader = false;
@@ -141,6 +146,21 @@ std::wstring ResolveHeaderDropFolder(const std::vector<std::wstring>& sources) {
     return {};
 }
 
+// The program a file row hands dropped items to: an .exe/.com/.bat/.cmd, or a
+// shortcut to one, as in Explorer. Shortcut targets were resolved by the
+// listing worker, so DragOver reads only the snapshot.
+static std::wstring DropLaunchProgramAt(const app::Tab& tab, int index) {
+    const auto& entry = tab.EntryAt(index);
+    if (entry.is_dir || entry.change_record_only || !entry.recycle_path.empty()) return {};
+    if (ui::LooksLikeFolderShortcut(entry.name)) {
+        return !entry.link_target.empty() && !entry.link_target_is_dir &&
+                ui::IsDropLaunchProgram(entry.link_target)
+            ? entry.link_target : std::wstring();
+    }
+    std::wstring full = EntryFullPath(tab, index);
+    return ui::IsDropLaunchProgram(full) ? full : std::wstring();
+}
+
 // Resolves the drop target under pt (client coords), updates feedback state,
 // and returns the DROPEFFECT_* to report back. Also drives the 800ms
 // spring-loaded folder enter and Esc-back.
@@ -155,6 +175,7 @@ DWORD ResolveDropTarget(AppState& s, const std::vector<std::wstring>& sources,
     s.dropTray = false;
     s.dropQuickAccess = false;
     s.dropDestDir.clear();
+    s.dropLaunchProgram.clear();
     s.dropBadge.clear();
     s.dropBadgeMove = false;
     if (sources.empty() || !(allowed & (DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK)))
@@ -176,6 +197,9 @@ DWORD ResolveDropTarget(AppState& s, const std::vector<std::wstring>& sources,
     if (!tab) return DROPEFFECT_NONE;
 
     std::wstring destName;
+    const bool file_row = hit.region == ui::HitTestResult::Row && hit.index >= 0 &&
+        tab->snapshot && hit.index < (int)tab->EntryCount() && !tab->EntryAt(hit.index).is_dir;
+    const std::wstring launch_program = file_row ? DropLaunchProgramAt(*tab, hit.index) : std::wstring();
     if (hit.region == ui::HitTestResult::Row && hit.index >= 0 &&
         tab->snapshot && hit.index < (int)tab->EntryCount() &&
         tab->EntryAt(hit.index).is_dir) {
@@ -183,6 +207,13 @@ DWORD ResolveDropTarget(AppState& s, const std::vector<std::wstring>& sources,
             !tab->EntryAt(hit.index).recycle_path.empty()) return DROPEFFECT_NONE;
         std::wstring full = EntryFullPath(*tab, hit.index);
         if (full.empty()) return DROPEFFECT_NONE;
+        // The dragged folder's own row neither accepts the drop nor
+        // spring-opens: pausing on it right after the drag starts is common.
+        if (ui::DropIntoOwnFolder(sources, full)) {
+            s.springRow = -1;
+            InvalidateRect(s.hwnd, nullptr, FALSE);
+            return DROPEFFECT_NONE;
+        }
         s.dropDestDir = full;
         s.dropRow = hit.index;
         s.dropPaneIndex = hit.pane_index;
@@ -199,6 +230,27 @@ DWORD ResolveDropTarget(AppState& s, const std::vector<std::wstring>& sources,
             NavigateTo(s, full);
             return DROPEFFECT_NONE;
         }
+    } else if (!launch_program.empty()) {
+        // Items dropped on a program open with it ("用 X 打开"); nothing is
+        // copied or moved, so the source never deletes on a COPY result.
+        s.springRow = -1;
+        const DWORD effect = (allowed & DROPEFFECT_COPY) ? DROPEFFECT_COPY
+            : (allowed & DROPEFFECT_LINK) ? DROPEFFECT_LINK : DROPEFFECT_NONE;
+        // A program is not handed itself (its row or its shortcut's target).
+        if (effect == DROPEFFECT_NONE || ui::DropIntoOwnFolder(sources, launch_program) ||
+            ui::DropIntoOwnFolder(sources, EntryFullPath(*tab, hit.index))) {
+            InvalidateRect(s.hwnd, nullptr, FALSE);
+            return DROPEFFECT_NONE;
+        }
+        s.dropLaunchProgram = launch_program;
+        s.dropRow = hit.index;
+        s.dropPaneIndex = hit.pane_index;
+        s.dropBadge = std::wstring(l10n::Pick(L"用 ", L"Open with ")) +
+            fs::StripLnkSuffix(tab->EntryAt(hit.index).name) + l10n::Pick(L" 打开", L"");
+        s.dropBadgeX = (float)pt.x;
+        s.dropBadgeY = (float)pt.y;
+        InvalidateRect(s.hwnd, nullptr, FALSE);
+        return effect;
     } else if (hit.region == ui::HitTestResult::BreadcrumbSegment && !hit.path.empty()) {
         s.dropDestDir = hit.path;
         s.dropBreadcrumb = hit.index;
@@ -314,6 +366,17 @@ DWORD ResolveDropTarget(AppState& s, const std::vector<std::wstring>& sources,
         InvalidateRect(s.hwnd, nullptr, FALSE);
         return DROPEFFECT_NONE;
     }
+    // A folder released on its own row (or into its own subtree) is not a
+    // target: Explorer shows "no drop" there, and the move would fail.
+    if (!s.dropDestDir.starts_with(L"pulse:") && ui::DropIntoOwnFolder(sources, s.dropDestDir)) {
+        s.dropRow = -1;
+        s.dropPaneIndex = -1;
+        s.dropBreadcrumb = -1;
+        s.dropSidebar = -1;
+        s.dropDestDir.clear();
+        InvalidateRect(s.hwnd, nullptr, FALSE);
+        return DROPEFFECT_NONE;
+    }
 
     DWORD effect = ui::ComputeDropEffect(key_state, sources.front(), s.dropDestDir,
                                         allowed & (DROPEFFECT_COPY | DROPEFFECT_MOVE),
@@ -343,6 +406,7 @@ DWORD DropExecute(AppState& s, const std::vector<std::wstring>& sources,
     if (s.trayDragOut) allowed &= DROPEFFECT_COPY;
     DWORD effect = ResolveDropTarget(s, sources, pt, key_state, allowed, preferred_effect);
     std::wstring dest = s.dropDestDir;
+    const std::wstring launch_program = s.dropLaunchProgram;
     bool tray = s.dropTray;
     const bool header = s.dropHeader;
     const int header_pane = s.dropPaneIndex;
@@ -350,6 +414,13 @@ DWORD DropExecute(AppState& s, const std::vector<std::wstring>& sources,
     ClearDropFeedback(s);
     s.springEntered = false;
     if (effect == DROPEFFECT_NONE || !(effect & allowed)) return DROPEFFECT_NONE;
+
+    if (!launch_program.empty()) {
+        // Launched on the ops open thread, in the program's own folder.
+        std::wstring folder = fs::ParentPath(fs::NormalizePath(launch_program));
+        s.ops.OpenProgramIn(launch_program, folder, ui::DropLaunchArguments(sources));
+        return effect;
+    }
 
     if (pin_quick_access) {
         std::vector<std::wstring> folders;
@@ -413,6 +484,7 @@ DWORD DropExecute(AppState& s, const std::vector<std::wstring>& sources,
     }
     if (dest.empty() || fs::IsVirtualPath(dest) || !(effect & allowed) ||
         (effect != DROPEFFECT_COPY && effect != DROPEFFECT_MOVE)) return DROPEFFECT_NONE;
+    if (ui::DropIntoOwnFolder(sources, dest)) return DROPEFFECT_NONE;
 
     // Archive managers (7-Zip, WinRAR, Bandizip) drag out of a temporary
     // folder that they delete as soon as the drop returns, while conflicts are
@@ -540,6 +612,9 @@ bool PointInList(const AppState& s, int mx, int my) {
 }
 
 void ResetMarquee(AppState& s) {
+    if (s.marqueeAutoScroll && s.hwnd) KillTimer(s.hwnd, kTimerMarqueeScroll);
+    s.marqueeAutoScroll = false;
+    s.marqueeSelectionDirty = false;
     s.marqueePending = false;
     s.marqueeActive = false;
     s.marqueeAdditive = false;
@@ -549,48 +624,59 @@ void ResetMarquee(AppState& s) {
     s.blankClickGeneration = 0;
 }
 
+POINT MarqueeStartOnScreen(const AppState& s) {
+    POINT start = s.marqueeStart;
+    if (const app::Tab* tab = s.pane ? s.pane->ActiveTab() : nullptr) {
+        start.x -= static_cast<LONG>(std::lround(tab->scroll_x - s.marqueeOriginScrollX));
+        start.y -= static_cast<LONG>(std::lround(tab->scroll_y - s.marqueeOriginScrollY));
+    }
+    return start;
+}
+
+D2D1_RECT_F MarqueeDisplayRect(const AppState& s) {
+    const POINT start = MarqueeStartOnScreen(s);
+    return D2D1::RectF(static_cast<float>(std::min(start.x, s.marqueeCur.x)),
+                       static_cast<float>(std::min(start.y, s.marqueeCur.y)),
+                       static_cast<float>(std::max(start.x, s.marqueeCur.x)),
+                       static_cast<float>(std::max(start.y, s.marqueeCur.y)));
+}
+
+// Bug 4: items are tested in content space, so rows scrolled out of view stay
+// selected and the start stays anchored to the item where the drag began.
 void ApplyMarqueeSelection(AppState& s) {
+    s.marqueeSelectionDirty = false;
     app::Tab* tab = ActiveTab(s);
     if (!tab || !tab->snapshot) return;
     const int n = static_cast<int>(tab->EntryCount());
     const D2D1_RECT_F list = ListRect(s);
-    const float left = static_cast<float>(std::min(s.marqueeStart.x, s.marqueeCur.x));
-    const float top = static_cast<float>(std::min(s.marqueeStart.y, s.marqueeCur.y));
-    const float right = static_cast<float>(std::max(s.marqueeStart.x, s.marqueeCur.x));
-    const float bottom = static_cast<float>(std::max(s.marqueeStart.y, s.marqueeCur.y));
-    const float clipL = std::max(left, list.left);
-    const float clipT = std::max(top, list.top);
-    const float clipR = std::min(right, list.right);
-    const float clipB = std::min(bottom, list.bottom);
+    const POINT start = MarqueeStartOnScreen(s);
+    // The pointer end stops at the list edge (auto-scroll brings more in);
+    // the start end may lie far off screen.
+    const float curX = std::clamp(static_cast<float>(s.marqueeCur.x), list.left, list.right);
+    const float curY = std::clamp(static_cast<float>(s.marqueeCur.y), list.top, list.bottom);
+    const float left = std::min(static_cast<float>(start.x), curX);
+    const float top = std::min(static_cast<float>(start.y), curY);
+    const float right = std::max(static_cast<float>(start.x), curX);
+    const float bottom = std::max(static_cast<float>(start.y), curY);
 
     ++tab->selection_revision;
     tab->all_selected = false;
     tab->selected.clear();
     if (s.marqueeAdditive) tab->selected = s.marqueeBase;
 
-    if (n > 0 && clipR > clipL && clipB > clipT) {
-        ui::PaneViewModel pane;
-        app::FillPaneViewModel(pane, *s.pane, &s.places);
-        const auto [first, last] = s.renderer.VisibleRangeInPane(pane, FocusedPaneRect(s));
-        const D2D1_RECT_F marquee = D2D1::RectF(clipL, clipT, clipR, clipB);
-        for (int view = first; view >= 0 && view <= last; ++view) {
-            const D2D1_RECT_F item = s.renderer.ItemRectInPane(pane, FocusedPaneRect(s), view);
-            if (item.right <= marquee.left || item.left >= marquee.right ||
-                item.bottom <= marquee.top || item.top >= marquee.bottom) continue;
-            const int source = pane.SourceIndex(view);
-            if (source >= 0) tab->selected.insert(source);
-        }
+    ui::PaneViewModel pane;
+    app::FillPaneViewModel(pane, *s.pane, &s.places);
+    if (n > 0 && right > left && bottom > top) {
+        std::vector<int> hits;
+        s.renderer.ItemsInRectInPane(pane, FocusedPaneRect(s), D2D1::RectF(left, top, right, bottom), hits);
+        for (const int source : hits) tab->selected.insert(source);
     }
 
     if (tab->selected.empty()) {
         tab->selected_index = -1;
         return;
     }
-    ui::PaneViewModel focusPane;
-    app::FillPaneViewModel(focusPane, *s.pane, &s.places);
-    int focus = s.renderer.ItemFromPointInPane(focusPane, FocusedPaneRect(s),
-                                               static_cast<float>(s.marqueeCur.x),
-                                               static_cast<float>(s.marqueeCur.y));
+    int focus = s.renderer.ItemFromPointInPane(pane, FocusedPaneRect(s), curX, curY);
     if (tab->selected.contains(focus)) tab->selected_index = focus;
     else tab->selected_index = *tab->selected.begin();
     if (tab->selection_anchor < 0) tab->selection_anchor = tab->selected_index;
@@ -598,6 +684,101 @@ void ApplyMarqueeSelection(AppState& s) {
         tab->all_selected = true;
         tab->selected.clear();
     }
+}
+
+namespace {
+// Scroll speed in pixels per millisecond for a pointer `beyond` pixels past
+// the edge zone: about 125 px/s at the edge, up to 3750 px/s far outside.
+// Time-based, so uneven frame or timer intervals do not change the speed.
+float MarqueeScrollSpeed(float beyond, float scale) {
+    return std::clamp(beyond * 0.022f, 0.125f * scale, 3.75f * scale);
+}
+
+// Signed distance past the auto-scroll zone on each axis (0 = inside).
+void MarqueeEdgeOverflow(const AppState& s, float& dx, float& dy) {
+    const D2D1_RECT_F list = ListRect(s);
+    const float zone = 12.0f * s.scale;   // a maximized window has no room below the list
+    const float x = static_cast<float>(s.marqueeCur.x), y = static_cast<float>(s.marqueeCur.y);
+    dx = dy = 0.0f;
+    if (y < list.top + zone) dy = y - (list.top + zone);
+    else if (y > list.bottom - zone) dy = y - (list.bottom - zone);
+    if (x < list.left + zone) dx = x - (list.left + zone);
+    else if (x > list.right - zone) dx = x - (list.right - zone);
+}
+
+void StopMarqueeAutoScroll(AppState& s) {
+    if (s.marqueeAutoScroll && s.hwnd) KillTimer(s.hwnd, kTimerMarqueeScroll);
+    s.marqueeAutoScroll = false;
+}
+
+// Requests the next frame: on the display clock when the pump runs.
+void RequestMarqueeFrame(AppState& s) {
+    if (s.framePump.Running()) s.framePump.Arm();
+    else if (s.hwnd) InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+} // namespace
+
+void UpdateMarqueeAutoScroll(AppState& s) {
+    float dx = 0.0f, dy = 0.0f;
+    if (s.marqueeActive) MarqueeEdgeOverflow(s, dx, dy);
+    const app::Tab* tab = ActiveTab(s);
+    const bool horizontal = tab && tab->view_mode == ui::ViewMode::List;
+    const bool want = s.marqueeActive && (horizontal ? dx != 0.0f : dy != 0.0f);
+    if (want == s.marqueeAutoScroll || !s.hwnd) return;
+    if (!want) { StopMarqueeAutoScroll(s); return; }
+    s.marqueeAutoScroll = true;
+    s.marqueeScrollLast = std::chrono::steady_clock::now();
+    // The timer keeps frames coming while the pointer rests (no mouse moves).
+    SetTimer(s.hwnd, kTimerMarqueeScroll, 16, nullptr);
+    RequestMarqueeFrame(s);
+}
+
+void TickMarqueeAutoScroll(AppState& s) {
+    if (!s.marqueeActive || !ActiveTab(s) || (GetKeyState(VK_LBUTTON) & 0x8000) == 0) {
+        StopMarqueeAutoScroll(s);
+        return;
+    }
+    RequestMarqueeFrame(s);
+}
+
+// Called by Render once per frame before the view model is built.
+void UpdateMarqueeFrame(AppState& s) {
+    if (s.marqueeAutoScroll) {
+        app::Tab* tab = ActiveTab(s);
+        if (!s.marqueeActive || !tab || (GetKeyState(VK_LBUTTON) & 0x8000) == 0) {
+            StopMarqueeAutoScroll(s);
+        } else {
+            // The pointer may rest outside the window; follow it without mouse moves.
+            POINT cursor{};
+            if (GetCursorPos(&cursor) && ScreenToClient(s.hwnd, &cursor)) s.marqueeCur = cursor;
+            const auto now = std::chrono::steady_clock::now();
+            const float elapsed = static_cast<float>(std::clamp(
+                std::chrono::duration<double, std::milli>(now - s.marqueeScrollLast).count(), 0.0, 50.0));
+            s.marqueeScrollLast = now;
+            float dx = 0.0f, dy = 0.0f;
+            MarqueeEdgeOverflow(s, dx, dy);
+            const bool horizontal = tab->view_mode == ui::ViewMode::List;
+            const float over = horizontal ? dx : dy;
+            if (over == 0.0f) {
+                StopMarqueeAutoScroll(s);
+            } else {
+                if (s.scrollAnimating) CancelScrollAnimation(s);
+                float& position = horizontal ? tab->scroll_x : tab->scroll_y;
+                const float before = position;
+                const float step = MarqueeScrollSpeed(std::abs(over), s.scale) * elapsed;
+                position += over < 0.0f ? -step : step;
+                ClampScroll(s);
+                s.scrollTargetX = tab->scroll_x;
+                s.scrollTargetY = tab->scroll_y;
+                if (position != before) {
+                    s.marqueeSelectionDirty = true;
+                    RefreshScrolledHover(s);
+                    MaybePrefetchSearchPage(s);
+                }
+            }
+        }
+    }
+    if (s.marqueeSelectionDirty && s.marqueeActive) ApplyMarqueeSelection(s);
 }
 
 void HandleListRowClick(AppState& s, int index, bool ctrl, bool shift) {
@@ -876,8 +1057,6 @@ void TickTabTransitions(AppState& s) {
     }
 }
 
-void UpdateSmoothScroll(AppState& s);
-
 void StartSmoothScroll(AppState& s, float delta, bool horizontal) {
     app::Tab* tab = ActiveTab(s);
     if (!tab) return;
@@ -911,7 +1090,7 @@ void StartSmoothScroll(AppState& s, float delta, bool horizontal) {
     MaybePrefetchSearchPage(s);
 }
 
-void UpdateSmoothScroll(AppState& s) {
+void UpdateSmoothScroll(AppState& s, const HoverPointerApi& api) {
     if (!s.scrollAnimating) return;
     app::Tab* tab = ActiveTab(s);
     if (!tab) { s.scrollAnimating = false; return; }
@@ -922,6 +1101,7 @@ void UpdateSmoothScroll(AppState& s) {
     s.scrollLastUpdateTime = now;
 
     float& position = s.scrollHorizontal ? tab->scroll_x : tab->scroll_y;
+    const float previous = position;
     const float target = s.scrollHorizontal ? s.scrollTargetX : s.scrollTargetY;
     const float remaining = target - position;
     if (std::abs(remaining) <= 0.35f) {
@@ -935,6 +1115,11 @@ void UpdateSmoothScroll(AppState& s) {
         position += remaining * response;
     }
     ClampScroll(s);
+    if (position != previous) {
+        // Wheel during a marquee: the band grows with the scrolled content.
+        if (s.marqueeActive) s.marqueeSelectionDirty = true;
+        RefreshScrolledHover(s, api);
+    }
 }
 
 LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -1679,7 +1864,9 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                     s->marqueeActive = true;
                     s->marqueePending = false;
                 }
-                if (s->marqueeActive) ApplyMarqueeSelection(*s);
+                // Applied once per frame in Render (UpdateMarqueeFrame).
+                if (s->marqueeActive) s->marqueeSelectionDirty = true;
+                UpdateMarqueeAutoScroll(*s);
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
@@ -1926,35 +2113,13 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         ui::WindowViewModel vm = BuildVm(*s);
         D2D1_RECT_F rect = D2D1::RectF(0, 0, (float)s->compositor.Width(), (float)s->compositor.Height());
         ui::HitTestResult hit = s->renderer.HitTest(vm, rect, (float)mx, (float)my);
-        const int newRegion = static_cast<int>(hit.region);
-        if (newRegion != s->hoverRegion || hit.index != s->hoverControlIndex ||
-            hit.sub_index != s->hoverSubIndex ||
-            hit.pane_index != s->hoverPaneIndex) {
-            ApplyHoverTarget(*s, hit);
-            if (hit.region == ui::HitTestResult::SidebarItem && fs::IsUncPath(hit.path))
-                RequestUncProbe(*s, hit.path);
+        const bool target_changed = static_cast<int>(hit.region) != s->hoverRegion ||
+            hit.index != s->hoverControlIndex || hit.sub_index != s->hoverSubIndex ||
+            hit.pane_index != s->hoverPaneIndex;
+        if (target_changed && hit.region == ui::HitTestResult::SidebarItem && fs::IsUncPath(hit.path))
+            RequestUncProbe(*s, hit.path);
+        if (UpdatePointerHover(*s, hit, POINT{mx, my}))
             InvalidateRect(hwnd, nullptr, FALSE);
-        }
-        s->sidebarScrollbarHot = hit.region == ui::HitTestResult::Scrollbar && hit.sub_index == 2;
-        int newHover = (hit.region == ui::HitTestResult::Row ||
-                        hit.region == ui::HitTestResult::RowStar ||
-                        hit.region == ui::HitTestResult::RowFolderSize ||
-                        hit.region == ui::HitTestResult::RowNewTab ||
-                        hit.region == ui::HitTestResult::ChangeBadge ||
-                        hit.region == ui::HitTestResult::RowMore) ? hit.index : -1;
-        if (newHover != s->hoverRow || hit.pane_index != s->hoverPaneIndex) {
-            s->hoverRow = newHover;
-            s->hoverPaneIndex = hit.pane_index;
-            s->ctxHoverSince = GetTickCount64();
-            if (newHover < 0) s->ctxHoverPrefetched.clear();
-            InvalidateRect(hwnd, nullptr, FALSE);
-        }
-        int newCrumb = (hit.region == ui::HitTestResult::BreadcrumbSegment) ? hit.index : -1;
-        UpdateChangeHover(*s, hit, POINT{mx, my});
-        if (newCrumb != s->breadcrumbHover) {
-            s->breadcrumbHover = newCrumb;
-            InvalidateRect(hwnd, nullptr, FALSE);
-        }
         D2D1_RECT_F content = s->renderer.ContentRect((float)s->compositor.Width(), (float)s->compositor.Height());
         float extra = 0.0f;
         if (app::Tab* tab = ActiveTab(*s); tab) {
@@ -2268,6 +2433,7 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 }
             }
         } else if (hit.region == ui::HitTestResult::Tab && hit.index >= 0) {
+            pulse::ArmTabDoubleClick(*s, static_cast<size_t>(hit.index));
             SwitchTab(*s, hit.index);
             s->tabDragPending = true;
             s->tabDragging = false;
@@ -2900,6 +3066,8 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 (GetKeyState(VK_MENU) & 0x8000) == 0 ? tab : nullptr;
             s->blankClickGeneration = tab ? tab->view_generation : 0;
             s->marqueeStart = s->marqueeCur = POINT{ mx, my };
+            s->marqueeOriginScrollX = tab ? tab->scroll_x : 0.0f;
+            s->marqueeOriginScrollY = tab ? tab->scroll_y : 0.0f;
             s->marqueeBase.clear();
             if (tab && ctrl) {
                 tab->MaterializeSelection();
@@ -2933,6 +3101,13 @@ LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPA
         ui::WindowViewModel vm = BuildVm(*s, false);
         D2D1_RECT_F rect = D2D1::RectF(0, 0, (float)s->compositor.Width(), (float)s->compositor.Height());
         ui::HitTestResult hit = s->renderer.HitTest(vm, rect, (float)mx, (float)my);
+        pulse::diagnostics::runtime::Event("file_double_click", {
+            {"row_hit", hit.region == ui::HitTestResult::Row},
+            {"details_view", double_tab && double_tab->view_mode == ui::ViewMode::Details},
+            {"column_layout", double_tab && double_tab->column_layout},
+            {"has_index", hit.index >= 0},
+            {"item_index", hit.index >= 0 ? static_cast<uint64_t>(hit.index) : 0}});
+        if (pulse::HandleTabDoubleClick(*s, hit)) return 0;
         if ((hit.region == ui::HitTestResult::Pane || hit.region == ui::HitTestResult::None) &&
             PointInList(*s, mx, my) &&
             (hit.pane_index < 0 || PaneAtSlot(*s, hit.pane_index) == s->pane)) {
@@ -3660,7 +3835,10 @@ LRESULT HandleMouseWheel(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         ui::WindowViewModel wheelVm = BuildVm(*s);
         D2D1_RECT_F wheelRect = D2D1::RectF(0, 0, (float)s->compositor.Width(), (float)s->compositor.Height());
         ui::HitTestResult wheelHit = s->renderer.HitTest(wheelVm, wheelRect, (float)pt.x, (float)pt.y);
-        if (HandleColumnStripWheel(*s, wheelVm, wheelHit, GET_WHEEL_DELTA_WPARAM(wParam))) return 0;
+        if (HandleColumnStripWheel(*s, wheelVm, wheelHit, GET_WHEEL_DELTA_WPARAM(wParam))) {
+            RefreshScrolledHover(*s);
+            return 0;
+        }
         const D2D1_RECT_F sidebarRc = s->renderer.SidebarRect(wheelRect.right, wheelRect.bottom);
         // Tray stack first: the panel lives inside the sidebar rect, so the
         // sidebar branch below would swallow every wheel event over it.
@@ -3716,12 +3894,14 @@ LRESULT HandleMouseWheel(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         }
         // Tray deck: wheel over the panel pages the icon window (handled above,
         // ahead of the sidebar branch that contains it).
-        if (wheelHit.pane_index >= 0) {
+        // A marquee belongs to the focused pane: the wheel scrolls it there.
+        const bool marquee = s->marqueeActive || s->marqueePending;
+        if (wheelHit.pane_index >= 0 && !marquee) {
             if (app::Pane* p = PaneAtSlot(*s, wheelHit.pane_index)) FocusPane(*s, p);
         }
         int delta = GET_WHEEL_DELTA_WPARAM(wParam);
         app::Tab* wheelTab = ActiveTab(*s);
-        if ((GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL) != 0) {
+        if ((GET_KEYSTATE_WPARAM(wParam) & MK_CONTROL) != 0 && !marquee) {
             if (wheelTab) {
                 const int direction = delta > 0 ? -1 : 1;
                 const int next = std::clamp(ui::ViewModeIndex(wheelTab->view_mode) + direction, 0, 7);
@@ -3748,6 +3928,33 @@ LRESULT HandleMouseWheel(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         return 0;
 }
 
+// Shift+F10 / Apps key: the item menu under the focused item, otherwise the
+// folder background menu at the list's top-left corner.
+void ShowKeyboardContextMenu(AppState& s) {
+    app::Tab* tab = ActiveTab(s);
+    if (!tab || !s.hwnd) return;
+    const D2D1_RECT_F list = ListRect(s);
+    POINT pt{ static_cast<LONG>(list.left + 24.0f * s.scale), static_cast<LONG>(list.top + 12.0f * s.scale) };
+    const bool items = !SelectedFullPaths(*tab).empty();
+    if (items && tab->selected_index >= 0) {
+        EnsureRowVisible(s, *tab, tab->selected_index);
+        ui::PaneViewModel pane;
+        app::FillPaneViewModel(pane, *s.pane, &s.places);
+        const int view = pane.ViewIndex(tab->selected_index);
+        if (view >= 0) {
+            const D2D1_RECT_F item = s.renderer.ItemRectInPane(pane, FocusedPaneRect(s), view);
+            if (item.bottom > item.top) {
+                pt.x = static_cast<LONG>(std::clamp(item.left + 24.0f * s.scale, list.left, list.right));
+                pt.y = static_cast<LONG>(std::clamp(item.bottom, list.top, list.bottom));
+            }
+        }
+    }
+    ClientToScreen(s.hwnd, &pt);
+    if (items) ShowItemContextMenu(s, pt);
+    else ShowBackgroundContextMenu(s, pt);
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
 LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
         if (wParam == VK_ESCAPE && s->settings.menu_drag_item() >= 0) {
@@ -3767,15 +3974,55 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         bool handled = true;
 
+        auto switchToTab = [&](std::optional<size_t> target) {
+            if (!target || *target == s->window_tabs.active) return;
+            if (s->renameIndex >= 0) HideRenameOverlay(*s, false);
+            if (!s->tagRenameId.empty()) HideTagRenameOverlay(*s, false);
+            if (s->filterEditing) HideFilterEditor(*s, true);
+            HideAddressEditor(*s, false);
+            SetFocus(s->hwnd);
+            SwitchTab(*s, *target);
+        };
+        // Bug 3: File Explorer's keys first (explorer_shortcuts.h).
+        const app::ExplorerKeyCommand explorer =
+            app::ExplorerShortcut(static_cast<UINT>(wParam), ctrl, shift, alt);
+
         if (app::IsTabShortcut(static_cast<UINT>(wParam), ctrl, shift, alt)) {
-            const auto target = app::TabShortcutTarget(s->window_tabs, shift);
-            if (target && *target != s->window_tabs.active) {
-                if (s->renameIndex >= 0) HideRenameOverlay(*s, false);
-                if (!s->tagRenameId.empty()) HideTagRenameOverlay(*s, false);
-                if (s->filterEditing) HideFilterEditor(*s, true);
-                HideAddressEditor(*s, false);
-                SetFocus(s->hwnd);
-                SwitchTab(*s, *target);
+            switchToTab(app::TabShortcutTarget(s->window_tabs, shift));
+        } else if (explorer.action != app::ExplorerKeyAction::None) {
+            using A = app::ExplorerKeyAction;
+            switch (explorer.action) {
+            case A::Delete: DeleteSelected(*s, explorer.shift); break;
+            case A::MarkTarget: MarkTargetPane(*s); break;
+            case A::NewFolder: CreateNewItem(*s, true); break;
+            case A::Search:
+                if (IsAddressSearchResults(tab)) ShowAddressSearch(*s);
+                else ShowFilterEditor(*s);
+                break;
+            case A::TabNumber:
+                switchToTab(app::NthVisibleTab(app::VisibleTabIndices(s->window_tabs), explorer.index));
+                break;
+            case A::Layout: {
+                static constexpr app::LayoutPreset kPresets[] = {
+                    app::LayoutPreset::Single, app::LayoutPreset::TwoVertical,
+                    app::LayoutPreset::Three, app::LayoutPreset::FourGrid};
+                ApplyLayoutPreset(*s, kPresets[explorer.index]);
+                break;
+            }
+            case A::ViewMode: SetViewMode(*s, ui::ViewModeFromIndex(explorer.index)); break;
+            case A::Tag: {
+                app::Tab* t = ActiveTab(*s);
+                if (t && explorer.index < static_cast<int>(s->places.tags.size())) {
+                    const auto tag_id=s->places.tags[static_cast<size_t>(explorer.index)].id;
+                    auto apply=[tag_id](AppState& v){if(auto* current=ActiveTab(v)) ToggleTagForSelection(v,tag_id,SelectedFullPaths(*current));};
+                    if(!DeferContentSelection(*s,apply)) apply(*s);
+                }
+                break;
+            }
+            case A::Back: GoBack(*s); break;
+            case A::ContextMenu: ShowKeyboardContextMenu(*s); break;
+            case A::Maximize: ShowWindow(hwnd, IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE); break;
+            case A::None: break;
             }
         } else if (ctrl && !shift && !alt && wParam == L'B') {
             ToggleSidebarCollapsed(*s);
@@ -3786,31 +4033,13 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             else ShowAddressSearch(*s);
         } else if (ctrl && wParam == L'P') {
             ShowOmnibar(*s, OmnibarMode::Project);
-        } else if (ctrl && shift && wParam >= L'1' && wParam <= L'7') {
-            app::Tab* t = ActiveTab(*s);
-            const int tag_index = static_cast<int>(wParam - L'1');
-            if (t && tag_index < static_cast<int>(s->places.tags.size())) {
-                const auto tag_id=s->places.tags[static_cast<size_t>(tag_index)].id;
-                auto apply=[tag_id](AppState& v){if(auto* current=ActiveTab(v)) ToggleTagForSelection(v,tag_id,SelectedFullPaths(*current));};
-                if(!DeferContentSelection(*s,apply)) apply(*s);
-            }
         } else if (ctrl && shift && wParam == L'F') {
             ShowAdvancedSearch(*s);
         } else if (ctrl && wParam == L'F') {
             if (IsAddressSearchResults(tab)) ShowAddressSearch(*s);
             else ShowFilterEditor(*s);
-        } else if (ctrl && wParam == L'D') {
-            MarkTargetPane(*s);
         } else if (wParam == VK_F6) {
             CycleFocus(*s);
-        } else if (ctrl && wParam == L'1') {
-            ApplyLayoutPreset(*s, app::LayoutPreset::Single);
-        } else if (ctrl && wParam == L'2') {
-            ApplyLayoutPreset(*s, app::LayoutPreset::TwoVertical);
-        } else if (ctrl && wParam == L'3') {
-            ApplyLayoutPreset(*s, app::LayoutPreset::Three);
-        } else if (ctrl && wParam == L'4') {
-            ApplyLayoutPreset(*s, app::LayoutPreset::FourGrid);
         } else if (ctrl && alt && wParam == L'C') {
             TransferToTarget(*s, false);
         } else if (ctrl && alt && wParam == L'X') {
@@ -3844,7 +4073,7 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             DeleteSelected(*s, (GetKeyState(VK_SHIFT) & 0x8000) != 0);
         } else if (wParam == VK_RETURN) {
             OpenSelected(*s);
-        } else if (wParam == VK_BACK || (alt && wParam == VK_UP)) {
+        } else if (alt && wParam == VK_UP) {
             GoUp(*s);
         } else if (alt && wParam == VK_LEFT) {
             GoBack(*s);

@@ -4,6 +4,7 @@
 #include "../common/json_utils.h"
 #include "../common/utf8_file.h"
 #include <algorithm>
+#include <iterator>
 #include <aclapi.h>
 #include <cwctype>
 #include <sddl.h>
@@ -161,6 +162,12 @@ std::wstring ConfigJson(const IndexConfig& config) {
         if (i) out += L",";
         out += L"\"" + config.system_groups[i] + L"\"";
     }
+    // Groups this release offered; later groups start at their default.
+    out += L"],\n  \"system_exclusion_known\":[";
+    for (size_t i = 0; i < std::size(kSystemExclusionGroups); ++i) {
+        if (i) out += L",";
+        out += L"\"" + std::wstring(kSystemExclusionGroups[i]) + L"\"";
+    }
     out += L"]\n}\n";
     return out;
 }
@@ -211,6 +218,12 @@ bool IndexConfig::IsPathExcluded(std::wstring_view path) const {
 bool IsSystemExclusionGroup(std::wstring_view group) {
     return std::any_of(std::begin(kSystemExclusionGroups), std::end(kSystemExclusionGroups),
                        [&](const wchar_t* known) { return group == known; });
+}
+
+bool HidesNodeModules(const IndexConfig& config) {
+    return config.exclude_system &&
+        std::find(config.system_groups.begin(), config.system_groups.end(), L"node_modules") !=
+            config.system_groups.end();
 }
 
 std::vector<std::wstring> SystemExclusionPaths(const IndexConfig& config) {
@@ -337,6 +350,21 @@ bool LoadIndexConfigFrom(const std::wstring& path, const std::wstring& default_i
                 std::find(loaded.system_groups.begin(), loaded.system_groups.end(), group) ==
                     loaded.system_groups.end())
                 loaded.system_groups.push_back(std::move(group));
+        // A group introduced after this file was written was never offered to
+        // the user, so it keeps its default. Before "system_exclusion_known"
+        // existed, node_modules was always hidden.
+        std::vector<std::wstring> known;
+        if (json.find(L"\"system_exclusion_known\"") != std::wstring::npos)
+            known = pulse::json::ExtractStringArray(json, L"system_exclusion_known");
+        else
+            known = {L"windows", L"temp", L"old", L"programdata"};
+        const IndexConfig defaults;
+        for (const auto& group : defaults.system_groups) {
+            if (std::find(known.begin(), known.end(), group) == known.end() &&
+                std::find(loaded.system_groups.begin(), loaded.system_groups.end(), group) ==
+                    loaded.system_groups.end())
+                loaded.system_groups.push_back(group);
+        }
     }
     config = std::move(loaded);
     return true;

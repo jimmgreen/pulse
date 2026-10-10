@@ -28,6 +28,10 @@ bool TickSidebarPeek(AppState& s, ULONGLONG now);
 void CloseSidebarPeek(AppState& s);
 // Middle click closes a tab (title strip or sidebar row).
 bool HandleTabMiddleClick(AppState& s, int x, int y);
+// Double-click close (Settings > Startup and close): a press on a tab arms it,
+// the double-click on that same tab closes it. Returns true when it closed one.
+void ArmTabDoubleClick(AppState& s, size_t index);
+bool HandleTabDoubleClick(AppState& s, const ui::HitTestResult& hit);
 // Middle click on a folder (list row, sidebar place, breadcrumb) opens it in a
 // background tab; Ctrl+middle click opens it in the foreground.
 bool HandleFolderMiddleClick(AppState& s, int x, int y);

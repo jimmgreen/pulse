@@ -190,6 +190,7 @@ struct GlobalSearchWindow::Impl {
             if (!search_pinyin) request.needle = L"nopinyin: " + request.needle;
             if (current_only) request.path_prefix = current_folder;
             filenames.SearchAsync(request, generation);
+            providers.ExpectNetwork(!network.Roots().empty());
             network.SearchAsync(request, generation);
             SetTimer(hwnd, kConnectTimeout, 10000, nullptr);
         }
@@ -218,6 +219,7 @@ struct GlobalSearchWindow::Impl {
     }
     void AcceptFilenames(bool from_network, uint32_t id, index::SearchResult result) {
         if (id != generation || content_mode) return;
+        if (from_network && result.error && !providers.network_expected) return;
         providers.Accept(from_network, result.error);
         if (from_network) network_result = std::move(result);
         else local_result = std::move(result);

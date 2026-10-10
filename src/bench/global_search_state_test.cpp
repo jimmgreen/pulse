@@ -38,5 +38,28 @@ int main() {
     check(!timeout.Error() && !timeout.Busy(), "late network success resolves its own timeout");
     GlobalProviderStatus empty; empty.Accept(false, 0); empty.Accept(true, 0);
     check(!empty.Error() && !empty.Busy(), "two successful empty providers remain a true empty result");
+    // 1236: without network roots the agent is optional and cannot fail the search.
+    for (bool network_first : {false, true}) {
+        GlobalProviderStatus optional; optional.ExpectNetwork(false);
+        check(optional.Busy(), "optional network still waits for the local index");
+        if (network_first) { optional.Accept(true, ERROR_CONNECTION_ABORTED); optional.Accept(false, 0); }
+        else { optional.Accept(false, 0); optional.Accept(true, ERROR_CONNECTION_ABORTED); }
+        check(!optional.Error() && !optional.Busy(),
+              "unreachable network agent without network roots never reports search incomplete");
+    }
+    GlobalProviderStatus optional_timeout; optional_timeout.ExpectNetwork(false);
+    optional_timeout.Timeout();
+    check(optional_timeout.Error() == ERROR_TIMEOUT && !optional_timeout.Busy(),
+          "optional network keeps a silent local index timeout visible");
+    GlobalProviderStatus optional_local; optional_local.ExpectNetwork(false);
+    optional_local.Accept(false, ERROR_INVALID_DATA);
+    check(optional_local.Error() == ERROR_INVALID_DATA, "local index failures stay visible");
+    GlobalProviderStatus expected; expected.ExpectNetwork(true);
+    expected.Accept(false, 0); expected.Accept(true, ERROR_CONNECTION_ABORTED);
+    check(expected.Error() == ERROR_CONNECTION_ABORTED,
+          "configured network roots still report an unreachable agent");
+    check(CountsProviderError(false, false) && CountsProviderError(false, true) &&
+          CountsProviderError(true, true) && !CountsProviderError(true, false),
+          "main window counts network errors only when network results were expected");
     return ok ? 0 : 1;
 }

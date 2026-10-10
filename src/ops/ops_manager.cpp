@@ -858,7 +858,8 @@ uint64_t OpsManager::Submit(OpRequest req) {
 void OpsManager::OpenWith(const std::wstring& path) {
     QueueItem item;
     item.open_path = path;
-    item.open_verb = L"open";
+    // Some registered defaults expose "edit" or a delegated default action.
+    // Leave the verb empty so Windows selects the association's default.
     EnqueueOpen(std::move(item));
 }
 
@@ -882,7 +883,7 @@ void OpsManager::ShowProperties(const std::vector<std::wstring>& paths) {
 void OpsManager::ExecuteVerb(const std::wstring& path, const std::wstring& verb) {
     QueueItem item;
     item.open_path = path;
-    item.open_verb = verb.empty() ? L"open" : verb;
+    item.open_verb = verb;
     // 打开方式… / 属性 are interactive dialogs: they must answer the click even
     // when a slow open is still in flight, so they go to the front of the queue.
     EnqueueOpen(std::move(item), true);
@@ -1320,12 +1321,17 @@ void OpsManager::EnqueueOpen(QueueItem item, bool front) {
         item.enqueued_at = GetTickCount64();
         if (front) open_queue_.push_front(std::move(item));
         else open_queue_.push_back(std::move(item));
+        const auto& queued = front ? open_queue_.front() : open_queue_.back();
+        diagnostics::runtime::Event("shell_open_queued", {{"task", queued.seq},
+            {"default_verb", queued.open_verb.empty()}, {"explicit_app", !queued.open_file.empty()},
+            {"path_chars", static_cast<uint64_t>(queued.open_path.size())},
+            {"queue_size", static_cast<uint64_t>(open_queue_.size())}});
     }
     open_cv_.notify_one();
 }
 
 void OpsManager::OpenThread() {
-    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    const HRESULT com_hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     for (;;) {
         QueueItem item;
         {
@@ -1444,28 +1450,35 @@ void OpsManager::OpenThread() {
             continue;
         }
 
-        // Dedicated open thread: never wait behind transfers. Omit
-        // SEE_MASK_NOASYNC so association handoff does not block this worker.
-        SHELLEXECUTEINFOW sei{ sizeof(sei) };
-        sei.hwnd = dialog_owner;
-        sei.lpVerb = item.open_verb.empty() ? L"open" : item.open_verb.c_str();
-        // Like openas / properties above: the shell and association handlers
-        // reject \\?\ paths and answer "Windows cannot find" (#55).
+        // Association work stays on the dedicated STA, never the UI/transfer
+        // thread. Complete handoff here because the idle worker does not pump.
+        const ULONGLONG started = GetTickCount64();
+        diagnostics::runtime::Event("shell_open_begin", {{"task", item.seq},
+            {"default_verb", item.open_verb.empty()}, {"explicit_app", !item.open_file.empty()},
+            {"queue_ms", item.enqueued_at ? started - item.enqueued_at : 0},
+            {"com_hresult", static_cast<uint32_t>(com_hr)}});
         const std::wstring shell_path = pulse::path::StripExtendedPathPrefix(item.open_path);
-        sei.lpFile = item.open_file.empty() ? shell_path.c_str() : item.open_file.c_str();
-        sei.lpParameters = item.open_args.empty() ? nullptr : item.open_args.c_str();
-        // Like Explorer, start an opened item in its own folder: batch files
-        // and many tools resolve relative paths against the working directory.
-        const std::wstring item_dir =
-            item.open_file.empty() ? OpenItemWorkingDirectory(item.open_path) : std::wstring();
-        sei.lpDirectory = !item.open_file.empty() ? shell_path.c_str()
-                          : item_dir.empty()      ? nullptr
-                                                  : item_dir.c_str();
-        sei.nShow = SW_SHOWNORMAL;
-        sei.fMask = SEE_MASK_FLAG_NO_UI;
-        ShellExecuteExW(&sei); // best effort; errors surface via the OS association UI
+        const std::wstring target = item.open_file.empty() ? shell_path : item.open_file;
+        const std::wstring item_dir = item.open_file.empty()
+            ? OpenItemWorkingDirectory(item.open_path) : shell_path;
+        const auto result = LaunchShellItem(target, item.open_verb, item.open_args, item_dir, dialog_owner);
+        diagnostics::runtime::Event("shell_open_result", {{"task", item.seq},
+            {"default_verb", item.open_verb.empty()}, {"explicit_app", !item.open_file.empty()},
+            {"error", result.error}, {"cancelled", result.error == ERROR_CANCELLED},
+            {"process_id", result.process_id}, {"shell_mask", result.mask},
+            {"elapsed_ms", GetTickCount64() - started}});
+        if (result.error && result.error != ERROR_CANCELLED) {
+            wchar_t detail[512]{};
+            FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr,
+                result.error, 0, detail, ARRAYSIZE(detail), nullptr);
+            const auto message = std::wstring(item.open_verb.empty()
+                ? l10n::Pick(L"无法使用默认应用打开此文件。", L"Could not open this file with its default application.")
+                : l10n::Pick(L"无法完成此打开操作。", L"Could not complete this open operation.")) +
+                L"\n" + target + L"\n" + detail + L" (" + std::to_wstring(result.error) + L")";
+            MessageBoxW(dialog_owner, message.c_str(), L"Pulse", MB_OK | MB_ICONERROR);
+        }
     }
-    CoUninitialize();
+    if (SUCCEEDED(com_hr)) CoUninitialize();
 }
 
 void OpsManager::RecordShellDone(uint32_t id, uint32_t hr, bool cancelled, std::wstring error) {
@@ -1549,6 +1562,7 @@ void OpsManager::ConfigureShellCallbacks() {
             m.text = std::move(it.text);
             m.clsid = std::move(it.clsid);
             m.handler = std::move(it.handler);
+            m.mnemonic = it.mnemonic;
             out.push_back(std::move(m));
         }
         OnCtxItems(id, std::move(out), partial, std::move(slow_clsids));
@@ -1892,6 +1906,19 @@ void OpsManager::RunTransfer(const OpRequest& req, uint64_t task_id) {
     const auto root_name = [&](const std::wstring& source) {
         return req.new_name.empty() ? FileName(source) : req.new_name;
     };
+    // Reject a folder targeted at itself or its own subtree before any fast
+    // rename or authorization probe: MoveFileEx reports that as access denied.
+    if (failure.empty() && !req.dest_dir.empty()) {
+        for (const auto& source : req.sources) {
+            std::wstring folder = source;
+            while (folder.size() > 3 && (folder.back() == L'\\' || folder.back() == L'/')) folder.pop_back();
+            if (!folder.empty() && StartsWithPath(req.dest_dir, folder)) {
+                failure_hr = HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER);
+                failure = l10n::Pick(L"不能将目录复制或移动到其自身内部：", L"Cannot copy or move a folder into itself: ") + source;
+                break;
+            }
+        }
+    }
     // Decide before the fast move mutates any source. A whole-request retry
     // after partial completion could duplicate copies or move items twice.
 #ifndef PULSE_ELEVATED_HOST

@@ -1,0 +1,172 @@
+[
+  {
+    "id": "M04-006",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\shell_context_lifetime_audit.log；pulse_shell_context_lifetime_audit_test exit 0，24 PASS；4次真实CtxSessionThreadImpl查询中阻塞fake handler，Close已被pump消费后放行，均在2秒等待预算内退出并回收events；不调用实际Shell handler。"
+  },
+  {
+    "id": "M04-007",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\shell_context_lifetime_audit.log；pulse_shell_context_lifetime_audit_test exit 0，24 PASS；分别注入第1/第2 CreateEvent失败（CreateThread调用数0）、CreateThread失败与成功Join；所有取得events均回收。生产pulse_shell与test均构建通过；未运行Application Verifier/ASan。"
+  },
+  {
+    "id": "M14-002",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\menu_identity_m14.log；exit 0；真实FluentMenu拒绝展开flyout换snapshot；controller fake sink交换/平移/删除ID通过，另见com_menu_identity_m14.log。生产RefreshOpenCtxMenu只在ReplaceItems=true提交NotePatchedDisplay；未调用真实Shell命令。"
+  },
+  {
+    "id": "M14-003",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\ui_module_audit_m14.log；exit 0；私有desktop；Home/End/Ctrl+A/reverse EM_SETSEL后Shift-click及水平滚动点击通过；未穷举IME/RTL"
+  },
+  {
+    "id": "M14-004",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\view_hit_bounds_m14.log；exit 0；行/列优先末尾空白命中拒绝，未操控桌面"
+  },
+  {
+    "id": "M14-005",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\ui_module_audit_m14.log；exit 0；私有desktop；warm renderer缓存在100/125/90%与fresh一致"
+  },
+  {
+    "id": "M14-006",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\menu_query_identity_m14.log；exit 0；normal/extended预取、pending/ready替换、handler配置更新和stale reply拒绝；fake Shell operations"
+  },
+  {
+    "id": "M14-007",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\ui_module_audit_m14.log；exit 0；私有desktop；advanced-search生产Render注入D2DERR_RECREATE_TARGET恢复；不是物理驱动reset"
+  },
+  {
+    "id": "M14-008",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\ui_module_audit_m14.log；exit 0；私有desktop；五个真实颜色EDIT在100/150/200%重复present失败后可编辑undo/同步"
+  },
+  {
+    "id": "M14-009",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\ui_module_audit_m14.log；exit 0；私有desktop；1000次Bloom绘制Factory引用计数不增长"
+  },
+  {
+    "id": "M15-001",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\preview_pipeline_audit.log；exit 0；OFFLINE/RECALL_ON_OPEN/RECALL_ON_DATA_ACCESS即使PINNED也阻止读取；local pinned正常"
+  },
+  {
+    "id": "M15-002",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\pulse_folder_budget_audit_test.log；exit 0；生产folder_listing.cpp+测试API适配器；FindNext第五项ACCESS_DENIED => Partial/ReadFailure；另pipeline日志4000显示/4001总数正确"
+  },
+  {
+    "id": "M15-003",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\pulse_folder_budget_audit_test.log；exit 0；生产folder_listing.cpp+测试API适配器；受控时钟/1000条平铺FindNext，预算到达前<20条停止；单个阻塞系统调用本身不可抢占"
+  },
+  {
+    "id": "M15-004",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\preview_format_audit.log；exit 0；隔离fixture；索引PSD降采样正确RGB平均、palette排列不改变结果、原尺寸颜色保持"
+  },
+  {
+    "id": "M15-005",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\preview_format_audit.log；exit 0；隔离fixture；RTF page/sect后的正文保留、隐藏destination跳过、字符cap完整性"
+  },
+  {
+    "id": "M15-006",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\preview_format_audit.log；exit 0；隔离fixture；xlsx date1904 absent/0/1/true和分数日期；1900 serial1/59/60/61"
+  },
+  {
+    "id": "M15-007",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\preview_format_audit.log；exit 0；隔离fixture；CSV/XLSX单字段cap、notebook字符/行cap及完整短输出"
+  },
+  {
+    "id": "M15-008",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\pulse_preview_ack_audit_test.log；exit 0；实际生产host request loop+测试专属MapViewOfFile失败、实际命名管道连续2请求ID保持；无ACK义务，无真实用户文件"
+  },
+  {
+    "id": "M15-009",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\preview_pipeline_audit.log；exit 0；100帧顺序、重复、逆向、loop、随机索引及disposal 1/2/3颜色正确；大源canvas返回gif-resource-limit。增量前缀处理经代码复核，未做吞吐基准"
+  },
+  {
+    "id": "M15-010",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\preview_format_audit.log；exit 0；隔离fixture；PSB缺RLE表、超大行长度、截断行拒绝"
+  },
+  {
+    "id": "M15-011",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\preview_format_audit.log；exit 0；隔离fixture；ZIP空/comment/fake EOCD/SFX及ZIP64 locator边界"
+  },
+  {
+    "id": "M16-001",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\pulse_preview_view_audit_test.log；exit 0；20列表格300px viewport，横向Scroll/Reveal后真实HitTest可达最后列；生产Shift+wheel/WM_MOUSEHWHEEL接线；未录制实际触控板输入。 初始夹具错误原日志保存在pulse_preview_view_audit_initial_failure.log。 用户桌面补验：20列Markdown横向滚动到末列；搜索Value20高亮且1/1，改为Value1自动返回首列。见docs/module-audit-preview-ui-2026-10-06.md。"
+  },
+  {
+    "id": "M16-002",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\pulse_preview_view_audit_test.log；exit 0；真实WARP绘制header-only CSV，无match/当前match像素hash不同，非模型替代。 初始夹具错误原日志保存在pulse_preview_view_audit_initial_failure.log。 用户桌面补验：04-pinned-header.csv含固定文字表头和两行数字；搜索HeaderNeedle高亮且1/1，Esc恢复布局。实测发现并修复Table/Tree搜索栏高度遗漏；新版Table已复测，Tree桌面复测待完成。定向入口14 PASS/0 FAIL，见bench_data/quick-preview-structured-search-audit.log。"
+  },
+  {
+    "id": "M16-003",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\pulse_preview_view_audit_test.log；exit 0；真实Markdown HitTest逐点扫描emoji代理对/组合字符不分裂；纯文本同根因metrics.length已编入最新pulse，本轮已补独立纯文本命中回归。 初始夹具错误原日志保存在pulse_preview_view_audit_initial_failure.log。 本轮补验：bench_data/quick-preview-unicode-audit.log，exit 0，8 PASS/0 FAIL；实际 QuickPreviewWindow/Render/DirectWrite HitTestText 在私有桌面检查普通文本 emoji、补充汉字、组合音标及希伯来文字，100/150/200% 布局缩放均不产生禁止的簇内偏移且可达关键首尾边界。未执行用户桌面鼠标拖选、系统 DPI 切换或剪贴板粘贴验收。 用户桌面补验：实际空格打开unicode.txt，拖选、Ctrl+C、Ctrl+F后Ctrl+V，可访问性读回完整的😀及𠮷é，搜索1/1且光标可见；不是仅截图验证。未切换系统DPI。"
+  },
+  {
+    "id": "M16-004",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\pulse_preview_view_audit_test.log；exit 0；真实host MakeTreeDocument -> TreeView.CurrentValue -> 独立XmlLite解析，含&、引号、<及字符引用tab的属性语义保持。 初始夹具错误原日志保存在pulse_preview_view_audit_initial_failure.log。"
+  },
+  {
+    "id": "M16-005",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\pulse_preview_view_audit_test.log；exit 0；Cambria Math真实BuildMathLayout，a hspace{10pt} b相对ab宽差在100/150/200%准确；不依赖DC transform，未新增上下标pt矩阵。 初始夹具错误原日志保存在pulse_preview_view_audit_initial_failure.log。"
+  },
+  {
+    "id": "M16-006",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\pulse_markdown_metadata_audit_test.log；exit 0；受控慢resolver立即返回、新generation不接旧结果、销毁不join；双worker+队列上限。真实断网盘/内核永久阻塞未实测"
+  },
+  {
+    "id": "M17-001",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\pulse_audit_preview_test--thumbnail-sheet.log；exit 0；WARP真实bitmap首帧缓存+非首页Failed经生产Draw仍Failed；顺序sheet请求及stale结果回归通过。首轮夹具漏LRU iterator造成AV，补完整fixture后通过"
+  },
+  {
+    "id": "M17-002",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\quick_preview_audit.log；pulse --quick-preview-audit exit 0；私有desktop真实QuickLook三个pack回调在隐藏窗口均推进cache epoch；frame/schema eviction清理已测，未真实安装pack。"
+  },
+  {
+    "id": "M17-003",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\quick_preview_audit.log；pulse --quick-preview-audit exit 0；私有desktop真实QuickLook Render与普通消息loop，无人工重画即可在150ms后队列重试；cache deadline筛选涵盖当前到期/旧key/已pending。handler watchdog使用同一deadline timer已编入，但未注入真实阻塞COM provider。"
+  },
+  {
+    "id": "M17-004",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\quick_preview_audit.log；pulse --quick-preview-audit exit 0；私有desktop真实QuickLook Render，Table输入选非首sheet后fake-cache终局Failed，ResetAnimation后仍保留索引1且停止加载。 本轮新增真实Render定向回归：失败后返回首表、重新选择失败表并接受成功payload通过；入口14 PASS/0 FAIL。缺失第二工作表的实机夹具已生成但桌面操作尚未完成。"
+  },
+  {
+    "id": "M17-005",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\pulse_preview_pan_lifetime_audit_test.log；exit 0；私有desktop真实InputMain消息循环+fake hooks；启动前Enable/Disable、Disable保留至匹配release、线程退出；不装系统hook或注入鼠标。首轮timer适配未调回调已修测试adapter"
+  },
+  {
+    "id": "M17-006",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\pulse_waveform_cancel_audit_test.log；exit 0；假ffmpeg probe与stdout卡住取消分别297/282ms返回且零publish；2worker上限经实现复核，未模拟MF永久阻塞"
+  },
+  {
+    "id": "M13-007",
+    "status": "未完成：无DLL完整批次热调用已验证，冷COM激活失败待定位",
+    "evidence": "bench_data/shell-tag-com-warm-v16.log：--warm-only 28 PASS/0 FAIL exit 0；真实SHCreateDefaultContextMenu/InvokeCommand，32标签、3/1000文件完整批次，混合全加/全有全移、重复请求与Execute不重切、后续Initialize/SetSelection拒绝、父级非标签调用拒绝、对象存活/撤销代际边界。1000文件Shell路径解析+绑定+菜单总计1437ms，Invoke125ms，Invoke到完整收集125ms，BatchHandler模型16ms（GetTickCount64粗粒度，未计ADS后台写入/持久化）。bench_data/shell-tag-registry-nodll-v2.log：72 PASS/0 FAIL，9个Create与24个Set故障注入及清理重试。bench_data/cold-token/cold_registration.txt：读取/解析GUID、HKCR与当前token UserClasses路径均成功，非restricted Medium token；cold_unknown.txt：IUnknown冷CoCreateInstance=80040154，2s重试相同。bench_data/shell-tag-com-v13.log保留完整失败；实际Pulse冷启动未验收。初始化失败资源释放已改IAgileReference RAII，未注入CoInitializeEx失败；旧worker撤销测试使用100ms泵消息窗口，不声称覆盖永久卡死Shell。"
+  }
+]

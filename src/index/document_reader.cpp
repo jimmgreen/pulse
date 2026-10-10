@@ -1,6 +1,7 @@
 #include "document_reader.h"
 #include "document_protocol.h"
 #include "document_admission.h"
+#include "../common/runtime_log.h"
 #include <shlobj.h>
 #include <psapi.h>
 #include <algorithm>
@@ -245,7 +246,7 @@ private:
             metrics.attempt_cpu_us += end - attempt_cpu_start_;
         attempt_cpu_running_ = false;
     }
-    void CaptureFailure(DocumentReadMetrics& metrics, uint64_t stage, DWORD error) noexcept {
+    void CaptureFailureState(DocumentReadMetrics& metrics, uint64_t stage, DWORD error) noexcept {
         metrics.child_failure_stage = stage; // 1=request, 2=header, 3=body, 4=allocation, 5=completion, 6=begin.
         if (!process_.value) return;
         // A broken pipe may race the process exit. Wait only briefly for that
@@ -270,6 +271,19 @@ private:
             metrics.child_peak_private_bytes = (std::max)(metrics.child_peak_private_bytes, uint64_t{memory.PeakPagefileUsage});
             metrics.child_memory_known |= 2;
         }
+    }
+    void CaptureFailure(DocumentReadMetrics& metrics, uint64_t stage, DWORD error) noexcept {
+        CaptureFailureState(metrics, stage, error);
+        // Parent-side, numeric-only evidence. Pulse.Document.exe is short-lived
+        // and intentionally has no logger of its own: one runtime file per child
+        // would evict long-lived app/service logs from the shared retention.
+        const bool cancelled = error == ERROR_CANCELLED;
+        diagnostics::runtime::Event(cancelled ? "document_child_cancelled" : "document_child_failure", {
+            {"stage", stage}, {"error", error}, {"exit_known", metrics.child_exit_known},
+            {"exit_code", metrics.child_exit_code}, {"memory_known", metrics.child_memory_known},
+            {"peak_private_bytes", metrics.child_peak_private_bytes}},
+            cancelled ? diagnostics::runtime::Level::Info :
+            stage == 4 ? diagnostics::runtime::Level::Warning : diagnostics::runtime::Level::Error);
     }
     void CompleteRead(DocumentReadMetrics& metrics) {
         last_use_ = GetTickCount64();

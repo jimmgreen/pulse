@@ -109,6 +109,10 @@ bool FillStaticVerbFromKey(HKEY root, const std::wstring& verb_key, const std::w
     flags.has_subcommands = !subcommands.empty();
     flags.has_extended_subcommands_key = !ext_key.empty();
     if (!ipc::KeepStaticVerb(flags)) return false;
+    // AppliesTo is an AQS condition only the shell can evaluate against the
+    // item; Explorer hides the verb when it does not match. Not showing it is
+    // the safe side (e.g. *\shell\UpdateEncryptionSettingsWork).
+    if (RegValueExists(root, verb_key, L"AppliesTo")) return false;
 
     std::wstring display = ResolveIndirect(RegReadString(root, verb_key, L"MUIVerb"));
     if (display.empty()) display = RegReadString(root, verb_key, nullptr);
@@ -118,6 +122,7 @@ bool FillStaticVerbFromKey(HKEY root, const std::wstring& verb_key, const std::w
 
     out.verb = verb;
     out.display = StripMnemonics(display);
+    out.mnemonic = ipc::MenuMnemonic(display);
     out.app_path.clear();
     out.command = command;
     out.children.clear();
@@ -297,37 +302,67 @@ std::vector<StaticVerb> EnumerateStaticVerbs(const std::wstring& ext) {
         if (background) {
             CollectVerbsFrom(HKEY_CLASSES_ROOT, L"Directory\\Background\\shell", out, true,
                              true, &seen);
+        } else if (ext == ipc::kDriveVerbKey) {
+            // A drive's menu reads Drive and Folder only (as the handler side).
+            CollectVerbsFrom(HKEY_CLASSES_ROOT, L"Drive\\shell", out, true, false, &seen);
+            CollectVerbsFrom(HKEY_CLASSES_ROOT, L"Folder\\shell", out, true, false, &seen);
         } else {
             CollectVerbsFrom(HKEY_CLASSES_ROOT, L"Directory\\shell", out, true, false, &seen);
             CollectVerbsFrom(HKEY_CLASSES_ROOT, L"Folder\\shell", out, true, false, &seen);
             CollectVerbsFrom(HKEY_CLASSES_ROOT, L"AllFilesystemObjects\\shell", out, true,
                              false, &seen);
-            if (ext == ipc::kDriveVerbKey)
-                CollectVerbsFrom(HKEY_CLASSES_ROOT, L"Drive\\shell", out, true, false, &seen);
         }
         return DedupeStaticVerbs(std::move(out), {}, 48);
     }
     if (ext.size() < 2 || ext[0] != L'.') return out;
     const std::wstring ext_lower = ToLower(ext);
 
-    // UserChoice beats the HKCR default progid (matches Explorer).
-    std::wstring progid = RegReadString(HKEY_CURRENT_USER,
-        L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\" +
-            ext_lower + L"\\UserChoice",
-        L"ProgId");
+    // The ProgID the shell itself resolves for the type (its menu uses that
+    // one). Hand-reading UserChoice / HKCR\.ext diverges from it: .dwg with an
+    // empty UserChoice resolved to CADFile in Explorer but AutoCAD.Drawing.26
+    // here, so Pulse showed 打印 and a signature verb Explorer did not.
+    std::wstring progid;
+    {
+        wchar_t resolved[256]{};
+        DWORD cch = ARRAYSIZE(resolved);
+        if (SUCCEEDED(AssocQueryStringW(ASSOCF_NONE, ASSOCSTR_PROGID, ext_lower.c_str(),
+                                        nullptr, resolved, &cch)) &&
+            resolved[0] && _wcsicmp(resolved, ext_lower.c_str()) != 0)
+            progid = resolved;
+    }
+    if (progid.empty()) {
+        progid = RegReadString(HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\FileExts\\" +
+                ext_lower + L"\\UserChoice",
+            L"ProgId");
+    }
     if (progid.empty())
         progid = RegReadString(HKEY_CLASSES_ROOT, ext_lower, nullptr);
 
+    // Explorer's association order for a file; a verb name is taken from the
+    // first class that defines it.
+    std::unordered_set<std::wstring> seen;
     std::wstring default_exe_lower;
     if (!progid.empty()) {
         default_exe_lower = ToLower(CommandExePath(RegReadString(
             HKEY_CLASSES_ROOT, progid + L"\\shell\\open\\command", nullptr)));
-        CollectVerbsFrom(HKEY_CLASSES_ROOT, progid + L"\\shell", out, true, false, nullptr);
+        CollectVerbsFrom(HKEY_CLASSES_ROOT, progid + L"\\shell", out, true, false, &seen);
     }
     CollectVerbsFrom(HKEY_CLASSES_ROOT,
                      L"SystemFileAssociations\\" + ext_lower + L"\\shell", out, true, false,
-                     nullptr);
+                     &seen);
+    const std::wstring perceived = RegReadString(HKEY_CLASSES_ROOT, ext_lower, L"PerceivedType");
+    if (!perceived.empty()) {
+        CollectVerbsFrom(HKEY_CLASSES_ROOT,
+                         L"SystemFileAssociations\\" + ToLower(perceived) + L"\\shell", out,
+                         true, false, &seen);
+    }
+    // Verbs every file gets (解锁占用, 使用 ToDesk 快传文件, 添加到收藏夹 …).
+    CollectVerbsFrom(HKEY_CLASSES_ROOT, L"*\\shell", out, true, false, &seen);
+    CollectVerbsFrom(HKEY_CLASSES_ROOT, L"AllFilesystemObjects\\shell", out, true, false, &seen);
 
+    // Programs and scripts get no 打开方式 in Explorer.
+    if (!ipc::OffersOpenWith(ext_lower)) return out;
     CollectOpenWith(ext_lower, default_exe_lower, out);
 
     StaticVerb open_as;
@@ -382,30 +417,42 @@ bool GetW(const uint8_t*& p, const uint8_t* end, std::wstring& s) {
     return true;
 }
 
-constexpr uint32_t kStaticVerbCacheVersion = 2;
+// v3 appends each verb's access key after its command. v4 keeps that layout
+// but changes the content (shell-resolved ProgID, * / AllFilesystemObjects /
+// PerceivedType verbs), so older files are discarded and reseeded.
+// v5: drive verbs from Drive + Folder only; no 打开方式 for programs.
+constexpr uint32_t kStaticVerbCacheVersion = 5;
+constexpr uint32_t kStaticVerbCacheMinVersion = 5;
 
 void PutVerb(std::vector<uint8_t>& buf, const StaticVerb& v, int depth) {
     PutW(buf, v.verb);
     PutW(buf, v.display);
     PutW(buf, v.app_path);
     PutW(buf, v.command);
+    PutU32(buf, static_cast<uint32_t>(v.mnemonic));
     const uint32_t n = depth > 0 ? 0 : static_cast<uint32_t>(
         (std::min)(v.children.size(), static_cast<size_t>(ipc::kMaxSubmenuChildren)));
     PutU32(buf, n);
     for (uint32_t i = 0; i < n; ++i) PutVerb(buf, v.children[i], depth + 1);
 }
 
-bool GetVerb(const uint8_t*& p, const uint8_t* end, StaticVerb& v, int depth) {
+bool GetVerb(const uint8_t*& p, const uint8_t* end, StaticVerb& v, int depth, uint32_t version) {
     if (!GetW(p, end, v.verb) || !GetW(p, end, v.display) || !GetW(p, end, v.app_path) ||
         !GetW(p, end, v.command))
         return false;
+    v.mnemonic = 0;
+    if (version >= 3) {
+        uint32_t key = 0;
+        if (!GetU32(p, end, key) || key > 0xFFFF) return false;
+        v.mnemonic = static_cast<wchar_t>(key);
+    }
     uint32_t n = 0;
     if (!GetU32(p, end, n) || n > 16 || (depth > 0 && n != 0)) return false;
     v.children.clear();
     v.children.reserve(n);
     for (uint32_t i = 0; i < n; ++i) {
         StaticVerb child;
-        if (!GetVerb(p, end, child, depth + 1)) return false;
+        if (!GetVerb(p, end, child, depth + 1, version)) return false;
         v.children.push_back(std::move(child));
     }
     return true;
@@ -444,7 +491,8 @@ bool LoadMachineStaticVerbCache(std::unordered_map<std::wstring, std::vector<Sta
     if (p + 8 > end || memcmp(p, "PSVC", 4) != 0) return false;
     p += 4;
     uint32_t ver = 0, count = 0;
-    if (!GetU32(p, end, ver) || ver != kStaticVerbCacheVersion || !GetU32(p, end, count) ||
+    if (!GetU32(p, end, ver) || ver < kStaticVerbCacheMinVersion || ver > kStaticVerbCacheVersion ||
+        !GetU32(p, end, count) ||
         count > 8000)
         return false;
     for (uint32_t i = 0; i < count; ++i) {
@@ -455,7 +503,7 @@ bool LoadMachineStaticVerbCache(std::unordered_map<std::wstring, std::vector<Sta
         verbs.reserve(nverb);
         for (uint32_t k = 0; k < nverb; ++k) {
             StaticVerb v;
-            if (!GetVerb(p, end, v, 0)) return false;
+            if (!GetVerb(p, end, v, 0, ver)) return false;
             verbs.push_back(std::move(v));
         }
         if (!ext.empty()) out.emplace(std::move(ext), std::move(verbs));

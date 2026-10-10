@@ -20,6 +20,7 @@ struct StaticVerb {
     std::wstring app_path;  // non-empty => open-with entry: launch this exe
     std::wstring command;   // raw HKCR command template; CommandStore children need this
     std::vector<StaticVerb> children; // cascade flyout (SubCommands / ExtendedSubCommandsKey)
+    wchar_t mnemonic = 0;   // access key from the registry label ("&Edit"), 0 = none
 };
 
 // ext is ".dwg" (file), or a location key ":folder" / ":drive" / ":bg".

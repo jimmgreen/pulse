@@ -4,7 +4,7 @@
 
 ## 交付
 
-- 安装包：`C:\Users\SS\Desktop\pulse\dist\PulseSetup-1.0.32-memory3.exe`
+- 安装包：`<repo>\dist\PulseSetup-1.0.32-memory3.exe`
 - 大小：7,881,339 B（约 7.52 MiB）。
 - SHA-256：`AD0C08BF520D12D8E9C4234561A362144105A58F226D0074F1B6CC69BDBCEEE7`
 - 清单：`dist/PulseSetup-1.0.32-memory3.manifest.json`，包含七个主要输入二进制的大小/哈希与旧安装包哈希。

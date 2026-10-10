@@ -14,6 +14,11 @@ namespace {
 
 using pulse::json::ExtractObject;
 
+// 2: slow_ext only holds handlers the host proved hung (collect_hung). Files
+// written before that carry disables from the old "everyone still running
+// after 1 s" rule, which hid every healthy extension after three stalls.
+constexpr int kPrefsVersion = 2;
+
 int ClampCap(int v, int lo, int hi, int fallback) {
     if (v < lo || v > hi) return fallback;
     return v;
@@ -212,7 +217,9 @@ void ContextMenuPrefs::SetComDisabled(const std::wstring& key, bool on) {
 
 std::wstring ContextMenuPrefs::ToJson() const {
     std::wstring out;
-    out += L"{\n  \"version\":1,\n";
+    out += L"{\n  \"version\":";
+    out += std::to_wstring(kPrefsVersion);
+    out += L",\n";
     out += L"  \"explorer_cap\":";
     out += std::to_wstring(explorer_cap);
     out += L",\n  \"open_with_mru\":";
@@ -402,6 +409,30 @@ bool ContextMenuPrefs::FromJson(const std::wstring& json) {
     // Purge disable state older builds persisted for SendTo (#77): the
     // exemption above keeps it clear, so this migration is idempotent.
     slow_ext.erase(ipc::SendToHandlerCatalogKey());
+    migrated = false;
+    if (pulse::json::ExtractInt(json, L"version", 1) < kPrefsVersion) {
+        // Drop the old heuristic's verdicts (every entry there was recorded
+        // as a synthetic 1000 ms "timeout") and the per-type timings nothing
+        // reads. Explicit switches in "items" are the user's and stay.
+        for (auto it = slow_ext.begin(); it != slow_ext.end();) {
+            if (!ipc::IsHandlerCatalogKey(it->first)) {
+                it = slow_ext.erase(it);
+                continue;
+            }
+            it->second.slow_hits = 0;
+            it->second.timeout_hits = 0;
+            it->second.deferred = false;
+            it->second.disabled = false;
+            ++it;
+        }
+        // Explorer's 打开方式 flyout now stands in for Pulse's static row and
+        // follows the 打开方式 switch; older catalogs filed it as a COM row.
+        for (auto& item : seen) {
+            if (item.flyout && item.category == ipc::CtxMenuCategory::OpenWith)
+                item.from_com = false;
+        }
+        migrated = true;
+    }
     return true;
 }
 
@@ -528,6 +559,10 @@ bool ContextMenuPrefs::Load() {
         return false;
     }
     load_failed = false;
+    if (migrated) {
+        Save();
+        migrated = false;
+    }
     return true;
 }
 

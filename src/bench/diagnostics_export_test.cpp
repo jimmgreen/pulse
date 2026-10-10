@@ -185,6 +185,58 @@ void Run(const fs::path& root) {
     Check(!Export(root / L"many-source", root / L"many-export") &&
           Read(root / L"many-export" / L"diagnostics-manifest.json").find("\"error_code\":4") != std::string::npos,
           "file-count cap is explicit in manifest");
+
+    const auto support_source = root / L"support-source";
+    const auto support_runtime = support_source / L"Diagnostics" / L"Runtime";
+    fs::create_directories(support_runtime);
+    auto record = [](const char* utc, const char* component, const char* event, int error, int severity,
+                     const char* extra = "") {
+        return std::string("{\"schema\":1,\"utc\":\"") + utc + "\",\"tick_ms\":1,\"session\":1,\"pid\":7,\"tid\":1,\"seq\":1,"
+            "\"component\":\"" + component + "\",\"version\":\"1\",\"build\":\"fixture\",\"event\":\"" + event +
+            "\",\"severity\":" + std::to_string(severity) + extra + ",\"data\":{\"error\":" + std::to_string(error) + "}}\n";
+    };
+    std::string noisy;
+    for (int i = 0; i < 300; ++i)
+        noisy += record("2026-10-09T04:00:00.000Z", "index-service", "index_write_invalid_hierarchy", 13, 2);
+    Write(support_runtime / L"index-service-7.jsonl", noisy);
+    Write(support_runtime / L"index-service-7.critical.jsonl",
+        record("2026-10-09T03:00:00.000Z", "index-service", "index_write_invalid_hierarchy", 13, 2,
+               ",\"evidence\":\"first\",\"occurrences\":900") +
+        record("2026-10-09T04:00:00.000Z", "index-service", "index_write_invalid_hierarchy", 13, 2,
+               ",\"evidence\":\"last\",\"occurrences\":900"));
+    Write(support_runtime / L"app-8.jsonl",
+        record("2026-10-09T05:00:00.000Z", "app", "preview_client_failure", 109, 2) +
+        record("2026-10-09T05:30:00.000Z", "app", "navigation_end", 0, 0) +
+        record("2026-10-09T05:40:00.000Z", "app", "preview_client_cancelled", 1223, 0));
+    const auto support = root / L"support-export";
+    fs::create_directories(support);
+    pulse::diagnostics::ExportOptions support_options;
+    support_options.source_root = support_source.wstring();
+    support_options.destination = support.wstring();
+    support_options.support_report = true;
+    support_options.include_dumps = false;
+    std::wstring support_error;
+    Check(pulse::diagnostics::Export(support_options, &support_error), "support export with runtime failures succeeds");
+    const auto report = Read(support / L"support-report.json");
+    const auto newest = report.find("\"event\":\"preview_client_failure\"");
+    const auto repeated = report.find("\"event\":\"index_write_invalid_hierarchy\"");
+    Check(newest != std::string::npos && repeated != std::string::npos && newest < repeated,
+          "support report lists failure patterns newest first");
+    Check(repeated != std::string::npos &&
+          report.find("\"event\":\"index_write_invalid_hierarchy\"", repeated + 1) == std::string::npos,
+          "a repeating failure collapses into one pattern");
+    Check(report.find("{\"occurrences\":900,\"last\":") != std::string::npos &&
+          report.find("{\"occurrences\":1,\"last\":") != std::string::npos,
+          "pattern counts use aggregated critical occurrences");
+    Check(report.find("\"failure_patterns\":2") != std::string::npos &&
+          report.find("navigation_end") == std::string::npos && report.find("preview_client_cancelled") == std::string::npos,
+          "successful and cancelled events are not failure patterns");
+    Check(report.find("\"schema\":2") == 1, "support report schema is versioned for the pattern format");
+    const auto summary = Read(support / L"summary.txt");
+    Check(summary.find("Failure patterns: 2") != std::string::npos &&
+          summary.find("app/preview_client_failure  error=109  x1") != std::string::npos &&
+          summary.find("index-service/index_write_invalid_hierarchy  error=13  x900") != std::string::npos,
+          "summary names the newest failure patterns");
 }
 } // namespace
 

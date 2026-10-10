@@ -108,6 +108,8 @@ constexpr UINT WM_NETWORK_LIVE_SEARCH = WM_APP + 71;  // shared_ptr<LiveNetworkS
 constexpr UINT WM_SHELL_VERB_SEED = WM_APP + 70;
 constexpr UINT WM_EXIT_PULSE = WM_APP + 72;  // palette "Exit Pulse" (#57)  // ShellVerbSeed* (machine verb cache read off the UI thread)
 constexpr UINT kTimerUi = 1;
+// Scrolls the list while a marquee is dragged past its edge.
+constexpr UINT_PTR kTimerMarqueeScroll = 0x4D51;
 constexpr UINT WM_NETWORK_LOCATIONS = WM_APP + 73;
 constexpr UINT WM_ASSOC_CHANGED = WM_APP + 74;  // SHCNE_ASSOCCHANGED: default programs changed
 
@@ -183,7 +185,7 @@ struct AppState {
 
     app::WindowTabs window_tabs;
     app::Pane* pane = nullptr;          // focused leaf of the current layout tab
-    app::Pane* targetPane = nullptr;    // Ctrl+D marked destination
+    app::Pane* targetPane = nullptr;    // Ctrl+Alt+D marked destination
 
     fs::SnapshotStore store;
     app::WorkerPool worker;
@@ -276,6 +278,7 @@ struct AppState {
         bool local_ready = false;
         bool network_ready = false;
         bool network_snapshot = false; // Captured for this request, not global root configuration.
+        bool network_expected = true;  // Network roots or a live walk exist; else its failure is ignored.
         std::wstring live_network_root;  // #74: scope walked live instead of the network index
     };
     std::unordered_map<uint32_t, PendingIndexSearch> pendingIndexSearches;
@@ -373,6 +376,10 @@ struct AppState {
     bool tabDragging = false;
     int tabDragIndex = -1;               // window_tabs.items index of the dragged tab
     POINT tabDragStartPt{};
+    // Double-click close (pulse::HandleTabDoubleClick): the tab the last press
+    // landed on (strip tab or vertical tab row, never a close button) and when.
+    const void* tabPressTab = nullptr;
+    LONG tabPressTime = 0;
     int tabDragLastX = 0;
     float tabDragPressLeft = 0.0f;       // rest-slot left at press (for grab-offset follow)
     float tabDragFloatLeft = 0.0f;       // dragged tab left (px, cursor-delta driven)
@@ -560,6 +567,7 @@ struct AppState {
     ULONGLONG teachShownAt = 0;
     bool teachShownThisSession = false; // at most one tip per launch
     std::wstring dropDestDir;                 // resolved drop destination ("" = none/tray)
+    std::wstring dropLaunchProgram;           // program row that opens the dropped items
 
     // Spring-loaded folder enter during drag-over (ui.md §7.8).
     int springRow = -1;
@@ -754,6 +762,17 @@ struct AppState {
     POINT marqueeStart{};
     POINT marqueeCur{};
     std::unordered_set<int> marqueeBase;
+    // Tab scroll offset when the marquee started. marqueeStart is in that
+    // moment's pane pixels, so scrolling carries the start with the content.
+    float marqueeOriginScrollX = 0.0f;
+    float marqueeOriginScrollY = 0.0f;
+    // Edge auto-scroll is on. Frames follow the display clock (framePump);
+    // kTimerMarqueeScroll only keeps them coming when the pump is unavailable.
+    bool marqueeAutoScroll = false;
+    std::chrono::steady_clock::time_point marqueeScrollLast{};
+    // Pointer moved since the band was last applied; Render applies it once
+    // per frame instead of once per mouse message.
+    bool marqueeSelectionDirty = false;
 
     // Cut state mirrored into list rows (ui.md §5.2 rule 6: 55% opacity).
     std::vector<std::wstring> cutPaths;

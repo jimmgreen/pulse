@@ -71,6 +71,9 @@ private:
     HANDLE agent_process_ = nullptr;
     ULONGLONG last_spawn_tick_ = 0;  // guarded by request_mu_
     static constexpr ULONGLONG kRespawnBackoffMs = 5000;
+    // A freshly started agent creates its pipe only after loading its roots,
+    // and a busy agent briefly has no free instance; wait this long for either.
+    static constexpr ULONGLONG kOpenPipeWaitMs = 3000;
     // Must match the mutex created by RunAgent() in network_agent_main.cpp.
 };
 

@@ -310,7 +310,7 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
                                             row.right - 16.0f * scale_,
                                             row.top + 30.0f * scale_ + switch_h * 0.5f),
                                 L"", sw);
-            for (int g = 0; g < 6; ++g) {
+            for (int g = 0; g < kSystemGroupRows; ++g) {
                 const auto& chip = lay.index_system_chip[g];
                 if (chip.right <= chip.left) continue;
                 painter_.DrawBadge({ chip, pulse::l10n::Get(SystemGroupLabel(g)),
@@ -336,10 +336,10 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
                 dc->DrawLine(D2D1::Point2F(cx, cy + d * 0.8f), D2D1::Point2F(cx + 3.5f * scale_, cy - d * 0.6f),
                              brAccent_.get(), 1.3f * scale_);
             }
-            for (int g = 0; g < 6 && vm.settings_index_system_expanded; ++g) {
+            for (int g = 0; g < kSystemGroupRows && vm.settings_index_system_expanded; ++g) {
                 const auto& group = lay.index_system_group[g];
                 if (group.bottom <= group.top) continue;
-                const bool locked = g >= 4;
+                const bool locked = g >= kSystemGroupConfigurable;
                 const bool group_enabled = service && on && !locked;
                 MakeBrush(dc, theme.stroke_divider, brStrokeDivider_);
                 FillRect(dc, brStrokeDivider_.get(), group.left, group.top, group.right - group.left, 1.0f);
@@ -1067,6 +1067,7 @@ float MainRenderer::SettingsDestinationOffset(const WindowViewModel& vm, int set
     case I::SettingsStartupOpen: target=l.startup_open_card;break;
     case I::SettingsNewTabOpen: target=l.new_tab_open_card;break;
     case I::SettingsCloseLastTab: target=l.close_last_tab_row;break;
+    case I::SettingsCloseTabDoubleClick: target=l.close_tab_double_click_row;break;
     case I::SettingsConfirmDelete: target=l.confirm_delete_row;break;
     case I::SettingsOpenFolders: target=l.startup_row[2];break;
     case I::SettingsRowHeight: target=l.density_card;break;

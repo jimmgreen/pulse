@@ -8,15 +8,19 @@
 
 #include <windowsx.h>
 #include <commctrl.h>
+#include <imm.h>
 #include <uxtheme.h>
 #include <wincodec.h>
 #include <d2d1effects.h>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <cwctype>
+#include <string_view>
 
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "uxtheme.lib")
+#pragma comment(lib, "imm32.lib")
 
 namespace pulse::ui {
 
@@ -95,12 +99,19 @@ bool DisplayEqualItem(const FluentMenuItem& a, const FluentMenuItem& b) {
 void PatchItemCommands(FluentMenuItem& dest, const FluentMenuItem& src) {
     dest.command = src.command;
     dest.trailing_command = src.trailing_command;
+    dest.mnemonic = src.mnemonic;
     const size_t n = (std::min)(dest.children.size(), src.children.size());
     for (size_t i = 0; i < n; ++i)
         PatchItemCommands(dest.children[i], src.children[i]);
     const size_t ns = (std::min)(dest.quick_swatches.size(), src.quick_swatches.size());
-    for (size_t i = 0; i < ns; ++i)
+    for (size_t i = 0; i < ns; ++i) {
         dest.quick_swatches[i].command = src.quick_swatches[i].command;
+        dest.quick_swatches[i].mnemonic = src.quick_swatches[i].mnemonic;
+    }
+}
+
+wchar_t UpperKey(wchar_t key) {
+    return key ? static_cast<wchar_t>(std::towupper(key)) : 0;
 }
 
 } // namespace
@@ -211,6 +222,51 @@ int FluentMenuModel::HitTestRow(float y_px) const {
     return -1;
 }
 
+wchar_t MenuItemMnemonic(const FluentMenuItem& item) {
+    if (item.mnemonic) return UpperKey(item.mnemonic);
+    // "编辑(E)" / "打开方式(H)...": shell32's CJK "(&X)" after CleanMenuText.
+    std::wstring_view text = item.text;
+    while (!text.empty() && (text.back() == L'.' || text.back() == L'\x2026' || text.back() == L' '))
+        text.remove_suffix(1);
+    if (text.size() < 3) return 0;
+    const wchar_t open = text[text.size() - 3];
+    const wchar_t key = text[text.size() - 2];
+    const wchar_t close = text.back();
+    if (!((open == L'(' && close == L')') || (open == L'\xFF08' && close == L'\xFF09'))) return 0;
+    const bool ascii_key = (key >= L'A' && key <= L'Z') || (key >= L'a' && key <= L'z') ||
+                           (key >= L'0' && key <= L'9');
+    return ascii_key ? UpperKey(key) : 0;
+}
+
+std::vector<MenuMnemonicTarget> FindMenuMnemonic(const std::vector<FluentMenuItem>& items,
+                                                 wchar_t key_a, wchar_t key_b) {
+    const wchar_t a = UpperKey(key_a);
+    const wchar_t b = UpperKey(key_b);
+    auto matches = [&](wchar_t key) { return key != 0 && (key == a || key == b); };
+    std::vector<MenuMnemonicTarget> out;
+    for (size_t i = 0; i < items.size(); ++i) {
+        const FluentMenuItem& item = items[i];
+        if (!item.enabled) continue;
+        if ((item.command != 0 || !item.children.empty()) && matches(MenuItemMnemonic(item)))
+            out.push_back({ static_cast<int>(i), -1 });
+        for (size_t s = 0; s < item.quick_swatches.size(); ++s) {
+            const FluentMenuSwatch& swatch = item.quick_swatches[s];
+            if (swatch.command != 0 && matches(UpperKey(swatch.mnemonic)))
+                out.push_back({ static_cast<int>(i), static_cast<int>(s) });
+        }
+    }
+    return out;
+}
+
+size_t NextMenuMnemonicTarget(const std::vector<MenuMnemonicTarget>& targets, int row,
+                              int swatch) {
+    for (size_t i = 0; i < targets.size(); ++i) {
+        if (targets[i].row > row || (targets[i].row == row && targets[i].swatch > swatch))
+            return i;
+    }
+    return 0;
+}
+
 int FluentMenuModel::NextEnabled(int from, int dir) const {
     if (items_.empty()) return -1;
     int n = (int)items_.size();
@@ -264,6 +320,34 @@ void FluentMenu::SetRowHeightDip(float dip) {
     model_.SetRowHeightDip(dip);
     sub_model_.SetRowHeightDip(dip);
 }
+
+namespace {
+
+// Native menus take letters as access keys even while a Chinese or Japanese
+// IME is on: the IME never sees them, so no candidate window pops up behind
+// the menu. A command menu has nothing to type into, so for its lifetime the
+// input context is detached from the window keeping keyboard focus and from
+// the menu itself (a click focuses it), then handed back unchanged.
+class ImeSuspension {
+public:
+    ImeSuspension(HWND focus, HWND menu) : focus_(focus), menu_(menu) {
+        if (focus_ && focus_ != menu_) saved_ = ImmAssociateContext(focus_, nullptr);
+        if (menu_) ImmAssociateContextEx(menu_, nullptr, 0);
+    }
+    ~ImeSuspension() {
+        if (menu_ && IsWindow(menu_)) ImmAssociateContextEx(menu_, nullptr, IACE_DEFAULT);
+        if (focus_ && focus_ != menu_ && IsWindow(focus_)) ImmAssociateContext(focus_, saved_);
+    }
+    ImeSuspension(const ImeSuspension&) = delete;
+    ImeSuspension& operator=(const ImeSuspension&) = delete;
+
+private:
+    HWND focus_ = nullptr;
+    HWND menu_ = nullptr;
+    HIMC saved_ = nullptr;
+};
+
+} // namespace
 
 bool FluentMenu::EnsureWindow() {
     if (hwnd_) return true;
@@ -1140,6 +1224,62 @@ int FluentMenu::InvokeAt(const FluentMenuModel& model, int row, float client_x) 
     return item->command;
 }
 
+bool FluentMenu::HandleMnemonicKey(const MSG& msg) {
+    if (filter_fn_ || animating_out_ || !open_) return false;
+    if (msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN) return false;
+    if (GetKeyState(VK_CONTROL) & 0x8000) return false; // Ctrl+C etc. stay app shortcuts
+    UINT vk = static_cast<UINT>(msg.wParam);
+    // An active IME (Chinese/Japanese input in the window behind) reports
+    // VK_PROCESSKEY; menus take the physical key, as native menus do.
+    if (vk == VK_PROCESSKEY) vk = ImmGetVirtualKey(msg.hwnd);
+    wchar_t latin = 0;
+    if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9'))
+        latin = static_cast<wchar_t>(vk);
+    else if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9)
+        latin = static_cast<wchar_t>(L'0' + (vk - VK_NUMPAD0));
+    // The keyboard layout's own character covers non-Latin access keys.
+    const UINT mapped = MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR);
+    wchar_t layout = (mapped & 0x80000000u) ? 0 : static_cast<wchar_t>(mapped & 0xFFFF);
+    if (layout <= L' ') layout = 0;
+    if (!latin && !layout) return false; // navigation / function keys
+
+    // Keys go to the flyout only once it has a highlighted row, like native
+    // menus: a flyout merely opened by hovering leaves the parent current.
+    const bool in_sub = sub_parent_row_ >= 0 && sub_hover_ >= 0;
+    const FluentMenuModel& model = in_sub ? sub_model_ : model_;
+    const auto targets = FindMenuMnemonic(model.Items(), latin, layout);
+    if (targets.empty()) return true;
+    if (targets.size() == 1) {
+        const MenuMnemonicTarget target = targets.front();
+        const FluentMenuItem* item = model.At(target.row);
+        if (!item) return true;
+        if (target.swatch >= 0) {
+            result_ = item->quick_swatches[static_cast<size_t>(target.swatch)].command;
+            Dismiss();
+        } else if (!in_sub && !item->children.empty()) {
+            UpdateHover(target.row);
+            OpenSubmenu(target.row);
+            sub_hover_ = sub_model_.FirstEnabled();
+            if (RenderSub()) PresentSub(255);
+        } else if (item->command != 0) {
+            result_ = item->command;
+            Dismiss();
+        }
+        return true;
+    }
+    const size_t next = NextMenuMnemonicTarget(targets, in_sub ? sub_hover_ : hover_row_,
+                                               in_sub ? sub_hover_swatch_ : hover_swatch_);
+    if (in_sub) {
+        sub_hover_ = targets[next].row;
+        sub_hover_swatch_ = targets[next].swatch;
+        if (RenderSub()) PresentSub(255);
+    } else {
+        CloseSubmenu();
+        UpdateHover(targets[next].row, targets[next].swatch);
+    }
+    return true;
+}
+
 float FluentMenu::FilterHeaderPx() const {
     if (!filter_fn_ || external_edit_) return 0.0f;
     if (anchor_to_rect_) {
@@ -1490,6 +1630,8 @@ int FluentMenu::RunModalLoop() {
                             }
                         }
                         swallow = true;
+                    } else if (HandleMnemonicKey(msg)) {
+                        swallow = true;
                     } else if (filter_fn_ && !edit_ && !external_edit_) {
                         msg.hwnd = hwnd_;
                         TranslateMessage(&msg);
@@ -1623,7 +1765,12 @@ int FluentMenu::TrackPopup(POINT screen_pt, std::vector<FluentMenuItem> items,
     } else {
         HideFilterEdit();
     }
-    const int popup_result = RunModalLoop();
+    int popup_result = 0;
+    {
+        const bool command_menu = !filter_fn_ && !external_edit_;
+        ImeSuspension ime(command_menu ? GetFocus() : nullptr, command_menu ? hwnd_ : nullptr);
+        popup_result = RunModalLoop();
+    }
     if (external_edit_) RemoveWindowSubclass(external_edit_, ExternalFilterEditProc, 2);
     external_edit_ = nullptr;
     UpdateTooltip(-1);

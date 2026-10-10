@@ -808,6 +808,7 @@ void SendCtxItems(uint32_t session_id, const std::vector<CtxItemOut>& items,
         if (it.separator_after) item_flags |= CTX_ITEM_SEPARATOR_AFTER;
         if (it.has_children) item_flags |= CTX_ITEM_HAS_CHILDREN;
         if (it.child) item_flags |= CTX_ITEM_CHILD;
+        item_flags |= pulse::ipc::PackCtxItemMnemonic(it.mnemonic);
         w.PutU32(item_flags);
         w.PutString(it.verb);
         w.PutString(it.text);
@@ -965,6 +966,10 @@ struct HandlerWorker {
     HANDLE thread = nullptr;
     DWORD thread_id = 0;
     uint32_t elapsed_ms = 0;
+    // 0 = binding / loading the extension, 1 = inside the extension's own menu
+    // code (QueryContextMenu / flyout init). Only a worker stuck in its own code
+    // can be blamed while another thread may hold the loader lock.
+    std::atomic<int> phase{0};
 };
 
 DWORD HandlerWorkerThreadImpl(LPVOID param) {
@@ -982,7 +987,7 @@ DWORD HandlerWorkerThreadImpl(LPVOID param) {
     pulse::shell::CtxBind bind;
     if (pulse::shell::BindCtxSelection(w->paths, w->background, bind)) {
         const HRESULT hr = pulse::shell::QueryOneHandler(
-            w->desc, bind, w->owner, w->id_first, w->id_last, w->qcm_flags, w->slot);
+            w->desc, bind, w->owner, w->id_first, w->id_last, w->qcm_flags, w->slot, &w->phase);
         if (SUCCEEDED(hr) && w->slot.menu)
             pulse::shell::CollectHandlerItems(w->slot, w->background, w->items);
         else
@@ -1214,33 +1219,70 @@ DWORD CtxSessionThreadImpl(LPVOID param, const CtxSessionApi& api = {}) {
         }
         return out;
     };
-    auto collect_slow = [&] {
-        std::vector<std::wstring> slow;
-        const bool late = GetTickCount64() - started >= 1000;
+    // Auto-disable feeds on this list, so it names only a handler that is
+    // provably hung on its own: still running at the stuck limit while every
+    // other worker finished. Slow-but-finished handlers are never reported —
+    // the menu does not wait for them (partials stream as workers finish).
+    // Several unfinished workers at once is a systemic stall (cold host, an
+    // antivirus scanning each DLL, the loader lock held by the default menu
+    // SendTo builds); blaming all of them permanently hid 25 healthy
+    // extensions (0-47 ms each) on a user's machine. SendTo itself is exempt
+    // (#77); while it is still running, a worker still loading its DLL may
+    // merely be waiting on the loader lock, so it is not blamed either.
+    auto collect_hung = [&] {
+        std::vector<std::wstring> hung;
+        if (GetTickCount64() - started < kHandlerStuckMs) return hung;
+        bool send_to_running = false;
+        const HandlerWorker* stuck = nullptr;
+        size_t stuck_count = 0;
         for (const auto& w : workers) {
-            if (!w) continue;
-            // SendTo wraps the whole default menu, so its elapsed time is
-            // structurally the sum of every other worker; its worst case is an
-            // empty flyout, never a hang. Exempt it from the auto-disable (#77).
-            if (IsSendToHandlerClsid(w->desc.clsid_text)) continue;
-            // Still inside QueryContextMenu: not responding (#65).
-            const bool slow_one = worker_done(*w) ? w->elapsed_ms >= 1000 : late;
-            if (slow_one && !w->desc.clsid_text.empty()) slow.push_back(w->desc.clsid_text);
+            if (!w || worker_done(*w)) continue;
+            if (IsSendToHandlerClsid(w->desc.clsid_text)) {
+                send_to_running = true;
+                continue;
+            }
+            stuck = w.get();
+            ++stuck_count;
         }
-        return slow;
+        if (stuck_count != 1 || !stuck || stuck->desc.clsid_text.empty()) return hung;
+        if (send_to_running && stuck->phase.load() < 1) return hung;
+        hung.push_back(stuck->desc.clsid_text);
+        return hung;
+    };
+
+    auto done_count = [&] {
+        size_t n = 0;
+        for (const auto& w : workers)
+            if (w && worker_done(*w)) ++n;
+        return n;
     };
 
     if (!workers.empty()) {
+        // Throttled so a burst of finishing extensions repaints the open menu
+        // a few times, not once per worker.
+        constexpr ULONGLONG kPartialGapMs = 60;
         bool sent_partial = false;
+        size_t partial_done = 0;
+        ULONGLONG partial_at = 0;
         while (!all_workers_done() && !SessionCloseRequested(sid)) {
             pump_session_messages();
             if (SessionCloseRequested(sid)) break;
             const ULONGLONG elapsed = GetTickCount64() - started;
             if (elapsed >= kHandlerStuckMs) break;
-            if (!sent_partial && elapsed >= kFastBudgetMs) {
-                items = collect_items();
-                SendCtxItems(sid, items, CTX_ITEMS_PARTIAL);
-                sent_partial = true;
+            if (elapsed >= kFastBudgetMs) {
+                // First snapshot at the fast budget, then one more whenever
+                // further workers finished: a single hung extension must not
+                // hold back every row that arrived after 80 ms until the 5 s
+                // stuck limit (发送到 needs ~150 ms on a busy machine).
+                const size_t done = done_count();
+                if (!sent_partial ||
+                    (done != partial_done && elapsed - partial_at >= kPartialGapMs)) {
+                    items = collect_items();
+                    SendCtxItems(sid, items, CTX_ITEMS_PARTIAL);
+                    sent_partial = true;
+                    partial_done = done;
+                    partial_at = elapsed;
+                }
             }
             std::vector<HANDLE> waits;
             waits.reserve(workers.size());
@@ -1252,6 +1294,10 @@ DWORD CtxSessionThreadImpl(LPVOID param, const CtxSessionApi& api = {}) {
                 const ULONGLONG left = elapsed >= kFastBudgetMs ? 1 : (kFastBudgetMs - elapsed);
                 timeout = left > 0xFFFFFFFFULL ? 200 : static_cast<DWORD>(left);
                 if (timeout == 0) timeout = 1;
+            } else if (done_count() != partial_done) {
+                // Finished rows are waiting for the throttle gap: wake for it.
+                const ULONGLONG since = GetTickCount64() - started - partial_at;
+                timeout = since >= kPartialGapMs ? 1 : static_cast<DWORD>(kPartialGapMs - since);
             }
             MsgWaitForMultipleObjects(static_cast<DWORD>(waits.size()), waits.data(),
                                       FALSE, timeout, QS_ALLINPUT);
@@ -1273,7 +1319,7 @@ DWORD CtxSessionThreadImpl(LPVOID param, const CtxSessionApi& api = {}) {
                    data->paths.empty() ? L"" : data->paths.front().c_str());
         api.log(slow);
     }
-    SendCtxItems(sid, items, 0, collect_slow());
+    SendCtxItems(sid, items, 0, collect_hung());
 
     auto dispatch_invoke = [&](std::unique_ptr<CtxInvokeMsg> inv) {
         if (!inv) return;

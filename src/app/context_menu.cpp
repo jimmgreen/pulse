@@ -8,6 +8,7 @@
 #include "../ipc/ctx_menu_util.h"
 #include <windows.h>
 #include <algorithm>
+#include <cwchar>
 #include <cwctype>
 #include <string_view>
 #include <unordered_set>
@@ -50,6 +51,13 @@ ui::FluentMenuItem Item(int cmd, const wchar_t* text, const wchar_t* glyph,
     it.glyph = glyph;
     if (shortcut) it.shortcut = shortcut;
     it.enabled = enabled;
+    it.mnemonic = BuiltinMenuMnemonic(cmd);
+    // Command-less flyout headers: 查看(V) / 排序方式(O) / 分组依据(P).
+    if (cmd == CmdNone && glyph) {
+        if (std::wcscmp(glyph, kGlyphViewMenu) == 0) it.mnemonic = L'V';
+        else if (std::wcscmp(glyph, kGlyphSortMenu) == 0) it.mnemonic = L'O';
+        else if (std::wcscmp(glyph, kGlyphGroupMenu) == 0) it.mnemonic = L'P';
+    }
     return it;
 }
 
@@ -76,10 +84,10 @@ std::vector<ui::FluentMenuItem> BuildItemMenu(bool can_undo, const std::wstring&
     strip.command = CmdNone; // row itself does nothing; buttons carry commands
     strip.enabled = true;
     strip.quick_swatches = {
-        { CmdCut,    {}, false, false, kGlyphCut },
-        { CmdCopy,   {}, false, false, kGlyphCopy },
-        { CmdDelete, {}, false, false, kGlyphDelete },
-        { CmdRename, {}, false, false, kGlyphRename },
+        { CmdCut,    {}, false, false, kGlyphCut,    BuiltinMenuMnemonic(CmdCut) },
+        { CmdCopy,   {}, false, false, kGlyphCopy,   BuiltinMenuMnemonic(CmdCopy) },
+        { CmdDelete, {}, false, false, kGlyphDelete, BuiltinMenuMnemonic(CmdDelete) },
+        { CmdRename, {}, false, false, kGlyphRename, BuiltinMenuMnemonic(CmdRename) },
     };
     strip.separator_after = true;
     items.push_back(std::move(strip));
@@ -281,7 +289,7 @@ std::vector<ui::FluentMenuItem> BuildRecyclePlaceMenu(bool can_empty) {
 std::vector<ui::FluentMenuItem> BuildBackgroundMenu(bool can_paste, bool can_undo,
                                                     const std::wstring& undo_label) {
     std::vector<ui::FluentMenuItem> items;
-    items.push_back(Item(CmdNewFolder, l10n::Get(l10n::StringId::NewFolder).c_str(), kGlyphNewFolder, L"F7"));
+    items.push_back(Item(CmdNewFolder, l10n::Get(l10n::StringId::NewFolder).c_str(), kGlyphNewFolder, L"Ctrl+Shift+N"));
     items.push_back(Item(CmdNewTextFile, l10n::Get(l10n::StringId::NewTextDocument).c_str(), kGlyphNewFile));
     items.back().separator_after = true;
     items.push_back(Item(CmdPaste, l10n::Get(l10n::StringId::Paste).c_str(), kGlyphPaste, L"Ctrl+V", can_paste));
@@ -425,7 +433,7 @@ void AppendBackgroundViewCommands(std::vector<ui::FluentMenuItem>& items,
 
 std::vector<ui::FluentMenuItem> BuildNewMenu() {
     std::vector<ui::FluentMenuItem> items;
-    items.push_back(Item(CmdNewFolder, l10n::Get(l10n::StringId::Folder).c_str(), kGlyphNewFolder, L"F7"));
+    items.push_back(Item(CmdNewFolder, l10n::Get(l10n::StringId::Folder).c_str(), kGlyphNewFolder, L"Ctrl+Shift+N"));
     items.push_back(Item(CmdNewTextFile, l10n::Get(l10n::StringId::TextDocument).c_str(), kGlyphNewFile));
     return items;
 }
@@ -438,11 +446,11 @@ std::vector<ui::FluentMenuItem> BuildSplitMenu(int current_preset) {
         ui::fluent::MenuPictogram pictogram;
     };
     static constexpr Row kRows[] = {
-        { CmdLayoutSingle,        L"Ctrl+1", l10n::StringId::LayoutSingle,     ui::fluent::MenuPictogram::LayoutSingle },
-        { CmdLayoutTwoVertical,   L"Ctrl+2", l10n::StringId::LayoutVertical,   ui::fluent::MenuPictogram::LayoutSideBySide },
+        { CmdLayoutSingle,        L"Ctrl+Alt+1", l10n::StringId::LayoutSingle,     ui::fluent::MenuPictogram::LayoutSingle },
+        { CmdLayoutTwoVertical,   L"Ctrl+Alt+2", l10n::StringId::LayoutVertical,   ui::fluent::MenuPictogram::LayoutSideBySide },
         { CmdLayoutTwoHorizontal, nullptr,   l10n::StringId::LayoutHorizontal, ui::fluent::MenuPictogram::LayoutStacked },
-        { CmdLayoutThree,         L"Ctrl+3", l10n::StringId::LayoutThree,      ui::fluent::MenuPictogram::LayoutThree },
-        { CmdLayoutFourGrid,      L"Ctrl+4", l10n::StringId::LayoutFour,       ui::fluent::MenuPictogram::LayoutFour },
+        { CmdLayoutThree,         L"Ctrl+Alt+3", l10n::StringId::LayoutThree,      ui::fluent::MenuPictogram::LayoutThree },
+        { CmdLayoutFourGrid,      L"Ctrl+Alt+4", l10n::StringId::LayoutFour,       ui::fluent::MenuPictogram::LayoutFour },
     };
     std::vector<ui::FluentMenuItem> items;
     for (const auto& row : kRows) {
@@ -472,8 +480,13 @@ std::vector<ui::FluentMenuItem> BuildViewMenu(ui::ViewMode current_mode, bool de
     };
     std::vector<ui::FluentMenuItem> items;
     items.reserve(9);
+    // File Explorer's Ctrl+Shift+1..8 (explorer_shortcuts.h).
+    static constexpr const wchar_t* keys[] = {
+        L"Ctrl+Shift+1", L"Ctrl+Shift+2", L"Ctrl+Shift+3", L"Ctrl+Shift+4",
+        L"Ctrl+Shift+5", L"Ctrl+Shift+6", L"Ctrl+Shift+7", L"Ctrl+Shift+8"
+    };
     for (int i = 0; i < 8; ++i) {
-        auto row = Item(CmdViewBase + i, l10n::Get(labels[i]).c_str(), glyphs[i]);
+        auto row = Item(CmdViewBase + i, l10n::Get(labels[i]).c_str(), glyphs[i], keys[i]);
         if (i == 0) row.glyph_scale = 1.16f;
         else if (i == 1) row.glyph_scale = 1.0f;
         else if (i == 2) row.glyph_scale = 0.82f;
@@ -583,12 +596,12 @@ std::vector<ui::FluentMenuItem> BuildCommandPalette(const std::wstring& query,
         items.back().pictogram = pictogram;
     };
     if (!project_only && !search_mode && !path_like) {
-        add_cmd(CmdLayoutTwoVertical, l10n::Get(l10n::StringId::LayoutVertical).c_str(), L"", L"Ctrl+2",
+        add_cmd(CmdLayoutTwoVertical, l10n::Get(l10n::StringId::LayoutVertical).c_str(), L"", L"Ctrl+Alt+2",
                 ui::fluent::MenuPictogram::LayoutSideBySide);
-        add_cmd(CmdLayoutFourGrid, l10n::Get(l10n::StringId::LayoutFour).c_str(), L"", L"Ctrl+4",
+        add_cmd(CmdLayoutFourGrid, l10n::Get(l10n::StringId::LayoutFour).c_str(), L"", L"Ctrl+Alt+4",
                 ui::fluent::MenuPictogram::LayoutFour);
         add_cmd(CmdCopyToTarget, l10n::Get(l10n::StringId::CopyToTarget).c_str(), kGlyphCopy, L"Ctrl+Alt+C");
-        add_cmd(CmdNewFolder, l10n::Get(l10n::StringId::NewFolder).c_str(), kGlyphNewFolder, L"F7");
+        add_cmd(CmdNewFolder, l10n::Get(l10n::StringId::NewFolder).c_str(), kGlyphNewFolder, L"Ctrl+Shift+N");
         add_cmd(CmdPinWorkspace, l10n::Get(l10n::StringId::PinWorkspace).c_str(), kGlyphFolder, nullptr);
         add_cmd(CmdCopyPath, l10n::Get(l10n::StringId::CopyPath).c_str(), kGlyphLink, L"Ctrl+Shift+C");
         add_cmd(CmdInstallFullIndex, l10n::Get(l10n::StringId::EnableFullIndex).c_str(), kGlyphSearch, nullptr);

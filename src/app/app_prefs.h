@@ -54,6 +54,8 @@ struct AppPrefs {
     int new_tab_open = 0;
     // Closing the only tab closes the window (app/last_tab_close.h).
     bool close_window_with_last_tab = false;
+    // Double-clicking a tab closes it, like its close button (app/last_tab_close.h).
+    bool close_tab_on_double_click = false;
     bool confirm_recycle_delete = false; // ask before Delete moves items to the Recycle Bin
     // Sign-in launches (Run value with --startup) stay hidden behind the tray icon.
     bool start_in_tray = false;
@@ -136,6 +138,15 @@ struct AppPrefs {
 
     bool StoreBackgroundImage(const std::wstring& source_path);
     void ClearBackgroundImage();
+
+    // Features that only work while Pulse runs: closing the window then hides
+    // it to the tray instead of exiting. Explorer window takeover is one: the
+    // watcher lives in this process, and "Open file location" from another
+    // program (explorer /select) never goes through a folder association.
+    bool KeepsRunningInBackground() const {
+        return keep_running_on_close || global_search_enabled ||
+               (integration_enabled && take_over_explorer_windows);
+    }
 };
 
 std::wstring FolderOpenCommandLine(const std::wstring& exe);

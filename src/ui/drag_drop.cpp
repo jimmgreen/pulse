@@ -150,6 +150,55 @@ bool LooksLikeFolderShortcut(const std::wstring& path) {
     return _wcsicmp(path.c_str() + (path.size() - 4), L".lnk") == 0;
 }
 
+bool DropIntoOwnFolder(const std::vector<std::wstring>& sources, const std::wstring& dest_dir) {
+    const auto comparable = [](std::wstring path) {
+        if (path.rfind(L"\\\\?\\UNC\\", 0) == 0) path = L"\\\\" + path.substr(8);
+        else if (path.rfind(L"\\\\?\\", 0) == 0) path = path.substr(4);
+        for (auto& c : path) if (c == L'/') c = L'\\';
+        while (path.size() > 3 && path.back() == L'\\') path.pop_back();
+        return path;
+    };
+    const std::wstring dest = comparable(dest_dir);
+    if (dest.empty()) return false;
+    for (const auto& item : sources) {
+        const std::wstring source = comparable(item);
+        if (source.empty() || source.size() > dest.size() ||
+            _wcsnicmp(dest.c_str(), source.c_str(), source.size()) != 0) continue;
+        if (dest.size() == source.size() || dest[source.size()] == L'\\' || source.back() == L'\\')
+            return true;
+    }
+    return false;
+}
+
+bool IsDropLaunchProgram(const std::wstring& path) {
+    const size_t dot = path.find_last_of(L'.');
+    const size_t slash = path.find_last_of(L"\\/");
+    if (dot == std::wstring::npos || (slash != std::wstring::npos && dot < slash)) return false;
+    for (const wchar_t* program : {L".exe", L".com", L".bat", L".cmd"})
+        if (_wcsicmp(path.c_str() + dot, program) == 0) return true;
+    return false;
+}
+
+std::wstring DropLaunchArguments(const std::vector<std::wstring>& sources) {
+    std::wstring arguments;
+    for (std::wstring path : sources) {
+        if (path.rfind(L"\\\\?\\UNC\\", 0) == 0) path = L"\\\\" + path.substr(8);
+        else if (path.rfind(L"\\\\?\\", 0) == 0) path = path.substr(4);
+        if (path.empty()) continue;
+        if (!arguments.empty()) arguments += L' ';
+        // File names cannot contain '"'; only a trailing backslash needs care.
+        if (path.find_first_of(L" \t") == std::wstring::npos) {
+            arguments += path;
+            continue;
+        }
+        arguments += L'"';
+        arguments += path;
+        if (path.back() == L'\\') arguments += L'\\';
+        arguments += L'"';
+    }
+    return arguments;
+}
+
 // ---------------------------------------------------------------------------
 // IDataObject inspection
 // ---------------------------------------------------------------------------

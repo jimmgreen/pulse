@@ -1,4 +1,5 @@
 #include <thread>
+#include "app_window_title.h"
 // app_navigation.cpp — extracted from app_main.cpp.
 #include "app_internal.h"
 #include "shell_window_sync.h"
@@ -6,6 +7,7 @@
 #include "listing_selection_restore.h"
 #include "content_navigation.h"
 #include "content_search_snapshot.h"
+#include "global_search_result_state.h"
 #include "../ui/lumatext_renderer.h"
 #include "../ui/fluent_menu.h"
 #include "../ui/drag_drop.h"
@@ -367,7 +369,8 @@ void DispatchIndexSearch(AppState& s, const index::Query& query, uint32_t id) {
     pending.query = query;
     const bool live_network = NeedsLiveNetworkSearch(s, query);
     pending.network_snapshot = app::UsesNetworkSnapshot(s.networkIndex.Roots(), query, live_network);
-    pending.network_ready = !live_network && s.networkIndex.Roots().empty();
+    pending.network_expected = live_network || !s.networkIndex.Roots().empty();
+    pending.network_ready = !pending.network_expected;
     if (live_network) pending.live_network_root = query.path_prefix;
     if (!s.appPrefs.search_pinyin) pending.query.needle = L"nopinyin: " + pending.query.needle;
     s.pendingIndexSearches.emplace(id, std::move(pending));
@@ -807,6 +810,12 @@ void AcceptIndexProviderResult(AppState& s, uint32_t id,
     auto found = s.pendingIndexSearches.find(id);
     if (found == s.pendingIndexSearches.end()) return;
     auto& pending = found->second;
+    if (!app::CountsProviderError(network, pending.network_expected)) {
+        // No network root and no live walk: an agent that is starting or
+        // unreachable has nothing to contribute and must not mark the local
+        // results incomplete (1236). Its hits, if any, still merge.
+        result.error = ERROR_SUCCESS;
+    }
     if (network) {
         pending.network = std::move(result);
         pending.network_ready = network_final;
@@ -1747,6 +1756,7 @@ void NavigateTo(AppState& s, const std::wstring& path) {
     tab->NavigateTo(normalized);
     RecordSearchHistory(s, normalized);
     StartLoadingPath(s, *tab, normalized);
+    SyncTaskbarWindowTitle(s);
     RestoreNavigationReturnSelection(s, *tab, returnedChild);
     RememberPath(s, normalized);
     RecordRecentOpen(s, normalized, app::PlaceItemKind::Folder);
@@ -1761,6 +1771,7 @@ void FocusPane(AppState& s, app::Pane* p) {
     if (s.filterEditing) HideFilterEditor(s, true);
     for (auto& pane : Panes(s)) pane->focused = (pane.get() == p);
     s.pane = p;
+    SyncTaskbarWindowTitle(s);
     RememberLayoutFocus(s);
     app::Tab* tab = p->ActiveTab();
     if (tab) {

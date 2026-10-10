@@ -16,6 +16,7 @@ ShellMenuEntry ComEntry(const ops::ShellMenuItem& item, int command = 0) {
     ShellMenuEntry entry;
     entry.command = command;
     entry.text = item.text;
+    entry.mnemonic = item.mnemonic;
     entry.enabled = item.enabled;
     entry.verb = item.verb;
     entry.from_com = true;
@@ -49,6 +50,7 @@ void AppendShellSection(std::vector<ui::FluentMenuItem>& items,
         ui::FluentMenuItem row;
         row.command = e.command;
         row.text = e.text;
+        row.mnemonic = e.mnemonic;
         row.enabled = e.enabled;
         // Software-owned submenu: keep the hierarchy as a one-level flyout.
         for (const auto& c : e.children) {
@@ -56,6 +58,7 @@ void AppendShellSection(std::vector<ui::FluentMenuItem>& items,
             ui::FluentMenuItem child;
             child.command = c.command;
             child.text = c.text;
+            child.mnemonic = c.mnemonic;
             child.enabled = c.enabled;
             row.children.push_back(std::move(child));
         }
@@ -397,11 +400,22 @@ std::vector<ShellMenuEntry> ContextMenuController::ComposeEntries(
     ContextMenuPrefs& prefs, bool& prefs_changed) const {
     std::vector<ShellMenuEntry> entries;
     entries.reserve(static_verbs_.size() + com_items_.size());
+    // Explorer's own 打开方式 flyout (recommended apps + 选择其他应用) replaces
+    // the static 打开方式… row once the host delivered it with its apps; until
+    // then the static row is the instant fallback.
+    bool com_open_with = false;
+    for (size_t i = 0; i + 1 < com_items_.size() && !com_open_with; ++i) {
+        com_open_with = !com_items_[i].child && com_items_[i].has_children &&
+                        com_items_[i + 1].child &&
+                        ipc::IsOpenWithSubmenuVerb(com_items_[i].verb);
+    }
     for (size_t i = 0; i < static_verbs_.size() && i < static_cast<size_t>(ipc::kMaxStaticVerbParents);
          ++i) {
         const auto& verb = static_verbs_[i];
+        if (com_open_with && ipc::ToLowerVerb(verb.verb) == L"openas") continue;
         ShellMenuEntry entry;
         entry.text = verb.display;
+        entry.mnemonic = verb.mnemonic;
         entry.verb = verb.verb;
         if (!verb.children.empty()) {
             entry.command = 0;
@@ -412,6 +426,7 @@ std::vector<ShellMenuEntry> ContextMenuController::ComposeEntries(
                 child.command = CmdShellStaticBase +
                     static_cast<int>(i) * ipc::kStaticVerbStride + static_cast<int>(j) + 1;
                 child.text = verb.children[j].display;
+                child.mnemonic = verb.children[j].mnemonic;
                 child.verb = verb.children[j].verb;
                 entry.children.push_back(std::move(child));
             }
@@ -426,6 +441,9 @@ std::vector<ShellMenuEntry> ContextMenuController::ComposeEntries(
         if (item.child) continue;
         if (item.has_children) {
             ShellMenuEntry parent = ComEntry(item);
+            // It stands in for the static row, so the 打开方式 group switch
+            // governs it rather than the COM-sourced "open with" rows switch.
+            if (ipc::IsOpenWithSubmenuVerb(item.verb)) parent.from_com = false;
             for (size_t j = i + 1; j < com_items_.size() && com_items_[j].child; ++j) {
                 if (com_items_[j].id > 0x7FFF) continue;
                 parent.children.push_back(ComEntry(com_items_[j],
@@ -461,7 +479,7 @@ std::vector<ShellMenuEntry> ContextMenuController::ComposeEntries(
             const std::wstring name = !entry.text.empty() ? entry.text : entry.handler;
             const auto category = ipc::ClassifyExplorerItem(entry.verb, entry.text, flyout);
             if (prefs.RecordSeen(ipc::HandlerCatalogKey(entry.clsid), name, flyout,
-                                 category, true))
+                                 category, entry.from_com))
                 prefs_changed = true;
             continue;
         }

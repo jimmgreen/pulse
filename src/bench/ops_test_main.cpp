@@ -948,6 +948,32 @@ int wmain(int argc, wchar_t** argv) {
               L"failed rename reports failure");
     }
 
+    // --- 4b. Folder targeted at itself ---------------------------------------
+    {
+        const std::wstring self = srcDir + L"\\self-target";
+        CreateDirectoryW(self.c_str(), nullptr);
+        CreateDirectoryW((self + L"\\child").c_str(), nullptr);
+        MakeFile(self + L"\\inside.txt", payload, sizeof(payload) - 1);
+        for (const auto type : { ops::OpType::Move, ops::OpType::Copy }) {
+            for (const std::wstring& dest : { self, self + L"\\child", self + L"\\" }) {
+                const auto st = RunOp(SimpleOp(type, { self.c_str() }, dest.c_str()));
+                Check(st.phase == ops::OpPhase::Failed &&
+                      (st.last_error.find(L"自身内部") != std::wstring::npos ||
+                       st.last_error.find(L"into itself") != std::wstring::npos) &&
+                      Exists(self + L"\\inside.txt") && !Exists(self + L"\\self-target") &&
+                      !Exists(self + L"\\child\\self-target"),
+                      type == ops::OpType::Move
+                          ? L"moving a folder onto itself or its subfolder is refused with a clear reason"
+                          : L"copying a folder onto itself or its subfolder is refused with a clear reason");
+                if (st.last_error.find(L"拒绝访问") != std::wstring::npos)
+                    wprintf(L"       error: %s\n", st.last_error.c_str());
+            }
+        }
+        DeleteFileW((self + L"\\inside.txt").c_str());
+        RemoveDirectoryW((self + L"\\child").c_str());
+        RemoveDirectoryW(self.c_str());
+    }
+
     // --- 5. Recycle delete --------------------------------------------------
     {
         RunOp(SimpleOp(ops::OpType::RecycleDelete, { (dstDir + L"\\b.txt").c_str() }));

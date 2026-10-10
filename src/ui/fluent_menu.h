@@ -33,6 +33,7 @@ struct FluentMenuSwatch {
     // Non-empty => icon button (Segoe Fluent Icons codepoint) instead of a
     // tag color dot: wider hit target, hover pill, theme text color.
     std::wstring glyph;
+    wchar_t mnemonic = 0;          // keyboard access key (case-insensitive), 0 = none
 };
 
 struct FluentMenuItem {
@@ -61,7 +62,28 @@ struct FluentMenuItem {
     bool shortcut_inline = false; // Search paths follow a shared, compact filename column.
     int trailing_command = 0;     // Optional hover-revealed close action at the right edge.
     std::wstring tooltip;
+    // Keyboard access key like a native menu's "&X" (case-insensitive). 0 falls
+    // back to a trailing "(X)" in text, which Explorer's CJK labels keep.
+    wchar_t mnemonic = 0;
 };
+
+// Access key of a row: explicit mnemonic, else trailing "(X)" / "（X）" in text
+// (ignoring a final "..." or "…"). Upper-cased; 0 when the row has none.
+wchar_t MenuItemMnemonic(const FluentMenuItem& item);
+// One access-key match: a row (swatch == -1) or one of its quick swatches.
+struct MenuMnemonicTarget {
+    int row = -1;
+    int swatch = -1;
+};
+// Enabled rows / swatches whose access key equals key_a or key_b
+// (case-insensitive), in visual order. Rows qualify when they carry a command
+// or a flyout; command-less strips only through their swatches.
+std::vector<MenuMnemonicTarget> FindMenuMnemonic(const std::vector<FluentMenuItem>& items,
+                                                 wchar_t key_a, wchar_t key_b = 0);
+// Several rows sharing a key: index of the first match after (row, swatch),
+// wrapping to 0. Native menus cycle the highlight this way without invoking.
+size_t NextMenuMnemonicTarget(const std::vector<MenuMnemonicTarget>& targets, int row,
+                              int swatch);
 
 // Windowless menu layout + hit-testing (theme.row_menu = 36 DIP rows by default).
 class FluentMenuModel {
@@ -80,6 +102,7 @@ public:
     float InlineLabelWidthPx() const { return inline_label_width_; }
     float RowHeightPx() const { return row_h_; }
     int Count() const { return (int)items_.size(); }
+    const std::vector<FluentMenuItem>& Items() const { return items_; }
     const FluentMenuItem* At(int i) const;
     // True when row i's label is wider than the menu and gets ellipsized.
     bool Truncated(int i) const;
@@ -223,6 +246,10 @@ private:
     int HitTestSwatch(int row, float client_x) const;
     int HitTestSwatch(const FluentMenuModel& model, int row, float client_x) const;
     int InvokeRow(int row);        // returns command or 0
+    // Letter/digit keys in an ordinary (non-filter) menu: access-key dispatch.
+    // Returns true when the key belongs to the menu (always for printable keys,
+    // so typing never leaks into the window behind the popup).
+    bool HandleMnemonicKey(const MSG& msg);
     int InvokeAt(int row, float client_x) const;
     int InvokeAt(const FluentMenuModel& model, int row, float client_x) const;
     float FilterHeaderPx() const;

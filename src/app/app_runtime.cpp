@@ -1,4 +1,5 @@
 // app_runtime.cpp — extracted from app_main.cpp.
+#include "app_window_title.h"
 #include "app_internal.h"
 #include "pane_layout.h"
 #include "vertical_tabs.h"
@@ -234,6 +235,7 @@ void BindCurrentLayout(AppState& s) {
         s.pane = nullptr;
         s.targetPane = nullptr;
         SyncVisibleWatches(s);
+        SyncTaskbarWindowTitle(s);
         return;
     }
     tab->focused_index = std::clamp(tab->focused_index, 0,
@@ -255,6 +257,7 @@ void BindCurrentLayout(AppState& s) {
         s.scrollAnimating = false;
     }
     SyncVisibleWatches(s);
+    SyncTaskbarWindowTitle(s);
 }
 std::wstring ResolveOpenFolderPath(std::wstring path) {
     while (!path.empty() && (path.front() == L'"' || path.back() == L'"')) {
@@ -610,15 +613,18 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
                         if (group == index::kSystemExclusionGroups[i])
                             vm.settings_index_system_groups |= 1u << i;
                 vm.settings_index_system_expanded = s.settings.system_exclusion_expanded();
-                if (s.shot.active && vm.settings_page == 1 && !vm.settings_index_system_known) {
-                    // Shots show the defaults; PULSE_SHOT_SYSTEM_EXPANDED=1 opens the list.
-                    wchar_t expanded[4]{};
+                wchar_t shot_expanded[4]{};
+                const bool shot_force_expanded = s.shot.active &&
+                    GetEnvironmentVariableW(L"PULSE_SHOT_SYSTEM_EXPANDED", shot_expanded, 4) &&
+                    shot_expanded[0] == L'1';
+                if (s.shot.active && vm.settings_page == 1 &&
+                    (!vm.settings_index_system_known || shot_force_expanded)) {
+                    // Shots show the defaults; PULSE_SHOT_SYSTEM_EXPANDED=1 opens the list
+                    // even when a running service reports its own configuration.
                     vm.settings_index_system_known = true;
                     vm.settings_index_exclude_system = true;
-                    vm.settings_index_system_groups = 0x7u;
-                    vm.settings_index_system_expanded =
-                        GetEnvironmentVariableW(L"PULSE_SHOT_SYSTEM_EXPANDED", expanded, 4) &&
-                        expanded[0] == L'1';
+                    vm.settings_index_system_groups = 0x17u;  // windows, temp, old, node_modules
+                    vm.settings_index_system_expanded = shot_force_expanded;
                 }
             }
             vm.settings_network_roots.clear();
@@ -886,11 +892,7 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
                 slot.pane.rename_index = s.renameIndex;
                 if (s.marqueeActive) {
                     slot.pane.marquee_active = true;
-                    slot.pane.marquee_rect = D2D1::RectF(
-                        static_cast<float>(std::min(s.marqueeStart.x, s.marqueeCur.x)),
-                        static_cast<float>(std::min(s.marqueeStart.y, s.marqueeCur.y)),
-                        static_cast<float>(std::max(s.marqueeStart.x, s.marqueeCur.x)),
-                        static_cast<float>(std::max(s.marqueeStart.y, s.marqueeCur.y)));
+                    slot.pane.marquee_rect = MarqueeDisplayRect(s);
                 }
             }
         }
@@ -1870,6 +1872,7 @@ static void FillTrayCompare(AppState& s, const app::TrayItem* const (&items)[2],
 }
 
 ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
+    SyncTaskbarWindowTitle(s);
     if (!s.pane) return {};
     // A finished pack download repaints the window once; drop the cached
     // failed thumbnails so the newly supported files are decoded again.
@@ -1934,6 +1937,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     vm.settings_notify_icon = s.appPrefs.notify_icon_mode;
     vm.settings_new_tab_open = s.appPrefs.new_tab_open;
     vm.settings_close_last_tab = s.appPrefs.close_window_with_last_tab;
+    vm.settings_close_tab_double_click = s.appPrefs.close_tab_on_double_click;
     vm.settings_confirm_delete = s.appPrefs.confirm_recycle_delete;
     vm.settings_home_folder = s.appPrefs.home_folder;
     vm.settings_text_render = s.appPrefs.text_render;
@@ -2051,11 +2055,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     vm.details_resize_pressed = s.detailsPanelResizing;
     if (s.marqueeActive) {
         vm.pane.marquee_active = true;
-        vm.pane.marquee_rect = D2D1::RectF(
-            static_cast<float>(std::min(s.marqueeStart.x, s.marqueeCur.x)),
-            static_cast<float>(std::min(s.marqueeStart.y, s.marqueeCur.y)),
-            static_cast<float>(std::max(s.marqueeStart.x, s.marqueeCur.x)),
-            static_cast<float>(std::max(s.marqueeStart.y, s.marqueeCur.y)));
+        vm.pane.marquee_rect = MarqueeDisplayRect(s);
     }
     vm.breadcrumb_hover = s.breadcrumbHover;
     vm.breadcrumb_drop = s.dropBreadcrumb;

@@ -1,0 +1,336 @@
+{
+  "log_directory": "<repo>\\build\\quicklook_build",
+  "items": [
+    {
+      "id": "M05-001",
+      "status": "partial",
+      "evidence": {
+        "logs": [
+          "index-security-audit.log"
+        ],
+        "verification": "实际隔离目录 ACL 拒绝、源与不安全目标保护、叶/祖先 rename 拒绝通过。Medium token 无管理员成功迁移及受限令牌读取最终/临时文件正向测试；此前三次失败日志保留。"
+      }
+    },
+    {
+      "id": "M05-002",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "index-query-audit.log"
+        ],
+        "verification": "真实映射索引 warm vs cold 七组 ext/size/quote/negation/OR 比较通过；仅简单正向子串允许增量收窄。"
+      }
+    },
+    {
+      "id": "M05-003",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "index-query-audit.log"
+        ],
+        "verification": "真实 mapped node ApplyNotify rename 后旧 DFS 区间排除、另一作用域通用扫描命中通过。"
+      }
+    },
+    {
+      "id": "M05-005",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "index-query-audit.log"
+        ],
+        "verification": "真实文件 size 改变并 ApplyNotify 后缓存过滤失效通过。"
+      }
+    },
+    {
+      "id": "M05-007",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "index-query-audit.log"
+        ],
+        "verification": "生产 loader 拒绝非法 prefix bucket、非零首posting范围、越界posting ID 三例通过。"
+      }
+    },
+    {
+      "id": "M05-008",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "index-query-audit.log"
+        ],
+        "verification": "真实 mapped base+patch 在 quoted/single/no-pinyin 查询各只出现一次。"
+      }
+    },
+    {
+      "id": "M05-011",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "index-query-audit.log"
+        ],
+        "verification": "真实90层深路径保留drive及所有祖先通过；循环/非法parent防护代码已编译。"
+      }
+    },
+    {
+      "id": "M05-004",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "notify-restart-audit.log"
+        ],
+        "verification": "--notify-restart-only 真实通知 WAL 添加/重命名/删除及连续两次重载通过；未操作用户服务。"
+      }
+    },
+    {
+      "id": "M05-006",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "mft-completion-audit.log"
+        ],
+        "verification": "生产枚举核心注入输出后失败/取消/consumer stop 返回失败，完整枚举成功；未向真实卷注入故障。"
+      }
+    },
+    {
+      "id": "M05-009",
+      "status": "partial",
+      "evidence": {
+        "logs": [
+          "deadline-pipe-audit.log"
+        ],
+        "verification": "真实隔离管道静默、背压、trickle 绝对截止、取消与健康独立管道通过；network-agent-deadline-audit.log 验证生产代理静默对端后4922ms内处理健康STATUS。完整 index_host 多客户搜索/广播场景未运行。"
+      }
+    },
+    {
+      "id": "M05-010",
+      "status": "implemented_unverified",
+      "evidence": {
+        "logs": [],
+        "verification": "排除配置写入已纳入 engine mutex 并编译；尚无定向并发运行证据。"
+      }
+    },
+    {
+      "id": "M05-012",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "usn-page-audit.log"
+        ],
+        "verification": "生产共享 USN 页解析器两页及坏长度/名字/cursor 用例通过；未运行真实卷 measure。"
+      }
+    },
+    {
+      "id": "M05-013",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "writer-idle-audit.log"
+        ],
+        "verification": "真实 Writer 三个离线窗口 CPU 0ms，保留队列、匿名管道重连排空和停止通过。"
+      }
+    },
+    {
+      "id": "M06-001",
+      "status": "partial",
+      "evidence": {
+        "logs": [
+          "index-security-audit.log"
+        ],
+        "verification": "真实 NEW_CREDENTIALS LUID 隔离、受限 logon token ACL 拒绝及请求1至9鉴权通过；network-client-audit.log 客户端截止通过。未使用两个真实Windows用户/独立交互会话。"
+      }
+    },
+    {
+      "id": "M06-002",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "network-worker-audit.log"
+        ],
+        "verification": "生产 crawl 注入 FindNext/子目录错误保留旧shard，watch健康仍重试；live walk明确incomplete。隔离本地目录与受控错误，未真实SMB断网。"
+      }
+    },
+    {
+      "id": "M06-003",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "network-worker-audit.log"
+        ],
+        "verification": "实际本地首次RDCW在尚无shard时已排队reconcile通过；未真实SMB场景。"
+      }
+    },
+    {
+      "id": "M06-004",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "network-worker-audit.log"
+        ],
+        "verification": "真实枚举期间注入更新notify/祖先删除，迟到subtree扫描不能覆盖新元数据或复活删除节点；生产代际保护通过。"
+      }
+    },
+    {
+      "id": "M06-005",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "network-worker-audit.log"
+        ],
+        "verification": "生产SearchLoop parent/child root按路径去重，specific root优先，total与后续page唯一成员通过。"
+      }
+    },
+    {
+      "id": "M06-006",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "network-worker-audit.log"
+        ],
+        "verification": "生产worker合成100001条，较晚最佳name/size/mtime/rank仍入100000候选集，后页和cancel incomplete通过；实际UI排序点击未运行。"
+      }
+    },
+    {
+      "id": "M06-007",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "network-worker-audit.log"
+        ],
+        "verification": "生产mapped-drive normalize用受控WNet返回ERROR_MORE_DATA且GetLastError为ACCESS_DENIED，验证按返回码分配缓冲成功；非真实mappedSMB。"
+      }
+    },
+    {
+      "id": "M06-008",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "network-config-audit.log"
+        ],
+        "verification": "--network-config-only 严格JSON/UTF8、真实独占读取拒绝保留配置、拒绝写与修复重载通过。"
+      }
+    },
+    {
+      "id": "M07-001",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "pdf-unicode-audit.log"
+        ],
+        "verification": "真实 bundled pdfium.dll 的 ExtractPdfiumText/DocumentLiteralMatch 七例含BMP/U+20000/emoji/跨页/跨scalar/空文档通过。初始代理项失败已修并保留日志；未完整内容数据库集成。"
+      }
+    },
+    {
+      "id": "M08-001",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "content-task-scope-audit.log"
+        ],
+        "verification": "实际受限子目录DACL及非递归/递归/作用域交集/取消共10项通过。"
+      }
+    },
+    {
+      "id": "M08-002",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "content-instant-reconcile-audit.log",
+          "content-instant-reconcile-audit-initial-fail.log",
+          "content-instant-reconcile-audit-second-fail.log"
+        ],
+        "verification": "已有/新增/导入各1通知失败后第2次恢复；永久3次失败明确暂停且保留原结果；取消仅1次，不重跑全量scan。前两轮夹具缺profile父目录和默认build排除项已修复并保留失败日志。生产会话和协议运行，元数据错误受控注入。"
+      }
+    },
+    {
+      "id": "M08-003",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "content-session-batch-audit.log"
+        ],
+        "verification": "6排序×2方向、首条立即可见、1000/2000/4000/8000行发布17/33/64/126次与取消刷新通过；8000行实际可见数量按revision累计504125 vs旧32004000。仍是批处理全量排序，未声称消除全部二次成本，未独立测live delta/filter/midstream sort/selection规模。"
+      }
+    },
+    {
+      "id": "M08-004",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "content-session-batch-audit.log"
+        ],
+        "verification": "6排序×2方向、首条立即可见、1000/2000/4000/8000行发布17/33/64/126次与取消刷新通过；8000行实际可见数量按revision累计504125 vs旧32004000。仍是批处理全量排序，未声称消除全部二次成本，未独立测live delta/filter/midstream sort/selection规模。"
+      }
+    },
+    {
+      "id": "M11-001",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "search-query-audit.log"
+        ],
+        "verification": "查询compile/parse六组raw无损回转、日期边界、OR各分支过滤与scope成员通过；保留初始OR scope三失败日志。未真实advanced dialog UI。"
+      }
+    },
+    {
+      "id": "M11-002",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "search-query-audit.log"
+        ],
+        "verification": "typed raw单/多token维持查询运算；advanced literal单/多token转义且成员正确，单词数不切换语义。未地址栏/历史键盘UI。"
+      }
+    },
+    {
+      "id": "M11-003",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "global-search-state-audit.log"
+        ],
+        "verification": "共享popup state helper按path恢复selection/scroll anchor，双provider乱序、同名不同路径、topN移出保持无选中、大小写extended路径通过；未实际popup键盘/Enter。"
+      }
+    },
+    {
+      "id": "M11-004",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "global-search-state-audit.log"
+        ],
+        "verification": "共享popup state helper分开跟踪两provider ready/error，失败/重试/timeout/迟到成功/真正空集18例中相关用例通过；未真实popup错误视觉状态。"
+      }
+    },
+    {
+      "id": "M04-004",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "shell-client-generation-audit.log",
+          "shell-client-generation-audit-initial-fail.log"
+        ],
+        "verification": "生产ShellClient在独立真实子进程/Windows命名管道上：Abort与真实sendfailure均暂停旧reader清理、建立新连接后释放旧reader；新child/代际保留，新pending不清，旧pending重试后各终态一次。shared_ptr保持旧pipe到OVERLAPPED取消完成，随后释放；partialframe Stop小于2秒。首轮发现本地retired vector延迟释放，修后全通过；没有运行真实Explorer COM或用户文件操作。"
+      }
+    },
+    {
+      "id": "M04-005",
+      "status": "passed",
+      "evidence": {
+        "logs": [
+          "shell-client-generation-audit.log"
+        ],
+        "verification": "实际自有stub子进程第一次启动在创建pipe前exit17，验证child_started和process/thread handles清除；同一ShellClient无需Stop/Start便按既有1500ms backoff自动启动下一child并完成请求。未启动真实pulse_shell或操作用户文件。"
+      }
+    }
+  ],
+  "supporting_evidence": [
+    {
+      "id": "M04-001",
+      "owner": "audit_selection",
+      "logs": [
+        "shell-client-generation-audit.log"
+      ],
+      "verification": "ShellClient Reserved接口在8个public request入口分配id后、连接/pending/发送前同步执行；实际快速ctx_items和同步unreachable done均看到已预登记id，后者在public调用返回前完成。OpsManager路由与完整001验收由selection负责。"
+    }
+  ]
+}

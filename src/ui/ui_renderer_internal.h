@@ -1818,14 +1818,17 @@ TitleChrome MakeTitleChrome(float window_w, float scale, float title_h) {
 constexpr float kSettingsNavW = 200.0f;
 constexpr int kSettingsNavCount = 6;  // 5: 预览增强包
 
-// System folder groups shown under Settings > Exclusions: 0-3 follow
-// index::kSystemExclusionGroups, 4-5 are always skipped by the index.
+// System folder groups shown under Settings > Exclusions: 0-4 follow
+// index::kSystemExclusionGroups, 5-6 are always skipped by the index.
+constexpr int kSystemGroupRows = 7;
+constexpr int kSystemGroupConfigurable = 5;
 inline pulse::l10n::StringId SystemGroupLabel(int group) {
     using I = pulse::l10n::StringId;
-    static constexpr I kLabels[] = {I::SystemGroupWindows, I::SystemGroupTemp, I::SystemGroupOld,
-                                    I::SystemGroupProgramData, I::SystemGroupRecycle,
+    static constexpr I kLabels[kSystemGroupRows] = {I::SystemGroupWindows, I::SystemGroupTemp,
+                                    I::SystemGroupOld, I::SystemGroupProgramData,
+                                    I::SystemGroupNodeModules, I::SystemGroupRecycle,
                                     I::SystemGroupComponents};
-    return kLabels[group < 0 || group > 5 ? 0 : group];
+    return kLabels[group < 0 || group >= kSystemGroupRows ? 0 : group];
 }
 inline const wchar_t* SystemGroupDetail(int group) {
     static constexpr const wchar_t* kDetails[] = {
@@ -1833,12 +1836,14 @@ inline const wchar_t* SystemGroupDetail(int group) {
         L"Windows\\Temp \u00b7 AppData\\Local\\Temp \u00b7 INetCache \u00b7 CrashDumps",
         L"Windows.old \u00b7 $WINDOWS.~BT \u00b7 $Windows.~WS \u00b7 $WinREAgent",
         L"C:\\ProgramData",
+        L"node_modules",
         L"$Recycle.Bin \u00b7 System Volume Information",
-        L"WinSxS \u00b7 servicing \u00b7 node_modules"};
-    return kDetails[group < 0 || group > 5 ? 0 : group];
+        L"WinSxS \u00b7 servicing"};
+    static_assert(sizeof(kDetails) / sizeof(kDetails[0]) == kSystemGroupRows);
+    return kDetails[group < 0 || group >= kSystemGroupRows ? 0 : group];
 }
 inline bool SystemGroupEnabled(const WindowViewModel& vm, int group) {
-    return group >= 4 || (vm.settings_index_system_groups & (1u << group)) != 0;
+    return group >= kSystemGroupConfigurable || (vm.settings_index_system_groups & (1u << group)) != 0;
 }
 inline bool SystemGroupChipVisible(const WindowViewModel& vm, int group) {
     return SystemGroupEnabled(vm, group);
@@ -2028,6 +2033,7 @@ struct SettingsLayout {
     D2D1_RECT_F new_tab_open_card{};
     D2D1_RECT_F new_tab_open_row[2]{};
     D2D1_RECT_F close_last_tab_row{};
+    D2D1_RECT_F close_tab_double_click_row{};
     D2D1_RECT_F confirm_delete_row{};
     D2D1_RECT_F start_in_tray_row{};
     D2D1_RECT_F text_render_card{};
@@ -2075,8 +2081,8 @@ struct SettingsLayout {
     // System folder switch: card spans the switch row, chips, group rows and
     // the user's exclusion rows below them.
     D2D1_RECT_F index_system_card{}, index_system_row{}, index_system_more{};
-    D2D1_RECT_F index_system_chip[6]{};
-    D2D1_RECT_F index_system_group[6]{};
+    D2D1_RECT_F index_system_chip[kSystemGroupRows]{};
+    D2D1_RECT_F index_system_group[kSystemGroupRows]{};
     std::vector<D2D1_RECT_F> index_exclude_rows;
     std::vector<D2D1_RECT_F> index_exclude_remove;
     D2D1_RECT_F network_action[2]{};
@@ -2258,7 +2264,7 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
                 x += w + 6.0f * scale;
                 return r;
             };
-            for (int g = 0; g < 6; ++g) {
+            for (int g = 0; g < kSystemGroupRows; ++g) {
                 if (!SystemGroupChipVisible(vm, g)) continue;
                 l.index_system_chip[g] = place(painter
                     ? painter->MeasureBadgeWidth(pulse::l10n::Get(SystemGroupLabel(g))) : 120.0f * scale,
@@ -2269,7 +2275,7 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
             l.index_system_more = place(more_w, 28.0f * scale);
             y = chip_y + 22.0f * scale + 14.0f * scale;
             if (vm.settings_index_system_expanded) {
-                for (int g = 0; g < 6; ++g) {
+                for (int g = 0; g < kSystemGroupRows; ++g) {
                     l.index_system_group[g] = D2D1::RectF(card_left + 36.0f * scale, y,
                                                           card_right - 12.0f * scale, y + 52.0f * scale);
                     y += 52.0f * scale;

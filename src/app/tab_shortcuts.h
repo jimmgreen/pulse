@@ -10,7 +10,8 @@ inline bool IsTabShortcut(UINT key, bool ctrl, bool shift, bool alt) {
     return ctrl && !alt && key == VK_TAB;
 }
 
-inline std::optional<size_t> TabShortcutTarget(const WindowTabs& tabs, bool shift) {
+// Tab indices in strip order, without tabs inside collapsed groups.
+inline std::vector<size_t> VisibleTabIndices(const WindowTabs& tabs) {
     std::vector<size_t> visible;
     for (size_t i = 0; i < tabs.items.size(); ++i) {
         const auto& tab = tabs.items[i];
@@ -24,6 +25,11 @@ inline std::optional<size_t> TabShortcutTarget(const WindowTabs& tabs, bool shif
         }
         if (!hidden) visible.push_back(i);
     }
+    return visible;
+}
+
+inline std::optional<size_t> TabShortcutTarget(const WindowTabs& tabs, bool shift) {
+    const std::vector<size_t> visible = VisibleTabIndices(tabs);
     if (visible.empty()) return std::nullopt;
     if (shift) {
         for (auto it = visible.rbegin(); it != visible.rend(); ++it)

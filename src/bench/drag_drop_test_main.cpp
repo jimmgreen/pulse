@@ -236,6 +236,25 @@ int wmain() {
     Check(ordinary == DROPEFFECT_COPY && native_calls == 1 &&
           native_paths == std::vector<std::wstring>{original.wstring()},
           "ordinary drag still reaches native boundary with selected path");
+    Check(DropIntoOwnFolder({L"E:\\work\\.minecraft"}, L"E:\\work\\.minecraft") &&
+          DropIntoOwnFolder({L"E:\\work\\.minecraft"}, L"e:\\WORK\\.minecraft\\") &&
+          DropIntoOwnFolder({L"E:\\work\\a.txt", L"E:\\work\\.minecraft"}, L"E:\\work\\.minecraft\\mods") &&
+          DropIntoOwnFolder({L"\\\\?\\E:\\work\\pack"}, L"E:/work/pack/sub"),
+          "a folder dropped onto itself or into its own subtree is not a target");
+    Check(!DropIntoOwnFolder({L"E:\\work\\.minecraft"}, L"E:\\work") &&
+          !DropIntoOwnFolder({L"E:\\work\\pack"}, L"E:\\work\\pack2") &&
+          !DropIntoOwnFolder({L"E:\\work\\pack"}, L"E:\\work\\other\\pack") &&
+          !DropIntoOwnFolder({}, L"E:\\work"),
+          "parents, siblings with a shared prefix and other folders remain targets");
+    Check(IsDropLaunchProgram(L"C:\\Tools\\App.EXE") && IsDropLaunchProgram(L"D:\\run.bat") &&
+          IsDropLaunchProgram(L"D:\\run.cmd") && IsDropLaunchProgram(L"\\\\?\\C:\\old.com") &&
+          !IsDropLaunchProgram(L"D:\\notes.txt") && !IsDropLaunchProgram(L"D:\\tool.exe\\readme") &&
+          !IsDropLaunchProgram(L"D:\\App.lnk") && !IsDropLaunchProgram(L"D:\\noext"),
+          "programs that open dropped items are recognized by extension only");
+    Check(DropLaunchArguments({L"\\\\?\\C:\\a.txt", L"D:\\my files\\b c.txt", L"\\\\?\\UNC\\srv\\share\\d.txt",
+                               L"E:\\with space\\"}) ==
+              L"C:\\a.txt \"D:\\my files\\b c.txt\" \\\\srv\\share\\d.txt \"E:\\with space\\\\\"",
+          "dropped items become one argument each, quoted only when they contain blanks");
     DeleteFileW(original.c_str());
     DeleteFileW(archived.c_str());
     RemoveDirectoryW(root.c_str());

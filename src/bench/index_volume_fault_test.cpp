@@ -1,20 +1,40 @@
 #include "../index/index_engine.h"
 #include "../index/index_volume_fault_hooks.h"
 #include "../index/index_paths.h"
+#include "../common/runtime_log.h"
 #include <winioctl.h>
 #include <filesystem>
 #include <fstream>
 #include <cstring>
 #include <cstdio>
+#include <unordered_set>
 
 namespace pulse::index::volume_fault_test {
-enum class Mode { Fallback, Stopped, Cancelled, UsnFailure, BadPage, CancelUsn, Complete, SecondVolumeFails };
+enum class Mode { Fallback, Stopped, Cancelled, UsnFailure, BadPage, CancelUsn, Complete, SecondVolumeFails,
+    OpenFailure, LargeMft, LargeUsn, WriteFailure, RetireFailure, ReplaceFailure, RollbackFailure, ConfigFailure };
+constexpr size_t kLargeRecordCount = 5000001;
 Mode mode = Mode::Fallback;
 unsigned opens = 0, closes = 0, mft_calls = 0, usn_calls = 0;
+size_t emitted = 0;
 std::atomic<bool>* active_running = nullptr;
-void Reset(Mode value) { mode = value; opens = closes = mft_calls = usn_calls = 0; active_running = nullptr; }
-HANDLE OpenVolume(wchar_t letter) { ++opens; return reinterpret_cast<HANDLE>(static_cast<uintptr_t>(letter)); }
-BOOL CloseHandle(HANDLE) { ++closes; return TRUE; }
+void Reset(Mode value) { mode = value; opens = closes = mft_calls = usn_calls = 0; emitted = 0; active_running = nullptr; }
+bool SnapshotFault(uint32_t stage) {
+    if ((stage == 1 && mode == Mode::WriteFailure) ||
+        (stage == 2 && mode == Mode::RetireFailure) ||
+        (stage == 3 && (mode == Mode::ReplaceFailure || mode == Mode::RollbackFailure)) ||
+        (stage == 4 && mode == Mode::RollbackFailure) ||
+        (stage == 5 && mode == Mode::ConfigFailure)) {
+        SetLastError(stage == 4 ? ERROR_ACCESS_DENIED : stage == 1 ? ERROR_DISK_FULL : ERROR_SHARING_VIOLATION);
+        return true;
+    }
+    return false;
+}
+HANDLE OpenVolume(wchar_t letter) {
+    ++opens;
+    if (mode == Mode::OpenFailure) { SetLastError(ERROR_ACCESS_DENIED); return INVALID_HANDLE_VALUE; }
+    return reinterpret_cast<HANDLE>(static_cast<uintptr_t>(letter));
+}
+BOOL CloseHandle(HANDLE) { ++closes; SetLastError(ERROR_INVALID_HANDLE); return TRUE; }
 bool QueryJournal(HANDLE, uint64_t& id, int64_t& next) { id = 123; next = 456; return true; }
 uint64_t RootFrn(wchar_t) { return 5; }
 bool IsAdmin() { return true; }
@@ -33,12 +53,22 @@ std::vector<VolumeInfo> ConfiguredVolumes() {
 MftReadResult EnumerateMft(HANDLE volume, std::atomic<bool>* running,
     const std::function<void(size_t)>& progress, const std::function<bool(MftFile&&)>& emit) {
     ++mft_calls; active_running = running;
+    if (mode == Mode::LargeMft) {
+        // Duplicate FRNs keep tree construction small while exercising the real
+        // record accumulation limit, which is checked before deduplication.
+        for (size_t i = 0; i < kLargeRecordCount; ++i) {
+            MftFile item; item.frn = 42; item.parent = 5; item.name = L"x"; item.name_type = 1;
+            if (!emit(std::move(item))) return MftReadResult::Stopped;
+            ++emitted;
+        }
+        return MftReadResult::Complete;
+    }
     MftFile file;
     file.frn = 42; file.parent = 5; file.name_type = 1;
     const bool complete = mode == Mode::Complete ||
         (mode == Mode::SecondVolumeFails && reinterpret_cast<uintptr_t>(volume) == L'Q');
     file.name = complete ? L"candidate.txt" : L"partial.txt";
-    emit(std::move(file));
+    if (!emit(std::move(file))) return MftReadResult::Stopped;
     progress(1);
     if (mode == Mode::Cancelled) { *running = false; return MftReadResult::Failed; }
     if (mode == Mode::Stopped) return MftReadResult::Stopped;
@@ -50,6 +80,26 @@ BOOL DeviceIoControl(HANDLE, DWORD code, LPVOID input, DWORD, LPVOID output, DWO
     if (code != FSCTL_ENUM_USN_DATA) { SetLastError(ERROR_INVALID_FUNCTION); return FALSE; }
     if (mode == Mode::SecondVolumeFails) { SetLastError(ERROR_READ_FAULT); return FALSE; }
     const auto* med = static_cast<MFT_ENUM_DATA_V0*>(input);
+    if (mode == Mode::LargeUsn) {
+        if (emitted == kLargeRecordCount) { SetLastError(ERROR_HANDLE_EOF); return FALSE; }
+        const DWORD record_size = static_cast<DWORD>((offsetof(USN_RECORD_V2, FileName) + 2 + 7) & ~size_t{7});
+        const size_t records = (std::min)(kLargeRecordCount - emitted,
+            static_cast<size_t>((capacity - sizeof(USN)) / record_size));
+        const DWORD bytes = static_cast<DWORD>(sizeof(USN) + records * record_size);
+        std::memset(output, 0, bytes);
+        const uint64_t cursor = med->StartFileReferenceNumber + records;
+        std::memcpy(output, &cursor, sizeof(cursor));
+        for (size_t i = 0; i < records; ++i) {
+            auto* rec = reinterpret_cast<USN_RECORD_V2*>(static_cast<BYTE*>(output) + sizeof(USN) + i * record_size);
+            rec->RecordLength = record_size; rec->MajorVersion = 2;
+            rec->FileReferenceNumber = 77; rec->ParentFileReferenceNumber = 5;
+            rec->FileNameOffset = static_cast<WORD>(offsetof(USN_RECORD_V2, FileName));
+            rec->FileNameLength = sizeof(wchar_t); rec->FileName[0] = L'x';
+        }
+        emitted += records;
+        *returned = bytes;
+        return TRUE;
+    }
     if (med->StartFileReferenceNumber) {
         SetLastError(mode == Mode::UsnFailure ? ERROR_READ_FAULT : ERROR_HANDLE_EOF);
         return FALSE;
@@ -99,13 +149,24 @@ struct EngineTestAccess {
         return true;
     }
     static const void* Mapping(Engine& engine) { return engine.map_.get(); }
+    static bool Write(Engine& engine, const std::wstring& path, bool invalid = false) {
+        Engine::Store store;
+        engine.AddNodeLocked(store, -1, L"Q:", Engine::kFlagDir);
+        if (invalid) store.nodes.front().parent = 0;
+        return engine.WriteIndexFile(path, store, {}, 654321);
+    }
+    static bool Map(Engine& engine, const std::wstring& path) {
+        std::unique_ptr<Engine::MappedFile> mapped;
+        return engine.MapIndexFile(path, mapped);
+    }
+    static bool Commit(Engine& engine, const std::wstring& path) { return engine.CommitMappedFile(path); }
     static bool Gap(Engine& engine) { return engine.folder_size_gap_; }
     static void Rebuild(Engine& engine) { engine.running_ = true; engine.FullRebuild("fault-test"); }
     static void Stop(Engine& engine) { engine.running_ = false; }
 };
 }
 
-int main() {
+int main(int argc, char** argv) {
     using namespace pulse::index;
     namespace vf = volume_fault_test;
     namespace fs = std::filesystem;
@@ -118,12 +179,56 @@ int main() {
     SetEnvironmentVariableW(L"LOCALAPPDATA", root.c_str());
     SetMachineIndexScope(false);
     SetActiveIndexDirectory(root.wstring());
+    check(pulse::diagnostics::runtime::Initialize(root.wstring(), "index"), "enable isolated scan failure diagnostics");
+    {
+        Engine engine;
+        const auto candidate = (root / L"diagnostic-snapshot.bin").wstring();
+        vf::Reset(vf::Mode::Complete);
+        check(!EngineTestAccess::Write(engine, (root / L"absent" / L"base").wstring()) &&
+            GetLastError() == ERROR_PATH_NOT_FOUND, "snapshot open failure preserves native error");
+        check(!EngineTestAccess::Write(engine, candidate, true) && GetLastError() == ERROR_INVALID_DATA,
+            "snapshot hierarchy rejection reports deterministic error");
+        vf::Reset(vf::Mode::WriteFailure);
+        check(!EngineTestAccess::Write(engine, candidate) && GetLastError() == ERROR_DISK_FULL &&
+            !fs::exists(candidate + L".tmp"), "injected write failure preserves disk-full after cleanup");
+        vf::Reset(vf::Mode::Complete);
+        { std::ofstream invalid(fs::path(candidate), std::ios::binary); invalid << "invalid"; }
+        check(!EngineTestAccess::Map(engine, candidate) && GetLastError() == ERROR_INVALID_DATA,
+            "mapping validation preserves error after closing file");
+        check(!EngineTestAccess::Commit(engine, candidate) && GetLastError() == ERROR_FILE_NOT_FOUND,
+            "publish map failure retains underlying open error");
+        fs::remove(candidate);
+        for (const auto mode : {vf::Mode::RetireFailure, vf::Mode::ReplaceFailure, vf::Mode::RollbackFailure}) {
+            vf::Reset(vf::Mode::Complete);
+            check(EngineTestAccess::Seed(engine, candidate), "seed isolated publication failure fixture");
+            const auto* previous = EngineTestAccess::Mapping(engine);
+            check(EngineTestAccess::Write(engine, candidate), "write candidate for injected publication failure");
+            vf::Reset(mode);
+            check(!EngineTestAccess::Commit(engine, candidate) && GetLastError() == ERROR_SHARING_VIOLATION,
+                "publication preserves primary error across mapping cleanup and rollback");
+            check(EngineTestAccess::Mapping(engine) == previous,
+                "publication failure retains previous live mapping");
+            fs::remove(candidate + L".tmp");
+            fs::remove(candidate);
+        }
+        vf::Reset(vf::Mode::ConfigFailure);
+        EngineTestAccess::Rebuild(engine);
+        check(vf::opens == 0, "configuration failure ends rebuild before volume enumeration");
+        EngineTestAccess::Stop(engine);
+    }
     for (const auto mode : {vf::Mode::Fallback, vf::Mode::Stopped, vf::Mode::Cancelled,
-                           vf::Mode::UsnFailure, vf::Mode::BadPage, vf::Mode::CancelUsn}) {
+                           vf::Mode::UsnFailure, vf::Mode::BadPage, vf::Mode::CancelUsn, vf::Mode::OpenFailure}) {
         vf::Reset(mode);
         Engine engine;
         const bool result = EngineTestAccess::Volume(engine);
+        const DWORD error = GetLastError();
         check(result == (mode == vf::Mode::Fallback), "production volume scan returns expected terminal result");
+        if (!result) {
+            const DWORD expected = mode == vf::Mode::OpenFailure ? ERROR_ACCESS_DENIED :
+                mode == vf::Mode::UsnFailure ? ERROR_READ_FAULT :
+                mode == vf::Mode::BadPage ? ERROR_INVALID_DATA : ERROR_OPERATION_ABORTED;
+            check(error == expected, "volume failure preserves cause despite handle cleanup changing last error");
+        }
         check(!EngineTestAccess::Candidate(engine, L"partial.txt"), "failed partial MFT records never enter tree");
         if (mode == vf::Mode::Fallback)
             check(EngineTestAccess::Candidate(engine, L"fallback.txt") && vf::usn_calls == 2,
@@ -132,7 +237,18 @@ int main() {
             check(EngineTestAccess::EmptyCandidate(engine), "stopped or failed enumeration publishes no partial tree");
         if (mode == vf::Mode::Stopped || mode == vf::Mode::Cancelled)
             check(vf::usn_calls == 0, "stopped/cancelled MFT never enters USN fallback");
-        check(vf::opens == 1 && vf::closes == 1, "fake volume lifetime is balanced");
+        check(vf::opens == 1 && vf::closes == (mode == vf::Mode::OpenFailure ? 0u : 1u), "fake volume lifetime is balanced");
+        EngineTestAccess::Stop(engine);
+    }
+    for (const auto mode : {vf::Mode::LargeMft, vf::Mode::LargeUsn}) {
+        if (argc > 1 && std::strcmp(argv[1], "--diagnostics-only") == 0) break;
+        vf::Reset(mode);
+        Engine engine;
+        check(EngineTestAccess::Volume(engine) && vf::emitted == vf::kLargeRecordCount &&
+            EngineTestAccess::Candidate(engine, L"x"),
+            mode == vf::Mode::LargeMft ? "MFT scan completes above five million records" :
+                "USN fallback completes above five million records");
+        check(vf::opens == 1 && vf::closes == 1, "large scan releases fake volume");
         EngineTestAccess::Stop(engine);
     }
     const auto snapshot = fs::path(CacheFilePath());
@@ -144,7 +260,7 @@ int main() {
         const auto original = bytes();
         const auto* mapping = EngineTestAccess::Mapping(engine);
         const auto count = engine.Count();
-        for (const auto mode : {vf::Mode::SecondVolumeFails, vf::Mode::Cancelled, vf::Mode::Stopped}) {
+        for (const auto mode : {vf::Mode::SecondVolumeFails, vf::Mode::Cancelled, vf::Mode::Stopped, vf::Mode::OpenFailure}) {
             vf::Reset(mode);
             EngineTestAccess::Rebuild(engine);
             check(!original.empty() && bytes() == original, "failed rebuild preserves disk snapshot byte for byte");
@@ -167,6 +283,58 @@ int main() {
             "all-success control replaces real disk snapshot and clears gap");
         EngineTestAccess::Stop(engine);
     }
+    pulse::diagnostics::runtime::Shutdown();
+    const auto log_path = root / L"Diagnostics" / L"Runtime" / (L"index-" + std::to_wstring(GetCurrentProcessId()) + L".jsonl");
+    std::ifstream log_file(log_path);
+    bool scan_error = false, rebuild_error = false, write_error = false, rollback_error = false;
+    bool config_error = false, hierarchy_error = false, cancelled = false, correlated = false;
+    std::unordered_set<uint64_t> rebuilds;
+    std::unordered_set<uint64_t> all_rebuilds;
+    bool balanced = true;
+    auto number = [](const std::string& line, const char* field) {
+        const auto at = line.find(std::string("\"") + field + "\":");
+        return at == std::string::npos ? 0ull : std::stoull(line.substr(at + std::strlen(field) + 3));
+    };
+    for (std::string line; std::getline(log_file, line);) {
+        const auto operation = number(line, "operation");
+        const bool is_error = number(line, "severity") == static_cast<uint64_t>(pulse::diagnostics::runtime::Level::Error);
+        if (line.find("\"event\":\"index_rebuild_begin\"") != std::string::npos) {
+            all_rebuilds.insert(operation);
+            balanced = rebuilds.insert(operation).second && balanced;
+        }
+        if (line.find("\"event\":\"index_rebuild_end\"") != std::string::npos)
+            balanced = rebuilds.erase(operation) == 1 && balanced;
+        if (line.find("filename_write_data_failed") != std::string::npos)
+            write_error = is_error && number(line, "error") == ERROR_DISK_FULL;
+        if (line.find("filename_publish_rollback_failed") != std::string::npos)
+            rollback_error = is_error && number(line, "error") == ERROR_ACCESS_DENIED;
+        if (line.find("index_rebuild_config_failed") != std::string::npos)
+            config_error = is_error && operation != 0 && rebuilds.contains(operation);
+        if (line.find("index_write_invalid_hierarchy") != std::string::npos)
+            hierarchy_error = is_error && number(line, "reason") == 3 && number(line, "node") == 0 && number(line, "parent") == 0;
+        if (line.find("index_volume_scan_cancelled") != std::string::npos)
+            cancelled = !is_error && number(line, "error") == ERROR_OPERATION_ABORTED;
+        if (line.find("index_volume_scan_failed") != std::string::npos && operation)
+            correlated = is_error && rebuilds.contains(operation);
+        if (line.find("\"error\":5") == std::string::npos) continue;
+        if (line.find("\"event\":\"index_volume_scan_failed\"") != std::string::npos &&
+            line.find("\"phase\":1") != std::string::npos && line.find("\"drive\":81") != std::string::npos) scan_error = true;
+        if (line.find("\"event\":\"index_rebuild_end\"") != std::string::npos) rebuild_error = true;
+    }
+    log_file.close();
+    const auto critical_path = root / L"Diagnostics" / L"Runtime" /
+        (L"index-" + std::to_wstring(GetCurrentProcessId()) + L".critical.jsonl");
+    std::ifstream critical_file(critical_path);
+    for (std::string line; std::getline(critical_file, line);) {
+        if (line.find("index_volume_scan_failed") != std::string::npos &&
+            all_rebuilds.contains(number(line, "operation"))) correlated = true;
+    }
+    critical_file.close();
+    check(scan_error && rebuild_error, "scan and rebuild logs retain access-denied cause instead of generic read fault");
+    check(write_error && rollback_error && hierarchy_error,
+        "default error events retain write, rollback and hierarchy failure details");
+    check(config_error && balanced && rebuilds.empty(), "every rebuild including configuration failure has paired terminal event");
+    check(cancelled && correlated, "cancellation is informational and scan failures correlate to active rebuild");
     SetActiveIndexDirectory({});
     if (root.parent_path() != parent || !root.filename().wstring().starts_with(L"volume-fault-")) return 2;
     std::error_code error;

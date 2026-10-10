@@ -73,6 +73,31 @@ ShellCommandResult LaunchShellCommand(const std::wstring& command, const std::ws
     if (execute.hProcess) CloseHandle(execute.hProcess);
     return {ERROR_SUCCESS, error, true};
 }
+ShellItemResult LaunchShellItem(const std::wstring& file, const std::wstring& verb,
+    const std::wstring& arguments, const std::wstring& directory, HWND owner,
+    const ShellCommandApi& api) {
+    if (file.empty()) return {ERROR_INVALID_PARAMETER};
+    const auto shell_file = pulse::path::StripExtendedPathPrefix(file);
+    const auto working = pulse::path::StripExtendedPathPrefix(directory);
+    SHELLEXECUTEINFOW execute{sizeof(execute)};
+    // This STA worker waits on a condition variable, not a message pump.
+    // DDE/COM association handoff must finish before it goes idle again.
+    execute.fMask = SEE_MASK_NOASYNC | SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+    if (verb.empty()) execute.fMask |= SEE_MASK_INVOKEIDLIST;
+    execute.hwnd = owner;
+    execute.lpVerb = verb.empty() ? nullptr : verb.c_str();
+    execute.lpFile = shell_file.c_str();
+    execute.lpParameters = arguments.empty() ? nullptr : arguments.c_str();
+    execute.lpDirectory = working.empty() ? nullptr : working.c_str();
+    execute.nShow = SW_SHOWNORMAL;
+    SetLastError(ERROR_SUCCESS);
+    const BOOL accepted = api.shell_execute(&execute);
+    const DWORD reported = accepted ? ERROR_SUCCESS : GetLastError();
+    const DWORD error = accepted ? ERROR_SUCCESS : (reported ? reported : ERROR_GEN_FAILURE);
+    const DWORD process_id = accepted && execute.hProcess ? GetProcessId(execute.hProcess) : 0;
+    if (execute.hProcess) CloseHandle(execute.hProcess);
+    return {error, process_id, execute.fMask};
+}
 TerminalLaunchResult LaunchTerminal(const std::wstring& executable, const std::wstring& arguments,
     const std::wstring& directory, HWND owner, const ShellCommandApi& api) {
     if (executable.empty()) return {ERROR_INVALID_PARAMETER, ERROR_INVALID_PARAMETER, false};

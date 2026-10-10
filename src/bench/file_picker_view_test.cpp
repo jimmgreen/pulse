@@ -48,7 +48,7 @@ FolderPickerChrome MakeChrome(PickerMode mode) {
     c.filter_text = L"文本文档 (*.txt; *.md)";
     c.primary_text = mode == PickerMode::Folder ? L"选择文件夹" : L"打开";
     c.cancel_text = L"取消";
-    c.summary = L"将选择：C:\\Users\\SS\\Documents\\季度报告\\2026 第三季度.docx";
+    c.summary = L"将选择：C:\\Users\\Example\\Documents\\季度报告\\2026 第三季度.docx";
     c.primary_enabled = true;
     c.hosted_edit = false;
     c.filename_text = L"2026 第三季度销售报告（最终版）.docx";

@@ -11,7 +11,7 @@ void HideMainWindowToTray(AppState& s) {
 }
 
 bool WantsTrayIcon(const AppState& s, bool window_hidden) {
-    return app::TrayIconWanted(s.appPrefs.keep_running_on_close || s.appPrefs.global_search_enabled,
+    return app::TrayIconWanted(s.appPrefs.KeepsRunningInBackground(),
                                s.appPrefs.notify_icon_mode, window_hidden);
 }
 

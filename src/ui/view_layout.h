@@ -90,6 +90,9 @@ public:
     D2D1_RECT_F FolderSizeRect(int view_index) const noexcept;
     int HitTest(float x, float y) const noexcept;
     std::pair<int, int> VisibleRange() const noexcept;
+    // Indices whose band can meet [lo, hi] along the scroll axis (viewport
+    // pixels: x for column-major views, y otherwise), including off screen.
+    std::pair<int, int> RangeForSpan(float lo, float hi) const noexcept;
     int MoveIndex(int current, int dx, int dy) const noexcept;
     int PageDelta() const noexcept;
     // Group headers (empty unless grouped): header g in viewport pixels.

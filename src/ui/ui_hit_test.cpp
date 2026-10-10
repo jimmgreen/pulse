@@ -418,6 +418,9 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 if (ContainsPt(lay.close_last_tab_row, x, y)) {
                     r.region = HitTestResult::SettingsToggle; r.index = 26; return r;
                 }
+                if (ContainsPt(lay.close_tab_double_click_row, x, y)) {
+                    r.region = HitTestResult::SettingsToggle; r.index = 35; return r;
+                }
                 if (ContainsPt(lay.confirm_delete_row, x, y)) {
                     r.region = HitTestResult::SettingsToggle; r.index = 32; return r;
                 }
@@ -457,7 +460,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                     return r;
                 }
                 // System folder switch shares the region: 1 switch row,
-                // 2 customize, 10 + i group i (only the configurable 0-3).
+                // 2 customize, 10 + i group i (only the configurable 0-4).
                 if (ContainsPt(lay.index_system_more, x, y)) {
                     r.region = HitTestResult::SettingsIndexExcludeAction;
                     r.index = 2;
@@ -468,7 +471,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                     r.index = 1;
                     return r;
                 }
-                for (int g = 0; g < 4; ++g) {
+                for (int g = 0; g < kSystemGroupConfigurable; ++g) {
                     if (ContainsPt(lay.index_system_group[g], x, y)) {
                         r.region = HitTestResult::SettingsIndexExcludeAction;
                         r.index = 10 + g;

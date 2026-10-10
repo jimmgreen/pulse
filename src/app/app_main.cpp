@@ -1,3 +1,4 @@
+#include "app_diagnostics.h"
 #include "../common/windows_compat.h"
 #include "../ui/FluentTokens.h"
 #include "quick_access.h"
@@ -224,6 +225,7 @@ void Render(AppState& s) {
     ui::Theme theme = hc ? ui::MakeHighContrastTheme() : ui::MakeTheme(s.darkMode, s.accentColor);
 
     if (s.scrollAnimating) UpdateSmoothScroll(s);
+    UpdateMarqueeFrame(s);
     UpdateProcessMetrics(s);
     ui::WindowViewModel vm = BuildVm(s);
     vm.backdrop_enabled = !hc && s.compositor.UsesTransparentComposition() && s.backdropActive;
@@ -285,7 +287,8 @@ void Render(AppState& s) {
     s.lastFrameTime = t1;
     // Motion started or still running: the next frames follow the display
     // clock instead of the 16 ms UI timer (see WM_FRAME_PUMP).
-    if (s.framePump.Running() && (s.scrollAnimating || s.renderer.TickMotion(GetTickCount64())))
+    if (s.framePump.Running() &&
+        (s.scrollAnimating || s.marqueeAutoScroll || s.renderer.TickMotion(GetTickCount64())))
         s.framePump.Arm();
 }
 
@@ -638,50 +641,12 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             return false;
         };
         settings_callbacks.prepare_diagnostics_export =
-            [s](std::wstring& destination, bool& include_service) {
-            if (!ConfirmDiagnosticsExport(*s, include_service)) return false;
+            [s](std::wstring& destination, bool& include_service, bool& include_dumps) {
+            if (!ConfirmDiagnosticsExport(*s, include_service, include_dumps)) return false;
             return PickFolder(*s, destination,
                 l10n::Get(l10n::StringId::DiagnosticsExportLocation).c_str());
         };
-        settings_callbacks.export_diagnostics =
-            [](const std::wstring& destination, bool include_service,
-               std::wstring& error) {
-            WIN32_FIND_DATAW data{};
-            HANDLE find = FindFirstFileW((destination + L"\\*").c_str(), &data);
-            bool empty = true;
-            if (find != INVALID_HANDLE_VALUE) {
-                do {
-                    if (wcscmp(data.cFileName, L".") != 0 &&
-                        wcscmp(data.cFileName, L"..") != 0) {
-                        empty = false;
-                        break;
-                    }
-                } while (FindNextFileW(find, &data));
-                FindClose(find);
-            }
-            if (!empty) return false;
-
-            diagnostics::ExportOptions options;
-            options.source_root = app::GetPulseDataDir();
-            options.include_dumps = true;
-            options.require_empty_destination = true;
-            if (!include_service) {
-                options.destination = destination;
-                return diagnostics::Export(options, &error);
-            }
-
-            const std::wstring service_dir = destination + L"\\IndexService";
-            const bool service_exported = CreateDirectoryW(service_dir.c_str(), nullptr) &&
-                index::IndexClient::ExportDiagnosticsElevated(service_dir);
-            const std::wstring user_dir = destination + L"\\User";
-            if (!CreateDirectoryW(user_dir.c_str(), nullptr)) return false;
-            options.destination = user_dir;
-            const bool user_exported = diagnostics::Export(options, &error);
-            if (!service_exported && error.empty()) error = l10n::Pick(
-                L"用户日志已导出，但索引服务诊断未完整导出。请检查 IndexService 目录中的清单，或重新导出并允许管理员授权。",
-                L"User logs were exported, but index service diagnostics are incomplete. Check the manifest in IndexService, or export again and allow administrator access.");
-            return user_exported && service_exported;
-        };
+        settings_callbacks.export_diagnostics = ExportAppDiagnostics;
         s->settings.BindUi(s->appPrefs, s->ctxMenuPrefs, s->index,
                            s->networkIndex, std::move(settings_callbacks));
         ApplyGlobalSearchSettings(*s);
@@ -979,7 +944,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (wParam == HTCLOSE) {
             SuspendContentSearches(*s);
             s->globalSearchWindow.Hide();
-            if (s->appPrefs.keep_running_on_close || s->appPrefs.global_search_enabled) HideMainWindowToTray(*s);
+            if (s->appPrefs.KeepsRunningInBackground()) HideMainWindowToTray(*s);
             else DestroyWindow(hwnd);
             return 0;
         }
@@ -988,7 +953,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
     case WM_CLOSE: {
         if (s) { SuspendContentSearches(*s); s->globalSearchWindow.Hide(); }
-        if (s && (s->appPrefs.keep_running_on_close || s->appPrefs.global_search_enabled)) {
+        if (s && s->appPrefs.KeepsRunningInBackground()) {
             HideMainWindowToTray(*s);
             return 0;
         }
@@ -1166,7 +1131,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (!s) return 0;
         s->framePump.FrameConsumed();
         if (!IsWindowVisible(hwnd) || IsIconic(hwnd) ||
-            (!s->scrollAnimating && !s->renderer.TickMotion(GetTickCount64()))) {
+            (!s->scrollAnimating && !s->marqueeAutoScroll && !s->renderer.TickMotion(GetTickCount64()))) {
             s->framePump.Disarm();  // WM_PAINT re-arms once shown again
             return 0;
         }
@@ -1183,6 +1148,10 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     }
 
     case WM_TIMER: {
+        if (s && wParam == kTimerMarqueeScroll) {
+            TickMarqueeAutoScroll(*s);
+            return 0;
+        }
         if (s && wParam == kTimerUncProbeRetry) {
             KillTimer(hwnd, kTimerUncProbeRetry);
             PumpUncProbe(*s);
@@ -1520,6 +1489,11 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         // Properties shortcut (alt && VK_RETURN) was unreachable.
         if (s && wParam == VK_RETURN && (GetKeyState(VK_MENU) & 0x8000))
             return HandleKeyDown(s, hwnd, msg, wParam, lParam);
+        // Same for Alt+Left/Right/Up (back, forward, up) and F10 (Shift+F10 is
+        // the context menu); unhandled keys still reach DefWindowProc there.
+        if (s && (wParam == VK_F10 || ((GetKeyState(VK_MENU) & 0x8000) &&
+                  (wParam == VK_LEFT || wParam == VK_RIGHT || wParam == VK_UP))))
+            return HandleKeyDown(s, hwnd, msg, wParam, lParam);
         break;
 
     case WM_SYSCHAR:
@@ -1716,18 +1690,17 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 token, std::move(payload->items), GetTickCount64(), payload->partial);
             if (completed.accepted) {
                 bool prefs_changed = false;
-                if (!completed.partial &&
-                    s->ctxMenuPrefs.RecordComTiming(completed.cache_key,
-                                                    completed.elapsed_ms))
-                    prefs_changed = true;
                 if (!completed.partial) {
+                    // The host names only a handler provably hung on its own
+                    // at its stuck limit (collect_hung); three such hangs
+                    // disable it. Slow-but-finished handlers are not reported:
+                    // the menu streams rows as they arrive and never waits.
                     for (const auto& clsid : payload->slow_clsids) {
                         // SendTo is exempt from the auto-disable (#77): it
-                        // serializes the whole default menu, so it would be
-                        // permanently killed after three slow right-clicks.
+                        // serializes the whole default menu.
                         if (ipc::IsSendToHandlerClsid(clsid)) continue;
                         if (s->ctxMenuPrefs.RecordComTiming(
-                                ipc::HandlerCatalogKey(clsid), 1000))
+                                ipc::HandlerCatalogKey(clsid), 5000))
                             prefs_changed = true;
                     }
                 }

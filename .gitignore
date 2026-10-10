@@ -87,3 +87,7 @@ CONERR$
 
 # Local promotional video (not part of source releases).
 /docs/video/*.mp4
+
+# Local scratch: experiment backups and size/test scripts.
+/_backups/
+/.size-test/

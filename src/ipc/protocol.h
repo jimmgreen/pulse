@@ -51,8 +51,9 @@
 //                              item_id(u32) + flags(u32, CTX_ITEM_*) +
 //                              verb(string) + text(string) +
 //                              clsid(string) + handler(string) +
-//                              slow_clsids(string array, optional; handlers that
-//                              took >= 1000ms, final payload only)
+//                              slow_clsids(string array, optional; final payload
+//                              only: the one handler provably hung on its own
+//                              at the stuck limit, see collect_hung)
 #pragma once
 #include <windows.h>
 #include <cstdint>
@@ -99,6 +100,16 @@ enum CtxItemFlags : uint32_t {
     CTX_ITEM_HAS_CHILDREN = 4,  // submenu header; item_id is not invokable
     CTX_ITEM_CHILD = 8,         // belongs to the nearest preceding header
 };
+// Bits 16..31 of the per-item flags carry the row's access key (UTF-16 code
+// unit of the raw label's "&X", upper-cased; 0 = none). Older readers only
+// test the low bits above, so the field is backward compatible both ways.
+constexpr uint32_t CTX_ITEM_MNEMONIC_SHIFT = 16;
+inline uint32_t PackCtxItemMnemonic(wchar_t key) {
+    return static_cast<uint32_t>(static_cast<uint16_t>(key)) << CTX_ITEM_MNEMONIC_SHIFT;
+}
+inline wchar_t UnpackCtxItemMnemonic(uint32_t flags) {
+    return static_cast<wchar_t>(flags >> CTX_ITEM_MNEMONIC_SHIFT);
+}
 
 // RSP_CTX_ITEMS message flags (after session_id).
 enum CtxItemsMsgFlags : uint32_t {

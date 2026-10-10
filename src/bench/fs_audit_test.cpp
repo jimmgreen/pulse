@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <cstdio>
 #include <cstring>
+#include <cwctype>
 static std::atomic<bool> short_read{false}, fallback_block{false};
 static HANDLE entered, release_io;
 static BOOL WINAPI TestRead(HANDLE h, LPVOID b, DWORD n, LPDWORD done, LPOVERLAPPED o) {
@@ -17,8 +18,23 @@ static HANDLE WINAPI TestFind(LPCWSTR p, FINDEX_INFO_LEVELS level, LPVOID data,
     if (fallback_block) { SetEvent(entered); WaitForSingleObject(release_io,INFINITE); }
     return FindFirstFileExW(p,level,data,search,filter,flags);
 }
+// This PC media queries: one drive is held to stand in for a disconnected
+// mapped drive or an empty card reader.
+static std::atomic<wchar_t> stalled_drive{0};
+static std::atomic<unsigned> stalled_queries{0};
+static HANDLE release_drive;
+static BOOL WINAPI TestVolume(LPCWSTR root, LPWSTR name, DWORD name_size, LPDWORD serial,
+                              LPDWORD max_component, LPDWORD flags, LPWSTR fs_name, DWORD fs_size) {
+    if (root && stalled_drive.load() != 0 && root[0] == stalled_drive.load()) {
+        ++stalled_queries;
+        WaitForSingleObject(release_drive, INFINITE);
+    }
+    return GetVolumeInformationW(root, name, name_size, serial, max_component, flags, fs_name, fs_size);
+}
 #define FindFirstFileExW TestFind
+#define GetVolumeInformationW TestVolume
 #include "../fs/fs_enum.cpp"
+#undef GetVolumeInformationW
 #undef FindFirstFileExW
 #include "../fs/fs_recycle.cpp"
 static std::atomic<DWORD> watch_error{0};
@@ -35,6 +51,9 @@ static BOOL WINAPI TestChanges(HANDLE h, LPVOID b, DWORD n, BOOL tree, DWORD fil
 #include "../app/app_worker.cpp"
 // Isolate enumeration/worker lifetime from unrelated cache, link, sort and
 // logging services. The production WorkerPool and enumeration run unchanged.
+namespace pulse::diagnostics::runtime {
+void Event(const char*, std::initializer_list<Field>, Level) noexcept {}
+}
 namespace pulse::app {
 std::wstring FindGitRoot(const std::wstring&) { return {}; }
 void ResolveLinksInPlace(const std::wstring&,std::vector<fs::DirEntry>&,const std::function<bool()>&) {}
@@ -234,6 +253,50 @@ int main() {
     ValidateNtDirectoryRecord(info,sizeof(record));
     Check(std::wstring(info->FileName,info->FileNameLength/2)==name && info->EaSize==0xa0000003,"M03-008 shared NT ABI preserves nonzero EA/tag and Unicode filename");
     g_NtCreateFile=real_open;g_NtQueryDirectoryFile=real_query;
+    {
+        // One stalled drive used to time out the whole This PC listing
+        // ("目录不可用") while every drive still opened on its own.
+        wchar_t windows_dir[MAX_PATH]{};
+        GetWindowsDirectoryW(windows_dir, MAX_PATH);
+        const wchar_t letter = static_cast<wchar_t>(towupper(windows_dir[0]));
+        const std::wstring root = NormalizePath(std::wstring{letter, L':', L'\\'});
+        const std::wstring suffix = std::wstring(L" (") + letter + L":)";
+        auto list = [](std::vector<DirEntry>& listed) {
+            const ULONGLONG start = GetTickCount64();
+            EnumerateDirectory(L"", listed, EnumerationOptions{});
+            return GetTickCount64() - start;
+        };
+        auto find = [&](const std::vector<DirEntry>& listed) -> const DirEntry* {
+            for (const auto& entry : listed) if (entry.full_path == root) return &entry;
+            return nullptr;
+        };
+        release_drive = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        stalled_drive = letter;
+        std::vector<DirEntry> first, second, third;
+        bool listed_ok = true;
+        ULONGLONG first_ms = 0, second_ms = 0;
+        try { first_ms = list(first); second_ms = list(second); } catch (...) { listed_ok = false; }
+        const DirEntry* stalled = find(first);
+        std::printf("this pc stalled drive: first=%llums second=%llums drives=%zu queries=%u\n",
+                    first_ms, second_ms, first.size(), stalled_queries.load());
+        Check(listed_ok && first_ms < 5000 && stalled && stalled->name.ends_with(suffix) &&
+              stalled->drive_total == 0 && first.size() == second.size(),
+              "This PC lists every drive while one drive's media query stalls");
+        Check(listed_ok && second_ms < 5000 && find(second) && stalled_queries.load() == 1,
+              "a drive whose earlier media query is still stuck is not probed again");
+        stalled_drive = 0;
+        SetEvent(release_drive);
+        // The released query finishes on its own thread; poll briefly.
+        const DirEntry* recovered = nullptr;
+        for (int i = 0; i < 30 && listed_ok && !(recovered && recovered->drive_total > 0); ++i) {
+            try { list(third); } catch (...) { listed_ok = false; }
+            recovered = find(third);
+            if (!(recovered && recovered->drive_total > 0)) Sleep(100);
+        }
+        Check(listed_ok && recovered && recovered->drive_total > 0,
+              "the drive's label and capacity return once its media answers");
+        CloseHandle(release_drive);
+    }
     CloseHandle(entered);CloseHandle(release_io);std::filesystem::remove_all(dir);
     return failures?1:0;
 }

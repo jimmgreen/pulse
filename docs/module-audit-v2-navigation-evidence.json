@@ -1,0 +1,147 @@
+[
+  {
+    "id": "M04-002",
+    "status": "verified",
+    "evidence": "bench_data/audit_navigation_20261006/transfer_audit_v2.log: pulse_transfer_audit_test exit 0, 28 PASS/0 FAIL. Isolated fixture + deny ACL; queued cancel/pause, scanning cancel, file/tree KeepBoth and persisted undo, incomplete scan, partial move undo, per-source target rights, literal shell-template argv, real OpsManager authorization partial completion and conflict cancel/session reuse/exact destination. Authorization helper is same-token test host, no real UAC. Previous failed authorization fixture log retained as transfer_audit.log; test-host whitelist corrected. Protocol target exit0 in elevated_protocol.log."
+  },
+  {
+    "id": "M04-003",
+    "status": "verified",
+    "evidence": "bench_data/audit_navigation_20261006/transfer_audit_v2.log: pulse_transfer_audit_test exit 0, 28 PASS/0 FAIL. Isolated fixture + deny ACL; queued cancel/pause, scanning cancel, file/tree KeepBoth and persisted undo, incomplete scan, partial move undo, per-source target rights, literal shell-template argv, real OpsManager authorization partial completion and conflict cancel/session reuse/exact destination. Authorization helper is same-token test host, no real UAC. Previous failed authorization fixture log retained as transfer_audit.log; test-host whitelist corrected. Protocol target exit0 in elevated_protocol.log."
+  },
+  {
+    "id": "M04-008",
+    "status": "verified",
+    "evidence": "bench_data/audit_navigation_20261006/transfer_audit_v2.log: pulse_transfer_audit_test exit 0, 28 PASS/0 FAIL. Isolated fixture + deny ACL; queued cancel/pause, scanning cancel, file/tree KeepBoth and persisted undo, incomplete scan, partial move undo, per-source target rights, literal shell-template argv, real OpsManager authorization partial completion and conflict cancel/session reuse/exact destination. Authorization helper is same-token test host, no real UAC. Previous failed authorization fixture log retained as transfer_audit.log; test-host whitelist corrected. Protocol target exit0 in elevated_protocol.log."
+  },
+  {
+    "id": "M04-010",
+    "status": "verified",
+    "evidence": "bench_data/audit_navigation_20261006/transfer_audit_v2.log: pulse_transfer_audit_test exit 0, 28 PASS/0 FAIL. Isolated fixture + deny ACL; queued cancel/pause, scanning cancel, file/tree KeepBoth and persisted undo, incomplete scan, partial move undo, per-source target rights, literal shell-template argv, real OpsManager authorization partial completion and conflict cancel/session reuse/exact destination. Authorization helper is same-token test host, no real UAC. Previous failed authorization fixture log retained as transfer_audit.log; test-host whitelist corrected. Protocol target exit0 in elevated_protocol.log."
+  },
+  {
+    "id": "M04-011",
+    "status": "verified",
+    "evidence": "bench_data/audit_navigation_20261006/transfer_audit_v2.log: pulse_transfer_audit_test exit 0, 28 PASS/0 FAIL. Isolated fixture + deny ACL; queued cancel/pause, scanning cancel, file/tree KeepBoth and persisted undo, incomplete scan, partial move undo, per-source target rights, literal shell-template argv, real OpsManager authorization partial completion and conflict cancel/session reuse/exact destination. Authorization helper is same-token test host, no real UAC. Previous failed authorization fixture log retained as transfer_audit.log; test-host whitelist corrected. Protocol target exit0 in elevated_protocol.log."
+  },
+  {
+    "id": "M04-012",
+    "status": "verified",
+    "evidence": "bench_data/audit_navigation_20261006/transfer_audit_v2.log: pulse_transfer_audit_test exit 0, 28 PASS/0 FAIL. Isolated fixture + deny ACL; queued cancel/pause, scanning cancel, file/tree KeepBoth and persisted undo, incomplete scan, partial move undo, per-source target rights, literal shell-template argv, real OpsManager authorization partial completion and conflict cancel/session reuse/exact destination. Authorization helper is same-token test host, no real UAC. Previous failed authorization fixture log retained as transfer_audit.log; test-host whitelist corrected. Protocol target exit0 in elevated_protocol.log."
+  },
+  {
+    "id": "M04-013",
+    "status": "verified",
+    "evidence": "bench_data/audit_navigation_20261006/transfer_audit_v2.log: pulse_transfer_audit_test exit 0, 28 PASS/0 FAIL. Isolated fixture + deny ACL; queued cancel/pause, scanning cancel, file/tree KeepBoth and persisted undo, incomplete scan, partial move undo, per-source target rights, literal shell-template argv, real OpsManager authorization partial completion and conflict cancel/session reuse/exact destination. Authorization helper is same-token test host, no real UAC. Previous failed authorization fixture log retained as transfer_audit.log; test-host whitelist corrected. Protocol target exit0 in elevated_protocol.log."
+  },
+  {
+    "id": "M04-014",
+    "status": "verified",
+    "evidence": "bench_data/audit_navigation_20261006/transfer_audit_v2.log: pulse_transfer_audit_test exit 0, 28 PASS/0 FAIL. Isolated fixture + deny ACL; queued cancel/pause, scanning cancel, file/tree KeepBoth and persisted undo, incomplete scan, partial move undo, per-source target rights, literal shell-template argv, real OpsManager authorization partial completion and conflict cancel/session reuse/exact destination. Authorization helper is same-token test host, no real UAC. Previous failed authorization fixture log retained as transfer_audit.log; test-host whitelist corrected. Protocol target exit0 in elevated_protocol.log."
+  },
+  {
+    "id": "M04-001",
+    "status": "verified",
+    "evidence": "bench_data/audit_navigation_20261006/transfer_task_lifecycle.log: pulse_transfer_audit_test exit0,31PASS/0FAIL. Real OpsManager registered file/menu/query completions delivered interleaved, duplicate and late-unknown messages verify exact-once per-ID routing and no overwrite; terminal queue retains rapid success/failure IDs and precise completion task ID. ShellClient owner additionally verified Reserved before fast ctx_items and synchronous unreachable done in quicklook_build/shell-client-generation-audit.log. No real third-party Explorer verb/provider UI exercised. All fixture-only and no residual test authorization host."
+  },
+  {
+    "id": "M10-001",
+    "status": "verified",
+    "evidence": "bench_data/audit_navigation_20261006/selection_navigation_stable.log: model filter/path aggregates and Shift mouse pass; first Shift+Down fails because BuildVm synchronizes visibility preferences and clears fixture anchor (pre log focus0/-1). Probe corrected to synchronize preferences before selecting, unchanged assertion; awaiting new pulse. Remaining five keyboard paths pass. Process exited1 normally; prior diagnostic access violation no longer reproduces after consistent build. Final rerun: bench_data/audit_navigation_20261006/selection_navigation_final.log, pulse exit0, all assertions PASS. TEMP/TMP isolated to fixture, stopped only spawned test network-agent PID19536. M10 all six keyboard paths now pass; M18 collapsed/filter source set passes; M11 deterministic gate/history/defer exact identity and M12 shared command classification pass. No manual popup/DPI or external ADS/file operation checks."
+  },
+  {
+    "id": "M10-002",
+    "status": "verified",
+    "evidence": "bench_data/audit_navigation_20261006/selection_navigation_stable.log: overlapping LoadPaths + cancel isolation, shared generation navigation away, actual ApplyWorkerResult selection/clear/missing identity, OpenWorkspace ThisPC first/middle/last via saved in-memory object, pinned drag/pinned region invariants all PASS. Disk workspace save-close-reopen not exercised. 本轮补真实磁盘保存/销毁/新对象Load：首、中、末栏此电脑空路径及视图顺序均保持，6 PASS/0 FAIL，bench_data/workspace-disk-roundtrip-audit.log；未手动点击工作区。"
+  },
+  {
+    "id": "M10-003",
+    "status": "verified",
+    "evidence": "bench_data/audit_navigation_20261006/selection_navigation_stable.log: overlapping LoadPaths + cancel isolation, shared generation navigation away, actual ApplyWorkerResult selection/clear/missing identity, OpenWorkspace ThisPC first/middle/last via saved in-memory object, pinned drag/pinned region invariants all PASS. Disk workspace save-close-reopen not exercised. 本轮补真实磁盘保存/销毁/新对象Load：首、中、末栏此电脑空路径及视图顺序均保持，6 PASS/0 FAIL，bench_data/workspace-disk-roundtrip-audit.log；未手动点击工作区。"
+  },
+  {
+    "id": "M10-004",
+    "status": "verified",
+    "evidence": "bench_data/audit_navigation_20261006/selection_navigation_stable.log: overlapping LoadPaths + cancel isolation, shared generation navigation away, actual ApplyWorkerResult selection/clear/missing identity, OpenWorkspace ThisPC first/middle/last via saved in-memory object, pinned drag/pinned region invariants all PASS. Disk workspace save-close-reopen not exercised. 本轮补真实磁盘保存/销毁/新对象Load：首、中、末栏此电脑空路径及视图顺序均保持，6 PASS/0 FAIL，bench_data/workspace-disk-roundtrip-audit.log；未手动点击工作区。"
+  },
+  {
+    "id": "M10-005",
+    "status": "verified",
+    "evidence": "bench_data/audit_navigation_20261006/selection_navigation_stable.log: overlapping LoadPaths + cancel isolation, shared generation navigation away, actual ApplyWorkerResult selection/clear/missing identity, OpenWorkspace ThisPC first/middle/last via saved in-memory object, pinned drag/pinned region invariants all PASS. Disk workspace save-close-reopen not exercised. 本轮补真实磁盘保存/销毁/新对象Load：首、中、末栏此电脑空路径及视图顺序均保持，6 PASS/0 FAIL，bench_data/workspace-disk-roundtrip-audit.log；未手动点击工作区。"
+  },
+  {
+    "id": "M14-001",
+    "status": "verified",
+    "evidence": "bench_data/audit_navigation_20261006/selection_navigation_stable.log: actual renderer + production resize/autofit helpers pass recycle/saved-search/search/ordinary (8 assertions); no manual DPI visual check."
+  },
+  {
+    "id": "M11-005",
+    "status": "verified",
+    "evidence": "Source + navigation probe implemented. Deterministic worker gate covers clearing filter commit, zero/multiple patterns, user selection cancellation, rapid replacement and no-filter; cross-store history then production deferred resolve exact path. Awaiting pulse build/test. Final rerun: bench_data/audit_navigation_20261006/selection_navigation_final.log, pulse exit0, all assertions PASS. TEMP/TMP isolated to fixture, stopped only spawned test network-agent PID19536. M10 all six keyboard paths now pass; M18 collapsed/filter source set passes; M11 deterministic gate/history/defer exact identity and M12 shared command classification pass. No manual popup/DPI or external ADS/file operation checks."
+  },
+  {
+    "id": "M11-006",
+    "status": "verified",
+    "evidence": "Source + navigation probe implemented. Deterministic worker gate covers clearing filter commit, zero/multiple patterns, user selection cancellation, rapid replacement and no-filter; cross-store history then production deferred resolve exact path. Awaiting pulse build/test. Final rerun: bench_data/audit_navigation_20261006/selection_navigation_final.log, pulse exit0, all assertions PASS. TEMP/TMP isolated to fixture, stopped only spawned test network-agent PID19536. M10 all six keyboard paths now pass; M18 collapsed/filter source set passes; M11 deterministic gate/history/defer exact identity and M12 shared command classification pass. No manual popup/DPI or external ADS/file operation checks."
+  },
+  {
+    "id": "M12-001",
+    "status": "verified",
+    "evidence": "bench_data/audit_navigation_20261006/drop_staging.log: pulse_drop_staging_test exit0, 22 PASS/0 FAIL. Real empty directory + first/middle/deep enumeration injected errors, batch preservation, partial stage cleanup. OLE caller now returns NONE + error toast on failure; physical external OLE drag/error toast not manually exercised."
+  },
+  {
+    "id": "M12-002",
+    "status": "verified",
+    "evidence": "bench_data/audit_navigation_20261006/selection_navigation_task_lifecycle.log: pulse exit0,133PASS/0FAIL. Actual ReleaseTrayBatch enqueues fixture move, retains pending card, actual OpsManager terminal consumes only successful original card; model cases cover partial failure, cancellation/skip retry, duplicate late terminal, second release and newly-collected same-path isolation. transfer_task_lifecycle.log exit0,31PASS confirms actual merged-directory moved root and rapid success/failure terminal IDs. TEMP/TMP isolated; preferences persist=false asserted, stopped only this probe network-agent PID9044. No manual tray animation/drag gesture visual verification."
+  },
+  {
+    "id": "M12-003",
+    "status": "verified",
+    "evidence": "bench_data/audit_navigation_20261006/selection_navigation_task_lifecycle.log: pulse exit0,133PASS/0FAIL. Actual CreateNewItem->Shell create->OpsManager terminal binds task/full path, origin refresh selects real created directory after focus moves without opening editor in other pane. Production consumer cases cover A/B same basename, rapid success/failure task isolation and navigation before late completion. TEMP/TMP isolated and preferences persist=false; exact spawned network-agent PID9044 cleaned. No actual rename submission or manual overlay visual verification."
+  },
+  {
+    "id": "M12-004",
+    "status": "verified",
+    "evidence": "CreateTagPicker fixed action ID30051 below dynamic30060; shared production command classification probe covers3/4/5 custom colors. Awaiting pulse; actual picker popup/restart preferences not exercised. Final rerun: bench_data/audit_navigation_20261006/selection_navigation_final.log, pulse exit0, all assertions PASS. TEMP/TMP isolated to fixture, stopped only spawned test network-agent PID19536. M10 all six keyboard paths now pass; M18 collapsed/filter source set passes; M11 deterministic gate/history/defer exact identity and M12 shared command classification pass. No manual popup/DPI or external ADS/file operation checks."
+  },
+  {
+    "id": "M13-001",
+    "status": "verified",
+    "evidence": "bench_data/audit_navigation_20261006/single_instance.log: exit0, 9 PASS/0 FAIL. Sender/receiver CWD differ; empty/virtual tokens unchanged; actual mutex ownership publishes endpoint; same-class isolated decoy is skipped; Release removes publication. Tests use a unique test window class and mutex, no messages sent to real user Pulse instance."
+  },
+  {
+    "id": "M13-005",
+    "status": "verified",
+    "evidence": "bench_data/audit_navigation_20261006/single_instance.log: exit0, 9 PASS/0 FAIL. Sender/receiver CWD differ; empty/virtual tokens unchanged; actual mutex ownership publishes endpoint; same-class isolated decoy is skipped; Release removes publication. Tests use a unique test window class and mutex, no messages sent to real user Pulse instance."
+  },
+  {
+    "id": "M13-002",
+    "status": "verified",
+    "evidence": "bench_data/audit_navigation_20261006/shell_registry_retry.log: pulse_shell_registry_retry_test exit0, all PASS. Fake IShellWindows factory/pending/register/navigate first failures, disconnect rebuild, unchanged desired retry, no duplicate cookies, shutdown retry cancellation. No real Explorer restart or CreateThread/CoInitialize fault injection. 22 PASS/0 FAIL."
+  },
+  {
+    "id": "M13-003",
+    "status": "verified",
+    "evidence": "bench_data/audit_navigation_20261006/integration_registry.log: pulse_integration_registry_test exit0, all PASS with process HKCU redirected to unique sandbox and cleanup verified. New snapshot-after-commit interruption simulated by throwing from test Write hook; old restore and upgrade-retry restore preserve original association. Partial legacy repair and enable rollback double-write failures recover. No actual power loss/production HKCU changes. Whole affected registry executable: 67 PASS/0 FAIL."
+  },
+  {
+    "id": "M13-004",
+    "status": "verified",
+    "evidence": "bench_data/audit_navigation_20261006/integration_registry.log: pulse_integration_registry_test exit0, all PASS with process HKCU redirected to unique sandbox and cleanup verified. New snapshot-after-commit interruption simulated by throwing from test Write hook; old restore and upgrade-retry restore preserve original association. Partial legacy repair and enable rollback double-write failures recover. No actual power loss/production HKCU changes. Whole affected registry executable: 67 PASS/0 FAIL."
+  },
+  {
+    "id": "M13-008",
+    "status": "verified",
+    "evidence": "bench_data/audit_navigation_20261006/integration_registry.log: pulse_integration_registry_test exit0, all PASS with process HKCU redirected to unique sandbox and cleanup verified. New snapshot-after-commit interruption simulated by throwing from test Write hook; old restore and upgrade-retry restore preserve original association. Partial legacy repair and enable rollback double-write failures recover. No actual power loss/production HKCU changes. Whole affected registry executable: 67 PASS/0 FAIL."
+  },
+  {
+    "id": "M13-006",
+    "status": "verified",
+    "evidence": "bench_data/audit_navigation_20261006/shell_tag_registry.log: pulse_shell_tag_registry_test exit0, 50 PASS/0 FAIL. Two roots/six Create/sixteen Set write failures, icon failure, Directory-only residual removal all retried with unchanged inputs; isolated HKCU and fixture ICO only. Production 2-second scheduler commits signature only after complete success; no actual Explorer menu UI validation."
+  },
+  {
+    "id": "M18-004",
+    "status": "verified",
+    "evidence": "Implementation belongs to parent. bench_data/audit_navigation_20261006/selection_navigation_stable.log List horizontal scrolling and icon columns PASS. Collapsed group fixture initially used a/b (same A-H group); changed second group to r (Q-Z), pending pulse rerun. Worker stopped; no ADS reads on real paths. Final rerun: bench_data/audit_navigation_20261006/selection_navigation_final.log, pulse exit0, all assertions PASS. TEMP/TMP isolated to fixture, stopped only spawned test network-agent PID19536. M10 all six keyboard paths now pass; M18 collapsed/filter source set passes; M11 deterministic gate/history/defer exact identity and M12 shared command classification pass. No manual popup/DPI or external ADS/file operation checks."
+  }
+]

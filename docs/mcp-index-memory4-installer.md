@@ -5,7 +5,7 @@
 ## 产物
 
 - 安装包：dist/PulseSetup-1.0.32-memory4.exe。
-- 完整路径：C:/Users/SS/Desktop/pulse/dist/PulseSetup-1.0.32-memory4.exe。
+- 完整路径：<repo>/dist/PulseSetup-1.0.32-memory4.exe。
 - 大小：7,881,762 B。
 - SHA-256：B05A45F16C9F4F79BC012836F7F104DDF7311C6D25578F78E75326935E0098AA。
 - 清单：dist/PulseSetup-1.0.32-memory4.manifest.json。

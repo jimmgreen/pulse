@@ -68,7 +68,7 @@ void TestConfirm() {
     Check(ConfirmItemRows(many).size() == kConfirmMaxItemRows, "five items show without collapsing");
 
     const auto chars = [](std::wstring_view s) { return static_cast<float>(s.size()); };
-    const std::wstring long_path = L"C:\\Users\\SS\\Desktop\\bench\\fx\\delete-me.txt";
+    const std::wstring long_path = L"C:\\Users\\Example\\Desktop\\bench\\fx\\delete-me.txt";
     Check(FitConfirmItemText(long_path, 100.0f, chars) == long_path, "a path that fits is unchanged");
     Check(FitConfirmItemText(long_path, 22.0f, chars) == L"C:\\\u2026\\fx\\delete-me.txt",
           "a long path keeps the drive and as many last folders as fit");

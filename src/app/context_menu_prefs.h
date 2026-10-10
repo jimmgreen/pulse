@@ -32,6 +32,9 @@ struct SlowComExt {
 struct ContextMenuPrefs {
     bool persist = true;
     bool load_failed = false;
+    // FromJson rewrote state an older build persisted (see kPrefsVersion);
+    // Load saves the cleaned file once.
+    bool migrated = false;
 
     // Explorer shows 软件功能 / 打开方式 / 打印 and leaves 发送到 plus the image
     // and system verbs out unless the type registers them; those two groups stay
@@ -75,7 +78,8 @@ struct ContextMenuPrefs {
     std::vector<std::wstring> DisabledHandlerClsids() const;
     bool RecordSeen(const std::wstring& key, const std::wstring& text, bool flyout,
                     ipc::CtxMenuCategory category, bool from_com = false);
-    // key: ".dwg" / ":folder" / ":drive" / ":bg" / ":file". Returns true if prefs changed.
+    // key: "h:{CLSID}" of a handler the host reported hung. Returns true if
+    // prefs changed.
     bool RecordComTiming(const std::wstring& key, uint32_t elapsed_ms);
     bool ComDeferred(const std::wstring& key) const;
     bool ComDisabled(const std::wstring& key) const;

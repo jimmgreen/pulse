@@ -3,11 +3,13 @@
 
 namespace pulse::index {
 
-bool Engine::ShouldSkipName(std::wstring_view name) {
+bool Engine::ShouldSkipName(std::wstring_view name) const {
+    // node_modules is the optional "node_modules" system group; the rest are
+    // always kept out of search.
     return name == L"." || name == L".." ||
            name == L"$Recycle.Bin" || name == L"System Volume Information" ||
            name == L"WinSxS" || name == L"servicing" ||
-           (name.size() == 12 && _wcsnicmp(name.data(), L"node_modules", 12) == 0);
+           (hide_node_modules_ && name.size() == 12 && _wcsnicmp(name.data(), L"node_modules", 12) == 0);
 }
 
 void Engine::RefreshSubtreeVisibilityLocked(int32_t root, DeltaLog* delta) {

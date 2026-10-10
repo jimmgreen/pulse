@@ -3,7 +3,7 @@
   "configuration": "Release",
   "runtime": "MT",
   "synchronized": "2026-09-22",
-  "source": "C:/Users/SS/Desktop/lumatext (local working tree), built in build/lumatext-size",
+  "source": "%USERPROFILE%/Desktop/lumatext (local working tree), built in build/lumatext-size",
   "notes": "Release MT; LUMATEXT_OPTIMIZE_RELEASE_SIZE=ON: IPO and Gw, Os limited to bundled FreeType/HarfBuzz. All 26 exports preserved; matching import library synchronized. Four rendering/layout/glyph tests and assertion-enabled mixed-runtime ABI test passed. Sample render pixels identical. Remote CI SDK pin unchanged; Windows 8.1 not retested.",
   "files": [
     {

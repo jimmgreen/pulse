@@ -41,7 +41,7 @@ struct IndexConfig {
     // Built-in system folder groups (kSystemExclusionGroups). Configs written
     // before this setting existed leave system_groups_saved false.
     bool exclude_system = true;
-    std::vector<std::wstring> system_groups{L"windows", L"temp", L"old"};
+    std::vector<std::wstring> system_groups{L"windows", L"temp", L"old", L"node_modules"};
     bool system_groups_saved = false;
 
     bool IsExcluded(const std::wstring& id) const;
@@ -49,8 +49,10 @@ struct IndexConfig {
 };
 
 inline constexpr const wchar_t* kSystemExclusionGroups[] = {
-    L"windows", L"temp", L"old", L"programdata"};
+    L"windows", L"temp", L"old", L"programdata", L"node_modules"};
 bool IsSystemExclusionGroup(std::wstring_view group);
+// "node_modules" hides dependency folders by name on every volume.
+bool HidesNodeModules(const IndexConfig& config);
 // Folders hidden from the index by the enabled system groups, expanded for
 // the system drive and every local user profile.
 std::vector<std::wstring> SystemExclusionPaths(const IndexConfig& config);

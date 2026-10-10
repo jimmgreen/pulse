@@ -1,5 +1,6 @@
 #include "../index/content_timing.h"
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -192,6 +193,24 @@ int main() {
         Check(std::filesystem::file_size(fixture.Log()) < 2 * 1024 * 1024 &&
               std::filesystem::file_size(fixture.Log().wstring() + L".1") == 2 * 1024 * 1024,
               "2 MiB rotation retains exactly one backup");
+    }
+    {
+        const auto now = std::filesystem::file_time_type::clock::now();
+        auto stale = [&](int i) { return fixture.directory / (L"content-timing-" + std::to_wstring(900000 + i) + L".jsonl"); };
+        for (int i = 0; i < 40; ++i) {
+            { std::ofstream file(stale(i)); file << "{}\n"; }
+            std::filesystem::last_write_time(stale(i), now - std::chrono::hours(48) + std::chrono::minutes(i));
+        }
+        const auto unrelated = fixture.directory / L"unrelated.jsonl";
+        { std::ofstream file(unrelated); file << "x"; }
+        ContentTiming timing(705);
+        timing.Finish(0, 0, 0, false);
+        size_t stale_left = 0;
+        for (const auto& entry : std::filesystem::directory_iterator(fixture.directory))
+            if (entry.path().filename().wstring().starts_with(L"content-timing-9")) ++stale_left;
+        Check(stale_left == 24 && std::filesystem::exists(stale(39)) && std::filesystem::exists(stale(16)) &&
+              !std::filesystem::exists(stale(15)) && std::filesystem::exists(unrelated) && std::filesystem::exists(fixture.Log()),
+              "earlier processes' timing logs are pruned to the newest 24 files; own and unrelated files are kept");
     }
     {
         const auto impossible = fixture.directory / L"regular-file";

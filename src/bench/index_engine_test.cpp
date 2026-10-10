@@ -7,8 +7,11 @@
 #include "../index/index_delta.h"
 #include <algorithm>
 #include <filesystem>
+#include "../common/runtime_log.h"
 #include <fstream>
 #include <iostream>
+#include <iterator>
+#include <string_view>
 #include <chrono>
 
 namespace pulse::index {
@@ -411,6 +414,175 @@ struct EngineTestAccess {
         check(!ReadFolderSizes(truncated, 3, values), "truncated folder-size IPC rejected");
         return ok;
     }
+    // Hard links: one searchable node per name, persisted through snapshots.
+    static bool HardLinkBuildFixture() {
+        bool ok = true;
+        auto check = [&](bool value, const char* name) {
+            std::cout << (value ? "[PASS] " : "[FAIL] ") << name << '\n'; ok &= value;
+        };
+        auto has = [](Engine& e, const wchar_t* needle, const wchar_t* path) {
+            Query q; q.needle = needle; q.limit = 100;
+            const auto result = e.Search(q);
+            return std::any_of(result.hits.begin(), result.hits.end(), [&](const Hit& hit) { return hit.path == path; });
+        };
+        auto build = [](Engine& e, bool hide_node_modules) {
+            e.running_ = true;
+            e.hide_node_modules_ = hide_node_modules;
+            Engine::VolState volume;
+            volume.letter = L'C';
+            volume.kind = VolumeKind::Removable;
+            volume.volume_id = L"hardlink-volume";
+            std::vector<Engine::FrnNode> nodes;
+            auto add = [&](uint64_t id, uint64_t parent, const wchar_t* name, bool dir, bool link = false) {
+                Engine::FrnNode node;
+                node.frn = id; node.parent = parent; node.name = name; node.is_dir = dir;
+                node.extra_link = link; node.size = link ? 0 : 42;
+                nodes.push_back(std::move(node));
+            };
+            add(1100, 1003, L"index.js", false, true);   // extra link before its primary
+            add(1000, 5, L"Links", true);
+            add(1001, 1000, L"store", true);
+            add(1002, 1000, L"app", true);
+            add(1003, 1002, L"node_modules", true);
+            add(1100, 1001, L"index.js", false);
+            add(1100, 1002, L"copy.js", false, true);
+            add(1100, 1001, L"INDEX.JS", false, true);   // same link as the primary
+            add(1100, 999999, L"orphan.js", false, true); // parent outside the index
+            const bool built = e.BuildMftTree(std::move(volume), 5, std::move(nodes));
+            e.live_ = std::move(e.build_);
+            e.vols_ = std::move(e.build_vols_);
+            e.RebuildChildMapLocked();
+            e.ready_ = true;
+            return built;
+        };
+        Engine e;
+        check(build(e, true), "hard link fixture builds");
+        std::vector<int32_t> links;
+        e.CollectFrnLocked(e.vols_.front(), 1100, links);
+        check(links.size() == 3, "MFT build keeps one node per distinct hard link name");
+        check(has(e, L"index.js", L"C:\\Links\\store\\index.js") && has(e, L"copy.js", L"C:\\Links\\app\\copy.js"),
+              "every hard link name is searchable");
+        check(std::all_of(links.begin(), links.end(), [&](int32_t id) { return e.AttrAt(id).size == 42; }),
+              "hard link names share the file size");
+        check(!has(e, L"index.js", L"C:\\Links\\app\\node_modules\\index.js"),
+              "node_modules link stays hidden while its group is on");
+        Query orphan; orphan.needle = L"orphan.js"; orphan.limit = 10;
+        check(e.Search(orphan).total == 0, "link below an unknown parent is skipped");
+        const auto file = std::filesystem::absolute(std::filesystem::path(L"bench_data") /
+            (L"index-hardlink-" + std::to_wstring(GetCurrentProcessId()) + L".bin"));
+        std::filesystem::create_directories(file.parent_path());
+        const bool saved = Save(e, file.wstring());
+        check(saved, "save hard link snapshot");
+        if (saved) {
+            Engine mapped;
+            const bool loaded = Load(mapped, file.wstring());
+            std::vector<int32_t> mapped_links;
+            if (loaded) mapped.CollectFrnLocked(mapped.vols_.front(), 1100, mapped_links);
+            check(loaded && mapped_links.size() == 3 && has(mapped, L"copy.js", L"C:\\Links\\app\\copy.js"),
+                  "snapshot keeps every hard link mapped to its file");
+        }
+        std::error_code ec;
+        std::filesystem::remove(file, ec);
+        Engine visible;
+        check(build(visible, false) && has(visible, L"index.js", L"C:\\Links\\app\\node_modules\\index.js"),
+              "node_modules link is searchable when its group is off");
+        return ok;
+    }
+
+    static bool HardLinkUsnFixture() {
+        bool ok = true;
+        auto check = [&](bool value, const char* name) {
+            std::cout << (value ? "[PASS] " : "[FAIL] ") << name << '\n'; ok &= value;
+        };
+        const auto fixture = std::filesystem::absolute(std::filesystem::path(L"bench_data") /
+            (L"hardlink-usn-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64())));
+        const auto a = fixture / L"A", b = fixture / L"B";
+        std::filesystem::create_directories(a); std::filesystem::create_directories(b);
+        auto write = [](const std::filesystem::path& p, size_t n) {
+            std::ofstream f(p, std::ios::binary | std::ios::trunc); f << std::string(n, 'x');
+        };
+        auto file_id = [](const std::filesystem::path& p) -> uint64_t {
+            HANDLE h = CreateFileW(p.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                   nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+            if (h == INVALID_HANDLE_VALUE) return 0;
+            BY_HANDLE_FILE_INFORMATION info{};
+            const BOOL got = GetFileInformationByHandle(h, &info);
+            CloseHandle(h);
+            return got ? (static_cast<uint64_t>(info.nFileIndexHigh) << 32) | info.nFileIndexLow : 0;
+        };
+        write(a / L"one.bin", 100);
+        const uint64_t frn = file_id(a / L"one.bin");
+        Engine e;
+        e.AddForTest((a / L"one.bin").wstring(), L"one.bin", false, 100);
+        e.AddForTest(b.wstring(), L"B", true);
+        Engine::VolState volume;
+        volume.letter = fixture.wstring()[0];
+        volume.root_idx = e.ResolvePathLocked(fixture.root_path().wstring());
+        volume.journal_id = 1;
+        for (const auto& pair : std::vector<std::pair<uint64_t, std::wstring>>{
+                 {1, fixture.root_path().wstring()}, {2, fixture.wstring()}, {3, a.wstring()},
+                 {4, b.wstring()}, {frn, (a / L"one.bin").wstring()}})
+            volume.frn_new.push_back({pair.first, e.ResolvePathLocked(pair.second), 0});
+        e.vols_.push_back(std::move(volume));
+        e.running_ = true;
+        e.ready_ = true;
+        auto usn = [&](uint64_t parent, const wchar_t* name, DWORD reason) {
+            const auto length = static_cast<WORD>(wcslen(name) * sizeof(wchar_t));
+            std::vector<BYTE> bytes(sizeof(USN_RECORD_V2) + length);
+            auto* record = reinterpret_cast<USN_RECORD_V2*>(bytes.data());
+            record->RecordLength = static_cast<DWORD>(bytes.size()); record->MajorVersion = 2;
+            record->FileReferenceNumber = frn; record->ParentFileReferenceNumber = parent;
+            record->Reason = reason; record->FileAttributes = FILE_ATTRIBUTE_ARCHIVE;
+            record->FileNameOffset = static_cast<WORD>(offsetof(USN_RECORD_V2, FileName)); record->FileNameLength = length;
+            memcpy(bytes.data() + record->FileNameOffset, name, length);
+            e.ApplyUsnLocked(e.vols_.front(), record);
+        };
+        auto links = [&] {
+            std::vector<int32_t> out;
+            e.CollectFrnLocked(e.vols_.front(), frn, out);
+            return out;
+        };
+        auto indexed = [&](const std::filesystem::path& p) {
+            const int32_t id = e.ResolvePathLocked(p.wstring());
+            return id >= 0 && !e.IsTomb(id);
+        };
+        const bool linked = frn != 0 && CreateHardLinkW((b / L"one.bin").c_str(), (a / L"one.bin").c_str(), nullptr);
+        check(linked, "create NTFS hard link fixture");
+        if (linked) {
+            usn(4, L"one.bin", USN_REASON_HARD_LINK_CHANGE);
+            check(links().size() == 2 && indexed(b / L"one.bin") && indexed(a / L"one.bin"),
+                  "USN hard link creation adds the new name");
+            usn(4, L"one.bin", USN_REASON_HARD_LINK_CHANGE);
+            check(links().size() == 2, "repeated hard link record does not duplicate the name");
+            write(a / L"one.bin", 350);
+            usn(3, L"one.bin", USN_REASON_DATA_EXTEND);
+            const auto current = links();
+            check(current.size() == 2 && std::all_of(current.begin(), current.end(),
+                      [&](int32_t id) { return e.AttrAt(id).size == 350; }),
+                  "data change refreshes every hard link name");
+            std::filesystem::rename(b / L"one.bin", b / L"two.bin");
+            usn(4, L"two.bin", USN_REASON_RENAME_NEW_NAME);
+            check(links().size() == 2 && indexed(a / L"one.bin") && indexed(b / L"two.bin") && !indexed(b / L"one.bin"),
+                  "renaming one link moves only that name");
+            std::filesystem::remove(a / L"one.bin");
+            usn(3, L"one.bin", USN_REASON_HARD_LINK_CHANGE);
+            check(links().size() == 1 && !indexed(a / L"one.bin") && indexed(b / L"two.bin"),
+                  "removing one link keeps the file under its other name");
+            const bool relinked = CreateHardLinkW((a / L"three.bin").c_str(), (b / L"two.bin").c_str(), nullptr);
+            if (relinked) usn(3, L"three.bin", USN_REASON_HARD_LINK_CHANGE);
+            check(relinked && links().size() == 2 && indexed(a / L"three.bin"), "a later hard link is indexed");
+            std::filesystem::remove(a / L"three.bin");
+            std::filesystem::remove(b / L"two.bin");
+            usn(4, L"two.bin", USN_REASON_FILE_DELETE | USN_REASON_CLOSE);
+            check(links().empty() && !indexed(a / L"three.bin") && !indexed(b / L"two.bin"),
+                  "deleting the file removes every hard link name");
+        }
+        std::error_code ec;
+        std::filesystem::remove_all(fixture, ec);
+        check(!ec, "isolated hard link fixture cleanup");
+        return ok;
+    }
+
     static bool NamePoolFixture();
     static bool QuietDiagnosticsFixture();
     static bool UsnQueueFixture() {
@@ -576,6 +748,11 @@ struct EngineTestAccess {
             (L"filename-maintenance-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64())));
         std::filesystem::create_directories(dir);
         SetActiveIndexDirectory(dir.wstring());
+        check(MergeRetryDelayMs(0) == 0 && MergeRetryDelayMs(1) == 5000 && MergeRetryDelayMs(2) == 10000 &&
+            MergeRetryDelayMs(7) == 320000 && MergeRetryDelayMs(8) == 600000 && MergeRetryDelayMs(1000) == 600000,
+            "merge retry delay doubles from five seconds and caps at ten minutes");
+        const bool own_runtime = !pulse::diagnostics::runtime::Enabled() &&
+            pulse::diagnostics::runtime::Initialize((dir / L"runtime").wstring(), "test");
         {
             Engine engine;
             check(Build(engine), "build isolated maintenance fixture");
@@ -607,10 +784,45 @@ struct EngineTestAccess {
                 check(engine.merge_retry_after_tick_ == retry &&
                     engine.MaintenanceMergeReason(retry - 1, 100000000) == nullptr,
                     "forced compaction and delta triggers honor failure backoff");
+                check(engine.merge_failures_ == 1, "a gated merge attempt is not counted as another failure");
+                engine.merge_retry_after_tick_ = 0;
+                const auto second_started = GetTickCount64();
+                engine.MergeBase(true, "fixture_failure");
+                check(engine.merge_failures_ == 2 &&
+                    engine.merge_retry_after_tick_ >= second_started + MergeRetryDelayMs(2),
+                    "repeated merge failure doubles the retry delay");
                 CloseHandle(blocker);
                 engine.merge_retry_after_tick_ = 0;
                 engine.MergeBase(true, "fixture_retry");
                 check(engine.struct_changes_ == 0, "failed merge succeeds once replacement becomes possible");
+                check(engine.merge_failures_ == 0 && engine.merge_retry_after_tick_ == 0,
+                    "successful merge resets the failure backoff");
+                if (own_runtime) {
+                    check(pulse::diagnostics::runtime::Flush(5000), "flush merge runtime events");
+                    std::string main_log, critical_log;
+                    for (const auto& entry : std::filesystem::directory_iterator(dir / L"runtime" / L"Diagnostics" / L"Runtime")) {
+                        std::ifstream file(entry.path(), std::ios::binary);
+                        const std::string text{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+                        (entry.path().filename().wstring().ends_with(L".critical.jsonl") ? critical_log : main_log) += text;
+                    }
+                    auto has_line = [](const std::string& text, std::initializer_list<const char*> parts) {
+                        size_t begin = 0;
+                        while (begin < text.size()) {
+                            const size_t end = (std::min)(text.find('\n', begin), text.size());
+                            const auto line = std::string_view(text).substr(begin, end - begin);
+                            bool all = true;
+                            for (const char* part : parts) all &= line.find(part) != std::string_view::npos;
+                            if (all) return true;
+                            begin = end + 1;
+                        }
+                        return false;
+                    };
+                    check(has_line(main_log, {"\"event\":\"index_merge_end\"", "\"outcome\":1", "\"failures\":1", "\"retry_ms\":5000"}) &&
+                        has_line(main_log, {"\"event\":\"index_merge_end\"", "\"outcome\":0", "\"failures\":0"}),
+                        "merge failure and recovery leave terminal runtime events");
+                    check(has_line(critical_log, {"\"event\":\"index_merge_end\"", "\"evidence\":\"last\"", "\"occurrences\":2", "\"failures\":2"}),
+                        "repeated merge failures aggregate into one critical pattern");
+                }
             }
         }
         {
@@ -666,6 +878,7 @@ struct EngineTestAccess {
             }
         }
         SetActiveIndexDirectory(L"");
+        if (own_runtime) pulse::diagnostics::runtime::Shutdown();
         std::filesystem::remove_all(dir);
         return ok;
     }
@@ -1034,10 +1247,14 @@ int wmain(int argc, wchar_t** argv) {
     if (argc > 1 && std::wstring_view(argv[1]) == L"--parent-cycle-only") return EngineTestAccess::ParentCycleFixture() ? 0 : 1;
     if (argc > 1 && std::wstring_view(argv[1]) == L"--recycle-only") return EngineTestAccess::RecycleFixture() ? 0 : 1;
     if (argc > 1 && std::wstring_view(argv[1]) == L"--coverage-only") return EngineTestAccess::CoverageBenchmark() ? 0 : 1;
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--hardlink-only")
+        return EngineTestAccess::HardLinkBuildFixture() && EngineTestAccess::HardLinkUsnFixture() ? 0 : 1;
     std::cout << std::unitbuf;
     Engine engine;
     Check(EngineTestAccess::Build(engine), "actual MFT tree builder accepts fixture");
     CheckSearch(engine);
+    Check(EngineTestAccess::HardLinkBuildFixture(), "hard link MFT build fixture");
+    Check(EngineTestAccess::HardLinkUsnFixture(), "hard link USN fixture");
     const auto dir = std::filesystem::absolute(std::filesystem::path(L"bench_data") /
         (L"index_engine_test_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount64())));
     std::filesystem::create_directories(dir);

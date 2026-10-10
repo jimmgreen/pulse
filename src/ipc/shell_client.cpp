@@ -445,6 +445,7 @@ void ShellClient::ReaderThread() {
                     it.separator_after = (flags & CTX_ITEM_SEPARATOR_AFTER) != 0;
                     it.has_children = (flags & CTX_ITEM_HAS_CHILDREN) != 0;
                     it.child = (flags & CTX_ITEM_CHILD) != 0;
+                    it.mnemonic = UnpackCtxItemMnemonic(flags);
                     if (ok) items.push_back(std::move(it));
                 }
                 std::vector<std::wstring> slow_clsids;

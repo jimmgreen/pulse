@@ -1050,6 +1050,35 @@ std::wstring SelfPath() {
     return path;
 }
 
+// A host that dies (crash, hang ended by setup) or quits with an error must
+// not leave search waiting until someone reinstalls the service:
+//  - SCM restarts it. The first delay is long on purpose: setup ends a host
+//    that does not stop and then replaces the files; an early restart would
+//    run the old binary, and --install would find it running and keep it.
+//  - Interactive users may start it, so Pulse can bring back a stopped host
+//    (IndexClient). Everything else matches the default service DACL.
+void ConfigureServiceRecovery(SC_HANDLE svc) {
+    SC_ACTION actions[3] = {{SC_ACTION_RESTART, 60000}, {SC_ACTION_RESTART, 120000}, {SC_ACTION_RESTART, 300000}};
+    SERVICE_FAILURE_ACTIONSW failure{};
+    failure.dwResetPeriod = 24 * 60 * 60;
+    failure.cActions = ARRAYSIZE(actions);
+    failure.lpsaActions = actions;
+    if (!ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS, &failure))
+        ServiceTrace(L"failure actions not set");
+    SERVICE_FAILURE_ACTIONS_FLAG flag{TRUE};
+    if (!ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, &flag))
+        ServiceTrace(L"failure actions flag not set");
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            L"D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)"
+            L"(A;;CCLCSWRPLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)",
+            SDDL_REVISION_1, &sd, nullptr)) {
+        if (!SetServiceObjectSecurity(svc, DACL_SECURITY_INFORMATION, sd))
+            ServiceTrace(L"service DACL not set");
+        LocalFree(sd);
+    }
+}
+
 int InstallService() {
     SetMachineIndexScope(true);
     // Repair ProgramData ACLs on every install so older SY/BA-only trees become
@@ -1068,7 +1097,7 @@ int InstallService() {
 
         SC_HANDLE svc = OpenServiceW(scm, kServiceName,
                                      SERVICE_START | SERVICE_QUERY_STATUS |
-                                         SERVICE_CHANGE_CONFIG);
+                                         SERVICE_CHANGE_CONFIG | READ_CONTROL | WRITE_DAC);
         if (!svc && GetLastError() == ERROR_SERVICE_DOES_NOT_EXIST) {
             svc = CreateServiceW(scm, kServiceName, L"Pulse Index",
                                  SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS,
@@ -1092,6 +1121,7 @@ int InstallService() {
             wchar_t text[] = L"Pulse file-name index (MFT + USN). UI talks to this over a named pipe.";
             desc.lpDescription = text;
             ChangeServiceConfig2W(svc, SERVICE_CONFIG_DESCRIPTION, &desc);
+            ConfigureServiceRecovery(svc);
             last_err = EnsureServiceRunning(
                 [&](SERVICE_STATUS_PROCESS& status) -> DWORD {
                     DWORD needed = 0;
@@ -1182,12 +1212,14 @@ int ConfigureCommand(const std::vector<std::wstring>& args) {
 }
 
 int ExportDiagnosticsCommand(const std::vector<std::wstring>& args) {
-    if (args.size() != 3) return ERROR_INVALID_PARAMETER;
+    if (args.size() != 3 && !(args.size() == 4 && args[3] == L"--include-dumps")) return ERROR_INVALID_PARAMETER;
     if (!IsElevated()) return ERROR_ELEVATION_REQUIRED;
     pulse::diagnostics::ExportOptions options;
     options.source_root = MachineDataRoot();
     options.destination = args[2];
-    options.include_dumps = true;
+    options.include_dumps = args.size() == 4;
+    options.support_report = true;
+    options.configuration_file = MachineConfigPath();
     options.require_empty_destination = true;
     std::wstring error;
     return pulse::diagnostics::Export(options, &error) ? 0 : ERROR_WRITE_FAULT;

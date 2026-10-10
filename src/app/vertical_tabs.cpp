@@ -1,8 +1,10 @@
 #include "vertical_tabs.h"
 #include "app_commands.h"
 #include "app_navigation.h"
+#include "last_tab_close.h"
 #include "../common/localization.h"
 #include <algorithm>
+#include <utility>
 #include <cwchar>
 
 namespace pulse {
@@ -187,6 +189,7 @@ bool HandleVerticalTabPress(AppState& s, const ui::HitTestResult& hit) {
     }
     if (hit.region == R::SidebarItem && IsVerticalTabPath(hit.path, &index)) {
         // Switch on press (like the strip); the press may also become a reorder.
+        ArmTabDoubleClick(s, index);
         if (index < s.window_tabs.items.size() && index != s.window_tabs.active)
             SwitchTab(s, index);
         POINT pt{};
@@ -291,6 +294,35 @@ bool HandleTabMiddleClick(AppState& s, int x, int y) {
         return false;
     }
     if (index >= s.window_tabs.items.size()) return true;
+    CloseLayoutTab(s, index);
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+    return true;
+}
+
+void ArmTabDoubleClick(AppState& s, size_t index) {
+    s.tabPressTab = index < s.window_tabs.items.size() ? s.window_tabs.items[index].get() : nullptr;
+    s.tabPressTime = GetMessageTime();
+}
+
+bool HandleTabDoubleClick(AppState& s, const ui::HitTestResult& hit) {
+    using R = ui::HitTestResult;
+    const void* pressed = std::exchange(s.tabPressTab, nullptr);
+    size_t index = 0;
+    if (hit.region == R::Tab && hit.index >= 0) {
+        index = static_cast<size_t>(hit.index);
+    } else if (hit.region == R::SidebarItem && IsVerticalTabPath(hit.path, &index)) {
+    } else {
+        return false;
+    }
+    if (index >= s.window_tabs.items.size()) return false;
+    if (!app::TabDoubleClickCloses(s.appPrefs.close_tab_on_double_click, pressed,
+            s.window_tabs.items[index].get(),
+            static_cast<DWORD>(GetMessageTime() - s.tabPressTime), GetDoubleClickTime()))
+        return false;
+    // Same as the close button: strip widths hold so the next tab's body
+    // stays under the pointer for another double-click.
+    if (hit.region == R::Tab)
+        s.renderer.FreezeTabWidths(BuildVm(s, false), static_cast<float>(s.compositor.Width()));
     CloseLayoutTab(s, index);
     InvalidateRect(s.hwnd, nullptr, FALSE);
     return true;

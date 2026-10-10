@@ -1,5 +1,6 @@
 #include "../index/document_reader.h"
 #include "../index/document_protocol.h"
+#include "../common/runtime_log.h"
 #include <tlhelp32.h>
 #include <psapi.h>
 #include <iostream>
@@ -8,6 +9,11 @@ int wmain(int argc, wchar_t** argv) {
     if (argc < 4 || argc > 5) return 2;
     SetEnvironmentVariableW(L"PULSE_PDF_ENGINE", argv[1]);
     pulse::index::DocumentReadSession session;
+    // Optional parent-side runtime evidence for failure-fixture runs.
+    wchar_t runtime_root[MAX_PATH]{};
+    const DWORD runtime_chars = GetEnvironmentVariableW(L"PULSE_BENCH_RUNTIME_DIR", runtime_root, MAX_PATH);
+    const bool runtime = runtime_chars && runtime_chars < MAX_PATH &&
+        pulse::diagnostics::runtime::Initialize(runtime_root, "test");
     std::wstring body; uint64_t bytes = 0; DWORD error = 0;
     pulse::index::DocumentReadMetrics metrics;
     const auto start = pulse::index::DocumentMicros();
@@ -60,5 +66,9 @@ int wmain(int argc, wchar_t** argv) {
     std::string encoded(static_cast<size_t>(count), '\0');
     WideCharToMultiByte(CP_UTF8, 0, body.data(), static_cast<int>(body.size()), encoded.data(), count, nullptr, nullptr);
     std::cout.write(encoded.data(), encoded.size());
+    if (runtime) {
+        pulse::diagnostics::runtime::Flush(5000);
+        pulse::diagnostics::runtime::Shutdown();
+    }
     return 0;
 }

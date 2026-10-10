@@ -38,7 +38,13 @@ bool WriteString(HANDLE pipe, const std::wstring& value) {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
+#ifdef PULSE_PREVIEW_MAPPING_TEST
+    const std::wstring test_log_root = __argc > 3 ? __wargv[3] : L"";
+    crash::Initialize({crash::ProcessRole::Preview, false, test_log_root});
+#else
     crash::Initialize({crash::ProcessRole::Preview, false, {}});
+#endif
+    struct DiagnosticsShutdown { ~DiagnosticsShutdown() { crash::Shutdown(); } } diagnostics_shutdown;
     if (__argc < 2) return 2;
     const DWORD owner = wcstoul(__wargv[1], nullptr, 10);
     const std::wstring pipeName = ipc::PreviewPipeName(owner);
@@ -57,6 +63,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             req.path_chars==0 || req.path_chars>32768) break;
         std::wstring path(req.path_chars, L'\0');
         if (!ipc::ReadAll(pipe, path.data(), req.path_chars*sizeof(wchar_t))) break;
+        const auto request_started = GetTickCount64();
+        const auto terminal = [&](const char* event, uint32_t stage, DWORD error,
+                                  diagnostics::runtime::Level level) {
+            diagnostics::runtime::Event(event, {{"request", req.request_id},
+                {"generation", req.generation}, {"elapsed_ms", GetTickCount64() - request_started},
+                {"stage", stage}, {"error", error}, {"flags", req.flags}}, level);
+        };
         std::vector<uint8_t> pixels;
         std::wstring previewText;
         std::wstring errorText;
@@ -114,14 +127,17 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             if (result.error == L"pdf-thumbnail-budget")
                 diagnostics::runtime::Event("pdf_thumbnail_budget", {
                     {"elapsed_ms", GetTickCount64() - decode_started},
-                    {"request", req.request_id}, {"pixels", cap}});
+                    {"request", req.request_id}, {"generation", req.generation}, {"pixels", cap}},
+                    diagnostics::runtime::Level::Warning);
             response.integrity = preview::DescribeIntegrity(result, made);
-            if (!decode.grid) diagnostics::runtime::Event("preview_integrity", {
+            if (!decode.grid) diagnostics::runtime::Event("preview_decode_integrity", {
+                {"request", req.request_id}, {"generation", req.generation},
                 {"state", static_cast<uint32_t>(response.integrity.state)},
                 {"reason", static_cast<uint32_t>(response.integrity.reason)},
                 {"unit", static_cast<uint32_t>(response.integrity.unit)},
                 {"loaded", response.integrity.loaded}, {"total", response.integrity.total},
-                {"kind", static_cast<uint32_t>(result.kind)}, {"index", req.frame_index}});
+                {"kind", static_cast<uint32_t>(result.kind)}, {"index", req.frame_index}},
+                made ? diagnostics::runtime::Level::Info : diagnostics::runtime::Level::Error);
             pixels = std::move(result.pixels);
             w = result.width; h = result.height; stride = result.stride;
             source_w = result.source_width; source_h = result.source_height;
@@ -165,10 +181,16 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
 #else
             constexpr bool fail_create = false, fail_view = false;
 #endif
+            if (fail_create) SetLastError(ERROR_NOT_ENOUGH_MEMORY);
             if (!fail_create) mapping=CreateFileMappingW(INVALID_HANDLE_VALUE,nullptr,PAGE_READWRITE,0,
                 static_cast<DWORD>(pixels.size()),mappingName.c_str());
+            if (mapping && fail_view) SetLastError(ERROR_NOT_ENOUGH_MEMORY);
             if (mapping && !fail_view) view=MapViewOfFile(mapping,FILE_MAP_WRITE,0,0,pixels.size());
-            if (!view) { response.status=2; mappingName.clear();
+            if (!view) {
+                const DWORD error = GetLastError();
+                terminal("preview_host_mapping_failure", mapping ? 2 : 1, error,
+                    diagnostics::runtime::Level::Error);
+                response.status=2; mappingName.clear();
                 if (mapping) { CloseHandle(mapping); mapping = nullptr; }
                 response.integrity.state = preview::IntegrityState::Failed;
                 response.integrity.reason = preview::IntegrityReason::Unavailable;
@@ -187,7 +209,18 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             if (!ok) break;
             ok = WriteString(pipe, property.label) && WriteString(pipe, property.value);
         }
-        if (ok && response.mapping_chars != 0) { unsigned char ack=0; ok=ipc::ReadAll(pipe,&ack,1); }
+        DWORD response_error = ok ? ERROR_SUCCESS : GetLastError();
+        uint32_t response_stage = 3; // Response bytes written; ACK is a separate terminal stage.
+        if (ok && response.mapping_chars != 0) {
+            unsigned char ack=0; ok=ipc::ReadAll(pipe,&ack,1);
+            response_stage = 4;
+            if (!ok) response_error = GetLastError();
+        }
+        if (!ok) terminal("preview_host_response_failure", response_stage, response_error,
+            diagnostics::runtime::Level::Error);
+        else if (!(req.flags & ipc::kPreviewRequestFlagGrid) || response.status == 2)
+            terminal("preview_host_response", response_stage, static_cast<DWORD>(response.status),
+                response.status ? diagnostics::runtime::Level::Error : diagnostics::runtime::Level::Info);
         if (view) UnmapViewOfFile(view); if (mapping) CloseHandle(mapping);
         if (!ok) break;
     }

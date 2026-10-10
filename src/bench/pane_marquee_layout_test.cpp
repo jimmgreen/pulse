@@ -1,4 +1,5 @@
 #include "../app/pane_layout.h"
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <set>
@@ -99,6 +100,35 @@ int main() {
     const D2D1_RECT_F bounds{20,30,1100,900};
     Check(Same(bounds,FocusedWindowPaneRect(&single,a,bounds,1.25f)),"single pane retains unchanged bounds");
     Check(Same(bounds,FocusedWindowPaneRect(nullptr,a,bounds,1.25f)),"missing tree keeps content fallback");
+    // Bug 4: a marquee whose start scrolled off screen still covers every item
+    // between that start and the pointer (RangeForSpan vs. a full scan).
+    for (ViewMode mode : {ViewMode::Details,ViewMode::List,ViewMode::MediumIcons}) {
+        const D2D1_RECT_F list{100,200,900,800};
+        const size_t count=5000;
+        const bool columns=mode==ViewMode::List;
+        const ViewLayout probe(mode,list,count,0,0,1.25f);
+        const float scroll=columns ? std::min(3000.0f,probe.MaxScrollX()) : std::min(3000.0f,probe.MaxScrollY());
+        const ViewLayout layout(mode,list,count,columns?scroll:0,columns?0:scroll,1.25f);
+        // Started at the first item before scrolling, now dragged to mid-viewport.
+        const D2D1_RECT_F box=columns ? D2D1_RECT_F{list.left+10-scroll,list.top+5,list.left+400,list.bottom-5}
+                                      : D2D1_RECT_F{list.left+10,list.top+5-scroll,list.left+500,list.top+300};
+        std::set<int> brute, ranged;
+        for (int i=0;i<static_cast<int>(count);++i) {
+            const auto item=layout.ItemRect(i);
+            if (item.right<=box.left || item.left>=box.right || item.bottom<=box.top || item.top>=box.bottom) continue;
+            brute.insert(i);
+        }
+        const auto [lo,hi]=columns ? layout.RangeForSpan(box.left,box.right) : layout.RangeForSpan(box.top,box.bottom);
+        for (int i=lo;i>=0 && i<=hi;++i) {
+            const auto item=layout.ItemRect(i);
+            if (item.right<=box.left || item.left>=box.right || item.bottom<=box.top || item.top>=box.bottom) continue;
+            ranged.insert(i);
+        }
+        Check(scroll>0 && brute.count(0)==1 && brute.size()>10,"scrolled marquee fixture reaches the off-screen first item");
+        Check(ranged==brute,"RangeForSpan covers every item of an off-screen marquee");
+        const auto onscreen=layout.VisibleRange();
+        Check(onscreen.first>0,"fixture start lies outside VisibleRange (old behaviour lost it)");
+    }
     std::cout << "[INFO] production split/layout geometry only; physical input is verified separately\n";
     return failures?1:0;
 }

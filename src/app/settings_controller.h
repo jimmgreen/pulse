@@ -102,8 +102,8 @@ public:
         std::function<void(const std::wstring&)> open_path;
         std::function<void()> open_diagnostics;
         std::function<bool(std::wstring&)> clear_diagnostics;
-        std::function<bool(std::wstring&, bool&)> prepare_diagnostics_export;
-        std::function<bool(const std::wstring&, bool, std::wstring&)>
+        std::function<bool(std::wstring&, bool&, bool&)> prepare_diagnostics_export;
+        std::function<bool(const std::wstring&, bool, bool, std::wstring&)>
             export_diagnostics;
     };
 

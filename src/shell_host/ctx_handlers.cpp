@@ -4,19 +4,23 @@
 #include "../common/path_utils.h"
 #include "../ipc/ctx_menu_util.h"
 
+#include <shlobj.h>
 #include <shlwapi.h>
 #include <shobjidl.h>
 
 #include <cwctype>
 #include <unordered_set>
+#include <vector>
 
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "version.lib")
 
 using pulse::ipc::CleanMenuText;
+using pulse::ipc::MenuMnemonic;
 using pulse::ipc::IsBuiltinContextVerb;
 using pulse::ipc::IsDisabledHandler;
-using pulse::ipc::IsDroppedContextSubmenu;
+using pulse::ipc::IsDefaultMenuExtraVerb;
+using pulse::ipc::IsOpenWithSubmenuVerb;
 using pulse::ipc::KeepFlyoutParentWithoutLeaves;
 using pulse::ipc::kMaxSubmenuChildren;
 using pulse::ipc::ToLowerVerb;
@@ -142,10 +146,20 @@ std::wstring ExtensionOf(const std::wstring& path) {
     return ToLowerVerb(name.substr(dot));
 }
 
+// The ProgID Explorer itself resolves for the type. Reading HKCR\.ext (or
+// UserChoice) by hand diverges from it: on the reporting machine .dwg had an
+// empty UserChoice and HKCR\.dwg = AutoCAD.Drawing.26, yet the shell (and its
+// menu) used CADFile, so Pulse loaded the wrong verbs and handlers.
 std::wstring ProgIdForExt(const std::wstring& ext) {
     if (ext.empty()) return {};
     wchar_t progid[256]{};
+    DWORD cch = ARRAYSIZE(progid);
+    if (SUCCEEDED(AssocQueryStringW(ASSOCF_NONE, ASSOCSTR_PROGID, ext.c_str(), nullptr,
+                                    progid, &cch)) && progid[0] &&
+        _wcsicmp(progid, ext.c_str()) != 0)
+        return progid;
     DWORD bytes = sizeof(progid);
+    progid[0] = 0;
     if (RegGetValueW(HKEY_CLASSES_ROOT, ext.c_str(), nullptr, RRF_RT_REG_SZ, nullptr,
                      progid, &bytes) != ERROR_SUCCESS || !progid[0])
         return {};
@@ -187,13 +201,16 @@ std::wstring CtxVerbOf(IContextMenu* menu, UINT id, UINT id_first) {
     return {};
 }
 
-std::wstring MenuItemText(HMENU menu, UINT pos) {
+// Visible row text; the raw label's access key ("&X") goes to *mnemonic.
+std::wstring MenuItemText(HMENU menu, UINT pos, wchar_t* mnemonic = nullptr) {
+    if (mnemonic) *mnemonic = 0;
     wchar_t buf[512]{};
     MENUITEMINFOW mii{ sizeof(mii) };
     mii.fMask = MIIM_STRING;
     mii.dwTypeData = buf;
     mii.cch = ARRAYSIZE(buf) - 1;
     if (!GetMenuItemInfoW(menu, pos, TRUE, &mii)) return {};
+    if (mnemonic) *mnemonic = MenuMnemonic(buf);
     return CleanMenuText(buf);
 }
 
@@ -216,11 +233,137 @@ void InitMenuPopup(IContextMenu2* menu2, IContextMenu3* menu3, HMENU submenu, UI
     }
 }
 
+// 发送到 has been seen to fill in 310-440 ms on a cold host (95-160 ms warm);
+// Explorer's own rows can arrive 300+ ms apart, so a quiet gap below that
+// would cut the list short.
+constexpr ULONGLONG kSendToFillMs = 1500;
+constexpr ULONGLONG kSendToQuietMs = 500;
+// 包含到库中 replaces 正在检索库... in ~110 ms cold, ~16 ms warm.
+constexpr ULONGLONG kPlaceholderFillMs = 300;
+
+void SafeDispatch(const MSG* msg) {
+    __try {
+        TranslateMessage(msg);
+        DispatchMessageW(msg);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+// Some flyouts fill from messages posted to their own hidden windows, so the
+// worker gives them its queue until `done` or `deadline`. Thread messages (the
+// host's worker commands) are set aside and posted back afterwards.
+template <typename Done>
+void PumpUntil(Done done, ULONGLONG deadline) {
+    std::vector<MSG> held;
+    bool quit = false;
+    WPARAM quit_code = 0;
+    while (!done()) {
+        const ULONGLONG now = GetTickCount64();
+        if (now >= deadline) break;
+        const ULONGLONG left = deadline - now;
+        MsgWaitForMultipleObjects(0, nullptr, FALSE, static_cast<DWORD>(left < 10 ? left : 10),
+                                  QS_ALLINPUT);
+        MSG msg{};
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) {
+                quit = true;
+                quit_code = msg.wParam;
+            } else if (!msg.hwnd) {
+                held.push_back(msg);
+            } else {
+                SafeDispatch(&msg);
+            }
+        }
+    }
+    for (const MSG& msg : held)
+        PostThreadMessageW(GetCurrentThreadId(), msg.message, msg.wParam, msg.lParam);
+    if (quit) PostQuitMessage(static_cast<int>(quit_code));
+}
+
+// A flyout showing only greyed rows (正在检索库..., 正在搜索设备...) is still
+// being filled.
+bool OnlyPlaceholderRows(HMENU menu) {
+    const int count = GetMenuItemCount(menu);
+    int rows = 0;
+    for (int i = 0; i < count; ++i) {
+        MENUITEMINFOW mii{ sizeof(mii) };
+        mii.fMask = MIIM_STATE | MIIM_FTYPE | MIIM_SUBMENU;
+        if (!GetMenuItemInfoW(menu, static_cast<UINT>(i), TRUE, &mii)) return false;
+        if (mii.fType & MFT_SEPARATOR) continue;
+        if (mii.hSubMenu || !(mii.fState & (MFS_DISABLED | MFS_GRAYED))) return false;
+        ++rows;
+    }
+    return rows > 0;
+}
+
+// True when the flyout was given time to fill.
+bool WaitForFlyoutFill(HMENU submenu, int fill_target) {
+    if (fill_target > 0) {
+        int last = GetMenuItemCount(submenu);
+        ULONGLONG changed = GetTickCount64();
+        PumpUntil([&] {
+            const int count = GetMenuItemCount(submenu);
+            const ULONGLONG now = GetTickCount64();
+            if (count != last) {
+                last = count;
+                changed = now;
+            }
+            return count >= fill_target || now - changed >= kSendToQuietMs;
+        }, GetTickCount64() + kSendToFillMs);
+        return true;
+    }
+    if (OnlyPlaceholderRows(submenu)) {
+        const int before = GetMenuItemCount(submenu);
+        PumpUntil([&] {
+            return GetMenuItemCount(submenu) != before || !OnlyPlaceholderRows(submenu);
+        }, GetTickCount64() + kPlaceholderFillMs);
+        return true;
+    }
+    return false;
+}
+
+// Entries Explorer lists under 发送到 (hidden files such as desktop.ini are not).
+int CountSendToTargets() {
+    PIDLIST_ABSOLUTE pidl = nullptr;
+    if (FAILED(SHGetKnownFolderIDList(FOLDERID_SendTo, 0, nullptr, &pidl)) || !pidl) return 0;
+    int count = 0;
+    IShellFolder* folder = nullptr;
+    if (SUCCEEDED(SHBindToObject(nullptr, pidl, nullptr, IID_PPV_ARGS(&folder))) && folder) {
+        IEnumIDList* items = nullptr;
+        if (folder->EnumObjects(nullptr, SHCONTF_FOLDERS | SHCONTF_NONFOLDERS, &items) == S_OK &&
+            items) {
+            PITEMID_CHILD child = nullptr;
+            while (items->Next(1, &child, nullptr) == S_OK) {
+                ++count;
+                CoTaskMemFree(child);
+            }
+            items->Release();
+        }
+        folder->Release();
+    }
+    CoTaskMemFree(pidl);
+    return count;
+}
+
+bool ContainsVerb(const std::vector<std::wstring>& verbs, const std::wstring& verb) {
+    if (verb.empty()) return false;
+    for (const auto& v : verbs)
+        if (_wcsicmp(v.c_str(), verb.c_str()) == 0) return true;
+    return false;
+}
+
 void CollectSubmenuLeaves(IContextMenu* menu, IContextMenu2* menu2, IContextMenu3* menu3,
                           HMENU submenu, UINT pos, bool background, UINT id_first,
                           bool parent_enabled, int depth, ULONGLONG deadline,
-                          std::vector<CtxItemOut>& kids) {
-    if (GetTickCount64() < deadline) InitMenuPopup(menu2, menu3, submenu, pos);
+                          std::vector<CtxItemOut>& kids, bool open_with = false,
+                          int fill_target = 0) {
+    if (GetTickCount64() < deadline) {
+        InitMenuPopup(menu2, menu3, submenu, pos);
+        // Off the first-paint path: these workers stream in a later partial.
+        // Rows that arrived late get the usual budget for their own flyouts.
+        if (depth == 0 && WaitForFlyoutFill(submenu, fill_target))
+            deadline = GetTickCount64() + kNestedFlyoutBudgetMs;
+    }
     const int sub_count = GetMenuItemCount(submenu);
     for (int j = 0; j < sub_count && static_cast<int>(kids.size()) < kMaxSubmenuChildren; ++j) {
         MENUITEMINFOW sub{ sizeof(sub) };
@@ -233,18 +376,22 @@ void CollectSubmenuLeaves(IContextMenu* menu, IContextMenu2* menu2, IContextMenu
                 parent_enabled && !(sub.fState & (MFS_DISABLED | MFS_GRAYED));
             CollectSubmenuLeaves(menu, menu2, menu3, sub.hSubMenu, static_cast<UINT>(j),
                                  background, id_first, nested_enabled, depth + 1, deadline,
-                                 kids);
+                                 kids, open_with);
             continue;
         }
-        const std::wstring child_text = MenuItemText(submenu, static_cast<UINT>(j));
+        wchar_t child_mnemonic = 0;
+        const std::wstring child_text =
+            MenuItemText(submenu, static_cast<UINT>(j), &child_mnemonic);
         if (child_text.empty()) continue;
         CtxItemOut item;
         item.id = sub.wID;
         item.enabled = parent_enabled && !(sub.fState & (MFS_DISABLED | MFS_GRAYED));
         item.child = true;
         item.verb = CtxVerbOf(menu, sub.wID, id_first);
-        if (IsBuiltinContextVerb(item.verb, background)) continue;
+        // 选择其他应用 carries the builtin "openas" verb but belongs to the flyout.
+        if (!open_with && IsBuiltinContextVerb(item.verb, background)) continue;
         item.text = child_text;
+        item.mnemonic = child_mnemonic;
         kids.push_back(std::move(item));
     }
 }
@@ -268,6 +415,93 @@ void ReleaseHandlerSlot(CtxHandlerSlot& slot) noexcept {
     slot.menu = nullptr;
 }
 
+std::vector<std::wstring> CtxHandlerKeysForFile(const std::wstring& progid,
+                                               const std::wstring& ext,
+                                               const std::wstring& perceived) {
+    // Explorer's order: the type's ProgID, its SystemFileAssociations entries,
+    // then every file (*) and every file-system object.
+    constexpr wchar_t kHandlers[] = L"\\shellex\\ContextMenuHandlers";
+    std::vector<std::wstring> keys;
+    if (!progid.empty()) keys.push_back(progid + kHandlers);
+    if (!ext.empty()) keys.push_back(L"SystemFileAssociations\\" + ext + kHandlers);
+    if (!perceived.empty())
+        keys.push_back(L"SystemFileAssociations\\" + perceived + kHandlers);
+    keys.push_back(std::wstring(L"*") + kHandlers);
+    keys.push_back(std::wstring(L"AllFilesystemObjects") + kHandlers);
+    return keys;
+}
+
+std::vector<std::wstring> CtxHandlerKeysForLocation(bool drive_root) {
+    constexpr wchar_t kHandlers[] = L"\\shellex\\ContextMenuHandlers";
+    if (drive_root)
+        return { std::wstring(L"Drive") + kHandlers, std::wstring(L"Folder") + kHandlers };
+    return { std::wstring(L"Directory") + kHandlers, std::wstring(L"Folder") + kHandlers,
+             std::wstring(L"AllFilesystemObjects") + kHandlers };
+}
+
+std::vector<std::wstring> ConditionalShellVerbs(const std::vector<std::wstring>& classes) {
+    std::vector<std::wstring> verbs;
+    for (const auto& cls : classes) {
+        HKEY shell = nullptr;
+        if (RegOpenKeyExW(HKEY_CLASSES_ROOT, (cls + L"\\shell").c_str(), 0, KEY_READ, &shell) !=
+            ERROR_SUCCESS)
+            continue;
+        for (DWORD i = 0;; ++i) {
+            wchar_t name[256]{};
+            DWORD cch = ARRAYSIZE(name);
+            if (RegEnumKeyExW(shell, i, name, &cch, nullptr, nullptr, nullptr, nullptr) !=
+                ERROR_SUCCESS)
+                break;
+            if (RegGetValueW(shell, name, L"AppliesTo", RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ,
+                             nullptr, nullptr, nullptr) == ERROR_SUCCESS &&
+                !ContainsVerb(verbs, name))
+                verbs.emplace_back(name);
+        }
+        RegCloseKey(shell);
+    }
+    return verbs;
+}
+
+HRESULT InitContextMenuExtension(IUnknown* extension, const CtxBind& bind, IContextMenu** menu) {
+    if (!menu) return E_POINTER;
+    *menu = nullptr;
+    if (!extension) return E_INVALIDARG;
+    IShellExtInit* init = nullptr;
+    if (SUCCEEDED(extension->QueryInterface(IID_PPV_ARGS(&init))) && init) {
+        // Called anyway, WorkFolders (E_INVALIDARG), Portable Devices and
+        // Library Location (E_FAIL) still add 立即同步 / 以便携式设备方式打开 /
+        // 包含到库中 that Explorer never shows; Open With fails on a drive.
+        const HRESULT hr = init->Initialize(bind.folder, bind.data, bind.assoc);
+        init->Release();
+        if (FAILED(hr)) return hr;
+    }
+    const HRESULT hr = extension->QueryInterface(IID_PPV_ARGS(menu));
+    return SUCCEEDED(hr) && !*menu ? E_NOINTERFACE : hr;
+}
+
+namespace {
+
+// HKCR class names behind handler keys ("Drive\\shellex\\..." -> "Drive").
+std::vector<std::wstring> ClassesOf(const std::vector<std::wstring>& handler_keys) {
+    std::vector<std::wstring> classes;
+    for (const auto& key : handler_keys) {
+        const size_t at = key.find(L"\\shellex\\");
+        if (at != std::wstring::npos) classes.push_back(key.substr(0, at));
+    }
+    return classes;
+}
+
+void AttachDefaultMenuVerbs(std::vector<CtxHandlerDesc>& handlers,
+                            const std::vector<std::wstring>& handler_keys) {
+    for (auto& desc : handlers) {
+        if (desc.clsid != kSendToHandler) continue;
+        desc.default_menu_verbs = ConditionalShellVerbs(ClassesOf(handler_keys));
+        return;
+    }
+}
+
+} // namespace
+
 std::vector<CtxHandlerDesc> EnumerateCtxHandlers(
     bool background, const std::wstring& path,
     const std::vector<std::wstring>& disabled_clsids) {
@@ -286,12 +520,50 @@ std::vector<CtxHandlerDesc> EnumerateCtxHandlers(
         AddPackagedHandlers(true, path, out, seen, disabled_clsids);
         return out;
     }
+    const std::wstring ext = ExtensionOf(path);
+    const DWORD attr = GetFileAttributesW(ToParsingPath(path).c_str());
+    if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        // A plain file: only the keys Explorer's association array holds for
+        // it. Folder / Directory / Drive extensions do not apply; loading them
+        // cost a worker each (PintoStartScreen ~125 ms) and showed rows such as
+        // 包含到库中 or 以便携式设备方式打开 that Explorer never offers on a file.
+        const auto keys = CtxHandlerKeysForFile(ProgIdForExt(ext), ext, PerceivedType(ext));
+        for (const auto& key : keys) add(key.c_str());
+        AttachDefaultMenuVerbs(out, keys);
+        AddPackagedHandlers(false, path, out, seen, disabled_clsids);
+        return out;
+    }
+    if (attr != INVALID_FILE_ATTRIBUTES) {
+        // A folder or a drive root: Explorer's keys for it, never * (files
+        // only) — on a drive root those added VS / Git / ToDesk / 内网通 / 泛泰快传 rows
+        // Explorer does not show.
+        const std::wstring parsing = ToParsingPath(path);
+        const bool drive_root = PathIsRootW(parsing.c_str()) && !PathIsUNCW(parsing.c_str());
+        const auto keys = CtxHandlerKeysForLocation(drive_root);
+        for (const auto& key : keys) add(key.c_str());
+        if (drive_root) {
+            // No 发送到 on a drive, but its default-menu slot still supplies
+            // 创建快捷方式 / 格式化 / BitLocker.
+            std::vector<CtxHandlerDesc> objects;
+            std::unordered_set<std::wstring> objects_seen = seen;
+            AddHandlersFromKey(HKEY_CLASSES_ROOT, L"AllFilesystemObjects\\shellex\\ContextMenuHandlers",
+                               objects, objects_seen, disabled_clsids);
+            for (auto& desc : objects) {
+                if (desc.clsid != kSendToHandler) continue;
+                desc.default_menu_only = true;
+                seen.insert(desc.clsid_text);
+                out.push_back(std::move(desc));
+            }
+        }
+        AttachDefaultMenuVerbs(out, keys);
+        AddPackagedHandlers(false, path, out, seen, disabled_clsids);
+        return out;
+    }
     add(L"*\\shellex\\ContextMenuHandlers");
     add(L"AllFilesystemObjects\\shellex\\ContextMenuHandlers");
     add(L"Folder\\shellex\\ContextMenuHandlers");
     add(L"Directory\\shellex\\ContextMenuHandlers");
     add(L"Drive\\shellex\\ContextMenuHandlers");
-    const std::wstring ext = ExtensionOf(path);
     if (!ext.empty()) {
         const std::wstring assoc = L"SystemFileAssociations\\" + ext +
             L"\\shellex\\ContextMenuHandlers";
@@ -368,12 +640,14 @@ bool BindCtxSelection(const std::vector<std::wstring>& paths, bool background,
 
 HRESULT QueryOneHandler(const CtxHandlerDesc& handler, const CtxBind& bind,
                         HWND owner, UINT id_first, UINT id_last, UINT qcm_flags,
-                        CtxHandlerSlot& slot) {
+                        CtxHandlerSlot& slot, std::atomic<int>* phase) {
     slot = {};
     slot.id_first = id_first;
     slot.id_last = id_last;
     slot.clsid = handler.clsid_text;
     slot.name = handler.name;
+    slot.default_menu_verbs = handler.default_menu_verbs;
+    slot.default_menu_only = handler.default_menu_only;
 
     HRESULT hr = E_FAIL;
     if (handler.explorer_command) {
@@ -387,6 +661,7 @@ HRESULT QueryOneHandler(const CtxHandlerDesc& handler, const CtxBind& bind,
         IShellItemArray* items = nullptr;
         if (bind.data)
             SHCreateShellItemArrayFromDataObject(bind.data, IID_PPV_ARGS(&items));
+        if (phase) phase->store(1);
         hr = items ? CreateExplorerCommandMenu(command, items, &slot.menu) : E_FAIL;
         if (items) items->Release();
         command->Release();
@@ -396,12 +671,7 @@ HRESULT QueryOneHandler(const CtxHandlerDesc& handler, const CtxBind& bind,
                               IID_IUnknown, reinterpret_cast<void**>(&unk));
         if (FAILED(hr) || !unk) return FAILED(hr) ? hr : E_FAIL;
 
-        IShellExtInit* init = nullptr;
-        if (SUCCEEDED(unk->QueryInterface(IID_PPV_ARGS(&init))) && init) {
-            init->Initialize(bind.folder, bind.data, bind.assoc);
-            init->Release();
-        }
-        hr = unk->QueryInterface(IID_PPV_ARGS(&slot.menu));
+        hr = InitContextMenuExtension(unk, bind, &slot.menu);
         unk->Release();
     }
     if (FAILED(hr) || !slot.menu) {
@@ -416,6 +686,7 @@ HRESULT QueryOneHandler(const CtxHandlerDesc& handler, const CtxBind& bind,
         return E_OUTOFMEMORY;
     }
     (void)owner;
+    if (phase) phase->store(1);
     hr = SafeQueryContextMenu(slot.menu, slot.hmenu, 0, id_first, id_last, qcm_flags);
     if (FAILED(hr)) {
         ReleaseHandlerSlot(slot);
@@ -445,6 +716,7 @@ HRESULT QueryOneHandler(const CtxHandlerDesc& handler, const CtxBind& bind,
         if (slot.send_to_title.empty() && plain_row >= 0)
             slot.send_to_title = MenuItemText(slot.hmenu, static_cast<UINT>(plain_row));
         if (!slot.send_to_title.empty()) {
+            if (!slot.default_menu_only) slot.send_to_expected = CountSendToTargets();
             IShellItemArray* selection = nullptr;
             IContextMenu* native = nullptr;
             HRESULT native_hr = SHCreateShellItemArrayFromDataObject(bind.data, IID_PPV_ARGS(&selection));
@@ -506,28 +778,45 @@ void CollectHandlerItems(const CtxHandlerSlot& slot, bool background,
             continue;
         }
         const bool enabled = !(mii.fState & (MFS_DISABLED | MFS_GRAYED));
-        const std::wstring title = MenuItemText(slot.hmenu, static_cast<UINT>(i));
-        if (!slot.send_to_title.empty() && title != slot.send_to_title &&
-            !(mii.hSubMenu &&
-              pulse::ipc::ToLowerVerb(CtxVerbOf(slot.menu, mii.wID, slot.id_first)) == L"sendto"))
-            continue;
+        wchar_t title_mnemonic = 0;
+        const std::wstring title =
+            MenuItemText(slot.hmenu, static_cast<UINT>(i), &title_mnemonic);
+        // The SendTo slot holds the whole default Shell menu; besides 发送到 it
+        // also feeds the few rows only that menu produces (创建快捷方式).
+        std::wstring extra_verb;
+        if (!slot.send_to_title.empty() && !mii.hSubMenu)
+            extra_verb = CtxVerbOf(slot.menu, mii.wID, slot.id_first);
+        const bool default_extra = IsDefaultMenuExtraVerb(extra_verb) ||
+                                   ContainsVerb(slot.default_menu_verbs, extra_verb);
+        const bool send_to_row = !slot.send_to_title.empty() &&
+            (title == slot.send_to_title ||
+             (mii.hSubMenu &&
+              pulse::ipc::ToLowerVerb(CtxVerbOf(slot.menu, mii.wID, slot.id_first)) == L"sendto"));
+        if (!slot.send_to_title.empty() && !default_extra && !send_to_row) continue;
+        // A drive's menu has no 发送到; its slot only feeds the default extras.
+        if (slot.default_menu_only && !default_extra) continue;
         if (mii.hSubMenu) {
             const std::wstring parent_verb = slot.send_to_title.empty()
                 ? CtxVerbOf(slot.menu, mii.wID, slot.id_first) : L"sendto";
-            if (IsBuiltinContextVerb(parent_verb, background) ||
-                IsDroppedContextSubmenu(parent_verb)) continue;
+            const bool open_with = slot.send_to_title.empty() &&
+                                   IsOpenWithSubmenuVerb(parent_verb);
+            if (!open_with && IsBuiltinContextVerb(parent_verb, background)) continue;
             const std::wstring& parent_text = title;
             if (parent_text.empty()) continue;
             // Send to fills itself on WM_INITMENUPOPUP and sits near the end of
             // the default menu, so slower flyouts above it could use up the
-            // shared budget and leave it empty (#77). It gets its own.
+            // shared budget and leave it empty (#77). It gets its own, and so
+            // does 打开方式, which also enumerates its apps on first open.
             const bool send_to = !slot.send_to_title.empty() ||
                                  pulse::ipc::ToLowerVerb(parent_verb) == L"sendto";
             std::vector<CtxItemOut> kids;
             CollectSubmenuLeaves(slot.menu, slot.menu2, slot.menu3, mii.hSubMenu,
                                  static_cast<UINT>(i), background, slot.id_first, enabled, 0,
-                                 send_to ? GetTickCount64() + kNestedFlyoutBudgetMs : deadline,
-                                 kids);
+                                 send_to || open_with ? GetTickCount64() + kNestedFlyoutBudgetMs
+                                                      : deadline,
+                                 kids, open_with, send_to ? slot.send_to_expected : 0);
+            // An empty 打开方式 adds nothing over Pulse's own 打开方式… row.
+            if (kids.empty() && open_with) continue;
             if (kids.empty()) {
                 if (!KeepFlyoutParentWithoutLeaves(mii.wID, slot.id_first, slot.id_last))
                     continue;
@@ -537,6 +826,7 @@ void CollectHandlerItems(const CtxHandlerSlot& slot, bool background,
                 item.enabled = enabled && !send_to;
                 item.verb = parent_verb;
                 item.text = parent_text;
+                item.mnemonic = title_mnemonic;
                 push(std::move(item));
                 continue;
             }
@@ -546,6 +836,7 @@ void CollectHandlerItems(const CtxHandlerSlot& slot, bool background,
             header.has_children = true;
             header.verb = parent_verb;
             header.text = parent_text;
+            header.mnemonic = title_mnemonic;
             push(std::move(header));
             for (auto& k : kids) {
                 k.clsid = slot.clsid;
@@ -560,9 +851,9 @@ void CollectHandlerItems(const CtxHandlerSlot& slot, bool background,
         CtxItemOut item;
         item.id = mii.wID;
         // A Send to row without its flyout cannot send anywhere (#77).
-        item.enabled = enabled && slot.send_to_title.empty();
+        item.enabled = enabled && (slot.send_to_title.empty() || default_extra);
         item.verb = verb;
-        item.text = MenuItemText(slot.hmenu, static_cast<UINT>(i));
+        item.text = MenuItemText(slot.hmenu, static_cast<UINT>(i), &item.mnemonic);
         push(std::move(item));
     }
 }

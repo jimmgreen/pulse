@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -158,11 +159,91 @@ const BYTE* AttrValue(const BYTE* attr, uint32_t& len) {
 // Large or heavily fragmented files keep their unnamed $DATA in an extension
 // record listed by $ATTRIBUTE_LIST. Their FILE_NAME size is only a creation-
 // time copy (often 0), so the base record is held until the extension's size
-// is known.
+// is known. Files with many hard links also keep FILE_NAMEs in extension
+// records, so every base record with an attribute list is held until the end.
+struct OwnedName {
+    uint64_t parent = 0;
+    std::wstring name;
+    uint64_t size = 0;
+    uint8_t type = 0;
+};
+struct HeldFile {
+    MftFile file;
+    std::vector<OwnedName> names;
+    bool have_data = false;
+};
 struct ExtensionSizes {
     std::unordered_map<uint64_t, uint64_t> data; // base FRN -> logical size
-    std::vector<MftFile> held;
+    std::unordered_map<uint64_t, std::vector<OwnedName>> names; // base FRN -> FILE_NAMEs
+    std::vector<HeldFile> held;
 };
+
+struct NameView {
+    uint64_t parent = 0;
+    std::wstring_view name;
+    uint64_t size = 0;
+    uint8_t type = 0;
+};
+
+int NameRank(uint8_t type) { return (type == 1 || type == 3) ? 0 : (type == 0 ? 1 : 2); }
+
+bool SameLink(uint64_t parent_a, std::wstring_view a, uint64_t parent_b, std::wstring_view b) {
+    return parent_a == parent_b && a.size() == b.size() &&
+        CompareStringOrdinal(a.data(), static_cast<int>(a.size()), b.data(),
+                             static_cast<int>(b.size()), TRUE) == CSTR_EQUAL;
+}
+
+// The preferred Win32 name becomes the primary entry. Every other Win32 or
+// POSIX FILE_NAME of a file is a separate hard link; DOS (type 2) names are
+// 8.3 aliases of a Win32 name in the same directory.
+void SelectNames(MftFile& file, const NameView* names, size_t count, bool have_data) {
+    size_t best = count;
+    for (size_t i = 0; i < count; ++i)
+        if (best == count || NameRank(names[i].type) < NameRank(names[best].type)) best = i;
+    if (best == count) return;
+    file.parent = names[best].parent;
+    file.name.assign(names[best].name);
+    file.name_type = names[best].type;
+    if (!have_data) file.size = names[best].size;
+    file.links.clear();
+    if (file.is_dir) return;
+    for (size_t i = 0; i < count; ++i) {
+        if (i == best || names[i].type == 2) continue;
+        if (SameLink(names[i].parent, names[i].name, file.parent, file.name)) continue;
+        const bool duplicate = std::any_of(file.links.begin(), file.links.end(), [&](const MftLink& link) {
+            return SameLink(names[i].parent, names[i].name, link.parent, link.name);
+        });
+        if (!duplicate) file.links.push_back(MftLink{names[i].parent, std::wstring(names[i].name)});
+    }
+}
+
+// Reads one resident FILE_NAME value. `name` points into the record buffer.
+bool ReadFileName(const BYTE* attr, NameView& out) {
+    uint32_t vlen = 0;
+    const BYTE* v = AttrValue(attr, vlen);
+    if (!v || vlen < 66) return false;
+    std::memcpy(&out.parent, v, 8);
+    std::memcpy(&out.size, v + 48, 8);
+    const BYTE nlen = v[64];
+    out.type = v[65];
+    const uint32_t nbytes = static_cast<uint32_t>(nlen) * 2;
+    if (nlen == 0 || nbytes > vlen - 66) return false;
+    out.name = std::wstring_view(reinterpret_cast<const wchar_t*>(v + 66), nlen);
+    return true;
+}
+
+void CollectExtensionNames(const BYTE* rec, const FileRecord* hdr, ExtensionSizes& extensions) {
+    const BYTE* p = rec + hdr->attr_off;
+    const BYTE* end = rec + hdr->bytes_used;
+    while (static_cast<size_t>(end - p) >= sizeof(AttrHeader)) {
+        auto* a = reinterpret_cast<const AttrHeader*>(p);
+        if (a->type == kAttrEnd || a->length < sizeof(AttrHeader) || a->length > static_cast<size_t>(end - p)) break;
+        NameView view;
+        if (a->type == kAttrFileName && !a->non_resident && ReadFileName(p, view))
+            extensions.names[hdr->base].push_back(OwnedName{view.parent, std::wstring(view.name), view.size, view.type});
+        p += a->length;
+    }
+}
 
 bool UnnamedDataSize(const BYTE* rec, const FileRecord* hdr, uint64_t& size) {
     const BYTE* p = rec + hdr->attr_off;
@@ -199,18 +280,20 @@ bool ParseRecord(BYTE* rec, uint32_t rec_size, uint32_t sector, uint64_t index,
     if (hdr->bytes_used > rec_size || hdr->attr_off < sizeof(FileRecord) ||
         hdr->attr_off > hdr->bytes_used)
         return true;
-    if (hdr->base != 0) {                   // extension record; base already holds names
+    if (hdr->base != 0) {                   // extension record of a held base record
         uint64_t size = 0;
         if (extensions && UnnamedDataSize(rec, hdr, size)) extensions->data[hdr->base] = size;
+        if (extensions) CollectExtensionNames(rec, hdr, *extensions);
         return true;
     }
 
     MftFile best;
     best.frn = (static_cast<uint64_t>(hdr->seq) << 48) | (index & 0xFFFFFFFFFFFFULL);
     best.is_dir = (hdr->flags & 2) != 0;
-    uint8_t best_name_type = 0xFF;
     uint64_t data_size = 0;
     bool have_data = false, have_list = false;
+    thread_local std::vector<NameView> names;
+    names.clear();
 
     const BYTE* p = rec + hdr->attr_off;
     const BYTE* end = rec + hdr->bytes_used;
@@ -232,25 +315,8 @@ bool ParseRecord(BYTE* rec, uint32_t rec_size, uint32_t sector, uint64_t index,
                 if (attrs & FILE_ATTRIBUTE_DIRECTORY) best.is_dir = true;
             }
         } else if (a->type == kAttrFileName && !a->non_resident) {
-            uint32_t vlen = 0;
-            const BYTE* v = AttrValue(p, vlen);
-            if (v && vlen >= 66) {
-                uint64_t parent = 0, fsize = 0;
-                std::memcpy(&parent, v, 8);
-                std::memcpy(&fsize, v + 48, 8);
-                const BYTE nlen = v[64];
-                const BYTE ntype = v[65];
-                const uint32_t nbytes = static_cast<uint32_t>(nlen) * 2;
-                auto rank = [](uint8_t t) { return (t == 1 || t == 3) ? 0 : (t == 0 ? 1 : 2); };
-                if (nbytes <= vlen - 66 && nlen > 0 &&
-                    (best.name.empty() || rank(ntype) < rank(best_name_type))) {
-                    best.parent = parent;
-                    best.name.assign(reinterpret_cast<const wchar_t*>(v + 66), nlen);
-                    best.name_type = ntype;
-                    best_name_type = ntype;
-                    if (!have_data) best.size = fsize;
-                }
-            }
+            NameView view;
+            if (ReadFileName(p, view)) names.push_back(view);
         } else if (a->type == kAttrData && unnamed) {
             if (a->non_resident) {
                 if (a->length < sizeof(AttrHeader) + sizeof(AttrNonResident)) break;
@@ -268,11 +334,18 @@ bool ParseRecord(BYTE* rec, uint32_t rec_size, uint32_t sector, uint64_t index,
         if (a->length == 0) break;
     }
     if (have_data) best.size = data_size;
-    if (best.name.empty()) return true;
-    if (extensions && have_list && !have_data && !best.is_dir) {
-        extensions->held.push_back(std::move(best));
+    if (extensions && have_list && !best.is_dir) {
+        HeldFile held;
+        held.have_data = have_data;
+        held.names.reserve(names.size());
+        for (const NameView& name : names)
+            held.names.push_back(OwnedName{name.parent, std::wstring(name.name), name.size, name.type});
+        held.file = std::move(best);
+        extensions->held.push_back(std::move(held));
         return true;
     }
+    SelectNames(best, names.data(), names.size(), have_data);
+    if (best.name.empty()) return true;
     return emit(std::move(best));
 }
 
@@ -395,9 +468,23 @@ MftReadResult EnumerateMftRecordsResult(const NTFS_VOLUME_DATA_BUFFER& vd,
         if (left && !CheckedAdd(file_off, left, file_off)) return MftReadResult::Failed;
     }
     // Extension records may precede or follow their base record anywhere in $MFT.
-    for (auto& f : extensions.held) {
+    std::vector<NameView> views;
+    for (auto& held : extensions.held) {
         if (running && !running->load()) return MftReadResult::Stopped;
-        if (const auto found = extensions.data.find(f.frn); found != extensions.data.end()) f.size = found->second;
+        MftFile& f = held.file;
+        if (!held.have_data) {
+            if (const auto found = extensions.data.find(f.frn); found != extensions.data.end()) {
+                f.size = found->second;
+                held.have_data = true;
+            }
+        }
+        if (const auto found = extensions.names.find(f.frn); found != extensions.names.end())
+            for (auto& name : found->second) held.names.push_back(std::move(name));
+        views.clear();
+        for (const OwnedName& name : held.names)
+            views.push_back(NameView{name.parent, name.name, name.size, name.type});
+        SelectNames(f, views.data(), views.size(), held.have_data);
+        if (f.name.empty()) continue;
         if (!deliver(std::move(f))) return MftReadResult::Stopped;
     }
     if (running && !running->load()) return MftReadResult::Stopped;

@@ -1412,3 +1412,11 @@
 #define IDS_CONTEXT_ORDER_RESET 2569
 #define IDS_CONTEXT_ORDER_HINT 2570
 #define IDS_CONTEXT_ORDER_HINT_ROW 2571
+// Settings > Exclusions: the optional node_modules system group.
+#define IDS_SYSTEM_GROUP_NODE_MODULES 2572
+// Shortcut sheet rows for the File Explorer keys (Ctrl+Shift+1-8, Shift+F10).
+#define IDS_HELP_VIEW_MODE 2573
+#define IDS_HELP_CONTEXT_MENU 2574
+// Settings > Startup and close: double-clicking a tab closes it.
+#define IDS_SETTINGS_CLOSE_TAB_DOUBLE_CLICK 2575
+#define IDS_SETTINGS_CLOSE_TAB_DOUBLE_CLICK_DESC 2576

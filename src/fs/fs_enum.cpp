@@ -14,6 +14,8 @@
 #include <shlwapi.h>
 #include <lm.h>
 #include <algorithm>
+#include <array>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 
@@ -364,18 +366,95 @@ static void EnumerateNtQuery(const std::wstring& path, std::vector<DirEntry>& ou
 
 }
 
+namespace {
+// Volume label and capacity are the only This PC fields that touch the media.
+// A disconnected mapped drive, an empty card reader or a spun-down disk can
+// stall them past the listing timeout, which failed the whole view with
+// "目录不可用" while every drive still opened on its own. Each drive answers
+// on its own thread within a short shared budget; a late drive is listed by
+// its letter alone, and is not probed again while its earlier query is stuck.
+constexpr auto kDriveMediaBudget = std::chrono::milliseconds(2000);
+
+struct DriveMedia {
+    std::wstring label;
+    uint64_t total = 0;
+    uint64_t free = 0;
+};
+
+struct DriveMediaProbe {
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::array<std::optional<DriveMedia>, 26> answers;
+};
+
+std::array<std::atomic<bool>, 26> drive_media_busy{};
+
+DriveMedia QueryDriveMedia(const wchar_t* root) {
+    DWORD previous_mode = 0;
+    const bool mode_set = SetThreadErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX,
+                                             &previous_mode) != FALSE;
+    DriveMedia media;
+    wchar_t label[MAX_PATH + 1] = {};
+    if (GetVolumeInformationW(root, label, MAX_PATH, nullptr, nullptr, nullptr, nullptr, 0))
+        media.label = label;
+    ULARGE_INTEGER free_bytes{}, total_bytes{};
+    if (GetDiskFreeSpaceExW(root, &free_bytes, &total_bytes, nullptr)) {
+        media.total = total_bytes.QuadPart;
+        media.free = free_bytes.QuadPart;
+    }
+    if (mode_set) SetThreadErrorMode(previous_mode, nullptr);
+    return media;
+}
+} // namespace
+
 // "This PC" view (empty path): one entry per logical drive, label matches
 // the sidebar ("Label (C:)" or a localized fallback). full_path is set so
 // the app layer can navigate/open without joining parent+name.
-static void EnumerateThisPc(std::vector<DirEntry>& out) {
-    DWORD drives = GetLogicalDrives();
+static void EnumerateThisPc(std::vector<DirEntry>& out, const std::atomic<bool>* cancelled) {
+    const DWORD drives = GetLogicalDrives();
+    auto probe = std::make_shared<DriveMediaProbe>();
+    std::array<bool, 26> started{};
+    int pending = 0;
     for (int i = 0; i < 26; ++i) {
-        if (!(drives & (1 << i))) continue;
+        if (!(drives & (1u << i)) || drive_media_busy[i].exchange(true)) continue;
+        try {
+            std::thread([probe, i] {
+                const wchar_t root[4] = { static_cast<wchar_t>(L'A' + i), L':', L'\\', L'\0' };
+                DriveMedia media;
+                try { media = QueryDriveMedia(root); } catch (...) {}
+                drive_media_busy[i] = false;
+                {
+                    std::lock_guard lock(probe->mutex);
+                    probe->answers[i] = std::move(media);
+                }
+                probe->changed.notify_all();
+            }).detach();
+            started[i] = true;
+            ++pending;
+        } catch (...) {
+            drive_media_busy[i] = false;
+        }
+    }
+    std::array<std::optional<DriveMedia>, 26> answers;
+    {
+        std::unique_lock lock(probe->mutex);
+        const auto deadline = std::chrono::steady_clock::now() + kDriveMediaBudget;
+        for (;;) {
+            int answered = 0;
+            for (int i = 0; i < 26; ++i) answered += started[i] && probe->answers[i].has_value();
+            if (answered == pending || (cancelled && cancelled->load()) ||
+                std::chrono::steady_clock::now() >= deadline) break;
+            probe->changed.wait_for(lock, std::chrono::milliseconds(25));
+        }
+        answers = probe->answers;
+    }
+    for (int i = 0; i < 26; ++i) {
+        if (!(drives & (1u << i))) continue;
         wchar_t root[4] = { wchar_t(L'A' + i), L':', L'\\', L'\0' };
-        wchar_t volName[MAX_PATH + 1] = {};
-        GetVolumeInformationW(root, volName, MAX_PATH, nullptr, nullptr, nullptr, nullptr, 0);
+        const DriveMedia* media = answers[i] ? &*answers[i] : nullptr;
         DirEntry e;
-        e.name = std::wstring(volName[0] ? volName : l10n::Pick(L"本地磁盘", L"Local Disk")) +
+        e.name = (media && !media->label.empty() ? media->label
+                                                 : std::wstring(l10n::Pick(L"本地磁盘", L"Local Disk"))) +
                  L" (" + root[0] + L":)";
         e.full_path = NormalizePath(root);
         e.is_dir = true;
@@ -383,10 +462,9 @@ static void EnumerateThisPc(std::vector<DirEntry>& out) {
         // Local metadata only (no media access): the UI shows it as the type.
         e.drive_type = static_cast<uint8_t>(GetDriveTypeW(root));
         // Same figures as the sidebar drive rows; the tile view draws them.
-        ULARGE_INTEGER free_bytes{}, total_bytes{};
-        if (GetDiskFreeSpaceExW(root, &free_bytes, &total_bytes, nullptr)) {
-            e.drive_total = total_bytes.QuadPart;
-            e.drive_free = free_bytes.QuadPart;
+        if (media) {
+            e.drive_total = media->total;
+            e.drive_free = media->free;
         }
         out.push_back(std::move(e));
     }
@@ -427,7 +505,7 @@ static void EnumerateServerShares(const std::wstring& server, std::vector<DirEnt
 static void EnumerateDirectoryImpl(const std::wstring& path, std::vector<DirEntry>& out, const std::atomic<bool>* cancelled) {
     out.clear();
     if (path.empty()) {
-        EnumerateThisPc(out);
+        EnumerateThisPc(out, cancelled);
         return;
     }
     std::wstring normalized = NormalizePath(path);

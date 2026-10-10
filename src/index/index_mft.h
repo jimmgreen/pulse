@@ -7,10 +7,18 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 #include <windows.h>
 #include <winioctl.h>
 
 namespace pulse::index {
+
+// Additional hard link name of a file: a Win32/POSIX FILE_NAME whose
+// (parent, name) differs from MftFile::name. DOS 8.3 aliases are not links.
+struct MftLink {
+    uint64_t parent = 0;
+    std::wstring name;
+};
 
 struct MftFile {
     uint64_t frn = 0;
@@ -20,6 +28,9 @@ struct MftFile {
     std::wstring name;
     bool is_dir = false;
     uint8_t name_type = 0; // NTFS FILE_NAME.NameType
+    // Other hard links of a file (never set for directories), including names
+    // stored in $ATTRIBUTE_LIST extension records.
+    std::vector<MftLink> links;
 };
 
 // Core enumeration accepts a positional reader so complete/failure semantics

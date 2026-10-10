@@ -22,8 +22,8 @@ std::vector<HelpGroup> HelpGroups() {
     return {
         {Id::HelpGroupNav, {
             {Id::HelpOpen, l10n::Pick(L"Enter / 双击", L"Enter / Double-click")},
-            {Id::HelpBackForward, L"Alt ← / →"},
-            {Id::Up, L"Backspace / Alt ↑"},
+            {Id::HelpBackForward, L"Backspace / Alt ← / →"},
+            {Id::Up, L"Alt ↑"},
             {Id::HelpGoToPath, L"Ctrl L / Alt D / F4"},
             {Id::Refresh, L"F5"},
             {Id::HelpMoveFocus, L"↑ ↓ PgUp PgDn Home End"},
@@ -35,17 +35,18 @@ std::vector<HelpGroup> HelpGroups() {
             {Id::Undo, L"Ctrl Z"},
             {Id::Rename, L"F2"},
             {Id::BatchRename, L"Ctrl Shift R"},
-            {Id::NewFolder, L"F7"},
-            {Id::Delete, L"Delete"},
+            {Id::NewFolder, L"Ctrl Shift N / F7"},
+            {Id::Delete, L"Delete / Ctrl D"},
             {Id::PermanentDelete, L"Shift Delete"},
             {Id::Properties, L"Alt Enter"},
-            {Id::HelpToggleTag, L"Ctrl Shift 1–7"},
+            {Id::HelpContextMenu, L"Shift F10"},
+            {Id::HelpToggleTag, L"Ctrl Alt Shift 1–7"},
         }},
         {Id::HelpGroupSearch, {
             {Id::Search, L"Ctrl K"},
             {Id::HelpCommandBar, L"Ctrl Shift K"},
             {Id::HelpProject, L"Ctrl P"},
-            {Id::HelpFilter, L"Ctrl F"},
+            {Id::HelpFilter, L"Ctrl F / Ctrl E / F3"},
             {Id::AdvancedSearch, L"Ctrl Shift F"},
         }},
         {Id::HelpGroupSelect, {
@@ -57,12 +58,14 @@ std::vector<HelpGroup> HelpGroups() {
         {Id::HelpGroupTabs, {
             {Id::TooltipNewTab, L"Ctrl T"},
             {Id::TabClose, L"Ctrl W"},
-            {Id::HelpSwitchTab, L"Ctrl Tab / Ctrl Shift Tab"},
-            {Id::SplitLayout, L"Ctrl 1 / 2 / 3 / 4"},
+            {Id::HelpSwitchTab, L"Ctrl Tab / Ctrl 1–9"},
+            {Id::SplitLayout, L"Ctrl Alt 1 / 2 / 3 / 4"},
+            {Id::HelpViewMode, L"Ctrl Shift 1–8"},
             {Id::HelpNextPane, L"F6"},
-            {Id::HelpMarkTarget, L"Ctrl D"},
+            {Id::HelpMarkTarget, L"Ctrl Alt D"},
             {Id::HelpTransferTarget, L"Ctrl Alt C / X"},
             {Id::HelpSidebar, L"Ctrl B"},
+            {Id::Maximize, L"F11"},
         }},
     };
 }

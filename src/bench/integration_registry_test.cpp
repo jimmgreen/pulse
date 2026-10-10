@@ -83,6 +83,8 @@ int wmain() {
     Check(!ApplyShellIntegration(ShellIntegrationKind::ThisPc, exe, true) && HasLegacyShellIntegrationResidue() &&
         !Read(L"Software\\Pulse\\ShellIntegration\\Backups\\v1\\ThisPc", L"Snapshot").exists,
         "enable requires explicit repair instead of backing up damaged legacy overrides as originals");
+    Check(LastShellIntegrationFailure().kind == ShellIntegrationFailureKind::LegacyResidue,
+        "legacy residue is reported as its own failure reason");
     Set(shell + L"\\ThirdParty\\command", L"", L"third party command");
     Check(RepairLegacyShellIntegrationResidue() && !HasLegacyShellIntegrationResidue() &&
         !KeyExists(pc) && !KeyExists(win) && !Read(shell).exists &&
@@ -110,6 +112,7 @@ int wmain() {
     const auto original = Read(command), delegate = Read(command, L"DelegateExecute"), verb = Read(shell), old_win = Read(win), old_pc = Read(pc);
     bool enabled = true;
     for (auto kind : {ShellIntegrationKind::Folders, ShellIntegrationKind::WinE, ShellIntegrationKind::ThisPc}) enabled = ApplyShellIntegration(kind, exe, true) && ReadShellIntegration(kind, exe) && enabled;
+    Check(LastShellIntegrationFailure().kind == ShellIntegrationFailureKind::None, "a successful apply clears the failure reason");
     Check(enabled, "enable all associations and read actual state");
     Check(ApplyShellIntegration(ShellIntegrationKind::Folders, exe, true), "repeated enable retains original snapshot");
     bool restored = true;
@@ -211,6 +214,11 @@ int wmain() {
     secured=secured && SetEntriesInAclW(1,&deny,old_acl,&denied_acl)==ERROR_SUCCESS;
     secured=secured && SetSecurityInfo(protected_key,SE_REGISTRY_KEY,DACL_SECURITY_INFORMATION|PROTECTED_DACL_SECURITY_INFORMATION,nullptr,nullptr,denied_acl,nullptr)==ERROR_SUCCESS;
     Check(secured && !ApplyShellIntegration(ShellIntegrationKind::Directory,exe,true) && Read(command)==protected_original && !HasShellIntegrationOwnership(ShellIntegrationKind::Directory,exe), "denied write reports failure and leaves original association");
+    if (secured) {
+        const auto denied = LastShellIntegrationFailure();
+        Check(denied.kind==ShellIntegrationFailureKind::AccessDenied && denied.status==ERROR_ACCESS_DENIED && denied.key==command,
+              "denied write is reported as access denied with its key");
+    }
     if (secured) Check(SetSecurityInfo(protected_key,SE_REGISTRY_KEY,DACL_SECURITY_INFORMATION|UNPROTECTED_DACL_SECURITY_INFORMATION,nullptr,nullptr,old_acl,nullptr)==ERROR_SUCCESS,"isolated ACL restored");
     if (secured) {
         Check(ApplyShellIntegration(ShellIntegrationKind::Directory,exe,true),"retry succeeds after write access is restored");
@@ -256,8 +264,11 @@ int wmain() {
     SetIntegrationWriteHookForTesting(FailEnableAndRollback);
     const bool enabled_with_failure = ApplyShellIntegration(ShellIntegrationKind::Directory, exe, true);
     SetIntegrationWriteHookForTesting(nullptr);
+    const auto hook_failure = LastShellIntegrationFailure();
     Check(!enabled_with_failure && HasShellIntegrationOwnership(ShellIntegrationKind::Directory, exe),
           "enable and compensation failures retain command ownership anchor");
+    Check(hook_failure.kind == ShellIntegrationFailureKind::WriteError && !hook_failure.key.empty(),
+          "the first failed write is reported, not the compensation");
     Check(ApplyShellIntegration(ShellIntegrationKind::Directory, exe, false) &&
           Read(command) == rollback_command && Read(command, L"DelegateExecute") == rollback_delegate,
           "retry after failed enable compensation restores original command and delegate");

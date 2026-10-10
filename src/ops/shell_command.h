@@ -18,6 +18,16 @@ struct ShellCommandApi {
 };
 ShellCommandResult LaunchShellCommand(const std::wstring& command, const std::wstring& directory,
     HWND owner, const ShellCommandApi& api = {});
+struct ShellItemResult {
+    DWORD error = ERROR_SUCCESS;
+    DWORD process_id = 0; // zero is valid for a delegated/packaged activation
+    DWORD mask = 0;
+};
+// Empty verb means the registered default action, not a hard-coded "open".
+// The caller owns COM initialization; handoff completes on its worker thread.
+ShellItemResult LaunchShellItem(const std::wstring& file, const std::wstring& verb,
+    const std::wstring& arguments, const std::wstring& directory, HWND owner,
+    const ShellCommandApi& api = {});
 struct TerminalLaunchResult {
     DWORD error = ERROR_SUCCESS;
     DWORD open_error = ERROR_SUCCESS;

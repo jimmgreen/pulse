@@ -520,13 +520,13 @@ int RunSettingsIntegrationUiTest(AppState& s, const wchar_t* output) {
                         bar_fits &= !nonempty(l.integration_bar) && !nonempty(l.integration_retry) && !nonempty(l.integration_restore);
                     }
                     const auto hint = l10n::Get(!vm.settings_integration_enabled ? I::IntegrationInactiveHint
-                        : state == 4 ? I::IntegrationNoneHint : I::IntegrationRunningHint);
+                        : state == 4 ? I::IntegrationNoneHint : I::IntegrationHintLaunch);
                     const auto h = l.integration_hint;
                     hints &= nonempty(h) && h.top >= experimental.bottom && h.bottom <= l.integration_card.bottom &&
                         h.top+4*scale+painter.MeasureWrappedCaptionHeight(hint, h.right-16*scale-(h.left+78*scale)) <= h.bottom+0.5f;
                     if (state == 1) {
                         // Every background prerequisite met: no hint row at all.
-                        auto ready = vm; ready.settings_launch_on_startup = ready.settings_keep_running = true;
+                        auto ready = vm; ready.settings_launch_on_startup = true;   // close-to-tray follows takeover
                         const auto rl = ui::MakeSettingsLayout(ready, window, scale, s.renderer.TitleBarHeight(), 28*scale, &painter);
                         hints &= !nonempty(rl.integration_hint) && rl.integration_card.bottom < l.integration_card.bottom;
                     }
@@ -568,8 +568,8 @@ int RunSettingsIntegrationUiTest(AppState& s, const wchar_t* output) {
             vm.settings_integration_can_restore = state != 0 && state != 4;
             vm.settings_integration_can_retry = state == 2 || state == 3;
             vm.settings_integration_summary = state == 3 ? std::wstring(l10n::Pick(
-                L"没能设置：Win + E。可能被安全软件拦截，可以重试。",
-                L"Could not apply: Win + E. Security software may have blocked it; try again."))
+                L"没能设置：桌面上的「此电脑」（写入后被改回，可能被安全软件拦截）。详情见 %LOCALAPPDATA%\\Pulse\\logs\\integration.log。",
+                L"Could not apply: This PC on the desktop (it was undone right after writing, possibly by security software). Details: %LOCALAPPDATA%\\Pulse\\logs\\integration.log."))
                 : state == 2 ? l10n::Get(I::IntegrationDriftDesc) : std::wstring{};
             const auto window = D2D1::RectF(0, 0, static_cast<float>(width), static_cast<float>(height));
             const auto l = ui::MakeSettingsLayout(vm, window, 1, s.renderer.TitleBarHeight(), 28, &painter);

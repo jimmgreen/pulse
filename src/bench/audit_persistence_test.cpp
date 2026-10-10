@@ -68,7 +68,7 @@ int main() {
 
     // System folder exclusions: configs from older releases get the defaults
     // and stay unmarked so the service persists them and rebuilds once.
-    const std::vector<std::wstring> default_groups{L"windows", L"temp", L"old"};
+    const std::vector<std::wstring> default_groups{L"windows", L"temp", L"old", L"node_modules"};
     Check(config.exclude_system && config.system_groups == default_groups && !config.system_groups_saved,
           "SYS-001 missing config uses default system groups");
     WriteUtf8FileAtomic(machine, valid);
@@ -77,11 +77,21 @@ int main() {
           "SYS-002 config without system keys is unmarked with defaults");
     WriteUtf8FileAtomic(machine, LR"({"exclude_system":false,"system_exclusion_groups":["temp","bogus","temp","programdata"]})");
     Check(index::LoadIndexConfigFrom(machine, L"default", config) && !config.exclude_system &&
-          config.system_groups == std::vector<std::wstring>{L"temp", L"programdata"} && config.system_groups_saved,
-          "SYS-003 saved groups drop unknown and duplicate names");
+          config.system_groups == std::vector<std::wstring>{L"temp", L"programdata", L"node_modules"} &&
+          config.system_groups_saved,
+          "SYS-003 saved groups drop unknown and duplicate names; node_modules keeps its old behaviour");
     WriteUtf8FileAtomic(machine, LR"({"system_exclusion_groups":[]})");
+    Check(index::LoadIndexConfigFrom(machine, L"default", config) &&
+          config.system_groups == std::vector<std::wstring>{L"node_modules"} &&
+          config.system_groups_saved, "SYS-004 legacy empty group list still hides node_modules");
+    WriteUtf8FileAtomic(machine, LR"({"system_exclusion_groups":[],"system_exclusion_known":["windows","temp","old","programdata","node_modules"]})");
     Check(index::LoadIndexConfigFrom(machine, L"default", config) && config.system_groups.empty() &&
-          config.system_groups_saved, "SYS-004 empty saved group list stays empty");
+          config.system_groups_saved && !index::HidesNodeModules(config),
+          "SYS-004 empty saved group list stays empty once node_modules was offered");
+    WriteUtf8FileAtomic(machine, LR"({"system_exclusion_groups":["windows"],"system_exclusion_known":["windows","temp","old","programdata"]})");
+    Check(index::LoadIndexConfigFrom(machine, L"default", config) &&
+          config.system_groups == std::vector<std::wstring>{L"windows", L"node_modules"},
+          "SYS-010 groups newer than the saved file start at their default");
     DeleteFileW(machine.c_str());
     {
         wchar_t windows[MAX_PATH]{};
@@ -113,6 +123,12 @@ int main() {
         Check(index::SystemExclusionPaths(off).empty(), "SYS-008 switch off excludes nothing");
         Check(index::IsSystemExclusionGroup(L"old") && !index::IsSystemExclusionGroup(L"all") &&
               !index::IsSystemExclusionGroup(L"Windows"), "SYS-009 group names are exact");
+        Check(index::IsSystemExclusionGroup(L"node_modules") && index::HidesNodeModules(defaults) &&
+              !index::HidesNodeModules(off) && !index::HidesNodeModules(only_data),
+              "SYS-011 node_modules group follows the master switch and its own checkbox");
+        Check(std::none_of(system_paths.begin(), system_paths.end(), [](const std::wstring& p) {
+                  return p.find(L"node_modules") != std::wstring::npos;
+              }), "SYS-012 node_modules hides by folder name, not by fixed path");
     }
     std::filesystem::remove_all(dir);
     return failures ? 1 : 0;

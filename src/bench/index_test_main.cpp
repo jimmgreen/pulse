@@ -1,4 +1,5 @@
 #include "../index/index_config.h"
+#include "../index/index_executable.h"
 #include "../index/index_query.h"
 #include "../index/network_index.h"
 #include "../index/network_crawl_schedule.h"
@@ -8,8 +9,10 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iostream>
 #include <mutex>
+#include <vector>
 
 namespace pulse::index {
 struct NetworkIndexTestAccess {
@@ -303,9 +306,47 @@ int RunNetworkConfigAudit() {
     return failures ? 1 : 0;
 }
 
+// Pulse.Index.exe resolution for a pulse.exe started outside the install folder.
+void RunIndexExecutableTests() {
+    const std::wstring installed = L"C:\\Program Files\\Pulse\\Pulse.Index.exe";
+    Check(IndexExecutableFromServiceCommand(L"\"C:\\Program Files\\Pulse\\Pulse.Index.exe\" --service") == installed,
+          L"service command: quoted image path");
+    Check(IndexExecutableFromServiceCommand(L"C:\\Program Files\\Pulse\\pulse.index.exe --service") ==
+              L"C:\\Program Files\\Pulse\\pulse.index.exe",
+          L"service command: unquoted path with spaces");
+    Check(IndexExecutableFromServiceCommand(L"\"C:\\Tools\\Other.exe\" --run C:\\x\\Pulse.Index.exe").empty() &&
+              IndexExecutableFromServiceCommand(L"\"C:\\Pulse\\NotPulse.Index.exe\" --service").empty() &&
+              IndexExecutableFromServiceCommand(L"Pulse.Index.exe --service").empty() &&
+              IndexExecutableFromServiceCommand(L"").empty(),
+          L"service command: other images rejected");
+    const std::wstring downloads = L"D:\\Users\\qwer5\\Downloads\\Pulse.Index.exe";
+    const std::wstring service = L"\"" + installed + L"\" --service";
+    auto only = [](std::initializer_list<std::wstring> files) {
+        return [files = std::vector<std::wstring>(files)](const std::wstring& path) {
+            return std::find(files.begin(), files.end(), path) != files.end();
+        };
+    };
+    Check(ResolveIndexExecutable(downloads, service, only({installed})) == installed,
+          L"pulse.exe outside the install folder uses the service executable");
+    Check(ResolveIndexExecutable(downloads, service, only({downloads, installed})) == downloads,
+          L"sibling Pulse.Index.exe stays preferred");
+    Check(ResolveIndexExecutable(downloads, L"", only({})) == downloads &&
+              ResolveIndexExecutable(downloads, service, only({})) == downloads,
+          L"no service or missing service file keeps the sibling path for the error");
+    // Live: an installed PulseIndex service resolves to an existing executable
+    // without elevation (this process runs as the signed-in user).
+    const std::wstring live = InstalledServiceCommand(L"PulseIndex");
+    if (!live.empty()) {
+        const std::wstring image = IndexExecutableFromServiceCommand(live);
+        Check(!image.empty() && GetFileAttributesW(image.c_str()) != INVALID_FILE_ATTRIBUTES,
+              L"installed PulseIndex service resolves to its Pulse.Index.exe");
+    }
+}
+
 int wmain(int argc, wchar_t** argv) {
     if (argc == 2 && std::wstring_view(argv[1]) == L"--network-config-only") return RunNetworkConfigAudit();
     RunLiveNetworkTests();
+    RunIndexExecutableTests();
     Check(NormalizeVolumeId(L"  \\\\?\\Volume{abc}\\  ") == L"\\\\?\\VOLUME{ABC}\\",
           L"volume id normalization");
 

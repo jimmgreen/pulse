@@ -3,10 +3,24 @@
 #include <string>
 
 namespace pulse::app {
+// A network provider failure only makes a search incomplete when network
+// results were expected: a configured network root or a live network walk.
+// Without either, the network agent has nothing to contribute, and an agent
+// that is starting, busy or blocked must not mark complete local results as
+// "search incomplete" (error 1236).
+inline bool CountsProviderError(bool network, bool network_expected) {
+    return !network || network_expected;
+}
 struct GlobalProviderStatus {
     bool local_ready = false, network_ready = false;
+    bool network_expected = true;
     DWORD local_error = 0, network_error = 0;
+    void ExpectNetwork(bool expected) {
+        network_expected = expected;
+        if (!expected) { network_ready = true; network_error = 0; }
+    }
     void Accept(bool network, DWORD error) {
+        if (!CountsProviderError(network, network_expected)) return;
         (network ? network_ready : local_ready) = true;
         (network ? network_error : local_error) = error;
     }

@@ -337,6 +337,41 @@ std::pair<int, int> ViewLayout::VisibleRange() const noexcept {
     return {first, last};
 }
 
+std::pair<int, int> ViewLayout::RangeForSpan(float lo, float hi) const noexcept {
+    if (count_ == 0 || hi < lo) return {-1, -1};
+    const int last_index = static_cast<int>(count_) - 1;
+    if (groups_) {
+        const float a = std::clamp(lo - viewport_.top + scroll_y_, 0.0f, std::max(0.0f, content_height_));
+        const float b = std::clamp(hi - viewport_.top + scroll_y_, a, std::max(a, content_height_));
+        auto index_at = [&](float local_y, bool last) {
+            const int g = GroupAtY(local_y);
+            const ListGroup& grp = (*groups_)[static_cast<size_t>(g)];
+            const float off = local_y - group_top_[static_cast<size_t>(g)] - header_h_;
+            if (grp.collapsed || off < 0.0f) return last ? grp.first + grp.count - 1 : grp.first;
+            return grp.first + std::min(grp.count - 1, static_cast<int>(off / metrics_.cell_height));
+        };
+        return {std::max(0, index_at(a, false) - 1), std::min(last_index, index_at(b, true) + 1)};
+    }
+    int first = 0, last = last_index;
+    if (metrics_.column_major) {
+        if (metrics_.cell_width <= 0.0f || metrics_.rows_per_column <= 0) return {0, last_index};
+        const float a = lo - viewport_.left + scroll_x_, b = hi - viewport_.left + scroll_x_;
+        const int first_col = std::max(0, static_cast<int>(std::floor(a / metrics_.cell_width)) - 1);
+        const int last_col = std::max(0, static_cast<int>(std::floor(b / metrics_.cell_width)) + 1);
+        first = first_col * metrics_.rows_per_column;
+        last = std::min(last, (last_col + 1) * metrics_.rows_per_column - 1);
+    } else {
+        if (metrics_.cell_height <= 0.0f || metrics_.columns <= 0) return {0, last_index};
+        const float a = lo - viewport_.top + scroll_y_, b = hi - viewport_.top + scroll_y_;
+        const int first_row = std::max(0, static_cast<int>(std::floor(a / metrics_.cell_height)) - 1);
+        const int last_row = std::max(0, static_cast<int>(std::floor(b / metrics_.cell_height)) + 1);
+        first = first_row * metrics_.columns;
+        last = std::min(last, (last_row + 1) * metrics_.columns - 1);
+    }
+    if (first > last) return {-1, -1};
+    return {first, last};
+}
+
 int ViewLayout::MoveIndex(int current, int dx, int dy) const noexcept {
     if (count_ == 0) return -1;
     current = std::clamp(current, 0, static_cast<int>(count_) - 1);

@@ -1,6 +1,7 @@
 #include "lumatext_renderer.h"
 #include "optional_lumatext.h"
 #include "typography.h"
+#include "edit_word_range.h"
 
 #include <windows.h>
 #include <windowsx.h>
@@ -177,7 +178,20 @@ struct LumaTextRenderer::Impl {
     int mouse_anchor = 0;
     int mouse_caret = 0;
     bool applying_mouse_selection = false;
+    // A drag keeps its selection here until release. Sending EM_SETSEL for
+    // every WM_MOUSEMOVE runs the native redraw guard, which briefly hides
+    // the redirected edit surface and made dragged selections flicker.
+    bool mouse_selection_deferred = false;
+    // After a double-click the held button extends by whole words, as in
+    // native editors; a pointer that shifts slightly keeps the whole word.
+    bool mouse_word_drag = false;
+    int mouse_word_start = 0;
+    int mouse_word_end = 0;
     std::unordered_map<HWND, std::pair<int, int>> edit_selections;
+    // Horizontal scroll persists like native EDIT's offset: the text moves
+    // only when the caret would leave the field. Paint and mouse hit-testing
+    // share it so the pointer maps to the characters actually on screen.
+    std::unordered_map<HWND, float> edit_scrolls;
     static constexpr float kEditPad = 2.0f;
     // Inputs use DirectWrite in every text mode, sharing the list rendering
     // parameters while EDIT continues to own text, undo and IME.
@@ -922,12 +936,37 @@ struct LumaTextRenderer::Impl {
         return dw_params.Get();
     }
 
-    static float EditScrollX(float caret_x, float width) {
+    static float EditScrollX(float caret_x, float width, float previous = 0.0f,
+                             float text_width = -1.0f) {
         const float inner = std::max(1.0f, width - kEditPad);
-        float scroll = 0.0f;
+        float scroll = std::max(0.0f, previous);
         if (caret_x - scroll > inner) scroll = caret_x - inner;
         if (caret_x - scroll < kEditPad) scroll = std::max(0.0f, caret_x - kEditPad);
-        return scroll;
+        if (text_width >= 0.0f) scroll = std::min(scroll, std::max(0.0f, text_width - inner));
+        return std::max(0.0f, scroll);
+    }
+
+    static float EditTextWidth(IDWriteTextLayout* layout) {
+        DWRITE_TEXT_METRICS metrics{};
+        if (!layout || FAILED(layout->GetMetrics(&metrics))) return -1.0f;
+        return metrics.widthIncludingTrailingWhitespace;
+    }
+
+    float EditScroll(HWND hwnd, IDWriteTextLayout* layout, float caret_x, float width) const {
+        const auto saved = edit_scrolls.find(hwnd);
+        return EditScrollX(caret_x, width, saved != edit_scrolls.end() ? saved->second : 0.0f,
+                           EditTextWidth(layout));
+    }
+
+    // Character under the pointer (not the nearest caret stop), so a click on
+    // the right half of a letter still belongs to that letter's word.
+    static int DwCharIndex(IDWriteTextLayout* layout, float x, int length) {
+        if (!layout || length <= 0) return 0;
+        BOOL trailing = FALSE;
+        BOOL inside = FALSE;
+        DWRITE_HIT_TEST_METRICS hit{};
+        if (FAILED(layout->HitTestPoint(x, 1.0f, &trailing, &inside, &hit))) return length - 1;
+        return std::clamp(static_cast<int>(hit.textPosition), 0, length - 1);
     }
 
     void ApplyMouseSelection(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
@@ -966,25 +1005,29 @@ struct LumaTextRenderer::Impl {
         const auto dw = DwEditLayout(text, format, static_cast<float>(rc.bottom - rc.top));
         if (!dw) return;
         const float caret_x = DwCaretX(dw.Get(), caret_for_scroll, length);
-        const float scroll = EditScrollX(caret_x, width);
-        const int index = DwHitIndex(dw.Get(), static_cast<float>(GET_X_LPARAM(lParam)) - kEditPad + scroll, length);
+        // Hit-test against the offset last painted, not one re-derived from
+        // the caret: deriving it again slid the text under a held pointer.
+        const auto painted = edit_scrolls.find(hwnd);
+        const float scroll = painted != edit_scrolls.end()
+            ? painted->second : EditScroll(hwnd, dw.Get(), caret_x, width);
+        const float text_x = static_cast<float>(GET_X_LPARAM(lParam)) - kEditPad + scroll;
+        const int index = DwHitIndex(dw.Get(), text_x, length);
         ++stats.edit_directwrite_hits;
 
         if (msg == WM_LBUTTONDBLCLK) {
-            int start = index;
-            int end = index;
-            while (start > 0 && !std::iswspace(text[static_cast<size_t>(start) - 1]))
-                --start;
-            while (end < static_cast<int>(text.size()) &&
-                   !std::iswspace(text[static_cast<size_t>(end)]))
-                ++end;
+            const auto [start, end] = EditWordRangeAt(text, DwCharIndex(dw.Get(), text_x, length));
             mouse_hwnd = hwnd;
             mouse_anchor = start;
             mouse_caret = end;
+            mouse_word_drag = true;
+            mouse_word_start = start;
+            mouse_word_end = end;
+            mouse_selection_deferred = false;
             SetMouseSelection(hwnd);
             return;
         }
         if (msg == WM_LBUTTONDOWN) {
+            mouse_word_drag = false;
             if (wParam & MK_SHIFT) {
                 if (mouse_hwnd != hwnd) mouse_anchor = static_cast<int>(sel0);
                 mouse_hwnd = hwnd;
@@ -994,15 +1037,39 @@ struct LumaTextRenderer::Impl {
                 mouse_anchor = index;
                 mouse_caret = index;
             }
+            mouse_selection_deferred = false;
             SetMouseSelection(hwnd);
+            return;
+        }
+        if (mouse_word_drag && mouse_hwnd == hwnd) {
+            const auto [start, end] = EditWordRangeAt(text, DwCharIndex(dw.Get(), text_x, length));
+            if (start < mouse_word_start) {
+                mouse_anchor = mouse_word_end;
+                mouse_caret = start;
+            } else {
+                mouse_anchor = mouse_word_start;
+                mouse_caret = std::max(end, mouse_word_end);
+            }
+            mouse_selection_deferred = true;
             return;
         }
         if (mouse_hwnd != hwnd) {
             mouse_hwnd = hwnd;
             mouse_anchor = static_cast<int>(sel0);
         }
+        mouse_word_drag = false;
         mouse_caret = index;
-        SetMouseSelection(hwnd);
+        mouse_selection_deferred = true;
+    }
+
+    bool DeferredSelection(HWND hwnd) const {
+        return mouse_selection_deferred && mouse_hwnd == hwnd;
+    }
+
+    void CommitMouseSelection(HWND hwnd) {
+        if (!DeferredSelection(hwnd)) return;
+        mouse_selection_deferred = false;
+        if (IsWindow(hwnd)) SetMouseSelection(hwnd);
     }
 
     void SetMouseSelection(HWND hwnd) {
@@ -1060,6 +1127,11 @@ struct LumaTextRenderer::Impl {
         DWORD sel0 = 0, sel1 = 0;
         SendMessageW(hwnd, EM_GETSEL, reinterpret_cast<WPARAM>(&sel0),
                      reinterpret_cast<LPARAM>(&sel1));
+        if (DeferredSelection(hwnd)) {
+            const int length = static_cast<int>(text.size());
+            sel0 = static_cast<DWORD>(std::clamp(mouse_anchor, 0, length));
+            sel1 = static_cast<DWORD>(std::clamp(mouse_caret, 0, length));
+        }
         const int sel_lo = static_cast<int>(std::min(sel0, sel1));
         const int sel_hi = static_cast<int>(std::max(sel0, sel1));
         int caret = static_cast<int>(sel1);
@@ -1079,7 +1151,8 @@ struct LumaTextRenderer::Impl {
         };
         const float caret_x = caret_origin(caret);
         const float pad = kEditPad;
-        const float scroll = EditScrollX(caret_x, static_cast<float>(w));
+        const float scroll = EditScroll(hwnd, dw_layout.Get(), caret_x, static_cast<float>(w));
+        edit_scrolls[hwnd] = scroll;
 
         blit_dc->SetTarget(blit_target.Get());
         blit_dc->BeginDraw();
@@ -1202,6 +1275,24 @@ void LumaTextRenderer::TrackEdit(HWND hwnd) {
 LRESULT CALLBACK LumaTextRenderer::EditSelectionProc(HWND hwnd, UINT message, WPARAM wparam,
                                                     LPARAM lparam, UINT_PTR id, DWORD_PTR data) {
     auto* self = reinterpret_cast<LumaTextRenderer*>(data);
+#if defined(PULSE_HAS_LUMATEXT)
+    if (self->impl_ && self->impl_->DeferredSelection(hwnd)) {
+        // Input and focus changes act on the dragged selection the user sees;
+        // an explicit EM_SETSEL replaces it.
+        switch (message) {
+        case WM_KEYDOWN: case WM_SYSKEYDOWN: case WM_CHAR: case WM_IME_STARTCOMPOSITION:
+        case WM_KILLFOCUS: case WM_SETTEXT: case EM_REPLACESEL: case WM_CUT: case WM_COPY:
+        case WM_PASTE: case WM_CLEAR: case WM_UNDO: case EM_UNDO:
+            self->impl_->CommitMouseSelection(hwnd);
+            break;
+        case EM_SETSEL:
+            if (!self->impl_->setting_mouse_selection) self->impl_->mouse_selection_deferred = false;
+            break;
+        default:
+            break;
+        }
+    }
+#endif
     const LRESULT result = DefSubclassProc(hwnd, message, wparam, lparam);
     self->SyncEditSelection(hwnd, message, wparam, lparam);
     if (message == WM_NCDESTROY) {
@@ -1214,10 +1305,18 @@ void LumaTextRenderer::SyncEditSelection(HWND hwnd, UINT message, WPARAM wparam,
 #if defined(PULSE_HAS_LUMATEXT)
     if (!impl_) return;
     if (message == WM_NCDESTROY || message == WM_KILLFOCUS) {
-        if (impl_->mouse_hwnd == hwnd) impl_->mouse_hwnd = nullptr;
-        if (message == WM_NCDESTROY) impl_->edit_selections.erase(hwnd);
+        if (impl_->mouse_hwnd == hwnd) {
+            impl_->mouse_hwnd = nullptr;
+            impl_->mouse_selection_deferred = false;
+        }
+        if (message == WM_NCDESTROY) {
+            impl_->edit_selections.erase(hwnd);
+            impl_->edit_scrolls.erase(hwnd);
+        }
         return;
     }
+    // New text starts at the left edge, as native EDIT does.
+    if (message == WM_SETTEXT) impl_->edit_scrolls.erase(hwnd);
     if (impl_->applying_mouse_selection) return;
     if (message != EM_SETSEL && message != WM_KEYDOWN && message != WM_CHAR &&
         message != WM_SETTEXT && message != EM_REPLACESEL && message != WM_CUT &&
@@ -1301,9 +1400,11 @@ LRESULT LumaTextRenderer::CallEditDefaultMouse(HWND hwnd, UINT msg, WPARAM wPara
                 impl_->ApplyMouseSelection(hwnd, msg, wParam, lParam, format);
             return 0;
         case WM_LBUTTONUP:
+            impl_->CommitMouseSelection(hwnd);
             if (GetCapture() == hwnd) ReleaseCapture();
             return 0;
         case WM_CAPTURECHANGED:
+            impl_->CommitMouseSelection(hwnd);
             return 0;
         default:
             break;
@@ -1332,7 +1433,12 @@ void LumaTextRenderer::Shutdown() noexcept {
         RemoveWindowSubclass(hwnd, EditSelectionProc, reinterpret_cast<UINT_PTR>(this));
     tracked_edits_.clear();
 #if defined(PULSE_HAS_LUMATEXT)
-    if (impl_) { impl_->edit_selections.clear(); impl_->mouse_hwnd = nullptr; }
+    if (impl_) {
+        impl_->edit_selections.clear();
+        impl_->edit_scrolls.clear();
+        impl_->mouse_hwnd = nullptr;
+        impl_->mouse_selection_deferred = false;
+    }
 #endif
     if (impl_) impl_->Shutdown();
 }

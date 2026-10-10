@@ -1,5 +1,6 @@
 #include "thumbnail_cache.h"
 #include "../common/utf8_file.h"
+#include "../common/runtime_log.h"
 #include "thumbnail_artwork_layout.h"
 #include <algorithm>
 #include <cwctype>
@@ -162,33 +163,64 @@ ThumbnailCache::Item* ThumbnailCache::StaleBitmap(const std::wstring& identity,
     Touch(item);
     return &item;
 }
-bool ThumbnailCache::Connect() {
+// Stage values are stable diagnostics identifiers: launch=1, connect=2, send=3,
+// wait=4, timeout=5, exited=6, response=7, mapping-open=8, mapping-view=9,
+// ack=10, host-status=11, store=12, cancelled=13.
+void ThumbnailCache::LogFailure(const Request& req, uint64_t started, uint32_t stage,
+                                DWORD error, bool cancelled) {
+    {
+        std::lock_guard lock(mutex_);
+        cancelled = cancelled || req.epoch != epoch_.load(std::memory_order_relaxed) ||
+            (req.details && req.identity != latest_details_identity_) ||
+            (req.document && !req.document->active.load());
+    }
+    DWORD exit_code = 0;
+    const bool exit_known = child_.hProcess && GetExitCodeProcess(child_.hProcess, &exit_code);
+    diagnostics::runtime::Event(cancelled ? "preview_client_cancelled" : "preview_client_failure", {
+        {"stage", stage}, {"error", error}, {"elapsed_ms", GetTickCount64() - started},
+        {"request", req.id}, {"generation", req.generation}, {"host_pid", child_.dwProcessId},
+        {"exit_known", exit_known}, {"exit_code", exit_code}, {"cache", pipe_token_},
+        {"kind", static_cast<uint32_t>(req.kind)}, {"flags", req.flags}},
+        cancelled ? diagnostics::runtime::Level::Info : diagnostics::runtime::Level::Error);
+}
+bool ThumbnailCache::Connect(const Request& req, uint64_t started) {
     if (pipe_ != INVALID_HANDLE_VALUE) return true;
     const std::wstring pipeName = ipc::PreviewPipeName(pipe_token_);
     wchar_t exe[MAX_PATH]{}; GetModuleFileNameW(nullptr, exe, ARRAYSIZE(exe));
-    wchar_t* slash = wcsrchr(exe, L'\\'); if (!slash) return false; *(slash + 1) = 0;
+    wchar_t* slash = wcsrchr(exe, L'\\');
+    if (!slash) { LogFailure(req, started, 1, ERROR_BAD_PATHNAME); return false; }
+    *(slash + 1) = 0;
     std::wstring cmd = L"\"" + std::wstring(exe) + L"Pulse.Preview.exe\" " +
         std::to_wstring(pipe_token_);
     STARTUPINFOW si{sizeof(si)};
     si.dwFlags = STARTF_FORCEOFFFEEDBACK; // background helper: no AppStarting cursor
     if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | (folder_thumbnail_ ? BELOW_NORMAL_PRIORITY_CLASS : 0),
-                        nullptr, nullptr, &si, &child_)) return false;
+                        nullptr, nullptr, &si, &child_)) {
+        const DWORD error = GetLastError();
+        LogFailure(req, started, 1, error, !running_);
+        return false;
+    }
     const ULONGLONG deadline = GetTickCount64() + 3000;
+    DWORD connect_error = ERROR_SUCCESS;
     do {
         pipe_ = CreateFileW(pipeName.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
                             OPEN_EXISTING, 0, nullptr);
         if (pipe_ != INVALID_HANDLE_VALUE) {
             ULONG server_pid = 0;
-            if (GetNamedPipeServerProcessId(pipe_, &server_pid) &&
-                server_pid == child_.dwProcessId)
-                return true;
+            const bool got_pid = GetNamedPipeServerProcessId(pipe_, &server_pid) != FALSE;
+            const DWORD error = got_pid ? ERROR_ACCESS_DENIED : GetLastError();
+            if (got_pid && server_pid == child_.dwProcessId) return true;
+            LogFailure(req, started, 2, error, !running_);
             CloseHandle(pipe_);
             pipe_ = INVALID_HANDLE_VALUE;
             StopChild();
             return false;
         }
+        connect_error = GetLastError();
+        if (WaitForSingleObject(child_.hProcess, 0) == WAIT_OBJECT_0) break;
         Sleep(25);
     } while (running_ && GetTickCount64() < deadline);
+    LogFailure(req, started, 2, connect_error, !running_);
     StopChild(); return false;
 }
 PreviewDrawResult ThumbnailCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
@@ -624,7 +656,13 @@ void ThumbnailCache::Worker() {
             std::fflush(trace.get());
         };
         mark("begin", true);
-        Item result; bool ok = Connect();
+        uint32_t failure_stage = 0;
+        DWORD failure_error = ERROR_SUCCESS;
+        const auto fail = [&](uint32_t stage, DWORD error) {
+            if (!failure_stage) { failure_stage = stage; failure_error = error; }
+        };
+        Item result; bool ok = Connect(req, request_start);
+        const bool connected = ok;
         mark("connected", ok);
         ipc::PreviewRequest wire; wire.request_id=req.id; wire.generation=req.generation;
         wire.kind=req.kind; wire.pixel_size=req.pixels; wire.attrs=req.attrs;
@@ -637,6 +675,7 @@ void ThumbnailCache::Worker() {
         wire.path_chars=(uint32_t)req.path.size();
         if (ok) ok = ipc::WriteAll(pipe_, &wire, sizeof(wire)) &&
                      ipc::WriteAll(pipe_, req.path.data(), wire.path_chars * sizeof(wchar_t));
+        if (connected && !ok) fail(3, GetLastError());
         mark("sent", ok);
         ipc::PreviewResponse response{};
         if (ok) {
@@ -644,24 +683,38 @@ void ThumbnailCache::Worker() {
             ULONGLONG last_trace = GetTickCount64();
             DWORD available = 0;
             while (running_ && GetTickCount64() < deadline) {
-                if (!FolderRequestCurrent(req)) { ok = false; break; }
-                if (!PeekNamedPipe(pipe_, nullptr, 0, nullptr, &available, nullptr)) { ok=false; break; }
+                if (!FolderRequestCurrent(req)) { fail(13, ERROR_CANCELLED); ok = false; break; }
+                if (!PeekNamedPipe(pipe_, nullptr, 0, nullptr, &available, nullptr)) { fail(4, GetLastError()); ok=false; break; }
                 if (available >= sizeof(response)) break;
-                if (child_.hProcess && WaitForSingleObject(child_.hProcess, 0) == WAIT_OBJECT_0) { ok=false; break; }
+                if (child_.hProcess && WaitForSingleObject(child_.hProcess, 0) == WAIT_OBJECT_0) { fail(6, ERROR_PROCESS_ABORTED); ok=false; break; }
                 if (trace && GetTickCount64() - last_trace >= 250) {
                     mark("waiting", true);
                     last_trace = GetTickCount64();
                 }
                 Sleep(10);
             }
-            if (available < sizeof(response)) ok=false;
+            if (available < sizeof(response)) {
+                fail(running_ ? 5 : 13, running_ ? ERROR_TIMEOUT : ERROR_CANCELLED);
+                ok=false;
+            }
         }
         mark("header-ready", ok);
-        if (ok) ok = ipc::ReadAll(pipe_, &response, sizeof(response)) &&
-                     response.magic == ipc::kPreviewMagic && response.request_id == req.id;
+        const auto read = [&](void* data, DWORD bytes) {
+            if (ipc::ReadAll(pipe_, data, bytes)) return true;
+            fail(7, GetLastError());
+            return false;
+        };
+        if (ok) {
+            ok = read(&response, sizeof(response));
+            if (ok && (response.magic != ipc::kPreviewMagic || response.request_id != req.id ||
+                       response.generation != req.generation || response.mapping_chars > 512 ||
+                       response.property_count > 16)) {
+                fail(7, ERROR_INVALID_DATA); ok = false;
+            }
+        }
         std::wstring mapping;
         if (ok && response.mapping_chars) { mapping.resize(response.mapping_chars);
-            ok = ipc::ReadAll(pipe_, mapping.data(), response.mapping_chars * sizeof(wchar_t)); }
+            ok = read(mapping.data(), response.mapping_chars * sizeof(wchar_t)); }
         std::wstring previewText;
         if (ok && response.text_chars) {
             const uint32_t limit = response.kind == ipc::PreviewContentKind::Table ||
@@ -671,38 +724,39 @@ void ThumbnailCache::Worker() {
                 ? ipc::kPreviewMaxTableChars  // DOCX / EPUB payloads run up to 2M
                 : response.kind == ipc::PreviewContentKind::Archive
                 ? ipc::kPreviewMaxArchiveChars : ipc::kPreviewMaxTextChars;
-            if (response.text_chars > limit) ok = false;
+            if (response.text_chars > limit) { fail(7, ERROR_INVALID_DATA); ok = false; }
             else {
                 previewText.resize(response.text_chars);
-                ok = ipc::ReadAll(pipe_, previewText.data(),
+                ok = read(previewText.data(),
                                   response.text_chars * sizeof(wchar_t));
             }
         }
         std::wstring errorText;
         if (ok && response.error_chars) {
-            if (response.error_chars > 512) ok = false;
+            if (response.error_chars > 512) { fail(7, ERROR_INVALID_DATA); ok = false; }
             else {
                 errorText.resize(response.error_chars);
-                ok = ipc::ReadAll(pipe_, errorText.data(),
+                ok = read(errorText.data(),
                                   response.error_chars * sizeof(wchar_t));
             }
         }
         std::vector<PreviewProperty> properties;
         for (uint32_t i = 0; ok && i < response.property_count && i < 16; ++i) {
             uint32_t labelChars = 0, valueChars = 0;
-            ok = ipc::ReadAll(pipe_, &labelChars, sizeof(labelChars)) && labelChars <= 128;
+            ok = read(&labelChars, sizeof(labelChars)) && labelChars <= 128;
             PreviewProperty property;
             if (ok && labelChars) {
                 property.label.resize(labelChars);
-                ok = ipc::ReadAll(pipe_, property.label.data(), labelChars * sizeof(wchar_t));
+                ok = read(property.label.data(), labelChars * sizeof(wchar_t));
             }
-            if (ok) ok = ipc::ReadAll(pipe_, &valueChars, sizeof(valueChars)) && valueChars <= 1024;
+            if (ok) ok = read(&valueChars, sizeof(valueChars)) && valueChars <= 1024;
             if (ok && valueChars) {
                 property.value.resize(valueChars);
-                ok = ipc::ReadAll(pipe_, property.value.data(), valueChars * sizeof(wchar_t));
+                ok = read(property.value.data(), valueChars * sizeof(wchar_t));
             }
             if (ok) properties.push_back(std::move(property));
         }
+        if (connected && !ok && !failure_stage) fail(7, ERROR_INVALID_DATA);
         mark("payload-read", ok, response.status);
         if (ok && response.status == 0 && !mapping.empty()) {
             HANDLE map = OpenFileMappingW(FILE_MAP_READ, FALSE, mapping.c_str());
@@ -718,9 +772,14 @@ void ThumbnailCache::Worker() {
                     if (quick_look_content_ && response.kind == ipc::PreviewContentKind::Bitmap)
                         result.palette = ComputeCoverPalette(result.pixels.data(),
                             result.w, result.h, result.stride);
-                } CloseHandle(map); }
+                } else fail(9, GetLastError());
+                CloseHandle(map);
+            } else fail(8, GetLastError());
         }
-        if (ok && response.mapping_chars) { const unsigned char ack=1; ok=ipc::WriteAll(pipe_,&ack,1); }
+        if (ok && response.mapping_chars) {
+            const unsigned char ack=1; ok=ipc::WriteAll(pipe_,&ack,1);
+            if (!ok) fail(10, GetLastError());
+        }
         if (ok) {
             result.kind = response.kind;
             result.text = std::move(previewText);
@@ -757,9 +816,20 @@ void ThumbnailCache::Worker() {
             result.integrity.state = preview::IntegrityState::Failed;
             result.integrity.reason = preview::IntegrityReason::Unavailable;
         }
+        // A grid entry without a provider is expected; transport/mapping faults
+        // and explicit preview failures still carry a terminal diagnostic.
+        const bool ordinary_unsupported = !req.details && ok && response.status == 1 &&
+            response.kind == ipc::PreviewContentKind::Unsupported;
+        if (ok && response.status != 0 && !ordinary_unsupported)
+            fail(11, static_cast<DWORD>(response.status));
+        if (result.failed && !failure_stage && connected && !ordinary_unsupported)
+            fail(12, ERROR_INVALID_DATA);
+        if (failure_stage) LogFailure(req, request_start, failure_stage, failure_error,
+            failure_stage == 13 || !running_ || !FolderRequestCurrent(req));
         mark("store-begin", ok, response.status);
         const bool stored = StoreResult(req, std::move(result));
         mark("stored", stored, response.status);
+        if (!stored) LogFailure(req, request_start, 12, ERROR_CANCELLED, true);
         if (const HWND hwnd = hwnd_.load(); stored && hwnd)
             InvalidateRect(hwnd, nullptr, FALSE);
         if (!ok) StopChild();

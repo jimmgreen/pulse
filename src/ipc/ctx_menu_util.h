@@ -28,7 +28,6 @@ inline bool IsBuiltinContextVerb(std::wstring_view verb, bool background) {
         L"explore", L"openas", L"cut", L"copy", L"paste", L"pastelink",
         L"delete", L"rename", L"properties", L"copyaspath",
         L"pintohome", L"pintostartscreen", L"pintostart",
-        L"windows.modernshare", L"windows.share",
     };
     for (auto k : kCommon)
         if (v == k) return true;
@@ -43,11 +42,34 @@ inline bool IsBuiltinContextVerb(std::wstring_view verb, bool background) {
     return false;
 }
 
-// Submenu parents that are dropped entirely (their content is provided by
-// Pulse from the registry instead, so flattening them would duplicate rows).
-inline bool IsDroppedContextSubmenu(std::wstring_view verb) {
+// Explorer's 打开方式 flyout (the "Open With" handler). It is kept whole —
+// recommended apps plus 选择其他应用 — and replaces Pulse's static 打开方式… row
+// once it arrives, so the list matches Explorer instead of a registry guess.
+inline bool IsOpenWithSubmenuVerb(std::wstring_view verb) {
     const std::wstring v = ToLowerVerb(verb);
     return v == L"openas" || v == L"open with";
+}
+
+// Rows only the default Shell menu produces (no registry verb or extension
+// owns them, or the owning extension adds them only inside that menu). The
+// SendTo worker already builds that menu for 发送到, so these are taken from it
+// and invoked through it: Explorer's own implementation. 创建快捷方式, a drive's
+// 格式化, and 向右/向左旋转 (ShellImagePreview adds no row on its own).
+inline bool IsDefaultMenuExtraVerb(std::wstring_view verb) {
+    const std::wstring v = ToLowerVerb(verb);
+    return v == L"link" || v == L"format" || v == L"rotate90" || v == L"rotate270";
+}
+
+// Explorer offers no 打开方式 for programs and scripts it runs itself (the Open
+// With extension adds nothing for them), so neither does Pulse's static row.
+inline bool OffersOpenWith(std::wstring_view ext) {
+    const std::wstring e = ToLowerVerb(ext);
+    static constexpr std::wstring_view kRunnable[] = {
+        L".exe", L".com", L".bat", L".cmd", L".pif", L".scr",
+    };
+    for (auto k : kRunnable)
+        if (e == k) return false;
+    return true;
 }
 
 // Menu display text -> clean row text: strip '&' accelerator markers and any
@@ -73,6 +95,25 @@ inline std::wstring CleanMenuText(std::wstring_view raw) {
     size_t start = 0;
     while (start < out.size() && out[start] == L' ') ++start;
     return out.substr(start);
+}
+
+// Access key of a raw menu label: the character after a single '&' (before
+// any "\tCtrl+X" suffix), upper-cased; 0 when the label has none. Pairs with
+// CleanMenuText, which drops the marker from the visible text.
+inline wchar_t MenuMnemonic(std::wstring_view raw) {
+    for (size_t i = 0; i < raw.size(); ++i) {
+        if (raw[i] == L'\t') break;
+        if (raw[i] != L'&') continue;
+        if (i + 1 >= raw.size()) break;
+        if (raw[i + 1] == L'&') {
+            ++i;
+            continue;
+        }
+        const wchar_t key = raw[i + 1];
+        if (key == L'\t' || std::iswspace(key)) return 0;
+        return static_cast<wchar_t>(std::towupper(key));
+    }
+    return 0;
 }
 
 // At most this many children per software-owned submenu flyout.

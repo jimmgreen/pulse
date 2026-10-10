@@ -33,6 +33,7 @@ struct CtxMenuItem {
     std::wstring text;
     std::wstring clsid;
     std::wstring handler;
+    wchar_t mnemonic = 0;         // access key ("&X" of the raw label), 0 = none
 };
 
 class ShellClient {

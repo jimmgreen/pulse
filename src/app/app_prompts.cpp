@@ -45,14 +45,17 @@ bool ConfirmClearDiagnostics(AppState& s) {
     return Ask(s, spec) == ui::ConfirmChoice::Confirm;
 }
 
-bool ConfirmDiagnosticsExport(AppState& s, bool& include_service) {
+bool ConfirmDiagnosticsExport(AppState& s, bool& include_service, bool& include_dumps) {
     ui::ConfirmDialogSpec privacy;
     privacy.title = Text(l10n::StringId::DiagnosticsPrivacyTitle);
-    privacy.message = Text(l10n::StringId::DiagnosticsPrivacyMessage);
-    privacy.confirm_text = Text(l10n::StringId::ConfirmContinue);
+    privacy.message = l10n::Pick(L"导出脱敏错误事件、程序版本、服务状态和磁盘空间，供反馈问题。默认不包含文件路径、搜索内容或内存转储。若需要排查崩溃，可选择包含转储；转储可能包含私人信息。请检查生成的 ZIP 后再发送。", L"Export sanitized error events, application versions, service status and disk space. File paths, searches and memory dumps are excluded by default. For crash analysis, you can include dumps, which may contain private information. Review the ZIP before sharing.");
+    privacy.confirm_text = l10n::Pick(L"导出普通诊断", L"Export basic diagnostics");
+    privacy.secondary_text = l10n::Pick(L"同时包含崩溃转储", L"Include crash dumps");
     privacy.tone = ui::ConfirmTone::Warning;
     privacy.default_choice = ui::ConfirmChoice::Cancel;
-    if (Ask(s, privacy) != ui::ConfirmChoice::Confirm) return false;
+    const auto privacy_choice = Ask(s, privacy);
+    if (privacy_choice == ui::ConfirmChoice::Cancel) return false;
+    include_dumps = privacy_choice == ui::ConfirmChoice::Secondary;
 
     ui::ConfirmDialogSpec service;
     service.title = Text(l10n::StringId::DiagnosticsPrivacyTitle);

@@ -2,6 +2,7 @@
 #include "preview_handler_pan.h"
 #include "../common/preview_extensions.h"
 #include "../common/path_utils.h"
+#include "../common/runtime_log.h"
 #include <shobjidl.h>
 #include <shlobj.h>
 #include <shlwapi.h>
@@ -293,11 +294,12 @@ void EvictFactory(const CLSID& clsid) {
     g_factories.erase(clsid);
 }
 
-ComPtr<IUnknown> CreateHandler(const CLSID& clsid) {
+ComPtr<IUnknown> CreateHandler(const CLSID& clsid, HRESULT& result) {
 #ifdef PULSE_PREVIEW_HANDLER_TESTING
     if (g_preview_handler_factory_for_test) {
         ComPtr<IUnknown> handler;
         handler.Attach(g_preview_handler_factory_for_test());
+        result = handler ? S_OK : E_FAIL;
         return handler;
     }
 #endif
@@ -306,6 +308,7 @@ ComPtr<IUnknown> CreateHandler(const CLSID& clsid) {
         if (factory) {
             ComPtr<IUnknown> unknown;
             const HRESULT hr = factory->CreateInstance(nullptr, IID_PPV_ARGS(&unknown));
+            result = hr;
             if (SUCCEEDED(hr) && unknown) return unknown;
             EvictFactory(clsid);
             if (hr != kServerExecFailure && attempt == 0) break;
@@ -314,6 +317,7 @@ ComPtr<IUnknown> CreateHandler(const CLSID& clsid) {
         ComPtr<IUnknown> unknown;
         HRESULT hr = CoCreateInstance(clsid, nullptr, CLSCTX_LOCAL_SERVER,
                                       IID_PPV_ARGS(&unknown));
+        result = hr;
         if (SUCCEEDED(hr) && unknown) return unknown;
         if (hr != kServerExecFailure) break;
     }
@@ -355,38 +359,38 @@ private:
     HWND hwnd_ = nullptr;
 };
 
-bool InitWithStream(IUnknown* handler, const std::wstring& path, IUnknown** kept_stream) {
+HRESULT InitWithStream(IUnknown* handler, const std::wstring& path, IUnknown** kept_stream) {
     ComPtr<IInitializeWithStream> init;
     HRESULT hr = handler->QueryInterface(IID_PPV_ARGS(&init));
-    if (FAILED(hr)) return false;
+    if (FAILED(hr)) return hr;
     ComPtr<IStream> stream;
     hr = SHCreateStreamOnFileEx(path.c_str(), STGM_READ | STGM_SHARE_DENY_NONE, 0, FALSE,
                                 nullptr, &stream);
-    if (FAILED(hr)) return false;
+    if (FAILED(hr)) return hr;
     hr = init->Initialize(stream.Get(), STGM_READ);
-    if (hr == E_NOTIMPL) return false;
-    if (FAILED(hr)) return false;
+    if (hr == E_NOTIMPL) return hr;
+    if (FAILED(hr)) return hr;
     *kept_stream = stream.Detach();
-    return true;
+    return S_OK;
 }
 
-bool InitWithItem(IUnknown* handler, const std::wstring& path) {
+HRESULT InitWithItem(IUnknown* handler, const std::wstring& path) {
     ComPtr<IInitializeWithItem> init;
     HRESULT hr = handler->QueryInterface(IID_PPV_ARGS(&init));
-    if (FAILED(hr)) return false;
+    if (FAILED(hr)) return hr;
     ComPtr<IShellItem> item;
     hr = SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&item));
-    if (FAILED(hr)) return false;
+    if (FAILED(hr)) return hr;
     hr = init->Initialize(item.Get(), STGM_READ);
-    return hr != E_NOTIMPL && SUCCEEDED(hr);
+    return hr;
 }
 
-bool InitWithFile(IUnknown* handler, const std::wstring& path) {
+HRESULT InitWithFile(IUnknown* handler, const std::wstring& path) {
     ComPtr<IInitializeWithFile> init;
     HRESULT hr = handler->QueryInterface(IID_PPV_ARGS(&init));
-    if (FAILED(hr)) return false;
+    if (FAILED(hr)) return hr;
     hr = init->Initialize(path.c_str(), STGM_READ);
-    return hr != E_NOTIMPL && SUCCEEDED(hr);
+    return hr;
 }
 
 void RegisterClassOnce() {
@@ -545,6 +549,17 @@ struct PreviewHandlerHost::WorkerState {
     }
 
     bool OpenCurrent(const std::wstring& opening_identity) {
+        const auto started = GetTickCount64();
+        const auto request = diagnostics::runtime::NextId();
+        uint64_t generation = 0;
+        { std::lock_guard<std::mutex> lock(mutex); generation = command_version; }
+        const auto report = [&](uint32_t stage, HRESULT hr) {
+            const bool cancelled = !IsCurrent(opening_identity);
+            diagnostics::runtime::Event(cancelled ? "preview_handler_cancelled" : "preview_handler_failure",
+                {{"request", request}, {"generation", generation}, {"stage", stage},
+                 {"hresult", static_cast<uint32_t>(hr)}, {"elapsed_ms", GetTickCount64() - started}},
+                cancelled ? diagnostics::runtime::Level::Info : diagnostics::runtime::Level::Error);
+        };
         Unload();
         HideWindow();
         {
@@ -563,8 +578,9 @@ struct PreviewHandlerHost::WorkerState {
         if (path.empty() || !IsCurrent(opening_identity) || !EnsureWindow()) return false;
         CLSID clsid{};
         if (!FindPreviewHandlerClsid(ExtensionOf(path), clsid)) return false;
-        ComPtr<IUnknown> unknown = CreateHandler(clsid);
-        if (!unknown) return false;
+        HRESULT activation = E_FAIL;
+        ComPtr<IUnknown> unknown = CreateHandler(clsid, activation);
+        if (!unknown) { report(2, activation); return false; }
 
         site = new PreviewFrame(hwnd);
         ComPtr<IObjectWithSite> object_with_site;
@@ -572,14 +588,21 @@ struct PreviewHandlerHost::WorkerState {
             object_with_site->SetSite(site);
 
         const std::wstring open_path = ShellPath(path);
-        const bool file_ok = InitWithFile(unknown.Get(), open_path);
-        const bool item_ok = !file_ok && InitWithItem(unknown.Get(), open_path);
-        const bool stream_ok = !file_ok && !item_ok &&
-            InitWithStream(unknown.Get(), open_path, &stream);
+        const HRESULT file_hr = InitWithFile(unknown.Get(), open_path);
+        const HRESULT item_hr = FAILED(file_hr) ? InitWithItem(unknown.Get(), open_path) : S_OK;
+        const HRESULT stream_hr = FAILED(file_hr) && FAILED(item_hr)
+            ? InitWithStream(unknown.Get(), open_path, &stream) : S_OK;
+        if (FAILED(file_hr) && FAILED(item_hr) && FAILED(stream_hr)) {
+            // Keep each attempted initialization HRESULT; optional interfaces often
+            // return E_NOINTERFACE while another initializer reports the real error.
+            report(3, file_hr); report(4, item_hr); report(5, stream_hr);
+            Unload(); return false;
+        }
         ComPtr<IPreviewHandler> preview;
-        if (!(file_ok || item_ok || stream_ok) || FAILED(unknown.As(&preview)) || !preview) {
-            Unload();
-            return false;
+        const HRESULT preview_hr = unknown.As(&preview);
+        if (FAILED(preview_hr) || !preview) {
+            report(6, preview_hr);
+            Unload(); return false;
         }
         handler = unknown.Detach();
         if (!IsCurrent(opening_identity)) { Unload(); return false; }
@@ -589,19 +612,30 @@ struct PreviewHandlerHost::WorkerState {
         pan.Disable();
         RECT client{};
         GetClientRect(hwnd, &client);
-        if (client.right <= client.left || client.bottom <= client.top ||
-            FAILED(preview->SetWindow(hwnd, &client))) {
+        if (client.right <= client.left || client.bottom <= client.top) {
+            Unload(); HideWindow(); return false;
+        }
+        const HRESULT window_hr = preview->SetWindow(hwnd, &client);
+        if (FAILED(window_hr)) {
+            report(7, window_hr);
             Unload();
             HideWindow();
             return false;
         }
-        if (!IsCurrent(opening_identity) || FAILED(preview->DoPreview())) {
+        if (!IsCurrent(opening_identity)) {
+            report(8, HRESULT_FROM_WIN32(ERROR_CANCELLED));
+            Unload(); HideWindow(); return false;
+        }
+        const HRESULT preview_result = preview->DoPreview();
+        if (FAILED(preview_result)) {
+            report(8, preview_result);
             Unload();
             HideWindow();
             return false;
         }
         preview->SetRect(&client);
         if (!IsCurrent(opening_identity)) {
+            report(8, HRESULT_FROM_WIN32(ERROR_CANCELLED));
             Unload();
             HideWindow();
             return false;
@@ -996,6 +1030,9 @@ DWORD WINAPI PreviewHandlerHost::WorkerMain(void* parameter) {
     const HRESULT com_result = CoInitializeEx(nullptr,
         COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     if (FAILED(com_result)) {
+        diagnostics::runtime::Event("preview_handler_failure",
+            {{"stage", 1}, {"hresult", static_cast<uint32_t>(com_result)}},
+            diagnostics::runtime::Level::Error);
         self->state.store(State::Failed, std::memory_order_release);
         return 0;
     }

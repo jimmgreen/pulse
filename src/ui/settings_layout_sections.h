@@ -31,9 +31,9 @@ inline std::wstring IntegrationHint(const WindowViewModel& vm) {
     if(!vm.settings_integration_enabled) return l10n::Get(I::IntegrationInactiveHint);
     if(IntegrationSelectedCount(vm)==0) return l10n::Get(I::IntegrationNoneHint);
     if(!vm.settings_integration_experimental) return {};
-    if(!vm.settings_launch_on_startup && !vm.settings_keep_running) return l10n::Get(I::IntegrationRunningHint);
+    // Taking over keeps Pulse in the tray on close by itself
+    // (AppPrefs::KeepsRunningInBackground); only sign-in is left to ask for.
     if(!vm.settings_launch_on_startup) return l10n::Get(I::IntegrationHintLaunch);
-    if(!vm.settings_keep_running) return l10n::Get(I::IntegrationHintKeep);
     return {};
 }
 inline constexpr l10n::StringId kIntegrationChips[]={l10n::StringId::IntegrationExperimentalTag,
@@ -169,6 +169,7 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
     l.startup_open_card=row(narrow ? 98.0f : 64.0f); segments(l.startup_open_card,l.startup_open_row,2,282);
     l.new_tab_open_card=row(narrow ? 98.0f : 64.0f); segments(l.new_tab_open_card,l.new_tab_open_row,2,282);
     l.close_last_tab_row=row(64);
+    l.close_tab_double_click_row=row(64);
     l.group[1]=D2D1::RectF(left,l.startup_row[0].top,right,y);
     section(2);
     l.density_card=row(narrow ? 98.0f : 64.0f); segments(l.density_card,l.density_row,3,282);

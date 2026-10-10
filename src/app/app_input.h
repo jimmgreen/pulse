@@ -1,6 +1,7 @@
 // app_input.h — Pointer, keyboard, marquee, and drag/drop input.
 #pragma once
 #include "app_runtime.h"
+#include "app_hover.h"
 
 namespace pulse {
 bool HandleBrowserNavigation(AppState& s, LPARAM command);
@@ -37,6 +38,18 @@ void EnsureRowVisible(AppState& s, app::Tab& tab, int index);
 bool PointInList(const AppState& s, int mx, int my);
 void ResetMarquee(AppState& s);
 void ApplyMarqueeSelection(AppState& s);
+// Marquee start in current pane pixels (it moves with the scrolled content).
+POINT MarqueeStartOnScreen(const AppState& s);
+// The marquee rectangle to draw, in current pane pixels.
+D2D1_RECT_F MarqueeDisplayRect(const AppState& s);
+// Starts/stops edge auto-scroll for the marquee. Scrolling happens in
+// UpdateMarqueeFrame on display frames; Tick (kTimerMarqueeScroll) only asks
+// for the next frame while the pointer rests.
+void UpdateMarqueeAutoScroll(AppState& s);
+void TickMarqueeAutoScroll(AppState& s);
+// Render, once per frame: advances edge auto-scroll by elapsed time and
+// applies a band the pointer or scrolling changed since the last frame.
+void UpdateMarqueeFrame(AppState& s);
 void HandleListRowClick(AppState& s, int index, bool ctrl, bool shift);
 void FinishListRowClick(AppState& s);
 void CancelRenameClick(AppState& s);
@@ -48,5 +61,5 @@ float TagEaseInOutQuad(float t);
 void TickTagTransitions(AppState& s);
 void TickTabTransitions(AppState& s);
 void StartSmoothScroll(AppState& s, float delta, bool horizontal = false);
-void UpdateSmoothScroll(AppState& s);
+void UpdateSmoothScroll(AppState& s, const HoverPointerApi& api = {});
 } // namespace pulse

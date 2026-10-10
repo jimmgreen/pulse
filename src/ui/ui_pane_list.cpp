@@ -2262,15 +2262,20 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             const float row_flash = shift ? shift->Flash(row_key) : 0.0f;
 
             bool selected = vm.IsRowSelected(src);
-            bool hover = (src == vm.hover_index);
+            // A marquee sweeps across many rows: hover feedback (row highlight,
+            // link pill) would flicker under the pointer and animate every link.
+            bool hover = (src == vm.hover_index) && !vm.marquee_active;
             bool cut = e.record_only || vm.cut_names.contains(e.name);
             const float hidden_alpha = HiddenEntryAlpha(e.attrs);
-            const bool expand_link = e.is_link && (hover || selected) && src != vm.rename_index;
+            const bool expand_link = e.is_link && !vm.marquee_active && (hover || selected) &&
+                src != vm.rename_index;
             const float link_expansion = e.is_link && pane_index >= 0 && pane_index < 8
                 ? link_pill_motion_[pane_index].Update(list_context, row_key, expand_link,
-                    motion_frame_, motion_now_, !IsHighContrast()) : (expand_link ? 1.0f : 0.0f);
-            const std::wstring link_label = e.link_destination.empty()
-                ? l10n::Pick(L"目标不可用", L"Target unavailable") : e.link_destination;
+                    motion_frame_, motion_now_, !IsHighContrast() && !vm.marquee_active)
+                : (expand_link ? 1.0f : 0.0f);
+            const std::wstring link_label = !e.is_link ? std::wstring()
+                : e.link_destination.empty()
+                ? std::wstring(l10n::Pick(L"目标不可用", L"Target unavailable")) : e.link_destination;
             D2D1_RECT_F artwork = iconRect;
 
             const float inset = 4.0f * scale_;
@@ -2401,12 +2406,15 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             }
             if (draw_shapes && !morph_item && !e.record_only && e.is_link) {
                 const bool expand_on_icon = iconGrid;
-                const std::wstring caption = e.link_destination.find(L"://") != std::wstring::npos
+                // A collapsed pill shows no text: skip building and measuring it every frame.
+                const bool show_caption = expand_on_icon && link_expansion > 0.0f;
+                const std::wstring caption = !show_caption ? std::wstring()
+                    : e.link_destination.find(L"://") != std::wstring::npos
                     ? link_label : FileNameOf(link_label);
                 DrawLinkOverlay(iconRect.left, iconRect.top,
                     std::min(iconRect.right - iconRect.left, iconRect.bottom - iconRect.top), theme,
-                    cut ? 0.55f : hidden_alpha, expand_on_icon ? caption : std::wstring(),
-                    expand_on_icon ? link_expansion : 0.0f, cell.right - 8.0f * scale_, &artwork);
+                    cut ? 0.55f : hidden_alpha, show_caption ? caption : std::wstring(),
+                    show_caption ? link_expansion : 0.0f, cell.right - 8.0f * scale_, &artwork);
             }
             if (draw_shapes && !morph_item && !e.record_only && IsProtectedSystemEntry(e.attrs))
                 DrawProtectedBadge(dc, iconGrid ? artwork : iconRect, scale_, theme);
@@ -3138,6 +3146,26 @@ std::pair<int, int> MainRenderer::VisibleRangeInPane(
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
     ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups());
     return layout.VisibleRange();
+}
+
+void MainRenderer::ItemsInRectInPane(const PaneViewModel& vm, const D2D1_RECT_F& full_bounds,
+                                     const D2D1_RECT_F& rect, std::vector<int>& sources) const {
+    sources.clear();
+    if (rect.right <= rect.left || rect.bottom <= rect.top) return;
+    const D2D1_RECT_F pane_bounds = PaneBodyBounds(vm, full_bounds);
+    const float extra = PaneExtraTop(vm, scale_, pane_bounds.right - pane_bounds.left, compositor_);
+    D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups());
+    const auto [first, last] = layout.Metrics().column_major ? layout.RangeForSpan(rect.left, rect.right)
+                                                             : layout.RangeForSpan(rect.top, rect.bottom);
+    for (int view = first; view >= 0 && view <= last; ++view) {
+        const D2D1_RECT_F item = layout.ItemRect(view);
+        if (item.bottom <= item.top) continue; // inside a collapsed group
+        if (item.right <= rect.left || item.left >= rect.right ||
+            item.bottom <= rect.top || item.top >= rect.bottom) continue;
+        const int source = vm.SourceIndex(view);
+        if (source >= 0) sources.push_back(source);
+    }
 }
 
 int MainRenderer::RowFromYInPane(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds, float y) const {

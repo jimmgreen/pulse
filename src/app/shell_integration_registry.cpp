@@ -8,7 +8,24 @@
 #include <vector>
 
 namespace pulse::app {
+#ifdef PULSE_INTEGRATION_TEST
+static thread_local IntegrationWriteHook write_hook = nullptr;
+void SetIntegrationWriteHookForTesting(IntegrationWriteHook hook) { write_hook = hook; }
+#endif
 namespace {
+
+// Only ApplyShellIntegration records; the first failure explains the result.
+thread_local bool t_recording = false;
+thread_local ShellIntegrationFailure t_failure;
+
+void Fail(ShellIntegrationFailureKind kind, const std::wstring& key = {}, const std::wstring& name = {},
+          long status = 0) {
+    if (!t_recording || t_failure.kind != ShellIntegrationFailureKind::None) return;
+    t_failure.kind = kind;
+    t_failure.key = key;
+    t_failure.name = name;
+    t_failure.status = status;
+}
 
 constexpr wchar_t kBackupRoot[] = L"Software\\Pulse\\ShellIntegration\\Backups\\v1\\";
 constexpr DWORD kSnapshotMagic = 0x31534950; // PIS1; one atomic REG_BINARY value per group.
@@ -50,36 +67,58 @@ bool Read(const std::wstring& key, const std::wstring& name, Value& value) {
     HKEY handle = nullptr;
     LONG status = RegOpenKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, KEY_QUERY_VALUE, &handle);
     if (status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND) return true;
-    if (status != ERROR_SUCCESS) return false;
+    if (status != ERROR_SUCCESS) { Fail(ShellIntegrationFailureKind::ReadError, key, name, status); return false; }
     DWORD size = 0;
     status = RegQueryValueExW(handle, name.c_str(), nullptr, &value.type, nullptr, &size);
     if (status == ERROR_FILE_NOT_FOUND) { RegCloseKey(handle); value = {}; return true; }
-    if (status != ERROR_SUCCESS || size > 8 * 1024 * 1024) { RegCloseKey(handle); return false; }
+    if (status != ERROR_SUCCESS || size > 8 * 1024 * 1024) {
+        RegCloseKey(handle);
+        Fail(ShellIntegrationFailureKind::ReadError, key, name, status);
+        return false;
+    }
     value.bytes.resize(size);
     status = RegQueryValueExW(handle, name.c_str(), nullptr, &value.type,
                              value.bytes.empty() ? nullptr : value.bytes.data(), &size);
     RegCloseKey(handle);
-    if (status != ERROR_SUCCESS) return false;
+    if (status != ERROR_SUCCESS) { Fail(ShellIntegrationFailureKind::ReadError, key, name, status); return false; }
     value.bytes.resize(size);
     value.exists = true;
     return true;
 }
 
 bool Write(const std::wstring& key, const std::wstring& name, const Value& value) {
+#ifdef PULSE_INTEGRATION_TEST
+    if (write_hook && !write_hook(key, name)) {
+        Fail(ShellIntegrationFailureKind::WriteError, key, name, ERROR_WRITE_FAULT);
+        return false;
+    }
+#endif
     HKEY handle = nullptr;
     LONG status = value.exists
         ? RegCreateKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, nullptr, 0, KEY_SET_VALUE, nullptr, &handle, nullptr)
         : RegOpenKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, KEY_SET_VALUE, &handle);
     if (!value.exists && (status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND)) return true;
-    if (status != ERROR_SUCCESS) return false;
+    auto denied = [&](LONG code) {
+        Fail(code == ERROR_ACCESS_DENIED ? ShellIntegrationFailureKind::AccessDenied
+                                         : ShellIntegrationFailureKind::WriteError, key, name, code);
+        return false;
+    };
+    if (status != ERROR_SUCCESS) return denied(status);
     status = value.exists
         ? RegSetValueExW(handle, name.c_str(), 0, value.type, value.bytes.empty() ? nullptr : value.bytes.data(),
                          static_cast<DWORD>(value.bytes.size()))
         : RegDeleteValueW(handle, name.c_str());
     RegCloseKey(handle);
     if (!value.exists && status == ERROR_FILE_NOT_FOUND) status = ERROR_SUCCESS;
+    if (status != ERROR_SUCCESS) return denied(status);
     Value actual;
-    return status == ERROR_SUCCESS && Read(key, name, actual) && SameValue(actual, value);
+    if (!Read(key, name, actual)) return false;
+    if (!SameValue(actual, value)) {
+        // The call succeeded but the value is not there: something undid it.
+        Fail(ShellIntegrationFailureKind::Reverted, key, name, 0);
+        return false;
+    }
+    return true;
 }
 
 void Put(std::vector<BYTE>& bytes, DWORD number) {
@@ -356,9 +395,15 @@ bool ApplyGroup(const std::wstring& group, const std::wstring& exe, bool on) {
     if (pending_journal.exists) {
         UpgradeJournal journal;
         if (!DecodeUpgrade(pending_journal, Bindings(group, exe).size(), journal) ||
-            !JournalForExecutable(journal, exe)) return false;
-        if (on && !ShellCommandTargetsExecutable(Text(journal.next.written[0]), exe)) return false;
-        if (!FinishUpgrade(group, journal, !on)) return false;
+            !JournalForExecutable(journal, exe) ||
+            (on && !ShellCommandTargetsExecutable(Text(journal.next.written[0]), exe))) {
+            Fail(ShellIntegrationFailureKind::PendingUpgrade, journal_key, L"UpgradeJournal");
+            return false;
+        }
+        if (!FinishUpgrade(group, journal, !on)) {
+            Fail(ShellIntegrationFailureKind::PendingUpgrade, journal_key, L"UpgradeJournal");
+            return false;
+        }
         if (!on) return true;
     }
     const auto bindings = Bindings(group, exe);
@@ -378,7 +423,10 @@ bool ApplyGroup(const std::wstring& group, const std::wstring& exe, bool on) {
         ShellCommandTargetsExecutable(Text(previous.written[0]), exe);
 
     if (on) {
-        if (stored.exists && !valid) return false;
+        if (stored.exists && !valid) {
+            Fail(ShellIntegrationFailureKind::BadBackup, backup_key, L"Snapshot");
+            return false;
+        }
         Snapshot next;
         next.before = current;
         for (size_t i = 0; i < bindings.size(); ++i) {
@@ -398,7 +446,10 @@ bool ApplyGroup(const std::wstring& group, const std::wstring& exe, bool on) {
         for (size_t i = 0; i < bindings.size(); ++i) {
             if (SameValue(current[i], bindings[i].desired)) continue;
             Value checked;
-            if (!Read(bindings[i].key, bindings[i].name, checked) || !SameValue(checked, current[i]) ||
+            const bool readable = Read(bindings[i].key, bindings[i].name, checked);
+            if (readable && !SameValue(checked, current[i]))
+                Fail(ShellIntegrationFailureKind::ChangedByOther, bindings[i].key, bindings[i].name);
+            if (!readable || !SameValue(checked, current[i]) ||
                 !Write(bindings[i].key, bindings[i].name, bindings[i].desired)) {
                 bool rolled_back = true;
                 for (size_t j = i + 1; j-- > 0;) {
@@ -424,7 +475,10 @@ bool ApplyGroup(const std::wstring& group, const std::wstring& exe, bool on) {
             previous.written.push_back(i == 0 ? current[i] : bindings[i].desired);
         }
     }
-    if (valid && !owned && !removed_anchor) return false; // someone edited Pulse's command
+    if (valid && !owned && !removed_anchor) { // someone edited Pulse's command
+        Fail(ShellIntegrationFailureKind::ChangedByOther, bindings[0].key, bindings[0].name);
+        return false;
+    }
     bool ok = valid;
     bool write_failed = false;
     for (size_t i = bindings.size(); i-- > 0;) {
@@ -474,13 +528,47 @@ bool ShellCommandTargetsExecutable(const std::wstring& command, const std::wstri
 }
 
 bool ApplyShellIntegration(ShellIntegrationKind kind, const std::wstring& exe, bool on) {
-    if (exe.empty()) return false;
+    t_failure = {};
+    if (exe.empty()) { t_failure.kind = ShellIntegrationFailureKind::Unknown; return false; }
     // Do not record damaged legacy overrides as the next "original" state.
     // The explicit repair action must release them before enabling again.
-    if (on && HasLegacyShellIntegrationResidue()) return false;
+    if (on && HasLegacyShellIntegrationResidue()) {
+        t_failure.kind = ShellIntegrationFailureKind::LegacyResidue;
+        return false;
+    }
+    struct Recording {
+        Recording() { t_recording = true; }
+        ~Recording() { t_recording = false; }
+    } recording;
     bool ok = true;
-    for (const auto& group : Groups(kind)) ok = ApplyGroup(group, exe, on) && ok;
+    for (const auto& group : Groups(kind)) {
+        const bool applied = ApplyGroup(group, exe, on);
+        if (!applied && t_failure.kind == ShellIntegrationFailureKind::None) {
+            t_failure.kind = ShellIntegrationFailureKind::Unknown;
+            t_failure.key = std::wstring(kBackupRoot) + group;
+        }
+        ok = applied && ok;
+    }
+    if (ok) t_failure = {};
     return ok;
+}
+
+ShellIntegrationFailure LastShellIntegrationFailure() { return t_failure; }
+
+const wchar_t* ShellIntegrationFailureName(ShellIntegrationFailureKind kind) noexcept {
+    switch (kind) {
+    case ShellIntegrationFailureKind::None: return L"ok";
+    case ShellIntegrationFailureKind::AccessDenied: return L"access-denied";
+    case ShellIntegrationFailureKind::WriteError: return L"write-error";
+    case ShellIntegrationFailureKind::Reverted: return L"reverted-after-write";
+    case ShellIntegrationFailureKind::ReadError: return L"read-error";
+    case ShellIntegrationFailureKind::LegacyResidue: return L"legacy-residue";
+    case ShellIntegrationFailureKind::BadBackup: return L"bad-backup";
+    case ShellIntegrationFailureKind::PendingUpgrade: return L"pending-upgrade";
+    case ShellIntegrationFailureKind::ChangedByOther: return L"changed-by-other";
+    case ShellIntegrationFailureKind::Unknown: break;
+    }
+    return L"unknown";
 }
 
 bool ReadShellIntegration(ShellIntegrationKind kind, const std::wstring& exe) {

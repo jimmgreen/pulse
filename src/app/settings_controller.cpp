@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cwchar>
+#include <string>
 #include <thread>
 
 namespace pulse::app {
@@ -27,6 +28,73 @@ bool SelectValue(int index, const int (&values)[Size], int& target) {
     if (index < 0 || index >= static_cast<int>(Size) || target == values[index]) return false;
     target = values[index];
     return true;
+}
+
+// Bug 2: say which item failed and why; only blame security software when the
+// registry refused the write or the value disappeared right after it.
+std::wstring IntegrationFailureText(const ShellIntegrationFailure& failure) {
+    using K = ShellIntegrationFailureKind;
+    const std::wstring code = std::to_wstring(failure.status);
+    switch (failure.kind) {
+    case K::AccessDenied:
+        return l10n::Pick(L"系统拒绝写入，可能被安全软件拦截", L"the write was denied, possibly by security software");
+    case K::Reverted:
+        return l10n::Pick(L"写入后被改回，可能被安全软件拦截", L"it was undone right after writing, possibly by security software");
+    case K::WriteError:
+        return std::wstring(l10n::Pick(L"写入注册表失败，错误 ", L"registry write failed, error ")) + code;
+    case K::ReadError:
+        return std::wstring(l10n::Pick(L"读取注册表失败，错误 ", L"registry read failed, error ")) + code;
+    case K::LegacyResidue:
+        return l10n::Pick(L"发现旧版本留下的关联，点「重试」会先清理", L"old associations from an earlier version were found; Try again cleans them first");
+    case K::BadBackup:
+        return l10n::Pick(L"原设置的备份已损坏，为免丢失原设置已停止", L"the backup of the original setting is damaged, so nothing was changed");
+    case K::PendingUpgrade:
+        return l10n::Pick(L"上次升级的关联迁移没有完成", L"the association update from the last upgrade did not finish");
+    case K::ChangedByOther:
+        return l10n::Pick(L"已被其他程序修改，为免覆盖已停止", L"another program changed it, so it was not overwritten");
+    case K::None:
+        return l10n::Pick(L"写入后读取结果不一致", L"the setting did not read back as written");
+    case K::Unknown: break;
+    }
+    return l10n::Pick(L"原因未知", L"unknown reason");
+}
+
+std::wstring IntegrationLogPath() {
+    wchar_t base[MAX_PATH]{};
+    const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
+    if (!length || length >= MAX_PATH) return {};
+    std::wstring dir = std::wstring(base) + L"\\Pulse";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    dir += L"\\logs";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    return dir + L"\\integration.log";
+}
+
+// One UTF-8 line per failed item in %LOCALAPPDATA%\Pulse\logs\integration.log.
+void LogIntegrationFailure(const wchar_t* item, bool on, const ShellIntegrationFailure& failure) {
+    const std::wstring path = IntegrationLogPath();
+    if (path.empty()) return;
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    wchar_t line[2048]{};
+    swprintf_s(line, L"%04u-%02u-%02u %02u:%02u:%02u.%03u item=%s want=%s result=%s status=%ld key=HKCU\\%s value=%s\r\n",
+               now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond, now.wMilliseconds, item,
+               on ? L"on" : L"off", ShellIntegrationFailureName(failure.kind), failure.status,
+               failure.key.empty() ? L"-" : failure.key.c_str(),
+               failure.name.empty() ? L"(default)" : failure.name.c_str());
+    const int bytes = WideCharToMultiByte(CP_UTF8, 0, line, -1, nullptr, 0, nullptr, nullptr);
+    if (bytes <= 1) return;
+    std::string text(static_cast<size_t>(bytes - 1), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, line, -1, text.data(), bytes, nullptr, nullptr);
+    HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                              OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+    LARGE_INTEGER size{};
+    if (GetFileSizeEx(file, &size) && size.QuadPart < 512 * 1024) {
+        DWORD written = 0;
+        WriteFile(file, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
+    }
+    CloseHandle(file);
 }
 
 } // namespace
@@ -491,6 +559,13 @@ bool SettingsController::StartUiTask(SettingsTask task) {
     if (IsNetworkTask(task.kind) && !network) return false;
     return StartTask(std::move(task), [network, diagnostics_export](
                                       const SettingsTask& value, std::wstring& error) {
+        // Local index settings run Pulse.Index.exe elevated. Report a missing
+        // executable here (localized via ServiceText) instead of a shell dialog.
+        if (!IsNetworkTask(value.kind) && value.kind != SettingsTaskKind::DiagnosticsExport &&
+            GetFileAttributesW(index::IndexClient::ExePath().c_str()) == INVALID_FILE_ATTRIBUTES) {
+            error = L"找不到 Pulse.Index.exe";
+            return false;
+        }
         switch (value.kind) {
         case SettingsTaskKind::Volume:
             return index::IndexClient::ConfigureVolumeElevated(value.key, value.enabled);
@@ -527,7 +602,7 @@ bool SettingsController::StartUiTask(SettingsTask task) {
             return true;
         case SettingsTaskKind::DiagnosticsExport:
             return diagnostics_export &&
-                diagnostics_export(value.path, value.enabled, error);
+                diagnostics_export(value.path, value.enabled, value.pin, error);
         }
         return false;
     }, ui_.task_completion);
@@ -857,7 +932,8 @@ std::wstring SettingsController::IntegrationSummary() const {
         std::wstring message;
         if (!integration_error_.empty())
             message = std::wstring(l10n::Pick(L"没能设置：", L"Could not apply: ")) + integration_error_ +
-                l10n::Pick(L"。可能被安全软件拦截，可以重试。", L". Security software may have blocked it; try again.");
+                l10n::Pick(L"。详情见 %LOCALAPPDATA%\\Pulse\\logs\\integration.log。",
+                           L". Details: %LOCALAPPDATA%\\Pulse\\logs\\integration.log.");
         if (integration_save_failed_) {
             if (!message.empty()) message += L" ";
             message += l10n::Pick(L"你的选择没能保存，重启后可能变回原来的设置。",
@@ -883,23 +959,31 @@ void SettingsController::IntegrationAction(int index) {
     // Editing a disabled integration only changes the saved selection.
     if (p.integration_enabled || index == 0 || index == 5 || index == 6) {
         integration_error_.clear();
-        auto failed = [&](const wchar_t* label) {
-            if (!integration_error_.empty()) integration_error_ += l10n::Pick(L"、", L", ");
+        auto failed = [&](const wchar_t* label, const wchar_t* item, bool on, bool explained) {
+            if (!integration_error_.empty()) integration_error_ += l10n::Pick(L"；", L"; ");
             integration_error_ += label;
+            if (!explained) return;
+            const auto failure = LastShellIntegrationFailure();
+            integration_error_ += l10n::Pick(L"（", L" (") + IntegrationFailureText(failure) + l10n::Pick(L"）", L")");
+            LogIntegrationFailure(item, on, failure);
         };
         if ((index == 5 || index == 6) && HasLegacyShellIntegrationResidue() &&
             !RepairLegacyShellIntegrationResidue())
-            failed(l10n::Pick(L"旧版资源管理器关联", L"Legacy Explorer associations"));
-        if (!p.ApplyFolderOpen(p.integration_enabled && p.integration_folders))
-            failed(l10n::Pick(L"文件夹和磁盘", L"Folders and drives"));
-        if (!p.ApplyWinE(p.integration_enabled && p.integration_win_e))
-            failed(L"Win + E");
-        if (!ApplyThisPcOpen(p, p.integration_enabled && p.integration_this_pc))
-            failed(l10n::Pick(L"桌面上的「此电脑」", L"This PC on the desktop"));
+            failed(l10n::Pick(L"旧版资源管理器关联", L"Legacy Explorer associations"), L"legacy", false, false);
+        const bool folders_on = p.integration_enabled && p.integration_folders;
+        if (!p.ApplyFolderOpen(folders_on))
+            failed(l10n::Pick(L"文件夹和磁盘", L"Folders and drives"), L"folders", folders_on, true);
+        const bool win_e_on = p.integration_enabled && p.integration_win_e;
+        if (!p.ApplyWinE(win_e_on))
+            failed(L"Win + E", L"win-e", win_e_on, true);
+        const bool this_pc_on = p.integration_enabled && p.integration_this_pc;
+        if (!ApplyThisPcOpen(p, this_pc_on))
+            failed(l10n::Pick(L"桌面上的「此电脑」", L"This PC on the desktop"), L"this-pc", this_pc_on, true);
     }
     integration_save_failed_ = !p.Save();
     if (ui_.integration_changed) ui_.integration_changed();
-    Apply(SettingsEffect::None);
+    // Explorer window takeover keeps Pulse in the tray on close (KeepsRunningInBackground).
+    Apply(SettingsEffect::TrayVisibility);
 }
 
 void SettingsController::ToggleUi(int index) {
@@ -976,6 +1060,9 @@ void SettingsController::ToggleUi(int index) {
         SaveAndApply(SettingsEffect::None);
     } else if (index == 26) {
         prefs_->close_window_with_last_tab = !prefs_->close_window_with_last_tab;
+        SaveAndApply(SettingsEffect::None);
+    } else if (index == 35) {
+        prefs_->close_tab_on_double_click = !prefs_->close_tab_on_double_click;
         SaveAndApply(SettingsEffect::None);
     } else if (index == 32) {
         prefs_->confirm_recycle_delete = !prefs_->confirm_recycle_delete;
@@ -1165,12 +1252,14 @@ void SettingsController::DiagnosticsAction(int action) {
         !ui_.export_diagnostics || !ui_.task_completion) return;
     std::wstring destination;
     bool include_service = false;
-    if (!ui_.prepare_diagnostics_export(destination, include_service) ||
+    bool include_dumps = false;
+    if (!ui_.prepare_diagnostics_export(destination, include_service, include_dumps) ||
         destination.empty()) return;
     ClearError();
     SettingsTask task{SettingsTaskKind::DiagnosticsExport};
     task.path = std::move(destination);
     task.enabled = include_service;
+    task.pin = include_dumps;
     StartUiTask(std::move(task));
 }
 

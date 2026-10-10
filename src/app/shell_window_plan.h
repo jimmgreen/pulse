@@ -53,6 +53,7 @@ bool SplitShellItemPath(const std::wstring& path, std::wstring& folder, std::wst
 // (explorer.exe /select,… run directly). What one poll of it found:
 struct ExplorerWindowProbe {
     unsigned age_ms = 0;          // since the window registered
+    unsigned view_age_ms = 0;     // since its view first reported a folder
     bool view_ready = false;      // its folder view exists and reports a folder
     bool supported = false;       // a file system folder or This PC
     size_t selected = 0;          // items selected in it
@@ -61,10 +62,37 @@ struct ExplorerWindowProbe {
 enum class ExplorerTakeoverStep { Wait, Take, Leave };
 
 constexpr unsigned kExplorerViewTimeoutMs = 4000;     // no view by then: leave it
-constexpr unsigned kExplorerSelectionGraceMs = 400;   // /select applies after the view
+// After the view is ready: a selection arriving this soon goes along with the
+// request; a later one follows it (kExplorerLateSelectionMs).
+constexpr unsigned kExplorerSelectionGraceMs = 150;
+// The hidden source stays open this long after its view is ready, because
+// /select often applies 590-640 ms after it (Windows 11 23H2).
+constexpr unsigned kExplorerLateSelectionMs = 800;
+// A selection that changes this soon after the view is ready comes from the
+// program that opened the window (/select, SHOpenFolderAndSelectItems), not
+// from the user, even if the window could not be hidden in time.
+constexpr unsigned kExplorerProgrammaticSelectionMs = 1500;
 
 // Wait for the view, leave virtual locations (Control Panel, Home, network…)
-// alone, and give /select a moment to arrive before taking the window.
+// alone, and take the window as soon as its view is ready — Pulse shows the
+// folder at once while the source stays hidden.
 ExplorerTakeoverStep DecideExplorerTakeover(const ExplorerWindowProbe& probe);
+
+// The source window once Pulse has acknowledged the folder.
+struct SourceCloseProbe {
+    bool identity_kept = false;     // same window, process and folder; view still readable
+    bool single_tab = false;        // exactly one tab and one shell view: nothing else to lose
+    bool hidden = false;            // invisible since it appeared: the user cannot have used it
+    bool selection_changed = false; // differs from what was sent to Pulse
+    bool sent_selection = false;    // the request carried names
+    unsigned view_age_ms = 0;
+};
+
+enum class SourceCloseStep { Wait, Close, CloseAndSelect, Abort };
+
+// Never closes a window with other tabs or one the user may have touched. A
+// hidden source waits a moment for a late /select, which then follows the
+// request to Pulse.
+SourceCloseStep DecideSourceClose(const SourceCloseProbe& probe);
 
 } // namespace pulse::app

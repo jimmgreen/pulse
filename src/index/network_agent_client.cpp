@@ -91,12 +91,27 @@ bool NetworkAgentClient::OpenPipe(HANDLE& pipe) {
         return CreateFileW(pipe_name_.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
             OPEN_EXISTING, SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr);
     };
-    pipe = open();
-    if (pipe == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PIPE_BUSY) {
-        WaitNamedPipeW(pipe_name_.c_str(), 1000);
+    // Missing (agent still starting, or between instances) and busy endpoints
+    // are transient. Retrying for a bounded time keeps the first search after
+    // launch from failing with ERROR_CONNECTION_ABORTED (1236).
+    const ULONGLONG deadline = GetTickCount64() + kOpenPipeWaitMs;
+    for (;;) {
         pipe = open();
+        if (pipe != INVALID_HANDLE_VALUE) break;
+        const DWORD error = GetLastError();
+        const ULONGLONG now = GetTickCount64();
+        if (!running_ || now >= deadline) return false;
+        if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PIPE_BUSY) return false;
+        // The agent this client started has exited: its pipe will never appear.
+        if (error == ERROR_FILE_NOT_FOUND && agent_process_ &&
+            WaitForSingleObject(agent_process_, 0) != WAIT_TIMEOUT) return false;
+        const DWORD slice = static_cast<DWORD>((std::min)(deadline - now, ULONGLONG{100}));
+        if (error == ERROR_PIPE_BUSY) {
+            if (!WaitNamedPipeW(pipe_name_.c_str(), slice)) Sleep(slice);
+        } else {
+            Sleep(slice);
+        }
     }
-    if (pipe == INVALID_HANDLE_VALUE) return false;
     if (agent::AuthorizedServer(pipe)) return true;
     CloseHandle(pipe);
     pipe = INVALID_HANDLE_VALUE;

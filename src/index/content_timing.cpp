@@ -6,6 +6,7 @@
 #include <mutex>
 #include <psapi.h>
 #include <string>
+#include <vector>
 
 namespace pulse::index {
 namespace {
@@ -15,6 +16,8 @@ constexpr size_t kWorkers = 16;
 constexpr size_t kSlowSamples = 8;
 constexpr size_t kPathChars = 768;
 constexpr uint64_t kRotateBytes = 2 * 1024 * 1024;
+// Logs of earlier processes (current, .1 and .summary files) kept on disk.
+constexpr size_t kRetainedForeignLogs = 24;
 constexpr uint64_t kSlowMicros = 250000;
 constexpr std::array<const char*, kLanes> kLaneNames{"pdf", "office", "text"};
 constexpr std::array<const char*, kStages> kStageNames{
@@ -108,6 +111,28 @@ std::wstring Environment(const wchar_t* name) {
     value.resize(count);
     return value;
 }
+// Each process writes its own content-timing-<pid> files; without pruning they
+// accumulate forever. Keep the newest files of other processes only.
+void PruneForeignLogs(const std::filesystem::path& directory) noexcept {
+    try {
+        const std::wstring own = L"content-timing-" + std::to_wstring(GetCurrentProcessId()) + L".";
+        struct Entry { std::filesystem::path path; std::filesystem::file_time_type time; };
+        std::vector<Entry> entries;
+        std::error_code error;
+        for (std::filesystem::directory_iterator it(directory, error), end; !error && it != end; it.increment(error)) {
+            const auto name = it->path().filename().wstring();
+            if (!name.starts_with(L"content-timing-") || name.starts_with(own)) continue;
+            if (!name.ends_with(L".jsonl") && !name.ends_with(L".jsonl.1")) continue;
+            std::error_code status;
+            if (it->is_symlink(status) || !it->is_regular_file(status)) continue;
+            const auto time = it->last_write_time(status);
+            if (!status) entries.push_back({it->path(), time});
+        }
+        if (entries.size() <= kRetainedForeignLogs) return;
+        std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) { return a.time > b.time; });
+        for (size_t i = kRetainedForeignLogs; i < entries.size(); ++i) DeleteFileW(entries[i].path.c_str());
+    } catch (...) {}
+}
 std::wstring LogPath() {
     auto directory = Environment(L"PULSE_CONTENT_TIMING_DIR");
     if (directory.empty()) {
@@ -118,6 +143,7 @@ std::wstring LogPath() {
     std::error_code error;
     std::filesystem::create_directories(directory, error);
     if (error) return {};
+    PruneForeignLogs(directory);
     return (std::filesystem::path(directory) /
         (L"content-timing-" + std::to_wstring(GetCurrentProcessId()) + L".jsonl")).wstring();
 }

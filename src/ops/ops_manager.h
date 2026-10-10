@@ -172,6 +172,7 @@ struct ShellMenuItem {
     std::wstring text;
     std::wstring clsid;
     std::wstring handler;
+    wchar_t mnemonic = 0;        // access key from the Explorer label, 0 = none
 };
 
 class OpsManager {
@@ -282,7 +283,7 @@ private:
     struct QueueItem {
         OpRequest req;
         std::wstring open_path;   // non-empty => ShellExecuteEx instead
-        std::wstring open_verb;   // "open" (default) / "properties" / ...
+        std::wstring open_verb;   // empty = default action; "open" / "properties" / ...
         std::wstring open_args;   // e.g. -d "<dir>" for wt.exe
         std::wstring open_file;   // explicit program (empty => open_path is the file)
         std::vector<std::wstring> open_paths; // multi-item "properties"

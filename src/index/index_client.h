@@ -44,7 +44,7 @@ public:
     static bool ConfigureIndexPathElevated(const std::wstring& path, std::wstring* error = nullptr);
     static bool ConfigureExcludePathElevated(const std::wstring& path, bool enabled);
     static bool ConfigureSystemExclusionElevated(const std::wstring& group, bool enabled);
-    static bool ExportDiagnosticsElevated(const std::wstring& empty_directory);
+    static bool ExportDiagnosticsElevated(const std::wstring& empty_directory, bool include_dumps = false);
 
     // Fire-and-forget. Reply arrives as search_msg (wParam = request id).
     void SearchAsync(const Query& q, uint32_t id);
@@ -61,6 +61,7 @@ private:
     void Writer();
     bool EnsureConnected();
     bool SpawnHelper();
+    void StartStoppedService();
     bool WriteMsg(uint32_t type, uint32_t id, const std::vector<uint8_t>& payload);
     bool ReadMsg(ipc::MsgHeader& hdr, std::vector<uint8_t>& payload);
     void HandleStatus(const uint8_t* p, size_t n);
@@ -75,6 +76,7 @@ private:
     std::wstring pipe_name_ = kPipeName;
     HANDLE child_proc_ = nullptr;
     HANDLE child_thread_ = nullptr;
+    ULONGLONG service_start_tick_ = 0;   // last StartStoppedService attempt (Worker thread only)
     std::thread worker_;
     std::thread writer_;
     std::atomic<bool> running_{false};

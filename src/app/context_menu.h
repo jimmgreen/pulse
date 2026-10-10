@@ -63,7 +63,7 @@ enum MenuCmd : int {
     CmdSettings,            // palette / title-bar gear → settings tab
     CmdSettingsContextMenu, // 管理右键项… → 右键菜单 page
     CmdTags,
-    CmdTagBase = 70,        // +0..6  Ctrl+Shift+1..7
+    CmdTagBase = 70,        // +0..6  Ctrl+Alt+Shift+1..7
     CmdViewBase = 80,       // + ViewModeIndex (8 stable view choices)
     CmdTabColorBase = 90,   // +0..7  tab-group color swatches
     CmdTabGroupNewTab = 98,
@@ -133,7 +133,30 @@ struct ShellMenuEntry {
     bool from_com = false;  // pulse_shell IContextMenu row (vs registry static)
     std::wstring clsid;     // handler CLSID when known ("{guid}")
     std::wstring handler;   // handler display name for the settings catalog
+    wchar_t mnemonic = 0;   // access key from the Explorer label ("&X"), 0 = none
 };
+
+// Explorer's access keys for the built-in rows that mirror its own verbs
+// (shell32 labels: 打开(O) 剪切(T) 复制(C) 粘贴(P) 删除(D) 重命名(M) 属性(R)
+// 撤消(U) 复制为路径(A) 刷新(E) 还原(E) 清空回收站(B)). 0 = no access key.
+inline wchar_t BuiltinMenuMnemonic(int command) {
+    switch (command) {
+    case CmdOpen: return L'O';
+    case CmdCut: return L'T';
+    case CmdCopy: return L'C';
+    case CmdPaste: return L'P';
+    case CmdDelete: return L'D';
+    case CmdRename: return L'M';
+    case CmdProperties:
+    case CmdFolderProperties: return L'R';
+    case CmdUndo: return L'U';
+    case CmdCopyPath: return L'A';
+    case CmdRefresh:
+    case CmdRestoreRecycle: return L'E';
+    case CmdEmptyRecycle: return L'B';
+    default: return 0;
+    }
+}
 
 // Context menu for a selected entry: 打开 + icon strip (cut/copy/delete/
 // rename) + built-in verbs + undo. Explorer rows are appended afterwards via

@@ -12,17 +12,18 @@ void Check(bool ok, const char* label) { std::cout << (ok ? "[PASS] " : "[FAIL] 
 struct Host {
     HANDLE pipe = INVALID_HANDLE_VALUE;
     PROCESS_INFORMATION child{};
-    ~Host() {
-        if (pipe != INVALID_HANDLE_VALUE) CloseHandle(pipe);
+    ~Host() { Stop(); }
+    void Stop() {
+        if (pipe != INVALID_HANDLE_VALUE) { CloseHandle(pipe); pipe = INVALID_HANDLE_VALUE; }
         if (child.hProcess) {
             if (WaitForSingleObject(child.hProcess, 2000) == WAIT_TIMEOUT) TerminateProcess(child.hProcess, 91);
-            CloseHandle(child.hProcess); CloseHandle(child.hThread);
+            CloseHandle(child.hProcess); CloseHandle(child.hThread); child = {};
         }
     }
-    bool Start(const wchar_t* mode) {
+    bool Start(const wchar_t* mode, const std::filesystem::path& logs) {
         wchar_t path[32768]{}; GetModuleFileNameW(nullptr, path, 32768);
         auto exe = std::filesystem::path(path).parent_path() / L"Pulse.Preview.exe";
-        auto command = L"\"" + exe.wstring() + L"\" " + std::to_wstring(GetCurrentProcessId()) + L" " + mode;
+        auto command = L"\"" + exe.wstring() + L"\" " + std::to_wstring(GetCurrentProcessId()) + L" \"" + mode + L"\" \"" + logs.wstring() + L"\"";
         STARTUPINFOW start{sizeof(start)};
         if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &start, &child)) return false;
         const auto name = pulse::ipc::PreviewPipeName(GetCurrentProcessId());
@@ -98,7 +99,8 @@ int wmain() {
     for (int scenario = 0; scenario < 4; ++scenario) {
         Host host;
         const wchar_t* mode = scenario == 0 ? L"--test-map-create-failure" : scenario == 1 ? L"--test-map-view-failure" : L"";
-        Check(host.Start(mode), "start owned isolated preview host");
+        const auto logs = folder / (L"logs-" + std::to_wstring(scenario));
+        Check(host.Start(mode, logs), "start owned isolated preview host");
         if (host.pipe == INVALID_HANDLE_VALUE) continue;
         pulse::ipc::PreviewResponse response{}; bool opened = false;
         Check(host.Request(bitmap, 1, scenario == 2, response, opened), "first bitmap response completes within deadline");
@@ -110,6 +112,24 @@ int wmain() {
               "GIF source budget is an explicit failed IPC response without bitmap or fallback");
         Check(host.Request(text, 5, false, response, opened) && response.status == 0,
               "GIF rejection leaves subsequent request aligned");
+        const auto pid = host.child.dwProcessId;
+        host.Stop();
+        const auto log_path = logs / L"Diagnostics" / L"Runtime" /
+            (L"preview-" + std::to_wstring(pid) + L".jsonl");
+        std::ifstream log_file(log_path, std::ios::binary);
+        const std::string log{std::istreambuf_iterator<char>(log_file), std::istreambuf_iterator<char>()};
+        if (scenario < 2) {
+            Check(log.find("\"event\":\"preview_host_mapping_failure\",\"severity\":2") != std::string::npos &&
+                log.find("\"request\":1,\"generation\":1") != std::string::npos &&
+                log.find("\"stage\":" + std::to_string(scenario + 1) + ",\"error\":8") != std::string::npos,
+                "mapping fault logs preserve stage, raw error and request correlation");
+            Check(log.find("\"event\":\"preview_host_response\",\"severity\":2") != std::string::npos,
+                "failed delivery payload has a separate host response terminal record");
+        } else Check(log.find("preview_host_response") == std::string::npos,
+            "successful grid response does not emit per-request terminal noise");
+        Check(log.find("pixel.bmp") == std::string::npos && log.find("next.txt") == std::string::npos &&
+            log.find("next request stays aligned") == std::string::npos,
+            "default host diagnostics contain no file names or document content");
     }
     std::filesystem::remove_all(folder);
     std::cout << "Failures: " << failures << '\n'; return failures ? 1 : 0;

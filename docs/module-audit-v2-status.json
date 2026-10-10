@@ -1,0 +1,890 @@
+[
+  {
+    "id": "M01-001",
+    "title": "JSON 字段查找把字符串值当作键，普通标签名会丢失已保存关联",
+    "status": "上一轮已实测"
+  },
+  {
+    "id": "M01-002",
+    "title": "JSON 转义不完整，导入含控制字符的标签元数据可写出随后拒读的配置",
+    "status": "上一轮已实测"
+  },
+  {
+    "id": "M01-003",
+    "title": "· P3：FFmpeg 来源测试仍要求生产已明确禁止的静默回退",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "media-pack-audit.log; 71 checks; custom disabled/missing/existing and actual preview host"
+  },
+  {
+    "id": "M01-004",
+    "title": "· P2：将 FFmpeg 自由文本 metadata 当成时长/视频结构行，错误参数进入真实播放",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "ffmpeg-playback-audit.log; 62 checks; real misleading metadata fixture and playback"
+  },
+  {
+    "id": "M01-005",
+    "title": "· P3：Job 建立/设限/绑定失败后仍启动解码器，资源与退出保护静默降级",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "ffmpeg-process-audit-v3.log; 18 checks; job failures fail closed, stable handles, abrupt parent termination kills actual owned child"
+  },
+  {
+    "id": "M02-001",
+    "title": "可恢复协调或回退菜单异常可超过启动诊断保留阈值",
+    "status": "上一轮已实测"
+  },
+  {
+    "id": "M02-002",
+    "title": "清理诊断在属性查询或中途枚举失败时静默返回成功",
+    "status": "上一轮已实测"
+  },
+  {
+    "id": "M02-004",
+    "title": "系统语言测试遗漏 ZhTW",
+    "status": "上一轮已实测"
+  },
+  {
+    "id": "M02-003",
+    "title": "初审 UI 缺陷已撤销",
+    "status": "报告撤销"
+  },
+  {
+    "id": "M03-001",
+    "title": "· P2 · 目录枚举缺少取消/截止时间，退出会等待底层I/O",
+    "status": "上一轮已实测"
+  },
+  {
+    "id": "M03-002",
+    "title": "· P2 · 不支持变更通知的目录触发无退避重开和刷新循环",
+    "status": "上一轮已实测"
+  },
+  {
+    "id": "M03-003",
+    "title": "· P2 · 回收站接受截断的v2原始路径，还原侧重复同一容错",
+    "status": "上一轮已实测"
+  },
+  {
+    "id": "M03-004",
+    "title": "· P2 · 正规化跳过盘符相对路径与绝对路径点段处理",
+    "status": "上一轮已实测"
+  },
+  {
+    "id": "M03-005",
+    "title": "· P2 · UNC磁盘缓存缺少按路径的串行/代际提交",
+    "status": "上一轮已实测"
+  },
+  {
+    "id": "M03-006",
+    "title": "· P2 · 过期UNC探测的晚到结果仍覆盖较新的连接状态",
+    "status": "上一轮已实测"
+  },
+  {
+    "id": "M03-007",
+    "title": "· P2 · UNC超时结果在未同步时读取另一线程正在写的RTT",
+    "status": "上一轮已实测"
+  },
+  {
+    "id": "M03-008",
+    "title": "· P3 · 枚举基准复制的NT结构漏掉EaSize，名称读取偏移错误",
+    "status": "上一轮已实测"
+  },
+  {
+    "id": "M04-001",
+    "title": "· P2 · 菜单请求先发出再登记，完成结果缺少按请求归属的持久化",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/audit_navigation_20261006/transfer_task_lifecycle.log: pulse_transfer_audit_test exit0,31PASS/0FAIL. Real OpsManager registered file/menu/query completions delivered interleaved, duplicate and late-unknown messages verify exact-once per-ID routing and no overwrite; terminal queue retains rapid success/failure IDs and precise completion task ID. ShellClient owner additionally verified Reserved before fast ctx_items and synchronous unreachable done in quicklook_build/shell-client-generation-audit.log. No real third-party Explorer verb/provider UI exercised. All fixture-only and no residual test authorization host."
+  },
+  {
+    "id": "M04-002",
+    "title": "· P2 · 扫描不完整时仍当作完整复制/移动成功",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/audit_navigation_20261006/transfer_audit_v2.log: pulse_transfer_audit_test exit 0, 28 PASS/0 FAIL. Isolated fixture + deny ACL; queued cancel/pause, scanning cancel, file/tree KeepBoth and persisted undo, incomplete scan, partial move undo, per-source target rights, literal shell-template argv, real OpsManager authorization partial completion and conflict cancel/session reuse/exact destination. Authorization helper is same-token test host, no real UAC. Previous failed authorization fixture log retained as transfer_audit.log; test-host whitelist corrected. Protocol target exit0 in elevated_protocol.log."
+  },
+  {
+    "id": "M04-003",
+    "title": "· P2 · KeepBoth移动撤销保留了自动生成的新名字",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/audit_navigation_20261006/transfer_audit_v2.log: pulse_transfer_audit_test exit 0, 28 PASS/0 FAIL. Isolated fixture + deny ACL; queued cancel/pause, scanning cancel, file/tree KeepBoth and persisted undo, incomplete scan, partial move undo, per-source target rights, literal shell-template argv, real OpsManager authorization partial completion and conflict cancel/session reuse/exact destination. Authorization helper is same-token test host, no real UAC. Previous failed authorization fixture log retained as transfer_audit.log; test-host whitelist corrected. Protocol target exit0 in elevated_protocol.log."
+  },
+  {
+    "id": "M04-004",
+    "title": "· P2 · Shell连接生命周期未绑定读者捕获的代际",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "shell-client-generation-audit.log",
+        "shell-client-generation-audit-initial-fail.log"
+      ],
+      "verification": "生产ShellClient在独立真实子进程/Windows命名管道上：Abort与真实sendfailure均暂停旧reader清理、建立新连接后释放旧reader；新child/代际保留，新pending不清，旧pending重试后各终态一次。shared_ptr保持旧pipe到OVERLAPPED取消完成，随后释放；partialframe Stop小于2秒。首轮发现本地retired vector延迟释放，修后全通过；没有运行真实Explorer COM或用户文件操作。"
+    }
+  },
+  {
+    "id": "M04-005",
+    "title": "· P2 · host在首次连通前退出后自动重试不能重新启动",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "shell-client-generation-audit.log"
+      ],
+      "verification": "实际自有stub子进程第一次启动在创建pipe前exit17，验证child_started和process/thread handles清除；同一ShellClient无需Stop/Start便按既有1500ms backoff自动启动下一child并完成请求。未启动真实pulse_shell或操作用户文件。"
+    }
+  },
+  {
+    "id": "M04-006",
+    "title": "· P2 · 查询中关闭菜单被消费后，资源仍保留至120秒过期",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\shell_context_lifetime_audit.log；pulse_shell_context_lifetime_audit_test exit 0，24 PASS；4次真实CtxSessionThreadImpl查询中阻塞fake handler，Close已被pump消费后放行，均在2秒等待预算内退出并回收events；不调用实际Shell handler。"
+  },
+  {
+    "id": "M04-007",
+    "title": "· P2 · 创建worker资源失败时仍启动线程，失败分支释放活跃参数",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\shell_context_lifetime_audit.log；pulse_shell_context_lifetime_audit_test exit 0，24 PASS；分别注入第1/第2 CreateEvent失败（CreateThread调用数0）、CreateThread失败与成功Join；所有取得events均回收。生产pulse_shell与test均构建通过；未运行Application Verifier/ASan。"
+  },
+  {
+    "id": "M04-008",
+    "title": "· P2 · 取消在扫描阶段不被观察，仍会执行后续原子移动",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/audit_navigation_20261006/transfer_audit_v2.log: pulse_transfer_audit_test exit 0, 28 PASS/0 FAIL. Isolated fixture + deny ACL; queued cancel/pause, scanning cancel, file/tree KeepBoth and persisted undo, incomplete scan, partial move undo, per-source target rights, literal shell-template argv, real OpsManager authorization partial completion and conflict cancel/session reuse/exact destination. Authorization helper is same-token test host, no real UAC. Previous failed authorization fixture log retained as transfer_audit.log; test-host whitelist corrected. Protocol target exit0 in elevated_protocol.log."
+  },
+  {
+    "id": "M04-009",
+    "title": "· P3 · Shell耗时基准在绑定失败后将未初始化值加入统计",
+    "status": "已修复并通过定向验证",
+    "evidence": "root bench_data/quicklook-b/shell-benchmark-failure-audit.log; actual invalid Shell bind returns no timing sample and cannot enter statistics"
+  },
+  {
+    "id": "M04-010",
+    "title": "· P2 · Shell命令模板反复ReplaceAll会重新解释插入的路径",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/audit_navigation_20261006/transfer_audit_v2.log: pulse_transfer_audit_test exit 0, 28 PASS/0 FAIL. Isolated fixture + deny ACL; queued cancel/pause, scanning cancel, file/tree KeepBoth and persisted undo, incomplete scan, partial move undo, per-source target rights, literal shell-template argv, real OpsManager authorization partial completion and conflict cancel/session reuse/exact destination. Authorization helper is same-token test host, no real UAC. Previous failed authorization fixture log retained as transfer_audit.log; test-host whitelist corrected. Protocol target exit0 in elevated_protocol.log."
+  },
+  {
+    "id": "M04-011",
+    "title": "· P2 · 已接受请求的启动窗口丢失取消/暂停",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/audit_navigation_20261006/transfer_audit_v2.log: pulse_transfer_audit_test exit 0, 28 PASS/0 FAIL. Isolated fixture + deny ACL; queued cancel/pause, scanning cancel, file/tree KeepBoth and persisted undo, incomplete scan, partial move undo, per-source target rights, literal shell-template argv, real OpsManager authorization partial completion and conflict cancel/session reuse/exact destination. Authorization helper is same-token test host, no real UAC. Previous failed authorization fixture log retained as transfer_audit.log; test-host whitelist corrected. Protocol target exit0 in elevated_protocol.log."
+  },
+  {
+    "id": "M04-012",
+    "title": "· P2 · 冲突取消产生两个终止信号，第二帧被当协议错误",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/audit_navigation_20261006/transfer_audit_v2.log: pulse_transfer_audit_test exit 0, 28 PASS/0 FAIL. Isolated fixture + deny ACL; queued cancel/pause, scanning cancel, file/tree KeepBoth and persisted undo, incomplete scan, partial move undo, per-source target rights, literal shell-template argv, real OpsManager authorization partial completion and conflict cancel/session reuse/exact destination. Authorization helper is same-token test host, no real UAC. Previous failed authorization fixture log retained as transfer_audit.log; test-host whitelist corrected. Protocol target exit0 in elevated_protocol.log."
+  },
+  {
+    "id": "M04-013",
+    "title": "· P2 · 失败/取消的授权传输丢弃已确认的路径完成事件",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/audit_navigation_20261006/transfer_audit_v2.log: pulse_transfer_audit_test exit 0, 28 PASS/0 FAIL. Isolated fixture + deny ACL; queued cancel/pause, scanning cancel, file/tree KeepBoth and persisted undo, incomplete scan, partial move undo, per-source target rights, literal shell-template argv, real OpsManager authorization partial completion and conflict cancel/session reuse/exact destination. Authorization helper is same-token test host, no real UAC. Previous failed authorization fixture log retained as transfer_audit.log; test-host whitelist corrected. Protocol target exit0 in elevated_protocol.log."
+  },
+  {
+    "id": "M04-014",
+    "title": "· P2 · 过度申请创建权限，使无需管理员的文件复制进入 UAC",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/audit_navigation_20261006/transfer_audit_v2.log: pulse_transfer_audit_test exit 0, 28 PASS/0 FAIL. Isolated fixture + deny ACL; queued cancel/pause, scanning cancel, file/tree KeepBoth and persisted undo, incomplete scan, partial move undo, per-source target rights, literal shell-template argv, real OpsManager authorization partial completion and conflict cancel/session reuse/exact destination. Authorization helper is same-token test host, no real UAC. Previous failed authorization fixture log retained as transfer_audit.log; test-host whitelist corrected. Protocol target exit0 in elevated_protocol.log."
+  },
+  {
+    "id": "M05-001",
+    "title": "· P1 · 迁移先复制再保护，SYSTEM全盘文件名索引落入普通可读目录",
+    "status": "已修复，部分实测通过；环境边界待验",
+    "evidence": {
+      "logs": [
+        "index-security-audit.log"
+      ],
+      "verification": "实际隔离目录 ACL 拒绝、源与不安全目标保护、叶/祖先 rename 拒绝通过。Medium token 无管理员成功迁移及受限令牌读取最终/临时文件正向测试；此前三次失败日志保留。"
+    }
+  },
+  {
+    "id": "M05-002",
+    "title": "· P2 · QueryCanNarrow错误地把追加字符等同于集合收窄",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "index-query-audit.log"
+      ],
+      "verification": "真实映射索引 warm vs cold 七组 ext/size/quote/negation/OR 比较通过；仅简单正向子串允许增量收窄。"
+    }
+  },
+  {
+    "id": "M05-003",
+    "title": "· P2 · 移动后仍使用旧DFS区间，范围搜索出现错纳入和漏查",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "index-query-audit.log"
+      ],
+      "verification": "真实 mapped node ApplyNotify rename 后旧 DFS 区间排除、另一作用域通用扫描命中通过。"
+    }
+  },
+  {
+    "id": "M05-004",
+    "title": "· P2 · 普通用户通知更新未写入WAL，正常重启复用旧快照",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "notify-restart-audit.log"
+      ],
+      "verification": "--notify-restart-only 真实通知 WAL 添加/重命名/删除及连续两次重载通过；未操作用户服务。"
+    }
+  },
+  {
+    "id": "M05-005",
+    "title": "· P2 · RDCW属性变化没有让size/date过滤缓存失效",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "index-query-audit.log"
+      ],
+      "verification": "真实文件 size 改变并 ApplyNotify 后缓存过滤失效通过。"
+    }
+  },
+  {
+    "id": "M05-006",
+    "title": "· P2 · MFT中途读失败被当成成功的完整卷",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "mft-completion-audit.log"
+      ],
+      "verification": "生产枚举核心注入输出后失败/取消/consumer stop 返回失败，完整枚举成功；未向真实卷注入故障。"
+    }
+  },
+  {
+    "id": "M05-007",
+    "title": "· P2 · prefix桶数组仅验证总数，坏桶仍可使搜索越界",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "index-query-audit.log"
+      ],
+      "verification": "生产 loader 拒绝非法 prefix bucket、非零首posting范围、越界posting ID 三例通过。"
+    }
+  },
+  {
+    "id": "M05-008",
+    "title": "· P2 · 小索引中同一patch节点被添加两遍",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "index-query-audit.log"
+      ],
+      "verification": "真实 mapped base+patch 在 quoted/single/no-pinyin 查询各只出现一次。"
+    }
+  },
+  {
+    "id": "M05-009",
+    "title": "· P2 · 慢客户端通过写背压阻塞全局搜索与窗口线程",
+    "status": "已修复，部分实测通过；环境边界待验",
+    "evidence": {
+      "logs": [
+        "deadline-pipe-audit.log"
+      ],
+      "verification": "真实隔离管道静默、背压、trickle 绝对截止、取消与健康独立管道通过；network-agent-deadline-audit.log 验证生产代理静默对端后4922ms内处理健康STATUS。完整 index_host 多客户搜索/广播场景未运行。"
+    }
+  },
+  {
+    "id": "M05-010",
+    "title": "· P2 · 排除配置在引擎锁外替换，与读路径数据竞争",
+    "status": "已修复，定向并发验证通过",
+    "evidence": "root bench_data/quicklook-b/index-exclusion-concurrency-audit.log; actual FullRebuild writer blocked by shared reader lock, then completes; two readers/100 replacements/6519 reads coherent. Scanning cancelled; no TSAN or real multivolume failure test."
+  },
+  {
+    "id": "M05-011",
+    "title": "· P2 · 64层路径重建静默丢掉盘符与祖先",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "index-query-audit.log"
+      ],
+      "verification": "真实90层深路径保留drive及所有祖先通过；循环/非法parent防护代码已编译。"
+    }
+  },
+  {
+    "id": "M05-012",
+    "title": "· P3 · MFT测量工具把分页游标当USN记录",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "usn-page-audit.log"
+      ],
+      "verification": "生产共享 USN 页解析器两页及坏长度/名字/cursor 用例通过；未运行真实卷 measure。"
+    }
+  },
+  {
+    "id": "M05-013",
+    "title": "· P2 · 断连Writer忙循环（历史发现，最新源码已修）",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "writer-idle-audit.log"
+      ],
+      "verification": "真实 Writer 三个离线窗口 CPU 0ms，保留队列、匿名管道重连排空和停止通过。"
+    }
+  },
+  {
+    "id": "M06-001",
+    "title": "· P1 · 用户代理管道缺少用户及登录会话隔离",
+    "status": "已修复，部分实测通过；环境边界待验",
+    "evidence": {
+      "logs": [
+        "index-security-audit.log"
+      ],
+      "verification": "真实 NEW_CREDENTIALS LUID 隔离、受限 logon token ACL 拒绝及请求1至9鉴权通过；network-client-audit.log 客户端截止通过。未使用两个真实Windows用户/独立交互会话。"
+    }
+  },
+  {
+    "id": "M06-002",
+    "title": "· P2 · 遍历失败误判完整成功",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "network-worker-audit.log"
+      ],
+      "verification": "生产 crawl 注入 FindNext/子目录错误保留旧shard，watch健康仍重试；live walk明确incomplete。隔离本地目录与受控错误，未真实SMB断网。"
+    }
+  },
+  {
+    "id": "M06-003",
+    "title": "· P2 · 首次扫描与首次watch之间存在无补偿的变化缺口",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "network-worker-audit.log"
+      ],
+      "verification": "实际本地首次RDCW在尚无shard时已排队reconcile通过；未真实SMB场景。"
+    }
+  },
+  {
+    "id": "M06-004",
+    "title": "· P2 · 旧子树扫描覆盖新watch条目",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "network-worker-audit.log"
+      ],
+      "verification": "真实枚举期间注入更新notify/祖先删除，迟到subtree扫描不能覆盖新元数据或复活删除节点；生产代际保护通过。"
+    }
+  },
+  {
+    "id": "M06-005",
+    "title": "· P2 · 父子重叠根使搜索结果和分页重复",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "network-worker-audit.log"
+      ],
+      "verification": "生产SearchLoop parent/child root按路径去重，specific root优先，total与后续page唯一成员通过。"
+    }
+  },
+  {
+    "id": "M06-006",
+    "title": "· P2 · 实时网络搜索的枚举前缀截断破坏全局排序",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "network-worker-audit.log"
+      ],
+      "verification": "生产worker合成100001条，较晚最佳name/size/mtime/rank仍入100000候选集，后页和cancel incomplete通过；实际UI排序点击未运行。"
+    }
+  },
+  {
+    "id": "M06-007",
+    "title": "· P2 · 映射盘转UNC检查了错误的错误通道",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "network-worker-audit.log"
+      ],
+      "verification": "生产mapped-drive normalize用受控WNet返回ERROR_MORE_DATA且GetLastError为ACCESS_DENIED，验证按返回码分配缓冲成功；非真实mappedSMB。"
+    }
+  },
+  {
+    "id": "M06-008",
+    "title": "· P2 · 损坏网络配置被静默空载并可被后续保存覆盖",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "network-config-audit.log"
+      ],
+      "verification": "--network-config-only 严格JSON/UTF8、真实独占读取拒绝保留配置、拒绝写与修复重载通过。"
+    }
+  },
+  {
+    "id": "M07-001",
+    "title": "· P2 · PDF使用UCS-2提取API，非BMP字符静默漏失",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "pdf-unicode-audit.log"
+      ],
+      "verification": "真实 bundled pdfium.dll 的 ExtractPdfiumText/DocumentLiteralMatch 七例含BMP/U+20000/emoji/跨页/跨scalar/空文档通过。初始代理项失败已修并保留日志；未完整内容数据库集成。"
+    }
+  },
+  {
+    "id": "M08-001",
+    "title": "· P2 · 非shared限定搜索未裁剪目录枚举，跨范围失败污染查询",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "content-task-scope-audit.log"
+      ],
+      "verification": "实际受限子目录DACL及非递归/递归/作用域交集/取消共10项通过。"
+    }
+  },
+  {
+    "id": "M08-002",
+    "title": "· P2 · 即时订阅丢弃失败变更而继续声称实时覆盖",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "content-instant-reconcile-audit.log",
+        "content-instant-reconcile-audit-initial-fail.log",
+        "content-instant-reconcile-audit-second-fail.log"
+      ],
+      "verification": "已有/新增/导入各1通知失败后第2次恢复；永久3次失败明确暂停且保留原结果；取消仅1次，不重跑全量scan。前两轮夹具缺profile父目录和默认build排除项已修复并保留失败日志。生产会话和协议运行，元数据错误受控注入。"
+    }
+  },
+  {
+    "id": "M08-003",
+    "title": "· P2 · 保存内容搜索的客户端/服务端执行模式不一致，初始排序失效",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "content-session-batch-audit.log"
+      ],
+      "verification": "6排序×2方向、首条立即可见、1000/2000/4000/8000行发布17/33/64/126次与取消刷新通过；8000行实际可见数量按revision累计504125 vs旧32004000。仍是批处理全量排序，未声称消除全部二次成本，未独立测live delta/filter/midstream sort/selection规模。"
+    }
+  },
+  {
+    "id": "M08-004",
+    "title": "· P2 · 单命中流式入库导致全量显示表二次重写",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "content-session-batch-audit.log"
+      ],
+      "verification": "6排序×2方向、首条立即可见、1000/2000/4000/8000行发布17/33/64/126次与取消刷新通过；8000行实际可见数量按revision累计504125 vs旧32004000。仍是批处理全量排序，未声称消除全部二次成本，未独立测live delta/filter/midstream sort/selection规模。"
+    }
+  },
+  {
+    "id": "M09-001",
+    "title": "· P2 · Places同步保存与后台写入的代际不一致",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "root bench_data/quicklook-b/places_persistence-audit-v2.log; 22 checks including conflicting aliases, actual sharing-lock write failure/retry and recovery"
+  },
+  {
+    "id": "M09-002",
+    "title": "· P2 · 标签写入失败被消费，旧权威文件压过较新恢复副本",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "root bench_data/quicklook-b/places_persistence-audit-v2.log; 22 checks including conflicting aliases, actual sharing-lock write failure/retry and recovery"
+  },
+  {
+    "id": "M09-003",
+    "title": "· P2 · 快速访问菜单固定key在迁移时变为显示文本key",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "root bench_data/quicklook-b/places_persistence-audit-v2.log; 22 checks including conflicting aliases, actual sharing-lock write failure/retry and recovery"
+  },
+  {
+    "id": "M10-001",
+    "title": "· P1 · Shift范围选择越过当前筛选范围",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/audit_navigation_20261006/selection_navigation_stable.log: model filter/path aggregates and Shift mouse pass; first Shift+Down fails because BuildVm synchronizes visibility preferences and clears fixture anchor (pre log focus0/-1). Probe corrected to synchronize preferences before selecting, unchanged assertion; awaiting new pulse. Remaining five keyboard paths pass. Process exited1 normally; prior diagnostic access violation no longer reproduces after consistent build. Final rerun: bench_data/audit_navigation_20261006/selection_navigation_final.log, pulse exit0, all assertions PASS. TEMP/TMP isolated to fixture, stopped only spawned test network-agent PID19536. M10 all six keyboard paths now pass; M18 collapsed/filter source set passes; M11 deterministic gate/history/defer exact identity and M12 shared command classification pass. No manual popup/DPI or external ADS/file operation checks."
+  },
+  {
+    "id": "M10-002",
+    "title": "· P2 · 多消费者虚拟加载代际互相取消",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/audit_navigation_20261006/selection_navigation_stable.log: overlapping LoadPaths + cancel isolation, shared generation navigation away, actual ApplyWorkerResult selection/clear/missing identity, OpenWorkspace ThisPC first/middle/last via saved in-memory object, pinned drag/pinned region invariants all PASS. Disk workspace save-close-reopen not exercised. 本轮补真实磁盘保存/销毁/新对象Load：首、中、末栏此电脑空路径及视图顺序均保持，6 PASS/0 FAIL，bench_data/workspace-disk-roundtrip-audit.log；未手动点击工作区。"
+  },
+  {
+    "id": "M10-003",
+    "title": "· P2 · 刷新回写请求时旧选择，丢弃更新后的选择",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/audit_navigation_20261006/selection_navigation_stable.log: overlapping LoadPaths + cancel isolation, shared generation navigation away, actual ApplyWorkerResult selection/clear/missing identity, OpenWorkspace ThisPC first/middle/last via saved in-memory object, pinned drag/pinned region invariants all PASS. Disk workspace save-close-reopen not exercised. 本轮补真实磁盘保存/销毁/新对象Load：首、中、末栏此电脑空路径及视图顺序均保持，6 PASS/0 FAIL，bench_data/workspace-disk-roundtrip-audit.log；未手动点击工作区。"
+  },
+  {
+    "id": "M10-004",
+    "title": "· P2 · 工作区重开漏恢复This PC分栏",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/audit_navigation_20261006/selection_navigation_stable.log: overlapping LoadPaths + cancel isolation, shared generation navigation away, actual ApplyWorkerResult selection/clear/missing identity, OpenWorkspace ThisPC first/middle/last via saved in-memory object, pinned drag/pinned region invariants all PASS. Disk workspace save-close-reopen not exercised. 本轮补真实磁盘保存/销毁/新对象Load：首、中、末栏此电脑空路径及视图顺序均保持，6 PASS/0 FAIL，bench_data/workspace-disk-roundtrip-audit.log；未手动点击工作区。"
+  },
+  {
+    "id": "M10-005",
+    "title": "· P2 · 竖向标签拖动绕过固定标签边界",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/audit_navigation_20261006/selection_navigation_stable.log: overlapping LoadPaths + cancel isolation, shared generation navigation away, actual ApplyWorkerResult selection/clear/missing identity, OpenWorkspace ThisPC first/middle/last via saved in-memory object, pinned drag/pinned region invariants all PASS. Disk workspace save-close-reopen not exercised. 本轮补真实磁盘保存/销毁/新对象Load：首、中、末栏此电脑空路径及视图顺序均保持，6 PASS/0 FAIL，bench_data/workspace-disk-roundtrip-audit.log；未手动点击工作区。"
+  },
+  {
+    "id": "M11-001",
+    "title": "· P2 · 结构化查询回填破坏原有布尔、否定及日期条件",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "search-query-audit.log"
+      ],
+      "verification": "查询compile/parse六组raw无损回转、日期边界、OR各分支过滤与scope成员通过；保留初始OR scope三失败日志。未真实advanced dialog UI。"
+    }
+  },
+  {
+    "id": "M11-002",
+    "title": "· P2 · 地址搜索是否识别原生运算符取决于词数",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "search-query-audit.log"
+      ],
+      "verification": "typed raw单/多token维持查询运算；advanced literal单/多token转义且成员正确，单词数不切换语义。未地址栏/历史键盘UI。"
+    }
+  },
+  {
+    "id": "M11-003",
+    "title": "· P2 · 第二个 provider 到达使全局搜索选中项指向另一文件",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "global-search-state-audit.log"
+      ],
+      "verification": "共享popup state helper按path恢复selection/scroll anchor，双provider乱序、同名不同路径、topN移出保持无选中、大小写extended路径通过；未实际popup键盘/Enter。"
+    }
+  },
+  {
+    "id": "M11-004",
+    "title": "· P2 · 全局名称搜索把网络 provider 失败显示为完成结果",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": {
+      "logs": [
+        "global-search-state-audit.log"
+      ],
+      "verification": "共享popup state helper分开跟踪两provider ready/error，失败/重试/timeout/迟到成功/真正空集18例中相关用例通过；未真实popup错误视觉状态。"
+    }
+  },
+  {
+    "id": "M11-005",
+    "title": "· P2 · 按模式选择捕获清过滤的中间代际，匹配结果随后被丢弃",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "Source + navigation probe implemented. Deterministic worker gate covers clearing filter commit, zero/multiple patterns, user selection cancellation, rapid replacement and no-filter; cross-store history then production deferred resolve exact path. Awaiting pulse build/test. Final rerun: bench_data/audit_navigation_20261006/selection_navigation_final.log, pulse exit0, all assertions PASS. TEMP/TMP isolated to fixture, stopped only spawned test network-agent PID19536. M10 all six keyboard paths now pass; M18 collapsed/filter source set passes; M11 deterministic gate/history/defer exact identity and M12 shared command classification pass. No manual popup/DPI or external ADS/file operation checks."
+  },
+  {
+    "id": "M11-006",
+    "title": "· P2 · 内容历史恢复未恢复 order revision，打开和复制被持续吞掉",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "Source + navigation probe implemented. Deterministic worker gate covers clearing filter commit, zero/multiple patterns, user selection cancellation, rapid replacement and no-filter; cross-store history then production deferred resolve exact path. Awaiting pulse build/test. Final rerun: bench_data/audit_navigation_20261006/selection_navigation_final.log, pulse exit0, all assertions PASS. TEMP/TMP isolated to fixture, stopped only spawned test network-agent PID19536. M10 all six keyboard paths now pass; M18 collapsed/filter source set passes; M11 deterministic gate/history/defer exact identity and M12 shared command classification pass. No manual popup/DPI or external ADS/file operation checks."
+  },
+  {
+    "id": "M12-001",
+    "title": "· P2 · staging 枚举失败被吞掉，空/不完整目录被当作完整来源",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/audit_navigation_20261006/drop_staging.log: pulse_drop_staging_test exit0, 22 PASS/0 FAIL. Real empty directory + first/middle/deep enumeration injected errors, batch preservation, partial stage cleanup. OLE caller now returns NONE + error toast on failure; physical external OLE drag/error toast not manually exercised."
+  },
+  {
+    "id": "M12-002",
+    "title": "· P2 · 托盘移动集合在任务完成前即被消费",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/audit_navigation_20261006/selection_navigation_task_lifecycle.log: pulse exit0,133PASS/0FAIL. Actual ReleaseTrayBatch enqueues fixture move, retains pending card, actual OpsManager terminal consumes only successful original card; model cases cover partial failure, cancellation/skip retry, duplicate late terminal, second release and newly-collected same-path isolation. transfer_task_lifecycle.log exit0,31PASS confirms actual merged-directory moved root and rapid success/failure terminal IDs. TEMP/TMP isolated; preferences persist=false asserted, stopped only this probe network-agent PID9044. No manual tray animation/drag gesture visual verification."
+  },
+  {
+    "id": "M12-003",
+    "title": "· P2 · 新建后的重命名绑定全局文件名，可能选中另一个目录的旧项目",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/audit_navigation_20261006/selection_navigation_task_lifecycle.log: pulse exit0,133PASS/0FAIL. Actual CreateNewItem->Shell create->OpsManager terminal binds task/full path, origin refresh selects real created directory after focus moves without opening editor in other pane. Production consumer cases cover A/B same basename, rapid success/failure task isolation and navigation before late completion. TEMP/TMP isolated and preferences persist=false; exact spawned network-agent PID9044 cleaned. No actual rename submission or manual overlay visual verification."
+  },
+  {
+    "id": "M12-004",
+    "title": "· P3 · 色块动态 ID 范围覆盖“自定义颜色”固定命令",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "CreateTagPicker fixed action ID30051 below dynamic30060; shared production command classification probe covers3/4/5 custom colors. Awaiting pulse; actual picker popup/restart preferences not exercised. Final rerun: bench_data/audit_navigation_20261006/selection_navigation_final.log, pulse exit0, all assertions PASS. TEMP/TMP isolated to fixture, stopped only spawned test network-agent PID19536. M10 all six keyboard paths now pass; M18 collapsed/filter source set passes; M11 deterministic gate/history/defer exact identity and M12 shared command classification pass. No manual popup/DPI or external ADS/file operation checks."
+  },
+  {
+    "id": "M13-001",
+    "title": "· P2 · 原样跨进程转发相对路径，丢失发起者工作目录",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/audit_navigation_20261006/single_instance.log: exit0, 9 PASS/0 FAIL. Sender/receiver CWD differ; empty/virtual tokens unchanged; actual mutex ownership publishes endpoint; same-class isolated decoy is skipped; Release removes publication. Tests use a unique test window class and mutex, no messages sent to real user Pulse instance."
+  },
+  {
+    "id": "M13-002",
+    "title": "· P2 · 发布desired即视作完成，暂态注册失败没有自动恢复",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/audit_navigation_20261006/shell_registry_retry.log: pulse_shell_registry_retry_test exit0, all PASS. Fake IShellWindows factory/pending/register/navigate first failures, disconnect rebuild, unchanged desired retry, no duplicate cookies, shutdown retry cancellation. No real Explorer restart or CreateThread/CoInitialize fault injection. 22 PASS/0 FAIL."
+  },
+  {
+    "id": "M13-003",
+    "title": "· P2 · 升级snapshot提前覆盖，写前中断使旧状态失去匹配备份",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/audit_navigation_20261006/integration_registry.log: pulse_integration_registry_test exit0, all PASS with process HKCU redirected to unique sandbox and cleanup verified. New snapshot-after-commit interruption simulated by throwing from test Write hook; old restore and upgrade-retry restore preserve original association. Partial legacy repair and enable rollback double-write failures recover. No actual power loss/production HKCU changes. Whole affected registry executable: 67 PASS/0 FAIL."
+  },
+  {
+    "id": "M13-004",
+    "title": "· P2 · 遗留修复只能识别完整七值特征，部分成功后备份无法续修",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/audit_navigation_20261006/integration_registry.log: pulse_integration_registry_test exit0, all PASS with process HKCU redirected to unique sandbox and cleanup verified. New snapshot-after-commit interruption simulated by throwing from test Write hook; old restore and upgrade-retry restore preserve original association. Partial legacy repair and enable rollback double-write failures recover. No actual power loss/production HKCU changes. Whole affected registry executable: 67 PASS/0 FAIL."
+  },
+  {
+    "id": "M13-005",
+    "title": "· P2 · Singleton端点没有绑定mutex拥有者，隔离实例可接收真实请求",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/audit_navigation_20261006/single_instance.log: exit0, 9 PASS/0 FAIL. Sender/receiver CWD differ; empty/virtual tokens unchanged; actual mutex ownership publishes endpoint; same-class isolated decoy is skipped; Release removes publication. Tests use a unique test window class and mutex, no messages sent to real user Pulse instance."
+  },
+  {
+    "id": "M13-006",
+    "title": "· P2 · 标签菜单部分安装/移除失败后不再重试",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/shell-tag-registry-nodll-v2.log: 72 PASS/0 FAIL. Isolated registry tests cover nine Create and twenty-four Set failures and cleanup retry; actual Explorer menu UI remains unverified."
+  },
+  {
+    "id": "M13-007",
+    "title": "· P2 · 按静默间隔切分一次Explorer调用，混合选中项会得到相反标签结果",
+    "status": "未完成：无DLL完整批次热调用已验证，冷COM激活失败待定位",
+    "evidence": "bench_data/shell-tag-com-warm-v16.log：--warm-only 28 PASS/0 FAIL exit 0；真实SHCreateDefaultContextMenu/InvokeCommand，32标签、3/1000文件完整批次，混合全加/全有全移、重复请求与Execute不重切、后续Initialize/SetSelection拒绝、父级非标签调用拒绝、对象存活/撤销代际边界。1000文件Shell路径解析+绑定+菜单总计1437ms，Invoke125ms，Invoke到完整收集125ms，BatchHandler模型16ms（GetTickCount64粗粒度，未计ADS后台写入/持久化）。bench_data/shell-tag-registry-nodll-v2.log：72 PASS/0 FAIL，9个Create与24个Set故障注入及清理重试。bench_data/cold-token/cold_registration.txt：读取/解析GUID、HKCR与当前token UserClasses路径均成功，非restricted Medium token；cold_unknown.txt：IUnknown冷CoCreateInstance=80040154，2s重试相同。bench_data/shell-tag-com-v13.log保留完整失败；实际Pulse冷启动未验收。初始化失败资源释放已改IAgileReference RAII，未注入CoInitializeEx失败；旧worker撤销测试使用100ms泵消息窗口，不声称覆盖永久卡死Shell。"
+  },
+  {
+    "id": "M13-008",
+    "title": "· P2 · 补偿失败时仍恢复command锚，后续restore错误返回成功",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/audit_navigation_20261006/integration_registry.log: pulse_integration_registry_test exit0, all PASS with process HKCU redirected to unique sandbox and cleanup verified. New snapshot-after-commit interruption simulated by throwing from test Write hook; old restore and upgrade-retry restore preserve original association. Partial legacy repair and enable rollback double-write failures recover. No actual power loss/production HKCU changes. Whole affected registry executable: 67 PASS/0 FAIL."
+  },
+  {
+    "id": "M14-001",
+    "title": "· P2 · 虚拟页按搜索布局绘制，拖动和自动适配却写普通列数组",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/audit_navigation_20261006/selection_navigation_task_lifecycle.log: pulse exit 0, 133 PASS/0 FAIL overall. Actual renderer and production resize/autofit helpers cover recycle/saved-search/search/ordinary. Private desktop; manual DPI/appearance verification remains outstanding."
+  },
+  {
+    "id": "M14-002",
+    "title": "· P1 · 展开的Shell子菜单保留旧ID，刷新快照后可执行另一命令",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\menu_identity_m14.log；exit 0；真实FluentMenu拒绝展开flyout换snapshot；controller fake sink交换/平移/删除ID通过，另见com_menu_identity_m14.log。生产RefreshOpenCtxMenu只在ReplaceItems=true提交NotePatchedDisplay；未调用真实Shell命令。"
+  },
+  {
+    "id": "M14-003",
+    "title": "· P2 · 自绘EDIT的鼠标状态不随键盘/程序化选区更新",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\ui_module_audit_m14.log；exit 0；私有desktop；Home/End/Ctrl+A/reverse EM_SETSEL后Shift-click及水平滚动点击通过；未穷举IME/RTL"
+  },
+  {
+    "id": "M14-004",
+    "title": "· P2 · 网格余白没有排除，点击空白会命中相邻行的项目",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\view_hit_bounds_m14.log；exit 0；行/列优先末尾空白命中拒绝，未操控桌面 用户桌面补验：详情视图下方、图标末行右侧、列表末列下方空白实际点击均清除选择，状态栏未选中。"
+  },
+  {
+    "id": "M14-005",
+    "title": "· P2 · 字体变化只清公共缓存，列表的两个独立缓存仍使用旧尺寸",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\ui_module_audit_m14.log；exit 0；私有desktop；warm renderer缓存在100/125/90%与fresh一致"
+  },
+  {
+    "id": "M14-006",
+    "title": "· P2 · 同目标预取会话忽略extended，Shift右键没有生效",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\menu_query_identity_m14.log；exit 0；normal/extended预取、pending/ready替换、handler配置更新和stale reply拒绝；fake Shell operations"
+  },
+  {
+    "id": "M14-007",
+    "title": "· P2 · 高级搜索dialog检测到device lost后无法恢复呈现",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\ui_module_audit_m14.log；exit 0；私有desktop；advanced-search生产Render注入D2DERR_RECREATE_TARGET恢复；不是物理驱动reset"
+  },
+  {
+    "id": "M14-008",
+    "title": "· P2 · 颜色选择器保留独立编辑分支，呈现失败时仅清空背景",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\ui_module_audit_m14.log；exit 0；私有desktop；五个真实颜色EDIT在100/150/200%重复present失败后可编辑undo/同步"
+  },
+  {
+    "id": "M14-009",
+    "title": "· P3 · Bloom颜色盘每帧泄漏一个工厂接口引用",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\ui_module_audit_m14.log；exit 0；私有desktop；1000次Bloom绘制Factory引用计数不增长"
+  },
+  {
+    "id": "M15-001",
+    "title": "· P2：offline 门遗漏 OFFLINE，并把 PINNED 当作内容已落地",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\preview_pipeline_audit.log；exit 0；OFFLINE/RECALL_ON_OPEN/RECALL_ON_DATA_ACCESS即使PINNED也阻止读取；local pinned正常"
+  },
+  {
+    "id": "M15-002",
+    "title": "· P2：文件夹扫描失败及展示裁剪没有进入完整性结果",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\pulse_folder_budget_audit_test.log；exit 0；生产folder_listing.cpp+测试API适配器；FindNext第五项ACCESS_DENIED => Partial/ReadFailure；另pipeline日志4000显示/4001总数正确"
+  },
+  {
+    "id": "M15-003",
+    "title": "· P2：单层目录枚举绕过400/3000ms扫描预算",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\pulse_folder_budget_audit_test.log；exit 0；生产folder_listing.cpp+测试API适配器；受控时钟/1000条平铺FindNext，预算到达前<20条停止；单个阻塞系统调用本身不可抢占"
+  },
+  {
+    "id": "M15-004",
+    "title": "· P2：索引色PSD缩小平均的是调色板下标，产生错误颜色",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\preview_format_audit.log；exit 0；隔离fixture；索引PSD降采样正确RGB平均、palette排列不改变结果、原尺寸颜色保持"
+  },
+  {
+    "id": "M15-005",
+    "title": "· P2：RTF正文复用首屏解析器，首个分页/分节后静默丢文",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\preview_format_audit.log；exit 0；隔离fixture；RTF page/sect后的正文保留、隐藏destination跳过、字符cap完整性"
+  },
+  {
+    "id": "M15-006",
+    "title": "· P2：XLSX忽略工作簿date1904，日期显示偏移1462天",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\preview_format_audit.log；exit 0；隔离fixture；xlsx date1904 absent/0/1/true和分数日期；1900 serial1/59/60/61"
+  },
+  {
+    "id": "M15-007",
+    "title": "· P2：字段级裁剪未上报truncated，完整性与实际可复制内容不一致",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\preview_format_audit.log；exit 0；隔离fixture；CSV/XLSX单字段cap、notebook字符/行cap及完整短输出"
+  },
+  {
+    "id": "M15-008",
+    "title": "· P2：共享映射视图失败后仍等ACK，下一请求被消费一个字节",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\pulse_preview_ack_audit_test.log；exit 0；实际生产host request loop+测试专属MapViewOfFile失败、实际命名管道连续2请求ID保持；无ACK义务，无真实用户文件"
+  },
+  {
+    "id": "M15-009",
+    "title": "· P2：GIF每一帧重新回放前缀，源画布内存不随缩图cap缩小",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\preview_pipeline_audit.log；exit 0；100帧顺序、重复、逆向、loop、随机索引及disposal 1/2/3颜色正确；大源canvas返回gif-resource-limit。增量前缀处理经代码复核，未做吞吐基准"
+  },
+  {
+    "id": "M15-010",
+    "title": "· P2：PSB RLE行长在验证剩余数据及资源限额前直接分配",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\preview_format_audit.log；exit 0；隔离fixture；PSB缺RLE表、超大行长度、截断行拒绝"
+  },
+  {
+    "id": "M15-011",
+    "title": "· P2：ZIP EOCD只匹配签名而不验证comment/目录边界，可能把有效内容列成空",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\preview_format_audit.log；exit 0；隔离fixture；ZIP空/comment/fake EOCD/SFX及ZIP64 locator边界"
+  },
+  {
+    "id": "M16-001",
+    "title": "· P2：Markdown宽表超过viewport后没有横向访问路径",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\pulse_preview_view_audit_test.log；exit 0；20列表格300px viewport，横向Scroll/Reveal后真实HitTest可达最后列；生产Shift+wheel/WM_MOUSEHWHEEL接线；未录制实际触控板输入。 初始夹具错误原日志保存在pulse_preview_view_audit_initial_failure.log。 用户桌面补验：20列Markdown横向滚动到末列；搜索Value20高亮且1/1，改为Value1自动返回首列。见docs/module-audit-preview-ui-2026-10-06.md。"
+  },
+  {
+    "id": "M16-002",
+    "title": "· P2：CSV固定表头参加查找但从未绘制命中高亮",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\pulse_preview_view_audit_test.log；exit 0；真实WARP绘制header-only CSV，无match/当前match像素hash不同，非模型替代。 初始夹具错误原日志保存在pulse_preview_view_audit_initial_failure.log。 用户桌面补验：04-pinned-header.csv含固定文字表头和两行数字；搜索HeaderNeedle高亮且1/1，Esc恢复布局。实测发现并修复Table/Tree搜索栏高度遗漏；新版Table已复测，Tree桌面复测待完成。定向入口14 PASS/0 FAIL，见bench_data/quick-preview-structured-search-audit.log。"
+  },
+  {
+    "id": "M16-003",
+    "title": "· P2：普通Unicode文字的trailing hit可落入代理对内部",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\pulse_preview_view_audit_test.log；exit 0；真实Markdown HitTest逐点扫描emoji代理对/组合字符不分裂；纯文本同根因metrics.length已编入最新pulse，本轮已补独立纯文本命中回归。 初始夹具错误原日志保存在pulse_preview_view_audit_initial_failure.log。 本轮补验：bench_data/quick-preview-unicode-audit.log，exit 0，8 PASS/0 FAIL；实际 QuickPreviewWindow/Render/DirectWrite HitTestText 在私有桌面检查普通文本 emoji、补充汉字、组合音标及希伯来文字，100/150/200% 布局缩放均不产生禁止的簇内偏移且可达关键首尾边界。未执行用户桌面鼠标拖选、系统 DPI 切换或剪贴板粘贴验收。 用户桌面补验：实际空格打开unicode.txt，拖选、Ctrl+C、Ctrl+F后Ctrl+V，可访问性读回完整的😀及𠮷é，搜索1/1且光标可见；不是仅截图验证。未切换系统DPI。"
+  },
+  {
+    "id": "M16-004",
+    "title": "· P2：XML子树复制把已解码属性当成可直接输出的XML",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\pulse_preview_view_audit_test.log；exit 0；真实host MakeTreeDocument -> TreeView.CurrentValue -> 独立XmlLite解析，含&、引号、<及字符引用tab的属性语义保持。 初始夹具错误原日志保存在pulse_preview_view_audit_initial_failure.log。"
+  },
+  {
+    "id": "M16-005",
+    "title": "· P2：pt显式长度没有应用窗口DPI尺度",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\pulse_preview_view_audit_test.log；exit 0；Cambria Math真实BuildMathLayout，a hspace{10pt} b相对ab宽差在100/150/200%准确；不依赖DC transform，未新增上下标pt矩阵。 初始夹具错误原日志保存在pulse_preview_view_audit_initial_failure.log。"
+  },
+  {
+    "id": "M16-006",
+    "title": "· P2：图片元数据解析在Render线程串行执行",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\pulse_markdown_metadata_audit_test.log；exit 0；受控慢resolver立即返回、新generation不接旧结果、销毁不join；双worker+队列上限。真实断网盘/内核永久阻塞未实测"
+  },
+  {
+    "id": "M17-001",
+    "title": "· P2：非首页失败时，把第一页当作该页内容画出",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\pulse_audit_preview_test--thumbnail-sheet.log；exit 0；WARP真实bitmap首帧缓存+非首页Failed经生产Draw仍Failed；顺序sheet请求及stale结果回归通过。首轮夹具漏LRU iterator造成AV，补完整fixture后通过"
+  },
+  {
+    "id": "M17-002",
+    "title": "· P2：包安装成功只刷新主网格，Quick Look 仍命中旧结果",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\quick_preview_audit.log；pulse --quick-preview-audit exit 0；私有desktop真实QuickLook三个pack回调在隐藏窗口均推进cache epoch；frame/schema eviction清理已测，未真实安装pack。"
+  },
+  {
+    "id": "M17-003",
+    "title": "· P2：静态 Quick Look 无 deadline 唤醒，失败重试和 handler 超时只在重画时发生",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\quick_preview_audit.log；pulse --quick-preview-audit exit 0；私有desktop真实QuickLook Render与普通消息loop，无人工重画即可在150ms后队列重试；cache deadline筛选涵盖当前到期/旧key/已pending。handler watchdog使用同一deadline timer已编入，但未注入真实阻塞COM provider。"
+  },
+  {
+    "id": "M17-004",
+    "title": "· P2：非首工作表失败被 ResetAnimation 清掉请求索引，终局失败仍留在加载状态",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\quick_preview_audit.log；pulse --quick-preview-audit exit 0；私有desktop真实QuickLook Render，Table输入选非首sheet后fake-cache终局Failed，ResetAnimation后仍保留索引1且停止加载。 本轮新增真实Render定向回归：失败后返回首表、重新选择失败表并接受成功payload通过；入口14 PASS/0 FAIL。缺失第二工作表的实机夹具已生成但桌面操作尚未完成。"
+  },
+  {
+    "id": "M17-005",
+    "title": "· P2：拖拽中 Disable 先卸钩，匹配 release 漏接并可遗留退出线程",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\pulse_preview_pan_lifetime_audit_test.log；exit 0；私有desktop真实InputMain消息循环+fake hooks；启动前Enable/Disable、Disable保留至匹配release、线程退出；不装系统hook或注入鼠标。首轮timer适配未调回调已修测试adapter"
+  },
+  {
+    "id": "M17-006",
+    "title": "· P2：波形工作没有把取消接到 probe 和阻塞输出读取",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "<repo>\\build\\quicklook_wt\\bench_data\\pulse_waveform_cancel_audit_test.log；exit 0；假ffmpeg probe与stdout卡住取消分别297/282ms返回且零publish；2worker上限经实现复核，未模拟MF永久阻塞"
+  },
+  {
+    "id": "M18-001",
+    "title": "· P1：图形初始化失败回滚覆盖用户配置与未恢复会话",
+    "status": "已修复并通过定向验证",
+    "evidence": "root bench_data/quicklook-b/startup-rollback-audit-v4.log; 21 PASS, actual private-desktop WM_CREATE two staged failures preserve four files byte-for-byte; ready model update save/load-failed refusal and actual WM_DESTROY save"
+  },
+  {
+    "id": "M18-002",
+    "title": "· P3：正常更新退出后遗留完整下载包",
+    "status": "已修复，隔离清理验证通过；真实升级待验",
+    "evidence": "root bench_data/quicklook-b/update_stage-audit-v2.log; 8 checks, real file locks and directory junction, active/foreign/extra-file guards; no actual upgrade or UAC 本轮真实自有进程补验：从隔离暂存目录启动exe、释放租约、运行中保留、正常退出后清理，4 PASS/0 FAIL，bench_data/update-stage-real-process-audit.log；未真实安装升级或UAC。"
+  },
+  {
+    "id": "M18-003",
+    "title": "· P2：托盘比较的文件属性查询仍在UI高频路径",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "本轮修正成功刷新消耗失败重试预算的问题，成功后重置连续失败次数。bench_data/tray-metadata-recovery-before.log：隔离副本还原旧计数逻辑，exit 1，两项失败（连续成功后临时失败恢复、真实文件删除重建恢复）。bench_data/tray-metadata-recovery-after.log：22 PASS/0 FAIL，exit 0；包括慢提供者下 10000 次请求、过期结果丢弃、退出不等待阻塞读取、最多三次连续失败及真实本地文件修改/删除/重建。pulse 与定向测试编译通过。尚未补用户桌面托盘点击和真实 SMB 断线验收。 用户桌面补验完成拖入两个文件、开启比较及8B改12B自动刷新。实测发现卡片仍为8B，已新增ApplyMetadata同步成功后台结果并更新批次总量；重建后重复同一操作，比较表和切回卡片均为12B。真实SMB、快速更换文件对仍保留原验证边界。"
+  },
+  {
+    "id": "M18-004",
+    "title": "· P2：可见ADS发现忽略真正布局及横向滚动",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "bench_data/audit_navigation_20261006/selection_navigation_final.log: pulse exit 0, all assertions PASS. List horizontal scrolling, icon columns and collapsed/filter source sets verified. TEMP/TMP isolated. No manual popup/DPI or external ADS validation. Earlier failed fixture log retained; corrected group fixture was rerun successfully."
+  },
+  {
+    "id": "M19-001",
+    "title": "· P2：portable遗漏管理员操作进程",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "portable-payload-audit.log; actual ZIP fixture and installer list; no real UAC integration"
+  },
+  {
+    "id": "M19-002",
+    "title": "· P2：正式发布缺少增强包资产上传与一致性门禁",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "release-packs-gate-audit.log; five fake-remote contract tests; no live publish 真实远端补验：v1.0.53草稿17个资产和4份清单下载比对21项通过；生产InstallPack在隔离目录完成四包解压和提交，37项通过。见bench_data/release-packs-live-audit.log、release-packs-real-install-audit.log。授权CLI下载，不等同客户端WinHTTP或公开发布；未修改远端。"
+  },
+  {
+    "id": "M19-003",
+    "title": "· P3：本地Win81安装器包含selftest构建",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "portable-payload-audit.log; marker rejection; no v143/Win8.1 installer build yet"
+  },
+  {
+    "id": "M19-004",
+    "title": "· P3：Win81默认验收无条件重用历史PASS",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "verify-runner-audit.log; four runner-contract tests; subprocess mocked, not Win8.1 full regressions"
+  },
+  {
+    "id": "M19-005",
+    "title": "· P2：可选签名发布强求默认Release不生成的PDB",
+    "status": "已修复，定向验证已运行；边界见证据",
+    "evidence": "actual MSVC PE/PDB identity fixture matches, unrelated PDB rejected; full signed packaging not executed"
+  }
+]

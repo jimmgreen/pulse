@@ -68,8 +68,21 @@ ExplorerTakeoverStep DecideExplorerTakeover(const ExplorerWindowProbe& probe) {
     if (!probe.view_ready)
         return probe.age_ms >= kExplorerViewTimeoutMs ? ExplorerTakeoverStep::Leave : ExplorerTakeoverStep::Wait;
     if (!probe.supported) return ExplorerTakeoverStep::Leave;
-    if (probe.selected > 0 || probe.age_ms >= kExplorerSelectionGraceMs) return ExplorerTakeoverStep::Take;
+    if (probe.selected > 0 || probe.view_age_ms >= kExplorerSelectionGraceMs) return ExplorerTakeoverStep::Take;
     return ExplorerTakeoverStep::Wait;
+}
+
+SourceCloseStep DecideSourceClose(const SourceCloseProbe& probe) {
+    if (!probe.identity_kept || !probe.single_tab) return SourceCloseStep::Abort;
+    if (probe.selection_changed) {
+        // Visible: the user may have picked something else there, unless the
+        // change came right after the view appeared (a late /select).
+        return probe.hidden || probe.view_age_ms < kExplorerProgrammaticSelectionMs
+            ? SourceCloseStep::CloseAndSelect : SourceCloseStep::Abort;
+    }
+    if (probe.hidden && !probe.sent_selection && probe.view_age_ms < kExplorerLateSelectionMs)
+        return SourceCloseStep::Wait;
+    return SourceCloseStep::Close;
 }
 
 } // namespace pulse::app

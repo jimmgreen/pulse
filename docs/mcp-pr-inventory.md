@@ -2,7 +2,7 @@
 
 日期：2026-09-18。用户选择先列出开放 PR、检查后再决定；本轮未执行 fetch、pull、merge、push、checkout、stash 或提交，也未运行测试。
 
-仓库：jimmgreen/pulse。本地：C:/Users/SS/Desktop/pulse，当前分支 main。
+仓库：jimmgreen/pulse。本地：<repo>，当前分支 main。
 
 | PR | 内容 | 目标 | 改动 | GitHub 状态 |
 |---|---|---|---|---|

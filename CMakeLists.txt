@@ -161,9 +161,11 @@ target_link_libraries(pulse_runtime_log PUBLIC psapi)
 
 add_library(pulse_crash_reporter STATIC
     src/common/crash_reporter.cpp
-    src/common/diagnostics_exporter.cpp)
+    src/common/diagnostics_exporter.cpp
+    src/common/diagnostics_report.cpp
+    src/common/diagnostics_archive.cpp)
 target_include_directories(pulse_crash_reporter PUBLIC "${CMAKE_BINARY_DIR}/generated")
-target_link_libraries(pulse_crash_reporter PUBLIC dbghelp shell32 pulse_localization pulse_runtime_log)
+target_link_libraries(pulse_crash_reporter PUBLIC dbghelp shell32 bcrypt version advapi32 pulse_localization pulse_runtime_log)
 
 add_library(pulse_text STATIC src/common/text_decode.cpp)
 
@@ -733,6 +735,12 @@ add_executable(pulse_ctx_handlers_test src/bench/ctx_handlers_test.cpp
     src/shell_host/ctx_handlers.cpp src/shell_host/packaged_ctx_handlers.cpp)
 target_link_libraries(pulse_ctx_handlers_test PRIVATE ole32 shell32 uuid shlwapi)
 
+# Explorer parity diagnosis: native menu vs Pulse pipeline on the real machine.
+add_executable(pulse_ctx_parity_probe src/bench/ctx_parity_probe.cpp
+    src/shell_host/ctx_handlers.cpp src/shell_host/packaged_ctx_handlers.cpp src/app/shell_verbs.cpp)
+target_link_libraries(pulse_ctx_parity_probe PRIVATE ole32 oleaut32 shell32 uuid shlwapi advapi32
+    version user32 pulse_localization)
+
 add_executable(pulse_integration src/integration_host/main.cpp src/app/shell_integration_registry.cpp)
 target_link_libraries(pulse_integration PRIVATE advapi32 shell32 shlwapi)
 
@@ -967,7 +975,7 @@ endforeach()
 
 # Document parsers never load into the UI or the persistent index writer.
 add_library(pulse_document_reader STATIC src/index/document_reader.cpp)
-target_link_libraries(pulse_document_reader PUBLIC pulse_text shell32 ole32)
+target_link_libraries(pulse_document_reader PUBLIC pulse_text shell32 ole32 pulse_runtime_log)
 add_executable(pulse_document src/index/document_host_main.cpp
     src/index/document_filter.cpp src/index/office_ooxml.cpp src/index/pdfium_text.cpp)
 add_custom_command(TARGET pulse_document POST_BUILD
@@ -1218,6 +1226,16 @@ target_link_options(pulse_typography_policy_test PRIVATE /MANIFEST:NO)
 target_link_libraries(pulse_typography_policy_test PRIVATE d3d11 d2d1 dwrite dxgi dcomp dwmapi
     shcore ole32 windowscodecs user32 gdi32 comctl32 uxtheme shell32 pulse_localization)
 pulse_enable_lumatext(pulse_typography_policy_test)
+
+# Context-menu access keys: pure matching rules plus the real Fluent modal loop.
+add_executable(pulse_menu_mnemonic_test src/bench/menu_mnemonic_test.cpp src/bench/child_edit_test.rc
+    src/ui/typography.cpp src/ui/ui_compositor.cpp src/ui/edit_host.cpp
+    src/ui/fluent_components.cpp src/ui/fluent_menu.cpp src/ui/tab_shape.cpp)
+target_include_directories(pulse_menu_mnemonic_test PRIVATE "${CMAKE_BINARY_DIR}/generated")
+target_link_options(pulse_menu_mnemonic_test PRIVATE /MANIFEST:NO)
+target_link_libraries(pulse_menu_mnemonic_test PRIVATE d3d11 d2d1 dwrite dxgi dcomp dwmapi
+    shcore ole32 windowscodecs user32 gdi32 comctl32 uxtheme shell32 imm32 pulse_localization)
+pulse_enable_lumatext(pulse_menu_mnemonic_test)
 
 get_target_property(audit_content_sources pulse_content_index_test SOURCES)
 list(REMOVE_ITEM audit_content_sources src/bench/content_index_test.cpp src/bench/content_instant_test.cpp)
@@ -1677,3 +1695,25 @@ if(PULSE_BUILD_PROGRESS_UI_TESTS)
 endif()
 
 include(cmake/setup.cmake)
+
+# Large legitimate indexes must round-trip beyond the former five-million cap.
+add_executable(pulse_index_capacity_test src/bench/index_capacity_test.cpp ${delta_replay_sources})
+target_link_libraries(pulse_index_capacity_test PRIVATE ${delta_replay_libraries} pulse_runtime_log)
+foreach(capacity_property INCLUDE_DIRECTORIES COMPILE_DEFINITIONS LINK_OPTIONS)
+    get_target_property(capacity_value pulse_index_engine_test ${capacity_property})
+    if(capacity_value)
+        set_property(TARGET pulse_index_capacity_test PROPERTY ${capacity_property} "${capacity_value}")
+    endif()
+endforeach()
+
+# Diagnostic events are used by both production preview sources and their isolated probes.
+get_property(diagnostics_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(diagnostics_target IN LISTS diagnostics_targets)
+    get_target_property(diagnostics_sources ${diagnostics_target} SOURCES)
+    if(diagnostics_sources MATCHES "thumbnail_cache[.]cpp|preview_handler_host[.]cpp")
+        target_link_libraries(${diagnostics_target} PRIVATE pulse_runtime_log)
+    endif()
+endforeach()
+
+add_executable(pulse_support_report_test src/bench/support_report_test.cpp)
+target_link_libraries(pulse_support_report_test PRIVATE pulse_crash_reporter)

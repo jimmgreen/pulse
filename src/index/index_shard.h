@@ -7,7 +7,8 @@ namespace pulse::index {
 
 // The V9 layout is unchanged. V11 rebuilds parent links damaged by old WAL replay.
 // 12: MFT builds read file sizes from extension records (fragmented large files).
-inline constexpr uint32_t kIndexSnapshotVersion = 12;
+// 13: one node per NTFS hard link name; older snapshots rebuild once.
+inline constexpr uint32_t kIndexSnapshotVersion = 13;
 
 struct ShardPaths {
     std::wstring directory;

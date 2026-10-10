@@ -10,6 +10,7 @@
 #include "../app/shell_registry_debounce.h"
 #include "../app/default_file_manager.h"
 #include "../app/shell_window_plan.h"
+#include "../app/explorer_shortcuts.h"
 #include "../app/last_tab_close.h"
 #include "../app/startup_launch.h"
 #include "../app/unc_probe_scheduler.h"
@@ -400,9 +401,10 @@ bool TestShellWindowPlan() {
         file && top && share && trailing && roots);
 
     using S = ExplorerTakeoverStep;
-    auto step = [](unsigned age, bool ready, bool supported, size_t selected) {
+    auto step = [](unsigned age, bool ready, bool supported, size_t selected, unsigned view_age = 0) {
         ExplorerWindowProbe probe;
         probe.age_ms = age;
+        probe.view_age_ms = view_age;
         probe.view_ready = ready;
         probe.supported = supported;
         probe.selected = selected;
@@ -413,12 +415,81 @@ bool TestShellWindowPlan() {
         step(kExplorerViewTimeoutMs, false, false, 0) == S::Leave);
     passed &= Report("explorer takeover: virtual locations are left to File Explorer",
         step(50, true, false, 0) == S::Leave && step(50, true, false, 2) == S::Leave);
-    passed &= Report("explorer takeover: a selection is taken at once, a plain folder after the grace",
-        step(50, true, true, 1) == S::Take && step(50, true, true, 0) == S::Wait &&
-        step(kExplorerSelectionGraceMs, true, true, 0) == S::Take);
+    passed &= Report("explorer takeover: a selection is taken at once, a plain folder soon after its view",
+        step(50, true, true, 1) == S::Take && step(5000, true, true, 0, 0) == S::Wait &&
+        step(50, true, true, 0, kExplorerSelectionGraceMs - 1) == S::Wait &&
+        step(50, true, true, 0, kExplorerSelectionGraceMs) == S::Take);
+
+    using C = SourceCloseStep;
+    auto close = [](bool identity, bool single_tab, bool hidden, bool changed, bool sent, unsigned view_age) {
+        SourceCloseProbe probe;
+        probe.identity_kept = identity;
+        probe.single_tab = single_tab;
+        probe.hidden = hidden;
+        probe.selection_changed = changed;
+        probe.sent_selection = sent;
+        probe.view_age_ms = view_age;
+        return DecideSourceClose(probe);
+    };
+    passed &= Report("explorer takeover: a source with another tab or a changed identity is never closed",
+        close(true, false, true, false, true, 5000) == C::Abort &&
+        close(true, false, false, false, true, 5000) == C::Abort &&
+        close(false, true, true, false, true, 5000) == C::Abort);
+    passed &= Report("explorer takeover: a hidden source waits for a late /select, then closes",
+        close(true, true, true, false, false, 0) == C::Wait &&
+        close(true, true, true, false, false, kExplorerLateSelectionMs - 1) == C::Wait &&
+        close(true, true, true, false, false, kExplorerLateSelectionMs) == C::Close &&
+        close(true, true, true, false, true, 0) == C::Close);
+    passed &= Report("explorer takeover: a late selection follows a hidden source; a visible one is left",
+        close(true, true, true, true, false, 300) == C::CloseAndSelect &&
+        close(true, true, false, true, false, kExplorerProgrammaticSelectionMs) == C::Abort);
+    passed &= Report("explorer takeover: a visible source's late /select still follows (WeChat)",
+        close(true, true, false, true, false, 300) == C::CloseAndSelect &&
+        close(true, true, false, true, false, kExplorerProgrammaticSelectionMs - 1) == C::CloseAndSelect);
+    passed &= Report("explorer takeover: a visible single-tab source closes without waiting (Windows 11 too)",
+        close(true, true, false, false, false, 0) == C::Close);
     passed &= Report("explorer takeover: setting has a label and description",
         !pulse::l10n::Get(pulse::l10n::StringId::SettingsExplorerWindows).empty() &&
         !pulse::l10n::Get(pulse::l10n::StringId::SettingsExplorerWindowsDesc).empty());
+    return passed;
+}
+
+bool TestExplorerShortcuts() {
+    using pulse::app::ExplorerShortcut;
+    using pulse::app::NthVisibleTab;
+    using A = pulse::app::ExplorerKeyAction;
+    auto is = [](UINT key, bool ctrl, bool shift, bool alt, A action, int index = 0) {
+        const auto command = ExplorerShortcut(key, ctrl, shift, alt);
+        return command.action == action && command.index == index;
+    };
+    bool passed = true;
+    passed &= Report("explorer keys: Ctrl+D deletes, Ctrl+Shift+D permanently, Ctrl+Alt+D marks the target",
+        is(L'D', true, false, false, A::Delete) && !ExplorerShortcut(L'D', true, false, false).shift &&
+        ExplorerShortcut(L'D', true, true, false).shift && is(L'D', true, false, true, A::MarkTarget));
+    passed &= Report("explorer keys: Ctrl+Shift+N new folder, Ctrl+E / F3 search, Ctrl+N untouched",
+        is(L'N', true, true, false, A::NewFolder) && is(L'E', true, false, false, A::Search) &&
+        is(VK_F3, false, false, false, A::Search) && is(L'N', true, false, false, A::None));
+    passed &= Report("explorer keys: Ctrl+1..9 tabs, Ctrl+Alt+1..4 layouts, Ctrl+Alt+5 nothing",
+        is(L'1', true, false, false, A::TabNumber, 0) && is(L'9', true, false, false, A::TabNumber, 8) &&
+        is(L'1', true, false, true, A::Layout, 0) && is(L'4', true, false, true, A::Layout, 3) &&
+        is(L'5', true, false, true, A::None));
+    passed &= Report("explorer keys: Ctrl+Shift+1..8 views in Explorer order, 9 nothing",
+        is(L'1', true, true, false, A::ViewMode, 0) && is(L'6', true, true, false, A::ViewMode, 5) &&
+        is(L'8', true, true, false, A::ViewMode, 7) && is(L'9', true, true, false, A::None) &&
+        pulse::ui::ViewModeFromIndex(5) == pulse::ui::ViewMode::Details &&
+        pulse::ui::ViewModeFromIndex(1) == pulse::ui::ViewMode::LargeIcons);
+    passed &= Report("explorer keys: Ctrl+Alt+Shift+1..7 tags",
+        is(L'1', true, true, true, A::Tag, 0) && is(L'7', true, true, true, A::Tag, 6) &&
+        is(L'8', true, true, true, A::None));
+    passed &= Report("explorer keys: Backspace back, Shift+F10 / Apps menu, F11 maximize; plain keys untouched",
+        is(VK_BACK, false, false, false, A::Back) && is(VK_F10, false, true, false, A::ContextMenu) &&
+        is(VK_APPS, false, false, false, A::ContextMenu) && is(VK_F11, false, false, false, A::Maximize) &&
+        is(VK_F10, false, false, false, A::None) && is(L'D', false, false, false, A::None) &&
+        is(VK_UP, false, false, true, A::None) && is(VK_TAB, true, false, false, A::None));
+    const std::vector<size_t> visible{0, 2, 3};
+    passed &= Report("explorer keys: Ctrl+N picks the Nth visible tab, Ctrl+9 the last",
+        NthVisibleTab(visible, 0) == size_t{0} && NthVisibleTab(visible, 1) == size_t{2} &&
+        !NthVisibleTab(visible, 5) && NthVisibleTab(visible, 8) == size_t{3} && !NthVisibleTab({}, 8));
     return passed;
 }
 
@@ -758,6 +829,113 @@ bool TestStaticMenuIdentity() {
     return ok;
 }
 
+// Explorer parity (.dwg report): Explorer's own 打开方式 flyout replaces the
+// static row once the host delivers it, and the 打开方式 switch governs it.
+bool TestOpenWithFlyoutReplacesStatic() {
+    using namespace pulse::app;
+    bool ok = true;
+    ContextMenuController controller;
+    ContextMenuPrefs prefs;
+    prefs.persist = false;
+    prefs.ResetToDefaults();
+    ContextMenuController::ShellOperations operations;
+    operations.query = [](auto, HWND, bool, bool, auto) { return 17u; };
+    controller.SetShellOperations(std::move(operations));
+    StaticVerb edit{L"edit", L"Edit", L"", L"cmd-edit", {}};
+    StaticVerb open_as{L"openas", L"Open with...", L"", L"", {}};
+    controller.CompleteStaticVerbs(L".dwg", {edit, open_as}, controller.cache_generation());
+    controller.StartQuery(prefs, nullptr, {L"C:\\a.dwg"}, false, L".dwg", false,
+        [](const auto& path) { return path; }, {});
+    auto find = [](const std::vector<pulse::ui::FluentMenuItem>& rows,
+                   const std::wstring& text) -> const pulse::ui::FluentMenuItem* {
+        for (const auto& row : rows)
+            if (row.text == text) return &row;
+        return nullptr;
+    };
+    bool changed = false;
+    auto rows = controller.BuildDisplay(prefs, {}, changed);
+    ok &= Report("static Open with row is the fallback before the COM flyout arrives",
+        find(rows, L"Open with...") != nullptr && find(rows, L"Edit") != nullptr);
+
+    const std::wstring open_with_clsid = L"{09799afb-ad67-11d1-abcd-00c04fc30936}";
+    pulse::ops::ShellMenuItem header, app, pick;
+    header.has_children = true;
+    header.verb = L"openas";
+    header.text = L"Open with(H)";
+    header.clsid = open_with_clsid;
+    app.id = 300;
+    app.child = true;
+    app.text = L"CAD Viewer";
+    app.clsid = open_with_clsid;
+    pick.id = 301;
+    pick.child = true;
+    pick.verb = L"openas";
+    pick.text = L"Choose another app(C)";
+    pick.clsid = open_with_clsid;
+    controller.CompleteComQuery(17, {header, app, pick}, GetTickCount64());
+    rows = controller.BuildDisplay(prefs, {}, changed);
+    const auto* flyout = find(rows, L"Open with(H)");
+    ok &= Report("Explorer's Open with flyout replaces the static row, apps and picker kept",
+        find(rows, L"Open with...") == nullptr && flyout && flyout->children.size() == 2 &&
+        flyout->children[0].text == L"CAD Viewer" && find(rows, L"Edit") != nullptr);
+    bool seen_local = false;
+    for (const auto& item : prefs.seen)
+        if (item.key == pulse::ipc::HandlerCatalogKey(open_with_clsid))
+            seen_local = !item.from_com && item.category == pulse::ipc::CtxMenuCategory::OpenWith;
+    ok &= Report("the Open with flyout is catalogued under the Open with switch", seen_local);
+    prefs.open_with = false;
+    rows = controller.BuildDisplay(prefs, {}, changed);
+    ok &= Report("turning Open with off hides the COM flyout too",
+        find(rows, L"Open with(H)") == nullptr && find(rows, L"Open with...") == nullptr);
+    return ok;
+}
+
+// Prefs v1 -> v2: verdicts of the old "everyone still running after 1 s"
+// rule are dropped, the user's explicit switches stay, per-type timings go.
+bool TestHungPrefsMigration() {
+    using namespace pulse::app;
+    bool ok = true;
+    const std::wstring healthy = L"{bbbbbbbb-0000-0000-0000-000000000002}";
+    const std::wstring user_off = L"{aaaaaaaa-0000-0000-0000-000000000001}";
+    const std::wstring open_with_key = L"h:{09799afb-ad67-11d1-abcd-00c04fc30936}";
+    const std::wstring v1 =
+        L"{\"version\":1,\"explorer_cap\":32,\"open_with_mru\":2,"
+        L"\"categories\":{\"software\":true,\"open_with\":true,\"open_with_com\":false},"
+        L"\"items\":{\"h:" + user_off + L"\":{\"enabled\":false}},"
+        L"\"seen\":[{\"key\":\"" + open_with_key + L"\",\"text\":\"Open with\",\"kind\":\"flyout\","
+        L"\"category\":\"open_with\",\"source\":\"com\"}],"
+        L"\"slow_ext\":{\"h:" + healthy + L"\":{\"ms\":1000,\"slow\":0,\"timeout\":3,"
+        L"\"deferred\":true,\"disabled\":true},"
+        L"\".dwg\":{\"ms\":5047,\"slow\":24,\"timeout\":15,\"deferred\":true,\"disabled\":true}}}";
+    ContextMenuPrefs prefs;
+    prefs.persist = false;
+    ok &= Report("v1 context menu prefs load and are flagged for migration",
+        prefs.FromJson(v1) && prefs.migrated);
+    ok &= Report("old auto-disable verdict is cleared for a healthy handler",
+        prefs.HandlerEnabled(healthy) && !prefs.ComDisabled(L"h:" + healthy));
+    ok &= Report("explicit user switch survives the migration", !prefs.HandlerEnabled(user_off));
+    ok &= Report("unused per-type timings are dropped", prefs.slow_ext.find(L".dwg") == prefs.slow_ext.end());
+    bool open_with_row = false;
+    for (const auto& item : prefs.seen)
+        if (item.key == open_with_key)
+            open_with_row = prefs.RowEnabled(item.key, item.category, item.from_com);
+    ok &= Report("catalogued Open with flyout shows as on in settings", open_with_row);
+    ContextMenuPrefs reloaded;
+    reloaded.persist = false;
+    const std::wstring v2 = prefs.ToJson();
+    ok &= Report("migrated prefs are written as version 2 and reload without migrating",
+        v2.find(L"\"version\":2") != std::wstring::npos && reloaded.FromJson(v2) &&
+        !reloaded.migrated && reloaded.HandlerEnabled(healthy) && !reloaded.HandlerEnabled(user_off));
+    const std::wstring hung = L"h:{cccccccc-0000-0000-0000-000000000003}";
+    reloaded.RecordComTiming(hung, 5000);
+    reloaded.RecordComTiming(hung, 5000);
+    const bool two = reloaded.ComDisabled(hung);
+    reloaded.RecordComTiming(hung, 5000);
+    ok &= Report("a handler the host reports hung three times is disabled",
+        !two && reloaded.ComDisabled(hung));
+    return ok;
+}
+
 bool TestComMenuIdentity() {
     using namespace pulse::app;
     bool ok = true;
@@ -907,6 +1085,11 @@ int wmain(int argc, wchar_t** argv) {
 
     if (argc == 2 && std::wstring(argv[1]) == L"--view-hit-bounds") return TestViewHitBounds() ? 0 : 1;
     if (argc == 2 && std::wstring(argv[1]) == L"--com-menu-identity") return TestComMenuIdentity() ? 0 : 1;
+    if (argc == 2 && std::wstring(argv[1]) == L"--explorer-parity") {
+        const bool open_with = TestOpenWithFlyoutReplacesStatic();
+        const bool migration = TestHungPrefsMigration();
+        return open_with && migration ? 0 : 1;
+    }
     if (argc == 2 && std::wstring(argv[1]) == L"--menu-query-identity") return TestMenuQueryIdentity() ? 0 : 1;
     if (argc == 2 && std::wstring(argv[1]) == L"--network-locations-view")
         return TestNetworkLocationsView() ? 0 : 1;
@@ -1442,6 +1625,27 @@ int wmain(int argc, wchar_t** argv) {
     parsed_prefs.ResetToDefaults();
     passed &= Report("reset keeps the window on the last tab close",
         !parsed_prefs.close_window_with_last_tab);
+    passed &= Report("double-click tab close setting has localized text",
+        pulse::l10n::Get(pulse::l10n::StringId::SettingsCloseTabDoubleClick) ==
+            L"\u53CC\u51FB\u6807\u7B7E\u9875\u5173\u95ED" &&
+        !pulse::l10n::Get(pulse::l10n::StringId::SettingsCloseTabDoubleClickDesc).empty());
+    passed &= Report("double-clicking a tab does nothing by default",
+        !prefs.close_tab_on_double_click);
+    settings_ui.ToggleUi(35);
+    passed &= Report("double-click tab close enables and persists",
+        prefs.close_tab_on_double_click && parsed_prefs.FromJson(prefs.ToJson()) &&
+        parsed_prefs.close_tab_on_double_click);
+    settings_ui.ToggleUi(35);
+    passed &= Report("double-click tab close disables and persists",
+        !prefs.close_tab_on_double_click && parsed_prefs.FromJson(prefs.ToJson()) &&
+        !parsed_prefs.close_tab_on_double_click);
+    parsed_prefs.close_tab_on_double_click = true;
+    passed &= Report("legacy preferences keep double-click tab close off",
+        parsed_prefs.FromJson(L"{}") && !parsed_prefs.close_tab_on_double_click);
+    parsed_prefs.close_tab_on_double_click = true;
+    parsed_prefs.ResetToDefaults();
+    passed &= Report("reset turns double-click tab close off",
+        !parsed_prefs.close_tab_on_double_click);
     passed &= Report("confirm before deleting setting has localized text",
         !pulse::l10n::Get(pulse::l10n::StringId::SettingsConfirmDelete).empty() &&
         !pulse::l10n::Get(pulse::l10n::StringId::SettingsConfirmDeleteDesc).empty() &&
@@ -1528,6 +1732,18 @@ int wmain(int argc, wchar_t** argv) {
         pulse::app::LastTabClosesWindow(1, false, true) && !pulse::app::LastTabClosesWindow(1, false, false) &&
         !pulse::app::LastTabClosesWindow(2, false, true) && !pulse::app::LastTabClosesWindow(1, true, true) &&
         !pulse::app::LastTabClosesWindow(0, false, true));
+    {
+        int tab_a = 0, tab_b = 0;
+        passed &= Report("double-click closes the tab both presses landed on",
+            pulse::app::TabDoubleClickCloses(true, &tab_a, &tab_a, 200, 500) &&
+            !pulse::app::TabDoubleClickCloses(false, &tab_a, &tab_a, 200, 500));
+        passed &= Report("double-click after a close-button press keeps the next tab",
+            !pulse::app::TabDoubleClickCloses(true, nullptr, &tab_b, 200, 500) &&
+            !pulse::app::TabDoubleClickCloses(true, &tab_a, &tab_b, 200, 500));
+        passed &= Report("double-click tab close honors the system double-click time",
+            pulse::app::TabDoubleClickCloses(true, &tab_a, &tab_a, 500, 500) &&
+            !pulse::app::TabDoubleClickCloses(true, &tab_a, &tab_a, 501, 500));
+    }
     passed &= Report("settings UI controller owns image selection flow",
         picked_image);
     settings_ui.ResetUi();
@@ -1653,6 +1869,7 @@ int wmain(int argc, wchar_t** argv) {
     com_item.id = 23;
     com_item.verb = L"customverb";
     com_item.text = L"Custom action";
+    com_item.mnemonic = L'U';
     com_items.push_back(com_item);
     const auto partial = context_menu.CompleteComQuery(
         17, com_items, GetTickCount64(), true);
@@ -1671,6 +1888,29 @@ int wmain(int argc, wchar_t** argv) {
     const auto display = context_menu.BuildDisplay(context, { base_item }, prefs_changed);
     passed &= Report("context menu composes cached static and live COM rows",
         display.size() >= 4 && prefs_changed);
+    {
+        bool com_key = false;
+        for (const auto& row : display)
+            com_key = com_key || (row.text == L"Custom action" && row.mnemonic == L'U');
+        passed &= Report("context menu keeps the Explorer access key on merged COM rows", com_key);
+        std::vector<pulse::ui::FluentMenuItem> rows;
+        pulse::app::ShellMenuEntry header;
+        header.text = L"Send to";
+        header.mnemonic = L'N';
+        pulse::app::ShellMenuEntry child;
+        child.command = 8101;
+        child.text = L"Desktop";
+        child.mnemonic = L'D';
+        header.children.push_back(child);
+        pulse::app::ShellMenuEntry flat;
+        flat.command = 8000;
+        flat.text = L"Edit";
+        flat.mnemonic = L'E';
+        pulse::app::AppendShellSection(rows, { header, flat });
+        passed &= Report("Explorer section rows and flyout children keep access keys",
+            rows.size() == 2 && rows[0].mnemonic == L'N' && rows[0].children.size() == 1 &&
+            rows[0].children[0].mnemonic == L'D' && rows[1].mnemonic == L'E');
+    }
     context_menu.InvalidateCaches();
     context_menu.OpenMenu({ std::move(base_item) });
     passed &= Report("context menu owns popup baseline state",
@@ -1864,6 +2104,7 @@ int wmain(int argc, wchar_t** argv) {
     passed &= Report("settings controller joins tasks during destruction",
         lifecycle_completed);
 
+    passed &= TestExplorerShortcuts();
     passed &= TestAddressBarCommands();
     passed &= TestAddressShortcuts();
     passed &= TestSelectionTokens();
