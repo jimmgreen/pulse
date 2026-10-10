@@ -2180,6 +2180,29 @@ void GoUp(AppState& s) {
     else if (!current.empty()) NavigateTo(s, L""); // drive root -> This PC
 }
 
+bool TabCanGoUp(const app::Tab* tab) {
+    if (!tab) return false;
+    // The recycle listing goes up to This PC.
+    if (IsRecycleTab(tab)) return true;
+    // A virtual view (search, tag, workspace) has no parent; Up falls back to
+    // history, so it is only meaningful when there is somewhere to go back to.
+    if (fs::IsVirtualPath(tab->current_path)) return tab->CanGoBack();
+    // This PC is the top: it has no parent, and GoUp() short-circuits there, so
+    // Up never had an effect. It used to stay enabled whenever the back stack was
+    // non-empty - the ordinary case right after stepping up out of a drive, and
+    // exactly how the button was reported as still clickable at This PC (#146).
+    const std::wstring current = fs::NormalizePath(tab->current_path);
+    if (current.empty()) return false;
+    // A drive or share root still has This PC above it, and any deeper folder has
+    // an ordinary parent, so Up is always meaningful below This PC.
+    return true;
+}
+
+bool CanGoUp(const AppState& s) {
+    // Read the tab without ActiveTab(), which takes a mutable state.
+    return TabCanGoUp(s.pane ? s.pane->ActiveTab() : nullptr);
+}
+
 void GoBack(AppState& s) {
     app::Tab* tab = ActiveTab(s);
     if (!tab || !tab->CanGoBack()) return;
