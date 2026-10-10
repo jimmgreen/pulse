@@ -1290,8 +1290,12 @@ void TestBlankPaneClickNavigation() {
         // it enabled made the button look and click active while doing nothing.
         tab->back_stack = {};
         Check(!CanGoUp(*state), L"up: disabled at This PC with no history");
+        // The ordinary case after stepping up out of a drive: the back stack is
+        // populated, but This PC still has no parent, and GoUp() does nothing
+        // there. Leaving it enabled is what made the button look clickable at
+        // This PC, so history must not re-enable it.
         tab->back_stack.push(L"C:\\PulseUpHistory");
-        Check(CanGoUp(*state), L"up: enabled at This PC when history offers a way back");
+        Check(!CanGoUp(*state), L"up: still disabled at This PC when history exists");
         tab->back_stack = {};
         tab->current_path = L"C:\\";
         Check(CanGoUp(*state), L"up: enabled at a drive root, which still has This PC above it");

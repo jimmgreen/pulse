@@ -2187,11 +2187,12 @@ bool TabCanGoUp(const app::Tab* tab) {
     // A virtual view (search, tag, workspace) has no parent; Up falls back to
     // history, so it is only meaningful when there is somewhere to go back to.
     if (fs::IsVirtualPath(tab->current_path)) return tab->CanGoBack();
-    // This PC is the top: nothing above it, and with no history nothing to fall
-    // back to either. GoUp() short-circuits here, so leaving the button enabled
-    // made a click do nothing while still looking active (#146).
+    // This PC is the top: it has no parent, and GoUp() short-circuits there, so
+    // Up never had an effect. It used to stay enabled whenever the back stack was
+    // non-empty - the ordinary case right after stepping up out of a drive, and
+    // exactly how the button was reported as still clickable at This PC (#146).
     const std::wstring current = fs::NormalizePath(tab->current_path);
-    if (current.empty()) return tab->CanGoBack();
+    if (current.empty()) return false;
     // A drive or share root still has This PC above it, and any deeper folder has
     // an ordinary parent, so Up is always meaningful below This PC.
     return true;
