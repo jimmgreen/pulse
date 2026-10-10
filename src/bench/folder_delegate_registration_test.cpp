@@ -92,8 +92,20 @@ int wmain() {
     Check(Read(L"Software\\Classes\\Drive\\shell\\open\\command", L"DelegateExecute").exists,
           "folder delegate: Drive override is still installed");
 
+    // The shell can only activate the delegate if the class itself is
+    // registered, so the LocalServer32 value has to name this executable.
+    const std::wstring server_key = std::wstring(L"Software\\Classes\\CLSID\\") +
+        kFolderOpenDelegateClassId + L"\\LocalServer32";
+    const Value server = Read(server_key, L"");
+    Check(server.exists && server.text.find(exe) != std::wstring::npos,
+          "folder delegate: LocalServer32 names this executable");
+    Check(server.text.find(L"--folder-open-com") != std::wstring::npos,
+          "folder delegate: LocalServer32 uses the delegate launch switch");
+
     Check(ApplyShellIntegration(ShellIntegrationKind::Folders, exe, false),
           "folder delegate: restore reports success");
+    Check(!Read(server_key, L"").exists,
+          "folder delegate: restore removes the class registration");
     // The recorded original carried Pulse's own empty DelegateExecute from the
     // Directory group in the same snapshot, so the requirement is that the value
     // no longer names Pulse's delegate - not that it disappears.
