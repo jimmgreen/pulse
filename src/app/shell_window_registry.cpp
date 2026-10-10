@@ -450,6 +450,11 @@ public:
             for (auto& [key, entry] : registered_) {
                 (void)key;
                 if (entry.view) entry.view->SetFolder(UniquePidl());
+                // Best effort: a transient RPC failure can leave Explorer
+                // running, and stale entries would keep answering for us.
+                if (windows_ && entry.pending) windows_->Revoke(entry.cookie);
+                if (windows_ && entry.bound && entry.window_cookie != entry.cookie)
+                    windows_->Revoke(entry.window_cookie);
             }
             registered_.clear();
             windows_.Reset();

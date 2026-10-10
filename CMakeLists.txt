@@ -1241,7 +1241,7 @@ get_target_property(audit_content_sources pulse_content_index_test SOURCES)
 list(REMOVE_ITEM audit_content_sources src/bench/content_index_test.cpp src/bench/content_instant_test.cpp)
 get_target_property(audit_content_libraries pulse_content_index_test LINK_LIBRARIES)
 add_executable(pulse_search_audit_test ${audit_content_sources} src/bench/search_audit_test.cpp
-    src/app/search_query.cpp src/app/global_search_handoff_query.cpp src/index/network_index.cpp
+    src/app/search_query.cpp src/app/search_query_rewrite.cpp src/app/global_search_handoff_query.cpp src/index/network_index.cpp
     src/index/index_config.cpp src/index/index_shard.cpp src/index/change_tracking.cpp)
 target_link_libraries(pulse_search_audit_test PRIVATE ${audit_content_libraries} shell32 mpr advapi32)
 target_sources(pulse PRIVATE src/app/global_search_handoff_query.cpp)

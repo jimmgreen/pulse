@@ -171,6 +171,18 @@ std::wstring QuoteQueryValue(std::wstring_view value) {
 }
 
 std::wstring CompileSearchQuery(const AdvancedSearchSpec& spec) {
+    if (spec.name_is_query) {
+        // The name holds native input typed by the user: keep its syntax and
+        // add the structured fields to every OR branch.
+        auto fields = spec;
+        fields.name.clear();
+        fields.name_is_query = false;
+        fields.origin.reset();
+        std::wstring raw = spec.name;
+        Trim(raw);
+        const auto filters = CompileSearchQuery(fields);
+        return filters.empty() ? raw : CombineNativeQuery(raw, filters);
+    }
     if (spec.origin) return RewriteSearchQuery(spec);
     std::wstring q;
     auto append = [&](std::wstring_view token) {

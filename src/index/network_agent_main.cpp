@@ -243,7 +243,6 @@ void ClientLoop(HANDLE pipe, const agent::Identity& owner) {
             WriteFrame(pipe, agent::RSP_RESULT, header.request_id, ResultPayload(true, {}));
         }
     }
-    CloseHandle(pipe);
 }
 
 int RunAgent(const std::wstring& test_token = {}) {
@@ -293,13 +292,19 @@ int RunAgent(const std::wstring& test_token = {}) {
         CloseHandle(connect.hEvent);
         if (!g.running) break;
         if (connected) {
-            pipe = listener.TakeConnected();
-            if (pipe == INVALID_HANDLE_VALUE) { exit_code = static_cast<int>(GetLastError()); break; }
+            pipe = listener.Release();
             ++g.clients;
             g.last_activity = GetTickCount64();
             ClientLoop(pipe, owner);
+            // Re-arm before closing the served instance: the endpoint stays
+            // reserved, and a waiting client sees PIPE_BUSY instead of
+            // connecting early and timing out behind a silent peer.
+            const bool rearmed = listener.Rearm();
+            const DWORD rearm_error = GetLastError();
+            CloseHandle(pipe);
             g.last_activity = GetTickCount64();
             --g.clients;
+            if (!rearmed) { exit_code = static_cast<int>(rearm_error); break; }
         } else {
             exit_code = static_cast<int>(GetLastError());
             break;

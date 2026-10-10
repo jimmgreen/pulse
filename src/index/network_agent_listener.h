@@ -23,6 +23,18 @@ public:
         pipe_ = next;
         return connected;
     }
+    // Hands over the connected instance without a replacement, so no second
+    // client queues behind it with a running deadline. Call Rearm() before
+    // closing the returned handle to keep the endpoint reserved.
+    HANDLE Release() {
+        const HANDLE connected = pipe_;
+        pipe_ = INVALID_HANDLE_VALUE;
+        return connected;
+    }
+    bool Rearm() {
+        if (pipe_ == INVALID_HANDLE_VALUE) pipe_ = Create(false);
+        return pipe_ != INVALID_HANDLE_VALUE;
+    }
 private:
     HANDLE Create(bool first) {
         if (name_.empty() || !security_) {

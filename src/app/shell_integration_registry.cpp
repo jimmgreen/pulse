@@ -347,6 +347,9 @@ bool FinishUpgrade(const std::wstring& group, const UpgradeJournal& journal, boo
              !SameValue(current, journal.changes.written[i]) &&
              !(restore && SameValue(current, target[i])))) return false;
     }
+    // Commit the new snapshot before any association changes, so an upgrade
+    // interrupted here still has the old command plus the journal to resume.
+    if (!restore && !WriteDurable(key, L"Snapshot", Encode(journal.next))) return false;
     // Restore the command last so an ordinary write failure retains its anchor.
     for (size_t n = 0; n < bindings.size(); ++n) {
         const size_t i = restore ? bindings.size() - 1 - n : n;
@@ -359,7 +362,7 @@ bool FinishUpgrade(const std::wstring& group, const UpgradeJournal& journal, boo
     }
     for (const auto& binding : bindings)
         if (!Flush(binding.key, true)) return false;
-    if (!WriteDurable(key, L"Snapshot", restore ? Value{} : Encode(journal.next))) return false;
+    if (restore && !WriteDurable(key, L"Snapshot", Value{})) return false;
     if (!WriteDurable(key, L"PendingUpgrade", Value{})) return false;
     if (!WriteDurable(key, L"UpgradeJournal", Value{})) return false;
     return exact;

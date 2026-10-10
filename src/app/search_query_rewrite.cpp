@@ -191,6 +191,36 @@ std::wstring RewriteSearchQuery(const AdvancedSearchSpec& spec) {
     return globals;
 }
 
+std::wstring CombineNativeQuery(std::wstring_view raw, std::wstring_view filters) {
+    std::wstring globals, extra;
+    std::vector<std::wstring> branches;
+    bool scope_seen = false, unconditional = false;
+    for (const auto& group : TokenGroups(raw)) {
+        std::wstring branch; bool predicate = false;
+        for (const auto& token : group) {
+            bool global; index::Term term;
+            Category(token, scope_seen, global, term);
+            if (!global) predicate = true;
+            Append(global ? globals : branch, token.raw);
+        }
+        if (predicate) { unconditional |= branch.empty(); branches.push_back(std::move(branch)); }
+    }
+    for (const auto& group : TokenGroups(filters)) for (const auto& token : group) {
+        bool global; index::Term term;
+        Category(token, scope_seen, global, term);
+        Append(global ? globals : extra, token.raw);
+    }
+    if (branches.empty() || unconditional) branches = {L""};
+    std::wstring query;
+    for (auto& branch : branches) {
+        Append(branch, extra);
+        if (!query.empty()) query += L" | ";
+        query += branch;
+    }
+    Append(globals, query);
+    return globals;
+}
+
 std::wstring NameQueryDraft(std::wstring_view raw) {
     auto spec = ParseSearchQuery(raw);
     spec.location = LocationScope::Indexed;

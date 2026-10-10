@@ -24,7 +24,7 @@ struct PreviewHandlerPanTest {
     static void CALLBACK Begin(HWND,UINT,UINT_PTR,DWORD) {
         auto* input=PreviewHandlerPan::current_input_;
         input->suppress_left_up=true;
-        input->wanted_hook=true;
+        input->desired_hook=true;
         PostThreadMessageW(GetCurrentThreadId(),PreviewHandlerPan::kHookCommand,0,0);
     }
     static void CALLBACK Release(HWND,UINT,UINT_PTR,DWORD) {

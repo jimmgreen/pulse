@@ -40,6 +40,8 @@ static bool TestBind(const std::vector<std::wstring>&,bool,CtxBind&){if(block_qu
 #undef CloseHandle
 #undef CreateThread
 #undef CreateEventW
+// Production entry with its default API, as the crash-guarded thread calls it.
+static DWORD WINAPI SessionEntry(LPVOID data){return CtxSessionThreadImpl(data);}
 int wmain(){
     int failures=0;
     auto check=[&](bool ok,const char* label){printf("[%s] %s\n",ok?"PASS":"FAIL",label);fflush(stdout);failures+=!ok;};
@@ -61,7 +63,7 @@ int wmain(){
         ResetEvent(entered);ResetEvent(release_query);
         {std::lock_guard lock(g_ctx_mutex);g_ctx_sessions[sid]={};}
         auto* data=new CtxSessionData;data->session_id=sid;data->paths={L"C:\\isolated-test.fixture"};
-        DWORD thread_id=0;HANDLE thread=CreateThread(nullptr,0,CtxSessionThreadImpl,data,0,&thread_id);
+        DWORD thread_id=0;HANDLE thread=CreateThread(nullptr,0,SessionEntry,data,0,&thread_id);
         const bool querying=thread&&WaitForSingleObject(entered,2000)==WAIT_OBJECT_0;
         check(querying,"controlled handler entered production session query");
         if(thread)PostThreadMessageW(thread_id,WM_CTX_CLOSE,0,0);
