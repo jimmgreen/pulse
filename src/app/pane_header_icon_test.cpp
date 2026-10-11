@@ -69,11 +69,12 @@ struct PaneHeaderIconTest {
                     check(layout.filter.right+4*scale<=layout.overflow.left,"compact filter and overflow do not overlap");
                     check(hit(layout.overflow)==HitTestResult::ToolbarMore,"compact overflow remains accessible");
                 } else {
-                    check(layout.filter.right+4*scale<=layout.commands[5].left,"filter and layout controls do not overlap");
-                    check(hit(layout.commands[5])==HitTestResult::SplitButton,"layout hit target");
-                    check(hit(layout.commands[6])==HitTestResult::DetailsToggle,"preview hit target");
-                    check(hit(layout.commands[7])==HitTestResult::PaneColumnLayout,"column view has its own toolbar hit target");
-                    check(layout.commands[7].right<=window.right-renderer.Margin(),"column view stays inside toolbar");
+                    check(layout.filter.right+4*scale<=layout.commands[6].left,"filter and layout controls do not overlap");
+                    check(hit(layout.commands[5])==HitTestResult::Terminal,"terminal hit target");
+                    check(hit(layout.commands[6])==HitTestResult::SplitButton,"layout hit target");
+                    check(hit(layout.commands[7])==HitTestResult::DetailsToggle,"preview hit target");
+                    check(hit(layout.commands[8])==HitTestResult::PaneColumnLayout,"column view has its own toolbar hit target");
+                    check(layout.commands[8].right<=window.right-renderer.Margin(),"column view stays inside toolbar");
                 }
                 if (expanded) {
                     const auto edit=renderer.FilterEditRect(window,1,true);

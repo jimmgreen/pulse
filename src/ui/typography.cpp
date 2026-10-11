@@ -10,6 +10,7 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <vector>
 #include <unordered_map>
 
 namespace pulse::ui::typography {
@@ -26,6 +27,8 @@ bool TraditionalChinese() noexcept {
 std::atomic_uint64_t g_generation{1};
 std::atomic_int g_text_render_mode{0};
 std::atomic_int g_ui_font_scale{100};
+std::wstring g_ui_font_family;  // empty = follow PreferredTextFamily() logic
+std::mutex g_ui_font_family_mutex;
 
 template <typename T>
 void Release(T*& value) noexcept {
@@ -47,6 +50,16 @@ bool FamilyExists(IDWriteFactory2* factory, const wchar_t* family) {
 }
 
 const wchar_t* ResolveFamily(IDWriteFactory2* factory, FontRole role) {
+    // 用户自定义界面字体优先（图标字体保持原逻辑，避免图标错乱）。
+    if (role != FontRole::Icon) {
+        thread_local std::wstring t_user_family;
+        {
+            std::lock_guard<std::mutex> lock(g_ui_font_family_mutex);
+            t_user_family = g_ui_font_family;
+        }
+        if (!t_user_family.empty() && FamilyExists(factory, t_user_family.c_str()))
+            return t_user_family.c_str();
+    }
     const bool traditional = TraditionalChinese();
     const bool chinese = traditional ||
         pulse::l10n::effective_language() == pulse::l10n::Language::ZhCN;
@@ -247,6 +260,52 @@ void SetUiFontScale(int percent) noexcept {
 
 int UiFontScalePercent() noexcept {
     return g_ui_font_scale.load(std::memory_order_relaxed);
+}
+
+void SetUiFontFamily(const std::wstring& family) noexcept {
+    std::lock_guard<std::mutex> lock(g_ui_font_family_mutex);
+    if (g_ui_font_family != family) {
+        g_ui_font_family = family;
+        g_generation.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+std::wstring UiFontFamily() noexcept {
+    std::lock_guard<std::mutex> lock(g_ui_font_family_mutex);
+    return g_ui_font_family;
+}
+
+std::vector<std::wstring> SystemFontFamilies(IDWriteFactory* factory) {
+    std::vector<std::wstring> names;
+    if (!factory) return names;
+    IDWriteFontCollection* collection = nullptr;
+    if (FAILED(factory->GetSystemFontCollection(&collection, FALSE)) || !collection)
+        return names;
+    const UINT32 count = collection->GetFontFamilyCount();
+    for (UINT32 i = 0; i < count; ++i) {
+        IDWriteFontFamily* family = nullptr;
+        if (FAILED(collection->GetFontFamily(i, &family)) || !family) continue;
+        IDWriteLocalizedStrings* strings = nullptr;
+        if (SUCCEEDED(family->GetFamilyNames(&strings)) && strings) {
+            UINT32 index = 0;
+            BOOL exists = FALSE;
+            // 优先 en-us，其次第一项。
+            if (FAILED(strings->FindLocaleName(L"en-us", &index, &exists)) || !exists)
+                index = 0;
+            UINT32 length = 0;
+            if (SUCCEEDED(strings->GetStringLength(index, &length)) && length > 0) {
+                std::wstring name(length + 1, L'\0');
+                if (SUCCEEDED(strings->GetString(index, name.data(), length + 1)))
+                    names.emplace_back(name.c_str());
+            }
+            strings->Release();
+        }
+        family->Release();
+    }
+    collection->Release();
+    std::sort(names.begin(), names.end());
+    names.erase(std::unique(names.begin(), names.end()), names.end());
+    return names;
 }
 
 float UiFontScale() noexcept {

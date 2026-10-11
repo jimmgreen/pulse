@@ -2397,6 +2397,7 @@ void ApplySettingsEffects(AppState& s, app::SettingsEffect effects) {
     }
     if (app::HasEffect(effects, app::SettingsEffect::UiFontSize)) {
         ui::typography::SetUiFontScale(s.appPrefs.ui_font_scale);
+        ui::typography::SetUiFontFamily(s.appPrefs.ui_font_family);
         // Formats and cached widths carry the previous size.
         ui::typography::InvalidateCaches();
         s.compositor.RecreateTextFormats(s.scale);

@@ -1,0 +1,43 @@
+# Dev 构建：push 到任意分支即在 windows-2022 上编译，上传 pulse.exe 供测试。
+# 不做 tag 校验、不发布，只是拿个能跑的开发版。
+name: dev-build
+
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pulse-dev-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 恢复构建缓存
+        uses: actions/cache@v4
+        with:
+          path: build
+          key: pulse-dev-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'src/**/*.cpp', 'src/**/*.h', 'src/**/*.rc') }}
+          restore-keys: |
+            pulse-dev-${{ runner.os }}-
+
+      - name: 编译（Release）
+        shell: cmd
+        run: .\build_release.bat
+
+      - name: 上传 pulse.exe 及同目录 DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: pulse-dev-${{ github.sha }}
+          path: |
+            build\pulse.exe
+            build\*.dll
+          if-no-files-found: error

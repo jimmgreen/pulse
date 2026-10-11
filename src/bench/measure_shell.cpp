@@ -194,7 +194,7 @@ int wmain(int argc, wchar_t* argv[]) {
         const HRESULT initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         if (FAILED(initialized)) return 2;
         const auto sample = time_thumbnail(L"?:\\Pulse-invalid-shell-benchmark-fixture");
-        const bool passed = !sample.milliseconds && !sample.hit;
+        const bool passed = !sample.image_ms && sample.status == ThumbnailStatus::BindFailed;
         CoUninitialize();
         std::cout << (passed ? "[PASS]" : "[FAIL]") << " factory binding failure has no timing sample and cannot enter statistics\n";
         return passed ? 0 : 1;

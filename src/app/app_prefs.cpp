@@ -120,8 +120,10 @@ std::wstring AppPrefs::ToJson() const {
     std::wstring escaped_image;
     std::wstring escaped_language;
     std::wstring escaped_home;
+    std::wstring escaped_font_family;
     pulse::json::Escape(window_effect, escaped_effect);
     pulse::json::Escape(home_folder, escaped_home);
+    pulse::json::Escape(ui_font_family, escaped_font_family);
     pulse::json::Escape(background_image, escaped_image);
     pulse::json::Escape(language, escaped_language);
     std::wstring out = L"{\n  \"version\":4,\n  \"launch_on_startup\":";
@@ -191,6 +193,9 @@ std::wstring AppPrefs::ToJson() const {
     out += std::to_wstring(text_render >= 0 && text_render <= 2 ? text_render : 0);
     out += L",\n  \"ui_font_scale\":";
     out += std::to_wstring(NormalizeUiFontScale(ui_font_scale));
+    out += L",\n  \"ui_font_family\":\"";
+    out += escaped_font_family;
+    out += L"\"";
     out += L",\n  \"show_hidden_files\":";
     out += show_hidden_files ? L"true" : L"false";
     out += L",\n  \"show_protected_os_files\":";
@@ -331,6 +336,7 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     text_render = pulse::json::ExtractInt(json, L"text_render", 0);
     if (text_render < 0 || text_render > 2) text_render = 0;
     ui_font_scale = NormalizeUiFontScale(pulse::json::ExtractInt(json, L"ui_font_scale", 100));
+    ui_font_family = pulse::json::ExtractString(json, L"ui_font_family");
     search_pinyin = pulse::json::ExtractBool(json, L"search_pinyin", true);
     global_search_enabled = pulse::json::ExtractBool(json, L"global_search_enabled", false);
     const int modifiers = pulse::json::ExtractInt(json, L"global_search_modifiers", 1);

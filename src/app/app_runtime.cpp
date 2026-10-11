@@ -1944,6 +1944,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     vm.settings_home_folder = s.appPrefs.home_folder;
     vm.settings_text_render = s.appPrefs.text_render;
     vm.settings_ui_font_scale = s.appPrefs.ui_font_scale;
+    vm.settings_ui_font_family = s.appPrefs.ui_font_family;
     vm.sidebar_scroll = s.sidebarScroll;
     vm.sidebar_scrollbar_opacity = s.sidebarScrollbarFade.Opacity();
     vm.sidebar_scrollbar_expand = s.sidebarScrollbarFade.Expand();

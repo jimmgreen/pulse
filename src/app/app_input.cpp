@@ -2205,6 +2205,43 @@ static void ClickGroupHeader(AppState& s, int pane_slot, int group, bool select)
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
+namespace {
+// 工具栏命令分支抽取：缓解 MSVC C1061（else-if 链过长）
+bool HandleToolbarCommands(AppState& s, HWND hwnd, const ui::HitTestResult& hit) {
+    if (hit.region == ui::HitTestResult::NavBack) {
+        GoBack(s);
+    } else if (hit.region == ui::HitTestResult::NavForward) {
+        GoForward(s);
+    } else if (hit.region == ui::HitTestResult::NavUp) {
+        GoUp(s);
+    } else if (hit.region == ui::HitTestResult::NavRefresh) {
+        RefreshActiveTab(s);
+    } else if (hit.region == ui::HitTestResult::NewButton) {
+        ShowNewDropdown(s);
+    } else if (hit.region == ui::HitTestResult::BreadcrumbSegment) {
+        const app::Tab* active = ActiveTab(s);
+        if (active && hit.path == active->current_path && IsAddressSearchResults(active)) ShowAddressSearch(s);
+        else NavigateTo(s, hit.path);
+    } else if (hit.region == ui::HitTestResult::Copy) {
+        CollectToTray(s, false);
+    } else if (hit.region == ui::HitTestResult::Cut) {
+        CollectToTray(s, true);
+    } else if (hit.region == ui::HitTestResult::Paste) {
+        PasteIntoCurrent(s);
+    } else if (hit.region == ui::HitTestResult::Rename) {
+        ShowRenameOverlay(s);
+    } else if (hit.region == ui::HitTestResult::Delete) {
+        DeleteSelected(s, (GetKeyState(VK_SHIFT) & 0x8000) != 0);
+    } else if (hit.region == ui::HitTestResult::Terminal) {
+        app::Tab* tab = ActiveTab(s);
+        if (tab && !tab->current_path.empty()) s.ops.OpenTerminal(ClipboardPath(tab->current_path));
+    } else {
+        return false;
+    }
+    return true;
+}
+} // namespace
+
 LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
         s->blankDoubleTab = nullptr;
@@ -2598,32 +2635,8 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             RecycleDuplicateGroup(*s, static_cast<size_t>(hit.index));
         } else if (hit.region == ui::HitTestResult::SettingsDupDeleteAll) {
             RecycleAllDuplicateExtras(*s);
-        } else if (hit.region == ui::HitTestResult::NavBack) {
-            GoBack(*s);
-        } else if (hit.region == ui::HitTestResult::NavForward) {
-            GoForward(*s);
-        } else if (hit.region == ui::HitTestResult::NavUp) {
-            GoUp(*s);
-        } else if (hit.region == ui::HitTestResult::NavRefresh) {
-            RefreshActiveTab(*s);
-        } else if (hit.region == ui::HitTestResult::NewButton) {
-            ShowNewDropdown(*s);
-        } else if (hit.region == ui::HitTestResult::BreadcrumbSegment) {
-            // The trailing search segment edits the query instead of reloading it.
-            const app::Tab* active = ActiveTab(*s);
-            if (active && hit.path == active->current_path && IsAddressSearchResults(active)) ShowAddressSearch(*s);
-            // Empty path is the This PC segment; NavigateTo handles it.
-            else NavigateTo(*s, hit.path);
-        } else if (hit.region == ui::HitTestResult::Copy) {
-            CollectToTray(*s, false);
-        } else if (hit.region == ui::HitTestResult::Cut) {
-            CollectToTray(*s, true);
-        } else if (hit.region == ui::HitTestResult::Paste) {
-            PasteIntoCurrent(*s);
-        } else if (hit.region == ui::HitTestResult::Rename) {
-            ShowRenameOverlay(*s);
-        } else if (hit.region == ui::HitTestResult::Delete) {
-            DeleteSelected(*s, (GetKeyState(VK_SHIFT) & 0x8000) != 0);
+        } else if (HandleToolbarCommands(*s, hwnd, hit)) {
+            // handled
         } else if (hit.region == ui::HitTestResult::GroupHeader ||
                    hit.region == ui::HitTestResult::GroupSelect) {
             ClickGroupHeader(*s, hit.pane_index, hit.index,

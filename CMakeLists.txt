@@ -283,9 +283,10 @@ add_executable(pulse_pack_installer_test
     src/bench/pack_installer_test.cpp
     src/app/pack_installer.cpp
     src/app/update_installer.cpp
-    src/app/update_transport.cpp)
+    src/app/update_transport.cpp
+    src/app/update_download_cleanup.cpp)
 target_include_directories(pulse_pack_installer_test PRIVATE "${CMAKE_BINARY_DIR}/generated")
-target_link_libraries(pulse_pack_installer_test PRIVATE pulse_runtime_log bcrypt cabinet shell32 user32 winhttp)
+target_link_libraries(pulse_pack_installer_test PRIVATE pulse_runtime_log bcrypt cabinet crypt32 shell32 user32 winhttp)
 
 add_executable(pulse_update_session_test src/bench/update_session_test.cpp src/app/startup_location.cpp)
 
@@ -1314,7 +1315,7 @@ add_executable(pulse_shell_tag_com_test
     src/fs/fs_enum.cpp src/ui/view_layout.cpp)
 target_link_libraries(pulse_shell_tag_com_test PRIVATE pulse_localization pulse_runtime_log
     user32 shell32 ole32 uuid advapi32 shlwapi netapi32 psapi)
-add_executable(pulse_single_instance_audit_test src/bench/single_instance_audit_test.cpp src/app/single_instance_coordinator.cpp)
+add_executable(pulse_single_instance_audit_test src/bench/single_instance_audit_test.cpp src/app/single_instance_coordinator.cpp src/app/this_pc_argument.cpp)
 target_link_libraries(pulse_single_instance_audit_test PRIVATE ole32 user32)
 add_executable(pulse_preview_pan_lifetime_audit_test src/bench/preview_pan_lifetime_audit_test.cpp)
 target_link_libraries(pulse_preview_pan_lifetime_audit_test PRIVATE gdi32 user32)
@@ -1404,6 +1405,7 @@ add_executable(pulse_enum_cancel_test src/bench/enum_cancel_test.cpp)
 target_link_libraries(pulse_enum_cancel_test PRIVATE pulse_localization shell32 shlwapi netapi32)
 
 add_executable(pulse_worker_enum_cancel_test src/bench/worker_enum_cancel_test.cpp)
+target_link_libraries(pulse_worker_enum_cancel_test PRIVATE pulse_runtime_log)
 
 add_executable(pulse_shell_benchmark_test src/bench/shell_benchmark_test.cpp)
 target_link_libraries(pulse_shell_benchmark_test PRIVATE ole32 shell32 uuid comctl32)
@@ -1519,6 +1521,7 @@ add_executable(pulse_config_capacity_test src/bench/config_capacity_test.cpp
 target_link_libraries(pulse_config_capacity_test PRIVATE user32 shell32 ole32 uuid advapi32 shlwapi netapi32 pulse_localization pulse_runtime_log)
 
 add_executable(pulse_virtual_worker_consumers_test src/bench/virtual_worker_consumers_test.cpp)
+target_link_libraries(pulse_virtual_worker_consumers_test PRIVATE pulse_runtime_log)
 
 target_sources(pulse_persistence_test PRIVATE src/app/this_pc_argument.cpp)
 target_sources(pulse_app_controllers_test PRIVATE src/app/this_pc_argument.cpp src/app/update_download_cleanup.cpp)

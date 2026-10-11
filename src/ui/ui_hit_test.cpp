@@ -239,8 +239,8 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             for(int i=0;i<3;++i) if(ContainsPt(lay.theme_tile[i],x,y)) {
                 const int values[]={1,2,0};r.region=HitTestResult::SettingsTheme;r.index=values[i];return r;
             }
-            if(ContainsPt(lay.effect_choice,x,y) || ContainsPt(lay.language_choice,x,y)) {
-                r.region=HitTestResult::SettingsDropdown;r.index=ContainsPt(lay.effect_choice,x,y) ? 0 : 1;return r;
+            if(ContainsPt(lay.effect_choice,x,y) || ContainsPt(lay.language_choice,x,y) || ContainsPt(lay.ui_font_choice,x,y)) {
+                r.region=HitTestResult::SettingsDropdown;r.index=ContainsPt(lay.ui_font_choice,x,y) ? 2 : (ContainsPt(lay.effect_choice,x,y) ? 0 : 1);return r;
             }
             if(ContainsPt(lay.performance_row,x,y)) {r.region=HitTestResult::SettingsToggle;r.index=4;return r;}
             for(int list_row=0;list_row<6;++list_row)
@@ -735,8 +735,8 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
         }
         if (ContainsPt(toolbar.create,x,y)) {r.region=HitTestResult::NewButton; return r;}
         const HitTestResult::Region commands[]={HitTestResult::Cut,HitTestResult::Copy,HitTestResult::Paste,
-            HitTestResult::Rename,HitTestResult::Delete,HitTestResult::SplitButton,HitTestResult::DetailsToggle,HitTestResult::PaneColumnLayout};
-        for(int i=0;i<8;++i) if(ContainsPt(toolbar.commands[i],x,y)) {r.region=commands[i]; return r;}
+            HitTestResult::Rename,HitTestResult::Delete,HitTestResult::Terminal,HitTestResult::SplitButton,HitTestResult::DetailsToggle,HitTestResult::PaneColumnLayout};
+        for(int i=0;i<9;++i) if(ContainsPt(toolbar.commands[i],x,y)) {r.region=commands[i]; return r;}
         return r;
     }
     // Status bar. Only the transfer summary (center-right) is a control;

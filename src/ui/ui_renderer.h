@@ -759,6 +759,7 @@ struct WindowViewModel {
     std::wstring settings_home_folder; // default location; empty = This PC
     int settings_text_render = 0; // 0 auto, 1 sharp, 2 smooth
     int settings_ui_font_scale = 100; // interface font size: 90 / 100 / 112 / 125
+    std::wstring settings_ui_font_family; // empty = system default
     bool settings_open_folders = false;
     bool settings_win_e = false;
     bool settings_this_pc = false;
@@ -988,6 +989,7 @@ struct HitTestResult {
         TrayPrev,                 // staging tray footer: previous card
         TrayNext,                  // staging tray footer: next card (top card to the back)
         PaneColumnLayout,
+        Terminal,                   // toolbar: open terminal in current folder
         ColumnStripRow,      // index = row, sub_index = column id
         ColumnStripDivider,  // sub_index = column id
         ColumnStripBlank,    // sub_index = column id

@@ -6,7 +6,10 @@
 #include <dwrite_3.h>
 
 #include <cstdint>
+#include <mutex>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace pulse::ui { class Compositor; }
 
@@ -50,6 +53,14 @@ inline bool UseLumaTextForUi() noexcept { return CurrentTextRenderMode() == Text
 void SetUiFontScale(int percent) noexcept;
 int UiFontScalePercent() noexcept;
 float UiFontScale() noexcept;
+
+// Process-wide UI font family override (Settings > Interface font).
+// Empty = follow the built-in PreferredTextFamily() logic. Applies to every
+// role except Icon, so glyph icons keep their slots. Bumps Generation().
+void SetUiFontFamily(const std::wstring& family) noexcept;
+std::wstring UiFontFamily() noexcept;
+// Enumerates installed font family names via the system font collection.
+std::vector<std::wstring> SystemFontFamilies(IDWriteFactory* factory);
 
 // Native EDIT controls hosted on Pulse surfaces (address bar and rename,
 // dialog fields, menu filters, Quick Look find) all use this font: the UI text
