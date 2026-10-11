@@ -1945,6 +1945,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     vm.settings_text_render = s.appPrefs.text_render;
     vm.settings_ui_font_scale = s.appPrefs.ui_font_scale;
     vm.settings_ui_font_family = s.appPrefs.ui_font_family;
+    vm.settings_terminal_path = s.appPrefs.terminal_path;
     vm.sidebar_scroll = s.sidebarScroll;
     vm.sidebar_scrollbar_opacity = s.sidebarScrollbarFade.Opacity();
     vm.sidebar_scrollbar_expand = s.sidebarScrollbarFade.Expand();
@@ -1956,12 +1957,31 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
         vm.sidebar_pin_drag_index = s.pinDragRun;
         if (s.pinGapVisible) vm.sidebar_pin_gap_line_y = s.pinGapLineY;
     }
-    if (app::Tab* sel_tab = ActiveTab(s); sel_tab && sel_tab->content_results && sel_tab->SelectedCount() > 1) {
+    if (app::Tab* sel_tab = ActiveTab(s); sel_tab && sel_tab->SelectedCount() >= 1) {
         wchar_t count[64]{};
         swprintf_s(count, l10n::Get(l10n::StringId::SelectedCountFormat).c_str(), sel_tab->SelectedCount());
-        const std::optional<uint64_t> bytes = ContentSelectionSize(*sel_tab);
-        vm.status.selection_text = std::wstring(count) + L"  \u00B7  " +
-            (bytes ? pulse::format::ByteSize(*bytes, true) : l10n::Get(l10n::StringId::LoadingEllipsis));
+        std::optional<uint64_t> bytes;
+        if (sel_tab->content_results) {
+            bytes = ContentSelectionSize(*sel_tab);
+        } else if (sel_tab->snapshot) {
+            // 普通文件列表：累加选中文件的大小（文件夹跳过，只计文件）。
+            uint64_t total = 0;
+            bool hasFile = false;
+            const auto indices = sel_tab->SelectedIndices();
+            for (int idx : indices) {
+                if (idx < 0 || static_cast<size_t>(idx) >= sel_tab->snapshot->size()) continue;
+                const auto& e = (*sel_tab->snapshot)[static_cast<size_t>(idx)];
+                if (!e.is_dir) {
+                    total += e.size;
+                    hasFile = true;
+                }
+            }
+            if (hasFile) bytes = total;
+        }
+        if (bytes || sel_tab->SelectedCount() > 1) {
+            vm.status.selection_text = std::wstring(count) + L"  \u00B7  " +
+                (bytes ? pulse::format::ByteSize(*bytes, true) : l10n::Get(l10n::StringId::LoadingEllipsis));
+        }
     }
     ops::OpStatus st = s.ops.Status();
     if (st.active || !st.last_error.empty() || !st.summary.empty()) {

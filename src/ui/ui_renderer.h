@@ -760,6 +760,7 @@ struct WindowViewModel {
     int settings_text_render = 0; // 0 auto, 1 sharp, 2 smooth
     int settings_ui_font_scale = 100; // interface font size: 90 / 100 / 112 / 125
     std::wstring settings_ui_font_family; // empty = system default
+    std::wstring settings_terminal_path; // empty = system default terminal
     bool settings_open_folders = false;
     bool settings_win_e = false;
     bool settings_this_pc = false;
@@ -888,6 +889,7 @@ struct HitTestResult {
         NetworkIndexAdd,
         SettingsContentIndex,
         SettingsFind, SettingsDisclosure, SettingsTheme, SettingsDropdown,
+        SettingsTerminalPath,
         SettingsContentAction,
         AddressSearchClear,
         AddressSearchClose,
@@ -1064,7 +1066,7 @@ public:
     // keeps only its command row.
     void SetVerticalTabs(bool on) {
         vertical_tabs_ = on && !embedded_;
-        toolbar_height_ = (vertical_tabs_ || embedded_ ? 44.0f : 88.0f) * scale_;
+        toolbar_height_ = (vertical_tabs_ || embedded_ ? 36.0f : 68.0f) * scale_;
     }
     // Hosted inside another window (the file picker): no title bar, tabs,
     // command row, status bar or details panel; only the address row, the
@@ -1598,7 +1600,7 @@ private:
     float embedded_bottom_dip_ = 0.0f;
     float scale_ = 1.0f;
     float title_bar_height_ = kTitleBarHeight;
-    float toolbar_height_ = 88.0f;
+    float toolbar_height_ = 68.0f;
     float status_height_ = 28.0f;
     float sidebar_width_ = 224.0f;
     float sidebar_width_dip_ = 224.0f;

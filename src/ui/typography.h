@@ -59,6 +59,10 @@ float UiFontScale() noexcept;
 // role except Icon, so glyph icons keep their slots. Bumps Generation().
 void SetUiFontFamily(const std::wstring& family) noexcept;
 std::wstring UiFontFamily() noexcept;
+// Process-wide UI font weight override (Settings > Interface font weight).
+// 400 = normal, 500 = medium, 700 = bold. Applies to every role except Icon.
+void SetUiFontWeight(int weight) noexcept;
+int UiFontWeight() noexcept;
 // Enumerates installed font family names via the system font collection.
 std::vector<std::wstring> SystemFontFamilies(IDWriteFactory* factory);
 

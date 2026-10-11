@@ -154,7 +154,54 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
         segmented(lay.text_render_card,lay.text_render_row,text_render,text_render_values,vm.settings_text_render,H::SettingsTextRender,I::SettingsTextRender,I::SettingsTextRenderDesc);divider(lay.text_render_card);
         const I ui_font_size[]={I::UiFontSmall,I::UiFontDefault,I::UiFontLarge,I::UiFontLarger};const int ui_font_size_values[]={90,100,112,125};
         segmented(lay.ui_font_size_card,lay.ui_font_size_row,ui_font_size,ui_font_size_values,vm.settings_ui_font_scale,H::SettingsUiFontSize,I::SettingsUiFontSize,I::SettingsUiFontSizeDesc,4,L"\xE8D2");divider(lay.ui_font_size_card);
-        dropdown(lay.ui_font_card,lay.ui_font_choice,I::SettingsUiFontFamily,I::SettingsUiFontFamilyDesc,vm.settings_ui_font_family.empty() ? l10n::Get(I::UiFontSystemDefault) : vm.settings_ui_font_family,2);divider(lay.ui_font_card);
+        dropdown(lay.ui_font_card,lay.ui_font_choice,I::SettingsUiFontFamily,I::SettingsUiFontFamilyDesc,vm.settings_ui_font_family.empty() ? l10n::Get(I::UiFontSystemDefault) : vm.settings_ui_font_family,2);
+        {
+            // 字重选择：常规(400)/中等(500)/粗体(700)，与字体下拉框并列。
+            const int w = ui::typography::UiFontWeight();
+            const wchar_t* label = w == 700 ? L"粗体 (700)" : w == 500 ? L"中等 (500)" : L"常规 (400)";
+            // 复用同一卡片内的第二个下拉位，索引 3。
+            D2D1_RECT_F rc = lay.ui_font_choice;
+            const float dw = 140.0f * scale_;
+            rc.left = rc.right - dw;
+            // 绘制字重下拉按钮
+            {
+                fluent::ButtonSpec control{};
+                control.bounds = rc;
+                control.text = label;
+                control.drop_down = true;
+                control.state.hovered = IsHovered(vm, H::SettingsDropdown, 3);
+                painter_.DrawButton(control);
+            }
+            // 注册命中区域（索引 3）
+            // 注意：实际命中注册由布局系统处理，这里仅绘制。
+        }
+        divider(lay.ui_font_card);
+        {
+            // 终端路径：显示当前路径，点击选择，右键清除。
+            draw_card(lay.terminal_card);
+            const std::wstring& tp = vm.settings_terminal_path;
+            label(lay.terminal_card, L"终端路径", tp.empty() ? L"系统默认" : tp, L"\xE8C1",
+                  lay.terminal_choice.left - 12 * scale_);
+            {
+                fluent::ButtonSpec control{};
+                control.bounds = lay.terminal_choice;
+                control.text = L"选择...";
+                control.state.hovered = IsHovered(vm, H::SettingsTerminalPath, 0);
+                painter_.DrawButton(control);
+            }
+            // 清除按钮（仅当有自定义路径时）
+            if (!tp.empty()) {
+                D2D1_RECT_F clearRc = lay.terminal_choice;
+                clearRc.left = clearRc.right + 8 * scale_;
+                clearRc.right = clearRc.left + 60 * scale_;
+                fluent::ButtonSpec clear{};
+                clear.bounds = clearRc;
+                clear.text = L"清除";
+                clear.state.hovered = IsHovered(vm, H::SettingsTerminalPath, 1);
+                painter_.DrawButton(clear);
+            }
+        }
+        divider(lay.terminal_card);
         {
             text(l10n::Get(I::SettingsIntegration),lay.integration_section);
             draw_card(lay.integration_card);

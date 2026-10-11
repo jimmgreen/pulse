@@ -45,11 +45,8 @@ void MainRenderer::SetCompositor(Compositor* comp) {
     material_.SetCompositor(comp);
     painter_.SetCompositor(comp);
     if (!comp) {
-        icon_cache_.Reset();
-        open_with_icons_.Reset();
-        thumbnail_cache_.Reset();
-        folder_thumbnail_cache_.Reset();
-        details_cache_.Reset();
+        // Closing one window must not empty the caches the others draw from.
+        if (owned_caches_) ResetRenderCaches(*owned_caches_);
         preview_handler_.Reset();
         preview_mono_format_.reset();
     }
@@ -71,12 +68,23 @@ void MainRenderer::InvalidateTypography() {
     painter_.InvalidateTypography();
 }
 void MainRenderer::SetIconNotifyWindow(HWND hwnd) {
+    // The caches may be shared by every Pulse window (RenderCaches): each
+    // renderer registers its own window and leaves the others in place.
+    if (notify_hwnd_ && notify_hwnd_ != hwnd) {
+        icon_cache_.RemoveNotifyWindow(notify_hwnd_);
+        open_with_icons_.RemoveNotifyWindow(notify_hwnd_);
+        thumbnail_cache_.RemoveNotifyWindow(notify_hwnd_);
+        folder_thumbnail_cache_.RemoveNotifyWindow(notify_hwnd_);
+        details_cache_.RemoveNotifyWindow(notify_hwnd_);
+    }
     notify_hwnd_ = hwnd;
-    icon_cache_.SetNotifyWindow(hwnd);
-    open_with_icons_.SetNotifyWindow(hwnd);
-    thumbnail_cache_.SetNotifyWindow(hwnd);
-    folder_thumbnail_cache_.SetNotifyWindow(hwnd);
-    details_cache_.SetNotifyWindow(hwnd);
+    if (hwnd) {
+        icon_cache_.AddNotifyWindow(hwnd);
+        open_with_icons_.AddNotifyWindow(hwnd);
+        thumbnail_cache_.AddNotifyWindow(hwnd);
+        folder_thumbnail_cache_.AddNotifyWindow(hwnd);
+        details_cache_.AddNotifyWindow(hwnd);
+    }
     preview_handler_.SetNotifyWindow(hwnd);
 }
 
@@ -89,7 +97,7 @@ void MainRenderer::SetScale(float scale) {
     }
     scale_ = scale;
     title_bar_height_ = (embedded_ ? embedded_top_dip_ : kTitleBarHeight) * scale;
-    toolbar_height_ = (vertical_tabs_ || embedded_ ? 44.0f : 88.0f) * scale;
+    toolbar_height_ = (vertical_tabs_ || embedded_ ? 36.0f : 68.0f) * scale;
     status_height_ = (embedded_ ? embedded_bottom_dip_ : 28.0f) * scale;
     sidebar_width_ = sidebar_width_dip_ * scale;
     pane_header_height_ = 40.0f * scale;
@@ -854,7 +862,7 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
             FillChromeTab(dc, brFillSelected_.get(), tabRc, shape);
         } else if (active) {
             // A solid light plate remains identifiable over pale chrome and wallpapers.
-            MakeBrush(dc, vm.dark ? WithAlpha(theme.surface_sheet, sheet_alpha_) : HexColor(0xFFFFFF), brFillSelected_);
+            MakeBrush(dc, vm.dark ? WithAlpha(theme.surface_sheet, sheet_alpha_) : theme.tab_active_bg, brFillSelected_);
             FillChromeTab(dc, brFillSelected_.get(), tabRc, shape);
         } else {
             // Grouped tabs get a tinted body; ungrouped keep the stock look.
@@ -1450,7 +1458,25 @@ MainRenderer::TabStripMetrics MainRenderer::ComputeTabStrip(
         m.active_w = tab_freeze_active_w_;
         m.compact = tab_freeze_compact_;
     } else if (visibleCount == 0 || normalW >= minW) {
-        m.w = visibleCount == 0 ? 0.0f : std::min(kTabMaxW * scale_, normalW);
+        // XYplorer-style: size tabs to content, not to fill available space.
+        // Measure the widest visible tab title and use it (plus chrome padding)
+        // instead of dividing the spare space equally.
+        float maxContentW = 0.0f;
+        if (compositor_) {
+            IDWriteFactory* factory = compositor_->DwriteFactory();
+            IDWriteTextFormat* fmt = compositor_->TabFormat();
+            for (size_t i = 0; i < vm.tabs.size(); ++i) {
+                const auto& t = vm.tabs[i];
+                if (t.hidden || t.pinned) continue;
+                const float tw = MeasureTextWidth(factory, fmt, t.title);
+                if (tw > maxContentW) maxContentW = tw;
+            }
+        }
+        // Chrome: icon (16) + gaps (6+24) + close button reserve (~28) + padding.
+        const float contentW = maxContentW + 72.0f * scale_;
+        const float sizedW = std::clamp(contentW, minW, kTabMaxW * scale_);
+        // Don't exceed what fits; fall back to equal division only if crowded.
+        m.w = visibleCount == 0 ? 0.0f : std::min(sizedW, normalW);
         m.active_w = m.w;
     } else {
         // Crowded: inactive tabs keep only their icon, the active one its title.

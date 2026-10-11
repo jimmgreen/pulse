@@ -218,6 +218,18 @@ bool HandleSettingsControl(AppState& s,const H& hit) {
             int picked=Dropdown(s,hit.index,std::move(items));
             if(picked==1) s.settings.UiFontFamily(L"");
             else if(picked>=2 && picked-2 < static_cast<int>(names.size())) s.settings.UiFontFamily(names[picked-2]);
+        } else if(hit.index==3) {
+            // 界面字体字重：常规(400)/中等(500)/粗体(700)。
+            const int current = s.appPrefs.ui_font_weight;
+            const int values[] = {400, 500, 700};
+            const wchar_t* labels[] = {L"常规 (400)", L"中等 (500)", L"粗体 (700)"};
+            for(int i=0;i<3;++i) {
+                ui::FluentMenuItem item;item.command=i+1;
+                item.text=labels[i];item.checked=(values[i]==current);
+                items.push_back(std::move(item));
+            }
+            int picked=Dropdown(s,hit.index,std::move(items));
+            if(picked>=1 && picked<=3) s.settings.UiFontWeight(values[picked-1]);
         } else if(hit.index==0) {
             const I labels[]={I::EffectNone,I::EffectAcrylic,I::EffectMica,I::EffectMicaAlt};
             for(int i=0;i<ui::kWindowEffectCount;++i) {
@@ -230,6 +242,28 @@ bool HandleSettingsControl(AppState& s,const H& hit) {
             constexpr int count=static_cast<int>(std::size(ids));
             for(int i=0;i<count;++i) items.push_back(Item(i+1,labels[i],s.appPrefs.language==ids[i]));
             int command=Dropdown(s,hit.index,std::move(items));if(command>=1 && command<=count) s.settings.Language(ids[command-1]);
+        }
+        break;
+    }
+    case H::SettingsTerminalPath: {
+        // 终端路径：用系统文件对话框选择 exe，空 = 系统默认。
+        if (hit.index == 1) {
+            // 清除自定义路径，恢复系统默认
+            s.settings.TerminalPath(L"");
+        } else {
+            wchar_t file[MAX_PATH] = L"";
+            OPENFILENAMEW ofn{};
+            ofn.lStructSize = sizeof(ofn);
+            ofn.hwndOwner = s.hwnd;
+            ofn.lpstrFile = file;
+            ofn.nMaxFile = ARRAYSIZE(file);
+            ofn.lpstrFilter = L"可执行文件\0*.exe\0所有文件\0*.*\0";
+            ofn.nFilterIndex = 1;
+            ofn.lpstrTitle = L"选择终端程序";
+            ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+            if (GetOpenFileNameW(&ofn)) {
+                s.settings.TerminalPath(file);
+            }
         }
         break;
     }

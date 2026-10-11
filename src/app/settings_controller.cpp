@@ -780,6 +780,22 @@ void SettingsController::UiFontFamily(const std::wstring& family) {
     }
 }
 
+void SettingsController::UiFontWeight(int weight) {
+    const int w = (weight == 500 || weight == 700) ? weight : 400;
+    if (prefs_ && prefs_->ui_font_weight != w) {
+        prefs_->ui_font_weight = w;
+        ui::typography::SetUiFontWeight(w);
+        SaveAndApply(SettingsEffect::UiFontSize);
+    }
+}
+
+void SettingsController::TerminalPath(const std::wstring& path) {
+    if (prefs_ && prefs_->terminal_path != path) {
+        prefs_->terminal_path = path;
+        SaveAndApply(SettingsEffect::None);
+    }
+}
+
 void SettingsController::TrayIconSize(int index) {
     static constexpr int values[] = {40, 48, 56};
     if (prefs_ && SelectValue(index, values, prefs_->tray_icon_size))

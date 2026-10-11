@@ -121,9 +121,11 @@ std::wstring AppPrefs::ToJson() const {
     std::wstring escaped_language;
     std::wstring escaped_home;
     std::wstring escaped_font_family;
+    std::wstring escaped_terminal_path;
     pulse::json::Escape(window_effect, escaped_effect);
     pulse::json::Escape(home_folder, escaped_home);
     pulse::json::Escape(ui_font_family, escaped_font_family);
+    pulse::json::Escape(terminal_path, escaped_terminal_path);
     pulse::json::Escape(background_image, escaped_image);
     pulse::json::Escape(language, escaped_language);
     std::wstring out = L"{\n  \"version\":4,\n  \"launch_on_startup\":";
@@ -196,7 +198,11 @@ std::wstring AppPrefs::ToJson() const {
     out += L",\n  \"ui_font_family\":\"";
     out += escaped_font_family;
     out += L"\"";
-    out += L",\n  \"show_hidden_files\":";
+    out += L",\n  \"ui_font_weight\":";
+    out += std::to_wstring(ui_font_weight == 500 || ui_font_weight == 700 ? ui_font_weight : 400);
+    out += L",\n  \"terminal_path\":\"";
+    out += escaped_terminal_path;
+    out += L"\",\n  \"show_hidden_files\":";
     out += show_hidden_files ? L"true" : L"false";
     out += L",\n  \"show_protected_os_files\":";
     out += show_protected_os_files ? L"true" : L"false";
@@ -337,6 +343,11 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     if (text_render < 0 || text_render > 2) text_render = 0;
     ui_font_scale = NormalizeUiFontScale(pulse::json::ExtractInt(json, L"ui_font_scale", 100));
     ui_font_family = pulse::json::ExtractString(json, L"ui_font_family");
+    {
+        const int w = pulse::json::ExtractInt(json, L"ui_font_weight", 400);
+        ui_font_weight = (w == 500 || w == 700) ? w : 400;
+    }
+    terminal_path = pulse::json::ExtractString(json, L"terminal_path");
     search_pinyin = pulse::json::ExtractBool(json, L"search_pinyin", true);
     global_search_enabled = pulse::json::ExtractBool(json, L"global_search_enabled", false);
     const int modifiers = pulse::json::ExtractInt(json, L"global_search_modifiers", 1);

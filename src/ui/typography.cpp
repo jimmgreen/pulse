@@ -29,6 +29,7 @@ std::atomic_int g_text_render_mode{0};
 std::atomic_int g_ui_font_scale{100};
 std::wstring g_ui_font_family;  // empty = follow PreferredTextFamily() logic
 std::mutex g_ui_font_family_mutex;
+std::atomic_int g_ui_font_weight{400};
 
 template <typename T>
 void Release(T*& value) noexcept {
@@ -173,8 +174,16 @@ HRESULT CreateTextFormat(IDWriteFactory2* factory, const TextFormatSpec& spec,
     const wchar_t* family = ResolveFamily(factory, spec.role);
     const wchar_t* locale = spec.role == FontRole::Icon ? L"en-US" : LocaleName();
     const float size = spec.role == FontRole::Icon ? spec.size : spec.size * UiFontScale();
+    // Global font weight override applies to text roles, not icons.
+    DWRITE_FONT_WEIGHT weight = spec.weight;
+    if (spec.role != FontRole::Icon) {
+        const int w = UiFontWeight();
+        if (w == 500) weight = DWRITE_FONT_WEIGHT_MEDIUM;
+        else if (w == 700) weight = DWRITE_FONT_WEIGHT_BOLD;
+        else weight = DWRITE_FONT_WEIGHT_NORMAL;
+    }
     const HRESULT result = factory->CreateTextFormat(
-        family, nullptr, spec.weight, spec.style, spec.stretch, size, locale, format);
+        family, nullptr, weight, spec.style, spec.stretch, size, locale, format);
     if (SUCCEEDED(result) && *format && spec.role != FontRole::Icon) {
         ApplyFallbackInternal(factory, *format);
     }
@@ -273,6 +282,18 @@ void SetUiFontFamily(const std::wstring& family) noexcept {
 std::wstring UiFontFamily() noexcept {
     std::lock_guard<std::mutex> lock(g_ui_font_family_mutex);
     return g_ui_font_family;
+}
+
+void SetUiFontWeight(int weight) noexcept {
+    const int w = (weight == 500 || weight == 700) ? weight : 400;
+    if (g_ui_font_weight.load(std::memory_order_relaxed) != w) {
+        g_ui_font_weight.store(w, std::memory_order_relaxed);
+        g_generation.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+int UiFontWeight() noexcept {
+    return g_ui_font_weight.load(std::memory_order_relaxed);
 }
 
 std::vector<std::wstring> SystemFontFamilies(IDWriteFactory* factory) {

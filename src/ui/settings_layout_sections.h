@@ -69,6 +69,7 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
     l.text_render_card=row(narrow ? 98.0f : 64.0f); segments(l.text_render_card,l.text_render_row,3,282);
     l.ui_font_size_card=row(narrow ? 98.0f : 64.0f); segments(l.ui_font_size_card,l.ui_font_size_row,4,340);
     l.ui_font_card=row(narrow ? 98.0f : 64.0f); l.ui_font_choice=choice(l.ui_font_card,220);
+    l.terminal_card=row(narrow ? 98.0f : 64.0f); l.terminal_choice=choice(l.terminal_card,220);
     l.group[0]=D2D1::RectF(left,l.theme_row.top,right,y);
     // Default file manager: a titled card of its own, independent of startup and background running.
     // Every choice stays visible, so users see what the master switch hands to Pulse.

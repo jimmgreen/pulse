@@ -40,25 +40,25 @@ inline ToolbarLayout MakeToolbarLayout(float width, float scale, float top, floa
         const float cap = width - margin - (x + margin + address_min) - nav_step - 2*margin;
         search_width = std::max(search_width, std::min(search_min_dip*scale, cap));
     }
-    out.search = {width-margin-search_width,top+4*scale,width-margin,top+40*scale};
-    out.address = {x+margin,top+4*scale,std::max(x+margin+60*scale,out.search.left-margin),top+40*scale};
+    out.search = {width-margin-search_width,top+2*scale,width-margin,top+30*scale};
+    out.address = {x+margin,top+2*scale,std::max(x+margin+60*scale,out.search.left-margin),top+30*scale};
     const bool overflow = available < 540*scale;
     if (available < 480*scale) {
         out.search.left=out.search.right-32*scale;
     }
     out.navigation[3] = NavigationButtonAt(out.search.left - margin - nav_step, top + 6 * scale, scale, nav_step);
     out.address.right = out.navigation[3].left-margin;
-    out.create = {left+margin,top+50*scale,left+margin+create_width,top+82*scale};
+    out.create = {left+margin,top+34*scale,left+margin+create_width,top+62*scale};
     x = out.create.right + 12*scale;
     for (int i=0;i<6;++i) {
-        out.commands[i] = {x,top+50*scale,x+30*scale,top+82*scale};
+        out.commands[i] = {x,top+34*scale,x+30*scale,top+62*scale};
         x += 34*scale;
     }
     if (overflow) { for (auto& command : out.commands) command = {}; x = out.create.right; }
     x += 8*scale;
     // sort_width: measured "icon + label + chevron" width (0 = legacy 88 DIP).
     const float sort_w = available >= 700*scale ? (sort_width > 0.0f ? sort_width : 88*scale) : 32*scale;
-    out.sort = {x,top+50*scale,x+sort_w,top+82*scale};
+    out.sort = {x,top+34*scale,x+sort_w,top+62*scale};
     x = out.sort.right + 6*scale;
     // filter_width: measured "icon + label" width (0 = legacy 88 DIP); kept above the
     // 60 DIP icon-only threshold. Expanding grows the field from here.

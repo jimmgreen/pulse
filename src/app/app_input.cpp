@@ -2234,7 +2234,22 @@ bool HandleToolbarCommands(AppState& s, HWND hwnd, const ui::HitTestResult& hit)
         DeleteSelected(s, (GetKeyState(VK_SHIFT) & 0x8000) != 0);
     } else if (hit.region == ui::HitTestResult::Terminal) {
         app::Tab* tab = ActiveTab(s);
-        if (tab && !tab->current_path.empty()) s.ops.OpenTerminal(ClipboardPath(tab->current_path));
+        if (tab && !tab->current_path.empty()) {
+            const std::wstring& custom = s.appPrefs.terminal_path;
+            if (!custom.empty()) {
+                // Custom terminal: launch the configured exe in the current folder.
+                SHELLEXECUTEINFOW sei{};
+                sei.cbSize = sizeof(sei);
+                sei.fMask = SEE_MASK_DEFAULT;
+                sei.hwnd = hwnd;
+                sei.lpFile = custom.c_str();
+                sei.lpDirectory = tab->current_path.c_str();
+                sei.nShow = SW_SHOWNORMAL;
+                ShellExecuteExW(&sei);
+            } else {
+                s.ops.OpenTerminal(ClipboardPath(tab->current_path));
+            }
+        }
     } else {
         return false;
     }

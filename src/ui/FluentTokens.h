@@ -109,7 +109,8 @@ inline D2D1_COLOR_F AutoAccentText(D2D1_COLOR_F accent) noexcept {
 }
 
 // Layout metrics in DIPs at 100% scale. Scaled at use (SetScale, etc.).
-inline constexpr float kTitleBarHeight = 48.0f;
+// Compact classic heights: tab bar 36, toolbar 64 (was 48/88).
+inline constexpr float kTitleBarHeight = 36.0f;
 
 // ---------------------------------------------------------------------------
 // Resolved runtime theme (colors already premultiplied by desired alpha).
@@ -359,47 +360,47 @@ inline Theme MakeTheme(bool dark, D2D1_COLOR_F accent) noexcept {
         t.fps_bg = WithAlpha(HexColor(0x000000), 0.60f);
         t.fps_text = HexColor(0xDCDCDC);
     } else {
-        // 经典 Windows 浅色主题：#F0F0F0 底、深灰字、经典蓝 #0078D7 选中、浅灰悬停。
-        t.accent = HexColor(0x0078D7);
+        // Win10 经典浅色主题：#F5F5F5 底、深灰字、Win10 蓝 #0078D4 点缀、选中项淡蓝。
+        t.accent = HexColor(0x0078D4);
         t.accent_hover = HexColor(0x0067B8);
         t.accent_pressed = HexColor(0x005A9E);
         t.accent_text = HexColor(0xFFFFFF);
-        t.bg = HexColor(0xF0F0F0);
+        t.bg = HexColor(0xF5F5F5);
         t.text = HexColor(0x1A1A1A);
         t.text_secondary = HexColor(0x666666);
         t.text_disabled = HexColor(0x999999);
 
         t.fill_hover = HexColor(0xE5E5E5);
         t.fill_pressed = HexColor(0xD0D0D0);
-        t.fill_selected = HexColor(0x0078D7);
+        t.fill_selected = HexColor(0xE5F1FB);
         t.fill_selected_inactive = HexColor(0xCCCCCC);
-        t.list_selected_start = HexColor(0x0078D7);
-        t.list_selected_end = HexColor(0x0078D7);
-        t.list_selected_outline = HexColor(0x0078D7);
+        t.list_selected_start = HexColor(0xE5F1FB);
+        t.list_selected_end = HexColor(0xE5F1FB);
+        t.list_selected_outline = HexColor(0x0078D4);
         t.fill_input = HexColor(0xFFFFFF);
         t.fill_input_hover = HexColor(0xFFFFFF);
         t.fill_input_focus = HexColor(0xFFFFFF);
-        t.fill_input_disabled = HexColor(0xF0F0F0);
+        t.fill_input_disabled = HexColor(0xF5F5F5);
 
-        t.stroke_card = HexColor(0xD4D4D4);
+        t.stroke_card = HexColor(0xD0D0D0);
         t.stroke_divider = HexColor(0xE0E0E0);
         t.stroke_input_bottom = HexColor(0x7A7A7A);
 
         t.surface_flyout = HexColor(0xFFFFFF);
         t.surface_pane_inactive = WithAlpha(HexColor(0x808080), 0.50f);
-        t.surface_title = HexColor(0xF0F0F0);
-        t.surface_sheet = HexColor(0xF0F0F0);
+        t.surface_title = HexColor(0xF5F5F5);
+        t.surface_sheet = HexColor(0xF5F5F5);
         t.surface_card = HexColor(0xFFFFFF);
 
-        t.header_bg = HexColor(0xF0F0F0);
-        t.header_sep = HexColor(0xD4D4D4);
+        t.header_bg = HexColor(0xF5F5F5);
+        t.header_sep = HexColor(0xD0D0D0);
         t.hover_bg = t.fill_hover;
         t.selection_bg = t.fill_selected;
         t.scrollbar_thumb = HexColor(0xC1C1C1);
-        t.tab_bg = HexColor(0xE4E4E4);
-        t.tab_active_bg = HexColor(0xFFFFFF);
+        t.tab_bg = HexColor(0xE8E8E8);
+        t.tab_active_bg = HexColor(0x0078D4);
         t.address_bg = HexColor(0xFFFFFF);
-        t.status_bg = HexColor(0xF0F0F0);
+        t.status_bg = HexColor(0xF5F5F5);
         t.icon_folder = HexColor(0xBCA270);
         t.icon_file = HexColor(0x808080);
         t.fps_bg = WithAlpha(HexColor(0x000000), 0.60f);
