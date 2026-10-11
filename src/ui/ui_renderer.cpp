@@ -1455,7 +1455,7 @@ MainRenderer::TabStripMetrics MainRenderer::ComputeTabStrip(
         // instead of dividing the spare space equally.
         float maxContentW = 0.0f;
         if (compositor_) {
-            IDWriteFactory* factory = compositor_->DwriteFactory();
+            IDWriteFactory2* factory = compositor_->DwriteFactory();
             IDWriteTextFormat* fmt = compositor_->TabFormat();
             for (size_t i = 0; i < vm.tabs.size(); ++i) {
                 const auto& t = vm.tabs[i];
