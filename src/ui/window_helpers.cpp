@@ -51,7 +51,7 @@ LRESULT BorderlessHitTest(HWND hwnd, LPARAM lparam, float title_height,
 
 bool ApplyBackdrop(HWND hwnd, bool dark) {
     UpdateWindowTheme(hwnd, dark);
-    const DWORD corner = DWMWCP_ROUND;
+    const DWORD corner = DWMWCP_DONOTROUND;  // 经典风格：窗口直角
     DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
     const bool high_contrast = IsHighContrast();
     DWORD backdrop = high_contrast ? DWMSBT_NONE : DWMSBT_TABBEDWINDOW;

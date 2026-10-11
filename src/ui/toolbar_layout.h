@@ -15,7 +15,7 @@ struct ToolbarLayout {
     D2D1_RECT_F address{}, search{}, create{};
     D2D1_RECT_F sort{}, filter{}, overflow{};
     D2D1_RECT_F group{};   // "Group" button / active chip (empty when not offered)
-    std::array<D2D1_RECT_F, 8> commands{};
+    std::array<D2D1_RECT_F, 9> commands{};
 };
 
 // search_min_dip widens the search field while a search is active or being
@@ -50,7 +50,7 @@ inline ToolbarLayout MakeToolbarLayout(float width, float scale, float top, floa
     out.address.right = out.navigation[3].left-margin;
     out.create = {left+margin,top+50*scale,left+margin+create_width,top+82*scale};
     x = out.create.right + 12*scale;
-    for (int i=0;i<5;++i) {
+    for (int i=0;i<6;++i) {
         out.commands[i] = {x,top+50*scale,x+30*scale,top+82*scale};
         x += 34*scale;
     }
@@ -74,8 +74,8 @@ inline ToolbarLayout MakeToolbarLayout(float width, float scale, float top, floa
         tail = out.group.right;
     }
     const float right_group = std::max(tail+12*scale,width-margin-102*scale);
-    for (int i=5;i<8;++i) {
-        x = right_group+(i-5)*34*scale;
+    for (int i=6;i<9;++i) {
+        x = right_group+(i-6)*34*scale;
         out.commands[i] = {x,top+50*scale,x+30*scale,top+82*scale};
     }
     if (overflow) {

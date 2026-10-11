@@ -173,9 +173,9 @@ struct Theme {
     D2D1_COLOR_F fps_text;
 
     // Geometric tokens (DIPs at 100% scale).
-    float radius_window = 12.0f;
-    float radius_flyout = 12.0f;
-    float radius_control = 8.0f;
+    float radius_window = 0.0f;
+    float radius_flyout = 0.0f;
+    float radius_control = 0.0f;
     float spacing_unit = 4.0f;
     float row_list = 28.0f;
     float row_header = 32.0f;
@@ -233,6 +233,9 @@ inline D2D1_COLOR_F GetAccentColor() noexcept {
 #endif
 #ifndef DWMWA_WINDOW_CORNER_PREFERENCE
 #define DWMWA_WINDOW_CORNER_PREFERENCE 33
+#endif
+#ifndef DWMWCP_DONOTROUND
+#define DWMWCP_DONOTROUND 1
 #endif
 #ifndef DWMWCP_ROUND
 #define DWMWCP_ROUND 2
@@ -310,89 +313,96 @@ inline Theme MakeTheme(bool dark, D2D1_COLOR_F accent) noexcept {
     t.danger_hover = WithAlpha(HexColor(0xC42B1C), 0.85f);
 
     if (dark) {
-        t.bg = HexColor(0x1A1A1A);
-        t.text = HexColor(0xFFFFFF);
-        t.text_secondary = WithAlpha(HexColor(0xFFFFFF), 0.6063f);
-        t.text_disabled = WithAlpha(HexColor(0xFFFFFF), 0.40f);
+        // 去饱和深色主题：深灰底 + 浅灰字，无彩色点缀。
+        const D2D1_COLOR_F muted = MixColor(accent, HexColor(0x808080), 0.65f);
+        t.accent = muted;
+        t.accent_hover = MixColor(muted, HexColor(0xFFFFFF), 0.15f);
+        t.accent_pressed = MixColor(muted, HexColor(0x000000), 0.20f);
+        t.bg = HexColor(0x202020);
+        t.text = HexColor(0xDCDCDC);
+        t.text_secondary = WithAlpha(HexColor(0xDCDCDC), 0.65f);
+        t.text_disabled = WithAlpha(HexColor(0xDCDCDC), 0.40f);
 
         t.fill_hover = WithAlpha(HexColor(0xFFFFFF), 0.08f);
-        t.fill_pressed = WithAlpha(HexColor(0xFFFFFF), 0.06f);
-        t.fill_selected = WithAlpha(accent, 0.15f);
-        t.fill_selected_inactive = WithAlpha(HexColor(0xFFFFFF), 0.08f);
-        // Lightened first: a dark or saturated accent at a plain alpha came out
-        // darker than the white hover wash, so selected rows blended in (#78).
-        const D2D1_COLOR_F lifted = MixColor(accent, HexColor(0xFFFFFF), 0.25f);
-        t.list_selected_start = WithAlpha(lifted, 0.45f);
-        t.list_selected_end = WithAlpha(lifted, 0.12f);
-        t.list_selected_outline = MixColor(accent, HexColor(0xFFFFFF), 0.35f);
-        t.fill_input = WithAlpha(HexColor(0xFFFFFF), 0.0605f);
-        t.fill_input_hover = WithAlpha(HexColor(0xFFFFFF), 0.0837f);
-        t.fill_input_focus = HexColor(0x1E1E1E);
-        t.fill_input_disabled = WithAlpha(HexColor(0xFFFFFF), 0.0419f);
+        t.fill_pressed = WithAlpha(HexColor(0xFFFFFF), 0.12f);
+        t.fill_selected = WithAlpha(muted, 0.55f);
+        t.fill_selected_inactive = WithAlpha(HexColor(0x808080), 0.35f);
+        t.list_selected_start = WithAlpha(muted, 0.55f);
+        t.list_selected_end = WithAlpha(muted, 0.55f);
+        t.list_selected_outline = muted;
+        t.fill_input = HexColor(0x2A2A2A);
+        t.fill_input_hover = HexColor(0x303030);
+        t.fill_input_focus = HexColor(0x2A2A2A);
+        t.fill_input_disabled = HexColor(0x262626);
 
-        t.stroke_card = WithAlpha(HexColor(0xFFFFFF), 0.045f);
-        t.stroke_divider = WithAlpha(HexColor(0xFFFFFF), 0.06f);
-        t.stroke_input_bottom = WithAlpha(HexColor(0xFFFFFF), 0.5442f);
+        t.stroke_card = HexColor(0x3A3A3A);
+        t.stroke_divider = HexColor(0x333333);
+        t.stroke_input_bottom = HexColor(0x6E6E6E);
 
-        t.surface_flyout = HexColor(0x2B2B2B);
-        t.surface_title = HexColor(0x1A1A1A);
-        t.surface_sheet = HexColor(0x202020);
-        t.surface_card = HexColor(0x272727);
-        t.surface_pane_inactive = WithAlpha(HexColor(0xFFFFFF), 0.72f);
+        t.surface_flyout = HexColor(0x2A2A2A);
+        t.surface_title = HexColor(0x202020);
+        t.surface_sheet = HexColor(0x242424);
+        t.surface_card = HexColor(0x2A2A2A);
+        t.surface_pane_inactive = WithAlpha(HexColor(0x808080), 0.50f);
 
-        t.header_bg = HexColor(0x1E1E1E);
-        t.header_sep = WithAlpha(HexColor(0xFFFFFF), 0.08f);
+        t.header_bg = HexColor(0x242424);
+        t.header_sep = HexColor(0x3A3A3A);
         t.hover_bg = t.fill_hover;
         t.selection_bg = t.fill_selected;
-        t.scrollbar_thumb = WithAlpha(HexColor(0xFFFFFF), 0.35f);
-        t.tab_bg = HexColor(0x1E1E1E);
-        t.tab_active_bg = HexColor(0x2C2C2C);
-        t.address_bg = HexColor(0x202020);
-        t.status_bg = HexColor(0x151515);
-        t.icon_folder = HexColor(0xFFCD70);
-        t.icon_file = HexColor(0x78B0E8);
+        t.scrollbar_thumb = HexColor(0x6E6E6E);
+        t.tab_bg = HexColor(0x242424);
+        t.tab_active_bg = HexColor(0x2E2E2E);
+        t.address_bg = HexColor(0x2A2A2A);
+        t.status_bg = HexColor(0x1E1E1E);
+        t.icon_folder = HexColor(0xB0B0B0);
+        t.icon_file = HexColor(0x909090);
         t.fps_bg = WithAlpha(HexColor(0x000000), 0.60f);
-        t.fps_text = HexColor(0xFFFFFF);
+        t.fps_text = HexColor(0xDCDCDC);
     } else {
-        t.bg = HexColor(0xF3F5F1);
-        t.text = HexColor(0x303B50);
-        t.text_secondary = HexColor(0x66748A);
-        t.text_disabled = HexColor(0x929CAE);
+        // 经典 Windows 浅色主题：#F0F0F0 底、深灰字、经典蓝 #0078D7 选中、浅灰悬停。
+        t.accent = HexColor(0x0078D7);
+        t.accent_hover = HexColor(0x0067B8);
+        t.accent_pressed = HexColor(0x005A9E);
+        t.accent_text = HexColor(0xFFFFFF);
+        t.bg = HexColor(0xF0F0F0);
+        t.text = HexColor(0x1A1A1A);
+        t.text_secondary = HexColor(0x666666);
+        t.text_disabled = HexColor(0x999999);
 
-        t.fill_hover = WithAlpha(HexColor(0x527D70), 0.055f);
-        t.fill_pressed = WithAlpha(HexColor(0x527D70), 0.09f);
-        t.fill_selected = WithAlpha(accent, 0.095f);
-        t.fill_selected_inactive = WithAlpha(HexColor(0x71877B), 0.075f);
-        t.list_selected_start = WithAlpha(accent, 0.30f);
-        t.list_selected_end = WithAlpha(accent, 0.08f);
-        t.list_selected_outline = WithAlpha(accent, 1.0f);
-        t.fill_input = WithAlpha(HexColor(0xFFFFFF), 0.90f);
+        t.fill_hover = HexColor(0xE5E5E5);
+        t.fill_pressed = HexColor(0xD0D0D0);
+        t.fill_selected = HexColor(0x0078D7);
+        t.fill_selected_inactive = HexColor(0xCCCCCC);
+        t.list_selected_start = HexColor(0x0078D7);
+        t.list_selected_end = HexColor(0x0078D7);
+        t.list_selected_outline = HexColor(0x0078D7);
+        t.fill_input = HexColor(0xFFFFFF);
         t.fill_input_hover = HexColor(0xFFFFFF);
         t.fill_input_focus = HexColor(0xFFFFFF);
-        t.fill_input_disabled = WithAlpha(HexColor(0xF2F5F0), 0.65f);
+        t.fill_input_disabled = HexColor(0xF0F0F0);
 
-        t.stroke_card = HexColor(0xDCE3D9);
-        t.stroke_divider = HexColor(0xE5EAE3);
-        t.stroke_input_bottom = WithAlpha(HexColor(0xA6B5A9), 0.65f);
+        t.stroke_card = HexColor(0xD4D4D4);
+        t.stroke_divider = HexColor(0xE0E0E0);
+        t.stroke_input_bottom = HexColor(0x7A7A7A);
 
         t.surface_flyout = HexColor(0xFFFFFF);
-        t.surface_pane_inactive = WithAlpha(HexColor(0x000000), 0.61f);
-        t.surface_title = HexColor(0xF1F3EE);
-        t.surface_sheet = HexColor(0xF7F8F4);
+        t.surface_pane_inactive = WithAlpha(HexColor(0x808080), 0.50f);
+        t.surface_title = HexColor(0xF0F0F0);
+        t.surface_sheet = HexColor(0xF0F0F0);
         t.surface_card = HexColor(0xFFFFFF);
 
-        t.header_bg = HexColor(0xF7F8F4);
-        t.header_sep = t.stroke_divider;
+        t.header_bg = HexColor(0xF0F0F0);
+        t.header_sep = HexColor(0xD4D4D4);
         t.hover_bg = t.fill_hover;
         t.selection_bg = t.fill_selected;
-        t.scrollbar_thumb = WithAlpha(HexColor(0x9BAF9E), 0.48f);
-        t.tab_bg = t.surface_title;
-        t.tab_active_bg = t.surface_sheet;
+        t.scrollbar_thumb = HexColor(0xC1C1C1);
+        t.tab_bg = HexColor(0xE4E4E4);
+        t.tab_active_bg = HexColor(0xFFFFFF);
         t.address_bg = HexColor(0xFFFFFF);
-        t.status_bg = t.surface_sheet;
+        t.status_bg = HexColor(0xF0F0F0);
         t.icon_folder = HexColor(0xBCA270);
-        t.icon_file = HexColor(0x839FC4);
-        t.fps_bg = WithAlpha(HexColor(0x303B50), 0.85f);
+        t.icon_file = HexColor(0x808080);
+        t.fps_bg = WithAlpha(HexColor(0x000000), 0.60f);
         t.fps_text = HexColor(0xFFFFFF);
     }
     return t;

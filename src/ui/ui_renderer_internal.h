@@ -186,6 +186,7 @@ void ClearTextWidthCache() {
     constexpr const wchar_t* kIconPaste = L"\xE77F";
     constexpr const wchar_t* kIconRename = L"\xE8AC";
     constexpr const wchar_t* kIconDelete = L"\xE74D";
+    constexpr const wchar_t* kIconTerminal = L"\xE756";
     constexpr const wchar_t* kIconSplit = L"\xE8A9";
     constexpr const wchar_t* kIconDetailsOpen = L"\xE8A0";
     constexpr const wchar_t* kIconDetailsClose = L"\xE89F";
@@ -2042,6 +2043,8 @@ struct SettingsLayout {
     D2D1_RECT_F text_render_row[3]{};
     D2D1_RECT_F ui_font_size_card{};
     D2D1_RECT_F ui_font_size_row[4]{};
+    D2D1_RECT_F ui_font_card{};
+    D2D1_RECT_F ui_font_choice{};
     D2D1_RECT_F tray_icon_card{};
     D2D1_RECT_F tray_icon_row[3]{};
     D2D1_RECT_F language_card{};

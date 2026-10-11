@@ -210,6 +210,7 @@ public:
     void HomeFolder(int action);
     void TextRendering(int index);
     void UiFontSize(int index);   // 0 small 90%, 1 default 100%, 2 large 112%, 3 larger 125%
+    void UiFontFamily(const std::wstring& family);  // empty = system default
     void TrayIconSize(int index);
     // Settings sliders: 0 interface transparency (0..90), 1 wallpaper blur (0..40).
     // Values apply live while dragging; EndSlider saves once.

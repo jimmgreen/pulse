@@ -90,19 +90,19 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
     create.icon_only=compact; create.drop_down=!compact;
     create.state.hovered=IsHovered(vm,HitTestResult::NewButton);
     painter_.DrawButton(create);
-    const wchar_t* glyphs[]={kIconCut,kIconCopy,kIconPaste,kIconRename,kIconDelete,kIconSplit,
+    const wchar_t* glyphs[]={kIconCut,kIconCopy,kIconPaste,kIconRename,kIconDelete,kIconTerminal,kIconSplit,
         vm.details_visible ? kIconDetailsClose : kIconDetailsOpen,L""};
     const HitTestResult::Region hits[]={HitTestResult::Cut,HitTestResult::Copy,HitTestResult::Paste,
-        HitTestResult::Rename,HitTestResult::Delete,HitTestResult::SplitButton,HitTestResult::DetailsToggle,HitTestResult::PaneColumnLayout};
-    for(int i=0;i<8;++i) {
+        HitTestResult::Rename,HitTestResult::Delete,HitTestResult::Terminal,HitTestResult::SplitButton,HitTestResult::DetailsToggle,HitTestResult::PaneColumnLayout};
+    for(int i=0;i<9;++i) {
         if (layout.commands[i].right <= layout.commands[i].left) continue;
         const bool enabled=i==2 || i>=5 || vm.pane.selected_count>0;
-        const bool selected=(i==5 && vm.pane_slots.size()>1) || (i==6 && vm.details_visible) ||
-            (i==7 && vm.pane.column_strip.enabled);
+        const bool selected=(i==6 && vm.pane_slots.size()>1) || (i==7 && vm.details_visible) ||
+            (i==8 && vm.pane.column_strip.enabled);
         DrawButton(layout.commands[i],theme,enabled && IsHovered(vm,hits[i]) ? theme.fill_hover :
             selected ? theme.fill_selected : kTransparent,
-            i==5 ? L"" : glyphs[i],L"",!enabled ? theme.text_disabled : selected ? theme.accent : theme.text_secondary,true,true);
-        if (i==5) {
+            i==6 ? L"" : glyphs[i],L"",!enabled ? theme.text_disabled : selected ? theme.accent : theme.text_secondary,true,true);
+        if (i==6) {
             // The split button shows the current layout (1 / 2 side by side /
             // 2 stacked / 3 / 4). A pane count that does not match the preset
             // (a custom split) is described from the pane rectangles instead.
@@ -118,7 +118,7 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
                 PaneHeaderIcon::SplitStacked,PaneHeaderIcon::SplitThree,PaneHeaderIcon::SplitFour};
             DrawPaneHeaderIcon(layout.commands[i],kIcons[preset],selected ? theme.accent : theme.text_secondary);
         }
-        if (i==7) DrawPaneHeaderIcon(layout.commands[i],PaneHeaderIcon::Columns,selected ? theme.accent : theme.text_secondary);
+        if (i==8) DrawPaneHeaderIcon(layout.commands[i],PaneHeaderIcon::Columns,selected ? theme.accent : theme.text_secondary);
     }
     if (layout.overflow.right > layout.overflow.left) {
         DrawButton(layout.overflow,theme,IsHovered(vm,HitTestResult::ToolbarMore) ? theme.fill_hover : kTransparent,

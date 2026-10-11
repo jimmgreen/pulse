@@ -394,7 +394,9 @@ bool WindowEffectUsesBackdrop(WindowEffect effect) noexcept {
 bool ApplyWindowEffect(HWND hwnd, WindowEffect effect, bool dark) noexcept {
     if (!hwnd) return false;
     UpdateWindowTheme(hwnd, dark);
-    const DWORD corner = DWMWCP_ROUND;
+    // 经典风格：禁用亚克力/Mica/壁纸背景，强制不透明；窗口直角。
+    effect = WindowEffect::None;
+    const DWORD corner = DWMWCP_DONOTROUND;
     DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
 
     if (IsHighContrast() || !compat::ModernWindows() || !IsWindows11OrLater()) {
@@ -1065,14 +1067,9 @@ ID2D1Bitmap* WindowMaterial::EnsureSampled(ID2D1DeviceContext* dc, const D2D1_RE
 
 bool WindowMaterial::DrawBackdrop(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
                                   WindowEffect effect, bool dark, const std::wstring& path) {
-    if (!dc || path.empty() || effect == WindowEffect::None || IsHighContrast() || !compat::ModernWindows()) {
-        return false;
-    }
-    ID2D1Bitmap* sampled = EnsureSampled(dc, dest, effect, dark, path);
-    if (!sampled) return false;
-    dc->DrawBitmap(sampled, dest, 1.0f, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
-                   nullptr, nullptr);
-    return true;
+    // 经典风格：始终不绘制壁纸/材质背景，保持不透明。
+    (void)dc; (void)dest; (void)effect; (void)dark; (void)path;
+    return false;
 }
 
 } // namespace pulse::ui

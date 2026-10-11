@@ -3,6 +3,7 @@
 #include "../common/localization.h"
 #include "about_info.h"
 #include "../ui/preview_format_catalog.h"
+#include "../ui/typography.h"
 #include "../ui/folder_picker_dialog.h"
 #include "../common/preview_packs.h"
 #include <shellapi.h>
@@ -44,7 +45,7 @@ int Dropdown(AppState& s, int index, std::vector<ui::FluentMenuItem> items) {
 }
 struct SettingDestination { I title;int page;unsigned expanded; };
 constexpr SettingDestination destinations[]={
-    {I::SettingsTheme,0,0},{I::SettingsThemeColor,0,0},{I::SettingsWindowEffect,0,0},{I::SettingsLanguage,0,0},{I::SettingsTextRender,0,0},{I::SettingsUiFontSize,0,0},
+    {I::SettingsTheme,0,0},{I::SettingsThemeColor,0,0},{I::SettingsWindowEffect,0,0},{I::SettingsLanguage,0,0},{I::SettingsTextRender,0,0},{I::SettingsUiFontSize,0,0},{I::SettingsUiFontFamily,0,0},
     {I::SettingsIntegration,0,0},{I::SettingsDefaultManager,0,0},{I::SettingsLaunch,0,0},{I::SettingsStartInTray,0,0},{I::SettingsKeepRunning,0,0},{I::SettingsNotifyIcon,0,0},
     {I::SettingsHomeFolder,0,0},{I::SettingsStartupOpen,0,0},{I::SettingsNewTabOpen,0,0},{I::SettingsCloseLastTab,0,0},{I::SettingsCloseTabDoubleClick,0,0},{I::SettingsRowHeight,0,0},{I::SettingsShowPerformance,0,0},
     {I::ListSmartDate,0,0},{I::ListZebraRows,0,0},{I::ListSizeBar,0,0},{I::ListTagNameColor,0,0},{I::ListSelectionOutline,0,0},{I::ListThumbnailBadges,0,0},{I::SettingsFolderSort,0,0},{I::SettingsConfirmDelete,0,0},
@@ -197,7 +198,27 @@ bool HandleSettingsControl(AppState& s,const H& hit) {
     case H::SettingsTheme: SetThemeMode(s,hit.index);break;
     case H::SettingsDropdown: {
         std::vector<ui::FluentMenuItem> items;
-        if(hit.index==0) {
+        if(hit.index==2) {
+            // 界面字体：跟随系统 + 系统已安装字体列表。
+            const std::wstring current=s.appPrefs.ui_font_family;
+            auto families=ui::typography::SystemFontFamilies(s.compositor.DwriteFactory());
+            {
+                ui::FluentMenuItem item;item.command=1;
+                item.text=l10n::Get(I::UiFontSystemDefault);item.checked=current.empty();
+                items.push_back(std::move(item));
+            }
+            int command=2;
+            for(const auto& name : families) {
+                ui::FluentMenuItem item;item.command=command++;
+                item.text=name;item.checked=(name==current);
+                items.push_back(std::move(item));
+                if(command>200) break;  // 菜单过长时截断
+            }
+            const std::vector<std::wstring> names=std::move(families);
+            int picked=Dropdown(s,hit.index,std::move(items));
+            if(picked==1) s.settings.UiFontFamily(L"");
+            else if(picked>=2 && picked-2 < static_cast<int>(names.size())) s.settings.UiFontFamily(names[picked-2]);
+        } else if(hit.index==0) {
             const I labels[]={I::EffectNone,I::EffectAcrylic,I::EffectMica,I::EffectMicaAlt};
             for(int i=0;i<ui::kWindowEffectCount;++i) {
                 auto item=Item(i+1,labels[i],s.appPrefs.window_effect==ui::WindowEffectId(static_cast<ui::WindowEffect>(i)));

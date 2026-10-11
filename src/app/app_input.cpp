@@ -2624,6 +2624,9 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             ShowRenameOverlay(*s);
         } else if (hit.region == ui::HitTestResult::Delete) {
             DeleteSelected(*s, (GetKeyState(VK_SHIFT) & 0x8000) != 0);
+        } else if (hit.region == ui::HitTestResult::Terminal) {
+            app::Tab* tab = ActiveTab(s);
+            if (tab && !tab->current_path.empty()) s->ops.OpenTerminal(ClipboardPath(tab->current_path));
         } else if (hit.region == ui::HitTestResult::GroupHeader ||
                    hit.region == ui::HitTestResult::GroupSelect) {
             ClickGroupHeader(*s, hit.pane_index, hit.index,

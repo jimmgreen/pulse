@@ -590,6 +590,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 L"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         }
         ui::typography::SetUiFontScale(s->appPrefs.ui_font_scale);
+        ui::typography::SetUiFontFamily(s->appPrefs.ui_font_family);
         ui::typography::InvalidateCaches();
         s->compositor.RecreateTextFormats(s->scale);
         if (s->safeMode) {

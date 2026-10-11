@@ -64,23 +64,11 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
     const float picker=kBloomPickerDip*scale;
     l.accent_picker=D2D1::RectF(right-16*scale-picker,l.accent_card.top+(96*scale-picker)/2,
         right-16*scale,l.accent_card.top+(96*scale+picker)/2);
-    // The tiles reuse SettingsEffect's existing hit regions and controller.
-    // A single tile selector avoids duplicate controls for the same setting.
-    const int effect_columns = right-left < 440*scale ? 2 : 4;
-    const int effect_rows = kWindowEffectCount/effect_columns;
-    const float effect_top = 66.0f;
-    l.effect_card=row(effect_top+82.0f*effect_rows+12.0f);
-    l.effect_choice = {};
-    const float effect_gap=8*scale;
-    const float effect_width=(right-left-32*scale-effect_gap*(effect_columns-1))/effect_columns;
-    for(int i=0;i<kWindowEffectCount;++i) {
-        const float tile_x=left+16*scale+(i%effect_columns)*(effect_width+effect_gap);
-        const float tile_y=l.effect_card.top+effect_top*scale+(i/effect_columns)*82*scale;
-        l.effect_row[i]=D2D1::RectF(tile_x,tile_y,tile_x+effect_width,tile_y+74*scale);
-    }
+    // 经典风格：隐藏窗口效果选择（强制不透明），不占布局空间。
     l.language_card=row(narrow ? 98.0f : 64.0f); l.language_choice=choice(l.language_card,176);
     l.text_render_card=row(narrow ? 98.0f : 64.0f); segments(l.text_render_card,l.text_render_row,3,282);
     l.ui_font_size_card=row(narrow ? 98.0f : 64.0f); segments(l.ui_font_size_card,l.ui_font_size_row,4,340);
+    l.ui_font_card=row(narrow ? 98.0f : 64.0f); l.ui_font_choice=choice(l.ui_font_card,220);
     l.group[0]=D2D1::RectF(left,l.theme_row.top,right,y);
     // Default file manager: a titled card of its own, independent of startup and background running.
     // Every choice stays visible, so users see what the master switch hands to Pulse.
@@ -184,14 +172,7 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
     l.disclosure[0]=row(64);
     if(vm.settings_expanded & 1u) {
         y+=10*scale;
-        l.wallpaper_card=row(124);
-        l.wallpaper_preview=D2D1::RectF(left+16*scale,l.wallpaper_card.top+12*scale,left+112*scale,l.wallpaper_card.top+68*scale);
-        const float cw=painter ? painter->MeasureButtonWidth(l10n::Get(l10n::StringId::Clear)) : 80*scale;
-        const float bw=painter ? painter->MeasureButtonWidth(l10n::Get(l10n::StringId::ChooseImage)) : 120*scale;
-        l.wallpaper_clear=D2D1::RectF(right-16*scale-cw,y-44*scale,right-16*scale,y-12*scale);
-        l.wallpaper_choose=D2D1::RectF(l.wallpaper_clear.left-8*scale-bw,y-44*scale,l.wallpaper_clear.left-8*scale,y-12*scale);
-        y+=8*scale; l.wallpaper_look_card=row(narrow ? 98.0f : 64.0f); segments(l.wallpaper_look_card,l.wallpaper_look_row,3,282);
-        y+=8*scale; l.wallpaper_blur_card=row(narrow ? 98.0f : 64.0f); segments(l.wallpaper_blur_card,l.wallpaper_blur_row,3,282);
+        // 经典风格：隐藏壁纸相关设置（壁纸/外观/模糊），不占布局空间。
         y+=8*scale; l.tray_icon_card=row(narrow ? 98.0f : 64.0f); segments(l.tray_icon_card,l.tray_icon_row,3,282);
         y+=8*scale; l.shell_tags_row=row(64);
         y+=8*scale; l.hidden_files_row=row(64);
