@@ -1315,7 +1315,7 @@ add_executable(pulse_shell_tag_com_test
     src/fs/fs_enum.cpp src/ui/view_layout.cpp)
 target_link_libraries(pulse_shell_tag_com_test PRIVATE pulse_localization pulse_runtime_log
     user32 shell32 ole32 uuid advapi32 shlwapi netapi32 psapi)
-add_executable(pulse_single_instance_audit_test src/bench/single_instance_audit_test.cpp src/app/single_instance_coordinator.cpp)
+add_executable(pulse_single_instance_audit_test src/bench/single_instance_audit_test.cpp src/app/single_instance_coordinator.cpp src/app/this_pc_argument.cpp)
 target_link_libraries(pulse_single_instance_audit_test PRIVATE ole32 user32)
 add_executable(pulse_preview_pan_lifetime_audit_test src/bench/preview_pan_lifetime_audit_test.cpp)
 target_link_libraries(pulse_preview_pan_lifetime_audit_test PRIVATE gdi32 user32)
