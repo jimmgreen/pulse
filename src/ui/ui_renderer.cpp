@@ -45,8 +45,11 @@ void MainRenderer::SetCompositor(Compositor* comp) {
     material_.SetCompositor(comp);
     painter_.SetCompositor(comp);
     if (!comp) {
-        // Closing one window must not empty the caches the others draw from.
-        if (owned_caches_) ResetRenderCaches(*owned_caches_);
+        icon_cache_.Reset();
+        open_with_icons_.Reset();
+        thumbnail_cache_.Reset();
+        folder_thumbnail_cache_.Reset();
+        details_cache_.Reset();
         preview_handler_.Reset();
         preview_mono_format_.reset();
     }
@@ -68,23 +71,12 @@ void MainRenderer::InvalidateTypography() {
     painter_.InvalidateTypography();
 }
 void MainRenderer::SetIconNotifyWindow(HWND hwnd) {
-    // The caches may be shared by every Pulse window (RenderCaches): each
-    // renderer registers its own window and leaves the others in place.
-    if (notify_hwnd_ && notify_hwnd_ != hwnd) {
-        icon_cache_.RemoveNotifyWindow(notify_hwnd_);
-        open_with_icons_.RemoveNotifyWindow(notify_hwnd_);
-        thumbnail_cache_.RemoveNotifyWindow(notify_hwnd_);
-        folder_thumbnail_cache_.RemoveNotifyWindow(notify_hwnd_);
-        details_cache_.RemoveNotifyWindow(notify_hwnd_);
-    }
     notify_hwnd_ = hwnd;
-    if (hwnd) {
-        icon_cache_.AddNotifyWindow(hwnd);
-        open_with_icons_.AddNotifyWindow(hwnd);
-        thumbnail_cache_.AddNotifyWindow(hwnd);
-        folder_thumbnail_cache_.AddNotifyWindow(hwnd);
-        details_cache_.AddNotifyWindow(hwnd);
-    }
+    icon_cache_.SetNotifyWindow(hwnd);
+    open_with_icons_.SetNotifyWindow(hwnd);
+    thumbnail_cache_.SetNotifyWindow(hwnd);
+    folder_thumbnail_cache_.SetNotifyWindow(hwnd);
+    details_cache_.SetNotifyWindow(hwnd);
     preview_handler_.SetNotifyWindow(hwnd);
 }
 
