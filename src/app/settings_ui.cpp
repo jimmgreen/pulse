@@ -7,6 +7,7 @@
 #include "../ui/folder_picker_dialog.h"
 #include "../common/preview_packs.h"
 #include <shellapi.h>
+#include <commdlg.h>
 #include <algorithm>
 #include <cwctype>
 #include <cmath>
