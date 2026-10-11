@@ -841,6 +841,7 @@ add_executable(pulse_app_controllers_test
     src/app/last_tab_close.cpp
     src/app/startup_launch.cpp
     src/ui/view_layout.cpp
+    src/ui/typography.cpp
     src/index/index_client.cpp
     src/index/network_agent_client.cpp)
 target_include_directories(pulse_app_controllers_test PRIVATE "${CMAKE_BINARY_DIR}/generated")
