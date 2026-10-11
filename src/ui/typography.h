@@ -1,5 +1,6 @@
 // Shared DirectWrite typography policy for Pulse-owned UI surfaces.
 #pragma once
+#include <atomic>
 
 #include <windows.h>
 #include <d2d1.h>
@@ -61,8 +62,18 @@ void SetUiFontFamily(const std::wstring& family) noexcept;
 std::wstring UiFontFamily() noexcept;
 // Process-wide UI font weight override (Settings > Interface font weight).
 // 400 = normal, 500 = medium, 700 = bold. Applies to every role except Icon.
-void SetUiFontWeight(int weight) noexcept;
-int UiFontWeight() noexcept;
+inline std::atomic_int g_ui_font_weight{400};
+inline std::atomic_uint64_t g_generation{1};
+inline void SetUiFontWeight(int weight) noexcept {
+    const int w = (weight == 500 || weight == 700) ? weight : 400;
+    if (g_ui_font_weight.load(std::memory_order_relaxed) != w) {
+        g_ui_font_weight.store(w, std::memory_order_relaxed);
+        g_generation.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+inline int UiFontWeight() noexcept {
+    return g_ui_font_weight.load(std::memory_order_relaxed);
+}
 // Enumerates installed font family names via the system font collection.
 std::vector<std::wstring> SystemFontFamilies(IDWriteFactory* factory);
 

@@ -24,12 +24,12 @@ bool g_fallback_traditional = false;
 bool TraditionalChinese() noexcept {
     return pulse::l10n::effective_language() == pulse::l10n::Language::ZhTW;
 }
-std::atomic_uint64_t g_generation{1};
+// (moved to header as inline)
 std::atomic_int g_text_render_mode{0};
 std::atomic_int g_ui_font_scale{100};
 std::wstring g_ui_font_family;  // empty = follow PreferredTextFamily() logic
 std::mutex g_ui_font_family_mutex;
-std::atomic_int g_ui_font_weight{400};
+// (moved to header as inline)
 
 template <typename T>
 void Release(T*& value) noexcept {
@@ -284,17 +284,9 @@ std::wstring UiFontFamily() noexcept {
     return g_ui_font_family;
 }
 
-void SetUiFontWeight(int weight) noexcept {
-    const int w = (weight == 500 || weight == 700) ? weight : 400;
-    if (g_ui_font_weight.load(std::memory_order_relaxed) != w) {
-        g_ui_font_weight.store(w, std::memory_order_relaxed);
-        g_generation.fetch_add(1, std::memory_order_relaxed);
-    }
-}
+// SetUiFontWeight moved to header as inline
 
-int UiFontWeight() noexcept {
-    return g_ui_font_weight.load(std::memory_order_relaxed);
-}
+// UiFontWeight moved to header as inline
 
 std::vector<std::wstring> SystemFontFamilies(IDWriteFactory* factory) {
     std::vector<std::wstring> names;
