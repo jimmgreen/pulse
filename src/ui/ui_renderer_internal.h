@@ -190,6 +190,7 @@ void ClearTextWidthCache() {
     constexpr const wchar_t* kIconDetailsOpen = L"\xE8A0";
     constexpr const wchar_t* kIconDetailsClose = L"\xE89F";
     constexpr const wchar_t* kIconView = L"\xE700";
+    constexpr const wchar_t* kIconTerminal = L"\xE756";
     constexpr const wchar_t* kIconSearch = L"\xE721";
     constexpr const wchar_t* kIconInfo = L"\xE946";
     constexpr const wchar_t* kIconFilter = L"\xE71C";
