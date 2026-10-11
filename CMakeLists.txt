@@ -283,7 +283,8 @@ add_executable(pulse_pack_installer_test
     src/bench/pack_installer_test.cpp
     src/app/pack_installer.cpp
     src/app/update_installer.cpp
-    src/app/update_transport.cpp)
+    src/app/update_transport.cpp
+    src/app/update_download_cleanup.cpp)
 target_include_directories(pulse_pack_installer_test PRIVATE "${CMAKE_BINARY_DIR}/generated")
 target_link_libraries(pulse_pack_installer_test PRIVATE pulse_runtime_log bcrypt cabinet shell32 user32 winhttp)
 
@@ -452,7 +453,7 @@ if(NOT PULSE_WITH_SELFTEST)
 endif()
 list(APPEND PULSE_APP_SOURCES src/index/network_agent_client.cpp)
 if(PULSE_APP_SOURCES)
-    add_executable(pulse WIN32 ${PULSE_APP_SOURCES})
+    add_executable(pulse WIN32 ${PULSE_APP_SOURCES} src/common/app_icon.rc)
     if(PULSE_WITH_SELFTEST)
         target_compile_definitions(pulse PRIVATE PULSE_WITH_SELFTEST=1)
         target_sources(pulse PRIVATE src/bench/startup_rollback_test.cpp)
