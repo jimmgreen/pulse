@@ -283,7 +283,8 @@ add_executable(pulse_pack_installer_test
     src/bench/pack_installer_test.cpp
     src/app/pack_installer.cpp
     src/app/update_installer.cpp
-    src/app/update_transport.cpp)
+    src/app/update_transport.cpp
+    src/app/update_download_cleanup.cpp)
 target_include_directories(pulse_pack_installer_test PRIVATE "${CMAKE_BINARY_DIR}/generated")
 target_link_libraries(pulse_pack_installer_test PRIVATE pulse_runtime_log bcrypt cabinet shell32 user32 winhttp)
 
@@ -1529,6 +1530,9 @@ target_link_libraries(pulse_single_instance_endpoint_test PRIVATE user32 advapi3
 add_executable(pulse_host_window_test src/bench/host_window_test.cpp src/app/host_window.cpp
     src/app/single_instance_coordinator.cpp src/app/shell_tag_command.cpp src/app/this_pc_argument.cpp)
 target_link_libraries(pulse_host_window_test PRIVATE user32 advapi32 ole32)
+add_executable(pulse_window_registry_test src/bench/window_registry_test.cpp)
+add_executable(pulse_render_cache_sharing_test src/bench/render_cache_sharing_test.cpp)
+target_link_libraries(pulse_render_cache_sharing_test PRIVATE user32 d3d11 d2d1)
 add_executable(pulse_shell_window_registry_retry_test src/bench/shell_window_registry_retry_test.cpp
     src/app/shell_window_registry.cpp)
 target_compile_definitions(pulse_shell_window_registry_retry_test PRIVATE PULSE_SHELL_WINDOW_REGISTRY_TEST=1)
