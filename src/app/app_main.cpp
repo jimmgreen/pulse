@@ -352,69 +352,6 @@ bool pulse::PrepareSessionForUpdate(AppState& s) {
     return s.updateSessionPrepared;
 }
 
-// System broadcasts (host_routing.h, multi-window M3c), handled once for the
-// process: the shared part runs once, the window part for every window that
-// shares `s`'s core (only `s` when it is not registered).
-// Close button, Alt+F4, WM_CLOSE (plan §8.1). One of several windows is
-// destroyed and takes only its own state along; the last window hides to the
-// tray when Pulse keeps running in the background, otherwise it exits.
-static void CloseMainWindow(AppState& s) {
-    const HWND hwnd = s.hwnd;
-    if (!s.core.windows.IsLastWindow(hwnd)) {
-        DestroyWindow(hwnd);
-        return;
-    }
-    SuspendContentSearches(s);
-    s.globalSearchWindow.Hide();
-    if (s.appPrefs.KeepsRunningInBackground()) HideMainWindowToTray(s);
-    else DestroyWindow(hwnd);
-}
-
-// Tray "Exit" and the palette's "Exit Pulse": every window closes, the most
-// recent one last so its WM_DESTROY stops the services and saves the session.
-// `s` may be gone once its window is destroyed; only the snapshot is used.
-static void ExitPulse(AppState& s) {
-    const HWND self = s.hwnd;
-    for (HWND window : s.core.windows.ExitOrder())
-        if (window != self && IsWindow(window)) DestroyWindow(window);
-    if (self && IsWindow(self)) DestroyWindow(self);
-}
-
-static LRESULT HandleSystemBroadcast(AppState& s, app::SystemBroadcast kind, WPARAM wParam) {
-    switch (kind) {
-    case app::SystemBroadcast::Theme:
-        if (s.themeOverride == ui::ThemeMode::Auto) s.darkMode = ui::ShouldUseDarkMode(s.themeOverride);
-        app::ForEachWindowSharingCore(s, [](AppState& window) {
-            if (window.appPrefs.accent_rgb.empty()) ApplyAccentFromPrefs(window, true);
-            ApplyAppWindowChrome(window);
-            InvalidateRect(window.hwnd, nullptr, FALSE);
-        });
-        return 0;
-    case app::SystemBroadcast::Volumes:
-        // The sidebar model is built once, so rebuild it here instead of
-        // waiting for a language switch or a restart.
-        RefreshSidebarModel(s);
-        app::ForEachWindowSharingCore(s, [](AppState& window) { InvalidateRect(window.hwnd, nullptr, FALSE); });
-        return 0;
-    case app::SystemBroadcast::QueryEndSession:
-        // Shutdown/logoff ends the process without WM_DESTROY; store the layout
-        // now. session.json holds one window, so it is saved once, from `s`
-        // (the most recent window when the host handles the broadcast).
-        SaveWindowSession(s, s.hwnd, true);
-        return TRUE;
-    case app::SystemBroadcast::EndSession:
-        if (s.startupComplete && wParam && !s.shot.active && !s.menushot && !s.isolatedTest) {
-            SaveWindowSession(s, s.hwnd, true);
-            s.places.Save();
-            s.ctxMenuPrefs.Save();
-        }
-        return 0;
-    case app::SystemBroadcast::None:
-        break;
-    }
-    return 0;
-}
-
 // Checked from the UI timer; skipped while a mouse drag (splitter, sidebar,
 // column, window move) is in progress so a half-finished resize is not stored.
 constexpr ULONGLONG kSessionAutosaveMs = 3000;
@@ -519,7 +456,6 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         s = reinterpret_cast<AppState*>(cs->lpCreateParams);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(s));
         s->hwnd = hwnd;
-        s->core.windows.Add(hwnd, s);
         s->tray_controller.Attach(hwnd, cs->hInstance, ServiceWindow(*s));
         InstallTrayRevealHook(*s);
 
@@ -654,7 +590,6 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 L"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         }
         ui::typography::SetUiFontScale(s->appPrefs.ui_font_scale);
-        ui::typography::SetUiFontFamily(s->appPrefs.ui_font_family);
         ui::typography::InvalidateCaches();
         s->compositor.RecreateTextFormats(s->scale);
         if (s->safeMode) {
@@ -1038,30 +973,36 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             return 0;
         }
         if (wParam == HTCLOSE) {
-            CloseMainWindow(*s);
+            SuspendContentSearches(*s);
+            s->globalSearchWindow.Hide();
+            if (s->appPrefs.KeepsRunningInBackground()) HideMainWindowToTray(*s);
+            else DestroyWindow(hwnd);
             return 0;
         }
         break;
     }
 
-    case WM_CLOSE:
-        if (!s) break;
-        CloseMainWindow(*s);
-        return 0;
+    case WM_CLOSE: {
+        if (s) { SuspendContentSearches(*s); s->globalSearchWindow.Hide(); }
+        if (s && s->appPrefs.KeepsRunningInBackground()) {
+            HideMainWindowToTray(*s);
+            return 0;
+        }
+        break;
+    }
 
     case app::TrayController::kCallbackMessage: {
         if (!s) return 0;
         const auto result = s->tray_controller.HandleCallback(lParam);
         if (result == app::TrayController::CallbackResult::ExitRequested)
-            ExitPulse(*s);
+            DestroyWindow(hwnd);
         return 0;
     }
 
     case WM_EXIT_PULSE:
         // Palette "Exit Pulse" (#57): the tray menu's full exit, reachable
         // when the icon is hidden. Posted so the palette unwinds first.
-        if (s) ExitPulse(*s);
-        else DestroyWindow(hwnd);
+        DestroyWindow(hwnd);
         return 0;
 
     case WM_DPICHANGED: {
@@ -1087,17 +1028,30 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     }
 
     case WM_SETTINGCHANGE:
+        if (s && (lParam == 0 ||
+                  wcscmp(reinterpret_cast<const wchar_t*>(lParam), L"ImmersiveColorSet") == 0 ||
+                  wcscmp(reinterpret_cast<const wchar_t*>(lParam), L"HighContrast") == 0)) {
+            if (s->themeOverride == ui::ThemeMode::Auto)
+                s->darkMode = ui::ShouldUseDarkMode(s->themeOverride);
+            if (s->appPrefs.accent_rgb.empty())
+                ApplyAccentFromPrefs(*s, true);
+            ApplyAppWindowChrome(*s);
+            InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        return 0;
+
     case WM_DEVICECHANGE:
-    case WM_QUERYENDSESSION:
-    case WM_ENDSESSION: {
-        // Every top-level window receives these; the host handles them once
-        // for all windows (HandleSystemBroadcast). Only without a host (tests,
-        // probes) does the window handle them itself.
-        const auto kind = app::ClassifySystemBroadcast(msg, wParam, lParam);
-        if (s && kind != app::SystemBroadcast::None && ServiceWindow(*s) == hwnd)
-            return HandleSystemBroadcast(*s, kind, wParam);
-        return msg == WM_QUERYENDSESSION ? TRUE : 0;
-    }
+        // A USB stick, a mounted image, or any new volume changes the drive
+        // list. The sidebar model is built once, so rebuild it here instead of
+        // waiting for a language switch or a restart.
+        if (s && (wParam == DBT_DEVICEARRIVAL || wParam == DBT_DEVICEREMOVECOMPLETE)) {
+            const auto* header = reinterpret_cast<const DEV_BROADCAST_HDR*>(lParam);
+            if (!header || header->dbch_devicetype == DBT_DEVTYP_VOLUME) {
+                RefreshSidebarModel(*s);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+        }
+        return 0;
 
     case WM_SHOWWINDOW:
         // Sent before the window becomes visible; restore full rate right away.
@@ -1105,7 +1059,6 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         break;
 
     case WM_ACTIVATE:
-        if (s && LOWORD(wParam) != WA_INACTIVE) s->core.windows.Touch(hwnd);
         if (s) s->renderer.NotifyPreviewActivate(LOWORD(wParam) != WA_INACTIVE);
         if (s && LOWORD(wParam) != WA_INACTIVE) {
             std::wstring kind, page;
@@ -1229,14 +1182,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             const ULONGLONG now = GetTickCount64();
             TickUpdates(*s, now);
             TickQuickPreviewSelection(*s, now);
-            if (TickSidebarRefresh(*s, now)) {
-                // The sidebar model is shared: whichever window's timer picks
-                // up the new drives, every window shows them.
-                dirty = true;
-                app::ForEachWindowSharingCore(*s, [s](AppState& window) {
-                    if (&window != s) InvalidateRect(window.hwnd, nullptr, FALSE);
-                });
-            }
+            if (TickSidebarRefresh(*s, now)) dirty = true;
             TickSessionAutosave(*s, hwnd, now);
             if (s->renderer.TickDetailsPreview(now)) dirty = true;
             if (s->renderer.TickMotion(now)) {
@@ -1612,11 +1558,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case WM_BITLOCKER_UNLOCK: {
         std::unique_ptr<app::BitLockerUnlockResult> result(
             reinterpret_cast<app::BitLockerUnlockResult*>(lParam));
-        // Every window showing the drive reloads or updates its banner.
-        if (s && result)
-            app::ForEachWindowSharingCore(*s, [&](AppState& window) {
-                ApplyBitLockerUnlock(window, result->root, result->unlocked);
-            });
+        if (s && result) ApplyBitLockerUnlock(*s, result->root, result->unlocked);
         return 0;
     }
 
@@ -2010,29 +1952,29 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 return 0;
             }
             s->places.SetNetworkStatus(result->unc, result->status, result->rtt_ms);
-            // The status is shared; every window showing the share updates.
-            const bool offline = result->status == fs::NetStatus::Offline;
-            app::ForEachWindowSharingCore(*s, [&](AppState& window) {
-                ForEachPane(window, [&](app::Pane& pane) {
+            if (result->status == fs::NetStatus::Offline) {
+                ForEachPane(*s, [&](app::Pane& pane) {
                     app::Tab* tab = pane.ActiveTab();
                     if (!tab || tab->current_path != result->unc) return;
-                    if (offline) {
-                        if (tab->snapshot) {
-                            tab->net_readonly = true;
-                            tab->banner_title = l10n::Get(l10n::StringId::Offline);
-                            tab->banner_message = l10n::Get(l10n::StringId::OfflineSnapshot);
-                        }
-                        return;
+                    if (tab->snapshot) {
+                        tab->net_readonly = true;
+                        tab->banner_title = l10n::Get(l10n::StringId::Offline);
+                        tab->banner_message = l10n::Get(l10n::StringId::OfflineSnapshot);
                     }
+                });
+            } else {
+                ForEachPane(*s, [&](app::Pane& pane) {
+                    app::Tab* tab = pane.ActiveTab();
+                    if (!tab || tab->current_path != result->unc) return;
                     tab->net_readonly = false;
                     if (tab->banner_title == l10n::Get(l10n::StringId::Offline)) {
                         tab->banner_title.clear();
                         tab->banner_message.clear();
                     }
                 });
-                InvalidateRect(window.hwnd, nullptr, FALSE);
-            });
+            }
             PumpUncProbe(*s);
+            InvalidateRect(hwnd, nullptr, FALSE);
         }
         delete result;
         return 0;
@@ -2059,39 +2001,46 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
 
+    case WM_QUERYENDSESSION:
+        // Shutdown/logoff ends the process without WM_DESTROY; store the layout now.
+        if (s) SaveWindowSession(*s, hwnd, true);
+        return TRUE;
+    case WM_ENDSESSION:
+        if (s && s->startupComplete && wParam && !s->shot.active && !s->menushot && !s->isolatedTest) {
+            SaveWindowSession(*s, hwnd, true);
+            s->places.Save();
+            s->ctxMenuPrefs.Save();
+        }
+        return 0;
+
     case WM_DESTROY: {
-        // Closing one of several windows (M3f) tears down what the window
-        // owns; services, saved state and the shared caches go with the last.
-        const bool last_window = !s || s->core.windows.IsLastWindow(hwnd);
-        if (last_window) app::shell_tags::RevokeCommandServer();
+        app::shell_tags::RevokeCommandServer();
         if (s) {
-            s->framePump.Stop();
-            if (last_window) {
-                s->probe_scheduler.Clear();
-                s->probeQueue.clear();
-                s->probeUnc.clear();
+            s->probe_scheduler.Clear();
+            s->probeQueue.clear();
+            s->probeUnc.clear();
 #ifdef PULSE_WITH_SELFTEST
-                extern void RecordP1StartupRollback(const AppState&);
-                RecordP1StartupRollback(*s);
+            extern void RecordP1StartupRollback(const AppState&);
+            RecordP1StartupRollback(*s);
 #endif
-                StopShellWindows(*s);
-                ShutdownGlobalSearch(*s);
-                StopShellRegistryWatch();
-                s->watches.Stop();
-                s->folderSizes.Stop();
-                s->settings.ResetUi();
-                s->settings.Stop();
-                s->update_checker.Stop();
-                s->update_installer.Stop();
-                s->contentSearch.Stop();
-                s->duplicateSearch.Stop();
-                s->networkIndex.Stop();
-                s->changes.client.Stop();
-                s->index.Stop();
-                CancelNetworkLocations(*s);
-                CancelSidebarRefresh(*s);
-                s->worker.Stop();
-            }
+            s->framePump.Stop();
+            StopShellWindows(*s);
+            ShutdownGlobalSearch(*s);
+            StopShellRegistryWatch();
+            s->watches.Stop();
+            s->folderSizes.Stop();
+            s->settings.ResetUi();
+            s->settings.Stop();
+            s->update_checker.Stop();
+            s->update_installer.Stop();
+            s->contentSearch.Stop();
+            s->duplicateSearch.Stop();
+            s->networkIndex.Stop();
+            s->changes.client.Stop();
+            s->index.Stop();
+            CancelNetworkLocations(*s);
+            CancelSidebarRefresh(*s);
+            s->worker.Stop();
             ShutdownDetailsSizeWalk(*s);
 
             if (s->dropTarget) {
@@ -2125,34 +2074,30 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 DeleteObject(s->editBrush);
                 s->editBrush = nullptr;
             }
-            if (last_window) {
-                // Visual-regression runs must never overwrite the user's real
-                // window, path, tray, or undo session.
-                if (s->startupComplete && !s->shot.active && !s->menushot && !s->isolatedTest) {
-                    // A hidden tag-only launch must not overwrite the real
-                    // window/tab session (SessionWritable); tags and places still save below.
-                    if (!s->updateSessionPrepared) SaveWindowSession(*s, hwnd, true);
-                    s->places.Save();
-                    s->ctxMenuPrefs.Save();
-                    if (!s->updateSessionPrepared) s->appPrefs.Save();
-                }
-
-                s->tray_controller.Detach();
-                s->ops.Stop();
-                ops::ShutdownElevatedTransferHelper();
-                app::SweepDropStages(app::DropStageRoot(), true);
-                s->single_instance.Release();
-
-                UnregisterAssocChangeNotify();
+            // Visual-regression runs must never overwrite the user's real
+            // window, path, tray, or undo session.
+            if (s->startupComplete && !s->shot.active && !s->menushot && !s->isolatedTest) {
+                // A hidden tag-only launch must not overwrite the real
+                // window/tab session (SessionWritable); tags and places still save below.
+                if (!s->updateSessionPrepared) SaveWindowSession(*s, hwnd, true);
+                s->places.Save();
+                s->ctxMenuPrefs.Save();
+                if (!s->updateSessionPrepared) s->appPrefs.Save();
             }
+
+            s->tray_controller.Detach();
+            s->ops.Stop();
+            ops::ShutdownElevatedTransferHelper();
+            app::SweepDropStages(app::DropStageRoot(), true);
+            s->single_instance.Release();
+
+            UnregisterAssocChangeNotify();
             s->renderer.SetIconNotifyWindow(nullptr);
             s->renderer.SetCompositor(nullptr);
-            if (last_window) ui::ResetRenderCaches(s->core.render_caches);
             s->compositor.Shutdown();
-            s->core.windows.Remove(hwnd);
             s->hwnd = nullptr;
         }
-        if (last_window) PostQuitMessage(0);
+        PostQuitMessage(0);
         return 0;
     }
     }
@@ -2801,26 +2746,19 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
                   "keep the system animations without DWM's duplicate caption buttons");
     // Hidden process window (host_window.h), created before the main window
     // so WM_CREATE can point services at it. It owns the single-instance
-    // endpoint (Pulse windows do not accept WM_COPYDATA) and forwards the
-    // process-level notifications in host_routing.h to the most recently
-    // active window (WindowRegistry).
+    // endpoint (the main window no longer accepts WM_COPYDATA) and forwards
+    // the process-level notifications in host_routing.h to the main window.
     const bool host_created = state.core.host.Create(hInstance,
         [&state](HWND host, UINT message, WPARAM wParam, LPARAM lParam) -> std::optional<LRESULT> {
-            AppState* const target = state.core.windows.MostRecent();
             if (app::IsHostRoutedMessage(message))
-                return target ? SendMessageW(target->hwnd, message, wParam, lParam) : 0;
-            if (const auto kind = app::ClassifySystemBroadcast(message, wParam, lParam);
-                kind != app::SystemBroadcast::None) {
-                if (target) return HandleSystemBroadcast(*target, kind, wParam);
-                return message == WM_QUERYENDSESSION ? TRUE : 0;
-            }
+                return state.hwnd ? SendMessageW(state.hwnd, message, wParam, lParam) : 0;
             if (message != 0 && message == app::TrayController::TaskbarCreatedMessage()) {
                 state.tray_controller.HandleTaskbarCreated();  // the icon lives on the host
                 return 0;
             }
             if (message != WM_COPYDATA) return std::nullopt;
-            if (!target || !state.single_instance.OwnsEndpoint(host)) return FALSE;
-            return HandleInstanceCopyData(*target, reinterpret_cast<COPYDATASTRUCT*>(lParam));
+            if (!state.hwnd || !state.single_instance.OwnsEndpoint(host)) return FALSE;
+            return HandleInstanceCopyData(state, reinterpret_cast<COPYDATASTRUCT*>(lParam));
         });
     if (!host_created) return 1;
     HWND hwnd = CreateWindowExW(
