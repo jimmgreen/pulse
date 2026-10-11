@@ -140,6 +140,7 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
         label(lay.accent_card,l10n::Get(I::SettingsThemeColor),l10n::Get(I::SettingsThemeColorDesc),L"\xE790",lay.accent_picker.left-16*scale_);
         if(vm.settings_bloom) {vm.settings_bloom->SetDisk(lay.accent_picker);vm.settings_bloom->Draw(dc,theme);}
         divider(lay.accent_card);
+        const I effects[]={I::EffectNone,I::EffectAcrylic,I::EffectMica,I::EffectMicaAlt};
         const I languages[]={I::LanguageSystem,I::LanguageZhCN,I::LanguageZhTW,I::LanguageEnUS};
         const auto dropdown=[&](D2D1_RECT_F r,D2D1_RECT_F c,I title,I desc,const std::wstring& value,int id) {
             label(r,l10n::Get(title),l10n::Get(desc),id==0 ? L"\xE790" : L"\xE8C1",c.left<r.left+100*scale_ ? r.right-16*scale_ : c.left-12*scale_);
@@ -148,60 +149,57 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
             control.state.hovered=IsHovered(vm,H::SettingsDropdown,id);
             painter_.DrawButton(control);
         };
-        // 经典风格：窗口效果选择已隐藏（强制不透明）。
+        label(lay.effect_card,l10n::Get(I::SettingsWindowEffect),l10n::Get(compat::ModernWindows() ? I::SettingsWindowEffectDesc : I::EffectUnavailable),L"\xE790",lay.effect_card.right-16*scale_);
+        for(int i=0;i<kWindowEffectCount;++i) {
+            const auto r=lay.effect_row[i];
+            auto preview=r;preview.bottom-=22*scale_;
+            const bool enabled=i==0 || compat::ModernWindows();
+            const bool selected=i==static_cast<int>(compat::ModernWindows() ? vm.window_effect : WindowEffect::None);
+            const bool hovered=enabled && IsHovered(vm,H::SettingsEffect,i);
+            const float tint[]={0.0f,0.22f,0.065f,0.16f};
+            auto background=BlendOver(WithAlpha(theme.accent,tint[i]),theme.surface_title);
+            if(!enabled) background=BlendOver(WithAlpha(theme.surface_sheet,0.6f),background);
+            MakeBrush(dc,background,brFillHover_);
+            dc->FillRoundedRectangle(D2D1::RoundedRect(preview,6*scale_,6*scale_),brFillHover_.get());
+            // A small window silhouette explains the material, not a fake DWM surface.
+            dc->PushAxisAlignedClip(preview,D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            if(i==1 || i==3) {
+                MakeBrush(dc,WithAlpha(theme.accent,vm.dark ? 0.18f : 0.13f),brFillHover_);
+                dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(preview.right-18*scale_,preview.top+11*scale_),
+                    36*scale_,26*scale_),brFillHover_.get());
+            }
+            const float inset=10*scale_;
+            auto window=D2D1::RectF(preview.left+inset,preview.top+9*scale_,preview.right-inset,preview.bottom-9*scale_);
+            const float plate_alpha=i==1 ? 0.48f : i==3 ? 0.72f : 0.96f;
+            MakeBrush(dc,WithAlpha(theme.surface_card,plate_alpha),brFillInput_);
+            dc->FillRoundedRectangle(D2D1::RoundedRect(window,3*scale_,3*scale_),brFillInput_.get());
+            MakeBrush(dc,WithAlpha(theme.text_secondary,0.30f),brTextSecondary_);
+            FillRoundedRect(dc,brTextSecondary_.get(),window.left+6*scale_,window.top+6*scale_,
+                (std::min)(18*scale_,(window.right-window.left)*0.18f),2*scale_,scale_);
+            MakeBrush(dc,WithAlpha(theme.accent,0.10f),brFillHover_);
+            FillRoundedRect(dc,brFillHover_.get(),window.right-22*scale_,window.top+5*scale_,
+                16*scale_,window.bottom-window.top-10*scale_,2*scale_);
+            dc->PopAxisAlignedClip();
+            MakeBrush(dc,selected ? theme.accent : hovered ? theme.text_secondary : theme.stroke_card,brStrokeCard_);
+            dc->DrawRoundedRectangle(D2D1::RoundedRect(preview,6*scale_,6*scale_),brStrokeCard_.get(),
+                selected ? 1.5f*scale_ : scale_);
+            if(selected) {
+                const auto center=D2D1::Point2F(preview.right-9*scale_,preview.bottom-9*scale_);
+                MakeBrush(dc,theme.accent,brAccent_);
+                dc->FillEllipse(D2D1::Ellipse(center,7*scale_,7*scale_),brAccent_.get());
+                DrawIconText(center.x-6*scale_,center.y-6*scale_,12*scale_,12*scale_,
+                    L"\xE73E",L"",theme.accent_text,0.6f);
+            }
+            painter_.DrawText(l10n::Get(effects[i]),D2D1::RectF(r.left,preview.bottom+3*scale_,r.right,r.bottom),
+                compositor_->SmallFormat(),!enabled ? theme.text_disabled : selected ? theme.accent : theme.text_secondary,
+                fluent::HorizontalAlignment::Center);
+        }
+        divider(lay.effect_card);
         dropdown(lay.language_card,lay.language_choice,I::SettingsLanguage,I::SettingsLanguageDesc,l10n::Get(languages[vm.settings_language]),1);divider(lay.language_card);
         const I text_render[]={I::TextRenderAuto,I::TextRenderSharp,I::TextRenderSmooth};const int text_render_values[]={0,1,2};
         segmented(lay.text_render_card,lay.text_render_row,text_render,text_render_values,vm.settings_text_render,H::SettingsTextRender,I::SettingsTextRender,I::SettingsTextRenderDesc);divider(lay.text_render_card);
         const I ui_font_size[]={I::UiFontSmall,I::UiFontDefault,I::UiFontLarge,I::UiFontLarger};const int ui_font_size_values[]={90,100,112,125};
-        segmented(lay.ui_font_size_card,lay.ui_font_size_row,ui_font_size,ui_font_size_values,vm.settings_ui_font_scale,H::SettingsUiFontSize,I::SettingsUiFontSize,I::SettingsUiFontSizeDesc,4,L"\xE8D2");divider(lay.ui_font_size_card);
-        dropdown(lay.ui_font_card,lay.ui_font_choice,I::SettingsUiFontFamily,I::SettingsUiFontFamilyDesc,vm.settings_ui_font_family.empty() ? l10n::Get(I::UiFontSystemDefault) : vm.settings_ui_font_family,2);
-        {
-            // 字重选择：常规(400)/中等(500)/粗体(700)，与字体下拉框并列。
-            const int w = ui::typography::UiFontWeight();
-            const wchar_t* label = w == 700 ? L"粗体 (700)" : w == 500 ? L"中等 (500)" : L"常规 (400)";
-            // 复用同一卡片内的第二个下拉位，索引 3。
-            D2D1_RECT_F rc = lay.ui_font_choice;
-            const float dw = 140.0f * scale_;
-            rc.left = rc.right - dw;
-            // 绘制字重下拉按钮
-            {
-                fluent::ButtonSpec control{};
-                control.bounds = rc;
-                control.text = label;
-                control.drop_down = true;
-                control.state.hovered = IsHovered(vm, H::SettingsDropdown, 3);
-                painter_.DrawButton(control);
-            }
-            // 注册命中区域（索引 3）
-            // 注意：实际命中注册由布局系统处理，这里仅绘制。
-        }
-        divider(lay.ui_font_card);
-        {
-            // 终端路径：显示当前路径，点击选择，右键清除。
-            draw_card(lay.terminal_card);
-            const std::wstring& tp = vm.settings_terminal_path;
-            label(lay.terminal_card, L"终端路径", tp.empty() ? L"系统默认" : tp, L"\xE8C1",
-                  lay.terminal_choice.left - 12 * scale_);
-            {
-                fluent::ButtonSpec control{};
-                control.bounds = lay.terminal_choice;
-                control.text = L"选择...";
-                control.state.hovered = IsHovered(vm, H::SettingsTerminalPath, 0);
-                painter_.DrawButton(control);
-            }
-            // 清除按钮（仅当有自定义路径时）
-            if (!tp.empty()) {
-                D2D1_RECT_F clearRc = lay.terminal_choice;
-                clearRc.left = clearRc.right + 8 * scale_;
-                clearRc.right = clearRc.left + 60 * scale_;
-                fluent::ButtonSpec clear{};
-                clear.bounds = clearRc;
-                clear.text = L"清除";
-                clear.state.hovered = IsHovered(vm, H::SettingsTerminalPath, 1);
-                painter_.DrawButton(clear);
-            }
-        }
-        divider(lay.terminal_card);
+        segmented(lay.ui_font_size_card,lay.ui_font_size_row,ui_font_size,ui_font_size_values,vm.settings_ui_font_scale,H::SettingsUiFontSize,I::SettingsUiFontSize,I::SettingsUiFontSizeDesc,4,L"\xE8D2");
         {
             text(l10n::Get(I::SettingsIntegration),lay.integration_section);
             draw_card(lay.integration_card);
@@ -311,7 +309,51 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
         toggle(lay.confirm_delete_row,I::SettingsConfirmDelete,I::SettingsConfirmDeleteDesc,L"\xE74D",vm.settings_confirm_delete,32);
         disclosure(lay.disclosure[0],I::SettingsAdvanced,I::SettingsAdvancedDesc,L"\xE713",0,true);
         if(vm.settings_expanded & 1u) {
-            // 经典风格：壁纸相关设置已隐藏。
+        draw_card(lay.wallpaper_card);
+        const auto& preview = lay.wallpaper_preview;
+        MakeBrush(dc, theme.fill_hover, brFillHover_);
+        FillRoundedRect(dc, brFillHover_.get(), preview.left, preview.top,
+                        preview.right - preview.left, preview.bottom - preview.top, 6.0f * scale_);
+        if (!vm.background_image.empty())
+            material_.DrawSourceCover(dc, preview, vm.background_image);
+        MakeBrush(dc, theme.stroke_card, brStrokeCard_);
+        dc->DrawRoundedRectangle(D2D1::RoundedRect(preview, 6.0f * scale_, 6.0f * scale_),
+                                 brStrokeCard_.get(), 1.0f);
+        const float text_left = preview.right + 12.0f * scale_;
+        const bool compact_wallpaper = lay.wallpaper_choose.top >
+            lay.wallpaper_card.top + 64.0f * scale_;
+        const float text_right = compact_wallpaper
+            ? lay.wallpaper_card.right - 16.0f * scale_
+            : lay.wallpaper_choose.left - 12.0f * scale_;
+        MakeBrush(dc, theme.text, brText_);
+        DrawTextRect(dc, compositor_->TextFormat(), brText_.get(),
+                     pulse::l10n::Get(pulse::l10n::StringId::SettingsWallpaper),
+                     text_left, lay.wallpaper_card.top + 18.0f * scale_,
+                     (std::max)(40.0f * scale_, text_right - text_left), 22.0f * scale_);
+        const std::wstring wallpaper_desc = vm.background_image.empty()
+            ? pulse::l10n::Get(pulse::l10n::StringId::SettingsWallpaperDesc)
+            : FileNameOf(vm.background_image);
+        MakeBrush(dc, theme.text_secondary, brTextSecondary_);
+        DrawTextRect(dc, compositor_->SmallFormat(), brTextSecondary_.get(), wallpaper_desc,
+                     text_left, lay.wallpaper_card.top + 42.0f * scale_,
+                     (std::max)(40.0f * scale_, text_right - text_left), 18.0f * scale_);
+        fluent::ControlState choose{};
+        choose.hovered = IsHovered(vm, HitTestResult::SettingsWallpaper, 0);
+        painter_.DrawButton({ lay.wallpaper_choose,
+                              pulse::l10n::Get(pulse::l10n::StringId::ChooseImage), {},
+                              fluent::ButtonKind::Standard, choose });
+        fluent::ControlState clear{};
+        clear.enabled = !vm.background_image.empty();
+        clear.hovered = clear.enabled && IsHovered(vm, HitTestResult::SettingsWallpaper, 1);
+        painter_.DrawButton({ lay.wallpaper_clear,
+                              pulse::l10n::Get(pulse::l10n::StringId::Clear), {},
+                              fluent::ButtonKind::Standard, clear });
+
+
+            const I looks[]={I::WallpaperLookSubtle,I::WallpaperLookBalanced,I::WallpaperLookVivid};const int look_ticks[]={25,50,75};
+            draw_card(lay.wallpaper_look_card);slider(lay.wallpaper_look_card,lay.wallpaper_look_row,vm.wallpaper_look,kPanelTransparencyMax,look_ticks,looks,H::SettingsWallpaperLook,I::SettingsWallpaperLook,I::SettingsWallpaperLookDesc,L"%");
+            const I blurs[]={I::WallpaperBlurOff,I::WallpaperBlurLight,I::WallpaperBlurStrong};const int blur_ticks[]={0,14,28};
+            draw_card(lay.wallpaper_blur_card);slider(lay.wallpaper_blur_card,lay.wallpaper_blur_row,vm.wallpaper_blur,kWallpaperBlurMax,blur_ticks,blurs,H::SettingsWallpaperBlur,I::SettingsWallpaperBlur,I::SettingsWallpaperBlurDesc,L" px");
             const I sizes[]={I::SettingsTraySmall,I::SettingsTrayStandard,I::SettingsTrayLarge};const int icons[]={40,48,56};
             draw_card(lay.tray_icon_card);segmented(lay.tray_icon_card,lay.tray_icon_row,sizes,icons,vm.settings_tray_icon,H::SettingsTrayIcon,I::SettingsTrayIcon,I::SettingsTrayIconDesc);
             draw_card(lay.shell_tags_row);toggle(lay.shell_tags_row,I::SettingsShellTags,I::SettingsShellTagsDesc,L"\xE8EC",vm.settings_shell_tags,21);
