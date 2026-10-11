@@ -10,6 +10,7 @@
 #include "../common/preview_packs.h"
 #include "pack_catalog.h"
 #include "../ui/quick_preview_command.h"
+#include "../ui/typography.h"
 
 #include <algorithm>
 #include <array>
