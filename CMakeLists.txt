@@ -1521,6 +1521,7 @@ add_executable(pulse_config_capacity_test src/bench/config_capacity_test.cpp
 target_link_libraries(pulse_config_capacity_test PRIVATE user32 shell32 ole32 uuid advapi32 shlwapi netapi32 pulse_localization pulse_runtime_log)
 
 add_executable(pulse_virtual_worker_consumers_test src/bench/virtual_worker_consumers_test.cpp)
+target_link_libraries(pulse_virtual_worker_consumers_test PRIVATE pulse_runtime_log)
 
 target_sources(pulse_persistence_test PRIVATE src/app/this_pc_argument.cpp)
 target_sources(pulse_app_controllers_test PRIVATE src/app/this_pc_argument.cpp src/app/update_download_cleanup.cpp)
