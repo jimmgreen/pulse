@@ -1405,6 +1405,7 @@ add_executable(pulse_enum_cancel_test src/bench/enum_cancel_test.cpp)
 target_link_libraries(pulse_enum_cancel_test PRIVATE pulse_localization shell32 shlwapi netapi32)
 
 add_executable(pulse_worker_enum_cancel_test src/bench/worker_enum_cancel_test.cpp)
+target_link_libraries(pulse_worker_enum_cancel_test PRIVATE pulse_runtime_log)
 
 add_executable(pulse_shell_benchmark_test src/bench/shell_benchmark_test.cpp)
 target_link_libraries(pulse_shell_benchmark_test PRIVATE ole32 shell32 uuid comctl32)
