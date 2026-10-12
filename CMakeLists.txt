@@ -1640,7 +1640,7 @@ target_link_libraries(pulse_update_download_cleanup_test PRIVATE bcrypt crypt32 
 
 add_executable(pulse_places_json_roundtrip_test src/bench/places_json_roundtrip_test.cpp
     src/app/places.cpp src/app/tag_ads_sync.cpp src/fs/fs_enum.cpp src/ui/view_layout.cpp)
-target_link_libraries(pulse_places_json_roundtrip_test PRIVATE user32 shell32 ole32 uuid advapi32 shlwapi netapi32 pulse_localization)
+target_link_libraries(pulse_places_json_roundtrip_test PRIVATE user32 shell32 ole32 uuid advapi32 shlwapi netapi32 pulse_localization pulse_runtime_log)
 
 add_executable(pulse_index_exclusion_concurrency_test src/bench/index_exclusion_concurrency_test.cpp ${query_narrow_sources})
 target_include_directories(pulse_index_exclusion_concurrency_test PRIVATE "${CMAKE_BINARY_DIR}/generated")
