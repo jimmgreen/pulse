@@ -29,6 +29,9 @@ public:
     void SetCallbacks(Callbacks callbacks) { callbacks_ = std::move(callbacks); }
 
     void ToggleGroupCollapse(WindowTabs& tabs, int group_id);
+    // Opens a new tab at the end of the group, carrying the last member's
+    // folder. Shared by the group menu and the chip hover card.
+    void NewTabInGroup(WindowTabs& tabs, int group_id);
     void ShowGroupMenu(WindowTabs& tabs, int group_id, POINT screen_pt, ui::FluentMenu& menu);
     void ShowTabMenu(WindowTabs& tabs, int tab_index, POINT screen_pt, ui::FluentMenu& menu);
 

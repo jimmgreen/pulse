@@ -131,4 +131,15 @@ float TabFlashAmount(const AppState& s, const app::LayoutTab* key);
 bool SyncTagGroups(AppState& s);
 // Advances the pulse; false once it has finished (or none is running).
 bool TickTabFlash(AppState& s);
+
+// Remembers `outgoing`, which has just stopped being the active tab, as the
+// last tab used inside its group. The group chip's hover card draws that tab
+// with a faint check when the group no longer owns the active tab. Passing a
+// tab that is still active is harmless (it is the most recent one in its
+// group); passing an ungrouped or null tab records nothing.
+void RememberGroupActivation(AppState& s, const app::LayoutTab* outgoing);
+// Drops remembered tabs that are no longer members of their group, which covers
+// tabs closed inside the tab controller and groups that lost their members.
+// Addresses are only compared, so a stale pointer is never dereferenced.
+void PruneGroupActivations(AppState& s);
 } // namespace pulse

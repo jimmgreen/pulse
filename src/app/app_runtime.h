@@ -130,6 +130,8 @@ std::wstring TooltipForHover(AppState& s);
 // Records what the pointer is over. Both mouse-move paths (client and frame)
 // must call this, or a hover field silently stops updating.
 void ApplyHoverTarget(AppState& s, const ui::HitTestResult& hit);
+// Hides the group-chip hover card. Safe to call when it is already hidden.
+void HideTabGroupCard(AppState& s);
 std::wstring EntryFullPath(const app::Tab& tab, int index);
 std::vector<std::wstring> SelectedFullPaths(const app::Tab& tab);
 std::wstring TagDiscoveryKey(std::wstring path);

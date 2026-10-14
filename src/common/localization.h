@@ -911,6 +911,7 @@ enum class StringId : UINT {
     TabCloseRight = IDS_TAB_CLOSE_RIGHT,
     TabGroupName = IDS_TAB_GROUP_NAME,
     TabGroupNew = IDS_TAB_GROUP_NEW,
+    TabGroupEdit = IDS_TAB_GROUP_EDIT,
     TabUngroup = IDS_TAB_UNGROUP,
     TabGroupClose = IDS_TAB_GROUP_CLOSE,
     TabMenuSearch = IDS_TAB_MENU_SEARCH,

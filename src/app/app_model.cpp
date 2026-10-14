@@ -1912,7 +1912,57 @@ void FillWindowTabStrip(ui::WindowViewModel& vm, const WindowTabs& tabs) {
         }
         vm.tabs.push_back(std::move(tv));
     }
+    // A collapsed chip hides its members, so record which group owns the active
+    // tab: the chip renders itself as the selected tab for that group.
+    if (tabs.active < tabs.items.size()) {
+        const int active_group = tabs.items[tabs.active]->tab_group;
+        if (active_group != 0) {
+            for (auto& gv : vm.tab_groups) {
+                if (gv.id == active_group) { gv.has_active = true; break; }
+            }
+        }
+    }
     vm.active_tab = static_cast<int>(tabs.active);
+}
+
+std::vector<ui::TabGroupCardRow> TabGroupCardRows(const WindowTabs& tabs, int group_id,
+                                                  const LayoutTab* group_last_active) {
+    std::vector<ui::TabGroupCardRow> rows;
+    if (group_id == 0) return rows;
+    const TabGroup* group = nullptr;
+    for (const auto& candidate : tabs.tab_groups) {
+        if (candidate.id == group_id) { group = &candidate; break; }
+    }
+    if (!group) return rows;
+    // An expanded group already shows its tabs in the strip; only a collapsed
+    // chip needs the card to name them.
+    if (group->collapsed) {
+        const bool owns_active =
+            tabs.active < tabs.items.size() && tabs.items[tabs.active]->tab_group == group_id;
+        for (size_t i = 0; i < tabs.items.size(); ++i) {
+            if (tabs.items[i]->tab_group != group_id) continue;
+            ui::TabGroupCardRow row;
+            row.text = LayoutTabTitle(*tabs.items[i]);
+            row.tab_index = static_cast<int>(i);
+            // "You are here" wins over "you were here": the memory of the
+            // previous tab only shows while this group has no active tab.
+            row.active = i == tabs.active;
+            row.was_active = !owns_active && tabs.items[i].get() == group_last_active;
+            rows.push_back(std::move(row));
+        }
+        if (!rows.empty()) rows.back().separator_after = true;
+    }
+    ui::TabGroupCardRow new_tab;
+    new_tab.text = pulse::l10n::Get(pulse::l10n::StringId::TabGroupNew);
+    new_tab.glyph = L"\xE710";
+    new_tab.new_tab = true;
+    rows.push_back(std::move(new_tab));
+    ui::TabGroupCardRow edit;
+    edit.text = pulse::l10n::Get(pulse::l10n::StringId::TabGroupEdit);
+    edit.glyph = L"\xE70F";
+    edit.edit = true;
+    rows.push_back(std::move(edit));
+    return rows;
 }
 
 ui::WindowViewModel BuildWindowViewModel(const Pane& pane,

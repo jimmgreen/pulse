@@ -362,6 +362,34 @@ int main() {
               "M7f: no closedWindows[] when nothing was closed");
     }
 
+    {
+        // The group chip hover card: a folded group lists its members (the
+        // active one marked) followed by the two action rows; an expanded group
+        // already shows its tabs in the strip, so the card keeps only the
+        // actions.
+        WindowTabs card_tabs;
+        std::vector<GroupSessionSnapshot> card_groups{
+            { 4, L"work", 0x00112233, true },
+        };
+        LayoutTabSnapshot card_member;
+        card_member.group = 4;
+        card_member.panes.push_back({ L"C:\\Windows", pulse::ui::ViewMode::Details, {}, {} });
+        RestoreWindowTabs(card_tabs, { card_member }, card_groups, 0,
+            [](Tab& tab, const std::wstring& loaded) { tab.current_path = loaded; });
+        const auto rows = TabGroupCardRows(card_tabs, 4, nullptr);
+        Check(rows.size() == 3 && rows[0].tab_index == 0 && rows[0].active &&
+                  rows[1].new_tab && rows[2].edit,
+              "group card: a folded group lists its member and the two actions");
+        Check(rows[0].separator_after,
+              "group card: the member run carries the divider above the actions");
+        card_tabs.tab_groups[0].collapsed = false;
+        const auto expanded = TabGroupCardRows(card_tabs, 4, nullptr);
+        Check(expanded.size() == 2 && expanded[0].new_tab && expanded[1].edit,
+              "group card: an expanded group keeps only the actions");
+        Check(TabGroupCardRows(card_tabs, 5, nullptr).empty(),
+              "group card: an unknown group shows nothing");
+    }
+
     std::printf("session_window_test: %d failure(s)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

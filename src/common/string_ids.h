@@ -1497,3 +1497,5 @@
 #define IDS_HELP_REOPEN_CLOSED 2650
 #define IDS_HELP_SWITCH_WINDOW 2651
 #define IDS_HELP_WINDOW_OVERVIEW 2652
+// Tab-group hover card: the trailing "Edit group" action row.
+#define IDS_TAB_GROUP_EDIT 2653

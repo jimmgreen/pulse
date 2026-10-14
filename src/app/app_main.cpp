@@ -334,8 +334,19 @@ static app::WindowSessionSnapshot CaptureSessionWindow(AppState& w) {
     snap.layout = CaptureWindowLayout(w);
     RememberLayoutFocus(w);
     snap.active_layout_tab = static_cast<int>(w.window_tabs.active);
-    for (const auto& group : w.window_tabs.tab_groups)
-        snap.tab_groups.push_back({group.id, group.name, group.color_rgb, group.collapsed});
+    for (const auto& group : w.window_tabs.tab_groups) {
+        app::GroupSessionSnapshot group_snap{group.id, group.name, group.color_rgb,
+                                             group.collapsed};
+        if (auto it = w.lastActiveInGroup.find(group.id); it != w.lastActiveInGroup.end()) {
+            for (size_t i = 0; i < w.window_tabs.items.size(); ++i) {
+                if (w.window_tabs.items[i].get() == it->second) {
+                    group_snap.last_active = static_cast<int>(i);
+                    break;
+                }
+            }
+        }
+        snap.tab_groups.push_back(std::move(group_snap));
+    }
     for (const auto& layout : w.window_tabs.items)
         if (layout) snap.layout_tabs.push_back(app::CaptureLayoutTab(*layout));
     snap.identity = w.identity;
@@ -358,8 +369,23 @@ static app::SessionSnapshot CaptureWindowSession(AppState& requested, HWND reque
     if (tab) snap.active_path = tab->current_path;
     RememberLayoutFocus(s);
     snap.active_layout_tab = static_cast<int>(s.window_tabs.active);
-    for (const auto& group : s.window_tabs.tab_groups)
-        snap.tab_groups.push_back({group.id, group.name, group.color_rgb, group.collapsed});
+    for (const auto& group : s.window_tabs.tab_groups) {
+        app::GroupSessionSnapshot group_snap{group.id, group.name, group.color_rgb,
+                                             group.collapsed};
+        // The live memory is a tab pointer; the session stores the position in
+        // the layout list, so the hover card can still mark "the tab you last
+        // used here" after a restart.
+        if (auto it = s.lastActiveInGroup.find(group.id);
+            it != s.lastActiveInGroup.end()) {
+            for (size_t i = 0; i < s.window_tabs.items.size(); ++i) {
+                if (s.window_tabs.items[i].get() == it->second) {
+                    group_snap.last_active = static_cast<int>(i);
+                    break;
+                }
+            }
+        }
+        snap.tab_groups.push_back(std::move(group_snap));
+    }
     for (const auto& layout : s.window_tabs.items)
         snap.layout_tabs.push_back(app::CaptureLayoutTab(*layout));
     snap.tray = s.tray;
@@ -1021,6 +1047,18 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (!s->shot.active && !s->session_layout_tabs.empty()) {
                 RestoreTabsFromSnapshots(*s, s->session_layout_tabs, s->session_tab_groups,
                                          s->session_active_layout_tab);
+                // Rebuild the group activation memory: the session kept each group's
+                // last-used tab as a position in the restored layout list.
+                s->lastActiveInGroup.clear();
+                for (const auto& group : s->session_tab_groups) {
+                    if (group.last_active < 0 ||
+                        static_cast<size_t>(group.last_active) >= s->window_tabs.items.size())
+                        continue;
+                    const app::LayoutTab* tab =
+                        s->window_tabs.items[static_cast<size_t>(group.last_active)].get();
+                    // A tab that changed groups since the save must not be claimed.
+                    if (tab->tab_group == group.id) s->lastActiveInGroup[group.id] = tab;
+                }
                 if (!s->session_path.empty())
                     RememberPath(*s, s->session_path);
                 else if (app::Tab* t = ActiveTab(*s))
@@ -1177,6 +1215,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             s->hoverSubIndex = -1;
             s->hoverSince = 0;
             s->tooltipText.clear();
+            HideTabGroupCard(*s);
             InvalidateRect(hwnd, nullptr, FALSE);
         }
         return 0;
@@ -1319,6 +1358,8 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             s->compositor.Resize(LOWORD(lParam), HIWORD(lParam));
             s->maximized = (wParam == SIZE_MAXIMIZED);
             if (wParam != SIZE_MINIMIZED && IsWindowVisible(hwnd)) NoteUiActivity(*s, hwnd, true);
+            // The card is anchored to the chip; a resize invalidates that.
+            HideTabGroupCard(*s);
             if (s->addressEditing) LayoutAddressEditor(*s);
             if (s->filterEditing && !s->filterFocusPending) LayoutFilterEditor(*s);
             if (!s->tagRenameId.empty()) LayoutTagRenameOverlay(*s);
@@ -1588,6 +1629,42 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     if (page == 0 && s->bloom_accent.Tick(0.016f)) dirty = true;
                     if (page == 4 && s->duplicateScan.scanning) dirty = true;
                 }
+            }
+            // Edge-style group hover card: 150 ms dwell on a chip opens it.
+            // Leaving both the chip and the card, or starting a tab drag,
+            // closes it.
+            const bool group_dragging = s->tabDragging || s->tabDragPending;
+            const bool on_chip =
+                s->hoverRegion == static_cast<int>(ui::HitTestResult::TabGroup);
+            const bool on_card =
+                s->hoverRegion == static_cast<int>(ui::HitTestResult::TabGroupCardRow) ||
+                s->hoverRegion == static_cast<int>(ui::HitTestResult::TabGroupCard);
+            if (s->groupCardGroupId != 0 &&
+                (group_dragging || (!on_chip && !on_card))) {
+                HideTabGroupCard(*s);
+                dirty = true;
+            }
+            if (!group_dragging && on_chip && s->groupCardSince != 0 &&
+                GetTickCount64() - s->groupCardSince >= 150 && s->hoverControlIndex >= 0 &&
+                s->hoverControlIndex <
+                    static_cast<int>(s->window_tabs.tab_groups.size())) {
+                const int group_id = s->window_tabs.tab_groups[
+                    static_cast<size_t>(s->hoverControlIndex)].id;
+                if (s->groupCardGroupId != group_id) {
+                    s->groupCardGroupId = group_id;
+                    s->groupCardChipIndex = s->hoverControlIndex;
+                    s->groupCardHoverRow = -1;
+                    // The card replaces any hint the chip would have shown.
+                    s->tooltipText.clear();
+                    dirty = true;
+                }
+            }
+            const int card_row =
+                s->hoverRegion == static_cast<int>(ui::HitTestResult::TabGroupCardRow)
+                    ? s->hoverControlIndex : -1;
+            if (s->groupCardGroupId != 0 && card_row != s->groupCardHoverRow) {
+                s->groupCardHoverRow = card_row;
+                dirty = true;
             }
             // 150 ms: the icon rail relies on the hint to name each row, and the
             // old 400 ms delay read as "no tooltip at all".

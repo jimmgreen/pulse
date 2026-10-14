@@ -114,6 +114,26 @@ void TabController::ToggleGroupCollapse(WindowTabs& tabs, int group_id) {
     Changed();
 }
 
+void TabController::NewTabInGroup(WindowTabs& tabs, int group_id) {
+    if (group_id == 0) return;
+    int last_member = -1;
+    for (int i = 0; i < static_cast<int>(tabs.items.size()); ++i) {
+        if (tabs.items[static_cast<size_t>(i)]->tab_group == group_id) last_member = i;
+    }
+    if (last_member < 0) return;
+    const Tab* folder = tabs.items[static_cast<size_t>(last_member)]->ActiveFolder();
+    const std::wstring path = folder ? folder->current_path : L"C:\\";
+    // A folded group hides its members, so a tab added to it would land on a
+    // strip that shows nothing: unfold first. NewTabAt makes the new tab
+    // active, which is why the unfold has to happen here and not at one of the
+    // two call sites (the group menu and the chip card).
+    if (TabGroup* group = FindGroup(tabs, group_id); group && group->collapsed) {
+        group->collapsed = false;
+        Changed();
+    }
+    OpenCreatedTab(tabs, static_cast<size_t>(last_member + 1), path, group_id);
+}
+
 uint32_t TabController::FirstUnusedColor(const WindowTabs& tabs) const {
     for (uint32_t color : kPalette) {
         const bool used = std::any_of(tabs.tab_groups.begin(), tabs.tab_groups.end(),
@@ -175,15 +195,7 @@ void TabController::ShowGroupMenu(WindowTabs& tabs, int group_id, POINT screen_p
             current->color_rgb = kPalette[command - CmdTabColorBase];
         }
     } else if (command == CmdTabGroupNewTab) {
-        int last_member = -1;
-        for (int i = 0; i < static_cast<int>(tabs.items.size()); ++i) {
-            if (tabs.items[static_cast<size_t>(i)]->tab_group == id) last_member = i;
-        }
-        if (last_member >= 0) {
-            const Tab* folder = tabs.items[static_cast<size_t>(last_member)]->ActiveFolder();
-            OpenCreatedTab(tabs, static_cast<size_t>(last_member + 1),
-                           folder ? folder->current_path : L"C:\\", id);
-        }
+        NewTabInGroup(tabs, id);
     } else if (command == CmdTabGroupUngroup) {
         RemoveGroup(tabs, id);
     } else if (command == CmdTabGroupClose) {

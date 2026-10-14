@@ -1934,6 +1934,22 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
         s.sidebarHiddenMask, s.starredExpanded, &s.sidebarOrder,
         s.sidebarQuickAccessHiddenMask);
     app::FillWindowTabStrip(vm, s.window_tabs);
+    if (s.groupCardGroupId != 0) {
+        // The tab controller can close tabs without going through the AppState
+        // wrappers, so re-check the remembered tabs before reading them.
+        PruneGroupActivations(s);
+        const app::LayoutTab* last_active = nullptr;
+        if (auto it = s.lastActiveInGroup.find(s.groupCardGroupId);
+            it != s.lastActiveInGroup.end()) {
+            last_active = it->second;
+        }
+        vm.tab_group_card.group_id = s.groupCardGroupId;
+        vm.tab_group_card.chip_index = s.groupCardChipIndex;
+        vm.tab_group_card.hover_row = s.groupCardHoverRow;
+        vm.tab_group_card.rows =
+            app::TabGroupCardRows(s.window_tabs, s.groupCardGroupId, last_active);
+        vm.tab_group_card.visible = !vm.tab_group_card.rows.empty();
+    }
     if (WindowIdentityShown(s) && app::ValidWindowColor(s.identity.color)) {  // M7c
         vm.window_identity = true;
         vm.window_identity_name = WindowDisplayName(s);
@@ -2500,13 +2516,32 @@ bool SidebarRailActive(const AppState& s) {
 }
 
 void ApplyHoverTarget(AppState& s, const ui::HitTestResult& hit) {
+    const int previous_index = s.hoverControlIndex;
+    const bool was_chip = s.hoverRegion == static_cast<int>(ui::HitTestResult::TabGroup);
     s.hoverRegion = static_cast<int>(hit.region);
     s.hoverControlIndex = hit.index;
     s.hoverSubIndex = hit.sub_index;
+    // The group card dwells on one chip: moving to a sibling chip restarts the
+    // clock (that chip's card opens), leaving the strip cancels it. Arriving
+    // from anywhere but the same chip always restarts it, even when the new
+    // index happens to equal the old non-chip index.
+    if (hit.region == ui::HitTestResult::TabGroup) {
+        if (!was_chip || previous_index != hit.index) s.groupCardSince = GetTickCount64();
+    } else if (hit.region != ui::HitTestResult::TabGroupCard &&
+               hit.region != ui::HitTestResult::TabGroupCardRow) {
+        s.groupCardSince = 0;
+    }
     s.hoverPath = hit.path;
     s.hoverLabel = hit.label;
     s.hoverSince = GetTickCount64();
     s.tooltipText.clear();
+}
+
+void HideTabGroupCard(AppState& s) {
+    s.groupCardGroupId = 0;
+    s.groupCardChipIndex = -1;
+    s.groupCardHoverRow = -1;
+    s.groupCardSince = 0;
 }
 
 std::wstring TooltipForHover(AppState& s) {

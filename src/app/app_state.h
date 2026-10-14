@@ -550,6 +550,17 @@ struct AppState : AppCoreOwner {
     // Name of the hovered sidebar row or section: the collapsed rail shows icons
     // only, so its tooltips read this.
     std::wstring hoverLabel;
+    // Edge-style hover card for a tab-group chip. groupCardGroupId == 0 means
+    // hidden; chipIndex is the index into WindowTabs::tab_groups it belongs to.
+    int groupCardGroupId = 0;
+    int groupCardChipIndex = -1;
+    int groupCardHoverRow = -1;
+    ULONGLONG groupCardSince = 0;
+    // group id -> the member tab that was active the last time the window left
+    // that group, so its chip card can mark "the tab you last used here". The
+    // pointers are identity tokens only: they are compared, never dereferenced
+    // (see RememberGroupActivation / PruneGroupActivations).
+    std::unordered_map<int, const app::LayoutTab*> lastActiveInGroup;
 
     // Drag-over feedback state (rendered via WindowViewModel).
     int dropRow = -1;

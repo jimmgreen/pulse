@@ -2472,9 +2472,32 @@ void OpenTabAt(AppState& s, const std::wstring& path) {
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
+void RememberGroupActivation(AppState& s, const app::LayoutTab* outgoing) {
+    if (!outgoing) return;
+    const int group_id = outgoing->tab_group;
+    if (group_id == 0) return;
+    s.lastActiveInGroup[group_id] = outgoing;
+}
+
+void PruneGroupActivations(AppState& s) {
+    auto& memory = s.lastActiveInGroup;
+    for (auto it = memory.begin(); it != memory.end();) {
+        bool still_member = false;
+        for (const auto& item : s.window_tabs.items) {
+            if (item.get() == it->second && item->tab_group == it->first) {
+                still_member = true;
+                break;
+            }
+        }
+        if (still_member) ++it;
+        else it = memory.erase(it);
+    }
+}
+
 void NewTab(AppState& s, const std::wstring& path) {
     if (OpenSystemNetworkShortcut(s, path)) return;
     RememberLayoutFocus(s);
+    RememberGroupActivation(s, s.window_tabs.Active());
     s.window_tabs.NewTab(path.empty() ? L"C:\\" : path);
     BindCurrentLayout(s);
     if (app::Tab* tab = ActiveTab(s)) {
@@ -2643,12 +2666,15 @@ void CloseLayoutTab(AppState& s, size_t idx) {
         return;
     }
     RememberLayoutFocus(s);
+    RememberGroupActivation(s, s.window_tabs.Active());
     if (s.window_tabs.items.size() > 1 && !s.window_tabs.items[idx]->pinned) {
         RememberClosingTabs(s, {idx});  // Ctrl+Shift+T brings it back (M7f)
         for (const auto& pane : s.window_tabs.items[idx]->panes)
             DropLiveNetworkSearch(s, pane->view.search_session_id);
     }
     s.window_tabs.CloseTab(idx);
+    // The closed tab is gone; drop any memory that still points at it.
+    PruneGroupActivations(s);
     BindCurrentLayout(s);
     RevalidateVisibleFolders(s);
     InvalidateRect(s.hwnd, nullptr, FALSE);
@@ -2662,6 +2688,7 @@ void SwitchTab(AppState& s, size_t idx) {
     if (idx >= s.window_tabs.items.size()) return;
     if (s.addressSearching) HideAddressEditor(s, false);
     RememberLayoutFocus(s);
+    RememberGroupActivation(s, s.window_tabs.Active());
     s.window_tabs.SwitchTab(idx);
     BindCurrentLayout(s);
     RevalidateVisibleFolders(s);

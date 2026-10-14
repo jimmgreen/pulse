@@ -444,6 +444,15 @@ void RebuildLayoutRoot(LayoutTab& tab);
 std::wstring LayoutTabTitle(const LayoutTab& tab);
 std::wstring TabTitle(const std::wstring& path);
 void FillWindowTabStrip(ui::WindowViewModel& vm, const WindowTabs& tabs);
+// Rows of the group-chip hover card: one row per member tab (collapsed groups
+// only, separated from the actions) followed by "New tab in group" and
+// "Edit group". Empty when the group no longer exists.
+// `group_last_active` is the tab the window last used inside that group (see
+// RememberGroupActivation); it is marked with `was_active` only while the group
+// does not own the active tab, so the card can tell "you are here" apart from
+// "you were here".
+std::vector<ui::TabGroupCardRow> TabGroupCardRows(const WindowTabs& tabs, int group_id,
+                                                  const LayoutTab* group_last_active = nullptr);
 
 // Pull every group's members into one contiguous run (group order by first
 // appearance; member order preserved). Chromium keeps groups always
