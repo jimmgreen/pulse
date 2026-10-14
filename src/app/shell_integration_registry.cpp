@@ -30,6 +30,14 @@ void Fail(ShellIntegrationFailureKind kind, const std::wstring& key = {}, const 
 constexpr wchar_t kBackupRoot[] = L"Software\\Pulse\\ShellIntegration\\Backups\\v1\\";
 constexpr DWORD kSnapshotMagic = 0x31534950; // PIS1; one atomic REG_BINARY value per group.
 
+std::wstring CurrentModulePath() {
+    std::wstring path(32768, L'\0');
+    const DWORD size = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+    if (!size || size >= path.size()) return {};
+    path.resize(size);
+    return path;
+}
+
 struct Value {
     bool known = true;
     bool exists = false;
@@ -638,6 +646,31 @@ bool HasLegacyShellIntegrationResidue() {
     }
     std::vector<Value> current;
     return LegacyResidue(bindings, current);
+}
+
+bool ReleaseStaleFolderAssociation(const std::wstring& exe) {
+    const std::wstring target = exe.empty() ? CurrentModulePath() : exe;
+    if (target.empty()) return false;
+    const std::wstring shell = L"Software\\Classes\\Folder\\shell";
+    const std::wstring verb = shell + L"\\open";
+    const std::wstring command = verb + L"\\command";
+    Value value;
+    if (!Read(command, L"", value) || !value.exists ||
+        (value.type != REG_SZ && value.type != REG_EXPAND_SZ)) return false;
+    if (!ShellCommandTargetsExecutable(Text(value), target)) return false;
+    // The stale shape mirrors a group write: the command plus the empty
+    // DelegateExecute on the command and on the verb (which suppresses the
+    // inherited Explorer handler), and the empty defaults that build left on
+    // the shell and verb keys.
+    bool ok = Write(command, L"", Value{});
+    ok = Write(command, L"DelegateExecute", Value{}) && ok;
+    ok = Write(verb, L"", Value{}) && ok;
+    ok = Write(verb, L"DelegateExecute", Value{}) && ok;
+    ok = Write(shell, L"", Value{}) && ok;
+    DropEmptyKeys(command);
+    DropEmptyKeys(verb);
+    DropEmptyKeys(shell);
+    return ok;
 }
 
 bool RepairLegacyShellIntegrationResidue() {

@@ -600,11 +600,20 @@ void AppPrefs::MigrateIntegration() {
 }
 
 bool AppPrefs::Load() {
+    bool integration_repaired = false;
     if (persist && HasLegacyShellIntegrationResidue()) {
         const bool repaired = RepairLegacyShellIntegrationResidue();
         pulse::diagnostics::runtime::Event("shell_integration_legacy_repair", {{"success", repaired ? 1u : 0u}});
-        SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+        integration_repaired = true;
     }
+    // Folder\shell belonged to a build retired long ago; the repair above knows
+    // only the current groups, so on its own it would leave that key stealing
+    // folder opens with the integration switched off.
+    if (persist && ReleaseStaleFolderAssociation(ExePath())) {
+        pulse::diagnostics::runtime::Event("shell_integration_stale_folder_release", {{"success", 1u}});
+        integration_repaired = true;
+    }
+    if (integration_repaired) SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
     const std::wstring dir = GetPulseDataDir();
     if (dir.empty()) {
         launch_on_startup = ReadLaunchOnStartup();

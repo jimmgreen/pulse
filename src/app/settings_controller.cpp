@@ -11,6 +11,8 @@
 #include "pack_catalog.h"
 #include "../ui/quick_preview_command.h"
 
+#include <shlobj.h>  // SHChangeNotify
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -991,6 +993,11 @@ void SettingsController::IntegrationAction(int index) {
         const bool recycle_bin_on = p.integration_enabled && p.integration_recycle_bin;
         if (!ApplyRecycleBinOpen(p, recycle_bin_on))
             failed(l10n::Pick(L"桌面上的「回收站」", L"Recycle Bin on the desktop"), L"recycle-bin", recycle_bin_on, true);
+        // Folder\shell is not one of the groups above, but a machine that ran an
+        // old build keeps that association; switching everything off has to
+        // release it too, or folders keep opening in Pulse anyway.
+        if (!p.integration_enabled && ReleaseStaleFolderAssociation({}))
+            SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
     }
     integration_save_failed_ = !p.Save();
     if (ui_.integration_changed) ui_.integration_changed();
