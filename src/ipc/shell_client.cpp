@@ -179,6 +179,11 @@ bool ShellClient::EnsureConnected() {
 // Caller must hold send_mutex_.
 bool ShellClient::SendFrame(uint32_t type, uint32_t id, const std::vector<uint8_t>& payload) {
     if (!running_.load() || !connection_ || connection_->retired) return false;
+    // Context-menu extensions run in the background host. Pass the user's
+    // foreground activation permission before the host launches an application.
+    if (type == REQ_CTX_INVOKE && child_started_ && child_.dwProcessId != 0)
+        AllowSetForegroundWindow(child_.dwProcessId);
+
     MsgHeader h;
     h.type = type;
     h.request_id = id;
