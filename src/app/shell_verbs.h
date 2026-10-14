@@ -8,6 +8,7 @@
 // EnumerateStaticVerbs does registry reads plus version-info lookups for
 // friendly app names: call it off the UI thread and cache per extension.
 #pragma once
+#include "../common/menu_icon.h"
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -21,6 +22,7 @@ struct StaticVerb {
     std::wstring command;   // raw HKCR command template; CommandStore children need this
     std::vector<StaticVerb> children; // cascade flyout (SubCommands / ExtendedSubCommandsKey)
     wchar_t mnemonic = 0;   // access key from the registry label ("&Edit"), 0 = none
+    MenuIcon icon;
 };
 
 // ext is ".dwg" (file), or a location key ":folder" / ":drive" / ":bg".

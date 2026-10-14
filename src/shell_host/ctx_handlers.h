@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../ipc/protocol.h"
+#include "../common/menu_icon.h"
 
 #include <windows.h>
 #include <atomic>
@@ -36,6 +37,7 @@ struct CtxItemOut {
     std::wstring clsid;
     std::wstring handler;
     wchar_t mnemonic = 0;   // access key from the raw label ("&X"), 0 = none
+    MenuIcon icon;
 };
 
 struct CtxHandlerSlot {

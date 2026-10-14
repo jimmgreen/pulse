@@ -1,6 +1,7 @@
 #include "packaged_ctx_handlers.h"
 
 #include "../common/path_utils.h"
+#include "../common/menu_icon.h"
 
 #include <appmodel.h>
 #include <shlwapi.h>
@@ -181,7 +182,7 @@ public:
 
 private:
     ~ExplorerCommandMenu() {
-        ReleaseCommands();
+        ReleaseEntries(0, 0);
         if (items_) items_->Release();
         root_->Release();
     }
@@ -190,6 +191,15 @@ private:
         for (auto* command : commands_)
             if (command) command->Release();
         commands_.clear();
+    }
+
+    void ReleaseEntries(size_t first_command, size_t first_bitmap) {
+        for (size_t i = first_command; i < commands_.size(); ++i)
+            if (commands_[i]) commands_[i]->Release();
+        commands_.resize(first_command);
+        for (size_t i = first_bitmap; i < bitmaps_.size(); ++i)
+            DeleteObject(bitmaps_[i]);
+        bitmaps_.resize(first_bitmap);
     }
 
     static void InsertSeparator(HMENU menu, UINT& position) {
@@ -210,6 +220,9 @@ private:
             return depth > 0;
         }
         if (next > last) return false;
+        const UINT first_id = next;
+        const size_t first_slot = commands_.size();
+        const size_t first_bitmap = bitmaps_.size();
         LPWSTR title = nullptr;
         if (FAILED(command->GetTitle(items_, &title)) || !title || !title[0]) {
             CoTaskMemFree(title);
@@ -223,8 +236,6 @@ private:
         HMENU submenu = nullptr;
         if ((flags & ECF_HASSUBCOMMANDS) && depth < kMaxSubCommandDepth) {
             submenu = CreatePopupMenu();
-            const UINT first_id = next;
-            const size_t first_slot = commands_.size();
             info.wID = next++;
             commands_.push_back(nullptr);
             IEnumExplorerCommand* children = nullptr;
@@ -244,9 +255,7 @@ private:
                 // A flyout without visible children is not shown by Explorer either;
                 // give back its id so the returned count matches the menu.
                 if (submenu) DestroyMenu(submenu);
-                for (size_t i = first_slot; i < commands_.size(); ++i)
-                    if (commands_[i]) commands_[i]->Release();
-                commands_.resize(first_slot);
+                ReleaseEntries(first_slot, first_bitmap);
                 next = first_id;
                 CoTaskMemFree(title);
                 return false;
@@ -261,8 +270,26 @@ private:
             command->AddRef();
             commands_.push_back(command);
         }
+        LPWSTR icon_location = nullptr;
+        HBITMAP bitmap = nullptr;
+        if (SUCCEEDED(command->GetIcon(items_, &icon_location)) && icon_location && icon_location[0])
+            bitmap = MenuIconBitmap(LoadMenuIcon(icon_location));
+        CoTaskMemFree(icon_location);
+        if (bitmap) {
+            info.fMask |= MIIM_BITMAP;
+            info.hbmpItem = bitmap;
+        }
+        if (!InsertMenuItemW(menu, position, TRUE, &info)) {
+            if (bitmap) DeleteObject(bitmap);
+            if (submenu) DestroyMenu(submenu);
+            ReleaseEntries(first_slot, first_bitmap);
+            next = first_id;
+            CoTaskMemFree(title);
+            return false;
+        }
+        if (bitmap) bitmaps_.push_back(bitmap);
         if ((flags & ECF_SEPARATORBEFORE) && depth > 0) InsertSeparator(menu, position);
-        InsertMenuItemW(menu, position++, TRUE, &info);
+        ++position;
         if ((flags & ECF_SEPARATORAFTER) && depth > 0) InsertSeparator(menu, position);
         CoTaskMemFree(title);
         return true;
@@ -272,6 +299,7 @@ private:
     IExplorerCommand* root_ = nullptr;
     IShellItemArray* items_ = nullptr;
     std::vector<IExplorerCommand*> commands_;
+    std::vector<HBITMAP> bitmaps_;
 };
 
 } // namespace

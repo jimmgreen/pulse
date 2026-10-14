@@ -118,6 +118,7 @@ struct MenuItemSpec {
     float glyph_scale = 1.0f;
     bool shortcut_inline = false;
     float inline_label_width = 0.0f;
+    ID2D1Bitmap* bitmap = nullptr;
 };
 
 struct ScrollbarSpec {

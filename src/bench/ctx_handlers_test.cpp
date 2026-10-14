@@ -1,5 +1,7 @@
 #include "../shell_host/ctx_handlers.h"
 #include "../ipc/ctx_menu_util.h"
+#include "../shell_host/ctx_menu_icons.h"
+#include "../ipc/menu_icon_codec.h"
 
 #include <cstdio>
 #include <cwchar>
@@ -25,6 +27,8 @@ public:
     HMENU slow = nullptr;
     bool slow_initialized = false;
     bool mnemonics = false;       // labels carry "&X" access keys
+    bool draw_icons = false;
+    bool icon_data_received = false;
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
         if (!out) return E_POINTER;
@@ -77,6 +81,16 @@ public:
             ? S_OK : E_FAIL;
     }
     HRESULT STDMETHODCALLTYPE HandleMenuMsg(UINT message, WPARAM wparam, LPARAM lparam) override {
+        if (draw_icons && message == WM_DRAWITEM) {
+            auto* draw = reinterpret_cast<DRAWITEMSTRUCT*>(lparam);
+            if (!draw || draw->CtlType != ODT_MENU) return E_INVALIDARG;
+            icon_data_received = draw->itemData == 42;
+            const RECT rect{8, 8, 24, 24};
+            HBRUSH brush = CreateSolidBrush(RGB(0, 180, 60));
+            FillRect(draw->hDC, &rect, brush);
+            DeleteObject(brush);
+            return S_OK;
+        }
         if (message == WM_INITMENUPOPUP && slow && reinterpret_cast<HMENU>(wparam) == slow) {
             Sleep(150); // longer than the shared nested-flyout budget
             if (!slow_initialized) AppendMenuW(slow, MF_STRING, first_ + 3, L"Slow item");
@@ -602,10 +616,108 @@ void TestConditionalShellVerbsRegistry() {
     Check(verbs.size() == 1 && verbs[0] == L"conditional",
           "only AppliesTo verbs are left to the default menu");
 }
+
+void TestMenuIcons() {
+    using namespace pulse;
+    MenuIcon source{2, 2, {10, 20, 30, 128, 0, 0, 0, 0,
+                           25, 50, 100, 255, 0, 0, 0, 0}};
+    HBITMAP bitmap = MenuIconBitmap(source);
+    Check(bitmap && ReadMenuBitmap(bitmap) == source, "bitmap preserves premultiplied alpha and transparent pixels");
+    DynamicMenu menu;
+    shell::CtxHandlerSlot slot;
+    slot.menu = &menu;
+    slot.menu2 = &menu;
+    slot.menu3 = &menu;
+    slot.hmenu = CreatePopupMenu();
+    slot.id_first = 1;
+    slot.id_last = 100;
+    menu.QueryContextMenu(slot.hmenu, 0, 1, 100, 0);
+    menu.HandleMenuMsg(WM_INITMENUPOPUP, reinterpret_cast<WPARAM>(menu.submenu), MAKELPARAM(1, FALSE));
+    MENUITEMINFOW info{sizeof(info)};
+    info.fMask = MIIM_BITMAP;
+    info.hbmpItem = bitmap;
+    SetMenuItemInfoW(slot.hmenu, 1, TRUE, &info);
+    SetMenuItemInfoW(menu.submenu, 0, TRUE, &info);
+    std::vector<shell::CtxItemOut> rows;
+    shell::CollectHandlerItems(slot, false, rows);
+    Check(rows.size() == 2 && rows[0].has_children && rows[1].child &&
+        rows[0].icon == source && rows[1].icon == source,
+        "COM collection preserves parent and dynamically populated child icons");
+    DestroyMenu(slot.hmenu);
+    DeleteObject(bitmap);
+    Check(rows.size() == 2 && rows[0].icon == source && rows[1].icon == source,
+        "owned pixels survive native menu and bitmap destruction");
+
+    menu.draw_icons = true;
+    info.fMask = MIIM_BITMAP | MIIM_ID | MIIM_DATA;
+    info.wID = 1;
+    info.hbmpItem = HBMMENU_CALLBACK;
+    info.dwItemData = 42;
+    for (bool version3 : {false, true}) {
+        const auto icon = shell::CollectMenuIcon(&menu, version3 ? &menu : nullptr, nullptr, info);
+        const size_t center = (16 * 32 + 16) * 4;
+        Check(icon.Valid() && icon.bgra[3] == 0 && icon.bgra[center + 3] == 255 &&
+            icon.bgra[center + 1] == 180 && menu.icon_data_received,
+            version3 ? "IContextMenu3 callback preserves icon transparency and item data"
+                     : "IContextMenu2 callback preserves icon transparency and item data");
+    }
+    info.hbmpItem = HBMMENU_SYSTEM;
+    Check(!shell::CollectMenuIcon(&menu, &menu, nullptr, info).Valid(), "special menu handles are never interpreted as bitmap pointers");
+    MenuIcon legacy{1, 1, {25, 50, 100, 0}};
+    bitmap = MenuIconBitmap(legacy);
+    const auto opaque = ReadMenuBitmap(bitmap);
+    Check(opaque.Valid() && opaque.bgra == std::vector<uint8_t>({25, 50, 100, 255}),
+        "legacy bitmap without alpha remains visible");
+    DeleteObject(bitmap);
+
+    ipc::PayloadWriter writer;
+    ipc::WriteMenuIcon(writer, source);
+    ipc::WriteMenuIcon(writer, {});
+    writer.PutString(L"next row");
+    ipc::PayloadReader reader(writer.data().data(), writer.data().size());
+    MenuIcon decoded, empty;
+    std::wstring tail;
+    Check(ipc::ReadMenuIcon(reader, decoded) && decoded == source &&
+        ipc::ReadMenuIcon(reader, empty) && !empty.Valid() && reader.GetString(tail) &&
+        tail == L"next row" && reader.remaining() == 0,
+        "icon IPC round trip preserves pixels and subsequent fields");
+
+    const uint32_t flags = ipc::CTX_ITEM_ENABLED | ipc::CTX_ITEM_HAS_CHILDREN |
+        ipc::CTX_ITEM_ICON | ipc::PackCtxItemMnemonic(L'N');
+    ipc::PayloadWriter item_writer;
+    item_writer.PutU32(flags);
+    ipc::WriteMenuIcon(item_writer, source);
+    ipc::PayloadReader item_reader(item_writer.data().data(), item_writer.data().size());
+    uint32_t decoded_flags = 0;
+    Check(item_reader.GetU32(decoded_flags) && decoded_flags == flags &&
+        (decoded_flags & ipc::CTX_ITEM_ICON) &&
+        ipc::UnpackCtxItemMnemonic(decoded_flags) == L'N' &&
+        ipc::ReadMenuIcon(item_reader, decoded) && decoded == source &&
+        item_reader.remaining() == 0,
+        "menu flags preserve mnemonic access keys alongside the icon payload");
+
+    bool rejects_truncation = true;
+    for (size_t length = 0; length < 12 + source.bgra.size(); ++length) {
+        ipc::PayloadReader truncated(writer.data().data(), length);
+        rejects_truncation = rejects_truncation && !ipc::ReadMenuIcon(truncated, decoded);
+    }
+    Check(rejects_truncation, "truncated icon payload rejected at every boundary");
+    ipc::PayloadWriter oversized;
+    oversized.PutU32(0xffffffffu);
+    oversized.PutU32(64);
+    oversized.PutU32(4);
+    ipc::PayloadReader invalid(oversized.data().data(), oversized.data().size());
+    Check(!ipc::ReadMenuIcon(invalid, decoded) && !decoded.Valid(), "oversized icon dimensions rejected before allocation");
+}
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
     if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) return 2;
+    if (argc > 1 && wcscmp(argv[1], L"--icons") == 0) {
+        TestMenuIcons();
+        CoUninitialize();
+        return passed ? 0 : 1;
+    }
     TestDynamicMenu(false);
     TestDynamicMenu(true);
     TestDynamicMenu(true, true);

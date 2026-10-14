@@ -7,6 +7,7 @@
 // must register ownership before sending, not after the request method returns.
 #pragma once
 #include "protocol.h"
+#include "../common/menu_icon.h"
 #include <windows.h>
 #include <atomic>
 #include <cstdio>
@@ -34,6 +35,7 @@ struct CtxMenuItem {
     std::wstring clsid;
     std::wstring handler;
     wchar_t mnemonic = 0;         // access key ("&X" of the raw label), 0 = none
+    MenuIcon icon;
 };
 
 class ShellClient {

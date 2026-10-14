@@ -732,14 +732,26 @@ add_executable(pulse_shell_recycle_test src/bench/shell_recycle_test.cpp src/ipc
 target_link_libraries(pulse_shell_recycle_test PRIVATE ole32 shell32 uuid shlwapi bcrypt pulse_localization)
 
 add_executable(pulse_ctx_handlers_test src/bench/ctx_handlers_test.cpp
-    src/shell_host/ctx_handlers.cpp src/shell_host/packaged_ctx_handlers.cpp)
+    src/shell_host/ctx_handlers.cpp src/shell_host/ctx_menu_icons.cpp src/shell_host/packaged_ctx_handlers.cpp)
 target_link_libraries(pulse_ctx_handlers_test PRIVATE ole32 shell32 uuid shlwapi)
 
 # Explorer parity diagnosis: native menu vs Pulse pipeline on the real machine.
 add_executable(pulse_ctx_parity_probe src/bench/ctx_parity_probe.cpp
-    src/shell_host/ctx_handlers.cpp src/shell_host/packaged_ctx_handlers.cpp src/app/shell_verbs.cpp)
+    src/shell_host/ctx_handlers.cpp src/shell_host/ctx_menu_icons.cpp
+    src/shell_host/packaged_ctx_handlers.cpp src/app/shell_verbs.cpp)
 target_link_libraries(pulse_ctx_parity_probe PRIVATE ole32 oleaut32 shell32 uuid shlwapi advapi32
     version user32 pulse_localization)
+
+add_library(pulse_menu_icons STATIC src/common/menu_icon.cpp)
+target_link_libraries(pulse_menu_icons PUBLIC shell32 shlwapi user32 gdi32)
+foreach(menu_icon_target pulse pulse_shell pulse_packaged_ctx_test pulse_ctx_handlers_test
+    pulse_ctx_parity_probe)
+    target_link_libraries(${menu_icon_target} PRIVATE pulse_menu_icons)
+endforeach()
+
+add_executable(pulse_static_menu_icon_test src/bench/static_menu_icon_test_main.cpp)
+target_link_libraries(pulse_static_menu_icon_test PRIVATE pulse_menu_icons pulse_localization
+    shell32 shlwapi advapi32 version)
 
 add_executable(pulse_integration src/integration_host/main.cpp src/app/shell_integration_registry.cpp)
 target_link_libraries(pulse_integration PRIVATE advapi32 shell32 shlwapi)
@@ -1267,6 +1279,13 @@ target_link_libraries(pulse_menu_mnemonic_test PRIVATE d3d11 d2d1 dwrite dxgi dc
     shcore ole32 windowscodecs user32 gdi32 comctl32 uxtheme shell32 imm32 pulse_localization)
 pulse_enable_lumatext(pulse_menu_mnemonic_test)
 
+add_executable(pulse_menu_icon_render_test src/bench/menu_icon_render_test.cpp
+    src/ui/typography.cpp src/ui/ui_compositor.cpp src/ui/edit_host.cpp
+    src/ui/fluent_components.cpp src/ui/fluent_menu.cpp src/ui/tab_shape.cpp)
+target_link_libraries(pulse_menu_icon_render_test PRIVATE d3d11 d2d1 dwrite dxgi dcomp dwmapi
+    shcore ole32 windowscodecs user32 gdi32 comctl32 uxtheme shell32 pulse_localization)
+pulse_enable_lumatext(pulse_menu_icon_render_test)
+
 get_target_property(audit_content_sources pulse_content_index_test SOURCES)
 list(REMOVE_ITEM audit_content_sources src/bench/content_index_test.cpp src/bench/content_instant_test.cpp)
 get_target_property(audit_content_libraries pulse_content_index_test LINK_LIBRARIES)
@@ -1387,13 +1406,13 @@ list(REMOVE_ITEM PULSE_WORKER_TEST_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/src/shel
 add_executable(pulse_shell_worker_lifecycle_test src/bench/shell_worker_lifecycle_test.cpp
     ${PULSE_WORKER_TEST_SOURCES})
 target_link_libraries(pulse_shell_worker_lifecycle_test PRIVATE ole32 shell32 uuid advapi32
-    shlwapi version pulse_crash_reporter)
+    shlwapi version pulse_crash_reporter pulse_menu_icons)
 # Real metadata readers and the validated-payload restore step, tested only on
 # privately created $I/$R pairs; never use the user's real Recycle Bin.
 add_executable(pulse_recycle_metadata_test src/bench/recycle_metadata_test.cpp
     src/fs/fs_recycle.cpp src/fs/fs_enum.cpp ${PULSE_WORKER_TEST_SOURCES})
 target_link_libraries(pulse_recycle_metadata_test PRIVATE ole32 shell32 uuid advapi32
-    shlwapi version netapi32 pulse_crash_reporter pulse_localization)
+    shlwapi version netapi32 pulse_crash_reporter pulse_localization pulse_menu_icons)
 target_compile_definitions(pulse_recycle_metadata_test PRIVATE PULSE_RECYCLE_METADATA_TEST=1)
 # Ordinary Win32 path semantics and owned-directory enumeration only.
 add_executable(pulse_path_normalize_test src/bench/path_normalize_test.cpp src/fs/fs_enum.cpp

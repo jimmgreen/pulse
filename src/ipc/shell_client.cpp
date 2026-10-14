@@ -1,5 +1,6 @@
 // shell_client.cpp — See shell_client.h for the contract.
 #include "shell_client.h"
+#include "menu_icon_codec.h"
 #include "deadline_pipe.h"
 #include "../common/localization.h"
 
@@ -440,6 +441,7 @@ void ShellClient::ReaderThread() {
                     if (ok) {
                         if (!r.GetString(it.clsid)) it.clsid.clear();
                         if (!r.GetString(it.handler)) it.handler.clear();
+                        if (flags & CTX_ITEM_ICON) ok = ReadMenuIcon(r, it.icon);
                     }
                     it.enabled = (flags & CTX_ITEM_ENABLED) != 0;
                     it.separator_after = (flags & CTX_ITEM_SEPARATOR_AFTER) != 0;

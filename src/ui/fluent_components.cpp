@@ -1383,6 +1383,16 @@ void Painter::DrawMenuItem(const MenuItemSpec& spec) {
         const auto center = D2D1::Point2F((icon_bounds.left + icon_bounds.right) * 0.5f,
                                          (icon_bounds.top + icon_bounds.bottom) * 0.5f);
         DrawTagDotState(center, 5.0f, spec.swatch_color, spec.checked, spec.mixed);
+    } else if (spec.bitmap) {
+        const auto size = spec.bitmap->GetSize();
+        const float fit = std::min(icon_width / std::max(1.0f, size.width),
+                                  icon_width / std::max(1.0f, size.height));
+        const float width = size.width * fit, height = size.height * fit;
+        const float left = (icon_bounds.left + icon_bounds.right - width) * 0.5f;
+        const float top = (icon_bounds.top + icon_bounds.bottom - height) * 0.5f;
+        dc_->DrawBitmap(spec.bitmap, D2D1::RectF(left, top, left + width, top + height),
+            spec.state.enabled ? (spec.state.pressed ? 0.7f : 1.0f) : 0.4f,
+            D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
     } else if (spec.pictogram != MenuPictogram::None) {
         DrawPaneLayoutIcon(icon_bounds, spec.pictogram, foreground);
     } else if (spec.radio && !spec.radio_group) {

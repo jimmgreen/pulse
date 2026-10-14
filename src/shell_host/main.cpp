@@ -10,6 +10,7 @@
 // The process is a stateless proxy: if it dies the UI side restarts it and
 // retries the in-flight request once (see src/ipc/shell_client.cpp).
 #include "../ipc/protocol.h"
+#include "../ipc/menu_icon_codec.h"
 #include "../ipc/ctx_menu_util.h"
 #include "ctx_handlers.h"
 #include "packaged_ctx_handlers.h"
@@ -801,7 +802,10 @@ void SendCtxItems(uint32_t session_id, const std::vector<CtxItemOut>& items,
     w.PutU32(session_id);
     w.PutU32(flags);
     w.PutU32((uint32_t)items.size());
+    size_t icon_bytes = 0;
     for (const auto& it : items) {
+        const bool send_icon = it.icon.Valid() &&
+            icon_bytes + it.icon.bgra.size() + 12 <= kMaxPayload / 2;
         w.PutU32(it.id);
         uint32_t item_flags = 0;
         if (it.enabled) item_flags |= CTX_ITEM_ENABLED;
@@ -809,11 +813,16 @@ void SendCtxItems(uint32_t session_id, const std::vector<CtxItemOut>& items,
         if (it.has_children) item_flags |= CTX_ITEM_HAS_CHILDREN;
         if (it.child) item_flags |= CTX_ITEM_CHILD;
         item_flags |= pulse::ipc::PackCtxItemMnemonic(it.mnemonic);
+        if (send_icon) item_flags |= CTX_ITEM_ICON;
         w.PutU32(item_flags);
         w.PutString(it.verb);
         w.PutString(it.text);
         w.PutString(it.clsid);
         w.PutString(it.handler);
+        if (send_icon) {
+            WriteMenuIcon(w, it.icon);
+            icon_bytes += it.icon.bgra.size() + 12;
+        }
     }
     w.PutStringArray(slow_clsids);
     SendMsg(RSP_CTX_ITEMS, session_id, w.data());

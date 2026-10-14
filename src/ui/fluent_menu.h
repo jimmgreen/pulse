@@ -16,6 +16,7 @@
 // self-test drives it directly with a standalone DWrite factory.
 #pragma once
 #include "fluent_components.h"
+#include "../common/menu_icon.h"
 
 #include <dwrite_3.h>
 #include <chrono>
@@ -65,6 +66,7 @@ struct FluentMenuItem {
     // Keyboard access key like a native menu's "&X" (case-insensitive). 0 falls
     // back to a trailing "(X)" in text, which Explorer's CJK labels keep.
     wchar_t mnemonic = 0;
+    MenuIcon icon;
 };
 
 // Access key of a row: explicit mnemonic, else trailing "(X)" / "（X）" in text
@@ -205,6 +207,12 @@ private:
         void* bits = nullptr;
         int w = 0;
         int h = 0;
+        struct IconBitmap {
+            MenuIcon pixels;
+            ComPtr<ID2D1Bitmap1> bitmap;
+        };
+        std::vector<IconBitmap> icons;
+        ComPtr<ID2D1Device> icon_device;
     };
 
     bool EnsureWindow();

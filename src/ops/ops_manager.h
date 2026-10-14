@@ -14,6 +14,7 @@
 //   RealDelete    -> never recorded, not undoable.
 #pragma once
 #include <windows.h>
+#include "../common/menu_icon.h"
 #include "file_lock_owner.h"
 #include "duplicate_cleanup_guard.h"
 #include <condition_variable>
@@ -173,6 +174,7 @@ struct ShellMenuItem {
     std::wstring clsid;
     std::wstring handler;
     wchar_t mnemonic = 0;        // access key from the Explorer label, 0 = none
+    MenuIcon icon;
 };
 
 class OpsManager {

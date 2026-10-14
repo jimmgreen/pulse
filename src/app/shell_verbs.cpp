@@ -131,6 +131,7 @@ bool FillStaticVerbFromKey(HKEY root, const std::wstring& verb_key, const std::w
     if ((flags.has_subcommands || flags.has_extended_subcommands_key) &&
         out.children.empty() && !flags.has_command)
         return false;
+    out.icon = LoadMenuIcon(RegReadString(root, verb_key, L"Icon"));
     return true;
 }
 
@@ -267,6 +268,7 @@ bool ResolveOpenWithApp(const std::wstring& exe_name, StaticVerb& out) {
     const size_t placeholder = out.display.find(L"{app}");
     if (placeholder != std::wstring::npos) out.display.replace(placeholder, 5, friendly);
     out.app_path = path;
+    out.icon = LoadMenuIcon(path);
     return true;
 }
 
@@ -394,16 +396,27 @@ std::vector<StaticVerb> DedupeStaticVerbs(std::vector<StaticVerb> verbs,
 
 namespace {
 
-void PutU32(std::vector<uint8_t>& buf, uint32_t v) {
+constexpr size_t kMaxStaticVerbCacheBytes = 32 * 1024 * 1024;
+// v6 keeps v5's verb selection and adds icon pixels after each access key.
+// Earlier caches are discarded and reseeded to populate both fields.
+constexpr uint32_t kStaticVerbCacheVersion = 6;
+constexpr uint32_t kStaticVerbCacheMinVersion = 6;
+
+bool PutU32(std::vector<uint8_t>& buf, uint32_t v) {
+    if (buf.size() > kMaxStaticVerbCacheBytes - sizeof(v)) return false;
     buf.insert(buf.end(), reinterpret_cast<uint8_t*>(&v), reinterpret_cast<uint8_t*>(&v) + 4);
+    return true;
 }
-void PutW(std::vector<uint8_t>& buf, const std::wstring& s) {
-    PutU32(buf, static_cast<uint32_t>(s.size()));
+bool PutW(std::vector<uint8_t>& buf, const std::wstring& s) {
+    if (s.size() > 4096 || !PutU32(buf, static_cast<uint32_t>(s.size())) ||
+        s.size() * sizeof(wchar_t) > kMaxStaticVerbCacheBytes - buf.size())
+        return false;
     buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(s.data()),
                reinterpret_cast<const uint8_t*>(s.data() + s.size()));
+    return true;
 }
 bool GetU32(const uint8_t*& p, const uint8_t* end, uint32_t& v) {
-    if (p + 4 > end) return false;
+    if (end - p < 4) return false;
     memcpy(&v, p, 4);
     p += 4;
     return true;
@@ -411,29 +424,52 @@ bool GetU32(const uint8_t*& p, const uint8_t* end, uint32_t& v) {
 bool GetW(const uint8_t*& p, const uint8_t* end, std::wstring& s) {
     uint32_t n = 0;
     if (!GetU32(p, end, n) || n > 4096) return false;
-    if (p + n * 2 > end) return false;
-    s.assign(reinterpret_cast<const wchar_t*>(p), n);
-    p += n * 2;
+    const size_t bytes = static_cast<size_t>(n) * sizeof(wchar_t);
+    if (static_cast<size_t>(end - p) < bytes) return false;
+    s.resize(n);
+    memcpy(s.data(), p, bytes);
+    p += bytes;
     return true;
 }
 
-// v3 appends each verb's access key after its command. v4 keeps that layout
-// but changes the content (shell-resolved ProgID, * / AllFilesystemObjects /
-// PerceivedType verbs), so older files are discarded and reseeded.
-// v5: drive verbs from Drive + Folder only; no 打开方式 for programs.
-constexpr uint32_t kStaticVerbCacheVersion = 5;
-constexpr uint32_t kStaticVerbCacheMinVersion = 5;
+bool PutIcon(std::vector<uint8_t>& buf, const MenuIcon& icon) {
+    if (icon.bgra.empty())
+        return PutU32(buf, 0) && PutU32(buf, 0) && PutU32(buf, 0);
+    if (!icon.Valid() || !PutU32(buf, icon.width) || !PutU32(buf, icon.height) ||
+        !PutU32(buf, static_cast<uint32_t>(icon.bgra.size())) ||
+        icon.bgra.size() > kMaxStaticVerbCacheBytes - buf.size())
+        return false;
+    buf.insert(buf.end(), icon.bgra.begin(), icon.bgra.end());
+    return true;
+}
 
-void PutVerb(std::vector<uint8_t>& buf, const StaticVerb& v, int depth) {
-    PutW(buf, v.verb);
-    PutW(buf, v.display);
-    PutW(buf, v.app_path);
-    PutW(buf, v.command);
-    PutU32(buf, static_cast<uint32_t>(v.mnemonic));
+bool GetIcon(const uint8_t*& p, const uint8_t* end, MenuIcon& icon) {
+    uint32_t width = 0, height = 0, bytes = 0;
+    if (!GetU32(p, end, width) || !GetU32(p, end, height) || !GetU32(p, end, bytes))
+        return false;
+    icon = {};
+    if (width == 0 && height == 0 && bytes == 0) return true;
+    if (width == 0 || height == 0 || width > 64 || height > 64 ||
+        bytes != width * height * 4 || static_cast<size_t>(end - p) < bytes)
+        return false;
+    icon.width = width;
+    icon.height = height;
+    icon.bgra.assign(p, p + bytes);
+    p += bytes;
+    return true;
+}
+
+bool PutVerb(std::vector<uint8_t>& buf, const StaticVerb& v, int depth) {
+    if (!PutW(buf, v.verb) || !PutW(buf, v.display) || !PutW(buf, v.app_path) ||
+        !PutW(buf, v.command) || !PutU32(buf, static_cast<uint32_t>(v.mnemonic)) ||
+        !PutIcon(buf, v.icon))
+        return false;
     const uint32_t n = depth > 0 ? 0 : static_cast<uint32_t>(
         (std::min)(v.children.size(), static_cast<size_t>(ipc::kMaxSubmenuChildren)));
-    PutU32(buf, n);
-    for (uint32_t i = 0; i < n; ++i) PutVerb(buf, v.children[i], depth + 1);
+    if (!PutU32(buf, n)) return false;
+    for (uint32_t i = 0; i < n; ++i)
+        if (!PutVerb(buf, v.children[i], depth + 1)) return false;
+    return true;
 }
 
 bool GetVerb(const uint8_t*& p, const uint8_t* end, StaticVerb& v, int depth, uint32_t version) {
@@ -446,6 +482,7 @@ bool GetVerb(const uint8_t*& p, const uint8_t* end, StaticVerb& v, int depth, ui
         if (!GetU32(p, end, key) || key > 0xFFFF) return false;
         v.mnemonic = static_cast<wchar_t>(key);
     }
+    if (!GetIcon(p, end, v.icon)) return false;
     uint32_t n = 0;
     if (!GetU32(p, end, n) || n > 16 || (depth > 0 && n != 0)) return false;
     v.children.clear();
@@ -476,7 +513,8 @@ bool LoadMachineStaticVerbCache(std::unordered_map<std::wstring, std::vector<Sta
                            FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
     LARGE_INTEGER sz{};
-    if (!GetFileSizeEx(h, &sz) || sz.QuadPart < 16 || sz.QuadPart > 32 * 1024 * 1024) {
+    if (!GetFileSizeEx(h, &sz) || sz.QuadPart < 12 ||
+        sz.QuadPart > static_cast<LONGLONG>(kMaxStaticVerbCacheBytes)) {
         CloseHandle(h);
         return false;
     }
@@ -495,6 +533,7 @@ bool LoadMachineStaticVerbCache(std::unordered_map<std::wstring, std::vector<Sta
         !GetU32(p, end, count) ||
         count > 8000)
         return false;
+    std::unordered_map<std::wstring, std::vector<StaticVerb>> parsed;
     for (uint32_t i = 0; i < count; ++i) {
         std::wstring ext;
         uint32_t nverb = 0;
@@ -506,23 +545,26 @@ bool LoadMachineStaticVerbCache(std::unordered_map<std::wstring, std::vector<Sta
             if (!GetVerb(p, end, v, 0, ver)) return false;
             verbs.push_back(std::move(v));
         }
-        if (!ext.empty()) out.emplace(std::move(ext), std::move(verbs));
+        if (!ext.empty()) parsed.emplace(std::move(ext), std::move(verbs));
     }
+    if (p != end) return false;
+    out = std::move(parsed);
     return true;
 }
 
 bool SaveMachineStaticVerbCache(
     const std::unordered_map<std::wstring, std::vector<StaticVerb>>& cache) {
     const std::wstring path = MachineStaticVerbCachePath();
-    if (path.empty()) return false;
+    if (path.empty() || cache.size() > 8000) return false;
     std::vector<uint8_t> buf;
     buf.insert(buf.end(), {'P', 'S', 'V', 'C'});
-    PutU32(buf, kStaticVerbCacheVersion);
-    PutU32(buf, static_cast<uint32_t>(cache.size()));
+    if (!PutU32(buf, kStaticVerbCacheVersion) ||
+        !PutU32(buf, static_cast<uint32_t>(cache.size()))) return false;
     for (const auto& [ext, verbs] : cache) {
-        PutW(buf, ext);
-        PutU32(buf, static_cast<uint32_t>(verbs.size()));
-        for (const auto& v : verbs) PutVerb(buf, v, 0);
+        if (verbs.size() > 64 || !PutW(buf, ext) ||
+            !PutU32(buf, static_cast<uint32_t>(verbs.size()))) return false;
+        for (const auto& v : verbs)
+            if (!PutVerb(buf, v, 0)) return false;
     }
     const std::wstring tmp = path + L".tmp";
     HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,

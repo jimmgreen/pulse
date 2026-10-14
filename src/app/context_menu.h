@@ -137,6 +137,7 @@ struct ShellMenuEntry {
     std::wstring clsid;     // handler CLSID when known ("{guid}")
     std::wstring handler;   // handler display name for the settings catalog
     wchar_t mnemonic = 0;   // access key from the Explorer label ("&X"), 0 = none
+    MenuIcon icon;
 };
 
 // Explorer's access keys for the built-in rows that mirror its own verbs

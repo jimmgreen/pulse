@@ -22,6 +22,7 @@ ShellMenuEntry ComEntry(const ops::ShellMenuItem& item, int command = 0) {
     entry.from_com = true;
     entry.clsid = item.clsid;
     entry.handler = item.handler;
+    entry.icon = item.icon;
     return entry;
 }
 
@@ -51,6 +52,7 @@ void AppendShellSection(std::vector<ui::FluentMenuItem>& items,
         row.command = e.command;
         row.text = e.text;
         row.mnemonic = e.mnemonic;
+        row.icon = e.icon;
         row.enabled = e.enabled;
         // Software-owned submenu: keep the hierarchy as a one-level flyout.
         for (const auto& c : e.children) {
@@ -59,6 +61,7 @@ void AppendShellSection(std::vector<ui::FluentMenuItem>& items,
             child.command = c.command;
             child.text = c.text;
             child.mnemonic = c.mnemonic;
+            child.icon = c.icon;
             child.enabled = c.enabled;
             row.children.push_back(std::move(child));
         }
@@ -134,6 +137,7 @@ std::vector<ShellMenuEntry> ApplyExplorerPrefs(const ContextMenuPrefs& prefs,
         ShellMenuEntry group;
         group.text = l10n::Cn(ipc::CompressFlyoutText());
         group.from_com = true;
+        group.icon = compress_top.front().icon;
         append_compress_children(group);
         if (!group.children.empty())
             kept.insert(kept.begin(), { std::move(group), 0 });
@@ -417,6 +421,7 @@ std::vector<ShellMenuEntry> ContextMenuController::ComposeEntries(
         entry.text = verb.display;
         entry.mnemonic = verb.mnemonic;
         entry.verb = verb.verb;
+        entry.icon = verb.icon;
         if (!verb.children.empty()) {
             entry.command = 0;
             const size_t n = (std::min)(verb.children.size(),
@@ -428,6 +433,7 @@ std::vector<ShellMenuEntry> ContextMenuController::ComposeEntries(
                 child.text = verb.children[j].display;
                 child.mnemonic = verb.children[j].mnemonic;
                 child.verb = verb.children[j].verb;
+                child.icon = verb.children[j].icon;
                 entry.children.push_back(std::move(child));
             }
         } else {

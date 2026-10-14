@@ -51,6 +51,8 @@
 //                              item_id(u32) + flags(u32, CTX_ITEM_*) +
 //                              verb(string) + text(string) +
 //                              clsid(string) + handler(string) +
+//                              [if CTX_ITEM_ICON: width(u32), height(u32),
+//                               byte_count(u32), premultiplied BGRA bytes] +
 //                              slow_clsids(string array, optional; final payload
 //                              only: the one handler provably hung on its own
 //                              at the stuck limit, see collect_hung)
@@ -99,6 +101,7 @@ enum CtxItemFlags : uint32_t {
     CTX_ITEM_SEPARATOR_AFTER = 2,
     CTX_ITEM_HAS_CHILDREN = 4,  // submenu header; item_id is not invokable
     CTX_ITEM_CHILD = 8,         // belongs to the nearest preceding header
+    CTX_ITEM_ICON = 16,         // owned BGRA icon follows handler(string)
 };
 // Bits 16..31 of the per-item flags carry the row's access key (UTF-16 code
 // unit of the raw label's "&X", upper-cased; 0 = none). Older readers only
@@ -129,6 +132,9 @@ static_assert(sizeof(MsgHeader) == 16);
 // ---------------------------------------------------------------------------
 class PayloadWriter {
 public:
+    void PutBytes(const std::vector<uint8_t>& bytes) {
+        buf_.insert(buf_.end(), bytes.begin(), bytes.end());
+    }
     void PutU32(uint32_t v) {
         size_t off = buf_.size();
         buf_.resize(off + 4);
@@ -161,6 +167,12 @@ private:
 
 class PayloadReader {
 public:
+    bool GetBytes(size_t count, std::vector<uint8_t>& bytes) {
+        if (count > remaining()) return false;
+        bytes.assign(data_ + off_, data_ + off_ + count);
+        off_ += count;
+        return true;
+    }
     PayloadReader(const uint8_t* data, size_t size) : data_(data), size_(size) {}
     bool GetU32(uint32_t& v) {
         if (off_ + 4 > size_) return false;

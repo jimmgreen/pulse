@@ -82,7 +82,7 @@ void FluentMenuModel::SetItems(std::vector<FluentMenuItem> items) {
 namespace {
 
 bool DisplayEqualItem(const FluentMenuItem& a, const FluentMenuItem& b) {
-    if (a.text != b.text || a.enabled != b.enabled ||
+    if (a.text != b.text || a.enabled != b.enabled || a.icon != b.icon ||
         a.toggle != b.toggle || a.secondary != b.secondary || a.checked != b.checked ||
         a.shortcut_inline != b.shortcut_inline || a.shortcut != b.shortcut ||
         a.separator_after != b.separator_after || a.tooltip != b.tooltip ||
@@ -615,6 +615,13 @@ bool FluentMenu::RenderSurface(const FluentMenuModel& model, int hover_row, int 
                                float header_px, bool draw_filter_field, Surface& s) {
     ID2D1DeviceContext* dc = compositor_ ? compositor_->Dc() : nullptr;
     if (!dc || model.Count() == 0) return false;
+    ComPtr<ID2D1Device> icon_device;
+    dc->GetDevice(&icon_device);
+    if (s.icon_device.get() != icon_device.get()) {
+        s.icons.clear();
+        s.icon_device = std::move(icon_device);
+    }
+    s.icons.resize(static_cast<size_t>(model.Count()));
 
     const int cw = model.WidthPx();
     const int header = (int)header_px;
@@ -706,6 +713,18 @@ bool FluentMenu::RenderSurface(const FluentMenuModel& model, int hover_row, int 
             spec.text = it->text;
             spec.glyph = it->glyph;
             spec.glyph_scale = it->glyph_scale;
+            auto& cached_icon = s.icons[static_cast<size_t>(i)];
+            if (cached_icon.pixels != it->icon) {
+                cached_icon.bitmap.reset();
+                cached_icon.pixels = it->icon;
+            }
+            if (!cached_icon.bitmap.get() && it->icon.Valid()) {
+                const auto icon_props = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_NONE,
+                    D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+                dc->CreateBitmap(D2D1::SizeU(it->icon.width, it->icon.height),
+                    it->icon.bgra.data(), it->icon.width * 4, icon_props, &cached_icon.bitmap);
+            }
+            spec.bitmap = cached_icon.bitmap.get();
             spec.shortcut = it->shortcut;
             spec.shortcut_inline = it->shortcut_inline;
             spec.inline_label_width = model.InlineLabelWidthPx();

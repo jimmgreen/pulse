@@ -1,5 +1,6 @@
 #include "ctx_handlers.h"
 #include "packaged_ctx_handlers.h"
+#include "ctx_menu_icons.h"
 
 #include "../common/path_utils.h"
 #include "../ipc/ctx_menu_util.h"
@@ -367,7 +368,7 @@ void CollectSubmenuLeaves(IContextMenu* menu, IContextMenu2* menu2, IContextMenu
     const int sub_count = GetMenuItemCount(submenu);
     for (int j = 0; j < sub_count && static_cast<int>(kids.size()) < kMaxSubmenuChildren; ++j) {
         MENUITEMINFOW sub{ sizeof(sub) };
-        sub.fMask = MIIM_ID | MIIM_STATE | MIIM_FTYPE | MIIM_SUBMENU;
+        sub.fMask = MIIM_ID | MIIM_STATE | MIIM_FTYPE | MIIM_SUBMENU | MIIM_BITMAP | MIIM_DATA;
         if (!GetMenuItemInfoW(submenu, j, TRUE, &sub)) continue;
         if (sub.fType & MFT_SEPARATOR) continue;
         if (sub.hSubMenu) {
@@ -392,6 +393,7 @@ void CollectSubmenuLeaves(IContextMenu* menu, IContextMenu2* menu2, IContextMenu
         if (!open_with && IsBuiltinContextVerb(item.verb, background)) continue;
         item.text = child_text;
         item.mnemonic = child_mnemonic;
+        item.icon = CollectMenuIcon(menu2, menu3, submenu, sub);
         kids.push_back(std::move(item));
     }
 }
@@ -770,7 +772,7 @@ void CollectHandlerItems(const CtxHandlerSlot& slot, bool background,
     };
     for (int i = 0; i < count; ++i) {
         MENUITEMINFOW mii{ sizeof(mii) };
-        mii.fMask = MIIM_ID | MIIM_STATE | MIIM_FTYPE | MIIM_SUBMENU;
+        mii.fMask = MIIM_ID | MIIM_STATE | MIIM_FTYPE | MIIM_SUBMENU | MIIM_BITMAP | MIIM_DATA;
         if (!GetMenuItemInfoW(slot.hmenu, i, TRUE, &mii)) continue;
         if (mii.fType & MFT_SEPARATOR) {
             if (!slot.send_to_title.empty()) continue;
@@ -827,6 +829,7 @@ void CollectHandlerItems(const CtxHandlerSlot& slot, bool background,
                 item.verb = parent_verb;
                 item.text = parent_text;
                 item.mnemonic = title_mnemonic;
+                item.icon = CollectMenuIcon(slot.menu2, slot.menu3, slot.hmenu, mii);
                 push(std::move(item));
                 continue;
             }
@@ -837,6 +840,7 @@ void CollectHandlerItems(const CtxHandlerSlot& slot, bool background,
             header.verb = parent_verb;
             header.text = parent_text;
             header.mnemonic = title_mnemonic;
+            header.icon = CollectMenuIcon(slot.menu2, slot.menu3, slot.hmenu, mii);
             push(std::move(header));
             for (auto& k : kids) {
                 k.clsid = slot.clsid;
@@ -854,6 +858,7 @@ void CollectHandlerItems(const CtxHandlerSlot& slot, bool background,
         item.enabled = enabled && (slot.send_to_title.empty() || default_extra);
         item.verb = verb;
         item.text = MenuItemText(slot.hmenu, static_cast<UINT>(i), &item.mnemonic);
+        item.icon = CollectMenuIcon(slot.menu2, slot.menu3, slot.hmenu, mii);
         push(std::move(item));
     }
 }

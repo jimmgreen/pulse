@@ -2,6 +2,7 @@
 // matching and the IExplorerCommand -> IContextMenu adapter. `--live` also
 // lists the verbs installed on this machine and their titles; `--pipe` queries
 // real menus through pulse_shell.exe. Both are read-only: nothing is invoked.
+// `--icons` runs only the isolated Explorer command icon cases.
 #include "../shell_host/packaged_ctx_handlers.h"
 #include "../ipc/shell_client.h"
 
@@ -101,9 +102,15 @@ public:
     IFACEMETHODIMP GetTitle(IShellItemArray*, LPWSTR* out) override {
         return SHStrDupW(title_.c_str(), out);
     }
-    IFACEMETHODIMP GetIcon(IShellItemArray*, LPWSTR* out) override {
+    IFACEMETHODIMP GetIcon(IShellItemArray* items, LPWSTR* out) override {
+        ++icon_calls;
+        last_icon_items = items;
         *out = nullptr;
-        return E_NOTIMPL;
+        if (!icon_location.empty()) {
+            const HRESULT hr = SHStrDupW(icon_location.c_str(), out);
+            if (FAILED(hr)) return hr;
+        }
+        return icon_result;
     }
     IFACEMETHODIMP GetToolTip(IShellItemArray*, LPWSTR* out) override {
         *out = nullptr;
@@ -137,6 +144,10 @@ public:
 
     int invoked = 0;
     IShellItemArray* last_items = nullptr;
+    std::wstring icon_location;
+    HRESULT icon_result = E_NOTIMPL;
+    int icon_calls = 0;
+    IShellItemArray* last_icon_items = nullptr;
 
 private:
     ~FakeCommand() {
@@ -180,6 +191,147 @@ HRESULT InvokeOffset(IContextMenu* menu, UINT offset) {
 }
 
 // ---- tests ------------------------------------------------------------------
+
+bool WriteIconFixture(const std::wstring& path) {
+    const WORD header[] = { 0, 1, 1 };
+    struct IconEntry {
+        BYTE width, height, colors, reserved;
+        WORD planes, bit_count;
+        DWORD byte_count, offset;
+    };
+    static_assert(sizeof(IconEntry) == 16);
+    const IconEntry entry{ 2, 2, 0, 0, 1, 32, 64, 22 };
+    BITMAPINFOHEADER bitmap{};
+    bitmap.biSize = sizeof(bitmap);
+    bitmap.biWidth = 2;
+    bitmap.biHeight = 4;
+    bitmap.biPlanes = 1;
+    bitmap.biBitCount = 32;
+    bitmap.biSizeImage = 16;
+    const DWORD pixels[] = { 0x80FF0000, 0x80FF0000, 0x80FF0000, 0x80FF0000 };
+    const DWORD mask[] = { 0, 0 };
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    const auto write = [&](const void* data, DWORD size) {
+        DWORD written = 0;
+        return WriteFile(file, data, size, &written, nullptr) && written == size;
+    };
+    const bool ok = write(header, sizeof(header)) && write(&entry, sizeof(entry)) &&
+        write(&bitmap, sizeof(bitmap)) && write(pixels, sizeof(pixels)) && write(mask, sizeof(mask));
+    CloseHandle(file);
+    return ok;
+}
+
+HBITMAP ItemBitmap(HMENU menu, UINT position) {
+    MENUITEMINFOW info{ sizeof(info) };
+    info.fMask = MIIM_BITMAP;
+    return GetMenuItemInfoW(menu, position, TRUE, &info) ? info.hbmpItem : nullptr;
+}
+
+bool PremultipliedIcon(HBITMAP bitmap) {
+    DIBSECTION dib{};
+    if (!bitmap || GetObjectW(bitmap, sizeof(dib), &dib) != static_cast<int>(sizeof(dib)) ||
+        dib.dsBm.bmBitsPixel != 32 || !dib.dsBm.bmBits || dib.dsBm.bmWidth <= 0 ||
+        dib.dsBm.bmHeight <= 0)
+        return false;
+    bool transparent_color = false;
+    const auto* pixels = static_cast<const BYTE*>(dib.dsBm.bmBits);
+    for (LONG y = 0; y < dib.dsBm.bmHeight; ++y) {
+        const BYTE* row = pixels + static_cast<size_t>(y) * dib.dsBm.bmWidthBytes;
+        for (LONG x = 0; x < dib.dsBm.bmWidth; ++x) {
+            const BYTE* pixel = row + static_cast<size_t>(x) * 4;
+            if (pixel[0] > pixel[3] || pixel[1] > pixel[3] || pixel[2] > pixel[3]) return false;
+            if (pixel[3] > 0 && pixel[3] < 255 && pixel[2] > 0) transparent_color = true;
+        }
+    }
+    return transparent_color;
+}
+
+void TestIcons(IShellItemArray* items, const std::wstring& dir) {
+    const std::wstring icon = dir + L"\\menu_icon.ico";
+    Check(WriteIconFixture(icon), "isolated translucent Explorer command icon fixture");
+    auto* root = new FakeCommand(L"Icon flyout", ECF_HASSUBCOMMANDS);
+    auto* child = new FakeCommand(L"Icon child");
+    auto* missing = new FakeCommand(L"Missing icon");
+    auto* failed = new FakeCommand(L"Failed icon");
+    auto* hidden = new FakeCommand(L"Hidden icon", ECF_DEFAULT, ECS_HIDDEN);
+    root->icon_location = child->icon_location = failed->icon_location = hidden->icon_location = icon;
+    root->icon_result = child->icon_result = hidden->icon_result = S_OK;
+    failed->icon_result = E_FAIL;
+    missing->icon_location = dir + L"\\missing.ico";
+    missing->icon_result = S_OK;
+    root->Add(child);
+    root->Add(missing);
+    root->Add(failed);
+    root->Add(hidden);
+    IContextMenu* menu = nullptr;
+    Check(SUCCEEDED(CreateExplorerCommandMenu(root, items, &menu)) && menu, "icon adapter created");
+    if (menu) {
+        HMENU popup = CreatePopupMenu();
+        const HRESULT hr = menu->QueryContextMenu(popup, 0, 100, 150, CMF_NORMAL);
+        HMENU submenu = GetSubMenu(popup, 0);
+        HBITMAP root_bitmap = ItemBitmap(popup, 0);
+        HBITMAP child_bitmap = ItemBitmap(submenu, 0);
+        Check(HRESULT_CODE(hr) == 4 && root_bitmap && child_bitmap &&
+                  root_bitmap != child_bitmap && PremultipliedIcon(root_bitmap) &&
+                  PremultipliedIcon(child_bitmap),
+              "Explorer command parent and child icons are premultiplied 32-bit menu bitmaps");
+        Check(root->icon_calls == 1 && child->icon_calls == 1 && root->last_icon_items == items &&
+                  child->last_icon_items == items && hidden->icon_calls == 0,
+              "visible command icons receive the bound selection; hidden icons are skipped");
+        Check(submenu && !ItemBitmap(submenu, 1) && !ItemBitmap(submenu, 2) &&
+                  SUCCEEDED(InvokeOffset(menu, 2)) && missing->invoked == 1,
+              "missing or failed icons preserve menu text and command invocation");
+        HMENU empty_popup = CreatePopupMenu();
+        menu->QueryContextMenu(empty_popup, 0, 100, 150, CMF_DEFAULTONLY);
+        BITMAP bitmap{};
+        Check(GetObjectW(root_bitmap, sizeof(bitmap), &bitmap) != 0 &&
+                  GetObjectW(child_bitmap, sizeof(bitmap), &bitmap) != 0,
+              "inserted bitmaps remain valid for the adapter lifetime across queries");
+        DestroyMenu(empty_popup);
+        DestroyMenu(popup);
+        menu->Release();
+        Check(GetObjectW(root_bitmap, sizeof(bitmap), &bitmap) == 0 &&
+                  GetObjectW(child_bitmap, sizeof(bitmap), &bitmap) == 0,
+              "releasing the adapter deletes parent and child menu bitmaps");
+    }
+    root->Release();
+
+    auto* rejected = new FakeCommand(L"Rejected icon flyout", ECF_HASSUBCOMMANDS);
+    auto* rejected_child = new FakeCommand(L"Rejected icon child");
+    rejected->icon_location = rejected_child->icon_location = icon;
+    rejected->icon_result = rejected_child->icon_result = S_OK;
+    rejected->Add(rejected_child);
+    menu = nullptr;
+    if (SUCCEEDED(CreateExplorerCommandMenu(rejected, items, &menu)) && menu) {
+        const DWORD before = GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS);
+        const HMENU invalid_menu = reinterpret_cast<HMENU>(static_cast<UINT_PTR>(-1));
+        Check(HRESULT_CODE(menu->QueryContextMenu(invalid_menu, 0, 100, 150, CMF_NORMAL)) == 0 &&
+                  FAILED(InvokeOffset(menu, 0)) && rejected->icon_calls == 1 &&
+                  rejected_child->icon_calls == 1 &&
+                  GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) == before,
+              "failed parent insertion releases child bitmaps and restores command ids");
+        menu->Release();
+    }
+    rejected->Release();
+
+    auto* empty = new FakeCommand(L"Empty icon flyout", ECF_HASSUBCOMMANDS);
+    empty->icon_location = icon;
+    empty->icon_result = S_OK;
+    empty->Add(new FakeCommand(L"Hidden", ECF_DEFAULT, ECS_HIDDEN));
+    menu = nullptr;
+    if (SUCCEEDED(CreateExplorerCommandMenu(empty, items, &menu)) && menu) {
+        HMENU popup = CreatePopupMenu();
+        Check(HRESULT_CODE(menu->QueryContextMenu(popup, 0, 100, 150, CMF_NORMAL)) == 0 &&
+                  empty->icon_calls == 0 && GetMenuItemCount(popup) == 0,
+              "empty flyouts consume no icon or command resources");
+        DestroyMenu(popup);
+        menu->Release();
+    }
+    empty->Release();
+    DeleteFileW(icon.c_str());
+}
 
 void TestAdapter(IShellItemArray* items) {
     constexpr UINT kFirst = 100;
@@ -594,10 +746,14 @@ int wmain(int argc, wchar_t** argv) {
     }
     Check(items != nullptr, "fixture shell item array");
 
-    TestAdapter(items);
-    TestManifest();
-    TestItemTypes(dir, file);
-    TestDuplicates();
+    const bool icons_only = argc == 2 && wcscmp(argv[1], L"--icons") == 0;
+    TestIcons(items, dir);
+    if (!icons_only) {
+        TestAdapter(items);
+        TestManifest();
+        TestItemTypes(dir, file);
+        TestDuplicates();
+    }
     for (int i = 1; i < argc; ++i) {
         if (wcscmp(argv[i], L"--live") == 0) Live();
         if (wcscmp(argv[i], L"--pipe") == 0) Pipe();
