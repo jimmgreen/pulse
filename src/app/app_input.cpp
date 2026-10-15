@@ -4015,7 +4015,7 @@ LRESULT HandleMouseWheel(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         // ahead of the sidebar branch that contains it).
         // A marquee belongs to the focused pane: the wheel scrolls it there.
         const bool marquee = s->marqueeActive || s->marqueePending;
-        if (wheelHit.pane_index >= 0 && !marquee) {
+        if (wheelHit.pane_index >= 0 && !marquee && GetForegroundWindow() == hwnd) {
             if (app::Pane* p = PaneAtSlot(*s, wheelHit.pane_index)) FocusPane(*s, p);
         }
         int delta = GET_WHEEL_DELTA_WPARAM(wParam);
