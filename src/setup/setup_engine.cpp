@@ -437,22 +437,23 @@ InstallResult RunInstall(Payload& payload, const std::wstring& self_path, const 
                 }
             }
         } else {
+            // Configure the location before registering the service: an upgrade
+            // must not start a scan only to stop it again for the same index
+            // path. A location that could not be applied must not cost the
+            // service itself, though - install it at whatever is configured.
             auto r = RunProcess(index_exe, L"--set-index-path " + Quote(NormalizeDir(req.index_path)), true);
             if (!r.started || r.exit_code != 0) {
                 post_failed = true;
                 result.error = L"Index location configuration failed: " + std::to_wstring(r.exit_code);
                 Log(result.error);
+            }
+            r = RunProcess(index_exe, L"--install", true);
+            if (!r.started || r.exit_code != 0) {
+                post_failed = true;
+                result.error = L"Index service setup failed: " + std::to_wstring(r.exit_code);
+                Log(result.error);
             } else {
-                // Configure the location first: an upgrade must not start a scan
-                // only to stop it again for the same index path.
-                r = RunProcess(index_exe, L"--install", true);
-                if (!r.started || r.exit_code != 0) {
-                    post_failed = true;
-                    result.error = L"Index service setup failed: " + std::to_wstring(r.exit_code);
-                    Log(result.error);
-                } else {
-                    result.index_running = true;
-                }
+                result.index_running = true;
             }
         }
         ctx.Phase(Phase::SeedVerbs, L"Caching context-menu verbs");
