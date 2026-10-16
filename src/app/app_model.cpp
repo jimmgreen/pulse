@@ -2103,6 +2103,8 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
             access.items.push_back(std::move(item));
         }
     }
+    for (auto& item : access.items)
+        item.shell_folder_icon = !item.path.empty() && !fs::IsVirtualPath(item.path);
     savedSearches = ConvertGroup(l10n::Get(l10n::StringId::SidebarSavedSearches),
                                  sidebar.saved_searches, false);
     // The title is only used by the section menus: the pane itself shows the

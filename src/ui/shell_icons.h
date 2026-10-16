@@ -37,6 +37,8 @@ public:
     void AddNotifyWindow(HWND hwnd);
     void RemoveNotifyWindow(HWND hwnd);
     void Reset();
+    // UI thread: requery these paths without joining a potentially slow Shell worker.
+    void InvalidatePaths(const std::vector<std::wstring>& paths);
 
     // Returns false while native icons are loading or the device is unavailable.
     // opacity lets callers fade the icon (hidden entries, cut items).
@@ -72,6 +74,7 @@ public:
 
 private:
     friend struct ShellIconCacheTestAccess;
+    friend struct SidebarFolderIconTest;
     static int ImageListId(float desired_pixels) noexcept;
     IImageList* EnsureImageList(int list_id);
     bool EnsureWic();
@@ -118,6 +121,7 @@ private:
     std::unordered_set<uint64_t> convert_pending_;
     std::unordered_map<uint64_t, IconPixels> ready_pixels_;
     uint64_t access_clock_ = 0;
+    uint64_t generation_ = 0; // Reject work started before an explicit refresh.
     std::thread worker_;
     std::atomic<bool> running_{false};
 };

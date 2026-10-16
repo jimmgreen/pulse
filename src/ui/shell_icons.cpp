@@ -139,6 +139,33 @@ void ShellIconCache::Reset() {
     ready_pixels_.clear();
 }
 
+void ShellIconCache::InvalidatePaths(const std::vector<std::wstring>& paths) {
+    if (paths.empty()) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++generation_;
+    for (const auto& path : paths) {
+        if (const auto it = exact_index_.find(path); it != exact_index_.end()) {
+            const auto index = static_cast<uint32_t>(it->second);
+            for (auto bitmap = bitmaps_.begin(); bitmap != bitmaps_.end();) {
+                if (static_cast<uint32_t>(bitmap->first) == index) {
+                    artwork_bounds_.erase(bitmap->first);
+                    bitmap = bitmaps_.erase(bitmap);
+                } else ++bitmap;
+            }
+            exact_index_.erase(it);
+        }
+        retry_after_.erase(path);
+        last_used_.erase(path);
+    }
+    // Old requests may still be in a Shell handler. New frames can queue fresh
+    // work immediately; the generation check discards any stale completion.
+    queued_.clear();
+    while (!queue_.empty()) queue_.pop();
+    convert_queue_.clear();
+    convert_pending_.clear();
+    ready_pixels_.clear();
+}
+
 int ShellIconCache::ImageListId(float desired_pixels) noexcept {
     if (desired_pixels <= 16.0f) return SHIL_SMALL;
     if (desired_pixels <= 32.0f) return SHIL_LARGE;
@@ -222,10 +249,12 @@ void ShellIconCache::WorkerLoop() {
         std::wstring path;
         uint64_t convert_key = 0;
         bool convert = false;
+        uint64_t generation = 0;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             cv_.wait(lock, [&] { return !running_ || !queue_.empty() || !convert_queue_.empty(); });
             if (!running_) break;
+            generation = generation_;
             if (!queue_.empty()) {
                 // Index lookups first: they are cheap and unlock conversions.
                 path = std::move(queue_.front());
@@ -243,6 +272,7 @@ void ShellIconCache::WorkerLoop() {
             if (ok) pixels.bounds = MeasureIconArtwork(pixels.data, pixels.width, pixels.height);
             {
                 std::lock_guard<std::mutex> lock(mutex_);
+                if (generation != generation_) continue;
                 convert_pending_.erase(convert_key);
                 if (ok) {
                     if (ready_pixels_.size() >= kReadyPixelsLimit) ready_pixels_.erase(ready_pixels_.begin());
@@ -264,6 +294,7 @@ void ShellIconCache::WorkerLoop() {
                                SHGFI_SYSICONINDEX | SHGFI_USEFILEATTRIBUTES))
                 index = info.iIcon;
             std::lock_guard<std::mutex> lock(mutex_);
+            if (generation != generation_) continue;
             if (index >= 0) {
                 if (generic_index_.size() >= 512) {
                     const auto victim = std::find_if(generic_index_.begin(), generic_index_.end(),
@@ -282,6 +313,7 @@ void ShellIconCache::WorkerLoop() {
         }
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            if (generation != generation_) continue;
             queued_.erase(path);
             if (index >= 0) {
                 retry_after_.erase(path);

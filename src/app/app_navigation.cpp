@@ -1665,6 +1665,8 @@ void ApplyNetworkConnect(AppState& s, const std::wstring& share, DWORD error) {
 void RefreshActiveTab(AppState& s, RefreshReason reason) {
     app::Tab* tab = ActiveTab(s);
     if (!tab) return;
+    if (reason == RefreshReason::Explicit)
+        s.renderer.RefreshSidebarFolderIcons(BuildVm(s, false));
     // F5 or a finished file operation must see the share as it is now (#74).
     if (reason == RefreshReason::Explicit || reason == RefreshReason::OperationCompleted)
         DropLiveNetworkSearch(s, tab->search_session_id);

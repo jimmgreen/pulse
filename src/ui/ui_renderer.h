@@ -354,6 +354,7 @@ struct SidebarItem {
     int count = 0;
     std::wstring path;
     bool is_drive = false;
+    bool shell_folder_icon = false; // Quick access follows the folder's Windows icon.
     float used_ratio = 0.0f;       // For drives: 0..1.
     float y_offset = 0.0f;         // Tags: slide-animation offset added at layout.
     int indent = 0;
@@ -1167,6 +1168,7 @@ struct HitTestResult {
 class MainRenderer {
     friend struct FilenameRenderTest;
     friend struct PaneHeaderIconTest;
+    friend struct SidebarFolderIconTest;
     friend struct FolderSizesUiTest;
     friend struct ColumnResizeUiTest;
     friend struct UiModuleAuditTest;
@@ -1497,6 +1499,7 @@ public:
     void SetThumbnailBadges(bool on) { thumbnail_badges_ = on; }
     // Default programs changed (SHCNE_ASSOCCHANGED).
     void InvalidateOpenWithIcons() { open_with_icons_.InvalidateAssociations(); }
+    void RefreshSidebarFolderIcons(const WindowViewModel& vm);
     // List-row hover buttons the user keeps: bit 0 star, bit 1 new tab, bit 2 more.
     // Bits 0-2 visible buttons, bits 3-8 their order (app::RowActionMask).
     void SetRowActions(unsigned mask) { row_actions_ = mask & 0x1FFu; }
@@ -1648,6 +1651,8 @@ public:
     D2D1_RECT_F SettingsDropdownBounds(const WindowViewModel& vm, int index, float window_w, float window_h) const;
     float SettingsDestinationOffset(const WindowViewModel& vm, int setting_id, float window_w, float window_h) const;
     float SidebarMaxScroll(const WindowViewModel& vm, float window_w, float window_h) const;
+    bool SettingsScrollbarGeometry(const WindowViewModel& vm, float window_w, float window_h,
+                                   D2D1_RECT_F& track, D2D1_RECT_F& thumb, float& max_scroll) const;
     bool SidebarScrollbarGeometry(const WindowViewModel& vm, float window_w, float window_h,
                                   D2D1_RECT_F& track, D2D1_RECT_F& thumb, float& max_scroll) const;
     // How many deck cards the tray panel fits at the current sidebar width
@@ -1691,6 +1696,7 @@ private:
     void DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawToolbarApps(const WindowViewModel& vm, const ToolbarLayout& layout, const Theme& theme);
     void DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
+    ID2D1Bitmap* SidebarFolderIcon(const SidebarItem& item, const D2D1_RECT_F& rect);
     void DrawPane(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawSinglePane(const WindowViewModel& vm, const PaneViewModel& pane,

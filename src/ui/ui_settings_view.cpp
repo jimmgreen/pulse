@@ -1039,17 +1039,19 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
     }
     dc->PopAxisAlignedClip();
 
-    const float view = lay.content.bottom - lay.content.top;
-    if (lay.content_h > view + 1.0f) {
-        fluent::ScrollbarSpec bar;
-        bar.viewport = D2D1::RectF(lay.content.right - 10.0f * scale_, lay.content.top,
-                                   lay.content.right - 2.0f * scale_, lay.content.bottom);
-        bar.offset = vm.settings_scroll;
-        bar.viewport_extent = view;
-        bar.content_extent = lay.content_h;
-        bar.expand_progress = 1.0f;
-        painter_.DrawScrollbar(bar);
-    }
+    painter_.DrawScrollbar(SettingsScrollbarSpec(vm, lay, scale_));
+}
+
+bool MainRenderer::SettingsScrollbarGeometry(const WindowViewModel& vm, float window_w,
+                                             float window_h, D2D1_RECT_F& track,
+                                             D2D1_RECT_F& thumb, float& max_scroll) const {
+    const auto lay = MakeSettingsLayout(vm, D2D1::RectF(0, 0, window_w, window_h),
+        scale_, title_bar_height_, status_height_, &painter_);
+    const auto bar = SettingsScrollbarSpec(vm, lay, scale_);
+    track = bar.viewport;
+    thumb = fluent::ScrollbarThumbRect(bar, scale_);
+    max_scroll = bar.enabled ? std::max(0.0f, bar.content_extent - bar.viewport_extent) : 0.0f;
+    return max_scroll > 0.0f && thumb.bottom > thumb.top;
 }
 
 D2D1_RECT_F MainRenderer::SettingsDropdownBounds(const WindowViewModel& vm, int index, float window_w, float window_h) const {

@@ -89,6 +89,21 @@ void MainRenderer::DrawSidebarPeek(const WindowViewModel& vm, const D2D1_RECT_F&
     DrawSidebar(vm, rect, theme);
 }
 
+ID2D1Bitmap* MainRenderer::SidebarFolderIcon(const SidebarItem& item, const D2D1_RECT_F& rect) {
+    if (!item.shell_folder_icon || item.path.empty()) return nullptr;
+    const float size = std::max(rect.right - rect.left, rect.bottom - rect.top);
+    icon_cache_.Prefetch(item.path, item.label, true, FILE_ATTRIBUTE_DIRECTORY, size);
+    return icon_cache_.CachedBitmapFor(item.path, item.label, true, FILE_ATTRIBUTE_DIRECTORY, size);
+}
+
+void MainRenderer::RefreshSidebarFolderIcons(const WindowViewModel& vm) {
+    std::vector<std::wstring> paths;
+    for (const auto& group : vm.sidebar)
+        for (const auto& item : group.items)
+            if (item.shell_folder_icon) paths.push_back(item.path);
+    icon_cache_.InvalidatePaths(paths);
+}
+
 void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme) {
     ID2D1DeviceContext* dc = compositor_->Dc();
     D2D1_RECT_F sb = SidebarRect(rect.right, rect.bottom);
@@ -326,8 +341,12 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             const float pad_y = (slot.rc.bottom - slot.rc.top - icon) * 0.5f;
             const D2D1_RECT_F icon_rc = D2D1::RectF(slot.rc.left + pad_x, slot.rc.top + pad_y,
                                                     slot.rc.right - pad_x, slot.rc.bottom - pad_y);
-            if (IsHighContrast() || svg_id == 0 ||
-                !DrawFluentSvg(svg_id, icon_rc, 1.0f, nullptr, true)) {
+            ID2D1Bitmap* shell_icon = SidebarFolderIcon(item, icon_rc);
+            if (shell_icon)
+                dc->DrawBitmap(shell_icon, &icon_rc, 1.0f,
+                    D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, nullptr, nullptr);
+            if (!shell_icon && (IsHighContrast() || svg_id == 0 ||
+                !DrawFluentSvg(svg_id, icon_rc, 1.0f, nullptr, true))) {
                 DrawIconText(slot.rc.left, slot.rc.top, slot.rc.right - slot.rc.left,
                     slot.rc.bottom - slot.rc.top, item.icon_glyph, item.fallback_text,
                     iconColor, 0.92f);
@@ -612,7 +631,14 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             row.icon_color = item.icon_color;
             row.suppress_text = item.editing;
             const int row_svg = item.is_tag ? 0 : FluentSvgIdForGlyph(item.icon_glyph);
-            row.skip_glyph = !IsHighContrast() && row_svg != 0 && EnsureFluentSvg(row_svg, true);
+            // Resolve only cached artwork here; Shell lookups and conversion stay off the UI thread.
+            const auto icon_rect = painter_.SidebarItemIconRect(slot.rc, item.status_dot);
+            const float folder_size = std::min(icon_rect.right - icon_rect.left, icon_rect.bottom - icon_rect.top);
+            const float folder_top = (icon_rect.top + icon_rect.bottom - folder_size) * 0.5f;
+            const auto folder_rect = D2D1::RectF(icon_rect.left, folder_top,
+                icon_rect.left + folder_size, folder_top + folder_size);
+            ID2D1Bitmap* folder_icon = SidebarFolderIcon(item, folder_rect);
+            row.skip_glyph = folder_icon || (!IsHighContrast() && row_svg != 0 && EnsureFluentSvg(row_svg, true));
             const bool unpin = SidebarItemHasUnpin(item);
             const auto unpin_rc = WorkspaceUnpinRect(slot.rc, scale_);
             const auto expand_rc = SidebarExpandRect(slot.rc, scale_);
@@ -623,7 +649,10 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
                 row.trailing_reserve = (std::max)(0.0f,
                     (slot.rc.right - expand_rc.left) - 4.0f * scale_);
             painter_.DrawSidebarItem(row);
-            if (row.skip_glyph) {
+            if (folder_icon) {
+                dc->DrawBitmap(folder_icon, &folder_rect, 1.0f,
+                    D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, nullptr, nullptr);
+            } else if (row.skip_glyph) {
                 DrawFluentSvg(row_svg, painter_.SidebarItemIconRect(slot.rc, item.status_dot),
                               1.0f, nullptr, true);
             }

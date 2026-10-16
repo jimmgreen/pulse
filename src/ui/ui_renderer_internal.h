@@ -2242,6 +2242,19 @@ float ReleaseLineHeight(const fluent::Painter* painter, const std::wstring& line
 #include "settings_sysctx_layout.h"
 
 
+fluent::ScrollbarSpec SettingsScrollbarSpec(const WindowViewModel& vm,
+                                           const SettingsLayout& lay, float scale) {
+    fluent::ScrollbarSpec bar;
+    bar.viewport = D2D1::RectF(lay.content.right - 10.0f * scale, lay.content.top,
+                              lay.content.right - 2.0f * scale, lay.content.bottom);
+    bar.offset = vm.settings_scroll;
+    bar.viewport_extent = lay.content.bottom - lay.content.top;
+    bar.content_extent = lay.content_h;
+    bar.expand_progress = 1.0f;
+    bar.enabled = vm.settings_open && bar.content_extent > bar.viewport_extent + 1.0f;
+    return bar;
+}
+
 SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& rect,
                                   float scale, float title_h, float status_h,
                                   const fluent::Painter* painter) {

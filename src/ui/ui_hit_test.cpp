@@ -235,6 +235,12 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             }
         }
         if (ContainsPt(lay.content, x, y)) {
+            const auto bar = SettingsScrollbarSpec(vm, lay, scale_);
+            if (bar.enabled && ContainsPt(bar.viewport, x, y)) {
+                r.region = HitTestResult::Scrollbar;
+                r.sub_index = 3; // Settings content, independent of the file pane.
+                return r;
+            }
             // 右键菜单 layer card 系统右键菜单 (the Pulse card is the current page).
             if (ContainsPt(lay.ctx_layer[1], x, y)) {
                 r.region = HitTestResult::SettingsCtxPivot; r.index = 6; return r;
