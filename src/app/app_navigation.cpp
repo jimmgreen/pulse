@@ -2415,6 +2415,7 @@ void OpenSelected(AppState& s) {
     }
     const auto indices = tab->SelectedIndices();
     if (indices.empty()) return;
+    s.renderer.NotifyPreviewActivate(false);
     if (indices.size() == 1) {
         const fs::DirEntry& e = tab->EntryAt(static_cast<size_t>(indices[0]));
         if (e.change_record_only) return;

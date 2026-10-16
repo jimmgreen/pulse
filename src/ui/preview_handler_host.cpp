@@ -488,7 +488,7 @@ struct PreviewHandlerHost::WorkerState {
         if (!ClientToScreen(owner, &origin)) return;
         const int width = std::max(1L, bounds.right - bounds.left);
         const int height = std::max(1L, bounds.bottom - bounds.top);
-        if (shown && !app_active && !OverlayOwnsForeground()) {
+        if (!app_active && !OverlayOwnsForeground()) {
             pan.Disable();
             SetWindowPos(hwnd, HWND_NOTOPMOST, origin.x, origin.y, width, height,
                          SWP_NOACTIVATE | SWP_HIDEWINDOW);
@@ -641,12 +641,17 @@ struct PreviewHandlerHost::WorkerState {
             return false;
         }
         shown = true;
-        PlaceOverlay();
-        // Office handlers may paint directly into the host. Wake their child
-        // windows without erasing the pixels DoPreview has already produced.
-        RedrawWindow(hwnd, nullptr, nullptr,
-                     RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_NOERASE);
-        pan.Enable(hwnd);
+        if (!app_active && !OverlayOwnsForeground()) {
+            pan.Disable();
+            HideWindow();
+        } else {
+            PlaceOverlay();
+            // Office handlers may paint directly into the host. Wake their child
+            // windows without erasing the pixels DoPreview has already produced.
+            RedrawWindow(hwnd, nullptr, nullptr,
+                         RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_NOERASE);
+            pan.Enable(hwnd);
+        }
         return true;
     }
 
