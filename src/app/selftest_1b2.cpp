@@ -2056,13 +2056,13 @@ void TestMenuModel() {
 
     // Item menu: 打开 + icon strip (cut/copy/delete/rename) + verbs + undo.
     auto items = BuildItemMenu(false, L"");
-    Check(items.size() == 9, L"menu: item menu is 打开+图标条+verbs+undo");
+    Check(items.size() == 10, L"menu: item menu is 打开+图标条+verbs+undo");
     // Command-id ranges must not overlap: CmdTabJoinGroupBase once collided
     // with CmdTabCloseOthers and "join group" closed every other tab.
     static_assert(CmdTabJoinGroupBase > CmdTabCloseRight &&
                   CmdTabJoinGroupBase + 32 <= CmdRecentBase,
                   "join-group ids must sit between tab commands and recents");
-    std::vector<int> want{ CmdOpen, CmdNone, CmdCopyPath, CmdOpenTerminal, CmdProperties,
+    std::vector<int> want{ CmdOpen, CmdNone, CmdCopyName, CmdCopyPath, CmdOpenTerminal, CmdProperties,
                            CmdPinWorkspace, CmdPinNetwork, CmdTags, CmdUndo };
     bool ids_ok = items.size() >= want.size();
     for (size_t i = 0; i < want.size() && i < items.size(); ++i)
@@ -2075,21 +2075,45 @@ void TestMenuModel() {
           items[1].quick_swatches[3].command == CmdRename &&
           !items[1].quick_swatches[0].glyph.empty(),
           L"menu: icon strip carries 剪切/复制/删除/重命名");
-    Check(items.size() > 2 && items[2].shortcut == L"Ctrl+Shift+C",
-          L"menu: 复制路径 carries Ctrl+Shift+C");
+    Check(items.size() > 3 && items[2].command == CmdCopyName &&
+          items[2].text == l10n::Get(l10n::StringId::CopyName) && items[2].text.size() > 0 &&
+          items[3].shortcut == L"Ctrl+Shift+C",
+          L"menu: 复制名称 sits right above 复制路径, which carries Ctrl+Shift+C");
     auto folder_items = BuildItemMenu(false, L"", true);
-    Check(folder_items.size() == 10, L"menu: folder item menu adds 在新标签打开");
-    Check(folder_items.size() > 3 &&
+    Check(folder_items.size() == 11, L"menu: folder item menu adds 在新标签打开");
+    Check(folder_items.size() > 4 &&
           folder_items[2].command == CmdOpenInNewTab &&
           folder_items[2].text == L"在新标签打开" &&
-          folder_items[3].command == CmdCopyPath,
-          L"menu: 在新标签打开 sits before 复制路径");
+          folder_items[3].command == CmdCopyName &&
+          folder_items[4].command == CmdCopyPath,
+          L"menu: 在新标签打开 sits before 复制名称 and 复制路径");
     Check(!items.back().enabled, L"menu: undo disabled without a stack");
 
     auto recycle_items = BuildRecycleItemMenu(false, L"");
     Check(!recycle_items.empty() && recycle_items[0].command == CmdRestoreRecycle &&
           recycle_items[1].command == CmdDelete,
           L"menu: recycle item menu is restore + permanent delete");
+    // 复制名称 (#303) on every surface that can name something: the item menu
+    // above, the reclaim menu of the bin, and the blank area.
+    {
+        const auto find = [](const std::vector<ui::FluentMenuItem>& rows, int command) {
+            for (size_t i = 0; i < rows.size(); ++i)
+                if (rows[i].command == command) return i;
+            return rows.size();
+        };
+        const size_t recycle_name = find(recycle_items, CmdCopyName);
+        const auto background = BuildBackgroundMenu(true, true, L"\u64a4\u9500");
+        const size_t bg_name = find(background, CmdCopyName);
+        Check(recycle_name + 1 == find(recycle_items, CmdCopyPath) &&
+                  recycle_name < recycle_items.size() &&
+                  !recycle_items[recycle_name].text.empty() &&
+                  bg_name + 1 == find(background, CmdCopyPath) && bg_name < background.size() &&
+                  !background[bg_name].text.empty(),
+              L"menu: 复制名称 and 复制路径 are neighbours on the bin and the blank area");
+        // The blank-area row copies the folder name, so it carries no shortcut.
+        Check(background[bg_name].shortcut.empty() && background[bg_name].enabled,
+              L"menu: 复制名称 has no shortcut of its own");
+    }
     auto recycle_bg = BuildRecycleBackgroundMenu(true, L"撤销", true);
     Check(!recycle_bg.empty() && recycle_bg[0].command == CmdEmptyRecycle &&
           recycle_bg[0].enabled,
@@ -2689,7 +2713,7 @@ void TestContextMenuPrefs() {
 
         auto menu = BuildItemMenu(true, L"撤销移动 a.txt", true);
         ApplyBuiltinMenuPrefs(menu, builtin);
-        const std::vector<int> kept_ids{ CmdOpen, CmdNone, CmdOpenInNewTab, CmdCopyPath,
+        const std::vector<int> kept_ids{ CmdOpen, CmdNone, CmdOpenInNewTab, CmdCopyName, CmdCopyPath,
                                          CmdOpenTerminal, CmdProperties };
         bool kept_ok = menu.size() == kept_ids.size();
         for (size_t i = 0; kept_ok && i < menu.size(); ++i) kept_ok = menu[i].command == kept_ids[i];
@@ -2753,11 +2777,13 @@ void TestContextMenuPrefs() {
 
         auto moved = BuildItemMenu(true, L"", true);
         ApplyBuiltinMenuPrefs(moved, ordered, BuiltinMenuSurface::Item);
-        const std::vector<int> moved_ids{ CmdOpen, CmdNone, CmdCopyPath, CmdOpenInNewTab, CmdOpenTerminal,
-                                          CmdProperties, CmdPinWorkspace, CmdPinNetwork, CmdTags, CmdUndo };
+        // 复制路径 is dragged to the top; 复制名称 keeps its place in the block.
+        const std::vector<int> moved_ids{ CmdOpen, CmdNone, CmdCopyPath, CmdOpenInNewTab, CmdCopyName,
+                                          CmdOpenTerminal, CmdProperties, CmdPinWorkspace, CmdPinNetwork,
+                                          CmdTags, CmdUndo };
         bool moved_ok = moved.size() == moved_ids.size();
         for (size_t i = 0; moved_ok && i < moved.size(); ++i) moved_ok = moved[i].command == moved_ids[i];
-        Check(moved_ok && moved[5].separator_after && !moved[2].separator_after,
+        Check(moved_ok && moved[6].separator_after && !moved[2].separator_after,
               L"menu: a moved Pulse command takes its new place, groups keep their separators");
 
         auto undo_first = BuiltinMenuDefaultOrder(BuiltinMenuSurface::Item);
@@ -4376,6 +4402,27 @@ void TestMultiSelect() {
     tab.SelectRange(0, 3);
     Check(tab.SelectedCount() == 4 && tab.IsSelected(0) && tab.IsSelected(3) && !tab.IsSelected(4),
           L"select: shift range");
+
+    // 复制名称 (#303) reads the same rows as 复制路径: same count, same order,
+    // and both skip a history row that has no path to name.
+    {
+        const auto names = SelectedEntryNames(tab);
+        const auto paths = SelectedFullPaths(tab);
+        Check(names.size() == paths.size() && names.size() == 4 &&
+                  names[0] == L"f0" && names[3] == L"f3" &&
+                  JoinClipboardLines(names) == L"f0\r\nf1\r\nf2\r\nf3",
+              L"copy name: one CRLF line per selected row, same rows as 复制路径");
+        (*entries)[1].change_record_only = true;
+        const auto names_after = SelectedEntryNames(tab);
+        const auto paths_after = SelectedFullPaths(tab);
+        Check(names_after.size() == paths_after.size() && names_after.size() == 3 &&
+                  std::find(names_after.begin(), names_after.end(), L"f1") == names_after.end(),
+              L"copy name: a history row is skipped by both name and path");
+        (*entries)[1].change_record_only = false;
+        Check(JoinClipboardLines({L"a", L"b"}) == L"a\r\nb" && JoinClipboardLines({}) == L"" &&
+                  JoinClipboardLines({L"only"}) == L"only",
+              L"copy name: clipboard lines join with CRLF and never trail one");
+    }
 
     tab.SelectAll();
     Check(tab.all_selected && tab.SelectedCount() == 5 && tab.IsSelected(4) && tab.selected.empty(),

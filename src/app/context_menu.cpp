@@ -21,6 +21,9 @@ namespace {
 constexpr const wchar_t* kGlyphOpen = L"\xE8E5";
 constexpr const wchar_t* kGlyphCut = L"\xE8C6";
 constexpr const wchar_t* kGlyphCopy = L"\xE8C8";
+// 复制名称 shares the copy glyph; like 固定到网络 (kGlyphLink), one constant
+// is enough while the labels differ.
+constexpr const wchar_t* kGlyphCopyName = L"\xE8C8";
 constexpr const wchar_t* kGlyphPaste = L"\xE77F";
 constexpr const wchar_t* kGlyphDelete = L"\xE74D";
 constexpr const wchar_t* kGlyphRename = L"\xE8AC";
@@ -94,6 +97,7 @@ std::vector<ui::FluentMenuItem> BuildItemMenu(bool can_undo, const std::wstring&
 
     if (folder)
         items.push_back(Item(CmdOpenInNewTab, l10n::Get(l10n::StringId::OpenNewTab).c_str(), kGlyphOpenInNewTab));
+    items.push_back(Item(CmdCopyName, l10n::Get(l10n::StringId::CopyName).c_str(), kGlyphCopyName));
     items.push_back(Item(CmdCopyPath, l10n::Get(l10n::StringId::CopyPath).c_str(), kGlyphLink, L"Ctrl+Shift+C"));
     items.push_back(Item(CmdOpenTerminal, l10n::Get(l10n::StringId::OpenTerminalHere).c_str(), kGlyphTerminal));
     items.push_back(Item(CmdProperties, l10n::Get(l10n::StringId::Properties).c_str(), kGlyphProperties, L"Alt+Enter"));
@@ -110,6 +114,7 @@ std::vector<ui::FluentMenuItem> BuildItemMenu(bool can_undo, const std::wstring&
 BuiltinMenuItem BuiltinItemForCommand(int command) {
     switch (command) {
     case CmdOpenInNewTab: return BuiltinMenuItem::OpenInNewTab;
+    case CmdCopyName: return BuiltinMenuItem::CopyName;
     case CmdCopyPath: return BuiltinMenuItem::CopyPath;
     case CmdOpenTerminal: return BuiltinMenuItem::Terminal;
     case CmdPinQuickAccess:
@@ -237,9 +242,15 @@ void AppendWindowTransferCommands(std::vector<ui::FluentMenuItem>& items,
     auto copy = flyout(CmdCopyToWindowBase, l10n::StringId::CopyToWindow, kGlyphCopy);
     auto move = flyout(CmdMoveToWindowBase, l10n::StringId::MoveToWindow, kGlyphCut);
     move.enabled = can_move;
+    // Right above 复制名称, so 名称/路径 stay neighbours; a menu without it
+    // (breadcrumb, 新建) falls back to 复制路径.
     auto at = std::find_if(items.begin(), items.end(), [](const ui::FluentMenuItem& row) {
-        return row.command == CmdCopyPath;
+        return row.command == CmdCopyName;
     });
+    if (at == items.end())
+        at = std::find_if(items.begin(), items.end(), [](const ui::FluentMenuItem& row) {
+            return row.command == CmdCopyPath;
+        });
     if (at == items.end())
         at = std::find_if(items.begin(), items.end(), [](const ui::FluentMenuItem& row) {
             return row.command == CmdProperties || row.command == CmdUndo;
@@ -290,6 +301,7 @@ std::vector<ui::FluentMenuItem> BuildRecycleItemMenu(bool can_undo,
     items.push_back(Item(CmdRestoreRecycle, l10n::Get(l10n::StringId::Restore).c_str(), kGlyphUndo));
     items.push_back(Item(CmdDelete, l10n::Get(l10n::StringId::PermanentDelete).c_str(), kGlyphDelete, L"Del"));
     items.back().separator_after = true;
+    items.push_back(Item(CmdCopyName, l10n::Get(l10n::StringId::CopyName).c_str(), kGlyphCopyName));
     items.push_back(Item(CmdCopyPath, l10n::Get(l10n::StringId::CopyPath).c_str(), kGlyphLink, L"Ctrl+Shift+C"));
     items.back().separator_after = true;
     items.push_back(UndoItem(can_undo, undo_label));
@@ -325,6 +337,7 @@ std::vector<ui::FluentMenuItem> BuildBackgroundMenu(bool can_paste, bool can_und
     items.push_back(Item(CmdNewTextFile, l10n::Get(l10n::StringId::NewTextDocument).c_str(), kGlyphNewFile));
     items.back().separator_after = true;
     items.push_back(Item(CmdPaste, l10n::Get(l10n::StringId::Paste).c_str(), kGlyphPaste, L"Ctrl+V", can_paste));
+    items.push_back(Item(CmdCopyName, l10n::Get(l10n::StringId::CopyName).c_str(), kGlyphCopyName));
     items.push_back(Item(CmdCopyPath, l10n::Get(l10n::StringId::CopyPath).c_str(), kGlyphLink, L"Ctrl+Shift+C"));
     items.back().separator_after = true;
     items.push_back(Item(CmdSelectAll, l10n::Get(l10n::StringId::SelectAll).c_str(), kGlyphSelectAll, L"Ctrl+A"));
@@ -638,6 +651,7 @@ std::vector<ui::FluentMenuItem> BuildCommandPalette(const std::wstring& query,
         add_cmd(CmdCopyToTarget, l10n::Get(l10n::StringId::CopyToTarget).c_str(), kGlyphCopy, L"Ctrl+Alt+C");
         add_cmd(CmdNewFolder, l10n::Get(l10n::StringId::NewFolder).c_str(), kGlyphNewFolder, L"Ctrl+Shift+N");
         add_cmd(CmdPinWorkspace, l10n::Get(l10n::StringId::PinWorkspace).c_str(), kGlyphFolder, nullptr);
+        add_cmd(CmdCopyName, l10n::Get(l10n::StringId::CopyName).c_str(), kGlyphCopyName, nullptr);
         add_cmd(CmdCopyPath, l10n::Get(l10n::StringId::CopyPath).c_str(), kGlyphLink, L"Ctrl+Shift+C");
         add_cmd(CmdInstallFullIndex, l10n::Get(l10n::StringId::EnableFullIndex).c_str(), kGlyphSearch, nullptr);
         add_cmd(CmdSettings, l10n::Get(l10n::StringId::Settings).c_str(), kGlyphSettings, nullptr);

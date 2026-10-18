@@ -114,6 +114,29 @@ int wmain() {
         check(app::BuiltinMenuShared(BuiltinMenuItem::CopyPath) && app::BuiltinMenuShared(BuiltinMenuItem::Undo) &&
             !app::BuiltinMenuShared(BuiltinMenuItem::Paste) && !app::BuiltinMenuShared(BuiltinMenuItem::Properties),
             "CMI-B07 两处共用 marks rows present in both menus");
+        // #303: the new row is a real catalog member, not a menu-only extra.
+        check(app::BuiltinMenuShared(BuiltinMenuItem::CopyName) &&
+            app::BuiltinMenuKey(BuiltinMenuItem::CopyName) == L"copy_name" &&
+            (slim & app::BuiltinMenuBit(BuiltinMenuItem::CopyName)) == 0,
+            "CMI-B09 复制名称 shares both menus, keeps 精简 and its own key");
+        {
+            const auto item_rows = app::BuiltinMenuDefaultOrder(app::BuiltinMenuSurface::Item);
+            const auto bg_rows = app::BuiltinMenuDefaultOrder(app::BuiltinMenuSurface::Background);
+            const auto before = [](const app::BuiltinMenuOrder& rows, BuiltinMenuItem a, BuiltinMenuItem b) {
+                return std::find(rows.begin(), rows.end(), a) + 1 == std::find(rows.begin(), rows.end(), b);
+            };
+            check(before(item_rows, BuiltinMenuItem::CopyName, BuiltinMenuItem::CopyPath) &&
+                before(bg_rows, BuiltinMenuItem::CopyName, BuiltinMenuItem::CopyPath),
+                "CMI-B10 复制名称 sits right above 复制路径 in both surfaces");
+            auto name_first = item_rows;
+            name_first.erase(std::find(name_first.begin(), name_first.end(), BuiltinMenuItem::CopyName));
+            name_first.insert(name_first.begin(), BuiltinMenuItem::CopyName);
+            const auto moved = app::BuiltinMenuOrderedRows(app::BuiltinMenuSurface::Item, name_first);
+            const auto item_surface = app::BuiltinMenuSurfaceRows(app::BuiltinMenuSurface::Item);
+            check(moved.size() == item_surface.count && moved[2].item == BuiltinMenuItem::CopyName &&
+                app::NormalizeBuiltinMenuOrder(app::BuiltinMenuSurface::Item, name_first) == name_first,
+                "CMI-B11 the new row drags to the first slot and keeps its slot's separators");
+        }
         bool labels = true;
         for (int i = 0; i < app::kBuiltinMenuItemCount; ++i)
             labels &= !app::BuiltinMenuKey(static_cast<BuiltinMenuItem>(i)).empty();

@@ -2979,6 +2979,28 @@ std::vector<std::wstring> SelectedFullPaths(const app::Tab& tab) {
     return out;
 }
 
+std::vector<std::wstring> SelectedEntryNames(const app::Tab& tab) {
+    std::vector<std::wstring> out;
+    if (!tab.snapshot) return out;
+    const auto indices = tab.SelectedIndices();
+    out.reserve(indices.size());
+    for (int index : indices) {
+        // Same filter as SelectedFullPaths: a history row has no name to copy.
+        if (EntryFullPath(tab, index).empty()) continue;
+        out.push_back(tab.EntryAt(static_cast<size_t>(index)).name);
+    }
+    return out;
+}
+
+std::wstring JoinClipboardLines(const std::vector<std::wstring>& lines) {
+    std::wstring text;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (i) text += L"\r\n";
+        text += lines[i];
+    }
+    return text;
+}
+
 std::wstring TagDiscoveryKey(std::wstring path) {
     path = fs::NormalizePath(std::move(path));
     for (auto& c : path) c = static_cast<wchar_t>(std::towlower(c));

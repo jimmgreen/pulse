@@ -114,7 +114,8 @@ void PureChecks() {
           BuiltinMenuMnemonic(CmdCopy) == L'C' && BuiltinMenuMnemonic(CmdPaste) == L'P' &&
           BuiltinMenuMnemonic(CmdDelete) == L'D' && BuiltinMenuMnemonic(CmdRename) == L'M' &&
           BuiltinMenuMnemonic(CmdProperties) == L'R' && BuiltinMenuMnemonic(CmdUndo) == L'U' &&
-          BuiltinMenuMnemonic(CmdCopyPath) == L'A' && BuiltinMenuMnemonic(CmdRefresh) == L'E' &&
+          BuiltinMenuMnemonic(CmdCopyPath) == L'A' && BuiltinMenuMnemonic(CmdCopyName) == 0 &&
+          BuiltinMenuMnemonic(CmdRefresh) == L'E' &&
           BuiltinMenuMnemonic(CmdTags) == 0,
           "built-in rows use Explorer's access keys; Pulse-only rows have none");
 }

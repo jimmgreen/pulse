@@ -606,12 +606,17 @@ bool RunTabTransferTest() {
                 AppendWindowTransferCommands(menu, {}, true);
                 check(menu.size() == plain, "without another window the item menu has no window flyouts");
                 AppendWindowTransferCommands(menu, {folder_c, L"\\\\?\\D:\\"}, false);
+                // Anchored above 复制名称 so 名称/路径 stay neighbours (#303).
+                const auto copy_name = std::find_if(menu.begin(), menu.end(), [](const ui::FluentMenuItem& row) {
+                    return row.command == CmdCopyName;
+                });
                 const auto copy_path = std::find_if(menu.begin(), menu.end(), [](const ui::FluentMenuItem& row) {
                     return row.command == CmdCopyPath;
                 });
-                const size_t at = static_cast<size_t>(copy_path - menu.begin());
-                if (check(menu.size() == plain + 2 && copy_path != menu.end() && at >= 2,
-                          "the two flyouts come right before 复制路径")) {
+                const size_t at = static_cast<size_t>(copy_name - menu.begin());
+                if (check(menu.size() == plain + 2 && copy_name != menu.end() && copy_path == copy_name + 1 &&
+                              at >= 2,
+                          "the two flyouts come right before 复制名称, which stays above 复制路径")) {
                     const ui::FluentMenuItem& copy = menu[at - 2];
                     const ui::FluentMenuItem& move = menu[at - 1];
                     check(copy.command == CmdNone && copy.enabled && copy.text == l10n::Get(l10n::StringId::CopyToWindow) &&

@@ -1544,3 +1544,5 @@
 // Network view warning when Windows Firewall's Network Discovery group is off.
 #define IDS_NETWORK_DISCOVERY_OFF_TITLE 2731
 #define IDS_NETWORK_DISCOVERY_OFF_DESC 2732
+// Context menu: copy the selected names (#303), next to 复制路径.
+#define IDS_COPY_NAME 2733

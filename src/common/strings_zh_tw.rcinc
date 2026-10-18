@@ -284,6 +284,7 @@ BEGIN
     IDS_OPEN                        "開啟"
     IDS_OPEN_NEW_TAB                "在新分頁開啟"
     IDS_COPY_PATH                   "複製路徑"
+    IDS_COPY_NAME                   "複製名稱"
     IDS_MORE                        "更多"
     IDS_INFORMATION                 "資訊"
     IDS_LOCATION                    "位置"

@@ -18,6 +18,7 @@ struct BuiltinMenuInfo {
 
 constexpr BuiltinMenuInfo kItems[] = {
     { BuiltinMenuItem::OpenInNewTab,   L"open_new_tab",   l10n::StringId::OpenNewTab },
+    { BuiltinMenuItem::CopyName,       L"copy_name",      l10n::StringId::CopyName },
     { BuiltinMenuItem::CopyPath,       L"copy_path",      l10n::StringId::CopyPath },
     { BuiltinMenuItem::Terminal,       L"terminal",       l10n::StringId::OpenTerminalHere },
     { BuiltinMenuItem::QuickAccess,    L"quick_access",   l10n::StringId::PinQuickAccess },
@@ -61,6 +62,7 @@ constexpr BuiltinMenuRow kItemRows[] = {
     { B::Count, F::Strip, nullptr, nullptr, false, false },
     { B::RecentChanges, F::None, L"\xE81C", nullptr, false, false },
     { B::OpenInNewTab, F::None, L"\xE8A7", nullptr, false, false },
+    { B::CopyName, F::None, L"\xE8C8", nullptr, false, false },
     { B::CopyPath, F::None, L"\xE71B", L"Ctrl+Shift+C", false, false },
     { B::Terminal, F::None, L"\xE756", nullptr, false, false },
     { B::Properties, F::None, L"\xE946", L"Alt+Enter", true, false },
@@ -78,6 +80,7 @@ constexpr BuiltinMenuRow kBackgroundRows[] = {
     { B::NewFolder, F::None, L"\xE8F4", L"F7", false, false },
     { B::NewTextFile, F::None, L"\xE8A5", nullptr, true, false },
     { B::Paste, F::None, L"\xE77F", L"Ctrl+V", false, false },
+    { B::CopyName, F::None, L"\xE8C8", nullptr, false, false },
     { B::CopyPath, F::None, L"\xE71B", L"Ctrl+Shift+C", true, false },
     { B::SelectCommands, F::None, L"\xE8B3", L"Ctrl+A", true, false },
     { B::Terminal, F::None, L"\xE756", nullptr, true, false },
@@ -103,8 +106,8 @@ constexpr uint32_t kAllBits = (1u << kBuiltinMenuItemCount) - 1u;
 // 精简 keeps the everyday rows; 标准 drops the rarely used pins and
 // selection helpers; 完整 (default) shows everything.
 constexpr uint32_t kSlimHidden = kAllBits & ~Bits({
-    B::CopyPath, B::Undo, B::View, B::Sort, B::Group, B::Refresh, B::NewFolder,
-    B::NewTextFile, B::Paste, B::Properties, B::FolderProperties });
+    B::CopyName, B::CopyPath, B::Undo, B::View, B::Sort, B::Group, B::Refresh,
+    B::NewFolder, B::NewTextFile, B::Paste, B::Properties, B::FolderProperties });
 constexpr uint32_t kStandardHidden = Bits({ B::PinNetwork, B::RecentChanges, B::SelectCommands });
 
 } // namespace
