@@ -1,0 +1,72 @@
+name: Build Windows ARM64
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build-arm64:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC ARM64 Environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64_arm64
+
+      - name: Download and replace ARM64 PDFium
+        shell: pwsh
+        run: |
+          $url = "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8044/pdfium-win-arm64.tgz"
+          Write-Host "Downloading ARM64 PDFium from $url..."
+          Invoke-WebRequest -Uri $url -OutFile "pdfium.tgz"
+          tar -xzf "pdfium.tgz"
+          Copy-Item -Path "bin/pdfium.dll" -Destination "third_party/pdfium/bin/pdfium.dll" -Force
+          Write-Host "ARM64 PDFium replaced successfully."
+
+      - name: Configure CMake
+        run: |
+          cmake -S . -B build-arm64 -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_SYSTEM_NAME=Windows `
+            -DCMAKE_SYSTEM_PROCESSOR=ARM64 `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
+            -DPULSE_WITH_LUMATEXT=OFF `
+            -DPULSE_WITH_SELFTEST=OFF
+
+      - name: Build ARM64 Executables
+        run: |
+          cmake --build build-arm64 --target pulse pulse_index pulse_preview pulse_document pulse_shell pulse_integration pulse_elevated --parallel 4
+
+      - name: Package ARM64 Portable ZIP
+        shell: pwsh
+        run: |
+          $version = (Get-Content version.txt -Raw).Trim()
+          $stage = "dist/Pulse-$version-arm64-portable"
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          $binaries = @(
+            'pulse.exe', 'Pulse.Index.exe', 'Pulse.Preview.exe',
+            'Pulse.Document.exe', 'pulse_shell.exe', 'pulse_integration.exe',
+            'pulse_elevated.exe', 'pdfium.dll'
+          )
+          foreach ($bin in $binaries) {
+            Copy-Item -Path "build-arm64/$bin" -Destination $stage -Force
+          }
+          New-Item -ItemType Directory -Path "$stage/licenses/PDFium" -Force | Out-Null
+          Copy-Item -Path "third_party/pdfium/licenses/*" -Destination "$stage/licenses/PDFium" -Recurse -Force
+          Copy-Item -Path "third_party/pdfium/LICENSE" -Destination "$stage/licenses/PDFium/binary-distribution.txt" -Force
+
+          New-Item -ItemType Directory -Path "dist" -Force | Out-Null
+          $zipPath = "dist/Pulse-$version-windows-arm64.zip"
+          Compress-Archive -Path "$stage\*" -DestinationPath $zipPath -Force
+          Write-Host "Created archive: $zipPath"
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pulse-Windows-ARM64
+          path: dist/Pulse-*-windows-arm64.zip
+          retention-days: 30
