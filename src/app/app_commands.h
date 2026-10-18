@@ -9,6 +9,8 @@ namespace pulse::app { struct SelectionCaps; struct DriveVerbResult; }
 namespace pulse {
 bool EnsureMenu(AppState& s);
 void CopySelectedPath(AppState& s);
+// 复制名称 (#303): the selected file names, or the folder's name on blank space.
+void CopySelectedName(AppState& s);
 void CreateNewItem(AppState& s, bool folder);
 void QueueTagAds(AppState& s, std::vector<app::TagAdsUpdate> updates);
 bool DeleteTagAndRefreshViews(AppState& s, const app::TagId& tag_id);

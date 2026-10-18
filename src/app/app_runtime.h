@@ -132,6 +132,11 @@ std::wstring TooltipForHover(AppState& s);
 void ApplyHoverTarget(AppState& s, const ui::HitTestResult& hit);
 std::wstring EntryFullPath(const app::Tab& tab, int index);
 std::vector<std::wstring> SelectedFullPaths(const app::Tab& tab);
+// Names of the selected entries, with the same filtering as SelectedFullPaths
+// (rows without a path are skipped), so the two lists always line up.
+std::vector<std::wstring> SelectedEntryNames(const app::Tab& tab);
+// One clipboard line per entry: CRLF, like 复制路径 and Excel expect.
+std::wstring JoinClipboardLines(const std::vector<std::wstring>& lines);
 std::wstring TagDiscoveryKey(std::wstring path);
 void QueueVisibleTagDiscovery(AppState& s);
 void ApplyTagAdsDiscoveries(AppState& s, const std::vector<TagAdsDiscovery>& discoveries);

@@ -355,6 +355,7 @@ enum class StringId : UINT {
     Open = IDS_OPEN,
     OpenNewTab = IDS_OPEN_NEW_TAB,
     CopyPath = IDS_COPY_PATH,
+    CopyName = IDS_COPY_NAME,
     More = IDS_MORE,
     Information = IDS_INFORMATION,
     Location = IDS_LOCATION,

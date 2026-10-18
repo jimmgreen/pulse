@@ -111,12 +111,22 @@ void CopySelectedPath(AppState& s) {
     if (!tab) return;
     std::vector<std::wstring> paths = SelectedFullPaths(*tab);
     if (paths.empty()) return;
-    std::wstring text;
-    for (size_t i = 0; i < paths.size(); ++i) {
-        if (i) text += L"\r\n";
-        text += ClipboardPath(paths[i]);
+    for (auto& path : paths) path = ClipboardPath(path);
+    ops::WriteClipboardText(JoinClipboardLines(paths));
+}
+
+void CopySelectedName(AppState& s) {
+    if(DeferContentSelection(s,[=](AppState& v){CopySelectedName(v);})) return;
+    app::Tab* tab = ActiveTab(s);
+    if (!tab) return;
+    std::vector<std::wstring> names = SelectedEntryNames(*tab);
+    if (names.empty()) {
+        // Nothing selected (blank area): the folder's own name, as 复制路径
+        // copies the folder's path. A virtual view gives its localized name.
+        if (tab->current_path.empty()) return;  // This PC: nothing to name
+        names.push_back(app::TabTitle(tab->current_path));
     }
-    ops::WriteClipboardText(text);
+    ops::WriteClipboardText(JoinClipboardLines(names));
 }
 
 // Creates "新建文件夹"/"新建文本文档.txt" via the ops layer, then (on the next
@@ -1304,6 +1314,11 @@ void DispatchMenuCommand(AppState& s, int cmd) {
         if (!target.empty()) s.ops.OpenTerminal(ClipboardPath(target));
         break;
     }
+    case app::CmdCopyName:
+        // Item menu copies the selected names; blank space falls back to the
+        // folder's name inside CopySelectedName itself.
+        CopySelectedName(s);
+        break;
     case app::CmdCopyPath: {
         // Item menu copies the selection; background menu copies the folder.
         app::Tab* tab = ActiveTab(s);
@@ -2789,7 +2804,7 @@ std::vector<ui::SelectionChipAction> SelectionChipActions(AppState& s) {
         static constexpr int kOrder[] = {
             app::CmdUnlockDrive, app::CmdEjectDrive, app::CmdDisconnectDrive, app::CmdRestoreRecycle,
             app::CmdMapNetworkDrive, app::CmdUnpinNetwork, app::CmdBatchRename, app::CmdGroupIntoFolder,
-            app::CmdDissolveFolder, app::CmdCompareSideBySide, app::CmdTags, app::CmdCopyPath,
+            app::CmdDissolveFolder, app::CmdCompareSideBySide, app::CmdTags, app::CmdCopyName, app::CmdCopyPath,
             app::CmdOpenInNewTab, app::CmdOpenPath, app::CmdPinQuickAccess, app::CmdUnpinQuickAccess,
             app::CmdProperties, app::CmdOpenTerminal, app::CmdViewRecentChanges,
             app::CmdPinWorkspace, app::CmdPinNetwork,

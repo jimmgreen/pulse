@@ -15,6 +15,7 @@ namespace pulse::app {
 // Settings-page order.
 enum class BuiltinMenuItem : uint8_t {
     OpenInNewTab,
+    CopyName,
     CopyPath,
     Terminal,
     QuickAccess,

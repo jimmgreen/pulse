@@ -113,6 +113,7 @@ enum MenuCmd : int {
     CmdApplyGroupToAllFolders = 195, // group menu: this grouping becomes every folder's default (#75)
     CmdCustomizeToolbar = 197,  // toolbar More / New menu: 自定义工具栏 sheet
     CmdNewMarkdownFile = 198,   // New menu: 新建 Markdown 文档
+    CmdCopyName = 199,          // item / background: copy the selected names (#303)
     CmdExitPulse = 196,         // palette: quit even when closing keeps Pulse running (#57)
     CmdRecentBase = 200,
     // Drive and network verbs (selection_caps.h / drive_verbs.h), clear of the
