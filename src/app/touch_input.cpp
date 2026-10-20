@@ -241,20 +241,20 @@ void TouchInputAdapter::DispatchTap(HWND hwnd, float x, float y) {
 
     case ui::HitTestResult::Tab:
         if (hit.index >= 0) {
-            SwitchTab(state_, hit.index);
+            SwitchTab(state_, static_cast<size_t>(hit.index));
             InvalidateRect(hwnd, nullptr, FALSE);
         }
         break;
 
     case ui::HitTestResult::TabClose:
         if (hit.index >= 0) {
-            CloseTab(state_, hit.index);
+            CloseLayoutTab(state_, static_cast<size_t>(hit.index));
             InvalidateRect(hwnd, nullptr, FALSE);
         }
         break;
 
     case ui::HitTestResult::TabNew:
-        NewTab(state_);
+        OpenNewTab(state_);
         InvalidateRect(hwnd, nullptr, FALSE);
         break;
 
