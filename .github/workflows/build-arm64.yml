@@ -48,9 +48,9 @@ jobs:
             -DPULSE_WITH_LUMATEXT=ON `
             -DPULSE_WITH_SELFTEST=OFF
 
-      - name: Build ARM64 Executables and Installer Stub
+      - name: Build ARM64 Executables, Tests and Installer Stub
         run: |
-          cmake --build build-arm64 --target pulse pulse_index pulse_preview pulse_document pulse_shell pulse_integration pulse_elevated pulse_setup --parallel 4
+          cmake --build build-arm64 --target pulse pulse_index pulse_preview pulse_document pulse_shell pulse_integration pulse_elevated pulse_setup pulse_session_window_test pulse_known_folder_links_test pulse_command_icon_test pulse_item_selection_geometry_test pulse_touch_gesture_test --parallel 4
 
       - name: Package Single-File Installer (PulseSetup-windows-arm64.exe)
         shell: pwsh

@@ -1182,7 +1182,20 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             int col = 0;
             while (col < columns.count - 1 && x >= columns.DividerX(col)) ++col;
             switch (columns.kinds[static_cast<size_t>(col)]) {
-            case ColumnKind::Name: out.column = SortColumn::Name; break;
+            case ColumnKind::Name: {
+                const D2D1_RECT_F nameColRc = D2D1::RectF(
+                    col == 0 ? paneRc.left : columns.DividerX(col - 1),
+                    columnTop,
+                    columns.DividerX(col),
+                    listTop);
+                const auto hdr_geom = ComputeHeaderSelectionGeometry(nameColRc, scale_, touch_density_);
+                if (ContainsPt(hdr_geom.hit_rect, x, y)) {
+                    out.region = HitTestResult::HeaderCheckbox;
+                    return out;
+                }
+                out.column = SortColumn::Name;
+                break;
+            }
             case ColumnKind::Path:
                 if (paneVm.content_results) out.column = SortColumn::Path;
                 else out.region = HitTestResult::Pane;
@@ -1357,6 +1370,14 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                             return out;
                         }
                     }
+                }
+                const auto cb_geom = ComputeItemSelectionGeometry(
+                    paneVm.view_mode, cell, scale_, touch_density_, entry.selected,
+                    paneVm.hover_index == idx, touchscreen_ready_, checkbox_visibility_);
+                if (cb_geom.visible && ContainsPt(cb_geom.hit_rect, x, y)) {
+                    out.region = HitTestResult::RowCheckbox;
+                    out.index = idx;
+                    return out;
                 }
                 out.region = HitTestResult::Row;
                 out.index = idx;

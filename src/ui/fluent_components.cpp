@@ -1040,18 +1040,19 @@ void Painter::DrawCheckBox(const D2D1_RECT_F& bounds, std::wstring_view text,
     D2D1_COLOR_F border;
     D2D1_COLOR_F fill;
     D2D1_COLOR_F foreground = state.enabled ? theme_->text : theme_->text_disabled;
+    const bool is_active = state.checked || state.indeterminate;
     if (high_contrast_) {
         border = !state.enabled ? theme_->text_disabled
-                 : state.checked ? theme_->accent : theme_->stroke_input_bottom;
-        fill = !state.enabled ? (state.checked ? theme_->text_disabled : theme_->fill_input)
-               : state.checked ? theme_->accent : theme_->fill_input;
-    } else if (state.checked && state.enabled) {
+                 : is_active ? theme_->accent : theme_->stroke_input_bottom;
+        fill = !state.enabled ? (is_active ? theme_->text_disabled : theme_->fill_input)
+               : is_active ? theme_->accent : theme_->fill_input;
+    } else if (is_active && state.enabled) {
         const AccentShades shades = DeriveAccentShades(theme_->accent);
         fill = state.pressed ? (dark_ ? shades.dark2 : shades.light2)
                : state.hovered ? (dark_ ? shades.dark1 : shades.light1)
                                : theme_->accent;
         border = fill;
-    } else if (state.checked) {
+    } else if (is_active) {
         fill = dark_ ? Rgba(0xFFFFFF, 41) : Rgba(0x000000, 56);
         border = Rgba(0x000000, 0);
     } else if (dark_) {
@@ -1070,14 +1071,24 @@ void Painter::DrawCheckBox(const D2D1_RECT_F& bounds, std::wstring_view text,
     }
     FillRoundedRect(box, radius, fill);
     StrokeRoundedRect(box, radius, border);
-    if (state.checked) {
+    if (is_active) {
         D2D1_COLOR_F check_color = high_contrast_ ? theme_->accent_text
                                                   : dark_ ? HexColor(0x000000)
                                                           : HexColor(0xFFFFFF);
         if (!state.enabled) {
             check_color = MultiplyAlpha(check_color, 0.8f);
         }
-        DrawCheckMark(box, check_color);
+        if (state.indeterminate) {
+            const float bar_w = Px(10.0f);
+            const float bar_h = Px(2.5f);
+            const float cx = (box.left + box.right) * 0.5f;
+            const float cy = (box.top + box.bottom) * 0.5f;
+            const auto bar = D2D1::RectF(cx - bar_w * 0.5f, cy - bar_h * 0.5f,
+                                         cx + bar_w * 0.5f, cy + bar_h * 0.5f);
+            FillRoundedRect(bar, Px(1.0f), check_color);
+        } else {
+            DrawCheckMark(box, check_color);
+        }
     }
     DrawText(text,
              D2D1::RectF(box.right + Px(8.0f), bounds.top, bounds.right, bounds.bottom),

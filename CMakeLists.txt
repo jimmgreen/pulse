@@ -790,7 +790,7 @@ target_link_libraries(pulse_persistence_test PRIVATE
 # Multi-window M0: single-window session baseline (session v8 must keep it).
 add_executable(pulse_session_window_test src/bench/session_window_test.cpp
     src/app/session.cpp src/app/session_tab_model.cpp src/app/tab_group_model.cpp src/app/window_identity.cpp
-    src/app/app_model.cpp src/app/places.cpp src/app/entry_group.cpp src/app/tag_ads_sync.cpp
+    src/app/app_model.cpp src/app/known_folder_links.cpp src/app/places.cpp src/app/entry_group.cpp src/app/tag_ads_sync.cpp
     src/app/pane_layout.cpp src/app/column_view_model.cpp src/app/search_query.cpp
     src/app/search_query_rewrite.cpp src/index/index_query.cpp src/index/search_kinds.cpp
     src/index/content_result_store.cpp src/fs/fs_enum.cpp src/ui/view_layout.cpp)
@@ -799,7 +799,7 @@ target_link_libraries(pulse_session_window_test PRIVATE
 # Multi-window M7h: a split tab dropped on a window's edge brings all its panes.
 add_executable(pulse_pane_drop_test src/bench/pane_drop_test.cpp src/app/pane_drop.cpp
     src/app/session.cpp src/app/session_tab_model.cpp src/app/window_identity.cpp
-    src/app/app_model.cpp src/app/places.cpp src/app/entry_group.cpp src/app/tag_ads_sync.cpp
+    src/app/app_model.cpp src/app/known_folder_links.cpp src/app/places.cpp src/app/entry_group.cpp src/app/tag_ads_sync.cpp
     src/app/tab_group_model.cpp src/app/pane_layout.cpp src/app/column_view_model.cpp src/app/search_query.cpp
     src/app/search_query_rewrite.cpp src/index/index_query.cpp src/index/search_kinds.cpp
     src/index/content_result_store.cpp src/fs/fs_enum.cpp src/ui/view_layout.cpp)
@@ -807,12 +807,31 @@ target_link_libraries(pulse_pane_drop_test PRIVATE
     user32 shell32 ole32 uuid advapi32 shlwapi netapi32 secur32 pulse_localization pulse_runtime_log pulse_sqlite)
 # Toolbar / chip / item menu: what a drive, a share or a Recycle Bin item can do.
 add_executable(pulse_selection_caps_test src/bench/selection_caps_test.cpp
-    src/app/app_model.cpp src/app/places.cpp src/app/entry_group.cpp src/app/tag_ads_sync.cpp
+    src/app/app_model.cpp src/app/known_folder_links.cpp src/app/places.cpp src/app/entry_group.cpp src/app/tag_ads_sync.cpp
     src/app/pane_layout.cpp src/app/column_view_model.cpp src/app/search_query.cpp
     src/app/search_query_rewrite.cpp src/index/index_query.cpp src/index/search_kinds.cpp
     src/index/content_result_store.cpp src/fs/fs_enum.cpp src/ui/view_layout.cpp)
 target_link_libraries(pulse_selection_caps_test PRIVATE
     user32 shell32 ole32 uuid advapi32 shlwapi netapi32 secur32 pulse_localization pulse_runtime_log pulse_sqlite)
+# Known folder links: 4 extra known folders, deduplication, localization, and pin precedence.
+add_executable(pulse_known_folder_links_test src/bench/known_folder_links_test.cpp
+    src/app/known_folder_links.cpp src/app/app_model.cpp src/app/places.cpp src/app/entry_group.cpp src/app/tag_ads_sync.cpp
+    src/app/session.cpp src/app/session_tab_model.cpp src/app/tab_group_model.cpp src/app/window_identity.cpp
+    src/app/pane_layout.cpp src/app/column_view_model.cpp src/app/search_query.cpp
+    src/app/search_query_rewrite.cpp src/index/index_query.cpp src/index/search_kinds.cpp
+    src/index/content_result_store.cpp src/fs/fs_enum.cpp src/ui/view_layout.cpp)
+target_link_libraries(pulse_known_folder_links_test PRIVATE
+    user32 shell32 ole32 uuid advapi32 shlwapi netapi32 secur32 pulse_localization pulse_runtime_log pulse_sqlite)
+# Touch improvement P2: item selection geometry and touch density preferences.
+add_executable(pulse_item_selection_geometry_test src/bench/item_selection_geometry_test.cpp
+    src/ui/view_layout.cpp src/app/app_prefs.cpp src/app/folder_view_prefs.cpp
+    src/app/folder_sort_prefs.cpp src/app/default_file_manager.cpp
+    src/app/shell_integration_registry.cpp src/app/startup_launch.cpp)
+target_link_libraries(pulse_item_selection_geometry_test PRIVATE
+    user32 shell32 ole32 uuid advapi32 shlwapi pulse_localization)
+# Touch improvement P4/P5: touch gesture reducer, panning, and inertia.
+add_executable(pulse_touch_gesture_test src/bench/touch_gesture_test.cpp)
+target_link_libraries(pulse_touch_gesture_test PRIVATE user32)
 # Multi-window M1: AppState's process-wide members alias one AppCore (compile-time checks).
 add_executable(pulse_app_core_alias_test src/bench/app_core_alias_test.cpp)
 target_include_directories(pulse_app_core_alias_test PRIVATE "${CMAKE_BINARY_DIR}/generated")

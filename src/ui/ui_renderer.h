@@ -9,6 +9,7 @@
 #include "open_with_icons.h"
 #include "sysctx_view.h"
 #include "view_layout.h"
+#include "item_selection_geometry.h"
 #include "column_strip_layout.h"
 #include "panel_metrics.h"
 #include "toolbar_layout.h"
@@ -1028,6 +1029,8 @@ struct HitTestResult {
         Splitter,
         Scrollbar,
         Row,
+        RowCheckbox,
+        HeaderCheckbox,
         ChangeBadge,
         ChangeOpen,
         ChangeTimeFilter,
@@ -1326,6 +1329,13 @@ public:
     void SetTrayIconDip(float dip) { tray_icon_dip_ = std::clamp(dip, 32.0f, 64.0f); }
     float TrayIconDip() const { return tray_icon_dip_; }
     float Margin() const { return margin_; }
+
+    void SetTouchDensity(TouchDensity density) noexcept { touch_density_ = density; }
+    void SetCheckboxVisibility(CheckboxVisibility visibility) noexcept { checkbox_visibility_ = visibility; }
+    void SetTouchscreenReady(bool ready) noexcept { touchscreen_ready_ = ready; }
+    TouchDensity GetTouchDensity() const noexcept { return touch_density_; }
+    CheckboxVisibility GetCheckboxVisibility() const noexcept { return checkbox_visibility_; }
+    bool GetTouchscreenReady() const noexcept { return touchscreen_ready_; }
 
     // Right details panel: toggled from the view menu; ContentRect shrinks.
     void SetDetailsPanelVisible(bool visible) {
@@ -1842,6 +1852,9 @@ private:
     float sidebar_width_ = 224.0f;
     float sidebar_width_dip_ = 224.0f;
     bool vertical_tabs_ = false;
+    TouchDensity touch_density_ = TouchDensity::Compact;
+    CheckboxVisibility checkbox_visibility_ = CheckboxVisibility::Auto;
+    bool touchscreen_ready_ = false;
     float search_min_dip_ = 0.0f;
     int toolbar_group_ = -1;
     int new_primary_ = 0;

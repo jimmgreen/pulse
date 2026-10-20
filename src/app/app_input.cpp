@@ -2460,6 +2460,15 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 SetCapture(hwnd);
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
+        } else if (hit.region == ui::HitTestResult::RowCheckbox && hit.index >= 0) {
+            s->checkboxPressCandidate = true;
+            s->checkboxPressIndex = hit.index;
+            s->checkboxPressPane = s->pane;
+            SetCapture(hwnd);
+        } else if (hit.region == ui::HitTestResult::HeaderCheckbox) {
+            s->headerCheckboxPressCandidate = true;
+            s->headerCheckboxPressPane = s->pane;
+            SetCapture(hwnd);
         } else if (hit.region == ui::HitTestResult::Row && hit.index >= 0) {
             const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
@@ -3274,6 +3283,59 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         (void)wParam;
         if (s) {
             s->paneDragPending = false;
+            if (s->checkboxPressCandidate) {
+                const int candidate_idx = s->checkboxPressIndex;
+                s->checkboxPressCandidate = false;
+                s->checkboxPressIndex = -1;
+                s->checkboxPressPane = nullptr;
+                if (GetCapture() == hwnd) ReleaseCapture();
+                const ui::WindowViewModel vm = BuildVm(*s);
+                const D2D1_RECT_F rect = D2D1::RectF(0, 0,
+                    static_cast<float>(s->compositor.Width()),
+                    static_cast<float>(s->compositor.Height()));
+                const ui::HitTestResult hit = s->renderer.HitTest(
+                    vm, rect, static_cast<float>(GET_X_LPARAM(lParam)), static_cast<float>(GET_Y_LPARAM(lParam)));
+                if (hit.region == ui::HitTestResult::RowCheckbox && hit.index == candidate_idx) {
+                    if (app::Tab* tab = ActiveTab(*s)) {
+                        tab->ToggleSelect(candidate_idx);
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                    }
+                }
+                return 0;
+            }
+            if (s->headerCheckboxPressCandidate) {
+                s->headerCheckboxPressCandidate = false;
+                s->headerCheckboxPressPane = nullptr;
+                if (GetCapture() == hwnd) ReleaseCapture();
+                const ui::WindowViewModel vm = BuildVm(*s);
+                const D2D1_RECT_F rect = D2D1::RectF(0, 0,
+                    static_cast<float>(s->compositor.Width()),
+                    static_cast<float>(s->compositor.Height()));
+                const ui::HitTestResult hit = s->renderer.HitTest(
+                    vm, rect, static_cast<float>(GET_X_LPARAM(lParam)), static_cast<float>(GET_Y_LPARAM(lParam)));
+                if (hit.region == ui::HitTestResult::HeaderCheckbox) {
+                    if (app::Tab* tab = ActiveTab(*s)) {
+                        if (tab->CountBound() > 0) {
+                            bool all_sel = true;
+                            size_t selectable_count = 0;
+                            std::vector<int> selectable;
+                            selectable.reserve(static_cast<size_t>(tab->CountBound()));
+                            for (int i = 0; i < tab->CountBound(); ++i) {
+                                if (!tab->EntryVisible(i)) continue;
+                                ++selectable_count;
+                                selectable.push_back(i);
+                                if (!tab->IsSelected(i)) all_sel = false;
+                            }
+                            if (selectable_count > 0) {
+                                if (all_sel) tab->ClearSelection();
+                                else tab->SelectIndices(selectable);
+                                InvalidateRect(hwnd, nullptr, FALSE);
+                            }
+                        }
+                    }
+                }
+                return 0;
+            }
             if (s->settings.slider_drag() >= 0) {
                 s->settings.EndSlider();
                 if (GetCapture() == hwnd) ReleaseCapture();
@@ -4215,6 +4277,13 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             s->showFps = s->forceStatusPerformance || s->appPrefs.show_status_performance;
             s->appPrefs.Save();
             InvalidateRect(hwnd, nullptr, FALSE);
+        } else if (ctrl && wParam == VK_SPACE) {
+            // Touch improvement P3: Ctrl+Space toggles the currently focused item when list has focus and no edit is active
+            if (s->renameIndex < 0 && tab && tab->selected_index >= 0 &&
+                tab->selected_index < tab->CountBound()) {
+                tab->ToggleSelect(tab->selected_index);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
         } else if (wParam == VK_SPACE) {
             // A hover card up: Space opens its file, not the selection.
             if (!OpenHoverPreviewInQuickLook(*s)) ToggleQuickPreview(*s);

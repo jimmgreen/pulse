@@ -858,6 +858,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             ui::typography::InvalidateCaches();
         }
         s->compositor.RecreateTextFormats(s->scale);
+        s->touch_input = std::make_unique<app::TouchInputAdapter>(*s);
         if (init_core) {
             if (s->safeMode) {
                 s->appPrefs.window_effect = L"none";
@@ -879,6 +880,10 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         s->renderer.SetRowActions(app::RowActionMask(s->ctxMenuPrefs.builtin_hidden,
             s->ctxMenuPrefs.BuiltinOrder(app::BuiltinMenuSurface::RowButtons)));
         s->renderer.SetThumbnailBadges(s->appPrefs.list_thumbnail_badges);
+        const bool touch_ready = ui::DetectTouchscreenReady();
+        s->renderer.SetTouchscreenReady(touch_ready);
+        s->renderer.SetTouchDensity(ui::ResolveTouchDensity(s->appPrefs.touch_ui_mode, touch_ready));
+        s->renderer.SetCheckboxVisibility(ui::ResolveCheckboxVisibility(s->appPrefs.item_checkboxes));
         app::SetFolderSortMode(app::FolderSortModeFromInt(s->appPrefs.folder_sort_mode));
         ui::typography::SetTextRenderMode(static_cast<ui::typography::TextRenderMode>(s->appPrefs.text_render));
         s->compositor.UpdateTextRenderingParams(nullptr);
@@ -1525,6 +1530,13 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 if (s->framePump.Running()) s->framePump.Arm();
                 else dirty = true;
             }
+            if (s->touch_input) {
+                s->touch_input->OnTimerTick(hwnd);
+                if (s->touch_input->IsInertiaActive()) {
+                    if (s->framePump.Running()) s->framePump.Arm();
+                    else dirty = true;
+                }
+            }
             if (pulse::TickSidebarPeek(*s, now)) dirty = true;
             TickShellTagMenu(*s, now);
             if (s->detailsPreviewFoldStart) {
@@ -1764,6 +1776,18 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (s) { s->detailsPreviewPanning = false; s->renderer.EndDetailsPreviewPan(); }
         if (GetCapture() == hwnd) ReleaseCapture();
         break;
+    case WM_POINTERDOWN:
+    case WM_POINTERUPDATE:
+    case WM_POINTERUP:
+    case WM_POINTERCAPTURECHANGED: {
+        if (s && s->touch_input) {
+            LRESULT res = 0;
+            if (s->touch_input->HandlePointerMessage(hwnd, msg, wParam, lParam, res)) {
+                return res;
+            }
+        }
+        break;
+    }
     case WM_MOUSEMOVE:
         if (s) pulse::UpdateSidebarPeek(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
         if (HandleSidebarResize(s, hwnd, msg, lParam)) return 0;

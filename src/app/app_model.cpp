@@ -1291,8 +1291,11 @@ void RefreshSidebarDriveCapacity(std::vector<SidebarEntry>& drives) {
     if (changed) SetThreadErrorMode(old_mode, nullptr);
 }
 
-SidebarModel BuildSidebarModel(const fs::RecycleBinInfo* recycle) {
+SidebarModel BuildSidebarModel(const fs::RecycleBinInfo* recycle,
+                               const KnownFolderSnapshot* prev_known_folders) {
     SidebarModel m;
+    m.known_folders = ResolveKnownFolders(prev_known_folders);
+
     // Starred items lead their own section, next to (not inside) quick access.
     SidebarEntry starred;
     starred.glyph = L"\xE735";
@@ -1302,64 +1305,65 @@ SidebarModel BuildSidebarModel(const fs::RecycleBinInfo* recycle) {
     starred.path = MakeStarredPath();
     starred.expandable = true;
     m.starred.push_back(std::move(starred));
-    SidebarEntry recent;
-    recent.glyph = L"\xE823";
-    recent.fallback = L"Recent";
-    recent.color = ui::HexColor(0x60A5FA);
-    recent.label = l10n::Get(l10n::StringId::Recent);
-    recent.path = MakeRecentPath();
-    recent.builtin = static_cast<int>(BuiltinQuickAccess::Recent);
-    m.quick_access.push_back(std::move(recent));
-    SidebarEntry desktop = MakeKnownEntry(FOLDERID_Desktop, L"\xE7F4", L"Desktop",
-        ui::HexColor(0x38BDF8), l10n::Get(l10n::StringId::Desktop).c_str());
-    desktop.badge = l10n::Get(l10n::StringId::Desktop);
-    desktop.badge_rgb = 0x0078D4;
-    desktop.builtin = static_cast<int>(BuiltinQuickAccess::Desktop);
-    m.quick_access.push_back(std::move(desktop));
-    // Explorer shows the localized name ("下载"), not the folder name on disk.
-    SidebarEntry downloads = MakeKnownEntry(FOLDERID_Downloads, L"\xE896", L"Downloads",
-        ui::HexColor(0xC084FC), l10n::Get(l10n::StringId::Downloads).c_str());
-    downloads.builtin = static_cast<int>(BuiltinQuickAccess::Downloads);
-    m.quick_access.push_back(std::move(downloads));
-    // OneDrive leads its own section: one row per signed-in account, the way
-    // Explorer lists them. The known folder only resolves for the primary
-    // account, so it stays as the fallback when the registry has nothing.
-    m.cloud = BuildOneDriveEntries();
-    if (m.cloud.empty()) {
-        SidebarEntry onedrive = MakeKnownEntry(FOLDERID_OneDrive, L"\xE753", L"OneDrive",
-            ui::HexColor(0x2B88D8), L"OneDrive");
-        if (!onedrive.path.empty()) m.cloud.push_back(std::move(onedrive));
-    }
-    // Isolated test instances only: a fixture folder stands in for a OneDrive
-    // account so the row menu (#80) can be exercised without a signed-in client.
-    wchar_t fake[MAX_PATH]{};
-    if (m.cloud.empty() && GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", nullptr, 0) > 0) {
-        const DWORD n = GetEnvironmentVariableW(L"PULSE_TEST_ONEDRIVE", fake, MAX_PATH);
-        if (n > 0 && n < MAX_PATH) {
-            SidebarEntry onedrive;
-            onedrive.glyph = L"\xE753";
-            onedrive.fallback = L"OneDrive";
-            onedrive.color = ui::HexColor(0x2B88D8);
-            onedrive.label = L"OneDrive";
-            onedrive.path = fs::NormalizePath(fake);
-            m.cloud.push_back(std::move(onedrive));
+
+    // Populate quick access according to kQuickAccessDisplayOrder:
+    // Recent, Desktop, Downloads, Documents, Pictures, Music, Videos, RecycleBin.
+    for (BuiltinQuickAccess id : kQuickAccessDisplayOrder) {
+        if (id == BuiltinQuickAccess::Recent) {
+            SidebarEntry recent;
+            recent.glyph = L"\xE823";
+            recent.fallback = L"Recent";
+            recent.color = ui::HexColor(0x60A5FA);
+            recent.label = l10n::Get(l10n::StringId::Recent);
+            recent.path = m.known_folders.GetPath(BuiltinQuickAccess::Recent);
+            recent.builtin = static_cast<int>(BuiltinQuickAccess::Recent);
+            m.quick_access.push_back(std::move(recent));
+        } else if (id == BuiltinQuickAccess::RecycleBin) {
+            SidebarEntry recycle_bin;
+            recycle_bin.glyph = L"\xE75C";
+            recycle_bin.fallback = L"Bin";
+            recycle_bin.color = ui::HexColor(0x94A3B8);
+            recycle_bin.label = l10n::Get(l10n::StringId::RecycleBin);
+            recycle_bin.path = m.known_folders.GetPath(BuiltinQuickAccess::RecycleBin);
+            recycle_bin.builtin = static_cast<int>(BuiltinQuickAccess::RecycleBin);
+            if (recycle && recycle->valid) {
+                wchar_t occupancy[96]{};
+                swprintf_s(occupancy, l10n::Get(l10n::StringId::RecycleOccupancyFormat).c_str(),
+                           std::to_wstring(recycle->items).c_str(),
+                           pulse::format::ByteSize(recycle->bytes).c_str());
+                recycle_bin.detail = occupancy;
+            }
+            m.quick_access.push_back(std::move(recycle_bin));
+        } else {
+            const auto* desc = GetKnownFolderDescriptor(id);
+            if (!desc) continue;
+            const std::wstring& path = m.known_folders.GetPath(id);
+            if (path.empty()) continue; // Skip on resolution failure; do not build empty paths
+
+            // Deduplicate if multiple known folders point to the same directory
+            bool duplicate = false;
+            for (const auto& existing : m.quick_access) {
+                if (_wcsicmp(existing.path.c_str(), path.c_str()) == 0) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) continue;
+
+            SidebarEntry entry;
+            entry.glyph = desc->glyph;
+            entry.fallback = desc->fallback;
+            entry.color = ui::HexColor(desc->color_rgb);
+            entry.label = l10n::Get(desc->l10n_id);
+            entry.path = path;
+            entry.builtin = static_cast<int>(id);
+            if (id == BuiltinQuickAccess::Desktop) {
+                entry.badge = l10n::Get(l10n::StringId::Desktop);
+                entry.badge_rgb = 0x0078D4;
+            }
+            m.quick_access.push_back(std::move(entry));
         }
     }
-    SidebarEntry recycle_bin;
-    recycle_bin.glyph = L"\xE75C";
-    recycle_bin.fallback = L"Bin";
-    recycle_bin.color = ui::HexColor(0x94A3B8);
-    recycle_bin.label = l10n::Get(l10n::StringId::RecycleBin);
-    recycle_bin.path = MakeRecyclePath();
-    recycle_bin.builtin = static_cast<int>(BuiltinQuickAccess::RecycleBin);
-    if (recycle && recycle->valid) {
-        wchar_t occupancy[96]{};
-        swprintf_s(occupancy, l10n::Get(l10n::StringId::RecycleOccupancyFormat).c_str(),
-                   std::to_wstring(recycle->items).c_str(),
-                   pulse::format::ByteSize(recycle->bytes).c_str());
-        recycle_bin.detail = occupancy;
-    }
-    m.quick_access.push_back(std::move(recycle_bin));
 
     static const uint32_t kDrivePalette[] = { 0x60A5FA, 0x34D399, 0xFBBF24, 0xC084FC };
     DWORD drives = GetLogicalDrives();
@@ -2047,6 +2051,11 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
     for (const auto& entry : sidebar.quick_access) {
         if (entry.builtin >= 0 &&
             ((quick_access_hidden_mask >> entry.builtin) & 1u) != 0) continue;
+        // Explicit pin precedence: if this path is explicitly pinned by the user,
+        // suppress the built-in row here so it only appears in the pinned section below.
+        if (places && !entry.path.empty() && places->IsQuickAccessPinned(entry.path)) {
+            continue;
+        }
         quick_access_visible.push_back(entry);
     }
     access = ConvertGroup(
@@ -2080,26 +2089,37 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
     }
     const std::wstring& gitRoot = tab->git_root;
     if (!gitRoot.empty() && (!places || !places->IsStarred(gitRoot))) {
-        ui::SidebarItem project;
-        wchar_t project_label[512]{};
-        swprintf_s(project_label, l10n::Get(l10n::StringId::ProjectFormat).c_str(),
-                   TabTitle(gitRoot).c_str());
-        project.label = project_label;
-        project.path = gitRoot;
-        project.icon_glyph = L"\xE8B7";
-        project.fallback_text = L"Repo";
-        project.icon_color = ui::HexColor(0x34D399);
-        project.badge = L"Git";
-        access.items.push_back(std::move(project));
+        // Suppress automatic Git project row if the user explicitly pinned this path!
+        const bool already_pinned = places && places->IsQuickAccessPinned(gitRoot);
+        if (!already_pinned) {
+            ui::SidebarItem project;
+            wchar_t project_label[512]{};
+            swprintf_s(project_label, l10n::Get(l10n::StringId::ProjectFormat).c_str(),
+                       TabTitle(gitRoot).c_str());
+            project.label = project_label;
+            project.path = gitRoot;
+            project.icon_glyph = L"\xE8B7";
+            project.fallback_text = L"Repo";
+            project.icon_color = ui::HexColor(0x34D399);
+            project.badge = L"Git";
+            access.items.push_back(std::move(project));
+        }
     }
     if (places) {
         for (const auto& path : places->quick_access_paths) {
             ui::SidebarItem item;
-            item.label = TabTitle(path);
             item.path = path;
-            item.icon_glyph = L"\xE8B7";
-            item.fallback_text = L"Dir";
-            item.icon_color = ui::HexColor(0xFBBF24);
+            if (const auto* kf = sidebar.known_folders.FindByPath(path)) {
+                item.label = l10n::Get(kf->l10n_id);
+                item.icon_glyph = kf->glyph;
+                item.icon_color = ui::HexColor(kf->color_rgb);
+                item.fallback_text = kf->fallback;
+            } else {
+                item.label = TabTitle(path);
+                item.icon_glyph = L"\xE8B7";
+                item.fallback_text = L"Dir";
+                item.icon_color = ui::HexColor(0xFBBF24);
+            }
             access.items.push_back(std::move(item));
         }
     }

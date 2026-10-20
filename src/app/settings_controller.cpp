@@ -780,6 +780,26 @@ void SettingsController::RowHeight(int index) {
         SaveAndApply(SettingsEffect::RowHeight);
 }
 
+void SettingsController::ItemCheckboxes(int index) {
+    static constexpr const wchar_t* values[] = { L"auto", L"always", L"never" };
+    if (prefs_ && index >= 0 && index < static_cast<int>(std::size(values))) {
+        if (prefs_->item_checkboxes != values[index]) {
+            prefs_->item_checkboxes = values[index];
+            SaveAndApply(SettingsEffect::ListStyle);
+        }
+    }
+}
+
+void SettingsController::TouchUiMode(int index) {
+    static constexpr const wchar_t* values[] = { L"auto", L"compact", L"touch" };
+    if (prefs_ && index >= 0 && index < static_cast<int>(std::size(values))) {
+        if (prefs_->touch_ui_mode != values[index]) {
+            prefs_->touch_ui_mode = values[index];
+            SaveAndApply(SettingsEffect::ListStyle);
+        }
+    }
+}
+
 void SettingsController::FolderSort(int index) {
     static constexpr int values[] = {0, 1, 2};
     if (prefs_ && SelectValue(index, values, prefs_->folder_sort_mode))

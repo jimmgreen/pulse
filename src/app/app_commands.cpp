@@ -3590,6 +3590,10 @@ void ApplySettingsEffects(AppState& s, app::SettingsEffect effects) {
         s.renderer.SetRowActions(app::RowActionMask(s.ctxMenuPrefs.builtin_hidden,
             s.ctxMenuPrefs.BuiltinOrder(app::BuiltinMenuSurface::RowButtons)));
         s.renderer.SetThumbnailBadges(s.appPrefs.list_thumbnail_badges);
+        const bool touch_ready = ui::DetectTouchscreenReady();
+        s.renderer.SetTouchscreenReady(touch_ready);
+        s.renderer.SetTouchDensity(ui::ResolveTouchDensity(s.appPrefs.touch_ui_mode, touch_ready));
+        s.renderer.SetCheckboxVisibility(ui::ResolveCheckboxVisibility(s.appPrefs.item_checkboxes));
     }
     if (app::HasEffect(effects, app::SettingsEffect::FolderSort)) {
         app::SetFolderSortMode(app::FolderSortModeFromInt(s.appPrefs.folder_sort_mode));

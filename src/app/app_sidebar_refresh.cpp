@@ -34,8 +34,9 @@ void StartPending(AppState& state) {
     if (!request) return;
     const bool rebuild = *request || load->retry_rebuild;
     const auto recycle = state.recycle_info;
+    const auto prev_kf = state.sidebar.known_folders;
     auto drives = rebuild ? std::vector<app::SidebarEntry>{} : state.sidebar.drives;
-    state.worker.EnqueueIo([load, rebuild, recycle, drives = std::move(drives)]() mutable {
+    state.worker.EnqueueIo([load, rebuild, recycle, prev_kf, drives = std::move(drives)]() mutable {
         if (load->cancelled) return;
         app::SidebarModel result;
         bool succeeded = false;
@@ -46,10 +47,11 @@ void StartPending(AppState& state) {
                 // COM apartment; capacity-only updates do not need one.
                 SidebarComScope com;
                 if (SUCCEEDED(com.result) || com.result == RPC_E_CHANGED_MODE) {
-                    result = app::BuildSidebarModel(&recycle);
+                    result = app::BuildSidebarModel(&recycle, &prev_kf);
                     succeeded = true;
                 }
             } else {
+                result.known_folders = prev_kf;
                 result.drives = std::move(drives);
                 app::RefreshSidebarDriveCapacity(result.drives);
                 succeeded = true;

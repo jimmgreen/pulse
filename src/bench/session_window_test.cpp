@@ -193,7 +193,7 @@ int main() {
         return 0;
     }
 
-    Check(json.find(L"\"version\":8") != std::wstring::npos, "writer emits session version 8");
+    Check(json.find(L"\"version\":9") != std::wstring::npos, "writer emits session version 9");
     Check(json.find(L"\"windows\"") == std::wstring::npos,
           "writer leaves windows[] out when the snapshot has none");
     SessionSnapshot parsed;
@@ -360,6 +360,35 @@ int main() {
               "M7f: a closed window without tabs is dropped");
         Check(SessionToJson(SampleSession()).find(L"closedWindows") == std::wstring::npos,
               "M7f: no closedWindows[] when nothing was closed");
+    }
+
+    {
+        // Version 6: pre-v7 session drops quickAccessHidden mask to 0.
+        SessionSnapshot s6;
+        const std::wstring json6 = L"{\"version\":6,\"quickAccessHidden\":15,\"windows\":[{\"quickAccessHidden\":15}]}";
+        Check(ParseSessionJson(json6, s6) && s6.quick_access_hidden == 0 &&
+                  s6.windows.size() == 1 && s6.windows[0].layout.quick_access_hidden == 0,
+              "migration: version 6 drops quickAccessHidden to 0");
+
+        // Version 7 & 8: retains legacy low 4 bits (& 0x0F), clears high bits (bit 4+).
+        SessionSnapshot s8;
+        const std::wstring json8 = L"{\"version\":8,\"quickAccessHidden\":243,\"windows\":[{\"quickAccessHidden\":243}],"
+                                   L"\"closedWindows\":[{\"closedName\":\"c\",\"quickAccessHidden\":243,"
+                                   L"\"layoutTabs\":[{\"title\":\"t\",\"layout\":0,\"panes\":[{\"path\":\"C:\\\\\"}]}]}]}";
+        Check(ParseSessionJson(json8, s8) && s8.quick_access_hidden == 3 &&
+                  s8.windows.size() == 1 && s8.windows[0].layout.quick_access_hidden == 3 &&
+                  s8.closed_windows.size() == 1 && s8.closed_windows[0].window.layout.quick_access_hidden == 3,
+              "migration: version 8 masks quickAccessHidden with 0x0F across all 3 tiers");
+
+        // Version 9: preserves full 8 bits (& 0xFF).
+        SessionSnapshot s9;
+        const std::wstring json9 = L"{\"version\":9,\"quickAccessHidden\":245,\"windows\":[{\"quickAccessHidden\":245}],"
+                                   L"\"closedWindows\":[{\"closedName\":\"c\",\"quickAccessHidden\":245,"
+                                   L"\"layoutTabs\":[{\"title\":\"t\",\"layout\":0,\"panes\":[{\"path\":\"C:\\\\\"}]}]}]}";
+        Check(ParseSessionJson(json9, s9) && s9.quick_access_hidden == 245 &&
+                  s9.windows.size() == 1 && s9.windows[0].layout.quick_access_hidden == 245 &&
+                  s9.closed_windows.size() == 1 && s9.closed_windows[0].window.layout.quick_access_hidden == 245,
+              "migration: version 9 retains 8-bit quickAccessHidden across all 3 tiers");
     }
 
     std::printf("session_window_test: %d failure(s)\n", g_failures);

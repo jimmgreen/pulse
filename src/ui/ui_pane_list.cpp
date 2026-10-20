@@ -28,8 +28,8 @@
 namespace pulse::ui {
 
 float MainRenderer::ListRowHeightDip(const PaneViewModel& vm) const {
-    if (DetailsShowsSnippet(vm)) return std::max(row_height_dip_, kDetailsSnippetMinRowDip);
-    return row_height_dip_;
+    const float base = DetailsShowsSnippet(vm) ? std::max(row_height_dip_, kDetailsSnippetMinRowDip) : row_height_dip_;
+    return EffectiveRowHeightDip(base, touch_density_);
 }
 
 bool MainRenderer::EnsureEmptyStateSvg() {
@@ -1892,9 +1892,38 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
         for (int col = 0; col < columns.count; ++col) {
             const float cw = columns.widths[static_cast<size_t>(col)];
             switch (columns.kinds[static_cast<size_t>(col)]) {
-            case ColumnKind::Name:
+            case ColumnKind::Name: {
                 drawCol(pulse::l10n::Get(pulse::l10n::StringId::ColumnName), SortColumn::Name, cw, false);
+                const D2D1_RECT_F nameColRc = D2D1::RectF(
+                    col == 0 ? paneRc.left : columns.DividerX(col - 1),
+                    y,
+                    col == 0 ? paneRc.left + cw : columns.DividerX(col - 1) + cw,
+                    y + column_header_height_);
+                const auto hdr_geom = ComputeHeaderSelectionGeometry(nameColRc, scale_, touch_density_);
+                fluent::ControlState hdr_cb_state{};
+                const size_t total_count = pane.EntryCount();
+                if (total_count == 0) {
+                    hdr_cb_state.enabled = false;
+                } else {
+                    hdr_cb_state.enabled = true;
+                    size_t sel_count = 0;
+                    for (size_t k = 0; k < total_count; ++k) {
+                        if (pane.entries[k].selected) ++sel_count;
+                    }
+                    if (sel_count == total_count) {
+                        hdr_cb_state.checked = true;
+                        hdr_cb_state.indeterminate = false;
+                    } else if (sel_count > 0) {
+                        hdr_cb_state.checked = false;
+                        hdr_cb_state.indeterminate = true;
+                    } else {
+                        hdr_cb_state.checked = false;
+                        hdr_cb_state.indeterminate = false;
+                    }
+                }
+                painter_.DrawCheckBox(hdr_geom.visual_rect, L"", hdr_cb_state);
                 break;
+            }
             case ColumnKind::Path:
                 drawCol(pulse::l10n::Get(pulse::l10n::StringId::ColumnPath), SortColumn::Path, cw, false);
                 break;
@@ -2696,6 +2725,18 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                     (bg.top + bg.bottom - bar_h) * 0.5f, 2.5f * scale_, bar_h, 1.25f * scale_);
             }
             if (draw_shapes && selected) selection_painter.Selected(bg);
+            if (draw_shapes) {
+                const auto cb_geom = ComputeItemSelectionGeometry(
+                    vm.view_mode, cell, scale_, touch_density_, selected,
+                    vm.hover_index == src, touchscreen_ready_, checkbox_visibility_);
+                if (cb_geom.visible) {
+                    fluent::ControlState cb_state{};
+                    cb_state.enabled = true;
+                    cb_state.checked = selected;
+                    cb_state.hovered = (vm.hover_index == src);
+                    painter_.DrawCheckBox(cb_geom.visual_rect, L"", cb_state);
+                }
+            }
             if (draw_shapes && row_flash > 0.0f && !IsHighContrast()) {
                 // Newly appeared (pasted / created / extracted) row: fading accent wash.
                 MakeBrush(dc, WithAlpha(theme.accent, 0.20f * row_flash), brFillInput_);
