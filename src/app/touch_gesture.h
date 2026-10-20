@@ -369,8 +369,8 @@ public:
         vy_ = 0.0f;
     }
 
-    void StopX() noexcept { vx_ = 0.0; active_ = vy_ != 0.0; }
-    void StopY() noexcept { vy_ = 0.0; active_ = vx_ != 0.0; }
+    void StopX() noexcept { vx_ = 0.0; active_ = active_ && vy_ != 0.0; }
+    void StopY() noexcept { vy_ = 0.0; active_ = active_ && vx_ != 0.0; }
 
 private:
     float friction_k_ = 4.2f;

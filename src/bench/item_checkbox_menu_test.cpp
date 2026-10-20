@@ -1,6 +1,5 @@
 // Focused, windowless regression for the two View-menu entry points.
-// Build with context_menu.cpp (/Gy), pulse_localization and /OPT:REF so unused
-// filesystem / palette functions do not pull the application into this target.
+#include "../app/view_menu.h"
 #include "../app/context_menu.h"
 #include "../common/localization.h"
 
@@ -67,11 +66,10 @@ bool CheckPolicy(const std::wstring& policy, int selected) {
                 options.details_panel = details;
                 options.filesystem = filesystem;
                 options.item_checkboxes = policy;
-                std::vector<ui::FluentMenuItem> background;
-                app::AppendBackgroundViewCommands(background, options);
-                if (background.empty() || background.front().command != app::CmdNone ||
-                    background.front().text != l10n::Get(l10n::StringId::View) ||
-                    !SameRows(menu, background.front().children)) return false;
+                const auto background_view = app::BuildViewSubmenuItem(options);
+                if (background_view.command != app::CmdNone ||
+                    background_view.text != l10n::Get(l10n::StringId::View) ||
+                    !SameRows(menu, background_view.children)) return false;
             }
         }
     }

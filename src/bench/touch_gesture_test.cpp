@@ -237,6 +237,17 @@ void TestCancelledPanCannotRestartInertia() {
     const auto up = reducer.OnUp(1, 100.0f, 100.0f, 1060, 1.0f);
     Check(up.kind == TouchActionKind::None && up.velocity_x == 0.0f && up.velocity_y == 0.0f,
           "Touch cancel: stale release cannot restart inertia after target invalidation");
+    TouchInertiaTracker tracker;
+    tracker.Start(10.0f, 10.0f);
+    tracker.StopX();
+    tracker.StopY();
+    Check(!tracker.IsActive(), "Touch cancel: stopping an axis cannot activate a rejected release");
+    tracker.Start(100.0f, 100.0f);
+    float dx = 0.0f;
+    float dy = 0.0f;
+    tracker.Step(1.0f, dx, dy);
+    tracker.StopX();
+    Check(!tracker.IsActive(), "Touch cancel: stopping an axis cannot revive an expired simulation");
 }
 
 void TestInertiaSettlesWithoutCutoff() {

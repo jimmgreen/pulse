@@ -831,10 +831,8 @@ add_executable(pulse_touch_gesture_test src/bench/touch_gesture_test.cpp)
 target_link_libraries(pulse_touch_gesture_test PRIVATE user32)
 # View-menu checkbox policy model, without starting the application or using a profile.
 add_executable(pulse_item_checkbox_menu_test src/bench/item_checkbox_menu_test.cpp
-    src/app/context_menu.cpp src/ui/view_layout.cpp)
-target_compile_options(pulse_item_checkbox_menu_test PRIVATE /Gy)
-target_link_options(pulse_item_checkbox_menu_test PRIVATE /OPT:REF)
-target_link_libraries(pulse_item_checkbox_menu_test PRIVATE pulse_localization)
+    src/app/view_menu.cpp src/ui/view_layout.cpp)
+target_link_libraries(pulse_item_checkbox_menu_test PRIVATE pulse_localization user32)
 # Multi-window M1: AppState's process-wide members alias one AppCore (compile-time checks).
 add_executable(pulse_app_core_alias_test src/bench/app_core_alias_test.cpp)
 target_include_directories(pulse_app_core_alias_test PRIVATE "${CMAKE_BINARY_DIR}/generated")

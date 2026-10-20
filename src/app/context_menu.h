@@ -9,6 +9,7 @@
 #include "../ui/view_layout.h"
 #include "../ui/ui_renderer.h"
 #include "context_menu_prefs.h"
+#include "view_menu.h"
 #include "../index/index_engine.h"
 #include <string>
 
