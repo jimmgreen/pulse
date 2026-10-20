@@ -6,7 +6,8 @@
 #include <array>
 #include <span>
 #include <cstdint>
-#include <initguid.h>
+#include <windows.h>
+#include <shtypes.h>
 #include <knownfolders.h>
 
 namespace pulse::app {

@@ -67,7 +67,6 @@ inline ItemSelectionGeometry ComputeItemSelectionGeometry(
         geom.visible = has_touchscreen_ready || is_selected || is_hovered;
     }
 
-    const float item_w = (std::max)(0.0f, item_rect.right - item_rect.left);
     const float item_h = (std::max)(0.0f, item_rect.bottom - item_rect.top);
     const bool is_touch = (density == TouchDensity::Touch);
 
