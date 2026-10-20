@@ -272,12 +272,6 @@ std::vector<ui::FluentMenuItem> BuildBreadcrumbMenu(bool filesystem);
 
 // Split-button layout presets.
 std::vector<ui::FluentMenuItem> BuildSplitMenu(int current_preset);
-// can_apply_all: real folder, offer "apply view and sort to all folders".
-// Checkbox choices stay flat so the background View flyout remains one level.
-std::vector<ui::FluentMenuItem> BuildViewMenu(ui::ViewMode current_mode,
-                                              bool details_panel = false,
-                                              bool can_apply_all = false,
-                                              const std::wstring& item_checkboxes = L"auto");
 
 // Ctrl+K / address omnibar: verbs + index hits + recent folders at the end.
 struct OmnibarQuery {
