@@ -114,6 +114,8 @@ pwsh ./scripts/build_release_ci.ps1 -Channel win81 -BuildDir build-ci-win81
 
 技术栈为 C++20、Win32、Direct2D 和 DirectComposition。文件系统、索引、预览与 Shell 任务分别放在对应模块，避免阻塞界面。
 
+复选框显示策略、触控密度和惯性滚动均使用共享 UI 源码，不是 ARM64 专属，也不依赖 LumaText；自动触控密度依据触摸屏能力而不是 CPU 架构。当前构建验证覆盖普通 Windows x64（LumaText / DirectWrite）、Windows 8.1 x64 兼容配置和 Windows ARM64。GitHub 上的 x64 回归在 Windows Server 2022 执行，Windows 8.1 配置另有静态启动导入检查；这些检查不代替 Windows 8.1 或真实触控屏上的运行验证。32 位 x86 不在当前发布配置范围内。
+
 更多说明：[自动更新与发布](docs/automatic-updates.md) · [Windows 兼容性](docs/windows-compatibility.md) · [索引存储与迁移](docs/index-migration.md)
 
 ## 许可证

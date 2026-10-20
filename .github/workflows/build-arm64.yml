@@ -1,4 +1,4 @@
-name: Build Windows ARM64
+name: Build Windows ARM64 and verify shared UI
 
 on:
   workflow_dispatch:
@@ -7,8 +7,22 @@ on:
 
 jobs:
   touch-regressions-x64:
-    name: Run touch and selection regressions (Windows x64)
+    name: Shared UI (${{ matrix.profile }})
     runs-on: windows-2022
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: windows-x64-lumatext
+            lumatext: 'ON'
+            win81: 'OFF'
+          - profile: windows-x64-directwrite
+            lumatext: 'OFF'
+            win81: 'OFF'
+          - profile: win81-x64-lumatext
+            lumatext: 'ON'
+            win81: 'ON'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -16,19 +30,26 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: amd64
-      - name: Configure targeted regression tests
+      - name: Configure shared UI and targeted regressions
         shell: pwsh
         run: |
           cmake -S . -B build-touch-tests -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
-            -DPULSE_WITH_LUMATEXT=OFF `
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON `
+            -DPULSE_WITH_LUMATEXT=${{ matrix.lumatext }} `
+            -DPULSE_WIN81_CANDIDATE=${{ matrix.win81 }} `
             -DPULSE_WITH_SELFTEST=OFF
           if ($LASTEXITCODE -ne 0) { throw "CMake configuration failed" }
-      - name: Build only touch and selection tests
+      - name: Build main program and affected tests
         shell: pwsh
         run: |
-          cmake --build build-touch-tests --target pulse_touch_gesture_test pulse_item_selection_geometry_test pulse_item_checkbox_menu_test --parallel 4
-          if ($LASTEXITCODE -ne 0) { throw "Targeted regression build failed" }
+          cmake --build build-touch-tests --target pulse pulse_touch_gesture_test pulse_item_selection_geometry_test pulse_item_checkbox_menu_test --parallel 4
+          if ($LASTEXITCODE -ne 0) { throw "Shared UI build failed" }
+      - name: Verify shared sources, renderer and x64 executable
+        shell: pwsh
+        run: |
+          python scripts/check_shared_touch_build.py --build-dir build-touch-tests --lumatext ${{ matrix.lumatext }} --machine x64
+          if ($LASTEXITCODE -ne 0) { throw "Shared UI build coverage failed" }
       - name: Execute touch and selection regressions
         shell: pwsh
         run: |
@@ -38,6 +59,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Selection layout regression failed" }
           & ./build-touch-tests/pulse_item_checkbox_menu_test.exe
           if ($LASTEXITCODE -ne 0) { throw "Checkbox menu regression failed" }
+      - name: Audit Windows 8.1 startup imports
+        if: matrix.win81 == 'ON'
+        shell: pwsh
+        run: |
+          python tools/audit_win81_imports.py build-touch-tests
+          if ($LASTEXITCODE -ne 0) { throw "Windows 8.1 startup import guard failed" }
 
   build-arm64:
     runs-on: windows-2022
@@ -75,6 +102,7 @@ jobs:
         run: |
           cmake -S . -B build-arm64 -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON `
             -DCMAKE_SYSTEM_NAME=Windows `
             -DCMAKE_SYSTEM_PROCESSOR=ARM64 `
             -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
@@ -83,7 +111,13 @@ jobs:
 
       - name: Build ARM64 Executables, Tests and Installer Stub
         run: |
-          cmake --build build-arm64 --target pulse pulse_index pulse_preview pulse_document pulse_shell pulse_integration pulse_elevated pulse_setup pulse_session_window_test pulse_known_folder_links_test pulse_command_icon_test pulse_item_selection_geometry_test pulse_touch_gesture_test --parallel 4
+          cmake --build build-arm64 --target pulse pulse_index pulse_preview pulse_document pulse_shell pulse_integration pulse_elevated pulse_setup pulse_session_window_test pulse_known_folder_links_test pulse_command_icon_test pulse_item_selection_geometry_test pulse_touch_gesture_test pulse_item_checkbox_menu_test --parallel 4
+
+      - name: Verify shared sources, renderer and ARM64 executable
+        shell: pwsh
+        run: |
+          python scripts/check_shared_touch_build.py --build-dir build-arm64 --lumatext ON --machine arm64
+          if ($LASTEXITCODE -ne 0) { throw "Shared ARM64 UI build coverage failed" }
 
       - name: Package Single-File Installer (PulseSetup-windows-arm64.exe)
         shell: pwsh
