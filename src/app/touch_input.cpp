@@ -4,6 +4,8 @@
 #include "app_model.h"
 #include "app_commands.h"
 #include "app_input.h"
+#include "app_navigation.h"
+#include "app_ops_ui.h"
 #include "../ui/ui_renderer.h"
 #include <windowsx.h>
 #include <algorithm>
@@ -149,8 +151,8 @@ void TouchInputAdapter::SetupScrollTarget(float x, float y) {
         if (scroll_target_.tab) {
             scroll_target_.column_major = (scroll_target_.tab->view_mode == ui::ViewMode::List);
             const D2D1_RECT_F bounds = FocusedPaneRect(state_);
-            const auto& pane_vm = (hit.pane_index >= 0 && static_cast<size_t>(hit.pane_index) < vm.panes.size())
-                ? vm.panes[static_cast<size_t>(hit.pane_index)]
+            const auto& pane_vm = (hit.pane_index >= 0 && static_cast<size_t>(hit.pane_index) < vm.pane_slots.size())
+                ? vm.pane_slots[static_cast<size_t>(hit.pane_index)].pane
                 : vm.pane;
             scroll_target_.max_scroll_x = state_.renderer.MaxScrollXForPane(pane_vm, bounds);
             scroll_target_.max_scroll_y = state_.renderer.MaxScrollForPane(pane_vm, bounds);
@@ -183,7 +185,7 @@ void TouchInputAdapter::ApplyScrollDelta(float delta_x, float delta_y, HWND hwnd
         if (state_.settings.page() == scroll_target_.settings_page) {
             const float new_s = std::clamp(
                 state_.settings.scroll() - delta_y, 0.0f, scroll_target_.max_scroll_y);
-            state_.settings.SetScroll(new_s);
+            state_.settings.SetScroll(new_s, scroll_target_.max_scroll_y);
             InvalidateRect(hwnd, nullptr, FALSE);
         }
     }
@@ -289,7 +291,7 @@ void TouchInputAdapter::DispatchTap(HWND hwnd, float x, float y) {
         break;
 
     case ui::HitTestResult::SettingsButton:
-        ToggleSettings(state_);
+        OpenSettingsTab(state_, 0);
         InvalidateRect(hwnd, nullptr, FALSE);
         break;
 
@@ -332,12 +334,12 @@ void TouchInputAdapter::DispatchTap(HWND hwnd, float x, float y) {
         break;
 
     case ui::HitTestResult::SettingsNav:
-        state_.settings.Navigate(hit.index);
+        OpenSettingsTab(state_, hit.index);
         InvalidateRect(hwnd, nullptr, FALSE);
         break;
 
     case ui::HitTestResult::SettingsToggle:
-        state_.settings.Toggle(hit.index);
+        state_.settings.ToggleUi(hit.index);
         InvalidateRect(hwnd, nullptr, FALSE);
         break;
 
