@@ -4,11 +4,14 @@
 #include <windows.h>
 #include <unordered_set>
 
+namespace pulse {
+struct AppState;
+}
+
 namespace pulse::app {
 
-struct AppState;
-class Tab;
-class Pane;
+struct Tab;
+struct Pane;
 
 enum class TouchScrollTargetKind {
     None,
@@ -29,7 +32,7 @@ struct TouchScrollTarget {
 
 class TouchInputAdapter {
 public:
-    explicit TouchInputAdapter(AppState& state);
+    explicit TouchInputAdapter(pulse::AppState& state);
     ~TouchInputAdapter() = default;
 
     // Returns true if the message was handled/consumed (return 0 in WndProc)
@@ -51,7 +54,7 @@ private:
     void SetupScrollTarget(float x, float y);
     void ApplyScrollDelta(float delta_x, float delta_y, HWND hwnd);
 
-    AppState& state_;
+    pulse::AppState& state_;
     TouchGestureReducer reducer_;
     TouchInertiaTracker inertia_;
     TouchScrollTarget scroll_target_;

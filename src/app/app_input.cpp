@@ -2373,7 +2373,23 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
         if (hit.region == ui::HitTestResult::DetailsPreview) {
             s->dragPending = false;
             return 0;
-        } else if (hit.region == ui::HitTestResult::ColumnDivider) {
+        }
+        if (hit.region == ui::HitTestResult::RowCheckbox && hit.index >= 0) {
+            s->dragPending = false;
+            s->checkboxPressCandidate = true;
+            s->checkboxPressIndex = hit.index;
+            s->checkboxPressPane = s->pane;
+            SetCapture(hwnd);
+            return 0;
+        }
+        if (hit.region == ui::HitTestResult::HeaderCheckbox) {
+            s->dragPending = false;
+            s->headerCheckboxPressCandidate = true;
+            s->headerCheckboxPressPane = s->pane;
+            SetCapture(hwnd);
+            return 0;
+        }
+        if (hit.region == ui::HitTestResult::ColumnDivider) {
             if (s->renameIndex >= 0) HideRenameOverlay(*s, true);
             s->dragPending = false;
             s->columnResizing = true;
@@ -2460,15 +2476,6 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 SetCapture(hwnd);
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
-        } else if (hit.region == ui::HitTestResult::RowCheckbox && hit.index >= 0) {
-            s->checkboxPressCandidate = true;
-            s->checkboxPressIndex = hit.index;
-            s->checkboxPressPane = s->pane;
-            SetCapture(hwnd);
-        } else if (hit.region == ui::HitTestResult::HeaderCheckbox) {
-            s->headerCheckboxPressCandidate = true;
-            s->headerCheckboxPressPane = s->pane;
-            SetCapture(hwnd);
         } else if (hit.region == ui::HitTestResult::Row && hit.index >= 0) {
             const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;

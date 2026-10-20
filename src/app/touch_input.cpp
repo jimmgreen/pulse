@@ -10,7 +10,7 @@
 
 namespace pulse::app {
 
-TouchInputAdapter::TouchInputAdapter(AppState& state) : state_(state) {}
+TouchInputAdapter::TouchInputAdapter(pulse::AppState& state) : state_(state) {}
 
 bool TouchInputAdapter::ClassifyPointer(WPARAM wParam, uint32_t& out_pointer_id, POINTER_INPUT_TYPE& out_type) {
     const uint32_t id = static_cast<uint32_t>(GET_POINTERID_WPARAM(wParam));
