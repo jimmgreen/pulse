@@ -1,9 +1,8 @@
 name: Build RAW preview pack
 
-# pulse-rawpack.exe and the replaceable LibRaw DLL. Run manually; a tag
-# "pack-raw-<version>" publishes the files and their manifest to a release
-# of that name, where Pulse's pack installer finds them.
-
+# Native x64 and ARM64 builds; LibRaw remains a replaceable LGPL/CDDL DLL.
+# x64 keeps its original download names/tag. ARM64 uses a separate -arm64 tag,
+# so both releases can retain <installed-name>.lzms for Pulse's pack installer.
 on:
   workflow_dispatch:
     inputs:
@@ -11,6 +10,15 @@ on:
         description: Pack version (e.g. 1.0.0)
         required: true
         default: '1.0.0'
+      architecture:
+        description: Native architecture to build (ARM64 requires a public repository)
+        type: choice
+        options: [all, x64, arm64]
+        default: all
+      publish:
+        description: Publish to releases in this repository (never marks latest)
+        type: boolean
+        default: false
   push:
     tags: ['pack-raw-[0-9]*']
 
@@ -22,45 +30,93 @@ env:
   VCPKG_COMMIT: d46283cf33cf5de7bd88e12156ce03882be1f179
 
 jobs:
-  build:
+  plan:
     runs-on: windows-2022
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      publish: ${{ steps.plan.outputs.publish }}
+    steps:
+      - name: Resolve version and architectures
+        id: plan
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.pack_version }}
+          INPUT_ARCHITECTURE: ${{ inputs.architecture }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          $version = $env:INPUT_VERSION
+          $architecture = $env:INPUT_ARCHITECTURE
+          $publish = $env:INPUT_PUBLISH -eq 'true'
+          if ($env:REF_TYPE -eq 'tag' -and $env:REF_NAME -like 'pack-raw-*') {
+            $version = $env:REF_NAME -replace '^pack-raw-', ''
+            $architecture = 'all'
+            if ($version.EndsWith('-arm64')) {
+              $version = $version -replace '-arm64$', ''
+              $architecture = 'arm64'
+            }
+            $publish = $true
+          }
+          if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.]+)?$' -or $version.EndsWith('-arm64')) {
+            throw 'pack_version must be a version such as 1.0.0 (the -arm64 suffix is reserved)'
+          }
+          if ($architecture -notin 'all', 'x64', 'arm64') { throw 'Invalid architecture' }
+          $include = @()
+          if ($architecture -in 'all', 'x64') { $include += @{ architecture = 'x64'; runner = 'windows-2022' } }
+          # windows-11-arm is a native standard runner for PUBLIC repositories.
+          if ($architecture -in 'all', 'arm64') { $include += @{ architecture = 'arm64'; runner = 'windows-11-arm' } }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "matrix=$(@{ include = $include } | ConvertTo-Json -Depth 4 -Compress)" >> $env:GITHUB_OUTPUT
+          "publish=$($publish.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+  build:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     defaults:
       run:
         shell: pwsh
+    env:
+      PACK_ARCH: ${{ matrix.architecture }}
+      PACK_VERSION: ${{ needs.plan.outputs.version }}
+      PACK_REPOSITORY: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
-      - uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-      - name: Resolve version
-        id: version
-        run: |
-          if ('${{ github.ref }}' -like 'refs/tags/pack-raw-*') {
-            "value=$('${{ github.ref_name }}' -replace '^pack-raw-','')" >> $env:GITHUB_OUTPUT
-          } else {
-            "value=${{ inputs.pack_version }}" >> $env:GITHUB_OUTPUT
-          }
+      # build.ps1 selects native MSVC host/target tools and refuses cross-OS
+      # execution before running the original RAW smoke/integration suite.
       - name: vcpkg
         run: |
           git clone --filter=blob:none https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP\vcpkg"
+          if ($LASTEXITCODE) { throw 'vcpkg clone failed' }
           git -C "$env:RUNNER_TEMP\vcpkg" checkout $env:VCPKG_COMMIT
+          if ($LASTEXITCODE) { throw 'vcpkg checkout failed' }
           & "$env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE) { throw 'vcpkg bootstrap failed' }
       - uses: actions/cache@v4
         with:
-          path: build/rawpack/binarycache
-          key: rawpack-${{ env.VCPKG_COMMIT }}-${{ hashFiles('packs/raw/vcpkg.json', 'packs/raw/ports/**', 'packs/raw/triplets/**') }}
-      - name: Build
-        # Includes synthetic DNG decode and malformed input checks.
+          path: build/rawpack-${{ matrix.architecture }}/binarycache
+          key: rawpack-${{ matrix.architecture }}-${{ matrix.runner }}-${{ env.VCPKG_COMMIT }}-${{ hashFiles('packs/raw/vcpkg.json', 'packs/raw/ports/**', 'packs/raw/triplets/**') }}
+      - name: Build and native smoke tests
+        # Keeps format/corrupt/missing/cap checks and synthetic DNG decoding.
         run: |
-          & packs/raw/build.ps1 -VcpkgRoot "$env:RUNNER_TEMP\vcpkg" -Work build/rawpack
+          & packs/raw/build.ps1 -Architecture $env:PACK_ARCH -VcpkgRoot "$env:RUNNER_TEMP\vcpkg" -Work "build/rawpack-$env:PACK_ARCH"
           if ($LASTEXITCODE) { throw "build.ps1 failed ($LASTEXITCODE)" }
       - name: Package
         run: |
-          $version = '${{ steps.version.outputs.value }}'
-          $pack = 'build/rawpack/pack'
-          # Pulse downloads each file as <name>.lzms (Windows Compression API,
-          # present since Windows 8) and checks the hashes pinned in its source.
+          $version = $env:PACK_VERSION
+          $arch = $env:PACK_ARCH
+          $suffix = if ($arch -eq 'arm64') { '-arm64' } else { '' }
+          $tag = "pack-raw-$version$suffix"
+          $pack = "build/rawpack-$arch/pack"
+          $release = "build/rawpack-$arch/release"
+          New-Item -ItemType Directory -Force $release | Out-Null
+          # Windows Compression API exists on both architectures. Installed file
+          # names stay unchanged; the release tag isolates the native binaries.
           Add-Type -TypeDefinition @'
           using System;
           using System.ComponentModel;
@@ -84,62 +140,90 @@ jobs:
               }
           }
           '@
-          $sha = { param($p) (Get-FileHash $p -Algorithm SHA256).Hash.ToLower() }
-          $files = Get-ChildItem $pack -File | Sort-Object Name | ForEach-Object {
-            $packed = "$($_.Name).lzms"
-            [IO.File]::WriteAllBytes((Join-Path $PWD $packed), [Lzms]::Pack([IO.File]::ReadAllBytes($_.FullName)))
+          $sha = { param($p) (Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant() }
+          $files = @(Get-ChildItem $pack -File | Sort-Object Name | ForEach-Object {
+            $packedName = "$($_.Name).lzms"
+            $packedPath = Join-Path $release $packedName
+            [IO.File]::WriteAllBytes((Join-Path $PWD $packedPath), [Lzms]::Pack([IO.File]::ReadAllBytes($_.FullName)))
             [ordered]@{
               name = $_.Name; size = $_.Length; sha256 = & $sha $_.FullName
-              packed = [ordered]@{ name = $packed; size = (Get-Item $packed).Length; sha256 = & $sha $packed }
+              packed = [ordered]@{ name = $packedName; size = (Get-Item $packedPath).Length; sha256 = & $sha $packedPath }
             }
-          }
-          # The block to paste into src/app/pack_catalog.h.
-          $base = "https://github.com/${{ github.repository }}/releases/download/pack-raw-$version/"
-          $lines = @("// pack-raw-$version, generated by .github/workflows/preview-pack-raw.yml",
-                     'inline constexpr PackFile kRawPackFiles[] = {')
+          })
+          $base = "https://github.com/$env:PACK_REPOSITORY/releases/download/$tag/"
+          $symbol = if ($arch -eq 'arm64') { 'kRawPackArm64' } else { 'kRawPack' }
+          $lines = @("// $tag ($arch), generated by .github/workflows/preview-pack-raw.yml",
+                     "inline constexpr PackFile $($symbol)Files[] = {")
           foreach ($f in $files) {
             $lines += "    {L`"$($f.name)`", $($f.size), L`"$($f.sha256)`", $($f.packed.size), L`"$($f.packed.sha256)`"},"
           }
           $lines += '};'
-          $lines += "inline constexpr PackRelease kRawPackRelease{L`"raw`", L`"$version`", L`"$base`","
-          $lines += '    kRawPackFiles, sizeof(kRawPackFiles) / sizeof(kRawPackFiles[0])};'
-          $lines | Set-Content -Encoding utf8 pack-catalog.inc
-          "### pack_catalog.h`n``````cpp" | Add-Content $env:GITHUB_STEP_SUMMARY
+          $lines += "inline constexpr PackRelease $($symbol)Release{L`"raw`", L`"$version`", L`"$base`","
+          $lines += "    $($symbol)Files, sizeof($($symbol)Files) / sizeof($($symbol)Files[0])};"
+          $lines | Set-Content -Encoding utf8 (Join-Path $release "pack-catalog$suffix.inc")
+          "### RAW pack catalog ($arch)`n``````cpp" | Add-Content $env:GITHUB_STEP_SUMMARY
           $lines | Add-Content $env:GITHUB_STEP_SUMMARY
           '```' | Add-Content $env:GITHUB_STEP_SUMMARY
           $manifest = [ordered]@{
-            id = 'raw'; version = $version; license = 'LGPL-2.1-only OR CDDL-1.0'
+            id = 'raw'; version = $version; architecture = $arch
+            license = 'LGPL-2.1-only OR CDDL-1.0'
             files = $files
             min_pulse = '1.0.53'
           }
-          $manifest | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 "pulse-pack-raw-$version.json"
+          $manifest | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 (Join-Path $release "pulse-pack-raw-$version$suffix.json")
       - uses: actions/upload-artifact@v4
         with:
-          name: pack-raw
+          name: pack-raw-${{ matrix.architecture }}
+          # Keep raw staged files for independent PE/hash/notice verification.
           path: |
-            pulse-pack-raw-*.json
-            *.lzms
-            pack-catalog.inc
+            build/rawpack-${{ matrix.architecture }}/release/
+            build/rawpack-${{ matrix.architecture }}/pack/
           if-no-files-found: error
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pack-raw-${{ matrix.architecture }}-failure-logs
+          path: |
+            build/rawpack-${{ matrix.architecture }}/buildtrees/**/*.log
+            build/rawpack-${{ matrix.architecture }}/buildtrees/**/*.err
+            build/rawpack-${{ matrix.architecture }}/buildtrees/**/*.out
+            build/rawpack-${{ matrix.architecture }}/cmake/CMakeFiles/CMakeConfigureLog.yaml
+            build/rawpack-${{ matrix.architecture }}/installed/vcpkg/issue_body.md
+          if-no-files-found: warn
 
   publish:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/pack-raw-')
+    needs: [plan, build]
+    if: needs.plan.outputs.publish == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: windows-2022
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: pack-raw
-      - name: Publish release
+          name: pack-raw-${{ matrix.architecture }}
+      - name: Publish release in this repository
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          PACK_REPOSITORY: ${{ github.repository }}
+          PACK_VERSION: ${{ needs.plan.outputs.version }}
+          PACK_ARCH: ${{ matrix.architecture }}
+          BUILD_SHA: ${{ github.sha }}
         run: |
-          $tag = '${{ github.ref_name }}'
-          # --latest=false: Pulse's updater reads releases/latest/download/update-manifest.json,
-          # so a pack release must never become the repository's "latest" release.
-          gh release create $tag --repo '${{ github.repository }}' --latest=false --title "RAW preview pack $($tag -replace 'pack-raw-','')" `
+          $suffix = if ($env:PACK_ARCH -eq 'arm64') { '-arm64' } else { '' }
+          $tag = "pack-raw-$env:PACK_VERSION$suffix"
+          $title = "RAW preview pack $env:PACK_VERSION ($env:PACK_ARCH)"
+          # Separate tags avoid asset collisions and preserve x64 URLs. A manual
+          # fork run targets the exact built commit, not any upstream branch.
+          # Never overwrite pinned bytes from an existing version. Creation
+          # fails if this release exists; publish a new version instead.
+          $payload = @(Get-ChildItem release -File | ForEach-Object FullName)
+          if (-not $payload.Count) { throw 'Release payload is empty' }
+          gh release create $tag --repo $env:PACK_REPOSITORY --target $env:BUILD_SHA --latest=false --title $title `
             --notes 'Optional LibRaw camera RAW decoder for Pulse previews. Installed from Settings > Preview packs.' `
-            (Get-ChildItem pulse-pack-raw-*, *.lzms, pack-catalog.inc)
+            $payload
+          if ($LASTEXITCODE) { throw 'Release creation/upload failed; existing releases are immutable, use a new pack version' }

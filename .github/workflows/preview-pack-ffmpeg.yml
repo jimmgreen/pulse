@@ -1,8 +1,9 @@
 name: Build FFmpeg preview pack
 
 # Decode-only LGPL FFmpeg for Pulse's optional media preview pack.
-# Run manually; a tag "pack-ffmpeg-<version>" publishes the zip and its
-# manifest to a release of that name, where Pulse's pack installer finds it.
+# Manual builds default to both native architectures and only upload artifacts.
+# Tags publish independent releases: pack-ffmpeg-<version> (legacy x64 assets),
+# pack-ffmpeg-<version>-arm64 (ARM64 assets with the same installed file names).
 
 on:
   workflow_dispatch:
@@ -11,6 +12,15 @@ on:
         description: FFmpeg release to build (e.g. 7.1.1)
         required: true
         default: '7.1.1'
+      architecture:
+        description: Native architecture(s) to build
+        type: choice
+        options: [both, x64, arm64]
+        default: both
+      publish:
+        description: Publish independent architecture releases (fails if a release already exists)
+        type: boolean
+        default: false
   push:
     branches: ['codex/pack-download-build']
     tags: ['pack-ffmpeg-[0-9]*']
@@ -19,33 +29,93 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  prepare:
     runs-on: windows-2022
-    timeout-minutes: 90
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - name: Resolve version and architectures
+        id: resolve
+        shell: pwsh
+        env:
+          FFMPEG_VERSION: ${{ inputs.ffmpeg_version || '7.1.1' }}
+          PACK_ARCHITECTURE: ${{ inputs.architecture || 'both' }}
+        run: |
+          $version = $env:FFMPEG_VERSION
+          $architecture = $env:PACK_ARCHITECTURE
+          if ($env:GITHUB_REF -like 'refs/tags/pack-ffmpeg-*') {
+            if ($env:GITHUB_REF_NAME -notmatch '^pack-ffmpeg-(\d+(?:\.\d+)+)(-arm64)?$') {
+              throw "Invalid FFmpeg pack tag: $env:GITHUB_REF_NAME"
+            }
+            $version = $Matches[1]
+            $architecture = if ($Matches[2]) { 'arm64' } else { 'x64' }
+          }
+          if ($version -notmatch '^\d+(?:\.\d+)+$') { throw "Invalid FFmpeg release: $version" }
+          if ($architecture -notin 'both', 'x64', 'arm64') { throw "Invalid architecture: $architecture" }
+          $targets = @(
+            @{ arch = 'x64'; runner = 'windows-2022'; msystem = 'MINGW64'; artifact = 'pack-ffmpeg';
+               packages = 'mingw-w64-x86_64-gcc mingw-w64-x86_64-nasm mingw-w64-x86_64-pkgconf mingw-w64-x86_64-zlib mingw-w64-x86_64-dav1d' },
+            @{ arch = 'arm64'; runner = 'windows-11-arm'; msystem = 'CLANGARM64'; artifact = 'pack-ffmpeg-arm64';
+               packages = 'mingw-w64-clang-aarch64-clang mingw-w64-clang-aarch64-llvm-tools mingw-w64-clang-aarch64-pkgconf mingw-w64-clang-aarch64-zlib mingw-w64-clang-aarch64-dav1d' }
+          )
+          $selected = @($targets | Where-Object { $architecture -eq 'both' -or $_.arch -eq $architecture })
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "matrix=$(@{ include = $selected } | ConvertTo-Json -Depth 4 -Compress)" >> $env:GITHUB_OUTPUT
+
+  build:
+    needs: prepare
+    name: Build and test (${{ matrix.arch }}, native)
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    env:
+      FFMPEG_VERSION: ${{ needs.prepare.outputs.version }}
+      PACK_ARCH: ${{ matrix.arch }}
     defaults:
       run:
         shell: msys2 {0}
     steps:
       - uses: actions/checkout@v4
+      - name: Require a matching native host
+        shell: pwsh
+        env:
+          RUNNER_ARCHITECTURE: ${{ runner.arch }}
+        run: |
+          $expected = if ($env:PACK_ARCH -eq 'arm64') { 'Arm64' } else { 'X64' }
+          $os = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+          if ($env:RUNNER_ARCHITECTURE -ine $expected -or $os -ine $expected) {
+            throw "Native $expected host required; runner=$env:RUNNER_ARCHITECTURE OS=$os"
+          }
       - uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: ${{ matrix.msystem }}
+          # ARM images need a fresh installation; do not assume C:\msys64 exists.
+          release: true
           update: true
-          install: >-
-            make diffutils tar xz curl
-            mingw-w64-x86_64-gcc mingw-w64-x86_64-nasm mingw-w64-x86_64-pkgconf
-            mingw-w64-x86_64-zlib mingw-w64-x86_64-dav1d
-      - name: Resolve version
-        id: version
+          install: make diffutils tar xz curl ${{ matrix.packages }}
+      - name: Record toolchain
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/pack-ffmpeg-* ]]; then
-            echo "value=${GITHUB_REF#refs/tags/pack-ffmpeg-}" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=${{ inputs.ffmpeg_version || '7.1.1' }}" >> "$GITHUB_OUTPUT"
-          fi
+          mkdir -p pack-diagnostics
+          pacman -Q > pack-diagnostics/msys2-packages.txt
+          if [[ "$PACK_ARCH" == arm64 ]]; then clang --version; else gcc --version; fi > pack-diagnostics/compiler.txt
       - name: Build
         # Windows runners check out with CRLF; bash needs LF.
-        run: sed -i "s/\r$//" packs/ffmpeg/build.sh && bash packs/ffmpeg/build.sh "${{ steps.version.outputs.value }}" pack-out
+        run: sed -i "s/\r$//" packs/ffmpeg/build.sh && bash packs/ffmpeg/build.sh "$FFMPEG_VERSION" pack-out "$PACK_ARCH"
+      - name: Verify PE machine before native smoke tests
+        shell: pwsh
+        run: |
+          $expected = if ($env:PACK_ARCH -eq 'arm64') { 0xaa64 } else { 0x8664 }
+          foreach ($exe in 'pack-out/ffmpeg.exe', 'pack-out/ffprobe.exe') {
+            $bytes = [IO.File]::ReadAllBytes((Join-Path $PWD $exe))
+            if ($bytes.Length -lt 64 -or [BitConverter]::ToUInt16($bytes, 0) -ne 0x5a4d) { throw "Invalid DOS header: $exe" }
+            $pe = [BitConverter]::ToInt32($bytes, 0x3c)
+            if ($pe -lt 64 -or $pe -gt $bytes.Length - 6 -or [BitConverter]::ToUInt32($bytes, $pe) -ne 0x4550) { throw "Invalid PE header: $exe" }
+            $machine = [BitConverter]::ToUInt16($bytes, $pe + 4)
+            if ($machine -ne $expected) { throw ('{0}: expected PE machine 0x{1:x}, got 0x{2:x}' -f $exe, $expected, $machine) }
+          }
       - name: Smoke test
         shell: pwsh
         run: |
@@ -79,6 +149,8 @@ jobs:
               $writer.Write([int16](12000 * [Math]::Sin(2 * [Math]::PI * 440 * $i / 8000)))
             }
           } finally { $writer.Dispose(); $stream.Dispose() }
+          $probe = (& 'pack-out/ffprobe.exe' -v error -show_entries stream=codec_name -of default=noprint_wrappers=1:nokey=1 tone.wav) -join "`n"
+          if ($LASTEXITCODE -ne 0 -or $probe.Trim() -ne 'pcm_s16le') { throw 'Native ffprobe WAV inspection failed' }
           & $ff -v error -y -i tone.wav -ac 1 -ar 8000 -f s16le tone.pcm
           if ($LASTEXITCODE -ne 0 -or (Get-Item tone.pcm).Length -ne 32000) { throw 'PCM s16le output failed' }
           & $ff -v error -y -ss 0.5 -i tone.wav -t 0.25 -ac 1 -ar 8000 -f s16le seek.pcm
@@ -92,16 +164,38 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or (Get-Item frame.bmp).Length -eq 0) { throw 'Video output seeking failed' }
       - name: Check the pack is self-contained
         run: |
+          set -euo pipefail
+          inspector=objdump
+          [[ "$PACK_ARCH" != arm64 ]] || inspector=llvm-objdump
           for exe in pack-out/ffmpeg.exe pack-out/ffprobe.exe; do
-            if objdump -p "$exe" | grep -iE 'DLL Name: (libwinpthread|libgcc|libstdc|libdav1d|zlib1)'; then
-              echo "$exe depends on a MinGW DLL"; exit 1
+            imports="$("$inspector" -p "$exe")"
+            printf '%s\n' "$imports" > "pack-diagnostics/$(basename "$exe").imports.txt"
+            # Fail closed if the selected inspector cannot decode this PE file.
+            grep -qi 'DLL Name:' <<< "$imports" || { echo "No PE imports found: $exe"; exit 1; }
+            if grep -iE 'DLL Name: (libwinpthread|libgcc|libstdc|libdav1d|zlib1|libc\+\+|libunwind|libssp|libclang_rt|msys-)' <<< "$imports"; then
+              echo "$exe depends on a non-system runtime DLL"; exit 1
             fi
           done
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pack-ffmpeg-diagnostics-${{ matrix.arch }}
+          path: |
+            pack-diagnostics/*
+            build-pack-ffmpeg-${{ matrix.arch }}/ffmpeg-*/ffbuild/config.log
+          if-no-files-found: ignore
       - name: Package
         shell: pwsh
         run: |
-          $version = '${{ steps.version.outputs.value }}'
-          $zip = "pulse-pack-ffmpeg-$version-win64.zip"
+          $version = $env:FFMPEG_VERSION
+          $arm64 = $env:PACK_ARCH -eq 'arm64'
+          $suffix = if ($arm64) { '-arm64' } else { '' }
+          $tag = "pack-ffmpeg-$version$suffix"
+          $catalog = "pack-catalog$suffix.inc"
+          $fileSymbol = if ($arm64) { 'kMediaPackArm64Files' } else { 'kMediaPackFiles' }
+          $releaseSymbol = if ($arm64) { 'kMediaPackArm64Release' } else { 'kMediaPackRelease' }
+          $zip = if ($arm64) { "pulse-pack-ffmpeg-$version-arm64.zip" } else { "pulse-pack-ffmpeg-$version-win64.zip" }
           Compress-Archive -Path pack-out/* -DestinationPath $zip
           # Pulse downloads each file as <name>.lzms (Windows Compression API,
           # present since Windows 8) and checks the hashes pinned in its source.
@@ -138,54 +232,63 @@ jobs:
             }
           }
           # The block to paste into src/app/pack_catalog.h.
-          $base = "https://github.com/${{ github.repository }}/releases/download/pack-ffmpeg-$version/"
-          $lines = @("// pack-ffmpeg-$version, generated by .github/workflows/preview-pack-ffmpeg.yml",
-                     'inline constexpr PackFile kMediaPackFiles[] = {')
+          $base = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/"
+          $lines = @("// $tag ($env:PACK_ARCH), generated by .github/workflows/preview-pack-ffmpeg.yml",
+                     "inline constexpr PackFile ${fileSymbol}[] = {")
           foreach ($f in $files) {
             $lines += "    {L`"$($f.name)`", $($f.size), L`"$($f.sha256)`", $($f.packed.size), L`"$($f.packed.sha256)`"},"
           }
           $lines += '};'
-          $lines += "inline constexpr PackRelease kMediaPackRelease{L`"ffmpeg`", L`"$version`", L`"$base`","
-          $lines += '    kMediaPackFiles, sizeof(kMediaPackFiles) / sizeof(kMediaPackFiles[0])};'
-          $lines | Set-Content -Encoding utf8 pack-catalog.inc
+          $lines += "inline constexpr PackRelease ${releaseSymbol}{L`"ffmpeg`", L`"$version`", L`"$base`","
+          $lines += "    $fileSymbol, sizeof($fileSymbol) / sizeof(${fileSymbol}[0])};"
+          $lines | Set-Content -Encoding utf8 $catalog
           "### pack_catalog.h`n``````cpp" | Add-Content $env:GITHUB_STEP_SUMMARY
           $lines | Add-Content $env:GITHUB_STEP_SUMMARY
           '```' | Add-Content $env:GITHUB_STEP_SUMMARY
           $manifest = [ordered]@{
-            id = 'ffmpeg'; version = $version; license = 'LGPL-2.1-or-later'
+            id = 'ffmpeg'; version = $version; architecture = $env:PACK_ARCH; license = 'LGPL-2.1-or-later'
             archive = [ordered]@{ name = $zip; size = (Get-Item $zip).Length; sha256 = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() }
             files = $files
             min_pulse = '1.0.53'
           }
-          $manifest | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 "pulse-pack-ffmpeg-$version.json"
+          $manifest | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 "pulse-pack-ffmpeg-$version$suffix.json"
       - uses: actions/upload-artifact@v4
         with:
-          name: pack-ffmpeg
+          name: ${{ matrix.artifact }}
           path: |
             pulse-pack-ffmpeg-*.zip
             pulse-pack-ffmpeg-*.json
             *.lzms
-            pack-catalog.inc
+            pack-catalog*.inc
           if-no-files-found: error
 
   publish:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/pack-ffmpeg-')
+    needs: [prepare, build]
+    if: startsWith(github.ref, 'refs/tags/pack-ffmpeg-') || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
     runs-on: windows-2022
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: pack-ffmpeg
+          name: ${{ matrix.artifact }}
       - name: Publish release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          FFMPEG_VERSION: ${{ needs.prepare.outputs.version }}
+          PACK_ARCH: ${{ matrix.arch }}
         run: |
-          $tag = '${{ github.ref_name }}'
+          $suffix = if ($env:PACK_ARCH -eq 'arm64') { '-arm64' } else { '' }
+          $tag = "pack-ffmpeg-$env:FFMPEG_VERSION$suffix"
           # --latest=false: Pulse's updater reads releases/latest/download/update-manifest.json,
           # so a pack release must never become the repository's "latest" release.
-          gh release create $tag --repo '${{ github.repository }}' --latest=false --title "FFmpeg preview pack $($tag -replace 'pack-ffmpeg-','')" `
+          # Do not replace existing pinned assets; choose a new release version instead.
+          gh release create $tag --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --latest=false `
+            --title "FFmpeg preview pack $env:FFMPEG_VERSION ($env:PACK_ARCH)" `
             --notes 'Optional decode-only LGPL FFmpeg for Pulse previews. Installed from Settings > Preview packs.' `
-            (Get-ChildItem pulse-pack-ffmpeg-*, *.lzms, pack-catalog.inc)
+            (Get-ChildItem pulse-pack-ffmpeg-*, *.lzms, pack-catalog*.inc)
+          if ($LASTEXITCODE -ne 0) { throw "Release publication failed: $tag" }

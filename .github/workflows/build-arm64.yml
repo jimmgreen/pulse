@@ -4,6 +4,10 @@ on:
   workflow_dispatch:
   push:
     branches: [ main, feat/windows-arm64-support ]
+    paths-ignore:
+      - 'packs/**'
+      - '.github/workflows/preview-pack-*.yml'
+      - '**/*.md'
 
 jobs:
   touch-regressions-x64:

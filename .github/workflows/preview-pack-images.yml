@@ -1,10 +1,8 @@
 name: Build image preview pack
 
-# pulse-imgpack.exe with libheif + libde265 + dav1d (HEIC / AVIF), libjxl and
-# OpenEXR for Pulse's optional image preview pack. Run manually; a tag
-# "pack-images-<version>" publishes the files and their manifest to a release
-# of that name, where Pulse's pack installer finds them.
-
+# Native x64 and ARM64 decoders with identical features and licence constraints.
+# x64 keeps its original download names/tag. ARM64 uses a separate -arm64 tag,
+# so both releases can retain <installed-name>.lzms for Pulse's pack installer.
 on:
   workflow_dispatch:
     inputs:
@@ -12,6 +10,15 @@ on:
         description: Pack version (e.g. 1.0.0)
         required: true
         default: '1.0.0'
+      architecture:
+        description: Native architecture to build (ARM64 requires a public repository)
+        type: choice
+        options: [all, x64, arm64]
+        default: all
+      publish:
+        description: Publish to releases in this repository (never marks latest)
+        type: boolean
+        default: false
   push:
     tags: ['pack-images-[0-9]*']
 
@@ -19,57 +26,103 @@ permissions:
   contents: read
 
 env:
-  # The vcpkg ports the pack was validated with; packs/images/vcpkg.json
-  # overlays libheif on top of them.
+  # The overlay keeps libheif decoder-only; update neither features nor licences
+  # just to make an architecture build pass.
   VCPKG_COMMIT: d46283cf33cf5de7bd88e12156ce03882be1f179
 
 jobs:
-  build:
+  plan:
     runs-on: windows-2022
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      matrix: ${{ steps.plan.outputs.matrix }}
+      publish: ${{ steps.plan.outputs.publish }}
+    steps:
+      - name: Resolve version and architectures
+        id: plan
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.pack_version }}
+          INPUT_ARCHITECTURE: ${{ inputs.architecture }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          $version = $env:INPUT_VERSION
+          $architecture = $env:INPUT_ARCHITECTURE
+          $publish = $env:INPUT_PUBLISH -eq 'true'
+          if ($env:REF_TYPE -eq 'tag' -and $env:REF_NAME -like 'pack-images-*') {
+            $version = $env:REF_NAME -replace '^pack-images-', ''
+            $architecture = 'all'
+            if ($version.EndsWith('-arm64')) {
+              $version = $version -replace '-arm64$', ''
+              $architecture = 'arm64'
+            }
+            $publish = $true
+          }
+          if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.]+)?$' -or $version.EndsWith('-arm64')) {
+            throw 'pack_version must be a version such as 1.0.0 (the -arm64 suffix is reserved)'
+          }
+          if ($architecture -notin 'all', 'x64', 'arm64') { throw 'Invalid architecture' }
+          $include = @()
+          if ($architecture -in 'all', 'x64') { $include += @{ architecture = 'x64'; runner = 'windows-2022' } }
+          # windows-11-arm is a native standard runner for PUBLIC repositories.
+          if ($architecture -in 'all', 'arm64') { $include += @{ architecture = 'arm64'; runner = 'windows-11-arm' } }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "matrix=$(@{ include = $include } | ConvertTo-Json -Depth 4 -Compress)" >> $env:GITHUB_OUTPUT
+          "publish=$($publish.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+  build:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     defaults:
       run:
         shell: pwsh
+    env:
+      PACK_ARCH: ${{ matrix.architecture }}
+      PACK_VERSION: ${{ needs.plan.outputs.version }}
+      PACK_REPOSITORY: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
-      - uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-      - name: Resolve version
-        id: version
-        run: |
-          if ('${{ github.ref }}' -like 'refs/tags/pack-images-*') {
-            "value=$('${{ github.ref_name }}' -replace '^pack-images-','')" >> $env:GITHUB_OUTPUT
-          } else {
-            "value=${{ inputs.pack_version }}" >> $env:GITHUB_OUTPUT
-          }
+      # build.ps1 selects native MSVC host/target tools and refuses cross-OS
+      # execution before running imgpack_test or any helper smoke test.
       - name: vcpkg
         run: |
           git clone --filter=blob:none https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP\vcpkg"
+          if ($LASTEXITCODE) { throw 'vcpkg clone failed' }
           git -C "$env:RUNNER_TEMP\vcpkg" checkout $env:VCPKG_COMMIT
+          if ($LASTEXITCODE) { throw 'vcpkg checkout failed' }
           & "$env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE) { throw 'vcpkg bootstrap failed' }
       - uses: actions/cache@v4
         with:
-          path: build/imgpack/binarycache
-          key: imgpack-${{ env.VCPKG_COMMIT }}-${{ hashFiles('packs/images/vcpkg.json', 'packs/images/ports/**', 'packs/images/triplets/**') }}
-      - name: Build
-        # build.ps1 runs the smoke test (hevc=1 av1=1) and checks that every
-        # DLL the pack needs is shipped in it.
+          path: build/imgpack-${{ matrix.architecture }}/binarycache
+          key: imgpack-${{ matrix.architecture }}-${{ matrix.runner }}-${{ env.VCPKG_COMMIT }}-${{ hashFiles('packs/images/vcpkg.json', 'packs/images/ports/**', 'packs/images/triplets/**') }}
+      - name: Build and native smoke tests
+        # Keeps imgpack_test, HEVC/AV1 presence checks, and staged DLL checks.
         run: |
-          & packs/images/build.ps1 -VcpkgRoot "$env:RUNNER_TEMP\vcpkg" -Work build/imgpack
+          & packs/images/build.ps1 -Architecture $env:PACK_ARCH -VcpkgRoot "$env:RUNNER_TEMP\vcpkg" -Work "build/imgpack-$env:PACK_ARCH"
           if ($LASTEXITCODE) { throw "build.ps1 failed ($LASTEXITCODE)" }
       - name: Check licences
-        # Decoders only: libheif's GPL x265 / x264 encoders and the other
-        # encoder plugins must not end up in the pack.
+        # Decoders only: no GPL encoders or other encoder plugins in the pack.
         run: |
-          $bad = Get-ChildItem build/imgpack/pack -File | Where-Object { $_.Name -match 'x265|x264|openh264|rav1e|svt|aom' }
+          $bad = Get-ChildItem "build/imgpack-$env:PACK_ARCH/pack" -File | Where-Object { $_.Name -match 'x265|x264|openh264|rav1e|svt|aom' }
           if ($bad) { throw "encoder in the image pack: $($bad.Name -join ', ')" }
       - name: Package
         run: |
-          $version = '${{ steps.version.outputs.value }}'
-          $pack = 'build/imgpack/pack'
-          # Pulse downloads each file as <name>.lzms (Windows Compression API,
-          # present since Windows 8) and checks the hashes pinned in its source.
+          $version = $env:PACK_VERSION
+          $arch = $env:PACK_ARCH
+          $suffix = if ($arch -eq 'arm64') { '-arm64' } else { '' }
+          $tag = "pack-images-$version$suffix"
+          $pack = "build/imgpack-$arch/pack"
+          $release = "build/imgpack-$arch/release"
+          New-Item -ItemType Directory -Force $release | Out-Null
+          # Windows Compression API exists on both architectures. Installed file
+          # names stay unchanged; the release tag isolates the native binaries.
           Add-Type -TypeDefinition @'
           using System;
           using System.ComponentModel;
@@ -93,62 +146,90 @@ jobs:
               }
           }
           '@
-          $sha = { param($p) (Get-FileHash $p -Algorithm SHA256).Hash.ToLower() }
-          $files = Get-ChildItem $pack -File | Sort-Object Name | ForEach-Object {
-            $packed = "$($_.Name).lzms"
-            [IO.File]::WriteAllBytes((Join-Path $PWD $packed), [Lzms]::Pack([IO.File]::ReadAllBytes($_.FullName)))
+          $sha = { param($p) (Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant() }
+          $files = @(Get-ChildItem $pack -File | Sort-Object Name | ForEach-Object {
+            $packedName = "$($_.Name).lzms"
+            $packedPath = Join-Path $release $packedName
+            [IO.File]::WriteAllBytes((Join-Path $PWD $packedPath), [Lzms]::Pack([IO.File]::ReadAllBytes($_.FullName)))
             [ordered]@{
               name = $_.Name; size = $_.Length; sha256 = & $sha $_.FullName
-              packed = [ordered]@{ name = $packed; size = (Get-Item $packed).Length; sha256 = & $sha $packed }
+              packed = [ordered]@{ name = $packedName; size = (Get-Item $packedPath).Length; sha256 = & $sha $packedPath }
             }
-          }
-          # The block to paste into src/app/pack_catalog.h.
-          $base = "https://github.com/${{ github.repository }}/releases/download/pack-images-$version/"
-          $lines = @("// pack-images-$version, generated by .github/workflows/preview-pack-images.yml",
-                     'inline constexpr PackFile kImagePackFiles[] = {')
+          })
+          $base = "https://github.com/$env:PACK_REPOSITORY/releases/download/$tag/"
+          $symbol = if ($arch -eq 'arm64') { 'kImagePackArm64' } else { 'kImagePack' }
+          $lines = @("// $tag ($arch), generated by .github/workflows/preview-pack-images.yml",
+                     "inline constexpr PackFile $($symbol)Files[] = {")
           foreach ($f in $files) {
             $lines += "    {L`"$($f.name)`", $($f.size), L`"$($f.sha256)`", $($f.packed.size), L`"$($f.packed.sha256)`"},"
           }
           $lines += '};'
-          $lines += "inline constexpr PackRelease kImagePackRelease{L`"images`", L`"$version`", L`"$base`","
-          $lines += '    kImagePackFiles, sizeof(kImagePackFiles) / sizeof(kImagePackFiles[0])};'
-          $lines | Set-Content -Encoding utf8 pack-catalog.inc
-          "### pack_catalog.h`n``````cpp" | Add-Content $env:GITHUB_STEP_SUMMARY
+          $lines += "inline constexpr PackRelease $($symbol)Release{L`"images`", L`"$version`", L`"$base`","
+          $lines += "    $($symbol)Files, sizeof($($symbol)Files) / sizeof($($symbol)Files[0])};"
+          $lines | Set-Content -Encoding utf8 (Join-Path $release "pack-catalog$suffix.inc")
+          "### Image pack catalog ($arch)`n``````cpp" | Add-Content $env:GITHUB_STEP_SUMMARY
           $lines | Add-Content $env:GITHUB_STEP_SUMMARY
           '```' | Add-Content $env:GITHUB_STEP_SUMMARY
           $manifest = [ordered]@{
-            id = 'images'; version = $version; license = 'LGPL-3.0-only AND BSD-3-Clause AND MIT'
+            id = 'images'; version = $version; architecture = $arch
+            license = 'LGPL-3.0-only AND BSD-3-Clause AND MIT'
             files = $files
             min_pulse = '1.0.53'
           }
-          $manifest | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 "pulse-pack-images-$version.json"
+          $manifest | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 (Join-Path $release "pulse-pack-images-$version$suffix.json")
       - uses: actions/upload-artifact@v4
         with:
-          name: pack-images
+          name: pack-images-${{ matrix.architecture }}
+          # Keep raw staged files for independent PE/hash/notice verification.
           path: |
-            pulse-pack-images-*.json
-            *.lzms
-            pack-catalog.inc
+            build/imgpack-${{ matrix.architecture }}/release/
+            build/imgpack-${{ matrix.architecture }}/pack/
           if-no-files-found: error
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pack-images-${{ matrix.architecture }}-failure-logs
+          path: |
+            build/imgpack-${{ matrix.architecture }}/buildtrees/**/*.log
+            build/imgpack-${{ matrix.architecture }}/buildtrees/**/*.err
+            build/imgpack-${{ matrix.architecture }}/buildtrees/**/*.out
+            build/imgpack-${{ matrix.architecture }}/cmake/CMakeFiles/CMakeConfigureLog.yaml
+            build/imgpack-${{ matrix.architecture }}/installed/vcpkg/issue_body.md
+          if-no-files-found: warn
 
   publish:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/pack-images-')
+    needs: [plan, build]
+    if: needs.plan.outputs.publish == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: windows-2022
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: pack-images
-      - name: Publish release
+          name: pack-images-${{ matrix.architecture }}
+      - name: Publish release in this repository
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          PACK_REPOSITORY: ${{ github.repository }}
+          PACK_VERSION: ${{ needs.plan.outputs.version }}
+          PACK_ARCH: ${{ matrix.architecture }}
+          BUILD_SHA: ${{ github.sha }}
         run: |
-          $tag = '${{ github.ref_name }}'
-          # --latest=false: Pulse's updater reads releases/latest/download/update-manifest.json,
-          # so a pack release must never become the repository's "latest" release.
-          gh release create $tag --repo '${{ github.repository }}' --latest=false --title "Image preview pack $($tag -replace 'pack-images-','')" `
+          $suffix = if ($env:PACK_ARCH -eq 'arm64') { '-arm64' } else { '' }
+          $tag = "pack-images-$env:PACK_VERSION$suffix"
+          $title = "Image preview pack $env:PACK_VERSION ($env:PACK_ARCH)"
+          # Separate tags avoid asset collisions and preserve x64 URLs. A manual
+          # fork run targets the exact built commit, not any upstream branch.
+          # Never overwrite pinned bytes from an existing version. Creation
+          # fails if this release exists; publish a new version instead.
+          $payload = @(Get-ChildItem release -File | ForEach-Object FullName)
+          if (-not $payload.Count) { throw 'Release payload is empty' }
+          gh release create $tag --repo $env:PACK_REPOSITORY --target $env:BUILD_SHA --latest=false --title $title `
             --notes 'Optional HEIC / AVIF / JPEG XL / OpenEXR decoders for Pulse previews. Installed from Settings > Preview packs.' `
-            (Get-ChildItem pulse-pack-images-*, *.lzms, pack-catalog.inc)
+            $payload
+          if ($LASTEXITCODE) { throw 'Release creation/upload failed; existing releases are immutable, use a new pack version' }
