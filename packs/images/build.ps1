@@ -53,7 +53,7 @@ if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue) -or $env:VSCMD_ARG_T
     $vs = & $vswhere -latest -products * -requires $component -property installationPath
     if ($LASTEXITCODE -ne 0 -or -not $vs) { throw "Visual Studio $Architecture tools not found" }
     $devcmd = Join-Path ($vs | Select-Object -First 1) 'Common7\Tools\VsDevCmd.bat'
-    $environment = cmd /d /s /c "`"`"$devcmd`" -no_logo -arch=$Architecture -host_arch=$Architecture >nul && set`""
+    $environment = cmd /d /c "call `"$devcmd`" -no_logo -arch=$Architecture -host_arch=$Architecture >nul && set"
     if ($LASTEXITCODE -ne 0) { throw 'MSVC environment setup failed' }
     $environment | ForEach-Object {
         if ($_ -match '^([^=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($matches[1], $matches[2]) }

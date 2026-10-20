@@ -38,7 +38,7 @@ int wmain(int argc, wchar_t** argv) {
     GetEnvironmentVariableW(L"LOCALAPPDATA", previous, 32768);
     SetEnvironmentVariableW(L"LOCALAPPDATA", root.c_str());
     check(!preview::RawPackAvailable(), "missing pack is unavailable");
-    const fs::path pack = root / L"Pulse/packs/raw/test";
+    const fs::path pack = fs::path(packs::PacksRoot()) / L"raw" / L"test";
     fs::create_directories(pack);
     wchar_t self[32768]{}; GetModuleFileNameW(nullptr, self, 32768);
     fs::copy_file(self, pack / L"pulse-rawpack.exe", fs::copy_options::overwrite_existing);

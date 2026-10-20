@@ -26,6 +26,18 @@ struct PackRelease {
     size_t file_count;             // 0 while the pack is not published
 };
 
+#if defined(_M_ARM64EC)
+#error Pulse preview packs require a native x64 or ARM64 process target
+#elif defined(_M_ARM64) || defined(__aarch64__)
+#include "pack_catalog_arm64_generated.h"
+inline constexpr const PackRelease& kMediaPackRelease = kMediaPackArm64Release;
+inline constexpr const PackRelease& kImagePackRelease = kImagePackArm64Release;
+inline constexpr const PackRelease& kRawPackRelease = kRawPackArm64Release;
+inline constexpr const PackRelease& kArchivePackRelease = kArchivePackArm64Release;
+#elif defined(_M_X64) || defined(__x86_64__)
 #include "pack_catalog_generated.h"
+#else
+#error Pulse preview packs require a native x64 or ARM64 process target
+#endif
 
 } // namespace pulse::app

@@ -1,0 +1,122 @@
+name: Verify native preview pack routing
+on:
+  workflow_dispatch:
+    inputs:
+      install_published_packs:
+        description: Download hash-pinned catalog assets into an isolated test root
+        type: boolean
+        default: false
+  push:
+    branches: [main, feat/windows-arm64-support]
+    paths:
+      - 'src/common/preview_packs.h'
+      - 'src/common/pack_architecture.h'
+      - 'src/app/pack_catalog*.h'
+      - 'src/app/pack_installer.*'
+      - 'src/bench/*pack*test.cpp'
+      - '.github/workflows/preview-pack-runtime.yml'
+      - 'CMakeLists.txt'
+permissions:
+  contents: read
+jobs:
+  verify:
+    name: Pack routing (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2022
+          - arch: arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - name: Stage native ARM64 PDFium
+        if: matrix.arch == 'arm64'
+        run: |
+          Invoke-WebRequest 'https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8044/pdfium-win-arm64.tgz' -OutFile pdfium.tgz
+          tar -xzf pdfium.tgz
+          if ($LASTEXITCODE) { throw 'PDFium extraction failed' }
+          Copy-Item bin/pdfium.dll third_party/pdfium/bin/pdfium.dll -Force
+      - name: Build affected native tests and preview host
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          $arch = $env:TARGET_ARCH
+          if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant() -ne $arch) { throw 'Native runner architecture mismatch' }
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $component = if ($arch -eq 'arm64') { 'Microsoft.VisualStudio.Component.VC.Tools.ARM64' } else { 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64' }
+          $vs = & $vswhere -latest -products * -requires $component -property installationPath
+          if ($LASTEXITCODE -ne 0 -or -not $vs) { throw 'Native Visual Studio tools missing' }
+          $devcmd = Join-Path ($vs | Select-Object -First 1) 'Common7/Tools/VsDevCmd.bat'
+          $environment = cmd /d /c "call `"$devcmd`" -no_logo -arch=$arch -host_arch=$arch >nul && set"
+          if ($LASTEXITCODE) { throw 'MSVC environment setup failed' }
+          $environment | ForEach-Object {
+            if ($_ -match '^([^=]+)=(.*)$') { [Environment]::SetEnvironmentVariable($matches[1], $matches[2]) }
+          }
+          if ($env:VSCMD_ARG_TGT_ARCH -ne $arch -or $env:VSCMD_ARG_HOST_ARCH -ne $arch) { throw 'MSVC architecture mismatch' }
+          cmake -S . -B build-pack-routing -G Ninja -DCMAKE_BUILD_TYPE=Release -DPULSE_WITH_LUMATEXT=OFF -DPULSE_WITH_SELFTEST=OFF
+          if ($LASTEXITCODE) { throw 'Pack test configuration failed' }
+          cmake --build build-pack-routing --target pulse_pack_architecture_test pulse_pack_installer_test pulse_media_pack_test pulse_image_pack_test pulse_raw_pack_test pulse_raw_pack_host_test pulse_archive_pack_test pulse_archive_pack_host_test --parallel 4
+          if ($LASTEXITCODE) { throw 'Pack test build failed' }
+      - name: Verify isolated roots, shared preferences and installer models
+        run: |
+          & ./build-pack-routing/pulse_pack_architecture_test.exe
+          if ($LASTEXITCODE) { throw 'Architecture routing regression' }
+          & ./build-pack-routing/pulse_pack_installer_test.exe
+          if ($LASTEXITCODE) { throw 'Installer model regression' }
+      - name: Install the published native catalog into a new isolated root
+        if: inputs.install_published_packs
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'pulse-native-catalog-packs'
+          & ./build-pack-routing/pulse_pack_installer_test.exe --online $root
+          if ($LASTEXITCODE) { throw 'Native catalog download, verification or installation failed' }
+          $expected = if ('${{ matrix.arch }}' -eq 'arm64') { 0xaa64 } else { 0x8664 }
+          foreach ($file in Get-ChildItem $root -Recurse -File | Where-Object { $_.Extension -in '.exe', '.dll' }) {
+            $reader = [IO.BinaryReader]::new([IO.File]::OpenRead($file.FullName))
+            try {
+              if ($reader.ReadUInt16() -ne 0x5a4d) { throw 'Not a PE image' }
+              $reader.BaseStream.Position = 0x3c
+              $reader.BaseStream.Position = $reader.ReadUInt32()
+              if ($reader.ReadUInt32() -ne 0x4550 -or $reader.ReadUInt16() -ne $expected) { throw "Catalog contains the wrong native architecture: $($file.Name)" }
+            } finally { $reader.Dispose() }
+          }
+      - name: Execute affected pack module and preview host regressions
+        run: |
+          foreach ($name in 'media_pack', 'image_pack', 'raw_pack', 'archive_pack') {
+            & "./build-pack-routing/pulse_${name}_test.exe"
+            if ($LASTEXITCODE) { throw "Native $name regression" }
+          }
+      - name: Exercise published RAW and archive packs through preview IPC
+        if: inputs.install_published_packs
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'pulse-native-catalog-packs'
+          $raw = Get-Content (Join-Path $root 'raw/installed.json') -Raw | ConvertFrom-Json
+          $archive = Get-Content (Join-Path $root 'archive/installed.json') -Raw | ConvertFrom-Json
+          $rawDirectory = Join-Path $root "raw/$($raw.dir)"
+          $archiveTool = Join-Path $root "archive/$($archive.dir)/7z.exe"
+          $fixtures = Join-Path $env:RUNNER_TEMP 'pulse-native-pack-fixtures'
+          New-Item -ItemType Directory -Force $fixtures | Out-Null
+          python packs/raw/test_dng.py (Join-Path $rawDirectory 'pulse-rawpack.exe') (Join-Path $fixtures 'raw')
+          if ($LASTEXITCODE) { throw 'Native RAW synthetic fixture and decode failed' }
+          & ./build-pack-routing/pulse_raw_pack_host_test.exe $rawDirectory (Join-Path $fixtures 'raw')
+          if ($LASTEXITCODE) { throw 'Native RAW preview IPC regression' }
+          'Pulse isolated archive fixture' | Set-Content (Join-Path $fixtures 'hello.txt')
+          $wim = Join-Path $fixtures 'fixture.wim'
+          & $archiveTool a -twim $wim (Join-Path $fixtures 'hello.txt')
+          if ($LASTEXITCODE) { throw 'Native WIM fixture creation failed' }
+          & ./build-pack-routing/pulse_archive_pack_host_test.exe $archiveTool $wim
+          if ($LASTEXITCODE) { throw 'Native archive preview IPC regression' }
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: native-pack-routing-failure-${{ matrix.arch }}
+          path: |
+            build-pack-routing/CMakeFiles/CMakeConfigureLog.yaml
+            build-pack-routing/*.log
+          if-no-files-found: ignore

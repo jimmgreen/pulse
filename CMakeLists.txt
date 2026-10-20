@@ -279,6 +279,8 @@ add_executable(pulse_update_installer_test
 target_include_directories(pulse_update_installer_test PRIVATE "${CMAKE_BINARY_DIR}/generated")
 target_link_libraries(pulse_update_installer_test PRIVATE bcrypt shell32 user32 winhttp)
 
+add_executable(pulse_pack_architecture_test src/bench/pack_architecture_test.cpp)
+
 add_executable(pulse_pack_installer_test
     src/bench/pack_installer_test.cpp
     src/app/pack_installer.cpp
