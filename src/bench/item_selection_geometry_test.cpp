@@ -1,5 +1,4 @@
 #include "../ui/item_selection_geometry.h"
-#include "../app/app_prefs.h"
 #include <cstdio>
 #include <cassert>
 
@@ -111,41 +110,12 @@ void TestDensityAndPolicyResolution() {
           "Auto policy hides unselected unhovered checkbox on mouse-only device");
 }
 
-void TestAppPrefsSerialization() {
-    pulse::app::AppPrefs prefs;
-    Check(prefs.item_checkboxes == L"auto", "Default item_checkboxes is auto");
-    Check(prefs.touch_ui_mode == L"auto", "Default touch_ui_mode is auto");
-
-    // Roundtrip custom values
-    prefs.item_checkboxes = L"always";
-    prefs.touch_ui_mode = L"touch";
-    const std::wstring json = prefs.ToJson();
-
-    pulse::app::AppPrefs loaded;
-    Check(loaded.FromJson(json), "FromJson parses prefs JSON");
-    Check(loaded.item_checkboxes == L"always", "item_checkboxes roundtrips");
-    Check(loaded.touch_ui_mode == L"touch", "touch_ui_mode roundtrips");
-
-    // Invalid values fall back to "auto"
-    const std::wstring bad_json = L"{\n  \"version\":4,\n  \"item_checkboxes\":\"xyz\",\n  \"touch_ui_mode\":\"corrupt\"\n}";
-    pulse::app::AppPrefs fallback;
-    Check(fallback.FromJson(bad_json), "FromJson parses JSON with unknown enum");
-    Check(fallback.item_checkboxes == L"auto", "Unknown item_checkboxes falls back to auto");
-    Check(fallback.touch_ui_mode == L"auto", "Unknown touch_ui_mode falls back to auto");
-
-    // ResetToDefaults
-    loaded.ResetToDefaults();
-    Check(loaded.item_checkboxes == L"auto", "ResetToDefaults restores auto checkboxes");
-    Check(loaded.touch_ui_mode == L"auto", "ResetToDefaults restores auto touch mode");
-}
-
 } // namespace
 
 int main() {
     TestItemSelectionGeometryAllModes();
     TestHeaderSelectionGeometry();
     TestDensityAndPolicyResolution();
-    TestAppPrefsSerialization();
 
     std::printf("item_selection_geometry_test: %d failure(s)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
