@@ -124,6 +124,9 @@ enum MenuCmd : int {
     CmdUnpinNetwork = 3904,     // Network view: remove the selected pins
     CmdGroupIntoFolder = 3910,  // 2+ items: 合并到文件夹 (macOS New Folder with Selection)
     CmdDissolveFolder = 3911,   // folders only: 解散文件夹 (contents up one level, folder removed)
+    CmdItemCheckboxAuto = 3920, // view menu: item_checkboxes auto / always / never
+    CmdItemCheckboxAlways,
+    CmdItemCheckboxNever,
     CmdIndexBase = 1000,
     // Explorer integration (优化.md §7): registry static verbs bound to the
     // current selection (+index into the StaticVerb list) and pulse_shell
@@ -246,6 +249,7 @@ struct BackgroundViewOptions {
     bool can_group = false;  // real folders, Recent, search results, tag views
     bool group_virtual = false; // multi-folder view (search, tag, recycle): Location instead of Tag
     bool can_apply_group_all = false; // real folder: offer "apply grouping to all folders"
+    std::wstring item_checkboxes = L"auto";
 };
 void AppendBackgroundViewCommands(std::vector<ui::FluentMenuItem>& items,
                                   const BackgroundViewOptions& options);
@@ -268,9 +272,11 @@ std::vector<ui::FluentMenuItem> BuildBreadcrumbMenu(bool filesystem);
 // Split-button layout presets.
 std::vector<ui::FluentMenuItem> BuildSplitMenu(int current_preset);
 // can_apply_all: real folder, offer "apply view and sort to all folders".
+// Checkbox choices stay flat so the background View flyout remains one level.
 std::vector<ui::FluentMenuItem> BuildViewMenu(ui::ViewMode current_mode,
                                               bool details_panel = false,
-                                              bool can_apply_all = false);
+                                              bool can_apply_all = false,
+                                              const std::wstring& item_checkboxes = L"auto");
 
 // Ctrl+K / address omnibar: verbs + index hits + recent folders at the end.
 struct OmnibarQuery {

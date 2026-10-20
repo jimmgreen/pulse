@@ -122,7 +122,8 @@ bool TouchInputAdapter::HandlePointerMessage(HWND hwnd, UINT msg, WPARAM wParam,
             // a timer alive after the scrollable axis has hit an edge.
             inertia_.StartForScrollAxis(action.velocity_x, action.velocity_y,
                                         scroll_target_.column_major);
-            last_tick_time_ms_ = now_ms;
+            last_inertia_time_ = std::chrono::steady_clock::now();
+            if (inertia_.IsActive()) InvalidateRect(hwnd, nullptr, FALSE);
         }
         out_result = 0;
         return true;
@@ -146,7 +147,7 @@ void TouchInputAdapter::CancelActiveGesture() {
     reducer_.OnCancel(reducer_.ActivePointerId());
     inertia_.Stop();
     scroll_target_ = {};
-    last_tick_time_ms_ = 0;
+    last_inertia_time_ = {};
     // Keep consuming canceled contacts until their terminal messages arrive.
 }
 
@@ -164,24 +165,32 @@ void TouchInputAdapter::OnTimerTick(HWND hwnd) {
         DispatchHold(hwnd, hold.x, hold.y);
     }
 
+    if (!state_.framePump.Running()) OnAnimationFrame(hwnd);
+}
+
+void TouchInputAdapter::OnAnimationFrame(HWND hwnd) {
+    if (!inertia_.IsActive()) return;
+    if (!RefreshScrollTarget()) {
+        CancelActiveGesture();
+        return;
+    }
     // A newly started wheel animation is a new owner, not a second simulator.
-    if (inertia_.IsActive() && state_.scrollAnimating) {
+    if (state_.scrollAnimating) {
         CancelActiveGesture();
         return;
     }
 
-    // Advance inertia
-    if (inertia_.IsActive()) {
-        float dt = (last_tick_time_ms_ > 0) ? static_cast<float>(now_ms - last_tick_time_ms_) / 1000.0f : 0.016f;
-        dt = std::clamp(dt, 0.001f, 0.1f);
-        float dx_dip = 0.0f;
-        float dy_dip = 0.0f;
-        if (inertia_.Step(dt, dx_dip, dy_dip)) {
-            ApplyScrollDelta(dx_dip * state_.scale, dy_dip * state_.scale, hwnd);
-        }
-    }
+    const auto now = std::chrono::steady_clock::now();
+    const float elapsed = std::chrono::duration<float>(now - last_inertia_time_).count();
+    if (elapsed <= 0.0f) return;
+    last_inertia_time_ = now;
+    const float dt = std::min(elapsed, 0.1f);
+    float dx_dip = 0.0f;
+    float dy_dip = 0.0f;
+    if (inertia_.Step(dt, dx_dip, dy_dip))
+        ApplyScrollDelta(dx_dip * state_.scale, dy_dip * state_.scale, hwnd,
+                         !state_.framePump.Running());
 
-    last_tick_time_ms_ = now_ms;
     if (!inertia_.IsActive() && reducer_.State() != TouchGestureState::Pending &&
         reducer_.State() != TouchGestureState::Panning) scroll_target_ = {};
 }
@@ -274,7 +283,7 @@ bool TouchInputAdapter::RefreshScrollTarget() {
     return true;
 }
 
-void TouchInputAdapter::ApplyScrollDelta(float delta_x, float delta_y, HWND hwnd) {
+void TouchInputAdapter::ApplyScrollDelta(float delta_x, float delta_y, HWND hwnd, bool request_redraw) {
     if (!RefreshScrollTarget()) {
         CancelActiveGesture();
         return;
@@ -305,7 +314,7 @@ void TouchInputAdapter::ApplyScrollDelta(float delta_x, float delta_y, HWND hwnd
         state_.settings.SetScroll(position, scroll_target_.max_scroll_y);
     }
     if (step.blocked) inertia_.Stop();
-    if (step.changed) InvalidateRect(hwnd, nullptr, FALSE);
+    if (step.changed && request_redraw) InvalidateRect(hwnd, nullptr, FALSE);
 }
 
 void TouchInputAdapter::DispatchTap(HWND hwnd, float x, float y) {

@@ -309,11 +309,13 @@ inline TouchScrollStep ApplyTouchScrollAxis(float& position, float& animation_ta
              (delta < 0.0f && position >= maximum) || maximum == 0.0f };
 }
 
-// Exponential release inertia model: v(t) = v0 * exp(-k * dt)
+// Exponential drag plus a small constant braking force. Unlike a hard speed
+// cutoff, this reaches zero continuously in finite time and keeps the last step.
 class TouchInertiaTracker {
 public:
     explicit TouchInertiaTracker(float friction_k = 4.2f, float min_speed_dip = 20.0f)
-        : friction_k_(friction_k), min_speed_dip_(min_speed_dip) {}
+        : friction_k_((std::max)(0.001f, friction_k)),
+          min_speed_dip_((std::max)(0.001f, min_speed_dip)) {}
 
     void Start(float vx_dip, float vy_dip) noexcept {
         vx_ = vx_dip;
@@ -329,7 +331,9 @@ public:
 
     // Advances one simulation step with dt_seconds.
     // delta_x_dip and delta_y_dip output the movement distance in DIPs.
-    // Returns true if still animating, false if halted.
+    // Returns true when a displacement must be applied, including the final
+    // settling step. IsActive() separately tells the caller whether to schedule
+    // another frame.
     bool Step(float dt_sec, float& delta_x_dip, float& delta_y_dip) noexcept {
         if (!active_ || dt_sec <= 0.0f || dt_sec > 0.2f) {
             delta_x_dip = 0.0f;
@@ -338,20 +342,25 @@ public:
             return false;
         }
 
-        const float decay = std::exp(-friction_k_ * dt_sec);
-        const float avg_vx = vx_ * (1.0f + decay) * 0.5f;
-        const float avg_vy = vy_ * (1.0f + decay) * 0.5f;
-
-        delta_x_dip = avg_vx * dt_sec;
-        delta_y_dip = avg_vy * dt_sec;
-
-        vx_ *= decay;
-        vy_ *= decay;
-
-        if (std::abs(vx_) < min_speed_dip_ && std::abs(vy_) < min_speed_dip_) {
-            active_ = false;
-        }
-        return active_;
+        const auto advance_axis = [this, dt_sec](double& velocity) {
+            const double speed = std::abs(velocity);
+            if (speed == 0.0) return 0.0f;
+            const double friction = friction_k_;
+            const double brake = min_speed_dip_;
+            const double stop_time = std::log1p(speed / brake) / friction;
+            const double time = (std::min)(static_cast<double>(dt_sec), stop_time);
+            const double decay = std::exp(-friction * time);
+            const double distance = (std::max)(0.0,
+                (speed + brake) * -std::expm1(-friction * time) / friction - brake * time);
+            const double direction = velocity < 0.0 ? -1.0 : 1.0;
+            velocity = time >= stop_time ? 0.0
+                : direction * (std::max)(0.0, (speed + brake) * decay - brake);
+            return static_cast<float>(direction * distance);
+        };
+        delta_x_dip = advance_axis(vx_);
+        delta_y_dip = advance_axis(vy_);
+        active_ = vx_ != 0.0 || vy_ != 0.0;
+        return delta_x_dip != 0.0f || delta_y_dip != 0.0f;
     }
 
     void Stop() noexcept {
@@ -360,14 +369,14 @@ public:
         vy_ = 0.0f;
     }
 
-    void StopX() noexcept { vx_ = 0.0f; if (std::abs(vy_) < min_speed_dip_) active_ = false; }
-    void StopY() noexcept { vy_ = 0.0f; if (std::abs(vx_) < min_speed_dip_) active_ = false; }
+    void StopX() noexcept { vx_ = 0.0; active_ = vy_ != 0.0; }
+    void StopY() noexcept { vy_ = 0.0; active_ = vx_ != 0.0; }
 
 private:
     float friction_k_ = 4.2f;
     float min_speed_dip_ = 20.0f;
-    float vx_ = 0.0f;
-    float vy_ = 0.0f;
+    double vx_ = 0.0;
+    double vy_ = 0.0;
     bool active_ = false;
 };
 

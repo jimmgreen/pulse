@@ -27,7 +27,7 @@ jobs:
       - name: Build only touch and selection tests
         shell: pwsh
         run: |
-          cmake --build build-touch-tests --target pulse_touch_gesture_test pulse_item_selection_geometry_test --parallel 4
+          cmake --build build-touch-tests --target pulse_touch_gesture_test pulse_item_selection_geometry_test pulse_item_checkbox_menu_test --parallel 4
           if ($LASTEXITCODE -ne 0) { throw "Targeted regression build failed" }
       - name: Execute touch and selection regressions
         shell: pwsh
@@ -36,6 +36,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Touch regression failed" }
           & ./build-touch-tests/pulse_item_selection_geometry_test.exe
           if ($LASTEXITCODE -ne 0) { throw "Selection layout regression failed" }
+          & ./build-touch-tests/pulse_item_checkbox_menu_test.exe
+          if ($LASTEXITCODE -ne 0) { throw "Checkbox menu regression failed" }
 
   build-arm64:
     runs-on: windows-2022

@@ -240,6 +240,8 @@ void Render(AppState& s) {
     bool hc = s.shot_high_contrast || ui::IsHighContrast();
     ui::Theme theme = hc ? ui::MakeHighContrastTheme() : ui::MakeTheme(s.darkMode, s.accentColor);
 
+    if (s.framePump.Running() && s.touch_input)
+        s.touch_input->OnAnimationFrame(s.hwnd);
     if (s.scrollAnimating) UpdateSmoothScroll(s);
     UpdateMarqueeFrame(s);
     UpdateProcessMetrics(s);
@@ -320,7 +322,8 @@ void Render(AppState& s) {
     // Motion started or still running: the next frames follow the display
     // clock instead of the 16 ms UI timer (see WM_FRAME_PUMP).
     if (s.framePump.Running() &&
-        (s.scrollAnimating || s.marqueeAutoScroll || s.renderer.TickMotion(GetTickCount64())))
+        (s.scrollAnimating || (s.touch_input && s.touch_input->IsInertiaActive()) ||
+         s.marqueeAutoScroll || s.renderer.TickMotion(GetTickCount64())))
         s.framePump.Arm();
 }
 
@@ -1477,7 +1480,8 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (!s) return 0;
         s->framePump.FrameConsumed();
         if (!IsWindowVisible(hwnd) || IsIconic(hwnd) ||
-            (!s->scrollAnimating && !s->marqueeAutoScroll && !s->renderer.TickMotion(GetTickCount64()))) {
+            (!s->scrollAnimating && !(s->touch_input && s->touch_input->IsInertiaActive()) &&
+             !s->marqueeAutoScroll && !s->renderer.TickMotion(GetTickCount64()))) {
             s->framePump.Disarm();  // WM_PAINT re-arms once shown again
             return 0;
         }

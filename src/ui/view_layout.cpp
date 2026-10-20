@@ -76,7 +76,7 @@ ViewLayout::ViewLayout(ViewMode mode, D2D1_RECT_F viewport, size_t item_count,
         const float factor = fixed_pixel_tier ? 1.0f : scale_;
         metrics_.cell_width = std::min(width, cell_w * factor + selection_slot_);
         metrics_.cell_height = std::max(cell_h * factor,
-            selection_slot_dip >= 44.0f ? 44.0f * scale_ : 0.0f);
+            row_height_dip >= 44.0f ? 44.0f * scale_ : 0.0f);
         metrics_.icon_size = icon * factor;
         metrics_.slot_height = slot_h > 0.0f ? slot_h * factor : metrics_.icon_size;
         metrics_.columns = std::max(1, static_cast<int>(width / metrics_.cell_width));
@@ -99,7 +99,7 @@ ViewLayout::ViewLayout(ViewMode mode, D2D1_RECT_F viewport, size_t item_count,
     case ViewMode::Tiles: grid(280.0f, 72.0f, 48.0f); break;
     case ViewMode::List: {
         metrics_.cell_width = 220.0f * scale_ + selection_slot_;
-        metrics_.cell_height = (selection_slot_dip >= 44.0f ? 44.0f : 24.0f) * scale_;
+        metrics_.cell_height = (row_height_dip >= 44.0f ? 44.0f : 24.0f) * scale_;
         metrics_.icon_size = 16.0f * scale_;
         metrics_.column_major = true;
         metrics_.rows_per_column = std::max(1, static_cast<int>(height / metrics_.cell_height));

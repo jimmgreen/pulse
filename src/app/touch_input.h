@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <unordered_set>
 #include <string>
+#include <chrono>
 
 namespace pulse {
 struct AppState;
@@ -47,8 +48,10 @@ public:
     // Cancel current active gesture (called when modal overlay/menu appears, resize, tab switch, etc.)
     void CancelActiveGesture();
 
-    // Timer tick to check hold gesture and advance inertia
+    // Hold detection and inertia fallback when the display frame pump is unavailable.
     void OnTimerTick(HWND hwnd);
+    // Advance once immediately before a display-paced render, never from both clocks.
+    void OnAnimationFrame(HWND hwnd);
 
     bool IsInertiaActive() const noexcept { return inertia_.IsActive(); }
 
@@ -59,14 +62,14 @@ private:
     void DispatchHold(HWND hwnd, float x, float y);
     void SetupScrollTarget(float x, float y);
     bool RefreshScrollTarget();
-    void ApplyScrollDelta(float delta_x, float delta_y, HWND hwnd);
+    void ApplyScrollDelta(float delta_x, float delta_y, HWND hwnd, bool request_redraw = true);
 
     pulse::AppState& state_;
     TouchGestureReducer reducer_;
     TouchInertiaTracker inertia_;
     TouchScrollTarget scroll_target_;
     std::unordered_set<uint32_t> owned_touch_pointers_;
-    uint64_t last_tick_time_ms_ = 0;
+    std::chrono::steady_clock::time_point last_inertia_time_{};
 };
 
 } // namespace pulse::app

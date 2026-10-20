@@ -159,6 +159,19 @@ void TestLayoutOwnsCheckboxGutter() {
     }
     Check(SelectionSlotDip(TouchDensity::Touch, CheckboxVisibility::Never) == 0,
         "Never policy removes the reserved checkbox gutter");
+    for (const auto mode : {ViewMode::SmallIcons, ViewMode::List}) {
+        for (const float scale : {1.0f, 1.25f, 1.5f, 2.0f}) {
+            const ViewLayout hidden(mode, {0, 0, 640 * scale, 480 * scale}, 100,
+                0, 0, scale, 44, nullptr, SelectionSlotDip(TouchDensity::Touch, CheckboxVisibility::Never));
+            const auto cell = hidden.ItemRect(0);
+            Check(cell.bottom - cell.top >= 44 * scale - 0.01f,
+                "Hiding checkboxes preserves the touch target row height");
+            const auto cb = ComputeItemSelectionGeometry(mode, cell, scale, TouchDensity::Touch,
+                true, true, true, CheckboxVisibility::Never);
+            Check(!cb.visible && cb.leading_slot_width == 0,
+                "Never remains hidden even on selected or hovered touchscreen items");
+        }
+    }
 }
 
 } // namespace

@@ -49,6 +49,7 @@
 #include "bitlocker_unlock.h"
 #include "../fs/bitlocker_volume.h"
 #include "app_navigation.h"
+#include "app_input.h"
 #include "app_network_locations.h"
 #include "app_messages.h"
 #include "../ui/confirm_dialog.h"
@@ -1336,6 +1337,11 @@ void DispatchMenuCommand(AppState& s, int cmd) {
     case app::CmdColumnLayout:
         ToggleColumnLayout(s,-1);
         break;
+    case app::CmdItemCheckboxAuto:
+    case app::CmdItemCheckboxAlways:
+    case app::CmdItemCheckboxNever:
+        s.settings.ItemCheckboxes(cmd - app::CmdItemCheckboxAuto);
+        break;
     case app::CmdDetailsPanel:
         s.showDetailsPanel = !s.showDetailsPanel;
         s.renderer.SetDetailsPanelVisible(s.showDetailsPanel);
@@ -2030,6 +2036,7 @@ void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
     view_options.sort_direction = tab->sort_direction;
     view_options.folder_sort = s.appPrefs.folder_sort_mode;
     view_options.details_panel = s.showDetailsPanel;
+    view_options.item_checkboxes = s.appPrefs.item_checkboxes;
     view_options.can_sort = kind != L"starred" && kind != L"recent";
     view_options.indexed_search = (kind == L"search" || kind == L"saved-search") && !tab->content_results;
     view_options.show_path = kind == L"search" || kind == L"saved-search" || kind == L"recycle";
@@ -2634,7 +2641,8 @@ void ShowViewDropdown(AppState& s, int pane_index) {
     POINT anchor{ static_cast<LONG>(button.left), static_cast<LONG>(button.bottom) };
     ClientToScreen(s.hwnd, &anchor);
     auto items = app::BuildViewMenu(tab->view_mode, s.showDetailsPanel,
-        !tab->current_path.empty() && !fs::IsVirtualPath(tab->current_path));
+        !tab->current_path.empty() && !fs::IsVirtualPath(tab->current_path),
+        s.appPrefs.item_checkboxes);
     items.back().separator_after=true;
     items.push_back(app::BuildShortcutHints());
     const int cmd = s.menu->TrackPopup(anchor, items);
@@ -3583,6 +3591,7 @@ void ApplySettingsEffects(AppState& s, app::SettingsEffect effects) {
             s.menu->SetRowHeightDip(static_cast<float>(app::MenuRowHeightDip(row_height)));
     }
     if (app::HasEffect(effects, app::SettingsEffect::ListStyle)) {
+        const float old_selection_slot = s.renderer.ItemSelectionSlotDip();
         s.renderer.SetListStyle(s.appPrefs.list_smart_date, s.appPrefs.list_zebra_rows,
                                 s.appPrefs.list_size_bar, s.appPrefs.list_tag_name_color,
                                 s.appPrefs.list_selection_outline);
@@ -3594,6 +3603,24 @@ void ApplySettingsEffects(AppState& s, app::SettingsEffect effects) {
         s.renderer.SetTouchscreenReady(touch_ready);
         s.renderer.SetTouchDensity(ui::ResolveTouchDensity(s.appPrefs.touch_ui_mode, touch_ready));
         s.renderer.SetCheckboxVisibility(ui::ResolveCheckboxVisibility(s.appPrefs.item_checkboxes));
+        if (old_selection_slot != s.renderer.ItemSelectionSlotDip()) {
+            CancelScrollAnimation(s);
+            const auto vm = BuildVm(s, false);
+            for (size_t i = 0; i < vm.pane_slots.size(); ++i) {
+                app::Pane* pane = PaneAtSlot(s, static_cast<int>(i));
+                app::Tab* tab = pane ? pane->ActiveTab() : nullptr;
+                if (!tab || IsSettingsTab(tab)) continue;
+                const auto& slot = vm.pane_slots[i];
+                tab->scroll_x = std::clamp(tab->scroll_x, 0.0f,
+                    s.renderer.MaxScrollXForPane(slot.pane, slot.rect));
+                tab->scroll_y = std::clamp(tab->scroll_y, 0.0f,
+                    s.renderer.MaxScrollForPane(slot.pane, slot.rect));
+            }
+            if (const app::Tab* tab = ActiveTab(s)) {
+                s.scrollTargetX = tab->scroll_x;
+                s.scrollTargetY = tab->scroll_y;
+            }
+        }
     }
     if (app::HasEffect(effects, app::SettingsEffect::FolderSort)) {
         app::SetFolderSortMode(app::FolderSortModeFromInt(s.appPrefs.folder_sort_mode));

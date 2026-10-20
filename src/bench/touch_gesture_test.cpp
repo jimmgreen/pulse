@@ -239,6 +239,77 @@ void TestCancelledPanCannotRestartInertia() {
           "Touch cancel: stale release cannot restart inertia after target invalidation");
 }
 
+void TestInertiaSettlesWithoutCutoff() {
+    using namespace pulse::app;
+    for (const bool horizontal : {false, true}) {
+        for (const float direction : {-1.0f, 1.0f}) {
+            TouchInertiaTracker tracker;
+            tracker.StartForScrollAxis(direction * 20.0f, direction * 20.0f, horizontal);
+            float dx = 0.0f;
+            float dy = 0.0f;
+            Check(tracker.Step(0.016f, dx, dy) && tracker.IsActive(),
+                  "Settle: launch threshold does not truncate the first slow frame");
+            float previous_distance = std::abs(horizontal ? dx : dy);
+            bool smooth = previous_distance > 0.0f;
+            bool final_step_applied = false;
+            int frames = 1;
+            while (tracker.IsActive() && frames < 120) {
+                const bool moved = tracker.Step(0.016f, dx, dy);
+                const float distance = std::abs(horizontal ? dx : dy);
+                smooth = smooth && moved && distance <= previous_distance + 0.00001f &&
+                    (horizontal ? dy == 0.0f : dx == 0.0f) &&
+                    (horizontal ? dx : dy) * direction >= 0.0f;
+                if (!tracker.IsActive()) final_step_applied = moved && distance > 0.0f && distance < 0.02f;
+                previous_distance = distance;
+                ++frames;
+            }
+            Check(smooth && frames > 2 && !tracker.IsActive(),
+                  "Settle: slow tail decreases monotonically to rest on either axis and direction");
+            Check(final_step_applied,
+                  "Settle: final subpixel displacement is applied even when no next frame is needed");
+            Check(!tracker.Step(0.016f, dx, dy) && dx == 0.0f && dy == 0.0f,
+                  "Settle: subsequent frames stay completely stationary");
+        }
+    }
+}
+
+void TestInertiaIsFrameRateIndependent() {
+    using namespace pulse::app;
+    const float irregular[] = {0.006f, 0.011f, 0.008f, 0.024f, 0.007f, 0.016f};
+    constexpr double speed = 800.0;
+    constexpr double friction = 4.2;
+    constexpr double brake = 20.0;
+    const double stop_time = std::log1p(speed / brake) / friction;
+    const double expected_distance = speed / friction - brake * stop_time;
+    for (const float frame_rate : {60.0f, 90.0f, 120.0f, 144.0f, 0.0f}) {
+        TouchInertiaTracker tracker;
+        tracker.Start(0.0f, -static_cast<float>(speed));
+        double distance = 0.0;
+        double elapsed = 0.0;
+        float position = 300.0f;
+        float target = 900.0f;
+        bool monotonic = true;
+        int frames = 0;
+        while (tracker.IsActive() && frames < 1000) {
+            const float dt = frame_rate > 0.0f ? 1.0f / frame_rate : irregular[frames % 6];
+            float dx = 0.0f;
+            float dy = 0.0f;
+            const float before = position;
+            if (tracker.Step(dt, dx, dy)) {
+                distance -= dy;
+                ApplyTouchScrollAxis(position, target, dy, 2000.0f);
+            }
+            elapsed += dt;
+            monotonic = monotonic && position >= before && target == position;
+            ++frames;
+        }
+        Check(!tracker.IsActive() && std::abs(distance - expected_distance) < 0.002,
+              "Frame pacing: 60/90/120/144 Hz and irregular frames preserve analytic release distance");
+        Check(monotonic && elapsed >= stop_time - 0.0001 && elapsed < stop_time + 0.025,
+              "Frame pacing: no reversal or stale target while settling in finite time");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -251,6 +322,8 @@ int main() {
     TestDirectTouchScrollOwnership();
     TestTouchInertiaBoundaries();
     TestCancelledPanCannotRestartInertia();
+    TestInertiaSettlesWithoutCutoff();
+    TestInertiaIsFrameRateIndependent();
 
     std::printf("touch_gesture_test: %d failure(s)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
