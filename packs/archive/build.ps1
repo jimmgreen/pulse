@@ -1,11 +1,15 @@
-# Packages a verified, complete official 7-Zip x64 distribution; no installation.
+# Packages a verified, complete official 7-Zip native distribution; no installation.
 param(
     [Parameter(Mandatory=$true)][string]$SourceDirectory,
     [Parameter(Mandatory=$true)][ValidatePattern('^\d+\.\d+$')][string]$Version,
-    [string]$Work = 'build/archivepack'
+    [string]$Work = 'build/archivepack',
+    [ValidateSet('x64', 'arm64')][string]$Architecture = 'x64'
 )
 $ErrorActionPreference = 'Stop'
 $source = (Resolve-Path -LiteralPath $SourceDirectory).Path
+$machine = if ($Architecture -eq 'arm64') { 0xAA64 } else { 0x8664 }
+$hostArchitecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+if ($hostArchitecture -ne $Architecture) { throw "Run archive smoke tests on a native $Architecture runner (got $hostArchitecture)" }
 foreach ($name in @('7z.exe', '7z.dll', 'License.txt')) {
     if (-not (Test-Path -LiteralPath (Join-Path $source $name) -PathType Leaf)) { throw "Missing $name" }
 }
@@ -15,8 +19,9 @@ foreach ($name in @('7z.exe', '7z.dll')) {
         $item.VersionInfo.OriginalFilename -ne $name) { throw "Unexpected 7-Zip identity/version: $name" }
     $bytes = [IO.File]::ReadAllBytes($item.FullName)
     $pe = [BitConverter]::ToInt32($bytes, 60)
-    if ($pe -lt 0 -or $pe + 6 -gt $bytes.Length -or [BitConverter]::ToUInt16($bytes, $pe + 4) -ne 0x8664) {
-        throw "Expected x64 PE: $name"
+    if ($bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A -or $pe -lt 64 -or $pe + 6 -gt $bytes.Length -or
+        [BitConverter]::ToUInt32($bytes, $pe) -ne 0x4550 -or [BitConverter]::ToUInt16($bytes, $pe + 4) -ne $machine) {
+        throw "Expected $Architecture PE: $name"
     }
 }
 New-Item -ItemType Directory -Force -Path $Work | Out-Null
@@ -53,4 +58,4 @@ $process.Dispose()
 Get-ChildItem -LiteralPath $pack -File | ForEach-Object {
     [ordered]@{ name=$_.Name; size=$_.Length; sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
 } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $workPath 'files.json') -Encoding utf8
-Write-Output "Validated archive pack $Version at $pack (not published)."
+Write-Output "Validated native $Architecture archive pack $Version at $pack (not published)."

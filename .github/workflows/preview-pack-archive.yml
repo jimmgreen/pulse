@@ -9,12 +9,31 @@ on:
       installer_sha256:
         description: Independently verified SHA256 of official x64 installer
         required: true
+        default: '0859c524b8a63551848f0c246abddcb1d0b7b656b0fbfe879f8d85e61a9e6edd'
+      arm64_installer_sha256:
+        description: Independently verified SHA256 of official ARM64 installer
+        required: true
+        default: 'e22ce71c11dcf503c448fe51e56f41830eb4e1344fa5c7731ae63bce533a8e8e'
+      architecture:
+        description: Native package architecture
+        type: choice
+        options: [all, x64, arm64]
+        default: all
+      publish:
+        description: Publish verified pack assets to a non-latest release
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
   package:
-    runs-on: windows-2022
-    timeout-minutes: 10
+    name: Archive (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.architecture == 'x64' && '[{"arch":"x64","runner":"windows-2022","suffix":""}]' || inputs.architecture == 'arm64' && '[{"arch":"arm64","runner":"windows-11-arm","suffix":"-arm64"}]' || '[{"arch":"x64","runner":"windows-2022","suffix":""},{"arch":"arm64","runner":"windows-11-arm","suffix":"-arm64"}]') }}
     defaults:
       run:
         shell: pwsh
@@ -23,24 +42,60 @@ jobs:
       - name: Download and verify official distribution
         env:
           PACK_VERSION: ${{ inputs.version }}
-          INSTALLER_SHA256: ${{ inputs.installer_sha256 }}
+          INSTALLER_SHA256: ${{ matrix.arch == 'arm64' && inputs.arm64_installer_sha256 || inputs.installer_sha256 }}
         run: |
           if ($env:PACK_VERSION -notmatch '^\d+\.\d+$' -or $env:INSTALLER_SHA256 -notmatch '^[0-9a-fA-F]{64}$') { throw 'Invalid release inputs' }
           $compact = $env:PACK_VERSION.Replace('.', '')
           New-Item -ItemType Directory -Force build/archivepack | Out-Null
           $installer = "$PWD/build/archivepack/official.exe"
-          Invoke-WebRequest "https://github.com/ip7z/7zip/releases/download/$env:PACK_VERSION/7z$compact-x64.exe" -OutFile $installer
+          Invoke-WebRequest "https://github.com/ip7z/7zip/releases/download/$env:PACK_VERSION/7z$compact-${{ matrix.arch }}.exe" -OutFile $installer
           if ((Get-FileHash $installer -Algorithm SHA256).Hash -ne $env:INSTALLER_SHA256) { throw 'Official installer hash mismatch' }
-          & 'C:/Program Files/7-Zip/7z.exe' x $installer '-obuild/archivepack/source' -y
+          $extractor = (Get-Command 7z.exe -ErrorAction SilentlyContinue).Source
+          if (-not $extractor) { $extractor = 'C:/Program Files/7-Zip/7z.exe' }
+          & $extractor x $installer '-obuild/archivepack/source' -y
           if ($LASTEXITCODE) { throw 'Distribution extraction failed' }
-          & packs/archive/build.ps1 -SourceDirectory build/archivepack/source -Version $env:PACK_VERSION
+          & packs/archive/build.ps1 -SourceDirectory build/archivepack/source -Version $env:PACK_VERSION -Architecture '${{ matrix.arch }}'
+      - name: Package verified payload and generate catalog
+        env:
+          PACK_VERSION: ${{ inputs.version }}
+        run: |
+          python scripts/package_single_preview_pack.py --id archive --architecture '${{ matrix.arch }}' `
+            --version $env:PACK_VERSION --tag "pack-archive-$env:PACK_VERSION${{ matrix.suffix }}" `
+            --repository '${{ github.repository }}' --pack-directory build/archivepack/pack --output build/archivepack/assets
+          if ($LASTEXITCODE) { throw 'Archive payload packaging failed' }
       - uses: actions/upload-artifact@v4
         with:
-          name: archive-pack-candidate
+          name: archive-pack-candidate${{ matrix.suffix }}
           path: |
             build/archivepack/pack/*
             build/archivepack/files.json
+            build/archivepack/assets/*
           if-no-files-found: error
-# Candidate artifacts only. Publish/install catalog entries only after verified
-# LZMS payloads and their source-pinned hashes exist; never advertise this job as
-# an available downloadable Pulse release.
+  publish:
+    needs: package
+    if: inputs.publish
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: archive-pack-candidate*
+          path: artifacts
+      - name: Publish explicitly requested verified assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACK_VERSION: ${{ inputs.version }}
+        run: |
+          foreach ($directory in Get-ChildItem artifacts -Directory) {
+            $suffix = if ($directory.Name.EndsWith('-arm64')) { '-arm64' } else { '' }
+            $tag = "pack-archive-$env:PACK_VERSION$suffix"
+            $assets = Get-ChildItem $directory.FullName -Recurse -File | Where-Object { $_.Name -like '*.lzms' -or $_.Name -like 'pulse-pack-*.json' -or $_.Name -like 'pack-catalog*.inc' }
+            if (-not $assets) { throw "Missing verified payloads for $tag" }
+            gh release create $tag --repo '${{ github.repository }}' --target '${{ github.sha }}' --latest=false `
+              --title "Archive preview pack $env:PACK_VERSION$suffix" `
+              --notes 'Optional official 7-Zip archive listing package. Native architecture and format smoke tests passed; payload hashes are pinned in the generated catalog.' `
+              @($assets.FullName)
+            if ($LASTEXITCODE) { throw "Could not publish $tag (existing releases are never overwritten)" }
+          }
