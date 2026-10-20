@@ -30,7 +30,7 @@ path.write_bytes(b'II*\0'+struct.pack('<I',8)+struct.pack('<H',len(entries))+b''
 def run(*args):
     started=time.perf_counter()
     result=subprocess.run([str(exe),*map(str,args)],capture_output=True,timeout=25)
-    print(f"[TIME] {args[0]} {pathlib.Path(args[1]).name}: {(time.perf_counter()-started)*1000:.1f} ms")
+    print(f"[TIME] {args[0]} {pathlib.Path(args[1]).name!a}: {(time.perf_counter()-started)*1000:.1f} ms")
     return result
 def check(ok,label):
     if not ok: raise AssertionError(label)
