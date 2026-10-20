@@ -60,12 +60,20 @@ void ShowQuickAccessMenu(AppState& s, const std::wstring& path, POINT point) {
     open.command = app::CmdOpen;
     open.text = l10n::Get(l10n::StringId::Open);
     open.glyph = L"\xE8B7";
+    std::vector<ui::FluentMenuItem> items{open};
+    ui::FluentMenuItem open_tab;
+    open_tab.command = app::CmdOpenInNewTab;
+    open_tab.text = l10n::Get(l10n::StringId::OpenNewTab);
+    open_tab.glyph = L"\xE8A7";
+    items.push_back(std::move(open_tab));
     ui::FluentMenuItem remove;
     remove.command = app::CmdUnpinQuickAccess;
     remove.text = l10n::Get(l10n::StringId::UnpinQuickAccess);
     remove.glyph = L"\xE77A";
-    const int command = s.menu->TrackPopup(point, {open, remove});
+    items.push_back(std::move(remove));
+    const int command = s.menu->TrackPopup(point, std::move(items));
     if (command == app::CmdOpen) NavigateTo(s, path);
+    else if (command == app::CmdOpenInNewTab) OpenFolderTab(s, path);
     else HandleQuickAccessCommand(s, command, {path});
 }
 

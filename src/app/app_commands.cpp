@@ -2434,12 +2434,23 @@ void ShowCuratedItemMenu(AppState& s, const std::wstring& path,
                                 bool recent, POINT screen_pt) {
     if (path.empty() || !EnsureMenu(s)) return;
     constexpr int kCustomColor = 30100;
+    const auto* favorite = s.places.FindStarred(path);
+    const bool can_open_tab = !recent &&
+        ((favorite && favorite->kind == app::PlaceItemKind::Folder) ||
+         (!fs::IsVirtualPath(path) && QuickAccessEntryForPath(s, path)));
     std::vector<ui::FluentMenuItem> items;
     ui::FluentMenuItem open;
     open.command = app::CmdOpen;
     open.text = l10n::Get(l10n::StringId::Open);
     open.glyph = L"\xE8A0";
     items.push_back(std::move(open));
+    if (can_open_tab) {
+        ui::FluentMenuItem open_tab;
+        open_tab.command = app::CmdOpenInNewTab;
+        open_tab.text = l10n::Get(l10n::StringId::OpenNewTab);
+        open_tab.glyph = L"\xE8A7";
+        items.push_back(std::move(open_tab));
+    }
     if (recent) {
         ui::FluentMenuItem remove;
         remove.command = app::CmdRemoveRecent;
@@ -2484,7 +2495,6 @@ void ShowCuratedItemMenu(AppState& s, const std::wstring& path,
             items.push_back(std::move(remove));
         }
     }
-    const auto* favorite = s.places.FindStarred(path);
     const auto* recent_item = s.places.FindRecent(path);
     const bool known_folder = (favorite && favorite->kind == app::PlaceItemKind::Folder) ||
         (recent_item && recent_item->kind == app::PlaceItemKind::Folder) ||
@@ -2502,6 +2512,8 @@ void ShowCuratedItemMenu(AppState& s, const std::wstring& path,
             s.ops.OpenWith(path);
             RecordRecentOpen(s, path, app::PlaceItemKind::File);
         }
+    } else if (cmd == app::CmdOpenInNewTab && can_open_tab) {
+        OpenFolderTab(s, path);
     } else if (cmd == app::CmdEditStarBadge) {
         ShowStarredBadgeEditor(s, path, screen_pt);
     } else if (cmd >= app::CmdTabColorBase &&
