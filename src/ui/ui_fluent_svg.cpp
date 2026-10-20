@@ -271,6 +271,10 @@ int FluentSvgIdForGlyph(std::wstring_view glyph) {
     if (glyph == L"\xE75C") return IDR_FLUENT_RECYCLE_SVG;
     if (glyph == L"\xE7F1") return IDR_FLUENT_DRIVE_SVG;
     if (glyph == L"\xE8B7") return IDR_FLUENT_FOLDER_SVG;
+    if (glyph == L"\xE8A5") return IDR_FLUENT_DOCUMENT_SVG;
+    if (glyph == L"\xE8D6") return IDR_FLUENT_MUSIC_SVG;
+    if (glyph == L"\xEB9F" || glyph == L"\xE91B") return IDR_FLUENT_IMAGE_SVG;
+    if (glyph == L"\xE714") return IDR_FLUENT_VIDEO_SVG;
     if (glyph == L"\xE968") return IDR_FLUENT_NETWORK_SVG;
     if (glyph == L"\xE721") return IDR_FLUENT_SEARCH_SVG;
     // "This PC": monitor on a stand next to a tower, the way Explorer draws it.

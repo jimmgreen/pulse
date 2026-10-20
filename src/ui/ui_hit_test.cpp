@@ -1184,12 +1184,14 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             switch (columns.kinds[static_cast<size_t>(col)]) {
             case ColumnKind::Name: {
                 const D2D1_RECT_F nameColRc = D2D1::RectF(
-                    col == 0 ? paneRc.left : columns.DividerX(col - 1),
+                    DetailsContentRect(paneRc, scale_).left,
                     columnTop,
-                    columns.DividerX(col),
+                    columns.Left(ColumnKind::Name) + columns.Width(ColumnKind::Name),
                     listTop);
                 const auto hdr_geom = ComputeHeaderSelectionGeometry(nameColRc, scale_, touch_density_);
-                if (ContainsPt(hdr_geom.hit_rect, x, y)) {
+                if (checkbox_visibility_ != CheckboxVisibility::Never &&
+                    nameColRc.right - nameColRc.left >= hdr_geom.leading_slot_width + 8.0f * scale_ &&
+                    ContainsPt(hdr_geom.hit_rect, x, y)) {
                     out.region = HitTestResult::HeaderCheckbox;
                     return out;
                 }
@@ -1271,7 +1273,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 const D2D1_RECT_F list = PaneListRect(paneRc, extra, paneVm.view_mode);
                 const ViewLayout grouped(paneVm.view_mode, list, paneVm.EntryCount(),
                                          paneVm.scroll_x, paneVm.scroll_y, scale_,
-                                         ListRowHeightDip(paneVm, list), groups);
+                                         ListRowHeightDip(paneVm, list), groups, ItemSelectionSlotDip());
                 D2D1_RECT_F header{};
                 int g = grouped.StickyHeader(&header);
                 if (g < 0 || !ContainsPt(header, x, y)) {
@@ -1301,7 +1303,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                         const DetailsColumnLayout columns = DetailsColumns(list, paneVm);
                         ViewLayout layout(paneVm.view_mode, list, paneVm.EntryCount(),
                                           paneVm.scroll_x, paneVm.scroll_y, scale_,
-                                          ListRowHeightDip(paneVm, list), paneVm.Groups());
+                                          ListRowHeightDip(paneVm, list), paneVm.Groups(), ItemSelectionSlotDip());
                         const D2D1_RECT_F nameRc = layout.NameRect(viewRow);
                         const D2D1_RECT_F cell = layout.ItemRect(viewRow);
                         const ListEntryView& entry = MakeVisibleEntry(paneVm, static_cast<size_t>(idx));

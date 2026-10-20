@@ -6,6 +6,37 @@ on:
     branches: [ main, feat/windows-arm64-support ]
 
 jobs:
+  touch-regressions-x64:
+    name: Run touch and selection regressions (Windows x64)
+    runs-on: windows-2022
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Setup MSVC x64 Environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+      - name: Configure targeted regression tests
+        shell: pwsh
+        run: |
+          cmake -S . -B build-touch-tests -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DPULSE_WITH_LUMATEXT=OFF `
+            -DPULSE_WITH_SELFTEST=OFF
+          if ($LASTEXITCODE -ne 0) { throw "CMake configuration failed" }
+      - name: Build only touch and selection tests
+        shell: pwsh
+        run: |
+          cmake --build build-touch-tests --target pulse_touch_gesture_test pulse_item_selection_geometry_test --parallel 4
+          if ($LASTEXITCODE -ne 0) { throw "Targeted regression build failed" }
+      - name: Execute touch and selection regressions
+        shell: pwsh
+        run: |
+          & ./build-touch-tests/pulse_touch_gesture_test.exe
+          if ($LASTEXITCODE -ne 0) { throw "Touch regression failed" }
+          & ./build-touch-tests/pulse_item_selection_geometry_test.exe
+          if ($LASTEXITCODE -ne 0) { throw "Selection layout regression failed" }
+
   build-arm64:
     runs-on: windows-2022
     steps:

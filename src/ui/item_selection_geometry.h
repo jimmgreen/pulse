@@ -34,6 +34,11 @@ struct HeaderSelectionGeometry {
     float leading_slot_width = 0.0f; // Slot occupied in the header
 };
 
+inline float SelectionSlotDip(TouchDensity density, CheckboxVisibility policy) noexcept {
+    if (policy == CheckboxVisibility::Never) return 0.0f;
+    return density == TouchDensity::Touch ? 44.0f : 28.0f;
+}
+
 // Calculates item selection geometry for any of the 8 view modes.
 // item_rect: full bounding box of the item in client/viewport pixel space.
 // scale: DPI scale factor (e.g. 1.0, 1.5, 2.0).
@@ -81,7 +86,7 @@ inline ItemSelectionGeometry ComputeItemSelectionGeometry(
 
     if (is_grid) {
         // Icon grid: checkbox rests at top-left corner of the item cell.
-        // It does not displace the thumbnail/icon horizontally, but overlays the top-left card corner.
+        // ViewLayout reserves the same leading gutter before the artwork.
         const float pad_px = 6.0f * scale;
         geom.visual_rect.left = item_rect.left + pad_px;
         geom.visual_rect.top = item_rect.top + pad_px;
@@ -95,18 +100,18 @@ inline ItemSelectionGeometry ComputeItemSelectionGeometry(
 
         geom.hit_rect.left = (std::max)(item_rect.left, center_x - half_hit);
         geom.hit_rect.top = (std::max)(item_rect.top, center_y - half_hit);
-        geom.hit_rect.right = (std::min)(item_rect.right, center_x + half_hit);
-        geom.hit_rect.bottom = (std::min)(item_rect.bottom, center_y + half_hit);
+        geom.hit_rect.right = (std::min)(item_rect.right, geom.hit_rect.left + hit_min_px);
+        geom.hit_rect.bottom = (std::min)(item_rect.bottom, geom.hit_rect.top + hit_min_px);
 
-        geom.leading_slot_width = 0.0f; // Overlay, does not shift name below
+        geom.leading_slot_width = SelectionSlotDip(density, policy) * scale;
     } else {
         // Linear rows: Details, List, SmallIcons, Tiles, Content.
         // Checkbox is aligned to the leading edge (left) and vertically centered in the row.
         const float pad_x_px = 4.0f * scale;
-        const float slot_dip = is_touch ? 40.0f : 26.0f;
+        const float slot_dip = is_touch ? 44.0f : 28.0f;
         const float slot_px = slot_dip * scale;
 
-        geom.leading_slot_width = slot_px;
+        geom.leading_slot_width = SelectionSlotDip(density, policy) * scale;
 
         geom.visual_rect.left = item_rect.left + pad_x_px + (slot_px - pad_x_px - box_size_px) * 0.5f;
         geom.visual_rect.right = geom.visual_rect.left + box_size_px;
@@ -115,12 +120,16 @@ inline ItemSelectionGeometry ComputeItemSelectionGeometry(
 
         // Hit box covers the leading slot and full row height (or at least hit_min_px)
         geom.hit_rect.left = item_rect.left;
-        geom.hit_rect.right = item_rect.left + (std::max)(slot_px, hit_min_px);
+        geom.hit_rect.right = (std::min)(item_rect.right, item_rect.left + slot_px);
         const float center_y = item_rect.top + item_h * 0.5f;
         geom.hit_rect.top = (std::max)(item_rect.top, center_y - hit_min_px * 0.5f);
         geom.hit_rect.bottom = (std::min)(item_rect.bottom, center_y + hit_min_px * 0.5f);
     }
 
+    geom.visual_rect.left = (std::max)(item_rect.left, geom.visual_rect.left);
+    geom.visual_rect.right = (std::min)(item_rect.right, geom.visual_rect.right);
+    geom.visible = geom.visible && geom.visual_rect.right - geom.visual_rect.left >= box_size_px &&
+        item_h >= box_size_px;
     return geom;
 }
 
@@ -136,7 +145,7 @@ inline HeaderSelectionGeometry ComputeHeaderSelectionGeometry(
 
     const float col_h = (std::max)(0.0f, name_col_rect.bottom - name_col_rect.top);
     const float box_size_px = 18.0f * scale;
-    const float slot_dip = is_touch ? 40.0f : 26.0f;
+    const float slot_dip = is_touch ? 44.0f : 28.0f;
     const float slot_px = slot_dip * scale;
     const float pad_x_px = 4.0f * scale;
 

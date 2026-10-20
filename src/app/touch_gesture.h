@@ -291,6 +291,24 @@ private:
     std::deque<Sample> samples_;
 };
 
+struct TouchScrollStep {
+    bool changed = false;
+    bool blocked = false;
+};
+
+// Direct manipulation owns both the displayed position and the wheel target.
+// Leaving the latter behind lets the next animation frame pull the content back.
+inline TouchScrollStep ApplyTouchScrollAxis(float& position, float& animation_target,
+                                           float delta, float maximum) noexcept {
+    maximum = (std::max)(0.0f, maximum);
+    const float previous = position;
+    position = std::clamp(position - delta, 0.0f, maximum);
+    animation_target = position;
+    return { position != previous,
+             (delta > 0.0f && position <= 0.0f) ||
+             (delta < 0.0f && position >= maximum) || maximum == 0.0f };
+}
+
 // Exponential release inertia model: v(t) = v0 * exp(-k * dt)
 class TouchInertiaTracker {
 public:
@@ -301,6 +319,10 @@ public:
         vx_ = vx_dip;
         vy_ = vy_dip;
         active_ = (std::abs(vx_) >= min_speed_dip_ || std::abs(vy_) >= min_speed_dip_);
+    }
+
+    void StartForScrollAxis(float vx_dip, float vy_dip, bool horizontal) noexcept {
+        Start(horizontal ? vx_dip : 0.0f, horizontal ? 0.0f : vy_dip);
     }
 
     bool IsActive() const noexcept { return active_; }

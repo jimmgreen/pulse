@@ -57,8 +57,8 @@ void TestItemSelectionGeometryAllModes() {
                                   mode == ViewMode::LargeIcons ||
                                   mode == ViewMode::MediumIcons);
             if (is_grid) {
-                Check(touch_geom.leading_slot_width == 0.0f,
-                      "Grid views do not use leading horizontal slot");
+                Check(touch_geom.leading_slot_width >= 44.0f * scale,
+                       "Grid views reserve an independent checkbox gutter before artwork");
                 Check(touch_geom.visual_rect.left == item_rect.left + 6.0f * scale,
                       "Grid view checkbox is placed at top-left corner");
             } else {
@@ -110,12 +110,64 @@ void TestDensityAndPolicyResolution() {
           "Auto policy hides unselected unhovered checkbox on mouse-only device");
 }
 
+bool Overlaps(const D2D1_RECT_F& a, const D2D1_RECT_F& b) {
+    return a.left < b.right - 0.01f && b.left < a.right - 0.01f &&
+           a.top < b.bottom - 0.01f && b.top < a.bottom - 0.01f;
+}
+
+void TestLayoutOwnsCheckboxGutter() {
+    using namespace pulse::ui;
+    const ViewMode modes[] = {ViewMode::ExtraLargeIcons, ViewMode::LargeIcons,
+        ViewMode::MediumIcons, ViewMode::SmallIcons, ViewMode::List, ViewMode::Details,
+        ViewMode::Tiles, ViewMode::Content};
+    for (const float scale : {1.0f, 1.25f, 1.5f, 2.0f}) {
+        for (const float width : {90.0f, 320.0f, 960.0f}) {
+            for (const auto density : {TouchDensity::Compact, TouchDensity::Touch}) {
+                for (const auto mode : modes) {
+                    const auto viewport = D2D1::RectF(13 * scale, 23 * scale,
+                        (13 + width) * scale, 623 * scale);
+                    const ViewLayout layout(mode, viewport, 100, 0, 0, scale,
+                        EffectiveRowHeightDip(28, density), nullptr,
+                        SelectionSlotDip(density, CheckboxVisibility::Auto));
+                    const auto cell = layout.ItemRect(0);
+                    const auto cb = ComputeItemSelectionGeometry(mode, cell, scale, density,
+                        false, true, true);
+                    const auto icon = layout.IconRect(0);
+                    const auto thumb = layout.ThumbnailRect(0);
+                    const auto name = layout.NameRect(0);
+                    Check(!Overlaps(cb.hit_rect, icon), "Checkbox hit target never covers file icon");
+                    Check(!Overlaps(cb.hit_rect, thumb), "Checkbox hit target never covers thumbnail");
+                    Check(!Overlaps(cb.hit_rect, name), "Checkbox hit target never covers filename");
+                    Check(icon.left <= icon.right && icon.right <= cell.right + 0.01f,
+                        "Narrow-pane icon remains inside its cell");
+                    Check(cb.hit_rect.left >= cell.left && cb.hit_rect.right <= cell.right &&
+                        cb.hit_rect.top >= cell.top && cb.hit_rect.bottom <= cell.bottom,
+                        "Checkbox hit area cannot steal an adjacent item");
+                    const auto hidden = ComputeItemSelectionGeometry(mode, cell, scale, density,
+                        false, false, false);
+                    Check(hidden.leading_slot_width == cb.leading_slot_width,
+                        "Hover and selection do not move file content");
+                    if (density == TouchDensity::Touch)
+                        Check(cell.bottom - cell.top >= 44 * scale - 0.01f,
+                            "Touch rows meet the 44 DIP minimum");
+                    const float cx = (cell.left + (std::min)(cell.right, viewport.right)) * 0.5f;
+                    const float cy = (cell.top + cell.bottom) * 0.5f;
+                    Check(layout.HitTest(cx, cy) == 0, "Hit testing shares rendered cell geometry");
+                }
+            }
+        }
+    }
+    Check(SelectionSlotDip(TouchDensity::Touch, CheckboxVisibility::Never) == 0,
+        "Never policy removes the reserved checkbox gutter");
+}
+
 } // namespace
 
 int main() {
     TestItemSelectionGeometryAllModes();
     TestHeaderSelectionGeometry();
     TestDensityAndPolicyResolution();
+    TestLayoutOwnsCheckboxGutter();
 
     std::printf("item_selection_geometry_test: %d failure(s)\n", g_failures);
     return g_failures == 0 ? 0 : 1;

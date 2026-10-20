@@ -63,18 +63,20 @@ D2D1_RECT_F DetailsContentRect(D2D1_RECT_F bounds, float scale) noexcept {
 
 ViewLayout::ViewLayout(ViewMode mode, D2D1_RECT_F viewport, size_t item_count,
                        float scroll_x, float scroll_y, float scale,
-                       float row_height_dip, const ListGroups* groups)
+                       float row_height_dip, const ListGroups* groups, float selection_slot_dip)
     : mode_(mode), viewport_(viewport), count_(item_count),
       scroll_x_(std::max(0.0f, scroll_x)), scroll_y_(std::max(0.0f, scroll_y)),
       scale_(std::max(0.5f, scale)) {
+    selection_slot_ = std::max(0.0f, selection_slot_dip) * scale_;
     if (mode_ == ViewMode::Details) viewport_ = DetailsContentRect(viewport_, scale_);
     const float width = std::max(1.0f, viewport_.right - viewport_.left);
     const float height = std::max(1.0f, viewport_.bottom - viewport_.top);
     auto grid = [&](float cell_w, float cell_h, float icon, bool fixed_pixel_tier = false,
                     float slot_h = 0.0f) {
         const float factor = fixed_pixel_tier ? 1.0f : scale_;
-        metrics_.cell_width = std::min(width, cell_w * factor);
-        metrics_.cell_height = cell_h * factor;
+        metrics_.cell_width = std::min(width, cell_w * factor + selection_slot_);
+        metrics_.cell_height = std::max(cell_h * factor,
+            selection_slot_dip >= 44.0f ? 44.0f * scale_ : 0.0f);
         metrics_.icon_size = icon * factor;
         metrics_.slot_height = slot_h > 0.0f ? slot_h * factor : metrics_.icon_size;
         metrics_.columns = std::max(1, static_cast<int>(width / metrics_.cell_width));
@@ -96,8 +98,8 @@ ViewLayout::ViewLayout(ViewMode mode, D2D1_RECT_F viewport, size_t item_count,
     case ViewMode::SmallIcons: grid(144.0f, 28.0f, 16.0f); break;
     case ViewMode::Tiles: grid(280.0f, 72.0f, 48.0f); break;
     case ViewMode::List: {
-        metrics_.cell_width = 220.0f * scale_;
-        metrics_.cell_height = 24.0f * scale_;
+        metrics_.cell_width = 220.0f * scale_ + selection_slot_;
+        metrics_.cell_height = (selection_slot_dip >= 44.0f ? 44.0f : 24.0f) * scale_;
         metrics_.icon_size = 16.0f * scale_;
         metrics_.column_major = true;
         metrics_.rows_per_column = std::max(1, static_cast<int>(height / metrics_.cell_height));
@@ -251,11 +253,13 @@ D2D1_RECT_F ViewLayout::IconRect(int index) const noexcept {
         mode_ == ViewMode::MediumIcons) {
         const D2D1_RECT_F slot = ThumbnailRect(index);
         const float side = std::min(slot.right - slot.left, slot.bottom - slot.top);
-        const float left = cell.left + (cell.right - cell.left - side) * 0.5f;
+        const float left = slot.left + (slot.right - slot.left - side) * 0.5f;
         return {left, slot.bottom - side, left + side, slot.bottom};
     }
     const float top = cell.top + (cell.bottom - cell.top - icon) * 0.5f;
-    return {cell.left + pad, top, cell.left + pad + icon, top + icon};
+    const float left = std::min(cell.right, cell.left + selection_slot_ + pad);
+    const float side = std::min(icon, std::max(0.0f, cell.right - left));
+    return {left, top, left + side, top + side};
 }
 
 D2D1_RECT_F ViewLayout::ThumbnailRect(int index) const noexcept {
@@ -264,12 +268,13 @@ D2D1_RECT_F ViewLayout::ThumbnailRect(int index) const noexcept {
         return IconRect(index);
     const D2D1_RECT_F cell = ItemRect(index);
     const float pad = 8.0f * scale_;
-    const float available = std::max(16.0f, cell.right - cell.left - pad * 2.0f);
+    const float available = std::max(0.0f, cell.right - cell.left - selection_slot_ - pad * 2.0f);
     const float slot_w = std::min(metrics_.icon_size, available);
     // A narrow pane shrinks the slot, keeping its shape.
     const float slot_h = metrics_.icon_size > 0.0f
         ? metrics_.slot_height * slot_w / metrics_.icon_size : slot_w;
-    const float left = cell.left + (cell.right - cell.left - slot_w) * 0.5f;
+    const float left = std::min(cell.right, cell.left + selection_slot_ +
+        (cell.right - cell.left - selection_slot_ - slot_w) * 0.5f);
     return {left, cell.top + pad, left + slot_w, cell.top + pad + slot_h};
 }
 
@@ -280,17 +285,18 @@ D2D1_RECT_F ViewLayout::NameRect(int index) const noexcept {
     if (mode_ == ViewMode::ExtraLargeIcons || mode_ == ViewMode::LargeIcons ||
         mode_ == ViewMode::MediumIcons) {
         const D2D1_RECT_F slot = ThumbnailRect(index);
-        const float top = std::min(cell.bottom - 4.0f * scale_, slot.bottom + 6.0f * scale_);
+        const float top = std::min(cell.bottom - 4.0f * scale_, std::max(slot.bottom + 6.0f * scale_,
+            selection_slot_ > 0.0f ? cell.top + selection_slot_ : cell.top));
         const float lines_h = (kIconGridNameLines * kIconGridNameLineDip + 2.0f) * scale_;
         return {cell.left + pad, top, cell.right - pad, top + lines_h};
     }
     if (mode_ == ViewMode::Tiles || mode_ == ViewMode::Content) {
-        const float left = cell.left + pad + icon + 10.0f * scale_;
-        return {left, cell.top + 7.0f * scale_, cell.right - pad,
+        const float left = std::min(cell.right, cell.left + selection_slot_ + pad + icon + 10.0f * scale_);
+        return {left, cell.top + 7.0f * scale_, std::max(left, cell.right - pad),
                 cell.top + 31.0f * scale_};
     }
-    const float left = cell.left + pad + icon + 8.0f * scale_;
-    return {left, cell.top + 1.0f * scale_, cell.right - pad,
+    const float left = std::min(cell.right, cell.left + selection_slot_ + pad + icon + 8.0f * scale_);
+    return {left, cell.top + 1.0f * scale_, std::max(left, cell.right - pad),
             cell.bottom - 1.0f * scale_};
 }
 

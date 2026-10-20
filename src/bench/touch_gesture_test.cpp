@@ -1,6 +1,7 @@
 #include "../app/touch_gesture.h"
 #include <cstdio>
 #include <cassert>
+#include <initializer_list>
 
 namespace {
 
@@ -136,6 +137,108 @@ void TestInertiaSimulation() {
     Check(steps > 10 && steps < 150, "Inertia: Step count is bounded within reasonable range");
 }
 
+void TestDirectTouchScrollOwnership() {
+    using namespace pulse::app;
+    for (const bool horizontal : { false, true }) {
+        float x = 70.0f;
+        float y = 200.0f;
+        float target_x = 900.0f; // A previous wheel animation still has distance left.
+        float target_y = 800.0f;
+        float& position = horizontal ? x : y;
+        float& target = horizontal ? target_x : target_y;
+        const float previous = position;
+        const auto drag = ApplyTouchScrollAxis(position, target, -40.0f, 1000.0f);
+        Check(drag.changed && !drag.blocked && position == previous + 40.0f,
+              "Touch ownership: direct drag follows the finger on either scroll axis");
+        Check(target == position,
+              "Touch ownership: drag replaces a stale wheel animation target");
+
+        TouchInertiaTracker tracker;
+        tracker.StartForScrollAxis(-600.0f, -600.0f, horizontal);
+        bool monotonic = true;
+        bool synchronized = true;
+        int frames = 0;
+        while (tracker.IsActive() && frames < 240) {
+            float dx = 0.0f;
+            float dy = 0.0f;
+            const float before = position;
+            if (tracker.Step(0.016f, dx, dy)) {
+                const auto step = ApplyTouchScrollAxis(position, target,
+                    horizontal ? dx : dy, 1000.0f);
+                if (step.blocked) tracker.Stop();
+            }
+            // Reproduce the paint-time wheel response between touch ticks:
+            // a synchronized target must never pull against direct manipulation.
+            synchronized = synchronized && target == position;
+            const float before_paint = position;
+            position += (target - position) * 0.25f;
+            synchronized = synchronized && position == before_paint;
+            monotonic = monotonic && position >= before;
+            ++frames;
+        }
+        Check(monotonic && synchronized && frames > 1 && !tracker.IsActive(),
+              "Touch ownership: release inertia stays monotonic across interleaved wheel frames");
+        Check(horizontal ? y == 200.0f : x == 70.0f,
+              "Touch ownership: scrolling does not move the unsupported axis");
+    }
+}
+
+void TestTouchInertiaBoundaries() {
+    using namespace pulse::app;
+    for (const bool horizontal : { false, true }) {
+        for (const float direction : { -1.0f, 1.0f }) {
+            float position = direction > 0.0f ? 1.0f : 99.0f;
+            float target = 50.0f;
+            TouchInertiaTracker tracker;
+            tracker.StartForScrollAxis(direction * 2000.0f, direction * 2000.0f, horizontal);
+            float dx = 0.0f;
+            float dy = 0.0f;
+            Check(tracker.Step(0.016f, dx, dy), "Touch boundary: release begins in motion");
+            const auto step = ApplyTouchScrollAxis(position, target,
+                horizontal ? dx : dy, 100.0f);
+            if (step.blocked) tracker.Stop();
+            Check(step.blocked && !tracker.IsActive() &&
+                  position == (direction > 0.0f ? 0.0f : 100.0f) && target == position,
+                  "Touch boundary: both ends stop inertia immediately and synchronize the target");
+            dx = 1.0f;
+            dy = 1.0f;
+            Check(!tracker.Step(0.016f, dx, dy) && dx == 0.0f && dy == 0.0f,
+                  "Touch boundary: later ticks cannot produce edge jitter");
+        }
+    }
+
+    float position = 75.0f;
+    float target = 600.0f;
+    const auto empty = ApplyTouchScrollAxis(position, target, -10.0f, 0.0f);
+    Check(empty.blocked && position == 0.0f && target == 0.0f,
+          "Touch boundary: content shrinking to empty clamps and stops motion");
+    position = 75.0f;
+    const auto shrink = ApplyTouchScrollAxis(position, target, -5.0f, 30.0f);
+    Check(shrink.blocked && position == 30.0f && target == position,
+          "Touch boundary: refreshed smaller bounds never leave a stale target");
+
+    TouchInertiaTracker tracker;
+    tracker.StartForScrollAxis(800.0f, 0.0f, false);
+    Check(!tracker.IsActive(), "Touch axis: horizontal velocity cannot animate a vertical target");
+    tracker.StartForScrollAxis(0.0f, 800.0f, true);
+    Check(!tracker.IsActive(), "Touch axis: vertical velocity cannot animate a horizontal target");
+}
+
+void TestCancelledPanCannotRestartInertia() {
+    using namespace pulse::app;
+    TouchGestureReducer reducer;
+    reducer.OnDown(1, 100.0f, 200.0f, 1000, 1.0f);
+    Check(reducer.OnUpdate(1, 100.0f, 160.0f, 1020, 1.0f).kind == TouchActionKind::PanStart,
+          "Touch cancel: begin with a real pan");
+    Check(reducer.OnCancel(1).kind == TouchActionKind::Cancel,
+          "Touch cancel: cancellation consumes the active pan");
+    Check(reducer.OnUpdate(1, 100.0f, 120.0f, 1040, 1.0f).kind == TouchActionKind::None,
+          "Touch cancel: stale updates do not continue a canceled pan");
+    const auto up = reducer.OnUp(1, 100.0f, 100.0f, 1060, 1.0f);
+    Check(up.kind == TouchActionKind::None && up.velocity_x == 0.0f && up.velocity_y == 0.0f,
+          "Touch cancel: stale release cannot restart inertia after target invalidation");
+}
+
 } // namespace
 
 int main() {
@@ -145,6 +248,9 @@ int main() {
     TestPanningAndAxisLock();
     TestMultiTouchCancellation();
     TestInertiaSimulation();
+    TestDirectTouchScrollOwnership();
+    TestTouchInertiaBoundaries();
+    TestCancelledPanCannotRestartInertia();
 
     std::printf("touch_gesture_test: %d failure(s)\n", g_failures);
     return g_failures == 0 ? 0 : 1;

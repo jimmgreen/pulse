@@ -1503,6 +1503,9 @@ public:
         auto_widths_scale_ = -1.0f;
     }
     bool ListSmartDate() const { return list_smart_date_; }
+    float ItemSelectionSlotDip() const {
+        return SelectionSlotDip(touch_density_, checkbox_visibility_);
+    }
     // Grid thumbnails: default-program badge and video playing time.
     void SetThumbnailBadges(bool on) { thumbnail_badges_ = on; }
     // Default programs changed (SHCNE_ASSOCCHANGED).

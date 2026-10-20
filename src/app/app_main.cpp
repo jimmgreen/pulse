@@ -615,7 +615,9 @@ static bool IsUiActivityMessage(UINT msg) {
            (msg >= WM_NCMOUSEMOVE && msg <= WM_NCXBUTTONDBLCLK) ||
            msg == WM_MOUSELEAVE || msg == WM_NCMOUSELEAVE || msg == WM_PAINT ||
            msg == WM_SETFOCUS || msg == WM_KILLFOCUS || msg == WM_ACTIVATE ||
-           msg == WM_SIZE || msg == WM_CAPTURECHANGED || msg == WM_DPICHANGED;
+           msg == WM_SIZE || msg == WM_CAPTURECHANGED || msg == WM_DPICHANGED ||
+           msg == WM_POINTERDOWN || msg == WM_POINTERUPDATE ||
+           msg == WM_POINTERUP || msg == WM_POINTERCAPTURECHANGED;
 }
 
 static void NoteUiActivity(AppState& s, HWND hwnd, bool visible) {
@@ -1276,6 +1278,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
 
     case WM_DPICHANGED: {
+        if (s->touch_input) s->touch_input->CancelActiveGesture();
         const float old_scale = s->scale;
         s->scale = (float)HIWORD(wParam) / 96.0f;
         if (old_scale > 0.0f && s->scale != old_scale) {
@@ -1331,6 +1334,8 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         break;
 
     case WM_ACTIVATE:
+        if (s && LOWORD(wParam) == WA_INACTIVE && s->touch_input)
+            s->touch_input->CancelActiveGesture();
         if (s && LOWORD(wParam) != WA_INACTIVE) {
             s->core.windows.Touch(hwnd);
             // The session's other windows open once the first one is on screen
@@ -1370,6 +1375,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
     case WM_SIZE: {
         if (s) {
+            if (s->touch_input) s->touch_input->CancelActiveGesture();
             s->compositor.Resize(LOWORD(lParam), HIWORD(lParam));
             s->maximized = (wParam == SIZE_MAXIMIZED);
             if (wParam != SIZE_MINIMIZED && IsWindowVisible(hwnd)) NoteUiActivity(*s, hwnd, true);
@@ -1771,6 +1777,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     }
 
     case WM_CANCELMODE:
+        if (s && s->touch_input) s->touch_input->CancelActiveGesture();
         HandleSidebarResize(s, hwnd, msg, lParam);
         if (s) s->settings.EndMenuDrag();
         if (s) { s->detailsPreviewPanning = false; s->renderer.EndDetailsPreviewPan(); }

@@ -823,7 +823,8 @@ add_executable(pulse_known_folder_links_test src/bench/known_folder_links_test.c
 target_link_libraries(pulse_known_folder_links_test PRIVATE
     user32 shell32 ole32 uuid advapi32 shlwapi netapi32 secur32 pulse_localization pulse_runtime_log pulse_sqlite)
 # Touch improvement P2: item selection geometry and touch density preferences.
-add_executable(pulse_item_selection_geometry_test src/bench/item_selection_geometry_test.cpp)
+add_executable(pulse_item_selection_geometry_test src/bench/item_selection_geometry_test.cpp
+    src/ui/view_layout.cpp)
 target_link_libraries(pulse_item_selection_geometry_test PRIVATE user32)
 # Touch improvement P4/P5: touch gesture reducer, panning, and inertia.
 add_executable(pulse_touch_gesture_test src/bench/touch_gesture_test.cpp)

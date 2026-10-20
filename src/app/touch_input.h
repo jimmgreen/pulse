@@ -3,6 +3,7 @@
 #include "touch_gesture.h"
 #include <windows.h>
 #include <unordered_set>
+#include <string>
 
 namespace pulse {
 struct AppState;
@@ -12,6 +13,7 @@ namespace pulse::app {
 
 struct Tab;
 struct Pane;
+struct LayoutTab;
 
 enum class TouchScrollTargetKind {
     None,
@@ -22,8 +24,12 @@ enum class TouchScrollTargetKind {
 
 struct TouchScrollTarget {
     TouchScrollTargetKind kind = TouchScrollTargetKind::None;
+    LayoutTab* layout = nullptr;
     Pane* pane = nullptr;
     Tab* tab = nullptr;
+    std::wstring path;
+    uint64_t view_generation = 0;
+    int view_mode = -1;
     int settings_page = -1;
     bool column_major = false; // true for List view
     float max_scroll_x = 0.0f;
@@ -52,6 +58,7 @@ private:
     void DispatchDoubleTap(HWND hwnd, float x, float y);
     void DispatchHold(HWND hwnd, float x, float y);
     void SetupScrollTarget(float x, float y);
+    bool RefreshScrollTarget();
     void ApplyScrollDelta(float delta_x, float delta_y, HWND hwnd);
 
     pulse::AppState& state_;
@@ -59,7 +66,6 @@ private:
     TouchInertiaTracker inertia_;
     TouchScrollTarget scroll_target_;
     std::unordered_set<uint32_t> owned_touch_pointers_;
-    std::unordered_set<uint32_t> fallback_pointers_;
     uint64_t last_tick_time_ms_ = 0;
 };
 
