@@ -1369,15 +1369,15 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                             out.index = idx;
                             return out;
                         }
+                        const auto cb_geom = ComputeItemSelectionGeometry(
+                            paneVm.view_mode, cell, scale_, touch_density_, paneVm.IsRowSelected(idx),
+                            paneVm.hover_index == idx, touchscreen_ready_, checkbox_visibility_);
+                        if (cb_geom.visible && ContainsPt(cb_geom.hit_rect, x, y)) {
+                            out.region = HitTestResult::RowCheckbox;
+                            out.index = idx;
+                            return out;
+                        }
                     }
-                }
-                const auto cb_geom = ComputeItemSelectionGeometry(
-                    paneVm.view_mode, cell, scale_, touch_density_, entry.selected,
-                    paneVm.hover_index == idx, touchscreen_ready_, checkbox_visibility_);
-                if (cb_geom.visible && ContainsPt(cb_geom.hit_rect, x, y)) {
-                    out.region = HitTestResult::RowCheckbox;
-                    out.index = idx;
-                    return out;
                 }
                 out.region = HitTestResult::Row;
                 out.index = idx;

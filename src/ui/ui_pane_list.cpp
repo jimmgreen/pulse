@@ -1895,9 +1895,9 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
             case ColumnKind::Name: {
                 drawCol(pulse::l10n::Get(pulse::l10n::StringId::ColumnName), SortColumn::Name, cw, false);
                 const D2D1_RECT_F nameColRc = D2D1::RectF(
-                    col == 0 ? paneRc.left : columns.DividerX(col - 1),
+                    col == 0 ? columns.left : columns.DividerX(col - 1),
                     y,
-                    col == 0 ? paneRc.left + cw : columns.DividerX(col - 1) + cw,
+                    columns.DividerX(col),
                     y + column_header_height_);
                 const auto hdr_geom = ComputeHeaderSelectionGeometry(nameColRc, scale_, touch_density_);
                 fluent::ControlState hdr_cb_state{};
@@ -1908,7 +1908,7 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
                     hdr_cb_state.enabled = true;
                     size_t sel_count = 0;
                     for (size_t k = 0; k < total_count; ++k) {
-                        if (pane.entries[k].selected) ++sel_count;
+                        if (pane.IsRowSelected(static_cast<int>(k))) ++sel_count;
                     }
                     if (sel_count == total_count) {
                         hdr_cb_state.checked = true;
