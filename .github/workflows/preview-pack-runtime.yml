@@ -16,6 +16,8 @@ on:
       - 'src/bench/*pack*test.cpp'
       - '.github/workflows/preview-pack-runtime.yml'
       - 'CMakeLists.txt'
+      - 'scripts/import_arm64_pack_catalog.py'
+      - 'scripts/test_import_arm64_pack_catalog.py'
 permissions:
   contents: read
 jobs:
@@ -36,6 +38,10 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v4
+      - name: Verify native catalog importer metadata boundaries
+        run: |
+          python scripts/test_import_arm64_pack_catalog.py
+          if ($LASTEXITCODE) { throw 'Native catalog import regression' }
       - name: Stage native ARM64 PDFium
         if: matrix.arch == 'arm64'
         run: |
