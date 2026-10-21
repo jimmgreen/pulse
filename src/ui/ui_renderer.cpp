@@ -2,6 +2,7 @@
 #include "legacy_icons.h"
 #include "ui_renderer.h"
 #include "snack_style.h"
+#include "drag_preview_layout.h"
 #include "command_icons.h"
 #include "toolbar_layout.h"
 #include "ui_renderer_internal.h"
@@ -752,6 +753,7 @@ void MainRenderer::Render(const WindowViewModel& vm, const D2D1_RECT_F& rect,
     // over this one, so it follows the cursor as a pill, and a hint below
     // says what letting go does. Both are capsules in the notification style
     // (M7i, toast redesign A): acrylic in the window's own theme.
+    D2D1_RECT_F item_preview_rect{};
     if (vm.drag_ghost.on) {
         const DragGhostView& ghost = vm.drag_ghost;
         IDWriteFactory2* const factory = compositor_->DwriteFactory();
@@ -776,13 +778,29 @@ void MainRenderer::Render(const WindowViewModel& vm, const D2D1_RECT_F& rect,
         const float chipW = panes.empty() ? 0.0f : MeasureLayoutText(compositor_, factory, smallFmt, panes);
         const float pillH = 28.0f * scale_;
         const float pillR = pillH * 0.5f;
-        const float pillW = 30.0f * scale_ + titleW + (chipW > 0.0f ? 7.0f * scale_ + chipW : 0.0f) + 13.0f * scale_;
-        const float px = std::round((std::clamp)(ghost.x - 28.0f * scale_, rect.left, (std::max)(rect.left, rect.right - pillW)));
-        const float py = std::round((std::clamp)(ghost.y - 14.0f * scale_, rect.top, (std::max)(rect.top, rect.bottom - pillH)));
+        float pillW = 30.0f * scale_ + titleW + (chipW > 0.0f ? 7.0f * scale_ + chipW : 0.0f) + 13.0f * scale_;
+        float px = std::round((std::clamp)(ghost.x - 28.0f * scale_, rect.left, (std::max)(rect.left, rect.right - pillW)));
+        float py = std::round((std::clamp)(ghost.y - 14.0f * scale_, rect.top, (std::max)(rect.top, rect.bottom - pillH)));
+        if (ghost.item_preview) {
+            const float badgeW = vm.drag_badge.empty() ? 0.0f :
+                MeasureLayoutText(compositor_, factory, smallFmt, vm.drag_badge) + 20.0f * scale_;
+            const float stackH = pillH + (vm.drag_badge.empty() ? 0.0f : 30.0f * scale_);
+            item_preview_rect = ItemDragPreviewRect(rect, ghost.x, ghost.y,
+                                                    (std::max)(pillW, badgeW), stackH, scale_);
+            px = item_preview_rect.left;
+            py = item_preview_rect.top;
+            pillW = (std::min)(pillW, item_preview_rect.right - px);
+            dc->PushAxisAlignedClip(item_preview_rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        }
         plate(px, py, pillW, pillH, pillR);
-        DrawIconText(px + 10.0f * scale_, py, 16.0f * scale_, pillH, kIconFolder, L"[]", theme.icon_folder, 0.95f);
+        const std::wstring& glyph = ghost.icon_glyph.empty() ? kIconFolder : ghost.icon_glyph;
+        const D2D1_COLOR_F color = ghost.icon_color.a > 0.0f ? ghost.icon_color : theme.icon_folder;
+        DrawIconText(px + 10.0f * scale_, py, 16.0f * scale_, pillH, glyph,
+                     ghost.icon_fallback.empty() ? L"[]" : ghost.icon_fallback, color, 0.95f);
         MakeBrush(dc, pal.text, brText_);
-        DrawTabTitle(dc, factory, tabFmt, brText_.get(), ghost.title, px + 30.0f * scale_, py, titleW, pillH, scale_);
+        const float visibleTitleW = ghost.item_preview ? (std::max)(0.0f, pillW - 43.0f * scale_) : titleW;
+        DrawTabTitle(dc, factory, tabFmt, brText_.get(), ghost.title, px + 30.0f * scale_, py, visibleTitleW, pillH, scale_);
+        if (ghost.item_preview) dc->PopAxisAlignedClip();
         if (chipW > 0.0f) {
             MakeBrush(dc, pal.accent, brText_);
             DrawTextRect(dc, smallFmt, brText_.get(), panes, px + 30.0f * scale_ + titleW + 7.0f * scale_, py,
@@ -849,6 +867,12 @@ void MainRenderer::Render(const WindowViewModel& vm, const D2D1_RECT_F& rect,
         float bh = 24 * scale_;
         float bx = std::min(vm.drag_badge_x + 14 * scale_, rect.right - bw - margin_);
         float by = std::min(vm.drag_badge_y + 16 * scale_, rect.bottom - bh - margin_);
+        if (vm.drag_ghost.on && vm.drag_ghost.item_preview) {
+            bw = (std::min)(bw, item_preview_rect.right - item_preview_rect.left);
+            tw = (std::max)(0.0f, bw - 20.0f * scale_);
+            bx = item_preview_rect.left;
+            by = item_preview_rect.top + 34.0f * scale_;
+        }
         D2D1_RECT_F brc = D2D1::RectF(bx, by, bx + bw, by + bh);
         MakeBrush(dc, theme.surface_flyout, brFillHover_);
         FillRoundedRect(dc, brFillHover_.get(), brc.left, brc.top, bw, bh, 4 * scale_);

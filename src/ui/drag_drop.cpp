@@ -81,6 +81,118 @@ HRESULT CreateShellFilesDataObject(const std::vector<std::wstring>& paths,
     return hr;
 }
 
+// No Shell icon/thumbnail lookup: this is bounded in-memory work on the drag
+// thread, including for remote selections. The badge is capped to fit the image.
+std::wstring DragImageCount(size_t count) {
+    return count > 999 ? L"999+" : std::to_wstring(count);
+}
+
+SHDRAGIMAGE CreateFileDragImage(size_t count) {
+    SHDRAGIMAGE image{};
+    if (!count) return image;
+    int dpi = 96;
+    if (HDC screen = GetDC(nullptr)) {
+        dpi = (std::clamp)(GetDeviceCaps(screen, LOGPIXELSX), 96, 384);
+        ReleaseDC(nullptr, screen);
+    }
+    const auto px = [dpi](int value) { return MulDiv(value, dpi, 96); };
+    image.sizeDragImage = { px(76), px(56) };
+    image.ptOffset = { 0, 0 }; // artwork starts below/right of the cursor
+    image.crColorKey = CLR_NONE; // straight alpha, not premultiplied
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = image.sizeDragImage.cx;
+    info.bmiHeader.biHeight = -image.sizeDragImage.cy;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    image.hbmpDragImage = CreateDIBSection(nullptr, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!image.hbmpDragImage) return image;
+    auto* pixels = static_cast<uint32_t*>(bits);
+    const size_t width = static_cast<size_t>(image.sizeDragImage.cx);
+    std::fill_n(pixels, width * static_cast<size_t>(image.sizeDragImage.cy), uint32_t{});
+    const auto color = [](int index) -> uint32_t {
+        const COLORREF c = GetSysColor(index);
+        return 0xff000000u | (uint32_t(GetRValue(c)) << 16) |
+            (uint32_t(GetGValue(c)) << 8) | uint32_t(GetBValue(c));
+    };
+    const auto rect = [&](int left, int top, int right, int bottom, uint32_t c) {
+        for (int y = px(top); y < px(bottom); ++y)
+            std::fill(pixels + static_cast<size_t>(y) * width + px(left),
+                      pixels + static_cast<size_t>(y) * width + px(right), c);
+    };
+    const uint32_t paper = color(COLOR_WINDOW);
+    const uint32_t ink = color(COLOR_WINDOWTEXT);
+    if (count > 1) {
+        rect(12, 4, 44, 40, ink);
+        rect(13, 5, 43, 39, paper);
+    }
+    rect(8, 8, 40, 44, ink);
+    rect(9, 9, 39, 43, paper);
+    rect(14, 16, 33, 18, ink);
+    rect(14, 23, 33, 25, ink);
+    rect(14, 30, 27, 32, ink);
+    if (count > 1) {
+        const auto label = DragImageCount(count);
+        const int right = 26 + 8 * static_cast<int>(label.size()) + 6;
+        rect(26, 34, right, 52, color(COLOR_HIGHLIGHT));
+        // Small non-antialiased digits keep alpha/color edges crisp at all DPIs.
+        constexpr uint16_t glyphs[] = {
+            0b111'101'101'101'111, 0b010'110'010'010'111,
+            0b111'001'111'100'111, 0b111'001'111'001'111,
+            0b101'101'111'001'001, 0b111'100'111'001'111,
+            0b111'100'111'101'111, 0b111'001'001'001'001,
+            0b111'101'111'101'111, 0b111'101'111'001'111,
+            0b000'010'111'010'000
+        };
+        const uint32_t text = color(COLOR_HIGHLIGHTTEXT);
+        int x = 30;
+        for (wchar_t ch : label) {
+            const uint16_t glyph = glyphs[ch == L'+' ? 10 : ch - L'0'];
+            for (int y = 0; y < 5; ++y)
+                for (int column = 0; column < 3; ++column)
+                    if (glyph & (1u << (14 - y * 3 - column)))
+                        rect(x + column * 2, 38 + y * 2,
+                             x + column * 2 + 2, 40 + y * 2, text);
+            x += 8;
+        }
+    }
+    return image;
+}
+
+class FileDragImage final {
+public:
+    FileDragImage(IDataObject* data, size_t count, bool supports_private_formats) {
+        // FileDataObject cannot round-trip the helper's private formats. Keep
+        // its existing CF_HDROP/default-cursor fallback rather than half-init it.
+        if (!supports_private_formats || !data || !count) return;
+        if (FAILED(CoCreateInstance(CLSID_DragDropHelper, nullptr, CLSCTX_INPROC_SERVER,
+                                    IID_PPV_ARGS(&helper_))) || !helper_) return;
+        SHDRAGIMAGE image = CreateFileDragImage(count);
+        if (!image.hbmpDragImage) return;
+        // The helper owns the bitmap on success; the caller owns failure cleanup.
+        if (FAILED(helper_->InitializeFromBitmap(&image, data)))
+            DeleteObject(image.hbmpDragImage);
+    }
+    ~FileDragImage() {
+        if (!helper_) return;
+        // Also end the image after an external drop/cancel; some targets do not
+        // implement a helper and cannot clean up the source's drag-image window.
+        IDropTargetHelper* target = nullptr;
+        if (SUCCEEDED(helper_->QueryInterface(IID_PPV_ARGS(&target)))) {
+            target->DragLeave();
+            target->Release();
+        }
+        helper_->Release();
+    }
+    FileDragImage(const FileDragImage&) = delete;
+    FileDragImage& operator=(const FileDragImage&) = delete;
+
+private:
+    IDragSourceHelper* helper_ = nullptr;
+};
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -580,7 +692,10 @@ DWORD DoFileDragDrop(const std::vector<std::wstring>& paths, DWORD allowed_effec
     // often answer LINK, and without it they show the no-drop cursor (#235).
     // Preferred DropEffect above keeps only the caller's copy/move, so drop
     // targets that pick a default (Explorer, Pulse) still copy or move.
-    ::DoDragDrop(data, source, allowed_effects | DROPEFFECT_LINK, &effect);
+    {
+        FileDragImage drag_image(data, paths.size(), fallback == nullptr);
+        ::DoDragDrop(data, source, allowed_effects | DROPEFFECT_LINK, &effect);
+    }
     if (effect == DROPEFFECT_NONE) {
         if (fallback && fallback->PerformedEffect() != 0) {
             effect = fallback->PerformedEffect();
@@ -599,7 +714,22 @@ DWORD DoFileDragDrop(const std::vector<std::wstring>& paths, DWORD allowed_effec
 // WindowDropTarget
 // ---------------------------------------------------------------------------
 WindowDropTarget::WindowDropTarget(HWND hwnd, DropTargetCallbacks cb)
-    : hwnd_(hwnd), cb_(std::move(cb)) {}
+    : hwnd_(hwnd), cb_(std::move(cb)) {
+    if (hwnd_)
+        CoCreateInstance(CLSID_DragDropHelper, nullptr, CLSCTX_INPROC_SERVER,
+                         IID_PPV_ARGS(&drag_image_));
+}
+
+WindowDropTarget::~WindowDropTarget() {
+    EndDragImage();
+    if (drag_image_) drag_image_->Release();
+}
+
+void WindowDropTarget::EndDragImage() {
+    if (!drag_image_entered_) return;
+    drag_image_entered_ = false;
+    drag_image_->DragLeave();
+}
 
 HRESULT WindowDropTarget::QueryInterface(REFIID riid, void** out) {
     if (!out) return E_POINTER;
@@ -627,32 +757,41 @@ POINT WindowDropTarget::ClientPoint(POINTL pt) const {
 HRESULT WindowDropTarget::DragEnter(IDataObject* obj, DWORD key_state, POINTL pt,
                                     DWORD* effect) {
     if (!effect) return E_POINTER;
+    EndDragImage();
     sources_.clear();
     preferred_ = 0;
-    if (!ExtractHDropPaths(obj, sources_)) {
-        *effect = DROPEFFECT_NONE;
-        return S_OK;
-    }
-    preferred_ = PreferredDropEffect(obj);
     const DWORD allowed = *effect & (DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK);
-    *effect = allowed && cb_.drag_over ? cb_.drag_over(sources_, ClientPoint(pt), key_state, allowed, preferred_) & allowed
-                            : DROPEFFECT_NONE;
+    if (ExtractHDropPaths(obj, sources_)) {
+        preferred_ = PreferredDropEffect(obj);
+        *effect = allowed && cb_.drag_over
+            ? cb_.drag_over(sources_, ClientPoint(pt), key_state, allowed, preferred_) & allowed
+            : DROPEFFECT_NONE;
+    } else {
+        *effect = DROPEFFECT_NONE;
+    }
+    if (drag_image_ && obj) {
+        POINT screen{ pt.x, pt.y };
+        drag_image_entered_ = SUCCEEDED(drag_image_->DragEnter(hwnd_, obj, &screen, *effect));
+        if (!drag_image_entered_) drag_image_->DragLeave();
+    }
     return S_OK;
 }
 
 HRESULT WindowDropTarget::DragOver(DWORD key_state, POINTL pt, DWORD* effect) {
     if (!effect) return E_POINTER;
-    if (sources_.empty()) {
-        *effect = DROPEFFECT_NONE;
-        return S_OK;
-    }
     const DWORD allowed = *effect & (DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK);
-    *effect = allowed && cb_.drag_over ? cb_.drag_over(sources_, ClientPoint(pt), key_state, allowed, preferred_) & allowed
-                            : DROPEFFECT_NONE;
+    *effect = !sources_.empty() && allowed && cb_.drag_over
+        ? cb_.drag_over(sources_, ClientPoint(pt), key_state, allowed, preferred_) & allowed
+        : DROPEFFECT_NONE;
+    if (drag_image_entered_) {
+        POINT screen{ pt.x, pt.y };
+        if (FAILED(drag_image_->DragOver(&screen, *effect))) EndDragImage();
+    }
     return S_OK;
 }
 
 HRESULT WindowDropTarget::DragLeave() {
+    EndDragImage();
     sources_.clear();
     preferred_ = 0;
     if (cb_.drag_leave) cb_.drag_leave();
@@ -674,6 +813,13 @@ HRESULT WindowDropTarget::Drop(IDataObject* obj, DWORD key_state, POINTL pt, DWO
     DWORD performed = cb_.drop ? cb_.drop(sources, ClientPoint(pt), key_state, allowed, preferred) & allowed
                                : DROPEFFECT_NONE;
     *effect = performed;
+    if (drag_image_entered_) {
+        POINT screen{ pt.x, pt.y };
+        if (SUCCEEDED(drag_image_->Drop(obj, &screen, performed)))
+            drag_image_entered_ = false;
+        else
+            EndDragImage();
+    }
     // Tell the source what we did (Explorer uses this for move semantics).
     FORMATETC fmt{ (CLIPFORMAT)PerformedEffectFormat(), nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
     STGMEDIUM medium{};

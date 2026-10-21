@@ -15,7 +15,7 @@ void RunPathCommand(AppState& s, const std::wstring& path, bool filesystem, int 
     const std::wstring shell_path = ClipboardPath(path);
     switch (command) {
     case app::CmdOpenInNewTab:
-        OpenFolderTab(s, path);
+        OpenTabAt(s, path);
         break;
     case app::CmdOpen:
         NavigateTo(s, path);

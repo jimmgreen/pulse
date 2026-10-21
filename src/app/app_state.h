@@ -601,6 +601,7 @@ struct AppState : AppCoreOwner {
     int dropSidebar = -1;
     bool dropTray = false;
     bool dropQuickAccess = false;  // folders over the Quick access header: pin
+    bool dropNewTab = false;       // folders over tab bar / new-tab button: open in new tab
     std::wstring dropBadge;
     float dropBadgeX = 0.0f;
     float dropBadgeY = 0.0f;

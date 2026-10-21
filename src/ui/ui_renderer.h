@@ -669,6 +669,11 @@ struct DragGhostView {
     size_t em_start = 0;       // the part of `hint` in the accent color (M7i)
     size_t em_length = 0;
     std::wstring detail;       // a smaller note after it (may be empty)
+    // Sidebar drags reuse the pill with the source row's cached label/icon.
+    bool item_preview = false;
+    std::wstring icon_glyph;
+    std::wstring icon_fallback;
+    D2D1_COLOR_F icon_color = {};
 };
 
 struct WindowViewModel {

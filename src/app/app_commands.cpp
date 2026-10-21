@@ -840,6 +840,12 @@ void ShowTagSidebarMenu(AppState& s, const app::TagId& tag_id, POINT screen_pt) 
     constexpr int kDelete = 31200;
     const std::vector<uint32_t>& palette = TagColorPalette(s);
     std::vector<ui::FluentMenuItem> items;
+    ui::FluentMenuItem open_tab;
+    open_tab.command = app::CmdOpenInNewTab;
+    open_tab.text = l10n::Get(l10n::StringId::OpenNewTab);
+    open_tab.glyph = L"\xE8A7";
+    open_tab.separator_after = true;
+    items.push_back(std::move(open_tab));
     ui::FluentMenuItem rename;
     rename.command = kRename;
     rename.text = l10n::Get(l10n::StringId::TagRename);
@@ -874,7 +880,9 @@ void ShowTagSidebarMenu(AppState& s, const app::TagId& tag_id, POINT screen_pt) 
     remove.glyph = L"\xE74D";
     items.push_back(std::move(remove));
     const int command = s.menu->TrackPopup(screen_pt, std::move(items));
-    if (command == kRename) {
+    if (command == app::CmdOpenInNewTab) {
+        OpenTabAt(s, app::MakeTagPath(tag_id));
+    } else if (command == kRename) {
         constexpr int kApplyRename = 31300;
         auto rebuild = [](const std::wstring& query) {
             ui::FluentMenuItem item;
@@ -2442,6 +2450,11 @@ void ShowCuratedItemMenu(AppState& s, const std::wstring& path,
     if (path.empty() || !EnsureMenu(s)) return;
     constexpr int kCustomColor = 30100;
     std::vector<ui::FluentMenuItem> items;
+    ui::FluentMenuItem open_tab;
+    open_tab.command = app::CmdOpenInNewTab;
+    open_tab.text = l10n::Get(l10n::StringId::OpenNewTab);
+    open_tab.glyph = L"\xE8A7";
+    items.push_back(std::move(open_tab));
     ui::FluentMenuItem open;
     open.command = app::CmdOpen;
     open.text = l10n::Get(l10n::StringId::Open);
@@ -2500,14 +2513,20 @@ void ShowCuratedItemMenu(AppState& s, const std::wstring& path,
     const int cmd = s.menu->TrackPopup(screen_pt, std::move(items));
     if (HandleQuickAccessCommand(s, cmd, known_folder ? std::vector<std::wstring>{path}
                                                                    : std::vector<std::wstring>{})) return;
-    if (cmd == app::CmdOpen) {
-        const DWORD attrs = GetFileAttributesW(path.c_str());
-        const bool is_dir = attrs != INVALID_FILE_ATTRIBUTES &&
-                            (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
-        if (is_dir) NavigateTo(s, path);
-        else if (attrs != INVALID_FILE_ATTRIBUTES) {
-            s.ops.OpenWith(path);
-            RecordRecentOpen(s, path, app::PlaceItemKind::File);
+    if (cmd == app::CmdOpenInNewTab) {
+        OpenTabAt(s, path);
+    } else if (cmd == app::CmdOpen) {
+        if (fs::IsVirtualPath(path)) {
+            NavigateTo(s, path);
+        } else {
+            const DWORD attrs = GetFileAttributesW(path.c_str());
+            const bool is_dir = attrs != INVALID_FILE_ATTRIBUTES &&
+                                (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            if (is_dir) NavigateTo(s, path);
+            else if (attrs != INVALID_FILE_ATTRIBUTES) {
+                s.ops.OpenWith(path);
+                RecordRecentOpen(s, path, app::PlaceItemKind::File);
+            }
         }
     } else if (cmd == app::CmdEditStarBadge) {
         ShowStarredBadgeEditor(s, path, screen_pt);
@@ -3305,8 +3324,20 @@ void ShowOmnibar(AppState& s, OmnibarMode mode) {
 void ShowRecyclePlaceMenu(AppState& s, POINT screen_pt) {
     if (!EnsureMenu(s)) return;
     const bool can_empty = !s.recycle_info.valid || s.recycle_info.items > 0;
-    const int cmd = s.menu->TrackPopup(screen_pt, app::BuildRecyclePlaceMenu(can_empty));
-    if (cmd != app::CmdNone) DispatchMenuCommand(s, cmd);
+    std::vector<ui::FluentMenuItem> items;
+    ui::FluentMenuItem open_tab;
+    open_tab.command = app::CmdOpenInNewTab;
+    open_tab.text = l10n::Get(l10n::StringId::OpenNewTab);
+    open_tab.glyph = L"\xE8A7";
+    items.push_back(std::move(open_tab));
+    for (auto& item : app::BuildRecyclePlaceMenu(can_empty))
+        items.push_back(std::move(item));
+    const int cmd = s.menu->TrackPopup(screen_pt, std::move(items));
+    if (cmd == app::CmdOpenInNewTab) {
+        OpenTabAt(s, app::MakeRecyclePath());
+    } else if (cmd != app::CmdNone) {
+        DispatchMenuCommand(s, cmd);
+    }
 }
 void ApplyAppWindowChrome(AppState& s) {
     if (!s.hwnd) return;

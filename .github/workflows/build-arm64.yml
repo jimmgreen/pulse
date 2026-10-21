@@ -47,7 +47,7 @@ jobs:
       - name: Build main program and affected tests
         shell: pwsh
         run: |
-          cmake --build build-touch-tests --target pulse pulse_touch_gesture_test pulse_item_selection_geometry_test pulse_item_checkbox_menu_test --parallel 4
+          cmake --build build-touch-tests --target pulse pulse_touch_gesture_test pulse_item_selection_geometry_test pulse_item_checkbox_menu_test pulse_drag_drop_test --parallel 4
           if ($LASTEXITCODE -ne 0) { throw "Shared UI build failed" }
       - name: Verify shared sources, renderer and x64 executable
         shell: pwsh
@@ -63,6 +63,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Selection layout regression failed" }
           & ./build-touch-tests/pulse_item_checkbox_menu_test.exe
           if ($LASTEXITCODE -ne 0) { throw "Checkbox menu regression failed" }
+          & ./build-touch-tests/pulse_drag_drop_test.exe
+          if ($LASTEXITCODE -ne 0) { throw "Drag drop regression failed" }
       - name: Audit Windows 8.1 startup imports
         if: matrix.win81 == 'ON'
         shell: pwsh
@@ -115,7 +117,7 @@ jobs:
 
       - name: Build ARM64 Executables, Tests and Installer Stub
         run: |
-          cmake --build build-arm64 --target pulse pulse_index pulse_preview pulse_document pulse_shell pulse_integration pulse_elevated pulse_setup pulse_session_window_test pulse_known_folder_links_test pulse_command_icon_test pulse_item_selection_geometry_test pulse_touch_gesture_test pulse_item_checkbox_menu_test --parallel 4
+          cmake --build build-arm64 --target pulse pulse_index pulse_preview pulse_document pulse_shell pulse_integration pulse_elevated pulse_setup pulse_session_window_test pulse_known_folder_links_test pulse_command_icon_test pulse_item_selection_geometry_test pulse_touch_gesture_test pulse_item_checkbox_menu_test pulse_drag_drop_test --parallel 4
 
       - name: Verify shared sources, renderer and ARM64 executable
         shell: pwsh
