@@ -1,0 +1,177 @@
+name: Build Windows ARM64 and verify shared UI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, feat/windows-arm64-support ]
+    paths-ignore:
+      - 'packs/**'
+      - '.github/workflows/preview-pack-*.yml'
+      - '**/*.md'
+
+jobs:
+  touch-regressions-x64:
+    name: Shared UI (${{ matrix.profile }})
+    runs-on: windows-2022
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: windows-x64-lumatext
+            lumatext: 'ON'
+            win81: 'OFF'
+          - profile: windows-x64-directwrite
+            lumatext: 'OFF'
+            win81: 'OFF'
+          - profile: win81-x64-lumatext
+            lumatext: 'ON'
+            win81: 'ON'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Setup MSVC x64 Environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+      - name: Configure shared UI and targeted regressions
+        shell: pwsh
+        run: |
+          cmake -S . -B build-touch-tests -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON `
+            -DPULSE_WITH_LUMATEXT=${{ matrix.lumatext }} `
+            -DPULSE_WIN81_CANDIDATE=${{ matrix.win81 }} `
+            -DPULSE_WITH_SELFTEST=OFF
+          if ($LASTEXITCODE -ne 0) { throw "CMake configuration failed" }
+      - name: Build main program and affected tests
+        shell: pwsh
+        run: |
+          cmake --build build-touch-tests --target pulse pulse_touch_gesture_test pulse_item_selection_geometry_test pulse_item_checkbox_menu_test pulse_drag_drop_test --parallel 4
+          if ($LASTEXITCODE -ne 0) { throw "Shared UI build failed" }
+      - name: Verify shared sources, renderer and x64 executable
+        shell: pwsh
+        run: |
+          python scripts/check_shared_touch_build.py --build-dir build-touch-tests --lumatext ${{ matrix.lumatext }} --machine x64
+          if ($LASTEXITCODE -ne 0) { throw "Shared UI build coverage failed" }
+      - name: Execute touch and selection regressions
+        shell: pwsh
+        run: |
+          & ./build-touch-tests/pulse_touch_gesture_test.exe
+          if ($LASTEXITCODE -ne 0) { throw "Touch regression failed" }
+          & ./build-touch-tests/pulse_item_selection_geometry_test.exe
+          if ($LASTEXITCODE -ne 0) { throw "Selection layout regression failed" }
+          & ./build-touch-tests/pulse_item_checkbox_menu_test.exe
+          if ($LASTEXITCODE -ne 0) { throw "Checkbox menu regression failed" }
+          & ./build-touch-tests/pulse_drag_drop_test.exe
+          if ($LASTEXITCODE -ne 0) { throw "Drag drop regression failed" }
+      - name: Audit Windows 8.1 startup imports
+        if: matrix.win81 == 'ON'
+        shell: pwsh
+        run: |
+          python tools/audit_win81_imports.py build-touch-tests
+          if ($LASTEXITCODE -ne 0) { throw "Windows 8.1 startup import guard failed" }
+
+  build-arm64:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSVC ARM64 Environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64_arm64
+
+      - name: Download and replace ARM64 PDFium
+        shell: pwsh
+        run: |
+          $url = "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8044/pdfium-win-arm64.tgz"
+          Write-Host "Downloading ARM64 PDFium from $url..."
+          Invoke-WebRequest -Uri $url -OutFile "pdfium.tgz"
+          tar -xzf "pdfium.tgz"
+          Copy-Item -Path "bin/pdfium.dll" -Destination "third_party/pdfium/bin/pdfium.dll" -Force
+          Write-Host "ARM64 PDFium replaced successfully."
+
+      - name: Download and replace ARM64 LumaText SDK
+        shell: pwsh
+        run: |
+          $url = "https://github.com/kettly1260/lumatext/releases/download/v0.1.0-arm64/lumatext-windows-arm64.zip"
+          Write-Host "Downloading ARM64 LumaText SDK from $url..."
+          Invoke-WebRequest -Uri $url -OutFile "lumatext.zip"
+          Expand-Archive -Path "lumatext.zip" -DestinationPath "lumatext-sdk" -Force
+          Copy-Item -Path "lumatext-sdk/bin/lumatext.dll" -Destination "third_party/lumatext/bin/lumatext.dll" -Force
+          Copy-Item -Path "lumatext-sdk/lib/lumatext.lib" -Destination "third_party/lumatext/lib/lumatext.lib" -Force
+          Write-Host "ARM64 LumaText replaced successfully."
+
+      - name: Configure CMake (Full Native with LumaText enabled)
+        run: |
+          cmake -S . -B build-arm64 -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON `
+            -DCMAKE_SYSTEM_NAME=Windows `
+            -DCMAKE_SYSTEM_PROCESSOR=ARM64 `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
+            -DPULSE_WITH_LUMATEXT=ON `
+            -DPULSE_WITH_SELFTEST=OFF
+
+      - name: Build ARM64 Executables, Tests and Installer Stub
+        run: |
+          cmake --build build-arm64 --target pulse pulse_index pulse_preview pulse_document pulse_shell pulse_integration pulse_elevated pulse_setup pulse_session_window_test pulse_known_folder_links_test pulse_command_icon_test pulse_item_selection_geometry_test pulse_touch_gesture_test pulse_item_checkbox_menu_test pulse_drag_drop_test --parallel 4
+
+      - name: Verify shared sources, renderer and ARM64 executable
+        shell: pwsh
+        run: |
+          python scripts/check_shared_touch_build.py --build-dir build-arm64 --lumatext ON --machine arm64
+          if ($LASTEXITCODE -ne 0) { throw "Shared ARM64 UI build coverage failed" }
+
+      - name: Package Single-File Installer (PulseSetup-windows-arm64.exe)
+        shell: pwsh
+        run: |
+          $version = (Get-Content version.txt -Raw).Trim()
+          New-Item -ItemType Directory -Path "dist" -Force | Out-Null
+          python tools/pack_installer/pack_installer.py `
+            --root . `
+            --build build-arm64 `
+            --stub build-arm64/pulse_setup.exe `
+            --version $version `
+            --channel windows `
+            --out "dist/PulseSetup-$version-windows-arm64.exe"
+          Write-Host "Installer package created successfully."
+
+      - name: Package ARM64 Portable ZIP
+        shell: pwsh
+        run: |
+          $version = (Get-Content version.txt -Raw).Trim()
+          $stage = "dist/Pulse-$version-arm64-portable"
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          $binaries = @(
+            'pulse.exe', 'Pulse.Index.exe', 'Pulse.Preview.exe',
+            'Pulse.Document.exe', 'pulse_shell.exe', 'pulse_integration.exe',
+            'pulse_elevated.exe', 'lumatext.dll', 'pdfium.dll'
+          )
+          foreach ($bin in $binaries) {
+            Copy-Item -Path "build-arm64/$bin" -Destination $stage -Force
+          }
+          New-Item -ItemType Directory -Path "$stage/licenses/PDFium" -Force | Out-Null
+          Copy-Item -Path "third_party/pdfium/licenses/*" -Destination "$stage/licenses/PDFium" -Recurse -Force
+          Copy-Item -Path "third_party/pdfium/LICENSE" -Destination "$stage/licenses/PDFium/binary-distribution.txt" -Force
+
+          New-Item -ItemType Directory -Path "$stage/licenses/LumaText" -Force | Out-Null
+          Copy-Item -Path "third_party/lumatext/share/LumaText/licenses/*" -Destination "$stage/licenses/LumaText" -Recurse -Force
+
+          Copy-Item -Path "third_party/ib-pinyin-cpp/LICENSE.txt" -Destination "$stage/licenses/ib-pinyin-LICENSE.txt" -Force
+          Copy-Item -Path "third_party/md4c/LICENSE.md" -Destination "$stage/licenses/md4c-LICENSE.md" -Force
+
+          $zipPath = "dist/Pulse-$version-windows-arm64.zip"
+          Compress-Archive -Path "$stage\*" -DestinationPath $zipPath -Force
+          Write-Host "Created archive: $zipPath"
+
+      - name: Upload Artifacts (Installer + Portable)
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pulse-Windows-ARM64-Full
+          path: |
+            dist/PulseSetup-*-windows-arm64.exe
+            dist/Pulse-*-windows-arm64.zip
+          retention-days: 30

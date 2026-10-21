@@ -7,13 +7,48 @@
 #   (BMP frames, raw PCM / WAV for playback). No network, no devices, no GPL
 #   or nonfree components; --enable-gpl / --enable-nonfree are never passed.
 #
-# Runs in MSYS2 MINGW64 (see .github/workflows/preview-pack-ffmpeg.yml).
-# Usage: packs/ffmpeg/build.sh <ffmpeg-version> <output-dir>
+# Runs in MSYS2 MINGW64 (x64) or CLANGARM64 (arm64), on a matching Windows host.
+# Usage: packs/ffmpeg/build.sh <ffmpeg-version> <output-dir> [x64|arm64]
 set -euo pipefail
 
 VERSION="${1:?ffmpeg version, e.g. 7.1.1}"
 OUT="$(realpath -m "${2:?output directory}")"
-WORK="${WORK:-$PWD/build-pack-ffmpeg}"
+ARCH="${3:-x64}"
+[[ "$VERSION" =~ ^[0-9]+(\.[0-9]+)+$ ]] || { echo "invalid FFmpeg release: $VERSION" >&2; exit 1; }
+TOOLCHAIN=()
+case "$ARCH" in
+    x64)
+        EXPECTED_MSYSTEM=MINGW64
+        EXPECTED_PREFIX=/mingw64
+        FFMPEG_ARCH=x86_64
+        CC=gcc
+        STRIP=strip
+        LDFLAGS="-static -static-libgcc"
+        ;;
+    arm64)
+        EXPECTED_MSYSTEM=CLANGARM64
+        EXPECTED_PREFIX=/clangarm64
+        FFMPEG_ARCH=aarch64
+        CC=clang
+        STRIP=llvm-strip
+        LDFLAGS=-static
+        TOOLCHAIN=(--cc=clang --cxx=clang++ --host-cc=clang --ar=llvm-ar --nm=llvm-nm
+                   --ranlib=llvm-ranlib --strip=llvm-strip --windres=llvm-windres)
+        ;;
+    *) echo "unsupported architecture: $ARCH (expected x64 or arm64)" >&2; exit 1 ;;
+esac
+[[ "${MSYSTEM:-}" == "$EXPECTED_MSYSTEM" && "${MINGW_PREFIX:-}" == "$EXPECTED_PREFIX" ]] || {
+    echo "$ARCH requires MSYS2 $EXPECTED_MSYSTEM ($EXPECTED_PREFIX)" >&2; exit 1;
+}
+TARGET="$($CC -dumpmachine)"
+[[ "$TARGET" == "$FFMPEG_ARCH"-*mingw* || "$TARGET" == "$FFMPEG_ARCH"-*windows-gnu* ]] || {
+    echo "compiler target $TARGET does not match $ARCH Windows" >&2; exit 1;
+}
+echo "Building $ARCH with $CC ($TARGET), MSYSTEM=$MSYSTEM"
+# Do not let pkg-config pick up libraries from another MSYS2 environment.
+export PKG_CONFIG_LIBDIR="$MINGW_PREFIX/lib/pkgconfig:$MINGW_PREFIX/share/pkgconfig"
+export PKG_CONFIG_PATH=
+WORK="$(realpath -m "${WORK:-$PWD/build-pack-ffmpeg-$ARCH}")"
 JOBS="${JOBS:-$(nproc)}"
 mkdir -p "$WORK" "$OUT"
 cd "$WORK"
@@ -33,9 +68,10 @@ FILTERS=scale,setsar,format,null,anull,transpose,hflip,vflip,select,fps,tile,pad
 
 ./configure \
     --prefix="$WORK/prefix" \
-    --target-os=mingw32 --arch=x86_64 \
+    --target-os=mingw32 --arch="$FFMPEG_ARCH" \
+    "${TOOLCHAIN[@]}" \
     --pkg-config-flags=--static \
-    --extra-ldflags="-static -static-libgcc" \
+    --extra-ldflags="$LDFLAGS" \
     --enable-static --disable-shared \
     --disable-autodetect --enable-w32threads --enable-zlib --enable-libdav1d \
     --disable-everything \
@@ -57,14 +93,13 @@ grep -q '^#define CONFIG_NETWORK 0' config.h
 make -j"$JOBS"
 make install
 cp "$WORK/prefix/bin/ffmpeg.exe" "$WORK/prefix/bin/ffprobe.exe" "$OUT/"
-strip "$OUT/ffmpeg.exe" "$OUT/ffprobe.exe"
+"$STRIP" "$OUT/ffmpeg.exe" "$OUT/ffprobe.exe"
 
 # Licence material that has to travel with the binaries.
 cp COPYING.LGPLv2.1 "$OUT/LICENSE-FFmpeg-LGPL-2.1.txt"
-DAV1D_LICENSE="$(find /mingw64/share -ipath '*dav1d*' -iname 'COPYING*' -o -ipath '*dav1d*' -iname 'LICENSE*' | head -n1 || true)"
-[ -n "$DAV1D_LICENSE" ] && cp "$DAV1D_LICENSE" "$OUT/LICENSE-dav1d.txt"
+cp "$MINGW_PREFIX/share/licenses/dav1d/COPYING" "$OUT/LICENSE-dav1d.txt"
 cat > "$OUT/SOURCE.txt" <<EOF
-Pulse FFmpeg preview pack
+Pulse FFmpeg preview pack ($ARCH)
 FFmpeg ${VERSION}, built from the unmodified release tarball:
   https://ffmpeg.org/releases/${TARBALL}
 Build script and configuration:
@@ -79,3 +114,4 @@ echo "built: $(ls -la "$OUT")"
 for filter in fps scale format atempo trim atrim; do
     grep -Eq "[[:space:]]${filter}[[:space:]]" "$WORK/pack-filters.txt"
 done
+

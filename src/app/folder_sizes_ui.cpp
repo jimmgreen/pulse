@@ -86,7 +86,7 @@ void FillFolderSizes(AppState& s, ui::WindowViewModel& vm) {
         std::unordered_set<int> shown;
         const auto list = s.renderer.PaneListRect(pane, slot.rect);
         ui::ViewLayout layout(pane.view_mode, list, pane.EntryCount(), pane.scroll_x, pane.scroll_y, s.scale,
-                              s.renderer.ListRowHeightDip(pane, list), pane.Groups());
+                              s.renderer.ListRowHeightDip(pane, list), pane.Groups(), s.renderer.ItemSelectionSlotDip());
         const auto [first, last] = layout.VisibleRange();
         const size_t probed_before = probe_rows.size();
         // Every view probes its visible folders for emptiness; label views also want sizes.

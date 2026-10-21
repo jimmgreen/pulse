@@ -85,7 +85,8 @@ public:
     ViewLayout(ViewMode mode, D2D1_RECT_F viewport, size_t item_count,
                float scroll_x, float scroll_y, float scale,
                float row_height_dip = 0.0f, // >0: Details-mode row height override
-               const ListGroups* groups = nullptr); // single-column views only
+               const ListGroups* groups = nullptr, // single-column views only
+               float selection_slot_dip = 0.0f); // stable checkbox gutter; never depends on hover
 
     ViewMode Mode() const noexcept { return mode_; }
     const ViewLayoutMetrics& Metrics() const noexcept { return metrics_; }
@@ -132,6 +133,7 @@ private:
     float scroll_x_ = 0.0f;
     float scroll_y_ = 0.0f;
     float scale_ = 1.0f;
+    float selection_slot_ = 0.0f;
     ViewLayoutMetrics metrics_{};
     float content_width_ = 0.0f;
     float content_height_ = 0.0f;

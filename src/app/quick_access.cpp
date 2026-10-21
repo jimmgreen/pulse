@@ -56,6 +56,10 @@ bool HandleQuickAccessCommand(AppState& s, int command,
 
 void ShowQuickAccessMenu(AppState& s, const std::wstring& path, POINT point) {
     if (!EnsureMenu(s)) return;
+    ui::FluentMenuItem open_tab;
+    open_tab.command = app::CmdOpenInNewTab;
+    open_tab.text = l10n::Get(l10n::StringId::OpenNewTab);
+    open_tab.glyph = L"\xE8A7";
     ui::FluentMenuItem open;
     open.command = app::CmdOpen;
     open.text = l10n::Get(l10n::StringId::Open);
@@ -64,8 +68,9 @@ void ShowQuickAccessMenu(AppState& s, const std::wstring& path, POINT point) {
     remove.command = app::CmdUnpinQuickAccess;
     remove.text = l10n::Get(l10n::StringId::UnpinQuickAccess);
     remove.glyph = L"\xE77A";
-    const int command = s.menu->TrackPopup(point, {open, remove});
-    if (command == app::CmdOpen) NavigateTo(s, path);
+    const int command = s.menu->TrackPopup(point, {open_tab, open, remove});
+    if (command == app::CmdOpenInNewTab) OpenTabAt(s, path);
+    else if (command == app::CmdOpen) NavigateTo(s, path);
     else HandleQuickAccessCommand(s, command, {path});
 }
 
@@ -161,6 +166,10 @@ void ShowWorkspaceMenu(AppState& s, int index, POINT point) {
 
 void ShowNetworkPlaceMenu(AppState& s, const std::wstring& unc, POINT point) {
     if (!EnsureMenu(s)) return;
+    ui::FluentMenuItem open_tab;
+    open_tab.command = app::CmdOpenInNewTab;
+    open_tab.text = l10n::Get(l10n::StringId::OpenNewTab);
+    open_tab.glyph = L"\xE8A7";
     ui::FluentMenuItem open;
     open.command = app::CmdOpen;
     open.text = l10n::Get(l10n::StringId::Open);
@@ -169,8 +178,10 @@ void ShowNetworkPlaceMenu(AppState& s, const std::wstring& unc, POINT point) {
     unpin.command = app::CmdUnpinQuickAccess;
     unpin.text = l10n::Get(l10n::StringId::Unpin);
     unpin.glyph = L"\xE77A";
-    const int command = s.menu->TrackPopup(point, {open, unpin});
-    if (command == app::CmdOpen) {
+    const int command = s.menu->TrackPopup(point, {open_tab, open, unpin});
+    if (command == app::CmdOpenInNewTab) {
+        OpenTabAt(s, unc);
+    } else if (command == app::CmdOpen) {
         NavigateTo(s, unc);
     } else if (command == app::CmdUnpinQuickAccess && s.places.UnpinNetwork(unc)) {
         // The Network view lists the pins too.

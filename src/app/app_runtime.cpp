@@ -7,6 +7,7 @@
 #include "pane_layout.h"
 #include "tab_spring.h"
 #include "vertical_tabs.h"
+#include "sidebar_drag_preview.h"
 #include "app_column_view.h"
 #include "folder_sizes_ui.h"
 #include "update_status.h"
@@ -2378,6 +2379,17 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     }
     // Vertical tabs join the sidebar before its scroll range is measured.
     ApplyVerticalTabs(s, vm);
+    if (!vm.drag_ghost.on) {
+        if (s.pinDragActive)
+            vm.drag_ghost = app::BuildSidebarDragPreview(vm.sidebar, s.pinDragPath, -1, s.hoverPoint);
+        else if (s.starDragActive)
+            vm.drag_ghost = app::BuildSidebarDragPreview(vm.sidebar, s.starDragPath, -1, s.hoverPoint);
+        else if (s.tagDragActive)
+            vm.drag_ghost = app::BuildSidebarDragPreview(vm.sidebar, s.tagDragPath, -1, s.hoverPoint);
+        else if (s.groupDragActive)
+            vm.drag_ghost = app::BuildSidebarDragPreview(vm.sidebar, s.groupDragPath,
+                                                       s.groupDragId, s.hoverPoint);
+    }
     // The tray (including exiting cards) determines the sidebar viewport.
     // Clamp only after it is populated, using the same model as draw/hit-test.
     s.sidebarScroll = std::clamp(s.sidebarScroll, 0.0f, s.renderer.SidebarMaxScroll(

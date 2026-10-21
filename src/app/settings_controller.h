@@ -214,6 +214,8 @@ public:
     void WindowEffect(std::wstring_view effect_id);
     void AccentChoice(bool system_choice, uint32_t rgb);
     void RowHeight(int index);
+    void ItemCheckboxes(int index);
+    void TouchUiMode(int index);
     void FolderSort(int index);
     // Optional Details columns (ui/details_column_set.h bits), every folder.
     void DetailsColumns(uint32_t mask);

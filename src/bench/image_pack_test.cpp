@@ -145,7 +145,7 @@ static void ResolutionTests(const fs::path& profile) {
     using namespace packs;
     SetEnvironmentVariableW(L"LOCALAPPDATA", profile.c_str());
     Check(ResolvePackUncached(PackId::Images).source == ToolSource::None, "no image pack -> unavailable");
-    const fs::path base = profile / L"Pulse" / L"packs" / L"images";
+    const fs::path base = fs::path(PacksRoot()) / L"images";
     WriteBytes(base / L"installed.json", "{\"version\":\"1\",\"dir\":\"1\"}");
     Check(!ReadInstalledPack(PackId::Images).present, "installed.json without pulse-imgpack.exe is not present");
     WriteBytes(base / L"1" / L"pulse-imgpack.exe", "MZ");
@@ -207,7 +207,7 @@ int wmain() {
         // The pack, installed into the private profile like the installer does.
         const fs::path profile = root / L"profile";
         SetEnvironmentVariableW(L"LOCALAPPDATA", profile.c_str());
-        const fs::path installed = profile / L"Pulse" / L"packs" / L"images" / L"test";
+        const fs::path installed = fs::path(packs::PacksRoot()) / L"images" / L"test";
         fs::create_directories(installed);
         for (const auto& entry : fs::directory_iterator(pack_dir))
             if (entry.is_regular_file()) fs::copy_file(entry.path(), installed / entry.path().filename());

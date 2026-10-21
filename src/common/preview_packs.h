@@ -7,15 +7,18 @@
 // provider - could not make the preview. Without a pack nothing changes.
 //
 // Layout under %LOCALAPPDATA%\Pulse\packs:
-//   packs.json                  user settings, written by the app
-//   <key>\installed.json        {"version":"7.1.1","dir":"7.1.1"}
-//   <key>\<dir>\ffmpeg.exe ...  the pack's files
+//   packs.json                         shared user settings, written by the app
+//   <key>\installed.json               x64 {"version":"7.1.1","dir":"7.1.1"}
+//   <key>\<dir>\ffmpeg.exe ...         x64 pack files (existing layout)
+//   arm64\<key>\installed.json         ARM64 installation, separate from x64
+//   arm64\<key>\<dir>\ffmpeg.exe ...   ARM64 pack files
 //
 // Header-only on purpose: the preview host, the app and the tests are
 // separate executables and must not gain link dependencies.
 #pragma once
 
 #include "json_utils.h"
+#include "pack_architecture.h"
 #include "utf8_file.h"
 #include <windows.h>
 #include <cstdint>
@@ -52,15 +55,26 @@ inline const wchar_t* PackMainTool(PackId id) {
 
 // %LOCALAPPDATA%\Pulse\packs, empty when the variable is unavailable. Tests and
 // --test-instance runs redirect LOCALAPPDATA, which isolates packs as well.
-inline std::wstring PacksRoot() {
+inline std::wstring PacksSharedRoot() {
     wchar_t root[32768];
     const DWORD count = GetEnvironmentVariableW(L"LOCALAPPDATA", root, static_cast<DWORD>(std::size(root)));
     if (!count || count >= std::size(root)) return {};
     return std::wstring(root, count) + L"\\Pulse\\packs";
 }
 
+inline std::wstring PacksRoot(Architecture architecture = ProcessArchitecture()) {
+    const std::wstring root = PacksSharedRoot();
+    if (root.empty()) return {};
+    switch (architecture) {
+    case Architecture::X64: return root;
+    case Architecture::Arm64: return root + L"\\arm64";
+    }
+    return {};
+}
+
 inline std::wstring PacksSettingsPath() {
-    const std::wstring root = PacksRoot();
+    // Preferences survive switching between native ARM64 and emulated x64 Pulse.
+    const std::wstring root = PacksSharedRoot();
     return root.empty() ? std::wstring{} : root + L"\\packs.json";
 }
 
@@ -137,10 +151,9 @@ inline bool CreateDirectoryChain(const std::wstring& directory) {
 }
 
 inline bool SavePackSettings(const PackSettings& settings) {
-    const std::wstring root = PacksRoot();
-    if (root.empty()) return false;
-    if (!CreateDirectoryChain(root)) return false;
-    return WriteUtf8FileAtomic(PacksSettingsPath(), SerializePackSettings(settings));
+    const std::wstring path = PacksSettingsPath();
+    if (path.empty() || !CreateDirectoryChain(DirectoryOf(path))) return false;
+    return WriteUtf8FileAtomic(path, SerializePackSettings(settings));
 }
 
 struct InstalledPack {
@@ -163,9 +176,9 @@ inline std::wstring InstalledPackDirectory(const std::wstring& base, std::wstrin
 }
 
 // Reads <root>\<key>\installed.json and checks the main tool is there.
-inline InstalledPack ReadInstalledPack(PackId id) {
+inline InstalledPack ReadInstalledPack(PackId id, Architecture architecture = ProcessArchitecture()) {
     InstalledPack pack;
-    const std::wstring root = PacksRoot();
+    const std::wstring root = PacksRoot(architecture);
     if (root.empty()) return pack;
     pack.directory = InstalledPackDirectory(root + L"\\" + PackKey(id), &pack.version);
     pack.present = !pack.directory.empty() && IsRegularFile(pack.directory + L"\\" + PackMainTool(id));
@@ -249,14 +262,14 @@ inline ResolvedPack ResolvePackUncached(PackId id) {
     return out;
 }
 
-// Write times of packs.json and <key>\installed.json. Settings and the
-// installer write one of them on every change, so comparing this stamp lets a
-// change made in Settings reach the very next request.
+// Write times of shared packs.json and native <key>\installed.json. Settings
+// and the installer write one of them on every change, so comparing this stamp
+// lets a change made in Settings reach the very next request.
 inline uint64_t PackStamp(PackId id) {
     const std::wstring root = PacksRoot();
     if (root.empty()) return 0;
     uint64_t stamp = 0;
-    for (const std::wstring& file : {root + L"\\packs.json", root + L"\\" + PackKey(id) + L"\\installed.json"}) {
+    for (const std::wstring& file : {PacksSettingsPath(), root + L"\\" + PackKey(id) + L"\\installed.json"}) {
         WIN32_FILE_ATTRIBUTE_DATA data{};
         const uint64_t time = GetFileAttributesExW(file.c_str(), GetFileExInfoStandard, &data)
             ? (static_cast<uint64_t>(data.ftLastWriteTime.dwHighDateTime) << 32) | data.ftLastWriteTime.dwLowDateTime

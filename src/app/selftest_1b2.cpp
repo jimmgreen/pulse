@@ -5848,12 +5848,15 @@ void TestViewLayouts() {
     Check(list.MaxScrollX() > 0 && list.MaxScrollY() == 0,
           L"view: list is column-major with horizontal scrolling");
     auto menu = BuildViewMenu(ui::ViewMode::Details);
-    Check(menu.size() == 9 && menu[5].radio && !menu[0].radio &&
-          menu[8].command == CmdDetailsPanel,
-          L"view: menu has eight view choices plus details panel");
+    Check(menu.size() == 12 && menu[5].radio && !menu[0].radio &&
+          menu[8].command == CmdDetailsPanel && menu[8].separator_after &&
+          menu[9].command == CmdItemCheckboxAuto && menu[9].radio &&
+          menu[10].command == CmdItemCheckboxAlways && !menu[10].radio &&
+          menu[11].command == CmdItemCheckboxNever && !menu[11].radio,
+          L"view: menu has eight view choices, details panel and checkbox policy choices");
     const auto folder_menu = BuildViewMenu(ui::ViewMode::Details, false, true);
-    Check(folder_menu.size() == 10 && folder_menu.back().command == CmdApplyViewToAllFolders &&
-          folder_menu[8].separator_after,
+    Check(folder_menu.size() == 13 && folder_menu.back().command == CmdApplyViewToAllFolders &&
+          folder_menu[11].separator_after,
           L"view: real folders offer apply view and sort to all folders");
     Check(menu[0].glyph_scale > menu[1].glyph_scale &&
           menu[1].glyph_scale > menu[2].glyph_scale,

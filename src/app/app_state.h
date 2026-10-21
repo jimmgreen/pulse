@@ -26,6 +26,7 @@
 #include "tray_compare_metadata.h"
 #include "frame_pump.h"
 #include "ui_timer_pacer.h"
+#include "touch_input.h"
 #include <deque>
 #include <atomic>
 #include <memory>
@@ -261,6 +262,7 @@ struct AppState : AppCoreOwner {
     app::ListTypeAhead listTypeAhead;
     const app::Tab* listTypeAheadTab = nullptr;
     std::wstring listTypeAheadFolder;
+    std::unique_ptr<app::TouchInputAdapter> touch_input;
 
     app::WindowTabs window_tabs;
     app::Pane* pane = nullptr;          // focused leaf of the current layout tab
@@ -599,6 +601,7 @@ struct AppState : AppCoreOwner {
     int dropSidebar = -1;
     bool dropTray = false;
     bool dropQuickAccess = false;  // folders over the Quick access header: pin
+    bool dropNewTab = false;       // folders over tab bar / new-tab button: open in new tab
     std::wstring dropBadge;
     float dropBadgeX = 0.0f;
     float dropBadgeY = 0.0f;
@@ -641,6 +644,13 @@ struct AppState : AppCoreOwner {
     POINT dragStartPt{};
     int clickCollapseIndex = -1;
     bool clickToggleOnRelease = false;
+
+    // Item and header selection checkbox click candidates (Touch improvement P3)
+    bool checkboxPressCandidate = false;
+    int checkboxPressIndex = -1;
+    app::Pane* checkboxPressPane = nullptr;
+    bool headerCheckboxPressCandidate = false;
+    app::Pane* headerCheckboxPressPane = nullptr;
 
     // Tag drag-reorder gesture (sidebar 标签组), QFluentKit TabBar model:
     // the dragged tag follows cursor deltas 1:1, swaps with a sibling when its

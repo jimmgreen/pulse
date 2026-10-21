@@ -34,6 +34,12 @@ std::thread g_thread;
 // locks the target could hold (RtlLookupFunctionEntry reads the loader's
 // inverted function table), so the suspended thread cannot deadlock us.
 size_t UnwindSuspended(CONTEXT ctx, DWORD64* out, size_t cap) noexcept {
+#if defined(_M_ARM64)
+    (void)ctx;
+    (void)out;
+    (void)cap;
+    return 0;
+#elif defined(_M_X64)
     size_t n = 0;
     __try {
         while (n < cap && ctx.Rip) {
@@ -54,6 +60,9 @@ size_t UnwindSuspended(CONTEXT ctx, DWORD64* out, size_t cap) noexcept {
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
     return n;
+#else
+    return 0;
+#endif
 }
 
 bool SampleThread(DWORD tid, ThreadStack& out) {

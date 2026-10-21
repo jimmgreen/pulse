@@ -9,6 +9,7 @@
 #include "open_with_icons.h"
 #include "sysctx_view.h"
 #include "view_layout.h"
+#include "item_selection_geometry.h"
 #include "column_strip_layout.h"
 #include "panel_metrics.h"
 #include "toolbar_layout.h"
@@ -668,6 +669,11 @@ struct DragGhostView {
     size_t em_start = 0;       // the part of `hint` in the accent color (M7i)
     size_t em_length = 0;
     std::wstring detail;       // a smaller note after it (may be empty)
+    // Sidebar drags reuse the pill with the source row's cached label/icon.
+    bool item_preview = false;
+    std::wstring icon_glyph;
+    std::wstring icon_fallback;
+    D2D1_COLOR_F icon_color = {};
 };
 
 struct WindowViewModel {
@@ -1028,6 +1034,8 @@ struct HitTestResult {
         Splitter,
         Scrollbar,
         Row,
+        RowCheckbox,
+        HeaderCheckbox,
         ChangeBadge,
         ChangeOpen,
         ChangeTimeFilter,
@@ -1327,6 +1335,13 @@ public:
     float TrayIconDip() const { return tray_icon_dip_; }
     float Margin() const { return margin_; }
 
+    void SetTouchDensity(TouchDensity density) noexcept { touch_density_ = density; }
+    void SetCheckboxVisibility(CheckboxVisibility visibility) noexcept { checkbox_visibility_ = visibility; }
+    void SetTouchscreenReady(bool ready) noexcept { touchscreen_ready_ = ready; }
+    TouchDensity GetTouchDensity() const noexcept { return touch_density_; }
+    CheckboxVisibility GetCheckboxVisibility() const noexcept { return checkbox_visibility_; }
+    bool GetTouchscreenReady() const noexcept { return touchscreen_ready_; }
+
     // Right details panel: toggled from the view menu; ContentRect shrinks.
     void SetDetailsPanelVisible(bool visible) {
         details_visible_ = visible;
@@ -1493,6 +1508,9 @@ public:
         auto_widths_scale_ = -1.0f;
     }
     bool ListSmartDate() const { return list_smart_date_; }
+    float ItemSelectionSlotDip() const {
+        return SelectionSlotDip(touch_density_, checkbox_visibility_);
+    }
     // Grid thumbnails: default-program badge and video playing time.
     void SetThumbnailBadges(bool on) { thumbnail_badges_ = on; }
     // Default programs changed (SHCNE_ASSOCCHANGED).
@@ -1842,6 +1860,9 @@ private:
     float sidebar_width_ = 224.0f;
     float sidebar_width_dip_ = 224.0f;
     bool vertical_tabs_ = false;
+    TouchDensity touch_density_ = TouchDensity::Compact;
+    CheckboxVisibility checkbox_visibility_ = CheckboxVisibility::Auto;
+    bool touchscreen_ready_ = false;
     float search_min_dip_ = 0.0f;
     int toolbar_group_ = -1;
     int new_primary_ = 0;

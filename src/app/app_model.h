@@ -6,6 +6,7 @@
 #include "../ui/ui_renderer.h"
 #include "places.h"
 #include "tag_ads_sync.h"
+#include "known_folder_links.h"
 #include "column_view_model.h"
 #include "explorer_handoff.h"
 #include "entry_order_hold.h"
@@ -536,17 +537,6 @@ struct SidebarEntry {
     int builtin = -1;
 };
 
-// Built-in quick-access links, in the order they are listed. The stored mask
-// (session "quickAccessHidden") is indexed by these values, so changing the set
-// or the order needs a session migration (see kSessionVersion in session.cpp).
-enum class BuiltinQuickAccess : int {
-    Recent = 0,
-    Desktop,
-    Downloads,
-    RecycleBin,
-    Count,
-};
-
 // Sidebar sections. The ids are stable: the collapse/hide bitmasks stored in the
 // session are indexed by them, and the user may reorder the groups by dragging.
 enum class SidebarSectionId : int {
@@ -579,6 +569,7 @@ std::vector<int> DefaultSidebarOrder();
 int SidebarSectionIndex(const ui::WindowViewModel& vm, int section_id);
 
 struct SidebarModel {
+    KnownFolderSnapshot known_folders;
     std::vector<SidebarEntry> system_networks;
     std::vector<SidebarEntry> quick_access;
     std::vector<SidebarEntry> saved_searches;
@@ -587,7 +578,8 @@ struct SidebarModel {
     std::vector<SidebarEntry> starred; // the "starred items" root row
 };
 
-SidebarModel BuildSidebarModel(const fs::RecycleBinInfo* recycle = nullptr);
+SidebarModel BuildSidebarModel(const fs::RecycleBinInfo* recycle = nullptr,
+                               const KnownFolderSnapshot* prev_known_folders = nullptr);
 // Blocking volume queries: call only on a background worker.
 void RefreshSidebarDriveCapacity(std::vector<SidebarEntry>& drives);
 

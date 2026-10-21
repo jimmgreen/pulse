@@ -1,4 +1,5 @@
 #include "preview_host_client.h"
+#include "../common/preview_packs.h"
 #include <filesystem>
 #include <fstream>
 #include <cstdio>
@@ -8,7 +9,10 @@ int wmain(int argc, wchar_t** argv) {
     namespace fs = std::filesystem;
     using namespace pulse;
     const fs::path root = fs::current_path() / L"bench_data" / (L"raw-host-" + std::to_wstring(GetCurrentProcessId()));
-    const fs::path pack = root / L"Pulse/packs/raw/test";
+    wchar_t previous[32768]{};
+    GetEnvironmentVariableW(L"LOCALAPPDATA", previous, 32768);
+    SetEnvironmentVariableW(L"LOCALAPPDATA", root.c_str());
+    const fs::path pack = fs::path(packs::PacksRoot()) / L"raw" / L"test";
     const fs::path fixtures = fs::absolute(argv[2]);
     fs::create_directories(pack);
     for (const auto& file : fs::directory_iterator(argv[1])) {
@@ -16,9 +20,6 @@ int wmain(int argc, wchar_t** argv) {
             fs::copy_file(file.path(), pack / file.path().filename());
     }
     std::ofstream(pack.parent_path() / L"installed.json") << "{\"dir\":\"test\",\"version\":\"test\"}";
-    wchar_t previous[32768]{};
-    GetEnvironmentVariableW(L"LOCALAPPDATA", previous, 32768);
-    SetEnvironmentVariableW(L"LOCALAPPDATA", root.c_str());
     int failed = 0;
     auto check = [&](bool ok, const char* name) { printf("[%s] %s\n", ok ? "PASS" : "FAIL", name); failed += !ok; };
     {

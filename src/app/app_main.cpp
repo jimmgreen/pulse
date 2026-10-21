@@ -240,6 +240,8 @@ void Render(AppState& s) {
     bool hc = s.shot_high_contrast || ui::IsHighContrast();
     ui::Theme theme = hc ? ui::MakeHighContrastTheme() : ui::MakeTheme(s.darkMode, s.accentColor);
 
+    if (s.framePump.Running() && s.touch_input)
+        s.touch_input->OnAnimationFrame(s.hwnd);
     if (s.scrollAnimating) UpdateSmoothScroll(s);
     UpdateMarqueeFrame(s);
     UpdateProcessMetrics(s);
@@ -320,7 +322,8 @@ void Render(AppState& s) {
     // Motion started or still running: the next frames follow the display
     // clock instead of the 16 ms UI timer (see WM_FRAME_PUMP).
     if (s.framePump.Running() &&
-        (s.scrollAnimating || s.marqueeAutoScroll || s.renderer.TickMotion(GetTickCount64())))
+        (s.scrollAnimating || (s.touch_input && s.touch_input->IsInertiaActive()) ||
+         s.marqueeAutoScroll || s.renderer.TickMotion(GetTickCount64())))
         s.framePump.Arm();
 }
 
@@ -615,7 +618,9 @@ static bool IsUiActivityMessage(UINT msg) {
            (msg >= WM_NCMOUSEMOVE && msg <= WM_NCXBUTTONDBLCLK) ||
            msg == WM_MOUSELEAVE || msg == WM_NCMOUSELEAVE || msg == WM_PAINT ||
            msg == WM_SETFOCUS || msg == WM_KILLFOCUS || msg == WM_ACTIVATE ||
-           msg == WM_SIZE || msg == WM_CAPTURECHANGED || msg == WM_DPICHANGED;
+           msg == WM_SIZE || msg == WM_CAPTURECHANGED || msg == WM_DPICHANGED ||
+           msg == WM_POINTERDOWN || msg == WM_POINTERUPDATE ||
+           msg == WM_POINTERUP || msg == WM_POINTERCAPTURECHANGED;
 }
 
 static void NoteUiActivity(AppState& s, HWND hwnd, bool visible) {
@@ -858,6 +863,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             ui::typography::InvalidateCaches();
         }
         s->compositor.RecreateTextFormats(s->scale);
+        s->touch_input = std::make_unique<app::TouchInputAdapter>(*s);
         if (init_core) {
             if (s->safeMode) {
                 s->appPrefs.window_effect = L"none";
@@ -879,6 +885,10 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         s->renderer.SetRowActions(app::RowActionMask(s->ctxMenuPrefs.builtin_hidden,
             s->ctxMenuPrefs.BuiltinOrder(app::BuiltinMenuSurface::RowButtons)));
         s->renderer.SetThumbnailBadges(s->appPrefs.list_thumbnail_badges);
+        const bool touch_ready = ui::DetectTouchscreenReady();
+        s->renderer.SetTouchscreenReady(touch_ready);
+        s->renderer.SetTouchDensity(ui::ResolveTouchDensity(s->appPrefs.touch_ui_mode, touch_ready));
+        s->renderer.SetCheckboxVisibility(ui::ResolveCheckboxVisibility(s->appPrefs.item_checkboxes));
         app::SetFolderSortMode(app::FolderSortModeFromInt(s->appPrefs.folder_sort_mode));
         ui::typography::SetTextRenderMode(static_cast<ui::typography::TextRenderMode>(s->appPrefs.text_render));
         s->compositor.UpdateTextRenderingParams(nullptr);
@@ -1271,6 +1281,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
 
     case WM_DPICHANGED: {
+        if (s->touch_input) s->touch_input->CancelActiveGesture();
         const float old_scale = s->scale;
         s->scale = (float)HIWORD(wParam) / 96.0f;
         if (old_scale > 0.0f && s->scale != old_scale) {
@@ -1326,6 +1337,8 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         break;
 
     case WM_ACTIVATE:
+        if (s && LOWORD(wParam) == WA_INACTIVE && s->touch_input)
+            s->touch_input->CancelActiveGesture();
         if (s && LOWORD(wParam) != WA_INACTIVE) {
             s->core.windows.Touch(hwnd);
             // The session's other windows open once the first one is on screen
@@ -1365,6 +1378,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
     case WM_SIZE: {
         if (s) {
+            if (s->touch_input) s->touch_input->CancelActiveGesture();
             s->compositor.Resize(LOWORD(lParam), HIWORD(lParam));
             s->maximized = (wParam == SIZE_MAXIMIZED);
             if (wParam != SIZE_MINIMIZED && IsWindowVisible(hwnd)) NoteUiActivity(*s, hwnd, true);
@@ -1466,7 +1480,8 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (!s) return 0;
         s->framePump.FrameConsumed();
         if (!IsWindowVisible(hwnd) || IsIconic(hwnd) ||
-            (!s->scrollAnimating && !s->marqueeAutoScroll && !s->renderer.TickMotion(GetTickCount64()))) {
+            (!s->scrollAnimating && !(s->touch_input && s->touch_input->IsInertiaActive()) &&
+             !s->marqueeAutoScroll && !s->renderer.TickMotion(GetTickCount64()))) {
             s->framePump.Disarm();  // WM_PAINT re-arms once shown again
             return 0;
         }
@@ -1524,6 +1539,13 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 // re-arms it so the two never both render the same motion.
                 if (s->framePump.Running()) s->framePump.Arm();
                 else dirty = true;
+            }
+            if (s->touch_input) {
+                s->touch_input->OnTimerTick(hwnd);
+                if (s->touch_input->IsInertiaActive()) {
+                    if (s->framePump.Running()) s->framePump.Arm();
+                    else dirty = true;
+                }
             }
             if (pulse::TickSidebarPeek(*s, now)) dirty = true;
             TickShellTagMenu(*s, now);
@@ -1759,11 +1781,24 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     }
 
     case WM_CANCELMODE:
+        if (s && s->touch_input) s->touch_input->CancelActiveGesture();
         HandleSidebarResize(s, hwnd, msg, lParam);
         if (s) s->settings.EndMenuDrag();
         if (s) { s->detailsPreviewPanning = false; s->renderer.EndDetailsPreviewPan(); }
         if (GetCapture() == hwnd) ReleaseCapture();
         break;
+    case WM_POINTERDOWN:
+    case WM_POINTERUPDATE:
+    case WM_POINTERUP:
+    case WM_POINTERCAPTURECHANGED: {
+        if (s && s->touch_input) {
+            LRESULT res = 0;
+            if (s->touch_input->HandlePointerMessage(hwnd, msg, wParam, lParam, res)) {
+                return res;
+            }
+        }
+        break;
+    }
     case WM_MOUSEMOVE:
         if (s) pulse::UpdateSidebarPeek(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
         if (HandleSidebarResize(s, hwnd, msg, lParam)) return 0;

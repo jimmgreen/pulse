@@ -1182,7 +1182,22 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             int col = 0;
             while (col < columns.count - 1 && x >= columns.DividerX(col)) ++col;
             switch (columns.kinds[static_cast<size_t>(col)]) {
-            case ColumnKind::Name: out.column = SortColumn::Name; break;
+            case ColumnKind::Name: {
+                const D2D1_RECT_F nameColRc = D2D1::RectF(
+                    DetailsContentRect(paneRc, scale_).left,
+                    columnTop,
+                    columns.Left(ColumnKind::Name) + columns.Width(ColumnKind::Name),
+                    listTop);
+                const auto hdr_geom = ComputeHeaderSelectionGeometry(nameColRc, scale_, touch_density_);
+                if (checkbox_visibility_ != CheckboxVisibility::Never &&
+                    nameColRc.right - nameColRc.left >= hdr_geom.leading_slot_width + 8.0f * scale_ &&
+                    ContainsPt(hdr_geom.hit_rect, x, y)) {
+                    out.region = HitTestResult::HeaderCheckbox;
+                    return out;
+                }
+                out.column = SortColumn::Name;
+                break;
+            }
             case ColumnKind::Path:
                 if (paneVm.content_results) out.column = SortColumn::Path;
                 else out.region = HitTestResult::Pane;
@@ -1258,7 +1273,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 const D2D1_RECT_F list = PaneListRect(paneRc, extra, paneVm.view_mode);
                 const ViewLayout grouped(paneVm.view_mode, list, paneVm.EntryCount(),
                                          paneVm.scroll_x, paneVm.scroll_y, scale_,
-                                         ListRowHeightDip(paneVm, list), groups);
+                                         ListRowHeightDip(paneVm, list), groups, ItemSelectionSlotDip());
                 D2D1_RECT_F header{};
                 int g = grouped.StickyHeader(&header);
                 if (g < 0 || !ContainsPt(header, x, y)) {
@@ -1288,7 +1303,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                         const DetailsColumnLayout columns = DetailsColumns(list, paneVm);
                         ViewLayout layout(paneVm.view_mode, list, paneVm.EntryCount(),
                                           paneVm.scroll_x, paneVm.scroll_y, scale_,
-                                          ListRowHeightDip(paneVm, list), paneVm.Groups());
+                                          ListRowHeightDip(paneVm, list), paneVm.Groups(), ItemSelectionSlotDip());
                         const D2D1_RECT_F nameRc = layout.NameRect(viewRow);
                         const D2D1_RECT_F cell = layout.ItemRect(viewRow);
                         const ListEntryView& entry = MakeVisibleEntry(paneVm, static_cast<size_t>(idx));
@@ -1353,6 +1368,14 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                         }
                         if (ContainsPt(trail.more, x, y)) {
                             out.region = HitTestResult::RowMore;
+                            out.index = idx;
+                            return out;
+                        }
+                        const auto cb_geom = ComputeItemSelectionGeometry(
+                            paneVm.view_mode, cell, scale_, touch_density_, paneVm.IsRowSelected(idx),
+                            paneVm.hover_index == idx, touchscreen_ready_, checkbox_visibility_);
+                        if (cb_geom.visible && ContainsPt(cb_geom.hit_rect, x, y)) {
+                            out.region = HitTestResult::RowCheckbox;
                             out.index = idx;
                             return out;
                         }

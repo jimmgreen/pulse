@@ -10,15 +10,15 @@ int wmain(int argc, wchar_t** argv) {
     using namespace pulse;
     const std::wstring fixture = fs::absolute(argv[2]).wstring();
     const fs::path root = fs::current_path() / L"bench_data" / (L"archive-host-" + std::to_wstring(GetCurrentProcessId()));
-    const fs::path pack = root / L"Pulse/packs/archive/test";
+    wchar_t previous[32768]{};
+    GetEnvironmentVariableW(L"LOCALAPPDATA", previous, 32768);
+    SetEnvironmentVariableW(L"LOCALAPPDATA", root.c_str());
+    const fs::path pack = fs::path(packs::PacksRoot()) / L"archive" / L"test";
     fs::create_directories(pack);
     const fs::path tool(argv[1]);
     fs::copy_file(tool, pack / L"7z.exe");
     fs::copy_file(tool.parent_path() / L"7z.dll", pack / L"7z.dll");
     std::ofstream(pack.parent_path() / L"installed.json") << "{\"dir\":\"test\",\"version\":\"test\"}";
-    wchar_t previous[32768]{};
-    GetEnvironmentVariableW(L"LOCALAPPDATA", previous, 32768);
-    SetEnvironmentVariableW(L"LOCALAPPDATA", root.c_str());
     int failed = 0;
     auto check = [&](bool ok, const char* name) { printf("[%s] %s\n", ok ? "PASS" : "FAIL", name); failed += !ok; };
     {

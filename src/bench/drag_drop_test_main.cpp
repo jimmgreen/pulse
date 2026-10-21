@@ -1,6 +1,7 @@
 // Exercise the production drag implementation with only the native modal loop
 // replaced, so no mouse gesture or system clipboard is needed.
 #include "../ui/drag_drop.h"
+#include "../ui/drag_preview_layout.h"
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
@@ -11,8 +12,11 @@
 #include <iterator>
 
 HRESULT WINAPI AuditNativeDrag(IDataObject*, IDropSource*, DWORD, DWORD*);
+HRESULT WINAPI AuditCreateDragHelper(REFCLSID, IUnknown*, DWORD, REFIID, void**);
 #define DoDragDrop AuditNativeDrag
+#define CoCreateInstance AuditCreateDragHelper
 #include "../ui/drag_drop.cpp"
+#undef CoCreateInstance
 #undef DoDragDrop
 
 namespace {
@@ -20,6 +24,29 @@ int failures = 0;
 int passed = 0;
 int native_calls = 0;
 std::vector<std::wstring> native_paths;
+DWORD native_allowed = 0;
+DWORD native_preferred = 0;
+HRESULT native_result = DRAGDROP_S_DROP;
+std::function<void(IDropSource*)> native_source_audit;
+struct DragImageAudit {
+    unsigned creates = 0;
+    unsigned live = 0;
+    unsigned initializes = 0;
+    unsigned source_cleanups = 0;
+    unsigned enters = 0;
+    unsigned overs = 0;
+    unsigned leaves = 0;
+    unsigned drops = 0;
+    HRESULT create_result = S_OK;
+    HRESULT initialize_result = S_OK;
+    HRESULT enter_result = S_OK;
+    HRESULT over_result = S_OK;
+    HRESULT drop_result = S_OK;
+    HBITMAP bitmap = nullptr;
+    bool valid_image = false;
+    POINT point{};
+    DWORD effect = DROPEFFECT_NONE;
+} image_audit;
 void Check(bool ok, const char* label) {
     printf("[%s] %s\n", ok ? "PASS" : "FAIL", label);
     if (ok) ++passed; else ++failures;
@@ -84,11 +111,110 @@ private:
     DWORD preferred_;
 };
 
-HRESULT WINAPI AuditNativeDrag(IDataObject* data, IDropSource*, DWORD allowed, DWORD* effect) {
+class AuditedDragHelper final : public IDragSourceHelper, public IDropTargetHelper {
+public:
+    explicit AuditedDragHelper(bool source) : source_(source) { ++image_audit.live; }
+    ~AuditedDragHelper() {
+        if (owned_bitmap_) DeleteObject(owned_bitmap_);
+        --image_audit.live;
+    }
+    IFACEMETHODIMP QueryInterface(REFIID riid, void** out) override {
+        if (!out) return E_POINTER;
+        *out = nullptr;
+        if (riid == IID_IUnknown || riid == IID_IDragSourceHelper)
+            *out = static_cast<IDragSourceHelper*>(this);
+        else if (riid == IID_IDropTargetHelper)
+            *out = static_cast<IDropTargetHelper*>(this);
+        else
+            return E_NOINTERFACE;
+        AddRef();
+        return S_OK;
+    }
+    IFACEMETHODIMP_(ULONG) AddRef() override { return ++ref_; }
+    IFACEMETHODIMP_(ULONG) Release() override {
+        const ULONG left = --ref_;
+        if (!left) delete this;
+        return left;
+    }
+    IFACEMETHODIMP InitializeFromBitmap(SHDRAGIMAGE* image, IDataObject* data) override {
+        ++image_audit.initializes;
+        image_audit.bitmap = image->hbmpDragImage;
+        DIBSECTION dib{};
+        std::vector<std::wstring> paths;
+        const bool got_bitmap = GetObjectW(image->hbmpDragImage, sizeof(dib), &dib) ==
+            static_cast<int>(sizeof(dib));
+        bool transparent = false, opaque = false;
+        if (got_bitmap && dib.dsBm.bmBits) {
+            const auto* pixels = static_cast<const uint32_t*>(dib.dsBm.bmBits);
+            const size_t count = static_cast<size_t>(dib.dsBm.bmWidth) * dib.dsBm.bmHeight;
+            for (size_t i = 0; i < count; ++i) {
+                transparent = transparent || pixels[i] == 0;
+                opaque = opaque || (pixels[i] >> 24) == 255;
+            }
+        }
+        image_audit.valid_image = got_bitmap && transparent && opaque &&
+            image->sizeDragImage.cx == dib.dsBm.bmWidth &&
+            image->sizeDragImage.cy == dib.dsBm.bmHeight &&
+            image->sizeDragImage.cx <= 304 && image->sizeDragImage.cy <= 224 &&
+            image->ptOffset.x == 0 && image->ptOffset.y == 0 &&
+            image->crColorKey == CLR_NONE && pulse::ui::ExtractHDropPaths(data, paths);
+        if (SUCCEEDED(image_audit.initialize_result)) owned_bitmap_ = image->hbmpDragImage;
+        return image_audit.initialize_result;
+    }
+    IFACEMETHODIMP InitializeFromWindow(HWND, POINT*, IDataObject*) override { return E_NOTIMPL; }
+    IFACEMETHODIMP DragEnter(HWND, IDataObject*, POINT* point, DWORD effect) override {
+        ++image_audit.enters;
+        image_audit.point = *point;
+        image_audit.effect = effect;
+        return image_audit.enter_result;
+    }
+    IFACEMETHODIMP DragOver(POINT* point, DWORD effect) override {
+        ++image_audit.overs;
+        image_audit.point = *point;
+        image_audit.effect = effect;
+        return image_audit.over_result;
+    }
+    IFACEMETHODIMP DragLeave() override {
+        if (source_) ++image_audit.source_cleanups;
+        else ++image_audit.leaves;
+        return S_OK;
+    }
+    IFACEMETHODIMP Drop(IDataObject*, POINT* point, DWORD effect) override {
+        ++image_audit.drops;
+        image_audit.point = *point;
+        image_audit.effect = effect;
+        return image_audit.drop_result;
+    }
+    IFACEMETHODIMP Show(BOOL) override { return S_OK; }
+
+private:
+    ULONG ref_ = 1;
+    HBITMAP owned_bitmap_ = nullptr;
+    bool source_ = false;
+};
+
+HRESULT WINAPI AuditCreateDragHelper(REFCLSID clsid, IUnknown* outer, DWORD context,
+                                    REFIID riid, void** out) {
+    if (!out) return E_POINTER;
+    *out = nullptr;
+    ++image_audit.creates;
+    if (clsid != CLSID_DragDropHelper || outer || context != CLSCTX_INPROC_SERVER)
+        return E_INVALIDARG;
+    if (FAILED(image_audit.create_result)) return image_audit.create_result;
+    auto* helper = new AuditedDragHelper(riid == IID_IDragSourceHelper);
+    const HRESULT hr = helper->QueryInterface(riid, out);
+    helper->Release();
+    return hr;
+}
+
+HRESULT WINAPI AuditNativeDrag(IDataObject* data, IDropSource* source, DWORD allowed, DWORD* effect) {
     ++native_calls;
     pulse::ui::ExtractHDropPaths(data, native_paths);
-    *effect = allowed & DROPEFFECT_COPY;
-    return DRAGDROP_S_DROP;
+    native_allowed = allowed;
+    native_preferred = pulse::ui::PreferredDropEffect(data);
+    if (native_source_audit) native_source_audit(source);
+    *effect = native_result == DRAGDROP_S_DROP ? allowed & DROPEFFECT_COPY : DROPEFFECT_NONE;
+    return native_result;
 }
 
 int wmain() {
@@ -236,6 +362,44 @@ int wmain() {
     Check(ordinary == DROPEFFECT_COPY && native_calls == 1 &&
           native_paths == std::vector<std::wstring>{original.wstring()},
           "ordinary drag still reaches native boundary with selected path");
+    Check(image_audit.initializes == 1 && image_audit.valid_image &&
+          image_audit.source_cleanups == 1 && image_audit.live == 0,
+          "shell drag initializes valid drag image and cleans up helper on exit");
+    {
+        image_audit = {};
+        DropTargetCallbacks callbacks;
+        callbacks.drag_over = [](const auto&, POINT, DWORD, DWORD mask, DWORD) { return mask; };
+        callbacks.drop = [](const auto&, POINT, DWORD, DWORD mask, DWORD) { return mask; };
+        auto* target = new WindowDropTarget(reinterpret_cast<HWND>(1), std::move(callbacks));
+        Check(image_audit.creates == 1 && image_audit.live == 1,
+              "drop target creates drop target helper when window handle is provided");
+        auto* data = FileDataObject::Create({ original.wstring() });
+        DWORD effect = DROPEFFECT_COPY;
+        target->DragEnter(data, 0, POINTL{ 100, 200 }, &effect);
+        Check(image_audit.enters == 1 && image_audit.point.x == 100 && image_audit.point.y == 200,
+              "drop target helper receives DragEnter with coordinates");
+        effect = DROPEFFECT_COPY;
+        target->DragOver(0, POINTL{ 150, 250 }, &effect);
+        Check(image_audit.overs == 1 && image_audit.point.x == 150 && image_audit.point.y == 250,
+              "drop target helper receives DragOver updates");
+        effect = DROPEFFECT_COPY;
+        target->Drop(data, 0, POINTL{ 160, 260 }, &effect);
+        Check(image_audit.drops == 1 && image_audit.point.x == 160 && image_audit.point.y == 260,
+              "drop target helper receives Drop event");
+        target->Release();
+        data->Release();
+        Check(image_audit.live == 0, "drop target helper released with drop target");
+    }
+    {
+        const D2D1_RECT_F bounds = D2D1::RectF(0, 0, 1000, 800);
+        const auto r1 = ItemDragPreviewRect(bounds, 100, 100, 200, 50, 1.0f);
+        Check(r1.left == 116.0f && r1.top == 120.0f && r1.right == 316.0f && r1.bottom == 170.0f,
+              "drag preview offsets down-right from cursor within bounds");
+        const auto r2 = ItemDragPreviewRect(bounds, 950, 780, 200, 50, 1.0f);
+        Check(r2.right <= bounds.right && r2.bottom <= bounds.bottom &&
+              r2.left < 950.0f && r2.top < 780.0f,
+              "drag preview flips left and upward when approaching viewport bounds");
+    }
     Check(DropIntoOwnFolder({L"E:\\work\\.minecraft"}, L"E:\\work\\.minecraft") &&
           DropIntoOwnFolder({L"E:\\work\\.minecraft"}, L"e:\\WORK\\.minecraft\\") &&
           DropIntoOwnFolder({L"E:\\work\\a.txt", L"E:\\work\\.minecraft"}, L"E:\\work\\.minecraft\\mods") &&
@@ -255,6 +419,17 @@ int wmain() {
                                L"E:\\with space\\"}) ==
               L"C:\\a.txt \"D:\\my files\\b c.txt\" \\\\srv\\share\\d.txt \"E:\\with space\\\\\"",
           "dropped items become one argument each, quoted only when they contain blanks");
+    Check(FirstDroppableFolder({original.wstring()}).empty(),
+          "regular file is not recognized as a droppable folder for tab bar or pane drops");
+    Check(FirstDroppableFolder({root.wstring()}) == root.wstring(),
+          "folder directory is recognized as a droppable folder for new tab");
+    Check(FirstDroppableFolder({original.wstring(), root.wstring()}) == root.wstring(),
+          "first droppable folder is identified in a mixed file and folder list");
+    Check(LooksLikeFolderShortcut(L"C:\\shortcuts\\folder.lnk") &&
+          LooksLikeFolderShortcut(L"D:\\TARGET.LNK") &&
+          !LooksLikeFolderShortcut(L"C:\\folder\\target") &&
+          !LooksLikeFolderShortcut(L"C:\\file.txt"),
+          "folder shortcuts (.lnk) are recognized for header and new tab drop");
     DeleteFileW(original.c_str());
     DeleteFileW(archived.c_str());
     RemoveDirectoryW(root.c_str());

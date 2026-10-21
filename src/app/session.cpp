@@ -25,9 +25,24 @@ namespace {
 //           fields stay and mirror the focused window, so version 7 readers
 //           (which accept any version) still restore that window. windows[]
 //           is written last: the readers find keys by their first occurrence.
-constexpr int kSessionVersion = 8;
+//   8 -> 9: quickAccessHidden expanded from 4 bits to 8 bits for Documents,
+//           Pictures, Music, Videos. Document versions < 7 drop mask to 0;
+//           versions 7 and 8 retain low 4 bits (raw & 0x0F); version 9 retains
+//           low 8 bits (raw & 0xFF). Applied across top-level, windows[],
+//           and closedWindows[].
+constexpr int kSessionVersion = 9;
 // First version whose quickAccessHidden uses the current bit positions.
 constexpr int kQuickAccessBitsVersion = 7;
+
+// Normalize quickAccessHidden mask based on the session document version:
+//   version < 7    => 0 (old pre-v7 bitmask dropped)
+//   version 7 or 8 => raw & 0x0F (retain 4 legacy built-in items, discard old high bits)
+//   version >= 9   => raw & 0xFF (all 8 built-in items valid)
+inline constexpr int NormalizeQuickAccessHidden(int raw, int doc_version) noexcept {
+    if (doc_version < kQuickAccessBitsVersion) return 0;
+    if (doc_version < 9) return raw & 0x0F;
+    return raw & 0xFF;
+}
 
 // Folder-view column widths: modified, type, size[, created, accessed].
 // The two date columns are only written when set, so the value stays the
@@ -456,8 +471,8 @@ bool LoadSession(SessionSnapshot& snap) {
     return ParseSessionJson(json, snap);
 }
 
-// One windows[] or closedWindows[] element (version 8).
-static WindowSessionSnapshot ParseWindowJson(const std::wstring& wj) {
+// One windows[] or closedWindows[] element (version 8+).
+static WindowSessionSnapshot ParseWindowJson(const std::wstring& wj, int doc_version) {
     WindowSessionSnapshot w;
     w.window_rect = {pulse::json::ExtractInt(wj, L"left"), pulse::json::ExtractInt(wj, L"top"),
                      pulse::json::ExtractInt(wj, L"right"), pulse::json::ExtractInt(wj, L"bottom")};
@@ -466,7 +481,7 @@ static WindowSessionSnapshot ParseWindowJson(const std::wstring& wj) {
     l.sidebar_collapsed = pulse::json::ExtractInt(wj, L"sidebarCollapsed");
     l.sidebar_hidden = pulse::json::ExtractInt(wj, L"sidebarHidden");
     l.sidebar_order = ParseSidebarOrder(pulse::json::ExtractString(wj, L"sidebarOrder"));
-    l.quick_access_hidden = pulse::json::ExtractInt(wj, L"quickAccessHidden");
+    l.quick_access_hidden = NormalizeQuickAccessHidden(pulse::json::ExtractInt(wj, L"quickAccessHidden"), doc_version);
     l.starred_expanded = pulse::json::ExtractBool(wj, L"starredExpanded", true);
     l.details_panel = pulse::json::ExtractInt(wj, L"detailsPanel") != 0;
     l.details_panel_width = pulse::json::ExtractInt(wj, L"detailsPanelWidth");
@@ -492,14 +507,15 @@ bool ParseSessionJson(const std::wstring& json, SessionSnapshot& snap) {
     snap.window_rect.bottom = pulse::json::ExtractInt(json, L"bottom");
     snap.maximized = pulse::json::ExtractBool(json, L"maximized");
     snap.dark = pulse::json::ExtractBool(json, L"dark");
+    const int doc_version = pulse::json::ExtractInt(json, L"version");
     snap.active_path = pulse::json::ExtractString(json, L"path");
     snap.sidebar_collapsed = pulse::json::ExtractInt(json, L"sidebarCollapsed");
     snap.sidebar_hidden = pulse::json::ExtractInt(json, L"sidebarHidden");
     snap.sidebar_order = ParseSidebarOrder(pulse::json::ExtractString(json, L"sidebarOrder"));
-    // Bit positions changed in version 7 (the reserved starred bit is gone), so
-    // anything older restarts with every built-in link visible.
-    snap.quick_access_hidden = pulse::json::ExtractInt(json, L"version") >= kQuickAccessBitsVersion
-        ? pulse::json::ExtractInt(json, L"quickAccessHidden") : 0;
+    // Bit positions changed in version 7 (the reserved starred bit is gone),
+    // and expanded to 8 items in version 9.
+    snap.quick_access_hidden = NormalizeQuickAccessHidden(
+        pulse::json::ExtractInt(json, L"quickAccessHidden"), doc_version);
     snap.starred_expanded = json.find(L"\"starredExpanded\"") == std::wstring::npos
         ? true : pulse::json::ExtractBool(json, L"starredExpanded");
     snap.details_panel = pulse::json::ExtractInt(json, L"detailsPanel") != 0;
@@ -554,7 +570,7 @@ bool ParseSessionJson(const std::wstring& json, SessionSnapshot& snap) {
     std::vector<std::wstring> windowObjs;
     if (ExtractJsonArray(json, L"windows", windowsBody) &&
         SplitTopLevelObjects(windowsBody, windowObjs)) {
-        for (const std::wstring& wj : windowObjs) snap.windows.push_back(ParseWindowJson(wj));
+        for (const std::wstring& wj : windowObjs) snap.windows.push_back(ParseWindowJson(wj, doc_version));
     }
     if (snap.windows.empty()) {
         // Version 7 and older (or an unreadable windows[]): the single window.
@@ -581,7 +597,7 @@ bool ParseSessionJson(const std::wstring& json, SessionSnapshot& snap) {
     if (ExtractJsonArray(json, L"closedWindows", closedBody) && SplitTopLevelObjects(closedBody, closedObjs)) {
         for (const std::wstring& cj : closedObjs) {
             ClosedWindowSessionSnapshot closed;
-            closed.window = ParseWindowJson(cj);
+            closed.window = ParseWindowJson(cj, doc_version);
             closed.name = pulse::json::ExtractString(cj, L"closedName");
             if (!closed.window.layout_tabs.empty()) snap.closed_windows.push_back(std::move(closed));
         }

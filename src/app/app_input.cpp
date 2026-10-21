@@ -107,6 +107,7 @@ void ClearDropFeedback(AppState& s) {
     s.dropSidebar = -1;
     s.dropTray = false;
     s.dropQuickAccess = false;
+    s.dropNewTab = false;
     s.dropBadge.clear();
     s.dropBadgeMove = false;
     s.dropDestDir.clear();
@@ -137,6 +138,26 @@ bool PointOnPaneHeader(const AppState& s, const ui::WindowViewModel& vm,
     }
     const float header = s.renderer.PaneHeaderHeight();
     return x >= rc.left && x < rc.right && y >= rc.top && y < rc.top + header;
+}
+
+static bool IsPointOnTabBar(const AppState& s, const ui::WindowViewModel& vm, float x, float y) {
+    D2D1_RECT_F rect = D2D1::RectF(0, 0, static_cast<float>(s.compositor.Width()),
+                                  static_cast<float>(s.compositor.Height()));
+    ui::HitTestResult hit = s.renderer.HitTest(vm, rect, x, y);
+    if (hit.region == ui::HitTestResult::SidebarItem &&
+        (IsVerticalTabPath(hit.path) || hit.path == L"pulse:tab:new")) {
+        return true;
+    }
+    if (y < 0.0f || y >= s.renderer.TitleBarHeight()) return false;
+    if (hit.region == ui::HitTestResult::Close ||
+        hit.region == ui::HitTestResult::Maximize ||
+        hit.region == ui::HitTestResult::Minimize ||
+        hit.region == ui::HitTestResult::SettingsButton ||
+        hit.region == ui::HitTestResult::ThemeToggle ||
+        hit.region == ui::HitTestResult::SidebarToggle) {
+        return false;
+    }
+    return true;
 }
 
 // Folder path, or a .lnk that DropExecute will resolve. No COM on drag-over.
@@ -289,6 +310,24 @@ DWORD ResolveDropTarget(AppState& s, const std::vector<std::wstring>& sources,
         if (view && !view->current_path.empty() && !fs::IsVirtualPath(view->current_path)) {
             s.dropDestDir = view->current_path;
             destName = BaseName(view->current_path);
+        }
+    } else if (hit.region == ui::HitTestResult::TabNew ||
+               (hit.region == ui::HitTestResult::None &&
+                IsPointOnTabBar(s, vm, static_cast<float>(pt.x), static_cast<float>(pt.y))) ||
+               (hit.region == ui::HitTestResult::SidebarItem && hit.path == L"pulse:tab:new")) {
+        const std::wstring folder = HeaderDropHint(sources);
+        if (!folder.empty()) {
+            s.springRow = -1;
+            s.dropNewTab = true;
+            s.dropDestDir = folder;
+            destName = BaseName(folder);
+            s.dropBadge = l10n::Get(l10n::StringId::OpenNewTab);
+            s.dropBadgeX = (float)pt.x;
+            s.dropBadgeY = (float)pt.y;
+            InvalidateRect(s.hwnd, nullptr, FALSE);
+            if (allowed & DROPEFFECT_LINK) return DROPEFFECT_LINK;
+            if (allowed & DROPEFFECT_COPY) return DROPEFFECT_COPY;
+            return DROPEFFECT_NONE;
         }
     } else if (hit.region == ui::HitTestResult::BreadcrumbSegment && !hit.path.empty()) {
         s.dropDestDir = hit.path;
@@ -448,6 +487,7 @@ DWORD DropExecute(AppState& s, const std::vector<std::wstring>& sources,
     const std::wstring launch_program = s.dropLaunchProgram;
     bool tray = s.dropTray;
     const bool header = s.dropHeader;
+    const bool new_tab = s.dropNewTab;
     const int header_pane = s.dropPaneIndex;
     const bool pin_quick_access = s.dropQuickAccess;
     const int toolbar_app = s.dropToolbarApp;
@@ -517,6 +557,21 @@ DWORD DropExecute(AppState& s, const std::vector<std::wstring>& sources,
         effect = ui::ComputeDropEffect(key_state, sources.front(), dest,
                                        allowed & (DROPEFFECT_COPY | DROPEFFECT_MOVE),
                                        preferred_effect);
+    }
+
+    if (new_tab) {
+        for (const auto& source : sources) {
+            std::wstring folder = ResolveHeaderDropFolder({source});
+            if (folder.empty()) {
+                const DWORD attrs = GetFileAttributesW(source.c_str());
+                if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY))
+                    folder = fs::NormalizePath(source);
+            }
+            if (!folder.empty()) {
+                OpenTabAt(s, folder);
+            }
+        }
+        return effect;
     }
 
     if (tray) {
@@ -907,6 +962,7 @@ void ResetSidebarPinDrag(AppState& s) {
     s.pinDragToIndex = -1;
     s.pinGapVisible = false;
     s.pinGapLineY = 0.0f;
+    s.dropBadge.clear();
 }
 
 // Insertion slot for the dragged pin, measured against the pinned rows only.
@@ -1967,6 +2023,16 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 }
                 if (s->starDragActive) {
                     ui::WindowViewModel dragVm = BuildVm(*s);
+                    if (IsPointOnTabBar(*s, dragVm, static_cast<float>(mx), static_cast<float>(my))) {
+                        s->dropBadge = l10n::Get(l10n::StringId::OpenNewTab);
+                        s->dropBadgeX = static_cast<float>(mx);
+                        s->dropBadgeY = static_cast<float>(my);
+                        s->dropBadgeMove = false;
+                        s->dropSidebar = -1;
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                        return 0;
+                    }
+                    if (!s->dropBadge.empty()) s->dropBadge.clear();
                     const D2D1_RECT_F dragRect = D2D1::RectF(
                         0, 0, static_cast<float>(s->compositor.Width()),
                         static_cast<float>(s->compositor.Height()));
@@ -2158,15 +2224,33 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         if (s->pinDragPending || s->pinDragActive) {
             if ((GetKeyState(VK_LBUTTON) & 0x8000) == 0) {
                 ResetSidebarPinDrag(*s);
+                ClearDropFeedback(*s);
                 if (GetCapture() == hwnd) ReleaseCapture();
                 InvalidateRect(hwnd, nullptr, FALSE);
             } else {
                 if (!s->pinDragActive && !s->pinDragPath.empty() &&
-                    std::abs(my - s->pinDragStartPt.y) >= kSidebarDragDeadzonePx) {
+                    (std::abs(mx - s->pinDragStartPt.x) >= GetSystemMetrics(SM_CXDRAG) ||
+                     std::abs(my - s->pinDragStartPt.y) >= GetSystemMetrics(SM_CYDRAG))) {
                     s->pinDragActive = true;
                 }
                 if (s->pinDragActive) {
-                    UpdateSidebarPinDrag(*s, my);
+                    ui::WindowViewModel vmDrag = BuildVm(*s);
+                    if (IsPointOnTabBar(*s, vmDrag, static_cast<float>(mx), static_cast<float>(my))) {
+                        s->dropBadge = l10n::Get(l10n::StringId::OpenNewTab);
+                        s->dropBadgeX = static_cast<float>(mx);
+                        s->dropBadgeY = static_cast<float>(my);
+                        s->dropBadgeMove = false;
+                        s->pinGapVisible = false;
+                        s->pinDragToIndex = -1;
+                    } else {
+                        if (!s->dropBadge.empty()) s->dropBadge.clear();
+                        if (s->places.IsQuickAccessPinned(s->pinDragPath)) {
+                            UpdateSidebarPinDrag(*s, my);
+                        } else {
+                            s->pinGapVisible = false;
+                            s->pinDragToIndex = -1;
+                        }
+                    }
                     InvalidateRect(hwnd, nullptr, FALSE);
                 }
             }
@@ -2373,7 +2457,23 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
         if (hit.region == ui::HitTestResult::DetailsPreview) {
             s->dragPending = false;
             return 0;
-        } else if (hit.region == ui::HitTestResult::ColumnDivider) {
+        }
+        if (hit.region == ui::HitTestResult::RowCheckbox && hit.index >= 0) {
+            s->dragPending = false;
+            s->checkboxPressCandidate = true;
+            s->checkboxPressIndex = hit.index;
+            s->checkboxPressPane = s->pane;
+            SetCapture(hwnd);
+            return 0;
+        }
+        if (hit.region == ui::HitTestResult::HeaderCheckbox) {
+            s->dragPending = false;
+            s->headerCheckboxPressCandidate = true;
+            s->headerCheckboxPressPane = s->pane;
+            SetCapture(hwnd);
+            return 0;
+        }
+        if (hit.region == ui::HitTestResult::ColumnDivider) {
             if (s->renameIndex >= 0) HideRenameOverlay(*s, true);
             s->dragPending = false;
             s->columnResizing = true;
@@ -3091,9 +3191,9 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 s->starDragTarget = found == folders.end()
                     ? 0 : static_cast<size_t>(found - folders.begin());
                 SetCapture(hwnd);
-            } else if (s->places.IsQuickAccessPinned(hit.path)) {
-                // Pinned rows reorder inside quick access; navigation waits for
-                // the release so a press can become a drag.
+            } else if (!hit.path.empty() && !hit.path.starts_with(L"pulse:tag:") && !hit.path.starts_with(L"pulse:workspace:")) {
+                // Pinned and fixed sidebar rows (Quick access, drives, virtual places):
+                // navigation waits for release so a press can become a drag to the tab bar.
                 s->pinDragPending = true;
                 s->pinDragActive = false;
                 s->pinDragStartPt = POINT{ mx, my };
@@ -3116,8 +3216,6 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 std::wstring kind, rest;
                 app::ParsePulsePath(hit.path, &kind, &rest);
                 OpenWorkspace(*s, _wtoi(rest.c_str()));
-            } else if (!hit.path.empty()) {
-                NavigateTo(*s, hit.path);
             }
         } else if (hit.region == ui::HitTestResult::StatusBarCancelSearch) {
             if (auto* tab = ActiveTab(*s)) CancelActiveContentSearch(*s, *tab);
@@ -3274,6 +3372,59 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         (void)wParam;
         if (s) {
             s->paneDragPending = false;
+            if (s->checkboxPressCandidate) {
+                const int candidate_idx = s->checkboxPressIndex;
+                s->checkboxPressCandidate = false;
+                s->checkboxPressIndex = -1;
+                s->checkboxPressPane = nullptr;
+                if (GetCapture() == hwnd) ReleaseCapture();
+                const ui::WindowViewModel vm = BuildVm(*s);
+                const D2D1_RECT_F rect = D2D1::RectF(0, 0,
+                    static_cast<float>(s->compositor.Width()),
+                    static_cast<float>(s->compositor.Height()));
+                const ui::HitTestResult hit = s->renderer.HitTest(
+                    vm, rect, static_cast<float>(GET_X_LPARAM(lParam)), static_cast<float>(GET_Y_LPARAM(lParam)));
+                if (hit.region == ui::HitTestResult::RowCheckbox && hit.index == candidate_idx) {
+                    if (app::Tab* tab = ActiveTab(*s)) {
+                        tab->ToggleSelect(candidate_idx);
+                        InvalidateRect(hwnd, nullptr, FALSE);
+                    }
+                }
+                return 0;
+            }
+            if (s->headerCheckboxPressCandidate) {
+                s->headerCheckboxPressCandidate = false;
+                s->headerCheckboxPressPane = nullptr;
+                if (GetCapture() == hwnd) ReleaseCapture();
+                const ui::WindowViewModel vm = BuildVm(*s);
+                const D2D1_RECT_F rect = D2D1::RectF(0, 0,
+                    static_cast<float>(s->compositor.Width()),
+                    static_cast<float>(s->compositor.Height()));
+                const ui::HitTestResult hit = s->renderer.HitTest(
+                    vm, rect, static_cast<float>(GET_X_LPARAM(lParam)), static_cast<float>(GET_Y_LPARAM(lParam)));
+                if (hit.region == ui::HitTestResult::HeaderCheckbox) {
+                    if (app::Tab* tab = ActiveTab(*s)) {
+                        if (tab->CountBound() > 0) {
+                            bool all_sel = true;
+                            size_t selectable_count = 0;
+                            std::vector<int> selectable;
+                            selectable.reserve(static_cast<size_t>(tab->CountBound()));
+                            for (int i = 0; i < tab->CountBound(); ++i) {
+                                if (!tab->EntryVisible(i)) continue;
+                                ++selectable_count;
+                                selectable.push_back(i);
+                                if (!tab->IsSelected(i)) all_sel = false;
+                            }
+                            if (selectable_count > 0) {
+                                if (all_sel) tab->ClearSelection();
+                                else tab->SelectIndices(selectable);
+                                InvalidateRect(hwnd, nullptr, FALSE);
+                            }
+                        }
+                    }
+                }
+                return 0;
+            }
             if (s->settings.slider_drag() >= 0) {
                 s->settings.EndSlider();
                 if (GetCapture() == hwnd) ReleaseCapture();
@@ -3327,10 +3478,18 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 const std::wstring path = s->groupDragPath;
                 const bool navigate = s->groupDragNavigate;
                 const int section = s->groupDragId;
-                if (was_active) CommitSidebarGroupDrag(*s);
+                const int mx = GET_X_LPARAM(lParam);
+                const int my = GET_Y_LPARAM(lParam);
+                ui::WindowViewModel vmUp = BuildVm(*s);
+                const bool on_tab_bar = was_active &&
+                    IsPointOnTabBar(*s, vmUp, static_cast<float>(mx), static_cast<float>(my));
+                if (was_active && !on_tab_bar) CommitSidebarGroupDrag(*s);
                 ResetSidebarGroupDrag(*s);
+                ClearDropFeedback(*s);
                 if (GetCapture() == hwnd) ReleaseCapture();
-                if (!was_active) {
+                if (on_tab_bar && !path.empty()) {
+                    OpenTabAt(*s, path);
+                } else if (!was_active) {
                     // A row of a header-less section navigates on release; a
                     // header folds its section (masks are keyed by id).
                     if (navigate || !path.empty()) NavigateTo(*s, path);
@@ -3343,7 +3502,14 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 const bool was_active = s->pinDragActive;
                 const std::wstring path = s->pinDragPath;
                 const bool tab_row = IsVerticalTabPath(path);
-                if (was_active && s->pinDragToIndex >= 0) {
+                const int mx = GET_X_LPARAM(lParam);
+                const int my = GET_Y_LPARAM(lParam);
+                ui::WindowViewModel vmUp = BuildVm(*s);
+                const bool on_tab_bar = was_active &&
+                    IsPointOnTabBar(*s, vmUp, static_cast<float>(mx), static_cast<float>(my));
+                if (on_tab_bar && !path.empty() && !tab_row) {
+                    OpenTabAt(*s, path);
+                } else if (was_active && s->pinDragToIndex >= 0) {
                     if (tab_row)
                         CommitVerticalTabDrag(*s, path, static_cast<size_t>(s->pinDragToIndex));
                     else
@@ -3351,6 +3517,7 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                             static_cast<size_t>(s->pinDragToIndex));
                 }
                 ResetSidebarPinDrag(*s);
+                ClearDropFeedback(*s);
                 if (GetCapture() == hwnd) ReleaseCapture();
                 if (!was_active && !path.empty() && !tab_row) NavigateTo(*s, path);
                 InvalidateRect(hwnd, nullptr, FALSE);
@@ -3359,12 +3526,21 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             if (s->starDragPending || s->starDragActive) {
                 const bool was_active = s->starDragActive;
                 const std::wstring path = s->starDragPath;
-                if (was_active && s->dropSidebar >= 0)
+                const int mx = GET_X_LPARAM(lParam);
+                const int my = GET_Y_LPARAM(lParam);
+                ui::WindowViewModel vmUp = BuildVm(*s);
+                const bool on_tab_bar = was_active &&
+                    IsPointOnTabBar(*s, vmUp, static_cast<float>(mx), static_cast<float>(my));
+                if (on_tab_bar && !path.empty()) {
+                    OpenTabAt(*s, path);
+                } else if (was_active && s->dropSidebar >= 0) {
                     s->places.ReorderStarredFolder(path, s->starDragTarget);
+                }
                 s->starDragPending = false;
                 s->starDragActive = false;
                 s->starDragPath.clear();
                 s->dropSidebar = -1;
+                ClearDropFeedback(*s);
                 if (GetCapture() == hwnd) ReleaseCapture();
                 if (!was_active && !path.empty()) NavigateTo(*s, path);
                 InvalidateRect(hwnd, nullptr, FALSE);
@@ -3423,8 +3599,15 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 s->tagOrder.clear();
                 s->tagGapVisible = false;
                 s->tagGapFrom = s->tagGapTo = s->tagGapLineY = 0.0f;
+                ui::WindowViewModel vmUp = BuildVm(*s);
+                const int mx = GET_X_LPARAM(lParam);
+                const int my = GET_Y_LPARAM(lParam);
+                const bool on_tab_bar = wasActive &&
+                    IsPointOnTabBar(*s, vmUp, static_cast<float>(mx), static_cast<float>(my));
                 if (GetCapture() == hwnd) ReleaseCapture();
-                if (!wasActive && !path.empty()) NavigateTo(*s, path); // plain click
+                ClearDropFeedback(*s);
+                if (on_tab_bar && !path.empty()) OpenTabAt(*s, path);
+                else if (!wasActive && !path.empty()) NavigateTo(*s, path); // plain click
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
@@ -3876,6 +4059,9 @@ LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             if ((starred && starred->kind == app::PlaceItemKind::Folder) || quick_access) {
                 ShowCuratedItemMenu(*s, hit.path, false, sp);
                 shown = true;
+            } else if (!hit.path.empty()) {
+                ShowBreadcrumbMenu(*s, hit.path, sp);
+                shown = true;
             }
         } else if (hit.region == ui::HitTestResult::SidebarHeader ||
                    hit.region == ui::HitTestResult::SidebarBlank) {
@@ -4215,6 +4401,13 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             s->showFps = s->forceStatusPerformance || s->appPrefs.show_status_performance;
             s->appPrefs.Save();
             InvalidateRect(hwnd, nullptr, FALSE);
+        } else if (ctrl && wParam == VK_SPACE) {
+            // Touch improvement P3: Ctrl+Space toggles the currently focused item when list has focus and no edit is active
+            if (s->renameIndex < 0 && tab && tab->selected_index >= 0 &&
+                tab->selected_index < tab->CountBound()) {
+                tab->ToggleSelect(tab->selected_index);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
         } else if (wParam == VK_SPACE) {
             // A hover card up: Space opens its file, not the selection.
             if (!OpenHoverPreviewInQuickLook(*s)) ToggleQuickPreview(*s);
@@ -4225,6 +4418,17 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         } else if (ctrl && wParam == L'I') {
             DispatchMenuCommand(*s, app::CmdInvertSelection);
         } else if (wParam == VK_ESCAPE) {
+            if (s->pinDragPending || s->pinDragActive || s->starDragPending || s->starDragActive) {
+                ResetSidebarPinDrag(*s);
+                s->starDragPending = false;
+                s->starDragActive = false;
+                s->starDragPath.clear();
+                s->dropSidebar = -1;
+                ClearDropFeedback(*s);
+                if (GetCapture() == hwnd) ReleaseCapture();
+                InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
             s->contentSelectionAction.reset();
             if (tab->search_content_active || tab->search_awaiting_content || tab->search_live_generation) {
                 CancelActiveContentSearch(*s, *tab);

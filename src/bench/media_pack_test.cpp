@@ -122,7 +122,7 @@ static void ResolutionTests(const fs::path& profile) {
     using namespace packs;
     SetEnvironmentVariableW(L"LOCALAPPDATA", profile.c_str());
     Check(ResolvePackUncached(PackId::Media).source == ToolSource::None, "no pack, no settings -> unavailable");
-    const fs::path base = profile / L"Pulse" / L"packs" / L"ffmpeg";
+    const fs::path base = fs::path(PacksRoot()) / L"ffmpeg";
     WriteText(base / L"installed.json", "{\"version\":\"7.1.1\",\"dir\":\"..\\\\..\\\\evil\"}");
     Check(!ReadInstalledPack(PackId::Media).present, "installed.json dir with separators rejected");
     WriteText(base / L"installed.json", "{\"version\":\"7.1.1\",\"dir\":\"7.1.1\"}");

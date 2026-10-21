@@ -17,6 +17,8 @@
 #include <string>
 #include <vector>
 
+struct IDropTargetHelper;
+
 namespace pulse::ui {
 
 // ---------------------------------------------------------------------------
@@ -120,7 +122,9 @@ private:
     std::function<bool()> esc_hook_;
 };
 
-// Runs the modal DoDragDrop loop. Returns the performed DROPEFFECT_*.
+// Runs the modal DoDragDrop loop. Shell data objects carry a lightweight native
+// drag image; the limited FileDataObject fallback keeps the default cursors.
+// Returns the performed DROPEFFECT_*.
 DWORD DoFileDragDrop(const std::vector<std::wstring>& paths, DWORD allowed_effects,
                      std::function<bool()> esc_consumed,
                      const std::wstring& source_view = {});
@@ -144,6 +148,7 @@ struct DropTargetCallbacks {
 class WindowDropTarget final : public IDropTarget {
 public:
     WindowDropTarget(HWND hwnd, DropTargetCallbacks cb);
+    ~WindowDropTarget();
 
     IFACEMETHODIMP QueryInterface(REFIID riid, void** out) override;
     IFACEMETHODIMP_(ULONG) AddRef() override { return ++ref_; }
@@ -155,10 +160,13 @@ public:
 
 private:
     POINT ClientPoint(POINTL pt) const;
+    void EndDragImage();
 
     LONG ref_ = 1;
     HWND hwnd_ = nullptr;
     DropTargetCallbacks cb_;
+    IDropTargetHelper* drag_image_ = nullptr;
+    bool drag_image_entered_ = false;
     std::vector<std::wstring> sources_; // cached from DragEnter
     DWORD preferred_ = 0;               // source's Preferred DropEffect, from DragEnter
 };

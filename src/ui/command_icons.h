@@ -22,7 +22,8 @@ enum class Icon {
     Cut, Copy, Paste, Rename, Sort, Filter, List, Grid, Split, Columns,
     Panel, PanelClose, Check, Eye, Info, Home, Tray, Pin, Link,
     Palette, Sliders, Warning, Lock, OpenExternal, StarFilled, More,
-    SplitSingle, SplitStacked, SplitThree, SplitFour, Contrast, SwapHorizontal, SwapVertical, Count
+    SplitSingle, SplitStacked, SplitThree, SplitFour, Contrast, SwapHorizontal, SwapVertical,
+    Music, Video, Count
 };
 
 inline Icon FromGlyph(std::wstring_view glyph) noexcept {
@@ -84,6 +85,8 @@ inline Icon FromGlyph(std::wstring_view glyph) noexcept {
     case L'\xE9E9': case L'\xE8A4': return Icon::Sliders;
     case L'\xE7BA': return Icon::Warning;
     case L'\xE72E': return Icon::Lock;
+    case L'\xE8D6': case L'\xEC4F': return Icon::Music;
+    case L'\xE714': case L'\xE8B2': return Icon::Video;
     default: return Icon::None;
     }
 }
@@ -334,6 +337,12 @@ inline ID2D1PathGeometry* BuildGeometry(ID2D1Factory* factory, Icon icon) noexce
         line(3,18,14,18); line(19,18,21,18); circle(16.5f,18,2.5f); break;
     case Icon::Warning: path({{12,3},{22,21},{2,21},{12,3}}); line(12,9,12,14); dot(12,17.5f); break;
     case Icon::Lock: box(4,10,20,21); arc(12,8,5,180,360); line(7,8,7,10); line(17,8,17,10); line(12,14,12,17); break;
+    case Icon::Music:
+        circle(7.5f,16.5f,2.5f); circle(16.5f,13.5f,2.5f);
+        line(10,16.5f,10,5); line(19,13.5f,19,5);
+        line(10,5,19,5); line(10,7.5f,19,7.5f); break;
+    case Icon::Video:
+        box(3,5,16,19,2); path({{16,9.5f},{21,6.5f},{21,17.5f},{16,14.5f}}); break;
     default: break;
     }
     const HRESULT result = sink->Close();

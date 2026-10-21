@@ -20,6 +20,7 @@ struct ControlState {
     bool keyboard_focus = false;
     // Negative means snap to checked; otherwise this is the eased 0..1 check transition.
     float check_progress = -1.0f;
+    bool indeterminate = false; // Tri-state mixed selection
 };
 
 enum class HorizontalAlignment { Left, Center, Right };

@@ -70,6 +70,8 @@ void AppPrefs::ResetToDefaults() {
     list_size_bar = false;
     list_selection_outline = false;
     list_thumbnail_badges = true;
+    item_checkboxes = L"auto";
+    touch_ui_mode = L"auto";
     folder_sort_mode = 0;
     details_columns = ui::kDetailsColumnsDefault;
     startup_open = 0;
@@ -129,10 +131,14 @@ std::wstring AppPrefs::ToJson() const {
     std::wstring escaped_image;
     std::wstring escaped_language;
     std::wstring escaped_home;
+    std::wstring escaped_item_checkboxes;
+    std::wstring escaped_touch_ui_mode;
     pulse::json::Escape(window_effect, escaped_effect);
     pulse::json::Escape(home_folder, escaped_home);
     pulse::json::Escape(background_image, escaped_image);
     pulse::json::Escape(language, escaped_language);
+    pulse::json::Escape(item_checkboxes, escaped_item_checkboxes);
+    pulse::json::Escape(touch_ui_mode, escaped_touch_ui_mode);
     std::wstring out = L"{\n  \"version\":4,\n  \"launch_on_startup\":";
     out += launch_on_startup ? L"true" : L"false";
     out += L",\n  \"keep_running_on_close\":";
@@ -173,6 +179,8 @@ std::wstring AppPrefs::ToJson() const {
     out += list_selection_outline ? L"true" : L"false";
     out += L",\n  \"list_thumbnail_badges\":";
     out += list_thumbnail_badges ? L"true" : L"false";
+    out += L",\n  \"item_checkboxes\":\"" + escaped_item_checkboxes + L"\"";
+    out += L",\n  \"touch_ui_mode\":\"" + escaped_touch_ui_mode + L"\"";
     out += L",\n  \"vertical_tabs\":";
     out += vertical_tabs ? L"true" : L"false";
     out += L",\n  \"sidebar_collapsed\":";
@@ -342,6 +350,12 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     list_tag_name_color = pulse::json::ExtractBool(json, L"list_tag_name_color", false);
     list_selection_outline = pulse::json::ExtractBool(json, L"list_selection_outline", false);
     list_thumbnail_badges = pulse::json::ExtractBool(json, L"list_thumbnail_badges", true);
+    item_checkboxes = pulse::json::ExtractString(json, L"item_checkboxes", L"auto");
+    if (item_checkboxes != L"auto" && item_checkboxes != L"always" && item_checkboxes != L"never")
+        item_checkboxes = L"auto";
+    touch_ui_mode = pulse::json::ExtractString(json, L"touch_ui_mode", L"auto");
+    if (touch_ui_mode != L"auto" && touch_ui_mode != L"compact" && touch_ui_mode != L"touch")
+        touch_ui_mode = L"auto";
     vertical_tabs = pulse::json::ExtractBool(json, L"vertical_tabs", false);
     sidebar_collapsed = pulse::json::ExtractBool(json, L"sidebar_collapsed", false);
     folder_sort_mode = pulse::json::ExtractInt(json, L"folder_sort_mode", 0);

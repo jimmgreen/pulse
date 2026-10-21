@@ -46,6 +46,10 @@ struct AppPrefs {
     bool list_selection_outline = false; // accent outline around selected items (#78)
     // Grid thumbnails: default-program badge, plus playing time on videos.
     bool list_thumbnail_badges = true;
+    // Item selection checkboxes: "auto" (default), "always", "never"
+    std::wstring item_checkboxes = L"auto";
+    // Touch UI density mode: "auto" (default), "compact", "touch"
+    std::wstring touch_ui_mode = L"auto";
     bool vertical_tabs = false;       // tabs as the first sidebar section
     bool sidebar_collapsed = false;   // sidebar folded to its icon rail (Ctrl+B)
     // 0 folders first, 1 follow the sort direction, 2 mixed with files

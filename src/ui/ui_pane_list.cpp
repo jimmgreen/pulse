@@ -28,8 +28,8 @@
 namespace pulse::ui {
 
 float MainRenderer::ListRowHeightDip(const PaneViewModel& vm) const {
-    if (DetailsShowsSnippet(vm)) return std::max(row_height_dip_, kDetailsSnippetMinRowDip);
-    return row_height_dip_;
+    const float base = DetailsShowsSnippet(vm) ? std::max(row_height_dip_, kDetailsSnippetMinRowDip) : row_height_dip_;
+    return EffectiveRowHeightDip(base, touch_density_);
 }
 
 bool MainRenderer::EnsureEmptyStateSvg() {
@@ -666,22 +666,16 @@ D2D1_RECT_F MainRenderer::NameCellRect(const D2D1_RECT_F& pane_bounds, int view_
                                        const std::array<float, 4>& search_dividers,
                                        float row_height_px) const {
     const D2D1_RECT_F list = PaneListRect(pane_bounds, extra_top, mode);
-    if (mode != ViewMode::Details) {
-        ViewLayout layout(mode, list, item_count, scroll_x, scroll_y, scale_, row_height_dip_);
-        return layout.NameRect(view_row);
+    const float row_dip = row_height_px > 0.0f ? row_height_px / scale_
+        : EffectiveRowHeightDip(row_height_dip_, touch_density_);
+    const ViewLayout layout(mode, list, item_count, scroll_x, scroll_y, scale_, row_dip,
+                            nullptr, ItemSelectionSlotDip());
+    auto name = layout.NameRect(view_row);
+    if (mode == ViewMode::Details) {
+        const auto columns = DetailsColumns(list, column_dividers, search_view, search_dividers);
+        name.right = std::max(name.left, std::min(name.right, columns.DividerX(0) - margin_));
     }
-    const float list_x = list.left;
-    const float list_y = list.top;
-    const float name_w = DetailsColumns(list, column_dividers, search_view,
-                                        search_dividers).widths[0];
-    const float icon_size = 16.0f * scale_;
-    const float row_h = row_height_px > 0.0f ? row_height_px : row_height_;
-    const float row_y = list_y + static_cast<float>(view_row) * row_h - scroll_y;
-    const float name_x = list_x + margin_ + icon_size + margin_ + 4.0f * scale_;
-    const float name_avail = name_w - icon_size - margin_ * 3;
-    const float inset = 1.0f * scale_;
-    return D2D1::RectF(name_x, row_y + inset, name_x + std::max(40.0f * scale_, name_avail),
-                       row_y + row_h - inset);
+    return name;
 }
 
 bool MainRenderer::PointInItemName(const PaneViewModel& vm, const D2D1_RECT_F& full_bounds,
@@ -703,7 +697,7 @@ bool MainRenderer::PointInItemName(const PaneViewModel& vm, const D2D1_RECT_F& f
         // Grouped rows are offset by headers; take the vertical band from the layout.
         const D2D1_RECT_F list = PaneListRect(pane_bounds, extra_top, vm.view_mode);
         const ViewLayout grouped(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y,
-                                 scale_, ListRowHeightDip(vm, list), groups);
+                                 scale_, ListRowHeightDip(vm, list), groups, ItemSelectionSlotDip());
         const D2D1_RECT_F cell = grouped.ItemRect(view_index);
         if (cell.bottom - cell.top < 0.5f) return false;
         const float h = name.bottom - name.top;
@@ -1266,7 +1260,7 @@ void MainRenderer::DrawMorphFrom(const PaneViewModel& vm, const motion::ViewMorp
                       mode == ViewMode::MediumIcons;
     // Same inputs as the previous frame's DrawList: identical rects.
     const ViewLayout layout(mode, from.viewport, from.count, from.scroll_x, from.scroll_y,
-                            scale_, from.row_height_dip);
+                            scale_, from.row_height_dip, nullptr, ItemSelectionSlotDip());
     const auto [first, last] = layout.VisibleRange();
     static const std::vector<NameMatchRange> kNoMatches;
     // Details: the metadata columns fade out too, instead of vanishing.
@@ -1849,11 +1843,15 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
             const bool active = !pane.curated_order && pane.sort_column == col;
             MakeBrush(dc, active ? theme.accent : theme.text, brText_);
             IDWriteTextFormat* fmt = compositor_->HeaderFormat();
-            const float textInset = 8.0f * scale_;
+            const float textInset = (8.0f + (col == SortColumn::Name ? ItemSelectionSlotDip() : 0.0f)) * scale_;
             const float contentLeft = cx + textInset;
-            const float availableW = std::max(0.0f, cw - textInset * 2.0f);
-            const float iconW = active ? 12.0f * scale_ : 0.0f;
-            const float iconGap = active ? 3.0f * scale_ : 0.0f;
+            const float availableW = std::max(0.0f, cw - textInset - 8.0f * scale_);
+            if (availableW <= 0.0f) {
+                cx += cw;
+                return;
+            }
+            const float iconW = active && availableW >= 15.0f * scale_ ? 12.0f * scale_ : 0.0f;
+            const float iconGap = iconW > 0.0f ? 3.0f * scale_ : 0.0f;
             const float labelAvailable = std::max(0.0f, availableW - iconW - iconGap);
             // LumaText clips to the supplied surface bounds.  DWrite's
             // measured width can differ slightly from LumaText's raster
@@ -1877,7 +1875,7 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
                 DrawTextRect(dc, fmt, brText_.get(), label, groupLeft, y,
                              labelW, column_header_height_);
             }
-            if (active) {
+            if (iconW > 0.0f) {
                 DrawIconText(groupLeft + labelW + iconGap, y, iconW,
                              column_header_height_,
                              pane.sort_direction == SortDirection::Asc
@@ -1892,9 +1890,40 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
         for (int col = 0; col < columns.count; ++col) {
             const float cw = columns.widths[static_cast<size_t>(col)];
             switch (columns.kinds[static_cast<size_t>(col)]) {
-            case ColumnKind::Name:
+            case ColumnKind::Name: {
                 drawCol(pulse::l10n::Get(pulse::l10n::StringId::ColumnName), SortColumn::Name, cw, false);
+                const D2D1_RECT_F nameColRc = D2D1::RectF(
+                    DetailsContentRect(bounds, scale_).left,
+                    y,
+                    columns.Left(ColumnKind::Name) + columns.Width(ColumnKind::Name),
+                    y + column_header_height_);
+                const auto hdr_geom = ComputeHeaderSelectionGeometry(nameColRc, scale_, touch_density_);
+                fluent::ControlState hdr_cb_state{};
+                const size_t total_count = pane.EntryCount();
+                if (total_count == 0) {
+                    hdr_cb_state.enabled = false;
+                } else {
+                    hdr_cb_state.enabled = true;
+                    size_t sel_count = 0;
+                    for (size_t k = 0; k < total_count; ++k) {
+                        if (pane.IsRowSelected(static_cast<int>(k))) ++sel_count;
+                    }
+                    if (sel_count == total_count) {
+                        hdr_cb_state.checked = true;
+                        hdr_cb_state.indeterminate = false;
+                    } else if (sel_count > 0) {
+                        hdr_cb_state.checked = false;
+                        hdr_cb_state.indeterminate = true;
+                    } else {
+                        hdr_cb_state.checked = false;
+                        hdr_cb_state.indeterminate = false;
+                    }
+                }
+                if (checkbox_visibility_ != CheckboxVisibility::Never &&
+                    nameColRc.right - nameColRc.left >= hdr_geom.leading_slot_width + 8.0f * scale_)
+                    painter_.DrawCheckBox(hdr_geom.visual_rect, L"", hdr_cb_state);
                 break;
+            }
             case ColumnKind::Path:
                 drawCol(pulse::l10n::Get(pulse::l10n::StringId::ColumnPath), SortColumn::Path, cw, false);
                 break;
@@ -2290,7 +2319,7 @@ D2D1_RECT_F MainRenderer::RenameFieldRect(const PaneViewModel& vm, const D2D1_RE
     if (view < 0) return {};
     const ListEntryView& e = MakeVisibleEntry(vm, static_cast<size_t>(source_index));
     ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y,
-                      scale_, ListRowHeightDip(vm, list), vm.Groups());
+                      scale_, ListRowHeightDip(vm, list), vm.Groups(), ItemSelectionSlotDip());
     const D2D1_RECT_F nameRc = layout.NameRect(view);
     const bool iconGrid = vm.view_mode == ViewMode::ExtraLargeIcons ||
                           vm.view_mode == ViewMode::LargeIcons ||
@@ -2509,7 +2538,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
     const size_t entryCount = vm.EntryCount();
     if (entryCount == 0) return;
     const D2D1_RECT_F viewport = D2D1::RectF(x, y, x + w, y + h);
-    ViewLayout layout(vm.view_mode, viewport, entryCount, vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, viewport), vm.Groups());
+    ViewLayout layout(vm.view_mode, viewport, entryCount, vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, viewport), vm.Groups(), ItemSelectionSlotDip());
     const auto [startIdx, endIdx] = layout.VisibleRange();
     const DetailsColumnLayout detailsColumns = DetailsColumns(viewport, vm);
     const bool detailsView = vm.view_mode == ViewMode::Details;
@@ -2696,6 +2725,18 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                     (bg.top + bg.bottom - bar_h) * 0.5f, 2.5f * scale_, bar_h, 1.25f * scale_);
             }
             if (draw_shapes && selected) selection_painter.Selected(bg);
+            if (draw_shapes) {
+                const auto cb_geom = ComputeItemSelectionGeometry(
+                    vm.view_mode, cell, scale_, touch_density_, selected,
+                    vm.hover_index == src, touchscreen_ready_, checkbox_visibility_);
+                if (cb_geom.visible) {
+                    fluent::ControlState cb_state{};
+                    cb_state.enabled = true;
+                    cb_state.checked = selected;
+                    cb_state.hovered = (vm.hover_index == src);
+                    painter_.DrawCheckBox(cb_geom.visual_rect, L"", cb_state);
+                }
+            }
             if (draw_shapes && row_flash > 0.0f && !IsHighContrast()) {
                 // Newly appeared (pasted / created / extracted) row: fading accent wash.
                 MakeBrush(dc, WithAlpha(theme.accent, 0.20f * row_flash), brFillInput_);
@@ -3493,7 +3534,7 @@ void MainRenderer::DrawScrollbar(const PaneViewModel& vm, float x, float y, floa
     (void)theme;
     ID2D1DeviceContext* dc = compositor_->Dc();
     ViewLayout layout(vm.view_mode, D2D1::RectF(x, y, x + w, y + h), vm.EntryCount(),
-                      vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, D2D1::RectF(x, y, x + w, y + h)), vm.Groups());
+                      vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, D2D1::RectF(x, y, x + w, y + h)), vm.Groups(), ItemSelectionSlotDip());
     const float totalH = layout.ContentHeight();
     auto sb = ComputeScrollbar(h, totalH, vm.scroll_y, layout.Metrics().cell_height);
     if (!sb.valid) return;
@@ -3506,7 +3547,7 @@ bool MainRenderer::PaneScrollbarGeometry(const PaneViewModel& vm, const D2D1_REC
     const D2D1_RECT_F pane_bounds = PaneBodyBounds(vm, full_bounds);
     const float extra = PaneExtraTop(vm, scale_, pane_bounds.right - pane_bounds.left, compositor_);
     const auto list = PaneListRect(pane_bounds, extra, vm.view_mode);
-    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups());
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups(), ItemSelectionSlotDip());
     max_scroll = layout.MaxScrollY();
     const auto metrics = ComputeScrollbar(list.bottom - list.top, layout.ContentHeight(),
                                            vm.scroll_y, layout.Metrics().cell_height);
@@ -3521,7 +3562,7 @@ float MainRenderer::MaxScrollForPane(const PaneViewModel& vm, const D2D1_RECT_F&
     const D2D1_RECT_F pane_bounds = PaneBodyBounds(vm, full_bounds);
     const float extra = PaneExtraTop(vm, scale_, pane_bounds.right - pane_bounds.left, compositor_);
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
-    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups());
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups(), ItemSelectionSlotDip());
     return layout.MaxScrollY();
 }
 
@@ -3530,7 +3571,7 @@ float MainRenderer::MaxScrollXForPane(const PaneViewModel& vm,
     const D2D1_RECT_F pane_bounds = PaneBodyBounds(vm, full_bounds);
     const float extra = PaneExtraTop(vm, scale_, pane_bounds.right - pane_bounds.left, compositor_);
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
-    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups());
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups(), ItemSelectionSlotDip());
     return layout.MaxScrollX();
 }
 
@@ -3540,7 +3581,7 @@ D2D1_RECT_F MainRenderer::ItemRectInPane(const PaneViewModel& vm,
     const D2D1_RECT_F pane_bounds = PaneBodyBounds(vm, full_bounds);
     const float extra = PaneExtraTop(vm, scale_, pane_bounds.right - pane_bounds.left, compositor_);
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
-    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups());
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups(), ItemSelectionSlotDip());
     return layout.ItemRect(view_index);
 }
 
@@ -3549,7 +3590,7 @@ int MainRenderer::MoveViewIndex(const PaneViewModel& vm, const D2D1_RECT_F& full
     const D2D1_RECT_F pane_bounds = PaneBodyBounds(vm, full_bounds);
     const float extra = PaneExtraTop(vm, scale_, pane_bounds.right - pane_bounds.left, compositor_);
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
-    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups());
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups(), ItemSelectionSlotDip());
     return layout.MoveIndex(current, dx, dy);
 }
 
@@ -3557,7 +3598,7 @@ int MainRenderer::PageDelta(const PaneViewModel& vm, const D2D1_RECT_F& full_bou
     const D2D1_RECT_F pane_bounds = PaneBodyBounds(vm, full_bounds);
     const float extra = PaneExtraTop(vm, scale_, pane_bounds.right - pane_bounds.left, compositor_);
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
-    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups());
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups(), ItemSelectionSlotDip());
     return layout.PageDelta();
 }
 
@@ -3566,7 +3607,7 @@ std::pair<int, int> MainRenderer::VisibleRangeInPane(
     const D2D1_RECT_F pane_bounds = PaneBodyBounds(vm, full_bounds);
     const float extra = PaneExtraTop(vm, scale_, pane_bounds.right - pane_bounds.left, compositor_);
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
-    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups());
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups(), ItemSelectionSlotDip());
     return layout.VisibleRange();
 }
 
@@ -3577,7 +3618,7 @@ void MainRenderer::ItemsInRectInPane(const PaneViewModel& vm, const D2D1_RECT_F&
     const D2D1_RECT_F pane_bounds = PaneBodyBounds(vm, full_bounds);
     const float extra = PaneExtraTop(vm, scale_, pane_bounds.right - pane_bounds.left, compositor_);
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
-    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups());
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups(), ItemSelectionSlotDip());
     const auto [first, last] = layout.Metrics().column_major ? layout.RangeForSpan(rect.left, rect.right)
                                                              : layout.RangeForSpan(rect.top, rect.bottom);
     for (int view = first; view >= 0 && view <= last; ++view) {
@@ -3600,7 +3641,7 @@ int MainRenderer::ItemFromPointInPane(const PaneViewModel& vm,
     const D2D1_RECT_F pane_bounds = PaneBodyBounds(vm, full_bounds);
     const float extra = PaneExtraTop(vm, scale_, pane_bounds.right - pane_bounds.left, compositor_);
     D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
-    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups());
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups(), ItemSelectionSlotDip());
     int idx = layout.HitTest(x, y);
     if (idx < 0) return -1;
     return vm.SourceIndex(idx);
