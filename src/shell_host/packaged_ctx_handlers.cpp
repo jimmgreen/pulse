@@ -172,6 +172,9 @@ public:
         if (!info || !IS_INTRESOURCE(info->lpVerb)) return E_INVALIDARG;
         const size_t offset = LOWORD(reinterpret_cast<UINT_PTR>(info->lpVerb));
         if (offset >= commands_.size() || !commands_[offset]) return E_INVALIDARG;
+        // Packaged commands can live in a COM surrogate beyond pulse_shell.
+        // In-process commands need no transfer and may return E_NOINTERFACE.
+        CoAllowSetForegroundWindow(commands_[offset], nullptr);
         return commands_[offset]->Invoke(items_, nullptr);
     }
 

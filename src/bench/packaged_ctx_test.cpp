@@ -74,7 +74,7 @@ private:
     std::vector<FakeCommand*> items_;
 };
 
-class FakeCommand final : public IExplorerCommand {
+class FakeCommand final : public IExplorerCommand, public IForegroundTransfer {
 public:
     FakeCommand(const wchar_t* title, EXPCMDFLAGS flags = ECF_DEFAULT,
                 EXPCMDSTATE state = ECS_ENABLED)
@@ -86,6 +86,11 @@ public:
         if (!ppv) return E_POINTER;
         if (riid == IID_IUnknown || riid == __uuidof(IExplorerCommand)) {
             *ppv = static_cast<IExplorerCommand*>(this);
+            AddRef();
+            return S_OK;
+        }
+        if (riid == __uuidof(IForegroundTransfer) && expose_foreground_transfer) {
+            *ppv = static_cast<IForegroundTransfer*>(this);
             AddRef();
             return S_OK;
         }
@@ -120,7 +125,12 @@ public:
     IFACEMETHODIMP Invoke(IShellItemArray* items, IBindCtx*) override {
         ++invoked;
         last_items = items;
+        transferred_before_invoke = foreground_transfers > 0;
         return S_OK;
+    }
+    IFACEMETHODIMP AllowForegroundTransfer(void*) override {
+        ++foreground_transfers;
+        return foreground_result;
     }
     IFACEMETHODIMP GetFlags(EXPCMDFLAGS* out) override {
         *out = flags_;
@@ -137,6 +147,10 @@ public:
 
     int invoked = 0;
     IShellItemArray* last_items = nullptr;
+    bool expose_foreground_transfer = false;
+    bool transferred_before_invoke = false;
+    int foreground_transfers = 0;
+    HRESULT foreground_result = S_OK;
 
 private:
     ~FakeCommand() {
@@ -180,6 +194,47 @@ HRESULT InvokeOffset(IContextMenu* menu, UINT offset) {
 }
 
 // ---- tests ------------------------------------------------------------------
+
+void TestForegroundTransfer(IShellItemArray* items) {
+    auto* root = new FakeCommand(L"Editor", ECF_HASSUBCOMMANDS);
+    auto* first = new FakeCommand(L"First editor");
+    auto* second = new FakeCommand(L"Second editor");
+    first->expose_foreground_transfer = true;
+    second->expose_foreground_transfer = true;
+    first->AddRef();
+    second->AddRef();
+    root->Add(first);
+    root->Add(second);
+    IContextMenu* menu = nullptr;
+    Check(SUCCEEDED(CreateExplorerCommandMenu(root, items, &menu)) && menu,
+          "foreground adapter created");
+    if (menu) {
+        HMENU popup = CreatePopupMenu();
+        Check(SUCCEEDED(menu->QueryContextMenu(popup, 0, 100, 150, CMF_NORMAL)) &&
+                  first->foreground_transfers == 0 && second->foreground_transfers == 0,
+              "querying COM commands does not transfer foreground permission");
+        Check(SUCCEEDED(InvokeOffset(menu, 2)) && second->foreground_transfers == 1 &&
+                  second->transferred_before_invoke && second->last_items == items &&
+                  first->foreground_transfers == 0 && root->foreground_transfers == 0,
+              "selected COM command receives foreground permission before invocation");
+        Check(FAILED(InvokeOffset(menu, 99)) && second->foreground_transfers == 1 &&
+                  first->foreground_transfers == 0,
+              "invalid menu offsets do not transfer foreground permission");
+        first->foreground_result = E_ACCESSDENIED;
+        Check(SUCCEEDED(InvokeOffset(menu, 1)) && first->foreground_transfers == 1 &&
+                  first->invoked == 1 && first->last_items == items,
+              "foreground transfer failure does not suppress the command");
+        second->expose_foreground_transfer = false;
+        Check(SUCCEEDED(InvokeOffset(menu, 2)) && second->foreground_transfers == 1 &&
+                  second->invoked == 2,
+              "in-process commands remain invocable without foreground transfer support");
+        DestroyMenu(popup);
+        menu->Release();
+    }
+    root->Release();
+    first->Release();
+    second->Release();
+}
 
 void TestAdapter(IShellItemArray* items) {
     constexpr UINT kFirst = 100;
@@ -577,6 +632,22 @@ void Pipe() {
 int wmain(int argc, wchar_t** argv) {
     SetConsoleOutputCP(CP_UTF8);
     if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) return 2;
+    if (argc == 3 && wcscmp(argv[1], L"--foreground-proxy") == 0) {
+        CLSID clsid{};
+        IExplorerCommand* command = nullptr;
+        IForegroundTransfer* transfer = nullptr;
+        HRESULT hr = CLSIDFromString(argv[2], &clsid);
+        if (SUCCEEDED(hr)) hr = CoCreateInstance(clsid, nullptr,
+            CLSCTX_INPROC_SERVER | CLSCTX_LOCAL_SERVER, IID_PPV_ARGS(&command));
+        Check(SUCCEEDED(hr) && command, "installed Explorer command activates");
+        if (command) hr = command->QueryInterface(IID_PPV_ARGS(&transfer));
+        Check(SUCCEEDED(hr) && transfer, "installed COM proxy supports foreground transfer");
+        if (FAILED(hr)) std::printf("  COM result: 0x%08lX\n", hr);
+        if (transfer) transfer->Release();
+        if (command) command->Release();
+        CoUninitialize();
+        return g_ok ? 0 : 1;
+    }
 
     wchar_t temp[MAX_PATH]{};
     GetTempPathW(MAX_PATH, temp);
@@ -594,10 +665,14 @@ int wmain(int argc, wchar_t** argv) {
     }
     Check(items != nullptr, "fixture shell item array");
 
-    TestAdapter(items);
-    TestManifest();
-    TestItemTypes(dir, file);
-    TestDuplicates();
+    const bool foreground_only = argc == 2 && wcscmp(argv[1], L"--foreground") == 0;
+    TestForegroundTransfer(items);
+    if (!foreground_only) {
+        TestAdapter(items);
+        TestManifest();
+        TestItemTypes(dir, file);
+        TestDuplicates();
+    }
     for (int i = 1; i < argc; ++i) {
         if (wcscmp(argv[i], L"--live") == 0) Live();
         if (wcscmp(argv[i], L"--pipe") == 0) Pipe();
