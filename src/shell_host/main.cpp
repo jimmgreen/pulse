@@ -183,7 +183,17 @@ public:
         RememberItem(psi);
         return CheckCancel();
     }
-    IFACEMETHODIMP PostDeleteItem(DWORD, IShellItem*, HRESULT hr, IShellItem*) override {
+    IFACEMETHODIMP PostDeleteItem(DWORD, IShellItem* psi, HRESULT hr, IShellItem* newly_created) override {
+        if (SUCCEEDED(hr) && psi && newly_created) {
+            PWSTR src_path = nullptr;
+            PWSTR dst_path = nullptr;
+            if (SUCCEEDED(psi->GetDisplayName(SIGDN_FILESYSPATH, &src_path)) && src_path &&
+                SUCCEEDED(newly_created->GetDisplayName(SIGDN_FILESYSPATH, &dst_path)) && dst_path) {
+                recycled_items_.emplace_back(src_path, dst_path);
+            }
+            if (src_path) CoTaskMemFree(src_path);
+            if (dst_path) CoTaskMemFree(dst_path);
+        }
         NoteItemResult(hr);
         ++items_done_;
         MaybeReport(items_done_ == total_items_);
@@ -207,6 +217,7 @@ public:
     const std::wstring& last_failed_item() const { return last_failed_item_; }
     HRESULT item_failure() const { return item_failure_; }
     void NoteSetupFailure(const std::wstring& src) { last_failed_item_ = src; }
+    const std::vector<std::pair<std::wstring, std::wstring>>& recycled_items() const { return recycled_items_; }
 
 private:
     HRESULT CheckCancel() {
@@ -252,6 +263,7 @@ private:
     std::wstring last_failed_item_;
     HRESULT item_failure_ = S_OK;
     ULONGLONG last_send_ = 0;
+    std::vector<std::pair<std::wstring, std::wstring>> recycled_items_;
 };
 
 // ---------------------------------------------------------------------------
@@ -361,6 +373,50 @@ std::wstring CanonPath(std::wstring p) {
     return p;
 }
 
+std::map<std::wstring, std::vector<std::wstring>> g_recent_recycled;
+
+std::wstring ResolveThroughParentReparse(const std::wstring& path) {
+    const std::wstring parsed = ToParsingPath(path);
+    const size_t slash = parsed.find_last_of(L"\\/");
+    if (slash == std::wstring::npos || slash == 0) return {};
+    const std::wstring parent = parsed.substr(0, slash);
+    const std::wstring leaf = parsed.substr(slash + 1);
+    HANDLE h = CreateFileW(parent.c_str(), 0,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return {};
+    wchar_t buf[4096]{};
+    const DWORD len = GetFinalPathNameByHandleW(h, buf, ARRAYSIZE(buf), FILE_NAME_NORMALIZED);
+    CloseHandle(h);
+    if (len == 0 || len >= ARRAYSIZE(buf)) return {};
+    std::wstring resolved = ToParsingPath(std::wstring(buf, len));
+    if (!resolved.empty() && resolved.back() != L'\\') resolved.push_back(L'\\');
+    resolved += leaf;
+    return resolved;
+}
+
+void RecordRecycledItem(const std::wstring& original_path, const std::wstring& recycled_payload) {
+    const std::wstring key = CanonPath(original_path);
+    if (!key.empty() && !recycled_payload.empty())
+        g_recent_recycled[key].push_back(ToParsingPath(recycled_payload));
+    const std::wstring resolved = CanonPath(ResolveThroughParentReparse(original_path));
+    if (!resolved.empty() && resolved != key && !recycled_payload.empty())
+        g_recent_recycled[resolved].push_back(ToParsingPath(recycled_payload));
+}
+
+std::wstring PopRecycledItem(const std::wstring& wanted_canon) {
+    if (wanted_canon.empty()) return {};
+    auto it = g_recent_recycled.find(wanted_canon);
+    if (it == g_recent_recycled.end()) return {};
+    while (!it->second.empty()) {
+        std::wstring candidate = std::move(it->second.back());
+        it->second.pop_back();
+        if (GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES)
+            return candidate;
+    }
+    return {};
+}
+
 bool ReadRecycleOriginal(const std::wstring& i_path, std::wstring& original) {
     original.clear();
     pulse::recycle::IndexRecord record;
@@ -382,7 +438,12 @@ bool RestoreSelectedRecyclePayload(const std::wstring& payload, std::wstring& er
         return false;
     }
     const std::wstring dest = ToParsingPath(original);
-    if (!MoveFileExW(payload.c_str(), dest.c_str(), 0)) {
+    auto can_move = [&](const std::wstring& target) {
+        if (MoveFileExW(payload.c_str(), target.c_str(), 0)) return true;
+        const std::wstring resolved_target = ResolveThroughParentReparse(target);
+        return !resolved_target.empty() && MoveFileExW(payload.c_str(), resolved_target.c_str(), 0);
+    };
+    if (!can_move(dest)) {
         error = L"还原失败（目标可能已存在）";
         return false;
     }
@@ -401,26 +462,68 @@ bool RestoreOneFromRecycle(const std::wstring& payload, std::wstring& error) {
     const std::wstring expected = CanonPath(wanted.substr(0, 2) + L"\\$Recycle.Bin\\" + sid);
     const std::wstring name = wanted.substr(wanted.find_last_of(L'\\') + 1);
     if (parent != expected || name.size() <= 2 || name.substr(0, 2) != L"$R") {
-        // Legacy undo records contain only the original path. Never guess
-        // between multiple versions of that path.
-        WIN32_FIND_DATAW data{};
-        HANDLE find = FindFirstFileW((expected + L"\\$I*").c_str(), &data);
-        std::wstring match;
-        bool ambiguous = false;
-        if (find != INVALID_HANDLE_VALUE) {
+        const std::wstring resolved_wanted = CanonPath(ResolveThroughParentReparse(payload));
+        std::wstring recorded = PopRecycledItem(wanted);
+        if (recorded.empty() && !resolved_wanted.empty())
+            recorded = PopRecycledItem(resolved_wanted);
+        if (!recorded.empty())
+            return RestoreSelectedRecyclePayload(recorded, error);
+
+        std::vector<std::wstring> bins;
+        auto add_bin = [&](const std::wstring& prefix) {
+            if (prefix.size() < 2 || prefix[1] != L':') return;
+            const std::wstring bin = CanonPath(prefix.substr(0, 2) + L"\\$Recycle.Bin\\" + sid);
+            if (std::find(bins.begin(), bins.end(), bin) == bins.end())
+                bins.push_back(bin);
+        };
+        add_bin(wanted);
+        add_bin(resolved_wanted);
+        wchar_t drives[512]{};
+        const DWORD drives_len = GetLogicalDriveStringsW(ARRAYSIZE(drives) - 1, drives);
+        for (DWORD pos = 0; pos < drives_len;) {
+            const wchar_t* d = drives + pos;
+            const size_t dlen = wcslen(d);
+            if (dlen >= 2) add_bin(std::wstring(d, 2));
+            pos += static_cast<DWORD>(dlen + 1);
+        }
+
+        std::wstring best_match;
+        uint64_t best_deleted_ts = 0;
+        uint64_t best_write_ts = 0;
+        for (const auto& bin_dir : bins) {
+            WIN32_FIND_DATAW data{};
+            HANDLE find = FindFirstFileW((bin_dir + L"\\$I*").c_str(), &data);
+            if (find == INVALID_HANDLE_VALUE) continue;
             do {
-                std::wstring original;
-                const std::wstring index = expected + L"\\" + data.cFileName;
-                if (!ReadRecycleOriginal(index, original) || CanonPath(original) != wanted) continue;
+                pulse::recycle::IndexRecord record;
+                const std::wstring index = bin_dir + L"\\" + data.cFileName;
+                if (!pulse::recycle::ReadIndex(index, record)) continue;
+                const std::wstring orig_canon = CanonPath(record.original_path);
+                bool matches = (orig_canon == wanted) ||
+                               (!resolved_wanted.empty() && orig_canon == resolved_wanted);
+                if (!matches && !resolved_wanted.empty()) {
+                    matches = (CanonPath(ResolveThroughParentReparse(record.original_path)) == resolved_wanted);
+                }
+                if (!matches) continue;
                 std::wstring candidate = index;
                 candidate[candidate.find_last_of(L'\\') + 2] = L'R';
                 if (GetFileAttributesW(candidate.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
-                if (!match.empty()) { ambiguous = true; break; }
-                match = std::move(candidate);
+                const uint64_t deleted_ts =
+                    (static_cast<uint64_t>(record.deleted.dwHighDateTime) << 32) |
+                    record.deleted.dwLowDateTime;
+                const uint64_t write_ts =
+                    (static_cast<uint64_t>(data.ftLastWriteTime.dwHighDateTime) << 32) |
+                    data.ftLastWriteTime.dwLowDateTime;
+                if (best_match.empty() || deleted_ts > best_deleted_ts ||
+                    (deleted_ts == best_deleted_ts && write_ts >= best_write_ts)) {
+                    best_match = std::move(candidate);
+                    best_deleted_ts = deleted_ts;
+                    best_write_ts = write_ts;
+                }
             } while (FindNextFileW(find, &data));
             FindClose(find);
         }
-        if (!match.empty() && !ambiguous) return RestoreOneFromRecycle(match, error);
+        if (!best_match.empty()) return RestoreSelectedRecyclePayload(best_match, error);
         error = L"无法唯一确定回收站版本，请在回收站中选择具体条目";
         return false;
     }
@@ -525,6 +628,11 @@ void ExecuteRequest(Request* req) {
     // failure from final bookkeeping. The filesystem state is authoritative;
     // never tell the UI that a completed delete/rename failed. Setup failures
     // are excluded so a source that was already missing cannot become success.
+    if (req->type == REQ_DELETE_RECYCLE) {
+        for (const auto& pair : sink.recycled_items()) {
+            RecordRecycledItem(pair.first, pair.second);
+        }
+    }
     if (FAILED(hr) && !cancelled && !setup_failed && OperationPostconditionSatisfied(*req))
         hr = S_OK;
 
