@@ -23,6 +23,8 @@ using TagId = std::wstring;
 enum class TagSelectionState { None, Mixed, All };
 
 struct Workspace {
+    std::wstring id;
+    std::wstring group;
     std::wstring name;
     std::wstring root;
     int layout = 0;
@@ -89,6 +91,8 @@ public:
     PlacesCatalog() = default;
     ~PlacesCatalog();
     std::vector<Workspace> workspaces;
+    std::unordered_set<std::wstring> collapsed_workspace_groups; // transient sidebar state
+    std::unordered_set<std::wstring> expanded_workspace_ids; // default collapsed; independent of root paths
     std::vector<ColorTag> tags;
     std::vector<NetworkPlace> networks;
     std::vector<std::wstring> quick_access_paths;
@@ -106,6 +110,9 @@ public:
     DWORD TagSaveError() const;
 
     int FindWorkspace(const std::wstring& root) const;
+    int FindWorkspaceById(const std::wstring& id) const;
+    bool RenameWorkspace(int index, const std::wstring& name);
+    bool SetWorkspaceGroup(int index, const std::wstring& group);
     int PinWorkspace(const std::wstring& root, const std::wstring& name, int layout,
                      const std::vector<std::wstring>& pane_paths,
                      const std::vector<ui::ViewMode>& pane_views = {});

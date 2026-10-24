@@ -23,6 +23,7 @@ public:
         // Right before the tabs at these indices are closed by hand (M7f:
         // Ctrl+Shift+T brings them back). Only the tabs that will close.
         std::function<void(const std::vector<size_t>&)> closing_tabs;
+        std::function<void(size_t)> save_workspace;
     };
 
     explicit TabController(Callbacks callbacks = {}) : callbacks_(std::move(callbacks)) {}

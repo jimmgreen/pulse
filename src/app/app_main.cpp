@@ -780,6 +780,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             [s] { return s->appPrefs.close_window_with_last_tab; },
             [hwnd] { PostMessageW(hwnd, WM_CLOSE, 0, 0); },
             [s](const std::vector<size_t>& indices) { RememberClosingTabs(*s, indices); },
+            [s](size_t index) { SwitchTab(*s, index); SaveCurrentWorkspace(*s); },
         });
         if (init_core) {
             if (s->isolatedTest) {

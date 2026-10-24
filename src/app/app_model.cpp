@@ -2001,20 +2001,41 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
 
     workspaces.header = l10n::Get(l10n::StringId::SidebarWorkspaces);
     if (places) {
-        for (int i = 0; i < static_cast<int>(places->workspaces.size()); ++i) {
+        std::vector<int> workspace_order;
+        for (int i = 0; i < static_cast<int>(places->workspaces.size()); ++i) workspace_order.push_back(i);
+        std::stable_sort(workspace_order.begin(), workspace_order.end(), [&](int a, int b) {
+            return places->workspaces[static_cast<size_t>(a)].group <
+                   places->workspaces[static_cast<size_t>(b)].group;
+        });
+        std::wstring previous_group;
+        for (int i : workspace_order) {
             const auto& w = places->workspaces[static_cast<size_t>(i)];
+            if (!w.group.empty() && w.group != previous_group) {
+                ui::SidebarItem group;
+                group.label = w.group;
+                group.path = L"pulse:workspace-group:" + w.group;
+                group.expandable = true;
+                group.expanded = !places->collapsed_workspace_groups.contains(w.group);
+                group.icon_glyph = L"\xE8B7";
+                group.icon_color = ui::HexColor(0x94A3B8);
+                workspaces.items.push_back(std::move(group));
+            }
+            previous_group = w.group;
+            if (!w.group.empty() && places->collapsed_workspace_groups.contains(w.group)) continue;
             ui::SidebarItem it;
+            it.indent = w.group.empty() ? 0 : 1;
             it.label = w.name.empty() ? TabTitle(w.root) : w.name;
             it.detail = DisplayPath(w.root);
             it.path = MakeWorkspacePath(i);
+            it.expandable = true;
+            it.expanded = places->expanded_workspace_ids.contains(w.id);
             const bool unc = fs::IsUncPath(w.root);
             it.icon_glyph = unc ? L"\xE968" : L"\xE8B7";
             it.fallback_text = L"WS";
             it.icon_color = ui::HexColor(unc ? 0x38BDF8 : 0x34D399);
             if (unc) it.badge = l10n::Get(l10n::StringId::Server);
             if (i == places->active_workspace)
-                it.badge = l10n::Get(unc ? l10n::StringId::CurrentServer
-                                         : l10n::StringId::Current);
+                it.badge = l10n::Pick(L"最近", L"Recent");
             // The saved split is what sets a workspace apart from a Quick
             // access link; show it when there is more than one pane.
             const auto panes = std::count_if(w.pane_paths.begin(), w.pane_paths.end(),
@@ -2028,14 +2049,19 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
                 it.detail += pane_text;
             }
             workspaces.items.push_back(std::move(it));
-            for (const auto& child : places->FrequentChildren(i, 8)) {
+            if (!places->expanded_workspace_ids.contains(w.id)) continue;
+            const auto children = w.pane_paths.empty() ? std::vector<std::wstring>{w.root} : w.pane_paths;
+            for (const auto& child : children) {
+                if (child.empty()) continue;
                 ui::SidebarItem sub;
                 sub.label = TabTitle(child);
                 sub.path = child;
-                sub.indent = 1;
-                sub.icon_glyph = unc ? L"\xE968" : L"\xE8B7";
+                sub.indent = w.group.empty() ? 1 : 2;
+                sub.detail = DisplayPath(child);
+                const bool child_unc = fs::IsUncPath(child);
+                sub.icon_glyph = child_unc ? L"\xE968" : L"\xE8B7";
                 sub.fallback_text = L"Dir";
-                sub.icon_color = ui::HexColor(unc ? 0x38BDF8 : 0x94A3B8);
+                sub.icon_color = ui::HexColor(child_unc ? 0x38BDF8 : 0x94A3B8);
                 workspaces.items.push_back(std::move(sub));
             }
         }

@@ -104,6 +104,56 @@ int wmain() {
     Check(fs::remove(base / L"tags.json", error) && !error, "remove only private canonical copy");
     verify();
     if (base.parent_path() != parent || !base.filename().wstring().starts_with(L"places-json-")) return 1;
+    // Load the previous schema, then save two independent layouts sharing a root.
+    {
+        std::ofstream legacy(base / L"places.json", std::ios::binary | std::ios::trunc);
+        legacy << R"({"workspaces":[{"name":"Legacy","root":"C:\\project","layout":0,"panes":["C:\\project"]}]})";
+    }
+    std::wstring legacy_id, second_id;
+    const std::vector<std::wstring> paths{L"C:\\project", L"D:\\output", L"\\\\server\\share", L"C:\\reference"};
+    {
+        PlacesCatalog catalog;
+        Check(catalog.Load() && catalog.workspaces.size() == 1, "legacy workspace loads without an ID");
+        if (catalog.workspaces.size() == 1) {
+            legacy_id = catalog.workspaces[0].id;
+            Check(!legacy_id.empty() && catalog.workspaces[0].name == L"Legacy", "migration adds identity and preserves the name");
+            const int second = catalog.PinWorkspace(L"C:\\project", L"Second", 4, paths);
+            Check(second == 1 && catalog.workspaces.size() == 2, "same-root layouts are saved independently");
+            second_id = catalog.workspaces[static_cast<size_t>(second)].id;
+            Check(second_id != legacy_id, "independent layouts have distinct identities");
+            Check(!catalog.RenameWorkspace(second, L" \t ") && catalog.workspaces[1].name == L"Second",
+                "empty rename preserves saved name");
+            Check(catalog.RenameWorkspace(second, L"  Named layout  ") &&
+                catalog.SetWorkspaceGroup(second, L"  Projects  "), "rename and organize a saved layout");
+            Check(catalog.Save(), "save migrated and same-root workspaces");
+        }
+    }
+    {
+        PlacesCatalog catalog;
+        Check(catalog.Load() && catalog.workspaces.size() == 2, "both layouts survive reload");
+        const int first = catalog.FindWorkspaceById(legacy_id), second = catalog.FindWorkspaceById(second_id);
+        Check(first == 0 && second == 1, "migrated and new IDs remain stable across reload");
+        if (first >= 0 && second >= 0) {
+            Check(catalog.workspaces[1].pane_paths == paths && catalog.workspaces[1].layout == 4 &&
+                catalog.workspaces[1].name == L"Named layout" && catalog.workspaces[1].group == L"Projects",
+                "four directory paths, layout, name and group round trip");
+            catalog.UpdateWorkspaceSnapshot(second, 1, {L"D:\\updated", L"C:\\project"});
+            Check(catalog.workspaces[1].id == second_id && catalog.workspaces[0].name == L"Legacy" &&
+                catalog.workspaces[0].pane_paths == std::vector<std::wstring>{L"C:\\project"},
+                "updating one same-root workspace leaves the other intact");
+            Check(catalog.SetWorkspaceGroup(second, L"") && catalog.workspaces[1].group.empty(),
+                "empty group moves workspace out of its group");
+            Check(catalog.UnpinWorkspace(first) && catalog.FindWorkspaceById(second_id) == 0,
+                "deletion preserves another workspace identity when indices shift");
+        }
+    }
+    {
+        PlacesCatalog catalog;
+        Check(catalog.Load() && catalog.workspaces.size() == 1 &&
+            catalog.FindWorkspaceById(second_id) == 0 && catalog.workspaces[0].layout == 1 &&
+            catalog.workspaces[0].pane_paths == std::vector<std::wstring>{L"D:\\updated", L"C:\\project"},
+            "updated layout and deletion survive restart");
+    }
     fs::remove_all(base, error);
     Check(!error && !fs::exists(base), "remove owned fixture including private ADS");
     return failures ? 1 : 0;

@@ -542,17 +542,18 @@ void TestBreadcrumb() {
     cat.PinWorkspace(L"C:\\local", L"local", 0, { L"C:\\local" });
     cat.PinWorkspace(L"\\\\server\\share", L"nas", 0, { L"\\\\server\\share" });
     cat.workspaces[1].frequent.push_back({ L"\\\\server\\share\\sub", 3 });
+    for (const auto& workspace : cat.workspaces) cat.expanded_workspace_ids.insert(workspace.id);
     const auto wvm = BuildWindowViewModel(pane, sidebar, true, false, true, &cat, 0);
     const auto workspaces = std::find_if(wvm.sidebar.begin(), wvm.sidebar.end(),
         [](const auto& section) {
             return section.id == static_cast<int>(SidebarSectionId::Workspaces);
         });
-    Check(workspaces != wvm.sidebar.end() && workspaces->items.size() == 3,
-          L"sidebar: workspace group holds both workspaces + frequent child");
-    if (workspaces != wvm.sidebar.end() && workspaces->items.size() == 3) {
+    Check(workspaces != wvm.sidebar.end() && workspaces->items.size() == 4,
+          L"sidebar: workspace group holds both workspaces and their saved directories");
+    if (workspaces != wvm.sidebar.end() && workspaces->items.size() == 4) {
         const auto& local = workspaces->items[0];
-        const auto& nas = workspaces->items[1];
-        const auto& sub = workspaces->items[2];
+        const auto& nas = workspaces->items[2];
+        const auto& sub = workspaces->items[3];
         Check(local.badge.empty() && local.icon_glyph == L"\xE8B7",
               L"sidebar: local workspace keeps default glyph, no badge");
         Check(nas.badge == L"当前 · 服务器" && nas.icon_glyph == L"\xE968" &&
@@ -560,7 +561,7 @@ void TestBreadcrumb() {
               L"sidebar: active UNC workspace shows server badge + network glyph");
         Check(sub.badge.empty() && sub.icon_glyph == L"\xE968" &&
               colorIs(sub.icon_color, 0x38BDF8),
-              L"sidebar: UNC frequent child gets network glyph, no badge");
+              L"sidebar: UNC saved directory gets network glyph, no badge");
     }
 
     const auto access = BuildSidebarModel();

@@ -226,8 +226,10 @@ int main(int argc, char** argv) {
                      Get(StringId::SettingsDuplicates) == L"\u91cd\u590d\u6587\u4ef6" &&
                      Get(StringId::DupScan) == L"\u626b\u63cf" &&
                      Get(StringId::DupMinSize) == L"\u6700\u5c0f\u5927\u5c0f" &&
-                     Get(StringId::PinWorkspace) == L"\u9489\u4e3a\u5de5\u4f5c\u533a" &&
-                     Get(StringId::UnpinWorkspace) == L"\u53d6\u6d88\u5de5\u4f5c\u533a" &&
+                     Get(StringId::PinWorkspace) == L"将标签页保存为工作区..." &&
+                     Get(StringId::UnpinWorkspace) == L"删除已保存的工作区" &&
+                     Get(StringId::WorkspaceNameHint) == L"工作区名称" &&
+                     Get(StringId::WorkspaceGroup) == L"设置分组..." &&
                      Get(StringId::AdvancedSearch) == L"\u9ad8\u7ea7\u641c\u7d22" &&
                      Get(StringId::KindCustom) == L"\u6307\u5b9a\u6269\u5c55\u540d" &&
                      Get(StringId::OpEmptying) == L"\u6b63\u5728\u6e05\u7a7a\u56de\u6536\u7ad9" &&
@@ -263,8 +265,10 @@ int main(int argc, char** argv) {
                      Get(StringId::ColumnDeleted) == L"Date deleted" &&
                      Get(StringId::SettingsDuplicates) == L"Duplicate files" &&
                      Get(StringId::DupDeleteAllExtras) == L"Delete all extras" &&
-                     Get(StringId::PinWorkspace) == L"Pin as workspace" &&
-                     Get(StringId::UnpinWorkspace) == L"Unpin workspace" &&
+                     Get(StringId::PinWorkspace) == L"Save tab as workspace..." &&
+                     Get(StringId::UnpinWorkspace) == L"Delete saved workspace" &&
+                     Get(StringId::WorkspaceNameHint) == L"Workspace name" &&
+                     Get(StringId::WorkspaceGroup) == L"Set group..." &&
                      Get(StringId::AdvancedSearch) == L"Advanced search" &&
                      Get(StringId::KindCustom) == L"Custom extension" &&
                      Get(StringId::OpEmptying) == L"Emptying Recycle Bin" &&

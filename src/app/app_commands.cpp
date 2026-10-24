@@ -1348,15 +1348,7 @@ void DispatchMenuCommand(AppState& s, int cmd) {
     case app::CmdCopyToTarget: TransferToTarget(s, false); break;
     case app::CmdMoveToTarget: TransferToTarget(s, true); break;
     case app::CmdPinWorkspace: {
-        std::wstring root = PinCandidate(s);
-        if (!root.empty() && !fs::IsVirtualPath(root)) {
-            if (s.places.FindWorkspace(root) >= 0) {
-                s.places.UnpinWorkspace(root);
-            } else {
-                s.places.PinWorkspace(root, L"", static_cast<int>(WorkspaceLayoutOf(s)), CollectPanePaths(s),
-                                      CollectPaneViews(s));
-            }
-        }
+        SaveCurrentWorkspace(s);
         break;
     }
     case app::CmdPinNetwork: {
@@ -1416,13 +1408,10 @@ bool ClipboardHasFiles() {
 }
 
 void ApplyWorkspacePinLabel(std::vector<ui::FluentMenuItem>& items, AppState& s) {
-    const std::wstring root = PinCandidate(s);
-    const bool pinned = !root.empty() && !fs::IsVirtualPath(root) &&
-        s.places.FindWorkspace(root) >= 0;
+    (void)s;
     for (auto& item : items) {
         if (item.command != app::CmdPinWorkspace) continue;
-        item.text = pinned ? l10n::Get(l10n::StringId::UnpinWorkspace)
-                           : l10n::Get(l10n::StringId::PinWorkspace);
+        item.text = l10n::Get(l10n::StringId::PinWorkspace);
         break;
     }
 }

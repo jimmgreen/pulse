@@ -4,6 +4,7 @@
 #include "app_network_locations.h"
 #include "../common/localization.h"
 #include <algorithm>
+#include <cwchar>
 
 namespace pulse {
 std::vector<std::wstring> QuickAccessTargets(const app::Tab* tab, bool background) {
@@ -118,10 +119,79 @@ void ShowQuickAccessAddMenu(AppState& s, POINT point) {
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
+namespace {
+bool EditWorkspaceText(AppState& s, POINT point, l10n::StringId hint,
+                       std::wstring& text, bool allow_empty = false) {
+    if (!EnsureMenu(s)) return false;
+    constexpr int kSave = 31001;
+    s.menu->SetFilterPlaceholder(l10n::Get(hint));
+    s.menu->SetInitialFilterText(text);
+    s.menu->SetFilterMinWidth(320.0f);
+    const auto build = [&](const std::wstring& query) {
+        text = query;
+        ui::FluentMenuItem save;
+        save.command = kSave;
+        save.text = l10n::Get(l10n::StringId::TabNameSave);
+        save.enabled = allow_empty || query.find_first_not_of(L" \t\r\n") != std::wstring::npos;
+        return std::vector<ui::FluentMenuItem>{save};
+    };
+    const int command = s.menu->TrackPopup(point, build(text), build);
+    s.menu->SetFilterPlaceholder(l10n::Get(l10n::StringId::TabMenuSearch));
+    s.menu->SetFilterMinWidth(0.0f);
+    return command == kSave;
+}
+
+bool CanSaveWorkspace(const std::vector<std::wstring>& paths) {
+    return !paths.empty() && paths.size() <= 4 &&
+        std::all_of(paths.begin(), paths.end(), [](const auto& path) {
+            return !path.empty() && !fs::IsVirtualPath(path);
+        });
+}
+}
+
+void SaveCurrentWorkspace(AppState& s) {
+    const auto paths = CollectPanePaths(s);
+    if (!CanSaveWorkspace(paths)) return;
+    std::wstring name = app::LayoutTabTitle(LiveLayout(s));
+    POINT point{};
+    GetCursorPos(&point);
+    if (!EditWorkspaceText(s, point, l10n::StringId::WorkspaceNameHint, name)) return;
+    const int index = s.places.PinWorkspace(paths.front(), name,
+        static_cast<int>(WorkspaceLayoutOf(s)), paths, CollectPaneViews(s));
+    if (index >= 0) {
+        s.places.RenameWorkspace(index, name);
+        LiveLayout(s).workspace_id = s.places.workspaces[static_cast<size_t>(index)].id;
+        LiveLayout(s).title = s.places.workspaces[static_cast<size_t>(index)].name;
+    }
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
+bool ToggleWorkspaceGroup(AppState& s, const std::wstring& path) {
+    constexpr std::wstring_view prefix = L"pulse:workspace-group:";
+    if (!path.starts_with(prefix)) return false;
+    const auto group = path.substr(prefix.size());
+    if (!s.places.collapsed_workspace_groups.erase(group))
+        s.places.collapsed_workspace_groups.insert(group);
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+    return true;
+}
+
+bool ToggleWorkspaceDirectories(AppState& s, const std::wstring& path) {
+    std::wstring kind, rest;
+    if (!app::ParsePulsePath(path, &kind, &rest) || kind != L"workspace" || rest.empty() ||
+        rest.find_first_not_of(L"0123456789") != std::wstring::npos) return false;
+    const auto index = std::wcstoull(rest.c_str(), nullptr, 10);
+    if (index >= s.places.workspaces.size()) return false;
+    const auto& id = s.places.workspaces[static_cast<size_t>(index)].id;
+    if (!s.places.expanded_workspace_ids.erase(id)) s.places.expanded_workspace_ids.insert(id);
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+    return true;
+}
+
 void ShowWorkspaceMenu(AppState& s, int index, POINT point) {
     if (index < 0 || index >= static_cast<int>(s.places.workspaces.size())) return;
     if (!EnsureMenu(s)) return;
-    constexpr int kUpdate = 2, kUnpin = 3;
+    constexpr int kUpdate = 31002, kUnpin = 31003, kRename = 31004, kGroup = 31005;
     ui::FluentMenuItem open;
     open.command = app::CmdOpen;
     open.text = l10n::Get(l10n::StringId::Open);
@@ -130,14 +200,34 @@ void ShowWorkspaceMenu(AppState& s, int index, POINT point) {
     update.command = kUpdate;
     update.text = l10n::Get(l10n::StringId::WorkspaceUpdateLayout);
     update.glyph = L"\xE72C";
+    update.enabled = CanSaveWorkspace(CollectPanePaths(s));
     update.separator_after = true;
     ui::FluentMenuItem unpin;
     unpin.command = kUnpin;
     unpin.text = l10n::Get(l10n::StringId::UnpinWorkspace);
     unpin.glyph = L"\xE77A";
-    const int command = s.menu->TrackPopup(point, {open, update, unpin});
+    ui::FluentMenuItem rename;
+    rename.command = kRename;
+    rename.text = l10n::Get(l10n::StringId::Rename);
+    rename.glyph = L"\xE8AC";
+    ui::FluentMenuItem group;
+    group.command = kGroup;
+    group.text = l10n::Get(l10n::StringId::WorkspaceGroup);
+    group.glyph = L"\xE8B7";
+    const int command = s.menu->TrackPopup(point, {open, rename, group, update, unpin});
     if (command == app::CmdOpen) {
         OpenWorkspace(s, index);
+    } else if (command == kRename || command == kGroup) {
+        const auto& w = s.places.workspaces[static_cast<size_t>(index)];
+        const auto id = w.id;
+        std::wstring text = command == kRename ? w.name : w.group;
+        if (!EditWorkspaceText(s, point, command == kRename ? l10n::StringId::WorkspaceNameHint
+                : l10n::StringId::WorkspaceGroupHint, text, command == kGroup)) return;
+        if (command == kRename) {
+            s.places.RenameWorkspace(index, text);
+            for (auto& tab : s.window_tabs.items)
+                if (tab->workspace_id == id) tab->title = s.places.workspaces[static_cast<size_t>(index)].name;
+        } else s.places.SetWorkspaceGroup(index, text);
     } else if (command == kUpdate) {
         // The snapshot was only taken when pinning; this is the one way to
         // refresh it without unpinning (which would drop frequent folders).

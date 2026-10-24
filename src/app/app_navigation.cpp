@@ -166,18 +166,21 @@ void OpenWorkspace(AppState& s, int index) {
     if (index < 0 || index >= static_cast<int>(s.places.workspaces.size())) return;
     const app::Workspace w = s.places.workspaces[static_cast<size_t>(index)];
     s.places.active_workspace = index;
-    const std::wstring root = fs::NormalizePath(w.root);
     size_t found = static_cast<size_t>(-1);
     for (size_t i = 0; i < s.window_tabs.items.size(); ++i) {
-        const app::Tab* folder = s.window_tabs.items[i]->ActiveFolder();
-        if (!folder || folder->current_path.empty()) continue;
-        if (_wcsicmp(fs::NormalizePath(folder->current_path).c_str(), root.c_str()) == 0) {
+        if (!w.id.empty() && s.window_tabs.items[i]->workspace_id == w.id) {
             found = i;
             break;
         }
     }
-    if (found != static_cast<size_t>(-1)) SwitchTab(s, found);
-    else NewTab(s, w.root.empty() ? L"C:\\" : w.root);
+    if (found != static_cast<size_t>(-1)) {
+        SwitchTab(s, found);
+        s.places.Save();
+        return;
+    }
+    NewTab(s, w.root.empty() ? L"C:\\" : w.root);
+    LiveLayout(s).workspace_id = w.id;
+    LiveLayout(s).title = w.name;
     ApplyLayoutPreset(s, static_cast<app::LayoutPreset>(std::clamp(w.layout, 0, 4)));
     if (w.pane_paths.empty()) {
         NavigateTo(s, w.root);

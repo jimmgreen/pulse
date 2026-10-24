@@ -279,6 +279,16 @@ void TabController::ShowTabMenu(WindowTabs& tabs, int tab_index, POINT screen_pt
     items.push_back(MenuItem(CmdTabDuplicate, TabText(Text::TabDuplicate), L"\xE8C8"));
     items.push_back(MenuItem(CmdTabRename,
         pulse::l10n::Get(pulse::l10n::StringId::TabRename).c_str(), L"\xE8AC"));
+    if (callbacks_.save_workspace) {
+        auto save = MenuItem(CmdPinWorkspace, TabText(Text::PinWorkspace), L"\xE718");
+        const auto visible = tab.VisiblePanes();
+        save.enabled = !visible.empty() && visible.size() <= 4 &&
+            std::all_of(visible.begin(), visible.end(), [](const Pane* pane) {
+                const auto* folder = pane->ActiveTab();
+                return folder && !folder->current_path.empty() && !fs::IsVirtualPath(folder->current_path);
+            });
+        items.push_back(std::move(save));
+    }
     ui::FluentMenuItem colors;
     colors.text = pulse::l10n::Get(pulse::l10n::StringId::TabColor);
     ui::FluentMenuItem palette;
@@ -324,7 +334,9 @@ void TabController::ShowTabMenu(WindowTabs& tabs, int tab_index, POINT screen_pt
     items.push_back(MenuItem(CmdTabCloseRight, TabText(Text::TabCloseRight)));
 
     const int command = menu.TrackPopup(screen_pt, std::move(items));
-    if (command == CmdTabDuplicate) {
+    if (command == CmdPinWorkspace && callbacks_.save_workspace) {
+        callbacks_.save_workspace(static_cast<size_t>(tab_index));
+    } else if (command == CmdTabDuplicate) {
         DuplicateTab(tabs, static_cast<size_t>(tab_index));
     } else if (command == CmdTabNewRight) {
         const Tab* current = tabs.Active() ? tabs.Active()->ActiveFolder() : nullptr;

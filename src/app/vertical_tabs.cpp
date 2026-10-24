@@ -345,6 +345,7 @@ bool HandleFolderMiddleClick(AppState& s, int x, int y) {
     } else if (hit.region == R::BreadcrumbSegment) {
         path = hit.path;
     } else if (hit.region == R::SidebarItem) {
+        if (hit.path.starts_with(L"pulse:workspace-group:")) return true;
         if (IsVerticalTabPath(hit.path) || hit.path.starts_with(kTabPrefix)) return false;
         path = hit.path;
         if (!path.empty() && !fs::IsVirtualPath(path)) {

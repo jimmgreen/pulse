@@ -1544,3 +1544,7 @@
 // Network view warning when Windows Firewall's Network Discovery group is off.
 #define IDS_NETWORK_DISCOVERY_OFF_TITLE 2731
 #define IDS_NETWORK_DISCOVERY_OFF_DESC 2732
+
+#define IDS_WORKSPACE_NAME_HINT 2733
+#define IDS_WORKSPACE_GROUP 2734
+#define IDS_WORKSPACE_GROUP_HINT 2735
