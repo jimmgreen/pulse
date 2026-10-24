@@ -29,6 +29,7 @@ enum class PreviewFamily {
     Psd,
     Font,
     Raw,
+    Pe,
 };
 
 namespace formats {
@@ -94,6 +95,8 @@ inline constexpr std::wstring_view kPsd[] = { L".psd", L".psb" };
 // Font files render a specimen page through DirectWrite without installing.
 inline constexpr std::wstring_view kFont[] = { L".ttf", L".otf", L".ttc", L".otc" };
 
+inline constexpr std::wstring_view kPe[] = { L".exe", L".dll", L".sys", L".ocx", L".scr", L".cpl" };
+
 } // namespace formats
 
 struct PreviewFormat {
@@ -112,6 +115,7 @@ inline constexpr PreviewFormat kPreviewFormats[] = {
     { PreviewFamily::Psd,       formats::kPsd,       std::size(formats::kPsd) },
     { PreviewFamily::Raw,       formats::kRaw,       std::size(formats::kRaw) },
     { PreviewFamily::Font,      formats::kFont,      std::size(formats::kFont) },
+    { PreviewFamily::Pe,        formats::kPe,        std::size(formats::kPe) },
 };
 
 inline bool FormatHasExtension(const PreviewFormat& format, std::wstring_view extension) {

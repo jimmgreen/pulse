@@ -21,6 +21,8 @@
 #include "office_doc_model.h"
 #include "office_sketch.h"
 #include "pdf_raster.h"
+#include "pe_document.h"
+#include "pe_dependencies.h"
 #include "preview_file_utils.h"
 #include "psd_raster.h"
 #include "svg_raster.h"
@@ -1914,6 +1916,20 @@ static DecodeStep RunSniffed(const DecodeRequest& q, DecodeResult& r) {
 }
 
 // Last resort for everything: text, or a hex dump of binary data.
+static bool AcceptsPe(const DecodeRequest& q) {
+    return !q.grid && !q.offline && !q.is_directory &&
+        preview::IsFamilyExtension(preview::PreviewFamily::Pe, q.extension);
+}
+static DecodeStep RunPe(const DecodeRequest& q, DecodeResult& r) {
+    std::vector<uint8_t> bytes;
+    // Bound both I/O and memory; oversized files keep the existing fallback.
+    if (!ReadFileBytes(q.path, 64u * 1024u * 1024u, bytes) ||
+        !preview::MakePeDocument(q.path, bytes, r.text, r.truncated)) return DecodeStep::Next;
+    r.bytes_read = static_cast<uint32_t>(bytes.size());
+    r.kind = ipc::PreviewContentKind::Text;
+    return DecodeStep::Made;
+}
+
 static bool AcceptsAny(const DecodeRequest&) { return true; }
 static DecodeStep RunTextOrHex(const DecodeRequest& q, DecodeResult& r) {
     if (TextOrHexInto(q, r)) return DecodeStep::Made;
@@ -2118,6 +2134,7 @@ static const preview::DecoderEntry kDecoders[] = {
     { "audio-cover",     AcceptsAudioCover,   RunAudioCover },
     { "video-frame",     AcceptsVideoFrame,   RunVideoFrame },
     { "media-pack",      AcceptsMediaPack,    RunMediaPack },
+    { "pe",              AcceptsPe,           RunPe },
     { "shell-preview",   AcceptsShellPreview, RunShellPreview },
     { "content-sniff",   AcceptsSniffed,      RunSniffed },
     { "shell-thumbnail", AcceptsShellHandler, RunShellHandler },

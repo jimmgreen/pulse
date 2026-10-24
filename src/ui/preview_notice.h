@@ -54,6 +54,25 @@ inline std::wstring PreviewNotice(const std::wstring& error, const std::wstring&
         return message;
     };
     if (integrity.state == IntegrityState::Partial) {
+        if (metadata.starts_with(L"Portable Executable (PE32")) {
+            std::wstring message = Pick(L"PE 预览不完整：", L"Incomplete PE preview: ");
+            bool explained = false;
+            const auto append = [&](bool condition, const wchar_t* chinese, const wchar_t* english) {
+                if (!condition) return;
+                if (explained) message += Pick(L"；", L"; ");
+                message += Pick(chinese, english);
+                explained = true;
+            };
+            append(metadata.find(L"[LIMIT]") != std::wstring::npos,
+                L"依赖分析达到资源限制", L"dependency analysis reached its resource limits");
+            append(metadata.find(L"[Preview truncated]") != std::wstring::npos,
+                L"元数据报告已截断", L"metadata report truncated");
+            append(metadata.find(L"Some metadata is invalid") != std::wstring::npos ||
+                   metadata.find(L"Import metadata is incomplete") != std::wstring::npos,
+                L"部分元数据无法完整读取", L"some metadata could not be fully read");
+            if (!explained) message += Pick(L"部分信息未能完整分析", L"some information could not be fully analyzed");
+            return message + Pick(L"。详情见各页签中的说明。", L". See the notes in each tab.");
+        }
         if (integrity.reason == IntegrityReason::OnDemand)
             return Pick(L"工作表按需加载，切换标签即可读取。", L"Worksheets load on demand when selected.");
         if (integrity.reason == IntegrityReason::IncompleteDirectory)

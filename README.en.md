@@ -59,6 +59,10 @@ Select a file and press Space to preview it without opening another app:
 - DOCX, EPUB and Office documents can be read without the original software; archives show a browsable, searchable tree.
 - Videos play with seeking and frame stepping, animated WebP / APNG play back, and SVG, PSD, AI, DWG thumbnails, fonts and more are supported.
 
+In video previews, Left / Right seek backward / forward by 5 seconds; hold Shift for 30 seconds or Ctrl for 60 seconds. PageUp / PageDown or Up / Down switch files. Space toggles playback, and comma / period retain frame stepping.
+
+PE files such as EXE and DLL use tabs for properties/version, PE headers/sections, DLL dependencies, imports and exports; Ctrl+Tab switches tabs. Dependencies show candidate paths found by static search, with distinct states for missing modules, missing descendants and unresolved results. Inspection never executes the file. API sets, runtime DLL directories and SxS resolution cannot be determined by file searches alone, so these results do not guarantee that a program will start.
+
 Rest the pointer on a file (0.5 s by default) to get a hover card with its thumbnail or a text excerpt, its type and key facts; press Space while the card shows to open the full preview. The card takes the content's shape (wider for photos and clips, taller for pages and portraits, info only for files without a preview); hold Ctrl to enlarge it. Settings → Quick Look → Preview trigger switches to Space only or changes the hover delay and card size (small / medium / large).
 
 Settings → Supported formats lists every previewable format and checks whether the HEIF / HEVC / AV1 / WebP system extensions are installed.

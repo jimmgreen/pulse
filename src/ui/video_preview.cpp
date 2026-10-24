@@ -3,6 +3,7 @@
 #undef NTDDI_VERSION
 #define NTDDI_VERSION 0x06030000
 #include "video_preview.h"
+#include "playback_timeline.h"
 #include "../common/path_utils.h"
 #include "../common/preview_packs.h"
 #include "ffmpeg_playback.h"
@@ -30,6 +31,10 @@ using Microsoft::WRL::ComPtr;
 namespace {
 constexpr wchar_t kVideoClass[] = L"Pulse.VideoPreview";
 constexpr UINT kRetireVideo = WM_APP + 87;
+#ifdef PULSE_VIDEO_PREVIEW_TESTING
+std::atomic<HRESULT> native_failure_after_ready{S_OK};
+std::atomic<bool> native_play_failure_first{false};
+#endif
 
 struct Event {
     MFP_EVENT_TYPE type{};
@@ -162,6 +167,13 @@ bool MissingVideoDecoder(const std::wstring& path, CodecInfo& info) {
 }
 } // namespace
 
+#ifdef PULSE_VIDEO_PREVIEW_TESTING
+void VideoPreview::FailNativeAfterReadyForTest(HRESULT error, bool fail_play_first) {
+    native_play_failure_first.store(fail_play_first);
+    native_failure_after_ready.store(error);
+}
+#endif
+
 struct VideoPreview::Shared {
     HANDLE wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     ~Shared() { if (wake) CloseHandle(wake); }
@@ -174,7 +186,10 @@ struct VideoPreview::Shared {
     HWND child = nullptr;
     bool card = false;        // set before the player thread starts (Open)
     bool playing = true;
+    // Native errors can stop the backend without changing the user's intent.
+    bool requested_playing = true;
     bool seek_pending = false;
+    bool seek_in_flight = false;
     double seek_fraction = 0;
     unsigned steps = 0;
     bool audio_dirty = true;  // volume / mute / rate to apply on the player thread
@@ -276,7 +291,11 @@ void VideoPreview::Open(HWND owner, const std::wstring& path, bool card) {
     state_->child = child_;
     state_->card = card;
     if (card) state_->snapshot.muted = true;
-    if (!child_) { state_->snapshot.error = HRESULT_FROM_WIN32(GetLastError()); return; }
+    if (!child_) {
+        state_->snapshot.error = HRESULT_FROM_WIN32(GetLastError());
+        state_->snapshot.error_stage = L"video-window";
+        return;
+    }
     SetWindowLongPtrW(child_, GWLP_USERDATA,
         reinterpret_cast<LONG_PTR>(new std::shared_ptr<Shared>(state_)));
     try {
@@ -336,6 +355,7 @@ void VideoPreview::Play(bool playing) {
     struct Notify { Shared* state; ~Notify() { state->Wake(); } } notify{state_.get()};
     std::lock_guard lock(state_->mutex);
     state_->playing = playing;
+    state_->requested_playing = playing;
     state_->snapshot.playing = playing;
     state_->steps = 0;
     state_->snapshot.control_error = S_OK;
@@ -350,6 +370,22 @@ void VideoPreview::Seek(double fraction) {
     std::lock_guard lock(state_->mutex);
     if (!state_->snapshot.can_seek || state_->snapshot.duration <= 0) return;
     state_->seek_fraction = std::clamp(fraction, 0.0, 1.0);
+    state_->seek_pending = true;
+    state_->steps = 0;
+    state_->snapshot.control_error = S_OK;
+}
+void VideoPreview::SeekRelative(double seconds) {
+    if (!state_ || !std::isfinite(seconds)) return;
+    struct Notify { Shared* state; ~Notify() { state->Wake(); } } notify{state_.get()};
+    std::lock_guard lock(state_->mutex);
+    const auto& snapshot = state_->snapshot;
+    if (!snapshot.ready || !snapshot.can_seek || snapshot.duration <= 0 || FAILED(snapshot.error)) return;
+    // Repeated keys accumulate against the requested position while a decoder
+    // is catching up, rather than repeatedly seeking from its old timestamp.
+    const double base = state_->seek_pending || state_->seek_in_flight
+        ? state_->seek_fraction
+        : static_cast<double>(snapshot.position) / static_cast<double>(snapshot.duration);
+    state_->seek_fraction = playback::SeekOffset(base, snapshot.duration, seconds);
     state_->seek_pending = true;
     state_->steps = 0;
     state_->snapshot.control_error = S_OK;
@@ -381,6 +417,7 @@ void VideoPreview::Step() {
     std::lock_guard lock(state_->mutex);
     if (!state_->snapshot.ready || state_->snapshot.ended) return;
     state_->playing = false;
+    state_->requested_playing = false;
     state_->snapshot.playing = false;
     state_->steps = (std::min)(state_->steps + 1, 16u);
     state_->snapshot.control_error = S_OK;
@@ -399,9 +436,13 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
     HMODULE library = nullptr;
     ComPtr<IMFPMediaPlayer> player;
     ComPtr<Events> events;
+    const wchar_t* stage = L"COM";
     auto fail = [&](HRESULT hr) {
         std::lock_guard lock(state->mutex);
         state->snapshot.error = hr;
+        state->snapshot.native_error = hr;
+        state->snapshot.native_error_stage = stage;
+        state->snapshot.error_stage = stage;
         state->snapshot.ready = false;
         state->snapshot.playing = false;
         state->snapshot.unsupported_audio = IsAudio(path) &&
@@ -422,11 +463,16 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
     // The FFmpeg preview pack takes over what Media Foundation cannot play:
     // containers it does not know, and videos without an installed decoder.
     const std::wstring pack_ffmpeg = packs::PackToolPath(packs::PackId::Media, L"ffmpeg.exe");
+    {
+        std::lock_guard lock(state->mutex);
+        state->snapshot.ffmpeg_available = !pack_ffmpeg.empty();
+    }
     const bool mf_format = NativeExtension(LowerExtension(path));
     if (!pack_ffmpeg.empty() && !state->stop.load() && (!mf_format || state->snapshot.missing_decoder)) {
         if (RunFfmpeg(state, path, pack_ffmpeg)) { CoUninitialize(); return; }
     }
     if (!mf_format) {
+        stage = L"container";
         fail(MF_E_UNSUPPORTED_BYTESTREAM_TYPE);
         CoUninitialize();
         return;
@@ -437,13 +483,17 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
     const auto create = library ? reinterpret_cast<CreatePlayer>(
         GetProcAddress(library, "MFPCreateMediaPlayer")) : nullptr;
     HRESULT hr = create ? S_OK : HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND);
+    stage = L"MF-create-player";
     if (SUCCEEDED(hr) && !state->stop.load()) {
         events.Attach(new Events());
         hr = create(nullptr, FALSE, MFP_OPTION_FREE_THREADED_CALLBACK,
             events.Get(), state->child, &player);
         // MFPlay resolves a URL and rejects filesystem extended-length prefixes.
         const std::wstring media_path = pulse::path::StripExtendedPathPrefix(path);
-        if (SUCCEEDED(hr)) hr = player->CreateMediaItemFromURL(media_path.c_str(), FALSE, 0, nullptr);
+        if (SUCCEEDED(hr)) {
+            stage = L"MF-open-url";
+            hr = player->CreateMediaItemFromURL(media_path.c_str(), FALSE, 0, nullptr);
+        }
     }
     if (FAILED(hr)) fail(hr);
     bool ready = false;
@@ -456,7 +506,10 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
     while (SUCCEEDED(hr) && player && !state->stop.load()) {
         for (const auto& event : events->Take()) {
             if (FAILED(event.error)) {
-                if (!ready || event.type == MFP_EVENT_TYPE_ERROR) { hr = event.error; fail(hr); break; }
+                if (!ready || event.type == MFP_EVENT_TYPE_ERROR) {
+                    stage = event.type == MFP_EVENT_TYPE_ERROR ? L"MF-error-event" : L"MF-open-event";
+                    hr = event.error; fail(hr); break;
+                }
                 busy = false;
                 positioning = false;
                 operation_error = true;
@@ -469,10 +522,24 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
             }
             switch (event.type) {
             case MFP_EVENT_TYPE_MEDIAITEM_CREATED:
+                stage = L"MF-set-item";
                 hr = event.item ? player->SetMediaItem(event.item.Get()) : E_FAIL;
                 break;
             case MFP_EVENT_TYPE_MEDIAITEM_SET: {
                 ready = true;
+#ifdef PULSE_VIDEO_PREVIEW_TESTING
+                if (const HRESULT injected = native_failure_after_ready.exchange(S_OK); FAILED(injected)) {
+                    MFP_EVENT_HEADER fatal{};
+                    if (native_play_failure_first.exchange(false)) {
+                        fatal.eEventType = MFP_EVENT_TYPE_PLAY;
+                        fatal.hrEvent = injected;
+                        events->OnMediaPlayerEvent(&fatal);
+                    }
+                    fatal.eEventType = MFP_EVENT_TYPE_ERROR;
+                    fatal.hrEvent = injected;
+                    events->OnMediaPlayerEvent(&fatal);
+                }
+#endif
                 MFP_MEDIAITEM_CHARACTERISTICS flags{};
                 ComPtr<IMFPMediaItem> item;
                 if (SUCCEEDED(player->GetMediaItem(&item))) item->GetCharacteristics(&flags);
@@ -490,6 +557,7 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
                 positioning = false;
                 std::lock_guard lock(state->mutex);
                 state->playing = false;
+                state->requested_playing = false;
                 state->steps = 0;
                 break;
             }
@@ -516,6 +584,7 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
             state->snapshot.busy = busy || state->seek_pending || state->steps != 0;
             state->snapshot.duration = duration;
             state->snapshot.position = ended ? duration : position;
+            state->seek_in_flight = positioning;
             state->snapshot.stepped_frames = stepped;
             want_play = state->playing;
             // Explicit user input clears a recoverable control error.
@@ -526,7 +595,10 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
                 // continuous mouse seeks can starve Pause and leave audio playing.
                 seek = state->seek_pending;
                 fraction = state->seek_fraction;
-                if (seek) state->seek_pending = false;
+                if (seek) {
+                    state->seek_pending = false;
+                    state->seek_in_flight = true;
+                }
                 else if (!busy && state->steps && actual != MFP_MEDIAPLAYER_STATE_PLAYING) {
                     step = true;
                     --state->steps;
@@ -568,6 +640,7 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
         }
         if ((!ready || busy) && std::chrono::steady_clock::now() > deadline) {
             if (!ready) {
+                stage = L"MF-open-timeout";
                 hr = HRESULT_FROM_WIN32(ERROR_TIMEOUT); fail(hr); break;
             }
             // A control request timing out must not tear down an already open
@@ -610,20 +683,36 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
     player.Reset();
     events.Reset();
     if (library) FreeLibrary(library);
-    // Media Foundation could not open it at all (e.g. MKV with an unknown
-    // audio codec, broken indexes): let the pack try before giving up.
-    if (!ready && FAILED(hr) && !pack_ffmpeg.empty() && !state->stop.load())
+    // A fatal media event may follow MEDIAITEM_SET, even in the same event batch.
+    // Readiness is not proof the native backend can play; let the pack recover.
+    // Recoverable controls use control_error and never reach this failure path.
+    if (FAILED(hr) && !pack_ffmpeg.empty() && !state->stop.load())
         RunFfmpeg(state, path, pack_ffmpeg);
     CoUninitialize();
 }
 
 bool VideoPreview::RunFfmpeg(const std::shared_ptr<Shared>& state, const std::wstring& path,
                              const std::wstring& ffmpeg_exe) {
+    {
+        std::lock_guard lock(state->mutex);
+        state->snapshot.ffmpeg_attempted = true;
+        state->snapshot.ffmpeg_probe_failed = false;
+    }
     FfmpegMediaInfo info;
     const std::wstring media_path = pulse::path::StripExtendedPathPrefix(path);
-    if (state->stop.load() || !ProbeFfmpegMedia(ffmpeg_exe, media_path, info, &state->stop) || state->stop.load()) return false;
+    if (state->stop.load()) return false;
+    if (!ProbeFfmpegMedia(ffmpeg_exe, media_path, info, &state->stop)) {
+        std::lock_guard lock(state->mutex);
+        state->snapshot.ffmpeg_probe_failed = !state->stop.load();
+        return false;
+    }
+    if (state->stop.load()) return false;
     const bool audio_file = IsAudio(path);
-    if (audio_file ? !info.audio : !info.video) return false;
+    if (audio_file ? !info.audio : !info.video) {
+        std::lock_guard lock(state->mutex);
+        state->snapshot.ffmpeg_probe_failed = true;
+        return false;
+    }
     if (audio_file) info.video = false;   // cover art is drawn by the Quick Look itself
 
     float rate = 1.0f, volume = 1.0f;
@@ -633,6 +722,7 @@ bool VideoPreview::RunFfmpeg(const std::shared_ptr<Shared>& state, const std::ws
         auto& s = state->snapshot;
         s.ready = false;
         s.error = S_OK;
+        s.error_stage = L"";
         s.control_error = S_OK;
         s.missing_decoder = false;
         s.unsupported_audio = false;
@@ -648,6 +738,7 @@ bool VideoPreview::RunFfmpeg(const std::shared_ptr<Shared>& state, const std::ws
         volume = s.volume;
         muted = s.muted;
         state->audio_dirty = false;
+        state->playing = state->requested_playing;
         state->seek_pending = false;
         state->steps = 0;
     }
@@ -692,6 +783,7 @@ bool VideoPreview::RunFfmpeg(const std::shared_ptr<Shared>& state, const std::ws
                 seek = true;
                 fraction = state->seek_fraction;
                 state->seek_pending = false;
+                state->seek_in_flight = true;
             }
             if (state->steps && !want_play) {
                 step = true;
@@ -759,6 +851,7 @@ bool VideoPreview::RunFfmpeg(const std::shared_ptr<Shared>& state, const std::ws
             ended = true;
             std::lock_guard lock(state->mutex);
             state->playing = false;
+            state->requested_playing = false;
         }
         const bool failed = player.Failed();
         {
@@ -769,9 +862,13 @@ bool VideoPreview::RunFfmpeg(const std::shared_ptr<Shared>& state, const std::ws
             s.ended = ended;
             s.busy = false;
             s.position = ended ? info.duration : player.Position();
+            state->seek_in_flight = false;
             s.stepped_frames = stepped;
             s.rate = rate;
-            if (failed) s.error = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+            if (failed) {
+                s.error = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+                s.error_stage = L"FFmpeg-decode";
+            }
         }
         if (failed) {
             const std::string diagnostic = player.Diagnostic();
