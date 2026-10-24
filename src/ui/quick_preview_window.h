@@ -12,6 +12,7 @@
 #include "video_preview.h"
 #include "audio_waveform.h"
 #include "quick_preview_command.h"
+#include "pe_preview_tabs.h"
 
 #include <string>
 #include <vector>
@@ -127,6 +128,14 @@ private:
     void DrawIconSizes(ID2D1DeviceContext* dc, const D2D1_RECT_F& content, ID2D1SolidColorBrush* brush);
     int HitIconSize(POINT client) const;
     void ResetTextState();
+    float PeTabsHeight() const;
+    D2D1_RECT_F PeTabRect(int index) const;
+    int HitPeTab(POINT point) const;
+    void SelectPeTab(int index);
+    void DrawPeTabs(ID2D1DeviceContext* dc, ID2D1SolidColorBrush* brush);
+    void StylePeDependencies();
+    PePreviewTabs pe_tabs_;
+    int pe_tab_ = 0;
 
     // Paged documents (quick_preview_pages.cpp).
     struct PagesLayout {

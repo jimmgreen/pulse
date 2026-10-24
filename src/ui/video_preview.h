@@ -25,6 +25,13 @@ public:
         uint32_t stepped_frames = 0; // successful steps since the last seek/play
         HRESULT error = S_OK;
         HRESULT control_error = S_OK;
+        // Static stage identifiers retain the native failure when FFmpeg recovers.
+        HRESULT native_error = S_OK;
+        const wchar_t* native_error_stage = L"";
+        const wchar_t* error_stage = L"";
+        bool ffmpeg_available = false;
+        bool ffmpeg_attempted = false;
+        bool ffmpeg_probe_failed = false;
         float volume = 1.0f;  // requested (applied once the item is ready)
         bool muted = false;
         float rate = 1.0f;    // actual rate after the last SetRate
@@ -57,11 +64,15 @@ public:
     void Layout(const RECT& bounds, bool visible, int corner_radius = 0);
     void Play(bool playing);
     void Seek(double fraction);
+    void SeekRelative(double seconds);
     void Step();
     void SetVolume(float volume);  // 0..1
     void SetMuted(bool muted);
     void SetRate(float rate);
     State Snapshot() const;
+#ifdef PULSE_VIDEO_PREVIEW_TESTING
+    static void FailNativeAfterReadyForTest(HRESULT error, bool fail_play_first = false);
+#endif
     // FFmpeg playback (State::ffmpeg): the picture for the owner to draw, already
     // scaled for it; serial changes with every new frame.
     std::shared_ptr<const FfmpegFrame> Frame(uint64_t& serial) const;

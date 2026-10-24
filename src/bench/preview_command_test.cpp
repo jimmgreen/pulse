@@ -51,5 +51,16 @@ int main() {
     check(!PreviewNotice(L"docx-reading").empty(), "DOCX reading limitations stay outside document text");
     check(!PreviewNotice(L"udf-preview-unavailable").empty() &&
           !PreviewNotice(L"compressed-stream-preview-read-failed").empty(), "archive failures have explicit notices");
+    pulse::preview::Integrity partial;
+    partial.state = pulse::preview::IntegrityState::Partial;
+    partial.reason = pulse::preview::IntegrityReason::Limit;
+    const auto dependency_notice = PreviewNotice(L"", L"Portable Executable (PE32+)\n[LIMIT]\n", partial);
+    const auto report_notice = PreviewNotice(L"", L"Portable Executable (PE32+)\n[Preview truncated]\n", partial);
+    const auto damaged_notice = PreviewNotice(L"", L"Portable Executable (PE32+)\nSome metadata is invalid\n", partial);
+    check(dependency_notice != PreviewNotice(L"", L"ordinary text", partial) &&
+          dependency_notice != report_notice && report_notice != damaged_notice,
+          "PE dependency budgets, report truncation and unreadable metadata have distinct notices");
+    check(PreviewNotice(L"", L"Portable Executable (PE32+)\n", {}).empty(),
+          "complete PE preview does not gain a partial warning");
     return failed ? 1 : 0;
 }

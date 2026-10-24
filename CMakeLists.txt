@@ -540,6 +540,7 @@ add_executable(pulse_column_strip_test src/bench/column_strip_test.cpp src/ui/co
 add_executable(pulse_playback_controls_test src/bench/playback_controls_test.cpp src/ui/video_preview.cpp
     src/ui/ffmpeg_playback.cpp src/common/ffmpeg_tool.cpp)
 target_link_libraries(pulse_playback_controls_test PRIVATE user32 gdi32 ole32 mfuuid winmm)
+target_compile_definitions(pulse_playback_controls_test PRIVATE PULSE_VIDEO_PREVIEW_TESTING)
 
 # Quick Look playback through the FFmpeg pack; a real FFmpeg stands in for the
 # pack (PULSE_TEST_FFMPEG or C:\ffmpeg\bin), else the integration part is skipped.
@@ -627,6 +628,7 @@ add_executable(pulse_preview WIN32 src/preview_host/main.cpp src/preview_host/vi
     src/preview_host/pdf_raster.cpp src/preview_host/dwg_thumb.cpp
     src/preview_host/archive_listing.cpp src/preview_host/udf_listing.cpp src/preview_host/psd_raster.cpp
     src/preview_host/font_raster.cpp src/preview_host/preview_decoders.cpp
+    src/preview_host/pe_document.cpp src/preview_host/pe_dependencies.cpp
     src/preview_host/preview_properties.cpp src/preview_host/preview_file_utils.cpp
     src/preview_host/zip_entry.cpp src/preview_host/office_model.cpp src/preview_host/office_sketch.cpp
     src/preview_host/folder_listing.cpp src/preview_host/markdown_document.cpp third_party/md4c/md4c.c
@@ -652,6 +654,10 @@ target_link_libraries(pulse_preview PRIVATE pulse_crash_reporter)
 pulse_add_version_resource(pulse_preview "Pulse preview host" "Pulse.Preview" "Pulse.Preview.exe")
 
 # Preview protocol self test (console; drives Pulse.Preview.exe over the pipe)
+add_executable(pulse_pe_document_test src/bench/pe_document_test.cpp src/preview_host/pe_document.cpp
+    src/preview_host/pe_dependencies.cpp)
+target_link_libraries(pulse_pe_document_test PRIVATE advapi32 user32)
+
 add_executable(pulse_preview_test src/bench/preview_test_main.cpp src/bench/preview_coverage.cpp
     src/bench/thumbnail_cache_test.cpp src/ui/thumbnail_cache.cpp src/preview_host/video_codec.cpp
     src/preview_host/zip_entry.cpp src/preview_host/office_model.cpp

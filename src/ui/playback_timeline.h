@@ -4,6 +4,10 @@
 #include <cstdint>
 
 namespace pulse::ui::playback {
+inline double SeekOffset(double fraction, int64_t duration, double seconds) noexcept {
+    if (duration <= 0 || !std::isfinite(fraction) || !std::isfinite(seconds)) return 0;
+    return std::clamp(fraction + seconds * 10'000'000.0 / static_cast<double>(duration), 0.0, 1.0);
+}
 inline double Fraction(double x, double left, double right) noexcept {
     if (!(right > left) || !std::isfinite(x)) return 0;
     return std::clamp((x - left) / (right - left), 0.0, 1.0);

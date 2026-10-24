@@ -210,6 +210,8 @@ void QuickPreviewWindow::ResetView() {
     audio_wave_rect_ = {};
     ResetPages();
     ResetTextState();
+    pe_tabs_ = {};
+    pe_tab_ = 0;
 }
 
 void QuickPreviewWindow::ResetAnimation() {
@@ -427,7 +429,7 @@ D2D1_RECT_F QuickPreviewWindow::ContentRect() const {
     const float width = static_cast<float>(compositor_.Width());
     const float height = static_cast<float>(compositor_.Height());
     const float header = kTitleBarHeight * scale_;
-    return D2D1::RectF(0, header + FindBarHeight() + preview_notice_height_, width, height - PlaybackHeight());
+    return D2D1::RectF(0, header + FindBarHeight() + preview_notice_height_ + PeTabsHeight(), width, height - PlaybackHeight());
 }
 
 D2D1_RECT_F QuickPreviewWindow::ChromeButtonRect(ChromeButton button) const {
@@ -884,6 +886,7 @@ void QuickPreviewWindow::EnsureTextLayout(const std::wstring& text, bool hex, fl
                                                DWRITE_TEXT_RANGE{span.start, span.length});
         }
     }
+    StylePeDependencies();
     text_layout_dark_ = dark_;
     text_layout_width_ = width;
     text_layout_scale_ = scale_;
@@ -1120,6 +1123,10 @@ LRESULT CALLBACK QuickPreviewWindow::FindEditProc(HWND hwnd, UINT message, WPARA
     case WM_GETDLGCODE:
         return DLGC_WANTCHARS | DLGC_WANTARROWS | DLGC_WANTALLKEYS;
     case WM_KEYDOWN:
+        if (self->pe_tabs_.active && wparam == VK_TAB && (GetKeyState(VK_CONTROL) & 0x8000)) {
+            self->SelectPeTab((self->pe_tab_ + ((GetKeyState(VK_SHIFT) & 0x8000) ? 4 : 1)) % 5);
+            return 0;
+        }
         if (wparam == VK_ESCAPE) {
             self->CloseFind();
             return 0;
@@ -1586,6 +1593,7 @@ bool QuickPreviewWindow::ClientPoint(LPARAM lparam, POINT& out) const {
 }
 
 HCURSOR QuickPreviewWindow::ContentCursor(POINT client) const {
+    if (HitPeTab(client) >= 0) return LoadCursorW(nullptr, IDC_HAND);
     if (OverCodecButton(client)) return LoadCursorW(nullptr, IDC_HAND);
     if (HasPlayback() && client.y >= PlaybackRect().top)
         return LoadCursorW(nullptr, IDC_HAND);
@@ -1771,12 +1779,26 @@ void QuickPreviewWindow::Render() {
             DrawAudio(dc, video, text_brush.get(), secondary_brush.get());
         if (codec_card) {
             // The card explains the missing picture.
-        } else if (FAILED(video.error))
+        } else if (FAILED(video.error)) {
             status = video.unsupported_audio
                 ? l10n::HantText(l10n::Pick(L"系统无法解码此音频，请用默认应用打开。",
                                           L"Windows cannot decode this audio. Open it in the default app."))
                 : pulse::l10n::Get(pulse::l10n::StringId::PreviewCannotRender);
-        else if (!video.ready && !audio)
+            wchar_t code[32]{};
+            swprintf_s(code, L"\nHRESULT: 0x%08lX", static_cast<unsigned long>(video.error));
+            status += code;
+            if (video.error_stage && *video.error_stage)
+                status += L"\nStage: " + std::wstring(video.error_stage);
+            if (FAILED(video.native_error) && video.native_error != video.error) {
+                swprintf_s(code, L"\nNative: 0x%08lX", static_cast<unsigned long>(video.native_error));
+                status += code;
+                if (video.native_error_stage && *video.native_error_stage)
+                    status += L" (" + std::wstring(video.native_error_stage) + L")";
+            }
+            status += video.ffmpeg_probe_failed ? L"\nFFmpeg: probe failed" :
+                video.ffmpeg_attempted ? L"\nFFmpeg: attempted" :
+                video.ffmpeg_available ? L"\nFFmpeg: available, not attempted" : L"\nFFmpeg: unavailable";
+        } else if (!video.ready && !audio)
             status = pulse::l10n::Get(pulse::l10n::StringId::PreviewLoading);
     } else if (use_handler) {
         native_kind_ = NativeKind::None;
@@ -2091,11 +2113,21 @@ void QuickPreviewWindow::Render() {
         } else if (result == PreviewDrawResult::Text || result == PreviewDrawResult::Hex ||
                    result == PreviewDrawResult::Archive) {
             native_kind_ = result == PreviewDrawResult::Hex ? NativeKind::Hex : NativeKind::Text;
-            EnsureTextLayout(text, result == PreviewDrawResult::Hex,
+            if (result == PreviewDrawResult::Text) pe_tabs_.Update(item_.path, text);
+            const auto text_content = ContentRect();
+            const auto& shown_text = pe_tabs_.active ? pe_tabs_.pages[pe_tab_] : text;
+            const bool changed = preview_text_ != shown_text;
+            EnsureTextLayout(shown_text, result == PreviewDrawResult::Hex,
                              (std::max)(1.0f, width - pad * 2.0f));
-            DrawTextPreview(dc, content, text_brush.get());
-            DrawTextStatus(dc, content, result == PreviewDrawResult::Hex, bytes_read, truncated,
-                           text_encoding, text_brush.get());
+            if (changed) UpdateFindMatches();
+            dc->PushAxisAlignedClip(text_content, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            DrawTextPreview(dc, text_content, text_brush.get());
+            if (pe_tabs_.active)
+                DrawStatusPill(dc, text_content, {L"PE", l10n::Pick(L"Ctrl+Tab 切换标签", L"Ctrl+Tab to switch tabs")}, text_brush.get());
+            else
+                DrawTextStatus(dc, text_content, result == PreviewDrawResult::Hex, bytes_read, truncated,
+                               text_encoding, text_brush.get());
+            dc->PopAxisAlignedClip();
         } else if (TableFileKind(item_.path) == 2 && table_.HasData() &&
                    (result == PreviewDrawResult::Pending || result == PreviewDrawResult::Failed)) {
             native_kind_ = NativeKind::Table;
@@ -2118,6 +2150,7 @@ void QuickPreviewWindow::Render() {
                 : pulse::l10n::StringId::PreviewCannotRender);
         }
         dc->PopAxisAlignedClip();
+        DrawPeTabs(dc, text_brush.get());
         if (markdown_shown_) DrawMarkdownToggle(dc, text_brush.get());
         if (FindBarHeight() > 0.0f) {
             DrawFindBar(dc, FindBarRect());
@@ -2294,6 +2327,11 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
     case WM_LBUTTONDOWN: {
         POINT point{};
         ClientPoint(lparam, point);
+        if (const int tab = HitPeTab(point); tab >= 0) {
+            SetFocus(hwnd_);
+            SelectPeTab(tab);
+            return 0;
+        }
         if (PlaybackMouseDown(point)) return 0;
         if (const ChromeButton button = HitChromeButton(point); button != ChromeButton::None) {
             if (GetFocus() != hwnd_) SetFocus(hwnd_);  // provider may hold focus
@@ -2392,6 +2430,11 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
     case WM_LBUTTONDBLCLK: {
         POINT point{};
         ClientPoint(lparam, point);
+        if (const int tab = HitPeTab(point); tab >= 0) {
+            SetFocus(hwnd_);
+            SelectPeTab(tab);
+            return 0;
+        }
         if (PlaybackMouseDown(point)) return 0;
         if (const ChromeButton button = HitChromeButton(point); button != ChromeButton::None) {
             ActivateChromeButton(button);  // rapid clicks keep stepping through files
@@ -2682,10 +2725,28 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
     case WM_KEYDOWN: {
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        if (pe_tabs_.active && ctrl && wparam == VK_TAB) {
+            SelectPeTab((pe_tab_ + (shift ? 4 : 1)) % 5);
+            return 0;
+        }
         if (wparam == VK_ESCAPE) {
             if (find_open_) CloseFind();
             else Close();
             return 0;
+        }
+        if (!find_open_ && video_.active() && !VideoPreview::IsAudio(item_.path)) {
+            if (wparam == VK_LEFT || wparam == VK_RIGHT) {
+                const double seconds = ctrl ? 60.0 : shift ? 30.0 : 5.0;
+                video_.SeekRelative(wparam == VK_LEFT ? -seconds : seconds);
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                return 0;
+            }
+            if (!ctrl && !shift && (wparam == VK_PRIOR || wparam == VK_NEXT)) {
+                if (owner_ && navigate_message_)
+                    PostMessageW(owner_, navigate_message_,
+                        wparam == VK_PRIOR ? static_cast<WPARAM>(-1) : 1, 0);
+                return 0;
+            }
         }
         if (!find_open_ && HasPlayback() && !ctrl) {
             if (wparam == VK_SPACE) {

@@ -67,6 +67,9 @@ struct QuickPreviewPlaybackProbe {
         if (FAILED(hr)) { if (previous) previous->Release(); Check(false, "create component GPU target"); return; }
         dc->SetTarget(target); dc->BeginDraw();
         dc->Clear(q.dark_ ? D2D1::ColorF(0x151515) : D2D1::ColorF(0xF7F7F7));
+        const auto video = q.video_.Snapshot();
+        if (video.ready && video.ffmpeg)
+            q.DrawFfmpegFrame(dc, q.VideoFrameRect(video), 0);
         ID2D1SolidColorBrush* brush = nullptr;
         dc->CreateSolidColorBrush(q.dark_ ? D2D1::ColorF(0xF4F4F4) : D2D1::ColorF(0x202020), &brush);
         q.DrawHud(dc, q.ContentRect(), brush);
@@ -297,6 +300,7 @@ struct QuickPreviewPlaybackProbe {
         const auto state = q.video_.Snapshot();
         std::printf("window video HRESULT=%08lx ready=%d size=%ux%u duration=%lld\n",
             static_cast<unsigned long>(state.error), state.ready, state.width, state.height, state.duration);
+        std::printf("window decoder missing=%d codec=%ls\n", state.missing_decoder, state.codec.c_str());
         Check(state.ready && SUCCEEDED(state.error), "production space preview accepts target video");
         if (state.ready) {
             Check(Until([&] { return q.video_.Snapshot().position > 2000000; }),
@@ -311,7 +315,11 @@ struct QuickPreviewPlaybackProbe {
                     *reinterpret_cast<bool*>(context) = true;
                 return TRUE;
             }, reinterpret_cast<LPARAM>(&visible_child));
-            Check(q.visible() && visible_child, "video render child is visible with nonempty bounds");
+            const bool rendered = state.ffmpeg
+                ? q.ffmpeg_bitmap_.get() && q.ffmpeg_serial_ > 0 : visible_child;
+            std::printf("window backend ffmpeg=%d uploaded_frame_serial=%llu\n", state.ffmpeg,
+                static_cast<unsigned long long>(q.ffmpeg_serial_));
+            Check(q.visible() && rendered, "video backend has visible rendered content");
             SendMessageW(q.hwnd_, WM_KEYDOWN, VK_SPACE, 0); Pump(300);
             Check(q.visible() && !q.video_.Snapshot().playing, "space pauses video without closing preview");
             Capture(q, L"build\\playback-check\\target-video-controls.bmp");
