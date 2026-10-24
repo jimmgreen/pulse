@@ -395,6 +395,7 @@ bool PlacesCatalog::Load() {
     if (recovered) tag_json = std::move(recovery);
     if (!ReadTagsGeneration(tag_json, tag_generation)) { load_failed = true; return false; }
     workspaces.clear();
+    expanded_workspace_ids.clear();
     tags.clear();
     networks.clear();
     quick_access_paths.clear();
@@ -410,6 +411,9 @@ bool PlacesCatalog::Load() {
 
     for (const auto& block : ExtractObjectArray(json, L"workspaces")) {
         Workspace w;
+        w.id = pulse::json::ExtractString(block, L"id");
+        if (w.id.empty() || FindWorkspaceById(w.id) >= 0) w.id = NewTagId();
+        w.group = pulse::json::ExtractString(block, L"group");
         w.name = pulse::json::ExtractString(block, L"name");
         w.root = pulse::json::ExtractString(block, L"root");
         w.layout = pulse::json::ExtractInt(block, L"layout");
@@ -686,10 +690,13 @@ bool PlacesCatalog::SaveSnapshotFile(const SaveSnapshot& snapshot) {
       << L",\n  \"workspaces\":[\n";
     for (size_t i = 0; i < snapshot.workspaces.size(); ++i) {
         const auto& w = snapshot.workspaces[i];
-        std::wstring name, root;
+        std::wstring name, root, id, group;
+        pulse::json::Escape(w.id, id);
+        pulse::json::Escape(w.group, group);
         pulse::json::Escape(w.name, name);
         pulse::json::Escape(w.root, root);
-        f << L"    {\"name\":\"" << name << L"\",\"root\":\"" << root
+        f << L"    {\"id\":\"" << id << L"\",\"group\":\"" << group
+          << L"\",\"name\":\"" << name << L"\",\"root\":\"" << root
           << L"\",\"layout\":" << w.layout << L",\"panes\":";
         writeArr(w.pane_paths);
         std::vector<std::wstring> views;
@@ -807,15 +814,9 @@ int PlacesCatalog::PinWorkspace(const std::wstring& root, const std::wstring& na
                                 const std::vector<std::wstring>& pane_paths,
                                 const std::vector<ui::ViewMode>& pane_views) {
     const std::wstring n = Norm(root);
-    int existing = FindWorkspace(n);
-    if (existing >= 0) {
-        UpdateWorkspaceSnapshot(existing, layout, pane_paths, pane_views);
-        if (!name.empty()) workspaces[static_cast<size_t>(existing)].name = name;
-        active_workspace = existing;
-        Save();
-        return existing;
-    }
+    if (n.empty()) return -1;
     Workspace w;
+    w.id = NewTagId();
     w.root = n;
     w.name = name.empty() ? FolderTitle(n) : name;
     w.layout = layout;
@@ -831,9 +832,32 @@ int PlacesCatalog::PinWorkspace(const std::wstring& root, const std::wstring& na
 
 bool PlacesCatalog::UnpinWorkspace(int index) {
     if (index < 0 || index >= static_cast<int>(workspaces.size())) return false;
+    expanded_workspace_ids.erase(workspaces[static_cast<size_t>(index)].id);
     workspaces.erase(workspaces.begin() + index);
     if (active_workspace == index) active_workspace = -1;
     else if (active_workspace > index) --active_workspace;
+    Save();
+    return true;
+}
+
+int PlacesCatalog::FindWorkspaceById(const std::wstring& id) const {
+    if (id.empty()) return -1;
+    for (int i = 0; i < static_cast<int>(workspaces.size()); ++i)
+        if (workspaces[static_cast<size_t>(i)].id == id) return i;
+    return -1;
+}
+
+bool PlacesCatalog::RenameWorkspace(int index, const std::wstring& name) {
+    const auto trimmed = TrimTagName(name);
+    if (index < 0 || index >= static_cast<int>(workspaces.size()) || trimmed.empty()) return false;
+    workspaces[static_cast<size_t>(index)].name = trimmed;
+    Save();
+    return true;
+}
+
+bool PlacesCatalog::SetWorkspaceGroup(int index, const std::wstring& group) {
+    if (index < 0 || index >= static_cast<int>(workspaces.size())) return false;
+    workspaces[static_cast<size_t>(index)].group = TrimTagName(group);
     Save();
     return true;
 }
@@ -847,6 +871,7 @@ void PlacesCatalog::UpdateWorkspaceSnapshot(int index, int layout,
                                             const std::vector<ui::ViewMode>& pane_views) {
     if (index < 0 || index >= static_cast<int>(workspaces.size())) return;
     auto& w = workspaces[static_cast<size_t>(index)];
+    if (!pane_paths.empty()) w.root = Norm(pane_paths.front());
     w.layout = layout;
     w.pane_paths = pane_paths;
     w.pane_views = pane_views;

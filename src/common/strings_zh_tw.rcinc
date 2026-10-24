@@ -432,7 +432,7 @@ BEGIN
     IDS_DELETE                      "刪除"
     IDS_PROPERTIES                  "內容"
     IDS_OPEN_TERMINAL_HERE          "在此處開啟終端機"
-    IDS_PIN_WORKSPACE               "釘為工作區"
+    IDS_PIN_WORKSPACE               "將分頁儲存為工作區..."
     IDS_PIN_NETWORK                 "釘為網路位置"
     IDS_TAGS_ELLIPSIS               "標籤..."
     IDS_NEW_TEXT_DOCUMENT           "新增文字文件"
@@ -597,7 +597,7 @@ BEGIN
     IDS_DUP_FOLDER_PLACEHOLDER      "選擇要掃描的資料夾"
     IDS_DUP_TRUNCATED               "結果已截斷，僅顯示部分組。"
     IDS_DUP_MIN_SIZE_DESC           "小於該大小的檔案會跳過，避免掃出大量小檔案。"
-    IDS_UNPIN_WORKSPACE             "取消工作區"
+    IDS_UNPIN_WORKSPACE             "刪除已儲存的工作區"
     IDS_ADVANCED_SEARCH             "進階搜尋"
     IDS_SEARCH_CHIP_TYPE            "類型"
     IDS_SEARCH_CHIP_DATE            "修改時間"
@@ -1756,4 +1756,12 @@ BEGIN
     IDS_OP_AUTHORIZATION_PROMPT "請在 Windows 提示中授權，然後繼續此操作。"
     IDS_OP_AUTHORIZATION_NOT_GRANTED "未取得系統管理員權限。可重試授權、略過此項或取消。"
     IDS_OP_ITEMS_PER_SECOND "項/秒"
+END
+
+LANGUAGE 0x04, 0x01
+STRINGTABLE
+BEGIN
+    IDS_WORKSPACE_NAME_HINT "工作區名稱"
+    IDS_WORKSPACE_GROUP "設定群組..."
+    IDS_WORKSPACE_GROUP_HINT "群組名稱（留空取消群組）"
 END

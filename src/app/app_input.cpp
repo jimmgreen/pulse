@@ -3052,11 +3052,14 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 s->places.UnpinWorkspace(_wtoi(rest.c_str()));
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (hit.region == ui::HitTestResult::SidebarItemExpand) {
+            if (ToggleWorkspaceDirectories(*s, hit.path)) return 0;
+            if (ToggleWorkspaceGroup(*s, hit.path)) return 0;
             if (hit.path == app::MakeStarredPath()) {
                 s->starredExpanded = !s->starredExpanded;
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
         } else if (hit.region == ui::HitTestResult::SidebarItem) {
+            if (ToggleWorkspaceGroup(*s, hit.path)) return 0;
             // A section whose rows are the section itself (the starred root, the
             // OneDrive accounts) has no header to grab: dragging a row moves the
             // whole section, and a plain click still navigates on release.

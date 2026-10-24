@@ -569,7 +569,7 @@ BEGIN
     IDS_DELETE                      "删除"
     IDS_PROPERTIES                  "属性"
     IDS_OPEN_TERMINAL_HERE          "在此处打开终端"
-    IDS_PIN_WORKSPACE               "钉为工作区"
+    IDS_PIN_WORKSPACE               "将标签页保存为工作区..."
     IDS_PIN_NETWORK                 "钉为网络位置"
     IDS_TAGS_ELLIPSIS               "标签..."
     IDS_NEW_TEXT_DOCUMENT           "新建文本文档"
@@ -734,7 +734,7 @@ BEGIN
     IDS_DUP_FOLDER_PLACEHOLDER      "选择要扫描的文件夹"
     IDS_DUP_TRUNCATED               "结果已截断，仅显示部分组。"
     IDS_DUP_MIN_SIZE_DESC           "小于该大小的文件会跳过，避免扫出大量小文件。"
-    IDS_UNPIN_WORKSPACE             "取消工作区"
+    IDS_UNPIN_WORKSPACE             "删除已保存的工作区"
     IDS_ADVANCED_SEARCH             "高级搜索"
     IDS_SEARCH_CHIP_TYPE            "类型"
     IDS_SEARCH_CHIP_DATE            "修改时间"
@@ -1208,7 +1208,7 @@ BEGIN
     IDS_DELETE                      "Delete"
     IDS_PROPERTIES                  "Properties"
     IDS_OPEN_TERMINAL_HERE          "Open terminal here"
-    IDS_PIN_WORKSPACE               "Pin as workspace"
+    IDS_PIN_WORKSPACE               "Save tab as workspace..."
     IDS_PIN_NETWORK                 "Pin as network location"
     IDS_TAGS_ELLIPSIS               "Tags..."
     IDS_NEW_TEXT_DOCUMENT           "New text document"
@@ -1373,7 +1373,7 @@ BEGIN
     IDS_DUP_FOLDER_PLACEHOLDER      "Choose a folder to scan"
     IDS_DUP_TRUNCATED               "Results truncated; only some groups are shown."
     IDS_DUP_MIN_SIZE_DESC           "Files smaller than this are skipped to avoid a flood of tiny matches."
-    IDS_UNPIN_WORKSPACE             "Unpin workspace"
+    IDS_UNPIN_WORKSPACE             "Delete saved workspace"
     IDS_ADVANCED_SEARCH             "Advanced search"
     IDS_SEARCH_CHIP_TYPE            "Type"
     IDS_SEARCH_CHIP_DATE            "Date"
@@ -3470,4 +3470,19 @@ BEGIN
     IDS_OP_SKIP_AUTHORIZATION "Skip item"
     IDS_OP_AUTHORIZATION_PROMPT "Approve the Windows prompt to continue this operation."
     IDS_OP_AUTHORIZATION_NOT_GRANTED "Administrator permission was not granted. Retry, skip this item, or cancel."
+END
+
+LANGUAGE 0x04, 0x02
+STRINGTABLE
+BEGIN
+    IDS_WORKSPACE_NAME_HINT "工作区名称"
+    IDS_WORKSPACE_GROUP "设置分组..."
+    IDS_WORKSPACE_GROUP_HINT "分组名称（留空取消分组）"
+END
+LANGUAGE 0x09, 0x01
+STRINGTABLE
+BEGIN
+    IDS_WORKSPACE_NAME_HINT "Workspace name"
+    IDS_WORKSPACE_GROUP "Set group..."
+    IDS_WORKSPACE_GROUP_HINT "Group name (empty for no group)"
 END

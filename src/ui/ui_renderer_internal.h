@@ -1081,7 +1081,7 @@ void ClearTextWidthCache() {
     }
 
     bool SidebarItemHasUnpin(const SidebarItem& item) {
-        return item.tab_row || (item.indent == 0 && item.path.starts_with(L"pulse:workspace:"));
+        return item.tab_row || (!item.expandable && item.indent == 0 && item.path.starts_with(L"pulse:workspace:"));
     }
 
     D2D1_RECT_F WorkspaceUnpinRect(const D2D1_RECT_F& row, float scale) {
