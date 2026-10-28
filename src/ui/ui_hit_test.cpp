@@ -486,6 +486,9 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 if (ContainsPt(lay.vertical_tabs_row, x, y)) {
                     r.region = HitTestResult::SettingsToggle; r.index = 23; return r;
                 }
+                if (ContainsPt(lay.win_e_activate_row, x, y)) {
+                    r.region = HitTestResult::SettingsToggle; r.index = 47; return r;
+                }
                 if (ContainsPt(lay.tray_hide_row, x, y)) {
                     r.region = HitTestResult::SettingsToggle; r.index = 37; return r;
                 }

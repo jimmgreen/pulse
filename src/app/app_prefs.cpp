@@ -89,6 +89,7 @@ void AppPrefs::ResetToDefaults() {
     startup_open = 0;
     new_tab_open = 0;
     external_open = 0;
+    win_e_activate_existing = false;
     close_window_with_last_tab = true;
     close_tab_on_double_click = false;
     confirm_recycle_delete = false;
@@ -253,6 +254,8 @@ std::wstring AppPrefs::ToJson() const {
     out += new_tab_open == 1 ? L"1" : L"0";
     out += L",\n  \"external_open\":";
     out += std::to_wstring(external_open >= 0 && external_open <= 2 ? external_open : 0);
+    out += L",\n  \"win_e_activate_existing\":";
+    out += win_e_activate_existing ? L"true" : L"false";
     out += L",\n  \"close_window_with_last_tab\":";
     out += close_window_with_last_tab ? L"true" : L"false";
     out += L",\n  \"close_tab_on_double_click\":";
@@ -530,6 +533,7 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     new_tab_open = pulse::json::ExtractInt(json, L"new_tab_open", 0) == 1 ? 1 : 0;
     external_open = pulse::json::ExtractInt(json, L"external_open", 0);
     if (external_open < 0 || external_open > 2) external_open = 0;
+    win_e_activate_existing = pulse::json::ExtractBool(json, L"win_e_activate_existing", false);
     // Missing key = preferences saved before the setting existed: keep their behavior.
     close_window_with_last_tab = pulse::json::ExtractBool(json, L"close_window_with_last_tab", false);
     close_tab_on_double_click = pulse::json::ExtractBool(json, L"close_tab_on_double_click", false);

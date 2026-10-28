@@ -105,6 +105,22 @@ int main() {
         auto d = DecideOpenTarget(r, {Idle()}, none, P::AlwaysTab);
         Check(Is(d, A::NewWindow, R::Explicit, 0), "explicit: a new window even with \"always tab\"");
     }
+    // Rule 1.5, the Win+E wake-only setting.
+    {
+        ExternalOpenRequest r = At(kNow);
+        r.new_window = true;
+        r.activate_only = true;
+        auto d = DecideOpenTarget(r, {Idle()}, none, P::Smart);
+        Check(Is(d, A::Activate, R::ActivateOnly, 0) && !d.restore,
+              "wake-only: the most recent window comes forward, no new tab");
+        ExternalOpenWindow min;
+        min.minimized = true;
+        d = DecideOpenTarget(r, {min, Idle()}, none, P::AlwaysWindow);
+        Check(Is(d, A::Activate, R::ActivateOnly, 0) && d.restore,
+              "wake-only: a minimized window is restored, the policy does not matter");
+        d = DecideOpenTarget(r, {}, none, P::Smart);
+        Check(d.action == A::NewWindow, "wake-only: no window at all still opens one");
+    }
     // Rule 4.
     {
         ExternalOpenWindow w;

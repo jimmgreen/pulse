@@ -4399,4 +4399,6 @@ BEGIN
     IDS_OP_AUTH_TITLE_DELETE "刪除這些項目需要系統管理員權限"
     IDS_OP_AUTH_NOT_GRANTED_SHORT "沒有取得系統管理員權限。"
     IDS_OP_AUTHORIZATION_ONCE "確認一次即可，本次操作的其餘項目不會再詢問。"
+    IDS_SETTINGS_WIN_E_ACTIVATE "Win+E 只喚醒已有視窗"
+    IDS_SETTINGS_WIN_E_ACTIVATE_DESC "已在執行時按 Win+E 或再次啟動，不新增視窗，只把最近的視窗帶到前臺"
 END

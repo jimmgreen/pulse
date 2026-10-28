@@ -4401,6 +4401,8 @@ BEGIN
     IDS_OP_AUTH_TITLE_DELETE "删除这些项目需要管理员权限"
     IDS_OP_AUTH_NOT_GRANTED_SHORT "没有获得管理员权限。"
     IDS_OP_AUTHORIZATION_ONCE "确认一次即可，本次操作的其余项目不会再问。"
+    IDS_SETTINGS_WIN_E_ACTIVATE "Win+E 只唤醒已有窗口"
+    IDS_SETTINGS_WIN_E_ACTIVATE_DESC "已在运行时按 Win+E 或再次启动，不新建窗口，只把最近的窗口带到前台"
 END
 
 LANGUAGE 0x09, 0x01
@@ -8801,6 +8803,8 @@ BEGIN
     IDS_OP_AUTH_TITLE_DELETE "Deleting these items needs administrator permission"
     IDS_OP_AUTH_NOT_GRANTED_SHORT "Administrator permission wasn't granted."
     IDS_OP_AUTHORIZATION_ONCE "You only need to approve once; the rest of this operation won't ask again."
+    IDS_SETTINGS_WIN_E_ACTIVATE "Win+E brings back the existing window"
+    IDS_SETTINGS_WIN_E_ACTIVATE_DESC "While Pulse is running, Win+E (or launching it again) activates its window instead of opening a new one"
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.

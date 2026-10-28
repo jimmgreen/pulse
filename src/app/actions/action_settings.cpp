@@ -99,6 +99,7 @@ const SetDef kSettingDefs[] = {
     {"external_open", I::SettingsExternalOpen, 10, 0, -1, SET_GET(s.appPrefs.external_open),
      +[](AppState& s, int i) { s.settings.ExternalOpen(i); },
      {{{"smart", I::ExternalOpenSmart, 0}, {"tab", I::ExternalOpenTab, 1}, {"window", I::ExternalOpenWindow, 2}}}},
+    SET_SW("win_e_activate", SettingsWinEActivate, 10, 0, 47, win_e_activate_existing),
     SET_SW("vertical_tabs", SettingsVerticalTabs, 10, 0, 23, vertical_tabs),
     SET_SW("pinned_tab_names", PinnedNames, 10, 0, 6, show_pinned_tab_names),
     SET_SW("double_click_closes_tab", SettingsCloseTabDoubleClick, 10, 0, 35, close_tab_on_double_click),

@@ -68,7 +68,8 @@ void ForgetOpenToast(AppCore& core) {
 
 AppState& OpenExternalFolder(AppState& mru, const std::wstring& raw) {
     // Win+E's shell command launches Pulse without a path. Each launch is a
-    // new-window request, even when the current folder is already visible.
+    // new-window request, even when the current folder is already visible —
+    // unless the wake-only setting turns it into activating the recent window.
     const bool new_window = raw.empty();
     const bool this_pc = new_window || app::IsThisPcArgument(raw);
     const auto* current = ActiveTab(mru);
@@ -112,6 +113,7 @@ AppState& OpenExternalFolder(AppState& mru, const std::wstring& raw) {
     const app::ExternalOpenPolicy policy = OpenPolicy(mru);
     app::ExternalOpenRequest request;
     request.new_window = new_window;
+    request.activate_only = new_window && mru.appPrefs.win_e_activate_existing;
     request.can_dedupe = !this_pc;
     request.tick = now;
     const app::ExternalOpenDecision decision = app::DecideOpenTarget(request, snapshot, batch, policy);

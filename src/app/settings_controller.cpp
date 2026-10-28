@@ -1313,6 +1313,9 @@ void SettingsController::ToggleUi(int index) {
     } else if (index == 23) {
         prefs_->vertical_tabs = !prefs_->vertical_tabs;
         SaveAndApply(SettingsEffect::None);
+    } else if (index == 47) {
+        prefs_->win_e_activate_existing = !prefs_->win_e_activate_existing;
+        SaveAndApply(SettingsEffect::None);
     } else if (index == 37) {
         prefs_->tray_hide_when_empty = !prefs_->tray_hide_when_empty;
         SaveAndApply(SettingsEffect::None);

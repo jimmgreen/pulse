@@ -101,6 +101,9 @@ struct AppPrefs {
     // external_open: where a folder opened from another program goes
     // (multi-window M7, plan §6): 0 smart, 1 always a tab, 2 always a new window.
     int external_open = 0;
+    // Win+E (any empty-path launch) while Pulse runs only brings the most
+    // recent window forward instead of opening a new one (external_open rule 1.5).
+    bool win_e_activate_existing = false;
     // Closing the only tab closes the window (app/last_tab_close.h). New installs
     // follow File Explorer (Ctrl+W on the only tab closes the window); a saved file
     // without the key predates the setting and keeps the window (see FromJson).

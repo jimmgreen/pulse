@@ -32,6 +32,15 @@ ExternalOpenDecision DecideOpenTarget(const ExternalOpenRequest& request,
             return d;
         }
     }
+    // 1.5 The Win+E wake-only setting: the most recent window comes forward
+    // (restored when minimized or in the tray), no new window or tab.
+    if (request.activate_only) {
+        d.action = ExternalOpenAction::Activate;
+        d.reason = ExternalOpenReason::ActivateOnly;
+        d.window = 0;
+        d.restore = restore_of(0);
+        return d;
+    }
     // 2. Explicitly a new window.
     if (request.new_window) {
         d.action = ExternalOpenAction::NewWindow;

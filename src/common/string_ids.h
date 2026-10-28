@@ -4419,5 +4419,7 @@
 #define IDS_OP_AUTH_TITLE_DELETE                                                         5627
 #define IDS_OP_AUTH_NOT_GRANTED_SHORT                                                    5628
 #define IDS_OP_AUTHORIZATION_ONCE                                                        5629
+#define IDS_SETTINGS_WIN_E_ACTIVATE                                                      5630
+#define IDS_SETTINGS_WIN_E_ACTIVATE_DESC                                                 5631
 
 #endif  // PULSE_STRING_IDS_H

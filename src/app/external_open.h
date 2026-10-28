@@ -46,6 +46,7 @@ struct ExternalOpenBatch {
 struct ExternalOpenRequest {
     bool can_dedupe = true;   // false for This PC: every request opens it
     bool new_window = false;  // explicit (reserved: Shift+open, jump list)
+    bool activate_only = false;  // Win+E wake-only setting: forward the most recent window
     uint64_t tick = 0;
 };
 
@@ -59,6 +60,7 @@ enum class ExternalOpenAction : uint8_t {
 
 enum class ExternalOpenReason : uint8_t {
     Duplicate,    // rule 1
+    ActivateOnly, // rule 1.5: the Win+E wake-only setting
     Explicit,     // rule 2
     Batch,        // rule 3
     Policy,       // rule 4
