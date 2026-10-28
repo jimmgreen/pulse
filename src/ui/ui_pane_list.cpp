@@ -6329,15 +6329,8 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
     }
 
     DrawScrollbar(vm, x, y, w, h, theme);
-    if (vm.view_mode == ViewMode::List && layout.MaxScrollX() > 0.0f) {
-        const float viewW = std::max(1.0f, w);
-        const float totalW = layout.ContentWidth();
-        const float thumbW = std::max(28.0f * scale_, viewW * (viewW / totalW));
-        const float travel = std::max(1.0f, viewW - thumbW);
-        const float thumbX = x + (vm.scroll_x / layout.MaxScrollX()) * travel;
-        FillRoundedRect(dc, brScrollbar_.get(), thumbX, y + h - 8.0f * scale_,
-                        thumbW, 6.0f * scale_, 3.0f * scale_);
-    }
+    if (vm.view_mode == ViewMode::List && layout.MaxScrollX() > 0.0f)
+        painter_.DrawScrollbar(PaneHScrollbarSpec(vm, D2D1::RectF(x, y, x + w, y + h), layout.MaxScrollX(), scale_));
 }
 
 // "Group by" headers: chevron, label, count, rule and group bytes. The group
@@ -6532,17 +6525,39 @@ void MainRenderer::DrawGroupHeaders(const PaneViewModel& vm, const ViewLayout& l
     dc->PopAxisAlignedClip();
 }
 
+// The file list's bars are the shared fluent scrollbar, like settings and
+// the sidebar: thin at rest, full width with its track while hovered or dragged.
+fluent::ScrollbarSpec PaneScrollbarSpec(const PaneViewModel& vm, const D2D1_RECT_F& list,
+                                        float content_h, float scale) {
+    fluent::ScrollbarSpec bar;
+    bar.viewport = D2D1::RectF(list.right - 12.0f * scale, list.top, list.right - 2.0f * scale, list.bottom);
+    bar.offset = vm.scroll_y;
+    bar.viewport_extent = list.bottom - list.top;
+    bar.content_extent = content_h;
+    bar.expand_progress = vm.scrollbar_expand;
+    bar.opacity = vm.scrollbar_opacity;
+    return bar;
+}
+
+fluent::ScrollbarSpec PaneHScrollbarSpec(const PaneViewModel& vm, const D2D1_RECT_F& list,
+                                         float max_scroll_x, float scale) {
+    fluent::ScrollbarSpec bar;
+    bar.horizontal = true;
+    bar.viewport = D2D1::RectF(list.left, list.bottom - 12.0f * scale, list.right, list.bottom - 2.0f * scale);
+    bar.offset = vm.scroll_x;
+    bar.viewport_extent = list.right - list.left;
+    bar.content_extent = bar.viewport_extent + max_scroll_x;
+    bar.expand_progress = vm.scrollbar_expand;
+    bar.opacity = vm.scrollbar_opacity;
+    return bar;
+}
+
 void MainRenderer::DrawScrollbar(const PaneViewModel& vm, float x, float y, float w, float h, const Theme& theme) {
     (void)theme;
-    ID2D1DeviceContext* dc = compositor_->Dc();
-    ViewLayout layout(vm.view_mode, D2D1::RectF(x, y, x + w, y + h), vm.EntryCount(),
-                      vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, D2D1::RectF(x, y, x + w, y + h)), vm.Groups());
-    const float totalH = layout.ContentHeight();
-    auto sb = ComputeScrollbar(h, totalH, vm.scroll_y, layout.Metrics().cell_height);
-    if (!sb.valid) return;
-    float thumbW = 6 * scale_;
-    FillRoundedRect(dc, brScrollbar_.get(), x + w - 10.0f * scale_, y + sb.thumbY,
-        thumbW, sb.thumbH, thumbW * 0.5f);
+    const D2D1_RECT_F list = D2D1::RectF(x, y, x + w, y + h);
+    ViewLayout layout(vm.view_mode, list, vm.EntryCount(),
+                      vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups());
+    painter_.DrawScrollbar(PaneScrollbarSpec(vm, list, layout.ContentHeight(), scale_));
 }
 bool MainRenderer::PaneScrollbarGeometry(const PaneViewModel& vm, const D2D1_RECT_F& full_bounds,
                                           D2D1_RECT_F& track, D2D1_RECT_F& thumb, float& max_scroll) const {
@@ -6551,12 +6566,12 @@ bool MainRenderer::PaneScrollbarGeometry(const PaneViewModel& vm, const D2D1_REC
     const auto list = PaneListRect(pane_bounds, extra, vm.view_mode);
     ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_, ListRowHeightDip(vm, list), vm.Groups());
     max_scroll = layout.MaxScrollY();
-    const auto metrics = ComputeScrollbar(list.bottom - list.top, layout.ContentHeight(),
-                                           vm.scroll_y, layout.Metrics().cell_height);
-    if (!metrics.valid) return false;
+    // The drawn bar's thumb (DrawScrollbar), a little wider to grab.
+    const D2D1_RECT_F drawn = fluent::ScrollbarThumbRect(
+        PaneScrollbarSpec(vm, list, layout.ContentHeight(), scale_), scale_);
+    if (drawn.bottom <= drawn.top) return false;
     track = D2D1::RectF(list.right - 14 * scale_, list.top, list.right, list.bottom);
-    thumb = D2D1::RectF(track.left, list.top + metrics.thumbY, track.right,
-                         list.top + metrics.thumbY + metrics.thumbH);
+    thumb = D2D1::RectF(track.left, drawn.top, track.right, drawn.bottom);
     return true;
 }
 

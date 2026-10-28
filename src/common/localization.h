@@ -3035,7 +3035,6 @@ enum class StringId : UINT {
     AiAsstUndoGone = IDS_AI_ASST_UNDO_GONE,
     AiAsstMovedSome = IDS_AI_ASST_MOVED_SOME,
     AiConnStatusOn = IDS_AI_CONN_STATUS_ON,
-    AiConnPaste = IDS_AI_CONN_PASTE,
     AiConnErrAuth = IDS_AI_CONN_ERR_AUTH,
     AiConnErrBalance = IDS_AI_CONN_ERR_BALANCE,
     AiConnErrRate = IDS_AI_CONN_ERR_RATE,

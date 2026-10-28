@@ -3043,7 +3043,6 @@
 #define IDS_AI_ASST_UNDO_GONE                                                            4250
 #define IDS_AI_ASST_MOVED_SOME                                                           4251
 #define IDS_AI_CONN_STATUS_ON                                                            4254
-#define IDS_AI_CONN_PASTE                                                                4259
 #define IDS_AI_CONN_ERR_AUTH                                                             4267
 #define IDS_AI_CONN_ERR_BALANCE                                                          4269
 #define IDS_AI_CONN_ERR_RATE                                                             4271

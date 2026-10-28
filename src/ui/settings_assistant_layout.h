@@ -231,11 +231,9 @@ inline float LayoutSettingsAssistant(SettingsLayout& l, const WindowViewModel& v
         }
     } else if (v.stage == AsstStage::Setup) {
         if (v.needs_key) {
-            const float paste_w = button_w(asst_text::T(I::AiConnPaste));
-            const float controls = inner_right - paste_w - 8.0f * s - field_w;
+            const float controls = inner_right - field_w;
             o.key_row = row(asst_text::KeyCaption(v), controls);
-            o.key_paste = place(o.key_row, inner_right, paste_w);
-            o.key_field = place(o.key_row, o.key_paste.left - 8.0f * s, field_w);
+            o.key_field = place(o.key_row, inner_right, field_w);
             o.key_eye = D2D1::RectF(o.key_field.right - 32.0f * s, o.key_field.top + 2.0f * s,
                                     o.key_field.right - 2.0f * s, o.key_field.bottom - 2.0f * s);
             if (!v.console.empty())
@@ -345,11 +343,9 @@ inline float LayoutSettingsAssistant(SettingsLayout& l, const WindowViewModel& v
         o.voice_service = place(o.voice_head, inner_right, choice_w);
         o.voice_badge = place(o.voice_head, o.voice_service.left - 10.0f * s, bw, 22.0f);
         if (v.voice_stage == AsstVoiceStage::Setup) {
-            const float paste_w = button_w(asst_text::T(I::AiConnPaste));
-            const float controls = inner_right - paste_w - 8.0f * s - field_w;
+            const float controls = inner_right - field_w;
             o.voice_key_row = row(asst_text::VoiceKeyCaption(v), controls);
-            o.voice_key_paste = place(o.voice_key_row, inner_right, paste_w);
-            o.voice_key_field = place(o.voice_key_row, o.voice_key_paste.left - 8.0f * s, field_w);
+            o.voice_key_field = place(o.voice_key_row, inner_right, field_w);
             o.voice_key_eye = D2D1::RectF(o.voice_key_field.right - 32.0f * s, o.voice_key_field.top + 2.0f * s,
                                           o.voice_key_field.right - 2.0f * s, o.voice_key_field.bottom - 2.0f * s);
             if (!v.voice_shared && !v.voice_console.empty())
@@ -431,7 +427,6 @@ inline int HitTestSettingsAssistant(const SettingsLayout& l, const WindowViewMod
     if (v.stage == AsstStage::Setup) {
         if (in(o.key_eye)) return kAsstReveal;
         if (in(o.key_field)) return kAsstKeyField;
-        if (in(o.key_paste)) return kAsstPaste;
         if (in(o.key_link)) return kAsstKeyLink;
         if (in(o.url_field)) return kAsstUrlField;
         if (in(o.url_buttons[0])) return kAsstUrlEdit;
@@ -441,7 +436,6 @@ inline int HitTestSettingsAssistant(const SettingsLayout& l, const WindowViewMod
     if (v.voice_stage == AsstVoiceStage::Setup) {
         if (in(o.voice_key_eye)) return kAsstVoiceReveal;
         if (in(o.voice_key_field)) return kAsstVoiceKeyField;
-        if (in(o.voice_key_paste)) return kAsstVoicePaste;
         if (in(o.voice_key_link)) return kAsstVoiceKeyLink;
         if (in(o.voice_url_field)) return kAsstVoiceUrlField;
         if (in(o.voice_cancel)) return kAsstVoiceCancel;

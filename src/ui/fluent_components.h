@@ -137,6 +137,7 @@ struct ScrollbarSpec {
     float expand_progress = 0.0f;
     float opacity = 1.0f;  // fades the whole bar; high contrast always draws it opaque
     bool enabled = true;
+    bool horizontal = false;  // along the viewport's bottom edge (offset runs left to right)
 };
 
 D2D1_RECT_F ScrollbarThumbRect(const ScrollbarSpec& spec, float scale,

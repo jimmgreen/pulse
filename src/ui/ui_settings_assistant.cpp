@@ -227,7 +227,6 @@ void MainRenderer::DrawSettingsAssistant(const WindowViewModel& vm, const D2D1_R
             field(o.key_field, v.key_typed, AsstField::Key);
             DrawIconText(o.key_eye.left, o.key_eye.top, o.key_eye.right - o.key_eye.left, o.key_eye.bottom - o.key_eye.top,
                          v.revealed ? L"\xED1A" : L"\xE7B3", L"", hovered(kAsstReveal) ? theme.text : theme.text_secondary, 0.6f);
-            button(o.key_paste, asst_text::T(I::AiConnPaste), kAsstPaste);
             divider_below(o.key_row);
         }
         head(o.url_row, L"\xE774", asst_text::T(I::AsstUrlTitle), asst_text::UrlCaption(v),
@@ -390,7 +389,6 @@ void MainRenderer::DrawSettingsAssistant(const WindowViewModel& vm, const D2D1_R
         DrawIconText(o.voice_key_eye.left, o.voice_key_eye.top, o.voice_key_eye.right - o.voice_key_eye.left,
                      o.voice_key_eye.bottom - o.voice_key_eye.top, v.voice_revealed ? L"\xED1A" : L"\xE7B3", L"",
                      hovered(kAsstVoiceReveal) ? theme.text : theme.text_secondary, 0.6f);
-        button(o.voice_key_paste, asst_text::T(I::AiConnPaste), kAsstVoicePaste);
         divider_below(o.voice_key_row);
         head(o.voice_url_row, L"\xE774", asst_text::T(I::AsstUrlTitle), asst_text::VoiceUrlCaption(v),
              o.voice_url_field.right > o.voice_url_field.left ? o.voice_url_field.left : o.voice_url_row.right - 16*s);

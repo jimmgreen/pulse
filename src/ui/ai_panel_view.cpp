@@ -582,7 +582,7 @@ void AiPanelView::DrawEmptyState(Compositor* compositor, const AiPanelViewModel&
     const float max_scroll = (std::max)(0.0f, content_h_ - view_h_);
     if (scroll_ > max_scroll) scroll_ = max_scroll;
     if (max_scroll > 0.5f)
-        DrawBar(0, D2D1::RectF(area.right - 12.0f * s, area.top + 4.0f * s, area.right - 1.0f * s,
+        DrawBar(0, D2D1::RectF(area.right - 12.0f * s, area.top + 4.0f * s, area.right - 2.0f * s,
                                area.top + view_h_ - 4.0f * s), scroll_, view_h_, content_h_);
 }
 
@@ -908,7 +908,7 @@ void AiPanelView::DrawModelMenu(Compositor* compositor, const AiPanelViewModel& 
         if (menu_scroll_ < menu_scroll_max_ - 0.5f) fade(list_box.bottom, list_box.bottom - 10.0f * s);
         c.dc->PopAxisAlignedClip();
         // The shared scrollbar along the card's right edge.
-        const float bar_right = x1 + 5.0f * s;
+        const float bar_right = x1 + 4.0f * s;
         DrawBar(1, D2D1::RectF(bar_right - 12.0f * s, list_box.top + 2.0f * s, bar_right,
                                list_box.top + list_box_h - 2.0f * s), menu_scroll_, list_box_h, list_h);
     }

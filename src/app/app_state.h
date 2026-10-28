@@ -385,17 +385,22 @@ struct AppState : AppCoreOwner {
     } hoverPreview;
     int dropPaneIndex = -1;
     bool dropHeader = false;            // drop on pane title bar → open folder
-    bool scrollbarHovered = false;
     bool scrollbarDragging = false;
     bool scrollbarHorizontal = false;
     bool scrollbarSidebar = false;
     bool scrollbarSettings = false;   // dragging the settings page's scrollbar
     float scrollbarGrabOffset = 0.0f;   // pointer offset along the grabbed thumb
-    float scrollbarHoverWidth = 0.0f;
     // Sidebar scrollbar shows while scrolling or hovered, then fades (#44).
     bool sidebarScrollbarHot = false;
     float sidebarScrollSeen = 0.0f;
     app::ScrollbarFade sidebarScrollbarFade;
+    // Settings and file-list scrollbars: always thin, expanded while hovered
+    // or dragged (the same control and fade as the sidebar's).
+    bool settingsScrollbarHot = false;
+    app::ScrollbarFade settingsScrollbarFade;
+    bool paneScrollbarHot = false;
+    int paneScrollbarHotPane = -1;
+    app::ScrollbarFade paneScrollbarFade;
 
     bool splitterDragging = false;
     int splitterDragIndex = -1;

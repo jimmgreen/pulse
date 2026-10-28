@@ -21,14 +21,16 @@
 namespace pulse::ui {
 
 namespace {
-// The bar over the content's right edge; drawing and dragging share it.
-fluent::ScrollbarSpec SettingsScrollbar(const SettingsLayout& lay, float scale) {
+// The shared scrollbar over the content's right edge (thin at rest, full
+// width with its track under the pointer); drawing and dragging share it.
+fluent::ScrollbarSpec SettingsScrollbar(const SettingsLayout& lay, float scale, const WindowViewModel& vm) {
     fluent::ScrollbarSpec bar;
-    bar.viewport = D2D1::RectF(lay.content.right - 10.0f * scale, lay.content.top,
+    bar.viewport = D2D1::RectF(lay.content.right - 12.0f * scale, lay.content.top,
                                lay.content.right - 2.0f * scale, lay.content.bottom);
     bar.viewport_extent = lay.content.bottom - lay.content.top;
     bar.content_extent = lay.content_h;
-    bar.expand_progress = 1.0f;
+    bar.expand_progress = vm.settings_scrollbar_expand;
+    bar.opacity = vm.settings_scrollbar_opacity;
     return bar;
 }
 } // namespace
@@ -1297,7 +1299,7 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
 
     const float view = lay.content.bottom - lay.content.top;
     if (lay.content_h > view + 1.0f) {
-        fluent::ScrollbarSpec bar = SettingsScrollbar(lay, scale_);
+        fluent::ScrollbarSpec bar = SettingsScrollbar(lay, scale_, vm);
         bar.offset = vm.settings_scroll;
         painter_.DrawScrollbar(bar);
     }
@@ -1436,7 +1438,7 @@ bool MainRenderer::SettingsScrollbarGeometry(const WindowViewModel& vm, float wi
     const float view = (std::max)(0.0f, lay.content.bottom - lay.content.top);
     max_scroll = (std::max)(0.0f, lay.content_h - view);
     if (lay.content_h <= view + 1.0f) return false;   // DrawSettings draws no bar
-    fluent::ScrollbarSpec bar = SettingsScrollbar(lay, scale_);
+    fluent::ScrollbarSpec bar = SettingsScrollbar(lay, scale_, vm);
     bar.offset = vm.settings_scroll;
     track = bar.viewport;
     thumb = fluent::ScrollbarThumbRect(bar, scale_);

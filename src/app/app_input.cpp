@@ -2957,24 +2957,6 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             else
                 InvalidateRect(hwnd, nullptr, FALSE);
         }
-        D2D1_RECT_F content = s->renderer.ContentRect((float)s->compositor.Width(), (float)s->compositor.Height());
-        float extra = 0.0f;
-        if (app::Tab* tab = ActiveTab(*s); tab) {
-            if (!tab->banner_message.empty()) {
-                const float drawn = s->renderer.FocusedPaneBannerHeight();  // one or two lines
-                extra = drawn > 0.0f ? drawn : 36.0f * s->scale;
-            }
-            std::wstring kind;
-            if (app::ParsePulsePath(tab->current_path, &kind, nullptr) && kind == L"recent")
-                extra += 40.0f * s->scale;
-        }
-        float listTop = content.top + s->renderer.PaneHeaderHeight() + extra + s->renderer.ColumnHeaderHeight();
-        bool sbHit = (mx >= content.right - 14 * s->scale && mx < content.right &&
-                      my >= listTop && my < content.bottom);
-        if (sbHit != s->scrollbarHovered) {
-            s->scrollbarHovered = sbHit;
-            InvalidateRect(hwnd, nullptr, FALSE);
-        }
         return 0;
 }
 
@@ -2985,8 +2967,10 @@ LRESULT HandleMouseLeave(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         if (s) {
             AiAssistantMouseLeave(*s);
             if (s->renderer.ReleaseTabWidths()) InvalidateRect(hwnd, nullptr, FALSE);
-            s->scrollbarHovered = false;
             s->sidebarScrollbarHot = false;
+            s->settingsScrollbarHot = false;
+            s->paneScrollbarHot = false;
+            s->paneScrollbarHotPane = -1;
             s->hoverRow = -1;
             s->hoverPaneIndex = -1;
             s->ctxHoverSince = 0;

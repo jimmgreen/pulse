@@ -610,7 +610,7 @@ bool FluentMenu::ScrollRows(int rows) {
 fluent::ScrollbarSpec FluentMenu::BarSpec() const {
     fluent::ScrollbarSpec bar;
     const float top = static_cast<float>(kShadowMargin) + FilterHeaderPx();
-    const float right = static_cast<float>(kShadowMargin + model_.WidthPx()) - 1.0f * scale_;
+    const float right = static_cast<float>(kShadowMargin + model_.WidthPx()) - 2.0f * scale_;
     bar.viewport = D2D1::RectF(right - 12.0f * scale_, top + 4.0f * scale_,
                                right, top + BodyHeightPx() - 4.0f * scale_);
     bar.offset = scroll_y_;

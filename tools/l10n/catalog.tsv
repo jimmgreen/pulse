@@ -3050,7 +3050,6 @@ AiAsstUndoBusy	IDS_AI_ASST_UNDO_BUSY	4249	整理还没做完，做完再撤销�
 AiAsstUndoGone	IDS_AI_ASST_UNDO_GONE	4250	这次整理已经不能撤销了：之后又有别的改动。	This sort can no longer be undone: something else changed since.	這次整理已經不能復原了：之後又有別的變更。
 AiAsstMovedSome	IDS_AI_ASST_MOVED_SOME	4251	移动了 {k} / {n} 个，其余的没有成功	Moved {k} of {n}; the rest failed	移動了 {k} / {n} 個，其餘的沒有成功
 AiConnStatusOn	IDS_AI_CONN_STATUS_ON	4254	已连接	Connected	已連線
-AiConnPaste	IDS_AI_CONN_PASTE	4259	粘贴	Paste	貼上
 AiConnErrAuth	IDS_AI_CONN_ERR_AUTH	4267	密钥无效（401）	Invalid key (401)	金鑰無效（401）
 AiConnErrBalance	IDS_AI_CONN_ERR_BALANCE	4269	余额不足（402）	Insufficient balance (402)	餘額不足（402）
 AiConnErrRate	IDS_AI_CONN_ERR_RATE	4271	请求太频繁（429）	Too many requests (429)	請求太頻繁（429）

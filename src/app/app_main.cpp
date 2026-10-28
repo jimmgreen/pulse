@@ -2398,17 +2398,18 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 s->filterIgnoreKillFocus = false;
                 dirty = true;
             }
-            // Scrollbar hover expansion.
-            float target = s->scrollbarHovered ? (s->renderer.Margin() * 1.5f - 6.0f * s->scale) : 0.0f;
-            target = std::max(0.0f, target);
-            float step = (target - s->scrollbarHoverWidth) * 0.25f;
-            if (std::abs(step) > 0.1f) {
-                s->scrollbarHoverWidth += step;
-                dirty = true;
-            } else if (s->scrollbarHoverWidth != target) {
-                s->scrollbarHoverWidth = target;
-                dirty = true;
-            }
+            // Settings and file-list scrollbars: thin at rest, expanded while
+            // hovered or dragged (the shared fade, like the sidebar's).
+            s->settingsScrollbarFade.KeepVisible(true);
+            s->settingsScrollbarFade.SetHot(s->settingsScrollbarHot ||
+                (s->scrollbarDragging && s->scrollbarSettings), now);
+            if (s->settingsScrollbarFade.Tick(now)) dirty = true;
+            if (s->settingsScrollbarFade.Moving(now)) s->uiTimerPacer.NoteActivity(now);
+            s->paneScrollbarFade.KeepVisible(true);
+            s->paneScrollbarFade.SetHot(s->paneScrollbarHot ||
+                (s->scrollbarDragging && !s->scrollbarSidebar && !s->scrollbarSettings), now);
+            if (s->paneScrollbarFade.Tick(now)) dirty = true;
+            if (s->paneScrollbarFade.Moving(now)) s->uiTimerPacer.NoteActivity(now);
             // Sidebar scrollbar: shown while the sidebar scrolls or the bar is
             // hovered or dragged, faded out otherwise (#44).
             if (s->sidebarScroll != s->sidebarScrollSeen) {

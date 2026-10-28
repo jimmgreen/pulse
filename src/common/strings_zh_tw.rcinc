@@ -3023,7 +3023,6 @@ BEGIN
     IDS_AI_ASST_UNDO_GONE "這次整理已經不能復原了：之後又有別的變更。"
     IDS_AI_ASST_MOVED_SOME "移動了 {k} / {n} 個，其餘的沒有成功"
     IDS_AI_CONN_STATUS_ON "已連線"
-    IDS_AI_CONN_PASTE "貼上"
     IDS_AI_CONN_ERR_AUTH "金鑰無效（401）"
     IDS_AI_CONN_ERR_BALANCE "餘額不足（402）"
     IDS_AI_CONN_ERR_RATE "請求太頻繁（429）"

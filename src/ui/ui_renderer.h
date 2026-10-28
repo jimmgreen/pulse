@@ -1339,4 +1339,11 @@ private:
 
 };
 
+// The file list's scrollbars (the shared fluent control); the app's drag
+// geometry and the renderer draw from the same spec.
+fluent::ScrollbarSpec PaneScrollbarSpec(const PaneViewModel& vm, const D2D1_RECT_F& list,
+                                        float content_h, float scale);
+fluent::ScrollbarSpec PaneHScrollbarSpec(const PaneViewModel& vm, const D2D1_RECT_F& list,
+                                         float max_scroll_x, float scale);
+
 } // namespace pulse::ui

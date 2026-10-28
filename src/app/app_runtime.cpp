@@ -504,12 +504,12 @@ bool HorizontalScrollbarGeometry(const AppState& s, const ui::PaneViewModel& pan
     const float viewW = std::max(0.0f, track.right - track.left);
     maxScroll = s.renderer.MaxScrollXForPane(pane, FocusedPaneRect(s));
     if (maxScroll <= 0.0f || viewW <= 0.0f) return false;
-    const float totalW = viewW + maxScroll;
-    const float thumbW = std::max(28.0f * s.scale, viewW * (viewW / totalW));
-    const float travel = std::max(1.0f, viewW - thumbW);
-    const float thumbX = track.left + std::clamp(pane.scroll_x / maxScroll, 0.0f, 1.0f) * travel;
+    // The drawn bar (the shared control); its thumb, full height to grab.
+    const D2D1_RECT_F drawn = ui::fluent::ScrollbarThumbRect(
+        ui::PaneHScrollbarSpec(pane, track, maxScroll, s.scale), s.scale);
+    if (drawn.right <= drawn.left) return false;
     track.top = track.bottom - 12.0f * s.scale;
-    thumb = D2D1::RectF(thumbX, track.top, thumbX + thumbW, track.bottom);
+    thumb = D2D1::RectF(drawn.left, track.top, drawn.right, track.bottom);
     return true;
 }
 
@@ -2753,6 +2753,8 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     vm.sidebar_scroll = s.sidebarScroll;
     vm.sidebar_scrollbar_opacity = s.sidebarScrollbarFade.Opacity();
     vm.sidebar_scrollbar_expand = s.sidebarScrollbarFade.Expand();
+    vm.settings_scrollbar_opacity = s.settingsScrollbarFade.Opacity();
+    vm.settings_scrollbar_expand = s.settingsScrollbarFade.Expand();
     if (s.groupDragActive) {
         vm.sidebar_group_drag_id = s.groupDragId;
         if (s.groupGapVisible) vm.sidebar_group_gap_line_y = s.groupGapLineY;
@@ -3299,6 +3301,21 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     vm.tooltip_y = static_cast<float>(s.hoverPoint.y);
     pulse::FillAiAssistantVm(s, vm);   // Pulse 助手 and its chip (after FillAiStatusVm, may set a tip)
     FillPaneSlots(s, vm);
+    {
+        // File-list scrollbars: the hovered pane's (or the dragged, focused one's) expands.
+        const bool dragging = s.scrollbarDragging && !s.scrollbarSidebar && !s.scrollbarSettings;
+        const float expand = s.paneScrollbarFade.Expand(), opacity = s.paneScrollbarFade.Opacity();
+        vm.pane.scrollbar_opacity = opacity;
+        vm.pane.scrollbar_expand = vm.pane_slots.empty() ? expand : 0.0f;
+        for (size_t i = 0; i < vm.pane_slots.size(); ++i) {
+            ui::PaneSlotView& slot = vm.pane_slots[i];
+            const bool hot = dragging ? slot.focused
+                : (s.paneScrollbarHot && s.paneScrollbarHotPane == static_cast<int>(i));
+            slot.pane.scrollbar_opacity = opacity;
+            slot.pane.scrollbar_expand = hot ? expand : 0.0f;
+            if (slot.focused) vm.pane.scrollbar_expand = slot.pane.scrollbar_expand;
+        }
+    }
     FillChangePopover(s, vm);
     FillFolderSizes(s, vm);
     vm.window_effect = ui::WindowEffectFromId(s.appPrefs.window_effect);

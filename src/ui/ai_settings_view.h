@@ -108,7 +108,6 @@ enum AssistantHit : int {
     kAsstCancel = 11,       // 取消 (tiles, while a service is in use)
     kAsstRechoose = 12,     // 换一个服务 (setting one up)
     kAsstReveal = 13,       // the key field's eye
-    kAsstPaste = 14,        // 粘贴
     kAsstKeyLink = 15,      // 到…创建: the service's key page
     kAsstConnect = 16,      // 连接并读取模型
     kAsstModel = 17,        // 默认模型 drop-down
@@ -129,7 +128,6 @@ enum AssistantHit : int {
     // 语音输入.
     kAsstVoiceService = 400,   // the service drop-down (选择服务… / the service; 移除连接)
     kAsstVoiceReveal = 401,
-    kAsstVoicePaste = 402,
     kAsstVoiceKeyLink = 403,
     kAsstVoiceConnect = 404,   // 连接并测试
     kAsstVoiceCancel = 405,    // back from setting one up
@@ -218,7 +216,7 @@ struct AssistantPageLayout {
     std::vector<D2D1_RECT_F> more;     // 更多's chips
     // Rows under the header; zero-height when not shown.
     D2D1_RECT_F fresh_row{};
-    D2D1_RECT_F key_row{}, key_field{}, key_eye{}, key_paste{}, key_link{};
+    D2D1_RECT_F key_row{}, key_field{}, key_eye{}, key_link{};
     D2D1_RECT_F key_buttons[2]{};      // 更换, 移除
     D2D1_RECT_F url_row{}, url_field{}, url_buttons[2]{};   // 修改 | 保存 取消
     D2D1_RECT_F connect_row{}, connect{};
@@ -229,7 +227,7 @@ struct AssistantPageLayout {
     std::vector<D2D1_RECT_F> others;
     D2D1_RECT_F voice_section{}, voice_card{}, voice_foot{};
     D2D1_RECT_F voice_head{}, voice_badge{}, voice_service{};
-    D2D1_RECT_F voice_key_row{}, voice_key_field{}, voice_key_eye{}, voice_key_paste{}, voice_key_link{}, voice_rekey{};
+    D2D1_RECT_F voice_key_row{}, voice_key_field{}, voice_key_eye{}, voice_key_link{}, voice_rekey{};
     D2D1_RECT_F voice_url_row{}, voice_url_field{};
     D2D1_RECT_F voice_connect_row{}, voice_connect{}, voice_cancel{};
     D2D1_RECT_F voice_model_row{}, voice_model{};

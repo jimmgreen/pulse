@@ -825,25 +825,6 @@ void ModelMenu(AppState& s, AsstPageUi& u) {
     }
 }
 
-void Paste(AppState& s, AsstPageUi& u, AsstField into = AsstField::Key) {
-    HWND key = Edit(u, into);
-    if (!key || !OpenClipboard(s.hwnd)) return;
-    std::wstring text;
-    if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
-        if (const auto* p = static_cast<const wchar_t*>(GlobalLock(h))) {
-            text.assign(p, wcsnlen(p, 1024));
-            GlobalUnlock(h);
-        }
-    }
-    CloseClipboard();
-    std::wstring trimmed = Trim(text);
-    Wipe(text);
-    if (trimmed.empty()) return;
-    SetWindowTextW(key, trimmed.c_str());
-    Wipe(trimmed);
-    Focus(u, into);
-}
-
 // ---- 语音输入 ---------------------------------------------------------------
 // The service behind the composer's microphone (ai_voice_service.h): pick a
 // preset, paste its key (硅基流动 may reuse the model service's), 连接并测试
@@ -1461,9 +1442,6 @@ void AssistantSettingsClick(AppState& s, int target) {
     case ui::kAsstReveal:
         SetReveal(u, !u.revealed);
         break;
-    case ui::kAsstPaste:
-        Paste(s, u);
-        break;
     case ui::kAsstKeyLink: {
         const ai::Provider& p = ai::ProviderById(u.pick);
         if (p.key_url && *p.key_url) ShellExecuteW(s.hwnd, L"open", p.key_url, nullptr, nullptr, SW_SHOWNORMAL);
@@ -1504,7 +1482,6 @@ void AssistantSettingsClick(AppState& s, int target) {
         break;
     case ui::kAsstVoiceService: VoiceServiceMenu(s, u); break;
     case ui::kAsstVoiceReveal: SetVoiceReveal(u, !u.voice_revealed); break;
-    case ui::kAsstVoicePaste: Paste(s, u, AsstField::VoiceKey); break;
     case ui::kAsstVoiceKeyLink: {
         const std::wstring url = VoiceConsoleUrl(VoicePresetAt(u.voice_pick).id);
         if (!url.empty()) ShellExecuteW(s.hwnd, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);

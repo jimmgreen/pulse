@@ -1955,21 +1955,27 @@ D2D1_RECT_F Painter::ScrollbarThumbRect(const ScrollbarSpec& spec) const noexcep
 
 D2D1_RECT_F ScrollbarThumbRect(const ScrollbarSpec& spec, float scale,
                               bool high_contrast) noexcept {
+    const float length = spec.horizontal ? Width(spec.viewport) : Height(spec.viewport);
     if (!spec.enabled || spec.viewport_extent <= 0.0f ||
-        spec.content_extent <= spec.viewport_extent || Height(spec.viewport) <= 0.0f) {
+        spec.content_extent <= spec.viewport_extent || length <= 0.0f) {
         return D2D1::RectF();
     }
     const float progress = high_contrast ? 1.0f : Clamp01(spec.expand_progress);
     const float width = (2.5f + 2.5f * progress) * scale;
     const float min_thumb = 20.0f * scale;
-    const float thumb_height = std::min(Height(spec.viewport),
-        std::max(min_thumb, Height(spec.viewport) * spec.viewport_extent / spec.content_extent));
+    const float thumb_length = std::min(length,
+        std::max(min_thumb, length * spec.viewport_extent / spec.content_extent));
     const float max_offset = std::max(0.0f, spec.content_extent - spec.viewport_extent);
-    const float travel = std::max(0.0f, Height(spec.viewport) - thumb_height);
+    const float travel = std::max(0.0f, length - thumb_length);
     const float normalized = max_offset > 0.0f ? Clamp01(spec.offset / max_offset) : 0.0f;
+    if (spec.horizontal) {
+        const float left = spec.viewport.left + travel * normalized;
+        const float bottom = spec.viewport.bottom - 2.5f * scale;
+        return D2D1::RectF(left, bottom - width, left + thumb_length, bottom);
+    }
     const float top = spec.viewport.top + travel * normalized;
     const float right = spec.viewport.right - 2.5f * scale;
-    return D2D1::RectF(right - width, top, right, top + thumb_height);
+    return D2D1::RectF(right - width, top, right, top + thumb_length);
 }
 
 bool ScrollbarHitTest(const ScrollbarSpec& spec, float x, float y) noexcept {
@@ -2054,9 +2060,11 @@ void Painter::DrawScrollbar(const ScrollbarSpec& spec) {
     }
     const float progress = high_contrast_ ? 1.0f : Clamp01(spec.expand_progress);
     if (progress > 0.0f) {
-        const auto background = D2D1::RectF(spec.viewport.right - Px(10.0f),
-                                            spec.viewport.top, spec.viewport.right,
-                                            spec.viewport.bottom);
+        const auto background = spec.horizontal
+            ? D2D1::RectF(spec.viewport.left, spec.viewport.bottom - Px(10.0f),
+                          spec.viewport.right, spec.viewport.bottom)
+            : D2D1::RectF(spec.viewport.right - Px(10.0f), spec.viewport.top,
+                          spec.viewport.right, spec.viewport.bottom);
         D2D1_COLOR_F background_color = high_contrast_ ? theme_->surface_flyout
                                             : dark_ ? Rgba(0x2C2C2C, 245)
                                                     : Rgba(0xFCFCFC, 217);
@@ -2067,7 +2075,7 @@ void Painter::DrawScrollbar(const ScrollbarSpec& spec) {
                                : dark_ ? Rgba(0xFFFFFF, 139)
                                        : Rgba(0x000000, 114);
     foreground.a *= opacity;
-    FillRoundedRect(thumb, Width(thumb) * 0.5f, foreground);
+    FillRoundedRect(thumb, std::min(Width(thumb), Height(thumb)) * 0.5f, foreground);
 }
 
 void Painter::DrawBreadcrumbSegment(const BreadcrumbSegmentSpec& spec) {

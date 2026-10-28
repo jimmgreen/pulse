@@ -366,6 +366,9 @@ struct PaneViewModel {
     bool focus_first_hint = false; // first view row has keyboard focus but no selection
     int focus_ring_source = -1;    // unselected row holding keyboard focus (Ctrl+arrows)
     float scroll_y = 0.0f;
+    // The file list's scrollbars (the shared control): expanded while hovered or dragged.
+    float scrollbar_expand = 0.0f;
+    float scrollbar_opacity = 1.0f;
     float scroll_x = 0.0f;
     ViewMode view_mode = ViewMode::Details;
     float icon_dip = 0.0f;        // icon grids: thumbnail width in DIP (0 = the mode's preset)
@@ -1061,6 +1064,9 @@ struct WindowViewModel {
     // Sidebar scrollbar fade (#44): 0 hidden .. 1 shown; expand 0 thin thumb .. 1 thumb + track.
     float sidebar_scrollbar_opacity = 1.0f;
     float sidebar_scrollbar_expand = 1.0f;
+    // Settings page scrollbar: thin at rest, expanded while hovered or dragged.
+    float settings_scrollbar_opacity = 1.0f;
+    float settings_scrollbar_expand = 0.0f;
     TrayDeckView tray_deck;
     bool details_visible = false;   // right details panel toggle (view menu)
     int layout_preset = 0;          // app::LayoutPreset of the active tab (toolbar split icon)

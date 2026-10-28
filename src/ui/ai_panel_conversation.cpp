@@ -3014,7 +3014,7 @@ void AiPanelView::DrawConversation(Compositor* compositor, const AiPanelViewMode
 
     // The shared scrollbar: only when it overflows.
     if (max_scroll > 0.5f)
-        DrawBar(0, D2D1::RectF(area.right - 12.0f * s, area.top + 4.0f * s, area.right - 1.0f * s,
+        DrawBar(0, D2D1::RectF(area.right - 12.0f * s, area.top + 4.0f * s, area.right - 2.0f * s,
                                area.top + view_h_ - 4.0f * s), scroll_, view_h_, content_h_);
 
     // Drop tweens of blocks that are gone.

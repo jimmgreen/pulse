@@ -28,6 +28,11 @@ bool UpdatePointerHover(AppState& s, const ui::HitTestResult& pointer_hit, POINT
     const bool crumb_changed = crumb != s.breadcrumbHover;
     const bool sidebar_hot = hit.region == ui::HitTestResult::Scrollbar && hit.sub_index == 2;
     const bool sidebar_changed = sidebar_hot != s.sidebarScrollbarHot;
+    const bool settings_hot = hit.region == ui::HitTestResult::Scrollbar && hit.sub_index == 3;
+    const bool pane_hot = hit.region == ui::HitTestResult::Scrollbar && (hit.sub_index == 0 || hit.sub_index == 1);
+    const int pane_hot_index = pane_hot ? hit.pane_index : -1;
+    const bool bars_changed = settings_hot != s.settingsScrollbarHot || pane_hot != s.paneScrollbarHot ||
+                              pane_hot_index != s.paneScrollbarHotPane;
     s.hoverPoint = point;
     if (target_changed) ApplyHoverTarget(s, hit);
     if (row_changed) {
@@ -38,9 +43,12 @@ bool UpdatePointerHover(AppState& s, const ui::HitTestResult& pointer_hit, POINT
         NoteHoverPreviewRow(s);
     }
     s.sidebarScrollbarHot = sidebar_hot;
+    s.settingsScrollbarHot = settings_hot;
+    s.paneScrollbarHot = pane_hot;
+    s.paneScrollbarHotPane = pane_hot_index;
     s.breadcrumbHover = crumb;
     UpdateChangeHover(s, hit, point);
-    return target_changed || row_changed || crumb_changed || sidebar_changed;
+    return target_changed || row_changed || crumb_changed || sidebar_changed || bars_changed;
 }
 
 bool RefreshScrolledHover(AppState& s, const HoverPointerApi& api) {
