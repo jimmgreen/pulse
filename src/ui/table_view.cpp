@@ -179,8 +179,17 @@ bool TableView::SetPayload(const std::wstring& payload) {
                 if (LooksNumeric(text)) flags[c] |= kNumeric;
                 row[c] = std::move(text);
             }
+            sheet.fills.emplace_back(sheet.cols, 0);
             sheet.cells.push_back(std::move(row));
             sheet.flags.push_back(std::move(flags));
+        } else if (line[0] == L'F' && !sheets.empty()) {
+            const auto f = Split(line.substr(2), L'\t');
+            if (f.size() == 3) {
+                auto& sheet = sheets.back();
+                const size_t r = ToSize(f[0]), c = ToSize(f[1]);
+                if (r < sheet.fills.size() && c < sheet.cols && f[2].size() == 8 && std::all_of(f[2].begin(), f[2].end(), [](wchar_t ch) { return (ch >= L'0' && ch <= L'9') || (ch >= L'A' && ch <= L'F') || (ch >= L'a' && ch <= L'f'); }))
+                    sheet.fills[r][c] = static_cast<unsigned>(std::wcstoul(std::wstring(f[2]).c_str(), nullptr, 16));
+            }
         } else if (line[0] == L'W') {
             const auto f = Split(line.substr(2), L'\t');
             if (f.size() >= 2) { total_sheets = ToSize(f[0]); loaded_sheets = ToSize(f[1]); }
@@ -528,6 +537,12 @@ void TableView::Draw(ID2D1DeviceContext* dc, IDWriteFactory2* factory, const D2D
     dc->PushAxisAlignedClip(g.body, D2D1_ANTIALIAS_MODE_ALIASED);
     for (size_t r = r0; r < r1; ++r)
         if (r % 2 == 1) fill(R(g.body.left, row_top(r), g.body.right, row_top(r) + g.row_h), zebra);
+    for (size_t r = r0; r < r1; ++r) {
+        const size_t source = r + HeaderRows();
+        if (source >= s.fills.size()) continue;
+        for (size_t c = c0; c < c1; ++c)
+            if (s.fills[source][c]) fill(R(col_left(c), row_top(r), col_left(c + 1), row_top(r) + g.row_h), HexColor(s.fills[source][c] & 0xFFFFFF));
+    }
     // Crosshair: the hovered row and column, faintly.
     const D2D1_COLOR_F cross = WithAlpha(sel_line, dark ? 0.07f : 0.05f);
     const bool crosshair = drag_ == Drag::None && hover_row_ >= 0 && hover_col_ >= 0 &&
@@ -586,7 +601,13 @@ void TableView::Draw(ID2D1DeviceContext* dc, IDWriteFactory2* factory, const D2D
             const bool bold = (flags[c] & kBold) != 0, right = (flags[c] & kNumeric) != 0;
             IDWriteTextFormat* f = bold ? (right ? bold_right_.Get() : bold_.Get())
                                         : (right ? text_right_.Get() : text_.Get());
-            b->SetColor(theme.text);
+            auto text_color = theme.text;
+            if (r + hdr < s.fills.size() && s.fills[r + hdr][c]) {
+                const auto color = HexColor(s.fills[r + hdr][c] & 0xFFFFFF);
+                text_color = 0.2126f * color.r + 0.7152f * color.g + 0.0722f * color.b > 0.55f
+                    ? HexColor(0x202020) : HexColor(0xFFFFFF);
+            }
+            b->SetColor(text_color);
             dc->DrawTextW(row[c].data(), static_cast<UINT32>(row[c].size()), f,
                           R(col_left(c) + g.pad, top, col_left(c + 1) - g.pad, top + g.row_h), b,
                           D2D1_DRAW_TEXT_OPTIONS_CLIP);

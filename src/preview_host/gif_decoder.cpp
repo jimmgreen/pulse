@@ -27,13 +27,13 @@ bool Same(const BY_HANDLE_FILE_INFORMATION& a, const BY_HANDLE_FILE_INFORMATION&
         a.nFileIndexLow == b.nFileIndexLow && a.nFileSizeHigh == b.nFileSizeHigh && a.nFileSizeLow == b.nFileSizeLow &&
         CompareFileTime(&a.ftLastWriteTime, &b.ftLastWriteTime) == 0;
 }
-// Walk the inexpensive container before allowing WIC to allocate a source raster.
-bool Inspect(const std::vector<uint8_t>& data, const GifLimits& limits, UINT& w, UINT& h,
+// Validate container bounds before allowing WIC to allocate a source raster.
+bool Inspect(const std::vector<uint8_t>& data, UINT& w, UINT& h,
              std::vector<Meta>& frames, uint32_t& loops, uint64_t& source_bytes, Color& background, std::wstring& error) {
     auto bad = [&](const wchar_t* why) { error = why; return false; };
     if (data.size() < 13 || (memcmp(data.data(), "GIF87a", 6) && memcmp(data.data(), "GIF89a", 6))) return bad(L"gif-invalid");
     w = U16(data.data() + 6); h = U16(data.data() + 8);
-    if (!w || !h || uint64_t(w) * h * 4 > limits.canvas_bytes) return bad(L"gif-canvas-budget");
+    if (!w || !h || uint64_t(w) * h * 4 > MAXDWORD) return bad(L"gif-canvas-budget");
     size_t at = 13;
     auto take = [&](size_t n) { if (n > data.size() - at) return false; at += n; return true; };
     background = {};
@@ -76,10 +76,8 @@ bool Inspect(const std::vector<uint8_t>& data, const GifLimits& limits, UINT& w,
                    U16(data.data() + at + 6), disposal, delay, transparent};
             const auto packed = data[at + 8]; at += 9;
             if (!f.w || !f.h || f.x > w || f.y > h || f.w > w - f.x || f.h > h - f.y ||
-                uint64_t(f.w) * f.h * 4 > limits.canvas_bytes) return bad(L"gif-frame-bounds");
-            if (frames.size() == limits.frames) return bad(L"gif-frame-budget");
+                uint64_t(f.w) * f.h * 4 > MAXDWORD) return bad(L"gif-frame-bounds");
             source_bytes += uint64_t(f.w) * f.h * 4;
-            if (source_bytes > limits.working_bytes / 2) return bad(L"gif-source-budget");
             frames.push_back(f); disposal = 0; delay = 100; transparent = false;
             if ((packed & 0x80) && !take(size_t(3) << ((packed & 7) + 1))) return bad(L"gif-truncated");
             if (!take(1) || !blocks()) return bad(L"gif-truncated");
@@ -89,7 +87,6 @@ bool Inspect(const std::vector<uint8_t>& data, const GifLimits& limits, UINT& w,
 }
 }
 struct GifDecoder::State {
-    GifLimits limits;
     DWORD thread = GetCurrentThreadId();
     BY_HANDLE_FILE_INFORMATION identity{};
     std::wstring path;
@@ -109,18 +106,16 @@ struct GifDecoder::State {
         std::vector<Meta>().swap(frames); path.clear(); next = 0; loops = 0; source_bytes = 0; stats.reserved_bytes = 0;
     }
 };
-GifDecoder::GifDecoder(GifLimits limits) : state_(std::make_unique<State>()) { state_->limits = limits; }
+GifDecoder::GifDecoder() : state_(std::make_unique<State>()) {}
 GifDecoder::~GifDecoder() = default;
 void GifDecoder::Reset() { state_->Clear(); }
 GifStats GifDecoder::Stats() const { return state_->stats; }
 bool GifDecoder::Decode(const std::wstring& path, UINT edge, uint32_t index, GifFrame& result, HANDLE cancel) {
     auto& s = *state_; result = {};
     if (s.thread != GetCurrentThreadId()) { result.error = L"gif-wrong-thread"; return false; }
-    const auto deadline = GetTickCount64() + s.limits.milliseconds;
     auto fail = [&](const wchar_t* error) { result.error = error; result.pixels.clear(); s.Clear(); return false; };
     auto interrupted = [&]() -> const wchar_t* {
         if (cancel && WaitForSingleObject(cancel, 0) == WAIT_OBJECT_0) return L"gif-cancelled";
-        if (GetTickCount64() >= deadline) return L"gif-time-budget";
         return nullptr;
     };
     try {
@@ -130,21 +125,20 @@ bool GifDecoder::Decode(const std::wstring& path, UINT edge, uint32_t index, Gif
         BY_HANDLE_FILE_INFORMATION identity{};
         if (file.value == INVALID_HANDLE_VALUE || !GetFileInformationByHandle(file.value, &identity)) return fail(L"gif-open-failed");
         const uint64_t bytes = (uint64_t(identity.nFileSizeHigh) << 32) | identity.nFileSizeLow;
-        if (!bytes || bytes > s.limits.file_bytes || bytes > MAXDWORD) return fail(L"gif-file-budget");
+        if (!bytes || bytes > MAXDWORD) return fail(L"gif-file-budget");
         if (s.path != path || !s.decoder || !Same(identity, s.identity)) {
             s.Clear();
             s.file.resize(static_cast<size_t>(bytes));
             DWORD read = 0;
             if (!ReadFile(file.value, s.file.data(), static_cast<DWORD>(bytes), &read, nullptr) || read != bytes) return fail(L"gif-read-failed");
             std::wstring error;
-            if (!Inspect(s.file, s.limits, s.w, s.h, s.frames, s.loops, s.source_bytes, s.background, error)) {
+            if (!Inspect(s.file, s.w, s.h, s.frames, s.loops, s.source_bytes, s.background, error)) {
                 result.error = error; s.Clear(); return false;
             }
             // Canvas + disposal backup + decoded source + WIC bitmap copy + output,
             // with another canvas allowance for scaler scratch. Bound all declared
             // source rasters too, rather than assuming WIC releases previous frames.
             const uint64_t reserve = bytes + uint64_t(s.w) * s.h * 4 * 6 + uint64_t(s.frames.size()) * sizeof(Meta) + s.source_bytes * 2;
-            if (reserve > s.limits.working_bytes) return fail(L"gif-memory-budget");
             if (const auto why = interrupted()) return fail(why);
             if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&s.factory))) ||
                 FAILED(s.factory->CreateStream(&s.stream)) ||
@@ -166,7 +160,6 @@ bool GifDecoder::Decode(const std::wstring& path, UINT edge, uint32_t index, Gif
             FillBackground(s.canvas, s.w, 0, 0, s.w, s.h, s.frames.front().transparent ? Color{} : s.background);
             s.saved.clear(); s.next = 0; ++s.stats.resets;
         }
-        if (index + 1 - s.next > s.limits.steps_per_request) return fail(L"gif-work-budget");
         for (; s.next <= index; ++s.next) {
             if (const auto error = interrupted()) return fail(error);
             if (s.next) {

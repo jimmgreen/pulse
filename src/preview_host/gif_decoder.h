@@ -6,14 +6,6 @@
 #include <vector>
 
 namespace pulse::preview {
-struct GifLimits {
-    uint64_t file_bytes = 16ull * 1024 * 1024;
-    uint64_t canvas_bytes = 8ull * 1024 * 1024;
-    uint64_t working_bytes = 96ull * 1024 * 1024;
-    uint32_t frames = 4096;
-    uint32_t steps_per_request = 128;
-    uint32_t milliseconds = 1500;
-};
 struct GifFrame {
     std::vector<uint8_t> pixels;
     UINT width = 0, height = 0, stride = 0, source_width = 0, source_height = 0;
@@ -25,7 +17,7 @@ struct GifStats { uint64_t decoded_frames = 0, cache_loads = 0, resets = 0, rese
 // checked between bounded decode/composition steps; WIC itself is host-isolated.
 class GifDecoder {
 public:
-    explicit GifDecoder(GifLimits limits = {});
+    GifDecoder();
     ~GifDecoder();
     GifDecoder(const GifDecoder&) = delete;
     GifDecoder& operator=(const GifDecoder&) = delete;

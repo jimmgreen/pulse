@@ -80,6 +80,7 @@ private:
         bool truncated = false, header = false;
         size_t cols = 0;
         std::vector<std::vector<std::wstring>> cells;  // display text, header row included
+        std::vector<std::vector<unsigned>> fills;
         std::vector<std::vector<uint8_t>> flags;       // kBold / kNumeric per cell
         std::vector<float> col_x;                      // prefix sums (device px), cols + 1
         float num_w = 0.0f;                            // row-number column width

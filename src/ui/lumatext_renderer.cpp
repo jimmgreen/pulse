@@ -944,9 +944,8 @@ struct LumaTextRenderer::Impl {
         return result == LT_OK && end_result == LT_OK;
     }
 
-    // Two colours in one shaped line (a dimmed file extension): the same
-    // layout is drawn twice, clipped at the caret x of `split` in that layout,
-    // so glyph positions never depend on substring widths.
+    // Locate the extension with the complete shaped line, not a separately
+    // measured prefix. Simple Latin extensions can then share one pixel phase.
     bool DrawSplit(std::wstring_view text, IDWriteTextFormat* format,
                    const D2D1_RECT_F& bounds, const D2D1_COLOR_F& foreground,
                    std::uint32_t split, const D2D1_COLOR_F& split_foreground,
@@ -982,6 +981,13 @@ struct LumaTextRenderer::Impl {
             return false;
         }
         const float cut = std::round(bounds.left + split_x);
+        const auto tail = text.substr(split);
+        const bool stable_tail = tail.front() == L'.' && std::all_of(tail.begin() + 1, tail.end(), [](wchar_t c) {
+            return (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') ||
+                   (c >= L'0' && c <= L'9') || c == L'_';
+        });
+        float tail_width = 0;
+        if (stable_tail && !Measure(tail, format, tail_width, nullptr)) return false;
         const float top = bounds.top - 8.0f, bottom = bounds.bottom + 8.0f;
         dc->PushAxisAlignedClip(D2D1::RectF(std::floor(bounds.left) - 8.0f, top, cut, bottom),
                                 D2D1_ANTIALIAS_MODE_ALIASED);
@@ -991,10 +997,18 @@ struct LumaTextRenderer::Impl {
         if (!head) return false;
         dc->PushAxisAlignedClip(D2D1::RectF(cut, top, std::ceil(bounds.right) + 8.0f, bottom),
                                 D2D1_ANTIALIAS_MODE_ALIASED);
-        // Same layout and geometry as the head draw; it cannot fail where
-        // that one succeeded short of a device loss, which redraws anyway.
-        DrawOn(dc, text, format, bounds, split_foreground, background,
-               DWRITE_TEXT_ALIGNMENT_LEADING);
+        if (stable_tail) {
+            // The suffix starts on a whole pixel regardless of the prefix's
+            // fractional advance. A fixed width also reuses its cached surface
+            // across filenames; the full-line fit above still owns truncation.
+            const auto tail_bounds = D2D1::RectF(cut, bounds.top, cut + tail_width + ink + 1.0f, bounds.bottom);
+            DrawOn(dc, tail, format, tail_bounds, split_foreground, background,
+                   DWRITE_TEXT_ALIGNMENT_LEADING);
+        } else {
+            // Keep contextual shaping intact for non-Latin extensions.
+            DrawOn(dc, text, format, bounds, split_foreground, background,
+                   DWRITE_TEXT_ALIGNMENT_LEADING);
+        }
         dc->PopAxisAlignedClip();
         return true;
     }

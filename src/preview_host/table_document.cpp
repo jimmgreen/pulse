@@ -59,9 +59,16 @@ bool AppendSheet(std::wstring& out, const wchar_t* kind, std::wstring_view name,
         body += L'R';
         for (size_t c = 0; c < columns; ++c) {
             body += L'\t';
-            if (c < row.size()) AppendEscaped(body, row[c]);
+            if (c < row.size()) {
+                const std::wstring_view cell(row[c]);
+                AppendEscaped(body, std::wstring_view(kind) == L"xlsx" && cell.size() >= 9 && cell[0] == L'\x0002' ? cell.substr(9) : cell);
+            }
         }
         body += L'\n';
+        for (size_t c = 0; c < row.size(); ++c) {
+            if (std::wstring_view(kind) == L"xlsx" && row[c].size() >= 9 && row[c][0] == L'\x0002')
+                body += L"F\t" + std::to_wstring(written) + L"\t" + std::to_wstring(c) + L"\t" + row[c].substr(1, 8) + L"\n";
+        }
         if (out.size() + body.size() + 512 > budget) { body.resize(mark); truncated = true; break; }
         ++written;
     }
@@ -434,6 +441,7 @@ std::vector<std::wstring> ReadSharedStrings(std::string_view xml) {
 }
 
 struct Styles {
+    std::vector<unsigned> fill;
     std::vector<bool> bold;          // per cellXfs index
     std::vector<std::wstring> format; // number format code per cellXfs index ("" = General)
 };
@@ -460,10 +468,23 @@ std::wstring BuiltinFormat(unsigned id) {
     }
 }
 
-Styles ReadStyles(std::string_view xml) {
+Styles ReadStyles(std::string_view xml, std::string_view theme_xml) {
+    std::vector<unsigned> theme;
+    XmlReader tx(theme_xml);
+    for (auto k = tx.Next(); k != XmlReader::Kind::End; k = tx.Next()) {
+        if (k != XmlReader::Kind::Open) continue;
+        if (tx.name() == "srgbClr" || tx.name() == "sysClr") {
+            const std::string value(tx.Attr(tx.name() == "sysClr" ? "lastClr" : "val"));
+            theme.push_back(static_cast<unsigned>(std::strtoul(value.c_str(), nullptr, 16)));
+            if (theme.size() == 12) break;
+        }
+    }
+    if (theme.size() >= 4) { std::swap(theme[0], theme[1]); std::swap(theme[2], theme[3]); }
     Styles styles;
     std::map<unsigned, std::wstring> custom;
     std::vector<bool> font_bold;
+    std::vector<unsigned> fills;
+    bool solid = false, in_fills = false;
     XmlReader x(xml);
     enum class Section { None, Fonts, CellXfs } section = Section::None;
     bool in_font = false;
@@ -473,6 +494,46 @@ Styles ReadStyles(std::string_view xml) {
             if (n == "numFmt") {
                 custom[ToUnsigned(x.Attr("numFmtId"))] =
                     XmlReader::Unescape(XmlReader::Utf8(x.Attr("formatCode")));
+            } else if (n == "fills") {
+                in_fills = true;
+            } else if (in_fills && n == "fill") {
+                fills.push_back(0); solid = false;
+            } else if (in_fills && n == "patternFill") {
+                solid = x.Attr("patternType") == "solid";
+            } else if (n == "fgColor" && in_fills && solid && !fills.empty()) {
+                static constexpr unsigned indexed[] = {
+                    0x000000,0xFFFFFF,0xFF0000,0x00FF00,0x0000FF,0xFFFF00,0xFF00FF,0x00FFFF,
+                    0x000000,0xFFFFFF,0xFF0000,0x00FF00,0x0000FF,0xFFFF00,0xFF00FF,0x00FFFF,
+                    0x800000,0x008000,0x000080,0x808000,0x800080,0x008080,0xC0C0C0,0x808080,
+                    0x9999FF,0x993366,0xFFFFCC,0xCCFFFF,0x660066,0xFF8080,0x0066CC,0xCCCCFF,
+                    0x000080,0xFF00FF,0xFFFF00,0x00FFFF,0x800080,0x800000,0x008080,0x0000FF,
+                    0x00CCFF,0xCCFFFF,0xCCFFCC,0xFFFF99,0x99CCFF,0xFF99CC,0xCC99FF,0xFFCC99,
+                    0x3366FF,0x33CCCC,0x99CC00,0xFFCC00,0xFF9900,0xFF6600,0x666699,0x969696,
+                    0x003366,0x339966,0x003300,0x333300,0x993300,0x993366,0x333399,0x333333};
+                if (!x.Attr("indexed").empty() && ToUnsigned(x.Attr("indexed")) < 64)
+                    fills.back() = 0xFF000000u | indexed[ToUnsigned(x.Attr("indexed"))];
+                const std::string rgb(x.Attr("rgb"));
+                const auto theme_id = x.Attr("theme");
+                if (!theme_id.empty() && ToUnsigned(theme_id) < theme.size()) {
+                    unsigned color = theme[ToUnsigned(theme_id)];
+                    const std::string tint_text(x.Attr("tint"));
+                    const double tint = (std::max)(-1.0, (std::min)(1.0, std::strtod(tint_text.c_str(), nullptr)));
+                    const double red = (color >> 16) & 255u, green = (color >> 8) & 255u, blue = color & 255u;
+                    const double hi = (std::max)({red, green, blue}), lo = (std::min)({red, green, blue});
+                    const double light = (hi + lo) / 510.0;
+                    const double next = tint < 0 ? light * (1 + tint) : light * (1 - tint) + tint;
+                    const double chroma = hi - lo;
+                    const double saturation = chroma == 0 ? 0 : chroma / (255 * (1 - std::abs(2 * light - 1)));
+                    const double new_chroma = (1 - std::abs(2 * next - 1)) * saturation * 255;
+                    unsigned adjusted = 0;
+                    for (unsigned shift : {0u, 8u, 16u}) {
+                        const double channel = (color >> shift) & 255u;
+                        const double value = (next * 255 - new_chroma / 2) + (chroma == 0 ? 0 : (channel - lo) * new_chroma / chroma);
+                        adjusted |= static_cast<unsigned>(std::round((std::clamp)(value, 0.0, 255.0))) << shift;
+                    }
+                    fills.back() = 0xFF000000u | adjusted;
+                }
+                if (rgb.size() == 8 || rgb.size() == 6) fills.back() = 0xFF000000u | static_cast<unsigned>(std::strtoul(rgb.c_str(), nullptr, 16));
             } else if (n == "fonts") {
                 section = Section::Fonts;
             } else if (n == "cellXfs") {
@@ -488,12 +549,15 @@ Styles ReadStyles(std::string_view xml) {
             } else if (section == Section::CellXfs && n == "xf") {
                 const unsigned font = ToUnsigned(x.Attr("fontId"));
                 const unsigned fmt = ToUnsigned(x.Attr("numFmtId"));
+                const unsigned fill = ToUnsigned(x.Attr("fillId"));
+                styles.fill.push_back(fill < fills.size() ? fills[fill] : 0);
                 styles.bold.push_back(font < font_bold.size() && font_bold[font]);
                 const auto it = custom.find(fmt);
                 styles.format.push_back(it != custom.end() ? it->second : BuiltinFormat(fmt));
             }
         } else if (k == XmlReader::Kind::Close) {
-            if (x.name() == "font") in_font = false;
+            if (x.name() == "fills") in_fills = false;
+            else if (x.name() == "font") in_font = false;
             else if (x.name() == "fonts" || x.name() == "cellXfs") section = Section::None;
         }
     }
@@ -631,12 +695,14 @@ void ReadSheet(std::string_view xml, const std::vector<std::wstring>& shared, co
         if (text.size() > kMaxCellChars) {
             text.resize(SafePrefix(text, kMaxCellChars)); text += L'\x2026'; truncated = true;
         }
-        if (text.empty()) return;
+        const unsigned fill = style < styles.fill.size() ? styles.fill[style] : 0;
+        if (text.empty() && !fill) return;
         if (rows.size() <= row_index) rows.resize(row_index + 1);
         Row& row = rows[row_index];
         if (row.size() <= col) row.resize(col + 1);
         const bool bold = style < styles.bold.size() && styles.bold[style];
         row[col] = bold ? std::wstring(1, L'\x0001') + text : text;
+        if (fill) { wchar_t color[9]; swprintf_s(color, L"%08X", fill); row[col] = std::wstring(1, L'\x0002') + color + row[col]; }
         columns = (std::max)(columns, col + 1);
     };
     for (auto k = x.Next(); k != XmlReader::Kind::End; k = x.Next()) {
@@ -797,7 +863,7 @@ bool MakeXlsxTable(const std::wstring& path, std::wstring& payload, uint32_t& by
     ReadPart(path, RelationshipsPart(workbook_part), rels, nullptr, total);
     // Sheet order and names from the workbook, targets from its relationships.
     std::map<std::string, std::string> targets;
-    std::string shared_part = "xl/sharedStrings.xml", styles_part = "xl/styles.xml";
+    std::string shared_part = "xl/sharedStrings.xml", styles_part = "xl/styles.xml", theme_part = "xl/theme/theme1.xml";
     {
         XmlReader x(rels);
         for (auto k = x.Next(); k != XmlReader::Kind::End; k = x.Next()) {
@@ -806,6 +872,7 @@ bool MakeXlsxTable(const std::wstring& path, std::wstring& payload, uint32_t& by
             const auto type = x.Attr("Type");
             if (RelationshipTypeIs(type, "sharedStrings")) shared_part = target;
             else if (RelationshipTypeIs(type, "styles")) styles_part = target;
+            else if (RelationshipTypeIs(type, "theme")) theme_part = target;
             targets[std::string(x.Attr("Id"))] = target;
         }
     }
@@ -845,7 +912,11 @@ bool MakeXlsxTable(const std::wstring& path, std::wstring& payload, uint32_t& by
     Styles styles;
     if (!sheets[sheet_index].hidden && !sheets[sheet_index].part.empty()) {
         if (ReadPart(path, shared_part, shared_xml, nullptr, total)) shared = ReadSharedStrings(shared_xml);
-        if (ReadPart(path, styles_part, styles_xml, nullptr, total)) styles = ReadStyles(styles_xml);
+        if (ReadPart(path, styles_part, styles_xml, nullptr, total)) {
+            std::string theme_xml;
+            ReadPart(path, theme_part, theme_xml, nullptr, total);
+            styles = ReadStyles(styles_xml, theme_xml);
+        }
     }
     payload = L"PULSETBL\t1\n";
     size_t loaded = 0;

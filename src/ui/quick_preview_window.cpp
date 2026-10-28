@@ -2785,7 +2785,11 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
         if (native_kind_ == NativeKind::Table) {
             const float x = static_cast<float>(point.x), y = static_cast<float>(point.y);
             if (table_.Dragging()) {
-                if (table_.MouseMove(x, y)) InvalidateRect(hwnd_, nullptr, FALSE);
+                if (!(wparam & MK_LBUTTON)) {
+                    table_.MouseUp();
+                    if (GetCapture() == hwnd_) ReleaseCapture();
+                    InvalidateRect(hwnd_, nullptr, FALSE);
+                } else if (table_.MouseMove(x, y)) InvalidateRect(hwnd_, nullptr, FALSE);
             } else {
                 if (table_.Hover(x, y)) InvalidateRect(hwnd_, nullptr, FALSE);
                 // Full text of a clipped cell once the pointer rests on it.
@@ -2851,6 +2855,7 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
         return 0;
     case WM_LBUTTONUP:
     case WM_CAPTURECHANGED:
+    case WM_CANCELMODE:
         if (message == WM_LBUTTONUP && playback_drag_)
             SeekPlayback(static_cast<float>(GET_X_LPARAM(lparam)));
         EndPlaybackDrag(message == WM_LBUTTONUP);
@@ -2864,7 +2869,7 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
             tree_.MouseUp();
             InvalidateRect(hwnd_, nullptr, FALSE);
         }
-        if (message == WM_LBUTTONUP) ReleaseCapture();
+        if ((message == WM_LBUTTONUP || message == WM_CANCELMODE) && GetCapture() == hwnd_) ReleaseCapture();
         return 0;
     case WM_RBUTTONUP: {
         POINT point{};

@@ -10,6 +10,8 @@
 //       header: 1 when the first row is a header row (CSV heuristic).
 //   R\t<cell>\t<cell>...   one per row of the preceding sheet; a cell that
 //       starts with "\B" is bold (XLSX styles).
+//   F\t<row>\t<column>\t<ARGB> optional solid cell fill, zero-based indices;
+//       eight hexadecimal digits, separate from cell text. Older readers ignore it.
 //   X\t<source>            CSV only: the decoded text for the source view.
 //   W\t<total>\t<read>\t<selected> XLSX: total sheets, read parts (0/1), and
 //       the requested zero-based workbook sheet index.

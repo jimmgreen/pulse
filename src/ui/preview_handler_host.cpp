@@ -470,6 +470,16 @@ struct PreviewHandlerHost::WorkerState {
         placed_y = INT_MIN;
     }
 
+    void EnablePan() {
+        const auto extension = ExtensionOf(path);
+        if (extension == L".xlsx" || extension == L".xls" || extension == L".xlsm" ||
+            extension == L".xlsb" || extension == L".csv" || extension == L".ods") {
+            pan.Disable();
+            return;
+        }
+        pan.Enable(hwnd);
+    }
+
     void PlaceOverlay() {
         if (!hwnd || !owner) return;
 #ifdef PULSE_PREVIEW_HANDLER_TESTING
@@ -491,7 +501,7 @@ struct PreviewHandlerHost::WorkerState {
         const bool size_changed = width != placed_w || height != placed_h;
         const bool moved = origin.x != placed_x || origin.y != placed_y || size_changed;
         if (!moved && shown && IsWindowVisible(hwnd)) {
-            if (handler) pan.Enable(hwnd);
+            if (handler) EnablePan();
             return;
         }
         placed_x = origin.x;
@@ -513,7 +523,7 @@ struct PreviewHandlerHost::WorkerState {
                 preview->SetRect(&client);
             }
         }
-        if (handler && shown) pan.Enable(hwnd);
+        if (handler && shown) EnablePan();
     }
 
     void Unload() {
@@ -640,7 +650,7 @@ struct PreviewHandlerHost::WorkerState {
         // windows without erasing the pixels DoPreview has already produced.
         RedrawWindow(hwnd, nullptr, nullptr,
                      RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_NOERASE);
-        pan.Enable(hwnd);
+        EnablePan();
         return true;
     }
 
