@@ -437,7 +437,8 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
         // A long path scrolled toward its root eases there, and back to its
         // end 1.5 s after the pointer leaves (SettleBreadcrumbScroll).
         const bool addr_hot = IsHovered(vm, HitTestResult::AddressBar) ||
-                              IsHovered(vm, HitTestResult::BreadcrumbSegment);
+                              IsHovered(vm, HitTestResult::BreadcrumbSegment) ||
+                              IsHovered(vm, HitTestResult::BreadcrumbArrow);
         if (addr_hot) crumb_hover_left_ = 0;
         else if (crumb_scroll_ > 0.0f && crumb_hover_left_ == 0) crumb_hover_left_ = GetTickCount64();
         if (std::fabs(crumb_scroll_ - crumb_scroll_shown_) > 0.25f) {
@@ -564,9 +565,14 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
                         seg.rc.right - seg.rc.left, seg.rc.bottom - seg.rc.top,
                         theme.radius_control * scale_);
                 }
-                if (i > 0) {
-                    // Chevron separator.
-                    float chX = seg.rc.left - 14.0f * scale_;
+                if (i + 1 < placed.size() || (!vm.pane.is_query_search &&
+                    (vm.pane.path.empty() || !fs::IsVirtualPath(vm.pane.path)))) {
+                    const float chX = seg.rc.right;
+                    if (IsHovered(vm, HitTestResult::BreadcrumbArrow, static_cast<int>(i))) {
+                        MakeBrush(dc, theme.fill_hover, brFillHover_);
+                        FillRoundedRect(dc, brFillHover_.get(), chX, seg.rc.top,
+                            14.0f * scale_, seg.rc.bottom - seg.rc.top, theme.radius_control * scale_);
+                    }
                     DrawIconText(chX, addrRc.top, 14.0f * scale_, addrRc.bottom - addrRc.top,
                         kIconChevronRight, L">", seg.ghost ? WithAlpha(theme.text_secondary, 0.55f)
                                                            : theme.text_secondary, kIconSmall);

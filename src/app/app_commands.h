@@ -102,6 +102,7 @@ std::vector<ui::FluentMenuItem> ExplorerMenu(
 void RefreshOpenCtxMenu(AppState& s);
 bool HandleShellMenuCommand(AppState& s, int cmd);
 // from_chip: the selection chip's ⋯ (adds the pinned-app rows on top).
+void ShowSidebarDriveMenu(AppState& s, std::wstring path, POINT screen_pt);
 void ShowItemContextMenu(AppState& s, POINT screen_pt, bool from_chip = false);
 // Shift+F10 / Apps key: the item menu under the focused item, else the background menu.
 void ShowKeyboardContextMenu(AppState& s);
@@ -110,6 +111,7 @@ void ShowKeyboardContextMenu(AppState& s);
 std::vector<uint64_t> DissolveFolders(AppState& s, app::Tab& tab, const std::vector<std::wstring>& folders,
                                       uint64_t group, const std::wstring& label);
 void ShowBackgroundContextMenu(AppState& s, POINT screen_pt);
+void ShowBreadcrumbChildren(AppState& s, std::wstring path, POINT screen_pt);
 void ShowBreadcrumbMenu(AppState& s, std::wstring path, POINT screen_pt);
 void ShowNewDropdown(AppState& s);
 void ShowSplitDropdown(AppState& s);

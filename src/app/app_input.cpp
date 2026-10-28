@@ -3108,7 +3108,8 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             return 0;
         }
         if (hit.region == ui::HitTestResult::TreeSticky) {
-            ClickTreeSticky(*s, hit.pane_index, hit.index);
+            if (!HandleDetailsTreeMouseDown(*s, vm, hit, mx, my, (GetKeyState(VK_MENU) & 0x8000) != 0))
+                ClickTreeSticky(*s, hit.pane_index, hit.index);
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
@@ -3616,7 +3617,14 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             // Split New button: main part creates a folder (inline rename), chevron opens the menu.
             // One branch on purpose: this else-if chain is at MSVC's nesting limit (C1061).
             PressNewButton(*s, hit.region == ui::HitTestResult::NewButtonArrow);
-        } else if (hit.region == ui::HitTestResult::BreadcrumbSegment) {
+        } else if (hit.region == ui::HitTestResult::BreadcrumbSegment ||
+                   hit.region == ui::HitTestResult::BreadcrumbArrow) {
+            if (hit.region == ui::HitTestResult::BreadcrumbArrow) {
+                POINT anchor{static_cast<LONG>(hit.control_bounds.left), static_cast<LONG>(hit.control_bounds.bottom)};
+                ClientToScreen(hwnd, &anchor);
+                ShowBreadcrumbChildren(*s, hit.path, anchor);
+                return 0;
+            }
             // The trailing search segment edits the query instead of reloading it.
             const app::Tab* active = ActiveTab(*s);
             if (active && hit.path == active->current_path && IsAddressSearchResults(active)) ShowAddressSearch(*s);
@@ -4960,6 +4968,11 @@ LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                    hit.sidebar_section == static_cast<int>(app::SidebarSectionId::Cloud)) {
             // OneDrive has no header to right-click (#80): its rows carry the menu.
             ShowCloudPlaceMenu(*s, hit.path, sp);
+            shown = true;
+        } else if (hit.region == ui::HitTestResult::SidebarItem &&
+                   hit.path.size() >= 2 && hit.path.size() <= 3 && hit.path[1] == L':' &&
+                   (hit.path.size() == 2 || hit.path[2] == L'\\' || hit.path[2] == L'/')) {
+            ShowSidebarDriveMenu(*s, hit.path, sp);
             shown = true;
         } else if (hit.region == ui::HitTestResult::SidebarItem) {
             // The 项目 row of the repository the tab is in: its Git menu.

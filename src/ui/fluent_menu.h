@@ -223,6 +223,8 @@ public:
     void SetMorphFrom(RECT screen_rc) { morph_button_ = screen_rc; morph_next_ = true; }
     // Align an ordinary selection menu below its control; cleared after use.
     void SetDropdownRect(RECT screen_rc) { dropdown_rect_ = screen_rc; dropdown_ = true; }
+    // Position the visible card at a screen point, excluding its transparent shadow.
+    static POINT CardOrigin(POINT point) { return {point.x - kShadowMargin, point.y - kShadowMargin}; }
     // Override the filter-mode minimum width (dips) for the next TrackPopup;
     // <= 0 restores the palette default. Reset after each popup.
     void SetFilterMinWidth(float dips) { filter_min_width_ = dips; }

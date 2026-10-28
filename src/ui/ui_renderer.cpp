@@ -848,7 +848,8 @@ void MainRenderer::BreadcrumbLayout(const PaneViewModel& vm, float w,
         crumb_scroll_ = crumb_scroll_shown_ = 0.0f;
     }
     const float view_left = addr.left + margin_;
-    const float width = total + ghost_total;
+    const bool trailing_arrow = !vm.is_query_search && (vm.path.empty() || !fs::IsVirtualPath(vm.path));
+    const float width = total + ghost_total + (trailing_arrow ? chevronW : 0.0f);
     const float overflow = std::max(0.0f, width - avail);
     crumb_scroll_ = std::clamp(crumb_scroll_, 0.0f, overflow);
     const float offset = std::clamp(crumb_scroll_shown_, 0.0f, overflow);

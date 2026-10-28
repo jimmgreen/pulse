@@ -136,6 +136,12 @@ int wmain() {
         Check(!animations || shift.Active(2100), L"row flash is active right after the insert");
         Check(!shift.Active(2016 + motion::ListShiftMotion::kFlashMs + motion::kSettleGraceMs),
               L"abandoned row flash stops asking for frames after its duration");
+        shift.BeginFrame(8, 0, 0, 15, 3, 2032, true); // expanded tree revision
+        const auto offset = shift.Offset(99, D2D1::Point2F(0, 80));
+        shift.Offset(100, D2D1::Point2F(0, 100));
+        Check(offset.x == 0 && offset.y == 0 && shift.Flash(99) == 0 && shift.Flash(100) == 0,
+              L"tree revision clears old flashes and does not flash revealed rows");
+        shift.EndFrame();
     }
 
     // View-mode morph (grid -> list): shared-element travel, spring timing,

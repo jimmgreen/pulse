@@ -947,12 +947,23 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 r.control_bounds=AddressFavoritesRect(rect.right);
                 return r;
             }
-            if (!vm.address_editing && x < toolbar.address.right-28*scale_) {
+            if (!vm.address_editing && x < toolbar.address.right-(FavoritesButtonShown() ? 28*scale_ : 0)) {
                 std::vector<BreadcrumbPlaced> placed;
                 BreadcrumbStrip strip;
                 BreadcrumbLayout(vm.pane,rect.right,placed,&strip);
                 // A scrolled-away part of a long path is not clickable.
                 const bool in_view=strip.overflow<=0.0f || (x>=strip.view.left && x<strip.view.right);
+                if (in_view) for (size_t i=0;i<placed.size();++i) {
+                    if (i+1==placed.size() && (vm.pane.is_query_search ||
+                        (!vm.pane.path.empty() && fs::IsVirtualPath(vm.pane.path)))) break;
+                    auto arrow = placed[i].rc;
+                    arrow.left = arrow.right;
+                    arrow.right = i+1<placed.size() ? placed[i+1].rc.left : arrow.left+14.0f*scale_;
+                    if (ContainsPt(arrow,x,y)) {
+                        r.region=HitTestResult::BreadcrumbArrow; r.index=(int)i;
+                        r.path=placed[i].path; r.control_bounds=arrow; return r;
+                    }
+                }
                 if (in_view) for (size_t i=0;i<placed.size();++i) if (ContainsPt(placed[i].rc,x,y)) {
                     r.region=HitTestResult::BreadcrumbSegment; r.index=(int)i; r.path=placed[i].path; break;
                 }

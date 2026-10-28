@@ -152,7 +152,8 @@ enum MenuCmd : int {
     CmdToolbarAppBase = 5100,
     CmdToolbarPinAppBase = 5120,
     // Toolbar toggle tools (toolbar_tools.h): + index into kToolbarToolIds.
-    CmdToolbarToolBase = 5160,
+    CmdToolbarToolBase = 5300,
+    CmdToolbarToolEnd = 5400,
     // New menu ▸ 「新建」按钮的主操作: + AppPrefs::toolbar_new_primary (0..2).
     CmdNewPrimaryBase = 5180,
     // Network page (app_network_page.h): 连接服务器 and its ▾ menu, 最近访问.

@@ -1620,7 +1620,7 @@ static void AiOrganizeHere(AppState& s) {
 
 void DispatchMenuCommand(AppState& s, int cmd) {
     if (HandleNetworkPageCommand(s, cmd)) return;  // 连接服务器, 最近访问, ...
-    if (cmd >= app::CmdToolbarToolBase && cmd < app::CmdNewPrimaryBase &&
+    if (cmd >= app::CmdToolbarToolBase && cmd < app::CmdToolbarToolEnd &&
         cmd < app::CmdToolbarToolBase + static_cast<int>(app::kToolbarToolCount)) {
         const size_t tool = static_cast<size_t>(cmd - app::CmdToolbarToolBase);
         if (app::kToolbarToolIds[tool] == L"split") ShowSplitDropdown(s);
@@ -2718,6 +2718,28 @@ bool HandleShellMenuCommand(AppState& s, int cmd) {
         [&s] { WaitForShellMenuReady(s); }, [&s] { ScheduleFolderRefresh(s); });
 }
 
+void ShowSidebarDriveMenu(AppState& s, std::wstring path, POINT screen_pt) {
+    if (!IsDriveRootPath(path) || !EnsureMenu(s)) return;
+    s.context_menu.Close();
+    StartCtxQuery(s, {path}, false, std::wstring(ipc::kDriveVerbKey));
+    s.context_menu.SeedComItemsFromCache();
+    auto items = app::BuildBreadcrumbMenu(true);
+    s.context_menu.OpenMenu(items);
+    const int cmd = s.menu->TrackPopup(screen_pt, ExplorerMenu(s, s.context_menu.base_items()));
+    s.context_menu.CloseMenu();
+    if (HandleShellMenuCommand(s, cmd)) return;
+    // Sidebar commands belong to the clicked drive, never the active selection.
+    switch (cmd) {
+    case app::CmdOpen: NavigateTo(s, path); break;
+    case app::CmdOpenInNewTab: OpenFolderTab(s, path); break;
+    case app::CmdCopyPath: ops::WriteClipboardText(path); break;
+    case app::CmdCopy: ops::WriteClipboard({path}, false); break;
+    case app::CmdOpenTerminal: s.ops.OpenTerminal(path); break;
+    case app::CmdProperties: s.ops.ShowProperties(path); break;
+    default: break;
+    }
+}
+
 void ShowItemContextMenu(AppState& s, POINT screen_pt, bool from_chip) {
     if(DeferContentSelection(s,[=](AppState& v){ShowItemContextMenu(v,screen_pt,from_chip);})) return;
     if (!EnsureMenu(s)) return;
@@ -3041,7 +3063,8 @@ std::wstring WithoutEllipsis(std::wstring label) {
 }
 // Tools with a command of their own run it (details / columns too, which are
 // toggles); the others (the setting switches, split) run as
-// CmdToolbarToolBase + index, kept below CmdNewPrimaryBase.
+// CmdToolbarToolBase + index, within its own reserved range.
+static_assert(app::CmdToolbarToolBase + app::kToolbarToolCount <= app::CmdToolbarToolEnd);
 int ToolbarToolCommand(size_t index) {
     return kToolbarTools[index].command ? kToolbarTools[index].command
                                         : app::CmdToolbarToolBase + static_cast<int>(index);

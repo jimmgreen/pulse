@@ -1588,7 +1588,15 @@ int MainRenderer::TreeChevronAt(const PaneViewModel& vm, const D2D1_RECT_F& full
     const D2D1_RECT_F list = PaneListRect(pane_bounds, extra, vm.view_mode);
     const ViewLayout layout(vm.view_mode, list, vm.EntryCount(), vm.scroll_x, vm.scroll_y, scale_,
                             ListRowHeightDip(vm, list), vm.Groups());
-    const int row = layout.HitTest(x, y);
+    int row = layout.HitTest(x, y);
+    const StickyTree sticky = StickyTreeRows(vm, list);
+    for (const TreePin& pin : sticky.pins) {
+        const float top = sticky.top + pin.y;
+        if (y >= top && y < top + sticky.row_h) {
+            row = pin.row;
+            break;
+        }
+    }
     const DetailsTreeRow* tree_row = vm.tree->At(row);
     if (!tree_row || tree_row->kind != TreeRowKind::Entry || !tree_row->expandable) return -1;
     const float left = layout.IconRect(row).left + CheckGutterDip(vm) * scale_ +
@@ -3458,7 +3466,7 @@ bool MainRenderer::DrawTruncatedName(const std::wstring& name, float x, float y,
     // Shape colored filenames in one layout. Splitting at the extension gives
     // each substring its own clipping/ellipsis and loses glyph positioning
     // across the boundary (including the dot's ink and the stem's last glyph).
-    // LumaText draws its one layout twice, clipped at the extension's caret.
+    // LumaText locates the extension with that layout's caret before drawing it.
     bool drawn = false;
     if (visible_matches.empty() && !IsHighContrast()) {
         drawn = ext_at != std::wstring::npos
@@ -4508,8 +4516,11 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
     // The filter and the sort order are not part of the shift context: a
     // change of either is a re-arrangement the visible rows travel through
     // (motion v2 "sort" / "filter").
+    // Tree expansion changes visibility, not filesystem membership. Start a
+    // fresh motion context so revealed rows are not flashed as new files.
     const uint64_t list_context = std::hash<std::wstring>{}(vm.path) ^
-        (static_cast<uint64_t>(vm.view_mode) << 56);
+        (static_cast<uint64_t>(vm.view_mode) << 56) ^
+        (vm.tree ? vm.tree->revision * 0x9e3779b97f4a7c15ULL : 0);
     const uint64_t arrangement = (std::hash<std::wstring>{}(vm.filter_text) * 31u) ^
         (static_cast<uint64_t>(vm.sort_column) << 40) ^ (static_cast<uint64_t>(vm.sort_direction) << 48);
     motion::ListShiftMotion* shift =
@@ -4729,7 +4740,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                 }
             }
             const ListEntryView& e = MakeVisibleEntry(vm, static_cast<size_t>(src));
-            const uint64_t row_key = std::hash<std::wstring_view>{}(std::wstring_view(e.name));
+            const uint64_t row_key = std::hash<std::wstring_view>{}(std::wstring_view(e.path.empty() ? e.name : e.path));
             D2D1_POINT_2F row_shift{0.0f, 0.0f};
             if (shift) row_shift = shift->Offset(row_key, D2D1::Point2F(cell.left, cell.top));
             // Motion 5b: a row on its way to the Recycle Bin slides 14 px left
@@ -6025,9 +6036,9 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                         rowY += rowH + 2.0f * scale_;
                     }
                 }
-            } else if (vm.view_mode == ViewMode::Tiles && e.drive_mounted) {
-                // Mounted drives (CloudDrive, rclone, mapped): no usage bar; the
-                // 网络盘 chip and what Pulse does with them instead.
+            } else if (vm.view_mode == ViewMode::Tiles && e.drive_mounted && e.drive_used < 0.0f) {
+                // Mounted drives without capacity data retain the network hint.
+                // Available capacity uses the same bar as local drives below.
                 IDWriteTextFormat* chip_fmt = compositor_->SmallFormat();
                 const std::wstring chip = l10n::Get(l10n::StringId::MountedDriveChip);
                 const float chipH = 18.0f * scale_;

@@ -1443,6 +1443,7 @@ struct HitTestResult {
         AddressSearchClear,
         AddressSearchClose,
         BreadcrumbSegment,
+        BreadcrumbArrow,
         ColumnHeader,
         ColumnDivider,
         FilterBox,

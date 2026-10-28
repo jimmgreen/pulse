@@ -959,9 +959,16 @@ bool FluentMenu::RenderSurface(const FluentMenuModel& model, int hover_row, int 
                 pm.Hide();
             }
         }
+        const float body_top = y;
         y += model.RowTopPx(0) - (main ? scroll_y_ : 0.0f);
         for (int i = 0; i < model.Count(); ++i) {
             const FluentMenuItem* it = model.At(i);
+            // Rows scrolled wholly outside the clipped body are skipped.
+            if (main && max_visible_rows_ > 0 &&
+                (y + model.RowHeightPx(i) < body_top - 4.0f * scale_ || y > body_top + body + 4.0f * scale_)) {
+                y += model.RowHeightPx(i) + (it->separator_after ? 5.0f * scale_ : 0.0f);
+                continue;
+            }
             // Rows follow the card in with a short stagger and a 4dip rise.
             const float ra = row_alpha(i);
             const bool layered = ra < 0.999f;

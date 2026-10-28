@@ -601,12 +601,13 @@ void NoteDetailsTreeResult(AppState& s, const app::WorkResult& res, bool again) 
 
 bool HandleDetailsTreeMouseDown(AppState& s, const ui::WindowViewModel& vm,
                                 const ui::HitTestResult& hit, int x, int y, bool alt) {
-    if (hit.region != ui::HitTestResult::Row || hit.index < 0) return false;
+    const bool sticky = hit.region == ui::HitTestResult::TreeSticky;
+    if ((!sticky && hit.region != ui::HitTestResult::Row) || hit.index < 0) return false;
     D2D1_RECT_F rect{};
     const ui::PaneViewModel& pane = HitPane(s, vm, hit, rect);
     app::Tab* tab = ActiveTab(s);
     if (!pane.tree || !tab || !tab->TreeEntries()) return false;
-    const int view = pane.ViewIndex(hit.index);
+    const int view = sticky ? hit.index : pane.ViewIndex(hit.index);
     const ui::DetailsTreeRow* row = pane.tree->At(view);
     if (!row) return false;
     const float fx = static_cast<float>(x);
@@ -619,6 +620,12 @@ bool HandleDetailsTreeMouseDown(AppState& s, const ui::WindowViewModel& vm,
     }
     if (row->kind != ui::TreeRowKind::Entry) return true;  // placeholders do nothing
     if (!row->expandable || s.renderer.TreeChevronAt(pane, rect, fx, fy) != view) return false;
+    if (sticky) {
+        if (s.scrollAnimating) CancelScrollAnimation(s);
+        const float row_top = s.renderer.ItemRectInPane(pane, rect, view).top;
+        const float list_top = s.renderer.PaneListRect(pane, rect).top;
+        tab->scroll_y = (std::max)(0.0f, tab->scroll_y + row_top - list_top);
+    }
     Toggle(s, *tab, pane, view, alt);
     return true;
 }
