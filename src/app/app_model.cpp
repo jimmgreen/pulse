@@ -1329,7 +1329,7 @@ std::vector<SidebarEntry> BuildOneDriveEntries() {
         if (path.empty()) continue;
         const bool duplicate = std::any_of(out.begin(), out.end(),
             [&](const SidebarEntry& entry) {
-                return _wcsicmp(entry.path.c_str(), path.c_str()) == 0;
+                return SameCloudRootPath(entry.path, path);
             });
         if (duplicate) continue;
         std::wstring suffix = key == L"Personal"

@@ -218,6 +218,13 @@ void CacheWrites(const fs::path& root) {
     std::printf("[CACHE] rewrites in 7 s with the parent folder shown: %u\n", rewrites);
     Check(rewrites == 0, "the cache is not rewritten over and over while its parent folder is shown");
     sizes.Stop();
+    Check(folder_size::ReadValues(looped.wstring()).empty(),
+          "cache ancestors are live-only and cannot feed back into persisted totals");
+    const auto stable = FileId(looped);
+    FolderSizeValue value{};
+    value.has_value = true; value.bytes = 999999;
+    Check(folder_size::WriteValues(looped.wstring(), {{data.wstring(), value}}) && FileId(looped) == stable,
+          "changing a cache ancestor total does not recreate the temporary file");
 }
 void Attributes(const fs::path& path, DWORD attrs) {
     if (!SetFileAttributesW(path.c_str(), attrs)) throw std::runtime_error("attribute fixture failed");

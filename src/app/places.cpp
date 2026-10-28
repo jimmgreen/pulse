@@ -905,7 +905,10 @@ bool PlacesCatalog::SaveSnapshotFile(const SaveSnapshot& snapshot) {
     f << L"  ]\n}\n";
     DeleteFileW((dir + L"\\places.tmp").c_str());
     const std::wstring document = f.str();
-    return WriteCatalogDocument(dir + L"\\places.json", document, false);
+    const std::wstring path = dir + L"\\places.json";
+    std::wstring existing;
+    if (ReadUtf8File(path, existing) && existing == document) return true;
+    return WriteCatalogDocument(path, document, false);
 }
 
 bool PlacesCatalog::FlushPendingSave(bool force) const {
