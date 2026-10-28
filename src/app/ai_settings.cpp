@@ -6,6 +6,30 @@
 namespace pulse::app::ai {
 namespace {
 
+// assistant.thinking (ai_providers.h ThinkLevel, kept apart so this file
+// needs nothing above it).
+constexpr const char* kThinkingNames[] = {"off", "minimal", "low", "medium", "high", "xhigh", "max"};
+int ClampThinking(int level) { return level < 0 ? 0 : level > 6 ? 6 : level; }
+int ThinkingFromName(const std::string& name) {
+    for (int i = 0; i < 7; ++i)
+        if (name == kThinkingNames[i]) return i;
+    return -1;
+}
+// "effort" meant what the service sent: DeepSeek's 0..3 were off, low, high
+// and max; the others' off, low, medium and high.
+bool DeepSeekService(const std::string& service) { return service.empty() || service == "deepseek"; }
+int ThinkingFromEffort(int effort, const std::string& service) {
+    static constexpr int kDeepSeek[] = {0, 2, 4, 6}, kOthers[] = {0, 2, 3, 4};
+    effort = effort < 0 ? 0 : effort > 3 ? 3 : effort;
+    return DeepSeekService(service) ? kDeepSeek[effort] : kOthers[effort];
+}
+int EffortFromThinking(int level, const std::string& service) {
+    static constexpr int kDeepSeek[] = {0, 1, 1, 2, 2, 3, 3}, kOthers[] = {0, 1, 1, 2, 3, 3, 3};
+    level = ClampThinking(level);
+    return DeepSeekService(service) ? kDeepSeek[level] : kOthers[level];
+}
+
+
 constexpr size_t kMaxClients = 64, kMaxRules = 256, kMaxName = 128;
 constexpr size_t kMaxServices = 32;
 
@@ -129,13 +153,14 @@ Settings ParseSettings(std::string_view utf8, bool* malformed) {
         s.assistant.floating = a->get_string("dock") == "floating";
         const std::string model = a->get_string("model");
         if (!model.empty() && model.size() <= kMaxName) s.assistant.model = model;
-        if (const auto* effort = a->find("effort")) {
-            int64_t n = 0;
-            if (effort->get_int(n, 0, 3)) s.assistant.effort = static_cast<int>(n);
-        }
+        int64_t effort = -1;
+        if (const auto* e = a->find("effort"); !e || !e->get_int(effort, 0, 3)) effort = -1;
+        const int thinking = ThinkingFromName(a->get_string("thinking"));
         const std::string base_url = a->get_string("base_url");
         if (UsableUrl(base_url)) s.assistant.base_url = base_url;
         if (const std::string service = a->get_string("service"); UsableServiceId(service)) s.assistant.service = service;
+        if (thinking >= 0) s.assistant.thinking = thinking;
+        else if (effort >= 0) s.assistant.thinking = ThinkingFromEffort(static_cast<int>(effort), s.assistant.service);
         if (const auto* list = a->find("services"); list && list->is_object()) {
             for (size_t i = 0; i < list->size() && s.assistant.services.size() < kMaxServices; ++i) {
                 const std::string& id = list->keys()[i];
@@ -211,7 +236,8 @@ std::string SerializeSettings(const Settings& s) {
     // Only once another service was chosen, so older files stay as they are.
     if (!s.assistant.service.empty()) assistant.set("service", s.assistant.service);
     assistant.set("model", s.assistant.model);
-    assistant.set("effort", s.assistant.effort);
+    assistant.set("thinking", kThinkingNames[ClampThinking(s.assistant.thinking)]);
+    assistant.set("effort", EffortFromThinking(s.assistant.thinking, s.assistant.service));
     if (!s.assistant.base_url.empty()) assistant.set("base_url", s.assistant.base_url);
     if (!s.assistant.services.empty()) {
         json::Value list = json::Value::Object();

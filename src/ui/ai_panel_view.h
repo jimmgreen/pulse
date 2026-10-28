@@ -570,6 +570,9 @@ struct AiPeekView {
     AiErrTone tone = AiErrTone::Err;
 };
 
+// How the model takes 思考 (app/ai_providers.h ThinkKind).
+enum class AiEffortMode : uint8_t { Levels, Toggle, Fixed };
+
 struct AiPanelViewModel {
     bool dark = false;
     bool high_contrast = false;
@@ -602,14 +605,18 @@ struct AiPanelViewModel {
     std::wstring placeholder;
     std::wstring add_files;
     std::wstring model_label;         // deepseek-flash
-    std::wstring effort_label;        // " · 高" (empty when thinking is off)
+    std::wstring effort_label;        // " · 高", " · 始终思考" (empty when thinking is off)
     AiSendState send = AiSendState::Dim;
-    // 思考强度 popover over the model button. A service without a thinking
-    // setting has none: the button opens the model list (a FluentMenu).
+    // 思考强度 popover over the model button, as the model takes it: its
+    // levels on the slider, a switch, or 始终思考 with no control. A model
+    // without thinking has none: the button opens the model list (a FluentMenu).
     bool menu_open = false;
-    std::array<std::wstring, 4> effort_names;
-    std::array<std::wstring, 4> effort_details;   // each level's line
-    int effort_count = 4;             // stops: 4 关低中高, 3 低中高, 2 关开, 0 none
+    AiEffortMode effort_mode = AiEffortMode::Levels;
+    std::array<std::wstring, 7> effort_names;     // Fixed: [0] 始终思考
+    std::array<std::wstring, 7> effort_details;   // each level's line; Fixed: [0]
+    std::wstring effort_note;         // under the line: 这个模型始终会思考… (may be empty)
+    std::wstring effort_toggle_label; // Toggle: the switch's 深度思考
+    int effort_count = 4;             // stops (2..7; a switch has 2), 0 for Fixed
     int effort = 2;                   // the selected stop
     int effort_default = 2;           // the stop ↺ goes back to
     bool connected = false;
@@ -835,7 +842,8 @@ private:
     // stop with a slight overshoot.
     float slider_pos_ = 0.0f, slider_from_ = 0.0f;
     int slider_target_ = -1;          // the stop it settles on (-1: not placed yet)
-    int slider_stops_ = 0;
+    int slider_stops_ = 0;            // 0 while the popover shows a switch or 始终思考
+    int toggle_target_ = -1;          // the switch row: the stop a click picks
     uint64_t slider_at_ = 0;
     bool slider_anim_ = false, slider_drag_ = false;
     // The panel's scrollbars are the shared fluent control (the same look,

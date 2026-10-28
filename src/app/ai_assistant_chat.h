@@ -146,6 +146,10 @@ std::wstring AiAgentBaseUrl();  // ai.json assistant.base_url, else the default
 std::wstring AiAgentDefaultBaseUrl();   // the service's own address (ai_providers.h)
 std::wstring AiAgentHost();     // "api.deepseek.com"
 std::wstring AiAssistantModelName(const AppState& s);   // the model a request uses, as the service names it
+// 思考 for that model (ai_providers.h ModelThinking): whether a request
+// thinks, and the level's name for the turn's meta (高, 开启, 自动 …).
+bool AiAssistantThinks(const AppState& s);
+std::wstring AiAssistantThinkName(const AppState& s);
 void AiAgentStart(AppState& s, const std::wstring& prompt, bool with_context);
 void AiAgentStop(AppState& s);   // cancels the request and any tool still running
 // Flow A: the 搜索条件 card's chip × and + 条件 search again in Pulse without

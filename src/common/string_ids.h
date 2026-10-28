@@ -4597,5 +4597,23 @@
 #define IDS_AI_VOICE_SETTINGS                                                            5875
 #define IDS_AI_ASST_MODEL_FLASH_SHORT                                                    5876
 #define IDS_AI_ASST_MODEL_PRO_SHORT                                                      5877
+#define IDS_AI_ASST_EFFORT_MINIMAL                                                       5878
+#define IDS_AI_ASST_EFFORT_X_HIGH                                                        5879
+#define IDS_AI_ASST_EFFORT_MAX                                                           5880
+#define IDS_AI_ASST_EFFORT_MINIMAL_DETAIL                                                5881
+#define IDS_AI_ASST_EFFORT_X_HIGH_DETAIL                                                 5882
+#define IDS_AI_ASST_EFFORT_MAX_DETAIL                                                    5883
+#define IDS_AI_ASST_EFFORT_DEFAULT                                                       5884
+#define IDS_AI_ASST_THINK_ALWAYS                                                         5885
+#define IDS_AI_ASST_THINK_AUTO                                                           5886
+#define IDS_AI_ASST_THINK_ALWAYS_NOTE                                                    5887
+#define IDS_AI_ASST_THINK_TOGGLE_NOTE                                                    5888
+#define IDS_AI_ASST_THINK_FIXED_DETAIL                                                   5889
+#define IDS_ASST_THINK_ALWAYS_DESC                                                       5890
+#define IDS_ASST_THINK_FIXED_DESC                                                        5891
+#define IDS_ASST_THINK_NONE                                                              5892
+#define IDS_PROV_MIMO                                                                    5893
+#define IDS_PROV_SUB_MIMO                                                                5894
+#define IDS_ASST_URL_MIMO                                                                5895
 
 #endif  // PULSE_STRING_IDS_H

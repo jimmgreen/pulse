@@ -62,6 +62,8 @@ inline std::wstring KeyCaption(const AssistantPageView& v) {
 inline std::wstring UrlCaption(const AssistantPageView& v) {
     using I = l10n::StringId;
     if (v.custom && v.stage == AsstStage::Setup) return T(I::AsstUrlCustomDesc);
+    // 小米 MiMo: Token Plan keys (tp-) go to their own host (ai_providers.h AddressForKey).
+    if (v.id == "mimo" && v.stage == AsstStage::Setup && v.url_default) return Fill(I::AsstUrlMimo, L"{url}", v.url);
     return v.url_default ? Fill(I::AsstUrlDefault, L"{url}", v.url) : v.url;
 }
 inline std::wstring ConnectCaption(const AssistantPageView& v) {
@@ -75,19 +77,28 @@ inline const std::wstring& ThinkTitle(const AssistantPageView& v) {
 }
 inline const std::wstring& ThinkCaption(const AssistantPageView& v) {
     using I = l10n::StringId;
-    return T(v.think == AsstThink::Toggle ? I::AsstThinkToggleDesc : I::AsstThinkLevelsDesc);
+    if (v.think == AsstThink::Toggle) return T(I::AsstThinkToggleDesc);
+    if (v.think == AsstThink::Fixed) return T(I::AsstThinkFixedDesc);
+    return T(v.think_always ? I::AsstThinkAlwaysDesc : I::AsstThinkLevelsDesc);
 }
 inline int ThinkSegments(const AssistantPageView& v) {
-    return v.think == AsstThink::Levels4 ? 4 : v.think == AsstThink::Levels3 ? 3 : 0;
+    return v.think == AsstThink::Levels ? static_cast<int>(v.think_names.size()) : 0;
 }
 inline const std::wstring& ThinkLabel(const AssistantPageView& v, int i) {
-    using I = l10n::StringId;
-    static constexpr I k4[] = {I::AiAsstEffortOff, I::AiAsstEffortLow, I::AiAsstEffortMid, I::AiAsstEffortHigh};
-    return T(k4[v.think == AsstThink::Levels3 ? (std::min)(i + 1, 3) : (std::clamp)(i, 0, 3)]);
+    static const std::wstring kNone;
+    return i >= 0 && i < static_cast<int>(v.think_names.size()) ? v.think_names[static_cast<size_t>(i)] : kNone;
 }
-// The checked segment: Levels3 has no 关 (effort 0 shows as 低).
-inline int ThinkChecked(const AssistantPageView& v) {
-    return v.think == AsstThink::Levels3 ? (std::max)(v.effort - 1, 0) : v.effort;
+inline int ThinkChecked(const AssistantPageView& v) { return v.think_chosen; }
+// The note under the model card; a model without thinking says so first.
+inline std::wstring Foot(const AssistantPageView& v) {
+    using I = l10n::StringId;
+    if (v.stage == AsstStage::Connected && v.think == AsstThink::None && !v.think_none_model.empty())
+    {
+        std::wstring none = Fill(I::AsstThinkNone, L"{model}", v.think_none_model);
+        if (!none.empty() && none.back() < 0x80) none += L' ';  // Latin sentences need a gap; CJK ones don't
+        return none + T(I::AsstFoot);
+    }
+    return T(I::AsstFoot);
 }
 inline const std::wstring& VoiceBadge(const AssistantPageView& v) {
     using I = l10n::StringId;
@@ -286,6 +297,11 @@ inline float LayoutSettingsAssistant(SettingsLayout& l, const WindowViewModel& v
         } else if (v.think == AsstThink::Toggle) {
             o.think_row = row(asst_text::ThinkCaption(v), inner_right - 42.0f * s);
             o.think_toggle = place(o.think_row, inner_right, 42.0f * s);
+        } else if (v.think == AsstThink::Fixed) {
+            // 始终思考: no control, the words where the level would be.
+            const float value_w = button_w(asst_text::T(I::AiAsstThinkAlways)) - 16.0f * s;
+            o.think_row = row(asst_text::ThinkCaption(v), inner_right - value_w);
+            o.think_value = place(o.think_row, inner_right, value_w, 24.0f);
         }
         // API Key: 更换, 移除 (Ollama has none).
         if (v.needs_key) {
@@ -327,7 +343,7 @@ inline float LayoutSettingsAssistant(SettingsLayout& l, const WindowViewModel& v
     o.model_card = D2D1::RectF(left, card_top, right, y);
     {
         // The note under the card, like every other page's.
-        const std::wstring& foot = asst_text::T(I::AsstFoot);
+        const std::wstring foot = asst_text::Foot(v);
         const float h = caption_h(foot, right - left - 12.0f * s);
         o.model_foot = D2D1::RectF(left + 6.0f * s, y + 8.0f * s, right - 6.0f * s, y + 8.0f * s + h);
         y = o.model_foot.bottom;

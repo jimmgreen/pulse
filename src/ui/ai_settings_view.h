@@ -146,8 +146,9 @@ enum class AsstConn : uint8_t { None, Ok, Failed, Testing };
 enum class AsstStage : uint8_t { Pick, Setup, Connected };
 // 语音输入: none set up, one being set up (key, address, 连接), or one in use.
 enum class AsstVoiceStage : uint8_t { Off, Setup, Set };
-// How the service takes 思考: four levels, three, on/off, or not at all.
-enum class AsstThink : uint8_t { None, Levels4, Levels3, Toggle };
+// How the default model takes 思考 (app/ai_providers.h ThinkKind): its own
+// levels, on/off, always (no control), or not at all.
+enum class AsstThink : uint8_t { None, Levels, Toggle, Fixed };
 inline constexpr int kAsstTiles = 10;
 struct AsstTileView {
     std::string id;            // ai_providers.h
@@ -183,7 +184,10 @@ struct AssistantPageView {
     std::wstring model;                // the default model id
     bool model_editing = false;        // 手动输入模型名
     AsstThink think = AsstThink::None;
-    int effort = 0;                    // 0 off .. 3 high (Toggle: 0 off, else on)
+    std::vector<std::wstring> think_names;   // Levels: each stop's name (2..7)
+    int think_chosen = 0;              // the stop shown (Toggle: 0 off, 1 on)
+    bool think_always = false;         // Levels without 关闭
+    std::wstring think_none_model;     // None: the foot says this model does not think
     float think_drag = -1.0f;          // 思考强度 knob held: stops under the pointer, else < 0
     std::wstring key_mask;             // sk-…9832; empty when the service needs none
     std::vector<AsstOtherView> others;

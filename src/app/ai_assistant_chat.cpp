@@ -223,10 +223,7 @@ void SetChip(AiChat& c, ui::StatusAiState state, std::wstring text, float progre
     c.chip_progress = progress;
 }
 
-std::wstring EffortName(const AppState& s) {
-    static constexpr I kNames[] = {I::AiAsstEffortOff, I::AiAsstEffortLow, I::AiAsstEffortMid, I::AiAsstEffortHigh};
-    return Text(kNames[std::clamp(s.aiAssistant.effort, 0, 3)]);
-}
+std::wstring EffortName(const AppState& s) { return AiAssistantThinkName(s); }
 
 std::wstring ModelName(const AppState& s) { return AiAssistantModelName(s); }
 
@@ -283,7 +280,7 @@ void PushThinking(AiChat& c, uint32_t delay, std::wstring reason) {
 void StartOrganize(AppState& s, AiChat& c, const std::wstring& prompt);
 
 void StartPlain(AppState& s, AiChat& c, const std::wstring& reason, const std::wstring& answer, bool think = true) {
-    if (think && s.aiAssistant.effort > 0) PushThinking(c, 350, reason);
+    if (think && AiAssistantThinks(s)) PushThinking(c, 350, reason);
     auto tid = std::make_shared<uint32_t>(0);
     Push(c, 300, std::function<void(AppState&)>([tid](AppState& st) {
              AiBlockView& t = Chat(st).Add(AiBlockKind::Text, Now());
@@ -323,7 +320,7 @@ void StartOrganize(AppState& s, AiChat& c, const std::wstring& prompt) {
         L"\u300D\u3002\u5148\u770B\u5F53\u524D\u7A97\u53E3\u548C\u8FD9\u4E2A\u6587\u4EF6\u5939\u91CC\u6709\u4EC0\u4E48\uFF0C\u518D\u6309\u6269\u5C55\u540D\u5206\u7EC4\uFF1A" +
         cats +
         L"\u3002\u76EE\u6807\u6587\u4EF6\u5939\u90FD\u8FD8\u4E0D\u5B58\u5728\uFF0C\u9700\u8981\u65B0\u5EFA\uFF0C\u8FD9\u8981\u5728\u65B9\u6848\u91CC\u5199\u6E05\u695A\uFF1B\u4E0D\u8986\u76D6\u5DF2\u6709\u6587\u4EF6\uFF0C\u505A\u5B8C\u8981\u80FD\u64A4\u9500\u3002";
-    if (s.aiAssistant.effort > 0) PushThinking(c, 350, reason);
+    if (AiAssistantThinks(s)) PushThinking(c, 350, reason);
 
     // Scene 3: look at the window, read the folder.
     auto steps1 = std::make_shared<uint32_t>(0);
@@ -585,7 +582,7 @@ void StartOrganize(AppState& s, AiChat& c, const std::wstring& prompt) {
                           const double secs = static_cast<double>(Now() - c3.turn_start) / 1000.0;
                           wchar_t buf[16];
                           swprintf_s(buf, L"%.1f", secs);
-                          const bool off = s3.aiAssistant.effort == 0;
+                          const bool off = !AiAssistantThinks(s3);
                           std::wstring meta = Text(off ? I::AiAsstActsMetaOff : I::AiAsstActsMeta);
                           meta = Fill(meta, L"{model}", ModelName(s3));
                           if (!off) meta = Fill(meta, L"{effort}", EffortName(s3));
@@ -634,7 +631,7 @@ void AiChatAddActs(AppState& s, int tools, bool failed) {
     const double secs = static_cast<double>(Now() - c.turn_start) / 1000.0;
     wchar_t buf[16];
     swprintf_s(buf, L"%.1f", secs);
-    const bool off = s.aiAssistant.effort == 0;
+    const bool off = !AiAssistantThinks(s);
     std::wstring meta = Text(off ? I::AiAsstActsMetaOff : I::AiAsstActsMeta);
     meta = Fill(meta, L"{model}", ModelName(s));
     if (!off) meta = Fill(meta, L"{effort}", EffortName(s));

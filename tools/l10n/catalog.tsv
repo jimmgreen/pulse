@@ -2961,7 +2961,7 @@ AiAsstEffortMid	IDS_AI_ASST_EFFORT_MID	4160	中	Medium	中
 AiAsstEffortHigh	IDS_AI_ASST_EFFORT_HIGH	4161	高	High	高
 AiAsstEffortOffDetail	IDS_AI_ASST_EFFORT_OFF_DETAIL	4162	不思考，直接回答，最快。	No thinking, answers straight away. Fastest.	不思考，直接回答，最快。
 AiAsstEffortLowDetail	IDS_AI_ASST_EFFORT_LOW_DETAIL	4163	简单任务，略想一下就动手。	Simple tasks: a quick thought, then action.	簡單任務，略想一下就動手。
-AiAsstEffortMidDetail	IDS_AI_ASST_EFFORT_MID_DETAIL	4164	默认。速度和仔细程度平衡。	Default. Balances speed and care.	預設。速度和仔細程度平衡。
+AiAsstEffortMidDetail	IDS_AI_ASST_EFFORT_MID_DETAIL	4164	速度和仔细程度平衡。	Balances speed and care.	速度和仔細程度平衡。
 AiAsstEffortHighDetail	IDS_AI_ASST_EFFORT_HIGH_DETAIL	4165	多步整理、复杂查找时更仔细，也更慢、更费 token。	More careful for multi-step tidying and complex searches; slower and uses more tokens.	多步整理、複雜尋找時更仔細，也更慢、更費 token。
 AiAsstConnected	IDS_AI_ASST_CONNECTED	4166	已连接 {host}	Connected to {host}	已連線 {host}
 AiAsstNotConnected	IDS_AI_ASST_NOT_CONNECTED	4167	未连接 · 需要 API 密钥	Not connected · API key needed	未連線 · 需要 API 金鑰
@@ -4604,3 +4604,21 @@ AiChipSettings	IDS_AI_CHIP_SETTINGS	5874	AI 助手设置…	AI assistant setting
 AiVoiceSettings	IDS_AI_VOICE_SETTINGS	5875	语音设置…	Voice settings…	
 AiAsstModelFlashShort	IDS_AI_ASST_MODEL_FLASH_SHORT	5876	日常整理	Everyday	日常整理
 AiAsstModelProShort	IDS_AI_ASST_MODEL_PRO_SHORT	5877	复杂任务	Complex tasks	複雜任務
+AiAsstEffortMinimal	IDS_AI_ASST_EFFORT_MINIMAL	5878	最低	Minimal	最低
+AiAsstEffortXHigh	IDS_AI_ASST_EFFORT_X_HIGH	5879	超高	Extra high	超高
+AiAsstEffortMax	IDS_AI_ASST_EFFORT_MAX	5880	最高	Max	最高
+AiAsstEffortMinimalDetail	IDS_AI_ASST_EFFORT_MINIMAL_DETAIL	5881	只做很少的思考，几乎和关闭一样快。	Barely thinks; almost as fast as off.	只做很少的思考，幾乎和關閉一樣快。
+AiAsstEffortXHighDetail	IDS_AI_ASST_EFFORT_X_HIGH_DETAIL	5882	更长时间推理，适合难题。	Reasons longer, for hard problems.	更長時間推理，適合難題。
+AiAsstEffortMaxDetail	IDS_AI_ASST_EFFORT_MAX_DETAIL	5883	最充分的推理，最慢、最费 token。	The most thorough reasoning; slowest and uses the most tokens.	最充分的推理，最慢、最費 token。
+AiAsstEffortDefault	IDS_AI_ASST_EFFORT_DEFAULT	5884	默认。{detail}	Default. {detail}	預設。{detail}
+AiAsstThinkAlways	IDS_AI_ASST_THINK_ALWAYS	5885	始终思考	Always thinks	始終思考
+AiAsstThinkAuto	IDS_AI_ASST_THINK_AUTO	5886	自动	auto	自動
+AiAsstThinkAlwaysNote	IDS_AI_ASST_THINK_ALWAYS_NOTE	5887	这个模型始终会思考，没有「关闭」	This model always thinks; it has no Off	這個模型始終會思考，沒有「關閉」
+AiAsstThinkToggleNote	IDS_AI_ASST_THINK_TOGGLE_NOTE	5888	这个模型只能开或关，不能调强度	This model is only on or off	這個模型只能開或關，不能調強度
+AiAsstThinkFixedDetail	IDS_AI_ASST_THINK_FIXED_DETAIL	5889	这个模型总是先思考再回答，不能调整强度，也不能关闭。	This model always thinks before answering; its thinking cannot be adjusted or switched off.	這個模型總是先思考再回答，不能調整強度，也不能關閉。
+AsstThinkAlwaysDesc	IDS_ASST_THINK_ALWAYS_DESC	5890	这个模型始终会思考，可以调强度	This model always thinks; choose how hard	這個模型始終會思考，可以調強度
+AsstThinkFixedDesc	IDS_ASST_THINK_FIXED_DESC	5891	这个模型始终会思考，不能调整	This model always thinks; it cannot be adjusted	這個模型始終會思考，不能調整
+AsstThinkNone	IDS_ASST_THINK_NONE	5892	{model} 不支持思考，所以没有思考强度设置。	{model} does not think, so there is no thinking setting.	{model} 不支援思考，所以沒有思考強度設定。
+ProvMimo	IDS_PROV_MIMO	5893	小米 MiMo	Xiaomi MiMo	小米 MiMo
+ProvSubMimo	IDS_PROV_SUB_MIMO	5894	小米开放平台	Xiaomi MiMo platform	小米開放平台
+AsstUrlMimo	IDS_ASST_URL_MIMO	5895	{url}（默认）· tp- 开头的 Token Plan Key 会自动改用套餐地址	{url} (default) · Token Plan keys (tp-) use their own address automatically	{url}（預設）· tp- 開頭的 Token Plan Key 會自動改用套餐位址

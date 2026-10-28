@@ -20,6 +20,8 @@
 #include "ai_agent_internal.h"
 #include "ai_model_list.h"
 
+#include <algorithm>
+
 namespace pulse {
 namespace ai_agent {
 using app::ai::ModelEvent;
@@ -355,7 +357,8 @@ std::string Body(AppState& s, const AiAgent& a) {
     body.set("stream_options", std::move(so));
     if (a.sent_tools) body.set("tools", Tools());
     // Each service takes 思考 in its own field, or not at all (ai_providers.h).
-    app::ai::AddThinking(app::ai::CurrentProvider(), s.aiAssistant.effort, Utf8(AiChatModelId(s)), body);
+    app::ai::AddThinking(app::ai::CurrentProvider(), static_cast<app::ai::ThinkLevel>(std::clamp(s.aiAssistant.think, 0, 6)),
+                         Utf8(AiChatModelId(s)), body);
     return json::Serialize(body);
 }
 
@@ -930,7 +933,7 @@ void SendRound(AppState& s) {
     a.reasoning.clear();
     a.content.clear();
     a.text_id = 0;
-    if (s.aiAssistant.effort > 0) {
+    if (AiAssistantThinks(s)) {
         AiBlockView& b = c.Add(AiBlockKind::Thinking, Now());
         b.running = true;
         b.label = Text(I::AiAsstThinking);

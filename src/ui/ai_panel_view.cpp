@@ -761,10 +761,15 @@ void AiPanelView::DrawComposer(Compositor* compositor, const AiPanelViewModel& v
 }
 
 // 思考强度 popover (after Codex): the level and 「model ›」 on top, ↺ back to
-// the default, the stepped slider, and the level's line under it.
+// the default, the stepped slider (as many stops as the model has), and the
+// level's line under it. A model that is only on or off shows a switch row
+// instead; one that always thinks shows 始终思考 and why, with no control.
 void AiPanelView::DrawEffortMenu(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal, float s,
                                  uint64_t now_ms) {
-    const bool want = vm.menu_open && vm.effort_count >= 2;
+    const bool levels = vm.effort_mode == AiEffortMode::Levels;
+    const bool toggle = vm.effort_mode == AiEffortMode::Toggle;
+    const bool fixed = vm.effort_mode == AiEffortMode::Fixed;
+    const bool want = vm.menu_open && (fixed || vm.effort_count >= 2);
     const bool opening = want && !menu_shown_;
     if (want != menu_shown_) {
         menu_shown_ = want;
@@ -774,16 +779,22 @@ void AiPanelView::DrawEffortMenu(Compositor* compositor, const AiPanelViewModel&
     menu_link_ = {};
     menu_slider_ = {};
     menu_reset_ = {};
-    const int stops = std::clamp(vm.effort_count, 2, 4);
-    const int chosen = std::clamp(vm.effort, 0, stops - 1);
-    if (opening || stops != slider_stops_ || slider_target_ < 0) {
+    toggle_target_ = -1;
+    const int stops = levels ? std::clamp(vm.effort_count, 2, 7) : 0;
+    const int chosen = fixed ? 0 : std::clamp(vm.effort, 0, (levels ? stops : 2) - 1);
+    if (!levels) {
+        slider_stops_ = 0;
+        slider_target_ = -1;
+        slider_anim_ = false;
+        slider_drag_ = false;
+    } else if (opening || stops != slider_stops_ || slider_target_ < 0) {
         slider_pos_ = static_cast<float>(chosen);
         slider_target_ = chosen;
         slider_anim_ = false;
         slider_drag_ = false;
     }
-    slider_stops_ = stops;
-    if (!slider_drag_) {
+    if (levels) slider_stops_ = stops;
+    if (levels && !slider_drag_) {
         if (chosen != slider_target_) {   // a key, ↺, or the release's commit
             slider_from_ = slider_pos_;
             slider_target_ = chosen;
@@ -808,11 +819,11 @@ void AiPanelView::DrawEffortMenu(Compositor* compositor, const AiPanelViewModel&
     }
     const float t = animate_ ? std::clamp(static_cast<float>(now_ms - menu_at_) / static_cast<float>(kMenuMs), 0.0f, 1.0f) : 1.0f;
     const float p = menu_shown_ ? EaseDesign(t) : 1.0f - EaseDesign(t);
-    if (p <= 0.0f || vm.effort_count < 2) return;
+    if (p <= 0.0f || (!fixed && vm.effort_count < 2)) return;
     if (t < 1.0f) decor_ = true;
     Ctx c{compositor, compositor->Dc(), brush_, s};
     // The level under the knob while it is dragged, else the chosen one.
-    const int shown = slider_drag_ ? std::clamp(static_cast<int>(std::lround(slider_pos_)), 0, stops - 1) : chosen;
+    const int shown = levels && slider_drag_ ? std::clamp(static_cast<int>(std::lround(slider_pos_)), 0, stops - 1) : chosen;
     const std::wstring& name = vm.effort_names[static_cast<size_t>(shown)];
     const std::wstring& detail = vm.effort_details[static_cast<size_t>(shown)];
 
@@ -826,14 +837,31 @@ void AiPanelView::DrawEffortMenu(Compositor* compositor, const AiPanelViewModel&
     // The line keeps one height for every level, so dragging never resizes.
     const float text_w = w - 2.0f * pad_x;
     int lines = 0;
-    for (int i = 0; i < stops; ++i) {
+    const int lined = levels ? stops : toggle ? 2 : 0;   // 始终思考's line sits in its box
+    for (int i = 0; i < lined; ++i) {
         const std::wstring& d = vm.effort_details[static_cast<size_t>(i)];
         if (d.empty()) continue;
         const float dh = c.MeasureWrapped(d, formats_.caption, text_w, line_h);
         lines = (std::max)(lines, std::clamp(static_cast<int>(std::ceil(dh / line_h - 0.25f)), 1, 3));
     }
     const float caption_h = lines > 0 ? 4.0f * s + line_h * static_cast<float>(lines) : 0.0f;
-    const float h = 10.0f * s + top_h + gap + slider_h + caption_h + 10.0f * s;
+    // 这个模型始终会思考 / 只能开或关, in the faintest text under the line.
+    float note_h = 0.0f;
+    if (!vm.effort_note.empty()) {
+        const float dh = c.MeasureWrapped(vm.effort_note, formats_.caption, text_w, line_h);
+        note_h = 2.0f * s + line_h * static_cast<float>(std::clamp(static_cast<int>(std::ceil(dh / line_h - 0.25f)), 1, 2));
+    }
+    // The body: the slider, the switch row, or 始终思考's box.
+    const float row_h = 40.0f * s;
+    const float box_pad = 10.0f * s;
+    float body_h = slider_h;
+    if (toggle) body_h = row_h;
+    else if (fixed) {
+        const float dh = c.MeasureWrapped(detail, formats_.caption, text_w - 2.0f * box_pad, line_h);
+        body_h = 2.0f * box_pad +
+                 line_h * static_cast<float>(std::clamp(static_cast<int>(std::ceil(dh / line_h - 0.25f)), 1, 4));
+    }
+    const float h = 10.0f * s + top_h + gap + body_h + caption_h + note_h + 10.0f * s;
     const float anchor = model_button_.right + 6.0f * s;
     const float bottom = model_button_.top - 6.0f * s;
     const float min_left = panel_rect_.left + 8.0f * s;
@@ -860,12 +888,13 @@ void AiPanelView::DrawEffortMenu(Compositor* compositor, const AiPanelViewModel&
     // ↺ on the right; dim (and inert) at the default.
     const float rb = 26.0f * s;
     const D2D1_RECT_F reset = D2D1::RectF(x1 - rb + 6.0f * s, y - 2.0f * s, x1 + 6.0f * s, y - 2.0f * s + rb);
-    const bool can_reset = shown != std::clamp(vm.effort_default, 0, stops - 1);
+    const bool can_reset = !fixed && shown != std::clamp(vm.effort_default, 0, (levels ? stops : 2) - 1);
     const bool reset_hot = can_reset && vm.hover.part == AiPanelPart::MenuReset;
     if (reset_hot) c.Fill(reset, 8.0f * s, vm.pressed.part == AiPanelPart::MenuReset ? Mix(pal.hover, pal.text, 0.06f) : pal.hover);
     const float icon = 16.0f * s;
-    c.Icon(AiIcon::Retry, (reset.left + reset.right - icon) * 0.5f, (reset.top + reset.bottom - icon) * 0.5f, icon,
-           !can_reset ? Alpha(pal.text3, 0.45f) : reset_hot ? pal.text : pal.text2);
+    if (!fixed)   // nothing to go back to
+        c.Icon(AiIcon::Retry, (reset.left + reset.right - icon) * 0.5f, (reset.top + reset.bottom - icon) * 0.5f, icon,
+               !can_reset ? Alpha(pal.text3, 0.45f) : reset_hot ? pal.text : pal.text2);
     // The level, in the accent.
     const float side = rb + 6.0f * s;
     c.Text(name, formats_.num15, D2D1::RectF(x0 + side, y, x1 - side, y + 20.0f * s), pal.accent, center);
@@ -889,28 +918,52 @@ void AiPanelView::DrawEffortMenu(Compositor* compositor, const AiPanelViewModel&
         if (vm.menu_open) menu_link_ = link;
     }
     y += top_h + gap;
-    // The slider.
-    fluent::StepSliderSpec spec;
-    spec.bounds = D2D1::RectF(x0, y, x1, y + slider_h);
-    spec.stops = stops;
-    spec.position = slider_pos_;
-    spec.state.hovered = vm.hover.part == AiPanelPart::MenuSlider;
-    spec.state.pressed = slider_drag_;
-    bar_painter_.DrawStepSlider(spec);
-    y += slider_h;
-    if (lines > 0 && !detail.empty()) {
-        TextOptions wrap = center;
-        wrap.wrap = true;
-        wrap.center_v = false;
-        wrap.line_height = line_h;
-        c.Text(detail, formats_.caption, D2D1::RectF(x0, y + 4.0f * s, x1, y + caption_h), pal.text3, wrap);
+    TextOptions wrap = center;
+    wrap.wrap = true;
+    wrap.center_v = false;
+    wrap.line_height = line_h;
+    // The body.
+    D2D1_RECT_F control = D2D1::RectF(x0, y, x1, y + body_h);
+    const bool body_hot = vm.hover.part == AiPanelPart::MenuSlider;
+    const D2D1_COLOR_F well = Mix(pal.card, pal.text, 0.035f);
+    if (levels) {
+        fluent::StepSliderSpec spec;
+        spec.bounds = control;
+        spec.stops = stops;
+        spec.position = slider_pos_;
+        spec.state.hovered = body_hot;
+        spec.state.pressed = slider_drag_;
+        bar_painter_.DrawStepSlider(spec);
+        control = D2D1::RectF(control.left, control.top - 3.0f * s, control.right, control.bottom + 3.0f * s);
+    } else if (toggle) {
+        // 深度思考 and the shared switch; the whole row flips it.
+        c.Fill(control, 8.0f * s, body_hot ? Mix(well, pal.text, vm.pressed.part == AiPanelPart::MenuSlider ? 0.06f : 0.03f) : well);
+        const float sw = 42.0f * s, sh = 32.0f * s;
+        c.Text(vm.effort_toggle_label, formats_.body13,
+               D2D1::RectF(control.left + 12.0f * s, control.top, control.right - sw - 16.0f * s, control.bottom), pal.text);
+        fluent::ControlState state{};
+        state.checked = chosen > 0;
+        state.hovered = body_hot;
+        const float sy = std::round((control.top + control.bottom - sh) * 0.5f);
+        bar_painter_.DrawSwitch(D2D1::RectF(control.right - 10.0f * s - sw, sy, control.right - 10.0f * s, sy + sh), L"", state);
+        toggle_target_ = chosen > 0 ? 0 : 1;
+    } else {
+        c.Fill(control, 8.0f * s, well);
+        TextOptions boxed = wrap;
+        c.Text(detail, formats_.caption,
+               D2D1::RectF(control.left + box_pad, control.top + box_pad, control.right - box_pad, control.bottom - box_pad),
+               pal.text2, boxed);
     }
+    y += body_h;
+    if (lines > 0 && !detail.empty())
+        c.Text(detail, formats_.caption, D2D1::RectF(x0, y + 4.0f * s, x1, y + caption_h), pal.text3, wrap);
+    y += caption_h;
+    if (note_h > 0.0f) c.Text(vm.effort_note, formats_.caption, D2D1::RectF(x0, y + 2.0f * s, x1, y + note_h), pal.text3, wrap);
     c.dc->PopLayer();
     c.dc->SetTransform(saved);
     if (vm.menu_open) {
         menu_rect_ = box;
-        menu_slider_ = D2D1::RectF(spec.bounds.left, spec.bounds.top - 3.0f * s, spec.bounds.right,
-                                   spec.bounds.bottom + 3.0f * s);
+        if (!fixed) menu_slider_ = control;
         if (can_reset) menu_reset_ = reset;
     }
 }
@@ -1058,6 +1111,7 @@ AiPanelHit AiPanelView::HitTest(float x, float y) const {
         if (In(menu_link_, x, y)) return {AiPanelPart::MenuModel, -1};
         if (In(menu_reset_, x, y)) return {AiPanelPart::MenuReset, -1};
         if (In(menu_slider_, x, y)) {
+            if (slider_stops_ < 2) return {AiPanelPart::MenuSlider, toggle_target_};   // the switch row
             const float at = fluent::StepSliderPositionAt(menu_slider_, slider_stops_, x, bar_scale_);
             return {AiPanelPart::MenuSlider, static_cast<int>(std::lround(at))};
         }

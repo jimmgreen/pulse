@@ -45,7 +45,6 @@ constexpr KnownModel kKnownModels[] = {
     {"deepseek-flash", I::AiAsstModelFlashShort, I::AiAsstModelFlashDetail},
     {"deepseek-v4-pro", I::AiAsstModelProShort, I::AiAsstModelProDetail},
 };
-constexpr int kDefaultEffort = 2;   // 中 (ai_settings.h); on for a switch
 std::string g_model = "deepseek-flash";   // the chosen id (ai.json assistant.model)
 
 const std::vector<std::string>& Listed() { return ai::ListedModels(AiAgentBaseUrl()); }
@@ -62,37 +61,23 @@ const std::string& CurrentModel() {
     if (list.empty() || ChosenIndex(list) >= 0) return g_model;
     return list.front();
 }
-constexpr I kEffortNames[] = {I::AiAsstEffortOff, I::AiAsstEffortLow, I::AiAsstEffortMid, I::AiAsstEffortHigh};
-constexpr I kEffortDetails[] = {I::AiAsstEffortOffDetail, I::AiAsstEffortLowDetail, I::AiAsstEffortMidDetail,
-                                I::AiAsstEffortHighDetail};
+// The seven levels' lines (ai_providers.h ThinkLevel; ThinkLevelLabel names them).
+constexpr I kLevelDetails[] = {I::AiAsstEffortOffDetail,  I::AiAsstEffortMinimalDetail, I::AiAsstEffortLowDetail,
+                               I::AiAsstEffortMidDetail,  I::AiAsstEffortHighDetail,    I::AiAsstEffortXHighDetail,
+                               I::AiAsstEffortMaxDetail};
 
 std::wstring Text(I id) { return l10n::Get(id).c_str(); }
 
-// 思考强度 as the current service offers it: DeepSeek 关/低/中/高, OpenAI
-// 低/中/高 (its reasoning cannot be switched off), a switch (关/开) or none.
-// ai.json keeps one effort 0..3; a segment maps onto it.
-struct EffortChoice {
-    int count = 0;
-    bool toggle = false;
-    int first = 0;   // the effort of the first segment
-};
+std::wstring LevelName(ai::ThinkLevel level) { return ai::ThinkLevelLabel(level); }
 
-EffortChoice EffortChoices() {
-    switch (ai::CurrentProvider().think) {
-        case ai::ThinkStyle::DeepSeek: return {4, false, 0};
-        case ai::ThinkStyle::Effort3: return {3, false, 1};
-        case ai::ThinkStyle::EnableThinking:
-        case ai::ThinkStyle::ThinkingType: return {2, true, 0};
-        default: return {};
-    }
+// 思考强度 is the model's (ai_providers.h ModelThinking): its own levels, a
+// switch, always on, or none. ai.json keeps the level the user prefers and
+// the slider shows the model's nearest one.
+ai::ThinkLevel Preferred(const AiAssistantState& a) { return static_cast<ai::ThinkLevel>(std::clamp(a.think, 0, 6)); }
+ai::ThinkSpec CurrentThinking() { return ai::ModelThinking(ai::CurrentProvider(), CurrentModel()); }
+int StopOf(const ai::ThinkSpec& t, ai::ThinkLevel preferred) {
+    return (std::max)(t.IndexOf(ai::SnapThinking(t, preferred)), 0);
 }
-
-int SegmentOf(const EffortChoice& c, int effort) {
-    if (c.toggle) return effort > 0 ? 1 : 0;
-    return std::clamp(effort - c.first, 0, (std::max)(c.count - 1, 0));
-}
-
-int EffortOf(const EffortChoice& c, int segment) { return c.toggle ? (segment > 0 ? 2 : 0) : segment + c.first; }
 
 std::wstring Fill(std::wstring text, std::wstring_view key, const std::wstring& value) {
     if (const size_t at = text.find(key); at != std::wstring::npos) text.replace(at, key.size(), value);
@@ -113,7 +98,7 @@ void LoadPrefs(AiAssistantState& a) {
     a.prefs_loaded = true;
     const ai::Settings settings = ai::LoadSettings();
     a.floating = settings.assistant.floating;
-    a.effort = std::clamp(settings.assistant.effort, 0, 3);
+    a.think = std::clamp(settings.assistant.thinking, 0, 6);
     a.model = 0;
     if (!settings.assistant.model.empty()) g_model = settings.assistant.model;
 }
@@ -124,7 +109,7 @@ void SavePrefs(const AiAssistantState& a) {
     if (malformed) return;   // never overwrite a file we could not read
     settings.assistant.floating = a.floating;
     settings.assistant.model = g_model;
-    settings.assistant.effort = a.effort;
+    settings.assistant.thinking = a.think;
     (void)ai::SaveSettings(settings);
 }
 
@@ -470,14 +455,13 @@ void PickModel(AppState& s, const D2D1_RECT_F& box) {
     Redraw(s);
 }
 
-// Sets 思考强度 to a stop of the current service's slider.
+// Sets 思考强度 to a stop of the model's slider (or switch). The stop already
+// shown keeps the preference, which may be a level this model lacks.
 void SetEffortStop(AppState& s, int stop) {
     AiAssistantState& a = s.aiAssistant;
-    const EffortChoice choice = EffortChoices();
-    if (choice.count == 0) return;
-    const int effort = EffortOf(choice, std::clamp(stop, 0, choice.count - 1));
-    if (effort == a.effort) return;
-    a.effort = effort;
+    const ai::ThinkSpec t = CurrentThinking();
+    if (!t.Adjustable() || stop < 0 || stop >= t.count || stop == StopOf(t, Preferred(a))) return;
+    a.think = static_cast<int>(t.levels[stop]);
     SavePrefs(a);
 }
 
@@ -573,13 +557,13 @@ void Activate(AppState& s, const ui::AiPanelHit& hit) {
         break;
     }
     case P::ModelButton:
-        // 思考强度 when the service has it (the slider and 「model ›」), else
-        // the model list right away.
+        // 思考强度 when the model has it (the slider, switch or 始终思考, and
+        // 「model ›」), else the model list right away.
         if (a.menu_open) CloseMenu(s);
         else {
             AiVoiceCloseMenu(s);
             if (AiAgentConnected()) ai::RefreshListedModels(s.hwnd, AiAgentBaseUrl());
-            if (EffortChoices().count > 0) {
+            if (CurrentThinking().kind != ai::ThinkKind::None) {
                 a.menu_open = true;
             } else {
                 PickModel(s, s.renderer.AiPanel().ModelButtonRect());
@@ -591,8 +575,11 @@ void Activate(AppState& s, const ui::AiPanelHit& hit) {
         PickModel(s, s.renderer.AiPanel().ModelLinkRect());
         break;
     case P::MenuReset:
-        a.effort = kDefaultEffort;
+        a.think = static_cast<int>(CurrentThinking().fallback);
         SavePrefs(a);
+        break;
+    case P::MenuSlider:   // the switch of a model that is only on or off
+        SetEffortStop(s, hit.index);
         break;
     case P::GoSettings:
         OpenServiceSettings(s);
@@ -857,25 +844,43 @@ void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm) {
     p.placeholder = Text(I::AiAsstPlaceholder);
     p.add_files = Text(I::AiAsstAddFiles);
     p.model_label = json::Wide(CurrentModel());
-    const EffortChoice choice = EffortChoices();
-    p.effort_count = choice.count;
-    p.effort = SegmentOf(choice, std::clamp(a.effort, 0, 3));
-    if (choice.count == 0) p.effort_label.clear();
-    else if (choice.toggle) p.effort_label = a.effort > 0 ? L" \u00B7 " + Text(I::AiAsstThinkShort) : std::wstring();
-    else p.effort_label = a.effort == 0 && choice.first == 0 ? std::wstring()
-                                                              : L" \u00B7 " + Text(kEffortNames[EffortOf(choice, p.effort)]);
+    const ai::ThinkSpec think = CurrentThinking();
+    const ai::ThinkLevel level = ai::SnapThinking(think, Preferred(a));
+    p.effort_mode = think.kind == ai::ThinkKind::Fixed    ? ui::AiEffortMode::Fixed
+                    : think.kind == ai::ThinkKind::Toggle ? ui::AiEffortMode::Toggle
+                                                          : ui::AiEffortMode::Levels;
+    p.effort_count = think.Adjustable() ? think.count : 0;
+    p.effort = StopOf(think, Preferred(a));
+    p.effort_default = (std::max)(think.IndexOf(think.fallback), 0);
+    p.effort_label.clear();
+    if (think.kind == ai::ThinkKind::Fixed) p.effort_label = L" \u00B7 " + Text(I::AiAsstThinkAlways);
+    else if (think.kind == ai::ThinkKind::Toggle && level != ai::ThinkLevel::Off)
+        p.effort_label = L" \u00B7 " + Text(I::AiAsstThinkShort);
+    else if (think.kind == ai::ThinkKind::Levels && level != ai::ThinkLevel::Off)
+        p.effort_label = L" \u00B7 " + LevelName(level);
     p.send = chat.busy ? ui::AiSendState::Busy : p.composer_empty ? ui::AiSendState::Dim : ui::AiSendState::Ready;
 
-    p.menu_open = a.menu_open && choice.count > 0;
-    p.effort_default = SegmentOf(choice, kDefaultEffort);
-    if (choice.toggle) {
-        p.effort_names = {Text(I::AiAsstEffortOff), Text(I::AsstThinkToggle), L"", L""};
-        p.effort_details = {Text(I::AiAsstEffortOffDetail), Text(I::AiAsstThinkOnDetail), L"", L""};
-    } else {
-        for (int i = 0; i < 4; ++i) {
-            const bool has = i < choice.count;
-            p.effort_names[static_cast<size_t>(i)] = has ? Text(kEffortNames[EffortOf(choice, i)]) : L"";
-            p.effort_details[static_cast<size_t>(i)] = has ? Text(kEffortDetails[EffortOf(choice, i)]) : L"";
+    p.menu_open = a.menu_open && think.kind != ai::ThinkKind::None;
+    p.effort_names = {};
+    p.effort_details = {};
+    p.effort_note.clear();
+    if (think.kind == ai::ThinkKind::Fixed) {
+        p.effort_names[0] = Text(I::AiAsstThinkAlways);
+        p.effort_details[0] = Text(I::AiAsstThinkFixedDetail);
+    } else if (think.Adjustable()) {
+        for (int i = 0; i < think.count; ++i) {
+            const auto at = static_cast<size_t>(i);
+            const int lv = static_cast<int>(think.levels[i]);
+            const bool toggle = think.kind == ai::ThinkKind::Toggle;
+            p.effort_names[at] = toggle ? Text(i ? I::AiAsstEffortOn : I::AiAsstEffortOff) : LevelName(think.levels[i]);
+            p.effort_details[at] = Text(toggle ? (i ? I::AiAsstThinkOnDetail : I::AiAsstEffortOffDetail) : kLevelDetails[lv]);
+            if (i == p.effort_default) p.effort_details[at] = Fill(Text(I::AiAsstEffortDefault), L"{detail}", p.effort_details[at]);
+        }
+        if (think.kind == ai::ThinkKind::Toggle) {
+            p.effort_toggle_label = Text(I::AsstThinkToggle);
+            p.effort_note = Text(I::AiAsstThinkToggleNote);
+        } else if (!think.CanOff()) {
+            p.effort_note = Text(I::AiAsstThinkAlwaysNote);
         }
     }
     // Connected once a service key is stored (ai_model_key.h).
@@ -887,7 +892,7 @@ void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm) {
         p.setup_intro = Text(I::AiAsstSetupIntro);
         p.setup_more = Text(I::AiAsstSetupMore);
         p.setup_go = Text(I::AiAsstSetupGo);
-        p.setup_marks = {"deepseek", "qwen", "kimi", "zhipu", "doubao", "silicon", "openai", "openrouter", "ollama"};
+        p.setup_marks = {"deepseek", "qwen", "kimi", "zhipu", "doubao", "mimo", "silicon", "openai", "ollama"};
         p.suggestions.clear();
     }
     AiVoiceFill(s, vm);
@@ -902,7 +907,8 @@ void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm) {
         if (AiVoiceHasTip(part)) {
             if (AiVoiceTip(s, part, voice_tip)) vm.tooltip_text = std::move(voice_tip);
         } else if (part == P::MenuSlider) {
-            if (a.hover.index >= 0 && a.hover.index < 4) vm.tooltip_text = p.effort_names[static_cast<size_t>(a.hover.index)];
+            if (p.effort_mode == ui::AiEffortMode::Levels && a.hover.index >= 0 && a.hover.index < p.effort_count)
+                vm.tooltip_text = p.effort_names[static_cast<size_t>(a.hover.index)];
         } else vm.tooltip_text = Text(part == P::MenuReset ? I::RestoreDefaults
                                : part == P::NewChat ? I::AiAsstNewChat
                                : part == P::Close ? I::AiAsstCollapse
@@ -1141,6 +1147,15 @@ bool AiAssistantMouseOther(AppState& s, int x, int y) {
 
 std::wstring AiAssistantModelName(const AppState&) { return json::Wide(CurrentModel()); }
 
+bool AiAssistantThinks(const AppState& s) { return ai::ThinksAt(CurrentThinking(), Preferred(s.aiAssistant)); }
+
+std::wstring AiAssistantThinkName(const AppState& s) {
+    const ai::ThinkSpec think = CurrentThinking();
+    if (think.kind == ai::ThinkKind::Fixed) return Text(I::AiAsstThinkAuto);
+    if (think.kind == ai::ThinkKind::Toggle) return Text(I::AiAsstEffortOn);
+    return LevelName(ai::SnapThinking(think, Preferred(s.aiAssistant)));
+}
+
 bool AiAssistantWheel(AppState& s, int x, int y, int delta) {
     if (!AiAssistantMouseOther(s, x, y)) return false;
     if (s.renderer.AiPanel().PeekHitTest(static_cast<float>(x), static_cast<float>(y)).part != ui::AiPanelPart::None)
@@ -1173,18 +1188,18 @@ bool AiAssistantSetCursor(AppState& s, int x, int y) {
 bool AiAssistantMenuKey(AppState& s, WPARAM vk) {
     AiAssistantState& a = s.aiAssistant;
     if (!a.open || !a.menu_open) return false;
-    const EffortChoice choice = EffortChoices();
-    if (choice.count == 0) return false;
-    const int now = SegmentOf(choice, std::clamp(a.effort, 0, 3));
+    const ai::ThinkSpec think = CurrentThinking();
+    if (!think.Adjustable()) return false;
+    const int now = StopOf(think, Preferred(a));
     int stop = -1;
     if (vk == VK_LEFT || vk == VK_DOWN) stop = now - 1;
     else if (vk == VK_RIGHT || vk == VK_UP) stop = now + 1;
     else if (vk == VK_HOME) stop = 0;
-    else if (vk == VK_END) stop = choice.count - 1;
+    else if (vk == VK_END) stop = think.count - 1;
     else if (vk >= '1' && vk <= '9') stop = static_cast<int>(vk - '1');
     else if (vk >= VK_NUMPAD1 && vk <= VK_NUMPAD9) stop = static_cast<int>(vk - VK_NUMPAD1);
     else return false;
-    if (stop >= 0 && stop < choice.count) SetEffortStop(s, stop);
+    if (stop >= 0 && stop < think.count) SetEffortStop(s, stop);
     Redraw(s);
     return true;
 }

@@ -22,7 +22,7 @@ struct AiAssistantState {
     bool floating = false;
     bool prefs_loaded = false;
     int model = 0;                 // index into the model list
-    int effort = 2;                // 0 off .. 3 high
+    int think = 4;                 // the preferred level, 0 off .. 6 max (ai_providers.h ThinkLevel)
     bool menu_open = false;
     uint64_t menu_closed_at = 0;   // the menu's fade-out still covers the input
     // The context chip was removed for this folder.

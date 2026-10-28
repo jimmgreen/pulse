@@ -690,6 +690,8 @@ void Connect(AppState& s, AsstPageUi& u) {
         Focus(u, AsstField::Key);
         return;
     }
+    // 小米 MiMo's Token Plan keys (tp-) connect to their own host.
+    if (!u.url_editing) endpoint.base_url = ai::AddressForKey(p, endpoint.base_url, endpoint.key);
     u.connecting = true;
     u.error_title.clear();
     u.error_sub.clear();
@@ -771,9 +773,16 @@ void CancelEditing(AppState& s, AsstPageUi& u) {
     HideEdit(s, u, AsstField::Model);
 }
 
-void SetEffort(AppState& s, int effort) {
-    effort = std::clamp(effort, 0, 3);
-    if (!UpdateAssistant([&](ai::AssistantPrefs& a) { a.effort = effort; })) return;
+// 思考 as the default model takes it, and the level the user prefers.
+ai::ThinkSpec DefaultModelThinking(const ai::Settings& settings) {
+    return ai::ModelThinking(ai::CurrentProvider(), settings.assistant.model);
+}
+ai::ThinkLevel PreferredThinking(const ai::Settings& settings) {
+    return static_cast<ai::ThinkLevel>(std::clamp(settings.assistant.thinking, 0, 6));
+}
+
+void SetThinking(AppState& s, ai::ThinkLevel level) {
+    if (!UpdateAssistant([&](ai::AssistantPrefs& a) { a.thinking = static_cast<int>(level); })) return;
     AiAssistantPrefsChanged(s);
 }
 
@@ -1259,13 +1268,23 @@ void Refresh(ui::AssistantPageView& v) {
         v.tiles.push_back(std::move(tile));
     }
     v.model = json::Wide(settings.assistant.model);
-    v.effort = std::clamp(settings.assistant.effort, 0, 3);
-    switch (current.think) {
-        case ai::ThinkStyle::DeepSeek: v.think = ui::AsstThink::Levels4; break;
-        case ai::ThinkStyle::Effort3: v.think = ui::AsstThink::Levels3; break;
-        case ai::ThinkStyle::EnableThinking:
-        case ai::ThinkStyle::ThinkingType: v.think = ui::AsstThink::Toggle; break;
-        default: v.think = ui::AsstThink::None; break;
+    // 思考强度 follows the default model: its levels, a switch, 始终思考, or
+    // nothing (the foot says why).
+    const ai::ThinkSpec think = ai::ModelThinking(current, settings.assistant.model);
+    const ai::ThinkLevel level = ai::SnapThinking(think, PreferredThinking(settings));
+    switch (think.kind) {
+        case ai::ThinkKind::Levels:
+            v.think = ui::AsstThink::Levels;
+            for (int i = 0; i < think.count; ++i) v.think_names.push_back(ai::ThinkLevelLabel(think.levels[i]));
+            v.think_chosen = (std::max)(think.IndexOf(level), 0);
+            v.think_always = !think.CanOff();
+            break;
+        case ai::ThinkKind::Toggle:
+            v.think = ui::AsstThink::Toggle;
+            v.think_chosen = level != ai::ThinkLevel::Off ? 1 : 0;
+            break;
+        case ai::ThinkKind::Fixed: v.think = ui::AsstThink::Fixed; break;
+        case ai::ThinkKind::None: v.think = ui::AsstThink::None; v.think_none_model = v.model; break;
     }
     std::wstring key;
     if (current.needs_key && ai::LoadServiceKey(current.id, key) && !key.empty()) v.key_mask = ai::MaskModelKey(key);
@@ -1423,7 +1442,13 @@ bool AssistantThinkDragEnd(AppState& s) {
     if (!u || u->think_drag < 0.0f) return false;
     const int stop = static_cast<int>(std::lround(u->think_drag));
     u->think_drag = -1.0f;
-    SetEffort(s, ai::CurrentProvider().think == ai::ThinkStyle::Effort3 ? stop + 1 : stop);
+    // The stop already shown keeps the preference (it may be a level this
+    // model lacks: 超高 shows as 高 on 豆包 and comes back on GPT-5.5).
+    const ai::Settings settings = ai::LoadSettings();
+    const ai::ThinkSpec think = DefaultModelThinking(settings);
+    if (think.kind == ai::ThinkKind::Levels && stop >= 0 && stop < think.count &&
+        stop != think.IndexOf(ai::SnapThinking(think, PreferredThinking(settings))))
+        SetThinking(s, think.levels[stop]);
     Changed();
     Redraw(s);
     return true;
@@ -1443,7 +1468,7 @@ void AssistantSettingsClick(AppState& s, int target) {
         Redraw(s);
         return;
     }
-    if (target >= ui::kAsstThinkBase && target < ui::kAsstThinkBase + 4) {
+    if (target >= ui::kAsstThinkBase && target < ui::kAsstThinkBase + ai::kThinkLevels) {
         // 思考强度: the knob jumps to the stop pressed and then follows the
         // pointer; the level is kept on release (AssistantThinkDragEnd), like
         // the other settings sliders.
@@ -1508,8 +1533,9 @@ void AssistantSettingsClick(AppState& s, int target) {
     case ui::kAsstModelSave: SaveModel(s, u); break;
     case ui::kAsstModel: ModelMenu(s, u); break;
     case ui::kAsstThinkToggle: {
-        const int effort = std::clamp(ai::LoadSettings().assistant.effort, 0, 3);
-        SetEffort(s, effort > 0 ? 0 : 2);
+        const ai::Settings settings = ai::LoadSettings();
+        const bool on = ai::ThinksAt(DefaultModelThinking(settings), PreferredThinking(settings));
+        SetThinking(s, on ? ai::ThinkLevel::Off : ai::ThinkLevel::High);
         break;
     }
     case ui::kAsstRekey:

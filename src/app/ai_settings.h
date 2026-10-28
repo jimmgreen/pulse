@@ -64,7 +64,11 @@ struct AssistantPrefs {
     bool floating = false;                    // "dock": "docked" | "floating"
     std::string service;                      // ai_providers.h id; empty: deepseek
     std::string model = "deepseek-flash";
-    int effort = 2;                           // 0 off, 1 low, 2 medium, 3 high (ai_providers.h ThinkStyle)
+    // "thinking": the level the user prefers, 0 off … 6 max (ai_providers.h
+    // ThinkLevel); each model uses the nearest one it has. "effort" (0..3,
+    // what older versions read) is still written alongside, and read when
+    // "thinking" is missing.
+    int thinking = 4;                         // high
     std::string base_url;                     // empty: the service's own address
     std::vector<std::pair<std::string, ServicePrefs>> services;   // "services": {id: {...}}, the others
     VoicePrefs voice;                         // "voice": {...}

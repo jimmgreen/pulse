@@ -17,7 +17,7 @@ int ProviderLogoResource(std::string_view id) {
         {"doubao", IDR_PROVIDER_DOUBAO_SVG},     {"silicon", IDR_PROVIDER_SILICON_SVG},
         {"openai", IDR_PROVIDER_OPENAI_SVG},     {"openrouter", IDR_PROVIDER_OPENROUTER_SVG},
         {"ollama", IDR_PROVIDER_OLLAMA_SVG},     {"gemini", IDR_PROVIDER_GEMINI_SVG},
-        {"claude", IDR_PROVIDER_CLAUDE_SVG},
+        {"claude", IDR_PROVIDER_CLAUDE_SVG},     {"mimo", IDR_PROVIDER_MIMO_SVG},
     };
     for (const Entry& e : kLogos)
         if (id == e.id) return e.resource;
@@ -40,7 +40,14 @@ std::wstring FitLine(Compositor* compositor, IDWriteTextFormat* format, const st
 void MainRenderer::DrawProviderMark(std::string_view id, std::wstring_view name, const D2D1_RECT_F& r,
                                     const Theme& theme) {
     const bool dark = theme.bg.r + theme.bg.g + theme.bg.b < 1.5f;
-    if (const int resource = ProviderLogoResource(id); resource && DrawProviderLogo(resource, dark, r)) return;
+    // 小米 MiMo's mark is a two-line wordmark: a little wider than the square ones.
+    D2D1_RECT_F logo = r;
+    if (id == "mimo") {
+        const float grow = (r.right - r.left) * 0.15f;
+        logo.left -= grow;
+        logo.right += grow;
+    }
+    if (const int resource = ProviderLogoResource(id); resource && DrawProviderLogo(resource, dark, logo)) return;
     const float side = (std::min)(r.right - r.left, r.bottom - r.top);
     const D2D1_RECT_F box = D2D1::RectF((r.left + r.right - side) * 0.5f, (r.top + r.bottom - side) * 0.5f,
                                         (r.left + r.right + side) * 0.5f, (r.top + r.bottom + side) * 0.5f);
@@ -324,9 +331,13 @@ void MainRenderer::DrawSettingsAssistant(const WindowViewModel& vm, const D2D1_R
         } else if (v.think == AsstThink::Toggle) {
             head(o.think_row, L"\xEA80", asst_text::ThinkTitle(v), asst_text::ThinkCaption(v), o.think_toggle.left);
             fluent::ControlState state{};
-            state.checked = v.effort > 0;
+            state.checked = v.think_chosen > 0;
             state.hovered = hovered(kAsstThinkToggle);
             painter_.DrawSwitch(o.think_toggle, L"", state);
+            divider_below(o.think_row);
+        } else if (v.think == AsstThink::Fixed) {
+            head(o.think_row, L"\xEA80", asst_text::ThinkTitle(v), asst_text::ThinkCaption(v), o.think_value.left);
+            text(asst_text::T(I::AiAsstThinkAlways), o.think_value);
             divider_below(o.think_row);
         }
         // API Key.
@@ -371,7 +382,7 @@ void MainRenderer::DrawSettingsAssistant(const WindowViewModel& vm, const D2D1_R
     }
     // The note under the card, as on every other page.
     if (o.model_foot.bottom > o.model_foot.top)
-        painter_.DrawWrappedCaption(asst_text::T(I::AsstFoot), D2D1::Point2F(o.model_foot.left, o.model_foot.top),
+        painter_.DrawWrappedCaption(asst_text::Foot(v), D2D1::Point2F(o.model_foot.left, o.model_foot.top),
                                     o.model_foot.right - o.model_foot.left, theme.text_secondary);
 
     // 语音输入.
