@@ -1765,10 +1765,16 @@ void ProcessPendingResults(AppState& s) {
         batch = std::move(s.results);
         s.results = {};
     }
+    if (batch.empty()) return;
     while (!batch.empty()) {
         ApplyWorkerResult(s, batch.front());
         batch.pop();
     }
+    // A new snapshot detaches the expanded-folder rows until the tree is
+    // rebuilt; a scroll clamp before the next paint would measure the list
+    // without them and pull a view scrolled into expanded children back up
+    // (a share without a working watch is re-listed every second).
+    app::ForEachWindowSharingCore(s, [](AppState& window) { SyncDetailsTrees(window); });
 }
 
 void CaptureListingSelection(app::Tab& tab) {
