@@ -54,6 +54,8 @@ struct AsstPageUi {
     int line_px = 0;
     HBRUSH brush = nullptr;
     COLORREF brush_color = CLR_INVALID;
+    COLORREF painted_back = CLR_INVALID;  // the EDITs' colours when last invalidated
+    COLORREF painted_fore = CLR_INVALID;
     // 连接.
     struct Job {
         uint64_t gen = 0;
@@ -1507,6 +1509,19 @@ void AssistantSettingsLayout(AppState& s) {
     AsstPageUi* u = Ui(s);
     if (!u) return;
     for (int i = 0; i < ui::kAsstFields; ++i) Place(s, *u, static_cast<AsstField>(i));
+    // A theme switch changes the colours under the hosted EDITs; repaint them
+    // so a field that stays open doesn't keep the old background.
+    D2D1_COLOR_F back{}, fore{}, hint{};
+    s.renderer.SettingsAssistantEditColors(back, fore, hint);
+    const COLORREF back_ref = ToColorRef(back);
+    const COLORREF fore_ref = ToColorRef(fore);
+    if (back_ref != u->painted_back || fore_ref != u->painted_fore) {
+        u->painted_back = back_ref;
+        u->painted_fore = fore_ref;
+        for (HWND edit : u->edits) {
+            if (edit) InvalidateRect(edit, nullptr, TRUE);
+        }
+    }
 }
 
 HBRUSH AssistantSettingsCtlColor(AppState& s, HDC hdc, HWND edit) {
