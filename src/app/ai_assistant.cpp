@@ -704,6 +704,7 @@ void AiAssistantClose(AppState& s, bool animate) {
     a.pressed = {};
     if (a.captured && GetCapture() == s.hwnd) ReleaseCapture();
     a.captured = false;
+    s.renderer.AiPanel().EndScrollDrag();
     HideEdit(s);
     ApplyPanel(s, animate);
     // Closed on a finished turn: the bubble over the chip says what happened.
@@ -958,6 +959,17 @@ void AiAssistantLayout(AppState& s) {
 
 bool AiAssistantMouseMove(AppState& s, int x, int y) {
     AiAssistantState& a = s.aiAssistant;
+    ui::AiPanelView& view = s.renderer.AiPanel();
+    if (view.ScrollDragging() != 0) {
+        if ((GetKeyState(VK_LBUTTON) & 0x8000) == 0) {   // the release went elsewhere
+            view.EndScrollDrag();
+            a.captured = false;
+            if (GetCapture() == s.hwnd) ReleaseCapture();
+        } else if (view.DragScroll(static_cast<float>(y))) {
+            Redraw(s);
+        }
+        return true;
+    }
     if (!Reachable(s) && !a.captured) {
         if (a.hover.part != ui::AiPanelPart::None) {
             a.hover = {};
@@ -965,6 +977,7 @@ bool AiAssistantMouseMove(AppState& s, int x, int y) {
         }
         return false;
     }
+    if (view.SetScrollHot(static_cast<float>(x), static_cast<float>(y))) Redraw(s);
     const ui::AiPanelHit hit = HitAt(s, x, y);
     if (!(hit == a.hover)) {
         a.hover = hit;
@@ -974,7 +987,7 @@ bool AiAssistantMouseMove(AppState& s, int x, int y) {
         Redraw(s);
     }
     a.hover_point = POINT{x, y};
-    if (hit.part == ui::AiPanelPart::None && !a.captured) return false;
+    if (hit.part == ui::AiPanelPart::None && !a.captured && !view.ScrollHot()) return false;
     TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, s.hwnd, 0};
     TrackMouseEvent(&tme);
     return true;
@@ -983,6 +996,16 @@ bool AiAssistantMouseMove(AppState& s, int x, int y) {
 bool AiAssistantMouseDown(AppState& s, int x, int y) {
     AiAssistantState& a = s.aiAssistant;
     if (!Reachable(s)) return false;
+    ui::AiPanelView& view = s.renderer.AiPanel();
+    if (a.open && view.BeginScrollDrag(static_cast<float>(x), static_cast<float>(y))) {
+        // The conversation's bar is outside the menus: they fold like for any click there.
+        if (view.ScrollDragging() == 1 && (a.menu_open || AiVoiceMenuOpen(s))) CloseMenu(s);
+        a.pressed = {};
+        SetCapture(s.hwnd);
+        a.captured = true;
+        Redraw(s);
+        return true;
+    }
     const ui::AiPanelHit hit = HitAt(s, x, y);
     if (hit.part == ui::AiPanelPart::None) {
         // Outside: the menus fold away and the click goes on to Pulse.
@@ -1002,6 +1025,15 @@ bool AiAssistantMouseDown(AppState& s, int x, int y) {
 
 bool AiAssistantMouseUp(AppState& s, int x, int y) {
     AiAssistantState& a = s.aiAssistant;
+    ui::AiPanelView& view = s.renderer.AiPanel();
+    if (view.ScrollDragging() != 0) {
+        view.EndScrollDrag();
+        a.captured = false;
+        if (GetCapture() == s.hwnd) ReleaseCapture();
+        view.SetScrollHot(static_cast<float>(x), static_cast<float>(y));
+        Redraw(s);
+        return true;
+    }
     if (!a.captured) return false;
     a.captured = false;
     if (GetCapture() == s.hwnd) ReleaseCapture();
@@ -1041,6 +1073,7 @@ bool AiAssistantWheel(AppState& s, int x, int y, int delta) {
 
 void AiAssistantMouseLeave(AppState& s) {
     AiAssistantState& a = s.aiAssistant;
+    if (s.renderer.AiPanel().SetScrollHot(-1.0e6f, -1.0e6f)) Redraw(s);
     if (a.hover.part == ui::AiPanelPart::None || a.captured) return;
     a.hover = {};
     Redraw(s);

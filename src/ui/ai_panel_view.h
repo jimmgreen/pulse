@@ -672,6 +672,15 @@ public:
     void ScrollBy(float dy);
     void ScrollToEnd();
     bool Following() const noexcept { return follow_; }
+    // The overlay scrollbars (conversation or welcome, and the model list)
+    // work like Pulse's other scrollbars: drag the thumb, or press the track
+    // to jump there and keep dragging. Hover widens the bar.
+    bool BeginScrollDrag(float x, float y);   // true when a bar took the press
+    bool DragScroll(float y);                 // true when the view moved
+    void EndScrollDrag() noexcept { scroll_drag_ = 0; }
+    int ScrollDragging() const noexcept { return scroll_drag_; }   // 1 conversation, 2 model list
+    bool SetScrollHot(float x, float y);      // true when the hover changed
+    bool ScrollHot() const noexcept { return scroll_hot_ != 0; }
 
     // Last drawn geometry.
     AiPanelHit HitTest(float x, float y) const;
@@ -825,6 +834,22 @@ private:
     D2D1_RECT_F menu_manage_{};
     // The model list, when it is longer than its box.
     float menu_scroll_ = 0.0f, menu_scroll_max_ = 0.0f;
+    // Overlay scrollbars of the last frame: [0] conversation, [1] model list.
+    struct OverlayBar {
+        bool on = false;
+        D2D1_RECT_F zone{};          // where a press grabs it
+        float track_top = 0.0f, travel = 1.0f, thumb_top = 0.0f, thumb_h = 0.0f, max = 0.0f;
+    };
+    std::array<OverlayBar, 2> bars_{};
+    int scroll_drag_ = 0;            // 1 conversation, 2 model list
+    int scroll_hot_ = 0;
+    float drag_grab_ = 0.0f;         // pointer offset inside the thumb
+    int BarAt(float x, float y) const;
+    // Records bar `which` and returns its thumb (rest width `rest_w`, wider
+    // while hovered or dragged), right edge at `edge`.
+    D2D1_RECT_F PlaceBar(int which, float edge, float top, float height, float content, float view,
+                         float scroll, float min_thumb, float rest_w, float s);
+    bool BarHot(int which) const noexcept { return scroll_drag_ == which + 1 || scroll_hot_ == which + 1; }
     D2D1_RECT_F go_settings_{};
     std::function<void(std::string_view, const D2D1_RECT_F&)> mark_painter_;
     D2D1_RECT_F conversation_rect_{};

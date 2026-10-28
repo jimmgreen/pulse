@@ -260,6 +260,8 @@ void AiPanelView::Draw(Compositor* compositor, const AiPanelViewModel& vm, const
     drawn_ = false;
     input_placed_ = false;
     decor_ = false;
+    bars_[0].on = false;
+    bars_[1].on = false;
     conv_anim_ = false;
     conv_decor_ = false;
     ID2D1DeviceContext* dc = compositor ? compositor->Dc() : nullptr;
@@ -575,11 +577,9 @@ void AiPanelView::DrawEmptyState(Compositor* compositor, const AiPanelViewModel&
     const float max_scroll = (std::max)(0.0f, content_h_ - view_h_);
     if (scroll_ > max_scroll) scroll_ = max_scroll;
     if (max_scroll > 0.5f) {
-        const float track = view_h_ - 8.0f * s;
-        const float thumb = (std::max)(28.0f * s, track * view_h_ / content_h_);
-        const float ty = area.top + 4.0f * s + (track - thumb) * (scroll_ / max_scroll);
-        c.Fill(D2D1::RectF(area.right - 7.0f * s, ty, area.right - 3.0f * s, ty + thumb), 2.0f * s,
-               Alpha(pal.text3, 0.35f));
+        const D2D1_RECT_F bar = PlaceBar(0, area.right - 3.0f * s, area.top, view_h_, content_h_, view_h_,
+                                         scroll_, 28.0f * s, 4.0f * s, s);
+        c.Fill(bar, (bar.right - bar.left) * 0.5f, Alpha(pal.text3, BarHot(0) ? 0.6f : 0.35f));
     }
 }
 
@@ -902,10 +902,9 @@ void AiPanelView::DrawModelMenu(Compositor* compositor, const AiPanelViewModel& 
         if (menu_scroll_ < menu_scroll_max_ - 0.5f) fade(list_box.bottom, list_box.bottom - 10.0f * s);
         c.dc->PopAxisAlignedClip();
         // A thin thumb at the right edge, like an overlay scrollbar.
-        const float track = list_box_h - 8.0f * s;
-        const float thumb = (std::max)(24.0f * s, track * list_box_h / list_h);
-        const float top = list_box.top + 4.0f * s + (track - thumb) * (menu_scroll_ / menu_scroll_max_);
-        c.Fill(D2D1::RectF(x1 - 5.0f * s, top, x1 - 2.0f * s, top + thumb), 1.5f * s, pal.line);
+        const D2D1_RECT_F bar = PlaceBar(1, x1 - 2.0f * s, list_box.top, list_box_h, list_h, list_box_h,
+                                         menu_scroll_, 24.0f * s, 3.0f * s, s);
+        c.Fill(bar, (bar.right - bar.left) * 0.5f, BarHot(1) ? Alpha(pal.text3, 0.6f) : pal.line);
     }
     y += list_box_h;
     if (segments > 0) {
@@ -1105,6 +1104,72 @@ AiPanelHit AiPanelView::HitTest(float x, float y) const {
     if (In(send_button_, x, y)) return {AiPanelPart::Send, -1};
     if (In(input_rect_, x, y)) return {AiPanelPart::Input, -1};
     return {AiPanelPart::Panel, -1};
+}
+
+D2D1_RECT_F AiPanelView::PlaceBar(int which, float edge, float top, float height, float content, float view,
+                                  float scroll, float min_thumb, float rest_w, float s) {
+    OverlayBar& b = bars_[static_cast<size_t>(which)];
+    const float track = (std::max)(1.0f, height - 8.0f * s);
+    const float thumb = (std::min)(track, (std::max)(min_thumb, track * view / (std::max)(content, 1.0f)));
+    b.on = true;
+    b.max = (std::max)(0.0f, content - view);
+    b.track_top = top + 4.0f * s;
+    b.travel = (std::max)(1.0f, track - thumb);
+    b.thumb_h = thumb;
+    b.thumb_top = b.track_top + (track - thumb) * (b.max > 0.0f ? std::clamp(scroll / b.max, 0.0f, 1.0f) : 0.0f);
+    // A finger-wide grab zone along the edge; the thumb itself stays thin.
+    b.zone = D2D1::RectF(edge - 12.0f * s, top, edge + 3.0f * s, top + height);
+    const float w = BarHot(which) ? 8.0f * s : rest_w;
+    return D2D1::RectF(edge - w, b.thumb_top, edge, b.thumb_top + thumb);
+}
+
+int AiPanelView::BarAt(float x, float y) const {
+    auto in = [&](const D2D1_RECT_F& r) { return x >= r.left && x < r.right && y >= r.top && y < r.bottom; };
+    const OverlayBar& list = bars_[1];
+    if (list.on && list.max > 0.5f && in(list.zone)) return 2;
+    if (in(menu_rect_) || in(mic_menu_)) return 0;   // a menu covers the conversation there
+    const OverlayBar& conv = bars_[0];
+    if (conv.on && conv.max > 0.5f && in(conv.zone)) return 1;
+    return 0;
+}
+
+bool AiPanelView::BeginScrollDrag(float x, float y) {
+    const int which = BarAt(x, y);
+    if (which == 0) return false;
+    const OverlayBar& b = bars_[static_cast<size_t>(which - 1)];
+    const bool on_thumb = y >= b.thumb_top && y < b.thumb_top + b.thumb_h;
+    drag_grab_ = on_thumb ? y - b.thumb_top : b.thumb_h * 0.5f;   // the track jumps the thumb here
+    scroll_drag_ = which;
+    scroll_hot_ = which;
+    DragScroll(y);
+    return true;
+}
+
+bool AiPanelView::DragScroll(float y) {
+    if (scroll_drag_ == 0) return false;
+    const OverlayBar& b = bars_[static_cast<size_t>(scroll_drag_ - 1)];
+    if (!b.on) {
+        scroll_drag_ = 0;   // its view went away (the menu closed)
+        return false;
+    }
+    const float v = std::clamp((y - b.track_top - drag_grab_) * b.max / b.travel, 0.0f, b.max);
+    if (scroll_drag_ == 2) {
+        if (std::abs(v - menu_scroll_) < 0.01f) return false;
+        menu_scroll_ = v;
+        return true;
+    }
+    if (std::abs(v - scroll_) < 0.01f && !scroll_anim_) return false;
+    scroll_ = v;
+    scroll_anim_ = false;
+    follow_ = v >= b.max - 1.0f;
+    return true;
+}
+
+bool AiPanelView::SetScrollHot(float x, float y) {
+    const int hot = scroll_drag_ != 0 ? scroll_drag_ : BarAt(x, y);
+    if (hot == scroll_hot_) return false;
+    scroll_hot_ = hot;
+    return true;
 }
 
 bool AiPanelView::Contains(float x, float y) const {
