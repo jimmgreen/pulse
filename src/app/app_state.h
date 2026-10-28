@@ -78,6 +78,7 @@
 #include <vector>
 
 namespace pulse {
+struct AddressPathOpen;
 
 constexpr UINT kTimerUi = 1;
 // Scrolls the list while a marquee is dragged past its edge.
@@ -521,6 +522,7 @@ struct AppState : AppCoreOwner {
     bool shot_high_contrast = false;
 
     HWND hwndAddressEdit = nullptr;
+    std::shared_ptr<AddressPathOpen> addressPathOpen;
     bool addressEditing = false;
     bool addressSearching = false;
     // Opened by 连接服务器: bare host names count as servers (app_network_page.h).
