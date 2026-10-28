@@ -15,7 +15,7 @@ namespace pulse {
 struct AddressCompletionQuery {
     std::wstring parent, prefix;
 };
-inline bool ParseAddressCompletion(std::wstring text, AddressCompletionQuery& query) {
+inline bool ParseAddressCompletion(std::wstring text, AddressCompletionQuery& query, const std::wstring& base = {}) {
     const auto first = text.find_first_not_of(L" \t\r\n");
     if (first == std::wstring::npos) return false;
     text.erase(0, first);
@@ -25,6 +25,10 @@ inline bool ParseAddressCompletion(std::wstring text, AddressCompletionQuery& qu
         if (quote != std::wstring::npos) text.resize(quote);
     }
     for (auto& c : text) if (c == L'/') c = L'\\';
+    if (!text.empty() && text.front() != L'\\' && text.find(L':') == std::wstring::npos &&
+        text.front() != L'%' && !base.empty() && !fs::IsVirtualPath(base)) {
+        text = base + (base.back() == L'\\' ? L"" : L"\\") + text;
+    }
     const bool unc = text.compare(0, 2, L"\\\\") == 0;
     const bool drive = text.size() >= 3 && iswalpha(text[0]) && text[1] == L':' && text[2] == L'\\';
     const auto cut = text.find_last_of(L'\\');

@@ -13,6 +13,9 @@ int wmain() {
     check(!pulse::ParseAddressCompletion(L"\\\\host", query), "bare server stays server suggestions");
     check(!pulse::ParseAddressCompletion(L"C:relative\\file", query), "drive relative rejected");
     check(!pulse::ParseAddressCompletion(L"C:\\dir\\*", query), "wildcard rejected");
+    check(pulse::ParseAddressCompletion(L"Doc", query, L"C:\\Users\\User\\Desktop") && query.parent == L"C:\\Users\\User\\Desktop\\" && query.prefix == L"Doc", "relative folder prefix uses current directory");
+    check(pulse::ParseAddressCompletion(L"Docs\\sub", query, L"C:\\Users\\User\\Desktop") && query.parent == L"C:\\Users\\User\\Desktop\\Docs\\" && query.prefix == L"sub", "relative nested prefix");
+    check(!pulse::ParseAddressCompletion(L"Docs", query, L"pulse:recent"), "virtual location has no relative completion");
     pulse::AddressCompletionWorker worker;
     auto cancelled = std::make_shared<pulse::AddressCompletionResult>();
     cancelled->cancelled = true;

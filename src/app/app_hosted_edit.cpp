@@ -362,9 +362,9 @@ static void CancelAddressCompletion(HWND hwnd) {
         address_completion.erase(it);
     }
 }
-static bool StartAddressCompletion(HWND hwnd, const std::wstring& text) {
+static bool StartAddressCompletion(HWND hwnd, const std::wstring& text, const std::wstring& base) {
     AddressCompletionQuery query;
-    if (!ParseAddressCompletion(text, query)) return false;
+    if (!ParseAddressCompletion(text, query, base)) return false;
     static AddressCompletionWorker worker;
     auto result = std::make_shared<AddressCompletionResult>();
     address_completion[hwnd] = result;
@@ -415,7 +415,18 @@ void UpdateAddressSuggestions(AppState& s) {
     }
     while (!text.empty() && iswspace(text.front())) text.erase(text.begin());
     // "\\..." and 连接服务器: known servers, from memory only (no network).
-    if (StartAddressCompletion(s.hwndAddressEdit, text)) return done();
+    // An alias head ("fbb" → 发布包, "fbb\rest") keeps its suggestions below
+    // rather than being completed as a folder relative to the current one.
+    const bool alias_head = [&] {
+        if (app::AliasStore::Instance().Empty() || text.empty() || text.find_first_of(L":%\"") != std::wstring::npos ||
+            text.front() == L'\\' || text.front() == L'/') return false;
+        std::wstring head = text.substr(0, text.find_first_of(L"\\/"));
+        while (!head.empty() && iswspace(head.back())) head.pop_back();
+        return !head.empty() && !app::AliasStore::Instance().SuggestRanked(head, 1).empty();
+    }();
+    const app::Tab* completion_tab = ActiveTab(s);
+    const bool relative = completion_tab && !alias_head && !app::ResolveAddressShortcut(text).resolved;
+    if (StartAddressCompletion(s.hwndAddressEdit, text, relative ? ClipboardPath(completion_tab->current_path) : std::wstring{})) return done();
     if (FillServerSuggestions(s, text)) return done();
     if (app::AliasStore::Instance().Empty()) return done();
     // Paths, shell: and %VAR% shortcuts keep the plain editor; "别名\rest"
