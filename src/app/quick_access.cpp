@@ -1,4 +1,5 @@
 #include "quick_access.h"
+#include "context_menu.h"
 #include "app_commands.h"
 #include "app_navigation.h"
 #include "app_network_locations.h"
@@ -12,7 +13,6 @@ namespace {
 
 // Local command of the quick-access menus; outside the MenuCmd range.
 constexpr int kEditQuickAccessCommand = 0x7E00;
-constexpr int kOpenQuickAccessNewTab = 0x7E01;
 
 std::wstring QuickAccessKeyPath(const AppState& s, const std::wstring& key) {
     const int builtin = app::BuiltinQuickAccessFromKey(key);
@@ -204,7 +204,7 @@ void ShowQuickAccessMenu(AppState& s, const std::wstring& path, POINT point) {
     // #58-2: a plain click navigates the focused pane; a new tab is one
     // gesture away, and the menu says which.
     ui::FluentMenuItem new_tab;
-    new_tab.command = kOpenQuickAccessNewTab;
+    new_tab.command = app::CmdOpenInNewTab;
     new_tab.text = l10n::Get(l10n::StringId::OpenNewTab);
     new_tab.shortcut = l10n::Get(l10n::StringId::QuickAccessNewTabHint);
     new_tab.glyph = L"\xE8A7";
@@ -213,9 +213,11 @@ void ShowQuickAccessMenu(AppState& s, const std::wstring& path, POINT point) {
     remove.text = l10n::Get(l10n::StringId::UnpinQuickAccess);
     remove.glyph = L"\xE77A";
     remove.separator_after = true;
-    const int command = s.menu->TrackPopup(point, {open, new_tab, remove, EditQuickAccessMenuItem()});
+    std::vector<ui::FluentMenuItem> items{open, new_tab, remove, EditQuickAccessMenuItem()};
+    app::ApplyBuiltinMenuPrefs(items, s.ctxMenuPrefs, app::BuiltinMenuSurface::Item);
+    const int command = s.menu->TrackPopup(point, std::move(items));
     if (command == app::CmdOpen) NavigateTo(s, path);
-    else if (command == kOpenQuickAccessNewTab) OpenFolderTab(s, path);
+    else if (command == app::CmdOpenInNewTab) OpenFolderTab(s, path);
     else if (command == kEditQuickAccessCommand) ShowQuickAccessEditor(s, point);
     else HandleQuickAccessCommand(s, command, {path});
 }

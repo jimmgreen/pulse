@@ -206,7 +206,7 @@ std::vector<ShellMenuEntry> ApplyExplorerPrefs(const ContextMenuPrefs& prefs,
     const int mru_cap = prefs.open_with_mru;
     int vendor_index = -1;
 
-    const bool compress_on = prefs.ItemEnabled(ipc::CompressCatalogKey(),
+    const bool compress_on = prefs.RowEnabled(ipc::CompressCatalogKey(),
         ipc::CtxMenuCategory::Software, true);
 
     for (const auto& e : entries) {
@@ -221,7 +221,7 @@ std::vector<ShellMenuEntry> ApplyExplorerPrefs(const ContextMenuPrefs& prefs,
         const std::wstring key = !e.clsid.empty()
             ? ipc::HandlerCatalogKey(e.clsid)
             : ipc::CatalogKey(e.text, flyout);
-        if (!prefs.ItemEnabled(key, cat, e.from_com)) continue;
+        if (!prefs.RowEnabled(key, cat, e.from_com)) continue;
         if (cat == ipc::CtxMenuCategory::OpenWith && ipc::IsOpenWithMruText(e.text)) {
             if (mru_cap >= 0 && mru_kept >= mru_cap) continue;
             ++mru_kept;

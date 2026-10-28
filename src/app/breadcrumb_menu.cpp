@@ -54,7 +54,9 @@ void ShowBreadcrumbMenu(AppState& s, std::wstring path, POINT screen_pt) {
     const bool filesystem = !fs::IsVirtualPath(path);
     // Keep the clicked path across TrackPopup's nested message loop. Selection
     // commands target file rows and must not be used for breadcrumb ancestors.
-    const int command = s.menu->TrackPopup(screen_pt, app::BuildBreadcrumbMenu(filesystem));
+    auto items = app::BuildBreadcrumbMenu(filesystem);
+    app::ApplyBuiltinMenuPrefs(items, s.ctxMenuPrefs, app::BuiltinMenuSurface::Item);
+    const int command = s.menu->TrackPopup(screen_pt, std::move(items));
     RunPathCommand(s, path, filesystem, command);
 }
 
@@ -189,6 +191,7 @@ void ShowCloudPlaceMenu(AppState& s, const std::wstring& path, POINT screen_pt) 
     hide.command = kHideCloud;
     hide.text = l10n::Get(l10n::StringId::SidebarHideCloud);
     items.push_back(std::move(hide));
+    app::ApplyBuiltinMenuPrefs(items, s.ctxMenuPrefs, app::BuiltinMenuSurface::Item);
     const int command = s.menu->TrackPopup(screen_pt, std::move(items));
     if (command == kHideCloud) {
         s.sidebarHiddenMask |= 1u << static_cast<int>(app::SidebarSectionId::Cloud);

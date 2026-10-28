@@ -2724,6 +2724,7 @@ void ShowSidebarDriveMenu(AppState& s, std::wstring path, POINT screen_pt) {
     StartCtxQuery(s, {path}, false, std::wstring(ipc::kDriveVerbKey));
     s.context_menu.SeedComItemsFromCache();
     auto items = app::BuildBreadcrumbMenu(true);
+    app::ApplyBuiltinMenuPrefs(items, s.ctxMenuPrefs, app::BuiltinMenuSurface::Item);
     s.context_menu.OpenMenu(items);
     const int cmd = s.menu->TrackPopup(screen_pt, ExplorerMenu(s, s.context_menu.base_items()));
     s.context_menu.CloseMenu();
@@ -2846,6 +2847,7 @@ void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
         const std::wstring undoLabel = s.ops.UndoLabel();
         auto items = app::BuildRecycleBackgroundMenu(s.ops.CanUndo(), undoLabel, can_empty);
         app::AppendBackgroundViewCommands(items, view_options);
+        app::ApplyBuiltinMenuPrefs(items, s.ctxMenuPrefs, app::BuiltinMenuSurface::Background);
         s.context_menu.OpenMenu(std::move(items));
         const int cmd = s.menu->TrackPopup(screen_pt, s.context_menu.base_items());
         s.context_menu.CloseMenu();
@@ -3493,7 +3495,7 @@ void ShowCuratedItemMenu(AppState& s, const std::wstring& path,
     // 收藏夹分组与分隔线: 放进分组 › (each group, 新建分组…, 移出分组) and the
     // separator after it.
     constexpr int kNewGroup = 30190, kLeaveGroup = 30191, kSeparator = 30192, kGroupBase = 30200;
-    constexpr int kOpenNewTab = 30180;
+    constexpr int kOpenNewTab = app::CmdOpenInNewTab;
     std::vector<std::wstring> group_ids;
     std::vector<ui::FluentMenuItem> items;
     ui::FluentMenuItem open;
@@ -3602,6 +3604,7 @@ void ShowCuratedItemMenu(AppState& s, const std::wstring& path,
         (recent_item && recent_item->kind == app::PlaceItemKind::Folder) ||
         (!fs::IsVirtualPath(path) && QuickAccessEntryForPath(s, path));
     if (known_folder) AppendQuickAccessCommand(s, items, {path});
+    app::ApplyBuiltinMenuPrefs(items, s.ctxMenuPrefs, app::BuiltinMenuSurface::Item);
     const int cmd = s.menu->TrackPopup(screen_pt, std::move(items));
     if (HandleQuickAccessCommand(s, cmd, known_folder ? std::vector<std::wstring>{path}
                                                                    : std::vector<std::wstring>{})) return;

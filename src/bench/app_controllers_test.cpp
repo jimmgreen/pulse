@@ -1557,6 +1557,27 @@ bool TestPackAutoUpdate() {
 }
 
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--shell-disabled-prefs") {
+        using namespace pulse::app;
+        ContextMenuPrefs prefs;
+        prefs.persist = false;
+        prefs.ResetToDefaults();
+        ShellMenuEntry item;
+        item.text = L"Open with Application";
+        item.from_com = true;
+        const auto key = pulse::ipc::CatalogKey(item.text, false);
+        bool ok = Report("ordinary shell row initially visible", ApplyExplorerPrefs(prefs, {item}).size() == 1);
+        prefs.SetComDisabled(key, true);
+        ok &= Report("disabled legacy shell row agrees with settings", !prefs.CatalogItemVisible(key) && ApplyExplorerPrefs(prefs, {item}).empty());
+        prefs.SetComDisabled(key, false);
+        ok &= Report("reenabled legacy shell row returns", ApplyExplorerPrefs(prefs, {item}).size() == 1);
+        item.text = L"Compress to archive";
+        const auto compress = pulse::ipc::CompressCatalogKey();
+        ok &= Report("compression row initially visible", !ApplyExplorerPrefs(prefs, {item}).empty());
+        prefs.SetComDisabled(compress, true);
+        ok &= Report("disabled compression group agrees with settings", !prefs.CatalogItemVisible(compress) && ApplyExplorerPrefs(prefs, {item}).empty());
+        return ok ? 0 : 1;
+    }
     if (argc == 2 && std::wstring_view(argv[1]) == L"--context-query-key") {
         pulse::app::ContextMenuController controller;
         pulse::app::ContextMenuPrefs prefs;
