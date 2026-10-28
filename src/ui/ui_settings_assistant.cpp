@@ -200,7 +200,8 @@ void MainRenderer::DrawSettingsAssistant(const WindowViewModel& vm, const D2D1_R
     }
     if (v.stage == AsstStage::Pick) {
         divider_below(o.head);
-        // Tiles: the mark, the name and a line; 当前 on the one in use.
+        // Tiles: the mark, the name and a line; the one in use is marked like
+        // the selected window effect card, with a check in the corner.
         for (int i = 0; i < kAsstTiles && i < static_cast<int>(v.tiles.size()); ++i) {
             const D2D1_RECT_F& t = o.tiles[i];
             if (t.right <= t.left) continue;
@@ -227,9 +228,10 @@ void MainRenderer::DrawSettingsAssistant(const WindowViewModel& vm, const D2D1_R
                               D2D1::RectF(t.left + 6*s, t.top + 64*s, t.right - 6*s, t.top + 82*s),
                               compositor_->SmallFormat(), theme.text_secondary, fluent::HorizontalAlignment::Center);
             if (tile.current) {
-                const std::wstring& tag = asst_text::T(I::AsstCurrent);
-                const float w = painter_.MeasureBadgeWidth(tag);
-                badge(D2D1::RectF(t.right - 6*s - w, t.top + 6*s, t.right - 6*s, t.top + 24*s), tag, fluent::BadgeKind::Accent);
+                const auto center = D2D1::Point2F(t.right - 11*s, t.top + 11*s);
+                MakeBrush(dc, theme.accent, brAccent_);
+                dc->FillEllipse(D2D1::Ellipse(center, 7*s, 7*s), brAccent_.get());
+                DrawIconText(center.x - 6*s, center.y - 6*s, 12*s, 12*s, L"\xE73E", L"", theme.accent_text, 0.6f);
             }
         }
         // 更多: Gemini, Claude.

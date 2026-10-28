@@ -276,7 +276,10 @@ inline float LayoutSettingsAssistant(SettingsLayout& l, const WindowViewModel& v
             float value_w = 24.0f * s;
             for (int i = 0; i < n; ++i)
                 value_w = (std::max)(value_w, button_w(asst_text::ThinkLabel(v, i)) - 16.0f * s);
-            const float slider_w = 200.0f * s, gap = 12.0f * s;
+            // Slider and level as wide as the model field above (200 at most),
+            // so a narrow page leaves the caption room.
+            const float gap = 12.0f * s;
+            const float slider_w = (std::clamp)(field_w - value_w - gap, 128.0f * s, 200.0f * s);
             o.think_row = row(asst_text::ThinkCaption(v), inner_right - value_w - gap - slider_w);
             o.think_value = place(o.think_row, inner_right, value_w, 24.0f);
             o.think_slider = place(o.think_row, inner_right - value_w - gap, slider_w, fluent::StepSliderHeight(s) / s);
