@@ -143,7 +143,7 @@ void AiChatErrRun(AppState& s, int index);
 bool AiAgentConnected();        // a model key is stored (checked at most every 2 s)
 void AiAgentKeyChanged();       // after the key or the address was saved or removed
 std::wstring AiAgentBaseUrl();  // ai.json assistant.base_url, else the default
-std::wstring AiAgentDefaultBaseUrl();   // https://api.deepseek.com
+std::wstring AiAgentDefaultBaseUrl();   // the service's own address (ai_providers.h)
 std::wstring AiAgentHost();     // "api.deepseek.com"
 std::wstring AiAssistantModelName(const AppState& s);   // the model a request uses, as the service names it
 void AiAgentStart(AppState& s, const std::wstring& prompt, bool with_context);

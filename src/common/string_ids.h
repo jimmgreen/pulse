@@ -4583,5 +4583,20 @@
 #define IDS_ASST_TODAY                                                                   5791
 #define IDS_ASST_BADGE_FAILED                                                            5792
 #define IDS_ASST_VOICE_SET_BADGE                                                         5793
+#define IDS_PROV_QWEN                                                                    5794
+#define IDS_PROV_ZHIPU                                                                   5795
+#define IDS_PROV_DOUBAO                                                                  5796
+#define IDS_PROV_SILICON                                                                 5797
+#define IDS_PROV_CUSTOM                                                                  5798
+#define IDS_PROV_SUB_DEEPSEEK                                                            5799
+#define IDS_PROV_SUB_QWEN                                                                5800
+#define IDS_PROV_SUB_KIMI                                                                5801
+#define IDS_PROV_SUB_ZHIPU                                                               5802
+#define IDS_PROV_SUB_DOUBAO                                                              5803
+#define IDS_PROV_SUB_PROXY                                                               5804
+#define IDS_PROV_SUB_OPENROUTER                                                          5805
+#define IDS_PROV_SUB_OLLAMA                                                              5806
+#define IDS_PROV_SUB_CUSTOM                                                              5807
+#define IDS_AI_ERR_TOOLS_HINT                                                            5808
 
 #endif  // PULSE_STRING_IDS_H

@@ -4590,3 +4590,18 @@ SettingsNavNew	IDS_SETTINGS_NAV_NEW	5790	新	New
 AsstToday	IDS_ASST_TODAY	5791	今天 {time}	today {time}	
 AsstBadgeFailed	IDS_ASST_BADGE_FAILED	5792	连接失败	Connection failed	
 AsstVoiceSetBadge	IDS_ASST_VOICE_SET_BADGE	5793	已设置	Set up	
+ProvQwen	IDS_PROV_QWEN	5794	通义千问	Qwen	
+ProvZhipu	IDS_PROV_ZHIPU	5795	智谱 GLM	Zhipu GLM	
+ProvDoubao	IDS_PROV_DOUBAO	5796	豆包	Doubao	
+ProvSilicon	IDS_PROV_SILICON	5797	硅基流动	SiliconFlow	
+ProvCustom	IDS_PROV_CUSTOM	5798	自定义	Custom	
+ProvSubDeepseek	IDS_PROV_SUB_DEEPSEEK	5799	深度求索	DeepSeek platform	
+ProvSubQwen	IDS_PROV_SUB_QWEN	5800	阿里云百炼	Alibaba Cloud Model Studio	
+ProvSubKimi	IDS_PROV_SUB_KIMI	5801	月之暗面	Moonshot AI	
+ProvSubZhipu	IDS_PROV_SUB_ZHIPU	5802	智谱开放平台	Zhipu open platform	
+ProvSubDoubao	IDS_PROV_SUB_DOUBAO	5803	火山方舟	Volcano Ark	
+ProvSubProxy	IDS_PROV_SUB_PROXY	5804	需要代理	Needs a proxy in China	
+ProvSubOpenRouter	IDS_PROV_SUB_OPENROUTER	5805	一个 Key 用多家	Many models, one key	
+ProvSubOllama	IDS_PROV_SUB_OLLAMA	5806	本机 · 无需 Key	This PC · no key	
+ProvSubCustom	IDS_PROV_SUB_CUSTOM	5807	任意兼容地址	Any compatible address	
+AiErrToolsHint	IDS_AI_ERR_TOOLS_HINT	5808	这个模型可能不支持工具调用（function calling），助手需要它来查看和整理文件。换一个支持的模型，或在 设置 › AI 助手 里更换服务。	This model may not support tool calls (function calling), which the assistant needs to look at and organize files. Pick a model that does, or change the service in Settings › AI assistant.	

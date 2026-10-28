@@ -4575,6 +4575,21 @@ enum class StringId : UINT {
     AsstToday = IDS_ASST_TODAY,
     AsstBadgeFailed = IDS_ASST_BADGE_FAILED,
     AsstVoiceSetBadge = IDS_ASST_VOICE_SET_BADGE,
+    ProvQwen = IDS_PROV_QWEN,
+    ProvZhipu = IDS_PROV_ZHIPU,
+    ProvDoubao = IDS_PROV_DOUBAO,
+    ProvSilicon = IDS_PROV_SILICON,
+    ProvCustom = IDS_PROV_CUSTOM,
+    ProvSubDeepseek = IDS_PROV_SUB_DEEPSEEK,
+    ProvSubQwen = IDS_PROV_SUB_QWEN,
+    ProvSubKimi = IDS_PROV_SUB_KIMI,
+    ProvSubZhipu = IDS_PROV_SUB_ZHIPU,
+    ProvSubDoubao = IDS_PROV_SUB_DOUBAO,
+    ProvSubProxy = IDS_PROV_SUB_PROXY,
+    ProvSubOpenRouter = IDS_PROV_SUB_OPENROUTER,
+    ProvSubOllama = IDS_PROV_SUB_OLLAMA,
+    ProvSubCustom = IDS_PROV_SUB_CUSTOM,
+    AiErrToolsHint = IDS_AI_ERR_TOOLS_HINT,
 };
 
 bool IsLanguageId(std::wstring_view id) noexcept;

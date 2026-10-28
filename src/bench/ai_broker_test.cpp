@@ -149,6 +149,28 @@ int main() {
         const Settings broken = LoadSettings(&malformed);
         Check(malformed && !broken.mcp_enabled, "a malformed ai.json reads as defaults (MCP off)");
         Check(ParseSettings("{\"log_days\":9999}").log_days == 30, "log_days out of range keeps the default");
+        // Model services (设置 › AI 助手): a file from before them stays byte for byte.
+        const std::string older =
+            "{\"mcp_enabled\":false,\"log_days\":30,\"clients\":[],\"allow\":[],"
+            "\"assistant\":{\"dock\":\"docked\",\"model\":\"deepseek-flash\",\"effort\":2}}\n";
+        Check(SerializeSettings(ParseSettings(older)) == older, "an ai.json without services is written back unchanged");
+        Check(ParseSettings(older).assistant.service.empty(), "no service means DeepSeek");
+        Settings svc;
+        svc.assistant.service = "qwen";
+        svc.assistant.model = "qwen-plus";
+        svc.assistant.services = {{"deepseek", {"deepseek-flash", ""}}, {"custom", {"my-model", "http://192.168.1.20:8000/v1"}}};
+        const Settings svc_back = ParseSettings(SerializeSettings(svc));
+        Check(svc_back.assistant.service == "qwen" && svc_back.assistant.model == "qwen-plus" &&
+              svc_back.assistant.services.size() == 2 && svc_back.assistant.services[0].first == "deepseek" &&
+              svc_back.assistant.services[0].second.model == "deepseek-flash" &&
+              svc_back.assistant.services[1].second.base_url == "http://192.168.1.20:8000/v1",
+              "service and the other services' models and addresses round-trip");
+        const Settings bad_svc = ParseSettings(
+            "{\"assistant\":{\"service\":\"Qwen!\",\"services\":{\"../x\":{\"model\":\"m\"},"
+            "\"kimi\":{\"base_url\":\"ftp://x\"}}}}");
+        Check(bad_svc.assistant.service.empty() && bad_svc.assistant.services.size() == 1 &&
+              bad_svc.assistant.services[0].first == "kimi" && bad_svc.assistant.services[0].second.base_url.empty(),
+              "malformed service ids and addresses are dropped");
     }
 
     // --- the broker with fake tools.

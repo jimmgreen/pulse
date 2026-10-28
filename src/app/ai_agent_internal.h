@@ -10,6 +10,7 @@
 #include "ai_cleanup_scan.h"
 #include "ai_dup_scan.h"
 #include "ai_model_key.h"
+#include "ai_providers.h"
 #include "ai_model_stream.h"
 #include "ai_search_spec.h"
 #include "ai_settings.h"

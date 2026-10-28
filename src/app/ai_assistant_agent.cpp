@@ -23,7 +23,6 @@ namespace pulse {
 namespace ai_agent {
 using app::ai::ModelEvent;
 
-constexpr wchar_t kBaseUrl[] = L"https://api.deepseek.com";
 constexpr int kMaxRounds = 12;
 constexpr size_t kMaxToolText = 48 * 1024;   // a tool result sent back, in UTF-8 bytes
 
@@ -347,14 +346,8 @@ std::string Body(AppState& s, const AiAgent& a) {
     so.set("include_usage", true);
     body.set("stream_options", std::move(so));
     body.set("tools", Tools());
-    json::Value thinking = json::Value::Object();
-    const int effort = std::clamp(s.aiAssistant.effort, 0, 3);
-    thinking.set("type", effort == 0 ? "disabled" : "enabled");
-    body.set("thinking", std::move(thinking));
-    if (effort > 0) {
-        static constexpr const char* kEffort[] = {"", "low", "high", "max"};
-        body.set("reasoning_effort", kEffort[effort]);
-    }
+    // Each service takes 思考 in its own field, or not at all (ai_providers.h).
+    app::ai::AddThinking(app::ai::CurrentProvider(), s.aiAssistant.effort, Utf8(AiChatModelId(s)), body);
     return json::Serialize(body);
 }
 
@@ -667,8 +660,21 @@ ui::AiErrButton Btn(AiErrAct act, AiIcon icon, I text, bool primary) {
     return b;
 }
 
-bool Official() { return AiAgentBaseUrl() == AiAgentDefaultBaseUrl(); }
-std::wstring ServiceName() { return Official() ? std::wstring(L"DeepSeek") : AiAgentHost(); }
+// DeepSeek at its own address: the one service whose top-up page Pulse knows.
+bool Official() {
+    return app::ai::IsDefaultProvider(app::ai::CurrentProvider()) && AiAgentBaseUrl() == AiAgentDefaultBaseUrl();
+}
+std::wstring ServiceName() {
+    const app::ai::Provider& p = app::ai::CurrentProvider();
+    return app::ai::IsCustomProvider(p) ? AiAgentHost() : app::ai::ProviderName(p);
+}
+
+// A refusal that names tools: the model cannot call them (function calling).
+bool MentionsTools(const std::string& message) {
+    std::string lower(message);
+    for (char& ch : lower) ch = static_cast<char>(ch >= 'A' && ch <= 'Z' ? ch - 'A' + 'a' : ch);
+    return lower.find("tool") != std::string::npos || lower.find("function") != std::string::npos;
+}
 
 AiChatError CutError() {
     AiChatError e;
@@ -748,6 +754,8 @@ AiChatError BuildError(const ModelEvent& ev) {
     if (!detail.empty()) e.sub = Text(I::AiErrBadS);
     e.detail = detail;
     if (ev.http_status == 404) e.hint = Text(I::AiErrBadHint404);
+    else if ((ev.http_status == 400 || ev.http_status == 422) && MentionsTools(ev.error_message))
+        e.hint = Text(I::AiErrToolsHint);
     else if (ev.http_status == 400 || ev.http_status == 422) e.hint = Text(I::AiErrBadHint);
     e.buttons = {Btn(AiErrAct::SwitchModel, AiIcon::Swap, I::AiErrBtnSwitch, true), retry};
     if (!detail.empty()) e.buttons.push_back(Btn(AiErrAct::CopyDetail, AiIcon::Copy, I::AiErrBtnCopy, false));
@@ -942,18 +950,20 @@ bool AiAgentConnected() {
 void AiAgentKeyChanged() {
     g_key_checked = 0;
     g_base_loaded = false;
+    app::ai::ProvidersChanged();
 }
 
 std::wstring AiAgentBaseUrl() {
     if (!g_base_loaded) {
         g_base_loaded = true;
         const std::string url = app::ai::LoadSettings().assistant.base_url;
-        g_base_url = url.empty() ? std::wstring(kBaseUrl) : json::Wide(url);
+        g_base_url = url.empty() ? AiAgentDefaultBaseUrl() : json::Wide(url);
     }
     return g_base_url;
 }
 
-std::wstring AiAgentDefaultBaseUrl() { return kBaseUrl; }
+// The address of the service in use; empty for a custom one without its own.
+std::wstring AiAgentDefaultBaseUrl() { return app::ai::CurrentProvider().base_url; }
 
 std::wstring AiAgentHost() { return app::ai::ModelHost(AiAgentBaseUrl()); }
 

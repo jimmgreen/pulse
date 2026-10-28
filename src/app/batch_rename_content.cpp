@@ -137,9 +137,8 @@ std::string ContentRequestBody(const ContentAsk& ask) {
     Value format = Value::Object();
     format.set("type", "json_object");
     body.set("response_format", std::move(format));
-    Value thinking = Value::Object();
-    thinking.set("type", "disabled");
-    body.set("thinking", std::move(thinking));
+    // No thinking: the caller adds the off switch in the form its service takes
+    // (ai_providers.h WithoutThinking).
     return json::Serialize(body);
 }
 

@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace pulse::app::ai {
@@ -49,12 +50,23 @@ struct VoicePrefs {
     bool IsDefault() const { return service.empty() && base_url.empty() && model.empty() && pause == 1 && mic.empty(); }
 };
 
-// Pulse 助手 (ai_assistant.h): where its panel sits and the model last used.
+// What Pulse 助手 remembers of a model service that is not the one in use
+// (设置 › AI 助手 › 其他已保存的服务), so switching back keeps its model and
+// address. Its key stays in its own key file (ai_model_key.h).
+struct ServicePrefs {
+    std::string model;
+    std::string base_url;   // empty: the service's own address
+};
+
+// Pulse 助手 (ai_assistant.h): where its panel sits, the model service in use
+// (ai_providers.h) and the model last used.
 struct AssistantPrefs {
     bool floating = false;                    // "dock": "docked" | "floating"
+    std::string service;                      // ai_providers.h id; empty: deepseek
     std::string model = "deepseek-flash";
-    int effort = 2;                           // 0 off, 1 low, 2 medium, 3 high
-    std::string base_url;                     // 管理连接 · 高级; empty: https://api.deepseek.com
+    int effort = 2;                           // 0 off, 1 low, 2 medium, 3 high (ai_providers.h ThinkStyle)
+    std::string base_url;                     // empty: the service's own address
+    std::vector<std::pair<std::string, ServicePrefs>> services;   // "services": {id: {...}}, the others
     VoicePrefs voice;                         // "voice": {...}
 };
 

@@ -7,6 +7,20 @@ namespace pulse::app::ai {
 namespace {
 
 constexpr size_t kMaxClients = 64, kMaxRules = 256, kMaxName = 128;
+constexpr size_t kMaxServices = 32;
+
+// An address ai.json may carry: http(s), at most 512 bytes.
+bool UsableUrl(std::string_view url) {
+    return url.size() <= 512 && (url.starts_with("https://") || url.starts_with("http://"));
+}
+
+// A model service id (ai_providers.h): lower-case letters, digits, '-' and '_'.
+bool UsableServiceId(std::string_view id) {
+    if (id.empty() || id.size() > 32) return false;
+    for (const char ch : id)
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_')) return false;
+    return true;
+}
 
 std::wstring LocalAppData() {
     wchar_t root[32768];
@@ -120,8 +134,21 @@ Settings ParseSettings(std::string_view utf8, bool* malformed) {
             if (effort->get_int(n, 0, 3)) s.assistant.effort = static_cast<int>(n);
         }
         const std::string base_url = a->get_string("base_url");
-        if (base_url.size() <= 512 && (base_url.starts_with("https://") || base_url.starts_with("http://")))
-            s.assistant.base_url = base_url;
+        if (UsableUrl(base_url)) s.assistant.base_url = base_url;
+        if (const std::string service = a->get_string("service"); UsableServiceId(service)) s.assistant.service = service;
+        if (const auto* list = a->find("services"); list && list->is_object()) {
+            for (size_t i = 0; i < list->size() && s.assistant.services.size() < kMaxServices; ++i) {
+                const std::string& id = list->keys()[i];
+                const json::Value& item = list->at(i);
+                if (!UsableServiceId(id) || !item.is_object()) continue;
+                ServicePrefs sp;
+                if (const std::string m = item.get_string("model"); m.size() <= kMaxName) sp.model = m;
+                if (const std::string u = item.get_string("base_url"); UsableUrl(u)) sp.base_url = u;
+                bool seen = false;
+                for (const auto& have : s.assistant.services) seen |= have.first == id;
+                if (!seen) s.assistant.services.emplace_back(id, std::move(sp));
+            }
+        }
         if (const auto* v = a->find("voice"); v && v->is_object()) {
             VoicePrefs& voice = s.assistant.voice;
             const std::string service = v->get_string("service");
@@ -181,9 +208,21 @@ std::string SerializeSettings(const Settings& s) {
     }
     json::Value assistant = json::Value::Object();
     assistant.set("dock", s.assistant.floating ? "floating" : "docked");
+    // Only once another service was chosen, so older files stay as they are.
+    if (!s.assistant.service.empty()) assistant.set("service", s.assistant.service);
     assistant.set("model", s.assistant.model);
     assistant.set("effort", s.assistant.effort);
     if (!s.assistant.base_url.empty()) assistant.set("base_url", s.assistant.base_url);
+    if (!s.assistant.services.empty()) {
+        json::Value list = json::Value::Object();
+        for (const auto& [id, sp] : s.assistant.services) {
+            json::Value item = json::Value::Object();
+            if (!sp.model.empty()) item.set("model", sp.model);
+            if (!sp.base_url.empty()) item.set("base_url", sp.base_url);
+            list.set(id, std::move(item));
+        }
+        assistant.set("services", std::move(list));
+    }
     if (const VoicePrefs& vp = s.assistant.voice; !vp.IsDefault()) {
         json::Value voice = json::Value::Object();
         if (!vp.service.empty()) voice.set("service", vp.service);

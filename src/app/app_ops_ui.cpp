@@ -22,6 +22,7 @@
 #include "ai_assistant_chat.h"
 #include "ai_model_key.h"
 #include "ai_model_stream.h"
+#include "ai_providers.h"
 #include "link_resolve.h"
 #include "locked_item_prompt.h"
 #include "selection_caps.h"
@@ -1061,11 +1062,12 @@ static size_t SubmitBatchRename(AppState& s, const std::vector<std::wstring>& pa
             app::ai::ModelEndpoint endpoint;
             endpoint.base_url = AiAgentBaseUrl();
             endpoint.key = std::move(key);
-            auto stream = app::ai::ModelStream::Start(std::move(endpoint), body);
+            auto stream = app::ai::ModelStream::Start(std::move(endpoint),
+                                                      app::ai::WithoutThinking(app::ai::CurrentProvider(), body));
             if (!stream) { error = l10n::Get(l10n::StringId::BrAiErrNetwork); return nullptr; }
             return std::make_shared<BatchRenameAiRequest>(std::move(stream));
         };
-        options.ai_provider = L"DeepSeek";   // the only service the connection speaks to (管理连接)
+        options.ai_provider = app::ai::ProviderName(app::ai::CurrentProvider());
     }
     // 按内容命名: text through the content-search reader (PDF and Office in
     // the sandboxed parser), never the file itself.

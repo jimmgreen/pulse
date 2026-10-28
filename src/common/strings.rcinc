@@ -4565,6 +4565,21 @@ BEGIN
     IDS_ASST_TODAY "今天 {time}"
     IDS_ASST_BADGE_FAILED "连接失败"
     IDS_ASST_VOICE_SET_BADGE "已设置"
+    IDS_PROV_QWEN "通义千问"
+    IDS_PROV_ZHIPU "智谱 GLM"
+    IDS_PROV_DOUBAO "豆包"
+    IDS_PROV_SILICON "硅基流动"
+    IDS_PROV_CUSTOM "自定义"
+    IDS_PROV_SUB_DEEPSEEK "深度求索"
+    IDS_PROV_SUB_QWEN "阿里云百炼"
+    IDS_PROV_SUB_KIMI "月之暗面"
+    IDS_PROV_SUB_ZHIPU "智谱开放平台"
+    IDS_PROV_SUB_DOUBAO "火山方舟"
+    IDS_PROV_SUB_PROXY "需要代理"
+    IDS_PROV_SUB_OPENROUTER "一个 Key 用多家"
+    IDS_PROV_SUB_OLLAMA "本机 · 无需 Key"
+    IDS_PROV_SUB_CUSTOM "任意兼容地址"
+    IDS_AI_ERR_TOOLS_HINT "这个模型可能不支持工具调用（function calling），助手需要它来查看和整理文件。换一个支持的模型，或在 设置 › AI 助手 里更换服务。"
 END
 
 LANGUAGE 0x09, 0x01
@@ -9129,6 +9144,21 @@ BEGIN
     IDS_ASST_TODAY "today {time}"
     IDS_ASST_BADGE_FAILED "Connection failed"
     IDS_ASST_VOICE_SET_BADGE "Set up"
+    IDS_PROV_QWEN "Qwen"
+    IDS_PROV_ZHIPU "Zhipu GLM"
+    IDS_PROV_DOUBAO "Doubao"
+    IDS_PROV_SILICON "SiliconFlow"
+    IDS_PROV_CUSTOM "Custom"
+    IDS_PROV_SUB_DEEPSEEK "DeepSeek platform"
+    IDS_PROV_SUB_QWEN "Alibaba Cloud Model Studio"
+    IDS_PROV_SUB_KIMI "Moonshot AI"
+    IDS_PROV_SUB_ZHIPU "Zhipu open platform"
+    IDS_PROV_SUB_DOUBAO "Volcano Ark"
+    IDS_PROV_SUB_PROXY "Needs a proxy in China"
+    IDS_PROV_SUB_OPENROUTER "Many models, one key"
+    IDS_PROV_SUB_OLLAMA "This PC · no key"
+    IDS_PROV_SUB_CUSTOM "Any compatible address"
+    IDS_AI_ERR_TOOLS_HINT "This model may not support tool calls (function calling), which the assistant needs to look at and organize files. Pick a model that does, or change the service in Settings › AI assistant."
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.
