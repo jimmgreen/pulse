@@ -3,6 +3,7 @@
 
 #include "ai_assistant.h"
 #include "ai_assistant_chat.h"
+#include "ai_assistant_settings.h"
 #include "ai_model_key.h"
 #include "ai_model_list.h"
 #include "ai_model_stream.h"
@@ -167,6 +168,7 @@ void ProbeDone(AppState& s, AiConnUi& u, app::ai::ModelProbe result) {
     u.save_failed = false;
     const bool ok = u.probe.http_status == 200;
     u.test = ok ? ui::AiConnTest::Ok : ui::AiConnTest::Bad;
+    NoteAssistantConnection(ok);   // Settings > AI 助手 > 上次连接
     // The service's models, for the model menu (they do not depend on the key).
     if (ok) app::ai::StoreListedModels(u.probe_url, u.probe.models);
     if (ok && u.save_after && Editing(u)) {

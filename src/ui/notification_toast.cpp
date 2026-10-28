@@ -159,6 +159,14 @@ void NotificationToast::ShowError(HWND owner, std::wstring title, std::wstring m
     Show(owner, std::move(title), std::move(message), true);
     kind_ = fluent::InfoBarKind::Error;
 }
+void NotificationToast::ShowActionCard(HWND owner, fluent::InfoBarKind kind, std::wstring title, std::wstring message,
+                                       std::vector<SnackAction> actions) {
+    Show(owner, std::move(title), std::move(message), true);
+    kind_ = kind;
+    if (actions.size() > 2) actions.resize(2);
+    actions_ = std::move(actions);
+    action_rects_.assign(actions_.size(), D2D1_RECT_F{});
+}
 void NotificationToast::Dismiss(HWND owner) {
     const bool was_up = visible_;
     visible_ = false;
@@ -297,7 +305,7 @@ bool NotificationToast::HandleMessage(HWND owner, UINT message, WPARAM wparam, L
         pressed_card_ = true;
         pressed_close_ = Contains(close_, x, y);
         pressed_action_ = -1;
-        for (size_t i = 0; snack_ && i < action_rects_.size(); ++i)
+        for (size_t i = 0; i < action_rects_.size(); ++i)
             if (Contains(action_rects_[i], x, y)) pressed_action_ = static_cast<int>(i);
         SetCapture(owner);
         InvalidateRect(owner, nullptr, FALSE);
@@ -305,7 +313,8 @@ bool NotificationToast::HandleMessage(HWND owner, UINT message, WPARAM wparam, L
     } else if (message == WM_LBUTTONUP && (pressed_card_ || Contains(card_, x, y))) {
         const bool close = pressed_close_ && Contains(close_, x, y);
         const int pressed_action = pressed_action_;
-        const bool action = !snack_ && pressed_card_ && !pressed_close_ && Contains(card_, x, y) && action_message_;
+        const bool action = !snack_ && actions_.empty() && pressed_card_ && !pressed_close_ && Contains(card_, x, y) &&
+                            action_message_;
         pressed_close_ = pressed_card_ = false;
         pressed_action_ = -1;
         if (GetCapture() == owner) ReleaseCapture();
@@ -313,9 +322,10 @@ bool NotificationToast::HandleMessage(HWND owner, UINT message, WPARAM wparam, L
         else if (action) {
             PostMessageW(owner, action_message_, 0, 0);
             Dismiss(owner);
-        } else if (snack_ && pressed_action >= 0 && static_cast<size_t>(pressed_action) < actions_.size() &&
+        } else if (pressed_action >= 0 && static_cast<size_t>(pressed_action) < actions_.size() &&
+                   static_cast<size_t>(pressed_action) < action_rects_.size() &&
                    Contains(action_rects_[static_cast<size_t>(pressed_action)], x, y)) {
-            // The capsule acts on its buttons only (M7i): the rest of it is text.
+            // The capsule and an action card act on their buttons only: the rest is text.
             if (const UINT post = actions_[static_cast<size_t>(pressed_action)].message) PostMessageW(owner, post, 0, 0);
             Dismiss(owner);
         } else {
@@ -365,9 +375,10 @@ void NotificationToast::Draw(Compositor& compositor, const Theme& theme, float s
         DWRITE_TEXT_METRICS metrics{};
         if (SUCCEEDED(body->GetMetrics(&metrics))) {
             const float line = metrics.lineCount ? metrics.height / static_cast<float>(metrics.lineCount) : px(16.0f);
-            body_h = (std::min)(metrics.height, std::ceil(line * 2.0f));
-            if (metrics.lineCount > 2) {
-                // Two lines at most; the rest is cut with an ellipsis.
+            // Two lines at most (four on a card with buttons: it explains what to do).
+            const UINT32 max_lines = actions_.empty() ? 2u : 4u;
+            body_h = (std::min)(metrics.height, std::ceil(line * static_cast<float>(max_lines)));
+            if (metrics.lineCount > max_lines) {
                 body->SetMaxHeight(body_h + 0.5f);
                 ComPtr<IDWriteInlineObject> ellipsis;
                 if (SUCCEEDED(factory->CreateEllipsisTrimmingSign(body.get(), &ellipsis))) {
@@ -379,7 +390,11 @@ void NotificationToast::Draw(Compositor& compositor, const Theme& theme, float s
             }
         }
     }
-    const float height = std::round(px(12.0f) + title_h + (body_h > 0.0f ? px(2.0f) + body_h : 0.0f) + px(12.0f));
+    // An action card: a row of buttons under the text.
+    const float button_h = px(28.0f), buttons_gap = px(10.0f);
+    const float buttons_h = actions_.empty() ? 0.0f : buttons_gap + button_h;
+    const float height = std::round(px(12.0f) + title_h + (body_h > 0.0f ? px(2.0f) + body_h : 0.0f) + buttons_h +
+                                    px(12.0f));
     const float right = std::round(window_w - margin);
     const float top = std::round(window_h - px(48.0f) - height);
     card_ = D2D1::RectF(right - width, top, right, top + height);
@@ -390,7 +405,15 @@ void NotificationToast::Draw(Compositor& compositor, const Theme& theme, float s
     DrawSnackPlate(dc, card_, radius, pal, scale, high_contrast, pose.plate_alpha);
     if (pose.content_alpha <= 0.0f) return;
     scope.Fade(pose.content_alpha);
-    if (kind_ == fluent::InfoBarKind::Error && !high_contrast) {
+    const bool toned = kind_ == fluent::InfoBarKind::Error ||
+                       (kind_ == fluent::InfoBarKind::Warning && !actions_.empty());
+    if (toned && !high_contrast) {
+        // A card with buttons is tinted in its tone: it asks for a next step.
+        if (!actions_.empty()) {
+            D2D1_COLOR_F tint = painter_.StatusToneColor(kind_);
+            tint.a = 0.07f;
+            painter_.FillRoundedRect(card_, radius, tint);
+        }
         // An error keeps a thin edge in its tone so it is not read as a status note.
         D2D1_COLOR_F edge = painter_.StatusToneColor(kind_);
         edge.a = 0.55f;
@@ -414,6 +437,24 @@ void NotificationToast::Draw(Compositor& compositor, const Theme& theme, float s
     if (GetCursorPos(&cursor) && ScreenToClient(compositor.Hwnd(), &cursor)) {
         cx = static_cast<float>(cursor.x);
         cy = static_cast<float>(cursor.y);
+    }
+    if (!actions_.empty()) {
+        action_rects_.resize(actions_.size());
+        float bx = card_.left + text_x;
+        const float by = card_.bottom - px(12.0f) - button_h;
+        for (size_t i = 0; i < actions_.size(); ++i) {
+            const float bw = (std::max)(px(72.0f), painter_.MeasureButtonWidth(actions_[i].label));
+            const D2D1_RECT_F button = D2D1::RectF(bx, by, (std::min)(bx + bw, card_.right - pad), by + button_h);
+            action_rects_[i] = button;
+            fluent::ButtonSpec spec;
+            spec.bounds = button;
+            spec.text = actions_[i].label;
+            spec.kind = i == 0 && !high_contrast ? fluent::ButtonKind::Primary : fluent::ButtonKind::Standard;
+            spec.state.hovered = visible_ && Contains(button, cx, cy);
+            spec.state.pressed = pressed_action_ == static_cast<int>(i);
+            painter_.DrawButton(spec);
+            bx = button.right + px(8.0f);
+        }
     }
     close_ = D2D1::RectF(card_.right - px(8.0f + 24.0f), line_mid - px(12.0f), card_.right - px(8.0f), line_mid + px(12.0f));
     if (visible_ && (Contains(close_, cx, cy) || pressed_close_)) painter_.FillRoundedRect(close_, px(12.0f), pal.hover);

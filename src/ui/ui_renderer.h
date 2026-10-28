@@ -821,6 +821,7 @@ private:
     void DrawSettingsSysCtx(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawSettingsShortcuts(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawSettingsAi(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
+    void DrawSettingsAssistant(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     // 右键菜单 layer cards, the same on pages 2 and 6: Pulse 右键菜单 | 系统右键菜单.
     void DrawCtxLayerCards(const D2D1_RECT_F& pulse, const D2D1_RECT_F& system, bool system_current,
                            bool other_hovered, const Theme& theme);

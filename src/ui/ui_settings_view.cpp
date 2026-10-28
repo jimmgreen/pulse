@@ -74,6 +74,8 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
         pulse::l10n::StringId::SettingsPageTabs,
         pulse::l10n::StringId::SettingsPageSystem,
         pulse::l10n::StringId::SettingsPageFileOps,
+        pulse::l10n::StringId::SettingsGeneral,  // 13: AI 与 MCP, no row (title: ai_text)
+        pulse::l10n::StringId::AsstPageTitle,
     };
     static_assert(std::size(kNav) == kSettingsNavCount);
     static constexpr const wchar_t* kNavIcon[] = {
@@ -86,6 +88,8 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
         L"\xE737",  // 标签页与窗口
         L"\xE7E8",  // 启动与集成
         L"\xE8DE",  // 文件操作
+        L"\xE99A",  // AI 与 MCP (no row)
+        L"\xF5C2",  // AI 助手 (sparkle, as the status bar chip)
     };
     static_assert(std::size(kNavIcon) == kSettingsNavCount);
     // Page 5 (快速预览) has no string-table entry; see pack_text. Page 2 is
@@ -143,6 +147,7 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
     }
     for (int i = 0; i < kSettingsNavCount; ++i) {
         if (i == 6) continue;  // no row: reached through the 右键菜单 layer cards
+        if (i == kSettingsPageAi) continue;  // no row: under 增强包
         const bool active = nav_page == i;
         const auto& rc = lay.nav_row[i];
         DrawIconText(rc.left + (compact_nav ? 13.0f : 12.0f) * scale_, rc.top, 22.0f * scale_, rc.bottom - rc.top,
@@ -165,6 +170,18 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
             painter_.DrawText(count, badge, compositor_->SmallFormat(), D2D1::ColorF(0xFFFFFF),
                               fluent::HorizontalAlignment::Center);
         }
+        // AI 助手: 新 until it was opened in this run.
+        if (i == kSettingsPageAssistant && vm.settings_assistant_new && !compact_nav) {
+            const std::wstring& label = pulse::l10n::Get(pulse::l10n::StringId::SettingsNavNew);
+            const float bw = painter_.MeasureBadgeWidth(label);
+            const float mid = (rc.top + rc.bottom) * 0.5f;
+            fluent::BadgeSpec spec;
+            spec.bounds = D2D1::RectF(rc.right - 10.0f * scale_ - bw, mid - 10.0f * scale_, rc.right - 10.0f * scale_,
+                                      mid + 10.0f * scale_);
+            spec.text = label;
+            spec.kind = fluent::BadgeKind::Accent;
+            painter_.DrawBadge(spec);
+        }
     }
 
     dc->PushAxisAlignedClip(lay.content, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -184,7 +201,8 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
         : vm.settings_page == 5 ? std::wstring(pack_text::Title())
         : vm.settings_page == 7 ? std::wstring(shortcuts_text::Title())
         : vm.settings_page == 8 ? std::wstring(pack_text::PacksSection())
-        : vm.settings_page == kSettingsPageAi ? std::wstring(ai_text::Title()) : l10n::Get(page_title_id);
+        : vm.settings_page == kSettingsPageAi ? std::wstring(ai_text::Title())
+        : vm.settings_page == kSettingsPageAssistant ? asst_text::Title() : l10n::Get(page_title_id);
     ComPtr<IDWriteTextLayout> title_layout;
     compositor_->DwriteFactory()->CreateTextLayout(title.c_str(), static_cast<UINT32>(title.size()),
         compositor_->HeaderFormat(), lay.content.right-lay.content.left-pad*2, 40*scale_, &title_layout);
@@ -193,8 +211,10 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
         title_layout->SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD, {0,static_cast<UINT32>(title.size())});
         compositor_->DrawTextLayout(D2D1::Point2F(lay.content.left+pad,origin+pad),title_layout.get(),brText_.get());
     }
-    if (vm.settings_page == 5 || vm.settings_page == 8 || vm.settings_page == kSettingsPageAi)
-        painter_.DrawWrappedCaption(vm.settings_page == kSettingsPageAi ? ai_text::Intro()
+    if (vm.settings_page == 5 || vm.settings_page == 8 || vm.settings_page == kSettingsPageAi ||
+        vm.settings_page == kSettingsPageAssistant)
+        painter_.DrawWrappedCaption(vm.settings_page == kSettingsPageAssistant ? asst_text::Intro().c_str()
+                                    : vm.settings_page == kSettingsPageAi ? ai_text::Intro()
                                     : vm.settings_page == 8 ? pack_text::PacksIntro() : pack_text::Intro(),
             D2D1::Point2F(lay.content.left+pad, origin+60*scale_),
             lay.content.right-lay.content.left-2*pad, theme.text_secondary);
@@ -1071,6 +1091,8 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
         DrawSettingsShortcuts(vm, rect, theme);
     } else if (vm.settings_page == kSettingsPageAi) {
         DrawSettingsAi(vm, rect, theme);
+    } else if (vm.settings_page == kSettingsPageAssistant) {
+        DrawSettingsAssistant(vm, rect, theme);
     } else if (vm.settings_page == 4) {
         auto draw_card = [&](const D2D1_RECT_F& card) {
             if (card.right <= card.left || card.bottom <= card.top) return;
@@ -1283,7 +1305,7 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
 
 D2D1_RECT_F MainRenderer::SettingsDropdownBounds(const WindowViewModel& vm, int index, float window_w, float window_h) const {
     const auto l=MakeSettingsLayout(vm,D2D1::RectF(0,0,window_w,window_h),scale_,title_bar_height_,status_height_,&painter_);
-    return index==0 ? l.effect_choice : l.language_choice;
+    return index==0 ? l.effect_choice : index==2 ? l.pack_dl_choice : l.language_choice;
 }
 
 float MainRenderer::SettingsDestinationOffset(const WindowViewModel& vm, int setting_id, float window_w, float window_h) const {
@@ -1374,6 +1396,7 @@ float MainRenderer::SettingsDestinationOffset(const WindowViewModel& vm, int set
     case I::ServerFolders: target=l.network_action[0];break;
     case I::ReleaseNotes: target=l.release_card;break;
     case I::SettingsAutoUpdate: target=l.update_auto_row;break;
+    case I::DownloadSourceTitle: target=l.pack_dl_row;break;
     default: return 0;
     }
     return (std::max)(0.0f,target.top-l.content_origin-20*scale_);

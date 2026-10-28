@@ -953,6 +953,8 @@ enum class PackAction : int {
     AiRemove,           // AI pack: uninstall (asks first)
     AiCancel,           // AI pack: stop the running download
     AiManage,           // AI pack: open 增强包 > AI 与 MCP (kSettingsPageAi)
+    DownloadSource,     // 高级 > 下载源: the drop-down
+    SpeedTest,          // 测速: (re)run the probe of every source
 };
 
 // A tab dragged out of another window, over this one (multi-window M7h): the
@@ -1197,12 +1199,20 @@ struct WindowViewModel {
     bool settings_pack_archive_available = false;
     float settings_pack_archive_progress = 0.0f;
     std::wstring settings_pack_archive_version, settings_pack_archive_notice, settings_pack_archive_update_version;
+    // 高级 > 下载源 (app::UpdateSource) and 测速: per row (mirror 1, mirror 2, GitHub)
+    // milliseconds, or -1 not run, -2 running, -3 failed; the system proxy GitHub uses.
+    uint32_t settings_pack_download_source = 0;
+    int settings_pack_speed_ms[3]{-1, -1, -1};
+    std::wstring settings_pack_proxy;
     int settings_theme = 0; // system, light, dark
     bool settings_open = false;
     // 0 外观, 1 search/index, 2 context menu, 3 about, 4 duplicates, 5 quick look, 6 system menu,
     // 7 shortcuts, 8 packs, 9 文件列表, 10 标签页与窗口, 11 启动与集成, 12 文件操作,
-    // 13 AI 与 MCP (kSettingsPageAi, under 增强包)
+    // 13 AI 与 MCP (kSettingsPageAi, under 增强包), 14 AI 助手 (kSettingsPageAssistant)
     int settings_page = 0;
+    // Settings > AI 助手 (filled on that page); the sidebar's 新 until it was opened.
+    AssistantPageView settings_assistant;
+    bool settings_assistant_new = false;
     // Settings > 系统右键菜单 (page 6): the model's last published view.
     std::shared_ptr<const SysCtxView> settings_sysctx;
     // Settings > 快捷键 (page 7): the page model's last view; the sidebar badge
@@ -1580,6 +1590,7 @@ struct HitTestResult {
         TreeSticky,            // details tree folder pinned over the list top: index = view row
         SidebarBarSwitch,      // 收藏夹 root row: move the list to the 收藏栏; index = run
         FavoritesBarDock,      // 收藏栏's right end: put the list back in the sidebar
+        SettingsAssistant,     // Settings > AI 助手: index = AssistantHit
     } region = None;
     SidebarAddAction sidebar_action = SidebarAddAction::None;
     int index = -1;          // tab/row/sidebar item/tray batch/tray item.

@@ -2318,11 +2318,12 @@ TitleChrome MakeTitleChrome(float window_w, float scale, float title_h) {
 constexpr float kSettingsNavW = 200.0f;
 // 5: 快速预览, 6: 系统右键菜单, 7: 快捷键, 8: 增强包; 0 and 9-12 split the former 通用 page:
 // 0 外观, 9 文件列表, 10 标签页与窗口, 11 启动与集成, 12 文件操作.
-constexpr int kSettingsNavCount = 13;
+// 13 AI 与 MCP has no row (under 增强包); 14 AI 助手 follows 增强包.
+constexpr int kSettingsNavCount = 15;
 inline bool IsGeneralSettingsPage(int page) noexcept { return page == 0 || (page >= 9 && page <= 12); }
 // Sidebar order, top to bottom, in five groups (关于 3 sits at the bottom, 6 has no row).
-constexpr int kSettingsNavOrder[] = {0, 9, 10, 11, 12, 1, 5, 8, 2, 7, 4};
-constexpr int kSettingsNavGroupStart[] = {0, 1, 3, 5, 10};  // indexes into kSettingsNavOrder
+constexpr int kSettingsNavOrder[] = {0, 9, 10, 11, 12, 1, 5, 8, 14, 2, 7, 4};
+constexpr int kSettingsNavGroupStart[] = {0, 1, 3, 5, 11};  // indexes into kSettingsNavOrder
 constexpr int kSettingsNavGroups = 5;
 
 // System folder groups shown under Settings > Exclusions: 0-4 follow
@@ -2552,6 +2553,9 @@ struct SettingsLayout {
         pack_primary{}, pack_update{}, pack_notice{}, pack_advanced_section{}, pack_custom_row{}, pack_path_row{},
         pack_detect{}, pack_browse{}, pack_remove_row{}, pack_group{}, pack_note{}, pack_source_group{}, pack_source_status{},
         pack_auto_update_row{};
+    // 增强包 > 高级 > 下载源 (row and drop-down), and the 测速 card under 高级.
+    D2D1_RECT_F pack_dl_row{}, pack_dl_choice{}, pack_speed_card{}, pack_speed_button{}, pack_speed_list{},
+        pack_speed_row[3]{};
     float pack_desc_h = 0.0f;
     // The image pack card (same parts as the FFmpeg one).
     D2D1_RECT_F pack_images_section{}, pack_images_card{}, pack_images_badge{}, pack_images_enable{},
@@ -2573,6 +2577,7 @@ struct SettingsLayout {
     SysCtxLayout sysctx;  // page 6, see LayoutSettingsSysCtx
     ShortcutsLayout shortcuts;  // page 7, see LayoutSettingsShortcuts
     AiPageLayout ai;            // kSettingsPageAi, see LayoutSettingsAi
+    AssistantPageLayout assistant;   // kSettingsPageAssistant, see LayoutSettingsAssistant
     D2D1_RECT_F accent_card{};
     D2D1_RECT_F accent_picker{};
     D2D1_RECT_F effect_card{};
@@ -2844,6 +2849,7 @@ inline void StyleReleaseBadge(fluent::BadgeSpec& spec, ReleaseTag tag, bool dark
 #include "settings_sysctx_layout.h"
 #include "settings_shortcuts_layout.h"
 #include "settings_ai_layout.h"
+#include "settings_assistant_layout.h"
 
 
 bool ContainsPt(const D2D1_RECT_F& rc, float x, float y) {

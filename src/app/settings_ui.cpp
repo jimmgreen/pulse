@@ -13,6 +13,9 @@
 #include "content_pack_ui.h"
 #include "ai_pack_ui.h"
 #include "ai_settings_ui.h"
+#include "download_source_probe.h"
+#include "ai_assistant_settings.h"
+#include "update_transport.h"
 #include "../ui/ui_renderer.h"
 #include <shellapi.h>
 #include <shlobj.h>
@@ -76,7 +79,7 @@ constexpr SettingDestination destinations[]={
     {I::SettingsLanDiscovery,12,0},{I::SettingsLanCache,12,0},{I::SettingsNetworkRecent,12,0},{I::NetworkShowHiddenShares,12,0},
     {I::SettingsClearNetwork,12,0},{I::SettingsChangeTracking,12,0},
     {I::GlobalSearch,1,0},{I::GlobalSearchHotkey,1,0},{I::GlobalSearchDoubleCtrl,1,0},{I::GlobalSearchDoubleCtrlGap,1,0},{I::GlobalSearchApps,1,0},{I::DialogJumpBar,1,0},{I::DialogJumpAuto,1,0},{I::SearchPinyin,1,0},{I::JumpHistory,1,0},{I::ContentIndexManage,1,0},{I::IndexLocation,1,2},{I::LocalDrives,1,2},
-    {I::Exclusions,1,2},{I::ServerFolders,1,2},{I::SettingsContextMenu,2,0},{I::SettingsDuplicates,4,0},{I::QuickPreview,5,4},{I::PreviewPacks,8,0},
+    {I::Exclusions,1,2},{I::ServerFolders,1,2},{I::SettingsContextMenu,2,0},{I::SettingsDuplicates,4,0},{I::QuickPreview,5,4},{I::PreviewPacks,8,0},{I::DownloadSourceTitle,8,0},
     {I::SettingsAboutDiagnostics,3,0},{I::SettingsShowPerformance,3,0},{I::SettingsHints,3,0},{I::SettingsHintsReset,3,0},{I::SettingsTransfer,3,0},{I::SettingsAutoUpdate,3,0},
 };
 std::vector<ui::FluentMenuItem> FilterSettings(const std::wstring& query) {
@@ -349,6 +352,7 @@ bool HandleSettingsControl(AppState& s,const H& hit) {
     case H::SettingsSysCtx: SysCtxAction(s,hit.index);break;
     case H::SettingsShortcuts: ShortcutsAction(s,hit.index);break;
     case H::SettingsAi: pulse::AiSettingsAction(s,hit.index);break;
+    case H::SettingsAssistant: pulse::AssistantSettingsClick(s,hit.index);break;
     case H::SettingsPackAction: {
         bool refresh=false;
         switch(static_cast<ui::PackAction>(hit.index)) {
@@ -387,6 +391,30 @@ bool HandleSettingsControl(AppState& s,const H& hit) {
         case ui::PackAction::AiRemove: ConfirmRemoveAiPack(s); InvalidateRect(s.hwnd,nullptr,FALSE); return true;
         case ui::PackAction::AiCancel: CancelAiPackInstall(); return true;
         case ui::PackAction::AiManage: OpenSettingsTab(s,ui::kSettingsPageAi); return true;
+        case ui::PackAction::DownloadSource: {
+            // 自动, 镜像 1, 镜像 2, GitHub (stored values 0, 2, 3, 1); a tested source shows its time.
+            const uint32_t order[]={0,2,3,1};
+            const int probe_row[]={-1,2,0,1};   // by stored value: the 测速 row
+            const I names[]={I::UpdateSourceAuto,I::UpdateSourceGitHub,I::UpdateSourceMirror1,I::UpdateSourceMirror2};
+            const I descs[]={I::UpdateSourceAutoDesc,I::UpdateSourceGitHubDesc,I::UpdateSourceMirror1Desc,I::UpdateSourceMirror2Desc};
+            const uint32_t current=s.settings.Packs().download_source;
+            std::vector<ui::FluentMenuItem> items;
+            for(const uint32_t value:order) {
+                auto item=Item(static_cast<int>(value)+1,names[value],value==current);
+                const int ms=probe_row[value]>=0 ? app::SourceProbeResult(probe_row[value]) : app::kSourceProbeNotRun;
+                if(ms>=0) item.shortcut=ms<1000 ? std::to_wstring(ms)+L" ms" : std::to_wstring(ms/1000)+L"."+std::to_wstring(ms%1000/100)+L" s";
+                else item.shortcut=l10n::Get(descs[value]);
+                items.push_back(std::move(item));
+            }
+            const int command=Dropdown(s,2,std::move(items));
+            if(command>=1 && command<=static_cast<int>(app::kUpdateSourceCount)) s.settings.SetDownloadSource(static_cast<uint32_t>(command-1));
+            InvalidateRect(s.hwnd,nullptr,FALSE);
+            return true;
+        }
+        case ui::PackAction::SpeedTest:
+            if(!app::SourceProbeRunning()) app::StartSourceProbe(s.hwnd);
+            InvalidateRect(s.hwnd,nullptr,FALSE);
+            return true;
         case ui::PackAction::TriggerHover:
         case ui::PackAction::TriggerSpace:
             s.settings.PreviewTrigger(hit.index-static_cast<int>(ui::PackAction::TriggerHover));

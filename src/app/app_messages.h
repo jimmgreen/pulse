@@ -90,5 +90,12 @@ constexpr UINT WM_DOUBLE_CTRL = WM_APP + 118;  // two Ctrl taps anywhere: toggle
 constexpr UINT WM_DIALOG_JUMP_CONTEXT = WM_APP + 119;  // the dialog jump bar wants the open folders
 constexpr UINT WM_DEVICE_WATCH_READY = WM_APP + 120;  // worker: wParam ticket, lParam PIDLIST_ABSOLUTE of the phone folder to watch (app_runtime.h)
 constexpr UINT WM_DEVICE_FOLDER_CHANGED = WM_APP + 121;  // SHChangeNotify on the watched phone folder (SHCNRF_NewDelivery)
+// The failed pack download card's buttons (pack_failure_ui.h).
+constexpr UINT WM_PACK_RETRY = WM_APP + 122;
+constexpr UINT WM_PACK_SOURCES = WM_APP + 123;
+constexpr UINT WM_PACK_CHECK_UPDATE = WM_APP + 124;
+constexpr UINT WM_PACK_DETAILS = WM_APP + 125;
+constexpr UINT WM_PACK_OPEN_FOLDER = WM_APP + 126;
+constexpr UINT WM_SOURCE_PROBE_DONE = WM_APP + 127;  // a 测速 probe finished (download_source_probe.h)
 
 }  // namespace pulse

@@ -26,6 +26,8 @@
 #include "app_details_tree.h"
 #include "folder_sizes_ui.h"
 #include "update_status.h"
+#include "download_source_probe.h"
+#include "ai_assistant_settings.h"
 #include "about_info.h"
 #include "../ui/lumatext_renderer.h"
 #include "../ui/link_type_text.h"
@@ -653,6 +655,7 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
             vm.settings_expanded = s.appPrefs.search_enabled ? s.settingsExpanded : (s.settingsExpanded & ~2u);
             FillShortcutsVm(s, vm);  // 快捷键: sidebar badge everywhere, the page view on page 7
             if (vm.settings_page == ui::kSettingsPageAi) pulse::FillAiSettingsVm(s, vm);   // 增强包 > AI 与 MCP
+            pulse::FillAssistantSettingsVm(s, vm);   // AI 助手: the page, and the sidebar's 新
             if (vm.settings_page == 5) vm.settings_preview_codecs = ui::DetectPreviewCodecs(false, s.hwnd);
             if (vm.settings_page == 9) {
                 const auto cache = s.settings.ThumbCache(s.hwnd);
@@ -755,6 +758,10 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
                 vm.settings_pack_archive_installing = packs.archive_installing;
                 vm.settings_pack_archive_progress = packs.archive_progress;
                 vm.settings_pack_archive_update_version = packs.archive_update_version;
+                vm.settings_pack_download_source = packs.download_source;
+                for (int row = 0; row < app::kSourceProbeCount; ++row)
+                    vm.settings_pack_speed_ms[row] = app::SourceProbeResult(row);
+                if (vm.settings_pack_speed_ms[2] != app::kSourceProbeNotRun) vm.settings_pack_proxy = app::SourceProbeProxy();
                 // Screenshot fixture for the downloading state (percent).
                 wchar_t fake_progress[8]{};
                 if (s.shot.active && s.isolatedTest &&

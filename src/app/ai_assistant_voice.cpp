@@ -1012,6 +1012,14 @@ void AiVoiceFill(AppState& s, ui::WindowViewModel& vm) {
     if (u.shake_at && Now() - u.shake_at < 800) Redraw(s);   // the shake plays out
 }
 
+void AiVoiceOpenConnection(AppState& s) {
+    AiVoiceUi& u = Ui(s);
+    if (u.rec) return;
+    Reload(u);
+    OpenCard(s, u, Connected(u));
+    Redraw(s);
+}
+
 bool AiVoiceActivate(AppState& s, const ui::AiPanelHit& hit) {
     AiVoiceUi& u = Ui(s);
     switch (hit.part) {

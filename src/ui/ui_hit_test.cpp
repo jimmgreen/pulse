@@ -749,6 +749,8 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                     {&lay.pack_detect, PackAction::UseDetected},
                     {&lay.pack_browse, PackAction::Browse},
                     {&lay.pack_custom_row, PackAction::UseCustom},
+                    {&lay.pack_dl_choice, PackAction::DownloadSource},
+                    {&lay.pack_speed_button, PackAction::SpeedTest},
                     {&lay.pack_auto_update_row, PackAction::AutoUpdate},
                     {&lay.pack_remove_row, PackAction::RemoveOnUninstall},
                     {&lay.trigger_choice[0], PackAction::TriggerHover},
@@ -793,6 +795,13 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 const int target = HitTestSettingsAi(lay, vm, x, y);
                 if (target >= 0) {
                     r.region = HitTestResult::SettingsAi;
+                    r.index = target;
+                    return r;
+                }
+            } else if (vm.settings_page == kSettingsPageAssistant) {
+                const int target = HitTestSettingsAssistant(lay, vm, x, y);
+                if (target >= 0) {
+                    r.region = HitTestResult::SettingsAssistant;
                     r.index = target;
                     return r;
                 }

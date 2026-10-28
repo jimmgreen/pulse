@@ -79,6 +79,7 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
             l.nav_row[3] = D2D1::RectF(l.nav.left + 8*scale, top, l.nav.right - 8*scale, top + row_h*scale);
         }
         l.nav_row[6] = {};
+        l.nav_row[kSettingsPageAi] = {};
     }
     const float pad = 20.0f * scale;
     auto label_btn_w = [&](std::wstring_view label) {
@@ -529,6 +530,8 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
         y = LayoutSettingsShortcuts(l, vm, scale, y, painter);
     } else if (vm.settings_page == kSettingsPageAi) {
         y = LayoutSettingsAi(l, vm, scale, y, painter);
+    } else if (vm.settings_page == kSettingsPageAssistant) {
+        y = LayoutSettingsAssistant(l, vm, scale, y, painter);
     } else if (vm.settings_page == 4) {
         const float card_left = l.content.left + pad;
         const float card_right = l.content.right - pad;

@@ -45,5 +45,7 @@ bool AiVoiceIsField(ui::AiPanelPart part);
 HBRUSH AiVoiceCtlColor(AppState& s, HDC hdc, HWND edit);
 void AiVoiceDpiChanged(AppState& s);
 void AiVoiceDestroy(AppState& s);
+// Settings > AI 助手 > 设置语音…: the voice connection card (manage when set up).
+void AiVoiceOpenConnection(AppState& s);
 
 } // namespace pulse

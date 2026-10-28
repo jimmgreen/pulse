@@ -20,6 +20,12 @@ class NotificationToast {
 public:
     void Show(HWND owner, std::wstring title, std::wstring message, bool persistent = true, UINT action_message = 0);
     void ShowError(HWND owner, std::wstring title, std::wstring message);
+    // The corner card with up to two buttons under its text (the first one
+    // reads as the primary): each posts its message and closes the card. It
+    // waits to be read like an error; `kind` picks the glyph and tone. The
+    // text gets up to four lines.
+    void ShowActionCard(HWND owner, fluent::InfoBarKind kind, std::wstring title, std::wstring message,
+                        std::vector<SnackAction> actions);
     // The tone of the card shown by the last Show (its glyph; an error also
     // gets an edge). Show picks warning for persistent cards, else info.
     void SetKind(fluent::InfoBarKind kind) noexcept { kind_ = kind; }

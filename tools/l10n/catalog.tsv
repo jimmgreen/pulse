@@ -4512,3 +4512,81 @@ AiFoOrgAlready	IDS_AI_FO_ORG_ALREADY	5712	这些项目已经在目标文件夹�
 AiFoOrgClash	IDS_AI_FO_ORG_CLASH	5713	「{folder}」里已有「{name}」，整次没做	“{folder}” already has “{name}”; nothing was moved	「{folder}」裡已有「{name}」，整次沒做
 AiFoOrgNeedFolder	IDS_AI_FO_ORG_NEED_FOLDER	5714	「{name}」要写完整路径（当前不在文件夹里）	“{name}” needs a full path (no folder is open)	「{name}」要寫完整路徑（目前不在資料夾裡）
 AiFoOrgTwice	IDS_AI_FO_ORG_TWICE	5715	「{name}」列了两次	“{name}” is listed twice	「{name}」列了兩次
+PackFailNetworkAll	IDS_PACK_FAIL_NETWORK_ALL	5716	连不上下载服务器，{n} 个下载源都试过了。请检查网络或代理后重试。	Couldn't reach the download servers; all {n} sources were tried. Check your network or proxy and try again.	
+PackFailNetworkOne	IDS_PACK_FAIL_NETWORK_ONE	5717	连不上下载源「{source}」。请检查网络或代理，或换一个下载源后重试。	Couldn't reach {source}. Check your network or proxy, or pick another download source and try again.	
+PackMismatchTitle	IDS_PACK_MISMATCH_TITLE	5718	增强包与这个版本的 Pulse 不匹配	The pack doesn't match this version of Pulse	
+PackMismatchAll	IDS_PACK_MISMATCH_ALL	5719	{n} 个下载源给出的文件都和这个 Pulse 里登记的不一致。通常是因为当前 Pulse 不是正式发布的版本（例如自己编译的测试版），更新到最新正式版即可。	All {n} download sources served a file other than the one this Pulse expects. This usually means this Pulse isn't an official release (for example a build of your own); updating to the latest release fixes it.	
+PackMismatchOne	IDS_PACK_MISMATCH_ONE	5720	下载源「{source}」给出的文件和这个 Pulse 里登记的不一致。可以换一个下载源；如果当前 Pulse 不是正式发布的版本，更新到最新正式版即可。	{source} served a file other than the one this Pulse expects. Try another download source, or update to the latest release if this Pulse isn't an official one.	
+PackMismatchSize	IDS_PACK_MISMATCH_SIZE	5721	大小不一致	size differs	
+PackMismatchHash	IDS_PACK_MISMATCH_HASH	5722	校验值不一致	checksum differs	
+AiPackDiskTitle	IDS_AI_PACK_DISK_TITLE	5723	无法保存 AI 增强包	Couldn't save the AI pack	
+ContentPackDiskTitle	IDS_CONTENT_PACK_DISK_TITLE	5724	无法保存内容搜索增强包	Couldn't save the content search pack	
+PackDiskMessage	IDS_PACK_DISK_MESSAGE	5725	写入增强包文件夹失败：磁盘空间不足，或者文件夹没有写入权限。	Writing to the packs folder failed: the disk may be full, or the folder isn't writable.	
+ContentPackFailedTitle	IDS_CONTENT_PACK_FAILED_TITLE	5726	内容搜索增强包下载失败	Content search pack download failed	
+PackActionSources	IDS_PACK_ACTION_SOURCES	5727	下载源设置	Download source	
+PackActionDetails	IDS_PACK_ACTION_DETAILS	5728	查看详情	Details	
+UpdateSourceAuto	IDS_UPDATE_SOURCE_AUTO	5729	自动（推荐）	Automatic (recommended)	
+UpdateSourceMirror1	IDS_UPDATE_SOURCE_MIRROR1	5730	镜像 1 · ghproxy.net	Mirror 1 · ghproxy.net	
+UpdateSourceMirror2	IDS_UPDATE_SOURCE_MIRROR2	5731	镜像 2 · gh-proxy.com	Mirror 2 · gh-proxy.com	
+UpdateSourceGitHub	IDS_UPDATE_SOURCE_GITHUB	5732	GitHub 直连	GitHub direct	
+UpdateSourceAutoDesc	IDS_UPDATE_SOURCE_AUTO_DESC	5733	镜像 1 → 镜像 2 → GitHub，逐个尝试	Mirror 1 → mirror 2 → GitHub, one after another	
+UpdateSourceMirror1Desc	IDS_UPDATE_SOURCE_MIRROR1_DESC	5734	国内访问较快	Usually faster in mainland China	
+UpdateSourceMirror2Desc	IDS_UPDATE_SOURCE_MIRROR2_DESC	5735	备用镜像	Backup mirror	
+UpdateSourceGitHubDesc	IDS_UPDATE_SOURCE_GITHUB_DESC	5736	使用系统代理设置	Uses the system proxy settings	
+DownloadSourceTitle	IDS_DOWNLOAD_SOURCE_TITLE	5737	下载源	Download source	
+DownloadSourceDesc	IDS_DOWNLOAD_SOURCE_DESC	5738	增强包和 Pulse 更新从哪里下载。「自动」会先试国内镜像，连不上或文件不对就换下一个，最后试 GitHub。	Where packs and Pulse updates come from. Automatic tries the mirrors first, moves on when one can't be reached or serves a wrong file, and tries GitHub last.	
+SpeedTestTitle	IDS_SPEED_TEST_TITLE	5739	测速	Speed test	
+SpeedTestDesc	IDS_SPEED_TEST_DESC	5740	逐个连接下载源，取一个小文件，不会下载增强包本身。	Connects to each source and fetches a small file; the packs themselves aren't downloaded.	
+SpeedTestStart	IDS_SPEED_TEST_START	5741	开始测速	Test now	
+SpeedTestAgain	IDS_SPEED_TEST_AGAIN	5742	重新测速	Test again	
+SpeedTestOk	IDS_SPEED_TEST_OK	5743	可用 · {time}	Available · {time}	
+SpeedTestFail	IDS_SPEED_TEST_FAIL	5744	不可用	Unavailable	
+SpeedTestRunning	IDS_SPEED_TEST_RUNNING	5745	正在测速…	Testing…	
+SpeedTestViaProxy	IDS_SPEED_TEST_VIA_PROXY	5746	GitHub 直连（经系统代理 {proxy}）	GitHub direct (via system proxy {proxy})	
+SpeedTestNotRun	IDS_SPEED_TEST_NOT_RUN	5747	未测速	Not tested	
+PackDetailsTitle	IDS_PACK_DETAILS_TITLE	5748	增强包下载详情	Pack download details	
+PackDetailsPack	IDS_PACK_DETAILS_PACK	5749	增强包：{name} {version}	Pack: {name} {version}	
+PackDetailsFile	IDS_PACK_DETAILS_FILE	5750	文件：{file} · 登记 {size}	File: {file} · expected {size}	
+PackDetailsSources	IDS_PACK_DETAILS_SOURCES	5751	试过的下载源：{sources}	Sources tried: {sources}	
+PackDetailsResult	IDS_PACK_DETAILS_RESULT	5752	结果：{result}（错误代码 {code}）	Result: {result} (error code {code})	
+PackDetailsNote	IDS_PACK_DETAILS_NOTE	5753	Pulse 里登记了每个增强包文件的大小和校验值，下载到的文件完全一致才会安装。自己编译的 Pulse 登记的是本机编译的增强包，所以下载不到匹配的文件。	Pulse records the size and checksum of every pack file and installs only an exact match. A Pulse you built yourself records packs built on your PC, so no download can match.	
+AiPackName	IDS_AI_PACK_NAME	5754	AI 增强包	AI pack	
+ContentPackName	IDS_CONTENT_PACK_NAME	5755	内容搜索增强包	Content search pack	
+AsstPageTitle	IDS_ASST_PAGE_TITLE	5756	AI 助手	AI assistant	
+AsstPageIntro	IDS_ASST_PAGE_INTRO	5757	Pulse 内置的对话助手（Ctrl+J）。它用你自己的模型服务和 API Key，Key 只加密保存在这台电脑上。	Pulse's built-in chat assistant (Ctrl+J). It uses your own model service and API key; the key is stored encrypted on this PC only.	
+AsstModelSection	IDS_ASST_MODEL_SECTION	5758	模型服务	Model service	
+AsstModelTitle	IDS_ASST_MODEL_TITLE	5759	服务与模型	Service and model	
+AsstModelDesc	IDS_ASST_MODEL_DESC	5760	兼容 OpenAI 接口的服务都可以用：DeepSeek 官方、自己部署的模型或其他服务商。	Any OpenAI-compatible service works: DeepSeek, a model you host, or another provider.	
+AsstService	IDS_ASST_SERVICE	5761	服务	Service	
+AsstServiceOfficial	IDS_ASST_SERVICE_OFFICIAL	5762	DeepSeek 官方	DeepSeek (official)	
+AsstServiceCustom	IDS_ASST_SERVICE_CUSTOM	5763	自定义服务	Custom service	
+AsstDefaultModel	IDS_ASST_DEFAULT_MODEL	5764	默认模型	Default model	
+AsstModelCount	IDS_ASST_MODEL_COUNT	5765	模型列表来自服务，共 {n} 个	{n} models listed by the service	
+AsstModelUnlisted	IDS_ASST_MODEL_UNLISTED	5766	连接后从服务读取模型列表	The model list is read from the service once connected	
+AsstKey	IDS_ASST_KEY	5767	API Key	API key	
+AsstKeySaved	IDS_ASST_KEY_SAVED	5768	已保存 · 本机加密	Saved · encrypted on this PC	
+AsstLastConn	IDS_ASST_LAST_CONN	5769	上次连接	Last connection	
+AsstConnOk	IDS_ASST_CONN_OK	5770	正常 · {time}	OK · {time}	
+AsstConnBad	IDS_ASST_CONN_BAD	5771	失败 · {time}	Failed · {time}	
+AsstConnNever	IDS_ASST_CONN_NEVER	5772	本次运行还没有连接	Not connected in this session	
+AsstConnTesting	IDS_ASST_CONN_TESTING	5773	正在测试…	Testing…	
+AsstTest	IDS_ASST_TEST	5774	测试连接	Test connection	
+AsstManage	IDS_ASST_MANAGE	5775	管理连接…	Manage connection…	
+AsstConnect	IDS_ASST_CONNECT	5776	连接模型…	Connect a model…	
+AsstManageFoot	IDS_ASST_MANAGE_FOOT	5777	「管理连接」打开助手面板里的连接卡片：换服务地址、换 Key、选默认模型都在那里，改完立即生效。	Manage connection opens the connection card in the assistant panel: change the service address, the key or the default model there; changes apply at once.	
+AsstVoiceSection	IDS_ASST_VOICE_SECTION	5778	语音输入	Voice input	
+AsstVoiceTitle	IDS_ASST_VOICE_TITLE	5779	语音识别服务	Speech recognition service	
+AsstVoiceDesc	IDS_ASST_VOICE_DESC	5780	只在你按住麦克风时录音，录音不保存，识别完也不会自动发送。	Records only while you hold the microphone; recordings aren't saved and nothing is sent by itself.	
+AsstVoiceHint	IDS_ASST_VOICE_HINT	5781	可选：硅基流动（免费模型）· OpenAI · 自定义	Options: SiliconFlow (free model) · OpenAI · custom	
+AsstVoiceSet	IDS_ASST_VOICE_SET	5782	设置语音…	Set up voice…	
+AsstVoiceSiliconFlow	IDS_ASST_VOICE_SILICONFLOW	5783	硅基流动	SiliconFlow	
+AsstVoiceCustom	IDS_ASST_VOICE_CUSTOM	5784	自定义	Custom	
+AsstVoiceNoKey	IDS_ASST_VOICE_NO_KEY	5785	缺少 Key	Key missing	
+AsstMcpSection	IDS_ASST_MCP_SECTION	5786	让其他 AI 应用使用 Pulse	Let other AI apps use Pulse	
+AsstMcpDesc	IDS_ASST_MCP_DESC	5787	和上面的助手不是一回事：这是让 Claude 等外部 AI 应用来查找、整理你的文件。需要 AI 增强包。	Not the assistant above: this lets outside AI apps such as Claude find and organize your files. Needs the AI pack.	
+AsstMcpMeta	IDS_ASST_MCP_META	5788	Pulse.AI.exe · MCP · 随 Pulse 同步更新	Pulse.AI.exe · MCP · updated with Pulse	
+AsstMcpManage	IDS_ASST_MCP_MANAGE	5789	在增强包中管理	Manage in Packs	
+SettingsNavNew	IDS_SETTINGS_NAV_NEW	5790	新	New	
+AsstToday	IDS_ASST_TODAY	5791	今天 {time}	today {time}	
+AsstBadgeFailed	IDS_ASST_BADGE_FAILED	5792	连接失败	Connection failed	
+AsstVoiceSetBadge	IDS_ASST_VOICE_SET_BADGE	5793	已设置	Set up	

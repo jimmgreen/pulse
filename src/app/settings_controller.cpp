@@ -134,6 +134,7 @@ int SettingsController::PageFromName(std::wstring_view name) noexcept {
     if (name == L"tabs") return 10;
     if (name == L"system") return 11;
     if (name == L"file-ops") return 12;
+    if (name == L"assistant") return ui::kSettingsPageAssistant;
     return 0;
 }
 
@@ -151,12 +152,13 @@ const wchar_t* SettingsController::PageName(int page) noexcept {
     if (page == 10) return L"tabs";
     if (page == 11) return L"system";
     if (page == 12) return L"file-ops";
+    if (page == ui::kSettingsPageAssistant) return L"assistant";
     return L"general";
 }
 
 void SettingsController::SelectPage(int page) noexcept {
     CancelGlobalSearchHotkeyCapture();
-    page_ = std::clamp(page, 0, ui::kSettingsPageAi);
+    page_ = std::clamp(page, 0, ui::kSettingsPageAssistant);
     scroll_ = 0.0f;
     packs_checked_ = 0;  // re-read the packs when their page opens
 }

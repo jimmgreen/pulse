@@ -92,6 +92,7 @@
 #include "ai_launcher.h"
 #include "ai_service.h"
 #include "ai_settings_ui.h"
+#include "pack_failure_ui.h"
 #include "ai_assistant.h"
 #include "ai_assistant_chat.h"
 #include "ai_assistant_voice.h"
@@ -2136,6 +2137,18 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case WM_AI_SNACK_UNDO:
     case WM_AI_SNACK_OPEN:
         if (s) pulse::HandleAiSnackMessage(*s, msg);
+        return 0;
+
+    case WM_PACK_RETRY:
+    case WM_PACK_SOURCES:
+    case WM_PACK_CHECK_UPDATE:
+    case WM_PACK_DETAILS:
+    case WM_PACK_OPEN_FOLDER:
+        if (s) pulse::HandlePackFailureMessage(*s, msg);
+        return 0;
+
+    case WM_SOURCE_PROBE_DONE:
+        if (s) InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
 
     case WM_ZIP_COMPRESS:

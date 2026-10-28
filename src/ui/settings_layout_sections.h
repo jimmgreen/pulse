@@ -679,6 +679,55 @@ inline bool ShowsDetect(const WindowViewModel& vm) {
     return !vm.settings_pack_detected_path.empty() &&
         _wcsicmp(vm.settings_pack_detected_path.c_str(), vm.settings_pack_custom_path.c_str()) != 0;
 }
+// 高级 > 下载源 and 测速.
+inline const wchar_t* DownloadSourceTitle() { return l10n::Get(l10n::StringId::DownloadSourceTitle).c_str(); }
+inline const wchar_t* DownloadSourceDesc() { return l10n::Get(l10n::StringId::DownloadSourceDesc).c_str(); }
+// By stored value (app::UpdateSource): 0 自动, 1 GitHub, 2 镜像 1, 3 镜像 2.
+inline const wchar_t* SourceName(uint32_t source) {
+    using I = l10n::StringId;
+    const I ids[] = {I::UpdateSourceAuto, I::UpdateSourceGitHub, I::UpdateSourceMirror1, I::UpdateSourceMirror2};
+    return l10n::Get(ids[source < 4 ? source : 0]).c_str();
+}
+inline const wchar_t* SpeedTestTitle() { return l10n::Get(l10n::StringId::SpeedTestTitle).c_str(); }
+inline const wchar_t* SpeedTestDesc() { return l10n::Get(l10n::StringId::SpeedTestDesc).c_str(); }
+inline bool SpeedTestRan(const WindowViewModel& vm) {
+    for (const int ms : vm.settings_pack_speed_ms) if (ms != -1) return true;
+    return false;
+}
+inline bool SpeedTestRunning(const WindowViewModel& vm) {
+    for (const int ms : vm.settings_pack_speed_ms) if (ms == -2) return true;
+    return false;
+}
+inline const wchar_t* SpeedTestButton(const WindowViewModel& vm) {
+    return l10n::Get(SpeedTestRan(vm) ? l10n::StringId::SpeedTestAgain : l10n::StringId::SpeedTestStart).c_str();
+}
+// Milliseconds as "320 ms" / "1.2 s".
+inline std::wstring SpeedTime(int ms) {
+    wchar_t text[32]{};
+    if (ms < 1000) swprintf_s(text, L"%d ms", ms);
+    else swprintf_s(text, L"%.1f s", static_cast<double>(ms) / 1000.0);
+    return text;
+}
+// 测速 row `row` (0 镜像 1, 1 镜像 2, 2 GitHub): the source, GitHub with its proxy.
+inline std::wstring SpeedRowName(const WindowViewModel& vm, int row) {
+    if (row == 0) return SourceName(2);
+    if (row == 1) return SourceName(3);
+    if (vm.settings_pack_proxy.empty()) return SourceName(1);
+    std::wstring text = l10n::Get(l10n::StringId::SpeedTestViaProxy);
+    const size_t at = text.find(L"{proxy}");
+    if (at != std::wstring::npos) text.replace(at, 7, vm.settings_pack_proxy);
+    return text;
+}
+inline std::wstring SpeedRowStatus(int ms) {
+    using I = l10n::StringId;
+    if (ms == -1) return l10n::Get(I::SpeedTestNotRun);
+    if (ms == -2) return l10n::Get(I::SpeedTestRunning);
+    if (ms < 0) return l10n::Get(I::SpeedTestFail);
+    std::wstring text = l10n::Get(I::SpeedTestOk);
+    const size_t at = text.find(L"{time}");
+    if (at != std::wstring::npos) text.replace(at, 6, SpeedTime(ms));
+    return text;
+}
 } // namespace pack_text
 
 float LayoutSettingsPacks(SettingsLayout& l, const WindowViewModel& vm, float scale,
@@ -912,9 +961,32 @@ float LayoutSettingsPacks(SettingsLayout& l, const WindowViewModel& vm, float sc
     // Background updates and the uninstall choice remain separate from the media source.
     y += 24*scale; l.pack_advanced_section = row(28);
     const float group_top = y;
+    {
+        // 下载源: the drop-down at the right of its row.
+        const float choice_w = 220*scale;
+        l.pack_dl_row = row((caption_h(pack_text::DownloadSourceDesc(), right - left - 304*scale) + 47*scale) / scale);
+        const float cy = (l.pack_dl_row.top + l.pack_dl_row.bottom) * 0.5f;
+        l.pack_dl_choice = D2D1::RectF(right - 16*scale - choice_w, cy - 16*scale, right - 16*scale, cy + 16*scale);
+    }
     l.pack_auto_update_row = row((caption_h(pack_text::AutoUpdateDesc(), right - left - 126*scale) + 47*scale) / scale);
     l.pack_remove_row = row((caption_h(pack_text::RemoveDesc(), right - left - 126*scale) + 47*scale) / scale);
     l.pack_group = D2D1::RectF(left, group_top, right, y);
+    {
+        // 测速: title, caption and the button, then a row per source.
+        y += 12*scale;
+        const float top = y;
+        const float bw = (std::max)(button_w(pack_text::SpeedTestButton(vm)), 88*scale);
+        const float header_h = caption_h(pack_text::SpeedTestDesc(), right - left - 84*scale - bw) + 47*scale;
+        l.pack_speed_button = D2D1::RectF(right - 16*scale - bw, top + 14*scale, right - 16*scale, top + 46*scale);
+        float ry = top + header_h + 4*scale;
+        for (auto& r : l.pack_speed_row) {
+            r = D2D1::RectF(left + 54*scale, ry, right - 16*scale, ry + 36*scale);
+            ry = r.bottom;
+        }
+        l.pack_speed_list = D2D1::RectF(left + 54*scale, top + header_h + 4*scale, right - 16*scale, ry);
+        y = ry + 16*scale;
+        l.pack_speed_card = D2D1::RectF(left, top, right, y);
+    }
     y += 12*scale;
     l.pack_note = D2D1::RectF(left, y, right, y + caption_h(pack_text::Note(), right - left - 8*scale) + 4*scale);
     y = l.pack_note.bottom + 24*scale;

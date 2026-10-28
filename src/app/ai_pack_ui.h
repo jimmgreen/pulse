@@ -25,4 +25,7 @@ float AiPackInstallProgress() noexcept;  // 0..1
 // pack after Pulse itself was updated (Settings > auto update).
 void TickAiPackInstall(AppState& s);
 
+// 重试 on the failure card: downloads again, without asking.
+bool RetryAiPackInstall(AppState& s);
+
 } // namespace pulse

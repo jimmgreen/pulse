@@ -98,4 +98,34 @@ struct AiPageLayout {
     D2D1_RECT_F pack_section{}, uninstall_row{}, uninstall{};
 };
 
+// Settings > AI 助手 (kSettingsPageAssistant): Pulse's own assistant (Ctrl+J), its
+// model service and voice input, and a way to AI 与 MCP. Built by
+// app/ai_assistant_settings.cpp; never holds the key itself.
+enum AssistantHit : int {
+    kAsstTest = 0,     // 测试连接
+    kAsstManage = 1,   // 管理连接… / 连接模型…: the assistant panel's connection card
+    kAsstVoice = 2,    // 设置语音…: the panel's voice connection card
+    kAsstMcp = 3,      // 在增强包中管理: 增强包 > AI 与 MCP
+};
+enum class AsstConn : uint8_t { None, Ok, Failed, Testing };
+struct AssistantPageView {
+    bool key_saved = false;
+    bool official = true;          // the default DeepSeek address
+    std::wstring host;             // api.deepseek.com
+    std::wstring model;            // the default model id
+    size_t model_count = 0;        // ids the service listed (0: not read yet)
+    AsstConn conn = AsstConn::None;
+    std::wstring conn_time;        // HH:MM of this run's last check
+    bool voice_set = false, voice_key = false;
+    std::wstring voice_service;    // 硅基流动 / OpenAI / 自定义
+    std::wstring voice_host;
+    bool mcp_installed = false;    // the AI pack (bundled or installed)
+};
+struct AssistantPageLayout {
+    D2D1_RECT_F model_section{}, model_card{}, model_badge{}, test{}, manage{}, model_foot{};
+    D2D1_RECT_F model_rows[4]{};   // 服务, 默认模型, API Key, 上次连接
+    D2D1_RECT_F voice_section{}, voice_card{}, voice_badge{}, voice_button{}, voice_row{};
+    D2D1_RECT_F mcp_section{}, mcp_card{}, mcp_badge{}, mcp_button{}, mcp_meta{};
+};
+
 } // namespace pulse::ui
