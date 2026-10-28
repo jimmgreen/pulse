@@ -442,6 +442,154 @@ FilePlan PlanEmptyBin(FilePlan p) {
     return p;
 }
 
+// file.organize: moves[{item, dest}] in one plan. An item or a dest that is
+// not a full path is a name in the focused folder (下载 + 文档 = 下载\文档);
+// without a focused folder a dest goes through the resolver (Documents\发票).
+// Any name already taken in its folder refuses the whole plan: nothing is
+// overwritten or renamed to (2), and the model is told which name to change.
+FilePlan PlanOrganize(AppState& s, FilePlan p, const json::Value& args, DestResolver resolve) {
+    const json::Value* moves = args.find("moves");
+    if (!moves || !moves->is_array() || moves->size() == 0)
+        return Fail(std::move(p), "moves must be a non-empty array of {item, dest}", Text(I::AiFoNoItems));
+    if (moves->size() > kMaxItems)
+        return Fail(std::move(p), "too many items for one step (5000 at most)",
+                    Fill(Text(I::AiFoTooMany), L"{n}", std::to_wstring(kMaxItems)));
+    app::Tab* tab = ActiveTab(s);
+    const std::wstring here = tab && RealFolder(tab->current_path) && !tab->net_readonly
+                                  ? pulse::path::StripExtendedPathPrefix(tab->current_path)
+                                  : std::wstring();
+    const auto clean = [](std::wstring x) {
+        x = pulse::path::StripExtendedPathPrefix(Trimmed(std::move(x)));
+        for (wchar_t& c : x)
+            if (c == L'/') c = L'\\';
+        while (x.size() > 3 && x.back() == L'\\') x.pop_back();
+        return x;
+    };
+    const auto absolute = [](const std::wstring& x) {
+        return x.size() >= 3 && ((x[1] == L':' && x[2] == L'\\') || x.rfind(L"\\\\", 0) == 0);
+    };
+    json::Value list = json::Value::Array();
+    std::vector<std::wstring> dest_of;
+    for (size_t i = 0; i < moves->size(); ++i) {
+        const json::Value& m = moves->at(i);
+        if (!m.is_object()) return Fail(std::move(p), "each move is an object {item, dest}", Text(I::AiFoNoItems));
+        std::wstring item = clean(json::Wide(m.get_string("item", m.get_string("path"))));
+        std::wstring dest = clean(json::Wide(m.get_string("dest", m.get_string("dest_folder"))));
+        if (item.empty()) return Fail(std::move(p), "a move has no item", Text(I::AiFoNoItems));
+        if (dest.empty()) return Fail(std::move(p), "a move has no dest", Text(I::AiFoNoDest));
+        if (!absolute(item)) {
+            if (here.empty())
+                return Fail(std::move(p), "item is a name but the focused pane is not a folder: give full paths",
+                            Fill(Text(I::AiFoOrgNeedFolder), L"{name}", item));
+            item = Join(here, item);
+        }
+        if (!absolute(dest)) {
+            if (!here.empty()) {
+                dest = Join(here, dest);
+            } else {
+                const std::wstring raw = dest;
+                dest = resolve ? clean(resolve(raw)) : std::wstring();
+                if (!absolute(dest))
+                    return Fail(std::move(p), "dest is a name but the focused pane is not a folder: give full paths",
+                                Fill(Text(I::AiFoOrgNeedFolder), L"{name}", raw));
+            }
+        }
+        list.push(json::Value(json::Utf8(item)));
+        dest_of.push_back(std::move(dest));
+    }
+    json::Value items_args = json::Value::Object();
+    items_args.set("items", std::move(list));
+    std::vector<std::wstring> items;
+    if (!Items(s, items_args, items, p)) return p;   // exists, not a drive, not a system folder
+    if (items.size() != dest_of.size())
+        return Fail(std::move(p), "every item must be a path string", Text(I::AiFoNoItems));
+    for (size_t i = 0; i < items.size(); ++i)
+        for (size_t j = 0; j < i; ++j)
+            if (Same(items[i], items[j]))
+                return Fail(std::move(p), "an item is listed twice", Fill(Text(I::AiFoOrgTwice), L"{name}", Leaf(items[i])));
+    for (size_t i = 0; i < items.size(); ++i) {
+        const std::wstring& dest = dest_of[i];
+        if (!RealFolder(dest))
+            return Fail(std::move(p), "dest must be a folder path", Fill(Text(I::AiFoBadDest), L"{dest}", dest));
+        if (const std::wstring root = SystemFolderOf(dest); !root.empty())
+            return Fail(std::move(p), "dest is inside a system or program folder",
+                        Fill(Text(I::AiFoSystem), L"{folder}", root));
+        if (Exists(dest) && !IsDir(dest))
+            return Fail(std::move(p), "dest is a file, not a folder", Fill(Text(I::AiFoBadDest), L"{dest}", dest));
+        if (Under(dest, items[i]))
+            return Fail(std::move(p), "a folder cannot go into itself", Text(I::AiFoIntoItself));
+    }
+    // Group by folder (first one named first); an item already there does nothing.
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (Same(Parent(items[i]), dest_of[i])) continue;
+        auto it = std::find_if(p.dests.begin(), p.dests.end(), [&](const OrganizeDest& d) { return Same(d.path, dest_of[i]); });
+        if (it == p.dests.end()) {
+            OrganizeDest d;
+            d.path = dest_of[i];
+            d.make = !IsDir(d.path);
+            p.dests.push_back(std::move(d));
+            it = p.dests.end() - 1;
+        }
+        it->sources.push_back(items[i]);
+    }
+    if (p.dests.empty()) {
+        p.ok = true;
+        p.skip = true;
+        p.why = Text(I::AiFoOrgAlready);
+        return p;
+    }
+    // A taken name anywhere refuses the whole plan.
+    for (const OrganizeDest& d : p.dests) {
+        for (size_t i = 0; i < d.sources.size(); ++i) {
+            const std::wstring leaf = Leaf(d.sources[i]);
+            bool taken = !d.make && Exists(Join(d.path, leaf));
+            for (size_t j = 0; j < i && !taken; ++j) taken = Same(Leaf(d.sources[j]), leaf);
+            if (taken) {
+                p.error = "conflict: \"" + json::Utf8(Join(d.path, leaf)) +
+                          "\" is taken (already there, or two items share the name); nothing was moved. "
+                          "Pick another dest for that item and try again.";
+                p.ok = false;
+                p.why = Fill(Fill(Text(I::AiFoOrgClash), L"{name}", leaf), L"{folder}", Leaf(d.path));
+                return std::move(p);
+            }
+        }
+    }
+    // Missing folders and their missing parents, parents first.
+    for (const OrganizeDest& d : p.dests) {
+        if (!d.make) continue;
+        std::vector<std::wstring> chain;
+        for (std::wstring at = d.path; !at.empty() && !IsDir(at); at = Parent(at)) {
+            if (IsDriveRoot(at) || app::IsUncServerRoot(at) || Same(Parent(at), at))
+                return Fail(std::move(p), "dest is on a drive or share that is not there",
+                            Fill(Text(I::AiFoBadDest), L"{dest}", d.path));
+            if (Exists(at)) return Fail(std::move(p), "a folder on the dest path is a file",
+                                        Fill(Text(I::AiFoBadDest), L"{dest}", at));
+            chain.push_back(at);
+        }
+        for (auto it = chain.rbegin(); it != chain.rend(); ++it)
+            if (std::none_of(p.make_folders.begin(), p.make_folders.end(), [&](const std::wstring& f) { return Same(f, *it); }))
+                p.make_folders.push_back(*it);
+    }
+    for (const OrganizeDest& d : p.dests)
+        for (const std::wstring& src : d.sources) p.sources.push_back(src);
+    for (const OrganizeDest& d : p.dests) {
+        FilePlan part;
+        part.sources = d.sources;
+        AddRows(part, d.path);
+        for (FileRow& r : part.rows) p.rows.push_back(std::move(r));
+        p.bytes += part.bytes;
+        if (!part.files_only) p.files_only = false;
+    }
+    p.count = p.rows.size();
+    p.dest = Parent(p.sources[0]);
+    for (const std::wstring& src : p.sources)
+        if (!Same(Parent(src), p.dest)) p.one_source_folder = false;
+    if (!p.one_source_folder && !here.empty()) p.dest = here;
+    p.dest_exists = true;
+    p.ok = true;
+    return p;
+}
+
 } // namespace
 
 FileOp FileOpOf(std::string_view id) noexcept {
@@ -454,6 +602,7 @@ FileOp FileOpOf(std::string_view id) noexcept {
     if (id == "file.delete_permanent") return FileOp::Purge;
     if (id == "recycle.restore") return FileOp::Restore;
     if (id == "recycle.empty") return FileOp::EmptyBin;
+    if (id == "file.organize") return FileOp::Organize;
     return FileOp::None;
 }
 
@@ -464,7 +613,8 @@ bool FileOpUndoes(FileOp op) noexcept {
     case FileOp::Rename:
     case FileOp::Group:
     case FileOp::Dissolve:
-    case FileOp::Recycle: return true;
+    case FileOp::Recycle:
+    case FileOp::Organize: return true;
     default: return false;
     }
 }
@@ -483,6 +633,7 @@ FilePlan PlanFileOp(AppState& s, std::string_view id, const json::Value& args, D
     case FileOp::Purge: return PlanPurge(s, std::move(p), args);
     case FileOp::Restore: return PlanRestore(s, std::move(p));
     case FileOp::EmptyBin: return PlanEmptyBin(std::move(p));
+    case FileOp::Organize: return PlanOrganize(s, std::move(p), args, resolve);
     case FileOp::None: break;
     }
     return Fail(std::move(p), "not a file action", Text(I::AiActWhyUnknown));
@@ -564,6 +715,23 @@ std::vector<uint64_t> SubmitFilePlan(AppState& s, const FilePlan& plan, uint64_t
         ops::OpRequest r = request(ops::OpType::EmptyRecycle);
         r.undo_group = 0;
         tasks.push_back(s.ops.Submit(std::move(r)));
+        break;
+    }
+    case FileOp::Organize: {
+        // The new folders (parents first), then one move per folder; all one undo group.
+        for (const std::wstring& folder : plan.make_folders) {
+            ops::OpRequest make = request(ops::OpType::CreateFolder);
+            make.sources.push_back(folder);
+            tasks.push_back(s.ops.Submit(std::move(make)));
+        }
+        s.cutPaths.clear();
+        for (const OrganizeDest& d : plan.dests) {
+            ops::OpRequest r = request(ops::OpType::Move);
+            r.sources = d.sources;
+            r.dest_dir = d.path;
+            r.collision_policy = ops::CollisionPolicy::KeepBoth;   // checked free; never overwrite a late arrival
+            tasks.push_back(s.ops.Submit(std::move(r)));
+        }
         break;
     }
     case FileOp::None: break;

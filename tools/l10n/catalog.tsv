@@ -4426,3 +4426,89 @@ OpAuthTitleMove	IDS_OP_AUTH_TITLE_MOVE	5626	移动到这里需要管理员权限
 OpAuthTitleDelete	IDS_OP_AUTH_TITLE_DELETE	5627	删除这些项目需要管理员权限	Deleting these items needs administrator permission	刪除這些項目需要系統管理員權限
 OpAuthNotGrantedShort	IDS_OP_AUTH_NOT_GRANTED_SHORT	5628	没有获得管理员权限。	Administrator permission wasn't granted.	沒有取得系統管理員權限。
 OpAuthorizationOnce	IDS_OP_AUTHORIZATION_ONCE	5629	确认一次即可，本次操作的其余项目不会再问。	You only need to approve once; the rest of this operation won't ask again.	確認一次即可，本次操作的其餘項目不會再詢問。
+ActFindDuplicates	IDS_ACT_FIND_DUPLICATES	5630	查找重复文件	Find duplicate files	尋找重複檔案
+ActOrganizeHere	IDS_ACT_ORGANIZE_HERE	5631	AI 整理此文件夹…	AI tidy this folder…	AI 整理此資料夾…
+ActDomAssistant	IDS_ACT_DOM_ASSISTANT	5632	AI 助手	AI assistant	AI 助理
+ActFindDupValue	IDS_ACT_FIND_DUP_VALUE	5633	比对「{folder}」	Compare “{folder}”	比對「{folder}」
+ActOrganizeValue	IDS_ACT_ORGANIZE_VALUE	5634	交给 Pulse 助手	Hand to the Pulse assistant	交給 Pulse 助理
+ActNeedAi	IDS_ACT_NEED_AI	5635	先在 设置 → AI 里连接模型	Connect a model in Settings → AI first	先在 設定 → AI 裡連線模型
+ActWhyOpenFolder	IDS_ACT_WHY_OPEN_FOLDER	5636	先打开一个文件夹	Open a folder first	先開啟一個資料夾
+AiOrgHere	IDS_AI_ORG_HERE	5637	把「{folder}」整理一下：	Tidy up “{folder}”: 	把「{folder}」整理一下：
+AiOrgHereSel	IDS_AI_ORG_HERE_SEL	5638	把选中的 {n} 项整理一下：	Tidy up the {n} selected items: 	把選取的 {n} 項整理一下：
+AiOrgHereTail	IDS_AI_ORG_HERE_TAIL	5639	按类型分到文件夹	sort them into folders by type	依類型分到資料夾
+AiLockOrgHereS	IDS_AI_LOCK_ORG_HERE_S	5640	这一步只是把一句话填进 Pulse 助手的输入框，由你自己改了再发。	This only puts a sentence in the Pulse assistant's box, for you to edit and send.	這一步只是把一句話填進 Pulse 助理的輸入框，由你自己改了再送出。
+AiLockOrgHereWhere	IDS_AI_LOCK_ORG_HERE_WHERE	5641	在 Pulse 里：命令面板 >「AI 整理此文件夹…」，或在文件夹空白处右键	In Pulse: command palette > “AI tidy this folder…”, or right-click a folder's empty space	在 Pulse 裡：命令面板 >「AI 整理此資料夾…」，或在資料夾空白處按右鍵
+DupFTitle	IDS_DUP_F_TITLE	5642	重复文件	Duplicate files	重複檔案
+DupFTabRunning	IDS_DUP_F_TAB_RUNNING	5643	重复文件 · 比对中	Duplicate files · comparing	重複檔案 · 比對中
+DupFGroupsN	IDS_DUP_F_GROUPS_N	5644	{g} 组	{g} groups	{g} 組
+DupFHeaderSub	IDS_DUP_F_HEADER_SUB	5645	{where} · 含子文件夹	{where} · with subfolders	{where} · 含子資料夾
+DupFSecs	IDS_DUP_F_SECS	5646	{s} 秒	{s} s	{s} 秒
+DupFRunTitle	IDS_DUP_F_RUN_TITLE	5647	正在比对「{where}」…	Comparing “{where}”…	正在比對「{where}」…
+DupFRunSub	IDS_DUP_F_RUN_SUB	5648	已看过 {n} 个文件 · {size}	{n} files looked at · {size}	已看過 {n} 個檔案 · {size}
+DupFS1	IDS_DUP_FS1	5649	① 大小相同	① Same size	① 大小相同
+DupFS2	IDS_DUP_FS2	5650	② 开头 64 KB 相同	② Same first 64 KB	② 開頭 64 KB 相同
+DupFS3	IDS_DUP_FS3	5651	③ 逐字节相同	③ Same bytes	③ 逐位元組相同
+DupFS1Run	IDS_DUP_FS1_RUN	5652	已看过 {n} 个	{n} looked at	已看過 {n} 個
+DupFS1Val	IDS_DUP_FS1_VAL	5653	{n} 个文件可能重复	{n} files may be duplicates	{n} 個檔案可能重複
+DupFS2Val	IDS_DUP_FS2_VAL	5654	{n} 个	{n} files	{n} 個
+DupFS3Val	IDS_DUP_FS3_VAL	5655	{k} / {n} 已核对	{k} / {n} checked	{k} / {n} 已核對
+DupFProg	IDS_DUP_F_PROG	5656	{k} / {n}	{k} / {n}	{k} / {n}
+DupFWait	IDS_DUP_F_WAIT	5657	等待	Waiting	等待
+DupFBusy	IDS_DUP_F_BUSY	5658	正在把多出的副本移到回收站…	Moving the extra copies to the Recycle Bin…	正在把多出的副本移到資源回收筒…
+DupFBusyPurge	IDS_DUP_F_BUSY_PURGE	5659	正在永久删除多出的副本…	Permanently deleting the extra copies…	正在永久刪除多出的副本…
+DupFBusySub	IDS_DUP_F_BUSY_SUB	5660	每组保留的那份先锁定，再核对一次内容	Each group's kept copy is locked and checked again first	每組保留的那份先鎖定，再核對一次內容
+DupFEmpty	IDS_DUP_F_EMPTY	5661	没有找到重复的文件	No duplicate files found	沒有找到重複的檔案
+DupFEmptyAfter	IDS_DUP_F_EMPTY_AFTER	5662	没有重复文件了	No duplicates left	沒有重複檔案了
+DupFSumTitle	IDS_DUP_F_SUM_TITLE	5663	{g} 组重复，多出 {n} 份，共 {size}	{g} duplicate groups, {n} extra copies, {size} in all	{g} 組重複，多出 {n} 份，共 {size}
+DupFSumKeepAll	IDS_DUP_F_SUM_KEEP_ALL	5664	{g} 组重复，都建议保留	{g} duplicate groups, all worth keeping	{g} 組重複，都建議保留
+DupFSumSub	IDS_DUP_F_SUM_SUB	5665	比对了 {n} 个文件 · 只算逐字节相同的	{n} files compared · only byte-for-byte matches count	比對了 {n} 個檔案 · 只算逐位元組相同的
+DupFSumOnline	IDS_DUP_F_SUM_ONLINE	5666	 · {n} 个云端文件没下载，跳过	 · {n} cloud files not downloaded, skipped	 · {n} 個雲端檔案沒下載，略過
+DupFSumTruncated	IDS_DUP_F_SUM_TRUNCATED	5667	 · 文件太多，只比对了一部分	 · too many files, only part was compared	 · 檔案太多，只比對了一部分
+DupFRecycleBtn	IDS_DUP_F_RECYCLE_BTN	5668	把多出的 {n} 份移到回收站	Move the {n} extra copies to the Recycle Bin	把多出的 {n} 份移到資源回收筒
+DupFRuleOldest	IDS_DUP_F_RULE_OLDEST	5669	保留规则：最早的	Keep: the oldest	保留規則：最早的
+DupFRuleNewest	IDS_DUP_F_RULE_NEWEST	5670	保留规则：最新的	Keep: the newest	保留規則：最新的
+DupFGroupMeta	IDS_DUP_F_GROUP_META	5671	{n} 份 · 每份 {size}	{n} copies · {size} each	{n} 份 · 每份 {size}
+DupFWaste	IDS_DUP_F_WASTE	5672	多出 {size}	{size} extra	多出 {size}
+DupFExtra	IDS_DUP_F_EXTRA	5673	多出	Extra	多出
+DupFWhyPre	IDS_DUP_F_WHY_PRE	5674	保留理由	Why keep it	保留理由
+DupFWhy1	IDS_DUP_F_WHY1	5675	① 在整理过的文件夹里	① In a sorted folder	① 在整理過的資料夾裡
+DupFWhy2	IDS_DUP_F_WHY2	5676	② 名字干净	② Clean name	② 名稱乾淨
+DupFWhy3	IDS_DUP_F_WHY3	5677	③ 最早的那份	③ The oldest copy	③ 最早的那份
+DupFWhy3New	IDS_DUP_F_WHY3_NEW	5678	③ 最新的那份	③ The newest copy	③ 最新的那份
+DupFWhyPicked	IDS_DUP_F_WHY_PICKED	5679	你选的 · 规则不再改这一组	Your pick · the rules leave this group alone	你選的 · 規則不再改這一組
+DupFWhyBoth	IDS_DUP_F_WHY_BOTH	5680	{n} 份分别在整理过的文件夹里，可能各有用处，默认都不删；要删就在一份上右键「只保留这份」	The {n} copies are in different sorted folders and may each be in use, so none is removed; to remove one, right-click the copy to keep and choose “Keep only this”	{n} 份分別在整理過的資料夾裡，可能各有用處，預設都不刪；要刪就在一份上按右鍵「只保留這份」
+DupFWhy2One	IDS_DUP_F_WHY2_ONE	5681	另一份名字带 {mark}	the other copy's name has {mark}	另一份名稱帶 {mark}
+DupFWhy2Many	IDS_DUP_F_WHY2_MANY	5682	其他几份名字带编号或「副本」	the other copies' names have a number or “Copy”	其他幾份名稱帶編號或「複本」
+DupFWhySameBytes	IDS_DUP_F_WHY_SAME_BYTES	5683	名字不同但内容完全一样	different names, identical contents	名稱不同但內容完全一樣
+DupFAskTitle	IDS_DUP_F_ASK_TITLE	5684	把 {n} 个多出的副本移到回收站？	Move {n} extra copies to the Recycle Bin?	把 {n} 個多出的副本移到資源回收筒？
+DupFAskMsg	IDS_DUP_F_ASK_MSG	5685	每组保留 1 份，共腾出 {size}。可以在 Pulse 里撤销，也可以从回收站还原。	One copy of each group stays; this frees {size}. You can undo it in Pulse or restore from the Recycle Bin.	每組保留 1 份，共騰出 {size}。可以在 Pulse 裡復原，也可以從資源回收筒還原。
+DupFAskMsgPurge	IDS_DUP_F_ASK_MSG_PURGE	5686	每组保留 1 份。回收站放不下，这些副本会被永久删除，不能撤销。	One copy of each group stays. The Recycle Bin can't hold them, so these copies will be deleted permanently and can't be undone.	每組保留 1 份。資源回收筒放不下，這些副本會被永久刪除，無法復原。
+DupFAskKeep	IDS_DUP_F_ASK_KEEP	5687	保留 {name}	keeps {name}	保留 {name}
+DupFAskRoom	IDS_DUP_F_ASK_ROOM	5688	{drive} 盘回收站还能放 {free}，放得下。删除前会再核对一次每组保留的那份。	The Recycle Bin on {drive}: can take {free} more — enough. Each group's kept copy is checked again first.	{drive} 磁碟的資源回收筒還能放 {free}，放得下。刪除前會再核對一次每組保留的那份。
+DupFAskTight	IDS_DUP_F_ASK_TIGHT	5689	{drive} 盘回收站只剩 {free}，放进去会挤掉最早删除的项目。删除前会再核对一次每组保留的那份。	The Recycle Bin on {drive}: has only {free} left; the oldest items in it will make room. Each group's kept copy is checked again first.	{drive} 磁碟的資源回收筒只剩 {free}，放進去會擠掉最早刪除的項目。刪除前會再核對一次每組保留的那份。
+DupFAskFull	IDS_DUP_F_ASK_FULL	5690	回收站放不下 {size}，这些文件会被永久删除	The Recycle Bin can't hold {size}; these files will be deleted permanently	資源回收筒放不下 {size}，這些檔案會被永久刪除
+DupFAskOk	IDS_DUP_F_ASK_OK	5691	移到回收站	Move to Recycle Bin	移到資源回收筒
+DupFAskPurge	IDS_DUP_F_ASK_PURGE	5692	永久删除…	Delete permanently…	永久刪除…
+DupFDone	IDS_DUP_F_DONE	5693	已把 {n} 个副本移到回收站，腾出 {size}	Moved {n} copies to the Recycle Bin, freeing {size}	已把 {n} 個副本移到資源回收筒，騰出 {size}
+DupFPurged	IDS_DUP_F_PURGED	5694	已永久删除 {n} 个副本，腾出 {size}	Deleted {n} copies permanently, freeing {size}	已永久刪除 {n} 個副本，騰出 {size}
+DupFPart	IDS_DUP_F_PART	5695	移走 {n} 个；{name} 刚被改过，这一组没动	Moved {n}; {name} just changed, so its group was left alone	移走 {n} 個；{name} 剛被修改，這一組沒動
+DupFPartN	IDS_DUP_F_PART_N	5696	移走 {n} 个；{k} 组的文件刚被改过，没动	Moved {n}; files in {k} groups just changed and were left alone	移走 {n} 個；{k} 組的檔案剛被修改，沒動
+DupFFailed	IDS_DUP_F_FAILED	5697	没能移走多出的副本，文件都没动	Couldn't move the extra copies; nothing was changed	沒能移走多出的副本，檔案都沒動
+DupFNoFolder	IDS_DUP_F_NO_FOLDER	5698	找不到这个文件夹	Can't find this folder	找不到這個資料夾
+DupFKeepThis	IDS_DUP_F_KEEP_THIS	5699	只保留这份	Keep only this	只保留這份
+DupFReapply	IDS_DUP_F_REAPPLY	5700	按规则重新标	Mark again by the rules	依規則重新標
+AiFoAcceptOrganize	IDS_AI_FO_ACCEPT_ORGANIZE	5701	整理	Organize	整理
+AiFoArgOrganize	IDS_AI_FO_ARG_ORGANIZE	5702	{n} 项 → {k} 个文件夹	{n} items → {k} folders	{n} 項 → {k} 個資料夾
+AiFoLineOrganize	IDS_AI_FO_LINE_ORGANIZE	5703	{n} 项已整理到 {k} 个文件夹	{n} items sorted into {k} folders	{n} 項已整理到 {k} 個資料夾
+AiFoTitleOrganize	IDS_AI_FO_TITLE_ORGANIZE	5704	把 {n} 个项目整理到 {k} 个文件夹？	Sort {n} items into {k} folders?	把 {n} 個項目整理到 {k} 個資料夾？
+AiFoTitleOrganizeMcp	IDS_AI_FO_TITLE_ORGANIZE_MCP	5705	「{client}」想把 {n} 个项目整理到 {k} 个文件夹	“{client}” wants to sort {n} items into {k} folders	「{client}」想把 {n} 個項目整理到 {k} 個資料夾
+AiFoSubOrganize	IDS_AI_FO_SUB_ORGANIZE	5706	都在「{folder}」里。不会覆盖任何文件，整次可以一步撤销。	All in “{folder}”. No file is overwritten, and it all undoes in one step.	都在「{folder}」裡。不會覆寫任何檔案，整次可以一步復原。
+AiFoSubOrganizeMixed	IDS_AI_FO_SUB_ORGANIZE_MIXED	5707	来自几个文件夹。不会覆盖任何文件，整次可以一步撤销。	From several folders. No file is overwritten, and it all undoes in one step.	來自幾個資料夾。不會覆寫任何檔案，整次可以一步復原。
+AiFoOrgNewN	IDS_AI_FO_ORG_NEW_N	5708	新建 {n} 个文件夹	{n} new folders	新增 {n} 個資料夾
+AiFoOrgNoClash	IDS_AI_FO_ORG_NO_CLASH	5709	目标文件夹里没有同名文件。	No file of the same name in the target folders.	目標資料夾裡沒有同名檔案。
+AiFoOrgRowNew	IDS_AI_FO_ORG_ROW_NEW	5710	新建	New	新增
+AiFoOrgRowHave	IDS_AI_FO_ORG_ROW_HAVE	5711	已有	Existing	已有
+AiFoOrgAlready	IDS_AI_FO_ORG_ALREADY	5712	这些项目已经在目标文件夹里了	These items are already in their folders	這些項目已經在目標資料夾裡了
+AiFoOrgClash	IDS_AI_FO_ORG_CLASH	5713	「{folder}」里已有「{name}」，整次没做	“{folder}” already has “{name}”; nothing was moved	「{folder}」裡已有「{name}」，整次沒做
+AiFoOrgNeedFolder	IDS_AI_FO_ORG_NEED_FOLDER	5714	「{name}」要写完整路径（当前不在文件夹里）	“{name}” needs a full path (no folder is open)	「{name}」要寫完整路徑（目前不在資料夾裡）
+AiFoOrgTwice	IDS_AI_FO_ORG_TWICE	5715	「{name}」列了两次	“{name}” is listed twice	「{name}」列了兩次

@@ -154,7 +154,9 @@ void AiAgentQueryChip(AppState& s, int block, int chip);
 void AiAgentQueryAdd(AppState& s, int block);
 void AiAgentFollow(AppState& s, int block, int item);
 // Puts `text` into the composer without sending it and focuses it (ai_assistant.cpp).
-void AiAssistantFillComposer(AppState& s, const std::wstring& text);
+// `select_from`: the text from there on starts selected (AI 整理此文件夹…'s
+// 按类型分到文件夹, typed over to change it); past the end: the caret at the end.
+void AiAssistantFillComposer(AppState& s, const std::wstring& text, size_t select_from = static_cast<size_t>(-1));
 // 语音输入: recognized words go after what is there (a space only between
 // letters or digits), the caret at the end. Never sends.
 void AiAssistantAppendComposer(AppState& s, const std::wstring& words);

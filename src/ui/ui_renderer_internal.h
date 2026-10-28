@@ -1105,6 +1105,7 @@ void ClearTextWidthCache() {
         case PaneBannerAction::AddNetworkIndex: return pulse::l10n::Get(I::NetworkLiveAdd);
         case PaneBannerAction::NetworkSettings: return pulse::l10n::Get(I::Settings);
         case PaneBannerAction::LanRescan: return pulse::l10n::Get(I::HintActLanRescan);
+        case PaneBannerAction::DupCancel: return pulse::l10n::Get(I::Cancel);
         default: return {};
         }
     }
@@ -1120,9 +1121,11 @@ void ClearTextWidthCache() {
         };
         float room = width - 16 * scale - (12 + 16 + 8 + 4) * scale;
         bool any = false;
-        for (const auto action : pane.banner_actions) {
+        for (int i = 0; i < 2; ++i) {
+            const PaneBannerAction action = pane.banner_actions[i];
             if (action == PaneBannerAction::None) continue;
-            room -= measure(PaneBannerActionLabel(action)) * 1.06f + 20 * scale;
+            const std::wstring& own = pane.banner_action_labels[i];
+            room -= measure(own.empty() ? PaneBannerActionLabel(action) : own) * 1.06f + 20 * scale;
             any = true;
         }
         if (any) room -= 6 * scale;
@@ -1168,7 +1171,8 @@ void ClearTextWidthCache() {
             for (int i = 0; i < 2; ++i) {
                 const PaneBannerAction action = pane.banner_actions[i];
                 if (action == PaneBannerAction::None) continue;
-                out.labels[i] = PaneBannerActionLabel(action);
+                out.labels[i] = pane.banner_action_labels[i].empty() ? PaneBannerActionLabel(action)
+                                                                     : pane.banner_action_labels[i];
                 out.regions[i] = action == PaneBannerAction::ManageIndex ? HitTestResult::ContentIndexManage
                     : action == PaneBannerAction::AddNetworkIndex ? HitTestResult::NetworkIndexAdd
                     : HitTestResult::PaneBannerButton;
@@ -1193,8 +1197,15 @@ void ClearTextWidthCache() {
         return (kTagQueryRowDip + (pane.tag_query_refine.empty() ? 0.0f : kTagQueryRefineDip)) * scale;
     }
 
+    // 重复文件 tab: the three pass cards under the banner while it compares.
+    constexpr float kDupFunnelDip = 66.0f;
+    float DupFunnelHeight(const PaneViewModel& pane, float scale) {
+        return pane.dup_funnel.on ? kDupFunnelDip * scale : 0.0f;
+    }
+
     float PaneExtraTop(const PaneViewModel& pane, float scale, float width, Compositor* compositor) {
         return PaneBannerHeight(pane, width, scale, compositor) + TagQueryBarHeight(pane, scale) +
+               DupFunnelHeight(pane, scale) +
                (pane.is_recent ? kRecentControlsDip * scale : 0.0f) +
                (pane.is_query_search ? kSearchFiltersDip * scale : 0.0f) +
                (pane.is_changes ? 36.0f * scale : 0.0f);

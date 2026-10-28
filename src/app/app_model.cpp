@@ -2015,7 +2015,27 @@ void CollectFilterMatches(const Tab& tab, const PlacesCatalog* places, std::vect
     }
 }
 
+namespace {
+PaneDecorator g_dup_decorator = nullptr;
+void FillPaneViewModelBody(ui::PaneViewModel& out, const Pane& pane, const PlacesCatalog* places);
+} // namespace
+
+void SetDupPaneDecorator(PaneDecorator decorator) { g_dup_decorator = decorator; }
+
 void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCatalog* places) {
+    out.banner_action_labels[0].clear();
+    out.banner_action_labels[1].clear();
+    out.dup_funnel = {};
+    out.dup_chips = false;
+    out.dup_empty_title.clear();
+    FillPaneViewModelBody(out, pane, places);
+    const Tab* tab = pane.ActiveTab();
+    if (g_dup_decorator && tab && tab->current_path.starts_with(L"pulse:ai-list:"))
+        g_dup_decorator(tab->current_path, out);
+}
+
+namespace {
+void FillPaneViewModelBody(ui::PaneViewModel& out, const Pane& pane, const PlacesCatalog* places) {
     const Tab* tab = pane.ActiveTab();
     if (!tab) return;
     out.path = tab->virtual_title.empty() ? DisplayPath(tab->current_path) : tab->virtual_title;
@@ -2299,6 +2319,7 @@ void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCat
         }
     }
 }
+} // namespace
 
 namespace {
 std::wstring CompareKey(const std::wstring& name) {

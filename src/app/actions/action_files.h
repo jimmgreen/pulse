@@ -22,10 +22,11 @@ struct AppState;
 
 namespace pulse::app::actions {
 
-enum class FileOp : uint8_t { None, Copy, Move, Rename, Group, Dissolve, Recycle, Purge, Restore, EmptyBin };
+enum class FileOp : uint8_t { None, Copy, Move, Rename, Group, Dissolve, Recycle, Purge, Restore, EmptyBin, Organize };
 
 // file.copy_to / move_to / paste / rename / group_into_folder / dissolve /
-// recycle / delete_permanent, recycle.restore / empty; None for the rest.
+// recycle / delete_permanent / organize, recycle.restore / empty; None for
+// the rest.
 FileOp FileOpOf(std::string_view id) noexcept;
 inline bool IsFileOp(std::string_view id) noexcept { return FileOpOf(id) != FileOp::None; }
 
@@ -39,6 +40,13 @@ struct FileRow {
     uint64_t bytes = 0;   // a file's size (folders 0)
     bool folder = false;
     bool skip = false;    // Restore: its place is taken, so it stays in the bin
+};
+
+// Organize: one folder the plan fills (the dialog lists these, in order).
+struct OrganizeDest {
+    std::wstring path;
+    bool make = false;                  // not there yet: Pulse makes it first
+    std::vector<std::wstring> sources;  // full paths, in the order given
 };
 
 struct FilePlan {
@@ -59,6 +67,12 @@ struct FilePlan {
     size_t clashes = 0;                 // Restore: its place is taken (left out); Copy / Move: the name is taken (kept both)
     size_t inner = 0;                   // Dissolve: items that move up a level
     uint64_t bin_max = 0, bin_used = 0; // Recycle: the drive's bin
+    // Organize (file.organize moves[{item, dest}]): the folders in order, and
+    // the ones Pulse makes first, parents before children. `dest` is the
+    // folder the items are in when they share one.
+    std::vector<OrganizeDest> dests;
+    std::vector<std::wstring> make_folders;
+    bool one_source_folder = true;
 };
 
 // dest arguments: "D:\财务\2026", "Documents\发票" (the assistant resolves

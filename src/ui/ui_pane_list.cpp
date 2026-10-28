@@ -2555,6 +2555,7 @@ void MainRenderer::DrawPane(const WindowViewModel& vm, const D2D1_RECT_F& rect, 
 void MainRenderer::DrawPaneEmptyState(const WindowViewModel& vm, const PaneViewModel& pane,
                                       const D2D1_RECT_F& bounds, int pane_index,
                                       const Theme& theme) {
+    if (pane.dup_funnel.on) return;   // 重复文件 tab: the pass cards above say how far it is
     if (pane.is_changes) {
         const std::wstring& message = !pane.change_empty_text.empty() ? pane.change_empty_text :
             pulse::l10n::Get(pulse::l10n::StringId::NoMatches);
@@ -2678,8 +2679,9 @@ void MainRenderer::DrawPaneEmptyState(const WindowViewModel& vm, const PaneViewM
             painter_.DrawEmptyState(fallback);
             return;
         }
-        painter_.DrawText(pulse::l10n::Get(pulse::l10n::StringId::NoContent), layout.title,
-                          compositor_->HeaderFormat(), theme.text,
+        painter_.DrawText(pane.dup_empty_title.empty() ? pulse::l10n::Get(pulse::l10n::StringId::NoContent)
+                                                       : pane.dup_empty_title,
+                          layout.title, compositor_->HeaderFormat(), theme.text,
                           fluent::HorizontalAlignment::Center);
         return;
     }
@@ -3110,6 +3112,42 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
             painter_.DrawButton(button);
         }
         y += 36 * scale_;
+    }
+    if (pane.dup_funnel.on) {
+        // 重复文件 tab: ① 大小相同 › ② 开头 64 KB › ③ 逐字节, real counts as they come.
+        const DupFunnelView& f = pane.dup_funnel;
+        const float gap = 8.0f * scale_, pad = 10.0f * scale_, radius = 6.0f * scale_;
+        const float cw = std::max(1.0f, (w - 16.0f * scale_ - 2.0f * gap) / 3.0f);
+        const float top = y + 2.0f * scale_, card_bottom = y + (kDupFunnelDip - 8.0f) * scale_;
+        IDWriteTextFormat* small_fmt = compositor_->SmallFormat();
+        IDWriteTextFormat* body = compositor_->TextFormat();
+        for (int i = 0; i < 3; ++i) {
+            const float left = x + 8.0f * scale_ + static_cast<float>(i) * (cw + gap);
+            const D2D1_RECT_F rc = D2D1::RectF(left, top, left + cw, card_bottom);
+            const bool done = i < f.stage, running = i == f.stage;
+            painter_.FillRoundedRect(rc, radius, theme.surface_card);
+            painter_.StrokeRoundedRect(rc, radius, running ? WithAlpha(theme.accent, 0.6f) : theme.stroke_card);
+            const float inner = std::max(0.0f, cw - 2.0f * pad - (done ? 18.0f * scale_ : 0.0f));
+            MakeBrush(dc, done || running ? theme.text_secondary : WithAlpha(theme.text_secondary, 0.6f), brTextSecondary_);
+            DrawTextEndEllipsis(compositor_, small_fmt, brTextSecondary_.get(), f.title[i], rc.left + pad, rc.top + 6.0f * scale_,
+                                inner, 18.0f * scale_);
+            if (done)
+                DrawIconText(rc.right - pad - 14.0f * scale_, rc.top + 6.0f * scale_, 14.0f * scale_, 18.0f * scale_,
+                             L"\xE73E", L"", theme.accent, 0.8f);
+            MakeBrush(dc, done || running ? theme.text : WithAlpha(theme.text_secondary, 0.7f), brTextSecondary_);
+            DrawTextEndEllipsis(compositor_, body, brTextSecondary_.get(), f.value[i], rc.left + pad, rc.top + 25.0f * scale_,
+                                std::max(0.0f, cw - 2.0f * pad), 22.0f * scale_);
+            if (running && f.progress[i] >= 0.0f) {
+                const D2D1_RECT_F track = D2D1::RectF(rc.left + pad, rc.bottom - 9.0f * scale_, rc.right - pad,
+                                                      rc.bottom - 6.0f * scale_);
+                painter_.FillRoundedRect(track, 1.5f * scale_, WithAlpha(theme.accent, 0.18f));
+                D2D1_RECT_F fill = track;
+                fill.right = track.left + (track.right - track.left) * std::clamp(f.progress[i], 0.0f, 1.0f);
+                if (fill.right > fill.left + 1.0f) painter_.FillRoundedRect(fill, 1.5f * scale_, theme.accent);
+            }
+        }
+        MakeBrush(dc, theme.text_secondary, brTextSecondary_);
+        y += kDupFunnelDip * scale_;
     }
     if (ShowsColumnHeader(pane.view_mode) && pane.column_strip.Active()) {
         // Column view: the folder's name as a caption like the columns beside
@@ -5666,6 +5704,23 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                     if (avail <= 1.0f) continue;
                     switch (detailsColumns.kinds[static_cast<size_t>(col)]) {
                     case ColumnKind::Path: {
+                        if (!vm.path_roots.empty()) {
+                            // 重复文件 tab: 下载\工作\2026 Q3 rather than C:\…\Downloads\工作.
+                            const std::wstring folder = FolderOf(e.path);
+                            std::wstring rel;
+                            for (const auto& [root, label] : vm.path_roots) {
+                                if (folder.size() >= root.size() &&
+                                    _wcsnicmp(folder.c_str(), root.c_str(), root.size()) == 0 &&
+                                    (folder.size() == root.size() || folder[root.size()] == L'\\')) {
+                                    rel = label + folder.substr(root.size());
+                                    break;
+                                }
+                            }
+                            if (!rel.empty()) {
+                                draw_detail_text(fit(rel, avail), left, avail, DWRITE_TEXT_ALIGNMENT_LEADING);
+                                break;
+                            }
+                        }
                         // Keep the drive and the nearest folders; elide the middle.
                         const auto [head, last] = MiddleEllipsisPath(FolderOf(e.path), avail,
                             [&](const std::wstring& s) { return CellTextWidth(s); });
@@ -5770,6 +5825,31 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                         break;
                     }
                     case ColumnKind::Type: {
+                        if (vm.dup_chips && !e.type_text.empty() && !IsHighContrast()) {
+                            // 重复文件 tab (任务46 效果图): 保留 in the accent, 多出 neutral grey,
+                            // 都留 amber, as small rounded tags.
+                            const bool darkTheme = theme.bg.r < 0.5f;
+                            const D2D1_COLOR_F base = darkTheme ? D2D1::ColorF(1.0f, 1.0f, 1.0f) : D2D1::ColorF(0.0f, 0.0f, 0.0f);
+                            D2D1_COLOR_F ink = secondary, fill = WithAlpha(base, darkTheme ? 0.09f : 0.05f);
+                            if (e.type_text == pulse::l10n::Get(pulse::l10n::StringId::AiDupKeep)) {
+                                ink = darkTheme ? HexColor(0x9FD2BDu) : theme.accent;
+                                fill = WithAlpha(theme.accent, darkTheme ? 0.28f : 0.13f);
+                            } else if (e.type_text == pulse::l10n::Get(pulse::l10n::StringId::AiDupBoth)) {
+                                ink = HexColor(darkTheme ? 0xF0C27Eu : 0xA0681Bu);
+                                fill = darkTheme ? HexColor(0x4A3A22u) : HexColor(0xFBF1E1u);
+                            }
+                            const float textW = typography::MeasureLine(compositor_, compositor_->FileNameFormat(), e.type_text);
+                            const float pillW = std::min(avail, textW + 16.0f * scale_);
+                            const float pillH = 20.0f * scale_;
+                            const float pillTop = std::round((cell.top + cell.bottom - pillH) * 0.5f);
+                            MakeBrush(dc, fill, brFillInput_);
+                            FillRoundedRect(dc, brFillInput_.get(), left, pillTop, pillW, pillH, 5.0f * scale_);
+                            MakeBrush(dc, WithAlpha(ink, cut ? 0.55f : 1.0f), brTextSecondary_);
+                            const float labelW = std::max(0.0f, pillW - 16.0f * scale_);
+                            draw_detail_text(fit(e.type_text, labelW), left + 8.0f * scale_, labelW, DWRITE_TEXT_ALIGNMENT_LEADING);
+                            MakeBrush(dc, secondary, brTextSecondary_);
+                            break;
+                        }
                         const bool deleted_change = vm.is_changes &&
                             e.type_text == pulse::l10n::Get(pulse::l10n::StringId::ChangeDeleted);
                         float typeLeft = left;
@@ -6354,22 +6434,54 @@ void MainRenderer::DrawGroupHeaders(const PaneViewModel& vm, const ViewLayout& l
                 4.0f * scale_, 4.0f * scale_), brAccent_.get());
             x += 14.0f * scale_;
         }
-        const std::wstring label = GroupLabel(vm, g);
+        std::wstring label = GroupLabel(vm, g);
+        // 重复文件 tab (dup_finder.cpp): "name\tmeta\twhy\twaste\tboth" - the
+        // name in the text color, 2 份 · 每份 98.3 MB, the 保留理由, and 多出
+        // 98.3 MB (or 都留) at the right in place of the group's bytes.
+        std::wstring dup_part[5];
+        bool dup_head = false;
+        if (vm.dup_chips && label.find(L'\t') != std::wstring::npos) {
+            size_t at = 0;
+            for (int i = 0; i < 5; ++i) {
+                const size_t tab = label.find(L'\t', at);
+                dup_part[i] = label.substr(at, tab == std::wstring::npos ? std::wstring::npos : tab - at);
+                if (tab == std::wstring::npos) break;
+                at = tab + 1;
+            }
+            label = dup_part[0];
+            dup_head = true;
+        }
+        const D2D1_COLOR_F amber = HexColor(theme.bg.r < 0.5f ? 0xF0C27Eu : 0xA0681Bu);
         const float label_w = std::min(std::max(0.0f, text_right - x),
                                        MeasureLayoutText(compositor_, factory, label_fmt, label) + 1.0f);
-        MakeBrush(dc, theme.accent, brAccent_);
+        MakeBrush(dc, dup_head ? theme.text : theme.accent, brAccent_);
         DrawTextEndEllipsis(compositor_, label_fmt, brAccent_.get(), label, x, hr.top, label_w, h);
-        x += label_w + 8.0f * scale_;
+        x += label_w + (dup_head ? 10.0f : 8.0f) * scale_;
 
         wchar_t count[64]{};
         swprintf_s(count, l10n::Get(g.count == 1 ? l10n::StringId::GroupCountOne
                                                  : l10n::StringId::GroupCount).c_str(), g.count);
-        const std::wstring count_text = count;
+        const std::wstring count_text = dup_head ? dup_part[1] : std::wstring(count);
         const float count_w = MeasureLayoutText(compositor_, factory, small_fmt, count_text) + 1.0f;
         MakeBrush(dc, theme.text_secondary, brTextSecondary_);
         if (x + count_w <= text_right)
             DrawTextRect(dc, small_fmt, brTextSecondary_.get(), count_text, x, hr.top, count_w, h);
         x += count_w + 10.0f * scale_;
+        // The right end first, so the 保留理由 knows how much room is left.
+        std::wstring right_text;
+        if (!show_select) right_text = dup_head ? dup_part[3] : (g.bytes > 0 ? pulse::format::ByteSize(g.bytes, true) : std::wstring());
+        const float right_w = right_text.empty() ? 0.0f : MeasureLayoutText(compositor_, factory, small_fmt, right_text) + 1.0f;
+        const float right_x = rc.right - 8.0f * scale_ - right_w;
+        if (dup_head && !dup_part[2].empty()) {
+            const float why_right = (right_w > 0.0f ? right_x - 14.0f * scale_ : text_right);
+            const float why_w = std::min(std::max(0.0f, why_right - x),
+                                         MeasureLayoutText(compositor_, factory, small_fmt, dup_part[2]) + 1.0f);
+            if (why_w > 48.0f * scale_) {
+                MakeBrush(dc, WithAlpha(theme.text_secondary, 0.82f), brFillHover_);
+                DrawTextEndEllipsis(dc, factory, small_fmt, brFillHover_.get(), dup_part[2], x, hr.top, why_w, h);
+                x += why_w + 10.0f * scale_;
+            }
+        }
         if (vm.group_by == 7 && g.rank == 2) {
             // 网盘程序入口: say what these icons are, ahead of the rule.
             const std::wstring note = l10n::Get(l10n::StringId::GroupThisPcLaunchersNote);
@@ -6382,16 +6494,16 @@ void MainRenderer::DrawGroupHeaders(const PaneViewModel& vm, const ViewLayout& l
         }
 
         float rule_right = text_right;
-        if (!show_select && g.bytes > 0) {
-            const std::wstring bytes = pulse::format::ByteSize(g.bytes, true);
-            const float bytes_w = MeasureLayoutText(compositor_, factory, small_fmt, bytes) + 1.0f;
-            const float bx = rc.right - 8.0f * scale_ - bytes_w;
-            if (bx > x + 24.0f * scale_) {
-                DrawTextRect(dc, small_fmt, brTextSecondary_.get(), bytes, bx, hr.top, bytes_w, h);
-                rule_right = bx - 10.0f * scale_;
+        if (right_w > 0.0f && right_x > x + (dup_head ? 4.0f : 24.0f) * scale_) {
+            if (dup_head) {
+                MakeBrush(dc, dup_part[4].empty() ? theme.accent : amber, brAccent_);
+                DrawTextRect(dc, small_fmt, brAccent_.get(), right_text, right_x, hr.top, right_w, h);
+            } else {
+                DrawTextRect(dc, small_fmt, brTextSecondary_.get(), right_text, right_x, hr.top, right_w, h);
             }
+            rule_right = right_x - 10.0f * scale_;
         }
-        if (rule_right > x) {
+        if (!dup_head && rule_right > x) {
             MakeBrush(dc, theme.stroke_divider, brFillHover_);
             FillRect(dc, brFillHover_.get(), x, std::floor(hr.top + h * 0.5f), rule_right - x, 1.0f * scale_);
         }

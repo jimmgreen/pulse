@@ -40,6 +40,7 @@
 #include "app_sidebar_refresh.h"
 #include "cloud_sync_probe.h"
 #include "device_registry.h"
+#include "dup_finder.h"
 #include "operation_intent_ui.h"
 #include "../ui/typography.h"
 #include "../ui/preview_format_catalog.h"
@@ -2419,6 +2420,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 else dirty = true;
             }
             if (TickTabFlash(*s)) dirty = true;
+            if (app::dup::Tick(*s)) dirty = true;   // 查找重复文件: the funnel, the finished list
             if (SyncTagGroups(*s)) {
                 // Tags changed: a tag-grouped folder re-sorts into its new groups,
                 // and a tag view picks up newly tagged (or untagged) items.
@@ -2900,6 +2902,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     FinishOperationIntents(*s, finished);
                     NoteArrivalFinished(*s, finished);
                     NoteDeleteFinished(*s, finished);
+                    app::dup::NoteFinished(*s, finished);
                     NoteBatchRenameFinished(*s, finished);
                     NoteTrayReleaseFinished(*s, finished);
                     if (finished.type == ops::OpType::EmptyRecycle)

@@ -708,7 +708,7 @@ constexpr std::string_view kAskIds[] = {
     "preview.cloud_download", "drive.eject", "drive.disconnect",
 };
 
-constexpr std::string_view kLockIds[] = {"app.exit", "drive.unlock", "assistant.prefs"};
+constexpr std::string_view kLockIds[] = {"app.exit", "drive.unlock", "assistant.prefs", "assistant.organize_here"};
 
 constexpr bool TablesKnown() {
     for (const auto& [id, _] : kExtRunners)
@@ -770,6 +770,10 @@ ArgLock LockFor(AppState& s, std::string_view id, const json::Value& args) {
     } else if (id == "assistant.prefs") {
         k.sub = Text(I::AiSetLockS);
         k.where = Fill(Text(I::AiLockWhereSettings), L"{page}", SettingsPageTitle(13));
+    } else if (id == "assistant.organize_here") {
+        // Task 46: it only fills the assistant's box for the user to send.
+        k.sub = Text(I::AiLockOrgHereS);
+        k.where = Text(I::AiLockOrgHereWhere);
     }
     return k;
 }

@@ -436,6 +436,10 @@ struct FolderCompareResult {
 FolderCompareResult CompareFolderTabs(const Tab& a, const Tab& b);
 void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane,
                        const PlacesCatalog* places = nullptr);
+// Task 46: the 重复文件 tab dresses its pane (banner, funnel, chips) on top of
+// the ai-list view. Registered by dup::Start, so tests link without it.
+using PaneDecorator = void (*)(const std::wstring& path, ui::PaneViewModel& out);
+void SetDupPaneDecorator(PaneDecorator decorator);
 
 // One window tab = one working layout (pane count, split ratios, each column).
 struct LayoutTab {

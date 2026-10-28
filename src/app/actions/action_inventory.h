@@ -131,6 +131,8 @@ inline constexpr ActionEntry kActions[] = {
     {"file.batch_rename", ActionRisk::View},
     {"file.group_into_folder", ActionRisk::Move},
     {"file.dissolve", ActionRisk::Move},
+    {"file.organize", ActionRisk::Move},          // AI apps: moves[{item, dest}], one plan dialog
+    {"file.find_duplicates", ActionRisk::Read},   // reads files to compare them; opens a 重复文件 tab
     {"file.zip", ActionRisk::Create},
     {"file.recycle", ActionRisk::Delete},
     {"file.delete_permanent", ActionRisk::PermanentDelete},
@@ -205,6 +207,7 @@ inline constexpr ActionEntry kActions[] = {
     {"keymap.read", ActionRisk::Read},
     {"keymap.set", ActionRisk::Organize},
     {"assistant.prefs", ActionRisk::UserOnly},   // its own permissions and connections: only the user
+    {"assistant.organize_here", ActionRisk::UserOnly},   // fills the assistant's box for the user to send
 };
 
 // In KeyAction order, one per action (checked at compile time).
@@ -406,6 +409,10 @@ inline constexpr MenuCmdLink kMenuCmdLinks[] = {
     {CmdNetworkClearRecent, {"net.recent"}},
     {CmdNetworkHiddenShares, {"settings.set"}},
     {CmdNetworkDiscoverySettings, {"app.settings_page"}},
+    {CmdFindDuplicates, {"file.find_duplicates"}},
+    {CmdAiOrganizeHere, {"assistant.organize_here"}},
+    {CmdDupKeepThis, {"file.find_duplicates"}},
+    {CmdDupReapplyRules, {"file.find_duplicates"}},
     {CmdShellStaticBase, {"shell.run_verb"}},
     {CmdShellComBase, {"shell.run_verb"}},
     {kCmdGitPull, {"git.pull"}},

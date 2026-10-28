@@ -15,6 +15,7 @@
 #include "../drive_verbs.h"
 #include "../git_ui.h"
 #include "../app_messages.h"
+#include "../ai_assistant_chat.h"
 #include "../context_menu.h"
 #include "../favorites_bar.h"
 #include "../keymap.h"
@@ -38,6 +39,7 @@
 #include "../../fs/bitlocker_volume.h"
 #include "../../fs/cloud_state.h"
 #include "../../fs/fs_enum.h"
+#include "../../ui/command_icons.h"
 #include "../../ui/ui_renderer.h"
 
 #include <iterator>
@@ -78,6 +80,31 @@ bool InFolder(AppState& s) {
 
 bool NeedFolder(AppState& s, ActionView& v) {
     return InFolder(s) ? true : Off(v, I::ActWhyNotFolder);
+}
+
+// Task 46: 查找重复文件 names the folder it compares; AI 整理此文件夹… needs a
+// model. Both are grey outside a real folder (此电脑, 回收站, 搜索结果).
+void FillFindDuplicates(AppState& s, ActionView& v) {
+    if (!InFolder(s)) {
+        Off(v, I::ActWhyOpenFolder);
+        return;
+    }
+    std::wstring value = Text(I::ActFindDupValue);
+    const std::wstring folder = TabTitle(ActiveTab(s)->current_path);
+    if (const size_t at = value.find(L"{folder}"); at != std::wstring::npos) value.replace(at, 8, folder);
+    v.value = std::move(value);
+}
+
+void FillOrganizeHere(AppState& s, ActionView& v) {
+    if (!InFolder(s)) {
+        Off(v, I::ActWhyOpenFolder);
+        return;
+    }
+    if (!AiAgentConnected()) {
+        Off(v, I::ActNeedAi);
+        return;
+    }
+    v.value = Text(I::ActOrganizeValue);
 }
 
 bool NeedPanes(AppState& s, ActionView& v) {
@@ -603,6 +630,7 @@ constexpr Fill kAlways = nullptr;
 constexpr std::pair<std::string_view, std::string_view> kNoRow[] = {
     {"search.files", "the search_files tool runs it"},
     {"settings.set", "one row per setting, from action_settings (SettingView)"},
+    {"file.organize", "AI apps only: it needs moves[{item, dest}]; the assistant uses organize_files"},
 };
 
 constexpr bool NoRowKnown() {
@@ -711,6 +739,8 @@ constexpr Def kDefs[] = {
      CmdGroupIntoFolder, kNoRun, FillSelection},
     {"file.dissolve", I::ActDissolveFolder, I::ActDomFiles, L"\xF5BB", P::None, L"Ctrl+Shift+G",
      CmdDissolveFolder, kNoRun, FillSelection},
+    {"file.find_duplicates", I::ActFindDuplicates, I::ActDomFiles, L"\xE8C8", P::None, kNoKey, CmdFindDuplicates,
+     kNoRun, FillFindDuplicates},
     {"file.zip", I::TrayMenuZip, I::ActDomFiles, L"\xF012", P::None, kNoKey, CmdCompressZip, kNoRun,
      FillSelection},
     {"file.recycle", I::Delete, I::ActDomFiles, L"\xE74D", P::None, L"Delete", CmdDelete, kNoRun,
@@ -862,6 +892,8 @@ constexpr Def kDefs[] = {
     {"drive.disconnect", I::DisconnectNetworkDrive, I::ActDomFiles, L"\xE8CD", P::None, kNoKey, CmdDisconnectDrive, kNoRun,
      FillDisconnect},
     {"drive.unlock", I::UnlockDrive, I::ActDomFiles, L"\xE785", P::None, kNoKey, CmdUnlockDrive, kNoRun, FillUnlock},
+    {"assistant.organize_here", I::ActOrganizeHere, I::ActDomAssistant, ui::command_icons::kGlyphSparkle, P::None,
+     kNoKey, CmdAiOrganizeHere, kNoRun, FillOrganizeHere},
     {"assistant.prefs", I::ActAssistantPrefs, I::ActDomApp, L"\xE713", P::None, kNoKey, 0,
      +[](AppState& s) { OpenSettingsTab(s, 13); }, kAlways},
     // 应用

@@ -165,6 +165,11 @@ enum MenuCmd : int {
     CmdNetworkClearRecent = 5196,        // ⋯ 清除最近访问
     CmdNetworkHiddenShares = 5197,       // ⋯ 显示隐藏共享 (toggle)
     CmdNetworkDiscoverySettings = 5198,  // ⋯ 局域网发现设置… (Settings → 文件操作)
+    // Task 46: 查找重复文件 (dup_finder.h) and AI 整理此文件夹… (folder background, palette).
+    CmdFindDuplicates = 5200,
+    CmdAiOrganizeHere = 5201,
+    CmdDupKeepThis = 5202,               // 重复文件 tab row: 只保留这份
+    CmdDupReapplyRules = 5203,           // 重复文件 tab row: 按规则重新标
     CmdShellStaticBase = 6000,
     CmdShellComBase = 8000,
 };

@@ -318,6 +318,10 @@ struct CtlStep {
     bool quiet = false;              // no step row: the card that follows says it (the lock card)
 };
 
+// ai_agent_dupfind.cpp: file.find_duplicates waits for its compare (task 46);
+// true while it runs (CtlNext goes on when it ends).
+bool DupStepAsk(AppState& s, std::shared_ptr<CtlRun> run, const json::Value& args);
+
 // ai_agent_mcp.cpp
 bool RunGone(AppState& s, const CtlRun& run);
 void McpLater(AppState& s, std::shared_ptr<app::ai::McpActionsRun> mcp, uint32_t delay, std::function<int(AppState&)> fn);

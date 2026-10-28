@@ -50,6 +50,8 @@
 #include "actions/action_inventory.h"
 #include "actions/action_files.h"
 #include "ai_cleanup_scan.h"
+#include "ai_dup_scan.h"
+#include "dup_finder.h"
 #include "actions/action_params.h"
 #include "actions/action_policy.h"
 #include "actions/action_registry.h"
@@ -5710,6 +5712,50 @@ bool AsPump(const std::function<bool()>& done, DWORD ms, const std::function<voi
 
 // P3: the assistant's gate per action and find_actions' rows
 // (plans/ai/P3_AI接入动作表.html).
+// Task 46: the 重复文件 tab's keep rules (flow E's): organised folder › clean
+// name › earliest or newest; two organised folders keep one each.
+void TestDupKeepRules() {
+    namespace ai = app::ai;
+    const auto file = [](const wchar_t* path, uint64_t mtime, bool organized, bool clean) {
+        ai::DupFile f;
+        f.path = path;
+        f.bytes = 100;
+        f.mtime = mtime;
+        f.organized = organized;
+        f.clean = clean;
+        return f;
+    };
+    ai::DupGroup g;
+    g.files = {file(L"D:\\dl\\a (1).txt", 1, false, false), file(L"D:\\dl\\a.txt", 2, false, true)};
+    ai::ApplyKeepRules(g, false);
+    Check(g.files[1].keep && !g.files[0].keep && g.why == ai::DupWhy::CleanName && g.Extra() == 1 && g.ExtraBytes() == 100,
+          L"dup rules: a clean name beats an older copy");
+    g.files = {file(L"D:\\dl\\r.docx", 1, false, true), file(L"D:\\work\\q3\\r.docx", 5, true, true)};
+    ai::ApplyKeepRules(g, false);
+    Check(g.files[1].keep && g.why == ai::DupWhy::Organized, L"dup rules: the sorted folder's copy stays");
+    g.files = {file(L"D:\\dl\\demo.mp4", 1, false, true), file(L"D:\\dl\\other.mp4", 9, false, true)};
+    ai::ApplyKeepRules(g, false);
+    const bool oldest = g.files[0].keep && g.why == ai::DupWhy::Earliest;
+    ai::ApplyKeepRules(g, true);
+    Check(oldest && g.files[1].keep && !g.files[0].keep && g.why == ai::DupWhy::Newest,
+          L"dup rules: rule 3 keeps the oldest, or the newest when asked");
+    g.files = {file(L"D:\\p\\A\\t.jpg", 1, true, true), file(L"D:\\p\\B\\t.jpg", 1, true, true),
+               file(L"D:\\dl\\t.jpg", 1, false, true)};
+    ai::ApplyKeepRules(g, false);
+    Check(g.both && g.Kept() == 2 && !g.files[2].keep && g.why == ai::DupWhy::Both,
+          L"dup rules: two sorted folders both keep theirs");
+    g.files = {file(L"D:\\dl\\a (1).txt", 1, false, false), file(L"D:\\dl\\a.txt", 2, false, true)};
+    ai::ApplyKeepRules(g, false);
+    ai::PickKeeper(g, 0);
+    ai::ApplyKeepRules(g, true);
+    Check(g.picked && g.files[0].keep && !g.files[1].keep && g.why == ai::DupWhy::Picked,
+          L"dup rules: the user's pick survives a rule change");
+    json::Value out;
+    Check(app::dup::Finished(0) && !app::dup::ResultJson(0, out) && app::dup::Summary(0).empty() &&
+              !app::dup::IsDupTab(L"pulse:ai-list:0"),
+          L"dup tab: an unknown run is over and has no result");
+}
+
 void TestActionPolicy() {
     namespace act = app::actions;
     const auto gate = [](std::string_view id, std::wstring_view target = {}) { return act::AiPolicy(id, target).gate; };
@@ -5722,6 +5768,16 @@ void TestActionPolicy() {
     Check(gate("file.recycle") == act::Gate::Plan && gate("recycle.empty") == act::Gate::Plan,
           L"policy: deleting shows its card first");
     Check(gate("app.exit") == act::Gate::Locked, L"policy: exiting Pulse is the user's only");
+    // Task 46: comparing files is a read (查看与读取, on by default); AI 整理
+    // only fills the assistant's box, so an AI app gets its lock card.
+    Check(gate("file.find_duplicates") == act::Gate::Direct &&
+              act::McpGroupOf("file.find_duplicates") == act::McpGroupOfRisk(act::ActionRisk::Read),
+          L"policy: comparing duplicates is a read step");
+    Check(gate("file.organize") == act::Gate::Plan && gate("assistant.organize_here") == act::Gate::Locked &&
+              act::HasLockText("assistant.organize_here"),
+          L"policy: organizing shows a plan; AI 整理此文件夹 is the user's");
+    Check(act::FindAction("file.find_duplicates") != nullptr && act::FindAction("assistant.organize_here") != nullptr,
+          L"policy: the task 46 rows are in the palette");
     Check(gate("no.such.action") == act::Gate::Locked, L"policy: unknown ids are locked");
     Check(gate("index.install_full") == act::Gate::Confirm, L"policy: a system action asks first");
     Check(gate("nav.open", L"C:\\AsT\\setup.exe") == act::Gate::Confirm &&
@@ -5922,6 +5978,31 @@ void TestFilePlans() {
               L"file plans: emptying the bin is a permanent delete in the files group");
     }
 
+    // Task 46: file.organize puts several folders in one plan.
+    const auto moves = [](std::initializer_list<std::pair<std::wstring, std::wstring>> list) {
+        json::Value v = json::Value::Object();
+        json::Value arr = json::Value::Array();
+        for (const auto& [item, dest] : list) {
+            json::Value m = json::Value::Object();
+            m.set("item", json::Utf8(item));
+            m.set("dest", json::Utf8(dest));
+            arr.push(std::move(m));
+        }
+        v.set("moves", std::move(arr));
+        return v;
+    };
+    Check(act::FileOpOf("file.organize") == act::FileOp::Organize, L"file plans: file.organize is a file step");
+    p = act::PlanFileOp(s, "file.organize", moves({{a, root + L"\\docs"}, {b, sub}}), nullptr);
+    Check(p.ok && !p.skip && p.op == act::FileOp::Organize && p.dests.size() == 2 && p.dests[0].make &&
+              !p.dests[1].make && p.dests[1].sources.size() == 1,
+          L"file plans: organize lists each folder and makes the missing one");
+    p = act::PlanFileOp(s, "file.organize", moves({{a, root}}), nullptr);
+    Check(p.ok && p.skip, L"file plans: organizing into its own folder does nothing");
+    p = act::PlanFileOp(s, "file.organize", moves({{a, root + L"\\docs"}, {a, sub}}), nullptr);
+    Check(!p.ok && !p.why.empty(), L"file plans: an item listed twice is refused");
+    p = act::PlanFileOp(s, "file.organize", moves({{sub + L"\\x.txt", root}, {root + L"\\x.txt", root}}), nullptr);
+    Check(!p.ok, L"file plans: organize refuses a missing item");
+
     for (const wchar_t* f : {L"\\a.txt", L"\\b.txt", L"\\sub\\x.txt", L"\\sub\\y.txt"}) DeleteFileW((root + f).c_str());
     RemoveDirectoryW(sub.c_str());
     RemoveDirectoryW(root.c_str());
@@ -6102,8 +6183,8 @@ void TestMcpRunActions() {
     size_t total = 0;
     for (size_t n : counts) total += n;
     Check(total == std::size(act::kActions) && counts[static_cast<size_t>(G::View)] > 0 &&
-              counts[static_cast<size_t>(G::Locked)] == 3 && counts[static_cast<size_t>(G::Files)] == 11,
-          L"mcp: every action is in one group; 3 are only the user's, 11 change files");
+              counts[static_cast<size_t>(G::Locked)] == 4 && counts[static_cast<size_t>(G::Files)] == 12,
+          L"mcp: every action is in one group; 4 are only the user's, 12 change files");
     Check(act::McpGroupOf("nav.back") == G::View && act::McpGroupOf("settings.set") == G::Organize &&
               act::McpGroupOf("file.new_folder") == G::Create && act::McpGroupOf("file.recycle") == G::Files &&
               act::McpGroupOf("file.delete_permanent") == G::Files && act::McpGroupOf("git.push") == G::External &&
@@ -9567,6 +9648,7 @@ int RunSelfTest1B2() {
         wcscmp(test_case, L"action-state") == 0) {
         TestActionState();
         TestActionPolicy();
+        TestDupKeepRules();
         TestActionArgs();
         TestFilePlans();
         TestMcpRunActions();
@@ -9719,6 +9801,7 @@ int RunSelfTest1B2() {
     TestSplitLayout();
     TestActionState();
     TestActionPolicy();
+    TestDupKeepRules();
     TestActionArgs();
     TestFilePlans();
     TestMcpRunActions();

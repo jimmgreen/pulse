@@ -1470,7 +1470,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             }
         }
         const float columnTop = changesTop + (paneVm.is_changes ? 36 * scale_ : 0) +
-                                TagQueryBarHeight(paneVm, scale_);
+                                TagQueryBarHeight(paneVm, scale_) + DupFunnelHeight(paneVm, scale_);
         float listTop = paneRc.top + pane_header_height_ + extra +
                         (ShowsColumnHeader(paneVm.view_mode) ? column_header_height_ : 0.0f);
         if (y >= paneRc.top && y < paneRc.top + pane_header_height_) {

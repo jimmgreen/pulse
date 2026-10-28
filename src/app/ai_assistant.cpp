@@ -613,13 +613,14 @@ void AiAssistantAppendComposer(AppState& s, const std::wstring& words) {
     Redraw(s);
 }
 
-void AiAssistantFillComposer(AppState& s, const std::wstring& text) {
+void AiAssistantFillComposer(AppState& s, const std::wstring& text, size_t select_from) {
     AiAssistantState& a = s.aiAssistant;
     EnsureEdit(s);
     if (!a.edit) return;
     SetWindowTextW(a.edit, text.c_str());
     const int end = static_cast<int>(text.size());
-    SendMessageW(a.edit, EM_SETSEL, static_cast<WPARAM>(end), static_cast<LPARAM>(end));
+    const int from = select_from < text.size() ? static_cast<int>(select_from) : end;
+    SendMessageW(a.edit, EM_SETSEL, static_cast<WPARAM>(from), static_cast<LPARAM>(end));
     ReadComposerMetrics(a);
     a.focus_pending = true;
     Redraw(s);

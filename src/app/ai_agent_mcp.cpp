@@ -195,7 +195,20 @@ void McpFoAsk(AppState& s, std::shared_ptr<CtlRun> run, std::shared_ptr<fo::File
     ui::ConfirmDialogSpec spec;
     spec.title = cf.title;
     spec.message = cf.sub;
-    if (plan->op != fo::FileOp::EmptyBin) {
+    if (plan->op == fo::FileOp::Organize) {
+        // One row per folder: 文档  ·  新建  ·  季度报告.docx、合同扫描.pdf … 9 项.
+        for (const fo::OrganizeDest& d : plan->dests) {
+            if (spec.items.size() >= 5) break;
+            std::wstring names;
+            for (size_t i = 0; i < d.sources.size() && i < 3; ++i)
+                names += (i ? Text(I::AiTkListSep) : std::wstring()) + Leaf(d.sources[i]);
+            if (d.sources.size() > 3) names += L" \u2026";
+            spec.items.push_back(Leaf(d.path) + L"    " + Text(d.make ? I::AiFoOrgRowNew : I::AiFoOrgRowHave) + L"    " +
+                                 names + L"    " + Fill(Text(I::AiFoNItems), L"{n}", Num(d.sources.size())));
+        }
+        spec.item_glyph = L"\xE8B7";
+        spec.items_total = plan->dests.size();
+    } else if (plan->op != fo::FileOp::EmptyBin) {
         for (const fo::FileRow& r : plan->rows) {
             if (spec.items.size() >= 5) break;
             spec.items.push_back(McpFoRow(*plan, r));

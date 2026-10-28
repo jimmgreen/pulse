@@ -48,6 +48,7 @@
 #include "actions/action_registry.h"
 #include "ai_assistant.h"
 #include "ai_assistant_chat.h"
+#include "dup_finder.h"
 #include "system_ctx_registry.h"
 #include "shell_verbs.h"
 #include "toolbar_apps.h"
@@ -1602,6 +1603,21 @@ static void RunCloudPin(AppState& s, fs::CloudPinAction action) {
 
 static void FlipToolbarTool(AppState& s, size_t index);
 
+// AI 整理此文件夹… (task 46 ⑦): opens the assistant with a sentence about the
+// folder (or the selection) and selects its editable end; never sends.
+static void AiOrganizeHere(AppState& s) {
+    const app::Tab* tab = ActiveTab(s);
+    if (!tab || tab->current_path.empty() || fs::IsVirtualPath(tab->current_path) || !AiAgentConnected()) return;
+    const size_t picked = tab->SelectedCount();
+    std::wstring head = l10n::Get(picked > 0 ? l10n::StringId::AiOrgHereSel : l10n::StringId::AiOrgHere);
+    const std::wstring key = picked > 0 ? L"{n}" : L"{folder}";
+    if (const size_t at = head.find(key); at != std::wstring::npos)
+        head.replace(at, key.size(), picked > 0 ? std::to_wstring(picked) : app::TabTitle(tab->current_path));
+    const size_t from = head.size();
+    AiAssistantOpen(s);
+    AiAssistantFillComposer(s, head + l10n::Get(l10n::StringId::AiOrgHereTail), from);
+}
+
 void DispatchMenuCommand(AppState& s, int cmd) {
     if (HandleNetworkPageCommand(s, cmd)) return;  // 连接服务器, 最近访问, ...
     if (cmd >= app::CmdToolbarToolBase && cmd < app::CmdNewPrimaryBase &&
@@ -1771,6 +1787,10 @@ void DispatchMenuCommand(AppState& s, int cmd) {
     case app::CmdUnpinNetwork: UnpinSelectedNetworks(s); break;
     case app::CmdBatchRename: ShowBatchRename(s); break;
     case app::CmdGroupIntoFolder: GroupSelectionIntoFolder(s); break;
+    case app::CmdFindDuplicates: app::dup::FindInFolder(s); break;
+    case app::CmdAiOrganizeHere: AiOrganizeHere(s); break;
+    case app::CmdDupKeepThis: app::dup::KeepSelected(s); break;
+    case app::CmdDupReapplyRules: app::dup::ReapplyRules(s); break;
     case app::CmdDissolveFolder: DissolveSelectedFolders(s); break;
     case app::CmdSetAlias: ShowAliasOverlay(s); break;
     case app::CmdStageToTray: StageSelection(s); break;
@@ -2190,6 +2210,17 @@ std::vector<ui::FluentMenuItem> BuildFinderItemMenu(
         open_path.text = l10n::Get(l10n::StringId::OpenPath);
         open_path.glyph = ui::command_icons::kGlyphOpenPath;
         items.insert(items.begin() + 1, std::move(open_path));
+    }
+    // 重复文件 tab (task 46 ④): 打开所在文件夹, 只保留这份, 按规则重新标 after 打开.
+    if (tab && app::dup::IsDupTab(tab->current_path)) {
+        ui::FluentMenuItem open_path = VerbRow(app::CmdOpenPath, l10n::Get(l10n::StringId::OpenPath),
+                                               ui::command_icons::kGlyphOpenPath);
+        ui::FluentMenuItem keep = VerbRow(app::CmdDupKeepThis, l10n::Get(l10n::StringId::DupFKeepThis), L"\xE73E");
+        keep.enabled = app::dup::CanKeepSelected(s);
+        ui::FluentMenuItem again = VerbRow(app::CmdDupReapplyRules, l10n::Get(l10n::StringId::DupFReapply), L"\xE72C");
+        again.separator_after = true;
+        const size_t at = items.empty() ? 0 : 1;
+        items.insert(items.begin() + static_cast<std::ptrdiff_t>(at), {std::move(open_path), std::move(keep), std::move(again)});
     }
     if (CanDissolveSelection(tab)) {
         ui::FluentMenuItem dissolve;
@@ -2763,6 +2794,7 @@ std::vector<app::sysctx::NewTemplate> NewTemplatesForMenu(AppState& s, bool wait
 bool RunShellNewCommand(AppState& s, int cmd, const std::vector<app::sysctx::NewTemplate>& templates);
 void AppendBackgroundNewMenu(std::vector<ui::FluentMenuItem>& items,
                              const std::vector<app::sysctx::NewTemplate>& templates);
+void AppendFolderTools(std::vector<ui::FluentMenuItem>& items);
 } // namespace
 
 void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
@@ -2831,6 +2863,8 @@ void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
     const auto new_templates = can_create_here ? NewTemplatesForMenu(s, false)
                                                : std::vector<app::sysctx::NewTemplate>{};
     if (can_create_here) AppendBackgroundNewMenu(base_items, new_templates);
+    if (!tab->current_path.empty() && !fs::IsVirtualPath(tab->current_path) && !app::IsUncServerRoot(tab->current_path))
+        AppendFolderTools(base_items);
     // This PC, a server's share list, the Network view and other Pulse views
     // take no new items or pastes, and have no folder of their own to open a
     // terminal in or pin as a workspace.
@@ -3182,6 +3216,30 @@ bool RunShellNewCommand(AppState& s, int cmd, const std::vector<app::sysctx::New
 // The background menu's 新建 flyout: the toolbar New menu's rows, minus the
 // flat 新建文件夹 / 新建文本文档 rows the menu already shows (those stay
 // separately configurable on the 右键菜单 page), right after them.
+// 查找重复文件 and, with a model connected, AI 整理此文件夹… under 新建 ›
+// (task 46 ①); not shown at all without AI (the palette greys it instead).
+void AppendFolderTools(std::vector<ui::FluentMenuItem>& items) {
+    size_t at = 0;
+    const std::wstring new_text = l10n::Get(l10n::StringId::New);
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (!items[i].children.empty() && items[i].text == new_text) { at = i + 1; break; }
+        if (items[i].command == app::CmdNewFolder || items[i].command == app::CmdNewTextFile) at = i + 1;
+    }
+    std::vector<ui::FluentMenuItem> rows;
+    rows.push_back(VerbRow(app::CmdFindDuplicates, l10n::Get(l10n::StringId::ActFindDuplicates), L"\xE8C8"));
+    if (AiAgentConnected())
+        rows.push_back(VerbRow(app::CmdAiOrganizeHere, l10n::Get(l10n::StringId::ActOrganizeHere),
+                               ui::command_icons::kGlyphSparkle));
+    if (at > 0) {
+        rows.back().separator_after = items[at - 1].separator_after;
+        items[at - 1].separator_after = false;
+    } else {
+        rows.back().separator_after = true;
+    }
+    items.insert(items.begin() + static_cast<std::ptrdiff_t>(at), std::make_move_iterator(rows.begin()),
+                 std::make_move_iterator(rows.end()));
+}
+
 void AppendBackgroundNewMenu(std::vector<ui::FluentMenuItem>& items,
                              const std::vector<app::sysctx::NewTemplate>& templates) {
     bool has_folder = false, has_text = false;

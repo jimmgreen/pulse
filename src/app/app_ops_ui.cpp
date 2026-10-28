@@ -35,6 +35,7 @@
 #include "../ops/elevated_delete.h"
 #include "../ipc/ctx_menu_util.h"
 #include "device_registry.h"
+#include "dup_finder.h"
 #include <windows.h>
 #include <windowsx.h>
 #include <commctrl.h>
@@ -585,6 +586,8 @@ void NoteDeleteFinished(AppState& s, const ops::FinishedTask& done) {
     if (done.type != ops::OpType::RecycleDelete || !done.success || done.sources.empty() || done.is_undo ||
         !s.ops.CanUndo() || !s.hwnd)
         return;
+    // 重复文件's 移到回收站 says what it freed in its own snack (dup_finder.cpp).
+    if (app::dup::OwnsTask(done.task_id)) return;
     std::wstring title = l10n::Get(l10n::StringId::DeleteSnackTitle);
     if (const size_t at = title.find(L"{n}"); at != std::wstring::npos)
         title.replace(at, 3, std::to_wstring(done.sources.size()));

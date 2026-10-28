@@ -9,6 +9,7 @@
 #include "network_connect.h"
 #include "app_network_page.h"
 #include "ai_cleanup_scan.h"
+#include "dup_finder.h"
 #include "../fs/bitlocker_volume.h"
 #include "../fs/device_path.h"
 #include "../fs/device_source.h"
@@ -2956,6 +2957,11 @@ bool HandlePaneBannerPress(AppState& s, const ui::HitTestResult& hit) {
         }
         break;
     }
+    case A::DupRecycle:
+    case A::DupRule:
+    case A::DupCancel:
+        app::dup::BannerPress(s, static_cast<A>(hit.index));
+        break;
     case A::Dismiss:
         if (app::Tab* tab = ActiveTab(s)) {
             tab->banner_title.clear();

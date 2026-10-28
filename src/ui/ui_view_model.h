@@ -200,7 +200,18 @@ enum class CompareMark : uint8_t { Same = 0, OnlyHere = 1, Newer = 2, Older = 3,
 // Buttons on the strip above a file list (pane banner), main one first.
 enum class PaneBannerAction : int {
     None = 0, Retry, GoUp, Reconnect, Unlock, Refresh, ManageIndex, AddNetworkIndex, Dismiss,
-    NetworkSettings, LanRescan
+    NetworkSettings, LanRescan,
+    DupRecycle, DupRule, DupCancel   // the 重复文件 tab (app/dup_finder.h)
+};
+
+// The 重复文件 tab while it compares: the three passes as cards under the
+// banner (大小相同 › 开头 64 KB › 逐字节).
+struct DupFunnelView {
+    bool on = false;
+    int stage = 0;                // the pass running now (0..2); 3 = done
+    std::wstring title[3];        // ① 大小相同
+    std::wstring value[3];        // 96 个文件可能重复 / 14 / 23 已核对
+    float progress[3] = {};       // the running pass: 0..1, < 0 = no bar
 };
 
 // One chip of a tag view's condition bar or 细分 row.
@@ -248,7 +259,14 @@ struct PaneViewModel {
     std::wstring banner_message;
     int banner_kind = 0; // 0 info, 1 success, 2 warning, 3 error, 4 neutral
     PaneBannerAction banner_actions[2] = {PaneBannerAction::None, PaneBannerAction::None};
+    std::wstring banner_action_labels[2];   // non-empty: the button's own words (把多出的 4 份移到回收站)
     bool banner_dismissible = false;  // a close button that clears the banner
+    DupFunnelView dup_funnel;         // 重复文件 tab: the compare's passes while it runs
+    bool dup_chips = false;           // 重复文件 tab: 保留 / 多出 / 都留 as colored chips
+    std::wstring dup_empty_title;     // 重复文件 tab with nothing left: its empty-state title
+    // 重复文件 tab: the 路径 column names a folder under one of these roots
+    // by the root's label (下载\工作\2026 Q3). Pairs of root path, label.
+    std::vector<std::pair<std::wstring, std::wstring>> path_roots;
     // Derived data is shared with the tab cache. Search views can contain
     // 100k rows, so copying these containers for every animation frame is not
     // acceptable.

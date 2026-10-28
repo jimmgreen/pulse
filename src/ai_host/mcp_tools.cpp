@@ -33,6 +33,12 @@ const char* RunActionsDescription() {
         "e folder or a known folder, made if missing. Locked actions (quitting Pulse, unlocking a BitLocker drive, the "
         "AI permissions, turning off delete confirmation) are only the user's. Stops at the first step that fails; earl"
         "ier steps stay done. undo_last undoes the whole call. Returns each step's outcome.\n") + std::string(
+        "file.organize {moves: [{item, dest}]} sorts many files into folders with one plan dialog (a file step; missi"
+        "ng folders are made; any name already taken refuses the whole plan). file.find_duplicates {folders, min_size,"
+        " show} is a read step: Pulse reads the files on this PC to compare them byte for byte - their contents never "
+        "reach you - skips online-only cloud files, opens a tab with the groups unless show is false, and returns each"
+        " group's paths, sizes and dates, the copy it would keep and why (at most 50 groups). The user can move the ex"
+        "tras to the Recycle Bin from that tab; file.recycle {items} asks them every time.\n") + std::string(
         "Common actions (args): window.layout {layout: single|side_by_side|stacked|three|four, panes: [a folder per pan"
         "e, left or top first; \"\" leaves one]}, nav.go {path, pane}, window.new {path}, tab.new {path}, tab.close, ta"
         "b.to_window, pane.to_window {pane}, window.merge, window.overview, nav.back, nav.up, view.mode {view: extra_la"
