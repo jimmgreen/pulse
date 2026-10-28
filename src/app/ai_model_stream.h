@@ -76,6 +76,7 @@ struct ModelProbe {
     DWORD win32_error = 0;               // no HTTP answer
     uint32_t ms = 0;                     // round trip
     std::vector<std::string> models;     // ids the service lists
+    std::vector<std::string> chat_only;  // of those, the ones the list says cannot call tools
     std::string error_type;
     std::string error_message;
 };

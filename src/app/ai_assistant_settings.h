@@ -25,6 +25,8 @@ void AssistantSettingsLayout(AppState& s);
 // WM_CTLCOLOREDIT for the page's EDITs; nullptr for any other.
 HBRUSH AssistantSettingsCtlColor(AppState& s, HDC hdc, HWND edit);
 void AssistantSettingsDpiChanged(AppState& s);
+// The mic menu's 语音设置…: Settings > AI 助手, scrolled to 语音输入.
+void ShowAssistantVoiceSettings(AppState& s);
 void AssistantSettingsDestroy(AppState& s);
 
 } // namespace pulse

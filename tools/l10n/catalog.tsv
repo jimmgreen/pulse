@@ -3049,50 +3049,18 @@ AiAsstErrEarly	IDS_AI_ASST_ERR_EARLY	4248	回答中途断开了，点「重试�
 AiAsstUndoBusy	IDS_AI_ASST_UNDO_BUSY	4249	整理还没做完，做完再撤销。	The sort is still running; undo once it finishes.	整理還沒做完，做完再復原。
 AiAsstUndoGone	IDS_AI_ASST_UNDO_GONE	4250	这次整理已经不能撤销了：之后又有别的改动。	This sort can no longer be undone: something else changed since.	這次整理已經不能復原了：之後又有別的變更。
 AiAsstMovedSome	IDS_AI_ASST_MOVED_SOME	4251	移动了 {k} / {n} 个，其余的没有成功	Moved {k} of {n}; the rest failed	移動了 {k} / {n} 個，其餘的沒有成功
-AiConnFormat	IDS_AI_CONN_FORMAT	4252	{host} · OpenAI 格式	{host} · OpenAI format	{host} · OpenAI 格式
-AiConnStatusOff	IDS_AI_CONN_STATUS_OFF	4253	未连接	Not connected	未連線
 AiConnStatusOn	IDS_AI_CONN_STATUS_ON	4254	已连接	Connected	已連線
-AiConnStatusBadKey	IDS_AI_CONN_STATUS_BAD_KEY	4255	密钥无效	Invalid key	金鑰無效
-AiConnStatusFailed	IDS_AI_CONN_STATUS_FAILED	4256	连接失败	Connection failed	連線失敗
-AiConnKeyLink	IDS_AI_CONN_KEY_LINK	4257	在哪里获取？	Where do I get one?	在哪裡取得？
-AiConnKeyPlaceholder	IDS_AI_CONN_KEY_PLACEHOLDER	4258	粘贴 sk- 开头的密钥	Paste the key that starts with sk-	貼上 sk- 開頭的金鑰
 AiConnPaste	IDS_AI_CONN_PASTE	4259	粘贴	Paste	貼上
-AiConnChange	IDS_AI_CONN_CHANGE	4260	更换	Change	更換
-AiConnKeyHelp	IDS_AI_CONN_KEY_HELP	4261	在 DeepSeek 开放平台的「API Keys」页面创建。	Create one on the API Keys page of the DeepSeek platform.	在 DeepSeek 開放平台的「API Keys」頁面建立。
-AiConnTesting	IDS_AI_CONN_TESTING	4262	正在连接 {host}…	Connecting to {host}…	正在連線 {host}…
-AiConnOkTitle	IDS_AI_CONN_OK_TITLE	4263	连接正常	Connection works	連線正常
-AiConnOkMs	IDS_AI_CONN_OK_MS	4264	 · {n} 毫秒	 · {n} ms	 · {n} 毫秒
-AiConnCheckedNow	IDS_AI_CONN_CHECKED_NOW	4265	上次检查：刚刚	Last checked: just now	上次檢查：剛剛
-AiConnCheckedMin	IDS_AI_CONN_CHECKED_MIN	4266	上次检查：{n} 分钟前	Last checked: {n} min ago	上次檢查：{n} 分鐘前
 AiConnErrAuth	IDS_AI_CONN_ERR_AUTH	4267	密钥无效（401）	Invalid key (401)	金鑰無效（401）
-AiConnErrAuthSub	IDS_AI_CONN_ERR_AUTH_SUB	4268	检查是否复制完整，或在开放平台重新创建一个。	Check that it was copied whole, or create a new one on the platform.	檢查是否複製完整，或在開放平台重新建立一個。
 AiConnErrBalance	IDS_AI_CONN_ERR_BALANCE	4269	余额不足（402）	Insufficient balance (402)	餘額不足（402）
-AiConnErrBalanceSub	IDS_AI_CONN_ERR_BALANCE_SUB	4270	到 DeepSeek 开放平台充值后再试。	Top up on the DeepSeek platform, then try again.	到 DeepSeek 開放平台儲值後再試。
 AiConnErrRate	IDS_AI_CONN_ERR_RATE	4271	请求太频繁（429）	Too many requests (429)	請求太頻繁（429）
 AiConnErrRateSub	IDS_AI_CONN_ERR_RATE_SUB	4272	稍等片刻再试。	Wait a moment and try again.	稍等片刻再試。
 AiConnErrServer	IDS_AI_CONN_ERR_SERVER	4273	服务暂时不可用（{code}）	Service unavailable ({code})	服務暫時無法使用（{code}）
 AiConnErrServerSub	IDS_AI_CONN_ERR_SERVER_SUB	4274	服务那边出了问题，稍后再试。	The service has a problem; try again later.	服務那邊出了問題，稍後再試。
 AiConnErrNetwork	IDS_AI_CONN_ERR_NETWORK	4275	连不上 {host}	Can't reach {host}	連不上 {host}
-AiConnErrNetworkSub	IDS_AI_CONN_ERR_NETWORK_SUB	4276	检查网络，或在「高级」里核对接口地址。	Check the network, or the address under Advanced.	檢查網路，或在「進階」裡核對介面位址。
 AiConnErrOther	IDS_AI_CONN_ERR_OTHER	4277	连接失败（{code}）	Connection failed ({code})	連線失敗（{code}）
-AiConnErrOtherSub	IDS_AI_CONN_ERR_OTHER_SUB	4278	在「高级」里核对接口地址是否正确。	Check the address under Advanced.	在「進階」裡核對介面位址是否正確。
 AiConnErrSave	IDS_AI_CONN_ERR_SAVE	4279	无法保存密钥	Couldn't save the key	無法儲存金鑰
 AiConnErrSaveSub	IDS_AI_CONN_ERR_SAVE_SUB	4280	Windows 加密存储失败，请再试一次。	Windows encrypted storage failed; try again.	Windows 加密儲存失敗，請再試一次。
-AiConnModels	IDS_AI_CONN_MODELS	4281	可用模型	Available models	可用模型
-AiConnModelFlash	IDS_AI_CONN_MODEL_FLASH	4282	快，日常整理	Fast, everyday tidying	快，日常整理
-AiConnModelPro	IDS_AI_CONN_MODEL_PRO	4283	更强的推理	Stronger reasoning	更強的推理
-AiConnDefault	IDS_AI_CONN_DEFAULT	4284	默认	Default	預設
-AiConnAdvanced	IDS_AI_CONN_ADVANCED	4285	高级	Advanced	進階
-AiConnUrl	IDS_AI_CONN_URL	4286	接口地址	Address	介面位址
-AiConnUrlHelp	IDS_AI_CONN_URL_HELP	4287	兼容 OpenAI 格式的服务都可以，留空用默认地址。	Any OpenAI-format service works; leave empty for the default.	相容 OpenAI 格式的服務都可以，留空用預設位址。
-AiConnSafe	IDS_AI_CONN_SAFE	4288	密钥用 Windows 加密，只保存在这台电脑上，只发给上面的服务。不会写进设置文件或日志。	The key is encrypted by Windows, kept only on this PC and sent only to the service above. It never goes into settings files or logs.	金鑰用 Windows 加密，只儲存在這台電腦上，只傳給上面的服務。不會寫進設定檔或記錄。
-AiConnRemove	IDS_AI_CONN_REMOVE	4289	移除密钥	Remove key	移除金鑰
-AiConnTest	IDS_AI_CONN_TEST	4290	测试连接	Test	測試連線
-AiConnSave	IDS_AI_CONN_SAVE	4291	保存	Save	儲存
-AiConnDone	IDS_AI_CONN_DONE	4292	完成	Done	完成
-AiConnBack	IDS_AI_CONN_BACK	4293	返回	Back	返回
-AiConnShowKey	IDS_AI_CONN_SHOW_KEY	4294	显示密钥	Show key	顯示金鑰
-AiConnHideKey	IDS_AI_CONN_HIDE_KEY	4295	隐藏密钥	Hide key	隱藏金鑰
 AiListWatch	IDS_AI_LIST_WATCH	4296	Pulse 助手正在读取 {k}/{n}	Pulse Assistant is reading {k}/{n}	Pulse 助手正在讀取 {k}/{n}
 AiPeekDone	IDS_AI_PEEK_DONE	4297	Pulse 助手 · 完成	Pulse Assistant · Done	Pulse 助手 · 完成
 AiPeekSorted	IDS_AI_PEEK_SORTED	4298	已把 {n} 个文件整理到 {g} 个新文件夹：{names}。	Sorted {n} files into {g} new folders: {names}.	已把 {n} 個檔案整理到 {g} 個新資料夾：{names}。
@@ -3848,10 +3816,9 @@ AiSetPillConn	IDS_AI_SET_PILL_CONN	5047	连接和 API key	Connections and API ke
 AiVoiceMic	IDS_AI_VOICE_MIC	5048	语音输入	Voice input	語音輸入
 AiVoiceOptions	IDS_AI_VOICE_OPTIONS	5049	语音输入选项	Voice input options	語音輸入選項
 AiVoiceHeading	IDS_AI_VOICE_HEADING	5050	语音识别	Speech recognition	語音辨識
-AiVoiceAdd	IDS_AI_VOICE_ADD	5051	添加	Add	新增
 AiVoiceNoConn	IDS_AI_VOICE_NO_CONN	5052	还没有语音连接	No voice connection yet	還沒有語音連線
 AiVoiceConnected	IDS_AI_VOICE_CONNECTED	5053	{model} · 已连接	{model} · Connected	{model} · 已連線
-AiVoiceNotConn	IDS_AI_VOICE_NOT_CONN	5054	点「添加」连一个语音识别服务	Click Add to connect a speech service	點「新增」連一個語音辨識服務
+AiVoiceNotConn	IDS_AI_VOICE_NOT_CONN	5054	连上语音识别服务后可用	Connect a speech service to use it	
 AiVoiceMicLabel	IDS_AI_VOICE_MIC_LABEL	5055	麦克风	Microphone	麥克風
 AiVoiceMicDefault	IDS_AI_VOICE_MIC_DEFAULT	5056	系统默认	System default	系統預設
 AiVoiceMicNone	IDS_AI_VOICE_MIC_NONE	5057	没有找到	None found	沒有找到
@@ -3860,18 +3827,8 @@ AiVoicePause1	IDS_AI_VOICE_PAUSE1	5059	1 秒	1 s	1 秒
 AiVoicePause2	IDS_AI_VOICE_PAUSE2	5060	2 秒	2 s	2 秒
 AiVoicePauseManual	IDS_AI_VOICE_PAUSE_MANUAL	5061	手动	Manual	手動
 AiVoiceMenuNote	IDS_AI_VOICE_MENU_NOTE	5062	只在点麦克风时录音，录完上传给语音服务识别，Pulse 不保存录音。文字填进输入框，按 Enter 才发送。	Records only after you click the mic. The audio goes to the speech service for recognition; Pulse keeps no recordings. The words go into the box and are sent only when you press Enter.	只在點麥克風時錄音，錄完上傳給語音服務辨識，Pulse 不儲存錄音。文字填進輸入框，按 Enter 才傳送。
-AiVoiceCardAdd	IDS_AI_VOICE_CARD_ADD	5063	添加语音识别连接	Add a speech recognition connection	新增語音辨識連線
-AiVoiceCardManage	IDS_AI_VOICE_CARD_MANAGE	5064	语音识别连接	Speech recognition connection	語音辨識連線
-AiVoiceCardSub	IDS_AI_VOICE_CARD_SUB	5065	DeepSeek 不能识别语音，需要另接一个语音识别服务（OpenAI 兼容的 /audio/transcriptions 接口）。	DeepSeek can't recognize speech, so voice input needs a separate speech recognition service (an OpenAI-compatible /audio/transcriptions endpoint).	DeepSeek 不能辨識語音，需要另接一個語音辨識服務（OpenAI 相容的 /audio/transcriptions 介面）。
-AiVoiceService	IDS_AI_VOICE_SERVICE	5066	服务	Service	服務
 AiVoiceSiliconFlow	IDS_AI_VOICE_SILICON_FLOW	5067	硅基流动	SiliconFlow	矽基流動
 AiVoiceCustom	IDS_AI_VOICE_CUSTOM	5068	自定义	Custom	自訂
-AiVoiceUrl	IDS_AI_VOICE_URL	5069	地址	Address	位址
-AiVoiceKeyNote	IDS_AI_VOICE_KEY_NOTE	5070	只存在本机	Stored only on this PC	只存在本機
-AiVoiceKeyPlaceholder	IDS_AI_VOICE_KEY_PLACEHOLDER	5071	粘贴 API key	Paste API key	貼上 API key
-AiVoiceModel	IDS_AI_VOICE_MODEL	5072	模型	Model	模型
-AiVoiceModelNote	IDS_AI_VOICE_MODEL_NOTE	5073	已从服务读取	Read from the service	已從服務讀取
-AiVoiceModelPlaceholder	IDS_AI_VOICE_MODEL_PLACEHOLDER	5074	填好 key 后从服务读取	Read from the service once the key is in	填好 key 後從服務讀取
 AiVoiceTesting	IDS_AI_VOICE_TESTING	5075	正在读取模型并测试识别…	Reading models and testing recognition…	正在讀取模型並測試辨識…
 AiVoiceTestOk	IDS_AI_VOICE_TEST_OK	5076	已连接 · 测试音频识别用了 {s} 秒	Connected · the test audio took {s} s to recognize	已連線 · 測試音訊辨識用了 {s} 秒
 AiVoiceErrKey	IDS_AI_VOICE_ERR_KEY	5077	服务不接受这个 key（401）。检查后重新粘贴。	The service rejected this key (401). Check it and paste it again.	服務不接受這個 key（401）。檢查後重新貼上。
@@ -3879,12 +3836,7 @@ AiVoiceErrNet	IDS_AI_VOICE_ERR_NET	5078	连不上 {host}。检查网络和地址
 AiVoiceErrHttp	IDS_AI_VOICE_ERR_HTTP	5079	服务返回了错误 {code}。{msg}	The service returned error {code}. {msg}	服務傳回了錯誤 {code}。{msg}
 AiVoiceErrNoModel	IDS_AI_VOICE_ERR_NO_MODEL	5080	这个服务没有列出语音识别模型。	This service lists no speech recognition models.	這個服務沒有列出語音辨識模型。
 AiVoiceErrSave	IDS_AI_VOICE_ERR_SAVE	5081	key 没能保存到本机，再试一次。	The key couldn't be saved on this PC. Try again.	key 沒能儲存到本機，再試一次。
-AiVoicePrivacy	IDS_AI_VOICE_PRIVACY	5082	只在你点麦克风时录音，录完上传给这个服务识别。Pulse 不保存录音。	Records only after you click the mic, then uploads it to this service for recognition. Pulse keeps no recordings.	只在你點麥克風時錄音，錄完上傳給這個服務辨識。Pulse 不儲存錄音。
-AiVoiceCancel	IDS_AI_VOICE_CANCEL	5083	取消	Cancel	取消
-AiVoiceSave	IDS_AI_VOICE_SAVE	5084	保存	Save	儲存
 AiVoiceRemove	IDS_AI_VOICE_REMOVE	5085	移除连接	Remove connection	移除連線
-AiVoiceAdded	IDS_AI_VOICE_ADDED	5086	已添加语音连接：{name}	Voice connection added: {name}	已新增語音連線：{name}
-AiVoiceRemoved	IDS_AI_VOICE_REMOVED	5087	已移除语音连接	Voice connection removed	已移除語音連線
 AiVoiceNeedTitle	IDS_AI_VOICE_NEED_TITLE	5088	语音输入需要一个语音识别连接	Voice input needs a speech recognition connection	語音輸入需要一個語音辨識連線
 AiVoiceNeedSub	IDS_AI_VOICE_NEED_SUB	5089	DeepSeek 不能识别语音。推荐硅基流动的 SenseVoiceSmall：中文好，国内直接能用。也可以用 OpenAI 或其他兼容的服务。	DeepSeek can't recognize speech. SiliconFlow's SenseVoiceSmall is recommended: good with Chinese and reachable in mainland China. OpenAI or any compatible service works too.	DeepSeek 不能辨識語音。推薦矽基流動的 SenseVoiceSmall：中文好，國內直接能用。也可以用 OpenAI 或其他相容的服務。
 AiVoiceNeedButton	IDS_AI_VOICE_NEED_BUTTON	5090	添加语音连接	Add voice connection	新增語音連線
@@ -4560,7 +4512,7 @@ AsstKey	IDS_ASST_KEY	5767	API Key	API key
 AsstTest	IDS_ASST_TEST	5774	测试连接	Test connection	
 AsstVoiceSection	IDS_ASST_VOICE_SECTION	5778	语音输入	Voice input	
 AsstVoiceTitle	IDS_ASST_VOICE_TITLE	5779	语音识别服务	Speech recognition service	
-AsstVoiceDesc	IDS_ASST_VOICE_DESC	5780	按住说话，识别成文字后放进输入框，不会自动发送；不保存录音	Hold to speak: the words go into the input box and are never sent on their own; no recording is kept	
+AsstVoiceDesc	IDS_ASST_VOICE_DESC	5780	点麦克风说话，识别成文字放进输入框，不会自动发送；不保存录音	Click the mic and speak: the words go into the input box and are never sent on their own; no recording is kept	
 AsstVoiceNoKey	IDS_ASST_VOICE_NO_KEY	5785	缺少 Key	Key missing	
 AsstMcpSection	IDS_ASST_MCP_SECTION	5786	让其他 AI 应用使用 Pulse	Let other AI apps use Pulse	
 AsstMcpDesc	IDS_ASST_MCP_DESC	5787	和上面的助手不是一回事：这是让 Claude 等外部 AI 应用来查找、整理你的文件。需要 AI 增强包。	Not the assistant above: this lets outside AI apps such as Claude find and organize your files. Needs the AI pack.	
@@ -4639,3 +4591,15 @@ AsstVoiceConnectBtn	IDS_ASST_VOICE_CONNECT_BTN	5860	连接并测试	Connect and 
 AsstVoiceModelTitle	IDS_ASST_VOICE_MODEL_TITLE	5861	识别模型	Recognition model	
 AsstVoiceFoot	IDS_ASST_VOICE_FOOT	5862	只在麦克风亮着时录音；录音不保存。	Records only while the microphone is on; recordings are never kept.	
 AsstVoiceNoKeyMask	IDS_ASST_VOICE_NO_KEY_MASK	5863	还没有保存 Key	No key saved yet	
+AiAsstServiceSettings	IDS_AI_ASST_SERVICE_SETTINGS	5864	模型服务设置…	Model service settings…	
+AiAsstSetupTitle	IDS_AI_ASST_SETUP_TITLE	5865	先连接一个模型服务	Connect a model service first	
+AiAsstSetupIntro	IDS_AI_ASST_SETUP_INTRO	5866	助手使用你自己的模型服务和 API Key。国内外常见的服务都支持：	The assistant uses your own model service and API key. Popular services are supported:	
+AiAsstSetupMore	IDS_AI_ASST_SETUP_MORE	5867	及自定义	and custom ones	
+AiAsstSetupGo	IDS_AI_ASST_SETUP_GO	5868	去设置模型服务	Set up a model service	
+AiAsstEffortOn	IDS_AI_ASST_EFFORT_ON	5869	开启	On	
+AiAsstThinkShort	IDS_AI_ASST_THINK_SHORT	5870	思考	Thinking	
+AiAsstThinkOnDetail	IDS_AI_ASST_THINK_ON_DETAIL	5871	先想一想再回答，更仔细，也更慢。	Thinks before answering. More careful, but slower.	
+AiChipOpen	IDS_AI_CHIP_OPEN	5872	打开助手	Open assistant	
+AiChipCollapse	IDS_AI_CHIP_COLLAPSE	5873	收起助手	Collapse assistant	
+AiChipSettings	IDS_AI_CHIP_SETTINGS	5874	AI 助手设置…	AI assistant settings…	
+AiVoiceSettings	IDS_AI_VOICE_SETTINGS	5875	语音设置…	Voice settings…	

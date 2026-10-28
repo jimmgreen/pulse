@@ -18,6 +18,7 @@
 // reasoning_content in the history (the service requires it back). Nothing
 // moves without the user's 整理; the model cannot delete or overwrite.
 #include "ai_agent_internal.h"
+#include "ai_model_list.h"
 
 namespace pulse {
 namespace ai_agent {
@@ -337,7 +338,14 @@ std::string Body(AppState& s, const AiAgent& a) {
     json::Value messages = json::Value::Array();
     json::Value sys = json::Value::Object();
     sys.set("role", "system");
-    sys.set("content", SystemPrompt());
+    std::string prompt = SystemPrompt();
+    // 仅聊天 (ai_model_list.h): no tools go out, and the model says so rather
+    // than pretending to act.
+    if (!a.sent_tools)
+        prompt += "\n- This model cannot call tools here, so you cannot look at or change anything in Pulse. If "
+                  "the user asks for an action, say in one sentence that the current model only chats and that a "
+                  "model with tool support can be chosen from the model menu; then help with words where you can.";
+    sys.set("content", std::move(prompt));
     messages.push(std::move(sys));
     for (const json::Value& m : a.history.items()) messages.push(m);
     body.set("messages", std::move(messages));
@@ -345,7 +353,7 @@ std::string Body(AppState& s, const AiAgent& a) {
     json::Value so = json::Value::Object();
     so.set("include_usage", true);
     body.set("stream_options", std::move(so));
-    body.set("tools", Tools());
+    if (a.sent_tools) body.set("tools", Tools());
     // Each service takes 思考 in its own field, or not at all (ai_providers.h).
     app::ai::AddThinking(app::ai::CurrentProvider(), s.aiAssistant.effort, Utf8(AiChatModelId(s)), body);
     return json::Serialize(body);
@@ -884,6 +892,18 @@ bool Pump(AppState& s) {
             return false;
         }
         case ModelEvent::Kind::Failed:
+            // The service refused the tools (no function calling): remember
+            // the model as 仅聊天 and ask again without them, once a turn.
+            if ((ev.http_status == 400 || ev.http_status == 422) && a.sent_tools && !a.tools_retried &&
+                MentionsTools(ev.error_message)) {
+                app::ai::MarkChatOnlyModel(AiAgentBaseUrl(), Utf8(AiChatModelId(s)));
+                a.tools_retried = true;
+                FoldThinking(s, a);
+                a.stream.reset();
+                --a.rounds;
+                SendRound(s);
+                return false;
+            }
             Fail(s, BuildError(ev));
             return false;
         }
@@ -922,6 +942,7 @@ void SendRound(AppState& s) {
     app::ai::ModelEndpoint endpoint;
     endpoint.base_url = AiAgentBaseUrl();
     endpoint.key = std::move(key);
+    a.sent_tools = !app::ai::IsChatOnlyModel(endpoint.base_url, Utf8(AiChatModelId(s)));
     a.stream = app::ai::ModelStream::Start(std::move(endpoint), Body(s, a));
     const uint64_t gen = a.generation;
     AiChatPush(s, 30, [gen](AppState& st) {
@@ -972,6 +993,7 @@ void AiAgentStart(AppState& s, const std::wstring& prompt, bool with_context) {
     ++a.generation;
     a.turn_history = a.history.size();
     a.rounds = 0;
+    a.tools_retried = false;
     a.tool_count = 0;
     a.organized = false;
     a.think_id = a.text_id = a.steps_id = 0;

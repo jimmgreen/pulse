@@ -82,6 +82,8 @@ struct AiAgent {
     int rounds = 0;
     int tool_count = 0;
     bool organized = false;                       // organize_files ran this turn
+    bool sent_tools = false;                      // this round's request carried the tools
+    bool tools_retried = false;                   // a tools refusal was resent once this turn
     uint32_t think_id = 0;
     uint32_t text_id = 0;
     uint32_t steps_id = 0;

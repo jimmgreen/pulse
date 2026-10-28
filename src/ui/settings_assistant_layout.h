@@ -204,16 +204,18 @@ inline float LayoutSettingsAssistant(SettingsLayout& l, const WindowViewModel& v
         if (badge) o.head_badge = place(o.head, bx + 8.0f * s - (n ? 10.0f * s : 0.0f), badge_w, 22.0f);
     }
     if (v.stage == AsstStage::Pick) {
-        // Five columns of tiles, then 更多's chips.
+        // Five columns of tiles (four when the page is narrow, e.g. beside the
+        // docked assistant, so names like OpenRouter still fit), then 更多's chips.
         const float gap = 8.0f * s, pad = 16.0f * s, tile_h = 88.0f * s;
-        const float tile_w = (right - left - pad * 2 - gap * 4) / 5.0f;
+        const int cols = (right - left - pad * 2 - gap * 4) / 5.0f >= 100.0f * s ? 5 : 4;
+        const float tile_w = (right - left - pad * 2 - gap * static_cast<float>(cols - 1)) / static_cast<float>(cols);
         const int first = (std::min)(static_cast<int>(v.tiles.size()), kAsstTiles);
         for (int i = 0; i < first; ++i) {
-            const float tx = left + pad + static_cast<float>(i % 5) * (tile_w + gap);
-            const float ty = y + 4.0f * s + static_cast<float>(i / 5) * (tile_h + gap);
+            const float tx = left + pad + static_cast<float>(i % cols) * (tile_w + gap);
+            const float ty = y + 4.0f * s + static_cast<float>(i / cols) * (tile_h + gap);
             o.tiles[i] = D2D1::RectF(tx, ty, tx + tile_w, ty + tile_h);
         }
-        y += 4.0f * s + static_cast<float>((first + 4) / 5) * (tile_h + gap) + 4.0f * s;
+        y += 4.0f * s + static_cast<float>((first + cols - 1) / cols) * (tile_h + gap) + 4.0f * s;
         if (static_cast<int>(v.tiles.size()) > first) {
             const float lw = button_w(asst_text::T(I::AsstMore)) - 16.0f * s;
             o.more_label = D2D1::RectF(left + pad, y, left + pad + lw, y + 30.0f * s);

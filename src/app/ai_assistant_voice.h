@@ -4,8 +4,8 @@
 // privacy switch, then records (ai_voice_capture.h); each sentence is
 // uploaded once to the speech service (ai_voice_service.h) and its words are
 // appended to the composer, in order. Nothing is ever sent by itself: Enter
-// sends. The chevron's menu (service, microphone, pause) and the 语音识别连接
-// card (service, address, key, model, test) are here too.
+// sends. The chevron's menu (microphone, pause, 语音设置…) is here too; the
+// service itself is set up in Settings > AI 助手 (ai_assistant_settings.cpp).
 #pragma once
 
 #include "../ui/ai_panel_view.h"
@@ -32,21 +32,16 @@ bool AiVoiceBusy(const AppState& s);
 void AiVoiceRunDue(AppState& s);
 bool AiVoiceMenuOpen(const AppState& s);
 void AiVoiceCloseMenu(AppState& s);
-// Esc: the card, else the menu, else stops listening. True when it did something.
+// Esc: the menu, else stops listening. True when it did something.
 bool AiVoiceEscape(AppState& s);
 // Stops listening (the panel closes, 发送): sentences already recorded are
 // still recognized and appended.
 void AiVoiceStop(AppState& s);
-// After every frame: the card's EDITs follow the drawn fields.
+// After every frame: repaints while the menu fades.
 void AiVoiceLayout(AppState& s);
 bool AiVoiceTip(const AppState& s, ui::AiPanelPart part, std::wstring& text);
 bool AiVoiceHasTip(ui::AiPanelPart part);
-bool AiVoiceIsField(ui::AiPanelPart part);
-HBRUSH AiVoiceCtlColor(AppState& s, HDC hdc, HWND edit);
-void AiVoiceDpiChanged(AppState& s);
 void AiVoiceDestroy(AppState& s);
-// Settings > AI 助手 > 设置语音…: the voice connection card (manage when set up).
-void AiVoiceOpenConnection(AppState& s);
 // 设置 › AI 助手 saved the voice connection: read ai.json again (not mid-recording).
 void AiVoicePrefsChanged(AppState& s);
 

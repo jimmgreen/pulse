@@ -24,6 +24,15 @@ int ProviderLogoResource(std::string_view id) {
     return 0;
 }
 
+// `text` as it fits `width` in `format`: whole, else cut with an ellipsis
+// (never sliced mid-glyph by the clip).
+std::wstring FitLine(Compositor* compositor, IDWriteTextFormat* format, const std::wstring& text, float width) {
+    if (typography::MeasureLine(compositor, format, text) <= width) return text;
+    std::wstring cut = text;
+    while (cut.size() > 1 && typography::MeasureLine(compositor, format, cut + L"\u2026") > width) cut.pop_back();
+    return cut + L"\u2026";
+}
+
 } // namespace
 
 // A service's mark; a letter in a rounded square when there is none (自定义)
@@ -171,9 +180,17 @@ void MainRenderer::DrawSettingsAssistant(const WindowViewModel& vm, const D2D1_R
                                                        6*s, 6*s), brStrokeCard_.get(), tile.current ? 1.5f : 1.0f);
             const float cx = (t.left + t.right) * 0.5f;
             DrawProviderMark(tile.id, tile.name, D2D1::RectF(cx - 14*s, t.top + 12*s, cx + 14*s, t.top + 40*s), theme);
-            painter_.DrawText(tile.name, D2D1::RectF(t.left + 6*s, t.top + 44*s, t.right - 6*s, t.top + 64*s),
-                              compositor_->TextFormat(), theme.text, fluent::HorizontalAlignment::Center);
-            painter_.DrawText(tile.sub, D2D1::RectF(t.left + 6*s, t.top + 64*s, t.right - 6*s, t.top + 82*s),
+            // A narrow page (the assistant docked): a long name steps down to
+            // the small face, and what still does not fit ends in an ellipsis.
+            const float text_w = t.right - t.left - 12*s;
+            IDWriteTextFormat* name_format = compositor_->TextFormat();
+            if (typography::MeasureLine(compositor_, name_format, tile.name) > text_w)
+                name_format = compositor_->SmallFormat();
+            painter_.DrawText(FitLine(compositor_, name_format, tile.name, text_w),
+                              D2D1::RectF(t.left + 6*s, t.top + 44*s, t.right - 6*s, t.top + 64*s),
+                              name_format, theme.text, fluent::HorizontalAlignment::Center);
+            painter_.DrawText(FitLine(compositor_, compositor_->SmallFormat(), tile.sub, text_w),
+                              D2D1::RectF(t.left + 6*s, t.top + 64*s, t.right - 6*s, t.top + 82*s),
                               compositor_->SmallFormat(), theme.text_secondary, fluent::HorizontalAlignment::Center);
             if (tile.current) {
                 const std::wstring& tag = asst_text::T(I::AsstCurrent);

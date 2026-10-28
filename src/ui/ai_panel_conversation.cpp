@@ -6,7 +6,6 @@
 // out top to bottom with CSS margin collapsing, so spacing matches the page.
 #include "ai_panel_view.h"
 #include "ai_panel_draw.h"
-#include "ai_panel_conn.h"
 
 #include "ui_motion.h"
 
@@ -263,13 +262,8 @@ float AiPanelView::TweenTo(uint64_t key, float target, uint32_t ms, uint64_t now
 
 void AiPanelView::ScrollBy(float dy) {
     // The open model menu's list takes the wheel while it scrolls.
-    if (menu_shown_ && conn_ && !conn_->card && conn_->menu_scroll_max > 0.0f) {
-        conn_->menu_scroll = std::clamp(conn_->menu_scroll + dy, 0.0f, conn_->menu_scroll_max);
-        return;
-    }
-    // So does the connection card's body, in a short window.
-    if (menu_shown_ && conn_ && conn_->card && conn_->card_scroll_max > 0.0f) {
-        conn_->card_scroll = std::clamp(conn_->card_scroll + dy, 0.0f, conn_->card_scroll_max);
+    if (menu_shown_ && menu_scroll_max_ > 0.0f) {
+        menu_scroll_ = std::clamp(menu_scroll_ + dy, 0.0f, menu_scroll_max_);
         return;
     }
     const float max_scroll = (std::max)(0.0f, content_h_ - view_h_);

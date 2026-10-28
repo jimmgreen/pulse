@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cwctype>
 #include <memory>
+#include <mutex>
 #include <thread>
 
 namespace pulse::app::ai {
@@ -29,8 +30,20 @@ struct Cache {
     std::wstring url;     // normalized
     uint64_t at = 0;      // FILETIME of the fetch
     std::vector<std::string> ids;
+    std::vector<std::string> chat_only;   // the list says: no tools
+    std::vector<std::string> learned;     // refused tools once (may be unlisted)
 };
 Cache g_cache;
+
+// A list from a worker thread, taken in by the UI thread (TakePending).
+struct Pending {
+    std::wstring url;
+    std::vector<std::string> ids, chat_only;
+    bool keep_learned = false;
+};
+std::mutex g_pending_lock;
+std::vector<Pending> g_pending;
+std::atomic<DWORD> g_ui_thread{0};   // the thread that reads the lists
 
 struct Job {
     std::wstring url;     // normalized
@@ -68,7 +81,13 @@ std::wstring CachePath() {
     return dir.empty() ? std::wstring() : dir + L"\\models.txt";
 }
 
-// models.txt: "pulse-models 1", the endpoint, the fetch time, then one id a line.
+bool Has(const std::vector<std::string>& ids, const std::string& id) {
+    return std::find(ids.begin(), ids.end(), id) != ids.end();
+}
+
+// models.txt: "pulse-models 2" (1 is read too), the endpoint, the fetch time,
+// then one id a line, with a tab and flags in version 2: c the list marks it
+// chat only, l it refused tools, h it is not in the list (only learned).
 void Load() {
     if (g_cache.loaded) return;
     g_cache.loaded = true;
@@ -96,7 +115,7 @@ void Load() {
         lines.push_back(std::move(line));
         at = end + 1;
     }
-    if (lines.size() < 4 || lines[0] != "pulse-models 1") return;
+    if (lines.size() < 4 || (lines[0] != "pulse-models 1" && lines[0] != "pulse-models 2")) return;
     Cache c;
     c.loaded = true;
     c.url = Normalize(json::Wide(lines[1]));
@@ -105,17 +124,33 @@ void Load() {
     } catch (...) {
         return;
     }
-    for (size_t i = 3; i < lines.size() && c.ids.size() < kMaxModels; ++i)
-        if (UsableId(lines[i])) c.ids.push_back(lines[i]);
-    if (!c.url.empty() && !c.ids.empty()) g_cache = std::move(c);
+    for (size_t i = 3; i < lines.size() && c.ids.size() < kMaxModels; ++i) {
+        const size_t tab = lines[i].find('\t');
+        const std::string id = lines[i].substr(0, tab);
+        const std::string flags = tab == std::string::npos ? std::string() : lines[i].substr(tab + 1);
+        if (!UsableId(id)) continue;
+        if (flags.find('h') == std::string::npos) c.ids.push_back(id);
+        if (flags.find('c') != std::string::npos) c.chat_only.push_back(id);
+        if (flags.find('l') != std::string::npos && c.learned.size() < kMaxModels) c.learned.push_back(id);
+    }
+    if (!c.url.empty() && (!c.ids.empty() || !c.learned.empty())) g_cache = std::move(c);
 }
 
 void Save() {
     const std::wstring path = CachePath();
     if (path.empty()) return;
     CreateDirectoryW(AiDirectory().c_str(), nullptr);
-    std::string data = "pulse-models 1\n" + json::Utf8(g_cache.url) + "\n" + std::to_string(g_cache.at) + "\n";
-    for (const std::string& id : g_cache.ids) data += id + "\n";
+    std::string data = "pulse-models 2\n" + json::Utf8(g_cache.url) + "\n" + std::to_string(g_cache.at) + "\n";
+    auto line = [&](const std::string& id, bool listed) {
+        std::string flags;
+        if (Has(g_cache.chat_only, id)) flags += 'c';
+        if (Has(g_cache.learned, id)) flags += 'l';
+        if (!listed) flags += 'h';
+        data += flags.empty() ? id + "\n" : id + "\t" + flags + "\n";
+    };
+    for (const std::string& id : g_cache.ids) line(id, true);
+    for (const std::string& id : g_cache.learned)
+        if (!Has(g_cache.ids, id)) line(id, false);
     const std::wstring temp = path + L".tmp";
     HANDLE file = CreateFileW(temp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return;
@@ -124,6 +159,37 @@ void Save() {
                     written == data.size();
     CloseHandle(file);
     if (!ok || !MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) DeleteFileW(temp.c_str());
+}
+
+// The UI thread takes in a stored list.
+void Apply(Pending p) {
+    std::vector<std::string> usable, chat_only;
+    for (const std::string& id : p.ids) {
+        if (usable.size() >= kMaxModels) break;
+        if (UsableId(id) && !Has(usable, id)) usable.push_back(id);
+    }
+    if (usable.empty() || p.url.empty()) return;
+    for (const std::string& id : p.chat_only)
+        if (Has(usable, id) && !Has(chat_only, id)) chat_only.push_back(id);
+    std::vector<std::string> learned;
+    if (p.keep_learned && g_cache.url == p.url) learned = std::move(g_cache.learned);
+    g_cache.url = p.url;
+    g_cache.at = Now();
+    g_cache.ids = std::move(usable);
+    g_cache.chat_only = std::move(chat_only);
+    g_cache.learned = std::move(learned);
+    Save();
+}
+
+void TakePending() {
+    g_ui_thread.store(GetCurrentThreadId(), std::memory_order_relaxed);
+    Load();
+    std::vector<Pending> pending;
+    {
+        std::lock_guard<std::mutex> lock(g_pending_lock);
+        pending.swap(g_pending);
+    }
+    for (Pending& p : pending) Apply(std::move(p));
 }
 
 void CALLBACK RefreshTimer(HWND hwnd, UINT, UINT_PTR id, DWORD) {
@@ -135,7 +201,7 @@ void CALLBACK RefreshTimer(HWND hwnd, UINT, UINT_PTR id, DWORD) {
     KillTimer(hwnd, id);
     const std::shared_ptr<Job> job = std::move(g_job);
     if (job->result.http_status == 200 && !job->result.models.empty()) {
-        StoreListedModels(job->url, job->result.models);
+        StoreListedModels(job->url, job->result.models, job->result.chat_only, true);
         g_tried_url.clear();
         if (hwnd) InvalidateRect(hwnd, nullptr, FALSE);
     }
@@ -145,30 +211,49 @@ void CALLBACK RefreshTimer(HWND hwnd, UINT, UINT_PTR id, DWORD) {
 
 const std::vector<std::string>& ListedModels(const std::wstring& base_url) {
     static const std::vector<std::string> kNone;
-    Load();
+    TakePending();
     const std::wstring url = Normalize(base_url);
     if (!g_cache.ids.empty() && g_cache.url == url) return g_cache.ids;
     return url == Normalize(json::Wide(kOfficialUrl)) ? kOfficial : kNone;
 }
 
-void StoreListedModels(const std::wstring& base_url, const std::vector<std::string>& ids) {
-    std::vector<std::string> usable;
-    for (const std::string& id : ids) {
-        if (usable.size() >= kMaxModels) break;
-        if (UsableId(id) && std::find(usable.begin(), usable.end(), id) == usable.end()) usable.push_back(id);
+void StoreListedModels(const std::wstring& base_url, const std::vector<std::string>& ids,
+                       const std::vector<std::string>& chat_only, bool keep_learned) {
+    Pending p;
+    p.url = Normalize(base_url);
+    p.ids = ids;
+    p.chat_only = chat_only;
+    p.keep_learned = keep_learned;
+    {
+        std::lock_guard<std::mutex> lock(g_pending_lock);
+        g_pending.push_back(std::move(p));
     }
+    if (g_ui_thread.load(std::memory_order_relaxed) == GetCurrentThreadId()) TakePending();
+}
+
+bool IsChatOnlyModel(const std::wstring& base_url, const std::string& id) {
+    TakePending();
+    if (id.empty() || g_cache.url != Normalize(base_url)) return false;
+    return Has(g_cache.chat_only, id) || Has(g_cache.learned, id);
+}
+
+void MarkChatOnlyModel(const std::wstring& base_url, const std::string& id) {
+    TakePending();
     const std::wstring url = Normalize(base_url);
-    if (usable.empty() || url.empty()) return;
-    Load();
-    g_cache.url = url;
-    g_cache.at = Now();
-    g_cache.ids = std::move(usable);
+    if (!UsableId(id) || url.empty()) return;
+    if (g_cache.url != url) {
+        g_cache = {};
+        g_cache.loaded = true;
+        g_cache.url = url;   // at 0: the list is fetched again
+    }
+    if (Has(g_cache.learned, id) || g_cache.learned.size() >= kMaxModels) return;
+    g_cache.learned.push_back(id);
     Save();
 }
 
 void RefreshListedModels(HWND hwnd, const std::wstring& base_url) {
     if (g_job) return;
-    Load();
+    TakePending();
     const std::wstring url = Normalize(base_url);
     if (url.empty()) return;
     const uint64_t now = Now();

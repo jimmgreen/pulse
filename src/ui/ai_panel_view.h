@@ -13,16 +13,16 @@
 #include <dwrite.h>
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace pulse::ui {
 
 class Compositor;
-struct AiConnView;   // 管理连接 (ai_panel_conn.h)
 struct AiVoiceMenuView;   // 语音设置 menu (ai_panel_voice.h)
-struct AiVoiceCardView;   // 语音识别连接 card (ai_panel_voice.h)
 
 enum class AiPanelMode : uint8_t { Docked = 0, Floating = 1 };
 
@@ -84,37 +84,15 @@ enum class AiPanelPart : uint8_t {
     DupFile,           // index = block index * 64 + group * 8 + file (that copy stays)
     DupRule,           // 改规则 (block index)
     DupMore,           // 在 Pulse 中查看全部 (block index)
-    // 管理连接 card (the model menu unfolded).
-    ConnCard,       // the card's background (swallows the click)
-    ConnBack,
-    ConnClose,
-    ConnLink,       // 在哪里获取？
-    ConnPaste,
-    ConnEye,
-    ConnChange,
-    ConnAdvanced,
-    ConnTest,
-    ConnSave,
-    ConnRemove,
-    ConnKeyField,
-    ConnUrlField,
+    // Not connected yet: the empty state's 去设置模型服务.
+    GoSettings,
     // 语音输入 (third batch, flow V): the composer's microphone and its menu.
     Mic,
     MicMenu,        // the small chevron beside it
     VoiceMenu,      // the menu's background
-    VoiceManage,    // 管理连接 / 添加 in the menu
+    VoiceManage,    // 语音设置… in the menu
     VoiceMicPick,   // the microphone dropdown
     VoicePause,     // index 0..2: 1 秒 / 2 秒 / 手动
-    // 语音识别连接 card.
-    VoiceCard,      // the card's background
-    VoiceClose,
-    VoiceService,   // index 0..2: 硅基流动 / OpenAI / 自定义
-    VoiceUrlField,
-    VoiceKeyField,
-    VoiceModel,     // the model dropdown
-    VoiceCancel,
-    VoiceSave,
-    VoiceRemove,
     // The bubble above the chip once the panel is closed.
     PeekCard,
     PeekClose,
@@ -138,6 +116,7 @@ struct AiSuggestionView {
 struct AiModelView {
     std::wstring name;
     std::wstring detail;
+    std::wstring tag;   // 仅聊天 (empty: none), a small outlined pill after the name
 };
 
 // One piece of the conversation (v2.css "messages" … "result card").
@@ -560,7 +539,6 @@ struct AiVoiceView {
     bool recognizing = false;         // 识别中… after the text
     std::wstring recognizing_text;
     std::shared_ptr<const AiVoiceMenuView> menu;   // non-null while the menu is open
-    std::shared_ptr<const AiVoiceCardView> card;   // non-null while the card is open
 };
 
 // The status bar chip (left end): "✦ AI" plus what the assistant is doing.
@@ -608,6 +586,11 @@ struct AiPanelViewModel {
     std::wstring intro;
     std::vector<AiSuggestionView> suggestions;
     std::wstring safe_note;
+    // No model service yet: the empty state shows the services and a button
+    // to Settings > AI 助手 instead of the greeting and suggestions.
+    bool setup = false;
+    std::wstring setup_title, setup_intro, setup_more, setup_go;
+    std::vector<std::string> setup_marks;   // provider ids, drawn by the mark painter
     // Conversation (shown when !empty).
     std::vector<AiBlockView> blocks;
     // Composer.
@@ -632,13 +615,12 @@ struct AiPanelViewModel {
     std::vector<AiModelView> models;
     int model = 0;
     std::array<std::wstring, 4> effort_names;
+    int effort_count = 4;             // segments: 4 关低中高, 3 低中高, 2 关开, 0 no thinking section
     std::wstring effort_detail;       // the selected effort's line
-    int effort = 2;
+    int effort = 2;                   // the selected segment
     bool connected = false;
     std::wstring connection_text;     // 已连接 api.deepseek.com / 未连接
-    std::wstring manage_text;         // 管理连接
-    // 管理连接: non-null while the menu is unfolded into the connection card.
-    std::shared_ptr<const AiConnView> conn;
+    std::wstring manage_text;         // 模型服务设置… (opens Settings > AI 助手)
     AiVoiceView voice;
     // Pointer.
     AiPanelHit hover;
@@ -709,20 +691,18 @@ public:
     }
     // The docked column was last drawn as glass.
     bool Glass() const noexcept { return glass_drawn_; }
-    D2D1_COLOR_F BgColor() const noexcept { return bg_color_; }   // the voice card's fields
+    D2D1_COLOR_F BgColor() const noexcept { return bg_color_; }
     D2D1_COLOR_F TextColor() const noexcept { return text_color_; }
     D2D1_COLOR_F PlaceholderColor() const noexcept { return text3_color_; }
     // The composer's text face (13.5), for the LumaText-presented EDIT.
     IDWriteTextFormat* ComposerFormat() const noexcept { return formats_.body; }
     D2D1_RECT_F ModelButtonRect() const noexcept { return model_button_; }
-    // 管理连接 card: the text box of the key (0) or address (1) field when
-    // the card is settled and that field takes an EDIT this frame.
-    bool ConnFieldRect(int field, D2D1_RECT_F& rect) const;
-    // 语音识别连接 card: the address (0) or key (1) field's text box when it
-    // takes an EDIT this frame.
-    bool VoiceFieldRect(int field, D2D1_RECT_F& rect) const;
-    // Where a voice dropdown opens: the card's model box (VoiceModel) or the
-    // menu's microphone box (VoiceMicPick), last frame.
+    // Draws a service's logo (MainRenderer::DrawProviderMark), set before Draw.
+    void SetMarkPainter(std::function<void(std::string_view, const D2D1_RECT_F&)> painter) {
+        mark_painter_ = std::move(painter);
+    }
+    // Where the microphone dropdown opens: the menu's box (VoiceMicPick),
+    // last frame.
     bool VoiceAnchor(AiPanelPart part, D2D1_RECT_F& rect) const;
 
     // The status bar chip; its motion (spinning spark, amber ring) asks for
@@ -784,18 +764,12 @@ private:
                       const D2D1_RECT_F& box, float scale, uint64_t now_ms);
     void DrawModelMenu(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal,
                        float scale, uint64_t now_ms);
-    // ai_panel_conn.cpp. Lays out (draw = false: only measures) the card in
-    // `card` (its top-left; the width is the card's) and returns its height.
-    float DrawConnCard(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal,
-                       const D2D1_RECT_F& card, float scale, uint64_t now_ms, bool draw);
     // ai_panel_voice.cpp: the mic button (in the composer row), the composer
-    // while it listens, the 语音设置 menu and the 语音识别连接 card.
+    // while it listens and the 语音设置 menu.
     void DrawMic(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal, float scale, uint64_t now_ms);
     void DrawVoiceInput(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal, float line,
                         float scale, uint64_t now_ms);
     void DrawVoiceMenu(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal, float scale,
-                       uint64_t now_ms);
-    void DrawVoiceCard(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal, float scale,
                        uint64_t now_ms);
     // The input's lines: the EDIT's, or while listening the recording lines.
     int InputLines(const AiPanelViewModel& vm) const;
@@ -842,17 +816,17 @@ private:
     D2D1_COLOR_F glass_frame_{};
     D2D1_RECT_F add_files_{}, model_button_{}, send_button_{};
     D2D1_RECT_F mic_button_{}, mic_menu_{};
-    // 语音输入: menu and card motion, hit rects and formats (ai_panel_voice.h).
+    // 语音输入: menu motion, hit rects and formats (ai_panel_voice.h).
     struct VoiceGeom;
     std::shared_ptr<VoiceGeom> voice_;
     D2D1_RECT_F menu_rect_{};
     std::vector<D2D1_RECT_F> menu_model_rects_;
     std::array<D2D1_RECT_F, 4> menu_effort_rects_{};
     D2D1_RECT_F menu_manage_{};
-    // 管理连接 card: morph between the menu and the card, its hit rects and
-    // its own text formats (ai_panel_conn.h).
-    struct ConnGeom;
-    std::shared_ptr<ConnGeom> conn_;
+    // The model list, when it is longer than its box.
+    float menu_scroll_ = 0.0f, menu_scroll_max_ = 0.0f;
+    D2D1_RECT_F go_settings_{};
+    std::function<void(std::string_view, const D2D1_RECT_F&)> mark_painter_;
     D2D1_RECT_F conversation_rect_{};
     D2D1_COLOR_F card_color_{1, 1, 1, 1};
     D2D1_COLOR_F bg_color_{1, 1, 1, 1};

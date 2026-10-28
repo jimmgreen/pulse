@@ -4871,6 +4871,10 @@ LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             return 0;
         }
         if (HandleFavoritesBarContextMenu(*s, hit, sp)) return 0;   // 收藏栏
+        if (hit.region == ui::HitTestResult::StatusBarAi) {   // ✦ AI: open, or its settings
+            AiChipContextMenu(*s, sp);
+            return 0;
+        }
         // A pinned tool: separators, remove, 自定义工具栏 (the preview pin and
         // the apps fall through to the popover).
         if (hit.region == ui::HitTestResult::ToolbarPin && hit.index >= 0 && !ui::ToolbarPickerOpen() &&

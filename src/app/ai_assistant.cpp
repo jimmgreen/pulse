@@ -2,17 +2,20 @@
 #include "ai_assistant.h"
 
 #include "ai_assistant_chat.h"
-#include "ai_assistant_conn.h"
 #include "ai_assistant_settings.h"
 #include "ai_assistant_voice.h"
 #include "ai_model_list.h"
+#include "ai_providers.h"
 #include "ai_settings.h"
 #include "app_internal.h"
+#include "app_commands.h"
 #include "app_navigation.h"
 #include "keymap.h"
 #include "../common/json_value.h"
 #include "../common/localization.h"
 #include "../ui/edit_host.h"
+#include "../ui/fluent_menu.h"
+#include "../ui/settings_page_ids.h"
 #include "../ui/typography.h"
 #include "../ui/ui_motion.h"
 #include "../ui/ui_renderer.h"
@@ -62,6 +65,32 @@ constexpr I kEffortDetails[] = {I::AiAsstEffortOffDetail, I::AiAsstEffortLowDeta
                                 I::AiAsstEffortHighDetail};
 
 std::wstring Text(I id) { return l10n::Get(id).c_str(); }
+
+// 思考强度 as the current service offers it: DeepSeek 关/低/中/高, OpenAI
+// 低/中/高 (its reasoning cannot be switched off), a switch (关/开) or none.
+// ai.json keeps one effort 0..3; a segment maps onto it.
+struct EffortChoice {
+    int count = 0;
+    bool toggle = false;
+    int first = 0;   // the effort of the first segment
+};
+
+EffortChoice EffortChoices() {
+    switch (ai::CurrentProvider().think) {
+        case ai::ThinkStyle::DeepSeek: return {4, false, 0};
+        case ai::ThinkStyle::Effort3: return {3, false, 1};
+        case ai::ThinkStyle::EnableThinking:
+        case ai::ThinkStyle::ThinkingType: return {2, true, 0};
+        default: return {};
+    }
+}
+
+int SegmentOf(const EffortChoice& c, int effort) {
+    if (c.toggle) return effort > 0 ? 1 : 0;
+    return std::clamp(effort - c.first, 0, (std::max)(c.count - 1, 0));
+}
+
+int EffortOf(const EffortChoice& c, int segment) { return c.toggle ? (segment > 0 ? 2 : 0) : segment + c.first; }
 
 std::wstring Fill(std::wstring text, std::wstring_view key, const std::wstring& value) {
     if (const size_t at = text.find(key); at != std::wstring::npos) text.replace(at, key.size(), value);
@@ -362,17 +391,22 @@ void HideEdit(AppState& s) {
 void CloseMenu(AppState& s) {
     AiAssistantState& a = s.aiAssistant;
     AiVoiceCloseMenu(s);
-    AiConnClose(s);
     if (!a.menu_open) return;
     a.menu_open = false;
     a.menu_closed_at = ui::motion::NowMs();
+}
+
+// The model service is set up in one place: Settings > AI 助手.
+void OpenServiceSettings(AppState& s) {
+    CloseMenu(s);
+    OpenSettingsTab(s, ui::kSettingsPageAssistant);
 }
 
 // Header buttons and the answer's acts show a tip after a dwell.
 bool HasTip(ui::AiPanelPart part) {
     using P = ui::AiPanelPart;
     return part == P::NewChat || part == P::Mode || part == P::Close || part == P::ActCopy || part == P::ActRetry ||
-           part == P::ActThumb || part == P::ConnBack || part == P::ConnClose || part == P::ConnEye || AiVoiceHasTip(part);
+           part == P::ActThumb || AiVoiceHasTip(part);
 }
 
 void ShowTipLater(AppState& s) {
@@ -404,11 +438,9 @@ void Activate(AppState& s, const ui::AiPanelHit& hit) {
         if (hit.part == P::PeekCard) return;
         AiChatHidePeek(s);
         if (hit.part == P::PeekUndo && a.chat && a.chat->peek_failed) {
-            // A failed turn: 重试 in place, or 连接模型 opens 管理连接.
+            // A failed turn: 重试 in place, or 连接模型 opens Settings.
             if (a.chat->peek_tone == ui::AiErrTone::Accent) {
-                AiAssistantOpen(s);
-                a.menu_open = true;
-                AiConnOpen(s);
+                OpenServiceSettings(s);
             } else {
                 AiChatRetryTurn(s);
             }
@@ -422,17 +454,8 @@ void Activate(AppState& s, const ui::AiPanelHit& hit) {
         Redraw(s);
         return;
     }
-    if (bool close_menu = false; AiConnActivate(s, hit, close_menu)) {
-        if (close_menu) {
-            CloseMenu(s);
-            a.focus_pending = true;
-        }
-        Redraw(s);
-        return;
-    }
     // The mic, its menu and the voice card. The model menu gives way to them.
     if ((hit.part == P::Mic || hit.part == P::MicMenu) && a.menu_open) {
-        AiConnClose(s);
         a.menu_open = false;
         a.menu_closed_at = ui::motion::NowMs();
     }
@@ -495,17 +518,22 @@ void Activate(AppState& s, const ui::AiPanelHit& hit) {
         a.focus_pending = true;
         break;
     }
-    case P::MenuEffort:
+    case P::MenuEffort: {
         // The menu stays open to show the chosen strength's line.
-        if (hit.index >= 0 && hit.index < 4 && hit.index != a.effort) {
-            a.effort = hit.index;
-            SavePrefs(a);
+        const EffortChoice choice = EffortChoices();
+        if (hit.index >= 0 && hit.index < choice.count) {
+            const int effort = EffortOf(choice, hit.index);
+            if (effort != a.effort) {
+                a.effort = effort;
+                SavePrefs(a);
+            }
         }
         break;
+    }
     case P::MenuManage:
-        // The menu unfolds into the 管理连接 card in place.
-        AiConnOpen(s);
-        break;
+    case P::GoSettings:
+        OpenServiceSettings(s);
+        return;
     case P::Send:
         CloseMenu(s);
         // While the mic listens 发送 only stops it: the last words are still
@@ -569,8 +597,8 @@ void Activate(AppState& s, const ui::AiPanelHit& hit) {
         if (!AiChatErrAction(s, hit.index, act)) break;
         if (AiVoiceErrAct(s, act, hit.index)) break;
         if (act == ui::AiErrAct::ManageConn || act == ui::AiErrAct::Connect) {
-            a.menu_open = true;
-            AiConnOpen(s);
+            OpenServiceSettings(s);
+            return;
         } else if (act == ui::AiErrAct::SwitchModel) {
             a.menu_open = true;
             if (AiAgentConnected()) ai::RefreshListedModels(s.hwnd, AiAgentBaseUrl());
@@ -629,6 +657,28 @@ void AiAssistantFillComposer(AppState& s, const std::wstring& text, size_t selec
 
 bool AiAssistantIsOpen(const AppState& s) { return s.aiAssistant.open; }
 
+void AiChipContextMenu(AppState& s, POINT screen_pt) {
+    if (!EnsureMenu(s)) return;
+    s.menu->SetTheme(s.darkMode, s.accentColor);
+    std::vector<ui::FluentMenuItem> items(2);
+    items[0].command = 1;
+    items[0].text = Text(s.aiAssistant.open ? I::AiChipCollapse : I::AiChipOpen);
+    items[0].glyph = L"\xF5C2";
+    items[0].shortcut = L"Ctrl+J";
+    items[0].separator_after = true;
+    items[1].command = 2;
+    items[1].text = Text(I::AiChipSettings);
+    items[1].glyph = L"\xE713";
+    const int command = s.menu->TrackPopup(screen_pt, std::move(items));
+    if (command == 1) {
+        if (s.aiAssistant.open) AiAssistantClose(s);
+        else AiAssistantOpen(s);
+    } else if (command == 2) {
+        OpenSettingsTab(s, ui::kSettingsPageAssistant);
+    }
+    Redraw(s);
+}
+
 void AiAssistantOpen(AppState& s, bool animate) {
     AiAssistantState& a = s.aiAssistant;
     LoadPrefs(a);
@@ -648,7 +698,6 @@ void AiAssistantClose(AppState& s, bool animate) {
     AiAssistantState& a = s.aiAssistant;
     if (!a.open) return;
     a.open = false;
-    AiConnClose(s);
     AiVoiceStop(s);
     a.menu_open = false;
     a.hover = {};
@@ -745,8 +794,13 @@ void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm) {
     p.add_files = Text(I::AiAsstAddFiles);
     const std::vector<std::string>& listed = Listed();
     p.model_label = json::Wide(CurrentModel());
-    p.effort = std::clamp(a.effort, 0, 3);
-    p.effort_label = p.effort == 0 ? std::wstring() : L" \u00B7 " + Text(kEffortNames[p.effort]);
+    const EffortChoice choice = EffortChoices();
+    p.effort_count = choice.count;
+    p.effort = SegmentOf(choice, std::clamp(a.effort, 0, 3));
+    if (choice.count == 0) p.effort_label.clear();
+    else if (choice.toggle) p.effort_label = a.effort > 0 ? L" \u00B7 " + Text(I::AiAsstThinkShort) : std::wstring();
+    else p.effort_label = a.effort == 0 && choice.first == 0 ? std::wstring()
+                                                              : L" \u00B7 " + Text(kEffortNames[EffortOf(choice, p.effort)]);
     p.send = chat.busy ? ui::AiSendState::Busy : p.composer_empty ? ui::AiSendState::Dim : ui::AiSendState::Ready;
 
     p.menu_open = a.menu_open;
@@ -759,18 +813,34 @@ void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm) {
         std::wstring detail;
         for (const KnownModel& k : kKnownModels)
             if (id == k.id) detail = Text(k.detail);
-        p.models.push_back({json::Wide(id), std::move(detail)});
+        std::wstring tag = ai::IsChatOnlyModel(AiAgentBaseUrl(), id) ? Text(I::AsstChatOnly) : std::wstring();
+        p.models.push_back({json::Wide(id), std::move(detail), std::move(tag)});
     }
     const auto chosen = std::find(rows.begin(), rows.end(), CurrentModel());
     p.model = chosen == rows.end() ? -1 : static_cast<int>(chosen - rows.begin());
-    for (size_t i = 0; i < 4; ++i) p.effort_names[i] = Text(kEffortNames[i]);
-    p.effort_detail = Text(kEffortDetails[p.effort]);
+    if (choice.toggle) {
+        p.effort_names = {Text(I::AiAsstEffortOff), Text(I::AiAsstEffortOn), L"", L""};
+        p.effort_detail = Text(p.effort > 0 ? I::AiAsstThinkOnDetail : I::AiAsstEffortOffDetail);
+    } else {
+        for (int i = 0; i < 4; ++i)
+            p.effort_names[static_cast<size_t>(i)] = i < choice.count ? Text(kEffortNames[EffortOf(choice, i)]) : L"";
+        p.effort_detail = choice.count > 0 ? Text(kEffortDetails[EffortOf(choice, p.effort)]) : std::wstring();
+    }
     // Connected once a DeepSeek key is stored (ai_model_key.h).
     p.connected = AiAgentConnected();
     p.connection_text = p.connected ? Fill(Text(I::AiAsstConnected), L"{host}", AiAgentHost())
                                     : Text(I::AiAsstNotConnected);
-    p.manage_text = Text(I::AiAsstManage);
-    AiConnFill(s, p);
+    p.manage_text = Text(I::AiAsstServiceSettings);
+    // No service yet: the welcome leads to Settings instead of suggestions.
+    p.setup = !p.connected;
+    if (p.setup) {
+        p.setup_title = Text(I::AiAsstSetupTitle);
+        p.setup_intro = Text(I::AiAsstSetupIntro);
+        p.setup_more = Text(I::AiAsstSetupMore);
+        p.setup_go = Text(I::AiAsstSetupGo);
+        p.setup_marks = {"deepseek", "qwen", "kimi", "zhipu", "doubao", "silicon", "openai", "openrouter", "ollama"};
+        p.suggestions.clear();
+    }
     AiVoiceFill(s, vm);
 
     p.hover = a.hover;
@@ -779,12 +849,9 @@ void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm) {
     using P = ui::AiPanelPart;
     if (HasTip(a.hover.part) && a.pressed.part == P::None && GetTickCount64() - a.hover_since >= kTipDelayMs) {
         const P part = a.hover.part;
-        std::wstring conn_tip;
+        std::wstring voice_tip;
         if (AiVoiceHasTip(part)) {
-            if (AiVoiceTip(s, part, conn_tip)) vm.tooltip_text = std::move(conn_tip);
-        } else if (AiConnTip(s, part, conn_tip)) {
-            // A card part under a pointer that has not moved since ‹ / ⌄.
-            if (AiConnIsOpen(s)) vm.tooltip_text = std::move(conn_tip);
+            if (AiVoiceTip(s, part, voice_tip)) vm.tooltip_text = std::move(voice_tip);
         } else vm.tooltip_text = Text(part == P::NewChat ? I::AiAsstNewChat
                                : part == P::Close ? I::AiAsstCollapse
                                : part == P::ActCopy ? I::AiAsstCopy
@@ -805,7 +872,6 @@ void AiAssistantPrefsChanged(AppState& s) {
 void AiAssistantLayout(AppState& s) {
     AiAssistantState& a = s.aiAssistant;
     AssistantSettingsLayout(s);
-    AiConnLayout(s);
     AiVoiceLayout(s);
     if (!a.edit) return;
     const ui::AiPanelView& view = s.renderer.AiPanel();
@@ -984,7 +1050,7 @@ bool AiAssistantSetCursor(AppState& s, int x, int y) {
     const AiAssistantState& a = s.aiAssistant;
     if (!a.open || !s.renderer.AiPanel().Contains(static_cast<float>(x), static_cast<float>(y))) return false;
     const ui::AiPanelHit hit = s.renderer.AiPanel().HitTest(static_cast<float>(x), static_cast<float>(y));
-    const bool text = hit.part == ui::AiPanelPart::Input || AiConnIsField(hit.part) || AiVoiceIsField(hit.part);
+    const bool text = hit.part == ui::AiPanelPart::Input;
     SetCursor(LoadCursorW(nullptr, text ? IDC_IBEAM : IDC_ARROW));
     return true;
 }
@@ -1009,9 +1075,7 @@ HBRUSH AiAssistantCtlColor(AppState& s, HDC hdc, HWND edit) {
     AiAssistantState& a = s.aiAssistant;
     if (!edit) return nullptr;
     if (edit != a.edit) {
-        if (HBRUSH page = AssistantSettingsCtlColor(s, hdc, edit)) return page;
-        if (HBRUSH voice = AiVoiceCtlColor(s, hdc, edit)) return voice;
-        return AiConnCtlColor(s, hdc, edit);
+        return AssistantSettingsCtlColor(s, hdc, edit);   // Settings > AI 助手
     }
     const ui::AiPanelView& view = s.renderer.AiPanel();
     const COLORREF back = ToColorRef(view.CardColor());
@@ -1029,8 +1093,6 @@ HBRUSH AiAssistantCtlColor(AppState& s, HDC hdc, HWND edit) {
 void AiAssistantDpiChanged(AppState& s) {
     AiAssistantState& a = s.aiAssistant;
     AssistantSettingsDpiChanged(s);
-    AiConnDpiChanged(s);
-    AiVoiceDpiChanged(s);
     if (!a.edit) return;
     EnsureFont(s);
     ReadComposerMetrics(a);
@@ -1041,7 +1103,6 @@ void AiAssistantDestroy(AppState& s) {
     AiAssistantState& a = s.aiAssistant;
     if (s.hwnd) KillTimer(s.hwnd, kTipTimer);
     AssistantSettingsDestroy(s);
-    AiConnDestroy(s);
     AiVoiceDestroy(s);
     if (a.edit) DestroyWindow(a.edit);
     a.edit = nullptr;

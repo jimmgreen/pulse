@@ -636,7 +636,7 @@ void ConnectDone(AppState& s, AsstPageUi& u, ai::ModelProbe result) {
         Redraw(s);
         return;
     }
-    if (listed) ai::StoreListedModels(u.job_url, result.models);
+    if (listed) ai::StoreListedModels(u.job_url, result.models, result.chat_only);
     NoteAssistantConnection(true, result.ms);
     ToConnected(s, u);
     // No list (or nothing to choose from it): a typed name, kept if there was one.
@@ -723,7 +723,7 @@ void StartTest(AppState& s) {
             const std::wstring url = endpoint.base_url;
             const ai::ModelProbe result = ai::ProbeModelService(std::move(endpoint));   // wipes the key
             const bool ok = result.http_status == 200;
-            if (ok) ai::StoreListedModels(url, result.models);
+            if (ok) ai::StoreListedModels(url, result.models, result.chat_only, true);
             NoteAssistantConnection(ok, result.ms);
             g_testing.store(false);
             if (hwnd && IsWindow(hwnd)) InvalidateRect(hwnd, nullptr, FALSE);
@@ -795,6 +795,7 @@ void ModelMenu(AppState& s, AsstPageUi& u) {
         ui::FluentMenuItem item;
         item.command = static_cast<int>(i) + 1;
         item.text = json::Wide(ids[i]);
+        if (ai::IsChatOnlyModel(AiAgentBaseUrl(), ids[i])) item.badge_text = Text(I::AsstChatOnly);
         item.radio_group = true;
         item.radio = ids[i] == current;
         items.push_back(std::move(item));
@@ -1545,6 +1546,22 @@ HBRUSH AssistantSettingsCtlColor(AppState& s, HDC hdc, HWND edit) {
         SetBkMode(hdc, OPAQUE);
     }
     return u->brush;
+}
+
+void ShowAssistantVoiceSettings(AppState& s) {
+    OpenSettingsTab(s, ui::kSettingsPageAssistant);
+    // Scroll so 语音输入's heading sits near the top (its service dropdown
+    // is the card's first row; the heading and card padding are above it).
+    const float w = static_cast<float>(s.compositor.Width());
+    const float h = static_cast<float>(s.compositor.Height());
+    const ui::WindowViewModel vm = BuildVm(s, false);
+    const D2D1_RECT_F r = s.renderer.SettingsDropdownBounds(vm, 4, w, h);
+    D2D1_RECT_F track{}, thumb{};
+    float max_scroll = 0.0f;
+    if (r.bottom <= r.top || !s.renderer.SettingsScrollbarGeometry(vm, w, h, track, thumb, max_scroll)) return;
+    const float above = s.renderer.TitleBarHeight() + 96.0f * s.scale;
+    s.settings.SetScroll(s.settings.scroll() + r.top - above, max_scroll);
+    Redraw(s);
 }
 
 void AssistantSettingsDpiChanged(AppState& s) {

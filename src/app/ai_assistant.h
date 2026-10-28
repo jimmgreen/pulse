@@ -14,7 +14,6 @@ namespace pulse {
 struct AppState;
 namespace ui { struct WindowViewModel; }
 struct AiChat;   // the conversation and its driver (ai_assistant_chat.h)
-struct AiConnUi; // 管理连接 card: fields, test, key (ai_assistant_conn.h)
 struct AiVoiceUi; // 语音输入: listening, menu, connection card (ai_assistant_voice.h)
 struct AsstPageUi; // Settings > AI 助手: stage, fields, 连接 (ai_assistant_settings.h)
 
@@ -57,8 +56,6 @@ struct AiAssistantState {
     // Conversation; created on first use. Opaque here so the driver can
     // change without rebuilding everything that sees AppState.
     std::shared_ptr<AiChat> chat;
-    // 管理连接 card; created when it first opens.
-    std::shared_ptr<AiConnUi> conn;
     // 语音输入; created on the first frame with the panel.
     std::shared_ptr<AiVoiceUi> voice;
     // Settings > AI 助手; created when the page first shows.
@@ -73,6 +70,8 @@ void AiAssistantHotkey(AppState& s);
 void AiAssistantOpen(AppState& s, bool animate = true);
 void AiAssistantClose(AppState& s, bool animate = true);
 bool AiAssistantIsOpen(const AppState& s);
+// Right-click on the status bar's ✦ AI: open / collapse, AI 助手设置….
+void AiChipContextMenu(AppState& s, POINT screen_pt);
 
 // BuildVm: the panel and the chip's open/idle look.
 void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm);
