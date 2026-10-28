@@ -3012,12 +3012,10 @@ void AiPanelView::DrawConversation(Compositor* compositor, const AiPanelViewMode
     }
     if (scroll_ > max_scroll) scroll_ = max_scroll;
 
-    // Overlay scrollbar (Chromium's thin bar): only when it overflows.
-    if (max_scroll > 0.5f) {
-        const D2D1_RECT_F tr = PlaceBar(0, area.right - 3.0f * s, area.top, view_h_, content_h_, view_h_,
-                                        scroll_, 28.0f * s, 4.0f * s, s);
-        c.Fill(tr, (tr.right - tr.left) * 0.5f, Alpha(pal.text3, BarHot(0) ? 0.6f : 0.35f));
-    }
+    // The shared scrollbar: only when it overflows.
+    if (max_scroll > 0.5f)
+        DrawBar(0, D2D1::RectF(area.right - 12.0f * s, area.top + 4.0f * s, area.right - 1.0f * s,
+                               area.top + view_h_ - 4.0f * s), scroll_, view_h_, content_h_);
 
     // Drop tweens of blocks that are gone.
     tweens_.erase(std::remove_if(tweens_.begin(), tweens_.end(), [](const auto& kv) { return !kv.second.used; }),

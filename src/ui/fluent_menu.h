@@ -305,15 +305,19 @@ private:
     void UpdateHover(int row, int swatch = -1);
     float BodyHeightPx() const;
     // Overflow scrolling (#67): a menu taller than the work area keeps its
-    // card on screen and scrolls the rows between two arrow strips.
+    // card on screen and scrolls its rows under the shared scrollbar.
     bool Scrollable() const { return max_visible_rows_ > 0 || overflow_; }
-    float ArrowPx() const;          // arrow strip height; 0 unless overflowing
     float ViewportPx() const;       // body height left for rows
     float MaxScrollPx() const;
     void ApplyHeightLimit(float available_px);
     bool ScrollTo(float y);         // clamps; true when the rows moved
     bool ScrollRows(int rows);      // whole rows, top row aligned like native menus
-    void TickArrowScroll();         // modal-loop tick while resting on an arrow
+    // The shared scrollbar (fluent::ScrollbarSpec) over the rows' right edge.
+    fluent::ScrollbarSpec BarSpec() const;
+    bool BarPress(float x, float y);   // true when the press grabbed the bar
+    bool BarDrag(float y);             // true when the rows moved
+    void BarRelease();
+    bool TickBar();                    // modal-loop tick; true while it animates
     void UpdateTooltip(int row);
     bool RenderTip(const std::wstring& text);   // tooltip text -> tip_surf_
     int HitTestSwatch(int row, float client_x) const;
@@ -380,11 +384,10 @@ private:
     float scroll_y_ = 0.0f;
     float body_limit_px_ = 0.0f;
     bool overflow_ = false;
-    int arrow_hover_ = 0;          // -1 top arrow, +1 bottom arrow, 0 none
-    std::chrono::steady_clock::time_point arrow_tick_{};
-    float arrow_accum_ms_ = 0.0f;
-    static constexpr float kScrollArrowDip = 20.0f;
-    static constexpr float kScrollArrowMsPerRow = 60.0f;
+    fluent::ScrollbarFade bar_fade_;
+    bool bar_hot_ = false;         // pointer on the scrollbar
+    bool bar_drag_ = false;
+    float bar_grab_ = 0.0f;        // pointer offset along the thumb
     HWND tooltip_ = nullptr;
     std::wstring tooltip_text_;
     bool open_ = false;

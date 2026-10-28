@@ -142,6 +142,59 @@ struct ScrollbarSpec {
 D2D1_RECT_F ScrollbarThumbRect(const ScrollbarSpec& spec, float scale,
                               bool high_contrast = false) noexcept;
 
+// One scrollbar for every scrolling surface: ScrollbarSpec draws it
+// (Painter::DrawScrollbar), the functions below move it and ScrollbarFade
+// times it, so the file list, settings, the sidebar, menus and the assistant
+// panel look and drag alike.
+//
+// True when a press at (x, y) lands on the bar: in its viewport while it scrolls.
+bool ScrollbarHitTest(const ScrollbarSpec& spec, float x, float y) noexcept;
+// Where along the thumb a press holds it: on the thumb, where it was pressed;
+// on the track, its middle (the thumb jumps under the pointer).
+float ScrollbarGrabOffset(float thumb_start, float thumb_length, float pointer) noexcept;
+// The offset for the pointer while dragging, along one axis; `grab` is from
+// ScrollbarGrabOffset at the press.
+float ScrollbarDragOffset(float track_start, float track_length, float thumb_length,
+                          float max_offset, float pointer, float grab) noexcept;
+
+// Visibility and width over time: a thin thumb shows while its view scrolls
+// (or always, with KeepVisible) and fades out a moment later; the pointer on
+// the bar or a drag keeps it and expands it to the full thumb with its track.
+// Time based, so a slow UI tick only coarsens it.
+class ScrollbarFade {
+public:
+    static constexpr uint64_t kHoldMs = 1000;    // visible after the last scroll or hover
+    static constexpr uint64_t kFadeInMs = 100;
+    static constexpr uint64_t kFadeOutMs = 400;
+    static constexpr uint64_t kExpandMs = 120;
+
+    // The view scrolled.
+    void Reveal(uint64_t now) noexcept;
+    // Pointer on the bar, or the bar being dragged.
+    void SetHot(bool hot, uint64_t now) noexcept;
+    // Thin at rest instead of hidden (short lists in menus and panels).
+    void KeepVisible(bool keep) noexcept { keep_visible_ = keep; }
+    // Advances to `now`; true when opacity or expansion changed.
+    bool Tick(uint64_t now) noexcept;
+    // True while a frame-rate tick matters: a fade or expansion is running or
+    // about to start.
+    bool Moving(uint64_t now) const noexcept;
+
+    float Opacity() const noexcept { return opacity_; }
+    float Expand() const noexcept { return expand_; }
+
+private:
+    float TargetOpacity(uint64_t now) const noexcept;
+    float TargetExpand() const noexcept { return hot_ ? 1.0f : 0.0f; }
+
+    float opacity_ = 0.0f;
+    float expand_ = 0.0f;
+    bool hot_ = false;
+    bool keep_visible_ = false;
+    uint64_t visible_until_ = 0;
+    uint64_t last_tick_ = 0;
+};
+
 struct ListRowSpec {
     D2D1_RECT_F bounds{};
     ControlState state{};

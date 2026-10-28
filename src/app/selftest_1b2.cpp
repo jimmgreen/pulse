@@ -208,16 +208,17 @@ struct FluentMenuTestPeer {
         menu.model_.SetItems(std::move(items));
         menu.model_.Layout(nullptr, scale, 300.0f * scale);
     }
+    static uint64_t ScrollbarFadeFullMs() { return fluent::ScrollbarFade::kExpandMs; }
     static bool CheckOverflowFit(float scale) {
         FluentMenu menu;
         FillOverflowMenu(menu, scale, 6);
         menu.ApplyHeightLimit(400.0f * scale);
-        if (menu.overflow_ || menu.ArrowPx() != 0.0f ||
+        if (menu.overflow_ || menu.BarSpec().enabled ||
             std::abs(menu.BodyHeightPx() - static_cast<float>(menu.model_.HeightPx())) > 0.01f)
             return false;
         FillOverflowMenu(menu, scale, 60);
         menu.ApplyHeightLimit(400.0f * scale);
-        return menu.overflow_ && menu.Scrollable() && menu.ArrowPx() > 0.0f &&
+        return menu.overflow_ && menu.Scrollable() && menu.BarSpec().enabled &&
             std::abs(menu.BodyHeightPx() - 400.0f * scale) < 0.01f &&
             menu.MaxScrollPx() > 0.0f && menu.scroll_y_ == 0.0f;
     }
@@ -226,27 +227,30 @@ struct FluentMenuTestPeer {
         FillOverflowMenu(menu, scale, 60);
         menu.ApplyHeightLimit(400.0f * scale);
         menu.open_ = true;
-        const float arrow = menu.ArrowPx();
         auto at = [&](float body_y) {
             return POINT{ menu.kShadowMargin + 40, static_cast<LONG>(menu.kShadowMargin + body_y) };
         };
         bool ok = true;
-        menu.OnMouse(at(arrow * 0.5f), false);
-        ok = ok && menu.arrow_hover_ == -1 && menu.hover_row_ == -1;
-        menu.OnMouse(at(arrow + menu.model_.RowTopPx(0) + 2.0f), false);
-        ok = ok && menu.arrow_hover_ == 0 && menu.hover_row_ == 0;
-        const float bottom = menu.BodyHeightPx() - arrow * 0.5f;
-        menu.OnMouse(at(bottom), false);
-        ok = ok && menu.arrow_hover_ == 1 && menu.hover_row_ == -1;
-        menu.OnMouse(at(bottom), true); // a click pages down without invoking anything
-        const float paged = menu.scroll_y_;
-        ok = ok && paged > 0.0f && menu.result_ == 0 && menu.open_;
-        // Rows under the pointer account for the arrow strip and the offset.
-        menu.OnMouse(at(arrow + 2.0f), false);
-        ok = ok && menu.hover_row_ == menu.model_.HitTestRow(paged + 2.0f);
-        const float before = menu.scroll_y_;
-        menu.OnMouse(at(arrow * 0.5f), true); // and the top arrow pages back up
-        ok = ok && menu.scroll_y_ < before;
+        menu.OnMouse(at(menu.model_.RowTopPx(0) + 2.0f), false);
+        ok = ok && menu.hover_row_ == 0;
+        // The shared scrollbar: a press away from it is not a bar press; one
+        // low on its track jumps there without invoking a row; dragging
+        // follows the pointer; releasing ends the drag and keeps the menu.
+        const fluent::ScrollbarSpec bar = menu.BarSpec();
+        const float bx = (bar.viewport.left + bar.viewport.right) * 0.5f;
+        ok = ok && !menu.BarPress(menu.kShadowMargin + 40.0f, bar.viewport.bottom - 2.0f);
+        ok = ok && menu.BarPress(bx, bar.viewport.bottom - 2.0f) && menu.bar_drag_;
+        ok = ok && std::abs(menu.scroll_y_ - menu.MaxScrollPx()) < 0.01f && menu.result_ == 0 && menu.open_;
+        menu.BarDrag(bar.viewport.top);
+        ok = ok && menu.scroll_y_ == 0.0f;
+        menu.BarDrag((bar.viewport.top + bar.viewport.bottom) * 0.5f);
+        const float mid = menu.scroll_y_;
+        ok = ok && mid > 0.0f && mid < menu.MaxScrollPx();
+        menu.BarRelease();
+        ok = ok && !menu.bar_drag_ && !menu.BarDrag(bar.viewport.top) && menu.result_ == 0 && menu.open_;
+        // Rows under the pointer account for the offset.
+        menu.OnMouse(at(2.0f), false);
+        ok = ok && menu.hover_row_ == menu.model_.HitTestRow(mid + 2.0f);
         menu.open_ = false;
         return ok;
     }
@@ -265,23 +269,13 @@ struct FluentMenuTestPeer {
             return false;
         return menu.hover_row_ == -1; // scrolling drops the stale hover
     }
-    static bool CheckOverflowArrowHover(float scale) {
+    static bool CheckOverflowRowSteps(float scale) {
         FluentMenu menu;
         FillOverflowMenu(menu, scale, 60);
         menu.ApplyHeightLimit(400.0f * scale);
-        menu.arrow_hover_ = 1;
-        menu.TickArrowScroll(); // the first tick only starts the clock
-        if (menu.scroll_y_ != 0.0f) return false;
-        menu.arrow_tick_ = std::chrono::steady_clock::now() - std::chrono::milliseconds(70);
-        menu.TickArrowScroll();
-        const float moved = menu.scroll_y_;
         // One whole row per step: the next row's top lines up with the viewport.
-        if (std::abs(moved - menu.model_.RowTopPx(1)) > 0.01f)
-            return false;
-        menu.arrow_hover_ = 0; // the pointer left the arrow
-        menu.arrow_tick_ = std::chrono::steady_clock::now() - std::chrono::milliseconds(70);
-        menu.TickArrowScroll();
-        if (menu.scroll_y_ != moved) return false;
+        menu.ScrollRows(1);
+        if (std::abs(menu.scroll_y_ - menu.model_.RowTopPx(1)) > 0.01f) return false;
         // Paging and stepping back always land on a row top.
         menu.ScrollRows(5);
         menu.ScrollRows(-1);
@@ -308,12 +302,15 @@ struct FluentMenuTestPeer {
             items.push_back(std::move(item));
         }
         // Lay out once to size the limit, then render the same rows mid-scroll
-        // with the pointer resting on the bottom arrow.
+        // with the pointer on the scrollbar.
         menu.model_.SetItems(items);
         menu.model_.Layout(compositor.DwriteFactory(), scale, 0.0f);
         menu.ApplyHeightLimit(360.0f * scale);
         menu.ScrollRows(4);
-        menu.arrow_hover_ = 1;
+        menu.bar_fade_.KeepVisible(true);
+        menu.bar_fade_.SetHot(true, 1);
+        menu.bar_fade_.Tick(1);
+        menu.bar_fade_.Tick(1 + ScrollbarFadeFullMs());
         return menu.overflow_ && menu.SaveDebugSnapshot(path.c_str(), std::move(items), -1);
     }
     static bool CheckSubmenuColors(float scale) {
@@ -2076,17 +2073,17 @@ void TestMenuModel() {
     for (float scale : {1.0f, 1.5f}) {
         const bool hi = scale != 1.0f;
         Check(ui::FluentMenuTestPeer::CheckOverflowFit(scale), hi
-            ? L"menu overflow: a menu taller than the screen stays on it with arrows (#67, 150%)"
-            : L"menu overflow: a menu taller than the screen stays on it with arrows (#67, 100%)");
+            ? L"menu overflow: a menu taller than the screen stays on it with a scrollbar (#67, 150%)"
+            : L"menu overflow: a menu taller than the screen stays on it with a scrollbar (#67, 100%)");
         Check(ui::FluentMenuTestPeer::CheckOverflowPointer(scale), hi
-            ? L"menu overflow: arrows page on click and rows hit-test through the scroll (150%)"
-            : L"menu overflow: arrows page on click and rows hit-test through the scroll (100%)");
+            ? L"menu overflow: the shared scrollbar drags without invoking a row; rows hit-test through the scroll (150%)"
+            : L"menu overflow: the shared scrollbar drags without invoking a row; rows hit-test through the scroll (100%)");
         Check(ui::FluentMenuTestPeer::CheckOverflowKeysAndWheel(scale), hi
-            ? L"menu overflow: keyboard selection stays between the arrows; scrolling clamps (150%)"
-            : L"menu overflow: keyboard selection stays between the arrows; scrolling clamps (100%)");
-        Check(ui::FluentMenuTestPeer::CheckOverflowArrowHover(scale), hi
-            ? L"menu overflow: resting on an arrow keeps scrolling until the pointer leaves (150%)"
-            : L"menu overflow: resting on an arrow keeps scrolling until the pointer leaves (100%)");
+            ? L"menu overflow: keyboard selection stays in view; scrolling clamps (150%)"
+            : L"menu overflow: keyboard selection stays in view; scrolling clamps (100%)");
+        Check(ui::FluentMenuTestPeer::CheckOverflowRowSteps(scale), hi
+            ? L"menu overflow: row steps land on a row top (150%)"
+            : L"menu overflow: row steps land on a row top (100%)");
     }
     Check(ui::FluentMenuTestPeer::CheckSubmenuColors(1.0f),
           L"menu: all submenu color dots hover and dispatch at 100 percent DPI");

@@ -450,8 +450,23 @@ LRESULT CALLBACK FluentMenu::MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         break;
     case WM_MOUSEMOVE: {
         POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-        if (is_sub) self->OnSubMouse(pt, false);
-        else self->OnMouse(pt, false);
+        if (is_sub) {
+            self->OnSubMouse(pt, false);
+        } else if (self->bar_drag_) {
+            if (self->BarDrag(static_cast<float>(pt.y)) && self->Render())
+                self->Present(self->present_alpha_, self->present_offset_);
+        } else {
+            self->bar_hot_ = fluent::ScrollbarHitTest(self->BarSpec(),
+                static_cast<float>(pt.x), static_cast<float>(pt.y));
+            if (!self->bar_hot_) {
+                self->OnMouse(pt, false);
+            } else {
+                // The bar sits over the rows' right edge: no row under it.
+                self->sub_pending_row_ = -1;
+                self->UpdateTooltip(-1);
+                if (self->hover_row_ >= 0) self->UpdateHover(-1);
+            }
+        }
         TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, hwnd, 0 };
         TrackMouseEvent(&tme);
         return 0;
@@ -465,18 +480,30 @@ LRESULT CALLBACK FluentMenu::MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             }
         } else {
             // Keep the flyout: the pointer may be crossing onto it.
-            if (self->arrow_hover_ != 0) {
-                self->arrow_hover_ = 0;
-                if (self->hover_row_ < 0 && self->Render()) self->Present(self->present_alpha_, self->present_offset_);
-            }
+            if (!self->bar_drag_) self->bar_hot_ = false;
             self->UpdateHover(-1);
         }
         return 0;
     case WM_LBUTTONDOWN:
-        if (!is_sub) SetFocus(self->external_edit_ ? self->external_edit_ : self->edit_ ? self->edit_ : hwnd);
+        if (!is_sub) {
+            SetFocus(self->external_edit_ ? self->external_edit_ : self->edit_ ? self->edit_ : hwnd);
+            if (self->BarPress(static_cast<float>(GET_X_LPARAM(lParam)), static_cast<float>(GET_Y_LPARAM(lParam)))) {
+                SetCapture(hwnd);
+                if (self->Render()) self->Present(self->present_alpha_, self->present_offset_);
+            }
+        }
         return 0; // press visual is skipped; invoke happens on release
+    case WM_CAPTURECHANGED:
+        if (!is_sub && self->bar_drag_ && reinterpret_cast<HWND>(lParam) != hwnd) self->BarRelease();
+        break;
     case WM_LBUTTONUP: {
         POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (!is_sub && self->bar_drag_) {
+            // A scrollbar drag ends here; it never invokes the row below.
+            self->BarRelease();
+            if (GetCapture() == hwnd) ReleaseCapture();
+            return 0;
+        }
         if (is_sub) self->OnSubMouse(pt, true);
         else self->OnMouse(pt, true);
         return 0;
@@ -527,12 +554,8 @@ float FluentMenu::BodyHeightPx() const {
         model_.RowTopPx(std::min(max_visible_rows_, model_.Count())) + 4.0f * scale_);
 }
 
-float FluentMenu::ArrowPx() const {
-    return overflow_ ? std::round(kScrollArrowDip * scale_) : 0.0f;
-}
-
 float FluentMenu::ViewportPx() const {
-    return std::max(0.0f, BodyHeightPx() - ArrowPx() * 2.0f);
+    return std::max(0.0f, BodyHeightPx());
 }
 
 float FluentMenu::MaxScrollPx() const {
@@ -545,9 +568,9 @@ void FluentMenu::ApplyHeightLimit(float available_px) {
         body_limit_px_ = std::max(model_.RowHeightPx(), available_px);
     } else if (static_cast<float>(model_.HeightPx()) > available_px) {
         // Taller than the work area (#67): keep the card on screen and scroll
-        // the rows between two arrow strips, like native menus do.
+        // the rows under the shared scrollbar.
         overflow_ = true;
-        body_limit_px_ = std::max(available_px, ArrowPx() * 2.0f + model_.RowHeightPx());
+        body_limit_px_ = std::max(available_px, model_.RowHeightPx());
     } else {
         body_limit_px_ = 0.0f;
     }
@@ -571,7 +594,7 @@ bool FluentMenu::ScrollRows(int rows) {
     if (rows == 0 || model_.Count() == 0) return false;
     // First row whose top is at or below the viewport top; a half-hidden row
     // above it is the one a step up reveals.
-    // Scrolled rows sit flush under the top arrow; only the very top keeps
+    // Scrolled rows sit flush with the top; only the very top keeps
     // the menu's leading padding.
     int first = model_.Count() - 1;
     for (int i = 0; i < model_.Count(); ++i) {
@@ -584,28 +607,53 @@ bool FluentMenu::ScrollRows(int rows) {
     return ScrollTo(target == 0 ? 0.0f : model_.RowTopPx(target));
 }
 
-void FluentMenu::TickArrowScroll() {
-    const auto now = std::chrono::steady_clock::now();
-    if (arrow_hover_ == 0) {
-        arrow_tick_ = {};
-        arrow_accum_ms_ = 0.0f;
-        return;
-    }
-    if (arrow_tick_ == std::chrono::steady_clock::time_point{}) {
-        arrow_tick_ = now;
-        arrow_accum_ms_ = 0.0f;
-        return;
-    }
-    arrow_accum_ms_ += std::min(100.0f,
-        std::chrono::duration<float, std::milli>(now - arrow_tick_).count());
-    arrow_tick_ = now;
-    int steps = 0;
-    while (arrow_accum_ms_ >= kScrollArrowMsPerRow) {
-        arrow_accum_ms_ -= kScrollArrowMsPerRow;
-        ++steps;
-    }
-    if (steps > 0 && ScrollRows(arrow_hover_ * steps) && Render())
-        Present(present_alpha_, present_offset_);
+fluent::ScrollbarSpec FluentMenu::BarSpec() const {
+    fluent::ScrollbarSpec bar;
+    const float top = static_cast<float>(kShadowMargin) + FilterHeaderPx();
+    const float right = static_cast<float>(kShadowMargin + model_.WidthPx()) - 1.0f * scale_;
+    bar.viewport = D2D1::RectF(right - 12.0f * scale_, top + 4.0f * scale_,
+                               right, top + BodyHeightPx() - 4.0f * scale_);
+    bar.offset = scroll_y_;
+    bar.viewport_extent = ViewportPx();
+    bar.content_extent = static_cast<float>(model_.HeightPx());
+    bar.expand_progress = bar_fade_.Expand();
+    bar.opacity = bar_fade_.Opacity();
+    bar.enabled = Scrollable() && MaxScrollPx() > 0.0f;
+    return bar;
+}
+
+bool FluentMenu::BarPress(float x, float y) {
+    const fluent::ScrollbarSpec bar = BarSpec();
+    if (!fluent::ScrollbarHitTest(bar, x, y)) return false;
+    const D2D1_RECT_F thumb = fluent::ScrollbarThumbRect(bar, scale_);
+    bar_grab_ = fluent::ScrollbarGrabOffset(thumb.top, thumb.bottom - thumb.top, y);
+    bar_drag_ = true;
+    bar_hot_ = true;
+    sub_pending_row_ = -1;
+    UpdateTooltip(-1);
+    hover_row_ = -1;
+    BarDrag(y);   // a press on the track jumps the thumb there
+    return true;
+}
+
+bool FluentMenu::BarDrag(float y) {
+    if (!bar_drag_) return false;
+    const fluent::ScrollbarSpec bar = BarSpec();
+    const D2D1_RECT_F thumb = fluent::ScrollbarThumbRect(bar, scale_);
+    return ScrollTo(fluent::ScrollbarDragOffset(bar.viewport.top, bar.viewport.bottom - bar.viewport.top,
+                                                thumb.bottom - thumb.top, MaxScrollPx(), y, bar_grab_));
+}
+
+void FluentMenu::BarRelease() {
+    bar_drag_ = false;
+}
+
+bool FluentMenu::TickBar() {
+    const uint64_t now = ::pulse::ui::motion::NowMs();
+    bar_fade_.KeepVisible(true);
+    bar_fade_.SetHot(bar_hot_ || bar_drag_, now);
+    if (bar_fade_.Tick(now) && Render()) Present(present_alpha_, present_offset_);
+    return bar_fade_.Moving(now);
 }
 
 void FluentMenu::LayoutWindow(POINT screen_pt) {
@@ -879,10 +927,8 @@ bool FluentMenu::RenderSurface(const FluentMenuModel& model, int hover_row, int 
             painter_.DrawTextField(field);
         }
         if (header > 0) y += (float)header;
-        const float body_top = y;
-        const float arrow = main ? ArrowPx() : 0.0f;
-        dc->PushAxisAlignedClip(D2D1::RectF(static_cast<float>(kShadowMargin), y + arrow,
-            static_cast<float>(kShadowMargin + cw), y + body - arrow), D2D1_ANTIALIAS_MODE_ALIASED);
+        dc->PushAxisAlignedClip(D2D1::RectF(static_cast<float>(kShadowMargin), y,
+            static_cast<float>(kShadowMargin + cw), y + body), D2D1_ANTIALIAS_MODE_ALIASED);
         // Hover plate: one rounded rect that glides between rows (Plate
         // spring) instead of each row lighting up on its own. High contrast
         // keeps the per-row system highlight.
@@ -896,7 +942,7 @@ bool FluentMenu::RenderSurface(const FluentMenuModel& model, int hover_row, int 
             ::pulse::ui::motion::SpringRectMotion& pm = main ? plate_ : sub_plate_;
             uint64_t& pf = main ? plate_frame_ : sub_plate_frame_;
             if (plate_row >= 0) {
-                const float top = y + arrow + model.RowTopPx(plate_row) - (main ? scroll_y_ : 0.0f);
+                const float top = y + model.RowTopPx(plate_row) - (main ? scroll_y_ : 0.0f);
                 float right = static_cast<float>(kShadowMargin + cw) - 6.0f * scale_;
                 if (model.At(plate_row)->trailing_command) right -= 32.0f * scale_;
                 const D2D1_RECT_F target = D2D1::RectF(static_cast<float>(kShadowMargin) + 6.0f * scale_,
@@ -913,7 +959,7 @@ bool FluentMenu::RenderSurface(const FluentMenuModel& model, int hover_row, int 
                 pm.Hide();
             }
         }
-        y += arrow + model.RowTopPx(0) - (main ? scroll_y_ : 0.0f);
+        y += model.RowTopPx(0) - (main ? scroll_y_ : 0.0f);
         for (int i = 0; i < model.Count(); ++i) {
             const FluentMenuItem* it = model.At(i);
             // Rows follow the card in with a short stagger and a 4dip rise.
@@ -999,24 +1045,8 @@ bool FluentMenu::RenderSurface(const FluentMenuModel& model, int hover_row, int 
             if (it->separator_after) y += 5.0f * scale_;
         }
         dc->PopAxisAlignedClip();
-        if (arrow > 0.0f) {
-            const float max_scroll = MaxScrollPx();
-            for (int dir = -1; dir <= 1; dir += 2) {
-                const float top = dir < 0 ? body_top : body_top + static_cast<float>(body) - arrow;
-                const D2D1_RECT_F strip = D2D1::RectF(
-                    static_cast<float>(kShadowMargin) + 4.0f * scale_, top + 2.0f * scale_,
-                    static_cast<float>(kShadowMargin + cw) - 4.0f * scale_, top + arrow - 2.0f * scale_);
-                const bool can_scroll = dir < 0 ? scroll_y_ > 0.5f : scroll_y_ < max_scroll - 0.5f;
-                if (can_scroll && arrow_hover_ == dir)
-                    painter_.FillRoundedRect(strip, 4.0f * scale_, theme.fill_hover);
-                const float g = 6.0f * scale_;
-                const float cx = (strip.left + strip.right) * 0.5f;
-                const float cy = (strip.top + strip.bottom) * 0.5f;
-                painter_.DrawGlyph(dir < 0 ? L"\xE70E" : L"\xE70D",
-                    D2D1::RectF(cx - g, cy - g, cx + g, cy + g),
-                    can_scroll ? theme.text_secondary : theme.text_disabled);
-            }
-        }
+        // The shared scrollbar, thin at rest, full width under the pointer.
+        if (main && Scrollable()) painter_.DrawScrollbar(BarSpec());
     }
 
     HRESULT hr = dc->EndDraw();
@@ -1216,7 +1246,7 @@ void FluentMenu::OpenSubmenu(int row) {
     const int overlap = (int)std::lround(4.0f * scale_);
     // First child row lines up with the header row.
     int y = base_y_ + present_offset_ +
-            (int)(FilterHeaderPx() + ArrowPx() + model_.RowTopPx(row) - scroll_y_) -
+            (int)(FilterHeaderPx() + model_.RowTopPx(row) - scroll_y_) -
             (int)sub_model_.RowTopPx(0);
     int x = base_x_ + model_.WidthPx() - overlap; // card edges overlap by 4dip
 
@@ -1295,29 +1325,7 @@ void FluentMenu::OnMouse(POINT client_pt, bool button_up) {
     if (!open_ || animating_out_) return;
     float y = (float)client_pt.y - (float)kShadowMargin - FilterHeaderPx();
     const float body_h = BodyHeightPx();
-    const float arrow = ArrowPx();
-    int zone = 0; // -1 / +1: over the top / bottom scroll arrow (#67)
-    if (arrow > 0.0f && y >= 0 && y < body_h)
-        zone = y < arrow ? -1 : (y >= body_h - arrow ? 1 : 0);
-    const bool zone_changed = zone != arrow_hover_;
-    arrow_hover_ = zone;
-    if (zone_changed) arrow_tick_ = {};
-    if (zone != 0) {
-        sub_pending_row_ = -1;
-        if (button_up) {
-            // A click pages; resting on the arrow scrolls continuously.
-            const int page = std::max(1, static_cast<int>(ViewportPx() / model_.RowHeightPx()) - 1);
-            if (ScrollRows(zone * page) && Render())
-                Present(present_alpha_, present_offset_);
-            return;
-        }
-        UpdateTooltip(-1);
-        if (hover_row_ >= 0) UpdateHover(-1);
-        else if (zone_changed && Render()) Present(present_alpha_, present_offset_);
-        return;
-    }
-    if (zone_changed && Render()) Present(present_alpha_, present_offset_);
-    int row = y >= 0 && y < body_h ? model_.HitTestRow(y - arrow + scroll_y_) : -1;
+    int row = y >= 0 && y < body_h ? model_.HitTestRow(y + scroll_y_) : -1;
     const FluentMenuItem* it = model_.At(row);
     const bool flyout_header = it && it->enabled && !it->children.empty();
     if (button_up) {
@@ -2029,7 +2037,7 @@ int FluentMenu::RunModalLoop() {
                 if (r == hover_row_) OpenSubmenu(r);
             }
         }
-        if (open_ && !animating_out_ && overflow_) TickArrowScroll();
+        if (open_ && !animating_out_ && Scrollable() && TickBar()) animating = true;
         // Animation frames follow the compositor: a 16 ms timeout rounds up to
         // two 15.6 ms timer ticks, which left the 120 ms fade ~4 uneven frames
         // (smooth only while the pointer moved).
@@ -2220,8 +2228,9 @@ int FluentMenu::TrackPopup(POINT screen_pt, std::vector<FluentMenuItem> items,
     scroll_y_ = 0.0f;
     body_limit_px_ = 0.0f;
     overflow_ = false;
-    arrow_hover_ = 0;
-    arrow_tick_ = {};
+    bar_hot_ = false;
+    bar_drag_ = false;
+    bar_fade_ = {};
     if (items.empty() && !filter_fn_) {
         dropdown_ = false;
         external_edit_ = nullptr;
@@ -2333,8 +2342,9 @@ int FluentMenu::TrackPopup(POINT screen_pt, std::vector<FluentMenuItem> items,
     max_visible_rows_ = 0;
     scroll_y_ = 0.0f;
     overflow_ = false;
-    arrow_hover_ = 0;
-    arrow_tick_ = {};
+    bar_hot_ = false;
+    bar_drag_ = false;
+    bar_fade_ = {};
     anchor_to_rect_ = false;
     dropdown_ = false;
     hover_first_on_open_ = true;

@@ -390,10 +390,7 @@ struct AppState : AppCoreOwner {
     bool scrollbarHorizontal = false;
     bool scrollbarSidebar = false;
     bool scrollbarSettings = false;   // dragging the settings page's scrollbar
-    int scrollbarDragStartX = 0;
-    int scrollbarDragStartY = 0;
-    float scrollbarGrabOffset = 0.0f;
-    float scrollbarDragStartScroll = 0.0f;
+    float scrollbarGrabOffset = 0.0f;   // pointer offset along the grabbed thumb
     float scrollbarHoverWidth = 0.0f;
     // Sidebar scrollbar shows while scrolling or hovered, then fades (#44).
     bool sidebarScrollbarHot = false;

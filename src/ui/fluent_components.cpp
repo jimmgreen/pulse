@@ -1972,6 +1972,74 @@ D2D1_RECT_F ScrollbarThumbRect(const ScrollbarSpec& spec, float scale,
     return D2D1::RectF(right - width, top, right, top + thumb_height);
 }
 
+bool ScrollbarHitTest(const ScrollbarSpec& spec, float x, float y) noexcept {
+    return spec.enabled && spec.viewport_extent > 0.0f && spec.content_extent > spec.viewport_extent &&
+           x >= spec.viewport.left && x < spec.viewport.right &&
+           y >= spec.viewport.top && y < spec.viewport.bottom;
+}
+
+float ScrollbarGrabOffset(float thumb_start, float thumb_length, float pointer) noexcept {
+    return pointer >= thumb_start && pointer < thumb_start + thumb_length
+        ? pointer - thumb_start : thumb_length * 0.5f;
+}
+
+float ScrollbarDragOffset(float track_start, float track_length, float thumb_length,
+                          float max_offset, float pointer, float grab) noexcept {
+    if (max_offset <= 0.0f) return 0.0f;
+    const float travel = std::max(1.0f, track_length - thumb_length);
+    const float along = pointer - track_start - std::min(grab, thumb_length);
+    return std::clamp(along * max_offset / travel, 0.0f, max_offset);
+}
+
+namespace {
+
+float ApproachFade(float value, float target, uint64_t dt, uint64_t up_ms, uint64_t down_ms) noexcept {
+    if (value == target) return value;
+    if (value < target) {
+        const float step = static_cast<float>(dt) / static_cast<float>(up_ms);
+        return std::min(target, value + step);
+    }
+    const float step = static_cast<float>(dt) / static_cast<float>(down_ms);
+    return std::max(target, value - step);
+}
+
+} // namespace
+
+void ScrollbarFade::Reveal(uint64_t now) noexcept {
+    visible_until_ = std::max(visible_until_, now + kHoldMs);
+}
+
+void ScrollbarFade::SetHot(bool hot, uint64_t now) noexcept {
+    if (hot_ && !hot) visible_until_ = std::max(visible_until_, now + kHoldMs);
+    hot_ = hot;
+}
+
+float ScrollbarFade::TargetOpacity(uint64_t now) const noexcept {
+    return (keep_visible_ || hot_ || now < visible_until_) ? 1.0f : 0.0f;
+}
+
+bool ScrollbarFade::Tick(uint64_t now) noexcept {
+    // The first tick after a long idle steps by at most one fade.
+    const uint64_t dt = last_tick_ == 0 || now < last_tick_
+        ? 0 : std::min<uint64_t>(now - last_tick_, kFadeOutMs);
+    last_tick_ = now;
+    const float opacity = opacity_ == 0.0f && TargetOpacity(now) > 0.0f && dt == 0
+        ? 1.0f  // no time base yet: show at once rather than stall
+        : ApproachFade(opacity_, TargetOpacity(now), dt, kFadeInMs, kFadeOutMs);
+    const float expand = ApproachFade(expand_, TargetExpand(), dt, kExpandMs, kExpandMs);
+    const bool changed = opacity != opacity_ || expand != expand_;
+    opacity_ = opacity;
+    expand_ = expand;
+    return changed;
+}
+
+bool ScrollbarFade::Moving(uint64_t now) const noexcept {
+    if (opacity_ != TargetOpacity(now) || expand_ != TargetExpand()) return true;
+    // Holding: tick fast just before the fade so it starts smoothly.
+    constexpr uint64_t kLead = 150;
+    return opacity_ > 0.0f && !hot_ && !keep_visible_ && visible_until_ <= now + kLead;
+}
+
 void Painter::DrawScrollbar(const ScrollbarSpec& spec) {
     if (!theme_) {
         return;

@@ -782,6 +782,9 @@ int Dropdown(AppState& s, int index, std::vector<ui::FluentMenuItem> items) {
     POINT corners[] = {{static_cast<LONG>(std::lround(r.left)), static_cast<LONG>(std::lround(r.top))},
                        {static_cast<LONG>(std::lround(r.right)), static_cast<LONG>(std::lround(r.bottom))}};
     MapWindowPoints(s.hwnd, nullptr, corners, 2);
+    // A long model list scrolls under the shared scrollbar instead of
+    // running down the screen (like the panel's model menu).
+    s.menu->SetMaxVisibleRows(12);
     return s.menu->TrackDropdown({corners[0].x, corners[0].y, corners[1].x, corners[1].y}, std::move(items));
 }
 

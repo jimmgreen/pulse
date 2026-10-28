@@ -2206,39 +2206,31 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 ui::WindowViewModel dragVm = BuildVm(*s);
                 D2D1_RECT_F track{}, thumb{};
                 float maxScroll = 0.0f;
+                // The shared drag rule: the thumb stays where it was grabbed.
+                auto dragV = [&] {
+                    return ui::fluent::ScrollbarDragOffset(track.top, track.bottom - track.top,
+                        thumb.bottom - thumb.top, maxScroll, static_cast<float>(my), s->scrollbarGrabOffset);
+                };
                 if (s->scrollbarSettings) {
                     if (s->renderer.SettingsScrollbarGeometry(
                             dragVm, static_cast<float>(s->compositor.Width()),
                             static_cast<float>(s->compositor.Height()), track, thumb, maxScroll)) {
-                        const float travel = std::max(1.0f,
-                            (track.bottom - track.top) - (thumb.bottom - thumb.top));
-                        s->settings.SetScroll(s->scrollbarDragStartScroll +
-                            (my - s->scrollbarDragStartY) * maxScroll / travel, maxScroll);
+                        s->settings.SetScroll(dragV(), maxScroll);
                         InvalidateRect(hwnd, nullptr, FALSE);
                     }
                 } else if (s->scrollbarSidebar && s->renderer.SidebarScrollbarGeometry(
                         dragVm, static_cast<float>(s->compositor.Width()),
                         static_cast<float>(s->compositor.Height()), track, thumb, maxScroll)) {
-                    const float travel = std::max(1.0f,
-                        (track.bottom - track.top) - (thumb.bottom - thumb.top));
-                    s->sidebarScroll = std::clamp(s->scrollbarDragStartScroll +
-                        (my - s->scrollbarDragStartY) * maxScroll / travel, 0.0f, maxScroll);
+                    s->sidebarScroll = dragV();
                     InvalidateRect(hwnd, nullptr, FALSE);
                 } else if (!s->scrollbarSidebar && s->scrollbarHorizontal &&
                     HorizontalScrollbarGeometry(*s, dragVm.pane, track, thumb, maxScroll)) {
-                    const float travel = std::max(1.0f,
-                        (track.right - track.left) - (thumb.right - thumb.left));
-                    tab->scroll_x = std::clamp(s->scrollbarDragStartScroll +
-                        (mx - s->scrollbarDragStartX) * maxScroll / travel, 0.0f, maxScroll);
+                    tab->scroll_x = ui::fluent::ScrollbarDragOffset(track.left, track.right - track.left,
+                        thumb.right - thumb.left, maxScroll, static_cast<float>(mx), s->scrollbarGrabOffset);
                     InvalidateRect(hwnd, nullptr, FALSE);
                 } else if (!s->scrollbarSidebar && !s->scrollbarHorizontal &&
                            ScrollbarGeometry(*s, dragVm.pane, track, thumb, maxScroll)) {
-                    const float travel = std::max(1.0f,
-                        (track.bottom - track.top) - (thumb.bottom - thumb.top));
-                    tab->scroll_y = std::clamp(
-                        (my - track.top - std::min(s->scrollbarGrabOffset, thumb.bottom - thumb.top))
-                            * maxScroll / travel,
-                        0.0f, maxScroll);
+                    tab->scroll_y = dragV();
                     s->scrollTargetY = tab->scroll_y;
                     MaybePrefetchSearchPage(*s);
                     InvalidateRect(hwnd, nullptr, FALSE);
@@ -3328,31 +3320,24 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 ? HorizontalScrollbarGeometry(*s, scrollPane, track, thumb, maxScroll)
                 : ScrollbarGeometry(*s, scrollPane, track, thumb, maxScroll);
             if ((tab || s->scrollbarSettings) && hasGeometry) {
-                const bool outside = s->scrollbarHorizontal
-                    ? (mx < thumb.left || mx >= thumb.right)
-                    : (my < thumb.top || my >= thumb.bottom);
+                // The shared scrollbar rule: a press on the track jumps the
+                // thumb's middle there; on the thumb it holds where pressed.
+                const bool horizontal = s->scrollbarHorizontal;
+                const float pointer = static_cast<float>(horizontal ? mx : my);
+                const float thumbStart = horizontal ? thumb.left : thumb.top;
+                const float thumbLength = horizontal ? thumb.right - thumb.left : thumb.bottom - thumb.top;
+                const bool outside = pointer < thumbStart || pointer >= thumbStart + thumbLength;
+                s->scrollbarGrabOffset = ui::fluent::ScrollbarGrabOffset(thumbStart, thumbLength, pointer);
                 if (outside) {
-                    const float travel = std::max(1.0f,
-                        s->scrollbarHorizontal
-                            ? (track.right-track.left)-(thumb.right-thumb.left)
-                            : (track.bottom-track.top)-(thumb.bottom-thumb.top));
-                    const float pointer = s->scrollbarHorizontal ? mx-track.left : my-track.top;
-                    const float thumbExtent = s->scrollbarHorizontal
-                        ? thumb.right-thumb.left : thumb.bottom-thumb.top;
-                    const float value = std::clamp((pointer-thumbExtent*0.5f)*maxScroll/travel,
-                                                   0.0f,maxScroll);
+                    const float value = ui::fluent::ScrollbarDragOffset(horizontal ? track.left : track.top,
+                        horizontal ? track.right - track.left : track.bottom - track.top,
+                        thumbLength, maxScroll, pointer, s->scrollbarGrabOffset);
                     if (s->scrollbarSettings) s->settings.SetScroll(value, maxScroll);
-                    else if (s->scrollbarSidebar) s->sidebarScroll=value;
-                    else if (s->scrollbarHorizontal) tab->scroll_x=value;
-                    else { tab->scroll_y=value; s->scrollTargetY=value; MaybePrefetchSearchPage(*s); }
+                    else if (s->scrollbarSidebar) s->sidebarScroll = value;
+                    else if (horizontal) tab->scroll_x = value;
+                    else { tab->scroll_y = value; s->scrollTargetY = value; MaybePrefetchSearchPage(*s); }
                 }
-                s->scrollbarGrabOffset = outside ? (thumb.bottom - thumb.top) * 0.5f : my - thumb.top;
                 s->scrollbarDragging = true;
-                s->scrollbarDragStartX = mx;
-                s->scrollbarDragStartY = my;
-                s->scrollbarDragStartScroll = s->scrollbarSettings ? s->settings.scroll()
-                    : s->scrollbarSidebar ? s->sidebarScroll
-                    : s->scrollbarHorizontal ? tab->scroll_x : tab->scroll_y;
                 SetCapture(hwnd);
                 InvalidateRect(hwnd, nullptr, FALSE);
             } else {
