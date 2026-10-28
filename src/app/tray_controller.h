@@ -36,8 +36,10 @@ public:
     // next one. The icon, its visibility and its owner stay as they are.
     void Retarget(HWND window) noexcept {
         if (!hwnd_ || !window) return;
+        if (hwnd_ == window) return;
         hwnd_ = window;
         restore_maximized_ = false;
+        has_hidden_placement_ = false;
     }
     void Detach();
     bool SetVisible(bool visible);
@@ -71,6 +73,8 @@ private:
     bool icon_added_ = false;
     bool wanted_visible_ = false;   // last SetVisible request, for TaskbarCreated
     bool restore_maximized_ = false;
+    WINDOWPLACEMENT hidden_placement_{sizeof(WINDOWPLACEMENT)};
+    bool has_hidden_placement_ = false;
     std::function<void()> before_restore_;
 };
 

@@ -1,10 +1,12 @@
 #include "global_search_window.h"
+#include "../common/runtime_log.h"
 #include "global_search_result_state.h"
 #include "app_catalog.h"
 #include "folder_alias.h"
 #include "jump_history.h"
 #include "jump_match.h"
 #include "../ui/FluentTokens.h"
+#include "../ui/command_icons.h"
 #include "resource.h"
 #include "../ui/empty_state_layout.h"
 #include "../ui/fluent_components.h"
@@ -274,7 +276,22 @@ struct GlobalSearchWindow::Impl {
     ui::WindowEffect EffectiveEffect() const {
         return !ui::IsHighContrast() && ui::SystemAllowsPopupAcrylic() ? ui::WindowEffect::Acrylic : ui::WindowEffect::None;
     }
+    static constexpr UINT_PTR kDiagnosticTimer = 0x475344;
+    uint64_t diagnostic_until = 0, diagnostic_id = 0;
+    unsigned diagnostic_events = 0;
+    HWND diagnostic_foreground = nullptr;
+    void Trace(const char* event, uint64_t value = 0) {
+        if (!diagnostic_until || GetTickCount64() > diagnostic_until || diagnostic_events++ >= 256) return;
+        const HWND foreground = GetForegroundWindow();
+        DWORD pid = 0;
+        if (foreground) GetWindowThreadProcessId(foreground, &pid);
+        diagnostics::runtime::Event(event, {{"id", diagnostic_id}, {"value", value},
+            {"foreground", reinterpret_cast<uintptr_t>(foreground)}, {"foreground_pid", pid},
+            {"self_foreground", foreground == hwnd}, {"visible", hwnd && IsWindowVisible(hwnd)},
+            {"focus", reinterpret_cast<uintptr_t>(GetFocus())}});
+    }
     void ApplyAppearance() {
+        Trace("search_appearance");
         if (!hwnd) return;
         backdrop = ui::ApplyWindowEffect(hwnd, EffectiveEffect(), dark);
         if (background) DeleteObject(background);
@@ -369,6 +386,7 @@ struct GlobalSearchWindow::Impl {
         if (hwnd) { KillTimer(hwnd, kDebounce); KillTimer(hwnd, kConnectTimeout); }
     }
     void Hide() {
+        Trace("search_hide");
         Cancel();
         HideScopeTooltip();
         handoff_hover = false;
@@ -918,6 +936,10 @@ struct GlobalSearchWindow::Impl {
         const D2D1_RECT_F inner{rect.left + stroke / 2, rect.top + stroke / 2, rect.right - stroke / 2, rect.bottom - stroke / 2};
         target->DrawRoundedRectangle(D2D1::RoundedRect(inner, radius, radius), brush.Get(), stroke);
     }
+    void CommandIcon(std::wstring_view glyph, D2D1_RECT_F rect, float size, D2D1_COLOR_F color) {
+        brush->SetColor(color);
+        ui::command_icons::DrawGlyph(target.Get(), brush.Get(), glyph, rect, size);
+    }
     void Label(const std::wstring& text, D2D1_RECT_F rect, float size, UINT32 color, bool bold = false, const wchar_t* face = L"Segoe UI", bool highlight = false, DWRITE_TEXT_ALIGNMENT alignment = DWRITE_TEXT_ALIGNMENT_LEADING) {
         LabelC(text, rect, size, Color(color), bold, face, highlight, alignment);
     }
@@ -1178,7 +1200,7 @@ struct GlobalSearchWindow::Impl {
         FillC(field, FieldColor(), kEditCornerRadius);
         StrokeC(field, p.line, kEditCornerRadius);
         FillC({field.left + 10, field.bottom - 2, field.right - 10, field.bottom}, p.accent, 1);
-        LabelC(L"\xE721", {field.left + 14, mid - 12, field.left + 38, mid + 12}, 17, p.muted, false, L"Segoe Fluent Icons");
+        CommandIcon(L"\xE721", {field.left + 14, mid - 12, field.left + 38, mid + 12}, 17, p.muted);
         // name / content segment
         const auto seg = ModeRect();
         AddHot(seg, HotMode);
@@ -1244,7 +1266,7 @@ struct GlobalSearchWindow::Impl {
             const auto& item = scopes[i];
             const bool on = static_cast<int>(i) == scope;
             const bool zero = item.counted && item.count == 0 && !query.empty() && !on;
-            LabelC(item.glyph, {22, row_y + 7, 40, row_y + 23}, 14, on ? p.accent_text : zero ? WithAlpha(p.muted, 0.55f) : p.muted, false, L"Segoe Fluent Icons");
+            CommandIcon(item.glyph, {22, row_y + 7, 40, row_y + 23}, 14, on ? p.accent_text : zero ? WithAlpha(p.muted, 0.55f) : p.muted);
             float count_left = side - 20;
             if (item.counted && !query.empty()) {
                 const auto count = std::to_wstring(item.count);
@@ -1265,7 +1287,7 @@ struct GlobalSearchWindow::Impl {
             AddHot(rect, HotAddPlace);
             const bool hovered = Hovered(HotAddPlace);
             if (hovered) FillC(rect, p.hover, 6);
-            LabelC(L"\xE710", {22, row_y + 8, 40, row_y + 22}, 12, hovered ? p.accent_text : p.faint, false, L"Segoe Fluent Icons");
+            CommandIcon(L"\xE710", {22, row_y + 8, 40, row_y + 22}, 12, hovered ? p.accent_text : p.faint);
             LabelC(Text(StringId::GlobalSearchAddPlace), {46, row_y, side - 14, row_y + 30}, 12.5f, hovered ? p.accent_text : p.faint);
             row_y += 30;
         }
@@ -1318,7 +1340,7 @@ struct GlobalSearchWindow::Impl {
         std::wstring parent = row.app ? Text(StringId::TypeApplication) : path::StripExtendedPathPrefix(ParentPath(row.path));
         float path_left = text_left;
         if (row.network) {
-            LabelC(L"\xE8CE", {text_left, path_top + 2, text_left + 14, path_top + 15}, 10, p.faint, false, L"Segoe Fluent Icons");
+            CommandIcon(L"\xE8CE", {text_left, path_top + 2, text_left + 14, path_top + 15}, 10, p.faint);
             path_left += 16;
         }
         LabelC(MiddleEllipsis(parent, text_right - path_left, 12), {path_left, path_top, text_right, path_top + 17}, 12, p.faint);
@@ -1388,7 +1410,7 @@ struct GlobalSearchWindow::Impl {
                 const D2D1_RECT_F chip{x, y, x + w, y + 28};
                 AddHot(chip, HotRecentQuery, static_cast<int>(i));
                 FillC(chip, Hovered(HotRecentQuery, static_cast<int>(i)) ? p.hover : p.chip, 14);
-                LabelC(L"\xE81C", {x + 10, y + 7, x + 24, y + 21}, 11, p.faint, false, L"Segoe Fluent Icons");
+                CommandIcon(L"\xE81C", {x + 10, y + 7, x + 24, y + 21}, 11, p.faint);
                 LabelC(text, {x + 28, y, x + w - 10, y + 28}, 12.5f, p.muted);
                 x += w + 6;
             }
@@ -1446,7 +1468,7 @@ struct GlobalSearchWindow::Impl {
             const float cx = (left + right) / 2;
             const D2D1_RECT_F pill{cx - tw / 2, bottom - 46, cx + tw / 2, bottom - 14};
             FillC(pill, D2D1::ColorF(0x15161b, 0.94f), 16);
-            LabelC(L"\xE73E", {pill.left + 14, pill.top + 9, pill.left + 30, pill.bottom - 9}, 12, D2D1::ColorF(0x7fd6a0), false, L"Segoe Fluent Icons");
+            CommandIcon(L"\xE73E", {pill.left + 14, pill.top + 9, pill.left + 30, pill.bottom - 9}, 12, D2D1::ColorF(0x7fd6a0));
             LabelC(toast, {pill.left + 34, pill.top, pill.right - 10, pill.bottom}, 12.5f, D2D1::ColorF(1, 1, 1, 1));
         }
     }
@@ -1651,12 +1673,19 @@ struct GlobalSearchWindow::Impl {
         return HTCLIENT;
     }
     LRESULT Message(UINT message, WPARAM wp, LPARAM lp) {
+        if (message == WM_NCACTIVATE || message == WM_ACTIVATE || message == WM_ACTIVATEAPP ||
+            message == WM_SHOWWINDOW || message == WM_SETFOCUS || message == WM_KILLFOCUS)
+            Trace("search_window_message", (uint64_t(message) << 32) | static_cast<uint32_t>(wp));
         switch (message) {
         case WM_PAINT: Paint(); return 0;
         case WM_ERASEBKGND: return 1;
         case WM_NCCALCSIZE: if (wp) return 0; break;
         case WM_NCHITTEST: return HitTestFrame(lp);
-        case WM_NCACTIVATE: return DefWindowProcW(hwnd, message, wp, -1);
+        case WM_NCACTIVATE:
+            // Like KeepFrostedProc for dialogs, keep the acrylic frame active.
+            // Attention flashes must not alternate the whole popup's backdrop;
+            // real application deactivation is still handled by WM_ACTIVATEAPP.
+            return DefWindowProcW(hwnd, message, TRUE, -1);
         case WM_GETMINMAXINFO: {
             auto* info = reinterpret_cast<MINMAXINFO*>(lp);
             info->ptMinTrackSize = {Px(kMinWidth), Px(kMinHeight)};
@@ -1689,6 +1718,18 @@ struct GlobalSearchWindow::Impl {
             return reinterpret_cast<LRESULT>(ui::EditBackBrush(background));
         }
         case WM_TIMER:
+            if (wp == kDiagnosticTimer) {
+                const HWND current = GetForegroundWindow();
+                if (current != diagnostic_foreground) {
+                    diagnostic_foreground = current;
+                    Trace("search_foreground_changed");
+                }
+                if (GetTickCount64() >= diagnostic_until) {
+                    KillTimer(hwnd, kDiagnosticTimer);
+                    diagnostic_until = 0;
+                }
+                return 0;
+            }
             if (wp == kDebounce) Search();
             else if (wp == kConnectTimeout) {
                 KillTimer(hwnd, kConnectTimeout);
@@ -1795,14 +1836,20 @@ struct GlobalSearchWindow::Impl {
         return self ? self->Message(message, wp, lp) : DefWindowProcW(window, message, wp, lp);
     }
     bool Show(HWND owner, bool use_dark, float requested_scale, const std::wstring& folder, bool pinyin) {
+        diagnostic_id = diagnostics::runtime::NextId();
+        diagnostic_events = 0;
+        diagnostic_until = diagnostics::runtime::Enabled() ? GetTickCount64() + 10000 : 0;
+        diagnostic_foreground = GetForegroundWindow();
+        Trace("search_show_begin");
         dark = use_dark; scale = requested_scale > 0 ? requested_scale : 1;
         search_pinyin = pinyin;
         animations = ui::motion::SystemAnimationsEnabled();
         plate_motion.SetAnimationsEnabled(animations); scope_motion.SetAnimationsEnabled(animations); mode_motion.SetAnimationsEnabled(animations);
-        const HWND foreground = GetForegroundWindow();
-        POINT cursor{}; GetCursorPos(&cursor);
-        const HMONITOR active_monitor = foreground && foreground != hwnd ? MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST) :
-            MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+        // Follow the pointer even when that monitor only shows the desktop.
+        POINT cursor{};
+        const HMONITOR active_monitor = GetCursorPos(&cursor)
+            ? MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST)
+            : MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTONEAREST);
         if (const float monitor_scale = MonitorScale(active_monitor); monitor_scale > 0) scale = monitor_scale;
         (void)owner;
         const bool folder_changed = folder != current_folder;
@@ -1819,8 +1866,23 @@ struct GlobalSearchWindow::Impl {
         SendMessageW(edit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(Text(StringId::GlobalSearchPlaceholder).c_str()));
         MONITORINFO monitor{sizeof(monitor)}; GetMonitorInfoW(active_monitor, &monitor);
         const RECT place = Placement(monitor.rcWork);
-        SetWindowPos(hwnd, HWND_TOPMOST, place.left, place.top, place.right - place.left, place.bottom - place.top, SWP_SHOWWINDOW | SWP_FRAMECHANGED);
-        Layout(); SetForegroundWindow(hwnd); SetFocus(edit); SendMessageW(edit, EM_SETSEL, 0, -1);
+        SetWindowPos(hwnd, HWND_TOPMOST, place.left, place.top, place.right - place.left, place.bottom - place.top,
+                     SWP_SHOWWINDOW | SWP_FRAMECHANGED | SWP_NOACTIVATE);
+        Layout();
+        // Raw Input double-Ctrl arrives on a background queue, unlike WM_HOTKEY.
+        // Hand focus over as the dialog jump bar does, before asking Windows
+        // to activate us; a rejected activation otherwise flashes the frame.
+        const HWND active = GetForegroundWindow();
+        const DWORD active_thread = active ? GetWindowThreadProcessId(active, nullptr) : 0;
+        const DWORD self = GetCurrentThreadId();
+        const bool attached = active_thread && active_thread != self &&
+            AttachThreadInput(self, active_thread, TRUE) != FALSE;
+        SetForegroundWindow(hwnd);
+        if (GetForegroundWindow() == hwnd) SetFocus(edit);
+        if (attached) AttachThreadInput(self, active_thread, FALSE);
+        SendMessageW(edit, EM_SETSEL, 0, -1);
+        Trace("search_show_end");
+        if (diagnostic_until) SetTimer(hwnd, kDiagnosticTimer, 50, nullptr);
         Changed(); return true;
     }
     static float MonitorScale(HMONITOR monitor) {

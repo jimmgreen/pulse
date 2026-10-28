@@ -1,3 +1,4 @@
+#include "../common/runtime_log.h"
 #include "global_search_controller.h"
 #include "global_search_handoff.h"
 #include "shortcut_page.h"
@@ -259,6 +260,8 @@ bool HandleGlobalSearchHotkeyCapture(AppState& s, unsigned key) {
 }
 
 void ToggleGlobalSearch(AppState& s, bool double_ctrl) {
+    diagnostics::runtime::Event("search_summon", {{"double_ctrl", double_ctrl},
+        {"visible", s.globalSearchWindow.Visible()}});
     // Two Ctrl taps over an Open / Save dialog go to its jump bar.
     if (double_ctrl && s.core.dialogJump.FocusSearch()) return;
     if (!s.appPrefs.global_search_enabled || !s.appPrefs.search_enabled) return;
