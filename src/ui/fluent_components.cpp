@@ -15,6 +15,9 @@ namespace pulse::ui::fluent {
 
 namespace {
 
+// Corner radius of buttons, dropdowns and text fields (DIPs).
+constexpr float kControlCorner = 6.0f;
+
 constexpr std::wstring_view kChevronDown = L"\xE70D";
 constexpr std::wstring_view kChevronUp = L"\xE70E";
 constexpr std::wstring_view kChevronRight = L"\xE76C";
@@ -266,6 +269,9 @@ void Painter::SetCompositor(Compositor* compositor) noexcept {
         brush.reset();
     }
     scratch_brush_.reset();
+    for (auto& entry : gradient_cache_) {
+        entry.brush.reset();
+    }
     round_stroke_.reset();
     body_format_.reset();
     nav_format_.reset();
@@ -800,6 +806,60 @@ void Painter::DrawCommandButton(const ButtonSpec& spec) {
     if (state.keyboard_focus) DrawFocusRing(spec.bounds, Px(theme_->radius_control));
 }
 
+void Painter::StrokeElevationRect(const D2D1_RECT_F& bounds, float radius,
+                                  const D2D1_COLOR_F& border, const D2D1_COLOR_F& edge,
+                                  bool edge_on_top) {
+    if (!dc_ || Width(bounds) <= 0.0f || Height(bounds) <= 0.0f) {
+        return;
+    }
+    const auto same = [](const D2D1_COLOR_F& a, const D2D1_COLOR_F& b) {
+        return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
+    };
+    ID2D1LinearGradientBrush* brush = nullptr;
+    if (!same(border, edge)) {
+        GradientEntry* slot = nullptr;
+        for (auto& entry : gradient_cache_) {
+            if (entry.brush.get() && same(entry.from, border) && same(entry.to, edge)) {
+                slot = &entry;
+                break;
+            }
+        }
+        if (!slot) {
+            slot = &gradient_cache_[gradient_next_];
+            gradient_next_ = (gradient_next_ + 1) % gradient_cache_.size();
+            slot->brush.reset();
+            slot->from = border;
+            slot->to = edge;
+            const D2D1_GRADIENT_STOP stops[2] = {{0.0f, border}, {1.0f, edge}};
+            ComPtr<ID2D1GradientStopCollection> collection;
+            if (SUCCEEDED(dc_->CreateGradientStopCollection(stops, 2, &collection))) {
+                dc_->CreateLinearGradientBrush(
+                    D2D1::LinearGradientBrushProperties(D2D1::Point2F(0.0f, 0.0f),
+                                                        D2D1::Point2F(0.0f, 1.0f)),
+                    collection.get(), &slot->brush);
+            }
+        }
+        brush = slot->brush.get();
+    }
+    if (!brush) {
+        StrokeRoundedRect(bounds, radius, border);
+        return;
+    }
+    // The gradient runs over the last few pixels and is clamped beyond, so
+    // the darker edge follows the corners instead of stopping where they start.
+    const float band = std::max(1.0f, Px(3.0f));
+    if (edge_on_top) {
+        brush->SetStartPoint(D2D1::Point2F(bounds.left, bounds.top + band));
+        brush->SetEndPoint(D2D1::Point2F(bounds.left, bounds.top));
+    } else {
+        brush->SetStartPoint(D2D1::Point2F(bounds.left, bounds.bottom - band));
+        brush->SetEndPoint(D2D1::Point2F(bounds.left, bounds.bottom));
+    }
+    const auto aligned = Inset(bounds, 0.5f);
+    dc_->DrawRoundedRectangle(D2D1::RoundedRect(aligned, radius, radius), brush, 1.0f,
+                              round_stroke_.get());
+}
+
 void Painter::DrawButton(const ButtonSpec& spec) {
     if (!theme_ || !compositor_) {
         return;
@@ -812,7 +872,7 @@ void Painter::DrawButton(const ButtonSpec& spec) {
     const bool primary = spec.kind == ButtonKind::Primary || (toggle && state.checked);
     const bool transparent = spec.kind == ButtonKind::Transparent ||
                              (spec.kind == ButtonKind::TransparentToggle && !state.checked);
-    const float radius = Px(theme_->radius_control);
+    const float radius = Px(kControlCorner);
     D2D1_COLOR_F foreground = dark_ ? HexColor(0xFFFFFF) : HexColor(0x000000);
     D2D1_COLOR_F fill{};
     D2D1_COLOR_F border{};
@@ -891,16 +951,23 @@ void Painter::DrawButton(const ButtonSpec& spec) {
                : state.pressed ? RgbaF(0xFFFFFF, 0.0326f)
                : state.hovered ? RgbaF(0xFFFFFF, 0.0837f)
                                : RgbaF(0xFFFFFF, 0.0605f);
-        border = RgbaF(0xFFFFFF, 0.053f);
-        edge = state.enabled && !state.pressed ? RgbaF(0xFFFFFF, 0.08f) : border;
+        border = !state.enabled || state.pressed ? RgbaF(0xFFFFFF, 0.053f)
+                 : state.hovered ? RgbaF(0xFFFFFF, 0.075f) : RgbaF(0xFFFFFF, 0.065f);
+        edge = !state.enabled || state.pressed ? border
+               : state.hovered ? RgbaF(0xFFFFFF, 0.14f) : RgbaF(0xFFFFFF, 0.12f);
         foreground = !state.enabled ? RgbaF(0xFFFFFF, 0.3628f)
                      : state.pressed ? RgbaF(0xFFFFFF, 0.786f) : HexColor(0xFFFFFF);
     } else {
-        fill = !state.enabled || state.pressed ? RgbaF(0xF9F9F9, 0.30f)
-               : state.hovered ? RgbaF(0xF9F9F9, 0.50f) : RgbaF(0xFFFFFF, 0.70f);
-        border = !state.enabled ? RgbaF(0x000000, 0.06f) : RgbaF(0x000000, 0.073f);
-        edge = !state.enabled ? border
-                              : state.pressed ? border : RgbaF(0x000000, 0.183f);
+        // A solid face one step brighter than the card it sits on, so the
+        // button reads as a control rather than a line under some text.
+        fill = !state.enabled ? RgbaF(0xF9F9F9, 0.50f)
+               : state.pressed ? HexColor(0xF2F4F0)
+               : state.hovered ? HexColor(0xF8F9F7) : HexColor(0xFFFFFF);
+        border = !state.enabled ? RgbaF(0x000000, 0.06f)
+                 : state.hovered && !state.pressed ? RgbaF(0x000000, 0.085f)
+                                                   : RgbaF(0x000000, 0.075f);
+        edge = !state.enabled || state.pressed ? border
+               : state.hovered ? RgbaF(0x000000, 0.19f) : RgbaF(0x000000, 0.17f);
         foreground = !state.enabled ? RgbaF(0x000000, 0.36f)
                      : state.pressed ? RgbaF(0x000000, 0.63f) : HexColor(0x000000);
     }
@@ -920,11 +987,7 @@ void Painter::DrawButton(const ButtonSpec& spec) {
         FillRoundedRect(spec.bounds, radius, fill);
     }
     if (draw_border) {
-        StrokeRoundedRect(spec.bounds, radius, border);
-        const float y = edge_on_top ? spec.bounds.top + 0.5f : spec.bounds.bottom - 0.5f;
-        dc_->DrawLine(D2D1::Point2F(spec.bounds.left + radius, y),
-                      D2D1::Point2F(spec.bounds.right - radius, y),
-                      ScratchBrush(edge), 1.0f);
+        StrokeElevationRect(spec.bounds, radius, border, edge, edge_on_top);
     }
 
     const float pad_x = Px(8.0f);
@@ -994,7 +1057,7 @@ void Painter::DrawTextFieldFrame(const D2D1_RECT_F& bounds, const ControlState& 
         return;
     }
 
-    const float radius = Px(theme_->radius_control);
+    const float radius = Px(kControlCorner);
     const D2D1_COLOR_F fill = TextFieldFillColor(*theme_, state, dark_, high_contrast_,
                                                 hosted_edit);
     D2D1_COLOR_F border;
@@ -1099,7 +1162,7 @@ void Painter::DrawTextField(const TextFieldSpec& spec) {
     }
 
     if (spec.state.keyboard_focus) {
-        DrawFocusRing(spec.bounds, Px(theme_->radius_control));
+        DrawFocusRing(spec.bounds, Px(kControlCorner));
     }
 }
 

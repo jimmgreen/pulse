@@ -599,6 +599,11 @@ private:
                             const D2D1_COLOR_F& color);
     void DrawArc(D2D1_POINT_2F center, float radius, float start_degrees,
                  float span_degrees, float stroke_width, const D2D1_COLOR_F& color);
+    // A 1px rounded border whose last few pixels on one side shade from
+    // `border` to `edge` (WinUI's elevation border).
+    void StrokeElevationRect(const D2D1_RECT_F& bounds, float radius,
+                             const D2D1_COLOR_F& border, const D2D1_COLOR_F& edge,
+                             bool edge_on_top);
     void EnsureTextFormats();
     void EnsureStrokeStyle();
     IDWriteTextFormat* BodyFormat() const noexcept;
@@ -621,6 +626,13 @@ private:
     std::uint64_t format_generation_ = 0;   // typography::Generation() of the formats
     std::array<ComPtr<ID2D1SolidColorBrush>, static_cast<size_t>(BrushId::Count)> brushes_{};
     ComPtr<ID2D1SolidColorBrush> scratch_brush_;
+    struct GradientEntry {
+        D2D1_COLOR_F from{};
+        D2D1_COLOR_F to{};
+        ComPtr<ID2D1LinearGradientBrush> brush;
+    };
+    std::array<GradientEntry, 8> gradient_cache_{};  // button edges, by colour pair
+    std::size_t gradient_next_ = 0;
     ComPtr<ID2D1StrokeStyle> round_stroke_;
     ComPtr<IDWriteTextFormat> body_format_;
     ComPtr<IDWriteTextFormat> nav_format_;
