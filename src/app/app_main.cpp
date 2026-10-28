@@ -15,6 +15,8 @@
 #include "app_hover_preview.h"
 #include "app_details_tree.h"
 #include "update_stage.h"
+#include "update_transport.h"
+#include "../common/preview_packs.h"
 #include "tag_ads_sync.h"
 #include "app_prompts.h"
 #include "vertical_tabs.h"
@@ -3937,6 +3939,9 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     pulse::compat::EnableDpiAwareness();
     // OLE init (drag & drop + clipboard); implies STA COM init.
     OleInitialize(nullptr);
+    // Settings > 增强包 > 下载源 applies to every download from the start
+    // (packs and Pulse's own update); Settings re-applies it on change.
+    pulse::app::SetUpdateSource(static_cast<pulse::app::UpdateSource>(pulse::packs::LoadPackSettings().download_source));
     pulse::app::startup_trace::Mark("ole");
     for (int i = 1; i < __argc; ++i) {
         if (wcscmp(__wargv[i], L"--material-selftest") == 0) {

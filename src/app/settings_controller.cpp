@@ -13,6 +13,7 @@
 #include "system_ctx_model.h"
 #include "shortcut_settings.h"
 #include "pack_catalog.h"
+#include "update_transport.h"
 #include "../ui/quick_preview_command.h"
 #include "../ui/settings_page_ids.h"
 
@@ -218,6 +219,8 @@ void SettingsController::RefreshPacks() {
     state.custom_path = settings.custom_ffmpeg;
     state.remove_on_uninstall = settings.remove_on_uninstall;
     state.auto_update = settings.auto_update;
+    state.download_source = settings.download_source;
+    app::SetUpdateSource(static_cast<app::UpdateSource>(settings.download_source));
     const packs::InstalledPack media = packs::ReadInstalledPack(PackId::Media);
     state.media_installed = media.present;
     state.version = media.version;
@@ -542,6 +545,14 @@ void SettingsController::ToggleRemovePacksOnUninstall() {
 void SettingsController::ToggleAutoUpdatePacks() {
     UpdatePackSettings([](packs::PackSettings& s) { s.auto_update = !s.auto_update; });
     RefreshPacks();
+}
+
+bool SettingsController::SetDownloadSource(uint32_t source) {
+    if (source >= app::kUpdateSourceCount) return false;
+    const bool saved = UpdatePackSettings([source](packs::PackSettings& s) { s.download_source = source; });
+    if (saved) app::SetUpdateSource(static_cast<app::UpdateSource>(source));
+    RefreshPacks();
+    return saved;
 }
 
 void SettingsController::SetScroll(float value, float maximum) noexcept {

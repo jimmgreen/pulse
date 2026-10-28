@@ -21,6 +21,9 @@ enum class UpdateError : uint8_t {
     InsecureUrl,
     UnsupportedWindows,
     LocalIo,
+    // A whole response that fails the caller's size/hash check (a mirror
+    // serving another build): the next source may still have the right one.
+    Mismatch,
 };
 
 struct UpdateManifest {

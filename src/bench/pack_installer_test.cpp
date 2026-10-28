@@ -338,6 +338,7 @@ int wmain(int argc, wchar_t** argv) {
         Check(InstallPack(fx.release, root, progress, error, fx.Reader()) == PackInstallOutcome::Failed,
               "tampered download fails");
         Check(error == ERROR_INVALID_DATA, "tampering reports invalid data");
+        Check(progress.failure.load() == static_cast<uint32_t>(PackFailure::Mismatch), "tampering is a mismatch");
         Check(!Exists(base + L"\\7.2") && !Exists(base + L"\\7.2.partial"), "nothing of the failed version stays");
         std::wstring json;
         Check(ReadUtf8File(base + L"\\installed.json", json) && json.find(L"7.1.1") != std::wstring::npos,
@@ -362,6 +363,7 @@ int wmain(int argc, wchar_t** argv) {
         DWORD error = 0;
         Check(InstallPack(fx.release, root, progress, error, fx.Reader()) == PackInstallOutcome::Failed,
               "oversized response fails");
+        Check(progress.failure.load() == static_cast<uint32_t>(PackFailure::Mismatch), "oversized response is a mismatch");
         Check(!Exists(base + L"\\7.4.partial"), "oversized response leaves no staging");
     }
 
@@ -372,6 +374,55 @@ int wmain(int argc, wchar_t** argv) {
         DWORD error = 0;
         Check(InstallPack(fx.release, root, progress, error, fx.Reader()) == PackInstallOutcome::Failed,
               "404 fails");
+        Check(progress.failure.load() == static_cast<uint32_t>(PackFailure::Network), "404 is a network failure");
+    }
+
+    {   // A release on GitHub: a mirror with another build's file (wrong hash,
+        // then too large) is skipped and the next source installs the pack.
+        Fixture fx(L"7.45");
+        const std::wstring github = L"https://github.com/jimmgreen/pulse/releases/download/v7/";
+        std::map<std::wstring, std::vector<uint8_t>> moved;
+        for (size_t i = 0; i < fx.names.size(); ++i) {
+            const std::wstring asset = github + fx.names[i] + L".lzms";
+            auto tampered = fx.packed[i];
+            tampered[tampered.size() / 2] ^= 0x5a;
+            moved[L"https://ghproxy.net/" + asset] = tampered;
+            auto longer = fx.packed[i];
+            longer.push_back(0);
+            moved[L"https://gh-proxy.com/" + asset] = longer;
+            moved[asset] = fx.packed[i];
+        }
+        fx.server = moved;
+        fx.release.base_url = github.c_str();
+        std::vector<std::wstring> asked;
+        auto inner = fx.Reader();
+        UpdateResponseReader reader = [&](std::wstring_view url, uint64_t maximum, const std::atomic<bool>& cancelled,
+                                          const std::function<bool(const void*, DWORD)>& consume,
+                                          UpdateError& category, DWORD& error) {
+            asked.emplace_back(url);
+            return inner(url, maximum, cancelled, consume, category, error);
+        };
+        PackInstallProgress progress;
+        DWORD error = 0;
+        Check(InstallPack(fx.release, root, progress, error, reader) == PackInstallOutcome::Installed &&
+              error == ERROR_SUCCESS, "wrong mirror files fall back to GitHub");
+        Check(asked.size() == 6 && ReadAll(base + L"\\7.45\\ffmpeg.exe") == fx.plain[0],
+              "each file tries both mirrors once, then GitHub");
+        // Every source wrong: a mismatch, not a network failure.
+        fx.server[github + fx.names[0] + L".lzms"].push_back(1);
+        fx.server.erase(github + fx.names[1] + L".lzms");
+        asked.clear();
+        PackInstallProgress again;
+        Check(InstallPack(fx.release, root, again, error, reader) == PackInstallOutcome::Failed &&
+              again.failure.load() == static_cast<uint32_t>(PackFailure::Mismatch) && asked.size() == 3,
+              "all sources wrong reports a mismatch after three tries");
+        // A fixed source is the only one asked.
+        SetUpdateSource(UpdateSource::Mirror2);
+        asked.clear();
+        PackInstallProgress fixed;
+        Check(InstallPack(fx.release, root, fixed, error, reader) == PackInstallOutcome::Failed && asked.size() == 1 &&
+              asked[0].starts_with(L"https://gh-proxy.com/"), "a chosen source is the only one tried");
+        SetUpdateSource(UpdateSource::Automatic);
     }
 
     {   // Cancelling mid-download.

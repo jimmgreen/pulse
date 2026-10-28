@@ -151,16 +151,50 @@ std::wstring AcceleratedUpdateUrl(std::wstring_view url) {
     return L"https://ghproxy.net/" + std::wstring(url);
 }
 
+namespace {
+std::atomic<uint32_t> g_update_source{static_cast<uint32_t>(UpdateSource::Automatic)};
+}
+
+void SetUpdateSource(UpdateSource source) noexcept {
+    const auto value = static_cast<uint32_t>(source);
+    g_update_source.store(value < kUpdateSourceCount ? value : 0u, std::memory_order_relaxed);
+}
+
+UpdateSource CurrentUpdateSource() noexcept {
+    return static_cast<UpdateSource>(g_update_source.load(std::memory_order_relaxed));
+}
+
+std::wstring UpdateSourceUrl(std::wstring_view url, UpdateSource source) {
+    const auto accelerated = AcceleratedUpdateUrl(url);
+    switch (source) {
+        case UpdateSource::Mirror1: return accelerated;
+        case UpdateSource::Mirror2:
+            return accelerated.empty() ? std::wstring{} : L"https://gh-proxy.com/" + std::wstring(url);
+        case UpdateSource::GitHub:
+        case UpdateSource::Automatic:
+        default: return std::wstring(url);
+    }
+}
+
+std::vector<std::wstring> UpdateSourceUrls(std::wstring_view url, UpdateSource source) {
+    // Custom hosts (not a public release asset) never use a public mirror.
+    if (AcceleratedUpdateUrl(url).empty()) return {std::wstring(url)};
+    if (source != UpdateSource::Automatic) return {UpdateSourceUrl(url, source)};
+    return {UpdateSourceUrl(url, UpdateSource::Mirror1), UpdateSourceUrl(url, UpdateSource::Mirror2),
+            std::wstring(url)};
+}
+
 bool ReadUpdateWithFallback(std::wstring_view url, uint64_t maximum_bytes,
                             const std::atomic<bool>& cancelled,
                             const std::function<bool()>& reset,
                             const std::function<bool(const void*, DWORD)>& consume,
                             UpdateError& category, DWORD& error,
-                            const UpdateResponseReader& read) {
-    const auto accelerated = AcceleratedUpdateUrl(url);
-    const auto secondary = accelerated.empty() ? std::wstring{} : L"https://gh-proxy.com/" + std::wstring(url);
-    const std::array<std::wstring_view, 3> sources{accelerated, secondary, url};
-    for (const auto source : sources) {
+                            const UpdateResponseReader& read,
+                            const std::function<bool()>& verify) {
+    // The most telling failure so far: a wrong file beats a refused connection.
+    UpdateError mismatch = UpdateError::None;
+    DWORD mismatch_error = ERROR_SUCCESS;
+    for (const auto& source : UpdateSourceUrls(url, CurrentUpdateSource())) {
         if (source.empty()) continue;
         if (cancelled) { category = UpdateError::Network; error = ERROR_CANCELLED; return false; }
         if (!reset()) {
@@ -170,12 +204,25 @@ bool ReadUpdateWithFallback(std::wstring_view url, uint64_t maximum_bytes,
             return false;
         }
         if (read(source, maximum_bytes, cancelled, consume, category, error)) {
-            category = UpdateError::None;
-            error = ERROR_SUCCESS;
-            return true;
+            if (!verify || verify()) {
+                category = UpdateError::None;
+                error = ERROR_SUCCESS;
+                return true;
+            }
+            category = UpdateError::Mismatch;
+            error = ERROR_INVALID_DATA;
         }
-        if (cancelled || error == ERROR_CANCELLED ||
-            (category != UpdateError::Network && category != UpdateError::HttpStatus)) return false;
+        if (cancelled || error == ERROR_CANCELLED) return false;
+        if (category == UpdateError::ResponseTooLarge || category == UpdateError::Mismatch) {
+            mismatch = category;
+            mismatch_error = error;
+            continue;
+        }
+        if (category != UpdateError::Network && category != UpdateError::HttpStatus) return false;
+    }
+    if (mismatch != UpdateError::None) {
+        category = mismatch;
+        error = mismatch_error;
     }
     return false;
 }
