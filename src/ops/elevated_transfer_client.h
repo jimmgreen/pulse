@@ -24,6 +24,8 @@ ShellTransferResult DeleteWithElevatedHelper(const std::vector<std::wstring>& so
     bool permanent, HWND owner, std::atomic<bool>& cancel,
     ElevatedTransferCallbacks callbacks = {});
 void ShutdownElevatedTransferHelper();
+ShellTransferResult CreateFolderWithElevatedHelper(const std::wstring& path, HWND owner,
+    std::atomic<bool>& cancel, ElevatedTransferCallbacks callbacks = {});
 #ifdef PULSE_ELEVATED_TEST_CLIENT
 DWORD ElevatedHelperProcessIdForTesting();
 #endif

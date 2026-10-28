@@ -133,7 +133,7 @@ static ShellTransferResult RunAuthorizedRequest(elevated::Kind kind, const eleva
                 Writer response; response.Number(conflict.token); response.Number(static_cast<uint32_t>(answer.choice));
                 response.Number<uint32_t>(answer.apply_to_all ? 1 : 0);
                 if (!WriteFrame(session.pipe.Get(), session.process.Get(), session.nonce, Kind::ConflictReply, sequence, response)) break;
-            } else if (header.kind == Kind::CompletedItem && kind == Kind::Transfer) {
+            } else if (header.kind == Kind::CompletedItem && (kind == Kind::Transfer || kind == Kind::CreateFolder)) {
                 auto from = reader.Text(), to = reader.Text();
                 if (!reader.Done() || !SafePath(from) || !SafePath(to) || result.sources.size() >= 100000) break;
                 result.sources.push_back(std::move(from)); result.destinations.push_back(std::move(to)); result.mutated = true;
@@ -192,6 +192,20 @@ ShellTransferResult DeleteWithElevatedHelper(const std::vector<std::wstring>& so
     callbacks.paused = {}; // Shell deletion does not expose reliable pause.
     callbacks.conflict = {};
     return RunAuthorizedRequest(permanent ? Kind::PermanentDelete : Kind::RecycleDelete, request, owner, cancel, std::move(callbacks));
+}
+
+ShellTransferResult CreateFolderWithElevatedHelper(const std::wstring& path, HWND owner,
+    std::atomic<bool>& cancel, ElevatedTransferCallbacks callbacks) {
+    using namespace elevated;
+    ShellTransferResult result;
+    if (cancel.load()) { result.hr = HRESULT_FROM_WIN32(ERROR_CANCELLED); result.cancelled = true; return result; }
+    if (!SafePath(path)) { result.hr = E_INVALIDARG; return result; }
+    Writer request;
+    request.Text(path);
+    if (!request.good) { result.hr = E_INVALIDARG; return result; }
+    callbacks.paused = {};
+    callbacks.conflict = {};
+    return RunAuthorizedRequest(Kind::CreateFolder, request, owner, cancel, std::move(callbacks));
 }
 
 void ShutdownElevatedTransferHelper() {

@@ -1,6 +1,9 @@
 #include "shell_command_template.h"
 // ops_manager.cpp — See ops_manager.h for the contract.
 #include "ops_manager.h"
+#ifndef PULSE_ELEVATED_HOST
+#include "elevated_transfer_client.h"
+#endif
 #include "../common/runtime_log.h"
 #include "operation_presentation.h"
 #include "transfer_rate_estimator.h"
@@ -422,7 +425,7 @@ std::wstring CreateFailureText(DWORD code) {
 // 新建 entries (ShellNew) reuse the text-file path: a template file is copied
 // (CopyFile fails rather than overwrite), Data bytes are written, else the
 // file stays empty like NullFile.
-bool CreateInProcess(const OpRequest& req, std::wstring* error) {
+bool CreateInProcess(const OpRequest& req, std::wstring* error, DWORD* failure_code) {
     const std::wstring path = req.sources.empty() ? std::wstring{} : req.sources.front();
     DWORD code = ERROR_SUCCESS;
     if (path.empty()) {
@@ -465,6 +468,7 @@ bool CreateInProcess(const OpRequest& req, std::wstring* error) {
         }
     }
     if (code != ERROR_SUCCESS && error) *error = CreateFailureText(code);
+    if (failure_code) *failure_code = code;
     return code == ERROR_SUCCESS;
 }
 
@@ -4803,10 +4807,35 @@ void OpsManager::RunShellOp(const OpRequest& req, uint64_t task_id) {
 
     if (req.type == OpType::CreateFolder || req.type == OpType::CreateTextFile) {
         std::wstring local_error;
-        const bool created = CreateInProcess(req, &local_error);
-        if (created) PushUndo(req, task_id);
+        DWORD create_error = ERROR_SUCCESS;
+        bool cancelled = shell_cancel_requested_.load() || stopping_.load();
+        bool created = !cancelled && CreateInProcess(req, &local_error, &create_error);
+        OpRequest completed = req;
+#ifndef PULSE_ELEVATED_HOST
+        if (!created && !cancelled && req.type == OpType::CreateFolder &&
+            (create_error == ERROR_ACCESS_DENIED || create_error == ERROR_PRIVILEGE_NOT_HELD ||
+             create_error == ERROR_ELEVATION_REQUIRED)) {
+            SetStatus([](OpStatus& st) {
+                st.can_pause = false;
+            });
+            ElevatedTransferCallbacks callbacks;
+            callbacks.authorization = [this](bool awaiting) {
+                SetStatus([&](OpStatus& st) {
+                    st.authorization = awaiting ? AuthorizationState::Requesting : AuthorizationState::None;
+                });
+            };
+            const auto result = CreateFolderWithElevatedHelper(req.sources.front(), UiWindow(), shell_cancel_requested_, std::move(callbacks));
+            created = result.mutated && result.destinations.size() == 1;
+            cancelled = result.cancelled;
+            if (created) completed.sources = result.destinations;
+            else if (!cancelled && FAILED(result.hr)) local_error = result.error.empty()
+                ? CreateFailureText(HRESULT_CODE(result.hr)) : result.error;
+        }
+#endif
+        if (created) PushUndo(completed, task_id);
         SetStatus([&](OpStatus& st) {
             st.active = false;
+            st.authorization = AuthorizationState::None;
             st.percent = -1.0f;
             st.completed_ops++;
             if (created) {
@@ -4815,9 +4844,10 @@ void OpsManager::RunShellOp(const OpRequest& req, uint64_t task_id) {
                 st.summary = Describe(req) + l10n::Get(l10n::StringId::Completed).c_str();
             } else {
                 st.phase = OpPhase::Failed;
-                st.last_error = local_error;
+                st.last_error = cancelled ? l10n::Get(l10n::StringId::Canceled) : local_error;
             }
         });
+        shell_cancel_requested_ = false;
         return;
     }
 

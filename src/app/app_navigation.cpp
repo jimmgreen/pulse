@@ -1,3 +1,4 @@
+#include "pane_transfer_target.h"
 #include <thread>
 #include "app_window_title.h"
 // app_navigation.cpp — extracted from app_main.cpp.
@@ -2605,10 +2606,13 @@ void OpenFoldersSideBySide(AppState& s) {
 void TransferToTarget(AppState& s, bool move) {
     if(DeferContentSelection(s,[=](AppState& v){TransferToTarget(v,move);})) return;
     app::Tab* src = ActiveTab(s);
-    if (!src || !s.targetPane || s.targetPane == s.pane) return;
+    if (!src) return;
+    const auto visible = VisiblePanes(s);
+    app::Pane* target = app::ResolveTransferTarget(visible, s.pane, s.targetPane);
+    if (!target || target == s.pane) return;
     const app::SelectionCaps caps = app::ComputeSelectionCaps(*src, &s.places);
     if (!(move ? caps.cut : caps.copy)) return;
-    app::Tab* dst = s.targetPane->ActiveTab();
+    app::Tab* dst = target->ActiveTab();
     if (!dst || dst->current_path.empty()) return;
     // A phone on either side: Explorer's engine, as a Pulse task.
     if (IsDeviceTab(src) || IsDeviceTab(dst)) {
@@ -2616,7 +2620,7 @@ void TransferToTarget(AppState& s, bool move) {
         std::vector<std::wstring> items = IsDeviceTab(src) ? SelectedShellIds(*src) : SelectedFullPaths(*src);
         if (!items.empty() && SubmitDeviceTransfer(s, std::move(items), dst->current_path, move, &task) &&
             !IsDeviceTab(dst))
-            ArmArrivalSelection(s, s.targetPane, task, 0);
+            ArmArrivalSelection(s, target, task, 0);
         return;
     }
     if (fs::IsVirtualPath(dst->current_path) || dst->net_readonly ||
@@ -2631,7 +2635,7 @@ void TransferToTarget(AppState& s, bool move) {
     // #58-13: the items are selected in the target pane as they arrive, as a
     // paste selects them in its own.
     uint64_t task = 0;
-    if (SubmitWithConflictResolution(s, std::move(req), &task)) ArmArrivalSelection(s, s.targetPane, task, 0);
+    if (SubmitWithConflictResolution(s, std::move(req), &task)) ArmArrivalSelection(s, target, task, 0);
 }
 
 std::vector<std::wstring> WindowTransferFolders(AppState& s) {

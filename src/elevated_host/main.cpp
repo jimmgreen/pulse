@@ -98,6 +98,21 @@ int Run(DWORD parent_id, const Nonce& nonce) {
                 last_request = header.request;
                 active_task.store(manager.Submit(std::move(request)));
                 SetEvent(changed.Get());
+            } else if (header.kind == Kind::CreateFolder) {
+                if (active_request.load() || header.request <= last_request) break;
+                auto path = reader.Text();
+                if (!reader.Done() || !SafePath(path)) break;
+                ops::OpRequest request;
+                request.type = ops::OpType::CreateFolder;
+                request.sources.push_back(std::move(path));
+                request.is_undo = true;
+                cancelled.store(false);
+                deleting.store(false);
+                active_task.store(0);
+                active_request.store(header.request);
+                last_request = header.request;
+                active_task.store(manager.Submit(std::move(request)));
+                SetEvent(changed.Get());
             } else if (header.kind == Kind::RecycleDelete || header.kind == Kind::PermanentDelete) {
                 if (active_request.load() || header.request <= last_request) break;
                 const auto count = reader.Number<uint32_t>();

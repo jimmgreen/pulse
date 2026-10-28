@@ -1181,7 +1181,6 @@ void UpdateOperationWindow(AppState& s, bool allow_conflict_dialog) {
     // Built on first show (EnsureOperationWindow): most windows never need one.
     const auto now = std::chrono::steady_clock::now();
     const ops::OpStatus status = s.ops.Status();
-    if (s.operationWindow) s.operationWindow->Update(status);
 
     if (status.active && status.task_id != s.operationUiTaskId) {
         s.operationUiTaskId = status.task_id;
@@ -1190,6 +1189,16 @@ void UpdateOperationWindow(AppState& s, bool allow_conflict_dialog) {
         s.operationStartedAt = now;
         s.operationFinishedAt = {};
     }
+
+    // Creation stays in the list (including inline rename after completion).
+    // UAC already owns consent; do not turn it into a transfer progress window.
+    const bool inline_create = status.type == ops::OpType::CreateFolder ||
+                               status.type == ops::OpType::CreateTextFile;
+    if (inline_create && !s.operationPinnedByUser && status.phase != ops::OpPhase::Failed) {
+        HideOperationWindow(s);
+        return;
+    }
+    if (s.operationWindow) s.operationWindow->Update(status);
 
     if (allow_conflict_dialog) {
         if (const auto conflict = s.ops.PendingConflict();
