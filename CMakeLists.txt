@@ -926,8 +926,19 @@ add_executable(pulse_ctx_handlers_test src/bench/ctx_handlers_test.cpp
     src/shell_host/ctx_handlers.cpp src/shell_host/packaged_ctx_handlers.cpp)
 target_link_libraries(pulse_ctx_handlers_test PRIVATE ole32 shell32 uuid shlwapi)
 
+add_executable(pulse_start_pin_menu_test src/bench/start_pin_menu_test.cpp src/ipc/shell_client.cpp)
+target_link_libraries(pulse_start_pin_menu_test PRIVATE ole32 shell32 uuid shlwapi bcrypt pulse_localization)
+
+add_executable(pulse_isolated_start_pin_test src/bench/isolated_start_pin_test.cpp
+    src/shell_host/isolated_start_pin.cpp src/shell_host/ctx_handlers.cpp
+    src/shell_host/packaged_ctx_handlers.cpp)
+target_link_libraries(pulse_isolated_start_pin_test PRIVATE ole32 shell32 uuid shlwapi advapi32)
+add_dependencies(pulse_isolated_start_pin_test pulse_shell)
+add_dependencies(pulse_start_pin_menu_test pulse_shell)
+
 # Explorer parity diagnosis: native menu vs Pulse pipeline on the real machine.
 add_executable(pulse_ctx_parity_probe src/bench/ctx_parity_probe.cpp
+    src/shell_host/isolated_start_pin.cpp
     src/shell_host/ctx_handlers.cpp src/shell_host/packaged_ctx_handlers.cpp src/app/shell_verbs.cpp
     src/app/context_menu_controller.cpp src/app/ctx_layout_cache.cpp src/app/context_menu_prefs.cpp
     src/app/builtin_menu_items.cpp src/bench/localization_test.rc)
@@ -936,6 +947,7 @@ add_executable(pulse_ctx_parity_probe src/bench/ctx_parity_probe.cpp
 target_include_directories(pulse_ctx_parity_probe PRIVATE "${CMAKE_BINARY_DIR}/generated")
 target_link_libraries(pulse_ctx_parity_probe PRIVATE ole32 oleaut32 shell32 uuid shlwapi advapi32
     version user32 pulse_localization)
+add_dependencies(pulse_ctx_parity_probe pulse_shell)
 
 add_executable(pulse_integration src/integration_host/main.cpp src/app/shell_integration_registry.cpp
     src/app/system_ctx_registry.cpp)
@@ -1035,6 +1047,13 @@ target_link_libraries(pulse_compositor_resize_test PRIVATE
     d3d11 d2d1 dwrite dxgi dcomp dwmapi shcore ole32 windowscodecs user32 gdi32
     comctl32 pulse_localization)
 pulse_enable_lumatext(pulse_compositor_resize_test)
+
+add_executable(pulse_extension_render_test src/bench/extension_render_test.cpp
+    src/ui/typography.cpp src/ui/ui_compositor.cpp)
+target_link_libraries(pulse_extension_render_test PRIVATE
+    d3d11 d2d1 dwrite dxgi dcomp dwmapi shcore ole32 windowscodecs user32 gdi32
+    comctl32 pulse_localization)
+pulse_enable_lumatext(pulse_extension_render_test)
 
 add_executable(pulse_search_history_test
     src/bench/search_history_test.cpp
@@ -1584,6 +1603,8 @@ add_executable(pulse_tray_metadata_audit_test src/bench/tray_metadata_audit_test
 add_executable(pulse_paste_source_test src/bench/paste_source_test.cpp src/app/paste_source.cpp)
 add_executable(pulse_window_placement_test src/bench/window_placement_test.cpp src/app/window_placement.cpp)
 target_link_libraries(pulse_window_placement_test PRIVATE shell32 user32)
+add_executable(pulse_tray_placement_test src/bench/tray_placement_test.cpp src/app/tray_controller.cpp)
+target_link_libraries(pulse_tray_placement_test PRIVATE shell32 user32 pulse_runtime_log)
 add_executable(pulse_network_worker_audit_test src/bench/network_worker_audit_test.cpp
     src/index/index_config.cpp src/index/index_query.cpp src/index/search_kinds.cpp
     src/index/index_shard.cpp src/index/change_tracking.cpp src/index/filename_pinyin.cpp)
@@ -2132,6 +2153,18 @@ if(PULSE_BUILD_PROGRESS_UI_TESTS)
     endforeach()
 endif()
 
+foreach(address_test address_completion address_features create_progress)
+    add_executable(pulse_${address_test}_test src/bench/${address_test}_test.cpp $<TARGET_OBJECTS:pulse>)
+    get_target_property(address_libraries pulse LINK_LIBRARIES)
+    target_link_libraries(pulse_${address_test}_test PRIVATE ${address_libraries})
+    foreach(address_property INCLUDE_DIRECTORIES COMPILE_DEFINITIONS COMPILE_OPTIONS LINK_OPTIONS)
+        get_target_property(address_value pulse ${address_property})
+        if(address_value)
+            set_property(TARGET pulse_${address_test}_test PROPERTY ${address_property} "${address_value}")
+        endif()
+    endforeach()
+endforeach()
+
 include(cmake/setup.cmake)
 
 # Large legitimate indexes must round-trip beyond the former five-million cap.
@@ -2155,3 +2188,7 @@ endforeach()
 
 add_executable(pulse_support_report_test src/bench/support_report_test.cpp)
 target_link_libraries(pulse_support_report_test PRIVATE pulse_crash_reporter)
+
+add_executable(pulse_sheet_fill_test src/bench/sheet_fill_test.cpp src/preview_host/table_document.cpp src/preview_host/zip_entry.cpp src/ui/table_view.cpp src/ui/typography.cpp src/ui/ui_compositor.cpp)
+target_link_libraries(pulse_sheet_fill_test PRIVATE dwrite d2d1 d3d11 dxgi dcomp dwmapi shcore windowscodecs ole32 shell32 shlwapi user32 gdi32 comctl32 xmllite pulse_localization)
+pulse_enable_lumatext(pulse_sheet_fill_test)
