@@ -16,6 +16,7 @@
 #include "../app/places.h"
 #include "../common/text_format.h"
 #include <windowsx.h>
+#include <commctrl.h>
 #include <d2d1effects.h>
 #include <shlwapi.h>
 #include <algorithm>
@@ -1478,11 +1479,14 @@ ID2D1Bitmap* MainRenderer::LogoBitmap() {
     }
     logo_bitmap_.reset();
     logo_dc_ = nullptr;
-    // Decode well above the on-screen size so the mark stays crisp at high DPI.
-    const int px = std::max(32, static_cast<int>(48.0f * scale_ + 0.5f));
-    HICON icon = static_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr),
-        MAKEINTRESOURCEW(IDI_PULSE), IMAGE_ICON, px, px, LR_DEFAULTCOLOR));
-    if (!icon) return nullptr;
+    // Decode at the on-screen size (24 DIP), scaling down from the nearest larger
+    // frame: the small frames are pixel-fitted, and a 2x decode would blur them.
+    const int px = std::max(16, static_cast<int>(24.0f * scale_ + 0.5f));
+    HICON icon = nullptr;
+    if (FAILED(LoadIconWithScaleDown(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_PULSE), px, px, &icon)) ||
+        !icon) {
+        return nullptr;
+    }
     ComPtr<IWICImagingFactory> wic;
     ComPtr<IWICBitmap> wicBitmap;
     ComPtr<IWICFormatConverter> converter;
@@ -1541,8 +1545,12 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
     if (hasToggle && user_sidebar_collapsed_) {
         // Rail: the toggle stands in for the brand mark.
     } else if (ID2D1Bitmap* logo = LogoBitmap()) {
-        dc->DrawBitmap(logo, D2D1::RectF(x, markY, x + mark, markY + mark), 1.0f,
-                       D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC, nullptr, nullptr);
+        // 1:1 on whole pixels so the pixel-fitted frame stays sharp.
+        const D2D1_SIZE_U ls = logo->GetPixelSize();
+        const float lx = std::round(x + (mark - static_cast<float>(ls.width)) * 0.5f);
+        const float ly = std::round(markY + (mark - static_cast<float>(ls.height)) * 0.5f);
+        dc->DrawBitmap(logo, D2D1::RectF(lx, ly, lx + static_cast<float>(ls.width), ly + static_cast<float>(ls.height)),
+                       1.0f, D2D1_INTERPOLATION_MODE_LINEAR, nullptr, nullptr);
     } else {
         MakeBrush(dc, theme.accent, brAccent_);
         dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x + mark * 0.5f, markY + mark * 0.5f),
