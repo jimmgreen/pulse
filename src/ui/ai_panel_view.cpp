@@ -765,6 +765,9 @@ void AiPanelView::DrawModelMenu(Compositor* compositor, const AiPanelViewModel& 
         menu_shown_ = vm.menu_open;
         menu_at_ = now_ms;
     }
+    // The list opens on the chosen model; the pop's first frame draws nothing,
+    // so mark it here and place it once the list lays out.
+    if (opening) menu_scroll_ = -1.0f;
     menu_rect_ = {};
     menu_model_rects_.clear();
     menu_effort_rects_ = {};
@@ -793,7 +796,7 @@ void AiPanelView::DrawModelMenu(Compositor* compositor, const AiPanelViewModel& 
     }
     const float list_box_h = (std::min)(list_h, 312.0f * s);
     menu_scroll_max_ = list_h - list_box_h;
-    if (opening) menu_scroll_ = chosen_h > 0.0f ? chosen_top + chosen_h * 0.5f - list_box_h * 0.5f : 0.0f;
+    if (menu_scroll_ < 0.0f) menu_scroll_ = chosen_h > 0.0f ? chosen_top + chosen_h * 0.5f - list_box_h * 0.5f : 0.0f;
     menu_scroll_ = std::clamp(menu_scroll_, 0.0f, menu_scroll_max_);
     const float sep_h = 13.0f * s;
     const float seg_h = 36.0f * s;
