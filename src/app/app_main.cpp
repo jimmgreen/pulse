@@ -3221,7 +3221,11 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             // wParam 1: an item inside the previewed folder (Quick Look list).
             const std::wstring inner = wParam == 1 ? s->quickPreview.TakeOpenPath() : std::wstring();
             if (!inner.empty()) OpenPath(*s, inner);
-            else OpenSelected(*s);
+            else {
+                // The item opens in its default program; the preview is done.
+                s->quickPreview.Close();
+                OpenSelected(*s);
+            }
         }
         return 0;
 

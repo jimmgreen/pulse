@@ -121,7 +121,11 @@ void HandleQuickPreviewCommand(AppState& s, const ui::QuickPreviewCommand& comma
     tab->SelectOnly(index);
     EnsureRowVisible(s, *tab, index);
     switch (action) {
-    case ui::QuickPreviewAction::Open: OpenSelected(s); break;
+    case ui::QuickPreviewAction::Open:
+        // The item opens in its default program; the preview is done.
+        s.quickPreview.Close();
+        OpenSelected(s);
+        break;
     case ui::QuickPreviewAction::Cut: CollectToTray(s, true); break;
     case ui::QuickPreviewAction::Copy: CollectToTray(s, false); break;
     case ui::QuickPreviewAction::CopyPath: CopySelectedPath(s); break;
