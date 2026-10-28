@@ -45,10 +45,10 @@ enum class AiPanelPart : uint8_t {
     ModelButton,
     Send,
     Input,
-    Menu,           // the model menu's background
-    MenuModel,      // index
-    MenuEffort,     // index 0..3
-    MenuManage,
+    Menu,           // the 思考强度 popover's background
+    MenuModel,      // its 「model ›」: opens the model list
+    MenuSlider,     // its slider; index = the stop under the pointer
+    MenuReset,      // its ↺: back to the default level
     Conversation,
     // Conversation parts; index = block index in AiPanelViewModel::blocks.
     ThinkToggle,
@@ -112,12 +112,6 @@ struct AiSuggestionView {
     AiTint tint = AiTint::Image;
     std::wstring title;
     std::wstring detail;
-};
-
-struct AiModelView {
-    std::wstring name;
-    std::wstring detail;
-    std::wstring tag;   // 仅聊天 (empty: none), a small outlined pill after the name
 };
 
 // One piece of the conversation (v2.css "messages" … "result card").
@@ -610,18 +604,15 @@ struct AiPanelViewModel {
     std::wstring model_label;         // deepseek-flash
     std::wstring effort_label;        // " · 高" (empty when thinking is off)
     AiSendState send = AiSendState::Dim;
-    // Model menu.
+    // 思考强度 popover over the model button. A service without a thinking
+    // setting has none: the button opens the model list (a FluentMenu).
     bool menu_open = false;
-    std::wstring model_heading, effort_heading;
-    std::vector<AiModelView> models;
-    int model = 0;
     std::array<std::wstring, 4> effort_names;
-    int effort_count = 4;             // segments: 4 关低中高, 3 低中高, 2 关开, 0 no thinking section
-    std::wstring effort_detail;       // the selected effort's line
-    int effort = 2;                   // the selected segment
+    std::array<std::wstring, 4> effort_details;   // each level's line
+    int effort_count = 4;             // stops: 4 关低中高, 3 低中高, 2 关开, 0 none
+    int effort = 2;                   // the selected stop
+    int effort_default = 2;           // the stop ↺ goes back to
     bool connected = false;
-    std::wstring connection_text;     // 已连接 api.deepseek.com / 未连接
-    std::wstring manage_text;         // 模型服务设置… (opens Settings > AI 助手)
     AiVoiceView voice;
     // Pointer.
     AiPanelHit hover;
@@ -673,15 +664,24 @@ public:
     void ScrollBy(float dy);
     void ScrollToEnd();
     bool Following() const noexcept { return follow_; }
-    // The overlay scrollbars (conversation or welcome, and the model list)
-    // work like Pulse's other scrollbars: drag the thumb, or press the track
+    // The overlay scrollbar (conversation or welcome) works like Pulse's other scrollbars: drag the thumb, or press the track
     // to jump there and keep dragging. Hover widens the bar.
     bool BeginScrollDrag(float x, float y);   // true when a bar took the press
     bool DragScroll(float y);                 // true when the view moved
     void EndScrollDrag() noexcept { scroll_drag_ = 0; }
-    int ScrollDragging() const noexcept { return scroll_drag_; }   // 1 conversation, 2 model list
+    int ScrollDragging() const noexcept { return scroll_drag_; }   // 1 conversation
     bool SetScrollHot(float x, float y);      // true when the hover changed
     bool ScrollHot() const noexcept { return scroll_hot_ != 0; }
+
+    // The 思考强度 slider: a press on it starts a drag, the knob follows the
+    // pointer and the level under it shows; the release snaps to a stop.
+    bool BeginSliderDrag(float x, float y);   // true when the press is on the slider
+    int DragSlider(float x);                  // the stop under the knob (-1: no drag)
+    int EndSliderDrag();                      // the stop it snapped to (-1: no drag)
+    bool SliderDragging() const noexcept { return slider_drag_; }
+    // The model list's anchor in the popover (「model ›」; the other is
+    // ModelButtonRect).
+    D2D1_RECT_F ModelLinkRect() const noexcept { return menu_link_; }
 
     // Last drawn geometry.
     AiPanelHit HitTest(float x, float y) const;
@@ -772,8 +772,8 @@ private:
     float ComposerHeight(const AiPanelViewModel& vm, float scale) const;
     void DrawComposer(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal,
                       const D2D1_RECT_F& box, float scale, uint64_t now_ms);
-    void DrawModelMenu(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal,
-                       float scale, uint64_t now_ms);
+    void DrawEffortMenu(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal,
+                        float scale, uint64_t now_ms);
     // ai_panel_voice.cpp: the mic button (in the composer row), the composer
     // while it listens and the 语音设置 menu.
     void DrawMic(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal, float scale, uint64_t now_ms);
@@ -794,7 +794,7 @@ private:
     bool dock_anim_ = false, float_anim_ = false;
     uint64_t dock_start_ = 0, float_start_ = 0;
     uint64_t opened_at_ = 0;
-    // Model menu pop.
+    // 思考强度 popover pop.
     bool menu_shown_ = false;
     uint64_t menu_at_ = 0;
     bool decor_ = false;
@@ -830,21 +830,24 @@ private:
     struct VoiceGeom;
     std::shared_ptr<VoiceGeom> voice_;
     D2D1_RECT_F menu_rect_{};
-    std::vector<D2D1_RECT_F> menu_model_rects_;
-    std::array<D2D1_RECT_F, 4> menu_effort_rects_{};
-    D2D1_RECT_F menu_manage_{};
-    // The model list, when it is longer than its box.
-    float menu_scroll_ = 0.0f, menu_scroll_max_ = 0.0f;
+    D2D1_RECT_F menu_link_{}, menu_slider_{}, menu_reset_{};
+    // The slider's knob, in stops: it follows a drag, then springs onto the
+    // stop with a slight overshoot.
+    float slider_pos_ = 0.0f, slider_from_ = 0.0f;
+    int slider_target_ = -1;          // the stop it settles on (-1: not placed yet)
+    int slider_stops_ = 0;
+    uint64_t slider_at_ = 0;
+    bool slider_anim_ = false, slider_drag_ = false;
     // The panel's scrollbars are the shared fluent control (the same look,
-    // fade and drag as settings and the sidebar): [0] conversation or welcome,
-    // [1] model list. `spec` is as last drawn; `drawn` is reset each frame.
+    // fade and drag as settings and the sidebar): the conversation or the
+    // welcome. `spec` is as last drawn; `drawn` is reset each frame.
     struct Bar {
         fluent::ScrollbarSpec spec;
         fluent::ScrollbarFade fade;
         bool drawn = false;
     };
-    std::array<Bar, 2> bars_{};
-    int scroll_drag_ = 0;            // 1 conversation, 2 model list
+    std::array<Bar, 1> bars_{};
+    int scroll_drag_ = 0;            // 1 conversation
     int scroll_hot_ = 0;
     float drag_grab_ = 0.0f;         // pointer offset along the thumb
     float bar_scale_ = 1.0f;

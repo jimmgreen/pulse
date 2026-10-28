@@ -4595,5 +4595,7 @@
 #define IDS_AI_CHIP_COLLAPSE                                                             5873
 #define IDS_AI_CHIP_SETTINGS                                                             5874
 #define IDS_AI_VOICE_SETTINGS                                                            5875
+#define IDS_AI_ASST_MODEL_FLASH_SHORT                                                    5876
+#define IDS_AI_ASST_MODEL_PRO_SHORT                                                      5877
 
 #endif  // PULSE_STRING_IDS_H

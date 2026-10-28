@@ -261,11 +261,6 @@ float AiPanelView::TweenTo(uint64_t key, float target, uint32_t ms, uint64_t now
 }
 
 void AiPanelView::ScrollBy(float dy) {
-    // The open model menu's list takes the wheel while it scrolls.
-    if (menu_shown_ && menu_scroll_max_ > 0.0f) {
-        menu_scroll_ = std::clamp(menu_scroll_ + dy, 0.0f, menu_scroll_max_);
-        return;
-    }
     const float max_scroll = (std::max)(0.0f, content_h_ - view_h_);
     const float base = scroll_anim_ ? scroll_to_ : scroll_;
     const float to = std::clamp(base + dy, 0.0f, max_scroll);

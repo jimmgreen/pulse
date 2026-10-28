@@ -92,6 +92,8 @@ bool AiAssistantSetCursor(AppState& s, int x, int y);
 // Esc with the main window focused: closes the menu, else stops a running
 // turn.
 bool AiAssistantEscape(AppState& s);
+// ←/→ (↑/↓), Home/End and 1–9 move the open 思考强度 slider; true when taken.
+bool AiAssistantMenuKey(AppState& s, WPARAM vk);
 
 // WM_CTLCOLOREDIT for the composer; nullptr for any other EDIT.
 HBRUSH AiAssistantCtlColor(AppState& s, HDC hdc, HWND edit);

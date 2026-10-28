@@ -38,12 +38,14 @@ constexpr UINT kTipDelayMs = 520;
 constexpr uint64_t kMenuFadeMs = 240;
 
 // Models come from the connected service (ai_model_list.h) and are shown
-// and sent as it names them. The two official DeepSeek ones get a line.
-struct KnownModel { const char* id; I detail; };
+// and sent as it names them. The two official DeepSeek ones get a short
+// caption in the list and their line as its tip.
+struct KnownModel { const char* id; I caption; I detail; };
 constexpr KnownModel kKnownModels[] = {
-    {"deepseek-flash", I::AiAsstModelFlashDetail},
-    {"deepseek-v4-pro", I::AiAsstModelProDetail},
+    {"deepseek-flash", I::AiAsstModelFlashShort, I::AiAsstModelFlashDetail},
+    {"deepseek-v4-pro", I::AiAsstModelProShort, I::AiAsstModelProDetail},
 };
+constexpr int kDefaultEffort = 2;   // 中 (ai_settings.h); on for a switch
 std::string g_model = "deepseek-flash";   // the chosen id (ai.json assistant.model)
 
 const std::vector<std::string>& Listed() { return ai::ListedModels(AiAgentBaseUrl()); }
@@ -392,6 +394,7 @@ void CloseMenu(AppState& s) {
     AiAssistantState& a = s.aiAssistant;
     AiVoiceCloseMenu(s);
     if (!a.menu_open) return;
+    s.renderer.AiPanel().EndSliderDrag();   // a drag that Esc cut short is dropped
     a.menu_open = false;
     a.menu_closed_at = ui::motion::NowMs();
 }
@@ -406,7 +409,76 @@ void OpenServiceSettings(AppState& s) {
 bool HasTip(ui::AiPanelPart part) {
     using P = ui::AiPanelPart;
     return part == P::NewChat || part == P::Mode || part == P::Close || part == P::ActCopy || part == P::ActRetry ||
-           part == P::ActThumb || AiVoiceHasTip(part);
+           part == P::ActThumb || part == P::MenuReset || part == P::MenuSlider || AiVoiceHasTip(part);
+}
+
+// The model list: the shared FluentMenu (the dropdown of Pulse's other menus),
+// under the model button or the 思考强度 popover's 「model ›」. The popover
+// stays open behind it.
+void PickModel(AppState& s, const D2D1_RECT_F& box) {
+    AiAssistantState& a = s.aiAssistant;
+    if (box.right <= box.left || !EnsureMenu(s)) return;
+    const std::vector<std::string>& listed = Listed();
+    // Before the service listed anything: the chosen one alone.
+    const std::vector<std::string> alone{CurrentModel()};
+    const std::vector<std::string> rows = listed.empty() ? alone : listed;
+    std::vector<ui::FluentMenuItem> items;
+    {
+        ui::FluentMenuItem head;
+        head.heading = true;
+        head.enabled = false;   // a caption: never hovered or picked
+        head.text = Text(I::AiAsstModelHeading);
+        items.push_back(std::move(head));
+    }
+    const std::string current = CurrentModel();
+    for (size_t i = 0; i < rows.size(); ++i) {
+        ui::FluentMenuItem item;
+        item.command = static_cast<int>(i) + 1;
+        item.text = json::Wide(rows[i]);
+        item.checked = rows[i] == current;
+        for (const KnownModel& k : kKnownModels)
+            if (rows[i] == k.id) {
+                item.shortcut = Text(k.caption);
+                item.tooltip = Text(k.detail);
+            }
+        if (ai::IsChatOnlyModel(AiAgentBaseUrl(), rows[i])) item.badge_text = Text(I::AsstChatOnly);
+        items.push_back(std::move(item));
+    }
+    items.back().separator_after = true;
+    constexpr int kManage = 100000;
+    {
+        ui::FluentMenuItem manage;
+        manage.command = kManage;
+        manage.text = Text(I::AiAsstServiceSettings);
+        manage.glyph = L"\xE713";
+        manage.shortcut = Text(AiAgentConnected() ? I::AiConnStatusOn : I::AsstNotConnectedBadge);
+        items.push_back(std::move(manage));
+    }
+    POINT c[] = {{static_cast<LONG>(std::lround(box.left)), static_cast<LONG>(std::lround(box.top))},
+                 {static_cast<LONG>(std::lround(box.right)), static_cast<LONG>(std::lround(box.bottom))}};
+    MapWindowPoints(s.hwnd, nullptr, c, 2);
+    s.menu->SetTheme(s.darkMode, s.accentColor);
+    const int cmd = s.menu->TrackDropdown({c[0].x, c[0].y, c[1].x, c[1].y}, std::move(items));
+    if (cmd == kManage) {
+        OpenServiceSettings(s);
+        return;
+    }
+    if (cmd >= 1 && static_cast<size_t>(cmd) <= rows.size() && rows[static_cast<size_t>(cmd) - 1] != current) {
+        g_model = rows[static_cast<size_t>(cmd) - 1];
+        SavePrefs(a);
+    }
+    Redraw(s);
+}
+
+// Sets 思考强度 to a stop of the current service's slider.
+void SetEffortStop(AppState& s, int stop) {
+    AiAssistantState& a = s.aiAssistant;
+    const EffortChoice choice = EffortChoices();
+    if (choice.count == 0) return;
+    const int effort = EffortOf(choice, std::clamp(stop, 0, choice.count - 1));
+    if (effort == a.effort) return;
+    a.effort = effort;
+    SavePrefs(a);
 }
 
 void ShowTipLater(AppState& s) {
@@ -501,36 +573,27 @@ void Activate(AppState& s, const ui::AiPanelHit& hit) {
         break;
     }
     case P::ModelButton:
+        // 思考强度 when the service has it (the slider and 「model ›」), else
+        // the model list right away.
         if (a.menu_open) CloseMenu(s);
         else {
             AiVoiceCloseMenu(s);
-            a.menu_open = true;
             if (AiAgentConnected()) ai::RefreshListedModels(s.hwnd, AiAgentBaseUrl());
-        }
-        break;
-    case P::MenuModel: {
-        const std::vector<std::string>& list = Listed();
-        if (hit.index >= 0 && hit.index < static_cast<int>(list.size()) && list[hit.index] != CurrentModel()) {
-            g_model = list[hit.index];
-            SavePrefs(a);
-        }
-        CloseMenu(s);
-        a.focus_pending = true;
-        break;
-    }
-    case P::MenuEffort: {
-        // The menu stays open to show the chosen strength's line.
-        const EffortChoice choice = EffortChoices();
-        if (hit.index >= 0 && hit.index < choice.count) {
-            const int effort = EffortOf(choice, hit.index);
-            if (effort != a.effort) {
-                a.effort = effort;
-                SavePrefs(a);
+            if (EffortChoices().count > 0) {
+                a.menu_open = true;
+            } else {
+                PickModel(s, s.renderer.AiPanel().ModelButtonRect());
+                a.focus_pending = true;
             }
         }
         break;
-    }
-    case P::MenuManage:
+    case P::MenuModel:
+        PickModel(s, s.renderer.AiPanel().ModelLinkRect());
+        break;
+    case P::MenuReset:
+        a.effort = kDefaultEffort;
+        SavePrefs(a);
+        break;
     case P::GoSettings:
         OpenServiceSettings(s);
         return;
@@ -600,8 +663,8 @@ void Activate(AppState& s, const ui::AiPanelHit& hit) {
             OpenServiceSettings(s);
             return;
         } else if (act == ui::AiErrAct::SwitchModel) {
-            a.menu_open = true;
-            if (AiAgentConnected()) ai::RefreshListedModels(s.hwnd, AiAgentBaseUrl());
+            CloseMenu(s);
+            PickModel(s, s.renderer.AiPanel().ModelButtonRect());
         } else {
             CloseMenu(s);
             AiChatErrRun(s, hit.index);
@@ -793,7 +856,6 @@ void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm) {
     }
     p.placeholder = Text(I::AiAsstPlaceholder);
     p.add_files = Text(I::AiAsstAddFiles);
-    const std::vector<std::string>& listed = Listed();
     p.model_label = json::Wide(CurrentModel());
     const EffortChoice choice = EffortChoices();
     p.effort_count = choice.count;
@@ -804,34 +866,20 @@ void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm) {
                                                               : L" \u00B7 " + Text(kEffortNames[EffortOf(choice, p.effort)]);
     p.send = chat.busy ? ui::AiSendState::Busy : p.composer_empty ? ui::AiSendState::Dim : ui::AiSendState::Ready;
 
-    p.menu_open = a.menu_open;
-    p.model_heading = Text(I::AiAsstModelHeading);
-    p.effort_heading = Text(I::AiAsstEffortHeading);
-    // Before the service listed anything: the chosen one alone.
-    const std::vector<std::string> alone{CurrentModel()};
-    const std::vector<std::string>& rows = listed.empty() ? alone : listed;
-    for (const std::string& id : rows) {
-        std::wstring detail;
-        for (const KnownModel& k : kKnownModels)
-            if (id == k.id) detail = Text(k.detail);
-        std::wstring tag = ai::IsChatOnlyModel(AiAgentBaseUrl(), id) ? Text(I::AsstChatOnly) : std::wstring();
-        p.models.push_back({json::Wide(id), std::move(detail), std::move(tag)});
-    }
-    const auto chosen = std::find(rows.begin(), rows.end(), CurrentModel());
-    p.model = chosen == rows.end() ? -1 : static_cast<int>(chosen - rows.begin());
+    p.menu_open = a.menu_open && choice.count > 0;
+    p.effort_default = SegmentOf(choice, kDefaultEffort);
     if (choice.toggle) {
-        p.effort_names = {Text(I::AiAsstEffortOff), Text(I::AiAsstEffortOn), L"", L""};
-        p.effort_detail = Text(p.effort > 0 ? I::AiAsstThinkOnDetail : I::AiAsstEffortOffDetail);
+        p.effort_names = {Text(I::AiAsstEffortOff), Text(I::AsstThinkToggle), L"", L""};
+        p.effort_details = {Text(I::AiAsstEffortOffDetail), Text(I::AiAsstThinkOnDetail), L"", L""};
     } else {
-        for (int i = 0; i < 4; ++i)
-            p.effort_names[static_cast<size_t>(i)] = i < choice.count ? Text(kEffortNames[EffortOf(choice, i)]) : L"";
-        p.effort_detail = choice.count > 0 ? Text(kEffortDetails[EffortOf(choice, p.effort)]) : std::wstring();
+        for (int i = 0; i < 4; ++i) {
+            const bool has = i < choice.count;
+            p.effort_names[static_cast<size_t>(i)] = has ? Text(kEffortNames[EffortOf(choice, i)]) : L"";
+            p.effort_details[static_cast<size_t>(i)] = has ? Text(kEffortDetails[EffortOf(choice, i)]) : L"";
+        }
     }
-    // Connected once a DeepSeek key is stored (ai_model_key.h).
+    // Connected once a service key is stored (ai_model_key.h).
     p.connected = AiAgentConnected();
-    p.connection_text = p.connected ? Fill(Text(I::AiAsstConnected), L"{host}", AiAgentHost())
-                                    : Text(I::AiAsstNotConnected);
-    p.manage_text = Text(I::AiAsstServiceSettings);
     // No service yet: the welcome leads to Settings instead of suggestions.
     p.setup = !p.connected;
     if (p.setup) {
@@ -853,7 +901,10 @@ void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm) {
         std::wstring voice_tip;
         if (AiVoiceHasTip(part)) {
             if (AiVoiceTip(s, part, voice_tip)) vm.tooltip_text = std::move(voice_tip);
-        } else vm.tooltip_text = Text(part == P::NewChat ? I::AiAsstNewChat
+        } else if (part == P::MenuSlider) {
+            if (a.hover.index >= 0 && a.hover.index < 4) vm.tooltip_text = p.effort_names[static_cast<size_t>(a.hover.index)];
+        } else vm.tooltip_text = Text(part == P::MenuReset ? I::RestoreDefaults
+                               : part == P::NewChat ? I::AiAsstNewChat
                                : part == P::Close ? I::AiAsstCollapse
                                : part == P::ActCopy ? I::AiAsstCopy
                                : part == P::ActRetry ? I::AiAsstRetry
@@ -970,6 +1021,18 @@ bool AiAssistantMouseMove(AppState& s, int x, int y) {
         }
         return true;
     }
+    if (view.SliderDragging()) {
+        if ((GetKeyState(VK_LBUTTON) & 0x8000) == 0) {   // the release went elsewhere
+            SetEffortStop(s, view.EndSliderDrag());
+            a.captured = false;
+            a.pressed = {};
+            if (GetCapture() == s.hwnd) ReleaseCapture();
+        } else {
+            view.DragSlider(static_cast<float>(x));
+        }
+        Redraw(s);
+        return true;
+    }
     if (!Reachable(s) && !a.captured) {
         if (a.hover.part != ui::AiPanelPart::None) {
             a.hover = {};
@@ -1007,6 +1070,15 @@ bool AiAssistantMouseDown(AppState& s, int x, int y) {
         return true;
     }
     const ui::AiPanelHit hit = HitAt(s, x, y);
+    if (hit.part == ui::AiPanelPart::MenuSlider && view.BeginSliderDrag(static_cast<float>(x), static_cast<float>(y))) {
+        // The knob jumps under the press and follows the drag.
+        a.pressed = hit;
+        a.hover = hit;
+        SetCapture(s.hwnd);
+        a.captured = true;
+        Redraw(s);
+        return true;
+    }
     if (hit.part == ui::AiPanelPart::None) {
         // Outside: the menus fold away and the click goes on to Pulse.
         if (a.menu_open || AiVoiceMenuOpen(s)) {
@@ -1031,6 +1103,16 @@ bool AiAssistantMouseUp(AppState& s, int x, int y) {
         a.captured = false;
         if (GetCapture() == s.hwnd) ReleaseCapture();
         view.SetScrollHot(static_cast<float>(x), static_cast<float>(y));
+        Redraw(s);
+        return true;
+    }
+    if (view.SliderDragging()) {
+        // Snaps to the nearest stop; the level applies right away.
+        SetEffortStop(s, view.EndSliderDrag());
+        a.captured = false;
+        a.pressed = {};
+        if (GetCapture() == s.hwnd) ReleaseCapture();
+        a.hover = HitAt(s, x, y);
         Redraw(s);
         return true;
     }
@@ -1085,6 +1167,25 @@ bool AiAssistantSetCursor(AppState& s, int x, int y) {
     const ui::AiPanelHit hit = s.renderer.AiPanel().HitTest(static_cast<float>(x), static_cast<float>(y));
     const bool text = hit.part == ui::AiPanelPart::Input;
     SetCursor(LoadCursorW(nullptr, text ? IDC_IBEAM : IDC_ARROW));
+    return true;
+}
+
+bool AiAssistantMenuKey(AppState& s, WPARAM vk) {
+    AiAssistantState& a = s.aiAssistant;
+    if (!a.open || !a.menu_open) return false;
+    const EffortChoice choice = EffortChoices();
+    if (choice.count == 0) return false;
+    const int now = SegmentOf(choice, std::clamp(a.effort, 0, 3));
+    int stop = -1;
+    if (vk == VK_LEFT || vk == VK_DOWN) stop = now - 1;
+    else if (vk == VK_RIGHT || vk == VK_UP) stop = now + 1;
+    else if (vk == VK_HOME) stop = 0;
+    else if (vk == VK_END) stop = choice.count - 1;
+    else if (vk >= '1' && vk <= '9') stop = static_cast<int>(vk - '1');
+    else if (vk >= VK_NUMPAD1 && vk <= VK_NUMPAD9) stop = static_cast<int>(vk - VK_NUMPAD1);
+    else return false;
+    if (stop >= 0 && stop < choice.count) SetEffortStop(s, stop);
+    Redraw(s);
     return true;
 }
 

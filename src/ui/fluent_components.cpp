@@ -2109,6 +2109,96 @@ bool ScrollbarFade::Moving(uint64_t now) const noexcept {
     return opacity_ > 0.0f && !hot_ && !keep_visible_ && visible_until_ <= now + kLead;
 }
 
+namespace {
+constexpr float kStepKnobDip = 36.0f;
+constexpr float kStepTrackDip = 30.0f;
+constexpr float kStepRowDip = 40.0f;
+}  // namespace
+
+float StepSliderHeight(float scale) noexcept { return std::round(kStepRowDip * scale); }
+
+float StepSliderStopX(const D2D1_RECT_F& bounds, int stops, float position, float scale) noexcept {
+    const float inset = kStepKnobDip * 0.5f * scale;
+    const float left = bounds.left + inset;
+    const float right = bounds.right - inset;
+    if (stops < 2 || right <= left) return (bounds.left + bounds.right) * 0.5f;
+    const float last = static_cast<float>(stops - 1);
+    return left + (right - left) * std::clamp(position, 0.0f, last) / last;
+}
+
+float StepSliderPositionAt(const D2D1_RECT_F& bounds, int stops, float x, float scale) noexcept {
+    const float inset = kStepKnobDip * 0.5f * scale;
+    const float left = bounds.left + inset;
+    const float right = bounds.right - inset;
+    if (stops < 2 || right <= left) return 0.0f;
+    return Clamp01((x - left) / (right - left)) * static_cast<float>(stops - 1);
+}
+
+void Painter::DrawStepSlider(const StepSliderSpec& spec) {
+    if (!dc_ || !theme_) return;
+    const int stops = std::max(spec.stops, 2);
+    const ControlState& state = spec.state;
+    const float cy = (spec.bounds.top + spec.bounds.bottom) * 0.5f;
+    const float track_h = std::round(Px(kStepTrackDip));
+    const float track_top = std::round(cy - track_h * 0.5f);
+    const D2D1_RECT_F track = D2D1::RectF(std::round(spec.bounds.left), track_top,
+                                          std::round(spec.bounds.right), track_top + track_h);
+    const float radius = track_h * 0.5f;
+    const float knob_x = StepSliderStopX(spec.bounds, stops, spec.position, scale_);
+    const float knob_r = Px(kStepKnobDip) * 0.5f;
+    D2D1_COLOR_F rest, fill, dot_rest, dot_fill, knob, knob_line;
+    if (high_contrast_) {
+        rest = theme_->fill_input;
+        fill = state.enabled ? theme_->accent : theme_->text_disabled;
+        dot_rest = theme_->text;
+        dot_fill = theme_->accent_text;
+        knob = state.enabled ? theme_->text : theme_->text_disabled;
+        knob_line = theme_->stroke_input_bottom;
+    } else {
+        const AccentShades shades = DeriveAccentShades(theme_->accent);
+        rest = dark_ ? Rgba(0xFFFFFF, 20) : Rgba(0x000000, 15);
+        fill = !state.enabled ? (dark_ ? Rgba(0xFFFFFF, 41) : Rgba(0x000000, 56))
+               : state.pressed ? shades.light2
+               : state.hovered ? shades.light1 : theme_->accent;
+        dot_rest = dark_ ? Rgba(0xFFFFFF, 77) : Rgba(0x000000, 66);
+        dot_fill = theme_->accent_text;
+        dot_fill.a *= 0.7f;
+        knob = !state.enabled ? (dark_ ? Rgba(0xFFFFFF, 96) : Rgba(0xFFFFFF, 200))
+                              : dark_ ? HexColor(0xF3F3F3) : HexColor(0xFFFFFF);
+        knob_line = dark_ ? Rgba(0x000000, 40) : Rgba(0x000000, 20);
+    }
+    FillRoundedRect(track, radius, rest);
+    // The accent runs to just past the knob, so the knob sits on its end.
+    const float fill_right = std::min(track.right, std::max(track.left + track_h, knob_x + radius));
+    FillRoundedRect(D2D1::RectF(track.left, track.top, fill_right, track.bottom), radius, fill);
+    const float dot_r = Px(2.5f);
+    for (int i = 0; i < stops; ++i) {
+        const float x = StepSliderStopX(spec.bounds, stops, static_cast<float>(i), scale_);
+        if (std::abs(x - knob_x) < knob_r + Px(2.0f)) continue;   // under the knob
+        dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, cy), dot_r, dot_r),
+                         ScratchBrush(x < knob_x ? dot_fill : dot_rest));
+    }
+    if (!high_contrast_ && state.enabled) {
+        // A soft shadow under the knob; a touch deeper while hovered or held.
+        const float deep = state.pressed || state.hovered ? 1.4f : 1.0f;
+        for (int i = 3; i >= 1; --i) {
+            const float grow = Px(static_cast<float>(i));
+            const int alpha = static_cast<int>((dark_ ? 34.0f : 16.0f) * deep / static_cast<float>(i));
+            dc_->FillEllipse(D2D1::Ellipse(D2D1::Point2F(knob_x, cy + Px(1.0f)), knob_r + grow * 0.5f,
+                                           knob_r + grow * 0.5f),
+                             ScratchBrush(Rgba(0x000000, alpha)));
+        }
+    }
+    const D2D1_ELLIPSE knob_shape = D2D1::Ellipse(D2D1::Point2F(knob_x, cy), knob_r, knob_r);
+    dc_->FillEllipse(knob_shape, ScratchBrush(knob));
+    const float stroke = std::max(1.0f, std::round(Px(1.0f)));
+    dc_->DrawEllipse(D2D1::Ellipse(knob_shape.point, knob_r - stroke * 0.5f, knob_r - stroke * 0.5f),
+                     ScratchBrush(knob_line), stroke);
+    if (state.keyboard_focus) {
+        DrawFocusRing(D2D1::RectF(knob_x - knob_r, cy - knob_r, knob_x + knob_r, cy + knob_r), knob_r);
+    }
+}
+
 void Painter::DrawScrollbar(const ScrollbarSpec& spec) {
     if (!theme_) {
         return;

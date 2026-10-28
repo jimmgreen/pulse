@@ -4587,6 +4587,8 @@ enum class StringId : UINT {
     AiChipCollapse = IDS_AI_CHIP_COLLAPSE,
     AiChipSettings = IDS_AI_CHIP_SETTINGS,
     AiVoiceSettings = IDS_AI_VOICE_SETTINGS,
+    AiAsstModelFlashShort = IDS_AI_ASST_MODEL_FLASH_SHORT,
+    AiAsstModelProShort = IDS_AI_ASST_MODEL_PRO_SHORT,
 };
 
 bool IsLanguageId(std::wstring_view id) noexcept;

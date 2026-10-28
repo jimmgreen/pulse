@@ -196,6 +196,25 @@ private:
     uint64_t last_tick_ = 0;
 };
 
+// A stepped slider (思考强度, after Codex): a pill track with a dot at each
+// stop, filled in the accent up to a round knob. The owner keeps the position
+// and moves it (drag, click, keys, the snap's slight overshoot); the
+// functions below map stops to pixels, so drawing and hit testing agree.
+struct StepSliderSpec {
+    D2D1_RECT_F bounds{};   // the slider's row, StepSliderHeight tall
+    int stops = 2;
+    float position = 0.0f;  // in stops, 0..stops-1 (fractional while it moves)
+    ControlState state{};   // hovered, pressed (dragging), keyboard_focus, enabled
+};
+
+// The row height in pixels: the 36 DIP knob and room for its shadow.
+float StepSliderHeight(float scale) noexcept;
+// The knob's centre for `position` (in stops); the end stops sit a knob
+// radius in from the ends.
+float StepSliderStopX(const D2D1_RECT_F& bounds, int stops, float position, float scale) noexcept;
+// The position (in stops, fractional, clamped) under the pointer at `x`.
+float StepSliderPositionAt(const D2D1_RECT_F& bounds, int stops, float x, float scale) noexcept;
+
 struct ListRowSpec {
     D2D1_RECT_F bounds{};
     ControlState state{};
@@ -491,6 +510,7 @@ public:
     void DrawTagDotState(D2D1_POINT_2F center, float radius, const D2D1_COLOR_F& color,
                          bool checked, bool mixed, bool hovered = false);
     void DrawScrollbar(const ScrollbarSpec& spec);
+    void DrawStepSlider(const StepSliderSpec& spec);
     void DrawBreadcrumbSegment(const BreadcrumbSegmentSpec& spec);
     void DrawCommandSearchBox(const CommandSearchBoxSpec& spec);
     void DrawSplitButton(const SplitButtonSpec& spec);

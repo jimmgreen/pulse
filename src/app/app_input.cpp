@@ -5220,7 +5220,8 @@ void ShowKeyboardContextMenu(AppState& s) {
 
 LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
-        if (wParam == VK_ESCAPE && AiAssistantEscape(*s)) return 0;   // Pulse 助手's model menu
+        if (wParam == VK_ESCAPE && AiAssistantEscape(*s)) return 0;
+        if (AiAssistantMenuKey(*s, wParam)) return 0;   // the 思考强度 slider's keys   // Pulse 助手's model menu
         if (wParam == VK_ESCAPE && SysCtxPreviewDragCancel(*s)) return 0;
         if (wParam == VK_ESCAPE && CancelMarquee(*s)) {
             InvalidateRect(hwnd, nullptr, FALSE);

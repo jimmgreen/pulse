@@ -4577,6 +4577,8 @@ BEGIN
     IDS_AI_CHIP_COLLAPSE "收起助手"
     IDS_AI_CHIP_SETTINGS "AI 助手设置…"
     IDS_AI_VOICE_SETTINGS "语音设置…"
+    IDS_AI_ASST_MODEL_FLASH_SHORT "日常整理"
+    IDS_AI_ASST_MODEL_PRO_SHORT "复杂任务"
 END
 
 LANGUAGE 0x09, 0x01
@@ -9153,6 +9155,8 @@ BEGIN
     IDS_AI_CHIP_COLLAPSE "Collapse assistant"
     IDS_AI_CHIP_SETTINGS "AI assistant settings…"
     IDS_AI_VOICE_SETTINGS "Voice settings…"
+    IDS_AI_ASST_MODEL_FLASH_SHORT "Everyday"
+    IDS_AI_ASST_MODEL_PRO_SHORT "Complex tasks"
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.
