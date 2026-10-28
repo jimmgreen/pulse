@@ -1245,6 +1245,7 @@ struct WindowViewModel {
     std::wstring settings_home_folder; // default location; empty = This PC
     int settings_text_render = 0; // 0 auto, 1 sharp, 2 smooth
     int settings_ui_font_scale = 100; // interface font size: 90 / 100 / 112 / 125
+    std::wstring settings_ui_font_family; // interface font family; empty = built-in
     // 主题色 › 自定义: hue 0..360, saturation 0..100, lightness 0..100 (settings_expanded bit 5 opens it).
     int settings_accent_hsl[3] = {220, 60, 50};
     bool settings_open_folders = false;

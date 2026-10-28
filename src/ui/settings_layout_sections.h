@@ -168,6 +168,7 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
         l.language_card=row(seg_h); l.language_choice=choice(l.language_card,176);
         l.text_render_card=row(seg_h); segments(l.text_render_card,l.text_render_row,3,282);
         l.ui_font_size_card=row(seg_h); segments(l.ui_font_size_card,l.ui_font_size_row,4,340);
+        l.ui_font_family_card=row(narrow ? 98.0f : 64.0f); l.ui_font_family_choice=choice(l.ui_font_family_card,244);
     } else if (page == 9) {
         section(I::SettingsSecOpenSelect);
         l.click_open_card=row(seg_h); segments(l.click_open_card,l.click_open_row,2,282);

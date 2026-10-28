@@ -473,9 +473,12 @@ LRESULT CALLBACK FluentMenu::MenuWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         }
         return 0;
     case WM_LBUTTONDOWN:
+        self->pressed_hwnd_ = hwnd;
         if (!is_sub) SetFocus(self->external_edit_ ? self->external_edit_ : self->edit_ ? self->edit_ : hwnd);
         return 0; // press visual is skipped; invoke happens on release
     case WM_LBUTTONUP: {
+        if (self->pressed_hwnd_ != hwnd) return 0; // the click that opened the list
+        self->pressed_hwnd_ = nullptr;
         POINT pt{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         if (is_sub) self->OnSubMouse(pt, true);
         else self->OnMouse(pt, true);
@@ -2237,6 +2240,7 @@ int FluentMenu::TrackPopup(POINT screen_pt, std::vector<FluentMenuItem> items,
     hover_swatch_ = -1;
     result_ = 0;
     animating_out_ = false;
+    pressed_hwnd_ = nullptr;  // a fresh list, no press belongs to it yet
     LayoutWindow(screen_pt);
     motion_ = ::pulse::ui::motion::SystemAnimationsEnabled();
     plate_.SetAnimationsEnabled(motion_);

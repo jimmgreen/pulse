@@ -4426,3 +4426,7 @@ OpAuthTitleMove	IDS_OP_AUTH_TITLE_MOVE	5626	移动到这里需要管理员权限
 OpAuthTitleDelete	IDS_OP_AUTH_TITLE_DELETE	5627	删除这些项目需要管理员权限	Deleting these items needs administrator permission	刪除這些項目需要系統管理員權限
 OpAuthNotGrantedShort	IDS_OP_AUTH_NOT_GRANTED_SHORT	5628	没有获得管理员权限。	Administrator permission wasn't granted.	沒有取得系統管理員權限。
 OpAuthorizationOnce	IDS_OP_AUTHORIZATION_ONCE	5629	确认一次即可，本次操作的其余项目不会再问。	You only need to approve once; the rest of this operation won't ask again.	確認一次即可，本次操作的其餘項目不會再詢問。
+# 设置 › 通用 › interface font family (Settings > General).
+SettingsUiFontFamily	IDS_SETTINGS_UI_FONT_FAMILY	5630	界面字体	Interface font	介面字型
+SettingsUiFontFamilyDesc	IDS_SETTINGS_UI_FONT_FAMILY_DESC	5631	界面文字使用的字形；图标和代码等宽字体不变，缺字自动回退	Typeface for interface text; icons and code keep theirs, missing glyphs fall back.	介面文字使用的字型；圖示與程式碼等寬字型不變，缺字自動回退
+UiFontSystemDefault	IDS_UI_FONT_SYSTEM_DEFAULT	5632	系统默认	System default	系統預設

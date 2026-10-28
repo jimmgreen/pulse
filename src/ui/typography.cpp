@@ -26,12 +26,95 @@ bool TraditionalChinese() noexcept {
 std::atomic_uint64_t g_generation{1};
 std::atomic_int g_text_render_mode{0};
 std::atomic_int g_ui_font_scale{100};
+std::mutex g_family_mutex;
+std::wstring g_ui_font_family;
+// The picker asks for the family list every time it opens; walking every
+// installed family costs milliseconds, so keep the last build until the locale
+// or the font collection changes.
+std::mutex g_families_mutex;
+std::wstring g_families_locale;
+std::vector<FontFamilyChoice> g_families;
 
 template <typename T>
 void Release(T*& value) noexcept {
     if (value) value->Release();
     value = nullptr;
 }
+
+std::wstring ReadFamilyName(IDWriteLocalizedStrings* names, UINT32 index) {
+    UINT32 length = 0;
+    if (!names || FAILED(names->GetStringLength(index, &length))) return {};
+    std::wstring text(length + 1, L'\0');
+    if (FAILED(names->GetString(index, text.data(), length + 1))) return {};
+    text.resize(length);
+    return text;
+}
+
+// The family name in `locale`, falling back to the English name and then to
+// whatever the collection lists first.
+std::wstring LocalizedFamilyName(IDWriteFontFamily* family, const wchar_t* locale) {
+    IDWriteLocalizedStrings* names = nullptr;
+    if (!family || FAILED(family->GetFamilyNames(&names)) || !names) return {};
+    UINT32 index = 0;
+    BOOL found = FALSE;
+    if (FAILED(names->FindLocaleName(locale, &index, &found)) || !found) {
+        if (FAILED(names->FindLocaleName(L"en-us", &index, &found)) || !found) index = 0;
+    }
+    std::wstring text = ReadFamilyName(names, index);
+    names->Release();
+    return text;
+}
+
+// A face that draws Latin letters belongs in the picker; icon and symbol faces
+// do not. Chinese coverage only decides the order: text in a Chinese file name
+// still renders through the fallback when the chosen family lacks it.
+bool CoversLatinText(IDWriteFontFamily* family) {
+    if (!family) return false;
+    IDWriteFont* font = nullptr;
+    if (FAILED(family->GetFont(0, &font)) || !font) return false;
+    BOOL latin = FALSE;
+    font->HasCharacter(L'A', &latin);
+    font->Release();
+    return latin;
+}
+
+bool CoversChineseText(IDWriteFontFamily* family) {
+    if (!family) return false;
+    IDWriteFont* font = nullptr;
+    if (FAILED(family->GetFont(0, &font)) || !font) return false;
+    BOOL cjk = FALSE;
+    font->HasCharacter(0x4E2D, &cjk);
+    font->Release();
+    return cjk;
+}
+
+// Glyph and symbol collections would turn the interface into boxes.
+bool SymbolFace(const std::wstring& name) {
+    static const wchar_t* const markers[] = {
+        L"Wingdings", L"Webdings", L"Marlett", L"Symbol", L"Emoji", L"Icons",
+        L"MDL2", L"Fluent Icons", L"Bookshelf Symbol",
+    };
+    for (const wchar_t* marker : markers) {
+        if (name.find(marker) != std::wstring::npos) return true;
+    }
+    return false;
+}
+
+// Order the picker by what a Chinese UI reaches for first, then by name.
+int FamilyRank(const std::wstring& name) {
+    static const wchar_t* const preferred[] = {
+        L"Microsoft YaHei UI", L"Microsoft YaHei", L"Microsoft JhengHei UI",
+        L"Microsoft JhengHei", L"Segoe UI Variable Text", L"Segoe UI",
+        L"DengXian", L"SimSun", L"NSimSun", L"SimHei", L"KaiTi", L"FangSong",
+        L"Noto Sans SC", L"Source Han Sans SC",
+    };
+    for (size_t i = 0; i < ARRAYSIZE(preferred); ++i) {
+        if (CompareStringOrdinal(name.c_str(), -1, preferred[i], -1, TRUE) == CSTR_EQUAL)
+            return static_cast<int>(i);
+    }
+    return static_cast<int>(ARRAYSIZE(preferred));
+}
+
 
 bool FamilyExists(IDWriteFactory2* factory, const wchar_t* family) {
     if (!factory || !family) return false;
@@ -46,7 +129,7 @@ bool FamilyExists(IDWriteFactory2* factory, const wchar_t* family) {
     return SUCCEEDED(result) && exists;
 }
 
-const wchar_t* ResolveFamily(IDWriteFactory2* factory, FontRole role) {
+std::wstring ResolveFamily(IDWriteFactory2* factory, FontRole role) {
     const bool traditional = TraditionalChinese();
     // Taiwan glyph forms; YaHei only if JhengHei is missing.
     const wchar_t* const text_tw[] = {
@@ -72,6 +155,13 @@ const wchar_t* ResolveFamily(IDWriteFactory2* factory, FontRole role) {
     case FontRole::Icon: candidates = icons; break;
     case FontRole::Monospace: candidates = traditional ? mono_tw : mono; break;
     default: candidates = traditional ? text_tw : text_en; break;
+    }
+    // The user's interface font replaces the built-in cascade for text and
+    // display only; icons need their glyph face and code needs its monospace
+    // one. A family that is no longer installed falls through to the cascade.
+    if (role == FontRole::Text || role == FontRole::Display) {
+        const std::wstring chosen = UiFontFamily();
+        if (!chosen.empty() && FamilyExists(factory, chosen.c_str())) return chosen;
     }
     for (size_t i = 0; candidates[i]; ++i) {
         if (FamilyExists(factory, candidates[i])) return candidates[i];
@@ -144,7 +234,13 @@ bool HasIconFont(IDWriteFactory2* factory) {
     return available;
 }
 
-const wchar_t* PreferredTextFamily() noexcept {
+const wchar_t* PreferredTextFamily() {
+    // thread_local so the pointer stays valid for the caller: CreateEditFont
+    // reads it immediately, but the old per-language literals could be
+    // returned from any thread.
+    static thread_local std::wstring chosen;
+    chosen = UiFontFamily();
+    if (!chosen.empty()) return chosen.c_str();
     switch (pulse::l10n::effective_language()) {
     case pulse::l10n::Language::ZhCN: return L"Microsoft YaHei UI";
     case pulse::l10n::Language::ZhTW: return L"Microsoft JhengHei UI";
@@ -157,11 +253,11 @@ HRESULT CreateTextFormat(IDWriteFactory2* factory, const TextFormatSpec& spec,
     if (!format) return E_POINTER;
     *format = nullptr;
     if (!factory || spec.size <= 0.0f) return E_INVALIDARG;
-    const wchar_t* family = ResolveFamily(factory, spec.role);
+    const std::wstring family = ResolveFamily(factory, spec.role);
     const wchar_t* locale = spec.role == FontRole::Icon ? L"en-US" : LocaleName();
     const float size = spec.role == FontRole::Icon ? spec.size : spec.size * UiFontScale();
     const HRESULT result = factory->CreateTextFormat(
-        family, nullptr, spec.weight, spec.style, spec.stretch, size, locale, format);
+        family.c_str(), nullptr, spec.weight, spec.style, spec.stretch, size, locale, format);
     if (SUCCEEDED(result) && *format && spec.role != FontRole::Icon) {
         ApplyFallbackInternal(factory, *format);
     }
@@ -255,11 +351,116 @@ float UiFontScale() noexcept {
     return static_cast<float>(UiFontScalePercent()) / 100.0f;
 }
 
+void SetUiFontFamily(std::wstring family) {
+    {
+        std::lock_guard lock(g_family_mutex);
+        if (g_ui_font_family == family) return;
+        g_ui_font_family = std::move(family);
+    }
+    g_generation.fetch_add(1, std::memory_order_relaxed);
+}
+
+std::wstring UiFontFamily() {
+    std::lock_guard lock(g_family_mutex);
+    return g_ui_font_family;
+}
+
+std::vector<FontFamilyChoice> UiFontFamilies(IDWriteFactory2* factory) {
+    const std::wstring locale = LocaleName();
+    {
+        std::lock_guard lock(g_families_mutex);
+        if (!g_families.empty() && g_families_locale == locale) return g_families;
+    }
+    std::vector<FontFamilyChoice> choices;
+    // The built-in cascade leads, with an empty label the settings UI fills in
+    // with its own wording (this layer has no business owning UI strings).
+    choices.push_back(FontFamilyChoice{});
+    if (!factory) return choices;
+
+    IDWriteFontCollection* collection = nullptr;
+    if (FAILED(factory->GetSystemFontCollection(&collection, FALSE)) || !collection)
+        return choices;
+
+    struct Entry {
+        std::wstring value;
+        std::wstring label;
+        int rank = 0;
+        bool chinese = false;
+    };
+    std::vector<Entry> entries;
+    const UINT32 count = collection->GetFontFamilyCount();
+    entries.reserve(count);
+    for (UINT32 i = 0; i < count; ++i) {
+        IDWriteFontFamily* family = nullptr;
+        if (FAILED(collection->GetFontFamily(i, &family)) || !family) continue;
+        if (!CoversLatinText(family)) {
+            family->Release();
+            continue;
+        }
+        Entry entry;
+        entry.chinese = CoversChineseText(family);
+        entry.value = LocalizedFamilyName(family, L"en-us");
+        entry.label = LocalizedFamilyName(family, LocaleName());
+        family->Release();
+        if (entry.value.empty()) continue;
+        if (SymbolFace(entry.value)) continue;
+        if (entry.label.empty()) entry.label = entry.value;
+        entry.rank = FamilyRank(entry.value);
+        entries.push_back(std::move(entry));
+    }
+    collection->Release();
+
+    // Faces that draw Chinese first, so a Chinese interface does not have to
+    // scroll past Latin-only serifs; the preferred few lead, then by name.
+    std::stable_sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
+        if (a.chinese != b.chinese) return a.chinese;
+        if (a.rank != b.rank) return a.rank < b.rank;
+        return CompareStringOrdinal(a.value.c_str(), -1, b.value.c_str(), -1, TRUE) == CSTR_LESS_THAN;
+    });
+    choices.reserve(choices.size() + entries.size());
+    for (Entry& entry : entries) {
+        FontFamilyChoice choice;
+        choice.value = std::move(entry.value);
+        choice.label = std::move(entry.label);
+        choices.push_back(std::move(choice));
+    }
+    {
+        std::lock_guard lock(g_families_mutex);
+        g_families = choices;
+        g_families_locale = locale;
+    }
+    return choices;
+}
+
+std::wstring UiFontFamilyLabel(IDWriteFactory2* factory, const std::wstring& family) {
+    if (family.empty()) return {};
+    const auto find = [&family] {
+        std::lock_guard lock(g_families_mutex);
+        for (const FontFamilyChoice& choice : g_families) {
+            if (choice.value == family) return choice.label;
+        }
+        return std::wstring();
+    };
+    const std::wstring cached = find();
+    if (!cached.empty()) return cached;
+    // Cold cache (first settings frame of the session): build what the picker
+    // offers, then look the saved family up in it.
+    UiFontFamilies(factory);
+    return find();
+}
+
 void InvalidateCaches() {
     {
         std::lock_guard lock(g_fallback_mutex);
         Release(g_fallback);
         g_fallback_factory = nullptr;
+    }
+    {
+        // A family installed while the process runs shows up after the next
+        // typography reset.
+        std::lock_guard lock(g_families_mutex);
+        g_families.clear();
+        g_families_locale.clear();
     }
     g_generation.fetch_add(1, std::memory_order_relaxed);
 }

@@ -971,6 +971,14 @@ void SettingsController::UiFontSize(int index) {
         SaveAndApply(SettingsEffect::UiFontSize);
 }
 
+void SettingsController::UiFontFamily(std::wstring_view family) {
+    if (!prefs_) return;
+    std::wstring value(family);
+    if (prefs_->ui_font_family == value) return;
+    prefs_->ui_font_family = std::move(value);
+    SaveAndApply(SettingsEffect::UiFontFamily);
+}
+
 void SettingsController::TrayIconSize(int index) {
     static constexpr int values[] = {40, 48, 56};
     if (prefs_ && SelectValue(index, values, prefs_->tray_icon_size))

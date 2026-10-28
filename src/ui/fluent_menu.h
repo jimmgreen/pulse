@@ -361,6 +361,12 @@ private:
     bool anchor_to_rect_ = false;
     RECT dropdown_rect_{};
     bool dropdown_ = false;
+    // The window the current left press went down on. The popup only acts on a
+    // release it saw the press for: a dropdown opens from the button's
+    // mouse-down, so the release that ends that click arrives with the list
+    // already up, and when the list is tall enough to cover the pointer it
+    // lands here — it ends the opening click, it does not pick a row.
+    HWND pressed_hwnd_ = nullptr;
     POINT popup_pt_{};
     bool top_center_ = false;
     bool topmost_ = false;

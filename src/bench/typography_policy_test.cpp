@@ -321,6 +321,77 @@ int wmain(int argc, wchar_t** argv) {
             std::wstring(family) == expected_family,
             "warm painter follows traditional Chinese locale and family");
         if (expected) expected->Release();
+        {
+            // Settings > General > Interface font: a chosen family replaces the
+            // language cascade for text and display only, a name that is not
+            // installed keeps the cascade, and the list offers real families.
+            const std::wstring original_family = typography::UiFontFamily();
+            Check(original_family.empty(), "no interface font family is chosen by default");
+            const auto families = typography::UiFontFamilies(compositor.DwriteFactory());
+            bool listed = families.size() > 1 && families[0].value.empty();
+            for (const auto& choice : families)
+                listed &= choice.value.empty() ? choice.label.empty() : !choice.label.empty();
+            Check(listed, "the font list leads with the built-in cascade and names the families it offers");
+            const auto family_of = [&](typography::FontRole role) {
+                IDWriteTextFormat* format = nullptr;
+                typography::CreateTextFormat(compositor.DwriteFactory(), {role, 14.0f}, &format);
+                std::wstring name;
+                if (format) {
+                    wchar_t buffer[256]{};
+                    format->GetFontFamilyName(buffer, ARRAYSIZE(buffer));
+                    name = buffer;
+                    format->Release();
+                }
+                return name;
+            };
+            const std::wstring builtin_text = family_of(typography::FontRole::Text);
+            const std::wstring builtin_mono = family_of(typography::FontRole::Monospace);
+            const std::wstring builtin_icon = family_of(typography::FontRole::Icon);
+            std::wstring wanted;
+            for (size_t i = 1; i < families.size(); ++i) {
+                if (families[i].value != builtin_text) {
+                    wanted = families[i].value;
+                    break;
+                }
+            }
+            Check(!wanted.empty(), "the font list offers a family other than the built-in one");
+            if (!wanted.empty()) {
+                const unsigned long long generation = typography::Generation();
+                typography::SetUiFontFamily(wanted);
+                Check(typography::UiFontFamily() == wanted && typography::Generation() > generation,
+                    "choosing an interface font bumps the typography generation");
+                Check(family_of(typography::FontRole::Text) == wanted,
+                    "interface text uses the chosen family");
+                Check(family_of(typography::FontRole::Monospace) == builtin_mono &&
+                    family_of(typography::FontRole::Icon) == builtin_icon,
+                    "monospace and icon faces keep their own families");
+                Check(painter.BeginFrame(theme),
+                    "font family painter frame refreshes its own font cache");
+                wchar_t body_family[256]{};
+                fluent::PainterTestPeer::Body(painter)->GetFontFamilyName(body_family,
+                    ARRAYSIZE(body_family));
+                Check(std::wstring(body_family) == wanted,
+                    "the warm painter draws interface text in the chosen family");
+                Check(std::wstring(typography::PreferredTextFamily()) == wanted,
+                    "native edit controls follow the chosen interface family");
+                Check(!typography::UiFontFamilyLabel(compositor.DwriteFactory(), wanted).empty(),
+                    "the chosen family keeps a name for the settings row");
+                typography::SetUiFontFamily(L"Pulse Missing Interface Font");
+                Check(family_of(typography::FontRole::Text) == builtin_text,
+                    "an uninstalled interface family falls back to the language cascade");
+                Check(typography::UiFontFamilyLabel(compositor.DwriteFactory(),
+                        L"Pulse Missing Interface Font").empty(),
+                    "a family that is not installed has no name to show");
+                typography::SetUiFontFamily(original_family);
+                typography::InvalidateCaches();
+                Check(painter.BeginFrame(theme),
+                    "painter frame refreshes after restoring the built-in family");
+                fluent::PainterTestPeer::Body(painter)->GetFontFamilyName(body_family,
+                    ARRAYSIZE(body_family));
+                Check(std::wstring(body_family) == builtin_text,
+                    "restoring the built-in family returns the language family");
+            }
+        }
         for (int percent : {90, 100, 112, 125}) {
             typography::SetUiFontScale(percent);
             const float interface_scale = static_cast<float>(percent) / 100.0f;

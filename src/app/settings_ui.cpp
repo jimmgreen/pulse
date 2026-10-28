@@ -14,6 +14,7 @@
 #include "ai_pack_ui.h"
 #include "ai_settings_ui.h"
 #include "../ui/ui_renderer.h"
+#include "../ui/typography.h"
 #include <shellapi.h>
 #include <shlobj.h>
 #include <algorithm>
@@ -33,9 +34,13 @@ int Popup(AppState& s,std::vector<ui::FluentMenuItem> items) {
     s.menu->SetTheme(s.darkMode,s.accentColor);
     POINT pt{};GetCursorPos(&pt);return s.menu->TrackPopup(pt,std::move(items));
 }
-int Dropdown(AppState& s, int index, std::vector<ui::FluentMenuItem> items) {
+int Dropdown(AppState& s, int index, std::vector<ui::FluentMenuItem> items, int max_rows = 0) {
     if(!EnsureMenu(s)) return 0;
     s.menu->SetTheme(s.darkMode,s.accentColor);
+    // A long list (every installed family) sizes to the rows shown and scrolls,
+    // like the search history, instead of turning into a sheet that swallows
+    // the page it was opened from.
+    s.menu->SetMaxVisibleRows(max_rows);
     const auto r=s.renderer.SettingsDropdownBounds(BuildVm(s,false),index,
         static_cast<float>(s.compositor.Width()),static_cast<float>(s.compositor.Height()));
     POINT corners[]={{static_cast<LONG>(std::lround(r.left)),static_cast<LONG>(std::lround(r.top))},
@@ -57,7 +62,7 @@ constexpr SettingDestination destinations[]={
     // 0 外观
     {I::SettingsTheme,0,0},{I::SettingsThemeColor,0,0},{I::AccentCustomTitle,0,32},{I::SettingsWindowEffect,0,0},{I::SettingsFrameLook,0,0},{I::MenuAcrylic,0,0},
     {I::SettingsWallpaper,0,0},{I::SettingsWallpaperLook,0,0},{I::SettingsWallpaperBlur,0,0},
-    {I::SettingsLanguage,0,0},{I::SettingsTextRender,0,0},{I::SettingsUiFontSize,0,0},
+    {I::SettingsLanguage,0,0},{I::SettingsTextRender,0,0},{I::SettingsUiFontSize,0,0},{I::SettingsUiFontFamily,0,0},
     // 9 文件列表
     {I::SettingsClickOpen,9,0},{I::SettingsItemCheckboxes,9,0},{I::SettingsBlankClickBack,9,0},
     {I::SettingsShowHidden,9,0},{I::SettingsShowProtected,9,0},{I::SettingsFolderSort,9,0},
@@ -435,11 +440,20 @@ bool HandleSettingsControl(AppState& s,const H& hit) {
                 item.enabled=i==0 || compat::ModernWindows();items.push_back(std::move(item));
             }
             int command=Dropdown(s,hit.index,std::move(items));if(command>=1 && command<=ui::kWindowEffectCount) s.settings.WindowEffect(ui::WindowEffectId(static_cast<ui::WindowEffect>(command-1)));
-        } else {
+        } else if(hit.index==1) {
             const I labels[]={I::LanguageSystem,I::LanguageZhCN,I::LanguageZhTW,I::LanguageEnUS};const wchar_t* ids[]={L"system",L"zh-CN",L"zh-TW",L"en-US"};
             constexpr int count=static_cast<int>(std::size(ids));
             for(int i=0;i<count;++i) items.push_back(Item(i+1,labels[i],s.appPrefs.language==ids[i]));
             int command=Dropdown(s,hit.index,std::move(items));if(command>=1 && command<=count) s.settings.Language(ids[command-1]);
+        } else {
+            const auto families=ui::typography::UiFontFamilies(s.compositor.DwriteFactory());
+            const int count=static_cast<int>(families.size());
+            for(int i=0;i<count;++i) {
+                auto item=Item(i+1,I::UiFontSystemDefault,families[i].value==s.appPrefs.ui_font_family);
+                if(!families[i].value.empty()) item.text=families[i].label;
+                items.push_back(std::move(item));
+            }
+            int command=Dropdown(s,hit.index,std::move(items),12);if(command>=1 && command<=count) s.settings.UiFontFamily(families[command-1].value);
         }
         break;
     }

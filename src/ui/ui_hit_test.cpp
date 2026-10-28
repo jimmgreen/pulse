@@ -280,8 +280,12 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             for(int i=0;i<3;++i) if(ContainsPt(lay.theme_tile[i],x,y)) {
                 const int values[]={1,2,0};r.region=HitTestResult::SettingsTheme;r.index=values[i];return r;
             }
-            if(ContainsPt(lay.effect_choice,x,y) || ContainsPt(lay.language_choice,x,y)) {
-                r.region=HitTestResult::SettingsDropdown;r.index=ContainsPt(lay.effect_choice,x,y) ? 0 : 1;return r;
+            if(ContainsPt(lay.effect_choice,x,y) || ContainsPt(lay.language_choice,x,y) ||
+               ContainsPt(lay.ui_font_family_choice,x,y)) {
+                r.region=HitTestResult::SettingsDropdown;
+                r.index=ContainsPt(lay.effect_choice,x,y) ? 0
+                    : ContainsPt(lay.language_choice,x,y) ? 1 : 2;
+                return r;
             }
             if(ContainsPt(lay.performance_row,x,y)) {r.region=HitTestResult::SettingsToggle;r.index=4;return r;}
             if(ContainsPt(lay.menu_acrylic_row,x,y)) {r.region=HitTestResult::SettingsToggle;r.index=36;return r;}

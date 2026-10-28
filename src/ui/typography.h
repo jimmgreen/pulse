@@ -6,7 +6,9 @@
 #include <dwrite_3.h>
 
 #include <cstdint>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace pulse::ui { class Compositor; }
 
@@ -29,7 +31,9 @@ struct TextFormatSpec {
 
 const wchar_t* LocaleName() noexcept;
 bool HasIconFont(IDWriteFactory2* factory);
-const wchar_t* PreferredTextFamily() noexcept;
+// The family for native EDIT controls: the interface font family below, or the
+// language's built-in one. Returns storage owned by the caller's thread.
+const wchar_t* PreferredTextFamily();
 HRESULT CreateTextFormat(IDWriteFactory2* factory, const TextFormatSpec& spec,
                          IDWriteTextFormat** format);
 HRESULT CreateRenderingParams(IDWriteFactory2* factory, HMONITOR monitor,
@@ -50,6 +54,31 @@ inline bool UseLumaTextForUi() noexcept { return CurrentTextRenderMode() == Text
 void SetUiFontScale(int percent) noexcept;
 int UiFontScalePercent() noexcept;
 float UiFontScale() noexcept;
+
+// Process-wide interface font family (Settings > 界面字体), e.g.
+// "Microsoft YaHei UI". Empty keeps the built-in per-language cascade. The
+// choice covers Text and Display only: glyph icons must keep their icon font
+// and code must keep its monospace face. A family that is not installed is
+// ignored, so a saved preference can never leave the UI without a font.
+// Callers recreate cached formats after a change.
+void SetUiFontFamily(std::wstring family);
+std::wstring UiFontFamily();
+
+// One row of the font picker. `value` is what the preferences store (the
+// English family name, which FindFamilyName resolves in every locale and stays
+// valid when the UI language changes); `label` is the name to show.
+struct FontFamilyChoice {
+    std::wstring value;
+    std::wstring label;
+};
+// The first row is the built-in cascade (empty value, localized label). The
+// rest are installed families that can draw the interface: Latin letters plus
+// CJK, which keeps icon and symbol faces out of the list. Common Chinese UI
+// faces come first, then the remaining families by name.
+std::vector<FontFamilyChoice> UiFontFamilies(IDWriteFactory2* factory);
+// The label the picker shows for `family`, or empty when the family is no longer
+// installed (the interface then falls back to the built-in cascade).
+std::wstring UiFontFamilyLabel(IDWriteFactory2* factory, const std::wstring& family);
 
 // Native EDIT controls hosted on Pulse surfaces (address bar and rename,
 // dialog fields, menu filters, Quick Look find) all use this font: the UI text

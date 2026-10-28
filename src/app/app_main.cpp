@@ -1395,6 +1395,11 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     s->appPrefs.show_hidden_files = true;
                     s->appPrefs.show_protected_os_files = true;
                 }
+                // GUI verification of the interface font (never persisted).
+                wchar_t test_family[128]{};
+                if (GetEnvironmentVariableW(L"PULSE_TEST_UI_FONT_FAMILY", test_family,
+                        ARRAYSIZE(test_family)) > 0)
+                    s->appPrefs.ui_font_family = test_family;
             }
             l10n::Initialize(cs->hInstance, s->appPrefs.language);
             if (s->shot.update_available) {
@@ -1406,6 +1411,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     L"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
             }
             ui::typography::SetUiFontScale(s->appPrefs.ui_font_scale);
+            ui::typography::SetUiFontFamily(s->appPrefs.ui_font_family);
             ui::typography::InvalidateCaches();
         }
         s->compositor.RecreateTextFormats(s->scale);

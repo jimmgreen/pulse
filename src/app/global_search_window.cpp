@@ -918,16 +918,21 @@ struct GlobalSearchWindow::Impl {
         const D2D1_RECT_F inner{rect.left + stroke / 2, rect.top + stroke / 2, rect.right - stroke / 2, rect.bottom - stroke / 2};
         target->DrawRoundedRectangle(D2D1::RoundedRect(inner, radius, radius), brush.Get(), stroke);
     }
-    void Label(const std::wstring& text, D2D1_RECT_F rect, float size, UINT32 color, bool bold = false, const wchar_t* face = L"Segoe UI", bool highlight = false, DWRITE_TEXT_ALIGNMENT alignment = DWRITE_TEXT_ALIGNMENT_LEADING) {
+    // An empty face means "whatever Settings > Interface font says", the same rule
+    // the main window follows; only glyph runs name a family of their own.
+    const wchar_t* UiFace(const wchar_t* face) const {
+        return face && *face ? face : ui::typography::PreferredTextFamily();
+    }
+    void Label(const std::wstring& text, D2D1_RECT_F rect, float size, UINT32 color, bool bold = false, const wchar_t* face = nullptr, bool highlight = false, DWRITE_TEXT_ALIGNMENT alignment = DWRITE_TEXT_ALIGNMENT_LEADING) {
         LabelC(text, rect, size, Color(color), bold, face, highlight, alignment);
     }
-    void LabelC(const std::wstring& text, D2D1_RECT_F rect, float size, D2D1_COLOR_F color, bool bold = false, const wchar_t* face = L"Segoe UI", bool highlight = false, DWRITE_TEXT_ALIGNMENT alignment = DWRITE_TEXT_ALIGNMENT_LEADING, bool wrap = false) {
+    void LabelC(const std::wstring& text, D2D1_RECT_F rect, float size, D2D1_COLOR_F color, bool bold = false, const wchar_t* face = nullptr, bool highlight = false, DWRITE_TEXT_ALIGNMENT alignment = DWRITE_TEXT_ALIGNMENT_LEADING, bool wrap = false) {
         if (text.empty() || rect.right <= rect.left) return;
         ComPtr<IDWriteTextFormat> format;
         // Glyph icons keep their slots; text follows Settings > Interface font size.
-        const bool icon_face = std::wstring_view(face).find(L"Icons") != std::wstring_view::npos;
+        const bool icon_face = face && std::wstring_view(face).find(L"Icons") != std::wstring_view::npos;
         const float text_size = icon_face ? size : size * ui::typography::UiFontScale();
-        if (FAILED(write_factory->CreateTextFormat(face, nullptr, bold ? DWRITE_FONT_WEIGHT_SEMI_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
+        if (FAILED(write_factory->CreateTextFormat(UiFace(face), nullptr, bold ? DWRITE_FONT_WEIGHT_SEMI_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, text_size, l10n::LocaleName(), &format))) return;
         format->SetWordWrapping(wrap ? DWRITE_WORD_WRAPPING_EMERGENCY_BREAK : DWRITE_WORD_WRAPPING_NO_WRAP);
         format->SetTextAlignment(alignment);
@@ -997,7 +1002,7 @@ struct GlobalSearchWindow::Impl {
         ComPtr<IDWriteTextFormat> format;
         ComPtr<IDWriteTextLayout> layout;
         DWRITE_TEXT_METRICS metrics{};
-        if (SUCCEEDED(write_factory->CreateTextFormat(L"Segoe UI", nullptr, bold ? DWRITE_FONT_WEIGHT_SEMI_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
+        if (SUCCEEDED(write_factory->CreateTextFormat(ui::typography::PreferredTextFamily(), nullptr, bold ? DWRITE_FONT_WEIGHT_SEMI_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
             DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, size * ui::typography::UiFontScale(),
             l10n::LocaleName(), &format)) &&
             SUCCEEDED(write_factory->CreateTextLayout(text.data(), static_cast<UINT32>(text.size()), format.Get(), 4000, 40, &layout)))
@@ -1022,7 +1027,7 @@ struct GlobalSearchWindow::Impl {
         const D2D1_RECT_F rect{right - w, mid - 10, right, mid + 10};
         FillC(rect, fill, 4);
         const bool symbols = std::any_of(text.begin(), text.end(), [](wchar_t c) { return c >= 0x2190 && c <= 0x21ff; });
-        LabelC(text, rect, symbols ? 11.5f : 11, color, false, symbols ? L"Segoe UI Symbol" : L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_CENTER);
+        LabelC(text, rect, symbols ? 11.5f : 11, color, false, symbols ? L"Segoe UI Symbol" : nullptr, false, DWRITE_TEXT_ALIGNMENT_CENTER);
         return rect.left;
     }
     // Draws "label [key]" pairs right-to-left; returns the left edge.
@@ -1189,13 +1194,13 @@ struct GlobalSearchWindow::Impl {
         const auto plate = mode_motion.Update(1, content_mode ? 1 : 0, content_mode ? content_rect : name_rect, frame, ui::motion::NowMs(), ui::motion::spring::Snappy);
         FillC(plate, dark ? D2D1::ColorF(0x464851) : D2D1::ColorF(0xffffff), 5);
         if (!dark) StrokeC(plate, p.line, 5);
-        LabelC(Text(StringId::SearchModeName), name_rect, 12.5f, content_mode ? p.muted : p.text, false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_CENTER);
-        LabelC(Text(StringId::SearchModeContent), content_rect, 12.5f, content_mode ? p.text : p.muted, false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_CENTER);
+        LabelC(Text(StringId::SearchModeName), name_rect, 12.5f, content_mode ? p.muted : p.text, false, nullptr, false, DWRITE_TEXT_ALIGNMENT_CENTER);
+        LabelC(Text(StringId::SearchModeContent), content_rect, 12.5f, content_mode ? p.text : p.muted, false, nullptr, false, DWRITE_TEXT_ALIGNMENT_CENTER);
         // Esc
         const D2D1_RECT_F esc{width - 56, mid - 11, width - 20, mid + 11};
         AddHot(esc, HotEsc);
         FillC(esc, Hovered(HotEsc) ? p.hover : p.key, 5);
-        LabelC(L"Esc", esc, 11, p.muted, false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_CENTER);
+        LabelC(L"Esc", esc, 11, p.muted, false, nullptr, false, DWRITE_TEXT_ALIGNMENT_CENTER);
         if (busy) {
             // Thin sweep under the header while providers work.
             const float t = static_cast<float>(ui::motion::NowMs() % 1100) / 1100.0f;
@@ -1313,7 +1318,7 @@ struct GlobalSearchWindow::Impl {
         const float text_right = right - 12 - std::max(hints_w, meta_w);
         const float name_top = content_row ? y + 8 : y + 7;
         LabelC(row.alias.empty() ? row.name : row.alias + L" \x00B7 " + row.name, {text_left, name_top, text_right, name_top + 20}, 14,
-               p.text, false, L"Segoe UI", !showing_recent);
+               p.text, false, nullptr, !showing_recent);
         const float path_top = name_top + 20;
         std::wstring parent = row.app ? Text(StringId::TypeApplication) : path::StripExtendedPathPrefix(ParentPath(row.path));
         float path_left = text_left;
@@ -1323,13 +1328,13 @@ struct GlobalSearchWindow::Impl {
         }
         LabelC(MiddleEllipsis(parent, text_right - path_left, 12), {path_left, path_top, text_right, path_top + 17}, 12, p.faint);
         if (content_row && !row.snippet.empty())
-            LabelC(row.snippet, {text_left, path_top + 19, right - 16, path_top + 41}, 12.5f, p.muted, false, L"Segoe UI", true);
+            LabelC(row.snippet, {text_left, path_top + 19, right - 16, path_top + 41}, 12.5f, p.muted, false, nullptr, true);
         if (!sel && !row.app) {
             const auto time = FormatTime(row.mtime);
             const auto size = row.directory ? Text(StringId::KindFolder) : row.size || row.mtime ? FormatSize(row.size) : std::wstring{};
             const float mt = content_row ? y + 9 : y + 8;
-            LabelC(time, {right - 12 - meta_w, mt, right - 12, mt + 17}, 11.5f, p.faint, false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_TRAILING);
-            LabelC(size, {right - 12 - meta_w, mt + 17, right - 12, mt + 34}, 11.5f, p.faint, false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_TRAILING);
+            LabelC(time, {right - 12 - meta_w, mt, right - 12, mt + 17}, 11.5f, p.faint, false, nullptr, false, DWRITE_TEXT_ALIGNMENT_TRAILING);
+            LabelC(size, {right - 12 - meta_w, mt + 17, right - 12, mt + 34}, 11.5f, p.faint, false, nullptr, false, DWRITE_TEXT_ALIGNMENT_TRAILING);
         } else if (sel) {
             const float mid = content_row ? y + 20 : y + h / 2;
             float r = right - 12;
@@ -1343,11 +1348,11 @@ struct GlobalSearchWindow::Impl {
         const float cx = (left + right) / 2;
         float y = (top + bottom) / 2 - 40;
         if (busy) {
-            LabelC(Text(StringId::GlobalSearchLoading), {left, y, right, y + 40}, 14, p.muted, false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_CENTER);
+            LabelC(Text(StringId::GlobalSearchLoading), {left, y, right, y + 40}, 14, p.muted, false, nullptr, false, DWRITE_TEXT_ALIGNMENT_CENTER);
             return;
         }
         if (!error.empty()) {
-            LabelC(error, {left + 16, y, right - 16, y + 40}, 14, p.muted, false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_CENTER);
+            LabelC(error, {left + 16, y, right - 16, y + 40}, 14, p.muted, false, nullptr, false, DWRITE_TEXT_ALIGNMENT_CENTER);
             return;
         }
         if (query.empty()) {
@@ -1357,19 +1362,19 @@ struct GlobalSearchWindow::Impl {
                     D2D1::SizeU(static_cast<UINT32>(Px(200)), static_cast<UINT32>(Px(200 * 360.0f / 512))), D2D1::SizeF(512, 360), &empty_art);
             }
             if (empty_art) target->DrawBitmap(empty_art.Get(), {cx - 100, y - 110, cx + 100, y + 30}, dark ? 0.9f : 0.6f);
-            LabelC(Text(StringId::GlobalSearchEmpty), {left, y + 36, right, y + 62}, 14, p.muted, false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_CENTER);
+            LabelC(Text(StringId::GlobalSearchEmpty), {left, y + 36, right, y + 62}, 14, p.muted, false, nullptr, false, DWRITE_TEXT_ALIGNMENT_CENTER);
             return;
         }
         const bool filtered = scope != 0 || (!content_mode && (kind_filter != 0 || date_filter != 0));
-        LabelC(Text(StringId::GlobalSearchNoResults), {left, y, right, y + 26}, 15, p.text, false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_CENTER);
-        if (filtered) LabelC(Text(StringId::GlobalSearchNoFilteredResults), {left, y + 26, right, y + 48}, 12.5f, p.muted, false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_CENTER);
+        LabelC(Text(StringId::GlobalSearchNoResults), {left, y, right, y + 26}, 15, p.text, false, nullptr, false, DWRITE_TEXT_ALIGNMENT_CENTER);
+        if (filtered) LabelC(Text(StringId::GlobalSearchNoFilteredResults), {left, y + 26, right, y + 48}, 12.5f, p.muted, false, nullptr, false, DWRITE_TEXT_ALIGNMENT_CENTER);
         const auto& action = Text(filtered ? StringId::EmptyActClearFilters : content_mode ? StringId::SearchModeName : StringId::EmptyActContent);
         const float bw = TextWidth(action, 12.5f) + 28;
         const D2D1_RECT_F button{cx - bw / 2, y + 60, cx + bw / 2, y + 90};
         const Hot kind = filtered ? HotClearFilters : HotSearchContent;
         AddHot(button, kind);
         FillC(button, Hovered(kind) ? p.hover : p.chip, 7);
-        LabelC(action, button, 12.5f, p.accent_text, false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_CENTER);
+        LabelC(action, button, 12.5f, p.accent_text, false, nullptr, false, DWRITE_TEXT_ALIGNMENT_CENTER);
     }
     void DrawList(const Palette& p, uint64_t now) {
         const float left = ListLeft(), right = ListRight(), top = ListTop(), bottom = ListBottom();
@@ -1473,10 +1478,10 @@ struct GlobalSearchWindow::Impl {
             icons.Draw(compositor.Dc(), {cx - 24, cy - 24, cx + 24, cy + 24}, row.path, row.name, row.directory, row.directory ? FILE_ATTRIBUTE_DIRECTORY : 0);
         }
         float y = thumb_box.bottom + 14;
-        LabelC(row.name, {l, y, r, y + 44}, 15, p.text, true, L"Segoe UI", !showing_recent, DWRITE_TEXT_ALIGNMENT_LEADING, true);
+        LabelC(row.name, {l, y, r, y + 44}, 15, p.text, true, nullptr, !showing_recent, DWRITE_TEXT_ALIGNMENT_LEADING, true);
         y += TextWidth(row.name, 15, true) > r - l ? 46 : 24;
         if (!row.app) {
-            LabelC(path::StripExtendedPathPrefix(row.path), {l, y, r, y + 36}, 12, p.faint, false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_LEADING, true);
+            LabelC(path::StripExtendedPathPrefix(row.path), {l, y, r, y + 36}, 12, p.faint, false, nullptr, false, DWRITE_TEXT_ALIGNMENT_LEADING, true);
             y += 44;
         } else {
             y += 8;
@@ -1498,13 +1503,13 @@ struct GlobalSearchWindow::Impl {
         const D2D1_RECT_F open = row.app ? D2D1_RECT_F{l, b - 32, r, b} : D2D1_RECT_F{l, b - 70, r, b - 38};
         AddHot(open, HotPreviewOpen);
         FillC(open, Hovered(HotPreviewOpen) ? Theme().accent_hover : p.accent, 7);
-        LabelC(Text(StringId::Open), open, 13, D2D1::ColorF(1, 1, 1, 1), false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_CENTER);
+        LabelC(Text(StringId::Open), open, 13, D2D1::ColorF(1, 1, 1, 1), false, nullptr, false, DWRITE_TEXT_ALIGNMENT_CENTER);
         if (row.app) return;
         AddHot(location, HotPreviewLocation); AddHot(copy, HotPreviewCopy);
         for (auto [rect, label, kind] : {std::tuple{location, StringId::HintActOpenPath, HotPreviewLocation}, std::tuple{copy, StringId::CopyPath, HotPreviewCopy}}) {
             FillC(rect, Hovered(kind) ? p.hover : p.chip, 7);
             StrokeC(rect, p.line, 7);
-            LabelC(Text(label), rect, 12.5f, p.text, false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_CENTER);
+            LabelC(Text(label), rect, 12.5f, p.text, false, nullptr, false, DWRITE_TEXT_ALIGNMENT_CENTER);
         }
     }
     void DrawFooter(const Palette& p) {

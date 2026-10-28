@@ -196,7 +196,9 @@ int main(int argc, char** argv) {
                                   StringId::ListThumbnailBadges, StringId::ListThumbnailBadgesDesc,
                                   StringId::ContextOrderHintRow, StringId::SystemGroupNodeModules,
                                   StringId::HelpViewMode, StringId::HelpContextMenu,
-                                  StringId::NetworkDiscoveryOffTitle, StringId::NetworkDiscoveryOffDesc})
+                                  StringId::NetworkDiscoveryOffTitle, StringId::NetworkDiscoveryOffDesc,
+                                  StringId::SettingsUiFontFamily, StringId::SettingsUiFontFamilyDesc,
+                                  StringId::UiFontSystemDefault})
                 newest &= !Get(id).empty();
         }
         SetLanguage(L"zh-TW");

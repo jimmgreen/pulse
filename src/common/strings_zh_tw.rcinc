@@ -4399,4 +4399,7 @@ BEGIN
     IDS_OP_AUTH_TITLE_DELETE "刪除這些項目需要系統管理員權限"
     IDS_OP_AUTH_NOT_GRANTED_SHORT "沒有取得系統管理員權限。"
     IDS_OP_AUTHORIZATION_ONCE "確認一次即可，本次操作的其餘項目不會再詢問。"
+    IDS_SETTINGS_UI_FONT_FAMILY "介面字型"
+    IDS_SETTINGS_UI_FONT_FAMILY_DESC "介面文字使用的字型；圖示與程式碼等寬字型不變，缺字自動回退"
+    IDS_UI_FONT_SYSTEM_DEFAULT "系統預設"
 END

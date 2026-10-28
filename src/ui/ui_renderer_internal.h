@@ -2601,6 +2601,8 @@ struct SettingsLayout {
     D2D1_RECT_F text_render_row[3]{};
     D2D1_RECT_F ui_font_size_card{};
     D2D1_RECT_F ui_font_size_row[4]{};
+    D2D1_RECT_F ui_font_family_card{};
+    D2D1_RECT_F ui_font_family_choice{};
     D2D1_RECT_F tray_icon_card{};
     D2D1_RECT_F tray_icon_row[3]{};
     D2D1_RECT_F language_card{};

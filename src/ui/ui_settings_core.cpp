@@ -286,8 +286,8 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
         
         const I effects[]={I::EffectNone,I::EffectAcrylic,I::EffectMica,I::EffectMicaAlt};
         const I languages[]={I::LanguageSystem,I::LanguageZhCN,I::LanguageZhTW,I::LanguageEnUS};
-        const auto dropdown=[&](D2D1_RECT_F r,D2D1_RECT_F c,I title,I desc,const std::wstring& value,int id) {
-            label(r,l10n::Get(title),l10n::Get(desc),id==0 ? L"\xE81E" : L"\xE775",c.left<r.left+100*scale_ ? r.right-16*scale_ : c.left-12*scale_);
+        const auto dropdown=[&](D2D1_RECT_F r,D2D1_RECT_F c,I title,I desc,const std::wstring& value,int id,const wchar_t* icon) {
+            label(r,l10n::Get(title),l10n::Get(desc),icon,c.left<r.left+100*scale_ ? r.right-16*scale_ : c.left-12*scale_);
             fluent::ButtonSpec control{};
             control.bounds=c; control.text=value; control.drop_down=true;
             control.state.hovered=IsHovered(vm,H::SettingsDropdown,id);
@@ -349,11 +349,18 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
             dim_end(frame_dim);
         }
         toggle(lay.menu_acrylic_row,I::MenuAcrylic,I::MenuAcrylicDesc,L"\xE700",vm.settings_menu_acrylic,36);
-        dropdown(lay.language_card,lay.language_choice,I::SettingsLanguage,I::SettingsLanguageDesc,l10n::Get(languages[vm.settings_language]),1);
+        dropdown(lay.language_card,lay.language_choice,I::SettingsLanguage,I::SettingsLanguageDesc,l10n::Get(languages[vm.settings_language]),1,L"\xE775");
         const I text_render[]={I::TextRenderAuto,I::TextRenderSharp,I::TextRenderSmooth};const int text_render_values[]={0,1,2};
         segmented(lay.text_render_card,lay.text_render_row,text_render,text_render_values,vm.settings_text_render,H::SettingsTextRender,I::SettingsTextRender,I::SettingsTextRenderDesc,3,L"\xE8D2");
         const I ui_font_size[]={I::UiFontSmall,I::UiFontDefault,I::UiFontLarge,I::UiFontLarger};const int ui_font_size_values[]={90,100,112,125};
         segmented(lay.ui_font_size_card,lay.ui_font_size_row,ui_font_size,ui_font_size_values,vm.settings_ui_font_scale,H::SettingsUiFontSize,I::SettingsUiFontSize,I::SettingsUiFontSizeDesc,4,L"\xE8E9");
+        divider(lay.ui_font_size_card);
+        {
+            const std::wstring family=vm.settings_ui_font_family.empty()
+                ? l10n::Get(I::UiFontSystemDefault)
+                : typography::UiFontFamilyLabel(compositor_->DwriteFactory(),vm.settings_ui_font_family);
+            dropdown(lay.ui_font_family_card,lay.ui_font_family_choice,I::SettingsUiFontFamily,I::SettingsUiFontFamilyDesc,family,2,L"\xE8D2");
+        }
         if(lay.wallpaper_card.bottom>lay.wallpaper_card.top) {
         const auto& preview = lay.wallpaper_preview;
         MakeBrush(dc, theme.fill_hover, brFillHover_);

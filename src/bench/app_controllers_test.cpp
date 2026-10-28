@@ -2086,6 +2086,21 @@ int wmain(int argc, wchar_t** argv) {
     passed &= Report("settings UI controller routes preference commands",
         prefs.window_effect == L"mica-alt" && prefs.row_height == 28 &&
         prefs.accent_rgb == L"2468AC" && applied_effects == 10);
+    settings_ui.UiFontFamily(L"Microsoft YaHei UI");
+    passed &= Report("settings interface font stores the family and requests a typography refresh",
+        prefs.ui_font_family == L"Microsoft YaHei UI" &&
+        HasEffect(last_effect, SettingsEffect::UiFontFamily));
+    const int family_effects = applied_effects;
+    settings_ui.UiFontFamily(L"Microsoft YaHei UI");
+    passed &= Report("settings interface font ignores the family already in use",
+        applied_effects == family_effects);
+    pulse::app::AppPrefs family_prefs;
+    passed &= Report("interface font defaults to the built-in cascade and survives a reload",
+        family_prefs.ui_font_family.empty() && family_prefs.FromJson(prefs.ToJson()) &&
+        family_prefs.ui_font_family == L"Microsoft YaHei UI");
+    settings_ui.UiFontFamily(L"");
+    passed &= Report("the system default clears the stored interface font",
+        prefs.ui_font_family.empty() && HasEffect(last_effect, SettingsEffect::UiFontFamily));
     settings_ui.NotifyIcon(2);
     passed &= Report("settings tray icon choice requests tray synchronization",
         prefs.notify_icon_mode == 2 && HasEffect(last_effect, SettingsEffect::TrayVisibility));

@@ -5749,9 +5749,13 @@ void ApplySettingsEffects(AppState& s, app::SettingsEffect effects) {
     }
     if (app::HasEffect(effects, app::SettingsEffect::MenuMaterial))
         ui::FluentMenu::SetAcrylicEnabled(s.appPrefs.menu_acrylic && !s.safeMode);
-    if (app::HasEffect(effects, app::SettingsEffect::UiFontSize)) {
-        ui::typography::SetUiFontScale(s.appPrefs.ui_font_scale);
-        // Formats and cached widths carry the previous size.
+    if (app::HasEffect(effects, app::SettingsEffect::UiFontSize) ||
+        app::HasEffect(effects, app::SettingsEffect::UiFontFamily)) {
+        if (app::HasEffect(effects, app::SettingsEffect::UiFontSize))
+            ui::typography::SetUiFontScale(s.appPrefs.ui_font_scale);
+        if (app::HasEffect(effects, app::SettingsEffect::UiFontFamily))
+            ui::typography::SetUiFontFamily(s.appPrefs.ui_font_family);
+        // Formats and cached widths carry the previous size and family.
         ui::typography::InvalidateCaches();
         s.compositor.RecreateTextFormats(s.scale);
         s.renderer.InvalidateTypography();
