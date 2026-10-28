@@ -1,9 +1,13 @@
-// ai_assistant_settings.h - Settings > AI 助手 (kSettingsPageAssistant): what
-// the page shows about Pulse's own assistant (from ai.json and whether keys
-// are stored, never the keys) and its buttons, which open the assistant
-// panel's connection and voice cards where the real settings live.
+// ai_assistant_settings.h - Settings > AI 助手 (kSettingsPageAssistant): where
+// Pulse 助手's model service is chosen and set up. Tiles to pick a service,
+// its key and address with 连接 (which reads its models), then the default
+// model, 思考, key, address and the other services whose keys are kept. The
+// page hosts its own EDITs (key, address, typed model name); keys go straight
+// from the field to Windows encryption (ai_model_key.h) and are never shown.
 #pragma once
 #include "../common/windows_compat.h"
+
+#include <cstdint>
 
 namespace pulse {
 struct AppState;
@@ -14,7 +18,13 @@ void FillAssistantSettingsVm(AppState& s, ui::WindowViewModel& vm);
 // A click on HitTestResult::SettingsAssistant (AssistantHit).
 void AssistantSettingsClick(AppState& s, int target);
 // A connection check of the assistant's model service finished somewhere
-// (this page or the panel's 管理连接 card): 上次连接, for this run only.
-void NoteAssistantConnection(bool ok);
+// (this page or the panel): 上次连接, for this run only.
+void NoteAssistantConnection(bool ok, uint32_t ms = 0);
+// After every frame: the page's EDITs follow the drawn fields (or hide).
+void AssistantSettingsLayout(AppState& s);
+// WM_CTLCOLOREDIT for the page's EDITs; nullptr for any other.
+HBRUSH AssistantSettingsCtlColor(AppState& s, HDC hdc, HWND edit);
+void AssistantSettingsDpiChanged(AppState& s);
+void AssistantSettingsDestroy(AppState& s);
 
 } // namespace pulse

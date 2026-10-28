@@ -1,9 +1,48 @@
 #include "../common/windows_compat.h"
 #include "ui_renderer.h"
 #include "ui_renderer_internal.h"
+#include "../app/resource.h"
 #include "../common/localization.h"
 
 namespace pulse::ui {
+
+namespace {
+
+// The vendor marks (assets/providers, lobe-icons MIT / simple-icons CC0).
+int ProviderLogoResource(std::string_view id) {
+    struct Entry { const char* id; int resource; };
+    static constexpr Entry kLogos[] = {
+        {"deepseek", IDR_PROVIDER_DEEPSEEK_SVG}, {"qwen", IDR_PROVIDER_QWEN_SVG},
+        {"kimi", IDR_PROVIDER_KIMI_SVG},         {"zhipu", IDR_PROVIDER_ZHIPU_SVG},
+        {"doubao", IDR_PROVIDER_DOUBAO_SVG},     {"silicon", IDR_PROVIDER_SILICON_SVG},
+        {"openai", IDR_PROVIDER_OPENAI_SVG},     {"openrouter", IDR_PROVIDER_OPENROUTER_SVG},
+        {"ollama", IDR_PROVIDER_OLLAMA_SVG},     {"gemini", IDR_PROVIDER_GEMINI_SVG},
+        {"claude", IDR_PROVIDER_CLAUDE_SVG},
+    };
+    for (const Entry& e : kLogos)
+        if (id == e.id) return e.resource;
+    return 0;
+}
+
+} // namespace
+
+// A service's mark; a letter in a rounded square when there is none (自定义)
+// or Direct2D cannot draw it (Windows 8.1).
+void MainRenderer::DrawProviderMark(std::string_view id, std::wstring_view name, const D2D1_RECT_F& r,
+                                    const Theme& theme) {
+    const bool dark = theme.bg.r + theme.bg.g + theme.bg.b < 1.5f;
+    if (const int resource = ProviderLogoResource(id); resource && DrawProviderLogo(resource, dark, r)) return;
+    const float side = (std::min)(r.right - r.left, r.bottom - r.top);
+    const D2D1_RECT_F box = D2D1::RectF((r.left + r.right - side) * 0.5f, (r.top + r.bottom - side) * 0.5f,
+                                        (r.left + r.right + side) * 0.5f, (r.top + r.bottom + side) * 0.5f);
+    painter_.FillRoundedRect(box, side * 0.28f, WithAlpha(theme.accent, dark ? 0.30f : 0.16f));
+    std::wstring letter = id == "custom" || name.empty() ? std::wstring(L"\xE71B") : std::wstring(name.substr(0, 1));
+    if (id == "custom") {
+        DrawIconText(box.left, box.top, side, side, letter.c_str(), L"", theme.text, 0.62f);
+        return;
+    }
+    painter_.DrawText(letter, box, compositor_->TextFormat(), theme.text, fluent::HorizontalAlignment::Center);
+}
 
 // Settings > AI 助手 (kSettingsPageAssistant). Geometry: LayoutSettingsAssistant;
 // texts: asst_text (settings_assistant_layout.h); clicks: SettingsAssistant.
@@ -18,6 +57,7 @@ void MainRenderer::DrawSettingsAssistant(const WindowViewModel& vm, const D2D1_R
     const bool dark = theme.bg.r + theme.bg.g + theme.bg.b < 1.5f;
     const D2D1_COLOR_F success = dark ? D2D1::ColorF(0x45D7A4) : D2D1::ColorF(0x107C5A);
     const D2D1_COLOR_F danger = painter_.StatusToneColor(fluent::InfoBarKind::Error);
+    auto hovered = [&](int target) { return IsHovered(vm, H::SettingsAssistant, target); };
     auto text = [&](std::wstring_view value, D2D1_RECT_F r, bool is_small = false) {
         painter_.DrawText(value, r, is_small ? compositor_->SmallFormat() : compositor_->TextFormat(),
                           is_small ? theme.text_secondary : theme.text);
@@ -29,94 +69,252 @@ void MainRenderer::DrawSettingsAssistant(const WindowViewModel& vm, const D2D1_R
         dc->FillRoundedRectangle(D2D1::RoundedRect(r, 8*s, 8*s), brFillInput_.get());
         dc->DrawRoundedRectangle(D2D1::RoundedRect(r, 8*s, 8*s), brStrokeCard_.get(), 1);
     };
+    auto divider_below = [&](D2D1_RECT_F r) {
+        if (r.bottom <= r.top) return;
+        MakeBrush(dc, theme.stroke_divider, brStrokeDivider_);
+        FillRect(dc, brStrokeDivider_.get(), r.left + 16*s, r.bottom, r.right - r.left - 32*s, 1);
+    };
     auto button = [&](D2D1_RECT_F r, std::wstring_view label, int target,
                       fluent::ButtonKind kind = fluent::ButtonKind::Standard, bool enabled = true) {
         if (r.right <= r.left) return;
         fluent::ControlState state{};
         state.enabled = enabled;
-        state.hovered = enabled && IsHovered(vm, H::SettingsAssistant, target);
+        state.hovered = enabled && hovered(target);
         painter_.DrawButton({r, label, {}, kind, state});
     };
     auto badge = [&](D2D1_RECT_F r, std::wstring_view label, fluent::BadgeKind kind) {
+        if (r.right <= r.left) return;
         fluent::BadgeSpec spec;
         spec.bounds = r;
         spec.text = label;
         spec.kind = kind;
         painter_.DrawBadge(spec);
     };
-    // Icon, title and caption of a card, left of `controls_left`.
+    // A row's icon, title and caption, left of `controls_left`.
     auto head = [&](D2D1_RECT_F c, const wchar_t* icon, std::wstring_view title, std::wstring_view caption,
-                    float controls_left) {
-        DrawIconText(c.left + 16*s, c.top + 14*s, 24*s, 24*s, icon, L"", theme.text_secondary, 0.85f);
+                    float controls_left, const D2D1_COLOR_F* caption_color = nullptr) {
+        if (c.bottom <= c.top) return;
+        if (icon) DrawIconText(c.left + 16*s, c.top + 14*s, 24*s, 24*s, icon, L"", theme.text_secondary, 0.85f);
         text(title, D2D1::RectF(c.left + 54*s, c.top + 12*s, controls_left - 14*s, c.top + 36*s));
         painter_.DrawWrappedCaption(caption, D2D1::Point2F(c.left + 54*s, c.top + 38*s),
-                                    controls_left - 14*s - c.left - 54*s, theme.text_secondary);
+                                    controls_left - 14*s - c.left - 54*s,
+                                    caption_color ? *caption_color : theme.text_secondary);
     };
-    // A quiet pill (optionally led by a status dot); returns its right edge.
-    auto pill = [&](float x, float mid, std::wstring_view value, const D2D1_COLOR_F* dot) {
-        const float w = MeasureTextWidth(compositor_->DwriteFactory(), compositor_->SmallFormat(), std::wstring(value)) +
-                        (dot ? 30*s : 18*s);
-        const D2D1_RECT_F r = D2D1::RectF(x, mid - 11*s, x + w, mid + 11*s);
-        painter_.FillRoundedRect(r, 6*s, WithAlpha(theme.text, dark ? 0.08f : 0.05f));
-        float tx = r.left + 9*s;
-        if (dot) {
-            painter_.FillRoundedRect(D2D1::RectF(tx, mid - 3*s, tx + 6*s, mid + 3*s), 3*s, *dot);
-            tx += 12*s;
-        }
-        painter_.DrawText(value, D2D1::RectF(tx, mid - 10*s, r.right - 6*s, mid + 10*s), compositor_->SmallFormat(),
-                          theme.text);
-        return r.right;
+    // A field frame for a hosted EDIT (the EDIT draws the text on top); the
+    // app places the EDITs where the last frame drew them.
+    asst_drawn_ = true;
+    asst_clip_ = lay.content;
+    for (auto& f : asst_fields_) f = {};
+    asst_edit_back_ = theme.fill_input_focus;
+    asst_edit_back_.a = 1.0f;
+    asst_edit_fore_ = theme.text;
+    asst_edit_hint_ = theme.text_secondary;
+    auto field = [&](D2D1_RECT_F r, bool focused, AsstField which) {
+        if (r.right <= r.left) return;
+        fluent::ControlState state{};
+        state.focused = focused;
+        painter_.DrawTextFieldFrame(r, state, true);
+        // Text inside the frame: 10 DIP in, clear of the key field's eye.
+        asst_fields_[static_cast<int>(which)] =
+            D2D1::RectF(r.left + 10*s, r.top + 2*s, r.right - (which == AsstField::Key ? 36*s : 10*s), r.bottom - 3*s);
     };
-    auto field_label = [&](D2D1_RECT_F r, int row) {
-        text(asst_text::RowLabel(row), D2D1::RectF(r.left, r.top + 5*s, r.left + 104*s, r.bottom - 5*s), true);
-    };
+    const float controls_left_head = [&] {
+        float x = o.model_card.right - 16*s;
+        for (const auto& b : o.head_buttons) if (b.right > b.left) x = (std::min)(x, b.left);
+        if (o.head_badge.right > o.head_badge.left) x = (std::min)(x, o.head_badge.left);
+        return x;
+    }();
 
     // 模型服务.
     painter_.DrawText(asst_text::T(I::AsstModelSection), o.model_section, compositor_->TextFormat(), theme.text);
     card(o.model_card);
-    head(o.model_card, L"\xF5C2", asst_text::T(I::AsstModelTitle), asst_text::T(I::AsstModelDesc), o.test.left);
-    badge(o.model_badge, asst_text::ModelBadge(v), asst_text::ModelBadgeKind(v));
-    button(o.test, asst_text::T(I::AsstTest), kAsstTest, fluent::ButtonKind::Standard,
-           v.key_saved && v.conn != AsstConn::Testing);
-    button(o.manage, asst_text::ManageButton(v), kAsstManage, fluent::ButtonKind::Primary);
     {
-        const float value_x = o.model_rows[0].left + 110*s;
-        const D2D1_COLOR_F idle = theme.text_secondary;
-        // 服务: the service with a dot (green once a key is saved and works) and its host.
-        const auto& r0 = o.model_rows[0];
-        field_label(r0, 0);
-        const float mid0 = (r0.top + r0.bottom) * 0.5f;
-        const bool live = v.key_saved && v.conn != AsstConn::Failed;
-        float x = pill(value_x, mid0, asst_text::ServiceName(v), live ? &success : &idle);
-        if (!v.host.empty())
-            text(v.host, D2D1::RectF(x + 8*s, mid0 - 10*s, r0.right, mid0 + 10*s), true);
+        const D2D1_RECT_F& h = o.head;
+        if (v.stage == AsstStage::Pick) {
+            head(h, L"\xF5C2", asst_text::HeadTitle(v), asst_text::HeadCaption(v), controls_left_head);
+            if (!v.in_use) badge(o.head_badge, asst_text::T(I::AsstNotConnectedBadge), fluent::BadgeKind::Neutral);
+        } else {
+            DrawProviderMark(v.id, v.name, D2D1::RectF(h.left + 14*s, h.top + 12*s, h.left + 42*s, h.top + 40*s), theme);
+            head(h, nullptr, v.name, asst_text::HeadCaption(v), controls_left_head);
+            if (v.stage == AsstStage::Connected) badge(o.head_badge, asst_text::ConnBadge(v), asst_text::ConnBadgeKind(v));
+        }
+        I labels[3]{};
+        int targets[3]{};
+        const int n = asst_text::HeadButtons(v, labels, targets);
+        for (int i = 0; i < n; ++i) {
+            const bool testing = targets[i] == kAsstTest && v.conn == AsstConn::Testing;
+            button(o.head_buttons[i], asst_text::T(testing ? I::AsstConnecting : labels[i]), targets[i],
+                   fluent::ButtonKind::Standard, !testing);
+        }
+    }
+    if (v.stage == AsstStage::Pick) {
+        divider_below(o.head);
+        // Tiles: the mark, the name and a line; 当前 on the one in use.
+        for (int i = 0; i < kAsstTiles && i < static_cast<int>(v.tiles.size()); ++i) {
+            const D2D1_RECT_F& t = o.tiles[i];
+            if (t.right <= t.left) continue;
+            const AsstTileView& tile = v.tiles[static_cast<size_t>(i)];
+            const bool hot = hovered(kAsstTileBase + i);
+            const D2D1_COLOR_F fill = tile.current ? WithAlpha(theme.accent, dark ? 0.16f : 0.08f)
+                                    : hot ? theme.fill_hover : WithAlpha(theme.text, dark ? 0.04f : 0.025f);
+            painter_.FillRoundedRect(t, 6*s, fill);
+            MakeBrush(dc, tile.current ? theme.accent : theme.stroke_card, brStrokeCard_);
+            dc->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(t.left + 0.5f, t.top + 0.5f, t.right - 0.5f, t.bottom - 0.5f),
+                                                       6*s, 6*s), brStrokeCard_.get(), tile.current ? 1.5f : 1.0f);
+            const float cx = (t.left + t.right) * 0.5f;
+            DrawProviderMark(tile.id, tile.name, D2D1::RectF(cx - 14*s, t.top + 12*s, cx + 14*s, t.top + 40*s), theme);
+            painter_.DrawText(tile.name, D2D1::RectF(t.left + 6*s, t.top + 44*s, t.right - 6*s, t.top + 64*s),
+                              compositor_->TextFormat(), theme.text, fluent::HorizontalAlignment::Center);
+            painter_.DrawText(tile.sub, D2D1::RectF(t.left + 6*s, t.top + 64*s, t.right - 6*s, t.top + 82*s),
+                              compositor_->SmallFormat(), theme.text_secondary, fluent::HorizontalAlignment::Center);
+            if (tile.current) {
+                const std::wstring& tag = asst_text::T(I::AsstCurrent);
+                const float w = painter_.MeasureBadgeWidth(tag);
+                badge(D2D1::RectF(t.right - 6*s - w, t.top + 6*s, t.right - 6*s, t.top + 24*s), tag, fluent::BadgeKind::Accent);
+            }
+        }
+        // 更多: Gemini, Claude.
+        if (o.more_label.right > o.more_label.left) {
+            text(asst_text::T(I::AsstMore), o.more_label, true);
+            for (size_t i = 0; i < o.more.size(); ++i) {
+                const size_t index = static_cast<size_t>(kAsstTiles) + i;
+                if (index >= v.tiles.size()) break;
+                const AsstTileView& tile = v.tiles[index];
+                const D2D1_RECT_F& c = o.more[i];
+                const bool hot = hovered(kAsstTileBase + static_cast<int>(index));
+                painter_.FillRoundedRect(c, 15*s, tile.current ? WithAlpha(theme.accent, dark ? 0.16f : 0.08f)
+                                                  : hot ? theme.fill_hover : WithAlpha(theme.text, dark ? 0.05f : 0.035f));
+                DrawProviderMark(tile.id, tile.name, D2D1::RectF(c.left + 8*s, c.top + 7*s, c.left + 24*s, c.top + 23*s), theme);
+                painter_.DrawText(tile.name, D2D1::RectF(c.left + 30*s, c.top + 5*s, c.right - 8*s, c.bottom - 5*s),
+                                  compositor_->SmallFormat(), theme.text);
+            }
+        }
+    } else if (v.stage == AsstStage::Setup) {
+        divider_below(o.head);
+        if (o.key_row.bottom > o.key_row.top) {
+            // The link to the key page reads as a link.
+            const bool link = !v.console.empty();
+            const D2D1_COLOR_F& c = theme.accent;   // lifted toward white in dark mode to stay readable
+            const D2D1_COLOR_F accent = dark ? D2D1::ColorF(c.r + (1 - c.r) * 0.45f, c.g + (1 - c.g) * 0.45f,
+                                                            c.b + (1 - c.b) * 0.45f) : c;
+            head(o.key_row, L"\xE8D7", asst_text::T(I::AsstKey), asst_text::KeyCaption(v), o.key_field.left,
+                 link ? &accent : nullptr);
+            field(o.key_field, v.key_typed, AsstField::Key);
+            DrawIconText(o.key_eye.left, o.key_eye.top, o.key_eye.right - o.key_eye.left, o.key_eye.bottom - o.key_eye.top,
+                         v.revealed ? L"\xED1A" : L"\xE7B3", L"", hovered(kAsstReveal) ? theme.text : theme.text_secondary, 0.6f);
+            button(o.key_paste, asst_text::T(I::AiConnPaste), kAsstPaste);
+            divider_below(o.key_row);
+        }
+        head(o.url_row, L"\xE774", asst_text::T(I::AsstUrlTitle), asst_text::UrlCaption(v),
+             o.url_field.right > o.url_field.left ? o.url_field.left : o.url_buttons[0].left);
+        field(o.url_field, v.url_typed, AsstField::Url);
+        button(o.url_buttons[0], asst_text::T(I::AsstEdit), kAsstUrlEdit);
+        divider_below(o.url_row);
+        const bool failed = !v.error_title.empty();
+        head(o.connect_row, L"\xE703", asst_text::T(I::AsstConnectTitle), asst_text::ConnectCaption(v), o.connect.left,
+             failed ? &danger : nullptr);
+        const bool ready = (!v.needs_key || v.key_typed) && (!v.custom || v.url_typed) && !v.connecting;
+        button(o.connect, asst_text::T(v.connecting ? I::AsstConnecting : I::AsstConnectBtn), kAsstConnect,
+               fluent::ButtonKind::Primary, ready);
+    } else {
+        divider_below(o.head);
+        if (o.fresh_row.bottom > o.fresh_row.top) {
+            // 连接正常 · 120 毫秒 · 读到 12 个模型…: right after connecting.
+            const D2D1_RECT_F& r = o.fresh_row;
+            const float mid = r.top + 24*s;
+            const D2D1_COLOR_F dot = v.fresh_manual ? painter_.StatusToneColor(fluent::InfoBarKind::Warning) : success;
+            painter_.FillRoundedRect(D2D1::RectF(r.left + 25*s, mid - 4*s, r.left + 33*s, mid + 4*s), 4*s, dot);
+            painter_.DrawWrappedCaption(v.fresh, D2D1::Point2F(r.left + 54*s, r.top + 14*s), r.right - 16*s - r.left - 54*s,
+                                        theme.text);
+            divider_below(r);
+        }
         // 默认模型.
-        const auto& r1 = o.model_rows[1];
-        field_label(r1, 1);
-        const float mid1 = (r1.top + r1.bottom) * 0.5f;
-        x = v.model.empty() ? value_x - 8*s : pill(value_x, mid1, v.model, nullptr);
-        text(asst_text::ModelCount(v), D2D1::RectF(x + 8*s, mid1 - 10*s, r1.right, mid1 + 10*s), true);
-        // API Key: whether one is stored; the key itself is never read here.
-        const auto& r2 = o.model_rows[2];
-        field_label(r2, 2);
-        painter_.DrawText(asst_text::KeyState(v), D2D1::RectF(value_x, r2.top + 5*s, r2.right, r2.bottom - 5*s),
-                          compositor_->SmallFormat(), v.key_saved ? theme.text : theme.text_secondary);
-        // 上次连接 (this run).
-        const auto& r3 = o.model_rows[3];
-        field_label(r3, 3);
-        const D2D1_COLOR_F tone = v.conn == AsstConn::Ok ? success : v.conn == AsstConn::Failed ? danger
-                                                                                                : theme.text_secondary;
-        painter_.DrawText(asst_text::ConnState(v), D2D1::RectF(value_x, r3.top + 5*s, r3.right, r3.bottom - 5*s),
-                          compositor_->SmallFormat(), tone);
+        head(o.model_row, L"\xF5C2", asst_text::T(I::AsstDefaultModel), asst_text::T(I::AsstModelDesc2),
+             v.model_editing ? o.model_field.left : o.model_choice.left);
+        if (v.model_editing) {
+            field(o.model_field, true, AsstField::Model);
+            button(o.model_buttons[0], asst_text::T(I::Save), kAsstModelSave, fluent::ButtonKind::Primary);
+            button(o.model_buttons[1], asst_text::T(I::Cancel), kAsstModelCancel);
+        } else if (o.model_choice.right > o.model_choice.left) {
+            fluent::ButtonSpec control{};
+            control.bounds = o.model_choice;
+            const std::wstring& placeholder = asst_text::T(I::AsstModelNone);
+            control.text = v.model.empty() ? std::wstring_view(placeholder) : std::wstring_view(v.model);
+            control.drop_down = true;
+            control.state.hovered = hovered(kAsstModel);
+            painter_.DrawButton(control);
+        }
+        divider_below(o.model_row);
+        // 思考强度 / 深度思考.
+        if (const int n = asst_text::ThinkSegments(v)) {
+            head(o.think_row, L"\xEA80", asst_text::ThinkTitle(v), asst_text::ThinkCaption(v), o.think_seg[0].left);
+            painter_.DrawSegmentedTrack(D2D1::RectF(o.think_seg[0].left, o.think_seg[0].top,
+                                                    o.think_seg[n - 1].right, o.think_seg[n - 1].bottom));
+            const int checked = asst_text::ThinkChecked(v);
+            for (int i = 0; i < n; ++i) {
+                fluent::SegmentedItemSpec item{};
+                item.bounds = o.think_seg[i];
+                item.text = asst_text::ThinkLabel(v, i);
+                item.state.checked = i == checked;
+                item.state.hovered = hovered(kAsstThinkBase + i);
+                item.shared_track = true;
+                item.position = i == 0 ? fluent::SegmentPosition::First
+                    : i == n - 1 ? fluent::SegmentPosition::Last : fluent::SegmentPosition::Middle;
+                painter_.DrawSegmentedItem(item);
+            }
+            divider_below(o.think_row);
+        } else if (v.think == AsstThink::Toggle) {
+            head(o.think_row, L"\xEA80", asst_text::ThinkTitle(v), asst_text::ThinkCaption(v), o.think_toggle.left);
+            fluent::ControlState state{};
+            state.checked = v.effort > 0;
+            state.hovered = hovered(kAsstThinkToggle);
+            painter_.DrawSwitch(o.think_toggle, L"", state);
+            divider_below(o.think_row);
+        }
+        // API Key.
+        if (o.key_row.bottom > o.key_row.top) {
+            head(o.key_row, L"\xE8D7", asst_text::T(I::AsstKey), asst_text::KeyCaption(v), o.key_buttons[0].left);
+            button(o.key_buttons[0], asst_text::T(I::AsstReplace), kAsstRekey);
+            button(o.key_buttons[1], asst_text::T(I::Remove), kAsstRemoveKey);
+            divider_below(o.key_row);
+        }
+        // 接口地址.
+        head(o.url_row, L"\xE774", asst_text::T(I::AsstUrlTitle), asst_text::UrlCaption(v),
+             v.url_editing ? o.url_field.left : o.url_buttons[0].left);
+        if (v.url_editing) {
+            field(o.url_field, true, AsstField::Url);
+            button(o.url_buttons[0], asst_text::T(I::Save), kAsstUrlSave, fluent::ButtonKind::Primary, v.url_typed);
+            button(o.url_buttons[1], asst_text::T(I::Cancel), kAsstUrlCancel);
+        } else {
+            button(o.url_buttons[0], asst_text::T(I::AsstEdit), kAsstUrlEdit);
+        }
+        // 其他已保存的服务.
+        if (o.others_row.bottom > o.others_row.top) {
+            divider_below(o.url_row);
+            head(o.others_row, L"\xE8F1", asst_text::T(I::AsstOthers), asst_text::T(I::AsstOthersDesc),
+                 o.others_row.right - 16*s);
+            for (size_t i = 0; i < o.others.size() && i < v.others.size(); ++i) {
+                const D2D1_RECT_F& c = o.others[i];
+                const AsstOtherView& other = v.others[i];
+                const bool hot = hovered(kAsstOtherBase + static_cast<int>(i));
+                painter_.FillRoundedRect(c, 6*s, hot ? theme.fill_hover : WithAlpha(theme.text, dark ? 0.05f : 0.035f));
+                MakeBrush(dc, theme.stroke_card, brStrokeCard_);
+                dc->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(c.left + 0.5f, c.top + 0.5f, c.right - 0.5f, c.bottom - 0.5f),
+                                                           6*s, 6*s), brStrokeCard_.get(), 1.0f);
+                DrawProviderMark(other.id, other.name, D2D1::RectF(c.left + 8*s, c.top + 8*s, c.left + 24*s, c.top + 24*s), theme);
+                const float name_w = MeasureTextWidth(compositor_->DwriteFactory(), compositor_->TextFormat(), other.name);
+                painter_.DrawText(other.name, D2D1::RectF(c.left + 30*s, c.top + 6*s, c.right - 8*s, c.bottom - 6*s),
+                                  compositor_->TextFormat(), theme.text);
+                if (!other.model.empty())
+                    painter_.DrawText(other.model, D2D1::RectF(c.left + 30*s + name_w + 8*s, c.top + 7*s, c.right - 8*s, c.bottom - 5*s),
+                                      compositor_->SmallFormat(), theme.text_secondary);
+            }
+        }
     }
-    {
-        // Where the connection is managed: a note with an accent edge.
-        const auto& n = o.model_foot;
-        painter_.FillRoundedRect(n, 6*s, WithAlpha(theme.text, dark ? 0.06f : 0.035f));
-        painter_.FillRoundedRect(D2D1::RectF(n.left, n.top, n.left + 3*s, n.bottom), 1.5f*s, theme.accent);
-        painter_.DrawWrappedCaption(asst_text::T(I::AsstManageFoot), D2D1::Point2F(n.left + 16*s, n.top + 9*s),
-                                    n.right - n.left - 28*s, theme.text);
-    }
+    // The note under the card, as on every other page.
+    if (o.model_foot.bottom > o.model_foot.top)
+        painter_.DrawWrappedCaption(asst_text::T(I::AsstFoot), D2D1::Point2F(o.model_foot.left, o.model_foot.top),
+                                    o.model_foot.right - o.model_foot.left, theme.text_secondary);
 
     // 语音输入.
     painter_.DrawText(asst_text::T(I::AsstVoiceSection), o.voice_section, compositor_->TextFormat(), theme.text);
@@ -126,14 +324,14 @@ void MainRenderer::DrawSettingsAssistant(const WindowViewModel& vm, const D2D1_R
     button(o.voice_button, asst_text::T(I::AsstVoiceSet), kAsstVoice);
     {
         const auto& r = o.voice_row;
-        field_label(r, 0);
-        const float mid = (r.top + r.bottom) * 0.5f;
         const D2D1_COLOR_F idle = theme.text_secondary;
         const bool ready = v.voice_set && v.voice_key;
-        const float x = pill(r.left + 110*s, mid, v.voice_set ? v.voice_service : asst_text::T(I::NotSet),
-                             ready ? &success : &idle);
-        text(v.voice_set ? v.voice_host : asst_text::T(I::AsstVoiceHint),
-             D2D1::RectF(x + 8*s, mid - 10*s, r.right, mid + 10*s), true);
+        const float mid = (r.top + r.bottom) * 0.5f;
+        painter_.FillRoundedRect(D2D1::RectF(r.left, mid - 3*s, r.left + 6*s, mid + 3*s), 3*s, ready ? success : idle);
+        std::wstring line = v.voice_set ? v.voice_service : asst_text::T(I::NotSet);
+        line += L"  \u00b7  ";
+        line += v.voice_set ? v.voice_host : asst_text::T(I::AsstVoiceHint);
+        text(line, D2D1::RectF(r.left + 14*s, mid - 10*s, r.right, mid + 10*s), true);
     }
 
     // 让其他 AI 应用使用 Pulse.

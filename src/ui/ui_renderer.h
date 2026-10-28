@@ -733,6 +733,11 @@ public:
     bool SettingsScrollbarGeometry(const WindowViewModel& vm, float window_w, float window_h,
                                    D2D1_RECT_F& track, D2D1_RECT_F& thumb, float& max_scroll) const;
     D2D1_RECT_F SettingsDropdownBounds(const WindowViewModel& vm, int index, float window_w, float window_h) const;
+    // Settings > AI 助手 as last drawn: where a hosted EDIT goes (its text
+    // area) and the part of the page that shows (clip); false when the field
+    // was not drawn in the last frame. Colours: the field's plate and text.
+    bool SettingsAssistantField(AsstField which, D2D1_RECT_F& field, D2D1_RECT_F& clip) const;
+    void SettingsAssistantEditColors(D2D1_COLOR_F& back, D2D1_COLOR_F& fore, D2D1_COLOR_F& hint) const;
     float SettingsDestinationOffset(const WindowViewModel& vm, int setting_id, float window_w, float window_h) const;
     float SidebarMaxScroll(const WindowViewModel& vm, float window_w, float window_h) const;
     bool SidebarScrollbarGeometry(const WindowViewModel& vm, float window_w, float window_h,
@@ -822,6 +827,7 @@ private:
     void DrawSettingsShortcuts(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawSettingsAi(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawSettingsAssistant(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
+    void DrawProviderMark(std::string_view id, std::wstring_view name, const D2D1_RECT_F& r, const Theme& theme);
     // 右键菜单 layer cards, the same on pages 2 and 6: Pulse 右键菜单 | 系统右键菜单.
     void DrawCtxLayerCards(const D2D1_RECT_F& pulse, const D2D1_RECT_F& system, bool system_current,
                            bool other_hovered, const Theme& theme);
@@ -924,6 +930,9 @@ private:
     bool DrawExcludeEmptySvg(const D2D1_RECT_F& bounds, float opacity = 1.0f);
     bool EnsureExcludeEmptySvg();
     bool EnsureFluentSvg(int resource_id, bool colorful = false);
+    // A vendor mark (assets/providers) with currentColor in the theme's text
+    // colour; false when Direct2D cannot draw it.
+    bool DrawProviderLogo(int resource_id, bool dark, const D2D1_RECT_F& bounds);
     bool DrawFluentSvg(int resource_id, const D2D1_RECT_F& bounds, float opacity = 1.0f,
                        const D2D1_COLOR_F* foreground = nullptr, bool colorful = false);
     // Returns true when the name had to be shortened with an ellipsis.
@@ -1173,6 +1182,11 @@ private:
     bool frame_partial_ = false;
     D2D1_RECT_F frame_damage_{};
     bool last_frame_overlay_ = true;     // the last frame drew a floating overlay
+    // Settings > AI 助手's EDIT fields as last drawn (SettingsAssistantField).
+    bool asst_drawn_ = false;
+    D2D1_RECT_F asst_fields_[3]{};
+    D2D1_RECT_F asst_clip_{};
+    D2D1_COLOR_F asst_edit_back_{}, asst_edit_fore_{}, asst_edit_hint_{};
     std::array<std::vector<std::pair<int, D2D1_RECT_F>>, 8> drawn_rows_{};  // source, cell
     // Panes whose last frame drew tree guides: a hover moves the highlighted
     // line, which spans rows outside the two that changed.

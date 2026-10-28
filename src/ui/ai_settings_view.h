@@ -100,30 +100,104 @@ struct AiPageLayout {
 
 // Settings > AI 助手 (kSettingsPageAssistant): Pulse's own assistant (Ctrl+J), its
 // model service and voice input, and a way to AI 与 MCP. Built by
-// app/ai_assistant_settings.cpp; never holds the key itself.
+// app/ai_assistant_settings.cpp; never holds a key, only its mask.
 enum AssistantHit : int {
-    kAsstTest = 0,     // 测试连接
-    kAsstManage = 1,   // 管理连接… / 连接模型…: the assistant panel's connection card
-    kAsstVoice = 2,    // 设置语音…: the panel's voice connection card
-    kAsstMcp = 3,      // 在增强包中管理: 增强包 > AI 与 MCP
+    kAsstTest = 0,          // 测试连接
+    kAsstVoice = 2,         // 设置语音…: the panel's voice connection card
+    kAsstMcp = 3,           // 在增强包中管理: 增强包 > AI 与 MCP
+    kAsstChange = 10,       // 更换服务: back to the tiles
+    kAsstCancel = 11,       // 取消 (tiles, while a service is in use)
+    kAsstRechoose = 12,     // 换一个服务 (setting one up)
+    kAsstReveal = 13,       // the key field's eye
+    kAsstPaste = 14,        // 粘贴
+    kAsstKeyLink = 15,      // 到…创建: the service's key page
+    kAsstConnect = 16,      // 连接并读取模型
+    kAsstModel = 17,        // 默认模型 drop-down
+    kAsstThinkToggle = 18,  // 深度思考
+    kAsstRekey = 19,        // API Key 更换
+    kAsstRemoveKey = 20,    // API Key 移除
+    kAsstUrlEdit = 21,      // 接口地址 修改
+    kAsstUrlSave = 22,
+    kAsstUrlCancel = 23,
+    kAsstModelSave = 24,    // a typed model name
+    kAsstModelCancel = 25,
+    kAsstKeyField = 26,     // a field whose EDIT is hidden: focus it
+    kAsstUrlField = 27,
+    kAsstModelField = 28,
+    kAsstTileBase = 100,    // + tile (kAsstTiles first-screen tiles, then 更多's)
+    kAsstThinkBase = 200,   // + 思考强度 segment
+    kAsstOtherBase = 300,   // + 其他已保存的服务 chip
 };
+// Fields the page hosts an EDIT in (MainRenderer::SettingsAssistantField).
+enum class AsstField : uint8_t { Key, Url, Model };
 enum class AsstConn : uint8_t { None, Ok, Failed, Testing };
+// Tiles to pick from, the service being set up, or the one in use.
+enum class AsstStage : uint8_t { Pick, Setup, Connected };
+// How the service takes 思考: four levels, three, on/off, or not at all.
+enum class AsstThink : uint8_t { None, Levels4, Levels3, Toggle };
+inline constexpr int kAsstTiles = 10;
+struct AsstTileView {
+    std::string id;            // ai_providers.h
+    std::wstring name, sub;
+    bool current = false;      // the service in use
+    bool saved = false;        // its key is stored: a click switches to it
+};
+struct AsstOtherView {
+    std::string id;
+    std::wstring name, model;
+};
 struct AssistantPageView {
-    bool key_saved = false;
-    bool official = true;          // the default DeepSeek address
-    std::wstring host;             // api.deepseek.com
-    std::wstring model;            // the default model id
-    size_t model_count = 0;        // ids the service listed (0: not read yet)
+    AsstStage stage = AsstStage::Pick;
+    bool in_use = false;               // a service is set up (the tiles offer 取消)
+    std::vector<AsstTileView> tiles;   // first screen, then 更多 (Gemini, Claude)
+    // The service being set up or in use.
+    std::string id;
+    std::wstring name, sub;            // sub: under the name
+    bool needs_key = true, custom = false;
+    std::wstring console;              // 到{console}创建; empty: no key page
+    std::wstring url;                  // the address
+    bool url_default = true;           // the service's own
+    bool url_editing = false;          // the address row is a field
+    bool key_typed = false, url_typed = false;
+    bool revealed = false;
+    bool connecting = false;
+    std::wstring error_title, error_sub;   // the last 连接 that failed
+    // In use.
+    std::wstring host_line;            // api.deepseek.com · 上次连接 14:32 · 120 毫秒
     AsstConn conn = AsstConn::None;
-    std::wstring conn_time;        // HH:MM of this run's last check
+    std::wstring fresh;                // 连接正常 · … right after connecting; empty otherwise
+    bool fresh_manual = false;         // …but the service lists no models: type one
+    std::wstring model;                // the default model id
+    bool model_editing = false;        // 手动输入模型名
+    AsstThink think = AsstThink::None;
+    int effort = 0;                    // 0 off .. 3 high (Toggle: 0 off, else on)
+    std::wstring key_mask;             // sk-…9832; empty when the service needs none
+    std::vector<AsstOtherView> others;
+    // 语音输入.
     bool voice_set = false, voice_key = false;
-    std::wstring voice_service;    // 硅基流动 / OpenAI / 自定义
+    std::wstring voice_service;        // 硅基流动 / OpenAI / 自定义
     std::wstring voice_host;
-    bool mcp_installed = false;    // the AI pack (bundled or installed)
+    bool mcp_installed = false;        // the AI pack (bundled or installed)
 };
 struct AssistantPageLayout {
-    D2D1_RECT_F model_section{}, model_card{}, model_badge{}, test{}, manage{}, model_foot{};
-    D2D1_RECT_F model_rows[4]{};   // 服务, 默认模型, API Key, 上次连接
+    D2D1_RECT_F model_section{}, model_card{}, model_foot{};
+    // Every stage: a header row (icon or logo, title, caption, controls).
+    D2D1_RECT_F head{}, head_badge{}, head_buttons[3]{};
+    // Tiles.
+    D2D1_RECT_F tiles[kAsstTiles]{};
+    D2D1_RECT_F more_label{};
+    std::vector<D2D1_RECT_F> more;     // 更多's chips
+    // Rows under the header; zero-height when not shown.
+    D2D1_RECT_F fresh_row{};
+    D2D1_RECT_F key_row{}, key_field{}, key_eye{}, key_paste{}, key_link{};
+    D2D1_RECT_F key_buttons[2]{};      // 更换, 移除
+    D2D1_RECT_F url_row{}, url_field{}, url_buttons[2]{};   // 修改 | 保存 取消
+    D2D1_RECT_F connect_row{}, connect{};
+    D2D1_RECT_F model_row{}, model_choice{}, model_field{}, model_buttons[2]{};
+    D2D1_RECT_F think_row{}, think_toggle{};
+    D2D1_RECT_F think_seg[4]{};
+    D2D1_RECT_F others_row{};
+    std::vector<D2D1_RECT_F> others;
     D2D1_RECT_F voice_section{}, voice_card{}, voice_badge{}, voice_button{}, voice_row{};
     D2D1_RECT_F mcp_section{}, mcp_card{}, mcp_badge{}, mcp_button{}, mcp_meta{};
 };

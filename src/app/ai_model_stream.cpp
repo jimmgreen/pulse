@@ -352,6 +352,11 @@ ModelProbe ProbeModelService(ModelEndpoint endpoint) {
         return probe;
     }
     std::wstring headers = L"Accept: application/json\r\nAuthorization: Bearer " + endpoint.key + L"\r\n";
+    // Anthropic lists its models only to its own key header (chat takes the bearer).
+    const std::wstring anthropic = L"api.anthropic.com";
+    if (url.host.size() >= anthropic.size() &&
+        url.host.compare(url.host.size() - anthropic.size(), anthropic.size(), anthropic) == 0)
+        headers += L"x-api-key: " + endpoint.key + L"\r\nanthropic-version: 2023-06-01\r\n";
     const BOOL sent = WinHttpSendRequest(request.value, headers.c_str(), static_cast<DWORD>(headers.size()),
                                          WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
     SecureZeroMemory(headers.data(), headers.size() * sizeof(wchar_t));

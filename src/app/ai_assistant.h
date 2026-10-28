@@ -16,6 +16,7 @@ namespace ui { struct WindowViewModel; }
 struct AiChat;   // the conversation and its driver (ai_assistant_chat.h)
 struct AiConnUi; // 管理连接 card: fields, test, key (ai_assistant_conn.h)
 struct AiVoiceUi; // 语音输入: listening, menu, connection card (ai_assistant_voice.h)
+struct AsstPageUi; // Settings > AI 助手: stage, fields, 连接 (ai_assistant_settings.h)
 
 struct AiAssistantState {
     bool open = false;
@@ -60,6 +61,8 @@ struct AiAssistantState {
     std::shared_ptr<AiConnUi> conn;
     // 语音输入; created on the first frame with the panel.
     std::shared_ptr<AiVoiceUi> voice;
+    // Settings > AI 助手; created when the page first shows.
+    std::shared_ptr<AsstPageUi> page;
 };
 
 // The status bar chip: opens or closes the panel (an outside client's open
@@ -75,6 +78,8 @@ bool AiAssistantIsOpen(const AppState& s);
 void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm);
 // After every frame: the composer EDIT follows the drawn input box.
 void AiAssistantLayout(AppState& s);
+// Settings changed the model or 思考 elsewhere (设置 › AI 助手): read them again.
+void AiAssistantPrefsChanged(AppState& s);
 
 // Pointer messages in client pixels; true when the panel took them.
 bool AiAssistantMouseMove(AppState& s, int x, int y);

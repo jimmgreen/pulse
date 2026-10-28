@@ -4555,25 +4555,9 @@ ContentPackName	IDS_CONTENT_PACK_NAME	5755	内容搜索增强包	Content search 
 AsstPageTitle	IDS_ASST_PAGE_TITLE	5756	AI 助手	AI assistant	
 AsstPageIntro	IDS_ASST_PAGE_INTRO	5757	Pulse 内置的对话助手（Ctrl+J）。它用你自己的模型服务和 API Key，Key 只加密保存在这台电脑上。	Pulse's built-in chat assistant (Ctrl+J). It uses your own model service and API key; the key is stored encrypted on this PC only.	
 AsstModelSection	IDS_ASST_MODEL_SECTION	5758	模型服务	Model service	
-AsstModelTitle	IDS_ASST_MODEL_TITLE	5759	服务与模型	Service and model	
-AsstModelDesc	IDS_ASST_MODEL_DESC	5760	兼容 OpenAI 接口的服务都可以用：DeepSeek 官方、自己部署的模型或其他服务商。	Any OpenAI-compatible service works: DeepSeek, a model you host, or another provider.	
-AsstService	IDS_ASST_SERVICE	5761	服务	Service	
-AsstServiceOfficial	IDS_ASST_SERVICE_OFFICIAL	5762	DeepSeek 官方	DeepSeek (official)	
-AsstServiceCustom	IDS_ASST_SERVICE_CUSTOM	5763	自定义服务	Custom service	
 AsstDefaultModel	IDS_ASST_DEFAULT_MODEL	5764	默认模型	Default model	
-AsstModelCount	IDS_ASST_MODEL_COUNT	5765	模型列表来自服务，共 {n} 个	{n} models listed by the service	
-AsstModelUnlisted	IDS_ASST_MODEL_UNLISTED	5766	连接后从服务读取模型列表	The model list is read from the service once connected	
 AsstKey	IDS_ASST_KEY	5767	API Key	API key	
-AsstKeySaved	IDS_ASST_KEY_SAVED	5768	已保存 · 本机加密	Saved · encrypted on this PC	
-AsstLastConn	IDS_ASST_LAST_CONN	5769	上次连接	Last connection	
-AsstConnOk	IDS_ASST_CONN_OK	5770	正常 · {time}	OK · {time}	
-AsstConnBad	IDS_ASST_CONN_BAD	5771	失败 · {time}	Failed · {time}	
-AsstConnNever	IDS_ASST_CONN_NEVER	5772	本次运行还没有连接	Not connected in this session	
-AsstConnTesting	IDS_ASST_CONN_TESTING	5773	正在测试…	Testing…	
 AsstTest	IDS_ASST_TEST	5774	测试连接	Test connection	
-AsstManage	IDS_ASST_MANAGE	5775	管理连接…	Manage connection…	
-AsstConnect	IDS_ASST_CONNECT	5776	连接模型…	Connect a model…	
-AsstManageFoot	IDS_ASST_MANAGE_FOOT	5777	「管理连接」打开助手面板里的连接卡片：换服务地址、换 Key、选默认模型都在那里，改完立即生效。	Manage connection opens the connection card in the assistant panel: change the service address, the key or the default model there; changes apply at once.	
 AsstVoiceSection	IDS_ASST_VOICE_SECTION	5778	语音输入	Voice input	
 AsstVoiceTitle	IDS_ASST_VOICE_TITLE	5779	语音识别服务	Speech recognition service	
 AsstVoiceDesc	IDS_ASST_VOICE_DESC	5780	只在你按住麦克风时录音，录音不保存，识别完也不会自动发送。	Records only while you hold the microphone; recordings aren't saved and nothing is sent by itself.	
@@ -4587,7 +4571,6 @@ AsstMcpDesc	IDS_ASST_MCP_DESC	5787	和上面的助手不是一回事：这是让
 AsstMcpMeta	IDS_ASST_MCP_META	5788	Pulse.AI.exe · MCP · 随 Pulse 同步更新	Pulse.AI.exe · MCP · updated with Pulse	
 AsstMcpManage	IDS_ASST_MCP_MANAGE	5789	在增强包中管理	Manage in Packs	
 SettingsNavNew	IDS_SETTINGS_NAV_NEW	5790	新	New	
-AsstToday	IDS_ASST_TODAY	5791	今天 {time}	today {time}	
 AsstBadgeFailed	IDS_ASST_BADGE_FAILED	5792	连接失败	Connection failed	
 AsstVoiceSetBadge	IDS_ASST_VOICE_SET_BADGE	5793	已设置	Set up	
 ProvQwen	IDS_PROV_QWEN	5794	通义千问	Qwen	
@@ -4605,3 +4588,47 @@ ProvSubOpenRouter	IDS_PROV_SUB_OPENROUTER	5805	一个 Key 用多家	Many models,
 ProvSubOllama	IDS_PROV_SUB_OLLAMA	5806	本机 · 无需 Key	This PC · no key	
 ProvSubCustom	IDS_PROV_SUB_CUSTOM	5807	任意兼容地址	Any compatible address	
 AiErrToolsHint	IDS_AI_ERR_TOOLS_HINT	5808	这个模型可能不支持工具调用（function calling），助手需要它来查看和整理文件。换一个支持的模型，或在 设置 › AI 助手 里更换服务。	This model may not support tool calls (function calling), which the assistant needs to look at and organize files. Pick a model that does, or change the service in Settings › AI assistant.	
+AsstPickTitle	IDS_ASST_PICK_TITLE	5809	选择模型服务	Choose a model service	
+AsstPickChange	IDS_ASST_PICK_CHANGE	5810	更换模型服务	Change the model service	
+AsstPickDesc	IDS_ASST_PICK_DESC	5811	支持所有兼容 OpenAI 接口的服务。选一个，然后填入它的 API Key。	Any service with an OpenAI-compatible API works. Pick one, then paste its API key.	
+AsstNotConnectedBadge	IDS_ASST_NOT_CONNECTED_BADGE	5812	未连接	Not connected	
+AsstCurrent	IDS_ASST_CURRENT	5813	当前	Current	
+AsstMore	IDS_ASST_MORE	5814	更多	More	
+AsstCompatSub	IDS_ASST_COMPAT_SUB	5815	{sub} · 兼容 OpenAI 接口	{sub} · OpenAI-compatible API	
+AsstCustomSub	IDS_ASST_CUSTOM_SUB	5816	任何兼容 OpenAI 接口的地址	Any OpenAI-compatible address	
+AsstRechoose	IDS_ASST_RECHOOSE	5817	换一个服务	Pick another	
+AsstKeyGet	IDS_ASST_KEY_GET	5818	还没有？到 {console} 创建	No key yet? Create one at {console}	
+AsstKeyGetPlain	IDS_ASST_KEY_GET_PLAIN	5819	填写服务方提供的密钥	The key the service gave you	
+AsstKeyPlaceholder	IDS_ASST_KEY_PLACEHOLDER	5820	粘贴 API Key	Paste the API key	
+AsstUrlTitle	IDS_ASST_URL_TITLE	5821	接口地址	API address	
+AsstUrlCustomDesc	IDS_ASST_URL_CUSTOM_DESC	5822	一般以 /v1 结尾，例如 http://192.168.1.20:8000/v1	Usually ends with /v1, e.g. http://192.168.1.20:8000/v1	
+AsstUrlDefault	IDS_ASST_URL_DEFAULT	5823	{url}（默认）	{url} (default)	
+AsstConnectTitle	IDS_ASST_CONNECT_TITLE	5824	连接	Connect	
+AsstConnectDesc	IDS_ASST_CONNECT_DESC	5825	连接时会读取这个服务提供的模型列表	Connecting reads the list of models this service offers	
+AsstConnectOllama	IDS_ASST_CONNECT_OLLAMA	5826	确认 Ollama 正在运行，然后连接	Make sure Ollama is running, then connect	
+AsstConnectBtn	IDS_ASST_CONNECT_BTN	5827	连接并读取模型	Connect and read models	
+AsstConnecting	IDS_ASST_CONNECTING	5828	正在连接…	Connecting…	
+AsstHostLine	IDS_ASST_HOST_LINE	5829	{host} · 上次连接 {time} · {ms} 毫秒	{host} · last connected {time} · {ms} ms	
+AsstChangeService	IDS_ASST_CHANGE_SERVICE	5830	更换服务	Change service	
+AsstFresh	IDS_ASST_FRESH	5831	连接正常	Connected	
+AsstFreshDetail	IDS_ASST_FRESH_DETAIL	5832	{ms} 毫秒 · 读到 {n} 个模型，默认用 {model}，可在下面更改	{ms} ms · {n} models found; using {model} by default, change it below	
+AsstFreshManual	IDS_ASST_FRESH_MANUAL	5833	这个服务不提供完整的模型列表，请在下面输入模型名	This service does not list all its models; type a model name below	
+AsstModelDesc2	IDS_ASST_MODEL_DESC_2	5834	新对话默认用它，对话中可在输入框左下角临时切换	New chats start with it; switch any time from the input box	
+AsstModelManual	IDS_ASST_MODEL_MANUAL	5835	手动输入模型名…	Type a model name…	
+AsstModelPlaceholder	IDS_ASST_MODEL_PLACEHOLDER	5836	模型名，原样发送	Model name, sent as typed	
+AsstModelNone	IDS_ASST_MODEL_NONE	5837	选择模型	Choose a model	
+AsstChatOnly	IDS_ASST_CHAT_ONLY	5838	仅聊天	Chat only	
+AsstThinkLevelsDesc	IDS_ASST_THINK_LEVELS_DESC	5839	越高回答越周到，但更慢、更费 token	Higher is more thorough, but slower and uses more tokens	
+AsstThinkToggle	IDS_ASST_THINK_TOGGLE	5840	深度思考	Deep thinking	
+AsstThinkToggleDesc	IDS_ASST_THINK_TOGGLE_DESC	5841	先思考再回答，更周到，但更慢、更费 token	Thinks before answering: more thorough, but slower and uses more tokens	
+AsstOthers	IDS_ASST_OTHERS	5842	其他已保存的服务	Other saved services	
+AsstOthersDesc	IDS_ASST_OTHERS_DESC	5843	各自的 Key 都还在，点一下就切换过去	Their keys are kept; click one to switch to it	
+AsstFoot	IDS_ASST_FOOT	5844	Key 用 Windows 加密保存在这台电脑上，只发给你选择的服务。改动立即生效。	Keys are encrypted by Windows on this PC and sent only to the service you chose. Changes apply right away.	
+AsstErrAuthSub	IDS_ASST_ERR_AUTH_SUB	5845	检查是否完整复制，或到控制台重新创建	Check that it was copied in full, or create a new one in the console	
+AsstErrBalanceSub	IDS_ASST_ERR_BALANCE_SUB	5846	到服务方控制台充值后再试	Top up in the service's console, then try again	
+AsstErrNetworkSub	IDS_ASST_ERR_NETWORK_SUB	5847	检查网络或代理，或核对接口地址	Check the network or proxy, or the API address	
+AsstErrOtherSub	IDS_ASST_ERR_OTHER_SUB	5848	核对接口地址是否正确	Check that the API address is right	
+AsstErrOllama	IDS_ASST_ERR_OLLAMA	5849	连不上 Ollama	Can't reach Ollama	
+AsstErrOllamaSub	IDS_ASST_ERR_OLLAMA_SUB	5850	确认 Ollama 已安装并正在运行	Make sure Ollama is installed and running	
+AsstReplace	IDS_ASST_REPLACE	5851	更换	Replace	
+AsstEdit	IDS_ASST_EDIT	5852	修改	Edit	

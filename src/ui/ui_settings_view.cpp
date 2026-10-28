@@ -1305,7 +1305,22 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
 
 D2D1_RECT_F MainRenderer::SettingsDropdownBounds(const WindowViewModel& vm, int index, float window_w, float window_h) const {
     const auto l=MakeSettingsLayout(vm,D2D1::RectF(0,0,window_w,window_h),scale_,title_bar_height_,status_height_,&painter_);
+    if(index==3) return l.assistant.model_choice;
     return index==0 ? l.effect_choice : index==2 ? l.pack_dl_choice : l.language_choice;
+}
+
+bool MainRenderer::SettingsAssistantField(AsstField which, D2D1_RECT_F& field, D2D1_RECT_F& clip) const {
+    const D2D1_RECT_F& r=asst_fields_[static_cast<int>(which)];
+    if(!asst_drawn_ || r.right<=r.left) return false;
+    field=r;
+    clip=asst_clip_;
+    return true;
+}
+
+void MainRenderer::SettingsAssistantEditColors(D2D1_COLOR_F& back, D2D1_COLOR_F& fore, D2D1_COLOR_F& hint) const {
+    back=asst_edit_back_;
+    fore=asst_edit_fore_;
+    hint=asst_edit_hint_;
 }
 
 float MainRenderer::SettingsDestinationOffset(const WindowViewModel& vm, int setting_id, float window_w, float window_h) const {

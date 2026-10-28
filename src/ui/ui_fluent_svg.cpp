@@ -255,6 +255,45 @@ bool MainRenderer::DrawFluentSvg(int resource_id, const D2D1_RECT_F& bounds, flo
     return DrawFluentSvgFitted(empty_state_svg_dc_.get(), it->second.get(), bounds, opacity);
 }
 
+// Vendor marks share the document cache under negative keys (one per theme):
+// their monochrome parts are currentColor, written in before parsing.
+bool MainRenderer::DrawProviderLogo(int resource_id, bool dark, const D2D1_RECT_F& bounds) {
+    if (compat::LegacyMode() || !compositor_ || !compositor_->Dc() || resource_id <= 0) return false;
+    const int key = -(resource_id * 2 + (dark ? 1 : 0));
+    if (fluent_svg_failed_.count(key)) return false;
+    auto it = fluent_svgs_.find(key);
+    if (it == fluent_svgs_.end() || !it->second.get() || !empty_state_svg_dc_.get()) {
+        if (!empty_state_svg_dc_.get() &&
+            FAILED(compositor_->Dc()->QueryInterface(IID_PPV_ARGS(&empty_state_svg_dc_)))) {
+            return false;
+        }
+        const HMODULE module = GetModuleHandleW(nullptr);
+        const HRSRC resource = FindResourceW(module, MAKEINTRESOURCEW(resource_id), RT_RCDATA);
+        const HGLOBAL loaded = resource ? LoadResource(module, resource) : nullptr;
+        const DWORD byte_count = resource ? SizeofResource(module, resource) : 0;
+        const void* bytes = loaded ? LockResource(loaded) : nullptr;
+        if (!bytes || byte_count == 0) {
+            fluent_svg_failed_.insert(key);
+            return false;
+        }
+        std::string markup(static_cast<const char*>(bytes), byte_count);
+        const std::string_view color = dark ? "#F2F2F2" : "#1B1B1B";
+        for (size_t at = markup.find("currentColor"); at != std::string::npos; at = markup.find("currentColor", at))
+            markup.replace(at, 12, color);
+        ComPtr<ID2D1SvgDocument> document;
+        if (!CreateSvgFromBytes(empty_state_svg_dc_.get(), markup.data(), static_cast<DWORD>(markup.size()), document)) {
+            const std::string simplified = SimplifySvgForD2d(markup);
+            if (simplified.empty() || !CreateSvgFromBytes(empty_state_svg_dc_.get(), simplified.data(),
+                                                          static_cast<DWORD>(simplified.size()), document)) {
+                fluent_svg_failed_.insert(key);
+                return false;
+            }
+        }
+        it = fluent_svgs_.insert_or_assign(key, std::move(document)).first;
+    }
+    return DrawFluentSvgFitted(empty_state_svg_dc_.get(), it->second.get(), bounds, 1.0f);
+}
+
 ID2D1Bitmap1* MainRenderer::FluentSvgBitmap(int resource_id, ID2D1SvgDocument* svg,
                                             int size_q, int fx, int fy) {
     const uint64_t key = (static_cast<uint64_t>(static_cast<uint32_t>(resource_id)) << 32) |

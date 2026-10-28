@@ -4,30 +4,90 @@
 // Drawing: ui_settings_assistant.cpp; clicks: HitTestResult::SettingsAssistant
 // (AssistantHit), handled in app/ai_assistant_settings.cpp; data: AssistantPageView.
 //
-// Three cards: 模型服务 (where the assistant's model comes from), 语音输入, and
-// a pointer to AI 与 MCP, which is something else (outside apps using Pulse).
+// 模型服务 is one card in three stages: tiles to pick a service from, the
+// picked service with its key field and 连接, and the service in use with its
+// default model, 思考, key, address and the other services whose keys are kept.
+// Then 语音输入, and a pointer to AI 与 MCP (outside apps using Pulse).
 
 namespace asst_text {
 inline const std::wstring& T(l10n::StringId id) { return l10n::Get(id); }
-inline std::wstring Fill(l10n::StringId id, std::wstring_view key, const std::wstring& value) {
-    std::wstring text = T(id);
+inline std::wstring Fill(std::wstring text, std::wstring_view key, const std::wstring& value) {
     if (const size_t at = text.find(key); at != std::wstring::npos) text.replace(at, key.size(), value);
     return text;
 }
+inline std::wstring Fill(l10n::StringId id, std::wstring_view key, const std::wstring& value) {
+    return Fill(T(id), key, value);
+}
 inline const std::wstring& Title() { return T(l10n::StringId::AsstPageTitle); }
 inline const std::wstring& Intro() { return T(l10n::StringId::AsstPageIntro); }
-inline const std::wstring& ManageButton(const AssistantPageView& v) {
-    return T(v.key_saved ? l10n::StringId::AsstManage : l10n::StringId::AsstConnect);
-}
-// The badge at a card's top right, and its tone.
-inline const std::wstring& ModelBadge(const AssistantPageView& v) {
+// The header row of the card.
+inline const std::wstring& HeadTitle(const AssistantPageView& v) {
     using I = l10n::StringId;
-    if (!v.key_saved) return T(I::NotSet);
+    return T(v.in_use ? I::AsstPickChange : I::AsstPickTitle);
+}
+inline std::wstring HeadCaption(const AssistantPageView& v) {
+    using I = l10n::StringId;
+    switch (v.stage) {
+        case AsstStage::Pick: return T(I::AsstPickDesc);
+        case AsstStage::Setup: return v.custom ? T(I::AsstCustomSub) : Fill(I::AsstCompatSub, L"{sub}", v.sub);
+        default: return v.host_line;
+    }
+}
+inline const std::wstring& ConnBadge(const AssistantPageView& v) {
+    using I = l10n::StringId;
     return T(v.conn == AsstConn::Failed ? I::AsstBadgeFailed : I::AiConnStatusOn);
 }
-inline fluent::BadgeKind ModelBadgeKind(const AssistantPageView& v) {
-    if (!v.key_saved) return fluent::BadgeKind::Neutral;
+inline fluent::BadgeKind ConnBadgeKind(const AssistantPageView& v) {
     return v.conn == AsstConn::Failed ? fluent::BadgeKind::Danger : fluent::BadgeKind::Success;
+}
+// The header's buttons, right to left.
+inline int HeadButtons(const AssistantPageView& v, l10n::StringId (&out)[3], int (&targets)[3]) {
+    using I = l10n::StringId;
+    int n = 0;
+    if (v.stage == AsstStage::Pick) {
+        if (v.in_use) { out[n] = I::Cancel; targets[n++] = kAsstCancel; }
+    } else if (v.stage == AsstStage::Setup) {
+        out[n] = I::AsstRechoose; targets[n++] = kAsstRechoose;
+    } else {
+        out[n] = I::AsstChangeService; targets[n++] = kAsstChange;
+        out[n] = I::AsstTest; targets[n++] = kAsstTest;
+    }
+    return n;
+}
+inline std::wstring KeyCaption(const AssistantPageView& v) {
+    using I = l10n::StringId;
+    if (v.stage == AsstStage::Connected) return v.key_mask;
+    return v.console.empty() ? T(I::AsstKeyGetPlain) : Fill(I::AsstKeyGet, L"{console}", v.console) + L" \u2197";
+}
+inline std::wstring UrlCaption(const AssistantPageView& v) {
+    using I = l10n::StringId;
+    if (v.custom && v.stage == AsstStage::Setup) return T(I::AsstUrlCustomDesc);
+    return v.url_default ? Fill(I::AsstUrlDefault, L"{url}", v.url) : v.url;
+}
+inline std::wstring ConnectCaption(const AssistantPageView& v) {
+    using I = l10n::StringId;
+    if (!v.error_title.empty()) return v.error_title + L" \u00b7 " + v.error_sub;
+    return T(v.needs_key ? I::AsstConnectDesc : I::AsstConnectOllama);
+}
+inline const std::wstring& ThinkTitle(const AssistantPageView& v) {
+    using I = l10n::StringId;
+    return T(v.think == AsstThink::Toggle ? I::AsstThinkToggle : I::AiAsstEffortHeading);
+}
+inline const std::wstring& ThinkCaption(const AssistantPageView& v) {
+    using I = l10n::StringId;
+    return T(v.think == AsstThink::Toggle ? I::AsstThinkToggleDesc : I::AsstThinkLevelsDesc);
+}
+inline int ThinkSegments(const AssistantPageView& v) {
+    return v.think == AsstThink::Levels4 ? 4 : v.think == AsstThink::Levels3 ? 3 : 0;
+}
+inline const std::wstring& ThinkLabel(const AssistantPageView& v, int i) {
+    using I = l10n::StringId;
+    static constexpr I k4[] = {I::AiAsstEffortOff, I::AiAsstEffortLow, I::AiAsstEffortMid, I::AiAsstEffortHigh};
+    return T(k4[v.think == AsstThink::Levels3 ? (std::min)(i + 1, 3) : (std::clamp)(i, 0, 3)]);
+}
+// The checked segment: Levels3 has no 关 (effort 0 shows as 低).
+inline int ThinkChecked(const AssistantPageView& v) {
+    return v.think == AsstThink::Levels3 ? (std::max)(v.effort - 1, 0) : v.effort;
 }
 inline const std::wstring& VoiceBadge(const AssistantPageView& v) {
     using I = l10n::StringId;
@@ -41,35 +101,11 @@ inline fluent::BadgeKind VoiceBadgeKind(const AssistantPageView& v) {
 inline const std::wstring& McpBadge(const AssistantPageView& v) {
     return T(v.mcp_installed ? l10n::StringId::Installed : l10n::StringId::NotInstalled);
 }
-inline std::wstring ServiceName(const AssistantPageView& v) {
-    return T(v.official ? l10n::StringId::AsstServiceOfficial : l10n::StringId::AsstServiceCustom);
-}
-inline std::wstring ModelCount(const AssistantPageView& v) {
-    if (v.model_count == 0) return T(l10n::StringId::AsstModelUnlisted);
-    return Fill(l10n::StringId::AsstModelCount, L"{n}", std::to_wstring(v.model_count));
-}
-inline std::wstring KeyState(const AssistantPageView& v) {
-    return T(v.key_saved ? l10n::StringId::AsstKeySaved : l10n::StringId::NotSet);
-}
-inline std::wstring ConnState(const AssistantPageView& v) {
-    using I = l10n::StringId;
-    const std::wstring when = Fill(I::AsstToday, L"{time}", v.conn_time);
-    switch (v.conn) {
-        case AsstConn::Ok: return Fill(I::AsstConnOk, L"{time}", when);
-        case AsstConn::Failed: return Fill(I::AsstConnBad, L"{time}", when);
-        case AsstConn::Testing: return T(I::AsstConnTesting);
-        default: return T(I::AsstConnNever);
-    }
-}
-inline const std::wstring& RowLabel(int row) {
-    using I = l10n::StringId;
-    const I ids[] = {I::AsstService, I::AsstDefaultModel, I::AsstKey, I::AsstLastConn};
-    return T(ids[row < 0 || row > 3 ? 0 : row]);
-}
 } // namespace asst_text
 
 inline float LayoutSettingsAssistant(SettingsLayout& l, const WindowViewModel& vm, float s, float y,
                                      const fluent::Painter* painter) {
+    using I = l10n::StringId;
     AssistantPageLayout& o = l.assistant;
     o = {};
     const AssistantPageView& v = vm.settings_assistant;
@@ -81,54 +117,195 @@ inline float LayoutSettingsAssistant(SettingsLayout& l, const WindowViewModel& v
         return h > 0.0f ? h : 20.0f * s;
     };
     auto button_w = [&](std::wstring_view text) { return painter ? painter->MeasureButtonWidth(text) : 88.0f * s; };
-    auto badge = [&](float top, std::wstring_view text) {
-        const float w = painter ? painter->MeasureBadgeWidth(text) : 56.0f * s;
-        return D2D1::RectF(inner_right - w, top + 14.0f * s, inner_right, top + 36.0f * s);
-    };
     auto section = [&](bool first) {
         y += first ? 4.0f * s : 22.0f * s;
         const auto r = D2D1::RectF(left, y, right, y + 30.0f * s);
         y = r.bottom;
         return r;
     };
-    // A card's header: title and caption left of the buttons (which sit under
-    // the badge); returns the header height, at least `minimum` (rows that run
-    // under the buttons start below them).
-    auto header = [&](std::wstring_view caption, float buttons_left, float minimum) {
-        return (std::max)(minimum * s, 38.0f * s + caption_h(caption, buttons_left - 14.0f * s - text_left) + 8.0f * s);
+    // A row: title and caption from text_left to controls_left; at least 64.
+    auto row = [&](std::wstring_view caption, float controls_left) {
+        const float h = (std::max)(64.0f * s, 38.0f * s + caption_h(caption, controls_left - 14.0f * s - text_left) + 12.0f * s);
+        const auto r = D2D1::RectF(left, y, right, y + h);
+        y = r.bottom;
+        return r;
     };
+    // Controls right to left, centred in the row: returns the leftmost edge.
+    auto place = [&](const D2D1_RECT_F& r, float x_right, float w, float h = 32.0f) {
+        const float mid = (r.top + r.bottom) * 0.5f;
+        return D2D1::RectF(x_right - w, mid - h * 0.5f * s, x_right, mid + h * 0.5f * s);
+    };
+    // Fields are 280 wide when there is room (half the row at most).
+    const float field_w = (std::min)(280.0f * s, (inner_right - text_left) * 0.42f);
 
     y += caption_h(asst_text::Intro(), right - left) + 18.0f * s;
 
-    // 模型服务: the service, model, key and last check; 测试连接 / 管理连接….
+    // 模型服务.
     o.model_section = section(true);
+    const float card_top = y;
     {
-        const float top = y;
-        const float manage_w = button_w(asst_text::ManageButton(v));
-        const float test_w = button_w(asst_text::T(l10n::StringId::AsstTest));
-        o.manage = D2D1::RectF(inner_right - manage_w, top + 48.0f * s, inner_right, top + 80.0f * s);
-        o.test = D2D1::RectF(o.manage.left - 8.0f * s - test_w, o.manage.top, o.manage.left - 8.0f * s, o.manage.bottom);
-        o.model_badge = badge(top, asst_text::ModelBadge(v));
-        float ry = top + header(asst_text::T(l10n::StringId::AsstModelDesc), o.test.left, 92.0f);
-        for (auto& r : o.model_rows) {
-            r = D2D1::RectF(text_left, ry, inner_right, ry + 30.0f * s);
-            ry = r.bottom;
+        // Header: buttons (and the badge) at the right.
+        I labels[3]{};
+        int targets[3]{};
+        const int n = asst_text::HeadButtons(v, labels, targets);
+        float x = inner_right;
+        float widths[3]{};
+        for (int i = 0; i < n; ++i) { widths[i] = button_w(asst_text::T(labels[i])); x -= widths[i] + (i ? 8.0f * s : 0.0f); }
+        float badge_w = 0.0f;
+        const bool badge = v.stage == AsstStage::Connected || (v.stage == AsstStage::Pick && !v.in_use);
+        if (badge) {
+            const std::wstring& text = v.stage == AsstStage::Pick ? asst_text::T(I::AsstNotConnectedBadge)
+                                                                   : asst_text::ConnBadge(v);
+            badge_w = painter ? painter->MeasureBadgeWidth(text) : 56.0f * s;
+            x -= badge_w + (n ? 10.0f * s : 0.0f);
         }
-        const std::wstring& foot = asst_text::T(l10n::StringId::AsstManageFoot);
-        ry += 12.0f * s;
-        o.model_foot = D2D1::RectF(text_left, ry, inner_right, ry + caption_h(foot, inner_right - text_left - 28.0f * s) + 18.0f * s);
-        y = o.model_foot.bottom + 16.0f * s;
-        o.model_card = D2D1::RectF(left, top, right, y);
+        o.head = row(asst_text::HeadCaption(v), x);
+        float bx = inner_right;
+        for (int i = 0; i < n; ++i) {
+            o.head_buttons[i] = place(o.head, bx, widths[i]);
+            bx = o.head_buttons[i].left - 8.0f * s;
+        }
+        if (badge) o.head_badge = place(o.head, bx + 8.0f * s - (n ? 10.0f * s : 0.0f), badge_w, 22.0f);
+    }
+    if (v.stage == AsstStage::Pick) {
+        // Five columns of tiles, then 更多's chips.
+        const float gap = 8.0f * s, pad = 16.0f * s, tile_h = 88.0f * s;
+        const float tile_w = (right - left - pad * 2 - gap * 4) / 5.0f;
+        const int first = (std::min)(static_cast<int>(v.tiles.size()), kAsstTiles);
+        for (int i = 0; i < first; ++i) {
+            const float tx = left + pad + static_cast<float>(i % 5) * (tile_w + gap);
+            const float ty = y + 4.0f * s + static_cast<float>(i / 5) * (tile_h + gap);
+            o.tiles[i] = D2D1::RectF(tx, ty, tx + tile_w, ty + tile_h);
+        }
+        y += 4.0f * s + static_cast<float>((first + 4) / 5) * (tile_h + gap) + 4.0f * s;
+        if (static_cast<int>(v.tiles.size()) > first) {
+            const float lw = button_w(asst_text::T(I::AsstMore)) - 16.0f * s;
+            o.more_label = D2D1::RectF(left + pad, y, left + pad + lw, y + 30.0f * s);
+            float cx = o.more_label.right + 8.0f * s;
+            for (size_t i = static_cast<size_t>(first); i < v.tiles.size(); ++i) {
+                const float w = button_w(v.tiles[i].name) + 20.0f * s;
+                o.more.push_back(D2D1::RectF(cx, y, cx + w, y + 30.0f * s));
+                cx += w + 8.0f * s;
+            }
+            y += 30.0f * s + 14.0f * s;
+        } else {
+            y += 8.0f * s;
+        }
+    } else if (v.stage == AsstStage::Setup) {
+        if (v.needs_key) {
+            const float paste_w = button_w(asst_text::T(I::AiConnPaste));
+            const float controls = inner_right - paste_w - 8.0f * s - field_w;
+            o.key_row = row(asst_text::KeyCaption(v), controls);
+            o.key_paste = place(o.key_row, inner_right, paste_w);
+            o.key_field = place(o.key_row, o.key_paste.left - 8.0f * s, field_w);
+            o.key_eye = D2D1::RectF(o.key_field.right - 32.0f * s, o.key_field.top + 2.0f * s,
+                                    o.key_field.right - 2.0f * s, o.key_field.bottom - 2.0f * s);
+            if (!v.console.empty())
+                o.key_link = D2D1::RectF(text_left, o.key_row.top + 36.0f * s, controls - 14.0f * s, o.key_row.bottom - 8.0f * s);
+        }
+        if (v.custom || v.url_editing) {
+            o.url_row = row(asst_text::UrlCaption(v), inner_right - field_w);
+            o.url_field = place(o.url_row, inner_right, field_w);
+        } else {
+            const float w = button_w(asst_text::T(I::AsstEdit));
+            o.url_row = row(asst_text::UrlCaption(v), inner_right - w);
+            o.url_buttons[0] = place(o.url_row, inner_right, w);
+        }
+        const std::wstring& label = asst_text::T(v.connecting ? I::AsstConnecting : I::AsstConnectBtn);
+        const float w = button_w(label) + (v.connecting ? 24.0f * s : 0.0f);
+        o.connect_row = row(asst_text::ConnectCaption(v), inner_right - w);
+        o.connect = place(o.connect_row, inner_right, w);
+    } else {
+        if (!v.fresh.empty()) {
+            const float h = (std::max)(48.0f * s, caption_h(v.fresh, inner_right - text_left) + 24.0f * s);
+            o.fresh_row = D2D1::RectF(left, y, right, y + h);
+            y = o.fresh_row.bottom;
+        }
+        // 默认模型: the drop-down, or a field for a typed name.
+        if (v.model_editing) {
+            const float save_w = button_w(asst_text::T(I::Save)), cancel_w = button_w(asst_text::T(I::Cancel));
+            const float controls = inner_right - cancel_w - save_w - field_w - 16.0f * s;
+            o.model_row = row(asst_text::T(I::AsstModelDesc2), controls);
+            o.model_buttons[1] = place(o.model_row, inner_right, cancel_w);
+            o.model_buttons[0] = place(o.model_row, o.model_buttons[1].left - 8.0f * s, save_w);
+            o.model_field = place(o.model_row, o.model_buttons[0].left - 8.0f * s, field_w);
+        } else {
+            o.model_row = row(asst_text::T(I::AsstModelDesc2), inner_right - field_w);
+            o.model_choice = place(o.model_row, inner_right, field_w);
+        }
+        // 思考强度 / 深度思考.
+        if (const int n = asst_text::ThinkSegments(v)) {
+            float widths[4]{}, total = 0.0f;
+            for (int i = 0; i < n; ++i) {
+                widths[i] = (std::max)(52.0f * s, button_w(asst_text::ThinkLabel(v, i)) - 8.0f * s);
+                total += widths[i];
+            }
+            o.think_row = row(asst_text::ThinkCaption(v), inner_right - total);
+            float sx = inner_right - total;
+            for (int i = 0; i < n; ++i) {
+                o.think_seg[i] = place(o.think_row, sx + widths[i], widths[i]);
+                sx += widths[i];
+            }
+        } else if (v.think == AsstThink::Toggle) {
+            o.think_row = row(asst_text::ThinkCaption(v), inner_right - 42.0f * s);
+            o.think_toggle = place(o.think_row, inner_right, 42.0f * s);
+        }
+        // API Key: 更换, 移除 (Ollama has none).
+        if (v.needs_key) {
+            const float a = button_w(asst_text::T(I::AsstReplace)), b = button_w(asst_text::T(I::Remove));
+            o.key_row = row(asst_text::KeyCaption(v), inner_right - a - b - 8.0f * s);
+            o.key_buttons[1] = place(o.key_row, inner_right, b);
+            o.key_buttons[0] = place(o.key_row, o.key_buttons[1].left - 8.0f * s, a);
+        }
+        // 接口地址: 修改, or a field with 保存 / 取消.
+        if (v.url_editing) {
+            const float save_w = button_w(asst_text::T(I::Save)), cancel_w = button_w(asst_text::T(I::Cancel));
+            const float controls = inner_right - cancel_w - save_w - field_w - 16.0f * s;
+            o.url_row = row(asst_text::UrlCaption(v), controls);
+            o.url_buttons[1] = place(o.url_row, inner_right, cancel_w);
+            o.url_buttons[0] = place(o.url_row, o.url_buttons[1].left - 8.0f * s, save_w);
+            o.url_field = place(o.url_row, o.url_buttons[0].left - 8.0f * s, field_w);
+        } else {
+            const float w = button_w(asst_text::T(I::AsstEdit));
+            o.url_row = row(asst_text::UrlCaption(v), inner_right - w);
+            o.url_buttons[0] = place(o.url_row, inner_right, w);
+        }
+        // 其他已保存的服务: chips under the title, wrapping.
+        if (!v.others.empty()) {
+            const float top = y;
+            float cx = text_left, cy = top + 38.0f * s + caption_h(asst_text::T(I::AsstOthersDesc), inner_right - text_left) + 6.0f * s;
+            for (const AsstOtherView& other : v.others) {
+                std::wstring label = other.name;
+                if (!other.model.empty()) label += L"  " + other.model;
+                const float w = (std::min)(button_w(label) + 22.0f * s, inner_right - text_left);
+                if (cx > text_left && cx + w > inner_right) { cx = text_left; cy += 38.0f * s; }
+                o.others.push_back(D2D1::RectF(cx, cy, cx + w, cy + 32.0f * s));
+                cx += w + 8.0f * s;
+            }
+            o.others_row = D2D1::RectF(left, top, right, cy + 32.0f * s + 14.0f * s);
+            y = o.others_row.bottom;
+        }
+    }
+    y += 4.0f * s;
+    o.model_card = D2D1::RectF(left, card_top, right, y);
+    {
+        // The note under the card, like every other page's.
+        const std::wstring& foot = asst_text::T(I::AsstFoot);
+        const float h = caption_h(foot, right - left - 12.0f * s);
+        o.model_foot = D2D1::RectF(left + 6.0f * s, y + 8.0f * s, right - 6.0f * s, y + 8.0f * s + h);
+        y = o.model_foot.bottom;
     }
 
     // 语音输入: the speech service; 设置语音….
     o.voice_section = section(false);
     {
         const float top = y;
-        const float w = button_w(asst_text::T(l10n::StringId::AsstVoiceSet));
+        const float w = button_w(asst_text::T(I::AsstVoiceSet));
         o.voice_button = D2D1::RectF(inner_right - w, top + 48.0f * s, inner_right, top + 80.0f * s);
-        o.voice_badge = badge(top, asst_text::VoiceBadge(v));
-        const float ry = top + header(asst_text::T(l10n::StringId::AsstVoiceDesc), o.voice_button.left, 66.0f);
+        const float bw = painter ? painter->MeasureBadgeWidth(asst_text::VoiceBadge(v)) : 56.0f * s;
+        o.voice_badge = D2D1::RectF(inner_right - bw, top + 14.0f * s, inner_right, top + 36.0f * s);
+        const float desc = caption_h(asst_text::T(I::AsstVoiceDesc), o.voice_button.left - 14.0f * s - text_left);
+        const float ry = top + (std::max)(66.0f * s, 38.0f * s + desc + 8.0f * s);
         o.voice_row = D2D1::RectF(text_left, ry, o.voice_button.left - 12.0f * s, ry + 30.0f * s);
         y = o.voice_row.bottom + 14.0f * s;
         o.voice_card = D2D1::RectF(left, top, right, y);
@@ -138,10 +315,12 @@ inline float LayoutSettingsAssistant(SettingsLayout& l, const WindowViewModel& v
     o.mcp_section = section(false);
     {
         const float top = y;
-        const float w = button_w(asst_text::T(l10n::StringId::AsstMcpManage));
+        const float w = button_w(asst_text::T(I::AsstMcpManage));
         o.mcp_button = D2D1::RectF(inner_right - w, top + 48.0f * s, inner_right, top + 80.0f * s);
-        o.mcp_badge = badge(top, asst_text::McpBadge(v));
-        const float ry = top + header(asst_text::T(l10n::StringId::AsstMcpDesc), o.mcp_button.left, 70.0f);
+        const float bw = painter ? painter->MeasureBadgeWidth(asst_text::McpBadge(v)) : 56.0f * s;
+        o.mcp_badge = D2D1::RectF(inner_right - bw, top + 14.0f * s, inner_right, top + 36.0f * s);
+        const float desc = caption_h(asst_text::T(I::AsstMcpDesc), o.mcp_button.left - 14.0f * s - text_left);
+        const float ry = top + (std::max)(70.0f * s, 38.0f * s + desc + 8.0f * s);
         o.mcp_meta = D2D1::RectF(text_left, ry - 4.0f * s, o.mcp_button.left - 12.0f * s, ry + 22.0f * s);
         y = o.mcp_meta.bottom + 14.0f * s;
         o.mcp_card = D2D1::RectF(left, top, right, y);
@@ -153,9 +332,43 @@ inline int HitTestSettingsAssistant(const SettingsLayout& l, const WindowViewMod
     const AssistantPageLayout& o = l.assistant;
     auto in = [&](const D2D1_RECT_F& r) { return r.right > r.left && x >= r.left && x < r.right && y >= r.top && y < r.bottom; };
     const AssistantPageView& v = vm.settings_assistant;
-    if (in(o.test) && v.key_saved && v.conn != AsstConn::Testing) return kAsstTest;
-    if (in(o.manage)) return kAsstManage;
+    l10n::StringId labels[3]{};
+    int targets[3]{};
+    const int n = asst_text::HeadButtons(v, labels, targets);
+    for (int i = 0; i < n; ++i) {
+        if (!in(o.head_buttons[i])) continue;
+        if (targets[i] == kAsstTest && v.conn == AsstConn::Testing) return -1;
+        return targets[i];
+    }
+    for (int i = 0; i < kAsstTiles; ++i)
+        if (in(o.tiles[i])) return kAsstTileBase + i;
+    for (size_t i = 0; i < o.more.size(); ++i)
+        if (in(o.more[i])) return kAsstTileBase + kAsstTiles + static_cast<int>(i);
+    if (v.stage == AsstStage::Setup) {
+        if (in(o.key_eye)) return kAsstReveal;
+        if (in(o.key_field)) return kAsstKeyField;
+        if (in(o.key_paste)) return kAsstPaste;
+        if (in(o.key_link)) return kAsstKeyLink;
+        if (in(o.url_field)) return kAsstUrlField;
+        if (in(o.url_buttons[0])) return kAsstUrlEdit;
+        if (in(o.connect) && !v.connecting) return kAsstConnect;
+    }
     if (in(o.voice_button)) return kAsstVoice;
     if (in(o.mcp_button)) return kAsstMcp;
+    if (v.stage != AsstStage::Connected) return -1;
+    if (in(o.model_choice)) return kAsstModel;
+    if (in(o.model_field)) return kAsstModelField;
+    if (in(o.model_buttons[0])) return kAsstModelSave;
+    if (in(o.model_buttons[1])) return kAsstModelCancel;
+    for (int i = 0; i < 4; ++i)
+        if (in(o.think_seg[i])) return kAsstThinkBase + i;
+    if (in(o.think_toggle)) return kAsstThinkToggle;
+    if (in(o.key_buttons[0])) return kAsstRekey;
+    if (in(o.key_buttons[1])) return kAsstRemoveKey;
+    if (in(o.url_field)) return kAsstUrlField;
+    if (in(o.url_buttons[0])) return v.url_editing ? kAsstUrlSave : kAsstUrlEdit;
+    if (in(o.url_buttons[1])) return kAsstUrlCancel;
+    for (size_t i = 0; i < o.others.size(); ++i)
+        if (in(o.others[i])) return kAsstOtherBase + static_cast<int>(i);
     return -1;
 }

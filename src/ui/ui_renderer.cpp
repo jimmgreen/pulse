@@ -1117,6 +1117,7 @@ void MainRenderer::Render(const WindowViewModel& vm, const D2D1_RECT_F& rect,
                           const Theme& theme) {
     if (!compositor_ || !compositor_->Dc()) return;
     ++motion_frame_;
+    asst_drawn_ = false;   // DrawSettingsAssistant sets it again
     last_frame_overlay_ = OverlayUp(vm);
     thumbnail_cache_.AdvanceFrame();
     folder_thumbnail_cache_.BeginFrame();

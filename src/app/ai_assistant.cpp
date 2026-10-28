@@ -3,6 +3,7 @@
 
 #include "ai_assistant_chat.h"
 #include "ai_assistant_conn.h"
+#include "ai_assistant_settings.h"
 #include "ai_assistant_voice.h"
 #include "ai_model_list.h"
 #include "ai_settings.h"
@@ -795,8 +796,15 @@ void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm) {
     }
 }
 
+void AiAssistantPrefsChanged(AppState& s) {
+    s.aiAssistant.prefs_loaded = false;
+    LoadPrefs(s.aiAssistant);
+    Redraw(s);
+}
+
 void AiAssistantLayout(AppState& s) {
     AiAssistantState& a = s.aiAssistant;
+    AssistantSettingsLayout(s);
     AiConnLayout(s);
     AiVoiceLayout(s);
     if (!a.edit) return;
@@ -1001,6 +1009,7 @@ HBRUSH AiAssistantCtlColor(AppState& s, HDC hdc, HWND edit) {
     AiAssistantState& a = s.aiAssistant;
     if (!edit) return nullptr;
     if (edit != a.edit) {
+        if (HBRUSH page = AssistantSettingsCtlColor(s, hdc, edit)) return page;
         if (HBRUSH voice = AiVoiceCtlColor(s, hdc, edit)) return voice;
         return AiConnCtlColor(s, hdc, edit);
     }
@@ -1019,6 +1028,7 @@ HBRUSH AiAssistantCtlColor(AppState& s, HDC hdc, HWND edit) {
 
 void AiAssistantDpiChanged(AppState& s) {
     AiAssistantState& a = s.aiAssistant;
+    AssistantSettingsDpiChanged(s);
     AiConnDpiChanged(s);
     AiVoiceDpiChanged(s);
     if (!a.edit) return;
@@ -1030,6 +1040,7 @@ void AiAssistantDpiChanged(AppState& s) {
 void AiAssistantDestroy(AppState& s) {
     AiAssistantState& a = s.aiAssistant;
     if (s.hwnd) KillTimer(s.hwnd, kTipTimer);
+    AssistantSettingsDestroy(s);
     AiConnDestroy(s);
     AiVoiceDestroy(s);
     if (a.edit) DestroyWindow(a.edit);
