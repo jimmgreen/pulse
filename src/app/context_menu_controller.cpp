@@ -203,7 +203,7 @@ std::vector<ShellMenuEntry> ApplyExplorerPrefs(const ContextMenuPrefs& prefs,
     std::vector<Ranked> kept;
     kept.reserve(entries.size());
     int mru_kept = 0;
-    const int mru_cap = (std::max)(0, prefs.open_with_mru);
+    const int mru_cap = prefs.open_with_mru;
     int vendor_index = -1;
 
     const bool compress_on = prefs.ItemEnabled(ipc::CompressCatalogKey(),
@@ -223,7 +223,7 @@ std::vector<ShellMenuEntry> ApplyExplorerPrefs(const ContextMenuPrefs& prefs,
             : ipc::CatalogKey(e.text, flyout);
         if (!prefs.ItemEnabled(key, cat, e.from_com)) continue;
         if (cat == ipc::CtxMenuCategory::OpenWith && ipc::IsOpenWithMruText(e.text)) {
-            if (mru_kept >= mru_cap) continue;
+            if (mru_cap >= 0 && mru_kept >= mru_cap) continue;
             ++mru_kept;
         }
         // Explorer's order: vendor flyouts, then software verbs, 打开方式, 打印,

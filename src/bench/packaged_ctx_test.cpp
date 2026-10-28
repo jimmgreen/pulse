@@ -118,9 +118,10 @@ public:
     IFACEMETHODIMP GetTitle(IShellItemArray*, LPWSTR* out) override {
         return SHStrDupW(title_.c_str(), out);
     }
+    std::wstring icon_reference;
     IFACEMETHODIMP GetIcon(IShellItemArray*, LPWSTR* out) override {
         *out = nullptr;
-        return E_NOTIMPL;
+        return icon_reference.empty() ? E_NOTIMPL : SHStrDupW(icon_reference.c_str(), out);
     }
     IFACEMETHODIMP GetToolTip(IShellItemArray*, LPWSTR* out) override {
         *out = nullptr;
@@ -206,6 +207,7 @@ void TestAdapter(IShellItemArray* items) {
     constexpr UINT kFirst = 100;
     {
         auto* flat = new FakeCommand(L"Open in Terminal");
+        flat->icon_reference = L"%SystemRoot%\\System32\\shell32.dll,0";
         IContextMenu* menu = nullptr;
         Check(SUCCEEDED(CreateExplorerCommandMenu(flat, items, &menu)) && menu, "adapter created");
         HMENU popup = CreatePopupMenu();
@@ -214,6 +216,24 @@ void TestAdapter(IShellItemArray* items) {
                   ItemText(popup, 0) == L"Open in Terminal" &&
                   GetMenuItemID(popup, 0) == kFirst,
               "flat command inserts one item with the first id");
+        MENUITEMINFOW icon_info{ sizeof(icon_info) };
+        icon_info.fMask = MIIM_BITMAP;
+        BITMAP bitmap{};
+        Check(GetMenuItemInfoW(popup, 0, TRUE, &icon_info) && icon_info.hbmpItem &&
+                  GetObjectW(icon_info.hbmpItem, sizeof(bitmap), &bitmap) &&
+                  bitmap.bmWidth == 32 && bitmap.bmHeight == 32 && bitmap.bmBits,
+              "GetIcon resource becomes a real menu bitmap");
+        bool visible_pixel = false;
+        bool transparent_pixel = false;
+        if (bitmap.bmBits && bitmap.bmWidth == 32 && bitmap.bmHeight == 32) {
+            const auto* pixels = static_cast<const unsigned char*>(bitmap.bmBits);
+            for (size_t i = 3; i < 32 * 32 * 4; i += 4) {
+                visible_pixel |= pixels[i] != 0;
+                transparent_pixel |= pixels[i] == 0;
+            }
+        }
+        Check(visible_pixel && transparent_pixel,
+              "resource icon preserves visible pixels and transparent background");
         Check(SUCCEEDED(InvokeOffset(menu, 0)) && flat->invoked == 1 && flat->last_items == items,
               "flat command invokes with the bound items");
         Check(FAILED(InvokeOffset(menu, 1)) && flat->invoked == 1, "out-of-range offset rejected");

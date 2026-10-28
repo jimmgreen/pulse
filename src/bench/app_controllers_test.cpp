@@ -1235,6 +1235,34 @@ bool TestOpenWithFlyoutReplacesStatic() {
 
 // Prefs v1 -> v2: verdicts of the old "everyone still running after 1 s"
 // rule are dropped, the user's explicit switches stay, per-type timings go.
+bool TestDefaultMenuCompleteness() {
+    using namespace pulse::app;
+    ContextMenuPrefs prefs;
+    prefs.persist = false;
+    prefs.ResetToDefaults();
+    std::vector<ShellMenuEntry> entries;
+    for (int i = 0; i < 12; ++i) {
+        ShellMenuEntry item;
+        item.text = L"Open with Application " + std::to_wstring(i);
+        item.from_com = true;
+        entries.push_back(item);
+    }
+    bool ok = Report("default keeps all twelve COM application recommendations",
+        ApplyExplorerPrefs(prefs, entries).size() == entries.size());
+    const auto key = pulse::ipc::CatalogKey(entries.front().text, false);
+    prefs.SetItemEnabled(key, false);
+    ok &= Report("explicit user disable still hides one recommendation",
+        ApplyExplorerPrefs(prefs, entries).size() == entries.size() - 1);
+    prefs.open_with = false;
+    ok &= Report("user can disable the entire open-with group", ApplyExplorerPrefs(prefs, entries).empty());
+    ContextMenuPrefs back;
+    back.persist = false;
+    ok &= Report("round trip preserves unlimited default and user switches",
+        back.FromJson(prefs.ToJson()) && back.open_with_mru == -1 && !back.open_with &&
+        !back.ItemEnabled(key, pulse::ipc::CtxMenuCategory::OpenWith, true));
+    return ok;
+}
+
 bool TestHungPrefsMigration() {
     using namespace pulse::app;
     bool ok = true;
@@ -1266,9 +1294,10 @@ bool TestHungPrefsMigration() {
     ContextMenuPrefs reloaded;
     reloaded.persist = false;
     const std::wstring v2 = prefs.ToJson();
-    ok &= Report("migrated prefs are written as version 2 and reload without migrating",
-        v2.find(L"\"version\":2") != std::wstring::npos && reloaded.FromJson(v2) &&
+    ok &= Report("migrated prefs are written as version 4 and reload without migrating",
+        v2.find(L"\"version\":4") != std::wstring::npos && reloaded.FromJson(v2) &&
         !reloaded.migrated && reloaded.HandlerEnabled(healthy) && !reloaded.HandlerEnabled(user_off));
+    ok &= Report("old implicit open-with restrictions are removed", reloaded.open_with_com && reloaded.open_with_mru == -1);
     const std::wstring hung = L"h:{cccccccc-0000-0000-0000-000000000003}";
     reloaded.RecordComTiming(hung, 5000);
     reloaded.RecordComTiming(hung, 5000);
@@ -1583,7 +1612,8 @@ int wmain(int argc, wchar_t** argv) {
     if (argc == 2 && std::wstring(argv[1]) == L"--explorer-parity") {
         const bool open_with = TestOpenWithFlyoutReplacesStatic();
         const bool migration = TestHungPrefsMigration();
-        return open_with && migration ? 0 : 1;
+        const bool completeness = TestDefaultMenuCompleteness();
+        return open_with && migration && completeness ? 0 : 1;
     }
     if (argc == 2 && std::wstring(argv[1]) == L"--menu-query-identity") return TestMenuQueryIdentity() ? 0 : 1;
     if (argc == 2 && std::wstring(argv[1]) == L"--network-locations-view")

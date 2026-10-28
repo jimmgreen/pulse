@@ -581,6 +581,39 @@ void TestDefaultMenuConditionalVerbs() {
           "a drive's default-menu slot adds no Send to");
 }
 
+void TestRegisteredExplorerCommand() {
+    const std::wstring key = L"Software\\Classes\\Directory\\Background\\shell\\PulseCommandTest_" +
+        std::to_wstring(GetCurrentProcessId());
+    const wchar_t* clsid = L"{6377F984-27BA-4B21-BF21-A4F55E010001}";
+    HKEY registered = nullptr;
+    const bool created = RegCreateKeyExW(HKEY_CURRENT_USER, key.c_str(), 0, nullptr, 0,
+        KEY_WRITE, nullptr, &registered, nullptr) == ERROR_SUCCESS;
+    Check(created, "registered explorer command fixture");
+    if (!created) return;
+    RegSetValueExW(registered, L"ExplorerCommandHandler", 0, REG_SZ,
+        reinterpret_cast<const BYTE*>(clsid), static_cast<DWORD>((wcslen(clsid) + 1) * sizeof(wchar_t)));
+    RegCloseKey(registered);
+    auto contains = [&](const std::vector<std::wstring>& disabled) {
+        for (const auto& desc : pulse::shell::EnumerateCtxHandlers(true, L"C:\\", disabled))
+            if (_wcsicmp(desc.clsid_text.c_str(), clsid) == 0) return desc.explorer_command;
+        return false;
+    };
+    Check(contains({}), "classic shell ExplorerCommandHandler enters native command adapter");
+    Check(!contains({clsid}), "registered explorer command honors explicit disable");
+    RegDeleteTreeW(HKEY_CURRENT_USER, key.c_str());
+    const std::wstring file_key = L"Software\\Classes\\*\\shell\\PulseCommandTest_" +
+        std::to_wstring(GetCurrentProcessId());
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, file_key.c_str(), 0, nullptr, 0,
+                       KEY_WRITE, nullptr, &registered, nullptr) == ERROR_SUCCESS) {
+        RegSetValueExW(registered, L"ExplorerCommandHandler", 0, REG_SZ,
+            reinterpret_cast<const BYTE*>(clsid), static_cast<DWORD>((wcslen(clsid) + 1) * sizeof(wchar_t)));
+        RegCloseKey(registered);
+        Check(!contains({}), "file explorer command does not leak into background menu");
+        RegDeleteTreeW(HKEY_CURRENT_USER, file_key.c_str());
+    } else {
+        Check(false, "file explorer command fixture");
+    }
+}
 void TestConditionalShellVerbsRegistry() {
     const wchar_t* cls = L"PulseCtxTest.Conditional";
     const std::wstring base = std::wstring(L"Software\\Classes\\") + cls + L"\\shell";
@@ -754,6 +787,11 @@ void TestNativeSendToDrop() {
 
 int wmain(int argc, wchar_t** argv) {
     if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) return 2;
+    if (argc > 1 && wcscmp(argv[1], L"--registered-command") == 0) {
+        TestRegisteredExplorerCommand();
+        CoUninitialize();
+        return passed ? 0 : 1;
+    }
     TestDynamicMenu(false);
     TestDynamicMenu(true);
     TestDynamicMenu(true, true);

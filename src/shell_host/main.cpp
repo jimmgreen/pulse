@@ -12,6 +12,7 @@
 #include "../ipc/protocol.h"
 #include "../ipc/ctx_menu_util.h"
 #include "ctx_handlers.h"
+#include "isolated_start_pin.h"
 #include "packaged_ctx_handlers.h"
 #include "../common/current_user_security.h"
 #include "../common/path_utils.h"
@@ -1517,6 +1518,7 @@ struct HandlerWorker {
     UINT id_last = 0;
     UINT qcm_flags = 0;
     pulse::shell::CtxHandlerSlot slot;
+    std::unique_ptr<pulse::shell::IsolatedStartPinSession> isolated_start_pin;
     std::vector<CtxItemOut> items;
     std::vector<pulse::shell::SendToTarget> send_to;   // native 发送到 only
     HANDLE done_event = nullptr;
@@ -1562,6 +1564,18 @@ DWORD HandlerWorkerThreadImpl(LPVOID param) {
         const std::wstring title = pulse::shell::NativeSendToTitle(&mnemonic);
         pulse::shell::NativeSendToItems(w->send_to, title, mnemonic, w->id_first, w->id_last,
                                         w->items);
+    } else if (_wcsicmp(w->desc.clsid_text.c_str(),
+                       L"{470c0ebd-5d73-4d58-9ced-e91e22e23282}") == 0) {
+        // The default-menu fallback can make Start pinning fail in this
+        // process. Keep its native menu and invocation in a fresh worker.
+        w->isolated_start_pin = std::make_unique<pulse::shell::IsolatedStartPinSession>();
+        const HRESULT hr = w->isolated_start_pin->Query(w->paths, w->owner,
+            w->id_first, w->id_last, w->qcm_flags, w->exit_event, w->items);
+        w->phase = 1;
+        if (FAILED(hr)) {
+            w->items.clear();
+            w->isolated_start_pin.reset();
+        }
     } else if (pulse::shell::BindCtxSelection(w->paths, w->background, bind)) {
         const HRESULT hr = pulse::shell::QueryOneHandler(
             w->desc, bind, w->owner, w->id_first, w->id_last, w->qcm_flags, w->slot, &w->phase);
@@ -1590,7 +1604,11 @@ DWORD HandlerWorkerThreadImpl(LPVOID param) {
                 d.background = w->background;
                 if (IsNativeSendToClsid(w->desc.clsid_text))
                     InvokeNativeSendTo(*w, inv->invoke_req_id, inv->item_id);
-                else if (w->slot.menu && inv->item_id >= w->id_first)
+                else if (w->isolated_start_pin) {
+                    const HRESULT hr = w->isolated_start_pin->Invoke(inv->item_id);
+                    SendDone(inv->invoke_req_id, hr, false,
+                             FAILED(hr) ? L"context menu invoke failed" : L"");
+                } else if (w->slot.menu && inv->item_id >= w->id_first)
                     CtxInvoke(d, w->slot.menu, w->id_first, inv->invoke_req_id, inv->item_id);
                 else
                     SendDone(inv->invoke_req_id, E_INVALIDARG, false,
@@ -1606,6 +1624,7 @@ DWORD HandlerWorkerThreadImpl(LPVOID param) {
         if (invoked || exiting) break;
     }
     pulse::shell::ReleaseHandlerSlot(w->slot);
+    w->isolated_start_pin.reset();
     pulse::shell::FreeSendToTargets(w->send_to);
     CoUninitialize();
     return 0;
@@ -2195,6 +2214,7 @@ DWORD WINAPI ParentWatchdog(LPVOID param) {
 // cached in PackagedContextMenuVerbs() behind its own lock.
 DWORD WINAPI PackagedVerbsPrewarm(LPVOID) {
     const HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    pulse::shell::IsolatedStartPinSession::Prewarm();
     const ULONGLONG start = GetTickCount64();
     const size_t count = pulse::shell::PackagedContextMenuVerbs().size();
     wchar_t buf[96];
@@ -2255,6 +2275,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     // Declare PMv2 before COM or any HWND exists so Windows does not bitmap-scale
     // those dialogs on high-DPI displays.
     pulse::compat::EnableDpiAwareness();
+    if (__argc > 1 && wcscmp(__wargv[1], L"--isolated-start-pin") == 0)
+        return pulse::shell::RunIsolatedStartPin(__argc, __wargv);
 
     DWORD ui_pid = GetCurrentProcessId();
     if (__argc > 1) {

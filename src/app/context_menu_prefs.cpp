@@ -20,7 +20,8 @@ using pulse::json::ExtractObject;
 // 3: 发送到 / 共享 and the system groups default on (Explorer parity). Older
 // files stored the old off defaults as plain values, so they are turned on
 // once; per-row switches in "items" are the user's and stay.
-constexpr int kPrefsVersion = 3;
+// 4: expose COM Open-with entries and remove the old implicit MRU cap.
+constexpr int kPrefsVersion = 4;
 
 int ClampCap(int v, int lo, int hi, int fallback) {
     if (v < lo || v > hi) return fallback;
@@ -41,10 +42,10 @@ void ContextMenuPrefs::ResetToDefaults() {
     rotate = true;
     shortcut = true;
     open_with = true;
-    open_with_com = false;
+    open_with_com = true;
     system_extra = true;
     print = true;
-    open_with_mru = 2;
+    open_with_mru = -1;
     item_enabled.clear();
     seen.clear();
     slow_ext.clear();
@@ -92,7 +93,7 @@ bool ContextMenuPrefs::ItemEnabled(const std::wstring& key, ipc::CtxMenuCategory
                                    bool from_com) const {
     const auto it = item_enabled.find(key);
     if (it != item_enabled.end()) return it->second;
-    if (c == ipc::CtxMenuCategory::OpenWith && from_com) return open_with_com;
+    if (c == ipc::CtxMenuCategory::OpenWith && from_com) return open_with && open_with_com;
     return CategoryEnabled(c);
 }
 
@@ -349,7 +350,7 @@ std::wstring ContextMenuPrefs::ToJson() const {
 bool ContextMenuPrefs::FromJson(const std::wstring& json) {
     if (!pulse::json::ValidConfigObject(json)) return false;
     // "explorer_cap" of older files is ignored: the menu has no row cap.
-    open_with_mru = ClampCap(pulse::json::ExtractInt(json, L"open_with_mru", 2), 0, 8, 2);
+    open_with_mru = ClampCap(pulse::json::ExtractInt(json, L"open_with_mru", -1), -1, 8, -1);
 
     const std::wstring cats = ExtractObject(json, L"categories");
     const std::wstring& src = cats.empty() ? json : cats;
@@ -359,7 +360,7 @@ bool ContextMenuPrefs::FromJson(const std::wstring& json) {
     rotate = pulse::json::ExtractBool(src, L"rotate", true);
     shortcut = pulse::json::ExtractBool(src, L"shortcut", true);
     open_with = pulse::json::ExtractBool(src, L"open_with", true);
-    open_with_com = pulse::json::ExtractBool(src, L"open_with_com", false);
+    open_with_com = pulse::json::ExtractBool(src, L"open_with_com", true);
     system_extra = pulse::json::ExtractBool(src, L"system_extra", true);
     print = pulse::json::ExtractBool(src, L"print", true);
 
@@ -452,6 +453,10 @@ bool ContextMenuPrefs::FromJson(const std::wstring& json) {
     }
     if (version < 3) {
         share = wallpaper = rotate = shortcut = system_extra = true;
+    }
+    if (version < 4) {
+        open_with_com = true;
+        if (open_with_mru == 2) open_with_mru = -1;
     }
     migrated = version < kPrefsVersion;
     return true;

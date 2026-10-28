@@ -111,6 +111,8 @@ bool FillStaticVerbFromKey(HKEY root, const std::wstring& verb_key, const std::w
     flags.has_subcommands = !subcommands.empty();
     flags.has_extended_subcommands_key = !ext_key.empty();
     if (!ipc::KeepStaticVerb(flags)) return false;
+    // The host asks IExplorerCommand for its actual title, state and children.
+    if (flags.has_explorer_command) return false;
     // AppliesTo is an AQS condition only the shell can evaluate against the
     // item; Explorer hides the verb when it does not match. Not showing it is
     // the safe side (e.g. *\shell\UpdateEncryptionSettingsWork).
@@ -557,8 +559,9 @@ bool GetW(const uint8_t*& p, const uint8_t* end, std::wstring& s) {
 // v5: drive verbs from Drive + Folder only; no 打开方式 for programs.
 // v6: a DelegateExecute verb keeps no command (setdesktopwallpaper's
 // placeholder Explorer.exe), so v5 files with that command are discarded.
-constexpr uint32_t kStaticVerbCacheVersion = 6;
-constexpr uint32_t kStaticVerbCacheMinVersion = 6;
+// v7: native ExplorerCommandHandler titles replace registry-name fallback rows.
+constexpr uint32_t kStaticVerbCacheVersion = 7;
+constexpr uint32_t kStaticVerbCacheMinVersion = 7;
 
 void PutVerb(std::vector<uint8_t>& buf, const StaticVerb& v, int depth) {
     PutW(buf, v.verb);

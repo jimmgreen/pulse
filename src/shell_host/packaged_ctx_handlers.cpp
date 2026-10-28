@@ -208,6 +208,62 @@ private:
         for (auto* command : commands_)
             if (command) command->Release();
         commands_.clear();
+        for (auto bitmap : bitmaps_) DeleteObject(bitmap);
+        bitmaps_.clear();
+    }
+
+    HBITMAP CommandBitmap(IExplorerCommand* command) {
+        LPWSTR reference = nullptr;
+        const HRESULT hr = command->GetIcon(items_, &reference);
+        if (FAILED(hr) || !reference || !*reference) {
+            CoTaskMemFree(reference);
+            return nullptr;
+        }
+        std::vector<wchar_t> path(reference, reference + wcslen(reference) + 1);
+        CoTaskMemFree(reference);
+        const int index = PathParseIconLocationW(path.data());
+        PathUnquoteSpacesW(path.data());
+        const DWORD needed = ExpandEnvironmentStringsW(path.data(), nullptr, 0);
+        if (!needed || needed > 32768) return nullptr;
+        std::vector<wchar_t> expanded(needed);
+        if (!ExpandEnvironmentStringsW(path.data(), expanded.data(), needed)) return nullptr;
+        HICON icon = nullptr;
+        if (FAILED(SHDefExtractIconW(expanded.data(), index, 0, &icon, nullptr,
+                                    MAKELONG(32, 32))) || !icon) return nullptr;
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = 32;
+        bi.bmiHeader.biHeight = -32;
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        void* bits = nullptr;
+        HBITMAP bitmap = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        HDC dc = CreateCompatibleDC(nullptr);
+        if (bitmap && dc) {
+            auto previous = SelectObject(dc, bitmap);
+            ZeroMemory(bits, 32 * 32 * 4);
+            std::vector<unsigned char> mask(32 * 32 * 4);
+            const BOOL masked = DrawIconEx(dc, 0, 0, icon, 32, 32, 0, nullptr, DI_MASK);
+            GdiFlush();
+            memcpy(mask.data(), bits, mask.size());
+            ZeroMemory(bits, mask.size());
+            const BOOL drawn = DrawIconEx(dc, 0, 0, icon, 32, 32, 0, nullptr, DI_NORMAL);
+            GdiFlush();
+            auto* pixels = static_cast<unsigned char*>(bits);
+            bool alpha = false;
+            for (size_t i = 3; i < mask.size(); i += 4) alpha |= pixels[i] != 0;
+            if (drawn && masked && !alpha) {
+                for (size_t i = 0; i < mask.size(); i += 4) {
+                    pixels[i + 3] = mask[i] ? 0 : 255;
+                    if (mask[i]) pixels[i] = pixels[i + 1] = pixels[i + 2] = 0;
+                }
+            }
+            SelectObject(dc, previous);
+            if (!drawn) { DeleteObject(bitmap); bitmap = nullptr; }
+        } else if (bitmap) { DeleteObject(bitmap); bitmap = nullptr; }
+        if (dc) DeleteDC(dc);
+        DestroyIcon(icon);
+        return bitmap;
     }
 
     static void InsertSeparator(HMENU menu, UINT& position) {
@@ -281,6 +337,11 @@ private:
             commands_.push_back(command);
         }
         if ((flags & ECF_SEPARATORBEFORE) && depth > 0) InsertSeparator(menu, position);
+        if (HBITMAP bitmap = CommandBitmap(command)) {
+            info.fMask |= MIIM_BITMAP;
+            info.hbmpItem = bitmap;
+            bitmaps_.push_back(bitmap);
+        }
         InsertMenuItemW(menu, position++, TRUE, &info);
         if ((flags & ECF_SEPARATORAFTER) && depth > 0) InsertSeparator(menu, position);
         CoTaskMemFree(title);
@@ -292,6 +353,7 @@ private:
     IShellItemArray* items_ = nullptr;
     IUnknown* site_ = nullptr;
     std::vector<IExplorerCommand*> commands_;
+    std::vector<HBITMAP> bitmaps_;
 };
 
 // --- minimal folder view site ------------------------------------------------

@@ -756,6 +756,38 @@ std::vector<CtxHandlerDesc> EnumerateCtxHandlers(
     std::unordered_set<std::wstring> seen;
     auto add = [&](const wchar_t* relative) {
         AddHandlersFromKey(HKEY_CLASSES_ROOT, relative, out, seen, disabled_clsids);
+        const std::wstring key(relative);
+        if (background && key != L"Directory\\Background\\shellex\\ContextMenuHandlers") return;
+        const auto suffix = key.find(L"\\shellex\\");
+        if (suffix == std::wstring::npos) return;
+        HKEY shell = nullptr;
+        if (RegOpenKeyExW(HKEY_CLASSES_ROOT, (key.substr(0, suffix) + L"\\shell").c_str(),
+                          0, KEY_READ, &shell) != ERROR_SUCCESS) return;
+        for (DWORD index = 0;; ++index) {
+            wchar_t name[256]{};
+            DWORD length = ARRAYSIZE(name);
+            if (RegEnumKeyExW(shell, index, name, &length, nullptr, nullptr, nullptr, nullptr)
+                != ERROR_SUCCESS) break;
+            wchar_t value[64]{};
+            DWORD bytes = sizeof(value);
+            if (RegGetValueW(shell, name, L"ExplorerCommandHandler", RRF_RT_REG_SZ,
+                             nullptr, value, &bytes) != ERROR_SUCCESS) continue;
+            CtxHandlerDesc desc;
+            if (FAILED(CLSIDFromString(value, &desc.clsid))) continue;
+            const auto present = [&](const wchar_t* field) {
+                return RegGetValueW(shell, name, field, RRF_RT_ANY, nullptr, nullptr, nullptr)
+                    == ERROR_SUCCESS;
+            };
+            if (present(L"LegacyDisable") || present(L"ProgrammaticAccessOnly") ||
+                present(L"Extended") || present(L"AppliesTo")) continue;
+            desc.clsid_text = ClsidText(desc.clsid);
+            if (IsDisabledHandler(desc.clsid_text, disabled_clsids) ||
+                !seen.insert(desc.clsid_text).second) continue;
+            desc.name = name;
+            desc.explorer_command = true;
+            out.push_back(std::move(desc));
+        }
+        RegCloseKey(shell);
     };
     if (background) {
         add(L"Directory\\Background\\shellex\\ContextMenuHandlers");

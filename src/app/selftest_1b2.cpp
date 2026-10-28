@@ -2578,7 +2578,7 @@ void TestContextMenuPrefs() {
         reset.persist = false;
         reset.SetGroupEnabled(ipc::CtxMenuGroup::Share, false);
         reset.ResetToDefaults();
-        Check(reset.share && reset.GroupEnabled(ipc::CtxMenuGroup::System) && !reset.open_with_com,
+        Check(reset.share && reset.GroupEnabled(ipc::CtxMenuGroup::System) && reset.open_with_com,
               L"prefs: restore defaults turns 发送到 and the system group back on");
         // Files written before version 3 stored the old off defaults.
         ContextMenuPrefs old_file;
