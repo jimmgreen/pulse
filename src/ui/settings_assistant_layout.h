@@ -91,12 +91,48 @@ inline int ThinkChecked(const AssistantPageView& v) {
 }
 inline const std::wstring& VoiceBadge(const AssistantPageView& v) {
     using I = l10n::StringId;
-    if (!v.voice_set) return T(I::NotSet);
-    return T(v.voice_key ? I::AsstVoiceSetBadge : I::AsstVoiceNoKey);
+    if (v.voice_stage != AsstVoiceStage::Set && !v.voice_saved) return T(I::NotSet);
+    return T(v.voice_has_key ? I::AsstVoiceSetBadge : I::AsstVoiceNoKey);
 }
 inline fluent::BadgeKind VoiceBadgeKind(const AssistantPageView& v) {
-    if (!v.voice_set) return fluent::BadgeKind::Neutral;
-    return v.voice_key ? fluent::BadgeKind::Success : fluent::BadgeKind::Warning;
+    if (v.voice_stage != AsstVoiceStage::Set && !v.voice_saved) return fluent::BadgeKind::Neutral;
+    return v.voice_has_key ? fluent::BadgeKind::Success : fluent::BadgeKind::Warning;
+}
+// The service drop-down's text: 选择服务… until one is picked.
+inline const std::wstring& VoiceChoice(const AssistantPageView& v) {
+    return v.voice_stage == AsstVoiceStage::Off ? T(l10n::StringId::AsstVoicePick) : v.voice_name;
+}
+inline std::wstring VoiceKeyCaption(const AssistantPageView& v) {
+    using I = l10n::StringId;
+    if (v.voice_stage == AsstVoiceStage::Set) {
+        if (!v.voice_has_key) return T(I::AsstVoiceNoKeyMask);
+        return v.voice_shared ? Fill(I::AsstVoiceSharedMask, L"{mask}", v.voice_key_mask) : v.voice_key_mask;
+    }
+    if (v.voice_shared) return T(I::AsstVoiceKeyShared);
+    return v.voice_console.empty() ? T(I::AsstKeyGetPlain) : Fill(I::AsstKeyGet, L"{console}", v.voice_console) + L" \u2197";
+}
+inline std::wstring VoiceUrlCaption(const AssistantPageView& v) {
+    using I = l10n::StringId;
+    if (v.voice_custom) return T(I::AsstUrlCustomDesc);
+    return Fill(I::AsstUrlDefault, L"{url}", v.voice_url);
+}
+inline const std::wstring& VoiceConnectCaption(const AssistantPageView& v) {
+    using I = l10n::StringId;
+    if (v.voice_testing) return T(I::AiVoiceTesting);
+    if (!v.voice_error.empty()) return v.voice_error;
+    return T(I::AsstVoiceConnectDesc);
+}
+// Under 识别模型: how the last try went, while there is one to tell.
+inline const std::wstring& VoiceModelCaption(const AssistantPageView& v) {
+    using I = l10n::StringId;
+    if (v.voice_testing) return T(I::AiVoiceTesting);
+    if (!v.voice_error.empty()) return v.voice_error;
+    return v.voice_ok;
+}
+inline const std::wstring& PauseLabel(int i) {
+    using I = l10n::StringId;
+    static constexpr I k[] = {I::AiVoicePause1, I::AiVoicePause2, I::AiVoicePauseManual};
+    return T(k[(std::clamp)(i, 0, 2)]);
 }
 inline const std::wstring& McpBadge(const AssistantPageView& v) {
     return T(v.mcp_installed ? l10n::StringId::Installed : l10n::StringId::NotInstalled);
@@ -296,19 +332,65 @@ inline float LayoutSettingsAssistant(SettingsLayout& l, const WindowViewModel& v
         y = o.model_foot.bottom;
     }
 
-    // 语音输入: the speech service; 设置语音….
+    // 语音输入: the service drop-down in the header; setting one up: key,
+    // address (custom), 连接; in use: key, model, 停顿, microphone.
     o.voice_section = section(false);
     {
         const float top = y;
-        const float w = button_w(asst_text::T(I::AsstVoiceSet));
-        o.voice_button = D2D1::RectF(inner_right - w, top + 48.0f * s, inner_right, top + 80.0f * s);
+        const float choice_w = (std::min)(200.0f * s, field_w);
         const float bw = painter ? painter->MeasureBadgeWidth(asst_text::VoiceBadge(v)) : 56.0f * s;
-        o.voice_badge = D2D1::RectF(inner_right - bw, top + 14.0f * s, inner_right, top + 36.0f * s);
-        const float desc = caption_h(asst_text::T(I::AsstVoiceDesc), o.voice_button.left - 14.0f * s - text_left);
-        const float ry = top + (std::max)(66.0f * s, 38.0f * s + desc + 8.0f * s);
-        o.voice_row = D2D1::RectF(text_left, ry, o.voice_button.left - 12.0f * s, ry + 30.0f * s);
-        y = o.voice_row.bottom + 14.0f * s;
+        o.voice_head = row(asst_text::T(I::AsstVoiceDesc), inner_right - choice_w - 10.0f * s - bw);
+        o.voice_service = place(o.voice_head, inner_right, choice_w);
+        o.voice_badge = place(o.voice_head, o.voice_service.left - 10.0f * s, bw, 22.0f);
+        if (v.voice_stage == AsstVoiceStage::Setup) {
+            const float paste_w = button_w(asst_text::T(I::AiConnPaste));
+            const float controls = inner_right - paste_w - 8.0f * s - field_w;
+            o.voice_key_row = row(asst_text::VoiceKeyCaption(v), controls);
+            o.voice_key_paste = place(o.voice_key_row, inner_right, paste_w);
+            o.voice_key_field = place(o.voice_key_row, o.voice_key_paste.left - 8.0f * s, field_w);
+            o.voice_key_eye = D2D1::RectF(o.voice_key_field.right - 32.0f * s, o.voice_key_field.top + 2.0f * s,
+                                          o.voice_key_field.right - 2.0f * s, o.voice_key_field.bottom - 2.0f * s);
+            if (!v.voice_shared && !v.voice_console.empty())
+                o.voice_key_link = D2D1::RectF(text_left, o.voice_key_row.top + 36.0f * s, controls - 14.0f * s,
+                                               o.voice_key_row.bottom - 8.0f * s);
+            if (v.voice_custom) {
+                o.voice_url_row = row(asst_text::VoiceUrlCaption(v), inner_right - field_w);
+                o.voice_url_field = place(o.voice_url_row, inner_right, field_w);
+            } else {
+                o.voice_url_row = row(asst_text::VoiceUrlCaption(v), inner_right);
+            }
+            const std::wstring& label = asst_text::T(v.voice_testing ? I::AsstConnecting : I::AsstVoiceConnectBtn);
+            const float w = button_w(label) + (v.voice_testing ? 24.0f * s : 0.0f);
+            const float cw = button_w(asst_text::T(I::Cancel));
+            o.voice_connect_row = row(asst_text::VoiceConnectCaption(v), inner_right - w - 8.0f * s - cw);
+            o.voice_connect = place(o.voice_connect_row, inner_right, w);
+            o.voice_cancel = place(o.voice_connect_row, o.voice_connect.left - 8.0f * s, cw);
+        } else if (v.voice_stage == AsstVoiceStage::Set) {
+            const float rw = button_w(asst_text::T(I::AsstReplace));
+            o.voice_key_row = row(asst_text::VoiceKeyCaption(v), inner_right - rw);
+            o.voice_rekey = place(o.voice_key_row, inner_right, rw);
+            o.voice_model_row = row(asst_text::VoiceModelCaption(v), inner_right - field_w);
+            o.voice_model = place(o.voice_model_row, inner_right, field_w);
+            float widths[3]{}, total = 0.0f;
+            for (int i = 0; i < 3; ++i) {
+                widths[i] = (std::max)(52.0f * s, button_w(asst_text::PauseLabel(i)) - 8.0f * s);
+                total += widths[i];
+            }
+            o.voice_pause_row = row({}, inner_right - total);
+            float sx = inner_right - total;
+            for (int i = 0; i < 3; ++i) {
+                o.voice_pause[i] = place(o.voice_pause_row, sx + widths[i], widths[i]);
+                sx += widths[i];
+            }
+            o.voice_mic_row = row({}, inner_right - field_w);
+            o.voice_mic = place(o.voice_mic_row, inner_right, field_w);
+        }
+        y += 4.0f * s;
         o.voice_card = D2D1::RectF(left, top, right, y);
+        const std::wstring& foot = asst_text::T(I::AsstVoiceFoot);
+        const float h = caption_h(foot, right - left - 12.0f * s);
+        o.voice_foot = D2D1::RectF(left + 6.0f * s, y + 8.0f * s, right - 6.0f * s, y + 8.0f * s + h);
+        y = o.voice_foot.bottom;
     }
 
     // 让其他 AI 应用使用 Pulse: AI 与 MCP lives on its own page under 增强包.
@@ -353,7 +435,22 @@ inline int HitTestSettingsAssistant(const SettingsLayout& l, const WindowViewMod
         if (in(o.url_buttons[0])) return kAsstUrlEdit;
         if (in(o.connect) && !v.connecting) return kAsstConnect;
     }
-    if (in(o.voice_button)) return kAsstVoice;
+    if (in(o.voice_service)) return kAsstVoiceService;
+    if (v.voice_stage == AsstVoiceStage::Setup) {
+        if (in(o.voice_key_eye)) return kAsstVoiceReveal;
+        if (in(o.voice_key_field)) return kAsstVoiceKeyField;
+        if (in(o.voice_key_paste)) return kAsstVoicePaste;
+        if (in(o.voice_key_link)) return kAsstVoiceKeyLink;
+        if (in(o.voice_url_field)) return kAsstVoiceUrlField;
+        if (in(o.voice_cancel)) return kAsstVoiceCancel;
+        if (in(o.voice_connect) && !v.voice_testing) return kAsstVoiceConnect;
+    } else if (v.voice_stage == AsstVoiceStage::Set) {
+        if (in(o.voice_rekey)) return kAsstVoiceRekey;
+        if (in(o.voice_model) && !v.voice_testing) return kAsstVoiceModel;
+        for (int i = 0; i < 3; ++i)
+            if (in(o.voice_pause[i])) return kAsstVoicePauseBase + i;
+        if (in(o.voice_mic)) return kAsstVoiceMic;
+    }
     if (in(o.mcp_button)) return kAsstMcp;
     if (v.stage != AsstStage::Connected) return -1;
     if (in(o.model_choice)) return kAsstModel;

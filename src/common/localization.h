@@ -4546,10 +4546,6 @@ enum class StringId : UINT {
     AsstVoiceSection = IDS_ASST_VOICE_SECTION,
     AsstVoiceTitle = IDS_ASST_VOICE_TITLE,
     AsstVoiceDesc = IDS_ASST_VOICE_DESC,
-    AsstVoiceHint = IDS_ASST_VOICE_HINT,
-    AsstVoiceSet = IDS_ASST_VOICE_SET,
-    AsstVoiceSiliconFlow = IDS_ASST_VOICE_SILICONFLOW,
-    AsstVoiceCustom = IDS_ASST_VOICE_CUSTOM,
     AsstVoiceNoKey = IDS_ASST_VOICE_NO_KEY,
     AsstMcpSection = IDS_ASST_MCP_SECTION,
     AsstMcpDesc = IDS_ASST_MCP_DESC,
@@ -4617,6 +4613,17 @@ enum class StringId : UINT {
     AsstErrOllamaSub = IDS_ASST_ERR_OLLAMA_SUB,
     AsstReplace = IDS_ASST_REPLACE,
     AsstEdit = IDS_ASST_EDIT,
+    AsstVoicePick = IDS_ASST_VOICE_PICK,
+    AsstVoiceSubSilicon = IDS_ASST_VOICE_SUB_SILICON,
+    AsstVoiceSubOpenAi = IDS_ASST_VOICE_SUB_OPEN_AI,
+    AsstVoiceSubCustom = IDS_ASST_VOICE_SUB_CUSTOM,
+    AsstVoiceKeyShared = IDS_ASST_VOICE_KEY_SHARED,
+    AsstVoiceSharedMask = IDS_ASST_VOICE_SHARED_MASK,
+    AsstVoiceConnectDesc = IDS_ASST_VOICE_CONNECT_DESC,
+    AsstVoiceConnectBtn = IDS_ASST_VOICE_CONNECT_BTN,
+    AsstVoiceModelTitle = IDS_ASST_VOICE_MODEL_TITLE,
+    AsstVoiceFoot = IDS_ASST_VOICE_FOOT,
+    AsstVoiceNoKeyMask = IDS_ASST_VOICE_NO_KEY_MASK,
 };
 
 bool IsLanguageId(std::wstring_view id) noexcept;

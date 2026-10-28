@@ -94,6 +94,13 @@ void MainRenderer::DrawSettingsAssistant(const WindowViewModel& vm, const D2D1_R
     auto head = [&](D2D1_RECT_F c, const wchar_t* icon, std::wstring_view title, std::wstring_view caption,
                     float controls_left, const D2D1_COLOR_F* caption_color = nullptr) {
         if (c.bottom <= c.top) return;
+        if (caption.empty()) {
+            // A title alone sits in the middle of its row, level with the control.
+            const float mid = (c.top + c.bottom) * 0.5f;
+            if (icon) DrawIconText(c.left + 16*s, mid - 12*s, 24*s, 24*s, icon, L"", theme.text_secondary, 0.85f);
+            text(title, D2D1::RectF(c.left + 54*s, mid - 12*s, controls_left - 14*s, mid + 12*s));
+            return;
+        }
         if (icon) DrawIconText(c.left + 16*s, c.top + 14*s, 24*s, 24*s, icon, L"", theme.text_secondary, 0.85f);
         text(title, D2D1::RectF(c.left + 54*s, c.top + 12*s, controls_left - 14*s, c.top + 36*s));
         painter_.DrawWrappedCaption(caption, D2D1::Point2F(c.left + 54*s, c.top + 38*s),
@@ -115,8 +122,9 @@ void MainRenderer::DrawSettingsAssistant(const WindowViewModel& vm, const D2D1_R
         state.focused = focused;
         painter_.DrawTextFieldFrame(r, state, true);
         // Text inside the frame: 10 DIP in, clear of the key field's eye.
+        const bool eye = which == AsstField::Key || which == AsstField::VoiceKey;
         asst_fields_[static_cast<int>(which)] =
-            D2D1::RectF(r.left + 10*s, r.top + 2*s, r.right - (which == AsstField::Key ? 36*s : 10*s), r.bottom - 3*s);
+            D2D1::RectF(r.left + 10*s, r.top + 2*s, r.right - (eye ? 36*s : 10*s), r.bottom - 3*s);
     };
     const float controls_left_head = [&] {
         float x = o.model_card.right - 16*s;
@@ -317,22 +325,98 @@ void MainRenderer::DrawSettingsAssistant(const WindowViewModel& vm, const D2D1_R
                                     o.model_foot.right - o.model_foot.left, theme.text_secondary);
 
     // 语音输入.
+    // A drop-down button with a service's mark (or none) before its text.
+    auto choice = [&](D2D1_RECT_F r, std::wstring_view label, int target, std::string_view mark, bool muted = false) {
+        if (r.right <= r.left) return;
+        fluent::ButtonSpec control{};
+        control.bounds = r;
+        control.drop_down = true;
+        control.state.hovered = hovered(target);
+        painter_.DrawButton(control);
+        float x = r.left + 12*s;
+        if (!mark.empty()) {
+            const float mid = (r.top + r.bottom) * 0.5f;
+            DrawProviderMark(mark, label, D2D1::RectF(x, mid - 8*s, x + 16*s, mid + 8*s), theme);
+            x += 24*s;
+        }
+        painter_.DrawText(label, D2D1::RectF(x, r.top, r.right - 30*s, r.bottom), compositor_->TextFormat(),
+                          muted ? theme.text_secondary : theme.text);
+    };
+    // The voice services' marks: 硅基流动 and OpenAI share the model tiles'.
+    auto voice_mark = [&](const std::string& id) -> std::string_view {
+        if (id == "siliconflow") return "silicon";
+        if (id == "openai") return "openai";
+        if (id == "custom") return "custom";
+        return {};
+    };
+    // A row under the header without an icon (the approved card's sub rows).
+    auto sub_row = [&](D2D1_RECT_F r, std::wstring_view title, std::wstring_view caption, float controls_left,
+                       const D2D1_COLOR_F* caption_color = nullptr) {
+        head(r, nullptr, title, caption, controls_left, caption_color);
+    };
     painter_.DrawText(asst_text::T(I::AsstVoiceSection), o.voice_section, compositor_->TextFormat(), theme.text);
     card(o.voice_card);
-    head(o.voice_card, L"\xE720", asst_text::T(I::AsstVoiceTitle), asst_text::T(I::AsstVoiceDesc), o.voice_button.left);
+    head(o.voice_head, L"\xE720", asst_text::T(I::AsstVoiceTitle), asst_text::T(I::AsstVoiceDesc), o.voice_badge.left);
     badge(o.voice_badge, asst_text::VoiceBadge(v), asst_text::VoiceBadgeKind(v));
-    button(o.voice_button, asst_text::T(I::AsstVoiceSet), kAsstVoice);
-    {
-        const auto& r = o.voice_row;
-        const D2D1_COLOR_F idle = theme.text_secondary;
-        const bool ready = v.voice_set && v.voice_key;
-        const float mid = (r.top + r.bottom) * 0.5f;
-        painter_.FillRoundedRect(D2D1::RectF(r.left, mid - 3*s, r.left + 6*s, mid + 3*s), 3*s, ready ? success : idle);
-        std::wstring line = v.voice_set ? v.voice_service : asst_text::T(I::NotSet);
-        line += L"  \u00b7  ";
-        line += v.voice_set ? v.voice_host : asst_text::T(I::AsstVoiceHint);
-        text(line, D2D1::RectF(r.left + 14*s, mid - 10*s, r.right, mid + 10*s), true);
+    choice(o.voice_service, asst_text::VoiceChoice(v), kAsstVoiceService,
+           v.voice_stage == AsstVoiceStage::Off ? std::string_view{} : voice_mark(v.voice_id),
+           v.voice_stage == AsstVoiceStage::Off);
+    if (v.voice_stage == AsstVoiceStage::Setup) {
+        divider_below(o.voice_head);
+        const bool link = !v.voice_shared && !v.voice_console.empty();
+        const D2D1_COLOR_F& c = theme.accent;
+        const D2D1_COLOR_F accent = dark ? D2D1::ColorF(c.r + (1 - c.r) * 0.45f, c.g + (1 - c.g) * 0.45f,
+                                                        c.b + (1 - c.b) * 0.45f) : c;
+        head(o.voice_key_row, L"\xE8D7", asst_text::T(I::AsstKey), asst_text::VoiceKeyCaption(v), o.voice_key_field.left,
+             link ? &accent : nullptr);
+        field(o.voice_key_field, v.voice_key_typed, AsstField::VoiceKey);
+        DrawIconText(o.voice_key_eye.left, o.voice_key_eye.top, o.voice_key_eye.right - o.voice_key_eye.left,
+                     o.voice_key_eye.bottom - o.voice_key_eye.top, v.voice_revealed ? L"\xED1A" : L"\xE7B3", L"",
+                     hovered(kAsstVoiceReveal) ? theme.text : theme.text_secondary, 0.6f);
+        button(o.voice_key_paste, asst_text::T(I::AiConnPaste), kAsstVoicePaste);
+        divider_below(o.voice_key_row);
+        head(o.voice_url_row, L"\xE774", asst_text::T(I::AsstUrlTitle), asst_text::VoiceUrlCaption(v),
+             o.voice_url_field.right > o.voice_url_field.left ? o.voice_url_field.left : o.voice_url_row.right - 16*s);
+        field(o.voice_url_field, v.voice_url_typed, AsstField::VoiceUrl);
+        divider_below(o.voice_url_row);
+        const bool failed = !v.voice_error.empty() && !v.voice_testing;
+        head(o.voice_connect_row, L"\xE703", asst_text::T(I::AsstConnectTitle), asst_text::VoiceConnectCaption(v),
+             o.voice_cancel.left, failed ? &danger : nullptr);
+        button(o.voice_cancel, asst_text::T(I::Cancel), kAsstVoiceCancel);
+        const bool ready = (v.voice_key_typed || v.voice_shared) && (!v.voice_custom || v.voice_url_typed) && !v.voice_testing;
+        button(o.voice_connect, asst_text::T(v.voice_testing ? I::AsstConnecting : I::AsstVoiceConnectBtn), kAsstVoiceConnect,
+               fluent::ButtonKind::Primary, ready);
+    } else if (v.voice_stage == AsstVoiceStage::Set) {
+        divider_below(o.voice_head);
+        sub_row(o.voice_key_row, asst_text::T(I::AsstKey), asst_text::VoiceKeyCaption(v), o.voice_rekey.left);
+        button(o.voice_rekey, asst_text::T(I::AsstReplace), kAsstVoiceRekey);
+        divider_below(o.voice_key_row);
+        const bool failed = !v.voice_error.empty() && !v.voice_testing;
+        sub_row(o.voice_model_row, asst_text::T(I::AsstVoiceModelTitle), asst_text::VoiceModelCaption(v), o.voice_model.left,
+                failed ? &danger : nullptr);
+        choice(o.voice_model, v.voice_model, kAsstVoiceModel, {});
+        divider_below(o.voice_model_row);
+        sub_row(o.voice_pause_row, asst_text::T(I::AiVoicePauseHeading), {}, o.voice_pause[0].left);
+        painter_.DrawSegmentedTrack(D2D1::RectF(o.voice_pause[0].left, o.voice_pause[0].top,
+                                                o.voice_pause[2].right, o.voice_pause[2].bottom));
+        for (int i = 0; i < 3; ++i) {
+            fluent::SegmentedItemSpec item{};
+            item.bounds = o.voice_pause[i];
+            item.text = asst_text::PauseLabel(i);
+            item.state.checked = i == v.voice_pause;
+            item.state.hovered = hovered(kAsstVoicePauseBase + i);
+            item.shared_track = true;
+            item.position = i == 0 ? fluent::SegmentPosition::First
+                : i == 2 ? fluent::SegmentPosition::Last : fluent::SegmentPosition::Middle;
+            painter_.DrawSegmentedItem(item);
+        }
+        divider_below(o.voice_pause_row);
+        sub_row(o.voice_mic_row, asst_text::T(I::AiVoiceMicLabel), {}, o.voice_mic.left);
+        choice(o.voice_mic, v.voice_mic, kAsstVoiceMic, {});
     }
+    if (o.voice_foot.bottom > o.voice_foot.top)
+        painter_.DrawWrappedCaption(asst_text::T(I::AsstVoiceFoot), D2D1::Point2F(o.voice_foot.left, o.voice_foot.top),
+                                    o.voice_foot.right - o.voice_foot.left, theme.text_secondary);
 
     // 让其他 AI 应用使用 Pulse.
     painter_.DrawText(asst_text::T(I::AsstMcpSection), o.mcp_section, compositor_->TextFormat(), theme.text);

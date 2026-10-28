@@ -47,5 +47,7 @@ void AiVoiceDpiChanged(AppState& s);
 void AiVoiceDestroy(AppState& s);
 // Settings > AI 助手 > 设置语音…: the voice connection card (manage when set up).
 void AiVoiceOpenConnection(AppState& s);
+// 设置 › AI 助手 saved the voice connection: read ai.json again (not mid-recording).
+void AiVoicePrefsChanged(AppState& s);
 
 } // namespace pulse

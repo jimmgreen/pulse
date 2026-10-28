@@ -4560,11 +4560,7 @@ AsstKey	IDS_ASST_KEY	5767	API Key	API key
 AsstTest	IDS_ASST_TEST	5774	测试连接	Test connection	
 AsstVoiceSection	IDS_ASST_VOICE_SECTION	5778	语音输入	Voice input	
 AsstVoiceTitle	IDS_ASST_VOICE_TITLE	5779	语音识别服务	Speech recognition service	
-AsstVoiceDesc	IDS_ASST_VOICE_DESC	5780	只在你按住麦克风时录音，录音不保存，识别完也不会自动发送。	Records only while you hold the microphone; recordings aren't saved and nothing is sent by itself.	
-AsstVoiceHint	IDS_ASST_VOICE_HINT	5781	可选：硅基流动（免费模型）· OpenAI · 自定义	Options: SiliconFlow (free model) · OpenAI · custom	
-AsstVoiceSet	IDS_ASST_VOICE_SET	5782	设置语音…	Set up voice…	
-AsstVoiceSiliconFlow	IDS_ASST_VOICE_SILICONFLOW	5783	硅基流动	SiliconFlow	
-AsstVoiceCustom	IDS_ASST_VOICE_CUSTOM	5784	自定义	Custom	
+AsstVoiceDesc	IDS_ASST_VOICE_DESC	5780	按住说话，识别成文字后放进输入框，不会自动发送；不保存录音	Hold to speak: the words go into the input box and are never sent on their own; no recording is kept	
 AsstVoiceNoKey	IDS_ASST_VOICE_NO_KEY	5785	缺少 Key	Key missing	
 AsstMcpSection	IDS_ASST_MCP_SECTION	5786	让其他 AI 应用使用 Pulse	Let other AI apps use Pulse	
 AsstMcpDesc	IDS_ASST_MCP_DESC	5787	和上面的助手不是一回事：这是让 Claude 等外部 AI 应用来查找、整理你的文件。需要 AI 增强包。	Not the assistant above: this lets outside AI apps such as Claude find and organize your files. Needs the AI pack.	
@@ -4632,3 +4628,14 @@ AsstErrOllama	IDS_ASST_ERR_OLLAMA	5849	连不上 Ollama	Can't reach Ollama
 AsstErrOllamaSub	IDS_ASST_ERR_OLLAMA_SUB	5850	确认 Ollama 已安装并正在运行	Make sure Ollama is installed and running	
 AsstReplace	IDS_ASST_REPLACE	5851	更换	Replace	
 AsstEdit	IDS_ASST_EDIT	5852	修改	Edit	
+AsstVoicePick	IDS_ASST_VOICE_PICK	5853	选择服务…	Choose a service…	
+AsstVoiceSubSilicon	IDS_ASST_VOICE_SUB_SILICON	5854	有免费模型	Has a free model	
+AsstVoiceSubOpenAi	IDS_ASST_VOICE_SUB_OPEN_AI	5855	需要代理	Needs a proxy in China	
+AsstVoiceSubCustom	IDS_ASST_VOICE_SUB_CUSTOM	5856	兼容地址	Any compatible address	
+AsstVoiceKeyShared	IDS_ASST_VOICE_KEY_SHARED	5857	可留空：沿用模型服务里硅基流动的 Key	May stay empty: uses the SiliconCloud key of the model service	
+AsstVoiceSharedMask	IDS_ASST_VOICE_SHARED_MASK	5858	与模型服务共用 · {mask}	Shared with the model service · {mask}	
+AsstVoiceConnectDesc	IDS_ASST_VOICE_CONNECT_DESC	5859	会读取识别模型，并用一段测试音频试识别一次	Reads the recognition models and tries a short test clip	
+AsstVoiceConnectBtn	IDS_ASST_VOICE_CONNECT_BTN	5860	连接并测试	Connect and test	
+AsstVoiceModelTitle	IDS_ASST_VOICE_MODEL_TITLE	5861	识别模型	Recognition model	
+AsstVoiceFoot	IDS_ASST_VOICE_FOOT	5862	只在麦克风亮着时录音；录音不保存。	Records only while the microphone is on; recordings are never kept.	
+AsstVoiceNoKeyMask	IDS_ASST_VOICE_NO_KEY_MASK	5863	还没有保存 Key	No key saved yet	

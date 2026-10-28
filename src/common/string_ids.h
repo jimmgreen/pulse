@@ -4554,10 +4554,6 @@
 #define IDS_ASST_VOICE_SECTION                                                           5778
 #define IDS_ASST_VOICE_TITLE                                                             5779
 #define IDS_ASST_VOICE_DESC                                                              5780
-#define IDS_ASST_VOICE_HINT                                                              5781
-#define IDS_ASST_VOICE_SET                                                               5782
-#define IDS_ASST_VOICE_SILICONFLOW                                                       5783
-#define IDS_ASST_VOICE_CUSTOM                                                            5784
 #define IDS_ASST_VOICE_NO_KEY                                                            5785
 #define IDS_ASST_MCP_SECTION                                                             5786
 #define IDS_ASST_MCP_DESC                                                                5787
@@ -4625,5 +4621,16 @@
 #define IDS_ASST_ERR_OLLAMA_SUB                                                          5850
 #define IDS_ASST_REPLACE                                                                 5851
 #define IDS_ASST_EDIT                                                                    5852
+#define IDS_ASST_VOICE_PICK                                                              5853
+#define IDS_ASST_VOICE_SUB_SILICON                                                       5854
+#define IDS_ASST_VOICE_SUB_OPEN_AI                                                       5855
+#define IDS_ASST_VOICE_SUB_CUSTOM                                                        5856
+#define IDS_ASST_VOICE_KEY_SHARED                                                        5857
+#define IDS_ASST_VOICE_SHARED_MASK                                                       5858
+#define IDS_ASST_VOICE_CONNECT_DESC                                                      5859
+#define IDS_ASST_VOICE_CONNECT_BTN                                                       5860
+#define IDS_ASST_VOICE_MODEL_TITLE                                                       5861
+#define IDS_ASST_VOICE_FOOT                                                              5862
+#define IDS_ASST_VOICE_NO_KEY_MASK                                                       5863
 
 #endif  // PULSE_STRING_IDS_H

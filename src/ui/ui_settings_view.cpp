@@ -1306,6 +1306,9 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
 D2D1_RECT_F MainRenderer::SettingsDropdownBounds(const WindowViewModel& vm, int index, float window_w, float window_h) const {
     const auto l=MakeSettingsLayout(vm,D2D1::RectF(0,0,window_w,window_h),scale_,title_bar_height_,status_height_,&painter_);
     if(index==3) return l.assistant.model_choice;
+    if(index==4) return l.assistant.voice_service;
+    if(index==5) return l.assistant.voice_model;
+    if(index==6) return l.assistant.voice_mic;
     return index==0 ? l.effect_choice : index==2 ? l.pack_dl_choice : l.language_choice;
 }
 

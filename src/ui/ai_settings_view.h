@@ -103,7 +103,6 @@ struct AiPageLayout {
 // app/ai_assistant_settings.cpp; never holds a key, only its mask.
 enum AssistantHit : int {
     kAsstTest = 0,          // 测试连接
-    kAsstVoice = 2,         // 设置语音…: the panel's voice connection card
     kAsstMcp = 3,           // 在增强包中管理: 增强包 > AI 与 MCP
     kAsstChange = 10,       // 更换服务: back to the tiles
     kAsstCancel = 11,       // 取消 (tiles, while a service is in use)
@@ -127,12 +126,28 @@ enum AssistantHit : int {
     kAsstTileBase = 100,    // + tile (kAsstTiles first-screen tiles, then 更多's)
     kAsstThinkBase = 200,   // + 思考强度 segment
     kAsstOtherBase = 300,   // + 其他已保存的服务 chip
+    // 语音输入.
+    kAsstVoiceService = 400,   // the service drop-down (选择服务… / the service; 移除连接)
+    kAsstVoiceReveal = 401,
+    kAsstVoicePaste = 402,
+    kAsstVoiceKeyLink = 403,
+    kAsstVoiceConnect = 404,   // 连接并测试
+    kAsstVoiceCancel = 405,    // back from setting one up
+    kAsstVoiceRekey = 406,     // API Key 更换
+    kAsstVoiceModel = 407,     // 识别模型 drop-down
+    kAsstVoiceMic = 408,       // 麦克风 drop-down
+    kAsstVoiceKeyField = 409,
+    kAsstVoiceUrlField = 410,
+    kAsstVoicePauseBase = 420, // + 停顿 segment: 1 秒, 2 秒, 手动
 };
 // Fields the page hosts an EDIT in (MainRenderer::SettingsAssistantField).
-enum class AsstField : uint8_t { Key, Url, Model };
+enum class AsstField : uint8_t { Key, Url, Model, VoiceKey, VoiceUrl };
+inline constexpr int kAsstFields = 5;
 enum class AsstConn : uint8_t { None, Ok, Failed, Testing };
 // Tiles to pick from, the service being set up, or the one in use.
 enum class AsstStage : uint8_t { Pick, Setup, Connected };
+// 语音输入: none set up, one being set up (key, address, 连接), or one in use.
+enum class AsstVoiceStage : uint8_t { Off, Setup, Set };
 // How the service takes 思考: four levels, three, on/off, or not at all.
 enum class AsstThink : uint8_t { None, Levels4, Levels3, Toggle };
 inline constexpr int kAsstTiles = 10;
@@ -174,9 +189,23 @@ struct AssistantPageView {
     std::wstring key_mask;             // sk-…9832; empty when the service needs none
     std::vector<AsstOtherView> others;
     // 语音输入.
-    bool voice_set = false, voice_key = false;
-    std::wstring voice_service;        // 硅基流动 / OpenAI / 自定义
-    std::wstring voice_host;
+    AsstVoiceStage voice_stage = AsstVoiceStage::Off;
+    std::string voice_id;              // siliconflow | openai | custom (Setup: the one picked)
+    std::wstring voice_name;           // 硅基流动 / OpenAI / 自定义
+    bool voice_custom = false;
+    std::wstring voice_url;            // Setup: the preset's address; Set: the one saved
+    std::wstring voice_console;        // 到{console}创建; empty: no key page
+    bool voice_key_typed = false, voice_url_typed = false, voice_revealed = false;
+    bool voice_shared = false;         // Setup: may stay empty (硅基流动's model key); Set: that same key
+    bool voice_has_key = true;         // Set: voice_key.bin holds a key
+    bool voice_saved = false;          // ai.json has a voice service (also while 更换 its key)
+    std::wstring voice_key_mask;
+    bool voice_testing = false;        // 连接 / a new model being tried
+    std::wstring voice_error;          // the last failure
+    std::wstring voice_ok;             // 已连接 · 测试音频识别用了 1.2 秒, right after
+    std::wstring voice_model;          // Set: the recognition model
+    int voice_pause = 0;               // segment: 0 = 1 秒, 1 = 2 秒, 2 = 手动
+    std::wstring voice_mic;            // Set: the microphone's name
     bool mcp_installed = false;        // the AI pack (bundled or installed)
 };
 struct AssistantPageLayout {
@@ -198,7 +227,14 @@ struct AssistantPageLayout {
     D2D1_RECT_F think_seg[4]{};
     D2D1_RECT_F others_row{};
     std::vector<D2D1_RECT_F> others;
-    D2D1_RECT_F voice_section{}, voice_card{}, voice_badge{}, voice_button{}, voice_row{};
+    D2D1_RECT_F voice_section{}, voice_card{}, voice_foot{};
+    D2D1_RECT_F voice_head{}, voice_badge{}, voice_service{};
+    D2D1_RECT_F voice_key_row{}, voice_key_field{}, voice_key_eye{}, voice_key_paste{}, voice_key_link{}, voice_rekey{};
+    D2D1_RECT_F voice_url_row{}, voice_url_field{};
+    D2D1_RECT_F voice_connect_row{}, voice_connect{}, voice_cancel{};
+    D2D1_RECT_F voice_model_row{}, voice_model{};
+    D2D1_RECT_F voice_pause_row{}, voice_pause[3]{};
+    D2D1_RECT_F voice_mic_row{}, voice_mic{};
     D2D1_RECT_F mcp_section{}, mcp_card{}, mcp_badge{}, mcp_button{}, mcp_meta{};
 };
 

@@ -1020,6 +1020,13 @@ void AiVoiceOpenConnection(AppState& s) {
     Redraw(s);
 }
 
+void AiVoicePrefsChanged(AppState& s) {
+    AiVoiceUi* u = Peek(s);
+    if (!u) return;   // read at first use
+    Reload(*u);
+    Redraw(s);
+}
+
 bool AiVoiceActivate(AppState& s, const ui::AiPanelHit& hit) {
     AiVoiceUi& u = Ui(s);
     switch (hit.part) {

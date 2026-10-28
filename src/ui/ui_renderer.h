@@ -1184,7 +1184,7 @@ private:
     bool last_frame_overlay_ = true;     // the last frame drew a floating overlay
     // Settings > AI 助手's EDIT fields as last drawn (SettingsAssistantField).
     bool asst_drawn_ = false;
-    D2D1_RECT_F asst_fields_[3]{};
+    D2D1_RECT_F asst_fields_[kAsstFields]{};
     D2D1_RECT_F asst_clip_{};
     D2D1_COLOR_F asst_edit_back_{}, asst_edit_fore_{}, asst_edit_hint_{};
     std::array<std::vector<std::pair<int, D2D1_RECT_F>>, 8> drawn_rows_{};  // source, cell
