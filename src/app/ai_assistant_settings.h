@@ -17,6 +17,11 @@ namespace ui { struct WindowViewModel; }
 void FillAssistantSettingsVm(AppState& s, ui::WindowViewModel& vm);
 // A click on HitTestResult::SettingsAssistant (AssistantHit).
 void AssistantSettingsClick(AppState& s, int target);
+// 思考强度's knob, held from that click: follow the pointer, then keep the
+// level under it on release (true when a drag ended).
+bool AssistantThinkDragging(AppState& s);
+void AssistantThinkDrag(AppState& s, int x);
+bool AssistantThinkDragEnd(AppState& s);
 // A connection check of the assistant's model service finished somewhere
 // (this page or the panel): 上次连接, for this run only.
 void NoteAssistantConnection(bool ok, uint32_t ms = 0);

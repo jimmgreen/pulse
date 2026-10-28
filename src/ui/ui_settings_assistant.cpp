@@ -55,6 +55,40 @@ void MainRenderer::DrawProviderMark(std::string_view id, std::wstring_view name,
 
 // Settings > AI 助手 (kSettingsPageAssistant). Geometry: LayoutSettingsAssistant;
 // texts: asst_text (settings_assistant_layout.h); clicks: SettingsAssistant.
+// 思考强度's knob: under the pointer while held, then a short snap onto the
+// chosen level with a slight overshoot, as in the composer's popover.
+float MainRenderer::AssistantThinkPosition(int stops, int chosen, float drag) {
+    constexpr uint64_t kSnapMs = 240;
+    AsstThinkMotion& m = asst_think_;
+    const uint64_t now = motion::NowMs();
+    // Another service, or the page coming back: start on the level.
+    if (stops != m.stops || (!m.dragging && now - m.drawn > 400)) {
+        m.position = static_cast<float>(chosen);
+        m.target = chosen;
+        m.until = 0;
+        m.dragging = false;
+    }
+    m.stops = stops;
+    m.drawn = now;
+    if (drag >= 0.0f) {
+        m.position = std::clamp(drag, 0.0f, static_cast<float>(stops - 1));
+        m.dragging = true;
+        return m.position;
+    }
+    if (m.dragging || chosen != m.target) {
+        m.from = m.position;
+        m.target = chosen;
+        m.at = now;
+        m.until = motion::SystemAnimationsEnabled() ? now + kSnapMs : 0;
+        m.dragging = false;
+    }
+    if (now >= m.until) return m.position = static_cast<float>(chosen);
+    const float u = std::clamp(static_cast<float>(now - m.at) / static_cast<float>(kSnapMs), 0.0f, 1.0f);
+    const float c1 = 1.1f, c3 = c1 + 1.0f, w = u - 1.0f;
+    const float e = 1.0f + c3 * w * w * w + c1 * w * w;
+    return m.position = m.from + (static_cast<float>(chosen) - m.from) * e;
+}
+
 void MainRenderer::DrawSettingsAssistant(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme) {
     using H = HitTestResult;
     using I = l10n::StringId;
@@ -269,23 +303,21 @@ void MainRenderer::DrawSettingsAssistant(const WindowViewModel& vm, const D2D1_R
             painter_.DrawButton(control);
         }
         divider_below(o.model_row);
-        // 思考强度 / 深度思考.
+        // 思考强度: the step slider the composer's popover uses, its level on
+        // the right. 深度思考 is a switch.
         if (const int n = asst_text::ThinkSegments(v)) {
-            head(o.think_row, L"\xEA80", asst_text::ThinkTitle(v), asst_text::ThinkCaption(v), o.think_seg[0].left);
-            painter_.DrawSegmentedTrack(D2D1::RectF(o.think_seg[0].left, o.think_seg[0].top,
-                                                    o.think_seg[n - 1].right, o.think_seg[n - 1].bottom));
-            const int checked = asst_text::ThinkChecked(v);
-            for (int i = 0; i < n; ++i) {
-                fluent::SegmentedItemSpec item{};
-                item.bounds = o.think_seg[i];
-                item.text = asst_text::ThinkLabel(v, i);
-                item.state.checked = i == checked;
-                item.state.hovered = hovered(kAsstThinkBase + i);
-                item.shared_track = true;
-                item.position = i == 0 ? fluent::SegmentPosition::First
-                    : i == n - 1 ? fluent::SegmentPosition::Last : fluent::SegmentPosition::Middle;
-                painter_.DrawSegmentedItem(item);
-            }
+            head(o.think_row, L"\xEA80", asst_text::ThinkTitle(v), asst_text::ThinkCaption(v), o.think_slider.left);
+            const int chosen = asst_text::ThinkChecked(v);
+            const bool held = v.think_drag >= 0.0f;
+            fluent::StepSliderSpec slider;
+            slider.bounds = o.think_slider;
+            slider.stops = n;
+            slider.position = AssistantThinkPosition(n, chosen, v.think_drag);
+            for (int i = 0; i < n; ++i) slider.state.hovered = slider.state.hovered || hovered(kAsstThinkBase + i);
+            slider.state.pressed = held;
+            painter_.DrawStepSlider(slider);
+            const int shown = held ? std::clamp(static_cast<int>(std::lround(slider.position)), 0, n - 1) : chosen;
+            text(asst_text::ThinkLabel(v, shown), o.think_value);
             divider_below(o.think_row);
         } else if (v.think == AsstThink::Toggle) {
             head(o.think_row, L"\xEA80", asst_text::ThinkTitle(v), asst_text::ThinkCaption(v), o.think_toggle.left);

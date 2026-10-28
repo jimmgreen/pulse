@@ -361,6 +361,7 @@ public:
         if (motion_now < mtime_flash_until_) active = true;
         if (motion_now < splitter_motion_until_) active = true;
         if (motion_now < spring_ring_until_) active = true;
+        if (motion_now < asst_think_.until) active = true;
         // Sidebar pill/plate, toolbar plates, column cascade, details sweep:
         // their last frame asked for another (RequestMotionFrame).
         if (motion_frame_wanted_) active = true;
@@ -681,6 +682,8 @@ public:
     app::BuiltinMenuOrder SettingsMenuDropOrder(const WindowViewModel& vm, const D2D1_RECT_F& rect, float x, float y);
     int SettingsSliderValueAt(const WindowViewModel& vm, const D2D1_RECT_F& rect,
                               int which, float x) const;
+    // Settings > AI 助手 › 思考强度: the slider position (in stops) at x, -1 when not shown.
+    float AssistantThinkPositionAt(const WindowViewModel& vm, const D2D1_RECT_F& rect, float x) const;
 
     bool PaneScrollbarGeometry(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds,
                                D2D1_RECT_F& track, D2D1_RECT_F& thumb, float& max_scroll) const;
@@ -1173,6 +1176,15 @@ private:
     std::array<HeaderSizeMotion, 8> header_size_motion_{};
     uint64_t splitter_motion_until_ = 0;
     uint64_t spring_ring_until_ = 0;        // NowMs: a spring-load ring is filling
+    // Settings > AI 助手 › 思考强度: the step slider's knob (ui_settings_assistant.cpp).
+    struct AsstThinkMotion {
+        float position = 0.0f, from = 0.0f;
+        int target = -1, stops = 0;
+        bool dragging = false;
+        uint64_t at = 0, until = 0, drawn = 0;   // NowMs
+    };
+    AsstThinkMotion asst_think_;
+    float AssistantThinkPosition(int stops, int chosen, float drag);
     // Set while drawing by motion whose state lives outside this class (the
     // sidebar, toolbar, column strip and details panel files); cleared at the
     // start of every frame. Rides the same frame pump as everything else.

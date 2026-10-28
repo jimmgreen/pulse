@@ -2,6 +2,7 @@
 #include "git_ui.h"
 #include "ai_settings_ui.h"
 #include "ai_assistant.h"
+#include "ai_assistant_settings.h"
 #include "folder_alias.h"
 #include "app_wall_hint.h"
 #include "arrival_select.h"
@@ -2058,6 +2059,15 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 if (s->settings.SliderValue(which,
                         s->renderer.SettingsSliderValueAt(vm, rect, which, (float)mx)))
                     InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+        }
+        // Settings > AI 助手 › 思考强度 knob held.
+        if (AssistantThinkDragging(*s)) {
+            if (!(wParam & MK_LBUTTON)) {
+                AssistantThinkDragEnd(*s);  // capture lost without WM_LBUTTONUP
+            } else {
+                AssistantThinkDrag(*s, mx);
                 return 0;
             }
         }
@@ -4366,6 +4376,10 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 s->settings.EndSlider();
                 if (GetCapture() == hwnd) ReleaseCapture();
                 InvalidateRect(hwnd, nullptr, FALSE);
+                return 0;
+            }
+            if (AssistantThinkDragEnd(*s)) {
+                if (GetCapture() == hwnd) ReleaseCapture();
                 return 0;
             }
             if (SysCtxPreviewDragEnd(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) return 0;

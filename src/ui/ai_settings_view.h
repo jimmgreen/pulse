@@ -123,7 +123,7 @@ enum AssistantHit : int {
     kAsstUrlField = 27,
     kAsstModelField = 28,
     kAsstTileBase = 100,    // + tile (kAsstTiles first-screen tiles, then 更多's)
-    kAsstThinkBase = 200,   // + 思考强度 segment
+    kAsstThinkBase = 200,   // + 思考强度 stop under the pointer
     kAsstOtherBase = 300,   // + 其他已保存的服务 chip
     // 语音输入.
     kAsstVoiceService = 400,   // the service drop-down (选择服务… / the service; 移除连接)
@@ -184,6 +184,7 @@ struct AssistantPageView {
     bool model_editing = false;        // 手动输入模型名
     AsstThink think = AsstThink::None;
     int effort = 0;                    // 0 off .. 3 high (Toggle: 0 off, else on)
+    float think_drag = -1.0f;          // 思考强度 knob held: stops under the pointer, else < 0
     std::wstring key_mask;             // sk-…9832; empty when the service needs none
     std::vector<AsstOtherView> others;
     // 语音输入.
@@ -222,7 +223,8 @@ struct AssistantPageLayout {
     D2D1_RECT_F connect_row{}, connect{};
     D2D1_RECT_F model_row{}, model_choice{}, model_field{}, model_buttons[2]{};
     D2D1_RECT_F think_row{}, think_toggle{};
-    D2D1_RECT_F think_seg[4]{};
+    D2D1_RECT_F think_slider{}, think_value{};  // 思考强度: the step slider and its level
+    float scale = 1.0f;
     D2D1_RECT_F others_row{};
     std::vector<D2D1_RECT_F> others;
     D2D1_RECT_F voice_section{}, voice_card{}, voice_foot{};

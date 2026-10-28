@@ -41,6 +41,7 @@ using ui::AsstStage;
 
 struct AsstPageUi {
     bool started = false;
+    float think_drag = -1.0f;          // 思考强度 knob held: stops under the pointer
     AsstStage stage = AsstStage::Pick;
     std::string pick;                  // the service being set up
     bool url_editing = false, model_editing = false, revealed = false;
@@ -1335,6 +1336,7 @@ void FillAssistantSettingsVm(AppState& s, ui::WindowViewModel& vm) {
     // A key removed elsewhere (or the file): back to the tiles.
     if (u.stage == AsstStage::Connected && !v.in_use) u.stage = AsstStage::Pick;
     v.stage = u.stage;
+    v.think_drag = u.think_drag;
     const ai::Provider& p = u.stage == AsstStage::Setup ? ai::ProviderById(u.pick) : ai::CurrentProvider();
     v.id = p.id;
     v.name = ai::ProviderName(p);
@@ -1393,6 +1395,40 @@ void FillAssistantSettingsVm(AppState& s, ui::WindowViewModel& vm) {
     }
 }
 
+namespace {
+float ThinkPositionAt(AppState& s, int x) {
+    const ui::WindowViewModel vm = BuildVm(s, false);
+    const D2D1_RECT_F rect = D2D1::RectF(0, 0, static_cast<float>(s.compositor.Width()),
+                                         static_cast<float>(s.compositor.Height()));
+    return s.renderer.AssistantThinkPositionAt(vm, rect, static_cast<float>(x));
+}
+} // namespace
+
+bool AssistantThinkDragging(AppState& s) {
+    const AsstPageUi* u = Ui(s);
+    return u && u->think_drag >= 0.0f;
+}
+
+void AssistantThinkDrag(AppState& s, int x) {
+    AsstPageUi* u = Ui(s);
+    if (!u || u->think_drag < 0.0f) return;
+    const float at = ThinkPositionAt(s, x);
+    if (at < 0.0f || at == u->think_drag) return;
+    u->think_drag = at;
+    Redraw(s);
+}
+
+bool AssistantThinkDragEnd(AppState& s) {
+    AsstPageUi* u = Ui(s);
+    if (!u || u->think_drag < 0.0f) return false;
+    const int stop = static_cast<int>(std::lround(u->think_drag));
+    u->think_drag = -1.0f;
+    SetEffort(s, ai::CurrentProvider().think == ai::ThinkStyle::Effort3 ? stop + 1 : stop);
+    Changed();
+    Redraw(s);
+    return true;
+}
+
 void AssistantSettingsClick(AppState& s, int target) {
     AsstPageUi* up = Ui(s);
     if (!up) return;
@@ -1408,9 +1444,11 @@ void AssistantSettingsClick(AppState& s, int target) {
         return;
     }
     if (target >= ui::kAsstThinkBase && target < ui::kAsstThinkBase + 4) {
-        const int i = target - ui::kAsstThinkBase;
-        SetEffort(s, ai::CurrentProvider().think == ai::ThinkStyle::Effort3 ? i + 1 : i);
-        Changed();
+        // 思考强度: the knob jumps to the stop pressed and then follows the
+        // pointer; the level is kept on release (AssistantThinkDragEnd), like
+        // the other settings sliders.
+        u.think_drag = static_cast<float>(target - ui::kAsstThinkBase);
+        SetCapture(s.hwnd);
         Redraw(s);
         return;
     }

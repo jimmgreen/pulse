@@ -94,6 +94,15 @@ int MainRenderer::SettingsSliderValueAt(const WindowViewModel& vm, const D2D1_RE
         : SettingsSliderValue(SettingsSlider(lay.wallpaper_blur_row, scale_), x, kWallpaperBlurMax);
 }
 
+float MainRenderer::AssistantThinkPositionAt(const WindowViewModel& vm, const D2D1_RECT_F& rect, float x) const {
+    const SettingsLayout lay = MakeSettingsLayout(vm, rect, scale_, title_bar_height_,
+                                                  status_height_, &painter_);
+    const int stops = asst_text::ThinkSegments(vm.settings_assistant);
+    const D2D1_RECT_F& r = lay.assistant.think_slider;
+    if (stops < 2 || r.right <= r.left) return -1.0f;
+    return fluent::StepSliderPositionAt(r, stops, x, scale_);
+}
+
 HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F& rect, float x, float y) const {
     HitTestResult r;
     if (x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom) return r;

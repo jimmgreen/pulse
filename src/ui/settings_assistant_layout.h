@@ -144,6 +144,7 @@ inline float LayoutSettingsAssistant(SettingsLayout& l, const WindowViewModel& v
     using I = l10n::StringId;
     AssistantPageLayout& o = l.assistant;
     o = {};
+    o.scale = s;
     const AssistantPageView& v = vm.settings_assistant;
     const float left = l.content.left + 20.0f * s, right = l.content.right - 20.0f * s;
     const float text_left = left + 54.0f * s, inner_right = right - 16.0f * s;
@@ -269,19 +270,16 @@ inline float LayoutSettingsAssistant(SettingsLayout& l, const WindowViewModel& v
             o.model_row = row(asst_text::T(I::AsstModelDesc2), inner_right - field_w);
             o.model_choice = place(o.model_row, inner_right, field_w);
         }
-        // 思考强度 / 深度思考.
+        // 思考强度: the shared step slider with its level on the right, like
+        // the other settings sliders. 深度思考 is a switch.
         if (const int n = asst_text::ThinkSegments(v)) {
-            float widths[4]{}, total = 0.0f;
-            for (int i = 0; i < n; ++i) {
-                widths[i] = (std::max)(52.0f * s, button_w(asst_text::ThinkLabel(v, i)) - 8.0f * s);
-                total += widths[i];
-            }
-            o.think_row = row(asst_text::ThinkCaption(v), inner_right - total);
-            float sx = inner_right - total;
-            for (int i = 0; i < n; ++i) {
-                o.think_seg[i] = place(o.think_row, sx + widths[i], widths[i]);
-                sx += widths[i];
-            }
+            float value_w = 24.0f * s;
+            for (int i = 0; i < n; ++i)
+                value_w = (std::max)(value_w, button_w(asst_text::ThinkLabel(v, i)) - 16.0f * s);
+            const float slider_w = 200.0f * s, gap = 12.0f * s;
+            o.think_row = row(asst_text::ThinkCaption(v), inner_right - value_w - gap - slider_w);
+            o.think_value = place(o.think_row, inner_right, value_w, 24.0f);
+            o.think_slider = place(o.think_row, inner_right - value_w - gap, slider_w, fluent::StepSliderHeight(s) / s);
         } else if (v.think == AsstThink::Toggle) {
             o.think_row = row(asst_text::ThinkCaption(v), inner_right - 42.0f * s);
             o.think_toggle = place(o.think_row, inner_right, 42.0f * s);
@@ -453,8 +451,11 @@ inline int HitTestSettingsAssistant(const SettingsLayout& l, const WindowViewMod
     if (in(o.model_field)) return kAsstModelField;
     if (in(o.model_buttons[0])) return kAsstModelSave;
     if (in(o.model_buttons[1])) return kAsstModelCancel;
-    for (int i = 0; i < 4; ++i)
-        if (in(o.think_seg[i])) return kAsstThinkBase + i;
+    if (in(o.think_slider)) {
+        const int stops = asst_text::ThinkSegments(v);
+        const float at = fluent::StepSliderPositionAt(o.think_slider, stops, x, o.scale);
+        return kAsstThinkBase + std::clamp(static_cast<int>(std::lround(at)), 0, stops - 1);
+    }
     if (in(o.think_toggle)) return kAsstThinkToggle;
     if (in(o.key_buttons[0])) return kAsstRekey;
     if (in(o.key_buttons[1])) return kAsstRemoveKey;
