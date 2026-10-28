@@ -14,6 +14,7 @@
 #include "app_runtime.h"
 #include "../common/json_value.h"
 #include "../common/localization.h"
+#include "../ui/edit_host.h"
 #include "../ui/fluent_menu.h"
 #include "../ui/settings_page_ids.h"
 #include "../ui/typography.h"
@@ -311,25 +312,26 @@ void SaveUrl(AppState& s, AsstPageUi& u);
 void SaveModel(AppState& s, AsstPageUi& u);
 void CancelEditing(AppState& s, AsstPageUi& u);
 
-void PaintPlaceholder(AppState& s, AsstPageUi& u, HWND hwnd) {
-    HDC hdc = GetDC(hwnd);
-    if (!hdc) return;
-    HideCaret(hwnd);
-    RECT r{};
-    SendMessageW(hwnd, EM_GETRECT, 0, reinterpret_cast<LPARAM>(&r));
-    HFONT old = static_cast<HFONT>(SelectObject(hdc, u.font));
-    SetBkMode(hdc, TRANSPARENT);
-    D2D1_COLOR_F back{}, fore{}, hint{};
-    s.renderer.SettingsAssistantEditColors(back, fore, hint);
-    SetTextColor(hdc, ToColorRef(hint));
-    std::wstring text;
-    if (hwnd == Edit(u, AsstField::Key)) text = Text(I::AsstKeyPlaceholder);
-    else if (hwnd == Edit(u, AsstField::Model)) text = Text(I::AsstModelPlaceholder);
-    else text = L"https://";
-    DrawTextW(hdc, text.c_str(), static_cast<int>(text.size()), &r, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-    SelectObject(hdc, old);
-    ShowCaret(hwnd);
-    ReleaseDC(hwnd, hdc);
+// Text, caret, selection and the hint are presented by LumaText like every
+// other Pulse field (edit_host.h); native painting stays as the fallback.
+struct EditLook {
+    IDWriteTextFormat* format = nullptr;
+    D2D1_COLOR_F fore{};
+    D2D1_COLOR_F back{};
+};
+
+EditLook Look(AppState& s) {
+    EditLook look;
+    look.format = s.compositor.TextFormat();
+    D2D1_COLOR_F hint{};
+    s.renderer.SettingsAssistantEditColors(look.back, look.fore, hint);
+    return look;
+}
+
+std::wstring Hint(AsstField f) {
+    if (f == AsstField::Key) return Text(I::AsstKeyPlaceholder);
+    if (f == AsstField::Model) return Text(I::AsstModelPlaceholder);
+    return L"https://";
 }
 
 // Enter: 连接 (setting up) or 保存; Esc: stop editing.
@@ -343,6 +345,11 @@ LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, D
     AppState& s = *reinterpret_cast<AppState*>(ref);
     AsstPageUi* u = Ui(s);
     if (!u) return DefSubclassProc(hwnd, msg, wp, lp);
+    const EditLook look = Look(s);
+    const auto presented = [&](LRESULT& out) {
+        return ui::HandleChildEditMessage(s.compositor, look.format, look.fore, look.back,
+                                          AssistantSettingsCtlColor(s, nullptr, hwnd), hwnd, msg, wp, lp, out);
+    };
     switch (msg) {
     case WM_GETDLGCODE:
         return DefSubclassProc(hwnd, msg, wp, lp) | DLGC_WANTALLKEYS;
@@ -374,22 +381,24 @@ LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, D
         break;
     case WM_SETFOCUS:
     case WM_KILLFOCUS: {
-        const LRESULT r = DefSubclassProc(hwnd, msg, wp, lp);
-        Redraw(s);
+        LRESULT r = 0;
+        if (!presented(r)) r = DefSubclassProc(hwnd, msg, wp, lp);
+        Redraw(s);   // the field's focus underline
         return r;
     }
-    case WM_PAINT: {
-        const LRESULT r = DefSubclassProc(hwnd, msg, wp, lp);
-        if (GetWindowTextLengthW(hwnd) == 0) PaintPlaceholder(s, *u, hwnd);
-        return r;
-    }
-    case WM_NCDESTROY:
+    case WM_NCDESTROY: {
+        LRESULT ignored = 0;
+        presented(ignored);
         RemoveWindowSubclass(hwnd, EditProc, kEditSubclass);
         break;
-    default:
+    }
+    default: {
+        LRESULT r = 0;
+        if (presented(r)) return r;
         break;
     }
-    const LRESULT r = DefSubclassProc(hwnd, msg, wp, lp);
+    }
+    const LRESULT r = ui::DefPresentedChildEditProc(s.compositor, look.format, look.fore, look.back, hwnd, msg, wp, lp);
     switch (msg) {
     case WM_CHAR: case WM_KEYDOWN: case WM_PASTE: case WM_CUT: case WM_CLEAR: case WM_UNDO:
     case EM_UNDO: case WM_SETTEXT: case EM_REPLACESEL:
@@ -417,7 +426,7 @@ LRESULT CALLBACK EditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, D
 void EnsureFont(AppState& s, AsstPageUi& u) {
     if (u.font && u.font_scale == s.scale) return;
     if (u.font) DeleteObject(u.font);
-    u.font = ui::typography::CreateEditFont(s.scale, 13.0f);
+    u.font = ui::typography::CreateEditFont(s.scale);   // the TextFormat size, like the other fields
     u.font_scale = s.scale;
     u.line_px = 0;
     for (HWND e : u.edits) {
@@ -438,11 +447,8 @@ void EnsureFont(AppState& s, AsstPageUi& u) {
 
 HWND MakeEdit(AppState& s, bool password) {
     // A redirected layered child like the composer (edit_host.h), one line.
-    const DWORD style = WS_CHILD | WS_CLIPSIBLINGS | WS_TABSTOP | ES_AUTOHSCROLL | (password ? ES_PASSWORD : 0);
-    HWND e = CreateWindowExW(WS_EX_LAYERED, L"EDIT", L"", style, 0, 0, 0, 0, s.hwnd, nullptr,
-                             GetModuleHandleW(nullptr), nullptr);
+    HWND e = ui::CreateChildEdit(s.hwnd, L"", password ? ES_PASSWORD : 0);
     if (!e) return nullptr;
-    SetLayeredWindowAttributes(e, 0, 255, LWA_ALPHA);
     SetWindowTheme(e, L"", L"");
     SendMessageW(e, EM_LIMITTEXT, 512, 0);
     if (password) SendMessageW(e, EM_SETPASSWORDCHAR, kMaskChar, 0);
@@ -487,8 +493,11 @@ void Place(AppState& s, AsstPageUi& u, AsstField f) {
     MapWindowPoints(nullptr, s.hwnd, reinterpret_cast<POINT*>(&cur), 2);
     const bool placed = cur.left == x && cur.top == y && cur.right - cur.left == w && cur.bottom - cur.top == line;
     if (!placed || !u.shown[i]) {
+        SendMessageW(edit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(Hint(f).c_str()));
         SetWindowPos(edit, HWND_TOP, x, y, w, line, SWP_NOACTIVATE | SWP_SHOWWINDOW);
         u.shown[i] = true;
+        const EditLook look = Look(s);
+        ui::PresentChildEdit(s.compositor, look.format, look.fore, look.back, edit);
     }
     if (u.focus_pending[i]) {
         u.focus_pending[i] = false;
@@ -1051,9 +1060,11 @@ HBRUSH AssistantSettingsCtlColor(AppState& s, HDC hdc, HWND edit) {
         u->brush = CreateSolidBrush(color);
         u->brush_color = color;
     }
-    SetTextColor(hdc, ToColorRef(fore));
-    SetBkColor(hdc, color);
-    SetBkMode(hdc, OPAQUE);
+    if (hdc) {
+        SetTextColor(hdc, ToColorRef(fore));
+        SetBkColor(hdc, color);
+        SetBkMode(hdc, OPAQUE);
+    }
     return u->brush;
 }
 

@@ -1060,6 +1060,10 @@ struct LumaTextRenderer::Impl {
         std::wstring text(static_cast<size_t>(len) + 1, L'\0');
         const int copied = GetWindowTextW(hwnd, text.data(), len + 1);
         text.resize(copied > 0 ? static_cast<size_t>(copied) : 0);
+        // A password field (an API key) is laid out, hit-tested and drawn as
+        // its mask: one character per character, so caret indices still match.
+        if (const auto mask = static_cast<wchar_t>(SendMessageW(hwnd, EM_GETPASSWORDCHAR, 0, 0)))
+            std::fill(text.begin(), text.end(), mask);
         return text;
     }
 
@@ -1422,13 +1426,7 @@ struct LumaTextRenderer::Impl {
 
         if (!EnsureBlit(w, h)) return false;
 
-        const int len = GetWindowTextLengthW(hwnd);
-        std::wstring text;
-        if (len > 0) {
-            text.resize(static_cast<size_t>(len) + 1);
-            const int copied = GetWindowTextW(hwnd, text.data(), len + 1);
-            text.resize(copied > 0 ? static_cast<size_t>(copied) : 0);
-        }
+        std::wstring text = ReadEditText(hwnd);
 
         DWORD sel0 = 0, sel1 = 0;
         SendMessageW(hwnd, EM_GETSEL, reinterpret_cast<WPARAM>(&sel0),
