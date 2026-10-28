@@ -207,7 +207,7 @@ struct StepSliderSpec {
     ControlState state{};   // hovered, pressed (dragging), keyboard_focus, enabled
 };
 
-// The row height in pixels: the 36 DIP knob and room for its shadow.
+// The row height in pixels: the 30 DIP knob and room for its shadow.
 float StepSliderHeight(float scale) noexcept;
 // The knob's centre for `position` (in stops); the end stops sit a knob
 // radius in from the ends.

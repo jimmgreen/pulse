@@ -2110,9 +2110,9 @@ bool ScrollbarFade::Moving(uint64_t now) const noexcept {
 }
 
 namespace {
-constexpr float kStepKnobDip = 36.0f;
-constexpr float kStepTrackDip = 30.0f;
-constexpr float kStepRowDip = 40.0f;
+constexpr float kStepKnobDip = 30.0f;
+constexpr float kStepTrackDip = 26.0f;
+constexpr float kStepRowDip = 34.0f;
 }  // namespace
 
 float StepSliderHeight(float scale) noexcept { return std::round(kStepRowDip * scale); }

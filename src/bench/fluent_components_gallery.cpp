@@ -171,7 +171,7 @@ bool DrawGallery(Compositor& compositor, bool dark, bool high_contrast,
                           3, false, State(true)});
 
     // 思考强度's stepped slider, the knob on 中 (third of four stops).
-    painter.DrawStepSlider({Rect(662, 496, 250, 40), 4, 2.0f, State()});
+    painter.DrawStepSlider({Rect(662, 498, 250, 34), 4, 2.0f, State()});
     ScrollbarSpec scrollbar{Rect(934, 58, 16, 594), 320, 260, 1200, 1.0f};
     painter.DrawScrollbar(scrollbar);
     scrollbar.viewport = Rect(960, 58, 16, 594);

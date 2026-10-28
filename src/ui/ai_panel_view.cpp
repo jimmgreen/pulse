@@ -819,10 +819,10 @@ void AiPanelView::DrawEffortMenu(Compositor* compositor, const AiPanelViewModel&
     // Geometry: width 320; right = button right + 6, bottom = button top - 8.
     const float w = 320.0f * s;
     const float pad_x = 16.0f * s;
-    const float top_h = 48.0f * s;        // the level (22) and 「model ›」 (24)
-    const float gap = 10.0f * s;
+    const float top_h = 42.0f * s;        // the level (20) and 「model ›」 (21)
+    const float gap = 6.0f * s;
     const float slider_h = fluent::StepSliderHeight(s);
-    const float line_h = 17.0f * s;
+    const float line_h = 16.0f * s;
     // The line keeps one height for every level, so dragging never resizes.
     const float text_w = w - 2.0f * pad_x;
     int lines = 0;
@@ -832,10 +832,10 @@ void AiPanelView::DrawEffortMenu(Compositor* compositor, const AiPanelViewModel&
         const float dh = c.MeasureWrapped(d, formats_.caption, text_w, line_h);
         lines = (std::max)(lines, std::clamp(static_cast<int>(std::ceil(dh / line_h - 0.25f)), 1, 3));
     }
-    const float caption_h = lines > 0 ? 6.0f * s + line_h * static_cast<float>(lines) : 0.0f;
-    const float h = 12.0f * s + top_h + gap + slider_h + caption_h + 14.0f * s;
+    const float caption_h = lines > 0 ? 4.0f * s + line_h * static_cast<float>(lines) : 0.0f;
+    const float h = 10.0f * s + top_h + gap + slider_h + caption_h + 10.0f * s;
     const float anchor = model_button_.right + 6.0f * s;
-    const float bottom = model_button_.top - 8.0f * s;
+    const float bottom = model_button_.top - 6.0f * s;
     const float min_left = panel_rect_.left + 8.0f * s;
     const float right = std::round((std::max)(anchor, min_left + w));
     const D2D1_RECT_F box = D2D1::RectF(std::round(right - w), std::round(bottom - h), right, bottom);
@@ -854,12 +854,12 @@ void AiPanelView::DrawEffortMenu(Compositor* compositor, const AiPanelViewModel&
     c.Stroke(box, radius, pal.line);
 
     const float x0 = box.left + pad_x, x1 = box.right - pad_x;
-    float y = box.top + 12.0f * s;
+    float y = box.top + 10.0f * s;
     TextOptions center;
     center.align = DWRITE_TEXT_ALIGNMENT_CENTER;
     // ↺ on the right; dim (and inert) at the default.
-    const float rb = 28.0f * s;
-    const D2D1_RECT_F reset = D2D1::RectF(x1 - rb + 4.0f * s, y, x1 + 4.0f * s, y + rb);
+    const float rb = 26.0f * s;
+    const D2D1_RECT_F reset = D2D1::RectF(x1 - rb + 6.0f * s, y - 2.0f * s, x1 + 6.0f * s, y - 2.0f * s + rb);
     const bool can_reset = shown != std::clamp(vm.effort_default, 0, stops - 1);
     const bool reset_hot = can_reset && vm.hover.part == AiPanelPart::MenuReset;
     if (reset_hot) c.Fill(reset, 8.0f * s, vm.pressed.part == AiPanelPart::MenuReset ? Mix(pal.hover, pal.text, 0.06f) : pal.hover);
@@ -868,7 +868,7 @@ void AiPanelView::DrawEffortMenu(Compositor* compositor, const AiPanelViewModel&
            !can_reset ? Alpha(pal.text3, 0.45f) : reset_hot ? pal.text : pal.text2);
     // The level, in the accent.
     const float side = rb + 6.0f * s;
-    c.Text(name, formats_.num15, D2D1::RectF(x0 + side, y, x1 - side, y + 22.0f * s), pal.accent, center);
+    c.Text(name, formats_.num15, D2D1::RectF(x0 + side, y, x1 - side, y + 20.0f * s), pal.accent, center);
     // 「model ›」: opens the model list.
     {
         const float chev = 12.0f * s;
@@ -876,8 +876,8 @@ void AiPanelView::DrawEffortMenu(Compositor* compositor, const AiPanelViewModel&
         const float tw = (std::min)(c.Measure(vm.model_label, formats_.body13), max_tw);
         const float lw = tw + 4.0f * s + chev + 18.0f * s;
         const float cx = (x0 + x1) * 0.5f;
-        const D2D1_RECT_F link = D2D1::RectF(std::round(cx - lw * 0.5f), y + 23.0f * s, std::round(cx + lw * 0.5f),
-                                             y + 46.0f * s);
+        const D2D1_RECT_F link = D2D1::RectF(std::round(cx - lw * 0.5f), y + 21.0f * s, std::round(cx + lw * 0.5f),
+                                             y + 42.0f * s);
         const bool hot = vm.hover.part == AiPanelPart::MenuModel;
         if (hot) c.Fill(link, (link.bottom - link.top) * 0.5f, vm.pressed.part == AiPanelPart::MenuModel
                                                                     ? Mix(pal.hover, pal.text, 0.06f) : pal.hover);
@@ -903,14 +903,14 @@ void AiPanelView::DrawEffortMenu(Compositor* compositor, const AiPanelViewModel&
         wrap.wrap = true;
         wrap.center_v = false;
         wrap.line_height = line_h;
-        c.Text(detail, formats_.caption, D2D1::RectF(x0, y + 6.0f * s, x1, y + caption_h), pal.text3, wrap);
+        c.Text(detail, formats_.caption, D2D1::RectF(x0, y + 4.0f * s, x1, y + caption_h), pal.text3, wrap);
     }
     c.dc->PopLayer();
     c.dc->SetTransform(saved);
     if (vm.menu_open) {
         menu_rect_ = box;
-        menu_slider_ = D2D1::RectF(spec.bounds.left, spec.bounds.top - 4.0f * s, spec.bounds.right,
-                                   spec.bounds.bottom + 4.0f * s);
+        menu_slider_ = D2D1::RectF(spec.bounds.left, spec.bounds.top - 3.0f * s, spec.bounds.right,
+                                   spec.bounds.bottom + 3.0f * s);
         if (can_reset) menu_reset_ = reset;
     }
 }
