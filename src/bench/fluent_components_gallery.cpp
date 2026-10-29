@@ -287,11 +287,14 @@ bool DrawCompositeGallery(Compositor& compositor, bool dark, bool high_contrast,
                              .glyph = L"\xE823", .icon_color = HexColor(0x60A5FA)});
     painter.DrawSidebarSectionHeader({.bounds = Rect(10, 274, 216, 26), .text = L"DRIVES",
                                       .state = State(), .expanded = true});
-    painter.DrawDriveSidebarItem({.bounds = Rect(10, 302, 216, 54), .name = L"System (C:)",
-                                  .detail = L"392G free", .glyph = L"\xE7F8", .capacity = 0.24f,
+    constexpr std::uint64_t kGallery_GB = std::uint64_t{1} << 30;
+    painter.DrawDriveSidebarItem({.bounds = Rect(10, 300, 216, 60), .name = L"System (C:)",
+                                  .detail = L"362G free", .glyph = L"\xE7F8", .capacity = 0.24f,
+                                  .free_bytes = 362 * kGallery_GB, .total_bytes = 476 * kGallery_GB,
                                   .icon_color = HexColor(0x60A5FA)});
-    painter.DrawDriveSidebarItem({.bounds = Rect(10, 360, 216, 54), .name = L"Data (D:)",
+    painter.DrawDriveSidebarItem({.bounds = Rect(10, 361, 216, 60), .name = L"Data (D:)",
                                   .detail = L"120G free", .glyph = L"\xE7F8", .capacity = 0.88f,
+                                  .free_bytes = 120 * kGallery_GB, .total_bytes = 1000 * kGallery_GB,
                                   .state = State(true), .icon_color = HexColor(0x34D399)});
     painter.DrawSidebarSectionHeader({.bounds = Rect(10, 422, 216, 26), .text = L"TAGS",
                                       .state = State(), .expanded = true});

@@ -4600,6 +4600,12 @@ BEGIN
     IDS_DRIVE_ONLY_LEFT "仅剩 {free} · 共 {total}"
     IDS_DRIVE_SIDE_FREE "{free} 可用"
     IDS_DRIVE_SIDE_ONLY_LEFT "仅剩 {free}"
+    IDS_COLUMN_USAGE "使用情况"
+    IDS_COLUMN_FREE "可用"
+    IDS_COLUMN_TOTAL_SIZE "总大小"
+    IDS_THIS_PC_OVERVIEW_TITLE "存储总览"
+    IDS_THIS_PC_OVERVIEW_DRIVES "{count} 块磁盘"
+    IDS_THIS_PC_OVERVIEW_SPACE "{free} 可用 · 已用 {used} · 共 {total}"
 END
 
 LANGUAGE 0x09, 0x01
@@ -9199,6 +9205,12 @@ BEGIN
     IDS_DRIVE_ONLY_LEFT "Only {free} left · {total} total"
     IDS_DRIVE_SIDE_FREE "{free} free"
     IDS_DRIVE_SIDE_ONLY_LEFT "Only {free} left"
+    IDS_COLUMN_USAGE "Usage"
+    IDS_COLUMN_FREE "Free"
+    IDS_COLUMN_TOTAL_SIZE "Total size"
+    IDS_THIS_PC_OVERVIEW_TITLE "Storage"
+    IDS_THIS_PC_OVERVIEW_DRIVES "{count} drives"
+    IDS_THIS_PC_OVERVIEW_SPACE "{free} free · {used} used · {total} total"
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.

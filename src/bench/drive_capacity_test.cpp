@@ -24,14 +24,19 @@ constexpr std::uint64_t kGB = std::uint64_t{1} << 30;
 }  // namespace
 
 int main() {
-    // Levels: accent under 85%, amber 85-94%, red from 95%.
+    // Levels: accent under 80%, amber 80-94%, red from 95%.
     Check(CapacityLevelFor(0.0f) == CapacityLevel::Normal, "an empty drive is normal");
-    Check(CapacityLevelFor(0.849f) == CapacityLevel::Normal, "84.9% is still normal");
-    Check(CapacityLevelFor(0.85f) == CapacityLevel::Warning, "85% turns amber");
-    Check(CapacityLevelFor(0.949f) == CapacityLevel::Warning, "94.9% stays amber");
+    Check(CapacityLevelFor(0.794f) == CapacityLevel::Normal, "79.4% (shown 79%) is still normal");
+    Check(CapacityLevelFor(0.7996f) == CapacityLevel::Warning, "79.96% shows 80%, so it is amber");
+    Check(CapacityLevelFor(0.80f) == CapacityLevel::Warning, "80% turns amber");
+    Check(CapacityLevelFor(0.85f) == CapacityLevel::Warning, "85% is amber");
+    Check(CapacityLevelFor(0.944f) == CapacityLevel::Warning, "94.4% stays amber");
+    Check(CapacityLevelFor(0.949f) == CapacityLevel::Critical, "94.9% shows 95%, so it is red");
     Check(CapacityLevelFor(0.95f) == CapacityLevel::Critical, "95% turns red");
     Check(CapacityLevelFor(1.0f) == CapacityLevel::Critical, "a full drive is red");
-    // Under 1 GB left only counts once the drive is also 85% used.
+    // Under 1 GB left only counts once the drive is also 80% used.
+    Check(CapacityLevelFor(0.81f, kGB - 1) == CapacityLevel::Critical, "81% with under 1 GB left is red");
+    Check(CapacityLevelFor(0.79f, kGB - 1) == CapacityLevel::Normal, "79% with under 1 GB left is not red");
     Check(CapacityLevelFor(0.86f, kGB - 1) == CapacityLevel::Critical, "86% with under 1 GB left is red");
     Check(CapacityLevelFor(0.86f, kGB) == CapacityLevel::Warning, "86% with exactly 1 GB left is amber");
     Check(CapacityLevelFor(0.20f, kGB / 4) == CapacityLevel::Normal, "a small stick at 20% is not red");

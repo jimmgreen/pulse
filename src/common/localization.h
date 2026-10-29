@@ -4610,6 +4610,12 @@ enum class StringId : UINT {
     DriveOnlyLeft = IDS_DRIVE_ONLY_LEFT,
     DriveSideFree = IDS_DRIVE_SIDE_FREE,
     DriveSideOnlyLeft = IDS_DRIVE_SIDE_ONLY_LEFT,
+    ColumnUsage = IDS_COLUMN_USAGE,
+    ColumnFree = IDS_COLUMN_FREE,
+    ColumnTotalSize = IDS_COLUMN_TOTAL_SIZE,
+    ThisPcOverviewTitle = IDS_THIS_PC_OVERVIEW_TITLE,
+    ThisPcOverviewDrives = IDS_THIS_PC_OVERVIEW_DRIVES,
+    ThisPcOverviewSpace = IDS_THIS_PC_OVERVIEW_SPACE,
 };
 
 bool IsLanguageId(std::wstring_view id) noexcept;

@@ -4598,4 +4598,10 @@ BEGIN
     IDS_DRIVE_ONLY_LEFT "僅剩 {free} · 共 {total}"
     IDS_DRIVE_SIDE_FREE "{free} 可用"
     IDS_DRIVE_SIDE_ONLY_LEFT "僅剩 {free}"
+    IDS_COLUMN_USAGE "使用情況"
+    IDS_COLUMN_FREE "可用"
+    IDS_COLUMN_TOTAL_SIZE "總大小"
+    IDS_THIS_PC_OVERVIEW_TITLE "儲存空間總覽"
+    IDS_THIS_PC_OVERVIEW_DRIVES "{count} 個磁碟"
+    IDS_THIS_PC_OVERVIEW_SPACE "{free} 可用 · 已用 {used} · 共 {total}"
 END

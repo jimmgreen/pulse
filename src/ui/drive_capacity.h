@@ -16,17 +16,6 @@ enum class CapacityLevel : std::uint8_t { Normal, Warning, Critical };
 
 constexpr std::uint64_t kCapacityUnknownFree = ~std::uint64_t{0};
 
-// Under 85% used: the accent. 85-94%: amber. 95% and up, or a drive that is
-// at least 85% used with under 1 GB left: red (a small stick with little
-// space in total is not "full" just because it is small).
-constexpr CapacityLevel CapacityLevelFor(float used,
-                                         std::uint64_t free_bytes = kCapacityUnknownFree) noexcept {
-    constexpr std::uint64_t kCriticalFree = std::uint64_t{1} << 30;
-    if (used >= 0.95f || (used >= 0.85f && free_bytes < kCriticalFree)) return CapacityLevel::Critical;
-    if (used >= 0.85f) return CapacityLevel::Warning;
-    return CapacityLevel::Normal;
-}
-
 // Whole percent for the label: never 0% while something is used, never 100%
 // while something is left.
 constexpr int CapacityPercent(float used) noexcept {
@@ -34,6 +23,19 @@ constexpr int CapacityPercent(float used) noexcept {
     if (used >= 1.0f) return 100;
     const int rounded = static_cast<int>(used * 100.0f + 0.5f);
     return rounded < 1 ? 1 : rounded > 99 ? 99 : rounded;
+}
+
+// By the whole percent shown beside the bar, so "80%" is never still blue.
+// Under 80% used: the accent. 80-94%: amber. 95% and up, or a drive that is
+// at least 80% used with under 1 GB left: red (a small stick with little
+// space in total is not "full" just because it is small).
+constexpr CapacityLevel CapacityLevelFor(float used,
+                                         std::uint64_t free_bytes = kCapacityUnknownFree) noexcept {
+    constexpr std::uint64_t kCriticalFree = std::uint64_t{1} << 30;
+    const int percent = CapacityPercent(used);
+    if (percent >= 95 || (percent >= 80 && free_bytes < kCriticalFree)) return CapacityLevel::Critical;
+    if (percent >= 80) return CapacityLevel::Warning;
+    return CapacityLevel::Normal;
 }
 
 inline std::wstring CapacityPercentText(float used) {

@@ -118,6 +118,8 @@ struct ListEntryView {
     // "75.2 GB 可用 · 共 476.6 GB" with the free size drawn semibold.
     float drive_used = -1.0f;
     uint64_t drive_free = 0;
+    uint64_t drive_total = 0;     // capacity; 0 = unknown
+    bool drive_row = false;       // This PC: a drive, capacity known or not
     std::wstring drive_space_text;
     uint32_t drive_space_bold_start = 0;
     uint32_t drive_space_bold_length = 0;
@@ -218,6 +220,22 @@ struct DupFunnelView {
     float progress[3] = {};       // the running pass: 0..1, < 0 = no bar
 };
 
+// This PC in details view with two or more drives: the 存储总览 card above
+// the list. Each drive is one segment of a stacked bar, as wide as its share
+// of the total capacity and filled as far as it is used.
+struct DriveOverviewView {
+    struct Drive {
+        std::wstring letter;    // "C:"
+        float used = 0.0f;      // 0..1
+        uint64_t free = 0;
+        uint64_t total = 0;
+    };
+    std::vector<Drive> drives;  // fewer than two: no card
+    uint64_t free = 0;
+    uint64_t total = 0;
+    bool On() const { return drives.size() >= 2; }
+};
+
 // One chip of a tag view's condition bar or 细分 row.
 struct TagQueryChipView {
     enum Kind { All = 0, Any = 1, Not = 2, Location = 3, RefineTag = 4, RefineLocation = 5, Add = 6, Save = 7 };
@@ -266,6 +284,10 @@ struct PaneViewModel {
     std::wstring banner_action_labels[2];   // non-empty: the button's own words (把多出的 4 份移到回收站)
     bool banner_dismissible = false;  // a close button that clears the banner
     DupFunnelView dup_funnel;         // 重复文件 tab: the compare's passes while it runs
+    // This PC in details view: 名称 · 使用情况 · 可用 · 总大小 · 类型, fitted
+    // to the drives; the global column choice and widths stay as they are.
+    bool this_pc_columns = false;
+    DriveOverviewView drive_overview; // with this_pc_columns: the 存储总览 card
     bool dup_chips = false;           // 重复文件 tab: 保留 / 多出 / 都留 as colored chips
     std::wstring dup_empty_title;     // 重复文件 tab with nothing left: its empty-state title
     // 重复文件 tab: the 路径 column names a folder under one of these roots
@@ -477,6 +499,7 @@ struct SidebarItem {
     bool is_drive = false;
     float used_ratio = 0.0f;       // For drives: 0..1.
     uint64_t free_bytes = ~uint64_t{0};  // For drives: bytes left (all ones = unknown).
+    uint64_t total_bytes = 0;            // For drives: capacity (0 = unknown).
     int indent = 0;
     bool status_dot = false;
     D2D1_COLOR_F status_color = {};

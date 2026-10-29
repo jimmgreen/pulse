@@ -4625,3 +4625,9 @@ DriveFreeOfTotal	IDS_DRIVE_FREE_OF_TOTAL	5896	{free} 可用 · 共 {total}	{free
 DriveOnlyLeft	IDS_DRIVE_ONLY_LEFT	5897	仅剩 {free} · 共 {total}	Only {free} left · {total} total	僅剩 {free} · 共 {total}
 DriveSideFree	IDS_DRIVE_SIDE_FREE	5898	{free} 可用	{free} free	{free} 可用
 DriveSideOnlyLeft	IDS_DRIVE_SIDE_ONLY_LEFT	5899	仅剩 {free}	Only {free} left	僅剩 {free}
+ColumnUsage	IDS_COLUMN_USAGE	5900	使用情况	Usage	使用情況
+ColumnFree	IDS_COLUMN_FREE	5901	可用	Free	可用
+ColumnTotalSize	IDS_COLUMN_TOTAL_SIZE	5902	总大小	Total size	總大小
+ThisPcOverviewTitle	IDS_THIS_PC_OVERVIEW_TITLE	5903	存储总览	Storage	儲存空間總覽
+ThisPcOverviewDrives	IDS_THIS_PC_OVERVIEW_DRIVES	5904	{count} 块磁盘	{count} drives	{count} 個磁碟
+ThisPcOverviewSpace	IDS_THIS_PC_OVERVIEW_SPACE	5905	{free} 可用 · 已用 {used} · 共 {total}	{free} free · {used} used · {total} total	{free} 可用 · 已用 {used} · 共 {total}

@@ -46,7 +46,8 @@ bool SameEntries(const std::vector<app::SidebarEntry>& a, const std::vector<app:
             !SameColor(x.color, y.color) || !SameColor(x.tag_dot, y.tag_dot) ||
             x.danger != y.danger || x.is_tag != y.is_tag || x.show_count != y.show_count ||
             x.count != y.count || x.path != y.path || x.is_drive != y.is_drive ||
-            std::abs(x.used_ratio - y.used_ratio) > kUsedRatioStep || x.expandable != y.expandable ||
+            std::abs(x.used_ratio - y.used_ratio) > kUsedRatioStep || x.total_bytes != y.total_bytes ||
+            x.expandable != y.expandable ||
             x.builtin != y.builtin) {
             return false;
         }

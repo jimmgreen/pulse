@@ -153,6 +153,26 @@ bool Less(const fs::DirEntry& a, const fs::DirEntry& b, ui::SortColumn col,
             return (dir == ui::SortDirection::Desc) ? !a_folder : a_folder;
     }
     int cmp = 0;
+    // This PC rows: its details view heads the date column 使用情况 and the
+    // size column 可用. Drives without a known size follow in either direction.
+    if (a.drive_type != 0 && b.drive_type != 0 &&
+        (col == ui::SortColumn::Mtime || col == ui::SortColumn::Size)) {
+        const bool ka_known = a.drive_total > 0, kb_known = b.drive_total > 0;
+        if (ka_known != kb_known) return ka_known;
+        if (ka_known) {
+            const auto key = [col](const fs::DirEntry& e) {
+                const uint64_t free = std::min(e.drive_free, e.drive_total);
+                return col == ui::SortColumn::Size
+                    ? static_cast<double>(free)
+                    : static_cast<double>(e.drive_total - free) / static_cast<double>(e.drive_total);
+            };
+            const double va = key(a), vb = key(b);
+            cmp = va < vb ? -1 : va > vb ? 1 : 0;
+        }
+        if (cmp == 0) cmp = ItemNameCompare(a, b, na, nb);
+        if (dir == ui::SortDirection::Desc) cmp = -cmp;
+        return cmp < 0;
+    }
     switch (col) {
     case ui::SortColumn::Name:
         cmp = ItemNameCompare(a, b, na, nb);

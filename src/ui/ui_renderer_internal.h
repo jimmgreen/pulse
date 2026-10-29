@@ -369,6 +369,9 @@ void ClearTextWidthCache() {
             entry.type_text = DriveTypeText(source.drive_remote_like ? static_cast<uint8_t>(DRIVE_REMOTE) : source.drive_type);
         if (source.drive_type != 0 && source.drive_locked)
             entry.type_text += L" \u00B7 " + pulse::l10n::Get(pulse::l10n::StringId::DriveBitLockerLocked);
+        else if (source.drive_type != 0 && !source.drive_fs.empty())
+            entry.type_text += L" \u00B7 " + source.drive_fs;   // 本地磁盘 · NTFS
+        entry.drive_row = source.drive_type != 0;
         if (entry.link_kind != fs::LinkKind::None) entry.type_text = LinkTypeText(entry.link_kind);
         if (source.drive_type != 0 && source.drive_total > 0) {
             const uint64_t free_bytes = std::min(source.drive_free, source.drive_total);
@@ -376,6 +379,7 @@ void ClearTextWidthCache() {
                 static_cast<double>(source.drive_total - free_bytes) /
                 static_cast<double>(source.drive_total));
             entry.drive_free = free_bytes;
+            entry.drive_total = source.drive_total;
             DriveSpaceText space = DriveTileSpaceText(free_bytes, source.drive_total);
             entry.drive_space_text = std::move(space.text);
             entry.drive_space_bold_start = static_cast<uint32_t>(space.bold_start);
@@ -482,7 +486,7 @@ void ClearTextWidthCache() {
         float pad = 8.0f;
         float headerH = 36.0f;
         float itemH = 32.0f;
-        float driveH = 48.0f;
+        float driveH = 60.0f;   // name + percent, bar, free · total
         float tagH = 26.0f;
         float itemGap = 2.0f;
         float groupGap = 16.0f;
@@ -500,7 +504,7 @@ void ClearTextWidthCache() {
         m.pad = 8.0f * scale;
         m.headerH = 36.0f * scale;
         m.itemH = 32.0f * scale;
-        m.driveH = 48.0f * scale;
+        m.driveH = 60.0f * scale;
         m.tagH = 26.0f * scale;
         m.itemGap = 2.0f * scale;
         m.groupGap = 16.0f * scale;
@@ -1204,9 +1208,15 @@ void ClearTextWidthCache() {
         return pane.dup_funnel.on ? kDupFunnelDip * scale : 0.0f;
     }
 
+    // This PC in details view: the 存储总览 card over two or more drives.
+    constexpr float kDriveOverviewDip = 102.0f;
+    float DriveOverviewHeight(const PaneViewModel& pane, float scale) {
+        return pane.this_pc_columns && pane.drive_overview.On() ? kDriveOverviewDip * scale : 0.0f;
+    }
+
     float PaneExtraTop(const PaneViewModel& pane, float scale, float width, Compositor* compositor) {
         return PaneBannerHeight(pane, width, scale, compositor) + TagQueryBarHeight(pane, scale) +
-               DupFunnelHeight(pane, scale) +
+               DupFunnelHeight(pane, scale) + DriveOverviewHeight(pane, scale) +
                (pane.is_recent ? kRecentControlsDip * scale : 0.0f) +
                (pane.is_query_search ? kSearchFiltersDip * scale : 0.0f) +
                (pane.is_changes ? 36.0f * scale : 0.0f);

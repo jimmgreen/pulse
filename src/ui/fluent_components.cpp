@@ -2756,6 +2756,36 @@ void Painter::DrawDriveSidebarItem(const DriveSidebarItemSpec& spec) {
                   icon_color);
     }
     const float text_left = content.left + icon_slot + Px(8.0f);
+    const CapacityLevel level = CapacityLevelFor(spec.capacity, spec.free_bytes);
+    const D2D1_COLOR_F bar_color = spec.bar_color.a > 0.0f ? spec.bar_color
+                                 : spec.icon_color.a > 0.0f ? spec.icon_color
+                                                            : theme_->accent;
+    if (spec.total_bytes > 0) {
+        // Name and percent, a 6 px bar, then the free and total sizes.
+        const std::wstring percent = CapacityPercentText(spec.capacity);
+        const float percent_width = MeasureTextWidth(compositor_->DwriteFactory(),
+                                                     CaptionFormat(), percent) + Px(6.0f);
+        DrawText(spec.name,
+                 D2D1::RectF(text_left, content.top, content.right - percent_width,
+                            content.top + text_row),
+                 NavFormat(), foreground);
+        DrawText(percent,
+                 D2D1::RectF(content.right - percent_width, content.top, content.right,
+                            content.top + text_row),
+                 CaptionFormat(), spec.state.enabled ? CapacityInk(level) : theme_->text_disabled,
+                 HorizontalAlignment::Right);
+        const float bar_top = content.top + text_row + Px(4.0f);
+        DrawCapacityBar(D2D1::RectF(text_left, bar_top, content.right, bar_top + Px(6.0f)),
+                        spec.capacity, bar_color, 1.0f, spec.free_bytes);
+        const float line_top = bar_top + Px(6.0f) + Px(3.0f);
+        DrawCapacitySpaceLine(DriveTileSpaceText(spec.free_bytes, spec.total_bytes), level,
+                              D2D1::RectF(text_left, line_top, content.right, line_top + Px(16.0f)),
+                              spec.state.enabled);
+        if (spec.state.keyboard_focus) {
+            DrawFocusRing(spec.bounds, radius);
+        }
+        return;
+    }
     const float detail_width = MeasureTextWidth(compositor_->DwriteFactory(),
                                                 CaptionFormat(), spec.detail) + Px(6.0f);
     DrawText(spec.name,
@@ -2763,7 +2793,6 @@ void Painter::DrawDriveSidebarItem(const DriveSidebarItemSpec& spec) {
                         content.top + text_row),
              NavFormat(), foreground);
     // "76.3G 可用" in the level's colour once the drive is filling up.
-    const CapacityLevel level = CapacityLevelFor(spec.capacity, spec.free_bytes);
     DrawText(spec.detail,
              D2D1::RectF(content.right - detail_width, content.top, content.right,
                         content.top + text_row),
@@ -2772,14 +2801,53 @@ void Painter::DrawDriveSidebarItem(const DriveSidebarItemSpec& spec) {
 
     const auto track = D2D1::RectF(text_left, content.bottom - Px(5.0f), content.right,
                                    content.bottom);
-    DrawCapacityBar(track, spec.capacity,
-                    spec.bar_color.a > 0.0f ? spec.bar_color
-                    : spec.icon_color.a > 0.0f ? spec.icon_color
-                                               : theme_->accent,
-                    1.0f, spec.free_bytes);
+    DrawCapacityBar(track, spec.capacity, bar_color, 1.0f, spec.free_bytes);
     if (spec.state.keyboard_focus) {
         DrawFocusRing(spec.bounds, radius);
     }
+}
+
+void Painter::DrawCapacitySpaceLine(const DriveSpaceText& space, CapacityLevel level,
+                                    const D2D1_RECT_F& bounds, bool enabled) {
+    if (!theme_ || !dc_ || !compositor_ || space.text.empty() || Width(bounds) <= 1.0f ||
+        Height(bounds) <= 0.0f) {
+        return;
+    }
+    IDWriteTextFormat* format = CaptionFormat();
+    IDWriteFactory2* factory = compositor_->DwriteFactory();
+    const D2D1_COLOR_F muted = enabled ? theme_->text_secondary : theme_->text_disabled;
+    const auto size = static_cast<UINT32>(space.text.size());
+    const UINT32 bold_start = (std::min)(static_cast<UINT32>(space.bold_start), size);
+    const UINT32 bold_length = (std::min)(static_cast<UINT32>(space.bold_length), size - bold_start);
+    ComPtr<IDWriteTextLayout> layout;
+    ComPtr<ID2D1SolidColorBrush> strong;
+    if (high_contrast_ || !format || !factory || bold_length == 0 ||
+        FAILED(factory->CreateTextLayout(space.text.c_str(), size, format, Width(bounds),
+                                         Height(bounds), &layout)) || !layout.get() ||
+        FAILED(dc_->CreateSolidColorBrush(
+            enabled ? (level == CapacityLevel::Critical ? CapacityInk(level) : theme_->text) : muted,
+            &strong)) || !strong.get()) {
+        DrawText(space.text, bounds, format, muted);
+        return;
+    }
+    layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    layout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    DWRITE_TEXT_METRICS metrics{};
+    if (SUCCEEDED(layout->GetMetrics(&metrics)) && metrics.widthIncludingTrailingWhitespace > Width(bounds)) {
+        DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+        ComPtr<IDWriteInlineObject> ellipsis;
+        factory->CreateEllipsisTrimmingSign(layout.get(), &ellipsis);
+        layout->SetTrimming(&trimming, ellipsis.get());
+    }
+    const DWRITE_TEXT_RANGE bold{bold_start, bold_length};
+    layout->SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD, bold);
+    // "仅剩 14.7 GB" in red, the words before the size included.
+    layout->SetDrawingEffect(strong.get(), level == CapacityLevel::Critical
+                                               ? DWRITE_TEXT_RANGE{0, bold_start + bold_length}
+                                               : bold);
+    const D2D1_RECT_F snapped = typography::SnapVerticalBounds(bounds);
+    DrawLayoutText(compositor_, dc_, high_contrast_, D2D1::Point2F(snapped.left, snapped.top), layout.get(),
+                   ScratchBrush(muted), D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
 void Painter::DrawCapacityBar(const D2D1_RECT_F& track, float capacity, D2D1_COLOR_F value_color,

@@ -1499,7 +1499,8 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             }
         }
         const float columnTop = changesTop + (paneVm.is_changes ? 36 * scale_ : 0) +
-                                TagQueryBarHeight(paneVm, scale_) + DupFunnelHeight(paneVm, scale_);
+                                TagQueryBarHeight(paneVm, scale_) + DupFunnelHeight(paneVm, scale_) +
+                                DriveOverviewHeight(paneVm, scale_);
         float listTop = paneRc.top + pane_header_height_ + extra +
                         (ShowsColumnHeader(paneVm.view_mode) ? column_header_height_ : 0.0f);
         if (y >= paneRc.top && y < paneRc.top + pane_header_height_) {
@@ -1571,7 +1572,9 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                     return out;
                 }
             }
-            for (int divider = 0; divider < columns.count - 1; ++divider) {
+            // This PC's columns are fitted to its drives and not resizable:
+            // a drag would write the global column widths.
+            for (int divider = 0; divider < columns.count - 1 && !paneVm.this_pc_columns; ++divider) {
                 if (std::abs(x - columns.DividerX(divider)) <= 4.0f * scale_) {
                     out.region = HitTestResult::ColumnDivider;
                     out.index = divider;
@@ -1593,6 +1596,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             case ColumnKind::Created: out.column = SortColumn::Created; break;
             case ColumnKind::Accessed: out.column = SortColumn::Accessed; break;
             case ColumnKind::Status: out.region = HitTestResult::Pane; break; // display-only
+            case ColumnKind::Total: out.region = HitTestResult::Pane; break;  // This PC: display-only
             }
             return out;
         }

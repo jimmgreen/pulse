@@ -834,6 +834,7 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             drive.glyph = item.icon_glyph;
             drive.capacity = item.used_ratio;
             drive.free_bytes = item.free_bytes;
+            drive.total_bytes = item.total_bytes;
             drive.state = state;
             drive.drop_target = slot.run == vm.sidebar_drop_index;
             drive.icon_color = item.icon_color;

@@ -129,6 +129,7 @@ std::vector<SidebarItem> ReadSidebarDrives() {
                                                            static_cast<double>(total.QuadPart));
                 item.detail = DriveDetail(free.QuadPart, total.QuadPart);
                 item.free_bytes = free.QuadPart;
+                item.total_bytes = total.QuadPart;
             }
         }
         if (label.empty()) {
@@ -450,6 +451,7 @@ private:
                                                            static_cast<double>(entry.size));
                 item.detail = DriveDetail(entry.free, entry.size);
                 item.free_bytes = entry.free;
+                item.total_bytes = entry.size;
             }
         }
     }

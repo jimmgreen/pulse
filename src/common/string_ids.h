@@ -4618,5 +4618,11 @@
 #define IDS_DRIVE_ONLY_LEFT                                                              5897
 #define IDS_DRIVE_SIDE_FREE                                                              5898
 #define IDS_DRIVE_SIDE_ONLY_LEFT                                                         5899
+#define IDS_COLUMN_USAGE                                                                 5900
+#define IDS_COLUMN_FREE                                                                  5901
+#define IDS_COLUMN_TOTAL_SIZE                                                            5902
+#define IDS_THIS_PC_OVERVIEW_TITLE                                                       5903
+#define IDS_THIS_PC_OVERVIEW_DRIVES                                                      5904
+#define IDS_THIS_PC_OVERVIEW_SPACE                                                       5905
 
 #endif  // PULSE_STRING_IDS_H

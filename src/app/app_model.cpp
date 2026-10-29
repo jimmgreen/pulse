@@ -1438,6 +1438,7 @@ void RefreshSidebarDriveCapacity(std::vector<SidebarEntry>& drives) {
         entry.detail.clear();
         entry.used_ratio = 0.0f;
         entry.free_bytes = ~uint64_t{0};
+        entry.total_bytes = 0;
         entry.danger = false;
         if (!GetDiskFreeSpaceExW(entry.path.c_str(), &free_bytes, &total_bytes, nullptr))
             continue;
@@ -1447,6 +1448,7 @@ void RefreshSidebarDriveCapacity(std::vector<SidebarEntry>& drives) {
         if (total > 0) {
             entry.used_ratio = static_cast<float>(static_cast<double>(total - free) / static_cast<double>(total));
             entry.free_bytes = free;
+            entry.total_bytes = total;
             entry.danger = ui::CapacityLevelFor(entry.used_ratio, free) == ui::CapacityLevel::Critical;
         }
     }
@@ -1676,6 +1678,7 @@ static ui::SidebarGroup ConvertGroup(const std::wstring& header, const std::vect
         it.is_drive = e.is_drive;
         it.used_ratio = e.used_ratio;
         it.free_bytes = e.free_bytes;
+        it.total_bytes = e.total_bytes;
         it.badge = e.badge;
         it.badge_color = ui::HexColor(e.badge_rgb);
         it.is_tag = e.is_tag;
@@ -2153,6 +2156,31 @@ void FillPaneViewModelBody(ui::PaneViewModel& out, const Pane& pane, const Place
     out.details_column_dividers = tab->details_column_dividers;
     out.search_column_dividers = tab->search_column_dividers;
     FillColumnStripView(out.column_strip, *tab);
+    // This PC in details view: its own columns, and 存储总览 over two or more
+    // local drives whose sizes are known.
+    out.this_pc_columns = tab->current_path.empty() && tab->view_mode == ui::ViewMode::Details &&
+                          !out.column_strip.Active();
+    out.drive_overview = {};
+    if (out.this_pc_columns && tab->snapshot && !tab->loading) {
+        for (size_t i = 0; i < tab->EntryCount(); ++i) {
+            const fs::DirEntry& e = tab->EntryAt(i);
+            if (!e.drive_type || e.drive_remote_like || e.drive_total == 0) continue;
+            ui::DriveOverviewView::Drive drive;
+            const std::wstring& root = e.full_path;
+            const size_t colon = root.find(L':');
+            if (colon != std::wstring::npos && colon > 0) drive.letter = root.substr(colon - 1, 2);
+            drive.total = e.drive_total;
+            drive.free = std::min(e.drive_free, e.drive_total);
+            drive.used = static_cast<float>(static_cast<double>(drive.total - drive.free) /
+                                            static_cast<double>(drive.total));
+            out.drive_overview.free += drive.free;
+            out.drive_overview.total += drive.total;
+            out.drive_overview.drives.push_back(std::move(drive));
+        }
+        // Drive letter order, whatever the rows are sorted by.
+        std::sort(out.drive_overview.drives.begin(), out.drive_overview.drives.end(),
+                  [](const auto& a, const auto& b) { return a.letter < b.letter; });
+    }
     out.focused = pane.focused;
     out.snapshot = tab->snapshot;
     out.tag_catalog = places;

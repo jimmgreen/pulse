@@ -563,8 +563,77 @@ D2D1_RECT_F MainRenderer::FilterEditRect(const D2D1_RECT_F& pane_bounds, float e
     return rc;
 }
 
+MainRenderer::DetailsColumnLayout MainRenderer::ThisPcColumns(
+    const D2D1_RECT_F& pane_bounds, const PaneViewModel& vm) const {
+    DetailsColumnLayout out;
+    const auto content = DetailsContentRect(pane_bounds, scale_);
+    out.left = content.left + margin_;
+    out.right = std::max(out.left, content.right - margin_ * 3.0f);
+    const float total = out.right - out.left;
+    out.count = 1;
+    out.kinds[0] = ColumnKind::Name;
+    out.widths[0] = std::max(0.0f, total);
+    if (total <= 0.0f || !compositor_ || !compositor_->FileNameFormat()) return out;
+    auto measure = [&](const std::wstring& text, IDWriteTextFormat* format) {
+        float luma = 0.0f;
+        compositor_->MeasureLumaText(text, format, luma);
+        return std::max(luma, MeasureTextWidth(compositor_->DwriteFactory(), format, text));
+    };
+    // Header text, both cell insets and room for a sort mark.
+    auto header = [&](pulse::l10n::StringId id) {
+        return measure(pulse::l10n::Get(id), compositor_->HeaderFormat()) + 35.0f * scale_;
+    };
+    float free_w = header(pulse::l10n::StringId::ColumnFree);
+    float total_w = header(pulse::l10n::StringId::ColumnTotalSize);
+    float type_w = header(pulse::l10n::StringId::ColumnType);
+    // The bar plus "100%" beside it.
+    const float usage_w = std::max(header(pulse::l10n::StringId::ColumnUsage), 200.0f * scale_);
+    const size_t rows = std::min<size_t>(vm.EntryCount(), 128);
+    for (size_t row = 0; row < rows; ++row) {
+        const int source = vm.SourceIndex(static_cast<int>(row));
+        if (source < 0) continue;
+        const ListEntryView& e = MakeVisibleEntry(vm, static_cast<size_t>(source));
+        if (e.drive_total > 0) {
+            // The free size is semibold: a little wider than it measures here.
+            free_w = std::max(free_w, measure(pulse::format::ByteSize(e.drive_free),
+                                              compositor_->FileNameFormat()) * 1.08f + 20.0f * scale_);
+            total_w = std::max(total_w, measure(pulse::format::ByteSize(e.drive_total),
+                                                compositor_->FileNameFormat()) + 20.0f * scale_);
+        }
+        // A phone's hint runs across the columns; it does not size 类型.
+        if (!e.device)
+            type_w = std::max(type_w, measure(e.type_text, compositor_->FileNameFormat()) + 20.0f * scale_);
+    }
+    type_w = std::min(type_w, 240.0f * scale_);
+    // Display order; when the pane is narrow, 类型 goes first, then 总大小,
+    // then 使用情况, so the name keeps at least 180 px.
+    struct Col { ColumnKind kind; float width; };
+    std::vector<Col> cols{{ColumnKind::Date, usage_w}, {ColumnKind::Size, free_w},
+                          {ColumnKind::Total, total_w}, {ColumnKind::Type, type_w}};
+    const float name_min = 180.0f * scale_;
+    const ColumnKind drop_order[] = {ColumnKind::Type, ColumnKind::Total, ColumnKind::Date, ColumnKind::Size};
+    for (const ColumnKind kind : drop_order) {
+        float used = 0.0f;
+        for (const Col& c : cols) used += c.width;
+        if (total - used >= name_min) break;
+        cols.erase(std::remove_if(cols.begin(), cols.end(), [kind](const Col& c) { return c.kind == kind; }),
+                   cols.end());
+    }
+    float used = 0.0f;
+    for (const Col& c : cols) used += c.width;
+    out.widths[0] = std::max(0.0f, total - used);
+    for (const Col& c : cols) {
+        out.kinds[static_cast<size_t>(out.count)] = c.kind;
+        out.widths[static_cast<size_t>(out.count)] = c.width;
+        ++out.count;
+    }
+    return out;
+}
+
 MainRenderer::DetailsColumnLayout MainRenderer::DetailsColumns(
     const D2D1_RECT_F& pane_bounds, const PaneViewModel& vm) const {
+    if (vm.this_pc_columns && !vm.is_search && !vm.column_strip.Active())
+        return ThisPcColumns(pane_bounds, vm);
     if (vm.column_strip.Active() && !vm.is_search) {
         // Column view: one name column, like the columns beside it.
         DetailsColumnLayout name_only = DetailsColumns(pane_bounds, DetailsColumnWidths{}, false, {});
@@ -741,6 +810,114 @@ void MainRenderer::DrawDriveSpaceLine(ID2D1DeviceContext* dc, const ListEntryVie
     }
     compositor_->DrawTextLayout(D2D1::Point2F(x, y), layout.get(), brTextSecondary_.get(),
                                 D2D1_DRAW_TEXT_OPTIONS_CLIP);
+}
+
+void MainRenderer::DrawDriveOverview(const PaneViewModel& pane, const D2D1_RECT_F& card, float reveal,
+                                     const Theme& theme) {
+    // 存储总览: the title and drive count, the free / used / total sizes on
+    // the right; a stacked bar, one segment per drive sized by capacity and
+    // filled by use; then each drive's letter and percent.
+    ID2D1DeviceContext* dc = compositor_ ? compositor_->Dc() : nullptr;
+    const DriveOverviewView& ov = pane.drive_overview;
+    if (!dc || !ov.On() || ov.total == 0 || card.right - card.left < 160.0f * scale_) return;
+    IDWriteFactory2* factory = compositor_->DwriteFactory();
+    IDWriteTextFormat* small_fmt = compositor_->SmallFormat();
+    IDWriteTextFormat* title_fmt = NameSemiboldFormat();
+    if (!factory || !small_fmt || !title_fmt) return;
+    const float radius = 8.0f * scale_;
+    painter_.FillRoundedRect(card, radius, theme.surface_card);
+    painter_.StrokeRoundedRect(card, radius, theme.stroke_card);
+    const float left = card.left + 16.0f * scale_;
+    const float right = card.right - 16.0f * scale_;
+    const float width = right - left;
+    using pulse::l10n::StringId;
+
+    // Title row.
+    const float row_top = card.top + 12.0f * scale_, row_h = 22.0f * scale_;
+    const std::wstring title = pulse::l10n::Get(StringId::ThisPcOverviewTitle);
+    const float title_w = std::min(width, MeasureTextWidth(factory, title_fmt, title) + 2.0f * scale_);
+    MakeBrush(dc, theme.text, brText_);
+    DrawTextEndEllipsis(compositor_, title_fmt, brText_.get(), title, left, row_top, title_w, row_h);
+    std::wstring count = pulse::l10n::Get(StringId::ThisPcOverviewDrives);
+    capacity_detail::ReplaceToken(count, L"{count}", std::to_wstring(ov.drives.size()));
+    const float count_left = left + title_w + 10.0f * scale_;
+    const float count_w = MeasureTextWidth(factory, small_fmt, count) + 2.0f * scale_;
+    MakeBrush(dc, theme.text_secondary, brTextSecondary_);
+    if (count_left + count_w <= right)
+        DrawTextEndEllipsis(compositor_, small_fmt, brTextSecondary_.get(), count, count_left, row_top + scale_,
+                            count_w, row_h);
+    // "75.0 GB 可用 · 已用 401.6 GB · 共 1.4 TB", the free size semibold.
+    std::wstring space = pulse::l10n::Get(StringId::ThisPcOverviewSpace);
+    capacity_detail::ReplaceToken(space, L"{used}", pulse::format::ByteSize(ov.total - std::min(ov.free, ov.total)));
+    capacity_detail::ReplaceToken(space, L"{total}", pulse::format::ByteSize(ov.total));
+    const std::wstring free_text = pulse::format::ByteSize(ov.free);
+    size_t free_at = std::wstring::npos;
+    capacity_detail::ReplaceToken(space, L"{free}", free_text, &free_at);
+    const float space_left = count_left + count_w + 12.0f * scale_;
+    ComPtr<IDWriteTextLayout> space_layout;
+    if (space_left < right &&
+        SUCCEEDED(factory->CreateTextLayout(space.c_str(), static_cast<UINT32>(space.size()), small_fmt,
+                                            right - space_left, row_h, &space_layout)) && space_layout.get()) {
+        space_layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        space_layout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+        DWRITE_TEXT_METRICS metrics{};
+        // Too narrow for all of it: leave it out rather than cut the numbers.
+        if (SUCCEEDED(space_layout->GetMetrics(&metrics)) && metrics.widthIncludingTrailingWhitespace <= right - space_left) {
+            if (free_at != std::wstring::npos) {
+                const DWRITE_TEXT_RANGE bold{static_cast<UINT32>(free_at), static_cast<UINT32>(free_text.size())};
+                space_layout->SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD, bold);
+                MakeBrush(dc, theme.text, brCapacityStrong_);
+                space_layout->SetDrawingEffect(brCapacityStrong_.get(), bold);
+            }
+            compositor_->DrawTextLayout(D2D1::Point2F(space_left, row_top + scale_), space_layout.get(),
+                                        brTextSecondary_.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+        }
+    }
+
+    // Stacked bar: every drive gets at least 6% of the width, so a small
+    // stick next to a large disk is still there to see.
+    const float bar_top = row_top + row_h + 10.0f * scale_;
+    const float bar_h = 10.0f * scale_, gap = 3.0f * scale_;
+    const size_t n = ov.drives.size();
+    double weight_sum = 0.0;
+    std::vector<double> weights(n);
+    for (size_t i = 0; i < n; ++i) {
+        weights[i] = std::max(static_cast<double>(ov.drives[i].total), static_cast<double>(ov.total) * 0.06);
+        weight_sum += weights[i];
+    }
+    const float bar_room = std::max(0.0f, width - gap * static_cast<float>(n - 1));
+    float seg_left = left;
+    for (size_t i = 0; i < n && weight_sum > 0.0; ++i) {
+        const float seg_w = i + 1 == n ? right - seg_left
+                                       : std::round(bar_room * static_cast<float>(weights[i] / weight_sum));
+        const D2D1_RECT_F seg = D2D1::RectF(seg_left, bar_top, seg_left + std::max(0.0f, seg_w), bar_top + bar_h);
+        painter_.DrawCapacityBar(seg, ov.drives[i].used, theme.accent, reveal, ov.drives[i].free);
+        seg_left += seg_w + gap;
+    }
+
+    // Legend: a swatch in the drive's level colour, "C:" and its percent.
+    float lx = left;
+    const float legend_top = bar_top + bar_h + 9.0f * scale_, legend_h = 18.0f * scale_;
+    for (const DriveOverviewView::Drive& drive : ov.drives) {
+        const CapacityLevel level = CapacityLevelFor(drive.used, drive.free);
+        const std::wstring pct = CapacityPercentText(drive.used);
+        const float letter_w = MeasureTextWidth(factory, small_fmt, drive.letter) + 2.0f * scale_;
+        const float pct_w = MeasureTextWidth(factory, small_fmt, pct) + 2.0f * scale_;
+        const float item_w = 14.0f * scale_ + letter_w + 4.0f * scale_ + pct_w;
+        if (lx + item_w > right) break;
+        const float sw = 8.0f * scale_;
+        const float sy = std::round(legend_top + (legend_h - sw) * 0.5f);
+        painter_.FillRoundedRect(D2D1::RectF(lx, sy, lx + sw, sy + sw), 2.0f * scale_,
+                                 level == CapacityLevel::Normal ? theme.accent : painter_.CapacityInk(level));
+        MakeBrush(dc, theme.text_secondary, brTextSecondary_);
+        DrawTextEndEllipsis(compositor_, small_fmt, brTextSecondary_.get(), drive.letter, lx + 14.0f * scale_,
+                            legend_top, letter_w, legend_h);
+        MakeBrush(dc, painter_.CapacityInk(level), brTextSecondary_);
+        DrawTextEndEllipsis(compositor_, small_fmt, brTextSecondary_.get(), pct,
+                            lx + 14.0f * scale_ + letter_w + 4.0f * scale_, legend_top, pct_w, legend_h);
+        lx += item_w + 16.0f * scale_;
+    }
+    MakeBrush(dc, theme.text_secondary, brTextSecondary_);
 }
 
 void MainRenderer::DrawTypeChipLabel(ID2D1DeviceContext* dc, const std::wstring& chip,
@@ -3206,6 +3383,13 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
         MakeBrush(dc, theme.text_secondary, brTextSecondary_);
         y += kDupFunnelDip * scale_;
     }
+    if (const float overviewH = DriveOverviewHeight(pane, scale_); overviewH > 0.0f) {
+        const D2D1_RECT_F card = D2D1::RectF(x + 8.0f * scale_, y + 4.0f * scale_, x + w - 8.0f * scale_,
+                                             y + overviewH - 8.0f * scale_);
+        DrawDriveOverview(pane, card, CapacityReveal(pane, pane_index), theme);
+        MakeBrush(dc, theme.text_secondary, brTextSecondary_);
+        y += overviewH;
+    }
     if (ShowsColumnHeader(pane.view_mode) && pane.column_strip.Active()) {
         // Column view: the folder's name as a caption like the columns beside
         // it, at the header's height so rows line up across the columns.
@@ -3224,8 +3408,11 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
         const DetailsColumnLayout columns = AnimateColumns(DetailsColumns(bounds, pane), pane_index);
         if (pane_index >= 0 && pane_index < static_cast<int>(painted_columns_.size())) {
             uint32_t mask = columns.two_line ? (1u << 8) : 0u;
-            for (int col = 0; col < columns.count; ++col)
+            for (int col = 0; col < columns.count; ++col) {
+                // This PC's 总大小 is no global column (and bit 8 is two_line).
+                if (columns.kinds[static_cast<size_t>(col)] == ColumnKind::Total) continue;
                 mask |= 1u << static_cast<uint32_t>(columns.kinds[static_cast<size_t>(col)]);
+            }
             painted_columns_[static_cast<size_t>(pane_index)] = mask;
         }
         float cx = columns.left;
@@ -3300,7 +3487,8 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
                 drawCol(pulse::l10n::Get(pulse::l10n::StringId::ColumnPath), SortColumn::Path, cw, false);
                 break;
             case ColumnKind::Date:
-                drawCol(pane.date_column_label.empty()
+                drawCol(pane.this_pc_columns ? pulse::l10n::Get(pulse::l10n::StringId::ColumnUsage)
+                        : pane.date_column_label.empty()
                             ? pulse::l10n::Get(pulse::l10n::StringId::ColumnModified)
                             : pane.date_column_label,
                         SortColumn::Mtime, cw, false);
@@ -3311,7 +3499,12 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
                         SortColumn::Type, cw, false);
                 break;
             case ColumnKind::Size:
-                drawCol(pulse::l10n::Get(pulse::l10n::StringId::ColumnSize), SortColumn::Size, cw, true);
+                drawCol(pulse::l10n::Get(pane.this_pc_columns ? pulse::l10n::StringId::ColumnFree
+                                                              : pulse::l10n::StringId::ColumnSize),
+                        SortColumn::Size, cw, true);
+                break;
+            case ColumnKind::Total:   // This PC: display-only
+                drawCol(pulse::l10n::Get(pulse::l10n::StringId::ColumnTotalSize), SortColumn::Name, cw, true, false);
                 break;
             case ColumnKind::Created:
                 drawCol(pulse::l10n::Get(pulse::l10n::StringId::ColumnCreated), SortColumn::Created, cw, false);
@@ -3376,6 +3569,7 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
             case ColumnKind::Created: b.name = pulse::l10n::Get(pulse::l10n::StringId::ColumnCreated); break;
             case ColumnKind::Accessed: b.name = pulse::l10n::Get(pulse::l10n::StringId::ColumnAccessed); break;
             case ColumnKind::Status: b.name = pulse::l10n::Get(pulse::l10n::StringId::ColumnStatus); break;
+            case ColumnKind::Total: b.name = pulse::l10n::Get(pulse::l10n::StringId::ColumnTotalSize); break;
             }
         } else if (col_badge_.on && col_badge_.pane == pane_index) {
             col_badge_.on = false;
@@ -4473,6 +4667,47 @@ void MainRenderer::DrawListSkeleton(const D2D1_RECT_F& viewport, const Theme& th
     }
 }
 
+float MainRenderer::CapacityReveal(const PaneViewModel& vm, int pane_index) {
+    // This PC tiles and its details view (and the overview card above it):
+    // the capacity bars grow from empty once per visit, after the listing
+    // lands. Safe to ask more than once a frame: the answer is the same.
+    NavEnter* nav = pane_index >= 0 && pane_index < static_cast<int>(nav_enter_.size())
+        ? &nav_enter_[static_cast<size_t>(pane_index)] : nullptr;
+    if (!nav) return 1.0f;
+    const bool grows = vm.view_mode == ViewMode::Tiles || vm.this_pc_columns;
+    if (nav->capacity_path != vm.path) {
+        nav->capacity_path = vm.path;
+        nav->capacity_pending = grows && motion::SystemAnimationsEnabled() && !IsHighContrast();
+        nav->capacity_start = 0;
+    }
+    if (nav->capacity_pending && !vm.loading) {
+        nav->capacity_pending = false;
+        // Drives list first; a folder of files has none to grow.
+        const size_t probe = std::min<size_t>(vm.EntryCount(), 64);
+        for (size_t k = 0; k < probe; ++k) {
+            const ListEntryView& probe_entry = MakeVisibleEntry(vm, k);
+            if (probe_entry.drive_used >= 0.0f && !probe_entry.device) {
+                nav->capacity_start = motion_now_;
+                break;
+            }
+        }
+    }
+    if (nav->capacity_pending) {
+        RequestMotionFrame();
+        return 0.0f;
+    }
+    if (nav->capacity_start) {
+        const float t = static_cast<float>(motion_now_ - nav->capacity_start) / kCapacityRevealMs;
+        if (t >= 1.0f || !grows) {
+            nav->capacity_start = 0;
+        } else {
+            RequestMotionFrame();
+            return motion::EaseOutCubic(t);
+        }
+    }
+    return 1.0f;
+}
+
 void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, float h,
                             const Theme& theme, int hover_region, int hover_control_index,
                             bool pane_focused, int pane_index) {
@@ -4538,40 +4773,9 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             nav->start = 0;
         if (nav->start || nav->pending) RequestMotionFrame();
     }
-    // This PC tiles: the capacity bars grow from empty, once per visit.
-    float capacity_reveal = 1.0f;
-    if (nav) {
-        if (nav->capacity_path != vm.path) {
-            nav->capacity_path = vm.path;
-            nav->capacity_pending = vm.view_mode == ViewMode::Tiles && motion::SystemAnimationsEnabled() &&
-                                    !IsHighContrast();
-            nav->capacity_start = 0;
-        }
-        if (nav->capacity_pending && !vm.loading) {
-            nav->capacity_pending = false;
-            // Drives list first; a folder of files has none to grow.
-            const size_t probe = std::min<size_t>(entryCount, 64);
-            for (size_t k = 0; k < probe; ++k) {
-                const ListEntryView& probe_entry = MakeVisibleEntry(vm, k);
-                if (probe_entry.drive_used >= 0.0f && !probe_entry.device) {
-                    nav->capacity_start = motion_now_;
-                    break;
-                }
-            }
-        }
-        if (nav->capacity_pending) {
-            capacity_reveal = 0.0f;
-            RequestMotionFrame();
-        } else if (nav->capacity_start) {
-            const float t = static_cast<float>(motion_now_ - nav->capacity_start) / kCapacityRevealMs;
-            if (t >= 1.0f || vm.view_mode != ViewMode::Tiles) {
-                nav->capacity_start = 0;
-            } else {
-                capacity_reveal = motion::EaseOutCubic(t);
-                RequestMotionFrame();
-            }
-        }
-    }
+    // This PC: the capacity bars grow from empty, once per visit.
+    const float capacity_reveal = CapacityReveal(vm, pane_index);
+
     if (entryCount == 0) return;
     const D2D1_RECT_F viewport = D2D1::RectF(x, y, x + w, y + h);
     g_wall_notify = notify_hwnd_;  // the aspect probe repaints this window
@@ -5805,6 +6009,69 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                     const float left = colX + textInset;
                     const float avail = std::max(0.0f, colW - textInset * 2.0f);
                     if (avail <= 1.0f) continue;
+                    if (vm.this_pc_columns) {
+                        const ColumnKind pc_kind = detailsColumns.kinds[static_cast<size_t>(col)];
+                        if ((e.device & fs::kPcDevicePlaceholder) && !e.drive_row) {
+                            // 没有连接的手机: how to connect one, across the columns.
+                            if (col == 1) {
+                                const float pc_span = std::max(0.0f, detailsColumns.right - left - textInset);
+                                draw_detail_text(fit(e.type_text, pc_span), left, pc_span, DWRITE_TEXT_ALIGNMENT_LEADING);
+                            }
+                            continue;
+                        }
+                        if (pc_kind == ColumnKind::Date || pc_kind == ColumnKind::Size || pc_kind == ColumnKind::Total) {
+                            if (!e.drive_row) continue;
+                            const DWRITE_TEXT_ALIGNMENT pc_align = pc_kind == ColumnKind::Date
+                                ? DWRITE_TEXT_ALIGNMENT_LEADING : DWRITE_TEXT_ALIGNMENT_TRAILING;
+                            if (e.drive_total == 0 || e.drive_used < 0.0f) {
+                                // No media, a locked volume, a share that did not answer.
+                                static const std::wstring kDash = L"\u2014";
+                                draw_detail_text(kDash, left, avail, pc_align);
+                                continue;
+                            }
+                            const CapacityLevel pc_level = CapacityLevelFor(e.drive_used, e.drive_free);
+                            const auto pc_ink = [cut](D2D1_COLOR_F pc_c) { return cut ? WithAlpha(pc_c, pc_c.a * 0.55f) : pc_c; };
+                            if (pc_kind == ColumnKind::Date) {
+                                // 使用情况: the bar, then the percent in the level's colour.
+                                const float pc_pct_w = std::min(avail, 40.0f * scale_);
+                                const float pc_bar_w = avail - pc_pct_w - 8.0f * scale_;
+                                if (pc_bar_w >= 24.0f * scale_) {
+                                    const float pc_cy = std::round((cell.top + cell.bottom) * 0.5f);
+                                    const D2D1_RECT_F pc_bar = D2D1::RectF(left, pc_cy - 3.0f * scale_, left + pc_bar_w,
+                                                                        pc_cy + 3.0f * scale_);
+                                    painter_.DrawCapacityBar(pc_bar, e.drive_used, theme.accent, capacity_reveal,
+                                                             e.drive_free);
+                                }
+                                MakeBrush(dc, pc_ink(painter_.CapacityInk(pc_level)), brTextSecondary_);
+                                draw_detail_text(CapacityPercentText(e.drive_used), left + avail - pc_pct_w, pc_pct_w,
+                                                 DWRITE_TEXT_ALIGNMENT_TRAILING);
+                                MakeBrush(dc, secondary, brTextSecondary_);
+                            } else if (pc_kind == ColumnKind::Size) {
+                                // 可用: semibold in the text colour, red once critical.
+                                const std::wstring pc_free = fit(pulse::format::ByteSize(e.drive_free), avail * 0.94f);
+                                IDWriteTextFormat* pc_bold = NameSemiboldFormat();
+                                const D2D1_COLOR_F pc_color = pc_level == CapacityLevel::Critical
+                                    ? painter_.CapacityInk(pc_level) : theme.text;
+                                if (pc_bold && !IsHighContrast()) {
+                                    MakeBrush(dc, pc_ink(pc_color), brText_);
+                                    const auto pc_prev = pc_bold->GetTextAlignment();
+                                    const auto pc_prev_para = pc_bold->GetParagraphAlignment();
+                                    pc_bold->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+                                    pc_bold->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                                    DrawTextEndEllipsis(compositor_, pc_bold, brText_.get(), pc_free, left,
+                                                        cell.top + scale_, avail, cell.bottom - cell.top - 2.0f * scale_);
+                                    pc_bold->SetTextAlignment(pc_prev);
+                                    pc_bold->SetParagraphAlignment(pc_prev_para);
+                                } else {
+                                    draw_detail_text(pc_free, left, avail, DWRITE_TEXT_ALIGNMENT_TRAILING);
+                                }
+                            } else {
+                                draw_detail_text(fit(pulse::format::ByteSize(e.drive_total), avail), left, avail,
+                                                 DWRITE_TEXT_ALIGNMENT_TRAILING);
+                            }
+                            continue;
+                        }
+                    }
                     switch (detailsColumns.kinds[static_cast<size_t>(col)]) {
                     case ColumnKind::Path: {
                         if (!vm.path_roots.empty()) {

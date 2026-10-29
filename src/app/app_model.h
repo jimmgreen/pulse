@@ -600,6 +600,7 @@ struct SidebarEntry {
     bool is_drive = false;
     float used_ratio = 0.0f;
     uint64_t free_bytes = ~uint64_t{0};  // drives: bytes left (all ones = unknown)
+    uint64_t total_bytes = 0;            // drives: capacity (0 = unknown)
     bool expandable = false;
     // Built-in quick-access link (BuiltinQuickAccess), -1 for user entries.
     // The quick-access menu toggles these one by one.

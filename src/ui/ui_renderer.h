@@ -423,7 +423,8 @@ public:
     // Date = modified. Values double as details_column_set.h bits: append only.
     // Status: cloud-file state (仅在云端 / 已在本地 / 始终保留), only drawn in
     // folders under a Cloud Files sync root (PaneViewModel::cloud_status_column).
-    enum class ColumnKind : uint8_t { Name, Path, Date, Type, Size, Created, Accessed, Status };
+    // Total: This PC's 总大小 (MainRenderer::ThisPcColumns), never a global column.
+    enum class ColumnKind : uint8_t { Name, Path, Date, Type, Size, Created, Accessed, Status, Total };
     static constexpr size_t kMaxDetailsColumns = 8;
     static_assert(kDetailsColumnModified == 1u << static_cast<uint32_t>(ColumnKind::Date) &&
                   kDetailsColumnType == 1u << static_cast<uint32_t>(ColumnKind::Type) &&
@@ -562,6 +563,10 @@ public:
         bool status_column = false) const;
     DetailsColumnLayout DetailsColumns(const D2D1_RECT_F& pane_bounds,
                                        const PaneViewModel& vm) const;
+    // This PC in details view: 名称 · 使用情况 (Date) · 可用 (Size) · 总大小
+    // (Total) · 类型, fitted to the drives; not resizable.
+    DetailsColumnLayout ThisPcColumns(const D2D1_RECT_F& pane_bounds,
+                                      const PaneViewModel& vm) const;
     DetailsColumnWidths ResizeDetailsColumnDivider(
         const D2D1_RECT_F& pane_bounds,
         const DetailsColumnWidths& dividers,
@@ -884,6 +889,11 @@ private:
     // free size semibold (and the whole "仅剩 X" in red once the drive is).
     void DrawDriveSpaceLine(ID2D1DeviceContext* dc, const ListEntryView& entry, CapacityLevel level,
                             const Theme& theme, float x, float y, float width, float height, bool cut);
+    // This PC: how far its capacity bars have grown in (0..1), once per visit.
+    float CapacityReveal(const PaneViewModel& vm, int pane_index);
+    // The 存储总览 card (DriveOverviewView) in `card`.
+    void DrawDriveOverview(const PaneViewModel& pane, const D2D1_RECT_F& card, float reveal,
+                           const Theme& theme);
     void DrawTypeChipLabel(ID2D1DeviceContext* dc, const std::wstring& chip, const D2D1_RECT_F& box,
                            const D2D1_COLOR_F& ink, const D2D1_COLOR_F& background);
     void DrawFolderIcon(float x, float y, float size, const Theme& theme,

@@ -349,6 +349,10 @@ struct DriveSidebarItemSpec {
     float capacity = 0.0f;
     // Bytes left, for the "under 1 GB" red (kCapacityUnknownFree: by percent only).
     std::uint64_t free_bytes = kCapacityUnknownFree;
+    // Capacity in bytes. Known: the name with its percent, the bar, then
+    // "75.0 GB 可用 · 共 476.6 GB" (as on This PC tiles). 0: `detail` beside
+    // the name instead.
+    std::uint64_t total_bytes = 0;
     ControlState state{};
     bool drop_target = false;
     bool skip_glyph = false;
@@ -553,8 +557,12 @@ public:
     D2D1_RECT_F SidebarItemIconRect(const D2D1_RECT_F& bounds, bool status_dot) const;
     D2D1_RECT_F DriveSidebarItemIconRect(const D2D1_RECT_F& bounds) const;
     void DrawDriveSidebarItem(const DriveSidebarItemSpec& spec);
+    // "75.0 GB 可用 · 共 476.6 GB": the free size semibold in the text colour,
+    // "仅剩 X" in red once the drive is critical.
+    void DrawCapacitySpaceLine(const DriveSpaceText& space, CapacityLevel level,
+                               const D2D1_RECT_F& bounds, bool enabled = true);
     // Drive usage track (sidebar drives, This PC tiles, phone storage, hover
-    // preview): a soft gradient in `value_color`, amber from 85% used and red
+    // preview): a soft gradient in `value_color`, amber from 80% used and red
     // from 95% (CapacityLevelFor). `reveal` 0..1 grows the fill in.
     void DrawCapacityBar(const D2D1_RECT_F& track, float capacity, D2D1_COLOR_F value_color,
                          float reveal = 1.0f, std::uint64_t free_bytes = kCapacityUnknownFree);
