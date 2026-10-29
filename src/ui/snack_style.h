@@ -91,4 +91,12 @@ inline SnackPalette MakeSnackPalette(const Theme& theme, bool high_contrast) noe
 // fade layer opens, since a target cannot be read with a layer pushed.
 void DrawSnackPlate(ID2D1DeviceContext* dc, const D2D1_RECT_F& rect, float radius, const SnackPalette& palette,
                     float scale, bool high_contrast, float opacity = 1.0f);
+
+// Fluent flyout elevation for an in-window surface: a real Gaussian shadow
+// (CLSID_D2D1Shadow) of the rounded `rect`, `drop` lower; call it once for the
+// wide key shadow and once for the tight ambient one, before the surface.
+// CSS `0 y b color` = DrawElevationShadow(..., b / 2, y, color). Not with a
+// layer or clip pushed: recording the silhouette retargets the context.
+void DrawElevationShadow(ID2D1DeviceContext* dc, const D2D1_RECT_F& rect, float radius, float deviation, float drop,
+                         const D2D1_COLOR_F& color, float opacity = 1.0f);
 }  // namespace pulse::ui

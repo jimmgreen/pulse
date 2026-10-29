@@ -1,6 +1,7 @@
 #include "group_wheel.h"
 #include "FluentTokens.h"
 #include "fluent_components.h"
+#include "snack_style.h"
 #include "command_icons.h"
 #include "typography.h"
 #include "ui_motion.h"
@@ -505,22 +506,12 @@ void GroupWheel::Draw(ID2D1DeviceContext* dc, IDWriteFactory* dwrite, IDWriteTex
     dc->GetTransform(&base);
     dc->SetTransform(D2D1::Matrix3x2F::Translation(0.0f, (1.0f - a) * -6.0f * s) * base);
 
-    // Shadow like a Windows 11 flyout: a wide soft one 6 DIP down and a tight
-    // contact one 1 DIP down. Each is a stack of 1-DIP steps (under 2 px at
-    // 150%), so it reads as a blur; dark themes need it darker to show at all.
+    // Flyout shadow, as CSS 0 6px 18px + 0 1px 3px: Gaussian, so it fades out
+    // instead of ending in a band; dark themes need it darker to show at all.
     const float radius = 14.0f * s;
     const bool dark = theme.bg.r + theme.bg.g + theme.bg.b < 1.5f;
-    auto soft = [&](float down, int inner, int outer, float peak) {
-        const float layer = peak / static_cast<float>(inner + outer);
-        for (int i = outer; i > -inner; --i) {
-            const float g = static_cast<float>(i) * s;
-            const D2D1_RECT_F r = D2D1::RectF(panel_.left - g, panel_.top - g + down * s,
-                                              panel_.right + g, panel_.bottom + g + down * s);
-            g_ink.Fill(r, std::max(0.0f, radius + g), D2D1::ColorF(0, 0, 0, layer * a));
-        }
-    };
-    soft(6.0f, 6, 10, dark ? 0.38f : 0.10f);
-    soft(1.0f, 0, 3, dark ? 0.30f : 0.06f);
+    DrawElevationShadow(dc, panel_, radius, 9.0f * s, 6.0f * s, D2D1::ColorF(0, 0, 0, dark ? 0.38f : 0.10f), a);
+    DrawElevationShadow(dc, panel_, radius, 1.5f * s, 1.0f * s, D2D1::ColorF(0, 0, 0, dark ? 0.30f : 0.06f), a);
     const D2D1_COLOR_F surface = GwOpaque(theme.surface_flyout, theme.bg);
     g_ink.Fill(panel_, radius, GwAlpha(surface, a));
     g_ink.Stroke(panel_, radius, GwAlpha(theme.stroke_card, a), std::max(1.0f, s));
