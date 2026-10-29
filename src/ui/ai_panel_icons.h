@@ -93,6 +93,8 @@ enum class AiIcon : uint8_t {
     Push,
     Pull,
     Eject,
+    // 55: the selection toolbar's 引用.
+    Quote,
     Count
 };
 

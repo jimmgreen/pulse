@@ -33,6 +33,16 @@ struct AiAssistantState {
     POINT hover_point{};
     uint64_t hover_since = 0;
     bool captured = false;
+    // Text selection in the conversation: clicks are counted (2 a word, 3 a
+    // paragraph) and a drag past its edge scrolls.
+    bool selecting = false;
+    int sel_clicks = 0;
+    uint64_t sel_click_at = 0;
+    POINT sel_click_pt{};
+    POINT sel_drag{};
+    // 引用: the words quoted above the composer; the next message starts
+    // with them as a Markdown block quote.
+    std::wstring quote;
     // Composer EDIT.
     HWND edit = nullptr;
     HFONT font = nullptr;
@@ -86,7 +96,13 @@ bool AiAssistantMouseDown(AppState& s, int x, int y);
 bool AiAssistantMouseUp(AppState& s, int x, int y);
 bool AiAssistantMouseOther(AppState& s, int x, int y);   // dblclick, right button
 // Wheel over the panel scrolls the conversation; true when the panel took it.
-bool AiAssistantWheel(AppState& s, int x, int y, int delta);
+// A tilt (horizontal) or Shift + wheel scrolls the code block or table under it.
+bool AiAssistantWheel(AppState& s, int x, int y, int delta, bool horizontal = false);
+// Right button released over the conversation: copy / quote / search, or a
+// link's or path chip's menu; true when one was shown.
+bool AiAssistantContextMenu(AppState& s, int x, int y);
+// Ctrl+C (Ctrl+Insert) and Ctrl+A with text selected in the conversation.
+bool AiAssistantSelectionKey(AppState& s, WPARAM vk);
 void AiAssistantMouseLeave(AppState& s);
 bool AiAssistantSetCursor(AppState& s, int x, int y);
 // Esc with the main window focused: closes the menu, else stops a running

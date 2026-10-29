@@ -4665,5 +4665,20 @@
 #define IDS_GROUP_MEDIA_MONTH                                                            5944
 #define IDS_GROUP_BY_TAKEN_MONTH                                                         5945
 #define IDS_GROUP_WHEEL_CLICK_APPLY                                                      5946
+#define IDS_AI_RICH_COPY_TABLE                                                           5947
+#define IDS_AI_RICH_LINES                                                                5948
+#define IDS_AI_RICH_TABLE_SIZE                                                           5949
+#define IDS_AI_RICH_PLAIN_TEXT                                                           5950
+#define IDS_AI_SEL_QUOTE                                                                 5951
+#define IDS_AI_SEL_SEARCH                                                                5952
+#define IDS_AI_MENU_COPY_MARKDOWN                                                        5953
+#define IDS_AI_MENU_SELECT_ANSWER                                                        5954
+#define IDS_AI_MENU_QUOTE                                                                5955
+#define IDS_AI_MENU_SEARCH_FOR                                                           5956
+#define IDS_AI_MENU_LOCATE                                                               5957
+#define IDS_AI_MENU_OPEN_LINK                                                            5958
+#define IDS_AI_MENU_COPY_LINK                                                            5959
+#define IDS_AI_PATH_MISSING                                                              5960
+#define IDS_AI_QUOTE_REMOVE                                                              5961
 
 #endif  // PULSE_STRING_IDS_H

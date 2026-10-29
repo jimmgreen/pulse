@@ -4647,6 +4647,21 @@ BEGIN
     IDS_GROUP_MEDIA_MONTH "%d年%d月"
     IDS_GROUP_BY_TAKEN_MONTH "拍摄月份"
     IDS_GROUP_WHEEL_CLICK_APPLY "单击应用"
+    IDS_AI_RICH_COPY_TABLE "复制表格"
+    IDS_AI_RICH_LINES "%d 行"
+    IDS_AI_RICH_TABLE_SIZE "%d 行 · %d 列"
+    IDS_AI_RICH_PLAIN_TEXT "文本"
+    IDS_AI_SEL_QUOTE "引用"
+    IDS_AI_SEL_SEARCH "在 Pulse 中搜索"
+    IDS_AI_MENU_COPY_MARKDOWN "复制为 Markdown"
+    IDS_AI_MENU_SELECT_ANSWER "全选这条回答"
+    IDS_AI_MENU_QUOTE "引用到输入框"
+    IDS_AI_MENU_SEARCH_FOR "在 Pulse 中搜索“%s”"
+    IDS_AI_MENU_LOCATE "在当前标签页定位"
+    IDS_AI_MENU_OPEN_LINK "打开链接"
+    IDS_AI_MENU_COPY_LINK "复制链接"
+    IDS_AI_PATH_MISSING "找不到“%s”"
+    IDS_AI_QUOTE_REMOVE "移除引用"
 END
 
 LANGUAGE 0x09, 0x01
@@ -9293,6 +9308,21 @@ BEGIN
     IDS_GROUP_MEDIA_MONTH "%d/%d"
     IDS_GROUP_BY_TAKEN_MONTH "Month taken"
     IDS_GROUP_WHEEL_CLICK_APPLY "Click to apply"
+    IDS_AI_RICH_COPY_TABLE "Copy table"
+    IDS_AI_RICH_LINES "%d lines"
+    IDS_AI_RICH_TABLE_SIZE "%d rows · %d columns"
+    IDS_AI_RICH_PLAIN_TEXT "Text"
+    IDS_AI_SEL_QUOTE "Quote"
+    IDS_AI_SEL_SEARCH "Search in Pulse"
+    IDS_AI_MENU_COPY_MARKDOWN "Copy as Markdown"
+    IDS_AI_MENU_SELECT_ANSWER "Select this answer"
+    IDS_AI_MENU_QUOTE "Quote in your message"
+    IDS_AI_MENU_SEARCH_FOR "Search Pulse for “%s”"
+    IDS_AI_MENU_LOCATE "Show in current tab"
+    IDS_AI_MENU_OPEN_LINK "Open link"
+    IDS_AI_MENU_COPY_LINK "Copy link"
+    IDS_AI_PATH_MISSING "Can't find “%s”"
+    IDS_AI_QUOTE_REMOVE "Remove quote"
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.

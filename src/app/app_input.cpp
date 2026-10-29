@@ -4837,7 +4837,10 @@ LRESULT HandleRButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
 LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
-        if (AiAssistantMouseOther(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) return 0;   // Pulse 助手
+        if (AiAssistantMouseOther(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) {   // Pulse 助手
+            AiAssistantContextMenu(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+            return 0;
+        }
         int mx = GET_X_LPARAM(lParam);
         int my = GET_Y_LPARAM(lParam);
         ui::WindowViewModel vm = BuildVm(*s);
@@ -5057,7 +5060,7 @@ LRESULT HandleMouseWheel(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         {
             POINT wp{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             ScreenToClient(hwnd, &wp);
-            if (AiAssistantWheel(*s, wp.x, wp.y, msg == WM_MOUSEWHEEL ? GET_WHEEL_DELTA_WPARAM(wParam) : 0))
+            if (AiAssistantWheel(*s, wp.x, wp.y, GET_WHEEL_DELTA_WPARAM(wParam), msg == WM_MOUSEHWHEEL))
                 return 0;   // Pulse 助手's conversation scrolls
         }
         {
@@ -5249,6 +5252,7 @@ void ShowKeyboardContextMenu(AppState& s) {
 LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
         if (wParam == VK_ESCAPE && AiAssistantEscape(*s)) return 0;
+        if (AiAssistantSelectionKey(*s, wParam)) return 0;   // Pulse 助手: Ctrl+C / Ctrl+A on its text
         if (AiAssistantMenuKey(*s, wParam)) return 0;   // the 思考强度 slider's keys   // Pulse 助手's model menu
         if (wParam == VK_ESCAPE && SysCtxPreviewDragCancel(*s)) return 0;
         if (wParam == VK_ESCAPE && CancelMarquee(*s)) {

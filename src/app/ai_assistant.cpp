@@ -10,6 +10,7 @@
 #include "app_internal.h"
 #include "app_commands.h"
 #include "app_navigation.h"
+#include "places.h"
 #include "keymap.h"
 #include "../common/json_value.h"
 #include "../common/localization.h"
@@ -21,9 +22,13 @@
 #include "../ui/ui_renderer.h"
 
 #include <commctrl.h>
+#include <shellapi.h>
 #include <uxtheme.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cwchar>
 #include <vector>
 
 namespace pulse {
@@ -173,9 +178,14 @@ std::wstring ContextText(AppState& s) {
     return Fill(Fill(Text(I::AiAsstContext), L"{folder}", folder), L"{n}", std::to_wstring(count));
 }
 
+std::wstring QuoteMarkdown(const std::wstring& quote);
+
 bool Submit(AppState& s, const std::wstring& text) {
     if (Chat(s).busy) return false;
-    AiChatSubmit(s, text, ContextText(s));
+    // 引用: the quoted words lead the message as a Markdown block quote.
+    AiAssistantState& a = s.aiAssistant;
+    AiChatSubmit(s, a.quote.empty() ? text : QuoteMarkdown(a.quote) + L"\n\n" + text, ContextText(s));
+    a.quote.clear();
     return true;
 }
 
@@ -487,6 +497,143 @@ ui::AiPanelHit HitAt(AppState& s, int x, int y) {
 
 bool Reachable(AppState& s) { return s.aiAssistant.open || s.renderer.AiPanel().PeekVisible(); }
 
+// ---- Text selection, links and path chips in the conversation (55 P1).
+
+constexpr UINT_PTR kSelectTimer = 0x4153;   // 'AS': a selection dragged past the conversation's edge
+
+bool IsSelectionPart(ui::AiPanelPart part) {
+    using P = ui::AiPanelPart;
+    return part == P::SelCopy || part == P::SelQuote || part == P::SelSearch;
+}
+
+std::wstring Trimmed(std::wstring t) {
+    const auto space = [](wchar_t ch) { return ch == L' ' || ch == L'\t' || ch == L'\r' || ch == L'\n' || ch == 0x3000; };
+    while (!t.empty() && space(t.back())) t.pop_back();
+    size_t i = 0;
+    while (i < t.size() && space(t[i])) ++i;
+    return t.substr(i);
+}
+
+// 在 Pulse 中搜索 takes a short single line (≤ 80 characters); "" otherwise.
+std::wstring SearchableText(const std::wstring& text) {
+    std::wstring q = Trimmed(text);
+    if (q.empty() || q.size() > 80 || q.find_first_of(L"\r\n") != std::wstring::npos) return {};
+    return q;
+}
+
+std::wstring Printf1(I id, const std::wstring& arg) {
+    const std::wstring fmt = Text(id);
+    std::vector<wchar_t> buf(fmt.size() + arg.size() + 16);
+    swprintf_s(buf.data(), buf.size(), fmt.c_str(), arg.c_str());
+    return buf.data();
+}
+
+std::wstring Shortened(const std::wstring& text, size_t max) {
+    return text.size() <= max ? text : text.substr(0, max - 1) + L"\u2026";
+}
+
+void Snack(AppState& s, std::wstring text) {
+    s.notification_toast.ShowSnack(s.hwnd, ui::SnackIcon::Suggest, std::move(text), {}, {}, {}, 2500);
+}
+
+void CopyAndSay(AppState& s, const std::wstring& text) {
+    if (text.empty()) return;
+    AiChatCopyText(s.hwnd, text);
+    Snack(s, Text(I::CopiedShort));
+}
+
+// Links open in the browser: http, https and mailto only.
+void OpenLink(AppState& s, const std::wstring& url) {
+    const auto starts = [&](const wchar_t* p) { return _wcsnicmp(url.c_str(), p, wcslen(p)) == 0; };
+    if (!starts(L"http://") && !starts(L"https://") && !starts(L"mailto:")) return;
+    ShellExecuteW(s.hwnd, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+// A path chip: a folder opens, a file opens its folder with it selected.
+void OpenPath(AppState& s, std::wstring path, bool new_tab) {
+    for (wchar_t& ch : path)
+        if (ch == L'/') ch = L'\\';
+    while (path.size() > 3 && path.back() == L'\\') path.pop_back();
+    const DWORD attrs = GetFileAttributesW(path.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        const size_t slash = path.find_last_of(L'\\');
+        Snack(s, Printf1(I::AiPathMissing, Shortened(slash == std::wstring::npos ? path : path.substr(slash + 1), 40)));
+        return;
+    }
+    std::wstring folder = path, leaf;
+    if ((attrs & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        const size_t slash = path.find_last_of(L'\\');
+        if (slash == std::wstring::npos) return;
+        folder = path.substr(0, slash);
+        leaf = path.substr(slash + 1);
+        if (folder.size() == 2 && folder[1] == L':') folder += L'\\';
+    }
+    if (new_tab) OpenFolderTab(s, folder);
+    else NavigateTo(s, folder);
+    if (!leaf.empty())
+        if (app::Tab* tab = ActiveTab(s)) SelectNameInTab(s, *tab, leaf);
+}
+
+// 引用: the words go above the composer and lead the next message as "> …".
+void QuoteText(AppState& s, const std::wstring& text) {
+    AiAssistantState& a = s.aiAssistant;
+    std::wstring q = Trimmed(text);
+    if (q.empty()) return;
+    std::wstring clean;
+    clean.reserve(q.size());
+    for (wchar_t ch : q)
+        if (ch != L'\r') clean += ch;
+    a.quote = Shortened(clean, 1200);
+    s.renderer.AiPanel().ClearSelection();
+    a.focus_pending = true;
+}
+
+std::wstring QuoteMarkdown(const std::wstring& quote) {
+    std::wstring out = L"> ";
+    for (wchar_t ch : quote) {
+        out += ch;
+        if (ch == L'\n') out += L"> ";
+    }
+    return out;
+}
+
+void FinishSelect(AppState& s) {
+    AiAssistantState& a = s.aiAssistant;
+    if (!a.selecting) return;
+    a.selecting = false;
+    a.captured = false;
+    if (s.hwnd) KillTimer(s.hwnd, kSelectTimer);
+    if (GetCapture() == s.hwnd) ReleaseCapture();
+    s.renderer.AiPanel().EndSelect();
+}
+
+void CALLBACK SelectTimer(HWND hwnd, UINT, UINT_PTR id, DWORD) {
+    auto* s = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (!s || !s->aiAssistant.selecting) {
+        KillTimer(hwnd, id);
+        return;
+    }
+    ui::AiPanelView& view = s->renderer.AiPanel();
+    const POINT p = s->aiAssistant.sel_drag;
+    const float speed = view.SelectScrollSpeed(static_cast<float>(p.y));
+    if (speed == 0.0f) {
+        KillTimer(hwnd, id);
+        return;
+    }
+    view.ScrollBy(speed, false);
+    view.DragSelect(static_cast<float>(p.x), static_cast<float>(p.y));
+    Redraw(*s);
+}
+
+// The whole answer under the pointer when nothing is selected.
+std::wstring AnswerText(ui::AiPanelView& view, int block, bool has, bool markdown) {
+    if (has) return view.SelectionText(markdown);
+    if (!view.SelectAnswer(block)) return {};
+    std::wstring t = view.SelectionText(markdown);
+    view.ClearSelection();
+    return t;
+}
+
 void Activate(AppState& s, const ui::AiPanelHit& hit) {
     AiAssistantState& a = s.aiAssistant;
     using P = ui::AiPanelPart;
@@ -525,6 +672,8 @@ void Activate(AppState& s, const ui::AiPanelHit& hit) {
         AiChatReset(s);
         if (a.edit) SetWindowTextW(a.edit, L"");
         a.context_removed_for.clear();
+        a.quote.clear();
+        s.renderer.AiPanel().ClearSelection();
         s.renderer.AiPanel().Rewake(ui::motion::NowMs());
         a.focus_pending = true;
         break;
@@ -549,6 +698,42 @@ void Activate(AppState& s, const ui::AiPanelHit& hit) {
         }
         break;
     }
+    case P::RichLink:
+    case P::RichPath:
+    case P::CodeCopy:
+    case P::TableCopy: {
+        CloseMenu(s);
+        ui::AiPanelView& view = s.renderer.AiPanel();
+        const ui::AiPanelView::RichTargetInfo t = view.TargetOf(hit);
+        if (t.text.empty()) break;
+        if (hit.part == P::RichLink) {
+            OpenLink(s, t.text);
+        } else if (hit.part == P::RichPath) {
+            OpenPath(s, t.text, true);
+        } else {
+            // The button says 已复制 for 2 s; no snack.
+            AiChatCopyText(s.hwnd, t.text);
+            view.MarkCopied(hit, ui::motion::NowMs());
+        }
+        break;
+    }
+    case P::SelCopy:
+        CopyAndSay(s, s.renderer.AiPanel().SelectionText(false));
+        s.renderer.AiPanel().HideSelectionBar();
+        break;
+    case P::SelQuote:
+        QuoteText(s, s.renderer.AiPanel().SelectionText(false));
+        break;
+    case P::SelSearch: {
+        const std::wstring q = SearchableText(s.renderer.AiPanel().SelectionText(false));
+        s.renderer.AiPanel().HideSelectionBar();
+        if (!q.empty()) NavigateTo(s, app::MakeSearchPath(q));
+        break;
+    }
+    case P::QuoteRemove:
+        a.quote.clear();
+        a.focus_pending = true;
+        break;
     case P::ContextRemove: {
         std::wstring path, name;
         size_t count = 0;
@@ -755,6 +940,8 @@ void AiAssistantClose(AppState& s, bool animate) {
     if (a.captured && GetCapture() == s.hwnd) ReleaseCapture();
     a.captured = false;
     s.renderer.AiPanel().EndScrollDrag();
+    FinishSelect(s);
+    s.renderer.AiPanel().ClearSelection();
     HideEdit(s);
     ApplyPanel(s, animate);
     // Closed on a finished turn: the bubble over the chip says what happened.
@@ -842,6 +1029,7 @@ void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm) {
         p.composer_text = ComposerText(a);
     }
     p.placeholder = Text(I::AiAsstPlaceholder);
+    p.quote = a.quote;
     p.add_files = Text(I::AiAsstAddFiles);
     p.model_label = json::Wide(CurrentModel());
     const ai::ThinkSpec think = CurrentThinking();
@@ -1039,6 +1227,18 @@ bool AiAssistantMouseMove(AppState& s, int x, int y) {
         Redraw(s);
         return true;
     }
+    if (a.selecting) {
+        if (GetCapture() != s.hwnd) {   // the capture went elsewhere
+            FinishSelect(s);
+        } else {
+            a.sel_drag = POINT{x, y};
+            view.DragSelect(static_cast<float>(x), static_cast<float>(y));
+            // Past the conversation's top or bottom: it scrolls while held.
+            if (view.SelectScrollSpeed(static_cast<float>(y)) != 0.0f) SetTimer(s.hwnd, kSelectTimer, 16, SelectTimer);
+        }
+        Redraw(s);
+        return true;
+    }
     if (!Reachable(s) && !a.captured) {
         if (a.hover.part != ui::AiPanelPart::None) {
             a.hover = {};
@@ -1086,12 +1286,41 @@ bool AiAssistantMouseDown(AppState& s, int x, int y) {
         return true;
     }
     if (hit.part == ui::AiPanelPart::None) {
-        // Outside: the menus fold away and the click goes on to Pulse.
+        // Outside: the menus fold away and the click goes on to Pulse (and
+        // its Ctrl+C is the files' again).
+        const bool had = view.HasSelection();
+        view.ClearSelection();   // a bare caret too: Ctrl+A is the files' again
+        if (had) Redraw(s);
         if (a.menu_open || AiVoiceMenuOpen(s)) {
             CloseMenu(s);
             Redraw(s);
         }
         return false;
+    }
+    if (a.open && hit.part == ui::AiPanelPart::Conversation) {
+        // Text: a press selects (2 clicks a word, 3 a paragraph; Shift extends).
+        const uint64_t now = GetTickCount64();
+        const bool near_last = std::abs(x - a.sel_click_pt.x) <= GetSystemMetrics(SM_CXDOUBLECLK) / 2 + 1 &&
+                               std::abs(y - a.sel_click_pt.y) <= GetSystemMetrics(SM_CYDOUBLECLK) / 2 + 1;
+        a.sel_clicks = (near_last && now - a.sel_click_at <= GetDoubleClickTime()) ? a.sel_clicks % 3 + 1 : 1;
+        a.sel_click_at = now;
+        a.sel_click_pt = POINT{x, y};
+        if (a.menu_open || AiVoiceMenuOpen(s)) CloseMenu(s);
+        const bool extend = GetKeyState(VK_SHIFT) < 0;
+        if (view.BeginSelect(static_cast<float>(x), static_cast<float>(y), a.sel_clicks, extend)) {
+            // Ctrl+C / Ctrl+A come to the window, not the composer.
+            if (a.edit && GetFocus() == a.edit) SetFocus(s.hwnd);
+            a.selecting = true;
+            a.sel_drag = POINT{x, y};
+            a.pressed = {};
+            SetCapture(s.hwnd);
+            a.captured = true;
+            Redraw(s);
+            return true;
+        }
+        view.ClearSelection();
+    } else if (!IsSelectionPart(hit.part)) {
+        view.HideSelectionBar();
     }
     a.pressed = hit;
     a.hover = hit;
@@ -1118,6 +1347,12 @@ bool AiAssistantMouseUp(AppState& s, int x, int y) {
         a.captured = false;
         a.pressed = {};
         if (GetCapture() == s.hwnd) ReleaseCapture();
+        a.hover = HitAt(s, x, y);
+        Redraw(s);
+        return true;
+    }
+    if (a.selecting) {
+        FinishSelect(s);
         a.hover = HitAt(s, x, y);
         Redraw(s);
         return true;
@@ -1156,11 +1391,20 @@ std::wstring AiAssistantThinkName(const AppState& s) {
     return LevelName(ai::SnapThinking(think, Preferred(s.aiAssistant)));
 }
 
-bool AiAssistantWheel(AppState& s, int x, int y, int delta) {
+bool AiAssistantWheel(AppState& s, int x, int y, int delta, bool horizontal) {
     if (!AiAssistantMouseOther(s, x, y)) return false;
     if (s.renderer.AiPanel().PeekHitTest(static_cast<float>(x), static_cast<float>(y)).part != ui::AiPanelPart::None)
         return true;   // over the bubble: nothing to scroll
-    if (delta != 0) {
+    if (delta != 0 && (horizontal || GetKeyState(VK_SHIFT) < 0)) {
+        // Sideways (a tilt or Shift + wheel): the code block or table under it.
+        const float dx = static_cast<float>(horizontal ? delta : -delta) / WHEEL_DELTA * 48.0f * s.scale;
+        if (s.renderer.AiPanel().ScrollBoxAt(static_cast<float>(x), static_cast<float>(y), dx)) {
+            Redraw(s);
+            return true;
+        }
+        if (horizontal) return true;
+    }
+    if (delta != 0 && !horizontal) {
         // Three 16 px lines a notch, like the page's list.
         s.renderer.AiPanel().ScrollBy(-static_cast<float>(delta) / WHEEL_DELTA * 48.0f * s.scale);
         Redraw(s);
@@ -1179,9 +1423,15 @@ void AiAssistantMouseLeave(AppState& s) {
 bool AiAssistantSetCursor(AppState& s, int x, int y) {
     const AiAssistantState& a = s.aiAssistant;
     if (!a.open || !s.renderer.AiPanel().Contains(static_cast<float>(x), static_cast<float>(y))) return false;
-    const ui::AiPanelHit hit = s.renderer.AiPanel().HitTest(static_cast<float>(x), static_cast<float>(y));
-    const bool text = hit.part == ui::AiPanelPart::Input;
-    SetCursor(LoadCursorW(nullptr, text ? IDC_IBEAM : IDC_ARROW));
+    const ui::AiPanelView& view = s.renderer.AiPanel();
+    const ui::AiPanelHit hit = view.HitTest(static_cast<float>(x), static_cast<float>(y));
+    using P = ui::AiPanelPart;
+    LPCWSTR cursor = IDC_ARROW;
+    if (hit.part == P::Input) cursor = IDC_IBEAM;
+    else if (hit.part == P::RichLink || hit.part == P::RichPath) cursor = IDC_HAND;
+    else if (a.selecting || (hit.part == P::Conversation && view.OverText(static_cast<float>(x), static_cast<float>(y))))
+        cursor = IDC_IBEAM;
+    SetCursor(LoadCursorW(nullptr, cursor));
     return true;
 }
 
@@ -1213,11 +1463,106 @@ bool AiAssistantEscape(AppState& s) {
         return true;
     }
     if (AiVoiceEscape(s)) return true;   // the voice card, its menu, listening
+    if (s.renderer.AiPanel().HasSelection()) {
+        s.renderer.AiPanel().ClearSelection();
+        Redraw(s);
+        return true;
+    }
     if (a.chat && a.chat->busy) {
         AiChatStop(s);
         return true;
     }
     return false;
+}
+
+bool AiAssistantSelectionKey(AppState& s, WPARAM vk) {
+    AiAssistantState& a = s.aiAssistant;
+    if (!a.open || GetKeyState(VK_CONTROL) >= 0) return false;
+    ui::AiPanelView& view = s.renderer.AiPanel();
+    const bool has = view.HasSelection();
+    if ((vk == 'C' || vk == VK_INSERT) && has) {
+        AiChatCopyText(s.hwnd, view.SelectionText(false));
+        return true;
+    }
+    if (vk == 'A') {
+        // The answer holding the selection or the caret of a plain click
+        // (the message, for a message).
+        const int block = has ? view.SelectionBlock() : view.CaretBlock();
+        if (block < 0) return false;
+        view.SelectAnswer(block);
+        Redraw(s);
+        return true;
+    }
+    return false;
+}
+
+bool AiAssistantContextMenu(AppState& s, int x, int y) {
+    AiAssistantState& a = s.aiAssistant;
+    if (!a.open || a.selecting) return false;
+    ui::AiPanelView& view = s.renderer.AiPanel();
+    const ui::AiPanelHit hit = HitAt(s, x, y);
+    using P = ui::AiPanelPart;
+    const bool target = hit.part == P::RichLink || hit.part == P::RichPath;
+    if (!target && hit.part != P::Conversation && !IsSelectionPart(hit.part)) return false;
+    const float fx = static_cast<float>(x), fy = static_cast<float>(y);
+    const bool has = view.HasSelection();
+    const int block = view.RichBlockAt(fx, fy);
+    if (!target && !has && (block < 0 || !view.OverText(fx, fy))) return false;
+    if (!EnsureMenu(s)) return false;
+    if (a.menu_open || AiVoiceMenuOpen(s)) CloseMenu(s);
+    std::vector<ui::FluentMenuItem> items;
+    items.reserve(8);   // `add` hands out pointers into it
+    const auto add = [&](int command, std::wstring text, const wchar_t* glyph, const wchar_t* key = L"") {
+        ui::FluentMenuItem item;
+        item.command = command;
+        item.text = std::move(text);
+        item.glyph = glyph;
+        item.shortcut = key;
+        items.push_back(std::move(item));
+        return &items.back();
+    };
+    const ui::AiPanelView::RichTargetInfo info = target ? view.TargetOf(hit) : ui::AiPanelView::RichTargetInfo{};
+    if (target && info.text.empty()) return false;
+    std::wstring query;
+    if (hit.part == P::RichLink) {
+        add(1, Text(I::AiMenuOpenLink), L"\xE774");
+        add(2, Text(I::AiMenuCopyLink), L"\xE71B");
+    } else if (hit.part == P::RichPath) {
+        add(3, Text(I::OpenNewTab), L"\xE8A7");
+        add(4, Text(I::AiMenuLocate), L"\xE838")->separator_after = true;   // the tray's 在所在位置显示 glyph
+        add(5, Text(I::CopyPath), L"\xE8C8");
+    } else {
+        query = has ? SearchableText(view.SelectionText(false)) : std::wstring();
+        add(10, Text(I::Copy), L"\xE8C8", L"Ctrl+C");
+        add(11, Text(I::AiMenuCopyMarkdown), L"\xE943")->separator_after = true;
+        add(12, Text(I::AiMenuSelectAnswer), L"\xE8B3", L"Ctrl+A");
+        ui::FluentMenuItem* quote = add(13, Text(I::AiMenuQuote), L"\xE8BD");
+        quote->enabled = has;
+        if (!query.empty()) {
+            quote->separator_after = true;
+            add(14, Printf1(I::AiMenuSearchFor, Shortened(query, 24)), L"\xE721");
+        }
+    }
+    view.HideSelectionBar();
+    POINT pt{x, y};
+    ClientToScreen(s.hwnd, &pt);
+    s.menu->SetTheme(s.darkMode, s.accentColor);
+    const int command = s.menu->TrackPopup(pt, std::move(items));
+    switch (command) {
+    case 1: OpenLink(s, info.text); break;
+    case 2: CopyAndSay(s, info.text); break;
+    case 3: OpenPath(s, info.text, true); break;
+    case 4: OpenPath(s, info.text, false); break;
+    case 5: CopyAndSay(s, info.text); break;
+    case 10: CopyAndSay(s, AnswerText(view, block, has, false)); break;
+    case 11: CopyAndSay(s, AnswerText(view, block, has, true)); break;
+    case 12: view.SelectAnswer(has ? view.SelectionBlock() : block); break;
+    case 13: QuoteText(s, view.SelectionText(false)); break;
+    case 14: if (!query.empty()) NavigateTo(s, app::MakeSearchPath(query)); break;
+    default: break;
+    }
+    Redraw(s);
+    return true;
 }
 
 HBRUSH AiAssistantCtlColor(AppState& s, HDC hdc, HWND edit) {

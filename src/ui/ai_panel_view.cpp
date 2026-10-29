@@ -4,6 +4,7 @@
 // used as DIPs.
 #include "ai_panel_view.h"
 #include "ai_panel_draw.h"
+#include "ai_panel_rich.h"
 
 #include "typography.h"
 #include "ui_compositor.h"
@@ -59,9 +60,11 @@ void AiPanelView::Formats::Release() {
     scale = 0.0f;
 }
 
+AiPanelView::AiPanelView() = default;
 AiPanelView::~AiPanelView() { ReleaseDeviceResources(); }
 
 void AiPanelView::ReleaseDeviceResources() {
+    ReleaseRich();
     formats_.Release();
     SafeRelease(brush_);
     brush_dc_ = nullptr;
@@ -385,7 +388,8 @@ void AiPanelView::DrawContent(Compositor* compositor, const AiPanelViewModel& vm
                               const D2D1_RECT_F& panel, float s, uint64_t now_ms) {
     Ctx c{compositor, compositor->Dc(), brush_, s};
     DrawHeader(compositor, vm, pal, panel, s);
-    // Composer: margin 6 12 12.
+    // Composer: margin 6 12 12 (its quote chip measured first).
+    MeasureQuote(compositor, vm, panel.right - panel.left - 24.0f * s - 2.0f * s - 22.0f * s, s);
     const float ch = ComposerHeight(vm, s);
     const D2D1_RECT_F box = D2D1::RectF(panel.left + 12.0f * s, panel.bottom - 12.0f * s - ch,
                                         panel.right - 12.0f * s, panel.bottom - 12.0f * s);
@@ -398,6 +402,7 @@ void AiPanelView::DrawContent(Compositor* compositor, const AiPanelViewModel& vm
     else DrawConversation(compositor, vm, pal, conversation_rect_, s, now_ms);
     c.dc->PopAxisAlignedClip();
     DrawComposer(compositor, vm, pal, box, s, now_ms);
+    DrawSelectionBar(compositor, vm, pal, s);
 }
 
 void AiPanelView::DrawHeader(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal,
@@ -596,7 +601,9 @@ float InputHeight(const AiPanelViewModel& vm, int input_lines, float s) {
 
 float AiPanelView::ComposerHeight(const AiPanelViewModel& vm, float s) const {
     // padding 10 / 8, context row 24 + 6, input, controls row 32, 1 px borders.
-    return std::round((2.0f + 10.0f + (vm.context_visible ? 30.0f : 0.0f) + 32.0f + 8.0f) * s) + InputHeight(vm, InputLines(vm), s);
+    const float quote = !vm.quote.empty() && rich_ ? rich_->quote_h : 0.0f;
+    return std::round((2.0f + 10.0f + (vm.context_visible ? 30.0f : 0.0f) + 32.0f + 8.0f) * s) + quote +
+           InputHeight(vm, InputLines(vm), s);
 }
 
 void AiPanelView::DrawComposer(Compositor* compositor, const AiPanelViewModel& vm, const Palette& base,
@@ -642,6 +649,7 @@ void AiPanelView::DrawComposer(Compositor* compositor, const AiPanelViewModel& v
         c.Icon(AiIcon::Close, xx, y + 6.5f * s, 11.0f * s, hot ? pal.text : pal.text3);
         y += 30.0f * s;
     }
+    DrawQuoteChip(compositor, vm, pal, left, right, y, s);
     const float input_h = InputHeight(vm, InputLines(vm), s);
     // .cp-in padding 2: the EDIT sits inside; the placeholder is drawn here
     // too, for the frames the EDIT is hidden (opening, model menu).
@@ -1129,6 +1137,7 @@ AiPanelHit AiPanelView::HitTest(float x, float y) const {
             if (In(it->rect, x, y)) return it->hit;
         return {AiPanelPart::Conversation, -1};
     }
+    if (In(quote_remove_, x, y)) return {AiPanelPart::QuoteRemove, -1};
     if (In(context_remove_, x, y)) return {AiPanelPart::ContextRemove, -1};
     if (In(context_chip_, x, y)) return {AiPanelPart::ContextChip, -1};
     if (In(add_files_, x, y)) return {AiPanelPart::AddFiles, -1};

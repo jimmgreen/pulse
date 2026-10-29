@@ -345,6 +345,11 @@ constexpr IconPart k_eject[] = {
     {"M5 18.5h14", 0, 0x000000u, 1.6f, 1.0f},
 };
 
+constexpr IconPart k_quote[] = {
+    {"M5 9.5h4.5v4.5c0 2.5-1.5 4-3.5 4.5M14.5 9.5H19v4.5c0 2.5-1.5 4-3.5 4.5", 0, 0x000000u, 1.6f, 1.0f},
+    {"M5 9.5V6h4.5v3.5M14.5 9.5V6H19v3.5", 0, 0x000000u, 1.6f, 1.0f},
+};
+
 constexpr IconDef kIcons[] = {
     {k_spark, std::size(k_spark)},
     {k_folder, std::size(k_folder)},
@@ -423,6 +428,7 @@ constexpr IconDef kIcons[] = {
     {k_push, std::size(k_push)},
     {k_pull, std::size(k_pull)},
     {k_eject, std::size(k_eject)},
+    {k_quote, std::size(k_quote)},
 };
 
 static_assert(std::size(kIcons) == static_cast<size_t>(AiIcon::Count), "one table entry per AiIcon");

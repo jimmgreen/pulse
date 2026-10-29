@@ -6,6 +6,7 @@
 // out top to bottom with CSS margin collapsing, so spacing matches the page.
 #include "ai_panel_view.h"
 #include "ai_panel_draw.h"
+#include "ai_panel_rich.h"
 
 #include "ui_motion.h"
 
@@ -126,52 +127,6 @@ ID2D1LinearGradientBrush* Gradient(ID2D1DeviceContext* dc, D2D1_POINT_2F a, D2D1
     return brush;
 }
 
-// One line or paragraph of an answer: "- " bullets, **bold** spans.
-struct RichLine {
-    std::wstring text;
-    std::vector<DWRITE_TEXT_RANGE> bold;
-    bool bullet = false;
-};
-
-std::vector<RichLine> ParseRich(const std::wstring& src) {
-    std::vector<RichLine> out;
-    size_t pos = 0;
-    while (pos <= src.size()) {
-        size_t end = src.find(L'\n', pos);
-        if (end == std::wstring::npos) end = src.size();
-        std::wstring_view line(src.data() + pos, end - pos);
-        pos = end + 1;
-        while (!line.empty() && (line.back() == L'\r' || line.back() == L' ')) line.remove_suffix(1);
-        if (line.empty()) {
-            if (end == src.size()) break;
-            continue;
-        }
-        RichLine r;
-        if (line.size() >= 2 && (line[0] == L'-' || line[0] == L'\x2022') && line[1] == L' ') {
-            r.bullet = true;
-            line.remove_prefix(2);
-        }
-        bool bold = false;
-        UINT32 start = 0;
-        for (size_t i = 0; i < line.size(); ++i) {
-            if (line[i] == L'*' && i + 1 < line.size() && line[i + 1] == L'*') {
-                const UINT32 at = static_cast<UINT32>(r.text.size());
-                if (bold && at > start) r.bold.push_back({start, at - start});
-                bold = !bold;
-                start = at;
-                ++i;
-                continue;
-            }
-            r.text.push_back(line[i]);
-        }
-        // An unclosed ** while streaming still shows bold.
-        if (bold && r.text.size() > start) r.bold.push_back({start, static_cast<UINT32>(r.text.size()) - start});
-        out.push_back(std::move(r));
-        if (end == src.size()) break;
-    }
-    return out;
-}
-
 D2D1_RECT_F Intersect(const D2D1_RECT_F& a, const D2D1_RECT_F& b) {
     return D2D1::RectF((std::max)(a.left, b.left), (std::max)(a.top, b.top), (std::min)(a.right, b.right),
                        (std::min)(a.bottom, b.bottom));
@@ -260,14 +215,14 @@ float AiPanelView::TweenTo(uint64_t key, float target, uint32_t ms, uint64_t now
     return target;
 }
 
-void AiPanelView::ScrollBy(float dy) {
+void AiPanelView::ScrollBy(float dy, bool animate) {
     const float max_scroll = (std::max)(0.0f, content_h_ - view_h_);
     const float base = scroll_anim_ ? scroll_to_ : scroll_;
     const float to = std::clamp(base + dy, 0.0f, max_scroll);
     scroll_from_ = scroll_;
     scroll_to_ = to;
     scroll_start_ = motion::NowMs();
-    scroll_anim_ = motion::SystemAnimationsEnabled();
+    scroll_anim_ = animate && motion::SystemAnimationsEnabled();
     if (!scroll_anim_) scroll_ = to;
     follow_ = to >= max_scroll - 1.0f;
 }
@@ -284,6 +239,8 @@ void AiPanelView::DrawConversation(Compositor* compositor, const AiPanelViewMode
     const bool motion_on = motion::SystemAnimationsEnabled();
     was_empty_ = false;
     for (auto& kv : tweens_) kv.second.used = false;
+    EnsureRichBrushes(dc, pal, vm.dark);
+    BeginRichFrame(vm);
 
     // Scroll position for this frame (content height is last frame's; a
     // following view snaps to the end below once this frame is measured).
@@ -558,16 +515,16 @@ void AiPanelView::DrawConversation(Compositor* compositor, const AiPanelViewMode
                 y += 30.0f * s;
             }
             // .bub: max-width 300, padding 10 14, radius 16 16 4 16, 13.5 / 21.
-            const float max_text = 300.0f * s - 28.0f * s;
-            const float tw = (std::min)(c.Measure(b.text, formats_.body), max_text);
-            const float th = (std::max)(21.0f * s, wrapped_h(b.text, formats_.body, max_text, 21.0f * s));
+            // Its text is selectable like an answer's (laid out once).
+            const float max_text = (std::min)(300.0f * s, x1 - x0) - 28.0f * s;
+            const AiRichDoc* rd = RichFor(compositor, b, max_text, s);
+            const float tw = rd ? rd->text_w : 0.0f;
+            const float th = rd ? (std::max)(21.0f * s, rd->height) : 21.0f * s;
             const float bw = tw + 28.0f * s;
             const D2D1_RECT_F r = D2D1::RectF(x1 - bw, top + y, x1, top + y + th + 20.0f * s);
-            if (visible(r.top, r.bottom)) {
-                FillCorners(c, r, 16.0f * s, 16.0f * s, 4.0f * s, 16.0f * s, pal.accent_soft);
-                wrapped(b.text, formats_.body, r.left + 14.0f * s, r.top + 10.0f * s, max_text + 1.0f, 21.0f * s,
-                        pal.text);
-            }
+            const bool shown = visible(r.top, r.bottom);
+            if (shown) FillCorners(c, r, 16.0f * s, 16.0f * s, 4.0f * s, 16.0f * s, pal.accent_soft);
+            if (rd) DrawRich(compositor, *rd, b, static_cast<int>(bi), r.left + 14.0f * s, r.top + 10.0f * s, pal, area, vm, s, now_ms, shown);
             y += th + 20.0f * s;
             pending = 18.0f * s;
             break;
@@ -646,71 +603,34 @@ void AiPanelView::DrawConversation(Compositor* compositor, const AiPanelViewMode
             break;
         }
         case AiBlockKind::Text: {
-            // .turn: 13.5 / 22; p margin 2 0 10; ul margin 0 0 10, li 2 0,
-            // padding-left 18.
-            const std::vector<RichLine> lines = ParseRich(b.text);
-            if (lines.empty() && !b.streaming) break;
+            // The answer's Markdown (ai_panel_rich.cpp), laid out once per
+            // text and width: p 13.5 / 22, lists, code, tables, path chips.
+            const AiRichDoc* rd = RichFor(compositor, b, x1 - x0, s);
+            if (!rd || (rd->pieces.empty() && rd->decos.empty() && !b.streaming)) break;
             const float lh = 22.0f * s;
-            float caret_x = x0, caret_y = -1.0f;
-            for (size_t li = 0; li < lines.size(); ++li) {
-                const RichLine& rl = lines[li];
-                // p and li both have margin-top 2; li → li collapses to 2,
-                // anything next to a paragraph or the list's end to 10.
-                place(2.0f * s);
-                const float lx = rl.bullet ? x0 + 18.0f * s : x0;
-                const float lw = x1 - lx;
-                TextOptions o;
-                o.wrap = true;
-                o.line_height = lh;
-                IDWriteTextLayout* layout = c.Layout(rl.text.empty() ? std::wstring(L" ") : rl.text, formats_.body, lw,
-                                                     10000.0f, o);
-                float h = lh;
-                if (layout) {
-                    for (const DWRITE_TEXT_RANGE& r : rl.bold) layout->SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD, r);
-                    DWRITE_TEXT_METRICS m{};
-                    layout->GetMetrics(&m);
-                    h = (std::max)(lh, m.height);
-                    if (visible(top + y, top + y + h)) {
-                        if (rl.bullet) {
-                            const float r = 2.6f * s;
-                            dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x0 + 7.0f * s, top + y + lh * 0.5f + 0.5f * s), r, r),
-                                            c.B(pal.text));
-                        }
-                        compositor->DrawTextLayout(D2D1::Point2F(lx, top + y), layout, c.B(pal.text));
-                    }
-                    if (b.streaming && li + 1 == lines.size()) {
-                        DWRITE_HIT_TEST_METRICS hm{};
-                        float px = 0.0f, py = 0.0f;
-                        const UINT32 n = static_cast<UINT32>(rl.text.size());
-                        if (n > 0 && SUCCEEDED(layout->HitTestTextPosition(n - 1, TRUE, &px, &py, &hm))) {
-                            caret_x = lx + px;
-                            caret_y = top + y + hm.top;
-                        } else {
-                            caret_x = lx;
-                            caret_y = top + y;
-                        }
-                    }
-                    layout->Release();
-                }
-                y += h;
-                const bool next_bullet = li + 1 < lines.size() && lines[li + 1].bullet;
-                pending = (rl.bullet && next_bullet) ? 2.0f * s : 10.0f * s;
-            }
+            place(rd->pieces.empty() && rd->decos.empty() ? 2.0f * s : rd->margin_top);
+            const float by = top + y;
+            const float h = rd->height;
+            DrawRich(compositor, *rd, b, static_cast<int>(bi), x0, by, pal, area, vm, s, now_ms, visible(by, by + h));
             if (b.streaming) {
-                if (lines.empty()) {
-                    place(2.0f * s);
+                float caret_x = x0, caret_y = by, caret_lh = lh;
+                if (!RichCaret(*rd, b.id, x0, by, caret_x, caret_y, caret_lh)) {
                     caret_x = x0;
-                    caret_y = top + y;
-                    y += lh;
-                    pending = 10.0f * s;
+                    caret_y = by;
                 }
+                const bool empty = rd->pieces.empty() && rd->decos.empty();
                 // .caret: 7 × 15 accent, blinking at 1 s steps(2, start).
                 conv_decor_ = true;
                 if (!motion_on || now_ms % 1000 < 500) {
                     const float cx = caret_x + 1.0f * s;
-                    const float cy = caret_y + (lh - 15.0f * s) * 0.5f + 2.0f * s;
+                    const float cy = caret_y + (caret_lh - 15.0f * s) * 0.5f + 2.0f * s;
                     c.Fill(D2D1::RectF(cx, cy, cx + 7.0f * s, cy + 15.0f * s), 1.0f * s, pal.accent);
                 }
+                y += empty ? lh : h;
+                pending = empty ? 10.0f * s : rd->margin_bottom;
+            } else {
+                y += h;
+                pending = rd->margin_bottom;
             }
             break;
         }
@@ -2997,6 +2917,7 @@ void AiPanelView::DrawConversation(Compositor* compositor, const AiPanelViewMode
     }
     y += pending + 10.0f * s;
     content_h_ = y;
+    EndRichFrame();
 
     // Snap a following view to the end now that the height is known (no
     // one-frame lag while text streams in).

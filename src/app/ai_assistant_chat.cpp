@@ -152,9 +152,16 @@ std::wstring Plain(const std::wstring& text) {
     return out;
 }
 
-void CopyText(HWND hwnd, const std::wstring& text) {
-    if (text.empty() || !OpenClipboard(hwnd)) return;
+void CopyText(HWND hwnd, const std::wstring& raw) {
+    if (raw.empty() || !OpenClipboard(hwnd)) return;
     EmptyClipboard();
+    // CF_UNICODETEXT lines end in CRLF (older apps paste a bare LF as one line).
+    std::wstring text;
+    text.reserve(raw.size() + raw.size() / 16);
+    for (size_t i = 0; i < raw.size(); ++i) {
+        if (raw[i] == L'\n' && (i == 0 || raw[i - 1] != L'\r')) text += L'\r';
+        text += raw[i];
+    }
     const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
     if (HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, bytes)) {
         if (void* p = GlobalLock(mem)) {
@@ -887,6 +894,27 @@ AiChat& Chat(AppState& s) {
     return *s.aiAssistant.chat;
 }
 
+namespace {
+std::wstring DemoAnswer() {
+    wchar_t path[MAX_PATH]{};
+    if (GetEnvironmentVariableW(L"PULSE_AI_DEMO_ANSWER", path, MAX_PATH) == 0) return {};
+    HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return {};
+    std::string bytes(64 * 1024, '\0');
+    DWORD got = 0;
+    const BOOL ok = ReadFile(f, bytes.data(), static_cast<DWORD>(bytes.size()), &got, nullptr);
+    CloseHandle(f);
+    if (!ok || got == 0) return {};
+    bytes.resize(got);
+    if (bytes.rfind("\xEF\xBB\xBF", 0) == 0) bytes.erase(0, 3);
+    const int n = MultiByteToWideChar(CP_UTF8, 0, bytes.data(), static_cast<int>(bytes.size()), nullptr, 0);
+    std::wstring text(static_cast<size_t>(n > 0 ? n : 0), L'\0');
+    if (n > 0) MultiByteToWideChar(CP_UTF8, 0, bytes.data(), static_cast<int>(bytes.size()), text.data(), n);
+    text.erase(std::remove(text.begin(), text.end(), L'\r'), text.end());
+    return text;
+}
+}  // namespace
+
 void AiChatSubmit(AppState& s, const std::wstring& prompt, const std::wstring& context) {
     AiChat& c = Chat(s);
     if (c.busy) return;
@@ -938,6 +966,15 @@ void AiChatSubmit(AppState& s, const std::wstring& prompt, const std::wstring& c
     c.queue.clear();
     SetChip(c, ui::StatusAiState::Busy, Text(I::AiAsstThinking));
     s.renderer.AiPanel().ScrollToEnd();
+    // PULSE_AI_DEMO_ANSWER=<UTF-8 file>: the demo answers with that Markdown
+    // (screenshots and checks of rich answers) instead of organizing.
+    if (const std::wstring answer = DemoAnswer(); !answer.empty()) {
+        AiBlockView& t = c.Add(AiBlockKind::Text, now);
+        t.text = answer;
+        Finish(s, true);
+        Redraw(s);
+        return;
+    }
     StartOrganize(s, c, prompt);
     Schedule(s);
     Redraw(s);

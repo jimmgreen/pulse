@@ -4657,6 +4657,21 @@ enum class StringId : UINT {
     GroupMediaMonth = IDS_GROUP_MEDIA_MONTH,
     GroupByTakenMonth = IDS_GROUP_BY_TAKEN_MONTH,
     GroupWheelClickApply = IDS_GROUP_WHEEL_CLICK_APPLY,
+    AiRichCopyTable = IDS_AI_RICH_COPY_TABLE,
+    AiRichLines = IDS_AI_RICH_LINES,
+    AiRichTableSize = IDS_AI_RICH_TABLE_SIZE,
+    AiRichPlainText = IDS_AI_RICH_PLAIN_TEXT,
+    AiSelQuote = IDS_AI_SEL_QUOTE,
+    AiSelSearch = IDS_AI_SEL_SEARCH,
+    AiMenuCopyMarkdown = IDS_AI_MENU_COPY_MARKDOWN,
+    AiMenuSelectAnswer = IDS_AI_MENU_SELECT_ANSWER,
+    AiMenuQuote = IDS_AI_MENU_QUOTE,
+    AiMenuSearchFor = IDS_AI_MENU_SEARCH_FOR,
+    AiMenuLocate = IDS_AI_MENU_LOCATE,
+    AiMenuOpenLink = IDS_AI_MENU_OPEN_LINK,
+    AiMenuCopyLink = IDS_AI_MENU_COPY_LINK,
+    AiPathMissing = IDS_AI_PATH_MISSING,
+    AiQuoteRemove = IDS_AI_QUOTE_REMOVE,
 };
 
 bool IsLanguageId(std::wstring_view id) noexcept;

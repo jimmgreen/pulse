@@ -543,6 +543,9 @@ endif()
 list(APPEND PULSE_APP_SOURCES src/index/network_agent_client.cpp)
 if(PULSE_APP_SOURCES)
     add_executable(pulse WIN32 ${PULSE_APP_SOURCES})
+    # The assistant's answers are Markdown, parsed by the same md4c as Quick Look.
+    target_sources(pulse PRIVATE src/preview_host/markdown_document.cpp third_party/md4c/md4c.c)
+    target_compile_definitions(pulse PRIVATE MD4C_USE_UTF16)
     if(PULSE_WITH_SELFTEST)
         target_compile_definitions(pulse PRIVATE PULSE_WITH_SELFTEST=1)
         target_sources(pulse PRIVATE src/bench/startup_rollback_test.cpp)
@@ -578,7 +581,8 @@ if(PULSE_APP_SOURCES)
         # size-optimised sources can't share a PCH built at /O2 (C4653).
         set(_pulse_no_pch src/ui/audio_waveform.cpp src/ui/preview_format_catalog.cpp
             src/ui/video_preview.cpp src/app/drive_verbs.cpp ${PULSE_SIZE_SOURCES})
-        target_precompile_headers(pulse PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/common/pch_system.h")
+        # C++ only: md4c.c (the assistant's Markdown) is C.
+        target_precompile_headers(pulse PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:${CMAKE_CURRENT_SOURCE_DIR}/src/common/pch_system.h>")
         set_source_files_properties(${_pulse_no_pch} PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
         if(CMAKE_GENERATOR MATCHES "Ninja")
             # CMake allows one PCH per target, so the app_state.h one is wired
@@ -910,6 +914,10 @@ target_compile_definitions(pulse_math_test PRIVATE MD4C_USE_UTF16)
 target_link_libraries(pulse_math_test PRIVATE dwrite d2d1 d3d11 dxgi dcomp dwmapi shcore
     windowscodecs ole32 shell32 shlwapi user32 gdi32 comctl32 pulse_localization)
 pulse_enable_lumatext(pulse_math_test)
+
+add_executable(pulse_ai_rich_text_test src/bench/ai_rich_text_test.cpp src/ui/ai_rich_text.cpp
+    src/preview_host/markdown_document.cpp third_party/md4c/md4c.c)
+target_compile_definitions(pulse_ai_rich_text_test PRIVATE MD4C_USE_UTF16)
 
 add_executable(pulse_shell_icons_test src/bench/shell_icons_test.cpp src/ui/shell_icons.cpp)
 target_link_libraries(pulse_shell_icons_test PRIVATE ole32 shell32 comctl32 uuid)

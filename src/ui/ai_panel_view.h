@@ -18,11 +18,22 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
+
+#include <wrl/client.h>
 
 namespace pulse::ui {
 
 class Compositor;
+struct AiRichDoc;     // ai_panel_rich.h
+struct AiRichPiece;
+// A point in the conversation's text: a block, a piece of it, a layout offset.
+struct AiRichSelPos {
+    uint32_t id = 0;
+    int piece = 0;
+    uint32_t offset = 0;
+};
 struct AiVoiceMenuView;   // 语音设置 menu (ai_panel_voice.h)
 
 enum class AiPanelMode : uint8_t { Docked = 0, Floating = 1 };
@@ -99,6 +110,18 @@ enum class AiPanelPart : uint8_t {
     PeekClose,
     PeekUndo,
     PeekOpen,
+    // Rich answers (index = block index * 256 + target): a link, a local path
+    // chip, a code block's 复制, a table's 复制表格.
+    RichLink,
+    RichPath,
+    CodeCopy,
+    TableCopy,
+    // The selection's mini toolbar: 复制 · 引用 · 在 Pulse 中搜索.
+    SelCopy,
+    SelQuote,
+    SelSearch,
+    // The composer's quote chip: its ×.
+    QuoteRemove,
 };
 
 struct AiPanelHit {
@@ -603,6 +626,8 @@ struct AiPanelViewModel {
     bool draw_composer_text = false;
     std::wstring composer_text;
     std::wstring placeholder;
+    // 引用: the chosen words above the input (empty: none).
+    std::wstring quote;
     std::wstring add_files;
     std::wstring model_label;         // deepseek-flash
     std::wstring effort_label;        // " · 高", " · 始终思考" (empty when thinking is off)
@@ -629,7 +654,7 @@ struct AiPanelViewModel {
 
 class AiPanelView {
 public:
-    AiPanelView() = default;
+    AiPanelView();
     AiPanelView(const AiPanelView&) = delete;
     AiPanelView& operator=(const AiPanelView&) = delete;
     ~AiPanelView();
@@ -668,7 +693,7 @@ public:
 
     // Conversation scrolling (px). Follows the newest block until the user
     // scrolls up; scrolling back to the end follows again.
-    void ScrollBy(float dy);
+    void ScrollBy(float dy, bool animate = true);
     void ScrollToEnd();
     bool Following() const noexcept { return follow_; }
     // The overlay scrollbar (conversation or welcome) works like Pulse's other scrollbars: drag the thumb, or press the track
@@ -734,6 +759,39 @@ public:
     bool PeekVisible() const noexcept { return peek_value_ > 0.0f; }
 
     void ReleaseDeviceResources();
+
+    // Text selection over answers and messages (ai_panel_rich.cpp). A press
+    // starts it (clicks: 1 characters, 2 a word, 3 a paragraph; extend: Shift
+    // moves its end), the drag follows the nearest text and the release shows
+    // the mini toolbar. Buttons, icons and line numbers are never selected.
+    bool OverText(float x, float y) const;     // selectable text under the point
+    bool BeginSelect(float x, float y, int clicks, bool extend);
+    void DragSelect(float x, float y);
+    void EndSelect();
+    bool Selecting() const noexcept;
+    bool HasSelection() const;
+    void ClearSelection();
+    void HideSelectionBar();
+    // The answer (its Text blocks back to the message) or the message holding
+    // `block`; -1: the last answer.
+    bool SelectAnswer(int block);
+    int CaretBlock() const;   // the block last clicked in (a selection or just a caret), else -1
+    int RichBlockAt(float x, float y) const;   // block index of the text nearest the point, -1
+    int SelectionBlock() const;                // block index of the selection's end, -1
+    std::wstring SelectionText(bool markdown) const;
+    // While a drag is past the conversation's top or bottom: px to scroll a tick.
+    float SelectScrollSpeed(float y) const;
+    // A link, path, code block or table under a RichLink / RichPath /
+    // CodeCopy / TableCopy hit: its URL, path, code or tab separated cells.
+    struct RichTargetInfo {
+        AiPanelPart part = AiPanelPart::None;
+        std::wstring text;
+    };
+    RichTargetInfo TargetOf(const AiPanelHit& hit) const;
+    // A copy button shows 已复制 for 2 s.
+    void MarkCopied(const AiPanelHit& hit, uint64_t now_ms);
+    // A code block or table under the point scrolls sideways; false elsewhere.
+    bool ScrollBoxAt(float x, float y, float dx);
 
     struct Palette;   // colors of one frame (ai_panel_view.cpp)
 
@@ -865,6 +923,35 @@ private:
     // Draws bar `which` over `viewport` (its hit zone and track) and records it.
     void DrawBar(int which, const D2D1_RECT_F& viewport, float offset, float view, float content);
     D2D1_RECT_F go_settings_{};
+    // Rich text and the selection (ai_panel_rich.h).
+    struct RichCache;
+    std::unique_ptr<RichCache> rich_;
+    D2D1_RECT_F quote_remove_{};
+    void EnsureRichBrushes(ID2D1DeviceContext* dc, const Palette& pal, bool dark);
+    void ReleaseRich();
+    const AiRichDoc* RichFor(Compositor* compositor, const AiBlockView& block, float width, float scale);
+    void BuildRich(Compositor* compositor, const AiBlockView& block, float width, float scale, AiRichDoc& doc,
+                   std::unordered_map<uint64_t, Microsoft::WRL::ComPtr<IDWriteTextLayout>>& reuse);
+    // Draws a laid out block at (ox, oy) and records its pieces for hit tests
+    // (only the latter when `draw` is false: off screen).
+    void DrawRich(Compositor* compositor, const AiRichDoc& doc, const AiBlockView& block, int index, float ox,
+                  float oy, const Palette& pal, const D2D1_RECT_F& area, const AiPanelViewModel& vm, float scale,
+                  uint64_t now_ms, bool draw);
+    bool RichCaret(const AiRichDoc& doc, uint32_t id, float ox, float oy, float& cx, float& cy, float& lh) const;
+    void BeginRichFrame(const AiPanelViewModel& vm);
+    void EndRichFrame();
+    float BoxScroll(uint32_t id, int box) const;
+    bool RichPosAt(float x, float y, bool strict, AiRichSelPos& out) const;
+    bool SelectionIn(uint32_t id, int piece, uint32_t length, uint32_t& a, uint32_t& b) const;
+    int ComparePos(const AiRichSelPos& x, const AiRichSelPos& y) const;
+    const AiRichPiece* PieceOf(const AiRichSelPos& p) const;
+    void UnitAround(const AiRichSelPos& p, int unit, AiRichSelPos& from, AiRichSelPos& to) const;
+    void DrawSelectionBar(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal, float scale);
+    // The composer's quote chip: its height (0 without a quote, measured
+    // before the composer is placed) and drawing.
+    float MeasureQuote(Compositor* compositor, const AiPanelViewModel& vm, float inner_width, float scale);
+    void DrawQuoteChip(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal, float left, float right,
+                       float& y, float scale);
     std::function<void(std::string_view, const D2D1_RECT_F&)> mark_painter_;
     D2D1_RECT_F conversation_rect_{};
     D2D1_COLOR_F card_color_{1, 1, 1, 1};

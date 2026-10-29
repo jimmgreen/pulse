@@ -4672,3 +4672,18 @@ GroupMediaUnknown	IDS_GROUP_MEDIA_UNKNOWN	5943	未知	Unknown	未知
 GroupMediaMonth	IDS_GROUP_MEDIA_MONTH	5944	%d年%d月	%d/%d	%d年%d月
 GroupByTakenMonth	IDS_GROUP_BY_TAKEN_MONTH	5945	拍摄月份	Month taken	拍攝月份
 GroupWheelClickApply	IDS_GROUP_WHEEL_CLICK_APPLY	5946	单击应用	Click to apply	按一下套用
+AiRichCopyTable	IDS_AI_RICH_COPY_TABLE	5947	复制表格	Copy table	複製表格
+AiRichLines	IDS_AI_RICH_LINES	5948	%d 行	%d lines	%d 行
+AiRichTableSize	IDS_AI_RICH_TABLE_SIZE	5949	%d 行 · %d 列	%d rows · %d columns	%d 列 · %d 欄
+AiRichPlainText	IDS_AI_RICH_PLAIN_TEXT	5950	文本	Text	文字
+AiSelQuote	IDS_AI_SEL_QUOTE	5951	引用	Quote	引用
+AiSelSearch	IDS_AI_SEL_SEARCH	5952	在 Pulse 中搜索	Search in Pulse	在 Pulse 中搜尋
+AiMenuCopyMarkdown	IDS_AI_MENU_COPY_MARKDOWN	5953	复制为 Markdown	Copy as Markdown	複製為 Markdown
+AiMenuSelectAnswer	IDS_AI_MENU_SELECT_ANSWER	5954	全选这条回答	Select this answer	全選這則回答
+AiMenuQuote	IDS_AI_MENU_QUOTE	5955	引用到输入框	Quote in your message	引用到輸入框
+AiMenuSearchFor	IDS_AI_MENU_SEARCH_FOR	5956	在 Pulse 中搜索“%s”	Search Pulse for “%s”	在 Pulse 中搜尋「%s」
+AiMenuLocate	IDS_AI_MENU_LOCATE	5957	在当前标签页定位	Show in current tab	在目前分頁中定位
+AiMenuOpenLink	IDS_AI_MENU_OPEN_LINK	5958	打开链接	Open link	開啟連結
+AiMenuCopyLink	IDS_AI_MENU_COPY_LINK	5959	复制链接	Copy link	複製連結
+AiPathMissing	IDS_AI_PATH_MISSING	5960	找不到“%s”	Can't find “%s”	找不到「%s」
+AiQuoteRemove	IDS_AI_QUOTE_REMOVE	5961	移除引用	Remove quote	移除引用
