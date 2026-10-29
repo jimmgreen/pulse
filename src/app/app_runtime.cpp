@@ -2727,6 +2727,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     vm.settings_list_tag_names = s.appPrefs.list_tag_name_color;
     vm.settings_list_selection_outline = s.appPrefs.list_selection_outline;
     vm.settings_list_thumbnail_badges = s.appPrefs.list_thumbnail_badges;
+    vm.settings_media_columns = s.appPrefs.media_columns;
     vm.settings_mtime = app::MtimeHintFromPrefs(s.appPrefs);
     vm.settings_mtime.tree = s.appPrefs.list_mtime_tree;   // the switch shows the pref itself
     vm.settings_sync_onedrive = s.appPrefs.sync_onedrive;

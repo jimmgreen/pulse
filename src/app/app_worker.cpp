@@ -374,6 +374,7 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
     if (!item.preserve_order) {
         const ScopedEntryGrouping grouping(item.group_by, item.path);
         const ScopedFolderSortMode folder_mode(item.folder_sort);
+        const ScopedMediaSortFolder media_folder(item.path);
         const auto tick = [&] {
             if ((++comparisons & 8191u) == 0) {
                 std::lock_guard<std::mutex> lock(mutex_);

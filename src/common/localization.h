@@ -4642,6 +4642,20 @@ enum class StringId : UINT {
     HoldPreviewOff = IDS_HOLD_PREVIEW_OFF,
     HoverSizeXLarge = IDS_HOVER_SIZE_XLARGE,
     PreviewKeyHint = IDS_PREVIEW_KEY_HINT,
+    ColumnMediaTaken = IDS_COLUMN_MEDIA_TAKEN,
+    ColumnMediaDims = IDS_COLUMN_MEDIA_DIMS,
+    ColumnMediaCamera = IDS_COLUMN_MEDIA_CAMERA,
+    ColumnMediaTitle = IDS_COLUMN_MEDIA_TITLE,
+    ColumnMediaArtist = IDS_COLUMN_MEDIA_ARTIST,
+    ColumnMediaAlbum = IDS_COLUMN_MEDIA_ALBUM,
+    ColumnMediaDuration = IDS_COLUMN_MEDIA_DURATION,
+    ColumnMediaResolution = IDS_COLUMN_MEDIA_RESOLUTION,
+    ColumnMediaFps = IDS_COLUMN_MEDIA_FPS,
+    MediaColumnsTitle = IDS_MEDIA_COLUMNS_TITLE,
+    MediaColumnsDesc = IDS_MEDIA_COLUMNS_DESC,
+    GroupMediaUnknown = IDS_GROUP_MEDIA_UNKNOWN,
+    GroupMediaMonth = IDS_GROUP_MEDIA_MONTH,
+    GroupByTakenMonth = IDS_GROUP_BY_TAKEN_MONTH,
 };
 
 bool IsLanguageId(std::wstring_view id) noexcept;

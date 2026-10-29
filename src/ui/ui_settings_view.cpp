@@ -1361,6 +1361,7 @@ float MainRenderer::SettingsDestinationOffset(const WindowViewModel& vm, int set
         case I::ListTagNameColor: target=l.list_style_row[3];break;
     case I::ListSelectionOutline: target=l.list_style_row[4];break;
     case I::ListThumbnailBadges: target=l.list_style_row[5];break;
+    case I::MediaColumnsTitle: target=l.list_style_row[6];break;
     case I::SettingsClickOpen: target=l.click_open_card;break;
     case I::SettingsItemCheckboxes: target=l.item_checkbox_row;break;
     case I::ListMtimeHint: target=l.mtime_style_card;break;

@@ -67,4 +67,29 @@ void SortEntriesBySize(std::vector<fs::DirEntry>& entries, ui::SortDirection dir
 // Order-independent fingerprint of `sizes`, to notice changed totals. Empty is 0.
 uint64_t FolderSizeSignature(const FolderSizeLookup& sizes);
 
+// 媒体文件夹专用列: SortColumn::Media* orders by values read off the window
+// thread. media_columns_ui.cpp registers where they come from; without a
+// source (tests) or a ScopedMediaSortFolder, and in EntryLess, such sorts
+// fall back to names. Rows whose value is unknown follow in either direction.
+struct MediaSortKey {
+    bool known = false;
+    std::wstring text;    // compared first, like names
+    uint64_t number = 0;  // then this (an album's track number, a duration)
+};
+using MediaSortKeySource = void (*)(const std::wstring& folder, const std::vector<fs::DirEntry>& entries,
+                                    ui::SortColumn column, std::vector<MediaSortKey>& keys);
+void SetMediaSortKeySource(MediaSortKeySource source) noexcept;
+// The folder SortEntries' rows on this thread live in, for a media sort.
+// Nestable; restores the previous folder.
+class ScopedMediaSortFolder {
+public:
+    explicit ScopedMediaSortFolder(const std::wstring& folder) noexcept;
+    ~ScopedMediaSortFolder();
+    ScopedMediaSortFolder(const ScopedMediaSortFolder&) = delete;
+    ScopedMediaSortFolder& operator=(const ScopedMediaSortFolder&) = delete;
+
+private:
+    const std::wstring* previous_;
+};
+
 } // namespace pulse::app

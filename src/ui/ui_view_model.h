@@ -27,6 +27,7 @@
 #include <array>
 #include <memory>
 #include <deque>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -57,7 +58,10 @@ class BloomAccentPicker;
 int FluentSvgIdForGlyph(std::wstring_view glyph);
 
 // Values are persisted (folder sort prefs, session): append only.
-enum class SortColumn { Name, Mtime, Type, Size, Path, Created, Accessed };
+// Media*: 媒体文件夹专用列 (PaneViewModel::media_columns), read by app/media_props.
+enum class SortColumn { Name, Mtime, Type, Size, Path, Created, Accessed,
+                        MediaTaken, MediaDims, MediaCamera, MediaTitle, MediaArtist, MediaAlbum,
+                        MediaDuration, MediaFps };
 enum class SortDirection { Asc, Desc };
 
 struct TabView {
@@ -288,6 +292,12 @@ struct PaneViewModel {
     // to the drives; the global column choice and widths stay as they are.
     bool this_pc_columns = false;
     DriveOverviewView drive_overview; // with this_pc_columns: the 存储总览 card
+    // Folder of mostly pictures (1), music (2) or videos (3) in details view:
+    // 名称 + that kind's columns (MainRenderer::MediaColumns); 0 = the usual
+    // columns. media_cell gives a row's text for one SortColumn::Media* value,
+    // empty while it is unknown or still being read.
+    uint8_t media_columns = 0;
+    std::function<std::wstring(int source, SortColumn column)> media_cell;
     bool dup_chips = false;           // 重复文件 tab: 保留 / 多出 / 都留 as colored chips
     std::wstring dup_empty_title;     // 重复文件 tab with nothing left: its empty-state title
     // 重复文件 tab: the 路径 column names a folder under one of these roots
@@ -1281,6 +1291,7 @@ struct WindowViewModel {
     bool settings_list_tag_names = false;
     bool settings_list_selection_outline = false;
     bool settings_list_thumbnail_badges = true;
+    bool settings_media_columns = true;
     // 缩略图缓存 row: 0 counting, 1 ready, 2 clearing, 3 cleared, 4 no cache
     // folder (SettingsController::ThumbCacheState).
     uint8_t settings_thumb_cache_phase = 0;

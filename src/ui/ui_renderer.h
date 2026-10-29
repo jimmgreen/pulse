@@ -424,7 +424,14 @@ public:
     // Status: cloud-file state (仅在云端 / 已在本地 / 始终保留), only drawn in
     // folders under a Cloud Files sync root (PaneViewModel::cloud_status_column).
     // Total: This PC's 总大小 (MainRenderer::ThisPcColumns), never a global column.
-    enum class ColumnKind : uint8_t { Name, Path, Date, Type, Size, Created, Accessed, Status, Total };
+    // Media*: 媒体文件夹专用列 (MainRenderer::MediaColumns), never global
+    // columns either; each sorts by the SortColumn of the same name.
+    enum class ColumnKind : uint8_t { Name, Path, Date, Type, Size, Created, Accessed, Status, Total,
+                                      MediaTaken, MediaDims, MediaCamera, MediaTitle, MediaArtist,
+                                      MediaAlbum, MediaDuration, MediaFps };
+    static constexpr bool IsMediaColumn(ColumnKind kind) noexcept { return kind >= ColumnKind::MediaTaken; }
+    static SortColumn MediaSortColumn(ColumnKind kind) noexcept;
+    static std::wstring MediaColumnLabel(ColumnKind kind, uint8_t media_columns);
     static constexpr size_t kMaxDetailsColumns = 8;
     static_assert(kDetailsColumnModified == 1u << static_cast<uint32_t>(ColumnKind::Date) &&
                   kDetailsColumnType == 1u << static_cast<uint32_t>(ColumnKind::Type) &&
@@ -567,6 +574,11 @@ public:
     // (Total) · 类型, fitted to the drives; not resizable.
     DetailsColumnLayout ThisPcColumns(const D2D1_RECT_F& pane_bounds,
                                       const PaneViewModel& vm) const;
+    // A media folder in details view (PaneViewModel::media_columns): 名称 then
+    // 拍摄日期 · 尺寸 · 相机 · 大小 / 标题 · 艺术家 · 专辑 · 时长 /
+    // 时长 · 分辨率 · 帧率 · 大小; fixed widths, not resizable.
+    DetailsColumnLayout MediaColumns(const D2D1_RECT_F& pane_bounds,
+                                     const PaneViewModel& vm) const;
     DetailsColumnWidths ResizeDetailsColumnDivider(
         const D2D1_RECT_F& pane_bounds,
         const DetailsColumnWidths& dividers,

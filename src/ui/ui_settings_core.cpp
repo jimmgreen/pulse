@@ -573,6 +573,7 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
         toggle(lay.list_style_row[3],I::ListTagNameColor,I::ListTagNameColorDesc,L"\xE8EC",vm.settings_list_tag_names,22);
         toggle(lay.list_style_row[4],I::ListSelectionOutline,I::ListSelectionOutlineDesc,L"\xE8B3",vm.settings_list_selection_outline,33);
         toggle(lay.list_style_row[5],I::ListThumbnailBadges,I::ListThumbnailBadgesDesc,L"\xE8B9",vm.settings_list_thumbnail_badges,34);
+        toggle(lay.list_style_row[6],I::MediaColumnsTitle,I::MediaColumnsDesc,L"\xE714",vm.settings_media_columns,80);
         if(lay.thumb_cache_row.bottom>lay.thumb_cache_row.top) {
             // 缩略图缓存: usage bar against the 512 MB budget, then 清除缓存.
             const auto& r=lay.thumb_cache_row;

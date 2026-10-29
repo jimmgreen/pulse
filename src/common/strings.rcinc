@@ -4632,6 +4632,20 @@ BEGIN
     IDS_HOLD_PREVIEW_OFF "关"
     IDS_HOVER_SIZE_XLARGE "特大"
     IDS_PREVIEW_KEY_HINT "空格 关闭 · K 暂停 · L 循环"
+    IDS_COLUMN_MEDIA_TAKEN "拍摄日期"
+    IDS_COLUMN_MEDIA_DIMS "尺寸"
+    IDS_COLUMN_MEDIA_CAMERA "相机"
+    IDS_COLUMN_MEDIA_TITLE "标题"
+    IDS_COLUMN_MEDIA_ARTIST "艺术家"
+    IDS_COLUMN_MEDIA_ALBUM "专辑"
+    IDS_COLUMN_MEDIA_DURATION "时长"
+    IDS_COLUMN_MEDIA_RESOLUTION "分辨率"
+    IDS_COLUMN_MEDIA_FPS "帧率"
+    IDS_MEDIA_COLUMNS_TITLE "媒体文件夹使用专用列"
+    IDS_MEDIA_COLUMNS_DESC "以图片、音乐或视频为主的文件夹，显示拍摄日期、艺术家、时长等列"
+    IDS_GROUP_MEDIA_UNKNOWN "未知"
+    IDS_GROUP_MEDIA_MONTH "%d年%d月"
+    IDS_GROUP_BY_TAKEN_MONTH "拍摄月份"
 END
 
 LANGUAGE 0x09, 0x01
@@ -9263,6 +9277,20 @@ BEGIN
     IDS_HOLD_PREVIEW_OFF "Off"
     IDS_HOVER_SIZE_XLARGE "Extra large"
     IDS_PREVIEW_KEY_HINT "Space closes · K pauses · L loops"
+    IDS_COLUMN_MEDIA_TAKEN "Date taken"
+    IDS_COLUMN_MEDIA_DIMS "Dimensions"
+    IDS_COLUMN_MEDIA_CAMERA "Camera"
+    IDS_COLUMN_MEDIA_TITLE "Title"
+    IDS_COLUMN_MEDIA_ARTIST "Artist"
+    IDS_COLUMN_MEDIA_ALBUM "Album"
+    IDS_COLUMN_MEDIA_DURATION "Length"
+    IDS_COLUMN_MEDIA_RESOLUTION "Resolution"
+    IDS_COLUMN_MEDIA_FPS "Frame rate"
+    IDS_MEDIA_COLUMNS_TITLE "Media columns in media folders"
+    IDS_MEDIA_COLUMNS_DESC "Folders that are mostly pictures, music or videos show date taken, artist, length and more"
+    IDS_GROUP_MEDIA_UNKNOWN "Unknown"
+    IDS_GROUP_MEDIA_MONTH "%d/%d"
+    IDS_GROUP_BY_TAKEN_MONTH "Month taken"
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.

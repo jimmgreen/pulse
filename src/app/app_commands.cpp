@@ -43,6 +43,7 @@
 #include "tag_missing.h"
 #include "tag_rules.h"
 #include "entry_sort.h"
+#include "media_columns_ui.h"
 #include "session.h"
 #include "context_menu.h"
 #include "actions/action_registry.h"
@@ -5864,6 +5865,7 @@ void ApplySettingsEffects(AppState& s, app::SettingsEffect effects) {
         s.renderer.SetRowActions(app::RowActionMask(s.ctxMenuPrefs.builtin_hidden,
             s.ctxMenuPrefs.BuiltinOrder(app::BuiltinMenuSurface::RowButtons)));
         s.renderer.SetThumbnailBadges(s.appPrefs.list_thumbnail_badges);
+        app::SetMediaColumnsEnabled(s.appPrefs.media_columns);
     }
     if (app::HasEffect(effects, app::SettingsEffect::FolderSort)) {
         app::SetFolderSortMode(app::FolderSortModeFromInt(s.appPrefs.folder_sort_mode));

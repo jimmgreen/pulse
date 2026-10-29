@@ -31,6 +31,7 @@
 namespace pulse { struct ContentSizeSummary; struct ContentSelectionRestore; }
 namespace pulse::app {
 struct ContentNavigationState;
+struct MediaColumnsState;
 
 // When navigating from a descendant to one of its ancestors, returns the
 // immediate child of the destination that the user just left. Empty means the
@@ -154,6 +155,12 @@ struct Tab {
     // with, and when they last moved for new totals (GetTickCount64).
     uint64_t folder_size_signature = 0;
     uint64_t folder_size_resorted_at = 0;
+    // 媒体文件夹专用列 (media_columns_ui.cpp): what they were worked out for,
+    // and the reader revision the last live re-sort saw.
+    mutable fs::SnapshotPtr media_snapshot;
+    mutable std::shared_ptr<const MediaColumnsState> media_state;
+    uint64_t media_resort_revision = 0;
+    uint64_t media_resorted_at = 0;
     ColumnStripState column_strip; // listings shown beside the list in column view
     std::wstring git_root;
     std::shared_ptr<std::vector<fs::DirEntry>> search_entries;
@@ -440,6 +447,10 @@ void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane,
 // the ai-list view. Registered by dup::Start, so tests link without it.
 using PaneDecorator = void (*)(const std::wstring& path, ui::PaneViewModel& out);
 void SetDupPaneDecorator(PaneDecorator decorator);
+// 媒体文件夹专用列: sets PaneViewModel::media_columns / media_cell. Registered
+// by InstallMediaColumns (media_columns_ui.cpp), so tests link without it.
+using MediaPaneDecorator = void (*)(const Tab& tab, ui::PaneViewModel& out);
+void SetMediaPaneDecorator(MediaPaneDecorator decorator);
 
 // One window tab = one working layout (pane count, split ratios, each column).
 struct LayoutTab {

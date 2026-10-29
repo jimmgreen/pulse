@@ -2023,10 +2023,12 @@ void CollectFilterMatches(const Tab& tab, const PlacesCatalog* places, std::vect
 
 namespace {
 PaneDecorator g_dup_decorator = nullptr;
+MediaPaneDecorator g_media_decorator = nullptr;
 void FillPaneViewModelBody(ui::PaneViewModel& out, const Pane& pane, const PlacesCatalog* places);
 } // namespace
 
 void SetDupPaneDecorator(PaneDecorator decorator) { g_dup_decorator = decorator; }
+void SetMediaPaneDecorator(MediaPaneDecorator decorator) { g_media_decorator = decorator; }
 
 void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCatalog* places) {
     out.banner_action_labels[0].clear();
@@ -2034,8 +2036,14 @@ void FillPaneViewModel(ui::PaneViewModel& out, const Pane& pane, const PlacesCat
     out.dup_funnel = {};
     out.dup_chips = false;
     out.dup_empty_title.clear();
+    out.media_columns = 0;
+    out.media_cell = nullptr;
     FillPaneViewModelBody(out, pane, places);
     const Tab* tab = pane.ActiveTab();
+    if (g_media_decorator && tab) g_media_decorator(*tab, out);
+    // A media column order without those columns on screen (switched off,
+    // another folder) sorts by name (SortEntries); show it as such.
+    if (!out.media_columns && out.sort_column >= ui::SortColumn::MediaTaken) out.sort_column = ui::SortColumn::Name;
     if (g_dup_decorator && tab && tab->current_path.starts_with(L"pulse:ai-list:"))
         g_dup_decorator(tab->current_path, out);
 }

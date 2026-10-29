@@ -4650,5 +4650,19 @@
 #define IDS_HOLD_PREVIEW_OFF                                                             5929
 #define IDS_HOVER_SIZE_XLARGE                                                            5930
 #define IDS_PREVIEW_KEY_HINT                                                             5931
+#define IDS_COLUMN_MEDIA_TAKEN                                                           5932
+#define IDS_COLUMN_MEDIA_DIMS                                                            5933
+#define IDS_COLUMN_MEDIA_CAMERA                                                          5934
+#define IDS_COLUMN_MEDIA_TITLE                                                           5935
+#define IDS_COLUMN_MEDIA_ARTIST                                                          5936
+#define IDS_COLUMN_MEDIA_ALBUM                                                           5937
+#define IDS_COLUMN_MEDIA_DURATION                                                        5938
+#define IDS_COLUMN_MEDIA_RESOLUTION                                                      5939
+#define IDS_COLUMN_MEDIA_FPS                                                             5940
+#define IDS_MEDIA_COLUMNS_TITLE                                                          5941
+#define IDS_MEDIA_COLUMNS_DESC                                                           5942
+#define IDS_GROUP_MEDIA_UNKNOWN                                                          5943
+#define IDS_GROUP_MEDIA_MONTH                                                            5944
+#define IDS_GROUP_BY_TAKEN_MONTH                                                         5945
 
 #endif  // PULSE_STRING_IDS_H

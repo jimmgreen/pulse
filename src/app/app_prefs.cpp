@@ -77,6 +77,7 @@ void AppPrefs::ResetToDefaults() {
     photo_wall_hint = true;
     list_selection_outline = false;
     list_thumbnail_badges = true;
+    media_columns = true;
     list_mtime_hint = 1;
     list_mtime_range = 7;
     list_mtime_palette = 0;
@@ -223,6 +224,8 @@ std::wstring AppPrefs::ToJson() const {
     out += list_selection_outline ? L"true" : L"false";
     out += L",\n  \"list_thumbnail_badges\":";
     out += list_thumbnail_badges ? L"true" : L"false";
+    out += L",\n  \"media_columns\":";
+    out += media_columns ? L"true" : L"false";
     out += L",\n  \"list_mtime_hint\":" + std::to_wstring(list_mtime_hint);
     out += L",\n  \"list_mtime_range\":" + std::to_wstring(list_mtime_range);
     out += L",\n  \"list_mtime_palette\":" + std::to_wstring(list_mtime_palette);
@@ -518,6 +521,7 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     list_tag_name_color = pulse::json::ExtractBool(json, L"list_tag_name_color", false);
     list_selection_outline = pulse::json::ExtractBool(json, L"list_selection_outline", false);
     list_thumbnail_badges = pulse::json::ExtractBool(json, L"list_thumbnail_badges", true);
+    media_columns = pulse::json::ExtractBool(json, L"media_columns", true);
     list_mtime_hint = std::clamp(pulse::json::ExtractInt(json, L"list_mtime_hint", 1), 0, 3);
     list_mtime_range = ui::ClampMtimeRange(pulse::json::ExtractInt(json, L"list_mtime_range", 7));
     list_mtime_palette = std::clamp(pulse::json::ExtractInt(json, L"list_mtime_palette", 0), 0, ui::kMtimePaletteCount - 1);

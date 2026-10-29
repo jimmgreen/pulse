@@ -8,7 +8,9 @@ namespace {
 
 // Indexed by ui::SortColumn; stable JSON names.
 constexpr const wchar_t* kColumnNames[] = { L"name", L"modified", L"type", L"size", L"path",
-                                            L"created", L"accessed" };
+                                            L"created", L"accessed", L"taken", L"dimensions",
+                                            L"camera", L"title", L"artist", L"album", L"duration",
+                                            L"frame_rate" };
 constexpr int kColumnCount = static_cast<int>(sizeof(kColumnNames) / sizeof(kColumnNames[0]));
 
 bool Valid(FolderSort sort) {

@@ -202,7 +202,7 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
         l.density_card=row(seg_h); segments(l.density_card,l.density_row,3,282);
         l.list_style_row[1]=row(64);   // zebra rows
         l.list_style_row[0]=row(64);   // smart date
-        for(int i=2;i<6;++i) l.list_style_row[i]=row(64);
+        for(int i=2;i<7;++i) l.list_style_row[i]=row(64);
         {
             // 缩略图缓存: title, description, then the usage bar; the button
             // is as wide as its longest label so it does not jump.

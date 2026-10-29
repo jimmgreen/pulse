@@ -4657,3 +4657,17 @@ HoldPreviewDesc	IDS_HOLD_PREVIEW_DESC	5928	在文件上按住左键预览，松�
 HoldPreviewOff	IDS_HOLD_PREVIEW_OFF	5929	关	Off	關
 HoverSizeXLarge	IDS_HOVER_SIZE_XLARGE	5930	特大	Extra large	特大
 PreviewKeyHint	IDS_PREVIEW_KEY_HINT	5931	空格 关闭 · K 暂停 · L 循环	Space closes · K pauses · L loops	空白鍵 關閉 · K 暫停 · L 循環
+ColumnMediaTaken	IDS_COLUMN_MEDIA_TAKEN	5932	拍摄日期	Date taken	拍攝日期
+ColumnMediaDims	IDS_COLUMN_MEDIA_DIMS	5933	尺寸	Dimensions	尺寸
+ColumnMediaCamera	IDS_COLUMN_MEDIA_CAMERA	5934	相机	Camera	相機
+ColumnMediaTitle	IDS_COLUMN_MEDIA_TITLE	5935	标题	Title	標題
+ColumnMediaArtist	IDS_COLUMN_MEDIA_ARTIST	5936	艺术家	Artist	演出者
+ColumnMediaAlbum	IDS_COLUMN_MEDIA_ALBUM	5937	专辑	Album	專輯
+ColumnMediaDuration	IDS_COLUMN_MEDIA_DURATION	5938	时长	Length	長度
+ColumnMediaResolution	IDS_COLUMN_MEDIA_RESOLUTION	5939	分辨率	Resolution	解析度
+ColumnMediaFps	IDS_COLUMN_MEDIA_FPS	5940	帧率	Frame rate	影格速率
+MediaColumnsTitle	IDS_MEDIA_COLUMNS_TITLE	5941	媒体文件夹使用专用列	Media columns in media folders	媒體資料夾使用專用欄
+MediaColumnsDesc	IDS_MEDIA_COLUMNS_DESC	5942	以图片、音乐或视频为主的文件夹，显示拍摄日期、艺术家、时长等列	Folders that are mostly pictures, music or videos show date taken, artist, length and more	以圖片、音樂或影片為主的資料夾，顯示拍攝日期、演出者、長度等欄
+GroupMediaUnknown	IDS_GROUP_MEDIA_UNKNOWN	5943	未知	Unknown	未知
+GroupMediaMonth	IDS_GROUP_MEDIA_MONTH	5944	%d年%d月	%d/%d	%d年%d月
+GroupByTakenMonth	IDS_GROUP_BY_TAKEN_MONTH	5945	拍摄月份	Month taken	拍攝月份

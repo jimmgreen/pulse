@@ -630,10 +630,94 @@ MainRenderer::DetailsColumnLayout MainRenderer::ThisPcColumns(
     return out;
 }
 
+SortColumn MainRenderer::MediaSortColumn(ColumnKind kind) noexcept {
+    switch (kind) {
+    case ColumnKind::MediaTaken: return SortColumn::MediaTaken;
+    case ColumnKind::MediaDims: return SortColumn::MediaDims;
+    case ColumnKind::MediaCamera: return SortColumn::MediaCamera;
+    case ColumnKind::MediaTitle: return SortColumn::MediaTitle;
+    case ColumnKind::MediaArtist: return SortColumn::MediaArtist;
+    case ColumnKind::MediaAlbum: return SortColumn::MediaAlbum;
+    case ColumnKind::MediaDuration: return SortColumn::MediaDuration;
+    case ColumnKind::MediaFps: return SortColumn::MediaFps;
+    default: return SortColumn::Name;
+    }
+}
+
+std::wstring MainRenderer::MediaColumnLabel(ColumnKind kind, uint8_t media_columns) {
+    using pulse::l10n::StringId;
+    switch (kind) {
+    case ColumnKind::MediaTaken: return pulse::l10n::Get(StringId::ColumnMediaTaken);
+    case ColumnKind::MediaDims:  // a video's size is its resolution
+        return pulse::l10n::Get(media_columns == 3 ? StringId::ColumnMediaResolution : StringId::ColumnMediaDims);
+    case ColumnKind::MediaCamera: return pulse::l10n::Get(StringId::ColumnMediaCamera);
+    case ColumnKind::MediaTitle: return pulse::l10n::Get(StringId::ColumnMediaTitle);
+    case ColumnKind::MediaArtist: return pulse::l10n::Get(StringId::ColumnMediaArtist);
+    case ColumnKind::MediaAlbum: return pulse::l10n::Get(StringId::ColumnMediaAlbum);
+    case ColumnKind::MediaDuration: return pulse::l10n::Get(StringId::ColumnMediaDuration);
+    case ColumnKind::MediaFps: return pulse::l10n::Get(StringId::ColumnMediaFps);
+    default: return std::wstring();
+    }
+}
+
+MainRenderer::DetailsColumnLayout MainRenderer::MediaColumns(
+    const D2D1_RECT_F& pane_bounds, const PaneViewModel& vm) const {
+    DetailsColumnLayout out;
+    const auto content = DetailsContentRect(pane_bounds, scale_);
+    out.left = content.left + margin_;
+    out.right = std::max(out.left, content.right - margin_ * 3.0f);
+    const float total = out.right - out.left;
+    out.count = 1;
+    out.kinds[0] = ColumnKind::Name;
+    out.widths[0] = std::max(0.0f, total);
+    if (total <= 0.0f || !compositor_ || !compositor_->HeaderFormat()) return out;
+    // Display order with a width in DIPs, and the rank it is dropped in when
+    // the pane is narrow (0 first), so the name keeps at least 200 DIPs.
+    struct Col { ColumnKind kind; float dip; int drop; };
+    using K = ColumnKind;
+    std::vector<Col> cols;
+    switch (vm.media_columns) {
+    case 1: cols = {{K::MediaTaken, 150, 3}, {K::MediaDims, 112, 1}, {K::MediaCamera, 160, 0}, {K::Size, 92, 2}}; break;
+    case 2: cols = {{K::MediaTitle, 220, 0}, {K::MediaArtist, 160, 2}, {K::MediaAlbum, 180, 1}, {K::MediaDuration, 76, 3}}; break;
+    case 3: cols = {{K::MediaDuration, 84, 3}, {K::MediaDims, 120, 2}, {K::MediaFps, 72, 0}, {K::Size, 92, 1}}; break;
+    default: return out;
+    }
+    std::vector<float> widths;
+    widths.reserve(cols.size());
+    for (const Col& c : cols) {
+        // Header text, both cell insets and room for a sort mark.
+        const std::wstring label = c.kind == K::Size ? pulse::l10n::Get(pulse::l10n::StringId::ColumnSize)
+                                                     : MediaColumnLabel(c.kind, vm.media_columns);
+        const float header = MeasureTextWidth(compositor_->DwriteFactory(), compositor_->HeaderFormat(), label) +
+                             35.0f * scale_;
+        widths.push_back(std::max(c.dip * scale_, header));
+    }
+    std::vector<bool> shown(cols.size(), true);
+    const float name_min = 200.0f * scale_;
+    for (int rank = 0; rank < static_cast<int>(cols.size()); ++rank) {
+        float used = 0.0f;
+        for (size_t i = 0; i < cols.size(); ++i) if (shown[i]) used += widths[i];
+        if (total - used >= name_min) break;
+        for (size_t i = 0; i < cols.size(); ++i) if (cols[i].drop == rank) shown[i] = false;
+    }
+    float used = 0.0f;
+    for (size_t i = 0; i < cols.size(); ++i) if (shown[i]) used += widths[i];
+    out.widths[0] = std::max(0.0f, total - used);
+    for (size_t i = 0; i < cols.size() && out.count < static_cast<int>(kMaxDetailsColumns); ++i) {
+        if (!shown[i]) continue;
+        out.kinds[static_cast<size_t>(out.count)] = cols[i].kind;
+        out.widths[static_cast<size_t>(out.count)] = widths[i];
+        ++out.count;
+    }
+    return out;
+}
+
 MainRenderer::DetailsColumnLayout MainRenderer::DetailsColumns(
     const D2D1_RECT_F& pane_bounds, const PaneViewModel& vm) const {
     if (vm.this_pc_columns && !vm.is_search && !vm.column_strip.Active())
         return ThisPcColumns(pane_bounds, vm);
+    if (vm.media_columns && !vm.is_search && !vm.column_strip.Active())
+        return MediaColumns(pane_bounds, vm);
     if (vm.column_strip.Active() && !vm.is_search) {
         // Column view: one name column, like the columns beside it.
         DetailsColumnLayout name_only = DetailsColumns(pane_bounds, DetailsColumnWidths{}, false, {});
@@ -2585,8 +2669,15 @@ void MainRenderer::DrawMorphFrom(const PaneViewModel& vm, const motion::ViewMorp
                     }
                     break;
                 }
-                default:
+                default: {
+                    const ColumnKind media_kind = columns.kinds[static_cast<size_t>(col)];
+                    if (!IsMediaColumn(media_kind) || !vm.media_cell) break;
+                    const std::wstring media_text = vm.media_cell(src, MediaSortColumn(media_kind));
+                    draw(media_text.empty() ? std::wstring(L"\u2014") : media_text, left, avail,
+                         media_kind == ColumnKind::MediaDuration || media_kind == ColumnKind::MediaFps
+                             ? DWRITE_TEXT_ALIGNMENT_TRAILING : DWRITE_TEXT_ALIGNMENT_LEADING);
                     break;
+                }
                 }
             }
         }
@@ -3409,8 +3500,9 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
         if (pane_index >= 0 && pane_index < static_cast<int>(painted_columns_.size())) {
             uint32_t mask = columns.two_line ? (1u << 8) : 0u;
             for (int col = 0; col < columns.count; ++col) {
-                // This PC's 总大小 is no global column (and bit 8 is two_line).
-                if (columns.kinds[static_cast<size_t>(col)] == ColumnKind::Total) continue;
+                // This PC's 总大小 and the media columns are no global columns
+                // (and bit 8 is two_line).
+                if (columns.kinds[static_cast<size_t>(col)] >= ColumnKind::Total) continue;
                 mask |= 1u << static_cast<uint32_t>(columns.kinds[static_cast<size_t>(col)]);
             }
             painted_columns_[static_cast<size_t>(pane_index)] = mask;
@@ -3506,6 +3598,14 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
             case ColumnKind::Total:   // This PC: display-only
                 drawCol(pulse::l10n::Get(pulse::l10n::StringId::ColumnTotalSize), SortColumn::Name, cw, true, false);
                 break;
+            case ColumnKind::MediaTaken: case ColumnKind::MediaDims: case ColumnKind::MediaCamera:
+            case ColumnKind::MediaTitle: case ColumnKind::MediaArtist: case ColumnKind::MediaAlbum:
+            case ColumnKind::MediaDuration: case ColumnKind::MediaFps: {
+                const ColumnKind media_kind = columns.kinds[static_cast<size_t>(col)];
+                drawCol(MediaColumnLabel(media_kind, pane.media_columns), MediaSortColumn(media_kind), cw,
+                        media_kind == ColumnKind::MediaDuration || media_kind == ColumnKind::MediaFps);
+                break;
+            }
             case ColumnKind::Created:
                 drawCol(pulse::l10n::Get(pulse::l10n::StringId::ColumnCreated), SortColumn::Created, cw, false);
                 break;
@@ -3570,6 +3670,7 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
             case ColumnKind::Accessed: b.name = pulse::l10n::Get(pulse::l10n::StringId::ColumnAccessed); break;
             case ColumnKind::Status: b.name = pulse::l10n::Get(pulse::l10n::StringId::ColumnStatus); break;
             case ColumnKind::Total: b.name = pulse::l10n::Get(pulse::l10n::StringId::ColumnTotalSize); break;
+            default: b.name = MediaColumnLabel(columns.kinds[static_cast<size_t>(active_divider)], pane.media_columns); break;
             }
         } else if (col_badge_.on && col_badge_.pane == pane_index) {
             col_badge_.on = false;
@@ -6071,6 +6172,17 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                             }
                             continue;
                         }
+                    }
+                    if (IsMediaColumn(detailsColumns.kinds[static_cast<size_t>(col)])) {
+                        // 媒体文件夹专用列: read off the UI thread; a dash until known.
+                        const ColumnKind media_kind = detailsColumns.kinds[static_cast<size_t>(col)];
+                        static const std::wstring kMediaDash = L"\u2014";
+                        const std::wstring media_text =
+                            vm.media_cell ? vm.media_cell(src, MediaSortColumn(media_kind)) : std::wstring();
+                        draw_detail_text(media_text.empty() ? kMediaDash : fit(media_text, avail), left, avail,
+                                         media_kind == ColumnKind::MediaDuration || media_kind == ColumnKind::MediaFps
+                                             ? DWRITE_TEXT_ALIGNMENT_TRAILING : DWRITE_TEXT_ALIGNMENT_LEADING);
+                        continue;
                     }
                     switch (detailsColumns.kinds[static_cast<size_t>(col)]) {
                     case ColumnKind::Path: {

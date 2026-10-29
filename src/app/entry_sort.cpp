@@ -101,6 +101,8 @@ int ItemNameCompare(const fs::DirEntry& a, const fs::DirEntry& b,
 std::atomic<FolderSortMode> g_folder_sort_mode{FolderSortMode::FoldersFirst};
 // -1: no ScopedFolderSortMode on this thread.
 thread_local int t_folder_sort_mode = -1;
+std::atomic<MediaSortKeySource> g_media_sort_keys{nullptr};
+thread_local const std::wstring* t_media_sort_folder = nullptr;
 
 } // namespace
 
@@ -124,6 +126,19 @@ ScopedFolderSortMode::~ScopedFolderSortMode() {
     t_folder_sort_mode = previous_;
 }
 
+void SetMediaSortKeySource(MediaSortKeySource source) noexcept {
+    g_media_sort_keys.store(source, std::memory_order_release);
+}
+
+ScopedMediaSortFolder::ScopedMediaSortFolder(const std::wstring& folder) noexcept
+    : previous_(t_media_sort_folder) {
+    t_media_sort_folder = &folder;
+}
+
+ScopedMediaSortFolder::~ScopedMediaSortFolder() {
+    t_media_sort_folder = previous_;
+}
+
 bool EntryLess(const fs::DirEntry& a, const fs::DirEntry& b,
                ui::SortColumn col, ui::SortDirection dir) {
     if (const EntryGrouping* grouping = CurrentEntryGrouping()) {
@@ -142,7 +157,8 @@ struct SizeKey {
 
 bool Less(const fs::DirEntry& a, const fs::DirEntry& b, ui::SortColumn col,
           ui::SortDirection dir, FolderSortMode folders, const SizeKey* ka, const SizeKey* kb,
-          const std::string* na = nullptr, const std::string* nb = nullptr) {
+          const std::string* na = nullptr, const std::string* nb = nullptr,
+          const MediaSortKey* ma = nullptr, const MediaSortKey* mb = nullptr) {
     const bool a_folder = a.is_dir || (!a.link_target.empty() && a.link_target_is_dir);
     const bool b_folder = b.is_dir || (!b.link_target.empty() && b.link_target_is_dir);
     // FoldersFirst pins folders above the direction flip below; FollowDirection
@@ -168,6 +184,18 @@ bool Less(const fs::DirEntry& a, const fs::DirEntry& b, ui::SortColumn col,
             };
             const double va = key(a), vb = key(b);
             cmp = va < vb ? -1 : va > vb ? 1 : 0;
+        }
+        if (cmp == 0) cmp = ItemNameCompare(a, b, na, nb);
+        if (dir == ui::SortDirection::Desc) cmp = -cmp;
+        return cmp < 0;
+    }
+    if (col >= ui::SortColumn::MediaTaken) {
+        if (ma && mb) {
+            if (ma->known != mb->known) return ma->known;
+            if (ma->known) {
+                if (!ma->text.empty() || !mb->text.empty()) cmp = NameCompare(ma->text, mb->text);
+                if (cmp == 0) cmp = ma->number < mb->number ? -1 : ma->number > mb->number ? 1 : 0;
+            }
         }
         if (cmp == 0) cmp = ItemNameCompare(a, b, na, nb);
         if (dir == ui::SortDirection::Desc) cmp = -cmp;
@@ -211,6 +239,8 @@ bool Less(const fs::DirEntry& a, const fs::DirEntry& b, ui::SortColumn col,
     case ui::SortColumn::Path:
         cmp = _wcsicmp(a.full_path.c_str(), b.full_path.c_str());
         if (cmp == 0) cmp = ItemNameCompare(a, b, na, nb);
+        break;
+    default:  // Media*: above
         break;
     }
     if (dir == ui::SortDirection::Desc) cmp = -cmp;
@@ -259,6 +289,13 @@ void SortRows(std::vector<fs::DirEntry>& entries, ui::SortColumn col, ui::SortDi
         }
     }
     const bool keyed = !name_keys.empty();
+    std::vector<MediaSortKey> media_keys;
+    if (col >= ui::SortColumn::MediaTaken && t_media_sort_folder) {
+        if (const MediaSortKeySource source = g_media_sort_keys.load(std::memory_order_acquire))
+            source(*t_media_sort_folder, entries, col, media_keys);
+        if (media_keys.size() != n) media_keys.clear();
+    }
+    const bool media = !media_keys.empty();
     std::vector<size_t> order(n);
     std::iota(order.begin(), order.end(), size_t{0});
     const EntryGrouping* grouping = CurrentEntryGrouping();
@@ -273,7 +310,8 @@ void SortRows(std::vector<fs::DirEntry>& entries, ui::SortColumn col, ui::SortDi
         }
         return Less(a, b, col, dir, mode,
                     sizes ? &size_keys[x] : nullptr, sizes ? &size_keys[y] : nullptr,
-                    keyed ? &name_keys[x] : nullptr, keyed ? &name_keys[y] : nullptr);
+                    keyed ? &name_keys[x] : nullptr, keyed ? &name_keys[y] : nullptr,
+                    media ? &media_keys[x] : nullptr, media ? &media_keys[y] : nullptr);
     });
     std::vector<fs::DirEntry> sorted;
     sorted.reserve(n);

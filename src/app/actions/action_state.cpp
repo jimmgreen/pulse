@@ -79,6 +79,14 @@ const char* SortName(ui::SortColumn column) {
     case ui::SortColumn::Path: return "path";
     case ui::SortColumn::Created: return "created";
     case ui::SortColumn::Accessed: return "accessed";
+    case ui::SortColumn::MediaTaken: return "date_taken";
+    case ui::SortColumn::MediaDims: return "dimensions";
+    case ui::SortColumn::MediaCamera: return "camera";
+    case ui::SortColumn::MediaTitle: return "title";
+    case ui::SortColumn::MediaArtist: return "artist";
+    case ui::SortColumn::MediaAlbum: return "album";
+    case ui::SortColumn::MediaDuration: return "length";
+    case ui::SortColumn::MediaFps: return "frame_rate";
     }
     return "name";
 }

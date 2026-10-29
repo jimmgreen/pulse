@@ -76,6 +76,8 @@
 #include "entry_sort.h"
 #include "drop_staging.h"
 #include "folder_sizes_ui.h"
+#include "media_columns_ui.h"
+#include "media_props.h"
 #include "saved_search.h"
 #include "search_query.h"
 #include "settings_controller.h"
@@ -1421,6 +1423,8 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         s->renderer.SetRowActions(app::RowActionMask(s->ctxMenuPrefs.builtin_hidden,
             s->ctxMenuPrefs.BuiltinOrder(app::BuiltinMenuSurface::RowButtons)));
         s->renderer.SetThumbnailBadges(s->appPrefs.list_thumbnail_badges);
+        app::InstallMediaColumns();
+        app::SetMediaColumnsEnabled(s->appPrefs.media_columns);
         s->renderer.SetMtimeHint(app::MtimeHintFromPrefs(s->appPrefs));
         s->renderer.SetItemClick(s->appPrefs.single_click_open, s->appPrefs.name_highlight, s->appPrefs.item_checkboxes);
         app::SetFolderSortMode(app::FolderSortModeFromInt(s->appPrefs.folder_sort_mode));
@@ -2298,6 +2302,13 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             }
             // New totals re-sort Size-ordered listings, paced (#58).
             if (folderSizeResortWaiting) folderSizeResortWaiting = ResortForFolderSizes(*s);
+            // 媒体文件夹专用列: values came back; repaint, re-sort media-ordered listings.
+            if (const uint64_t media = app::media::Revision(); media != s->mediaPropsRevision) {
+                s->mediaPropsRevision = media;
+                s->mediaResortWaiting = true;
+                dirty = true;
+            }
+            if (s->mediaResortWaiting) s->mediaResortWaiting = ResortForMediaProps(*s);
             if (DrainDirNotifies(*s)) {
                 s->uiTimerPacer.NoteActivity(GetTickCount64());
                 SyncUiTimerRate(*s, hwnd, IsWindowVisible(hwnd) && !IsIconic(hwnd));

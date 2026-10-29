@@ -1357,6 +1357,9 @@ void SettingsController::ToggleUi(int index) {
     } else if (index == 34) {
         prefs_->list_thumbnail_badges = !prefs_->list_thumbnail_badges;
         SaveAndApply(SettingsEffect::ListStyle);
+    } else if (index == 80) {
+        prefs_->media_columns = !prefs_->media_columns;
+        SaveAndApply(SettingsEffect::ListStyle);
     } else if (index == 36) {
         prefs_->menu_acrylic = !prefs_->menu_acrylic;
         SaveAndApply(SettingsEffect::MenuMaterial);

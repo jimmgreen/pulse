@@ -294,8 +294,8 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             }
             if(ContainsPt(lay.performance_row,x,y)) {r.region=HitTestResult::SettingsToggle;r.index=4;return r;}
             if(ContainsPt(lay.menu_acrylic_row,x,y)) {r.region=HitTestResult::SettingsToggle;r.index=36;return r;}
-            for(int list_row=0;list_row<6;++list_row)
-                if(ContainsPt(lay.list_style_row[list_row],x,y)) {r.region=HitTestResult::SettingsToggle;r.index=list_row<3 ? 17+list_row : (list_row==3 ? 22 : list_row==4 ? 33 : 34);return r;}
+            for(int list_row=0;list_row<7;++list_row)
+                if(ContainsPt(lay.list_style_row[list_row],x,y)) {r.region=HitTestResult::SettingsToggle;r.index=list_row<3 ? 17+list_row : (list_row==3 ? 22 : list_row==4 ? 33 : list_row==5 ? 34 : 80);return r;}
             // 鼠标与选择 (the rows hidden without single-click are empty rects).
             for(int i=0;i<2;++i) {
                 if(ContainsPt(lay.click_open_row[i],x,y)) {r.region=HitTestResult::SettingsClickMode;r.index=i;return r;}
@@ -1588,9 +1588,10 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                     return out;
                 }
             }
-            // This PC's columns are fitted to its drives and not resizable:
+            // This PC's and media folders' columns have fixed widths:
             // a drag would write the global column widths.
-            for (int divider = 0; divider < columns.count - 1 && !paneVm.this_pc_columns; ++divider) {
+            for (int divider = 0; divider < columns.count - 1 && !paneVm.this_pc_columns && !paneVm.media_columns;
+                 ++divider) {
                 if (std::abs(x - columns.DividerX(divider)) <= 4.0f * scale_) {
                     out.region = HitTestResult::ColumnDivider;
                     out.index = divider;
@@ -1613,6 +1614,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             case ColumnKind::Accessed: out.column = SortColumn::Accessed; break;
             case ColumnKind::Status: out.region = HitTestResult::Pane; break; // display-only
             case ColumnKind::Total: out.region = HitTestResult::Pane; break;  // This PC: display-only
+            default: out.column = MediaSortColumn(columns.kinds[static_cast<size_t>(col)]); break;
             }
             return out;
         }

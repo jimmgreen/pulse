@@ -556,6 +556,8 @@ struct AppState : AppCoreOwner {
     const app::LayoutTab* tabFlashKey = nullptr;
     ULONGLONG tabFlashAt = 0;
     uint64_t tagGroupsRevision = 0;
+    uint64_t mediaPropsRevision = 0;  // media::Revision this window has painted
+    bool mediaResortWaiting = false;  // a media-column re-sort is waiting (ResortForMediaProps)
     uint64_t cloudSyncRevision = 0;  // CloudSyncProbe answers this window has painted  // tag catalog revision last published for grouping
     float addressSearchAnimation = 0.0f;
     float addressScopeAnimation = 0.0f;

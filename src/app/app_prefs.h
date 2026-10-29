@@ -61,6 +61,7 @@ struct AppPrefs {
     bool list_selection_outline = false; // accent outline around selected items (#78)
     // Grid thumbnails: default-program badge, plus playing time on videos.
     bool list_thumbnail_badges = true;
+    bool media_columns = true;          // 媒体文件夹使用专用列 (media_columns_ui.h)
     // 修改时间提示 (ui/mtime_hint.h): 0 off, 1 dots, 2 bars, 3 text only.
     int list_mtime_hint = 1;
     int list_mtime_range = 7;         // days: 1, 3, 7, 30
