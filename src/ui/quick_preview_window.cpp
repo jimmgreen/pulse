@@ -2975,6 +2975,10 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         }
+        if (video_.active() && !VideoPreview::IsAudio(item_.path)) {
+            TogglePlayback();   // a click on the picture pauses / resumes, like K
+            return 0;
+        }
         SetCapture(hwnd_);
         if (native_kind_ == NativeKind::Bitmap && CanPanImage()) {
             panning_ = true;
@@ -3034,6 +3038,12 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
                 PagesMouseDown(point);  // fast clicks in the strip keep jumping
                 InvalidateRect(hwnd_, nullptr, FALSE);
             }
+            return 0;
+        }
+        if (video_.active() && !VideoPreview::IsAudio(item_.path) && !CodecCardClick(point) &&
+            point.x >= content.left && point.x < content.right &&
+            point.y >= content.top && point.y < content.bottom) {
+            TogglePlayback();   // the second click of a fast pair is a click too
             return 0;
         }
         if (native_kind_ == NativeKind::Bitmap &&

@@ -4642,7 +4642,7 @@ PreviewWindowSection	IDS_PREVIEW_WINDOW_SECTION	5913	预览窗口	Preview window
 PreviewSizeTitle	IDS_PREVIEW_SIZE_TITLE	5914	打开时的大小	Size when it opens	開啟時的大小
 PreviewSizeDesc	IDS_PREVIEW_SIZE_DESC	5915	适应内容按图片或视频的比例开窗；标题栏也能切换	Fit content follows the picture or video; switch from its title bar too	適應內容按圖片或影片的比例開窗；標題列也能切換
 PreviewSpaceTitle	IDS_PREVIEW_SPACE_TITLE	5916	空格键（视频和动图）	Space on videos and animations	空白鍵（影片和動圖）
-PreviewSpaceDesc	IDS_PREVIEW_SPACE_DESC	5917	选「关闭预览」时，按 K 暂停	With Close preview, press K to pause	選「關閉預覽」時，按 K 暫停
+PreviewSpaceDesc	IDS_PREVIEW_SPACE_DESC	5917	选「关闭预览」时，按 K 或单击画面暂停	With Close preview, press K or click the picture to pause	選「關閉預覽」時，按 K 或按一下畫面暫停
 PreviewSpaceClose	IDS_PREVIEW_SPACE_CLOSE	5918	关闭预览	Close preview	關閉預覽
 PreviewSpacePlay	IDS_PREVIEW_SPACE_PLAY	5919	播放 / 暂停	Play / pause	播放 / 暫停
 PreviewLoopTitle	IDS_PREVIEW_LOOP_TITLE	5920	循环播放	Loop	循環播放
