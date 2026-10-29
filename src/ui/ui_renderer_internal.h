@@ -18,6 +18,7 @@
 #include "preview_format_catalog.h"
 #include "link_type_text.h"
 #include "recent_day_label.h"
+#include "drive_capacity.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -374,11 +375,11 @@ void ClearTextWidthCache() {
             entry.drive_used = static_cast<float>(
                 static_cast<double>(source.drive_total - free_bytes) /
                 static_cast<double>(source.drive_total));
-            wchar_t space[128]{};
-            swprintf_s(space, pulse::l10n::Get(pulse::l10n::StringId::PickerDriveFreeFormat).c_str(),
-                       pulse::format::ByteSize(free_bytes).c_str(),
-                       pulse::format::ByteSize(source.drive_total).c_str());
-            entry.drive_space_text = space;
+            entry.drive_free = free_bytes;
+            DriveSpaceText space = DriveTileSpaceText(free_bytes, source.drive_total);
+            entry.drive_space_text = std::move(space.text);
+            entry.drive_space_bold_start = static_cast<uint32_t>(space.bold_start);
+            entry.drive_space_bold_length = static_cast<uint32_t>(space.bold_length);
         }
         entry.drive_mounted = source.drive_type != 0 && source.drive_remote_like;
         entry.net_kind = source.net_kind;

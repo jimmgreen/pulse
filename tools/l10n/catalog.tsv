@@ -758,7 +758,6 @@ PickerWillSelect	IDS_PICKER_WILL_SELECT	2442	将选择：	Will select: 	將選�
 PickerPathPlaceholder	IDS_PICKER_PATH_PLACEHOLDER	2443	输入路径，按 Enter 前往	Type a path and press Enter	輸入路徑，按 Enter 前往
 PickerLoading	IDS_PICKER_LOADING	2444	正在加载…	Loading…	正在載入…
 PickerTitleFolder	IDS_PICKER_TITLE_FOLDER	2445	选择文件夹	Choose a folder	選擇資料夾
-PickerDriveFreeFormat	IDS_PICKER_DRIVE_FREE_FORMAT	2446	可用 %s，共 %s	%s free of %s	可用 %s，共 %s
 PickerPickImageHint	IDS_PICKER_PICK_IMAGE_HINT	2447	请选择一张图片	Select a picture	請選擇一張圖片
 SettingsAutoUpdate	IDS_SETTINGS_AUTO_UPDATE	2449	自动检查更新	Check for updates automatically	自動檢查更新
 SettingsAutoUpdateDesc	IDS_SETTINGS_AUTO_UPDATE_DESC	2450	关闭后不再在后台检查，也不弹出更新提醒	When off, no background checks or update reminders	關閉後不再在背景檢查，也不彈出更新提醒
@@ -4622,3 +4621,7 @@ AsstThinkNone	IDS_ASST_THINK_NONE	5892	{model} 不支持思考，所以没有思
 ProvMimo	IDS_PROV_MIMO	5893	小米 MiMo	Xiaomi MiMo	小米 MiMo
 ProvSubMimo	IDS_PROV_SUB_MIMO	5894	小米开放平台	Xiaomi MiMo platform	小米開放平台
 AsstUrlMimo	IDS_ASST_URL_MIMO	5895	{url}（默认）· tp- 开头的 Token Plan Key 会自动改用套餐地址	{url} (default) · Token Plan keys (tp-) use their own address automatically	{url}（預設）· tp- 開頭的 Token Plan Key 會自動改用套餐位址
+DriveFreeOfTotal	IDS_DRIVE_FREE_OF_TOTAL	5896	{free} 可用 · 共 {total}	{free} free · {total} total	{free} 可用 · 共 {total}
+DriveOnlyLeft	IDS_DRIVE_ONLY_LEFT	5897	仅剩 {free} · 共 {total}	Only {free} left · {total} total	僅剩 {free} · 共 {total}
+DriveSideFree	IDS_DRIVE_SIDE_FREE	5898	{free} 可用	{free} free	{free} 可用
+DriveSideOnlyLeft	IDS_DRIVE_SIDE_ONLY_LEFT	5899	仅剩 {free}	Only {free} left	僅剩 {free}

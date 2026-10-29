@@ -599,6 +599,7 @@ struct SidebarEntry {
     std::wstring path;
     bool is_drive = false;
     float used_ratio = 0.0f;
+    uint64_t free_bytes = ~uint64_t{0};  // drives: bytes left (all ones = unknown)
     bool expandable = false;
     // Built-in quick-access link (BuiltinQuickAccess), -1 for user entries.
     // The quick-access menu toggles these one by one.

@@ -10,6 +10,7 @@
 #include "render_caches.h"
 #include "archive_preview.h"
 #include "name_highlight.h"
+#include "drive_capacity.h"
 #include "preview_handler_host.h"
 #include "video_preview.h"
 #include "ui_motion.h"
@@ -879,6 +880,10 @@ private:
                       D2D1_DRAW_TEXT_OPTIONS options = D2D1_DRAW_TEXT_OPTIONS_CLIP);
     // The extension inside a type chip, centered in its box in every text
     // rendering mode (Auto draws with LumaText, Sharp / Smooth with DirectWrite).
+    // This PC tiles: "75.2 GB 可用 · 共 476.6 GB" under the capacity bar, the
+    // free size semibold (and the whole "仅剩 X" in red once the drive is).
+    void DrawDriveSpaceLine(ID2D1DeviceContext* dc, const ListEntryView& entry, CapacityLevel level,
+                            const Theme& theme, float x, float y, float width, float height, bool cut);
     void DrawTypeChipLabel(ID2D1DeviceContext* dc, const std::wstring& chip, const D2D1_RECT_F& box,
                            const D2D1_COLOR_F& ink, const D2D1_COLOR_F& background);
     void DrawFolderIcon(float x, float y, float size, const Theme& theme,
@@ -1057,6 +1062,11 @@ private:
         uint64_t start = 0;
         int dir = 0;   // +1 deeper, -1 to an ancestor, 0 elsewhere (rises 6 px)
         bool pending = false;
+        // This PC tiles: the capacity bars grow in once per visit, after the
+        // listing lands (start 0 = idle). Its own path, so the first paint counts.
+        std::wstring capacity_path;
+        uint64_t capacity_start = 0;
+        bool capacity_pending = false;
     };
     std::array<NavEnter, 8> nav_enter_{};
     // Motion v2 "colresize": double-clicking a divider springs the columns
@@ -1284,6 +1294,8 @@ private:
     mutable ComPtr<ID2D1SolidColorBrush> brTagDot_;
     mutable ComPtr<ID2D1SolidColorBrush> brDanger_;
     mutable ComPtr<ID2D1SolidColorBrush> brDangerHover_;
+    mutable ComPtr<ID2D1SolidColorBrush> brCapacityInk_;     // This PC tiles: percent, "仅剩 X"
+    mutable ComPtr<ID2D1SolidColorBrush> brCapacityStrong_;  // This PC tiles: the free size
     mutable ComPtr<ID2D1SolidColorBrush> brScrollbar_;
     mutable ComPtr<ID2D1SolidColorBrush> brIconFolder_;
     mutable ComPtr<ID2D1SolidColorBrush> brIconFile_;

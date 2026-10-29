@@ -19,6 +19,7 @@
 #include "../common/display_path.h"
 #include "../common/text_format.h"
 #include "../fs/drive_label.h"
+#include "../ui/drive_capacity.h"
 #include "../ops/clipboard.h"
 #include "../ops/source_listing.h"
 #include <commctrl.h>
@@ -1436,16 +1437,17 @@ void RefreshSidebarDriveCapacity(std::vector<SidebarEntry>& drives) {
         ULARGE_INTEGER free_bytes{}, total_bytes{};
         entry.detail.clear();
         entry.used_ratio = 0.0f;
+        entry.free_bytes = ~uint64_t{0};
         entry.danger = false;
         if (!GetDiskFreeSpaceExW(entry.path.c_str(), &free_bytes, &total_bytes, nullptr))
             continue;
         const uint64_t total = total_bytes.QuadPart;
         const uint64_t free = std::min(free_bytes.QuadPart, total_bytes.QuadPart);
-        entry.detail = pulse::format::ByteSize(free, false, pulse::format::ByteSizeStyle::Compact)
-            + L" / " + pulse::format::ByteSize(total, false, pulse::format::ByteSizeStyle::Compact);
+        entry.detail = ui::DriveSidebarDetail(free, total);
         if (total > 0) {
             entry.used_ratio = static_cast<float>(static_cast<double>(total - free) / static_cast<double>(total));
-            entry.danger = static_cast<double>(free) / static_cast<double>(total) < 0.10;
+            entry.free_bytes = free;
+            entry.danger = ui::CapacityLevelFor(entry.used_ratio, free) == ui::CapacityLevel::Critical;
         }
     }
     if (changed) SetThreadErrorMode(old_mode, nullptr);
@@ -1673,6 +1675,7 @@ static ui::SidebarGroup ConvertGroup(const std::wstring& header, const std::vect
         it.path = e.path;
         it.is_drive = e.is_drive;
         it.used_ratio = e.used_ratio;
+        it.free_bytes = e.free_bytes;
         it.badge = e.badge;
         it.badge_color = ui::HexColor(e.badge_rgb);
         it.is_tag = e.is_tag;

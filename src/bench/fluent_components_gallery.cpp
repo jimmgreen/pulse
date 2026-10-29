@@ -288,10 +288,10 @@ bool DrawCompositeGallery(Compositor& compositor, bool dark, bool high_contrast,
     painter.DrawSidebarSectionHeader({.bounds = Rect(10, 274, 216, 26), .text = L"DRIVES",
                                       .state = State(), .expanded = true});
     painter.DrawDriveSidebarItem({.bounds = Rect(10, 302, 216, 54), .name = L"System (C:)",
-                                  .detail = L"120G / 512G", .glyph = L"\xE7F8", .capacity = 0.24f,
+                                  .detail = L"392G free", .glyph = L"\xE7F8", .capacity = 0.24f,
                                   .icon_color = HexColor(0x60A5FA)});
     painter.DrawDriveSidebarItem({.bounds = Rect(10, 360, 216, 54), .name = L"Data (D:)",
-                                  .detail = L"640G / 1TB", .glyph = L"\xE7F8", .capacity = 0.64f,
+                                  .detail = L"120G free", .glyph = L"\xE7F8", .capacity = 0.88f,
                                   .state = State(true), .icon_color = HexColor(0x34D399)});
     painter.DrawSidebarSectionHeader({.bounds = Rect(10, 422, 216, 26), .text = L"TAGS",
                                       .state = State(), .expanded = true});

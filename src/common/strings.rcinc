@@ -1261,7 +1261,6 @@ BEGIN
     IDS_PICKER_PATH_PLACEHOLDER "输入路径，按 Enter 前往"
     IDS_PICKER_LOADING "正在加载…"
     IDS_PICKER_TITLE_FOLDER "选择文件夹"
-    IDS_PICKER_DRIVE_FREE_FORMAT "可用 %s，共 %s"
     IDS_PICKER_PICK_IMAGE_HINT "请选择一张图片"
     IDS_LANGUAGE_ZH_TW "繁體中文"
     IDS_SETTINGS_AUTO_UPDATE "自动检查更新"
@@ -4597,6 +4596,10 @@ BEGIN
     IDS_PROV_MIMO "小米 MiMo"
     IDS_PROV_SUB_MIMO "小米开放平台"
     IDS_ASST_URL_MIMO "{url}（默认）· tp- 开头的 Token Plan Key 会自动改用套餐地址"
+    IDS_DRIVE_FREE_OF_TOTAL "{free} 可用 · 共 {total}"
+    IDS_DRIVE_ONLY_LEFT "仅剩 {free} · 共 {total}"
+    IDS_DRIVE_SIDE_FREE "{free} 可用"
+    IDS_DRIVE_SIDE_ONLY_LEFT "仅剩 {free}"
 END
 
 LANGUAGE 0x09, 0x01
@@ -5857,7 +5860,6 @@ BEGIN
     IDS_PICKER_PATH_PLACEHOLDER "Type a path and press Enter"
     IDS_PICKER_LOADING "Loading…"
     IDS_PICKER_TITLE_FOLDER "Choose a folder"
-    IDS_PICKER_DRIVE_FREE_FORMAT "%s free of %s"
     IDS_PICKER_PICK_IMAGE_HINT "Select a picture"
     IDS_LANGUAGE_ZH_TW "繁體中文"
     IDS_SETTINGS_AUTO_UPDATE "Check for updates automatically"
@@ -9193,6 +9195,10 @@ BEGIN
     IDS_PROV_MIMO "Xiaomi MiMo"
     IDS_PROV_SUB_MIMO "Xiaomi MiMo platform"
     IDS_ASST_URL_MIMO "{url} (default) · Token Plan keys (tp-) use their own address automatically"
+    IDS_DRIVE_FREE_OF_TOTAL "{free} free · {total} total"
+    IDS_DRIVE_ONLY_LEFT "Only {free} left · {total} total"
+    IDS_DRIVE_SIDE_FREE "{free} free"
+    IDS_DRIVE_SIDE_ONLY_LEFT "Only {free} left"
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.

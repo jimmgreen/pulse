@@ -1336,6 +1336,8 @@ add_executable(pulse_ai_json_test src/bench/ai_json_test.cpp src/common/json_val
 add_executable(pulse_model_thinking_test src/bench/model_thinking_test.cpp src/app/ai_providers.cpp
     src/app/ai_settings.cpp src/common/json_value.cpp)
 target_link_libraries(pulse_model_thinking_test PRIVATE pulse_localization pulse_runtime_log shell32 advapi32)
+add_executable(pulse_drive_capacity_test src/bench/drive_capacity_test.cpp src/bench/localization_test.rc)
+target_link_libraries(pulse_drive_capacity_test PRIVATE pulse_localization)
 add_executable(pulse_ai_broker_test src/bench/ai_broker_test.cpp src/app/ai_broker.cpp src/app/ai_settings.cpp
     src/app/ai_status.cpp src/app/ai_activity_log.cpp src/app/ai_pack.cpp src/app/content_pack.cpp src/app/pack_installer.cpp
     src/app/update_installer.cpp src/app/update_transport.cpp src/app/update_download_cleanup.cpp

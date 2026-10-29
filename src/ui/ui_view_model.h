@@ -114,9 +114,13 @@ struct ListEntryView {
     D2D1_COLOR_F tag_dots[3]{};
     int tag_dot_count = 0;
     std::wstring snippet;
-    // This PC tiles: used fraction (-1 = unknown) and "X free of Y".
+    // This PC tiles: used fraction (-1 = unknown), bytes left and
+    // "75.2 GB 可用 · 共 476.6 GB" with the free size drawn semibold.
     float drive_used = -1.0f;
+    uint64_t drive_free = 0;
     std::wstring drive_space_text;
+    uint32_t drive_space_bold_start = 0;
+    uint32_t drive_space_bold_length = 0;
     bool drive_mounted = false;  // This PC: mapped / user-mode mount (网络盘 chip in tiles)
     uint32_t launcher_rgb = 0;   // This PC program icon (网盘程序入口): brand tint, 0 = not one
     uint8_t net_kind = 0;        // pulse:networks device row: 1 PC, 2 NAS, 3 Mac (own icon), 0 = not one
@@ -472,6 +476,7 @@ struct SidebarItem {
     std::wstring path;
     bool is_drive = false;
     float used_ratio = 0.0f;       // For drives: 0..1.
+    uint64_t free_bytes = ~uint64_t{0};  // For drives: bytes left (all ones = unknown).
     int indent = 0;
     bool status_dot = false;
     D2D1_COLOR_F status_color = {};

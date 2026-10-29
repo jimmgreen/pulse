@@ -755,7 +755,6 @@ enum class StringId : UINT {
     PickerPathPlaceholder = IDS_PICKER_PATH_PLACEHOLDER,
     PickerLoading = IDS_PICKER_LOADING,
     PickerTitleFolder = IDS_PICKER_TITLE_FOLDER,
-    PickerDriveFreeFormat = IDS_PICKER_DRIVE_FREE_FORMAT,
     PickerPickImageHint = IDS_PICKER_PICK_IMAGE_HINT,
     SettingsAutoUpdate = IDS_SETTINGS_AUTO_UPDATE,
     SettingsAutoUpdateDesc = IDS_SETTINGS_AUTO_UPDATE_DESC,
@@ -4607,6 +4606,10 @@ enum class StringId : UINT {
     ProvMimo = IDS_PROV_MIMO,
     ProvSubMimo = IDS_PROV_SUB_MIMO,
     AsstUrlMimo = IDS_ASST_URL_MIMO,
+    DriveFreeOfTotal = IDS_DRIVE_FREE_OF_TOTAL,
+    DriveOnlyLeft = IDS_DRIVE_ONLY_LEFT,
+    DriveSideFree = IDS_DRIVE_SIDE_FREE,
+    DriveSideOnlyLeft = IDS_DRIVE_SIDE_ONLY_LEFT,
 };
 
 bool IsLanguageId(std::wstring_view id) noexcept;

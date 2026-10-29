@@ -751,7 +751,6 @@
 #define IDS_PICKER_PATH_PLACEHOLDER                                                      2443
 #define IDS_PICKER_LOADING                                                               2444
 #define IDS_PICKER_TITLE_FOLDER                                                          2445
-#define IDS_PICKER_DRIVE_FREE_FORMAT                                                     2446
 #define IDS_PICKER_PICK_IMAGE_HINT                                                       2447
 #define IDS_SETTINGS_AUTO_UPDATE                                                         2449
 #define IDS_SETTINGS_AUTO_UPDATE_DESC                                                    2450
@@ -4615,5 +4614,9 @@
 #define IDS_PROV_MIMO                                                                    5893
 #define IDS_PROV_SUB_MIMO                                                                5894
 #define IDS_ASST_URL_MIMO                                                                5895
+#define IDS_DRIVE_FREE_OF_TOTAL                                                          5896
+#define IDS_DRIVE_ONLY_LEFT                                                              5897
+#define IDS_DRIVE_SIDE_FREE                                                              5898
+#define IDS_DRIVE_SIDE_ONLY_LEFT                                                         5899
 
 #endif  // PULSE_STRING_IDS_H

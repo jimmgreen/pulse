@@ -1259,7 +1259,6 @@ BEGIN
     IDS_PICKER_PATH_PLACEHOLDER "輸入路徑，按 Enter 前往"
     IDS_PICKER_LOADING "正在載入…"
     IDS_PICKER_TITLE_FOLDER "選擇資料夾"
-    IDS_PICKER_DRIVE_FREE_FORMAT "可用 %s，共 %s"
     IDS_PICKER_PICK_IMAGE_HINT "請選擇一張圖片"
     IDS_LANGUAGE_ZH_TW "繁體中文"
     IDS_SETTINGS_AUTO_UPDATE "自動檢查更新"
@@ -4595,4 +4594,8 @@ BEGIN
     IDS_PROV_MIMO "小米 MiMo"
     IDS_PROV_SUB_MIMO "小米開放平台"
     IDS_ASST_URL_MIMO "{url}（預設）· tp- 開頭的 Token Plan Key 會自動改用套餐位址"
+    IDS_DRIVE_FREE_OF_TOTAL "{free} 可用 · 共 {total}"
+    IDS_DRIVE_ONLY_LEFT "僅剩 {free} · 共 {total}"
+    IDS_DRIVE_SIDE_FREE "{free} 可用"
+    IDS_DRIVE_SIDE_ONLY_LEFT "僅剩 {free}"
 END

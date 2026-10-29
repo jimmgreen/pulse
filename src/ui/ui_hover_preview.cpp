@@ -765,13 +765,8 @@ void MainRenderer::DrawHoverFolderCard(const HoverPreviewView& view, const D2D1_
             text(l10n::Get(l10n::StringId::Of).c_str() + format::ByteSize(view.drive_total), head, compositor_->SmallFormat(),
                  palette.text_secondary, fluent::HorizontalAlignment::Right);
             const D2D1_RECT_F bar = D2D1::RectF(head.left, well.top + 33.0f * s, head.right, well.top + 41.0f * s);
-            fill(bar, 4.0f * s, palette.divider);
             const float fraction = static_cast<float>(static_cast<double>(used) / static_cast<double>(view.drive_total));
-            const bool low = view.drive_free * 10 < view.drive_total;  // under 10% left
-            if (fraction > 0.0f)
-                fill(D2D1::RectF(bar.left, bar.top, bar.left + (std::max)(8.0f * s, (bar.right - bar.left) * fraction),
-                                 bar.bottom),
-                     4.0f * s, low ? D2D1::ColorF(0xD1453B) : palette.accent);
+            painter_.DrawCapacityBar(bar, fraction, palette.accent, 1.0f, view.drive_free);
         } else {
             text(l10n::Get(l10n::StringId::CapacityUnknown).c_str(), head, compositor_->SmallFormat(), palette.text_secondary);
         }

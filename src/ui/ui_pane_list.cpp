@@ -108,6 +108,17 @@ static CloudSwapPose CloudSwapFor(const void* owner, const std::wstring& path, i
 }
 
 
+namespace {
+// This PC tiles: the capacity bar grows in over this long, once per visit.
+constexpr float kCapacityRevealMs = 700.0f;
+
+// This PC tiles: the bar follows the text column, up to 360 DIP, and stops
+// short of the tile's edge (and the scrollbar next to the right column).
+float DriveTileBarWidth(const D2D1_RECT_F& name_rect, float scale) {
+    return std::max(0.0f, std::min(name_rect.right - name_rect.left - 12.0f * scale, 360.0f * scale));
+}
+}  // namespace
+
 float MainRenderer::ListRowHeightDip(const PaneViewModel& vm) const {
     if (DetailsShowsSnippet(vm)) return std::max(row_height_dip_, kDetailsSnippetMinRowDip);
     return row_height_dip_;
@@ -692,6 +703,44 @@ float MainRenderer::TypeChipWidthDip(const std::wstring& chip) const {
         w = 8.0f * static_cast<float>(std::max<size_t>(chip.size(), 4));
     }
     return w + 2.0f * kTypeChipPadDip + kTypeChipGapDip;
+}
+
+void MainRenderer::DrawDriveSpaceLine(ID2D1DeviceContext* dc, const ListEntryView& entry, CapacityLevel level,
+                                      const Theme& theme, float x, float y, float width, float height, bool cut) {
+    const std::wstring& text = entry.drive_space_text;
+    if (!dc || !compositor_ || text.empty() || width <= 1.0f || height <= 0.0f) return;
+    const auto ink = [cut](const D2D1_COLOR_F& color) { return cut ? WithAlpha(color, 0.55f) : color; };
+    IDWriteTextFormat* format = compositor_->SmallFormat();
+    IDWriteFactory2* factory = compositor_->DwriteFactory();
+    MakeBrush(dc, ink(theme.text_secondary), brTextSecondary_);
+    const auto size = static_cast<UINT32>(text.size());
+    const UINT32 bold_start = std::min<UINT32>(entry.drive_space_bold_start, size);
+    const UINT32 bold_length = std::min<UINT32>(entry.drive_space_bold_length, size - bold_start);
+    ComPtr<IDWriteTextLayout> layout;
+    if (!format || !factory || bold_length == 0 ||
+        FAILED(factory->CreateTextLayout(text.c_str(), size, format, width, height, &layout)) || !layout.get()) {
+        DrawTextEndEllipsis(compositor_, format, brTextSecondary_.get(), text, x, y, width, height);
+        return;
+    }
+    layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    if (MeasureTextWidth(factory, format, text) > width) {
+        DWRITE_TRIMMING trimming{ DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0 };
+        ComPtr<IDWriteInlineObject> ellipsis;
+        factory->CreateEllipsisTrimmingSign(layout.get(), &ellipsis);
+        layout->SetTrimming(&trimming, ellipsis.get());
+    }
+    const DWRITE_TEXT_RANGE bold{bold_start, bold_length};
+    layout->SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD, bold);
+    if (level == CapacityLevel::Critical) {
+        // "仅剩 14.7 GB" in red, the words before the size included.
+        MakeBrush(dc, ink(painter_.CapacityInk(level)), brCapacityStrong_);
+        layout->SetDrawingEffect(brCapacityStrong_.get(), DWRITE_TEXT_RANGE{0, bold_start + bold_length});
+    } else {
+        MakeBrush(dc, ink(theme.text), brCapacityStrong_);
+        layout->SetDrawingEffect(brCapacityStrong_.get(), bold);
+    }
+    compositor_->DrawTextLayout(D2D1::Point2F(x, y), layout.get(), brTextSecondary_.get(),
+                                D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
 void MainRenderer::DrawTypeChipLabel(ID2D1DeviceContext* dc, const std::wstring& chip,
@@ -4489,6 +4538,40 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             nav->start = 0;
         if (nav->start || nav->pending) RequestMotionFrame();
     }
+    // This PC tiles: the capacity bars grow from empty, once per visit.
+    float capacity_reveal = 1.0f;
+    if (nav) {
+        if (nav->capacity_path != vm.path) {
+            nav->capacity_path = vm.path;
+            nav->capacity_pending = vm.view_mode == ViewMode::Tiles && motion::SystemAnimationsEnabled() &&
+                                    !IsHighContrast();
+            nav->capacity_start = 0;
+        }
+        if (nav->capacity_pending && !vm.loading) {
+            nav->capacity_pending = false;
+            // Drives list first; a folder of files has none to grow.
+            const size_t probe = std::min<size_t>(entryCount, 64);
+            for (size_t k = 0; k < probe; ++k) {
+                const ListEntryView& probe_entry = MakeVisibleEntry(vm, k);
+                if (probe_entry.drive_used >= 0.0f && !probe_entry.device) {
+                    nav->capacity_start = motion_now_;
+                    break;
+                }
+            }
+        }
+        if (nav->capacity_pending) {
+            capacity_reveal = 0.0f;
+            RequestMotionFrame();
+        } else if (nav->capacity_start) {
+            const float t = static_cast<float>(motion_now_ - nav->capacity_start) / kCapacityRevealMs;
+            if (t >= 1.0f || vm.view_mode != ViewMode::Tiles) {
+                nav->capacity_start = 0;
+            } else {
+                capacity_reveal = motion::EaseOutCubic(t);
+                RequestMotionFrame();
+            }
+        }
+    }
     if (entryCount == 0) return;
     const D2D1_RECT_F viewport = D2D1::RectF(x, y, x + w, y + h);
     g_wall_notify = notify_hwnd_;  // the aspect probe repaints this window
@@ -5291,8 +5374,17 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                 else cloudState = 2;
             }
             const float cloudReserve = cloudState != 0 && !showRowActions ? 20.0f * scale_ : 0.0f;
+            // This PC tiles: the used percent ends the name row, over the bar's end.
+            const bool driveTile = vm.view_mode == ViewMode::Tiles && !e.device && e.drive_used >= 0.0f;
+            const std::wstring drivePercent = driveTile ? CapacityPercentText(e.drive_used) : std::wstring();
+            const float driveBarW = driveTile ? DriveTileBarWidth(nameRc, scale_) : 0.0f;
+            const float drivePercentW = driveTile
+                ? MeasureLayoutText(compositor_, compositor_->DwriteFactory(), compositor_->SmallFormat(), drivePercent)
+                : 0.0f;
             // A lone name column has no divider: it ends at the layout's right.
-            const float nameColRight = (vm.view_mode == ViewMode::Details
+            const float nameColRight = driveTile
+                ? std::max(nameRc.left, nameRc.left + driveBarW - drivePercentW - 8.0f * scale_)
+                : (vm.view_mode == ViewMode::Details
                 ? (stripRow ? detailsColumns.right : detailsColumns.DividerX(0) - margin_)
                 : nameRc.right) - (stripChevron ? 18.0f * scale_ : 0.0f) - cloudReserve;
             if (stripChevron) {
@@ -6055,16 +6147,21 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                 DrawTextEndEllipsis(dc, compositor_->DwriteFactory(), chip_fmt, brTextSecondary_.get(),
                     l10n::Get(l10n::StringId::MountedDriveNote), noteX, top,
                     std::max(0.0f, nameRc.right - noteX), chipH);
-            } else if (vm.view_mode == ViewMode::Tiles && e.drive_used >= 0.0f) {
-                // This PC tiles, as in File Explorer: usage bar, then free of total.
+            } else if (driveTile) {
+                // This PC tiles: name and used percent, the bar, then
+                // "75.2 GB 可用 · 共 476.6 GB" with the free size semibold.
                 const float textW = std::max(0.0f, nameRc.right - nameRc.left);
-                const float barTop = nameRc.top + 27.0f * scale_;
-                const D2D1_RECT_F bar{ nameRc.left, barTop,
-                    nameRc.left + std::min(textW, 240.0f * scale_), barTop + 6.0f * scale_ };
-                painter_.DrawCapacityBar(bar, e.drive_used, theme.accent);
-                DrawTextEndEllipsis(compositor_, compositor_->SmallFormat(),
-                    brTextSecondary_.get(), e.drive_space_text,
-                    nameRc.left, bar.bottom + 2.0f * scale_, textW, 20.0f * scale_);
+                const CapacityLevel level = CapacityLevelFor(e.drive_used, e.drive_free);
+                const D2D1_COLOR_F levelInk = painter_.CapacityInk(level);
+                MakeBrush(dc, cut ? WithAlpha(levelInk, 0.55f) : levelInk, brCapacityInk_);
+                DrawTextRect(dc, compositor_->SmallFormat(), brCapacityInk_.get(), drivePercent,
+                             nameRc.left + driveBarW - drivePercentW, nameRc.top + 1.0f * scale_,
+                             drivePercentW + 1.0f, 20.0f * scale_);
+                const float barTop = nameRc.top + 26.0f * scale_;
+                const D2D1_RECT_F bar{ nameRc.left, barTop, nameRc.left + driveBarW, barTop + 8.0f * scale_ };
+                painter_.DrawCapacityBar(bar, e.drive_used, theme.accent, capacity_reveal, e.drive_free);
+                DrawDriveSpaceLine(dc, e, level, theme, nameRc.left, bar.bottom + 3.0f * scale_, textW,
+                                   20.0f * scale_, cut);
             } else if (vm.view_mode == ViewMode::Tiles || vm.view_mode == ViewMode::Content) {
                 std::wstring meta = !e.snippet.empty() ? e.snippet : e.type_text;
                 if (e.snippet.empty() && !e.size_text.empty())

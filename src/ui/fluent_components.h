@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ui_compositor.h"
+#include "drive_capacity.h"
 
 #include <array>
 #include <cstddef>
@@ -346,6 +347,8 @@ struct DriveSidebarItemSpec {
     std::wstring_view detail;
     std::wstring_view glyph;
     float capacity = 0.0f;
+    // Bytes left, for the "under 1 GB" red (kCapacityUnknownFree: by percent only).
+    std::uint64_t free_bytes = kCapacityUnknownFree;
     ControlState state{};
     bool drop_target = false;
     bool skip_glyph = false;
@@ -550,8 +553,13 @@ public:
     D2D1_RECT_F SidebarItemIconRect(const D2D1_RECT_F& bounds, bool status_dot) const;
     D2D1_RECT_F DriveSidebarItemIconRect(const D2D1_RECT_F& bounds) const;
     void DrawDriveSidebarItem(const DriveSidebarItemSpec& spec);
-    // Drive usage track (sidebar drives, This PC tiles); 90% used turns danger.
-    void DrawCapacityBar(const D2D1_RECT_F& track, float capacity, D2D1_COLOR_F value_color);
+    // Drive usage track (sidebar drives, This PC tiles, phone storage, hover
+    // preview): a soft gradient in `value_color`, amber from 85% used and red
+    // from 95% (CapacityLevelFor). `reveal` 0..1 grows the fill in.
+    void DrawCapacityBar(const D2D1_RECT_F& track, float capacity, D2D1_COLOR_F value_color,
+                         float reveal = 1.0f, std::uint64_t free_bytes = kCapacityUnknownFree);
+    // The colour of a drive's numbers next to its bar (percent, "仅剩 X").
+    D2D1_COLOR_F CapacityInk(CapacityLevel level) const;
     void DrawPaneHeader(const PaneHeaderSpec& spec);
     void DrawColumnHeader(const ColumnHeaderSpec& spec);
     void DrawFileRowContent(const FileRowContentSpec& spec);
@@ -624,6 +632,9 @@ private:
     void StrokeElevationRect(const D2D1_RECT_F& bounds, float radius,
                              const D2D1_COLOR_F& border, const D2D1_COLOR_F& edge,
                              bool edge_on_top);
+    // A two-stop linear gradient brush from a small cache keyed by the colour
+    // pair; the caller sets its start and end points. Null if creation failed.
+    ID2D1LinearGradientBrush* CachedGradient(const D2D1_COLOR_F& from, const D2D1_COLOR_F& to);
     void EnsureTextFormats();
     void EnsureStrokeStyle();
     IDWriteTextFormat* BodyFormat() const noexcept;
@@ -651,7 +662,7 @@ private:
         D2D1_COLOR_F to{};
         ComPtr<ID2D1LinearGradientBrush> brush;
     };
-    std::array<GradientEntry, 8> gradient_cache_{};  // button edges, by colour pair
+    std::array<GradientEntry, 12> gradient_cache_{};  // button edges, capacity fills, by colour pair
     std::size_t gradient_next_ = 0;
     ComPtr<ID2D1StrokeStyle> round_stroke_;
     ComPtr<IDWriteTextFormat> body_format_;

@@ -4,6 +4,7 @@
 #include "folder_picker_dialog.h"
 
 #include "address_search_layout.h"
+#include "drive_capacity.h"
 #include "folder_picker_loader.h"
 #include "folder_picker_operations.h"
 #include "folder_picker_view.h"
@@ -96,9 +97,7 @@ std::vector<PickerPlace> KnownPlaces() {
 }
 
 std::wstring DriveDetail(uint64_t free, uint64_t total) {
-    if (!total) return {};
-    return format::ByteSize(free, false, format::ByteSizeStyle::Compact) + L" / " +
-           format::ByteSize(total, false, format::ByteSizeStyle::Compact);
+    return DriveSidebarDetail(free, total);
 }
 
 // Drives for the sidebar. Only local fixed disks are asked for their label
@@ -129,6 +128,7 @@ std::vector<SidebarItem> ReadSidebarDrives() {
                 item.used_ratio = static_cast<float>(1.0 - static_cast<double>(free.QuadPart) /
                                                            static_cast<double>(total.QuadPart));
                 item.detail = DriveDetail(free.QuadPart, total.QuadPart);
+                item.free_bytes = free.QuadPart;
             }
         }
         if (label.empty()) {
@@ -449,6 +449,7 @@ private:
                 item.used_ratio = static_cast<float>(1.0 - static_cast<double>(entry.free) /
                                                            static_cast<double>(entry.size));
                 item.detail = DriveDetail(entry.free, entry.size);
+                item.free_bytes = entry.free;
             }
         }
     }

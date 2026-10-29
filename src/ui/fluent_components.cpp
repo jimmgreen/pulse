@@ -806,6 +806,29 @@ void Painter::DrawCommandButton(const ButtonSpec& spec) {
     if (state.keyboard_focus) DrawFocusRing(spec.bounds, Px(theme_->radius_control));
 }
 
+ID2D1LinearGradientBrush* Painter::CachedGradient(const D2D1_COLOR_F& from, const D2D1_COLOR_F& to) {
+    if (!dc_) return nullptr;
+    const auto same = [](const D2D1_COLOR_F& a, const D2D1_COLOR_F& b) {
+        return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
+    };
+    for (auto& entry : gradient_cache_) {
+        if (entry.brush.get() && same(entry.from, from) && same(entry.to, to)) return entry.brush.get();
+    }
+    GradientEntry& slot = gradient_cache_[gradient_next_];
+    gradient_next_ = (gradient_next_ + 1) % gradient_cache_.size();
+    slot.brush.reset();
+    slot.from = from;
+    slot.to = to;
+    const D2D1_GRADIENT_STOP stops[2] = {{0.0f, from}, {1.0f, to}};
+    ComPtr<ID2D1GradientStopCollection> collection;
+    if (SUCCEEDED(dc_->CreateGradientStopCollection(stops, 2, &collection))) {
+        dc_->CreateLinearGradientBrush(
+            D2D1::LinearGradientBrushProperties(D2D1::Point2F(0.0f, 0.0f), D2D1::Point2F(0.0f, 1.0f)),
+            collection.get(), &slot.brush);
+    }
+    return slot.brush.get();
+}
+
 void Painter::StrokeElevationRect(const D2D1_RECT_F& bounds, float radius,
                                   const D2D1_COLOR_F& border, const D2D1_COLOR_F& edge,
                                   bool edge_on_top) {
@@ -816,31 +839,7 @@ void Painter::StrokeElevationRect(const D2D1_RECT_F& bounds, float radius,
         return a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
     };
     ID2D1LinearGradientBrush* brush = nullptr;
-    if (!same(border, edge)) {
-        GradientEntry* slot = nullptr;
-        for (auto& entry : gradient_cache_) {
-            if (entry.brush.get() && same(entry.from, border) && same(entry.to, edge)) {
-                slot = &entry;
-                break;
-            }
-        }
-        if (!slot) {
-            slot = &gradient_cache_[gradient_next_];
-            gradient_next_ = (gradient_next_ + 1) % gradient_cache_.size();
-            slot->brush.reset();
-            slot->from = border;
-            slot->to = edge;
-            const D2D1_GRADIENT_STOP stops[2] = {{0.0f, border}, {1.0f, edge}};
-            ComPtr<ID2D1GradientStopCollection> collection;
-            if (SUCCEEDED(dc_->CreateGradientStopCollection(stops, 2, &collection))) {
-                dc_->CreateLinearGradientBrush(
-                    D2D1::LinearGradientBrushProperties(D2D1::Point2F(0.0f, 0.0f),
-                                                        D2D1::Point2F(0.0f, 1.0f)),
-                    collection.get(), &slot->brush);
-            }
-        }
-        brush = slot->brush.get();
-    }
+    if (!same(border, edge)) brush = CachedGradient(border, edge);
     if (!brush) {
         StrokeRoundedRect(bounds, radius, border);
         return;
@@ -2763,38 +2762,93 @@ void Painter::DrawDriveSidebarItem(const DriveSidebarItemSpec& spec) {
              D2D1::RectF(text_left, content.top, content.right - detail_width,
                         content.top + text_row),
              NavFormat(), foreground);
+    // "76.3G 可用" in the level's colour once the drive is filling up.
+    const CapacityLevel level = CapacityLevelFor(spec.capacity, spec.free_bytes);
     DrawText(spec.detail,
              D2D1::RectF(content.right - detail_width, content.top, content.right,
                         content.top + text_row),
-             CaptionFormat(), theme_->text_secondary, HorizontalAlignment::Right);
+             CaptionFormat(), spec.state.enabled ? CapacityInk(level) : theme_->text_disabled,
+             HorizontalAlignment::Right);
 
-    const auto track = D2D1::RectF(text_left, content.bottom - Px(4.0f), content.right,
+    const auto track = D2D1::RectF(text_left, content.bottom - Px(5.0f), content.right,
                                    content.bottom);
     DrawCapacityBar(track, spec.capacity,
                     spec.bar_color.a > 0.0f ? spec.bar_color
                     : spec.icon_color.a > 0.0f ? spec.icon_color
-                                               : theme_->accent);
+                                               : theme_->accent,
+                    1.0f, spec.free_bytes);
     if (spec.state.keyboard_focus) {
         DrawFocusRing(spec.bounds, radius);
     }
 }
 
-void Painter::DrawCapacityBar(const D2D1_RECT_F& track, float capacity, D2D1_COLOR_F value_color) {
+void Painter::DrawCapacityBar(const D2D1_RECT_F& track, float capacity, D2D1_COLOR_F value_color,
+                              float reveal, std::uint64_t free_bytes) {
     if (!theme_ || !dc_ || Width(track) <= 0.0f || Height(track) <= 0.0f) {
         return;
     }
     const float radius = Height(track) * 0.5f;
-    FillRoundedRect(track, radius, dark_ ? Rgba(0xFFFFFF, 20) : Rgba(0x000000, 18));
+    // A quiet groove: a faint fill and a hairline, so an empty drive still
+    // reads as a track on Mica and on the solid pane alike.
+    FillRoundedRect(track, radius, dark_ ? Rgba(0xFFFFFF, 26) : Rgba(0x000000, 19));
+    if (!high_contrast_ && Height(track) >= Px(4.0f)) {
+        StrokeRoundedRect(track, (std::max)(0.0f, radius - 0.5f),
+                          dark_ ? Rgba(0xFFFFFF, 10) : Rgba(0x000000, 9));
+    }
     const float value = Clamp01(capacity);
-    if (value <= 0.0f) {
+    const float grow = Clamp01(reveal);
+    if (value <= 0.0f || grow <= 0.0f) {
         return;
     }
+    // A sliver of use still shows as a round dot rather than vanishing.
+    const float full = (std::min)(Width(track), (std::max)(Width(track) * value, Height(track)));
     auto value_rect = track;
-    value_rect.right = track.left + Width(track) * value;
-    if (value >= 0.90f) {
-        value_color = theme_->danger;
+    value_rect.right = track.left + full * grow;
+    const CapacityLevel level = CapacityLevelFor(value, free_bytes);
+    if (high_contrast_) {
+        FillRoundedRect(value_rect, radius, level == CapacityLevel::Normal ? value_color : theme_->danger);
+        return;
     }
-    FillRoundedRect(value_rect, radius, value_color);
+    // Lighter at the start, the full tone at the end.
+    const auto mix = [](D2D1_COLOR_F a, const D2D1_COLOR_F& b, float t) {
+        a.r += (b.r - a.r) * t;
+        a.g += (b.g - a.g) * t;
+        a.b += (b.b - a.b) * t;
+        a.a = 1.0f;
+        return a;
+    };
+    const D2D1_COLOR_F white = HexColor(0xFFFFFF);
+    D2D1_COLOR_F from{}, to{};
+    switch (level) {
+    case CapacityLevel::Warning:
+        from = dark_ ? HexColor(0xF2C068) : HexColor(0xE2A04A);
+        to = dark_ ? HexColor(0xE0A03A) : HexColor(0xC8811A);
+        break;
+    case CapacityLevel::Critical:
+        from = dark_ ? HexColor(0xFF8A73) : HexColor(0xE5604C);
+        to = dark_ ? HexColor(0xE5533F) : HexColor(0xC42B1C);
+        break;
+    case CapacityLevel::Normal:
+    default:
+        // Dark panes lift the accent a step so the bar keeps its contrast.
+        to = mix(value_color, white, dark_ ? 0.10f : 0.0f);
+        from = mix(value_color, white, dark_ ? 0.32f : 0.24f);
+        break;
+    }
+    if (ID2D1LinearGradientBrush* brush = CachedGradient(from, to)) {
+        // The gradient spans the drive's full fill, so it does not slide while growing.
+        brush->SetStartPoint(D2D1::Point2F(track.left, track.top));
+        brush->SetEndPoint(D2D1::Point2F(track.left + full, track.top));
+        dc_->FillRoundedRectangle(D2D1::RoundedRect(value_rect, radius, radius), brush);
+    } else {
+        FillRoundedRect(value_rect, radius, to);
+    }
+    // A faint top highlight between the round ends gives the fill some body.
+    if (Height(track) >= Px(6.0f) && Width(value_rect) > 2.0f * radius + 2.0f) {
+        const float y = value_rect.top + 0.5f;
+        dc_->DrawLine(D2D1::Point2F(value_rect.left + radius, y), D2D1::Point2F(value_rect.right - radius, y),
+                      ScratchBrush(dark_ ? Rgba(0xFFFFFF, 40) : Rgba(0xFFFFFF, 72)), 1.0f);
+    }
 }
 
 void Painter::DrawPaneHeader(const PaneHeaderSpec& spec) {
@@ -3187,6 +3241,19 @@ float Painter::InfoBarStripHeight(const InfoBarSpec& spec, float width) const {
 D2D1_COLOR_F Painter::StatusToneColor(InfoBarKind kind) const {
     if (!theme_) return D2D1::ColorF(0, 0, 0, 0);
     return MakeInfoTone(*theme_, kind, dark_, high_contrast_, theme_->bg).glyph;
+}
+
+D2D1_COLOR_F Painter::CapacityInk(CapacityLevel level) const {
+    if (!theme_) return D2D1::ColorF(0, 0, 0, 0);
+    switch (level) {
+    case CapacityLevel::Warning:
+        return MakeInfoTone(*theme_, InfoBarKind::Warning, dark_, high_contrast_, theme_->bg).action;
+    case CapacityLevel::Critical:
+        return MakeInfoTone(*theme_, InfoBarKind::Error, dark_, high_contrast_, theme_->bg).action;
+    case CapacityLevel::Normal:
+    default:
+        return theme_->text_secondary;
+    }
 }
 
 // A solid round glyph with the symbol cut out of it, in the tone of `kind`.
