@@ -2269,9 +2269,12 @@ void FillPaneViewModelBody(ui::PaneViewModel& out, const Pane& pane, const Place
     if (out.group_by != 0 && tab->snapshot && !tab->content_results && !out.compare_active) {
         const GroupBy by = GroupByFromInt(out.group_by);
         GroupClock clock = by == GroupBy::Date ? MakeGroupClock(tab->sort_column) : GroupClock{};
-        // Tag groups re-split when the catalog changes; dates at midnight.
+        // Tag groups re-split when the catalog changes; dates at midnight;
+        // media groups as values come in (each paced re-sort pass).
         const auto tag_catalog = by == GroupBy::Tag ? CurrentTagCatalog() : nullptr;
-        const uint64_t day_key = by == GroupBy::Tag ? (tag_catalog ? tag_catalog->revision : 0) : clock.today;
+        const bool media_groups = IsMediaGroup(by);
+        const uint64_t day_key = by == GroupBy::Tag ? (tag_catalog ? tag_catalog->revision : 0)
+                               : media_groups ? tab->media_resort_revision : clock.today;
         const int sort_key = static_cast<int>(tab->sort_column) * 2 +
                              static_cast<int>(tab->sort_direction);
         if (!tab->view_groups || tab->view_groups_snapshot != tab->snapshot ||
@@ -2280,6 +2283,7 @@ void FillPaneViewModelBody(ui::PaneViewModel& out, const Pane& pane, const Place
             tab->view_groups_rev != tab->group_collapse_rev) {
             auto groups = std::make_shared<ui::ListGroups>();
             if (by == GroupBy::Tag) clock.tags = TagGroupsForFolder(tab->current_path);
+            if (media_groups) clock.media = MediaGroupsForFolder(tab->current_path, by);
             const auto& entries = *tab->snapshot;
             const auto folded = tab->collapsed_groups.find(tab->current_path);
             const std::set<std::wstring>* collapsed =
@@ -2313,6 +2317,8 @@ void FillPaneViewModelBody(ui::PaneViewModel& out, const Pane& pane, const Place
                     }
                     if (by == GroupBy::Location) g.label = GroupLocationLabel(e);
                     if (by == GroupBy::AiDup) g.label = e.change_old_path;
+                    if (media_groups)   // empty: 未知 (the renderer names it)
+                        g.label = g.rank < 0 ? l10n::Get(l10n::StringId::GroupFolders) : MediaGroupLabel(clock, g.rank);
                     if (!seen.insert(g.key).second) {
                         contiguous = false;
                         break;

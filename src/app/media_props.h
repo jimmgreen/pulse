@@ -6,8 +6,10 @@
 #include "media_folder.h"
 #include <windows.h>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace pulse::app::media {
@@ -48,5 +50,13 @@ uint64_t Revision();
 std::shared_ptr<const Props> Find(const std::wstring& path, uint64_t mtime, uint64_t size);
 // Requests still waiting or being read.
 size_t Pending();
+
+// Every cached file directly inside `prefix` (a folder path ending in a
+// backslash, spelt as the requests spelt it), whatever version it was read
+// from: callers compare mtime / size with their listing. `fn` runs under the
+// cache lock, so it only copies.
+void ForEachInFolder(const std::wstring& prefix,
+                     const std::function<void(std::wstring_view name, uint64_t mtime, uint64_t size,
+                                              const Props& props)>& fn);
 
 }  // namespace pulse::app::media

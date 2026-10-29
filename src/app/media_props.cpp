@@ -209,4 +209,18 @@ size_t Pending() {
     return s.queue.size() + s.busy;
 }
 
+void ForEachInFolder(const std::wstring& prefix,
+                     const std::function<void(std::wstring_view name, uint64_t mtime, uint64_t size,
+                                              const Props& props)>& fn) {
+    if (prefix.empty()) return;
+    Shared& s = State();
+    std::lock_guard lock(s.m);
+    for (const auto& [path, cached] : s.cache) {
+        if (!cached.props || path.size() <= prefix.size() || !path.starts_with(prefix)) continue;
+        const std::wstring_view name = std::wstring_view(path).substr(prefix.size());
+        if (name.find(L'\\') != std::wstring_view::npos) continue;   // a subfolder's file
+        fn(name, cached.mtime, cached.size, *cached.props);
+    }
+}
+
 }  // namespace pulse::app::media

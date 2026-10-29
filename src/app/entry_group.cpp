@@ -101,6 +101,12 @@ bool FlipGroups(GroupBy g, ui::SortColumn col, ui::SortDirection dir) {
     case GroupBy::Date:
         return (col == ui::SortColumn::Mtime || col == ui::SortColumn::Created ||
                 col == ui::SortColumn::Accessed) && dir == ui::SortDirection::Asc;
+    // Newest month and the largest frames come first; names run A to Z.
+    case GroupBy::MediaMonth: return col == ui::SortColumn::MediaTaken && dir == ui::SortDirection::Asc;
+    case GroupBy::MediaTier: return col == ui::SortColumn::MediaDims && dir == ui::SortDirection::Asc;
+    case GroupBy::MediaCamera: return col == ui::SortColumn::MediaCamera && dir == ui::SortDirection::Desc;
+    case GroupBy::MediaAlbum: return col == ui::SortColumn::MediaAlbum && dir == ui::SortDirection::Desc;
+    case GroupBy::MediaArtist: return col == ui::SortColumn::MediaArtist && dir == ui::SortDirection::Desc;
     default: return false;
     }
 }
@@ -187,6 +193,18 @@ int GroupRank(const fs::DirEntry& e, GroupBy g, const GroupClock& c) {
         const auto it = c.tags->rank_by_name.find(key);
         return it != c.tags->rank_by_name.end() ? it->second : c.tags->untagged;
     }
+    case GroupBy::MediaMonth:
+    case GroupBy::MediaCamera:
+    case GroupBy::MediaAlbum:
+    case GroupBy::MediaArtist:
+    case GroupBy::MediaTier: {
+        if (IsFolder(e)) return -1;
+        if (!c.media) return 0;
+        const auto it = c.media->by_name.find(e.name);
+        if (it == c.media->by_name.end() || it->second.mtime != Ticks(e.mtime) || it->second.size != e.size)
+            return c.media->Unknown();
+        return it->second.rank;
+    }
     default: return 0;
     }
 }
@@ -195,6 +213,16 @@ int GroupCompare(const fs::DirEntry& a, const fs::DirEntry& b, GroupBy g,
                  const GroupClock& clock, ui::SortColumn col, ui::SortDirection dir) {
     if (g == GroupBy::None) return 0;
     if (g == GroupBy::Location) return ParentCompare(a, b);
+    if (IsMediaGroup(g)) {
+        const int ra = GroupRank(a, g, clock);
+        const int rb = GroupRank(b, g, clock);
+        if (ra == rb) return 0;
+        // Folders first and unknown values last, whichever way the groups run.
+        if (ra < 0 || rb < 0) return ra < 0 ? -1 : 1;
+        const int unknown = clock.media ? clock.media->Unknown() : 0;
+        if (ra == unknown || rb == unknown) return ra == unknown ? 1 : -1;
+        return (ra < rb) != FlipGroups(g, col, dir) ? -1 : 1;
+    }
     const int ra = g == GroupBy::Date ? DateRank(Ticks(GroupDateOf(a, col)), clock) : GroupRank(a, g, clock);
     const int rb = g == GroupBy::Date ? DateRank(Ticks(GroupDateOf(b, col)), clock) : GroupRank(b, g, clock);
     const bool flip = FlipGroups(g, col, dir);
@@ -224,10 +252,24 @@ std::wstring GroupKey(const fs::DirEntry& e, GroupBy g, const GroupClock& clock)
         for (auto& ch : key) ch = static_cast<wchar_t>(std::towlower(ch));
         return key;
     }
+    if (IsMediaGroup(g)) {
+        // By title, not rank: ranks shift as values arrive, a collapsed group stays.
+        std::wstring key = L"m" + std::to_wstring(static_cast<int>(g)) + L":";
+        if (rank < 0) return key + L"/";
+        std::wstring label = MediaGroupLabel(clock, rank);
+        if (label.empty()) return key + L"?";
+        for (auto& ch : label) ch = static_cast<wchar_t>(std::towlower(ch));
+        return key + label;
+    }
     static constexpr wchar_t kPrefix[] = L"-ndtsglpwk";
     std::wstring key(1, kPrefix[static_cast<int>(g)]);
     key += std::to_wstring(rank);
     return key;
+}
+
+std::wstring MediaGroupLabel(const GroupClock& clock, int rank) {
+    if (!clock.media || rank < 0 || rank >= clock.media->Unknown()) return {};
+    return clock.media->labels[static_cast<size_t>(rank)];
 }
 
 std::wstring GroupLocationLabel(const fs::DirEntry& e) {
@@ -337,10 +379,24 @@ std::shared_ptr<const TagGroupMap> TagGroupsForFolder(const std::wstring& folder
     return map;
 }
 
+namespace {
+std::atomic<MediaGroupSource> g_media_groups{nullptr};
+}  // namespace
+
+void SetMediaGroupSource(MediaGroupSource source) noexcept {
+    g_media_groups.store(source, std::memory_order_release);
+}
+
+std::shared_ptr<const MediaGroupMap> MediaGroupsForFolder(const std::wstring& folder, GroupBy g) {
+    const MediaGroupSource source = g_media_groups.load(std::memory_order_acquire);
+    return source && IsMediaGroup(g) && !folder.empty() ? source(folder, g) : nullptr;
+}
+
 ScopedEntryGrouping::ScopedEntryGrouping(int group_by, const std::wstring& folder) : previous_(t_grouping) {
     state_.by = GroupByFromInt(group_by);
     if (state_.by == GroupBy::Date) state_.clock = MakeGroupClock();
     if (state_.by == GroupBy::Tag) state_.clock.tags = TagGroupsForFolder(folder);
+    if (IsMediaGroup(state_.by)) state_.clock.media = MediaGroupsForFolder(folder, state_.by);
     t_grouping = &state_;
 }
 
@@ -361,6 +417,12 @@ std::optional<GroupBy> FolderGroupPrefs::Find(const std::wstring& path) const {
 bool FolderGroupPrefs::Set(const std::wstring& path, GroupBy by) {
     const auto key = GroupFolderKey(path);
     if (key.empty()) return false;
+    // Media groups last for the session; the folder's saved choice stays.
+    if (IsMediaGroup(by)) {
+        session_[key] = by;
+        return false;
+    }
+    session_.erase(key);
     const auto [it, inserted] = groups_.try_emplace(key, by);
     if (!inserted && it->second == by) return false;
     it->second = by;
@@ -396,6 +458,7 @@ void FolderGroupPrefs::ReadJson(const std::wstring& input) {
 GroupBy FolderGroupPrefs::Resolve(const std::wstring& path) const {
     const auto key = GroupFolderKey(path);
     if (!key.empty()) {
+        if (const auto it = session_.find(key); it != session_.end()) return it->second;
         if (const auto it = groups_.find(key); it != groups_.end()) return it->second;
         if (default_ && !key.starts_with(L"pulse:")) return *default_;
     }
@@ -405,6 +468,7 @@ GroupBy FolderGroupPrefs::Resolve(const std::wstring& path) const {
 void FolderGroupPrefs::ApplyToAll(GroupBy by) {
     default_ = by;
     std::erase_if(groups_, [](const auto& item) { return !item.first.starts_with(L"pulse:"); });
+    std::erase_if(session_, [](const auto& item) { return !item.first.starts_with(L"pulse:"); });
 }
 
 GroupBy DefaultGroupFor(const std::wstring& path) {

@@ -6859,6 +6859,8 @@ std::wstring MainRenderer::GroupLabel(const PaneViewModel& vm, const ListGroup& 
                          : g.rank == 2 ? StringId::GroupNetworkDrives : StringId::GroupNetworkPinned);
     case 9:  // the assistant's duplicates list: the group's file name
         return g.label;
+    case 10: case 11: case 12: case 13: case 14:   // media groups (app::GroupBy::Media*)
+        return g.label.empty() ? l10n::Get(StringId::GroupMediaUnknown) : g.label;
     default:
         return {};
     }

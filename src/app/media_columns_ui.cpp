@@ -5,9 +5,13 @@
 #include "app_runtime.h"
 #include "entry_group.h"
 #include "entry_sort.h"
+#include "../common/localization.h"
+#include "../common/string_ids.h"
 #include "../common/text_format.h"
 #include <algorithm>
 #include <atomic>
+#include <cwctype>
+#include <unordered_map>
 
 namespace pulse::app {
 
@@ -140,14 +144,101 @@ void SortKeys(const std::wstring& folder, const std::vector<fs::DirEntry>& entri
     }
 }
 
+// Group titles run as Explorer sorts names: case-insensitive, digits as numbers.
+bool LabelLess(const std::wstring& a, const std::wstring& b) {
+    return CompareStringEx(LOCALE_NAME_USER_DEFAULT, LINGUISTIC_IGNORECASE | SORT_DIGITSASNUMBERS,
+                           a.c_str(), static_cast<int>(a.size()), b.c_str(), static_cast<int>(b.size()),
+                           nullptr, nullptr, 0) == CSTR_LESS_THAN;
+}
+
+// 拍摄月份 / 相机 / 专辑 / 艺术家 / 分辨率档 for the files of `folder` read so far.
+std::shared_ptr<const MediaGroupMap> MediaGroups(const std::wstring& folder, GroupBy g) {
+    struct Found {
+        std::wstring name;
+        uint64_t mtime = 0, size = 0;
+        int value = 0;   // year * 12 + month - 1, media::Tier, or an index into texts
+    };
+    std::vector<Found> found;
+    std::vector<std::wstring> texts;                   // distinct, as first spelt
+    std::unordered_map<std::wstring, int> text_index;  // lower case -> texts
+    media::ForEachInFolder(Prefix(folder), [&](std::wstring_view name, uint64_t mtime, uint64_t size,
+                                               const media::Props& p) {
+        int value = 0;
+        if (g == GroupBy::MediaMonth) {
+            if (!p.taken) return;
+            const FILETIME utc{static_cast<DWORD>(p.taken & 0xFFFFFFFFu), static_cast<DWORD>(p.taken >> 32)};
+            FILETIME local{};
+            SYSTEMTIME st{};
+            if (!FileTimeToLocalFileTime(&utc, &local) || !FileTimeToSystemTime(&local, &st)) return;
+            value = st.wYear * 12 + st.wMonth - 1;
+        } else if (g == GroupBy::MediaTier) {
+            const media::Tier tier = media::TierOf(p.width, p.height);
+            if (tier == media::Tier::Unknown) return;
+            value = static_cast<int>(tier);
+        } else {
+            const std::wstring& text = g == GroupBy::MediaCamera ? p.camera
+                                     : g == GroupBy::MediaAlbum ? p.album : p.artist;
+            if (text.empty()) return;
+            std::wstring key = text;
+            for (auto& ch : key) ch = static_cast<wchar_t>(std::towlower(ch));
+            const auto [it, inserted] = text_index.try_emplace(std::move(key), static_cast<int>(texts.size()));
+            if (inserted) texts.push_back(text);
+            value = it->second;
+        }
+        found.push_back({std::wstring(name), mtime, size, value});
+    });
+    auto map = std::make_shared<MediaGroupMap>();
+    std::vector<int> order;   // distinct values in group order
+    for (const Found& f : found) order.push_back(f.value);
+    std::sort(order.begin(), order.end());
+    order.erase(std::unique(order.begin(), order.end()), order.end());
+    if (g == GroupBy::MediaMonth) {
+        std::reverse(order.begin(), order.end());   // newest first
+    } else if (g != GroupBy::MediaTier) {
+        std::sort(order.begin(), order.end(), [&](int a, int b) {
+            return LabelLess(texts[static_cast<size_t>(a)], texts[static_cast<size_t>(b)]);
+        });
+    }
+    std::unordered_map<int, int> rank_of;
+    for (const int value : order) {
+        rank_of.emplace(value, static_cast<int>(map->labels.size()));
+        if (g == GroupBy::MediaMonth) {
+            wchar_t buf[64]{};
+            swprintf_s(buf, l10n::Get(l10n::StringId::GroupMediaMonth).c_str(), value / 12, value % 12 + 1);
+            map->labels.emplace_back(buf);
+        } else if (g == GroupBy::MediaTier) {
+            static const wchar_t* const kTiers[] = {L"4K", L"1080p", L"720p"};
+            map->labels.emplace_back(value >= 0 && value < 3 ? std::wstring(kTiers[value])
+                                                             : l10n::Get(l10n::StringId::GroupNameOther));
+        } else {
+            map->labels.push_back(texts[static_cast<size_t>(value)]);
+        }
+    }
+    map->by_name.reserve(found.size());
+    for (Found& f : found)
+        map->by_name.emplace(std::move(f.name), MediaGroupMap::Item{f.mtime, f.size, rank_of[f.value]});
+    return map;
+}
+
 }  // namespace
 
 void InstallMediaColumns() {
     SetMediaPaneDecorator(&Decorate);
     SetMediaSortKeySource(&SortKeys);
+    SetMediaGroupSource(&MediaGroups);
 }
 
 void SetMediaColumnsEnabled(bool on) noexcept { g_enabled.store(on, std::memory_order_relaxed); }
+
+int MediaFolderKindFor(const Tab& tab) {
+    if (!g_enabled.load(std::memory_order_relaxed) || tab.content_results || tab.loading || !tab.snapshot ||
+        !Eligible(tab.current_path))
+        return 0;
+    if (tab.media_state && tab.media_snapshot == tab.snapshot) return static_cast<int>(tab.media_state->kind);
+    media::Tally tally;
+    for (const fs::DirEntry& e : *tab.snapshot) tally.Add(e.name, e.is_dir);
+    return static_cast<int>(media::Classify(tally));
+}
 
 }  // namespace pulse::app
 
@@ -169,7 +260,16 @@ bool ResortForMediaProps(AppState& s) {
         (GetKeyState(VK_LBUTTON) & 0x8000) != 0 || (GetKeyState(VK_RBUTTON) & 0x8000) != 0;
     ForEachPane(s, [&](app::Pane& pane) {
         app::Tab* tab = pane.ActiveTab();
-        if (!tab || tab->sort_column < ui::SortColumn::MediaTaken || !tab->snapshot || tab->loading ||
+        if (!tab) return;
+        const bool grouped = app::IsMediaGroup(app::GroupByFromInt(tab->EffectiveGroup()));
+        // Grouping needs the values in any view; the columns only ask in Details.
+        if (grouped && tab->snapshot && !tab->loading && !tab->content_results &&
+            tab->snapshot_path == tab->current_path && app::Eligible(tab->current_path) &&
+            (tab->media_snapshot != tab->snapshot || !tab->media_state)) {
+            tab->media_snapshot = tab->snapshot;
+            tab->media_state = app::Build(*tab);
+        }
+        if ((tab->sort_column < ui::SortColumn::MediaTaken && !grouped) || !tab->snapshot || tab->loading ||
             tab->pending_generation != 0 || tab->content_results || tab->search_content_active ||
             !tab->media_state || tab->media_state->kind == app::media::Kind::None ||
             tab->snapshot_path != tab->current_path || !tab->held_renames.empty() ||

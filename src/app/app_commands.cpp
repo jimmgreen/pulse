@@ -3723,6 +3723,7 @@ bool ApplyGroupToAllFolders(AppState& s, int group_by, bool confirm) {
     if (!usable()) return false;
     const app::GroupBy by = app::GroupByFromInt(group_by);
     if (by == app::GroupBy::Location) return false;  // multi-folder views only
+    if (by > app::GroupBy::Location) return false;   // fixed views and media groups: never a default
     if (confirm) {
         ui::ConfirmDialogSpec spec;
         spec.title = l10n::Get(l10n::StringId::ApplyViewAllTitle);

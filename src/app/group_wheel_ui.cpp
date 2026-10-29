@@ -3,6 +3,7 @@
 #include "context_menu.h"
 #include "entry_group.h"
 #include "entry_sort.h"
+#include "media_columns_ui.h"
 #include "../common/text_format.h"
 #include "../common/localization.h"
 #include "../common/string_ids.h"
@@ -37,6 +38,20 @@ constexpr ModeStyle kModes[] = {
     {6, l10n::StringId::Location, ui::command_icons::Icon::Folder, 0x22D3EE, 0x0E7490},
 };
 
+// Media folders add groups by what the files hold (media::Kind 1 pictures,
+// 2 music, 3 videos; app::GroupBy::Media*). Session only, like the list.
+struct MediaModeStyle {
+    int kind;
+    ModeStyle style;
+};
+constexpr MediaModeStyle kMediaModes[] = {
+    {1, {10, l10n::StringId::GroupByTakenMonth, ui::command_icons::Icon::History, 0xFB923C, 0xC2410C}},
+    {1, {11, l10n::StringId::ColumnMediaCamera, ui::command_icons::Icon::Camera, 0x38BDF8, 0x0369A1}},
+    {2, {12, l10n::StringId::ColumnMediaAlbum, ui::command_icons::Icon::Music, 0xE879F9, 0xA21CAF}},
+    {2, {13, l10n::StringId::ColumnMediaArtist, ui::command_icons::Icon::Stack, 0x818CF8, 0x4338CA}},
+    {3, {14, l10n::StringId::ColumnMediaResolution, ui::command_icons::Icon::Video, 0xFB923C, 0xC2410C}},
+};
+
 std::wstring Format(l10n::StringId id, int n) {
     wchar_t buf[128]{};
     swprintf_s(buf, l10n::Get(id).c_str(), n);
@@ -45,8 +60,13 @@ std::wstring Format(l10n::StringId id, int n) {
 
 // Header text for a group, matching the list's group headers.
 std::wstring Label(app::GroupBy by, int rank, const std::wstring& key, const fs::DirEntry& e,
-                   const app::TagCatalogSnapshot* tags) {
+                   const app::TagCatalogSnapshot* tags, const app::GroupClock& clock) {
     using l10n::StringId;
+    if (app::IsMediaGroup(by)) {
+        if (rank < 0) return l10n::Get(StringId::GroupFolders);
+        const std::wstring label = app::MediaGroupLabel(clock, rank);
+        return label.empty() ? l10n::Get(StringId::GroupMediaUnknown) : label;
+    }
     switch (by) {
     case app::GroupBy::Name: {
         static const wchar_t* const kNames[] = {L"0 \x2013 9", L"A \x2013 H", L"I \x2013 P", L"Q \x2013 Z"};
@@ -93,6 +113,7 @@ ui::GroupWheelOption BuildOption(const app::Tab& tab, const ModeStyle& mode,
     const app::GroupBy by = app::GroupByFromInt(mode.value);
     app::GroupClock clock = by == app::GroupBy::Date ? app::MakeGroupClock(tab.sort_column) : app::GroupClock{};
     if (by == app::GroupBy::Tag) clock.tags = app::TagGroupsForFolder(tab.current_path);
+    if (app::IsMediaGroup(by)) clock.media = app::MediaGroupsForFolder(tab.current_path, by);
     const auto catalog = by == app::GroupBy::Tag ? app::CurrentTagCatalog() : nullptr;
     struct Group { std::wstring key; int rank; size_t sample; int count; };
     std::vector<Group> groups;
@@ -110,7 +131,7 @@ ui::GroupWheelOption BuildOption(const app::Tab& tab, const ModeStyle& mode,
     });
     for (const auto& g : groups) {
         if (o.groups.size() >= 8) break;
-        o.groups.emplace_back(Label(by, g.rank, g.key, entries[g.sample], catalog.get()), g.count);
+        o.groups.emplace_back(Label(by, g.rank, g.key, entries[g.sample], catalog.get(), clock), g.count);
     }
     o.pill = Format(l10n::StringId::GroupWheelGroups, static_cast<int>(groups.size()));
     for (size_t i = 0; i < o.groups.size() && i < 3; ++i) {
@@ -293,6 +314,15 @@ void OpenGroupWheel(AppState& s) {
         if (mode.value == 6 && !multi) continue;
         if (tab->group_by == mode.value) data.applied = static_cast<int>(data.options.size());
         data.options.push_back(BuildOption(*tab, mode, entries));
+    }
+    if (!multi && !recent) {
+        const int media_kind = app::MediaFolderKindFor(*tab);
+        for (const auto& extra : kMediaModes) {
+            if (extra.kind != media_kind) continue;
+            if (tab->group_by == extra.style.value) data.applied = static_cast<int>(data.options.size());
+            data.options.push_back(BuildOption(*tab, extra.style, entries));
+            data.options.back().apply_all = false;   // session only: never every folder's default
+        }
     }
     data.current_text = l10n::Get(l10n::StringId::GroupWheelCurrent);
     data.scroll_text = l10n::Get(l10n::StringId::GroupWheelScroll);

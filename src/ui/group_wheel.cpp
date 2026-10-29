@@ -397,7 +397,9 @@ void GroupWheel::DrawFooter(ID2D1DeviceContext* dc, IDWriteFactory* dwrite, cons
     const float a = animate_ ? fade_value_ : 1.0f;
     // "Apply to all folders" sits at the right end; the key hints shrink around it.
     apply_all_rect_ = {};
-    if (!data_.apply_all_text.empty() && !data_.sort_controls && f_small_) {
+    const bool apply_all = data_.options.empty() ||
+        data_.options[static_cast<size_t>(std::lround(Clamp(t_)))].apply_all;
+    if (!data_.apply_all_text.empty() && !data_.sort_controls && apply_all && f_small_) {
         const float bw = g_ink.Measure(f_small_, data_.apply_all_text) + 20.0f * s;
         const D2D1_RECT_F b = D2D1::RectF(max_x - bw, y - 5.0f * s, max_x, y + hgt + 5.0f * s);
         apply_all_rect_ = b;

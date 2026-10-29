@@ -2785,7 +2785,7 @@ void SetGroupBy(AppState& s, int group_by) {
     if (!recent && !multi && (tab->current_path.empty() || fs::IsVirtualPath(tab->current_path))) return;
     const app::GroupBy by = app::GroupByFromInt(group_by);
     // Tag groups need one parent folder; Recent keeps its opened-time order.
-    if ((recent || multi) && by == app::GroupBy::Tag) return;
+    if ((recent || multi) && (by == app::GroupBy::Tag || app::IsMediaGroup(by))) return;
     if (!multi && by == app::GroupBy::Location) return;
     SyncTagGroups(s);
     if (s.appPrefs.folder_groups.Set(tab->current_path, by)) s.appPrefs.Save();

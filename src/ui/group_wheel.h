@@ -32,6 +32,7 @@ struct GroupWheelOption {
     std::wstring pill;          // "4 组" / "平铺"
     uint32_t hue1 = 0x94A3B8, hue2 = 0x64748B;   // preview colour wash
     std::vector<std::pair<std::wstring, int>> groups;  // preview; empty = flat
+    bool apply_all = true;      // group picker: the footer button shows while it is centred
     // Sort picker only: direction labels (asc, desc) and the preview for
     // each direction x folder mode (index desc * 3 + folder).
     std::array<std::wstring, 2> directions;
