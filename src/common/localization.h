@@ -4672,6 +4672,21 @@ enum class StringId : UINT {
     AiMenuCopyLink = IDS_AI_MENU_COPY_LINK,
     AiPathMissing = IDS_AI_PATH_MISSING,
     AiQuoteRemove = IDS_AI_QUOTE_REMOVE,
+    AiRegen = IDS_AI_REGEN,
+    AiRegenAgain = IDS_AI_REGEN_AGAIN,
+    AiRegenLonger = IDS_AI_REGEN_LONGER,
+    AiRegenShorter = IDS_AI_REGEN_SHORTER,
+    AiRegenModel = IDS_AI_REGEN_MODEL,
+    AiRegenMoreModels = IDS_AI_REGEN_MORE_MODELS,
+    AiNotHelpful = IDS_AI_NOT_HELPFUL,
+    AiStopVersion = IDS_AI_STOP_VERSION,
+    AiContinueGen = IDS_AI_CONTINUE_GEN,
+    AiUserEdit = IDS_AI_USER_EDIT,
+    AiUserEdited = IDS_AI_USER_EDITED,
+    AiEditWarn = IDS_AI_EDIT_WARN,
+    AiEditSend = IDS_AI_EDIT_SEND,
+    AiVerPrev = IDS_AI_VER_PREV,
+    AiVerNext = IDS_AI_VER_NEXT,
 };
 
 bool IsLanguageId(std::wstring_view id) noexcept;

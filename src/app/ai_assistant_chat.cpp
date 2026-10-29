@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cwctype>
+#include <iterator>
 
 namespace pulse {
 namespace {
@@ -234,11 +235,51 @@ std::wstring EffortName(const AppState& s) { return AiAssistantThinkName(s); }
 
 std::wstring ModelName(const AppState& s) { return AiAssistantModelName(s); }
 
+// 55 P2: each user block's versions on its turn's acts row (‹ 2 / 3 ›), a
+// row of its own for a version that has none (it failed), 已编辑 on the
+// bubble; 继续生成 only on the last turn.
+void MarkVersions(AiChat& c) {
+    for (size_t i = 0; i < c.blocks.size(); ++i) {
+        if (c.blocks[i].kind != AiBlockKind::User) continue;
+        const uint32_t uid = c.blocks[i].id;
+        size_t end = i + 1;
+        while (end < c.blocks.size() && c.blocks[end].kind != AiBlockKind::User) ++end;
+        const bool last_turn = end == c.blocks.size();
+        int count = 1, cur = 1;
+        bool edited = false;
+        if (auto it = c.branches.find(uid); it != c.branches.end() && !it->second.versions.empty()) {
+            count = static_cast<int>(it->second.versions.size());
+            cur = static_cast<int>(it->second.current) + 1;
+            edited = c.blocks[i].text != it->second.versions.front().text;
+        }
+        c.blocks[i].edited = edited;
+        size_t acts = c.blocks.size();
+        for (size_t k = i + 1; k < end; ++k) {
+            if (c.blocks[k].kind == AiBlockKind::Acts) acts = k;
+            if (c.blocks[k].kind == AiBlockKind::Stopped && !last_turn) c.blocks[k].accept.clear();
+        }
+        if (count > 1 && acts == c.blocks.size() && !(c.busy && last_turn)) {
+            AiBlockView row;
+            row.kind = AiBlockKind::Acts;
+            row.id = c.next_id++;
+            row.ver_only = true;
+            c.blocks.insert(c.blocks.begin() + static_cast<std::ptrdiff_t>(end), std::move(row));
+            acts = end++;
+        }
+        if (acts < c.blocks.size()) {
+            c.blocks[acts].ver = count > 1 ? cur : 0;
+            c.blocks[acts].ver_count = count > 1 ? count : 0;
+        }
+        i = end - 1;
+    }
+}
+
 // Ends the turn: the send button and the chip settle.
 void Finish(AppState& s, bool done_chip) {
     AiChat& c = Chat(s);
     c.busy = false;
     c.think_id = 0;
+    MarkVersions(c);
     if (done_chip) {
         SetChip(c, ui::StatusAiState::Done, Text(I::AiAsstChipDone));
         if (!s.aiAssistant.open) {
@@ -770,6 +811,7 @@ void AiChatFail(AppState& s, AiChatError err) {
         c.unread = true;
     }
     if (!s.aiAssistant.open) AiChatPeek(s, 650);
+    MarkVersions(c);
     Redraw(s);
 }
 
@@ -895,7 +937,20 @@ AiChat& Chat(AppState& s) {
 }
 
 namespace {
-std::wstring DemoAnswer() {
+// PULSE_AI_DEMO=1 plays the local demo (screenshots, no key); otherwise the
+// turn goes to the model.
+bool DemoMode() {
+    static const bool demo = [] {
+        wchar_t v[8]{};
+        return GetEnvironmentVariableW(L"PULSE_AI_DEMO", v, 8) > 0 && v[0] == L'1';
+    }();
+    return demo;
+}
+
+// PULSE_AI_DEMO_ANSWER=<UTF-8 file>: the demo answers with that Markdown
+// (screenshots and checks of rich answers) instead of organizing. Answers
+// split by a line "=====" are the versions 重新生成 brings, in turn.
+std::vector<std::wstring> DemoAnswers() {
     wchar_t path[MAX_PATH]{};
     if (GetEnvironmentVariableW(L"PULSE_AI_DEMO_ANSWER", path, MAX_PATH) == 0) return {};
     HANDLE f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -911,71 +966,241 @@ std::wstring DemoAnswer() {
     std::wstring text(static_cast<size_t>(n > 0 ? n : 0), L'\0');
     if (n > 0) MultiByteToWideChar(CP_UTF8, 0, bytes.data(), static_cast<int>(bytes.size()), text.data(), n);
     text.erase(std::remove(text.begin(), text.end(), L'\r'), text.end());
-    return text;
+    std::vector<std::wstring> out;
+    size_t from = 0;
+    for (;;) {
+        const size_t at = text.find(L"\n=====\n", from);
+        out.push_back(text.substr(from, at == std::wstring::npos ? std::wstring::npos : at - from));
+        if (at == std::wstring::npos) break;
+        from = at + 7;
+    }
+    return out;
+}
+
+// The demo answer streams into the text block from `from` (12 characters
+// every 30 ms), then the acts row.
+void StreamDemo(AiChat& c, uint32_t text_id, std::wstring answer, size_t from) {
+    Push(c, 0, std::function<int(AppState&)>([text_id, answer = std::move(answer), pos = std::make_shared<size_t>(from)](AppState& st) {
+             AiBlockView* b = Chat(st).Find(text_id);
+             if (!b) return -1;
+             *pos = (std::min)(answer.size(), *pos + 12);
+             b->text = answer.substr(0, *pos);
+             b->streaming = *pos < answer.size();
+             return b->streaming ? 30 : -1;
+         }));
+    Push(c, 120, std::function<void(AppState&)>([](AppState& st) {
+             AiChatAddActs(st, 0);
+             Finish(st, true);
+         }));
+}
+
+// A turn starts: the send button turns into stop, the chip works.
+void BeginTurn(AppState& s, AiChat& c) {
+    c.busy = true;
+    c.unread = false;
+    c.turn_start = Now();
+    c.queue.clear();
+    c.result_id = 0;
+    c.peek_text.clear();
+    c.peek_undo = false;
+    c.peek_failed = false;
+    c.peek_at = c.peek_until = 0;
+    SetChip(c, ui::StatusAiState::Busy, Text(I::AiAsstThinking));
+    s.renderer.AiPanel().ClearSelection();
+    s.renderer.AiPanel().ScrollToEnd();
+}
+
+// Asks the user block `user` (its words, its folder) as the turn.
+void RunTurn(AppState& s, AiChat& c, size_t user, const std::wstring& note) {
+    const uint32_t uid = c.blocks[user].id;
+    const std::wstring prompt = c.blocks[user].text;
+    const bool with_context = !c.blocks[user].context.empty();
+    c.last_prompt = prompt;
+    c.turn_hist[uid] = AiAgentHistorySize(s);
+    if (!DemoMode()) {
+        AiAgentStart(s, prompt, with_context, note);
+        Schedule(s);
+        return;
+    }
+    const std::vector<std::wstring> answers = DemoAnswers();
+    if (answers.empty()) {
+        StartOrganize(s, c, prompt);
+    } else {
+        size_t ver = 0;
+        if (auto it = c.branches.find(uid); it != c.branches.end()) ver = it->second.current;
+        AiBlockView& t = c.Add(AiBlockKind::Text, Now());
+        t.streaming = true;
+        StreamDemo(c, t.id, answers[ver % answers.size()], 0);
+    }
+    Schedule(s);
+}
+
+size_t HistAt(AppState& s, const AiChat& c, uint32_t uid) {
+    const auto it = c.turn_hist.find(uid);
+    return it != c.turn_hist.end() ? it->second : AiAgentHistorySize(s);
+}
+
+// The user block's branch; its first version is what is there now.
+AiTurnBranch& BranchOf(AiChat& c, size_t user) {
+    AiTurnBranch& br = c.branches[c.blocks[user].id];
+    if (br.versions.empty()) {
+        AiTurnVersion v;
+        v.text = c.blocks[user].text;
+        v.context = c.blocks[user].context;
+        br.versions.push_back(std::move(v));
+        br.current = 0;
+    }
+    return br;
+}
+
+// Everything after the user block, and the model history from its turn on,
+// go into `v` (the panel's selection may point into them: it goes).
+void Stash(AppState& s, AiChat& c, size_t user, AiTurnVersion& v) {
+    const uint32_t uid = c.blocks[user].id;
+    v.text = c.blocks[user].text;
+    v.context = c.blocks[user].context;
+    const auto from = c.blocks.begin() + static_cast<std::ptrdiff_t>(user + 1);
+    v.tail.assign(std::make_move_iterator(from), std::make_move_iterator(c.blocks.end()));
+    c.blocks.erase(c.blocks.begin() + static_cast<std::ptrdiff_t>(user + 1), c.blocks.end());
+    v.history = AiAgentCutHistory(s, HistAt(s, c, uid));
+    s.renderer.AiPanel().ClearSelection();
+}
+
+void SyncLastPrompt(AiChat& c) {
+    for (auto it = c.blocks.rbegin(); it != c.blocks.rend(); ++it)
+        if (it->kind == AiBlockKind::User) {
+            c.last_prompt = it->text;
+            return;
+        }
+}
+
+// A new version of the user block with these words, asked at once.
+void NewVersion(AppState& s, AiChat& c, size_t user, const std::wstring& text, const std::wstring& note) {
+    AiTurnBranch& br = BranchOf(c, user);
+    Stash(s, c, user, br.versions[br.current]);
+    AiTurnVersion v;
+    v.text = text;
+    v.context = c.blocks[user].context;
+    br.versions.push_back(std::move(v));
+    br.current = br.versions.size() - 1;
+    c.blocks[user].text = text;
+    BeginTurn(s, c);
+    RunTurn(s, c, user, note);
 }
 }  // namespace
+
+int AiChatUserOf(const AiChat& c, int block) {
+    if (block < 0 || block >= static_cast<int>(c.blocks.size())) return -1;
+    for (int i = block; i >= 0; --i)
+        if (c.blocks[static_cast<size_t>(i)].kind == AiBlockKind::User) return i;
+    return -1;
+}
 
 void AiChatSubmit(AppState& s, const std::wstring& prompt, const std::wstring& context) {
     AiChat& c = Chat(s);
     if (c.busy) return;
-    const uint64_t now = Now();
-    // PULSE_AI_DEMO=1 plays the local demo (screenshots, no key); otherwise
-    // the turn goes to the model.
-    static const bool demo = [] {
-        wchar_t v[8]{};
-        return GetEnvironmentVariableW(L"PULSE_AI_DEMO", v, 8) > 0 && v[0] == L'1';
-    }();
-    if (!demo) {
-        AiBlockView& u = c.Add(AiBlockKind::User, now);
-        u.text = prompt;
-        u.context = context;
-        c.last_prompt = prompt;
-        c.busy = true;
-        c.unread = false;
-        c.turn_start = now;
-        c.queue.clear();
-        c.result_id = 0;
-        c.peek_text.clear();
-        c.peek_undo = false;
-        c.peek_failed = false;
-        c.peek_at = c.peek_until = 0;
-        SetChip(c, ui::StatusAiState::Busy, Text(I::AiAsstThinking));
-        s.renderer.AiPanel().ScrollToEnd();
-        AiAgentStart(s, prompt, !context.empty());
-        Schedule(s);
-        Redraw(s);
-        return;
-    }
-    if (!c.noted) {
+    if (DemoMode() && !c.noted) {
         // A2: say plainly that this is the demo driver.
         AiBlockView& note = c.Add(AiBlockKind::Note, 0);
         note.text = Text(I::AiAsstDemoNote);
         c.noted = true;
     }
-    AiBlockView& u = c.Add(AiBlockKind::User, now);
+    AiBlockView& u = c.Add(AiBlockKind::User, Now());
     u.text = prompt;
     u.context = context;
-    c.last_prompt = prompt;
-    c.busy = true;
-    c.unread = false;
-    c.turn_start = now;
-    c.peek_text.clear();
-    c.peek_undo = false;
-    c.peek_failed = false;
-    c.peek_at = c.peek_until = 0;
-    c.queue.clear();
-    SetChip(c, ui::StatusAiState::Busy, Text(I::AiAsstThinking));
-    s.renderer.AiPanel().ScrollToEnd();
-    // PULSE_AI_DEMO_ANSWER=<UTF-8 file>: the demo answers with that Markdown
-    // (screenshots and checks of rich answers) instead of organizing.
-    if (const std::wstring answer = DemoAnswer(); !answer.empty()) {
-        AiBlockView& t = c.Add(AiBlockKind::Text, now);
-        t.text = answer;
-        Finish(s, true);
-        Redraw(s);
-        return;
+    BeginTurn(s, c);
+    RunTurn(s, c, c.blocks.size() - 1, {});
+    Redraw(s);
+}
+
+void AiChatRegenerate(AppState& s, int block, AiRegen kind) {
+    AiChat& c = Chat(s);
+    if (c.busy) return;
+    const int u = AiChatUserOf(c, block);
+    if (u < 0) return;
+    const size_t user = static_cast<size_t>(u);
+    // An organize that already ran in this turn keeps its card and its undo:
+    // then the message is asked again as a new turn, as before.
+    for (size_t k = user + 1; k < c.blocks.size() && c.blocks[k].kind != AiBlockKind::User; ++k)
+        if (c.blocks[k].kind == AiBlockKind::Result) {
+            const std::wstring text = c.blocks[user].text, context = c.blocks[user].context;
+            AiChatSubmit(s, text, context);
+            return;
+        }
+    const wchar_t* note = kind == AiRegen::Longer    ? L"Answer in more detail this time."
+                          : kind == AiRegen::Shorter ? L"Answer more concisely this time, keeping only the key points."
+                                                     : L"";
+    const std::wstring text = c.blocks[user].text;
+    NewVersion(s, c, user, text, note);
+    Redraw(s);
+}
+
+void AiChatEditTurn(AppState& s, int user_block, const std::wstring& text) {
+    AiChat& c = Chat(s);
+    if (c.busy || text.empty() || user_block < 0 || user_block >= static_cast<int>(c.blocks.size())) return;
+    const size_t user = static_cast<size_t>(user_block);
+    if (c.blocks[user].kind != AiBlockKind::User) return;
+    NewVersion(s, c, user, text, {});
+    Redraw(s);
+}
+
+void AiChatSwitchVersion(AppState& s, int block, int delta) {
+    AiChat& c = Chat(s);
+    if (c.busy) return;
+    const int u = AiChatUserOf(c, block);
+    if (u < 0) return;
+    const size_t user = static_cast<size_t>(u);
+    const uint32_t uid = c.blocks[user].id;
+    const auto it = c.branches.find(uid);
+    if (it == c.branches.end()) return;
+    AiTurnBranch& br = it->second;
+    const int target = static_cast<int>(br.current) + delta;
+    if (target < 0 || target >= static_cast<int>(br.versions.size()) || target == static_cast<int>(br.current)) return;
+    Stash(s, c, user, br.versions[br.current]);
+    AiTurnVersion& v = br.versions[static_cast<size_t>(target)];
+    c.blocks[user].text = v.text;
+    c.blocks[user].context = v.context;
+    c.blocks.insert(c.blocks.end(), std::make_move_iterator(v.tail.begin()), std::make_move_iterator(v.tail.end()));
+    v.tail.clear();
+    AiAgentRestoreHistory(s, HistAt(s, c, uid), v.history);
+    v.history.reset();
+    br.current = static_cast<size_t>(target);
+    SyncLastPrompt(c);
+    MarkVersions(c);
+    Redraw(s);
+}
+
+void AiChatContinue(AppState& s, int block) {
+    AiChat& c = Chat(s);
+    if (c.busy) return;
+    const int u = AiChatUserOf(c, block);
+    if (u < 0) return;
+    const size_t user = static_cast<size_t>(u);
+    // Only the last turn goes on: the model history ends there.
+    size_t text = c.blocks.size();
+    for (size_t k = user + 1; k < c.blocks.size(); ++k) {
+        if (c.blocks[k].kind == AiBlockKind::User) return;
+        if (c.blocks[k].kind == AiBlockKind::Text && !Plain(c.blocks[k].text).empty()) text = k;
     }
-    StartOrganize(s, c, prompt);
+    if (text == c.blocks.size()) return;
+    // The acts row and the 已停止 line go; the words go on in the same block.
+    c.blocks.erase(c.blocks.begin() + static_cast<std::ptrdiff_t>(text + 1), c.blocks.end());
+    const std::wstring prompt = c.blocks[user].text;
+    const bool with_context = !c.blocks[user].context.empty();
+    const std::wstring partial = c.blocks[text].text;
+    const uint32_t text_id = c.blocks[text].id;
+    BeginTurn(s, c);
+    c.last_prompt = prompt;
+    c.blocks[text].streaming = true;
+    if (DemoMode()) {
+        const std::vector<std::wstring> answers = DemoAnswers();
+        size_t ver = 0;
+        if (auto it = c.branches.find(c.blocks[user].id); it != c.branches.end()) ver = it->second.current;
+        const std::wstring answer = answers.empty() ? partial : answers[ver % answers.size()];
+        StreamDemo(c, text_id, answer, answer.rfind(partial, 0) == 0 ? partial.size() : answer.size());
+    } else {
+        AiAgentContinue(s, prompt, with_context, partial, text_id);
+    }
     Schedule(s);
     Redraw(s);
 }
@@ -1013,8 +1238,22 @@ void AiChatStop(AppState& s) {
     c.on_extra = nullptr;
     c.pause_id = 0;
     c.on_task_act = nullptr;
-    AiBlockView& note = c.Add(AiBlockKind::Note, Now());
-    note.text = Text(I::AiAsstStopped);
+    // 55 P2: a partial answer keeps its acts row and can go on (继续生成);
+    // without one, a quiet line says it stopped.
+    bool partial = false;
+    for (auto it = c.blocks.rbegin(); it != c.blocks.rend(); ++it) {
+        if (it->kind == AiBlockKind::User) break;
+        if (it->kind == AiBlockKind::Text && !Plain(it->text).empty()) { partial = true; break; }
+    }
+    if (partial) {
+        AiChatAddActs(s, AiAgentToolCount(s));
+        AiBlockView& st = c.Add(AiBlockKind::Stopped, Now());
+        st.title = Text(I::AiStopVersion) + L" \u00B7 ";
+        st.accept = Text(I::AiContinueGen);
+    } else {
+        AiBlockView& note = c.Add(AiBlockKind::Note, Now());
+        note.text = Text(I::AiAsstStopped);
+    }
     Finish(s, false);
     Redraw(s);
 }
@@ -1105,12 +1344,23 @@ void AiChatActivate(AppState& s, ui::AiPanelPart part, int block) {
         AiChatRetryTurn(s);
         break;
     case P::ActRetry:
-        if (!c.busy && !c.last_prompt.empty()) {
-            std::wstring context;
-            for (auto it = c.blocks.rbegin(); it != c.blocks.rend(); ++it)
-                if (it->kind == AiBlockKind::User) { context = it->context; break; }
-            AiChatSubmit(s, c.last_prompt, context);
-        }
+        AiChatRegenerate(s, block, AiRegen::Again);
+        break;
+    case P::ActThumb:
+        b.rating = b.rating > 0 ? 0 : 1;   // only shown here: nothing is sent
+        break;
+    case P::ActThumbDown:
+        b.rating = b.rating < 0 ? 0 : -1;
+        break;
+    case P::VerPrev:
+    case P::VerNext:
+        AiChatSwitchVersion(s, block, part == P::VerPrev ? -1 : 1);
+        break;
+    case P::StopContinue:
+        AiChatContinue(s, block);
+        break;
+    case P::UserCopy:
+        if (b.kind == AiBlockKind::User) CopyText(s.hwnd, b.text);
         break;
     default:
         break;

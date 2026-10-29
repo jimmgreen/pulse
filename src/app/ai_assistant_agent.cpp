@@ -849,22 +849,32 @@ bool Pump(AppState& s) {
             FoldSteps(s, a);
             a.content += ev.text;
             AiBlockView* t = Block(s, a.text_id);
+            if (!t && a.carry_id) {
+                // 继续生成: the words go on after the part already there.
+                t = Block(s, a.carry_id);
+                if (t) {
+                    a.text_id = a.carry_id;
+                    t->streaming = true;
+                }
+            }
             if (!t) {
                 AiBlockView& nt = c.Add(AiBlockKind::Text, Now());
                 nt.streaming = true;
                 a.text_id = nt.id;
                 t = &nt;
             }
-            t->text = Display(a.content);
+            t->text = Display(a.text_id == a.carry_id ? a.carry + a.content : a.content);
             break;
         }
         case ModelEvent::Kind::Finished: {
             FoldThinking(s, a);
             if (AiBlockView* t = Block(s, a.text_id)) {
                 t->streaming = false;
-                t->text = Display(a.content);
+                t->text = Display(a.text_id == a.carry_id ? a.carry + a.content : a.content);
             }
             a.text_id = 0;
+            a.carry.clear();
+            a.carry_id = 0;
             json::Value msg = json::Value::Object();
             msg.set("role", "assistant");
             msg.set("content", ev.content);
@@ -933,7 +943,7 @@ void SendRound(AppState& s) {
     a.reasoning.clear();
     a.content.clear();
     a.text_id = 0;
-    if (AiAssistantThinks(s)) {
+    if (AiAssistantThinks(s) && !a.carry_id) {
         AiBlockView& b = c.Add(AiBlockKind::Thinking, Now());
         b.running = true;
         b.label = Text(I::AiAsstThinking);
@@ -991,9 +1001,39 @@ std::wstring AiAgentDefaultBaseUrl() { return app::ai::CurrentProvider().base_ur
 
 std::wstring AiAgentHost() { return app::ai::ModelHost(AiAgentBaseUrl()); }
 
-void AiAgentStart(AppState& s, const std::wstring& prompt, bool with_context) {
+namespace {
+// What the model gets for the user's message: the words, the open folder,
+// a note left from an earlier turn.
+std::wstring UserContent(AppState& s, AiAgent& a, const std::wstring& prompt, bool with_context) {
+    std::wstring content = prompt;
+    if (with_context) {
+        if (app::Tab* tab = ActiveTab(s); tab && !tab->current_path.empty() && !fs::IsVirtualPath(tab->current_path)) {
+            content += L"\n\n[Pulse: the open folder is " + tab->current_path + L" (\u201C" +
+                       FolderLabel(tab->current_path) + L"\u201D, " + Num(tab->EntryCount()) + L" items)]";
+        }
+    }
+    if (!a.pending_note.empty()) {
+        content = a.pending_note + L"\n\n" + content;
+        a.pending_note.clear();
+    }
+    return content;
+}
+
+void PushMessage(AiAgent& a, const char* role, const std::wstring& content) {
+    json::Value m = json::Value::Object();
+    m.set("role", role);
+    m.set("content", Utf8(content));
+    a.history.push(std::move(m));
+}
+}  // namespace
+
+namespace {
+// A new turn: nothing of the last one carries over.
+AiAgent& ResetTurn(AppState& s) {
     AiAgent& a = Agent(s);
     ++a.generation;
+    a.carry.clear();
+    a.carry_id = 0;
     a.turn_history = a.history.size();
     a.rounds = 0;
     a.tools_retried = false;
@@ -1007,22 +1047,63 @@ void AiAgentStart(AppState& s, const std::wstring& prompt, bool with_context) {
     a.did_search = false;
     a.calls.clear();
     a.call_index = 0;
-    std::wstring content = prompt;
-    if (with_context) {
-        if (app::Tab* tab = ActiveTab(s); tab && !tab->current_path.empty() && !fs::IsVirtualPath(tab->current_path)) {
-            content += L"\n\n[Pulse: the open folder is " + tab->current_path + L" (\u201C" +
-                       FolderLabel(tab->current_path) + L"\u201D, " + Num(tab->EntryCount()) + L" items)]";
-        }
-    }
-    if (!a.pending_note.empty()) {
-        content = a.pending_note + L"\n\n" + content;
-        a.pending_note.clear();
-    }
-    json::Value user = json::Value::Object();
-    user.set("role", "user");
-    user.set("content", Utf8(content));
-    a.history.push(std::move(user));
+    return a;
+}
+}  // namespace
+
+void AiAgentStart(AppState& s, const std::wstring& prompt, bool with_context, const std::wstring& note) {
+    AiAgent& a = ResetTurn(s);
+    std::wstring content = UserContent(s, a, prompt, with_context);
+    if (!note.empty()) content += L"\n\n[Pulse: " + note + L"]";
+    PushMessage(a, "user", content);
     SendRound(s);
+}
+
+void AiAgentContinue(AppState& s, const std::wstring& prompt, bool with_context, const std::wstring& partial,
+                     uint32_t text_id) {
+    // The stop forgot the turn: the message, the part written so far, and a
+    // request to go on from there.
+    AiAgent& a = ResetTurn(s);
+    PushMessage(a, "user", UserContent(s, a, prompt, with_context));
+    PushMessage(a, "assistant", partial);
+    PushMessage(a, "user",
+                L"[Pulse: the user stopped the answer above partway. Continue exactly where it stopped, "
+                L"without repeating anything already written.]");
+    a.carry = Utf8(partial);
+    a.carry_id = text_id;
+    SendRound(s);
+}
+
+int AiAgentToolCount(AppState& s) {
+    AiChat& c = Chat(s);
+    return c.agent ? c.agent->tool_count : 0;
+}
+
+size_t AiAgentHistorySize(AppState& s) {
+    AiChat& c = Chat(s);
+    return c.agent ? c.agent->history.size() : 0;
+}
+
+std::shared_ptr<AiHistoryTail> AiAgentCutHistory(AppState& s, size_t from) {
+    AiChat& c = Chat(s);
+    auto tail = std::make_shared<AiHistoryTail>();
+    if (!c.agent) return tail;
+    AiAgent& a = *c.agent;
+    const size_t n = a.history.size();
+    if (from >= n) return tail;
+    json::Value kept = json::Value::Array();
+    for (size_t i = 0; i < n; ++i) (i < from ? kept : tail->messages).push(a.history.at(i));
+    a.history = std::move(kept);
+    return tail;
+}
+
+void AiAgentRestoreHistory(AppState& s, size_t from, const std::shared_ptr<AiHistoryTail>& tail) {
+    AiChat& c = Chat(s);
+    if (!c.agent && (!tail || tail->messages.size() == 0)) return;
+    AiAgent& a = Agent(s);
+    AiAgentCutHistory(s, from);
+    if (!tail) return;
+    for (const json::Value& m : tail->messages.items()) a.history.push(m);
 }
 
 void AiAgentStop(AppState& s) {

@@ -71,6 +71,11 @@
 #include <shlobj.h>
 
 namespace pulse {
+// 55 P2: model messages cut off the history with a version (ai_assistant_chat.h).
+struct AiHistoryTail {
+    json::Value messages = json::Value::Array();
+};
+
 struct AiAgent {
     json::Value history = json::Value::Array();   // user / assistant / tool messages
     std::wstring pending_note;                    // told to the model with the next prompt
@@ -89,6 +94,10 @@ struct AiAgent {
     uint32_t steps_id = 0;
     std::string reasoning;                        // this round, UTF-8
     std::string content;
+    // 继续生成 (55 P2): the part already written (UTF-8) and its text block;
+    // the first round's words go on there and it shows no thinking block.
+    std::string carry;
+    uint32_t carry_id = 0;
     std::vector<app::ai::ModelToolCall> calls;    // this round's
     size_t call_index = 0;
     std::wstring read_folder;                     // for the folded steps line

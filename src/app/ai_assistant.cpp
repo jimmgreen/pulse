@@ -38,6 +38,7 @@ namespace ai = app::ai;
 using I = l10n::StringId;
 
 constexpr UINT_PTR kComposerSubclass = 0x4149;   // 'AI'
+constexpr UINT_PTR kTurnEditSubclass = 0x4145;   // 'AE': a message edited in place
 constexpr UINT_PTR kTipTimer = 0x4154;           // 'AT'
 constexpr UINT kTipDelayMs = 520;
 constexpr uint64_t kMenuFadeMs = 240;
@@ -338,10 +339,11 @@ void EnsureFont(AppState& s) {
     a.font = ui::typography::CreateEditFont(s.scale, 13.5f);
     a.font_scale = s.scale;
     a.line_px = 0;
-    if (a.edit && a.font) {
-        SendMessageW(a.edit, WM_SETFONT, reinterpret_cast<WPARAM>(a.font), TRUE);
-        SendMessageW(a.edit, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
-    }
+    for (HWND e : {a.edit, a.turn_edit})
+        if (e && a.font) {
+            SendMessageW(e, WM_SETFONT, reinterpret_cast<WPARAM>(a.font), TRUE);
+            SendMessageW(e, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
+        }
     if (a.font) {
         HDC hdc = GetDC(s.hwnd);
         HFONT old = static_cast<HFONT>(SelectObject(hdc, a.font));
@@ -351,25 +353,32 @@ void EnsureFont(AppState& s) {
         ReleaseDC(s.hwnd, hdc);
         a.line_px = static_cast<int>(tm.tmHeight);
     }
-    if (a.edit && a.line_px > 0) {
-        // LumaText lays the text out at the same line height the composer is
-        // measured with (1/64 px), and draws the placeholder itself.
-        SetPropW(a.edit, L"Pulse.EditMultiline", reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(a.line_px) * 64u));
-    }
+    // LumaText lays the text out at the same line height the composer is
+    // measured with (1/64 px), and draws the placeholder itself.
+    for (HWND e : {a.edit, a.turn_edit})
+        if (e && a.line_px > 0)
+            SetPropW(e, L"Pulse.EditMultiline", reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(a.line_px) * 64u));
+}
+
+// The panel's text fields (the composer, a message edited in place): a
+// redirected layered child like the other hosted editors (edit_host.h), but
+// multi-line and wrapping (no ES_AUTOHSCROLL).
+HWND CreatePanelEdit(AppState& s) {
+    HWND e = CreateWindowExW(WS_EX_LAYERED, L"EDIT", L"",
+                             WS_CHILD | WS_CLIPSIBLINGS | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
+                             0, 0, 0, 0, s.hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (!e) return nullptr;
+    SetLayeredWindowAttributes(e, 0, 255, LWA_ALPHA);
+    SetWindowTheme(e, L"", L"");
+    SendMessageW(e, EM_LIMITTEXT, 8000, 0);
+    return e;
 }
 
 void EnsureEdit(AppState& s) {
     AiAssistantState& a = s.aiAssistant;
     if (a.edit || !s.hwnd) return;
-    // A redirected layered child like the other hosted editors (edit_host.h),
-    // but multi-line and wrapping (no ES_AUTOHSCROLL).
-    a.edit = CreateWindowExW(WS_EX_LAYERED, L"EDIT", L"",
-                             WS_CHILD | WS_CLIPSIBLINGS | WS_TABSTOP | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN,
-                             0, 0, 0, 0, s.hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+    a.edit = CreatePanelEdit(s);
     if (!a.edit) return;
-    SetLayeredWindowAttributes(a.edit, 0, 255, LWA_ALPHA);
-    SetWindowTheme(a.edit, L"", L"");
-    SendMessageW(a.edit, EM_LIMITTEXT, 8000, 0);
     a.font_scale = 0.0f;
     EnsureFont(s);
     SetWindowSubclass(a.edit, ComposerProc, kComposerSubclass, reinterpret_cast<DWORD_PTR>(&s));
@@ -383,6 +392,187 @@ void HideEdit(AppState& s) {
     ShowWindow(a.edit, SW_HIDE);
     a.edit_visible = false;
     if (had_focus && s.hwnd) SetFocus(s.hwnd);
+}
+
+// 55 P2: a message edited in place. Enter sends it as a new version, Esc
+// gives up, Shift+Enter is a new line.
+void EndTurnEdit(AppState& s) {
+    AiAssistantState& a = s.aiAssistant;
+    a.edit_id = 0;
+    a.turn_edit_focus = false;
+    if (a.turn_edit && a.turn_edit_visible) {
+        const bool had_focus = GetFocus() == a.turn_edit;
+        ShowWindow(a.turn_edit, SW_HIDE);
+        a.turn_edit_visible = false;
+        if (had_focus) a.focus_pending = true;   // back to the composer
+    }
+    Redraw(s);
+}
+
+void SendTurnEdit(AppState& s) {
+    AiAssistantState& a = s.aiAssistant;
+    if (!a.edit_id || !a.turn_edit || !a.chat) return;
+    std::wstring text(static_cast<size_t>(GetWindowTextLengthW(a.turn_edit)) + 1, L'\0');
+    text.resize(static_cast<size_t>(GetWindowTextW(a.turn_edit, text.data(), static_cast<int>(text.size()))));
+    text.erase(std::remove(text.begin(), text.end(), L'\r'), text.end());
+    while (!text.empty() && (text.back() == L'\n' || text.back() == L' ')) text.pop_back();
+    int block = -1;
+    for (size_t i = 0; i < a.chat->blocks.size(); ++i)
+        if (a.chat->blocks[i].id == a.edit_id) block = static_cast<int>(i);
+    EndTurnEdit(s);
+    if (!text.empty() && block >= 0) AiChatEditTurn(s, block, text);
+}
+
+void SyncTurnEdit(AppState& s) {
+    AiAssistantState& a = s.aiAssistant;
+    if (!a.turn_edit) return;
+    const int lines = static_cast<int>(SendMessageW(a.turn_edit, EM_GETLINECOUNT, 0, 0));
+    std::wstring text(static_cast<size_t>(GetWindowTextLengthW(a.turn_edit)) + 1, L'\0');
+    text.resize(static_cast<size_t>(GetWindowTextW(a.turn_edit, text.data(), static_cast<int>(text.size()))));
+    text.erase(std::remove(text.begin(), text.end(), L'\r'), text.end());
+    if (lines != a.turn_edit_lines || text != a.turn_edit_text) {
+        a.turn_edit_lines = (std::max)(1, lines);
+        a.turn_edit_text = std::move(text);
+        Redraw(s);
+    }
+}
+
+LRESULT CALLBACK TurnEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR ref) {
+    AppState& s = *reinterpret_cast<AppState*>(ref);
+    AiAssistantState& a = s.aiAssistant;
+    // Presented by LumaText in the composer's face and colours (edit_host.h).
+    const ui::AiPanelView& view = s.renderer.AiPanel();
+    IDWriteTextFormat* format = view.ComposerFormat() ? view.ComposerFormat() : s.compositor.TextFormat();
+    const D2D1_COLOR_F fore = view.TextColor();
+    const D2D1_COLOR_F back = view.CardColor();
+    const auto presented = [&](LRESULT& out) {
+        return ui::HandleChildEditMessage(s.compositor, format, fore, back, a.brush, hwnd, msg, wp, lp, out);
+    };
+    const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    switch (msg) {
+    case WM_GETDLGCODE:
+        return DefSubclassProc(hwnd, msg, wp, lp) | DLGC_WANTALLKEYS;
+    case WM_KEYDOWN:
+        if (wp == VK_RETURN && !shift) {
+            SendTurnEdit(s);
+            return 0;
+        }
+        if (wp == VK_ESCAPE) {
+            EndTurnEdit(s);
+            return 0;
+        }
+        break;
+    case WM_CHAR:
+        if ((wp == L'\r' || wp == L'\n') && !shift) return 0;
+        if (wp == 27) return 0;
+        if (wp == 1) {   // Ctrl+A: select all (a multiline EDIT does not)
+            SendMessageW(hwnd, EM_SETSEL, 0, -1);
+            return 0;
+        }
+        break;
+    case WM_NCDESTROY: {
+        LRESULT ignored = 0;
+        presented(ignored);
+        RemovePropW(hwnd, L"Pulse.EditMultiline");
+        RemovePropW(hwnd, L"Pulse.TurnBack");
+        RemovePropW(hwnd, L"Pulse.TurnFore");
+        RemoveWindowSubclass(hwnd, TurnEditProc, kTurnEditSubclass);
+        break;
+    }
+    default: {
+        LRESULT r = 0;
+        if (presented(r)) return r;
+        break;
+    }
+    }
+    const LRESULT r = ui::DefPresentedChildEditProc(s.compositor, format, fore, back, hwnd, msg, wp, lp);
+    switch (msg) {
+    case WM_CHAR: case WM_KEYDOWN: case WM_PASTE: case WM_CUT: case WM_CLEAR: case WM_UNDO:
+    case EM_UNDO: case WM_SETTEXT: case EM_REPLACESEL: case WM_SIZE:
+        SyncTurnEdit(s);
+        break;
+    default:
+        break;
+    }
+    return r;
+}
+
+void BeginTurnEdit(AppState& s, int block) {
+    AiAssistantState& a = s.aiAssistant;
+    AiChat& c = Chat(s);
+    if (c.busy || block < 0 || block >= static_cast<int>(c.blocks.size()) ||
+        c.blocks[static_cast<size_t>(block)].kind != ui::AiBlockKind::User)
+        return;
+    if (!a.turn_edit) {
+        a.turn_edit = CreatePanelEdit(s);
+        if (!a.turn_edit) return;
+        a.font_scale = 0.0f;
+        EnsureFont(s);
+        SetWindowSubclass(a.turn_edit, TurnEditProc, kTurnEditSubclass, reinterpret_cast<DWORD_PTR>(&s));
+    }
+    const ui::AiBlockView& u = c.blocks[static_cast<size_t>(block)];
+    a.edit_id = u.id;
+    std::wstring text;
+    for (wchar_t ch : u.text) {
+        if (ch == L'\n') text += L'\r';
+        text += ch;
+    }
+    SetWindowTextW(a.turn_edit, text.c_str());
+    SendMessageW(a.turn_edit, EM_SETSEL, text.size(), static_cast<LPARAM>(text.size()));
+    a.turn_edit_text = u.text;
+    a.turn_edit_lines = 1 + static_cast<int>(std::count(u.text.begin(), u.text.end(), L'\n'));
+    a.turn_edit_focus = true;
+    s.renderer.AiPanel().ClearSelection();
+    Redraw(s);
+}
+
+// After every frame: the EDIT sits on the drawn box while all of it is in
+// view; the edit ends when its message went or a turn started.
+void LayoutTurnEdit(AppState& s) {
+    AiAssistantState& a = s.aiAssistant;
+    if (!a.turn_edit) return;
+    if (a.edit_id && (!a.chat || a.chat->busy || !a.chat->Find(a.edit_id))) EndTurnEdit(s);
+    const ui::AiPanelView& view = s.renderer.AiPanel();
+    const bool covered = a.menu_open || AiVoiceCovers(s);
+    if (!a.edit_id || !a.open || !view.TurnEditPlaced() || covered) {
+        if (a.turn_edit_visible) {
+            if (GetFocus() == a.turn_edit) {
+                if (a.edit_id) a.turn_edit_focus = true;   // it comes back focused
+                SetFocus(s.hwnd);
+            }
+            ShowWindow(a.turn_edit, SW_HIDE);
+            a.turn_edit_visible = false;
+            Redraw(s);
+        }
+        return;
+    }
+    const D2D1_RECT_F r = view.TurnEditRect();
+    const int x = static_cast<int>(std::lround(r.left));
+    const int y = static_cast<int>(std::lround(r.top));
+    const int w = (std::max)(1, static_cast<int>(std::lround(r.right - r.left)));
+    const int h = (std::max)(1, static_cast<int>(std::lround(r.bottom - r.top)));
+    RECT cur{};
+    GetWindowRect(a.turn_edit, &cur);
+    MapWindowPoints(nullptr, s.hwnd, reinterpret_cast<POINT*>(&cur), 2);
+    const bool placed = cur.left == x && cur.top == y && cur.right - cur.left == w && cur.bottom - cur.top == h;
+    if (!placed || !a.turn_edit_visible) {
+        SetWindowPos(a.turn_edit, HWND_TOP, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        a.turn_edit_visible = true;
+        Redraw(s);
+    }
+    // A theme switch: the EDIT keeps its old card and ink until repainted.
+    const UINT_PTR back = 0x01000000u | ToColorRef(view.CardColor());
+    const UINT_PTR fore = 0x01000000u | ToColorRef(view.TextColor());
+    if (reinterpret_cast<UINT_PTR>(GetPropW(a.turn_edit, L"Pulse.TurnBack")) != back ||
+        reinterpret_cast<UINT_PTR>(GetPropW(a.turn_edit, L"Pulse.TurnFore")) != fore) {
+        SetPropW(a.turn_edit, L"Pulse.TurnBack", reinterpret_cast<HANDLE>(back));
+        SetPropW(a.turn_edit, L"Pulse.TurnFore", reinterpret_cast<HANDLE>(fore));
+        InvalidateRect(a.turn_edit, nullptr, TRUE);
+    }
+    if (a.turn_edit_focus) {
+        a.turn_edit_focus = false;
+        if (GetForegroundWindow() == s.hwnd || GetForegroundWindow() == GetAncestor(s.hwnd, GA_ROOT)) SetFocus(a.turn_edit);
+    }
 }
 
 void CloseMenu(AppState& s) {
@@ -404,7 +594,9 @@ void OpenServiceSettings(AppState& s) {
 bool HasTip(ui::AiPanelPart part) {
     using P = ui::AiPanelPart;
     return part == P::NewChat || part == P::Mode || part == P::Close || part == P::ActCopy || part == P::ActRetry ||
-           part == P::ActThumb || part == P::MenuReset || part == P::MenuSlider || AiVoiceHasTip(part);
+           part == P::ActThumb || part == P::ActThumbDown || part == P::VerPrev || part == P::VerNext ||
+           part == P::UserCopy || part == P::UserEdit || part == P::MenuReset || part == P::MenuSlider ||
+           AiVoiceHasTip(part);
 }
 
 // The model list: the shared FluentMenu (the dropdown of Pulse's other menus),
@@ -461,6 +653,65 @@ void PickModel(AppState& s, const D2D1_RECT_F& box) {
     if (cmd >= 1 && static_cast<size_t>(cmd) <= rows.size() && rows[static_cast<size_t>(cmd) - 1] != current) {
         g_model = rows[static_cast<size_t>(cmd) - 1];
         SavePrefs(a);
+    }
+    Redraw(s);
+}
+
+// 重新生成's caret (55 P2): 再试一次 / 更详细 / 更简洁, then 换个模型 — two
+// other models the service listed and 更多模型… (the model list); a model
+// picked here becomes the assistant's model and answers again.
+void RegenMenu(AppState& s, int block) {
+    AiAssistantState& a = s.aiAssistant;
+    const D2D1_RECT_F box = s.renderer.AiPanel().ConvHitRect({ui::AiPanelPart::ActRegenMenu, block});
+    if (box.right <= box.left || !EnsureMenu(s) || (a.chat && a.chat->busy)) return;
+    enum : int { kAgain = 1, kLonger, kShorter, kMore, kModel0 = 10 };
+    const std::string current = CurrentModel();
+    std::vector<std::string> others;
+    for (const std::string& m : Listed())
+        if (m != current && others.size() < 2) others.push_back(m);
+    std::vector<ui::FluentMenuItem> items;
+    const auto heading = [&](I id) {
+        ui::FluentMenuItem h;
+        h.heading = true;
+        h.enabled = false;
+        h.text = Text(id);
+        items.push_back(std::move(h));
+    };
+    const auto row = [&](int command, I id, const wchar_t* glyph) {
+        ui::FluentMenuItem it;
+        it.command = command;
+        it.text = Text(id);
+        it.glyph = glyph;
+        items.push_back(std::move(it));
+    };
+    heading(I::AiRegen);
+    row(kAgain, I::AiRegenAgain, L"\xE72C");
+    row(kLonger, I::AiRegenLonger, L"\xE8FD");
+    row(kShorter, I::AiRegenShorter, L"\xE8E4");
+    items.back().separator_after = true;
+    heading(I::AiRegenModel);
+    for (size_t i = 0; i < others.size(); ++i) {
+        ui::FluentMenuItem it;
+        it.command = kModel0 + static_cast<int>(i);
+        it.text = json::Wide(others[i]);
+        it.glyph = L"\xE950";
+        items.push_back(std::move(it));
+    }
+    row(kMore, I::AiRegenMoreModels, L"\xE712");
+    POINT c[] = {{static_cast<LONG>(std::lround(box.left)), static_cast<LONG>(std::lround(box.top))},
+                 {static_cast<LONG>(std::lround(box.right)), static_cast<LONG>(std::lround(box.bottom))}};
+    MapWindowPoints(s.hwnd, nullptr, c, 2);
+    s.menu->SetTheme(s.darkMode, s.accentColor);
+    const int cmd = s.menu->TrackDropdown({c[0].x, c[0].y, c[1].x, c[1].y}, std::move(items));
+    if (cmd == kAgain || cmd == kLonger || cmd == kShorter) {
+        AiChatRegenerate(s, block, cmd == kLonger ? AiRegen::Longer : cmd == kShorter ? AiRegen::Shorter : AiRegen::Again);
+    } else if (cmd >= kModel0 && static_cast<size_t>(cmd - kModel0) < others.size()) {
+        g_model = others[static_cast<size_t>(cmd - kModel0)];
+        SavePrefs(a);
+        AiChatRegenerate(s, block, AiRegen::Again);
+    } else if (cmd == kMore) {
+        PickModel(s, box);
+        if (CurrentModel() != current) AiChatRegenerate(s, block, AiRegen::Again);
     }
     Redraw(s);
 }
@@ -797,9 +1048,38 @@ void Activate(AppState& s, const ui::AiPanelHit& hit) {
     case P::ActCopy:
     case P::ActRetry:
     case P::ActThumb:
+    case P::ActThumbDown:
+    case P::VerPrev:
+    case P::VerNext:
+    case P::UserCopy:
+    case P::StopContinue:
     case P::CutRetry:
         CloseMenu(s);
         AiChatActivate(s, hit.part, hit.index);
+        break;
+    case P::ActRegenMenu:
+        CloseMenu(s);
+        RegenMenu(s, hit.index);
+        break;
+    // These rebuild the turn under the pointer: its old tip must not linger
+    // (the next move finds what is there now).
+    case P::UserEdit:
+        CloseMenu(s);
+        a.hover = {};
+        BeginTurnEdit(s, hit.index);
+        break;
+    case P::EditCancel:
+        a.hover = {};
+        EndTurnEdit(s);
+        break;
+    case P::EditSend:
+        a.hover = {};
+        SendTurnEdit(s);
+        break;
+    case P::EditBox:
+        s.renderer.AiPanel().RevealTurnEdit();
+        a.turn_edit_focus = true;
+        Redraw(s);
         break;
     case P::CleanCheck:
     case P::CleanLink:
@@ -997,6 +1277,19 @@ void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm) {
     AiChat& chat = Chat(s);
     p.empty = chat.blocks.empty();
     p.blocks = chat.blocks;
+    p.hover_turn = a.hover_turn;
+    p.edited_label = Text(I::AiUserEdited);
+    p.edit_block = -1;
+    if (a.edit_id)
+        for (size_t i = 0; i < chat.blocks.size(); ++i)
+            if (chat.blocks[i].id == a.edit_id) p.edit_block = static_cast<int>(i);
+    if (p.edit_block >= 0) {
+        p.edit_lines = a.turn_edit_lines;
+        p.edit_text = a.turn_edit_text;
+        p.edit_warn = Text(I::AiEditWarn);
+        p.edit_cancel = Text(I::Cancel);
+        p.edit_send = Text(I::AiEditSend);
+    }
     if (chat.think_id) {
         // The running thinking header counts seconds.
         for (ui::AiBlockView& b : p.blocks)
@@ -1100,9 +1393,13 @@ void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm) {
         } else vm.tooltip_text = Text(part == P::MenuReset ? I::RestoreDefaults
                                : part == P::NewChat ? I::AiAsstNewChat
                                : part == P::Close ? I::AiAsstCollapse
-                               : part == P::ActCopy ? I::AiAsstCopy
-                               : part == P::ActRetry ? I::AiAsstRetry
+                               : part == P::ActCopy || part == P::UserCopy ? I::AiAsstCopy
+                               : part == P::ActRetry ? I::AiRegen
                                : part == P::ActThumb ? I::AiAsstHelpful
+                               : part == P::ActThumbDown ? I::AiNotHelpful
+                               : part == P::VerPrev ? I::AiVerPrev
+                               : part == P::VerNext ? I::AiVerNext
+                               : part == P::UserEdit ? I::AiUserEdit
                                : a.floating ? I::AiAsstDock : I::AiAsstFloat);
         vm.tooltip_x = static_cast<float>(a.hover_point.x);
         vm.tooltip_y = static_cast<float>(a.hover_point.y);
@@ -1119,6 +1416,7 @@ void AiAssistantLayout(AppState& s) {
     AiAssistantState& a = s.aiAssistant;
     AssistantSettingsLayout(s);
     AiVoiceLayout(s);
+    LayoutTurnEdit(s);
     if (!a.edit) return;
     const ui::AiPanelView& view = s.renderer.AiPanel();
     const bool menu_fading = !a.menu_open && ui::motion::NowMs() - a.menu_closed_at < kMenuFadeMs;
@@ -1247,6 +1545,10 @@ bool AiAssistantMouseMove(AppState& s, int x, int y) {
         return false;
     }
     if (view.SetScrollHot(static_cast<float>(x), static_cast<float>(y))) Redraw(s);
+    if (const int turn = view.UserTurnAt(static_cast<float>(x), static_cast<float>(y)); turn != a.hover_turn) {
+        a.hover_turn = turn;   // the bubble's 复制 · 编辑 fade in
+        Redraw(s);
+    }
     const ui::AiPanelHit hit = HitAt(s, x, y);
     if (!(hit == a.hover)) {
         a.hover = hit;
@@ -1405,8 +1707,10 @@ bool AiAssistantWheel(AppState& s, int x, int y, int delta, bool horizontal) {
         if (horizontal) return true;
     }
     if (delta != 0 && !horizontal) {
-        // Three 16 px lines a notch, like the page's list.
+        // Three 16 px lines a notch, like the page's list. What was under the
+        // pointer moved away: no tip for it (the next move finds the new part).
         s.renderer.AiPanel().ScrollBy(-static_cast<float>(delta) / WHEEL_DELTA * 48.0f * s.scale);
+        if (!s.aiAssistant.captured) s.aiAssistant.hover = {};
         Redraw(s);
     }
     return true;
@@ -1415,6 +1719,10 @@ bool AiAssistantWheel(AppState& s, int x, int y, int delta, bool horizontal) {
 void AiAssistantMouseLeave(AppState& s) {
     AiAssistantState& a = s.aiAssistant;
     if (s.renderer.AiPanel().SetScrollHot(-1.0e6f, -1.0e6f)) Redraw(s);
+    if (a.hover_turn >= 0 && !a.captured) {
+        a.hover_turn = -1;
+        Redraw(s);
+    }
     if (a.hover.part == ui::AiPanelPart::None || a.captured) return;
     a.hover = {};
     Redraw(s);
@@ -1457,6 +1765,10 @@ bool AiAssistantMenuKey(AppState& s, WPARAM vk) {
 bool AiAssistantEscape(AppState& s) {
     AiAssistantState& a = s.aiAssistant;
     if (!a.open) return false;
+    if (a.edit_id) {   // a message edited in place gives up first
+        EndTurnEdit(s);
+        return true;
+    }
     if (a.menu_open) {
         CloseMenu(s);
         Redraw(s);
@@ -1568,7 +1880,7 @@ bool AiAssistantContextMenu(AppState& s, int x, int y) {
 HBRUSH AiAssistantCtlColor(AppState& s, HDC hdc, HWND edit) {
     AiAssistantState& a = s.aiAssistant;
     if (!edit) return nullptr;
-    if (edit != a.edit) {
+    if (edit != a.edit && edit != a.turn_edit) {
         return AssistantSettingsCtlColor(s, hdc, edit);   // Settings > AI 助手
     }
     const ui::AiPanelView& view = s.renderer.AiPanel();
@@ -1600,6 +1912,9 @@ void AiAssistantDestroy(AppState& s) {
     AiVoiceDestroy(s);
     if (a.edit) DestroyWindow(a.edit);
     a.edit = nullptr;
+    if (a.turn_edit) DestroyWindow(a.turn_edit);
+    a.turn_edit = nullptr;
+    a.edit_id = 0;
     if (a.font) DeleteObject(a.font);
     a.font = nullptr;
     if (a.brush) DeleteObject(a.brush);

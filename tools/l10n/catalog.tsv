@@ -4687,3 +4687,18 @@ AiMenuOpenLink	IDS_AI_MENU_OPEN_LINK	5958	打开链接	Open link	開啟連結
 AiMenuCopyLink	IDS_AI_MENU_COPY_LINK	5959	复制链接	Copy link	複製連結
 AiPathMissing	IDS_AI_PATH_MISSING	5960	找不到“%s”	Can't find “%s”	找不到「%s」
 AiQuoteRemove	IDS_AI_QUOTE_REMOVE	5961	移除引用	Remove quote	移除引用
+AiRegen	IDS_AI_REGEN	5962	重新生成	Regenerate	重新產生
+AiRegenAgain	IDS_AI_REGEN_AGAIN	5963	再试一次	Try again	再試一次
+AiRegenLonger	IDS_AI_REGEN_LONGER	5964	更详细	More detailed	更詳細
+AiRegenShorter	IDS_AI_REGEN_SHORTER	5965	更简洁	More concise	更簡潔
+AiRegenModel	IDS_AI_REGEN_MODEL	5966	换个模型	Try another model	換個模型
+AiRegenMoreModels	IDS_AI_REGEN_MORE_MODELS	5967	更多模型…	More models…	更多模型…
+AiNotHelpful	IDS_AI_NOT_HELPFUL	5968	没帮助	Not helpful	沒幫助
+AiStopVersion	IDS_AI_STOP_VERSION	5969	这个版本你中途停止了	You stopped this version partway	這個版本你中途停止了
+AiContinueGen	IDS_AI_CONTINUE_GEN	5970	继续生成	Continue	繼續產生
+AiUserEdit	IDS_AI_USER_EDIT	5971	编辑后重新发送	Edit and resend	編輯後重新傳送
+AiUserEdited	IDS_AI_USER_EDITED	5972	已编辑	Edited	已編輯
+AiEditWarn	IDS_AI_EDIT_WARN	5973	发送后，这条消息之后的回答会重新生成	Replies after this message will be regenerated	傳送後，這則訊息之後的回答會重新產生
+AiEditSend	IDS_AI_EDIT_SEND	5974	发送	Send	傳送
+AiVerPrev	IDS_AI_VER_PREV	5975	上一个版本	Previous version	上一個版本
+AiVerNext	IDS_AI_VER_NEXT	5976	下一个版本	Next version	下一個版本

@@ -4662,6 +4662,21 @@ BEGIN
     IDS_AI_MENU_COPY_LINK "复制链接"
     IDS_AI_PATH_MISSING "找不到“%s”"
     IDS_AI_QUOTE_REMOVE "移除引用"
+    IDS_AI_REGEN "重新生成"
+    IDS_AI_REGEN_AGAIN "再试一次"
+    IDS_AI_REGEN_LONGER "更详细"
+    IDS_AI_REGEN_SHORTER "更简洁"
+    IDS_AI_REGEN_MODEL "换个模型"
+    IDS_AI_REGEN_MORE_MODELS "更多模型…"
+    IDS_AI_NOT_HELPFUL "没帮助"
+    IDS_AI_STOP_VERSION "这个版本你中途停止了"
+    IDS_AI_CONTINUE_GEN "继续生成"
+    IDS_AI_USER_EDIT "编辑后重新发送"
+    IDS_AI_USER_EDITED "已编辑"
+    IDS_AI_EDIT_WARN "发送后，这条消息之后的回答会重新生成"
+    IDS_AI_EDIT_SEND "发送"
+    IDS_AI_VER_PREV "上一个版本"
+    IDS_AI_VER_NEXT "下一个版本"
 END
 
 LANGUAGE 0x09, 0x01
@@ -9323,6 +9338,21 @@ BEGIN
     IDS_AI_MENU_COPY_LINK "Copy link"
     IDS_AI_PATH_MISSING "Can't find “%s”"
     IDS_AI_QUOTE_REMOVE "Remove quote"
+    IDS_AI_REGEN "Regenerate"
+    IDS_AI_REGEN_AGAIN "Try again"
+    IDS_AI_REGEN_LONGER "More detailed"
+    IDS_AI_REGEN_SHORTER "More concise"
+    IDS_AI_REGEN_MODEL "Try another model"
+    IDS_AI_REGEN_MORE_MODELS "More models…"
+    IDS_AI_NOT_HELPFUL "Not helpful"
+    IDS_AI_STOP_VERSION "You stopped this version partway"
+    IDS_AI_CONTINUE_GEN "Continue"
+    IDS_AI_USER_EDIT "Edit and resend"
+    IDS_AI_USER_EDITED "Edited"
+    IDS_AI_EDIT_WARN "Replies after this message will be regenerated"
+    IDS_AI_EDIT_SEND "Send"
+    IDS_AI_VER_PREV "Previous version"
+    IDS_AI_VER_NEXT "Next version"
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.

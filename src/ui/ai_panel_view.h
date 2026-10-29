@@ -122,6 +122,21 @@ enum class AiPanelPart : uint8_t {
     SelSearch,
     // The composer's quote chip: its ×.
     QuoteRemove,
+    // 55 P2 (index = block index): 重新生成's menu caret, 没帮助, the ‹ › of
+    // an answer's versions, the user bubble's 复制 / 编辑, 继续生成 on a
+    // stopped version.
+    ActRegenMenu,
+    ActThumbDown,
+    VerPrev,
+    VerNext,
+    UserCopy,
+    UserEdit,
+    StopContinue,
+    // The message being edited in place (index = its block): the text area
+    // (while the panel draws it), 取消, 发送.
+    EditBox,
+    EditCancel,
+    EditSend,
 };
 
 struct AiPanelHit {
@@ -159,6 +174,7 @@ enum class AiBlockKind : uint8_t {
     Clean,      // 清理建议 card: categories with boxes, reasons, 查看, the total
     Funnel,     // 比对过程 card: three local stages with counts and bars (flow E)
     Dup,        // 重复文件 card: keep rules, groups (保留 / 副本), the total
+    Stopped,    // 这个版本你中途停止了 · 继续生成 under a partial answer (55 P2)
 };
 
 // Error card tone: Err needs the user (red, red border), Warn is temporary
@@ -542,6 +558,15 @@ struct AiBlockView {
     std::vector<AiConfirmRow> cf_rows;
     std::wstring cf_more, cf_bin, arm;
     bool armed = false;
+    // 55 P2. Acts: `ver` / `ver_count` the ‹ 2 / 3 › of the turn's versions
+    // (shown when ver_count > 1), `ver_only` a row that has nothing else (a
+    // version that failed), `rating` 👍 1 / 👎 -1 (local only). User:
+    // `edited` the text differs from the first version (已编辑).
+    int ver = 0;
+    int ver_count = 0;
+    bool ver_only = false;
+    int rating = 0;
+    bool edited = false;
 };
 
 // 语音输入: the composer while the microphone listens, and the mic button.
@@ -648,6 +673,14 @@ struct AiPanelViewModel {
     AiVoiceView voice;
     // Pointer.
     AiPanelHit hover;
+    std::wstring edited_label;        // 已编辑 under a bubble whose text was changed
+    // Editing a message in place (55 P2): its block (-1: none), the EDIT's
+    // line count, its words (drawn while the EDIT is hidden), the note and
+    // the buttons.
+    int edit_block = -1;
+    int edit_lines = 1;
+    std::wstring edit_text, edit_warn, edit_cancel, edit_send;
+    int hover_turn = -1;              // user block whose turn is under the pointer (55 P2: 复制 · 编辑)
     AiPanelHit pressed;
     AiPeekView peek;
 };
@@ -765,6 +798,13 @@ public:
     // moves its end), the drag follows the nearest text and the release shows
     // the mini toolbar. Buttons, icons and line numbers are never selected.
     bool OverText(float x, float y) const;     // selectable text under the point
+    int UserTurnAt(float x, float y) const;    // the user block whose turn is there (-1: none)
+    D2D1_RECT_F ConvHitRect(AiPanelHit hit) const;   // where a conversation part was drawn (empty: not shown)
+    // The in-place edit's text area and whether all of it is in view (the
+    // EDIT is shown over it only then).
+    D2D1_RECT_F TurnEditRect() const noexcept { return turn_edit_rect_; }
+    bool TurnEditPlaced() const noexcept { return turn_edit_placed_; }
+    void RevealTurnEdit();   // scrolls the whole edit box into view
     bool BeginSelect(float x, float y, int clicks, bool extend);
     void DragSelect(float x, float y);
     void EndSelect();
@@ -984,6 +1024,9 @@ private:
         AiPanelHit hit;
     };
     std::vector<ConvHit> conv_hits_;
+    std::vector<std::pair<D2D1_RECT_F, int>> turn_rects_;   // user turns (bubble .. next turn), visible part
+    D2D1_RECT_F turn_edit_rect_{};
+    bool turn_edit_placed_ = false;
 
     Formats formats_;
     ID2D1SolidColorBrush* brush_ = nullptr;

@@ -350,6 +350,29 @@ constexpr IconPart k_quote[] = {
     {"M5 9.5V6h4.5v3.5M14.5 9.5V6H19v3.5", 0, 0x000000u, 1.6f, 1.0f},
 };
 
+// 55 P2 (plans/ai/55_AI对话成熟化_效果图.html ③).
+constexpr IconPart k_thumbd[] = {
+    {"M8 13.5v-9H5.5a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1zM8 13.5l3.5 6.5a2 2 0 0 0 2.3-2.4L13 14h5a2 2 0 0 0 2-2.3l-1-6a2 2 0 0 0-2-1.7H8", 0, 0x000000u, 1.6f, 1.0f},
+};
+constexpr IconPart k_edit[] = {
+    {"M14.5 5.5l4 4L9 19H5v-4z", 0, 0x000000u, 1.6f, 1.0f},
+    {"M12.5 7.5l4 4", 0, 0x000000u, 1.6f, 1.0f},
+};
+constexpr IconPart k_info[] = {
+    {"M4 12A8 8 0 1 0 20 12A8 8 0 1 0 4 12Z", 0, 0x000000u, 1.6f, 1.0f},
+    {"M12 11v5M12 8h.01", 0, 0x000000u, 1.6f, 1.0f},
+};
+constexpr IconPart k_detail[] = {
+    {"M5 7h14M5 12h14M5 17h9", 0, 0x000000u, 1.6f, 1.0f},
+};
+constexpr IconPart k_short[] = {
+    {"M5 9h14M5 15h8", 0, 0x000000u, 1.6f, 1.0f},
+};
+constexpr IconPart k_model[] = {
+    {"M8 5h8a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3V8a3 3 0 0 1 3-3z", 0, 0x000000u, 1.6f, 1.0f},
+    {"M9 9h6v6H9z", 0, 0x000000u, 1.6f, 1.0f},
+};
+
 constexpr IconDef kIcons[] = {
     {k_spark, std::size(k_spark)},
     {k_folder, std::size(k_folder)},
@@ -429,6 +452,12 @@ constexpr IconDef kIcons[] = {
     {k_pull, std::size(k_pull)},
     {k_eject, std::size(k_eject)},
     {k_quote, std::size(k_quote)},
+    {k_thumbd, std::size(k_thumbd)},
+    {k_edit, std::size(k_edit)},
+    {k_info, std::size(k_info)},
+    {k_detail, std::size(k_detail)},
+    {k_short, std::size(k_short)},
+    {k_model, std::size(k_model)},
 };
 
 static_assert(std::size(kIcons) == static_cast<size_t>(AiIcon::Count), "one table entry per AiIcon");

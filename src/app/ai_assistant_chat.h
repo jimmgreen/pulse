@@ -14,11 +14,28 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace pulse {
 struct AppState;
 struct AiAgent;   // the DeepSeek agent loop (ai_assistant_agent.cpp)
+struct AiHistoryTail;   // model messages cut off the history (ai_agent_internal.h)
+
+// 55 P2: the versions of one user message, like branches. A version is the
+// message's words plus everything after it: the blocks and the model
+// history. The current version lives in AiChat::blocks (its entry here only
+// keeps its words); the others wait here until ‹ › brings one back.
+struct AiTurnVersion {
+    std::wstring text, context;
+    std::vector<ui::AiBlockView> tail;
+    std::shared_ptr<AiHistoryTail> history;
+};
+
+struct AiTurnBranch {
+    std::vector<AiTurnVersion> versions;
+    size_t current = 0;
+};
 
 struct AiChat {
     std::vector<ui::AiBlockView> blocks;
@@ -79,6 +96,11 @@ struct AiChat {
     ui::AiErrTone peek_tone = ui::AiErrTone::Err;
     std::wstring peek_title;
 
+    // 55 P2. Per user block id: the model history's length before it, and
+    // its versions once it has more than one.
+    std::unordered_map<uint32_t, size_t> turn_hist;
+    std::unordered_map<uint32_t, AiTurnBranch> branches;
+
     ui::AiBlockView* Find(uint32_t id);
     ui::AiBlockView& Add(ui::AiBlockKind kind, uint64_t now_ms);
 };
@@ -134,6 +156,17 @@ void AiChatUndoLast(AppState& s);   // the latest result card's 撤销
 void AiChatFail(AppState& s, AiChatError err);
 // Sends the last prompt again in place of the failed turn (no second bubble).
 void AiChatRetryTurn(AppState& s);
+// 55 P2, `block` any block of the turn. 重新生成: the turn's answer becomes a
+// new version (kind 0 再试一次, 1 更详细, 2 更简洁). ‹ ›: another version.
+// 继续生成: a stopped answer goes on. Edit: the message gets new words and
+// a new version.
+enum class AiRegen : uint8_t { Again, Longer, Shorter };
+void AiChatRegenerate(AppState& s, int block, AiRegen kind);
+void AiChatSwitchVersion(AppState& s, int block, int delta);
+void AiChatContinue(AppState& s, int block);
+void AiChatEditTurn(AppState& s, int user_block, const std::wstring& text);
+// The user block of the turn `block` is in (-1: none).
+int AiChatUserOf(const AiChat& c, int block);
 // The error card button behind an ErrAction hit (false: none).
 bool AiChatErrAction(AppState& s, int index, ui::AiErrAct& act);
 // Runs the chat's own error buttons: 重试, 去充值, 复制详情.
@@ -150,7 +183,18 @@ std::wstring AiAssistantModelName(const AppState& s);   // the model a request u
 // thinks, and the level's name for the turn's meta (高, 开启, 自动 …).
 bool AiAssistantThinks(const AppState& s);
 std::wstring AiAssistantThinkName(const AppState& s);
-void AiAgentStart(AppState& s, const std::wstring& prompt, bool with_context);
+// `note`: one more line for the model only (重新生成's 更详细 / 更简洁).
+void AiAgentStart(AppState& s, const std::wstring& prompt, bool with_context, const std::wstring& note = {});
+// 继续生成: the turn again with the part already written; what comes goes
+// on in the text block `text_id`, without a thinking block.
+void AiAgentContinue(AppState& s, const std::wstring& prompt, bool with_context, const std::wstring& partial,
+                     uint32_t text_id);
+// The model history: its length, the messages from `from` on (cut off and
+// returned), and putting such a tail back at `from`.
+size_t AiAgentHistorySize(AppState& s);
+int AiAgentToolCount(AppState& s);   // tool calls of the running (or last) turn
+std::shared_ptr<AiHistoryTail> AiAgentCutHistory(AppState& s, size_t from);
+void AiAgentRestoreHistory(AppState& s, size_t from, const std::shared_ptr<AiHistoryTail>& tail);
 void AiAgentStop(AppState& s);   // cancels the request and any tool still running
 // Flow A: the 搜索条件 card's chip × and + 条件 search again in Pulse without
 // the model; 接着做 fills the composer (复制路径 copies at once).

@@ -4680,5 +4680,20 @@
 #define IDS_AI_MENU_COPY_LINK                                                            5959
 #define IDS_AI_PATH_MISSING                                                              5960
 #define IDS_AI_QUOTE_REMOVE                                                              5961
+#define IDS_AI_REGEN                                                                     5962
+#define IDS_AI_REGEN_AGAIN                                                               5963
+#define IDS_AI_REGEN_LONGER                                                              5964
+#define IDS_AI_REGEN_SHORTER                                                             5965
+#define IDS_AI_REGEN_MODEL                                                               5966
+#define IDS_AI_REGEN_MORE_MODELS                                                         5967
+#define IDS_AI_NOT_HELPFUL                                                               5968
+#define IDS_AI_STOP_VERSION                                                              5969
+#define IDS_AI_CONTINUE_GEN                                                              5970
+#define IDS_AI_USER_EDIT                                                                 5971
+#define IDS_AI_USER_EDITED                                                               5972
+#define IDS_AI_EDIT_WARN                                                                 5973
+#define IDS_AI_EDIT_SEND                                                                 5974
+#define IDS_AI_VER_PREV                                                                  5975
+#define IDS_AI_VER_NEXT                                                                  5976
 
 #endif  // PULSE_STRING_IDS_H

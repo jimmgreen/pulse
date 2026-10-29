@@ -398,6 +398,9 @@ void AiPanelView::DrawContent(Compositor* compositor, const AiPanelViewModel& vm
     suggestion_rects_.clear();
     go_settings_ = {};
     conv_hits_.clear();
+    turn_rects_.clear();
+    turn_edit_rect_ = {};
+    turn_edit_placed_ = false;
     if (vm.empty) DrawEmptyState(compositor, vm, pal, conversation_rect_, s, now_ms);
     else DrawConversation(compositor, vm, pal, conversation_rect_, s, now_ms);
     c.dc->PopAxisAlignedClip();
@@ -1147,6 +1150,26 @@ AiPanelHit AiPanelView::HitTest(float x, float y) const {
     if (In(send_button_, x, y)) return {AiPanelPart::Send, -1};
     if (In(input_rect_, x, y)) return {AiPanelPart::Input, -1};
     return {AiPanelPart::Panel, -1};
+}
+
+void AiPanelView::RevealTurnEdit() {
+    if (turn_edit_rect_.bottom <= turn_edit_rect_.top) return;
+    const float pad = 12.0f * bar_scale_;
+    if (turn_edit_rect_.top < conversation_rect_.top + pad) ScrollBy(turn_edit_rect_.top - conversation_rect_.top - pad);
+    else if (turn_edit_rect_.bottom > conversation_rect_.bottom - pad) ScrollBy(turn_edit_rect_.bottom - conversation_rect_.bottom + pad + 68.0f * bar_scale_);
+}
+
+D2D1_RECT_F AiPanelView::ConvHitRect(AiPanelHit hit) const {
+    for (const ConvHit& h : conv_hits_)
+        if (h.hit == hit) return h.rect;
+    return {};
+}
+
+int AiPanelView::UserTurnAt(float x, float y) const {
+    if (!drawn_ || !open_ || !In(conversation_rect_, x, y)) return -1;
+    for (const auto& [r, block] : turn_rects_)
+        if (In(r, x, y)) return block;
+    return -1;
 }
 
 void AiPanelView::DrawBar(int which, const D2D1_RECT_F& viewport, float offset, float view, float content) {

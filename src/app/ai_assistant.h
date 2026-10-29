@@ -30,6 +30,7 @@ struct AiAssistantState {
     // Pointer.
     ui::AiPanelHit hover;
     ui::AiPanelHit pressed;
+    int hover_turn = -1;           // user block whose turn is under the pointer (its 复制 · 编辑)
     POINT hover_point{};
     uint64_t hover_since = 0;
     bool captured = false;
@@ -63,6 +64,14 @@ struct AiAssistantState {
     int lines = 1;
     int text_len = 0;
     int line_px = 0;
+    // Editing a message in place (55 P2): its block id (0: none), the EDIT
+    // over the box the panel draws, its words and wrapped lines.
+    uint32_t edit_id = 0;
+    HWND turn_edit = nullptr;
+    bool turn_edit_visible = false;
+    bool turn_edit_focus = false;  // focus it once it is placed
+    int turn_edit_lines = 1;
+    std::wstring turn_edit_text;
     // Conversation; created on first use. Opaque here so the driver can
     // change without rebuilding everything that sees AppState.
     std::shared_ptr<AiChat> chat;

@@ -95,6 +95,13 @@ enum class AiIcon : uint8_t {
     Eject,
     // 55: the selection toolbar's 引用.
     Quote,
+    // 55 P2: 没帮助, 编辑, the edit box's note, 重新生成's menu.
+    ThumbDown,
+    Edit,
+    Info,
+    Detail,
+    Short,
+    Model,
     Count
 };
 
