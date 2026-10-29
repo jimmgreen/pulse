@@ -5687,13 +5687,18 @@ bool SelectedQuickPreviewItem(AppState& s, ui::QuickPreviewItem& item) {
 }
 
 void ToggleQuickPreview(AppState& s) {
+    if (HoldPreviewPin(s)) return;   // Space while holding the button keeps the peek open
     if (s.quickPreview.visible()) {
         s.quickPreview.Close();
         return;
     }
     if(DeferContentSelection(s,[](AppState& v){ToggleQuickPreview(v);},true)) return;
     ui::QuickPreviewItem item;
-    if (SelectedQuickPreviewItem(s, item)) {
+    if (SelectedQuickPreviewItem(s, item)) OpenQuickPreview(s, item, true);
+}
+
+void OpenQuickPreview(AppState& s, const ui::QuickPreviewItem& item, bool activate) {
+    {
         const auto effect = s.appPrefs.background_image.empty()
             ? ui::WindowEffectFromId(s.appPrefs.window_effect)
             : ui::WindowEffect::None;
@@ -5724,7 +5729,8 @@ void ToggleQuickPreview(AppState& s) {
         s.quickPreview.Initialize(s.hwnd, WM_QUICK_PREVIEW_NAVIGATE,
                                   WM_QUICK_PREVIEW_OPEN, WM_QUICK_PREVIEW_COMMAND);
         s.quickPreview.SetAccent(s.accentColor);
-        s.quickPreview.Show(item, s.darkMode, effect, s.safeMode, zoom_from);
+        s.quickPreview.SetOptions(QuickPreviewOptionsFromPrefs(s.appPrefs));
+        s.quickPreview.Show(item, s.darkMode, effect, s.safeMode, zoom_from, activate);
         s.quickPreviewSelection.Reset(item.path);
     }
 }

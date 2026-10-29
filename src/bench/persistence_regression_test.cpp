@@ -223,6 +223,29 @@ int main(int argc, char** argv) {
     Check(prefs.StoreBackgroundImage(source) && std::filesystem::exists(prefs.background_image) && !std::filesystem::exists(old), "PERSIST-05 successful commit precedes old image removal");
     AppPrefs reloaded;reloaded.persist=false;Check(reloaded.Load() && reloaded.background_image==prefs.background_image, "PERSIST-05 new cache path survives reload");
     {
+        // 快速预览 > 预览窗口 / 按住预览 (task 54): defaults, round trip, bad values.
+        AppPrefs older; older.persist=false;
+        Check(older.FromJson(LR"({"hover_card_size":2})") && older.preview_size==0 && older.preview_remember_size &&
+              older.preview_rect_w==0 && older.preview_space_closes && older.preview_loop==0 &&
+              older.hold_preview_ms==0 && older.preview_key_hint_left==3 && older.hover_card_size==2,
+              "PREVIEW-01 prefs from before keep the defaults (fit, remember, Space closes, hold off)");
+        AppPrefs set; set.persist=false;
+        set.preview_size=4; set.preview_remember_size=false; set.preview_rect_x=-1500; set.preview_rect_y=40;
+        set.preview_rect_w=1200; set.preview_rect_h=800; set.preview_space_closes=false; set.preview_loop=1;
+        set.hold_preview_ms=500; set.preview_key_hint_left=1; set.hover_card_size=3;
+        AppPrefs set_again; set_again.persist=false;
+        Check(set_again.FromJson(set.ToJson()) && set_again.preview_size==4 && !set_again.preview_remember_size &&
+              set_again.preview_rect_x==-1500 && set_again.preview_rect_y==40 && set_again.preview_rect_w==1200 &&
+              set_again.preview_rect_h==800 && !set_again.preview_space_closes && set_again.preview_loop==1 &&
+              set_again.hold_preview_ms==500 && set_again.preview_key_hint_left==1 && set_again.hover_card_size==3,
+              "PREVIEW-02 preview window prefs and the extra large card round trip");
+        AppPrefs bad; bad.persist=false;
+        Check(bad.FromJson(LR"({"preview_size":9,"preview_loop":-2,"hold_preview_ms":450,"preview_key_hint_left":40,"preview_rect_w":-5,"hover_card_size":7})") &&
+              bad.preview_size==0 && bad.preview_loop==0 && bad.hold_preview_ms==0 && bad.preview_key_hint_left==3 &&
+              bad.preview_rect_w==0 && bad.hover_card_size==1,
+              "PREVIEW-03 out-of-range preview values fall back to the defaults");
+    }
+    {
         using Tools = std::vector<std::wstring>;
         AppPrefs legacy; legacy.persist=false;
         Check(legacy.FromJson(LR"({"toolbar_pins":5})") && legacy.toolbar_tools==Tools{L"cut",L"copy",L"paste",L"rename",L"delete",L"new_text",L"terminal",L"split",L"details",L"columns"}, "TOOLBAR-01 legacy pin mask becomes the tool list, with the former fixed buttons");

@@ -4631,3 +4631,29 @@ ColumnTotalSize	IDS_COLUMN_TOTAL_SIZE	5902	总大小	Total size	總大小
 ThisPcOverviewTitle	IDS_THIS_PC_OVERVIEW_TITLE	5903	存储总览	Storage	儲存空間總覽
 ThisPcOverviewDrives	IDS_THIS_PC_OVERVIEW_DRIVES	5904	{count} 块磁盘	{count} drives	{count} 個磁碟
 ThisPcOverviewSpace	IDS_THIS_PC_OVERVIEW_SPACE	5905	{free} 可用 · 已用 {used} · 共 {total}	{free} free · {used} used · {total} total	{free} 可用 · 已用 {used} · 共 {total}
+PreviewSizeFit	IDS_PREVIEW_SIZE_FIT	5906	适应内容	Fit content	適應內容
+PreviewSizeStandard	IDS_PREVIEW_SIZE_STANDARD	5907	标准	Standard	標準
+PreviewSizeLarge	IDS_PREVIEW_SIZE_LARGE	5908	大	Large	大
+PreviewSizeMaximized	IDS_PREVIEW_SIZE_MAXIMIZED	5909	最大化	Maximized	最大化
+PreviewSizeFullScreen	IDS_PREVIEW_SIZE_FULL_SCREEN	5910	全屏	Full screen	全螢幕
+PreviewRememberSize	IDS_PREVIEW_REMEMBER_SIZE	5911	记住我拖出来的大小	Remember the size I drag to	記住我拖出來的大小
+PreviewRememberDesc	IDS_PREVIEW_REMEMBER_DESC	5912	手动拖过窗口大小后，下次按这个大小打开	After you resize the window, it opens at that size next time	手動拖過視窗大小後，下次按這個大小開啟
+PreviewWindowSection	IDS_PREVIEW_WINDOW_SECTION	5913	预览窗口	Preview window	預覽視窗
+PreviewSizeTitle	IDS_PREVIEW_SIZE_TITLE	5914	打开时的大小	Size when it opens	開啟時的大小
+PreviewSizeDesc	IDS_PREVIEW_SIZE_DESC	5915	适应内容按图片或视频的比例开窗；标题栏也能切换	Fit content follows the picture or video; switch from its title bar too	適應內容按圖片或影片的比例開窗；標題列也能切換
+PreviewSpaceTitle	IDS_PREVIEW_SPACE_TITLE	5916	空格键（视频和动图）	Space on videos and animations	空白鍵（影片和動圖）
+PreviewSpaceDesc	IDS_PREVIEW_SPACE_DESC	5917	选「关闭预览」时，按 K 暂停	With Close preview, press K to pause	選「關閉預覽」時，按 K 暫停
+PreviewSpaceClose	IDS_PREVIEW_SPACE_CLOSE	5918	关闭预览	Close preview	關閉預覽
+PreviewSpacePlay	IDS_PREVIEW_SPACE_PLAY	5919	播放 / 暂停	Play / pause	播放 / 暫停
+PreviewLoopTitle	IDS_PREVIEW_LOOP_TITLE	5920	循环播放	Loop	循環播放
+PreviewLoopDesc	IDS_PREVIEW_LOOP_DESC	5921	在预览里按 L 也能切换	Press L in the preview to switch	在預覽裡按 L 也能切換
+PreviewLoopAnimations	IDS_PREVIEW_LOOP_ANIMATIONS	5922	仅动图	Animations	僅動圖
+PreviewLoopAll	IDS_PREVIEW_LOOP_ALL	5923	动图和视频	Both	動圖和影片
+PreviewLoopNone	IDS_PREVIEW_LOOP_NONE	5924	不循环	Off	不循環
+PreviewLoopOn	IDS_PREVIEW_LOOP_ON	5925	循环：开	Loop: on	循環：開
+PreviewLoopOff	IDS_PREVIEW_LOOP_OFF	5926	循环：关	Loop: off	循環：關
+HoldPreviewTitle	IDS_HOLD_PREVIEW_TITLE	5927	按住预览	Press and hold to preview	按住預覽
+HoldPreviewDesc	IDS_HOLD_PREVIEW_DESC	5928	在文件上按住左键预览，松开就关闭	Hold the left button on a file to preview it; let go to close	在檔案上按住左鍵預覽，放開就關閉
+HoldPreviewOff	IDS_HOLD_PREVIEW_OFF	5929	关	Off	關
+HoverSizeXLarge	IDS_HOVER_SIZE_XLARGE	5930	特大	Extra large	特大
+PreviewKeyHint	IDS_PREVIEW_KEY_HINT	5931	空格 关闭 · K 暂停 · L 循环	Space closes · K pauses · L loops	空白鍵 關閉 · K 暫停 · L 循環

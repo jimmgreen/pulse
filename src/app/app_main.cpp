@@ -2234,6 +2234,10 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     }
 
     case WM_TIMER: {
+        if (s && wParam == pulse::kHoldPreviewTimer) {   // 按住预览
+            pulse::HoldPreviewTimer(*s);
+            return 0;
+        }
         if (s && wParam == kAddressPathOpenTimer) {
             PollAddressPathOpen(*s);
             return 0;
@@ -2575,6 +2579,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (GetCapture() == hwnd) ReleaseCapture();
         break;
     case WM_MOUSEMOVE:
+        if (s) pulse::HoldPreviewMouseMove(*s, POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)});
         if (s) pulse::UpdateSidebarPeek(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
         if (HandleSidebarResize(s, hwnd, msg, lParam)) return 0;
         if (HandleDetailsPreviewPointer(s, hwnd, msg, wParam, lParam)) return 0;
@@ -2593,6 +2598,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return HandleLButtonDblClk(s, hwnd, msg, wParam, lParam);
 
     case WM_LBUTTONUP:
+        if (s) pulse::HoldPreviewButtonUp(*s);   // a peek closes on release
         if (HandleSidebarResize(s, hwnd, msg, lParam)) return 0;
         if (HandleDetailsPreviewPointer(s, hwnd, msg, wParam, lParam)) return 0;
         return HandleLButtonUp(s, hwnd, msg, wParam, lParam);

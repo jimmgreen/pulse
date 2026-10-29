@@ -274,7 +274,13 @@ public:
     void BlankClick(int index);   // 0 nothing, 1 back, 2 up
     void PreviewTrigger(int index);    // 0 hover card, 1 Space only
     void HoverPreviewDelay(int index); // 0.3 / 0.5 / 0.8 s
-    void HoverCardSize(int index);     // 0 small, 1 medium, 2 large
+    void HoverCardSize(int index);     // 0 small, 1 medium, 2 large, 3 extra large
+    // 快速预览 > 预览窗口 and 按住预览.
+    void PreviewSize(int index);       // app::kPreviewSize*; drops a remembered size
+    void TogglePreviewRememberSize();
+    void PreviewSpace(int index);      // 0 closes, 1 plays / pauses
+    void PreviewLoop(int index);       // app::kPreviewLoop*
+    void HoldPreview(int index);       // 0 off, 1..3: 0.3 / 0.5 / 0.8 s
     // 0 picks the default location's folder, 1 resets it to This PC.
     void HomeFolder(int action);
     void TextRendering(int index);

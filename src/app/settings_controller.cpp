@@ -951,8 +951,45 @@ void SettingsController::HoverPreviewDelay(int index) {
 }
 
 void SettingsController::HoverCardSize(int index) {
-    static constexpr int values[] = {kHoverCardSmall, kHoverCardMedium, kHoverCardLarge};
+    static constexpr int values[] = {kHoverCardSmall, kHoverCardMedium, kHoverCardLarge, kHoverCardXLarge};
     if (prefs_ && SelectValue(index, values, prefs_->hover_card_size))
+        SaveAndApply(SettingsEffect::None);
+}
+
+void SettingsController::PreviewSize(int index) {
+    static constexpr int values[] = {kPreviewSizeFit, kPreviewSizeStandard, kPreviewSizeLarge,
+                                     kPreviewSizeMaximized, kPreviewSizeFullScreen};
+    if (!prefs_) return;
+    const bool had_size = prefs_->preview_rect_w > 0;
+    if (!SelectValue(index, values, prefs_->preview_size) && !had_size) return;
+    // Picking a size here means that size, not the one dragged earlier.
+    prefs_->preview_rect_x = prefs_->preview_rect_y = prefs_->preview_rect_w = prefs_->preview_rect_h = 0;
+    SaveAndApply(SettingsEffect::None);
+}
+
+void SettingsController::TogglePreviewRememberSize() {
+    if (!prefs_) return;
+    prefs_->preview_remember_size = !prefs_->preview_remember_size;
+    if (!prefs_->preview_remember_size)
+        prefs_->preview_rect_x = prefs_->preview_rect_y = prefs_->preview_rect_w = prefs_->preview_rect_h = 0;
+    SaveAndApply(SettingsEffect::None);
+}
+
+void SettingsController::PreviewSpace(int index) {
+    if (!prefs_ || index < 0 || index > 1 || prefs_->preview_space_closes == (index == 0)) return;
+    prefs_->preview_space_closes = index == 0;
+    SaveAndApply(SettingsEffect::None);
+}
+
+void SettingsController::PreviewLoop(int index) {
+    static constexpr int values[] = {kPreviewLoopAnimations, kPreviewLoopAll, kPreviewLoopNone};
+    if (prefs_ && SelectValue(index, values, prefs_->preview_loop))
+        SaveAndApply(SettingsEffect::None);
+}
+
+void SettingsController::HoldPreview(int index) {
+    static constexpr int values[] = {0, 300, 500, 800};
+    if (prefs_ && SelectValue(index, values, prefs_->hold_preview_ms))
         SaveAndApply(SettingsEffect::None);
 }
 

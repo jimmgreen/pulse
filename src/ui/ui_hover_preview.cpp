@@ -35,7 +35,7 @@ constexpr float kBareTop = 14.0f;     // no preview: the tile starts the card
 constexpr float kMinCardWidth = 320.0f;  // the name, the type line and the three facts
 constexpr float kMinWellHeight = 96.0f;
 // 卡片尺寸 小 / 中 / 大: the base edge the shape is measured from.
-constexpr float kBaseEdge[3] = {280.0f, 380.0f, 500.0f};
+constexpr float kBaseEdge[4] = {280.0f, 380.0f, 500.0f, 660.0f};  // 小 / 中 / 大 / 特大
 constexpr float kZoom = 1.75f;        // Ctrl held
 
 // What the card shows, and so its shape.
@@ -286,10 +286,12 @@ void MainRenderer::DrawHoverPreview(const HoverPreviewView& view, const D2D1_REC
     const int laid_kind = hover_shape_kind_;
     const float laid_aspect = hover_shape_aspect_;
 
-    // Its size: the 小/中/大 base edge (much larger while Ctrl is held),
-    // never more than 45% of the window's width and 80% of its height.
-    float base = kBaseEdge[std::clamp(view.size_step, 0, 2)] * s;
-    float max_w = client_w * 0.45f, max_h = client_h * 0.8f;
+    // Its size: the 小/中/大/特大 base edge (much larger while Ctrl is held),
+    // never more than 45% of the window's width and 80% of its height (特大:
+    // 60% and 88%).
+    const bool xlarge = view.size_step >= 3;
+    float base = kBaseEdge[std::clamp(view.size_step, 0, 3)] * s;
+    float max_w = client_w * (xlarge ? 0.6f : 0.45f), max_h = client_h * (xlarge ? 0.88f : 0.8f);
     if (view.zoom) {
         base *= kZoom;
         max_w = client_w * 0.7f;
@@ -645,10 +647,11 @@ void MainRenderer::DrawHoverFolderCard(const HoverPreviewView& view, const D2D1_
     const uint64_t total = ready ? info->folders + info->files : 0;
     const size_t listed = ready ? info->items.size() : 0;
 
-    // Width: the 小/中/大 base edge (Ctrl: much larger), like a file's card.
-    float base = kBaseEdge[std::clamp(view.size_step, 0, 2)] * s;
-    float max_w = client_w * 0.45f, max_h = client_h * 0.8f;
-    int rows_cap = view.size_step <= 0 ? 6 : view.size_step == 1 ? 8 : 11;
+    // Width: the 小/中/大/特大 base edge (Ctrl: much larger), like a file's card.
+    const bool xlarge = view.size_step >= 3;
+    float base = kBaseEdge[std::clamp(view.size_step, 0, 3)] * s;
+    float max_w = client_w * (xlarge ? 0.6f : 0.45f), max_h = client_h * (xlarge ? 0.88f : 0.8f);
+    int rows_cap = view.size_step <= 0 ? 6 : view.size_step == 1 ? 8 : view.size_step == 2 ? 11 : 14;
     if (view.zoom) {
         base *= kZoom;
         max_w = client_w * 0.7f;

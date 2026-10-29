@@ -2541,7 +2541,11 @@ struct SettingsLayout {
     float integration_text_right = 0.0f;
     // Quick Look page: 预览方式 (hover card or Space) and the hover delay.
     D2D1_RECT_F trigger_section{}, trigger_row{}, trigger_choice[2]{}, hover_delay_row{}, hover_delay_choice[3]{};
-    D2D1_RECT_F hover_size_row{}, hover_size_choice[3]{};  // 卡片尺寸: 小 / 中 / 大
+    D2D1_RECT_F hover_size_row{}, hover_size_choice[4]{};  // 卡片尺寸: 小 / 中 / 大 / 特大
+    D2D1_RECT_F hold_row{}, hold_choice[4]{};              // 按住预览: 关 / 0.3 / 0.5 / 0.8 秒
+    // 预览窗口: the size it opens at, 记住我拖出来的大小, Space and loop.
+    D2D1_RECT_F window_section{}, preview_size_row{}, preview_size_choice[5]{}, preview_remember_row{};
+    D2D1_RECT_F space_row{}, space_choice[2]{}, loop_row{}, loop_choice[3]{};
     // Quick Look page: formats, source legend and system extensions.
     D2D1_RECT_F preview_section{}, preview_group{}, preview_formats{}, preview_legend{}, preview_legend_note{};
     D2D1_RECT_F preview_header_title{}, preview_header_summary{};

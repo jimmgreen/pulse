@@ -3344,6 +3344,7 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
+            ArmHoldPreview(*s, hit.index, POINT{mx, my});   // 按住预览 (off unless chosen)
             const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             app::Tab* tab = ActiveTab(*s);

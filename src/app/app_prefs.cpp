@@ -123,6 +123,13 @@ void AppPrefs::ResetToDefaults() {
     preview_trigger = kPreviewTriggerHover;
     hover_preview_delay_ms = 500;
     hover_card_size = kHoverCardMedium;
+    preview_size = kPreviewSizeFit;
+    preview_remember_size = true;
+    preview_rect_x = preview_rect_y = preview_rect_w = preview_rect_h = 0;
+    preview_space_closes = true;
+    preview_loop = kPreviewLoopAnimations;
+    hold_preview_ms = 0;
+    preview_key_hint_left = 3;
     change_tracking_enabled = false;
     change_tracking_days = 7;
     theme_mode = -1;
@@ -311,6 +318,18 @@ std::wstring AppPrefs::ToJson() const {
     out += L",\n  \"preview_trigger\":" + std::to_wstring(NormalizePreviewTrigger(preview_trigger));
     out += L",\n  \"hover_preview_delay_ms\":" + std::to_wstring(NormalizeHoverPreviewDelay(hover_preview_delay_ms));
     out += L",\n  \"hover_card_size\":" + std::to_wstring(NormalizeHoverCardSize(hover_card_size));
+    out += L",\n  \"preview_size\":" + std::to_wstring(NormalizePreviewSize(preview_size));
+    out += L",\n  \"preview_remember_size\":";
+    out += preview_remember_size ? L"true" : L"false";
+    out += L",\n  \"preview_rect_x\":" + std::to_wstring(preview_rect_x);
+    out += L",\n  \"preview_rect_y\":" + std::to_wstring(preview_rect_y);
+    out += L",\n  \"preview_rect_w\":" + std::to_wstring((std::max)(0, preview_rect_w));
+    out += L",\n  \"preview_rect_h\":" + std::to_wstring((std::max)(0, preview_rect_h));
+    out += L",\n  \"preview_space_closes\":";
+    out += preview_space_closes ? L"true" : L"false";
+    out += L",\n  \"preview_loop\":" + std::to_wstring(NormalizePreviewLoop(preview_loop));
+    out += L",\n  \"hold_preview_ms\":" + std::to_wstring(NormalizeHoldPreview(hold_preview_ms));
+    out += L",\n  \"preview_key_hint_left\":" + std::to_wstring(std::clamp(preview_key_hint_left, 0, 3));
     out += L",\n  \"change_tracking_enabled\":";
     out += change_tracking_enabled ? L"true" : L"false";
     out += L",\n  \"change_tracking_days\":";
@@ -573,6 +592,16 @@ bool AppPrefs::FromJson(const std::wstring& json) {
         pulse::json::ExtractInt(json, L"hover_preview_delay_ms", 500));
     hover_card_size = NormalizeHoverCardSize(
         pulse::json::ExtractInt(json, L"hover_card_size", kHoverCardMedium));
+    preview_size = NormalizePreviewSize(pulse::json::ExtractInt(json, L"preview_size", kPreviewSizeFit));
+    preview_remember_size = pulse::json::ExtractBool(json, L"preview_remember_size", true);
+    preview_rect_x = pulse::json::ExtractInt(json, L"preview_rect_x", 0);
+    preview_rect_y = pulse::json::ExtractInt(json, L"preview_rect_y", 0);
+    preview_rect_w = (std::max)(0, pulse::json::ExtractInt(json, L"preview_rect_w", 0));
+    preview_rect_h = (std::max)(0, pulse::json::ExtractInt(json, L"preview_rect_h", 0));
+    preview_space_closes = pulse::json::ExtractBool(json, L"preview_space_closes", true);
+    preview_loop = NormalizePreviewLoop(pulse::json::ExtractInt(json, L"preview_loop", kPreviewLoopAnimations));
+    hold_preview_ms = NormalizeHoldPreview(pulse::json::ExtractInt(json, L"hold_preview_ms", 0));
+    preview_key_hint_left = std::clamp(pulse::json::ExtractInt(json, L"preview_key_hint_left", 3), 0, 3);
     change_tracking_enabled = pulse::json::ExtractBool(json, L"change_tracking_enabled", false);
     change_tracking_days = pulse::json::ExtractInt(json, L"change_tracking_days", 7);
     if (change_tracking_days != 1 && change_tracking_days != 3 && change_tracking_days != 7)

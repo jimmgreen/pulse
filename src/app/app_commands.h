@@ -248,6 +248,20 @@ void ToggleQuickPreview(AppState& s);
 void NavigateQuickPreview(AppState& s, int direction);
 // File verb requested from inside the quick preview (WM_QUICK_PREVIEW_COMMAND).
 void HandleQuickPreviewCommand(AppState& s, const ui::QuickPreviewCommand& command);
+// Quick Look on `item` (the focused tab's selected row); activate false: the
+// press-and-hold peek, which leaves the focus and the mouse with Pulse.
+void OpenQuickPreview(AppState& s, const ui::QuickPreviewItem& item, bool activate);
+// 按住预览 (Settings > 快速预览): a press on a file row arms it; the preview
+// opens if the button is still down after the delay and the pointer stayed
+// within the drag threshold, and closes on release. Space pins it open.
+void ArmHoldPreview(AppState& s, int index, POINT client);
+void HoldPreviewMouseMove(AppState& s, POINT client);
+void HoldPreviewButtonUp(AppState& s);
+void HoldPreviewTimer(AppState& s);
+bool HoldPreviewPin(AppState& s);
+constexpr UINT_PTR kHoldPreviewTimer = 0x48504B;   // 'HPK'
+// Settings > 快速预览 > 预览窗口, as Quick Look takes it (set before Show).
+ui::QuickPreviewOptions QuickPreviewOptionsFromPrefs(const app::AppPrefs& prefs);
 // Keeps an open quick preview in step with the focused listing after a
 // snapshot refresh or directory notification: reloads a changed file,
 // re-anchors after an in-preview delete, closes when the entry is gone.

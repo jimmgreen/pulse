@@ -973,7 +973,7 @@ enum class PackAction : int {
     ArchiveInstall, ArchiveRemove, ArchiveEnable,
     TriggerHover, TriggerSpace,                         // 预览方式: hover card / Space only
     HoverDelayShort, HoverDelayMedium, HoverDelayLong,  // 悬停延迟: 0.3 / 0.5 / 0.8 s
-    HoverSizeSmall, HoverSizeMedium, HoverSizeLarge,    // 卡片尺寸: 小 / 中 / 大
+    HoverSizeSmall, HoverSizeMedium, HoverSizeLarge, HoverSizeXLarge,  // 卡片尺寸: 小 / 中 / 大 / 特大
     Update, ImagesUpdate, RawUpdate, ArchiveUpdate,     // 更新到: the catalog's newer release
     AutoUpdate,         // 自动更新增强包: on / off
     UpdateAll,          // 增强包 page: 全部更新 (every pack with a newer release)
@@ -986,6 +986,12 @@ enum class PackAction : int {
     AiManage,           // AI pack: open 增强包 > AI 与 MCP (kSettingsPageAi)
     DownloadSource,     // 高级 > 下载源: the drop-down
     SpeedTest,          // 测速: (re)run the probe of every source
+    // 快速预览 > 预览窗口 and 按住预览.
+    PreviewSizeFit, PreviewSizeStandard, PreviewSizeLarge, PreviewSizeMaximized, PreviewSizeFullScreen,
+    PreviewRememberSize,                 // 记住我拖出来的大小: on / off
+    SpaceClose, SpacePlayPause,          // 空格键（视频和动图）
+    LoopAnimations, LoopAll, LoopNone,   // 循环播放: 仅动图 / 动图和视频 / 不循环
+    HoldOff, HoldShort, HoldMedium, HoldLong,  // 按住预览: 关 / 0.3 / 0.5 / 0.8 s
 };
 
 // A tab dragged out of another window, over this one (multi-window M7h): the
@@ -1341,7 +1347,12 @@ struct WindowViewModel {
     int settings_blank_click_action = 0;   // app/blank_pane_click.h
     int settings_preview_trigger = 0;      // app::kPreviewTrigger*
     int settings_hover_delay_ms = 500;     // 300 / 500 / 800
-    int settings_hover_card_size = 1;      // 0 small, 1 medium, 2 large
+    int settings_hover_card_size = 1;      // 0 small, 1 medium, 2 large, 3 extra large
+    int settings_preview_size = 0;         // app::kPreviewSize*
+    bool settings_preview_remember = true; // 记住我拖出来的大小
+    bool settings_preview_space_closes = true;
+    int settings_preview_loop = 0;         // app::kPreviewLoop*
+    int settings_hold_preview_ms = 0;      // 0 off, 300 / 500 / 800
     bool settings_change_tracking = false;
     int settings_change_days = 3;
     int settings_row_height = 34; // current row-height pref (DIPs) for density radios

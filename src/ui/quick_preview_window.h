@@ -32,12 +32,19 @@ public:
                     UINT command_message = 0);
     // zoom_from: screen point of the previewed item's icon; the window grows
     // out of it and shrinks back into it on Close (ui_motion.h rules).
+    // activate false: the press-and-hold peek; focus and the mouse stay with
+    // the owner and media start muted until Activate.
     void Show(const QuickPreviewItem& item, bool dark, WindowEffect effect, bool safe_mode,
-              const POINT* zoom_from = nullptr);
+              const POINT* zoom_from = nullptr, bool activate = true);
+    void Activate();
     void Update(const QuickPreviewItem& item);
     void SetStarred(bool starred);
     // The app's accent colour (open button); call before Show.
     void SetAccent(const D2D1_COLOR_F& accent);
+    // Settings > 快速预览 > 预览窗口; call before Show. What the window changes
+    // itself is reported with QuickPreviewAction::SaveOptions.
+    void SetOptions(const QuickPreviewOptions& options) { options_ = options; }
+    const QuickPreviewOptions& options() const noexcept { return options_; }
     // The FFmpeg preview pack offer on the codec cards; repaints on change.
     void SetMediaPackOffer(const MediaPackOffer& offer);
     // A pack was installed: a file it can play now is opened again.
@@ -63,7 +70,7 @@ private:
     friend struct PreviewDeadlineProbe;
     // Pages: multi-page PDF / AI read as a continuous scroll (quick_preview_pages.cpp).
     enum class NativeKind { None, Bitmap, Text, Hex, Archive, Pages, Markdown, Table, Tree };
-    enum class ChromeButton { None, Prev, Next, More, Open };
+    enum class ChromeButton { None, Prev, Next, More, Open, Size };
 
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
     LRESULT HandleMessage(UINT message, WPARAM wparam, LPARAM lparam);
@@ -217,6 +224,37 @@ private:
     void PaintFindEditLuma(HWND hwnd, HDC hdc);
     LRESULT ForwardFindEditKeepLuma(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
     void ShowContextMenu(POINT screen);
+    // Window size presets (Settings > 快速预览 > 预览窗口, the header's size
+    // button, Ctrl+1/2/3, F).
+    void ShowSizeMenu(POINT screen);
+    void ChooseSizeMode(int mode);           // menu / Ctrl+1..3: also the new default
+    // The rect for the current item: the remembered size, else the preset's
+    // (适应内容 sets fit_pending_ when the size is only known after decoding).
+    RECT PlanRect(int mode, POINT centre, bool use_remembered);
+    void ApplyRect(const RECT& rect);
+    POINT WindowCentre() const;
+    void EnterFullScreen();
+    void LeaveFullScreen(bool restore_rect);
+    bool ContentPixelSize(uint32_t& width, uint32_t& height) const;  // decoded / probed
+    bool ProbeContentSize(uint32_t& width, uint32_t& height) const;  // file header only
+    int SizingChromeHeight() const;
+    void FitToContent(uint32_t width, uint32_t height);              // 适应内容, keeps the centre
+    void ReportOptions();
+    void ToggleLoop();
+    bool AnimationLoops() const noexcept { return options_.loop != 2; }
+    bool VideoLoops() const noexcept { return options_.loop == 1; }
+    QuickPreviewOptions options_;
+    bool fullscreen_ = false;
+    RECT pre_fullscreen_{};
+    bool user_sized_ = false;     // resized by hand since Show: presets leave the size alone
+    bool fit_pending_ = false;    // 适应内容 waits for the decoded picture / video size
+    RECT size_move_start_{};
+    ULONGLONG video_loop_at_ = 0;
+    uint32_t fit_w_ = 0, fit_h_ = 0;   // 适应内容 from the first frame (kFitTimer)
+    // "Space closes · K pauses · L loops" in a video's footer, for the first
+    // few videos after Space started closing them.
+    ULONGLONG key_hint_until_ = 0;
+    void StartKeyHint();
     QuickPreviewItem ActionTarget() const;
     void PostAction(QuickPreviewAction action, const QuickPreviewItem* target = nullptr);
     D2D1_RECT_F ChromeButtonRect(ChromeButton button) const;
@@ -230,7 +268,7 @@ private:
     // Unified header and footer (quick_preview_chrome.cpp).
     struct HeaderLayout {
         D2D1_RECT_F badge{}, name{}, meta{}, tools{}, separator{}, prev{}, counter{}, next{},
-            open{}, more{}, close{};
+            open{}, more{}, size{}, close{};
         bool meta_visible = true;     // narrow windows drop the meta line first,
         bool tools_visible = true;    // then fold the type tools into the more menu,
         bool open_text = true;        // then show only the open button's icon,
@@ -304,7 +342,8 @@ private:
     Compositor compositor_;
     // Room for every visible PDF page at full size plus the thumbnail strip;
     // a smaller budget would evict an on-screen page and re-request it forever.
-    ThumbnailCache thumbnails_{48ull * 1024ull * 1024ull, 192};
+    // Room for a few full-window pictures (a 4K window's frame is ~32 MB).
+    ThumbnailCache thumbnails_{160ull * 1024ull * 1024ull, 192};
     PreviewHandlerHost handler_;
     VideoPreview video_;
     AudioWaveform waveform_;

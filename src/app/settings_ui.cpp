@@ -427,7 +427,27 @@ bool HandleSettingsControl(AppState& s,const H& hit) {
         case ui::PackAction::HoverSizeSmall:
         case ui::PackAction::HoverSizeMedium:
         case ui::PackAction::HoverSizeLarge:
+        case ui::PackAction::HoverSizeXLarge:
             s.settings.HoverCardSize(hit.index-static_cast<int>(ui::PackAction::HoverSizeSmall));break;
+        case ui::PackAction::PreviewSizeFit:
+        case ui::PackAction::PreviewSizeStandard:
+        case ui::PackAction::PreviewSizeLarge:
+        case ui::PackAction::PreviewSizeMaximized:
+        case ui::PackAction::PreviewSizeFullScreen:
+            s.settings.PreviewSize(hit.index-static_cast<int>(ui::PackAction::PreviewSizeFit));break;
+        case ui::PackAction::PreviewRememberSize: s.settings.TogglePreviewRememberSize();break;
+        case ui::PackAction::SpaceClose:
+        case ui::PackAction::SpacePlayPause:
+            s.settings.PreviewSpace(hit.index-static_cast<int>(ui::PackAction::SpaceClose));break;
+        case ui::PackAction::LoopAnimations:
+        case ui::PackAction::LoopAll:
+        case ui::PackAction::LoopNone:
+            s.settings.PreviewLoop(hit.index-static_cast<int>(ui::PackAction::LoopAnimations));break;
+        case ui::PackAction::HoldOff:
+        case ui::PackAction::HoldShort:
+        case ui::PackAction::HoldMedium:
+        case ui::PackAction::HoldLong:
+            s.settings.HoldPreview(hit.index-static_cast<int>(ui::PackAction::HoldOff));break;
         case ui::PackAction::Browse: {
             ui::FolderPickerSpec spec;spec.mode=ui::PickerMode::File;
             spec.title=l10n::Get(l10n::StringId::ChooseFfmpegExe).c_str();

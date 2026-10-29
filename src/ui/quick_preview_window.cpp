@@ -11,6 +11,7 @@
 #include "../common/text_format.h"
 #include "../ipc/preview_protocol.h"
 #include "../ops/clipboard.h"
+#include "quick_preview_sizing.h"
 #include "fluent_components.h"
 #include "lumatext_renderer.h"
 #include "syntax_highlight.h"
@@ -71,6 +72,7 @@ constexpr UINT_PTR kPreviewDeadlineTimer = 31;
 constexpr UINT_PTR kFindEditCaretTimer = 71;
 constexpr UINT_PTR kZoomCloseTimer = 72;
 constexpr UINT_PTR kNavSlideTimer = 74;  // the next item slides in (motion phase 6)
+constexpr UINT_PTR kFitTimer = 75;       // 适应内容 once the first frame tells the size
 constexpr double kZoomOpenSeconds = 0.22;
 constexpr double kZoomCloseSeconds = 0.15;
 constexpr float kMaxDecodedZoom = 4.0f;
@@ -98,6 +100,8 @@ enum {
     kArchiveCmdCopyPath,
     kViewCmdFirst,       // + 0 / 1: the header's view toggle, folded into the menu
     kViewCmdSecond,
+    kSizeCmdFirst = 60,  // + PreviewSizeMode: the header's window size menu
+    kSizeCmdRemember = 70,
     kFileCmdBase = 100,  // + static_cast<int>(QuickPreviewAction)
 };
 
@@ -299,7 +303,7 @@ void QuickPreviewWindow::RecreateFormats() {
 }
 
 void QuickPreviewWindow::Show(const QuickPreviewItem& item, bool dark, WindowEffect effect,
-                              bool safe_mode, const POINT* zoom_from) {
+                              bool safe_mode, const POINT* zoom_from, bool activate) {
     if (!hwnd_ || item.path.empty()) return;
     if (closing_) {
         // Re-opened while the close zoom is still running.
@@ -326,14 +330,23 @@ void QuickPreviewWindow::Show(const QuickPreviewItem& item, bool dark, WindowEff
     ResetAnimation();
     icon_request_ = 0; icon_sizes_.clear(); icon_selected_ = -1; icon_pill_rects_.clear();
     BeginVideo();
+    if (!activate && video_.active()) video_.SetMuted(true);   // a peek is silent
+    StartKeyHint();
     RECT owner_rect{};
     GetWindowRect(owner_, &owner_rect);
-    const int owner_width = owner_rect.right - owner_rect.left;
-    const int owner_height = owner_rect.bottom - owner_rect.top;
-    const int width = std::clamp(static_cast<int>(owner_width * 0.82), 640, 1280);
-    const int height = std::clamp(static_cast<int>(owner_height * 0.82), 480, 900);
-    const int x = owner_rect.left + (owner_width - width) / 2;
-    const int y = owner_rect.top + (owner_height - height) / 2;
+    // Size: Settings > 快速预览 > 预览窗口 (a remembered drag wins), centred
+    // on Pulse's window.
+    LeaveFullScreen(false);
+    user_sized_ = false;
+    fit_pending_ = false;
+    KillTimer(hwnd_, kFitTimer);
+    const POINT owner_centre{(owner_rect.left + owner_rect.right) / 2, (owner_rect.top + owner_rect.bottom) / 2};
+    const bool full_screen = options_.size_mode == static_cast<int>(PreviewSizeMode::FullScreen);
+    const RECT placed = PlanRect(full_screen ? static_cast<int>(PreviewSizeMode::Fit) : options_.size_mode,
+                                 owner_centre, true);
+    const int x = placed.left, y = placed.top;
+    const int width = (std::max)(1L, placed.right - placed.left);
+    const int height = (std::max)(1L, placed.bottom - placed.top);
     SetWindowTextW(hwnd_, item_.name.empty()
         ? pulse::l10n::Get(pulse::l10n::StringId::QuickPreview).c_str() : PreviewTitle(item_).c_str());
     // Zoom out of the item's icon. Only with a plain (None) window effect:
@@ -354,14 +367,22 @@ void QuickPreviewWindow::Show(const QuickPreviewItem& item, bool dark, WindowEff
     const bool was_visible = IsWindowVisible(hwnd_) != FALSE;
     SetWindowPos(hwnd_, HWND_TOP, x, y, width, height,
                  was_visible ? 0u : static_cast<UINT>(SWP_NOACTIVATE));
+    if (full_screen) EnterFullScreen();
     if (!was_visible) Render();
-    ShowWindow(hwnd_, SW_SHOW);
-    SetForegroundWindow(hwnd_);
+    ShowWindow(hwnd_, activate ? SW_SHOW : SW_SHOWNOACTIVATE);
+    if (activate) SetForegroundWindow(hwnd_);
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 // Prev / next: remember the direction so the item that answers slides in
 // from that side (pulse_motion_v2.html quick preview, spring Smooth).
+// A peek pinned with Space: it takes the keyboard and its sound back.
+void QuickPreviewWindow::Activate() {
+    if (!visible()) return;
+    if (video_.active()) video_.SetMuted(playback_muted_);
+    SetForegroundWindow(hwnd_);
+}
+
 void QuickPreviewWindow::PostNavigate(int dir) {
     if (!owner_ || !navigate_message_) return;
     pending_nav_dir_ = dir;
@@ -397,6 +418,18 @@ void QuickPreviewWindow::Update(const QuickPreviewItem& item) {
     icon_request_ = 0; icon_sizes_.clear(); icon_selected_ = -1; icon_pill_rects_.clear();
     handler_.Reset();
     BeginVideo();
+    if (!same) StartKeyHint();
+    // 适应内容 follows each item's shape around the window's centre, unless
+    // the window was sized by hand, maximized or is full screen.
+    fit_pending_ = false;
+    KillTimer(hwnd_, kFitTimer);
+    const RECT& kept = options_.remembered;
+    const bool remembered = options_.remember_size && kept.right > kept.left && kept.bottom > kept.top;
+    if (!same && !fullscreen_ && !user_sized_ && !remembered && !IsZoomed(hwnd_) &&
+        options_.size_mode == static_cast<int>(PreviewSizeMode::Fit)) {
+        const RECT next = PlanRect(options_.size_mode, WindowCentre(), false);
+        if (!fit_pending_) ApplyRect(next);   // pending: keep the size until the first frame
+    }
     SetWindowTextW(hwnd_, item_.name.empty()
         ? pulse::l10n::Get(pulse::l10n::StringId::QuickPreview).c_str() : PreviewTitle(item_).c_str());
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -410,6 +443,9 @@ void QuickPreviewWindow::SetStarred(bool starred) {
 void QuickPreviewWindow::Close() {
     if (!hwnd_ || closing_) return;
     commands_.Clear();
+    fit_pending_ = false;
+    KillTimer(hwnd_, kFitTimer);
+    LeaveFullScreen(false);   // the next Show places the window again
     handler_.Hide();
     ResetAnimation();
     ResetView();
@@ -503,6 +539,7 @@ D2D1_RECT_F QuickPreviewWindow::ChromeButtonRect(ChromeButton button) const {
     case ChromeButton::Next: return header_.next;
     case ChromeButton::More: return header_.more;
     case ChromeButton::Open: return header_.open;
+    case ChromeButton::Size: return header_.size;
     default: return D2D1::RectF(0, 0, 0, 0);
     }
 }
@@ -572,8 +609,9 @@ void QuickPreviewWindow::DrawMarkdownToggle(ID2D1DeviceContext* dc,
 QuickPreviewWindow::ChromeButton QuickPreviewWindow::HitChromeButton(POINT client) const {
     const float x = static_cast<float>(client.x);
     const float y = static_cast<float>(client.y);
+    if (fullscreen_) return ChromeButton::None;
     for (ChromeButton button : {ChromeButton::Prev, ChromeButton::Next, ChromeButton::Open,
-                                ChromeButton::More}) {
+                                ChromeButton::Size, ChromeButton::More}) {
         const D2D1_RECT_F rect = ChromeButtonRect(button);
         if (x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom) return button;
     }
@@ -602,8 +640,238 @@ void QuickPreviewWindow::ActivateChromeButton(ChromeButton button) {
         ShowContextMenu(screen);
         break;
     }
+    case ChromeButton::Size: {
+        const D2D1_RECT_F rect = ChromeButtonRect(ChromeButton::Size);
+        POINT screen{static_cast<LONG>(rect.left), static_cast<LONG>(rect.bottom)};
+        ClientToScreen(hwnd_, &screen);
+        ShowSizeMenu(screen);
+        break;
+    }
     default:
         break;
+    }
+}
+
+// ---- Window size presets ---------------------------------------------------
+
+POINT QuickPreviewWindow::WindowCentre() const {
+    RECT now{};
+    GetWindowRect(hwnd_, &now);
+    return POINT{(now.left + now.right) / 2, (now.top + now.bottom) / 2};
+}
+
+int QuickPreviewWindow::SizingChromeHeight() const {
+    // Videos and animated pictures both carry the transport bar under the picture.
+    const bool bar = (video_.active() && !VideoPreview::IsAudio(item_.path)) || frame_count_ > 1;
+    const float playback = bar ? PlaybackHeight() : 0.0f;
+    return static_cast<int>(std::lround(HeaderHeight() + FooterHeight() + playback));
+}
+
+bool QuickPreviewWindow::ProbeContentSize(uint32_t& width, uint32_t& height) const {
+    width = height = 0;
+    if (!image_item_ || item_.path.empty() || (item_.attrs & FILE_ATTRIBUTE_DIRECTORY) ||
+        OfflinePlaceholder()) return false;
+    // Network files can stall the UI thread: their first frame sizes them.
+    std::wstring path = item_.path;
+    if (path.rfind(L"\\\\?\\", 0) == 0) path.erase(0, 4);
+    if (path.rfind(L"\\\\", 0) == 0 || path.rfind(L"UNC\\", 0) == 0) return false;
+    if (path.size() >= 2 && path[1] == L':') {
+        const wchar_t root[4] = {path[0], L':', L'\\', 0};
+        if (GetDriveTypeW(root) == DRIVE_REMOTE) return false;
+    }
+    HANDLE file = CreateFileW(item_.path.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    std::vector<uint8_t> head(128 * 1024);   // JPEG EXIF blocks come before the frame header
+    DWORD read = 0;
+    const BOOL ok = ReadFile(file, head.data(), static_cast<DWORD>(head.size()), &read, nullptr);
+    CloseHandle(file);
+    return ok && ProbeImageSize(head.data(), read, width, height);
+}
+
+bool QuickPreviewWindow::ContentPixelSize(uint32_t& width, uint32_t& height) const {
+    if (image_item_ && (source_w_ || decoded_w_)) {
+        width = source_w_ ? source_w_ : decoded_w_;
+        height = source_w_ ? source_h_ : decoded_h_;
+        if (image_turns_ & 1) std::swap(width, height);
+        return width && height;
+    }
+    if (video_.active()) {
+        if (VideoPreview::IsAudio(item_.path)) return false;
+        const auto state = video_.Snapshot();
+        width = state.width;
+        height = state.height;
+        return width && height;
+    }
+    return ProbeContentSize(width, height);
+}
+
+RECT QuickPreviewWindow::PlanRect(int mode, POINT centre, bool use_remembered) {
+    PreviewSizeInput in;
+    in.mode = static_cast<PreviewSizeMode>(std::clamp(mode, 0, 4));
+    MONITORINFO info{sizeof(info)};
+    GetMonitorInfoW(MonitorFromPoint(centre, MONITOR_DEFAULTTONEAREST), &info);
+    in.work = info.rcWork;
+    in.centre = centre;
+    in.chrome_h = SizingChromeHeight();
+    in.scale = scale_;
+    const RECT& kept = options_.remembered;
+    if (use_remembered && options_.remember_size && kept.right > kept.left && kept.bottom > kept.top) {
+        in.remembered_w = kept.right - kept.left;
+        in.remembered_h = kept.bottom - kept.top;
+    } else if (in.mode == PreviewSizeMode::Fit && !(item_.attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+        uint32_t w = 0, h = 0;
+        if (ContentPixelSize(w, h)) {
+            in.content_w = static_cast<int>(w);
+            in.content_h = static_cast<int>(h);
+        } else if (video_.active() && !VideoPreview::IsAudio(item_.path)) {
+            in.content_w = 1920;   // 16:9 until the video reports its size
+            in.content_h = 1080;
+            fit_pending_ = true;
+        } else if (image_item_) {
+            fit_pending_ = true;   // 标准 until the first frame
+        }
+    }
+    return PreviewWindowRect(in);
+}
+
+void QuickPreviewWindow::ApplyRect(const RECT& rect) {
+    if (!hwnd_ || rect.right <= rect.left || rect.bottom <= rect.top) return;
+    RECT now{};
+    GetWindowRect(hwnd_, &now);
+    if (EqualRect(&now, &rect)) return;
+    SetWindowPos(hwnd_, nullptr, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top,
+                 SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+void QuickPreviewWindow::FitToContent(uint32_t width, uint32_t height) {
+    if (!visible() || !width || !height || fullscreen_ || user_sized_ || IsZoomed(hwnd_) ||
+        options_.size_mode != static_cast<int>(PreviewSizeMode::Fit)) return;
+    PreviewSizeInput in;
+    in.mode = PreviewSizeMode::Fit;
+    in.centre = WindowCentre();
+    MONITORINFO info{sizeof(info)};
+    GetMonitorInfoW(MonitorFromPoint(in.centre, MONITOR_DEFAULTTONEAREST), &info);
+    in.work = info.rcWork;
+    in.chrome_h = SizingChromeHeight();
+    in.scale = scale_;
+    in.content_w = static_cast<int>(width);
+    in.content_h = static_cast<int>(height);
+    ApplyRect(PreviewWindowRect(in));
+}
+
+void QuickPreviewWindow::ChooseSizeMode(int mode) {
+    mode = std::clamp(mode, 0, 4);
+    options_.size_mode = mode;
+    options_.remembered = RECT{};   // a preset replaces the dragged size
+    user_sized_ = false;
+    fit_pending_ = false;
+    if (mode == static_cast<int>(PreviewSizeMode::FullScreen)) {
+        EnterFullScreen();
+    } else {
+        LeaveFullScreen(false);
+        if (IsZoomed(hwnd_)) ShowWindow(hwnd_, SW_RESTORE);
+        ApplyRect(PlanRect(mode, WindowCentre(), false));
+    }
+    ReportOptions();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void QuickPreviewWindow::EnterFullScreen() {
+    if (!hwnd_ || fullscreen_) return;
+    if (IsZoomed(hwnd_)) ShowWindow(hwnd_, SW_RESTORE);
+    GetWindowRect(hwnd_, &pre_fullscreen_);
+    MONITORINFO info{sizeof(info)};
+    if (!GetMonitorInfoW(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST), &info)) return;
+    fullscreen_ = true;
+    const DWORD corner = DWMWCP_DONOTROUND;
+    DwmSetWindowAttribute(hwnd_, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
+    const RECT& m = info.rcMonitor;
+    SetWindowPos(hwnd_, HWND_TOP, m.left, m.top, m.right - m.left, m.bottom - m.top,
+                 SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    if (find_open_) LayoutFindEdit();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void QuickPreviewWindow::LeaveFullScreen(bool restore_rect) {
+    if (!hwnd_ || !fullscreen_) return;
+    fullscreen_ = false;
+    const DWORD corner = DWMWCP_ROUND;
+    DwmSetWindowAttribute(hwnd_, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
+    if (restore_rect) ApplyRect(pre_fullscreen_);
+    if (find_open_) LayoutFindEdit();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void QuickPreviewWindow::StartKeyHint() {
+    key_hint_until_ = 0;
+    if (!video_.active() || VideoPreview::IsAudio(item_.path) || !options_.space_closes ||
+        options_.key_hint_left <= 0) return;
+    key_hint_until_ = GetTickCount64() + 5000;
+    --options_.key_hint_left;
+    ReportOptions();
+}
+
+void QuickPreviewWindow::ReportOptions() {
+    if (item_.path.empty()) return;
+    const QuickPreviewItem target = item_;
+    PostAction(QuickPreviewAction::SaveOptions, &target);
+}
+
+void QuickPreviewWindow::ToggleLoop() {
+    // The three choices nest (不循环 < 仅动图 < 动图和视频), so L steps along
+    // them: a looping video implies looping animations, and vice versa.
+    const bool video = video_.active();
+    if (video) options_.loop = VideoLoops() ? 0 : 1;
+    else options_.loop = AnimationLoops() ? 2 : 0;
+    const bool on = video ? VideoLoops() : AnimationLoops();
+    playback_note_ = pulse::l10n::Get(on ? pulse::l10n::StringId::PreviewLoopOn
+                                         : pulse::l10n::StringId::PreviewLoopOff);
+    playback_note_until_ = GetTickCount64() + 1500;
+    // Turning it back on wakes an animation that stopped on its last frame.
+    if (!video && on && !animation_active_ && frame_count_ > 1 && frame_index_ + 1 >= frame_count_)
+        TogglePlayback();
+    ReportOptions();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void QuickPreviewWindow::ShowSizeMenu(POINT screen) {
+    if (!text_menu_.Create(hwnd_, &compositor_, scale_)) return;
+    text_menu_.SetTheme(dark_, accent_);
+    text_menu_.SetTopmost(native_kind_ == NativeKind::None);
+    using pulse::l10n::StringId;
+    static constexpr StringId kLabels[5] = {StringId::PreviewSizeFit, StringId::PreviewSizeStandard,
+        StringId::PreviewSizeLarge, StringId::PreviewSizeMaximized, StringId::PreviewSizeFullScreen};
+    static constexpr const wchar_t* kKeys[5] = {L"", L"Ctrl+1", L"Ctrl+2", L"Ctrl+3", L"F"};
+    const int current = fullscreen_ ? 4 : std::clamp(options_.size_mode, 0, 4);
+    std::vector<FluentMenuItem> items;
+    for (int i = 0; i < 5; ++i) {
+        FluentMenuItem item;
+        item.command = kSizeCmdFirst + i;
+        item.text = pulse::l10n::Get(kLabels[i]);
+        item.shortcut = kKeys[i];
+        item.radio_group = true;
+        item.radio = i == current;
+        item.separator_after = i == 4;
+        items.push_back(std::move(item));
+    }
+    FluentMenuItem remember;
+    remember.command = kSizeCmdRemember;
+    remember.text = pulse::l10n::Get(StringId::PreviewRememberSize);
+    remember.glyph = L"\xE81C";
+    remember.toggle = true;
+    remember.checked = options_.remember_size;
+    items.push_back(std::move(remember));
+    const uint64_t menu_generation = generation_;
+    const int cmd = text_menu_.TrackPopup(screen, std::move(items));
+    if (!visible() || menu_generation != generation_) return;
+    if (cmd >= kSizeCmdFirst && cmd < kSizeCmdFirst + 5) {
+        ChooseSizeMode(cmd - kSizeCmdFirst);
+    } else if (cmd == kSizeCmdRemember) {
+        options_.remember_size = !options_.remember_size;
+        if (!options_.remember_size) options_.remembered = RECT{};
+        ReportOptions();
     }
 }
 
@@ -1903,7 +2171,9 @@ void QuickPreviewWindow::Render() {
     const D2D1_COLOR_F foreground = palette.ink;
     const D2D1_COLOR_F secondary = high_contrast ? foreground
         : dark_ ? D2D1::ColorF(0xB8B8B8) : D2D1::ColorF(0x606060);
-    dc->Clear(background);
+    // Full screen: pictures and videos sit on black.
+    dc->Clear(fullscreen_ && !high_contrast && (image_item_ || video_.active())
+        ? D2D1::ColorF(0x000000) : background);
     ComPtr<ID2D1SolidColorBrush> text_brush;
     ComPtr<ID2D1SolidColorBrush> secondary_brush;
     dc->CreateSolidColorBrush(foreground, &text_brush);
@@ -1999,7 +2269,9 @@ void QuickPreviewWindow::Render() {
                 else if (property.label == L"编码格式" && shown.codec_name.empty()) shown.codec_name = property.value;
             }
             SetMediaFooter(shown, std::move(facts));
-            if (video.ready && SUCCEEDED(video.error))
+            if (video.ready && SUCCEEDED(video.error) && GetTickCount64() < key_hint_until_)
+                footer_hint_ = pulse::l10n::Get(pulse::l10n::StringId::PreviewKeyHint);
+            else if (video.ready && SUCCEEDED(video.error))
                 footer_hint_ = pulse::l10n::Get(video.ffmpeg ? pulse::l10n::StringId::PreviewDecodeFfmpeg
                                                              : pulse::l10n::StringId::PreviewDecodeSystem);
         }
@@ -2134,7 +2406,13 @@ void QuickPreviewWindow::Render() {
             InvalidateRect(hwnd_, nullptr, FALSE);
         } else if (result == PreviewDrawResult::Bitmap && reported_frame_count > 1 &&
                    (kImageExtras || ExtensionLabel(item_.path) == L"GIF")) {
-            if (frame_count_ <= 1) InvalidateRect(hwnd_, nullptr, FALSE);
+            if (frame_count_ <= 1) {
+                InvalidateRect(hwnd_, nullptr, FALSE);
+                // It animates: 适应内容 makes room for the transport bar it now shows.
+                fit_w_ = source_w_ ? source_w_ : decoded_w_;
+                fit_h_ = source_w_ ? source_h_ : decoded_h_;
+                if (fit_w_ && fit_h_) SetTimer(hwnd_, kFitTimer, 1, nullptr);
+            }
             frame_count_ = reported_frame_count;
             frame_delay_ms_ = std::clamp(reported_delay_ms, 20u, 2000u);
             loop_count_ = reported_loop_count;
@@ -2170,6 +2448,13 @@ void QuickPreviewWindow::Render() {
         }
         if (result == PreviewDrawResult::Bitmap) {
             native_kind_ = NativeKind::Bitmap;
+            if (fit_pending_ && image_item_ && !icon) {
+                // 适应内容 for a picture whose header could not be read.
+                fit_pending_ = false;
+                fit_w_ = source_w_ ? source_w_ : decoded_w_;
+                fit_h_ = source_w_ ? source_h_ : decoded_h_;
+                if (fit_w_ && fit_h_) SetTimer(hwnd_, kFitTimer, 1, nullptr);
+            }
             SetImageFooter(content);
             // The first decoded frame tells the backdrop where (and whether) to draw.
             if (!backdrop && !icon && image_item_ && ImageBackdropWanted())
@@ -2430,8 +2715,10 @@ void QuickPreviewWindow::Render() {
     // The shell stays put while the content slides.
     LayoutHeader();
     DrawInfoDrawer(dc, palette);
-    DrawHeader(dc, palette);
-    DrawFooter(dc, palette);
+    if (!fullscreen_) {
+        DrawHeader(dc, palette);
+        DrawFooter(dc, palette);
+    }
     SchedulePreviewDeadline();
     {
         // Frame building only; EndDraw's flush and Present wait on the GPU and vsync.
@@ -2482,6 +2769,7 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
         if (wparam) return 0;
         break;
     case WM_NCHITTEST: {
+        if (fullscreen_) return HTCLIENT;   // no frame to drag or size
         POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         ScreenToClient(hwnd_, &point);
         RECT client{};
@@ -2949,6 +3237,11 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
             else KillTimer(hwnd_, kZoomCloseTimer);
             return 0;
         }
+        if (wparam == kFitTimer) {
+            KillTimer(hwnd_, kFitTimer);
+            FitToContent(fit_w_, fit_h_);
+            return 0;
+        }
         if (wparam == kNavSlideTimer) {
             if (nav_dir_ != 0 && visible()) InvalidateRect(hwnd_, nullptr, FALSE);
             else KillTimer(hwnd_, kNavSlideTimer);
@@ -2959,13 +3252,30 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
             return 0;
         }
         if (wparam == 8 && video_.active()) {
+            if (fit_pending_ || VideoLoops()) {
+                const auto state = video_.Snapshot();
+                if (fit_pending_ && state.ready && state.width && state.height) {
+                    fit_pending_ = false;
+                    FitToContent(state.width, state.height);
+                }
+                // 循环播放: start again from the beginning once it ends.
+                const ULONGLONG now = GetTickCount64();
+                if (VideoLoops() && state.ready && state.ended && SUCCEEDED(state.error) &&
+                    now - video_loop_at_ > 500) {
+                    video_loop_at_ = now;
+                    video_.Seek(0.0);
+                    video_.Play(true);
+                }
+            }
             if (visible() && !IsIconic(hwnd_)) InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         }
         if (wparam == kAnimationTimer && animation_active_ && visible()) {
             if (frame_count_ > 1 && !waiting_for_frame_ && !playback_scrub_pending_) {
                 if (frame_index_ + 1 >= frame_count_) {
-                    if (loop_count_ != 0 && completed_loops_ >= loop_count_) {
+                    // 循环播放 off: finish this pass and rest on the last frame (most
+                    // files ask to loop forever, so the file's own count cannot decide).
+                    if (!AnimationLoops()) {
                         animation_active_ = false;
                         KillTimer(hwnd_, kAnimationTimer);
                         InvalidateRect(hwnd_, nullptr, FALSE);
@@ -3011,6 +3321,26 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
             return 0;
         }
         break;
+    case WM_ENTERSIZEMOVE:
+        GetWindowRect(hwnd_, &size_move_start_);
+        break;
+    case WM_EXITSIZEMOVE: {
+        // A size dragged by hand: kept for this preview, and next time while
+        // 记住我拖出来的大小 is on. Moving alone changes nothing.
+        RECT now{};
+        GetWindowRect(hwnd_, &now);
+        const bool resized = now.right - now.left != size_move_start_.right - size_move_start_.left ||
+                             now.bottom - now.top != size_move_start_.bottom - size_move_start_.top;
+        if (resized && !fullscreen_ && !IsZoomed(hwnd_)) {
+            user_sized_ = true;
+            fit_pending_ = false;
+            if (options_.remember_size) {
+                options_.remembered = now;
+                ReportOptions();
+            }
+        }
+        break;
+    }
     case WM_GETMINMAXINFO: {
         auto* limits = reinterpret_cast<MINMAXINFO*>(lparam);
         limits->ptMinTrackSize.x = static_cast<LONG>(480.0f * scale_);
@@ -3063,12 +3393,38 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
         }
         if (wparam == VK_ESCAPE) {
             if (find_open_) CloseFind();
+            else if (fullscreen_) LeaveFullScreen(true);   // Esc leaves full screen first
             else Close();
+            return 0;
+        }
+        const bool repeat = (lparam & (1LL << 30)) != 0;
+        if (!find_open_ && ctrl && !shift &&
+            ((wparam >= '1' && wparam <= '3') || (wparam >= VK_NUMPAD1 && wparam <= VK_NUMPAD3))) {
+            // 标准 / 大 / 最大化, like the header's size menu.
+            const int step = static_cast<int>(wparam >= VK_NUMPAD1 ? wparam - VK_NUMPAD1 : wparam - '1');
+            if (!repeat) ChooseSizeMode(static_cast<int>(PreviewSizeMode::Standard) + step);
+            return 0;
+        }
+        if (!find_open_ && !ctrl && !shift && wparam == 'F') {
+            if (!repeat) {
+                if (fullscreen_) LeaveFullScreen(true);
+                else EnterFullScreen();
+            }
             return 0;
         }
         if (!find_open_ && HasPlayback() && !ctrl) {
             if (wparam == VK_SPACE) {
-                if (!(lparam & (1LL << 30))) TogglePlayback();
+                // 空格键 setting: close like on every other file, or play / pause.
+                if (options_.space_closes) Close();
+                else if (!repeat) TogglePlayback();
+                return 0;
+            }
+            if (wparam == 'K') {
+                if (!repeat) TogglePlayback();
+                return 0;
+            }
+            if (wparam == 'L') {
+                if (!repeat) ToggleLoop();
                 return 0;
             }
             if (wparam == VK_OEM_COMMA || wparam == VK_OEM_PERIOD) {

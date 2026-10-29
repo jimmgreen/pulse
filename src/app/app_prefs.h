@@ -151,6 +151,25 @@ struct AppPrefs {
     // The card's size step: 0 small, 1 medium, 2 large (kHoverCardSize*). The
     // card takes the content's shape within it; Ctrl enlarges it while held.
     int hover_card_size = 1;
+    // The Quick Look window (Settings > 快速预览 > 预览窗口, kPreviewSize*):
+    // 0 fits the picture or video, 1 standard, 2 large, 3 maximized, 4 full
+    // screen. Its title bar switches this too.
+    int preview_size = 0;
+    // A size the user dragged the window to (screen pixels; width 0 = none)
+    // is used instead of preview_size while preview_remember_size is on.
+    bool preview_remember_size = true;
+    int preview_rect_x = 0, preview_rect_y = 0, preview_rect_w = 0, preview_rect_h = 0;
+    // Space on a video or animation: true closes the preview as on every
+    // other file (K pauses); false plays / pauses.
+    bool preview_space_closes = true;
+    // kPreviewLoop*: 0 animations loop and videos stop at the end, 1 both
+    // loop, 2 neither (an animation plays as often as its file says).
+    int preview_loop = 0;
+    // Holding the left button on a file previews it until released: 0 off,
+    // else the delay in ms (300 / 500 / 800).
+    int hold_preview_ms = 0;
+    // How many more times a video shows the "Space closes" key hint.
+    int preview_key_hint_left = 3;
     bool change_tracking_enabled = false;
     int change_tracking_days = 7;
     // system / zh-CN / en-US
@@ -280,8 +299,27 @@ inline int NormalizeHoverPreviewDelay(int ms) noexcept {
 constexpr int kHoverCardSmall = 0;
 constexpr int kHoverCardMedium = 1;
 constexpr int kHoverCardLarge = 2;
+constexpr int kHoverCardXLarge = 3;
 inline int NormalizeHoverCardSize(int value) noexcept {
-    return value == kHoverCardSmall || value == kHoverCardLarge ? value : kHoverCardMedium;
+    return value == kHoverCardSmall || value == kHoverCardLarge || value == kHoverCardXLarge
+        ? value : kHoverCardMedium;
+}
+constexpr int kPreviewSizeFit = 0;
+constexpr int kPreviewSizeStandard = 1;
+constexpr int kPreviewSizeLarge = 2;
+constexpr int kPreviewSizeMaximized = 3;
+constexpr int kPreviewSizeFullScreen = 4;
+inline int NormalizePreviewSize(int value) noexcept {
+    return value >= kPreviewSizeFit && value <= kPreviewSizeFullScreen ? value : kPreviewSizeFit;
+}
+constexpr int kPreviewLoopAnimations = 0;
+constexpr int kPreviewLoopAll = 1;
+constexpr int kPreviewLoopNone = 2;
+inline int NormalizePreviewLoop(int value) noexcept {
+    return value == kPreviewLoopAll || value == kPreviewLoopNone ? value : kPreviewLoopAnimations;
+}
+inline int NormalizeHoldPreview(int ms) noexcept {
+    return ms == 300 || ms == 500 || ms == 800 ? ms : 0;
 }
 
 std::wstring FolderOpenCommandLine(const std::wstring& exe);

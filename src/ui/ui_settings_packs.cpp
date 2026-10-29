@@ -131,9 +131,31 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
     const int delay = vm.settings_hover_delay_ms == 300 ? 0 : vm.settings_hover_delay_ms == 800 ? 2 : 1;
     choice_row(lay.hover_delay_row, lay.hover_delay_choice, 3, delay, PackAction::HoverDelayShort, L"\xE916",
                pack_text::DelayTitle(), pack_text::DelayDesc(), &pack_text::DelayChoice);
-    const int card_size = vm.settings_hover_card_size == 0 ? 0 : vm.settings_hover_card_size == 2 ? 2 : 1;
-    choice_row(lay.hover_size_row, lay.hover_size_choice, 3, card_size, PackAction::HoverSizeSmall, L"\xE740",
+    const int card_size = std::clamp(vm.settings_hover_card_size, 0, 3);
+    choice_row(lay.hover_size_row, lay.hover_size_choice, 4, card_size, PackAction::HoverSizeSmall, L"\xE740",
                pack_text::SizeTitle(), pack_text::SizeDesc(), &pack_text::SizeChoice);
+    const int hold = vm.settings_hold_preview_ms == 300 ? 1 : vm.settings_hold_preview_ms == 500 ? 2
+                   : vm.settings_hold_preview_ms == 800 ? 3 : 0;
+    choice_row(lay.hold_row, lay.hold_choice, 4, hold, PackAction::HoldOff, L"\xE7C9",
+               pack_text::HoldTitle(), pack_text::HoldDesc(), &pack_text::HoldChoice);
+
+    // 预览窗口: the size Space opens it at, Space on media, loop.
+    text(pack_text::WindowSection(), lay.window_section);
+    choice_row(lay.preview_size_row, lay.preview_size_choice, 5, std::clamp(vm.settings_preview_size, 0, 4),
+               PackAction::PreviewSizeFit, L"\xE9A6", pack_text::WindowSizeTitle(), pack_text::WindowSizeDesc(),
+               &pack_text::WindowSizeChoice);
+    if (lay.preview_remember_row.bottom > lay.preview_remember_row.top) {
+        card(lay.preview_remember_row);
+        hover_row(lay.preview_remember_row, PackAction::PreviewRememberSize);
+        setting(lay.preview_remember_row, L"\xE81C", pack_text::RememberTitle(), pack_text::RememberDesc());
+        toggle(row_switch(lay.preview_remember_row), vm.settings_preview_remember, PackAction::PreviewRememberSize);
+    }
+    choice_row(lay.space_row, lay.space_choice, 2, vm.settings_preview_space_closes ? 0 : 1,
+               PackAction::SpaceClose, L"\xE765", pack_text::SpaceTitle(), pack_text::SpaceDesc(),
+               &pack_text::SpaceChoice);
+    choice_row(lay.loop_row, lay.loop_choice, 3, std::clamp(vm.settings_preview_loop, 0, 2),
+               PackAction::LoopAnimations, L"\xE8EE", pack_text::LoopTitle(), pack_text::LoopDesc(),
+               &pack_text::LoopChoice);
 
     text(pack_text::FormatsSection(), lay.preview_section);
     card(lay.preview_group);

@@ -429,7 +429,38 @@ inline const wchar_t* SizeDesc() {
 inline const wchar_t* SizeChoice(int i) {
     if (i == 0) return l10n::Get(l10n::StringId::UiFontSmall).c_str();
     if (i == 1) return l10n::Get(l10n::StringId::Medium).c_str();
-    return l10n::Get(l10n::StringId::UiFontLarge).c_str();
+    if (i == 2) return l10n::Get(l10n::StringId::UiFontLarge).c_str();
+    return l10n::Get(l10n::StringId::HoverSizeXLarge).c_str();
+}
+inline const wchar_t* HoldTitle() { return l10n::Get(l10n::StringId::HoldPreviewTitle).c_str(); }
+inline const wchar_t* HoldDesc() { return l10n::Get(l10n::StringId::HoldPreviewDesc).c_str(); }
+inline const wchar_t* HoldChoice(int i) {
+    if (i == 0) return l10n::Get(l10n::StringId::HoldPreviewOff).c_str();
+    return DelayChoice(i - 1);
+}
+inline const wchar_t* WindowSection() { return l10n::Get(l10n::StringId::PreviewWindowSection).c_str(); }
+inline const wchar_t* WindowSizeTitle() { return l10n::Get(l10n::StringId::PreviewSizeTitle).c_str(); }
+inline const wchar_t* WindowSizeDesc() { return l10n::Get(l10n::StringId::PreviewSizeDesc).c_str(); }
+inline const wchar_t* WindowSizeChoice(int i) {
+    using I = l10n::StringId;
+    static constexpr I ids[5] = {I::PreviewSizeFit, I::PreviewSizeStandard, I::PreviewSizeLarge,
+                                 I::PreviewSizeMaximized, I::PreviewSizeFullScreen};
+    return l10n::Get(ids[i < 0 || i > 4 ? 0 : i]).c_str();
+}
+inline const wchar_t* RememberTitle() { return l10n::Get(l10n::StringId::PreviewRememberSize).c_str(); }
+inline const wchar_t* RememberDesc() { return l10n::Get(l10n::StringId::PreviewRememberDesc).c_str(); }
+inline const wchar_t* SpaceTitle() { return l10n::Get(l10n::StringId::PreviewSpaceTitle).c_str(); }
+inline const wchar_t* SpaceDesc() { return l10n::Get(l10n::StringId::PreviewSpaceDesc).c_str(); }
+inline const wchar_t* SpaceChoice(int i) {
+    return i == 0 ? l10n::Get(l10n::StringId::PreviewSpaceClose).c_str()
+                  : l10n::Get(l10n::StringId::PreviewSpacePlay).c_str();
+}
+inline const wchar_t* LoopTitle() { return l10n::Get(l10n::StringId::PreviewLoopTitle).c_str(); }
+inline const wchar_t* LoopDesc() { return l10n::Get(l10n::StringId::PreviewLoopDesc).c_str(); }
+inline const wchar_t* LoopChoice(int i) {
+    if (i == 0) return l10n::Get(l10n::StringId::PreviewLoopAnimations).c_str();
+    if (i == 1) return l10n::Get(l10n::StringId::PreviewLoopAll).c_str();
+    return l10n::Get(l10n::StringId::PreviewLoopNone).c_str();
 }
 inline const wchar_t* PacksSection() { return l10n::Get(l10n::StringId::PreviewPacks).c_str(); }
 inline const wchar_t* PacksIntro() { return l10n::Get(l10n::StringId::PacksPageIntro).c_str(); }
@@ -748,8 +779,8 @@ float LayoutSettingsPacks(SettingsLayout& l, const WindowViewModel& vm, float sc
     // 预览方式: one card per choice row, segments at the right (below when narrow).
     {
         const bool narrow = right - left < 560*scale;
-        auto segments = [&](D2D1_RECT_F r, D2D1_RECT_F* output, int count, float width) {
-            const auto c = D2D1::RectF(narrow ? r.left + 16*scale : r.right - (width + 16)*scale,
+        auto segments = [&](D2D1_RECT_F r, D2D1_RECT_F* output, int count, float width, bool stack = false) {
+            const auto c = D2D1::RectF(narrow || stack ? r.left + 16*scale : r.right - (width + 16)*scale,
                 r.bottom - 44*scale, r.right - 16*scale, r.bottom - 12*scale);
             const float w = (c.right - c.left) / static_cast<float>(count);
             for (int i = 0; i < count; ++i)
@@ -765,8 +796,25 @@ float LayoutSettingsPacks(SettingsLayout& l, const WindowViewModel& vm, float sc
             segments(l.hover_delay_row, l.hover_delay_choice, 3, 240*font);
             y += 8*scale;
             l.hover_size_row = row(h);
-            segments(l.hover_size_row, l.hover_size_choice, 3, 240*font);
+            segments(l.hover_size_row, l.hover_size_choice, 4, 300*font);
         }
+        y += 8*scale;
+        l.hold_row = row(h);
+        segments(l.hold_row, l.hold_choice, 4, 300*font);
+        y += 24*scale;
+        // 预览窗口: five sizes need more room before they sit beside the text.
+        const bool stack_sizes = right - left < 820*scale;
+        l.window_section = row(28*font);
+        l.preview_size_row = row(narrow || stack_sizes ? 112.0f : h);
+        segments(l.preview_size_row, l.preview_size_choice, 5, 420*font, stack_sizes);
+        y += 8*scale;
+        l.preview_remember_row = row((caption_h(pack_text::RememberDesc(), right - left - 126*scale) + 47*scale) / scale);
+        y += 8*scale;
+        l.space_row = row(h);
+        segments(l.space_row, l.space_choice, 2, 260*font);
+        y += 8*scale;
+        l.loop_row = row(h);
+        segments(l.loop_row, l.loop_choice, 3, 320*font);
         y += 24*scale;
     }
     l.preview_section = row(28*font);

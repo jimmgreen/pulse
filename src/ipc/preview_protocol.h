@@ -59,7 +59,10 @@ constexpr uint32_t kPreviewMaxArchiveChars = 512u * 1024u;
 constexpr uint32_t kPreviewMaxTableChars = 2u * 1024u * 1024u;
 constexpr uint32_t kPreviewMinPixelSize = 32;
 constexpr uint32_t kPreviewDefaultPixelSize = 512;
-constexpr uint32_t kPreviewMaxPixelSize = 1024;
+// Quick Look asks for its window's longest edge in physical pixels: up to a
+// full-screen 4K window, so large pictures stay sharp instead of being
+// stretched from a 1024 px decode. Cards and grids ask for far less.
+constexpr uint32_t kPreviewMaxPixelSize = 4096;
 constexpr uint32_t kPreviewGifMaxPixelSize = 512;
 constexpr uint32_t kPreviewPixelBucket = 128;
 

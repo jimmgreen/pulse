@@ -22,6 +22,24 @@ enum class QuickPreviewAction : int {
     InstallImagePack,   // start (or cancel) the image preview pack download
     DownloadCloud,      // 下载并预览 on the cloud-only card
     OpenInNewTab,       // the previewed folder, in a new tab
+    SaveOptions,        // the window changed QuickPreviewOptions itself (size menu, L, a drag)
+};
+
+// Quick Look behaviour from Settings > 快速预览 (app prefs preview_*). The
+// window changes some of it itself and asks the owner to save it with
+// QuickPreviewAction::SaveOptions; the owner reads QuickPreviewWindow::options().
+struct QuickPreviewOptions {
+    int size_mode = 0;              // PreviewSizeMode / app::kPreviewSize*
+    bool remember_size = true;      // a dragged size is used next time
+    RECT remembered{};              // that size (screen px; empty = none)
+    bool space_closes = true;       // false: Space plays / pauses videos and animations
+    int loop = 0;                   // app::kPreviewLoop*: 0 animations, 1 all, 2 none
+    int key_hint_left = 3;          // how many more videos show the key hint
+    bool operator==(const QuickPreviewOptions& other) const {
+        return size_mode == other.size_mode && remember_size == other.remember_size &&
+               EqualRect(&remembered, &other.remembered) && space_closes == other.space_closes &&
+               loop == other.loop && key_hint_left == other.key_hint_left;
+    }
 };
 
 // 下载并预览 state for the item Quick Look shows (C4b).

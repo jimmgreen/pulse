@@ -844,6 +844,11 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
             vm.settings_preview_trigger = s.appPrefs.preview_trigger;
             vm.settings_hover_delay_ms = s.appPrefs.hover_preview_delay_ms;
             vm.settings_hover_card_size = s.appPrefs.hover_card_size;
+            vm.settings_preview_size = s.appPrefs.preview_size;
+            vm.settings_preview_remember = s.appPrefs.preview_remember_size;
+            vm.settings_preview_space_closes = s.appPrefs.preview_space_closes;
+            vm.settings_preview_loop = s.appPrefs.preview_loop;
+            vm.settings_hold_preview_ms = s.appPrefs.hold_preview_ms;
             vm.settings_change_tracking = s.appPrefs.change_tracking_enabled;
             vm.settings_change_days = s.appPrefs.change_tracking_days;
             vm.settings_row_height = s.appPrefs.row_height;

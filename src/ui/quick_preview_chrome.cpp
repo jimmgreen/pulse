@@ -42,6 +42,7 @@ constexpr float kGlyphSize = 16.0f * 0.66f;
 constexpr wchar_t kPrevGlyph[] = L"\xE72B";
 constexpr wchar_t kNextGlyph[] = L"\xE72A";
 constexpr wchar_t kMoreGlyph[] = L"\xE712";
+constexpr wchar_t kSizeGlyph[] = L"\xE740";   // 窗口大小 (FullScreen arrows)
 constexpr wchar_t kOpenGlyph[] = L"\xE8A7";   // OpenInNewWindow
 constexpr wchar_t kCloseGlyph[] = L"\xE711";
 constexpr wchar_t kFolderGlyph[] = L"\xE8B7";
@@ -140,8 +141,9 @@ std::wstring Fill(std::wstring text, std::wstring_view key, const std::wstring& 
 
 }  // namespace
 
-float QuickPreviewWindow::HeaderHeight() const noexcept { return kHeaderHeight * scale_; }
-float QuickPreviewWindow::FooterHeight() const noexcept { return kFooterHeight * scale_; }
+// Full screen hides the header and the footer; Esc or F brings them back.
+float QuickPreviewWindow::HeaderHeight() const noexcept { return fullscreen_ ? 0.0f : kHeaderHeight * scale_; }
+float QuickPreviewWindow::FooterHeight() const noexcept { return fullscreen_ ? 0.0f : kFooterHeight * scale_; }
 
 D2D1_RECT_F QuickPreviewWindow::FooterRect() const {
     const float width = static_cast<float>(compositor_.Width());
@@ -339,7 +341,7 @@ void QuickPreviewWindow::LayoutHeader() {
     const float tools_w = has_tools ? ToggleSegmentWidth(0) + ToggleSegmentWidth(1) + 4.0f * s : 0.0f;
     const float left_fixed = (kHeaderPadLeft + kBadgeSize + 10.0f) * s;
     const auto title_room = [&](bool tools, bool open_text, bool counter) {
-        float right = kCloseWidth * s + 2.0f * s + button + 4.0f * s;      // close, more
+        float right = kCloseWidth * s + 2.0f * s + (button + 4.0f * s) * 2.0f;  // close, more, size
         right += open_text ? open_full : button;                           // open
         right += 8.0f * s + button * 2.0f + (counter ? counter_w : 0.0f);  // nav
         if (tools) right += tools_w + 8.0f * s + 13.0f * s;                // pill + separator
@@ -372,6 +374,8 @@ void QuickPreviewWindow::LayoutHeader() {
     float x = h.close.left - 2.0f * s;
     h.more = D2D1::RectF(x - button, cy - button * 0.5f, x, cy + button * 0.5f);
     x = h.more.left - 4.0f * s;
+    h.size = D2D1::RectF(x - button, cy - button * 0.5f, x, cy + button * 0.5f);
+    x = h.size.left - 4.0f * s;
     const float open_w = h.open_text ? open_full : button;
     h.open = D2D1::RectF(x - open_w, cy - button * 0.5f, x, cy + button * 0.5f);
     x = h.open.left - 8.0f * s;
@@ -530,6 +534,7 @@ void QuickPreviewWindow::DrawHeader(ID2D1DeviceContext* dc, const ChromePalette&
                                    header_.open.right - 12.0f * s, header_.open.bottom),
                        p.on_accent);
     }
+    icon_button(ChromeButton::Size, header_.size, kSizeGlyph, true);
     icon_button(ChromeButton::More, header_.more, kMoreGlyph, true);
 
     // Close.
