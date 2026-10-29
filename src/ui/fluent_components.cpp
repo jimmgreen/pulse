@@ -1039,9 +1039,27 @@ void Painter::DrawButton(const ButtonSpec& spec) {
             body->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         }
         const bool center = spec.glyph.empty() && !spec.drop_down;
-        DrawText(spec.text, D2D1::RectF(left, content.top, right, content.bottom),
-                 body, foreground,
-                 center ? HorizontalAlignment::Center : HorizontalAlignment::Left);
+        if (!spec.keycap.empty()) {
+            // Text and keycap as one centred group; the key in a thin frame.
+            IDWriteTextFormat* caption = CaptionFormat();
+            const float key_w = typography::MeasureLine(compositor_, caption, spec.keycap) + Px(10.0f);
+            const float text_w = typography::MeasureLine(compositor_, body, spec.text);
+            const float gap = Px(8.0f);
+            float x = center ? std::max(left, (left + right - text_w - gap - key_w) * 0.5f) : left;
+            DrawText(spec.text, D2D1::RectF(x, content.top, std::min(right, x + text_w + Px(1.0f)), content.bottom),
+                     body, foreground, HorizontalAlignment::Left);
+            x += text_w + gap;
+            const float mid = (spec.bounds.top + spec.bounds.bottom) * 0.5f;
+            const D2D1_RECT_F key = D2D1::RectF(x, mid - Px(8.0f), std::min(right, x + key_w), mid + Px(8.0f));
+            if (Width(key) > Px(12.0f)) {
+                StrokeRoundedRect(key, Px(4.0f), MultiplyAlpha(foreground, 0.42f), std::max(1.0f, Px(1.0f)));
+                DrawText(spec.keycap, key, caption, MultiplyAlpha(foreground, 0.66f), HorizontalAlignment::Center);
+            }
+        } else {
+            DrawText(spec.text, D2D1::RectF(left, content.top, right, content.bottom),
+                     body, foreground,
+                     center ? HorizontalAlignment::Center : HorizontalAlignment::Left);
+        }
         if (body) body->SetWordWrapping(old_wrap);
     }
 
@@ -2551,10 +2569,12 @@ void Painter::DrawTag(const TagSpec& spec) {
 }
 
 float Painter::MeasureButtonWidth(std::wstring_view text, std::wstring_view glyph,
-                                  bool drop_down) const {
+                                  bool drop_down, std::wstring_view keycap) const {
     float width = Px(8.0f) * 2.0f;
     if (!glyph.empty()) width += Px(20.0f) + Px(4.0f);
     if (drop_down) width += Px(16.0f) + Px(4.0f);
+    if (!keycap.empty())
+        width += typography::MeasureLine(compositor_, CaptionFormat(), keycap) + Px(10.0f) + Px(8.0f);
     width += typography::MeasureLine(compositor_, BodyFormat(), text);
     return std::max(Px(32.0f), std::ceil(width));
 }

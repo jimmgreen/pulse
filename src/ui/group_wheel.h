@@ -42,8 +42,9 @@ struct GroupWheelOption {
 struct GroupWheelData {
     std::vector<GroupWheelOption> options;
     int applied = 0;            // index into options
-    std::wstring current_text, scroll_text, apply_text, cancel_text;
+    std::wstring current_text, apply_text, cancel_text;
     std::wstring apply_all_text;   // group picker footer button; empty = hidden
+    std::wstring click_apply_text; // centre row pill while the pointer is on it
     // Sort picker: direction + folder segments under the preview, the preview
     // shows `files` instead of group headers, and Left/Right set the direction.
     bool sort_controls = false;
@@ -52,6 +53,8 @@ struct GroupWheelData {
     std::wstring direction_text, folder_text;
     std::array<std::wstring, 3> folder_names;
 };
+
+namespace fluent { class Painter; }
 
 class GroupWheel {
 public:
@@ -68,7 +71,14 @@ public:
     bool Contains(float x, float y) const noexcept;
     // Footer "apply to all folders" button (laid out while drawing).
     bool HitApplyAll(float x, float y) const noexcept;
-    bool HoverApplyAll(float x, float y) noexcept;  // true when the highlight changed
+    // Footer Cancel / Apply buttons (laid out while drawing): 1 cancel, 2 apply, 0 none.
+    static constexpr int kFooterCancel = 1, kFooterApply = 2;
+    int HitFooter(float x, float y) const noexcept;
+    void PressFooter(int button) noexcept { footer_pressed_ = button; }
+    int FooterPressed() const noexcept { return footer_pressed_; }
+    bool InDrum(float x, float y) const noexcept;
+    // Pointer highlight: drum rows, the centre card, footer buttons. True when it changed.
+    bool Hover(float x, float y) noexcept;
     void Step(int delta);                  // roll by whole rows (keys, wheel)
     void StepTo(int index);
     bool PointerDown(float x, float y);    // true when a drag started in the drum
@@ -84,8 +94,9 @@ public:
 
     // Advances the spring and fades; true while another frame is needed.
     bool Tick(uint64_t now_ms);
+    // `painter` (the renderer's, begun for this frame) draws the footer buttons.
     void Draw(ID2D1DeviceContext* dc, IDWriteFactory* dwrite, IDWriteTextFormat* base_format,
-              const Theme& theme);
+              const Theme& theme, fluent::Painter* painter);
 
 private:
     int Count() const noexcept { return static_cast<int>(data_.options.size()); }
@@ -96,7 +107,10 @@ private:
     void DrawRow(ID2D1DeviceContext* dc, const Theme& theme, int index, float alpha);
     void DrawPreview(ID2D1DeviceContext* dc, const Theme& theme, const D2D1_RECT_F& pv,
                      int index, float alpha);
-    void DrawFooter(ID2D1DeviceContext* dc, IDWriteFactory* dwrite, const Theme& theme);
+    void DrawFooter(ID2D1DeviceContext* dc, fluent::Painter* painter);
+    // Drum row offset under the pointer (0 = centre card); kNoHover when none.
+    static constexpr int kNoHover = 1000;
+    int RowStepAt(float x, float y) const noexcept;
     // Sort segments: k = 0 direction (2 buttons), 1 folder (3 buttons); i < 0 = whole bar.
     D2D1_RECT_F SegmentRect(int k, int i) const noexcept;
     float ControlsHeight() const noexcept;
@@ -107,6 +121,10 @@ private:
     D2D1_RECT_F panel_{};
     D2D1_RECT_F apply_all_rect_{};
     bool apply_all_hot_ = false;
+    D2D1_RECT_F cancel_rect_{}, ok_rect_{};
+    int footer_hot_ = 0, footer_pressed_ = 0;
+    int hover_step_ = kNoHover;
+    int seg_hot_ = -1;  // sort controls segment under the pointer: k * 4 + i
     float scale_ = 1.0f;
     bool animate_ = true;
     bool open_ = false, closing_ = false;

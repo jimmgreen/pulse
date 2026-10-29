@@ -4656,6 +4656,7 @@ enum class StringId : UINT {
     GroupMediaUnknown = IDS_GROUP_MEDIA_UNKNOWN,
     GroupMediaMonth = IDS_GROUP_MEDIA_MONTH,
     GroupByTakenMonth = IDS_GROUP_BY_TAKEN_MONTH,
+    GroupWheelClickApply = IDS_GROUP_WHEEL_CLICK_APPLY,
 };
 
 bool IsLanguageId(std::wstring_view id) noexcept;

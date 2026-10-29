@@ -1469,7 +1469,7 @@ void MainRenderer::Render(const WindowViewModel& vm, const D2D1_RECT_F& rect,
         text_background_ = saved_tip_bg;
     }
     if (group_wheel_.Visible())
-        group_wheel_.Draw(dc, compositor_->DwriteFactory(), compositor_->TextFormat(), theme);
+        group_wheel_.Draw(dc, compositor_->DwriteFactory(), compositor_->TextFormat(), theme, &painter_);
     if (window_overview_.IsOpen())
         window_overview_.Draw(dc, compositor_->DwriteFactory(), compositor_->TextFormat(), theme);
     if (window_switcher_.IsOpen())

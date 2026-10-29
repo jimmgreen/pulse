@@ -325,8 +325,8 @@ void OpenGroupWheel(AppState& s) {
         }
     }
     data.current_text = l10n::Get(l10n::StringId::GroupWheelCurrent);
-    data.scroll_text = l10n::Get(l10n::StringId::GroupWheelScroll);
     data.apply_text = l10n::Get(l10n::StringId::GroupWheelApply);
+    data.click_apply_text = l10n::Get(l10n::StringId::GroupWheelClickApply);
     data.cancel_text = l10n::Get(l10n::StringId::Cancel);
     if (!multi && !recent && !tab->content_results && !tab->current_path.empty() &&
         !fs::IsVirtualPath(tab->current_path))
@@ -400,8 +400,8 @@ void OpenSortWheel(AppState& s) {
         data.options.push_back(std::move(o));
     }
     data.current_text = l10n::Get(l10n::StringId::GroupWheelCurrent);
-    data.scroll_text = l10n::Get(l10n::StringId::GroupWheelScroll);
     data.apply_text = l10n::Get(l10n::StringId::GroupWheelApply);
+    data.click_apply_text = l10n::Get(l10n::StringId::GroupWheelClickApply);
     data.cancel_text = l10n::Get(l10n::StringId::Cancel);
     data.direction_text = l10n::Get(l10n::StringId::SortWheelDirection);
     data.folder_text = l10n::Get(l10n::StringId::SortWheelFolders);
@@ -420,8 +420,21 @@ void OpenSortWheel(AppState& s) {
     Kick(s, s.hwnd);
 }
 
+// A click that closes the picker can be the first half of a double click: the
+// second half must not reach the list below (it would open an item).
+static ULONGLONG g_swallow_dblclk_until = 0;
+
+static void SwallowNextDoubleClick() {
+    g_swallow_dblclk_until = GetTickCount64() + GetDoubleClickTime();
+}
+
 bool GroupWheelMessage(AppState& s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     auto& wheel = s.renderer.GroupWheelPicker();
+    if (msg == WM_LBUTTONDBLCLK && g_swallow_dblclk_until != 0) {
+        const bool swallow = GetTickCount64() < g_swallow_dblclk_until;
+        g_swallow_dblclk_until = 0;
+        if (swallow && !wheel.IsOpen()) return true;
+    }
     if (!wheel.IsOpen()) return false;
     const float x = static_cast<float>(GET_X_LPARAM(lParam));
     const float y = static_cast<float>(GET_Y_LPARAM(lParam));
@@ -452,33 +465,70 @@ bool GroupWheelMessage(AppState& s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
     case WM_LBUTTONDBLCLK:
         if (!wheel.Contains(x, y)) {          // outside: dismiss, click swallowed
             wheel.Close();
+            SwallowNextDoubleClick();
+            Kick(s, hwnd);
+            return true;
+        }
+        if (const int button = wheel.HitFooter(x, y)) {   // Cancel / Apply: act on release
+            wheel.PressFooter(button);
+            wheel.Hover(x, y);
+            SetCapture(hwnd);
             Kick(s, hwnd);
             return true;
         }
         if (g_kind == WheelKind::Group && wheel.HitApplyAll(x, y)) {
             const int value = wheel.SelectedValue();
+            SwallowNextDoubleClick();
             wheel.Close();
             Kick(s, hwnd);
             ApplyGroupToAllFolders(s, value);
             Kick(s, hwnd);
             return true;
         }
+        // Double click on any row applies it: the first click already rolled it to the centre.
+        if (msg == WM_LBUTTONDBLCLK && wheel.InDrum(x, y)) {
+            SwallowNextDoubleClick();
+            Apply(s, hwnd, wheel.SelectedValue());
+            Kick(s, hwnd);
+            return true;
+        }
         if (wheel.PointerDown(x, y)) SetCapture(hwnd);
+        wheel.Hover(x, y);
         Kick(s, hwnd);
         return true;
     case WM_MOUSEMOVE:
+        if (wheel.FooterPressed()) {
+            if (wheel.Hover(x, y)) Kick(s, hwnd);
+            return true;
+        }
         if (wheel.Dragging()) {
             wheel.PointerMove(y);
             Kick(s, hwnd);
             return true;
         }
-        if (wheel.HoverApplyAll(x, y)) Kick(s, hwnd);
+        if (wheel.Hover(x, y)) Kick(s, hwnd);
         return wheel.Contains(x, y);
     case WM_LBUTTONUP:
+        if (const int pressed = wheel.FooterPressed()) {
+            ReleaseCapture();
+            wheel.PressFooter(0);
+            if (wheel.HitFooter(x, y) == pressed) {
+                SwallowNextDoubleClick();
+                if (pressed == ui::GroupWheel::kFooterApply) Apply(s, hwnd, wheel.SelectedValue());
+                else wheel.Close();
+            }
+            Kick(s, hwnd);
+            return true;
+        }
         if (wheel.Dragging()) {
             ReleaseCapture();
             const int value = wheel.PointerUp(y);
-            if (value >= 0) Apply(s, hwnd, value);
+            if (value >= 0) {
+                SwallowNextDoubleClick();
+                Apply(s, hwnd, value);
+            } else {
+                wheel.Hover(x, y);
+            }
             Kick(s, hwnd);
             return true;
         }

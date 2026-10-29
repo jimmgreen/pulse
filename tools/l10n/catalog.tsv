@@ -1510,7 +1510,7 @@ GroupWheelGroups	IDS_GROUP_WHEEL_GROUPS	2331	%d 组	%d groups	%d 組
 GroupWheelFlat	IDS_GROUP_WHEEL_FLAT	2332	平铺	Flat	並排
 GroupWheelCurrent	IDS_GROUP_WHEEL_CURRENT	2333	当前	Current	目前
 GroupWheelScroll	IDS_GROUP_WHEEL_SCROLL	2334	滑动	Scroll	滑動
-GroupWheelApply	IDS_GROUP_WHEEL_APPLY	2335	确定	Apply	確定
+GroupWheelApply	IDS_GROUP_WHEEL_APPLY	2335	应用	Apply	套用
 GroupWheelItems	IDS_GROUP_WHEEL_ITEMS	2336	%d 项	%d items	%d 項
 SortOldNew	IDS_SORT_OLD_NEW	2337	旧→新	Old→New	舊→新
 SortNewOld	IDS_SORT_NEW_OLD	2338	新→旧	New→Old	新→舊
@@ -4671,3 +4671,4 @@ MediaColumnsDesc	IDS_MEDIA_COLUMNS_DESC	5942	以图片、音乐或视频为主�
 GroupMediaUnknown	IDS_GROUP_MEDIA_UNKNOWN	5943	未知	Unknown	未知
 GroupMediaMonth	IDS_GROUP_MEDIA_MONTH	5944	%d年%d月	%d/%d	%d年%d月
 GroupByTakenMonth	IDS_GROUP_BY_TAKEN_MONTH	5945	拍摄月份	Month taken	拍攝月份
+GroupWheelClickApply	IDS_GROUP_WHEEL_CLICK_APPLY	5946	单击应用	Click to apply	按一下套用

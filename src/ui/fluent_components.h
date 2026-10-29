@@ -71,6 +71,9 @@ struct ButtonSpec {
     bool skip_glyph = false;
     // Drop-down chevron turn, 0..1 = 0..180 degrees (its menu opening).
     float chevron_turn = 0.0f;
+    // Key that does the same (L"Enter", L"Esc"): a faint keycap after the
+    // text, centred with it. MeasureButtonWidth takes the same text.
+    std::wstring_view keycap;
 };
 
 struct TextFieldSpec {
@@ -528,7 +531,8 @@ public:
     float MeasureBadgeWidth(std::wstring_view text) const;
     float MeasureButtonWidth(std::wstring_view text,
                              std::wstring_view glyph = {},
-                             bool drop_down = false) const;
+                             bool drop_down = false,
+                             std::wstring_view keycap = {}) const;
     float MeasureButtonHeight() const;
     // Word-wrapped caption text (release notes): height for a width, and drawing.
     float MeasureWrappedCaptionHeight(std::wstring_view text, float width) const;

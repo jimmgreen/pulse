@@ -4664,5 +4664,6 @@
 #define IDS_GROUP_MEDIA_UNKNOWN                                                          5943
 #define IDS_GROUP_MEDIA_MONTH                                                            5944
 #define IDS_GROUP_BY_TAKEN_MONTH                                                         5945
+#define IDS_GROUP_WHEEL_CLICK_APPLY                                                      5946
 
 #endif  // PULSE_STRING_IDS_H

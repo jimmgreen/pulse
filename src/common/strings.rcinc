@@ -1153,7 +1153,7 @@ BEGIN
     IDS_GROUP_WHEEL_FLAT "平铺"
     IDS_GROUP_WHEEL_CURRENT "当前"
     IDS_GROUP_WHEEL_SCROLL "滑动"
-    IDS_GROUP_WHEEL_APPLY "确定"
+    IDS_GROUP_WHEEL_APPLY "应用"
     IDS_GROUP_WHEEL_ITEMS "%d 项"
     IDS_SORT_OLD_NEW "旧→新"
     IDS_SORT_NEW_OLD "新→旧"
@@ -4646,6 +4646,7 @@ BEGIN
     IDS_GROUP_MEDIA_UNKNOWN "未知"
     IDS_GROUP_MEDIA_MONTH "%d年%d月"
     IDS_GROUP_BY_TAKEN_MONTH "拍摄月份"
+    IDS_GROUP_WHEEL_CLICK_APPLY "单击应用"
 END
 
 LANGUAGE 0x09, 0x01
@@ -9291,6 +9292,7 @@ BEGIN
     IDS_GROUP_MEDIA_UNKNOWN "Unknown"
     IDS_GROUP_MEDIA_MONTH "%d/%d"
     IDS_GROUP_BY_TAKEN_MONTH "Month taken"
+    IDS_GROUP_WHEEL_CLICK_APPLY "Click to apply"
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.
