@@ -1837,7 +1837,7 @@ void DispatchMenuCommand(AppState& s, int cmd) {
     }
     case app::CmdOpenTerminal: {
         const std::wstring target = TerminalTarget(s);
-        if (!target.empty()) s.ops.OpenTerminal(ClipboardPath(target));
+        if (!target.empty()) s.ops.OpenTerminal(ClipboardPath(target), s.appPrefs.terminal_program);
         break;
     }
     case app::CmdCopyPath: {

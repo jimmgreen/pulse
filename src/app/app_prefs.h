@@ -111,6 +111,7 @@ struct AppPrefs {
     // Sign-in launches (Run value with --startup) stay hidden behind the tray icon.
     bool start_in_tray = false;
     std::wstring home_folder;
+    std::wstring terminal_program; // empty uses wt.exe for the context-menu terminal
     // Text rendering: 0 auto (LumaText), 1 sharp (pixel-snapped DirectWrite), 2 smooth
     int text_render = 0;
     // Interface font size in percent of the built-in sizes: 90 / 100 / 112 / 125.

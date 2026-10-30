@@ -1448,7 +1448,7 @@ foreach(runtime_target IN LISTS runtime_targets)
 endforeach()
 
 add_executable(pulse_shell_command_test src/bench/shell_command_test.cpp src/ops/shell_command.cpp)
-target_link_libraries(pulse_shell_command_test PRIVATE shell32 user32)
+target_link_libraries(pulse_shell_command_test PRIVATE shell32 user32 ole32)
 add_executable(pulse_reparse_entry_test src/bench/reparse_entry_test.cpp src/bench/preview_integrity_strings.rc)
 target_link_libraries(pulse_reparse_entry_test PRIVATE pulse_localization user32 shell32 shlwapi netapi32)
 
@@ -2155,3 +2155,15 @@ endforeach()
 
 add_executable(pulse_support_report_test src/bench/support_report_test.cpp)
 target_link_libraries(pulse_support_report_test PRIVATE pulse_crash_reporter)
+
+# Reuse production rendering objects for the isolated terminal settings checks.
+add_executable(pulse_terminal_settings_test EXCLUDE_FROM_ALL
+    src/bench/terminal_settings_test.cpp $<TARGET_OBJECTS:pulse>)
+get_target_property(terminal_settings_libraries pulse LINK_LIBRARIES)
+target_link_libraries(pulse_terminal_settings_test PRIVATE ${terminal_settings_libraries})
+foreach(terminal_property INCLUDE_DIRECTORIES COMPILE_DEFINITIONS COMPILE_OPTIONS LINK_OPTIONS)
+    get_target_property(terminal_value pulse ${terminal_property})
+    if(terminal_value)
+        set_property(TARGET pulse_terminal_settings_test PROPERTY ${terminal_property} "${terminal_value}")
+    endif()
+endforeach()

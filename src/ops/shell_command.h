@@ -37,6 +37,9 @@ struct TerminalLaunchResult {
 // embedded/closing quotes. Does not interpret shell or template metacharacters.
 std::wstring QuoteWindowsArgument(std::wstring_view value);
 std::wstring TerminalCommandLine(const std::wstring& directory);
+std::wstring TerminalProgramArguments(const std::wstring& program, const std::wstring& directory);
+TerminalLaunchResult LaunchContextTerminal(const std::wstring& program, const std::wstring& directory,
+    HWND owner, const ShellCommandApi& api = {});
 TerminalLaunchResult LaunchTerminal(const std::wstring& executable, const std::wstring& arguments,
     const std::wstring& directory, HWND owner, const ShellCommandApi& api = {});
 }

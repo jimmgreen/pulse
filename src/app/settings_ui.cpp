@@ -72,6 +72,7 @@ constexpr SettingDestination destinations[]={
     {I::SettingsRecycleBin,11,0},{I::SettingsExplorerWindows,11,0},
     {I::SettingsLaunch,11,0},{I::SettingsStartInTray,11,0},{I::SettingsKeepRunning,11,0},{I::SettingsNotifyIcon,11,0},{I::SettingsShellTags,11,0},
     // 12 文件操作
+    {I::SettingsTerminal,12,0},
     {I::SettingsConfirmDelete,12,0},{I::SettingsTrayIcon,12,0},{I::TrayHideWhenEmpty,12,0},
     {I::SettingsLanDiscovery,12,0},{I::SettingsLanCache,12,0},{I::SettingsNetworkRecent,12,0},{I::NetworkShowHiddenShares,12,0},
     {I::SettingsClearNetwork,12,0},{I::SettingsChangeTracking,12,0},
@@ -303,6 +304,21 @@ bool TestSettingsFilter(const std::wstring& query,I expected) {
 bool HandleSettingsControl(AppState& s,const H& hit) {
     switch(hit.region) {
     case H::SettingsFind: FindSetting(s);break;
+    case H::SettingsTerminalProgram: {
+        if(hit.index==1) {
+            s.settings.SetTerminalProgram({});
+        } else if(hit.index==0) {
+            ui::FolderPickerSpec spec;spec.mode=ui::PickerMode::File;
+            spec.title=l10n::Get(I::SettingsTerminalPickerTitle);
+            spec.filters={{l10n::Get(I::SettingsTerminalExeFilter),L"*.exe"}};
+            const auto& current=s.appPrefs.terminal_program;
+            if(!current.empty()) spec.initial_path=packs::DirectoryOf(current);
+            ui::FilePickerResult picked;
+            if(ui::ShowFilePicker(s.hwnd,spec,s.darkMode,s.accentColor,picked) && !picked.paths.empty())
+                s.settings.SetTerminalProgram(picked.paths.front());
+        }
+        break;
+    }
     case H::SettingsToggle: {
         // Pulse menu preview: pressing a movable row arms a drag (app_input
         // follows the pointer and drops); the fixed rows do nothing.

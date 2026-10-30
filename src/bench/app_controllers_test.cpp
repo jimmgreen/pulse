@@ -1527,7 +1527,50 @@ bool TestPackAutoUpdate() {
     return passed;
 }
 
+bool TestTerminalPreferences() {
+    using namespace pulse::app;
+    AppPrefs prefs;
+    prefs.persist = false;
+    bool ok = Report("terminal defaults to Windows Terminal", prefs.terminal_program.empty());
+    const std::wstring program = L"C:\\工具 folder\\PowerShell\\pwsh.exe";
+    prefs.terminal_program = program;
+    AppPrefs loaded;
+    loaded.persist = false;
+    ok &= Report("terminal program survives JSON roundtrip",
+        loaded.FromJson(prefs.ToJson()) && loaded.terminal_program == program);
+    prefs.terminal_program = L"\\\\?\\UNC\\server\\共享\\pwsh.exe";
+    ok &= Report("extended UNC terminal survives JSON roundtrip",
+        loaded.FromJson(prefs.ToJson()) && loaded.terminal_program == prefs.terminal_program);
+    ok &= Report("legacy settings restore default terminal",
+        loaded.FromJson(L"{\"version\":4}") && loaded.terminal_program.empty());
+    ok &= Report("command fragments are not accepted as terminal programs",
+        loaded.FromJson(L"{\"terminal_program\":\"pwsh.exe -NoExit\"}") && loaded.terminal_program.empty());
+    pulse::index::IndexClient index;
+    pulse::index::NetworkAgentClient network;
+    ContextMenuPrefs context;
+    context.persist = false;
+    SettingsController controller;
+    int applied = 0;
+    SettingsController::UiCallbacks callbacks;
+    callbacks.apply_effects = [&](SettingsEffect) { ++applied; };
+    controller.BindUi(prefs, context, index, network, std::move(callbacks));
+    prefs.terminal_program.clear();
+    controller.SetTerminalProgram(program);
+    ok &= Report("settings immediately select custom terminal", prefs.terminal_program == program);
+    controller.SetTerminalProgram(program);
+    controller.SetTerminalProgram(L"cmd.exe /c calc.exe");
+    ok &= Report("unchanged or invalid selection preserves configuration", prefs.terminal_program == program);
+    controller.SetTerminalProgram({});
+    ok &= Report("restore default clears custom terminal", prefs.terminal_program.empty() && applied == 0);
+    prefs.terminal_program = program;
+    prefs.ResetToDefaults();
+    ok &= Report("reset all settings restores default terminal", prefs.terminal_program.empty());
+    return ok;
+}
+
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--terminal-preferences")
+        return TestTerminalPreferences() && TestAddressBarCommands() ? 0 : 1;
     if (argc == 2 && std::wstring_view(argv[1]) == L"--context-query-key") {
         pulse::app::ContextMenuController controller;
         pulse::app::ContextMenuPrefs prefs;
@@ -2746,6 +2789,7 @@ int wmain(int argc, wchar_t** argv) {
     passed &= TestExplorerShortcuts();
     passed &= TestShortcutKeymap();
     passed &= TestClosedWindowStack();
+    passed &= TestTerminalPreferences();
     passed &= TestAddressBarCommands();
     passed &= TestAddressShortcuts();
     passed &= TestSelectionTokens();

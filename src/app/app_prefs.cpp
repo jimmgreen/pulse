@@ -1,5 +1,6 @@
 // app_prefs.cpp — Persist general settings; sync 开机自启 with the Run key.
 #include "app_prefs.h"
+#include "../common/terminal_program.h"
 #include "blank_pane_click.h"
 #include "startup_launch.h"
 #include "default_file_manager.h"
@@ -98,6 +99,7 @@ void AppPrefs::ResetToDefaults() {
     show_hidden_shares = false;
     lan_cache_mode = 0;
     home_folder.clear();
+    terminal_program.clear();
     text_render = 0;
     ui_font_scale = 100;
     folder_views.Clear();
@@ -164,11 +166,13 @@ std::wstring AppPrefs::ToJson() const {
     std::wstring escaped_image;
     std::wstring escaped_language;
     std::wstring escaped_home;
+    std::wstring escaped_terminal;
     pulse::json::Escape(window_effect, escaped_effect);
     pulse::json::Escape(home_folder, escaped_home);
+    pulse::json::Escape(common::IsTerminalProgramValid(terminal_program) ? terminal_program : L"", escaped_terminal);
     pulse::json::Escape(background_image, escaped_image);
     pulse::json::Escape(language, escaped_language);
-    std::wstring out = L"{\n  \"version\":4,\n  \"launch_on_startup\":";
+    std::wstring out = L"{\n  \"version\":4,\n  \"terminal_program\":\"" + escaped_terminal + L"\",\n  \"launch_on_startup\":";
     out += launch_on_startup ? L"true" : L"false";
     out += L",\n  \"keep_running_on_close\":";
     out += keep_running_on_close ? L"true" : L"false";
@@ -540,6 +544,8 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     show_hidden_shares = pulse::json::ExtractBool(json, L"show_hidden_shares", false);
     lan_cache_mode = std::clamp(pulse::json::ExtractInt(json, L"lan_cache_mode", 0), 0, 2);
     home_folder = pulse::json::ExtractString(json, L"home_folder");
+    terminal_program = pulse::json::ExtractString(json, L"terminal_program");
+    if (!common::IsTerminalProgramValid(terminal_program)) terminal_program.clear();
     text_render = pulse::json::ExtractInt(json, L"text_render", 0);
     if (text_render < 0 || text_render > 2) text_render = 0;
     ui_font_scale = NormalizeUiFontScale(pulse::json::ExtractInt(json, L"ui_font_scale", 100));

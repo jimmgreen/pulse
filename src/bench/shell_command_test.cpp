@@ -1,4 +1,6 @@
 #include "../ops/shell_command.h"
+#include "../common/terminal_program.h"
+#include <objbase.h>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -14,6 +16,7 @@ DWORD terminal_open_error = ERROR_SUCCESS;
 DWORD actual_mask = 0;
 bool actual_null_verb = false, require_default_action = false, force_shell_failure = false;
 HANDLE shell_process = nullptr;
+HANDLE terminal_child = nullptr;
 BOOL WINAPI CreateStub(LPCWSTR, LPWSTR, LPSECURITY_ATTRIBUTES, LPSECURITY_ATTRIBUTES,
     BOOL, DWORD, LPVOID, LPCWSTR, LPSTARTUPINFOW, LPPROCESS_INFORMATION) {
     SetLastError(create_error); return create_error == ERROR_SUCCESS;
@@ -36,6 +39,143 @@ BOOL WINAPI CreateHidden(LPCWSTR image, LPWSTR command, LPSECURITY_ATTRIBUTES a,
     BOOL inherit, DWORD flags, LPVOID environment, LPCWSTR directory, LPSTARTUPINFOW startup, LPPROCESS_INFORMATION process) {
     startup->dwFlags |= STARTF_USESHOWWINDOW; startup->wShowWindow = SW_HIDE;
     return CreateProcessW(image, command, a, b, inherit, flags, environment, directory, startup, process);
+}
+BOOL WINAPI ShellCaptureChild(SHELLEXECUTEINFOW* info) {
+    info->nShow = SW_HIDE;
+    const BOOL accepted = ShellExecuteExW(info);
+    if (accepted && info->hProcess)
+        DuplicateHandle(GetCurrentProcess(), info->hProcess, GetCurrentProcess(), &terminal_child,
+            0, FALSE, DUPLICATE_SAME_ACCESS);
+    return accepted;
+}
+bool TestContextTerminal() {
+    bool ok = true;
+    auto check = [&](bool condition, const char* label) {
+        ok &= condition;
+        std::cout << (condition ? "[PASS] " : "[FAIL] ") << label << '\n';
+    };
+    const ShellCommandApi stub{CreateStub, ShellStub};
+    shell_calls = 0;
+    shell_error = ERROR_SUCCESS;
+    terminal_sequence = false;
+    const HWND owner = reinterpret_cast<HWND>(static_cast<uintptr_t>(0x1234));
+    const std::wstring address_directory = L"\\\\?\\C:\\工具 folder;with separator\\";
+    check(TerminalCommandLine(address_directory) == L"-d .",
+        "address-bar WT arguments do not split a semicolon directory into commands");
+    auto address_result = LaunchTerminal(L"wt.exe", TerminalCommandLine(address_directory), address_directory, owner, stub);
+    check(!address_result.error && actual_file == L"wt.exe" && actual_args == L"-d ." &&
+        actual_dir == L"C:\\工具 folder;with separator\\",
+        "address-bar WT launch keeps the complete Unicode semicolon working directory");
+    check(TerminalCommandLine(L"C:\\") == L"-d \"C:\\\\\"" &&
+        TerminalCommandLine(L"\\\\?\\UNC\\server\\共享\\") == L"-d \"\\\\server\\共享\\\\\"",
+        "shared WT arguments preserve drive-root and Unicode UNC quoting without semicolons");
+    check(TerminalProgramArguments(L"", L"C:\\") == TerminalCommandLine(L"C:\\") &&
+        TerminalProgramArguments(L"wt.exe", L"\\\\?\\UNC\\server\\共享\\") ==
+            TerminalCommandLine(L"\\\\?\\UNC\\server\\共享\\"),
+        "context default retains WT root and Unicode UNC argument quoting");
+    check(TerminalProgramArguments(L"C:\\工具 folder\\WT.EXE", L"C:\\工具 folder\\") ==
+        TerminalCommandLine(L"C:\\工具 folder\\") &&
+        TerminalProgramArguments(L"C:\\PowerShell\\pwsh.exe", L"C:\\工具 folder\\").empty(),
+        "absolute case-insensitive WT gets -d; other executables get no arguments");
+    auto result = LaunchContextTerminal(L"", L"\\\\?\\C:\\工具 folder\\", owner, stub);
+    check(!result.error && actual_file == L"wt.exe" && actual_args == TerminalCommandLine(L"C:\\工具 folder\\") &&
+        actual_dir == L"C:\\工具 folder\\" && actual_owner == owner,
+        "empty context choice launches WT with selected directory and owner");
+    result = LaunchContextTerminal(L"C:\\工具 folder\\WT.EXE", L"C:\\name;new-tab\\", owner, stub);
+    check(!result.error && actual_file == L"C:\\工具 folder\\WT.EXE" && actual_args == L"-d ." &&
+        actual_dir == L"C:\\name;new-tab\\",
+        "WT semicolon directory uses inherited working directory without command separators");
+    result = LaunchContextTerminal(L"\\\\?\\C:\\PowerShell\\pwsh.exe", L"\\\\?\\UNC\\server\\共享\\", owner, stub);
+    check(!result.error && actual_file == L"C:\\PowerShell\\pwsh.exe" && actual_args.empty() &&
+        actual_dir == L"\\\\server\\共享\\", "custom executable inherits normalized Unicode UNC working directory");
+    const auto calls = shell_calls;
+    for (const auto invalid : {L"pwsh.exe -NoExit", L"\"C:\\Tools\\pwsh.exe\"", L"cmd.exe\n", L"file.cmd",
+        L"https://example.test/run.exe", L"C:\\Tools\\bad\".exe"}) {
+        result = LaunchContextTerminal(invalid, L"C:\\", owner, stub);
+        check(result.error == ERROR_INVALID_PARAMETER && shell_calls == calls,
+            "invalid executable field is rejected before shell invocation");
+    }
+    check(pulse::common::IsTerminalProgramValid(L"") &&
+        pulse::common::IsTerminalProgramValid(L"\\\\?\\C:\\工具 folder\\pwsh.EXE") &&
+        pulse::common::IsTerminalProgramValid(L"\\\\server\\share\\pwsh.exe"),
+        "executable validation accepts default, extended Unicode path and UNC executable");
+    result = LaunchContextTerminal(L"\\\\?\\UNC\\server\\共享\\pwsh.exe", L"C:\\", owner, stub);
+    check(!result.error && actual_file == L"\\\\server\\共享\\pwsh.exe" && actual_args.empty(),
+        "extended UNC executable is accepted and normalized before shell invocation");
+    check(!pulse::common::IsTerminalProgramValid(L"\\\\?\\pwsh.exe") &&
+        !pulse::common::IsTerminalProgramValid(L"\\\\?\\relative\\pwsh.exe"),
+        "extended executable namespace still requires an absolute path");
+
+    terminal_sequence = true;
+    terminal_open_error = ERROR_ELEVATION_REQUIRED;
+    shell_error = ERROR_SUCCESS;
+    auto before = shell_calls;
+    result = LaunchContextTerminal(L"C:\\PowerShell\\pwsh.exe", L"C:\\工具 folder\\", owner, stub);
+    check(!result.error && result.open_error == ERROR_ELEVATION_REQUIRED && result.elevation_requested &&
+        shell_calls == before + 2 && actual_verb == L"runas" && actual_file == L"C:\\PowerShell\\pwsh.exe" &&
+        actual_args.empty() && actual_dir == L"C:\\工具 folder\\" && actual_owner == owner,
+        "context custom executable retries error 740 once with runas and original working directory");
+    terminal_open_error = ERROR_CANCELLED;
+    before = shell_calls;
+    result = LaunchContextTerminal(L"", L"C:\\", owner, stub);
+    check(result.error == ERROR_CANCELLED && !result.elevation_requested && shell_calls == before + 1,
+        "context normal cancellation never retries or requests elevation");
+    terminal_open_error = ERROR_ELEVATION_REQUIRED;
+    shell_error = ERROR_CANCELLED;
+    before = shell_calls;
+    result = LaunchContextTerminal(L"", L"C:\\", owner, stub);
+    check(result.error == ERROR_CANCELLED && result.elevation_requested && shell_calls == before + 2,
+        "context elevation cancellation returns without another attempt");
+    terminal_open_error = ERROR_FILE_NOT_FOUND;
+    before = shell_calls;
+    result = LaunchContextTerminal(L"C:\\Missing terminal\\pwsh.exe", L"C:\\", owner, stub);
+    check(result.error == ERROR_FILE_NOT_FOUND && !result.elevation_requested && shell_calls == before + 1 &&
+        actual_file == L"C:\\Missing terminal\\pwsh.exe" && actual_args.empty(),
+        "missing custom context executable returns its error without default fallback");
+    terminal_sequence = false;
+    shell_error = ERROR_SUCCESS;
+
+    const HRESULT com_hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    check(SUCCEEDED(com_hr), "real context launch initializes its COM apartment");
+    if (FAILED(com_hr)) return false;
+    wchar_t self[32768]{};
+    GetModuleFileNameW(nullptr, self, ARRAYSIZE(self));
+    const auto root = std::filesystem::absolute(std::filesystem::path(L"bench_data") /
+        (L"context-terminal-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64())));
+    const auto working = root / L"工具 folder;with separator";
+    const auto image = root / L"terminal-cwd-probe.exe";
+    std::filesystem::create_directories(working);
+    std::filesystem::copy_file(self, image);
+    result = LaunchContextTerminal(image.wstring(), working.wstring(), nullptr, {CreateStub, ShellCaptureChild});
+    const bool child_finished = terminal_child && WaitForSingleObject(terminal_child, 5000) == WAIT_OBJECT_0;
+    DWORD child_exit = STILL_ACTIVE;
+    if (terminal_child) {
+        GetExitCodeProcess(terminal_child, &child_exit);
+        CloseHandle(terminal_child);
+        terminal_child = nullptr;
+    }
+    check(child_finished && child_exit == 0, "real custom terminal child exits before fixture cleanup");
+    std::wstring directory;
+    const auto deadline = GetTickCount64() + 5000;
+    while (GetTickCount64() < deadline) {
+        std::ifstream input(working / L"terminal-cwd.txt", std::ios::binary);
+        const std::wstring expected = working.wstring();
+        directory.resize(expected.size());
+        input.read(reinterpret_cast<char*>(directory.data()), static_cast<std::streamsize>(directory.size() * sizeof(wchar_t)));
+        if (input && directory == expected) break;
+        Sleep(10);
+    }
+    check(!result.error && directory == working.wstring(),
+        "real custom executable receives no arguments and selected Unicode semicolon working directory");
+    if (child_finished) {
+        std::error_code cleanup_error;
+        std::filesystem::remove_all(root, cleanup_error);
+        check(!cleanup_error, "isolated terminal launch fixture is cleaned up");
+    } else {
+        std::wcout << L"[INFO] retained isolated fixture=" << root.wstring() << L'\n';
+    }
+    CoUninitialize();
+    return ok;
 }
 bool TestShellItemLaunch() {
     bool ok = true;
@@ -110,6 +250,20 @@ bool TestShellItemLaunch() {
 }
 }
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 1) {
+        wchar_t self[32768]{};
+        GetModuleFileNameW(nullptr, self, ARRAYSIZE(self));
+        if (std::filesystem::path(self).filename() == L"terminal-cwd-probe.exe") {
+            wchar_t directory[32768]{};
+            const DWORD length = GetCurrentDirectoryW(ARRAYSIZE(directory), directory);
+            if (!length || length >= ARRAYSIZE(directory)) return 1;
+            std::ofstream output(L"terminal-cwd.txt", std::ios::binary);
+            output.write(reinterpret_cast<const char*>(directory), static_cast<std::streamsize>(length * sizeof(wchar_t)));
+            return output ? 0 : 1;
+        }
+    }
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--terminal-only")
+        return TestContextTerminal() ? 0 : 1;
     if (argc == 2 && std::wstring_view(argv[1]) == L"--association-only")
         return TestShellItemLaunch() ? 0 : 1;
     if (argc == 4 && std::wstring_view(argv[1]) == L"--child") {
@@ -219,5 +373,6 @@ int wmain(int argc, wchar_t** argv) {
     check(!live.error && argument == L"two words" && directory == root.wstring(), "real non-elevated child receives argument and selected working directory");
     std::wcout << L"[INFO] isolated fixture=" << root.wstring() << L'\n';
     ok = TestShellItemLaunch() && ok;
+    ok = TestContextTerminal() && ok;
     return ok ? 0 : 1;
 }

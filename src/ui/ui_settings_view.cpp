@@ -1303,6 +1303,7 @@ float MainRenderer::SettingsDestinationOffset(const WindowViewModel& vm, int set
     case I::SettingsKeepRunning: target=l.startup_row[1];break;
     case I::SettingsNotifyIcon: target=l.notify_icon_card;break;
     case I::SettingsHomeFolder: target=l.home_folder_card;break;
+    case I::SettingsTerminal: target=l.terminal_program_card;break;
     case I::SettingsStartupOpen: target=l.startup_open_card;break;
     case I::SettingsNewTabOpen: target=l.new_tab_open_card;break;
     case I::SettingsExternalOpen: target=l.external_open_card;break;

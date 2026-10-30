@@ -523,6 +523,15 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 if (ContainsPt(lay.confirm_delete_row, x, y)) {
                     r.region = HitTestResult::SettingsToggle; r.index = 32; return r;
                 }
+                if (ContainsPt(lay.terminal_program_choose, x, y)) {
+                    r.region = HitTestResult::SettingsTerminalProgram; r.index = 0; return r;
+                }
+                if (!vm.settings_terminal_program.empty() && ContainsPt(lay.terminal_program_reset, x, y)) {
+                    r.region = HitTestResult::SettingsTerminalProgram; r.index = 1; return r;
+                }
+                if (ContainsPt(lay.terminal_program_path, x, y)) {
+                    r.region = HitTestResult::SettingsTerminalProgram; r.index = 2; return r;
+                }
                 // 文件操作 → 网络位置 (zero rects on the other pages).
                 if (ContainsPt(lay.lan_discovery_row, x, y)) {
                     r.region = HitTestResult::SettingsToggle; r.index = 40; return r;

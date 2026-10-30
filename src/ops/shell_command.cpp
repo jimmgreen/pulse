@@ -1,5 +1,6 @@
 #include "shell_command.h"
 #include "../common/path_utils.h"
+#include "../common/terminal_program.h"
 #include <vector>
 
 namespace pulse::ops {
@@ -149,7 +150,25 @@ std::wstring QuoteWindowsArgument(std::wstring_view value) {
 }
 
 std::wstring TerminalCommandLine(const std::wstring& dir) {
+    // WT treats semicolons as command separators even inside quoted arguments.
+    // Resolve "." using the selected working directory without passing its name.
+    if (dir.find(L';') != std::wstring::npos) return L"-d .";
     return L"-d " + QuoteWindowsArgument(pulse::path::StripExtendedPathPrefix(dir));
+}
+
+std::wstring TerminalProgramArguments(const std::wstring& program, const std::wstring& directory) {
+    const auto separator = program.find_last_of(L"\\/");
+    const auto name = separator == std::wstring::npos ? program : program.substr(separator + 1);
+    if (!program.empty() && _wcsicmp(name.c_str(), L"wt.exe") != 0) return {};
+    return TerminalCommandLine(directory);
+}
+
+TerminalLaunchResult LaunchContextTerminal(const std::wstring& program, const std::wstring& directory,
+    HWND owner, const ShellCommandApi& api) {
+    if (!pulse::common::IsTerminalProgramValid(program))
+        return {ERROR_INVALID_PARAMETER, ERROR_INVALID_PARAMETER, false};
+    return LaunchTerminal(program.empty() ? L"wt.exe" : pulse::path::StripExtendedPathPrefix(program),
+        TerminalProgramArguments(program, directory), directory, owner, api);
 }
 
 }

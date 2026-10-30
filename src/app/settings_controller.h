@@ -274,6 +274,7 @@ public:
     void HoverCardSize(int index);     // 0 small, 1 medium, 2 large
     // 0 picks the default location's folder, 1 resets it to This PC.
     void HomeFolder(int action);
+    void SetTerminalProgram(const std::wstring& path);
     void TextRendering(int index);
     void UiFontSize(int index);   // 0 small 90%, 1 default 100%, 2 large 112%, 3 larger 125%
     void TrayIconSize(int index);

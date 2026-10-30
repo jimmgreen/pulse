@@ -4399,4 +4399,11 @@ BEGIN
     IDS_OP_AUTH_TITLE_DELETE "刪除這些項目需要系統管理員權限"
     IDS_OP_AUTH_NOT_GRANTED_SHORT "沒有取得系統管理員權限。"
     IDS_OP_AUTHORIZATION_ONCE "確認一次即可，本次操作的其餘項目不會再詢問。"
+    IDS_SETTINGS_TERMINAL "在此處開啟終端機"
+    IDS_SETTINGS_TERMINAL_DESC "選擇右鍵選單使用的終端機程式，以目標資料夾作為工作目錄啟動。"
+    IDS_SETTINGS_TERMINAL_DEFAULT "Windows Terminal（預設）"
+    IDS_SETTINGS_TERMINAL_CHOOSE "選擇程式"
+    IDS_SETTINGS_TERMINAL_RESET "還原預設"
+    IDS_SETTINGS_TERMINAL_PICKER_TITLE "選擇終端機程式"
+    IDS_SETTINGS_TERMINAL_EXE_FILTER "可執行程式 (*.exe)"
 END

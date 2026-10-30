@@ -1280,12 +1280,11 @@ void OpsManager::ExecuteCommand(const std::wstring& command, const std::wstring&
     EnqueueOpen(std::move(item));
 }
 
-void OpsManager::OpenTerminal(const std::wstring& dir) {
+void OpsManager::OpenTerminal(const std::wstring& dir, const std::wstring& program) {
     QueueItem item;
     item.open_path = dir;
-    item.open_file = L"wt.exe";
-    item.open_verb = L"__terminal";
-    item.open_args = TerminalCommandLine(dir);
+    item.open_file = program;
+    item.open_verb = L"__context_terminal";
     EnqueueOpen(std::move(item));
 }
 
@@ -2013,9 +2012,11 @@ void OpsManager::OpenThread() {
         HWND dialog_owner = ui_hwnd_.load();
         if (!dialog_owner || !IsWindow(dialog_owner)) dialog_owner = GetForegroundWindow();
 
-        if (_wcsicmp(item.open_verb.c_str(), L"__terminal") == 0) {
+        if (_wcsicmp(item.open_verb.c_str(), L"__terminal") == 0 || item.open_verb == L"__context_terminal") {
             const auto started = GetTickCount64();
-            const auto result = LaunchTerminal(item.open_file, item.open_args, item.open_path, dialog_owner);
+            const auto result = item.open_verb == L"__context_terminal"
+                ? LaunchContextTerminal(item.open_file, item.open_path, dialog_owner)
+                : LaunchTerminal(item.open_file, item.open_args, item.open_path, dialog_owner);
             diagnostics::runtime::Event("terminal_launch_result", {{"task", item.seq},
                 {"open_error", result.open_error}, {"error", result.error},
                 {"cancelled", result.error == ERROR_CANCELLED},

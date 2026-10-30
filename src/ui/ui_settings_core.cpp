@@ -675,6 +675,16 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
             segmented(lay.tray_icon_card,lay.tray_icon_row,sizes,icons,vm.settings_tray_icon,H::SettingsTrayIcon,I::SettingsTrayIcon,I::SettingsTrayIconDesc,3,L"\xED1E");
         }
         toggle(lay.tray_hide_row,I::TrayHideWhenEmpty,I::TrayHideWhenEmptyDesc,L"\xE8F6",vm.settings_tray_hide_empty,37);
+        label(lay.terminal_program_card,l10n::Get(I::SettingsTerminal),l10n::Get(I::SettingsTerminalDesc),L"\xE756",
+            lay.terminal_program_path.right,(lay.terminal_program_path.top-lay.terminal_program_card.top)/scale_-43.0f);
+        text(FitEndEllipsis(
+            vm.settings_terminal_program.empty() ? l10n::Get(I::SettingsTerminalDefault) : vm.settings_terminal_program,
+            lay.terminal_program_path.right-lay.terminal_program_path.left,
+            [&](const std::wstring& value) { return MeasureLayoutText(compositor_,compositor_->DwriteFactory(),compositor_->SmallFormat(),value); }),
+            lay.terminal_program_path,true);
+        button(lay.terminal_program_choose,l10n::Get(I::SettingsTerminalChoose),H::SettingsTerminalProgram,0);
+        button(lay.terminal_program_reset,l10n::Get(I::SettingsTerminalReset),H::SettingsTerminalProgram,1,
+            false,!vm.settings_terminal_program.empty());
         toggle(lay.change_tracking_row,I::SettingsChangeTracking,I::SettingsChangeTrackingDesc,L"\xE823",vm.settings_change_tracking,8);
         {
             const I days[]={I::ChangeToday,I::ChangeLast3Days,I::ChangeLast7Days};const int day_values[]={1,3,7};

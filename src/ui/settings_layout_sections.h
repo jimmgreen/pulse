@@ -356,6 +356,27 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
         l.tray_icon_card=row(seg_h); segments(l.tray_icon_card,l.tray_icon_row,3,282);
         l.tray_hide_row=row(64);
 
+        section(I::SettingsTerminal);
+        {
+            const float text_left=left+54*scale, text_right=right-16*scale;
+            const float desc_h=painter ? painter->MeasureWrappedCaptionHeight(l10n::Get(I::SettingsTerminalDesc),
+                (std::max)(40*scale,text_right-text_left)) : 42*scale;
+            const float available=(std::max)(1.0f,right-left-32*scale);
+            const float cw=(std::min)(available,button_w(I::SettingsTerminalChoose,120));
+            const float rw=(std::min)(available,button_w(I::SettingsTerminalReset,100));
+            const bool stacked=cw+8*scale+rw>available;
+            const float buttons_h=(stacked ? 72.0f : 32.0f)*scale;
+            l.terminal_program_card=row(35+desc_h/scale+8+21+12+buttons_h/scale+12);
+            const float path_top=l.terminal_program_card.top+35*scale+desc_h+8*scale;
+            l.terminal_program_path=D2D1::RectF(text_left,path_top,text_right,path_top+21*scale);
+            const float button_top=l.terminal_program_path.bottom+12*scale;
+            const float button_left=narrow || stacked ? left+16*scale : right-16*scale-cw-8*scale-rw;
+            l.terminal_program_choose=D2D1::RectF(button_left,button_top,button_left+cw,button_top+32*scale);
+            const float reset_left=stacked ? button_left : button_left+cw+8*scale;
+            const float reset_top=button_top+(stacked ? 40*scale : 0.0f);
+            l.terminal_program_reset=D2D1::RectF(reset_left,reset_top,reset_left+rw,reset_top+32*scale);
+        }
+
         section(I::SettingsSecChanges);
         l.change_tracking_row=row(64);
         l.change_days_row=row(seg_h,true); segments(l.change_days_row,l.change_days,3,282);

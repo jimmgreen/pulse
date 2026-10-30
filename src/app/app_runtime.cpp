@@ -2740,6 +2740,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     vm.settings_close_tab_double_click = s.appPrefs.close_tab_on_double_click;
     vm.settings_confirm_delete = s.appPrefs.confirm_recycle_delete;
     vm.settings_home_folder = s.appPrefs.home_folder;
+    vm.settings_terminal_program = s.appPrefs.terminal_program;
     vm.settings_text_render = s.appPrefs.text_render;
     vm.settings_ui_font_scale = s.appPrefs.ui_font_scale;
     std::copy_n(s.settings.custom_accent(), 3, vm.settings_accent_hsl);
@@ -3469,6 +3470,11 @@ std::wstring TooltipForHover(AppState& s) {
     case R::SettingsBlankClick: return text(I::SettingsBlankClickBack);
     case R::SettingsHomeFolder:
         return text(s.hoverControlIndex == 1 ? I::ThisPc : I::SettingsHomeFolderPick);
+    case R::SettingsTerminalProgram:
+        if (s.hoverControlIndex == 1) return text(I::SettingsTerminalReset);
+        if (s.hoverControlIndex == 2)
+            return s.appPrefs.terminal_program.empty() ? text(I::SettingsTerminalDefault) : s.appPrefs.terminal_program;
+        return text(I::SettingsTerminalChoose);
     case R::SettingsThumbCache: return text(I::ThumbCacheTooltip);
     case R::SettingsTextRender: return text(I::SettingsTextRender);
     case R::SettingsUiFontSize: return text(I::SettingsUiFontSize);

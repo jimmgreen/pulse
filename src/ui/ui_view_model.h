@@ -1243,6 +1243,7 @@ struct WindowViewModel {
     bool settings_close_tab_double_click = false;
     bool settings_confirm_delete = false;
     std::wstring settings_home_folder; // default location; empty = This PC
+    std::wstring settings_terminal_program;
     int settings_text_render = 0; // 0 auto, 1 sharp, 2 smooth
     int settings_ui_font_scale = 100; // interface font size: 90 / 100 / 112 / 125
     // 主题色 › 自定义: hue 0..360, saturation 0..100, lightness 0..100 (settings_expanded bit 5 opens it).
@@ -1487,6 +1488,7 @@ struct HitTestResult {
         SettingsExternalOpen,
         SettingsBlankClick,
         SettingsHomeFolder,
+        SettingsTerminalProgram,
         SettingsLanCache,  // 发现结果保留: 0 10 min, 1 1 h, 2 this session
         SettingsThumbCache,
         SettingsTextRender,

@@ -3813,7 +3813,7 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 if (cmd == app::CmdOpenTerminal) {
                     std::wstring p = vm.details.path;
                     if (!p.empty() && !vm.details.is_dir) p = fs::ParentPath(p);
-                    if (!p.empty()) s->ops.OpenTerminal(ClipboardPath(p));
+                    if (!p.empty()) s->ops.OpenTerminal(ClipboardPath(p), s->appPrefs.terminal_program);
                 } else if (cmd == app::CmdDetailsComputeSize) {
                     if (!vm.details.path.empty()) StartDetailsSizeWalk(*s, vm.details.path);
                     InvalidateRect(hwnd, nullptr, FALSE);

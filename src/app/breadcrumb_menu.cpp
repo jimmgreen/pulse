@@ -29,7 +29,7 @@ void RunPathCommand(AppState& s, const std::wstring& path, bool filesystem, int 
         if (filesystem) ops::WriteClipboard({shell_path}, false);
         break;
     case app::CmdOpenTerminal:
-        if (filesystem) s.ops.OpenTerminal(shell_path);
+        if (filesystem) s.ops.OpenTerminal(shell_path, s.appPrefs.terminal_program);
         break;
     case app::CmdProperties:
         if (filesystem) s.ops.ShowProperties(shell_path);

@@ -4419,5 +4419,12 @@
 #define IDS_OP_AUTH_TITLE_DELETE                                                         5627
 #define IDS_OP_AUTH_NOT_GRANTED_SHORT                                                    5628
 #define IDS_OP_AUTHORIZATION_ONCE                                                        5629
+#define IDS_SETTINGS_TERMINAL                                                            5630
+#define IDS_SETTINGS_TERMINAL_DESC                                                       5631
+#define IDS_SETTINGS_TERMINAL_DEFAULT                                                    5632
+#define IDS_SETTINGS_TERMINAL_CHOOSE                                                     5633
+#define IDS_SETTINGS_TERMINAL_RESET                                                      5634
+#define IDS_SETTINGS_TERMINAL_PICKER_TITLE                                               5635
+#define IDS_SETTINGS_TERMINAL_EXE_FILTER                                                 5636
 
 #endif  // PULSE_STRING_IDS_H

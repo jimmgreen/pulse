@@ -4401,6 +4401,13 @@ BEGIN
     IDS_OP_AUTH_TITLE_DELETE "删除这些项目需要管理员权限"
     IDS_OP_AUTH_NOT_GRANTED_SHORT "没有获得管理员权限。"
     IDS_OP_AUTHORIZATION_ONCE "确认一次即可，本次操作的其余项目不会再问。"
+    IDS_SETTINGS_TERMINAL "在此处打开终端"
+    IDS_SETTINGS_TERMINAL_DESC "选择右键菜单使用的终端程序，以目标文件夹作为工作目录启动。"
+    IDS_SETTINGS_TERMINAL_DEFAULT "Windows Terminal（默认）"
+    IDS_SETTINGS_TERMINAL_CHOOSE "选择程序"
+    IDS_SETTINGS_TERMINAL_RESET "恢复默认"
+    IDS_SETTINGS_TERMINAL_PICKER_TITLE "选择终端程序"
+    IDS_SETTINGS_TERMINAL_EXE_FILTER "可执行程序 (*.exe)"
 END
 
 LANGUAGE 0x09, 0x01
@@ -8801,6 +8808,13 @@ BEGIN
     IDS_OP_AUTH_TITLE_DELETE "Deleting these items needs administrator permission"
     IDS_OP_AUTH_NOT_GRANTED_SHORT "Administrator permission wasn't granted."
     IDS_OP_AUTHORIZATION_ONCE "You only need to approve once; the rest of this operation won't ask again."
+    IDS_SETTINGS_TERMINAL "Open terminal here"
+    IDS_SETTINGS_TERMINAL_DESC "Choose the terminal used by the context menu. It starts with the target folder as its working directory."
+    IDS_SETTINGS_TERMINAL_DEFAULT "Windows Terminal (default)"
+    IDS_SETTINGS_TERMINAL_CHOOSE "Choose program"
+    IDS_SETTINGS_TERMINAL_RESET "Restore default"
+    IDS_SETTINGS_TERMINAL_PICKER_TITLE "Choose a terminal program"
+    IDS_SETTINGS_TERMINAL_EXE_FILTER "Executable programs (*.exe)"
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.

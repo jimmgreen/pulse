@@ -2585,6 +2585,10 @@ struct SettingsLayout {
     D2D1_RECT_F home_folder_card{};
     D2D1_RECT_F home_folder_choose{};
     D2D1_RECT_F home_folder_reset{};
+    D2D1_RECT_F terminal_program_card{};
+    D2D1_RECT_F terminal_program_path{};
+    D2D1_RECT_F terminal_program_choose{};
+    D2D1_RECT_F terminal_program_reset{};
     D2D1_RECT_F startup_open_card{};
     D2D1_RECT_F startup_open_row[2]{};
     D2D1_RECT_F notify_icon_card{};

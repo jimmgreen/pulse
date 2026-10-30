@@ -1,6 +1,7 @@
 #include "../common/windows_compat.h"
 #include "../common/localization.h"
 #include "settings_controller.h"
+#include "../common/terminal_program.h"
 #include "blank_pane_click.h"
 #include "default_file_manager.h"
 #include "shell_integration_registry.h"
@@ -956,6 +957,12 @@ void SettingsController::HomeFolder(int action) {
     } else {
         return;
     }
+    SaveAndApply(SettingsEffect::None);
+}
+
+void SettingsController::SetTerminalProgram(const std::wstring& path) {
+    if (!prefs_ || !common::IsTerminalProgramValid(path) || path == prefs_->terminal_program) return;
+    prefs_->terminal_program = path;
     SaveAndApply(SettingsEffect::None);
 }
 
