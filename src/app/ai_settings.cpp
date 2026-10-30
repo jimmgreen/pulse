@@ -159,6 +159,9 @@ Settings ParseSettings(std::string_view utf8, bool* malformed) {
         const std::string base_url = a->get_string("base_url");
         if (UsableUrl(base_url)) s.assistant.base_url = base_url;
         if (const std::string service = a->get_string("service"); UsableServiceId(service)) s.assistant.service = service;
+        s.assistant.history = a->get_bool("history", true);
+        if (int64_t days = 0; a->find("history_days") && a->find("history_days")->get_int(days, 0, 3650))
+            s.assistant.history_days = static_cast<int>(days);
         if (thinking >= 0) s.assistant.thinking = thinking;
         else if (effort >= 0) s.assistant.thinking = ThinkingFromEffort(static_cast<int>(effort), s.assistant.service);
         if (const auto* list = a->find("services"); list && list->is_object()) {
@@ -258,6 +261,8 @@ std::string SerializeSettings(const Settings& s) {
         if (!vp.mic.empty()) voice.set("mic", vp.mic);
         assistant.set("voice", std::move(voice));
     }
+    if (!s.assistant.history) assistant.set("history", false);
+    if (s.assistant.history_days > 0) assistant.set("history_days", s.assistant.history_days);
     root.set("assistant", std::move(assistant));
     return json::Serialize(root) + "\n";
 }

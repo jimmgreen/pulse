@@ -137,6 +137,9 @@ enum AssistantHit : int {
     kAsstVoiceKeyField = 409,
     kAsstVoiceUrlField = 410,
     kAsstVoicePauseBase = 420, // + 停顿 segment: 1 秒, 2 秒, 手动
+    // 55 P3 历史对话.
+    kAsstHistToggle = 430,     // 保存对话历史
+    kAsstHistKeepBase = 440,   // + 保留时间 segment: 永久, 30 天, 90 天, 1 年
 };
 // Fields the page hosts an EDIT in (MainRenderer::SettingsAssistantField).
 enum class AsstField : uint8_t { Key, Url, Model, VoiceKey, VoiceUrl };
@@ -210,6 +213,9 @@ struct AssistantPageView {
     int voice_pause = 0;               // segment: 0 = 1 秒, 1 = 2 秒, 2 = 手动
     std::wstring voice_mic;            // Set: the microphone's name
     bool mcp_installed = false;        // the AI pack (bundled or installed)
+    // 55 P3 历史对话: 保存对话历史, and 保留时间 while it is on.
+    bool history = true;
+    int history_keep = 0;              // segment: 0 永久, 1 30 天, 2 90 天, 3 1 年
 };
 struct AssistantPageLayout {
     D2D1_RECT_F model_section{}, model_card{}, model_foot{};
@@ -239,6 +245,7 @@ struct AssistantPageLayout {
     D2D1_RECT_F voice_model_row{}, voice_model{};
     D2D1_RECT_F voice_pause_row{}, voice_pause[3]{};
     D2D1_RECT_F voice_mic_row{}, voice_mic{};
+    D2D1_RECT_F hist_section{}, hist_card{}, hist_row{}, hist_toggle{}, hist_keep_row{}, hist_keep[4]{};
     D2D1_RECT_F mcp_section{}, mcp_card{}, mcp_badge{}, mcp_button{}, mcp_meta{};
 };
 

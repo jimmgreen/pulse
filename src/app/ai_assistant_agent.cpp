@@ -1084,6 +1084,16 @@ size_t AiAgentHistorySize(AppState& s) {
     return c.agent ? c.agent->history.size() : 0;
 }
 
+json::Value AiAgentHistoryJson(AppState& s) {
+    AiChat& c = Chat(s);
+    return c.agent ? c.agent->history : json::Value::Array();
+}
+
+void AiAgentSetHistory(AppState& s, json::Value history) {
+    if (!history.is_array()) return;
+    Agent(s).history = std::move(history);
+}
+
 std::shared_ptr<AiHistoryTail> AiAgentCutHistory(AppState& s, size_t from) {
     AiChat& c = Chat(s);
     auto tail = std::make_shared<AiHistoryTail>();

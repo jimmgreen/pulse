@@ -21,6 +21,7 @@ namespace pulse {
 struct AppState;
 struct AiAgent;   // the DeepSeek agent loop (ai_assistant_agent.cpp)
 struct AiHistoryTail;   // model messages cut off the history (ai_agent_internal.h)
+namespace json { class Value; }
 
 // 55 P2: the versions of one user message, like branches. A version is the
 // message's words plus everything after it: the blocks and the model
@@ -100,6 +101,14 @@ struct AiChat {
     // its versions once it has more than one.
     std::unordered_map<uint32_t, size_t> turn_hist;
     std::unordered_map<uint32_t, AiTurnBranch> branches;
+
+    // 55 P3 历史对话: the file this conversation saves to (empty until its
+    // first save), its title, whether the user renamed or pinned it, and
+    // what was last written (unchanged: not written again).
+    std::wstring history_id, title;
+    bool renamed = false, pinned = false;
+    int64_t created = 0;
+    size_t saved_sig = 0;
 
     ui::AiBlockView* Find(uint32_t id);
     ui::AiBlockView& Add(ui::AiBlockKind kind, uint64_t now_ms);
@@ -192,6 +201,31 @@ void AiAgentContinue(AppState& s, const std::wstring& prompt, bool with_context,
 // The model history: its length, the messages from `from` on (cut off and
 // returned), and putting such a tail back at `from`.
 size_t AiAgentHistorySize(AppState& s);
+// 55 P3: the whole model history as a saved conversation keeps it, and
+// putting such a history into a fresh conversation (历史对话 › open).
+json::Value AiAgentHistoryJson(AppState& s);
+void AiAgentSetHistory(AppState& s, json::Value history);
+
+// 55 P3 历史对话 (ai_chat_history.cpp). Saving needs a message and
+// 保存对话历史 on; opening another conversation stops and saves this one.
+void AiHistorySave(AppState& s);
+bool AiHistoryOpenChat(AppState& s, const std::wstring& id);
+// The layer over the panel: open lists the saved conversations (and drops
+// those past 保留时间).
+void AiHistoryShow(AppState& s, bool open);
+void AiHistoryFillVm(AppState& s, ui::AiHistoryView& view);
+// A click in the layer; true when it started renaming a row (the app puts
+// its EDIT there with AiHistoryRenameTitle).
+bool AiHistoryActivate(AppState& s, ui::AiPanelPart part, int row);
+void AiHistorySetQuery(AppState& s, std::wstring query);
+void AiHistoryRenameText(AppState& s, std::wstring text);
+const std::wstring& AiHistoryRenameTitle(AppState& s);
+bool AiHistoryRenaming(const AppState& s);
+void AiHistoryRenameEnd(AppState& s, bool save);   // Enter saves, Esc / elsewhere gives up
+bool AiHistoryOpenFirst(AppState& s);              // Enter in the search box
+// Esc: the rename, the confirmation, then the layer; true when taken.
+bool AiHistoryEscape(AppState& s);
+bool AiHistoryRowPinned(AppState& s, int row);     // its tip: 固定 / 取消固定
 int AiAgentToolCount(AppState& s);   // tool calls of the running (or last) turn
 std::shared_ptr<AiHistoryTail> AiAgentCutHistory(AppState& s, size_t from);
 void AiAgentRestoreHistory(AppState& s, size_t from, const std::shared_ptr<AiHistoryTail>& tail);

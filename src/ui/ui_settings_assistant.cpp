@@ -478,6 +478,34 @@ void MainRenderer::DrawSettingsAssistant(const WindowViewModel& vm, const D2D1_R
         painter_.DrawWrappedCaption(asst_text::T(I::AsstVoiceFoot), D2D1::Point2F(o.voice_foot.left, o.voice_foot.top),
                                     o.voice_foot.right - o.voice_foot.left, theme.text_secondary);
 
+    // 55 P3 历史对话.
+    painter_.DrawText(asst_text::T(I::AiHist), o.hist_section, compositor_->TextFormat(), theme.text);
+    card(o.hist_card);
+    head(o.hist_row, L"\xE81C", asst_text::T(I::AiHistSaveRow), asst_text::T(I::AiHistSaveDesc), o.hist_toggle.left);
+    {
+        fluent::ControlState state{};
+        state.checked = v.history;
+        state.hovered = hovered(kAsstHistToggle);
+        painter_.DrawSwitch(o.hist_toggle, L"", state);
+    }
+    if (o.hist_keep_row.bottom > o.hist_keep_row.top) {
+        divider_below(o.hist_row);
+        sub_row(o.hist_keep_row, asst_text::T(I::AiHistKeepRow), asst_text::T(I::AiHistKeepDesc), o.hist_keep[0].left);
+        painter_.DrawSegmentedTrack(D2D1::RectF(o.hist_keep[0].left, o.hist_keep[0].top, o.hist_keep[3].right,
+                                                o.hist_keep[3].bottom));
+        for (int i = 0; i < 4; ++i) {
+            fluent::SegmentedItemSpec item{};
+            item.bounds = o.hist_keep[i];
+            item.text = asst_text::KeepLabel(i);
+            item.state.checked = i == v.history_keep;
+            item.state.hovered = hovered(kAsstHistKeepBase + i);
+            item.shared_track = true;
+            item.position = i == 0 ? fluent::SegmentPosition::First
+                : i == 3 ? fluent::SegmentPosition::Last : fluent::SegmentPosition::Middle;
+            painter_.DrawSegmentedItem(item);
+        }
+    }
+
     // 让其他 AI 应用使用 Pulse.
     painter_.DrawText(asst_text::T(I::AsstMcpSection), o.mcp_section, compositor_->TextFormat(), theme.text);
     card(o.mcp_card);

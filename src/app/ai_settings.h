@@ -72,6 +72,11 @@ struct AssistantPrefs {
     std::string base_url;                     // empty: the service's own address
     std::vector<std::pair<std::string, ServicePrefs>> services;   // "services": {id: {...}}, the others
     VoicePrefs voice;                         // "voice": {...}
+    // 55 P3 历史对话: "history": false stops saving conversations;
+    // "history_days" removes those not updated for that many days (pinned
+    // ones stay). Written only when not the default, so older files stay.
+    bool history = true;
+    int history_days = 0;                     // 0: keep them all
 };
 
 // What AI apps (MCP) may do in Pulse (P5, 设置 › 增强包 › AI 与 MCP › AI

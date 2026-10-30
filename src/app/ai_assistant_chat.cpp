@@ -289,6 +289,7 @@ void Finish(AppState& s, bool done_chip) {
     } else {
         SetChip(c, ui::StatusAiState::Idle, L"");
     }
+    AiHistorySave(s);   // 55 P3: every finished (or stopped) turn
 }
 
 // Thinking: the header streams the reason, then folds into one line.
@@ -1167,6 +1168,7 @@ void AiChatSwitchVersion(AppState& s, int block, int delta) {
     br.current = static_cast<size_t>(target);
     SyncLastPrompt(c);
     MarkVersions(c);
+    AiHistorySave(s);   // 55 P3: the version shown is the one kept
     Redraw(s);
 }
 
@@ -1261,6 +1263,7 @@ void AiChatStop(AppState& s) {
 void AiChatReset(AppState& s) {
     if (!s.aiAssistant.chat) return;
     AiChatStop(s);
+    AiHistorySave(s);   // 55 P3: before it goes (unchanged: nothing written)
     if (s.hwnd) KillTimer(s.hwnd, kRunTimer);
     s.aiAssistant.chat = std::make_shared<AiChat>();
     s.renderer.AiPanel().ScrollToEnd();
@@ -1348,9 +1351,11 @@ void AiChatActivate(AppState& s, ui::AiPanelPart part, int block) {
         break;
     case P::ActThumb:
         b.rating = b.rating > 0 ? 0 : 1;   // only shown here: nothing is sent
+        AiHistorySave(s);
         break;
     case P::ActThumbDown:
         b.rating = b.rating < 0 ? 0 : -1;
+        AiHistorySave(s);
         break;
     case P::VerPrev:
     case P::VerNext:

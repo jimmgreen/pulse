@@ -4702,3 +4702,34 @@ AiEditWarn	IDS_AI_EDIT_WARN	5973	发送后，这条消息之后的回答会重�
 AiEditSend	IDS_AI_EDIT_SEND	5974	发送	Send	傳送
 AiVerPrev	IDS_AI_VER_PREV	5975	上一个版本	Previous version	上一個版本
 AiVerNext	IDS_AI_VER_NEXT	5976	下一个版本	Next version	下一個版本
+AiHist	IDS_AI_HIST	5977	历史对话	Chat history	歷史對話
+AiHistSearch	IDS_AI_HIST_SEARCH	5978	搜索对话标题和内容	Search titles and messages	搜尋對話標題和內容
+AiHistPinned	IDS_AI_HIST_PINNED	5979	已固定	Pinned	已釘選
+AiHistWeek	IDS_AI_HIST_WEEK	5980	7 天内	Previous 7 days	7 天內
+AiHistEarlier	IDS_AI_HIST_EARLIER	5981	更早	Earlier	更早
+AiHistPin	IDS_AI_HIST_PIN	5982	固定	Pin	釘選
+AiHistUnpin	IDS_AI_HIST_UNPIN	5983	取消固定	Unpin	取消釘選
+AiHistRenameHint	IDS_AI_HIST_RENAME_HINT	5984	Enter 保存 · Esc 取消	Enter to save · Esc to cancel	Enter 儲存 · Esc 取消
+AiHistDeleteNote	IDS_AI_HIST_DELETE_NOTE	5985	删除后无法恢复	This can't be undone	刪除後無法復原
+AiHistFoot	IDS_AI_HIST_FOOT	5986	对话只保存在这台电脑，不含 API Key	Chats stay on this PC, without your API key	對話只儲存在這台電腦，不含 API Key
+AiHistSettings	IDS_AI_HIST_SETTINGS	5987	历史设置	History settings	歷史設定
+AiHistEmpty	IDS_AI_HIST_EMPTY	5988	还没有保存的对话	No saved chats yet	還沒有儲存的對話
+AiHistNoMatch	IDS_AI_HIST_NO_MATCH	5989	没有找到相关对话	No matching chats	沒有找到相關對話
+AiHistOff	IDS_AI_HIST_OFF	5990	对话历史已关闭，新的对话不会保存	Chat history is off; new chats aren't saved	對話歷史已關閉，新的對話不會儲存
+AiHistUntitled	IDS_AI_HIST_UNTITLED	5991	新对话	New chat	新對話
+AiWeekSun	IDS_AI_WEEK_SUN	5992	周日	Sun	週日
+AiWeekMon	IDS_AI_WEEK_MON	5993	周一	Mon	週一
+AiWeekTue	IDS_AI_WEEK_TUE	5994	周二	Tue	週二
+AiWeekWed	IDS_AI_WEEK_WED	5995	周三	Wed	週三
+AiWeekThu	IDS_AI_WEEK_THU	5996	周四	Thu	週四
+AiWeekFri	IDS_AI_WEEK_FRI	5997	周五	Fri	週五
+AiWeekSat	IDS_AI_WEEK_SAT	5998	周六	Sat	週六
+AiHistSaveRow	IDS_AI_HIST_SAVE_ROW	5999	保存对话历史	Save chat history	儲存對話歷史
+AiHistSaveDesc	IDS_AI_HIST_SAVE_DESC	6000	对话只保存在这台电脑，不含 API Key；按 Ctrl+H 打开历史	Chats stay on this PC, without your API key. Press Ctrl+H to open them	對話只儲存在這台電腦，不含 API Key；按 Ctrl+H 開啟歷史
+AiHistKeepRow	IDS_AI_HIST_KEEP_ROW	6001	保留时间	Keep chats for	保留時間
+AiHistKeepDesc	IDS_AI_HIST_KEEP_DESC	6002	超过这个时间且没有固定的对话会被删除	Unpinned chats older than this are deleted	超過這個時間且沒有釘選的對話會被刪除
+AiHistKeepForever	IDS_AI_HIST_KEEP_FOREVER	6003	永久	Forever	永久
+AiHistKeep30	IDS_AI_HIST_KEEP_30	6004	30 天	30 days	30 天
+AiHistKeep90	IDS_AI_HIST_KEEP_90	6005	90 天	90 days	90 天
+AiHistKeep365	IDS_AI_HIST_KEEP_365	6006	1 年	1 year	1 年
+AiHistTip	IDS_AI_HIST_TIP	6007	历史对话（Ctrl+H）	Chat history (Ctrl+H)	歷史對話（Ctrl+H）

@@ -5386,6 +5386,8 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             }
         } else if (ctrl && !shift && !alt && wParam == L'J') {
             AiAssistantHotkey(*s);   // Pulse 助手: open + focus, focus, or collapse
+        } else if (ctrl && !shift && !alt && wParam == L'H') {
+            AiAssistantHistoryKey(*s);   // Pulse 助手 › 历史对话
         } else if (ctrl && !shift && !alt && wParam == L'B') {
             ToggleSidebarCollapsed(*s);
         } else if (ctrl && shift && !alt && wParam == L'B') {

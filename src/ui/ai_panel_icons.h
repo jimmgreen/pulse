@@ -102,6 +102,9 @@ enum class AiIcon : uint8_t {
     Detail,
     Short,
     Model,
+    // 55 P3: 历史对话 and its rows.
+    History,
+    Chat,
     Count
 };
 

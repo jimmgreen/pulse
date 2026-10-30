@@ -137,6 +137,20 @@ enum class AiPanelPart : uint8_t {
     EditBox,
     EditCancel,
     EditSend,
+    // 55 P3 历史对话: the header button; the layer itself (absorbs clicks),
+    // its search box and foot link; a row (index = row) and its 固定 /
+    // 重命名 / 删除, the inline 取消 · 删除, the title while it is renamed.
+    History,
+    HistArea,
+    HistSearch,
+    HistSettings,
+    HistRow,
+    HistPin,
+    HistRename,
+    HistDelete,
+    HistDelCancel,
+    HistDelOk,
+    HistRenameBox,
 };
 
 struct AiPanelHit {
@@ -621,6 +635,27 @@ struct AiPeekView {
 // How the model takes 思考 (app/ai_providers.h ThinkKind).
 enum class AiEffortMode : uint8_t { Levels, Toggle, Fixed };
 
+// 55 P3 历史对话: one saved conversation in the list (grouped in order: a
+// row with `group` set starts 已固定 / 今天 / 昨天 / 7 天内 / 更早).
+struct AiHistoryRowView {
+    std::wstring group;           // the heading above this row (empty: same group)
+    std::wstring title, snippet, when;
+    bool pinned = false;
+    bool current = false;         // the conversation in the panel
+};
+
+struct AiHistoryView {
+    bool open = false;
+    std::wstring search_cue, query;   // query: drawn while the search EDIT is hidden
+    std::wstring empty;               // no rows: 还没有保存的对话 / 没有找到相关对话
+    std::wstring foot, settings;      // 🔒 对话只保存在这台电脑… · 历史设置
+    std::wstring rename_hint, delete_note, cancel, del;
+    std::vector<AiHistoryRowView> rows;
+    int renaming = -1;                // row whose title is an EDIT
+    std::wstring rename_text;         // drawn while that EDIT is hidden
+    int deleting = -1;                // row in its inline confirmation
+};
+
 struct AiPanelViewModel {
     bool dark = false;
     bool high_contrast = false;
@@ -683,6 +718,7 @@ struct AiPanelViewModel {
     int hover_turn = -1;              // user block whose turn is under the pointer (55 P2: 复制 · 编辑)
     AiPanelHit pressed;
     AiPeekView peek;
+    AiHistoryView history;            // 55 P3
 };
 
 class AiPanelView {
@@ -805,6 +841,21 @@ public:
     D2D1_RECT_F TurnEditRect() const noexcept { return turn_edit_rect_; }
     bool TurnEditPlaced() const noexcept { return turn_edit_placed_; }
     void RevealTurnEdit();   // scrolls the whole edit box into view
+    // 55 P3 历史对话 (ai_panel_history.cpp): how far the layer slid in (0..1),
+    // the search box's and the renamed title's text areas (the app puts its
+    // EDITs there once the layer stands still), and the list's scrolling.
+    float HistoryAmount() const noexcept { return hist_k_; }
+    // The layer is over this point (what is under it takes no pointer).
+    bool HistoryCovers(float x, float y) const noexcept {
+        return hist_k_ > 0.001f && x >= hist_rect_.left && x < hist_rect_.right && y >= hist_rect_.top &&
+               y < hist_rect_.bottom;
+    }
+    bool HistorySettled() const noexcept { return hist_k_ >= 0.999f && hist_open_drawn_; }
+    D2D1_RECT_F HistorySearchRect() const noexcept { return hist_search_rect_; }
+    D2D1_RECT_F HistoryRenameRect() const noexcept { return hist_rename_rect_; }
+    bool HistoryScrollBy(float dy);   // false: the layer is not there
+    void HistoryRevealRow(int row);   // scrolls a row into view
+    void HistoryScrollTop() noexcept { hist_scroll_ = 0.0f; }
     bool BeginSelect(float x, float y, int clicks, bool extend);
     void DragSelect(float x, float y);
     void EndSelect();
@@ -987,6 +1038,10 @@ private:
     const AiRichPiece* PieceOf(const AiRichSelPos& p) const;
     void UnitAround(const AiRichSelPos& p, int unit, AiRichSelPos& from, AiRichSelPos& to) const;
     void DrawSelectionBar(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal, float scale);
+    void DrawHistory(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal, const D2D1_RECT_F& panel,
+                     float scale, uint64_t now_ms);
+    AiPanelHit HistoryHitTest(float x, float y) const;
+    float HistorySlide(bool open, uint64_t now_ms);   // eased 0..1 (its own: DrawConversation sweeps tweens_)
     // The composer's quote chip: its height (0 without a quote, measured
     // before the composer is placed) and drawing.
     float MeasureQuote(Compositor* compositor, const AiPanelViewModel& vm, float inner_width, float scale);
@@ -1027,6 +1082,17 @@ private:
     std::vector<std::pair<D2D1_RECT_F, int>> turn_rects_;   // user turns (bubble .. next turn), visible part
     D2D1_RECT_F turn_edit_rect_{};
     bool turn_edit_placed_ = false;
+    // 55 P3 历史对话.
+    D2D1_RECT_F hist_button_{};
+    float hist_k_ = 0.0f;               // slid in (eased)
+    float hist_from_ = 0.0f, hist_to_ = 0.0f;
+    uint64_t hist_start_ = 0;
+    uint32_t hist_ms_ = 0;
+    bool hist_open_drawn_ = false;      // vm.history.open last frame
+    D2D1_RECT_F hist_rect_{}, hist_list_rect_{}, hist_search_rect_{}, hist_rename_rect_{};
+    float hist_scroll_ = 0.0f, hist_content_h_ = 0.0f;
+    std::vector<float> hist_row_tops_;  // content y of each row (for reveal)
+    std::vector<ConvHit> hist_hits_;
 
     Formats formats_;
     ID2D1SolidColorBrush* brush_ = nullptr;

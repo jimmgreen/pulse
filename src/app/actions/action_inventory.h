@@ -268,6 +268,7 @@ inline constexpr KeyActionLink kKeyActionLinks[] = {
     {KeyAction::Overview, {"window.overview"}},
     {KeyAction::MergeWindows, {"window.merge"}},
     {KeyAction::AiAssistant, {"", "the assistant itself"}},
+    {KeyAction::AiHistory, {"", "the assistant's own chat history"}},
     {KeyAction::ShortcutHelp, {"app.shortcut_help"}},
 };
 

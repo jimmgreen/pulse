@@ -145,6 +145,11 @@ inline const std::wstring& PauseLabel(int i) {
     static constexpr I k[] = {I::AiVoicePause1, I::AiVoicePause2, I::AiVoicePauseManual};
     return T(k[(std::clamp)(i, 0, 2)]);
 }
+inline const std::wstring& KeepLabel(int i) {
+    using I = l10n::StringId;
+    static constexpr I k[] = {I::AiHistKeepForever, I::AiHistKeep30, I::AiHistKeep90, I::AiHistKeep365};
+    return T(k[(std::clamp)(i, 0, 3)]);
+}
 inline const std::wstring& McpBadge(const AssistantPageView& v) {
     return T(v.mcp_installed ? l10n::StringId::Installed : l10n::StringId::NotInstalled);
 }
@@ -408,6 +413,29 @@ inline float LayoutSettingsAssistant(SettingsLayout& l, const WindowViewModel& v
         y = o.voice_foot.bottom;
     }
 
+    // 55 P3 历史对话: 保存对话历史 (a switch) and, while it is on, 保留时间.
+    o.hist_section = section(false);
+    {
+        const float top = y;
+        o.hist_row = row(asst_text::T(I::AiHistSaveDesc), inner_right - 42.0f * s);
+        o.hist_toggle = place(o.hist_row, inner_right, 42.0f * s);
+        if (v.history) {
+            float widths[4]{}, total = 0.0f;
+            for (int i = 0; i < 4; ++i) {
+                widths[i] = (std::max)(52.0f * s, button_w(asst_text::KeepLabel(i)) - 8.0f * s);
+                total += widths[i];
+            }
+            o.hist_keep_row = row(asst_text::T(I::AiHistKeepDesc), inner_right - total);
+            float sx = inner_right - total;
+            for (int i = 0; i < 4; ++i) {
+                o.hist_keep[i] = place(o.hist_keep_row, sx + widths[i], widths[i]);
+                sx += widths[i];
+            }
+        }
+        y += 4.0f * s;
+        o.hist_card = D2D1::RectF(left, top, right, y);
+    }
+
     // 让其他 AI 应用使用 Pulse: AI 与 MCP lives on its own page under 增强包.
     o.mcp_section = section(false);
     {
@@ -464,6 +492,9 @@ inline int HitTestSettingsAssistant(const SettingsLayout& l, const WindowViewMod
             if (in(o.voice_pause[i])) return kAsstVoicePauseBase + i;
         if (in(o.voice_mic)) return kAsstVoiceMic;
     }
+    if (in(o.hist_toggle)) return kAsstHistToggle;
+    for (int i = 0; i < 4; ++i)
+        if (in(o.hist_keep[i])) return kAsstHistKeepBase + i;
     if (in(o.mcp_button)) return kAsstMcp;
     if (v.stage != AsstStage::Connected) return -1;
     if (in(o.model_choice)) return kAsstModel;

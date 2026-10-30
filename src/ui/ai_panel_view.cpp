@@ -394,6 +394,15 @@ void AiPanelView::DrawContent(Compositor* compositor, const AiPanelViewModel& vm
     const D2D1_RECT_F box = D2D1::RectF(panel.left + 12.0f * s, panel.bottom - 12.0f * s - ch,
                                         panel.right - 12.0f * s, panel.bottom - 12.0f * s);
     conversation_rect_ = D2D1::RectF(panel.left, panel.top + kHeadDip * s, panel.right, box.top - 6.0f * s);
+    // 55 P3: 历史对话 slides in from the left (.32 s); what it covers is not drawn.
+    hist_k_ = HistorySlide(vm.history.open, now_ms);
+    hist_open_drawn_ = vm.history.open;
+    const bool hist_shown = hist_k_ > 0.001f;
+    if (hist_shown) {
+        const float edge = panel.left + (panel.right - panel.left) * hist_k_;
+        c.dc->PushAxisAlignedClip(D2D1::RectF(edge, panel.top + kHeadDip * s, (std::max)(edge, panel.right), panel.bottom),
+                                  D2D1_ANTIALIAS_MODE_ALIASED);
+    }
     c.dc->PushAxisAlignedClip(conversation_rect_, D2D1_ANTIALIAS_MODE_ALIASED);
     suggestion_rects_.clear();
     go_settings_ = {};
@@ -406,6 +415,8 @@ void AiPanelView::DrawContent(Compositor* compositor, const AiPanelViewModel& vm
     c.dc->PopAxisAlignedClip();
     DrawComposer(compositor, vm, pal, box, s, now_ms);
     DrawSelectionBar(compositor, vm, pal, s);
+    if (hist_shown) c.dc->PopAxisAlignedClip();
+    DrawHistory(compositor, vm, pal, panel, s, now_ms);
 }
 
 void AiPanelView::DrawHeader(Compositor* compositor, const AiPanelViewModel& vm, const Palette& pal,
@@ -424,10 +435,13 @@ void AiPanelView::DrawHeader(Compositor* compositor, const AiPanelViewModel& vm,
     mode_button_ = D2D1::RectF(bx, cy - bs * 0.5f, bx + bs, cy + bs * 0.5f);
     bx -= bs + 8.0f * s;
     new_button_ = D2D1::RectF(bx, cy - bs * 0.5f, bx + bs, cy + bs * 0.5f);
-    c.Text(vm.title, formats_.title, D2D1::RectF(tx, head_rect_.top, new_button_.left - 8.0f * s, head_rect_.bottom),
+    bx -= bs + 8.0f * s;   // 55 P3: 历史对话, left of 新对话
+    hist_button_ = D2D1::RectF(bx, cy - bs * 0.5f, bx + bs, cy + bs * 0.5f);
+    c.Text(vm.title, formats_.title, D2D1::RectF(tx, head_rect_.top, hist_button_.left - 8.0f * s, head_rect_.bottom),
            pal.text);
     struct Button { const D2D1_RECT_F* r; AiPanelPart part; AiIcon icon; };
     const Button buttons[] = {
+        {&hist_button_, AiPanelPart::History, AiIcon::History},
         {&new_button_, AiPanelPart::NewChat, AiIcon::Plus},
         {&mode_button_, AiPanelPart::Mode, mode_ == AiPanelMode::Docked ? AiIcon::Float : AiIcon::Dock},
         {&close_button_, AiPanelPart::Close, AiIcon::ChevronDown},
@@ -435,11 +449,12 @@ void AiPanelView::DrawHeader(Compositor* compositor, const AiPanelViewModel& vm,
     for (const Button& b : buttons) {
         const bool hot = vm.hover.part == b.part;
         const bool down = hot && vm.pressed.part == b.part;
+        const bool on = b.part == AiPanelPart::History && vm.history.open;   // .hb.on
         const D2D1_COLOR_F hover = pal.glass ? pal.glass_hover : pal.hover;
-        if (hot) c.Fill(*b.r, 8.0f * s, down ? Mix(hover, pal.text, 0.06f) : hover);
+        if (hot || on) c.Fill(*b.r, 8.0f * s, down ? Mix(hover, pal.text, 0.06f) : hover);
         const float is = 17.0f * s;
         c.Icon(b.icon, (b.r->left + b.r->right - is) * 0.5f, (b.r->top + b.r->bottom - is) * 0.5f, is,
-               hot ? pal.text : pal.text2);
+               hot || on ? pal.text : pal.text2);
     }
     c.Fill(D2D1::RectF(panel.left, head_rect_.bottom - 1.0f, panel.right, head_rect_.bottom), 0.0f,
            pal.glass ? pal.glass_line : pal.line2);
@@ -1129,7 +1144,9 @@ AiPanelHit AiPanelView::HitTest(float x, float y) const {
         return hit;
     }
     if (!In(panel_rect_, x, y)) return hit;
+    if (In(hist_button_, x, y)) return {AiPanelPart::History, -1};
     if (In(new_button_, x, y)) return {AiPanelPart::NewChat, -1};
+    if (hist_k_ > 0.001f && In(hist_rect_, x, y)) return HistoryHitTest(x, y);
     if (In(mode_button_, x, y)) return {AiPanelPart::Mode, -1};
     if (In(close_button_, x, y)) return {AiPanelPart::Close, -1};
     if (In(conversation_rect_, x, y)) {

@@ -39,6 +39,7 @@ using I = l10n::StringId;
 
 constexpr UINT_PTR kComposerSubclass = 0x4149;   // 'AI'
 constexpr UINT_PTR kTurnEditSubclass = 0x4145;   // 'AE': a message edited in place
+constexpr UINT_PTR kHistEditSubclass = 0x4148;   // 'AH': 历史对话's search box and a title renamed
 constexpr UINT_PTR kTipTimer = 0x4154;           // 'AT'
 constexpr UINT kTipDelayMs = 520;
 constexpr uint64_t kMenuFadeMs = 240;
@@ -268,6 +269,11 @@ LRESULT CALLBACK ComposerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PT
                     AiAssistantHotkey(s);
                     return 0;
                 }
+            for (const app::KeyChord bound : app::ActiveKeymap().EffectiveChords(app::KeyAction::AiHistory))
+                if (bound == chord) {
+                    AiAssistantHistoryKey(s);   // 55 P3 历史对话
+                    return 0;
+                }
         }
         if (wp == VK_ESCAPE) {
             if (a.menu_open) {
@@ -285,6 +291,7 @@ LRESULT CALLBACK ComposerProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PT
         // Enter sends (WM_KEYDOWN); Shift+Enter is a new line. No beeps.
         if ((wp == L'\r' || wp == L'\n') && (GetKeyState(VK_SHIFT) & 0x8000) == 0) return 0;
         if (wp == 27 || wp == L'\t') return 0;
+        if (wp == 8 && GetKeyState(VK_CONTROL) < 0) return 0;   // Ctrl+H's backspace (历史对话)
         if (wp == 1) {   // Ctrl+A: select all (a multiline EDIT does not)
             SendMessageW(hwnd, EM_SETSEL, 0, -1);
             return 0;
@@ -339,7 +346,7 @@ void EnsureFont(AppState& s) {
     a.font = ui::typography::CreateEditFont(s.scale, 13.5f);
     a.font_scale = s.scale;
     a.line_px = 0;
-    for (HWND e : {a.edit, a.turn_edit})
+    for (HWND e : {a.edit, a.turn_edit, a.hist_search, a.hist_rename})
         if (e && a.font) {
             SendMessageW(e, WM_SETFONT, reinterpret_cast<WPARAM>(a.font), TRUE);
             SendMessageW(e, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, 0);
@@ -575,6 +582,199 @@ void LayoutTurnEdit(AppState& s) {
     }
 }
 
+// 55 P3 历史对话: the search box and a title being renamed are one-line
+// EDITs presented like the others, over the boxes the panel draws once the
+// layer stands still. Enter opens the first match / saves the name, Esc
+// gives up the name or closes the layer.
+std::wstring EditText(HWND e) {
+    std::wstring text(static_cast<size_t>(GetWindowTextLengthW(e)) + 1, L'\0');
+    text.resize(static_cast<size_t>(GetWindowTextW(e, text.data(), static_cast<int>(text.size()))));
+    return text;
+}
+
+void EndHistRename(AppState& s, bool save) {
+    AiAssistantState& a = s.aiAssistant;
+    if (a.hist_rename && AiHistoryRenaming(s)) AiHistoryRenameText(s, EditText(a.hist_rename));
+    AiHistoryRenameEnd(s, save);
+    a.hist_rename_focus = false;
+    if (a.hist_rename && a.hist_rename_visible) {
+        const bool had_focus = GetFocus() == a.hist_rename;
+        ShowWindow(a.hist_rename, SW_HIDE);
+        a.hist_rename_visible = false;
+        if (had_focus) {
+            if (s.hwnd) SetFocus(s.hwnd);
+            a.hist_search_focus = true;   // the keyboard stays in the layer
+        }
+    }
+    Redraw(s);
+}
+
+LRESULT CALLBACK HistEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR ref) {
+    AppState& s = *reinterpret_cast<AppState*>(ref);
+    AiAssistantState& a = s.aiAssistant;
+    const ui::AiPanelView& view = s.renderer.AiPanel();
+    IDWriteTextFormat* format = view.ComposerFormat() ? view.ComposerFormat() : s.compositor.TextFormat();
+    const D2D1_COLOR_F fore = view.TextColor();
+    const D2D1_COLOR_F back = view.CardColor();
+    const auto presented = [&](LRESULT& out) {
+        return ui::HandleChildEditMessage(s.compositor, format, fore, back, a.brush, hwnd, msg, wp, lp, out);
+    };
+    const bool rename = hwnd == a.hist_rename;
+    switch (msg) {
+    case WM_GETDLGCODE:
+        return DefSubclassProc(hwnd, msg, wp, lp) | DLGC_WANTALLKEYS;
+    case WM_KEYDOWN:
+        if (wp == VK_RETURN) {
+            if (rename) EndHistRename(s, true);
+            else if (AiHistoryOpenFirst(s)) a.focus_pending = true;
+            Redraw(s);
+            return 0;
+        }
+        if (wp == VK_ESCAPE) {
+            if (rename) {
+                EndHistRename(s, false);
+            } else if (AiHistoryEscape(s) && !a.hist_open) {
+                a.focus_pending = true;   // the composer, once the layer is gone
+            }
+            Redraw(s);
+            return 0;
+        }
+        if (wp != VK_CONTROL && wp != VK_SHIFT && wp != VK_MENU) {
+            const app::KeyChord chord = app::CurrentChord(static_cast<UINT>(wp));
+            for (const app::KeyChord bound : app::ActiveKeymap().EffectiveChords(app::KeyAction::AiHistory))
+                if (bound == chord) {
+                    AiAssistantHistoryKey(s);
+                    return 0;
+                }
+        }
+        break;
+    case WM_CHAR:
+        if (wp == L'\r' || wp == L'\n' || wp == 27 || wp == L'\t') return 0;
+        if (wp == 8 && GetKeyState(VK_CONTROL) < 0) return 0;   // Ctrl+H's backspace
+        if (wp == 1) {   // Ctrl+A
+            SendMessageW(hwnd, EM_SETSEL, 0, -1);
+            return 0;
+        }
+        break;
+    case WM_NCDESTROY: {
+        LRESULT ignored = 0;
+        presented(ignored);
+        RemovePropW(hwnd, L"Pulse.HistBack");
+        RemovePropW(hwnd, L"Pulse.HistFore");
+        RemoveWindowSubclass(hwnd, HistEditProc, kHistEditSubclass);
+        break;
+    }
+    default: {
+        LRESULT r = 0;
+        if (presented(r)) return r;
+        break;
+    }
+    }
+    const LRESULT r = ui::DefPresentedChildEditProc(s.compositor, format, fore, back, hwnd, msg, wp, lp);
+    switch (msg) {
+    case WM_CHAR: case WM_KEYDOWN: case WM_PASTE: case WM_CUT: case WM_CLEAR: case WM_UNDO:
+    case EM_UNDO: case WM_SETTEXT: case EM_REPLACESEL:
+        if (hwnd == a.hist_search) AiHistorySetQuery(s, EditText(hwnd));
+        else if (hwnd == a.hist_rename && AiHistoryRenaming(s)) {
+            AiHistoryRenameText(s, EditText(hwnd));
+        }
+        break;
+    default:
+        break;
+    }
+    return r;
+}
+
+HWND CreateLineEdit(AppState& s) {
+    HWND e = CreateWindowExW(WS_EX_LAYERED, L"EDIT", L"", WS_CHILD | WS_CLIPSIBLINGS | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0,
+                             0, 0, s.hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (!e) return nullptr;
+    SetLayeredWindowAttributes(e, 0, 255, LWA_ALPHA);
+    SetWindowTheme(e, L"", L"");
+    SendMessageW(e, EM_LIMITTEXT, 200, 0);
+    SetWindowSubclass(e, HistEditProc, kHistEditSubclass, reinterpret_cast<DWORD_PTR>(&s));
+    s.aiAssistant.font_scale = 0.0f;
+    return e;
+}
+
+void BeginHistRename(AppState& s) {
+    AiAssistantState& a = s.aiAssistant;
+    if (!a.hist_rename) {
+        a.hist_rename = CreateLineEdit(s);
+        if (!a.hist_rename) return;
+        EnsureFont(s);
+    }
+    const std::wstring title = AiHistoryRenameTitle(s);   // a copy: SETTEXT syncs it
+    SetWindowTextW(a.hist_rename, title.c_str());
+    SendMessageW(a.hist_rename, EM_SETSEL, 0, -1);
+    a.hist_rename_focus = true;
+}
+
+void PlaceHistEdit(AppState& s, HWND e, bool& visible, bool& focus, const D2D1_RECT_F& r, bool want, bool keep_focus) {
+    if (!e) return;
+    if (!want || r.right - r.left < 1.0f || r.bottom - r.top < 1.0f) {
+        if (visible) {
+            if (GetFocus() == e) {
+                if (s.hwnd) SetFocus(s.hwnd);
+                if (keep_focus) focus = true;   // it comes back focused
+            }
+            ShowWindow(e, SW_HIDE);
+            visible = false;
+            Redraw(s);
+        }
+        return;
+    }
+    const int x = static_cast<int>(std::lround(r.left));
+    const int y = static_cast<int>(std::lround(r.top));
+    const int w = (std::max)(1, static_cast<int>(std::lround(r.right - r.left)));
+    const int h = (std::max)(1, static_cast<int>(std::lround(r.bottom - r.top)));
+    RECT cur{};
+    GetWindowRect(e, &cur);
+    MapWindowPoints(nullptr, s.hwnd, reinterpret_cast<POINT*>(&cur), 2);
+    const bool placed = cur.left == x && cur.top == y && cur.right - cur.left == w && cur.bottom - cur.top == h;
+    if (!placed || !visible) {
+        SetWindowPos(e, HWND_TOP, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        visible = true;
+        Redraw(s);
+    }
+    const ui::AiPanelView& view = s.renderer.AiPanel();
+    const UINT_PTR back = 0x01000000u | ToColorRef(view.CardColor());
+    const UINT_PTR fore = 0x01000000u | ToColorRef(view.TextColor());
+    if (reinterpret_cast<UINT_PTR>(GetPropW(e, L"Pulse.HistBack")) != back ||
+        reinterpret_cast<UINT_PTR>(GetPropW(e, L"Pulse.HistFore")) != fore) {
+        SetPropW(e, L"Pulse.HistBack", reinterpret_cast<HANDLE>(back));
+        SetPropW(e, L"Pulse.HistFore", reinterpret_cast<HANDLE>(fore));
+        InvalidateRect(e, nullptr, TRUE);
+    }
+    if (focus) {
+        focus = false;
+        if (GetForegroundWindow() == s.hwnd || GetForegroundWindow() == GetAncestor(s.hwnd, GA_ROOT)) SetFocus(e);
+    }
+}
+
+void LayoutHistEdits(AppState& s) {
+    AiAssistantState& a = s.aiAssistant;
+    const ui::AiPanelView& view = s.renderer.AiPanel();
+    const bool shown = a.open && a.hist_open && view.HistorySettled() && !a.menu_open && !AiVoiceCovers(s);
+    if (shown && !a.hist_search) {
+        a.hist_search = CreateLineEdit(s);
+        if (a.hist_search) EnsureFont(s);
+    }
+    if (a.hist_search) {
+        // A single-line EDIT: the presenter draws its cue banner, also while focused.
+        if (const std::wstring cue = Text(I::AiHistSearch); cue != a.hist_cue) {
+            a.hist_cue = cue;
+            SendMessageW(a.hist_search, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(a.hist_cue.c_str()));
+            InvalidateRect(a.hist_search, nullptr, TRUE);
+        }
+    }
+    PlaceHistEdit(s, a.hist_search, a.hist_search_visible, a.hist_search_focus, view.HistorySearchRect(), shown,
+                  a.hist_open);
+    const bool renaming = AiHistoryRenaming(s);
+    PlaceHistEdit(s, a.hist_rename, a.hist_rename_visible, a.hist_rename_focus, view.HistoryRenameRect(),
+                  shown && renaming, renaming);
+}
+
 void CloseMenu(AppState& s) {
     AiAssistantState& a = s.aiAssistant;
     AiVoiceCloseMenu(s);
@@ -593,7 +793,8 @@ void OpenServiceSettings(AppState& s) {
 // Header buttons and the answer's acts show a tip after a dwell.
 bool HasTip(ui::AiPanelPart part) {
     using P = ui::AiPanelPart;
-    return part == P::NewChat || part == P::Mode || part == P::Close || part == P::ActCopy || part == P::ActRetry ||
+    return part == P::History || part == P::HistPin || part == P::HistRename || part == P::HistDelete ||
+           part == P::NewChat || part == P::Mode || part == P::Close || part == P::ActCopy || part == P::ActRetry ||
            part == P::ActThumb || part == P::ActThumbDown || part == P::VerPrev || part == P::VerNext ||
            part == P::UserCopy || part == P::UserEdit || part == P::MenuReset || part == P::MenuSlider ||
            AiVoiceHasTip(part);
@@ -885,9 +1086,76 @@ std::wstring AnswerText(ui::AiPanelView& view, int block, bool has, bool markdow
     return t;
 }
 
+// 55 P3: 历史对话 in and out. Opening ends a message edit and the selection
+// and puts the keyboard in the search box; closing gives it back to the
+// composer once the layer has slid away.
+void OpenHistory(AppState& s, bool open) {
+    AiAssistantState& a = s.aiAssistant;
+    if (open == a.hist_open) return;
+    CloseMenu(s);
+    if (open) {
+        if (a.edit_id) EndTurnEdit(s);
+        s.renderer.AiPanel().ClearSelection();
+        if (a.hist_search) SetWindowTextW(a.hist_search, L"");
+        a.hist_search_focus = true;
+    } else {
+        if (AiHistoryRenaming(s)) EndHistRename(s, false);
+        a.hist_search_focus = false;
+        a.focus_pending = true;
+    }
+    AiHistoryShow(s, open);
+    a.hover = {};
+    Redraw(s);
+}
+
+bool IsHistoryPart(ui::AiPanelPart part) {
+    using P = ui::AiPanelPart;
+    switch (part) {
+    case P::HistArea: case P::HistSearch: case P::HistSettings: case P::HistRow: case P::HistPin:
+    case P::HistRename: case P::HistDelete: case P::HistDelCancel: case P::HistDelOk: case P::HistRenameBox:
+        return true;
+    default:
+        return false;
+    }
+}
+
+void HistoryClick(AppState& s, const ui::AiPanelHit& hit) {
+    AiAssistantState& a = s.aiAssistant;
+    using P = ui::AiPanelPart;
+    if (hit.part == P::HistRenameBox) return;   // its EDIT takes the clicks once placed
+    if (hit.part == P::HistSearch) {
+        a.hist_search_focus = true;
+        Redraw(s);
+        return;
+    }
+    // A click anywhere else gives up a name being typed (Enter saves it).
+    if (AiHistoryRenaming(s)) {
+        EndHistRename(s, false);
+        if (hit.part == P::HistRow || hit.part == P::HistArea) return;
+    }
+    const AiChat* before = a.chat.get();
+    if (AiHistoryActivate(s, hit.part, hit.index)) BeginHistRename(s);
+    if (a.chat.get() != before) {
+        // Another conversation came in: nothing of the old one stays around.
+        if (a.edit) SetWindowTextW(a.edit, L"");
+        a.context_removed_for.clear();
+        a.quote.clear();
+        s.renderer.AiPanel().ClearSelection();
+    }
+    if (!a.hist_open) {
+        a.hist_search_focus = false;
+        a.focus_pending = true;
+    }
+    Redraw(s);
+}
+
 void Activate(AppState& s, const ui::AiPanelHit& hit) {
     AiAssistantState& a = s.aiAssistant;
     using P = ui::AiPanelPart;
+    if (IsHistoryPart(hit.part)) {
+        HistoryClick(s, hit);
+        return;
+    }
     if (IsPeekPart(hit.part)) {
         if (hit.part == P::PeekCard) return;
         AiChatHidePeek(s);
@@ -918,8 +1186,12 @@ void Activate(AppState& s, const ui::AiPanelHit& hit) {
         return;
     }
     switch (hit.part) {
+    case P::History:
+        OpenHistory(s, !a.hist_open);
+        break;
     case P::NewChat:
         CloseMenu(s);
+        OpenHistory(s, false);
         AiChatReset(s);
         if (a.edit) SetWindowTextW(a.edit, L"");
         a.context_removed_for.clear();
@@ -1248,6 +1520,16 @@ void AiAssistantHotkey(AppState& s) {
     }
 }
 
+void AiAssistantHistoryKey(AppState& s) {
+    AiAssistantState& a = s.aiAssistant;
+    if (!a.open) {
+        AiAssistantOpen(s);
+        OpenHistory(s, true);
+        return;
+    }
+    OpenHistory(s, !a.hist_open);
+}
+
 void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm) {
     AiAssistantState& a = s.aiAssistant;
     // The chip is always there: "✦ AI" opens the panel.
@@ -1278,6 +1560,7 @@ void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm) {
     p.empty = chat.blocks.empty();
     p.blocks = chat.blocks;
     p.hover_turn = a.hover_turn;
+    AiHistoryFillVm(s, p.history);   // 55 P3
     p.edited_label = Text(I::AiUserEdited);
     p.edit_block = -1;
     if (a.edit_id)
@@ -1390,7 +1673,12 @@ void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm) {
         } else if (part == P::MenuSlider) {
             if (p.effort_mode == ui::AiEffortMode::Levels && a.hover.index >= 0 && a.hover.index < p.effort_count)
                 vm.tooltip_text = p.effort_names[static_cast<size_t>(a.hover.index)];
+        } else if (part == P::HistPin) {
+            vm.tooltip_text = Text(AiHistoryRowPinned(s, a.hover.index) ? I::AiHistUnpin : I::AiHistPin);
         } else vm.tooltip_text = Text(part == P::MenuReset ? I::RestoreDefaults
+                               : part == P::History ? I::AiHistTip
+                               : part == P::HistRename ? I::Rename
+                               : part == P::HistDelete ? I::Delete
                                : part == P::NewChat ? I::AiAsstNewChat
                                : part == P::Close ? I::AiAsstCollapse
                                : part == P::ActCopy || part == P::UserCopy ? I::AiAsstCopy
@@ -1417,10 +1705,13 @@ void AiAssistantLayout(AppState& s) {
     AssistantSettingsLayout(s);
     AiVoiceLayout(s);
     LayoutTurnEdit(s);
+    LayoutHistEdits(s);
     if (!a.edit) return;
     const ui::AiPanelView& view = s.renderer.AiPanel();
     const bool menu_fading = !a.menu_open && ui::motion::NowMs() - a.menu_closed_at < kMenuFadeMs;
-    const bool menu_covers = a.menu_open || menu_fading || AiVoiceCovers(s);
+    // 55 P3: 历史对话 covers the composer while it is there or sliding.
+    const bool menu_covers = a.menu_open || menu_fading || AiVoiceCovers(s) || a.hist_open ||
+                             view.HistoryAmount() > 0.001f;
     // Glass panel: the composer rests translucent with the text drawn by the
     // panel; the opaque EDIT shows only while it has (or is about to take)
     // focus.
@@ -1544,8 +1835,12 @@ bool AiAssistantMouseMove(AppState& s, int x, int y) {
         }
         return false;
     }
-    if (view.SetScrollHot(static_cast<float>(x), static_cast<float>(y))) Redraw(s);
-    if (const int turn = view.UserTurnAt(static_cast<float>(x), static_cast<float>(y)); turn != a.hover_turn) {
+    // 55 P3: under 历史对话 the conversation takes no pointer.
+    const bool under_hist = view.HistoryCovers(static_cast<float>(x), static_cast<float>(y));
+    if (view.SetScrollHot(under_hist ? -1.0e6f : static_cast<float>(x), under_hist ? -1.0e6f : static_cast<float>(y)))
+        Redraw(s);
+    if (const int turn = under_hist ? -1 : view.UserTurnAt(static_cast<float>(x), static_cast<float>(y));
+        turn != a.hover_turn) {
         a.hover_turn = turn;   // the bubble's 复制 · 编辑 fade in
         Redraw(s);
     }
@@ -1568,7 +1863,8 @@ bool AiAssistantMouseDown(AppState& s, int x, int y) {
     AiAssistantState& a = s.aiAssistant;
     if (!Reachable(s)) return false;
     ui::AiPanelView& view = s.renderer.AiPanel();
-    if (a.open && view.BeginScrollDrag(static_cast<float>(x), static_cast<float>(y))) {
+    if (a.open && !view.HistoryCovers(static_cast<float>(x), static_cast<float>(y)) &&
+        view.BeginScrollDrag(static_cast<float>(x), static_cast<float>(y))) {
         // The conversation's bar is outside the menus: they fold like for any click there.
         if (view.ScrollDragging() == 1 && (a.menu_open || AiVoiceMenuOpen(s))) CloseMenu(s);
         a.pressed = {};
@@ -1706,6 +2002,13 @@ bool AiAssistantWheel(AppState& s, int x, int y, int delta, bool horizontal) {
         }
         if (horizontal) return true;
     }
+    if (delta != 0 && !horizontal && IsHistoryPart(s.renderer.AiPanel().HitTest(static_cast<float>(x), static_cast<float>(y)).part)) {
+        // 55 P3: the history list scrolls on its own.
+        s.renderer.AiPanel().HistoryScrollBy(-static_cast<float>(delta) / WHEEL_DELTA * 48.0f * s.scale);
+        if (!s.aiAssistant.captured) s.aiAssistant.hover = {};
+        Redraw(s);
+        return true;
+    }
     if (delta != 0 && !horizontal) {
         // Three 16 px lines a notch, like the page's list. What was under the
         // pointer moved away: no tip for it (the next move finds the new part).
@@ -1774,6 +2077,12 @@ bool AiAssistantEscape(AppState& s) {
         Redraw(s);
         return true;
     }
+    if (a.hist_open) {   // 55 P3: the rename, the confirmation, then the layer
+        if (AiHistoryRenaming(s)) EndHistRename(s, false);
+        else if (AiHistoryEscape(s) && !a.hist_open) a.focus_pending = true;
+        Redraw(s);
+        return true;
+    }
     if (AiVoiceEscape(s)) return true;   // the voice card, its menu, listening
     if (s.renderer.AiPanel().HasSelection()) {
         s.renderer.AiPanel().ClearSelection();
@@ -1812,6 +2121,7 @@ bool AiAssistantContextMenu(AppState& s, int x, int y) {
     AiAssistantState& a = s.aiAssistant;
     if (!a.open || a.selecting) return false;
     ui::AiPanelView& view = s.renderer.AiPanel();
+    if (view.HistoryCovers(static_cast<float>(x), static_cast<float>(y))) return false;   // 55 P3
     const ui::AiPanelHit hit = HitAt(s, x, y);
     using P = ui::AiPanelPart;
     const bool target = hit.part == P::RichLink || hit.part == P::RichPath;
@@ -1880,7 +2190,7 @@ bool AiAssistantContextMenu(AppState& s, int x, int y) {
 HBRUSH AiAssistantCtlColor(AppState& s, HDC hdc, HWND edit) {
     AiAssistantState& a = s.aiAssistant;
     if (!edit) return nullptr;
-    if (edit != a.edit && edit != a.turn_edit) {
+    if (edit != a.edit && edit != a.turn_edit && edit != a.hist_search && edit != a.hist_rename) {
         return AssistantSettingsCtlColor(s, hdc, edit);   // Settings > AI 助手
     }
     const ui::AiPanelView& view = s.renderer.AiPanel();
@@ -1908,6 +2218,7 @@ void AiAssistantDpiChanged(AppState& s) {
 void AiAssistantDestroy(AppState& s) {
     AiAssistantState& a = s.aiAssistant;
     if (s.hwnd) KillTimer(s.hwnd, kTipTimer);
+    AiHistorySave(s);   // 55 P3: the conversation as Pulse closes
     AssistantSettingsDestroy(s);
     AiVoiceDestroy(s);
     if (a.edit) DestroyWindow(a.edit);
@@ -1915,6 +2226,10 @@ void AiAssistantDestroy(AppState& s) {
     if (a.turn_edit) DestroyWindow(a.turn_edit);
     a.turn_edit = nullptr;
     a.edit_id = 0;
+    for (HWND* e : {&a.hist_search, &a.hist_rename}) {
+        if (*e) DestroyWindow(*e);
+        *e = nullptr;
+    }
     if (a.font) DeleteObject(a.font);
     a.font = nullptr;
     if (a.brush) DeleteObject(a.brush);

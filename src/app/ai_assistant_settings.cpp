@@ -1319,6 +1319,9 @@ void Refresh(ui::AssistantPageView& v) {
         Wipe(voice_key);
     }
     v.mcp_installed = app::AiPackReady(app::QueryAiPackState());
+    v.history = settings.assistant.history;
+    const int days = settings.assistant.history_days;
+    v.history_keep = days <= 0 ? 0 : days <= 30 ? 1 : days <= 90 ? 2 : 3;
 }
 
 
@@ -1479,6 +1482,18 @@ void AssistantSettingsClick(AppState& s, int target) {
     }
     if (target >= ui::kAsstVoicePauseBase && target < ui::kAsstVoicePauseBase + 3) {
         SetVoicePause(s, target - ui::kAsstVoicePauseBase);
+        Changed();
+        Redraw(s);
+        return;
+    }
+    if (target == ui::kAsstHistToggle ||
+        (target >= ui::kAsstHistKeepBase && target < ui::kAsstHistKeepBase + 4)) {
+        // 55 P3 历史对话: 保存对话历史 and 保留时间 (永久 / 30 天 / 90 天 / 1 年).
+        static constexpr int kKeepDays[] = {0, 30, 90, 365};
+        (void)UpdateAssistant([&](ai::AssistantPrefs& a) {
+            if (target == ui::kAsstHistToggle) a.history = !a.history;
+            else a.history_days = kKeepDays[target - ui::kAsstHistKeepBase];
+        });
         Changed();
         Redraw(s);
         return;

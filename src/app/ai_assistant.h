@@ -16,6 +16,7 @@ namespace ui { struct WindowViewModel; }
 struct AiChat;   // the conversation and its driver (ai_assistant_chat.h)
 struct AiVoiceUi; // 语音输入: listening, menu, connection card (ai_assistant_voice.h)
 struct AsstPageUi; // Settings > AI 助手: stage, fields, 连接 (ai_assistant_settings.h)
+struct AiHistoryUi; // 历史对话: the saved list, its filter and row actions (ai_chat_history.cpp)
 
 struct AiAssistantState {
     bool open = false;
@@ -79,6 +80,15 @@ struct AiAssistantState {
     std::shared_ptr<AiVoiceUi> voice;
     // Settings > AI 助手; created when the page first shows.
     std::shared_ptr<AsstPageUi> page;
+    // 55 P3 历史对话: the layer over the panel, its list, the search EDIT
+    // and the EDIT over a renamed title (one line each, like turn_edit).
+    bool hist_open = false;
+    std::shared_ptr<AiHistoryUi> hist;
+    HWND hist_search = nullptr;
+    HWND hist_rename = nullptr;
+    bool hist_search_visible = false, hist_rename_visible = false;
+    bool hist_search_focus = false, hist_rename_focus = false;
+    std::wstring hist_cue;          // the search EDIT's placeholder (its Pulse.EditCue)
 };
 
 // The status bar chip: opens or closes the panel (an outside client's open
@@ -117,6 +127,8 @@ bool AiAssistantSetCursor(AppState& s, int x, int y);
 // Esc with the main window focused: closes the menu, else stops a running
 // turn.
 bool AiAssistantEscape(AppState& s);
+// Ctrl+H: 历史对话 (opens the panel when it is closed; closes the layer).
+void AiAssistantHistoryKey(AppState& s);
 // ←/→ (↑/↓), Home/End and 1–9 move the open 思考强度 slider; true when taken.
 bool AiAssistantMenuKey(AppState& s, WPARAM vk);
 

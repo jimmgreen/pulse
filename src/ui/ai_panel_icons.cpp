@@ -372,6 +372,15 @@ constexpr IconPart k_model[] = {
     {"M8 5h8a3 3 0 0 1 3 3v8a3 3 0 0 1-3 3H8a3 3 0 0 1-3-3V8a3 3 0 0 1 3-3z", 0, 0x000000u, 1.6f, 1.0f},
     {"M9 9h6v6H9z", 0, 0x000000u, 1.6f, 1.0f},
 };
+// 55 P3: the header's 历史对话 (a clock running back) and a row's chat bubble.
+constexpr IconPart k_history[] = {
+    {"M4.5 12a7.5 7.5 0 1 0 2.2-5.3", 0, 0x000000u, 1.6f, 1.0f},
+    {"M4.5 4.5v3.5H8", 0, 0x000000u, 1.6f, 1.0f},
+    {"M12 8v4.2l2.8 1.8", 0, 0x000000u, 1.6f, 1.0f},
+};
+constexpr IconPart k_chat[] = {
+    {"M5 6.5A2 2 0 0 1 7 4.5h10a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-6l-4 3.5v-3.5H7a2 2 0 0 1-2-2z", 0, 0x000000u, 1.6f, 1.0f},
+};
 
 constexpr IconDef kIcons[] = {
     {k_spark, std::size(k_spark)},
@@ -458,6 +467,8 @@ constexpr IconDef kIcons[] = {
     {k_detail, std::size(k_detail)},
     {k_short, std::size(k_short)},
     {k_model, std::size(k_model)},
+    {k_history, std::size(k_history)},
+    {k_chat, std::size(k_chat)},
 };
 
 static_assert(std::size(kIcons) == static_cast<size_t>(AiIcon::Count), "one table entry per AiIcon");

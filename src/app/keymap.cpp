@@ -82,6 +82,7 @@ constexpr KeyActionInfo kActions[] = {
     {X::Overview, "Overview", G::Windows, N::Normal, L"窗口总览", L"Window overview", D(K(C | S, 'O')), 0, 0, 0, false},
     {X::MergeWindows, "MergeWindows", G::Windows, N::Normal, L"合并所有窗口", L"Merge all windows", D(K(C | S, 'J')), 0, 0, 0, false},
     {X::AiAssistant, "AiAssistant", G::Windows, N::Normal, L"Pulse 助手", L"Pulse Assistant", D(K(C, 'J')), 0, 0, 0, false},
+    {X::AiHistory, "AiHistory", G::Windows, N::Normal, L"Pulse 助手历史对话", L"Pulse Assistant chat history", D(K(C, 'H')), 0, 0, 0, false},
     {X::ShortcutHelp, "ShortcutHelp", G::Windows, N::Normal, L"键盘快捷键", L"Keyboard shortcuts", D(K(C, VK_OEM_2)), 0, 0, 0, false},
 };
 static_assert(std::size(kActions) == static_cast<size_t>(kKeyActionCount));
