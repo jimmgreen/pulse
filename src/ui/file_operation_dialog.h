@@ -199,7 +199,7 @@ struct LockedItemInfo {
     ops::OpType type = ops::OpType::RecycleDelete;
     std::wstring path;                 // the locked item
     std::vector<ops::LockOwner> owners;
-    bool can_end = false;              // every owner may be ended: 结束进程并重试
+    bool can_end = false;              // at least one owner may be ended: 结束进程并重试
     bool can_skip = false;             // 跳过此项 (OpsManager::CanSkipLockedItem)
 };
 

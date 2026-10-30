@@ -1204,9 +1204,13 @@ void ConfigureServiceRecovery(SC_HANDLE svc) {
     if (!ChangeServiceConfig2W(svc, SERVICE_CONFIG_FAILURE_ACTIONS_FLAG, &flag))
         ServiceTrace(L"failure actions flag not set");
     PSECURITY_DESCRIPTOR sd = nullptr;
+    // WP (SERVICE_STOP) for Interactive Users: the window runs unelevated, and
+    // quitting it stops the service so a portable folder can be deleted
+    // (StopIndexServiceOnExit). Starting was already theirs, so this is the
+    // matching half, not new reach.
     if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
             L"D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)"
-            L"(A;;CCLCSWRPLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)",
+            L"(A;;CCLCSWRPWPLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)",
             SDDL_REVISION_1, &sd, nullptr)) {
         if (!SetServiceObjectSecurity(svc, DACL_SECURITY_INFORMATION, sd))
             ServiceTrace(L"service DACL not set");

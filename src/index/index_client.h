@@ -122,4 +122,11 @@ private:
     std::condition_variable pending_cv_;
 };
 
+// Pulse is exiting: stop the PulseIndex service so it no longer holds files in
+// the folder (deleting an old portable copy then just works). Best effort and
+// bounded by `timeout_ms`: quiet when the account may not control the service.
+// The next launch starts it again through IndexClient::StartStoppedService, so
+// no index data is lost.
+bool StopIndexServiceOnExit(unsigned timeout_ms);
+
 } // namespace pulse::index

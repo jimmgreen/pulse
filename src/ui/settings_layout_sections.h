@@ -235,7 +235,7 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
         }
         l.startup_open_card=row(seg_h); segments(l.startup_open_card,l.startup_open_row,2,282);
         l.new_tab_open_card=row(seg_h); segments(l.new_tab_open_card,l.new_tab_open_row,2,282);
-        l.external_open_card=row(seg_h); segments(l.external_open_card,l.external_open_row,3,282);
+        l.external_open_card=row(seg_h); segments(l.external_open_card,l.external_open_row,4,282);
 
         section(I::SettingsSecTabs);
         l.vertical_tabs_row=row(64);

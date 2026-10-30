@@ -252,7 +252,7 @@ std::wstring AppPrefs::ToJson() const {
     out += L",\n  \"new_tab_open\":";
     out += new_tab_open == 1 ? L"1" : L"0";
     out += L",\n  \"external_open\":";
-    out += std::to_wstring(external_open >= 0 && external_open <= 2 ? external_open : 0);
+    out += std::to_wstring(external_open >= 0 && external_open <= 3 ? external_open : 0);
     out += L",\n  \"close_window_with_last_tab\":";
     out += close_window_with_last_tab ? L"true" : L"false";
     out += L",\n  \"close_tab_on_double_click\":";
@@ -529,7 +529,7 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     startup_open = pulse::json::ExtractInt(json, L"startup_open", 0) == 1 ? 1 : 0;
     new_tab_open = pulse::json::ExtractInt(json, L"new_tab_open", 0) == 1 ? 1 : 0;
     external_open = pulse::json::ExtractInt(json, L"external_open", 0);
-    if (external_open < 0 || external_open > 2) external_open = 0;
+    if (external_open < 0 || external_open > 3) external_open = 0;
     // Missing key = preferences saved before the setting existed: keep their behavior.
     close_window_with_last_tab = pulse::json::ExtractBool(json, L"close_window_with_last_tab", false);
     close_tab_on_double_click = pulse::json::ExtractBool(json, L"close_tab_on_double_click", false);

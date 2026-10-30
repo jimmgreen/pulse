@@ -11,9 +11,10 @@
 namespace pulse::app {
 
 enum class ExternalOpenPolicy : uint8_t {
-    Smart = 0,         // default (plan §6 rule 5)
-    AlwaysTab = 1,     // a tab of the most recently used window
-    AlwaysWindow = 2,  // a new window
+    Smart = 0,            // default (plan §6 rule 5)
+    AlwaysTab = 1,        // a tab of the most recently used window
+    AlwaysWindow = 2,     // a new window
+    AlwaysActivate = 3,   // 只呼出: raise the window, open nothing (Win+E without a folder)
 };
 
 // Hidden tuning (plan §6: unvalidated, fixed after the P3 beta).

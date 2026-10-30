@@ -5471,7 +5471,15 @@ void ApplyAppWindowChrome(AppState& s) {
         s.backdropActive = true;
         return;
     }
-    s.backdropActive = ui::ApplyWindowEffect(s.hwnd, effect, s.darkMode);
+    if (ui::SystemSupportsDwmBackdrop()) {
+        s.backdropActive = ui::ApplyWindowEffect(s.hwnd, effect, s.darkMode);
+        return;
+    }
+    // Windows 10 has no backdrop attribute: leave the frame solid and let the
+    // renderer sample the desktop wallpaper with the same recipes, so the
+    // effect tiles change the window here too.
+    ui::ApplyWindowEffect(s.hwnd, ui::WindowEffect::None, s.darkMode);
+    s.backdropActive = ui::WindowEffectUsesBackdrop(effect) && !ui::DesktopWallpaperPath().empty();
 }
 
 // The picker draws its list with the main window's renderer; hand it the

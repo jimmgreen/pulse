@@ -7,10 +7,12 @@
 
 namespace pulse {
 
-bool LockedItemOwnersClosable(const ops::OpStatus& status) {
-    return !status.lock_owners.empty() &&
-        std::all_of(status.lock_owners.begin(), status.lock_owners.end(),
-                    [](const ops::LockOwner& owner) { return owner.closable; });
+// One killable owner is enough to offer 结束进程并重试: the others are Pulse
+// itself or a protected process, and refusing the button for the whole list
+// left the user with nothing but 重试 (waiting).
+bool LockedItemCanEndAny(const ops::OpStatus& status) {
+    return std::any_of(status.lock_owners.begin(), status.lock_owners.end(),
+                       [](const ops::LockOwner& owner) { return owner.closable; });
 }
 
 ui::ConfirmDialogSpec LockedItemPromptSpec(const ops::OpStatus& status, bool can_end) {
@@ -43,7 +45,7 @@ void PromptLockedItem(AppState& s, const ops::OpStatus& status) {
     info.type = status.type;
     info.path = status.locked_path;
     info.owners = status.lock_owners;
-    info.can_end = LockedItemOwnersClosable(status);
+    info.can_end = LockedItemCanEndAny(status);
     info.can_skip = s.ops.CanSkipLockedItem(status.task_id);
     switch (ui::ShowLockedItemDialog(s.hwnd, info, s.darkMode, s.accentColor)) {
     case ui::LockedItemChoice::Retry: s.ops.RetryLockedOperation(status.task_id, false); break;

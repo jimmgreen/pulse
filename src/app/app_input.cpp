@@ -2977,8 +2977,10 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 extra += 40.0f * s->scale;
         }
         float listTop = content.top + s->renderer.PaneHeaderHeight() + extra + s->renderer.ColumnHeaderHeight();
-        bool sbHit = (mx >= content.right - 14 * s->scale && mx < content.right &&
-                      my >= listTop && my < content.bottom);
+        // The settings page has its own bar; the pane one is not drawn there.
+        bool sbHit = !vm.settings_open &&
+            (mx >= content.right - 14 * s->scale && mx < content.right &&
+             my >= listTop && my < content.bottom);
         if (sbHit != s->scrollbarHovered) {
             s->scrollbarHovered = sbHit;
             InvalidateRect(hwnd, nullptr, FALSE);

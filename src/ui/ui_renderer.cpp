@@ -1024,6 +1024,14 @@ void MainRenderer::DrawButton(const D2D1_RECT_F& rc, const Theme& theme, const D
         size_factor);
 }
 
+const std::wstring& MainRenderer::WallpaperPath() {
+    if (!wallpaper_path_resolved_) {
+        wallpaper_path_ = DesktopWallpaperPath();
+        wallpaper_path_resolved_ = true;
+    }
+    return wallpaper_path_;
+}
+
 namespace {
 void UnionInto(D2D1_RECT_F& r, bool& any, const D2D1_RECT_F& a) {
     if (a.right <= a.left || a.bottom <= a.top) return;
@@ -1169,22 +1177,44 @@ void MainRenderer::Render(const WindowViewModel& vm, const D2D1_RECT_F& rect,
     // stack over it with the opacities from ComputeLayerAlphas.
     const bool image_mode = vm.window_effect == WindowEffect::None &&
                             !vm.background_image.empty() && !IsHighContrast();
+    // A selected image is the window base in every effect mode: drawn at once
+    // for None, sampled as the material for Acrylic/Mica. Both replace the
+    // sheet and card plates, so both use the wallpaper opacities. Without a
+    // transparent surface the base cannot show, so the plates stay.
+    const bool image_base = !vm.background_image.empty() && !IsHighContrast() &&
+                            vm.backdrop_enabled;
     bool backdrop_drawn = false;
+    // The image the window base is painted from; empty when DWM owns the base.
+    std::wstring material_image;
     if (embedded_) {
         // The host window owns the backdrop; only the shared sheet is tinted.
     } else if (image_mode) {
-        backdrop_drawn = material_.DrawSourceCover(dc, rect, vm.background_image,
+        material_image = vm.background_image;
+        backdrop_drawn = material_.DrawSourceCover(dc, rect, material_image,
                                                    WallpaperBlurDip(vm.wallpaper_blur) * scale_);
-    } else {
-        backdrop_drawn = material_.DrawBackdrop(
-            dc, rect, vm.window_effect, vm.dark,
-            (vm.window_effect == WindowEffect::None) ? std::wstring{} : vm.background_image);
+    } else if (vm.window_effect != WindowEffect::None) {
+        // A user image is the material source. Without one, Windows builds that
+        // cannot ask DWM for a backdrop sample the wallpaper instead of leaving
+        // the effect tiles doing nothing.
+        material_image = vm.background_image;
+        // 背景图模糊 scales the sampled material's blur the same way it scales
+        // the image drawn for None; the desktop-wallpaper fallback keeps the
+        // stock recipe because that slider is about the user's own image.
+        float material_blur = 1.0f;
+        if (material_image.empty() && !SystemSupportsDwmBackdrop())
+            material_image = WallpaperPath();
+        else if (!material_image.empty())
+            material_blur = WallpaperBlurScale(vm.wallpaper_blur);
+        backdrop_drawn = material_.DrawBackdrop(dc, rect, vm.window_effect, vm.dark,
+                                                material_image, material_blur);
     }
-    const LayerAlphas layers = ComputeLayerAlphas(image_mode, backdrop_drawn,
+    const LayerAlphas layers = ComputeLayerAlphas(image_base, backdrop_drawn,
         vm.backdrop_enabled, vm.dark, vm.wallpaper_look, vm.wallpaper_blur, vm.frame_transparency);
-    if (!backdrop_drawn && !vm.backdrop_enabled) {
+    if (!backdrop_drawn && (!vm.backdrop_enabled || !material_image.empty())) {
         // Lower pane opacity must reveal the theme canvas when no material or
         // wallpaper exists, instead of exposing an unpainted transparent base.
+        // A material whose decode has not landed yet stays opaque for the same
+        // reason.
         MakeBrush(dc, theme.bg, brBg_);
         dc->FillRectangle(rect, brBg_.get());
     }

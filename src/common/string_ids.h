@@ -594,6 +594,7 @@
 #define IDS_EXTERNAL_OPEN_SMART                                                          2593
 #define IDS_EXTERNAL_OPEN_TAB                                                            2594
 #define IDS_EXTERNAL_OPEN_WINDOW                                                         2595
+#define IDS_EXTERNAL_OPEN_ACTIVATE                                                       5630
 #define IDS_OPENED_IN_NEW_WINDOW                                                         2596
 #define IDS_OPENED_IN_TAB                                                                2597
 #define IDS_OPEN_CONVERT_TO_TAB                                                          2598
@@ -4413,7 +4414,7 @@
 #define IDS_LOCK_CLOSE_LEAD                                                              5621
 #define IDS_LOCK_CLOSE_END                                                               5622
 #define IDS_LOCK_WAITING                                                                 5623
-#define IDS_LOCK_RETRY_NOW                                                               5624
+#define IDS_LOCK_RELEASE_NOW                                                             5624
 #define IDS_OP_AUTH_TITLE_COPY                                                           5625
 #define IDS_OP_AUTH_TITLE_MOVE                                                           5626
 #define IDS_OP_AUTH_TITLE_DELETE                                                         5627

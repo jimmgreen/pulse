@@ -1578,7 +1578,13 @@ bool OpsManager::PrepareLockRetry(OpRequest& req, uint64_t task_id) {
     std::wstring failure;
     for (const auto& owner : owners) {
         DWORD error = ERROR_SUCCESS;
-        const CloseOwnerResult result = CloseLockOwner(owner, 5000, &error);
+        CloseOwnerResult result = CloseLockOwner(owner, 5000, &error);
+        if (result == CloseOwnerResult::Denied) {
+            // The window may not end this one (a service, another user, a
+            // higher integrity process): one UAC prompt ends it as admin.
+            error = ERROR_SUCCESS;
+            result = CloseLockOwnerElevated(owner, 5000, &error);
+        }
         if (result == CloseOwnerResult::Closed || result == CloseOwnerResult::AlreadyGone) continue;
         failure = l10n::Get(l10n::StringId::CouldNotEndProcess).c_str() + DescribeLockOwner(owner);
         if (result == CloseOwnerResult::TimedOut) failure += l10n::Get(l10n::StringId::TheProcessDidNotExitInTime).c_str();
@@ -4645,6 +4651,13 @@ void OpsManager::RunShellOp(const OpRequest& req, uint64_t task_id) {
             {"shell_items", shell_items}, {"shell_hresult", static_cast<uint32_t>(hr)},
             {"elapsed_ms", GetTickCount64() - started}});
 
+        // Entries that were already gone (another tool emptied them first) count
+        // as failures, so the bin is the judge: nothing left means it worked.
+        SHQUERYRBINFO after{};
+        after.cbSize = sizeof(after);
+        const bool after_ok = SUCCEEDED(SHQueryRecycleBinW(nullptr, &after));
+        const bool items_left = !after_ok || after.i64NumItems > 0;
+
         SetStatus([&](OpStatus& st) {
             st.active = false;
             st.percent = -1.0f;
@@ -4655,7 +4668,7 @@ void OpsManager::RunShellOp(const OpRequest& req, uint64_t task_id) {
                 st.phase = OpPhase::Failed;
                 st.last_error = l10n::Get(l10n::StringId::Canceled).c_str();
                 st.summary = st.last_error;
-            } else if (FAILED(hr) || result.failed_entries) {
+            } else if (FAILED(hr) || (result.failed_entries && items_left)) {
                 st.phase = OpPhase::Failed;
                 st.last_error = l10n::Get(l10n::StringId::CouldNotEmptyTheRecycleBin).c_str();
             } else {

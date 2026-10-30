@@ -24,6 +24,16 @@ WindowEffect WindowEffectFromId(std::wstring_view id) noexcept;
 bool WindowEffectUsesBackdrop(WindowEffect effect) noexcept;
 bool ApplyWindowEffect(HWND hwnd, WindowEffect effect, bool dark) noexcept;
 
+// Windows 11 paints the window base itself through DWMWA_SYSTEMBACKDROP_TYPE.
+// Older builds have no such attribute, so picking acrylic/Mica there used to
+// change nothing; they sample the desktop wallpaper with the same recipes
+// instead (WindowMaterial::DrawBackdrop).
+bool SystemSupportsDwmBackdrop() noexcept;
+// Desktop wallpaper, or the copy 个性化 stages under %APPDATA% (WIC sniffs the
+// format, the staged file has no extension). Empty when the desktop is a solid
+// color or the file is unreadable.
+std::wstring DesktopWallpaperPath();
+
 // In-window acrylic (multi-window M7i capsules). SampleTarget copies what the
 // current frame already holds under `rect` (plus `margin` for the blur) out of
 // the device context's target bitmap; it fails on targets that are not
@@ -76,8 +86,11 @@ public:
 
     // Paints the sampled material. Returns false when there is nothing to sample
     // (no path, None, high contrast, or decode failure) so the caller can use DWM.
+    // blur_scale scales the recipe's blur (背景图模糊: 0 keeps the image sharp,
+    // 1 at the stock 14 DIP, larger values blur it further).
     bool DrawBackdrop(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
-                      WindowEffect effect, bool dark, const std::wstring& path);
+                      WindowEffect effect, bool dark, const std::wstring& path,
+                      float blur_scale = 1.0f);
 
 #ifdef PULSE_WINDOW_MATERIAL_TESTING
     void SetDecodeDelayForTesting(DWORD delay_ms);
@@ -97,6 +110,12 @@ private:
     };
 
     static Recipe RecipeFor(WindowEffect effect, bool dark) noexcept;
+    // Opacities used when Pulse paints the window base itself.
+    struct MaterialStrength {
+        float luminosity = 1.0f;
+        float tint_opacity = 0.0f;
+    };
+    static MaterialStrength SelfPaintedStrength(WindowEffect effect) noexcept;
     void EnsureDecodeWorker();
     ID2D1Bitmap* SourceBitmapAt(const std::wstring& path, UINT max_edge);
     void QueueDecode(const std::wstring& path, UINT max_edge);
@@ -106,7 +125,8 @@ private:
     ID2D1Bitmap* EnsureBlurred(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
                                const std::wstring& path, float blur_px);
     ID2D1Bitmap* EnsureSampled(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
-                               WindowEffect effect, bool dark, const std::wstring& path);
+                               WindowEffect effect, bool dark, const std::wstring& path,
+                               float blur_scale);
 
     Compositor* compositor_ = nullptr;
     std::shared_ptr<DecodeWorker> decode_worker_;
@@ -126,6 +146,7 @@ private:
     std::wstring sampled_path_;
     WindowEffect sampled_effect_ = WindowEffect::None;
     bool sampled_dark_ = false;
+    float sampled_blur_scale_ = 1.0f;
     int sampled_w_ = 0;
     int sampled_h_ = 0;
     ID2D1DeviceContext* sampled_dc_ = nullptr;

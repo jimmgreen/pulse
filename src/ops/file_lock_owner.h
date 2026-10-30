@@ -18,7 +18,10 @@ struct LockOwner {
     FILETIME start_time{};      // with pid: identifies the process instance
     std::wstring app_name;      // Restart Manager display name
     std::wstring image_name;    // "WINWORD.EXE"; empty when the process is not queryable
-    bool closable = true;       // false: Pulse itself / its hosts, services, critical, Explorer
+    // false: Pulse itself, services, critical processes and Explorer. Pulse's
+    // own helpers (index, preview, content, AI, shell) stay closable: they
+    // restart on demand.
+    bool closable = true;
 };
 
 struct LockReport {
@@ -41,7 +44,8 @@ std::wstring FailedPathFromError(const std::wstring& error);
 std::vector<std::wstring> LockProbeFiles(const std::wstring& path, size_t limit = 256);
 
 // Restart Manager query. Processes whose image lives in `protected_dir`
-// (Pulse's own install folder) and this process are reported but not closable.
+// (Pulse's own install folder) and this process are reported but not closable,
+// except Pulse's restartable helpers (Pulse.Index/Preview/Content/AI/...).
 std::vector<LockOwner> FindLockOwners(const std::vector<std::wstring>& files,
                                       const std::wstring& protected_dir);
 
@@ -54,11 +58,17 @@ LockReport ProbeLockFailure(HRESULT hr, const std::wstring& error,
                             const std::vector<std::wstring>& sources,
                             const std::wstring& protected_dir, size_t limit = 256);
 
-enum class CloseOwnerResult { Closed, AlreadyGone, Refused, Denied, TimedOut };
+enum class CloseOwnerResult { Closed, AlreadyGone, Refused, Denied, TimedOut, Failed };
 
 // Terminates the owner only if `pid` still names the same process instance
 // (start time match) and it is closable; waits up to `wait_ms` for the exit.
 CloseOwnerResult CloseLockOwner(const LockOwner& owner, DWORD wait_ms, DWORD* error = nullptr);
+
+// Same kill through pulse_integration.exe started with "runas", for owners the
+// window may not end (services, other users, higher integrity). One UAC prompt
+// per call; Denied means the user cancelled it. Blocks until the helper exits,
+// so call it from a worker thread.
+CloseOwnerResult CloseLockOwnerElevated(const LockOwner& owner, DWORD wait_ms, DWORD* error = nullptr);
 
 // "Microsoft Word (WINWORD.EXE, PID 1234)" — language neutral.
 std::wstring DescribeLockOwner(const LockOwner& owner);

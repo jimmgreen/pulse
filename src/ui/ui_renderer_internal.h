@@ -106,6 +106,13 @@ void ClearTextWidthCache() {
     inline float WallpaperBlurDip(int wallpaper_blur) noexcept {
         return static_cast<float>(std::clamp(wallpaper_blur, 0, 40));
     }
+    // 背景图模糊 default that leaves the sampled Acrylic/Mica material looking
+    // as it always did; the slider scales the material blur against it, so
+    // 关闭 (0) keeps the image sharp.
+    constexpr float kStockWallpaperBlurDip = 14.0f;
+    inline float WallpaperBlurScale(int wallpaper_blur) noexcept {
+        return WallpaperBlurDip(wallpaper_blur) / kStockWallpaperBlurDip;
+    }
     constexpr int kPanelTransparencyMax = 90;
     constexpr int kWallpaperBlurMax = 40;
     constexpr int kFrameTransparencyMax = 100;
@@ -2592,7 +2599,7 @@ struct SettingsLayout {
     D2D1_RECT_F new_tab_open_card{};
     D2D1_RECT_F new_tab_open_row[2]{};
     D2D1_RECT_F external_open_card{};
-    D2D1_RECT_F external_open_row[3]{};
+    D2D1_RECT_F external_open_row[4]{};
     D2D1_RECT_F close_last_tab_row{};
     D2D1_RECT_F close_tab_double_click_row{};
     D2D1_RECT_F confirm_delete_row{};

@@ -4374,13 +4374,22 @@ void TestLockedItemPrompt() {
     Check(spec.note == l10n::Get(l10n::StringId::LockedItemEndHint) && spec.danger &&
               spec.confirm_text == l10n::Get(l10n::StringId::LockedItemEndRetry),
           L"locked item: ending owners warns about unsaved work");
-    Check(LockedItemOwnersClosable(status), L"locked item: closable owners allow end-and-retry");
+    Check(LockedItemCanEndAny(status), L"locked item: closable owners allow end-and-retry");
     status.lock_owners.back().closable = false;
     const ui::ConfirmDialogSpec retry = LockedItemPromptSpec(status, false);
-    Check(!LockedItemOwnersClosable(status) &&
+    Check(!LockedItemCanEndAny(status) &&
               retry.note == l10n::Get(l10n::StringId::LockedItemCloseHint) && !retry.danger &&
               retry.confirm_text == l10n::Get(l10n::StringId::LockedItemRetry),
           L"locked item: protected owners only get the close-and-retry hint");
+    // One killable owner among protected ones still offers the button: the rest
+    // (Pulse itself, services) cannot be ended from here, but the user must not
+    // be left with 重试 alone.
+    ops::LockOwner helper;
+    helper.pid = 4243;
+    helper.image_name = L"Pulse.Index.exe";
+    status.lock_owners.push_back(helper);
+    Check(LockedItemCanEndAny(status),
+          L"locked item: one killable owner keeps end-and-retry next to a protected one");
 }
 
 void TestTrayReveal() {

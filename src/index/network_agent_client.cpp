@@ -205,6 +205,14 @@ void NetworkAgentClient::Stop() {
     if (search_thread_.joinable()) search_thread_.join();
     std::lock_guard<std::mutex> lock(request_mu_);
     if (agent_process_) {
+        // Only this client started it, so this client ends it. The host's idle
+        // watch would otherwise keep it (and the index service it reconnects
+        // to, which restarts a stopped service) alive for ten minutes after
+        // the last window closed, looking exactly like a leaked process.
+        if (WaitForSingleObject(agent_process_, 0) == WAIT_TIMEOUT) {
+            TerminateProcess(agent_process_, 0);
+            WaitForSingleObject(agent_process_, 1000);
+        }
         CloseHandle(agent_process_);
         agent_process_ = nullptr;
     }

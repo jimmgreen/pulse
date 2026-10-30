@@ -1742,7 +1742,7 @@ private:
         return TextWidth(compositor_.DwriteFactory(), link_format_.get(), l10n::Get(id)) / scale_ + 2.0f;
     }
     D2D1_RECT_F RetryRect() const {
-        const float w = LinkW(l10n::StringId::LockRetryNow);
+        const float w = LinkW(l10n::StringId::LockReleaseNow);
         return Rect(scale_, kW - kPad - w, WaitTop(), w, 20);
     }
     D2D1_RECT_F SwitchRect(size_t row) const {
@@ -1750,10 +1750,10 @@ private:
         return Rect(scale_, kW - kPad - 13 - w, kListTop + 1 + static_cast<float>(row) * kRowH + 18, w, 20);
     }
 
-    // Focus order follows the reading order: 立即重试, [跳过此项,]
-    // [结束进程并重试,] 取消. Ending processes loses unsaved work, so Enter
-    // cancels by default when it is offered; otherwise Enter retries.
-    std::vector<int> FocusOrder() const { // 0 skip, 1 retry, 2 end, 3 cancel
+    // Focus order follows the reading order: 立即释放, [跳过此项,]
+    // [结束进程并重试,] 取消. Both of the first two end processes, which loses
+    // unsaved work, so Enter cancels unless the user moved the focus.
+    std::vector<int> FocusOrder() const { // 0 skip, 1 release, 2 end, 3 cancel
         std::vector<int> order;
         if (!released_) order.push_back(1);
         if (info_.can_skip) order.push_back(0);
@@ -1761,7 +1761,7 @@ private:
         order.push_back(3);
         return order;
     }
-    int DefaultFocus() const { return info_.can_end ? 3 : 1; }
+    int DefaultFocus() const { return 3; }
     void MoveFocus(bool back) {
         const std::vector<int> order = FocusOrder();
         size_t at = 0;
@@ -2088,7 +2088,7 @@ private:
             painter_.DrawText(l10n::Get(l10n::StringId::LockWaiting),
                               Rect(s, kPad + 22, wy, (retry.left / s) - kPad - 22 - 8, 20), meta_format_.get(),
                               theme.text_secondary);
-            DrawLink(l10n::Get(l10n::StringId::LockRetryNow), retry, hover_ == 5, keyboard && focus_ == 1, link, theme);
+            DrawLink(l10n::Get(l10n::StringId::LockReleaseNow), retry, hover_ == 5, keyboard && focus_ == 1, link, theme);
         }
 
         // Footer: the band all the file-operation dialogs share.
@@ -2192,7 +2192,9 @@ private:
             if (hit == pressed && hit != 0) {
                 if (hit >= 10) { SwitchTo(static_cast<size_t>(hit - 10)); InvalidateRect(hwnd_, nullptr, FALSE); return 0; }
                 if (hit == 1) Activate(0);
-                else if (hit == 5) Activate(1);
+                // 立即释放 ends the owners right away instead of waiting for
+                // them to close; retrying alone is the 重试 button's job.
+                else if (hit == 5) Complete(LockedItemChoice::EndAndRetry);
                 else if (hit == 3) Activate(2);
                 else Complete(LockedItemChoice::Cancel);
                 return 0;

@@ -42,7 +42,7 @@ const void* ActiveLayoutTab(const AppState& s) {
 
 app::ExternalOpenPolicy OpenPolicy(const AppState& s) {
     const int value = s.appPrefs.external_open;
-    return value >= 0 && value <= 2 ? static_cast<app::ExternalOpenPolicy>(value) : app::ExternalOpenPolicy::Smart;
+    return value >= 0 && value <= 3 ? static_cast<app::ExternalOpenPolicy>(value) : app::ExternalOpenPolicy::Smart;
 }
 
 // Rule 7: says where the folder went and offers the other way (one click,
@@ -67,6 +67,19 @@ void ForgetOpenToast(AppCore& core) {
 }  // namespace
 
 AppState& OpenExternalFolder(AppState& mru, const std::wstring& raw) {
+    // Win+E 写死：它启动 Pulse 时不带路径，所以这里凡是"没有路径的呼出"都只
+    // 激活已有窗口，绝不新开窗口/标签。带路径的（资源管理器"用 Pulse 打开"等）
+    // 仍按设置里的策略走。
+    const bool activate_only =
+        raw.empty() || OpenPolicy(mru) == app::ExternalOpenPolicy::AlwaysActivate;
+    if (activate_only) {
+        if (mru.hwnd) {
+            if (IsIconic(mru.hwnd)) ShowWindow(mru.hwnd, SW_RESTORE);
+            else if (!IsWindowVisible(mru.hwnd)) ShowWindow(mru.hwnd, SW_SHOW);
+            SetForegroundWindow(mru.hwnd);
+        }
+        return mru;
+    }
     // Win+E's shell command launches Pulse without a path. Each launch is a
     // new-window request, even when the current folder is already visible.
     const bool new_window = raw.empty();

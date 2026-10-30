@@ -601,6 +601,7 @@ SettingsExternalOpenDesc	IDS_SETTINGS_EXTERNAL_OPEN_DESC	2592	智能：正在用
 ExternalOpenSmart	IDS_EXTERNAL_OPEN_SMART	2593	智能	Smart	智慧
 ExternalOpenTab	IDS_EXTERNAL_OPEN_TAB	2594	标签页	Tab	索引標籤
 ExternalOpenWindow	IDS_EXTERNAL_OPEN_WINDOW	2595	新窗口	New window	新視窗
+ExternalOpenActivate	IDS_EXTERNAL_OPEN_ACTIVATE	5630	只呼出	Activate only	僅叫出
 OpenedInNewWindow	IDS_OPENED_IN_NEW_WINDOW	2596	已在新窗口打开	Opened in a new window	已在新視窗開啟
 OpenedInTab	IDS_OPENED_IN_TAB	2597	已在标签页打开	Opened in a tab	已在索引標籤開啟
 OpenConvertToTab	IDS_OPEN_CONVERT_TO_TAB	2598	点击改为标签页	Click to make it a tab	按一下改為索引標籤
@@ -4420,7 +4421,7 @@ LockInUseEnd	IDS_LOCK_IN_USE_END	5620	”正被使用	” is in use	」正被使
 LockCloseLead	IDS_LOCK_CLOSE_LEAD	5621	在下面的程序里关闭它，	Close it in the program below and it will be 	在下面的程式裡關閉它，
 LockCloseEnd	IDS_LOCK_CLOSE_END	5622	会自动继续。	 automatically.	會自動繼續。
 LockWaiting	IDS_LOCK_WAITING	5623	正在等待文件释放…	Waiting for the file to be released…	正在等待檔案釋放…
-LockRetryNow	IDS_LOCK_RETRY_NOW	5624	立即重试	Retry now	立即重試
+LockReleaseNow	IDS_LOCK_RELEASE_NOW	5624	立即释放	Release now	立即釋放
 OpAuthTitleCopy	IDS_OP_AUTH_TITLE_COPY	5625	复制到这里需要管理员权限	Copying here needs administrator permission	複製到這裡需要系統管理員權限
 OpAuthTitleMove	IDS_OP_AUTH_TITLE_MOVE	5626	移动到这里需要管理员权限	Moving here needs administrator permission	移動到這裡需要系統管理員權限
 OpAuthTitleDelete	IDS_OP_AUTH_TITLE_DELETE	5627	删除这些项目需要管理员权限	Deleting these items needs administrator permission	刪除這些項目需要系統管理員權限

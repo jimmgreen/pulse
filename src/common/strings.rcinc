@@ -4395,12 +4395,13 @@ BEGIN
     IDS_LOCK_CLOSE_LEAD "在下面的程序里关闭它，"
     IDS_LOCK_CLOSE_END "会自动继续。"
     IDS_LOCK_WAITING "正在等待文件释放…"
-    IDS_LOCK_RETRY_NOW "立即重试"
+    IDS_LOCK_RELEASE_NOW "立即释放"
     IDS_OP_AUTH_TITLE_COPY "复制到这里需要管理员权限"
     IDS_OP_AUTH_TITLE_MOVE "移动到这里需要管理员权限"
     IDS_OP_AUTH_TITLE_DELETE "删除这些项目需要管理员权限"
     IDS_OP_AUTH_NOT_GRANTED_SHORT "没有获得管理员权限。"
     IDS_OP_AUTHORIZATION_ONCE "确认一次即可，本次操作的其余项目不会再问。"
+    IDS_EXTERNAL_OPEN_ACTIVATE "只呼出"
 END
 
 LANGUAGE 0x09, 0x01
@@ -8795,12 +8796,13 @@ BEGIN
     IDS_LOCK_CLOSE_LEAD "Close it in the program below and it will be "
     IDS_LOCK_CLOSE_END " automatically."
     IDS_LOCK_WAITING "Waiting for the file to be released…"
-    IDS_LOCK_RETRY_NOW "Retry now"
+    IDS_LOCK_RELEASE_NOW "Release now"
     IDS_OP_AUTH_TITLE_COPY "Copying here needs administrator permission"
     IDS_OP_AUTH_TITLE_MOVE "Moving here needs administrator permission"
     IDS_OP_AUTH_TITLE_DELETE "Deleting these items needs administrator permission"
     IDS_OP_AUTH_NOT_GRANTED_SHORT "Administrator permission wasn't granted."
     IDS_OP_AUTHORIZATION_ONCE "You only need to approve once; the rest of this operation won't ask again."
+    IDS_EXTERNAL_OPEN_ACTIVATE "Activate only"
 END
 
 // Traditional Chinese (Taiwan), generated from the Simplified entries above.

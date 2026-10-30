@@ -550,7 +550,9 @@ if(PULSE_APP_SOURCES)
         target_sources(pulse PRIVATE src/bench/quick_preview_audit_test.cpp)
         target_sources(pulse PRIVATE src/bench/tray_completion_test.cpp)
     endif()
-    target_sources(pulse PRIVATE src/app/pulse.rc src/common/ffmpeg_tool.cpp)
+    # pulse_manifest.rc embeds a requireAdministrator manifest (see
+    # src/app/pulse_admin.manifest); the linker must not add its own.
+    target_sources(pulse PRIVATE src/app/pulse.rc src/app/pulse_manifest.rc src/common/ffmpeg_tool.cpp)
     if(PULSE_TEST_HOOKS_EFFECTIVE)
         # Only app_main.cpp dispatches to the hooks; scoping the define to it
         # keeps a toggle from rebuilding every pulse object.
@@ -643,6 +645,7 @@ target_link_options(pulse PRIVATE /MAP)
     # and their own imports out of the loader's work at every cold start.
     target_link_libraries(pulse PRIVATE delayimp)
     target_link_options(pulse PRIVATE
+        /MANIFEST:NO
         /DELAYLOAD:version.dll /DELAYLOAD:netapi32.dll /DELAYLOAD:mpr.dll
         /DELAYLOAD:winhttp.dll /DELAYLOAD:crypt32.dll /DELAYLOAD:secur32.dll
         /DELAYLOAD:setupapi.dll /DELAYLOAD:cfgmgr32.dll /DELAYLOAD:rstrtmgr.dll

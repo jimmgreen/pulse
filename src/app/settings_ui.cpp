@@ -512,4 +512,5 @@ bool SysCtxPreviewDragCancel(AppState& s) {
     InvalidateRect(s.hwnd,nullptr,FALSE);
     return true;
 }
+
 } // namespace pulse

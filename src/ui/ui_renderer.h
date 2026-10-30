@@ -665,7 +665,11 @@ public:
     bool SettleBreadcrumbScroll(uint64_t now_ms);
 
     void Render(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
-    void InvalidateWallpaper() { material_.Invalidate(); }
+    void InvalidateWallpaper() {
+        material_.Invalidate();
+        wallpaper_path_.clear();
+        wallpaper_path_resolved_ = false;
+    }
 
     HitTestResult HitTest(const WindowViewModel& vm, const D2D1_RECT_F& rect,
                           float x, float y) const;
@@ -948,6 +952,11 @@ private:
     ID2D1Bitmap* LogoBitmap();
 
     WindowMaterial material_;
+    // Windows builds without a DWM backdrop sample the desktop wallpaper so the
+    // Mica/Acrylic tiles still change the window. Resolved once per wallpaper.
+    const std::wstring& WallpaperPath();
+    std::wstring wallpaper_path_;
+    bool wallpaper_path_resolved_ = false;
     Compositor* compositor_ = nullptr;
     float expanded_overflow_px_ = 0.0f;
     int expanded_overflow_index_ = -1;
