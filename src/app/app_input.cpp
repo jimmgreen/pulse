@@ -101,10 +101,10 @@ static void NewFolderOrConnect(AppState& s) {
     if (tab && IsConnectServerPage(tab->current_path)) RunConnectServerDialog(s);
     else CreateNewItem(s, true);
 }
-// Settings toggles that belong to the network page (40-42, 46) are handled
-// by app_network_page; the rest by the settings controller.
+// Toggle IDs 40-42 are shared by search and network settings. Only the
+// File Operations page owns the network meanings of these IDs.
 static void ToggleSetting(AppState& s, int index) {
-    if (HandleNetworkSettingToggle(s, index)) return;
+    if (s.settings.page() == 12 && HandleNetworkSettingToggle(s, index)) return;
     s.settings.ToggleUi(index);
 }
 bool HandleBrowserNavigation(AppState& s, LPARAM command) {
