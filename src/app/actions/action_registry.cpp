@@ -4,6 +4,7 @@
 // view, selection, the common file commands, the tray, settings); the rest of
 // the inventory joins in P4. Rows only call what their menu row or key calls.
 #include "action_registry.h"
+#include "../window_arrange_ui.h"
 
 #include "action_args.h"
 #include "action_inventory.h"
@@ -679,6 +680,18 @@ constexpr Def kDefs[] = {
      +[](AppState& s) { Post(s, WM_CLOSE); }, kAlways},
     {"window.overview", I::WindowOverviewTitle, I::ActDomWindow, L"\xE7C4", P::None, L"Ctrl+Shift+O", 0,
      +[](AppState& s) { ToggleWindowOverview(s); }, kAlways},
+    {"window.arrange", I::ArrangeSideBySide, I::ActDomWindow, L"\xE8A9", P::None, kNoKey, 0,
+     +[](AppState& s) { ArrangeWindows(s, WindowArrangeLayout::SideBySide); }, kAlways},
+    {"window.arrange", I::ArrangeStacked, I::ActDomWindow, L"\xE8A9", P::None, kNoKey, 0,
+     +[](AppState& s) { ArrangeWindows(s, WindowArrangeLayout::Stacked); }, kAlways},
+    {"window.arrange", I::ArrangeColumns, I::ActDomWindow, L"\xE8A9", P::None, kNoKey, 0,
+     +[](AppState& s) { ArrangeWindows(s, WindowArrangeLayout::Columns); }, kAlways},
+    {"window.arrange", I::ArrangeTile, I::ActDomWindow, L"\xE8A9", P::None, kNoKey, 0,
+     +[](AppState& s) { ArrangeWindows(s, WindowArrangeLayout::Tile); }, kAlways},
+    {"window.arrange", I::ArrangeMain, I::ActDomWindow, L"\xE8A9", P::None, kNoKey, 0,
+     +[](AppState& s) { ArrangeWindows(s, WindowArrangeLayout::Main); }, kAlways},
+    {"window.arrange", I::ArrangeCascade, I::ActDomWindow, L"\xE8A9", P::None, kNoKey, 0,
+     +[](AppState& s) { ArrangeWindows(s, WindowArrangeLayout::Cascade); }, kAlways},
     {"window.merge", I::ActMergeWindows, I::ActDomWindow, L"\xE8C8", P::None, L"Ctrl+Shift+J", 0,
      +[](AppState& s) { MergeAllWindows(s); }, kAlways},
     {"window.maximize", I::ActMaximize, I::ActDomWindow, L"\xE922", P::None, L"F11", 0,
@@ -988,6 +1001,14 @@ std::vector<ActionView> ListActions(AppState& s) {
         if (d.glyph) v.glyph = d.glyph;
         v.pictogram = d.pictogram;
         if (d.chord) v.shortcut = ShownShortcut(d.chord);
+        if (d.id == "window.arrange") {
+            constexpr I labels[]={I::ArrangeSideBySide,I::ArrangeStacked,I::ArrangeColumns,I::ArrangeTile,I::ArrangeMain,I::ArrangeCascade};
+            for (int layout=0;layout<6;++layout) if(d.title==labels[layout]) {
+                const auto key=static_cast<KeyAction>(static_cast<int>(KeyAction::ArrangeSideBySide)+layout);
+                const auto& bindings=ActiveKeymap().Bindings(key);
+                if (!bindings.empty()) v.shortcut=ChordDisplay(bindings.front());
+            }
+        }
         v.palette = !d.hidden;
         if (d.fill) d.fill(s, v);
         out.push_back(std::move(v));

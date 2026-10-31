@@ -14,7 +14,7 @@ int FluentSvgIdForGlyph(std::wstring_view glyph);
 
 // Parses the RCDATA resource; when Direct2D rejects the markup, retries with
 // solid fills from the first gradient stops. False when nothing parses.
-bool LoadFluentSvg(ID2D1DeviceContext5* dc, int resource_id, ComPtr<ID2D1SvgDocument>& out);
+bool LoadFluentSvg(ID2D1DeviceContext5* dc, int resource_id, ComPtr<ID2D1SvgDocument>& out, HMODULE module = nullptr);
 
 // Draws a 24-unit document as the largest square centred in bounds.
 bool DrawFluentSvgFitted(ID2D1DeviceContext5* dc, ID2D1SvgDocument* svg,

@@ -36,6 +36,7 @@ std::thread g_thread;
 size_t UnwindSuspended(CONTEXT ctx, DWORD64* out, size_t cap) noexcept {
     size_t n = 0;
     __try {
+#if defined(_M_X64)
         while (n < cap && ctx.Rip) {
             out[n++] = ctx.Rip;
             DWORD64 image_base = 0;
@@ -51,6 +52,19 @@ size_t UnwindSuspended(CONTEXT ctx, DWORD64* out, size_t cap) noexcept {
                                  &handler_data, &establisher, nullptr);
             }
         }
+#elif defined(_M_IX86)
+        // x86 optimized code may omit frame pointers. Always keep the sampled
+        // instruction; follow only a bounded, monotonic EBP chain when present.
+        if (cap && ctx.Eip) out[n++] = ctx.Eip;
+        DWORD frame = ctx.Ebp;
+        while (n < cap && frame >= ctx.Esp && !(frame & 3) && frame - ctx.Esp < 1024 * 1024) {
+            const auto* words = reinterpret_cast<const DWORD*>(static_cast<uintptr_t>(frame));
+            const DWORD next = words[0], caller = words[1];
+            if (!caller || next <= frame) break;
+            out[n++] = caller;
+            frame = next;
+        }
+#endif
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
     return n;
@@ -97,7 +111,7 @@ std::wstring FrameText(DWORD64 addr) {
     HMODULE mod = nullptr;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                                 GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            reinterpret_cast<LPCWSTR>(addr), &mod) || !mod) {
+                            reinterpret_cast<LPCWSTR>(static_cast<uintptr_t>(addr)), &mod) || !mod) {
         swprintf_s(line, L"0x%016llx", static_cast<unsigned long long>(addr));
         return line;
     }

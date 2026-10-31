@@ -1,4 +1,5 @@
 #include "../common/runtime_log.h"
+#include "../common/picker_places_snapshot.h"
 #include "global_search_controller.h"
 #include "global_search_handoff.h"
 #include "shortcut_page.h"
@@ -154,6 +155,7 @@ void ApplyGlobalSearchSettings(AppState& s) {
     s.core.dialogJump.SetHistory(s.core.jumpHistory);
     if (!HotkeyAllowed(s)) return;
     s.core.dialogJump.Update(ServiceWindow(s), WM_DIALOG_JUMP_CONTEXT, s.appPrefs.dialog_jump_bar);
+    SendDialogJumpContext(s);
     const bool enabled = s.appPrefs.global_search_enabled && s.appPrefs.search_enabled;
     const bool ok = s.globalSearchHotkey.Update(ServiceWindow(s), enabled,
         s.appPrefs.global_search_modifiers, s.appPrefs.global_search_key);
@@ -225,6 +227,20 @@ void ToggleSearchSwitch(AppState& s) {
         return;
     }
     ApplySearchSwitch(s, purge);
+}
+
+void PublishPickerPlaces(AppState& s) {
+    if (s.isolatedTest) return;
+    static ULONGLONG last = 0;
+    const auto now = GetTickCount64();
+    if (now - last < 2000) return;
+    last = now;
+    AppState* window = s.core.windows.MostRecent();
+    if (!window) window = &s;
+    picker_places::Snapshot snapshot;
+    if (const auto* tab = ActiveTab(*window); tab && !fs::IsVirtualPath(tab->current_path)) snapshot.current = tab->current_path;
+    for (const auto& folder : KnownFolders(*window)) snapshot.folders.push_back({folder.path, folder.label, folder.open, folder.pinned});
+    picker_places::Publish(snapshot);
 }
 
 void SendDialogJumpContext(AppState& s) {

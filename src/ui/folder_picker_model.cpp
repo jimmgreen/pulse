@@ -122,7 +122,7 @@ bool PickerShowsEntry(DWORD attributes, std::wstring_view name, PickerMode mode,
         if (folded.find(needle) == std::wstring::npos) return false;
     }
     const bool shortcut = name.size() >= 4 && CompareStringOrdinal(name.data() + name.size() - 4, 4, L".lnk", 4, TRUE) == CSTR_EQUAL;
-    return (attributes & FILE_ATTRIBUTE_DIRECTORY) || shortcut || PickerMatchesFilter(name, mode, options);
+    return (attributes & FILE_ATTRIBUTE_DIRECTORY) || (shortcut && !options.no_dereference_links) || PickerMatchesFilter(name, mode, options);
 }
 
 void SortPickerEntries(std::vector<PickerEntry>& entries, const PickerOptions& options) {
@@ -204,7 +204,7 @@ std::wstring PickerChosenPath(PickerMode mode, std::wstring_view current,
         CompareStringOrdinal(selected->name.data() + selected->name.size() - 4, 4, L".lnk", 4, TRUE) == CSTR_EQUAL;
     if (shortcut) return selected->path;
     if (mode != PickerMode::Folder) {
-        return selected && (selected->kind == PickerEntryKind::Image || (mode == PickerMode::File && selected->kind == PickerEntryKind::File)) ? selected->path
+        return selected && (selected->kind == PickerEntryKind::Image || ((mode == PickerMode::File || mode == PickerMode::Save) && selected->kind == PickerEntryKind::File)) ? selected->path
                                                                      : std::wstring();
     }
     if (selected && (selected->kind == PickerEntryKind::Folder || selected->kind == PickerEntryKind::Drive)) return selected->path;

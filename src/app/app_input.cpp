@@ -10,6 +10,7 @@
 #include "../ui/ui_renderer.h"
 // app_input.cpp — extracted from app_main.cpp.
 #include "quick_access.h"
+#include "workspace_sidebar.h"
 #include "tag_manager.h"
 #include "tag_view.h"
 #include "filter_tag_complete.h"
@@ -22,6 +23,8 @@
 #include "tab_shortcuts.h"
 #include "explorer_shortcuts.h"
 #include "window_overview_ui.h"
+#include "window_management_ui.h"
+#include "window_arrange_ui.h"
 #include "app_updates.h"
 #include "app_internal.h"
 #include "global_search_controller.h"
@@ -105,7 +108,7 @@ static void NewFolderOrConnect(AppState& s) {
 // Settings toggles that belong to the network page (40-42, 46) are handled
 // by app_network_page; the rest by the settings controller.
 static void ToggleSetting(AppState& s, int index) {
-    if (HandleNetworkSettingToggle(s, index)) return;
+    if (s.settings.page() == 12 && HandleNetworkSettingToggle(s, index)) return;
     s.settings.ToggleUi(index);
 }
 bool HandleBrowserNavigation(AppState& s, LPARAM command) {
@@ -371,6 +374,8 @@ static DWORD ResolveDropTargetImpl(AppState& s, const std::vector<std::wstring>&
         InvalidateRect(s.hwnd, nullptr, FALSE);
         hit = s.renderer.HitTest(vm, rect, (float)pt.x, (float)pt.y);
     }
+    if ((hit.region == ui::HitTestResult::SidebarWorkspaceAction || hit.region == ui::HitTestResult::SidebarItemExpand) &&
+        WorkspaceIndexFromPath(hit.path) >= 0) hit.region = ui::HitTestResult::SidebarItem;
     DWORD toolbar_effect = DROPEFFECT_NONE;
     if (ResolveToolbarAppDrop(s, vm, hit, sources, pt, key_state, allowed, toolbar_effect)) {
         s.springRow = -1;
@@ -1480,6 +1485,7 @@ void ResetSidebarPinDrag(AppState& s) {
 void UpdateSidebarPinDrag(AppState& s, int my) {
     if (!s.pinDragActive || s.pinDragPath.empty()) return;
     if (UpdateVerticalTabDrag(s, my)) return;  // tab rows share this gesture
+    if (UpdateWorkspaceDrag(s, my)) return;
     if (UpdateSidebarTagDrag(s, my)) return;   // so do tag rows
     ui::WindowViewModel vm = BuildVm(s, false);
     const float w = static_cast<float>(s.compositor.Width());
@@ -3113,6 +3119,22 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
         if (hit.pane_index >= 0) {
             if (app::Pane* p = PaneAtSlot(*s, hit.pane_index)) FocusPane(*s, p);
         }
+        if (hit.region == ui::HitTestResult::SidebarWorkspaceAction) {
+            const int index = WorkspaceIndexFromPath(hit.path);
+            if (hit.sub_index == 0) OpenWorkspaceNewTab(*s, index);
+            else if (hit.sub_index == 1) {
+                POINT point{mx, my}; ClientToScreen(hwnd, &point);
+                ShowWorkspaceMenu(*s, index, point);
+            } else if (hit.sub_index == 2) UpdateWorkspaceFromCurrent(*s, index);
+            else if (hit.sub_index == 3) OpenWorkspace(*s, index);
+            else if (hit.sub_index == 4) SaveCurrentWorkspace(*s);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        if (hit.region == ui::HitTestResult::PaneClose) {
+            CloseWorkspacePane(*s, PaneAtSlot(*s, hit.pane_index));
+            return 0;
+        }
         if (hit.region == ui::HitTestResult::RowCheck || hit.region == ui::HitTestResult::HeaderCheck) {
             if (HandleItemCheckPress(*s, hit)) InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
@@ -3440,6 +3462,8 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             }
         } else if (hit.region == ui::HitTestResult::ThemeToggle) {
             ToggleTheme(*s);
+        } else if (hit.region == ui::HitTestResult::WindowManageButton) {
+            POINT pt{}; GetCursorPos(&pt); ShowWindowManagementMenu(*s, pt);
         } else if (hit.region == ui::HitTestResult::SettingsButton) {
             // The button is settings' tab: it opens where you left off and
             // closes again on a second click.
@@ -3467,12 +3491,6 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 s->settings.WindowEffect(
                     ui::WindowEffectId(static_cast<ui::WindowEffect>(hit.index)));
             InvalidateRect(hwnd, nullptr, FALSE);
-        } else if (hit.region == ui::HitTestResult::SettingsDensity) {
-            s->settings.RowHeight(hit.index);
-            InvalidateRect(hwnd, nullptr, FALSE);
-        } else if (hit.region == ui::HitTestResult::SettingsTextRender) {
-            s->settings.TextRendering(hit.index);
-            InvalidateRect(hwnd, nullptr, FALSE);
         } else if (hit.region == ui::HitTestResult::SettingsFolderSort ||
                    hit.region == ui::HitTestResult::SettingsMtimeStyle ||
                    hit.region == ui::HitTestResult::SettingsMtimeRange ||
@@ -3480,9 +3498,6 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                    hit.region == ui::HitTestResult::SettingsClickMode ||
                    hit.region == ui::HitTestResult::SettingsNameBand ||
                    hit.region == ui::HitTestResult::SettingsUiFontSize ||
-                   hit.region == ui::HitTestResult::SettingsStartupOpen ||
-                   hit.region == ui::HitTestResult::SettingsNewTabOpen ||
-                   hit.region == ui::HitTestResult::SettingsExternalOpen ||
                    hit.region == ui::HitTestResult::SettingsNotifyIcon ||
                    hit.region == ui::HitTestResult::SettingsBlankClick ||
                    hit.region == ui::HitTestResult::SettingsHomeFolder ||
@@ -3492,9 +3507,6 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             // nesting limit (C1061), so new settings must not lengthen it.
             switch (hit.region) {
             case ui::HitTestResult::SettingsUiFontSize: s->settings.UiFontSize(hit.index); break;
-            case ui::HitTestResult::SettingsStartupOpen: s->settings.StartupOpen(hit.index); break;
-            case ui::HitTestResult::SettingsNewTabOpen: s->settings.NewTabOpen(hit.index); break;
-            case ui::HitTestResult::SettingsExternalOpen: s->settings.ExternalOpen(hit.index); break;
             case ui::HitTestResult::SettingsNotifyIcon: s->settings.NotifyIcon(hit.index); break;
             case ui::HitTestResult::SettingsBlankClick: s->settings.BlankClick(hit.index); break;
             case ui::HitTestResult::SettingsHomeFolder: s->settings.HomeFolder(hit.index); break;
@@ -3971,7 +3983,9 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
         } else if (HandleVerticalTabPress(*s, hit)) {
             // Tab rows, the tabs header and the sidebar toggle.
         } else if (hit.region == ui::HitTestResult::SidebarHeaderAction) {
-            if (hit.sidebar_action == ui::SidebarAddAction::AddNetwork) {
+            if (hit.sidebar_action == ui::SidebarAddAction::SaveWorkspace) {
+                SaveCurrentWorkspace(*s);
+            } else if (hit.sidebar_action == ui::SidebarAddAction::AddNetwork) {
                 RunConnectServerDialog(*s);  // 连接服务器 (pulse_network_design.html §02)
             } else if (hit.sidebar_action == ui::SidebarAddAction::CreateTag) {
                 POINT point{ mx, my };
@@ -4007,7 +4021,13 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 s->places.UnpinWorkspace(_wtoi(rest.c_str()));
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (hit.region == ui::HitTestResult::SidebarItemExpand) {
-            if (hit.path == app::MakeStarredPath()) {
+            const int workspace = WorkspaceIndexFromPath(hit.path);
+            if (workspace >= 0 && workspace < static_cast<int>(s->places.workspaces.size())) {
+                auto& item = s->places.workspaces[static_cast<size_t>(workspace)];
+                item.expanded = !item.expanded;
+                s->places.Save();
+                InvalidateRect(hwnd, nullptr, FALSE);
+            } else if (hit.path == app::MakeStarredPath()) {
                 s->starredExpanded = !s->starredExpanded;
                 InvalidateRect(hwnd, nullptr, FALSE);
             } else if (app::IsTagGroupPath(hit.path)) {
@@ -4078,9 +4098,15 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 s->pinGapLineY = 0.0f;
                 SetCapture(hwnd);
             } else if (hit.path.starts_with(L"pulse:workspace:")) {
-                std::wstring kind, rest;
-                app::ParsePulsePath(hit.path, &kind, &rest);
-                OpenWorkspace(*s, _wtoi(rest.c_str()));
+                s->pinDragPending = true;
+                s->pinDragActive = false;
+                s->pinDragStartPt = POINT{mx, my};
+                s->pinDragPath = hit.path;
+                s->pinDragKey.clear();
+                s->pinDragRun = hit.index;
+                s->pinDragToIndex = -1;
+                s->pinGapVisible = false;
+                SetCapture(hwnd);
             } else if (!hit.path.empty()) {
                 NavigateTo(*s, hit.path);
             }
@@ -4240,6 +4266,7 @@ LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPA
         // they sometimes needed two clicks.
         switch (hit.region) {
         case ui::HitTestResult::ThemeToggle:
+        case ui::HitTestResult::WindowManageButton:
         case ui::HitTestResult::SettingsButton:
         case ui::HitTestResult::SidebarToggle:
         case ui::HitTestResult::TabNew:
@@ -4449,6 +4476,8 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 if (was_active && s->pinDragToIndex >= 0) {
                     if (tab_row)
                         CommitVerticalTabDrag(*s, path, static_cast<size_t>(s->pinDragToIndex));
+                    else if (WorkspaceIndexFromPath(path) >= 0)
+                        CommitWorkspaceDrag(*s, path, s->pinDragToIndex);
                     else if (IsSidebarTagPath(path))
                         CommitSidebarTagDrag(*s, path, static_cast<size_t>(s->pinDragToIndex));
                     else if (!qa_drag_key.empty())
@@ -4461,7 +4490,9 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 // Ctrl on a quick-access row opens it in a new tab (#58-2), as the
                 // middle button does.
                 const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-                if (!was_active && !path.empty() && !tab_row && ctrl && !qa_drag_key.empty() &&
+                if (!was_active && WorkspaceIndexFromPath(path) >= 0 && ctrl)
+                    OpenWorkspaceNewTab(*s, WorkspaceIndexFromPath(path));
+                else if (!was_active && !path.empty() && !tab_row && ctrl && !qa_drag_key.empty() &&
                     !IsSidebarTagPath(path))
                     OpenFolderTab(*s, path);
                 else if (!was_active && !path.empty() && !tab_row &&
@@ -4892,7 +4923,11 @@ LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             return 0;
         }
         bool shown = false;
-        if (hit.region == ui::HitTestResult::WindowIdentity) {
+        if (hit.region == ui::HitTestResult::WindowManageButton ||
+            (hit.region == ui::HitTestResult::None && my >= 0 && static_cast<float>(my) < s->renderer.TitleBarHeight())) {
+            ShowWindowManagementMenu(*s, sp);
+            shown = true;
+        } else if (hit.region == ui::HitTestResult::WindowIdentity) {
             ShowWindowIdentityMenu(*s, sp);  // M7c
             shown = true;
         } else if (hit.region == ui::HitTestResult::TabGroup && hit.index >= 0 &&
@@ -5272,6 +5307,20 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
         bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
         bool handled = true;
+        if (!ctrl && !alt && !shift && (wParam == VK_F2 || wParam == VK_DELETE) &&
+            (GetFocus() == hwnd || GetFocus() == nullptr) &&
+            s->hoverRegion == static_cast<int>(ui::HitTestResult::SidebarItem) &&
+            WorkspaceIndexFromPath(s->hoverPath) >= 0) {
+            const int index = WorkspaceIndexFromPath(s->hoverPath);
+            if (wParam == VK_F2) RenameWorkspace(*s, index);
+            else RemoveWorkspaceWithUndo(*s, index);
+            return 0;
+        }
+        if (ctrl && alt && !shift && wParam >= '1' && wParam <= '9' &&
+            (GetFocus() == hwnd || GetFocus() == nullptr)) {
+            OpenWorkspace(*s, static_cast<int>(wParam - '1'));
+            return 0;
+        }
 
         // Settings has no tab of its own: Esc closes it like a second click on
         // the settings button. Popovers, recorders, the shortcut search box and
@@ -5374,6 +5423,7 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             case A::MoveTabToNewWindow: PostMessageW(hwnd, WM_MOVE_TAB_TO_NEW_WINDOW, 0, 0); break;
             // The other windows go away; this one (whose handler runs) stays.
             case A::MergeWindows: MergeAllWindows(*s); break;
+
             // The commands check the selection themselves (as their menu rows).
             case A::GroupIntoFolder: DispatchMenuCommand(*s, app::CmdGroupIntoFolder); break;
             case A::DissolveFolder: DispatchMenuCommand(*s, app::CmdDissolveFolder); break;

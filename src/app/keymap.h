@@ -58,6 +58,7 @@ enum class KeyAction : uint8_t {
     MoveToTarget, Sidebar, FavoritesBar, Maximize,
     NewWindow, CloseWindow, TabToWindow, ReopenClosed, SwitchWindow, Overview, MergeWindows,
     AiAssistant, ShortcutHelp,
+    ArrangeSideBySide, ArrangeStacked, ArrangeColumns, ArrangeTile, ArrangeMain, ArrangeCascade,
     Count
 };
 constexpr int kKeyActionCount = static_cast<int>(KeyAction::Count);

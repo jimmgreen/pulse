@@ -97,6 +97,7 @@ void LoadPrefs(AiAssistantState& a) {
     if (a.prefs_loaded) return;
     a.prefs_loaded = true;
     const ai::Settings settings = ai::LoadSettings();
+    a.enabled = settings.enabled;
     a.floating = settings.assistant.floating;
     a.think = std::clamp(settings.assistant.thinking, 0, 6);
     a.model = 0;
@@ -732,6 +733,7 @@ void AiChipContextMenu(AppState& s, POINT screen_pt) {
 void AiAssistantOpen(AppState& s, bool animate) {
     AiAssistantState& a = s.aiAssistant;
     LoadPrefs(a);
+    if (!a.enabled) return;
     if (a.open) return;
     a.open = true;
     a.focus_pending = true;
@@ -783,6 +785,12 @@ void AiAssistantHotkey(AppState& s) {
 
 void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm) {
     AiAssistantState& a = s.aiAssistant;
+    LoadPrefs(a);
+    if (!a.enabled) {
+        vm.status.ai_state = ui::StatusAiState::Hidden;
+        vm.status.ai_open = false;
+        return;
+    }
     // The chip is always there: "✦ AI" opens the panel.
     if (vm.status.ai_state == ui::StatusAiState::Hidden) vm.status.ai_state = ui::StatusAiState::Idle;
     if (vm.status.ai_state == ui::StatusAiState::Idle) vm.status.ai_text.clear();

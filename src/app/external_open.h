@@ -16,10 +16,10 @@ enum class ExternalOpenPolicy : uint8_t {
     AlwaysWindow = 2,  // a new window
 };
 
-// Hidden tuning (plan §6: unvalidated, fixed after the P3 beta).
+// Legacy source-compatible fields. Timing never influences current decisions.
 struct ExternalOpenTuning {
-    uint64_t recent_input_ms = 8000;  // smart: input this recent means "busy"
-    uint64_t batch_ms = 500;          // requests this close together form one batch
+    uint64_t recent_input_ms = 8000;  // ignored; actual busy state is explicit
+    uint64_t batch_ms = 500;          // ignored; distinct requests are not grouped by time
 };
 
 // One Pulse window, most recently used first.
@@ -28,12 +28,12 @@ struct ExternalOpenWindow {
     bool minimized = false;
     bool hidden = false;        // closed to the tray
     bool busy = false;          // renaming, dragging, a menu or a modal dialog
-    uint64_t last_input_tick = 0;
-    bool batch_window = false;  // the window the current batch landed in
+    uint64_t last_input_tick = 0; // compatibility only; recent input is not a busy signal.
+    bool batch_window = false;  // legacy; ignored by current selection
 };
 
-// The requests that arrived together so far (rule 3). Kept by the caller
-// between requests; NextOpenBatch updates it.
+// Legacy batch state retained for source compatibility. NextOpenBatch clears it;
+// no time-based grouping or automatic promotion is performed.
 struct ExternalOpenBatch {
     uint64_t tick = 0;           // last request of the batch (0 = none)
     size_t count = 0;            // requests in it
@@ -45,7 +45,7 @@ struct ExternalOpenBatch {
 
 struct ExternalOpenRequest {
     bool can_dedupe = true;   // false for This PC: every request opens it
-    bool new_window = false;  // explicit (reserved: Shift+open, jump list)
+    bool new_window = false;  // explicit new-window intent; wins even when the folder is already shown
     uint64_t tick = 0;
 };
 
@@ -53,46 +53,52 @@ enum class ExternalOpenAction : uint8_t {
     Activate,      // `window` already shows the folder: bring that tab forward
     Tab,           // a new tab in `window` (restored first when `restore`)
     NewWindow,     // a new window
-    JoinBatch,     // a new tab in the batch's window `window`
-    PromoteBatch,  // a new window takes the batch's tab out of `window`, then this one
+    JoinBatch,     // legacy value; no longer produced by target selection
+    PromoteBatch,  // legacy value; no longer produced by target selection
+    Deferred,      // no usable target; caller keeps the request pending, no UI mutation
 };
 
 enum class ExternalOpenReason : uint8_t {
     Duplicate,    // rule 1
     Explicit,     // rule 2
-    Batch,        // rule 3
+    Batch,        // legacy reason; no longer produced
     Policy,       // rule 4
     Hidden,       // rule 5: minimized or in the tray, so nothing is interrupted
     Busy,         // rule 5: renaming, dragging, a menu or a dialog
-    RecentInput,  // rule 5: used within recent_input_ms
+    RecentInput,  // legacy reason; no longer produced
     Idle,         // rule 5: otherwise
 };
 
 struct ExternalOpenDecision {
     ExternalOpenAction action = ExternalOpenAction::Tab;
     ExternalOpenReason reason = ExternalOpenReason::Idle;
-    size_t window = 0;     // index into the windows passed in
+    size_t window = 0;     // target index only for Activate/Tab/legacy batch actions
     bool restore = false;  // the target window is minimized or hidden
 };
 
-// Plan §6 rules 1-5 in order, the first that applies wins. `windows` is
-// never empty in Pulse (the first window lives until exit); an empty list
-// yields NewWindow. Two refinements of the plan: a minimized or hidden window
-// is checked before recent input (nothing visible can be interrupted), and
-// "always tab" keeps a batch in its window instead of opening a new one.
+// Explicit new window precedes reuse. Otherwise prefer a nonbusy duplicate,
+// then the fixed new-window policy or a nonbusy MRU. All-busy tab/smart targets
+// yield Deferred without restoring or activating anything. Empty means first
+// launch and yields NewWindow. Request IDs/deduplication remain caller-owned;
+// separate explicit new-window requests must not be merged by folder path.
 ExternalOpenDecision DecideOpenTarget(const ExternalOpenRequest& request,
                                       const std::vector<ExternalOpenWindow>& windows,
                                       const ExternalOpenBatch& batch, ExternalOpenPolicy policy,
                                       const ExternalOpenTuning& tuning = {});
 
-// The batch after a request was opened as `decision`. `opened_tab` is false
-// when nothing new opened (Activate, or an open that failed); `tab_movable`
-// whether the tab it opened in an existing window can move out later.
+// Dedicated launch entries bypass folder deduplication and timing. Mode 0 opens
+// a window, mode 1 tabs, mode 2 only activates; modes 1/2 skip busy candidates.
+// All busy => Deferred. Explicit-window and first-window creation remain valid.
+ExternalOpenDecision DecideLaunchTarget(int mode, const std::vector<ExternalOpenWindow>& windows,
+                                      bool explicit_window = false);
+
+// Compatibility helpers: always return an empty batch / false respectively.
+// Arguments remain to avoid changing unrelated routing/conversion callers.
 ExternalOpenBatch NextOpenBatch(const ExternalOpenBatch& batch, const ExternalOpenRequest& request,
                                 const ExternalOpenDecision& decision, bool opened_tab, bool tab_movable,
                                 const ExternalOpenTuning& tuning = {});
 
-// Whether `request` continues `batch` (rule 3's time window).
+// Timing no longer creates a logical batch.
 bool ContinuesOpenBatch(const ExternalOpenBatch& batch, const ExternalOpenRequest& request,
                         const ExternalOpenTuning& tuning = {});
 
@@ -103,8 +109,8 @@ enum class OpenConversion : uint8_t {
     ToWindow,  // opened in a tab: "move it to a new window"
 };
 
-// What the toast offers for `decision`. Only the smart policy guesses, so
-// only it offers anything; an already open folder offers nothing.
+// Manual conversion remains available for completed Smart opens. Activation
+// and Deferred perform no open and offer nothing.
 // `in_new_window`: the folder ended up in a window opened for it (or its
 // batch); `tab_movable`: its window has another tab, so the tab can leave.
 OpenConversion OfferedConversion(const ExternalOpenDecision& decision, ExternalOpenPolicy policy,

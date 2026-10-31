@@ -168,6 +168,20 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     Log(L"Pulse setup: " + o.raw);
     const std::wstring self = SelfPath();
 
+    // UI fixtures use an empty payload and never enter installation or uninstall dispatch.
+    if (o.test && GetEnvironmentVariableW(L"PULSE_SETUP_UI_PROBE", nullptr, 0) != 0) {
+        const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        if (FAILED(com)) return kExitPrepareFailed;
+        Payload fixture_payload;
+        InstallRequest fixture;
+        fixture.options = o;
+        fixture.app_dir = o.dir.empty() ? ParentDir(self) + L"\\probe-app" : o.dir;
+        fixture.index_path = fixture.app_dir + L"\\index";
+        const WizardOutcome outcome = RunWizard(fixture_payload, self, fixture, DetectLanguage(o.lang.c_str()));
+        CoUninitialize();
+        return outcome.exit_code;
+    }
+
     // {app}\uninstall.exe is this bootstrapper without a payload.
     const size_t slash = self.find_last_of(L'\\');
     const std::wstring self_name = slash == std::wstring::npos ? self : self.substr(slash + 1);

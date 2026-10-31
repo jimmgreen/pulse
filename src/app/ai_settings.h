@@ -83,6 +83,7 @@ struct AssistantPrefs {
 inline constexpr const char* kMcpDefaultAllow[] = {"view", "create"};
 
 struct Settings {
+    bool enabled = true; // Built-in assistant, independent of MCP access.
     bool mcp_enabled = false;
     int log_days = 30;     // 1..365
     std::vector<ClientRecord> clients;

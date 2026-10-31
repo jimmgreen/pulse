@@ -1,3 +1,4 @@
+#include "pane_close.h"
 // app_state.h — Window process state, shot request, and WM_APP message ids.
 #pragma once
 #include "tray_compare_metadata.h"
@@ -151,6 +152,7 @@ struct WindowMergeUndo {
 };
 
 struct AppState : AppCoreOwner {
+    ClosedPane closedPane;
     // Stand-alone window state with its own AppCore (tests and selftest probes).
     AppState() : AppCoreOwner(std::make_unique<AppCore>()), core(*owned_core) {}
     // A window of the running process; `shared` must outlive this state.
@@ -689,6 +691,9 @@ struct AppState : AppCoreOwner {
     // double-click it turns into opens the folder and stops that calculation.
     std::wstring folderSizeClickPath;
     LONG folderSizeClickTime = 0;
+    HWND hwndWorkspaceRenameEdit = nullptr;
+    std::wstring workspaceRenameRoot;
+    bool workspaceRenameIgnoreKillFocus = false;
     HWND hwndTagRenameEdit = nullptr;
     app::TagId tagRenameId;
     bool tagRenameIgnoreKillFocus = false;

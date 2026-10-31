@@ -2,6 +2,8 @@
 #include "typography.h"
 #include <commctrl.h>
 #include <algorithm>
+#include <memory>
+#include <new>
 namespace pulse::ui {
 constexpr UINT_PTR kEditCaretTimer = 71;
 namespace {
@@ -9,6 +11,41 @@ namespace {
 // interval later; the painter restarts the blink phase at the same moment.
 void RestartCaretBlink(HWND hwnd) {
     if (GetFocus() == hwnd) SetTimer(hwnd, kEditCaretTimer, GetCaretBlinkTime(), nullptr);
+}
+constexpr wchar_t kPaintedPlain[] = L"Pulse.PaintedPlainEdit";
+struct PaintedEditState {
+    HWND parent = nullptr;
+    DWORD thread = 0;
+    DWORD error = ERROR_SUCCESS;
+};
+PaintedEditState* PaintedState(HWND hwnd) {
+    return static_cast<PaintedEditState*>(GetPropW(hwnd, kPaintedPlain));
+}
+LRESULT CALLBACK PaintedLifetimeProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam,
+    UINT_PTR id, DWORD_PTR data) {
+    if (message == WM_NCDESTROY) {
+        auto* state = reinterpret_cast<PaintedEditState*>(data);
+        RemovePropW(hwnd, kPaintedPlain);
+        RemoveWindowSubclass(hwnd, PaintedLifetimeProc, id);
+        const LRESULT result = DefSubclassProc(hwnd, message, wparam, lparam);
+        delete state;
+        return result;
+    }
+    return DefSubclassProc(hwnd, message, wparam, lparam);
+}
+void RecordPaintFailure(HWND hwnd) {
+    auto* state = PaintedState(hwnd);
+    if (!state || state->error) return;
+    // No property allocation or queue insertion is required to retain failure.
+    state->error = ERROR_FUNCTION_FAILED;
+    KillTimer(hwnd, kEditCaretTimer);
+    if (GetCurrentThreadId() == state->thread && GetParent(hwnd) == state->parent &&
+        GetWindowThreadProcessId(state->parent, nullptr) == state->thread) {
+        // The picker handler only marks done/error; it must not destroy the
+        // child while this synchronous presentation stack is still active.
+        SendMessageW(state->parent, PulsePaintedChildEditFailureMessage(),
+            reinterpret_cast<WPARAM>(hwnd), state->error);
+    }
 }
 constexpr wchar_t kNativeEdit[] = L"Pulse.NativeEditFallback";
 constexpr wchar_t kPolicyNative[] = L"Pulse.NativeEditPolicy";
@@ -52,6 +89,9 @@ void ReportNativeCaret(HWND hwnd, const EditCaretState& state) {
     NotifyWinEvent(EVENT_OBJECT_SHOW, hwnd, OBJID_CARET, CHILDID_SELF);
 }
 bool CustomEdit(Compositor& compositor, HWND hwnd) {
+    // Keep intercepting native painting even if the renderer becomes unavailable;
+    // the strict host will fail, rather than displaying a different text backend.
+    if (GetPropW(hwnd, kPaintedPlain)) return true;
     const bool custom = compositor.CustomEditEnabled() && !GetPropW(hwnd, kNativeEdit);
     if (GetPropW(hwnd, kMigrating)) return custom;
     const bool policy_native = GetPropW(hwnd, kPolicyNative) != nullptr;
@@ -89,7 +129,19 @@ bool PresentEdit(Compositor& compositor, HWND hwnd, IDWriteTextFormat* format,
 #ifdef PULSE_WITH_SELFTEST
     force_failure = GetPropW(hwnd, L"Pulse.Test.LumaPresentFailure") != nullptr;
 #endif
-    if (!force_failure && compositor.PresentLumaEdit(hwnd, format, foreground, background)) return true;
+    const bool painted_plain = GetPropW(hwnd, kPaintedPlain) != nullptr;
+    if (painted_plain && PulsePaintedChildEditError(hwnd)) return false;
+    if (painted_plain) {
+        // Child messages only invalidate the authoritative main-surface image.
+        // Native EDIT remains visible/focusable, but never owns the displayed bitmap.
+        if (force_failure || !compositor.CustomEditEnabled() || !InvalidateRect(GetParent(hwnd), nullptr, FALSE)) {
+            RecordPaintFailure(hwnd); return false;
+        }
+        ValidateRect(hwnd, nullptr);
+        return true;
+    }
+    if (!force_failure && compositor.PresentLumaEdit(hwnd, format, foreground, background, painted_plain)) return true;
+    if (painted_plain) { RecordPaintFailure(hwnd); return false; }
     // Keep native EDIT input, selection and IME together if presentation fails.
     SetPropW(hwnd, kNativeEdit, reinterpret_cast<HANDLE>(1));
     SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
@@ -98,6 +150,48 @@ bool PresentEdit(Compositor& compositor, HWND hwnd, IDWriteTextFormat* format,
     InvalidateRect(hwnd, nullptr, TRUE);
     return false;
 }
+}
+UINT PulsePaintedChildEditFailureMessage() {
+    static const UINT message = RegisterWindowMessageW(L"Pulse.PaintedPlainEditFailure.v1");
+    return message;
+}
+DWORD PulsePaintedChildEditError(HWND hwnd) {
+    const auto* state = PaintedState(hwnd);
+    return state ? state->error : ERROR_SUCCESS;
+}
+HWND CreatePulsePaintedChildEdit(HWND parent, const wchar_t* text, DWORD edit_style) {
+    const DWORD thread = GetCurrentThreadId();
+    if (!parent || GetWindowThreadProcessId(parent, nullptr) != thread) {
+        SetLastError(ERROR_INVALID_WINDOW_HANDLE); return nullptr;
+    }
+    if (!PulsePaintedChildEditFailureMessage()) { SetLastError(ERROR_GEN_FAILURE); return nullptr; }
+    std::unique_ptr<PaintedEditState> state(new (std::nothrow) PaintedEditState{parent, thread, ERROR_SUCCESS});
+    if (!state) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return nullptr; }
+    SetLastError(ERROR_SUCCESS);
+    HWND edit = CreateWindowExW(0, L"EDIT", text,
+        WS_CHILD | WS_CLIPSIBLINGS | WS_TABSTOP | ES_AUTOHSCROLL | edit_style,
+        0, 0, 0, 0, parent, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (!edit) { const DWORD error = GetLastError(); SetLastError(error ? error : ERROR_GEN_FAILURE); return nullptr; }
+    if (!SetPropW(edit, kPaintedPlain, state.get())) {
+        const DWORD error = GetLastError(); DestroyWindow(edit);
+        SetLastError(error ? error : ERROR_GEN_FAILURE); return nullptr;
+    }
+    // Separate lifetime hook remains installed when the host removes EditProc
+    // before destroying its children, including partial WM_CREATE failures.
+    if (!SetWindowSubclass(edit, PaintedLifetimeProc, 72, reinterpret_cast<DWORD_PTR>(state.get()))) {
+        const DWORD error = GetLastError(); RemovePropW(edit, kPaintedPlain); DestroyWindow(edit);
+        SetLastError(error ? error : ERROR_GEN_FAILURE); return nullptr;
+    }
+    state.release();
+    return edit;
+}
+bool DrawPulsePaintedChildEdit(Compositor& compositor, IDWriteTextFormat* format,
+    D2D1_COLOR_F foreground, D2D1_COLOR_F background, HWND hwnd, const D2D1_RECT_F& bounds) {
+    if (!PaintedState(hwnd) || PulsePaintedChildEditError(hwnd)) return false;
+    if (!compositor.DrawLumaEditOnSurface(hwnd, format, foreground, background, bounds)) {
+        RecordPaintFailure(hwnd); return false;
+    }
+    return true;
 }
 bool SynchronizeChildEditBackend(Compositor& compositor, HWND hwnd) {
     return hwnd && CustomEdit(compositor, hwnd);
@@ -156,6 +250,9 @@ bool HandleChildEditMessage(Compositor& compositor, IDWriteTextFormat* format,
         if (!CustomEdit(compositor, hwnd)) return false;
         HideCaret(hwnd);
         PresentEdit(compositor, hwnd, format, foreground, background);
+        // A sticky failure may return before the compositor presents anything.
+        // Always consume the invalid region, including the failure path.
+        ValidateRect(hwnd, nullptr);
         result = 0;
         return true;
     }

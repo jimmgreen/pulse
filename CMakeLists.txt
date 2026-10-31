@@ -154,11 +154,13 @@ set(PULSE_CONTENT_PACK_CHANNEL windows)
 if(PULSE_WIN81_CANDIDATE)
     set(PULSE_CONTENT_PACK_CHANNEL win81)
 endif()
-file(SHA256 "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pdfium/bin/pdfium.dll" PULSE_PDFIUM_SHA256)
+set(PULSE_PDFIUM_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pdfium" CACHE PATH
+    "PDFium distribution matching the target architecture")
+file(SHA256 "${PULSE_PDFIUM_ROOT}/bin/pdfium.dll" PULSE_PDFIUM_SHA256)
 file(CONFIGURE OUTPUT "${CMAKE_BINARY_DIR}/generated/pdfium_pin.h" CONTENT
     "// Generated at configure time from third_party/pdfium/bin/pdfium.dll.\n#pragma once\n#define PULSE_PDFIUM_SHA256 L\"@PULSE_PDFIUM_SHA256@\"\n" @ONLY)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
-    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pdfium/bin/pdfium.dll")
+    "${PULSE_PDFIUM_ROOT}/bin/pdfium.dll")
 
 function(pulse_add_version_resource target description internal_name original_filename)
     set(PULSE_FILE_DESCRIPTION "${description}")
@@ -550,7 +552,7 @@ if(PULSE_APP_SOURCES)
         target_sources(pulse PRIVATE src/bench/quick_preview_audit_test.cpp)
         target_sources(pulse PRIVATE src/bench/tray_completion_test.cpp)
     endif()
-    target_sources(pulse PRIVATE src/app/pulse.rc src/common/ffmpeg_tool.cpp)
+    target_sources(pulse PRIVATE src/app/pulse.rc src/common/ffmpeg_tool.cpp src/common/picker_owner_guard.cpp)
     if(PULSE_TEST_HOOKS_EFFECTIVE)
         # Only app_main.cpp dispatches to the hooks; scoping the define to it
         # keeps a toggle from rebuilding every pulse object.
@@ -758,6 +760,10 @@ add_executable(pulse_file_lock_test src/bench/file_lock_owner_test.cpp
     src/bench/localization_test.rc)
 target_link_libraries(pulse_file_lock_test PRIVATE ole32 shell32 uuid bcrypt rstrtmgr pulse_localization)
 
+add_executable(pulse_picker_owner_guard_test src/bench/picker_owner_guard_test.cpp
+    src/common/picker_owner_guard.cpp)
+target_link_libraries(pulse_picker_owner_guard_test PRIVATE user32 advapi32)
+
 # ---- Pulse.Shell.exe: COM isolation process (stage 1: recycle bin / IFileOperation) ----
 set(PULSE_ELEVATED_HOST_SOURCES
     src/elevated_host/main.cpp
@@ -795,11 +801,18 @@ add_dependencies(pulse_elevated_session_test pulse_elevated_test_host)
 file(GLOB_RECURSE PULSE_SHELL_SOURCES CONFIGURE_DEPENDS src/shell_host/*.cpp)
 if(PULSE_SHELL_SOURCES)
     add_executable(pulse_shell WIN32 ${PULSE_SHELL_SOURCES})
-target_link_libraries(pulse_shell PRIVATE ole32 shell32 uuid advapi32 shlwapi version pulse_crash_reporter)
+target_link_libraries(pulse_shell PRIVATE ole32 oleaut32 shell32 uuid advapi32 shlwapi version pulse_crash_reporter)
     pulse_add_version_resource(pulse_shell "Pulse Shell host" "pulse_shell" "pulse_shell.exe")
 endif()
 
 # ---- Pulse.Preview.exe: thumbnail decoding / Shell provider isolation ----
+add_library(pulse_start_pin SHARED src/start_pin/extension.cpp src/start_pin/extension.def)
+target_link_libraries(pulse_start_pin PRIVATE ole32 shell32 uuid advapi32 user32)
+add_dependencies(pulse_shell pulse_start_pin)
+add_executable(pulse_start_pin_bridge_test src/bench/start_pin_bridge_test.cpp src/ipc/shell_client.cpp)
+target_link_libraries(pulse_start_pin_bridge_test PRIVATE ole32 shell32 uuid shlwapi bcrypt pulse_localization)
+add_dependencies(pulse_start_pin_bridge_test pulse_shell)
+
 add_executable(pulse_preview WIN32 src/preview_host/main.cpp src/preview_host/video_codec.cpp
     src/preview_host/media_pack.cpp src/preview_host/image_pack.cpp
     src/preview_host/raw_pack.cpp src/preview_host/archive_pack.cpp src/common/ffmpeg_tool.cpp
@@ -825,7 +838,7 @@ set_source_files_properties(third_party/md4c/md4c.c PROPERTIES COMPILE_OPTIONS "
 # PDF / AI previews render with PDFium, loaded on demand (LoadLibraryExW) from
 # the executable's directory - the same pdfium.dll Pulse.Document.exe uses.
 add_custom_command(TARGET pulse_preview POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pdfium/bin/pdfium.dll" "$<TARGET_FILE_DIR:pulse_preview>/pdfium.dll")
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PULSE_PDFIUM_ROOT}/bin/pdfium.dll" "$<TARGET_FILE_DIR:pulse_preview>/pdfium.dll")
 # gdiplus renders WMF/EMF, including the EMF+ records Office clip art uses.
 target_link_libraries(pulse_preview PRIVATE ole32 shell32 gdi32 uuid windowscodecs propsys advapi32 gdiplus shlwapi)
 # Keep system renderers out of host startup: SVG loads Direct2D on
@@ -955,7 +968,11 @@ target_link_libraries(pulse_integration PRIVATE advapi32 shell32 shlwapi ole32)
 add_executable(pulse_system_ctx_test src/bench/system_ctx_test.cpp src/app/system_ctx_registry.cpp)
 target_link_libraries(pulse_system_ctx_test PRIVATE advapi32 shell32 shlwapi ole32)
 
-add_executable(pulse_open_handoff_test src/bench/open_handoff_test.cpp src/app/single_instance_coordinator.cpp src/app/this_pc_argument.cpp)
+add_executable(pulse_open_request_pipe_test EXCLUDE_FROM_ALL
+    src/bench/open_request_pipe_test.cpp src/app/open_request_pipe.cpp)
+target_link_libraries(pulse_open_request_pipe_test PRIVATE advapi32)
+
+add_executable(pulse_open_handoff_test src/bench/open_handoff_test.cpp src/app/single_instance_coordinator.cpp src/app/open_request_pipe.cpp src/app/this_pc_argument.cpp)
 target_link_libraries(pulse_open_handoff_test PRIVATE user32 ole32 advapi32)
 
 add_executable(pulse_integration_registry_test src/bench/integration_registry_test.cpp
@@ -1074,7 +1091,7 @@ add_executable(pulse_app_controllers_test
     src/app/ctx_layout_cache.cpp
     src/app/session_tab_model.cpp
     src/app/tab_group_model.cpp
-    src/app/single_instance_coordinator.cpp
+    src/app/single_instance_coordinator.cpp src/app/open_request_pipe.cpp
     src/app/tray_controller.cpp
     src/app/app_prefs.cpp
     src/app/default_file_manager.cpp
@@ -1251,9 +1268,9 @@ target_link_libraries(pulse_document_reader PUBLIC pulse_text shell32 ole32 puls
 add_executable(pulse_document src/index/document_host_main.cpp
     src/index/document_filter.cpp src/index/office_ooxml.cpp src/index/pdfium_text.cpp)
 add_custom_command(TARGET pulse_document POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pdfium/bin/pdfium.dll" "$<TARGET_FILE_DIR:pulse_document>/pdfium.dll"
-    COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pdfium/licenses" "$<TARGET_FILE_DIR:pulse_document>/licenses/PDFium"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/third_party/pdfium/LICENSE" "$<TARGET_FILE_DIR:pulse_document>/licenses/PDFium/binary-distribution.txt")
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PULSE_PDFIUM_ROOT}/bin/pdfium.dll" "$<TARGET_FILE_DIR:pulse_document>/pdfium.dll"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory "${PULSE_PDFIUM_ROOT}/licenses" "$<TARGET_FILE_DIR:pulse_document>/licenses/PDFium"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PULSE_PDFIUM_ROOT}/LICENSE" "$<TARGET_FILE_DIR:pulse_document>/licenses/PDFium/binary-distribution.txt")
 set_target_properties(pulse_document PROPERTIES OUTPUT_NAME "Pulse.Document")
 target_link_libraries(pulse_document PRIVATE ole32 uuid xmllite shlwapi advapi32)
 add_executable(pulse_pdf_bench src/bench/pdf_bench.cpp)
@@ -1702,7 +1719,7 @@ add_executable(pulse_shell_tag_com_test
     src/fs/fs_enum.cpp src/ui/view_layout.cpp)
 target_link_libraries(pulse_shell_tag_com_test PRIVATE pulse_localization pulse_runtime_log
     user32 shell32 ole32 uuid advapi32 shlwapi netapi32 psapi)
-add_executable(pulse_single_instance_audit_test src/bench/single_instance_audit_test.cpp src/app/single_instance_coordinator.cpp)
+add_executable(pulse_single_instance_audit_test src/bench/single_instance_audit_test.cpp src/app/single_instance_coordinator.cpp src/app/open_request_pipe.cpp)
 target_link_libraries(pulse_single_instance_audit_test PRIVATE ole32 user32)
 add_executable(pulse_preview_pan_lifetime_audit_test src/bench/preview_pan_lifetime_audit_test.cpp)
 target_link_libraries(pulse_preview_pan_lifetime_audit_test PRIVATE gdi32 user32)
@@ -1934,14 +1951,28 @@ target_sources(pulse_single_instance_audit_test PRIVATE src/app/this_pc_argument
 target_sources(pulse_app_controllers_test PRIVATE src/app/this_pc_argument.cpp src/app/update_download_cleanup.cpp)
 target_link_libraries(pulse_app_controllers_test PRIVATE crypt32)
 add_executable(pulse_single_instance_endpoint_test src/bench/single_instance_endpoint_test.cpp
-    src/app/single_instance_coordinator.cpp src/app/shell_tag_command.cpp src/app/this_pc_argument.cpp)
+    src/app/single_instance_coordinator.cpp src/app/open_request_pipe.cpp src/app/shell_tag_command.cpp src/app/this_pc_argument.cpp)
 target_link_libraries(pulse_single_instance_endpoint_test PRIVATE user32 advapi32 ole32)
 add_executable(pulse_host_window_test src/bench/host_window_test.cpp src/app/host_window.cpp
-    src/app/single_instance_coordinator.cpp src/app/shell_tag_command.cpp src/app/this_pc_argument.cpp)
+    src/app/single_instance_coordinator.cpp src/app/open_request_pipe.cpp src/app/shell_tag_command.cpp src/app/this_pc_argument.cpp)
 target_link_libraries(pulse_host_window_test PRIVATE user32 advapi32 ole32)
 add_executable(pulse_window_registry_test src/bench/window_registry_test.cpp)
 # Multi-window M7a: where folders opened from outside Pulse go (plan §6).
 add_executable(pulse_external_open_test src/bench/external_open_test.cpp src/app/external_open.cpp)
+add_executable(pulse_external_open_wait_test EXCLUDE_FROM_ALL
+    src/bench/external_open_wait_test.cpp src/app/single_instance_coordinator.cpp
+    src/app/open_request_pipe.cpp src/app/this_pc_argument.cpp)
+target_link_libraries(pulse_external_open_wait_test PRIVATE user32 ole32 advapi32)
+# Internal Explorer delivery shares the bounded external-open queue.
+add_executable(pulse_explorer_open_queue_test EXCLUDE_FROM_ALL
+    src/bench/explorer_open_queue_test.cpp src/app/single_instance_coordinator.cpp
+    src/app/open_request_pipe.cpp src/app/this_pc_argument.cpp)
+target_link_libraries(pulse_explorer_open_queue_test PRIVATE user32 ole32 advapi32)
+# Exact-fixture Explorer source and production handoff verification.
+add_executable(pulse_explorer_source_probe EXCLUDE_FROM_ALL
+    src/bench/explorer_source_probe.cpp src/app/explorer_source_scope.cpp)
+target_link_libraries(pulse_explorer_source_probe PRIVATE user32 ole32 oleaut32 shell32 uuid)
+
 # Multi-window M7c: window names and colors (plan §8.3).
 add_executable(pulse_window_identity_test src/bench/window_identity_test.cpp src/app/window_identity.cpp)
 # Multi-window M7d: the Ctrl+` window switcher (plan section 8, P3).
@@ -2196,3 +2227,29 @@ target_link_libraries(pulse_support_report_test PRIVATE pulse_crash_reporter)
 add_executable(pulse_sheet_fill_test src/bench/sheet_fill_test.cpp src/preview_host/table_document.cpp src/preview_host/zip_entry.cpp src/ui/table_view.cpp src/ui/typography.cpp src/ui/ui_compositor.cpp)
 target_link_libraries(pulse_sheet_fill_test PRIVATE dwrite d2d1 d3d11 dxgi dcomp dwmapi shcore windowscodecs ole32 shell32 shlwapi user32 gdi32 comctl32 xmllite pulse_localization)
 pulse_enable_lumatext(pulse_sheet_fill_test)
+
+add_executable(pulse_window_arrange_test src/bench/window_arrange_test.cpp src/app/window_arrange.cpp)
+target_compile_options(pulse_window_arrange_test PRIVATE /W4 /permissive- /utf-8)
+target_compile_definitions(pulse_window_arrange_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+
+include(cmake/PulsePickerBridge.cmake)
+target_sources(pulse_file_picker_model_test PRIVATE src/ui/file_save_model.cpp src/ui/file_save_revalidation.cpp src/ui/file_save_access_policy.cpp)
+target_sources(pulse_dialogs_test PRIVATE src/ui/file_save_model.cpp src/ui/file_save_revalidation.cpp src/ui/file_save_access_policy.cpp)
+
+include(cmake/PulseDialogRuntime.cmake)
+target_link_libraries(pulse_file_picker_model_test PRIVATE advapi32)
+
+include(cmake/PulsePickerInProcess.cmake)
+
+add_executable(pulse_entry_command_app_test EXCLUDE_FROM_ALL
+    src/bench/entry_command_app_test.cpp src/app/shell_integration_registry.cpp)
+target_link_libraries(pulse_entry_command_app_test PRIVATE user32 advapi32 shlwapi ole32)
+
+add_executable(pulse_hot_entry_app_test EXCLUDE_FROM_ALL src/bench/hot_entry_app_test.cpp)
+target_link_libraries(pulse_hot_entry_app_test PRIVATE user32 advapi32 ole32)
+
+include(cmake/PulseDialogAuto.cmake)
+
+# Bounded, same-user dialog location snapshot (isolated namespace regression).
+add_executable(pulse_picker_places_snapshot_test EXCLUDE_FROM_ALL src/bench/picker_places_snapshot_test.cpp)
+target_link_libraries(pulse_picker_places_snapshot_test PRIVATE advapi32)

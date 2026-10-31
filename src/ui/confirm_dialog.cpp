@@ -53,6 +53,8 @@ class ConfirmWindow {
 public:
     ConfirmChoice Show(HWND owner, const ConfirmDialogSpec& spec, bool dark,
                        D2D1_COLOR_F accent) {
+        if (spec.cancel_event && WaitForSingleObject(spec.cancel_event, 0) != WAIT_TIMEOUT)
+            return ConfirmChoice::Cancel;
         owner_ = owner;
         spec_ = NormalizeConfirmSpec(spec);
         dark_ = dark;
@@ -83,13 +85,21 @@ public:
         GetWindowRect(hwnd_, &placed);
         CenterOwnedWindow(hwnd_, owner_, placed.right - placed.left,
                           placed.bottom - placed.top);
-        if (owner_) EnableWindow(owner_, FALSE);
+        const bool owner_enabled = owner_ && IsWindowEnabled(owner_);
+        if (owner_enabled) EnableWindow(owner_, FALSE);
         ShowWindow(hwnd_, SW_SHOW);
         SetForegroundWindow(hwnd_);
         if (spec_.on_open) spec_.on_open(hwnd_);
 
         MSG message{};
-        while (!done_ && GetMessageW(&message, nullptr, 0, 0) > 0) {
+        while (!done_) {
+            if (spec_.cancel_event) {
+                const DWORD wait = MsgWaitForMultipleObjectsEx(1, &spec_.cancel_event, INFINITE,
+                    QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+                if (wait == WAIT_OBJECT_0 || wait == WAIT_FAILED) { choice_ = ConfirmChoice::Cancel; break; }
+                if (!PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) continue;
+                if (message.message == WM_QUIT) { PostQuitMessage(static_cast<int>(message.wParam)); break; }
+            } else if (GetMessageW(&message, nullptr, 0, 0) <= 0) break;
             RedirectStrayModalKey(message, hwnd_);
             TranslateMessage(&message);
             DispatchMessageW(&message);
@@ -97,7 +107,9 @@ public:
         if (spec_.on_open) spec_.on_open(nullptr);
         if (IsWindow(hwnd_)) { HideComposedDialog(hwnd_, owner_); DestroyWindow(hwnd_); }
         hwnd_ = nullptr;
-        if (owner_) EnableWindow(owner_, TRUE);
+        if (owner_enabled && IsWindow(owner_)) EnableWindow(owner_, TRUE);
+        if (spec_.cancel_event && WaitForSingleObject(spec_.cancel_event, 0) != WAIT_TIMEOUT)
+            choice_ = ConfirmChoice::Cancel;
         return choice_;
     }
 

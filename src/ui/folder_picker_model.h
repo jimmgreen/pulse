@@ -15,7 +15,7 @@
 
 namespace pulse::ui {
 
-enum class PickerMode { Folder, Image, File };
+enum class PickerMode { Folder, Image, File, Save };
 enum class PickerEntryKind { Folder, Image, Drive, File };
 
 struct PickerFilter { std::wstring label; std::wstring pattern; };
@@ -27,6 +27,21 @@ struct PickerOptions {
     std::wstring search;
     PickerSort sort = PickerSort::Name;
     bool descending = false;
+    // File acceptance only; listing and Image format restrictions remain strict.
+    bool advisory_file_filters = false;
+    // Explicit Open contract only. The loader still checks existence; it does
+    // not implement a read-access probe for either value of this field.
+    bool skip_access_validation = false;
+    bool allow_missing_open = false;
+    bool require_existing_open_parent = false;
+    bool validate_local_open_access_v1 = false;
+    // Explicit Open setter evidence. Only typed submissions may try a default
+    // extension after the exact path is missing; listing selections never do.
+    std::wstring default_extension;
+    bool extension_filter_changed = false;
+    bool typed_names = false;
+    bool use_default_extension = false;
+    bool no_dereference_links = false;
 };
 
 struct PickerEntry {

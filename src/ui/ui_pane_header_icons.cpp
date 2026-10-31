@@ -28,6 +28,7 @@ void MainRenderer::DrawPaneHeaderIcon(const D2D1_RECT_F& rc, PaneHeaderIcon icon
     case PaneHeaderIcon::SwapHorizontal: command = I::SwapHorizontal; break;
     case PaneHeaderIcon::SwapVertical: command = I::SwapVertical; break;
     case PaneHeaderIcon::Size: command = I::Sliders; break;
+    case PaneHeaderIcon::Close: command = I::Close; break;
     case PaneHeaderIcon::Wall: break;  // drawn below
     }
     MakeBrush(dc, color, brText_);

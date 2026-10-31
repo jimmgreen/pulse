@@ -40,6 +40,13 @@ enum class Icon {
     FullScreen, Save, Unlock, Eject, Skip, Disconnect, Music, Wrench, Timer, Help, Puzzle,
     // The Pulse assistant (command palette hand-off), filled in the accent.
     Sparkle,
+    // Settings rows, assistant setup, cloud states and actions that still fell
+    // back to the font: Segoe Wifi, Microphone, Checkbox, Highlight, Permissions,
+    // Bold, MapLayers, Globe, Flag, CellPhone, Completed, CompletedSolid, Blocked
+    // and the down arrow (moving a list item down).
+    Wifi, Mic, Checkbox, Highlight, Key, Bold, Layers, Globe, Flag, Phone,
+    CheckCircle, CheckCircleFilled, Blocked, Down,
+    Dialog, User, Exit,
     Count
 };
 
@@ -82,7 +89,7 @@ inline constexpr float FillOpacity(Icon icon) noexcept {
     switch (icon) {
     case Icon::StarFilled: case Icon::More: case Icon::Contrast: case Icon::SizeBar:
     case Icon::Pause: case Icon::Play: case Icon::Sparkle: return 1.0f;
-    case Icon::Invert: return 0.35f;
+    case Icon::Invert: case Icon::CheckCircleFilled: return 0.35f;
     case Icon::Zebra: return 0.28f;
     default: return 0.0f;
     }
@@ -115,6 +122,9 @@ inline Icon FromGlyph(std::wstring_view glyph) noexcept {
     case L'\xE823': case L'\xE787': return Icon::History;
     case L'\xE896': return Icon::Download;
     case L'\xE8A5': return Icon::File;
+    case L'\xF101': return Icon::Dialog;
+    case L'\xF102': return Icon::User;
+    case L'\xF103': return Icon::Exit;
     case L'\xE8A7': return Icon::OpenExternal;
     case L'\xEB9F': case L'\xE91B': return Icon::Image;
     case L'\xE7F1': return Icon::Drive;
@@ -242,6 +252,45 @@ inline Icon FromGlyph(std::wstring_view glyph) noexcept {
     case L'\xE756': return Icon::Terminal;
     case L'\xE8F4': return Icon::FolderAdd;
     case L'\xED25': return Icon::FolderDissolve;
+    // Settings, assistant, cloud-state and action glyphs that had no shape yet.
+    case L'\xE701': return Icon::Wifi;          // 局域网发现
+    case L'\xE720': return Icon::Mic;           // 语音输入
+    case L'\xE73A': return Icon::Checkbox;      // 项目复选框
+    case L'\xE7E6': return Icon::Highlight;     // 名称高亮
+    case L'\xE8D7': return Icon::Key;           // API Key
+    case L'\xE8DD': return Icon::Bold;          // 修改时间加粗
+    case L'\xE81E': return Icon::Layers;        // 主题、窗口效果
+    case L'\xE775': return Icon::Globe;         // 显示语言
+    case L'\xE7C1': return Icon::Flag;          // 设为目标栏
+    case L'\xE8EA': return Icon::Phone;         // 手机
+    case L'\xE930': return Icon::CheckCircle;   // 已在本机
+    case L'\xEC61': return Icon::CheckCircleFilled;  // 始终保留在本机
+    case L'\xE733': return Icon::Blocked;       // 同步被阻止
+    case L'\xE74B': return Icon::Down;
+    // ...and the ones whose meaning an existing shape already carries.
+    case L'\xE74A': return Icon::Up;
+    case L'\xE703': return Icon::Link;          // 连接
+    case L'\xE771': case L'\xE9CA': case L'\xEB3C': return Icon::Palette;  // 通用、配色、自定义主题色
+    case L'\xE7BC': return Icon::Zebra;
+    case L'\xE815': return Icon::Pointer;       // 悬停选中
+    case L'\xE897': return Icon::Delete;        // 删除前确认
+    case L'\xE8AD': case L'\xE78B': return Icon::OpenExternal;  // 外部打开、新建窗口
+    case L'\xE8DE': return Icon::Copy;          // 文件操作
+    case L'\xE8E9': return Icon::TextName;      // 界面文字大小
+    case L'\xE8F6': return Icon::EyeHidden;     // 暂存区为空时隐藏
+    case L'\xE99A': return Icon::Sparkle;       // AI 与 MCP
+    case L'\xE9D5': return Icon::History;       // 变更记录保留天数
+    case L'\xE9F5': case L'\xED1E': return Icon::Tray;  // 关闭后继续运行、暂存区图标
+    case L'\xEB42': return Icon::Image;         // 壁纸模糊
+    case L'\xEC57': return Icon::Power;         // 开机自启
+    case L'\xECCD': return Icon::Add;           // 新标签页打开
+    case L'\xECE7': return Icon::Compact;       // 行高
+    case L'\xE768': return Icon::Play;          // 运行右键命令
+    case L'\xE8E6': return Icon::Close;         // 取消选择
+    case L'\xE8FF': return Icon::Eye;           // 快速预览
+    case L'\xE9D9': return Icon::SearchAll;     // 索引状态
+    case L'\xEB90': return Icon::Error;         // 同步出错
+    case L'\xE7F8': return Icon::Computer;      // 网络设备
     default: return Icon::None;
     }
 }
@@ -604,6 +653,16 @@ inline ID2D1PathGeometry* BuildGeometry(ID2D1Factory* factory, Icon icon) noexce
     case Icon::Move: line(12,3,12,21); line(3,12,21,12); path({{9.5f,5.5f},{12,3},{14.5f,5.5f}});
         path({{9.5f,18.5f},{12,21},{14.5f,18.5f}}); path({{5.5f,9.5f},{3,12},{5.5f,14.5f}});
         path({{18.5f,9.5f},{21,12},{18.5f,14.5f}}); break;
+    case Icon::Dialog:
+        box(2.7f,3.75f,21.3f,20.25f,2.25f); line(2.7f,7.8f,21.3f,7.8f);
+        line(6,16.5f,12.75f,16.5f); line(15.3f,16.5f,18,16.5f); break;
+    case Icon::User:
+        circle(12,8.25f,3.9f); begin(4.5f,20.25f);
+        curve(4.5f,10.25f,19.5f,10.25f,19.5f,20.25f); end(); break;
+    case Icon::Exit:
+        line(3.75f,12,14.25f,12); path({{10.5f,7.5f},{15,12},{10.5f,16.5f}});
+        begin(15.75f,4.5f); to(18.75f,4.5f); curve(19.6f,4.5f,20.25f,5.2f,20.25f,6);
+        to(20.25f,18); curve(20.25f,18.8f,19.6f,19.5f,18.75f,19.5f); to(15.75f,19.5f); end(); break;
     case Icon::Power: line(12,3,12,11); arc(12,13,8,300,600); break;
     case Icon::Bulb: arc(12,9.5f,6,135,405); path({{7.76f,13.74f},{9.2f,16},{14.8f,16},{16.24f,13.74f}});
         line(9.5f,18.8f,14.5f,18.8f); line(10.5f,21,13.5f,21); break;
@@ -648,6 +707,29 @@ inline ID2D1PathGeometry* BuildGeometry(ID2D1Factory* factory, Icon icon) noexce
         arcto(17,15.5f,2.4f,true,true); to(17,20.5f); to(4,20.5f); end(true); break;
     case Icon::PinBadge: begin(8.5f,3); to(15.5f,3); to(14.5f,9); to(18,12.5f); to(6,12.5f); to(9.5f,9);
         end(true); begin(12,12.5f); to(12,21); end(); break;
+    case Icon::Wifi: arc(12,20,13.5f,227,313); arc(12,20,9,229,311); arc(12,20,4.6f,232,308);
+        dot(12,19.4f,1.05f); break;
+    case Icon::Mic: box(9,3,15,14,3); arc(12,10.5f,6.5f,0,180); line(12,17,12,20.5f); line(8.5f,20.5f,15.5f,20.5f); break;
+    case Icon::Checkbox: box(4,4,20,20,3); path({{8,12.2f},{11,15.2f},{16.5f,9}}); break;
+    case Icon::Highlight: path({{15,4},{20,9},{11.5f,17.5f},{6.5f,12.5f},{15,4}});
+        path({{6.5f,12.5f},{4,20},{11.5f,17.5f}}); line(14,20.5f,20.5f,20.5f); break;
+    case Icon::Key: circle(8,15.5f,4.5f); line(11.2f,12.3f,19.5f,4); line(16.5f,7,19,9.5f); line(14.2f,9.3f,16.2f,11.3f); break;
+    case Icon::Bold: begin(7.5f,19.5f); to(7.5f,4.5f); to(12.5f,4.5f); arcto(12.5f,11.5f,3.5f,false,true); to(7.5f,11.5f); end();
+        begin(7.5f,11.5f); to(13.5f,11.5f); arcto(13.5f,19.5f,4,false,true); to(7.5f,19.5f); end(); break;
+    case Icon::Layers: path({{12,5},{21,10},{12,15},{3,10},{12,5}}); path({{3,14.5f},{12,19.5f},{21,14.5f}}); break;
+    case Icon::Globe: circle(12,12,9); begin(12,3); curve(7.5f,6,7.5f,18,12,21); end();
+        begin(12,3); curve(16.5f,6,16.5f,18,12,21); end(); line(3,12,21,12); line(4.6f,7.5f,19.4f,7.5f);
+        line(4.6f,16.5f,19.4f,16.5f); break;
+    case Icon::Flag: line(5.5f,3,5.5f,21); path({{5.5f,4},{18.5f,4},{15.5f,8.25f},{18.5f,12.5f},{5.5f,12.5f}}); break;
+    case Icon::Phone: box(7,2.5f,17,21.5f,2.5f); line(10.5f,5.5f,13.5f,5.5f); dot(12,18.2f,1); break;
+    case Icon::CheckCircle: circle(12,12,9); path({{8,12.3f},{10.8f,15.1f},{16.2f,9.3f}}); break;
+    case Icon::CheckCircleFilled:
+        fill_begin(21,12);
+        sink->AddArc(D2D1::ArcSegment({3,12},{9,9},0,D2D1_SWEEP_DIRECTION_CLOCKWISE,D2D1_ARC_SIZE_SMALL));
+        sink->AddArc(D2D1::ArcSegment({21,12},{9,9},0,D2D1_SWEEP_DIRECTION_CLOCKWISE,D2D1_ARC_SIZE_SMALL));
+        end(true); path({{8,12.3f},{10.8f,15.1f},{16.2f,9.3f}}); break;
+    case Icon::Blocked: circle(12,12,9); line(5.6f,5.6f,18.4f,18.4f); break;
+    case Icon::Down: line(12,5,12,19); path({{6.5f,13.5f},{12,19},{17.5f,13.5f}}); break;
     default: break;
     }
     const HRESULT result = sink->Close();

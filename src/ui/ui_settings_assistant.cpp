@@ -183,6 +183,14 @@ void MainRenderer::DrawSettingsAssistant(const WindowViewModel& vm, const D2D1_R
         return x;
     }();
 
+    card(o.enabled_row);
+    head(o.enabled_row, L"\xE713", asst_text::T(I::AsstEnabledTitle), asst_text::T(I::AsstEnabledDesc), o.enabled_toggle.left);
+    {
+        fluent::ControlState state{};
+        state.checked = v.enabled;
+        state.hovered = hovered(kAsstEnabled);
+        painter_.DrawSwitch(o.enabled_toggle, L"", state);
+    }
     // 模型服务.
     painter_.DrawText(asst_text::T(I::AsstModelSection), o.model_section, compositor_->TextFormat(), theme.text);
     card(o.model_card);

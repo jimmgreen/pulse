@@ -588,6 +588,21 @@ void Painter::DrawTextWithBrush(std::wstring_view text, const D2D1_RECT_F& bound
                    text_brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
+float Painter::MeasureWrappedBodyHeight(std::wstring_view text, float width) const {
+    IDWriteTextLayout* layout = GetWrappedTextLayout(compositor_, BodyFormat(), text, width);
+    DWRITE_TEXT_METRICS metrics{};
+    if (!layout || FAILED(layout->GetMetrics(&metrics))) return 0.0f;
+    return std::ceil(metrics.height);
+}
+
+void Painter::DrawWrappedBody(std::wstring_view text, D2D1_POINT_2F origin, float width,
+                              const D2D1_COLOR_F& color) {
+    if (!dc_) return;
+    IDWriteTextLayout* layout = GetWrappedTextLayout(compositor_, BodyFormat(), text, width);
+    ID2D1SolidColorBrush* brush = ScratchBrush(color);
+    if (layout && brush) DrawLayoutText(compositor_, dc_, high_contrast_, origin, layout, brush);
+}
+
 float Painter::MeasureWrappedCaptionHeight(std::wstring_view text, float width) const {
     IDWriteTextLayout* layout = GetWrappedTextLayout(compositor_, CaptionFormat(), text, width);
     DWRITE_TEXT_METRICS metrics{};
@@ -745,6 +760,14 @@ void Painter::DrawPaneLayoutIcon(const D2D1_RECT_F& bounds, MenuPictogram kind,
     case MenuPictogram::LayoutThree:
         vline(mid_x, top, bottom);
         hline(mid_x, right, mid_y);
+        break;
+    case MenuPictogram::LayoutColumns:
+        vline(left + (right-left)/3, top, bottom);
+        vline(left + (right-left)*2/3, top, bottom);
+        break;
+    case MenuPictogram::LayoutCascade:
+        StrokeRoundedRect(D2D1::RectF(left + box*0.22f, top + box*0.22f, right, bottom), radius, color, stroke);
+        StrokeRoundedRect(D2D1::RectF(left + box*0.44f, top + box*0.44f, right, bottom), radius, color, stroke);
         break;
     case MenuPictogram::LayoutFour:
         vline(mid_x, top, bottom);

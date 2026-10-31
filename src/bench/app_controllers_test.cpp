@@ -395,6 +395,18 @@ bool TestDefaultFileManager() {
 bool TestShellWindowPlan() {
     using namespace pulse::app;
     bool passed = true;
+    using Item = ShellWindowItemResult;
+    passed &= Report("shell enumeration: documented S_FALSE/null is absent and S_OK/dispatch is found",
+        ClassifyShellWindowItem(S_FALSE, false) == Item::Absent &&
+        ClassifyShellWindowItem(S_OK, true) == Item::Found);
+    passed &= Report("shell enumeration: inconsistent success/pointer pairs remain invalid",
+        ClassifyShellWindowItem(S_FALSE, true) == Item::Invalid &&
+        ClassifyShellWindowItem(S_OK, false) == Item::Invalid);
+    passed &= Report("shell enumeration: failure and unknown success codes never become absent",
+        ClassifyShellWindowItem(E_FAIL, false) == Item::Invalid &&
+        ClassifyShellWindowItem(E_ACCESSDENIED, true) == Item::Invalid &&
+        ClassifyShellWindowItem(static_cast<HRESULT>(2), false) == Item::Invalid &&
+        ClassifyShellWindowItem(static_cast<HRESULT>(2), true) == Item::Invalid);
     passed &= Report("shell windows: drives, shares and This PC are shell folders; Pulse views are not",
         IsShellWindowPath(L"") && IsShellWindowPath(L"C:\\") && IsShellWindowPath(L"d:\\Work") &&
         IsShellWindowPath(L"\\\\server\\share\\dir") && !IsShellWindowPath(L"pulse:search?q=a") &&
@@ -447,33 +459,32 @@ bool TestShellWindowPlan() {
         step(50, true, true, 0, kExplorerSelectionGraceMs) == S::Take);
 
     using C = SourceCloseStep;
-    auto close = [](bool identity, bool single_tab, bool hidden, bool changed, bool sent, unsigned view_age) {
+    auto close = [](bool identity, bool single_tab, bool changed, bool sent, unsigned view_age) {
         SourceCloseProbe probe;
         probe.identity_kept = identity;
         probe.single_tab = single_tab;
-        probe.hidden = hidden;
         probe.selection_changed = changed;
         probe.sent_selection = sent;
         probe.view_age_ms = view_age;
         return DecideSourceClose(probe);
     };
-    passed &= Report("explorer takeover: a source with another tab or a changed identity is never closed",
-        close(true, false, true, false, true, 5000) == C::Abort &&
-        close(true, false, false, false, true, 5000) == C::Abort &&
-        close(false, true, true, false, true, 5000) == C::Abort);
-    passed &= Report("explorer takeover: a hidden source waits for a late /select, then closes",
-        close(true, true, true, false, false, 0) == C::Wait &&
-        close(true, true, true, false, false, kExplorerLateSelectionMs - 1) == C::Wait &&
-        close(true, true, true, false, false, kExplorerLateSelectionMs) == C::Close &&
-        close(true, true, true, false, true, 0) == C::Close);
-    passed &= Report("explorer takeover: a late selection follows a hidden source; a visible one is left",
-        close(true, true, true, true, false, 300) == C::CloseAndSelect &&
-        close(true, true, false, true, false, kExplorerProgrammaticSelectionMs) == C::Abort);
-    passed &= Report("explorer takeover: a visible source's late /select still follows (WeChat)",
-        close(true, true, false, true, false, 300) == C::CloseAndSelect &&
-        close(true, true, false, true, false, kExplorerProgrammaticSelectionMs - 1) == C::CloseAndSelect);
-    passed &= Report("explorer takeover: a visible single-tab source closes without waiting (Windows 11 too)",
-        close(true, true, false, false, false, 0) == C::Close);
+    passed &= Report("explorer takeover: unreadable/changed identity and additional tabs never authorize close",
+        close(true, false, false, true, 5000) == C::Abort &&
+        close(false, true, false, true, 5000) == C::Abort);
+    passed &= Report("explorer takeover: visible source waits for late selection before close",
+        close(true, true, false, false, 0) == C::Wait &&
+        close(true, true, false, false, kExplorerLateSelectionMs - 1) == C::Wait &&
+        close(true, true, false, false, kExplorerLateSelectionMs) == C::Close &&
+        close(true, true, false, true, 0) == C::Close);
+    passed &= Report("explorer takeover: late selection retains source without a new acknowledgement",
+        close(true, true, true, false, 300) == C::SelectAndKeep &&
+        close(true, true, true, true, kExplorerProgrammaticSelectionMs - 1) == C::SelectAndKeep &&
+        close(true, true, true, false, kExplorerProgrammaticSelectionMs) == C::Abort);
+    passed &= Report("explorer takeover: final recheck can revoke an earlier close decision",
+        close(true, true, false, true, 1000) == C::Close &&
+        close(true, true, true, true, 1000) != C::Close &&
+        close(false, true, false, true, 1000) != C::Close &&
+        close(true, false, false, true, 1000) != C::Close);
     passed &= Report("explorer takeover: setting has a label and description",
         !pulse::l10n::Get(pulse::l10n::StringId::SettingsExplorerWindows).empty() &&
         !pulse::l10n::Get(pulse::l10n::StringId::SettingsExplorerWindowsDesc).empty());
@@ -1557,6 +1568,10 @@ bool TestPackAutoUpdate() {
 }
 
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--explorer-takeover") {
+        pulse::l10n::Initialize(GetModuleHandleW(nullptr), L"zh-CN");
+        return TestShellWindowPlan() ? 0 : 1;
+    }
     if (argc == 2 && std::wstring_view(argv[1]) == L"--shell-disabled-prefs") {
         using namespace pulse::app;
         ContextMenuPrefs prefs;

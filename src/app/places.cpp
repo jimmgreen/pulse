@@ -431,6 +431,9 @@ bool PlacesCatalog::Load() {
 
     for (const auto& block : ExtractObjectArray(json, L"workspaces")) {
         Workspace w;
+        w.expanded = pulse::json::ExtractInt(block, L"expanded") != 0;
+        if (block.find(L"\"color_rgb\"") != std::wstring::npos)
+            w.color_rgb = static_cast<uint32_t>(pulse::json::ExtractInt(block, L"color_rgb")) & 0xFFFFFF;
         w.name = pulse::json::ExtractString(block, L"name");
         w.root = pulse::json::ExtractString(block, L"root");
         w.layout = pulse::json::ExtractInt(block, L"layout");
@@ -775,7 +778,8 @@ bool PlacesCatalog::SaveSnapshotFile(const SaveSnapshot& snapshot) {
         pulse::json::Escape(w.name, name);
         pulse::json::Escape(w.root, root);
         f << L"    {\"name\":\"" << name << L"\",\"root\":\"" << root
-          << L"\",\"layout\":" << w.layout << L",\"panes\":";
+          << L"\",\"layout\":" << w.layout << L",\"expanded\":" << (w.expanded ? 1 : 0)
+          << L",\"color_rgb\":" << w.color_rgb << L",\"panes\":";
         writeArr(w.pane_paths);
         std::vector<std::wstring> views;
         views.reserve(w.pane_views.size());

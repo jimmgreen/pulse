@@ -29,7 +29,7 @@ inline bool IsBuiltinContextVerb(std::wstring_view verb, bool background) {
         L"open", L"opennewprocess", L"opennewwindow", L"opennewtab",
         L"explore", L"openas", L"cut", L"copy", L"paste", L"pastelink",
         L"delete", L"rename", L"properties", L"copyaspath",
-        L"pintohome",
+        L"pintohome", L"pulsetags", // Pulse already exposes its native tag picker.
     };
     for (auto k : kCommon)
         if (v == k) return true;

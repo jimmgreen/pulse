@@ -102,6 +102,7 @@ struct AiPageLayout {
 // model service and voice input, and a way to AI 与 MCP. Built by
 // app/ai_assistant_settings.cpp; never holds a key, only its mask.
 enum AssistantHit : int {
+    kAsstEnabled = 1,
     kAsstTest = 0,          // 测试连接
     kAsstMcp = 3,           // 在增强包中管理: 增强包 > AI 与 MCP
     kAsstChange = 10,       // 更换服务: back to the tiles
@@ -161,6 +162,7 @@ struct AsstOtherView {
     std::wstring name, model;
 };
 struct AssistantPageView {
+    bool enabled = true;
     AsstStage stage = AsstStage::Pick;
     bool in_use = false;               // a service is set up (the tiles offer 取消)
     std::vector<AsstTileView> tiles;   // first screen, then 更多 (Gemini, Claude)
@@ -212,6 +214,7 @@ struct AssistantPageView {
     bool mcp_installed = false;        // the AI pack (bundled or installed)
 };
 struct AssistantPageLayout {
+    D2D1_RECT_F enabled_row{}, enabled_toggle{};
     D2D1_RECT_F model_section{}, model_card{}, model_foot{};
     // Every stage: a header row (icon or logo, title, caption, controls).
     D2D1_RECT_F head{}, head_badge{}, head_buttons[3]{};

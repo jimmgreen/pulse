@@ -113,6 +113,7 @@ Settings ParseSettings(std::string_view utf8, bool* malformed) {
         return s;
     }
     if (malformed) *malformed = false;
+    s.enabled = root.get_bool("enabled", true);
     s.mcp_enabled = root.get_bool("mcp_enabled", false);
     if (const auto* days = root.find("log_days")) {
         int64_t n = 0;
@@ -196,7 +197,26 @@ Settings ParseSettings(std::string_view utf8, bool* malformed) {
 Settings LoadSettings(bool* malformed) {
     if (malformed) *malformed = false;
     const std::wstring path = SettingsPath();
-    if (path.empty() || GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return {};
+    if (path.empty()) return {};
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    const DWORD attribute_error = attributes == INVALID_FILE_ATTRIBUTES ? GetLastError() : ERROR_SUCCESS;
+    const bool missing = attributes == INVALID_FILE_ATTRIBUTES &&
+        (attribute_error == ERROR_FILE_NOT_FOUND || attribute_error == ERROR_PATH_NOT_FOUND);
+    if (missing) {
+        Settings defaults;
+        wchar_t executable[32768]{};
+        const DWORD count = GetModuleFileNameW(nullptr, executable, static_cast<DWORD>(std::size(executable)));
+        if (count && count < std::size(executable)) {
+            std::wstring ini(executable, count);
+            const size_t slash = ini.find_last_of(L"\\/");
+            if (slash != std::wstring::npos) {
+                ini.resize(slash + 1);
+                ini += L"setup-defaults.ini";
+                defaults.enabled = GetPrivateProfileIntW(L"features", L"ai_assistant", 1, ini.c_str()) != 0;
+            }
+        }
+        return defaults;
+    }
     std::wstring text;
     if (!ReadUtf8File(path, text)) {
         if (malformed) *malformed = true;
@@ -207,6 +227,7 @@ Settings LoadSettings(bool* malformed) {
 
 std::string SerializeSettings(const Settings& s) {
     json::Value root = json::Value::Object();
+    if (!s.enabled) root.set("enabled", false);
     root.set("mcp_enabled", s.mcp_enabled);
     root.set("log_days", s.log_days);
     json::Value clients = json::Value::Array();

@@ -318,7 +318,7 @@ ToolbarLayout MainRenderer::ToolbarLayoutAt(float w, float create_width, float f
                                           filter_width, pin_count_, selection_span, pins);
     const TitleChrome chrome = MakeTitleChrome(w, scale_, title_bar_height_);
     const float row_top = (title_bar_height_ - 36.0f * scale_) * 0.5f - 4.0f * scale_;
-    const ToolbarLayout row = MakeToolbarLayout(chrome.settings_left - 4.0f * scale_, scale_, row_top,
+    const ToolbarLayout row = MakeToolbarLayout(chrome.windows_left - 4.0f * scale_, scale_, row_top,
                                                 margin_, create_width, left, 0.0f, search_hidden_ ? -1.0f : search_min_dip_);
     out.navigation = row.navigation;
     out.address = row.address;
@@ -1259,6 +1259,7 @@ void MainRenderer::Render(const WindowViewModel& vm, const D2D1_RECT_F& rect,
         if (peek) DrawSidebarPeek(vm, rect, theme);
         if (!embedded_) DrawStatusBar(vm, rect, theme);
         if (!peek) DrawTrayCompareCard(vm, theme);
+        DrawWorkspacePreview(vm, rect, theme);
     }
 
     // A tab dragged from another window over the content (multi-window M6d):
@@ -1489,7 +1490,7 @@ ID2D1Bitmap* MainRenderer::LogoBitmap() {
     // frame: the small frames are pixel-fitted, and a 2x decode would blur them.
     const int px = std::max(16, static_cast<int>(24.0f * scale_ + 0.5f));
     HICON icon = nullptr;
-    if (FAILED(LoadIconWithScaleDown(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_PULSE), px, px, &icon)) ||
+    if (FAILED(LoadIconWithScaleDown(ResourceModule(), MAKEINTRESOURCEW(IDI_PULSE), px, px, &icon)) ||
         !icon) {
         return nullptr;
     }
@@ -2104,6 +2105,9 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
     MakeBrush(dc, theme.stroke_divider, brStrokeDivider_);
     const float buttonTop = groupTop + 2.0f * scale_;
     const float buttonBottom = groupBottom - 2.0f * scale_;
+    DrawButton(D2D1::RectF(chrome.windows_left, buttonTop, chrome.windows_left + chrome.settings_w, buttonBottom),
+        theme, IsHovered(vm, HitTestResult::WindowManageButton) ? theme.fill_hover : kTransparent,
+        L"\xE8A9", L"W", theme.text, true, true);
     const D2D1_RECT_F settingsRc = D2D1::RectF(chrome.settings_left, buttonTop,
         chrome.settings_left + chrome.settings_w, buttonBottom);
     // Open settings has no tab: the button shows as selected instead, with the
@@ -2551,7 +2555,7 @@ MainRenderer::TabStripMetrics MainRenderer::ComputeTabStrip(
     // button stays empty so the window can still be grabbed there; tabs
     // compact that much earlier instead.
     constexpr float kTabDragReserveDip = 56.0f;
-    const float tabsRight = chrome.settings_left - (8.0f + kTabDragReserveDip) * scale_;
+    const float tabsRight = chrome.windows_left - (8.0f + kTabDragReserveDip) * scale_;
 
     // Group chips: one at the start of each consecutive same-group run. Their
     // widths come out of the strip budget before tabs are sized; positions

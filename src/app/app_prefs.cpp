@@ -88,6 +88,9 @@ void AppPrefs::ResetToDefaults() {
     details_columns = ui::kDetailsColumnsDefault;
     startup_open = 0;
     new_tab_open = 0;
+    open_pulse_icon = open_this_pc = open_win_e = arrange_gap = 0;
+    new_window_shows = 2;
+    arrange_include_minimized = false;
     external_open = 0;
     close_window_with_last_tab = true;
     close_tab_on_double_click = false;
@@ -253,6 +256,13 @@ std::wstring AppPrefs::ToJson() const {
     out += new_tab_open == 1 ? L"1" : L"0";
     out += L",\n  \"external_open\":";
     out += std::to_wstring(external_open >= 0 && external_open <= 2 ? external_open : 0);
+    out += L",\n  \"open_pulse_icon\":" + std::to_wstring(open_pulse_icon >= 0 && open_pulse_icon <= 2 ? open_pulse_icon : 0);
+    out += L",\n  \"open_this_pc\":" + std::to_wstring(open_this_pc >= 0 && open_this_pc <= 1 ? open_this_pc : 0);
+    out += L",\n  \"open_win_e\":" + std::to_wstring(open_win_e >= 0 && open_win_e <= 1 ? open_win_e : 0);
+    out += L",\n  \"new_window_shows\":" + std::to_wstring(new_window_shows >= 0 && new_window_shows <= 2 ? new_window_shows : 2);
+    out += L",\n  \"arrange_gap\":" + std::to_wstring(arrange_gap >= 0 && arrange_gap <= 1 ? arrange_gap : 0);
+    out += L",\n  \"arrange_include_minimized\":";
+    out += arrange_include_minimized ? L"true" : L"false";
     out += L",\n  \"close_window_with_last_tab\":";
     out += close_window_with_last_tab ? L"true" : L"false";
     out += L",\n  \"close_tab_on_double_click\":";
@@ -528,6 +538,17 @@ bool AppPrefs::FromJson(const std::wstring& json) {
         details_columns |= ui::kDetailsColumnStatus;
     startup_open = pulse::json::ExtractInt(json, L"startup_open", 0) == 1 ? 1 : 0;
     new_tab_open = pulse::json::ExtractInt(json, L"new_tab_open", 0) == 1 ? 1 : 0;
+    open_pulse_icon = pulse::json::ExtractInt(json, L"open_pulse_icon", 0);
+    if (open_pulse_icon < 0 || open_pulse_icon > 2) open_pulse_icon = 0;
+    open_this_pc = pulse::json::ExtractInt(json, L"open_this_pc", 0);
+    if (open_this_pc < 0 || open_this_pc > 1) open_this_pc = 0;
+    open_win_e = pulse::json::ExtractInt(json, L"open_win_e", 0);
+    if (open_win_e < 0 || open_win_e > 1) open_win_e = 0;
+    new_window_shows = pulse::json::ExtractInt(json, L"new_window_shows", 2);
+    if (new_window_shows < 0 || new_window_shows > 2) new_window_shows = 2;
+    arrange_gap = pulse::json::ExtractInt(json, L"arrange_gap", 0);
+    if (arrange_gap < 0 || arrange_gap > 1) arrange_gap = 0;
+    arrange_include_minimized = pulse::json::ExtractBool(json, L"arrange_include_minimized", false);
     external_open = pulse::json::ExtractInt(json, L"external_open", 0);
     if (external_open < 0 || external_open > 2) external_open = 0;
     // Missing key = preferences saved before the setting existed: keep their behavior.
@@ -918,6 +939,16 @@ bool AppPrefs::Load() {
     }
     load_failed = false;
     had_file = !missing;
+    if (missing && persist) {
+        const std::wstring exe = ExePath();
+        const auto slash = exe.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) {
+            const std::wstring defaults = exe.substr(0, slash + 1) + L"setup-defaults.ini";
+            global_search_enabled = GetPrivateProfileIntW(L"features", L"global_search",
+                global_search_enabled ? 1 : 0, defaults.c_str()) != 0;
+        }
+    }
+    if (persist) MigrateLegacyWinECommand(ExePath());
     launch_on_startup = ReadLaunchOnStartup();
     open_folders_in_pulse = ReadFolderOpen();
     take_over_win_e = ReadWinE();

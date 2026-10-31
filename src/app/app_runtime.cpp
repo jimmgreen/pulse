@@ -1,5 +1,6 @@
 // app_runtime.cpp — extracted from app_main.cpp.
 #include "app_window_title.h"
+#include "dialog_management_ui.h"
 #include "../fs/drive_kind.h"
 #include "../fs/device_path.h"
 #include "../common/shell_id.h"
@@ -7,6 +8,7 @@
 #include "folder_alias.h"
 #include "app_wall_hint.h"
 #include "app_internal.h"
+#include "workspace_sidebar.h"
 #include "app_network_page.h"
 #include "shortcut_page.h"
 #include "keymap.h"
@@ -815,6 +817,7 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
             vm.settings_default_manager =
                 static_cast<int>(app::DefaultFileManagerState(s.appPrefs));
             vm.settings_default_manager_desc = app::DefaultFileManagerSummary(s.appPrefs);
+            FillDialogManagementVm(s, vm);
             vm.settings_integration_enabled = s.appPrefs.integration_enabled;
             vm.settings_integration_folders = s.appPrefs.integration_folders;
             vm.settings_integration_win_e = s.appPrefs.integration_win_e;
@@ -2692,6 +2695,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
         s.pane->focused, s.maximized, s.darkMode, &s.places, s.sidebarCollapsedMask,
         SidebarHiddenMaskWithBar(s), s.starredExpanded, &s.sidebarOrder,
         s.sidebarQuickAccessHiddenMask);
+    FillWorkspaceSidebarState(s, vm);
     if (const app::Tab* tab = ActiveTab(s)) {
         FillWallHint(*tab, vm.pane);  // photo wall suggestion
         // A writable phone folder takes 新建文件夹 (CreateDeviceFolder), as its
@@ -2742,6 +2746,12 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     vm.settings_startup_open = s.appPrefs.startup_open;
     vm.settings_notify_icon = s.appPrefs.notify_icon_mode;
     vm.settings_new_tab_open = s.appPrefs.new_tab_open;
+    vm.settings_open_pulse_icon = s.appPrefs.open_pulse_icon;
+    vm.settings_new_window_shows = s.appPrefs.new_window_shows;
+    vm.settings_arrange_include_minimized = s.appPrefs.arrange_include_minimized;
+    vm.settings_arrange_gap = s.appPrefs.arrange_gap;
+    vm.settings_open_this_pc = s.appPrefs.open_this_pc;
+    vm.settings_open_win_e = s.appPrefs.open_win_e;
     vm.settings_external_open = s.appPrefs.external_open;
     vm.settings_close_last_tab = s.appPrefs.close_window_with_last_tab;
     vm.settings_close_tab_double_click = s.appPrefs.close_tab_on_double_click;
@@ -3461,6 +3471,7 @@ std::wstring TooltipForHover(AppState& s) {
     case R::TabNew: return text(s.appPrefs.show_hints ? I::TipxNewTab : I::TooltipNewTab);
     case R::ThemeToggle: return text(I::TooltipToggleTheme);
     case R::StatusBarAi: return text(I::AiChipTip);   // Pulse 助手  Ctrl+J
+    case R::WindowManageButton: return text(I::WindowManage);
     case R::SettingsButton: return text(I::Settings);
     case R::SettingsFind: return text(I::SettingsFind);
     case R::SettingsNav: {
@@ -3606,6 +3617,7 @@ std::wstring TooltipForHover(AppState& s) {
             ? actions[static_cast<size_t>(s.hoverControlIndex)].label : std::wstring{};
     }
     case R::PaneColumnLayout: return text(I::ColumnLayout);
+    case R::PaneClose: return text(I::WorkspaceClosePane);
     case R::PaneViewButton: return text(I::More);
     case R::FilterBox: return text(s.appPrefs.show_hints ? I::TipxFilter : I::FilterCurrent);
     case R::FilterClear: return text(I::Clear);
@@ -3654,6 +3666,15 @@ std::wstring TooltipForHover(AppState& s) {
                    s.places.tags[static_cast<size_t>(s.hoverSubIndex)].name.c_str());
         return tip;
     }
+    case R::SidebarWorkspaceAction:
+        switch (s.hoverSubIndex) {
+        case 0: return text(I::OpenNewTab);
+        case 1: return text(I::More);
+        case 2: return text(I::WorkspaceUpdateLayout);
+        case 3: return text(I::WorkspaceRestore);
+        case 4: return text(I::WorkspaceSaveCurrent);
+        default: return {};
+        }
     case R::SidebarItemAction:
         return text(IsVerticalTabPath(s.hoverPath) ? I::TooltipCloseTab : I::Unpin);
     case R::WindowIdentity: return text(I::WindowIdentityTip);

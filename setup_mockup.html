@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang='zh-CN'>
+<head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Pulse 安装程序</title>
+<style>
+/* Layout: the existing setup window from setup_ui.cpp (720 x 468, title 40) placed on a plain stage, drawn with its own coordinates and MakeTheme() colours; only the new toggles and slides are additions. */
+:root{--accent:#5B63D9;--acch:#6B72DE;--accp:#4C53C4;--acct:#FFFFFF;--mica1:#EEF0F8;--mica2:#F5F6F2;--card:rgba(255,255,255,.72);--cards:#FFFFFF;--stroke:rgba(0,0,0,.07);--div:rgba(0,0,0,.06);--text:#1F2635;--t2:#5D6A80;--t3:#929CAE;--input:rgba(255,255,255,.85);--inputh:#FFFFFF;--iline:rgba(0,0,0,.45);--hover:rgba(0,0,0,.04);--press:rgba(0,0,0,.025);--danger:#C42B1C;--success:#0F7B0F;--warn:#9D5D00;--scrim:rgba(255,255,255,.35);--wash:#C3C0FF;--washa:.11;--page:#E4E6EE;--shadow:0 24px 60px rgba(28,31,52,.22),0 2px 8px rgba(28,31,52,.10);--ui:'Segoe UI Variable Text','Segoe UI','Microsoft YaHei UI','PingFang SC',system-ui,sans-serif;color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme='light']){--accent:#7B83F0;--acch:#8C93F4;--accp:#6A72E0;--acct:#0E1030;--mica1:#20212A;--mica2:#1A1B1F;--card:rgba(255,255,255,.045);--cards:rgba(255,255,255,.07);--stroke:rgba(255,255,255,.075);--div:rgba(255,255,255,.06);--text:#FFFFFF;--t2:rgba(255,255,255,.62);--t3:rgba(255,255,255,.40);--input:rgba(255,255,255,.06);--inputh:rgba(255,255,255,.085);--iline:rgba(255,255,255,.54);--hover:rgba(255,255,255,.07);--press:rgba(255,255,255,.045);--danger:#FF99A4;--success:#6CCB5F;--warn:#FCE100;--scrim:rgba(0,0,0,.35);--wash:#8C84F8;--washa:.06;--page:#111215;--shadow:0 24px 60px rgba(0,0,0,.6),0 2px 8px rgba(0,0,0,.4);color-scheme:dark}}
+:root[data-theme='dark']{--accent:#7B83F0;--acch:#8C93F4;--accp:#6A72E0;--acct:#0E1030;--mica1:#20212A;--mica2:#1A1B1F;--card:rgba(255,255,255,.045);--cards:rgba(255,255,255,.07);--stroke:rgba(255,255,255,.075);--div:rgba(255,255,255,.06);--text:#FFFFFF;--t2:rgba(255,255,255,.62);--t3:rgba(255,255,255,.40);--input:rgba(255,255,255,.06);--inputh:rgba(255,255,255,.085);--iline:rgba(255,255,255,.54);--hover:rgba(255,255,255,.07);--press:rgba(255,255,255,.045);--danger:#FF99A4;--success:#6CCB5F;--warn:#FCE100;--scrim:rgba(0,0,0,.35);--wash:#8C84F8;--washa:.06;--page:#111215;--shadow:0 24px 60px rgba(0,0,0,.6),0 2px 8px rgba(0,0,0,.4);color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--text);font:13px/1.5 var(--ui);-webkit-font-smoothing:antialiased}
+button{font:inherit;color:inherit;cursor:pointer;background:none;border:0;padding:0}
+[hidden]{display:none!important}
+:focus-visible{outline:2px solid var(--text);outline-offset:3px}
+svg{display:block;flex:none}
+.page{max-width:1240px;margin:0 auto;padding:22px 16px 40px;display:flex;flex-direction:column;gap:14px}
+.ph{display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap}
+.ph h1{margin:0 0 4px;font-size:19px;font-weight:650}
+.lede{margin:0;max-width:76ch;color:var(--t2)}
+.sp{flex:1}
+.tgb{display:flex;align-items:center;gap:8px;height:32px;padding:0 12px;border-radius:8px;border:1px solid var(--stroke);background:var(--cards)}
+.srow{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.sl{color:var(--t2);font-size:12px}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.st{height:28px;padding:0 12px;border-radius:14px;border:1px solid var(--stroke);color:var(--t2);font-size:12px;background:var(--cards)}
+.st.on{border-color:var(--accent);color:var(--text)}
+.stage{display:grid;place-items:center;padding:40px 16px;border-radius:14px;border:1px solid var(--stroke);overflow-x:auto}
+@media (min-width:1000px){.win{zoom:1.25}}
+/* ---- the setup window, in setup_ui.cpp coordinates ---- */
+.win{position:relative;width:720px;height:468px;flex:none;border-radius:8px;overflow:hidden;background:linear-gradient(to bottom right,var(--mica1) 0%,var(--mica2) 55%,var(--mica2) 100%);box-shadow:var(--shadow);border:1px solid var(--stroke);user-select:none}
+.ab{position:absolute}
+.tbar{position:absolute;left:0;top:0;width:720px;height:40px}
+.tbar img{position:absolute;left:14px;top:12px;width:16px;height:16px}
+.tbar span{position:absolute;left:40px;top:0;line-height:40px;font-size:12px;color:var(--t2)}
+.wbtn{position:absolute;top:0;width:46px;height:40px;display:grid;place-items:center;color:var(--text)}
+.wbtn:hover{background:var(--hover)}
+.wbtn.x:hover{background:#C42B1C;color:#fff}
+.pg{position:absolute;left:0;top:40px;width:720px;height:428px;overflow:hidden}
+.pg.in>.layer{animation:slidein .42s cubic-bezier(.22,.61,.36,1)}
+@keyframes slidein{from{transform:translateX(24px);opacity:.15}to{transform:none;opacity:1}}
+.layer{position:absolute;left:0;top:-40px;width:720px;height:468px}
+/* buttons (Wizard::Button) */
+.bt{position:absolute;display:inline-flex;align-items:center;justify-content:center;gap:8px;height:32px;padding:0 16px;border-radius:4px;font-size:13px;white-space:nowrap}
+.bt.pri{background:var(--accent);color:var(--acct);font-weight:600;box-shadow:inset 0 -1px 0 rgba(0,0,0,.18)}
+.bt.pri:hover{background:var(--acch)}
+.bt.pri:active{background:var(--accp)}
+.bt.nor{background:var(--cards);border:1px solid var(--stroke)}
+.bt.nor:hover{background:var(--hover)}
+.bt.gh{color:var(--t2);border-radius:5px}
+.bt.gh:hover{background:var(--hover);color:var(--text)}
+/* welcome */
+.glow{position:absolute;left:360px;top:132px;width:0;height:0}
+.glow i{position:absolute;border-radius:50%;transform:translate(-50%,-50%)}
+.glow .wash{width:760px;height:760px;top:-20px;background:radial-gradient(closest-side,color-mix(in srgb,var(--wash) calc(var(--washa)*100%),transparent),color-mix(in srgb,var(--wash) calc(var(--washa)*45%),transparent) 45%,transparent)}
+.glow .gold{width:350px;height:350px;background:radial-gradient(closest-side,rgba(128,121,244,.20),rgba(128,121,244,.13) 38%,rgba(170,163,255,.05) 62%,transparent);animation:drift 9s linear infinite}
+.glow .orb{width:220px;height:220px;background:radial-gradient(closest-side,rgba(170,163,255,.24),rgba(128,121,244,.10) 45%,transparent);animation:orbit 12s linear infinite}
+.glow .orb2{width:192px;height:192px;background:radial-gradient(closest-side,rgba(229,226,255,.20),rgba(170,163,255,.07) 50%,transparent);animation:orbit2 18s linear infinite}
+.glow .core{left:42px;top:24px;width:256px;height:256px;background:radial-gradient(closest-side,rgba(229,226,255,.55),rgba(170,163,255,.40) 10%,rgba(128,121,244,.22) 30%,rgba(128,121,244,.07) 55%,rgba(128,121,244,.02) 80%,transparent);animation:breath 3.6s ease-in-out infinite}
+@keyframes drift{0%{margin:0 0 0 14px}25%{margin:9px 0 0 0}50%{margin:0 0 0 -14px}75%{margin:-9px 0 0 0}100%{margin:0 0 0 14px}}
+@keyframes orbit{0%{margin:0 0 0 72px}25%{margin:40px 0 0 0}50%{margin:0 0 0 -72px}75%{margin:-40px 0 0 0}100%{margin:0 0 0 72px}}
+@keyframes orbit2{0%{margin:0 0 0 -62px}25%{margin:34px 0 0 0}50%{margin:0 0 0 62px}75%{margin:-34px 0 0 0}100%{margin:0 0 0 -62px}}
+@keyframes breath{0%,100%{opacity:.6;transform:translate(-50%,-50%) scale(.9)}50%{opacity:1;transform:translate(-50%,-50%) scale(1.06)}}
+.logo{position:absolute;left:312px;top:84px;width:96px;height:96px;filter:drop-shadow(0 10px 12px rgba(28,31,52,.22))}
+.name{position:absolute;left:0;top:194px;width:720px;height:36px;display:flex;align-items:center;justify-content:center;gap:8px}
+.name b{font-size:28px;font-weight:600;line-height:36px}
+.ver{height:20px;padding:0 7px;border-radius:10px;background:var(--cards);border:1px solid var(--stroke);font-size:12px;font-weight:500;color:var(--t2);line-height:18px}
+.tag{position:absolute;left:48px;top:234px;width:624px;text-align:center;font-size:13.5px;color:var(--t2);line-height:22px}
+.inst{left:250px;top:282px;width:220px;height:44px;border-radius:8px;font-size:15px}
+.path{position:absolute;left:0;top:336px;width:720px;text-align:center;font-size:12px;line-height:20px;color:var(--t3)}
+.path em{font-style:normal;color:var(--t2)}
+.agree{position:absolute;left:18px;top:420px;height:32px;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--t2)}
+.cb{display:grid;place-items:center;width:18px;height:18px;border-radius:4px;background:var(--input);border:1px solid var(--iline)}
+.cb.on{background:var(--accent);border-color:var(--accent);color:var(--acct)}
+.cb.flash{border:2px solid var(--danger)}
+.lic{color:var(--accent)}
+.lic:hover{text-decoration:underline}
+/* options */
+.back{position:absolute;left:28px;top:44px;width:32px;height:32px;border-radius:5px;display:grid;place-items:center}
+.back:hover{background:var(--hover)}
+.otitle{position:absolute;left:72px;top:44px;line-height:32px;font-size:20px;font-weight:600}
+.view{position:absolute;left:0;top:90px;width:720px;height:317px;overflow-y:auto;padding:4px 28px 8px;scrollbar-width:thin;scrollbar-color:var(--t3) transparent}
+.view::-webkit-scrollbar{width:3px}
+.view::-webkit-scrollbar-thumb{background:var(--t3);border-radius:2px}
+.sec{height:26px;padding-left:2px;font-size:12px;font-weight:600;color:var(--t2);line-height:18px}
+.card{position:relative;height:62px;margin-bottom:3px;border-radius:7px;background:var(--card);border:1px solid var(--stroke)}
+.card.dim>.ic,.card.dim>.t1,.card.dim>.t2{opacity:.45}
+.card .ic{position:absolute;left:16px;top:20px;width:20px;height:20px;color:var(--text);opacity:.9}
+.card .t1{position:absolute;left:50px;top:11px;height:20px;display:flex;align-items:center;gap:6px;font-size:13.5px;white-space:nowrap}
+.card .t2{position:absolute;left:50px;top:31px;right:130px;font-size:12px;line-height:18px;color:var(--t2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card.f .t2{right:330px}
+.bdg{height:16px;padding:0 7px;border-radius:8px;background:color-mix(in srgb,var(--accent) 22%,transparent);color:var(--accent);font-size:11px;line-height:16px}
+.tg{position:absolute;right:15px;top:20px;width:40px;height:20px;border-radius:10px;background:var(--input);border:1px solid var(--iline)}
+.tg::after{content:'';position:absolute;left:4px;top:4px;width:10px;height:10px;border-radius:50%;background:var(--t2);transition:left .15s}
+.tg:hover::after{left:3px;top:3px;width:12px;height:12px}
+.tg.on{background:var(--accent);border-color:var(--accent)}
+.tg.on::after{left:24px;background:var(--acct)}
+.tg.on:hover::after{left:23px}
+.tgl{position:absolute;right:65px;top:20px;line-height:20px;font-size:12px;color:var(--t2)}
+.fld{position:absolute;top:14px;height:32px;padding:0 9px;border-radius:5px;background:var(--input);border:1px solid var(--stroke);box-shadow:inset 0 -1px 0 var(--iline);font-size:12.5px;line-height:30px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card.dim .fld{opacity:.45}
+.brw{position:absolute;right:15px;top:14px}
+.card.dim .brw{background:none;border-color:transparent;color:var(--t3)}
+.need{position:relative;height:30px;margin:3px 0 10px;font-size:11.5px;color:var(--t3)}
+.need span{position:absolute;top:0;line-height:16px}
+.need .r{right:2px}
+.need i{position:absolute;left:2px;right:2px;top:21px;height:3px;border-radius:1.5px;background:var(--div)}
+.need i b{display:block;height:100%;border-radius:1.5px;background:var(--accent)}
+.gap{height:11px}
+.new{outline:1.5px dashed color-mix(in srgb,var(--accent) 70%,transparent);outline-offset:3px}
+.ofoot{position:absolute;left:0;top:407px;width:720px;border-top:1px solid var(--div)}
+/* install */
+.ring{position:absolute;left:44px;top:96px;width:132px;height:132px}
+.pct{position:absolute;left:44px;top:96px;width:132px;height:132px;display:flex;align-items:baseline;justify-content:center;padding-top:42px}
+.pct b{font-size:30px;font-weight:600;line-height:42px}
+.pct span{font-size:14px;font-weight:500;color:var(--t2)}
+.steps{position:absolute;left:44px;top:250px;width:296px}
+.stp{position:relative;height:26px;padding-left:26px;line-height:26px;font-size:12.5px;color:var(--t3)}
+.stp.ok{color:var(--t2)}
+.stp.run{color:var(--text)}
+.stp .d{position:absolute;left:0;top:5px;width:16px;height:16px;border-radius:50%;border:1.5px solid currentColor}
+.stp.ok .d{background:var(--success);border-color:var(--success);color:#fff;display:grid;place-items:center}
+.stp.run .d{border-color:var(--accent);border-top-color:transparent;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.stp small{position:absolute;right:0;top:0;font-size:11px;color:var(--t3)}
+.panel{position:absolute;left:360px;top:58px;width:336px;height:360px;display:flex;flex-direction:column;padding:22px 22px 26px;border-radius:10px;background:var(--card);border:1px solid var(--stroke)}
+.slide{flex:1;display:flex;flex-direction:column;min-height:0;animation:sfade .5s ease}
+@keyframes sfade{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+.art{position:relative;flex:1;min-height:0;display:flex;flex-direction:column;gap:6px;padding:12px;border-radius:8px;border:1px solid var(--stroke);background:linear-gradient(to bottom right,color-mix(in srgb,var(--accent) 20%,transparent),transparent 70%);overflow:hidden}
+.art .r{height:12px;border-radius:3px;background:var(--cards);flex:none}
+.art .r.h{background:color-mix(in srgb,var(--accent) 45%,transparent)}
+.sbox{display:flex;align-items:center;gap:6px;height:22px;padding:0 6px;border-radius:5px;background:var(--input);border:1px solid var(--stroke);font-size:10px;color:var(--t2);margin-bottom:4px;flex:none}
+.caret{width:1px;height:11px;background:var(--text);animation:blink 1s steps(2) infinite}
+@keyframes blink{50%{opacity:0}}
+.two{flex:1;display:grid;grid-template-columns:1fr 1fr;gap:6px;min-height:0}
+.two>div{display:flex;flex-direction:column;gap:6px}
+.pv{border-radius:5px;background:linear-gradient(to bottom right,rgba(245,210,58,.35),rgba(123,131,240,.35))}
+.bub{align-self:flex-end;max-width:72%;padding:3px 8px;border-radius:8px 8px 2px 8px;background:var(--accent);color:var(--acct);font-size:10px;line-height:16px;flex:none}
+.rep{display:flex;flex-direction:column;gap:6px;padding:8px;border-radius:8px 8px 8px 2px;background:var(--cards);flex:none}
+.rep .ln{display:flex;align-items:center;gap:6px;font-size:10px;color:var(--t2)}
+.rep .ok{display:grid;place-items:center;width:12px;height:12px;border-radius:50%;background:var(--success);color:#fff}
+.mc{display:flex;gap:4px;flex-wrap:wrap}
+.mc span{height:14px;padding:0 6px;border-radius:7px;background:color-mix(in srgb,var(--accent) 18%,transparent);color:var(--accent);font-size:9px;line-height:14px}
+.undo{font-size:9.5px;color:var(--t3)}
+.undo b{color:var(--accent);font-weight:600}
+.tray{flex:1;position:relative;border-radius:7px;border:1.5px dashed color-mix(in srgb,var(--accent) 55%,transparent);min-height:0}
+.tray i{position:absolute;width:46%;height:20px;border-radius:5px;background:var(--cards);border:1px solid var(--stroke);box-shadow:0 2px 6px rgba(0,0,0,.08)}
+.tags{display:flex;flex-direction:column;gap:7px}
+.tags div{display:flex;align-items:center;gap:7px}
+.tags u{width:8px;height:8px;border-radius:50%;flex:none}
+.tags .r{flex:1}
+.stt{margin-top:14px;display:flex;align-items:center;gap:6px;font-size:15px;font-weight:600;line-height:20px}
+.stx{margin-top:4px;font-size:12.5px;color:var(--t2);line-height:19px;min-height:57px}
+.dots{position:absolute;right:16px;bottom:12px;display:flex;gap:5px}
+.dots button{width:5px;height:5px;border-radius:2.5px;background:var(--t3)}
+.dots button.on{width:14px;background:var(--accent)}
+.file{position:absolute;left:44px;top:428px;width:420px;font-size:12px;color:var(--t3);line-height:20px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* done */
+.dwrap{position:absolute;left:0;top:40px;width:720px;height:428px;display:flex;flex-direction:column;align-items:center;justify-content:center;padding-bottom:12px}
+.chk{width:84px;height:84px}
+.chk circle{stroke-dasharray:246;stroke-dashoffset:246;animation:draw .58s cubic-bezier(.22,.61,.36,1) forwards}
+.chk path{stroke-dasharray:48;stroke-dashoffset:48;animation:draw .4s .5s ease-out forwards}
+@keyframes draw{to{stroke-dashoffset:0}}
+.dt{margin-top:18px;font-size:28px;font-weight:600;line-height:36px}
+.ds{margin-top:8px;width:420px;text-align:center;font-size:13.5px;color:var(--t2);line-height:21px}
+.pills{display:flex;flex-wrap:wrap;justify-content:center;gap:6px;margin-top:16px;max-width:660px}
+.pill{display:flex;align-items:center;gap:6px;height:24px;padding:0 10px 0 10px;border-radius:12px;background:var(--card);border:1px solid var(--stroke);font-size:11.5px;color:var(--t2)}
+.pill i{width:6px;height:6px;border-radius:50%;background:var(--success)}
+.dbt{display:flex;gap:8px;margin-top:24px}
+.dbt .bt{position:static}
+/* dialog */
+.scrim{position:absolute;inset:40px 0 0;background:var(--scrim);display:grid;place-items:center;z-index:5}
+.dlg{width:360px;padding:22px 24px 18px;border-radius:8px;background:var(--mica2);border:1px solid var(--stroke);box-shadow:var(--shadow)}
+.dlg h4{margin:0 0 6px;font-size:16px;font-weight:600}
+.dlg p{margin:0 0 18px;color:var(--t2);font-size:12.5px}
+.dlg .bb{display:flex;gap:8px;justify-content:flex-end}
+.dlg .bt{position:static}
+.notes{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:18px 28px;margin-top:6px}
+.nt{border-top:1px solid var(--div);padding-top:10px}
+.nt h3{margin:0 0 4px;font-size:13px}
+.nt p{margin:0;max-width:52ch;color:var(--t2)}
+.land{max-width:100ch;margin:0;color:var(--t2)}
+.land b{color:var(--text)}
+.mono{font-family:'Cascadia Mono',Consolas,monospace;font-size:12px}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}.chk circle,.chk path{stroke-dashoffset:0}}
+</style>
+</head>
+<body>
+<div class='page'>
+<header class='ph'>
+<div class='sp'><h1>Pulse 安装程序</h1><p class='lede'>保持现有安装界面不变，只加两处：「自定义安装」里新增「全局搜索」和「AI 助手」两个开关（虚线框标出）；安装时的功能介绍从 3 条增加到 6 条，AI 助手排第一。宽屏按 125% 显示。</p></div>
+<button class='tgb' id='theme' type='button'></button>
+</header>
+<div class='srow'><span class='sl'>示例页面</span><div class='chips' id='jump'></div></div>
+<div class='stage'><div class='win' id='win'>
+<div class='tbar'><img id='logoS' alt=''><span>Pulse 安装程序</span><button class='wbtn' style='left:628px' type='button' aria-label='最小化'><svg viewBox='0 0 16 16' width='10' height='10' stroke='currentColor' fill='none'><path d='M3 8h10'/></svg></button><button class='wbtn x' style='left:674px' type='button' data-a='close' aria-label='关闭'><svg viewBox='0 0 16 16' width='10' height='10' stroke='currentColor' fill='none'><path d='M3 3l10 10M13 3L3 13'/></svg></button></div>
+<div class='pg' id='pg'></div>
+<div class='scrim' id='dlg' hidden></div>
+</div></div>
+<section class='notes'>
+<div class='nt'><h3>新增两个开关</h3><p>「搜索与索引」里加「全局搜索」：在任何程序里连按两次 Ctrl 呼出。新增「AI」一组，只有一个「AI 助手」开关：按 Ctrl+J 呼出。两项默认开启，装好即可用；模型服务和 Key 仍在 Pulse 里设置。</p></div>
+<div class='nt'><h3>功能介绍增加到 6 条</h3><p>安装进度右侧的介绍：AI 助手（新，排第一）、全盘搜索、空格键快速预览、双栏与标签页、临时暂存托盘、颜色标签。每 3.2 秒换一条，点下方圆点可切换。</p></div>
+<div class='nt'><h3>完成页多两项状态</h3><p>开启的话，完成页的状态胶囊会多出「全局搜索已开启」和「AI 助手 · Ctrl+J」。欢迎页、安装步骤和其他内容都不变。</p></div>
+</section>
+<p class='land'><b>落地改动</b>：<span class='mono'>setup_options.h</span> 的 Tasks 增加 <span class='mono'>global_search</span> 和 <span class='mono'>ai_assistant</span>，/TASKS 名称为 <span class='mono'>globalsearch</span>、<span class='mono'>aiassistant</span>，安装后写入 Pulse 的首启设置；<span class='mono'>setup_ui.cpp</span> 的 PaintOptions 增加两张卡片、PaintInstall 的介绍从 3 条改为 6 条并加三种示意图、PaintDone 增加两枚状态；新文字放进 <span class='mono'>setup_strings.cpp</span> 的简体、繁体、英文三列。</p>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const LOGO='data:image/svg+xml,'+encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="10 14 236 236"><defs><path id="o" d="M16 60A24 24 0 0 1 40 36H92C108 36 120 44 124 60H216A24 24 0 0 1 240 84V200A28 28 0 0 1 212 228H44A28 28 0 0 1 16 200Z"/><clipPath id="s"><use href="#o"/></clipPath><linearGradient id="b" x1="0" y1="36" x2="0" y2="228" gradientUnits="userSpaceOnUse"><stop stop-color="#2b2f86"/><stop offset="1" stop-color="#120f52"/></linearGradient><linearGradient id="f" x1="16" y1="70" x2="210" y2="240" gradientUnits="userSpaceOnUse"><stop stop-color="#c3c0ff"/><stop offset=".48" stop-color="#8079f4"/><stop offset="1" stop-color="#4b3fc6"/></linearGradient><linearGradient id="h" x1="0" y1="72" x2="0" y2="170" gradientUnits="userSpaceOnUse"><stop stop-color="#fff" stop-opacity=".30"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient><linearGradient id="d" x1="120" y1="80" x2="236" y2="226" gradientUnits="userSpaceOnUse"><stop stop-color="#8c84f8"/><stop offset="1" stop-color="#4a3fc4"/></linearGradient><linearGradient id="r" x1="0" y1="72" x2="0" y2="225" gradientUnits="userSpaceOnUse"><stop stop-color="#fff" stop-opacity=".55"/><stop offset=".72" stop-color="#fff" stop-opacity=".55"/><stop offset=".87" stop-color="#fff" stop-opacity=".36"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient><filter id="w" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="7"/></filter><path id="l" d="M0 0H92V30C110 30 120 44 124 60C126 68 127 70 129 80L147 169C150 187 154 207 160 228L170 256H0Z"/></defs><g clip-path="url(#s)"><path d="M0 0H256V256H0Z" fill="url(#b)"/><path d="M96 82L128 72C150 68 170 80 190 106L228 158C236 169 240 178 240 188H260V256H120Z" transform="translate(-3 -6)" fill="#120f52" opacity=".5" filter="url(#w)"/><path d="M96 82L128 72C150 68 170 80 190 106L228 158C236 169 240 178 240 188H260V256H120Z" fill="url(#d)"/><path d="M128 72C150 68 170 80 190 106L228 158C236 169 240 178 240 188V200A28 28 0 0 1 212 228" fill="none" stroke="url(#r)" stroke-width="1" stroke-linecap="round"/><use href="#l" transform="translate(6 0)" fill="#120f52" opacity=".45" filter="url(#w)"/><use href="#l" fill="url(#f)"/><use href="#l" fill="url(#h)"/></g></svg>`);
+const sv=(d,s,w)=>`<svg viewBox='0 0 20 20' width='${s||20}' height='${s||20}' fill='none' stroke='currentColor' stroke-width='${w||1.3}' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'>${d}</svg>`;
+const IC={
+folder:`<path d='M2.5 14.5V5.5L4 4h3.6l1.6 1.8H16l1.5 1.5v7.2L16 16H4z'/>`,search:`<circle cx='8.5' cy='8.5' r='5.5'/><path d='M12.6 12.6 17 17'/>`,
+db:`<ellipse cx='10' cy='5' rx='6' ry='2.2'/><path d='M4 5v10M16 5v10M4 10a6 2.2 0 0 0 12 0M4 15a6 2.2 0 0 0 12 0'/>`,power:`<path d='M10 2.5v7M5.6 5.6a6 6 0 1 0 8.8 0'/>`,
+mon:`<rect x='2.5' y='3.5' width='15' height='10.5' rx='1.5'/><path d='M7 17h6M10 14v3'/>`,
+kb:`<rect x='2' y='5' width='16' height='10' rx='1.6'/><path d='M5 8h.01M8 8h.01M11 8h.01M14 8h.01M6.5 11.8h7'/>`,
+spark:`<path d='M9 2.5l1.7 4.6 4.6 1.7-4.6 1.7L9 15.1l-1.7-4.6-4.6-1.7 4.6-1.7z'/><path d='M15.5 13l.6 1.6 1.6.6-1.6.6-.6 1.6-.6-1.6-1.6-.6 1.6-.6z'/>`,
+gear:`<circle cx='7' cy='7' r='2'/><path d='M7 .8v1.8M7 11.4v1.8M.8 7h1.8M11.4 7h1.8M2.6 2.6l1.3 1.3M10.1 10.1l1.3 1.3M11.4 2.6l-1.3 1.3M3.9 10.1l-1.3 1.3'/>`,
+back:`<path d='M9 1.5 3.5 7 9 12.5'/>`,chk:`<path d='M4.5 9.5l3 3 6-6.5'/>`};
+const S={page:'welcome',agree:true,flash:false,t:{index:true,global:true,ai:true,startup:false,desktop:false},p:0,shown:0,step:0,slide:0,timer:null,t0:0,frozen:false,anim:false};
+const card=(k,icon,title,sub,opt)=>{opt=opt||{};const on=S.t[k];
+ return `<div class='card${opt.f?' f':''}${opt.dim?' dim':''}${opt.isNew?' new':''}'><span class='ic'>${sv(IC[icon])}</span><div class='t1'>${title}${opt.badge?`<span class='bdg'>${opt.badge}</span>`:''}</div><div class='t2'>${sub}</div>${opt.field?opt.field:`<span class='tgl'>${on?'开':'关'}</span><button class='tg${on?' on':''}' type='button' role='switch' aria-checked='${on}' data-tg='${k}' aria-label='${title}'></button>`}</div>`};
+const field=(path,w,dis)=>`<div class='fld' style='left:${580-6-w}px;width:${w}px'>${path}</div><button class='bt nor brw' type='button' ${dis?'disabled':''}>浏览…</button>`;
+function welcome(){return `<div class='glow'><i class='wash' style='top:-20px'></i><i class='gold'></i><i class='orb'></i><i class='orb2'></i><i class='core' style='left:16px;top:-5px'></i></div><img class='logo' src='${LOGO}' alt=''><div class='name'><b>Pulse</b><span class='ver'>1.0.58</span></div><div class='tag'>为 Windows 打造的现代文件管理器 —— 浏览、搜索、整理，更顺手。</div><button class='bt pri inst' type='button' data-a='install'>立即安装</button><div class='path'>安装到 <em>C:\\Program Files\\Pulse</em> · 需要 28 MB</div><div class='agree'><button class='cb${S.agree?' on':''}${S.flash&&!S.agree?' flash':''}' type='button' role='checkbox' aria-checked='${S.agree}' data-a='agree' aria-label='我已阅读并同意许可协议'>${S.agree?sv(IC.chk,14,1.8):''}</button><span data-a='agree'>我已阅读并同意</span><button class='lic' type='button' data-a='lic'>许可协议</button></div><button class='bt gh' style='right:20px;top:420px;height:32px;font-size:13px' type='button' data-a='options'>${sv(IC.gear,14)}自定义安装</button>`}
+function options(){const t=S.t;
+ return `<button class='back' type='button' data-a='welcome' aria-label='返回'>${sv(IC.back,14,1.5)}</button><div class='otitle'>自定义安装</div><div class='view' id='view'>
+ <div class='sec'>安装位置</div>${card('app','folder','程序目录','升级时会沿用当前目录',{f:1,field:field('C:\\Program Files\\Pulse',260)})}
+ <div class='need'><span style='left:2px'>需要 28 MB</span><span class='r'>C: 可用 362 GB</span><i><b style='width:24%'></b></i></div>
+ <div class='sec'>搜索与索引</div>${card('index','search','启用全盘文件索引','安装 PulseIndex 后台服务，秒级搜索全部 NTFS 磁盘',{badge:'推荐'})}${card('idir','db','索引位置','服务器文件夹可稍后在设置中添加',{f:1,dim:!t.index,field:field('C:\\ProgramData\\Pulse\\Index',220,!t.index)})}${card('global','kb','全局搜索','在任何程序里连按两次 Ctrl 呼出搜索',{isNew:1})}<div class='gap'></div>
+ <div class='sec'>AI</div>${card('ai','spark','AI 助手','按 Ctrl+J 呼出，帮你找文件、整理文件夹和批量重命名',{badge:'新',isNew:1})}<div class='gap'></div>
+ <div class='sec'>其他</div>${card('startup','power','开机自动启动 Pulse','登录 Windows 后在托盘中待命')}${card('desktop','mon','创建桌面快捷方式','同时会添加到开始菜单')}
+ </div><div class='ofoot'></div><button class='bt nor' style='left:506px;top:419px' type='button' data-a='welcome'>返回</button><button class='bt pri' style='left:572px;top:419px;min-width:120px' type='button' data-a='install'>立即安装</button>`}
+const SLIDES=[
+ {title:'AI 助手，说一句就办好',badge:'新',text:'按 Ctrl+J 呼出。找文件、整理文件夹、批量重命名、清理重复文件都能交给它；删除前一定先问你，改动都能撤销。',art:()=>`<div class='bub'>把下载文件夹按类型整理</div><div class='rep'><div class='ln'><span class='ok'>${sv(IC.chk,10,2)}</span>已整理 128 个文件，放进 6 个文件夹</div><div class='mc'><span>文档 42</span><span>图片 51</span><span>安装包 18</span><span>压缩包 9</span></div><div class='undo'>不满意？可以<b>撤销</b></div></div><div class='r' style='width:86%'></div><div class='r' style='width:64%'></div>`},
+ {title:'全盘搜索，快到不用等',text:'基于 NTFS 主文件表的实时索引，输入即出结果，支持拼音与内容搜索。',art:()=>`<div class='sbox'>${sv(IC.search,12)}季度报告<span class='caret'></span></div>${[[1,1],[1,0],[.8,0],[.9,0],[.6,0]].map(([w,h])=>`<div class='r${h?' h':''}' style='width:${w*100}%'></div>`).join('')}`},
+ {title:'空格键快速预览',text:'图片、视频、PDF、Office 与代码文件，无需打开程序就能看清内容。',art:()=>`<div class='two'><div>${[1,.9,1,.7,.85].map(f=>`<div class='r${f===.9?' h':''}' style='width:${f*100}%'></div>`).join('')}</div><div class='pv'></div></div>`},
+ {title:'双栏与标签页',text:'拖放、批量重命名、管理员授权操作，整理文件一气呵成。',art:()=>`<div class='two'>${[0,1].map(c=>`<div><div class='r' style='height:14px;margin-bottom:4px'></div>${[0,1,2,3,4].map(r=>`<div class='r${(c===0&&r===1)||(c===1&&r===3)?' h':''}' style='width:${r%2?75:100}%'></div>`).join('')}</div>`).join('')}</div>`},
+ {title:'临时暂存托盘',text:'把散落在各处的文件先拖进托盘，凑齐后一次复制或移动到目标位置。',art:()=>`<div class='tray'><i style='left:10%;top:16%;transform:rotate(-4deg)'></i><i style='left:30%;top:34%;transform:rotate(3deg)'></i><i style='left:18%;top:56%'></i></div><div class='r h' style='width:58%'></div><div class='r' style='width:80%'></div>`},
+ {title:'颜色标签',text:'给文件和文件夹打上颜色标签，在侧栏点一下就能找回同一类文件。',art:()=>`<div class='tags'>${[['#EF4444',.9],['#F59E0B',.7],['#22C55E',.85],['#3B82F6',.6],['#A855F7',.75],['#EF4444',.5]].map(([c,w])=>`<div><u style='background:${c}'></u><div class='r' style='flex:none;width:${w*80}%'></div></div>`).join('')}</div>`}];
+function steps(){return [['解压程序文件'],['设置文件关联与快捷方式'],S.t.index&&['注册 PulseIndex 服务'],['缓存右键菜单项'],['完成']].filter(Boolean)}
+function install(){const st=steps(),cur=S.step,sl=SLIDES[S.slide],C=2*Math.PI*58;
+ return `<svg class='ring' viewBox='0 0 132 132' aria-hidden='true'><defs><linearGradient id='rg' x1='0' y1='0' x2='132' y2='132' gradientUnits='userSpaceOnUse'><stop style='stop-color:var(--accent)'/><stop offset='1' stop-color='#38BDF8'/></linearGradient></defs><circle cx='66' cy='66' r='58' fill='none' style='stroke:var(--div)' stroke-width='6'/><circle id='arc' cx='66' cy='66' r='58' fill='none' stroke='url(#rg)' stroke-width='6' stroke-linecap='round' stroke-dasharray='${C}' stroke-dashoffset='${C*(1-S.shown)}' transform='rotate(-90 66 66)'/></svg><div class='pct' role='progressbar' aria-valuenow='${Math.round(S.shown*100)}' aria-valuemin='0' aria-valuemax='100'><b id='pctn'>${Math.floor(S.shown*100+.001)}</b><span>%</span></div>
+ <div class='steps' id='steps'>${stepsHtml(st,cur)}</div>
+ <div class='panel'><div class='slide' id='slide'>${slideHtml(sl)}</div><div class='dots'>${SLIDES.map((_,i)=>`<button type='button' class='${i===S.slide?'on':''}' data-dot='${i}' aria-label='第 ${i+1} 条介绍'></button>`).join('')}</div></div>
+ <div class='file' id='file'>${cur===0?'C:\\Program Files\\Pulse\\Pulse.Preview.exe':''}</div><button class='bt gh' style='right:20px;top:424px;height:30px;font-size:12px' type='button' data-a='cancel'>取消</button>`}
+const stepsHtml=(st,cur)=>st.map((s,i)=>`<div class='stp${i<cur?' ok':i===cur?' run':''}'><span class='d'>${i<cur?sv(IC.chk,12,2):''}</span>${s[0]}${i===cur&&i===0?`<small>${(S.shown/.8*28).toFixed(1)} / 28 MB</small>`:''}</div>`).join('');
+const slideHtml=sl=>`<div class='art'>${sl.art()}</div><div class='stt'>${sl.title}${sl.badge?`<span class='bdg'>${sl.badge}</span>`:''}</div><div class='stx'>${sl.text}</div>`;
+function done(){const t=S.t,pills=[];
+ if(t.index)pills.push('索引服务运行中');if(t.global)pills.push('全局搜索已开启');if(t.ai)pills.push('AI 助手 · Ctrl+J');pills.push('右键菜单已注册');if(t.startup)pills.push('开机启动');
+ return `<div class='dwrap'><svg class='chk' viewBox='0 0 84 84' aria-hidden='true'><circle cx='42' cy='42' r='39' fill='none' style='stroke:var(--success)' stroke-width='3' transform='rotate(-90 42 42)'/><path d='M26 43l11 11 22-23' fill='none' style='stroke:var(--success)' stroke-width='4' stroke-linecap='round' stroke-linejoin='round'/></svg><div class='dt'>Pulse 已准备就绪</div><div class='ds'>${t.index?'安装完成。索引服务已在后台启动，首次建立索引通常只需几十秒。':'安装完成。随时可以在设置中启用全盘索引。'}</div><div class='pills'>${pills.map(p=>`<span class='pill'><i></i>${p}</span>`).join('')}</div><div class='dbt'><button class='bt nor' type='button' data-a='welcome'>关闭</button><button class='bt pri' style='min-width:120px' type='button' data-a='welcome'>启动 Pulse</button></div></div>`}
+function render(anim){
+ $('jump').innerHTML=[['welcome','欢迎'],['options','自定义安装'],['install','正在安装'],['done','完成']].map(([k,l])=>`<button class='st${S.page===k?' on':''}' type='button' data-page='${k}' aria-pressed='${S.page===k}'>${l}</button>`).join('');
+ const r=document.documentElement,dark=r.dataset.theme?r.dataset.theme==='dark':matchMedia('(prefers-color-scheme: dark)').matches;
+ $('theme').textContent=dark?'切换到浅色':'切换到深色';
+ const pg=$('pg'),sc=$('view')?$('view').scrollTop:0;
+ pg.className='pg'+(anim?' in':'');
+ pg.innerHTML=`<div class='layer'>${{welcome,options,install,done}[S.page]()}</div>`;
+ if(!anim&&$('view'))$('view').scrollTop=sc}
+function updateInstall(){const st=steps(),C=2*Math.PI*58;
+ const a=$('arc');if(!a)return;a.setAttribute('stroke-dashoffset',C*(1-S.shown));
+ $('pctn').textContent=Math.floor(S.shown*100+.001);$('steps').innerHTML=stepsHtml(st,S.step);
+ $('file').textContent=S.step===0?'C:\\Program Files\\Pulse\\'+['Pulse.exe','Pulse.Preview.exe','Pulse.Index.exe','Pulse.Content.exe','lumatext.dll'][Math.floor(S.shown*40)%5]:''}
+function setSlide(i){S.slide=i;S.slideAt=Date.now();const s=$('slide');if(!s)return;s.outerHTML=`<div class='slide' id='slide'>${slideHtml(SLIDES[i])}</div>`;document.querySelectorAll('[data-dot]').forEach(d=>d.classList.toggle('on',+d.dataset.dot===i))}
+function startInstall(){clearInterval(S.timer);S.shown=0;S.step=0;S.slide=0;S.slideAt=Date.now();S.t0=Date.now();S.page='install';render(true);
+ const st=steps(),idx=n=>st.findIndex(s=>s[0]===n);
+ S.timer=setInterval(()=>{if(!$('dlg').hidden)return;const e=Date.now()-S.t0;let target,step;
+  if(e<3600){target=.8*e/3600;step=0}else if(e<4400){target=.88;step=idx('设置文件关联与快捷方式')}else if(e<5200&&S.t.index){target=.92;step=idx('注册 PulseIndex 服务')}else if(e<6000){target=.96;step=idx('缓存右键菜单项')}else{target=1;step=st.length}
+  S.shown+=(target-S.shown)*.18;if(target-S.shown<.002)S.shown=target;S.step=step;
+  if(Date.now()-S.slideAt>3200)setSlide((S.slide+1)%SLIDES.length);
+  updateInstall();
+  if(S.shown>=.999&&e>6600){clearInterval(S.timer);S.page='done';render(true)}},50)}
+function dialog(show){const d=$('dlg');if(!show){d.hidden=true;d.innerHTML='';return}
+ d.innerHTML=`<div class='dlg' role='dialog' aria-modal='true' aria-labelledby='dt'><h4 id='dt'>要取消安装吗？</h4><p>已复制的文件会被清理，电脑不会留下任何改动。</p><div class='bb'><button class='bt pri' type='button' data-a='keep'>继续安装</button><button class='bt nor' type='button' data-a='abort'>取消安装</button></div></div>`;d.hidden=false;d.querySelector('.pri').focus()}
+document.addEventListener('click',e=>{const t=e.target;let b;
+ if(b=t.closest('[data-page]')){const p=b.dataset.page;clearInterval(S.timer);dialog(false);if(p==='install')startInstall();else{S.page=p;render(true)}return}
+ if(t.closest('#theme')){const r=document.documentElement,dark=r.dataset.theme?r.dataset.theme==='dark':matchMedia('(prefers-color-scheme: dark)').matches;r.dataset.theme=dark?'light':'dark';render(false);return}
+ if(b=t.closest('[data-tg]')){const k=b.dataset.tg;S.t[k]=!S.t[k];render(false);const n=document.querySelector(`[data-tg='${k}']`);if(n)n.focus();return}
+ if(b=t.closest('[data-dot]')){setSlide(+b.dataset.dot);return}
+ if(!(b=t.closest('[data-a]')))return;
+ switch(b.dataset.a){
+  case 'agree':S.agree=!S.agree;S.flash=false;render(false);break;
+  case 'lic':break;
+  case 'options':S.page='options';render(true);break;
+  case 'welcome':clearInterval(S.timer);S.page='welcome';render(true);break;
+  case 'install':if(!S.agree){S.flash=true;render(false);setTimeout(()=>{S.flash=false;if(S.page==='welcome')render(false)},900);break}startInstall();break;
+  case 'cancel':case 'close':if(S.page==='install')dialog(true);break;
+  case 'keep':dialog(false);break;
+  case 'abort':dialog(false);clearInterval(S.timer);S.page='welcome';render(true);break}});
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!$('dlg').hidden)dialog(false)});
+$('logoS').src=LOGO;
+(function(){const p=new URLSearchParams(location.search.slice(1)||location.hash.slice(1));
+ if(p.get('theme'))document.documentElement.dataset.theme=p.get('theme');
+ const pg=p.get('page');
+ if(pg==='install'&&p.get('p')){S.page='install';S.shown=+p.get('p');const st=steps();S.step=Math.min(st.length-1,Math.floor(S.shown*st.length));S.slide=+(p.get('slide')||0);render(false);return}
+ if(pg==='install'){startInstall();return}
+ S.page=['options','done'].includes(pg)?pg:'welcome';render(false);if($('view')&&p.get('scroll'))$('view').scrollTop=+p.get('scroll')})();
+</script>
+</body>
+</html>

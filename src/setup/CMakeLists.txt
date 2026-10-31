@@ -44,9 +44,10 @@ set_source_files_properties(setup.rc PROPERTIES OBJECT_DEPENDS ${CMAKE_CURRENT_B
 add_executable(pulse_setup WIN32
     setup_main.cpp setup_engine.cpp setup_common.cpp setup_log.cpp setup_options.cpp setup_process.cpp
     setup_registry.cpp setup_service.cpp setup_shortcut.cpp setup_transaction.cpp setup_strings.cpp
+    start_pin_registration.cpp
     setup_ui.cpp setup_uninstall.cpp setup.rc setup.manifest ${CMAKE_CURRENT_BINARY_DIR}/setup.ico)
 target_include_directories(pulse_setup PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
-target_link_libraries(pulse_setup PRIVATE pulse_setup_payload shell32 ole32 uuid advapi32 user32 gdi32 comctl32
+target_link_libraries(pulse_setup PRIVATE pulse_dialog_auto_registration pulse_setup_payload shell32 ole32 uuid advapi32 user32 gdi32 comctl32
     d2d1 dwrite windowscodecs dwmapi)
 target_compile_definitions(pulse_setup PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_options(pulse_setup PRIVATE /MANIFESTUAC:level='asInvoker')
@@ -61,3 +62,9 @@ foreach(setup_target pulse_setup_p0 pulse_setup)
     set_target_properties(${setup_target} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
     target_link_options(${setup_target} PRIVATE $<$<CONFIG:Release>:/OPT:REF /OPT:ICF>)
 endforeach()
+
+add_executable(pulse_setup_options_test setup_options_test.cpp setup_options.cpp setup_common.cpp)
+target_link_libraries(pulse_setup_options_test PRIVATE shell32 ole32 advapi32 user32)
+target_compile_definitions(pulse_setup_options_test PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(pulse_setup_options_test PRIVATE /W4)
+set_target_properties(pulse_setup_options_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})

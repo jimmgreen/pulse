@@ -572,7 +572,7 @@ SettingsHomeFolderPick	IDS_SETTINGS_HOME_FOLDER_PICK	2362	选择文件夹…	Cho
 SettingsHomeFolderTitle	IDS_SETTINGS_HOME_FOLDER_TITLE	2363	选择默认位置	Choose the default location	選擇預設位置
 SettingsStartupOpen	IDS_SETTINGS_STARTUP_OPEN	2364	启动时打开	When Pulse starts	啟動時開啟
 SettingsStartupOpenDesc	IDS_SETTINGS_STARTUP_OPEN_DESC	2365	恢复上次关闭时的标签页，或只打开默认位置	Reopen the tabs from last time, or only the default location	恢復上次關閉時的分頁，或只開啟預設位置
-StartupOpenLastTabs	IDS_STARTUP_OPEN_LAST_TABS	2366	上次的标签页	Last tabs	上次的分頁
+StartupOpenLastTabs	IDS_STARTUP_OPEN_LAST_TABS	2366	上次的标签页	Last tabs	
 OpenDefaultLocation	IDS_OPEN_DEFAULT_LOCATION	2367	默认位置	Default location	預設位置
 SettingsNewTabOpen	IDS_SETTINGS_NEW_TAB_OPEN	2368	新标签页打开	New tabs open	新分頁開啟
 SettingsNewTabOpenDesc	IDS_SETTINGS_NEW_TAB_OPEN_DESC	2369	新建标签页时显示当前文件夹，或默认位置	Show the current folder in a new tab, or the default location	新增分頁時顯示目前資料夾，或預設位置
@@ -4622,3 +4622,241 @@ AsstThinkNone	IDS_ASST_THINK_NONE	5892	{model} 不支持思考，所以没有思
 ProvMimo	IDS_PROV_MIMO	5893	小米 MiMo	Xiaomi MiMo	小米 MiMo
 ProvSubMimo	IDS_PROV_SUB_MIMO	5894	小米开放平台	Xiaomi MiMo platform	小米開放平台
 AsstUrlMimo	IDS_ASST_URL_MIMO	5895	{url}（默认）· tp- 开头的 Token Plan Key 会自动改用套餐地址	{url} (default) · Token Plan keys (tp-) use their own address automatically	{url}（預設）· tp- 開頭的 Token Plan Key 會自動改用套餐位址
+WindowManage	IDS_WINDOW_MANAGE	5896	窗口管理	Window management	
+ArrangeSideBySide	IDS_ARRANGE_SIDE_BY_SIDE	5897	左右并排	Side by side	
+ArrangeStacked	IDS_ARRANGE_STACKED	5898	上下堆叠	Stacked	
+ArrangeColumns	IDS_ARRANGE_COLUMNS	5899	三列排列	Three columns	
+ArrangeTile	IDS_ARRANGE_TILE	5900	平铺	Tile	
+ArrangeMain	IDS_ARRANGE_MAIN	5901	主次排列	Main and secondary	
+ArrangeCascade	IDS_ARRANGE_CASCADE	5902	层叠	Cascade	
+ArrangeApplied	IDS_ARRANGE_APPLIED	5903	已排列窗口	Windows arranged	
+ArrangeUndo	IDS_ARRANGE_UNDO	5904	撤销排列	Undo arrangement	
+ArrangeUnavailable	IDS_ARRANGE_UNAVAILABLE	5905	当前窗口状态或屏幕空间不支持此排列。	The current windows or available screen space do not support this arrangement.	
+ArrangeHint	IDS_ARRANGE_HINT	5906	按住 Shift 排列所有显示器上的窗口	Hold Shift to arrange windows on all monitors	
+ArrangeSingleHint	IDS_ARRANGE_SINGLE_HINT	5907	单窗口：拆出相邻标签页	One window: detach an adjacent tab	
+ArrangeCount	IDS_ARRANGE_COUNT	5908	{windows} 个窗口 · {tabs} 个标签页	{windows} windows · {tabs} tabs	
+SettingsOpenPulseIcon	IDS_SETTINGS_OPEN_PULSE_ICON	5909	点击 Pulse 图标	Clicking the Pulse icon	
+SettingsNewWindowShows	IDS_SETTINGS_NEW_WINDOW_SHOWS	5910	新窗口显示	New windows show	
+SettingsSecOpenWindows	IDS_SETTINGS_SEC_OPEN_WINDOWS	5911	打开与多窗口	Opening and multiple windows	
+SettingsSecArrangeWindows	IDS_SETTINGS_SEC_ARRANGE_WINDOWS	5912	窗口排列	Window arrangement	
+SettingsArrangeMinimized	IDS_SETTINGS_ARRANGE_MINIMIZED	5913	包含最小化窗口	Include minimized windows	
+SettingsArrangeGap	IDS_SETTINGS_ARRANGE_GAP	5914	窗口间距	Window gap	
+OpenWindowActivate	IDS_OPEN_WINDOW_ACTIVATE	5915	激活已有窗口	Activate window	
+OpenWindowStartup	IDS_OPEN_WINDOW_STARTUP	5916	启动位置	Startup	
+OpenWindowThisPc	IDS_OPEN_WINDOW_THIS_PC	5917	此电脑	This PC	
+ArrangeGapNone	IDS_ARRANGE_GAP_NONE	5918	无间距	No gap	
+ArrangeGapSix	IDS_ARRANGE_GAP_SIX	5919	6 DIP	6 DIP	
+OpenBusyNewWindow	IDS_OPEN_BUSY_NEW_WINDOW	5920	当前窗口正在操作，已在新窗口打开	Opened in a new window because the current window is busy	
+IntegrationHandlerExplorer	IDS_INTEGRATION_HANDLER_EXPLORER	5921	Windows 资源管理器	Windows File Explorer	
+IntegrationHandlerPulse	IDS_INTEGRATION_HANDLER_PULSE	5922	Pulse	Pulse	Pulse
+SettingsOpenPulseIconDesc	IDS_SETTINGS_OPEN_PULSE_ICON_DESC	5923	选择再次打开 Pulse 时的行为	Choose what happens when Pulse is opened again	
+SettingsNewWindowShowsDesc	IDS_SETTINGS_NEW_WINDOW_SHOWS_DESC	5924	选择新窗口首先显示的位置	Choose the initial location for a new window	
+SettingsArrangeMinimizedDesc	IDS_SETTINGS_ARRANGE_MINIMIZED_DESC	5925	排列时还原并包含最小化窗口	Restore and include minimized windows when arranging	
+SettingsArrangeGapDesc	IDS_SETTINGS_ARRANGE_GAP_DESC	5926	设置排列后窗口之间的间距	Set the spacing between arranged windows	
+ArrangeSingleTabHint	IDS_ARRANGE_SINGLE_TAB_HINT	5927	仅一个标签页：复制当前文件夹	One tab: open a copy of the current folder	
+
+# External open queue status (no target paths in notifications)
+ExternalOpenWaitExpiredTitle	IDS_EXTERNAL_OPEN_WAIT_EXPIRED_TITLE	5928	打开请求等待超时	Open requests timed out	
+ExternalOpenWaitExpiredDetail	IDS_EXTERNAL_OPEN_WAIT_EXPIRED_DETAIL	5929	等待超时 {n} 个，请重试。	Timed out: {n}. Please retry.	
+ExternalOpenQueueFailedTitle	IDS_EXTERNAL_OPEN_QUEUE_FAILED_TITLE	5930	未能完成打开请求	Could not complete open requests	
+ExternalOpenQueueFailedDetail	IDS_EXTERNAL_OPEN_QUEUE_FAILED_DETAIL	5931	处理失败 {n} 个，请重试。	Could not process: {n}. Please retry.	
+ExternalOpenMixedFailureDetail	IDS_EXTERNAL_OPEN_MIXED_FAILURE_DETAIL	5932	超时 {t}，失败 {f}。请重试。	Timed out: {t}; failed: {f}. Retry.	
+ThirdPartyDialogsExperimental	IDS_THIRD_PARTY_DIALOGS_EXPERIMENTAL	5933	第三方对话框（实验）	Third-party dialogs (experimental)	
+ThirdPartyDialogsDescription	IDS_THIRD_PARTY_DIALOGS_DESCRIPTION	5934	开启自动接入后，正常启动的应用也会尝试使用 Pulse 打开、保存窗口。当前支持本用户的 64 位标准接口，旧式、自绘及受限应用不覆盖。已运行的应用请先保存工作再重启。停用恢复原生，不关闭应用。启用期间请勿移动或删除组件包。也可在下方单独选择应用测试。	Automatic integration tries Pulse Open and Save in normally launched apps. Supports standard 64-bit interfaces for this user; legacy, custom and restricted dialogs are not covered. Save your work and restart running apps. Disabling restores native dialogs without closing apps. Keep the bundle in place while enabled. Individual app testing is also available below.	
+ThirdPartyDialogsBundle	IDS_THIRD_PARTY_DIALOGS_BUNDLE	5935	组件包	Component bundle	
+ThirdPartyDialogsApplication	IDS_THIRD_PARTY_DIALOGS_APPLICATION	5936	应用	Application	
+ThirdPartyDialogsChooseBundle	IDS_THIRD_PARTY_DIALOGS_CHOOSE_BUNDLE	5937	选择组件包文件夹	Choose bundle folder	
+ThirdPartyDialogsChooseApplication	IDS_THIRD_PARTY_DIALOGS_CHOOSE_APPLICATION	5938	选择应用	Choose application	
+ThirdPartyDialogsLaunch	IDS_THIRD_PARTY_DIALOGS_LAUNCH	5939	使用 Pulse 启动	Launch with Pulse	
+ThirdPartyDialogsRefresh	IDS_THIRD_PARTY_DIALOGS_REFRESH	5940	刷新状态	Refresh status	
+ThirdPartyDialogsDisable	IDS_THIRD_PARTY_DIALOGS_DISABLE	5941	停用	Disable	
+ThirdPartyDialogsNoBundle	IDS_THIRD_PARTY_DIALOGS_NO_BUNDLE	5942	尚未选择已验证的组件包	No verified bundle selected	
+ThirdPartyDialogsNoApplication	IDS_THIRD_PARTY_DIALOGS_NO_APPLICATION	5943	尚未选择应用	No application selected	
+ThirdPartyDialogsChooseHint	IDS_THIRD_PARTY_DIALOGS_CHOOSE_HINT	5944	选择组件包和应用后，再使用 Pulse 启动。	Choose a bundle and an application, then launch with Pulse.	
+ThirdPartyDialogsWorking	IDS_THIRD_PARTY_DIALOGS_WORKING	5945	正在处理…	Working…	
+ThirdPartyDialogsFailed	IDS_THIRD_PARTY_DIALOGS_FAILED	5946	未能完成操作，错误代码	Could not complete the operation. Error code	
+ThirdPartyDialogsStarted	IDS_THIRD_PARTY_DIALOGS_STARTED	5947	已启动，等待对话框	Started, waiting for a dialog	
+ThirdPartyDialogsBundleVerified	IDS_THIRD_PARTY_DIALOGS_BUNDLE_VERIFIED	5948	组件包已验证；启动时将再次检查。	Bundle verified; it will be checked again before launch.	
+ThirdPartyDialogsSession	IDS_THIRD_PARTY_DIALOGS_SESSION	5949	应用会话	Application session	
+ThirdPartyDialogsStatusUnknown	IDS_THIRD_PARTY_DIALOGS_STATUS_UNKNOWN	5950	无法确认会话状态，错误代码	Could not confirm session status. Error code	
+ThirdPartyDialogsDisabled	IDS_THIRD_PARTY_DIALOGS_DISABLED	5951	已停用	Disabled	
+ThirdPartyDialogsExited	IDS_THIRD_PARTY_DIALOGS_EXITED	5952	已退出	Exited	
+ThirdPartyDialogsNoSessions	IDS_THIRD_PARTY_DIALOGS_NO_SESSIONS	5953	尚无受管启动的会话。	No managed launch sessions yet.	
+ThirdPartyDialogsExecutableFilter	IDS_THIRD_PARTY_DIALOGS_EXECUTABLE_FILTER	5954	应用程序 (*.exe)	Applications (*.exe)	
+DialogAutoEnable	IDS_DIALOG_AUTO_0	5955	启用自动接入打开/保存（实验）	Enable automatic Open/Save (experimental)	
+DialogAutoDisable	IDS_DIALOG_AUTO_1	5956	停用自动接入	Disable automatic Open/Save	
+DialogAutoEnabled	IDS_DIALOG_AUTO_2	5957	自动接入已注册；重启应用后生效。	Automatic Open/Save registered; restart applications to apply.	
+DialogAutoDisabled	IDS_DIALOG_AUTO_3	5958	自动接入已停用。	Automatic Open/Save disabled.	
+DialogAutoConflict	IDS_DIALOG_AUTO_4	5959	自动接入注册冲突；未覆盖其他注册。	Automatic Open/Save registration conflict; other registration was preserved.	
+PickerBackToEdit	IDS_PICKER_BACK_TO_EDIT	5960	返回修改	Back to editing	返回修改
+PickerRenameSave	IDS_PICKER_RENAME_SAVE	5961	改名保存	Save with a new name	重新命名並儲存
+PickerPulseOpenPlaces	IDS_PICKER_PULSE_OPEN_PLACES	5962	在 Pulse 中打开	Open in Pulse	在 Pulse 中開啟
+PickerApplicationPlaces	IDS_PICKER_APPLICATION_PLACES	5963	程序提供的位置	Application locations	程式提供的位置
+StartupIntegrationLead	IDS_STARTUPINTEGRATIONLEAD	5964	决定 Pulse 何时启动，以及代替 Windows 的哪些部分。这些设置只对本机生效。	Choose when Pulse starts and which Windows features it replaces. These settings apply only to this PC.	
+StartupDialogsTitle	IDS_STARTUPDIALOGSTITLE	5965	打开和保存对话框	Open and save dialogs	
+StartupDialogsToggle	IDS_STARTUPDIALOGSTOGGLE	5966	用 Pulse 代替打开和保存对话框	Use Pulse for open and save dialogs	
+StartupDialogsDesc	IDS_STARTUPDIALOGSDESC	5967	其他软件调用受支持的标准文件对话框时，使用 Pulse 的快速访问、搜索和预览。	Use Pulse quick access, search and preview in supported standard file dialogs.	
+StartupDialogsScope	IDS_STARTUPDIALOGSSCOPE	5968	适用范围和使用须知	Scope and usage notes	
+StartupDialogsScopeBody	IDS_STARTUPDIALOGSSCOPEBODY	5969	支持当前组件架构的 Windows 标准 COM 打开、保存对话框。32 位、旧式接口及管理员程序需要对应入口；此开关不代表它们已全部接入。自绘对话框、受限应用和不支持的请求保留原界面。\n开启前已运行的软件，请保存工作后重新打开。仅影响当前用户；不会覆盖其他软件的入口。关闭后，后续请求恢复原生对话框。	Supports standard Windows COM file dialogs matching the installed components. 32-bit, legacy and elevated programs need their corresponding entry points; this switch does not connect them all. Custom, restricted and unsupported dialogs retain their original UI.\nSave your work and restart applications that were already running. Applies to the current user only and preserves other providers. Turning this off restores subsequent requests.	
+StartupDialogsOff	IDS_STARTUPDIALOGSOFF	5970	使用 Windows 对话框	Using Windows dialogs	
+StartupDialogsOn	IDS_STARTUPDIALOGSON	5971	使用 Pulse 对话框	Using Pulse dialogs	
+StartupDialogsChecking	IDS_STARTUPDIALOGSCHECKING	5972	正在检查组件和入口…	Checking components and registration…	
+StartupDialogsMissing	IDS_STARTUPDIALOGSMISSING	5973	组件缺失或校验失败。请修复安装后重试；尚未启用此功能。	Components are missing or invalid. Repair the installation and retry; this feature has not been enabled.	
+StartupDialogsFailed	IDS_STARTUPDIALOGSFAILED	5974	操作未完成。请重试或导出诊断；当前状态以实际入口为准。	The operation did not complete. Retry or export diagnostics; the actual registration determines the current state.	
+StartupDialogsConflict	IDS_STARTUPDIALOGSCONFLICT	5975	打开和保存对话框的入口已被其他组件占用。Pulse 不会覆盖它，请先关闭对应功能再重试。	Another component owns the open/save dialog entry. Pulse will not overwrite it. Turn off that feature before retrying.	
+StartupDialogsEnableTitle	IDS_STARTUPDIALOGSENABLETITLE	5976	开启 Pulse 打开和保存对话框？	Enable Pulse open and save dialogs?	
+StartupDialogsEnableConfirm	IDS_STARTUPDIALOGSENABLECONFIRM	5977	开启	Enable	
+StartupDialogsEnabledHint	IDS_STARTUPDIALOGSENABLEDHINT	5978	已开启。请保存工作后重新打开需要使用此功能的软件。	Enabled. Save your work and restart the applications you want to use with this feature.	
+StartupDiagnostics	IDS_STARTUPDIAGNOSTICS	5979	诊断报告	Diagnostic report	
+StartupDiagnosticsDesc	IDS_STARTUPDIAGNOSTICSDESC	5980	导出组件状态和错误码，不包含所选文件名、文件内容或原始日志。	Export component status and error codes, without selected filenames, file contents or raw logs.	
+StartupDiagnosticsExport	IDS_STARTUPDIAGNOSTICSEXPORT	5981	导出诊断	Export diagnostics	
+StartupDiagnosticsSaved	IDS_STARTUPDIAGNOSTICSSAVED	5982	诊断报告已保存：	Diagnostic report saved: 	
+StartupJumpSettings	IDS_STARTUPJUMPSETTINGS	5983	设置对话框跳转条	Configure the dialog jump bar	
+StartupJumpDesc	IDS_STARTUPJUMPDESC	5984	保留原生对话框时，也可快速跳到 Pulse 中打开的文件夹。	Jump to folders open in Pulse when the original Windows dialog is retained.	
+StartupRestoreSection	IDS_STARTUPRESTORESECTION	5985	恢复 Windows 默认	Restore Windows defaults	
+StartupRestoreTitle	IDS_STARTUPRESTORETITLE	5986	全部交还给 Windows	Return integrations to Windows	
+StartupRestoreDesc	IDS_STARTUPRESTOREDESC	5987	关闭文件夹接管、Pulse 打开和保存对话框以及资源管理器的 Pulse 标签菜单。开机自启和托盘设置保持不变。	Turn off folder takeover, Pulse file dialogs and the Explorer Pulse tags menu. Startup and tray settings stay unchanged.	
+StartupRestoreAction	IDS_STARTUPRESTOREACTION	5988	全部恢复	Restore all	
+StartupRestoreConfirm	IDS_STARTUPRESTORECONFIRM	5989	全部恢复 Windows 默认？	Restore all Windows integrations?	
+StartupRestoreDone	IDS_STARTUPRESTOREDONE	5990	已恢复。开机自启和托盘设置未改变。	Restored. Startup and tray settings were not changed.	
+StartupRestorePartial	IDS_STARTUPRESTOREPARTIAL	5991	部分项目未恢复，请检查文件夹入口状态并导出诊断后重试。	Some integrations could not be restored. Check folder registration and export diagnostics before retrying.	
+StartupFoldersSummary	IDS_STARTUPFOLDERSSUMMARY	5992	文件夹	Folders	
+StartupFoldersOff	IDS_STARTUPFOLDERSOFF	5993	由资源管理器打开	Opened by File Explorer	
+StartupFoldersOn	IDS_STARTUPFOLDERSON	5994	由 Pulse 打开	Opened by Pulse	
+StartupNeedsAttention	IDS_STARTUPNEEDSATTENTION	5995	需要处理	Needs attention	
+StartupLaunchOff	IDS_STARTUPLAUNCHOFF	5996	未开启	Off	
+StartupLaunchOn	IDS_STARTUPLAUNCHON	5997	已开启	On	
+StartupFolderDesc	IDS_STARTUPFOLDERDESC	5998	在桌面等位置双击文件夹或磁盘时	When you double-click folders or drives	
+StartupThisPcDesc	IDS_STARTUPTHISPCDESC	5999	双击桌面上的“此电脑”图标时	When you open This PC from the desktop	
+StartupWinEDesc	IDS_STARTUPWINEDESC	6000	按 Win + E 或点任务栏的文件资源管理器图标时	When you press Win + E or use the taskbar Explorer icon	
+StartupScopeYes	IDS_STARTUPSCOPEYES	6001	会改用 Pulse 对话框	Uses Pulse dialogs	
+StartupScopeYesDesc	IDS_STARTUPSCOPEYESDESC	6002	使用 Windows 标准文件对话框，并已启用对应 Pulse 接入组件的软件。	Applications using standard Windows file dialogs with the corresponding Pulse integration enabled.	
+StartupScopeNo	IDS_STARTUPSCOPENO	6003	仍使用原来的对话框	Keeps the original dialogs	
+StartupScopeNoDesc	IDS_STARTUPSCOPENODESC	6004	自绘对话框、受限或尚未接入的软件保留原界面。暂不支持的标准请求会回退到 Windows 对话框。	Custom dialogs, restricted apps and apps without integration keep their original UI. Unsupported standard requests fall back to Windows dialogs.	
+StartupKnowBefore	IDS_STARTUPKNOWBEFORE	6005	开启前请了解	Before enabling	
+StartupKnowTitle	IDS_STARTUPKNOWTITLE	6006	使用须知	Things to know	
+StartupKnowRestart	IDS_STARTUPKNOWRESTART	6007	重新打开已在运行的软件	Restart applications already running	
+StartupKnowRestartDesc	IDS_STARTUPKNOWRESTARTDESC	6008	开启前已在运行的软件，需要重新打开才会使用 Pulse 对话框。请先保存工作。	Applications already running must be restarted to use Pulse dialogs. Save your work first.	
+StartupKnowUser	IDS_STARTUPKNOWUSER	6009	只影响当前用户	Only affects the current user	
+StartupKnowUserDesc	IDS_STARTUPKNOWUSERDESC	6010	不改动这台电脑上其他用户的设置。	Other users on this computer are not affected.	
+StartupKnowProvider	IDS_STARTUPKNOWPROVIDER	6011	不覆盖其他软件	Preserves other providers	
+StartupKnowProviderDesc	IDS_STARTUPKNOWPROVIDERDESC	6012	如果另一款软件已经接管这些对话框，Pulse 会提示冲突，不会覆盖它。	If another application owns these dialogs, Pulse reports the conflict and leaves it unchanged.	
+StartupKnowRestore	IDS_STARTUPKNOWRESTORE	6013	随时可以恢复	Restore at any time	
+StartupKnowRestoreDesc	IDS_STARTUPKNOWRESTOREDESC	6014	关掉开关后，后续请求恢复 Windows 对话框，不会关闭任何软件；卸载 Pulse 时也会自动恢复。	Turning this off restores native dialogs for subsequent requests. Uninstalling also restores them. Dialogs already open are unaffected.	
+StartupJumpTitle	IDS_STARTUPJUMPTITLE	6015	Windows 对话框里也能快速跳转	Jump quickly in Windows dialogs	
+StartupPreview	IDS_STARTUPPREVIEW	6016	预览	Preview	
+IntegrationEnableKeep	IDS_INTEGRATIONENABLEKEEP	6017	打开「关闭后继续运行」	Enable keep running after close	開啟「關閉後繼續執行」
+IntegrationEnableLaunch	IDS_INTEGRATIONENABLELAUNCH	6018	打开「开机自启」	Enable launch at sign-in	開啟「開機自啟」
+WorkspaceEmptyHint	IDS_WORKSPACEEMPTYHINT	6019	把常用的分栏和文件夹存成工作区，下次一键回到这里。	Save your panes and folders as a workspace, then return with one click.	
+WorkspaceSaveCurrent	IDS_WORKSPACESAVECURRENT	6020	保存当前分栏	Save current panes	
+WorkspaceLayoutChanged	IDS_WORKSPACELAYOUTCHANGED	6021	分栏已变化	Panes have changed	
+WorkspaceRestore	IDS_WORKSPACERESTORE	6022	恢复	Restore	
+WorkspaceUpdate	IDS_WORKSPACEUPDATE	6023	更新	Update	
+WorkspaceRenameTitle	IDS_WORKSPACERENAMETITLE	6024	重命名工作区	Rename workspace	
+WorkspaceNameLabel	IDS_WORKSPACENAMELABEL	6025	工作区名称	Workspace name	
+WorkspaceColor	IDS_WORKSPACECOLOR	6026	颜色	Color	
+WorkspaceMoveUp	IDS_WORKSPACEMOVEUP	6027	上移	Move up	
+WorkspaceMoveDown	IDS_WORKSPACEMOVEDOWN	6028	下移	Move down	
+WorkspaceRemoved	IDS_WORKSPACEREMOVED	6029	已取消工作区	Workspace removed	
+WorkspaceOpenNewWindow	IDS_WORKSPACEOPENNEWWINDOW	6030	在新窗口打开	Open in new window	
+WorkspacePaneClosed	IDS_WORKSPACEPANECLOSED	6031	已关闭窗格	Pane closed	
+WorkspaceClosePane	IDS_WORKSPACECLOSEPANE	6032	关闭此栏	Close pane	
+SetupWindowTitle	IDS_SETUP_WINDOW_TITLE	6033	Pulse 安装程序	Pulse Setup	Pulse 安裝程式
+SetupTagline	IDS_SETUP_TAGLINE	6034	为 Windows 打造的现代文件管理器 —— 浏览、搜索、整理，更顺手。	A modern file manager for Windows — browse, search and organize, effortlessly.	為 Windows 打造的現代檔案管理員 —— 瀏覽、搜尋、整理，更順手。
+SetupInstall	IDS_SETUP_INSTALL	6035	立即安装	Install now	立即安裝
+SetupUpgrade	IDS_SETUP_UPGRADE	6036	立即升级	Upgrade now	立即升級
+SetupInstallTo	IDS_SETUP_INSTALL_TO	6037	安装到	Install to	安裝到
+SetupNeeds	IDS_SETUP_NEEDS	6038	需要 %1 MB	%1 MB required	需要 %1 MB
+SetupAgree	IDS_SETUP_AGREE	6039	我已阅读并同意	I accept the	我已閱讀並同意
+SetupLicense	IDS_SETUP_LICENSE	6040	许可协议	License Agreement	授權合約
+SetupCustom	IDS_SETUP_CUSTOM	6041	自定义安装	Custom install	自訂安裝
+SetupSecLocation	IDS_SETUP_SEC_LOCATION	6042	安装位置	Location	安裝位置
+SetupAppDir	IDS_SETUP_APP_DIR	6043	程序目录	App folder	程式目錄
+SetupAppDirSub	IDS_SETUP_APP_DIR_SUB	6044	升级时会沿用当前目录	Upgrades keep the current folder	升級時會沿用目前目錄
+SetupBrowse	IDS_SETUP_BROWSE	6045	浏览…	Browse…	瀏覽…
+SetupSpaceFree	IDS_SETUP_SPACE_FREE	6046	%1 可用 %2	%2 free on %1	%1 可用 %2
+SetupSecSearch	IDS_SETUP_SEC_SEARCH	6047	搜索与索引	Search & indexing	搜尋與索引
+SetupOptIndex	IDS_SETUP_OPT_INDEX	6048	启用全盘文件索引	Enable full-disk file index	啟用全磁碟檔案索引
+SetupRecommended	IDS_SETUP_RECOMMENDED	6049	推荐	Recommended	建議
+SetupOptIndexSub	IDS_SETUP_OPT_INDEX_SUB	6050	安装 PulseIndex 后台服务，秒级搜索全部 NTFS 磁盘	Installs the PulseIndex service for instant search across NTFS drives	安裝 PulseIndex 背景服務，秒級搜尋所有 NTFS 磁碟
+SetupIndexDir	IDS_SETUP_INDEX_DIR	6051	索引位置	Index location	索引位置
+SetupIndexDirSub	IDS_SETUP_INDEX_DIR_SUB	6052	服务器文件夹可稍后在设置中添加	Server folders can be added later in Settings	伺服器資料夾可稍後在設定中新增
+SetupSecOther	IDS_SETUP_SEC_OTHER	6053	其他	Other	其他
+SetupOptStartup	IDS_SETUP_OPT_STARTUP	6054	开机自动启动 Pulse	Launch Pulse at sign-in	開機自動啟動 Pulse
+SetupOptStartupSub	IDS_SETUP_OPT_STARTUP_SUB	6055	登录 Windows 后在托盘中待命	Waits in the tray after you sign in	登入 Windows 後在系統匣待命
+SetupOptDesktop	IDS_SETUP_OPT_DESKTOP	6056	创建桌面快捷方式	Create desktop shortcut	建立桌面捷徑
+SetupOptDesktopSub	IDS_SETUP_OPT_DESKTOP_SUB	6057	同时会添加到开始菜单	Also added to the Start menu	同時會新增到開始功能表
+SetupBack	IDS_SETUP_BACK	6058	返回	Back	返回
+SetupCancel	IDS_SETUP_CANCEL	6059	取消	Cancel	取消
+SetupOn	IDS_SETUP_ON	6060	开	On	開
+SetupOff	IDS_SETUP_OFF	6061	关	Off	關
+SetupStepExtract	IDS_SETUP_STEP_EXTRACT	6062	解压程序文件	Extracting files	解壓縮程式檔案
+SetupStepShortcuts	IDS_SETUP_STEP_SHORTCUTS	6063	设置文件关联与快捷方式	Setting associations & shortcuts	設定檔案關聯與捷徑
+SetupStepIndex	IDS_SETUP_STEP_INDEX	6064	注册 PulseIndex 服务	Registering PulseIndex service	註冊 PulseIndex 服務
+SetupStepVerbs	IDS_SETUP_STEP_VERBS	6065	缓存右键菜单项	Caching context-menu verbs	快取右鍵選單項目
+SetupStepFinish	IDS_SETUP_STEP_FINISH	6066	完成	Finishing	完成
+SetupS1Title	IDS_SETUP_S1_TITLE	6067	全盘搜索，快到不用等	Search that doesn't make you wait	全磁碟搜尋，快到不用等
+SetupS1Text	IDS_SETUP_S1_TEXT	6068	基于 NTFS 主文件表的实时索引，输入即出结果，支持拼音与内容搜索。	Live NTFS index with results as you type, including pinyin and content search.	基於 NTFS 主檔案表的即時索引，輸入即出結果，支援拼音與內容搜尋。
+SetupS2Title	IDS_SETUP_S2_TITLE	6069	空格键快速预览	Press Space to preview	空白鍵快速預覽
+SetupS2Text	IDS_SETUP_S2_TEXT	6070	图片、视频、PDF、Office 与代码文件，无需打开程序就能看清内容。	Images, video, PDF, Office and code — see what's inside without opening an app.	圖片、影片、PDF、Office 與程式碼檔案，無須開啟程式就能看清內容。
+SetupS3Title	IDS_SETUP_S3_TITLE	6071	双栏与标签页	Dual panes & tabs	雙欄與分頁
+SetupS3Text	IDS_SETUP_S3_TEXT	6072	拖放、批量重命名、管理员授权操作，整理文件一气呵成。	Drag and drop, batch rename and elevated operations, all in one flow.	拖放、批次重新命名、系統管理員授權操作，整理檔案一氣呵成。
+SetupSearchDemo	IDS_SETUP_SEARCH_DEMO	6073	季度报告	quarterly report	季度報告
+SetupDoneTitle	IDS_SETUP_DONE_TITLE	6074	Pulse 已准备就绪	Pulse is ready	Pulse 已準備就緒
+SetupDoneSub	IDS_SETUP_DONE_SUB	6075	安装完成。索引服务已在后台启动，首次建立索引通常只需几十秒。	Setup is complete. The index service is running; the first index usually takes under a minute.	安裝完成。索引服務已在背景啟動，首次建立索引通常只需幾十秒。
+SetupDoneSubNoIndex	IDS_SETUP_DONE_SUB_NO_INDEX	6076	安装完成。随时可以在设置中启用全盘索引。	Setup is complete. You can enable the full-disk index in Settings at any time.	安裝完成。隨時可以在設定中啟用全磁碟索引。
+SetupDoneTitleUp	IDS_SETUP_DONE_TITLE_UP	6077	已升级到 %1	Upgraded to %1	已升級到 %1
+SetupDoneSubUp	IDS_SETUP_DONE_SUB_UP	6078	你的设置、标签和索引都已保留。	Your settings, tags and index were kept.	你的設定、標籤和索引都已保留。
+SetupSumIndex	IDS_SETUP_SUM_INDEX	6079	索引服务运行中	Index service running	索引服務執行中
+SetupSumIndexFailed	IDS_SETUP_SUM_INDEX_FAILED	6080	索引服务未能启动，可在设置中重试	Index service did not start; retry in Settings	索引服務未能啟動，可在設定中重試
+SetupSumMenu	IDS_SETUP_SUM_MENU	6081	右键菜单已注册	Context menu registered	右鍵選單已註冊
+SetupSumStart	IDS_SETUP_SUM_START	6082	开机启动	Launch at sign-in	開機啟動
+SetupClose	IDS_SETUP_CLOSE	6083	关闭	Close	關閉
+SetupLaunch	IDS_SETUP_LAUNCH	6084	启动 Pulse	Launch Pulse	啟動 Pulse
+SetupBusyTitle	IDS_SETUP_BUSY_TITLE	6085	Pulse 正在复制文件	Pulse is copying files	Pulse 正在複製檔案
+SetupBusyText	IDS_SETUP_BUSY_TEXT	6086	有一个复制或移动任务尚未完成，升级会中断它。请等任务结束后点“重试”，安装程序不会强行关闭 Pulse。	A copy or move task is still running and an upgrade would interrupt it. Wait for it to finish, then click Retry. Setup never force-closes Pulse.	有一個複製或移動工作尚未完成，升級會中斷它。請等工作結束後按「重試」，安裝程式不會強制關閉 Pulse。
+SetupRetry	IDS_SETUP_RETRY	6087	重试	Retry	重試
+SetupCancelTitle	IDS_SETUP_CANCEL_TITLE	6088	要取消安装吗？	Cancel setup?	要取消安裝嗎？
+SetupCancelText	IDS_SETUP_CANCEL_TEXT	6089	已复制的文件会被清理，电脑不会留下任何改动。	Copied files will be removed and nothing will be left on this PC.	已複製的檔案會被清除，電腦不會留下任何變更。
+SetupKeepInstalling	IDS_SETUP_KEEP_INSTALLING	6090	继续安装	Keep installing	繼續安裝
+SetupCancelYes	IDS_SETUP_CANCEL_YES	6091	取消安装	Cancel setup	取消安裝
+SetupErrorTitle	IDS_SETUP_ERROR_TITLE	6092	安装没有完成	Setup did not finish	安裝沒有完成
+SetupErrorRolledBack	IDS_SETUP_ERROR_ROLLED_BACK	6093	原来的 Pulse 保持不变，可以稍后重试。	Your existing Pulse was left unchanged. You can try again later.	原來的 Pulse 保持不變，可以稍後重試。
+SetupOpenLog	IDS_SETUP_OPEN_LOG	6094	打开安装日志	Open setup log	開啟安裝記錄
+SetupBadDir	IDS_SETUP_BAD_DIR	6095	请选择一个有效的本地文件夹。	Please choose a valid local folder.	請選擇一個有效的本機資料夾。
+SetupNoSpace	IDS_SETUP_NO_SPACE	6096	磁盘空间不足。	Not enough disk space.	磁碟空間不足。
+SetupMinimize	IDS_SETUP_MINIMIZE	6097	最小化	Minimize	最小化
+SetupUnWindowTitle	IDS_SETUP_UN_WINDOW_TITLE	6098	Pulse 卸载程序	Pulse Uninstall	Pulse 解除安裝程式
+SetupUnTitle	IDS_SETUP_UN_TITLE	6099	卸载 Pulse	Uninstall Pulse	解除安裝 Pulse
+SetupUnSub	IDS_SETUP_UN_SUB	6100	将停止并移除 PulseIndex 服务，然后删除程序文件。	Stops and removes the PulseIndex service, then deletes the app files.	將停止並移除 PulseIndex 服務，然後刪除程式檔案。
+SetupUnClean	IDS_SETUP_UN_CLEAN	6101	同时删除设置、缓存和索引数据	Also remove settings, caches and index data	同時刪除設定、快取和索引資料
+SetupUnCleanSub	IDS_SETUP_UN_CLEAN_SUB	6102	推荐。自定义索引目录只会删除 Pulse 创建的文件	Recommended. Custom index folders only lose Pulse-owned files	建議。自訂索引目錄只會刪除 Pulse 建立的檔案
+SetupUnService	IDS_SETUP_UN_SERVICE	6103	PulseIndex 服务	PulseIndex service	PulseIndex 服務
+SetupUnServiceOn	IDS_SETUP_UN_SERVICE_ON	6104	已安装 · 卸载时会自动停止并移除	Installed · stopped and removed automatically	已安裝 · 解除安裝時會自動停止並移除
+SetupUnServiceNone	IDS_SETUP_UN_SERVICE_NONE	6105	未安装	Not installed	未安裝
+SetupUnBtn	IDS_SETUP_UN_BTN	6106	卸载	Uninstall	解除安裝
+SetupUnDone	IDS_SETUP_UN_DONE	6107	已卸载。感谢使用 Pulse。	Uninstalled. Thanks for using Pulse.	已解除安裝。感謝使用 Pulse。
+SetupUnDoneReboot	IDS_SETUP_UN_DONE_REBOOT	6108	已卸载。部分文件正在使用，将在重启电脑后删除。	Uninstalled. Some files are in use and will be removed after a restart.	已解除安裝。部分檔案正在使用中，將在重新啟動電腦後刪除。
+SetupUnFailed	IDS_SETUP_UN_FAILED	6109	卸载未完成，Pulse 没有被移除。	Uninstall did not finish. Pulse was not removed.	解除安裝未完成，Pulse 沒有被移除。
+SetupUnBusyText	IDS_SETUP_UN_BUSY_TEXT	6110	有一个复制或移动任务尚未完成，卸载会中断它。请等任务结束后点“重试”，卸载程序不会强行关闭 Pulse。	A copy or move task is still running and uninstalling would interrupt it. Wait for it to finish, then click Retry. Pulse is never force-closed.	有一個複製或移動工作尚未完成，解除安裝會中斷它。請等工作結束後按「重試」，解除安裝程式不會強制關閉 Pulse。
+SetupIntegrationIncomplete	IDS_SETUP_INTEGRATION_INCOMPLETE	6111	Pulse 打开命令已移除，但旧版本没有保留完整的原始关联，无法确认全部恢复。现有第三方设置和备份已保留。	Pulse open commands were removed, but old versions did not retain complete original associations. Other settings and backups were preserved.	Pulse 開啟命令已移除，但舊版沒有保留完整的原始關聯，無法確認全部還原。現有第三方設定與備份已保留。
+SetupIntegrationFailed	IDS_SETUP_INTEGRATION_FAILED	6112	部分打开命令仍指向 Pulse，卸载后这些入口可能无法打开。请重新安装 Pulse 后在系统集成设置中恢复，或修复 Windows 文件关联。	Some open commands still point to Pulse. After uninstall they may stop working. Reinstall Pulse to restore integration, or repair Windows file associations.	部分開啟命令仍指向 Pulse，解除安裝後這些入口可能無法開啟。請重新安裝 Pulse 後在系統整合設定中還原，或修復 Windows 檔案關聯。
+SetupOptGlobalSearch	IDS_SETUP_OPT_GLOBAL_SEARCH	6113	全局搜索	Global search	全域搜尋
+SetupOptGlobalSearchSub	IDS_SETUP_OPT_GLOBAL_SEARCH_SUB	6114	在任何程序里连按两次 Ctrl 呼出搜索	Press Ctrl twice in any app to open search	在任何程式裡連按兩次 Ctrl 叫出搜尋
+SetupSecAi	IDS_SETUP_SEC_AI	6115	AI	AI	AI
+SetupOptAiAssistant	IDS_SETUP_OPT_AI_ASSISTANT	6116	AI 助手	AI assistant	AI 助手
+SetupOptAiAssistantSub	IDS_SETUP_OPT_AI_ASSISTANT_SUB	6117	按 Ctrl+J 呼出，帮你找文件、整理文件夹和批量重命名	Press Ctrl+J to find files, organize folders and batch rename	按 Ctrl+J 叫出，幫你找檔案、整理資料夾和批次重新命名
+SetupNew	IDS_SETUP_NEW	6118	新	New	新
+SetupSumGlobalSearch	IDS_SETUP_SUM_GLOBAL_SEARCH	6119	全局搜索 · 双击 Ctrl	Global search · Ctrl twice	全域搜尋 · 按兩下 Ctrl
+SetupSumAiAssistant	IDS_SETUP_SUM_AI_ASSISTANT	6120	AI 助手 · Ctrl+J	AI assistant · Ctrl+J	AI 助手 · Ctrl+J
+SetupS4Title	IDS_SETUP_S4_TITLE	6121	AI 助手，说一句就办好	Your AI file assistant	AI 助手，說一句就辦好
+SetupS4Text	IDS_SETUP_S4_TEXT	6122	按 Ctrl+J 呼出，帮你找文件、整理文件夹和批量重命名；模型服务可在设置中配置。	Press Ctrl+J to find files, organize folders and batch rename. Configure your model service in Settings.	按 Ctrl+J 叫出，幫你找檔案、整理資料夾和批次重新命名；模型服務可在設定中設定。
+SetupS5Title	IDS_SETUP_S5_TITLE	6123	临时暂存托盘	A temporary staging tray	臨時暫存托盤
+SetupS5Text	IDS_SETUP_S5_TEXT	6124	把散落在各处的文件先拖进托盘，凑齐后一次复制或移动到目标位置。	Gather files from different folders in the tray, then copy or move them together.	把散落在各處的檔案先拖進托盤，湊齊後一次複製或移動到目標位置。
+SetupS6Title	IDS_SETUP_S6_TITLE	6125	颜色标签	Color tags	顏色標籤
+SetupS6Text	IDS_SETUP_S6_TEXT	6126	给文件和文件夹打上颜色标签，在侧栏点一下就能找回同一类文件。	Tag files and folders with colors, then find related items together from the sidebar.	給檔案和資料夾打上顏色標籤，在側欄點一下就能找回同一類檔案。
+SetupAiDemoPrompt	IDS_SETUP_AI_DEMO_PROMPT	6127	把下载文件夹按类型整理	Organize Downloads by file type	把下載資料夾按類型整理
+SetupAiDemoReply	IDS_SETUP_AI_DEMO_REPLY	6128	先查看整理方案，再确认执行	Review the plan, then confirm	先檢視整理方案，再確認執行
+SetupAiDemoAction	IDS_SETUP_AI_DEMO_ACTION	6129	查看方案	Review plan	檢視方案
+AsstEnabledTitle	IDS_ASST_ENABLED_TITLE	6130	启用 AI 助手	Enable AI assistant	啟用 AI 助手
+AsstEnabledDesc	IDS_ASST_ENABLED_DESC	6131	关闭后隐藏助手入口并停用 Ctrl+J，已保存的服务和密钥会保留。	Turn off to hide the assistant and disable Ctrl+J. Saved services and keys are kept.	關閉後隱藏助手入口並停用 Ctrl+J，已儲存的服務和金鑰會保留。

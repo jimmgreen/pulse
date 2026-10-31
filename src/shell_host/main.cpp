@@ -13,6 +13,7 @@
 #include "../ipc/ctx_menu_util.h"
 #include "ctx_handlers.h"
 #include "isolated_start_pin.h"
+#include "start_pin_client.h"
 #include "packaged_ctx_handlers.h"
 #include "../common/current_user_security.h"
 #include "../common/path_utils.h"
@@ -1442,6 +1443,15 @@ HRESULT BuildCtxMenu(const CtxSessionData& d, IContextMenu** out_menu, HMENU* ou
     return S_OK;
 }
 
+HRESULT InvokeStartPinPaths(const std::vector<std::wstring>& paths, bool pin) {
+    if (paths.empty()) return E_INVALIDARG;
+    for (const auto& path : paths) {
+        const HRESULT hr = pulse::start_pin::Invoke(ToParsingPath(path), pin);
+        if (FAILED(hr)) return hr;
+    }
+    return S_OK;
+}
+
 void CtxInvoke(const CtxSessionData& d, IContextMenu* menu, UINT id_first,
                uint32_t invoke_req_id, uint32_t item_id) {
     if (!menu || item_id < id_first) {
@@ -1457,6 +1467,11 @@ void CtxInvoke(const CtxSessionData& d, IContextMenu* menu, UINT id_first,
                                          reinterpret_cast<LPSTR>(verb_buf),
                                          ARRAYSIZE(verb_buf)))) {
         verb_buf[ARRAYSIZE(verb_buf) - 1] = L'\0';  // some handlers fill the buffer unterminated
+        if (!_wcsicmp(verb_buf, L"PinToStartScreen") || !_wcsicmp(verb_buf, L"UnpinFromStartScreen")) {
+            const HRESULT hr = InvokeStartPinPaths(d.paths, !_wcsicmp(verb_buf, L"PinToStartScreen"));
+            SendDone(invoke_req_id, hr, false, FAILED(hr) ? L"context menu invoke failed" : L"");
+            return;
+        }
         HRESULT pin_hr = E_FAIL;
         if (_wcsicmp(verb_buf, L"taskbarpin") == 0) {
             if (pulse::shell::InvokeTaskbandPin(d.paths, pin_hr)) {
@@ -1566,8 +1581,8 @@ DWORD HandlerWorkerThreadImpl(LPVOID param) {
                                         w->items);
     } else if (_wcsicmp(w->desc.clsid_text.c_str(),
                        L"{470c0ebd-5d73-4d58-9ced-e91e22e23282}") == 0) {
-        // The default-menu fallback can make Start pinning fail in this
-        // process. Keep its native menu and invocation in a fresh worker.
+        // Keep native menu enumeration isolated. Invocation is delegated to
+        // the Explorer extension because Windows checks the caller identity.
         w->isolated_start_pin = std::make_unique<pulse::shell::IsolatedStartPinSession>();
         const HRESULT hr = w->isolated_start_pin->Query(w->paths, w->owner,
             w->id_first, w->id_last, w->qcm_flags, w->exit_event, w->items);
@@ -1605,7 +1620,14 @@ DWORD HandlerWorkerThreadImpl(LPVOID param) {
                 if (IsNativeSendToClsid(w->desc.clsid_text))
                     InvokeNativeSendTo(*w, inv->invoke_req_id, inv->item_id);
                 else if (w->isolated_start_pin) {
-                    const HRESULT hr = w->isolated_start_pin->Invoke(inv->item_id);
+                    HRESULT hr = E_INVALIDARG;
+                    for (const auto& item : w->items) {
+                        if (item.id != inv->item_id || !item.enabled || item.has_children) continue;
+                        if (!_wcsicmp(item.verb.c_str(), L"PinToStartScreen") ||
+                            !_wcsicmp(item.verb.c_str(), L"UnpinFromStartScreen"))
+                            hr = InvokeStartPinPaths(w->paths, !_wcsicmp(item.verb.c_str(), L"PinToStartScreen"));
+                        break;
+                    }
                     SendDone(inv->invoke_req_id, hr, false,
                              FAILED(hr) ? L"context menu invoke failed" : L"");
                 } else if (w->slot.menu && inv->item_id >= w->id_first)
@@ -2291,6 +2313,11 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
 
     HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     if (FAILED(hr)) return 1;
+    if (__argc == 3 && (!_wcsicmp(__wargv[1], L"--start-pin") || !_wcsicmp(__wargv[1], L"--start-unpin"))) {
+        hr = pulse::start_pin::Invoke(__wargv[2], !_wcsicmp(__wargv[1], L"--start-pin"));
+        CoUninitialize();
+        return static_cast<int>(hr);
+    }
 
     std::wstring pipe_name = PipeNameFor(ui_pid);
     pulse::CurrentUserSecurityAttributes pipe_security;

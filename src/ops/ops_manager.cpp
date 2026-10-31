@@ -2175,6 +2175,15 @@ void OpsManager::RecordShellDone(uint32_t id, uint32_t hr, bool cancelled, std::
             }
         }
         if (ConsumeCtxInvokeDone(id)) {
+            if (FAILED(static_cast<HRESULT>(hr)) && !cancelled) {
+                const DWORD code = HRESULT_FACILITY(hr) == FACILITY_WIN32 ? HRESULT_CODE(hr) : hr;
+                wchar_t code_text[16]{};
+                swprintf_s(code_text, L"0x%08X", static_cast<unsigned>(hr));
+                error = std::wstring(l10n::Get(l10n::StringId::OpFailed).c_str()) + L" | " +
+                    Win32Message(code) + L" (" + code_text + L")";
+                std::lock_guard<std::mutex> lock(menu_mutex_);
+                shell_verb_error_ = std::move(error);
+            }
             ctx_invoke_done_.fetch_add(1, std::memory_order_acq_rel);
             if (notify_) notify_();
             return;

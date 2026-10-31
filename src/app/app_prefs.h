@@ -25,6 +25,12 @@ struct AppPrefs {
     // (a second launch brings the window back; #57).
     int notify_icon_mode = 0;
     bool open_folders_in_pulse = false;
+    int open_pulse_icon = 0;
+    int open_this_pc = 0;
+    int open_win_e = 0;
+    int new_window_shows = 2;
+    bool arrange_include_minimized = false;
+    int arrange_gap = 0;
     bool take_over_win_e = false;
     bool take_over_this_pc = false; // HKCU This PC open verb (default_file_manager.h)
     bool take_over_recycle_bin = false; // HKCU Recycle Bin open verb (default_file_manager.h)

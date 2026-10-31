@@ -3,6 +3,15 @@
 #include "ui_compositor.h"
 
 namespace pulse::ui {
+// Explicit non-layered presentation of the existing Pulse edit bitmap. Native
+// EDIT remains the input/IME model; its text painting is never a fallback.
+HWND CreatePulsePaintedChildEdit(HWND parent, const wchar_t* text = L"", DWORD edit_style = 0);
+DWORD PulsePaintedChildEditError(HWND hwnd);
+// Host invokes this within the main compositor's frame, using child-client
+// bounds mapped to parent pixels. It keeps the real EDIT's input/IME geometry.
+bool DrawPulsePaintedChildEdit(Compositor& compositor, IDWriteTextFormat* format,
+    D2D1_COLOR_F foreground, D2D1_COLOR_F background, HWND hwnd, const D2D1_RECT_F& bounds);
+UINT PulsePaintedChildEditFailureMessage();
 // Applies the selected backend to existing child surfaces; returns custom mode.
 bool SynchronizeChildEditBackend(Compositor& compositor, HWND hwnd);
 bool HandleChildEditMessage(Compositor& compositor, IDWriteTextFormat* format,

@@ -75,12 +75,10 @@ ExplorerTakeoverStep DecideExplorerTakeover(const ExplorerWindowProbe& probe) {
 SourceCloseStep DecideSourceClose(const SourceCloseProbe& probe) {
     if (!probe.identity_kept || !probe.single_tab) return SourceCloseStep::Abort;
     if (probe.selection_changed) {
-        // Visible: the user may have picked something else there, unless the
-        // change came right after the view appeared (a late /select).
-        return probe.hidden || probe.view_age_ms < kExplorerProgrammaticSelectionMs
-            ? SourceCloseStep::CloseAndSelect : SourceCloseStep::Abort;
+        return probe.view_age_ms < kExplorerProgrammaticSelectionMs
+            ? SourceCloseStep::SelectAndKeep : SourceCloseStep::Abort;
     }
-    if (probe.hidden && !probe.sent_selection && probe.view_age_ms < kExplorerLateSelectionMs)
+    if (!probe.sent_selection && probe.view_age_ms < kExplorerLateSelectionMs)
         return SourceCloseStep::Wait;
     return SourceCloseStep::Close;
 }

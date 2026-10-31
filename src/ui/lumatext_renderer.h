@@ -61,6 +61,11 @@ public:
     bool PaintEdit(HWND hwnd, HDC hdc, IDWriteTextFormat* format,
                    const D2D1_COLOR_F& foreground, const D2D1_COLOR_F& background);
 
+    // Called within the main device context BeginDraw/EndDraw. Uses the same
+    // edit bitmap and IME geometry, without writing to a child-window DC.
+    bool DrawEditOnSurface(HWND hwnd, IDWriteTextFormat* format,
+        const D2D1_COLOR_F& foreground, const D2D1_COLOR_F& background, const D2D1_RECT_F& bounds);
+
     const LumaTextStats& Stats() const noexcept;
     void RecordFallback() noexcept;
 
