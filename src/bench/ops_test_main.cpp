@@ -17,6 +17,7 @@
 #include <oleidl.h>
 #include <shlobj.h>
 #include <winioctl.h>
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -282,14 +283,17 @@ static void CheckDeleteProgress(const std::wstring& srcDir)
     const std::wstring speed_dir = srcDir + L"\\speed-delete";
     MakeDir(speed_dir);
     std::vector<std::wstring> victims;
+    bool fixtures_ready = true;
     for (int i = 0; i < 400; ++i) {
         wchar_t name[64];
         swprintf_s(name, L"s%04d.tmp", i);
         const std::wstring path = speed_dir + L"\\" + name;
         char buf[512] = {};
-        MakeFile(path, buf, sizeof(buf));
+        fixtures_ready = MakeFile(path, buf, sizeof(buf)) && fixtures_ready;
         victims.push_back(path);
     }
+    Check(fixtures_ready, L"all bulk delete fixtures were created");
+    if (!fixtures_ready) return;
     {
         std::lock_guard<std::mutex> lock(g_status_mutex);
         g_status_history.clear();
@@ -301,6 +305,11 @@ static void CheckDeleteProgress(const std::wstring& srcDir)
     const uint64_t task_id = g_ops.Submit(std::move(request));
     const auto started_at = std::chrono::steady_clock::now();
     Check(WaitOpDone(previous), L"bulk realdelete completes");
+    const auto completed = g_ops.Status();
+    Check(completed.phase == ops::OpPhase::Completed && completed.completed_items == victims.size(),
+          L"bulk realdelete confirms every fixture, without failures");
+    Check(std::all_of(victims.begin(), victims.end(), [](const auto& path) { return !Exists(path); }),
+          L"bulk realdelete removed every fixture");
     const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - started_at).count();
 
@@ -793,9 +802,12 @@ int wmain(int argc, wchar_t** argv) {
     // Exact, workspace-contained sandbox path.
     std::error_code cleanup_error;
     std::filesystem::remove_all(std::filesystem::path(root), cleanup_error);
-    MakeDir(root);
-    MakeDir(srcDir);
-    MakeDir(dstDir);
+    if (!cleanup_error) std::filesystem::create_directories(srcDir, cleanup_error);
+    if (!cleanup_error) std::filesystem::create_directories(dstDir, cleanup_error);
+    if (cleanup_error) {
+        fprintf(stderr, "[test] cannot prepare isolated fixture: %s\n", cleanup_error.message().c_str());
+        return 2;
+    }
 
     const char payload[] = "pulse ops self-test payload";
     MakeFile(srcDir + L"\\a.txt", payload, sizeof(payload) - 1);

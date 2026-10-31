@@ -123,7 +123,7 @@ struct Reader {
                 self.metrics.pdf_file_bytes += self.available;
             } else ++self.metrics.pdf_cache_hits;
             const auto from = static_cast<size_t>(position - self.offset);
-            const auto n = (std::min)(static_cast<size_t>(count), self.available - from);
+            const auto n = (std::min)(static_cast<size_t>(count), static_cast<size_t>(self.available) - from);
             memcpy(data, self.cache.data() + from, n);
             count -= static_cast<unsigned long>(n); position += static_cast<unsigned long>(n); data += n;
         }

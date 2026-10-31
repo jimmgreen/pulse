@@ -1,0 +1,4 @@
+LIBRARY PulsePickerUiProof
+EXPORTS
+    PulsePickerUiGetApi=_PulsePickerUiGetApi@12
+    PulsePickerUiGetApiV2=_PulsePickerUiGetApiV2@12

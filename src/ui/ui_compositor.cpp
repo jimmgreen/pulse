@@ -1,3 +1,4 @@
+#include "picker_proof_trace.h"
 // ui_compositor.cpp
 #include "ui_compositor.h"
 #include "../common/windows_compat.h"
@@ -321,9 +322,14 @@ bool Compositor::PaintLumaEdit(HWND hwnd, HDC hdc, IDWriteTextFormat* format,
     return lumaText_->PaintEdit(hwnd, hdc, format, foreground, background);
 }
 
+bool Compositor::DrawLumaEditOnSurface(HWND hwnd, IDWriteTextFormat* format,
+    const D2D1_COLOR_F& foreground, const D2D1_COLOR_F& background, const D2D1_RECT_F& bounds) {
+    return CustomEditEnabled() && lumaText_->DrawEditOnSurface(hwnd, format, foreground, background, bounds);
+}
+
 bool Compositor::PresentLumaEdit(HWND hwnd, IDWriteTextFormat* format,
                                  const D2D1_COLOR_F& foreground,
-                                 const D2D1_COLOR_F& background) {
+                                 const D2D1_COLOR_F& background, bool painted_plain_child) {
     if (!hwnd) return false;
 #if defined(PULSE_TEST_LUMATEXT_PRESENT_FAILURE) || defined(PULSE_WITH_SELFTEST)
     if (GetEnvironmentVariableW(L"PULSE_TEST_LUMATEXT_PRESENT_FAILURE", nullptr, 0)) return false;
@@ -333,8 +339,11 @@ bool Compositor::PresentLumaEdit(HWND hwnd, IDWriteTextFormat* format,
     DWORD layered_flags = 0;
     const bool redirected = GetLayeredWindowAttributes(hwnd, nullptr, nullptr, &layered_flags) &&
         (layered_flags & LWA_ALPHA);
-    HDC hdc = redirected ? GetDC(hwnd) : nullptr;
-    const bool ok = (!redirected || hdc) && PaintLumaEdit(hwnd, hdc, format, foreground, background);
+    // Both modes receive the same PaintEdit bitmap; a plain child uses its
+    // normal redirected DC solely as the destination, never native text output.
+    const bool use_dc = redirected || painted_plain_child;
+    HDC hdc = use_dc ? GetDC(hwnd) : nullptr;
+    const bool ok = (!use_dc || hdc) && PaintLumaEdit(hwnd, hdc, format, foreground, background);
     if (hdc) ReleaseDC(hwnd, hdc);
     ValidateRect(hwnd, nullptr);
     return ok;
@@ -397,7 +406,7 @@ bool Compositor::CreateSwapChain() {
             hr = factory->CreateSwapChainForComposition(d3dDevice_.get(), &desc, nullptr, &swapChain_);
         }
     }
-    if (SUCCEEDED(hr)) hr = compositionDevice_->CreateTargetForHwnd(hwnd_, FALSE, &compositionTarget_);
+    if (SUCCEEDED(hr)) hr = compositionDevice_->CreateTargetForHwnd(hwnd_, composition_above_children_ ? TRUE : FALSE, &compositionTarget_);
     if (SUCCEEDED(hr)) hr = compositionDevice_->CreateVisual(&compositionVisual_);
     if (SUCCEEDED(hr)) hr = compositionVisual_->SetContent(swapChain_.get());
     if (SUCCEEDED(hr)) hr = compositionTarget_->SetRoot(compositionVisual_.get());
@@ -653,11 +662,22 @@ Compositor* Compositor::FrameSourceUnder(HWND dialog, const RECT& area) {
     return nullptr;
 }
 
-void Compositor::Present(const RECT* dirty) {
-    if (device_lost_) return;
+HRESULT Compositor::Present(const RECT* dirty) {
+#if defined(PULSE_PICKER_INPROCESS_PROOF)
+    // Controlled proof only: the caller arms this after its second FileOk callback.
+    const DWORD previous_error = GetLastError();
+    wchar_t fail_present[2]{};
+    const bool inject_failure = GetEnvironmentVariableW(L"PULSE_PICKER_UI_PROOF_FAIL_PRESENT", fail_present, 2) == 1 &&
+        fail_present[0] == L'1';
+    SetLastError(previous_error);
+    if (inject_failure) return E_FAIL;
+#endif
+    if (device_lost_) return DXGI_ERROR_DEVICE_REMOVED;
     if (hwnd_) UpdateTextRenderingParams(
         MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST));
+    PULSE_PICKER_TRACE_POINT("copy-frame-before");
     CopyFrame();
+    PULSE_PICKER_TRACE_POINT("copy-frame-after");
     if (captureNext_) {
         captureNext_ = false;
         held_.reset();
@@ -669,28 +689,39 @@ void Compositor::Present(const RECT* dirty) {
                 held_.reset();
         }
     }
-    HRESULT hr = S_OK;
+    HRESULT hr = E_UNEXPECTED;
     if (swapChain_.get()) {
         if (dirty && CanPresentPartial()) {
             DXGI_PRESENT_PARAMETERS params{};
             RECT rect = *dirty;
             params.DirtyRectsCount = 1;
             params.pDirtyRects = &rect;
+            PULSE_PICKER_TRACE_POINT("swapchain-present-partial-before");
             hr = swapChain_->Present1(1, 0, &params);
+            PULSE_PICKER_TRACE_POINT("swapchain-present-partial-after");
         } else {
+            PULSE_PICKER_TRACE_POINT("swapchain-present-before");
             hr = swapChain_->Present(1, 0);
+            PULSE_PICKER_TRACE_POINT("swapchain-present-after");
         }
     }
     // Only a frame that reached the screen whole lets the next one be partial.
     full_next_ = FAILED(hr) || hr == DXGI_STATUS_OCCLUDED;
     if (FAILED(hr)) {
         if (IsDeviceLost(hr)) NotifyDeviceLost(hr);
-        return;
+        return hr;
     }
+    const HRESULT present_status = hr;
     if (compositionDevice_.get()) {
+        PULSE_PICKER_TRACE_POINT("composition-commit-before");
         hr = compositionDevice_->Commit();
-        if (FAILED(hr) && IsDeviceLost(hr)) NotifyDeviceLost(hr);
+        PULSE_PICKER_TRACE_POINT("composition-commit-after");
+        if (hr != S_OK) {
+            if (IsDeviceLost(hr)) NotifyDeviceLost(hr);
+            return hr;
+        }
     }
+    return present_status;
 }
 
 void Compositor::NotifyDeviceLost(HRESULT) {

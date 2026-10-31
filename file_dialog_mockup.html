@@ -1,0 +1,725 @@
+<!doctype html>
+<html lang='zh-CN' data-theme='dark'>
+<head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>Pulse 打开保存对话框</title>
+<style>
+/* Layout: page controls on top, then a desktop stage where the caller's window is dimmed and the Pulse dialog (1000 x 640, title 40, rows 34, sidebar 196) sits on it; change notes below. Tokens follow FluentTokens.h MakeTheme(). */
+:root{--page:#E9ECE6;--wall1:#D3DFE6;--wall2:#E9EDE3;--scrim:rgba(40,52,46,.22);--title:#F1F3EE;--sheet:#F7F8F4;--card:#FFFFFF;--cstroke:#DCE3D9;--flyout:#FFFFFF;--text:#303B50;--t2:#66748A;--t3:#929CAE;--hover:rgba(82,125,112,.065);--hover2:rgba(82,125,112,.13);--sel:rgba(15,108,189,.10);--selrow:rgba(0,0,0,.07);--stroke:#DCE3D9;--div:#E5EAE3;--field:rgba(255,255,255,.92);--fieldh:#FFFFFF;--fieldf:#FFFFFF;--fbot:rgba(130,150,136,.75);--btn:#FFFFFF;--btnh:#F4F6F1;--zebra:rgba(82,125,112,.035);--accent:#0F6CBD;--accentt:#0F6CBD;--onacc:#FFFFFF;--ls0:rgba(15,108,189,.22);--ls1:rgba(15,108,189,.05);--dis:rgba(82,125,112,.12);--folder:#D9A84A;--err:#C42B1C;--errbg:rgba(196,43,28,.07);--errst:rgba(196,43,28,.28);--warn:#985A00;--warnbg:rgba(232,160,40,.13);--warnst:rgba(176,112,10,.32);--ok:#2F7D4A;--wstroke:rgba(0,0,0,.12);--wshadow:0 24px 64px rgba(30,45,40,.26),0 2px 8px rgba(30,45,40,.12);--mshadow:0 10px 30px rgba(30,45,40,.20);--seg:rgba(255,255,255,.55);--paper:#FFFFFF;--ink:#46536B;--ui:'Segoe UI Variable Text','Segoe UI','Microsoft YaHei UI','PingFang SC',system-ui,sans-serif;--mono:'Cascadia Mono',Consolas,'Microsoft YaHei UI',monospace;color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme='light']){--page:#121212;--wall1:#1B2532;--wall2:#121820;--scrim:rgba(0,0,0,.44);--title:#1A1A1A;--sheet:#202020;--card:#272727;--cstroke:rgba(255,255,255,.06);--flyout:#2C2C2C;--text:#FFFFFF;--t2:rgba(255,255,255,.62);--t3:rgba(255,255,255,.40);--hover:rgba(255,255,255,.07);--hover2:rgba(255,255,255,.11);--sel:rgba(96,160,255,.16);--selrow:rgba(255,255,255,.10);--stroke:rgba(255,255,255,.08);--div:rgba(255,255,255,.07);--field:rgba(255,255,255,.06);--fieldh:rgba(255,255,255,.085);--fieldf:#1E1E1E;--fbot:rgba(255,255,255,.38);--btn:rgba(255,255,255,.06);--btnh:rgba(255,255,255,.095);--zebra:rgba(255,255,255,.022);--accent:#2E7CD6;--accentt:#6AAFFF;--onacc:#FFFFFF;--ls0:rgba(98,160,224,.40);--ls1:rgba(98,160,224,.09);--dis:rgba(255,255,255,.08);--folder:#FFCD70;--err:#FF99A4;--errbg:rgba(196,43,28,.16);--errst:rgba(255,153,164,.26);--warn:#F5C26B;--warnbg:rgba(245,180,80,.12);--warnst:rgba(245,194,107,.30);--ok:#6CCB8B;--wstroke:rgba(255,255,255,.10);--wshadow:0 24px 64px rgba(0,0,0,.58),0 2px 8px rgba(0,0,0,.35);--mshadow:0 10px 30px rgba(0,0,0,.48);--seg:rgba(255,255,255,.04);--paper:#2F2F2F;--ink:rgba(255,255,255,.78);color-scheme:dark}}
+:root[data-theme='dark']{--page:#121212;--wall1:#1B2532;--wall2:#121820;--scrim:rgba(0,0,0,.44);--title:#1A1A1A;--sheet:#202020;--card:#272727;--cstroke:rgba(255,255,255,.06);--flyout:#2C2C2C;--text:#FFFFFF;--t2:rgba(255,255,255,.62);--t3:rgba(255,255,255,.40);--hover:rgba(255,255,255,.07);--hover2:rgba(255,255,255,.11);--sel:rgba(96,160,255,.16);--selrow:rgba(255,255,255,.10);--stroke:rgba(255,255,255,.08);--div:rgba(255,255,255,.07);--field:rgba(255,255,255,.06);--fieldh:rgba(255,255,255,.085);--fieldf:#1E1E1E;--fbot:rgba(255,255,255,.38);--btn:rgba(255,255,255,.06);--btnh:rgba(255,255,255,.095);--zebra:rgba(255,255,255,.022);--accent:#2E7CD6;--accentt:#6AAFFF;--onacc:#FFFFFF;--ls0:rgba(98,160,224,.40);--ls1:rgba(98,160,224,.09);--dis:rgba(255,255,255,.08);--folder:#FFCD70;--err:#FF99A4;--errbg:rgba(196,43,28,.16);--errst:rgba(255,153,164,.26);--warn:#F5C26B;--warnbg:rgba(245,180,80,.12);--warnst:rgba(245,194,107,.30);--ok:#6CCB8B;--wstroke:rgba(255,255,255,.10);--wshadow:0 24px 64px rgba(0,0,0,.58),0 2px 8px rgba(0,0,0,.35);--mshadow:0 10px 30px rgba(0,0,0,.48);--seg:rgba(255,255,255,.04);--paper:#2F2F2F;--ink:rgba(255,255,255,.78);color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--text);font:13px/1.45 var(--ui)}
+button,input{font:inherit;color:inherit}
+button{cursor:pointer;background:none;border:0;padding:0}
+button:disabled{cursor:default}
+[hidden]{display:none!important}
+:focus-visible{outline:2px solid var(--accentt);outline-offset:-2px}
+svg{display:block;flex:none}
+kbd{font:inherit}
+.sp{flex:1}
+.mono{font-family:var(--mono)}
+.page{max-width:1240px;margin:0 auto;padding:22px 16px 40px;display:flex;flex-direction:column;gap:14px}
+.ph{display:flex;align-items:flex-start;gap:16px;flex-wrap:wrap}
+.ph h1{margin:0 0 4px;font-size:19px;font-weight:650;text-wrap:balance}
+.lede{margin:0;max-width:74ch;color:var(--t2)}
+.tg{display:flex;align-items:center;gap:8px;height:32px;padding:0 12px;border-radius:8px;border:1px solid var(--stroke);background:var(--btn)}
+.tg:hover{background:var(--btnh)}
+.tpls{display:flex;flex-wrap:wrap;gap:4px;padding:4px;border-radius:12px;border:1px solid var(--stroke);background:var(--seg)}
+.tp{display:flex;align-items:center;gap:9px;height:40px;padding:0 14px 0 8px;border-radius:8px;color:var(--t2);text-align:left}
+.tp:hover{background:var(--hover)}
+.tp b{display:block;font-weight:600;color:var(--text);line-height:1.2}
+.tp small{display:block;font-size:11px;line-height:1.2}
+.tp.on{background:var(--card);box-shadow:0 1px 3px rgba(0,0,0,.22),0 0 0 1px var(--stroke)}
+.srow{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.sl{color:var(--t2);font-size:12px}
+.states{display:flex;flex-wrap:wrap;gap:6px}
+.st{height:28px;padding:0 12px;border-radius:14px;border:1px solid var(--stroke);color:var(--t2);font-size:12px;background:var(--btn)}
+.st:hover:not(:disabled){color:var(--text);background:var(--btnh)}
+.st.on{border-color:var(--accentt);color:var(--text);background:var(--sel)}
+.st:disabled{opacity:.38}
+.apt{display:grid;place-items:center;width:22px;height:22px;border-radius:6px;color:#fff;font-size:11px;font-weight:700;flex:none;letter-spacing:-.02em}
+.stage{position:relative;height:740px;border-radius:14px;overflow:hidden;border:1px solid var(--stroke);background:linear-gradient(140deg,var(--wall1),var(--wall2))}
+.host{position:absolute;top:22px;left:48px;right:48px;height:620px;display:flex;flex-direction:column;border-radius:8px;overflow:hidden;background:var(--sheet);border:1px solid var(--wstroke);box-shadow:0 12px 40px rgba(0,0,0,.25)}
+.hbar{display:flex;align-items:center;gap:10px;height:36px;padding:0 12px;background:var(--title);color:var(--t2);font-size:12px;flex:none}
+.hbar .apt{width:18px;height:18px;font-size:9.5px;border-radius:5px}
+.htool{height:42px;flex:none;border-bottom:1px solid var(--div);background:color-mix(in srgb,var(--hc) 9%,var(--sheet))}
+.hbody{flex:1;display:flex;gap:16px;padding:22px;min-height:0}
+.hcol{display:flex;flex-direction:column;gap:12px;flex:1}
+.hcol.n{flex:0 0 220px;border-right:1px solid var(--div);padding-right:16px}
+.hcol.pg{flex:0 1 560px;margin:0 auto;padding:40px 48px;background:var(--paper);border-radius:4px;box-shadow:0 2px 10px rgba(0,0,0,.15)}
+.hcol i{display:block;height:9px;border-radius:5px;background:var(--hover2)}
+.scrim{position:absolute;inset:0;background:var(--scrim)}
+.dwrap{position:absolute;inset:0;display:grid;place-items:center;padding:16px}
+.dlg{position:relative;width:min(1000px,100%);height:640px;display:flex;flex-direction:column;background:var(--sheet);border:1px solid var(--wstroke);border-radius:8px;box-shadow:var(--wshadow);overflow:hidden;animation:pop .2s cubic-bezier(.2,.8,.2,1)}
+@keyframes pop{from{transform:translateY(8px) scale(.992)}to{transform:none}}
+.ttl{display:flex;align-items:center;gap:8px;height:40px;padding-left:12px;background:var(--title);flex:none;min-width:0}
+.ttl .who{display:flex;align-items:baseline;gap:6px;min-width:0;white-space:nowrap;overflow:hidden}
+.ttl .who b{font-weight:600}
+.ttl .who span{color:var(--t2);overflow:hidden;text-overflow:ellipsis}
+.brand{display:flex;align-items:center;gap:6px;margin-right:4px;color:var(--t3);font-size:11.5px;white-space:nowrap}
+.cls{display:grid;place-items:center;width:46px;height:40px;color:var(--text)}
+.cls:hover{background:#C42B1C;color:#fff}
+.adr{display:flex;align-items:center;gap:4px;height:48px;padding:0 10px 0 8px;flex:none;min-width:0}
+.ib{display:grid;place-items:center;width:32px;height:32px;border-radius:6px;color:var(--text);flex:none}
+.ib:hover:not(:disabled){background:var(--hover)}
+.ib:disabled{color:var(--t3)}
+.ib.on{background:var(--sel);color:var(--accentt)}
+.crumb{flex:1;min-width:0;display:flex;align-items:center;gap:1px;height:32px;margin-left:4px;padding:0 2px 0 6px;border-radius:6px;background:var(--field);border:1px solid var(--stroke);cursor:text;overflow:hidden}
+.crumb:hover{background:var(--fieldh)}
+.crumb.ed{background:var(--fieldf);box-shadow:inset 0 -2px 0 var(--accentt)}
+.crumb.bad{box-shadow:inset 0 -2px 0 var(--err)}
+.crumb input{flex:1;min-width:0;height:100%;padding:0 4px;border:0;outline:0;background:none;font-family:var(--mono);font-size:12.5px}
+.cs{display:flex;align-items:center;gap:6px;height:24px;padding:0 6px;border-radius:4px;white-space:nowrap;cursor:pointer;flex:none}
+.cs:hover{background:var(--hover2)}
+.cs.last{font-weight:600}
+.csep{color:var(--t3);flex:none}
+.cfill{flex:1;align-self:stretch;min-width:12px}
+.crumb .ib{width:28px;height:28px}
+.srch{display:flex;align-items:center;gap:8px;width:210px;height:32px;margin-left:4px;padding:0 6px 0 10px;border-radius:6px;background:var(--field);border:1px solid var(--stroke);color:var(--t2);flex:none}
+.srch:focus-within{background:var(--fieldf);box-shadow:inset 0 -2px 0 var(--accentt)}
+.srch input{flex:1;min-width:0;height:100%;border:0;outline:0;background:none;color:var(--text)}
+.srch input::placeholder,.nf input::placeholder{color:var(--t3)}
+.vsep{width:1px;height:20px;margin:0 4px;background:var(--div);flex:none}
+.vseg{display:flex;gap:2px;padding:2px;border-radius:8px;background:var(--hover);flex:none}
+.vseg .ib{width:28px;height:28px}
+.vseg .ib.on{background:var(--card);color:var(--text);box-shadow:0 1px 2px rgba(0,0,0,.22)}
+.bd{flex:1;min-height:0;display:flex;padding-right:8px}
+.side{width:196px;flex:none;overflow-y:auto;padding:0 6px 8px 8px;scrollbar-width:thin}
+.sh{display:flex;align-items:center;gap:8px;height:32px;margin-top:8px;padding:0 6px 0 10px;border-radius:8px;cursor:pointer;font-weight:600;font-size:12.5px}
+.sh:first-child{margin-top:0}
+.sh:hover{background:var(--hover)}
+.sh .chv{color:var(--t2);transition:transform .15s}
+.sh.shut .chv{transform:rotate(-90deg)}
+.kb{display:inline-grid;place-items:center;height:18px;padding:0 5px;border-radius:4px;border:1px solid var(--stroke);color:var(--t2);font-size:10.5px;font-weight:400;white-space:nowrap}
+.si{position:relative;display:flex;align-items:center;gap:10px;height:32px;margin-top:2px;padding:0 8px 0 10px;border-radius:8px;cursor:pointer;min-width:0}
+.si:hover{background:var(--hover)}
+.si.on{background:var(--selrow)}
+.si.on::before{content:'';position:absolute;left:0;top:9px;bottom:9px;width:3px;border-radius:2px;background:var(--accentt)}
+.si .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.si .tag{font-size:10.5px;padding:0 6px;border-radius:4px;background:var(--sel);color:var(--accentt);white-space:nowrap}
+.si.dr{height:46px;flex-direction:column;align-items:stretch;justify-content:center;gap:6px}
+.si.dr .l{display:flex;align-items:center;gap:10px;min-width:0}
+.si .cap{color:var(--t2);font-size:11px;white-space:nowrap}
+.bar{height:4px;margin-left:26px;border-radius:2px;background:var(--hover2);overflow:hidden}
+.bar i{display:block;height:100%;border-radius:2px;background:var(--accentt)}
+.card{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;margin-bottom:8px;background:var(--card);border:1px solid var(--cstroke);border-radius:10px;overflow:hidden}
+.lh{display:flex;align-items:center;gap:8px;height:40px;padding:0 10px 0 14px;flex:none;min-width:0}
+.lh b{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chip{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 10px;border-radius:12px;background:var(--hover);font-size:12px;color:var(--t2);white-space:nowrap;flex:none}
+.chip button{margin-right:-6px;padding:0 8px;height:20px;border-radius:10px;color:var(--accentt);font-weight:600}
+.chip button:hover{background:var(--hover2)}
+.cnt{color:var(--t2);font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.cols,.row{display:grid;grid-template-columns:minmax(0,1fr) 124px 136px 78px;gap:12px;align-items:center;padding:0 14px}
+.cols{height:30px;flex:none;color:var(--t2);font-size:12px;border-bottom:1px solid var(--div)}
+.cols button{display:flex;align-items:center;gap:4px;height:24px;color:inherit;white-space:nowrap;text-align:left}
+.cols button:last-child{justify-content:flex-end}
+.cols button.on{color:var(--text)}
+.lst{flex:1;min-height:0;overflow:auto;scrollbar-width:thin;outline:0;position:relative}
+.row{position:relative;height:34px;user-select:none}
+.row:nth-child(even){background:var(--zebra)}
+.row:hover{background:var(--hover)}
+.row.sel,.lr.sel{background:linear-gradient(90deg,var(--ls0),var(--ls1))}
+.row.sel::before,.lr.sel::before{content:'';position:absolute;left:3px;top:9px;bottom:9px;width:3px;border-radius:2px;background:var(--accentt)}
+.lst:focus-visible .cur{box-shadow:inset 0 0 0 1px var(--accentt)}
+.row.dim,.lr.dim,.gi.dim{opacity:.5}
+.fn{display:flex;align-items:center;gap:10px;min-width:0}
+.fn span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fd{color:var(--t2);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
+.fz{text-align:right}
+.row input{width:100%;height:26px;padding:0 6px;border:1px solid var(--accentt);border-radius:4px;background:var(--fieldf);outline:0}
+.dbar{display:flex;align-items:center;gap:8px}
+.dbar i{flex:1;height:5px;border-radius:3px;background:var(--hover2);overflow:hidden}
+.dbar i b{display:block;height:100%;background:var(--accentt)}
+.lv{columns:3 200px;column-gap:6px;padding:6px 8px}
+.lr{position:relative;display:flex;align-items:center;gap:8px;height:30px;padding:0 10px;border-radius:6px;break-inside:avoid;user-select:none}
+.lr:hover{background:var(--hover)}
+.lr span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.gv{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:6px;padding:10px 12px}
+.gi{display:flex;flex-direction:column;align-items:center;gap:6px;padding:6px 6px 8px;border-radius:8px;border:1px solid transparent;min-width:0;user-select:none}
+.gi:hover{background:var(--hover)}
+.gi.sel{background:var(--sel);border-color:color-mix(in srgb,var(--accentt) 60%,transparent)}
+.gi>span{max-width:100%;font-size:12px;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.th{width:100%;aspect-ratio:4/3;border-radius:6px;display:grid;place-items:center;overflow:hidden;background:var(--hover)}
+.empty{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;padding:24px;text-align:center;color:var(--t2)}
+.empty b{color:var(--text);font-size:14px;font-weight:600}
+.eic{display:grid;place-items:center;width:56px;height:56px;margin-bottom:6px;border-radius:16px;background:var(--hover);color:var(--t2)}
+.banner{display:grid;grid-template-columns:20px minmax(0,1fr);gap:4px 12px;margin:14px;padding:14px 16px;border-radius:8px;background:var(--errbg);border:1px solid var(--errst)}
+.banner svg{color:var(--err);margin-top:2px}
+.banner b{font-weight:600}
+.banner p{margin:0;color:var(--t2)}
+.banner .bb{grid-column:2;display:flex;gap:8px;margin-top:8px}
+.skel{display:flex;align-items:center;gap:12px;height:34px;padding:0 14px}
+.skel i{display:block;height:10px;border-radius:5px;background:var(--hover2);animation:pulse 1.3s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.45}}
+@keyframes spin{to{transform:rotate(360deg)}}
+.help.busy svg{animation:spin .9s linear infinite}
+.pnl{width:252px;flex:none;display:flex;flex-direction:column;gap:14px;margin:0 0 8px 8px;padding:14px;background:var(--card);border:1px solid var(--cstroke);border-radius:10px;overflow-y:auto;min-height:0;scrollbar-width:thin}
+.pvw{display:grid;place-items:center;aspect-ratio:4/3;border-radius:8px;overflow:hidden;background:var(--hover);flex:none}
+.doc{width:72%;height:88%;padding:12px 12px 0;border-radius:3px;background:var(--paper);box-shadow:0 2px 8px rgba(0,0,0,.2);display:flex;flex-direction:column;gap:6px;overflow:hidden;font-size:8.5px;line-height:1.35;color:var(--ink)}
+.doc b{font-size:10px}
+.doc i{display:block;height:5px;border-radius:3px;background:var(--hover2)}
+.ptt b{display:block;font-size:13.5px;font-weight:600;overflow-wrap:anywhere}
+.ptt span{color:var(--t2);font-size:12px}
+.kv{display:grid;grid-template-columns:auto minmax(0,1fr);gap:7px 14px;font-size:12px}
+.kv span{color:var(--t2)}
+.kv b{font-weight:400;overflow-wrap:anywhere}
+.stack{display:flex;flex-direction:column;gap:4px}
+.stack div{display:flex;align-items:center;gap:8px;height:28px;padding:0 8px;border-radius:6px;background:var(--hover);font-size:12px;min-width:0}
+.stack span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.phd{display:flex;align-items:center;gap:8px;font-weight:600}
+.phd small{margin-left:auto;font-weight:400;color:var(--t2);font-size:11.5px}
+.fld{display:flex;flex-direction:column;gap:6px}
+.fld>span{font-size:12px;color:var(--t2)}
+.tx{width:100%;height:32px;padding:0 10px;border-radius:6px;background:var(--field);border:1px solid var(--stroke);box-shadow:inset 0 -1px 0 var(--fbot);outline:0;color:var(--text)}
+.tx:focus{background:var(--fieldf);box-shadow:inset 0 -2px 0 var(--accentt)}
+.toks{display:flex;flex-wrap:wrap;gap:6px}
+.tok{display:inline-flex;align-items:center;gap:2px;height:26px;padding:0 3px 0 10px;border-radius:13px;background:var(--hover2);font-size:12px;max-width:100%}
+.tok span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tok button{display:grid;place-items:center;width:20px;height:20px;border-radius:10px;color:var(--t2)}
+.tok button:hover{background:var(--hover2);color:var(--text)}
+.addt{height:26px;padding:0 10px;border-radius:13px;border:1px dashed var(--t3);color:var(--t2);font-size:12px}
+.addt:hover{color:var(--text);border-color:var(--t2)}
+.tokin{width:110px;height:26px;padding:0 10px;border-radius:13px;border:1px solid var(--accentt);background:var(--fieldf);outline:0;font-size:12px}
+.pnote{margin:0;font-size:11.5px;color:var(--t2)}
+.ft{flex:none;display:flex;flex-direction:column;gap:6px;padding:12px 16px 14px;border-top:1px solid var(--div)}
+.r1{display:grid;grid-template-columns:52px minmax(0,1fr) 264px;gap:12px;align-items:center}
+.r1.nf1{grid-template-columns:52px minmax(0,1fr)}
+.lab{white-space:nowrap}
+.nf{display:flex;align-items:center;gap:6px;min-width:0;height:34px;padding:0 4px 0 10px;border-radius:6px;background:var(--field);border:1px solid var(--stroke);box-shadow:inset 0 -1px 0 var(--fbot);cursor:text;overflow:hidden}
+.nf:focus-within{background:var(--fieldf);box-shadow:inset 0 -2px 0 var(--accentt)}
+.nf.bad{box-shadow:inset 0 -2px 0 var(--err)}
+.nf input{flex:1;min-width:48px;height:100%;border:0;outline:0;background:none;color:var(--text)}
+.ext{display:grid;place-items:center;height:24px;padding:0 8px;border-radius:5px;background:var(--hover2);color:var(--t2);font-family:var(--mono);font-size:12px;flex:none}
+.fk{display:inline-flex;align-items:center;gap:6px;height:24px;padding:0 3px 0 6px;border-radius:5px;background:var(--hover2);font-size:12px;max-width:180px;flex:none}
+.fk span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fk button{display:grid;place-items:center;width:18px;height:18px;border-radius:4px;color:var(--t2)}
+.fk button:hover{background:var(--hover2);color:var(--text)}
+.more{color:var(--t2);font-size:12px;white-space:nowrap;flex:none}
+.typ{display:flex;align-items:center;gap:8px;min-width:0;height:34px;padding:0 10px 0 12px;border-radius:6px;background:var(--btn);border:1px solid var(--stroke);text-align:left}
+.typ:hover{background:var(--btnh)}
+.typ span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.typ small{color:var(--t2);font-size:12px}
+.help{display:flex;align-items:center;gap:6px;min-height:18px;margin-left:64px;font-size:12px;color:var(--t2);min-width:0}
+.help>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.help .p{font-family:var(--mono);font-size:11.5px;color:var(--text)}
+.help.err,.help.err .p{color:var(--err)}
+.help.warn,.help.warn .p{color:var(--warn)}
+.acts{display:flex;align-items:center;gap:8px;margin-top:4px;min-width:0;flex-wrap:wrap}
+.opts{display:flex;align-items:center;gap:6px 16px;flex-wrap:wrap;min-width:0}
+.og{display:flex;align-items:center;gap:8px;color:var(--t2)}
+.dd{display:flex;align-items:center;gap:10px;height:32px;padding:0 10px 0 12px;border-radius:6px;background:var(--btn);border:1px solid var(--stroke);color:var(--text)}
+.dd:hover{background:var(--btnh)}
+.ck{display:flex;align-items:center;gap:8px;height:32px;color:var(--text)}
+.box{display:grid;place-items:center;width:18px;height:18px;border-radius:4px;border:1px solid var(--t2);color:transparent}
+.ck.on .box{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn{height:32px;min-width:96px;padding:0 16px;border-radius:6px;background:var(--btn);border:1px solid var(--stroke);white-space:nowrap}
+.btn:hover:not(:disabled){background:var(--btnh)}
+.pri{display:flex;height:32px;min-width:96px;border-radius:6px;background:var(--accent);color:var(--onacc);overflow:hidden;flex:none}
+.pri button{flex:1;padding:0 18px;font-weight:600;color:inherit;white-space:nowrap}
+.pri button:hover:not(:disabled){background:rgba(255,255,255,.12)}
+.pri .arr{flex:none;width:30px;padding:0;display:grid;place-items:center;border-left:1px solid rgba(255,255,255,.28)}
+.pri.dis{background:var(--dis);color:var(--t3)}
+.pri.dis .arr{border-left-color:var(--div)}
+.btn.pri0{background:var(--accent);border-color:transparent;color:var(--onacc);font-weight:600}
+.btn.pri0:hover{background:color-mix(in srgb,var(--accent) 88%,#fff)}
+.ow{display:grid;grid-template-columns:20px minmax(0,1fr) auto;gap:2px 12px;align-items:center;padding:10px 10px 10px 14px;border-radius:8px;background:var(--warnbg);border:1px solid var(--warnst);animation:rise .18s cubic-bezier(.2,.8,.2,1)}
+@keyframes rise{from{transform:translateY(5px)}to{transform:none}}
+.ow>svg{color:var(--warn);grid-row:span 2}
+.ow b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ow p{margin:0;grid-column:2;color:var(--t2);font-size:12px}
+.ow .bb{grid-row:1/3;grid-column:3;display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.pop{position:absolute;z-index:30;min-width:200px;max-width:360px;max-height:420px;overflow-y:auto;padding:4px;background:var(--flyout);border:1px solid var(--stroke);border-radius:8px;box-shadow:var(--mshadow)}
+.mi{display:flex;align-items:center;gap:10px;width:100%;min-height:32px;padding:4px 10px 4px 8px;border-radius:6px;text-align:left}
+.mi:hover:not(:disabled),.mi:focus-visible{background:var(--hover)}
+.mi:disabled{color:var(--t3)}
+.mi .mk{display:grid;place-items:center;width:16px;color:var(--accentt)}
+.mi span{flex:1;min-width:0}
+.mi small{display:block;color:var(--t2);font-size:11.5px}
+.mi kbd{color:var(--t2);font-size:11.5px}
+.msep{height:1px;margin:4px 6px;background:var(--div)}
+.mh{padding:6px 10px 2px 34px;font-size:11.5px;color:var(--t2)}
+.res{position:absolute;inset:0;z-index:20;display:grid;place-items:center;padding:16px}
+.rc{width:min(480px,100%);display:flex;flex-direction:column;gap:12px;padding:20px 22px;border-radius:12px;background:var(--flyout);border:1px solid var(--stroke);box-shadow:var(--wshadow);animation:pop .2s cubic-bezier(.2,.8,.2,1)}
+.rc .rh{display:flex;align-items:center;gap:10px;font-size:14px;font-weight:600}
+.rc p{margin:0;color:var(--t2)}
+.rc ul{margin:0;padding:10px 12px;list-style:none;border-radius:8px;background:var(--hover);display:flex;flex-direction:column;gap:4px}
+.rc li{font-family:var(--mono);font-size:12px;overflow-wrap:anywhere}
+.rc .bb{display:flex;justify-content:flex-end}
+.notes{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:18px 28px;margin-top:6px}
+.note{border-top:1px solid var(--div);padding-top:10px}
+.note h3{margin:0 0 4px;font-size:13px}
+.note p{margin:0;max-width:52ch;color:var(--t2)}
+.land{max-width:96ch;margin:0;color:var(--t2)}
+.land b{color:var(--text);font-weight:600}
+.sh>.sp{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card{container-type:inline-size}
+@container (max-width:640px){.cols,.row{grid-template-columns:minmax(0,1fr) 112px 74px}.cols button:nth-child(3),.row .c3{display:none}}
+@container (max-width:400px){.cols,.row{grid-template-columns:minmax(0,1fr) 74px}.cols button:nth-child(2),.row .c2{display:none}}
+@media (max-width:1040px){.pnl{display:none}.brand{display:none}}
+@media (max-width:820px){.side{display:none}.bd{padding-left:8px}.srch{width:150px}.host{left:16px;right:16px}.r1{grid-template-columns:52px minmax(0,1fr)}.r1 .typ{grid-column:2}.help{margin-left:64px}}
+@media (max-width:560px){.stage{height:780px}.dlg{height:700px}.adr .vseg,.adr .vsep,.adr #bNew,.adr #bPanel{display:none}.srch{display:none}.lab{display:none}.r1,.r1.nf1{grid-template-columns:minmax(0,1fr)}.r1 .typ{grid-column:1}.help{margin-left:0}.cols,.row{grid-template-columns:minmax(0,1fr) 72px}.cols button:nth-child(2),.cols button:nth-child(3),.row .fd.c2,.row .fd.c3{display:none}.ow{grid-template-columns:20px minmax(0,1fr)}.ow .bb{grid-row:auto;grid-column:1/3;justify-content:flex-start}.tp{flex:1 1 140px}}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div class='page'>
+<header class='ph'>
+<div class='sp'><h1>打开 / 保存对话框</h1><p class='lede'>Pulse 代替系统打开、保存对话框时使用的一套模板，共六种。数据都是示例：可以点选和双击文件、输入文件名、切换文件类型、搜索、新建文件夹，也可以用下面的状态按钮查看加载、空文件夹、无法访问、输入有误和同名文件的样子。</p></div>
+<button class='tg' id='theme' type='button'></button>
+</header>
+<nav class='tpls' id='tpls' aria-label='模板'></nav>
+<div class='srow'><span class='sl'>状态</span><div class='states' id='states'></div></div>
+<section class='stage' id='stage'>
+<div class='host' id='host'></div>
+<div class='scrim'></div>
+<div class='dwrap'><div class='dlg' id='dlg' role='dialog' aria-modal='true' aria-labelledby='dlgTitle'>
+<div class='ttl' id='ttl'></div>
+<div class='adr' id='adr'></div>
+<div class='bd'><aside class='side' id='side' aria-label='位置'></aside><section class='card' id='card'></section><aside class='pnl' id='pnl'></aside></div>
+<footer class='ft' id='ft'><div class='r1' id='r1'></div><div class='help' id='help' aria-live='polite'></div><div class='acts' id='acts'></div></footer>
+</div></div>
+<div class='res' id='res' hidden></div>
+<div class='pop' id='pop' role='menu' hidden></div>
+</section>
+<section class='notes'>
+<div class='note'><h3>先说清是谁在要文件</h3><p>标题栏写出发起请求的程序和动作，例如「Word · 打开」。程序自己设置的标题、按钮文字和文件名标签照常显示。</p></div>
+<div class='note'><h3>侧栏直达常用位置</h3><p>新增「在 Pulse 中打开」和「最近使用」，与对话框跳转条共用数据，Ctrl+G 跳到 Pulse 当前的文件夹。程序用 AddPlace 加的位置单独成组，排在最上面。</p></div>
+<div class='note'><h3>文件名带出最终结果</h3><p>扩展名作为输入框尾部的标记显示，随文件类型变化。输入框下方一行说明会保存到哪里、打开什么，出错或同名时也在这一行提示。</p></div>
+<div class='note'><h3>程序的选项排进底栏</h3><p>编码、保存缩略图这类程序加的控件放在按钮左侧同一行，不再每个占一整行。文档属性（作者、标记、标题）放进右侧窗格，用可删除的标签输入。</p></div>
+<div class='note'><h3>同名文件在底栏确认</h3><p>保存时如果已有同名文件，底栏换成确认条：替换、改名保存，或返回修改，不再另弹窗口。</p></div>
+<div class='note'><h3>多选和筛选看得见</h3><p>多选时文件名框里是可逐个移除的标签，下方显示数量和总大小。列表上方标出当前类型隐藏了几项，可以一键显示全部。</p></div>
+</section>
+<p class='land'><b>落地改动</b>：标题条和底栏在 <span class='mono'>folder_picker_view.cpp</span>（LayoutPickerChrome / DrawPickerChrome）；自定义控件从 <span class='mono'>CustomPanel()</span> 的整行排布改为底栏内联，属性面板移到右侧；覆盖确认由 <span class='mono'>ShowConfirmDialog</span> 改为底栏内的确认条；侧栏在 <span class='mono'>BuildSidebar()</span> 中加入 Pulse 已打开的文件夹和最近位置；新建文件夹、视图和预览按钮加在内嵌渲染的地址栏右侧。新文字走 <span class='mono'>catalog.tsv</span>。尺寸沿用标题条 40、行高 34、侧栏 196、默认窗口 1000 × 640。</p>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const BS=String.fromCharCode(92);
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+const disp=p=>p===''?'此电脑':/^[A-Z]:$/.test(p)?p+BS:p.split('/').join(BS);
+const parentOf=p=>p===''?null:/^[A-Z]:$/.test(p)?'':p.slice(0,p.lastIndexOf('/'));
+const join=(p,n)=>p?p+'/'+n:n;
+const sv=(d,s)=>`<svg viewBox='0 0 16 16' width='${s||16}' height='${s||16}' fill='none' stroke='currentColor' stroke-width='1.3' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'>${d}</svg>`;
+const IC={
+back:`<path d='M13 8H3M7 4 3 8l4 4'/>`,fwd:`<path d='M3 8h10M9 4l4 4-4 4'/>`,up:`<path d='M8 13V3M4 7l4-4 4 4'/>`,
+refresh:`<path d='M13 8a5 5 0 1 1-1.5-3.5M13 2.5v3h-3'/>`,search:`<circle cx='7' cy='7' r='4.2'/><path d='m10.2 10.2 3.3 3.3'/>`,
+newf:`<path d='M8 13.2H3A1.2 1.2 0 0 1 1.8 12V4.2A1.2 1.2 0 0 1 3 3h3l1.4 1.5H13a1.2 1.2 0 0 1 1.2 1.2V7'/><path d='M12 9.3v4.4M9.8 11.5h4.4'/>`,
+det:`<path d='M2.5 4h11M2.5 8h11M2.5 12h11'/>`,lst:`<path d='M5.5 4h8M5.5 8h8M5.5 12h8'/><path d='M2.5 4h.01M2.5 8h.01M2.5 12h.01' stroke-width='2'/>`,
+grid:`<rect x='2.5' y='2.5' width='4.5' height='4.5' rx='1'/><rect x='9' y='2.5' width='4.5' height='4.5' rx='1'/><rect x='2.5' y='9' width='4.5' height='4.5' rx='1'/><rect x='9' y='9' width='4.5' height='4.5' rx='1'/>`,
+panel:`<rect x='2' y='3' width='12' height='10' rx='1.5'/><path d='M10 3v10'/>`,
+more:`<circle cx='3.5' cy='8' r='.7' fill='currentColor'/><circle cx='8' cy='8' r='.7' fill='currentColor'/><circle cx='12.5' cy='8' r='.7' fill='currentColor'/>`,
+chev:`<path d='M6 3.5 10.5 8 6 12.5'/>`,dn:`<path d='M4 6l4 4 4-4'/>`,upc:`<path d='M4 10l4-4 4 4'/>`,check:`<path d='M3.5 8.5l3 3 6-7'/>`,x:`<path d='M4.5 4.5l7 7M11.5 4.5l-7 7'/>`,
+info:`<circle cx='8' cy='8' r='6'/><path d='M8 7.2V11M8 5h.01'/>`,warn:`<path d='M8 2.2 14.2 13H1.8z'/><path d='M8 6.5v3M8 11.3h.01'/>`,
+err:`<circle cx='8' cy='8' r='6'/><path d='M8 4.8v3.8M8 10.9h.01'/>`,ok:`<circle cx='8' cy='8' r='6'/><path d='M5.3 8.2l1.8 1.8 3.6-4'/>`,
+spin:`<path d='M8 2a6 6 0 1 0 6 6'/>`,lock:`<rect x='3.5' y='7' width='9' height='6.5' rx='1.2'/><path d='M5.5 7V5a2.5 2.5 0 0 1 5 0v2'/>`,
+pc:`<rect x='2' y='3' width='12' height='8' rx='1'/><path d='M6 13.5h4M8 11v2.5'/>`,clock:`<circle cx='8' cy='8' r='5.8'/><path d='M8 4.8V8l2.2 1.4'/>`,
+pin:`<path d='M10 2.5l3.5 3.5-1.6.6-2.4 2.4.1 2.3L8 13 3 8l1.7-1.6h2.3L9.4 4z'/><path d='M5.3 10.7 2.5 13.5'/>`,
+pulse:`<path d='M1.5 8.5h3l2-5 3 9 2-4h3'/>`,copy:`<rect x='5' y='5' width='8.5' height='8.5' rx='1.5'/><path d='M3 10.5V4a1.5 1.5 0 0 1 1.5-1.5H11'/>`,
+eye:`<path d='M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z'/><circle cx='8' cy='8' r='2'/>`,
+sort:`<path d='M4.5 3v10M2.5 11l2 2 2-2M9 4h4.5M9 8h3.5M9 12h2'/>`,plus:`<path d='M8 3v10M3 8h10'/>`,
+desk:`<rect x='2' y='3' width='12' height='8.5' rx='1'/><path d='M5.5 13.5h5'/>`,dl:`<path d='M8 2.5v7.5M4.8 7 8 10.2 11.2 7M3 13.5h10'/>`,
+doc:`<path d='M4 1.8h5l3 3V14H4z'/><path d='M9 1.8v3h3M6 8.2h4M6 10.6h4'/>`,
+pic:`<rect x='2' y='3' width='12' height='10' rx='1.5'/><circle cx='5.8' cy='6.4' r='1.2'/><path d='m2.5 12 3.5-3.4 2.4 2.3 1.9-1.8 3.2 3'/>`,
+home:`<path d='M2.5 7.5 8 3l5.5 4.5V13a.5.5 0 0 1-.5.5H9.5V10h-3v3.5H3a.5.5 0 0 1-.5-.5z'/>`,
+chat:`<path d='M2.5 4.5A1.5 1.5 0 0 1 4 3h8a1.5 1.5 0 0 1 1.5 1.5v5A1.5 1.5 0 0 1 12 11H7l-3 2.5V11a1.5 1.5 0 0 1-1.5-1.5z'/>`,
+moon:`<path d='M13.2 9.6A5.6 5.6 0 0 1 6.4 2.8a5.6 5.6 0 1 0 6.8 6.8z'/>`,sun:`<circle cx='8' cy='8' r='3'/><path d='M8 1.5v1.6M8 12.9v1.6M1.5 8h1.6M12.9 8h1.6M3.4 3.4l1.1 1.1M11.5 11.5l1.1 1.1M12.6 3.4l-1.1 1.1M4.5 11.5l-1.1 1.1'/>`
+};
+const ic=(k,s)=>sv(IC[k],s);
+const FOLDER=s=>`<svg viewBox='0 0 16 16' width='${s}' height='${s}' aria-hidden='true'><path d='M1.5 4.2A1.4 1.4 0 0 1 2.9 2.8h3.2l1.5 1.5h5.5a1.4 1.4 0 0 1 1.4 1.4v6.6a1.4 1.4 0 0 1-1.4 1.4H2.9a1.4 1.4 0 0 1-1.4-1.4z' fill='var(--folder)'/><path d='M1.5 6.3h13v5.8a1.4 1.4 0 0 1-1.4 1.4H2.9a1.4 1.4 0 0 1-1.4-1.4z' fill='#fff' fill-opacity='.16'/></svg>`;
+const DRIVE=s=>`<svg viewBox='0 0 16 16' width='${s}' height='${s}' fill='none' aria-hidden='true'><path d='M2.6 8.6 4.2 3.5h7.6l1.6 5.1' stroke='var(--t2)' stroke-width='1.2' stroke-linejoin='round'/><rect x='1.6' y='8.6' width='12.8' height='4.9' rx='1.4' fill='var(--t2)' fill-opacity='.28' stroke='var(--t2)' stroke-width='1.1'/><circle cx='12' cy='11.05' r='.95' fill='var(--ok)'/></svg>`;
+const KC={doc:'#3B82F6',xls:'#22A06B',ppt:'#E0663D',pdf:'#E5484D',txt:'#94A3B8',img:'#14B8A6',zip:'#D4A017',exe:'#8B9AB5',vid:'#A855F7',aud:'#EC4899',code:'#5B9CF5',oth:'#94A3B8'};
+const KG={doc:`<path d='M5.6 8h4.8M5.6 10h4.8M5.6 12h3'/>`,txt:`<path d='M5.6 8h4.8M5.6 10h4.8M5.6 12h2.4'/>`,xls:`<path d='M5.4 7.6h5.2v4.8H5.4zM5.4 10h5.2M8 7.6v4.8'/>`,ppt:`<rect x='5.4' y='7.6' width='5.2' height='3.6' rx='.6'/><path d='M8 11.2v1.4'/>`,pdf:`<path d='M5.6 12.2c1.6-.9 3.1-2.7 3.5-4.6M6.3 9.2c1.6.2 3.4.9 4.2 2'/>`,img:`<circle cx='6.6' cy='8.4' r='.9'/><path d='m5.2 12.4 2-2 1.3 1.2 1.2-1.1 1.3 1.9'/>`,zip:`<path d='M8 1.8v1.6M7.2 4.2h1.6M7.2 6h1.6M7.2 7.8h1.6M7.3 9.6h1.4v2.2H7.3z'/>`,exe:`<rect x='5.2' y='7.4' width='5.6' height='4.8' rx='.6'/><path d='M5.2 8.8h5.6'/>`,vid:`<path d='M6.8 8.2v3.6L9.8 10z'/>`,aud:`<path d='M7.2 11.6V8l3-.8v3.6'/><circle cx='6.3' cy='11.6' r='.9'/><circle cx='9.3' cy='10.8' r='.9'/>`,code:`<path d='M6.6 8.4 5.2 10l1.4 1.6M9.4 8.4l1.4 1.6-1.4 1.6'/>`,oth:''};
+const FILE=(k,s)=>{const c=KC[k]||KC.oth;return `<svg viewBox='0 0 16 16' width='${s}' height='${s}' fill='none' stroke='${c}' stroke-width='1.1' stroke-linecap='round' stroke-linejoin='round' aria-hidden='true'><path d='M4 1.6h5.1l3.3 3.3V14a.6.6 0 0 1-.6.6H4a.6.6 0 0 1-.6-.6V2.2a.6.6 0 0 1 .6-.6z' fill='${c}' fill-opacity='.16'/><path d='M9 1.7V5h3.3'/>${KG[k]||''}</svg>`};
+const TY={docx:['Microsoft Word 文档','doc'],doc:['Word 97-2003 文档','doc'],docm:['启用宏的 Word 文档','doc'],dotx:['Word 模板','doc'],rtf:['RTF 文档','doc'],xlsx:['Microsoft Excel 工作表','xls'],pptx:['PowerPoint 演示文稿','ppt'],pdf:['PDF 文档','pdf'],txt:['文本文档','txt'],md:['Markdown 文档','txt'],png:['PNG 图片','img'],jpg:['JPG 图片','img'],jpeg:['JPG 图片','img'],webp:['WebP 图片','img'],zip:['压缩文件','zip'],exe:['应用程序','exe'],bat:['Windows 批处理文件','code'],mp4:['MP4 视频','vid'],m4a:['M4A 音频','aud'],fig:['Figma 文件','oth'],ps1:['PowerShell 脚本','code'],py:['Python 源文件','code'],json:['JSON 文件','code'],cpp:['C++ 源文件','code'],h:['C 头文件','code'],ini:['配置设置','oth'],dat:['DAT 文件','oth']};
+const extOf=n=>{const i=n.lastIndexOf('.');return i>0?n.slice(i+1).toLowerCase():''};
+const tyOf=e=>e.drive?['本地磁盘','drv']:e.dir?['文件夹','dir']:(TY[extOf(e.name)]||[extOf(e.name).toUpperCase()+' 文件','oth']);
+const UNIT={K:1024,M:1048576,G:1073741824,T:1099511627776};
+const psize=s=>{const m=/^([\d.]+)([KMGT]?)$/.exec(s);return m?Math.round(parseFloat(m[1])*(UNIT[m[2]]||1)):0};
+function fsize(b){if(b<1024)return b+' 字节';const u=['KB','MB','GB','TB'];let i=-1;do{b/=1024;i++}while(b>=1024&&i<3);return (b>=100?Math.round(b):+b.toFixed(1))+' '+u[i]}
+const gsz=b=>{const g=b/UNIT.G;return g>=1000?(g/1024).toFixed(1)+'TB':Math.round(g)+'G'};
+const NOW=new Date(2026,9,31,14,20);
+const p2=n=>String(n).padStart(2,'0');
+const pdate=s=>{const m=/(\d+)-(\d+)-(\d+) (\d+):(\d+)/.exec(s||'');return m?new Date(+m[1],m[2]-1,+m[3],+m[4],+m[5]):null};
+function fdate(d){if(!d)return '';const a=new Date(NOW.getFullYear(),NOW.getMonth(),NOW.getDate()),b=new Date(d.getFullYear(),d.getMonth(),d.getDate()),day=Math.round((a-b)/864e5),t=p2(d.getHours())+':'+p2(d.getMinutes());
+ if(day===0)return '今天 '+t;if(day===1)return '昨天 '+t;if(day<7)return '周'+'日一二三四五六'[d.getDay()]+' '+t;if(d.getFullYear()===NOW.getFullYear())return (d.getMonth()+1)+'月'+d.getDate()+'日';return d.getFullYear()+'/'+(d.getMonth()+1)+'/'+d.getDate()}
+const ffull=d=>d?d.getFullYear()+'-'+p2(d.getMonth()+1)+'-'+p2(d.getDate())+' '+p2(d.getHours())+':'+p2(d.getMinutes()):'';
+const RAW={
+'C:':'Program Files||2026-10-12 09:20\nUsers||2026-03-02 10:11\nWindows||2026-10-29 03:12',
+'C:/Users':'Public||2026-03-02 10:11\nSS||2026-10-31 09:02',
+'C:/Users/SS':'Desktop||2026-10-30 21:14\nDocuments||2026-10-31 09:40\nDownloads||2026-10-30 18:05\nMusic||2026-06-18 22:40\nPictures||2026-10-31 10:15\nVideos||2026-09-01 19:30\n~NTUSER.DAT|8M|2026-10-31 08:58',
+'C:/Users/SS/Desktop':'临时||2026-10-27 15:02\n发布说明.md|3.2K|2026-10-30 21:14\nPulse-Setup-1.0.58.exe|58.4M|2026-10-29 09:31\n会议室预订.xlsx|21K|2026-10-28 11:47\n~desktop.ini|282|2026-01-02 10:00',
+'C:/Users/SS/Documents':'WeChat Files||2026-10-31 09:40\nOffice 自定义模板||2026-05-09 14:20\n简历 2026.docx|184K|2026-09-12 20:05\n房租合同.pdf|2.4M|2026-08-02 11:20\n待办.txt|1.2K|2026-10-31 09:02\n家庭账本.xlsx|96K|2026-10-26 22:18',
+'C:/Users/SS/Documents/WeChat Files':'wxid_ss2026||2026-10-31 09:40\nAll Users||2026-02-11 08:30',
+'C:/Users/SS/Documents/WeChat Files/wxid_ss2026':'FileStorage||2026-10-31 09:40\n聊天记录备份.zip|412M|2026-10-01 23:10',
+'C:/Users/SS/Downloads':'安装包||2026-10-20 09:00\n季度报告.pdf|1.2M|2026-10-30 18:05\nffmpeg-release.zip|86.7M|2026-10-28 16:40\n发票-10月.pdf|210K|2026-10-29 10:12\n数据导出.xlsx|92K|2026-10-27 15:33\n截图 2026-10-30.png|412K|2026-10-30 14:02',
+'C:/Users/SS/Videos':'录屏 2026-10-30.mp4|128M|2026-10-30 16:44',
+'C:/Users/SS/Pictures':'截图||2026-10-31 10:15\n壁纸||2026-10-18 21:03\n相机||2026-09-30 18:20\n头像.png|286K|2026-07-14 12:30',
+'C:/Users/SS/Pictures/截图':'截图 2026-10-31 101530.png|512K|2026-10-31 10:15\n截图 2026-10-31 094412.png|388K|2026-10-31 09:44\n截图 2026-10-30 172208.png|1.1M|2026-10-30 17:22\n截图 2026-10-30 140251.png|402K|2026-10-30 14:02\n截图 2026-10-29 211037.png|734K|2026-10-29 21:10\n截图 2026-10-28 093015.png|256K|2026-10-28 09:30\n报价单.pdf|640K|2026-10-29 16:48\n录屏 2026-10-30.mp4|128M|2026-10-30 16:44',
+'C:/Users/SS/Pictures/壁纸':'山湖晨雾.jpg|4.2M|2026-10-18 21:03\n城市夜景.jpg|5.1M|2026-10-02 22:41\n海岸线航拍.jpg|6.3M|2026-09-21 13:05\n秋日森林.jpg|3.8M|2026-10-11 08:12\n雪山草甸.jpg|4.9M|2026-08-30 19:46\n窗边咖啡馆.webp|1.6M|2026-07-03 10:20\n极光.png|7.4M|2026-03-12 23:58\n沙丘.jpg|2.9M|2026-06-15 17:33\n樱花小径.jpg|3.3M|2026-04-02 09:15\n来源说明.txt|1K|2026-10-18 21:05',
+'D:':'Docs||2026-10-31 09:30\nProjects||2026-10-31 12:40\nInbox||2026-10-30 08:50',
+'D:/Docs':'Reports||2026-10-30 19:20\nNotes||2026-10-31 09:30\nDesign||2026-10-25 16:02\n索引.xlsx|48K|2026-10-21 10:00',
+'D:/Docs/Reports':'归档||2026-07-05 10:00\n2026 第二季度总结.docx|1.4M|2026-07-08 18:22\n2026 第三季度总结.docx|1.9M|2026-10-30 19:20\n经营数据 Q3.xlsx|860K|2026-10-29 17:05\n董事会汇报.pptx|12.6M|2026-10-30 11:48\n季度报告.pdf|1.2M|2026-10-30 18:05\n附录 数据口径.rtf|64K|2026-10-28 09:40\n报告模板.dotx|72K|2026-05-12 15:10\n修订记录.txt|4K|2026-10-30 19:21',
+'D:/Docs/Reports/归档':'2025 年度总结.docx|2.2M|2026-01-15 17:40\n2025 第四季度总结.docx|1.6M|2026-01-08 18:02',
+'D:/Docs/Notes':'草稿||2026-10-20 08:30\n会议纪要.txt|1.2K|2026-10-30 18:05\n周报 第44周.txt|3.4K|2026-10-31 09:30\n读书笔记.txt|18K|2026-10-22 23:12\n采购清单.txt|860|2026-10-26 20:45\n想法.md|2.1K|2026-10-29 22:37\n接口约定.md|6.8K|2026-10-24 15:20',
+'D:/Docs/Design':'图标||2026-10-25 16:02\n配色方案.pdf|640K|2026-10-22 10:12\n原型.fig|2.1M|2026-10-25 16:00',
+'D:/Projects':'pulse||2026-10-31 12:40\nwebsite||2026-10-28 20:15\nscripts||2026-10-19 09:12\ndotfiles||2026-09-03 21:40\nREADME.md|2K|2026-08-01 10:00',
+'D:/Projects/pulse':'assets||2026-10-29 15:12\ndocs||2026-10-31 15:20\nsrc||2026-10-31 15:35\ntools||2026-10-30 17:10\nCMakeLists.txt|38K|2026-10-31 15:33\nREADME.md|9.4K|2026-10-29 15:12\nbuild_release.bat|2K|2026-10-21 18:30',
+'D:/Projects/pulse/src':'app||2026-10-31 15:35\nfs||2026-10-29 15:12\nui||2026-10-31 15:35\nshell_bridge||2026-10-31 15:33\npicker_inprocess||2026-10-31 15:35',
+'D:/Projects/website':'public||2026-10-28 20:15\nsrc||2026-10-28 20:10\npackage.json|1.8K|2026-10-28 20:15',
+'D:/Projects/scripts':'backup.ps1|4.2K|2026-10-19 09:12\nrename.py|2.6K|2026-10-02 22:10',
+'D:/Inbox':'合同扫描件.pdf|3.4M|2026-10-31 08:50\n会议录音.m4a|12.8M|2026-10-30 15:20\n待办.txt|2K|2026-10-27 18:00',
+'E:':'素材||2026-10-31 10:02\n备份||2026-10-01 02:00',
+'E:/素材':'2026||2026-10-31 10:02\n字体||2026-06-22 14:11',
+'E:/素材/2026':'raw||2026-10-31 10:02\nexport||2026-10-30 22:18'
+};
+const DRIVES=[{id:'C:',label:'Win11',total:psize('476G'),free:psize('362G')},{id:'D:',label:'资料',total:psize('1863G'),free:psize('1240G')},{id:'E:',label:'素材盘',total:psize('931G'),free:psize('214G')}];
+const DENIED=new Set(['E:/备份']);
+const DN={'C:/Users':'用户','C:/Users/SS/Desktop':'桌面','C:/Users/SS/Documents':'文档','C:/Users/SS/Downloads':'下载','C:/Users/SS/Music':'音乐','C:/Users/SS/Pictures':'图片','C:/Users/SS/Videos':'视频'};
+const dname=p=>{if(p==='')return '此电脑';const d=DRIVES.find(x=>x.id===p);return d?d.label+' ('+d.id+')':DN[p]||p.slice(p.lastIndexOf('/')+1)};
+const FS={};
+function buildFS(){for(const k in FS)delete FS[k];
+ for(const [p,txt] of Object.entries(RAW))FS[p]=txt?txt.split('\n').map(l=>{const [n,s,d]=l.split('|');const hid=n[0]==='~',name=hid?n.slice(1):n;return {name,path:join(p,name),dir:!s,size:s?psize(s):0,m:pdate(d),hidden:hid}}):[];
+ FS['']=DRIVES.map(d=>({name:d.label+' ('+d.id+')',path:d.id,dir:true,drive:d,size:d.total,m:null}))}
+const known=p=>p===''||p in FS||DENIED.has(p)||((parentOf(p) in FS)&&(FS[parentOf(p)]||[]).some(e=>e.dir&&e.path===p));
+const APPS={word:{n:'Word',c:'#185ABD',g:'W'},wechat:{n:'微信',c:'#07C160',g:'微'},vscode:{n:'Visual Studio Code',c:'#1F6FB5',g:'VS'},notepad:{n:'记事本',c:'#3B8ED8',g:'记'},pulse:{n:'Pulse',c:'var(--accent)',g:''}};
+const appTile=(k,s)=>{const a=APPS[k];s=s||22;return `<span class='apt' style='background:${a.c};width:${s}px;height:${s}px;font-size:${Math.round(s*.48)}px'>${a.g||`<svg viewBox='0 0 16 16' width='${Math.round(s*.72)}' height='${Math.round(s*.72)}' fill='none' stroke='#fff' stroke-width='1.7' stroke-linecap='round' stroke-linejoin='round'>${IC.pulse}</svg>`}</span>`};
+const PULSE_OPEN=[['D:/Projects/pulse',1],['C:/Users/SS/Pictures/截图',0],['D:/Docs/Reports',0]];
+const QUICK=[['C:/Users/SS/Desktop','desk','桌面'],['C:/Users/SS/Downloads','dl','下载'],['C:/Users/SS/Documents','doc','文档'],['C:/Users/SS/Pictures','pic','图片'],['C:/Users/SS','home','个人文件夹']];
+const TPL={
+open:{label:'打开文件',app:'word',mode:'open',title:'打开',start:'D:/Docs/Reports',sel:['2026 第三季度总结.docx'],filters:[['所有 Word 文档','*.docx;*.docm;*.dotx;*.doc;*.rtf'],['Word 文档','*.docx'],['Word 模板','*.dotx'],['RTF 格式','*.rtf'],['所有文件','*.*']],split:['打开','以只读方式打开','以副本方式打开','在受保护的视图中打开','打开并修复'],panel:'preview',view:'details',recent:['D:/Docs/Reports','D:/Docs/Reports/归档','C:/Users/SS/Documents'],host:['文档1 - Word','page']},
+multi:{label:'多选文件',app:'wechat',mode:'multi',title:'打开',start:'C:/Users/SS/Pictures/截图',sel:['截图 2026-10-31 101530.png','截图 2026-10-31 094412.png','报价单.pdf'],filters:[['所有文件','*.*']],places:[['C:/Users/SS/Documents/WeChat Files','微信文件']],panel:'preview',view:'details',recent:['C:/Users/SS/Downloads','C:/Users/SS/Pictures/截图','D:/Inbox'],host:['微信','chat']},
+folder:{label:'选择文件夹',app:'vscode',mode:'folder',title:'打开文件夹',primary:'选择文件夹',start:'D:/Projects',sel:['pulse'],filters:[],panel:'preview',view:'details',recent:['D:/Projects/pulse','D:/Projects/website','D:/Projects/scripts'],host:['欢迎 - Visual Studio Code','editor']},
+save:{label:'另存为',app:'notepad',mode:'save',title:'另存为',start:'D:/Docs/Notes',name:'会议纪要 2026-10-31',filters:[['文本文档','*.txt'],['所有文件','*.*']],defExt:'txt',opts:[{t:'combo',id:'enc',label:'编码',items:['ANSI','UTF-16 LE','UTF-16 BE','UTF-8','带有 BOM 的 UTF-8'],v:'UTF-8'}],panel:'none',view:'details',recent:['D:/Docs/Notes','C:/Users/SS/Desktop','C:/Users/SS/Documents'],host:['*会议纪要 - 记事本','text']},
+saveprops:{label:'另存为 · 带属性',app:'word',mode:'save',title:'另存为',start:'D:/Docs/Reports',name:'2026 第三季度总结（终稿）',filters:[['Word 文档','*.docx'],['启用宏的 Word 文档','*.docm'],['Word 97-2003 文档','*.doc'],['PDF','*.pdf'],['RTF 格式','*.rtf'],['纯文本','*.txt']],defExt:'docx',opts:[{t:'check',id:'thumb',label:'保存缩略图',v:true}],props:[['作者','list',['SS']],['标记','list',['季度报告','财务']],['标题','text','2026 年第三季度经营总结'],['主题','text','']],panel:'props',view:'details',recent:['D:/Docs/Reports','D:/Docs/Reports/归档','C:/Users/SS/Desktop'],host:['2026 第三季度总结（终稿） - Word','page']},
+image:{label:'选择图片',app:'pulse',mode:'image',title:'选择背景图',primary:'选择',start:'C:/Users/SS/Pictures/壁纸',sel:['山湖晨雾.jpg'],filters:[['支持的图片','*.jpg;*.jpeg;*.png;*.bmp;*.webp;*.jfif']],panel:'preview',view:'icons',recent:['C:/Users/SS/Pictures/壁纸','C:/Users/SS/Pictures/相机','E:/素材/2026'],host:['Pulse 设置 · 外观','settings']}
+};
+const ORDER=['open','multi','folder','save','saveprops','image'];
+const STATES=[['normal','正常'],['loading','加载中'],['empty','空文件夹'],['denied','无法访问'],['error','输入有误'],['exists','同名文件']];
+const SCENES={'山湖晨雾':['#9DB7C8','#E9DCC6','#5E7684','#41596A'],'城市夜景':['#141C33','#E98A3F','#232A3E','#0E1322'],'海岸线航拍':['#2AA7CF','#F1E1B4','#E2C88F','#1B7E9C'],'秋日森林':['#E8A64A','#B4481C','#6E2A12','#4B1E0E'],'雪山草甸':['#6CA4D8','#EAF2F8','#5C8E4A','#3E6B33'],'窗边咖啡馆':['#E7C8A0','#6B4E3A','#4A3527','#2E2119'],'极光':['#0A1B2A','#24C79A','#0B2433','#06131C'],'沙丘':['#F6D9A6','#DE9A55','#C27A3A','#A86124'],'樱花小径':['#F7D2DD','#FDF2F5','#C88AA0','#9E6A7E'],'头像':['#C7D2FE','#818CF8','#6366F1','#4F46E5']};
+function thumbBg(name){const base=name.replace(/\.[^.]+$/,'');const s=SCENES[base];
+ if(s)return `radial-gradient(120% 60% at 25% 104%,${s[3]} 0 49%,transparent 50%),radial-gradient(90% 55% at 82% 106%,${s[2]} 0 49%,transparent 50%),linear-gradient(180deg,${s[0]},${s[1]})`;
+ return `linear-gradient(90deg,transparent 0 24%,rgba(255,255,255,.07) 24% 25%,transparent 25%),linear-gradient(180deg,#3A475C 0 13%,#27303F 13% 100%)`}
+const S={t:'open',state:'normal',cwd:'',back:[],fwd:[],sel:new Set(),cur:null,anchor:null,view:'details',sort:'name',desc:false,filter:0,showAll:false,hidden:false,q:'',name:'',typed:false,opts:{},props:[],panel:true,addr:false,addrBad:false,newFolder:false,confirm:false,done:null,shut:{},tokAdd:-1};
+const T=()=>TPL[S.t];
+const COL=new Intl.Collator('zh-CN',{numeric:true});
+const QC={desk:'#4CC2FF',dl:'#34D399',doc:'#60A5FA',pic:'#F5A524',home:'#A78BFA'};
+const findEntry=p=>{const k=p.toLowerCase(),par=parentOf(p);return par===null?null:(FS[par]||[]).find(e=>e.path.toLowerCase()===k)||null};
+const label=e=>e.dir?dname(e.path):e.name;
+function pats(){const f=T().filters[S.filter];return f?f[1].split(';').map(x=>x.trim().toLowerCase()):['*.*']}
+function matches(n){n=n.toLowerCase();return pats().some(p=>p==='*.*'||p==='*'||(p.startsWith('*.')&&n.endsWith(p.slice(1))))}
+function listing(){const m=T().mode,items=[];let hiddenN=0;
+ for(const e of FS[S.cwd]||[]){
+  if(e.hidden&&!S.hidden)continue;
+  if(!e.dir){if(m==='folder'||(!matches(e.name)&&!(S.showAll&&m!=='image'))){hiddenN++;continue}}
+  items.push(e)}
+ const q=S.q.trim().toLowerCase(),d=S.desc?-1:1;
+ const out=q?items.filter(e=>label(e).toLowerCase().includes(q)):items;
+ out.sort((a,b)=>(b.dir-a.dir)||d*(S.sort==='m'?(a.m||0)-(b.m||0):S.sort==='size'?a.size-b.size:S.sort==='type'?COL.compare(tyOf(a)[0],tyOf(b)[0])||COL.compare(a.name,b.name):COL.compare(label(a),label(b))));
+ return {items:out,hiddenN}}
+function curExt(){const p=pats()[0];return p&&p.startsWith('*.')&&p!=='*.*'?p.slice(2):(T().defExt||'')}
+function typedExt(n){const e=extOf(n);return e&&(TY[e]||pats().includes('*.'+e))?e:''}
+function saveTarget(){const n=S.name.trim();const file=typedExt(n)||!curExt()?n:n+'.'+curExt();return {file,path:join(S.cwd,file)}}
+const BADCH=/[\\/:*?"<>|]/;
+function resolveTyped(n){const p=/^[A-Za-z]:/.test(n)?n.split(BS).join('/').replace(/\/+$/,''):join(S.cwd,n);return {p,e:p.length===2?(FS['']||[]).find(x=>x.path.toLowerCase()===p.toLowerCase()):findEntry(p)}}
+function canCreate(){return S.cwd!==''&&!DENIED.has(S.cwd)&&S.state!=='loading'&&S.state!=='denied'}
+function status(){const t=T(),m=t.mode;
+ if(S.state==='loading')return {k:'busy',text:'正在加载…'};
+ if(S.state==='denied'||DENIED.has(S.cwd))return {k:'err',text:'当前位置无法访问，请换一个文件夹'};
+ if(m==='save'){const n=S.name.trim();
+  if(!n)return {k:'info',text:'输入文件名，或从上方选择'};
+  if(BADCH.test(n))return {k:'err',text:'文件名不能包含这些字符：\\ / : * ? " < > |'};
+  if(S.cwd==='')return {k:'err',text:'不能直接保存到「此电脑」，请先打开一个磁盘或文件夹'};
+  const tg=saveTarget(),ex=S.state==='empty'?null:(FS[S.cwd]||[]).find(e=>!e.dir&&e.name.toLowerCase()===tg.file.toLowerCase());
+  if(ex)return {k:'warn',pre:'已有同名文件，保存时会询问是否替换：',path:tg.path,on:1,exists:ex,paths:[tg.path]};
+  return {k:'ok',pre:'将保存到',path:tg.path,on:1,paths:[tg.path]}}
+ if(m==='folder'){
+  if(S.typed&&S.name.trim()){const r=resolveTyped(S.name.trim());if(!r.e||!r.e.dir)return {k:'err',text:`找不到「${disp(r.p)}」`};return {k:'ok',pre:'将选择',path:r.p,on:1,paths:[r.p]}}
+  const tg=[...S.sel][0]||(S.cwd!==''?S.cwd:null);
+  if(!tg)return {k:'info',text:'请选择一个文件夹或磁盘。'};
+  return {k:'ok',pre:'将选择',path:tg,on:1,paths:[tg]}}
+ if(m==='multi'){const typed=S.name.trim();
+  if(typed&&(typed.split('"').length-1)%2)return {k:'err',text:'请为每个文件名使用配对的引号。'};
+  const files=[...S.sel].map(findEntry).filter(e=>e&&!e.dir);
+  if(!files.length)return {k:'info',text:'选择一个或多个文件，按住 Ctrl 或 Shift 可以多选'};
+  return {k:'ok',text:`已选 ${files.length} 个文件，共 ${fsize(files.reduce((a,e)=>a+e.size,0))}`,on:1,paths:files.map(e=>e.path)}}
+ const n=S.name.trim();
+ if(!n)return {k:'info',text:m==='image'?'请选择一张图片':'输入文件名，或从上方选择'};
+ const r=resolveTyped(n);
+ if(!r.e)return {k:'err',text:`找不到「${disp(r.p)}」`};
+ if(r.e.dir)return {k:'info',pre:'按 Enter 进入',path:r.p,on:1,nav:r.p};
+ if(!matches(r.e.name))return {k:'err',text:'所选文件不符合当前文件类型。'};
+ return {k:'ok',pre:m==='image'?'将使用':'将打开',path:r.p,on:1,paths:[r.p]}}
+function reset(k){S.t=k;buildFS();const t=T();
+ Object.assign(S,{state:'normal',cwd:t.start,back:[],fwd:[],view:t.view,sort:'name',desc:false,filter:0,showAll:false,hidden:false,q:'',typed:false,panel:t.panel!=='none',addr:false,addrBad:false,newFolder:false,confirm:false,done:null,tokAdd:-1});
+ S.sel=new Set((t.sel||[]).map(n=>join(t.start,n)));S.cur=[...S.sel][0]||null;S.anchor=S.cur;
+ S.opts={};(t.opts||[]).forEach(o=>{S.opts[o.id]=o.v});
+ S.props=(t.props||[]).map(p=>[p[0],p[1],Array.isArray(p[2])?p[2].slice():p[2]]);
+ S.name=t.mode==='save'?t.name:t.mode==='multi'?'':S.cur?label(findEntry(S.cur)):''}
+function syncName(){const m=T().mode;if(m==='save'||m==='multi')return;
+ const e=S.cur&&S.sel.has(S.cur)?findEntry(S.cur):null;
+ if(m==='folder'){S.name=e&&e.dir?label(e):'';S.typed=false;return}
+ if(e&&!e.dir){S.name=e.name;S.typed=false}}
+function go(p,push){if(p===S.cwd&&!S.addr)return;
+ if(push!==false&&p!==S.cwd){S.back.push(S.cwd);S.fwd=[]}
+ Object.assign(S,{cwd:p,sel:new Set(),cur:null,anchor:null,q:'',addr:false,addrBad:false,newFolder:false,confirm:false,state:'normal',notice:''});
+ if(!S.typed&&T().mode!=='save'&&T().mode!=='multi')S.name='';
+ render()}
+function back(){if(!S.back.length)return;S.fwd.push(S.cwd);go(S.back.pop(),false)}
+function fwd(){if(!S.fwd.length)return;S.back.push(S.cwd);go(S.fwd.pop(),false)}
+function up(){const p=parentOf(S.cwd);if(p!==null)go(p)}
+function setState(k){const t=T(),m=t.mode,prev=S.state;S.state=k;S.confirm=false;S.notice='';
+ if(prev==='error'||prev==='exists'){S.typed=false;S.name=m==='save'?t.name:'';syncName()}
+ if(k==='empty'||k==='loading'||k==='denied'){S.sel=new Set();S.cur=null;S.anchor=null;if(m!=='save')S.name=''}
+ if(k==='normal'&&S.cwd===t.start&&!S.sel.size){S.sel=new Set((t.sel||[]).map(n=>join(t.start,n)));S.cur=[...S.sel][0]||null;S.anchor=S.cur;syncName()}
+ if(k==='error'){S.typed=true;
+  if(m==='save')S.name='会议:纪要';
+  else if(m==='open')S.name='2026 第三季度总结（修订）.docx';
+  else if(m==='multi')S.name='"截图 2026-10-31 101530.png" "报价单.pdf';
+  else if(m==='folder')S.name='D:'+BS+'Projects'+BS+'pulse-old';
+  else S.name='来源说明.txt'}
+ else if(k==='exists'){const ex=(FS[S.cwd]||[]).find(e=>!e.dir&&matches(e.name));if(ex){S.name=ex.name.replace(/\.[^.]+$/,'');S.confirm=true}}
+ render()}
+function renderTop(){
+ $('tpls').innerHTML=ORDER.map(k=>{const t=TPL[k];return `<button class='tp${k===S.t?' on':''}' type='button' data-t='${k}' aria-pressed='${k===S.t}'>${appTile(t.app,26)}<span><b>${t.label}</b><small>${esc(APPS[t.app].n)} · ${esc(t.title)}</small></span></button>`}).join('');
+ $('states').innerHTML=STATES.map(([k,l])=>`<button class='st${S.state===k?' on':''}' type='button' data-s='${k}' ${k==='exists'&&T().mode!=='save'?"disabled title='仅在保存时出现'":''}>${l}</button>`).join('');
+ const dark=document.documentElement.dataset.theme==='dark';
+ $('theme').innerHTML=ic(dark?'sun':'moon',15)+(dark?'浅色':'深色')}
+function renderHost(){const t=T(),a=APPS[t.app],[title,kind]=t.host;
+ const L=(n,w)=>Array.from({length:n},(_,i)=>`<i style='width:${w[i%w.length]}%;${w[i%w.length]?'':'background:none'}'></i>`).join('');
+ const B={page:`<div class='hcol pg'>${L(15,[92,86,95,60,0,88,94,79,90,52])}</div>`,chat:`<div class='hcol n'>${L(10,[80,64,72,58])}</div><div class='hcol'>${L(11,[46,62,38,0,70,54])}</div>`,editor:`<div class='hcol n'>${L(11,[70,55,62,48,66])}</div><div class='hcol'>${L(15,[40,64,52,78,30,58,70,44])}</div>`,text:`<div class='hcol'>${L(13,[64,88,72,40,0,80,58,90])}</div>`,settings:`<div class='hcol n'>${L(8,[70,60,66,52])}</div><div class='hcol'>${L(9,[50,90,74,0,62])}</div>`};
+ $('host').style.setProperty('--hc',a.c);
+ $('host').innerHTML=`<div class='hbar'>${appTile(t.app,18)}<span>${esc(title)}</span><span class='sp'></span>${ic('x',12)}</div><div class='htool'></div><div class='hbody'>${B[kind]}</div>`}
+function renderTitle(){const t=T(),a=APPS[t.app];
+ $('ttl').innerHTML=`${appTile(t.app,20)}<div class='who' id='dlgTitle'><b>${esc(a.n)}</b><span>· ${esc(t.title)}</span></div><span class='sp'></span><span class='brand'>${sv(IC.pulse,14)}Pulse 对话框</span><button class='cls' type='button' data-a='cancel' title='取消 (Esc)' aria-label='关闭'>${ic('x',14)}</button>`}
+function segs(p){const out=[{p:'',l:'此电脑'}];if(p==='')return out;let acc='';p.split('/').forEach((x,i)=>{acc=i?acc+'/'+x:x;out.push({p:acc,l:dname(acc)})});return out}
+function renderAddr(){const all=segs(S.cwd),t=T();
+ let crumb;
+ if(S.addr)crumb=`<div class='crumb ed${S.addrBad?' bad':''}'><input id='addrIn' value='${esc(S.cwd===''?'':disp(S.cwd))}' spellcheck='false' placeholder='输入路径，按 Enter 前往' aria-label='地址'></div>`;
+ else{const shown=all.length>5?[all[0],{more:1},...all.slice(-3)]:all;
+  crumb=`<div class='crumb' data-a='addrEdit' title='${esc(disp(S.cwd))}'><span style='color:var(--t2);margin-right:2px'>${ic('pc',14)}</span>${shown.map((s,i)=>(i?`<span class='csep'>${ic('chev',10)}</span>`:'')+(s.more?`<button class='cs' type='button' data-a='crumbMore' aria-label='更多位置'>…</button>`:`<button class='cs${i===shown.length-1?' last':''}' type='button' data-go='${esc(s.p)}'>${esc(s.l)}</button>`)).join('')}<span class='cfill' data-a='addrEdit'></span><button class='ib' type='button' data-a='refresh' title='刷新 (F5)' aria-label='刷新'>${ic('refresh',14)}</button></div>`}
+ $('adr').innerHTML=`<button class='ib' type='button' data-a='back' ${S.back.length?'':'disabled'} title='后退 (Alt+←)' aria-label='后退'>${ic('back')}</button><button class='ib' type='button' data-a='fwd' ${S.fwd.length?'':'disabled'} title='前进 (Alt+→)' aria-label='前进'>${ic('fwd')}</button><button class='ib' type='button' data-a='up' ${S.cwd!==''?'':'disabled'} title='上一级 (Alt+↑)' aria-label='上一级'>${ic('up')}</button>${crumb}<label class='srch'>${ic('search',14)}<input id='q' type='search' placeholder='搜索当前文件夹' value='${esc(S.q)}' autocomplete='off' aria-label='搜索当前文件夹'></label><span class='vsep'></span><button class='ib' id='bNew' type='button' data-a='newf' ${canCreate()?'':'disabled'} title='新建文件夹 (Ctrl+Shift+N)' aria-label='新建文件夹'>${ic('newf')}</button><div class='vseg' role='group' aria-label='视图'>${[['details','det','详细信息'],['list','lst','列表'],['icons','grid','大图标']].map(v=>`<button class='ib${S.view===v[0]?' on':''}' type='button' data-view='${v[0]}' title='${v[2]}' aria-label='${v[2]}' aria-pressed='${S.view===v[0]}'>${ic(v[1],15)}</button>`).join('')}</div><button class='ib${S.panel?' on':''}' id='bPanel' type='button' data-a='panel' title='${t.panel==='props'?'属性窗格':'预览窗格'} (Alt+P)' aria-label='${t.panel==='props'?'属性窗格':'预览窗格'}' aria-pressed='${S.panel}'>${ic('panel')}</button><button class='ib' type='button' data-a='more' title='排序和显示' aria-label='排序和显示'>${ic('more')}</button>`}
+function renderSide(){const t=T();
+ const sec=(id,icon,title,extra,rows,goPath)=>{const shut=S.shut[id];return `<div class='sh${shut?' shut':''}' data-sec='${id}' role='button' tabindex='0' aria-expanded='${!shut}'><span style='display:grid;color:var(--t2)'>${icon}</span><span class='sp'${goPath!=null?` data-go='${goPath}'`:''}>${title}</span>${extra||''}<span class='chv'>${ic('dn',12)}</span></div>${shut?'':rows}`};
+ let lit=false;const on=p=>!lit&&p===S.cwd?(lit=true,' on'):'';
+ const row=(p,icon,l,trail)=>`<div class='si${on(p)}' data-go='${esc(p)}' role='button' tabindex='0' title='${esc(disp(p))}'>${icon}<span class='nm'>${esc(l)}</span>${trail||''}</div>`;
+ let h='';
+ if(t.places)h+=sec('app',appTile(t.app,16),esc(APPS[t.app].n)+' 添加的位置','',t.places.map(([p,l])=>row(p,FOLDER(16),l)).join(''));
+ h+=sec('pulse',sv(IC.pulse,16),'在 Pulse 中打开','',PULSE_OPEN.map(([p,c])=>row(p,FOLDER(16),dname(p),c?`<span class='tag' title='跳到 Pulse 当前的文件夹'>当前 · Ctrl+G</span>`:'')).join(''));
+ h+=sec('quick',ic('pin',16),'快速访问','',QUICK.map(([p,i,l])=>row(p,`<span style='display:grid;color:${QC[i]}'>${ic(i,16)}</span>`,l)).join(''));
+ h+=sec('recent',ic('clock',16),'最近使用','',t.recent.map(p=>row(p,FOLDER(16),dname(p))).join(''));
+ h+=sec('pc',ic('pc',16),'此电脑','',DRIVES.map(d=>{const used=d.total-d.free;return `<div class='si dr${on(d.id)}' data-go='${d.id}' role='button' tabindex='0' title='可用 ${fsize(d.free)}，共 ${fsize(d.total)}'><div class='l'>${DRIVE(16)}<span class='nm'>${esc(d.label)} (${d.id})</span><span class='cap'>${gsz(used)} / ${gsz(d.total)}</span></div><div class='bar'><i style='width:${Math.round(used/d.total*100)}%'></i></div></div>`}).join(''),'');
+ $('side').innerHTML=h}
+function primaryLabel(){const t=T();return t.primary||(t.mode==='save'?'保存':t.mode==='folder'?'选择此文件夹':t.mode==='image'?'选择':'打开')}
+function iconFor(e,s){return e.drive?DRIVE(s):e.dir?FOLDER(s):FILE(tyOf(e)[1],s)}
+function renderList(){const t=T(),m=t.mode,{items,hiddenN}=listing(),f=t.filters[S.filter];
+ const denied=S.state==='denied'||DENIED.has(S.cwd),busy=S.state==='loading',empty=S.state==='empty';
+ let chips='';
+ if(!busy&&!denied){
+  if(S.q)chips+=`<span class='chip'>搜索「${esc(S.q)}」· ${items.length} 项<button type='button' data-a='clearQ'>清除</button></span>`;
+  if(hiddenN&&!empty){if(m==='folder')chips+=`<span class='chip'>只显示文件夹 · 隐藏了 ${hiddenN} 个文件</span>`;
+   else if(m==='image')chips+=`<span class='chip'>只显示图片 · 隐藏了 ${hiddenN} 项</span>`;
+   else chips+=`<span class='chip' title='${esc(f[1])}'>按「${esc(f[0])}」筛选 · 隐藏了 ${hiddenN} 项<button type='button' data-a='showAll'>显示全部</button></span>`}
+  if(S.showAll&&m!=='image'&&m!=='folder')chips+=`<span class='chip'>正在显示全部文件<button type='button' data-a='showAll'>只看匹配的</button></span>`}
+ const n=empty?0:items.length,cnt=busy||denied?'':`${n} 项${S.sel.size>1?` · 已选 ${S.sel.size} 项`:''}`;
+ const lh=`<div class='lh'>${S.cwd===''?`<span style='display:grid;color:var(--t2)'>${ic('pc',16)}</span>`:FOLDER(16)}<b>${esc(dname(S.cwd))}</b>${chips}<span class='sp'></span><span class='cnt'>${cnt}</span></div>`;
+ const drives=S.cwd==='';
+ const C=[['name','名称'],['m',drives?'类型':'修改日期'],['type',drives?'可用空间':'类型'],['size',drives?'总大小':'大小']];
+ const cols=`<div class='cols'>${C.map(([k,l])=>`<button type='button' data-sort='${k}' class='${!drives&&S.sort===k?'on':''}'>${l}${!drives&&S.sort===k?ic(S.desc?'dn':'upc',10):''}</button>`).join('')}</div>`;
+ let body;
+ if(busy)body=cols+`<div class='lst' aria-busy='true'>${[46,62,38,55,70,44,58,36,64,50].map(w=>`<div class='skel'><i style='width:18px;height:18px;border-radius:4px'></i><i style='width:${w}%'></i><span class='sp'></span><i style='width:72px'></i><i style='width:48px'></i></div>`).join('')}</div>`;
+ else if(denied)body=`<div class='banner' role='alert'>${ic('lock',18)}<div><b>无法打开此位置</b><p>没有访问「${esc(disp(S.cwd))}」的权限。可以重试，或返回上一级换个位置。</p></div><div class='bb'><button class='btn' type='button' data-a='retry'>重试</button><button class='btn' type='button' data-a='up'>返回上一级</button></div></div>`;
+ else if((empty||!items.length)&&!S.newFolder){
+  if(S.q&&!empty)body=`<div class='empty'><div class='eic'>${ic('search',26)}</div><b>没有找到「${esc(S.q)}」</b><span>只在当前文件夹中按名称查找，不含子文件夹</span><button class='btn' type='button' data-a='clearQ' style='margin-top:8px'>清除搜索</button></div>`;
+  else{const [b,s]=m==='folder'?['这里没有子文件夹',`点「${primaryLabel()}」即可使用当前位置`]:m==='image'?['这里没有图片','支持 JPG、PNG、BMP、WebP 格式']:m==='save'?['这个文件夹是空的','可以直接保存到这里']:['这个文件夹是空的','换个位置，或在地址栏输入路径'];
+   body=`<div class='empty'><div class='eic'>${m==='image'?ic('pic',26):FOLDER(28)}</div><b>${b}</b><span>${s}</span>${canCreate()&&(m==='save'||m==='folder')?`<button class='btn' type='button' data-a='newf' style='margin-top:8px'>新建文件夹</button>`:''}</div>`}}
+ else{const nf=S.newFolder?{nf:1}:null,list=nf?[nf,...items]:items;
+  const dim=e=>e.hidden||(!e.dir&&S.showAll&&!matches(e.name));
+  const cls=e=>(S.sel.has(e.path)?' sel':'')+(S.cur===e.path?' cur':'')+(dim(e)?' dim':'');
+  const nfIn=`<input id='nfIn' value='新建文件夹' aria-label='文件夹名称' spellcheck='false'>`;
+  if(S.view==='icons')body=`<div class='lst' id='lst' tabindex='0' role='listbox' aria-multiselectable='${m==='multi'}' aria-label='文件'><div class='gv'>${list.map(e=>e.nf?`<div class='gi sel'><span class='th'>${FOLDER(44)}</span>${nfIn}</div>`:`<div class='gi${cls(e)}' data-p='${esc(e.path)}' role='option' aria-selected='${S.sel.has(e.path)}' title='${esc(label(e))}'><span class='th' ${tyOf(e)[1]==='img'?`style="background:${thumbBg(e.name)}"`:''}>${tyOf(e)[1]==='img'?'':iconFor(e,e.dir||e.drive?44:38)}</span><span>${esc(label(e))}</span></div>`).join('')}</div></div>`;
+  else if(S.view==='list')body=`<div class='lst' id='lst' tabindex='0' role='listbox' aria-multiselectable='${m==='multi'}' aria-label='文件'><div class='lv'>${list.map(e=>e.nf?`<div class='lr sel'>${FOLDER(16)}${nfIn}</div>`:`<div class='lr${cls(e)}' data-p='${esc(e.path)}' role='option' aria-selected='${S.sel.has(e.path)}' title='${esc(label(e))}'>${iconFor(e,16)}<span>${esc(label(e))}</span></div>`).join('')}</div></div>`;
+  else body=cols+`<div class='lst' id='lst' tabindex='0' role='listbox' aria-multiselectable='${m==='multi'}' aria-label='文件'>${list.map(e=>{
+   if(e.nf)return `<div class='row sel'><span class='fn'>${FOLDER(18)}${nfIn}</span><span class='fd c2'>${fdate(NOW)}</span><span class='fd c3'>文件夹</span><span></span></div>`;
+   const d=e.drive;return `<div class='row${cls(e)}' data-p='${esc(e.path)}' role='option' aria-selected='${S.sel.has(e.path)}'><span class='fn'>${iconFor(e,18)}<span>${esc(label(e))}</span></span><span class='fd c2'>${d?'本地磁盘':fdate(e.m)}</span><span class='fd c3'>${d?`<span class='dbar'><i><b style='width:${Math.round((d.total-d.free)/d.total*100)}%'></b></i>${fsize(d.free)}</span>`:tyOf(e)[0]}</span><span class='fd fz'>${d?fsize(d.total):e.dir?'':fsize(e.size)}</span></div>`}).join('')}</div>`}
+ $('card').innerHTML=lh+body;
+ const nfi=$('nfIn');if(nfi){nfi.focus();nfi.select()}
+ const c=$('lst')&&$('lst').querySelector('.cur');if(c)c.scrollIntoView({block:'nearest'})}
+const PREV={'会议纪要.txt':['10 月 30 日 产品例会','1. 对话框跳转条下周开始灰度','2. 保存对话框改为在底栏确认覆盖','3. Edge 回归由 SS 跟进，周五前给结论'],'2026 第三季度总结.docx':['2026 年第三季度经营总结','一、总体情况','本季度收入同比增长 18%，毛利率提升 2.4 个百分点。','二、重点项目'],'周报 第44周.txt':['第 44 周周报','完成：打开对话框接入 Word、Excel','进行中：保存确认和属性面板'],'修订记录.txt':['v3 10-30 补充附录口径','v2 10-28 调整第二节结构']};
+const DIMS=['3840 × 2160','2560 × 1440','4032 × 3024','6000 × 4000','1920 × 1080'];
+function renderPanel(){const t=T(),el=$('pnl');
+ if(!S.panel){el.hidden=true;return}el.hidden=false;
+ if(t.panel==='props'){let h=`<div class='phd'>${appTile(t.app,18)}<span>文档属性</span><small>由 ${esc(APPS[t.app].n)} 提供</small></div>`;
+  S.props.forEach((p,i)=>{if(p[1]==='list')h+=`<div class='fld'><span>${p[0]}</span><div class='toks'>${p[2].map((v,j)=>`<span class='tok'><span>${esc(v)}</span><button type='button' data-tokdel='${i}:${j}' aria-label='删除${p[0]} ${esc(v)}'>${ic('x',11)}</button></span>`).join('')}${S.tokAdd===i?`<input class='tokin' id='tokIn' data-tok='${i}' placeholder='按 Enter 添加' aria-label='添加${p[0]}'>`:`<button class='addt' type='button' data-tokadd='${i}'>+ 添加${p[0]}</button>`}</div></div>`;
+   else h+=`<label class='fld'><span>${p[0]}</span><input class='tx' data-prop='${i}' value='${esc(p[2])}' placeholder='添加${p[0]}'></label>`});
+  el.innerHTML=h+`<p class='pnote'>属性随文件一起保存，之后可以在文件属性和 Pulse 的详细信息窗格里查看。</p>`;const ti=$('tokIn');if(ti)ti.focus();return}
+ if(S.state==='loading'||S.state==='denied'||DENIED.has(S.cwd)){el.innerHTML=`<div class='empty'><div class='eic'>${ic('eye',24)}</div><span>选择文件以预览</span></div>`;return}
+ const sel=[...S.sel].map(findEntry).filter(Boolean);
+ if(sel.length>1){const tot=sel.reduce((a,e)=>a+e.size,0);
+  el.innerHTML=`<div class='ptt'><b>已选 ${sel.length} 项</b><span>共 ${fsize(tot)}</span></div><div class='stack'>${sel.slice(0,7).map(e=>`<div>${iconFor(e,16)}<span>${esc(label(e))}</span></div>`).join('')}${sel.length>7?`<div><span>另外 ${sel.length-7} 项</span></div>`:''}</div><p class='pnote'>按住 Ctrl 单击可增减，按住 Shift 单击可连续选择。</p>`;return}
+ const e=sel[0]||null;
+ if(!e){const all=FS[S.cwd]||[],nd=all.filter(x=>x.dir).length,nf=all.length-nd;
+  el.innerHTML=`<div class='pvw'>${S.cwd===''?DRIVE(56):FOLDER(56)}</div><div class='ptt'><b>${esc(dname(S.cwd))}</b><span>${S.cwd===''?`${DRIVES.length} 个磁盘`:`${nd} 个文件夹，${nf} 个文件`}</span></div><p class='pnote'>选择文件以预览。</p>`;return}
+ const ty=tyOf(e);let pv;
+ if(ty[1]==='img')pv=`<div class='pvw' style="background:${thumbBg(e.name)}"></div>`;
+ else if(['doc','txt','pdf'].includes(ty[1])){const L=PREV[e.name];pv=`<div class='pvw'><div class='doc'>${L?`<b>${esc(L[0])}</b>${L.slice(1).map(x=>`<span>${esc(x)}</span>`).join('')}`:`<b>${esc(e.name.replace(/\.[^.]+$/,''))}</b>`}${'<i></i>'.repeat(L?4:9)}</div></div>`}
+ else pv=`<div class='pvw'>${iconFor(e,56)}</div>`;
+ const kv=e.drive?[['类型','本地磁盘'],['可用',fsize(e.drive.free)],['总大小',fsize(e.drive.total)]]:e.dir?[['类型','文件夹'],['包含',`${(FS[e.path]||[]).length} 项`],['修改时间',ffull(e.m)]]:[['类型',ty[0]],...(ty[1]==='img'?[['尺寸',DIMS[e.name.length%DIMS.length]]]:[]),['大小',fsize(e.size)],['修改时间',ffull(e.m)],['位置',disp(S.cwd)]];
+ el.innerHTML=pv+`<div class='ptt'><b>${esc(label(e))}</b><span>${esc(ty[0])}${e.dir?'':' · '+fsize(e.size)}</span></div><div class='kv'>${kv.map(([k,v])=>`<span>${k}</span><b>${esc(v)}</b>`).join('')}</div>`}
+function renderR1(){const t=T(),m=t.mode,st=status(),f=t.filters[S.filter],lab=m==='folder'?'文件夹':'文件名',bad=st.k==='err'&&S.state!=='denied'?' bad':'';
+ let field;
+ if(m==='multi'){const files=[...S.sel].map(findEntry).filter(e=>e&&!e.dir);
+  field=`<div class='nf${bad}' data-a='focusName'>${files.slice(0,3).map(e=>`<span class='fk' title='${esc(e.name)}'>${FILE(tyOf(e)[1],14)}<span>${esc(e.name)}</span><button type='button' data-unsel='${esc(e.path)}' aria-label='移除 ${esc(e.name)}'>${ic('x',11)}</button></span>`).join('')}${files.length>3?`<span class='more'>另外 ${files.length-3} 个</span>`:''}<input id='nameIn' value='${esc(S.name)}' placeholder='${files.length?'':'输入文件名，或从上方选择'}' autocomplete='off' spellcheck='false' aria-label='文件名'></div>`}
+ else field=`<div class='nf${bad}' data-a='focusName'><input id='nameIn' value='${esc(S.name)}' placeholder='${m==='folder'?'输入路径，按 Enter 前往':'输入文件名，或从上方选择'}' autocomplete='off' spellcheck='false' aria-label='${lab}'>${m==='save'?`<span class='ext' id='extPill' title='按所选类型自动添加' ${typedExt(S.name.trim())||!curExt()?'hidden':''}>.${esc(curExt())}</span>`:''}</div>`;
+ $('r1').className='r1'+(m==='folder'?' nf1':'');
+ $('r1').innerHTML=`<label class='lab' for='nameIn'>${lab}</label>${field}${m==='folder'?'':`<button class='typ' type='button' data-a='types' aria-haspopup='menu' title='${esc(f[0])} (${esc(f[1])})'><span>${esc(f[0])} <small>(${esc(f[1])})</small></span>${ic('dn',12)}</button>`}`}
+function renderHelp(){const st=S.notice?{k:'err',text:S.notice}:status(),el=$('help');el.hidden=S.confirm;if(S.confirm)return;
+ el.className='help '+st.k;
+ el.innerHTML=`<span style='display:grid;${st.k==='ok'?'color:var(--ok)':''}'>${ic({ok:'ok',info:'info',warn:'warn',err:'err',busy:'spin'}[st.k],14)}</span><span>${st.pre?esc(st.pre)+` <span class='p'>${esc(disp(st.path))}</span>`:esc(st.text)}</span>`}
+function freeName(file){const i=file.lastIndexOf('.'),stem=i>0?file.slice(0,i):file,ext=i>0?file.slice(i):'',has=x=>(FS[S.cwd]||[]).some(e=>e.name.toLowerCase()===x.toLowerCase());let n=2;while(has(`${stem} (${n})${ext}`))n++;return `${stem} (${n})${ext}`}
+function renderActs(){const t=T(),st=status(),el=$('acts');
+ if(S.confirm){const tg=saveTarget(),ex=(FS[S.cwd]||[]).find(e=>e.name.toLowerCase()===tg.file.toLowerCase()),alt=freeName(tg.file);
+  el.innerHTML=`<div class='ow' style='flex:1' role='alertdialog' aria-label='同名文件'>${ic('warn',18)}<b>「${esc(tg.file)}」已存在，要替换吗？</b><p>${ex?`现有文件修改于 ${fdate(ex.m)}，${fsize(ex.size)}。`:''}替换后原内容无法恢复。</p><div class='bb'><button class='btn' type='button' data-a='owBack'>返回修改</button><button class='btn' type='button' data-a='owRename' title='${esc(disp(join(S.cwd,alt)))}'>保存为「${esc(alt)}」</button><button class='btn pri0' type='button' id='owReplace' data-a='owReplace'>替换</button></div></div>`;return}
+ const opts=(t.opts||[]).map(o=>o.t==='combo'?`<div class='og'><span>${esc(o.label)}</span><button class='dd' type='button' data-combo='${o.id}' aria-haspopup='menu' aria-label='${esc(o.label)}'><span>${esc(S.opts[o.id])}</span>${ic('dn',12)}</button></div>`:`<button class='ck${S.opts[o.id]?' on':''}' type='button' role='checkbox' aria-checked='${!!S.opts[o.id]}' data-check='${o.id}'><span class='box'>${ic('check',12)}</span>${esc(o.label)}</button>`).join('');
+ const on=!!st.on;
+ el.innerHTML=`<div class='opts'>${opts}</div><span class='sp'></span><button class='btn' type='button' data-a='cancel'>取消</button><div class='pri${on?'':' dis'}'><button type='button' data-a='primary' ${on?'':'disabled'}>${esc(primaryLabel())}</button>${t.split?`<button class='arr' type='button' data-a='split' ${on?'':'disabled'} aria-label='其他打开方式' aria-haspopup='menu'>${ic('dn',12)}</button>`:''}</div>`}
+function renderFoot(){renderR1();renderHelp();renderActs()}
+function renderDone(){const el=$('res'),d=S.done,t=T(),a=APPS[t.app],what=t.mode==='folder'?'文件夹':'文件';
+ $('dlg').hidden=!!d;el.hidden=!d;if(!d)return;
+ const extra=[...(t.opts||[]).map(o=>`${o.label}：${o.t==='check'?(S.opts[o.id]?'是':'否'):S.opts[o.id]}`),...S.props.map(p=>`${p[0]}：${Array.isArray(p[2])?(p[2].join('、')||'无'):(p[2]||'无')}`)];
+ el.innerHTML=`<div class='rc' role='status'><div class='rh'>${appTile(t.app,24)}${d.ok?`${esc(a.n)} 收到了 ${d.paths.length} 个${what}`:'已取消'}</div>${d.ok?`<ul>${d.paths.map(p=>`<li>${esc(disp(p))}</li>`).join('')}</ul>${d.variant&&d.variant!=='打开'?`<p>打开方式：${esc(d.variant)}</p>`:''}${extra.length?`<p>${extra.map(esc).join('；')}</p>`:''}`:`<p>${esc(a.n)} 没有收到任何${what}。</p>`}<div class='bb'><button class='btn pri0' type='button' data-a='reopen'>重新打开对话框</button></div></div>`;
+ el.querySelector('[data-a=reopen]').focus()}
+let MENU=null;
+function openMenu(anchor,items,onPick,place){const pop=$('pop'),stage=$('stage');
+ pop.innerHTML=items.map((it,i)=>it.sep?`<div class='msep'></div>`:it.head?`<div class='mh'>${esc(it.head)}</div>`:`<button class='mi' type='button' role='menuitem' data-i='${i}' ${it.dis?'disabled':''}><span class='mk'>${it.check?ic('check',14):it.icon?`<span style='display:grid;color:var(--t2)'>${ic(it.icon,14)}</span>`:''}</span><span>${esc(it.text)}${it.sub?`<small>${esc(it.sub)}</small>`:''}</span>${it.kbd?`<kbd>${esc(it.kbd)}</kbd>`:''}</button>`).join('');
+ pop.hidden=false;pop.style.left='0px';pop.style.top='0px';
+ const sr=stage.getBoundingClientRect(),ar=anchor.getBoundingClientRect(),pr=pop.getBoundingClientRect();
+ let left=place==='right'?ar.right-sr.left-pr.width:ar.left-sr.left;left=Math.max(8,Math.min(left,sr.width-pr.width-8));
+ let top=place==='up'?ar.top-sr.top-pr.height-4:ar.bottom-sr.top+4;
+ if(top+pr.height>sr.height-8)top=ar.top-sr.top-pr.height-4;
+ pop.style.left=left+'px';pop.style.top=Math.max(8,top)+'px';
+ MENU={items,onPick,anchor};const first=pop.querySelector('.mi:not(:disabled)');if(first)first.focus()}
+function closeMenu(refocus){if(!MENU)return;$('pop').hidden=true;const a=MENU.anchor;MENU=null;if(refocus!==false&&a&&document.contains(a))a.focus()}
+function render(){renderTop();renderHost();renderTitle();renderAddr();renderSide();renderList();renderPanel();renderFoot();renderDone()}
+function visibleItems(){return S.state==='loading'||S.state==='denied'||S.state==='empty'||DENIED.has(S.cwd)?[]:listing().items}
+function refocusList(){const l=$('lst');if(l&&document.activeElement!==l)l.focus({preventScroll:true})}
+function select(p,ev){const m=T().mode,items=visibleItems(),e=findEntry(p);
+ if(m==='multi'&&ev&&ev.shiftKey&&S.anchor){const a=items.findIndex(x=>x.path===S.anchor),b=items.findIndex(x=>x.path===p);
+  if(a>=0&&b>=0){const lo=Math.min(a,b),hi=Math.max(a,b);if(!ev.ctrlKey)S.sel=new Set();items.slice(lo,hi+1).forEach(x=>S.sel.add(x.path))}}
+ else if(m==='multi'&&ev&&(ev.ctrlKey||ev.metaKey)){S.sel.has(p)?S.sel.delete(p):S.sel.add(p);S.anchor=p}
+ else{S.sel=new Set([p]);S.anchor=p}
+ S.cur=p;S.confirm=false;S.notice='';
+ if(m==='save'&&e&&!e.dir){const ce=curExt();S.name=ce&&e.name.toLowerCase().endsWith('.'+ce)?e.name.slice(0,-(ce.length+1)):e.name;S.typed=true}
+ else if(m==='multi')S.name='';
+ else syncName();
+ renderList();renderPanel();renderFoot();refocusList()}
+function activate(p){const e=findEntry(p);if(!e)return;
+ if(e.dir){go(e.path);refocusList();return}
+ if(T().mode==='multi'){S.sel.add(p);S.cur=p}else select(p);
+ primary()}
+function primary(variant){if(S.confirm)return;const st=status();if(!st.on)return;
+ if(st.nav){S.name='';S.typed=false;go(st.nav);return}
+ if(T().mode==='save'&&st.exists){S.confirm=true;renderFoot();const b=$('owReplace');if(b)b.focus();return}
+ closeMenu(false);S.done={ok:true,paths:st.paths,variant};renderDone()}
+function cancel(){closeMenu(false);S.done={ok:false};renderDone()}
+function commitNewFolder(v){v=(v||'').trim();S.newFolder=false;
+ if(v&&!BADCH.test(v)){const name=(FS[S.cwd]||[]).some(x=>x.name.toLowerCase()===v.toLowerCase())?freeName(v):v,ent={name,path:join(S.cwd,name),dir:true,size:0,m:new Date(NOW)};
+  (FS[S.cwd]=FS[S.cwd]||[]).push(ent);FS[ent.path]=[];S.sel=new Set([ent.path]);S.cur=ent.path;S.anchor=ent.path;syncName()}
+ renderAddr();renderList();renderPanel();renderFoot();refocusList()}
+function moreItems(){return [{head:'排序方式'},{text:'名称',check:S.sort==='name'},{text:'修改日期',check:S.sort==='m'},{text:'类型',check:S.sort==='type'},{text:'大小',check:S.sort==='size'},{sep:1},{text:'递增',check:!S.desc},{text:'递减',check:S.desc},{sep:1},{text:'显示隐藏的项目',check:S.hidden},{text:'复制当前路径',icon:'copy',dis:S.cwd===''}]}
+function pickMore(i){const k=[null,'name','m','type','size'];
+ if(i>=1&&i<=4)S.sort=k[i];else if(i===6)S.desc=false;else if(i===7)S.desc=true;else if(i===9)S.hidden=!S.hidden;
+ else if(i===10){try{navigator.clipboard.writeText(disp(S.cwd)).catch(()=>{})}catch(_){}const h=$('help');h.className='help ok';h.innerHTML=`<span style='display:grid;color:var(--ok)'>${ic('ok',14)}</span><span>已复制 <span class='p'>${esc(disp(S.cwd))}</span></span>`;setTimeout(renderHelp,1800);return}
+ renderList()}
+function refresh(){if(DENIED.has(S.cwd)){renderList();return}S.state='loading';S.sel=new Set();S.cur=null;render();setTimeout(()=>{if(S.state==='loading'){S.state='normal';render()}},650)}
+function toggleTheme(){const r=document.documentElement;r.dataset.theme=r.dataset.theme==='dark'?'light':'dark';renderTop()}
+document.addEventListener('click',ev=>{const tg=ev.target;
+ if(MENU){const mi=tg.closest('.mi');if(mi&&$('pop').contains(mi)){const fn=MENU.onPick,i=+mi.dataset.i;closeMenu();fn(i);return}if(!tg.closest('#pop'))closeMenu(false)}
+ let b;
+ if(b=tg.closest('[data-t]')){reset(b.dataset.t);render();return}
+ if(b=tg.closest('[data-s]')){setState(b.dataset.s);return}
+ if(tg.closest('#theme')){toggleTheme();return}
+ if(b=tg.closest('[data-unsel]')){S.sel.delete(b.dataset.unsel);renderList();renderPanel();renderFoot();return}
+ if(b=tg.closest('[data-tokdel]')){const [i,j]=b.dataset.tokdel.split(':').map(Number);S.props[i][2].splice(j,1);renderPanel();return}
+ if(b=tg.closest('[data-tokadd]')){S.tokAdd=+b.dataset.tokadd;renderPanel();return}
+ if(b=tg.closest('[data-go]')){go(b.dataset.go);return}
+ if(b=tg.closest('[data-sec]')){S.shut[b.dataset.sec]=!S.shut[b.dataset.sec];renderSide();return}
+ if(b=tg.closest('[data-view]')){S.view=b.dataset.view;renderAddr();renderList();return}
+ if(b=tg.closest('[data-sort]')){if(S.cwd==='')return;const k=b.dataset.sort;if(S.sort===k)S.desc=!S.desc;else{S.sort=k;S.desc=k==='m'||k==='size'}renderList();return}
+ if(b=tg.closest('[data-combo]')){const o=T().opts.find(x=>x.id===b.dataset.combo);openMenu(b,o.items.map(v=>({text:v,check:v===S.opts[o.id]})),i=>{S.opts[o.id]=o.items[i];renderActs()},'up');return}
+ if(b=tg.closest('[data-check]')){S.opts[b.dataset.check]=!S.opts[b.dataset.check];renderActs();return}
+ if(b=tg.closest('[data-p]')){select(b.dataset.p,ev);return}
+ if(tg.closest('.lst')&&!tg.closest('input')){S.sel=new Set();S.cur=null;if(T().mode==='folder')S.name='';renderList();renderPanel();renderFoot();refocusList();return}
+ if(!(b=tg.closest('[data-a]')))return;
+ switch(b.dataset.a){
+  case 'back':back();break;case 'fwd':fwd();break;case 'up':up();break;
+  case 'refresh':case 'retry':refresh();break;
+  case 'addrEdit':S.addr=true;renderAddr();{const i=$('addrIn');i.focus();i.select()}break;
+  case 'crumbMore':{const hid=segs(S.cwd).slice(1,-3);openMenu(b,hid.map(s=>({text:s.l,sub:disp(s.p)})),i=>go(hid[i].p))}break;
+  case 'newf':if(canCreate()){S.newFolder=true;renderList()}break;
+  case 'panel':S.panel=!S.panel;renderAddr();renderPanel();break;
+  case 'more':openMenu(b,moreItems(),pickMore,'right');break;
+  case 'clearQ':S.q='';renderAddr();renderList();break;
+  case 'showAll':S.showAll=!S.showAll;renderList();renderFoot();break;
+  case 'types':{const fl=T().filters;openMenu(b,fl.map((x,i)=>({text:x[0],sub:x[1],check:i===S.filter})),i=>{S.filter=i;S.showAll=false;const keep=[...S.sel].filter(p=>{const en=findEntry(p);return en&&(en.dir||matches(en.name))});S.sel=new Set(keep);if(S.cur&&!S.sel.has(S.cur))S.cur=keep[0]||null;renderList();renderPanel();renderFoot()},'up')}break;
+  case 'split':openMenu(b,T().split.map(s=>({text:s})),i=>primary(T().split[i]),'up');break;
+  case 'primary':primary();break;
+  case 'cancel':cancel();break;
+  case 'owBack':S.confirm=false;if(S.state==='exists')S.state='normal';renderTop();renderFoot();{const n=$('nameIn');n.focus();n.select()}break;
+  case 'owRename':S.done={ok:true,paths:[join(S.cwd,freeName(saveTarget().file))]};renderDone();break;
+  case 'owReplace':S.done={ok:true,paths:[saveTarget().path]};renderDone();break;
+  case 'reopen':reset(S.t);render();break;
+  case 'focusName':{const n=$('nameIn');if(n&&tg!==n)n.focus()}break}});
+document.addEventListener('dblclick',ev=>{const b=ev.target.closest('[data-p]');if(b)activate(b.dataset.p)});
+document.addEventListener('input',ev=>{const el=ev.target;
+ if(el.id==='q'){S.q=el.value;renderList();return}
+ if(el.id==='nameIn'){S.name=el.value;S.typed=true;S.confirm=false;S.notice='';
+  const nf=el.closest('.nf');if(nf)nf.classList.toggle('bad',status().k==='err');
+  const pill=$('extPill');if(pill)pill.hidden=!!typedExt(S.name.trim())||!curExt();
+  renderHelp();renderActs();return}
+ if(el.dataset.prop!=null)S.props[+el.dataset.prop][2]=el.value});
+document.addEventListener('focusout',ev=>{const el=ev.target;
+ if(el.id==='addrIn')setTimeout(()=>{if(S.addr&&document.activeElement!==$('addrIn')){S.addr=false;S.addrBad=false;renderAddr()}},150);
+ if(el.id==='nfIn')setTimeout(()=>{if(S.newFolder&&document.activeElement!==$('nfIn'))commitNewFolder(el.value)},0);
+ if(el.id==='tokIn'&&S.tokAdd>=0){const v=el.value.trim();if(v)S.props[S.tokAdd][2].push(v);S.tokAdd=-1;setTimeout(renderPanel,0)}});
+document.addEventListener('keydown',ev=>{const el=ev.target,k=ev.key,ctrl=ev.ctrlKey||ev.metaKey;
+ if(MENU){const its=[...$('pop').querySelectorAll('.mi:not(:disabled)')],i=its.indexOf(document.activeElement);
+  if(k==='ArrowDown'){ev.preventDefault();(its[i+1]||its[0]).focus()}else if(k==='ArrowUp'){ev.preventDefault();(its[i-1]||its[its.length-1]).focus()}else if(k==='Escape'||k==='Tab'){ev.preventDefault();closeMenu()}
+  return}
+ if(S.done){if(k==='Escape'){reset(S.t);render()}return}
+ if(el.id==='addrIn'){
+  if(k==='Enter'){ev.preventDefault();const v=el.value.trim();if(!v||v==='此电脑'){S.addr=false;go('');return}
+   const p=v.split(BS).join('/').replace(/\/+$/,'').replace(/^[a-z]:/i,x=>x.toUpperCase());
+   if(known(p)){S.addr=false;S.notice='';go(p)}else{S.addrBad=true;el.closest('.crumb').classList.add('bad');S.notice=`找不到「${v}」`;renderHelp()}return}
+  if(k==='Escape'){ev.preventDefault();S.addr=false;S.addrBad=false;S.notice='';renderAddr();renderHelp();return}}
+ if(el.id==='nfIn'){if(k==='Enter'){ev.preventDefault();commitNewFolder(el.value)}else if(k==='Escape'){ev.preventDefault();S.newFolder=false;renderList();refocusList()}return}
+ if(el.id==='tokIn'){if(k==='Enter'){ev.preventDefault();el.blur()}else if(k==='Escape'){ev.preventDefault();el.value='';el.blur()}return}
+ if(el.id==='q'){if(k==='Escape'&&S.q){ev.preventDefault();S.q='';el.value='';renderList();return}if(k==='ArrowDown'){ev.preventDefault();const it=visibleItems()[0];if(it)select(it.path);return}}
+ if(el.id==='nameIn'){if(k==='Enter'){ev.preventDefault();primary();return}
+  if(k==='Backspace'&&!el.value&&T().mode==='multi'&&S.sel.size){const last=[...S.sel].pop();S.sel.delete(last);renderList();renderPanel();renderFoot();$('nameIn').focus();return}}
+ if(el.id==='lst'){const items=visibleItems(),idx=items.findIndex(x=>x.path===S.cur),g=el.querySelector('.gv'),cols=g?getComputedStyle(g).gridTemplateColumns.split(' ').length:1;let ni=null;
+  if(k==='ArrowDown')ni=idx<0?0:Math.min(items.length-1,idx+cols);else if(k==='ArrowUp')ni=idx<0?0:Math.max(0,idx-cols);
+  else if(k==='ArrowRight'&&g)ni=Math.min(items.length-1,idx+1);else if(k==='ArrowLeft'&&g)ni=Math.max(0,idx-1);
+  else if(k==='Home')ni=0;else if(k==='End')ni=items.length-1;
+  else if(k==='Enter'){ev.preventDefault();const en=S.cur&&findEntry(S.cur);if(en&&en.dir&&S.sel.size<2){go(en.path);refocusList()}else primary();return}
+  else if(k==='Backspace'){ev.preventDefault();up();refocusList();return}
+  else if(ctrl&&k.toLowerCase()==='a'&&T().mode==='multi'){ev.preventDefault();S.sel=new Set(items.filter(x=>!x.dir).map(x=>x.path));renderList();renderPanel();renderFoot();refocusList();return}
+  if(ni!=null&&items[ni]){ev.preventDefault();select(items[ni].path,{shiftKey:ev.shiftKey})}}
+ if(k==='Escape'){ev.preventDefault();if(S.confirm){S.confirm=false;renderFoot()}else cancel();return}
+ if(ev.altKey&&k==='ArrowLeft'){ev.preventDefault();back();return}
+ if(ev.altKey&&k==='ArrowRight'){ev.preventDefault();fwd();return}
+ if(ev.altKey&&k==='ArrowUp'){ev.preventDefault();up();return}
+ if((ctrl&&k.toLowerCase()==='l')||k==='F4'){ev.preventDefault();S.addr=true;renderAddr();const i=$('addrIn');i.focus();i.select();return}
+ if((ctrl&&k.toLowerCase()==='f')||k==='F3'){ev.preventDefault();$('q').focus();return}
+ if(ctrl&&ev.shiftKey&&k.toLowerCase()==='n'){ev.preventDefault();if(canCreate()){S.newFolder=true;renderList()}return}
+ if(ctrl&&k.toLowerCase()==='g'){ev.preventDefault();go(PULSE_OPEN[0][0]);return}
+ if(ev.altKey&&k.toLowerCase()==='p'){ev.preventDefault();S.panel=!S.panel;renderAddr();renderPanel();return}
+ if(ev.altKey&&k.toLowerCase()==='n'){ev.preventDefault();$('nameIn').focus();return}
+ if(k==='F5'){ev.preventDefault();refresh()}});
+(function(){const h=new URLSearchParams(location.hash.slice(1)||location.search.slice(1)),t=h.get('t');
+ if(h.get('theme')==='light')document.documentElement.dataset.theme='light';
+ reset(TPL[t]?t:'open');if(h.get('v'))S.view=h.get('v');render();
+ const s=h.get('s');if(s&&s!=='normal'&&STATES.some(x=>x[0]===s))setState(s)})();
+</script>
+</body>
+</html>

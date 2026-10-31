@@ -70,6 +70,8 @@ HWND OpenPulseWindow(AppState& from, const WindowInit& init) {
     ReleaseRetiredWindowStates();
     auto owned = std::make_unique<AppState>(from.core);
     AppState* const state = owned.get();
+    state->isolatedTest = from.isolatedTest;
+    state->isolatedTestPersist = from.isolatedTestPersist;
     InheritWindowLayout(from, *state);
     if (init.restore && init.restore->layout) ApplyWindowLayout(*state, *init.restore->layout);
     state->has_window_start = true;
@@ -82,12 +84,16 @@ HWND OpenPulseWindow(AppState& from, const WindowInit& init) {
 
     RECT rect = init.rect ? *init.rect : CascadedRect(from);
     const HMONITOR from_monitor = MonitorFromWindow(from.hwnd, MONITOR_DEFAULTTONEAREST);
-    if (!init.rect && !init.restore && init.monitor && init.monitor != from_monitor) {
+    POINT cursor{};
+    const HMONITOR target_monitor = init.monitor ? init.monitor :
+        GetCursorPos(&cursor) ? MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST) : from_monitor;
+    if (!init.rect && !init.restore && target_monitor != from_monitor) {
         MONITORINFO there{sizeof(there)};
         MONITORINFO here{sizeof(here)};
         const RECT normal = NormalScreenRect(from.hwnd);
-        if (normal.right > normal.left && GetMonitorInfoW(init.monitor, &there) && GetMonitorInfoW(from_monitor, &here))
-            rect = app::MoveToWorkArea(normal, here.rcWork, there.rcWork);
+        if (normal.right > normal.left && GetMonitorInfoW(target_monitor, &there) && GetMonitorInfoW(from_monitor, &here))
+            rect = app::CascadeWindowRect(app::MoveToWorkArea(normal, here.rcWork, there.rcWork),
+                there.rcWork, static_cast<int>(std::lround(32.0f * (from.scale > 0.0f ? from.scale : 1.0f))));
     }
     bool maximize = false;
     if (init.restore) {

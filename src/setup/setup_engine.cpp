@@ -1,4 +1,5 @@
 #include "setup_engine.h"
+#include "start_pin_registration.h"
 
 #include "setup_common.h"
 #include "setup_log.h"
@@ -316,6 +317,16 @@ InstallResult RunInstall(Payload& payload, const std::wstring& self_path, const 
     }
     files.push_back(kUninstallerName);
     total_bytes += payload.Info().payload_offset;
+    const std::string defaults = std::string("[features]\r\nglobal_search=") +
+        (req.tasks.global_search ? "1" : "0") + "\r\nai_assistant=" +
+        (req.tasks.ai_assistant ? "1" : "0") + "\r\n";
+    const std::wstring defaults_source = (previous ? previous->dir : app) + L"\\setup-defaults.ini";
+    const std::wstring defaults_staged = tx.StagingDir() + L"\\setup-defaults.ini";
+    const bool defaults_written = FileExists(defaults_source)
+        ? CopyFileW(defaults_source.c_str(), defaults_staged.c_str(), FALSE) != FALSE
+        : WriteWholeFile(defaults_staged, defaults.data(), defaults.size());
+    if (!defaults_written) { tx.Abort(); return Fail(kExitPrepareFailed, L"Cannot write setup defaults"); }
+    files.push_back(L"setup-defaults.ini");
     if (!FlushTree(tx.StagingDir(), files, error)) { tx.Abort(); return Fail(kExitPrepareFailed, error); }
     Log(L"Extracted and flushed " + std::to_wstring(files.size()) + L" files in " +
         std::to_wstring(GetTickCount64() - t0) + L" ms");
@@ -390,6 +401,7 @@ InstallResult RunInstall(Payload& payload, const std::wstring& self_path, const 
     ctx.Phase(Phase::Registering, L"Registering Pulse");
     InstallResult result;
     result.app_dir = app;
+    result.defaults_written = defaults_written;
     bool post_failed = false;
     UninstallEntry entry;
     entry.dir = app;
@@ -402,6 +414,10 @@ InstallResult RunInstall(Payload& payload, const std::wstring& self_path, const 
     const RegLocation where = real ? RegLocation{HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY}
                                    : RegLocation{HKEY_CURRENT_USER, KEY_WOW64_64KEY};
     if (!WriteUninstallEntry(where, UninstallKey(o), entry, error)) return Fail(kExitFatalInstall, error);
+    if (real && !RegisterStartPin(app, error)) {
+        Log(error);
+        return Fail(kExitFatalInstall, error);
+    }
     if (previous && previous->inno && in_place) RemoveInnoUninstaller(app);
 
     const std::wstring group = KnownFolder(real ? FOLDERID_CommonPrograms : FOLDERID_Programs) +

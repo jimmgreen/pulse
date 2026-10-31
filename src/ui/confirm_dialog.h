@@ -55,6 +55,7 @@ struct ConfirmDialogSpec {
     // goes, so a question asked for someone else (an AI client) can be
     // closed from outside with WM_CLOSE, which answers Cancel.
     std::function<void(HWND)> on_open;
+    HANDLE cancel_event = nullptr; // borrowed; nested picker disconnect cancellation
 };
 
 ConfirmChoice ShowConfirmDialogEx(HWND owner, const ConfirmDialogSpec& spec, bool dark,

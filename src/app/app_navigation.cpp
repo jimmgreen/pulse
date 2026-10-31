@@ -1,9 +1,13 @@
+#include <cstdio>
+#include "explorer_initial_arm.h"
+#include "explorer_takeover_probe.h"
 #include "pane_transfer_target.h"
 #include <thread>
 #include "app_window_title.h"
 // app_navigation.cpp — extracted from app_main.cpp.
 #include "app_internal.h"
 #include "window_factory.h"
+#include "quick_access.h"
 #include "bitlocker_unlock.h"
 #include "selection_caps.h"
 #include "tag_query.h"
@@ -181,13 +185,13 @@ std::wstring ProjectSearchRoot(AppState& s) {
     return fs::IsVirtualPath(tab->current_path) ? L"" : tab->current_path;
 }
 
-void OpenWorkspace(AppState& s, int index) {
+static void RestoreWorkspace(AppState& s, int index, bool new_tab) {
     if (index < 0 || index >= static_cast<int>(s.places.workspaces.size())) return;
     const app::Workspace w = s.places.workspaces[static_cast<size_t>(index)];
     s.places.active_workspace = index;
     const std::wstring root = fs::NormalizePath(w.root);
     size_t found = static_cast<size_t>(-1);
-    for (size_t i = 0; i < s.window_tabs.items.size(); ++i) {
+    for (size_t i = 0; !new_tab && i < s.window_tabs.items.size(); ++i) {
         const app::Tab* folder = s.window_tabs.items[i]->ActiveFolder();
         if (!folder || folder->current_path.empty()) continue;
         if (_wcsicmp(fs::NormalizePath(folder->current_path).c_str(), root.c_str()) == 0) {
@@ -218,6 +222,33 @@ void OpenWorkspace(AppState& s, int index) {
     for (const auto& n : s.places.networks) WarmupUnc(s, n.unc);
     for (const auto& pth : w.pane_paths) WarmupUnc(s, pth);
     InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
+void OpenWorkspace(AppState& s, int index) {
+    RestoreWorkspace(s, index, false);
+}
+
+void OpenWorkspaceNewTab(AppState& s, int index) {
+    RestoreWorkspace(s, index, true);
+}
+
+void OpenWorkspaceNewWindow(AppState& s, int index) {
+    if (index < 0 || index >= static_cast<int>(s.places.workspaces.size())) return;
+    const HWND hwnd = OpenPulseWindow(s, WindowInit{s.places.workspaces[static_cast<size_t>(index)].root});
+    if (!hwnd) return;
+    auto* target = reinterpret_cast<AppState*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (target) RestoreWorkspace(*target, index, false);
+}
+
+void SaveCurrentWorkspace(AppState& s) {
+    const auto paths = CollectPanePaths(s);
+    if (paths.empty() || paths.front().empty() || fs::IsVirtualPath(paths.front())) return;
+    const bool is_new = s.places.FindWorkspace(paths.front()) < 0;
+    const int index = s.places.PinWorkspace(paths.front(), L"", static_cast<int>(WorkspaceLayoutOf(s)),
+                                           paths, CollectPaneViews(s));
+    s.sidebarCollapsedMask &= ~(1u << static_cast<unsigned>(app::SidebarSectionId::Workspaces));
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+    if (is_new) RenameWorkspace(s, index);
 }
 
 static void SetQuerySearchTitle(app::Tab& tab, const std::wstring& rest, size_t count,
@@ -987,7 +1018,7 @@ void CancelActiveContentSearch(AppState& s, app::Tab& tab) {
     if(tab.content_results) {tab.content_revision=UINT64_MAX;RefreshContentResults(s);}
 }
 
-static void CancelUnsharedDirectoryRequest(AppState& s, app::Tab& tab) {
+void CancelUnsharedDirectoryRequest(AppState& s, app::Tab& tab) {
     const uint64_t generation = tab.pending_generation;
     if (!generation) return;
     if (fs::IsVirtualPath(tab.current_path)) {
@@ -1083,6 +1114,7 @@ void RefreshDeviceViews(AppState& s) {
 
 void LoadVirtualView(AppState& s, app::Tab& tab, const std::wstring& path, PathLoadReason reason) {
     CancelUnsharedDirectoryRequest(s, tab);
+    if (tab.explorer_handoff) ExplorerTakeoverProbeNavigation(s, &tab, "navigation-reset");
     tab.explorer_handoff.reset();
     if (_wcsicmp(tab.current_path.c_str(), path.c_str()) != 0)
         tab.create_rename_intents.clear();
@@ -1324,6 +1356,7 @@ void StartLoadingPath(AppState& s, app::Tab& tab, const std::wstring& path, Path
     // origin instead so navigating away and back cannot revive an old request.
     (void)app::PendingCreateRenameIntent(tab.create_rename_intents, normalized, tab.view_generation);
     CancelUnsharedDirectoryRequest(s, tab);
+    if (tab.explorer_handoff) ExplorerTakeoverProbeNavigation(s, &tab, "navigation-reset");
     tab.explorer_handoff.reset();
     SyncTagGroups(s);
     DropLiveNetworkSearch(s, tab.search_session_id);
@@ -1490,17 +1523,47 @@ void StartLoadingPath(AppState& s, app::Tab& tab, const std::wstring& path, Path
 // Data layer of a worker result (multi-window M3b): the snapshot store and Git
 // roots are process-wide, so they change once per result, before any window
 // applies it. Returns whether the folder changed again while it was listed.
-static bool ApplyWorkerResultData(AppCore& core, const app::WorkResult& res) {
-    if (res.error) return false;
-    bool again = false;
+struct ListingRefresh { bool again = false, arm_only = false; unsigned evidence = 0; };
+static void RefreshPathImpl(AppState& s, const std::wstring& path, RefreshReason reason, bool initial_arm);
+static bool TransferableArm(const app::Tab& tab, bool arm_only) {
+    const auto* lease = tab.explorer_handoff.get();
+    return lease && lease->handoff && app::CanTransferExplorerInitialArm(arm_only,
+        lease->handoff->state == app::HandoffState::Pending, lease->listing_complete, lease->initial_arm_transferred,
+        tab.current_path == lease->path,
+        (tab.pending_generation ? tab.pending_generation : tab.applied_generation) == lease->generation,
+        tab.selection_revision == lease->initial_selection_revision, GetTickCount64(), lease->handoff->deadline_tick);
+}
+static void TraceArmEligibility(AppState& s, app::Tab& tab, const char* phase, uint64_t result_generation,
+                                bool arm_only, unsigned evidence) {
+    const auto* lease = tab.explorer_handoff.get();
+    if (!lease || !lease->handoff) return;
+    const auto now = GetTickCount64();
+    const unsigned gates = (arm_only ? 1u : 0u) | (lease->handoff->state == app::HandoffState::Pending ? 2u : 0u) |
+        (!lease->listing_complete ? 4u : 0u) | (!lease->initial_arm_transferred ? 8u : 0u) |
+        (tab.current_path == lease->path ? 16u : 0u) |
+        ((tab.pending_generation ? tab.pending_generation : tab.applied_generation) == lease->generation ? 32u : 0u) |
+        (tab.selection_revision == lease->initial_selection_revision ? 64u : 0u) | (now < lease->handoff->deadline_tick ? 128u : 0u);
+    char reason[256]{};
+    std::snprintf(reason, sizeof(reason), "%s initial_revision=%llu current_revision=%llu resgen=%llu arm_only=%u arm_dirty_bits=%u",
+        phase, static_cast<unsigned long long>(lease->initial_selection_revision),
+        static_cast<unsigned long long>(tab.selection_revision), static_cast<unsigned long long>(result_generation),
+        arm_only ? 1u : 0u, evidence);
+    ExplorerTakeoverProbeNavigation(s, &tab, reason, gates);
+}
+static ListingRefresh ApplyWorkerResultData(AppCore& core, const app::WorkResult& res) {
+    if (res.error) return {};
+    ListingRefresh refresh;
     if (res.snapshot && !fs::IsVirtualPath(res.path)) {
         // Also again when a watch armed after this listing had begun.
         const bool arm_missed = core.store.TakeArmMissed(res.path, res.listed_at);
-        again = core.store.IsDirty(res.path) || arm_missed;
+        const bool dirty = core.store.IsDirty(res.path);
+        refresh.again = dirty || arm_missed;
+        refresh.arm_only = app::ExplorerArmOnlyRefresh(arm_missed, dirty);
+        refresh.evidence = (arm_missed ? 1u : 0u) | (dirty ? 2u : 0u);
         core.store.Update(res.path, res.generation, res.snapshot, res.identity, res.listed_at);
     }
     if (!fs::IsVirtualPath(res.path)) core.gitRoots[res.path] = res.git_root;
-    return again;
+    return refresh;
 }
 
 // #58-7b: a folder with no saved view that is mostly pictures opens in Large
@@ -1529,7 +1592,7 @@ static void ShowConnectingBanner(app::Tab& tab) {
 
 // Window layer: the panes of one window that wait for this listing. Returns
 // whether a failed listing was awaited here (that window owns the unlock prompt).
-static bool ApplyWorkerResultToWindow(AppState& s, app::WorkResult& res, bool again) {
+static bool ApplyWorkerResultToWindow(AppState& s, app::WorkResult& res, bool again, bool arm_only, unsigned evidence) {
     if (Panes(s).empty()) return false;
     NoteColumnStripResult(s, res);
     NoteDetailsTreeResult(s, res, again);
@@ -1543,6 +1606,7 @@ static bool ApplyWorkerResultToWindow(AppState& s, app::WorkResult& res, bool ag
             tab->loading = false;
             tab->pending_generation = 0;
             tab->net_readonly = fs::IsUncPath(res.path);
+            if (tab->explorer_handoff) ExplorerTakeoverProbeNavigation(s, tab, "listing-failed", static_cast<unsigned>(res.generation));
             CompleteExplorerNavigation(*tab, res.generation, false);
             tab->banner_title = l10n::Get(tab->net_readonly
                 ? l10n::StringId::Offline : l10n::StringId::CannotOpen);
@@ -1583,6 +1647,8 @@ static bool ApplyWorkerResultToWindow(AppState& s, app::WorkResult& res, bool ag
         if (tab->applied_generation != 0 && res.generation < tab->applied_generation) return;
         any = true;
 
+        TraceArmEligibility(s, *tab, "arm-window-before-selection", res.generation, arm_only, evidence);
+        const bool reconcile_lease = TransferableArm(*tab, arm_only);
         const bool focusedTab = (&pane == s.pane);
             auto selection_restore = app::TakeListingSelection(*tab, res.path);
             auto& pendingNames = selection_restore.names;
@@ -1698,9 +1764,22 @@ static bool ApplyWorkerResultToWindow(AppState& s, app::WorkResult& res, bool ag
                 s.scrollTargetY = tab->scroll_y;
                 s.scrollAnimating = false;
             }
-            CompleteExplorerNavigation(*tab, res.generation, !res.cancelled && res.snapshot != nullptr);
+            if (tab->explorer_handoff) ExplorerTakeoverProbeNavigation(s, tab, "listing-record-before", static_cast<unsigned>(res.generation));
+            if (reconcile_lease && !res.cancelled && res.snapshot) {
+                std::vector<std::wstring> selected;
+                for (int index : tab->SelectedIndices())
+                    if (index >= 0 && static_cast<size_t>(index) < tab->EntryCount() && tab->EntryVisible(index)) selected.push_back(tab->EntryAt(index).name);
+                auto expected = tab->explorer_handoff->names;
+                if (expected.empty()) { tab->ClearSelection(); selected.clear(); }
+                std::sort(selected.begin(), selected.end()); std::sort(expected.begin(), expected.end());
+                if (selected == expected) {
+                    tab->explorer_handoff->initial_selection_revision = tab->selection_revision;
+                    ExplorerTakeoverProbeNavigation(s, tab, "initial-arm-skip-old-listing");
+                } else tab->explorer_handoff.reset();
+            } else CompleteExplorerNavigation(*tab, res.generation, !res.cancelled && res.snapshot != nullptr);
+            if (tab->explorer_handoff) ExplorerTakeoverProbeNavigation(s, tab, "listing-record-after", again ? 1u : 0u);
     });
-    if (again) RefreshPath(s, res.path);
+    if (again) RefreshPathImpl(s, res.path, RefreshReason::Background, arm_only);
     if (!any) return false;
     SyncQuickPreview(s);
 
@@ -1719,10 +1798,24 @@ void ApplyWorkerResult(AppState& s, app::WorkResult& res) {
     bool has_panes = false;
     app::ForEachWindowSharingCore(s, [&](AppState& window) { has_panes = has_panes || !Panes(window).empty(); });
     if (!has_panes) return;
-    const bool again = ApplyWorkerResultData(s.core, res);
+    app::ForEachWindowSharingCore(s, [&](AppState& window) {
+        ForEachPane(window, [&](app::Pane& pane) {
+            auto* tab = pane.ActiveTab();
+            if (tab && tab->explorer_handoff && tab->current_path == res.path && tab->pending_generation == res.generation)
+                TraceArmEligibility(window, *tab, "arm-before-shared-data", res.generation, false, 0);
+        });
+    });
+    const auto refresh = ApplyWorkerResultData(s.core, res);
+    app::ForEachWindowSharingCore(s, [&](AppState& window) {
+        ForEachPane(window, [&](app::Pane& pane) {
+            auto* tab = pane.ActiveTab();
+            if (tab && tab->explorer_handoff && tab->current_path == res.path && tab->pending_generation == res.generation)
+                TraceArmEligibility(window, *tab, "arm-after-shared-data", res.generation, refresh.arm_only, refresh.evidence);
+        });
+    });
     AppState* awaiting = nullptr;
     app::ForEachWindowSharingCore(s, [&](AppState& window) {
-        if (ApplyWorkerResultToWindow(window, res, again) && !awaiting) awaiting = &window;
+        if (ApplyWorkerResultToWindow(window, res, refresh.again, refresh.arm_only, refresh.evidence) && !awaiting) awaiting = &window;
     });
     // 最近访问 on the network page: a share some window actually shows.
     if (!res.error && fs::IsUncPath(res.path)) {
@@ -1788,6 +1881,9 @@ bool PathHasPendingRefresh(AppState& s, const std::wstring& path) {
 }
 
 void RefreshPath(AppState& s, const std::wstring& path, RefreshReason reason) {
+    RefreshPathImpl(s, path, reason, false);
+}
+static void RefreshPathImpl(AppState& s, const std::wstring& path, RefreshReason reason, bool initial_arm) {
     const std::wstring normalized = fs::NormalizePath(path);
     if (!path.empty() && normalized.empty()) return;
     std::vector<app::Tab*> tabs;
@@ -1814,12 +1910,26 @@ void RefreshPath(AppState& s, const std::wstring& path, RefreshReason reason) {
         return;
     }
     for (app::Tab* tab : tabs) {
+        char phase[64]{};
+        std::snprintf(phase, sizeof(phase), "arm-refresh-entry initial_arm=%u reason=%u",
+            initial_arm ? 1u : 0u, static_cast<unsigned>(reason));
+        TraceArmEligibility(s, *tab, phase, tab->pending_generation ? tab->pending_generation : tab->applied_generation,
+            initial_arm && reason == RefreshReason::Background, (initial_arm ? 1u : 0u) | (s.store.IsDirty(normalized) ? 2u : 0u));
+        const bool transfer = TransferableArm(*tab, initial_arm && reason == RefreshReason::Background);
+        if (tab->explorer_handoff) ExplorerTakeoverProbeNavigation(s, tab, transfer ? "initial-arm-transfer" : "refresh-reset", static_cast<unsigned>(reason));
+        if (!transfer) tab->explorer_handoff.reset();
         // F5 re-sorts; anything else merges into the rows on screen unless an
         // in-flight load (navigation, F5) already wants sort order (#13).
         if (reason == RefreshReason::Explicit) tab->refresh_keeps_order = false;
         else if (tab->pending_generation == 0) tab->refresh_keeps_order = true;
         const bool reveal = reason == RefreshReason::Explicit && tab->order_held;
         CaptureListingSelection(*tab);
+        if (tab->explorer_handoff) {
+            tab->pending_selected_names = tab->explorer_handoff->names;
+            tab->pending_selected_name = tab->pending_selected_names.empty() ? L"" : tab->pending_selected_names.front();
+            tab->pending_selection_revision = tab->selection_revision;
+            tab->pending_ensure_selection_visible = !tab->pending_selected_names.empty();
+        }
         // The selection usually moved when the held rows re-sort; follow it.
         if (reveal && tab->SelectedCount() > 0) tab->pending_ensure_selection_visible = true;
         tab->loading = !tab->snapshot;
@@ -1842,9 +1952,19 @@ void RefreshPath(AppState& s, const std::wstring& path, RefreshReason reason) {
             // mark that queued it survived, and its result queued one more full
             // enumeration (three per folder open with the watch's first report).
             s.store.BeginRefresh(normalized);
-            tab->pending_generation = s.worker.Refresh(
-                normalized, tab->sort_column, tab->sort_direction, tab->EffectiveGroup(),
-                SortFolderSizes(s, *tab, normalized), tab->EffectiveFolderSort());
+            try {
+                tab->pending_generation = s.worker.Refresh(
+                    normalized, tab->sort_column, tab->sort_direction, tab->EffectiveGroup(),
+                    SortFolderSizes(s, *tab, normalized), tab->EffectiveFolderSort());
+            } catch (...) { tab->explorer_handoff.reset(); throw; }
+        }
+        if (tab->explorer_handoff) {
+            if (!tab->pending_generation) tab->explorer_handoff.reset();
+            else {
+                tab->explorer_handoff->generation = tab->pending_generation;
+                tab->explorer_handoff->initial_arm_transferred = true;
+                ExplorerTakeoverProbeNavigation(s, tab, "initial-arm-rebound");
+            }
         }
     }
 }
@@ -2168,23 +2288,40 @@ static void ApplyDirNotifiesToWindow(AppState& s, const std::vector<AppState::Di
     for (const auto& item : batch) {
         const std::wstring path = fs::NormalizePath(item.path);
         if (item.overflow) {
+            ForEachPane(s, [&](app::Pane& pane) {
+                auto* tab = pane.ActiveTab();
+                if (tab && tab->explorer_handoff && tab->current_path == path)
+                    ExplorerTakeoverProbeNavigation(s, tab, "watch-overflow", fs::ArmedAt(item.overflow, item.events) ? 1u : 0u);
+            });
             // A newly armed watch reports one overflow for what it may have
             // missed while opening; a listing begun after its arm holds it all.
             const uint64_t armed_at = fs::ArmedAt(item.overflow, item.events);
+            const auto trace_arm_branch = [&](const char* branch, bool arm_only) {
+                ForEachPane(s, [&](app::Pane& pane) {
+                    auto* tab = pane.ActiveTab();
+                    if (tab && tab->explorer_handoff && tab->current_path == path)
+                        TraceArmEligibility(s, *tab, branch, tab->pending_generation, arm_only,
+                            (armed_at ? 1u : 0u) | (s.store.IsDirty(path) ? 2u : 0u));
+                });
+            };
             if (WindowShowsFolder(s, path)) {
                 shown.push_back(path);
                 if (armed_at != 0 && s.store.ListedSince(path, armed_at)) {
+                    trace_arm_branch("watch-arm-already-listed", false);
                     // Nothing missed.
                 } else if (armed_at != 0 && PathHasPendingRefresh(s, path)) {
                     // The running listing decides when it lands (TakeArmMissed).
+                    trace_arm_branch("watch-arm-note-pending", !s.store.IsDirty(path));
                     s.store.NoteArm(path, armed_at);
                 } else {
+                    const bool arm_only = armed_at != 0 && !s.store.IsDirty(path);
+                    trace_arm_branch("watch-arm-direct-refresh", arm_only);
                     DropSizePatches(s, path);
                     s.store.MarkDirty(path);
                     // A scan already in flight finishes and is shown first; the
                     // dirty mark then runs one more pass instead of discarding its work.
                     if (!PathHasPendingRefresh(s, path)) {
-                        RefreshPath(s, path);
+                        RefreshPathImpl(s, path, RefreshReason::Background, arm_only);
                         relisted.push_back(path);
                     }
                     changed = true;
@@ -2201,7 +2338,39 @@ static void ApplyDirNotifiesToWindow(AppState& s, const std::vector<AppState::Di
         }
         if (PathHasPendingRefresh(s, path)) {
             shown.push_back(path);
+            // Only the validated fixture scope may reveal notification names.
+            const auto scope = ExplorerTakeoverProbeScope(s);
+            const bool trace_fixture = scope && fs::NormalizePath(scope->folder) == path;
+            const auto trace_pending = [&](bool after) {
+                if (!trace_fixture) return;
+                ForEachPane(s, [&](app::Pane& pane) {
+                    auto* tab = pane.ActiveTab();
+                    if (!tab || !tab->explorer_handoff || tab->current_path != path) return;
+                    char summary[128]{};
+                    std::snprintf(summary, sizeof(summary), "pending-notify-dirty-%s count=%zu overflow=%u",
+                        after ? "after" : "before", item.events.size(), item.overflow ? 1u : 0u);
+                    ExplorerTakeoverProbeNavigation(s, tab, summary, s.store.IsDirty(path) ? 1u : 0u);
+                    if (after) return;
+                    const size_t limit = (std::min)(item.events.size(), size_t{8});
+                    for (size_t i = 0; i < limit; ++i) {
+                        const auto& event = item.events[i];
+                        char name[768]{};
+                        const int units = static_cast<int>((std::min)(event.name.size(), size_t{128}));
+                        const int count = units ? WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+                            event.name.data(), units, name, static_cast<int>(sizeof(name) - 1), nullptr, nullptr) : 0;
+                        if (count > 0) for (int n = 0; n < count; ++n)
+                            if (static_cast<unsigned char>(name[n]) < 32) name[n] = '?';
+                        char reason[960]{};
+                        std::snprintf(reason, sizeof(reason), "pending-notify-event index=%zu action=%lu arm=%llu name=%s truncated=%u",
+                            i, event.action, static_cast<unsigned long long>(event.armed_at),
+                            count > 0 ? name : "<empty-or-invalid>", event.name.size() > 128 ? 1u : 0u);
+                        ExplorerTakeoverProbeNavigation(s, tab, reason, event.action);
+                    }
+                });
+            };
+            trace_pending(false);
             s.store.MarkDirty(path);
+            trace_pending(true);
             continue;
         }
         auto& structural = GroupFor(structural_by_path, path);

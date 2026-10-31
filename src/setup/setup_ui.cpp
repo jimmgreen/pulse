@@ -112,8 +112,8 @@ bool ValidInstallPath(const std::wstring& p) {
 
 enum Id : int {
     kNone, kMin, kCloseX, kInstall, kAgree, kLicense, kToOptions, kBack, kAppEdit, kBrowseApp, kTglIndex,
-    kIndexEdit, kBrowseIndex, kTglStartup, kTglDesktop, kOptBack, kOptInstall, kCancelInstall, kLaunch,
-    kCloseDone, kOpenLog, kDlgPrimary, kDlgSecondary, kDot0, kDot1, kDot2, kTglCleanup, kUnStart, kUnClose,
+    kIndexEdit, kBrowseIndex, kTglStartup, kTglDesktop, kTglGlobal, kTglAi, kOptBack, kOptInstall, kCancelInstall, kLaunch,
+    kCloseDone, kOpenLog, kDlgPrimary, kDlgSecondary, kDot0, kDot1, kDot2, kDot3, kDot4, kDot5, kTglCleanup, kUnStart, kUnClose,
 };
 
 enum class Page { Welcome, Options, Install, Done, Error, Uninstall };
@@ -289,6 +289,7 @@ private:
     HANDLE busy_answer_event_ = nullptr;
     std::atomic<bool> busy_retry_{false};
     bool slow_ = false;
+    bool probe_ = false;
     int slide_ = 0;
     ULONGLONG slide_time_ = 0;
 };
@@ -302,8 +303,8 @@ bool Wizard::CreateFactories() {
                                    reinterpret_cast<IUnknown**>(&dwrite_))))
         return false;
     CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic_));
-    // Segoe UI Variable on Windows 11, Segoe UI otherwise; CJK comes from the
-    // matching UI font so that punctuation and glyph shapes are regional.
+    // Keep both Chinese translations in the prototype's sans-serif family.
+    // Older Windows installations may expose YaHei without the UI suffix.
     IDWriteFontCollection* fonts = nullptr;
     dwrite_->GetSystemFontCollection(&fonts);
     auto has = [&](const wchar_t* name) {
@@ -311,10 +312,15 @@ bool Wizard::CreateFactories() {
         BOOL exists = FALSE;
         return fonts && SUCCEEDED(fonts->FindFamilyName(name, &index, &exists)) && exists;
     };
-    if (lang_ == Lang::ZhHans && has(L"Microsoft YaHei UI")) font_family_ = L"Microsoft YaHei UI";
-    else if (lang_ == Lang::ZhHant && has(L"Microsoft JhengHei UI")) font_family_ = L"Microsoft JhengHei UI";
-    else if (has(L"Segoe UI Variable Text")) font_family_ = L"Segoe UI Variable Text";
-    else font_family_ = L"Segoe UI";
+    font_family_ = L"Segoe UI";
+    if (lang_ != Lang::En) {
+        for (const wchar_t* family : {L"Microsoft YaHei UI", L"Microsoft YaHei", L"Microsoft JhengHei UI", L"Microsoft JhengHei"}) {
+            if (has(family)) {
+                font_family_ = family;
+                break;
+            }
+        }
+    }
     SafeRelease(fonts);
     return true;
 }
@@ -535,6 +541,14 @@ void Wizard::Icon(int kind, float x, float y, D2D1_COLOR_F c) {
         case 7:  // back chevron (14 px)
             Polyline({{x + 9, y + 1.5f}, {x + 3.5f, y + 7}, {x + 9, y + 12.5f}}, c, 1.5f);
             break;
+        case 9:  // dual sparkle, matching the setup prototype's 20 px icon
+            Polyline({{x + 9, y + 2.5f}, {x + 10.7f, y + 7.1f}, {x + 15.3f, y + 8.8f},
+                      {x + 10.7f, y + 10.5f}, {x + 9, y + 15.1f}, {x + 7.3f, y + 10.5f},
+                      {x + 2.7f, y + 8.8f}, {x + 7.3f, y + 7.1f}}, c, w, true);
+            Polyline({{x + 15.5f, y + 13}, {x + 16.1f, y + 14.6f}, {x + 17.7f, y + 15.2f},
+                      {x + 16.1f, y + 15.8f}, {x + 15.5f, y + 17.4f}, {x + 14.9f, y + 15.8f},
+                      {x + 13.3f, y + 15.2f}, {x + 14.9f, y + 14.6f}}, c, w, true);
+            break;
         case 8:  // warning triangle (20 px)
             Polyline({{x + 10, y + 2}, {x + 18.5f, y + 17}, {x + 1.5f, y + 17}}, c, 1.5f, true);
             Line(x + 10, y + 7.5f, x + 10, y + 11.5f, c, 1.6f);
@@ -585,7 +599,20 @@ float Wizard::Button(int id, const std::wstring& label, float x, float y, Btn st
     if (style == Btn::Primary) Line(r.left + radius, r.bottom - .5f, r.right - radius, r.bottom - .5f, Hex(0, .18f), 1);
     const float tw = TextWidth(label, font, weight);
     float tx = x + (w - tw - icon_w) / 2;
-    if (icon) { Icon(icon, tx, y + (h - 14) / 2, fg); tx += icon_w; }
+    if (icon) {
+        float center_y = y + h / 2;
+        if (auto* layout = Layout(label, font, weight, tw + 1, h, false, DWRITE_TEXT_ALIGNMENT_LEADING)) {
+            DWRITE_TEXT_METRICS metrics{};
+            DWRITE_OVERHANG_METRICS ink{};
+            if (SUCCEEDED(layout->GetMetrics(&metrics)) && SUCCEEDED(layout->GetOverhangMetrics(&ink))) {
+                // Match the visible glyphs, not the font's asymmetric line box.
+                center_y = y + std::max(0.f, (h - metrics.height) / 2) + (h - ink.top + ink.bottom) / 2;
+            }
+            layout->Release();
+        }
+        Icon(icon, tx, center_y - 7, fg);
+        tx += icon_w;
+    }
     Text(label, {tx, y, tx + tw + 1, y + h}, font, fg, weight);
     FocusRing(id, r, radius);
     Hit(id, r);
@@ -691,15 +718,11 @@ void Wizard::PaintPage(Page p, float dx, float alpha) {
 }
 
 void Wizard::PaintWelcome() {
-    // Logo glow, coloured from the icon itself: its gold pulse line and lit
-    // dot. Light leaks from the dot past the tile, a broad warm halo balances
-    // it, and a navy-tinted shadow lifts the tile. While the page is shown
-    // the light flows: the dot breathes, the halo drifts and two warm lights
-    // circle the tile in opposite directions (pulse_installer_glow.html, "金色余晖").
+    // Soft violet light follows the folded-page product mark.
     {
         const float lx = kW / 2 - 48, ly = 54 + kWelcomeDy, cx = kW / 2, cy = 102 + kWelcomeDy;
         const D2D1_POINT_2F dot{lx + 64.2f, ly + 42.6f};
-        const D2D1_COLOR_F gold = Hex(0xF2B43A), hot = Hex(0xFFD66E), core = Hex(0xFFF6D2);
+        const D2D1_COLOR_F gold = Hex(0x8079F4), hot = Hex(0xAAA3FF), core = Hex(0xE5E2FF);
         const float k = theme_.dark ? 1.15f : 1.f;
         // Seconds within a 36 s loop: every period below divides it.
         const float t = GlowAnimating() ? static_cast<float>(GetTickCount64() % 36000) / 1000.f : 0.f;
@@ -715,13 +738,13 @@ void Wizard::PaintWelcome() {
             SafeRelease(brush);
             SafeRelease(coll);
         };
-        const D2D1_COLOR_F wash = theme_.dark ? Hex(0xFFBA50) : Hex(0xFFCE78);
+        const D2D1_COLOR_F wash = theme_.dark ? Hex(0x8C84F8) : Hex(0xC3C0FF);
         const float wa = theme_.dark ? .06f : .11f;  // low enough to stay free of 8-bit banding rings
         glow({cx, cy - 20}, 380, 380, {{0, WithAlpha(wash, wa)}, {.45f, WithAlpha(wash, wa * .45f)}, {1, WithAlpha(wash, 0)}});
         glow({cx + 14 * std::cos(drift), cy + 9 * std::sin(drift)}, 175, 175,
              {{0, WithAlpha(gold, .20f * k)}, {.38f, WithAlpha(gold, .13f * k)}, {.62f, WithAlpha(hot, .05f * k)},
               {1, WithAlpha(hot, 0)}});
-        // Two warm lights circle the tile in opposite directions, so the glow
+        // Two soft lights circle the mark in opposite directions, so the glow
         // visibly moves around it rather than only pulsing in place.
         if (GlowAnimating()) {
             glow({cx + 72 * std::cos(orbit), cy + 40 * std::sin(orbit)}, 110, 110,
@@ -807,20 +830,22 @@ void Wizard::PaintOptions() {
     };
     auto card = [&](int icon, Str title, Str sub, float alpha, const wchar_t* badge = nullptr,
                     bool wide_text = false) {
-        const D2D1_RECT_F r{L, y, R, y + 62};
+        const float sub_right = wide_text ? R - 80 : R - 330;
+        const float sub_height = wide_text ? TextHeight(T(sub), 12, sub_right - L - 50) : 18.f;
+        const D2D1_RECT_F r{L, y, R, y + std::max(62.f, sub_height + 44.f)};
         Fill(r, theme_.card, 7);
         Stroke(r, theme_.stroke, 7);
         Icon(icon, L + 16, y + 21, WithAlpha(theme_.text, .9f * alpha));
         const std::wstring t1 = T(title);
-        Text(t1, {L + 50, y + 12, R - 300, y + 32}, 13.5f, WithAlpha(theme_.text, alpha));
+        Text(t1, {L + 50, y + 12, wide_text ? R - 80 : R - 300, y + 32}, 13.5f, WithAlpha(theme_.text, alpha));
         if (badge) {
             const float bx = L + 50 + TextWidth(t1, 13.5f) + 6, bw = TextWidth(badge, 11) + 14;
             const D2D1_RECT_F b{bx, y + 14, bx + bw, y + 30};
             Fill(b, WithAlpha(theme_.accent, .22f * alpha), 8);
             Text(badge, b, 11, WithAlpha(theme_.accent, alpha), DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER);
         }
-        Text(T(sub), {L + 50, y + 32, wide_text ? R - 130 : R - 330, y + 50}, 12,
-             WithAlpha(theme_.text2, alpha));
+        Text(T(sub), {L + 50, y + 32, sub_right, y + 32 + sub_height}, 12,
+             WithAlpha(theme_.text2, alpha), DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, wide_text);
         return r;
     };
     auto field = [&](int edit_id, int browse_id, const D2D1_RECT_F& card_r, float width, D2D1_RECT_F& edit_rect,
@@ -842,7 +867,7 @@ void Wizard::PaintOptions() {
         if (!edit_shown)
             Text(edit_id == kAppEdit ? req_.app_dir : req_.index_path, edit_rect, 12.5f,
                  WithAlpha(theme_.text, enabled ? 1.f : .45f));
-        Hit(edit_id, in);
+        if (enabled) Hit(edit_id, in);
         if (enabled) Button(browse_id, T(Str::Browse), bx, card_r.top + 15, Btn::Normal, bw);
         else Text(T(Str::Browse), {bx, card_r.top + 15, right, card_r.top + 47}, 13, WithAlpha(theme_.text3, a),
                   DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -873,28 +898,28 @@ void Wizard::PaintOptions() {
     section(Str::SecSearch);
     const auto idx_card = card(2, Str::OptIndex, Str::OptIndexSub, 1, T(Str::Recommended), true);
     Toggle(kTglIndex, req_.tasks.index_service, idx_card.right - 16, idx_card.top + 31);
-    y += 65;
+    y = idx_card.bottom + 3;
     const float ia = req_.tasks.index_service ? 1.f : .45f;
     const auto dir_card = card(3, Str::IndexDir, Str::IndexDirSub, ia);
     field(kIndexEdit, kBrowseIndex, dir_card, 220, index_edit_rect_, index_edit_visible_, req_.tasks.index_service);
     y += 62 + 14;
+    const auto global_card = card(2, Str::OptGlobalSearch, Str::OptGlobalSearchSub, 1, nullptr, true);
+    Toggle(kTglGlobal, req_.tasks.global_search, global_card.right - 16, global_card.top + 31);
+    y = global_card.bottom + 14;
+    section(Str::SecAi);
+    const auto ai_card = card(9, Str::OptAiAssistant, Str::OptAiAssistantSub, 1, T(Str::New), true);
+    Toggle(kTglAi, req_.tasks.ai_assistant, ai_card.right - 16, ai_card.top + 31);
+    y = ai_card.bottom + 14;
     section(Str::SecOther);
     const auto st_card = card(4, Str::OptStartup, Str::OptStartupSub, 1, nullptr, true);
     Toggle(kTglStartup, req_.tasks.startup, st_card.right - 16, st_card.top + 31);
-    y += 65;
+    y = st_card.bottom + 3;
     const auto dk_card = card(5, Str::OptDesktop, Str::OptDesktopSub, 1, nullptr, true);
     Toggle(kTglDesktop, req_.tasks.desktop_icon, dk_card.right - 16, dk_card.top + 31);
-    y += 62 + 8;
+    y = dk_card.bottom + 8;
     rt_->PopAxisAlignedClip();
     max_scroll_ = std::max(0.f, (y + scroll_) - view_bottom);
 
-    // Hit rects outside the viewport must not receive clicks.
-    hits_.erase(std::remove_if(hits_.begin(), hits_.end(),
-                               [&](const HitRect& h) {
-                                   return h.id != kBack && h.id != kMin && h.id != kCloseX &&
-                                          (h.r.bottom < view_top || h.r.top > view_bottom);
-                               }),
-                hits_.end());
     if (max_scroll_ > 0) {  // thin scroll indicator
         const float vh = view_bottom - view_top, th = vh * vh / (vh + max_scroll_);
         const float ty = view_top + (vh - th) * (scroll_ / max_scroll_);
@@ -986,9 +1011,10 @@ void Wizard::PaintInstall() {
     const D2D1_RECT_F panel{360, 58, kW - 24, kH - 50};
     Fill(panel, theme_.card, 10);
     Stroke(panel, theme_.stroke, 10);
-    if (GetTickCount64() - slide_time_ > 3200) { slide_ = (slide_ + 1) % 3; slide_time_ = GetTickCount64(); }
+    if (!probe_ && GetTickCount64() - slide_time_ > 3200) { slide_ = (slide_ + 1) % 6; slide_time_ = GetTickCount64(); }
     const float st = std::min(1.f, (GetTickCount64() - slide_time_) / 500.f);
-    const Str titles[] = {Str::S1Title, Str::S2Title, Str::S3Title}, texts[] = {Str::S1Text, Str::S2Text, Str::S3Text};
+    const Str titles[] = {Str::S4Title, Str::S1Title, Str::S2Title, Str::S3Title, Str::S5Title, Str::S6Title};
+    const Str texts[] = {Str::S4Text, Str::S1Text, Str::S2Text, Str::S3Text, Str::S5Text, Str::S6Text};
     const float text_h = TextHeight(T(texts[slide_]), 12.5f, panel.right - panel.left - 44);
     const D2D1_RECT_F art{panel.left + 22, panel.top + 22 + 10 * (1 - st), panel.right - 22,
                           panel.bottom - 30 - text_h - 38 + 10 * (1 - st)};
@@ -1014,6 +1040,25 @@ void Wizard::PaintInstall() {
             my += 18;
         };
         if (slide_ == 0) {
+            const float prompt_height = TextHeight(T(Str::AiDemoPrompt), 11.5f, mw - 44);
+            Fill({mx + 24, my, mx + mw, my + prompt_height + 16}, WithAlpha(theme_.accent, .20f), 8);
+            Text(T(Str::AiDemoPrompt), {mx + 34, my + 8, mx + mw - 10, my + 8 + prompt_height},
+                 11.5f, theme_.text, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true);
+            my += prompt_height + 26;
+            const float reply_height = TextHeight(T(Str::AiDemoReply), 11.5f, mw - 36);
+            const float reply_bottom = my + reply_height + 52;
+            Fill({mx, my, mx + mw - 12, reply_bottom}, theme_.input, 8);
+            Stroke({mx, my, mx + mw - 12, reply_bottom}, theme_.stroke, 8);
+            Text(T(Str::AiDemoReply), {mx + 12, my + 10, mx + mw - 24, my + 10 + reply_height},
+                 11.5f, theme_.text2, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true);
+            const float action_width = TextWidth(T(Str::AiDemoAction), 10.5f) + 20;
+            const D2D1_RECT_F action{mx + 12, my + reply_height + 19, mx + 12 + action_width, reply_bottom - 9};
+            Fill(action, WithAlpha(theme_.accent, .14f), 4);
+            Text(T(Str::AiDemoAction), action, 10.5f, theme_.accent, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                 DWRITE_TEXT_ALIGNMENT_CENTER);
+            my = reply_bottom + 12;
+            if (my + 30 < art.bottom) { row(.86f, false); row(.64f, false); }
+        } else if (slide_ == 1) {
             const D2D1_RECT_F s{mx, my, mx + mw, my + 22};
             Fill(s, theme_.input, 5);
             Stroke(s, theme_.stroke, 5);
@@ -1026,7 +1071,7 @@ void Wizard::PaintInstall() {
             }
             my += 28;
             row(1, true); row(1, false); row(.8f, false); row(.9f, false); row(.6f, false);
-        } else if (slide_ == 1) {
+        } else if (slide_ == 2) {
             const float half = (mw - 6) / 2;
             float ry = my;
             for (float f : {1.f, .9f, 1.f, .7f, .85f}) { Fill({mx, ry, mx + half * f, ry + 12}, f == .9f ? WithAlpha(theme_.accent, .45f) : theme_.card_strong, 3); ry += 18; }
@@ -1039,6 +1084,28 @@ void Wizard::PaintInstall() {
                 rt_->FillRoundedRectangle(D2D1::RoundedRect(pv, 5, 5), pg);
             SafeRelease(pg);
             SafeRelease(pc);
+        } else if (slide_ == 4) {
+            const D2D1_RECT_F tray{mx, my, mx + mw, my + 110};
+            Fill(tray, WithAlpha(theme_.accent, .06f), 6);
+            Stroke(tray, WithAlpha(theme_.accent, .35f), 6);
+            for (int i = 0; i < 3; ++i) {
+                const float left = mx + mw * (i == 1 ? .30f : i == 2 ? .18f : .10f);
+                const float top = my + 12 + i * 28.f;
+                Fill({left, top, left + mw * .55f, top + 22}, theme_.input, 4);
+                Stroke({left, top, left + mw * .55f, top + 22}, theme_.stroke, 4);
+                Fill({left + 8, top + 7, left + mw * .42f, top + 15}, theme_.card_strong, 3);
+            }
+            my += 122;
+            row(.58f, true); row(.8f, false);
+        } else if (slide_ == 5) {
+            const D2D1_COLOR_F colors[] = {Hex(0xEF4444), Hex(0xF59E0B), Hex(0x22C55E),
+                                          Hex(0x3B82F6), Hex(0xA855F7), Hex(0xEF4444)};
+            const float widths[] = {.9f, .7f, .85f, .6f, .75f, .5f};
+            for (int r = 0; r < 6; ++r) {
+                Fill({mx, my + 3, mx + 9, my + 12}, colors[r], 4.5f);
+                Fill({mx + 18, my + 1, mx + 18 + (mw - 18) * widths[r], my + 13}, theme_.card_strong, 3);
+                my += 24;
+            }
         } else {
             const float half = (mw - 6) / 2;
             for (int c = 0; c < 2; ++c) {
@@ -1054,14 +1121,21 @@ void Wizard::PaintInstall() {
             }
         }
     }
+    if (slide_ == 0) {
+        const float badge_width = TextWidth(T(Str::New), 10.5f) + 14;
+        const float badge_left = art.left + TextWidth(T(titles[slide_]), 15, DWRITE_FONT_WEIGHT_SEMI_BOLD) + 8;
+        const D2D1_RECT_F badge{badge_left, art.bottom + 16, badge_left + badge_width, art.bottom + 32};
+        Fill(badge, WithAlpha(theme_.accent, .16f), 8);
+        Text(T(Str::New), badge, 10.5f, theme_.accent, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER);
+    }
     Text(T(titles[slide_]), {art.left, art.bottom + 14, art.right, art.bottom + 34}, 15, theme_.text,
          DWRITE_FONT_WEIGHT_SEMI_BOLD);
     Text(T(texts[slide_]), {art.left, art.bottom + 38, art.right, art.bottom + 40 + text_h}, 12.5f, theme_.text2,
          DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true);
     if (layer) { rt_->PopLayer(); layer->Release(); }
     {
-        float x = panel.right - 16 - (14 + 5 + 5 + 10);
-        for (int i = 0; i < 3; ++i) {
+        float x = panel.right - 16 - (14 + 5 * 5 + 5 * 5);
+        for (int i = 0; i < 6; ++i) {
             const float w = i == slide_ ? 14.f : 5.f;
             const D2D1_RECT_F d{x, panel.bottom - 17, x + w, panel.bottom - 12};
             Fill(d, i == slide_ ? theme_.accent : theme_.text3, 2.5f);
@@ -1084,11 +1158,28 @@ void Wizard::PaintInstall() {
 
 void Wizard::PaintDone() {
     const float t = std::min(1.f, (GetTickCount64() - page_time_) / 900.f);
-    const bool has_pills = (req_.tasks.index_service && !req_.options.test) || result_.verbs_seeded || result_.startup;
+    std::vector<std::pair<std::wstring, D2D1_COLOR_F>> pills;
+    if (req_.tasks.index_service && !req_.options.test)
+        pills.push_back(result_.index_running ? std::pair{std::wstring(T(Str::SumIndex)), theme_.success}
+                                              : std::pair{std::wstring(T(Str::SumIndexFailed)), theme_.warn});
+    if (result_.defaults_written && req_.tasks.global_search) pills.push_back({T(Str::SumGlobalSearch), theme_.success});
+    if (result_.defaults_written && req_.tasks.ai_assistant) pills.push_back({T(Str::SumAiAssistant), theme_.success});
+    if (result_.verbs_seeded) pills.push_back({T(Str::SumMenu), theme_.success});
+    if (result_.startup) pills.push_back({T(Str::SumStart), theme_.success});
+    std::vector<float> row_widths;
+    std::vector<size_t> row_starts;
+    for (size_t i = 0; i < pills.size(); ++i) {
+        const float w = TextWidth(pills[i].first, 11.5f) + 32;
+        if (row_widths.empty() || row_widths.back() + 6 + w > kW - 96) {
+            row_starts.push_back(i);
+            row_widths.push_back(w);
+        } else row_widths.back() += 6 + w;
+    }
+    const float pills_height = row_widths.empty() ? 0.f : 30.f * static_cast<float>(row_widths.size()) + 18.f;
     const std::wstring sub_measure = req_.upgrade ? T(Str::DoneSubUp)
                                      : result_.index_running ? T(Str::DoneSub) : T(Str::DoneSubNoIndex);
     // icon 84 + 18 + title 44 + text + 16 + pills 48 + buttons 32, centred in the stage
-    const float content = 84 + 18 + 44 + TextHeight(sub_measure, 13.5f, 420) + 16 + (has_pills ? 48 : 0) + 32;
+    const float content = 84 + 18 + 44 + TextHeight(sub_measure, 13.5f, 420) + 16 + pills_height + 32;
     const float cx = kW / 2, top = kTitle + (kH - kTitle - content) / 2 - 6;
     // Check mark that draws itself.
     const float circle = std::min(1.f, t / .65f);
@@ -1112,16 +1203,15 @@ void Wizard::PaintDone() {
          DWRITE_TEXT_ALIGNMENT_CENTER, true);
     y += sh + 16;
     // Summary pills.
-    std::vector<std::pair<std::wstring, D2D1_COLOR_F>> pills;
-    if (req_.tasks.index_service && !req_.options.test)
-        pills.push_back(result_.index_running ? std::pair{std::wstring(T(Str::SumIndex)), theme_.success}
-                                              : std::pair{std::wstring(T(Str::SumIndexFailed)), theme_.warn});
-    if (result_.verbs_seeded) pills.push_back({T(Str::SumMenu), theme_.success});
-    if (result_.startup) pills.push_back({T(Str::SumStart), theme_.success});
-    float total = -6;
-    for (auto& p : pills) total += TextWidth(p.first, 11.5f) + 32 + 6;
-    float x = (kW - total) / 2;
-    for (auto& [label, color] : pills) {
+    size_t row = 0;
+    float x = pills.empty() ? 0.f : (kW - row_widths[0]) / 2;
+    for (size_t i = 0; i < pills.size(); ++i) {
+        if (row + 1 < row_starts.size() && i == row_starts[row + 1]) {
+            ++row;
+            y += 30;
+            x = (kW - row_widths[row]) / 2;
+        }
+        const auto& [label, color] = pills[i];
         const float w = TextWidth(label, 11.5f) + 32;
         const D2D1_RECT_F r{x, y, x + w, y + 24};
         Fill(r, theme_.card, 12);
@@ -1317,6 +1407,8 @@ void Wizard::SyncFromEdits() {
 }
 
 void Wizard::Activate(int id) {
+    if (probe_ && (id == kInstall || id == kOptInstall || id == kLaunch || id == kUnStart || id == kOpenLog)) return;
+    if (probe_ && (id == kCloseX || id == kCloseDone)) { DestroyWindow(hwnd_); return; }
     switch (id) {
         case kMin: ShowWindow(hwnd_, SW_MINIMIZE); break;
         case kUnClose:
@@ -1345,6 +1437,8 @@ void Wizard::Activate(int id) {
         case kBrowseApp: Browse(true); break;
         case kBrowseIndex: Browse(false); break;
         case kTglIndex: req_.tasks.index_service = !req_.tasks.index_service; break;
+        case kTglGlobal: req_.tasks.global_search = !req_.tasks.global_search; break;
+        case kTglAi: req_.tasks.ai_assistant = !req_.tasks.ai_assistant; break;
         case kTglStartup: req_.tasks.startup = !req_.tasks.startup; break;
         case kTglDesktop: req_.tasks.desktop_icon = !req_.tasks.desktop_icon; break;
         case kInstall: case kOptInstall: StartInstall(); break;
@@ -1364,7 +1458,7 @@ void Wizard::Activate(int id) {
             else { cancel_ = true; paused_ = false; }
             dialog_ = Dialog::None;
             break;
-        case kDot0: case kDot1: case kDot2: slide_ = id - kDot0; slide_time_ = GetTickCount64(); break;
+        case kDot0: case kDot1: case kDot2: case kDot3: case kDot4: case kDot5: slide_ = id - kDot0; slide_time_ = GetTickCount64(); break;
     }
     Invalidate();
 }
@@ -1518,7 +1612,11 @@ void Wizard::LayoutEdits() {
 
 int Wizard::HitTest(float x, float y) const {
     for (auto it = hits_.rbegin(); it != hits_.rend(); ++it)
-        if (x >= it->r.left && x < it->r.right && y >= it->r.top && y < it->r.bottom) return it->id;
+        if (x >= it->r.left && x < it->r.right && y >= it->r.top && y < it->r.bottom) {
+            if (page_ == Page::Options && it->id != kBack && it->id != kMin && it->id != kCloseX &&
+                it->id != kOptBack && it->id != kOptInstall && (y < kTitle + 50 || y >= kH - 61)) continue;
+            return it->id;
+        }
     return kNone;
 }
 
@@ -1737,6 +1835,8 @@ LRESULT Wizard::Proc(UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 WizardOutcome Wizard::Run() {
+    wchar_t probe_value[16]{};
+    probe_ = req_.options.test && GetEnvironmentVariableW(L"PULSE_SETUP_UI_PROBE", probe_value, 16) != 0;
     if (!CreateFactories()) {
         Log(L"Direct2D is not available");
         outcome_.exit_code = kExitPrepareFailed;
@@ -1761,6 +1861,13 @@ WizardOutcome Wizard::Run() {
     if (HMODULE shcore = LoadLibraryW(L"shcore.dll")) {
         if (auto fn = reinterpret_cast<GetDpiForMonitorFn>(GetProcAddress(shcore, "GetDpiForMonitor"))) fn(mon, 0, &dx, &dy);
     }
+    if (probe_) {
+        wchar_t value[16]{};
+        if (GetEnvironmentVariableW(L"PULSE_SETUP_TEST_DPI", value, 16)) {
+            const int requested = _wtoi(value);
+            if (requested == 96 || requested == 144 || requested == 192) dx = static_cast<UINT>(requested);
+        }
+    }
     dpi_ = dx;
     const int w = static_cast<int>(kW * Scale()), h = static_cast<int>(kH * Scale());
     const RECT& wa = mi.rcWork;
@@ -1783,6 +1890,23 @@ WizardOutcome Wizard::Run() {
     SendMessageW(index_edit_, WM_SETFONT, reinterpret_cast<WPARAM>(edit_font_), FALSE);
     SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
     page_time_ = GetTickCount64() - 1000;
+    if (probe_) {
+        wchar_t value[16]{};
+        if (GetEnvironmentVariableW(L"PULSE_SETUP_TEST_PAGE", value, 16)) {
+            const int page = _wtoi(value);
+            if (page >= 0 && page <= 4) page_ = static_cast<Page>(page);
+        }
+        if (GetEnvironmentVariableW(L"PULSE_SETUP_TEST_SLIDE", value, 16)) slide_ = std::clamp(_wtoi(value), 0, 5);
+        if (GetEnvironmentVariableW(L"PULSE_SETUP_TEST_SCROLL", value, 16)) scroll_ = static_cast<float>(std::max(0, _wtoi(value)));
+        result_.defaults_written = true;
+        result_.verbs_seeded = true;
+        result_.startup = true;
+        phase_ = Phase::Extracting;
+        shown_progress_ = .42f;
+        total_bytes_ = 100 * 1048576;
+        done_bytes_ = 42 * 1048576;
+        slide_time_ = GetTickCount64() - 1000;
+    }
     ShowWindow(hwnd_, SW_SHOWNORMAL);
     SetForegroundWindow(hwnd_);
     SetTimer(hwnd_, 1, 16, nullptr);

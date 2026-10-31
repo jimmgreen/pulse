@@ -66,18 +66,25 @@ void ForgetOpenToast(AppCore& core) {
 
 }  // namespace
 
-AppState& OpenExternalFolder(AppState& mru, const std::wstring& raw) {
-    // Win+E's shell command launches Pulse without a path. Each launch is a
-    // new-window request, even when the current folder is already visible.
-    const bool new_window = raw.empty();
-    const bool this_pc = new_window || app::IsThisPcArgument(raw);
+bool ExternalOpenWindowBusy(const AppState& state) { return IsBusy(state); }
+
+ExternalOpenResult OpenExternalFolder(AppState& mru, const std::wstring& raw) {
+    const bool icon = raw.empty();
+    const bool win_e = raw == L"pulse:win-e";
+    const bool explicit_window = raw == L"pulse:new-window" || raw == L"pulse:this-pc";
+    const bool explicit_tab = raw == L"pulse:new-tab";
+    const bool launch = icon || win_e || explicit_window || explicit_tab || app::IsThisPcArgument(raw);
+    const bool this_pc = launch;
     const auto* current = ActiveTab(mru);
-    const std::wstring path = new_window ? (current ? current->current_path : std::wstring()) :
-        this_pc ? std::wstring() : ResolveOpenFolderPath(raw);
+    const std::wstring path = icon || win_e || raw == L"pulse:new-window" || explicit_tab
+        ? (mru.appPrefs.new_window_shows == 0 ? mru.appPrefs.home_folder :
+           mru.appPrefs.new_window_shows == 1 ? std::wstring() :
+           current ? current->current_path : std::wstring())
+        : this_pc ? std::wstring() : ResolveOpenFolderPath(raw);
     // Screenshot runs stay one window (plan §8.7); nothing to open stays as before.
     if (mru.shot.active || (!this_pc && path.empty())) {
         OpenFolderInNewTab(mru, raw);
-        return mru;
+        return {ExternalOpenStatus::Dispatched, &mru};
     }
     AppCore& core = mru.core;
     const uint64_t now = GetTickCount64();
@@ -102,19 +109,19 @@ AppState& OpenExternalFolder(AppState& mru, const std::wstring& raw) {
         windows.push_back(&w);
         snapshot.push_back(e);
     });
-    if (windows.empty()) {
-        OpenFolderInNewTab(mru, raw);
-        return mru;
-    }
+    if (windows.empty()) return {ExternalOpenStatus::Failed, nullptr};
     // The first tab can only move out while it is still there and not alone.
     batch.tab_movable = batch.tab_movable && batch_tab_movable;
 
     const app::ExternalOpenPolicy policy = OpenPolicy(mru);
     app::ExternalOpenRequest request;
-    request.new_window = new_window;
+    request.new_window = false;
     request.can_dedupe = !this_pc;
     request.tick = now;
-    const app::ExternalOpenDecision decision = app::DecideOpenTarget(request, snapshot, batch, policy);
+    const app::ExternalOpenDecision decision = launch
+        ? app::DecideLaunchTarget(explicit_tab ? 1 : icon ? mru.appPrefs.open_pulse_icon :
+                                 win_e ? mru.appPrefs.open_win_e : mru.appPrefs.open_this_pc, snapshot, explicit_window)
+        : app::DecideOpenTarget(request, snapshot, batch, policy);
 
     AppState* target = nullptr;
     bool opened = false;
@@ -124,18 +131,25 @@ AppState& OpenExternalFolder(AppState& mru, const std::wstring& raw) {
         init.path = path;
         init.adopt_from = adopt_from;
         init.adopt_index = adopt_index;
-        init.monitor = foreground ? MonitorFromWindow(foreground, MONITOR_DEFAULTTONULL) : nullptr;
+        POINT cursor{};
+        init.monitor = launch && GetCursorPos(&cursor) ? MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST) :
+            foreground ? MonitorFromWindow(foreground, MONITOR_DEFAULTTONULL) : nullptr;
         const HWND hwnd = OpenPulseWindow(from, init);
         return hwnd ? core.windows.Lookup(hwnd) : nullptr;
     };
     switch (decision.action) {
+    case app::ExternalOpenAction::Deferred:
+        return {ExternalOpenStatus::Deferred, nullptr};
     case app::ExternalOpenAction::Activate:
     case app::ExternalOpenAction::Tab:
     case app::ExternalOpenAction::JoinBatch:
         // OpenFolderInNewTab restores a minimized or hidden window (a fresh
         // start from the tray included) and brings an open folder forward.
         target = windows[decision.window];
-        OpenFolderInNewTab(*target, raw);
+        if (launch) {
+            if (decision.action != app::ExternalOpenAction::Activate) OpenTabAt(*target, path);
+            RevealWindow(*target);
+        } else OpenFolderInNewTab(*target, raw);
         opened = decision.action != app::ExternalOpenAction::Activate;
         break;
     case app::ExternalOpenAction::NewWindow:
@@ -160,9 +174,14 @@ AppState& OpenExternalFolder(AppState& mru, const std::wstring& raw) {
     }
     }
     if (!target) {
-        // A window could not be created: a tab in the window that has it.
-        target = &mru;
-        OpenFolderInNewTab(mru, raw);
+return {ExternalOpenStatus::Failed, nullptr};
+    }
+
+    if (launch) {
+        if (opened && decision.reason == app::ExternalOpenReason::Busy)
+            target->notification_toast.ShowSnack(target->hwnd, ui::SnackIcon::Window,
+                l10n::Get(l10n::StringId::OpenBusyNewWindow), L"", {});
+        return {ExternalOpenStatus::Dispatched, target};
     }
 
     const bool tab_movable = decision.action == app::ExternalOpenAction::Tab && target->window_tabs.items.size() >= 2;
@@ -186,14 +205,14 @@ AppState& OpenExternalFolder(AppState& mru, const std::wstring& raw) {
     // "Make it a tab" needs a window to go back to.
     if (offer == app::OpenConversion::None || (offer == app::OpenConversion::ToTab && !into)) {
         if (opened) ForgetOpenToast(core);
-        return *target;
+        return {ExternalOpenStatus::Dispatched, target};
     }
     core.open_convert = offer;
     core.open_convert_window = target->hwnd;
     core.open_convert_tab = ActiveLayoutTab(*target);
     core.open_convert_into = into;
     ShowOpenToast(*target, offer);
-    return *target;
+    return {ExternalOpenStatus::Dispatched, target};
 }
 
 void ConvertExternalOpen(AppState& s) {

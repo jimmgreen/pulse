@@ -1,5 +1,6 @@
 // shell_window_sync.cpp — see shell_window_sync.h.
 #include "shell_window_sync.h"
+#include "explorer_takeover_probe.h"
 
 #include "app_input.h"
 #include "app_navigation.h"
@@ -9,6 +10,7 @@
 #include "tray_reveal.h"
 #include "window_registry.h"
 #include "../common/path_utils.h"
+#include "../ui/ui_view_model.h"
 
 #include <shlobj.h>
 #include <algorithm>
@@ -36,6 +38,7 @@ bool ShellWindowsEnabled(const AppState& s) {
 }
 
 bool ExplorerTakeoverEnabled(const AppState& s) {
+    if (ExplorerTakeoverProbeRequested(s)) return ExplorerTakeoverProbeScope(s) != nullptr;
     if (s.isolatedTest) return ShellIntegrationAllowed(s, L"PULSE_TEST_EXPLORER_TAKEOVER");
     // 兼容打开方式 relies on the takeover: Explorer opens the folder, Pulse takes the window.
     return ShellIntegrationAllowed(s, nullptr) && s.appPrefs.integration_enabled &&
@@ -46,7 +49,7 @@ void SyncExplorerTakeover(AppState& s) {
     const bool enabled = ExplorerTakeoverEnabled(s);
     if (enabled && !s.explorer_takeover) {
         // Requests reach the most recent window through the host.
-        s.explorer_takeover = std::make_unique<app::ExplorerWindowTakeover>(ServiceWindow(s), WM_EXPLORER_TAKEOVER);
+        s.explorer_takeover = std::make_unique<app::ExplorerWindowTakeover>(s.single_instance.CreateExplorerSubmissionPort(ServiceWindow(s), WM_OPEN_EXTERNAL), ExplorerTakeoverProbeScope(s));
     } else if (!enabled && s.explorer_takeover) {
         s.explorer_takeover->Stop();
         s.explorer_takeover.reset();
@@ -140,14 +143,6 @@ void SyncShellWindows(AppState& s) {
 void StopShellWindows(AppState& s) {
     if (s.explorer_takeover) s.explorer_takeover->Stop();
     s.explorer_takeover.reset();
-    // Stop synchronizes with posting; release requests which the destroyed
-    // target window will no longer dispatch.
-    MSG pending{};
-    while (PeekMessageW(&pending, ServiceWindow(s), WM_EXPLORER_TAKEOVER, WM_EXPLORER_TAKEOVER, PM_REMOVE)) {
-        std::unique_ptr<app::ExplorerTakeoverRequest> request(
-            reinterpret_cast<app::ExplorerTakeoverRequest*>(pending.lParam));
-        if (request && request->handoff) request->handoff->Cancel();
-    }
     if (s.shell_windows) s.shell_windows->Stop();
     s.shell_windows.reset();
     s.shell_windows_published.clear();
@@ -196,68 +191,58 @@ void HandleShellSelect(AppState& s, const app::ShellSelectRequest& request) {
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
-// A /select that applied in the hidden source after its folder was handed
-// over: select those names in the tab opened for it, if it still shows it.
-static void SelectTakenOverNames(AppState& mru, const app::ExplorerTakeoverRequest& request) {
-    if (!ExplorerTakeoverEnabled(mru) || request.names.empty()) return;
-    // The folder may have opened in any window (M7a): the most recent one
-    // whose active tab shows it.
-    AppState& s = app::FindWindowSharingCore(mru, [&request](AppState& w) {
-        const app::Tab* active = ActiveTab(w);
-        return active && SameFolder(active->current_path, request.folder);
+ExternalOpenResult HandleExplorerTakeover(AppState& mru, const app::ExplorerOpenContext& request) {
+    if (!request.handoff || !ExplorerTakeoverEnabled(mru) ||
+        GetTickCount64() >= request.handoff->deadline_tick ||
+        request.handoff->state != app::HandoffState::Pending) return {};
+    bool available = false;
+    mru.core.windows.ForEach([&](HWND, const AppState& window) {
+        if (!ExternalOpenWindowBusy(window)) available = true;
     });
-    app::Tab* tab = ActiveTab(s);
-    if (!tab || !SameFolder(tab->current_path, request.folder)) return;
-    app::TraceShellWindows(L"takeover late selection folder=[%s] names=%zu", request.folder.c_str(),
-                           request.names.size());
-    SelectNameInTab(s, *tab, request.names.front());
-    for (size_t i = 1; i < request.names.size(); ++i) AddNameToSelection(s, *tab, request.names[i]);
-    InvalidateRect(s.hwnd, nullptr, FALSE);
-}
-
-void HandleExplorerTakeover(AppState& mru, const app::ExplorerTakeoverRequest& request) {
-    if (request.select_only) {
-        SelectTakenOverNames(mru, request);
-        return;
-    }
-    if (!request.handoff) return;
-    if (!ExplorerTakeoverEnabled(mru) || GetTickCount64() >= request.handoff->deadline_tick) {
-        request.handoff->Cancel();
-        return;
-    }
-    if (request.handoff->state != app::HandoffState::Pending) return;
-    if (!request.handoff->Receive(GetTickCount64())) return;
+    if (!available) return {ExternalOpenStatus::Deferred, nullptr};
     app::TraceShellWindows(L"takeover request folder=[%s] names=%zu", request.folder.c_str(), request.names.size());
     // Explorer's window is about to close, so the folder must open where it
     // can be seen: plan §6 picks the window (M7a); a window minimized or in
     // the tray is restored (a fresh start from the tray included) when the
     // folder goes there. This PC travels as its parsing name, which
     // OpenExternalFolder knows.
-    AppState& s = OpenExternalFolder(mru, request.folder.empty()
+    ExplorerTakeoverProbeDelivery(mru, request.handoff, "open-before");
+    const auto opened = OpenExternalFolder(mru, request.folder.empty()
                                               ? std::wstring(L"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}")
                                               : request.folder);
+    ExplorerTakeoverProbeDelivery(mru, request.handoff, "open-after");
+    if (opened.status != ExternalOpenStatus::Dispatched || !opened.target) {
+        return opened;
+    }
+    AppState& s = *opened.target;
+    ExplorerTakeoverProbeNavigation(s, ActiveTab(s), "bringfront-before");
     BringToFront(s.hwnd);
+    ExplorerTakeoverProbeNavigation(s, ActiveTab(s), "bringfront-after");
     app::Tab* tab = ActiveTab(s);
     if (!tab || !SameFolder(tab->current_path, request.folder)) {
-        request.handoff->Cancel();
-        return;
+        return {};
     }
     // Require a fresh successful enumeration even when an existing tab or an
     // offline cache was activated. Capture the generation after queuing it.
     tab->explorer_handoff.reset();
+    ExplorerTakeoverProbeNavigation(s, tab, "refresh-before");
     RefreshPath(s, tab->current_path);
+    ExplorerTakeoverProbeNavigation(s, tab, "refresh-after");
     auto lease = std::make_unique<app::ExplorerNavigationLease>();
     lease->handoff = request.handoff;
     lease->path = tab->current_path;
     lease->generation = tab->pending_generation;
     lease->names = request.names;
-    if (!lease->generation) return;
+    lease->initial_selection_revision = tab->selection_revision;
+    if (!lease->generation) return {};
     tab->explorer_handoff = std::move(lease);
     tab->pending_selected_names = request.names;
     tab->pending_selection_revision = tab->selection_revision;
     tab->pending_selected_name = request.names.empty() ? L"" : request.names.front();
     tab->pending_ensure_selection_visible = !request.names.empty();
+    ExplorerTakeoverProbeNavigation(s, tab, "lease-attached");
     InvalidateRect(s.hwnd, nullptr, FALSE);
+    return opened;
 }
 
 void CompleteExplorerNavigation(app::Tab& tab, uint64_t generation, bool success) {
@@ -275,7 +260,128 @@ void CompleteExplorerNavigation(app::Tab& tab, uint64_t generation, bool success
     // Empty Explorer selections must remain empty, instead of the normal
     // first-row selection used when a folder loads.
     if (lease->names.empty()) { tab.ClearSelection(); selected.clear(); }
-    lease->Complete(tab.current_path, generation, true, std::move(selected), GetTickCount64());
+    lease->RecordListing(tab.current_path, generation, true, std::move(selected), GetTickCount64());
+}
+
+namespace {
+bool ExplorerSelection(AppState& state, app::Tab& tab, std::vector<std::wstring>& selected) {
+    for (int index : tab.SelectedIndices()) {
+        if (index < 0 || static_cast<size_t>(index) >= tab.EntryCount() || !tab.EntryVisible(index)) {
+            if (tab.explorer_handoff) {
+                ExplorerTakeoverProbeNavigation(state, &tab, "selection-not-visible", static_cast<unsigned>(index));
+                tab.explorer_handoff->handoff->Cancel();
+            }
+            return false;
+        }
+        selected.push_back(tab.EntryAt(index).name);
+    }
+    return true;
+}
+void TraceFrameOnce(AppState& s, app::Tab* tab, unsigned bit, const char* reason, unsigned detail) {
+    if (!tab || !tab->explorer_handoff) return;
+    static std::weak_ptr<app::ExplorerHandoff> last;
+    static unsigned seen = 0;
+    const auto handoff = tab->explorer_handoff->handoff;
+    if (last.lock() != handoff) { last = handoff; seen = 0; }
+    if (seen & bit) return;
+    seen |= bit;
+    ExplorerTakeoverProbeNavigation(s, tab, reason, detail);
+}
+bool PresentedPane(AppState& s, app::Tab* tab) {
+    if (!IsWindowVisible(s.hwnd) || IsIconic(s.hwnd)) return false;
+    const auto* layout = s.window_tabs.Active();
+    if (!layout) return false;
+    for (auto* pane : layout->VisiblePanes()) if (pane && pane->ActiveTab() == tab) return true;
+    return false;
+}
+}
+void TickExplorerPresentation(AppState& s) {
+    const auto now = GetTickCount64();
+    ForEachPane(s, [&](app::Pane& pane) {
+        auto* tab = pane.ActiveTab();
+        if (tab && tab->explorer_handoff) {
+            std::vector<std::wstring> selected;
+            if (!ExplorerSelection(s, *tab, selected)) return;
+            const auto before = tab->explorer_handoff->handoff->state.load();
+            const bool visible = PresentedPane(s, tab);
+            tab->explorer_handoff->Presented(tab->current_path, tab->pending_generation, tab->applied_generation,
+                selected, visible, false, now);
+            if (before != tab->explorer_handoff->handoff->state.load()) {
+                const auto& lease = *tab->explorer_handoff;
+                const char* reason = now >= lease.handoff->deadline_tick ? "tick-expired" : !visible ? "tick-not-visible" :
+                    tab->current_path != lease.path ? "tick-path-changed" : tab->pending_generation && tab->pending_generation != lease.generation ?
+                    "tick-new-pending" : !tab->pending_generation && tab->applied_generation != lease.generation ? "tick-new-applied" : "tick-selection-changed";
+                ExplorerTakeoverProbeNavigation(s, tab, reason);
+            }
+        }
+    });
+}
+ExplorerFrame CaptureExplorerFrame(AppState& s, const ui::WindowViewModel& vm) {
+    ExplorerFrame frame;
+    if (vm.settings_open) {
+        ForEachPane(s, [&](app::Pane& pane) { TraceFrameOnce(s, pane.ActiveTab(), 128u, "capture-settings-overlay", 1); });
+        return frame;
+    }
+    const auto* layout = s.window_tabs.Active();
+    if (!layout) return frame;
+    const auto panes = layout->VisiblePanes();
+    if (panes.size() != vm.pane_slots.size()) {
+        for (auto* pane : panes) if (pane) TraceFrameOnce(s, pane->ActiveTab(), 128u, "capture-pane-count-mismatch",
+            (static_cast<unsigned>(panes.size()) << 16) | static_cast<unsigned>(vm.pane_slots.size()));
+        return frame;
+    }
+    for (size_t i = 0; i < panes.size(); ++i) {
+        const auto& slot = vm.pane_slots[i];
+        const auto& rect = slot.rect;
+        auto* tab = panes[i] ? panes[i]->ActiveTab() : nullptr;
+        if (tab && tab->explorer_handoff) {
+            const unsigned gates = (tab->explorer_handoff->listing_complete ? 1u : 0u) | (!tab->loading ? 2u : 0u) |
+                (rect.right > rect.left && rect.bottom > rect.top ? 4u : 0u) | (tab->snapshot ? 8u : 0u) |
+                (slot.pane.snapshot == tab->snapshot ? 16u : 0u);
+            TraceFrameOnce(s, tab, 1u, "capture-first-gates", gates);
+            if (tab->explorer_handoff->listing_complete) TraceFrameOnce(s, tab, 2u, "capture-listed-gates", gates);
+        }
+        if (tab && tab->explorer_handoff && tab->explorer_handoff->listing_complete &&
+            tab->explorer_handoff->handoff->state == app::HandoffState::Pending &&
+            !tab->loading && rect.right > rect.left && rect.bottom > rect.top &&
+            tab->snapshot && slot.pane.snapshot == tab->snapshot) {
+            // Both tree walks are first-then-second; animation only changes
+            // rectangles. Also verify the immutable listing and rendered row
+            // mapping, rather than trusting ordinal correspondence alone.
+            bool selection_visible = true;
+            for (int index : tab->SelectedIndices()) {
+                const int row = slot.pane.ViewIndex(index);
+                if (!tab->EntryVisible(index) || row < 0 || static_cast<size_t>(row) >= slot.pane.EntryCount() ||
+                    slot.pane.SourceIndex(row) != index || !slot.pane.IsRowSelected(index)) {
+                    selection_visible = false; break;
+                }
+            }
+            TraceFrameOnce(s, tab, selection_visible ? 4u : 8u, "capture-selection", selection_visible ? 1u : 0u);
+            if (selection_visible) frame.push_back({tab, tab->applied_generation, tab->selection_revision});
+        }
+    }
+    return frame;
+}
+void CompleteExplorerFrame(AppState& s, const ExplorerFrame& frame, bool presented) {
+    TickExplorerPresentation(s);
+    ForEachPane(s, [&](app::Pane& pane) {
+        auto* tab = pane.ActiveTab();
+        if (!tab || !tab->explorer_handoff) return;
+        if (!presented) {
+            TraceFrameOnce(s, tab, 16u, "frame-not-presented", static_cast<unsigned>(frame.size()));
+            tab->explorer_handoff->handoff->Cancel(); return;
+        }
+        const auto found = std::find_if(frame.begin(), frame.end(), [&](const auto& item) {
+            return item.tab == tab && item.generation == tab->applied_generation && item.selection_revision == tab->selection_revision;
+        });
+        if (found == frame.end()) { TraceFrameOnce(s, tab, 32u, "frame-no-matching-evidence", static_cast<unsigned>(frame.size())); return; }
+        std::vector<std::wstring> selected;
+        if (!ExplorerSelection(s, *tab, selected)) return;
+        const bool acknowledged = tab->explorer_handoff->Presented(tab->current_path, tab->pending_generation, tab->applied_generation,
+            selected, PresentedPane(s, tab) && !tab->loading && tab->snapshot && !tab->net_readonly, presented, GetTickCount64());
+        TraceFrameOnce(s, tab, 64u, "frame-ack-result", acknowledged ? 1u : 0u);
+        ExplorerTakeoverProbePresented(s, tab, acknowledged);
+    });
 }
 
 } // namespace pulse

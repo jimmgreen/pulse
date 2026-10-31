@@ -26,6 +26,7 @@
 #include "duplicate_scan.h"
 #include "explorer_window_takeover.h"
 #include "external_open.h"
+#include "external_open_notice.h"
 #include "folder_sizes.h"
 #include "dialog_jump.h"
 #include "double_ctrl.h"
@@ -63,6 +64,7 @@ struct NetworkLocationLoad;
 struct NetworkPageLoad;
 
 struct AppState;
+struct DialogManagementUiState;
 
 struct AppCore {
     AppCore() = default;
@@ -242,6 +244,8 @@ struct AppCore {
     // Folders opened from outside Pulse (M7a, open_routing.h): the batch the
     // last ones formed, its window and, while it is an existing window, the
     // tab the batch's first folder opened in there.
+    app::ExternalOpenNotice open_failure_notice;
+    uint64_t open_wait_tick = 0;
     app::ExternalOpenBatch open_batch;
     HWND open_batch_window = nullptr;
     const void* open_batch_tab = nullptr;  // app::LayoutTab*, compared only
@@ -257,9 +261,10 @@ struct AppCore {
     app::ExternalOpenPolicy open_suggested = app::ExternalOpenPolicy::Smart;
 
     // Hidden process window (host_window.h): single-instance endpoint today,
-    // tray/hotkey/service callbacks as M2 continues. Last member, so it is
-    // destroyed first and never outlives the state its handler reads.
+    // tray/hotkey/service callbacks as M2 continues. Destroyed before the
+    // state its handler reads, after management has revoked its worker wake.
     app::HostWindow host;
+    std::shared_ptr<DialogManagementUiState> dialogManagement;
 };
 
 // Owns the AppCore of a stand-alone AppState. A base class, so the core exists

@@ -2,6 +2,7 @@
 #include "../common/localization.h"
 // fluent_menu.cpp — See fluent_menu.h for the contract.
 #include "fluent_menu.h"
+#include "window_layout_diagram.h"
 #include "FluentTokens.h"
 #include "lumatext_renderer.h"
 #include "typography.h"
@@ -58,11 +59,17 @@ bool SwatchStripHasGlyphs(const FluentMenuItem& it) {
     return false;
 }
 
+bool HasLayoutTiles(const FluentMenuItem& it) {
+    return !it.quick_swatches.empty() && !it.quick_swatches.front().label.empty();
+}
+
 float SwatchSpacingDip(const FluentMenuItem& it) {
+    if (HasLayoutTiles(it)) return 94.0f;
     return SwatchStripHasGlyphs(it) ? 44.0f : 28.0f;
 }
 
 float SwatchHitRadiusDip(const FluentMenuItem& it) {
+    if (HasLayoutTiles(it)) return 44.0f;
     return SwatchStripHasGlyphs(it) ? 20.0f : 13.0f;
 }
 
@@ -241,7 +248,7 @@ void FluentMenuModel::Layout(IDWriteFactory2* dwrite, float scale, float min_wid
 
     float h = pad_v_ * 2.0f;
     for (const auto& it : items_) {
-        h += it.heading ? heading_h_ : row_h_;
+        h += HasLayoutTiles(it) ? 72.0f * scale_ : it.heading ? heading_h_ : row_h_;
         if (it.separator_after) h += sep_h_;
     }
     height_ = (int)std::ceil(h);
@@ -257,7 +264,7 @@ bool FluentMenuModel::Truncated(int i) const {
 
 float FluentMenuModel::RowHeightPx(int i) const {
     const FluentMenuItem* it = At(i);
-    return it && it->heading ? heading_h_ : row_h_;
+    return it && HasLayoutTiles(*it) ? 72.0f * scale_ : it && it->heading ? heading_h_ : row_h_;
 }
 
 float FluentMenuModel::RowTopPx(int i) const {
@@ -336,7 +343,7 @@ int FluentMenuModel::NextEnabled(int from, int dir) const {
         i += dir > 0 ? 1 : -1;
         if (i < 0) i = n - 1;
         if (i >= n) i = 0;
-        if (items_[i].enabled) return i;
+        if (items_[i].enabled && !items_[i].heading) return i;
     }
     return -1;
 }
@@ -1026,7 +1033,18 @@ bool FluentMenu::RenderSurface(const FluentMenuModel& model, int hover_row, int 
                     const float center_x = first + spacing * static_cast<float>(swatch_index);
                     const bool hovered = i == hover_row &&
                                          static_cast<int>(swatch_index) == hover_swatch;
-                    if (!swatch.glyph.empty()) {
+                    if (!swatch.label.empty()) {
+                        const auto tile = D2D1::RectF(center_x - 43*scale_, center_y - 32*scale_, center_x + 43*scale_, center_y + 32*scale_);
+                        painter_.FillRoundedRect(tile, 6*scale_, hovered ? theme.fill_hover : theme.fill_input);
+                        painter_.StrokeRoundedRect(tile, 6*scale_, theme.stroke_card);
+                        const auto ink = it->enabled ? theme.text : theme.text_disabled;
+                        using P=fluent::MenuPictogram;
+                        const int layout=swatch.pictogram==P::LayoutSideBySide?0:swatch.pictogram==P::LayoutStacked?1:
+                            swatch.pictogram==P::LayoutColumns?2:swatch.pictogram==P::LayoutFour?3:swatch.pictogram==P::LayoutThree?4:5;
+                        ComPtr<ID2D1SolidColorBrush> diagram_brush; dc->CreateSolidColorBrush(ink,&diagram_brush);
+                        if(diagram_brush.get()) DrawWindowLayoutDiagram(dc,D2D1::RectF(center_x-20*scale_,tile.top+8*scale_,center_x+22*scale_,tile.top+34*scale_),layout,diagram_brush.get(),scale_);
+                        painter_.DrawText(swatch.label, D2D1::RectF(tile.left+2*scale_, tile.top+38*scale_, tile.right-2*scale_, tile.bottom), compositor_->SmallFormat(), ink, fluent::HorizontalAlignment::Center);
+                    } else if (!swatch.glyph.empty()) {
                         // Icon button: hover pill + Fluent glyph in text color.
                         const float half_w = 18.0f * scale_;
                         const float half_h = 13.0f * scale_;
@@ -1519,6 +1537,8 @@ void FluentMenu::UpdateHover(int row, int swatch) {
             swatch = -1;
         } else if (!it || it->quick_swatches.empty()) {
             swatch = -1;
+        } else if (HasLayoutTiles(*it) && swatch < 0) {
+            swatch = 0;
         }
     }
     if (row == hover_row_ && swatch == hover_swatch_) return;
@@ -2114,6 +2134,11 @@ int FluentMenu::RunModalLoop() {
                             UpdateHover(next);
                         }
                         swallow = true;
+                    } else if (!filter_fn_ && (msg.wParam == VK_RIGHT || msg.wParam == VK_LEFT) &&
+                               sub_parent_row_ < 0 && model_.At(hover_row_) && HasLayoutTiles(*model_.At(hover_row_))) {
+                        const auto count=static_cast<int>(model_.At(hover_row_)->quick_swatches.size());
+                        UpdateHover(hover_row_, (std::max(0,hover_swatch_)+(msg.wParam==VK_RIGHT?1:count-1))%count);
+                        swallow=true;
                     } else if (!filter_fn_ && msg.wParam == VK_RIGHT && sub_parent_row_ < 0 &&
                                hover_row_ >= 0 && model_.At(hover_row_) &&
                                !model_.At(hover_row_)->children.empty()) {
@@ -2138,7 +2163,8 @@ int FluentMenu::RunModalLoop() {
                                 sub_hover_ = sub_model_.FirstEnabled();
                                 if (RenderSub()) PresentSub(255);
                             } else {
-                                int cmd = InvokeRow(hover_row_);
+                                int cmd = hov && HasLayoutTiles(*hov) && hover_swatch_ >= 0
+                                    ? hov->quick_swatches[static_cast<size_t>(hover_swatch_)].command : InvokeRow(hover_row_);
                                 if (cmd != 0) { result_ = cmd; Dismiss(); }
                             }
                         }

@@ -89,6 +89,7 @@ inline constexpr ActionEntry kActions[] = {
     {"window.close", ActionRisk::View},
     {"window.reopen", ActionRisk::View},
     {"window.activate", ActionRisk::View},
+    {"window.arrange", ActionRisk::View},
     {"window.merge", ActionRisk::View},
     {"window.overview", ActionRisk::View},
     {"window.maximize", ActionRisk::View},
@@ -267,9 +268,16 @@ inline constexpr KeyActionLink kKeyActionLinks[] = {
     {KeyAction::SwitchWindow, {"window.activate"}},
     {KeyAction::Overview, {"window.overview"}},
     {KeyAction::MergeWindows, {"window.merge"}},
+
     {KeyAction::AiAssistant, {"", "the assistant itself"}},
     {KeyAction::AiHistory, {"", "the assistant's own chat history"}},
     {KeyAction::ShortcutHelp, {"app.shortcut_help"}},
+    {KeyAction::ArrangeSideBySide, {"window.arrange"}},
+    {KeyAction::ArrangeStacked, {"window.arrange"}},
+    {KeyAction::ArrangeColumns, {"window.arrange"}},
+    {KeyAction::ArrangeTile, {"window.arrange"}},
+    {KeyAction::ArrangeMain, {"window.arrange"}},
+    {KeyAction::ArrangeCascade, {"window.arrange"}},
 };
 
 inline constexpr MenuCmdLink kMenuCmdLinks[] = {

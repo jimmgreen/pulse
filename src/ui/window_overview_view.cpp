@@ -1,4 +1,5 @@
 #include "window_overview_view.h"
+#include "window_layout_diagram.h"
 #include "FluentTokens.h"
 #include "typography.h"
 #include "window_switcher_view.h"
@@ -95,6 +96,18 @@ void WindowOverviewView::Layout() {
     area_ = D2D1::RectF(panel_.left + kPad * s, panel_.top + kHeaderH * s, panel_.right - kPad * s,
                         panel_.bottom - 10.0f * s);
     const float avail_w = std::max(area_.right - area_.left, 1.0f);
+    float arrangement_width=120.0f*s;
+    for (const auto& label:data_.arrangements) arrangement_width=std::max(arrangement_width,width_of(label)+36*s);
+    const int capacity=std::max(1,static_cast<int>((avail_w+6*s)/(arrangement_width+6*s)));
+    const int arrange_cols=capacity>=6?6:capacity>=3?3:capacity>=2?2:1;
+    const float arrange_w = (avail_w - static_cast<float>(arrange_cols-1)*6*s)/static_cast<float>(arrange_cols);
+    arrange_buttons_.clear();
+    for (size_t i=0;i<data_.arrangements.size();++i) {
+        const float x=area_.left+static_cast<float>(i%arrange_cols)*(arrange_w+6*s);
+        const float y=area_.top+static_cast<float>(i/arrange_cols)*40*s;
+        arrange_buttons_.push_back(D2D1::RectF(x,y,x+arrange_w,y+34*s));
+    }
+    if (!arrange_buttons_.empty()) area_.top=arrange_buttons_.back().bottom+12*s;
     const size_t items = data_.cards.size() + 1;
     const size_t cols = std::clamp<size_t>(static_cast<size_t>((avail_w + kGap * s) / ((kCardMinW + kGap) * s)), 1,
                                            items);
@@ -159,6 +172,9 @@ OverviewHit WindowOverviewView::HitTest(float x, float y) const noexcept {
     if (In(merge_button_, x, y)) {
         hit.kind = data_.can_merge_all ? OverviewHitKind::MergeAll : OverviewHitKind::Panel;
         return hit;
+    }
+    for (size_t i=0;i<arrange_buttons_.size();++i) if(In(arrange_buttons_[i],x,y)) {
+        hit.kind=OverviewHitKind::Arrange; hit.card=static_cast<int>(i); return hit;
     }
     hit.kind = OverviewHitKind::Panel;
     if (!In(area_, x, y)) return hit;
@@ -318,6 +334,15 @@ void WindowOverviewView::Draw(ID2D1DeviceContext* dc, IDWriteFactory* dwrite, ID
     fill(merge_button_, 6.0f * s, Alpha(theme.text, merge_hot ? 0.10f : 0.05f));
     stroke(merge_button_, 6.0f * s, theme.stroke_card, line);
     text(f_center_, data_.merge_all, merge_button_, data_.can_merge_all ? theme.text : Alpha(theme.text, 0.4f));
+    for (size_t i=0;i<arrange_buttons_.size();++i) {
+        const bool hot=hover_.kind==OverviewHitKind::Arrange && hover_.card==static_cast<int>(i);
+        fill(arrange_buttons_[i],6*s,Alpha(theme.text,hot?0.12f:0.05f));
+        stroke(arrange_buttons_[i],6*s,theme.stroke_card,line);
+        auto label=arrange_buttons_[i];
+        DrawWindowLayoutDiagram(dc,D2D1::RectF(label.left+8*s,label.top+8*s,label.left+34*s,label.bottom-6*s),static_cast<int>(i),use(theme.text_secondary),s);
+        label.left+=36*s;
+        text(f_center_,data_.arrangements[i],label,theme.text);
+    }
     const bool done_hot = hover_.kind == OverviewHitKind::Done;
     fill(done_button_, 6.0f * s, done_hot ? Alpha(theme.accent, 0.88f) : theme.accent);
     text(f_center_, data_.done, done_button_, D2D1::ColorF(1, 1, 1, 1));

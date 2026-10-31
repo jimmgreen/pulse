@@ -1,4 +1,5 @@
 #include "tray_controller.h"
+#include "app_messages.h"
 #include "../common/localization.h"
 #include "../common/runtime_log.h"
 #include "resource.h"
@@ -160,6 +161,15 @@ TrayController::CallbackResult TrayController::HandleCallback(LPARAM event) {
         HMENU menu = CreatePopupMenu();
         if (!menu) return CallbackResult::Handled;
         AppendMenuW(menu, MF_STRING, 1, l10n::Get(l10n::StringId::Open).c_str());
+        AppendMenuW(menu, MF_STRING, 3, l10n::Get(l10n::StringId::ActNewWindow).c_str());
+        HMENU layouts=CreatePopupMenu();
+        if (layouts) {
+            const l10n::StringId ids[]={l10n::StringId::ArrangeSideBySide,l10n::StringId::ArrangeStacked,l10n::StringId::ArrangeColumns,l10n::StringId::ArrangeTile,l10n::StringId::ArrangeMain,l10n::StringId::ArrangeCascade};
+            for(int i=0;i<6;++i) AppendMenuW(layouts,MF_STRING,10+i,l10n::Get(ids[i]).c_str());
+            AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(layouts),l10n::Get(l10n::StringId::SettingsSecArrangeWindows).c_str());
+        }
+        AppendMenuW(menu,MF_STRING,4,l10n::Get(l10n::StringId::ActMergeWindows).c_str());
+        AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
         AppendMenuW(menu, MF_STRING, 2, l10n::Get(l10n::StringId::TrayExit).c_str());
         // The menu owner must be foreground or the menu will not dismiss
         // (KB135788); the icon window owns it even while the UI is hidden.
@@ -170,6 +180,9 @@ TrayController::CallbackResult TrayController::HandleCallback(LPARAM event) {
         DestroyMenu(menu);
         PostMessageW(icon_window_, WM_NULL, 0, 0);
         if (command == 1) RestoreWindow();
+        if (command == 3) PostMessageW(hwnd_, WM_NEW_WINDOW, 0, 0);
+        if (command == 4) { RestoreWindow(); PostMessageW(hwnd_, WM_MERGE_ALL_WINDOWS, 0, 0); }
+        if (command >= 10 && command < 16) PostMessageW(hwnd_, WM_ARRANGE_WINDOWS, command-10, 1);
         return command == 2 ? CallbackResult::ExitRequested : CallbackResult::Handled;
     }
     default:

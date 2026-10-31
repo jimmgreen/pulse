@@ -220,7 +220,7 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
                                     : vm.settings_page == 8 ? pack_text::PacksIntro() : pack_text::Intro(),
             D2D1::Point2F(lay.content.left+pad, origin+60*scale_),
             lay.content.right-lay.content.left-2*pad, theme.text_secondary);
-    if (IsGeneralSettingsPage(vm.settings_page) || vm.settings_page == 1)
+    if ((IsGeneralSettingsPage(vm.settings_page) && vm.settings_page != 11) || vm.settings_page == 1)
         painter_.DrawText(l10n::Get(vm.settings_page == 0 ? l10n::StringId::SettingsAppearanceIntro
             : vm.settings_page == 9 ? l10n::StringId::SettingsFileListIntro
             : vm.settings_page == 10 ? l10n::StringId::SettingsTabsIntro
@@ -1307,6 +1307,7 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
 
 D2D1_RECT_F MainRenderer::SettingsDropdownBounds(const WindowViewModel& vm, int index, float window_w, float window_h) const {
     const auto l=MakeSettingsLayout(vm,D2D1::RectF(0,0,window_w,window_h),scale_,title_bar_height_,status_height_,&painter_);
+    if(index>=10 && index<=12) return l.integration_choice[index-10];
     if(index==3) return l.assistant.model_choice;
     if(index==4) return l.assistant.voice_service;
     if(index==5) return l.assistant.voice_model;
@@ -1338,6 +1339,9 @@ float MainRenderer::SettingsDestinationOffset(const WindowViewModel& vm, int set
     case I::SettingsWindowEffect: target=l.effect_card;break;
     case I::MenuAcrylic: target=l.menu_acrylic_row;break;
     case I::SettingsLanguage: target=l.language_card;break;
+    case I::StartupDialogsTitle:
+    case I::ThirdPartyDialogsExperimental: target=l.dialog_management_section;break;
+    case I::SettingsSecStartupTray: target=l.section[2];break;
     case I::SettingsIntegration: target=l.integration_section;break;
     case I::SettingsDefaultManager: target=l.default_manager_row;break;
     case I::SettingsLaunch: target=l.startup_row[0];break;
@@ -1347,6 +1351,10 @@ float MainRenderer::SettingsDestinationOffset(const WindowViewModel& vm, int set
     case I::SettingsHomeFolder: target=l.home_folder_card;break;
     case I::SettingsStartupOpen: target=l.startup_open_card;break;
     case I::SettingsNewTabOpen: target=l.new_tab_open_card;break;
+    case I::SettingsOpenPulseIcon: target=l.open_pulse_icon_card;break;
+    case I::SettingsNewWindowShows: target=l.new_window_shows_card;break;
+    case I::SettingsArrangeMinimized: target=l.arrange_minimized_row;break;
+    case I::SettingsArrangeGap: target=l.arrange_gap_card;break;
     case I::SettingsExternalOpen: target=l.external_open_card;break;
     case I::SettingsCloseLastTab: target=l.close_last_tab_row;break;
     case I::SettingsCloseTabDoubleClick: target=l.close_tab_double_click_row;break;

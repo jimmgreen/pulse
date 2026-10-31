@@ -45,6 +45,8 @@ constexpr UINT WM_NETWORK_LOCATIONS = WM_APP + 73;
 constexpr UINT WM_ASSOC_CHANGED = WM_APP + 74;  // SHCNE_ASSOCCHANGED: default programs changed
 constexpr UINT WM_BITLOCKER_UNLOCK = WM_APP + 75;  // app::BitLockerUnlockResult* (bitlocker_unlock.h)
 constexpr UINT WM_RELEASE_WINDOW_STATES = WM_APP + 76;  // host: free retired window states (window_factory.h)
+constexpr UINT WM_ARRANGE_WINDOWS = WM_APP + 129;
+constexpr UINT WM_MERGE_ALL_WINDOWS = WM_APP + 130;
 constexpr UINT WM_NEW_WINDOW = WM_APP + 77;  // open another window at this window's folder (M4a)
 constexpr UINT WM_REOPEN_CLOSED_WINDOW = WM_APP + 78;  // reopen the last closed window (M4c toast, Ctrl+Shift+T)
 constexpr UINT WM_OPEN_SESSION_WINDOWS = WM_APP + 79;  // first window shown: open the session's other windows (M4d)
@@ -57,7 +59,7 @@ constexpr UINT WM_ADOPT_OPEN_POLICY = WM_APP + 85;  // the "make it the default"
 constexpr UINT WM_REOPEN_CLOSED_TABS = WM_APP + 86;  // the "N tabs closed" toast was clicked (M7f)
 constexpr UINT WM_NETWORK_CONNECT = WM_APP + 88;  // app::NetworkConnectResult* (network_connect.h)
 constexpr UINT WM_CTX_LAYOUT_SEED = WM_APP + 87;  // lParam CtxLayoutSeed*: persistent menu layout read (C4)
-constexpr UINT WM_OPEN_EXTERNAL = WM_APP + 89;  // host: lParam std::wstring*, a forwarded launch accepted earlier
+constexpr UINT WM_OPEN_EXTERNAL = WM_APP + 89;  // host: wake only; SingleInstanceCoordinator owns queued requests
 constexpr UINT WM_DRIVE_VERB = WM_APP + 90;  // app::DriveVerbResult* (drive_verbs.h): eject / disconnect finished
 constexpr UINT WM_DETAILS_TREE_UNDO = WM_APP + 91;  // the "expanded N folders" snack: undo it
 constexpr UINT WM_UNDO_DELETE = WM_APP + 92;  // the "deleted N items" snack: undo the delete
@@ -98,4 +100,9 @@ constexpr UINT WM_PACK_DETAILS = WM_APP + 125;
 constexpr UINT WM_PACK_OPEN_FOLDER = WM_APP + 126;
 constexpr UINT WM_SOURCE_PROBE_DONE = WM_APP + 127;  // a 测速 probe finished (download_source_probe.h)
 
+constexpr UINT WM_WINDOW_ARRANGE_UNDO = WM_APP + 128;
+constexpr UINT WM_DIALOG_MANAGEMENT_RESULT = WM_APP + 131;
+
 }  // namespace pulse
+
+constexpr UINT WM_REOPEN_WORKSPACE_PANE = WM_APP + 132;

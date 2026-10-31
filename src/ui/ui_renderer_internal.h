@@ -8,6 +8,7 @@
 #include "typography.h"
 #include "name_highlight.h"
 #include "settings_page_ids.h"
+#include "startup_dialog_info.h"
 #include "../app/places.h"
 #include "../app/device_registry.h"
 #include "../app/folder_alias.h"
@@ -485,6 +486,7 @@ void ClearTextWidthCache() {
         float scale = 1.0f;
         float pad = 8.0f;
         float headerH = 36.0f;
+        float available_width = 0.0f;
         float itemH = 32.0f;
         float driveH = 60.0f;   // name + percent, bar, free · total
         float tagH = 26.0f;
@@ -520,7 +522,44 @@ void ClearTextWidthCache() {
     // Extra space under the vertical-tabs block; its divider sits mid-gap.
     constexpr float kSidebarTabsDividerGapDip = 8.0f;
 
+    D2D1_RECT_F WorkspacePreviewPaneRect(D2D1_RECT_F bounds, int layout, int pane) {
+        const float x = (bounds.left + bounds.right) * 0.5f;
+        const float y = (bounds.top + bounds.bottom) * 0.5f;
+        if (layout == 1) { if (pane == 0) bounds.right = x; else bounds.left = x; }
+        else if (layout == 2) { if (pane == 0) bounds.bottom = y; else bounds.top = y; }
+        else if (layout == 3) {
+            if (pane == 0) bounds.right = x;
+            else { bounds.left = x; if (pane == 1) bounds.bottom = y; else bounds.top = y; }
+        } else if (layout >= 4) {
+            if (pane % 2 == 0) bounds.right = x; else bounds.left = x;
+            if (pane < 2) bounds.bottom = y; else bounds.top = y;
+        }
+        return bounds;
+    }
+
+    D2D1_RECT_F WorkspaceActionRect(const D2D1_RECT_F& row, float scale, int action) {
+        if (action == 4) return D2D1::RectF(row.left + 8.0f * scale, row.top + 68.0f * scale, row.right - 8.0f * scale, row.top + 96.0f * scale);
+        if (action >= 2 && l10n::Get(l10n::StringId::WorkspaceUpdate).size() <= 3 && row.right - row.left >= 224.0f * scale) {
+            const float right = row.right - (action == 2 ? 38.0f : 4.0f) * scale;
+            return D2D1::RectF(right - 34.0f * scale, row.top + 46.0f * scale, right, row.top + 74.0f * scale);
+        }
+        if (action >= 2) {
+            const float mid = (row.left + row.right) * 0.5f;
+            return D2D1::RectF(action == 2 ? row.left + 6.0f * scale : mid,
+                              row.top + 62.0f * scale,
+                              action == 2 ? mid : row.right - 6.0f * scale,
+                              row.bottom - 4.0f * scale);
+        }
+        const float right = row.right - (action == 0 ? 52.0f : 28.0f) * scale;
+        return D2D1::RectF((std::max)(row.left, right - 24.0f * scale),
+                          row.top + 10.0f * scale, (std::max)(row.left, right),
+                          row.top + 34.0f * scale);
+    }
+
     float SidebarItemHeight(const SidebarItem& item, const SidebarMetrics& m) {
+        if (item.workspace_child_number > 0) return 26.0f * m.scale;
+        if (item.workspace_empty) return 100.0f * m.scale;
+        if (item.workspace_index >= 0) return (item.workspace_dirty ? (l10n::Get(l10n::StringId::WorkspaceUpdate).size() <= 3 && m.available_width >= 224.0f * m.scale ? 76.0f : 90.0f) : 44.0f) * m.scale;
         if (item.is_drive) return m.driveH;
         if (item.is_tag) return m.tagH;
         return m.itemH;
@@ -654,7 +693,8 @@ void ClearTextWidthCache() {
 
     fluent::ScrollbarSpec SidebarScrollbarSpec(const WindowViewModel& vm,
                                                const D2D1_RECT_F& sb, float scale) {
-        const SidebarMetrics m = MakeSidebarMetrics(scale);
+        SidebarMetrics m = MakeSidebarMetrics(scale);
+        m.available_width = sb.right - sb.left - 2.0f * m.pad;
         const float tray_height = std::min(ExpandedTrayHeight(vm, m), TrayHeightCap(vm, sb, scale));
         const float bottom = std::max(sb.top, sb.bottom - tray_height - 2.0f * TrayGap(tray_height, m));
         fluent::ScrollbarSpec bar;
@@ -676,7 +716,8 @@ void ClearTextWidthCache() {
         out.clear();
         const float width = sb.right - sb.left;
         const bool compact = SidebarRailLayout(width, scale);
-        const SidebarMetrics m = MakeSidebarMetrics(scale);
+        SidebarMetrics m = MakeSidebarMetrics(scale);
+        m.available_width = sb.right - sb.left - 2.0f * m.pad;
 
         if (compact) {
             const float rowH = 38.0f * scale;
@@ -2294,6 +2335,7 @@ void MakeBrush(ID2D1DeviceContext* dc, const D2D1_COLOR_F& c, ComPtr<ID2D1SolidC
 }
 struct TitleChrome {
     float chrome_left = 0.0f;
+    float windows_left = 0.0f;
     float settings_left = 0.0f;
     float settings_w = 0.0f;
     float theme_left = 0.0f;
@@ -2317,9 +2359,10 @@ TitleChrome MakeTitleChrome(float window_w, float scale, float title_h) {
     c.group_right = c.chrome_left - 14.0f * scale;
     c.theme_left = c.group_right - group_pad - c.theme_w;
     c.settings_left = c.theme_left - 1.0f * scale - c.settings_w;   // 1 DIP divider
-    c.group_left = c.settings_left - group_pad;
+    c.windows_left = c.settings_left - 37.0f * scale;
+    c.group_left = c.windows_left - group_pad;
     c.cmd_w = 0.0f;
-    c.cmd_left = c.settings_left;
+    c.cmd_left = c.windows_left;
     const float cmd_pad = 8.0f * scale;
     c.cmd_top = cmd_pad;
     c.cmd_h = std::max(0.0f, title_h - cmd_pad * 2.0f);
@@ -2533,11 +2576,21 @@ struct SettingsLayout {
     D2D1_RECT_F tips_card{};
     D2D1_RECT_F theme_row{}, theme_tile[3]{}, effect_choice{}, language_choice{};
     D2D1_RECT_F performance_row{}, disclosure[4]{}, filename_status{};
+    D2D1_RECT_F startup_lead{}, startup_overview[3]{}, startup_restore_row{}, startup_restore_button{};
+    StartupDialogInfoLayout startup_dialog_info;
+    D2D1_RECT_F startup_dialog_jump_row{}, dialog_badge{};
+    D2D1_RECT_F dialog_toggle_row{}, dialog_scope_button{}, dialog_export_button{}, dialog_retry_button{}, dialog_jump_button{};
+    D2D1_RECT_F dialog_management_section{}, dialog_management_intro{}, dialog_management_status{};
+    D2D1_RECT_F dialog_bundle_row{}, dialog_application_row{}, dialog_actions_row{}, dialog_empty_row{};
+    D2D1_RECT_F dialog_auto_enable{}, dialog_auto_disable{};
+    D2D1_RECT_F dialog_bundle_button{}, dialog_application_button{}, dialog_launch_button{}, dialog_refresh_button{};
+    std::vector<D2D1_RECT_F> dialog_session_rows, dialog_disable_buttons;
     D2D1_RECT_F integration_card{}, integration_status{}, integration_summary{}, integration_hint{};
     D2D1_RECT_F integration_retry{}, integration_restore{};
     D2D1_RECT_F integration_section{}, integration_badge{}, integration_bar{}, integration_list_head{};
     D2D1_RECT_F integration_chip[4]{};
-    D2D1_RECT_F integration_cover[3]{}, integration_options_head{}, integration_try{}, integration_hint_text{};
+    D2D1_RECT_F integration_choice[3]{};
+    D2D1_RECT_F integration_cover[3]{}, integration_options_head{}, integration_try{}, integration_hint_text{}, integration_hint_action{};
     float integration_text_right = 0.0f;
     // Quick Look page: 预览方式 (hover card or Space) and the hover delay.
     D2D1_RECT_F trigger_section{}, trigger_row{}, trigger_choice[2]{}, hover_delay_row{}, hover_delay_choice[3]{};
@@ -2622,6 +2675,13 @@ struct SettingsLayout {
     D2D1_RECT_F notify_icon_row[3]{};
     D2D1_RECT_F new_tab_open_card{};
     D2D1_RECT_F new_tab_open_row[2]{};
+    D2D1_RECT_F open_pulse_icon_card{};
+    D2D1_RECT_F open_pulse_icon_row[3]{};
+    D2D1_RECT_F new_window_shows_card{};
+    D2D1_RECT_F new_window_shows_row[3]{};
+    D2D1_RECT_F arrange_minimized_row{};
+    D2D1_RECT_F arrange_gap_card{};
+    D2D1_RECT_F arrange_gap_row[2]{};
     D2D1_RECT_F external_open_card{};
     D2D1_RECT_F external_open_row[3]{};
     D2D1_RECT_F close_last_tab_row{};

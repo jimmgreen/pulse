@@ -2613,45 +2613,65 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
     }
 
     workspaces.header = l10n::Get(l10n::StringId::SidebarWorkspaces);
+    workspaces.add_action = ui::SidebarAddAction::SaveWorkspace;
+    workspaces.badge_count = places ? static_cast<int>(places->workspaces.size()) : 0;
     if (places) {
         for (int i = 0; i < static_cast<int>(places->workspaces.size()); ++i) {
             const auto& w = places->workspaces[static_cast<size_t>(i)];
             ui::SidebarItem it;
             it.label = w.name.empty() ? TabTitle(w.root) : w.name;
-            it.detail = DisplayPath(w.root);
             it.path = MakeWorkspacePath(i);
-            const bool unc = fs::IsUncPath(w.root);
-            it.icon_glyph = unc ? L"\xE968" : L"\xE8B7";
-            it.fallback_text = L"WS";
-            it.icon_color = ui::HexColor(unc ? 0x38BDF8 : 0x34D399);
-            if (unc) it.badge = l10n::Get(l10n::StringId::Server);
-            if (i == places->active_workspace)
-                it.badge = l10n::Get(unc ? l10n::StringId::CurrentServer
-                                         : l10n::StringId::Current);
-            // The saved split is what sets a workspace apart from a Quick
-            // access link; show it when there is more than one pane.
-            const auto panes = std::count_if(w.pane_paths.begin(), w.pane_paths.end(),
-                [](const std::wstring& p) { return !p.empty(); });
-            if (panes > 1) {
-                wchar_t pane_text[64]{};
-                swprintf_s(pane_text, l10n::Get(l10n::StringId::WorkspacePanes).c_str(),
-                           static_cast<int>(panes));
-                if (it.badge.empty()) it.badge = pane_text;
-                it.detail += L" \x00B7 ";
-                it.detail += pane_text;
+            it.workspace_index = i;
+            it.workspace_root = w.root;
+            it.workspace_layout = w.layout;
+            it.workspace_active = i == places->active_workspace;
+            it.workspace_color_rgb = w.color_rgb;
+            it.workspace_panes = w.pane_paths.empty() ? std::vector<std::wstring>{w.root} : w.pane_paths;
+            it.workspace_views = w.pane_views;
+            it.expandable = true;
+            it.expanded = w.expanded;
+            it.icon_color = ui::HexColor(w.color_rgb);
+            for (const auto& path : it.workspace_panes) {
+                if (!it.detail.empty()) it.detail += L" \x00B7 ";
+                it.detail += TabTitle(path);
             }
+            if (it.workspace_active) it.badge = l10n::Get(l10n::StringId::Current);
+            else if (fs::IsUncPath(w.root)) it.badge = l10n::Get(l10n::StringId::Server);
             workspaces.items.push_back(std::move(it));
-            for (const auto& child : places->FrequentChildren(i, 8)) {
-                ui::SidebarItem sub;
-                sub.label = TabTitle(child);
-                sub.path = child;
-                sub.indent = 1;
-                sub.icon_glyph = unc ? L"\xE968" : L"\xE8B7";
-                sub.fallback_text = L"Dir";
-                sub.icon_color = ui::HexColor(unc ? 0x38BDF8 : 0x94A3B8);
-                workspaces.items.push_back(std::move(sub));
+            if (w.expanded) {
+                const auto paths = w.pane_paths.empty() ? std::vector<std::wstring>{w.root} : w.pane_paths;
+                for (size_t j = 0; j < paths.size(); ++j) {
+                    ui::SidebarItem sub;
+                    sub.label = TabTitle(paths[j]);
+                    sub.path = paths[j];
+                    sub.indent = 1;
+                    sub.fallback_text = std::to_wstring(j + 1);
+                    sub.workspace_child_number = static_cast<int>(j + 1);
+                    sub.workspace_child_view = j < w.pane_views.size() ? w.pane_views[j] : ui::ViewMode::Details;
+                    sub.icon_glyph = L"\xE8B7";
+                    sub.icon_color = ui::HexColor(w.color_rgb);
+                    workspaces.items.push_back(std::move(sub));
+                }
+                for (const auto& child : places->FrequentChildren(i, 8)) {
+                    if (std::find(paths.begin(), paths.end(), child) != paths.end()) continue;
+                    ui::SidebarItem sub;
+                    sub.label = TabTitle(child);
+                    sub.path = child;
+                    sub.indent = 1;
+                    sub.icon_glyph = L"\xE8B7";
+                    sub.icon_color = ui::HexColor(0x94A3B8);
+                    workspaces.items.push_back(std::move(sub));
+                }
             }
         }
+    }
+
+    if (workspaces.items.empty()) {
+        ui::SidebarItem empty;
+        empty.workspace_empty = true;
+        empty.label = l10n::Get(l10n::StringId::WorkspaceEmptyHint);
+        empty.detail = l10n::Get(l10n::StringId::WorkspaceSaveCurrent);
+        workspaces.items.push_back(std::move(empty));
     }
 
     // Quick access: the built-in links (minus the ones switched off) and the
@@ -2784,7 +2804,7 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
     // Section icons: every header section names itself with a glyph, so the wide
     // header and the narrow rail read the same. The PC glyph (monitor on a
     // stand) keeps "This PC" apart from the monitor-only Desktop row.
-    workspaces.icon_glyph = L"\xE8B7";    // folder
+    workspaces.icon_glyph = L"\xF5BE";    // shared workspace layout icon
     access.icon_glyph = L"\xE8A9";        // app grid
     savedSearches.icon_glyph = L"\xE721"; // search
     tags.icon_glyph = L"\xE8EC";          // tag

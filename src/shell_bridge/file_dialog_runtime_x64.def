@@ -1,0 +1,4 @@
+LIBRARY PulseFileDialogRuntime
+EXPORTS
+    DetourFinishHelperProcess @1
+    PulseFileDialogRuntimeQuery

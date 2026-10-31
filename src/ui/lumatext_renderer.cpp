@@ -1,3 +1,4 @@
+#include "picker_proof_trace.h"
 #include "lumatext_renderer.h"
 #include "optional_lumatext.h"
 #include "typography.h"
@@ -1430,7 +1431,7 @@ struct LumaTextRenderer::Impl {
     }
 
     bool PaintEdit(HWND hwnd, HDC hdc, IDWriteTextFormat* format,
-                   const D2D1_COLOR_F& foreground, const D2D1_COLOR_F& background) {
+                   const D2D1_COLOR_F& foreground, const D2D1_COLOR_F& background, const D2D1_RECT_F* surface_bounds = nullptr) {
         if (!hwnd || !format || !blit_dc || !dw_factory) return false;
         RECT rc{};
         GetClientRect(hwnd, &rc);
@@ -1438,9 +1439,13 @@ struct LumaTextRenderer::Impl {
         const int h = rc.bottom - rc.top;
         if (w <= 0 || h <= 0) return false;
 
+        PULSE_PICKER_TRACE_POINT("edit-ensure-bitmap-before");
         if (!EnsureBlit(w, h)) return false;
+        PULSE_PICKER_TRACE_POINT("edit-ensure-bitmap-after");
 
+        PULSE_PICKER_TRACE_POINT("edit-read-before");
         std::wstring text = ReadEditText(hwnd);
+        PULSE_PICKER_TRACE_POINT("edit-read-after");
 
         DWORD sel0 = 0, sel1 = 0;
         SendMessageW(hwnd, EM_GETSEL, reinterpret_cast<WPARAM>(&sel0),
@@ -1464,8 +1469,12 @@ struct LumaTextRenderer::Impl {
         const bool wraps = EditWraps(hwnd);
         const float wrap_width = wraps ? EditWrapWidth(hwnd, static_cast<float>(w)) : 0.0f;
         const float multiline = EditMultilineLine(hwnd);
+        PULSE_PICKER_TRACE_POINT("edit-layout-before");
         const auto dw_layout = DwEditLayout(text, format, static_cast<float>(h), wrap_width, multiline);
+        PULSE_PICKER_TRACE_POINT("edit-layout-after");
+        PULSE_PICKER_TRACE_POINT("edit-font-params-before");
         IDWriteRenderingParams* params = DwParams(hwnd);
+        PULSE_PICKER_TRACE_POINT("edit-font-params-after");
         if (!dw_layout || !params) return false;
         const auto caret_origin = [&](int position) {
             return DwCaretX(dw_layout.Get(), position, static_cast<int>(text.size()));
@@ -1664,31 +1673,50 @@ struct LumaTextRenderer::Impl {
                             caret_bottom),
                 brush.Get());
         }
+        PULSE_PICKER_TRACE_POINT("edit-blit-end-draw-before");
         const HRESULT end = blit_dc->EndDraw();
+        PULSE_PICKER_TRACE_POINT("edit-blit-end-draw-after");
         blit_dc->SetTarget(nullptr);
         if (FAILED(end) || !text_drawn || !selection_drawn || !brush) return false;
         ++stats.edit_directwrite_draws;
         stats.edit_rendering_mode = params->GetRenderingMode();
-        if (FAILED(blit_staging->CopyFromBitmap(nullptr, blit_target.Get(), nullptr))) {
-            return false;
-        }
-        D2D1_MAPPED_RECT mapped{};
-        if (FAILED(blit_staging->Map(D2D1_MAP_OPTIONS_READ, &mapped))) return false;
-        const size_t row_bytes = static_cast<size_t>(w) * 4u;
-        const void* dib_bits = mapped.bits;
-        std::vector<std::uint8_t> tight_pixels;
-        if (mapped.pitch != row_bytes) {
-            tight_pixels.resize(row_bytes * static_cast<size_t>(h));
-            const auto* source = static_cast<const std::uint8_t*>(mapped.bits);
-            for (int row = 0; row < h; ++row) {
-                std::memcpy(tight_pixels.data() + static_cast<size_t>(row) * row_bytes,
-                            source + static_cast<size_t>(row) * mapped.pitch,
-                            row_bytes);
+        bool presented = false;
+        if (surface_bounds) {
+            if (!target_dc) return false;
+            D2D1_MATRIX_3X2_F previous{}; target_dc->GetTransform(&previous);
+            target_dc->SetTransform(D2D1::Matrix3x2F::Identity());
+            target_dc->PushAxisAlignedClip(*surface_bounds, D2D1_ANTIALIAS_MODE_ALIASED);
+            target_dc->DrawBitmap(blit_target.Get(), surface_bounds, 1.0f,
+                D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, nullptr, nullptr);
+            target_dc->PopAxisAlignedClip();
+            target_dc->SetTransform(previous);
+            // blit_target is reused for the next editor. Finish its main-surface
+            // draw before another edit changes this shared bitmap's contents.
+            PULSE_PICKER_TRACE_POINT("main-flush-before");
+            presented = SUCCEEDED(target_dc->Flush());
+            PULSE_PICKER_TRACE_POINT("main-flush-after");
+        } else {
+            if (FAILED(blit_staging->CopyFromBitmap(nullptr, blit_target.Get(), nullptr))) {
+                return false;
             }
-            dib_bits = tight_pixels.data();
+            D2D1_MAPPED_RECT mapped{};
+            if (FAILED(blit_staging->Map(D2D1_MAP_OPTIONS_READ, &mapped))) return false;
+            const size_t row_bytes = static_cast<size_t>(w) * 4u;
+            const void* dib_bits = mapped.bits;
+            std::vector<std::uint8_t> tight_pixels;
+            if (mapped.pitch != row_bytes) {
+                tight_pixels.resize(row_bytes * static_cast<size_t>(h));
+                const auto* source = static_cast<const std::uint8_t*>(mapped.bits);
+                for (int row = 0; row < h; ++row) {
+                    std::memcpy(tight_pixels.data() + static_cast<size_t>(row) * row_bytes,
+                                source + static_cast<size_t>(row) * mapped.pitch,
+                                row_bytes);
+                }
+                dib_bits = tight_pixels.data();
+            }
+            presented = PresentEditBits(hwnd, hdc, dib_bits, w, h, background.a < 1.0f);
+            blit_staging->Unmap();
         }
-        const bool presented = PresentEditBits(hwnd, hdc, dib_bits, w, h, background.a < 1.0f);
-        blit_staging->Unmap();
 
         HIMC imc = ImmGetContext(hwnd);
         if (imc) {
@@ -1981,6 +2009,17 @@ bool LumaTextRenderer::Measure(std::wstring_view text, IDWriteTextFormat* format
     (void)format;
     width = 0.0f;
     if (height) *height = 0.0f;
+    return false;
+#endif
+}
+
+bool LumaTextRenderer::DrawEditOnSurface(HWND hwnd, IDWriteTextFormat* format,
+    const D2D1_COLOR_F& foreground, const D2D1_COLOR_F& background, const D2D1_RECT_F& bounds) {
+#if defined(PULSE_HAS_LUMATEXT)
+    TrackEdit(hwnd);
+    return impl_ && impl_->PaintEdit(hwnd, nullptr, format, foreground, background, &bounds);
+#else
+    (void)hwnd; (void)format; (void)foreground; (void)background; (void)bounds;
     return false;
 #endif
 }

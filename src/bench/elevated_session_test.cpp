@@ -10,8 +10,9 @@ void Write(const std::filesystem::path& path, const char* text) { std::ofstream 
 }
 int RunReviewTransferTests();
 int RunReviewTemplateTests();
-int RunReviewRoutingTests();
+int RunReviewRoutingTests(bool invoke_only = false);
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring(argv[1]) == L"--invoke-feedback") return RunReviewRoutingTests(true);
     if (argc == 2 && std::wstring(argv[1]) == L"--review-routing") return RunReviewRoutingTests();
     if (argc == 2 && std::wstring(argv[1]) == L"--review-template") return RunReviewTemplateTests();
     if (argc >= 3 && std::wstring(argv[1]) == L"--template-child") {

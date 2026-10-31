@@ -36,6 +36,12 @@
 namespace pulse::ui {
 
 namespace {
+bool IsSizePlaceholder(const std::wstring& text) {
+    return text == L"\u2014" || text == L"-" ||
+        text == l10n::Get(l10n::StringId::GroupSizeEmpty) ||
+        text == l10n::Get(l10n::StringId::SizeEmpty);
+}
+
 // Pulse 助手's list overlay of the pane DrawSinglePane is drawing (it owns
 // the painter: the spark and the title pill are drawn outside the list's clip).
 AiListPainter* g_ai_list_painter = nullptr;
@@ -387,10 +393,17 @@ std::array<float, 3> SizeSliderStops(float scale) noexcept {
 }
 } // namespace
 
+D2D1_RECT_F MainRenderer::PaneCloseRect(const D2D1_RECT_F& bounds) const {
+    auto rc = PaneViewButtonRect(bounds);
+    rc.left += kCommandIconStepDip * scale_;
+    rc.right += kCommandIconStepDip * scale_;
+    return rc;
+}
+
 D2D1_RECT_F MainRenderer::PaneViewButtonRect(const D2D1_RECT_F& pane_bounds,
                                               float filter_expand) const {
     (void)filter_expand;
-    const float right = pane_bounds.right - 8*scale_;
+    const float right = pane_bounds.right - (8 + (pane_close_visible_ ? kCommandIconStepDip : 0))*scale_;
     return D2D1::RectF(right-kCommandIconButtonDip*scale_,pane_bounds.top+4*scale_,
         right,pane_bounds.top+pane_header_height_-4*scale_);
 }
@@ -2665,7 +2678,9 @@ void MainRenderer::DrawMorphFrom(const PaneViewModel& vm, const motion::ViewMorp
                         draw(e.size_text.substr(space + 1), left + avail - unitW + 4.0f * scale_,
                              unitW - 4.0f * scale_, DWRITE_TEXT_ALIGNMENT_LEADING);
                     } else {
-                        draw(e.size_text, left, avail, DWRITE_TEXT_ALIGNMENT_TRAILING);
+                        const float value_width = IsSizePlaceholder(e.size_text) && avail > unitW * 1.8f
+                            ? avail - unitW : avail;
+                        draw(e.size_text, left, value_width, DWRITE_TEXT_ALIGNMENT_TRAILING);
                     }
                     break;
                 }
@@ -3079,6 +3094,7 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
 
     float y = y0;
     const std::wstring& title = pane.header_text;
+    pane_close_visible_ = vm.pane_slots.size() > 1;
     const D2D1_RECT_F mediumRc = PaneMediumIconsRect(bounds, pane.filter_expand, pane.size_control);
     const D2D1_RECT_F viewRc = PaneViewButtonRect(bounds, pane.filter_expand);
     const D2D1_RECT_F detailsRc = PaneDetailsRect(bounds, 1.0f, pane.size_control);
@@ -3107,7 +3123,7 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
         DrawChangeBadge(compositor_, painter_, pane.title_change_badge, titleBadge, theme, scale_);
     }
 
-    const float controlsOpacity = std::clamp(pane.header_controls_opacity, 0.0f, 1.0f);
+    const float controlsOpacity = split ? 1.0f : std::clamp(pane.header_controls_opacity, 0.0f, 1.0f);
     if (controlsOpacity > 0.0f) {
         const bool fading = controlsOpacity < 1.0f;
         if (fading) dc->PushLayer(D2D1::LayerParameters(D2D1::RectF(bounds.left, bounds.top,
@@ -3174,6 +3190,23 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
                 vm.hover_control_index == pane_index,
             theme);
         if (fading) dc->PopLayer();
+    }
+    if (split) {
+        const auto closeRc = PaneCloseRect(bounds);
+        MakeBrush(dc, WithAlpha(theme.text_secondary, 0.25f), brFillHover_);
+        const float dividerX = closeRc.left - 2.0f * scale_;
+        dc->DrawLine(D2D1::Point2F(dividerX, closeRc.top + 6.0f * scale_),
+                     D2D1::Point2F(dividerX, closeRc.bottom - 6.0f * scale_),
+                     brFillHover_.get(), scale_);
+        const bool closeHot = vm.hover_region == static_cast<int>(HitTestResult::PaneClose) &&
+                              vm.hover_control_index == pane_index;
+        if (closeHot) {
+            MakeBrush(dc, theme.fill_hover, brFillHover_);
+            FillRoundedRect(dc, brFillHover_.get(), closeRc.left, closeRc.top,
+                            closeRc.right - closeRc.left, closeRc.bottom - closeRc.top,
+                            theme.radius_control * scale_);
+        }
+        DrawPaneHeaderIcon(closeRc, PaneHeaderIcon::Close, closeHot ? theme.text : theme.text_secondary);
     }
     y += pane_header_height_;
 
@@ -3491,10 +3524,14 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
                             w - 24.0f * scale_, column_header_height_);
         y += column_header_height_;
     } else if (ShowsColumnHeader(pane.view_mode)) {
-        // Re-set the brush: earlier drawing (tray deck pills, toolbar) may
-        // have left a different color on this shared member.
-        MakeBrush(dc, theme.fill_input, brFillInput_);
+        // Match the pane's material opacity. Copy over a cut-through pane so
+        // the header does not become opaque by stacking the same tint twice;
+        // otherwise blend over the existing card, never making it clearer.
+        MakeBrush(dc, pane_cut ? pane_color_ : WithAlpha(theme.fill_input, theme.fill_input.a * card_alpha_),
+                  brFillInput_);
+        if (pane_cut) dc->SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_COPY);
         FillRect(dc, brFillInput_.get(), x, y, w, column_header_height_);
+        if (pane_cut) dc->SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
         FillRect(dc, brStrokeDivider_.get(), x, y + column_header_height_ - 1, w, 1);
         const DetailsColumnLayout columns = AnimateColumns(DetailsColumns(bounds, pane), pane_index);
         if (pane_index >= 0 && pane_index < static_cast<int>(painted_columns_.size())) {
@@ -6450,7 +6487,9 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                             draw_detail_text(unit, size_left + size_avail - unitW + 4.0f * scale_, unitW - 4.0f * scale_,
                                              DWRITE_TEXT_ALIGNMENT_LEADING);
                         } else {
-                            draw_detail_text(fit(*size_text, size_avail), size_left, size_avail, DWRITE_TEXT_ALIGNMENT_TRAILING);
+                            const float value_width = IsSizePlaceholder(*size_text) && size_avail > unitW * 1.8f
+                                ? size_avail - unitW : size_avail;
+                            draw_detail_text(fit(*size_text, value_width), size_left, value_width, DWRITE_TEXT_ALIGNMENT_TRAILING);
                         }
                         MakeBrush(dc, secondary, brTextSecondary_);
                         if (list_size_bar_ && !e.is_dir && e.size_value > 0 && !IsHighContrast()) {

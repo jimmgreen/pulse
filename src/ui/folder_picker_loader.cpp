@@ -1,5 +1,8 @@
 #include "../common/windows_compat.h"
 #include "folder_picker_loader.h"
+#include "../common/picker_navigation.h"
+#include "../common/picker_open_filter.h"
+#include "../common/picker_user_storage.h"
 
 #include "../common/display_path.h"
 #include "../common/localization.h"
@@ -11,6 +14,7 @@
 #include <functional>
 #include <mutex>
 #include <cwctype>
+#include <cwchar>
 #include <shobjidl.h>
 #include <wrl/client.h>
 #include <array>
@@ -43,11 +47,49 @@ DWORD ListingError(const std::wstring& path, DWORD enumeration_error) {
     return enumeration_error ? enumeration_error : ERROR_READ_FAULT;
 }
 
+// Probe only directory admission, on the existing worker. Enumeration and
+// access validation retain their original paths and cancellation generation.
+DWORD ProbeFolder(const std::wstring& path, const std::function<bool()>& cancelled) {
+    if (path.empty() || picker_navigation::IsComputerPath(path)) return ERROR_SUCCESS;
+    picker_user_storage::Path storage;
+    if (!picker_user_storage::Parse(path, storage)) return ERROR_NOT_SUPPORTED;
+    const DWORD admission = picker_user_storage::CheckAncestors(storage, false,
+        [](const std::wstring& root) { return GetDriveTypeW(root.c_str()); },
+        [](const std::wstring& part, DWORD& attributes) {
+            attributes = GetFileAttributesW(NativePath(part).c_str());
+            return attributes == INVALID_FILE_ATTRIBUTES ? GetLastError() : DWORD{ERROR_SUCCESS};
+        }, cancelled);
+    if (admission) return admission;
+    const HANDLE directory = CreateFileW(NativePath(path).c_str(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (directory == INVALID_HANDLE_VALUE) { const DWORD error = GetLastError(); return error ? error : ERROR_PATH_NOT_FOUND; }
+    BY_HANDLE_FILE_INFORMATION information{};
+    const bool queried = GetFileInformationByHandle(directory, &information) != FALSE;
+    DWORD error = queried ? ((information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? ERROR_SUCCESS : ERROR_DIRECTORY) : GetLastError();
+    if (queried && (information.dwFileAttributes & picker_user_storage::kUnsupportedAttributes)) error = ERROR_NOT_SUPPORTED;
+    if (!error) {
+        std::array<wchar_t, 32768> final_path{};
+        const DWORD length = GetFinalPathNameByHandleW(directory, final_path.data(), static_cast<DWORD>(final_path.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+        if (!length) error = GetLastError();
+        else if (length >= final_path.size()) error = ERROR_FILENAME_EXCED_RANGE;
+        else if (!picker_user_storage::SamePath(storage.value, final_path.data())) error = ERROR_NOT_SUPPORTED;
+    }
+    CloseHandle(directory);
+    if (cancelled()) return ERROR_CANCELLED;
+    return !queried && !error ? ERROR_READ_FAULT : error;
+}
+
 // The main window's enumeration (fs::EnumerateDirectory) feeds both the
 // picker's own rows (filtering, validation, type-ahead) and the directory
 // snapshot the shared pane renderer draws, in one order.
 PickerListing ReadListing(const std::wstring& path, PickerMode mode, const PickerOptions& options,
                           const std::function<bool()>& cancelled) {
+    if (picker_navigation::IsComputerPath(path)) {
+        auto listing = ReadListing(L"", mode, options, cancelled);
+        listing.path = path;
+        return listing;
+    }
     PickerListing listing;
     listing.path = path;
     DWORD old_mode = 0;
@@ -146,27 +188,169 @@ DWORD ResolveShortcuts(std::wstring& path, DWORD& attributes, const std::functio
     }, cancelled);
 }
 
+// Worker-only policy. No content read, creation, truncation or write access.
+// Checks a point-in-time ordinary filesystem object, not Windows dialog equivalence.
+// Retain the existing V1 GENERIC_READ obligation; storage admission is separate.
+DWORD CheckLocalOpenAccessV1(const std::wstring& input, const std::function<bool()>& cancelled, bool probe = true) {
+    picker_user_storage::Path storage;
+    if (!picker_user_storage::Parse(input, storage)) return ERROR_NOT_SUPPORTED;
+    const std::wstring& path = storage.value;
+    constexpr DWORD unsupported = picker_user_storage::kUnsupportedAttributes;
+    const DWORD admission = picker_user_storage::CheckAncestors(storage, probe,
+        [](const std::wstring& root) { return GetDriveTypeW(root.c_str()); },
+        [](const std::wstring& part, DWORD& attributes) {
+            attributes = GetFileAttributesW(NativePath(part).c_str());
+            return attributes == INVALID_FILE_ATTRIBUTES ? GetLastError() : DWORD{ERROR_SUCCESS};
+        }, cancelled);
+    if (admission) return admission;
+    if (!probe) return ERROR_SUCCESS;
+    HANDLE handle = CreateFileW(NativePath(path).c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return GetLastError();
+    DWORD error = ERROR_SUCCESS;
+    FILE_BASIC_INFO info{};
+    if (GetFileType(handle) != FILE_TYPE_DISK) error = ERROR_NOT_SUPPORTED;
+    else if (!GetFileInformationByHandleEx(handle, FileBasicInfo, &info, sizeof(info))) error = GetLastError();
+    else if (info.FileAttributes & unsupported) error = ERROR_NOT_SUPPORTED;
+    else if (info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) error = ERROR_DIRECTORY;
+    std::array<wchar_t, 32768> final_path{};
+    if (!error) {
+        const DWORD length = GetFinalPathNameByHandleW(handle, final_path.data(), static_cast<DWORD>(final_path.size()), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+        if (!length) error = GetLastError();
+        else if (length >= final_path.size()) error = ERROR_FILENAME_EXCED_RANGE;
+        else {
+            if (!picker_user_storage::SamePath(path, final_path.data()))
+                error = ERROR_NOT_SUPPORTED;
+        }
+    }
+    CloseHandle(handle);
+    return cancelled() ? ERROR_CANCELLED : error;
+}
+
+bool ValidOpenExtension(std::wstring_view extension) {
+    if (extension.empty()) return true; // Explicit empty setter is distinct from absent.
+    if (extension.size() > 255 || extension.back() == L'.' || extension.back() == L' ') return false;
+    if (extension.find_first_of(L"<>:\"/\\|") != extension.npos) return false;
+    for (size_t i = 0; i < extension.size(); ++i) {
+        const auto c = static_cast<unsigned>(extension[i]);
+        if (c < 32) return false;
+        if (c >= 0xd800 && c <= 0xdbff) {
+            if (++i == extension.size() || extension[i] < 0xdc00 || extension[i] > 0xdfff) return false;
+        } else if (c >= 0xdc00 && c <= 0xdfff) return false;
+    }
+    return true;
+}
+DWORD OpenExtension(const PickerOptions& options, std::wstring& extension) {
+    if (!options.use_default_extension) return ERROR_SUCCESS;
+    if (!ValidOpenExtension(options.default_extension)) return ERROR_INVALID_NAME;
+    extension = options.default_extension;
+    if (!options.extension_filter_changed || options.filters.empty()) return ERROR_SUCCESS;
+    if (options.filter_index >= options.filters.size()) return ERROR_INVALID_PARAMETER;
+    const auto& pattern = options.filters[options.filter_index].pattern;
+    if (!picker_filter::OpenPattern(std::wstring_view(pattern))) return ERROR_NOT_SUPPORTED;
+    const auto selected = picker_filter::FirstLiteralExtension(std::wstring_view(pattern));
+    // Native Open restores the caller's original default for a first mask,
+    // including all files; it never guesses a later concrete alternative.
+    if (!selected.empty()) extension.assign(selected);
+    return ERROR_SUCCESS;
+}
+
 PickerValidation ValidatePaths(const std::wstring& current, const std::vector<std::wstring>& names,
                                PickerMode mode, const PickerOptions& options, const std::function<bool()>& cancelled) {
     PickerValidation result;
     if (names.empty()) { result.error = ERROR_INVALID_NAME; return result; }
+    if ((options.allow_missing_open && (mode != PickerMode::File || !options.skip_access_validation || options.validate_local_open_access_v1)) ||
+        (options.require_existing_open_parent && !options.allow_missing_open)) {
+        result.error = ERROR_NOT_SUPPORTED; return result;
+    }
+    std::wstring extension;
+    if (mode == PickerMode::File) {
+        result.error = OpenExtension(options, extension);
+        if (result.error) return result;
+    }
+    // Same bounded selection limit as picker protocol kMaxPaths and the v2 array ABI.
+    constexpr size_t kMaxLocalOpenSelections = 1024;
+    if (options.validate_local_open_access_v1 &&
+        (mode != PickerMode::File || names.size() > kMaxLocalOpenSelections || options.skip_access_validation)) {
+        result.error = ERROR_NOT_SUPPORTED; return result;
+    }
+    // LocalOpen applies the same access/shortcut checks to every selected file.
+    // No prefix escapes on an error: the batch is cleared below.
     for (const auto& name : names) {
         if (cancelled()) { result.error = ERROR_CANCELLED; break; }
         auto path = ResolvePath(current, name);
         result.failed_path = path.empty() ? name : path;
         if (path.empty()) { result.error = ERROR_INVALID_NAME; break; }
-        DWORD attributes = GetFileAttributesW(NativePath(path).c_str());
+        if (options.allow_missing_open) {
+            picker_user_storage::Path storage;
+            if (!picker_user_storage::Parse(path, storage)) { result.error = ERROR_INVALID_NAME; break; }
+            path = storage.value;
+        }
+        if (options.validate_local_open_access_v1) result.error = CheckLocalOpenAccessV1(path, cancelled, false);
+        DWORD attributes = INVALID_FILE_ATTRIBUTES;
+        if (!result.error) {
+            attributes = GetFileAttributesW(NativePath(path).c_str());
+            if (attributes == INVALID_FILE_ATTRIBUTES) result.error = GetLastError();
+        }
+        // Native Open resolves an existing exact typed name first. Only absence
+        // permits trying a suffix; access/sharing/policy errors never choose a
+        // different file. Selected rows carry typed_names=false and stay exact.
+        const auto leaf = path.substr(path.find_last_of(L"\\/") + 1);
+        if (result.error == ERROR_FILE_NOT_FOUND && mode == PickerMode::File &&
+            options.use_default_extension && options.typed_names && !extension.empty() &&
+            leaf.find(L'.') == leaf.npos) {
+            // Wildcard defaults may accompany exact selections, but are never
+            // expanded into an arbitrary matching file during missing-name lookup.
+            if (extension.find_first_of(L"*?") != extension.npos) {
+                result.error = ERROR_INVALID_NAME;
+                break;
+            }
+            path += L'.' + extension;
+            result.failed_path = path;
+            result.error = options.validate_local_open_access_v1 ? CheckLocalOpenAccessV1(path, cancelled, false) : ERROR_SUCCESS;
+            if (!result.error) {
+                attributes = GetFileAttributesW(NativePath(path).c_str());
+                if (attributes == INVALID_FILE_ATTRIBUTES) result.error = GetLastError();
+            }
+        }
+        bool missing = false;
+        if (options.allow_missing_open && options.skip_access_validation &&
+            (result.error == ERROR_FILE_NOT_FOUND || result.error == ERROR_PATH_NOT_FOUND)) {
+            if (cancelled()) { result.error = ERROR_CANCELLED; break; }
+            picker_user_storage::Path storage;
+            if (!picker_user_storage::Parse(path, storage)) { result.error = ERROR_INVALID_NAME; break; }
+            path = storage.value;
+            if (options.require_existing_open_parent) {
+                const auto slash = path.find_last_of(L'\\');
+                auto parent = path.substr(0, slash);
+                if (parent.size() < storage.root_length) parent = storage.root;
+                const DWORD parent_attributes = GetFileAttributesW(NativePath(parent).c_str());
+                if (parent_attributes == INVALID_FILE_ATTRIBUTES) { result.error = GetLastError(); break; }
+                if (!(parent_attributes & FILE_ATTRIBUTE_DIRECTORY)) { result.error = ERROR_DIRECTORY; break; }
+            }
+            missing = true;
+            result.error = ERROR_SUCCESS;
+            attributes = FILE_ATTRIBUTE_NORMAL;
+        }
+        if (result.error) break;
         if (attributes == INVALID_FILE_ATTRIBUTES) { result.error = GetLastError(); break; }
-        result.error = ResolveShortcuts(path, attributes, cancelled);
+        result.error = (missing || options.no_dereference_links) ? ERROR_SUCCESS : ResolveShortcuts(path, attributes, cancelled);
         if (result.error != ERROR_SUCCESS) break;
         if (attributes & FILE_ATTRIBUTE_DIRECTORY) {
-            if (names.size() != 1) { result.error = ERROR_DIRECTORY; break; }
+            if (mode != PickerMode::Folder && names.size() != 1) { result.error = ERROR_DIRECTORY; break; }
             if (mode == PickerMode::Folder) result.paths.push_back(path);
             else result.navigate = path;
-        } else if (!PickerMatchesFilter(path.substr(path.find_last_of(L'\\') + 1), mode, options)) {
+        } else if (!(mode == PickerMode::File && options.advisory_file_filters) && !PickerMatchesFilter(path.substr(path.find_last_of(L'\\') + 1), mode, options)) {
             result.error = ERROR_UNSUPPORTED_TYPE;
             break;
-        } else result.paths.push_back(path);
+        } else {
+            if (options.validate_local_open_access_v1) {
+                result.error = CheckLocalOpenAccessV1(path, cancelled);
+                if (result.error) break;
+            }
+            result.paths.push_back(path);
+        }
     }
     if (result.error != ERROR_SUCCESS) { result.paths.clear(); result.navigate.clear(); }
     else result.failed_path.clear();
@@ -198,6 +382,7 @@ struct PickerLoader::Target {
     HWND hwnd = nullptr;
     UINT message = 0;
     UINT validation_message = 0;
+    UINT folder_commit_message = 0;
     std::atomic<uint64_t> serial{0};
     bool closed = false;
     std::function<void(uint64_t)> pending;
@@ -207,10 +392,11 @@ PickerListing ReadPickerListing(const std::wstring& path, PickerMode mode, const
     return ReadListing(path, mode, options, [] { return false; });
 }
 
-PickerLoader::PickerLoader(HWND hwnd, UINT message, UINT validation_message) : target_(std::make_shared<Target>()) {
+PickerLoader::PickerLoader(HWND hwnd, UINT message, UINT validation_message, UINT folder_commit_message) : target_(std::make_shared<Target>()) {
     target_->hwnd = hwnd;
     target_->message = message;
     target_->validation_message = validation_message;
+    target_->folder_commit_message = folder_commit_message;
     for (int worker = 0; worker < 2; ++worker) std::thread([target = target_] {
         SetThreadErrorMode(SEM_FAILCRITICALERRORS, nullptr);
         std::unique_lock lock(target->lock);
@@ -236,6 +422,8 @@ PickerLoader::~PickerLoader() {
     MSG message{};
     if (target_->hwnd) {
         while (PeekMessageW(&message, target_->hwnd, target_->message, target_->message, PM_REMOVE)) Take(message.lParam);
+        if (target_->folder_commit_message)
+            while (PeekMessageW(&message, target_->hwnd, target_->folder_commit_message, target_->folder_commit_message, PM_REMOVE)) TakeFolderCommit(message.lParam);
         if (target_->validation_message)
             while (PeekMessageW(&message, target_->hwnd, target_->validation_message, target_->validation_message, PM_REMOVE)) TakeValidation(message.lParam);
     }
@@ -248,7 +436,23 @@ void PickerLoader::Load(uint64_t generation, std::wstring path, PickerMode mode,
     ++target_->serial;
     target_->pending = [target = target_.get(), generation, path = std::move(path), mode, options = std::move(options)](uint64_t serial) {
         auto cancelled = [&] { return target->serial.load() != serial; };
-        auto result = std::make_unique<PickerListing>(ReadListing(path, mode, options, cancelled));
+        DWORD admission_error = ERROR_SUCCESS;
+        if (target->folder_commit_message) {
+            admission_error = ProbeFolder(path, cancelled);
+            if (cancelled()) return;
+            if (admission_error == ERROR_SUCCESS) {
+                auto commit = std::make_unique<PickerFolderCommit>();
+                commit->generation = generation;
+                commit->path = path;
+                std::lock_guard guard(target->lock);
+                if (target->closed || cancelled() || !PostMessageW(target->hwnd, target->folder_commit_message, 0,
+                    reinterpret_cast<LPARAM>(commit.get()))) return;
+                commit.release();
+            }
+        }
+        auto result = std::make_unique<PickerListing>();
+        if (admission_error == ERROR_SUCCESS) *result = ReadListing(path, mode, options, cancelled);
+        else { result->path = path; result->error = admission_error; }
         result->generation = generation;
         std::lock_guard guard(target->lock);
         if (!target->closed && !cancelled() && PostMessageW(target->hwnd, target->message, 0, reinterpret_cast<LPARAM>(result.get()))) result.release();
@@ -283,8 +487,115 @@ void PickerLoader::CreateFolder(uint64_t generation, std::wstring current, std::
     target_->changed.notify_one();
 }
 
+namespace {
+void ApplySaveSnapshot(PickerValidation& result, SaveRevalidationResult save) {
+    result.error = save.error;
+    if (save.state != SaveRevalidationState::Failed && save.snapshot && !save.error) {
+        result.paths.push_back(save.snapshot->Path());
+        result.overwrite_required = save.state == SaveRevalidationState::ConfirmOverwrite;
+        result.save_snapshot = std::move(save.snapshot);
+    } else if (!result.error) result.error = ERROR_INVALID_DATA;
+}
+}
+
+void PickerLoader::ValidateSave(uint64_t generation, SaveTargetRequest request) {
+    std::lock_guard guard(target_->lock);
+    ++target_->serial;
+    target_->pending = [target = target_.get(), generation, request = std::move(request)](uint64_t serial) {
+        auto cancelled = [&] { return target->serial.load() != serial; };
+        if (cancelled()) return;
+        auto result = std::make_unique<PickerValidation>();
+        result->generation = generation;
+        const auto resolved = ResolveSaveTarget(request);
+        result->failed_path = resolved.path.empty() ? request.filename : resolved.path;
+        auto save = CaptureSaveConfirmation(request, cancelled);
+        // Initially typing a folder retains the existing navigation behavior.
+        // A folder replacing a confirmed file is never treated as navigation.
+        if (save.error == ERROR_DIRECTORY && !cancelled()) {
+            const auto initial = ValidateSaveTarget(request);
+            if (initial.state == SaveTargetState::TargetDirectory) result->navigate = initial.path;
+            else ApplySaveSnapshot(*result, std::move(save));
+        } else ApplySaveSnapshot(*result, std::move(save));
+        std::lock_guard guard(target->lock);
+        if (!target->closed && !cancelled() && target->validation_message &&
+            PostMessageW(target->hwnd, target->validation_message, 0, reinterpret_cast<LPARAM>(result.get()))) result.release();
+    };
+    target_->changed.notify_one();
+}
+
+void PickerLoader::RevalidateSave(uint64_t generation, SaveConfirmationSnapshot snapshot) {
+    std::lock_guard guard(target_->lock);
+    ++target_->serial;
+    target_->pending = [target = target_.get(), generation, snapshot = std::move(snapshot)](uint64_t serial) {
+        auto cancelled = [&] { return target->serial.load() != serial; };
+        if (cancelled()) return;
+        auto result = std::make_unique<PickerValidation>();
+        result->generation = generation;
+        result->failed_path = snapshot.Path();
+        ApplySaveSnapshot(*result, RevalidateSaveConfirmation(snapshot, cancelled));
+        std::lock_guard guard(target->lock);
+        if (!target->closed && !cancelled() && target->validation_message &&
+            PostMessageW(target->hwnd, target->validation_message, 0, reinterpret_cast<LPARAM>(result.get()))) result.release();
+    };
+    target_->changed.notify_one();
+}
+
+void PickerLoader::CheckSaveAccess(uint64_t generation, SaveConfirmationSnapshot snapshot,
+                                   bool after_file_ok, uint64_t ui_generation, bool require_unencrypted, bool skip_access_validation) {
+    std::lock_guard guard(target_->lock);
+    ++target_->serial;
+    target_->pending = [target = target_.get(), generation, snapshot = std::move(snapshot), after_file_ok, ui_generation, require_unencrypted, skip_access_validation](uint64_t serial) {
+        auto cancelled = [&] { return target->serial.load() != serial; };
+        if (cancelled()) return;
+        auto result = std::make_unique<PickerValidation>();
+        result->generation = generation; result->failed_path = snapshot.Path();
+        result->save_ui_generation = ui_generation;
+        auto fresh = RevalidateSaveConfirmation(snapshot, cancelled);
+        if (fresh.state != SaveRevalidationState::Ready || !fresh.snapshot) {
+            ApplySaveSnapshot(*result, std::move(fresh));
+        } else {
+            if (skip_access_validation || fresh.snapshot->NoTestFileCreate()) {
+                // Explicit caller-validation or no-create policy; retain its snapshot metadata/overwrite checks.
+                result->paths.push_back(fresh.snapshot->Path());
+                result->save_snapshot = std::move(fresh.snapshot);
+                result->save_access_checked = true;
+                result->save_file_ok_checked = after_file_ok;
+            } else {
+            auto access = ValidateLocalSaveAccessV1(*fresh.snapshot, cancelled, {}, require_unencrypted);
+            result->error = access.error;
+            if (!access.error && access.state == SaveAccessState::Ready) {
+                result->paths.push_back(fresh.snapshot->Path());
+                result->save_snapshot = std::move(fresh.snapshot);
+                result->save_access_checked = true;
+                result->save_file_ok_checked = after_file_ok;
+            } else if (!access.error && access.state == SaveAccessState::NeedsConfirmation && access.confirmation) {
+                result->paths.push_back(access.confirmation->Path());
+                result->save_snapshot = access.confirmation;
+                result->overwrite_required = true;
+            } else if (!result->error) result->error = ERROR_INVALID_DATA;
+            // Keep cleanup evidence even when cancellation makes the reply stale.
+            // Do not retry or remove a pathname after an uncertain close/delete.
+            if (access.cleanup == SaveAccessCleanup::Unconfirmed || access.cleanup_error) {
+                wchar_t diagnostic[192]{};
+                swprintf_s(diagnostic, L"Pulse LocalSave cleanup failure stage=%u error=%lu cleanup=%lu primary=%lu\n",
+                    static_cast<unsigned>(access.stage), access.error, access.cleanup_error, access.primary_error);
+                OutputDebugStringW(diagnostic);
+            }
+            result->save_access_diagnostic = std::move(access);
+            }
+        }
+        std::lock_guard guard(target->lock);
+        if (!target->closed && !cancelled() && target->validation_message &&
+            PostMessageW(target->hwnd, target->validation_message, 0, reinterpret_cast<LPARAM>(result.get()))) result.release();
+    };
+    target_->changed.notify_one();
+}
+
 std::unique_ptr<PickerListing> PickerLoader::Take(LPARAM lparam) {
     return std::unique_ptr<PickerListing>(reinterpret_cast<PickerListing*>(lparam));
+}
+std::unique_ptr<PickerFolderCommit> PickerLoader::TakeFolderCommit(LPARAM lparam) {
+    return std::unique_ptr<PickerFolderCommit>(reinterpret_cast<PickerFolderCommit*>(lparam));
 }
 std::unique_ptr<PickerValidation> PickerLoader::TakeValidation(LPARAM lparam) {
     return std::unique_ptr<PickerValidation>(reinterpret_cast<PickerValidation*>(lparam));

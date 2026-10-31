@@ -30,6 +30,9 @@ class MainRenderer {
     friend struct ColumnResizeUiTest;
     friend struct UiModuleAuditTest;
 public:
+    void SetResourceModule(HINSTANCE module) { resource_module_ = module; }
+    HINSTANCE ResourceModule() const { return resource_module_ ? resource_module_ : GetModuleHandleW(nullptr); }
+
     MainRenderer();
     // Draws from caches shared with other windows (AppCore::render_caches).
     explicit MainRenderer(RenderCaches& caches);
@@ -51,6 +54,7 @@ public:
     // 已加星标 row; DrawStarFlight paints it over everything (ui_sidebar.cpp).
     void LaunchStarFlight(float x, float y);
     void DrawStarFlight(const Theme& theme);
+    void DrawWorkspacePreview(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     // Repaint interval the last drawn card asked for: 0 none, short while
     // something animates (dwell line, loading sweep), longer for a playing
     // video's progress line.
@@ -277,6 +281,7 @@ public:
     // details and icons sit one step further left.
     D2D1_RECT_F PaneMediumIconsRect(const D2D1_RECT_F& pane_bounds,
                                     float filter_expand = 1.0f, bool wall = false) const;
+    D2D1_RECT_F PaneCloseRect(const D2D1_RECT_F& bounds) const;
     D2D1_RECT_F PaneViewButtonRect(const D2D1_RECT_F& pane_bounds,
                                    float filter_expand = 1.0f) const;
     D2D1_RECT_F PaneDetailsRect(const D2D1_RECT_F& pane_bounds,
@@ -768,6 +773,7 @@ public:
     int TrayDeckCapacity(float window_w) const;
 
 private:
+    HINSTANCE resource_module_ = nullptr;
     UINT caret_due_ms_ = 0;
     DWORD shortcut_caret_epoch_ = 0;
     bool shortcut_caret_focus_ = false;
@@ -1054,6 +1060,7 @@ private:
     float collapse_from_ = 0.0f;
     uint64_t collapse_start_ = 0;  // motion::NowMs()
     static constexpr float kSidebarCollapseMs = 200.0f;
+    mutable bool pane_close_visible_ = false;
     float pane_header_height_ = 40.0f;
     float focused_banner_height_ = 0.0f;
     float column_header_height_ = 32.0f;

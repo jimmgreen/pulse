@@ -196,7 +196,7 @@ bool MainRenderer::EnsureFluentSvg(int resource_id, bool colorful) {
     }
 
     ComPtr<ID2D1SvgDocument> document;
-    if (!LoadFluentSvg(empty_state_svg_dc_.get(), resource_id, document)) {
+    if (!LoadFluentSvg(empty_state_svg_dc_.get(), resource_id, document, ResourceModule())) {
         fluent_svg_failed_.insert(resource_id);
         return false;
     }
@@ -267,7 +267,7 @@ bool MainRenderer::DrawProviderLogo(int resource_id, bool dark, const D2D1_RECT_
             FAILED(compositor_->Dc()->QueryInterface(IID_PPV_ARGS(&empty_state_svg_dc_)))) {
             return false;
         }
-        const HMODULE module = GetModuleHandleW(nullptr);
+        const HMODULE module = ResourceModule();
         const HRSRC resource = FindResourceW(module, MAKEINTRESOURCEW(resource_id), RT_RCDATA);
         const HGLOBAL loaded = resource ? LoadResource(module, resource) : nullptr;
         const DWORD byte_count = resource ? SizeofResource(module, resource) : 0;
@@ -338,10 +338,10 @@ ID2D1Bitmap1* MainRenderer::FluentSvgBitmap(int resource_id, ID2D1SvgDocument* s
     return slot.get();
 }
 
-bool LoadFluentSvg(ID2D1DeviceContext5* dc, int resource_id, ComPtr<ID2D1SvgDocument>& out) {
+bool LoadFluentSvg(ID2D1DeviceContext5* dc, int resource_id, ComPtr<ID2D1SvgDocument>& out, HMODULE module) {
     out.reset();
     if (!dc) return false;
-    const HMODULE module = GetModuleHandleW(nullptr);
+    if (!module) module = GetModuleHandleW(nullptr);
     const HRSRC resource = FindResourceW(module, MAKEINTRESOURCEW(resource_id), RT_RCDATA);
     if (!resource) return false;
     const HGLOBAL loaded = LoadResource(module, resource);

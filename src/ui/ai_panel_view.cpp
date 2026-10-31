@@ -407,6 +407,7 @@ void AiPanelView::DrawContent(Compositor* compositor, const AiPanelViewModel& vm
     suggestion_rects_.clear();
     go_settings_ = {};
     conv_hits_.clear();
+    jump_shown_ = false;   // 55 P4: set again by DrawConversation
     turn_rects_.clear();
     turn_edit_rect_ = {};
     turn_edit_placed_ = false;
@@ -1149,6 +1150,7 @@ AiPanelHit AiPanelView::HitTest(float x, float y) const {
     if (hist_k_ > 0.001f && In(hist_rect_, x, y)) return HistoryHitTest(x, y);
     if (In(mode_button_, x, y)) return {AiPanelPart::Mode, -1};
     if (In(close_button_, x, y)) return {AiPanelPart::Close, -1};
+    if (jump_shown_ && In(jump_rect_, x, y)) return {AiPanelPart::JumpLatest, -1};
     if (In(conversation_rect_, x, y)) {
         if (In(go_settings_, x, y)) return {AiPanelPart::GoSettings, -1};
         for (size_t i = 0; i < suggestion_rects_.size(); ++i)

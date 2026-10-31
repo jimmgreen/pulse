@@ -492,6 +492,18 @@ struct BreadcrumbSegment {
 std::vector<BreadcrumbSegment> SplitBreadcrumb(const std::wstring& path);
 
 struct SidebarItem {
+    int workspace_index = -1;
+    int workspace_child_number = 0;
+    ViewMode workspace_child_view = ViewMode::Details;
+    int workspace_layout = 0;
+    std::wstring workspace_root;
+    bool workspace_active = false;
+    bool workspace_dirty = false;
+    bool workspace_empty = false;
+    unsigned int workspace_color_rgb = 0x4CC2FF;
+    std::vector<std::wstring> workspace_panes;
+    std::vector<ViewMode> workspace_views;
+
     std::wstring label;
     std::wstring detail;
     std::wstring icon_glyph;       // Segoe Fluent Icons codepoint string.
@@ -525,7 +537,7 @@ struct SidebarItem {
     float flash = 0.0f;            // tab rows: attention pulse, see TabView::flash
 };
 
-enum class SidebarAddAction { None, CreateTag, AddNetwork, AddQuickAccess, NewTab };
+enum class SidebarAddAction { None, CreateTag, AddNetwork, AddQuickAccess, NewTab, SaveWorkspace };
 
 struct SidebarGroup {
     // Logical section id (pulse::app::SidebarSectionId). Collapse/hide masks and
@@ -852,6 +864,11 @@ struct SplitterView {
 };
 // Splitter hit index of the swap button on splitter i: kSplitterSwapIndex + i.
 inline constexpr int kSplitterSwapIndex = 1000;
+
+struct DialogManagedSessionView {
+    std::wstring title, status;
+    bool can_disable = false;
+};
 
 struct SettingsRowView {
     std::wstring key;
@@ -1317,6 +1334,12 @@ struct WindowViewModel {
     int settings_startup_open = 0; // 0 last tabs, 1 default location
     int settings_notify_icon = 0;  // 0 always, 1 in the background, 2 never (#57)
     int settings_new_tab_open = 0; // 0 current folder, 1 default location
+    int settings_open_pulse_icon = 0;
+    int settings_new_window_shows = 0;
+    bool settings_arrange_include_minimized = false;
+    int settings_arrange_gap = 0;
+    int settings_open_this_pc = 0;
+    int settings_open_win_e = 0;
     int settings_external_open = 0; // 0 smart, 1 tab, 2 new window (multi-window M7b)
     bool settings_close_last_tab = false;
     bool settings_close_tab_double_click = false;
@@ -1334,6 +1357,14 @@ struct WindowViewModel {
     // 设为默认文件管理器: 0 off, 1 partial, 2 full; the text lists what is missing.
     int settings_default_manager = 0;
     std::wstring settings_default_manager_desc;
+    // Pure snapshots: layout/render tests may populate these without a controller.
+    std::wstring settings_dialog_bundle, settings_dialog_application, settings_dialog_status;
+    bool settings_dialog_available = false, settings_dialog_busy = false;
+    bool settings_dialog_enabled = false, settings_dialog_conflict = false, settings_dialog_failed = false;
+    bool settings_dialog_scope_expanded = false;
+    bool settings_integration_restore_busy = false;
+    bool settings_dialog_can_launch = false, settings_dialog_can_enable_auto = false;
+    std::vector<DialogManagedSessionView> settings_dialog_sessions;
     bool settings_integration_enabled = false;
     bool settings_integration_folders = false;
     bool settings_integration_win_e = false;
@@ -1446,6 +1477,7 @@ struct HitTestResult {
         TabNew,
         TabGroup,
         ThemeToggle,
+        WindowManageButton,
         SettingsButton,
         Minimize,
         Maximize,
@@ -1464,6 +1496,7 @@ struct HitTestResult {
         DetailsToggle,
         PaneMediumIcons,
         PaneViewButton,
+        PaneClose,
         PaneDetails,
         PaneSizeSlider,     // icon views: the pane header's size slider (index = pane)
         PaneSizeButton,     // narrow pane: opens that slider over the title (index = pane)
@@ -1512,6 +1545,7 @@ struct HitTestResult {
         SidebarHeaderAction,
         SidebarItem,
         SidebarItemAction,
+        SidebarWorkspaceAction,
         SidebarItemExpand,
         SidebarBlank,             // empty space in the sidebar: section menu
         TrayRelease,
@@ -1554,6 +1588,7 @@ struct HitTestResult {
         StatusBarCancelSearch,
         SettingsNav,
         SettingsToggle,
+        SettingsDialogManagement, // 0 bundle, 1 application, 2 launch, 3 refresh, 100+ session disable
         SettingsIntegration, // 0 master, 4 experimental, 5 retry/restore, 6 restore all, 7 Recycle Bin, 8 try it
         SettingsGlobalSearchHotkey,
         SettingsChangeDays,
@@ -1569,6 +1604,9 @@ struct HitTestResult {
         SettingsStartupOpen,
         SettingsNotifyIcon,
         SettingsNewTabOpen,
+        SettingsOpenPulseIcon,
+        SettingsNewWindowShows,
+        SettingsArrangeGap,
         SettingsExternalOpen,
         SettingsBlankClick,
         SettingsHomeFolder,

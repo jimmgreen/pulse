@@ -1,8 +1,7 @@
 // Included inside ui_renderer_internal.h's anonymous namespace.
 // Default file manager card helpers shared by layout, drawing and tests.
 struct IntegrationBadgeInfo { std::wstring text; fluent::BadgeKind kind = fluent::BadgeKind::Neutral; };
-// One switch: on hands folders and drives, This PC and Win + E to Pulse together, so
-// Explorer never ends up as a launcher that bounces every double-click to Pulse.
+// Desired integration choices are retained independently of the master switch.
 inline bool IntegrationHasProblem(const WindowViewModel& vm) {
     return vm.settings_integration_state==2 || vm.settings_integration_state==3;
 }
@@ -31,7 +30,7 @@ inline l10n::StringId IntegrationRetryLabel(const WindowViewModel& vm) {
     return vm.settings_integration_other_exe.empty() ? I::IntegrationReapply : I::IntegrationUseThis;
 }
 // The footer: one plain sentence about what happens now.
-inline std::wstring IntegrationHint(const WindowViewModel& vm) {
+inline std::wstring IntegrationGuidance(const WindowViewModel& vm) {
     using I=l10n::StringId;
     if(!vm.settings_integration_enabled) return l10n::Get(I::IntegrationInactiveHint);
     if(vm.settings_integration_just_enabled) return l10n::Get(I::IntegrationJustOn);
@@ -43,6 +42,9 @@ inline std::wstring IntegrationHint(const WindowViewModel& vm) {
     if(vm.settings_integration_experimental && !vm.settings_keep_running) return l10n::Get(I::IntegrationHintKeep);
     if(vm.settings_integration_experimental && !vm.settings_launch_on_startup) return l10n::Get(I::IntegrationHintLaunch);
     return l10n::Get(I::IntegrationOnFoot);
+}
+inline std::wstring IntegrationHint(const WindowViewModel& vm) {
+    return IntegrationGuidance(vm);
 }
 inline bool IntegrationShowsTry(const WindowViewModel& vm) {
     return vm.settings_integration_enabled && !IntegrationHasProblem(vm);
@@ -235,14 +237,33 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
         }
         l.startup_open_card=row(seg_h); segments(l.startup_open_card,l.startup_open_row,2,282);
         l.new_tab_open_card=row(seg_h); segments(l.new_tab_open_card,l.new_tab_open_row,2,282);
+        section(I::SettingsSecOpenWindows);
+        l.open_pulse_icon_card=row(narrow ? 108.0f : 64.0f); segments(l.open_pulse_icon_card,l.open_pulse_icon_row,3,360);
+        l.new_window_shows_card=row(narrow ? 108.0f : 64.0f); segments(l.new_window_shows_card,l.new_window_shows_row,3,330);
         l.external_open_card=row(seg_h); segments(l.external_open_card,l.external_open_row,3,282);
 
+        section(I::SettingsSecArrangeWindows);
+        l.arrange_minimized_row=row(64);
+        l.arrange_gap_card=row(narrow ? 108.0f : 64.0f); segments(l.arrange_gap_card,l.arrange_gap_row,2,282);
         section(I::SettingsSecTabs);
         l.vertical_tabs_row=row(64);
         l.pinned_names_row=row(64);
         l.close_tab_double_click_row=row(64);
         l.close_last_tab_row=row(64);
     } else if (page == 11) {
+        auto wrap_height = [&](std::wstring_view value, float width) {
+            return painter ? painter->MeasureWrappedCaptionHeight(value,(std::max)(40*scale,width))/scale : 64.0f;
+        };
+        const float lead_h=wrap_height(l10n::Get(I::StartupIntegrationLead),right-left);
+        l.startup_lead=D2D1::RectF(left,y+12*scale,right,y+(24+lead_h)*scale);y=l.startup_lead.bottom+12*scale;
+        const bool overview_stack=right-left<680*scale;
+        const float overview_w=overview_stack ? right-left : (right-left-20*scale)/3;
+        for(int i=0;i<3;++i) {
+            const float x=left+(overview_stack ? 0 : i*(overview_w+10*scale));
+            const float top=y+(overview_stack ? i*82*scale : 0);
+            l.startup_overview[i]=D2D1::RectF(x,top,x+overview_w,top+72*scale);
+        }
+        y=l.startup_overview[2].bottom;
         section(I::SettingsIntegration);
         end_group();   // the integration card is laid out and drawn on its own
         l.integration_section=l.section[0];
@@ -292,29 +313,19 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
         }
     }
     l.integration_list_head=irow(32);
-    const float item_text_left=left+112*scale, item_text_right=right-16*scale;
-    {
-        // What opens in Pulse: three read-only tiles that wrap with the width.
-        const float x0=left+54*scale, x1=right-16*scale, tile_h=36*scale, gap=8*scale;
-        float x=x0, top=y;
-        for(int i=0;i<3;++i) {
-            const auto name=l10n::Get(kIntegrationCover[i]);
-            // Button width is the label plus 16; the tile adds the icon (34), the check (22) and slack.
-            const float w=(std::min)(x1-x0,(painter ? painter->MeasureButtonWidth(name) : 140*scale)+64*scale);
-            if(x>x0 && x+w>x1) { x=x0; top+=tile_h+gap; }
-            l.integration_cover[i]=D2D1::RectF(x,top,x+w,top+tile_h);
-            x+=w+gap;
-        }
-        y=top+tile_h+6*scale;
+    const float item_text_left=left+84*scale, item_text_right=right-16*scale;
+    const I cover_desc[]={I::StartupFolderDesc,I::StartupThisPcDesc,I::StartupWinEDesc};
+    for(int i=0;i<3;++i) {
+        l.integration_cover[i]=irow((std::max)(60.0f,43.0f+caption_height(l10n::Get(cover_desc[i]),item_text_right-item_text_left)/scale));
     }
+    l.recycle_bin_row=irow((std::max)(60.0f,43.0f+caption_height(l10n::Get(I::SettingsRecycleBinDesc),item_text_right-item_text_left)/scale));
     l.integration_options_head=irow(32);
-    auto item_row=[&](l10n::StringId desc,float text_right) {
-        const float h=caption_height(l10n::Get(desc),text_right-item_text_left);
-        return irow((std::max)(52.0f,(31*scale+h+12*scale)/scale));
+    auto item_row=[&](l10n::StringId desc,float text_right,float extra=0.0f) {
+        const float h=caption_height(l10n::Get(desc),text_right-left-132*scale);
+        return irow((std::max)(52.0f,(31*scale+h+12*scale)/scale)+extra);
     };
-    l.recycle_bin_row=item_row(l10n::StringId::SettingsRecycleBinDesc,item_text_right);
-    // The takeover is a regular option now: it also carries 兼容打开方式 below.
-    l.explorer_windows_row=item_row(l10n::StringId::IntegrationExperimentalDesc,item_text_right);
+    // Match the optional feature badge; stack it below the title on narrow pages.
+    l.explorer_windows_row=item_row(l10n::StringId::IntegrationExperimentalDesc,item_text_right,right-left<600*scale ? 24.0f : 0.0f);
     l.folders_compat_row=item_row(l10n::StringId::IntegrationCompatDesc,item_text_right);
     {
         // Footer: the try-it button (while on) and one sentence about what happens now.
@@ -325,7 +336,7 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
         float text_left=foot_left, text_top=top+6*scale, bottom=top;
         if(IntegrationShowsTry(vm)) {
             const auto label=l10n::Get(l10n::StringId::IntegrationTry);
-            const float w=painter ? painter->MeasureButtonWidth(label) : 180*scale;
+            const float w=painter ? painter->MeasureButtonWidth(label,L"\xE7F4") : 200*scale;
             l.integration_try=D2D1::RectF(foot_left,top,(std::min)(foot_left+w,item_text_right),top+32*scale);
             bottom=l.integration_try.bottom;
             if(item_text_right-(l.integration_try.right+12*scale)>=200*scale) text_left=l.integration_try.right+12*scale;
@@ -335,11 +346,57 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
         const float text_h=caption_height(hint,item_text_right-text_left);
         l.integration_hint_text=D2D1::RectF(text_left,text_top,item_text_right,text_top+text_h);
         bottom=(std::max)(bottom,l.integration_hint_text.bottom);
+        if(vm.settings_integration_enabled && (vm.settings_integration_experimental || vm.settings_integration_folders_compat) && (!vm.settings_keep_running || !vm.settings_launch_on_startup)) {
+            const auto action=l10n::Get(vm.settings_keep_running ? I::IntegrationEnableLaunch : I::IntegrationEnableKeep);
+            const float width=painter ? painter->MeasureButtonWidth(action) : 240*scale;
+            l.integration_hint_action=D2D1::RectF(foot_left,bottom+10*scale,(std::min)(item_text_right,foot_left+width),bottom+42*scale);
+            bottom=l.integration_hint_action.bottom;
+        }
         l.integration_hint=D2D1::RectF(left,y,right,bottom+14*scale);
         y=l.integration_hint.bottom;
     }
     l.integration_card=D2D1::RectF(left,integration_top,right,y);
         }
+        section(I::StartupDialogsTitle);
+        l.dialog_management_section=l.section[l.section_count-1];
+        const bool info_problem=vm.settings_dialog_conflict || vm.settings_dialog_failed;
+        const auto badge_text=l10n::Get(info_problem ? I::StartupNeedsAttention : vm.settings_dialog_enabled ? I::StartupLaunchOn : I::StartupLaunchOff);
+        const float badge_w=painter ? painter->MeasureBadgeWidth(badge_text) : 90*scale;
+        const bool badge_stack=right-left<600*scale;
+        const float title_width=(std::max)(40*scale,right-left-(badge_stack ? 132*scale : 156*scale+badge_w));
+        const float title_h=painter ? painter->MeasureWrappedBodyHeight(l10n::Get(I::StartupDialogsToggle),title_width)/scale : 40.0f;
+        l.dialog_toggle_row=row(28+title_h+wrap_height(l10n::Get(I::StartupDialogsDesc),title_width)+(badge_stack?30.0f:0.0f));
+        const auto toggle=l.dialog_toggle_row;
+        l.dialog_badge=badge_stack ? D2D1::RectF(left+54*scale,toggle.bottom-34*scale,left+54*scale+badge_w,toggle.bottom-12*scale)
+            : D2D1::RectF(right-84*scale-badge_w,toggle.top+21*scale,right-84*scale,toggle.top+43*scale);
+        if(info_problem || vm.settings_dialog_busy) {
+            l.dialog_management_status=row((info_problem ? 64.0f : 24.0f)+wrap_height(vm.settings_dialog_status,right-left-92*scale));
+            if(info_problem) {
+                auto retry=row(56);
+                l.dialog_retry_button=D2D1::RectF(left+20*scale,retry.top+12*scale,(std::min)(right-20*scale,left+20*scale+button_w(I::IntegrationRetry,90)),retry.bottom-12*scale);
+            }
+        }
+        if(vm.settings_dialog_enabled) {
+            l.dialog_scope_button=row(42);
+        }
+        if(!vm.settings_dialog_enabled || vm.settings_dialog_scope_expanded) {
+            l.startup_dialog_info=startup_info::Layout(left,right,y,scale,painter);
+            l.dialog_management_intro=D2D1::RectF(left,y,right,l.startup_dialog_info.bottom);
+            y=l.startup_dialog_info.bottom;
+        }
+        auto action_row=[&](I desc,I action,D2D1_RECT_F& control) {
+            const float bw=(std::min)(button_w(action,150),right-left-40*scale);
+            const float text_width=right-left-(narrow?80*scale:100*scale+bw);
+            const float h=50+wrap_height(l10n::Get(desc),text_width);
+            auto r=row(h+(narrow?44.0f:0.0f));
+            const float bx=narrow?left+54*scale:right-20*scale-bw;
+            const float by=narrow?r.bottom-44*scale:r.top+16*scale;
+            control=D2D1::RectF(bx,by,(std::min)(right-20*scale,bx+bw),by+32*scale);
+            return r;
+        };
+        if(vm.settings_dialog_enabled || info_problem)
+            l.dialog_application_row=action_row(I::StartupDiagnosticsDesc,I::StartupDiagnosticsExport,l.dialog_export_button);
+        l.startup_dialog_jump_row=action_row(I::StartupJumpDesc,I::StartupJumpSettings,l.dialog_jump_button);
         section(I::SettingsSecStartupTray);
         l.startup_row[0]=row(64);
         l.start_in_tray_row=row(64,true);
@@ -347,7 +404,16 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
         l.notify_icon_card=row(seg_h); segments(l.notify_icon_card,l.notify_icon_row,3,282);
 
         section(I::SettingsSecExplorer);
-        l.shell_tags_row=row(64);
+        l.shell_tags_row=row(52+wrap_height(l10n::Get(I::SettingsShellTagsDesc),right-left-126*scale));
+        section(I::StartupRestoreSection);
+        const float restore_w=button_w(I::StartupRestoreAction,130);
+        const float restore_text_width=right-left-(narrow?108*scale:128*scale+restore_w);
+        l.startup_restore_row=row(52+wrap_height(l10n::Get(I::StartupRestoreDesc),restore_text_width)+(narrow?44.0f:0.0f));
+        const auto restore=l.startup_restore_row;
+        const float restore_x=narrow?left+54*scale:right-20*scale-restore_w;
+        const float restore_y=narrow?restore.bottom-44*scale:restore.top+16*scale;
+        l.startup_restore_button=D2D1::RectF(restore_x,restore_y,(std::min)(right-20*scale,restore_x+restore_w),restore_y+32*scale);
+
     } else {
         section(I::SettingsSecDelete);
         l.confirm_delete_row=row(64);

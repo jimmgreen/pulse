@@ -23,6 +23,8 @@ using TagId = std::wstring;
 enum class TagSelectionState { None, Mixed, All };
 
 struct Workspace {
+    bool expanded = false;
+    uint32_t color_rgb = 0x4CC2FF;
     std::wstring name;
     std::wstring root;
     int layout = 0;

@@ -13,6 +13,8 @@ namespace pulse::setup {
 
 struct Tasks {
     bool index_service = true;
+    bool global_search = true;
+    bool ai_assistant = true;
     bool startup = false;
     bool desktop_icon = false;
 };
@@ -42,6 +44,7 @@ Options ParseOptions(const wchar_t* command_line);
 
 // Applies an Inno-style task list ("indexservice,!startup") onto `tasks`.
 void ApplyTaskList(const std::wstring& list, Tasks& tasks, bool replace);
+void ApplyRememberedTaskList(const std::wstring& list, Tasks& tasks);
 std::wstring FormatTaskList(const Tasks& tasks);  // "indexservice,startup"
 
 }  // namespace pulse::setup

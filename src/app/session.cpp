@@ -1,5 +1,6 @@
 // session.cpp
 #include "session.h"
+#include "hot_entry_data_dir.h"
 #include "split_tree_shape.h"
 #include "../common/config_json.h"
 #include "../ui/panel_metrics.h"
@@ -370,6 +371,8 @@ bool ParseLayoutTabs(const std::wstring& array_json,
 }
 
 std::wstring GetPulseDataDir() {
+    const auto& hot_fixture = VerifiedHotEntryDataDirectory();
+    if (!hot_fixture.empty()) return hot_fixture;
 #ifdef PULSE_WITH_SELFTEST
     wchar_t test_dir[32768]{};
     const DWORD length = GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", test_dir, ARRAYSIZE(test_dir));

@@ -22,6 +22,7 @@ struct AiAssistantState {
     bool open = false;
     bool floating = false;
     bool prefs_loaded = false;
+    bool enabled = true;
     int model = 0;                 // index into the model list
     int think = 4;                 // the preferred level, 0 off .. 6 max (ai_providers.h ThinkLevel)
     bool menu_open = false;

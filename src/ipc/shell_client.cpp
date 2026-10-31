@@ -2,6 +2,7 @@
 #include "shell_client.h"
 #include "deadline_pipe.h"
 #include "../common/localization.h"
+#include "../common/module_location.h"
 
 namespace pulse::ipc {
 #ifdef PULSE_SHELL_CLIENT_TEST
@@ -73,10 +74,9 @@ bool ShellClient::SpawnChild() {
     last_spawn_try_ = now;
 
     wchar_t exe_dir[MAX_PATH]{};
-    GetModuleFileNameW(nullptr, exe_dir, ARRAYSIZE(exe_dir));
-    wchar_t* slash = wcsrchr(exe_dir, L'\\');
-    if (!slash) return false;
-    *(slash + 1) = L'\0';
+    const auto module_address = +[] {};
+    if (module_location::DirectoryFromAddress(reinterpret_cast<const void*>(module_address),
+        exe_dir, ARRAYSIZE(exe_dir)) != ERROR_SUCCESS) return false;
 
     std::wstring cmd = L"\"";
     cmd += exe_dir;

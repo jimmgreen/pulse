@@ -176,7 +176,7 @@ std::vector<Binding> Bindings(const std::wstring& group, const std::wstring& exe
     if (group == L"WinE") {
         shell = L"Software\\Classes\\CLSID\\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}\\shell";
         verb = shell + L"\\opennewwindow";
-        line = L"\"" + exe + L"\"";
+        line = L"\"" + exe + L"\" --win-e";
     } else if (group == L"ThisPc") {
         shell = L"Software\\Classes\\CLSID\\{20D04FE0-3AEA-1069-A2D8-08002B30309D}\\shell";
         verb = shell + L"\\open";
@@ -645,6 +645,15 @@ const wchar_t* ShellIntegrationFailureName(ShellIntegrationFailureKind kind) noe
     case ShellIntegrationFailureKind::Unknown: break;
     }
     return L"unknown";
+}
+
+bool MigrateLegacyWinECommand(const std::wstring& exe) {
+    if (exe.empty()) return false;
+    const auto bindings = Bindings(L"WinE", exe);
+    Value command;
+    if (!Read(bindings.front().key, bindings.front().name, command)) return false;
+    if (Text(command) != L"\"" + exe + L"\"") return true;
+    return ApplyShellIntegration(ShellIntegrationKind::WinE, exe, true);
 }
 
 bool ReadShellIntegration(ShellIntegrationKind kind, const std::wstring& exe) {

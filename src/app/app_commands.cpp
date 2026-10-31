@@ -1,4 +1,5 @@
 #include "tag_color_commands.h"
+#include "picker_appearance.h"
 #include "git_ui.h"
 #include "mtime_hint_prefs.h"
 #include "tag_ads_sync.h"
@@ -5565,14 +5566,7 @@ void ApplyAppWindowChrome(AppState& s) {
 static ui::FolderPickerSpec MakePickerSpec(const AppState& s, ui::PickerMode mode) {
     ui::FolderPickerSpec spec;
     spec.mode = mode;
-    spec.selection_outline = s.appPrefs.list_selection_outline;
-    spec.row_height_dip = static_cast<float>(
-        app::EffectiveRowHeightDip(s.appPrefs.row_height, s.appPrefs.ui_font_scale));
-    spec.list_smart_date = s.appPrefs.list_smart_date;
-    spec.list_zebra_rows = s.appPrefs.list_zebra_rows;
-    spec.list_size_bar = s.appPrefs.list_size_bar;
-    spec.thumbnail_badges = s.appPrefs.list_thumbnail_badges;
-    spec.details_columns = s.appPrefs.details_columns;
+    app::ApplyPickerAppearanceToSpec(app::PickerAppearanceFromPrefs(s.appPrefs), spec);
     spec.show_hidden = s.appPrefs.show_hidden_files;
     return spec;
 }

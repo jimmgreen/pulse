@@ -74,7 +74,7 @@ constexpr KeyActionInfo kActions[] = {
     {X::FavoritesBar, "FavoritesBar", G::Tabs, N::Normal, L"显示收藏栏", L"Show the favorites bar", D(K(C | S, 'B')), 0, 0, 0, false},
     {X::Maximize, "Maximize", G::Tabs, N::Normal, L"最大化", L"Maximize", D(K(0, VK_F11)), 0, 0, 0, false},
     // Windows dispatches this through the configured shell integration.
-    {X::NewWindow, "NewWindow", G::Windows, N::Fixed, L"新建窗口", L"New window", D(K(kKeyWin, 'E')), 0, 0, 0, false},
+    {X::NewWindow, "NewWindow", G::Windows, N::Normal, L"新建窗口", L"New window", D(K(C, 'N')), 0, 0, 0, false},
     {X::CloseWindow, "CloseWindow", G::Windows, N::Normal, L"关闭窗口", L"Close window", D(K(C | S, 'W')), 0, 0, 0, false},
     {X::TabToWindow, "TabToWindow", G::Windows, N::Normal, L"标签页移到新窗口", L"Move tab to a new window", D(K(C | S, 'M')), 0, 0, 0, false},
     {X::ReopenClosed, "ReopenClosed", G::Windows, N::Normal, L"重新打开关闭的窗口", L"Reopen what was closed", D(K(C | S, 'T')), 0, 0, 0, false},
@@ -84,6 +84,12 @@ constexpr KeyActionInfo kActions[] = {
     {X::AiAssistant, "AiAssistant", G::Windows, N::Normal, L"Pulse 助手", L"Pulse Assistant", D(K(C, 'J')), 0, 0, 0, false},
     {X::AiHistory, "AiHistory", G::Windows, N::Normal, L"Pulse 助手历史对话", L"Pulse Assistant chat history", D(K(C, 'H')), 0, 0, 0, false},
     {X::ShortcutHelp, "ShortcutHelp", G::Windows, N::Normal, L"键盘快捷键", L"Keyboard shortcuts", D(K(C, VK_OEM_2)), 0, 0, 0, false},
+    {X::ArrangeSideBySide, "ArrangeSideBySide", G::Windows, N::Normal, L"", L"", D(), 0, 0, 0, false},
+    {X::ArrangeStacked, "ArrangeStacked", G::Windows, N::Normal, L"", L"", D(), 0, 0, 0, false},
+    {X::ArrangeColumns, "ArrangeColumns", G::Windows, N::Normal, L"", L"", D(), 0, 0, 0, false},
+    {X::ArrangeTile, "ArrangeTile", G::Windows, N::Normal, L"", L"", D(), 0, 0, 0, false},
+    {X::ArrangeMain, "ArrangeMain", G::Windows, N::Normal, L"", L"", D(), 0, 0, 0, false},
+    {X::ArrangeCascade, "ArrangeCascade", G::Windows, N::Normal, L"", L"", D(), 0, 0, 0, false},
 };
 static_assert(std::size(kActions) == static_cast<size_t>(kKeyActionCount));
 
@@ -154,6 +160,15 @@ const KeyActionInfo& ActionInfo(KeyAction action) noexcept {
 
 const wchar_t* ActionName(KeyAction action) {
     const auto& info = ActionInfo(action);
+    switch (info.action) {
+    case KeyAction::ArrangeSideBySide: return l10n::Get(l10n::StringId::ArrangeSideBySide).c_str();
+    case KeyAction::ArrangeStacked: return l10n::Get(l10n::StringId::ArrangeStacked).c_str();
+    case KeyAction::ArrangeColumns: return l10n::Get(l10n::StringId::ArrangeColumns).c_str();
+    case KeyAction::ArrangeTile: return l10n::Get(l10n::StringId::ArrangeTile).c_str();
+    case KeyAction::ArrangeMain: return l10n::Get(l10n::StringId::ArrangeMain).c_str();
+    case KeyAction::ArrangeCascade: return l10n::Get(l10n::StringId::ArrangeCascade).c_str();
+    default: break;
+    }
     return l10n::Pick(info.zh, info.en);
 }
 

@@ -911,6 +911,72 @@ bool TagRenameCell(AppState& s, const app::TagId& tag_id, D2D1_RECT_F& cell) {
     return false;
 }
 
+void LayoutWorkspaceRenameOverlay(AppState& s) {
+    if (!s.hwndWorkspaceRenameEdit || s.workspaceRenameRoot.empty()) return;
+    const int index = s.places.FindWorkspace(s.workspaceRenameRoot);
+    if (index < 0) { HideWorkspaceRenameOverlay(s, false); return; }
+    const auto vm = BuildVm(s);
+    const auto path = app::MakeWorkspacePath(index);
+    for (const auto& group : vm.sidebar) {
+        for (int item = 0; item < static_cast<int>(group.items.size()); ++item) {
+            if (group.items[static_cast<size_t>(item)].path != path) continue;
+            D2D1_RECT_F cell{};
+            if (!s.renderer.SidebarRowRect(vm, static_cast<float>(s.compositor.Width()),
+                    static_cast<float>(s.compositor.Height()), group.id, item, &cell)) break;
+            cell.left += 46.0f * s.scale;
+            cell.right -= 28.0f * s.scale;
+            cell.top += 2.0f * s.scale;
+            cell.bottom = cell.top + 24.0f * s.scale;
+            if (cell.right > cell.left) PlaceHostedEdit(s.hwndWorkspaceRenameEdit, s.hwnd, cell, s.scale, 0, 0);
+            return;
+        }
+    }
+    HideWorkspaceRenameOverlay(s, false);
+}
+
+void ShowWorkspaceRenameOverlay(AppState& s, int index) {
+    if (index < 0 || index >= static_cast<int>(s.places.workspaces.size())) return;
+    if (s.renameIndex >= 0) HideRenameOverlay(s, false);
+    if (!s.tagRenameId.empty()) HideTagRenameOverlay(s, true);
+    if (s.addressEditing) HideAddressEditor(s, false);
+    if (s.filterEditing) HideFilterEditor(s, true);
+    const auto workspace = s.places.workspaces[static_cast<size_t>(index)];
+    if (!s.hwndWorkspaceRenameEdit) s.hwndWorkspaceRenameEdit = CreateHostedEdit(s, WorkspaceRenameEditProc);
+    if (!s.hwndWorkspaceRenameEdit) return;
+    s.workspaceRenameRoot = workspace.root;
+    s.workspaceRenameIgnoreKillFocus = true;
+    SetWindowTextW(s.hwndWorkspaceRenameEdit, workspace.name.c_str());
+    LayoutWorkspaceRenameOverlay(s);
+    if (!s.workspaceRenameRoot.empty()) {
+        ShowWindow(s.hwndWorkspaceRenameEdit, SW_SHOW);
+        SetForegroundWindow(GetAncestor(s.hwndWorkspaceRenameEdit, GA_ROOT));
+        SetFocus(s.hwndWorkspaceRenameEdit);
+        SendMessageW(s.hwndWorkspaceRenameEdit, EM_SETSEL, 0, -1);
+    }
+    s.workspaceRenameIgnoreKillFocus = false;
+}
+
+void HideWorkspaceRenameOverlay(AppState& s, bool commit) {
+    if (!s.hwndWorkspaceRenameEdit || s.workspaceRenameRoot.empty()) return;
+    const auto root = std::exchange(s.workspaceRenameRoot, {});
+    if (commit) {
+        wchar_t text[512]{};
+        GetWindowTextW(s.hwndWorkspaceRenameEdit, text, ARRAYSIZE(text));
+        std::wstring name(text);
+        while (!name.empty() && iswspace(name.front())) name.erase(name.begin());
+        while (!name.empty() && iswspace(name.back())) name.pop_back();
+        const int index = s.places.FindWorkspace(root);
+        if (!name.empty() && index >= 0) {
+            s.places.workspaces[static_cast<size_t>(index)].name = std::move(name);
+            s.places.Save();
+        }
+    }
+    s.workspaceRenameIgnoreKillFocus = true;
+    ShowWindow(s.hwndWorkspaceRenameEdit, SW_HIDE);
+    s.workspaceRenameIgnoreKillFocus = false;
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
 void LayoutTagRenameOverlay(AppState& s) {
     if (!s.hwndTagRenameEdit || s.tagRenameId.empty() || !s.hwnd) return;
     D2D1_RECT_F cell{};
@@ -1454,6 +1520,22 @@ static LRESULT RenameEditProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
         UpdateRenameStatus(*s);
     }
     return result;
+}
+
+LRESULT CALLBACK WorkspaceRenameEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                         UINT_PTR, DWORD_PTR data) {
+    auto* s = reinterpret_cast<AppState*>(data);
+    if (!s) return DefSubclassProc(hwnd, msg, wp, lp);
+    LRESULT handled = 0;
+    if (HandleHostedEditMessage(*s, hwnd, msg, wp, lp, handled)) return handled;
+    if (msg == WM_KEYDOWN && (wp == VK_RETURN || wp == VK_ESCAPE)) {
+        HideWorkspaceRenameOverlay(*s, wp == VK_RETURN);
+        SetFocus(s->hwnd);
+        return 0;
+    }
+    if (msg == WM_KILLFOCUS && !s->workspaceRenameIgnoreKillFocus) HideWorkspaceRenameOverlay(*s, true);
+    if (msg == WM_ERASEBKGND) return EraseHostedEditBackground(hwnd, wp, s) ? 1 : 0;
+    return DefPresentedHostedEditProc(s, hwnd, msg, wp, lp);
 }
 
 LRESULT CALLBACK TagRenameEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,

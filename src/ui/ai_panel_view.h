@@ -151,6 +151,7 @@ enum class AiPanelPart : uint8_t {
     HistDelCancel,
     HistDelOk,
     HistRenameBox,
+    JumpLatest,   // 55 P4: the 回到最新 pill over the conversation's bottom
 };
 
 struct AiPanelHit {
@@ -667,6 +668,7 @@ struct AiPanelViewModel {
     std::wstring intro;
     std::vector<AiSuggestionView> suggestions;
     std::wstring safe_note;
+    std::wstring jump_latest;   // 55 P4: 回到最新
     // No model service yet: the empty state shows the services and a button
     // to Settings > AI 助手 instead of the greeting and suggestions.
     bool setup = false;
@@ -764,6 +766,7 @@ public:
     // scrolls up; scrolling back to the end follows again.
     void ScrollBy(float dy, bool animate = true);
     void ScrollToEnd();
+    bool JumpShown() const noexcept { return jump_shown_; }   // 55 P4
     bool Following() const noexcept { return follow_; }
     // The overlay scrollbar (conversation or welcome) works like Pulse's other scrollbars: drag the thumb, or press the track
     // to jump there and keep dragging. Hover widens the bar.
@@ -1091,6 +1094,8 @@ private:
     bool hist_open_drawn_ = false;      // vm.history.open last frame
     D2D1_RECT_F hist_rect_{}, hist_list_rect_{}, hist_search_rect_{}, hist_rename_rect_{};
     float hist_scroll_ = 0.0f, hist_content_h_ = 0.0f;
+    D2D1_RECT_F jump_rect_{};   // 55 P4: the 回到最新 pill (drawn only while scrolled up)
+    bool jump_shown_ = false;
     std::vector<float> hist_row_tops_;  // content y of each row (for reveal)
     std::vector<ConvHit> hist_hits_;
 

@@ -1,3 +1,6 @@
+#include "quick_access.h"
+#include "pane_close.h"
+#include "picker_host_mode.h"
 #include "app_diagnostics.h"
 #include "partial_redraw.h"
 #include "git_ui.h"
@@ -82,14 +85,18 @@
 #include "search_query.h"
 #include "settings_controller.h"
 #include "single_instance_coordinator.h"
+#include "external_open_dispatch.h"
 #include "address_path_open.h"
 #include "settings_transfer_ui.h"
 #include "window_factory.h"
+#include "window_jump_list.h"
 #include "open_routing.h"
 #include "window_identity_ui.h"
 #include "tab_transfer.h"
 #include "tab_detach.h"
 #include "window_merge.h"
+#include "window_arrange_ui.h"
+#include "window_management_test.h"
 #include "reopen_closed.h"
 #include "tray_controller.h"
 #include "ai_launcher.h"
@@ -223,6 +230,10 @@ bool TestAiBroker() {
 #include "tray_reveal.h"
 #include "default_file_manager.h"
 #include "shell_window_sync.h"
+#include "explorer_takeover_probe.h"
+#include "entry_command_probe.h"
+#include "hot_entry_probe.h"
+#include "dialog_management_ui.h"
 #include "host_window.h"
 #include "host_routing.h"
 #include "startup_trace.h"
@@ -552,6 +563,17 @@ void Render(AppState& s) {
     UpdateMarqueeFrame(s);
     UpdateProcessMetrics(s);
     ui::WindowViewModel vm = BuildVm(s);
+    const auto explorer_frame = CaptureExplorerFrame(s, vm);
+    const auto trace_explorer_frame_failure = [&](HRESULT draw, HRESULT present, bool hidden) {
+        ForEachPane(s, [&](app::Pane& pane) {
+            auto* tab = pane.ActiveTab();
+            if (!tab || !tab->explorer_handoff) return;
+            const auto status = tab->explorer_handoff->handoff->state.load();
+            if (status != app::HandoffState::Pending && status != app::HandoffState::Ready) return;
+            ExplorerTakeoverProbeNavigation(s, tab, "frame-enddraw-hr", static_cast<unsigned>(draw));
+            ExplorerTakeoverProbeNavigation(s, tab, hidden ? "frame-hidden-capture" : "frame-present-hr", static_cast<unsigned>(present));
+        });
+    };
     pulse::app::startup_trace::Mark("frame_vm");
     vm.backdrop_enabled = !hc && s.compositor.UsesTransparentComposition() && s.backdropActive;
     vm.pane.hover_index = s.hoverRow;
@@ -563,7 +585,7 @@ void Render(AppState& s) {
     // Partial redraw: only a quiet window repaints just the damage; anything
     // floating or moving besides the hover plates makes it a whole frame.
     RECT damage_px{};
-    bool partial = t_paint_damage && !app_motion && s.compositor.CanPresentPartial() && !s.shot.active &&
+    bool partial = explorer_frame.empty() && t_paint_damage && !app_motion && s.compositor.CanPresentPartial() && !s.shot.active &&
                    !hover_card.visible && !hover_card.dwell && !s.themeReveal.start &&
                    s.renameIndex < 0 && !s.notification_toast.IsVisible() &&
                    s.renderer.PartialRedrawSafe(vm);
@@ -595,6 +617,8 @@ void Render(AppState& s) {
     if (end_hr == D2DERR_RECREATE_TARGET || end_hr == DXGI_ERROR_DEVICE_REMOVED ||
         end_hr == DXGI_ERROR_DEVICE_RESET || end_hr == DXGI_ERROR_DRIVER_INTERNAL_ERROR) {
         s.compositor.NotifyDeviceLost(end_hr);
+        trace_explorer_frame_failure(end_hr, E_PENDING, false);
+        CompleteExplorerFrame(s, explorer_frame, false);
         return;
     }
     const auto present_start = std::chrono::steady_clock::now();
@@ -603,8 +627,16 @@ void Render(AppState& s) {
         GetEnvironmentVariableW(L"PULSE_TEST_HIDDEN_SHOT", hidden_frame, ARRAYSIZE(hidden_frame)) == 1 &&
         hidden_frame[0] == L'1';
     // An occluded flip chain advances to an unpainted buffer after Present.
-    if (!hidden_capture) s.compositor.Present(partial ? &damage_px : nullptr);
+    HRESULT presented_hr = S_FALSE;
+    if (!hidden_capture) presented_hr = s.compositor.Present(partial ? &damage_px : nullptr);
     else s.compositor.ForceFullFrame();
+    if (!app::ExplorerNavigationLease::FrameSucceeded(end_hr, presented_hr, hidden_capture))
+        trace_explorer_frame_failure(end_hr, presented_hr, hidden_capture);
+    CompleteExplorerFrame(s, explorer_frame, app::ExplorerNavigationLease::FrameSucceeded(end_hr, presented_hr, hidden_capture));
+    if (app::ExplorerNavigationLease::FrameSucceeded(end_hr, presented_hr, hidden_capture))
+        EntryCommandProbePresented(s);
+    if (app::ExplorerNavigationLease::FrameSucceeded(end_hr, presented_hr, hidden_capture))
+        HotEntryProbePresented(s);
     pulse::app::startup_trace::Mark("frame_present");
     const auto present_end = std::chrono::steady_clock::now();
     // Test instances report each window's first presented frame to the
@@ -623,6 +655,7 @@ void Render(AppState& s) {
     if (s.renameIndex >= 0) LayoutRenameOverlay(s);
     RevealExpandedName(s);
     if (!s.tagRenameId.empty()) LayoutTagRenameOverlay(s);
+    if (!s.workspaceRenameRoot.empty()) LayoutWorkspaceRenameOverlay(s);
     if (s.addressEditing) LayoutAddressEditor(s);
     if (s.filterEditing) LayoutFilterEditor(s);
     AiAssistantLayout(s);
@@ -961,6 +994,7 @@ static void HandOffAtExit(AppState& s, HWND hwnd) {
 // `s` may be gone once its window is destroyed; only the snapshot is used.
 static void ExitPulse(AppState& s) {
     if (!s.updateSessionPrepared) SaveWindowSession(s, s.hwnd, true);
+    s.core.open_failure_notice.Clear();
     s.core.exiting = true;  // these closes are not undoable (closed_windows)
     const HWND self = s.hwnd;
     for (HWND window : s.core.windows.ExitOrder())
@@ -1063,14 +1097,16 @@ static void NoteUiActivity(AppState& s, HWND hwnd, bool visible) {
 // prompt. Run inside WM_COPYDATA, that ran out the sender's time and it
 // reported “无法确认运行中的 Pulse 已收到此请求” although the folder opened a
 // moment later. So the request is accepted now and opened from the queue.
-static void QueueExternalOpen(AppState& s, std::wstring path) {
-    auto request = std::make_unique<std::wstring>(std::move(path));
-    const HWND host = s.core.host.Hwnd();
-    if (host && PostMessageW(host, WM_OPEN_EXTERNAL, 0, reinterpret_cast<LPARAM>(request.get()))) {
-        request.release();
-        return;
-    }
-    OpenExternalFolder(s, *request);
+static BOOL QueueExternalOpen(AppState& s, std::wstring path) {
+    using Coordinator = app::SingleInstanceCoordinator;
+    Coordinator::OpenRequest request;
+    GUID id{};
+    if (FAILED(CoCreateGuid(&id))) return FALSE;
+    CopyMemory(request.id.data(), &id, sizeof(id));
+    request.deadline = GetTickCount64() + 10000;
+    request.path = std::move(path);
+    const auto result = s.single_instance.SubmitOpenRequest(std::move(request), GetTickCount64(), s.core.host.Hwnd(), WM_OPEN_EXTERNAL);
+    return result == Coordinator::OpenSubmission::Accepted || result == Coordinator::OpenSubmission::Duplicate;
 }
 
 // A second launch or the Explorer tag verb reached the host window (the
@@ -1084,16 +1120,17 @@ static BOOL HandleInstanceCopyData(AppState& s, COPYDATASTRUCT* cds) {
     if (cds && cds->dwData == app::SingleInstanceCoordinator::OpenRequestMessageId()) {
         app::SingleInstanceCoordinator::OpenRequest request;
         if (!app::SingleInstanceCoordinator::DecodeOpenRequest(cds, request)) return FALSE;
-        const auto accepted = s.single_instance.AcceptOpenRequest(request, GetTickCount64());
-        if (accepted == app::SingleInstanceCoordinator::OpenAcceptance::Invalid) return FALSE;
-        if (accepted == app::SingleInstanceCoordinator::OpenAcceptance::New)
-            QueueExternalOpen(s, std::move(request.path));  // plan §6: tab, window or the open one
-        return TRUE; // acceptance, not a claim that asynchronous enumeration succeeded
+        const auto submitted = s.single_instance.SubmitOpenRequest(std::move(request), GetTickCount64(), s.core.host.Hwnd(), WM_OPEN_EXTERNAL);
+        using Submission = app::SingleInstanceCoordinator::OpenSubmission;
+        if (submitted == Submission::Retry) return static_cast<BOOL>(app::SingleInstanceCoordinator::RetryOpenReply);
+        return submitted == Submission::Accepted || submitted == Submission::Duplicate;
+
     }
-    std::wstring path;
-    if (!app::SingleInstanceCoordinator::DecodeOpenPath(cds, path)) return FALSE;
-    QueueExternalOpen(s, std::move(path));
-    return TRUE;
+    try {
+        std::wstring path;
+        if (!app::SingleInstanceCoordinator::DecodeOpenPath(cds, path)) return FALSE;
+        return QueueExternalOpen(s, std::move(path));
+    } catch (...) { return FALSE; }
 }
 
 // Settings > 快捷键: a key the user assigned reaches the handlers as the
@@ -1129,6 +1166,13 @@ static bool RouteUserShortcut(AppState& s, HWND hwnd, UINT msg, WPARAM wParam, L
     if (app::IsModifierKey(static_cast<UINT>(wParam))) return false;
     const app::KeyRoute route = app::RouteKey(app::ActiveKeymap(),
         app::CurrentChord(static_cast<UINT>(wParam)), lParam);
+    if (route.action >= app::KeyAction::ArrangeSideBySide && route.action <= app::KeyAction::ArrangeCascade) {
+        const int layout=static_cast<int>(route.action)-static_cast<int>(app::KeyAction::ArrangeSideBySide);
+        ArrangeWindows(s,static_cast<app::WindowArrangeLayout>(layout));
+        g_shortcut_eat_char=true;
+        result=0;
+        return true;
+    }
     if (route.kind == app::KeyRoute::Pass) return false;
     g_shortcut_eat_char = true;
     if (route.kind == app::KeyRoute::Swallow) {
@@ -1357,6 +1401,9 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 }
             }
             s->appPrefs.Load();
+            InitializeExplorerTakeoverProbe(*s);
+            InitializeEntryCommandProbe(*s);
+            InitializeHotEntryProbe(*s);
             ApplyKeymapPrefs(*s);
             ApplyNetworkPrefs(*s);  // 显示隐藏共享 reaches fs before any share list
             NoteRunningVersion(*s);
@@ -1388,6 +1435,9 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 }
             }
             l10n::Initialize(cs->hInstance, s->appPrefs.language);
+            if (!s->isolatedTest && !s->shot.active && !s->menushot &&
+                !s->colorpickshot && !s->colorpickdialog && !ShellTagHeadlessLaunch())
+                app::UpdateWindowJumpList();
             if (s->shot.update_available) {
                 s->update_result_ready = true;
                 s->update_result.update_available = true;
@@ -1631,6 +1681,20 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         AddClipboardFormatListener(hwnd);
 
         if (init_core) {
+            const bool explicit_launch = s->open_path == L"pulse:win-e" ||
+                s->open_path == L"pulse:new-window" || s->open_path == L"pulse:new-tab" ||
+                s->open_path == L"pulse:this-pc";
+            if (explicit_launch) {
+                const std::wstring launch_path = s->open_path == L"pulse:this-pc" || s->appPrefs.new_window_shows == 1
+                    ? std::wstring() : s->appPrefs.new_window_shows == 0
+                    ? app::DefaultLocation(s->appPrefs) : s->session_path;
+                s->session_layout_tabs.clear();
+                s->session_tab_groups.clear();
+                s->session_active_layout_tab = 0;
+                s->session_path.clear();
+                s->core.pending_session_windows.clear();
+                s->open_path = launch_path.empty() ? L"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}" : launch_path;
+            }
             // "Open the default location" drops only the saved tabs; the rest of the
             // session (sidebar, details pane, window state) still applies.
             const bool open_default_location =
@@ -1918,9 +1982,11 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (s->hwndAddressEdit) SendMessageW(s->hwndAddressEdit, WM_SETFONT, (WPARAM)s->editFont, TRUE);
         if (s->hwndRenameEdit) SendMessageW(s->hwndRenameEdit, WM_SETFONT, (WPARAM)s->editFont, TRUE);
         if (s->hwndTagRenameEdit) SendMessageW(s->hwndTagRenameEdit, WM_SETFONT, (WPARAM)s->editFont, TRUE);
+        if (s->hwndWorkspaceRenameEdit) SendMessageW(s->hwndWorkspaceRenameEdit, WM_SETFONT, (WPARAM)s->editFont, TRUE);
         AiAssistantDpiChanged(*s);
         if (s->addressEditing) LayoutAddressEditor(*s);
         if (!s->tagRenameId.empty()) LayoutTagRenameOverlay(*s);
+        if (!s->workspaceRenameRoot.empty()) LayoutWorkspaceRenameOverlay(*s);
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
     }
@@ -2003,6 +2069,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (s->addressEditing) LayoutAddressEditor(*s);
             if (s->filterEditing && !s->filterFocusPending) LayoutFilterEditor(*s);
             if (!s->tagRenameId.empty()) LayoutTagRenameOverlay(*s);
+        if (!s->workspaceRenameRoot.empty()) LayoutWorkspaceRenameOverlay(*s);
             ClampScroll(*s);
             InvalidateRect(hwnd, nullptr, FALSE);
         }
@@ -2039,9 +2106,8 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     }
 
     case WM_EXPLORER_TAKEOVER: {
-        std::unique_ptr<app::ExplorerTakeoverRequest> request(
-            reinterpret_cast<app::ExplorerTakeoverRequest*>(lParam));
-        if (s && request) HandleExplorerTakeover(*s, *request);
+        // Wake only: the coordinator owns all Explorer request lifetimes.
+        if (s) DispatchQueuedExternalOpen(*s);
         return 0;
     }
 
@@ -2288,8 +2354,15 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             return 0;
         }
         if (s && wParam == kTimerUi) {
+            PublishPickerPlaces(*s);
             SyncUiTimerRate(*s, hwnd, IsWindowVisible(hwnd) && !IsIconic(hwnd));
             s->uiTimerPacer.NoteTick(GetTickCount64());
+            TickExternalOpen(*s);
+            TickExplorerPresentation(*s);
+            TickExplorerTakeoverProbe(*s);
+            TickEntryCommandProbe(*s);
+            TickHotEntryProbe(*s);
+            TickDialogManagement(*s);
             bool dirty = false;
             if (TickChangeTracking(*s)) dirty = true;
             if (s->renderer.MtimeBoundaryDue()) dirty = true;   // 修改时间提示: a mark aged
@@ -3322,11 +3395,21 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
 
+    case WM_ARRANGE_WINDOWS:
+        if (s && wParam < 6) ArrangeWindows(*s,static_cast<app::WindowArrangeLayout>(wParam),(GetKeyState(VK_SHIFT)&0x8000)!=0,{},lParam!=0);
+        return 0;
+    case WM_MERGE_ALL_WINDOWS:
+        if (s) MergeAllWindows(*s);
+        return 0;
+    case WM_WINDOW_ARRANGE_UNDO:
+        if (s) UndoWindowArrange(*s, wParam);
+        return 0;
     case WM_NEW_WINDOW:
         // Another window at this window's current folder.
         if (s && s->startupComplete && !s->shot.active && !s->menushot) {
             const app::Tab* tab = ActiveTab(*s);
-            OpenPulseWindow(*s, WindowInit{tab ? tab->current_path : std::wstring()});
+            OpenPulseWindow(*s, WindowInit{s->appPrefs.new_window_shows == 0 ? s->appPrefs.home_folder :
+                s->appPrefs.new_window_shows == 1 ? std::wstring() : tab ? tab->current_path : std::wstring()});
         }
         return 0;
 
@@ -3336,7 +3419,14 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (s && RetireWindowState(*s)) SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         break;
 
+    case WM_REOPEN_WORKSPACE_PANE:
+        if (s) ReopenWorkspacePane(*s);
+        return 0;
+    case kUndoWorkspaceRemovalMessage:
+        if (s) UndoWorkspaceRemoval(*s);
+        return 0;
     case WM_DESTROY: {
+        if (s) ClearWorkspaceActions(*s);
         ReleaseDeviceFolderWatch(hwnd);
         // Closing one of several windows (M3f) tears down what the window
         // owns; services, saved state and the shared caches go with the last.
@@ -3959,6 +4049,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     pulse::compat::EnableDpiAwareness();
     // OLE init (drag & drop + clipboard); implies STA COM init.
     OleInitialize(nullptr);
+    if (__argc >= 2 && wcscmp(__wargv[1], L"--picker-host") == 0) {
+        l10n::Initialize(hInstance, L"system");
+        const int result = __argc == 4 ? app::RunPickerHostMode(__wargv[2], __wargv[3]) : 2;
+        OleUninitialize();
+        return result;
+    }
     // Settings > 增强包 > 下载源 applies to every download from the start
     // (packs and Pulse's own update); Settings re-applies it on change.
     pulse::app::SetUpdateSource(static_cast<pulse::app::UpdateSource>(pulse::packs::LoadPackSettings().download_source));
@@ -3989,6 +4085,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     AppState state;
     pulse::app::startup_trace::Mark("appstate");
     state.safeMode = pulse::crash::SafeModeRequested();
+    if (!PrepareHotEntryProbe(state)) return 1;
     for (int i = 1; i < __argc; ++i)
         if (wcscmp(__wargv[i], L"--test-instance") == 0) state.isolatedTest = true;
 #ifdef PULSE_WITH_SELFTEST
@@ -4170,6 +4267,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
                 state.shot.width = std::max(320, requestedWidth);
                 state.shot.height = std::max(240, requestedHeight);
             }
+        } else if (wcscmp(__wargv[i], L"--win-e") == 0) {
+            state.shot.path = L"pulse:win-e";
+        } else if (wcscmp(__wargv[i], L"--new-window") == 0) {
+            state.shot.path = L"pulse:new-window";
+        } else if (wcscmp(__wargv[i], L"--new-tab") == 0) {
+            state.shot.path = L"pulse:new-tab";
+        } else if (wcscmp(__wargv[i], L"--this-pc") == 0) {
+            state.shot.path = L"pulse:this-pc";
         } else if (i == __argc - 1 && !IsLaunchSwitch(__wargv[i])) {
             state.shot.path = __wargv[i];
         } else if (!IsLaunchSwitch(__wargv[i]) && state.shot.path.empty()) {
@@ -4213,16 +4318,19 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     // writes its last files; take over once it has gone.
     if (restart_after) WaitForRestartingPulse(restart_after);
     if (!SkipSingletonFromArgv()) {
-        const auto result = state.single_instance.Acquire();
+        const auto result = state.single_instance.Acquire(HotEntryProbeMutexName());
+        if (!HotEntryProbeAcquired(result)) return 1;
         if (result == app::SingleInstanceCoordinator::AcquireResult::Failed) {
             MessageBoxW(nullptr, L"Could not establish the Pulse instance endpoint.", L"Pulse", MB_OK | MB_ICONERROR);
             return 1;
         }
         if (result == app::SingleInstanceCoordinator::AcquireResult::Existing) {
             bool forwarded = true;
+            std::array<unsigned char, 16> attempted_id{};
             if (shell_tag) forwarded = app::ForwardShellTagRequest(*shell_tag);
             // A sign-in launch must not pop up the window that is already running.
-            else if (!startup_launch && !shell_tag_com) forwarded = state.single_instance.ForwardOpenPath(state.open_path, 10000);
+            else if (!startup_launch && !shell_tag_com) forwarded = state.single_instance.ForwardOpenPath(state.open_path, 10000, &attempted_id);
+            HotEntryProbeForwarded(forwarded, attempted_id);
             if (!forwarded) {
                 // This process exits before WM_CREATE initializes localization.
                 // Read the preference without repairing startup registration.
@@ -4304,6 +4412,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     const bool host_created = state.core.host.Create(hInstance,
         [&state](HWND host, UINT message, WPARAM wParam, LPARAM lParam) -> std::optional<LRESULT> {
             AppState* const target = state.core.windows.MostRecent();
+            if (message == WM_DIALOG_MANAGEMENT_RESULT) {
+                DialogManagementReady(state);
+                return 0;
+            }
             if (message == WM_AI_UI_TASK) {
                 // An AI tool reading or showing something in a window (ai_tools_ui.h).
                 pulse::app::ai::HandleAiUiTask(target, lParam);
@@ -4335,9 +4447,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
                 return 0;
             }
             if (message == WM_OPEN_EXTERNAL) {
-                // QueueExternalOpen: the window most recently used now.
-                std::unique_ptr<std::wstring> path(reinterpret_cast<std::wstring*>(lParam));
-                if (path && target) OpenExternalFolder(*target, *path);
+                DispatchQueuedExternalOpen(state);
                 return 0;
             }
             if (message != WM_COPYDATA) return std::nullopt;
@@ -4382,7 +4492,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 
     if (!hwnd) return 1;
     pulse::app::startup_trace::Mark("create_window");
-    if (!SkipSingletonFromArgv() && !state.single_instance.PublishEndpoint(state.core.host.Hwnd())) {
+    if (!SkipSingletonFromArgv() && !state.single_instance.PublishEndpoint(state.core.host.Hwnd(), WM_OPEN_EXTERNAL)) {
         DestroyWindow(hwnd);
         return 1;
     }
@@ -4551,6 +4661,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         return ok ? 0 : 1;
     }
 
+    wchar_t window_management_report[32768]{};
+    if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_WINDOW_MANAGEMENT", window_management_report, ARRAYSIZE(window_management_report))) {
+        const int result = RunWindowManagementTest(state, window_management_report);
+        CleanupWindowArrange();
+        DestroyWindow(hwnd);
+        ReleaseWindowStatesAtExit();
+        OleUninitialize();
+        return result;
+    }
+
     if (state.colorpickdialog) {
         // Interactive smoke test: open the picker centered on the work area.
         uint32_t rgb = 0x2FDFF1;
@@ -4575,8 +4695,21 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         return result;
     }
 #endif
+    if (GetEnvironmentVariableW(L"PULSE_TEST_DIALOG_MANAGEMENT_UI", nullptr, 0) ||
+        GetEnvironmentVariableW(L"PULSE_TEST_WORKSPACE_UI", nullptr, 0)) {
+        extern int RunGuardedDialogManagementUiTest(AppState&);
+        const int result = RunGuardedDialogManagementUiTest(state);
+        DestroyWindow(hwnd); OleUninitialize(); return result;
+    }
     if (state.shot.active) {
 #ifdef PULSE_WITH_TEST_HOOKS
+        wchar_t dialog_toggle_output[32768]{};
+        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_DIALOG_JUMP_TOGGLES", nullptr, 0) &&
+            GetEnvironmentVariableW(L"PULSE_TEST_SETTINGS_FLOW", dialog_toggle_output, ARRAYSIZE(dialog_toggle_output))) {
+            extern int RunDialogJumpToggleTest(AppState&, const wchar_t*);
+            const int result = RunDialogJumpToggleTest(state, dialog_toggle_output);
+            DestroyWindow(hwnd); OleUninitialize(); return result;
+        }
         wchar_t experience_probe[32768]{};
         if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_FOLDER_SIZE_EXPERIENCE", experience_probe, ARRAYSIZE(experience_probe))) {
             extern int RunFolderSizeExperienceProbe(AppState&, const wchar_t*);
@@ -4735,6 +4868,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     }
     // Later windows' states hold references into the core `state` owns.
     ExitTimer tail;
+    CleanupWindowArrange();
     ReleaseWindowStatesAtExit();
     const uint64_t windows_ms = tail.Lap();
     pulse::app::hang::Stop();

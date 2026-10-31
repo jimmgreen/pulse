@@ -14,6 +14,9 @@ void WarmupUnc(AppState& s, const std::wstring& path);
 std::wstring PinCandidate(AppState& s);
 std::wstring ProjectSearchRoot(AppState& s);
 void OpenWorkspace(AppState& s, int index);
+void OpenWorkspaceNewTab(AppState& s, int index);
+void OpenWorkspaceNewWindow(AppState& s, int index);
+void SaveCurrentWorkspace(AppState& s);
 index::Query MakeSearchPageQuery(const app::Tab& tab, const std::wstring& rest,
                                         size_t offset);
 void DispatchIndexSearch(AppState& s, const index::Query& query, uint32_t id);
@@ -149,3 +152,5 @@ bool SyncTagGroups(AppState& s);
 // Advances the pulse; false once it has finished (or none is running).
 bool TickTabFlash(AppState& s);
 } // namespace pulse
+
+namespace pulse { void CancelUnsharedDirectoryRequest(AppState& s, app::Tab& tab); }

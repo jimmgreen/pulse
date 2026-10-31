@@ -5,6 +5,202 @@
 #include "../ui/ui_renderer_internal.h"
 #include <fstream>
 #include <filesystem>
+#include <string_view>
+#include <objbase.h>
+
+namespace pulse { bool TestDialogManagementBackgroundVm(AppState&); }
+
+int RunDialogManagementUiTest(pulse::AppState& s,const wchar_t* output) {
+    using namespace pulse;
+    using I=l10n::StringId;using H=ui::HitTestResult;
+    std::ofstream log{std::filesystem::path(output)};
+    int failures=0;
+    auto check=[&](bool ok,const char* label) {log<<(ok ? "[PASS] " : "[FAIL] ")<<label<<'\n';if(!ok) ++failures;};
+    const auto language=l10n::preference();const float original_scale=s.scale;
+    const int original_width=s.compositor.Width(),original_height=s.compositor.Height();
+    const auto original_management=s.core.dialogManagement;
+    ui::fluent::Painter painter(&s.compositor);
+    auto fixture=[&](int variant) {
+        auto vm=BuildVm(s,false);vm.settings_open=true;vm.settings_page=11;vm.settings_scroll=0;
+        vm.settings_dialog_available=true;vm.settings_dialog_busy=variant==1;
+        vm.settings_dialog_enabled=variant==2;vm.settings_dialog_conflict=variant==3;
+        vm.settings_dialog_failed=variant==4;vm.settings_dialog_scope_expanded=false;
+        vm.settings_dialog_status=l10n::Get(variant==1 ? I::StartupDialogsChecking : variant==2 ? I::StartupDialogsOn : variant==3 ? I::StartupDialogsConflict : variant==4 ? I::StartupDialogsMissing : I::StartupDialogsOff);
+        vm.settings_integration_enabled=true;vm.settings_integration_state=1;
+        return vm;
+    };
+    bool bounds=true,hits=true,wrapped=true,old_hidden=true;
+    bool shortcut_bounds=true,shortcut_hits=true,shortcut_hidden=true;
+    for(const auto* locale:{L"zh-CN",L"zh-TW",L"en-US"}) {
+        l10n::SetLanguage(locale);painter.InvalidateTypography();
+        for(float scale:{1.0f,1.5f,2.0f}) {
+            s.compositor.RecreateTextFormats(scale);s.renderer.SetScale(scale);painter.SetScale(scale);
+            for(float width:{620.0f,1280.0f}) for(int variant=0;variant<5;++variant) {
+                auto vm=fixture(variant);const auto window=D2D1::RectF(0,0,width*scale,1100*scale);
+                const auto l=ui::MakeSettingsLayout(vm,window,scale,s.renderer.TitleBarHeight(),28*scale,&painter);
+                const D2D1_RECT_F controls[]={l.dialog_toggle_row,l.dialog_retry_button,l.dialog_export_button,l.dialog_scope_button,l.dialog_jump_button,l.startup_restore_button};
+                for(int i=0;i<6;++i) {
+                    const auto r=controls[i];if(r.bottom<=r.top) continue;
+                    bounds&=r.right>r.left && r.left>=l.content.left && r.right<=l.content.right;
+                    auto shown=vm;shown.settings_scroll=r.top-l.content.top-20*scale;
+                    const auto hit=s.renderer.HitTest(shown,window,(r.left+r.right)/2,(r.top+r.bottom)/2-shown.settings_scroll);
+                    hits&=(hit.region==H::SettingsDialogManagement && hit.index==10+i)==(i==3 || i==4 || !vm.settings_dialog_busy);
+                }
+                bounds&=l.dialog_export_button.right<=l.dialog_jump_button.left || l.dialog_export_button.bottom<=l.dialog_jump_button.top;
+                if(l.dialog_management_intro.bottom>l.dialog_management_intro.top) {
+                    const auto& info=l.startup_dialog_info;
+                    for(int j=0;j<4;++j) {
+                        const auto r=info.notes[j];
+                        wrapped&=ui::startup_info::BlockHeight(&painter,ui::startup_info::note_titles[j],ui::startup_info::note_bodies[j],r.right-r.left-26*scale,scale)<=r.bottom-r.top+0.5f;
+                        bounds&=r.left>=l.content.left && r.right<=l.content.right && r.bottom<=info.bottom;
+                    }
+                    for(int j=0;j<2;++j) {
+                        const auto r=info.scope[j];
+                        wrapped&=ui::startup_info::BlockHeight(&painter,ui::startup_info::scope_titles[j],ui::startup_info::scope_bodies[j],r.right-r.left-28*scale,scale)<=r.bottom-r.top+0.5f;
+                    }
+                }
+                bounds&=(l.dialog_scope_button.bottom>l.dialog_scope_button.top)==vm.settings_dialog_enabled;
+                bounds&=(l.dialog_application_row.bottom>l.dialog_application_row.top)==(vm.settings_dialog_enabled || vm.settings_dialog_conflict || vm.settings_dialog_failed);
+                old_hidden&=l.dialog_bundle_button.bottom==0 && l.dialog_launch_button.bottom==0 && l.dialog_disable_buttons.empty();
+                if(variant==0) for(int mode=0;mode<5;++mode) {
+                    auto quick=vm;
+                    quick.settings_integration_restore_busy=false;
+                    quick.settings_integration_experimental=mode<3;
+                    quick.settings_integration_folders_compat=mode==4;
+                    quick.settings_keep_running=mode==1 || mode==2;
+                    quick.settings_launch_on_startup=mode==2;
+                    const auto q=ui::MakeSettingsLayout(quick,window,scale,s.renderer.TitleBarHeight(),28*scale,&painter);
+                    const auto r=q.integration_hint_action;
+                    const bool visible=r.bottom>r.top;
+                    shortcut_hidden&=visible==(mode<2 || mode==4);
+                    if(!visible) continue;
+                    shortcut_bounds&=r.right>r.left && r.left>=q.content.left && r.right<=q.content.right &&
+                        r.top>=q.integration_hint_text.bottom && r.bottom<=q.integration_hint.bottom;
+                    quick.settings_scroll=r.top-q.content.top-20*scale;
+                    const auto h=s.renderer.HitTest(quick,window,(r.left+r.right)/2,(r.top+r.bottom)/2-quick.settings_scroll);
+                    shortcut_hits&=h.region==H::SettingsIntegration && h.index==(mode==1 ? 11 : 10);
+                }
+            }
+        }
+    }
+    check(bounds,"formal controls fit at 620/1280 DIP and 100/150/200 percent");
+    check(hits,"formal action hit regions and busy-state disabling match rendering");
+    check(wrapped,"scope explanation fits in all three languages");
+    check(old_hidden,"bundle/application/launch/session testing controls removed");
+    check(TestDialogManagementBackgroundVm(s),"background dialog refresh preserves visible state and does not enter busy layout");
+    check(shortcut_bounds,"integration enable shortcuts stay within wide/narrow footer bounds without overlapping text");
+    check(shortcut_hits,"integration enable shortcuts hit keep-running 10 then launch-at-sign-in 11");
+    check(shortcut_hidden,"integration shortcuts hide when both settings are enabled or runtime integration is disabled");
+    const auto base=std::filesystem::path(output).parent_path();
+    for(bool dark:{false,true}) for(bool narrow:{false,true}) for(int section=0;section<5;++section) {
+        const float scale=narrow ? 1.5f : 1.0f;
+        l10n::SetLanguage(narrow ? L"en-US" : L"zh-CN");painter.InvalidateTypography();
+        s.compositor.RecreateTextFormats(scale);s.renderer.SetScale(scale);painter.SetScale(scale);
+        const int width=static_cast<int>((narrow ? 620 : 1280)*scale),height=static_cast<int>(1000*scale);
+        s.compositor.Resize(width,height);
+        auto vm=fixture(section==1 ? 3 : section==2 ? 0 : 2);vm.settings_dialog_scope_expanded=section==4;vm.dark=dark;vm.window_effect=ui::WindowEffect::None;
+        vm.background_image.clear();vm.backdrop_enabled=false;vm.wallpaper_look=0;vm.wallpaper_blur=0;
+        if(section==0) {vm.settings_integration_experimental=true;vm.settings_keep_running=false;}
+        const auto window=D2D1::RectF(0,0,static_cast<float>(width),static_cast<float>(height));
+        const auto l=ui::MakeSettingsLayout(vm,window,scale,s.renderer.TitleBarHeight(),28*scale,&painter);
+        vm.settings_scroll=section==0 ? 0 : (section==1 || section==4 ? l.dialog_management_section.top : section==2 ? l.startup_dialog_info.heading.top : l.section[2].top)-l.content.top-12*scale;
+        auto* dc=s.compositor.Dc();dc->BeginDraw();s.renderer.Render(vm,window,ui::MakeTheme(dark,s.accentColor));
+        check(dc->EndDraw()==S_OK,"startup integration fixture rendered");
+        const auto name=std::wstring(L"startup-")+(dark ? L"dark-" : L"light-")+(narrow ? L"narrow-" : L"wide-")+std::to_wstring(section)+L".png";
+        check(s.compositor.SaveSnapshot((base/name).c_str()),"screenshot captured for visual review");
+    }
+    for(int index:{10,11,12,15}) {H action{};action.region=H::SettingsDialogManagement;action.index=index;if(s.isolatedTest) HandleSettingsControl(s,action);}
+    check(s.isolatedTest && s.core.dialogManagement==original_management,"isolated mutating actions cannot initialize controllers or touch configuration");
+    l10n::SetLanguage(l10n::LanguageId(language));s.compositor.Resize(original_width,original_height);
+    s.compositor.RecreateTextFormats(original_scale);s.renderer.SetScale(original_scale);
+    log<<"failures="<<failures<<std::endl;return failures ? 1 : 0;
+}
+
+
+int RunGuardedDialogManagementUiTest(pulse::AppState& state) {
+    const bool workspace_test = GetEnvironmentVariableW(L"PULSE_TEST_WORKSPACE_UI", nullptr, 0) > 0;
+    struct DirectoryHandle { HANDLE value=INVALID_HANDLE_VALUE; ~DirectoryHandle(){if(value!=INVALID_HANDLE_VALUE) CloseHandle(value);} } held;
+    try {
+        wchar_t enabled[8]{},output[32768]{},executable[32768]{};
+        if(!state.isolatedTest || __argc!=2 || !__wargv[1] || wcscmp(__wargv[1],L"--test-instance")!=0 ||
+            GetEnvironmentVariableW(workspace_test ? L"PULSE_TEST_WORKSPACE_UI" : L"PULSE_TEST_DIALOG_MANAGEMENT_UI",enabled,ARRAYSIZE(enabled))!=1 || enabled[0]!=L'1') return 2;
+        const DWORD length=GetEnvironmentVariableW(L"PULSE_TEST_SETTINGS_FLOW",output,ARRAYSIZE(output));
+        const DWORD exe_length=GetModuleFileNameW(nullptr,executable,ARRAYSIZE(executable));
+        if(!length || length>=ARRAYSIZE(output) || !exe_length || exe_length>=ARRAYSIZE(executable)) return 2;
+        const std::filesystem::path requested(output);
+        if(!requested.is_absolute() || requested.filename()!=L"management.log") return 2;
+        const auto leaf=requested.parent_path().filename().wstring();
+        constexpr std::wstring_view prefix=L"management-ui-";
+        if(!leaf.starts_with(prefix) || leaf.size()!=prefix.size()+38) return 2;
+        const auto nonce=leaf.substr(prefix.size());GUID guid{};wchar_t formatted[40]{};
+        if(FAILED(CLSIDFromString(nonce.c_str(),&guid)) || !StringFromGUID2(guid,formatted,ARRAYSIZE(formatted)) || _wcsicmp(nonce.c_str(),formatted)) return 2;
+        auto canonical=[](const std::filesystem::path& path) {
+            HANDLE file=CreateFileW(path.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS,nullptr);
+            if(file==INVALID_HANDLE_VALUE) return std::wstring{};
+            std::wstring result(32768,0);
+            const DWORD count=GetFinalPathNameByHandleW(file,result.data(),static_cast<DWORD>(result.size()),FILE_NAME_NORMALIZED);
+            CloseHandle(file);
+            if(!count || count>=result.size()) return std::wstring{};
+            result.resize(count);return result;
+        };
+        const auto bench=canonical(std::filesystem::path(executable).parent_path().parent_path()/L"bench_data");
+        const auto supplied_bench=canonical(requested.parent_path().parent_path());
+        if(bench.empty() || supplied_bench.empty() || _wcsicmp(bench.c_str(),supplied_bench.c_str())) return 2;
+        const auto fixture=std::filesystem::path(bench)/leaf;
+        // Only a freshly created direct fixture is allowed; never reuse a directory.
+        if(!CreateDirectoryW(fixture.c_str(),nullptr)) return 2;
+        held.value=CreateFileW(fixture.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE,
+            nullptr,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+        BY_HANDLE_FILE_INFORMATION info{};
+        if(held.value==INVALID_HANDLE_VALUE || !GetFileInformationByHandle(held.value,&info) ||
+            !(info.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY) || (info.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT) ||
+            canonical(fixture)!=fixture.wstring()) return 2;
+        if (workspace_test) {
+            extern int RunWorkspaceUiTest(pulse::AppState&, const wchar_t*);
+            return RunWorkspaceUiTest(state,(fixture/L"management.log").c_str());
+        }
+        return RunDialogManagementUiTest(state,(fixture/L"management.log").c_str());
+    } catch(...) { return 2; }
+}
+
+int RunDialogJumpToggleTest(pulse::AppState& s, const wchar_t* output) {
+    using namespace pulse;
+    std::ofstream log{std::filesystem::path(output)};
+    int failures = 0;
+    auto check = [&](bool ok, const char* label) {
+        log << (ok ? "[PASS] " : "[FAIL] ") << label << '\n';
+        if (!ok) ++failures;
+    };
+    s.appPrefs.persist = false;
+    OpenSettingsTab(s, 1);
+    ui::fluent::Painter painter(&s.compositor);
+    const auto window = D2D1::RectF(0, 0, static_cast<float>(s.compositor.Width()), static_cast<float>(s.compositor.Height()));
+    auto layout = [&] { return ui::MakeSettingsLayout(BuildVm(s, false), window, s.scale, s.renderer.TitleBarHeight(), 28*s.scale, &painter); };
+    const bool recent = s.appPrefs.network_recent_enabled, hidden = s.appPrefs.show_hidden_shares;
+    auto click = [&](bool automatic) {
+        s.settings.SetScroll(0, 0);
+        const auto initial = layout();
+        const auto row = automatic ? initial.dialog_jump_auto_row : initial.dialog_jump_row;
+        s.settings.SetScroll(row.top-initial.content.top, s.renderer.SettingsMaxScroll(BuildVm(s, false), window.right, window.bottom));
+        const auto visible = layout();
+        const auto target = automatic ? visible.dialog_jump_auto_row : visible.dialog_jump_row;
+        const int x = static_cast<int>((target.left+target.right)/2), y = static_cast<int>((target.top+target.bottom)/2);
+        const auto hit = s.renderer.HitTest(BuildVm(s, false), window, static_cast<float>(x), static_cast<float>(y));
+        check(hit.region == ui::HitTestResult::SettingsToggle && hit.index == (automatic ? 42 : 41), "dialog jump row hits its toggle");
+        SendMessageW(s.hwnd, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x,y));
+        SendMessageW(s.hwnd, WM_LBUTTONUP, 0, MAKELPARAM(x,y));
+    };
+    s.appPrefs.dialog_jump_bar = true;
+    s.appPrefs.dialog_jump_auto = false;
+    click(false); check(!s.appPrefs.dialog_jump_bar, "mouse disables dialog jump bar");
+    click(false); check(s.appPrefs.dialog_jump_bar, "mouse enables dialog jump bar");
+    click(true); check(s.appPrefs.dialog_jump_auto, "mouse enables automatic jump");
+    click(true); check(!s.appPrefs.dialog_jump_auto, "mouse disables automatic jump");
+    check(s.appPrefs.network_recent_enabled == recent && s.appPrefs.show_hidden_shares == hidden, "search toggles preserve network preferences");
+    log.flush();
+    return failures;
+}
 
 #ifdef PULSE_WITH_SELFTEST
 namespace pulse { bool TestSettingsFilter(const std::wstring&,l10n::StringId); }
@@ -420,7 +616,7 @@ int RunSettingsIntegrationUiTest(AppState& s, const wchar_t* output) {
     const float original_scale = s.scale;
     const int original_width = s.compositor.Width(), original_height = s.compositor.Height();
     ui::fluent::Painter painter(&s.compositor);
-    bool labels = true, separate = true, pill_fits = true, tiles = true, tiles_readonly = true;
+    bool labels = true, separate = true, pill_fits = true, tiles = true, choices_hit = true;
     bool extras = true, action_hits = true, bar_fits = true, foot = true, search = true;
     auto nonempty = [](D2D1_RECT_F r) { return r.right > r.left && r.bottom > r.top; };
     auto inside = [](D2D1_RECT_F inner, D2D1_RECT_F outer) {
@@ -493,8 +689,8 @@ int RunSettingsIntegrationUiTest(AppState& s, const wchar_t* output) {
                     };
                     const auto l = ui::MakeSettingsLayout(vm, window, scale, s.renderer.TitleBarHeight(), 28*scale, &painter);
                     const auto card = l.integration_card;
-                    separate &= l.integration_section.bottom <= card.top && card.bottom <= l.section[1].top &&
-                        l.group[1].top == l.startup_row[0].top && l.default_manager_row.top == card.top;
+                    separate &= l.integration_section.bottom <= card.top && card.bottom <= l.dialog_management_section.top &&
+                        l.group[2].top == l.startup_row[0].top && l.default_manager_row.top == card.top;
                     // Master row: the pill never collides with the switch and the description fits.
                     const auto m = l.default_manager_row;
                     const auto badge = l.integration_badge;
@@ -505,13 +701,18 @@ int RunSettingsIntegrationUiTest(AppState& s, const wchar_t* output) {
                         (stacked || badge.left >= l.integration_text_right) &&
                         m.top+35*scale+master_h <= (stacked ? badge.top : m.bottom-12*scale)+0.5f;
                     action_hits &= is_action(m, 0);
-                    // Coverage tiles: inside the card, below the heading, never overlapping, never clickable.
+                    // Integration choice rows stay inside the card and obey the master switch.
                     for (int i = 0; i < 3; ++i) {
                         const auto t = l.integration_cover[i];
                         tiles &= nonempty(t) && inside(t, card) && t.top >= l.integration_list_head.bottom-0.5f &&
                             t.bottom <= l.integration_options_head.top+0.5f;
                         for (int j = 0; j < i; ++j) tiles &= !overlap(t, l.integration_cover[j]);
-                        tiles_readonly &= hit(t).region != H::SettingsIntegration;
+                        const auto choice=l.integration_choice[i];
+                        tiles &= nonempty(choice) && inside(choice,t);
+                        const auto choice_hit=hit(choice);
+                        choices_hit &= vm.settings_integration_enabled
+                            ? choice_hit.region==H::SettingsDropdown && choice_hit.index==10+i
+                            : choice_hit.region!=H::SettingsDropdown;
                     }
                     // The extras (recycle bin, takeover, 兼容打开方式): their descriptions fit,
                     // they never overlap, and they are only editable while the switch is on.
@@ -559,7 +760,7 @@ int RunSettingsIntegrationUiTest(AppState& s, const wchar_t* output) {
     check(separate, "integration owns a titled card before startup settings");
     check(pill_fits, "status pill fits beside or below the master text without touching the switch");
     check(tiles, "coverage tiles fit inside the card without overlapping at every width and DPI");
-    check(tiles_readonly, "coverage tiles are read-only");
+    check(choices_hit, "integration dropdowns follow master enabled state");
     check(extras, "the three extras fit narrow and high-DPI layouts without overlapping");
     check(action_hits, "switch always hits; extras only while on; retry and restore only for problems");
     check(bar_fits, "problem bar and its actions fit; healthy states have no bar or action targets");
@@ -595,7 +796,12 @@ int RunSettingsIntegrationUiTest(AppState& s, const wchar_t* output) {
     return failures ? 1 : 0;
 }
 
+
 int RunSettingsFlowTest(AppState& s,const wchar_t* output) {
+    if (GetEnvironmentVariableW(L"PULSE_TEST_DIALOG_JUMP_TOGGLES", nullptr, 0))
+        return RunDialogJumpToggleTest(s, output);
+    if(GetEnvironmentVariableW(L"PULSE_TEST_DIALOG_MANAGEMENT_UI",nullptr,0))
+        return RunDialogManagementUiTest(s,output);
     if (GetEnvironmentVariableW(L"PULSE_TEST_SETTINGS_INTEGRATION", nullptr, 0))
         return RunSettingsIntegrationUiTest(s, output);
     if (GetEnvironmentVariableW(L"PULSE_TEST_ADAPTIVE_COLUMNS", nullptr, 0))

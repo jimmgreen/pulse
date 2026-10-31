@@ -193,6 +193,10 @@ inline float LayoutSettingsAssistant(SettingsLayout& l, const WindowViewModel& v
 
     y += caption_h(asst_text::Intro(), right - left) + 18.0f * s;
 
+    o.enabled_row = row(asst_text::T(I::AsstEnabledDesc), inner_right - 56.0f * s);
+    o.enabled_toggle = place(o.enabled_row, inner_right, 42.0f * s);
+    y += 18.0f * s;
+
     // 模型服务.
     o.model_section = section(true);
     const float card_top = y;
@@ -506,6 +510,7 @@ inline int HitTestSettingsAssistant(const SettingsLayout& l, const WindowViewMod
         const float at = fluent::StepSliderPositionAt(o.think_slider, stops, x, o.scale);
         return kAsstThinkBase + std::clamp(static_cast<int>(std::lround(at)), 0, stops - 1);
     }
+    if (in(o.enabled_toggle)) return kAsstEnabled;
     if (in(o.think_toggle)) return kAsstThinkToggle;
     if (in(o.key_buttons[0])) return kAsstRekey;
     if (in(o.key_buttons[1])) return kAsstRemoveKey;

@@ -36,6 +36,7 @@ struct InstallResult {
     std::wstring app_dir;
     bool index_running = false;  // for the summary on the finish page
     bool verbs_seeded = false;
+    bool defaults_written = false;
     bool startup = false;
 };
 

@@ -3078,6 +3078,19 @@ void AiPanelView::DrawConversation(Compositor* compositor, const AiPanelViewMode
     if (max_scroll > 0.5f)
         DrawBar(0, D2D1::RectF(area.right - 12.0f * s, area.top + 4.0f * s, area.right - 2.0f * s,
                                area.top + view_h_ - 4.0f * s), scroll_, view_h_, content_h_);
+    // 55 P4: the 回到最新 pill shows once the view is scrolled up from the end.
+    jump_shown_ = max_scroll > 1.0f && scroll_ < max_scroll - 4.0f * s && !vm.jump_latest.empty();
+    if (jump_shown_) {
+        const float w = 112.0f * s, h = 30.0f * s;
+        const float cx = (conversation_rect_.left + conversation_rect_.right) * 0.5f;
+        jump_rect_ = D2D1::RectF(cx - w * 0.5f, conversation_rect_.bottom - h - 10.0f * s,
+                                 cx + w * 0.5f, conversation_rect_.bottom - 10.0f * s);
+        c.Fill(jump_rect_, h * 0.5f, pal.card);
+        c.Stroke(jump_rect_, h * 0.5f, pal.text3, 1.0f);
+        TextOptions o;
+        o.align = DWRITE_TEXT_ALIGNMENT_CENTER;
+        c.Text(vm.jump_latest, formats_.caption, jump_rect_, pal.text, o);
+    }
 
     // Drop tweens of blocks that are gone.
     tweens_.erase(std::remove_if(tweens_.begin(), tweens_.end(), [](const auto& kv) { return !kv.second.used; }),

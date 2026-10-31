@@ -340,6 +340,7 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
     SetStatus([](OpStatus& status) { status.can_pause = false; });
     const bool permanent = req.type == OpType::RealDelete;
     std::vector<std::wstring> completed;
+    completed.reserve(req.sources.size());
     size_t skipped = 0;
     HRESULT failure = S_OK;
     std::wstring error;
@@ -478,7 +479,10 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
         // What the native pass could not delete takes the Shell path, which
         // brings the elevation and in-use prompts.
         const bool handled = !result.sources.empty() || result.cancelled;
-        bool authorized = !handled && NeedsShellTransfer({source}, L"", true);
+        // The operation itself checks access. Probing each source and its parent
+        // first duplicates file-system work for every ordinary recycle. A denied
+        // attempt with no mutation still enters the existing elevation path.
+        bool authorized = false;
         for (; !handled;) {
             if (authorized && defer_authorization) {
                 const auto choice = WaitForAuthorization(task_id, authorization_error, source);
@@ -520,7 +524,7 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
             status.completed_items = completed.size();
             update_rate(status);
         };
-        if (handled && !authorization_shown) SetProgressStatus(finish_item);
+        if (!authorization_shown && !authorized) SetProgressStatus(finish_item);
         else { authorization_shown = false; SetStatus(finish_item); }
         // Also when a partly deleted item was then skipped.
         if (result.mutated && (FAILED(result.hr) || result.cancelled || result.sources.empty())) {

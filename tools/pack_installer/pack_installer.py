@@ -31,6 +31,7 @@ import lzma
 import struct
 import sys
 import time
+import tempfile
 from pathlib import Path
 
 MAGIC = b"PULSEPK1"
@@ -40,10 +41,14 @@ TRAILER = struct.Struct("<8sQQ32s")
 # share their common static-CRT and library code (measured: ~1.1 MB saved).
 DEFAULT_LAYOUT = [
     ("{build}/pulse.exe", "pulse.exe"),
+    ("{build}/Pulse.AI.exe", "Pulse.AI.exe"),
+    ("{build}/Pulse.Content.exe", "Pulse.Content.exe"),
+    ("{build}/Pulse.Document.exe", "Pulse.Document.exe"),
     ("{build}/Pulse.Index.exe", "Pulse.Index.exe"),
     ("{build}/Pulse.Preview.exe", "Pulse.Preview.exe"),
     ("{build}/pulse_elevated.exe", "pulse_elevated.exe"),
     ("{build}/pulse_shell.exe", "pulse_shell.exe"),
+    ("{build}/pulse_start_pin.dll", "pulse_start_pin.dll"),
     ("{build}/pulse_integration.exe", "pulse_integration.exe"),
     ("{build}/lumatext.dll", "lumatext.dll"),
     ("{build}/pdfium.dll", "pdfium.dll"),
@@ -111,7 +116,22 @@ def main() -> int:
     stub = Path(args.stub)
     started = time.time()
     items = collect(root, build)
-    xz, stats = build_payload(items, args.version, args.channel)
+    # Reuse the strict dependency closure and integrity manifest builder. A
+    # private staging directory keeps incomplete bundles out of build outputs.
+    sys.path.insert(0, str(root / "tools" / "pack_dialog_experiment"))
+    import pack as dialog_pack
+    actual_build = build if build.is_absolute() else root / build
+    machine = dialog_pack.PE(actual_build / "pulse.exe").machine
+    arch = next((name for name, value in dialog_pack.MACHINES.items() if value == machine), None)
+    if arch is None:
+        raise SystemExit("unsupported Pulse architecture for dialog bundle")
+    with tempfile.TemporaryDirectory(prefix="pulse-dialog-") as staging:
+        bundle = Path(staging) / "DialogBridge"
+        dialog_pack.package(actual_build, bundle, args.version, arch, root, automatic=True)
+        dialog_pack.verify(bundle)
+        items.extend((f, "DialogBridge/" + f.relative_to(bundle).as_posix())
+                     for f in sorted(bundle.rglob("*")) if f.is_file())
+        xz, stats = build_payload(items, args.version, args.channel)
     stub_bytes = stub.read_bytes()
     trailer = TRAILER.pack(MAGIC, len(stub_bytes), len(xz), hashlib.sha256(xz).digest())
     # Keep the image 8-byte aligned so Authenticode signing appends its

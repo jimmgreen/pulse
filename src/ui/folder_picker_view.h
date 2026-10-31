@@ -12,20 +12,26 @@
 #include "ui_compositor.h"
 
 #include <string>
+#include <vector>
 
 namespace pulse::ui {
 
 enum PickerControl : int {
     kPickNone = 0,
+    kPickOverwriteBack,
+    kPickRename,
     kPickClose,
     kPickCancel,
     kPickPrimary,
+    kPickPrimaryDropDown,
     kPickFilename,
     kPickFilter,
     kPickList,      // keyboard focus on the shared file list
     kPickAddress,   // keyboard focus on the address row (hosted EDIT)
     kPickSearch,    // keyboard focus on the search field (hosted EDIT)
 };
+
+inline constexpr int kPickRemoveSelectionBase = 100;
 
 inline constexpr float kPickerTitleDip = 40.0f;
 
@@ -43,10 +49,15 @@ struct FolderPickerChrome {
     std::wstring cancel_text;
     std::wstring summary;          // what the primary button would pick, or a hint
     std::wstring notice;           // validation message; drawn instead of the summary
+    bool overwrite_pending = false;
+    std::wstring overwrite_back_text;
+    std::wstring rename_text;
     bool primary_enabled = false;
+    bool primary_drop_down = false;
     bool filename_focused = false;
     float filter_turn = 0.0f;
     bool hosted_edit = true;       // the file name text is a hosted EDIT, not drawn here
+    std::vector<std::wstring> selected_names;
     std::wstring filename_text;    // drawn only without a hosted EDIT (gallery, tests)
     int hover = kPickNone;
     int pressed = kPickNone;
@@ -63,8 +74,11 @@ struct FolderPickerChromeLayout {
     D2D1_RECT_F footer{};
     D2D1_RECT_F filename_label{};
     D2D1_RECT_F filename{};
+    std::vector<D2D1_RECT_F> selection_tags;
     D2D1_RECT_F filter{};
     D2D1_RECT_F summary{};
+    D2D1_RECT_F overwrite_back{};
+    D2D1_RECT_F rename{};
     D2D1_RECT_F cancel{};
     D2D1_RECT_F primary{};
 };

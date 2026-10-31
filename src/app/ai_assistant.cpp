@@ -104,6 +104,7 @@ void LoadPrefs(AiAssistantState& a) {
     if (a.prefs_loaded) return;
     a.prefs_loaded = true;
     const ai::Settings settings = ai::LoadSettings();
+    a.enabled = settings.enabled;
     a.floating = settings.assistant.floating;
     a.think = std::clamp(settings.assistant.thinking, 0, 6);
     a.model = 0;
@@ -1189,6 +1190,9 @@ void Activate(AppState& s, const ui::AiPanelHit& hit) {
     case P::History:
         OpenHistory(s, !a.hist_open);
         break;
+    case P::JumpLatest:
+        s.renderer.AiPanel().ScrollToEnd();
+        break;
     case P::NewChat:
         CloseMenu(s);
         OpenHistory(s, false);
@@ -1469,6 +1473,7 @@ void AiChipContextMenu(AppState& s, POINT screen_pt) {
 void AiAssistantOpen(AppState& s, bool animate) {
     AiAssistantState& a = s.aiAssistant;
     LoadPrefs(a);
+    if (!a.enabled) return;
     if (a.open) return;
     a.open = true;
     a.focus_pending = true;
@@ -1532,6 +1537,12 @@ void AiAssistantHistoryKey(AppState& s) {
 
 void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm) {
     AiAssistantState& a = s.aiAssistant;
+    LoadPrefs(a);
+    if (!a.enabled) {
+        vm.status.ai_state = ui::StatusAiState::Hidden;
+        vm.status.ai_open = false;
+        return;
+    }
     // The chip is always there: "✦ AI" opens the panel.
     if (vm.status.ai_state == ui::StatusAiState::Hidden) vm.status.ai_state = ui::StatusAiState::Idle;
     if (vm.status.ai_state == ui::StatusAiState::Idle) vm.status.ai_text.clear();
@@ -1591,6 +1602,7 @@ void FillAiAssistantVm(AppState& s, ui::WindowViewModel& vm) {
     const bool has_folder = CurrentFolder(s, path, folder, count);
     p.suggestions = Suggestions(s);
     p.safe_note = Text(I::AiAsstSafe);
+    p.jump_latest = Text(I::AiJumpLatest);
 
     p.context_visible = has_folder && a.context_removed_for != path;
     if (p.context_visible)

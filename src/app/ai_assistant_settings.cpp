@@ -8,6 +8,7 @@
 #include "ai_pack.h"
 #include "ai_providers.h"
 #include "ai_settings.h"
+#include "ai_service.h"
 #include "ai_voice_capture.h"
 #include "ai_voice_service.h"
 #include "app_commands.h"
@@ -1257,6 +1258,7 @@ void Refresh(ui::AssistantPageView& v) {
     const ai::Settings settings = ai::LoadSettings(&malformed);
     const ai::Provider& current = ai::CurrentProvider();
     v = {};
+    v.enabled = settings.enabled;
     v.in_use = ai::HasServiceKey(current.id);
     for (const ai::Provider* p : TileOrder()) {
         ui::AsstTileView tile;
@@ -1461,6 +1463,21 @@ void AssistantSettingsClick(AppState& s, int target) {
     AsstPageUi* up = Ui(s);
     if (!up) return;
     AsstPageUi& u = *up;
+    if (target == ui::kAsstEnabled) {
+        bool enabled = true;
+        if (!ai::UpdateAiSettings([&](ai::Settings& settings) {
+            settings.enabled = !settings.enabled;
+            enabled = settings.enabled;
+        })) return;
+        s.aiAssistant.enabled = enabled;
+        if (!enabled) {
+            if (s.aiAssistant.chat) AiChatStop(s);
+            AiAssistantClose(s, false);
+        }
+        Changed();
+        Redraw(s);
+        return;
+    }
     const std::vector<const ai::Provider*> tiles = TileOrder();
     if (target >= ui::kAsstTileBase && target < ui::kAsstTileBase + static_cast<int>(tiles.size())) {
         const ai::Provider& p = *tiles[static_cast<size_t>(target - ui::kAsstTileBase)];

@@ -11,5 +11,6 @@ void ApplySearchSwitch(AppState& s, bool purge_index);
 void ShutdownGlobalSearch(AppState& s);
 // Answers the Open / Save dialog jump bar: the folders open in Pulse and around.
 void SendDialogJumpContext(AppState& s);
+void PublishPickerPlaces(AppState& s);
 bool HandleGlobalSearchHotkeyCapture(AppState& s, unsigned key);
 }

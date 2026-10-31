@@ -75,20 +75,34 @@ Options ParseOptions(const wchar_t* command_line) {
 }
 
 void ApplyTaskList(const std::wstring& list, Tasks& tasks, bool replace) {
-    if (replace) tasks = Tasks{false, false, false};
+    if (replace) tasks = Tasks{false, false, false, false, false};
     for (auto item : SplitList(list)) {
         bool on = true;
         if (!item.empty() && item[0] == L'!') { on = false; item.erase(0, 1); }
         if (EqualsNoCase(item, L"indexservice")) tasks.index_service = on;
+        else if (EqualsNoCase(item, L"globalsearch")) tasks.global_search = on;
+        else if (EqualsNoCase(item, L"aiassistant")) tasks.ai_assistant = on;
         else if (EqualsNoCase(item, L"startup")) tasks.startup = on;
         else if (EqualsNoCase(item, L"desktopicon")) tasks.desktop_icon = on;
     }
+}
+
+void ApplyRememberedTaskList(const std::wstring& list, Tasks& tasks) {
+    ApplyTaskList(list, tasks, true);
+    bool feature_tokens = false;
+    for (auto item : SplitList(list)) {
+        if (!item.empty() && item[0] == L'!') item.erase(0, 1);
+        feature_tokens |= EqualsNoCase(item, L"globalsearch") || EqualsNoCase(item, L"aiassistant");
+    }
+    if (!feature_tokens) tasks.global_search = tasks.ai_assistant = true;
 }
 
 std::wstring FormatTaskList(const Tasks& tasks) {
     std::wstring out;
     auto add = [&](bool on, const wchar_t* name) { if (on) { if (!out.empty()) out += L','; out += name; } };
     add(tasks.index_service, L"indexservice");
+    add(true, tasks.global_search ? L"globalsearch" : L"!globalsearch");
+    add(true, tasks.ai_assistant ? L"aiassistant" : L"!aiassistant");
     add(tasks.startup, L"startup");
     add(tasks.desktop_icon, L"desktopicon");
     return out;

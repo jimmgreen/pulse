@@ -86,6 +86,23 @@ enum class Str {
     UnBusyText,
     IntegrationIncomplete,
     IntegrationFailed,
+    OptGlobalSearch,
+    OptGlobalSearchSub,
+    SecAi,
+    OptAiAssistant,
+    OptAiAssistantSub,
+    New,
+    SumGlobalSearch,
+    SumAiAssistant,
+    S4Title,
+    S4Text,
+    S5Title,
+    S5Text,
+    S6Title,
+    S6Text,
+    AiDemoPrompt,
+    AiDemoReply,
+    AiDemoAction,
     Count
 };
 

@@ -2,6 +2,7 @@
 #include "../fs/cloud_state.h"
 #include "../common/utf8_file.h"
 #include "../common/runtime_log.h"
+#include "../common/module_location.h"
 #include "thumbnail_artwork_layout.h"
 #include <algorithm>
 #include <cwctype>
@@ -431,10 +432,11 @@ bool ThumbnailCache::Connect(uint32_t lane, const Request& req, uint64_t started
     const uint32_t lane_token = io.token;
     if (lane_pipe != INVALID_HANDLE_VALUE) return true;
     const std::wstring pipeName = ipc::PreviewPipeName(lane_token);
-    wchar_t exe[MAX_PATH]{}; GetModuleFileNameW(nullptr, exe, ARRAYSIZE(exe));
-    wchar_t* slash = wcsrchr(exe, L'\\');
-    if (!slash) { LogFailure(lane, req, started, 1, ERROR_BAD_PATHNAME); return false; }
-    *(slash + 1) = 0;
+    wchar_t exe[MAX_PATH]{};
+    const auto module_address = +[] {};
+    const DWORD location_error = module_location::DirectoryFromAddress(reinterpret_cast<const void*>(module_address),
+        exe, ARRAYSIZE(exe));
+    if (location_error != ERROR_SUCCESS) { LogFailure(lane, req, started, 1, location_error); return false; }
     std::wstring cmd = L"\"" + std::wstring(exe) + L"Pulse.Preview.exe\" " +
         std::to_wstring(lane_token);
     STARTUPINFOW si{sizeof(si)};
