@@ -461,6 +461,7 @@ inline int HitTestSettingsAssistant(const SettingsLayout& l, const WindowViewMod
     const AssistantPageLayout& o = l.assistant;
     auto in = [&](const D2D1_RECT_F& r) { return r.right > r.left && x >= r.left && x < r.right && y >= r.top && y < r.bottom; };
     const AssistantPageView& v = vm.settings_assistant;
+    if (in(o.enabled_toggle)) return kAsstEnabled;
     l10n::StringId labels[3]{};
     int targets[3]{};
     const int n = asst_text::HeadButtons(v, labels, targets);
@@ -510,7 +511,6 @@ inline int HitTestSettingsAssistant(const SettingsLayout& l, const WindowViewMod
         const float at = fluent::StepSliderPositionAt(o.think_slider, stops, x, o.scale);
         return kAsstThinkBase + std::clamp(static_cast<int>(std::lround(at)), 0, stops - 1);
     }
-    if (in(o.enabled_toggle)) return kAsstEnabled;
     if (in(o.think_toggle)) return kAsstThinkToggle;
     if (in(o.key_buttons[0])) return kAsstRekey;
     if (in(o.key_buttons[1])) return kAsstRemoveKey;

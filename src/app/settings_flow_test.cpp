@@ -797,7 +797,26 @@ int RunSettingsIntegrationUiTest(AppState& s, const wchar_t* output) {
 }
 
 
+int RunAssistantToggleHitTest(const wchar_t* output) {
+    std::ofstream log{std::filesystem::path(output)};
+    int failures = 0;
+    for (const auto stage : {ui::AsstStage::Pick, ui::AsstStage::Setup, ui::AsstStage::Connected}) {
+        ui::WindowViewModel vm{};
+        vm.settings_assistant.stage = stage;
+        ui::SettingsLayout layout{};
+        layout.assistant.enabled_toggle = D2D1::RectF(100, 20, 142, 44);
+        const bool hit = ui::HitTestSettingsAssistant(layout, vm, 121, 32) == ui::kAsstEnabled;
+        const bool outside = ui::HitTestSettingsAssistant(layout, vm, 143, 32) != ui::kAsstEnabled;
+        log << (hit && outside ? "[PASS] " : "[FAIL] ")
+            << "assistant enable toggle hit bounds, stage " << static_cast<int>(stage) << '\n';
+        if (!hit || !outside) ++failures;
+    }
+    return failures ? 1 : 0;
+}
+
 int RunSettingsFlowTest(AppState& s,const wchar_t* output) {
+    if (GetEnvironmentVariableW(L"PULSE_TEST_ASSISTANT_TOGGLE_HIT", nullptr, 0))
+        return RunAssistantToggleHitTest(output);
     if (GetEnvironmentVariableW(L"PULSE_TEST_DIALOG_JUMP_TOGGLES", nullptr, 0))
         return RunDialogJumpToggleTest(s, output);
     if(GetEnvironmentVariableW(L"PULSE_TEST_DIALOG_MANAGEMENT_UI",nullptr,0))
