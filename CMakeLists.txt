@@ -2236,7 +2236,7 @@ if(PULSE_BUILD_PROGRESS_UI_TESTS)
     endforeach()
 endif()
 
-foreach(address_test address_completion address_features create_progress)
+foreach(address_test address_completion address_features create_progress details_tree_refresh)
     add_executable(pulse_${address_test}_test src/bench/${address_test}_test.cpp $<TARGET_OBJECTS:pulse>)
     get_target_property(address_libraries pulse LINK_LIBRARIES)
     target_link_libraries(pulse_${address_test}_test PRIVATE ${address_libraries})
