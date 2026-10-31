@@ -8,8 +8,8 @@
 // and show when the empty search box takes the focus.
 // Picking one moves the dialog there; a typed Save name is kept, and in an
 // Open dialog a file is filled in and opened. The dialog itself is driven
-// through its file name box (or its address bar in folder pickers); no
-// separate window is ever opened.
+// through its address bar for folders in modern dialogs; legacy dialogs
+// and file selections use the file name box. No separate window is opened.
 //
 // Everything runs on a thread of its own: Pulse's UI thread only answers the
 // context request (which folders are open) when a dialog shows up.
