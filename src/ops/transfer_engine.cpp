@@ -1,5 +1,6 @@
 // transfer_engine.cpp — See transfer_engine.h.
 #include "transfer_engine.h"
+#include "owned_transfer_output.h"
 #include "../fs/drive_kind.h"
 #include <winioctl.h>
 #include <algorithm>
@@ -74,6 +75,14 @@ unsigned TransferThreadCount(const std::wstring& source, const std::wstring& des
     return (std::min)(ThreadsFor(StorageOf(source)), ThreadsFor(StorageOf(dest_dir)));
 }
 
+bool IsSolidToSpinningTransfer(const std::wstring& source, const std::wstring& dest_dir) {
+    return StorageOf(source) == Storage::Solid && StorageOf(dest_dir) == Storage::Spinning;
+}
+
+unsigned MediumTransferThreadCount(const std::wstring& source, const std::wstring& dest_dir) {
+    return StorageOf(source) == Storage::Solid && StorageOf(dest_dir) == Storage::Solid ? 4u : 1u;
+}
+
 TransferTarget DescribeTransferTarget(const std::wstring& source, const std::wstring& dest_dir) {
     TransferTarget target;
     const Storage storage = StorageOf(dest_dir);
@@ -91,12 +100,15 @@ TransferTarget DescribeTransferTarget(const std::wstring& source, const std::wst
 }
 
 SmallCopyPool::SmallCopyPool(unsigned threads, std::atomic<bool>& cancel, std::atomic<bool>& pause,
-                             std::mutex& control_mutex, std::condition_variable& control_cv)
-    : cancel_(cancel), pause_(pause), control_mutex_(control_mutex), control_cv_(control_cv) {
+                             std::mutex& control_mutex, std::condition_variable& control_cv, bool bounded_medium,
+                             std::shared_ptr<SmallCopyPhaseProfile> phase_profile,
+                             TransferDeviceBudget::TaskToken budget_task)
+    : cancel_(cancel), pause_(pause), control_mutex_(control_mutex), control_cv_(control_cv),
+      bounded_medium_(bounded_medium), phase_profile_(std::move(phase_profile)),
+      budget_task_(budget_task ? std::move(budget_task) : TransferDeviceBudget::CreateTask()) {
     threads = (std::max)(1u, threads);
-    // Deep enough that the transfer thread hands over every small file and
-    // reaches the large ones while the pool works.
-    capacity_ = (std::max<size_t>)(threads * 4, 1024);
+    // Bound queued metadata independently of the byte budget.
+    capacity_ = bounded_medium_ ? 128 : (std::max<size_t>)(threads * 4, 1024);
     threads_.reserve(threads);
     for (unsigned i = 0; i < threads; ++i) threads_.emplace_back([this] { Worker(); });
 }
@@ -111,9 +123,20 @@ SmallCopyPool::~SmallCopyPool() {
     for (auto& thread : threads_) thread.join();
 }
 
-bool SmallCopyPool::HasRoom() const {
+bool SmallCopyPool::HasRoom(uint64_t bytes) const {
+    constexpr uint64_t budget = 256ull << 20;
     std::lock_guard lock(mutex_);
-    return outstanding_ < capacity_;
+    return !stopping_.load() && outstanding_ < capacity_ &&
+        (!bounded_medium_ || outstanding_ == 0 || (bytes <= budget && reserved_bytes_ <= budget - bytes));
+}
+
+std::vector<SmallCopyProgress> SmallCopyPool::TakeProgress() {
+    std::lock_guard lock(mutex_);
+    std::vector<SmallCopyProgress> snapshots;
+    snapshots.reserve(progress_.size());
+    for (const auto& item : progress_) snapshots.push_back(item.second);
+    progress_.clear();
+    return snapshots;
 }
 
 void SmallCopyPool::Submit(SmallCopyJob job) {
@@ -123,6 +146,10 @@ void SmallCopyPool::Submit(SmallCopyJob job) {
             done_.push_back({job.index, false});
         } else {
             queue_.push_back(std::move(job));
+        }
+        if (bounded_medium_) {
+            reservations_[job.index] = job.AdmissionBytes();
+            reserved_bytes_ += job.AdmissionBytes();
         }
         ++outstanding_;
     }
@@ -136,12 +163,27 @@ std::vector<SmallCopyResult> SmallCopyPool::Take(bool wait) {
     std::vector<SmallCopyResult> taken;
     taken.swap(done_);
     outstanding_ -= taken.size();
+    for (const auto& result : taken) {
+        if (bounded_medium_) {
+            const auto reservation = reservations_.find(result.index);
+            if (reservation != reservations_.end()) {
+                reserved_bytes_ -= reservation->second;
+                reservations_.erase(reservation);
+            }
+        }
+        progress_.erase(result.index);
+    }
     return taken;
 }
 
 size_t SmallCopyPool::Outstanding() const {
     std::lock_guard lock(mutex_);
     return outstanding_;
+}
+
+SmallCopyQueueSnapshot SmallCopyPool::QueueSnapshot() const {
+    std::lock_guard lock(mutex_);
+    return {queue_.size(), outstanding_ - queue_.size() - done_.size(), done_.size()};
 }
 
 void SmallCopyPool::Stop() {
@@ -152,29 +194,85 @@ void SmallCopyPool::Stop() {
         queue_.clear();
     }
     done_cv_.notify_all();
+    control_cv_.notify_all();
 }
 
 void SmallCopyPool::Worker() {
+    std::unique_ptr<SHA256VerificationWorker> verifier;
+    std::unique_ptr<SmallCopyWorkerProfile> profile;
+    if (phase_profile_) profile = std::make_unique<SmallCopyWorkerProfile>();
+    struct MergeProfile {
+        SmallCopyPhaseProfile* shared;
+        SmallCopyWorkerProfile* local;
+        ~MergeProfile() {
+            if (!shared) return;
+            std::lock_guard lock(shared->mutex);
+            shared->workers.Add(*local);
+        }
+    } merge_profile{phase_profile_.get(), profile.get()};
+    bool received_job = false;
     for (;;) {
         SmallCopyJob job;
         {
             std::unique_lock lock(mutex_);
+            const bool measure_empty_wait = profile && queue_.empty();
+            std::chrono::steady_clock::time_point wait_started{};
+            if (measure_empty_wait) wait_started = std::chrono::steady_clock::now();
             work_cv_.wait(lock, [&] { return closing_ || !queue_.empty(); });
+            if (measure_empty_wait) {
+                const auto elapsed = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - wait_started).count());
+                if (queue_.empty()) profile->queue_close_ns += elapsed;
+                else if (received_job) profile->queue_supply_ns += elapsed;
+                else profile->queue_start_ns += elapsed;
+            }
             if (queue_.empty()) return;
             job = std::move(queue_.front());
             queue_.pop_front();
+            received_job = true;
         }
-        // Pause between files, like the RunTransfer thread.
-        while (pause_.load() && !cancel_.load()) {
-            std::unique_lock control(control_mutex_);
-            control_cv_.wait_for(control, kTakeWait, [&] { return cancel_.load() || !pause_.load(); });
+        TransferDeviceBudget::Lease device_lease;
+        TransferDeviceBudget::Waiter budget_waiter;
+        bool dropped = false;
+        bool waited_for_budget = false;
+        std::chrono::steady_clock::time_point budget_started{};
+        for (;;) {
+            while (pause_.load() && !cancel_.load() && !stopping_.load()) {
+                budget_waiter.Reset();
+                std::unique_lock control(control_mutex_);
+                control_cv_.wait_for(control, kTakeWait, [&] {
+                    return cancel_.load() || stopping_.load() || !pause_.load();
+                });
+            }
+            if (cancel_.load() || stopping_.load()) { dropped = true; break; }
+            if (!job.devices) break;
+            device_lease = budget_waiter ? job.devices->budget.TryAcquire(budget_waiter)
+                : job.devices->budget.TryAcquire(job.devices->source, job.devices->target, job.AdmissionBytes());
+            if (!device_lease && !budget_waiter)
+                budget_waiter = job.devices->budget.Wait(job.devices->source, job.devices->target, job.AdmissionBytes(), budget_task_);
+            if (device_lease) break;
+            if (profile && !waited_for_budget) {
+                budget_started = std::chrono::steady_clock::now();
+                waited_for_budget = true;
+            }
+            // Another pool or serial transfer may own the shared permit. The
+            // bounded wait observes cancellation; the persistent ticket retains task order.
+            if (budget_waiter) budget_waiter.WaitForChange();
+            else {
+                std::unique_lock control(control_mutex_);
+                control_cv_.wait_for(control, std::chrono::milliseconds(2), [&] {
+                    return cancel_.load() || stopping_.load() || pause_.load();
+                });
+            }
         }
-        bool dropped = cancel_.load();
-        {
-            std::lock_guard lock(mutex_);
-            dropped = dropped || stopping_;
-        }
-        SmallCopyResult result = dropped ? SmallCopyResult{job.index, false} : Run(job);
+        budget_waiter.Reset();
+        if (waited_for_budget)
+            profile->budget_wait_ns += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - budget_started).count());
+        SmallCopyResult result = dropped ? SmallCopyResult{job.index, false} : Run(job, verifier, profile.get());
+        // Copy, verification and per-file move flush are finished. Do not make
+        // workers depend on the coordinator consuming done_ before they continue.
+        device_lease.Reset();
         {
             std::lock_guard lock(mutex_);
             done_.push_back(std::move(result));
@@ -231,26 +329,145 @@ bool FlushCopyToDisk(const std::wstring& path, DWORD attributes, DWORD& error, b
     return flushed;
 }
 
-SmallCopyResult SmallCopyPool::Run(const SmallCopyJob& job) {
+COPYFILE2_MESSAGE_ACTION CALLBACK SmallCopyPool::Progress(const COPYFILE2_MESSAGE* message, PVOID opaque) {
+    const auto& context = *static_cast<ProgressContext*>(opaque);
+    auto& pool = *context.pool;
+    if (context.owned_output && !*context.owned_output) {
+        HANDLE target = INVALID_HANDLE_VALUE;
+        switch (message->Type) {
+        case COPYFILE2_CALLBACK_STREAM_STARTED: target = message->Info.StreamStarted.hDestinationFile; break;
+        case COPYFILE2_CALLBACK_CHUNK_FINISHED: target = message->Info.ChunkFinished.hDestinationFile; break;
+        case COPYFILE2_CALLBACK_STREAM_FINISHED: target = message->Info.StreamFinished.hDestinationFile; break;
+        default: break;
+        }
+        if (target != INVALID_HANDLE_VALUE) {
+            VerificationStamp stamp;
+            if (CaptureOwnedOutputStamp(target, stamp)) *context.owned_output = std::make_shared<VerificationStamp>(stamp);
+        }
+    }
+    while (pool.pause_.load() && !pool.cancel_.load() && !pool.stopping_.load()) {
+        std::unique_lock control(pool.control_mutex_);
+        pool.control_cv_.wait_for(control, kTakeWait, [&] {
+            return !pool.pause_.load() || pool.cancel_.load() || pool.stopping_.load();
+        });
+    }
+    if (pool.cancel_.load() || pool.stopping_.load()) return COPYFILE2_PROGRESS_CANCEL;
+    if (message->Type == COPYFILE2_CALLBACK_CHUNK_FINISHED) {
+        const auto& chunk = message->Info.ChunkFinished;
+        std::lock_guard lock(pool.mutex_);
+        pool.progress_[context.index] = {context.index, chunk.uliTotalBytesTransferred.QuadPart,
+                                        chunk.uliTotalFileSize.QuadPart};
+    }
+    return COPYFILE2_PROGRESS_CONTINUE;
+}
+
+SmallCopyResult SmallCopyPool::Run(const SmallCopyJob& job, std::unique_ptr<SHA256VerificationWorker>& verifier,
+                                  SmallCopyWorkerProfile* profile) {
     SmallCopyResult result;
     result.index = job.index;
     result.ran = true;
-    // Same flags as the RunTransfer thread's direct copy; links are copied
-    // as links, and a file system without COPY_SYMLINK retries without it.
+    VerificationStamp before_copy;
+    if (job.verify) {
+        result.verification = std::make_shared<VerificationResult>();
+        DWORD error = ERROR_SUCCESS;
+        if (!CaptureVerificationStamp(job.source, before_copy, error)) {
+            result.verification->error = VerificationError::SourceStat;
+            result.verification->win32_error = error;
+            result.hr = HRESULT_FROM_WIN32(error ? error : ERROR_READ_FAULT);
+            return result;
+        }
+        if (job.expected_source) {
+            const auto& expected = *job.expected_source;
+            if (expected.volume != before_copy.volume || expected.index_high != before_copy.index_high ||
+                expected.index_low != before_copy.index_low || expected.bytes != before_copy.bytes ||
+                CompareFileTime(&expected.last_write, &before_copy.last_write) != 0) {
+                result.verification->error = VerificationError::SourceChanged;
+                result.hr = HRESULT_FROM_WIN32(ERROR_FILE_INVALID);
+                return result;
+            }
+        }
+    }
+    ProgressContext context{this, job.index, (job.verify || job.staged || job.unbuffered) ? &result.owned_output : nullptr};
+    // Link semantics survive an unsupported no-buffering retry unchanged.
     COPYFILE2_EXTENDED_PARAMETERS parameters{};
     parameters.dwSize = sizeof(parameters);
-    parameters.dwCopyFlags = COPY_FILE_COPY_SYMLINK | COPY_FILE_FAIL_IF_EXISTS;
-    result.hr = CopyFile2(job.source.c_str(), job.destination.c_str(), &parameters);
-    if (result.hr == HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER)) {
-        parameters.dwCopyFlags = COPY_FILE_FAIL_IF_EXISTS;
-        result.hr = CopyFile2(job.source.c_str(), job.destination.c_str(), &parameters);
+    parameters.dwCopyFlags = COPY_FILE_COPY_SYMLINK | COPY_FILE_FAIL_IF_EXISTS |
+        (job.unbuffered ? COPY_FILE_NO_BUFFERING : 0);
+    if (job.verify || job.staged || job.unbuffered || job.bytes >= (1ull << 20)) {
+        parameters.pProgressRoutine = Progress;
+        parameters.pvCallbackContext = &context;
+    }
+    const auto copy = [&] {
+        if (!profile) return CopyFile2(job.source.c_str(), job.destination.c_str(), &parameters);
+        const auto started = std::chrono::steady_clock::now();
+        const HRESULT hr = CopyFile2(job.source.c_str(), job.destination.c_str(), &parameters);
+        const DWORD error = GetLastError();
+        profile->copy_work_ns += static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - started).count());
+        ++profile->copy_calls;
+        SetLastError(error);
+        return hr;
+    };
+    result.hr = copy();
+    if (result.hr == HRESULT_FROM_WIN32(ERROR_INVALID_PARAMETER) && job.unbuffered) {
+        result.buffering_fallback_error = result.hr;
+        if (result.owned_output) {
+            if (!DeleteVerifiedOutput(job.destination, *result.owned_output, result.buffering_cleanup_error))
+                return result; // Preserve the first failure; never retry over an unowned/unclean output.
+            result.owned_output.reset();
+            std::lock_guard lock(mutex_);
+            progress_.erase(job.index);
+        }
+        parameters.dwCopyFlags &= ~COPY_FILE_NO_BUFFERING;
+        result.buffered_retry = true;
+        result.hr = copy();
     }
     if (FAILED(result.hr)) {
         // A name lost to another writer is that writer's file.
+        // Callback CANCEL already removes the partial destination. A second
+        // delete could remove another writer's replacement of that name.
         if (result.hr != HRESULT_FROM_WIN32(ERROR_FILE_EXISTS) &&
-            result.hr != HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS))
-            DeleteFileW(job.destination.c_str());
+            result.hr != HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS) &&
+            !(parameters.pProgressRoutine && result.hr == HRESULT_FROM_WIN32(ERROR_REQUEST_ABORTED))) {
+            if (job.verify || job.staged || job.unbuffered) {
+                DWORD cleanup_error = 0;
+                if (result.owned_output) DeleteVerifiedOutput(job.destination, *result.owned_output, cleanup_error);
+            } else DeleteFileW(job.destination.c_str());
+        }
         return result;
+    }
+    result.copy_completed = true;
+    result.bytes = job.bytes;
+    if (job.bytes >= (1ull << 20)) {
+        WIN32_FILE_ATTRIBUTE_DATA copied{};
+        if (GetFileAttributesExW(job.destination.c_str(), GetFileExInfoStandard, &copied))
+            result.bytes = (static_cast<uint64_t>(copied.nFileSizeHigh) << 32) | copied.nFileSizeLow;
+    }
+    if (job.verify) {
+        if (!verifier) verifier = std::make_unique<SHA256VerificationWorker>();
+        std::atomic<bool> verification_cancel{cancel_.load() || stopping_.load()};
+        const auto wait = [&] {
+            while (pause_.load() && !cancel_.load() && !stopping_.load()) {
+                std::unique_lock control(control_mutex_);
+                control_cv_.wait_for(control, kTakeWait, [&] {
+                    return !pause_.load() || cancel_.load() || stopping_.load();
+                });
+            }
+            verification_cancel.store(cancel_.load() || stopping_.load());
+        };
+        {
+            std::lock_guard lock(mutex_);
+            progress_[job.index] = {job.index, result.bytes, result.bytes, true};
+        }
+        *result.verification = verifier->Verify(job.source, job.destination, verification_cancel, wait, &before_copy, result.owned_output.get());
+        if (!result.verification->Success()) {
+            const auto& verification = *result.verification;
+            const DWORD error = verification.error == VerificationError::Cancelled ? ERROR_REQUEST_ABORTED :
+                verification.win32_error ? verification.win32_error : ERROR_CRC;
+            result.hr = HRESULT_FROM_WIN32(error);
+            return result;
+        }
+        result.bytes = result.verification->source_bytes;
     }
     if (job.move) {
         // Written out here, in parallel; the source is deleted by RunTransfer

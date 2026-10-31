@@ -966,8 +966,8 @@ private:
             check.pressed = pressed_ == 4 && hover_ == 4;
             check.focused = keyboard_focus_ && focus_ == 3;
             check.keyboard_focus = check.focused;
-            const std::wstring label = l10n::Get(l10n::StringId::OpApplyRestLead) +
-                pulse::format::GroupedInt(conflict_.remaining - 1) + l10n::Get(l10n::StringId::OpApplyRestEnd);
+            const std::wstring label = l10n::Get(conflict_.remaining_is_snapshot ? l10n::StringId::OpApplyKnownLead : l10n::StringId::OpApplyRestLead) +
+                pulse::format::GroupedInt(conflict_.remaining - 1) + l10n::Get(conflict_.remaining_is_snapshot ? l10n::StringId::OpApplyKnownEnd : l10n::StringId::OpApplyRestEnd);
             painter_.DrawCheckBox(ApplyRect(), label, check);
         }
         fluent::ControlState cancel_state{};
@@ -2282,6 +2282,8 @@ FileOperationWindow::~FileOperationWindow() { Destroy(); }
 
 bool FileOperationWindow::Create(HWND owner, FileOperationCallbacks callbacks) {
     if (hwnd_) return true;
+    positioned_ = false;
+    hover_ = pressed_ = 0;
     owner_ = owner;
     callbacks_ = std::move(callbacks);
     dark_ = ShouldUseDarkMode(ThemeMode::Auto);
@@ -2565,6 +2567,10 @@ void FileOperationWindow::Update(const ops::OpStatus& incoming) {
     else if (task_end_tick_ == 0) task_end_tick_ = now;
     const bool succeeded = finished && status_.phase == ops::OpPhase::Completed &&
         status_.last_error.empty();
+    if (succeeded && status_.failed_items == 0) {
+        SyncGraph();
+        graph_.Complete();
+    }
     // The countdown starts only when the finish happens in front of the user
     // in a window the app opened (SetAutoClose); a summary opened from the
     // pill stays until closed.
@@ -2656,7 +2662,8 @@ void FileOperationWindow::ResizeForDetails(bool preserve_center) {
 
 int FileOperationWindow::HitTestControl(float x, float y) const {
     if (closing_) return 0;
-    const auto labels = MakeTransferLabels(status_, detailed_, FailureView());
+    auto labels = MakeTransferLabels(status_, detailed_, FailureView());
+    if (preparation_only_) labels.show_details = false;
     const auto chrome = MakeTransferChrome(scale_,
         static_cast<float>(compositor_.Width()), static_cast<float>(compositor_.Height()),
         painter_, labels);
@@ -2804,7 +2811,8 @@ void FileOperationWindow::Render() {
     const float dip_w = width / std::max(s, 0.001f);
     const float content_w = dip_w - kPadX * 2.0f;
     auto* factory = compositor_.DwriteFactory();
-    const auto labels = MakeTransferLabels(status_, detailed_, FailureView());
+    auto labels = MakeTransferLabels(status_, detailed_, FailureView());
+    if (preparation_only_) labels.show_details = false;
     const auto chrome = MakeTransferChrome(s, width, height, painter_, labels);
     const ULONGLONG now = GetTickCount64();
 
@@ -2814,7 +2822,7 @@ void FileOperationWindow::Render() {
     const bool paused = ShowsPaused(status_);
     const bool pausing = PauseInFlight(status_);
     const bool waiting = status_.phase == ops::OpPhase::WaitingForConflict;
-    const bool scanning = status_.phase == ops::OpPhase::Scanning;
+    const bool scanning = status_.phase == ops::OpPhase::Scanning || !status_.enumeration_complete;
     const bool completed = status_.phase == ops::OpPhase::Completed && !failed;
     const bool cancelling = status_.phase == ops::OpPhase::Cancelling;
     // Partial failure: the rest went through, the failed items are listed.
@@ -2899,6 +2907,8 @@ void FileOperationWindow::Render() {
     } else if (paused && !pausing) {
         title = l10n::Get(deleting ? l10n::StringId::OpDeletePaused : restoring ? l10n::StringId::OpRestorePaused
             : moving ? l10n::StringId::OpMovePaused : l10n::StringId::OpCopyPaused);
+    } else if (!status_.enumeration_complete) {
+        title = l10n::Get(l10n::StringId::OpCopying);
     } else if (scanning) {
         title = l10n::Get(l10n::StringId::OpPreparingList);
     } else {
@@ -2906,6 +2916,8 @@ void FileOperationWindow::Render() {
             : moving ? l10n::StringId::OpMovingPrefix : l10n::StringId::OpCopyingPrefix)
             + pulse::format::GroupedInt(item_count) + items_suffix;
     }
+    if (preparation_only_)
+        title = l10n::Get(l10n::StringId::Delete) + L" · " + l10n::Get(l10n::StringId::OpPreparing);
     // Title, with a status icon once the task has ended.
     StatusIcon title_icon = StatusIcon::None;
     D2D1_COLOR_F icon_color = ok_color;
@@ -2991,6 +3003,7 @@ void FileOperationWindow::Render() {
         : paused ? l10n::Get(l10n::StringId::OpPaused)
         : waiting ? l10n::Get(l10n::StringId::OpWaiting)
         : emptying ? l10n::Get(l10n::StringId::OpEmptying)
+        : status_.phase == ops::OpPhase::Verifying ? l10n::Get(l10n::StringId::Verifying)
         : status_.speed_basis == ops::OpSpeedBasis::None ? l10n::Get(l10n::StringId::OpNoEstimate)
         : status_.eta_seconds == 0 || eta_unsettled ? l10n::Get(l10n::StringId::OpEstimating)
         : l10n::Get(l10n::StringId::OpApprox) + FormatDuration(status_.eta_seconds);
@@ -3004,7 +3017,7 @@ void FileOperationWindow::Render() {
         else remain_text = pulse::format::GroupedInt(remain_items) + l10n::Get(l10n::StringId::OpCountSuffix);
     }
     const std::wstring remain_line = remain_text.empty() ? std::wstring()
-        : l10n::Get(l10n::StringId::OpRemainingShort) + L" " + remain_text;
+        : l10n::Get(status_.enumeration_complete ? l10n::StringId::OpRemainingShort : l10n::StringId::OpDiscoveredPending) + L" " + remain_text;
     const std::wstring dot = L"  \x00B7  ";
     const std::wstring took = l10n::Get(l10n::StringId::OpTookLead) + FormatElapsed(elapsed_ms / 1000);
 
@@ -3015,7 +3028,14 @@ void FileOperationWindow::Render() {
     const float row_h = 18.0f;
     const bool indeterminate = scanning || status_.percent < 0.0f;
 
-    if (authorization) {
+    if (preparation_only_) {
+        DrawEllipsizedText(compositor_, value_format_.get(),
+            Rect(s, kPadX, hero_y + 10.0f, content_w, 24.0f),
+            l10n::Get(l10n::StringId::OpPreparingList), theme.text);
+        DrawEllipsizedText(compositor_, label_format_.get(),
+            Rect(s, kPadX, graph_top + 12.0f, content_w, row_h),
+            pulse::format::GroupedInt(status_.total_items) + items_suffix, theme.text_secondary);
+    } else if (authorization) {
         // Permission view (HTML 1j): the shield beside a two-line message in
         // place of the numbers and the graph. The first line says what is
         // needed or what went wrong; the second, while Windows asks, that it
@@ -3041,7 +3061,8 @@ void FileOperationWindow::Render() {
         const D2D1_RECT_F right_box = Rect(s, dip_w - kPadX - 220.0f, hero_y + 10.0f, 220.0f, 20.0f);
         if (indeterminate) {
             DrawEllipsizedText(compositor_, value_format_.get(), Rect(s, kPadX, hero_y + 10.0f, content_w * 0.55f, 20.0f),
-                               l10n::Get(scanning ? l10n::StringId::OpScanning : l10n::StringId::OpPreparing),
+                               l10n::Get(!status_.enumeration_complete ? l10n::StringId::OpScanningAndCopying :
+                                   (scanning ? l10n::StringId::OpScanning : l10n::StringId::OpPreparing)),
                                theme.text_secondary);
             if (status_.total_items > 0) {
                 std::wstring found = pulse::format::GroupedInt(status_.total_items);
@@ -3164,7 +3185,11 @@ void FileOperationWindow::Render() {
                 painter_.DrawText(counter, Rect(s, dip_w - kPadX - counter_w, rows_top, counter_w, row_h),
                                   label_format_.get(), text3, fluent::HorizontalAlignment::Right);
             std::wstring second;
-            if (!scanning && !remain_line.empty()) {
+            if (!status_.enumeration_complete) {
+                second = l10n::Get(l10n::StringId::OpCopiedPrefix) +
+                    pulse::format::GroupedInt(status_.completed_items) + l10n::Get(l10n::StringId::OpCountSuffix);
+                if (byte_basis) second += dot + pulse::format::ByteSize(status_.transferred_bytes);
+            } else if (!scanning && !remain_line.empty()) {
                 second = remain_line;
                 if (!paused && !waiting && status_.speed_basis != ops::OpSpeedBasis::None) second += dot + time_text;
             }
@@ -3263,7 +3288,7 @@ void FileOperationWindow::Render() {
     }
 
     // --- Details: a two-column label / value list ------------------------------
-    if (detailed_ && !authorization) {
+    if (detailed_ && !authorization && !preparation_only_) {
         const float top = kContentH + fail_block;
         painter_.FillRoundedRect(D2D1::RectF(ScaleDip(s, kPadX), ScaleDip(s, top),
                                              ScaleDip(s, kPadX + content_w), ScaleDip(s, top) + 1.0f),
@@ -3389,7 +3414,8 @@ LRESULT FileOperationWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM l
     case WM_NCCALCSIZE:
         return 0;
     case WM_NCHITTEST: {
-        const auto labels = MakeTransferLabels(status_, detailed_, FailureView());
+        auto labels = MakeTransferLabels(status_, detailed_, FailureView());
+        if (preparation_only_) labels.show_details = false;
         const auto chrome = MakeTransferChrome(scale_,
             static_cast<float>(compositor_.Width()), static_cast<float>(compositor_.Height()),
             painter_, labels);
@@ -3505,7 +3531,8 @@ LRESULT FileOperationWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM l
         pressed_ = 0;
         ReleaseCapture();
         if (hit == pressed) {
-            const auto labels = MakeTransferLabels(status_, detailed_, FailureView());
+            auto labels = MakeTransferLabels(status_, detailed_, FailureView());
+            if (preparation_only_) labels.show_details = false;
             if (hit == 4 && labels.cancel_retries && board_) {
                 std::vector<size_t> rows(board_->rows.size());
                 for (size_t i = 0; i < rows.size(); ++i) rows[i] = i;

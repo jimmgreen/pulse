@@ -4956,6 +4956,15 @@ enum class StringId : UINT {
     AsstEnabledTitle = IDS_ASST_ENABLED_TITLE,
     AsstEnabledDesc = IDS_ASST_ENABLED_DESC,
     AiJumpLatest = IDS_AI_JUMP_LATEST,
+    OpApplyKnownLead = IDS_OP_APPLY_KNOWN_LEAD,
+    OpApplyKnownEnd = IDS_OP_APPLY_KNOWN_END,
+    OpScanningAndCopying = IDS_OP_SCANNING_AND_COPYING,
+    OpDiscoveredPending = IDS_OP_DISCOVERED_PENDING,
+    CopyVerificationSourceChanged = IDS_COPY_VERIFICATION_SOURCE_CHANGED,
+    CopyVerificationTargetChanged = IDS_COPY_VERIFICATION_TARGET_CHANGED,
+    Git = IDS_GIT,
+    PackagedMenuSource = IDS_PACKAGED_MENU_SOURCE,
+    PackagedMenuReadOnly = IDS_PACKAGED_MENU_READ_ONLY,
 };
 
 bool IsLanguageId(std::wstring_view id) noexcept;

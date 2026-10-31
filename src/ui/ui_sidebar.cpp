@@ -1,5 +1,11 @@
 // ui_sidebar.cpp — Sidebar and staging-tray deck.
 #include "ui_renderer.h"
+#ifdef PULSE_STARTUP_TRACE_DIAGNOSTICS
+#include "../app/startup_trace.h"
+#define PULSE_SIDEBAR_MARK(label) app::startup_trace::Mark(label)
+#else
+#define PULSE_SIDEBAR_MARK(label) ((void)0)
+#endif
 #include "ui_renderer_internal.h"
 #include "../common/localization.h"
 #include "tab_shape.h"
@@ -230,7 +236,9 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
     // beside it provide the edge, so it has no fill or divider of its own.
 
     std::vector<SidebarSlot> slots;
+    PULSE_SIDEBAR_MARK("sidebar_layout_begin");
     LayoutSidebar(vm, sb, scale_, slots);
+    PULSE_SIDEBAR_MARK("sidebar_layout_end");
     const bool compact = SidebarRailLayout(w, scale_);
     painter_.BeginFrame(theme, IsHighContrast());
 
@@ -670,6 +678,26 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
         ~RowXform() { if (active) dc->SetTransform(saved); }
     };
 
+    if (!IsHighContrast() && !reordering && !collapse_anim_) {
+        std::vector<std::pair<int, D2D1_RECT_F>> icons;
+        icons.reserve(slots.size());
+        for (const auto& slot : slots) {
+            if (slot.group < 0) continue;
+            if (slot.kind == SidebarSlot::Header) {
+                icons.emplace_back(FluentSvgIdForGlyph(vm.sidebar[slot.group].icon_glyph),
+                                   painter_.SidebarSectionHeaderIconRect(slot.rc));
+            } else if (slot.item >= 0) {
+                const auto& item = vm.sidebar[slot.group].items[slot.item];
+                if (item.is_tag || item.tab_row) continue;
+                if (slot.kind == SidebarSlot::Drive)
+                    icons.emplace_back(FluentSvgIdForGlyph(item.icon_glyph), painter_.DriveSidebarItemIconRect(slot.rc));
+                else if (slot.kind == SidebarSlot::Item)
+                    icons.emplace_back(FluentSvgIdForGlyph(item.icon_glyph), painter_.SidebarItemIconRect(slot.rc, item.status_dot));
+            }
+        }
+        PrepareFluentSvgBitmaps(icons);
+    }
+
     ++sm.count_epoch;
     for (const size_t paint_k : paint_order) {
         const auto& slot = slots[paint_k];
@@ -972,7 +1000,9 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
                              !app::AliasStore::Instance().Empty() && app::AliasStore::Instance().ShowMark() &&
                              app::AliasStore::Instance().Shown(item.path) == item.label;
             const int row_svg = item.is_tag ? 0 : FluentSvgIdForGlyph(item.icon_glyph);
+            PULSE_SIDEBAR_MARK("sidebar_row_svg_begin");
             row.skip_glyph = !IsHighContrast() && row_svg != 0 && EnsureFluentSvg(row_svg, true);
+            PULSE_SIDEBAR_MARK("sidebar_row_svg_end");
             // 网盘 roots: the program's registered icon, as Explorer's navigation pane.
             const D2D1_RECT_F row_icon_rc = painter_.SidebarItemIconRect(slot.rc, item.status_dot);
             ID2D1Bitmap* row_shell_icon = item.icon_path.empty() || IsHighContrast() ? nullptr
@@ -996,7 +1026,9 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
                 row.suppress_text = true;
                 row.badge_text = {};
             }
+            PULSE_SIDEBAR_MARK("sidebar_row_text_begin");
             painter_.DrawSidebarItem(row);
+            PULSE_SIDEBAR_MARK("sidebar_row_text_end");
             if (item.workspace_index >= 0) {
                 const bool workspace_hot = row_hot || IsHovered(vm, HitTestResult::SidebarWorkspaceAction, slot.run);
                 const float text_right = (std::max)(slot.rc.left + 46.0f * scale_, slot.rc.right - (workspace_hot || !item.badge.empty() ? 80.0f : 30.0f) * scale_);

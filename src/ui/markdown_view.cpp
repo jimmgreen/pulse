@@ -132,16 +132,19 @@ MarkdownView::~MarkdownView() {
 }
 
 void MarkdownView::Clear() {
+    payload_identity_.reset();
+    ++text_revision_;
     image_metadata_.Reset();
     if (image_session_) image_session_->active = false;
     image_session_.reset();
     parsed_ = false;
-    payload_.clear();
+    decltype(payload_){}.swap(payload_);
+    shared_payload_.reset();
     path_.clear();
-    source_.clear();
-    plain_.clear();
-    blocks_.clear();
-    tables_.clear();
+    decltype(source_){}.swap(source_);
+    decltype(plain_){}.swap(plain_);
+    decltype(blocks_){}.swap(blocks_);
+    decltype(tables_){}.swap(tables_);
     gutter_ = 0;
     notebook_ = false;
     kernel_.clear();
@@ -151,10 +154,10 @@ void MarkdownView::Clear() {
     doc_author_.clear();
     words_ = 0;
     headings_ = 0;
-    all_blocks_.clear();
-    all_tables_.clear();
-    sections_.clear();
-    toc_.clear();
+    decltype(all_blocks_){}.swap(all_blocks_);
+    decltype(all_tables_){}.swap(all_tables_);
+    decltype(sections_){}.swap(sections_);
+    decltype(toc_){}.swap(toc_);
     section_ = 0;
     pending_block_ = -1;
     pending_end_ = pending_reveal_ = false;
@@ -170,17 +173,36 @@ void MarkdownView::Clear() {
     doc_height_ = 0.0f;
 }
 
+bool MarkdownView::SetPayload(const std::shared_ptr<const std::wstring>& payload, const std::wstring& file_path) {
+    if (payload && payload_identity_.lock() == payload && parsed_ && file_path == path_) {
+        return true;
+    }
+    if (!payload) return false;
+    const bool accepted = SetPayloadImpl(*payload, file_path, payload);
+    if (accepted) {
+        StorePayload(*payload, payload);
+        payload_identity_ = payload;
+    }
+    return accepted;
+}
+
 bool MarkdownView::SetPayload(const std::wstring& payload, const std::wstring& file_path) {
-    if (parsed_ && payload == payload_ && file_path == path_) return true;
+    return SetPayloadImpl(payload, file_path, {});
+}
+
+bool MarkdownView::SetPayloadImpl(const std::wstring& payload, const std::wstring& file_path,
+                           std::shared_ptr<const std::wstring> owner) {
+    payload_identity_.reset();
+    if (parsed_ && payload == Payload() && file_path == path_) return true;
     Clear();
     if (payload.rfind(L"PULSEMD\t1\n", 0) != 0) return false;
     image_session_ = std::make_shared<DocumentImageSession>();
-    payload_ = payload;
+    StorePayload(payload, std::move(owner));
     path_ = file_path;
     const size_t slash = file_path.find_last_of(L"\\/");
     base_dir_ = slash == std::wstring::npos ? std::wstring() : file_path.substr(0, slash);
 
-    const std::wstring_view all(payload_);
+    const std::wstring_view all(Payload());
     size_t pos = all.find(L'\n') + 1;
     int table = -1, row = -1, col = 0;
     size_t math_count = 0, math_chars = 0;
@@ -696,7 +718,7 @@ bool MarkdownView::SidebarVisible(float width) const noexcept {
 bool MarkdownView::Draw(ID2D1DeviceContext* dc, IDWriteFactory2* factory, const D2D1_RECT_F& rect,
                         const Theme& theme, bool dark, float scale, ThumbnailCache* images,
                         uint64_t generation, uint32_t sel_start, uint32_t sel_end,
-                        const std::vector<Highlight>& matches) {
+                        SearchHighlights matches) {
     if (!dc || !parsed_ || !EnsureFormats(factory, scale)) return false;
     scale_ = scale;
     D2D1_RECT_F doc = rect;
@@ -714,7 +736,7 @@ bool MarkdownView::Draw(ID2D1DeviceContext* dc, IDWriteFactory2* factory, const 
 bool MarkdownView::DrawDocument(ID2D1DeviceContext* dc, IDWriteFactory2* factory, const D2D1_RECT_F& rect,
                                 const Theme& theme, bool dark, float scale, ThumbnailCache* images,
                                 uint64_t generation, uint32_t sel_start, uint32_t sel_end,
-                                const std::vector<Highlight>& matches) {
+                                SearchHighlights matches) {
     view_ = rect;
     footer_rect_ = {};
     scale_ = scale;
@@ -893,7 +915,7 @@ bool MarkdownView::DrawDocument(ID2D1DeviceContext* dc, IDWriteFactory2* factory
                     bx + m[k].left + m[k].width + 3.0f * s, by + m[k].top + m[k].height - 1.0f * s), 3.0f * s, 3.0f * s),
                     brush_.Get());
         }
-        for (const Highlight& h : matches)
+        for (const Highlight h : matches.Intersecting(b.plain_start, uint64_t{b.plain_start} + b.text.size()))
             DrawRanges(dc, b, bx, by, h.start, h.start + h.length,
                        h.current ? HexColor(0xF59E0B, 0.75f) : HexColor(0xFACC15, dark ? 0.35f : 0.45f));
         DrawRanges(dc, b, bx, by, sel_start, sel_end, selection_color);

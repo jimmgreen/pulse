@@ -2,6 +2,7 @@
 // block (headings, paragraphs, lists, quotes, code, tables, rules, images)
 // from the preview host's block payload (preview_host/markdown_document.h).
 #pragma once
+#include "search_highlights.h"
 
 #include <windows.h>
 #include <d2d1_1.h>
@@ -10,6 +11,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <memory>
 #include <vector>
 
 #include "FluentTokens.h"
@@ -21,11 +23,13 @@ class ThumbnailCache;
 struct DocumentImageSession;
 
 class MarkdownView {
+    friend struct PreviewBufferLifetimeTest;
     friend struct ThumbnailCacheTestAccess;
 public:
     ~MarkdownView();
     // Parses the payload; a repeat of the same payload keeps scroll and layout.
     // Returns false for anything that is not a Markdown payload.
+    bool SetPayload(const std::shared_ptr<const std::wstring>& payload, const std::wstring& file_path);
     bool SetPayload(const std::wstring& payload, const std::wstring& file_path);
     void Clear();
     void SetNotifyWindow(HWND hwnd) noexcept { notify_ = hwnd; }
@@ -33,6 +37,7 @@ public:
     const std::wstring& Source() const noexcept { return source_; }
     // Block texts joined by newlines (table cells by tabs): what find, select
     // and copy work on. Offsets below index this text.
+    uint64_t TextRevision() const noexcept { return text_revision_; }
     const std::wstring& PlainText() const noexcept { return plain_; }
     // Jupyter notebook converted by the host (I record): kernel and cells.
     bool IsNotebook() const noexcept { return notebook_; }
@@ -61,14 +66,14 @@ public:
     // end of a chapter turn to the next one.
     bool ScrollAt(float x, float y, float wheel_steps);
 
-    struct Highlight { uint32_t start, length; bool current; };
+    using Highlight = SearchHighlight;
     // images: local pictures are drawn through Quick Look's thumbnail cache.
     // Returns true when an image's size became known and the view should be
     // painted again with the new layout.
     bool Draw(ID2D1DeviceContext* dc, IDWriteFactory2* factory, const D2D1_RECT_F& rect,
               const Theme& theme, bool dark, float scale, ThumbnailCache* images,
               uint64_t generation, uint32_t sel_start, uint32_t sel_end,
-              const std::vector<Highlight>& matches);
+              SearchHighlights matches);
 
     bool Scroll(float wheel_steps);
     bool ScrollHorizontal(float wheel_steps);
@@ -114,7 +119,7 @@ private:
     bool DrawDocument(ID2D1DeviceContext* dc, IDWriteFactory2* factory, const D2D1_RECT_F& rect,
                       const Theme& theme, bool dark, float scale, ThumbnailCache* images,
                       uint64_t generation, uint32_t sel_start, uint32_t sel_end,
-                      const std::vector<Highlight>& matches);
+                      SearchHighlights matches);
     void DrawToc(ID2D1DeviceContext* dc, const D2D1_RECT_F& rect, const Theme& theme, bool dark);
     bool SidebarVisible(float width) const noexcept;
     bool toc_hidden_ = false;  // the window's session-wide contents toggle
@@ -138,6 +143,21 @@ private:
     MarkdownImageMetadata image_metadata_;
     HWND notify_ = nullptr;
     bool parsed_ = false;
+    uint64_t text_revision_ = 0;
+    bool SetPayloadImpl(const std::wstring& payload, const std::wstring& file_path,
+                        std::shared_ptr<const std::wstring> owner);
+    const std::wstring& Payload() const noexcept { return shared_payload_ ? *shared_payload_ : payload_; }
+    void StorePayload(const std::wstring& value, std::shared_ptr<const std::wstring> owner) {
+        if (owner) {
+            shared_payload_ = std::move(owner);
+            std::wstring{}.swap(payload_);
+        } else {
+            payload_ = value;
+            shared_payload_.reset();
+        }
+    }
+    std::shared_ptr<const std::wstring> shared_payload_;
+    std::weak_ptr<const std::wstring> payload_identity_;
     std::wstring payload_, path_, base_dir_;
     std::wstring source_, plain_;
     std::vector<Block> blocks_;

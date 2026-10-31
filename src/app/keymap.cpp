@@ -649,7 +649,7 @@ ChordVerdict CheckChord(const Keymap& keymap, KeyAction action, KeyChord chord, 
     }
     if (Contains(keymap.Bindings(action), chord)) return set(ChordIssue::Same, ChordLevel::Info);
     const bool own_global = global && keymap.GlobalHotkeyEnabled() && keymap.GlobalHotkey() == chord;
-    if (env.IsTaken(chord) && !own_global) return set(ChordIssue::Taken, ChordLevel::Block);
+    if (global && env.IsTaken(chord) && !own_global) return set(ChordIssue::Taken, ChordLevel::Block);
     const Keymap::Owner other = keymap.Find(chord, action);
     if (other.found()) {
         v.other = other;
@@ -674,10 +674,7 @@ RangeVerdict CheckRange(const Keymap& keymap, KeyAction action, uint8_t mods, co
     for (const KeyChord chord : keymap.RangeChords(action, mods)) {
         RangeDigitStatus d;
         d.chord = chord;
-        if (env.IsTaken(chord)) {
-            d.issue = ChordIssue::Taken;
-            d.level = ChordLevel::Block;
-        } else if (const auto other = keymap.Find(chord, action); other.found()) {
+        if (const auto other = keymap.Find(chord, action); other.found()) {
             d.issue = ChordIssue::DuplicateFixed;
             d.level = ChordLevel::Block;
             d.other = other;
@@ -706,12 +703,8 @@ std::vector<BindingIssue> CollectIssues(const Keymap& keymap, const ShortcutEnv&
         if (info.kind == KeyKind::Fixed) continue;
         if (info.kind == KeyKind::Global) continue;  // its own registration reports a failure
         for (const KeyChord chord : keymap.EffectiveChords(action)) {
-            // A dismissed chord another program holds leaves the list (and
-            // the badge); CheckChord still blocks recording it.
-            if (env.IsTaken(chord)) {
-                if (!Contains(env.ime_ignored, chord))
-                    out.push_back({action, chord, ChordIssue::Taken, ChordLevel::Block});
-            } else if (env.ImeApplies(chord)) out.push_back({action, chord, ChordIssue::Ime, ChordLevel::Warn});
+            // Global registration availability does not prove local input is blocked.
+            if (env.ImeApplies(chord)) out.push_back({action, chord, ChordIssue::Ime, ChordLevel::Warn});
         }
     }
     std::stable_sort(out.begin(), out.end(), [](const BindingIssue& a, const BindingIssue& b) {
@@ -775,14 +768,8 @@ std::vector<KeyChord> SuggestChords(const Keymap& keymap, KeyAction action, cons
 
 std::vector<KeyChord> ProbeCandidates(const Keymap& keymap) {
     std::vector<KeyChord> out;
-    for (int i = 0; i < kKeyActionCount; ++i) {
-        const auto action = static_cast<KeyAction>(i);
-        const auto& info = ActionInfo(action);
-        if (info.kind == KeyKind::Fixed || info.kind == KeyKind::Global) continue;
-        for (const KeyChord chord : keymap.EffectiveChords(action)) PushUnique(out, chord);
-        for (const KeyChord chord : DefaultBindings(action)) PushUnique(out, chord);
-        for (const KeyChord chord : SuggestionPool(keymap, action)) PushUnique(out, chord);
-    }
+    // Probe only keys intended for system-wide registration. Local shortcuts
+    // are delivered through window messages and do not need RegisterHotKey.
     for (const KeyChord chord : SuggestionPool(keymap, KeyAction::GlobalSearch)) PushUnique(out, chord);
     if (keymap.GlobalHotkeyEnabled()) {
         const KeyChord own = keymap.GlobalHotkey();

@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <chrono>
 
 namespace {
 int failures = 0;
@@ -94,9 +95,83 @@ void TestBounded() {
     Check(!store.IsDirty(L"C:\\snap-many\\0"), "SNAP-07 marks for folders with no entry are bounded");
     Check(store.EntryCount() == 0 && store.ResidentBytes() == 0, "SNAP-07 marks hold no listings");
 }
+void TestMemoryAccounting() {
+    using namespace pulse::fs;
+    auto short_entries = std::make_shared<std::vector<DirEntry>>(100000);
+    for (auto& e : *short_entries) e.name = L"x";
+    const size_t short_bytes = sizeof(std::vector<DirEntry>) + short_entries->capacity() * sizeof(DirEntry);
+    SnapshotStore measure(16, 0);
+    measure.Update(L"C:\\measure-short", 1, short_entries);
+    std::cout << "MEMORY short_actual=" << short_bytes << " counted=" << measure.ResidentBytes() << '\n';
+    Check(measure.ResidentBytes() == short_bytes, "SNAP-MEM inline names and absent cold records add no heap allocation");
+    auto other_short = std::make_shared<std::vector<DirEntry>>(*short_entries);
+    SnapshotStore two;
+    two.Update(L"C:\\short-a", 1, short_entries);
+    two.Update(L"C:\\short-b", 1, other_short);
+    uint64_t generation = 0;
+    Check(two.GetOrStart(L"C:\\short-a", generation) == short_entries && two.EntryCount() == 2,
+        "SNAP-MEM two 100k short-name folders fit the unchanged 24 MiB budget without re-listing");
+
+    auto cold = std::make_shared<std::vector<DirEntry>>(1);
+    auto& e = cold->front();
+    e.name = std::wstring(120, L'n');
+    auto& extra = e.extra_.Mutable();
+    std::wstring* fields[] = {&extra.full_path, &extra.recycle_path, &extra.change_type_text,
+        &extra.change_old_path, &extra.link_target, &extra.link_destination, &extra.shell_id};
+    size_t expected = sizeof(std::vector<DirEntry>) + cold->capacity() * sizeof(DirEntry) +
+        sizeof(DirEntryExtra) + (e.name.capacity() + 1) * sizeof(wchar_t);
+    for (auto field : fields) {
+        field->reserve(256);
+        *field = L"long cold value";
+        expected += (field->capacity() + 1) * sizeof(wchar_t);
+    }
+    extra.recycle_path.clear(); // Empty does not imply its allocation was released.
+    SnapshotStore cold_store(16, 0);
+    cold_store.Update(L"C:\\cold", 1, cold);
+    std::cout << "MEMORY cold_actual=" << expected << " counted=" << cold_store.ResidentBytes() << '\n';
+    Check(cold_store.ResidentBytes() == expected, "SNAP-MEM cold object plus all seven external strings and terminators counted");
+    auto large_cold = std::make_shared<std::vector<DirEntry>>(6000, e);
+    const auto& copy = large_cold->front();
+    const auto& copy_extra = copy.extra_.Get();
+    const std::wstring* copied_fields[] = {&copy_extra.full_path, &copy_extra.recycle_path, &copy_extra.change_type_text,
+        &copy_extra.change_old_path, &copy_extra.link_target, &copy_extra.link_destination, &copy_extra.shell_id};
+    size_t per_entry = sizeof(DirEntry) + sizeof(DirEntryExtra) + (copy.name.capacity()+1)*sizeof(wchar_t);
+    for(auto field : copied_fields) if(field->capacity()>std::wstring().capacity()) per_entry+=(field->capacity()+1)*sizeof(wchar_t);
+    const size_t copied_bytes = sizeof(std::vector<DirEntry>) + 6000 * per_entry;
+    SnapshotStore bounded;
+    for (int i=0;i<12;++i) bounded.Update(L"C:\\cold-"+std::to_wstring(i),1,std::make_shared<std::vector<DirEntry>>(*large_cold));
+    Check(bounded.ResidentBytes() == bounded.EntryCount()*copied_bytes && bounded.ResidentBytes() <= 24ull*1024*1024,
+        "SNAP-MEM long-lived cold listings respect actual payload budget");
+
+    const auto begin=std::chrono::steady_clock::now();
+    for(int i=0;i<100;++i) measure.Update(L"C:\\measure-short",2+i,short_entries);
+    for(int i=0;i<100;++i) measure.Put(L"C:\\measure-short",short_entries);
+    const double elapsed=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count();
+    std::cout << "PERF same_snapshot_200_updates_ms=" << elapsed << '\n';
+    measure.MarkDirty(L"C:\\measure-short");
+    const DirectoryIdentity identity{7, 8, 9};
+    measure.Update(L"C:\\measure-short", 150, short_entries, identity, 500);
+    Check(!measure.IsDirty(L"C:\\measure-short") && measure.ListedSince(L"C:\\measure-short", 500) &&
+        SameDirectoryIdentity(measure.Identity(L"C:\\measure-short"), identity),
+        "SNAP-MEM same-pointer Update still publishes freshness and directory identity");
+    measure.MarkDirty(L"C:\\measure-short");
+    Check(measure.Put(L"C:\\measure-short", short_entries) == 150 &&
+        !measure.IsDirty(L"C:\\measure-short") && measure.GetOrStart(L"C:\\measure-short", generation) == short_entries && generation == 150,
+        "SNAP-MEM same-pointer Put clears dirtiness without changing worker generation");
+    auto replacement=Listing(2);
+    measure.Update(L"C:\\measure-short", 200, replacement);
+    const auto replacement_bytes=measure.ResidentBytes();
+    measure.Update(L"C:\\measure-short", 100, short_entries);
+    Check(measure.Peek(L"C:\\measure-short")==replacement && measure.ResidentBytes()==replacement_bytes,
+        "SNAP-MEM new immutable snapshot is recounted and stale generations cannot replace it");
+}
 } // namespace
 
-int wmain() {
+int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--memory") {
+        TestMemoryAccounting();
+        return failures ? 1 : 0;
+    }
     TestNeverListed();
     TestBigFolderEvicted();
     TestCountEviction();

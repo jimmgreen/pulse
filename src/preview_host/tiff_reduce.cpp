@@ -580,6 +580,31 @@ TiffReduceStatus ReduceTiffMemory(const uint8_t* data, size_t size, uint32_t min
     return ReduceTiff(source, min_edge, threads, out);
 }
 
+bool EstimateReducedTiffMemory(const std::wstring& path, uint32_t min_edge, uint64_t& bytes) {
+    FileSource source(path);
+    Layout layout;
+    if (!min_edge || !source.Open() || ParseLayout(source, layout) != TiffReduceStatus::Made) return false;
+    const uint32_t factor = (std::max)(layout.width, layout.height) / min_edge;
+    if (factor < 2 || factor > kMaxFactor) return false;
+    const uint64_t groups = (std::min)(layout.down, (std::min)(8u, (std::max)(1u, std::thread::hardware_concurrency())));
+    const uint64_t raster = uint64_t(layout.seg_width) * layout.seg_height * layout.spp * layout.bytes_per_sample;
+    const uint64_t packed = layout.counts.empty() ? 0 : *std::max_element(layout.counts.begin(), layout.counts.end());
+    const uint64_t output = ((uint64_t(layout.width) + factor - 1) / factor) * ((uint64_t(layout.height) + factor - 1) / factor);
+    // Per-group compressed and decoded segment; band sums + merged sums,
+    // reduced image, WIC copy, conversion/scaling and IPC output.
+    const auto multiply = [](uint64_t a, uint64_t b) {
+        return b && a > UINT64_MAX / b ? UINT64_MAX : a * b;
+    };
+    const auto add = [](uint64_t a, uint64_t b) {
+        return b > UINT64_MAX - a ? UINT64_MAX : a + b;
+    };
+    bytes = add(32ull << 20, multiply(groups, add(raster, packed)));
+    bytes = add(bytes, multiply(output, 64));
+    bytes = add(bytes, multiply(layout.counts.size(), 48));
+    bytes = add(bytes, multiply(multiply(min_edge, min_edge), 16));
+    return true;
+}
+
 bool ReduceTiffFile(const std::wstring& path, uint32_t min_edge, TiffReduced& out) {
     FileSource source(path);
     if (!source.Open()) return false;

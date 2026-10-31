@@ -55,7 +55,7 @@ struct ContextMenuPrefs {
     std::vector<SeenMenuItem> seen;
     std::unordered_map<std::wstring, SlowComExt> slow_ext;
     // Pulse's own menu rows / row buttons the user turned off (BuiltinMenuBit).
-    uint32_t builtin_hidden = 0;
+    uint64_t builtin_hidden = 0;
     // Their order per BuiltinMenuSurface; empty = table order.
     BuiltinMenuOrder builtin_order[static_cast<size_t>(BuiltinMenuSurface::Count)];
 

@@ -4964,5 +4964,14 @@
 #define IDS_ASST_ENABLED_TITLE                                                           6130
 #define IDS_ASST_ENABLED_DESC                                                            6131
 #define IDS_AI_JUMP_LATEST                                                               6244
+#define IDS_OP_APPLY_KNOWN_LEAD                                                          6245
+#define IDS_OP_APPLY_KNOWN_END                                                           6246
+#define IDS_OP_SCANNING_AND_COPYING                                                      6247
+#define IDS_OP_DISCOVERED_PENDING                                                        6248
+#define IDS_COPY_VERIFICATION_SOURCE_CHANGED                                             6249
+#define IDS_COPY_VERIFICATION_TARGET_CHANGED                                             6250
+#define IDS_GIT                                                                          6251
+#define IDS_PACKAGED_MENU_SOURCE                                                         6252
+#define IDS_PACKAGED_MENU_READ_ONLY                                                      6253
 
 #endif  // PULSE_STRING_IDS_H

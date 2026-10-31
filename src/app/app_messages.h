@@ -60,6 +60,7 @@ constexpr UINT WM_REOPEN_CLOSED_TABS = WM_APP + 86;  // the "N tabs closed" toas
 constexpr UINT WM_NETWORK_CONNECT = WM_APP + 88;  // app::NetworkConnectResult* (network_connect.h)
 constexpr UINT WM_CTX_LAYOUT_SEED = WM_APP + 87;  // lParam CtxLayoutSeed*: persistent menu layout read (C4)
 constexpr UINT WM_OPEN_EXTERNAL = WM_APP + 89;  // host: wake only; SingleInstanceCoordinator owns queued requests
+constexpr UINT WM_DRIVE_EJECT_READY = WM_APP + 133; // shared_ptr<DriveEjectTask>*
 constexpr UINT WM_DRIVE_VERB = WM_APP + 90;  // app::DriveVerbResult* (drive_verbs.h): eject / disconnect finished
 constexpr UINT WM_DETAILS_TREE_UNDO = WM_APP + 91;  // the "expanded N folders" snack: undo it
 constexpr UINT WM_UNDO_DELETE = WM_APP + 92;  // the "deleted N items" snack: undo the delete

@@ -1,3 +1,4 @@
+#include <future>
 // ui_renderer.h — Full-window Fluent renderer (title bar, toolbar, sidebar, pane, tray).
 #pragma once
 #include "ui_view_model.h"
@@ -14,6 +15,7 @@
 #include "preview_handler_host.h"
 #include "video_preview.h"
 #include "ui_motion.h"
+#include "item_check_motion.h"
 #include "link_pill.h"
 #include "ui_view_morph.h"
 #include "group_wheel.h"
@@ -32,8 +34,12 @@ class MainRenderer {
 public:
     void SetResourceModule(HINSTANCE module) { resource_module_ = module; }
     HINSTANCE ResourceModule() const { return resource_module_ ? resource_module_ : GetModuleHandleW(nullptr); }
+    std::vector<std::shared_future<void>> SuspendVolume(const std::wstring& root);
+    void ResumeVolume(const std::wstring& root);
 
     MainRenderer();
+    ~MainRenderer();
+    void PruneWallViews(const std::vector<PaneSlotView>& panes) const;
     // Draws from caches shared with other windows (AppCore::render_caches).
     explicit MainRenderer(RenderCaches& caches);
     MainRenderer(const MainRenderer&) = delete;
@@ -227,6 +233,7 @@ public:
     float FocusedPaneBannerHeight() const { return focused_banner_height_; }
     float ColumnHeaderHeight() const { return column_header_height_; }
     float RowHeight() const { return row_height_; }
+    void ReconcileWallAnchor(PaneViewModel& vm, const D2D1_RECT_F& bounds) const;
     float ListRowHeightDip(const PaneViewModel& vm) const;
     // Same, but aware of the two-line (name + path) narrow search layout; icon
     // grids get their name block and icon size (the pane's ViewLayout inputs).
@@ -341,6 +348,7 @@ public:
     // Owner-drawn text fields (Settings > 快捷键 search): milliseconds until
     // the caret should toggle, 0 when no drawn caret is showing.
     UINT CaretBlinkDueMs() const { return caret_due_ms_; }
+    uint64_t ThumbnailRetryDeadline() { return thumbnail_cache_.WindowRetryDeadline(notify_hwnd_); }
     bool TickMotion(ULONGLONG now) {
         // Glides run on the NowMs clock; `now` (GetTickCount64) serves the
         // task pill and copy feedback below.
@@ -774,6 +782,8 @@ public:
 
 private:
     HINSTANCE resource_module_ = nullptr;
+    std::vector<std::wstring> suspended_volumes_;
+
     UINT caret_due_ms_ = 0;
     DWORD shortcut_caret_epoch_ = 0;
     bool shortcut_caret_focus_ = false;
@@ -1176,6 +1186,8 @@ private:
     bool click_single_ = false;
     int click_band_ = 0;
     bool item_checks_ = false;
+    std::array<ItemCheckMotion, 8> item_check_motion_;
+
     MtimeHint mtime_hint_ = MtimeHint{0};  // off until the app applies its prefs (pickers stay plain)
     uint64_t mtime_next_boundary_ = UINT64_MAX;  // FILETIME the next drawn mark changes bucket
     uint64_t mtime_flash_until_ = 0;              // NowMs: a changed row is still glowing
@@ -1384,7 +1396,9 @@ private:
     std::unordered_set<int> fluent_svg_failed_;
     // Colour icons rasterized once per size and quarter-pixel offset:
     // DrawSvgDocument re-tessellates the artwork on every call.
-    ComPtr<ID2D1DeviceContext> fluent_raster_dc_;
+    ComPtr<ID2D1DeviceContext5> fluent_raster_dc_;
+    ID2D1DeviceContext5* FluentRasterContext();
+    void PrepareFluentSvgBitmaps(const std::vector<std::pair<int, D2D1_RECT_F>>& requests);
     std::unordered_map<uint64_t, ComPtr<ID2D1Bitmap1>> fluent_bitmaps_;
     ID2D1Bitmap1* FluentSvgBitmap(int resource_id, ID2D1SvgDocument* svg, int size_q, int fx, int fy);
     ID2D1DeviceContext* logo_dc_ = nullptr;

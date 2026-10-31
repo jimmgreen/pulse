@@ -7,6 +7,7 @@
 #include "lumatext_renderer.h"
 #include "typography.h"
 #include "window_material.h"
+#include "text_contrast_scope.h"
 
 #include <windowsx.h>
 #include <commctrl.h>
@@ -861,6 +862,8 @@ bool FluentMenu::RenderSurface(const FluentMenuModel& model, int hover_row, int 
     // glyphs (worst on CJK) once composited by UpdateLayeredWindow.
     const D2D1_TEXT_ANTIALIAS_MODE old_text_aa = dc->GetTextAntialiasMode();
     dc->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+    const bool high_contrast = IsHighContrast();
+    const TextContrastScope text_contrast_scope(high_contrast);
     dc->BeginDraw();
     dc->Clear(D2D1::ColorF(0, 0, 0, 0));
 
@@ -869,7 +872,7 @@ bool FluentMenu::RenderSurface(const FluentMenuModel& model, int hover_row, int 
     const auto drop = (anchor_to_rect_ && header > 0)
         ? D2D1::RectF(card.left, card.top + (float)header, card.right, card.bottom)
         : card;
-    Theme theme = IsHighContrast() ? MakeHighContrastTheme() : MakeTheme(dark_, accent_);
+    Theme theme = high_contrast ? MakeHighContrastTheme() : MakeTheme(dark_, accent_);
     const float radius = theme.radius_flyout * scale_;
 
     // Drop shadow: card silhouette -> CLSID_D2D1Shadow, drawn with an offset.
@@ -893,7 +896,7 @@ bool FluentMenu::RenderSurface(const FluentMenuModel& model, int hover_row, int 
     }
 
     bool plate = false;
-    if (acrylic_active_ && !IsHighContrast() && drop.right > drop.left && drop.bottom > drop.top) {
+    if (acrylic_active_ && !high_contrast && drop.right > drop.left && drop.bottom > drop.top) {
         const POINT origin = main ? POINT{ base_x_, base_y_ } : POINT{ sub_x_, sub_y_ };
         plate = EnsurePlate(s, drop, origin, bmp);
         ComPtr<ID2D1Factory> factory;
@@ -911,7 +914,7 @@ bool FluentMenu::RenderSurface(const FluentMenuModel& model, int hover_row, int 
         }
     }
 
-    if (painter_.BeginFrame(theme, IsHighContrast())) {
+    if (painter_.BeginFrame(theme, high_contrast)) {
         if (drop.right > drop.left && drop.bottom > drop.top)
             painter_.DrawMenuSurface(drop, plate);
         if (anchor_to_rect_ && header > 0) {
@@ -939,7 +942,7 @@ bool FluentMenu::RenderSurface(const FluentMenuModel& model, int hover_row, int 
         // Hover plate: one rounded rect that glides between rows (Plate
         // spring) instead of each row lighting up on its own. High contrast
         // keeps the per-row system highlight.
-        const bool glide = !IsHighContrast();
+        const bool glide = !high_contrast;
         int plate_row = -1;
         if (glide && hover_row >= 0) {
             const FluentMenuItem* hv = model.At(hover_row);
@@ -1457,9 +1460,11 @@ bool FluentMenu::RenderTip(const std::wstring& text) {
     dc->SetTarget(bmp.get());
     const D2D1_TEXT_ANTIALIAS_MODE old_text_aa = dc->GetTextAntialiasMode();
     dc->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+    const bool high_contrast = IsHighContrast();
+    const TextContrastScope text_contrast_scope(high_contrast);
     dc->BeginDraw();
     dc->Clear(D2D1::ColorF(0, 0, 0, 0));
-    const Theme theme = IsHighContrast() ? MakeHighContrastTheme() : MakeTheme(dark_, accent_);
+    const Theme theme = high_contrast ? MakeHighContrastTheme() : MakeTheme(dark_, accent_);
     // The layered window has nothing behind it: flatten the flyout colour onto bg.
     D2D1_COLOR_F fill = theme.surface_flyout;
     const float a = fill.a;

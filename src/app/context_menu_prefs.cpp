@@ -1,4 +1,4 @@
-// context_menu_prefs.cpp — JSON load/save for the Explorer fusion-zone prefs.
+﻿// context_menu_prefs.cpp — JSON load/save for the Explorer fusion-zone prefs.
 #include "context_menu_prefs.h"
 #include "../common/config_json.h"
 #include "session.h"
@@ -13,6 +13,18 @@ namespace pulse::app {
 namespace {
 
 using pulse::json::ExtractObject;
+constexpr size_t kSeenCatalogLimit = 400;
+
+void RetireOldestSeen(ContextMenuPrefs& prefs) {
+    auto oldest = std::find_if(prefs.seen.begin(), prefs.seen.end(), [&](const auto& row) {
+        return !prefs.item_enabled.contains(row.key) && !prefs.ComDisabled(row.key);
+    });
+    if (oldest == prefs.seen.end()) oldest = prefs.seen.begin();
+    // The catalog is bounded discovery metadata; user overrides and disabled
+    // handler state remain intact even when every catalog row is configured.
+    if (oldest != prefs.seen.end()) prefs.seen.erase(oldest);
+}
+
 
 // 2: slow_ext only holds handlers the host proved hung (collect_hung). Files
 // written before that carry disables from the old "everyone still running
@@ -184,9 +196,12 @@ std::vector<std::wstring> ContextMenuPrefs::DisabledHandlerClsids() const {
 bool ContextMenuPrefs::RecordSeen(const std::wstring& key, const std::wstring& text,
                                   bool flyout, ipc::CtxMenuCategory category, bool from_com) {
     if (key.empty() || text.empty()) return false;
-    for (const auto& item : seen)
-        if (item.key == key) return false;
-    if (seen.size() >= 400) return false;
+    const auto found = std::find_if(seen.begin(), seen.end(), [&](const auto& item) { return item.key == key; });
+    if (found != seen.end()) {
+        std::rotate(found, std::next(found), seen.end());
+        return false;
+    }
+    while (seen.size() >= kSeenCatalogLimit) RetireOldestSeen(*this);
     SeenMenuItem item;
     item.key = key;
     item.text = text;
@@ -458,6 +473,7 @@ bool ContextMenuPrefs::FromJson(const std::wstring& json) {
         open_with_com = true;
         if (open_with_mru == 2) open_with_mru = -1;
     }
+    while (seen.size() > kSeenCatalogLimit) RetireOldestSeen(*this);
     migrated = version < kPrefsVersion;
     return true;
 }

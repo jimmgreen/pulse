@@ -1,3 +1,4 @@
+#include "../common/volume_path.h"
 // ui_hover_preview.cpp - The hover preview card (HoverPreviewView): an
 // acrylic flyout beside the hovered file with its preview, an icon tile with
 // the name and type, and a strip of three key facts.
@@ -222,6 +223,7 @@ VideoPreview::State MainRenderer::HoverVideoState() const {
 
 void MainRenderer::DrawHoverPreview(const HoverPreviewView& view, const D2D1_RECT_F& client,
                                     const Theme& theme, bool high_contrast) {
+    if (path::OnAnyVolume(view.path, suspended_volumes_)) return;
     hover_frame_ms_ = 0;
     const auto stop_video = [&] {
         if (hover_video_ && hover_video_->active()) hover_video_->Reset();
@@ -395,6 +397,18 @@ void MainRenderer::DrawHoverPreview(const HoverPreviewView& view, const D2D1_REC
     const D2D1_RECT_F content = show_well
         ? D2D1::RectF(well.left + 4.0f * s, well.top + 4.0f * s, well.right - 4.0f * s, well.bottom - 4.0f * s)
         : D2D1::RectF(card.left, card.top, card.left + 1.0f, card.top + 1.0f);
+    // A playing clip replaces the poster. Take one snapshot for this frame,
+    // and keep the poster path only until an actual video image is available.
+    VideoPreview::State video;
+    uint64_t serial = 0;
+    std::shared_ptr<const FfmpegFrame> picture;
+    if (view.video && view.owner && hover_video_ && hover_video_path_ == view.path) {
+        video = hover_video_->Snapshot();
+        if (video.ffmpeg) picture = hover_video_->Frame(serial);
+    }
+    const bool video_showing = !hover_video_failed_ && video.ready && SUCCEEDED(video.error) &&
+        (!video.missing_decoder || video.ffmpeg) &&
+        (video.ffmpeg ? picture && picture->width && picture->height : video.position > 0);
     uint32_t decoded_w = 0, decoded_h = 0;
     std::wstring preview_text;
     // Office documents ask for the thumbnail kind of preview: the embedded
@@ -407,10 +421,10 @@ void MainRenderer::DrawHoverPreview(const HoverPreviewView& view, const D2D1_REC
     // is none instead of trying the shell and a hex dump.
     // HEIF: the embedded thumbnail first, then the photo; while the photo
     // decodes the cache keeps drawing the thumbnail (a stale size).
-    const bool heif_wait = HeifPhoto(view.name) &&
+    const bool heif_wait = !video_showing && HeifPhoto(view.name) &&
         hover_cache_.Draw(dc, content, view.path, view.attrs, kHeifQuickEdge, 1, view.modified, view.size, 0.0f,
             nullptr, nullptr, nullptr, true) == PreviewDrawResult::Pending;
-    const PreviewDrawResult result = heif_wait ? PreviewDrawResult::Pending :
+    const PreviewDrawResult result = video_showing ? PreviewDrawResult::Bitmap : heif_wait ? PreviewDrawResult::Pending :
         hover_cache_.Draw(dc, content, view.path, view.attrs, 1024u, 1,
         view.modified, view.size, show_well ? 1.0f : 0.0f, &preview_text, nullptr, nullptr,
         !OfficeDocument(view.name), nullptr, nullptr, nullptr, nullptr, nullptr, 0, nullptr, nullptr, nullptr,
@@ -487,8 +501,6 @@ void MainRenderer::DrawHoverPreview(const HoverPreviewView& view, const D2D1_REC
                 hover_video_path_ = view.path;
             }
         }
-        VideoPreview::State video;
-        if (hover_video_ && hover_video_path_ == view.path) video = hover_video_->Snapshot();
         // No picture to show: an error, or Media Foundation would only play
         // the (muted) sound because the video decoder is missing.
         if (!hover_video_failed_ && hover_video_path_ == view.path &&
@@ -513,11 +525,7 @@ void MainRenderer::DrawHoverPreview(const HoverPreviewView& view, const D2D1_REC
             frame = D2D1::RectF(std::round(cx - w * 0.5f), std::round(cy - h * 0.5f),
                                 std::round(cx + w * 0.5f), std::round(cy + h * 0.5f));
         }
-        uint64_t serial = 0;
-        std::shared_ptr<const FfmpegFrame> picture;
-        if (video.ffmpeg && hover_video_) picture = hover_video_->Frame(serial);
-        const bool showing = !hover_video_failed_ && video.ready && SUCCEEDED(video.error) &&
-            (video.ffmpeg ? picture && picture->width && picture->height : video.position > 0);
+        const bool showing = video_showing;
         if (hover_video_ && hover_video_->active()) {
             const RECT bounds{std::lround(frame.left), std::lround(frame.top), std::lround(frame.right),
                               std::lround(frame.bottom)};

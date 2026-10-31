@@ -42,6 +42,7 @@
 #include "../common/text_format.h"
 #include "../common/path_utils.h"
 #include "../common/diagnostics_exporter.h"
+#include "../common/runtime_log.h"
 #include "snapshot_patch.h"
 #include "entry_group.h"
 #include "cloud_roots.h"
@@ -1787,6 +1788,10 @@ static bool ApplyWorkerResultToWindow(AppState& s, app::WorkResult& res, bool ag
     s.timing.sort_ms = res.sort_ms;
     s.timing.sort_done_ms = res.enum_ms + res.sort_ms;
     pulse::app::startup_trace::Mark("listing_applied");
+    diagnostics::runtime::Event("navigation_snapshot_applied", {{"generation", res.generation},
+        {"entries", res.snapshot ? res.snapshot->size() : 0},
+        {"enum_us", static_cast<uint64_t>(res.enum_ms * 1000.0)},
+        {"sort_us", static_cast<uint64_t>(res.sort_ms * 1000.0)}});
 
     if (s.shot.active) InvalidateRect(s.hwnd, nullptr, FALSE);
     return false;

@@ -1,4 +1,5 @@
 #include "context_menu_controller.h"
+#include "../common/context_diagnostics.h"
 #include "../common/localization.h"
 
 #include "../ipc/ctx_menu_util.h"
@@ -103,6 +104,7 @@ ShellMenuEntry ComEntry(const ops::ShellMenuItem& item, int command = 0) {
 
 void AppendShellSection(std::vector<ui::FluentMenuItem>& items,
                         const std::vector<ShellMenuEntry>& entries) {
+    context_diagnostics::Batch diagnostic(L"append-shell");
     if (entries.empty()) return;
     auto lower = [](std::wstring s) {
         for (auto& c : s) c = static_cast<wchar_t>(std::towlower(c));
@@ -115,9 +117,9 @@ void AppendShellSection(std::vector<ui::FluentMenuItem>& items,
     size_t added = 0;
     for (const auto& e : entries) {
         const bool header = !e.children.empty();
-        if (e.text.empty() || (e.command == 0 && !header)) continue;
+        if (e.text.empty() || (e.command == 0 && !header)) { diagnostic.Row(L"drop-invalid", e.text); continue; }
         const std::wstring key = lower(e.text);
-        if (!seen.insert(key).second) continue;
+        if (!seen.insert(key).second) { diagnostic.Row(L"drop-duplicate-label", e.text); continue; }
         if (added == 0 && !items.empty()) items.back().separator_after = true;
         ui::FluentMenuItem row;
         row.command = e.command;
@@ -189,12 +191,18 @@ std::vector<ui::FluentMenuItem> ReconcileCtxDisplay(
         out.push_back(std::move(row));
         ++result.late;
     }
+    context_diagnostics::Batch diagnostic(L"reconcile");
+    diagnostic.Number(L"greyed", result.greyed);
+    diagnostic.Number(L"withheld", result.withheld);
+    diagnostic.Number(L"late", result.late);
+    for (const auto& row : out) diagnostic.Row(row.enabled ? L"candidate-enabled" : L"candidate-disabled", row.text);
     if (stats) *stats = result;
     return out;
 }
 
 std::vector<ShellMenuEntry> ApplyExplorerPrefs(const ContextMenuPrefs& prefs,
                                                const std::vector<ShellMenuEntry>& entries) {
+    context_diagnostics::Batch diagnostic(L"preferences");
     std::vector<ShellMenuEntry> compress_top;
     struct Ranked {
         ShellMenuEntry entry;
@@ -210,10 +218,12 @@ std::vector<ShellMenuEntry> ApplyExplorerPrefs(const ContextMenuPrefs& prefs,
         ipc::CtxMenuCategory::Software, true);
 
     for (const auto& e : entries) {
-        if (e.text.empty()) continue;
-        if (!e.clsid.empty() && !prefs.HandlerEnabled(e.clsid)) continue;
+        diagnostic.Row(e.from_com ? L"input-com" : L"input-static", e.text);
+        if (e.text.empty()) { diagnostic.Row(L"drop-empty"); continue; }
+        if (!e.clsid.empty() && !prefs.HandlerEnabled(e.clsid)) { diagnostic.Row(L"drop-handler-disabled", e.clsid); continue; }
         const bool flyout = !e.children.empty();
         if (!flyout && ipc::IsCompressTopLevel(e.text)) {
+            diagnostic.Row(compress_on ? L"regroup-compression" : L"drop-compression-preference", e.text);
             if (compress_on) compress_top.push_back(e);
             continue;
         }
@@ -221,9 +231,13 @@ std::vector<ShellMenuEntry> ApplyExplorerPrefs(const ContextMenuPrefs& prefs,
         const std::wstring key = !e.clsid.empty()
             ? ipc::HandlerCatalogKey(e.clsid)
             : ipc::CatalogKey(e.text, flyout);
-        if (!prefs.RowEnabled(key, cat, e.from_com)) continue;
+        diagnostic.Number(L"category", static_cast<unsigned>(cat));
+        if (!prefs.RowEnabled(key, cat, e.from_com)) {
+            diagnostic.Row(prefs.item_enabled.contains(key) ? L"drop-item-override" : L"drop-category-or-com-preference", e.text);
+            continue;
+        }
         if (cat == ipc::CtxMenuCategory::OpenWith && ipc::IsOpenWithMruText(e.text)) {
-            if (mru_cap >= 0 && mru_kept >= mru_cap) continue;
+            if (mru_cap >= 0 && mru_kept >= mru_cap) { diagnostic.Row(L"drop-mru-cap", e.text); continue; }
             ++mru_kept;
         }
         // Explorer's order: vendor flyouts, then software verbs, 打开方式, 打印,
@@ -248,6 +262,7 @@ std::vector<ShellMenuEntry> ApplyExplorerPrefs(const ContextMenuPrefs& prefs,
                     dup = true;
                     break;
                 }
+            if (dup) diagnostic.Row(L"drop-compression-duplicate", row.text);
             if (!dup) dest.children.push_back(std::move(row));
         }
         compress_top.clear();
@@ -317,6 +332,9 @@ void ContextMenuController::StartQuery(
     extension_ = std::move(extension);
     if (background && extension_.empty()) extension_ = ipc::kBackgroundVerbKey;
     names_ = CtxNamesFor(paths_, background_);
+    context_diagnostics::Batch diagnostic(L"start-query");
+    diagnostic.Number(L"token", token);
+    diagnostic.Number(L"selection-count", paths.size());
     token_ = token;
     com_ready_ = false;
     com_predicted_ = false;
@@ -397,10 +415,16 @@ bool IsNativeNewEntry(const ShellMenuEntry& entry) {
 std::vector<ui::FluentMenuItem> ContextMenuController::BuildDisplay(
     ContextMenuPrefs& prefs, const std::vector<ui::FluentMenuItem>& base_items,
     bool& prefs_changed) const {
+    context_diagnostics::Batch diagnostic(L"build-display");
+    diagnostic.Number(L"token", token_);
+    diagnostic.Row(com_predicted_ ? L"cache-predicted" : L"live-layout");
     std::vector<ui::FluentMenuItem> display = base_items;
     auto entries = ComposeEntries(prefs, prefs_changed);
     // The same entries already sit in Pulse's 新建 flyout; one 新建 is enough.
-    if (HasPulseNewMenu(base_items)) std::erase_if(entries, IsNativeNewEntry);
+    if (HasPulseNewMenu(base_items)) {
+        for (const auto& entry : entries) if (IsNativeNewEntry(entry)) diagnostic.Row(L"drop-native-new-duplicate", entry.text);
+        std::erase_if(entries, IsNativeNewEntry);
+    }
     AppendShellSection(display, ApplyExplorerPrefs(prefs, std::move(entries)));
     ui::FluentMenuItem manage;
     manage.command = CmdSettingsContextMenu;
@@ -408,6 +432,10 @@ std::vector<ui::FluentMenuItem> ContextMenuController::BuildDisplay(
     manage.glyph = L"\xE713";
     if (!display.empty()) display.back().separator_after = true;
     display.push_back(std::move(manage));
+    for (const auto& row : display) {
+        diagnostic.Row(row.enabled ? L"candidate-enabled" : L"candidate-disabled", row.text);
+        for (const auto& child : row.children) diagnostic.Row(child.enabled ? L"candidate-child-enabled" : L"candidate-child-disabled", child.text);
+    }
     return display;
 }
 
@@ -460,6 +488,13 @@ std::vector<ui::FluentMenuItem> ContextMenuController::ReconcileDisplay(
 }
 
 void ContextMenuController::CommitDisplay(std::vector<ui::FluentMenuItem> shown) {
+    context_diagnostics::Batch diagnostic(L"commit-display");
+    diagnostic.Number(L"token", token_);
+    diagnostic.Number(L"rows", shown.size());
+    for (const auto& row : shown) {
+        diagnostic.Row(row.enabled ? L"committed-enabled" : L"committed-disabled", row.text);
+        for (const auto& child : row.children) diagnostic.Row(child.enabled ? L"committed-child-enabled" : L"committed-child-disabled", child.text);
+    }
     shown_ = std::move(shown);
     // Appended rows are shown rows from now on: late adds up, greyed is the
     // current state.
@@ -735,6 +770,11 @@ ContextMenuController::QueryCompletion ContextMenuController::CompleteComQuery(
         return result;
     }
     if (token == 0 || token != token_) return result;
+    context_diagnostics::Batch diagnostic(L"complete-com");
+    diagnostic.Number(L"token", token);
+    diagnostic.Number(L"partial", partial);
+    diagnostic.Number(L"rows", items.size());
+    diagnostic.Number(L"predicted", com_predicted_);
     result.accepted = true;
     result.partial = partial;
     result.cache_key = CacheKey(background_, extension_, paths_.size() > 1);
@@ -776,6 +816,9 @@ ContextMenuController::QueryCompletion ContextMenuController::CompleteComQuery(
 
 std::vector<ShellMenuEntry> ContextMenuController::ComposeEntries(
     ContextMenuPrefs& prefs, bool& prefs_changed) const {
+    context_diagnostics::Batch diagnostic(L"compose-input");
+    for (const auto& row : static_verbs_) diagnostic.Row(L"static", row.display);
+    for (const auto& row : com_items_) { diagnostic.Row(row.child ? L"com-child" : L"com", row.text); diagnostic.Row(L"clsid", row.clsid); }
     std::vector<ShellMenuEntry> entries;
     entries.reserve(static_verbs_.size() + com_items_.size());
     // Explorer's own 打开方式 flyout (recommended apps + 选择其他应用) replaces
@@ -790,7 +833,7 @@ std::vector<ShellMenuEntry> ContextMenuController::ComposeEntries(
     for (size_t i = 0; i < static_verbs_.size() && i < static_cast<size_t>(ipc::kMaxStaticVerbParents);
          ++i) {
         const auto& verb = static_verbs_[i];
-        if (com_open_with && ipc::ToLowerVerb(verb.verb) == L"openas") continue;
+        if (com_open_with && ipc::ToLowerVerb(verb.verb) == L"openas") { diagnostic.Row(L"drop-static-openas-replaced-by-com", verb.display); continue; }
         ShellMenuEntry entry;
         entry.text = verb.display;
         entry.mnemonic = verb.mnemonic;
@@ -950,6 +993,12 @@ bool ContextMenuController::TakeTiming(bool shell_command, CtxMenuTiming& out) {
     // Late rows of an answer the open menu could not take (a visible flyout
     // was changing): the stored layout has them for the next menu.
     timing_.dropped = pending_stats_.late + pending_stats_.withheld;
+    context_diagnostics::Batch diagnostic(L"menu-final-timing");
+    diagnostic.Number(L"token", token_);
+    diagnostic.Number(L"rows", timing_.rows_final);
+    diagnostic.Number(L"late", reconcile_stats_.late);
+    diagnostic.Number(L"greyed", reconcile_stats_.greyed);
+    diagnostic.Number(L"dropped", timing_.dropped);
     timing_.shell_command = shell_command;
     out = std::move(timing_);
     timing_ = {};

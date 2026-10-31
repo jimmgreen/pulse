@@ -3,7 +3,7 @@
 //
 // Open and the cut / copy / delete / rename strip always stay; everything
 // listed here can be turned off. Hidden items persist by key in
-// context_menu.json ("pulse_items"), so the enum order is free to change.
+// context_menu.json ("pulse_items"), and the original enum order stays compatible.
 #pragma once
 #include <cstdint>
 #include <string>
@@ -36,6 +36,31 @@ enum class BuiltinMenuItem : uint8_t {
     Paste,
     Properties,
     FolderProperties,
+    OpenPath,
+    GroupIntoFolder,
+    DissolveFolder,
+    SetAlias,
+    StageToTray,
+    CopyToTarget,
+    MoveToTarget,
+    BatchRename,
+    CompareSideBySide,
+    CloudKeep,
+    CloudFree,
+    EjectDrive,
+    DisconnectDrive,
+    UnlockDrive,
+    MapNetworkDrive,
+    ForgetNetworkRecent,
+    DupKeepThis,
+    DupReapplyRules,
+    FindDuplicates,
+    AiOrganizeHere,
+    NewTemplates,
+    Git,
+    ConnectServer,
+    CopyToWindow,
+    MoveToWindow,
     Count
 };
 
@@ -43,10 +68,10 @@ constexpr int kBuiltinMenuItemCount = static_cast<int>(BuiltinMenuItem::Count);
 // User order of a surface's movable rows (fixed rows always stay on top).
 // An empty order means the table order.
 using BuiltinMenuOrder = std::vector<BuiltinMenuItem>;
-static_assert(kBuiltinMenuItemCount <= 32, "builtin_hidden is a 32-bit mask");
+static_assert(kBuiltinMenuItemCount <= 64, "builtin_hidden is a 64-bit mask");
 
-constexpr uint32_t BuiltinMenuBit(BuiltinMenuItem item) {
-    return 1u << static_cast<uint32_t>(item);
+constexpr uint64_t BuiltinMenuBit(BuiltinMenuItem item) {
+    return uint64_t{1} << static_cast<uint32_t>(item);
 }
 
 // Stable context_menu.json key ("copy_path", "row_star", ...).
@@ -63,7 +88,7 @@ constexpr uint32_t kRowActionsAll = kRowActionStar | kRowActionNewTab | kRowActi
 // Bits 3-8 carry the left-to-right order of the three buttons as 2-bit ids
 // (0 star, 1 new tab, 2 more); 0 there means the default order.
 constexpr uint32_t kRowActionOrderShift = 3u;
-uint32_t RowActionMask(uint32_t builtin_hidden, const BuiltinMenuOrder& row_order = {});
+uint32_t RowActionMask(uint64_t builtin_hidden, const BuiltinMenuOrder& row_order = {});
 
 // Settings page: the three surfaces the Pulse menu card switches between.
 enum class BuiltinMenuSurface : uint8_t { Item, Background, RowButtons, Count };
@@ -105,7 +130,7 @@ struct BuiltinMenuVisibleRow {
     bool separator_after;
 };
 std::vector<BuiltinMenuVisibleRow> BuiltinMenuVisibleRows(BuiltinMenuSurface surface,
-                                                          uint32_t builtin_hidden,
+                                                          uint64_t builtin_hidden,
                                                           const BuiltinMenuOrder& order = {});
 // True when the item shows in both the file and the blank-area menu, so one
 // switch changes both.
@@ -113,8 +138,8 @@ bool BuiltinMenuShared(BuiltinMenuItem item);
 
 // One-click presets, as builtin_hidden masks. Full is the default.
 enum class BuiltinMenuPreset : uint8_t { Slim, Standard, Full, Count };
-uint32_t BuiltinMenuPresetHidden(BuiltinMenuPreset preset);
+uint64_t BuiltinMenuPresetHidden(BuiltinMenuPreset preset);
 // The preset whose mask equals `builtin_hidden`, or Count for 自定义.
-BuiltinMenuPreset BuiltinMenuPresetFor(uint32_t builtin_hidden);
+BuiltinMenuPreset BuiltinMenuPresetFor(uint64_t builtin_hidden);
 
 } // namespace pulse::app

@@ -1,4 +1,7 @@
+#include <future>
 #pragma once
+#include "plain_highlight_lines.h"
+#include "preview_text_identity.h"
 
 #include "ui_compositor.h"
 #include "thumbnail_cache.h"
@@ -23,6 +26,9 @@ namespace pulse::ui {
 
 class QuickPreviewWindow {
 public:
+    std::vector<std::shared_future<void>> SuspendVolume(const std::wstring& root);
+    void ResumeVolume(const std::wstring& root);
+
     QuickPreviewWindow() = default;
     ~QuickPreviewWindow();
     QuickPreviewWindow(const QuickPreviewWindow&) = delete;
@@ -63,6 +69,8 @@ public:
     std::wstring TakeOpenPath() { std::wstring path; path.swap(open_path_); return path; }
 
 private:
+    std::vector<std::wstring> suspended_volumes_;
+
 #ifdef PULSE_WITH_SELFTEST
     friend struct QuickPreviewAuditTest;
 #endif
@@ -202,7 +210,7 @@ private:
     bool DrawImageBackdrop(ID2D1DeviceContext* dc, const D2D1_RECT_F& content, const D2D1_RECT_F& draw);
     void DrawFindBar(ID2D1DeviceContext* dc, const D2D1_RECT_F& bar);
     Theme CurrentTheme() const;
-    void EnsureTextLayout(const std::wstring& text, bool hex, float width, bool reading = false);
+    void EnsureTextLayout(const std::wstring& text, bool hex, float width, bool reading = false, bool same_text = false);
     bool PlainTextCandidate() const;
     bool HitTestText(float x, float y, uint32_t& index);
     void CopyTextSelection(bool require_selection) const;
@@ -213,6 +221,9 @@ private:
     void UpdateFindMatches();
     void FindNext(int direction);
     void ScrollMatchIntoView(uint32_t start);
+    void ResetTextDrawingCache();
+    void DrawCachedText(ID2D1DeviceContext* dc, ID2D1SolidColorBrush* text_brush,
+                        float origin_x, float origin_y);
     void DrawTextPreview(ID2D1DeviceContext* dc, const D2D1_RECT_F& content,
                           ID2D1SolidColorBrush* text_brush);
     bool ClientPoint(LPARAM lparam, POINT& out) const;
@@ -378,6 +389,15 @@ private:
     ComPtr<IDWriteTextFormat> preview_text_format_;
     ComPtr<IDWriteTextFormat> reading_text_format_;  // .txt reading mode: UI font, 1.75 line height
     ComPtr<IDWriteTextLayout> text_layout_;
+    ComPtr<ID2D1CommandList> text_commands_;
+    ComPtr<ID2D1Device> text_commands_device_;
+    ComPtr<IDWriteRenderingParams> text_commands_params_;
+    D2D1_COLOR_F text_commands_color_{};
+    D2D1_POINT_2F text_commands_origin_{};
+    float text_commands_dpi_x_ = 0.0f;
+    float text_commands_dpi_y_ = 0.0f;
+    D2D1_TEXT_ANTIALIAS_MODE text_commands_aa_ = D2D1_TEXT_ANTIALIAS_MODE_DEFAULT;
+    PlainHighlightLines plain_highlight_lines_;
     QuickPreviewItem item_;
     QuickPreviewCommands commands_;
     std::wstring preview_notice_;
@@ -473,6 +493,7 @@ private:
     bool pages_strip_ = true;
 
     std::wstring preview_text_;
+    PreviewTextIdentity preview_text_identity_;
     float text_layout_width_ = 0.0f;
     float text_layout_scale_ = 0.0f;
     bool text_layout_hex_ = false;

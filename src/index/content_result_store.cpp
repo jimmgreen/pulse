@@ -27,13 +27,18 @@ std::wstring Column(sqlite3_stmt* p, int i) {
     const auto* text = static_cast<const wchar_t*>(sqlite3_column_text16(p,i));
     return text ? std::wstring(text, sqlite3_column_bytes16(p,i)/2) : std::wstring{};
 }
+fs::DirEntry ReadEntry(sqlite3_stmt* p) {
+    fs::DirEntry entry;
+    entry.name = Column(p,0); entry.full_path = Column(p,1);
+    entry.size = static_cast<uint64_t>(sqlite3_column_int64(p,2));
+    const auto stamp = static_cast<uint64_t>(sqlite3_column_int64(p,3));
+    entry.mtime = {static_cast<DWORD>(stamp), static_cast<DWORD>(stamp >> 32)};
+    entry.attrs = FILE_ATTRIBUTE_NORMAL;
+    return entry;
+}
 ContentResultStore::Row ReadRow(sqlite3_stmt* p) {
     ContentResultStore::Row row;
-    row.entry.name = Column(p,0); row.entry.full_path = Column(p,1);
-    row.entry.size = static_cast<uint64_t>(sqlite3_column_int64(p,2));
-    const auto stamp = static_cast<uint64_t>(sqlite3_column_int64(p,3));
-    row.entry.mtime = {static_cast<DWORD>(stamp), static_cast<DWORD>(stamp >> 32)};
-    row.entry.attrs = FILE_ATTRIBUTE_NORMAL;
+    row.entry = ReadEntry(p);
     row.snippet = Column(p,5);
     row.file_id = static_cast<uint64_t>(sqlite3_column_int64(p,6));
     const auto line = sqlite3_column_int(p,4);
@@ -342,14 +347,14 @@ bool ContentResultStore::UpsertChanges(const std::vector<ContentHit>& hits, Cont
     // Rebuild only the compact display order; unchanged bodies and hit rows
     // stay in the disk spool. Page caches remain bounded after every mutation.
     ok = ok && p.Exec("DELETE FROM visible");
-    Statement rows(p.db, ("SELECT name,path,size,mtime,line,snippet,file_id,seq FROM hits ORDER BY " + order).c_str());
+    Statement rows(p.db, ("SELECT name,path,size,mtime,seq FROM hits ORDER BY " + order).c_str());
     Statement visible(p.db,"INSERT INTO visible(pos,seq) VALUES(?1,?2)");
     size_t count = 0, raw = 0;
     int rc = SQLITE_DONE;
     while (ok && rows.p && (rc=sqlite3_step(rows.p)) == SQLITE_ROW) {
-        const auto row = ReadRow(rows.p); ++raw;
-        if (!p.filter || p.filter(row.entry)) {
-            visible.Int(1,count++); visible.Int(2,static_cast<uint64_t>(sqlite3_column_int64(rows.p,7)));
+        ++raw;
+        if (!p.filter || p.filter(ReadEntry(rows.p))) {
+            visible.Int(1,count++); visible.Int(2,static_cast<uint64_t>(sqlite3_column_int64(rows.p,4)));
             ok=visible.Step(); visible.Reset();
         }
     }
@@ -422,13 +427,12 @@ void ContentResultStore::SetFilter(Filter filter) {
             std::lock_guard lock(p->io);
             if(epoch!=p->filter_epoch || p->stopping) return;
             if(!p->Open() || !p->MaterializeVisible() || !p->Exec("BEGIN; DELETE FROM visible;")) { p->error=ERROR_DATABASE_FAILURE; p->filtering=false; p->Notify(); return; }
-            Statement read(p->db,("SELECT name,path,size,mtime,line,snippet,file_id,seq FROM hits ORDER BY " + p->order).c_str());
+            Statement read(p->db,("SELECT name,path,size,mtime,seq FROM hits ORDER BY " + p->order).c_str());
             Statement write(p->db,"INSERT INTO visible VALUES(?1,?2)");
             size_t count=0; int rc=SQLITE_DONE; bool ok=read.p && write.p;
             while(ok && !p->stopping && epoch==p->filter_epoch && (rc=sqlite3_step(read.p))==SQLITE_ROW) {
-                const auto row=ReadRow(read.p);
-                if(!filter || filter(row.entry)) {
-                    write.Int(1,count++); write.Int(2,static_cast<uint64_t>(sqlite3_column_int64(read.p,7)));
+                if(!filter || filter(ReadEntry(read.p))) {
+                    write.Int(1,count++); write.Int(2,static_cast<uint64_t>(sqlite3_column_int64(read.p,4)));
                     ok=write.Step(); write.Reset();
                 }
             }
@@ -573,12 +577,12 @@ void ContentResultStore::Match(Filter filter,std::function<void(Selection)> comp
             std::lock_guard lock(p->io);
             if(!p->Open()) result.error=ERROR_DATABASE_FAILURE;
             else {
-                Statement read(p->db,"SELECT h.name,h.path,h.size,h.mtime,h.line,h.snippet,h.file_id,v.pos FROM visible v JOIN hits h ON h.seq=v.seq ORDER BY v.pos");
+                Statement read(p->db,"SELECT h.name,h.path,h.size,h.mtime,v.pos FROM visible v JOIN hits h ON h.seq=v.seq ORDER BY v.pos");
                 int rc=SQLITE_DONE;
                 if(!read.p) result.error=ERROR_DATABASE_FAILURE;
                 else {
                     while(!p->stopping && (rc=sqlite3_step(read.p))==SQLITE_ROW)
-                        if(!filter || filter(ReadRow(read.p).entry)) result.matches.push_back(sqlite3_column_int(read.p,7));
+                        if(!filter || filter(ReadEntry(read.p))) result.matches.push_back(sqlite3_column_int(read.p,4));
                     if(rc!=SQLITE_DONE) result.error=ERROR_CANCELLED;
                 }
             }

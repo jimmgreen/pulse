@@ -40,15 +40,35 @@ SnapshotStore::SnapshotStore(size_t capacity, size_t byte_capacity)
     : capacity_((std::max<size_t>)(1, capacity)), byte_capacity_(byte_capacity) {
 }
 
-size_t SnapshotStore::SnapshotBytes(const SnapshotPtr& snapshot) {
+namespace {
+size_t StringHeapBytes(const std::wstring& value) {
+    // The inline buffer is already included in its owning object's sizeof.
+    const auto data = reinterpret_cast<uintptr_t>(value.data());
+    const auto object = reinterpret_cast<uintptr_t>(&value);
+    if (data >= object && data - object < sizeof(value)) return 0;
+    return (value.capacity() + 1) * sizeof(wchar_t);
+}
+}
+
+size_t SnapshotStore::SnapshotBytes(const std::wstring& key, const SnapshotPtr& snapshot) const {
     if (!snapshot) return 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto it = map_.find(key);
+        // Reuse only the same immutable object. Another listing of this path
+        // can have different capacities even when its contents compare equal.
+        if (it != map_.end() && it->second.snapshot == snapshot) return it->second.bytes;
+    }
     size_t bytes = sizeof(std::vector<DirEntry>) + snapshot->capacity() * sizeof(DirEntry);
     for (const auto& entry : *snapshot) {
-        bytes += entry.name.capacity() * sizeof(wchar_t);
-        bytes += entry.full_path.capacity() * sizeof(wchar_t);
-        bytes += entry.link_target.capacity() * sizeof(wchar_t);
-        bytes += entry.link_destination.capacity() * sizeof(wchar_t);
-        bytes += entry.shell_id.capacity() * sizeof(wchar_t);
+        bytes += StringHeapBytes(entry.name);
+        if (entry.extra_) {
+            const auto& extra = entry.extra_.Get();
+            bytes += sizeof(DirEntryExtra) + StringHeapBytes(extra.full_path) +
+                StringHeapBytes(extra.recycle_path) + StringHeapBytes(extra.change_type_text) +
+                StringHeapBytes(extra.change_old_path) + StringHeapBytes(extra.link_target) +
+                StringHeapBytes(extra.link_destination) + StringHeapBytes(extra.shell_id);
+        }
     }
     return bytes;
 }
@@ -149,7 +169,7 @@ void SnapshotStore::Update(const std::wstring& path, uint64_t generation,
     std::wstring key = NormalizePath(path);
     if (!path.empty() && key.empty()) return;
     // Snapshots are immutable; count large directories before taking the UI-facing lock.
-    const size_t bytes = SnapshotBytes(snapshot);
+    const size_t bytes = SnapshotBytes(key, snapshot);
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = map_.find(key);
     if (it == map_.end()) {
@@ -187,7 +207,7 @@ uint64_t SnapshotStore::Put(const std::wstring& path, SnapshotPtr snapshot) {
     std::wstring key = NormalizePath(path);
     if (!path.empty() && key.empty()) return 0;
     // Snapshots are immutable; count large directories before taking the UI-facing lock.
-    const size_t bytes = SnapshotBytes(snapshot);
+    const size_t bytes = SnapshotBytes(key, snapshot);
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = map_.find(key);
     if (it == map_.end()) {

@@ -9,6 +9,12 @@
 
 using pulse::ui::VideoPreview;
 static int failures = 0;
+static int layout_messages = 0;
+static WNDPROC original_video_proc = nullptr;
+LRESULT CALLBACK CountLayout(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    if (message == WM_WINDOWPOSCHANGING) ++layout_messages;
+    return CallWindowProcW(original_video_proc, hwnd, message, wparam, lparam);
+}
 void Check(bool ok, const char* label) {
     std::printf("[%s] %s\n", ok ? "PASS" : "FAIL", label);
     std::fflush(stdout);
@@ -56,6 +62,24 @@ int wmain(int argc, wchar_t** argv) {
     VideoPreview video;
     video.Open(window, argv[1]);
     video.Layout(RECT{0, 0, 460, 260}, true);
+    HWND child = GetWindow(window, GW_CHILD);
+    if (child) {
+        original_video_proc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(child, GWLP_WNDPROC,
+            reinterpret_cast<LONG_PTR>(CountLayout)));
+        for (int i = 0; i < 120; ++i) video.Layout(RECT{0, 0, 460, 260}, true);
+        Check(layout_messages == 0, "identical playback layouts do not reposition the video window");
+        video.Layout(RECT{0, 0, 400, 240}, true);
+        Check(layout_messages > 0, "changed playback bounds reposition the video window");
+        layout_messages = 0;
+        video.Layout(RECT{0, 0, 400, 240}, true);
+        Check(layout_messages == 0, "resized playback layout also remains stable");
+        video.Layout(RECT{0, 0, 400, 240}, false);
+        Check(!IsWindowVisible(child), "layout visibility change hides video");
+        video.Layout(RECT{0, 0, 460, 260}, true);
+        Check(IsWindowVisible(child), "layout visibility change restores video");
+        SetWindowLongPtrW(child, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(original_video_proc));
+    }
+    Check(child != nullptr, "video child exists for layout regression");
     const bool opened = Until([&] { auto s = video.Snapshot(); return s.ready || FAILED(s.error); });
     auto state = video.Snapshot();
     std::printf("open HRESULT=%08lx ready=%d size=%ux%u duration=%lld\n",

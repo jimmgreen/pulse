@@ -18,6 +18,8 @@
 #include "../common/preview_extensions.h"
 #include "../common/file_placeholder.h"
 #include "wall_aspects.h"
+#include "wall_layout_source.h"
+#include "wall_layout_job.h"
 #include "file_name_breaks.h"
 #include "../fs/cloud_state.h"
 #include "../app/cloud_sync_probe.h"
@@ -1164,7 +1166,7 @@ MainRenderer::DetailsColumnLayout MainRenderer::DetailsColumns(
 
 namespace {
 int FolderIconNameLines(Compositor* compositor, const PaneViewModel& vm, float scale);
-const WallRows* PaneWallRows(const PaneViewModel& vm, float width, float scale);
+const WallRows* PaneWallRows(const PaneViewModel& vm, float width, float scale, HWND owner);
 }
 
 ViewLayoutParams MainRenderer::ListRowHeightDip(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds) const {
@@ -1173,7 +1175,7 @@ ViewLayoutParams MainRenderer::ListRowHeightDip(const PaneViewModel& vm, const D
     // scrolling agree).
     if (IsZoomIconMode(vm.view_mode)) {
         ViewLayoutParams params(IconGridNameBlockDip(FolderIconNameLines(compositor_, vm, scale_)), vm.icon_dip);
-        params.wall = PaneWallRows(vm, std::max(1.0f, pane_bounds.right - pane_bounds.left), scale_);
+        params.wall = PaneWallRows(vm, std::max(1.0f, pane_bounds.right - pane_bounds.left), scale_, notify_hwnd_);
         return params;
     }
     const float base = ListRowHeightDip(vm);
@@ -1650,12 +1652,6 @@ void DrawItemCheckBox(ID2D1DeviceContext* dc, ID2D1SolidColorBrush* brush, ID2D1
     dc->SetAntialiasMode(saved);
 }
 
-// Ticks draw in when a row becomes checked; keyed by path, so a folder that
-// reloads keeps its rows still.
-std::unordered_map<std::wstring, std::pair<bool, uint64_t>>& CheckTransitions() {
-    static std::unordered_map<std::wstring, std::pair<bool, uint64_t>> seen;
-    return seen;
-}
 }  // namespace
 
 float MainRenderer::CheckGutterDip(const PaneViewModel& vm) const {
@@ -4076,79 +4072,24 @@ D2D1_SIZE_F IconGridNameSize(Compositor* compositor, const std::wstring& name, f
     return D2D1::SizeF(metrics.width, metrics.height);
 }
 
-// The wall's window for the background aspect probe (set while painting).
-HWND g_wall_notify = nullptr;
-
-// Aspects of one listing by source index: the pictures' path keys once, the
-// known aspects refreshed (one locked lookup) when WallAspects learns more.
-// The first sight of a listing sends its unknown pictures to the probe.
-struct WallSource {
-    std::weak_ptr<const std::vector<fs::DirEntry>> snapshot;
-    std::vector<uint64_t> keys;    // 0 = not a picture or video
-    std::vector<float> aspects;    // 0 = not known yet (4:3)
-    uint64_t version = 0;
-};
-
-const WallSource& WallSourceFor(const std::shared_ptr<const std::vector<fs::DirEntry>>& snapshot,
-                                const std::wstring& folder) {
-    static std::vector<WallSource> cache;
-    const auto same = [&](const WallSource& c) {
-        return !c.snapshot.expired() && !c.snapshot.owner_before(snapshot) && !snapshot.owner_before(c.snapshot);
-    };
-    auto& store = WallAspects::Instance();
-    for (WallSource& c : cache) {
-        if (!same(c)) continue;
-        const uint64_t version = store.Version();
-        if (c.version != version) {
-            store.Lookup(c.keys.data(), c.aspects.data(), c.keys.size());
-            c.version = version;
-        }
-        return c;
-    }
-    std::erase_if(cache, [](const WallSource& c) { return c.snapshot.expired(); });
-    if (cache.size() >= 8) cache.erase(cache.begin());
-    WallSource c;
-    c.snapshot = snapshot;
-    const size_t n = snapshot->size();
-    c.keys.assign(n, 0);
-    c.aspects.assign(n, 0.0f);
-    for (size_t i = 0; i < n; ++i) {
-        const fs::DirEntry& e = (*snapshot)[i];
-        if (!WallPicture(e.name, e.is_dir)) continue;
-        // The path MakeVisibleEntry gives the row, so thumbnails find the key.
-        const std::wstring path = !e.full_path.empty() ? e.full_path
-            : (fs::IsVirtualPath(folder) ? std::wstring() : JoinDirName(folder, e.name));
-        if (!path.empty()) c.keys[i] = WallAspects::Hash(path);
-    }
-    c.version = store.Version();
-    store.Lookup(c.keys.data(), c.aspects.data(), n);
-    std::vector<std::pair<uint64_t, std::wstring>> unknown;
-    for (size_t i = 0; i < n; ++i)
-        if (c.keys[i] && c.aspects[i] <= 0.0f) {
-            const fs::DirEntry& e = (*snapshot)[i];
-            unknown.emplace_back(c.keys[i], !e.full_path.empty() ? e.full_path : JoinDirName(folder, e.name));
-        }
-    if (!unknown.empty()) store.Probe(std::move(unknown), g_wall_notify);
-    cache.push_back(std::move(c));
-    return cache.back();
-}
-
-// Photo wall rows of an icon grid at this width (vm.wall). Pictures and videos
-// take their aspect from WallAspects (decoded thumbnails, the header probe),
-// 4:3 until known; everything else 0.85 like the prototype. Cached per
-// snapshot, order, width and size like FolderIconNameLines, so every
-// ViewLayout of the pane shares one build. New aspects rebuild the rows (O(n))
-// and keep the previous ones for a short glide (WallGlide).
+// Per-window and per-tab immutable rows. Source preparation and reflow run on
+// one cancellable worker; UI submission and unchanged cache lookup are bounded.
 struct WallRowsCache {
     std::weak_ptr<const std::vector<fs::DirEntry>> snapshot;
     std::weak_ptr<const PaneViewModel::FilterMap> order;
     bool ordered;
     size_t count;
-    float width, row_px;
-    std::vector<float> aspects;            // per view index, as built
+    float width, row_px, scale;
+    uint64_t aspect_version = 0;
+    std::shared_ptr<WallLayoutSource> source;
     std::shared_ptr<const WallRows> rows;  // stable while layouts point at it
     std::shared_ptr<const WallRows> prev;  // before the last aspect change
     ULONGLONG changed_at = 0;
+    std::shared_ptr<WallLayoutJob> job = std::make_shared<WallLayoutJob>();
+    HWND owner = nullptr;
+    uintptr_t view_identity = 0;
+    uint64_t demand_owner = 0;
+    int demand_first = -1, demand_last = -1;
 };
 std::vector<WallRowsCache>& WallRowsCaches() {
     static std::vector<WallRowsCache> cache;
@@ -4168,38 +4109,81 @@ void RetireWallRows(std::shared_ptr<const WallRows> rows) {
     if (rows) retired.emplace_back(now, std::move(rows));
 }
 void RetireWallEntry(WallRowsCache& c) {
+    c.job->Cancel();
+    if (c.demand_owner) WallAspects::Instance().RemoveDemand(c.demand_owner);
     RetireWallRows(std::move(c.rows));
     RetireWallRows(std::move(c.prev));
 }
 
-const WallRows* PaneWallRows(const PaneViewModel& vm, float width, float scale) {
+void UpdateWallDemand(WallRowsCache& c, const PaneViewModel& vm, float height) {
+    int first = 0, last = std::min(128, static_cast<int>(c.count));
+    if (c.rows && c.rows->RowCount()) {
+        const int first_row = std::max(0, c.rows->RowAtY(vm.scroll_y));
+        const int last_row = std::max(first_row, c.rows->RowAtY(vm.scroll_y + height));
+        first = c.rows->row_first[static_cast<size_t>(first_row)];
+        last = c.rows->row_first[std::min(static_cast<size_t>(last_row + 1), c.rows->RowCount())];
+    }
+    if (first == c.demand_first && last == c.demand_last) return;
+    c.demand_first = first;
+    c.demand_last = last;
+    std::vector<std::pair<uint64_t, std::wstring>> files;
+    const auto add = [&](int row) {
+        if (row < 0 || row >= static_cast<int>(c.count) || files.size() >= 512) return;
+        const int src = vm.SourceIndex(row);
+        if (src < 0 || static_cast<size_t>(src) >= vm.snapshot->size()) return;
+        const auto& entry = (*vm.snapshot)[static_cast<size_t>(src)];
+        if (!WallPicture(entry.name, entry.is_dir)) return;
+        auto path = WallLayoutSource::Path(entry, vm.path, fs::IsVirtualPath(vm.path));
+        if (path.empty()) return;
+        const uint64_t modified = (static_cast<uint64_t>(entry.mtime.dwHighDateTime) << 32) | entry.mtime.dwLowDateTime;
+        files.emplace_back(WallAspects::ContentHash(path, modified, entry.size), std::move(path));
+    };
+    for (int row = first; row < last && row < first + 384; ++row) add(row);
+    for (int offset = 0; offset < 64; ++offset) { add(last + offset); add(first - offset - 1); }
+    WallAspects::Instance().ReplaceDemand(c.demand_owner, c.owner, std::move(files));
+}
+const WallRows* PaneWallRows(const PaneViewModel& vm, float width, float scale, HWND owner) {
     if (!vm.wall || !IsZoomIconMode(vm.view_mode) || !vm.snapshot || vm.content_results) return nullptr;
     const size_t count = vm.EntryCount();
     if (count == 0) return nullptr;
     const float row_px = 0.78f * IconDip(vm.view_mode, vm.icon_dip, scale) * scale;
-    const WallSource& source = WallSourceFor(vm.snapshot, vm.path);
-    std::vector<float> aspects(count, 0.85f);
-    for (size_t row = 0; row < count; ++row) {
-        const int src = vm.SourceIndex(static_cast<int>(row));
-        if (src < 0 || static_cast<size_t>(src) >= source.keys.size() || !source.keys[static_cast<size_t>(src)]) continue;
-        aspects[row] = source.aspects[static_cast<size_t>(src)];
-    }
     auto& cache = WallRowsCaches();
     const auto same = [](const auto& weak, const auto& strong) {
         return !weak.expired() && !weak.owner_before(strong) && !strong.owner_before(weak);
     };
     const bool ordered = vm.filter_map != nullptr;
+    std::erase_if(cache, [&](WallRowsCache& c) {
+        const bool obsolete = c.owner == owner && c.view_identity == vm.wall_view_identity &&
+            (!same(c.snapshot, vm.snapshot) || c.ordered != ordered || (ordered && !same(c.order, vm.filter_map)));
+        if (obsolete) RetireWallEntry(c);
+        return obsolete;
+    });
     for (WallRowsCache& c : cache) {
-        if (same(c.snapshot, vm.snapshot) && c.ordered == ordered && (!ordered || same(c.order, vm.filter_map)) &&
-            c.count == count && c.width == width && c.row_px == row_px) {
-            if (c.aspects == aspects) return c.rows.get();
-            // Same listing, new aspects: the rows from the change on reflow
-            // (rows before it keep their items, so nothing above moves).
-            RetireWallRows(std::move(c.prev));
-            c.prev = c.rows;
-            c.changed_at = GetTickCount64();
-            c.rows = std::make_shared<const WallRows>(BuildWallRows(aspects, width, row_px, scale));
-            c.aspects = std::move(aspects);
+        if (c.owner == owner && c.view_identity == vm.wall_view_identity && same(c.snapshot, vm.snapshot) && c.ordered == ordered && (!ordered || same(c.order, vm.filter_map)) &&
+            c.count == count) {
+            const bool geometry_changed = c.width != width || c.row_px != row_px || c.scale != scale;
+            if (geometry_changed) {
+                c.job->Cancel();
+                c.width = width;
+                c.row_px = row_px;
+                c.scale = scale;
+            }
+            const uint64_t version = WallAspects::Instance().Version();
+            const bool aspects_changed = c.aspect_version != version && !c.job->Busy();
+            if (aspects_changed || geometry_changed) c.aspect_version = version;
+            if (!c.rows) if (auto ready = c.job->TakeReady()) {
+                RetireWallRows(std::move(c.prev));
+                RetireWallRows(std::move(c.rows));
+                c.rows = std::move(ready);
+                c.changed_at = GetTickCount64();
+            }
+            if (aspects_changed || geometry_changed)
+                c.job->RequestPrepared([source = c.source, geometry_changed](const auto& generation, uint64_t expected) {
+                    return source->Prepare(generation, expected, geometry_changed);
+                }, width, row_px, scale, [source = c.source] { source->Committed(); }, true);
+            // Poll through the existing paint path; no worker touches a window handle.
+            if (owner && (c.job->Busy() || c.aspect_version != WallAspects::Instance().Version())) SetTimer(owner, 0x574C, 16,
+                [](HWND hwnd, UINT, UINT_PTR id, DWORD) { KillTimer(hwnd, id); InvalidateRect(hwnd, nullptr, FALSE); });
             return c.rows.get();
         }
     }
@@ -4211,9 +4195,20 @@ const WallRows* PaneWallRows(const PaneViewModel& vm, float width, float scale) 
         cache.erase(cache.begin());
     }
     RetireWallRows(nullptr);  // frees what has waited long enough
-    WallRowsCache c{vm.snapshot, vm.filter_map, ordered, count, width, row_px, {},
-                    std::make_shared<const WallRows>(BuildWallRows(aspects, width, row_px, scale)), nullptr, 0};
-    c.aspects = std::move(aspects);
+    WallRowsCache c{};
+    c.snapshot = vm.snapshot; c.order = vm.filter_map; c.ordered = ordered; c.count = count;
+    c.width = width; c.row_px = row_px; c.scale = scale;
+    static uint64_t next_demand_owner = 0;
+    c.demand_owner = ++next_demand_owner;
+    c.owner = owner;
+    c.view_identity = vm.wall_view_identity;
+    c.aspect_version = WallAspects::Instance().Version();
+    c.source = WallLayoutSource::Create(vm.snapshot, vm.filter_map, vm.path, fs::IsVirtualPath(vm.path));
+    c.job->RequestPrepared([source = c.source](const auto& generation, uint64_t expected) {
+        return source->Prepare(generation, expected, true);
+    }, width, row_px, scale, [source = c.source] { source->Committed(); }, true);
+    if (owner && (c.job->Busy() || c.aspect_version != WallAspects::Instance().Version())) SetTimer(owner, 0x574C, 16,
+                [](HWND hwnd, UINT, UINT_PTR id, DWORD) { KillTimer(hwnd, id); InvalidateRect(hwnd, nullptr, FALSE); });
     cache.push_back(std::move(c));
     return cache.back().rows.get();
 }
@@ -4235,6 +4230,51 @@ float WallGlide(const WallRows* rows, const WallRows** prev) {
 }
 } // namespace
 
+void MainRenderer::PruneWallViews(const std::vector<PaneSlotView>& panes) const {
+    std::erase_if(WallRowsCaches(), [&](WallRowsCache& c) {
+        if (c.owner != notify_hwnd_) return false;
+        const bool visible = std::any_of(panes.begin(), panes.end(), [&](const auto& pane) {
+            return pane.pane.wall && pane.pane.wall_view_identity == c.view_identity;
+        });
+        if (visible) return false;
+        RetireWallEntry(c);
+        return true;
+    });
+}
+MainRenderer::~MainRenderer() {
+    std::erase_if(WallRowsCaches(), [&](WallRowsCache& c) {
+        if (c.owner != notify_hwnd_) return false;
+        RetireWallEntry(c);
+        return true;
+    });
+}
+void MainRenderer::ReconcileWallAnchor(PaneViewModel& vm, const D2D1_RECT_F& bounds) const {
+    if (!vm.wall || !vm.snapshot) {
+        std::erase_if(WallRowsCaches(), [&](WallRowsCache& c) {
+            if (c.owner != notify_hwnd_ || c.view_identity != vm.wall_view_identity) return false;
+            RetireWallEntry(c);
+            return true;
+        });
+        return;
+    }
+    const auto list = PaneListRect(vm, bounds);
+    PaneWallRows(vm, std::max(1.0f, list.right - list.left), scale_, notify_hwnd_);
+    for (auto& c : WallRowsCaches()) {
+        if (c.owner != notify_hwnd_ || c.view_identity != vm.wall_view_identity ||
+            c.snapshot.lock() != vm.snapshot || c.ordered != bool(vm.filter_map) ||
+            (c.ordered && c.order.lock() != vm.filter_map) || c.count != vm.EntryCount()) continue;
+        UpdateWallDemand(c, vm, list.bottom - list.top);
+        auto ready = c.job->TakeReady();
+        if (!ready) return;
+        // Snapshot and ordering are identical: the view index identifies the
+        // same immutable source entry, including while aspect rows reflow.
+        if (c.rows) vm.scroll_y = WallAnchorScroll(*c.rows, *ready, vm.scroll_y);
+        RetireWallRows(std::move(c.prev));
+        RetireWallRows(std::move(c.rows));
+        c.rows = std::move(ready);
+        return;
+    }
+}
 MainRenderer::WallHintRects MainRenderer::PaneWallHintRects(const PaneViewModel& vm,
                                                             const D2D1_RECT_F& pane_bounds) const {
     WallHintRects r;
@@ -4914,9 +4954,13 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
     // This PC: the capacity bars grow from empty, once per visit.
     const float capacity_reveal = CapacityReveal(vm, pane_index);
 
+    ItemCheckMotion* checks = item_checks_ && pane_index >= 0 &&
+        pane_index < static_cast<int>(item_check_motion_.size()) ? &item_check_motion_[pane_index] : nullptr;
+    const bool animate_checks = checks && motion::SystemAnimationsEnabled() && !IsHighContrast();
+    if (checks) checks->Begin(vm.path, motion_frame_);
     if (entryCount == 0) return;
     const D2D1_RECT_F viewport = D2D1::RectF(x, y, x + w, y + h);
-    g_wall_notify = notify_hwnd_;  // the aspect probe repaints this window
+
     // One set of params per frame: a second ListRowHeightDip could pick up
     // newer wall aspects than the layout below was built from.
     const ViewLayoutParams list_params = ListRowHeightDip(vm, viewport);
@@ -5332,6 +5376,13 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             }
 
             bool selected = vm.IsRowSelected(src);
+            float check_tick = 1.0f;
+            if (draw_shapes && checks && !e.path.empty()) {
+                const auto sample = checks->Update(e.path, selected, motion_frame_, motion_now_, animate_checks);
+                check_tick = sample.progress;
+                if (sample.active) RequestMotionFrame();
+            }
+
             // A marquee sweeps across many rows: hover feedback (row highlight,
             // link pill) would flicker under the pointer and animate every link.
             bool hover = (src == vm.hover_index) && !vm.marquee_active;
@@ -5510,7 +5561,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                         vm.view_generation, e.modified_value, e.size_value, hidden_alpha, &aspect,
                         &wall_duration_ms) == PreviewDrawResult::Bitmap;
                     if (aspect > 0.0f && !e.path.empty() &&
-                        WallAspects::Instance().Note(WallAspects::Hash(e.path), aspect))
+                        WallAspects::Instance().Note(WallAspects::ContentHash(e.path, e.modified_value, e.size_value), aspect))
                         RequestMotionFrame();  // the rows reflow next frame
                     if (wallDrawn) {
                         artwork = thumbRect;
@@ -5658,25 +5709,11 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                             box.top - 2.0f * scale_, box.right + 2.0f * scale_, box.bottom + 2.0f * scale_),
                             6.0f * scale_, 6.0f * scale_), brTagDot_.get());
                     }
-                    float tick = 1.0f;
-                    if (!e.path.empty()) {
-                        auto& seen = CheckTransitions();
-                        if (seen.size() > 4096) seen.clear();
-                        auto [it, added] = seen.try_emplace(e.path, selected, uint64_t{0});
-                        if (!added && it->second.first != selected) it->second = {selected, motion_now_};
-                        if (selected && it->second.second && motion::SystemAnimationsEnabled() && !IsHighContrast()) {
-                            const float t01 = static_cast<float>(motion_now_ - it->second.second) / 140.0f;
-                            if (t01 < 1.0f) {
-                                tick = std::max(0.0f, t01);
-                                list_loading_active_ = true;  // keeps frames coming for the draw-in
-                            }
-                        }
-                    }
                     EnsureRoundCapStroke(dc, roundCapStroke_);
                     MakeBrush(dc, theme.accent, brTagDot_);
                     // Shown only because several are selected: faint until hovered.
                     DrawItemCheckBox(dc, brTagDot_.get(), roundCapStroke_.get(), box, scale_, theme, IsHighContrast(),
-                                     selected ? 1 : 0, hover, tick, !hover && !selected ? 0.5f : 1.0f);
+                                     selected ? 1 : 0, hover, check_tick, !hover && !selected ? 0.5f : 1.0f);
                 }
             }
             // Mid-morph the labels are drawn in a second, faded pass.

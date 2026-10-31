@@ -1224,6 +1224,12 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
                 FillChangePane(s, *tab, slot.pane, slot.rect);
                 FillGitPane(s, *tab, slot.pane);
                 FillSyncPane(s, *tab, slot.pane);   // SVN marks (outside Git) and OneDrive states
+                const float wall_scroll_before = slot.pane.scroll_y;
+                s.renderer.ReconcileWallAnchor(slot.pane, slot.rect);
+                if (slot.focused && s.scrollAnimating)
+                    s.scrollTargetY += slot.pane.scroll_y - wall_scroll_before;
+                tab->scroll_y = slot.pane.scroll_y;
+                if (slot.focused) vm.pane.scroll_y = slot.pane.scroll_y;
                 if (slot.focused) {
                     vm.pane.git_marks = slot.pane.git_marks;
                     vm.pane.onedrive_status = slot.pane.onedrive_status;
@@ -1264,6 +1270,7 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
         }
         vm.pane_slots.push_back(std::move(slot));
     }
+    s.renderer.PruneWallViews(vm.pane_slots);
 }
 // ---------------------------------------------------------------------------
 // Staging tray card deck: display entries (newest batch first) + eased poses.

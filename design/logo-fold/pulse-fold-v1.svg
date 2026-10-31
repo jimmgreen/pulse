@@ -1,0 +1,50 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="foldindigob" x1="0" y1="36" x2="0" y2="228" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6a6fd0" />
+      <stop offset="1" stop-color="#2b2f86" />
+    </linearGradient>
+    <linearGradient id="foldindigof" x1="16" y1="70" x2="210" y2="240" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#c3c0ff" />
+      <stop offset=".48" stop-color="#8079f4" />
+      <stop offset="1" stop-color="#4b3fc6" />
+    </linearGradient>
+    <linearGradient id="foldindigosheen" x1="0" y1="72" x2="0" y2="170" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff" stop-opacity=".30" />
+      <stop offset="1" stop-color="#fff" stop-opacity="0" />
+    </linearGradient>
+    <linearGradient id="foldindigoe" x1="16" y1="0" x2="240" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff" stop-opacity=".9" />
+      <stop offset=".55" stop-color="#fff" stop-opacity=".45" />
+      <stop offset="1" stop-color="#fff" stop-opacity=".8" />
+    </linearGradient>
+    <filter id="foldindigos" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="7" />
+    </filter>
+    <clipPath id="foldindigoc">
+      <path d="M16 60a24 24 0 0 1 24-24h52c9 0 16 3 22 10l12 14h90a24 24 0 0 1 24 24v116a28 28 0 0 1-28 28H44a28 28 0 0 1-28-28z" />
+    </clipPath>
+    <linearGradient id="foldindigor" x1="120" y1="80" x2="236" y2="226" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#8c84f8" />
+      <stop offset="1" stop-color="#4a3fc4" />
+    </linearGradient>
+    <linearGradient id="foldindigobd" x1="0" y1="36" x2="0" y2="228" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2b2f86" />
+      <stop offset="1" stop-color="#120f52" />
+    </linearGradient>
+    <clipPath id="foldSurface">
+      <path d="M96 82L128 72C150 68 170 80 190 106L228 158C236 169 240 178 240 188V200A28 28 0 0 1 212 228H120Z" />
+    </clipPath>
+  </defs>
+  <path d="M16 60a24 24 0 0 1 24-24h52c9 0 16 3 22 10l12 14h90a24 24 0 0 1 24 24v116a28 28 0 0 1-28 28H44a28 28 0 0 1-28-28z" fill="url(#foldindigobd)" />
+  <path d="M28 46c3-4 7-6 12-6h52c8 0 13 3 18 9" fill="none" stroke="#fff" stroke-opacity=".22" stroke-width="2" stroke-linecap="round" />
+  <g clip-path="url(#foldindigoc)">
+    <path d="M96 82L128 72C150 68 170 80 190 106L228 158C236 169 240 178 240 188V200A28 28 0 0 1 212 228H120Z" transform="translate(-3 -6)" fill="#120f52" opacity=".5" filter="url(#foldindigos)" />
+    <path d="M96 82L128 72C150 68 170 80 190 106L228 158C236 169 240 178 240 188V200A28 28 0 0 1 212 228H120Z" fill="url(#foldindigor)" />
+    <path d="M128 72c22-4 42 8 62 34l38 52c8 11 12 20 12 30" fill="none" stroke="#fff" stroke-opacity=".55" stroke-width="2" stroke-linecap="round" clip-path="url(#foldSurface)" />
+    <path d="M16 60a24 24 0 0 1 24-24h52c9 0 16 3 22 10l4 5c6 8 9 16 11 26l18 92c3 18 7 38 13 59H44a28 28 0 0 1-28-28z" transform="translate(6 0)" fill="#120f52" opacity=".45" filter="url(#foldindigos)" />
+  </g>
+  <path d="M16 60a24 24 0 0 1 24-24h52c9 0 16 3 22 10l4 5c6 8 9 16 11 26l18 92c3 18 7 38 13 59H44a28 28 0 0 1-28-28z" fill="url(#foldindigof)" />
+  <path d="M16 60a24 24 0 0 1 24-24h52c9 0 16 3 22 10l4 5c6 8 9 16 11 26l18 92c3 18 7 38 13 59H44a28 28 0 0 1-28-28z" fill="url(#foldindigosheen)" />
+</svg>

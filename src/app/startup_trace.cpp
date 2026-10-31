@@ -18,7 +18,7 @@
 namespace pulse::app::startup_trace {
 namespace {
 
-constexpr size_t kMaxMarks = 96;
+constexpr size_t kMaxMarks = 256;
 constexpr size_t kMaxDlls = 160;
 constexpr size_t kMaxStaticModules = 256;
 constexpr size_t kMaxMessages = 64;
@@ -59,6 +59,9 @@ constexpr ULONG kDllLoaded = 1;
 int g_state = 0;  // 0 unknown, 1 enabled, -1 disabled; set on the UI thread
 ULONGLONG g_created = 0;
 DWORD g_main_thread = 0;
+struct CounterEntry { const char* label; double value; };
+CounterEntry g_counters[32];
+size_t g_counter_count = 0;
 MarkEntry g_marks[kMaxMarks];
 size_t g_mark_count = 0;
 DllEntry g_dlls[kMaxDlls];
@@ -143,6 +146,9 @@ void Flush() noexcept {
             fwprintf(f, L"%9.2f  +%8.2f  %hs%ls\n", m.ms, m.ms - prev, m.label, other ? L"  [worker]" : L"");
         if (!other) prev = m.ms;
     }
+    fwprintf(f, L"\n# Cumulative diagnostic counters at latest frame\n");
+    for (size_t i = 0; i < g_counter_count; ++i)
+        fwprintf(f, L"%hs = %.3f\n", g_counters[i].label, g_counters[i].value);
     fwprintf(f, L"\n# Window messages taking %.0f ms or more (start, duration)\n", kSlowMessageMs);
     for (size_t i = 0; i < g_message_count; ++i)
         fwprintf(f, L"%9.2f  %8.2f  msg 0x%04X\n", g_messages[i].start, g_messages[i].duration, g_messages[i].msg);
@@ -184,6 +190,20 @@ void Mark(const char* label) noexcept {
         if (g_marks[i].label == label) ++occurrence;
     if (occurrence <= 3 && g_mark_count < kMaxMarks)
         g_marks[g_mark_count++] = {label, occurrence, SinceCreation(), GetCurrentThreadId()};
+    ReleaseSRWLockExclusive(&g_lock);
+}
+
+void Counter(const char* label, double value) noexcept {
+    if (!Enabled()) return;
+    AcquireSRWLockExclusive(&g_lock);
+    if (!g_flushed) {
+        size_t i = 0;
+        while (i < g_counter_count && g_counters[i].label != label) ++i;
+        if (i < ARRAYSIZE(g_counters)) {
+            g_counters[i] = {label, value};
+            if (i == g_counter_count) ++g_counter_count;
+        }
+    }
     ReleaseSRWLockExclusive(&g_lock);
 }
 

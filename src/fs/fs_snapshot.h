@@ -72,6 +72,7 @@ public:
     bool TakeArmMissed(const std::wstring& path, uint64_t listed_at);
 
     size_t EntryCount() const;
+    // Snapshot payload allocations, excluding allocator bookkeeping and map nodes.
     size_t ResidentBytes() const;
 
 private:
@@ -99,7 +100,7 @@ private:
     std::unordered_set<std::wstring> stale_;
     static constexpr size_t kStaleLimit = 1024;
 
-    static size_t SnapshotBytes(const SnapshotPtr& snapshot);
+    size_t SnapshotBytes(const std::wstring& key, const SnapshotPtr& snapshot) const;
     void EvictToBudget(const std::wstring* protected_key = nullptr);
     // Removes one entry (map and LRU); a dirty one leaves its mark in stale_.
     void Evict(std::unordered_map<std::wstring, Entry>::iterator it);

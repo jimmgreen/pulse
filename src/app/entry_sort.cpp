@@ -268,6 +268,7 @@ void SortRows(std::vector<fs::DirEntry>& entries, ui::SortColumn col, ui::SortDi
         size_keys.resize(n);
         std::wstring lower;
         for (size_t i = 0; i < n; ++i) {
+            if (tick) tick();
             const fs::DirEntry& e = entries[i];
             if (!e.is_dir || e.drive_type != 0) {
                 size_keys[i].bytes = e.size;
@@ -283,6 +284,7 @@ void SortRows(std::vector<fs::DirEntry>& entries, ui::SortColumn col, ui::SortDi
     // All rows compare by name key or none do, so the order stays consistent.
     std::vector<std::string> name_keys(n);
     for (size_t i = 0; i < n; ++i) {
+        if (tick) tick();
         if (!NameSortKey(entries[i].name, name_keys[i])) {
             std::vector<std::string>().swap(name_keys);
             break;
@@ -299,13 +301,24 @@ void SortRows(std::vector<fs::DirEntry>& entries, ui::SortColumn col, ui::SortDi
     std::vector<size_t> order(n);
     std::iota(order.begin(), order.end(), size_t{0});
     const EntryGrouping* grouping = CurrentEntryGrouping();
+    std::vector<int> group_ranks;
+    if (grouping && grouping->by != GroupBy::Location) {
+        GroupClock clock = grouping->clock;
+        clock.date_column = col;
+        group_ranks.reserve(n);
+        for (const auto& entry : entries) {
+            if (tick) tick();
+            group_ranks.push_back(GroupRank(entry, grouping->by, clock));
+        }
+    }
     const FolderSortMode mode = CurrentFolderSortMode();
     std::sort(order.begin(), order.end(), [&](size_t x, size_t y) {
         if (tick) tick();
         const fs::DirEntry& a = entries[x];
         const fs::DirEntry& b = entries[y];
         if (grouping) {
-            if (const int c = GroupCompare(a, b, grouping->by, grouping->clock, col, dir))
+            if (const int c = GroupCompareRanks(a, b, grouping->by, col, dir,
+                    group_ranks.empty() ? 0 : group_ranks[x], group_ranks.empty() ? 0 : group_ranks[y]))
                 return c < 0;
         }
         return Less(a, b, col, dir, mode,

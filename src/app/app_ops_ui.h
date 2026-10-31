@@ -11,6 +11,8 @@ bool SubmitWithConflictResolution(AppState& s, ops::OpRequest request, uint64_t*
 void ReleaseTrayBatch(AppState& s, size_t idx);
 void PasteIntoCurrent(AppState& s);
 void DeleteSelected(AppState& s, bool permanent);
+void PollDeletePreflight(AppState& s);
+void CancelDeletePreflight(AppState& s);
 void DeletePaths(AppState& s, std::vector<std::wstring> paths, bool permanent);
 // A delete finished: rows that slid out return if it failed; a recycle offers
 // "Deleted N items - Undo" (motion 5b).

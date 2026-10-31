@@ -6,6 +6,10 @@
 #include "lumatext_renderer.h"
 #include "typography.h"
 #include "FluentTokens.h"
+#include "text_contrast_scope.h"
+#ifdef PULSE_STARTUP_TRACE_DIAGNOSTICS
+#include "../app/startup_trace.h"
+#endif
 #include <commctrl.h>
 #include <prsht.h>
 #include <shellscalingapi.h>
@@ -19,6 +23,15 @@
 #include <vector>
 
 namespace pulse::ui {
+namespace {
+void TraceGraphics(const char* label) noexcept {
+#ifdef PULSE_STARTUP_TRACE_DIAGNOSTICS
+    app::startup_trace::Mark(label);
+#else
+    (void)label;
+#endif
+}
+}
 
 namespace {
 
@@ -129,12 +142,15 @@ bool Compositor::Init(HWND hwnd) {
         t_compositors.push_back(this);
     device_lost_ = false;
     if (!InitD3D()) return false;
+    TraceGraphics("graphics_device_ready");
     RECT rc;
     GetClientRect(hwnd_, &rc);
     width_ = std::max(1L, rc.right - rc.left);
     height_ = std::max(1L, rc.bottom - rc.top);
     if (!CreateSwapChain()) return false;
+    TraceGraphics("graphics_swapchain_ready");
     ResizeSwapChain();
+    TraceGraphics("graphics_target_ready");
     return targetBitmap_.get() != nullptr;
 }
 
@@ -187,10 +203,13 @@ void Compositor::PrefetchSharedDevice() {
         if (prefetch.started) return;
         prefetch.started = true;
     }
+    TraceGraphics("graphics_prefetch_scheduled");
     try {
         std::thread([] {
+            TraceGraphics("graphics_prefetch_worker_begin");
             ComPtr<ID3D11Device> device;
             const bool ok = SUCCEEDED(CreateD3DDevice(device));
+            TraceGraphics("graphics_prefetch_worker_created");
             DevicePrefetch& state = Prefetch();
             {
                 std::lock_guard<std::mutex> lock(state.mutex);
@@ -220,11 +239,13 @@ bool Compositor::InitD3D() {
         // D3D11 devices are free-threaded, so one created on the prefetch
         // worker serves this thread like its own.
         created->d3d = TakePrefetchedDevice();
+        TraceGraphics("graphics_prefetch_taken");
         if (created->d3d.get() && created->d3d->GetDeviceRemovedReason() != S_OK) created->d3d.reset();
         if (!created->d3d.get()) {
             hr = CreateD3DDevice(created->d3d);
             if (!CheckGraphics(hr, L"D3D11CreateDevice (hardware/WARP)")) return false;
         }
+        TraceGraphics("graphics_d3d_ready");
 
         hr = created->d3d->QueryInterface(&created->dxgi);
         if (!CheckGraphics(hr, L"IDXGIDevice1")) return false;
@@ -236,6 +257,7 @@ bool Compositor::InitD3D() {
         hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory1),
             &opts, reinterpret_cast<void**>(&created->factory));
         if (!CheckGraphics(hr, L"D2D1CreateFactory")) return false;
+        TraceGraphics("graphics_d2d_factory_ready");
 
         hr = created->factory->CreateDevice(created->dxgi.get(), &created->d2d);
         if (!CheckGraphics(hr, L"D2D CreateDevice")) return false;
@@ -251,6 +273,7 @@ bool Compositor::InitD3D() {
 
     hr = d2dDevice_->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc_);
     if (!CheckGraphics(hr, L"D2D CreateDeviceContext")) return false;
+    TraceGraphics("graphics_d2d_context_ready");
 
     dc_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     dc_->SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -258,10 +281,12 @@ bool Compositor::InitD3D() {
     hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory2),
         reinterpret_cast<IUnknown**>(&dwriteFactory_));
     if (!CheckGraphics(hr, L"DWriteCreateFactory")) return false;
+    TraceGraphics("graphics_dwrite_ready");
 
     UpdateTextRenderingParams(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST));
     if (!lumaText_) lumaText_ = std::make_unique<LumaTextRenderer>();
     lumaText_->Init(dwriteFactory_.get(), dc_.get());
+    TraceGraphics("graphics_lumatext_ready");
 
     return true;
 }
@@ -365,11 +390,11 @@ void Compositor::SynchronizeEditSelection(HWND hwnd, UINT msg, WPARAM wParam, LP
 }
 
 bool Compositor::LumaTextEnabled() const noexcept {
-    return LumaTextAvailable() && typography::UseLumaTextForUi() && !IsHighContrast();
+    return LumaTextAvailable() && typography::UseLumaTextForUi() && !TextHighContrast();
 }
 
 bool Compositor::CustomEditEnabled() const noexcept {
-    return LumaTextAvailable() && !IsHighContrast();
+    return LumaTextAvailable() && !TextHighContrast();
 }
 
 const LumaTextStats* Compositor::GetLumaTextStats() const noexcept {
@@ -825,9 +850,12 @@ static void CreateFormat(IDWriteFactory2* factory, float size, DWRITE_FONT_WEIGH
 void Compositor::RecreateTextFormats(float scale) {
     UpdateTextRenderingParams(hwnd_
         ? MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST) : nullptr);
-    // Every renderer file keeps its own width cache (ui_renderer_internal.h);
-    // only a new generation retires them all when formats are replaced.
-    typography::InvalidateMeasurements();
+    // Replacing formats can reuse their addresses, so retire cached widths.
+    // A new compositor owns no old formats: its first initialization must
+    // not discard the other windows' already measured text.
+    if (TextOptimizationBaselineForTest() || textFormat_.get() || fileNameFormat_.get() || smallFormat_.get() ||
+        headerFormat_.get() || tabFormat_.get() || addressFormat_.get() || iconFormat_.get())
+        typography::InvalidateMeasurements();
     textFormat_.reset();
     fileNameFormat_.reset();
     smallFormat_.reset();

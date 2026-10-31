@@ -1,4 +1,4 @@
-// ctx_menu_controller_test.cpp - ContextMenuController bookkeeping: the
+﻿// ctx_menu_controller_test.cpp - ContextMenuController bookkeeping: the
 // per-menu timing record (ctx_menu_timing.h), static-verb re-reads, rows
 // painted from the cache while the live answer arrives in parts, and the
 // persistent layout with templated names (ctx_layout_cache.h), and the
@@ -769,6 +769,68 @@ int wmain() {
                       "other static verbs keep their registry command line");
         }
     }
+    {
+        app::ContextMenuPrefs filter_prefs;
+        filter_prefs.persist = false;
+        app::ShellMenuEntry hidden;
+        hidden.text = L"诊断隐藏项";
+        hidden.command = 12001;
+        hidden.from_com = false;
+        filter_prefs.SetItemEnabled(ipc::CatalogKey(hidden.text, false), false);
+        app::ShellMenuEntry duplicate;
+        duplicate.text = L"诊断重复项";
+        duplicate.command = 12002;
+        duplicate.from_com = false;
+        const auto filtered = app::ApplyExplorerPrefs(filter_prefs, { hidden, duplicate, duplicate });
+        Check(filtered.size() == 2 && filtered[0].text == duplicate.text &&
+              filtered[1].text == duplicate.text,
+              "an explicit preference hides the Chinese label before append");
+        std::vector<ui::FluentMenuItem> display;
+        app::AppendShellSection(display, filtered);
+        Check(display.size() == 1 && display[0].text == duplicate.text &&
+              display[0].command == duplicate.command,
+              "duplicate Chinese labels retain exactly one actionable row");
+    }
+
+    {
+        app::ContextMenuPrefs prefs;
+        const auto category = ipc::CtxMenuCategory::Software;
+        for (int i = 0; i < 400; ++i) {
+            const auto key = L"v:catalog-" + std::to_wstring(i);
+            prefs.RecordSeen(key, key.substr(2), false, category);
+        }
+        prefs.SetItemEnabled(L"v:catalog-0", false);
+        prefs.RecordSeen(L"v:catalog-1", L"catalog-1", false, category);
+        Check(prefs.RecordSeen(L"v:new-visible", L"New visible", false, category) && prefs.seen.size() == 400,
+              "saturated settings catalog admits newly visible Shell row within bound");
+        const auto has = [&](const std::wstring& key) {
+            for (const auto& row : prefs.seen) if (row.key == key) return true;
+            return false;
+        };
+        Check(has(L"v:catalog-0") && has(L"v:catalog-1") && !has(L"v:catalog-2") && has(L"v:new-visible"),
+              "catalog retirement preserves configured and recently encountered rows first");
+        for (const auto& row : prefs.seen) prefs.SetItemEnabled(row.key, false);
+        prefs.RecordSeen(L"v:after-configured", L"After configured", false, category);
+        Check(prefs.seen.size() == 400 && has(L"v:after-configured") &&
+              prefs.item_enabled.contains(L"v:catalog-0") && !prefs.item_enabled.at(L"v:catalog-0"),
+              "all-configured catalog still admits new rows without losing evicted override");
+        prefs.RecordSeen(L"v:catalog-0", L"catalog-0", false, category);
+        Check(has(L"v:catalog-0") && !prefs.RowEnabled(L"v:catalog-0", category, false),
+              "rediscovered retired row keeps the user's hidden preference");
+        app::ContextMenuPrefs loaded;
+        Check(loaded.FromJson(prefs.ToJson()) && loaded.seen.size() <= 400 &&
+              !loaded.RowEnabled(L"v:catalog-0", category, false),
+              "bounded discovery catalog and retained overrides survive persistence");
+        for (int i = 0; i < 50; ++i) {
+            auto extra = prefs.seen.back();
+            extra.text = L"overflow-" + std::to_wstring(i); extra.key = L"v:" + extra.text;
+            prefs.seen.push_back(std::move(extra));
+        }
+        Check(loaded.FromJson(prefs.ToJson()) && loaded.seen.size() == 400 &&
+              !loaded.RowEnabled(L"v:catalog-0", category, false),
+              "loading oversized legacy catalog enforces bound without dropping overrides");
+    }
+
     std::printf("%s\n", failures ? "FAILED" : "ALL PASSED");
     return failures ? 1 : 0;
 }

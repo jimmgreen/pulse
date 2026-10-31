@@ -12,6 +12,9 @@
 #pragma once
 #include "thumbnail_cache.h"
 #include <mutex>
+#include <condition_variable>
+#include <deque>
+#include <thread>
 #include <string>
 
 namespace pulse::ui {
@@ -26,12 +29,24 @@ public:
     void Save(const ThumbnailStoreKey& key, uint32_t decode_ms, const StoredThumbnail& thumb) override;
     // Deletes every entry (Settings). Entries being written meanwhile survive.
     void Clear();
+    bool FlushForTesting(uint32_t timeout_ms);
+    friend struct ThumbnailWriterTest;
     uint64_t BytesOnDisk();
     // Empty when the cache is turned off or has no folder.
     const std::wstring& Root();
 
 private:
     ThumbnailDiskCache() = default;
+    ~ThumbnailDiskCache();
+    void WriterLoop();
+    void SaveNow(const ThumbnailStoreKey& key, uint32_t decode_ms, const StoredThumbnail& thumb);
+    struct WriteRequest { std::wstring path; DWORD attrs = 0; uint32_t pixels = 0; uint64_t modified = 0, size = 0; bool keep_always = false; uint32_t decode_ms = 0; StoredThumbnail thumb; };
+    std::mutex writer_mutex_;
+    std::condition_variable writer_cv_;
+    std::deque<WriteRequest> writes_;
+    std::thread writer_;
+    size_t writer_bytes_ = 0;
+    bool stopping_ = false;
     std::wstring EntryPath(const ThumbnailStoreKey& key) const;
     void ScanLocked();
     void TrimLocked();

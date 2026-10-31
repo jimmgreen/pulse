@@ -4,6 +4,9 @@
 // with DXGI_ERROR_INVALID_CALL, and every later frame drew into nothing: a
 // white window until Pulse was restarted.
 #include "../ui/ui_compositor.h"
+#include "../ui/typography.h"
+#include "../ui/text_contrast_scope.h"
+#include <thread>
 
 #include <cstdio>
 
@@ -45,6 +48,47 @@ int wmain() {
     Check(ready, "initialize an off-screen compositor");
     if (ready) {
         Check(HasTarget(compositor) && DrawFrame(compositor), "the first frame draws");
+        const bool system_contrast = pulse::ui::IsHighContrast();
+        {
+            pulse::ui::TextContrastScope scope(true);
+            Check(pulse::ui::TextHighContrast() && !compositor.LumaTextEnabled() && !compositor.CustomEditEnabled(),
+                  "high contrast frame keeps the native text fallback");
+            {
+                pulse::ui::TextContrastScope nested(false);
+                Check(!pulse::ui::TextHighContrast(), "nested frame uses its own contrast snapshot");
+            }
+            Check(pulse::ui::TextHighContrast(), "nested frame restores outer contrast snapshot");
+            {
+                pulse::ui::TextContrastScope inactive(false, false);
+                Check(pulse::ui::TextHighContrast(), "inactive test scope leaves its caller unchanged");
+            }
+
+            bool other_thread = !system_contrast;
+            std::thread([&] { other_thread = pulse::ui::TextHighContrast(); }).join();
+            Check(other_thread == system_contrast, "contrast snapshot is confined to its drawing thread");
+        }
+        Check(pulse::ui::TextHighContrast() == pulse::ui::IsHighContrast(),
+              "outside the frame contrast is queried from the system again");
+        compositor.RecreateTextFormats(1.0f);
+        const auto generation = pulse::ui::typography::Generation();
+        const float width = pulse::ui::typography::MeasureLine(&compositor, compositor.TextFormat(), L"Sample file 123");
+        {
+            Compositor auxiliary;
+            const bool auxiliary_ready = auxiliary.Init(hwnd);
+            Check(auxiliary_ready, "initialize auxiliary compositor on the shared device");
+            if (auxiliary_ready) {
+                auxiliary.RecreateTextFormats(1.0f);
+                Check(pulse::ui::typography::Generation() == generation,
+                      "initial auxiliary formats preserve main-window measurements");
+                auxiliary.RecreateTextFormats(1.5f);
+                Check(pulse::ui::typography::Generation() != generation,
+                      "replacement formats still invalidate measurements");
+                const float scaled = pulse::ui::typography::MeasureLine(&auxiliary, auxiliary.TextFormat(), L"Sample file 123");
+                Check(scaled > width * 1.4f && scaled < width * 1.6f,
+                      "DPI replacement measures at the new scale");
+            }
+        }
+
 
         bool kept = true;
         for (int i = 0; i < 40 && kept; ++i) {

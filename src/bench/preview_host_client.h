@@ -3,6 +3,7 @@
 // (shared by pulse_preview_test's self test, --probe and --coverage).
 #pragma once
 #include "../ipc/preview_protocol.h"
+#include "../common/decode_memory_budget.h"
 #include <windows.h>
 #include <cstdint>
 #include <cwchar>
@@ -24,6 +25,8 @@ struct Result {
 
 class Host {
 public:
+    void SetBudgeted(bool enabled) { budgeted_ = enabled; }
+    void SetBudgetGrantHook(void (*hook)(HANDLE)) { budget_grant_hook_ = hook; }
     DWORD ProcessId() const { return process_.dwProcessId; }
     bool Start() {
         wchar_t exe[MAX_PATH]{};
@@ -67,6 +70,8 @@ public:
                  uint32_t flags = 0, uint32_t frame_index = 0) {
         pulse::ipc::PreviewRequest request{};
         request.flags = flags;
+        pulse::preview::DecodeMemoryBudget::Lease lease;
+        if (budgeted_) { request.magic = pulse::ipc::kPreviewBudgetRequestMagic; request.flags |= pulse::ipc::kPreviewRequestFlagGrid; }
         request.frame_index = frame_index;
         request.request_id = next_++;
         request.generation = request.request_id;
@@ -78,6 +83,17 @@ public:
         if (!pulse::ipc::WriteAll(pipe_, &request, sizeof(request)) ||
             !pulse::ipc::WriteAll(pipe_, path.data(), request.path_chars * sizeof(wchar_t)) ||
             !pulse::ipc::ReadAll(pipe_, &result.response, sizeof(result.response))) return false;
+        unsigned proposals = 0;
+        while (result.response.magic == pulse::ipc::kPreviewBudgetProposalMagic) {
+            if (!budgeted_ || ++proposals > 16 || result.response.request_id != request.request_id ||
+                result.response.generation != request.generation) return false;
+            const uint64_t bytes = uint64_t(result.response.width) | (uint64_t(result.response.height) << 32);
+            const bool acquired = pulse::preview::SharedDecodeMemoryBudget().Reserve(lease, bytes, (result.response.flags & 1) != 0);
+            const uint32_t grant = acquired ? pulse::ipc::kPreviewBudgetGrant : 0;
+            if (!pulse::ipc::WriteAll(pipe_, &grant, sizeof(grant))) return false;
+            if (acquired && budget_grant_hook_) budget_grant_hook_(process_.hProcess);
+            if (!pulse::ipc::ReadAll(pipe_, &result.response, sizeof(result.response))) return false;
+        }
         if (result.response.magic != pulse::ipc::kPreviewMagic ||
             result.response.request_id != request.request_id) return false;
         std::wstring mapping(result.response.mapping_chars, L'\0');
@@ -122,6 +138,8 @@ public:
         return true;
     }
 private:
+    bool budgeted_ = false;
+    void (*budget_grant_hook_)(HANDLE) = nullptr;
     HANDLE pipe_ = INVALID_HANDLE_VALUE;
     PROCESS_INFORMATION process_{};
     uint32_t next_ = 1;

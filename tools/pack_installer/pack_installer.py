@@ -81,6 +81,13 @@ def collect(root: Path, build: Path) -> list[tuple[Path, str]]:
 CHANNELS = {"windows": 10240, "win81": 9600}
 
 
+def payload_dictionary_size(raw_size: int) -> int:
+    # History beyond the entire input cannot improve compression. Keep the
+    # existing 64 MiB ceiling for larger releases, but avoid reserving it in
+    # the installer's streaming decoder for smaller payloads.
+    return max(4096, min(64 << 20, 1 << (max(raw_size, 1) - 1).bit_length()))
+
+
 def build_payload(items, version: str, channel: str = "windows") -> tuple[bytes, dict]:
     files, blobs = [], []
     for src, dest in items:
@@ -94,7 +101,7 @@ def build_payload(items, version: str, channel: str = "windows") -> tuple[bytes,
     filters = [
         {"id": lzma.FILTER_X86},
         {"id": lzma.FILTER_LZMA2, "preset": 9 | lzma.PRESET_EXTREME,
-         "dict_size": 64 << 20, "nice_len": 273},
+         "dict_size": payload_dictionary_size(len(raw)), "nice_len": 273},
     ]
     xz = lzma.compress(raw, format=lzma.FORMAT_XZ, check=lzma.CHECK_CRC64, filters=filters)
     return xz, {"raw": len(raw), "xz": len(xz), "files": len(files)}

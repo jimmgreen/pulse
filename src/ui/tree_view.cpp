@@ -133,8 +133,27 @@ bool Identifier(const std::wstring& key) {
 
 // ---- Payload ----------------------------------------------------------------
 
+bool TreeView::SetPayload(const std::shared_ptr<const std::wstring>& payload) {
+    if (payload && payload_identity_.lock() == payload && !Payload().empty()) {
+        return true;
+    }
+    if (!payload) return false;
+    const bool accepted = SetPayloadImpl(*payload, payload);
+    if (accepted) {
+        StorePayload(*payload, payload);
+        payload_identity_ = payload;
+    }
+    return accepted;
+}
+
 bool TreeView::SetPayload(const std::wstring& payload) {
-    if (payload == payload_ && !payload_.empty()) return true;
+    return SetPayloadImpl(payload, {});
+}
+
+bool TreeView::SetPayloadImpl(const std::wstring& payload,
+                           std::shared_ptr<const std::wstring> owner) {
+    payload_identity_.reset();
+    if (payload == Payload() && !Payload().empty()) return true;
     if (payload.compare(0, 11, L"PULSETREE\t1") != 0) return false;
     Clear();
     std::wstring_view all(payload);
@@ -183,7 +202,7 @@ bool TreeView::SetPayload(const std::wstring& payload) {
         }
     }
     if (!header) { Clear(); return false; }
-    payload_ = payload;
+    StorePayload(payload, std::move(owner));
     // Subtree ends (pre-order: the next node at the same or a lower depth).
     std::vector<uint32_t> open;
     for (uint32_t i = 0; i < nodes_.size(); ++i) {
@@ -214,15 +233,18 @@ bool TreeView::SetPayload(const std::wstring& payload) {
 }
 
 void TreeView::Clear() {
-    payload_.clear();
-    source_.clear();
-    plain_.clear();
+    payload_identity_.reset();
+    ++text_revision_;
+    decltype(payload_){}.swap(payload_);
+    shared_payload_.reset();
+    decltype(source_){}.swap(source_);
+    decltype(plain_){}.swap(plain_);
     error_.clear();
     error_line_ = error_column_ = 0;
     xml_ = truncated_ = false;
-    nodes_.clear();
-    expanded_.clear();
-    rows_.clear();
+    decltype(nodes_){}.swap(nodes_);
+    decltype(expanded_){}.swap(expanded_);
+    decltype(rows_){}.swap(rows_);
     current_ = -1;
     hover_row_ = -1;
     sy_ = 0.0f;
@@ -755,7 +777,7 @@ bool TreeView::EnsureFormats(IDWriteFactory2* factory, float scale) {
 }
 
 void TreeView::Draw(ID2D1DeviceContext* dc, IDWriteFactory2* factory, const D2D1_RECT_F& rect,
-                    const Theme& theme, bool dark, float scale, const std::vector<Highlight>& matches) {
+                    const Theme& theme, bool dark, float scale, SearchHighlights matches) {
     if (!dc || nodes_.empty() || !EnsureFormats(factory, scale)) return;
     view_ = rect;
     scale_ = scale;
@@ -842,17 +864,15 @@ void TreeView::Draw(ID2D1DeviceContext* dc, IDWriteFactory2* factory, const D2D1
             if (brushes[p.color]) layout->SetDrawingEffect(brushes[p.color].Get(), {p.start, p.length});
         // Find highlights inside this node's searchable text.
         const uint32_t start = n.offset, end = n.offset + static_cast<uint32_t>(base);
-        auto it = std::lower_bound(matches.begin(), matches.end(), start,
-                                   [](const Highlight& h, uint32_t v) { return h.start + h.length <= v; });
-        for (; it != matches.end() && it->start < end; ++it) {
-            const uint32_t a = (std::max)(it->start, start) - start;
-            const uint32_t b = (std::min)(it->start + it->length, end) - start;
+        for (const Highlight match : matches.Intersecting(start, end)) {
+            const uint32_t a = (std::max)(match.start, start) - start;
+            const uint32_t b = (std::min)(match.start + match.length, end) - start;
             if (b <= a) continue;
             UINT32 count = 0;
             layout->HitTestTextRange(a, b - a, 0, 0, nullptr, 0, &count);
             std::vector<DWRITE_HIT_TEST_METRICS> hits(count);
             if (count && SUCCEEDED(layout->HitTestTextRange(a, b - a, 0, 0, hits.data(), count, &count))) {
-                brush_->SetColor(it->current ? HexColor(0xF59E0B) : HexColor(0xFACC15));
+                brush_->SetColor(match.current ? HexColor(0xF59E0B) : HexColor(0xFACC15));
                 for (const auto& h : hits)
                     dc->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(tx + h.left, y + 2.0f * s, tx + h.left + h.width,
                                                                            y + rh - 2.0f * s), 2.0f * s, 2.0f * s), brush_.Get());

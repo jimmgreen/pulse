@@ -12,6 +12,15 @@
 namespace pulse::ui {
 
 struct LumaTextStats {
+    // Startup diagnostics only; these remain zero unless PULSE_STARTUP_TRACE is enabled.
+    std::uint64_t layout_time_us = 0;
+    std::uint64_t draw_time_us = 0;
+    std::uint64_t frame_end_time_us = 0;
+    std::uint64_t recording_end_time_us = 0;
+    std::uint64_t shaping_time_us = 0;
+    std::uint64_t raster_time_us = 0;
+    std::uint64_t upload_time_us = 0;
+    std::uint64_t composition_time_us = 0;
     std::uint64_t draw_calls = 0;
     std::uint64_t freetype_glyphs = 0;
     std::uint64_t cache_hits = 0;

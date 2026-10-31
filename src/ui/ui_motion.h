@@ -398,8 +398,8 @@ inline float ListShiftMotion::ShiftProgress() const noexcept {
 // RectMotion driven by a spring instead of a fixed ease. The plate carries
 // its velocity across target changes: sweeping the pointer over several
 // rows keeps it moving instead of restarting from rest at every row (which
-// read as the plate lagging the pointer). Integrated in fixed 4 ms steps
-// from the elapsed time, so the path does not depend on the frame rate.
+// read as the plate lagging the pointer). Evaluated analytically from elapsed time so dropped frames and
+// different refresh rates follow the same path.
 class SpringRectMotion {
 public:
     D2D1_RECT_F Update(uint64_t context, int64_t key, const D2D1_RECT_F& target,
@@ -410,6 +410,7 @@ public:
             Snap(target);
             last_ = now;
         } else if (key != key_) {
+            if (!settled_) Step(now);
             to_ = target;
             spec_ = spec;
             if (settled_) {
@@ -452,17 +453,41 @@ private:
         settled_ = true;
     }
     void Step(uint64_t now) noexcept {
-        float dt = static_cast<float>(std::min<uint64_t>(now - last_, 64)) * 0.001f;
+        const float dt = static_cast<float>(now - last_) * 0.001f;
         last_ = now;
         float* x[4] = {&current_.left, &current_.top, &current_.right, &current_.bottom};
         const float g[4] = {to_.left, to_.top, to_.right, to_.bottom};
-        while (dt > 0.0f) {
-            const float h = std::min(dt, 0.004f);
-            for (int i = 0; i < 4; ++i) {
-                vel_[i] += (spec_.k * (g[i] - *x[i]) - spec_.c * vel_[i]) * h;
-                *x[i] += vel_[i] * h;
+        const float alpha = spec_.c * 0.5f;
+        const float discriminant = alpha * alpha - spec_.k;
+        const float root = std::sqrt(std::fabs(discriminant));
+        const float e = std::exp(-alpha * dt);
+        const float cosine = discriminant < -0.001f ? std::cos(root * dt) : 0.0f;
+        const float sine = discriminant < -0.001f ? std::sin(root * dt) : 0.0f;
+        const float r1 = -alpha + root, r2 = -alpha - root;
+        const float e1 = discriminant >= 0.001f ? std::exp(r1 * dt) : 0.0f;
+        const float e2 = discriminant >= 0.001f ? std::exp(r2 * dt) : 0.0f;
+        for (int i = 0; i < 4; ++i) {
+            const float y = *x[i] - g[i];
+            const float v = vel_[i];
+            float position = 0.0f;
+            float velocity = 0.0f;
+            if (std::fabs(discriminant) < 0.001f) {
+                const float b = v + alpha * y;
+                position = e * (y + b * dt);
+                velocity = e * (v - alpha * b * dt);
+            } else if (discriminant < 0.0f) {
+                const float w = root;
+                const float c = cosine, sn = sine;
+                position = e * (y * c + (v + alpha * y) / w * sn);
+                velocity = e * (v * c - (alpha * v + spec_.k * y) / w * sn);
+            } else {
+                const float a = (v - r2 * y) / (r1 - r2);
+                const float b = y - a;
+                position = a * e1 + b * e2;
+                velocity = r1 * a * e1 + r2 * b * e2;
             }
-            dt -= h;
+            *x[i] = g[i] + position;
+            vel_[i] = velocity;
         }
         bool rest = now - start_ >= kMaxGlideMs;
         if (!rest) {

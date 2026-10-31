@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.25)
+﻿cmake_minimum_required(VERSION 3.25)
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/version.txt" PULSE_VERSION LIMIT_COUNT 1)
 project(Pulse VERSION ${PULSE_VERSION} LANGUAGES C CXX)
 
@@ -17,6 +17,7 @@ endif()
 
 option(PULSE_WIN81_CANDIDATE "Require a Windows 8.1-capable release toolset" OFF)
 option(PULSE_RELEASE_SYMBOLS "Generate matching PDBs for signed release archives" OFF)
+option(PULSE_WITH_IPO "Enable Release interprocedural optimization for pulse.exe" OFF)
 if(PULSE_WIN81_CANDIDATE AND MSVC_VERSION GREATER_EQUAL 1950)
     message(FATAL_ERROR "Windows 8.1 candidate builds require VS 2022 v143, not VS 2026")
 endif()
@@ -181,6 +182,12 @@ add_library(pulse_crash_reporter STATIC
     src/common/diagnostics_archive.cpp)
 target_include_directories(pulse_crash_reporter PUBLIC "${CMAKE_BINARY_DIR}/generated")
 target_link_libraries(pulse_crash_reporter PUBLIC dbghelp shell32 bcrypt version advapi32 pulse_localization pulse_runtime_log)
+
+add_library(pulse_virtual_disk STATIC src/common/virtual_disk_eject.cpp)
+target_compile_features(pulse_virtual_disk PRIVATE cxx_std_20)
+target_compile_options(pulse_virtual_disk PRIVATE /W4 /permissive- /utf-8)
+target_compile_definitions(pulse_virtual_disk PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+target_link_libraries(pulse_virtual_disk PUBLIC virtdisk advapi32 setupapi cfgmgr32)
 
 add_library(pulse_text STATIC src/common/text_decode.cpp)
 
@@ -548,6 +555,14 @@ if(PULSE_APP_SOURCES)
     # The assistant's answers are Markdown, parsed by the same md4c as Quick Look.
     target_sources(pulse PRIVATE src/preview_host/markdown_document.cpp third_party/md4c/md4c.c)
     target_compile_definitions(pulse PRIVATE MD4C_USE_UTF16)
+    if(PULSE_WITH_IPO)
+        include(CheckIPOSupported)
+        check_ipo_supported(RESULT _pulse_ipo_supported OUTPUT _pulse_ipo_error LANGUAGES CXX)
+        if(NOT _pulse_ipo_supported)
+            message(FATAL_ERROR "PULSE_WITH_IPO is unavailable: ${_pulse_ipo_error}")
+        endif()
+        set_property(TARGET pulse PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+    endif()
     if(PULSE_WITH_SELFTEST)
         target_compile_definitions(pulse PRIVATE PULSE_WITH_SELFTEST=1)
         target_sources(pulse PRIVATE src/bench/startup_rollback_test.cpp)
@@ -726,6 +741,7 @@ add_executable(pulse_cover_palette_test src/bench/cover_palette_test.cpp)
 
 add_executable(pulse_ops_test
     src/bench/ops_test_main.cpp
+    src/bench/retry_template_test.cpp
     src/ops/duplicate_cleanup_guard.cpp
     src/ops/ops_manager.cpp
     src/ops/file_lock_owner.cpp
@@ -750,7 +766,7 @@ add_executable(pulse_rename_ops_test src/bench/rename_ops_test.cpp
     src/app/batch_rename.cpp
     src/ops/duplicate_cleanup_guard.cpp
     src/ops/ops_manager.cpp src/ops/file_lock_owner.cpp src/ipc/shell_client.cpp)
-target_link_libraries(pulse_rename_ops_test PRIVATE ole32 shell32 uuid bcrypt pulse_localization pulse_fs_watch)
+target_link_libraries(pulse_rename_ops_test PRIVATE ole32 shell32 uuid bcrypt advapi32 pulse_localization pulse_fs_watch)
 
 add_executable(pulse_create_rename_intent_test src/bench/create_rename_intent_test.cpp
     src/app/create_rename_intent.cpp src/ops/duplicate_cleanup_guard.cpp
@@ -790,6 +806,7 @@ target_compile_definitions(pulse_elevated_test_host PRIVATE PULSE_ELEVATED_HOST=
 target_link_libraries(pulse_elevated_test_host PRIVATE ole32 shell32 uuid advapi32 bcrypt
     rstrtmgr pulse_localization)
 add_executable(pulse_elevated_transfer_protocol_test src/bench/elevated_transfer_protocol_test.cpp)
+target_link_libraries(pulse_elevated_transfer_protocol_test PRIVATE pulse_virtual_disk)
 add_executable(pulse_elevated_delete_test src/bench/elevated_delete_test.cpp src/ops/elevated_delete.cpp)
 target_link_libraries(pulse_elevated_delete_test PRIVATE ole32 shell32 uuid)
 add_executable(pulse_elevated_session_test src/bench/elevated_session_test.cpp
@@ -1446,6 +1463,14 @@ get_target_property(delta_replay_sources pulse_index_engine_test SOURCES)
 list(REMOVE_ITEM delta_replay_sources src/bench/index_engine_test.cpp)
 get_target_property(delta_replay_libraries pulse_index_engine_test LINK_LIBRARIES)
 add_executable(pulse_index_delta_replay_test src/bench/index_delta_replay_test.cpp ${delta_replay_sources})
+add_executable(pulse_index_volume_pause_test src/bench/index_volume_pause_test.cpp ${delta_replay_sources})
+target_link_libraries(pulse_index_volume_pause_test PRIVATE ${delta_replay_libraries} pulse_runtime_log)
+foreach(pause_property INCLUDE_DIRECTORIES COMPILE_DEFINITIONS LINK_OPTIONS)
+    get_target_property(pause_value pulse_index_engine_test ${pause_property})
+    if(pause_value)
+        set_property(TARGET pulse_index_volume_pause_test PROPERTY ${pause_property} "${pause_value}")
+    endif()
+endforeach()
 target_link_libraries(pulse_index_delta_replay_test PRIVATE ${delta_replay_libraries})
 foreach(delta_replay_property INCLUDE_DIRECTORIES COMPILE_DEFINITIONS LINK_OPTIONS)
     get_target_property(delta_replay_value pulse_index_engine_test ${delta_replay_property})
@@ -1469,6 +1494,7 @@ get_property(runtime_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
 foreach(runtime_target IN LISTS runtime_targets)
     get_target_property(runtime_sources ${runtime_target} SOURCES)
     if("${runtime_sources}" MATCHES "ops_manager\\.cpp")
+        target_link_libraries(${runtime_target} PRIVATE pulse_virtual_disk)
         if(NOT "${runtime_sources}" MATCHES "elevated_transfer\\.cpp")
             target_sources(${runtime_target} PRIVATE src/ops/elevated_transfer.cpp)
         endif()
@@ -1553,6 +1579,8 @@ add_executable(pulse_folder_thumbnail_test src/bench/folder_thumbnail_test.cpp s
 add_executable(pulse_index_writer_idle_test src/bench/index_writer_idle_test.cpp)
 target_link_libraries(pulse_index_writer_idle_test PRIVATE user32 shell32 advapi32)
 set(PULSE_FOLDER_SIZE_SOURCES src/app/folder_sizes.cpp src/app/folder_size_scanner.cpp src/app/folder_size_store.cpp)
+add_executable(pulse_volume_release_test src/bench/volume_release_test.cpp ${PULSE_FOLDER_SIZE_SOURCES})
+target_link_libraries(pulse_volume_release_test PRIVATE pulse_fs_watch)
 add_executable(pulse_folder_sizes_experience_test src/bench/folder_sizes_experience_test.cpp ${PULSE_FOLDER_SIZE_SOURCES})
 target_link_libraries(pulse_folder_sizes_experience_test PRIVATE pulse_fs_watch)
 add_executable(pulse_folder_sizes_perf_test src/bench/folder_sizes_perf_test.cpp ${PULSE_FOLDER_SIZE_SOURCES})
@@ -1650,7 +1678,7 @@ target_link_libraries(pulse_network_worker_audit_test PRIVATE shell32 mpr advapi
 add_executable(pulse_pdf_unicode_test src/bench/pdf_unicode_test.cpp src/index/pdfium_text.cpp)
 
 get_target_property(transfer_audit_sources pulse_ops_test SOURCES)
-list(FILTER transfer_audit_sources EXCLUDE REGEX "ops_test_main.cpp$")
+list(FILTER transfer_audit_sources EXCLUDE REGEX "(ops_test_main|retry_template_test).cpp$")
 get_target_property(transfer_audit_libraries pulse_ops_test LINK_LIBRARIES)
 add_executable(pulse_transfer_audit_test ${transfer_audit_sources} src/bench/transfer_audit_test.cpp)
 target_link_libraries(pulse_transfer_audit_test PRIVATE ${transfer_audit_libraries} advapi32)
@@ -2049,6 +2077,9 @@ target_link_libraries(pulse_zip_eocd_test PRIVATE ole32 shell32 shlwapi)
 target_sources(pulse_preview PRIVATE src/preview_host/gif_decoder.cpp)
 add_executable(pulse_gif_decode_test src/bench/gif_decode_test.cpp src/preview_host/gif_decoder.cpp)
 target_link_libraries(pulse_gif_decode_test PRIVATE ole32 windowscodecs uuid)
+add_executable(pulse_gif_switch_memory_test src/bench/gif_switch_memory_test.cpp)
+target_link_libraries(pulse_gif_switch_memory_test PRIVATE ole32 windowscodecs uuid psapi)
+add_dependencies(pulse_gif_switch_memory_test pulse_preview)
 if(PULSE_WITH_SELFTEST)
     target_compile_definitions(pulse_preview PRIVATE PULSE_PREVIEW_MAPPING_TEST)
     add_executable(pulse_preview_mapping_ack_test src/bench/preview_mapping_ack_test.cpp)
@@ -2270,3 +2301,281 @@ include(cmake/PulseDialogAuto.cmake)
 # Bounded, same-user dialog location snapshot (isolated namespace regression).
 add_executable(pulse_picker_places_snapshot_test EXCLUDE_FROM_ALL src/bench/picker_places_snapshot_test.cpp)
 target_link_libraries(pulse_picker_places_snapshot_test PRIVATE advapi32)
+# Isolated VHDX fixture; runtime requires a Windows administrator token.
+add_library(pulse_virtual_disk_fault_test STATIC src/common/virtual_disk_eject.cpp)
+target_compile_features(pulse_virtual_disk_fault_test PRIVATE cxx_std_20)
+target_compile_options(pulse_virtual_disk_fault_test PRIVATE /W4 /permissive- /utf-8)
+target_compile_definitions(pulse_virtual_disk_fault_test PUBLIC PULSE_VIRTUAL_DISK_FAULT_TEST=1)
+target_compile_definitions(pulse_virtual_disk_fault_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+target_link_libraries(pulse_virtual_disk_fault_test PUBLIC virtdisk advapi32 setupapi cfgmgr32)
+add_executable(pulse_drive_eject_test src/bench/drive_eject_test.cpp
+    src/ops/elevated_transfer_client.cpp src/ipc/elevated_transfer_transport.cpp)
+target_compile_features(pulse_drive_eject_test PRIVATE cxx_std_20)
+target_compile_options(pulse_drive_eject_test PRIVATE /W4 /permissive- /utf-8)
+target_compile_definitions(pulse_drive_eject_test PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
+target_link_libraries(pulse_drive_eject_test PRIVATE user32 gdi32 shell32 advapi32 bcrypt pulse_virtual_disk_fault_test)
+
+add_executable(pulse_spring_motion_test src/bench/spring_motion_test.cpp)
+target_link_libraries(pulse_spring_motion_test PRIVATE user32)
+add_executable(pulse_recycle_restore_index_test src/bench/recycle_restore_index_test.cpp)
+add_executable(pulse_operation_refresh_test src/bench/operation_refresh_test.cpp)
+add_executable(pulse_item_check_motion_test src/bench/item_check_motion_test.cpp)
+add_executable(pulse_wall_row_aspects_test src/bench/wall_row_aspects_test.cpp)
+
+add_executable(pulse_startup_idle_test src/bench/startup_idle_test.cpp)
+target_link_libraries(pulse_startup_idle_test PRIVATE user32)
+
+if(TARGET pulse)
+    target_compile_definitions(pulse PRIVATE PULSE_STARTUP_TRACE_DIAGNOSTICS=1)
+endif()
+
+get_target_property(PULSE_LISTING_TEST_SOURCES pulse_selection_caps_test SOURCES)
+list(FILTER PULSE_LISTING_TEST_SOURCES EXCLUDE REGEX "selection_caps_test[.]cpp$")
+add_executable(pulse_listing_filter_perf_test src/bench/listing_filter_perf_test.cpp ${PULSE_LISTING_TEST_SOURCES} src/app/entry_sort.cpp src/fs/fs_snapshot.cpp)
+get_target_property(PULSE_LISTING_TEST_LIBS pulse_selection_caps_test LINK_LIBRARIES)
+target_link_libraries(pulse_listing_filter_perf_test PRIVATE ${PULSE_LISTING_TEST_LIBS})
+target_include_directories(pulse_listing_filter_perf_test PRIVATE "${CMAKE_BINARY_DIR}/generated")
+target_sources(pulse_listing_filter_perf_test PRIVATE src/app/git_status.cpp src/app/tag_query.cpp)
+
+if(EXISTS "${CMAKE_BINARY_DIR}/listing_filter_baseline_app_model.cpp")
+get_target_property(PULSE_FILTER_BASELINE_SOURCES pulse_listing_filter_perf_test SOURCES)
+list(FILTER PULSE_FILTER_BASELINE_SOURCES EXCLUDE REGEX "(^|/)app_model[.]cpp$")
+add_executable(pulse_listing_filter_baseline EXCLUDE_FROM_ALL ${PULSE_FILTER_BASELINE_SOURCES} "${CMAKE_BINARY_DIR}/listing_filter_baseline_app_model.cpp")
+target_include_directories(pulse_listing_filter_baseline PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/app" "${CMAKE_BINARY_DIR}/generated")
+target_link_libraries(pulse_listing_filter_baseline PRIVATE ${PULSE_LISTING_TEST_LIBS})
+endif()
+
+# Data-only preview lifetime checks share production parsers without creating a GPU device.
+get_target_property(PULSE_PREVIEW_BUFFER_SOURCES pulse_preview_view_audit_test SOURCES)
+list(FILTER PULSE_PREVIEW_BUFFER_SOURCES EXCLUDE REGEX "src/bench/")
+add_executable(pulse_preview_buffer_lifetime_test ${PULSE_PREVIEW_BUFFER_SOURCES}
+    src/ui/archive_preview.cpp src/bench/preview_buffer_lifetime_test.cpp)
+get_target_property(PULSE_PREVIEW_BUFFER_LIBRARIES pulse_preview_view_audit_test LINK_LIBRARIES)
+target_compile_definitions(pulse_preview_buffer_lifetime_test PRIVATE MD4C_USE_UTF16)
+target_link_libraries(pulse_preview_buffer_lifetime_test PRIVATE ${PULSE_PREVIEW_BUFFER_LIBRARIES})
+pulse_enable_lumatext(pulse_preview_buffer_lifetime_test)
+get_target_property(PULSE_PREVIEW_BUFFER_OPTIONS pulse_preview_buffer_lifetime_test COMPILE_OPTIONS)
+list(TRANSFORM PULSE_PREVIEW_BUFFER_OPTIONS REPLACE "^/W4$" "$<$<COMPILE_LANGUAGE:CXX>:/W4>")
+set_target_properties(pulse_preview_buffer_lifetime_test PROPERTIES COMPILE_OPTIONS "${PULSE_PREVIEW_BUFFER_OPTIONS}")
+
+target_sources(pulse_content_enumeration_test PRIVATE src/bench/content_match_perf_test.cpp)
+
+# Focused preview highlight rendering and selection delta regressions.
+add_executable(pulse_search_highlights_test src/bench/search_highlights_test.cpp)
+add_executable(pulse_marquee_selection_test src/bench/marquee_selection_test.cpp)
+add_executable(pulse_search_highlight_render_test ${PULSE_PREVIEW_BUFFER_SOURCES}
+    src/bench/search_highlight_render_test.cpp)
+target_compile_definitions(pulse_search_highlight_render_test PRIVATE MD4C_USE_UTF16)
+target_link_libraries(pulse_search_highlight_render_test PRIVATE ${PULSE_PREVIEW_BUFFER_LIBRARIES})
+pulse_enable_lumatext(pulse_search_highlight_render_test)
+get_target_property(PULSE_HIGHLIGHT_OPTIONS pulse_search_highlight_render_test COMPILE_OPTIONS)
+list(TRANSFORM PULSE_HIGHLIGHT_OPTIONS REPLACE "^/W4$" "$<$<COMPILE_LANGUAGE:CXX>:/W4>")
+set_target_properties(pulse_search_highlight_render_test PROPERTIES COMPILE_OPTIONS "${PULSE_HIGHLIGHT_OPTIONS}")
+
+add_executable(pulse_preview_payload_test src/bench/preview_payload_test.cpp src/ui/thumbnail_cache.cpp)
+target_link_libraries(pulse_preview_payload_test PRIVATE d2d1 d3d11 dxgi dwrite windowscodecs ole32 shell32 shlwapi uuid pulse_crash_reporter)
+
+add_executable(pulse_index_match_cache_test src/bench/index_match_cache_test.cpp ${query_narrow_sources})
+target_include_directories(pulse_index_match_cache_test PRIVATE "${CMAKE_BINARY_DIR}/generated")
+target_link_libraries(pulse_index_match_cache_test PRIVATE advapi32 shlwapi ole32 shell32 netapi32 mpr pulse_localization pulse_runtime_log)
+
+add_executable(pulse_preview_identity_test ${PULSE_PREVIEW_BUFFER_SOURCES}
+    src/ui/archive_preview.cpp src/bench/preview_identity_test.cpp)
+target_compile_definitions(pulse_preview_identity_test PRIVATE MD4C_USE_UTF16)
+target_link_libraries(pulse_preview_identity_test PRIVATE ${PULSE_PREVIEW_BUFFER_LIBRARIES})
+pulse_enable_lumatext(pulse_preview_identity_test)
+get_target_property(PULSE_IDENTITY_OPTIONS pulse_preview_identity_test COMPILE_OPTIONS)
+list(TRANSFORM PULSE_IDENTITY_OPTIONS REPLACE "^/W4$" "$<$<COMPILE_LANGUAGE:CXX>:/W4>")
+set_target_properties(pulse_preview_identity_test PROPERTIES COMPILE_OPTIONS "${PULSE_IDENTITY_OPTIONS}")
+add_executable(pulse_plain_highlight_test src/bench/plain_highlight_test.cpp)
+target_link_libraries(pulse_plain_highlight_test PRIVATE dwrite)
+add_executable(pulse_plain_highlight_render_test src/bench/plain_highlight_render_test.cpp)
+target_link_libraries(pulse_plain_highlight_render_test PRIVATE dwrite d2d1 d3d11 dxgi)
+
+# Rebuild the saved engine with the identical controlled benchmark fixture.
+if(EXISTS "${CMAKE_BINARY_DIR}/index_match_cache_before/index_engine.cpp")
+set(PULSE_MATCH_BASELINE_SOURCES ${query_narrow_sources})
+list(FILTER PULSE_MATCH_BASELINE_SOURCES EXCLUDE REGEX "(^|/)index_engine[.]cpp$")
+add_executable(pulse_index_match_cache_baseline EXCLUDE_FROM_ALL src/bench/index_match_cache_test.cpp
+    ${PULSE_MATCH_BASELINE_SOURCES} "${CMAKE_BINARY_DIR}/index_match_cache_before/index_engine.cpp")
+target_include_directories(pulse_index_match_cache_baseline PRIVATE "${CMAKE_BINARY_DIR}/generated" "${CMAKE_CURRENT_SOURCE_DIR}/src/index")
+target_link_libraries(pulse_index_match_cache_baseline PRIVATE advapi32 shlwapi ole32 shell32 netapi32 mpr pulse_localization pulse_runtime_log)
+endif()
+
+add_executable(pulse_source_identity_test src/bench/source_identity_test.cpp)
+
+add_executable(pulse_preview_storage_test ${PULSE_PREVIEW_BUFFER_SOURCES}
+    src/ui/archive_preview.cpp src/bench/preview_storage_test.cpp)
+target_compile_definitions(pulse_preview_storage_test PRIVATE MD4C_USE_UTF16)
+target_link_libraries(pulse_preview_storage_test PRIVATE ${PULSE_PREVIEW_BUFFER_LIBRARIES})
+pulse_enable_lumatext(pulse_preview_storage_test)
+get_target_property(PULSE_STORAGE_OPTIONS pulse_preview_storage_test COMPILE_OPTIONS)
+list(TRANSFORM PULSE_STORAGE_OPTIONS REPLACE "^/W4$" "$<$<COMPILE_LANGUAGE:CXX>:/W4>")
+set_target_properties(pulse_preview_storage_test PROPERTIES COMPILE_OPTIONS "${PULSE_STORAGE_OPTIONS}")
+
+# Main-window text measurements survive initialization of an auxiliary window.
+add_executable(pulse_compositor_measure_cache_test EXCLUDE_FROM_ALL
+    src/bench/compositor_measure_cache_test.cpp src/ui/typography.cpp src/ui/ui_compositor.cpp)
+target_link_libraries(pulse_compositor_measure_cache_test PRIVATE
+    d3d11 d2d1 dwrite dxgi dcomp dwmapi shcore ole32 windowscodecs user32 gdi32 comctl32 pulse_localization)
+pulse_enable_lumatext(pulse_compositor_measure_cache_test)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/build/startup_graphics_before/ui_compositor.cpp")
+    add_executable(pulse_compositor_measure_cache_before EXCLUDE_FROM_ALL
+        src/bench/compositor_measure_cache_test.cpp src/ui/typography.cpp
+        build/startup_graphics_before/ui_compositor.cpp)
+    target_include_directories(pulse_compositor_measure_cache_before PRIVATE src/ui)
+    target_link_libraries(pulse_compositor_measure_cache_before PRIVATE
+        d3d11 d2d1 dwrite dxgi dcomp dwmapi shcore ole32 windowscodecs user32 gdi32 comctl32 pulse_localization)
+    pulse_enable_lumatext(pulse_compositor_measure_cache_before)
+endif()
+
+# Measure actual independent menu rendering with shared dependencies.
+foreach(menu_frame_variant IN ITEMS test before)
+    if(menu_frame_variant STREQUAL "before")
+        set(menu_frame_source "${CMAKE_CURRENT_SOURCE_DIR}/build/menu_frame_before/fluent_menu.cpp")
+        if(NOT EXISTS "${menu_frame_source}")
+            continue()
+        endif()
+    else()
+        set(menu_frame_source src/ui/fluent_menu.cpp)
+    endif()
+    set(menu_frame_target pulse_menu_frame_${menu_frame_variant})
+    add_executable(${menu_frame_target} EXCLUDE_FROM_ALL src/bench/menu_frame_test.cpp src/bench/child_edit_test.rc
+        src/ui/typography.cpp src/ui/ui_compositor.cpp src/ui/edit_host.cpp src/ui/fluent_components.cpp
+        ${menu_frame_source} src/ui/tab_shape.cpp src/ui/window_material.cpp)
+    target_include_directories(${menu_frame_target} PRIVATE "${CMAKE_BINARY_DIR}/generated" src/ui)
+    target_link_options(${menu_frame_target} PRIVATE /MANIFEST:NO)
+    target_link_libraries(${menu_frame_target} PRIVATE d3d11 d2d1 dwrite dxgi dcomp dwmapi
+        shcore ole32 windowscodecs user32 gdi32 comctl32 uxtheme shell32 imm32 pulse_localization)
+    pulse_enable_lumatext(${menu_frame_target})
+endforeach()
+
+add_executable(pulse_visible_text_test EXCLUDE_FROM_ALL
+    src/bench/visible_text_test.cpp src/ui/visible_text_renderer.cpp)
+target_compile_features(pulse_visible_text_test PRIVATE cxx_std_20)
+target_compile_definitions(pulse_visible_text_test PRIVATE UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_options(pulse_visible_text_test PRIVATE /W4 /permissive- /utf-8)
+target_link_libraries(pulse_visible_text_test PRIVATE d3d11 d2d1 dwrite dxgi ole32 uuid)
+
+add_executable(pulse_transfer_stage_timing_test src/bench/transfer_stage_timing_test.cpp)
+
+# Same real copy/conflict workload with the former quadratic counter, opt-in build only.
+get_target_property(conflict_baseline_sources pulse_ops_test SOURCES)
+get_target_property(conflict_baseline_libraries pulse_ops_test LINK_LIBRARIES)
+add_executable(pulse_ops_conflict_baseline_test EXCLUDE_FROM_ALL ${conflict_baseline_sources})
+target_link_libraries(pulse_ops_conflict_baseline_test PRIVATE ${conflict_baseline_libraries})
+target_compile_definitions(pulse_ops_conflict_baseline_test PRIVATE PULSE_CONFLICT_SNAPSHOT_BASELINE=1)
+add_dependencies(pulse_ops_conflict_baseline_test pulse_shell)
+
+# Matched-code delivery benchmarks; baseline snapshots are explicitly saved before edits.
+get_target_property(copy_delivery_sources pulse_ops_bench SOURCES)
+get_target_property(copy_delivery_libraries pulse_ops_bench LINK_LIBRARIES)
+list(REMOVE_ITEM copy_delivery_sources src/bench/ops_bench_main.cpp)
+add_executable(pulse_copy_delivery_bench src/bench/copy_delivery_bench_main.cpp ${copy_delivery_sources})
+target_link_libraries(pulse_copy_delivery_bench PRIVATE ${copy_delivery_libraries})
+if(EXISTS "${CMAKE_BINARY_DIR}/copy_delivery_before/src/ops/ops_manager.cpp")
+    set(copy_delivery_baseline_sources ${copy_delivery_sources})
+    list(FILTER copy_delivery_baseline_sources EXCLUDE REGEX "(ops_manager|transfer_engine)\\.cpp$")
+    add_executable(pulse_copy_delivery_baseline src/bench/copy_delivery_bench_main.cpp
+        ${copy_delivery_baseline_sources}
+        "${CMAKE_BINARY_DIR}/copy_delivery_before/src/ops/ops_manager.cpp"
+        "${CMAKE_BINARY_DIR}/copy_delivery_before/src/ops/transfer_engine.cpp")
+    target_include_directories(pulse_copy_delivery_baseline PRIVATE
+        "${CMAKE_BINARY_DIR}/copy_delivery_before/src/ops" "${CMAKE_CURRENT_SOURCE_DIR}/src/ops")
+    target_link_libraries(pulse_copy_delivery_baseline PRIVATE ${copy_delivery_libraries})
+endif()
+
+add_executable(pulse_copy_security_compatibility_test EXCLUDE_FROM_ALL
+    src/bench/copy_security_compatibility_test.cpp src/ops/transfer_engine.cpp)
+target_link_libraries(pulse_copy_security_compatibility_test PRIVATE ole32 advapi32 crypt32 ncrypt)
+
+add_executable(pulse_copy_pool_control_test EXCLUDE_FROM_ALL
+    src/bench/copy_pool_control_test.cpp src/ops/transfer_engine.cpp)
+
+add_executable(pulse_overwrite_authorization_contract_test EXCLUDE_FROM_ALL
+    src/bench/overwrite_authorization_contract_test.cpp src/ops/undo_file_version.cpp)
+target_link_libraries(pulse_overwrite_authorization_contract_test PRIVATE bcrypt ole32)
+
+add_executable(pulse_replacement_backup_test EXCLUDE_FROM_ALL src/bench/replacement_backup_test.cpp src/ops/replacement_backup.cpp)
+target_link_libraries(pulse_replacement_backup_test PRIVATE ole32 bcrypt)
+
+add_executable(pulse_copy_fault_test EXCLUDE_FROM_ALL src/bench/copy_fault_test.cpp src/ops/transfer_engine.cpp)
+target_link_libraries(pulse_copy_fault_test PRIVATE ole32)
+
+# Copy pipeline components are shared by production and focused operation fixtures.
+get_property(copy_pipeline_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(copy_target IN LISTS copy_pipeline_targets)
+    get_target_property(copy_sources ${copy_target} SOURCES)
+    if("src/ops/ops_manager.cpp" IN_LIST copy_sources)
+        target_sources(${copy_target} PRIVATE src/ops/replacement_backup.cpp)
+    endif()
+    if("src/ops/transfer_engine.cpp" IN_LIST copy_sources)
+        target_sources(${copy_target} PRIVATE src/ops/verification_worker.cpp src/ops/transfer_device_budget.cpp)
+        target_link_libraries(${copy_target} PRIVATE bcrypt)
+    endif()
+endforeach()
+add_executable(pulse_verification_worker_test EXCLUDE_FROM_ALL
+    src/bench/verification_worker_test.cpp src/ops/verification_worker.cpp)
+target_link_libraries(pulse_verification_worker_test PRIVATE bcrypt)
+add_executable(pulse_transfer_device_budget_test EXCLUDE_FROM_ALL
+    src/bench/transfer_device_budget_test.cpp src/ops/transfer_device_budget.cpp)
+add_executable(pulse_target_directory_cache_test EXCLUDE_FROM_ALL src/bench/target_directory_cache_test.cpp)
+
+add_executable(pulse_transfer_enumeration_cursor_test EXCLUDE_FROM_ALL src/bench/transfer_enumeration_cursor_test.cpp)
+
+add_executable(pulse_copy_block_experiment EXCLUDE_FROM_ALL src/bench/copy_block_experiment.cpp src/ops/verification_worker.cpp)
+target_link_libraries(pulse_copy_block_experiment PRIVATE bcrypt ole32)
+
+add_executable(pulse_thumbnail_writer_test src/bench/thumbnail_writer_test.cpp src/ui/thumbnail_disk_cache.cpp)
+target_link_libraries(pulse_thumbnail_writer_test PRIVATE d2d1 windowscodecs ole32 shell32 shlwapi uuid)
+
+add_executable(pulse_wall_layout_job_test src/bench/wall_layout_job_test.cpp src/ui/view_layout.cpp)
+
+add_executable(pulse_image_grid_benchmark src/bench/image_grid_benchmark.cpp src/ui/thumbnail_cache.cpp)
+target_link_libraries(pulse_image_grid_benchmark PRIVATE d2d1 d3d11 dxgi dwrite windowscodecs ole32 shell32 shlwapi uuid psapi pulse_runtime_log)
+add_executable(pulse_wall_aspect_demand_test src/bench/wall_aspect_demand_test.cpp src/ui/wall_aspects.cpp)
+target_link_libraries(pulse_wall_aspect_demand_test PRIVATE ole32 shell32 propsys user32 uuid)
+add_executable(pulse_wall_layout_source_test src/bench/wall_layout_source_test.cpp src/ui/view_layout.cpp src/ui/wall_aspects.cpp)
+target_link_libraries(pulse_wall_layout_source_test PRIVATE user32 ole32 propsys shell32 uuid)
+add_executable(pulse_decode_memory_budget_test src/bench/decode_memory_budget_test.cpp)
+
+add_executable(pulse_builtin_menu_coverage_test src/bench/builtin_menu_coverage_test.cpp
+    src/app/context_menu.cpp src/app/context_menu_prefs.cpp src/app/builtin_menu_items.cpp src/ui/view_layout.cpp)
+target_link_libraries(pulse_builtin_menu_coverage_test PRIVATE pulse_localization shell32 shlwapi advapi32 ole32)
+# Keep this focused executable independent of unused palette/navigation builders.
+target_compile_options(pulse_builtin_menu_coverage_test PRIVATE /Gy)
+target_link_options(pulse_builtin_menu_coverage_test PRIVATE /OPT:REF)
+
+# The settings scan reuses read-only MSIX discovery; it never instantiates commands.
+target_sources(pulse PRIVATE src/shell_host/packaged_ctx_handlers.cpp)
+target_sources(pulse_app_controllers_test PRIVATE src/shell_host/packaged_ctx_handlers.cpp)
+add_executable(pulse_system_ctx_packaged_test src/bench/system_ctx_packaged_test.cpp
+    src/app/system_ctx_registry.cpp src/shell_host/packaged_ctx_handlers.cpp)
+target_link_libraries(pulse_system_ctx_packaged_test PRIVATE ole32 shell32 shlwapi advapi32 uuid)
+
+add_executable(pulse_native_delete_stream_test src/bench/native_delete_stream_test.cpp)
+
+add_executable(pulse_delete_preflight_test EXCLUDE_FROM_ALL
+    src/bench/delete_preflight_test.cpp src/app/delete_preflight.cpp src/ops/elevated_delete.cpp)
+target_link_libraries(pulse_delete_preflight_test PRIVATE ole32 shell32 uuid)
+
+add_executable(pulse_recycle_policy_test src/bench/recycle_policy_test.cpp src/ops/elevated_delete.cpp)
+target_link_libraries(pulse_recycle_policy_test PRIVATE ole32 shell32 uuid)
+
+get_target_property(delete_delivery_sources pulse_ops_bench SOURCES)
+get_target_property(delete_delivery_libraries pulse_ops_bench LINK_LIBRARIES)
+list(REMOVE_ITEM delete_delivery_sources src/bench/ops_bench_main.cpp)
+add_executable(pulse_delete_delivery_test src/bench/delete_delivery_test.cpp ${delete_delivery_sources})
+target_link_libraries(pulse_delete_delivery_test PRIVATE ${delete_delivery_libraries})
+
+target_compile_definitions(pulse_copy_delivery_bench PRIVATE PULSE_COPY_STREAM_TESTING=1)
+if(EXISTS "${CMAKE_BINARY_DIR}/delete_policy_baseline.cpp")
+    get_target_property(delete_baseline_sources pulse_ops_bench SOURCES)
+    get_target_property(delete_baseline_libraries pulse_ops_bench LINK_LIBRARIES)
+    list(REMOVE_ITEM delete_baseline_sources src/ops/ops_manager_authorized_delete.cpp)
+    add_executable(pulse_delete_baseline_bench EXCLUDE_FROM_ALL ${delete_baseline_sources} "${CMAKE_BINARY_DIR}/delete_policy_baseline.cpp")
+    target_include_directories(pulse_delete_baseline_bench PRIVATE src/ops)
+    target_link_libraries(pulse_delete_baseline_bench PRIVATE ${delete_baseline_libraries})
+endif()
+
+target_compile_definitions(pulse_delete_delivery_test PRIVATE PULSE_NATIVE_DELETE_TEST)

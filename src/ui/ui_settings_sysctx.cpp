@@ -1,4 +1,4 @@
-#include "../common/windows_compat.h"
+﻿#include "../common/windows_compat.h"
 #include "ui_renderer.h"
 #include "ui_renderer_internal.h"
 #include "../common/localization.h"
@@ -221,8 +221,8 @@ void MainRenderer::DrawSettingsSysCtx(const WindowViewModel& vm, const D2D1_RECT
         painter_.FillRoundedRect(d.method, 7 * s, subtle);
         painter_.DrawWrappedCaption(row.method, D2D1::Point2F(d.method.left + 10 * s, d.method.top + 8 * s),
                                     d.method.right - d.method.left - 20 * s, theme.text_secondary);
-        button(d.copy, sysctx_text::CopyKey(), L"\xE8C8", kSysCtxDetailCopy, true);
-        button(d.folder, sysctx_text::OpenFolder(), L"\xE838", kSysCtxDetailFolder, true);
+        button(d.copy, sysctx_text::CopyKey(), L"\xE8C8", kSysCtxDetailCopy, row.registry_copyable);
+        button(d.folder, sysctx_text::OpenFolder(), L"\xE838", kSysCtxDetailFolder, row.registry_copyable);
         button(d.remove, row.deleting ? sysctx_text::KeepLeftover() : sysctx_text::DeleteLeftover(),
                row.deleting ? L"\xE7A7" : L"\xE74D", kSysCtxDetailDelete, ready);
     };

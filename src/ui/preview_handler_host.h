@@ -1,9 +1,11 @@
-#pragma once
+﻿#pragma once
 #include <d2d1.h>
 #include <windows.h>
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <future>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -26,6 +28,8 @@ public:
 
     void SetNotifyWindow(HWND hwnd);
     void Hide();
+    std::shared_future<void> SuspendVolume(const std::wstring& root);
+    void ResumeVolume(const std::wstring& root);
     void Reset();
     uint64_t NextWatchdogDeadline() const;
     // Re-evaluates the popup overlay's screen position after its owner moves.
@@ -82,6 +86,7 @@ private:
     RECT last_bounds_{};
     HWND last_owner_ = nullptr;
     bool last_enabled_ = false;
+    std::map<std::wstring, std::shared_future<void>> suspended_volumes_;
 };
 
 } // namespace pulse::ui

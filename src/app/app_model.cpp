@@ -1,3 +1,4 @@
+#include "name_pattern.h"
 // app_model.cpp
 #include "app_model.h"
 #include "git_status.h"
@@ -168,6 +169,13 @@ void Tab::SetSnapshot(fs::SnapshotPtr value) {
     view_cache_filter_text.clear();
     view_filter_map.reset();
     view_tag_dots.reset();
+    view_row_cache.reset();
+    view_groups.reset();
+    view_groups_snapshot.reset();
+    view_groups_filter.reset();
+    view_compare_base.reset();
+    view_compare_marks.reset();
+    view_compare_map.reset();
     snapshot_path = snapshot ? current_path : L"";
     if(content_results) { directory_count=0; file_count=content_results->Count(); return; }
     if (all_selected && !ShowsEveryEntry()) MaterializeSelection();
@@ -1980,8 +1988,8 @@ index::ContentResultStore::Filter ContentFilter(const std::wstring& text, const 
         }
         sets.push_back(std::move(set));
     }
-    return [name=std::move(name),sets=std::move(sets)](const fs::DirEntry& entry) {
-        if(!NameMatchesPattern(entry.name,name)) return false;
+    return [pattern=NamePattern(name),sets=std::move(sets)](const fs::DirEntry& entry) {
+        if(!pattern.Matches(entry.name)) return false;
         if(sets.empty()) return true;
         const std::wstring key=ToLowerCopy(entry.full_path);
         for(const auto& set:sets) if(set.paths.contains(key)==set.exclude) return false;
@@ -2004,11 +2012,15 @@ void CollectFilterMatches(const Tab& tab, const PlacesCatalog* places, std::vect
     ParseFilterText(tab.filter_text, name_needle, tag_terms);
     if (name_needle.empty() && tag_terms.empty())
         name_needle = ToLowerCopy(tab.filter_text);
+    const NamePattern pattern(name_needle);
+    const auto* rows = tab.TreeEntries();
+    if (!rows) rows = tab.snapshot.get();
+    const int available = static_cast<int>((std::min)(static_cast<size_t>(n), rows->size()));
     out.reserve(static_cast<size_t>(n));
-    for (int i = 0; i < n; ++i) {
-        const auto& e = tab.EntryAt(static_cast<size_t>(i));
+    for (int i = 0; i < available; ++i) {
+        const auto& e = (*rows)[static_cast<size_t>(i)];
         if (!tab.EntryVisible(i)) continue;
-        bool name_ok = NameMatchesPattern(e.name, name_needle);
+        bool name_ok = pattern.Matches(e.name);
         // 别名: the filter also finds an item by its alias, or its pinyin.
         if (!name_ok && !name_needle.empty() && !AliasStore::Instance().Empty()) {
             const std::wstring alias = AliasStore::Instance().Find(EntryPathOf(tab, e));
@@ -2019,6 +2031,10 @@ void CollectFilterMatches(const Tab& tab, const PlacesCatalog* places, std::vect
             tag_ok = TagTermsMatch(*places, places->TagsForPath(EntryPathOf(tab, e)), tag_terms);
         if (name_ok && tag_ok) out.push_back(i);
     }
+    // Maps cached by each tab should not retain a full-directory allocation
+    // after a selective query. Keep dense results and small reusable buffers.
+    if (out.capacity() > 4096 && out.size() < out.capacity() / 8)
+        std::vector<int>(out.begin(), out.end()).swap(out);
 }
 
 namespace {
@@ -2158,6 +2174,7 @@ void FillPaneViewModelBody(ui::PaneViewModel& out, const Pane& pane, const Place
     out.view_mode = tab->view_mode;
     out.icon_dip = tab->icon_dip;
     out.wall = tab->wall;
+    out.wall_view_identity = reinterpret_cast<uintptr_t>(tab);
     out.view_generation = tab->view_generation;
     out.sort_column = tab->sort_column;
     out.sort_direction = tab->sort_direction;
@@ -2294,6 +2311,7 @@ void FillPaneViewModelBody(ui::PaneViewModel& out, const Pane& pane, const Place
             std::set<std::wstring> seen;
             bool contiguous = true;
             int prev = -1;
+            int prev_rank = 0;
             for (size_t row = 0; row < rows; ++row) {
                 const int src = out.filter_map ? (*out.filter_map)[row] : static_cast<int>(row);
                 if (src < 0 || static_cast<size_t>(src) >= entries.size()) {
@@ -2301,12 +2319,13 @@ void FillPaneViewModelBody(ui::PaneViewModel& out, const Pane& pane, const Place
                     continue;
                 }
                 const fs::DirEntry& e = entries[static_cast<size_t>(src)];
+                const int rank = GroupRank(e, by, clock);
                 if (groups->empty() || prev < 0 ||
-                    GroupCompare(entries[static_cast<size_t>(prev)], e, by, clock,
-                                 tab->sort_column, tab->sort_direction) != 0) {
+                    GroupCompareRanks(entries[static_cast<size_t>(prev)], e, by,
+                                      tab->sort_column, tab->sort_direction, prev_rank, rank) != 0) {
                     ui::ListGroup g;
                     g.first = static_cast<int>(row);
-                    g.rank = GroupRank(e, by, clock);
+                    g.rank = rank;
                     g.sample = src;
                     g.key = GroupKey(e, by, clock);
                     g.collapsed = collapsed && collapsed->contains(g.key);
@@ -2329,6 +2348,7 @@ void FillPaneViewModelBody(ui::PaneViewModel& out, const Pane& pane, const Place
                 ++g.count;
                 if (!e.is_dir) g.bytes += e.size;
                 prev = src;
+                prev_rank = rank;
             }
             if (!contiguous) groups->clear();
             tab->view_groups = std::move(groups);

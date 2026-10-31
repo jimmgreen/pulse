@@ -2,6 +2,8 @@
 #include <windows.h>
 #include <cstdint>
 #include <memory>
+#include <future>
+#include <vector>
 #include <string>
 
 namespace pulse::ui {
@@ -53,6 +55,7 @@ public:
     // pointer through to the owner, and decodes FFmpeg frames at card size.
     void Open(HWND owner, const std::wstring& path, bool card = false);
     void Reset();
+    std::vector<std::shared_future<void>> SuspendVolume(const std::wstring& root);
     // corner_radius > 0 clips the video window to a rounded rectangle.
     void Layout(const RECT& bounds, bool visible, int corner_radius = 0);
     void Play(bool playing);
@@ -74,7 +77,11 @@ private:
                           const std::wstring& ffmpeg);
     static LRESULT CALLBACK VideoProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
     std::shared_ptr<Shared> state_;
+    std::vector<std::weak_ptr<Shared>> retired_;
     HWND child_ = nullptr;
+    RECT layout_bounds_{};
+    bool layout_valid_ = false;
+    bool layout_visible_ = false;
     SIZE region_size_{};
     int region_radius_ = 0;
 };

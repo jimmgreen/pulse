@@ -413,6 +413,7 @@ struct PaneViewModel {
     // GetTickCount64 when it appeared / goes (fades out from there); 0 = none.
     uint64_t wall_hint_since = 0;
     uint64_t wall_hint_until = 0;
+    uintptr_t wall_view_identity = 0;
     uint64_t view_generation = 1;
     SortColumn sort_column = SortColumn::Name;
     SortDirection sort_direction = SortDirection::Asc;
@@ -767,6 +768,7 @@ struct DetailsPanelView {
     DWORD attrs = 0;
     uint64_t modified_value = 0;    // thumbnail cache key parts
     uint64_t size_value = 0;
+    uintptr_t wall_view_identity = 0;
     uint64_t view_generation = 1;
     float scroll_y = 0.0f;
     bool preview_only = false;
@@ -1406,7 +1408,7 @@ struct WindowViewModel {
     // 2 row buttons), the hidden-item mask, and where BuiltinMenuItem 0 sits
     // in settings_items.
     int settings_context_tab = 0;
-    uint32_t settings_builtin_hidden = 0;
+    uint64_t settings_builtin_hidden = 0;
     size_t settings_builtin_first = 0;
     // Pulse menu order per BuiltinMenuSurface (normalized), and the preview
     // row being dragged: BuiltinMenuItem or -1, pointer position in px (y,

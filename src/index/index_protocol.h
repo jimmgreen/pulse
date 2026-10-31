@@ -12,6 +12,7 @@ inline constexpr wchar_t kServiceName[] = L"PulseIndex";
 inline constexpr wchar_t kMutexName[] = L"Local\\Pulse.Index.Singleton";
 inline constexpr size_t kIndexMaxRequestPayload = 256 * 1024;
 inline constexpr size_t kIndexMaxPayload = 48 * 1024 * 1024;
+inline constexpr uint32_t kVolumePauseCapability = 0x56504c31; // optional status extension: VPL1
 
 enum IndexMsg : uint32_t {
     REQ_IDX_STATUS = 1,
@@ -20,6 +21,8 @@ enum IndexMsg : uint32_t {
     REQ_IDX_CHANGE_LEASE = 4,
     REQ_IDX_CHANGE_SUMMARIES = 5,
     REQ_IDX_CHANGE_DETAILS = 6,
+    REQ_IDX_VOLUME_PAUSE = 20,
+    RSP_IDX_VOLUME_PAUSE = 120,
     REQ_IDX_TEST_SHUTDOWN = 0x7fff0001,
     RSP_IDX_STATUS = 101,
     RSP_IDX_SEARCH = 102,

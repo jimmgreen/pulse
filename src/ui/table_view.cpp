@@ -131,8 +131,30 @@ D2D1_RECT_F R(float l, float t, float r, float b) { return D2D1::RectF(l, t, r, 
 
 // ---------------------------------------------------------------- payload
 
+bool TableView::SetPayload(const std::shared_ptr<const std::wstring>& payload) {
+    if (payload && payload_identity_.lock() == payload && !sheets_.empty()) {
+        if (lazy_sheets_ && sheet_ == response_sheet_)
+            awaiting_sheet_ = pending_sheet_request_ = false;
+        return true;
+    }
+    if (!payload) return false;
+    const bool accepted = SetPayloadImpl(*payload, payload);
+    // Table responses may be valid but superseded: remember only committed content.
+    if (accepted && Payload() == *payload) {
+        StorePayload(*payload, payload);
+        payload_identity_ = payload;
+    }
+    return accepted;
+}
+
 bool TableView::SetPayload(const std::wstring& payload) {
-    if (payload == payload_ && !sheets_.empty()) {
+    return SetPayloadImpl(payload, {});
+}
+
+bool TableView::SetPayloadImpl(const std::wstring& payload,
+                           std::shared_ptr<const std::wstring> owner) {
+    payload_identity_.reset();
+    if (payload == Payload() && !sheets_.empty()) {
         if (lazy_sheets_ && sheet_ == response_sheet_)
             awaiting_sheet_ = pending_sheet_request_ = false;
         return true;
@@ -209,7 +231,13 @@ bool TableView::SetPayload(const std::wstring& payload) {
             if (sheets[i].name != sheets_[i].name) { same_workbook = false; break; }
         if (same_workbook && selected_sheet != sheet_) return true;
     }
-    payload_ = payload;
+    for (size_t i = 0; i < (std::min)(sheets.size(), sheets_.size()); ++i) {
+        if (sheets[i].name == sheets_[i].name) {
+            sheets[i].tab_width = sheets_[i].tab_width;
+            sheets[i].selected_tab_width = sheets_[i].selected_tab_width;
+        }
+    }
+    StorePayload(payload, std::move(owner));
     sheets_ = std::move(sheets);
     source_ = std::move(source);
     spreadsheet_ = spreadsheet;
@@ -228,14 +256,17 @@ bool TableView::SetPayload(const std::wstring& payload) {
 }
 
 void TableView::Clear() {
-    payload_.clear();
-    source_.clear();
-    plain_.clear();
-    sheets_.clear();
+    payload_identity_.reset();
+    ++text_revision_;
+    decltype(payload_){}.swap(payload_);
+    shared_payload_.reset();
+    decltype(source_){}.swap(source_);
+    decltype(plain_){}.swap(plain_);
+    decltype(sheets_){}.swap(sheets_);
     total_sheets_ = loaded_sheets_ = 0;
     lazy_sheets_ = awaiting_sheet_ = pending_sheet_request_ = false;
     spreadsheet_ = false;
-    row_offsets_.clear();
+    decltype(row_offsets_){}.swap(row_offsets_);
     sheet_ = 0;
     first_visible_sheet_ = 0;
     response_sheet_ = 0;
@@ -256,6 +287,7 @@ size_t TableView::BodyRows() const noexcept {
 }
 
 void TableView::BuildPlain() {
+    ++text_revision_;
     plain_.clear();
     row_offsets_.clear();
     const Sheet* s = Current();
@@ -325,6 +357,7 @@ std::vector<std::wstring> TableView::StatusParts(uint32_t encoding) const {
 bool TableView::EnsureFormats(IDWriteFactory2* factory, float scale) {
     if (!factory) return false;
     if (factory == factory_ && scale == format_scale_ && text_) return true;
+    for (auto& sheet : sheets_) sheet.tab_width = sheet.selected_tab_width = -1.0f;
     factory_ = factory;
     format_scale_ = scale;
     text_.Reset(); text_right_.Reset(); bold_.Reset(); bold_right_.Reset(); small_.Reset(); tip_.Reset();
@@ -472,7 +505,7 @@ WrlPtr<IDWriteTextLayout> TableView::CellLayout(const std::wstring& text, bool b
 
 void TableView::Draw(ID2D1DeviceContext* dc, IDWriteFactory2* factory, const D2D1_RECT_F& rect,
                      const Theme& theme, bool dark, float scale, const D2D1_COLOR_F& background,
-                     const std::vector<Highlight>& matches) {
+                     SearchHighlights matches) {
     Sheet* sheet = Current();
     if (!dc || !sheet || !EnsureFormats(factory, scale)) return;
     view_ = rect;
@@ -565,14 +598,12 @@ void TableView::Draw(ID2D1DeviceContext* dc, IDWriteFactory2* factory, const D2D
         const uint32_t first = row_offsets_[r0 + hdr];
         const uint32_t last = r1 + hdr < row_offsets_.size() ? row_offsets_[r1 + hdr]
                                                              : static_cast<uint32_t>(plain_.size());
-        auto it = std::lower_bound(matches.begin(), matches.end(), first,
-                                   [](const Highlight& h, uint32_t v) { return h.start + h.length <= v; });
-        for (; it != matches.end() && it->start < last; ++it) {
+        for (const Highlight match : matches.Intersecting(first, last)) {
             size_t row = 0, col = 0;
             uint32_t in_cell = 0;
-            if (!OffsetToCell(it->start, row, col, in_cell) || row < hdr + r0 || col < c0 || col >= c1) continue;
+            if (!OffsetToCell(match.start, row, col, in_cell) || row < hdr + r0 || col < c0 || col >= c1) continue;
             const std::wstring& text = s.cells[row][col];
-            const uint32_t len = (std::min)(it->length, static_cast<uint32_t>(text.size()) - (std::min)(in_cell, static_cast<uint32_t>(text.size())));
+            const uint32_t len = (std::min)(match.length, static_cast<uint32_t>(text.size()) - (std::min)(in_cell, static_cast<uint32_t>(text.size())));
             if (!len) continue;
             const bool right = (s.flags[row][col] & kNumeric) != 0;
             const float cw = s.col_x[col + 1] - s.col_x[col] - g.pad * 2.0f;
@@ -585,7 +616,7 @@ void TableView::Draw(ID2D1DeviceContext* dc, IDWriteFactory2* factory, const D2D
             if (FAILED(layout->HitTestTextRange(in_cell, len, 0, 0, m.data(), count, &count))) continue;
             const float ox = col_left(col) + g.pad;
             const float oy = row_top(row - hdr);
-            b->SetColor(it->current ? HexColor(0xF59E0B, 0.85f) : HexColor(0xFACC15, dark ? 0.45f : 0.55f));
+            b->SetColor(match.current ? HexColor(0xF59E0B, 0.85f) : HexColor(0xFACC15, dark ? 0.45f : 0.55f));
             for (UINT32 i = 0; i < count; ++i) {
                 const float l = ox + m[i].left, rr = (std::min)(ox + m[i].left + m[i].width, ox + cw);
                 if (rr > l) dc->FillRoundedRectangle(D2D1::RoundedRect(R(l, oy + 4.0f * k, rr, oy + g.row_h - 4.0f * k), 2.0f * k, 2.0f * k), b);
@@ -686,7 +717,7 @@ void TableView::Draw(ID2D1DeviceContext* dc, IDWriteFactory2* factory, const D2D
                               b, D2D1_DRAW_TEXT_OPTIONS_CLIP);
             }
             if (hdr && layout) {
-                for (const auto& match : matches) {
+                for (const Highlight match : matches.Intersecting(0, row_offsets_.size() > 1 ? row_offsets_[1] : plain_.size())) {
                     size_t row = 0, col = 0;
                     uint32_t in_cell = 0;
                     if (!OffsetToCell(match.start, row, col, in_cell) || row != 0 || col != c) continue;
@@ -825,30 +856,36 @@ float TableView::DrawTabsIn(ID2D1DeviceContext* dc, IDWriteFactory2* factory, co
     float x = tabs.left + 60.0f * k;
     const float limit = (std::max)(x, tabs.right - size_w - 28.0f * k);
     // Keep earlier tabs visible when they fit; selection is not a scroll origin.
-    std::vector<WrlPtr<IDWriteTextLayout>> layouts(sheets_.size());
-    std::vector<float> widths(sheets_.size(), 24.0f * k);
-    float selected_extent = 0.0f;
-    for (size_t i = 0; i < sheets_.size(); ++i) {
+    const auto make_layout = [&](size_t i) {
+        WrlPtr<IDWriteTextLayout> layout;
         const auto& name = sheets_[i].name;
         factory->CreateTextLayout(name.data(), static_cast<UINT32>(name.size()), small_.Get(),
-            400.0f * k, 24.0f * k, &layouts[i]);
-        if (layouts[i]) {
-            if (i == sheet_) layouts[i]->SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                DWRITE_TEXT_RANGE{0, static_cast<UINT32>(name.size())});
-            DWRITE_TEXT_METRICS metrics{};
-            layouts[i]->GetMetrics(&metrics);
-            widths[i] = (std::min)(metrics.width, 240.0f * k) + 24.0f * k;
-        }
-        if (i <= sheet_) selected_extent += widths[i] + 2.0f * k;
-    }
+            400.0f * k, 24.0f * k, &layout);
+        if (layout && i == sheet_) layout->SetFontWeight(DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            DWRITE_TEXT_RANGE{0, static_cast<UINT32>(name.size())});
+        return layout;
+    };
+    const auto width_for = [&](size_t i, IDWriteTextLayout* ready = nullptr) {
+        auto& sheet = sheets_[i];
+        float& width = i == sheet_ ? sheet.selected_tab_width : sheet.tab_width;
+        if (width >= 0.0f) return width;
+        auto measured = ready ? WrlPtr<IDWriteTextLayout>{} : make_layout(i);
+        IDWriteTextLayout* layout = ready ? ready : measured.Get();
+        DWRITE_TEXT_METRICS metrics{};
+        if (layout && SUCCEEDED(layout->GetMetrics(&metrics)))
+            width = (std::min)(metrics.width, 240.0f * k) + 24.0f * k;
+        return width >= 0.0f ? width : 24.0f * k;
+    };
+    float selected_extent = 0.0f;
+    for (size_t i = 0; i <= sheet_; ++i) selected_extent += width_for(i) + 2.0f * k;
     first_visible_sheet_ = 0;
     while (first_visible_sheet_ < sheet_ && selected_extent - 2.0f * k > limit - x)
-        selected_extent -= widths[first_visible_sheet_++] + 2.0f * k;
+        selected_extent -= width_for(first_visible_sheet_++) + 2.0f * k;
     dc->PushAxisAlignedClip(R(x, tabs.top, limit, tabs.bottom), D2D1_ANTIALIAS_MODE_ALIASED);
     for (size_t i = first_visible_sheet_; i < sheets_.size() && x < limit; ++i) {
         const bool on = i == sheet_;
-        auto& layout = layouts[i];
-        const float w = widths[i];
+        auto layout = make_layout(i);
+        const float w = width_for(i, layout.Get());
         const float inset = (std::max)(2.0f * k, (tabs.bottom - tabs.top - 23.0f * k) * 0.5f);
         const D2D1_RECT_F tab = R(x, tabs.top + inset, x + w, tabs.bottom - inset);
         tab_rects_.push_back(R(tab.left, tab.top, (std::min)(tab.right, limit), tab.bottom));

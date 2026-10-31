@@ -51,7 +51,7 @@ bool EntryLess(const fs::DirEntry& a, const fs::DirEntry& b,
                ui::SortColumn col, ui::SortDirection dir, FolderSortMode folders);
 
 // Sorts `entries` in EntryLess order (grouping and folder mode included).
-// Faster than std::sort with EntryLess on large lists; `tick` runs once per
+// Faster than std::sort with EntryLess on large lists; `tick` runs during key preparation and once per
 // comparison and may throw to abandon the sort, which leaves `entries` untouched.
 void SortEntries(std::vector<fs::DirEntry>& entries, ui::SortColumn col, ui::SortDirection dir,
                  const std::function<void()>& tick = {});
@@ -60,7 +60,7 @@ void SortEntries(std::vector<fs::DirEntry>& entries, ui::SortColumn col, ui::Sor
 using FolderSizeLookup = std::unordered_map<std::wstring, uint64_t>;
 // Size order as EntryLess sorts it (grouping and folder mode included), except
 // that folders compare by their totals in `sizes`; folders without one follow
-// the rest in either direction. `tick` runs once per comparison and may throw
+// the rest in either direction. `tick` runs during key preparation and once per comparison and may throw
 // to abandon the sort, which leaves `entries` untouched.
 void SortEntriesBySize(std::vector<fs::DirEntry>& entries, ui::SortDirection dir,
                        const FolderSizeLookup& sizes, const std::function<void()>& tick = {});

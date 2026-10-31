@@ -15,6 +15,7 @@
 #pragma once
 #include <windows.h>
 #include "file_lock_owner.h"
+#include "../common/rename_identity_types.h"
 #include "duplicate_cleanup_guard.h"
 #include "op_speed_graph.h"
 #include "../common/menu_icon.h"
@@ -68,13 +69,15 @@ struct ConflictItemInfo {
     FILETIME destination_modified{};
     bool source_is_directory = false;
     bool destination_is_directory = false;
-    size_t remaining = 0;     // conflicts still to come, this one included
+    size_t remaining = 0;     // this one included; advisory when remaining_is_snapshot
+    bool remaining_is_snapshot = false;
     size_t ordinal = 0;       // 1-based position among the conflicts asked so far (0 = unknown)
     OpType type = OpType::Copy;
     std::wstring keep_both_name; // leaf name 保留两者 would give the new copy
 };
 
 struct OpRequest {
+    std::optional<RenameIdentity> authorized_rename_identity; // Session-only helper identity.
     OpType type = OpType::Copy;
     std::vector<std::wstring> sources;
     std::wstring dest_dir;    // Copy / Move
@@ -166,6 +169,7 @@ struct OpStatus {
     OpType type = OpType::Copy;
     OpPhase phase = OpPhase::Completed;
     uint64_t task_id = 0;
+    bool enumeration_complete = true; // false: discovered totals are still growing
     float percent = -1.0f;    // <0 = nothing to show
     std::wstring summary;     // one-line status-bar text
     std::wstring last_error;

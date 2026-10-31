@@ -225,6 +225,13 @@ int GroupCompare(const fs::DirEntry& a, const fs::DirEntry& b, GroupBy g,
     }
     const int ra = g == GroupBy::Date ? DateRank(Ticks(GroupDateOf(a, col)), clock) : GroupRank(a, g, clock);
     const int rb = g == GroupBy::Date ? DateRank(Ticks(GroupDateOf(b, col)), clock) : GroupRank(b, g, clock);
+    return GroupCompareRanks(a, b, g, col, dir, ra, rb);
+}
+
+int GroupCompareRanks(const fs::DirEntry& a, const fs::DirEntry& b, GroupBy g,
+                      ui::SortColumn col, ui::SortDirection dir, int ra, int rb) {
+    if (g == GroupBy::None) return 0;
+    if (g == GroupBy::Location) return ParentCompare(a, b);
     const bool flip = FlipGroups(g, col, dir);
     // Folders stay the first group for Size/Type even when reversed.
     const bool pinned = g == GroupBy::Size || g == GroupBy::Type;

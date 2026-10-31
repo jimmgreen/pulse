@@ -1673,7 +1673,7 @@ ChooseFfmpegExe	IDS_CHOOSE_FFMPEG_EXE	2872	选择 ffmpeg.exe	Choose ffmpeg.exe
 TheCompleteSelectionCouldNotBeProcessedCheckTheTagsBeforeTry	IDS_THE_COMPLETE_SELECTION_COULD_NOT_BE_PROCESSED_CHECK_THE_TAGS_BEFORE_TRY	2873	未能处理完整选择，标签未完成更新。请检查后重试。	The complete selection could not be processed. Check the tags before trying again.	
 Text2874	IDS_TEXT2874	2874	「	“	
 Text2875	IDS_TEXT2875	2875	」	”	
-HeldByAnotherProgram	IDS_HELD_BY_ANOTHER_PROGRAM	2876	被其他程序占用	held by another program	
+HeldByAnotherProgram	IDS_HELD_BY_ANOTHER_PROGRAM	2876	全局热键不可用	Unavailable as a global hotkey	無法使用為全域快速鍵
 TheIMEMayTakeIt	IDS_THE_IMEMAY_TAKE_IT	2877	输入法可能拦截	the IME may take it	
 UsedByAnotherAction	IDS_USED_BY_ANOTHER_ACTION	2878	已被其他操作使用	used by another action	
 ReservedByWindows	IDS_RESERVED_BY_WINDOWS	2879	系统保留	reserved by Windows	
@@ -1704,8 +1704,8 @@ Text2903	IDS_TEXT2903	2903	：	:
 AllAvailable	IDS_ALL_AVAILABLE	2904	 全部可用	: all available	
 Save	IDS_SAVE	2905	保存	Save	
 CurrentKey	IDS_CURRENT_KEY	2906	当前按键：	Current key: 	
-IsHeldByAnotherProgram	IDS_IS_HELD_BY_ANOTHER_PROGRAM	2907	 被另一个程序占用	 is held by another program	
-AnotherProgramRegisteredItAsAHotkeySoPulseNeverReceivesItPic	IDS_ANOTHER_PROGRAM_REGISTERED_IT_AS_AHOTKEY_SO_PULSE_NEVER_RECEIVES_IT_PIC	2908	另一个程序把它注册成了全局热键，按下时 Pulse 收不到。换一个按键，或在那个程序里关掉这个热键。	Another program registered it as a hotkey, so Pulse never receives it. Pick another key, or switch the hotkey off in that program.	
+IsHeldByAnotherProgram	IDS_IS_HELD_BY_ANOTHER_PROGRAM	2907	 无法注册为全局热键	 cannot be registered as a global hotkey	 無法註冊為全域快速鍵
+AnotherProgramRegisteredItAsAHotkeySoPulseNeverReceivesItPic	IDS_ANOTHER_PROGRAM_REGISTERED_IT_AS_AHOTKEY_SO_PULSE_NEVER_RECEIVES_IT_PIC	2908	系统拒绝注册这个全局热键，未提供占用程序名称。这不代表应用内快捷键失效。可测试实际响应，或改用其他组合。	Windows rejected this global hotkey registration without identifying an owner. This does not prove that an in-app shortcut is blocked. Test the key or choose another combination.	系統拒絕註冊這個全域快速鍵，未提供占用程式名稱。這不代表應用程式內的快速鍵失效。可測試實際反應，或改用其他組合。
 MicrosoftPinyinUsesItFor	IDS_MICROSOFT_PINYIN_USES_IT_FOR	2909	微软拼音用它做	Microsoft Pinyin uses it for 	
 WhileTheChineseIMEIsOnItTakesThisKeyFirstSwitchTheIMEHotkeyO	IDS_WHILE_THE_CHINESE_IMEIS_ON_IT_TAKES_THIS_KEY_FIRST_SWITCH_THE_IMEHOTKEY_O	2910	中文输入法开着时，这个键会先被输入法拿走。关掉输入法的这个热键，或者换一个按键。	While the Chinese IME is on it takes this key first. Switch the IME hotkey off, or pick another key.	
 OpenSettingsTimeLanguageLanguageRegion	IDS_OPEN_SETTINGS_TIME_LANGUAGE_LANGUAGE_REGION	2911	打开 Windows 设置 → 时间和语言 → 语言和区域	Open Settings → Time & language → Language & region	
@@ -1727,7 +1727,7 @@ IsUsedBy	IDS_IS_USED_BY	2926	 已被	 is used by
 Text2927	IDS_TEXT2927	2927	使用		
 ItIsTheSystemWideHotkeyAndCannotBeShared	IDS_IT_IS_THE_SYSTEM_WIDE_HOTKEY_AND_CANNOT_BE_SHARED	2928	它是全局热键，不能同时用作程序内快捷键。	It is the system-wide hotkey and cannot be shared.	
 ThatIsAFixedKeyOrANumberedGroupItCannotBeReplaced	IDS_THAT_IS_AFIXED_KEY_OR_ANUMBERED_GROUP_IT_CANNOT_BE_REPLACED	2929	那是固定按键或带序号的组合，不能替换。	That is a fixed key or a numbered group; it cannot be replaced.	
-AnotherProgramRegisteredItSoPulseNeverReceivesIt	IDS_ANOTHER_PROGRAM_REGISTERED_IT_SO_PULSE_NEVER_RECEIVES_IT	2930	另一个程序把它注册成了全局热键，按下时 Pulse 收不到。	Another program registered it, so Pulse never receives it.	
+AnotherProgramRegisteredItSoPulseNeverReceivesIt	IDS_ANOTHER_PROGRAM_REGISTERED_IT_SO_PULSE_NEVER_RECEIVES_IT	2930	系统拒绝注册这个全局热键，未提供占用程序名称。请选择其他组合。	Windows rejected this global hotkey registration without identifying an owner. Choose another combination.	系統拒絕註冊這個全域快速鍵，未提供占用程式名稱。請選擇其他組合。
 ASystemWideHotkeyNeedsCtrlAltOrWin	IDS_ASYSTEM_WIDE_HOTKEY_NEEDS_CTRL_ALT_OR_WIN	2931	全局热键至少要有 Ctrl、Alt 或 Win	A system-wide hotkey needs Ctrl, Alt or Win	
 ASingleLetterOrDigitCannotBeAShortcut	IDS_ASINGLE_LETTER_OR_DIGIT_CANNOT_BE_ASHORTCUT	2932	单个字母或数字不能做快捷键	A single letter or digit cannot be a shortcut	
 TheyJumpToFileNamesAddCtrlOrAlt	IDS_THEY_JUMP_TO_FILE_NAMES_ADD_CTRL_OR_ALT	2933	它们用于按文件名首字母跳转，请加上 Ctrl 或 Alt。	They jump to file names; add Ctrl or Alt.	
@@ -4971,3 +4971,12 @@ SetupAiDemoAction	IDS_SETUP_AI_DEMO_ACTION	6129	查看方案	Review plan	檢視�
 AsstEnabledTitle	IDS_ASST_ENABLED_TITLE	6130	启用 AI 助手	Enable AI assistant	啟用 AI 助手
 AsstEnabledDesc	IDS_ASST_ENABLED_DESC	6131	关闭后隐藏助手入口并停用 Ctrl+J，已保存的服务和密钥会保留。	Turn off to hide the assistant and disable Ctrl+J. Saved services and keys are kept.	關閉後隱藏助手入口並停用 Ctrl+J，已儲存的服務和金鑰會保留。
 AiJumpLatest	IDS_AI_JUMP_LATEST	6244	回到最新	Jump to latest	回到最新
+OpApplyKnownLead	IDS_OP_APPLY_KNOWN_LEAD	6245	对后续冲突执行相同操作（另有 	Apply to later conflicts (	對後續衝突執行相同操作（另有 
+OpApplyKnownEnd	IDS_OP_APPLY_KNOWN_END	6246	 个已知冲突）	 more currently known)	 個已知衝突）
+OpScanningAndCopying	IDS_OP_SCANNING_AND_COPYING	6247	正在扫描并复制	Scanning and copying	正在掃描並複製
+OpDiscoveredPending	IDS_OP_DISCOVERED_PENDING	6248	已发现待处理	Discovered pending	已發現待處理
+CopyVerificationSourceChanged	IDS_COPY_VERIFICATION_SOURCE_CHANGED	6249	源文件在复制或校验期间发生变化	The source changed during copying or verification	來源檔案在複製或驗證期間發生變更
+CopyVerificationTargetChanged	IDS_COPY_VERIFICATION_TARGET_CHANGED	6250	目标文件在校验期间被替换或修改	The destination was replaced or modified during verification	目標檔案在驗證期間被取代或修改
+Git	IDS_GIT	6251	Git	Git	Git
+PackagedMenuSource	IDS_PACKAGED_MENU_SOURCE	6252	打包应用菜单声明（MSIX）	Packaged app menu declaration (MSIX)	封裝應用程式選單宣告（MSIX）
+PackagedMenuReadOnly	IDS_PACKAGED_MENU_READ_ONLY	6253	由应用包声明，系统级设置只读。可用“在 Pulse 中显示”控制本应用内的菜单。	Declared by an app package; system settings are read-only. Use “Show in Pulse” to control this app’s menu.	由應用程式套件宣告，系統層級設定唯讀。可用「在 Pulse 中顯示」控制本應用程式內的選單。
