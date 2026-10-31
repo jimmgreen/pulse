@@ -14,6 +14,7 @@ enum class SnackIcon { Tab, Window, Undo, Merge, Suggest };
 struct SnackAction {
     std::wstring label;
     UINT message = 0;
+    WPARAM wparam = 0;
 };
 
 class NotificationToast {

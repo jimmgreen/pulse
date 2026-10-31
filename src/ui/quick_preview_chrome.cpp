@@ -10,6 +10,7 @@
 // the UI does; high contrast falls back to DirectWrite and system colours.
 #include "quick_preview_window.h"
 #include "FluentTokens.h"
+#include "text_contrast_scope.h"
 #include "command_icons.h"
 #include "legacy_icons.h"
 #include "typography.h"
@@ -62,9 +63,7 @@ std::wstring ShortAppName(std::wstring name) {
 }
 
 bool HighContrast() {
-    HIGHCONTRASTW value{sizeof(value)};
-    return SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(value), &value, 0) &&
-        (value.dwFlags & HCF_HIGHCONTRASTON);
+    return TextHighContrast();
 }
 
 bool Inside(const D2D1_RECT_F& rect, POINT point) {

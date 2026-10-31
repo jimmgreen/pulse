@@ -21,6 +21,10 @@ void ObserveShellCallbacksForReview(const ipc::ShellClient::Callbacks& cb) {
     if (review_shell_callbacks) review_shell_callbacks(cb);
 }
 struct OpsManagerReviewTestAccess {
+    static void CompleteInvoke(OpsManager& manager, HRESULT hr, bool cancelled, std::wstring error = {}) {
+        manager.ctx_invoke_ids_.insert(991);
+        manager.RecordShellDone(991, static_cast<uint32_t>(hr), cancelled, std::move(error));
+    }
     static void ConfigureRouting(OpsManager& manager) {
         manager.own_shell_client_ = false;
         manager.ConfigureShellCallbacks();
@@ -843,7 +847,7 @@ struct RoutingFixture {
     }
 };
 }
-int RunReviewRoutingTests() {
+int RunReviewRoutingTests(bool invoke_only = false) {
     using namespace pulse;
     using A = ops::OpsManagerReviewTestAccess;
     using C = ipc::ShellClientReviewTestAccess;
@@ -852,6 +856,25 @@ int RunReviewRoutingTests() {
         std::cout << (ok ? "[PASS] " : "[FAIL] ") << text << '\n';
         if (!ok) ++failures;
     };
+    {
+        ops::OpsManager manager;
+        A::CompleteInvoke(manager, HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED), false);
+        const auto message = manager.TakeShellVerbError();
+        wchar_t expected[512]{};
+        FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr,
+            ERROR_ACCESS_DENIED, 0, expected, 512, nullptr);
+        std::wstring detail(expected);
+        while (!detail.empty() && (detail.back() == L'\r' || detail.back() == L'\n')) detail.pop_back();
+        check(!detail.empty() && message.find(detail) != std::wstring::npos, "invoke access denied reaches UI with decoded Win32 error");
+        check(manager.TakeShellVerbError().empty() && manager.TakeCtxInvokeDone(), "invoke error consumed once and refresh retained");
+        A::CompleteInvoke(manager, E_FAIL, true);
+        check(manager.TakeShellVerbError().empty(), "cancelled invoke stays silent");
+        A::CompleteInvoke(manager, S_OK, false);
+        check(manager.TakeShellVerbError().empty(), "successful invoke stays silent");
+        A::CompleteInvoke(manager, E_FAIL, false, L"provider failure");
+        check(manager.TakeShellVerbError().find(L"0x80004005") != std::wstring::npos, "invoke failure exposes HRESULT even with generic provider text");
+    }
+    if (invoke_only) return failures ? 1 : 0;
     std::cout << "[INFO] production dispatch/Submit/callback/wait paths with deterministic in-process transport; no host or filesystem action\n";
     {
         RoutingFixture f;

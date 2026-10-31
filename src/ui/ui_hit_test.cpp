@@ -230,6 +230,10 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             return r;
         }
         }
+        if (x >= chrome.windows_left && x < chrome.windows_left + chrome.settings_w) {
+            r.region = HitTestResult::WindowManageButton;
+            return r;
+        }
         if (x >= chrome.settings_left && x < chrome.settings_left + chrome.settings_w) {
             r.region = HitTestResult::SettingsButton;
             return r;
@@ -301,6 +305,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                 if(ContainsPt(lay.click_open_row[i],x,y)) {r.region=HitTestResult::SettingsClickMode;r.index=i;return r;}
                 if(ContainsPt(lay.name_highlight_row[i],x,y)) {r.region=HitTestResult::SettingsNameBand;r.index=i;return r;}
             }
+            if(ContainsPt(lay.arrange_minimized_row,x,y)) {r.region=HitTestResult::SettingsToggle;r.index=80;return r;}
             if(ContainsPt(lay.hover_select_row,x,y)) {r.region=HitTestResult::SettingsToggle;r.index=77;return r;}
             if(ContainsPt(lay.item_checkbox_row,x,y)) {r.region=HitTestResult::SettingsToggle;r.index=78;return r;}
             // 修改时间提示 (the hidden rows are empty rects) and sync status.
@@ -316,6 +321,9 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
 
             if (IsGeneralSettingsPage(vm.settings_page)) {
                 // The switch, then the two extras (only while it is on); the coverage tiles are read-only.
+                if(vm.settings_integration_enabled) for(int i=0;i<3;++i) {
+                    if(ContainsPt(lay.integration_choice[i],x,y)) {r.region=HitTestResult::SettingsDropdown;r.index=10+i;return r;}
+                }
                 if(ContainsPt(lay.default_manager_row,x,y)) {r.region=HitTestResult::SettingsIntegration;r.index=0;return r;}
                 if(vm.settings_integration_enabled) {
                     if(ContainsPt(lay.explorer_windows_row,x,y)) {r.region=HitTestResult::SettingsIntegration;r.index=4;return r;}
@@ -386,6 +394,15 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                         r.region = HitTestResult::SettingsNotifyIcon;
                         r.index = i;
                         return r;
+                    }
+                    if (i < 3 && ContainsPt(lay.open_pulse_icon_row[i], x, y)) {
+                        r.region = HitTestResult::SettingsOpenPulseIcon; r.index = i; return r;
+                    }
+                    if (i < 3 && ContainsPt(lay.new_window_shows_row[i], x, y)) {
+                        r.region = HitTestResult::SettingsNewWindowShows; r.index = i; return r;
+                    }
+                    if (i < 2 && ContainsPt(lay.arrange_gap_row[i], x, y)) {
+                        r.region = HitTestResult::SettingsArrangeGap; r.index = i; return r;
                     }
                     if (ContainsPt(lay.external_open_row[i], x, y)) {
                         r.region = HitTestResult::SettingsExternalOpen;

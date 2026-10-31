@@ -1,5 +1,7 @@
+﻿#include <future>
 #pragma once
 #include "ui_compositor.h"
+#include <utility>
 #include "d2d_device_binding.h"
 #include "repaint_targets.h"
 #include "preview_viewport.h"
@@ -69,7 +71,7 @@ public:
     void SetDeviceContext(ID2D1DeviceContext* dc);
     void SetNotifyWindow(HWND hwnd) { repaint_.Set(hwnd); }
     void AddNotifyWindow(HWND hwnd) { repaint_.Add(hwnd); }
-    void RemoveNotifyWindow(HWND hwnd) { repaint_.Remove(hwnd); }
+    void RemoveNotifyWindow(HWND hwnd);
     // Quick Look's cache: folders come as contents listings and Markdown as
     // rendered documents.
     void SetQuickLookContent(bool on) { quick_look_content_ = on; }
@@ -89,7 +91,9 @@ public:
     static uint32_t DefaultParallelism();
     // Once per painted frame of a SetParallelism cache: what this frame draws
     // goes ahead of requests only earlier frames asked for.
-    void AdvanceFrame();
+    void AdvanceFrame(HWND window = nullptr);
+    void EndInterestFrame();
+    bool TakeUploadFrameRequest() { std::lock_guard lock(mutex_); return std::exchange(upload_frame_pending_, false); }
     static constexpr uint32_t kMaxLanes = 4;
     // The store SetParallelism caches read before asking a host and write
     // after a slow decode; null (tests, tools) keeps memory only.
@@ -104,8 +108,11 @@ public:
     void Warm();
     void Reset();
     void Evict();
+    std::shared_future<void> SuspendVolume(const std::wstring& root);
+    void ResumeVolume(const std::wstring& root);
     void BeginFrame();
     uint64_t NextRetryDeadline();
+    uint64_t WindowRetryDeadline(HWND window);
     // Earliest retry encountered by Draw since the previous call. Zero means idle.
     uint64_t TakeRetryDeadline();
     // pan_x/pan_y non-null: cover mode (fill dest, crop overflow) with a
@@ -131,7 +138,10 @@ public:
                            D2D1_RECT_F* artwork_rect = nullptr,
                            uint32_t* media_duration_ms = nullptr,
                            preview::Integrity* integrity = nullptr,
-                           const std::shared_ptr<DocumentImageSession>& document = {});
+                           const std::shared_ptr<DocumentImageSession>& document = {},
+                           std::shared_ptr<const std::wstring>* shared_text = nullptr);
+    // shared_text is reset on every call; empty payloads return a null holder.
+    // A nonempty holder owns immutable text independently of cache lifetime.
     // media_duration_ms (optional): a video's playing time, 0 when unknown.
     PreviewDrawResult DrawGridThumbnail(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
         const std::wstring& path, DWORD attrs, uint32_t pixel_size, uint64_t generation,
@@ -166,12 +176,15 @@ private:
     friend class FolderThumbnailCache;
     friend struct FolderThumbnailCacheTestAccess;
     struct Item {
+        uint64_t upload_token = 0;
+        bool upload_failed = false;
         ComPtr<ID2D1Bitmap> bitmap;
         std::vector<uint8_t> pixels;
         IconArtworkBounds artwork_bounds;
         CoverPalette palette;   // Quick Look content only (see Palette)
         ImageStats stats;       // Quick Look content only (see Stats)
         std::wstring text;
+        std::shared_ptr<const std::wstring> shared_text;
         std::wstring error;
         std::vector<PreviewProperty> properties;
         uint32_t w = 0, h = 0, stride = 0;
@@ -206,9 +219,11 @@ private:
         uint32_t frame_index = 0;
         uint32_t epoch = 0;
         bool details = false;
+        bool interest_tracked = false;
         // Set when taken: on screen and quick, so its host runs a step higher.
         bool urgent = false;
         uint32_t timeout_ms = 0;
+        uint32_t budget_deferrals = 0;
         uint32_t flags = 0;
         uint64_t modified = 0, size = 0;
         std::wstring path, key, identity;
@@ -217,8 +232,13 @@ private:
     // Last decoded still bitmap of a file at any pixel size: drawn while a
     // different size is pending or being retried, so a thumbnail never drops
     // back to the file-type icon once it has been shown.
+    void PrepareBitmap(const std::wstring& key, bool budgeted);
+    uint64_t upload_sequence_ = 0, device_generation_ = 0, upload_elapsed_us_ = 0;
+    size_t upload_bytes_ = 0;
+    bool upload_frame_pending_ = false;
+    void (*upload_probe_)(ThumbnailCache&) = nullptr;
     Item* StaleBitmap(const std::wstring& identity, const std::wstring& except_key);
-    static uint32_t ResponseTimeoutMs(const std::wstring& path, ipc::PreviewRequestKind kind);
+    static uint32_t ResponseTimeoutMs(const std::wstring& path, ipc::PreviewRequestKind kind, uint64_t source_size = 0);
     void Worker() { Worker(0); }
     void Worker(uint32_t lane);
     // Lane 0 is pipe_ / child_ / pipe_token_ / worker_; the rest live in extra_lanes_.
@@ -252,6 +272,14 @@ private:
                      uint64_t size, uint32_t frame_index = 0) const;
     D2DDeviceBinding device_binding_;
     ID2D1DeviceContext* dc_ = nullptr;  // device_binding_'s private context
+    struct WindowInterest {
+        std::unordered_set<std::wstring> committed, drawing, visible, drawing_visible;
+        bool active = false;
+    };
+    std::unordered_map<HWND, WindowInterest> interests_;
+    HWND interest_window_ = nullptr;
+    bool WantedByWindowLocked(const std::wstring& key) const;
+    void NotifyResult(const Request& req);
     RepaintTargets repaint_;
     std::atomic<bool> quick_look_content_{false};
     std::atomic<bool> folder_thumbnail_{false};
@@ -279,12 +307,23 @@ private:
     std::unordered_map<std::wstring, uint32_t> transient_failures_;
     std::wstring latest_details_identity_;
     std::atomic<uint32_t> epoch_{1};
+    struct VolumeRelease {
+        std::promise<void> promise;
+        std::shared_future<void> future = promise.get_future().share();
+        size_t pending = 0;
+        bool failed = false;
+    };
+    bool VolumeSuspendedLocked(const std::wstring& path) const;
+    std::unordered_map<std::wstring, std::shared_ptr<VolumeRelease>> suspended_volumes_;
+    std::wstring lane_paths_[kMaxLanes];
+    std::shared_ptr<VolumeRelease> release_lanes_[kMaxLanes];
     std::thread worker_;
     ExtraLane extra_lanes_[kMaxLanes - 1];
     uint32_t lane_count_ = 1;
     bool visible_order_ = false;
     bool boost_hosts_ = false;
     uint32_t slow_in_flight_ = 0;
+    bool lane_busy_[kMaxLanes]{};
     std::atomic<bool> warm_{false};
     uint64_t frame_ = 1;
     uint64_t draw_sequence_ = 0;

@@ -108,7 +108,7 @@ bool FillStaticVerbFromKey(HKEY root, const std::wstring& verb_key, const std::w
         !RegReadString(root, verb_key, L"ExplorerCommandHandler").empty();
     const std::wstring subcommands = RegReadString(root, verb_key, L"SubCommands");
     const std::wstring ext_key = RegReadString(root, verb_key, L"ExtendedSubCommandsKey");
-    flags.has_subcommands = !subcommands.empty();
+    flags.has_subcommands = RegValueExists(root, verb_key, L"SubCommands");
     flags.has_extended_subcommands_key = !ext_key.empty();
     if (!ipc::KeepStaticVerb(flags)) return false;
     // The host asks IExplorerCommand for its actual title, state and children.
@@ -560,8 +560,8 @@ bool GetW(const uint8_t*& p, const uint8_t* end, std::wstring& s) {
 // v6: a DelegateExecute verb keeps no command (setdesktopwallpaper's
 // placeholder Explorer.exe), so v5 files with that command are discarded.
 // v7: native ExplorerCommandHandler titles replace registry-name fallback rows.
-constexpr uint32_t kStaticVerbCacheVersion = 7;
-constexpr uint32_t kStaticVerbCacheMinVersion = 7;
+constexpr uint32_t kStaticVerbCacheVersion = 8;
+constexpr uint32_t kStaticVerbCacheMinVersion = 8;
 
 void PutVerb(std::vector<uint8_t>& buf, const StaticVerb& v, int depth) {
     PutW(buf, v.verb);

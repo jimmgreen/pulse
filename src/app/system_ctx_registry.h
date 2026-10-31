@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 // System (Explorer-wide) context menu entries: read-only enumeration (S1) and
 // enable/disable (S2). The disable markers are the ones ContextMenuManager
@@ -14,6 +14,7 @@ namespace pulse::app::sysctx {
 
 enum class Kind { Verb, ShellEx, DragDrop, ShellNew, SendTo, OpenWith };
 enum class Root { User, Machine, File };
+enum class Source { Registry, Packaged };
 
 // Where HKCR's two layers live. Tests point both at a scratch key under HKCU.
 struct Roots {
@@ -72,6 +73,7 @@ struct Item {
     bool is_protected = false;
     bool trusted_installer = false;
     bool missing = false;          // command/handler points at a file that is gone
+    Source source = Source::Registry;
 };
 
 std::vector<Item> Enumerate(const Roots& roots, const Scene& scene);

@@ -2,6 +2,7 @@
 // wWinMain is never called. No registry providers, Shell verbs or host pipe.
 #include "../shell_host/main.cpp"
 #include <iostream>
+#include <thread>
 
 namespace {
 int failures = 0;
@@ -257,6 +258,19 @@ int RunSessionCloseTests() {
 }
 
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring(argv[1]) == L"--diagnostic-log") {
+        HostLog(L"中文菜单诊断");
+        std::vector<std::thread> writers;
+        for (uint32_t worker = 0; worker < 4; ++worker) {
+            writers.emplace_back([worker] {
+                for (uint32_t row = 0; row < 20; ++row)
+                    ContextDiagnostic(9000 + worker, L"concurrent row=" + std::to_wstring(row));
+            });
+        }
+        for (auto& writer : writers) writer.join();
+        std::cout << "[PASS] diagnostic log writers completed; verify isolated UTF-8 log contents\n";
+        return 0;
+    }
     if (argc == 2 && std::wstring(argv[1]) == L"--session-close") return RunSessionCloseTests();
     std::cout << "[INFO] isolated worker allocation failure injection; no host or Shell provider startup\n";
     DWORD before = 0, after = 0;

@@ -1216,6 +1216,12 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
                 FillChangePane(s, *tab, slot.pane, slot.rect);
                 FillGitPane(s, *tab, slot.pane);
                 FillSyncPane(s, *tab, slot.pane);   // SVN marks (outside Git) and OneDrive states
+                const float wall_scroll_before = slot.pane.scroll_y;
+                s.renderer.ReconcileWallAnchor(slot.pane, slot.rect);
+                if (slot.focused && s.scrollAnimating)
+                    s.scrollTargetY += slot.pane.scroll_y - wall_scroll_before;
+                tab->scroll_y = slot.pane.scroll_y;
+                if (slot.focused) vm.pane.scroll_y = slot.pane.scroll_y;
                 if (slot.focused) {
                     vm.pane.git_marks = slot.pane.git_marks;
                     vm.pane.onedrive_status = slot.pane.onedrive_status;
@@ -1256,6 +1262,7 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
         }
         vm.pane_slots.push_back(std::move(slot));
     }
+    s.renderer.PruneWallViews(vm.pane_slots);
 }
 // ---------------------------------------------------------------------------
 // Staging tray card deck: display entries (newest batch first) + eased poses.
@@ -2742,6 +2749,12 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     vm.settings_startup_open = s.appPrefs.startup_open;
     vm.settings_notify_icon = s.appPrefs.notify_icon_mode;
     vm.settings_new_tab_open = s.appPrefs.new_tab_open;
+    vm.settings_open_pulse_icon = s.appPrefs.open_pulse_icon;
+    vm.settings_new_window_shows = s.appPrefs.new_window_shows;
+    vm.settings_arrange_include_minimized = s.appPrefs.arrange_include_minimized;
+    vm.settings_arrange_gap = s.appPrefs.arrange_gap;
+    vm.settings_open_this_pc = s.appPrefs.open_this_pc;
+    vm.settings_open_win_e = s.appPrefs.open_win_e;
     vm.settings_external_open = s.appPrefs.external_open;
     vm.settings_close_last_tab = s.appPrefs.close_window_with_last_tab;
     vm.settings_close_tab_double_click = s.appPrefs.close_tab_on_double_click;
@@ -3461,6 +3474,7 @@ std::wstring TooltipForHover(AppState& s) {
     case R::TabNew: return text(s.appPrefs.show_hints ? I::TipxNewTab : I::TooltipNewTab);
     case R::ThemeToggle: return text(I::TooltipToggleTheme);
     case R::StatusBarAi: return text(I::AiChipTip);   // Pulse 助手  Ctrl+J
+    case R::WindowManageButton: return text(I::WindowManage);
     case R::SettingsButton: return text(I::Settings);
     case R::SettingsFind: return text(I::SettingsFind);
     case R::SettingsNav: {

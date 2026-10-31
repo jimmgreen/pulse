@@ -1307,6 +1307,7 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
 
 D2D1_RECT_F MainRenderer::SettingsDropdownBounds(const WindowViewModel& vm, int index, float window_w, float window_h) const {
     const auto l=MakeSettingsLayout(vm,D2D1::RectF(0,0,window_w,window_h),scale_,title_bar_height_,status_height_,&painter_);
+    if(index>=10 && index<=12) return l.integration_choice[index-10];
     if(index==3) return l.assistant.model_choice;
     if(index==4) return l.assistant.voice_service;
     if(index==5) return l.assistant.voice_model;
@@ -1347,6 +1348,10 @@ float MainRenderer::SettingsDestinationOffset(const WindowViewModel& vm, int set
     case I::SettingsHomeFolder: target=l.home_folder_card;break;
     case I::SettingsStartupOpen: target=l.startup_open_card;break;
     case I::SettingsNewTabOpen: target=l.new_tab_open_card;break;
+    case I::SettingsOpenPulseIcon: target=l.open_pulse_icon_card;break;
+    case I::SettingsNewWindowShows: target=l.new_window_shows_card;break;
+    case I::SettingsArrangeMinimized: target=l.arrange_minimized_row;break;
+    case I::SettingsArrangeGap: target=l.arrange_gap_card;break;
     case I::SettingsExternalOpen: target=l.external_open_card;break;
     case I::SettingsCloseLastTab: target=l.close_last_tab_row;break;
     case I::SettingsCloseTabDoubleClick: target=l.close_tab_double_click_row;break;

@@ -317,10 +317,7 @@ void ShortcutSettings::BuildPop(ui::ShortcutPopView& p) {
             std::wstring name = ActionName(owner.action);
             if (owner.digit >= 0) name += L" " + std::to_wstring(owner.digit);
             p.verdict = l10n::Get(l10n::StringId::Got).c_str() + keys + L" → " + Quote(name);
-            if (env_.IsTaken(test_chord_)) {
-                p.level = 3;
-                p.detail = l10n::Get(l10n::StringId::NoteAnotherProgramAlsoRegisteredIt).c_str();
-            } else if (env_.ImeApplies(test_chord_)) {
+            if (env_.ImeApplies(test_chord_)) {
                 p.level = 2;
                 p.detail = std::wstring(l10n::Get(l10n::StringId::NoteMicrosoftPinyinUsesItFor).c_str()) +
                            Quote(ImeConflictName(test_chord_) ? ImeConflictName(test_chord_) : L"") +
@@ -916,7 +913,7 @@ void ShortcutSettings::FeedChord(KeyChord chord) {
     rec_chord_ = chord;
     // One RegisterHotKey for the new chord: cheap enough on the UI thread.
     const bool ours = map_.GlobalHotkeyEnabled() && chord == map_.GlobalHotkey();
-    if (!ours && !env_.IsTaken(chord) && (chord.mods & (kKeyCtrl | kKeyAlt | kKeyWin))) {
+    if (ActionInfo(pop_action_).kind == KeyKind::Global && !ours && !env_.IsTaken(chord) && (chord.mods & (kKeyCtrl | kKeyAlt | kKeyWin))) {
         if (!ProbeTakenChords({chord}).empty()) env_.taken.push_back(chord);
     }
 }

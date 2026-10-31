@@ -81,6 +81,18 @@ bool Contains(const std::wstring& value, const wchar_t* fragment) {
 
 struct LumaTextRenderer::Impl {
     LumaTextStats stats;
+    bool trace_timings = false;
+    std::uint64_t TraceClock() const noexcept {
+        if (!trace_timings) return 0;
+        static const LONGLONG frequency = [] { LARGE_INTEGER f{}; QueryPerformanceFrequency(&f); return f.QuadPart; }();
+        LARGE_INTEGER now{};
+        QueryPerformanceCounter(&now);
+        return static_cast<std::uint64_t>(static_cast<double>(now.QuadPart) * 1000000.0 / static_cast<double>(frequency));
+    }
+    void TraceElapsed(std::uint64_t start, std::uint64_t& total) const noexcept {
+        if (trace_timings) total += TraceClock() - start;
+    }
+
 
 #if defined(PULSE_HAS_LUMATEXT)
     struct LayoutKey {
@@ -500,6 +512,9 @@ struct LumaTextRenderer::Impl {
     }
 
     bool Init(IDWriteFactory* dwrite, ID2D1RenderTarget* target) {
+        wchar_t trace[16]{};
+        const DWORD trace_length = GetEnvironmentVariableW(L"PULSE_STARTUP_TRACE", trace, ARRAYSIZE(trace));
+        trace_timings = trace_length > 0 && trace_length < ARRAYSIZE(trace) && trace[0] != L'0';
         auto context_desc = LumaText::Descriptor<lt_context_desc>();
         context_desc.dwrite_factory = dwrite;
         context_desc.cpu_cache_limit_bytes = kGlyphCacheLimit;
@@ -725,7 +740,10 @@ struct LumaTextRenderer::Impl {
         FillLayoutDesc(desc, key, style, font_size, cascade);
 
         LumaText::TextLayout layout;
-        if (lt_text_layout_create(context.get(), &desc, layout.put()) != LT_OK) return nullptr;
+        const auto layout_start = TraceClock();
+        const auto layout_result = lt_text_layout_create(context.get(), &desc, layout.put());
+        TraceElapsed(layout_start, stats.layout_time_us);
+        if (layout_result != LT_OK) return nullptr;
         while (layouts.size() >= kLayoutCacheLimit) EvictOldestLayout();
         layout_lru.push_front(key);
         const auto inserted = layouts.emplace(key, LayoutSlot{std::move(layout),
@@ -873,14 +891,26 @@ struct LumaTextRenderer::Impl {
         // No render profile: it would pick a config by background and drop
         // the foreground-dependent dilation set above.
 
+        const auto draw_start = TraceClock();
         const lt_result result = lt_frame_draw_text_layout(frame.get(), layout->get(), &draw);
+        TraceElapsed(draw_start, stats.draw_time_us);
         auto frame_stats = LumaText::Descriptor<lt_frame_stats>();
         if (result == LT_OK && lt_frame_get_stats(frame.get(), &frame_stats) == LT_OK) {
             stats.freetype_glyphs += frame_stats.freetype_glyphs;
             stats.cache_hits += frame_stats.glyph_cache_hits;
+            if (trace_timings) {
+                stats.shaping_time_us += frame_stats.shaping_time_us;
+                stats.raster_time_us += frame_stats.raster_time_us;
+                stats.upload_time_us += frame_stats.upload_time_us;
+                stats.composition_time_us += frame_stats.composition_time_us;
+            }
         }
+        const auto end_start = TraceClock();
         const lt_result end_result = lt_frame_end(frame.get());
+        TraceElapsed(end_start, stats.frame_end_time_us);
+        const auto recording_start = TraceClock();
         const HRESULT recording_result = recording_dc->EndDraw();
+        TraceElapsed(recording_start, stats.recording_end_time_us);
         recording_dc->SetTarget(nullptr);
         if (result != LT_OK || end_result != LT_OK || FAILED(recording_result) ||
             FAILED(commands->Close())) {
@@ -933,13 +963,23 @@ struct LumaTextRenderer::Impl {
         draw.background_type = LT_BACKGROUND_TRANSPARENT;
         draw.render_config = LumaText::Descriptor<lt_render_config>();
         ApplySharpConfig(draw.render_config, foreground);
+        const auto draw_start = TraceClock();
         const lt_result result = lt_frame_draw_layout(frame.get(), layout, &draw);
+        TraceElapsed(draw_start, stats.draw_time_us);
         auto frame_stats = LumaText::Descriptor<lt_frame_stats>();
         if (result == LT_OK && lt_frame_get_stats(frame.get(), &frame_stats) == LT_OK) {
             stats.freetype_glyphs += frame_stats.freetype_glyphs;
             stats.cache_hits += frame_stats.glyph_cache_hits;
+            if (trace_timings) {
+                stats.shaping_time_us += frame_stats.shaping_time_us;
+                stats.raster_time_us += frame_stats.raster_time_us;
+                stats.upload_time_us += frame_stats.upload_time_us;
+                stats.composition_time_us += frame_stats.composition_time_us;
+            }
         }
+        const auto end_start = TraceClock();
         const lt_result end_result = lt_frame_end(frame.get());
+        TraceElapsed(end_start, stats.frame_end_time_us);
         stats.draw_calls++;
         return result == LT_OK && end_result == LT_OK;
     }

@@ -6,6 +6,7 @@
 // trigger a background rebuild to repair visibility and disconnected parent links.
 #pragma once
 #include "usn_stream.h"
+#include "index_volume_pause.h"
 #include "filename_timing.h"
 #include "index_feed.h"
 #include "folder_size_index.h"
@@ -119,6 +120,8 @@ public:
     std::wstring Status() const;
     std::vector<VolumeInfo> Volumes() const;
     void RequestRebuild();
+    std::shared_ptr<VolumePause> PauseVolumes(std::vector<std::wstring> ids, std::vector<std::wstring> roots);
+    void ResumeVolumes(const std::shared_ptr<VolumePause>& lease);
     ChangeState ChangeCoverage(const std::wstring& path) const;
     void SetChangeLease(const std::wstring& owner, bool enabled);
     ChangeTracker& Changes() { return changes_; }
@@ -126,6 +129,12 @@ public:
                     uint64_t size = 0, uint64_t mtime = 0);
 
 private:
+    void ApplyVolumePauses();
+    bool VolumePaused(const std::wstring& id) const;
+    bool PathPaused(const std::wstring& path) const;
+    std::mutex volume_pause_mutex_;
+    std::vector<std::shared_ptr<VolumePause>> volume_pause_requests_;
+    std::vector<std::shared_ptr<VolumePause>> volume_pauses_;
     FolderSizeIndex folder_sizes_;
     ULONGLONG folder_size_retry_after_ = 0;
     bool folder_size_usn_update_ = false;

@@ -1,5 +1,6 @@
 // Renders the progress card (pulse_ops_dialogs.html §1–§4) in each state to
-// PNG and checks the 2.5 s auto-close. Usage: pulse_ops_dialog_shots [out-dir]
+// PNG and checks the 2.5 s auto-close. Usage: pulse_ops_dialog_shots [out-dir] [locale]
+// Add --copy-pipeline-only as the third argument for eight focused pipeline images.
 #include "../common/windows_compat.h"
 #include "../common/localization.h"
 #include "../ui/file_operation_dialog.h"
@@ -31,6 +32,9 @@ struct FileOperationWindowTestAccess {
             if (i < 8) v *= 0.25 + 0.75 * t / 8.0;  // warm-up ramp
             window.graph_.points.push_back({ x, v });
         }
+    }
+    static float GraphEnd(const FileOperationWindow& window) {
+        return window.graph_.points.empty() ? -1.0f : window.graph_.points.back().x;
     }
     static void Elapsed(FileOperationWindow& window, ULONGLONG ms, bool ended) {
         const ULONGLONG now = GetTickCount64();
@@ -133,6 +137,8 @@ int wmain(int argc, wchar_t** argv) {
     };
     std::vector<std::wstring> opened;
     callbacks.open_folder = [&](const std::wstring& folder) { opened.push_back(folder); };
+    ops::OpSpeedGraph saved_history;
+    callbacks.speed_history = [&](uint64_t) { return saved_history; };
     ui::FileOperationWindow window;
     Check(window.Create(nullptr, std::move(callbacks)), "create hidden operation window");
     const double mb = 1024.0 * 1024.0;
@@ -142,6 +148,123 @@ int wmain(int argc, wchar_t** argv) {
         Check(Access::Snapshot(window, output / (name + L".png")), "save screenshot");
     };
 
+    if (argc > 3 && wcscmp(argv[3], L"--graph-completion-only") == 0) {
+        ops::OpSpeedGraph graph;
+        graph.Sample(1000, 86.0f, 200.0);
+        graph.Complete();
+        Check(graph.points.back().x == 1.0f && graph.points.back().v == 200.0,
+              "completion bypasses interval and preserves measured speed");
+        graph.Complete();
+        Check(graph.points.size() == 2, "completion is idempotent");
+        graph.Reset();
+        graph.Complete();
+        Check(graph.points.empty(), "empty history stays empty");
+        graph.Sample(1000, -1.0f, 200.0);
+        graph.Complete();
+        Check(!graph.by_progress && graph.points.size() == 1, "time history stays unchanged");
+        for (int mode = 0; mode < 4; ++mode) {
+            auto status = Running(ops::OpType::Copy, 86.0f);
+            status.task_id = 9000 + mode;
+            status.enumeration_complete = true;
+            window.Update(status);
+            Access::Graph(window, 0.86f, 212.0 * mb);
+            status.active = false;
+            status.phase = (mode == 0 || mode == 3) ? ops::OpPhase::Completed : ops::OpPhase::Failed;
+            if (mode == 1 || mode == 2) status.last_error = mode == 1 ? L"Failed" : L"Cancelled";
+            if (mode == 3) status.failed_items = 1;
+            if (mode == 0) {
+                status.percent = 100.0f;
+                status.completed_items = status.total_items;
+                status.transferred_bytes = status.total_bytes;
+            }
+            window.Update(status);
+            Check(Access::GraphEnd(window) == (mode == 0 ? 1.0f : 0.86f),
+                  "only successful completion closes history");
+            shot(L"graph_completion_" + std::to_wstring(mode));
+        }
+        saved_history.Sample(1000, 0.0f, 120.0 * mb);
+        saved_history.Sample(1250, 40.0f, 180.0 * mb);
+        saved_history.Sample(1500, 86.0f, 212.0 * mb);
+        auto completed = Running(ops::OpType::Copy, 100.0f);
+        completed.task_id = 9100;
+        completed.active = false;
+        completed.phase = ops::OpPhase::Completed;
+        completed.enumeration_complete = true;
+        window.Update(completed);
+        Check(Access::GraphEnd(window) == 1.0f,
+              "first completed card closes truncated callback history");
+        window.SetTheme(true, ui::HexColor(0x6474C7));
+        Access::Size(window, 144, false);
+        Access::Place(window, -4000, -4000);
+        window.Show(false);
+        window.Hide();
+        window.Show(false);
+        Check(Access::GraphEnd(window) == 1.0f,
+              "reopened completed card cannot regress to truncated callback history");
+        Access::Elapsed(window, 7000, true);
+        shot(L"graph_completion_dark_144dpi_reopened");
+        window.Destroy();
+        CoUninitialize();
+        return failures ? 1 : 0;
+    }
+
+    if (argc > 3 && wcscmp(argv[3], L"--copy-pipeline-only") == 0) {
+        Check(!output.empty(), "pipeline screenshots require output directory");
+        uint64_t pipeline_task = 1000;
+        for (const bool dark : {true, false}) {
+            window.SetTheme(dark, ui::HexColor(0x6474C7));
+            for (const UINT dpi : {96u, 144u}) {
+                const std::wstring suffix = std::wstring(dark ? L"-dark-" : L"-light-") + std::to_wstring(dpi);
+                Access::Size(window, dpi, false);
+                Access::Place(window, -4000, -4000);
+                auto unknown = Running(ops::OpType::Copy, 25.0f);
+                unknown.task_id = pipeline_task++;
+                unknown.active = true;
+                unknown.can_pause = true;
+                unknown.enumeration_complete = false;
+                unknown.percent = -1.0f;
+                unknown.eta_seconds = 0;
+                unknown.total_items = 640;
+                unknown.completed_items = 128;
+                unknown.total_bytes = 512ull << 20;
+                unknown.transferred_bytes = 128ull << 20;
+                unknown.summary = l10n::Get(l10n::StringId::OpScanningAndCopying);
+                window.Update(unknown);
+                Access::Place(window, -4000, -4000);
+                Access::Graph(window, 0.0f, 212.0 * mb, false);
+                Access::Elapsed(window, 12000, false);
+                const auto& shown_unknown = Access::Shown(window);
+                Check(shown_unknown.active && !shown_unknown.enumeration_complete && shown_unknown.percent < 0 &&
+                      shown_unknown.eta_seconds == 0 && shown_unknown.total_items > shown_unknown.completed_items &&
+                      shown_unknown.completed_items > 0 && shown_unknown.transferred_bytes > 0,
+                      "shown scanning-copy status retains unknown totals");
+                shot(L"pipeline-unknown" + suffix);
+
+                auto verifying = Running(ops::OpType::Copy, 99.0f);
+                verifying.task_id = pipeline_task++;
+                verifying.phase = ops::OpPhase::Verifying;
+                verifying.active = true;
+                verifying.can_pause = true;
+                verifying.enumeration_complete = true;
+                verifying.percent = 99.0f;
+                verifying.eta_seconds = 0;
+                verifying.summary = l10n::Get(l10n::StringId::Verifying);
+                window.Update(verifying);
+                Access::Place(window, -4000, -4000);
+                Access::Graph(window, 0.99f, 212.0 * mb);
+                Access::Elapsed(window, 61000, false);
+                const auto& shown_verifying = Access::Shown(window);
+                Check(shown_verifying.active && shown_verifying.enumeration_complete &&
+                      shown_verifying.phase == ops::OpPhase::Verifying && shown_verifying.percent == 99.0f,
+                      "shown verification stays active at 99 percent");
+                shot(L"pipeline-verifying-99" + suffix);
+            }
+        }
+        std::printf("%s\n", failures == 0 ? "ALL PASS" : "FAILURES");
+        window.Destroy();
+        CoUninitialize();
+        return failures == 0 ? 0 : 1;
+    }
     struct Scale { UINT dpi; const wchar_t* tag; };
     const Scale scales[] = { {96, L"100"}, {144, L"150"}, {192, L"200"} };
     for (const bool dark : {true, false}) {

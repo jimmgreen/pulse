@@ -44,6 +44,7 @@ set_source_files_properties(setup.rc PROPERTIES OBJECT_DEPENDS ${CMAKE_CURRENT_B
 add_executable(pulse_setup WIN32
     setup_main.cpp setup_engine.cpp setup_common.cpp setup_log.cpp setup_options.cpp setup_process.cpp
     setup_registry.cpp setup_service.cpp setup_shortcut.cpp setup_transaction.cpp setup_strings.cpp
+    start_pin_registration.cpp
     setup_ui.cpp setup_uninstall.cpp setup.rc setup.manifest ${CMAKE_CURRENT_BINARY_DIR}/setup.ico)
 target_include_directories(pulse_setup PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(pulse_setup PRIVATE pulse_setup_payload shell32 ole32 uuid advapi32 user32 gdi32 comctl32

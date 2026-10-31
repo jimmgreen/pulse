@@ -691,15 +691,11 @@ void Wizard::PaintPage(Page p, float dx, float alpha) {
 }
 
 void Wizard::PaintWelcome() {
-    // Logo glow, coloured from the icon itself: its gold pulse line and lit
-    // dot. Light leaks from the dot past the tile, a broad warm halo balances
-    // it, and a navy-tinted shadow lifts the tile. While the page is shown
-    // the light flows: the dot breathes, the halo drifts and two warm lights
-    // circle the tile in opposite directions (pulse_installer_glow.html, "金色余晖").
+    // Soft violet light follows the folded-page product mark.
     {
         const float lx = kW / 2 - 48, ly = 54 + kWelcomeDy, cx = kW / 2, cy = 102 + kWelcomeDy;
         const D2D1_POINT_2F dot{lx + 64.2f, ly + 42.6f};
-        const D2D1_COLOR_F gold = Hex(0xF2B43A), hot = Hex(0xFFD66E), core = Hex(0xFFF6D2);
+        const D2D1_COLOR_F gold = Hex(0x8079F4), hot = Hex(0xAAA3FF), core = Hex(0xE5E2FF);
         const float k = theme_.dark ? 1.15f : 1.f;
         // Seconds within a 36 s loop: every period below divides it.
         const float t = GlowAnimating() ? static_cast<float>(GetTickCount64() % 36000) / 1000.f : 0.f;
@@ -715,13 +711,13 @@ void Wizard::PaintWelcome() {
             SafeRelease(brush);
             SafeRelease(coll);
         };
-        const D2D1_COLOR_F wash = theme_.dark ? Hex(0xFFBA50) : Hex(0xFFCE78);
+        const D2D1_COLOR_F wash = theme_.dark ? Hex(0x8C84F8) : Hex(0xC3C0FF);
         const float wa = theme_.dark ? .06f : .11f;  // low enough to stay free of 8-bit banding rings
         glow({cx, cy - 20}, 380, 380, {{0, WithAlpha(wash, wa)}, {.45f, WithAlpha(wash, wa * .45f)}, {1, WithAlpha(wash, 0)}});
         glow({cx + 14 * std::cos(drift), cy + 9 * std::sin(drift)}, 175, 175,
              {{0, WithAlpha(gold, .20f * k)}, {.38f, WithAlpha(gold, .13f * k)}, {.62f, WithAlpha(hot, .05f * k)},
               {1, WithAlpha(hot, 0)}});
-        // Two warm lights circle the tile in opposite directions, so the glow
+        // Two soft lights circle the mark in opposite directions, so the glow
         // visibly moves around it rather than only pulsing in place.
         if (GlowAnimating()) {
             glow({cx + 72 * std::cos(orbit), cy + 40 * std::sin(orbit)}, 110, 110,

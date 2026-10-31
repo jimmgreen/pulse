@@ -68,6 +68,10 @@ constexpr SettingDestination destinations[]={
     {I::ListSelectionOutline,9,0},{I::ListThumbnailBadges,9,0},{I::ThumbCache,9,0},{I::AliasMark,9,0},{I::SettingsTreeSticky,9,0},
     {I::ListMtimeHint,9,0},{I::ListMtimeRange,9,0},{I::ListMtimePalette,9,0},{I::SyncOneDrive,9,0},{I::SyncSvn,9,0},
     // 10 标签页与窗口
+    {I::SettingsOpenPulseIcon,10,0},
+    {I::SettingsNewWindowShows,10,0},
+    {I::SettingsArrangeMinimized,10,0},
+    {I::SettingsArrangeGap,10,0},
     {I::SettingsHomeFolder,10,0},{I::SettingsStartupOpen,10,0},{I::SettingsNewTabOpen,10,0},{I::SettingsExternalOpen,10,0},
     {I::SettingsVerticalTabs,10,0},{I::PinnedNames,10,0},{I::SettingsCloseTabDoubleClick,10,0},{I::SettingsCloseLastTab,10,0},
     // 11 启动与集成
@@ -92,6 +96,19 @@ std::vector<ui::FluentMenuItem> FilterSettings(const std::wstring& query) {
         auto item=Item(static_cast<int>(i)+1,destinations[i].title);
         item.shortcut=l10n::Get(pages[destinations[i].page]);
         std::wstring haystack=item.text+L" "+item.shortcut;
+        // Search aliases are accepted input tokens, not additional UI labels.
+        if ((needle == L"多开" || needle == L"多開" || needle == L"multiwindow" || needle == L"multi window") &&
+            (destinations[i].title == I::SettingsOpenPulseIcon || destinations[i].title == I::SettingsNewWindowShows))
+            haystack += L" " + needle;
+        if ((needle == L"win+e" || needle == L"win + e") && destinations[i].title == I::SettingsWinE)
+            haystack += L" " + needle;
+        if (destinations[i].page == 10) {
+            for (I alias : {I::SettingsSecOpenWindows, I::SettingsSecArrangeWindows,
+                    I::ExternalOpenWindow, I::ExternalOpenTab, I::OpenWindowActivate,
+                    I::SettingsArrangeMinimized, I::SettingsArrangeGap})
+                haystack += L" " + l10n::Get(alias);
+        }
+
         if (destinations[i].page == 5 || destinations[i].page == 8) {
             // Translate each visible heading separately: the Traditional Chinese
             // phrase table deliberately does not translate unknown concatenations.
@@ -305,6 +322,14 @@ bool TestSettingsFilter(const std::wstring& query,I expected) {
 
 bool HandleSettingsControl(AppState& s,const H& hit) {
     switch(hit.region) {
+    case H::SettingsOpenPulseIcon: s.settings.OpenPulseIcon(hit.index);break;
+    case H::SettingsNewWindowShows: s.settings.NewWindowShows(hit.index);break;
+    case H::SettingsArrangeGap: s.settings.ArrangeGap(hit.index);break;
+    case H::SettingsStartupOpen: s.settings.StartupOpen(hit.index);break;
+    case H::SettingsNewTabOpen: s.settings.NewTabOpen(hit.index);break;
+    case H::SettingsExternalOpen: s.settings.ExternalOpen(hit.index);break;
+    case H::SettingsDensity: s.settings.RowHeight(hit.index);break;
+    case H::SettingsTextRender: s.settings.TextRendering(hit.index);break;
     case H::SettingsFind: FindSetting(s);break;
     case H::SettingsToggle: {
         // Pulse menu preview: pressing a movable row arms a drag (app_input
@@ -456,7 +481,21 @@ bool HandleSettingsControl(AppState& s,const H& hit) {
     case H::SettingsTheme: SetThemeMode(s,hit.index);break;
     case H::SettingsDropdown: {
         std::vector<ui::FluentMenuItem> items;
-        if(hit.index==0) {
+        if(hit.index>=10 && hit.index<=12) {
+            if(!s.appPrefs.integration_enabled) break;
+            const int kind=hit.index-10;
+            const bool enabled=kind==0 ? s.appPrefs.integration_folders : kind==1 ? s.appPrefs.integration_this_pc : s.appPrefs.integration_win_e;
+            const int value=!enabled ? 0 : kind==0 ? 1 : 1+(kind==1 ? s.appPrefs.open_this_pc : s.appPrefs.open_win_e);
+            items.push_back(Item(1,I::IntegrationHandlerExplorer,value==0));
+            items.push_back(Item(2,kind==0 ? I::IntegrationHandlerPulse : I::ExternalOpenWindow,value==1));
+            if(kind!=0) items.push_back(Item(3,I::ExternalOpenTab,value==2));
+            const int command=Dropdown(s,hit.index,std::move(items));
+            if(command>=1 && command<=(kind==0 ? 2 : 3)) {
+                if(kind==0) { if(s.appPrefs.integration_folders!=(command==2)) s.settings.IntegrationAction(1); }
+                else if(kind==1) s.settings.OpenThisPc(command-1);
+                else s.settings.OpenWinE(command-1);
+            }
+        } else if(hit.index==0) {
             const I labels[]={I::EffectNone,I::EffectAcrylic,I::EffectMica,I::EffectMicaAlt};
             for(int i=0;i<ui::kWindowEffectCount;++i) {
                 auto item=Item(i+1,labels[i],s.appPrefs.window_effect==ui::WindowEffectId(static_cast<ui::WindowEffect>(i)));

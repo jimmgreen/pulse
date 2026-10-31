@@ -28,6 +28,8 @@ public:
     std::wstring IndexPath() const;
     bool ServiceMode() const;
     bool Connected() const { return connected_.load(); }
+    // Owner-thread snapshot; the eject worker probes this and the service pipe without starting either.
+    std::wstring ReleasePipeName() const { return pipe_name_; }
     bool PinyinReady() const { return connected_.load() && pinyin_ready_.load(); }
     uint64_t Revision() const { return revision_.load(); }
     std::vector<VolumeInfo> Volumes() const;

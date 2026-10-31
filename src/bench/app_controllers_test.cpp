@@ -13,6 +13,7 @@
 #include "../app/shell_window_plan.h"
 #include "../app/explorer_shortcuts.h"
 #include "../app/keymap.h"
+#include "../app/shortcut_settings.h"
 #include "../app/closed_windows.h"
 #include "../app/last_tab_close.h"
 #include "../app/startup_launch.h"
@@ -560,14 +561,35 @@ bool TestShortcutKeymap() {
         moved.Translate(chord(L"Ctrl+G")).kind == k::Keymap::Translation::Swallow);
 
     k::ShortcutEnv env;
-    env.taken = {chord(L"Ctrl+Alt+C"), chord(L"Ctrl+Alt+X")};
-    const auto before = k::CollectIssues(fresh, env);
-    env.ime_ignored = {chord(L"Ctrl+Alt+C")};
-    const auto after = k::CollectIssues(fresh, env);
-    passed &= Report("keymap: a dismissed taken chord leaves the issues list (badge)",
-        before.size() == 2 && after.size() == 1 && after[0].chord == chord(L"Ctrl+Alt+X"));
-    passed &= Report("keymap: a dismissed taken chord still blocks recording it",
-        k::CheckChord(fresh, KeyAction::CopyPath, chord(L"Ctrl+Alt+C"), env).issue == k::ChordIssue::Taken);
+    env.taken = {chord(L"Ctrl+C"), chord(L"Ctrl+Alt+C"), chord(L"Alt+Shift+1")};
+    passed &= Report("keymap: global registration failure is not a local conflict badge",
+        k::CollectIssues(fresh, env).empty());
+    passed &= Report("keymap: Ctrl+C still resolves to Copy despite failed global probe",
+        fresh.Find(chord(L"Ctrl+C")).action == KeyAction::Copy);
+    passed &= Report("keymap: local rebinding preserves actual in-app duplicate checks",
+        k::CheckChord(fresh, KeyAction::CopyPath, chord(L"Ctrl+Alt+C"), env).issue == k::ChordIssue::Duplicate);
+    passed &= Report("keymap: real global registration conflict still blocks",
+        k::CheckChord(fresh, KeyAction::GlobalSearch, chord(L"Ctrl+Alt+C"), env).issue == k::ChordIssue::Taken);
+    passed &= Report("keymap: local numbered ranges ignore global probe failures",
+        k::CheckRange(fresh, KeyAction::Layout, k::kKeyAlt | k::kKeyShift, env).bad == 0);
+    const auto candidates = k::ProbeCandidates(fresh);
+    passed &= Report("keymap: background probes exclude ordinary Copy",
+        std::find(candidates.begin(), candidates.end(), chord(L"Ctrl+C")) == candidates.end());
+    k::ShortcutSettings settings;
+    settings.SetEnvForTesting(env);
+    const auto view = settings.View();
+    bool copy_clear = false;
+    for (const auto& group : view->groups)
+        for (const auto& row : group.rows)
+            if (row.action == static_cast<int>(KeyAction::Copy)) copy_clear = row.level == 0;
+    passed &= Report("shortcuts view: Copy has no false red mark or conflict badge",
+        copy_clear && view->red == 0 && settings.IssueCount() == 0);
+    settings.Click(pulse::ui::kScTester);
+    settings.HandleHotkeyChord(chord(L"Ctrl+C"));
+    const auto tested = settings.View();
+    passed &= Report("shortcuts tester: received Ctrl+C reports Copy without an occupied warning",
+        tested->pop.kind == pulse::ui::ShortcutPopView::Tester && tested->pop.level == 0 &&
+        tested->pop.detail.empty() && tested->pop.verdict.find(k::ActionName(KeyAction::Copy)) != std::wstring::npos);
     return passed;
 }
 
@@ -1628,6 +1650,7 @@ int wmain(int argc, wchar_t** argv) {
         return ok ? 0 : 1;
     }
 
+    if (argc == 2 && std::wstring(argv[1]) == L"--shortcut-keymap") return TestShortcutKeymap() ? 0 : 1;
     if (argc == 2 && std::wstring(argv[1]) == L"--view-hit-bounds") return TestViewHitBounds() ? 0 : 1;
     if (argc == 2 && std::wstring(argv[1]) == L"--com-menu-identity") return TestComMenuIdentity() ? 0 : 1;
     if (argc == 2 && std::wstring(argv[1]) == L"--explorer-parity") {

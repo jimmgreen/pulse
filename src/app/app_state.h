@@ -12,6 +12,7 @@
 #include "../ui/quick_preview_window.h"
 #include "list_type_ahead.h"
 #include "preview_selection_follow.h"
+#include "marquee_selection.h"
 #include "../ui/text_diff_window.h"
 #include "../ui/bloom_accent_picker.h"
 #include "../fs/fs_enum.h"
@@ -150,7 +151,10 @@ struct WindowMergeUndo {
     app::ClosedWindow place;
 };
 
+struct DeletePreflight;
 struct AppState : AppCoreOwner {
+    std::shared_ptr<DeletePreflight> delete_preflight;
+    ui::FileOperationWindow delete_preflight_window;
     // Stand-alone window state with its own AppCore (tests and selftest probes).
     AppState() : AppCoreOwner(std::make_unique<AppCore>()), core(*owned_core) {}
     // A window of the running process; `shared` must outlive this state.
@@ -1010,6 +1014,11 @@ struct AppState : AppCoreOwner {
     POINT marqueeStart{};
     POINT marqueeCur{};
     std::unordered_set<int> marqueeBase;
+    pulse::app::MarqueeSelection marqueeDelta;
+    std::vector<int> marqueeHits;
+    app::MarqueeContext marqueeContext;
+    uint64_t marqueeRevision = 0;
+    bool marqueeRevisionTracked = false;
     // Tab scroll offset when the marquee started. marqueeStart is in that
     // moment's pane pixels, so scrolling carries the start with the content.
     float marqueeOriginScrollX = 0.0f;

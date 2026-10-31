@@ -50,6 +50,7 @@ public:
     void Destroy();
     void SetTheme(bool dark, D2D1_COLOR_F accent);
     void Update(const ops::OpStatus& status);
+    void SetPreparationOnly(bool on) { preparation_only_ = on; }
     void Show(bool activate = true);
     void Hide();
     bool IsVisible() const;
@@ -89,6 +90,7 @@ private:
     void RetryFailureRows(const std::vector<size_t>& rows);
     void FinishRetry(const ops::OpStatus& status);
 
+    bool preparation_only_ = false;
     HWND hwnd_ = nullptr;
     HWND owner_ = nullptr;
     Compositor compositor_;

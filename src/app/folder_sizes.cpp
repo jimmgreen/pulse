@@ -102,6 +102,17 @@ struct FolderSizes::Impl {
     std::set<std::wstring> protected_paths, manual, blocked_auto;
     std::vector<std::wstring> order, roots;
     std::wstring active_scan_path;
+    struct Suspension {
+        std::promise<void> ready;
+        std::shared_future<void> future = ready.get_future().share();
+        std::vector<std::shared_future<void>> watches;
+        bool drained = false, completed = false;
+    };
+    std::map<std::wstring, std::shared_ptr<Suspension>> suspended;
+    std::vector<std::pair<std::wstring, std::shared_future<void>>> retiring_watches;
+    bool Suspended(const std::wstring& path) const {
+        return std::any_of(suspended.begin(), suspended.end(), [&](const auto& item) { return Within(path, item.first); });
+    }
     std::vector<FolderSizeRequest> last_visible;
     std::vector<std::wstring> last_roots;
     std::map<std::wstring, Watch> watches;
@@ -211,6 +222,7 @@ struct FolderSizes::Impl {
             std::lock_guard lock(mutex);
             const auto now = GetTickCount64();
             for (const auto& key : probe_wanted) {
+                if (Suspended(key)) continue;
                 const auto found = probes.find(key);
                 if (found != probes.end() && ProbeFresh(key, found->second, now)) continue;
                 batch.push_back(key);
@@ -280,6 +292,7 @@ struct FolderSizes::Impl {
             std::lock_guard lock(mutex);
             const auto now = GetTickCount64();
             std::erase_if(roots, [&](const auto& root) {
+                if (Suspended(root)) return true;
                 const bool active = std::any_of(last_roots.begin(), last_roots.end(), [&](const auto& path) {
                     return Within(path, root) && !VolumeRoot(path);
                 });
@@ -301,14 +314,20 @@ struct FolderSizes::Impl {
             }
             for (const auto& root : roots) if (!watches.contains(root)) create.push_back(root);
         }
-        for (auto& watch : retired) watch->Stop();
+        for (auto& watch : retired) {
+            auto future = watch->StopAsync();
+            retiring_watches.emplace_back(Key(watch->path()), std::move(future));
+        }
+        std::erase_if(retiring_watches, [](const auto& item) {
+            return !item.second.valid() || item.second.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready;
+        });
         for (const auto& root : create) {
             if (stopping || DriveType(root) == DRIVE_REMOTE) continue;
             auto watch = std::make_shared<fs::DirWatch>();
             uint64_t instance = 0;
             {
                 std::lock_guard lock(mutex);
-                if (std::find(roots.begin(), roots.end(), root) == roots.end()) continue;
+                if (Suspended(root) || std::find(roots.begin(), roots.end(), root) == roots.end()) continue;
                 instance = ++watch_sequence;
                 watches.emplace(root, Watch{watch, instance, instance});
             }
@@ -545,6 +564,32 @@ struct FolderSizes::Impl {
         uint64_t last_save = GetTickCount64(), schedule_scope = 0;
         bool manual_turn = true;
         while (!stopping) {
+            std::vector<std::pair<std::shared_ptr<Suspension>, std::shared_ptr<fs::DirWatch>>> retiring;
+            {
+                std::lock_guard lock(mutex);
+                for (auto& [root, request] : suspended) {
+                    if (!request->drained) {
+                        for (const auto& [path, future] : retiring_watches)
+                            if (Within(path, root)) request->watches.push_back(future);
+                        std::erase_if(jobs, [&](const auto& job) { return Within(job->path, root); });
+                        for (auto it = watches.begin(); it != watches.end();) {
+                            if (!Within(it->first, root)) { ++it; continue; }
+                            retiring.emplace_back(request, std::move(it->second.handle));
+                            it = watches.erase(it);
+                        }
+                        request->drained = true;
+                    }
+                    if (retiring.empty() && !request->completed && std::all_of(request->watches.begin(), request->watches.end(), [](const auto& future) {
+                        return !future.valid() || future.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready;
+                    })) { request->completed = true; request->ready.set_value(); }
+                }
+            }
+            for (auto& [request, watch] : retiring) {
+                auto completion = watch->StopAsync();
+                std::lock_guard lock(mutex);
+                retiring_watches.emplace_back(Key(watch->path()), completion);
+                request->watches.push_back(std::move(completion));
+            }
             { std::lock_guard lock(mutex); kick = false; }
             UpdateWatches(cache_key);
             const bool probing = RunProbes();
@@ -552,7 +597,7 @@ struct FolderSizes::Impl {
             {
                 std::lock_guard lock(mutex);
                 for (const auto& path : order)
-                    if (wanted.at(path) && !manual.contains(path)) classify.push_back(path);
+                    if (wanted.at(path) && !manual.contains(path) && !Suspended(path)) classify.push_back(path);
             }
             for (const auto& path : classify) {
                 const auto type = DriveType(path);
@@ -583,7 +628,7 @@ struct FolderSizes::Impl {
                 if (reprioritize) for (size_t i = 0; i < order.size(); ++i) priority.emplace(order[i], manual.contains(order[i]) ? i : order.size() + i);
                 for (const auto& path : order) {
                     if (jobs.size() == kScanConcurrency && !reprioritize) break;
-                    if (!wanted.at(path)) continue;
+                    if (!wanted.at(path) || Suspended(path)) continue;
                     auto& entry = store.entries.at(path);
                     const bool explicit_request = manual.contains(path);
                     if (!explicit_request && ExpensiveAutomaticPath(path)) {
@@ -626,7 +671,8 @@ struct FolderSizes::Impl {
                 if (jobs.empty() && !probing) {
                     const auto due = IdleDeadline(now, last_save, !file.empty());
                     const auto idle_now = GetTickCount64();
-                    wake.wait_for(lock, std::chrono::milliseconds(due > idle_now ? due - idle_now : 0),
+                    const bool releasing = std::any_of(suspended.begin(), suspended.end(), [](const auto& item) { return !item.second->completed; });
+                    wake.wait_for(lock, std::chrono::milliseconds(releasing ? 10 : (due > idle_now ? due - idle_now : 0)),
                         [&] { return kick || stopping.load(); });
                 }
             }
@@ -708,6 +754,42 @@ struct FolderSizes::Impl {
 
 FolderSizes::FolderSizes() : impl_(std::make_unique<Impl>()) {}
 FolderSizes::~FolderSizes() { Stop(); }
+
+std::shared_future<void> FolderSizes::SuspendVolume(const std::wstring& root) {
+    auto& state = *impl_;
+    const auto key = Key(root);
+    std::lock_guard lock(state.mutex);
+    if (key.empty() || state.stopping) return {};
+    if (const auto found = state.suspended.find(key); found != state.suspended.end()) return found->second->future;
+    auto request = std::make_shared<Impl::Suspension>();
+    state.suspended.emplace(key, request);
+    for (auto& [path, entry] : state.store.entries) if (Within(path, key)) {
+        ++entry.request_epoch;
+        entry.value.verified = false;
+        if (entry.value.has_value && entry.value.source != FolderSizeSource::Index) entry.value.state = FolderSizeState::Cached;
+        entry.work = {};
+    }
+    if (state.worker.joinable() && Within(state.active_scan_path, key)) CancelSynchronousIo(state.worker.native_handle());
+    if (!state.worker.joinable()) state.worker = std::thread([&state] { state.Run(); });
+    state.changed = true; state.kick = true;
+    state.wake.notify_all();
+    return request->future;
+}
+
+void FolderSizes::ResumeVolume(const std::wstring& root) {
+    std::vector<FolderSizeRequest> visible;
+    std::vector<std::wstring> roots;
+    {
+        auto& state = *impl_;
+        std::lock_guard lock(state.mutex);
+        if (!state.suspended.erase(Key(root))) return;
+        visible = state.last_visible; roots = state.last_roots;
+        state.last_visible.clear(); state.last_roots.clear();
+        state.kick = true;
+        state.wake.notify_all();
+    }
+    Sync(std::move(visible), std::move(roots));
+}
 void FolderSizes::SetCachePath(std::function<std::wstring()> path) {
     std::lock_guard lock(impl_->mutex);
     if (!impl_->worker.joinable()) impl_->cache_path = std::move(path);
@@ -743,7 +825,7 @@ void FolderSizes::Sync(std::vector<FolderSizeRequest> visible, std::vector<std::
     // Never recursively watch a whole volume just because its overview is visible.
     const auto now = GetTickCount64();
     for (const auto& root : requested_roots) {
-        if (VolumeRoot(root) || NetworkPath(root)) continue;
+        if (state.Suspended(root) || VolumeRoot(root) || NetworkPath(root)) continue;
         const auto covering = std::find_if(state.roots.begin(), state.roots.end(), [&](const auto& r) { return Within(root, r); });
         if (covering != state.roots.end()) { state.watch_used[*covering] = now; continue; }
         if (state.roots.size() >= kWatchLimit) {
@@ -776,8 +858,8 @@ void FolderSizes::Sync(std::vector<FolderSizeRequest> visible, std::vector<std::
         // Visibility is not a data revision. Preserve published bytes and completion age.
         if (!entry->value.has_value && entry->completed == 0 && !entry->work.Running())
             entry->not_before = (std::max)(entry->not_before, now + 150);
-        wanted[request.path] = (request.automatic && !NetworkPath(request.path) &&
-            !state.blocked_auto.contains(request.path)) || state.manual.contains(request.path);
+        wanted[request.path] = !state.Suspended(request.path) && ((request.automatic && !NetworkPath(request.path) &&
+            !state.blocked_auto.contains(request.path)) || state.manual.contains(request.path));
         order.push_back(request.path);
     }
     for (const auto& path : state.manual) if (!wanted.contains(path)) {
@@ -801,7 +883,7 @@ void FolderSizes::Calculate(const std::wstring& path) {
     const auto key = Key(path);
     std::lock_guard lock(state.mutex);
     const auto demand = state.wanted.find(key);
-    if (demand == state.wanted.end()) return;
+    if (demand == state.wanted.end() || state.Suspended(key)) return;
     demand->second = true; state.manual.insert(key);
     state.store.InvalidateAncestors(key, GetTickCount64(), 0);
     if (auto found = state.store.entries.find(key); found != state.store.entries.end()) {

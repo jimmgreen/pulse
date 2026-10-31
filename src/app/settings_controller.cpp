@@ -926,6 +926,44 @@ void SettingsController::NewTabOpen(int index) {
         SaveAndApply(SettingsEffect::None);
 }
 
+void SettingsController::OpenPulseIcon(int index) {
+    static constexpr int values[] = {0, 1, 2};
+    if (prefs_ && SelectValue(index, values, prefs_->open_pulse_icon))
+        SaveAndApply(SettingsEffect::None);
+}
+
+void SettingsController::NewWindowShows(int index) {
+    static constexpr int values[] = {0, 1, 2};
+    if (prefs_ && SelectValue(index, values, prefs_->new_window_shows))
+        SaveAndApply(SettingsEffect::None);
+}
+
+void SettingsController::OpenThisPc(int index) {
+    if (!prefs_ || index < 0 || index > 2) return;
+    if (index != 0) prefs_->open_this_pc = index - 1;
+    if (prefs_->integration_this_pc != (index != 0)) IntegrationAction(3);
+    else SaveAndApply(SettingsEffect::None);
+}
+
+void SettingsController::OpenWinE(int index) {
+    if (!prefs_ || index < 0 || index > 2) return;
+    if (index != 0) prefs_->open_win_e = index - 1;
+    if (prefs_->integration_win_e != (index != 0)) IntegrationAction(2);
+    else SaveAndApply(SettingsEffect::None);
+}
+
+void SettingsController::ArrangeGap(int index) {
+    static constexpr int values[] = {0, 1};
+    if (prefs_ && SelectValue(index, values, prefs_->arrange_gap))
+        SaveAndApply(SettingsEffect::None);
+}
+
+void SettingsController::ArrangeMinimized(int index) {
+    if (!prefs_ || index < 0 || index > 1) return;
+    prefs_->arrange_include_minimized = index != 0;
+    SaveAndApply(SettingsEffect::None);
+}
+
 void SettingsController::ExternalOpen(int index) {
     static constexpr int values[] = {0, 1, 2};
     if (prefs_ && SelectValue(index, values, prefs_->external_open))
@@ -1202,9 +1240,6 @@ void SettingsController::IntegrationAction(int index) {
     p.integration_configured = true;
     if (index == 0) {
         p.integration_enabled = !p.integration_enabled;
-        // Folders and drives, This PC and Win + E go together: with only some of them,
-        // Explorer opens first and then hands every double-click on to Pulse.
-        if (p.integration_enabled) p.integration_folders = p.integration_win_e = p.integration_this_pc = true;
         integration_enabled_at_ = p.integration_enabled ? GetTickCount64() : 0;
     }
     else if (index == 1) p.integration_folders = !p.integration_folders;
@@ -1247,6 +1282,7 @@ void SettingsController::IntegrationAction(int index) {
 
 void SettingsController::ToggleUi(int index) {
     if (!prefs_ || !context_) return;
+    if (index == 80) { ArrangeMinimized(prefs_->arrange_include_minimized ? 0 : 1); return; }
     // 修改时间提示 switches and sync status, kept out of the chain below.
     // 77, 78: 鼠标与选择 hover selection and item check boxes; 79: 滚动时固定上级.
     if (index >= 70 && index <= 79) {

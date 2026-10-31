@@ -1,3 +1,5 @@
+﻿#include <thread>
+#include <stdexcept>
 #include "preview_handler_host.h"
 #include "preview_handler_pan.h"
 #include "../common/preview_extensions.h"
@@ -703,6 +705,62 @@ struct PreviewHandlerHost::WorkerState {
     PreviewHandlerPan pan;
 };
 
+namespace {
+bool PreviewPathOnVolume(const std::wstring& path, const std::wstring& root) {
+    return !root.empty() && path.size() >= root.size() &&
+        _wcsnicmp(path.c_str(), root.c_str(), root.size()) == 0 &&
+        (root.back() == L'\\' || path.size() == root.size() || path[root.size()] == L'\\');
+}
+}
+
+std::shared_future<void> PreviewHandlerHost::SuspendVolume(const std::wstring& root) {
+    std::wstring normalized = root;
+    for (auto& ch : normalized) ch = ch == L'/' ? L'\\' : static_cast<wchar_t>(towlower(ch));
+    while (!normalized.empty() && normalized.back() == L'\\') normalized.pop_back();
+    if (const auto it = suspended_volumes_.find(normalized); it != suspended_volumes_.end()) return it->second;
+    std::vector<std::shared_ptr<WorkerState>> affected;
+    auto stop_matching = [&](const std::shared_ptr<WorkerState>& worker) {
+        if (!worker) return false;
+        std::lock_guard<std::mutex> lock(worker->mutex);
+        if (!PreviewPathOnVolume(worker->provider_path, normalized) &&
+            !PreviewPathOnVolume(worker->command.path, normalized)) return false;
+        worker->stop = true;
+        SetEvent(worker->wake);
+        affected.push_back(worker);
+        return true;
+    };
+    for (const auto& worker : retired_) stop_matching(worker);
+    if (stop_matching(worker_)) {
+        DetachOverlay(worker_->overlay.load(std::memory_order_acquire));
+        retired_.push_back(worker_);
+        worker_.reset();
+        last_enabled_ = false;
+        last_identity_.clear();
+        last_path_.clear();
+    }
+    auto completion = std::make_shared<std::promise<void>>();
+    auto release = completion->get_future().share();
+    suspended_volumes_[normalized] = release;
+    if (affected.empty()) completion->set_value();
+    else std::thread([affected = std::move(affected), completion] {
+        for (const auto& worker : affected) {
+            if (!worker->thread || WaitForSingleObject(worker->thread, INFINITE) != WAIT_OBJECT_0) {
+                completion->set_exception(std::make_exception_ptr(std::runtime_error("Preview release could not be confirmed")));
+                return;
+            }
+        }
+        completion->set_value();
+    }).detach();
+    return release;
+}
+
+void PreviewHandlerHost::ResumeVolume(const std::wstring& root) {
+    std::wstring normalized = root;
+    for (auto& ch : normalized) ch = ch == L'/' ? L'\\' : static_cast<wchar_t>(towlower(ch));
+    while (!normalized.empty() && normalized.back() == L'\\') normalized.pop_back();
+    suspended_volumes_.erase(normalized);
+}
+
 PreviewHandlerHost::PreviewHandlerHost() = default;
 
 PreviewHandlerHost::~PreviewHandlerHost() {
@@ -831,6 +889,8 @@ void PreviewHandlerHost::Sync(HWND owner, const D2D1_RECT_F& bounds, const std::
                               bool enabled, bool immediate) {
     // Called on every paint: an apartment that stopped answering is retired
     // first, and this frame falls through to the caller's fallback preview.
+    for (const auto& entry : suspended_volumes_)
+        if (PreviewPathOnVolume(path, entry.first)) enabled = false;
     const std::wstring identity = path + L"\n" + std::to_wstring(generation) + L":" +
         std::to_wstring(modified) + L":" + std::to_wstring(size);
     if (RetireStalledApartment(identity, enabled)) return;

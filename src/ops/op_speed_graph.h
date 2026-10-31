@@ -30,6 +30,13 @@ struct OpSpeedGraph {
         last_tick = 0;
     }
 
+    // Completion is an event, not a periodic sample. Preserve the last measured
+    // rate rather than adding the terminal status's zero speed.
+    void Complete() {
+        if (!by_progress || points.empty() || points.back().x >= 1.0f) return;
+        points.push_back({1.0f, points.back().v});
+    }
+
     bool Due(uint64_t now) const { return last_tick == 0 || now - last_tick >= kIntervalMs; }
 
     // percent < 0: no measurable progress, so a rolling time window instead.

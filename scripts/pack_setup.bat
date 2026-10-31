@@ -22,7 +22,7 @@ if not defined PULSE_VERSION (
 
 powershell -NoProfile -ExecutionPolicy Bypass -File "%CD%\scripts\check_release_payload.ps1" -BuildDir "%PULSE_BUILD_DIR%" || exit /b 1
 
-for %%F in (pulse.exe Pulse.Index.exe Pulse.Preview.exe pulse_shell.exe pulse_elevated.exe pulse_integration.exe lumatext.dll pdfium.dll) do (
+for %%F in (pulse.exe Pulse.AI.exe Pulse.Content.exe Pulse.Document.exe Pulse.Index.exe Pulse.Preview.exe pulse_shell.exe pulse_start_pin.dll pulse_elevated.exe pulse_integration.exe lumatext.dll pdfium.dll) do (
     if not exist "%PULSE_BUILD_DIR%\%%F" (
         echo Missing build output: %PULSE_BUILD_DIR%\%%F
         exit /b 1

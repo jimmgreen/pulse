@@ -9,6 +9,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 using namespace pulse;
@@ -290,6 +291,7 @@ void LevelsMath() {
 }
 
 void ProbeCancellation() {
+    const int children_before = ChildProcesses();
     wchar_t self[32768];
     GetModuleFileNameW(nullptr, self, static_cast<DWORD>(std::size(self)));
     std::atomic<bool> stop{false};
@@ -299,9 +301,15 @@ void ProbeCancellation() {
     Check(!ProbeFfmpegMedia(self, L"cancel-test", info, &stop), "cancelled probe produces no result");
     cancel.join();
     Check(GetTickCount64() - start < 1500, "probe cancels without eight-second timeout");
+    Check(ChildProcesses() == children_before, "cancelled probe child has exited before return");
 }
 
-int main(int argc, char**) {
+int main(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "--cancel") == 0) {
+        ProbeCancellation();
+        std::printf("ffmpeg cancellation: %d passed, %d failed\n", g_passed, g_failed);
+        return g_failed ? 1 : 0;
+    }
     // Deterministic stalled decoder used by ProbeCancellation.
     if (argc > 1) { Sleep(30000); return 1; }
     ProbeCancellation();

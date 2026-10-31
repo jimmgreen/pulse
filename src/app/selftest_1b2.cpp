@@ -8869,7 +8869,7 @@ void TestKeymap() {
           L"keymap check: single letters and digits rejected");
     Check(issue(KeyAction::CopyPath, L"Win+F") == I::WinKey && issue(KeyAction::GlobalSearch, L"Win+Shift+F") == I::None,
           L"keymap check: Win only for the global hotkey");
-    Check(issue(KeyAction::CopyToTarget, L"Ctrl+Alt+X") == I::Taken, L"keymap check: another program's hotkey");
+    Check(issue(KeyAction::GlobalSearch, L"Ctrl+Alt+X") == I::Taken, L"keymap check: another program's hotkey");
     const auto dup = k::CheckChord(m, KeyAction::CopyPath, chord(L"Ctrl+Shift+F"), env);
     Check(dup.issue == I::Duplicate && dup.level == k::ChordLevel::Warn && dup.other.action == KeyAction::AdvancedSearch,
           L"keymap check: another action's key can be replaced");
@@ -8898,17 +8898,16 @@ void TestKeymap() {
 
     k::Keymap fresh;
     const auto issues = k::CollectIssues(fresh, env);
-    Check(issues.size() == 3 && issues[0].level == k::ChordLevel::Block && issues[1].level == k::ChordLevel::Block &&
-          issues[2].issue == I::Ime && issues[2].action == KeyAction::AdvancedSearch,
-          L"keymap: issues list (taken first, then the IME)");
+    Check(issues.size() == 1 && issues[0].issue == I::Ime && issues[0].action == KeyAction::AdvancedSearch,
+          L"keymap: local issues include IME, not global registration failures");
     const auto suggestions = k::SuggestChords(fresh, KeyAction::CopyToTarget, env);
     bool suggestions_ok = suggestions.size() == 3;
     for (const KeyChord c : suggestions)
         suggestions_ok = suggestions_ok && k::CheckChord(fresh, KeyAction::CopyToTarget, c, env).level == k::ChordLevel::Ok;
     Check(suggestions_ok && suggestions[0] == chord(L"Ctrl+Alt+Shift+C"), L"keymap: three free suggestions");
     const auto probe = k::ProbeCandidates(fresh);
-    Check(std::find(probe.begin(), probe.end(), chord(L"Ctrl+Alt+C")) != probe.end() && probe.size() > 60,
-          L"keymap: probe list covers the keys in effect");
+    Check(std::find(probe.begin(), probe.end(), chord(L"Ctrl+C")) == probe.end() && !probe.empty(),
+          L"keymap: probe list excludes local copy");
 
     // Messages the handlers expect.
     Check(k::KeyMessageFor(chord(L"Alt+D")) == WM_SYSKEYDOWN && k::KeyMessageFor(chord(L"Ctrl+Alt+C")) == WM_KEYDOWN,

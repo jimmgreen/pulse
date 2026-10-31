@@ -63,6 +63,7 @@ struct NetworkLocationLoad;
 struct NetworkPageLoad;
 
 struct AppState;
+struct DriveEjectTask;
 
 struct AppCore {
     AppCore() = default;
@@ -72,6 +73,7 @@ struct AppCore {
     fs::SnapshotStore store;
     app::WorkerPool worker;
     fs::DirWatchSet watches;
+    std::shared_ptr<DriveEjectTask> drive_eject;
     struct DirNotifyBatch {
         std::wstring path;
         bool overflow = false;

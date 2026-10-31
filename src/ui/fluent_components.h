@@ -38,6 +38,8 @@ enum class MenuPictogram {
     LayoutStacked,
     LayoutThree,
     LayoutFour,
+    LayoutColumns,
+    LayoutCascade,
 };
 
 inline constexpr wchar_t kOmnibarHintKey[] = L"Ctrl+K";
@@ -480,6 +482,7 @@ public:
     // 别名 mark (pulse_alias.html .amark): a soft-accent rounded tile with a
     // tag drawn in the accent. `tile` is its 14-DIP square.
     void DrawAliasMark(const D2D1_RECT_F& tile);
+    void DrawPaneLayoutIcon(const D2D1_RECT_F& bounds, MenuPictogram kind, const D2D1_COLOR_F& color);
     void DrawFocusRing(const D2D1_RECT_F& bounds, float radius);
 
     void DrawButton(const ButtonSpec& spec);
@@ -615,8 +618,7 @@ private:
     void DrawGlyphWithBrush(std::wstring_view glyph, const D2D1_RECT_F& bounds,
                             BrushId brush);
     void DrawCheckMark(const D2D1_RECT_F& bounds, const D2D1_COLOR_F& color);
-    void DrawPaneLayoutIcon(const D2D1_RECT_F& bounds, MenuPictogram kind,
-                            const D2D1_COLOR_F& color);
+
     void DrawArc(D2D1_POINT_2F center, float radius, float start_degrees,
                  float span_degrees, float stroke_width, const D2D1_COLOR_F& color);
     // A 1px rounded border whose last few pixels on one side shade from

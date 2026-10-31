@@ -1,3 +1,4 @@
+#include "drive_verbs.h"
 #include "app_sidebar_refresh.h"
 #include "app_internal.h"
 #include "sidebar_refresh_schedule.h"
@@ -89,6 +90,9 @@ void StartPending(AppState& state) {
             // Publish completion even on failure: WorkerPool's outer catch
             // otherwise leaves the sidebar scheduler permanently busy.
         }
+        if (succeeded)
+            for (const auto& drive : result.drives)
+                if (drive.is_drive) app::RefreshDriveEjectable(drive.path, static_cast<uint8_t>(GetDriveTypeW(drive.path.c_str())));
         if (load->cancelled) return;
         std::lock_guard lock(load->mutex);
         load->result = std::move(result);

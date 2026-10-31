@@ -326,7 +326,7 @@ bool NotificationToast::HandleMessage(HWND owner, UINT message, WPARAM wparam, L
                    static_cast<size_t>(pressed_action) < action_rects_.size() &&
                    Contains(action_rects_[static_cast<size_t>(pressed_action)], x, y)) {
             // The capsule and an action card act on their buttons only: the rest is text.
-            if (const UINT post = actions_[static_cast<size_t>(pressed_action)].message) PostMessageW(owner, post, 0, 0);
+            if (const UINT post = actions_[static_cast<size_t>(pressed_action)].message) PostMessageW(owner, post, actions_[static_cast<size_t>(pressed_action)].wparam, 0);
             Dismiss(owner);
         } else {
             InvalidateRect(owner, nullptr, FALSE);

@@ -9,7 +9,7 @@
 // key the user assigned into the action's default key (which the existing
 // handlers already know), and swallows a default key that no longer belongs
 // to its action. Conflict checks (CheckChord / CheckRange) are pure; the
-// RegisterHotKey probe tells which chords another program holds.
+// RegisterHotKey probe checks availability for system-wide registration only.
 #pragma once
 
 #include <windows.h>
@@ -58,6 +58,7 @@ enum class KeyAction : uint8_t {
     MoveToTarget, Sidebar, FavoritesBar, Maximize,
     NewWindow, CloseWindow, TabToWindow, ReopenClosed, SwitchWindow, Overview, MergeWindows,
     AiAssistant, ShortcutHelp,
+    ArrangeSideBySide, ArrangeStacked, ArrangeColumns, ArrangeTile, ArrangeMain, ArrangeCascade,
     Count
 };
 constexpr int kKeyActionCount = static_cast<int>(KeyAction::Count);
@@ -181,7 +182,7 @@ enum class ChordIssue : uint8_t {
     NeedsCtrl,      // the window switcher cycles while Ctrl is held
     ShiftReserved,  // Shift steps backwards for this action
     Same,           // already this action's key
-    Taken,          // another program's global hotkey (RegisterHotKey: 1409)
+    Taken,          // unavailable for global registration (RegisterHotKey: 1409)
     DuplicateFixed, // a fixed key or a numbered group: cannot be replaced
     Duplicate,      // another action's key: can be replaced
     Ime,            // the Chinese IME uses it
@@ -192,9 +193,9 @@ enum class ChordIssue : uint8_t {
 };
 
 struct ShortcutEnv {
-    std::vector<KeyChord> taken;  // chords another program holds
+    std::vector<KeyChord> taken;  // chords unavailable for global registration
     bool chinese_ime = false;     // a Chinese input method is installed
-    // 已关闭，不再提示: IME warnings and chords another program holds (the
+    // 已关闭，不再提示: IME warnings and chords unavailable for global registration (the
     // list and the sidebar badge leave them out; recording still warns).
     std::vector<KeyChord> ime_ignored;
     bool IsTaken(KeyChord chord) const noexcept;

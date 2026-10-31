@@ -1,4 +1,5 @@
 #include "setup_engine.h"
+#include "start_pin_registration.h"
 
 #include "setup_common.h"
 #include "setup_log.h"
@@ -402,6 +403,10 @@ InstallResult RunInstall(Payload& payload, const std::wstring& self_path, const 
     const RegLocation where = real ? RegLocation{HKEY_LOCAL_MACHINE, KEY_WOW64_64KEY}
                                    : RegLocation{HKEY_CURRENT_USER, KEY_WOW64_64KEY};
     if (!WriteUninstallEntry(where, UninstallKey(o), entry, error)) return Fail(kExitFatalInstall, error);
+    if (real && !RegisterStartPin(app, error)) {
+        Log(error);
+        return Fail(kExitFatalInstall, error);
+    }
     if (previous && previous->inno && in_place) RemoveInnoUninstaller(app);
 
     const std::wstring group = KnownFolder(real ? FOLDERID_CommonPrograms : FOLDERID_Programs) +

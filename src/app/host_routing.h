@@ -49,6 +49,8 @@ inline constexpr UINT kHostRoutedMessages[] = {
     WM_TAG_ADS_DISCOVERED,     // tag ADS discovery
     WM_SETTINGS_TASK_RESULT,   // settings background tasks
     WM_NET_PROBE,              // UNC probe scheduler (shared queue)
+    WM_DRIVE_EJECT_READY,
+    WM_DRIVE_VERB,
     WM_BITLOCKER_UNLOCK,       // unlock wait (the prompt stays owned by the waiting window)
     WM_NETWORK_CONNECT,        // share logon (the credential prompt stays owned by the waiting window)
     WM_EXPLORER_TAKEOVER,      // Explorer window takeover (opens in the most recent window)

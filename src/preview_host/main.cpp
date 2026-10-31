@@ -7,6 +7,7 @@
 #include "../common/crash_reporter.h"
 #include "preview_decoders.h"
 #include "gif_decoder.h"
+#include "decode_budget.h"
 #include "folder_thumbnail.h"
 #include "preview_integrity.h"
 #include "../common/runtime_log.h"
@@ -62,10 +63,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     for (;;) {
         ipc::PreviewRequest req;
-        if (!ipc::ReadAll(pipe, &req, sizeof(req)) || req.magic!=ipc::kPreviewMagic ||
+        if (!ipc::ReadAll(pipe, &req, sizeof(req)) || (req.magic!=ipc::kPreviewMagic && req.magic!=ipc::kPreviewBudgetRequestMagic) ||
             req.path_chars==0 || req.path_chars>32768) break;
         std::wstring path(req.path_chars, L'\0');
         if (!ipc::ReadAll(pipe, path.data(), req.path_chars*sizeof(wchar_t))) break;
+        preview::DecodeBudgetSession budget_session{pipe, req.request_id, req.generation};
+        preview::DecodeBudgetScope budget_scope(req.magic == ipc::kPreviewBudgetRequestMagic &&
+            (req.flags & ipc::kPreviewRequestFlagGrid) ? &budget_session : nullptr);
         const auto request_started = GetTickCount64();
         const auto terminal = [&](const char* event, uint32_t stage, DWORD error,
                                   diagnostics::runtime::Level level) {
@@ -127,7 +131,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
                      cap <= preview::kGridThumbnailEdge};
             preview::DecodeResult result;
             const ULONGLONG decode_started = GetTickCount64();
-            made = preview::DecodeContent(decode, result);
+            try { made = preview::DecodeContent(decode, result); }
+            catch (const preview::DecodeBudgetDenied&) {
+                result = {}; result.error = L"decode-memory-budget"; made = false;
+            }
             if (result.error == L"pdf-thumbnail-budget")
                 diagnostics::runtime::Event("pdf_thumbnail_budget", {
                     {"elapsed_ms", GetTickCount64() - decode_started},

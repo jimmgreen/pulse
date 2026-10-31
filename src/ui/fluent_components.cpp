@@ -746,6 +746,14 @@ void Painter::DrawPaneLayoutIcon(const D2D1_RECT_F& bounds, MenuPictogram kind,
         vline(mid_x, top, bottom);
         hline(mid_x, right, mid_y);
         break;
+    case MenuPictogram::LayoutColumns:
+        vline(left + (right-left)/3, top, bottom);
+        vline(left + (right-left)*2/3, top, bottom);
+        break;
+    case MenuPictogram::LayoutCascade:
+        StrokeRoundedRect(D2D1::RectF(left + box*0.22f, top + box*0.22f, right, bottom), radius, color, stroke);
+        StrokeRoundedRect(D2D1::RectF(left + box*0.44f, top + box*0.44f, right, bottom), radius, color, stroke);
+        break;
     case MenuPictogram::LayoutFour:
         vline(mid_x, top, bottom);
         hline(left, right, mid_y);

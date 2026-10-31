@@ -1,9 +1,14 @@
 // drive_verbs.cpp — see drive_verbs.h.
 #include "drive_verbs.h"
+#include "../common/virtual_disk_eject.h"
+#include "../ops/elevated_transfer_client.h"
 #include <winioctl.h>
+#include <mutex>
+#include <map>
 #include <setupapi.h>
 #include <cfgmgr32.h>
 #include <initguid.h>
+#include <virtdisk.h>
 #include <devguid.h>
 #include <ntddstor.h>
 #include <winnetwk.h>
@@ -12,20 +17,78 @@
 #pragma comment(lib, "setupapi.lib")
 #pragma comment(lib, "cfgmgr32.lib")
 #pragma comment(lib, "mpr.lib")
+#pragma comment(lib, "virtdisk.lib")
 
 namespace pulse::app {
 namespace {
 
+std::wstring DriveCacheKey(const std::wstring& root) {
+    std::wstring key = root;
+    if (key.starts_with(L"\\\\?\\") && (key.size() == 6 || key.size() == 7) && key[5] == L':')
+        key.erase(0, 4);
+    if ((key.size() == 2 || (key.size() == 3 && (key[2] == L'\\' || key[2] == L'/'))) && key[1] == L':') {
+        if (key[0] >= L'a' && key[0] <= L'z') key[0] -= L'a' - L'A';
+        if (key[0] >= L'A' && key[0] <= L'Z') return key.substr(0, 2) + L"\\";
+    }
+    return root;
+}
+
 std::wstring VolumeDevice(const std::wstring& root) {
+    if (root.starts_with(L"\\\\?\\GLOBALROOT\\Device\\CdRom")) return root;
+    if (root.starts_with(L"\\\\?\\Volume{")) {
+        auto device = root;
+        if (device.back() == L'\\') device.pop_back();
+        return device;
+    }
     if (root.size() < 2 || root[1] != L':') return {};
     return std::wstring(L"\\\\.\\") + root[0] + L":";
 }
 
-bool DeviceNumber(HANDLE h, STORAGE_DEVICE_NUMBER& n) {
+bool PhysicalCdDevice(const std::wstring& root, std::wstring& device) {
+    if (root.size() < 2 || root[1] != L':' || GetDriveTypeW(root.c_str()) != DRIVE_CDROM) return false;
+    HANDLE handle = CreateFileW(VolumeDevice(root).c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                nullptr, OPEN_EXISTING, 0, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) return false;
+    STORAGE_PROPERTY_QUERY query{};
+    query.PropertyId = StorageDeviceProperty;
+    query.QueryType = PropertyStandardQuery;
+    BYTE buffer[1024]{};
     DWORD bytes = 0;
-    return DeviceIoControl(h, IOCTL_STORAGE_GET_DEVICE_NUMBER, nullptr, 0, &n, sizeof(n), &bytes,
-                           nullptr) != FALSE;
+    const BOOL ok = DeviceIoControl(handle, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof(query),
+                                    buffer, sizeof(buffer), &bytes, nullptr);
+    CloseHandle(handle);
+    if (!ok || bytes < sizeof(STORAGE_DEVICE_DESCRIPTOR)) return false;
+    const auto bus = reinterpret_cast<const STORAGE_DEVICE_DESCRIPTOR*>(buffer)->BusType;
+    if (bus != BusTypeAta && bus != BusTypeAtapi && bus != BusTypeSata && bus != BusTypeUsb) return false;
+    wchar_t native[MAX_PATH]{};
+    if (!QueryDosDeviceW(root.substr(0, 2).c_str(), native, MAX_PATH) ||
+        std::wstring_view(native).find(L"\\Device\\CdRom") != 0) return false;
+    device = L"\\\\?\\GLOBALROOT";
+    device += native;
+    return true;
 }
+
+DWORD CheckDriveEjectIdentity(const std::wstring& root, const std::wstring& expected_volume) {
+    if (expected_volume.empty()) return ERROR_SUCCESS;
+    if (expected_volume.starts_with(L"\\\\?\\GLOBALROOT\\Device\\CdRom")) {
+        std::wstring current_device;
+        return PhysicalCdDevice(root, current_device) && current_device == expected_volume
+                   ? ERROR_SUCCESS : ERROR_MEDIA_CHANGED;
+    }
+    wchar_t current[MAX_PATH]{};
+    if (!GetVolumeNameForVolumeMountPointW(root.c_str(), current, MAX_PATH) ||
+        _wcsicmp(current, expected_volume.c_str()) != 0) return ERROR_MEDIA_CHANGED;
+    return ERROR_SUCCESS;
+}
+
+std::mutex eject_cache_mutex;
+std::map<std::wstring, bool> eject_cache;
+uint64_t eject_cache_generation = 0;
+
+using storage::VirtualDiskImage;
+using storage::DeviceNumber;
+using storage::DiskVolumes;
+using storage::DetachImage;
 
 // The disk device node that holds the volume.
 DEVINST DiskDevInst(const std::wstring& root) {
@@ -38,6 +101,21 @@ DEVINST DiskDevInst(const std::wstring& root) {
     const bool got = DeviceNumber(volume, want);
     CloseHandle(volume);
     if (!got) return 0;
+    // Never send virtual storage through PnP parent ejection when image lookup fails.
+    HANDLE probe = CreateFileW(device.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               nullptr, OPEN_EXISTING, 0, nullptr);
+    if (probe == INVALID_HANDLE_VALUE) return 0;
+    STORAGE_PROPERTY_QUERY query{};
+    query.PropertyId = StorageDeviceProperty;
+    query.QueryType = PropertyStandardQuery;
+    BYTE properties[1024]{};
+    DWORD bytes = 0;
+    const BOOL queried = DeviceIoControl(probe, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof(query),
+                                         properties, sizeof(properties), &bytes, nullptr);
+    CloseHandle(probe);
+    if (!queried || bytes < sizeof(STORAGE_DEVICE_DESCRIPTOR)) return 0;
+    const auto bus = reinterpret_cast<const STORAGE_DEVICE_DESCRIPTOR*>(properties)->BusType;
+    if (bus == BusTypeVirtual || bus == BusTypeFileBackedVirtual) return 0;
     HDEVINFO set = SetupDiGetClassDevsW(&GUID_DEVINTERFACE_DISK, nullptr, nullptr,
                                         DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
     if (set == INVALID_HANDLE_VALUE) return 0;
@@ -96,11 +174,23 @@ DWORD EjectDevice(const std::wstring& root, std::wstring& veto_name) {
 
 // Optical drives: open the tray (Explorer's 弹出).
 DWORD EjectMedia(const std::wstring& root) {
+    std::wstring image;
+    if (VirtualDiskImage(root, image) == ERROR_SUCCESS) return DetachImage(root, image);
     const std::wstring device = VolumeDevice(root);
     HANDLE h = CreateFileW(device.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                            OPEN_EXISTING, 0, nullptr);
     if (h == INVALID_HANDLE_VALUE) return GetLastError();
     DWORD bytes = 0;
+    if (!DeviceIoControl(h, FSCTL_LOCK_VOLUME, nullptr, 0, nullptr, 0, &bytes, nullptr)) {
+        const DWORD lock_error = GetLastError();
+        // A verified physical empty tray has no filesystem to lock.
+        if (!root.starts_with(L"\\\\?\\GLOBALROOT\\Device\\CdRom") ||
+            (lock_error != ERROR_NOT_READY && lock_error != ERROR_NO_MEDIA_IN_DRIVE)) {
+            CloseHandle(h);
+            return lock_error == ERROR_ACCESS_DENIED || lock_error == ERROR_SHARING_VIOLATION
+                       ? ERROR_DEVICE_IN_USE : lock_error;
+        }
+    }
     const BOOL ok = DeviceIoControl(h, IOCTL_STORAGE_EJECT_MEDIA, nullptr, 0, nullptr, 0, &bytes, nullptr);
     const DWORD error = ok ? NO_ERROR : GetLastError();
     CloseHandle(h);
@@ -118,10 +208,13 @@ int CALLBACK FontFound(const LOGFONTW*, const TEXTMETRICW*, DWORD, LPARAM found)
 
 } // namespace
 
-bool DriveEjectable(const std::wstring& root, uint8_t drive_type) {
+bool QueryDriveEjectable(const std::wstring& root, uint8_t drive_type) {
     if (drive_type == DRIVE_REMOVABLE || drive_type == DRIVE_CDROM) return true;
     if (drive_type != DRIVE_FIXED) return false;
-    const std::wstring device = VolumeDevice(root);
+    const auto query_root = DriveCacheKey(root);
+    std::wstring image;
+    if (VirtualDiskImage(query_root, image) == ERROR_SUCCESS) return true;
+    const std::wstring device = VolumeDevice(query_root);
     if (device.empty()) return false;
     HANDLE h = CreateFileW(device.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                            OPEN_EXISTING, 0, nullptr);
@@ -147,6 +240,61 @@ bool DriveEjectable(const std::wstring& root, uint8_t drive_type) {
     }
 }
 
+void InvalidateDriveEjectableCache() {
+    std::lock_guard lock(eject_cache_mutex);
+    eject_cache.clear();
+    ++eject_cache_generation;
+}
+
+DWORD PrepareDriveEject(const std::wstring& root, DriveEjectPlan& plan) {
+    wchar_t volume[MAX_PATH]{};
+    if (!GetVolumeNameForVolumeMountPointW(root.c_str(), volume, MAX_PATH)) {
+        const DWORD error = GetLastError();
+        if ((error == ERROR_NOT_READY || error == ERROR_NO_MEDIA_IN_DRIVE) && PhysicalCdDevice(root, plan.volume_name)) {
+            plan.roots = {root};
+            return ERROR_SUCCESS;
+        }
+        return error;
+    }
+    plan.volume_name = volume;
+    return GetDriveEjectRoots(plan.volume_name, plan.roots);
+}
+
+DWORD GetDriveEjectRoots(const std::wstring& root, std::vector<std::wstring>& roots) {
+    std::vector<std::wstring> volumes;
+    const DWORD error = DiskVolumes(root, volumes);
+    if (error != ERROR_SUCCESS) return error;
+    for (auto volume : volumes) {
+        volume += L"\\";
+        DWORD needed = 0;
+        GetVolumePathNamesForVolumeNameW(volume.c_str(), nullptr, 0, &needed);
+        if (!needed) return GetLastError();
+        std::vector<wchar_t> paths(needed);
+        if (!GetVolumePathNamesForVolumeNameW(volume.c_str(), paths.data(), needed, &needed)) return GetLastError();
+        for (const wchar_t* path = paths.data(); *path; path += wcslen(path) + 1) roots.emplace_back(path);
+    }
+    return ERROR_SUCCESS;
+}
+
+void RefreshDriveEjectable(const std::wstring& root, uint8_t drive_type) {
+    uint64_t generation = 0;
+    {
+        std::lock_guard lock(eject_cache_mutex);
+        generation = eject_cache_generation;
+    }
+    const bool ejectable = QueryDriveEjectable(root, drive_type);
+    std::lock_guard lock(eject_cache_mutex);
+    if (generation == eject_cache_generation) eject_cache[DriveCacheKey(root)] = ejectable;
+}
+
+bool DriveEjectable(const std::wstring& root, uint8_t drive_type) {
+    if (drive_type == DRIVE_REMOVABLE || drive_type == DRIVE_CDROM) return true;
+    if (drive_type != DRIVE_FIXED) return false;
+    std::lock_guard lock(eject_cache_mutex);
+    const auto it = eject_cache.find(DriveCacheKey(root));
+    return it != eject_cache.end() && it->second;
+}
+
 const wchar_t* EjectGlyph() {
     static const bool fluent = [] {
         bool found = false;
@@ -163,13 +311,44 @@ const wchar_t* EjectGlyph() {
     return fluent ? L"\xF847" : L"\xE88E";  // Eject : USB
 }
 
-bool StartDriveEject(HWND notify, UINT msg, const std::wstring& root, uint8_t drive_type) {
+DWORD EjectVirtualDiskWithAuthorization(const storage::VirtualDiskIdentity& identity, HWND owner, std::wstring* veto_name = nullptr) {
+    DWORD error = storage::DetachVirtualDiskSafely(identity, veto_name);
+    if (error == ERROR_ACCESS_DENIED || error == ERROR_PRIVILEGE_NOT_HELD) {
+        std::atomic<bool> cancel{false};
+        const auto elevated = ops::EjectWithElevatedHelper(identity, owner, cancel);
+        error = SUCCEEDED(elevated.hr) ? ERROR_SUCCESS :
+            HRESULT_FACILITY(elevated.hr) == FACILITY_WIN32 ? HRESULT_CODE(elevated.hr) : ERROR_GEN_FAILURE;
+        if (veto_name && error == ERROR_DEVICE_IN_USE) *veto_name = elevated.error;
+    }
+    return error;
+}
+
+bool StartDriveEject(HWND notify, UINT msg, const std::wstring& root, uint8_t drive_type,
+                     const std::wstring& expected_volume) {
     try {
-        std::thread([notify, msg, root, drive_type] {
+        std::thread([notify, msg, root, drive_type, expected_volume] {
             auto* result = new DriveVerbResult;
             result->verb = DriveVerb::Eject;
             result->root = root;
-            result->error = drive_type == DRIVE_CDROM ? EjectMedia(root) : EjectDevice(root, result->veto_name);
+            result->error = CheckDriveEjectIdentity(root, expected_volume);
+            if (result->error != ERROR_SUCCESS) {
+                Post(notify, msg, result);
+                return;
+            }
+            const auto& target = expected_volume.empty() ? root : expected_volume;
+            const UINT actual_type = GetDriveTypeW(root.c_str());
+            if (actual_type != drive_type) result->error = ERROR_MEDIA_CHANGED;
+            else if (actual_type == DRIVE_FIXED || actual_type == DRIVE_REMOVABLE || actual_type == DRIVE_CDROM) {
+                storage::VirtualDiskIdentity identity;
+                const DWORD identity_error = storage::CaptureVirtualDiskIdentity(expected_volume, identity);
+                if (identity_error == ERROR_SUCCESS) {
+                    result->error = EjectVirtualDiskWithAuthorization(identity, notify, &result->veto_name);
+                } else if (actual_type == DRIVE_CDROM) {
+                    result->error = EjectMedia(target);
+                } else if (QueryDriveEjectable(target, static_cast<uint8_t>(actual_type))) {
+                    result->error = EjectDevice(target, result->veto_name);
+                } else result->error = identity_error == ERROR_ACCESS_DENIED ? identity_error : ERROR_NOT_SUPPORTED;
+            } else result->error = ERROR_MEDIA_CHANGED;
             Post(notify, msg, result);
         }).detach();
         return true;

@@ -1,4 +1,4 @@
-﻿#include "elevated_delete.h"
+#include "elevated_delete.h"
 #include "../common/path_utils.h"
 #include <shobjidl.h>
 #include <shlobj.h>
@@ -90,7 +90,6 @@ struct RecycleCache::State {
     bool volume_checked = false;
     bool available = false;
     DWORD volume_error = 0;
-    bool limits_read = false;
     RecycleBinLimits limits;
 };
 RecycleCache::RecycleCache() : state_(std::make_unique<State>()) {}
@@ -306,6 +305,7 @@ uint64_t MeasureFolder(const std::wstring& folder, uint64_t limit, std::atomic<b
                                        FIND_FIRST_EX_LARGE_FETCH);
         if (find == INVALID_HANDLE_VALUE) continue;
         do {
+            if (cancel.load(std::memory_order_relaxed)) break;
             const wchar_t* name = data.cFileName;
             if (name[0] == L'.' && (name[1] == 0 || (name[1] == L'.' && name[2] == 0))) continue;
             if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
@@ -321,21 +321,12 @@ uint64_t MeasureFolder(const std::wstring& folder, uint64_t limit, std::atomic<b
 }
 }  // namespace
 
-RecycleBinLimits ReadRecycleBinLimits(const std::wstring& path, DWORD* volume_error) {
+namespace {
+RecycleBinLimits ReadRecycleBinLimitsForRoot(const std::wstring& root) {
     RecycleBinLimits limits;
-    if (volume_error) *volume_error = 0;
     DWORD value = 0;
-    if (PolicyDword(L"NoRecycleFiles", value) && value != 0) {
-        limits.disabled = true;
-        return limits;
-    }
-    std::vector<wchar_t> root(32768);
-    if (!GetVolumePathNameW(LongPath(path).c_str(), root.data(), static_cast<DWORD>(root.size()))) {
-        if (volume_error) *volume_error = GetLastError();
-        return limits;
-    }
     ULARGE_INTEGER total{}, free{};
-    if (GetDiskFreeSpaceExW(root.data(), nullptr, &total, &free))
+    if (GetDiskFreeSpaceExW(root.c_str(), nullptr, &total, &free))
         limits.used_bytes = total.QuadPart - (std::min)(free.QuadPart, total.QuadPart);
     // Policy size (percent of the volume) wins over the user's setting.
     if (PolicyDword(L"RecycleBinSize", value) && value <= 100) {
@@ -344,7 +335,7 @@ RecycleBinLimits ReadRecycleBinLimits(const std::wstring& path, DWORD* volume_er
     }
     wchar_t volume_name[64]{};
     std::wstring guid;
-    if (GetVolumeNameForVolumeMountPointW(root.data(), volume_name, 64)) {
+    if (GetVolumeNameForVolumeMountPointW(root.c_str(), volume_name, 64)) {
         const std::wstring name = volume_name;
         const size_t open = name.find(L'{'), close = name.find(L'}');
         if (open != std::wstring::npos && close != std::wstring::npos && close > open)
@@ -373,8 +364,43 @@ RecycleBinLimits ReadRecycleBinLimits(const std::wstring& path, DWORD* volume_er
     return limits;
 }
 
+} // namespace
+
+RecycleBinLimits ReadRecycleBinLimits(const std::wstring& path, DWORD* volume_error) {
+    if (volume_error) *volume_error = 0;
+    DWORD value = 0;
+    if (PolicyDword(L"NoRecycleFiles", value) && value != 0) {
+        RecycleBinLimits limits;
+        limits.disabled = true;
+        return limits;
+    }
+    std::vector<wchar_t> root(32768);
+    if (!GetVolumePathNameW(LongPath(path).c_str(), root.data(), static_cast<DWORD>(root.size()))) {
+        if (volume_error) *volume_error = GetLastError();
+        return {};
+    }
+    return ReadRecycleBinLimitsForRoot(root.data());
+}
+
+RecyclePolicy QueryRecyclePolicy(const std::wstring& path) {
+    RecyclePolicy policy;
+    if (path::StripExtendedPathPrefix(path).starts_with(L"\\\\")) return policy;
+    std::vector<wchar_t> root(32768);
+    if (!GetVolumePathNameW(LongPath(path).c_str(), root.data(), static_cast<DWORD>(root.size()))) {
+        policy.volume_error = GetLastError();
+        return policy;
+    }
+    if (GetDriveTypeW(root.data()) != DRIVE_FIXED) return policy;
+    DWORD value = 0;
+    if (PolicyDword(L"NoRecycleFiles", value) && value != 0) policy.limits.disabled = true;
+    else policy.limits = ReadRecycleBinLimitsForRoot(root.data());
+    policy.available = !policy.limits.disabled;
+    return policy;
+}
+
 HRESULT CheckRecycleFits(const std::wstring& path, const RecycleBinLimits& limits, std::atomic<bool>& cancel,
                          bool measure_folders) {
+    if (cancel.load(std::memory_order_relaxed)) return kCancelled;
     if (limits.disabled) return COPYENGINE_E_RECYCLE_BIN_NOT_FOUND;
     if (!limits.max_bytes || (limits.used_bytes && limits.max_bytes >= limits.used_bytes)) return S_OK;
     WIN32_FILE_ATTRIBUTE_DATA data{};
@@ -390,16 +416,9 @@ HRESULT CheckRecycleFits(const std::wstring& path, const RecycleBinLimits& limit
 }
 
 bool RecycleBinAvailable(const std::wstring& path, DWORD* volume_error) {
-    if (volume_error) *volume_error = 0;
-    if (path::StripExtendedPathPrefix(path).starts_with(L"\\\\")) return false;
-    std::vector<wchar_t> volume(32768);
-    if (!GetVolumePathNameW(path.c_str(), volume.data(), static_cast<DWORD>(volume.size()))) {
-        if (volume_error) *volume_error = GetLastError();
-        return false;
-    }
-    if (GetDriveTypeW(volume.data()) != DRIVE_FIXED) return false;
-    // A bin that is turned off deletes at once: the same as having none.
-    return !ReadRecycleBinLimits(path).disabled;
+    const auto policy = QueryRecyclePolicy(path);
+    if (volume_error) *volume_error = policy.volume_error;
+    return policy.available;
 }
 
 ShellTransferResult DeleteWithCurrentToken(const std::vector<std::wstring>& sources,
@@ -414,8 +433,9 @@ ShellTransferResult DeleteWithCurrentToken(const std::vector<std::wstring>& sour
             // turned into a silent permanent delete.
             DWORD volume_error = 0;
             bool available = false;
+            RecycleBinLimits limits;
             // A mount point is checked on its own: its volume is not its parent's.
-            const DWORD source_attributes = cache ? GetFileAttributesW(source.c_str()) : INVALID_FILE_ATTRIBUTES;
+            const DWORD source_attributes = cache ? GetFileAttributesW(LongPath(source).c_str()) : INVALID_FILE_ATTRIBUTES;
             const bool cacheable = source_attributes != INVALID_FILE_ATTRIBUTES &&
                 !(source_attributes & FILE_ATTRIBUTE_REPARSE_POINT);
             const std::wstring volume_parent = cacheable ? ParentKey(source) : std::wstring{};
@@ -423,13 +443,17 @@ ShellTransferResult DeleteWithCurrentToken(const std::vector<std::wstring>& sour
                 cache->state().volume_parent == volume_parent) {
                 available = cache->state().available;
                 volume_error = cache->state().volume_error;
+                limits = cache->state().limits;
             } else {
-                available = RecycleBinAvailable(source, &volume_error);
+                const auto policy = QueryRecyclePolicy(source);
+                available = policy.available;
+                volume_error = policy.volume_error;
+                limits = policy.limits;
                 if (cache && !volume_parent.empty()) {
                     auto& state = cache->state();
                     state.volume_checked = true;
                     state.volume_parent = volume_parent;
-                    state.limits_read = false;  // read again for this folder
+                    state.limits = limits;
                     state.available = available;
                     state.volume_error = volume_error;
                 }
@@ -445,17 +469,6 @@ ShellTransferResult DeleteWithCurrentToken(const std::vector<std::wstring>& sour
             }
             // The bin's size limit: an item larger than the bin would be
             // deleted for good by the Shell, so it is refused here, untouched.
-            RecycleBinLimits limits;
-            if (cache && cache->state().limits_read && !volume_parent.empty() &&
-                cache->state().volume_parent == volume_parent) {
-                limits = cache->state().limits;
-            } else {
-                limits = ReadRecycleBinLimits(source);
-                if (cache && !volume_parent.empty() && cache->state().volume_parent == volume_parent) {
-                    cache->state().limits_read = true;
-                    cache->state().limits = limits;
-                }
-            }
             result.hr = CheckRecycleFits(source, limits, cancel);
             if (FAILED(result.hr)) {
                 result.cancelled = result.hr == kCancelled;

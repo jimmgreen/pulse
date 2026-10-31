@@ -1,8 +1,7 @@
 // Included inside ui_renderer_internal.h's anonymous namespace.
 // Default file manager card helpers shared by layout, drawing and tests.
 struct IntegrationBadgeInfo { std::wstring text; fluent::BadgeKind kind = fluent::BadgeKind::Neutral; };
-// One switch: on hands folders and drives, This PC and Win + E to Pulse together, so
-// Explorer never ends up as a launcher that bounces every double-click to Pulse.
+// Desired integration choices are retained independently of the master switch.
 inline bool IntegrationHasProblem(const WindowViewModel& vm) {
     return vm.settings_integration_state==2 || vm.settings_integration_state==3;
 }
@@ -31,7 +30,7 @@ inline l10n::StringId IntegrationRetryLabel(const WindowViewModel& vm) {
     return vm.settings_integration_other_exe.empty() ? I::IntegrationReapply : I::IntegrationUseThis;
 }
 // The footer: one plain sentence about what happens now.
-inline std::wstring IntegrationHint(const WindowViewModel& vm) {
+inline std::wstring IntegrationGuidance(const WindowViewModel& vm) {
     using I=l10n::StringId;
     if(!vm.settings_integration_enabled) return l10n::Get(I::IntegrationInactiveHint);
     if(vm.settings_integration_just_enabled) return l10n::Get(I::IntegrationJustOn);
@@ -43,6 +42,19 @@ inline std::wstring IntegrationHint(const WindowViewModel& vm) {
     if(vm.settings_integration_experimental && !vm.settings_keep_running) return l10n::Get(I::IntegrationHintKeep);
     if(vm.settings_integration_experimental && !vm.settings_launch_on_startup) return l10n::Get(I::IntegrationHintLaunch);
     return l10n::Get(I::IntegrationOnFoot);
+}
+inline std::wstring IntegrationHint(const WindowViewModel& vm) {
+    using I=l10n::StringId;
+    const auto policy=[&](bool active,int mode) {
+        return l10n::Get(!active ? I::IntegrationHandlerExplorer
+            : mode==0 ? I::ExternalOpenWindow : I::ExternalOpenTab);
+    };
+    std::wstring text=l10n::Get(I::SettingsWinE);
+    text += L" → "; text += policy(vm.settings_integration_win_e_active,vm.settings_open_win_e);
+    text += L" · "; text += l10n::Get(I::ThisPc);
+    text += L" → "; text += policy(vm.settings_integration_this_pc_active,vm.settings_open_this_pc);
+    text += L"\n"; text += IntegrationGuidance(vm);
+    return text;
 }
 inline bool IntegrationShowsTry(const WindowViewModel& vm) {
     return vm.settings_integration_enabled && !IntegrationHasProblem(vm);
@@ -235,8 +247,14 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
         }
         l.startup_open_card=row(seg_h); segments(l.startup_open_card,l.startup_open_row,2,282);
         l.new_tab_open_card=row(seg_h); segments(l.new_tab_open_card,l.new_tab_open_row,2,282);
+        section(I::SettingsSecOpenWindows);
+        l.open_pulse_icon_card=row(narrow ? 108.0f : 64.0f); segments(l.open_pulse_icon_card,l.open_pulse_icon_row,3,360);
+        l.new_window_shows_card=row(narrow ? 108.0f : 64.0f); segments(l.new_window_shows_card,l.new_window_shows_row,3,330);
         l.external_open_card=row(seg_h); segments(l.external_open_card,l.external_open_row,3,282);
 
+        section(I::SettingsSecArrangeWindows);
+        l.arrange_minimized_row=row(64);
+        l.arrange_gap_card=row(narrow ? 108.0f : 64.0f); segments(l.arrange_gap_card,l.arrange_gap_row,2,282);
         section(I::SettingsSecTabs);
         l.vertical_tabs_row=row(64);
         l.pinned_names_row=row(64);
@@ -294,18 +312,14 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
     l.integration_list_head=irow(32);
     const float item_text_left=left+112*scale, item_text_right=right-16*scale;
     {
-        // What opens in Pulse: three read-only tiles that wrap with the width.
-        const float x0=left+54*scale, x1=right-16*scale, tile_h=36*scale, gap=8*scale;
-        float x=x0, top=y;
+        const bool integration_narrow=right-left<520.0f*scale;
         for(int i=0;i<3;++i) {
-            const auto name=l10n::Get(kIntegrationCover[i]);
-            // Button width is the label plus 16; the tile adds the icon (34), the check (22) and slack.
-            const float w=(std::min)(x1-x0,(painter ? painter->MeasureButtonWidth(name) : 140*scale)+64*scale);
-            if(x>x0 && x+w>x1) { x=x0; top+=tile_h+gap; }
-            l.integration_cover[i]=D2D1::RectF(x,top,x+w,top+tile_h);
-            x+=w+gap;
+            l.integration_cover[i]=irow(integration_narrow ? 88.0f : 60.0f);
+            const auto r=l.integration_cover[i];
+            l.integration_choice[i]=integration_narrow
+                ? D2D1::RectF(left+54*scale,r.top+42*scale,right-16*scale,r.bottom-10*scale)
+                : D2D1::RectF(right-240*scale,r.top+14*scale,right-16*scale,r.bottom-14*scale);
         }
-        y=top+tile_h+6*scale;
     }
     l.integration_options_head=irow(32);
     auto item_row=[&](l10n::StringId desc,float text_right) {

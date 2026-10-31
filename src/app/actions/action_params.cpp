@@ -17,6 +17,7 @@ namespace pulse::app::actions {
 namespace {
 
 constexpr std::pair<std::string_view, std::string_view> kSpecs[] = {
+    {"window.arrange", "layout:side_by_side|stacked|columns|tile|main|cascade"},
     {"window.layout", "layout:single|side_by_side|stacked|three|four panes:folders"},
     {"nav.go", "path:folder pane:pane"},
     {"window.new", "path:folder"},

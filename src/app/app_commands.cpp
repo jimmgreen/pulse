@@ -1,3 +1,5 @@
+#include "drive_eject_ui.h"
+#include "quick_preview_navigation.h"
 #include "tag_color_commands.h"
 #include "git_ui.h"
 #include "mtime_hint_prefs.h"
@@ -1510,7 +1512,7 @@ void RunDriveVerb(AppState& s, int cmd) {
     if (cmd == app::CmdUnlockDrive && drive.locked) {
         app::StartBitLockerUnlock(s.hwnd, ServiceWindow(s), WM_BITLOCKER_UNLOCK, drive.root);
     } else if (cmd == app::CmdEjectDrive && app::DriveEjectable(drive.root, drive.type)) {
-        app::StartDriveEject(s.hwnd, WM_DRIVE_VERB, drive.root, drive.type);
+        StartPreparedDriveEject(s, drive.root, drive.type);
     } else if (cmd == app::CmdDisconnectDrive && drive.type == DRIVE_REMOTE) {
         app::StartDriveDisconnect(s.hwnd, WM_DRIVE_VERB, drive.root, false);
     }
@@ -1537,6 +1539,7 @@ void RenameSelected(AppState& s) {
 }
 
 void ApplyDriveVerbResult(AppState& s, const app::DriveVerbResult& result) {
+    if (result.verb == app::DriveVerb::Eject) CompletePreparedDriveEject(s, result.root);
     const std::wstring drive = DriveDisplay(result.root);
     if (result.error == NO_ERROR) {
         RefreshAfterDriveChange(s);
@@ -1575,7 +1578,7 @@ void ApplyDriveVerbResult(AppState& s, const app::DriveVerbResult& result) {
     if (!ui::ShowConfirmDialog(s.hwnd, spec, s.darkMode, s.accentColor)) return;
     if (eject) {
         uint8_t type = static_cast<uint8_t>(GetDriveTypeW(result.root.c_str()));
-        app::StartDriveEject(s.hwnd, WM_DRIVE_VERB, result.root, type);
+        StartPreparedDriveEject(s, result.root, type);
     } else {
         app::StartDriveDisconnect(s.hwnd, WM_DRIVE_VERB, result.root, false);
     }
@@ -2766,12 +2769,12 @@ void ShowItemContextMenu(AppState& s, POINT screen_pt, bool from_chip) {
     auto base_items = BuildFinderItemMenu(s, s.ops.CanUndo(), undoLabel);
     std::vector<std::wstring> window_folders;
     if (!IsRecycleTab(tab)) {
-        app::ApplyBuiltinMenuPrefs(base_items, s.ctxMenuPrefs, app::BuiltinMenuSurface::Item);
         if (!paths.empty()) window_folders = WindowTransferFolders(s);
         const app::SelectionCaps caps = SelectionCapsOf(s);
         // Phone items go to another window's folder through Explorer's
         // engine (SubmitDeviceTransfer), like local ones.
         app::AppendWindowTransferCommands(base_items, window_folders, tab && (caps.copy || caps.cut));
+        app::ApplyBuiltinMenuPrefs(base_items, s.ctxMenuPrefs, app::BuiltinMenuSurface::Item);
     } else {
         app::ApplyBuiltinMenuPrefs(base_items, s.ctxMenuPrefs);
     }
@@ -2882,7 +2885,6 @@ void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
     if (tab->current_path.empty()) EraseCommand(base_items, app::CmdCopyPath);
     const auto quick_paths = QuickAccessTargets(tab, true);
     AppendQuickAccessCommand(s, base_items, quick_paths);
-    app::ApplyBuiltinMenuPrefs(base_items, s.ctxMenuPrefs, app::BuiltinMenuSurface::Background);
     const bool can_create_here = CanCreateHere(tab);
     const auto new_templates = can_create_here ? NewTemplatesForMenu(s, false)
                                                : std::vector<app::sysctx::NewTemplate>{};
@@ -2916,6 +2918,7 @@ void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
     // In-app Git: pull / push / refresh for a folder inside a repository.
     const std::wstring git_root = tab->git_root;
     if (view_options.filesystem) AppendGitMenu(*tab, base_items);
+    app::ApplyBuiltinMenuPrefs(base_items, s.ctxMenuPrefs, app::BuiltinMenuSurface::Background);
     s.context_menu.OpenMenu(std::move(base_items));
     auto display = ExplorerMenu(s, s.context_menu.base_items());
 
@@ -4028,7 +4031,7 @@ std::vector<ui::SelectionChipAction> SelectionChipActions(AppState& s) {
         std::wstring path;
         std::vector<int> selected;   // the folder items depend on the whole selection
         const void* snapshot = nullptr;  // a drive unlocked or ejected: same rows, new verbs
-        uint32_t hidden = 0;
+        uint64_t hidden = 0;
         std::vector<std::wstring> tools;
         std::vector<std::wstring> selection;
         app::BuiltinMenuOrder order;
@@ -5735,9 +5738,9 @@ void NavigateQuickPreview(AppState& s, int direction) {
     ui::WindowViewModel vm = BuildVm(s);
     const int count = static_cast<int>(vm.pane.EntryCount());
     if (count <= 0) return;
-    int view = vm.pane.ViewIndex(tab->selected_index);
-    if (view < 0) view = 0;
-    view = std::clamp(view + (direction < 0 ? -1 : 1), 0, count - 1);
+    const int view = app::QuickPreviewNavigationTarget(
+        vm.pane.ViewIndex(tab->selected_index), count, direction);
+    if (view < 0) return;
     tab->MoveFocus(vm.pane.SourceIndex(view), false);
     EnsureRowVisible(s, *tab, tab->selected_index);
     auto update=[](AppState& v) {

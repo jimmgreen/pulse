@@ -1,3 +1,4 @@
+#include "start_pin_registration.h"
 #include "setup_uninstall.h"
 
 #include "setup_common.h"
@@ -18,7 +19,7 @@ namespace {
 // Files of an installation that predates the manifest ([Files] in the iss).
 constexpr const wchar_t* kKnownFiles[] = {
     L"pulse.exe", L"lumatext.dll", L"pdfium.dll", L"Pulse.Index.exe", L"Pulse.Document.exe",
-    L"Pulse.Preview.exe", L"pulse_shell.exe", L"pulse_elevated.exe", L"pulse_integration.exe",
+    L"Pulse.Preview.exe", L"pulse_start_pin.dll", L"pulse_shell.exe", L"pulse_elevated.exe", L"pulse_integration.exe",
     L"msvcp140.dll", L"msvcp140_atomic_wait.dll", L"vcruntime140.dll", L"vcruntime140_1.dll",
     L"uninstall.exe",
 };
@@ -251,6 +252,12 @@ UninstallResult RunUninstall(const UninstallRequest& req, const UninstallCallbac
             RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\Pulse\\ShellIntegration");
             RegDeleteKeyW(HKEY_CURRENT_USER, L"Software\\Pulse");  // only when nothing else is left in it
         }
+    }
+
+    if (real && !UnregisterStartPin(app, result.error)) {
+        Log(result.error);
+        result.exit_code = kExitFailed;
+        return result;
     }
 
     // 4. Installed files, then the directories they leave empty.

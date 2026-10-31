@@ -3,6 +3,20 @@
 
 namespace pulse::app {
 
+ExternalOpenDecision DecideLaunchTarget(int mode, const std::vector<ExternalOpenWindow>& windows,
+                                      bool explicit_window) {
+    ExternalOpenDecision d;
+    d.reason = ExternalOpenReason::Policy;
+    d.action = ExternalOpenAction::NewWindow;
+    if (explicit_window || windows.empty() || mode == 0) return d;
+    if (mode == 2) d.action = ExternalOpenAction::Activate;
+    else if (!windows.front().busy) d.action = ExternalOpenAction::Tab;
+    else d.reason = ExternalOpenReason::Busy;
+    d.restore = d.action != ExternalOpenAction::NewWindow &&
+                (windows.front().hidden || windows.front().minimized);
+    return d;
+}
+
 bool ContinuesOpenBatch(const ExternalOpenBatch& batch, const ExternalOpenRequest& request,
                         const ExternalOpenTuning& tuning) {
     return batch.count > 0 && batch.tick != 0 && request.tick >= batch.tick &&

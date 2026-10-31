@@ -6,11 +6,22 @@
 #include <windows.h>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace pulse::app {
 
-// Removable media, optical drives, and fixed disks on a hot-plug bus (USB,
-// 1394, SD): Explorer offers 弹出 for these. Quick (one storage query).
+// Invalidate immediately on device change; queries in flight cannot repopulate old data.
+void InvalidateDriveEjectableCache();
+// Worker-only: all mounted paths on the same disk, including other partitions.
+struct DriveEjectPlan {
+    std::vector<std::wstring> roots;
+    std::wstring volume_name;
+};
+DWORD PrepareDriveEject(const std::wstring& root, DriveEjectPlan& plan);
+DWORD GetDriveEjectRoots(const std::wstring& root, std::vector<std::wstring>& roots);
+// Call from the drive enumeration worker before publishing its snapshot.
+void RefreshDriveEjectable(const std::wstring& root, uint8_t drive_type);
+// Removable/optical media, hot-plug fixed disks and VHD/VHDX; cache-only on UI thread.
 bool DriveEjectable(const std::wstring& root, uint8_t drive_type);
 
 // The eject glyph: Segoe Fluent Icons has one; Segoe MDL2 (Windows 10) does not.
@@ -27,7 +38,8 @@ struct DriveVerbResult {
 };
 
 // Worker thread; posts `msg` with LPARAM = DriveVerbResult* (receiver deletes).
-bool StartDriveEject(HWND notify, UINT msg, const std::wstring& root, uint8_t drive_type);
+bool StartDriveEject(HWND notify, UINT msg, const std::wstring& root, uint8_t drive_type,
+                     const std::wstring& expected_volume = {});
 bool StartDriveDisconnect(HWND notify, UINT msg, const std::wstring& root, bool force);
 
 // The system 映射网络驱动器 dialog, `share` prefilled (empty: blank).

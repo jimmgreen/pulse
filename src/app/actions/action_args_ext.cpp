@@ -1,3 +1,4 @@
+#include "../drive_eject_ui.h"
 // action_args_ext.cpp - The P4b runners of action_args.h: actions whose
 // effect leaves Pulse (Git, shell menu items, other programs) or touches the
 // system (cloud files, drives), with the words of their confirm cards, and
@@ -647,7 +648,7 @@ ArgRun DriveVerb(AppState& s, const json::Value& args, bool eject) {
         return Fail("that drive cannot be ejected", Fill(Text(I::AiDriveNotEjectable), L"{drive}", letter));
     if (!eject && d.type != DRIVE_REMOTE)
         return Fail("that is not a network drive", Fill(Text(I::AiDriveNotRemote), L"{drive}", letter));
-    const bool started = eject ? StartDriveEject(s.hwnd, WM_DRIVE_VERB, d.root, d.type)
+    const bool started = eject ? StartPreparedDriveEject(s, d.root, d.type)
                                : StartDriveDisconnect(s.hwnd, WM_DRIVE_VERB, d.root, false);
     if (!started) return Fail("Windows did not take the request", Text(I::AiActWhyFailed));
     ArgRun r;

@@ -1,3 +1,4 @@
+#include "drive_verbs.h"
 // app_worker.cpp
 #include "app_worker.h"
 #include "app_model.h"
@@ -289,6 +290,8 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
                     fs::EnumerateDirectory(path, result.entries, &cancel);
                     if (cancel) throw fs::EnumerationCancelled();
                     if (path.empty()) {
+                        for (const auto& drive : result.entries)
+                            if (drive.drive_type) RefreshDriveEjectable(drive.full_path, drive.drive_type);
                         // This PC: the program icons Windows shows there (网盘程序入口).
                         for (auto& launcher : CurrentThisPcLaunchers()) {
                             fs::DirEntry e;
@@ -345,6 +348,8 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
     }
     auto t1 = std::chrono::steady_clock::now();
     res.enum_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    diagnostics::runtime::Event("navigation_enumerated", {{"generation", item.generation},
+        {"entries", entries->size()}, {"elapsed_us", static_cast<uint64_t>(res.enum_ms * 1000.0)}});
 
     // Check cancellation before sort.
     {
@@ -395,6 +400,9 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
     }
     auto t3 = std::chrono::steady_clock::now();
     res.sort_ms = std::chrono::duration<double, std::milli>(t3 - t2).count();
+    diagnostics::runtime::Event("navigation_sorted", {{"generation", item.generation},
+        {"entries", entries->size()}, {"elapsed_us", static_cast<uint64_t>(res.sort_ms * 1000.0)},
+        {"prepare_us", static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count())}});
 
     {
         std::lock_guard<std::mutex> lock(mutex_);

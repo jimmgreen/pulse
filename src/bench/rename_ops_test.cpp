@@ -1,8 +1,13 @@
+#include "../common/rename_identity.h"
 #include "../ops/ops_manager.h"
+#include "../common/rename_identity.h"
 #include "../ipc/shell_client.h"
 #include "../common/localization.h"
 #include "../app/batch_rename.h"
 #include <filesystem>
+#include <aclapi.h>
+#include <sddl.h>
+#include <vector>
 #include <fstream>
 #include <cstdio>
 #include <atomic>
@@ -33,14 +38,171 @@ bool Exact(const std::filesystem::path& path) {
     FindClose(find); return path.filename().wstring() == data.cFileName;
 }
 }
+
+// This opt-in test must run at medium integrity as pulse.exe beside the real
+// pulse_elevated.exe. It never touches Program Files or modifies helper trust.
+int AuthorizationRenameTest() {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return 2;
+    TOKEN_ELEVATION elevation{}; DWORD size = 0;
+    GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size);
+    GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+    std::vector<BYTE> user(size);
+    const bool queried = GetTokenInformation(token, TokenUser, user.data(), size, &size) != FALSE;
+    CloseHandle(token);
+    Check(queried && !elevation.TokenIsElevated, "authorization client is not elevated");
+    if (!queried || elevation.TokenIsElevated) return 2;
+    LPWSTR sid = nullptr;
+    if (!ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(user.data())->User.Sid, &sid)) return 2;
+    const std::wstring sddl = L"D:P(A;;FA;;;BA)(A;;FRFX;;;" + std::wstring(sid) + L")";
+    LocalFree(sid);
+    PSECURITY_DESCRIPTOR restricted = nullptr;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &restricted, nullptr)) return 2;
+    PACL acl = nullptr; BOOL present = FALSE, defaulted = FALSE;
+    GetSecurityDescriptorDacl(restricted, &present, &acl, &defaulted);
+    wchar_t temp[MAX_PATH]{}; GetTempPathW(MAX_PATH, temp);
+    const auto root = std::filesystem::path(temp) / (L"pulse-rename-auth-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+    std::filesystem::create_directory(root);
+    for (auto name : {L"source.txt", L"collision.txt", L"locked.txt", L"batch-a.txt", L"batch-b.txt"}) std::ofstream(root / name) << "fixture";
+    std::filesystem::create_directory(root / L"Folder");
+    struct Saved { HANDLE handle; PSECURITY_DESCRIPTOR descriptor; PACL acl; SECURITY_DESCRIPTOR_CONTROL control; };
+    std::vector<Saved> saved;
+    bool protected_ok = true;
+    std::vector<std::filesystem::path> paths{root};
+    for (const auto& entry : std::filesystem::directory_iterator(root)) paths.push_back(entry.path());
+    for (const auto& path : paths) {
+        HANDLE handle = CreateFileW(path.c_str(), READ_CONTROL | WRITE_DAC, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        PSECURITY_DESCRIPTOR original = nullptr; PACL original_acl = nullptr;
+        const DWORD read_error = handle == INVALID_HANDLE_VALUE ? GetLastError() :
+            GetSecurityInfo(handle, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                nullptr, nullptr, &original_acl, nullptr, &original);
+        if (read_error != ERROR_SUCCESS) {
+            std::printf("[INFO] fixture ACL capture path=%ls error=%lu\n", path.c_str(), read_error);
+            if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+            protected_ok = false; break;
+        }
+        SECURITY_DESCRIPTOR_CONTROL control{}; DWORD revision = 0;
+        GetSecurityDescriptorControl(original, &control, &revision);
+        saved.push_back({handle, original, original_acl, control});
+    }
+    // Capture every handle and original DACL before restricting a parent:
+    // directory ACL propagation can otherwise remove access to its children.
+    // Protect children first so restricting the root cannot alter their ACLs.
+    if (protected_ok) {
+        for (size_t i = saved.size(); i > 0; --i) {
+            const DWORD error = SetSecurityInfo(saved[i - 1].handle, SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                nullptr, nullptr, acl, nullptr);
+            if (error != ERROR_SUCCESS) {
+                std::printf("[INFO] fixture ACL restrict path=%ls error=%lu\n", paths[i - 1].c_str(), error);
+                protected_ok = false; break;
+            }
+        }
+    }
+    LocalFree(restricted);
+    Check(protected_ok, "isolated fixture grants administrators full access and current user read/execute");
+    if (protected_ok) {
+        const BOOL direct = MoveFileW((root / L"source.txt").c_str(), (root / L"direct.txt").c_str());
+        const DWORD error = GetLastError();
+        Check(!direct && error == ERROR_ACCESS_DENIED, "medium token cannot rename protected fixture directly");
+        OpsManager ops;
+        std::atomic<bool> cancel_batch{false};
+        ops.Start([&] { const auto status = ops.Status();
+            if (status.type == OpType::BatchRename && status.completed_items == 1 && cancel_batch.exchange(false)) ops.CancelCurrent();
+        });
+        auto wait = [&](uint64_t before) {
+            const auto deadline = GetTickCount64() + 120000;
+            while (GetTickCount64() < deadline) {
+                if (ops.Status().completed_ops > before && !ops.Status().active) return true;
+                if (ops.Status().authorization == AuthorizationState::ActionRequired) { ops.CancelCurrent(); }
+                Sleep(10);
+            }
+            ops.CancelCurrent(); return false;
+        };
+        auto rename = [&](const wchar_t* from, const wchar_t* to) {
+            const auto before = ops.Status().completed_ops;
+            OpRequest request; request.type = OpType::Rename; request.sources = {(root / from).wstring()}; request.new_name = to;
+            ops.Submit(request); Check(wait(before), "authorized rename terminates");
+        };
+        rename(L"source.txt", L"renamed.txt");
+        const bool success = Exact(root / L"renamed.txt") && !Exact(root / L"source.txt");
+        Check(success, "production elevated helper renames protected file");
+        if (success) {
+            const auto before = ops.Status().completed_ops; ops.Undo();
+            Check(wait(before) && Exact(root / L"source.txt") && !Exact(root / L"renamed.txt"), "authorized undo restores protected file");
+        }
+        rename(L"Folder", L"RenamedFolder");
+        const bool folder_success = Exact(root / L"RenamedFolder") && !Exact(root / L"Folder");
+        Check(folder_success, "production helper renames protected directory");
+        if (folder_success) {
+            const auto before = ops.Status().completed_ops; ops.Undo();
+            Check(wait(before) && Exact(root / L"Folder") && !Exact(root / L"RenamedFolder"),
+                "authorized undo restores protected directory");
+        }
+        rename(L"source.txt", L"collision.txt");
+        Check(Exact(root / L"source.txt") && Exact(root / L"collision.txt") && ops.Status().phase == OpPhase::Failed,
+            "authorized collision preserves both files");
+        HANDLE locked = CreateFileW((root / L"locked.txt").c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        Check(locked != INVALID_HANDLE_VALUE, "hold protected fixture without delete sharing");
+        rename(L"locked.txt", L"locked-new.txt");
+        Check(Exact(root / L"locked.txt") && !Exact(root / L"locked-new.txt") && ops.Status().phase == OpPhase::Failed,
+            "authorized locked rename preserves file");
+        if (locked != INVALID_HANDLE_VALUE) CloseHandle(locked);
+        OpRequest batch; batch.type = OpType::BatchRename;
+        batch.sources = {(root / L"batch-a.txt").wstring(), (root / L"batch-b.txt").wstring()};
+        batch.new_names = {L"batch-a-new.txt", L"batch-b-new.txt"};
+        cancel_batch = true;
+        const auto before = ops.Status().completed_ops; ops.Submit(batch);
+        Check(wait(before) && Exact(root / L"batch-a-new.txt") && Exact(root / L"batch-b.txt") && !Exact(root / L"batch-b-new.txt"),
+            "authorized batch cancel preserves unprocessed item");
+        ops.Stop();
+    }
+    bool restored = true;
+    for (auto it = saved.rbegin(); it != saved.rend(); ++it) {
+        restored &= SetSecurityInfo(it->handle, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION |
+            ((it->control & SE_DACL_PROTECTED) ? PROTECTED_DACL_SECURITY_INFORMATION : UNPROTECTED_DACL_SECURITY_INFORMATION),
+            nullptr, nullptr, it->acl, nullptr) == ERROR_SUCCESS;
+        CloseHandle(it->handle); LocalFree(it->descriptor);
+    }
+    Check(restored, "restore original fixture DACLs");
+    std::error_code ec; std::filesystem::remove_all(root, ec);
+    Check(!ec && !std::filesystem::exists(root), "remove isolated authorization fixture");
+    return failures ? 1 : 0;
+}
+
 int main(int argc, char** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
+    if (argc > 1 && std::string_view(argv[1]) == "--rename-authorization") return AuthorizationRenameTest();
     // Assertions compare Simplified error text from the embedded string table.
     pulse::l10n::Initialize(GetModuleHandleW(nullptr), L"zh-CN");
     const auto root = std::filesystem::absolute(std::filesystem::path(L"bench_data") /
         (L"rename-ops-" + std::to_wstring(GetCurrentProcessId())));
     std::filesystem::create_directories(root / L"child");
     auto make = [&](const wchar_t* name) { std::ofstream(root / name) << "fixture"; };
+    if (argc > 1 && std::string_view(argv[1]) == "--rename-identity") {
+        make(L"identity.txt");
+        RenameIdentity identity;
+        Check(CaptureRenameIdentity((root / L"identity.txt").wstring(), identity) == ERROR_SUCCESS,
+            "capture source and parent identity");
+        Check(MoveFileW((root / L"identity.txt").c_str(), (root / L"original.txt").c_str()) != FALSE,
+            "retain original object while replacing source pathname");
+        make(L"identity.txt");
+        Check(RenameIdentified((root / L"identity.txt").wstring(), L"unexpected.txt", identity) == ERROR_FILE_INVALID &&
+            Exact(root / L"identity.txt") && Exact(root / L"original.txt") && !Exact(root / L"unexpected.txt"),
+            "replacement at authorized pathname is rejected without mutation");
+        Check(CaptureRenameIdentity((root / L"identity.txt").wstring(), identity) == ERROR_SUCCESS &&
+            RenameIdentified((root / L"identity.txt").wstring(), L"identified.txt", identity) == ERROR_SUCCESS &&
+            Exact(root / L"identified.txt") && !Exact(root / L"identity.txt"),
+            "matching identity renames through validated handle");
+        make(L"occupied.txt");
+        Check(CaptureRenameIdentity((root / L"identified.txt").wstring(), identity) == ERROR_SUCCESS &&
+            RenameIdentified((root / L"identified.txt").wstring(), L"occupied.txt", identity) != ERROR_SUCCESS &&
+            Exact(root / L"identified.txt") && Exact(root / L"occupied.txt"),
+            "identified rename never replaces existing destination");
+        std::filesystem::remove_all(root);
+        return failures ? 1 : 0;
+    }
     if (argc > 1 && std::string_view(argv[1]) == "--shell-roundtrip") {
         // New items are created in process now, so drive the Shell host's
         // request/Done stream directly.

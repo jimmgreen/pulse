@@ -41,6 +41,8 @@ struct FluentMenuSwatch {
     // tag color dot: wider hit target, hover pill, theme text color.
     std::wstring glyph;
     wchar_t mnemonic = 0;          // keyboard access key (case-insensitive), 0 = none
+    std::wstring label;
+    fluent::MenuPictogram pictogram = fluent::MenuPictogram::None;
 };
 
 struct FluentMenuItem {

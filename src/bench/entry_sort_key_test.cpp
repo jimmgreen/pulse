@@ -1,11 +1,13 @@
 // entry_sort_key_test.cpp - SortEntries must order rows exactly as std::sort
 // with EntryLess does; the keyed fast path only changes the speed.
 #include "../app/entry_sort.h"
+#include "../app/entry_group.h"
 
 #include <windows.h>
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cwctype>
 #include <random>
 #include <string>
 #include <thread>
@@ -98,10 +100,78 @@ std::vector<std::wstring> Combos(const std::vector<std::wstring>& pieces, size_t
 }
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--group-perf") {
+        std::mt19937 random(7482);
+        std::vector<std::wstring> names;
+        for (int i = 0; i < 50000; ++i) names.push_back(L"document_" + std::to_wstring(i) + L"_report.txt");
+        auto fixture = MakeRows(names, random);
+        std::shuffle(fixture.begin(), fixture.end(), random);
+        auto catalog = std::make_shared<app::TagCatalogSnapshot>();
+        catalog->tags.resize(8);
+        for (size_t i = 0; i < names.size(); ++i)
+            catalog->paths.emplace_back(L"c:\\t\\" + names[i], static_cast<int>(i % 8));
+        app::PublishTagCatalog(catalog);
+        for (const auto group : {app::GroupBy::None, app::GroupBy::Name, app::GroupBy::Tag}) {
+            app::ScopedEntryGrouping grouping(static_cast<int>(group), L"C:\\t");
+            std::vector<double> times;
+            for (int run = 0; run < 6; ++run) {
+                auto rows = fixture;
+                const auto start = std::chrono::steady_clock::now();
+                app::SortEntries(rows, ui::SortColumn::Name, ui::SortDirection::Asc);
+                const double elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+                if (run) times.push_back(elapsed);
+            }
+            std::sort(times.begin(), times.end());
+            std::printf("group=%d rows=%zu median_ms=%.3f min_ms=%.3f max_ms=%.3f\n",
+                static_cast<int>(group), fixture.size(), times[2], times.front(), times.back());
+            std::fflush(stdout);
+        }
+        app::PublishTagCatalog({});
+        return 0;
+    }
+
     std::mt19937 rng(42);
     Check(AllOrders(MakeRows(TrickyNames(), rng)), "keyed names: every column, direction and folder mode match EntryLess");
     Check(AllOrders(MakeRows(Combos(TrickyNames(), 6000, 7), rng)), "6000 combined names match EntryLess");
+
+    {
+        auto names = TrickyNames();
+        names.push_back(std::wstring(600, L'x') + L"123.txt");
+        auto rows = MakeRows(names, rng);
+        const auto clock = app::MakeGroupClock();
+        auto catalog = std::make_shared<app::TagCatalogSnapshot>();
+        catalog->tags.resize(3);
+        for (size_t i = 0; i < rows.size(); ++i) {
+            auto& row = rows[i];
+            std::wstring lower = row.name;
+            for (auto& ch : lower) ch = static_cast<wchar_t>(std::towlower(ch));
+            catalog->paths.emplace_back(L"c:\\t\\" + lower, static_cast<int>(i % 3));
+            row.full_path = L"\\\\?\\C:\\" + std::wstring(280, L'p') + std::to_wstring(i % 4) + L"\\" + row.name;
+            row.net_group = static_cast<uint8_t>(i % 4);
+            row.pc_device = i % 7 == 0;
+            row.pc_launcher = i % 11 == 0;
+            row.size = (i % 8) * 512ull * 1024 * 1024;
+            const auto ft = [](uint64_t t) { return FILETIME{static_cast<DWORD>(t), static_cast<DWORD>(t >> 32)}; };
+            row.mtime = ft(clock.today - (i % 30) * 864000000000ull);
+            row.ctime = ft(clock.today - (i % 6) * 864000000000ull);
+            row.atime = ft(clock.tomorrow + (i % 3) * 864000000000ull);
+        }
+        app::PublishTagCatalog(catalog);
+        bool same = true;
+        for (int group = 1; group <= 9; ++group) {
+            const app::ScopedEntryGrouping grouping(group, L"C:\\t");
+            for (const auto mode : {app::FolderSortMode::FoldersFirst, app::FolderSortMode::FollowDirection, app::FolderSortMode::Mixed}) {
+                const app::ScopedFolderSortMode folders(mode);
+                for (const auto col : {ui::SortColumn::Name, ui::SortColumn::Size, ui::SortColumn::Type,
+                        ui::SortColumn::Mtime, ui::SortColumn::Created, ui::SortColumn::Accessed, ui::SortColumn::Path})
+                    for (const auto dir : {ui::SortDirection::Asc, ui::SortDirection::Desc})
+                        same = SameOrder(rows, col, dir) && same;
+            }
+        }
+        app::PublishTagCatalog({});
+        Check(same, "cached ranks preserve all groups, columns, directions, folder modes and long names/paths");
+    }
 
     auto mixed = TrickyNames();
     for (const auto& e : ExoticNames()) mixed.push_back(e);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <d2d1.h>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -129,7 +130,7 @@ struct WallRows {
 // aspects: width / height per view index (<= 0 = not known yet: 4:3). Rows
 // aim at row_px; a full row shrinks a little to fill the width exactly, the
 // last one keeps row_px unless filling it stretches less than 1.25x.
-WallRows BuildWallRows(const std::vector<float>& aspects, float width, float row_px, float scale);
+WallRows BuildWallRows(const std::vector<float>& aspects, float width, float row_px, float scale, const std::atomic<uint64_t>* generation = nullptr, uint64_t expected = 0);
 
 // Size inputs of a pane's layout; a plain row height converts implicitly.
 struct ViewLayoutParams {

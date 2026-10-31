@@ -40,10 +40,14 @@ TRAILER = struct.Struct("<8sQQ32s")
 # share their common static-CRT and library code (measured: ~1.1 MB saved).
 DEFAULT_LAYOUT = [
     ("{build}/pulse.exe", "pulse.exe"),
+    ("{build}/Pulse.AI.exe", "Pulse.AI.exe"),
+    ("{build}/Pulse.Content.exe", "Pulse.Content.exe"),
+    ("{build}/Pulse.Document.exe", "Pulse.Document.exe"),
     ("{build}/Pulse.Index.exe", "Pulse.Index.exe"),
     ("{build}/Pulse.Preview.exe", "Pulse.Preview.exe"),
     ("{build}/pulse_elevated.exe", "pulse_elevated.exe"),
     ("{build}/pulse_shell.exe", "pulse_shell.exe"),
+    ("{build}/pulse_start_pin.dll", "pulse_start_pin.dll"),
     ("{build}/pulse_integration.exe", "pulse_integration.exe"),
     ("{build}/lumatext.dll", "lumatext.dll"),
     ("{build}/pdfium.dll", "pdfium.dll"),
@@ -76,6 +80,13 @@ def collect(root: Path, build: Path) -> list[tuple[Path, str]]:
 CHANNELS = {"windows": 10240, "win81": 9600}
 
 
+def payload_dictionary_size(raw_size: int) -> int:
+    # History beyond the entire input cannot improve compression. Keep the
+    # existing 64 MiB ceiling for larger releases, but avoid reserving it in
+    # the installer's streaming decoder for smaller payloads.
+    return max(4096, min(64 << 20, 1 << (max(raw_size, 1) - 1).bit_length()))
+
+
 def build_payload(items, version: str, channel: str = "windows") -> tuple[bytes, dict]:
     files, blobs = [], []
     for src, dest in items:
@@ -89,7 +100,7 @@ def build_payload(items, version: str, channel: str = "windows") -> tuple[bytes,
     filters = [
         {"id": lzma.FILTER_X86},
         {"id": lzma.FILTER_LZMA2, "preset": 9 | lzma.PRESET_EXTREME,
-         "dict_size": 64 << 20, "nice_len": 273},
+         "dict_size": payload_dictionary_size(len(raw)), "nice_len": 273},
     ]
     xz = lzma.compress(raw, format=lzma.FORMAT_XZ, check=lzma.CHECK_CRC64, filters=filters)
     return xz, {"raw": len(raw), "xz": len(xz), "files": len(files)}

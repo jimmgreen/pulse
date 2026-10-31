@@ -1,3 +1,4 @@
+#include "delete_preflight.h"
 // app_ops_ui.cpp — extracted from app_main.cpp.
 #include "app_internal.h"
 #include "app_messages.h"
@@ -507,13 +508,7 @@ ui::PermanentDeleteChoice ConfirmPermanentDelete(AppState& s, const std::vector<
     return ui::ShowPermanentDeleteDialog(s.hwnd, info, s.darkMode, s.accentColor);
 }
 
-bool AllHaveRecycleBin(const std::vector<std::wstring>& paths) {
-    if (paths.size() > 256) return false; // don't probe volumes for a huge selection
-    return std::all_of(paths.begin(), paths.end(), [](const std::wstring& path) {
-        DWORD volume_error = 0;
-        return ops::RecycleBinAvailable(path, &volume_error);
-    });
-}
+
 }
 
 // Motion 5b: the rows slide out now; the listing drops them when the delete
@@ -597,46 +592,95 @@ void NoteDeleteFinished(AppState& s, const ops::FinishedTask& done) {
         {ui::SnackAction{l10n::Get(l10n::StringId::SnackUndo), WM_UNDO_DELETE}}, L"Ctrl+Z");
 }
 
+void CancelDeletePreflight(AppState& s) {
+    if (s.delete_preflight) s.delete_preflight->cancel.store(true);
+    s.delete_preflight.reset();
+    KillTimer(s.hwnd, 0xD311);
+    s.delete_preflight_window.Destroy();
+}
+
 void DeletePaths(AppState& s, std::vector<std::wstring> paths, bool permanent) {
     if (paths.empty()) return;
+    CancelDeletePreflight(s);
+    const auto show_failure = [&s] {
+        s.notification_toast.ShowSnack(s.hwnd, ui::SnackIcon::Suggest,
+            l10n::Get(l10n::StringId::Delete), l10n::Get(l10n::StringId::OperationFailedMessage), {}, {}, 5000);
+    };
+    auto request = std::make_shared<DeletePreflight>();
+    request->paths = std::move(paths);
+    request->permanent = permanent;
+    if (s.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", nullptr, 0)) {
+        wchar_t delay_text[32]{};
+        const DWORD length = GetEnvironmentVariableW(L"PULSE_TEST_DELETE_PREFLIGHT_DELAY_MS", delay_text, 32);
+        const int delay_ms = length > 0 && length < 32 ? std::clamp(_wtoi(delay_text), 0, 30000) : 0;
+        if (delay_ms) {
+            const std::weak_ptr<DeletePreflight> weak = request;
+            request->before_probe = [weak, delay_ms] {
+                const auto pending = weak.lock();
+                for (int elapsed = 0; pending && elapsed < delay_ms && !pending->cancel.load(); elapsed += 10)
+                    Sleep(static_cast<DWORD>(std::min(10, delay_ms - elapsed)));
+            };
+        }
+    }
+    s.delete_preflight = request;
+    ui::FileOperationCallbacks callbacks;
+    callbacks.cancel = [request] { request->cancel.store(true); };
+    callbacks.dismiss = callbacks.cancel;
+    if (!s.delete_preflight_window.Create(s.hwnd, std::move(callbacks))) {
+        CancelDeletePreflight(s);
+        show_failure();
+        return;
+    }
+    s.delete_preflight_window.SetPreparationOnly(true);
+    s.delete_preflight_window.SetTheme(s.darkMode, s.accentColor);
+    ops::OpStatus status;
+    status.active = true;
+    status.can_pause = false;
+    status.type = permanent ? ops::OpType::RealDelete : ops::OpType::RecycleDelete;
+    status.phase = ops::OpPhase::Scanning;
+    status.enumeration_complete = true;
+    status.total_items = request->paths.size();
+    status.source_label = ClipboardPath(request->paths.front());
+    s.delete_preflight_window.Update(status);
+    s.delete_preflight_window.Show(false);
+    if (!SetTimer(s.hwnd, 0xD311, 30, nullptr)) { CancelDeletePreflight(s); show_failure(); return; }
+    StartDeletePreflight(request);
+}
+
+void PollDeletePreflight(AppState& s) {
+    const auto request = s.delete_preflight;
+    if (!request) return;
+    if (request->cancel.load()) { CancelDeletePreflight(s); return; }
+    if (!request->done.load()) return;
+    struct CompletionCleanup {
+        HWND owner;
+        std::shared_ptr<DeletePreflight> request;
+        ~CompletionCleanup() {
+            if (auto* state = GetAppState(owner); state && state->delete_preflight == request)
+                state->delete_preflight.reset();
+        }
+    } cleanup{s.hwnd, request};
+    const HWND owner = s.hwnd;
+    const AppState* expected_state = &s;
+    const auto still_current = [owner, expected_state, request] {
+        const auto* state = GetAppState(owner);
+        return state && state == expected_state && CanSubmitDeletePreflight(state->delete_preflight, request);
+    };
+    KillTimer(s.hwnd, 0xD311);
+    s.delete_preflight_window.Destroy();
+    if (request->cancel.load()) return;
+    if (request->failed) {
+        s.notification_toast.ShowSnack(s.hwnd, ui::SnackIcon::Suggest,
+            l10n::Get(l10n::StringId::Delete), l10n::Get(l10n::StringId::OperationFailedMessage), {}, {}, 5000);
+        return;
+    }
+    auto paths = std::move(request->paths);
+    auto direct = std::move(request->direct);
+    bool permanent = request->permanent;
+    const auto reason = request->reason;
     if (!permanent) {
-        // Shares and removable drives have no Recycle Bin, a drive can have
-        // its bin turned off, and a file can be larger than the bin: the
-        // Shell would delete those for good, so the ops layer refuses to
-        // recycle them. Like Explorer, ask for a permanent delete of those
-        // items, saying why; the rest still go to the Recycle Bin. (Folders
-        // are measured by the ops layer, which refuses an oversized one.)
-        using Reason = ui::PermanentDeleteInfo::NoBinReason;
-        std::vector<std::wstring> direct;
-        Reason reason = Reason::TooLarge;
-        std::atomic<bool> no_cancel{false};
-        std::wstring cached_parent;
-        bool cached_available = true;
-        ops::RecycleBinLimits cached_limits;
-        std::erase_if(paths, [&](const std::wstring& path) {
-            // Items of one folder share a volume, except a mount point.
-            const DWORD attributes = GetFileAttributesW(path.c_str());
-            const bool mount = attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT);
-            const std::wstring parent = mount ? std::wstring{} : path.substr(0, path.find_last_of(L'\\') + 1);
-            if (parent.empty() || !pulse::path::EqualInsensitive(parent, cached_parent)) {
-                DWORD volume_error = 0;
-                cached_available = ops::RecycleBinAvailable(path, &volume_error);
-                if (volume_error) return false;  // not judged; the delete reports why
-                cached_limits = ops::ReadRecycleBinLimits(path, &volume_error);
-                if (volume_error) return false;
-                cached_parent = parent;
-            }
-            Reason why;
-            if (!cached_available) why = cached_limits.disabled ? Reason::Disabled : Reason::Location;
-            else if (ops::CheckRecycleFits(path, cached_limits, no_cancel, false) == ops::kRecycleBinTooSmall)
-                why = Reason::TooLarge;
-            else return false;
-            if (why == Reason::Location || (why == Reason::Disabled && reason == Reason::TooLarge)) reason = why;
-            direct.push_back(path);
-            return true;
-        });
         if (!direct.empty()) {
-            if (ConfirmPermanentDelete(s, direct, true, false, reason) != ui::PermanentDeleteChoice::Delete) return;
+            if (ConfirmPermanentDelete(s, direct, true, false, reason) != ui::PermanentDeleteChoice::Delete || !still_current()) return;
             ops::OpRequest req;
             req.type = ops::OpType::RealDelete;
             req.sources = std::move(direct);
@@ -646,14 +690,15 @@ void DeletePaths(AppState& s, std::vector<std::wstring> paths, bool permanent) {
         }
     }
     if (permanent) {
-        const auto choice = ConfirmPermanentDelete(s, paths, false, AllHaveRecycleBin(paths));
-        if (choice == ui::PermanentDeleteChoice::Cancel) return;
+        const auto choice = ConfirmPermanentDelete(s, paths, false, request->offer_recycle);
+        if (choice == ui::PermanentDeleteChoice::Cancel || !still_current()) return;
         // 移到回收站 from the dialog: the user already confirmed, don't ask again.
         if (choice == ui::PermanentDeleteChoice::Recycle) permanent = false;
     } else if (s.appPrefs.confirm_recycle_delete) {
         const ui::ConfirmDialogSpec confirm = BuildRecycleDeleteConfirm(paths);
-        if (!ui::ShowConfirmDialog(s.hwnd, confirm, s.darkMode, s.accentColor)) return;
+        if (!ui::ShowConfirmDialog(s.hwnd, confirm, s.darkMode, s.accentColor) || !still_current()) return;
     }
+    if (!still_current()) return;
     ops::OpRequest req;
     req.type = permanent ? ops::OpType::RealDelete : ops::OpType::RecycleDelete;
     req.sources = std::move(paths);
@@ -689,6 +734,8 @@ void RestoreSelected(AppState& s) {
     app::Tab* tab = ActiveTab(s);
     if (!tab || !tab->snapshot || !IsRecycleTab(tab)) return;
     std::vector<std::wstring> paths;
+    std::vector<std::wstring> parents;
+    std::unordered_set<std::wstring> parent_keys;
     std::wstring first_name; // the status names the item, not its $R payload
     for (int index : tab->SelectedIndices()) {
         if (index < 0 || index >= static_cast<int>(tab->EntryCount())) continue;
@@ -696,10 +743,14 @@ void RestoreSelected(AppState& s) {
         if (entry.recycle_path.empty()) continue;
         if (paths.empty()) first_name = entry.name;
         paths.push_back(entry.recycle_path);
+        const auto parent = fs::ParentPath(entry.full_path);
+        if (!parent.empty() && parent_keys.insert(path::FoldedKey(parent)).second)
+            parents.push_back(parent);
     }
     if (paths.empty()) return;
     ops::OpRequest req;
     req.type = ops::OpType::RestoreRecycle;
+    req.refresh_directories = std::move(parents);
     req.sources = std::move(paths);
     req.display_name = std::move(first_name);
     s.ops.Submit(std::move(req));
@@ -709,6 +760,8 @@ void RestoreAllRecycle(AppState& s) {
     app::Tab* tab = ActiveTab(s);
     if (!tab || !tab->snapshot || !IsRecycleTab(tab)) return;
     std::vector<std::wstring> paths;
+    std::vector<std::wstring> parents;
+    std::unordered_set<std::wstring> parent_keys;
     const size_t count = tab->EntryCount();
     paths.reserve(count);
     std::wstring first_name;
@@ -717,10 +770,14 @@ void RestoreAllRecycle(AppState& s) {
         if (entry.recycle_path.empty()) continue;
         if (paths.empty()) first_name = entry.name;
         paths.push_back(entry.recycle_path);
+        const auto parent = fs::ParentPath(entry.full_path);
+        if (!parent.empty() && parent_keys.insert(path::FoldedKey(parent)).second)
+            parents.push_back(parent);
     }
     if (paths.empty()) return;
     ops::OpRequest req;
     req.type = ops::OpType::RestoreRecycle;
+    req.refresh_directories = std::move(parents);
     req.sources = std::move(paths);
     req.display_name = std::move(first_name);
     s.ops.Submit(std::move(req));

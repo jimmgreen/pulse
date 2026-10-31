@@ -1674,7 +1674,7 @@ ChooseFfmpegExe	IDS_CHOOSE_FFMPEG_EXE	2872	选择 ffmpeg.exe	Choose ffmpeg.exe
 TheCompleteSelectionCouldNotBeProcessedCheckTheTagsBeforeTry	IDS_THE_COMPLETE_SELECTION_COULD_NOT_BE_PROCESSED_CHECK_THE_TAGS_BEFORE_TRY	2873	未能处理完整选择，标签未完成更新。请检查后重试。	The complete selection could not be processed. Check the tags before trying again.	
 Text2874	IDS_TEXT2874	2874	「	“	
 Text2875	IDS_TEXT2875	2875	」	”	
-HeldByAnotherProgram	IDS_HELD_BY_ANOTHER_PROGRAM	2876	被其他程序占用	held by another program	
+HeldByAnotherProgram	IDS_HELD_BY_ANOTHER_PROGRAM	2876	全局热键不可用	Unavailable as a global hotkey	無法使用為全域快速鍵
 TheIMEMayTakeIt	IDS_THE_IMEMAY_TAKE_IT	2877	输入法可能拦截	the IME may take it	
 UsedByAnotherAction	IDS_USED_BY_ANOTHER_ACTION	2878	已被其他操作使用	used by another action	
 ReservedByWindows	IDS_RESERVED_BY_WINDOWS	2879	系统保留	reserved by Windows	
@@ -1705,8 +1705,8 @@ Text2903	IDS_TEXT2903	2903	：	:
 AllAvailable	IDS_ALL_AVAILABLE	2904	 全部可用	: all available	
 Save	IDS_SAVE	2905	保存	Save	
 CurrentKey	IDS_CURRENT_KEY	2906	当前按键：	Current key: 	
-IsHeldByAnotherProgram	IDS_IS_HELD_BY_ANOTHER_PROGRAM	2907	 被另一个程序占用	 is held by another program	
-AnotherProgramRegisteredItAsAHotkeySoPulseNeverReceivesItPic	IDS_ANOTHER_PROGRAM_REGISTERED_IT_AS_AHOTKEY_SO_PULSE_NEVER_RECEIVES_IT_PIC	2908	另一个程序把它注册成了全局热键，按下时 Pulse 收不到。换一个按键，或在那个程序里关掉这个热键。	Another program registered it as a hotkey, so Pulse never receives it. Pick another key, or switch the hotkey off in that program.	
+IsHeldByAnotherProgram	IDS_IS_HELD_BY_ANOTHER_PROGRAM	2907	 无法注册为全局热键	 cannot be registered as a global hotkey	 無法註冊為全域快速鍵
+AnotherProgramRegisteredItAsAHotkeySoPulseNeverReceivesItPic	IDS_ANOTHER_PROGRAM_REGISTERED_IT_AS_AHOTKEY_SO_PULSE_NEVER_RECEIVES_IT_PIC	2908	系统拒绝注册这个全局热键，未提供占用程序名称。这不代表应用内快捷键失效。可测试实际响应，或改用其他组合。	Windows rejected this global hotkey registration without identifying an owner. This does not prove that an in-app shortcut is blocked. Test the key or choose another combination.	系統拒絕註冊這個全域快速鍵，未提供占用程式名稱。這不代表應用程式內的快速鍵失效。可測試實際反應，或改用其他組合。
 MicrosoftPinyinUsesItFor	IDS_MICROSOFT_PINYIN_USES_IT_FOR	2909	微软拼音用它做	Microsoft Pinyin uses it for 	
 WhileTheChineseIMEIsOnItTakesThisKeyFirstSwitchTheIMEHotkeyO	IDS_WHILE_THE_CHINESE_IMEIS_ON_IT_TAKES_THIS_KEY_FIRST_SWITCH_THE_IMEHOTKEY_O	2910	中文输入法开着时，这个键会先被输入法拿走。关掉输入法的这个热键，或者换一个按键。	While the Chinese IME is on it takes this key first. Switch the IME hotkey off, or pick another key.	
 OpenSettingsTimeLanguageLanguageRegion	IDS_OPEN_SETTINGS_TIME_LANGUAGE_LANGUAGE_REGION	2911	打开 Windows 设置 → 时间和语言 → 语言和区域	Open Settings → Time & language → Language & region	
@@ -1728,7 +1728,7 @@ IsUsedBy	IDS_IS_USED_BY	2926	 已被	 is used by
 Text2927	IDS_TEXT2927	2927	使用		
 ItIsTheSystemWideHotkeyAndCannotBeShared	IDS_IT_IS_THE_SYSTEM_WIDE_HOTKEY_AND_CANNOT_BE_SHARED	2928	它是全局热键，不能同时用作程序内快捷键。	It is the system-wide hotkey and cannot be shared.	
 ThatIsAFixedKeyOrANumberedGroupItCannotBeReplaced	IDS_THAT_IS_AFIXED_KEY_OR_ANUMBERED_GROUP_IT_CANNOT_BE_REPLACED	2929	那是固定按键或带序号的组合，不能替换。	That is a fixed key or a numbered group; it cannot be replaced.	
-AnotherProgramRegisteredItSoPulseNeverReceivesIt	IDS_ANOTHER_PROGRAM_REGISTERED_IT_SO_PULSE_NEVER_RECEIVES_IT	2930	另一个程序把它注册成了全局热键，按下时 Pulse 收不到。	Another program registered it, so Pulse never receives it.	
+AnotherProgramRegisteredItSoPulseNeverReceivesIt	IDS_ANOTHER_PROGRAM_REGISTERED_IT_SO_PULSE_NEVER_RECEIVES_IT	2930	系统拒绝注册这个全局热键，未提供占用程序名称。请选择其他组合。	Windows rejected this global hotkey registration without identifying an owner. Choose another combination.	系統拒絕註冊這個全域快速鍵，未提供占用程式名稱。請選擇其他組合。
 ASystemWideHotkeyNeedsCtrlAltOrWin	IDS_ASYSTEM_WIDE_HOTKEY_NEEDS_CTRL_ALT_OR_WIN	2931	全局热键至少要有 Ctrl、Alt 或 Win	A system-wide hotkey needs Ctrl, Alt or Win	
 ASingleLetterOrDigitCannotBeAShortcut	IDS_ASINGLE_LETTER_OR_DIGIT_CANNOT_BE_ASHORTCUT	2932	单个字母或数字不能做快捷键	A single letter or digit cannot be a shortcut	
 TheyJumpToFileNamesAddCtrlOrAlt	IDS_THEY_JUMP_TO_FILE_NAMES_ADD_CTRL_OR_ALT	2933	它们用于按文件名首字母跳转，请加上 Ctrl 或 Alt。	They jump to file names; add Ctrl or Alt.	
@@ -4622,3 +4622,48 @@ AsstThinkNone	IDS_ASST_THINK_NONE	5892	{model} 不支持思考，所以没有思
 ProvMimo	IDS_PROV_MIMO	5893	小米 MiMo	Xiaomi MiMo	小米 MiMo
 ProvSubMimo	IDS_PROV_SUB_MIMO	5894	小米开放平台	Xiaomi MiMo platform	小米開放平台
 AsstUrlMimo	IDS_ASST_URL_MIMO	5895	{url}（默认）· tp- 开头的 Token Plan Key 会自动改用套餐地址	{url} (default) · Token Plan keys (tp-) use their own address automatically	{url}（預設）· tp- 開頭的 Token Plan Key 會自動改用套餐位址
+WindowManage	IDS_WINDOW_MANAGE	5896	窗口管理	Window management	
+ArrangeSideBySide	IDS_ARRANGE_SIDE_BY_SIDE	5897	左右并排	Side by side	
+ArrangeStacked	IDS_ARRANGE_STACKED	5898	上下堆叠	Stacked	
+ArrangeColumns	IDS_ARRANGE_COLUMNS	5899	三列排列	Three columns	
+ArrangeTile	IDS_ARRANGE_TILE	5900	平铺	Tile	
+ArrangeMain	IDS_ARRANGE_MAIN	5901	主次排列	Main and secondary	
+ArrangeCascade	IDS_ARRANGE_CASCADE	5902	层叠	Cascade	
+ArrangeApplied	IDS_ARRANGE_APPLIED	5903	已排列窗口	Windows arranged	
+ArrangeUndo	IDS_ARRANGE_UNDO	5904	撤销排列	Undo arrangement	
+ArrangeUnavailable	IDS_ARRANGE_UNAVAILABLE	5905	当前窗口状态或屏幕空间不支持此排列。	The current windows or available screen space do not support this arrangement.	
+ArrangeHint	IDS_ARRANGE_HINT	5906	按住 Shift 排列所有显示器上的窗口	Hold Shift to arrange windows on all monitors	
+ArrangeSingleHint	IDS_ARRANGE_SINGLE_HINT	5907	单窗口：拆出相邻标签页	One window: detach an adjacent tab	
+ArrangeCount	IDS_ARRANGE_COUNT	5908	{windows} 个窗口 · {tabs} 个标签页	{windows} windows · {tabs} tabs	
+SettingsOpenPulseIcon	IDS_SETTINGS_OPEN_PULSE_ICON	5909	点击 Pulse 图标	Clicking the Pulse icon	
+SettingsNewWindowShows	IDS_SETTINGS_NEW_WINDOW_SHOWS	5910	新窗口显示	New windows show	
+SettingsSecOpenWindows	IDS_SETTINGS_SEC_OPEN_WINDOWS	5911	打开与多窗口	Opening and multiple windows	
+SettingsSecArrangeWindows	IDS_SETTINGS_SEC_ARRANGE_WINDOWS	5912	窗口排列	Window arrangement	
+SettingsArrangeMinimized	IDS_SETTINGS_ARRANGE_MINIMIZED	5913	包含最小化窗口	Include minimized windows	
+SettingsArrangeGap	IDS_SETTINGS_ARRANGE_GAP	5914	窗口间距	Window gap	
+OpenWindowActivate	IDS_OPEN_WINDOW_ACTIVATE	5915	激活已有窗口	Activate window	
+OpenWindowStartup	IDS_OPEN_WINDOW_STARTUP	5916	启动位置	Startup	
+OpenWindowThisPc	IDS_OPEN_WINDOW_THIS_PC	5917	此电脑	This PC	
+ArrangeGapNone	IDS_ARRANGE_GAP_NONE	5918	无间距	No gap	
+ArrangeGapSix	IDS_ARRANGE_GAP_SIX	5919	6 DIP	6 DIP	
+OpenBusyNewWindow	IDS_OPEN_BUSY_NEW_WINDOW	5920	当前窗口正在操作，已在新窗口打开	Opened in a new window because the current window is busy	
+IntegrationHandlerExplorer	IDS_INTEGRATION_HANDLER_EXPLORER	5921	Windows 资源管理器	Windows File Explorer	
+IntegrationHandlerPulse	IDS_INTEGRATION_HANDLER_PULSE	5922	Pulse	Pulse	Pulse
+SettingsOpenPulseIconDesc	IDS_SETTINGS_OPEN_PULSE_ICON_DESC	5923	选择再次打开 Pulse 时的行为	Choose what happens when Pulse is opened again	
+SettingsNewWindowShowsDesc	IDS_SETTINGS_NEW_WINDOW_SHOWS_DESC	5924	选择新窗口首先显示的位置	Choose the initial location for a new window	
+SettingsArrangeMinimizedDesc	IDS_SETTINGS_ARRANGE_MINIMIZED_DESC	5925	排列时还原并包含最小化窗口	Restore and include minimized windows when arranging	
+SettingsArrangeGapDesc	IDS_SETTINGS_ARRANGE_GAP_DESC	5926	设置排列后窗口之间的间距	Set the spacing between arranged windows	
+ArrangeSingleTabHint	IDS_ARRANGE_SINGLE_TAB_HINT	5927	仅一个标签页：复制当前文件夹	One tab: open a copy of the current folder	
+
+OpApplyKnownLead	IDS_OP_APPLY_KNOWN_LEAD	5928	对后续冲突执行相同操作（另有 	Apply to later conflicts (	對後續衝突執行相同操作（另有 
+OpApplyKnownEnd	IDS_OP_APPLY_KNOWN_END	5929	 个已知冲突）	 more currently known)	 個已知衝突）
+
+OpScanningAndCopying	IDS_OP_SCANNING_AND_COPYING	5930	正在扫描并复制	Scanning and copying	正在掃描並複製
+OpDiscoveredPending	IDS_OP_DISCOVERED_PENDING	5931	已发现待处理	Discovered pending	已發現待處理
+
+CopyVerificationSourceChanged	IDS_COPY_VERIFICATION_SOURCE_CHANGED	5932	源文件在复制或校验期间发生变化	The source changed during copying or verification	來源檔案在複製或驗證期間發生變更
+CopyVerificationTargetChanged	IDS_COPY_VERIFICATION_TARGET_CHANGED	5933	目标文件在校验期间被替换或修改	The destination was replaced or modified during verification	目標檔案在驗證期間被取代或修改
+
+Git	IDS_GIT	5934	Git	Git	Git
+PackagedMenuSource	IDS_PACKAGED_MENU_SOURCE	5935	打包应用菜单声明（MSIX）	Packaged app menu declaration (MSIX)	封裝應用程式選單宣告（MSIX）
+PackagedMenuReadOnly	IDS_PACKAGED_MENU_READ_ONLY	5936	由应用包声明，系统级设置只读。可用“在 Pulse 中显示”控制本应用内的菜单。	Declared by an app package; system settings are read-only. Use “Show in Pulse” to control this app’s menu.	由應用程式套件宣告，系統層級設定唯讀。可用「在 Pulse 中顯示」控制本應用程式內的選單。

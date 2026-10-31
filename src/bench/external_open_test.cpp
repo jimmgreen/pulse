@@ -31,6 +31,21 @@ bool Is(const ExternalOpenDecision& d, ExternalOpenAction a, ExternalOpenReason 
 }  // namespace
 
 int main() {
+    {
+        auto w = Idle();
+        w.last_input_tick = kNow;
+        Check(DecideLaunchTarget(1, {w}).action == ExternalOpenAction::Tab, "launch: recent input does not change tab preference");
+        w.busy = true;
+        Check(DecideLaunchTarget(1, {w}).action == ExternalOpenAction::NewWindow, "launch: busy tab target opens window");
+        Check(DecideLaunchTarget(2, {w}).action == ExternalOpenAction::Activate, "launch: activation adds no tab");
+        w.busy = false; w.hidden = true;
+        Check(DecideLaunchTarget(1, {w}).restore, "launch: hidden target restores");
+        w.hidden = false; w.minimized = true;
+        Check(DecideLaunchTarget(2, {w}).restore, "launch: minimized target restores");
+        Check(DecideLaunchTarget(1, {}).action == ExternalOpenAction::NewWindow, "launch: first launch creates window");
+        Check(DecideLaunchTarget(2, {w}, true).action == ExternalOpenAction::NewWindow, "launch: explicit command overrides preference");
+    }
+
     const ExternalOpenBatch none;
     const ExternalOpenTuning tuning;
     using A = ExternalOpenAction;

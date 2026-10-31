@@ -113,7 +113,7 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
     auto segmented=[&](D2D1_RECT_F card,D2D1_RECT_F const* choices,const I* labels,const int* values,int current,H::Region hit,I title,I desc,int count=3,const wchar_t* icon=L"\xE8A4") {
         if(card.bottom<=card.top) return;
         const bool stacked=choices[0].left<card.left+100*scale_;
-        label(card,l10n::Get(title),l10n::Get(desc),icon,stacked ? card.right-16*scale_ : choices[0].left-12*scale_);
+        label(card,l10n::Get(title),title==desc ? L"" : l10n::Get(desc),icon,stacked ? card.right-16*scale_ : choices[0].left-12*scale_);
         painter_.DrawSegmentedTrack(D2D1::RectF(choices[0].left,choices[0].top,choices[count-1].right,choices[count-1].bottom));
         for(int i=0;i<count;++i) {
             fluent::SegmentedItemSpec item{};item.bounds=choices[i];item.text=l10n::Get(labels[i]);
@@ -453,26 +453,18 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
                     D2D1::RectF(r.left+54*scale_,r.top+8*scale_,r.right-16*scale_,r.bottom),
                     compositor_->SmallFormat(),theme.text_secondary);
             }
-            // Read-only tiles: what opens in Pulse right now (registry read-back), faded while off.
-            // DrawIconText's last argument is a size factor: fade with the colour, keep the size.
             const wchar_t* cover_icons[]={L"\xE8B7",L"\xE7F4",L"\xE765"};
             for(int i=0;i<3;++i) {
-                const auto r=lay.integration_cover[i];
-                if(r.bottom<=r.top) continue;
-                const bool active=IntegrationCoverActive(vm,i);
-                const float alpha=master_on ? 1.0f : 0.55f;
-                MakeBrush(dc,WithAlpha(theme.fill_input,theme.fill_input.a*alpha),brFillInput_);
-                MakeBrush(dc,WithAlpha(theme.stroke_card,theme.stroke_card.a*alpha),brStrokeCard_);
-                dc->FillRoundedRectangle(D2D1::RoundedRect(r,6*scale_,6*scale_),brFillInput_.get());
-                dc->DrawRoundedRectangle(D2D1::RoundedRect(r,6*scale_,6*scale_),brStrokeCard_.get(),1);
-                const float mid=(r.top+r.bottom)/2;
-                DrawIconText(r.left+10*scale_,mid-8*scale_,16*scale_,16*scale_,cover_icons[i],L"",
-                    master_on ? theme.accent : WithAlpha(theme.text_secondary,theme.text_secondary.a*0.5f),0.95f);
-                const float check=active ? 22*scale_ : 0.0f;
-                painter_.DrawText(l10n::Get(kIntegrationCover[i]),
-                    D2D1::RectF(r.left+34*scale_,r.top,r.right-8*scale_-check,r.bottom),
-                    compositor_->TextFormat(),master_on ? theme.text : theme.text_secondary);
-                if(active) DrawIconText(r.right-24*scale_,mid-7*scale_,14*scale_,14*scale_,L"\xE73E",L"",theme.accent,0.95f);
+                const auto r=lay.integration_cover[i], c=lay.integration_choice[i];
+                const bool enabled=i==0 ? vm.settings_integration_folders : i==1 ? vm.settings_integration_this_pc : vm.settings_integration_win_e;
+                const int policy=i==1 ? vm.settings_open_this_pc : vm.settings_open_win_e;
+                const I value=!enabled ? I::IntegrationHandlerExplorer : i==0 ? I::IntegrationHandlerPulse : policy==0 ? I::ExternalOpenWindow : I::ExternalOpenTab;
+                label(r,l10n::Get(kIntegrationCover[i]),L"",cover_icons[i],c.top>r.top+30*scale_ ? r.right-16*scale_ : c.left-12*scale_);
+                fluent::ButtonSpec control{};
+                control.bounds=c;control.text=l10n::Get(value);control.drop_down=true;
+                control.state.hovered=master_on && IsHovered(vm,H::SettingsDropdown,10+i);
+                control.state.enabled=master_on;
+                painter_.DrawButton(control);
             }
             {
                 const auto r=lay.integration_options_head;
@@ -539,6 +531,13 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
         segmented(lay.new_tab_open_card,lay.new_tab_open_row,new_tab_open,two_values,vm.settings_new_tab_open,H::SettingsNewTabOpen,I::SettingsNewTabOpen,I::SettingsNewTabOpenDesc,2,L"\xECCD");
         const I external_open[]={I::ExternalOpenSmart,I::ExternalOpenTab,I::ExternalOpenWindow};const int external_values[]={0,1,2};
         segmented(lay.external_open_card,lay.external_open_row,external_open,external_values,vm.settings_external_open,H::SettingsExternalOpen,I::SettingsExternalOpen,I::SettingsExternalOpenDesc,3,L"\xE8AD");
+        const I open_pulse_icon_labels[]={I::ExternalOpenWindow,I::ExternalOpenTab,I::OpenWindowActivate}; const int open_pulse_icon_values[]={0,1,2};
+        segmented(lay.open_pulse_icon_card,lay.open_pulse_icon_row,open_pulse_icon_labels,open_pulse_icon_values,vm.settings_open_pulse_icon,H::SettingsOpenPulseIcon,I::SettingsOpenPulseIcon,I::SettingsOpenPulseIconDesc,3);
+        const I new_window_shows_labels[]={I::OpenWindowStartup,I::OpenWindowThisPc,I::NewTabOpenCurrent}; const int new_window_shows_values[]={0,1,2};
+        segmented(lay.new_window_shows_card,lay.new_window_shows_row,new_window_shows_labels,new_window_shows_values,vm.settings_new_window_shows,H::SettingsNewWindowShows,I::SettingsNewWindowShows,I::SettingsNewWindowShowsDesc,3);
+        toggle(lay.arrange_minimized_row,I::SettingsArrangeMinimized,I::SettingsArrangeMinimizedDesc,L"\xE921",vm.settings_arrange_include_minimized,80);
+        const I arrange_gap_labels[]={I::ArrangeGapNone,I::ArrangeGapSix}; const int arrange_gap_values[]={0,1};
+        segmented(lay.arrange_gap_card,lay.arrange_gap_row,arrange_gap_labels,arrange_gap_values,vm.settings_arrange_gap,H::SettingsArrangeGap,I::SettingsArrangeGap,I::SettingsArrangeGapDesc,2);
         toggle(lay.vertical_tabs_row,I::SettingsVerticalTabs,I::SettingsVerticalTabsDesc,L"\xE8A0",vm.settings_vertical_tabs,23);
         toggle(lay.pinned_names_row,I::PinnedNames,I::PinnedNamesDesc,L"\xE718",vm.show_pinned_tab_names,6);
         toggle(lay.close_tab_double_click_row,I::SettingsCloseTabDoubleClick,I::SettingsCloseTabDoubleClickDesc,L"\xEA39",vm.settings_close_tab_double_click,35);

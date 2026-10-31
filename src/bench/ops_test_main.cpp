@@ -5,7 +5,9 @@
 // bench_data/opstest (created/cleaned by this test). Prints one PASS/FAIL
 // line per check; exit code 0 iff all checks pass.
 #include "../ops/ops_manager.h"
+#include "../common/runtime_log.h"
 #include "../ops/transfer_rate_estimator.h"
+#include "../ops/verification_worker.h"
 #include "../app/update_shutdown.h"
 #include "../ops/clipboard.h"
 #include "../ipc/shell_client.h"
@@ -17,6 +19,7 @@
 #include <oleidl.h>
 #include <shlobj.h>
 #include <winioctl.h>
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -282,14 +285,17 @@ static void CheckDeleteProgress(const std::wstring& srcDir)
     const std::wstring speed_dir = srcDir + L"\\speed-delete";
     MakeDir(speed_dir);
     std::vector<std::wstring> victims;
+    bool fixtures_ready = true;
     for (int i = 0; i < 400; ++i) {
         wchar_t name[64];
         swprintf_s(name, L"s%04d.tmp", i);
         const std::wstring path = speed_dir + L"\\" + name;
         char buf[512] = {};
-        MakeFile(path, buf, sizeof(buf));
+        fixtures_ready = MakeFile(path, buf, sizeof(buf)) && fixtures_ready;
         victims.push_back(path);
     }
+    Check(fixtures_ready, L"all bulk delete fixtures were created");
+    if (!fixtures_ready) return;
     {
         std::lock_guard<std::mutex> lock(g_status_mutex);
         g_status_history.clear();
@@ -301,6 +307,11 @@ static void CheckDeleteProgress(const std::wstring& srcDir)
     const uint64_t task_id = g_ops.Submit(std::move(request));
     const auto started_at = std::chrono::steady_clock::now();
     Check(WaitOpDone(previous), L"bulk realdelete completes");
+    const auto completed = g_ops.Status();
+    Check(completed.phase == ops::OpPhase::Completed && completed.completed_items == victims.size(),
+          L"bulk realdelete confirms every fixture, without failures");
+    Check(std::all_of(victims.begin(), victims.end(), [](const auto& path) { return !Exists(path); }),
+          L"bulk realdelete removed every fixture");
     const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - started_at).count();
 
@@ -331,7 +342,122 @@ static void CheckDeleteProgress(const std::wstring& srcDir)
             static_cast<long long>(elapsed_ms), saw_live_speed ? 1 : 0);
 }
 
+int RunCopyAliasOnly() {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(com)) return 2;
+    l10n::SetLanguage(L"en-US");
+    GUID guid{}; wchar_t guid_text[40]{};
+    if (FAILED(CoCreateGuid(&guid)) || !StringFromGUID2(guid, guid_text, 40)) { CoUninitialize(); return 2; }
+    const auto sandbox = SandboxRoot();
+    if (sandbox.empty()) { CoUninitialize(); return 2; }
+    const auto root = std::filesystem::path(sandbox).parent_path() / (std::wstring(L"copy_alias_") + guid_text);
+    std::error_code ec;
+    if (!std::filesystem::create_directories(root, ec) || ec) { CoUninitialize(); return 2; }
+    const auto source = root / L"source", alias_dir = root / L"aliases", output = root / L"output", outside = root / L"junction-target";
+    for (const auto& dir : {source,alias_dir,output,outside,outside/L"nested"})
+        if (!std::filesystem::create_directory(dir,ec) || ec) { CoUninitialize(); return 2; }
+    const auto file = source / L"payload.bin", expected = root / L"expected.bin";
+    const char payload[] = "controlled alias payload: preserve every byte";
+    for (const auto& path : {file,expected,outside/L"payload.bin",outside/L"nested"/L"leaf.bin"})
+        if (!MakeFile(path.wstring(),payload,sizeof(payload))) { CoUninitialize(); return 2; }
+    const auto target_id = FileId((outside/L"payload.bin").wstring());
+    const auto leaf_id = FileId((outside/L"nested"/L"leaf.bin").wstring());
+    Check(target_id!=0 && leaf_id!=0,L"alias fixture target identities available");
+    std::atomic<bool> cancel{false};
+    ops::SHA256VerificationWorker verifier;
+    const auto sha_matches = [&](const std::filesystem::path& path) {
+        return verifier.Verify(path.wstring(),expected.wstring(),cancel,[] {}).Success();
+    };
+    const auto reparse_bytes = [](const std::filesystem::path& path) {
+        std::vector<BYTE> bytes(MAXIMUM_REPARSE_DATA_BUFFER_SIZE);
+        HANDLE handle = CreateFileW(path.c_str(),0,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_BACKUP_SEMANTICS,nullptr);
+        if (handle == INVALID_HANDLE_VALUE) return std::vector<BYTE>{};
+        DWORD got=0;
+        const BOOL ok=DeviceIoControl(handle,FSCTL_GET_REPARSE_POINT,nullptr,0,bytes.data(),static_cast<DWORD>(bytes.size()),&got,nullptr);
+        CloseHandle(handle);
+        if (!ok) return std::vector<BYTE>{};
+        bytes.resize(got); return bytes;
+    };
+    g_ops.SetJournalPath(L"");
+    g_ops.Start([] {},false);
+    const auto finish = [&] {
+        g_ops.Stop(); CoUninitialize();
+        wprintf(L"[INFO] retained alias fixture: %ls\n",root.c_str());
+        return g_fail ? 1 : 0;
+    };
+    const auto run = [&](ops::OpRequest request) {
+        const auto before = g_ops.Status().completed_ops;
+        const auto status = RunOp(std::move(request));
+        Check(status.completed_ops>before,L"alias operation reaches its own terminal result");
+        return status;
+    };
+    const auto alias = alias_dir / L"payload.bin";
+    Check(CreateHardLinkW(alias.c_str(),file.c_str(),nullptr)!=FALSE,L"OPS-02 isolated hard-link fixture");
+    if (g_fail) return finish();
+    for (const auto type : {ops::OpType::Copy,ops::OpType::Move}) {
+        for (bool reverse : {false,true}) {
+            auto request=SimpleOp(type,{(reverse?alias:file).c_str()},(reverse?source:alias_dir).c_str());
+            request.collision_policy=ops::CollisionPolicy::Replace;
+            const auto result=run(request);
+            Check(result.phase==ops::OpPhase::Completed && result.last_error.empty() &&
+                  FileId(file.wstring())==FileId(alias.wstring()) && sha_matches(file) && sha_matches(alias),
+                  L"OPS-02 hard-link Copy/Move Replace preserves both same-object names");
+        }
+    }
+    const auto junction=root/L"junction";
+    Check(MakeJunction(junction.wstring(),source.wstring()),L"OPS-02 isolated directory junction fixture");
+    if (g_fail) return finish();
+    for (const auto type : {ops::OpType::Copy,ops::OpType::Move}) {
+        for (bool reverse : {false,true}) {
+            const auto input=(reverse?junction:source)/L"payload.bin";
+            auto request=SimpleOp(type,{input.c_str()},(reverse?source:junction).c_str());
+            request.collision_policy=ops::CollisionPolicy::Replace;
+            const auto result=run(request);
+            Check(result.phase==ops::OpPhase::Completed && result.last_error.empty() && sha_matches(file) &&
+                  sha_matches(junction/L"payload.bin") && FileId(file.wstring())==FileId((junction/L"payload.bin").wstring()),
+                  L"OPS-02 junction aliases Copy/Move Replace preserve file in both directions");
+        }
+    }
+    const auto source_link=root/L"source-junction";
+    Check(MakeJunction(source_link.wstring(),outside.wstring()),L"junction source fixture");
+    if (g_fail) return finish();
+    const auto before_link=reparse_bytes(source_link);
+    auto copied_link=run(SimpleOp(ops::OpType::Copy,{source_link.c_str()},output.c_str()));
+    const auto after_link=reparse_bytes(output/L"source-junction");
+    Check(copied_link.phase==ops::OpPhase::Completed && copied_link.last_error.empty() && !before_link.empty() && after_link==before_link,
+          L"source junction copy preserves reparse payload instead of materializing its target tree");
+    Check(sha_matches(outside/L"payload.bin") && sha_matches(outside/L"nested"/L"leaf.bin") &&
+          FileId((outside/L"payload.bin").wstring())==target_id && FileId((outside/L"nested"/L"leaf.bin").wstring())==leaf_id,
+          L"junction target and nested target SHA256 and identities unchanged");
+    const auto symbolic=root/L"file-symlink.bin";
+    BOOL symlink=CreateSymbolicLinkW(symbolic.c_str(),file.c_str(),0x2); // ALLOW_UNPRIVILEGED_CREATE
+    DWORD symlink_error=symlink?ERROR_SUCCESS:GetLastError();
+    if (!symlink && symlink_error==ERROR_INVALID_PARAMETER) {
+        symlink=CreateSymbolicLinkW(symbolic.c_str(),file.c_str(),0);
+        symlink_error=symlink?ERROR_SUCCESS:GetLastError();
+    }
+    if (!symlink && (symlink_error==ERROR_PRIVILEGE_NOT_HELD || symlink_error==ERROR_ACCESS_DENIED || symlink_error==ERROR_NOT_SUPPORTED)) {
+        printf("[SKIP] file symlink creation unavailable: Win32=%lu\n",symlink_error);
+    } else {
+        Check(symlink!=FALSE,L"file symlink fixture creation");
+        if (symlink) {
+            const auto original_reparse=reparse_bytes(symbolic);
+            const auto result=run(SimpleOp(ops::OpType::Copy,{symbolic.c_str()},output.c_str()));
+            Check(result.phase==ops::OpPhase::Completed && result.last_error.empty() && !original_reparse.empty() &&
+                  reparse_bytes(output/L"file-symlink.bin")==original_reparse && sha_matches(file) && sha_matches(output/L"file-symlink.bin"),
+                  L"file symlink copy retains link payload and leaves referenced content unchanged");
+        }
+    }
+    return finish();
+}
+
+int RunRetryTemplateTest(bool memory_only);
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--copy-alias-only") return RunCopyAliasOnly();
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--retry-template-only") return RunRetryTemplateTest(false);
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--retry-template-memory") return RunRetryTemplateTest(true);
     setvbuf(stdout, nullptr, _IONBF, 0);
     // Assertions below use the Simplified texts (" - 副本", "已取消"); the
     // English forms are checked separately.
@@ -783,7 +909,27 @@ int wmain(int argc, wchar_t** argv) {
           L"terminal command escapes quotes and trailing slashes");
 
     // --- Setup sandbox ------------------------------------------------------
-    const std::wstring root = SandboxRoot();
+    const bool conflict_snapshot_only = argc > 1 && std::wstring_view(argv[1]) == L"--conflict-snapshot-only";
+    size_t conflict_workload_count = 128;
+    if (conflict_snapshot_only && argc > 2) {
+        size_t parsed = 0;
+        bool valid = argv[2][0] != L'\0';
+        for (const wchar_t* digit = argv[2]; valid && *digit; ++digit) {
+            if (*digit < L'0' || *digit > L'9') { valid = false; break; }
+            parsed = parsed * 10 + static_cast<size_t>(*digit - L'0');
+            if (parsed > 4096) valid = false;
+        }
+        if (!valid || parsed < 16 || argc > 3) {
+            fprintf(stderr, "[test] conflict count must be an integer from 16 through 4096\n");
+            return 2;
+        }
+        conflict_workload_count = parsed;
+    }
+    const auto sandbox_root = SandboxRoot();
+    const std::wstring root = conflict_snapshot_only && !sandbox_root.empty()
+        ? (std::filesystem::path(sandbox_root).parent_path() /
+           (L"conflict_snapshot_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount64()))).wstring()
+        : sandbox_root;
     if (root.empty()) {
         fprintf(stderr, "[test] cannot locate bench_data/opstest\n");
         return 2;
@@ -792,10 +938,13 @@ int wmain(int argc, wchar_t** argv) {
     std::wstring dstDir = root + L"\\dst";
     // Exact, workspace-contained sandbox path.
     std::error_code cleanup_error;
-    std::filesystem::remove_all(std::filesystem::path(root), cleanup_error);
-    MakeDir(root);
-    MakeDir(srcDir);
-    MakeDir(dstDir);
+    if (!conflict_snapshot_only) std::filesystem::remove_all(std::filesystem::path(root), cleanup_error);
+    if (!cleanup_error) std::filesystem::create_directories(srcDir, cleanup_error);
+    if (!cleanup_error) std::filesystem::create_directories(dstDir, cleanup_error);
+    if (cleanup_error) {
+        fprintf(stderr, "[test] cannot prepare isolated fixture: %s\n", cleanup_error.message().c_str());
+        return 2;
+    }
 
     const char payload[] = "pulse ops self-test payload";
     MakeFile(srcDir + L"\\a.txt", payload, sizeof(payload) - 1);
@@ -820,6 +969,150 @@ int wmain(int argc, wchar_t** argv) {
     });
     Sleep(800); // let the ops worker bring up ShellClient before direct IPC calls
     fprintf(stderr, "[test] ops started\n");
+
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--conflict-snapshot-only") {
+        wprintf(L"[INFO] conflict fixture: %ls\n", root.c_str());
+        Check(diagnostics::runtime::Initialize(root + L"\\conflict-diagnostics", "conflict_test"), L"snapshot diagnostics initialized");
+        const auto finish = [&] {
+            g_ops.Stop();
+            diagnostics::runtime::Flush(); diagnostics::runtime::Shutdown();
+            CoUninitialize();
+            return g_fail ? 1 : 0;
+        };
+        if (g_fail) return finish();
+        for (const auto choice : {ops::ConflictChoice::Skip, ops::ConflictChoice::Replace,
+                                  ops::ConflictChoice::KeepBoth}) {
+            const auto source = srcDir + L"\\snapshot-" + std::to_wstring(static_cast<int>(choice));
+            const auto target = dstDir + L"\\snapshot-" + std::to_wstring(static_cast<int>(choice));
+            MakeDir(source); MakeDir(target);
+            ops::OpRequest request;
+            request.type = ops::OpType::Copy; request.dest_dir = target;
+            for (size_t i = 0; i < conflict_workload_count; ++i) {
+                const auto name = L"\\item-" + std::to_wstring(i) + L".txt";
+                Check(MakeFile(source + name, "new", 3) && MakeFile(target + name, "old", 3), L"snapshot fixture");
+                if (g_fail) return finish();
+                request.sources.push_back(source + name);
+            }
+            const auto previous = g_ops.Status().completed_ops;
+            const auto begin = std::chrono::steady_clock::now();
+            g_ops.Submit(request);
+            size_t count = 0; uint64_t token = 0; bool counts_ok = true;
+            while (g_ops.Status().completed_ops == previous &&
+                   std::chrono::steady_clock::now() - begin < std::chrono::seconds(30 + conflict_workload_count / 16)) {
+                if (const auto info = g_ops.PendingConflict(); info && info->token != token) {
+                    token = info->token;
+                    counts_ok = counts_ok && count < conflict_workload_count && info->remaining == conflict_workload_count - count;
+                    ++count;
+                    g_ops.ResolveConflict(token, choice, false);
+                }
+                Sleep(1);
+            }
+            Check(count == conflict_workload_count && counts_ok && g_ops.Status().completed_ops > previous &&
+                  g_ops.Status().last_error.empty(), L"snapshot: real conflicts count down and complete");
+            bool content_ok = true;
+            for (const auto& file : request.sources) {
+                const auto name = std::filesystem::path(file).filename().wstring();
+                if (choice == ops::ConflictChoice::Replace)
+                    content_ok = content_ok && FileHash(file) == FileHash(target + L"\\" + name);
+                else {
+                    const auto original = target + L"\\" + name;
+                    content_ok = content_ok && FileHash(file) != FileHash(original) && FileSize(original) == 3;
+                }
+            }
+            size_t outputs = 0, new_copies = 0;
+            for (const auto& item : std::filesystem::directory_iterator(target)) {
+                ++outputs;
+                if (!Exists(source + L"\\" + item.path().filename().wstring())) {
+                    ++new_copies;
+                    content_ok = content_ok && item.is_regular_file() &&
+                        FileHash(item.path().wstring()) == FileHash(request.sources.front());
+                }
+            }
+            if (choice == ops::ConflictChoice::KeepBoth) content_ok = content_ok && new_copies == conflict_workload_count;
+            Check(content_ok && outputs == (choice == ops::ConflictChoice::KeepBoth ? conflict_workload_count * 2 : conflict_workload_count),
+                  L"snapshot: replace, skip and keep-both preserve expected outputs");
+            printf("[INFO] conflict%zu choice=%d elapsed=%.6fs\n", conflict_workload_count, static_cast<int>(choice),
+                   std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count());
+        }
+        for (const auto choice : {ops::ConflictChoice::KeepBoth, ops::ConflictChoice::Skip}) {
+            const auto name = L"folder-" + std::to_wstring(static_cast<int>(choice));
+            const auto folder = srcDir + L"\\" + name;
+            const auto target = dstDir + L"\\directory-case-" + std::to_wstring(static_cast<int>(choice));
+            MakeDir(folder); MakeDir(target);
+            Check(MakeFile(folder + L"\\child.txt", "new", 3) &&
+                  MakeFile(target + L"\\" + name, "old", 3), L"directory snapshot fixture");
+            if (g_fail) return finish();
+            size_t resolved = 0;
+            const auto result = RunConflictOp(SimpleOp(ops::OpType::Copy, {folder.c_str()}, target.c_str()),
+                                               choice, false, &resolved);
+            bool copied_child = false;
+            for (const auto& item : std::filesystem::recursive_directory_iterator(target)) {
+                if (item.is_regular_file() && item.path().filename() == L"child.txt")
+                    copied_child = FileHash(item.path().wstring()) == FileHash(folder + L"\\child.txt");
+            }
+            Check(resolved == 1 && result.last_error.empty() &&
+                  copied_child == (choice == ops::ConflictChoice::KeepBoth) &&
+                  FileSize(target + L"\\" + name) == 3,
+                  L"snapshot: directory rename updates child target; directory skip omits child");
+        }
+        const auto a = srcDir + L"\\dynamic-a.txt";
+        const auto b = srcDir + L"\\dynamic-b.txt";
+        Check(MakeFile(a, "new", 3) && MakeFile(b, "new", 3) &&
+              MakeFile(dstDir + L"\\dynamic-a.txt", "old", 3), L"dynamic snapshot fixture");
+        if (g_fail) return finish();
+        const auto previous = g_ops.Status().completed_ops;
+        g_ops.Submit(SimpleOp(ops::OpType::Copy, {a.c_str(), b.c_str()}, dstDir.c_str()));
+        size_t count = 0; uint64_t token = 0;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (g_ops.Status().completed_ops == previous && std::chrono::steady_clock::now() < deadline) {
+            if (const auto info = g_ops.PendingConflict(); info && info->token != token) {
+                token = info->token;
+                if (++count == 1) Check(MakeFile(dstDir + L"\\dynamic-b.txt", "old", 3), L"dynamic destination created");
+                g_ops.ResolveConflict(token, ops::ConflictChoice::Skip, false);
+            }
+            Sleep(1);
+        }
+        Check(count == 2 && g_ops.Status().completed_ops > previous &&
+              FileHash(b) != FileHash(dstDir + L"\\dynamic-b.txt"),
+              L"snapshot: destination created after snapshot is still a real conflict");
+        size_t cancelled_count = 0;
+        RunConflictOp(SimpleOp(ops::OpType::Copy, {a.c_str()}, dstDir.c_str()),
+                      ops::ConflictChoice::Cancel, false, &cancelled_count);
+        Check(cancelled_count == 1 && FileHash(a) != FileHash(dstDir + L"\\dynamic-a.txt"),
+              L"snapshot: cancel preserves existing destination");
+        return finish();
+    }
+
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--restore-index-only") {
+        const auto one = srcDir + L"\\restore-index-one.txt";
+        const auto two = srcDir + L"\\restore-index-two.txt";
+        const auto three = srcDir + L"\\restore-index-three.txt";
+        MakeFile(one, "one", 3); MakeFile(two, "second", 6); MakeFile(three, "third", 5);
+        const auto deleted = RunOp(SimpleOp(ops::OpType::RecycleDelete, {one.c_str(), two.c_str(), three.c_str()}));
+        Check(deleted.last_error.empty() && !Exists(one) && !Exists(two) && !Exists(three),
+              L"restore index fixture recycles only three isolated files");
+        const auto restored = RunOp(SimpleOp(ops::OpType::RestoreRecycle, {one.c_str(), two.c_str(), three.c_str()}));
+        Check(restored.last_error.empty() && FileSize(one) == 3 && FileSize(two) == 6 && FileSize(three) == 5,
+              L"real shell batch restores original-path identities through the shared index");
+        DeleteFileW(one.c_str()); DeleteFileW(two.c_str()); DeleteFileW(three.c_str());
+        g_ops.Stop();
+        CoUninitialize();
+        return g_fail ? 1 : 0;
+    }
+
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--completion-refresh-only") {
+        auto request = SimpleOp(ops::OpType::CreateTextFile, {(srcDir + L"\\refresh.txt").c_str()});
+        request.refresh_directories = {srcDir};
+        g_ops.DrainCompletions();
+        const auto status = RunOp(request);
+        const auto completions = g_ops.DrainCompletions();
+        Check(status.phase == ops::OpPhase::Completed && completions.size() == 1 &&
+              completions.front().refresh_directories == request.refresh_directories,
+              L"completion preserves explicitly affected directories for visible-pane refresh");
+        g_ops.Stop();
+        CoUninitialize();
+        return g_fail ? 1 : 0;
+    }
 
     if (argc > 1 && std::wstring_view(argv[1]) == L"--delete-progress-only") {
         CheckDeleteProgress(srcDir);

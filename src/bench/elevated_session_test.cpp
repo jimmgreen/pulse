@@ -10,8 +10,9 @@ void Write(const std::filesystem::path& path, const char* text) { std::ofstream 
 }
 int RunReviewTransferTests();
 int RunReviewTemplateTests();
-int RunReviewRoutingTests();
+int RunReviewRoutingTests(bool invoke_only = false);
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring(argv[1]) == L"--invoke-feedback") return RunReviewRoutingTests(true);
     if (argc == 2 && std::wstring(argv[1]) == L"--review-routing") return RunReviewRoutingTests();
     if (argc == 2 && std::wstring(argv[1]) == L"--review-template") return RunReviewTemplateTests();
     if (argc >= 3 && std::wstring(argv[1]) == L"--template-child") {
@@ -47,6 +48,23 @@ int wmain(int argc, wchar_t** argv) {
     if (!GetTempPathW(MAX_PATH, temp)) return 2;
     const auto root = std::filesystem::path(temp) / (L"pulse_session_test_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount64()));
     std::atomic<bool> cancel{false};
+    if (argc == 2 && std::wstring(argv[1]) == L"--drive-eject") {
+        pulse::storage::VirtualDiskIdentity identity;
+        identity.volume_name = L"\\\\?\\Volume{01234567-89ab-cdef-0123-456789abcdef}\\";
+        identity.image_path = L"C:\\nonexistent-pulse-fixture.vhdx";
+        cancel = true;
+        auto result = EjectWithElevatedHelper(identity, nullptr, cancel);
+        check(result.cancelled && ElevatedHelperProcessIdForTesting() == 0, "eject cancelled before authorization starts no helper");
+        cancel = false;
+        auto invalid = identity; invalid.volume_name = L"C:\\";
+        result = EjectWithElevatedHelper(invalid, nullptr, cancel);
+        check(FAILED(result.hr) && ElevatedHelperProcessIdForTesting() == 0, "eject rejects drive letters before helper launch");
+        result = EjectWithElevatedHelper(identity, nullptr, cancel);
+        check(FAILED(result.hr) && !result.mutated && ElevatedHelperProcessIdForTesting() != 0,
+              "helper returns identity lookup failure without mutation or replay");
+        ShutdownElevatedTransferHelper();
+        return failed ? 1 : 0;
+    }
     if (argc == 2 && std::wstring(argv[1]) == L"--create-folder") {
         std::filesystem::create_directories(root);
         const auto folder = root / L"新建文件夹 授权测试";

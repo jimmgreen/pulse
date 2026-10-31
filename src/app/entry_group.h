@@ -81,6 +81,11 @@ int GroupRank(const fs::DirEntry& e, GroupBy g, const GroupClock& clock);
 int GroupCompare(const fs::DirEntry& a, const fs::DirEntry& b, GroupBy g,
                  const GroupClock& clock, ui::SortColumn col, ui::SortDirection dir);
 
+// Same comparison using ranks prepared once per row (except Location, which
+// still compares parent paths). Date ranks must use the active sort column.
+int GroupCompareRanks(const fs::DirEntry& a, const fs::DirEntry& b, GroupBy g,
+                      ui::SortColumn col, ui::SortDirection dir, int ra, int rb);
+
 // Stable key for collapse state ("d3", "t:pdf", ...).
 std::wstring GroupKey(const fs::DirEntry& e, GroupBy g, const GroupClock& clock);
 

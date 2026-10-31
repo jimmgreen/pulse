@@ -377,6 +377,7 @@ struct PaneViewModel {
     // GetTickCount64 when it appeared / goes (fades out from there); 0 = none.
     uint64_t wall_hint_since = 0;
     uint64_t wall_hint_until = 0;
+    uintptr_t wall_view_identity = 0;
     uint64_t view_generation = 1;
     SortColumn sort_column = SortColumn::Name;
     SortDirection sort_direction = SortDirection::Asc;
@@ -717,6 +718,7 @@ struct DetailsPanelView {
     DWORD attrs = 0;
     uint64_t modified_value = 0;    // thumbnail cache key parts
     uint64_t size_value = 0;
+    uintptr_t wall_view_identity = 0;
     uint64_t view_generation = 1;
     float scroll_y = 0.0f;
     bool preview_only = false;
@@ -1272,6 +1274,12 @@ struct WindowViewModel {
     int settings_startup_open = 0; // 0 last tabs, 1 default location
     int settings_notify_icon = 0;  // 0 always, 1 in the background, 2 never (#57)
     int settings_new_tab_open = 0; // 0 current folder, 1 default location
+    int settings_open_pulse_icon = 0;
+    int settings_new_window_shows = 0;
+    bool settings_arrange_include_minimized = false;
+    int settings_arrange_gap = 0;
+    int settings_open_this_pc = 0;
+    int settings_open_win_e = 0;
     int settings_external_open = 0; // 0 smart, 1 tab, 2 new window (multi-window M7b)
     bool settings_close_last_tab = false;
     bool settings_close_tab_double_click = false;
@@ -1325,7 +1333,7 @@ struct WindowViewModel {
     // 2 row buttons), the hidden-item mask, and where BuiltinMenuItem 0 sits
     // in settings_items.
     int settings_context_tab = 0;
-    uint32_t settings_builtin_hidden = 0;
+    uint64_t settings_builtin_hidden = 0;
     size_t settings_builtin_first = 0;
     // Pulse menu order per BuiltinMenuSurface (normalized), and the preview
     // row being dragged: BuiltinMenuItem or -1, pointer position in px (y,
@@ -1396,6 +1404,7 @@ struct HitTestResult {
         TabNew,
         TabGroup,
         ThemeToggle,
+        WindowManageButton,
         SettingsButton,
         Minimize,
         Maximize,
@@ -1519,6 +1528,9 @@ struct HitTestResult {
         SettingsStartupOpen,
         SettingsNotifyIcon,
         SettingsNewTabOpen,
+        SettingsOpenPulseIcon,
+        SettingsNewWindowShows,
+        SettingsArrangeGap,
         SettingsExternalOpen,
         SettingsBlankClick,
         SettingsHomeFolder,

@@ -85,6 +85,10 @@ ExternalOpenDecision DecideOpenTarget(const ExternalOpenRequest& request,
                                       const ExternalOpenBatch& batch, ExternalOpenPolicy policy,
                                       const ExternalOpenTuning& tuning = {});
 
+// Dedicated launch entries bypass folder deduplication, batches and recent input.
+ExternalOpenDecision DecideLaunchTarget(int mode, const std::vector<ExternalOpenWindow>& windows,
+                                      bool explicit_window = false);
+
 // The batch after a request was opened as `decision`. `opened_tab` is false
 // when nothing new opened (Activate, or an open that failed); `tab_movable`
 // whether the tab it opened in an existing window can move out later.

@@ -420,7 +420,7 @@ int RunSettingsIntegrationUiTest(AppState& s, const wchar_t* output) {
     const float original_scale = s.scale;
     const int original_width = s.compositor.Width(), original_height = s.compositor.Height();
     ui::fluent::Painter painter(&s.compositor);
-    bool labels = true, separate = true, pill_fits = true, tiles = true, tiles_readonly = true;
+    bool labels = true, separate = true, pill_fits = true, tiles = true, choices_hit = true;
     bool extras = true, action_hits = true, bar_fits = true, foot = true, search = true;
     auto nonempty = [](D2D1_RECT_F r) { return r.right > r.left && r.bottom > r.top; };
     auto inside = [](D2D1_RECT_F inner, D2D1_RECT_F outer) {
@@ -505,13 +505,18 @@ int RunSettingsIntegrationUiTest(AppState& s, const wchar_t* output) {
                         (stacked || badge.left >= l.integration_text_right) &&
                         m.top+35*scale+master_h <= (stacked ? badge.top : m.bottom-12*scale)+0.5f;
                     action_hits &= is_action(m, 0);
-                    // Coverage tiles: inside the card, below the heading, never overlapping, never clickable.
+                    // Integration choice rows stay inside the card and obey the master switch.
                     for (int i = 0; i < 3; ++i) {
                         const auto t = l.integration_cover[i];
                         tiles &= nonempty(t) && inside(t, card) && t.top >= l.integration_list_head.bottom-0.5f &&
                             t.bottom <= l.integration_options_head.top+0.5f;
                         for (int j = 0; j < i; ++j) tiles &= !overlap(t, l.integration_cover[j]);
-                        tiles_readonly &= hit(t).region != H::SettingsIntegration;
+                        const auto choice=l.integration_choice[i];
+                        tiles &= nonempty(choice) && inside(choice,t);
+                        const auto choice_hit=hit(choice);
+                        choices_hit &= vm.settings_integration_enabled
+                            ? choice_hit.region==H::SettingsDropdown && choice_hit.index==10+i
+                            : choice_hit.region!=H::SettingsDropdown;
                     }
                     // The extras (recycle bin, takeover, 兼容打开方式): their descriptions fit,
                     // they never overlap, and they are only editable while the switch is on.
@@ -559,7 +564,7 @@ int RunSettingsIntegrationUiTest(AppState& s, const wchar_t* output) {
     check(separate, "integration owns a titled card before startup settings");
     check(pill_fits, "status pill fits beside or below the master text without touching the switch");
     check(tiles, "coverage tiles fit inside the card without overlapping at every width and DPI");
-    check(tiles_readonly, "coverage tiles are read-only");
+    check(choices_hit, "integration dropdowns follow master enabled state");
     check(extras, "the three extras fit narrow and high-DPI layouts without overlapping");
     check(action_hits, "switch always hits; extras only while on; retry and restore only for problems");
     check(bar_fits, "problem bar and its actions fit; healthy states have no bar or action targets");

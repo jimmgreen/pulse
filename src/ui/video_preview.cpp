@@ -1,3 +1,4 @@
+#include "../common/volume_path.h"
 // Keep MF header feature gates consistent with the Windows 8.1 app target.
 // The project NTDDI value is newer than WINVER in current Windows SDK headers.
 #undef NTDDI_VERSION
@@ -170,6 +171,9 @@ struct VideoPreview::Shared {
     State snapshot;
     std::atomic<bool> stop{false};
     std::atomic<bool> finished{false};
+    std::wstring path;
+    std::promise<void> released;
+    std::shared_future<void> release_done = released.get_future().share();
     std::atomic<bool> repaint{true};
     HWND child = nullptr;
     bool card = false;        // set before the player thread starts (Open)
@@ -298,10 +302,11 @@ void VideoPreview::Open(HWND owner, const std::wstring& path, bool card) {
     child_ = CreateWindowExW(0, kVideoClass, L"", WS_CHILD | WS_CLIPSIBLINGS,
         0, 0, 1, 1, owner, nullptr, GetModuleHandleW(nullptr), nullptr);
     state_ = std::make_shared<Shared>();
+    state_->path = path;
     state_->child = child_;
     state_->card = card;
     if (card) state_->snapshot.muted = true;
-    if (!child_) { state_->snapshot.error = HRESULT_FROM_WIN32(GetLastError()); return; }
+    if (!child_) { state_->snapshot.error = HRESULT_FROM_WIN32(GetLastError()); state_->finished = true; state_->released.set_value(); return; }
     SetWindowLongPtrW(child_, GWLP_USERDATA,
         reinterpret_cast<LONG_PTR>(new std::shared_ptr<Shared>(state_)));
     try {
@@ -309,11 +314,13 @@ void VideoPreview::Open(HWND owner, const std::wstring& path, bool card) {
     } catch (...) {
         state_->snapshot.error = E_OUTOFMEMORY;
         state_->finished.store(true);
+        state_->released.set_value();
     }
 }
 
 void VideoPreview::Reset() {
-    if (state_) { state_->stop.store(true); state_->Wake(); }
+    std::erase_if(retired_, [](const auto& weak) { return weak.expired(); });
+    if (state_) { state_->stop.store(true); state_->Wake(); retired_.push_back(state_); }
     if (child_) {
         ShowWindow(child_, SW_HIDE);
         // Retire the render target only after MFPlay has released it. The child
@@ -322,16 +329,40 @@ void VideoPreview::Reset() {
         child_ = nullptr;
     }
     state_.reset();
+    layout_valid_ = false;
     region_size_ = {};
     region_radius_ = 0;
+}
+
+std::vector<std::shared_future<void>> VideoPreview::SuspendVolume(const std::wstring& root) {
+    if (state_ && path::OnVolume(state_->path, root)) Reset();
+    std::vector<std::shared_future<void>> pending;
+    std::erase_if(retired_, [&](const auto& weak) {
+        const auto state = weak.lock();
+        if (!state) return true;
+        if (path::OnVolume(state->path, root)) {
+            state->stop = true;
+            state->Wake();
+            pending.push_back(state->release_done);
+        }
+        return state->finished.load();
+    });
+    return pending;
 }
 
 void VideoPreview::Layout(const RECT& bounds, bool visible, int corner_radius) {
     if (!child_) return;
     const LONG width = (std::max)(1L, bounds.right - bounds.left);
     const LONG height = (std::max)(1L, bounds.bottom - bounds.top);
-    SetWindowPos(child_, nullptr, bounds.left, bounds.top, width, height,
-        SWP_NOACTIVATE | SWP_NOZORDER | (visible ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
+    const RECT normalized{bounds.left, bounds.top, bounds.left + width, bounds.top + height};
+    if (!layout_valid_ || !EqualRect(&normalized, &layout_bounds_) || visible != layout_visible_) {
+        if (SetWindowPos(child_, nullptr, bounds.left, bounds.top, width, height,
+            SWP_NOACTIVATE | SWP_NOZORDER | (visible ? SWP_SHOWWINDOW : SWP_HIDEWINDOW))) {
+            layout_bounds_ = normalized;
+            layout_visible_ = visible;
+            layout_valid_ = true;
+        }
+    }
     if (width != region_size_.cx || height != region_size_.cy || corner_radius != region_radius_) {
         if (state_) state_->Wake();
         region_size_ = SIZE{width, height};
@@ -416,6 +447,7 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
         std::shared_ptr<Shared> state;
         ~Finish() {
             state->finished.store(true);
+            state->released.set_value();
             if (state->stop.load())
                 PostMessageW(state->child, kRetireVideo, 0, reinterpret_cast<LPARAM>(state.get()));
         }

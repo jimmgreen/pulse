@@ -1,4 +1,6 @@
 #include "window_overview_ui.h"
+#include "window_management_ui.h"
+#include "window_arrange_ui.h"
 #include "app_internal.h"
 #include "app_navigation.h"
 #include "tab_transfer.h"
@@ -87,6 +89,7 @@ void Refresh(AppState& s) {
     data.title = l10n::Get(l10n::StringId::WindowOverviewTitle);
     data.hint = l10n::Get(l10n::StringId::WindowOverviewHint);
     data.notice = s.overview.notice;
+    for (int i=0;i<6;++i) data.arrangements.push_back(l10n::Get(WindowArrangeLabel(static_cast<app::WindowArrangeLayout>(i))));
     data.merge_all = l10n::Get(l10n::StringId::WindowOverviewMergeAll);
     data.done = l10n::Get(l10n::StringId::WindowOverviewDone);
     data.switch_to = l10n::Get(l10n::StringId::WindowOverviewSwitch);
@@ -317,6 +320,12 @@ bool WindowOverviewMessage(AppState& s, HWND hwnd, UINT msg, WPARAM wParam, LPAR
         case ui::OverviewHitKind::More:
             GoTo(s, hit.card, std::nullopt);
             return true;
+        case ui::OverviewHitKind::Arrange: {
+            const auto order=s.overview.order;
+            Close(s);
+            ArrangeWindows(s,static_cast<app::WindowArrangeLayout>(hit.card),(GetKeyState(VK_SHIFT)&0x8000)!=0,order);
+            return true;
+        }
         case ui::OverviewHitKind::MergeAll:
             MergeAll(s);
             return true;

@@ -23,13 +23,21 @@ struct RecycleBinLimits {
     uint64_t used_bytes = 0; // the volume's used space (nothing larger can exist)
 };
 RecycleBinLimits ReadRecycleBinLimits(const std::wstring& path, DWORD* volume_error = nullptr);
+// Advisory snapshot only; execution must still check current recycle policy.
+struct RecyclePolicy {
+    bool available = false;
+    DWORD volume_error = 0;
+    RecycleBinLimits limits;
+};
+RecyclePolicy QueryRecyclePolicy(const std::wstring& path);
+
 // A recycle the bin would turn into a permanent delete: the item is larger
 // than the bin. Nothing was deleted.
 constexpr HRESULT kRecycleBinTooSmall = MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0x7A10);
 // S_OK when `path` can go to the bin; COPYENGINE_E_RECYCLE_BIN_NOT_FOUND when
 // the bin is off; kRecycleBinTooSmall when it is larger than the bin. Folders
 // are measured (links not entered), stopping once past the limit. `measure_folders`
-// false: only files are judged (cheap, for the UI thread).
+// false: only files are judged (advisory preflight).
 HRESULT CheckRecycleFits(const std::wstring& path, const RecycleBinLimits& limits, std::atomic<bool>& cancel,
                          bool measure_folders = true);
 // Shell objects one recycle task reuses from item to item: the Recycle Bin,

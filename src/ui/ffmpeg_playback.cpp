@@ -1,4 +1,5 @@
 #include "ffmpeg_playback.h"
+#include "ui_motion.h"
 #include <algorithm>
 #include <cmath>
 #include <cwchar>
@@ -69,7 +70,10 @@ bool ProbeFfmpegMedia(const std::wstring& ffmpeg_exe, const std::wstring& path, 
     bool finished = false;
     while (!cancelled() && GetTickCount64() < deadline)
         if (process.Wait(25)) { finished = true; break; }
-    if (!finished) process.Terminate(cancelled() ? ERROR_CANCELLED : ERROR_TIMEOUT);
+    if (!finished) {
+        process.Terminate(cancelled() ? ERROR_CANCELLED : ERROR_TIMEOUT);
+        process.Wait(INFINITE); // Backend thread: the volume-release barrier needs real process exit.
+    }
     reader.join();
     return finished && !cancelled() && ParseFfmpegMediaInfo(log, info);
 }
@@ -143,6 +147,10 @@ void FfmpegPlayback::Stop() {
     // Killing the decoders unblocks the pipe reads of both threads.
     if (video_) video_->Terminate();
     if (audio_) audio_->Terminate();
+    // Stop runs on the preview backend. Do not report release while a decoder
+    // still owns a file; the eject caller has its own bounded wait.
+    if (video_) video_->Wait(INFINITE);
+    if (audio_) audio_->Wait(INFINITE);
     queue_cv_.notify_all();
     if (wave_event_) SetEvent(wave_event_);
     if (video_reader_.joinable()) video_reader_.join();
@@ -178,7 +186,7 @@ bool FfmpegPlayback::Start(int64_t position, float rate, SIZE box, bool playing)
     playing_ = playing;
     start_ = std::clamp<int64_t>(position, 0, info_.duration > 0 ? info_.duration : INT64_MAX);
     shown_time_ = paused_at_ = wall_base_ = start_;
-    wall_tick_ = GetTickCount64();
+    wall_tick_ = motion::NowMs();
     const std::wstring input = ffmpeg::QuoteArgument(ffmpeg::InputArgument(path_));
     const std::wstring seek = start_ > 0 ? L" -ss " + Seconds(start_) : std::wstring();
     bool any = false;
@@ -358,7 +366,7 @@ int64_t FfmpegPlayback::Clock() {
             MMTIME time{TIME_BYTES};
             waveOutGetPosition(wave_, &time, sizeof(time));
             wall_base_ = start_ + static_cast<int64_t>(static_cast<double>(time.u.cb) * kSecond / kBytesPerSecond * rate_);
-            wall_tick_ = GetTickCount64();
+            wall_tick_ = motion::NowMs();
             wall_clock_ = true;
         } else {
             MMTIME time{TIME_BYTES};
@@ -366,7 +374,7 @@ int64_t FfmpegPlayback::Clock() {
                 return start_ + static_cast<int64_t>(static_cast<double>(time.u.cb) * kSecond / kBytesPerSecond * rate_);
         }
     }
-    return wall_base_ + static_cast<int64_t>((GetTickCount64() - wall_tick_) * 10'000.0 * rate_);
+    return wall_base_ + static_cast<int64_t>((motion::NowMs() - wall_tick_) * 10'000.0 * rate_);
 }
 
 void FfmpegPlayback::SetPlaying(bool playing) {
@@ -384,7 +392,7 @@ void FfmpegPlayback::SetPlaying(bool playing) {
     }
     if (playing) {
         wall_base_ = paused_at_;
-        wall_tick_ = GetTickCount64();
+        wall_tick_ = motion::NowMs();
     }
 }
 

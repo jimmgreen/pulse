@@ -6,6 +6,11 @@
 
 namespace pulse::ipc {
 constexpr uint32_t kPreviewMagic = 0x57565250; // PRVW
+// Grid decode budget protocol v1. Struct sizes stay unchanged; old hosts
+// reject the new request magic instead of interpreting a grant as a request.
+constexpr uint32_t kPreviewBudgetRequestMagic = 0x31425650;
+constexpr uint32_t kPreviewBudgetProposalMagic = 0x31424450;
+constexpr uint32_t kPreviewBudgetGrant = 0x31474250;
 enum class PreviewContentKind : uint32_t {
     None = 0,
     Bitmap = 1,

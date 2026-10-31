@@ -2283,6 +2283,7 @@ void MakeBrush(ID2D1DeviceContext* dc, const D2D1_COLOR_F& c, ComPtr<ID2D1SolidC
 }
 struct TitleChrome {
     float chrome_left = 0.0f;
+    float windows_left = 0.0f;
     float settings_left = 0.0f;
     float settings_w = 0.0f;
     float theme_left = 0.0f;
@@ -2306,9 +2307,10 @@ TitleChrome MakeTitleChrome(float window_w, float scale, float title_h) {
     c.group_right = c.chrome_left - 14.0f * scale;
     c.theme_left = c.group_right - group_pad - c.theme_w;
     c.settings_left = c.theme_left - 1.0f * scale - c.settings_w;   // 1 DIP divider
-    c.group_left = c.settings_left - group_pad;
+    c.windows_left = c.settings_left - 37.0f * scale;
+    c.group_left = c.windows_left - group_pad;
     c.cmd_w = 0.0f;
-    c.cmd_left = c.settings_left;
+    c.cmd_left = c.windows_left;
     const float cmd_pad = 8.0f * scale;
     c.cmd_top = cmd_pad;
     c.cmd_h = std::max(0.0f, title_h - cmd_pad * 2.0f);
@@ -2526,6 +2528,7 @@ struct SettingsLayout {
     D2D1_RECT_F integration_retry{}, integration_restore{};
     D2D1_RECT_F integration_section{}, integration_badge{}, integration_bar{}, integration_list_head{};
     D2D1_RECT_F integration_chip[4]{};
+    D2D1_RECT_F integration_choice[3]{};
     D2D1_RECT_F integration_cover[3]{}, integration_options_head{}, integration_try{}, integration_hint_text{};
     float integration_text_right = 0.0f;
     // Quick Look page: 预览方式 (hover card or Space) and the hover delay.
@@ -2607,6 +2610,13 @@ struct SettingsLayout {
     D2D1_RECT_F notify_icon_row[3]{};
     D2D1_RECT_F new_tab_open_card{};
     D2D1_RECT_F new_tab_open_row[2]{};
+    D2D1_RECT_F open_pulse_icon_card{};
+    D2D1_RECT_F open_pulse_icon_row[3]{};
+    D2D1_RECT_F new_window_shows_card{};
+    D2D1_RECT_F new_window_shows_row[3]{};
+    D2D1_RECT_F arrange_minimized_row{};
+    D2D1_RECT_F arrange_gap_card{};
+    D2D1_RECT_F arrange_gap_row[2]{};
     D2D1_RECT_F external_open_card{};
     D2D1_RECT_F external_open_row[3]{};
     D2D1_RECT_F close_last_tab_row{};

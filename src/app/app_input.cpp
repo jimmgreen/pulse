@@ -22,6 +22,8 @@
 #include "tab_shortcuts.h"
 #include "explorer_shortcuts.h"
 #include "window_overview_ui.h"
+#include "window_management_ui.h"
+#include "window_arrange_ui.h"
 #include "app_updates.h"
 #include "app_internal.h"
 #include "global_search_controller.h"
@@ -1168,11 +1170,12 @@ float MaxScrollForActivePane(AppState& s, ui::PaneViewModel* out) {
 void ClampScroll(AppState& s) {
     app::Tab* tab = ActiveTab(s);
     if (!tab) return;
-    const float maxScroll = MaxScrollForActivePane(s);
+    ui::PaneViewModel pane;
+    const float maxScroll = MaxScrollForActivePane(s, &pane);
     tab->scroll_y = std::clamp(tab->scroll_y, 0.0f, maxScroll);
     s.scrollTargetY = std::clamp(s.scrollTargetY, 0.0f, maxScroll);
-    ui::PaneViewModel pane;
-    app::FillPaneViewModel(pane, *s.pane, &s.places);
+    // Reuse the same model for both axes on every animation frame.
+    pane.scroll_y = tab->scroll_y;
     const float maxScrollX = s.renderer.MaxScrollXForPane(pane, FocusedPaneRect(s));
     tab->scroll_x = std::clamp(tab->scroll_x, 0.0f, maxScrollX);
     s.scrollTargetX = std::clamp(s.scrollTargetX, 0.0f, maxScrollX);
@@ -1212,8 +1215,12 @@ void ResetMarquee(AppState& s) {
     s.marqueeAdditive = false;
     s.marqueeToggle = false;
     s.marqueeRowIndex = -1;
-    s.marqueeBase.clear();
-    s.marqueeBefore.clear();
+    app::ClearMarqueeScratch(s.marqueeBase);
+    app::ClearMarqueeScratch(s.marqueeBefore);
+    s.marqueeDelta.Reset();
+    app::ClearMarqueeScratch(s.marqueeHits);
+    s.marqueeContext = {};
+    s.marqueeRevisionTracked = false;
     s.blankClickPane = nullptr;
     s.blankClickTab = nullptr;
     s.blankClickGeneration = 0;
@@ -1238,10 +1245,20 @@ D2D1_RECT_F MarqueeDisplayRect(const AppState& s) {
 
 // Bug 4: items are tested in content space, so rows scrolled out of view stay
 // selected and the start stays anchored to the item where the drag began.
+static bool MarqueeOwnerMatches(const AppState& s, const app::Tab* tab) {
+    return tab && s.marqueeContext == app::MarqueeContext{
+        s.pane, tab, tab->snapshot.get(), tab->TreeEntries(), tab->view_generation } &&
+        (!s.marqueeRevisionTracked || tab->selection_revision == s.marqueeRevision);
+}
+
 void ApplyMarqueeSelection(AppState& s) {
     s.marqueeSelectionDirty = false;
     app::Tab* tab = ActiveTab(s);
-    if (!tab || !tab->snapshot) return;
+    if (!MarqueeOwnerMatches(s, tab) || !tab->snapshot) {
+        ResetMarquee(s);
+        if (s.hwnd && GetCapture() == s.hwnd) ReleaseCapture();
+        return;
+    }
     const int n = static_cast<int>(tab->EntryCount());
     const D2D1_RECT_F list = ListRect(s);
     const POINT start = MarqueeStartOnScreen(s);
@@ -1256,36 +1273,28 @@ void ApplyMarqueeSelection(AppState& s) {
     const float right = std::max(std::max(static_cast<float>(start.x), curX), left + 1.0f);
     const float bottom = std::max(std::max(static_cast<float>(start.y), curY), top + 1.0f);
 
-    ++tab->selection_revision;
-    tab->all_selected = false;
-    tab->selected.clear();
-    if (s.marqueeAdditive) tab->selected = s.marqueeBase;
-
     ui::PaneViewModel pane;
     app::FillPaneViewModel(pane, *s.pane, &s.places);
+    auto& hits = s.marqueeHits;
+    hits.clear();
     if (n > 0 && right > left && bottom > top) {
-        std::vector<int> hits;
-        s.renderer.ItemsInRectInPane(pane, FocusedPaneRect(s), D2D1::RectF(left, top, right, bottom), hits);
-        for (const int source : hits) {
-            if (IsDetailsTreePlaceholder(*tab, source)) continue;
-            // Ctrl (File Explorer): the band inverts what it covers.
-            if (s.marqueeToggle && s.marqueeBase.contains(source)) tab->selected.erase(source);
-            else tab->selected.insert(source);
-        }
+        s.renderer.ItemsInRectInPane(pane, FocusedPaneRect(s),
+            D2D1::RectF(left, top, right, bottom), hits);
+        std::erase_if(hits, [&](int source) { return IsDetailsTreePlaceholder(*tab, source); });
     }
-
-    if (tab->selected.empty()) {
+    if (s.marqueeDelta.Apply(tab->selected, tab->all_selected, s.marqueeBase,
+            s.marqueeAdditive, s.marqueeToggle, n, hits)) ++tab->selection_revision;
+    s.marqueeRevision = tab->selection_revision;
+    s.marqueeRevisionTracked = true;
+    if (!tab->all_selected && tab->selected.empty()) {
         tab->selected_index = -1;
         return;
     }
-    int focus = s.renderer.ItemFromPointInPane(pane, FocusedPaneRect(s), curX, curY);
-    if (tab->selected.contains(focus)) tab->selected_index = focus;
-    else tab->selected_index = *tab->selected.begin();
+    const int focus = s.renderer.ItemFromPointInPane(pane, FocusedPaneRect(s), curX, curY);
+    if (tab->IsSelected(focus)) tab->selected_index = focus;
+    else if (!tab->all_selected) tab->selected_index = *tab->selected.begin();
+    else if (!tab->IsSelected(tab->selected_index)) tab->selected_index = 0;
     if (tab->selection_anchor < 0) tab->selection_anchor = tab->selected_index;
-    if (static_cast<int>(tab->selected.size()) == n) {
-        tab->all_selected = true;
-        tab->selected.clear();
-    }
 }
 
 namespace {
@@ -1345,6 +1354,11 @@ void TickMarqueeAutoScroll(AppState& s) {
 
 // Called by Render once per frame before the view model is built.
 void UpdateMarqueeFrame(AppState& s) {
+    if ((s.marqueeActive || s.marqueePending) && !MarqueeOwnerMatches(s, ActiveTab(s))) {
+        ResetMarquee(s);
+        if (s.hwnd && GetCapture() == s.hwnd) ReleaseCapture();
+        return;
+    }
     if (s.marqueeAutoScroll) {
         app::Tab* tab = ActiveTab(s);
         if (!s.marqueeActive || !tab || (GetKeyState(VK_LBUTTON) & 0x8000) == 0) {
@@ -1672,6 +1686,11 @@ static int ListDragSlop(const AppState& s, int metric, bool drag) {
 
 // Esc during a marquee puts this selection back.
 static void RememberSelectionForMarquee(AppState& s, app::Tab* tab) {
+    s.marqueeDelta.Reset();
+    s.marqueeHits.clear();
+    s.marqueeContext = {s.pane, tab, tab ? tab->snapshot.get() : nullptr,
+        tab ? tab->TreeEntries() : nullptr, tab ? tab->view_generation : 0};
+    s.marqueeRevisionTracked = false;
     s.marqueeBefore.clear();
     s.marqueeBeforeAll = tab && tab->all_selected;
     s.marqueeBeforeIndex = tab ? tab->selected_index : -1;
@@ -1680,8 +1699,11 @@ static void RememberSelectionForMarquee(AppState& s, app::Tab* tab) {
 
 static bool CancelMarquee(AppState& s) {
     if (!s.marqueeActive && !s.marqueePending) return false;
-    if (app::Tab* tab = ActiveTab(s); tab && s.marqueeActive) {
-        ++tab->selection_revision;
+    if (app::Tab* tab = ActiveTab(s); MarqueeOwnerMatches(s, tab) && s.marqueeActive) {
+        const bool same_selection = tab->all_selected == s.marqueeBeforeAll
+            ? tab->selected == s.marqueeBefore
+            : (tab->all_selected ? s.marqueeBefore.size() : tab->selected.size()) == tab->EntryCount();
+        if (!same_selection) ++tab->selection_revision;
         tab->all_selected = s.marqueeBeforeAll;
         tab->selected = s.marqueeBefore;
         tab->selected_index = s.marqueeBeforeIndex;
@@ -1756,7 +1778,6 @@ void TickTabTransitions(AppState& s) {
 void StartSmoothScroll(AppState& s, float delta, bool horizontal) {
     app::Tab* tab = ActiveTab(s);
     if (!tab) return;
-    ClampScroll(s);
 
     if (s.scrollAnimating && s.scrollHorizontal != horizontal) CancelScrollAnimation(s);
     s.scrollHorizontal = horizontal;
@@ -1766,6 +1787,7 @@ void StartSmoothScroll(AppState& s, float delta, bool horizontal) {
     if (s.scrollAnimating) {
         UpdateSmoothScroll(s);
     } else {
+        ClampScroll(s);
         s.scrollTargetY = tab->scroll_y;
         s.scrollTargetX = tab->scroll_x;
         s.scrollLastUpdateTime = std::chrono::steady_clock::now();
@@ -2785,6 +2807,11 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         }
 
         if (s->marqueePending || s->marqueeActive) {
+            if (!MarqueeOwnerMatches(*s, ActiveTab(*s))) {
+                ResetMarquee(*s);
+                if (GetCapture() == hwnd) ReleaseCapture();
+                return 0;
+            }
             if ((wParam & MK_LBUTTON) == 0) {
                 if (s->marqueeActive) ApplyMarqueeSelection(*s);
                 ResetMarquee(*s);
@@ -2800,12 +2827,9 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                     s->marqueeActive = true;
                     s->marqueePending = false;
                     s->tooltipText.clear();  // the hover tip of the pressed row would ride along
-                    // A marquee from a row clears the selection only now that
-                    // it really is a marquee (a plain click selects the row).
+                    // The first Apply replaces the row selection if needed;
+                    // do not publish a transient empty selection here.
                     if (s->marqueeRowIndex >= 0) {
-                        if (!s->marqueeAdditive) {
-                            if (app::Tab* tab = ActiveTab(*s)) tab->ClearSelection();
-                        }
                         s->marqueeRowIndex = -1;
                     }
                 }
@@ -3371,6 +3395,8 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                     tab->MaterializeSelection();
                     s->marqueeBase = tab->selected;
                 }
+                s->marqueeRevision = tab->selection_revision;
+                s->marqueeRevisionTracked = true;
                 SetCapture(hwnd);
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
@@ -3440,6 +3466,8 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             }
         } else if (hit.region == ui::HitTestResult::ThemeToggle) {
             ToggleTheme(*s);
+        } else if (hit.region == ui::HitTestResult::WindowManageButton) {
+            POINT pt{}; GetCursorPos(&pt); ShowWindowManagementMenu(*s, pt);
         } else if (hit.region == ui::HitTestResult::SettingsButton) {
             // The button is settings' tab: it opens where you left off and
             // closes again on a second click.
@@ -3467,12 +3495,6 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 s->settings.WindowEffect(
                     ui::WindowEffectId(static_cast<ui::WindowEffect>(hit.index)));
             InvalidateRect(hwnd, nullptr, FALSE);
-        } else if (hit.region == ui::HitTestResult::SettingsDensity) {
-            s->settings.RowHeight(hit.index);
-            InvalidateRect(hwnd, nullptr, FALSE);
-        } else if (hit.region == ui::HitTestResult::SettingsTextRender) {
-            s->settings.TextRendering(hit.index);
-            InvalidateRect(hwnd, nullptr, FALSE);
         } else if (hit.region == ui::HitTestResult::SettingsFolderSort ||
                    hit.region == ui::HitTestResult::SettingsMtimeStyle ||
                    hit.region == ui::HitTestResult::SettingsMtimeRange ||
@@ -3480,9 +3502,6 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                    hit.region == ui::HitTestResult::SettingsClickMode ||
                    hit.region == ui::HitTestResult::SettingsNameBand ||
                    hit.region == ui::HitTestResult::SettingsUiFontSize ||
-                   hit.region == ui::HitTestResult::SettingsStartupOpen ||
-                   hit.region == ui::HitTestResult::SettingsNewTabOpen ||
-                   hit.region == ui::HitTestResult::SettingsExternalOpen ||
                    hit.region == ui::HitTestResult::SettingsNotifyIcon ||
                    hit.region == ui::HitTestResult::SettingsBlankClick ||
                    hit.region == ui::HitTestResult::SettingsHomeFolder ||
@@ -3492,9 +3511,6 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             // nesting limit (C1061), so new settings must not lengthen it.
             switch (hit.region) {
             case ui::HitTestResult::SettingsUiFontSize: s->settings.UiFontSize(hit.index); break;
-            case ui::HitTestResult::SettingsStartupOpen: s->settings.StartupOpen(hit.index); break;
-            case ui::HitTestResult::SettingsNewTabOpen: s->settings.NewTabOpen(hit.index); break;
-            case ui::HitTestResult::SettingsExternalOpen: s->settings.ExternalOpen(hit.index); break;
             case ui::HitTestResult::SettingsNotifyIcon: s->settings.NotifyIcon(hit.index); break;
             case ui::HitTestResult::SettingsBlankClick: s->settings.BlankClick(hit.index); break;
             case ui::HitTestResult::SettingsHomeFolder: s->settings.HomeFolder(hit.index); break;
@@ -4145,6 +4161,8 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 tab->MaterializeSelection();
                 s->marqueeBase = tab->selected;
             }
+            s->marqueeRevision = tab ? tab->selection_revision : 0;
+            s->marqueeRevisionTracked = true;
             SetCapture(hwnd);
             InvalidateRect(hwnd, nullptr, FALSE);
         }
@@ -4240,6 +4258,7 @@ LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPA
         // they sometimes needed two clicks.
         switch (hit.region) {
         case ui::HitTestResult::ThemeToggle:
+        case ui::HitTestResult::WindowManageButton:
         case ui::HitTestResult::SettingsButton:
         case ui::HitTestResult::SidebarToggle:
         case ui::HitTestResult::TabNew:
@@ -4660,7 +4679,7 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 s->blankDoubleTime = static_cast<DWORD>(GetMessageTime());
                 s->blankDoublePoint = s->marqueeStart;
                 goBack = goBack && double_click;
-                const int row_click = s->marqueePending ? s->marqueeRowIndex : -1;
+                const int row_click = s->marqueePending && MarqueeOwnerMatches(*s, tab) ? s->marqueeRowIndex : -1;
                 const bool row_ctrl = s->marqueeRowCtrl, row_shift = s->marqueeRowShift;
                 if (s->marqueeActive) ApplyMarqueeSelection(*s);
                 ResetMarquee(*s);
@@ -4892,7 +4911,11 @@ LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             return 0;
         }
         bool shown = false;
-        if (hit.region == ui::HitTestResult::WindowIdentity) {
+        if (hit.region == ui::HitTestResult::WindowManageButton ||
+            (hit.region == ui::HitTestResult::None && my >= 0 && static_cast<float>(my) < s->renderer.TitleBarHeight())) {
+            ShowWindowManagementMenu(*s, sp);
+            shown = true;
+        } else if (hit.region == ui::HitTestResult::WindowIdentity) {
             ShowWindowIdentityMenu(*s, sp);  // M7c
             shown = true;
         } else if (hit.region == ui::HitTestResult::TabGroup && hit.index >= 0 &&
@@ -5374,6 +5397,7 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
             case A::MoveTabToNewWindow: PostMessageW(hwnd, WM_MOVE_TAB_TO_NEW_WINDOW, 0, 0); break;
             // The other windows go away; this one (whose handler runs) stays.
             case A::MergeWindows: MergeAllWindows(*s); break;
+
             // The commands check the selection themselves (as their menu rows).
             case A::GroupIntoFolder: DispatchMenuCommand(*s, app::CmdGroupIntoFolder); break;
             case A::DissolveFolder: DispatchMenuCommand(*s, app::CmdDissolveFolder); break;

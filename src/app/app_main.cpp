@@ -1,3 +1,5 @@
+#include "../ui/thumbnail_retry_timer.h"
+#include "drive_eject_ui.h"
 #include "app_diagnostics.h"
 #include "partial_redraw.h"
 #include "git_ui.h"
@@ -44,6 +46,8 @@
 #include "device_registry.h"
 #include "dup_finder.h"
 #include "operation_intent_ui.h"
+#include "operation_refresh.h"
+#include "startup_idle.h"
 #include "../ui/typography.h"
 #include "../ui/preview_format_catalog.h"
 #include "../common/crash_reporter.h"
@@ -83,11 +87,14 @@
 #include "address_path_open.h"
 #include "settings_transfer_ui.h"
 #include "window_factory.h"
+#include "window_jump_list.h"
 #include "open_routing.h"
 #include "window_identity_ui.h"
 #include "tab_transfer.h"
 #include "tab_detach.h"
 #include "window_merge.h"
+#include "window_arrange_ui.h"
+#include "window_management_test.h"
 #include "reopen_closed.h"
 #include "tray_controller.h"
 #include "ai_launcher.h"
@@ -224,6 +231,10 @@ bool TestAiBroker() {
 #include "host_window.h"
 #include "host_routing.h"
 #include "startup_trace.h"
+#include "../ui/text_contrast_scope.h"
+#ifdef PULSE_WITH_SELFTEST
+#include "startup_perf_probe.h"
+#endif
 #include <commctrl.h>
 #include <dbt.h> // WM_DEVICECHANGE / DEV_BROADCAST_HDR
 #include "../ui/device_crumbs.h"
@@ -331,7 +342,23 @@ static bool TestNestedFrames() {
 }
 // Keeps frames coming while anything moves: the display rate, or about 30 fps
 // when only decorative motion runs. Render and the UI timer both decide here.
+static bool HiddenFrameBaselineForTest() {
+#ifdef PULSE_WITH_SELFTEST
+    static const bool baseline = GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", nullptr, 0) &&
+        GetEnvironmentVariableW(L"PULSE_TEST_HIDDEN_RENDER_BASELINE", nullptr, 0);
+    return baseline;
+#else
+    return false;
+#endif
+}
+static bool WindowNeedsFrames(const AppState& s) {
+    // Explicit offscreen captures still render; ordinary hidden windows retain
+    // their resources and repaint the latest model when shown again.
+    return HiddenFrameBaselineForTest() || s.shot.active || s.menushot ||
+        (IsWindowVisible(s.hwnd) && !IsIconic(s.hwnd));
+}
 static void ArmMotionFrames(AppState& s, bool app_motion) {
+    if (!WindowNeedsFrames(s)) { s.framePump.Disarm(); return; }
     if (!app_motion && s.renderer.DecorativeMotionOnly()) s.framePump.ArmPaced(kDecorativeFrameMs);
     else s.framePump.Arm();
 }
@@ -487,8 +514,10 @@ static void RevealExpandedName(AppState& s) {
     s.scrollHorizontal = false;
     s.scrollLastUpdateTime = std::chrono::steady_clock::now();
     s.scrollAnimating = true;
-    if (s.framePump.Running()) s.framePump.Arm();
-    else if (s.hwnd) InvalidateRect(s.hwnd, nullptr, FALSE);
+    if (s.framePump.Running()) {
+        if (WindowNeedsFrames(s)) s.framePump.Arm();
+        else s.framePump.Disarm();
+    } else if (s.hwnd) InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
 // WM_PAINT's partial damage for the Render it calls (null: a whole frame).
@@ -537,7 +566,9 @@ void Render(AppState& s) {
     const auto draw_start = std::chrono::steady_clock::now();
     dc->BeginDraw();
 
-    bool hc = s.shot_high_contrast || ui::IsHighContrast();
+    const bool system_high_contrast = ui::IsHighContrast();
+    ui::TextContrastScope text_contrast_scope(system_high_contrast, !ui::TextOptimizationBaselineForTest());
+    bool hc = s.shot_high_contrast || system_high_contrast;
     ui::Theme theme = hc ? ui::MakeHighContrastTheme() : ui::MakeTheme(s.darkMode, s.accentColor);
 
     // The staging tray steps once per frame painted, so motion a click or a
@@ -576,6 +607,17 @@ void Render(AppState& s) {
     dc->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
     s.renderer.Render(vm, rect, theme);
     pulse::app::startup_trace::Mark("frame_scene");
+    if (const auto* text_stats = s.compositor.GetLumaTextStats()) {
+        const auto count = [](const char* label, std::uint64_t us) { pulse::app::startup_trace::Counter(label, static_cast<double>(us) / 1000.0); };
+        count("luma_layout_ms", text_stats->layout_time_us);
+        count("luma_draw_ms", text_stats->draw_time_us);
+        count("luma_frame_end_ms", text_stats->frame_end_time_us);
+        count("luma_recording_end_ms", text_stats->recording_end_time_us);
+        count("luma_shaping_ms", text_stats->shaping_time_us);
+        count("luma_raster_ms", text_stats->raster_time_us);
+        count("luma_upload_ms", text_stats->upload_time_us);
+        count("luma_composition_ms", text_stats->composition_time_us);
+    }
     TickDragLanding(s);
     s.renderer.DrawHoverPreview(hover_card, rect, theme, hc);  // also the dwell line, and stops a video
     s.renderer.DrawStarFlight(theme);
@@ -604,6 +646,9 @@ void Render(AppState& s) {
     if (!hidden_capture) s.compositor.Present(partial ? &damage_px : nullptr);
     else s.compositor.ForceFullFrame();
     pulse::app::startup_trace::Mark("frame_present");
+#ifdef PULSE_WITH_SELFTEST
+    if (!hidden_capture) app::startup_perf_probe::Presented(s.hwnd);
+#endif
     const auto present_end = std::chrono::steady_clock::now();
     // Test instances report each window's first presented frame to the
     // debugger output on the QPC clock, so a harness can time Ctrl+N to the
@@ -664,6 +709,7 @@ void Render(AppState& s) {
     }
     if (const UINT caret = s.renderer.CaretBlinkDueMs()) SetTimer(s.hwnd, kTimerDrawnCaret, caret, nullptr);
     else KillTimer(s.hwnd, kTimerDrawnCaret);
+    ui::ArmThumbnailRetryTimer(s.hwnd, s.renderer.ThumbnailRetryDeadline());
 }
 
 // The session used to be written only in WM_DESTROY, so a Windows shutdown,
@@ -977,6 +1023,7 @@ static LRESULT HandleSystemBroadcast(AppState& s, app::SystemBroadcast kind, WPA
         });
         return 0;
     case app::SystemBroadcast::Volumes:
+        app::InvalidateDriveEjectableCache();
         // The sidebar model is built once, so rebuild it here instead of
         // waiting for a language switch or a restart.
         RefreshSidebarModel(s);
@@ -1127,6 +1174,13 @@ static bool RouteUserShortcut(AppState& s, HWND hwnd, UINT msg, WPARAM wParam, L
     if (app::IsModifierKey(static_cast<UINT>(wParam))) return false;
     const app::KeyRoute route = app::RouteKey(app::ActiveKeymap(),
         app::CurrentChord(static_cast<UINT>(wParam)), lParam);
+    if (route.action >= app::KeyAction::ArrangeSideBySide && route.action <= app::KeyAction::ArrangeCascade) {
+        const int layout=static_cast<int>(route.action)-static_cast<int>(app::KeyAction::ArrangeSideBySide);
+        ArrangeWindows(s,static_cast<app::WindowArrangeLayout>(layout));
+        g_shortcut_eat_char=true;
+        result=0;
+        return true;
+    }
     if (route.kind == app::KeyRoute::Pass) return false;
     g_shortcut_eat_char = true;
     if (route.kind == app::KeyRoute::Swallow) {
@@ -1286,13 +1340,14 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         s->renderer.SetCompositor(&s->compositor);
         s->renderer.SetScale(s->scale);
         s->renderer.SetIconNotifyWindow(hwnd);
+        InheritDriveEjectSuspension(*s);
         // The association watch, Quick Look and the operations window wait
         // for WM_DEFERRED_STARTUP, after the first frame: together they cost
         // the cold start about 150 ms. Later windows build Quick Look and the
         // operations window on first use (ToggleQuickPreview,
         // EnsureOperationWindow); each is a hidden window that cost every
         // Ctrl+N about 25 ms.
-        if (init_core) PostMessageW(hwnd, WM_DEFERRED_STARTUP, 0, 0);
+        if (init_core) app::ScheduleStartupIdle(hwnd, 0);
 
         s->window_tabs.EnsureDefault();
         BindCurrentLayout(*s);
@@ -1335,7 +1390,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 // (decimal), without touching the user's context_menu.json.
                 wchar_t mask[16]{};
                 if (GetEnvironmentVariableW(L"PULSE_TEST_BUILTIN_HIDDEN", mask, ARRAYSIZE(mask)) > 0) {
-                    s->ctxMenuPrefs.builtin_hidden = static_cast<uint32_t>(wcstoul(mask, nullptr, 10));
+                    s->ctxMenuPrefs.builtin_hidden = static_cast<uint64_t>(wcstoull(mask, nullptr, 10));
                     s->ctxMenuPrefs.persist = false;
                 }
                 // PULSE_TEST_BUILTIN_ORDER0/1/2: comma-joined row keys per surface.
@@ -1386,6 +1441,9 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 }
             }
             l10n::Initialize(cs->hInstance, s->appPrefs.language);
+            if (!s->isolatedTest && !s->shot.active && !s->menushot &&
+                !s->colorpickshot && !s->colorpickdialog && !ShellTagHeadlessLaunch())
+                app::UpdateWindowJumpList();
             if (s->shot.update_available) {
                 s->update_result_ready = true;
                 s->update_result.update_available = true;
@@ -1627,6 +1685,20 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         AddClipboardFormatListener(hwnd);
 
         if (init_core) {
+            const bool explicit_launch = s->open_path == L"pulse:win-e" ||
+                s->open_path == L"pulse:new-window" || s->open_path == L"pulse:new-tab" ||
+                s->open_path == L"pulse:this-pc";
+            if (explicit_launch) {
+                const std::wstring launch_path = s->open_path == L"pulse:this-pc" || s->appPrefs.new_window_shows == 1
+                    ? std::wstring() : s->appPrefs.new_window_shows == 0
+                    ? app::DefaultLocation(s->appPrefs) : s->session_path;
+                s->session_layout_tabs.clear();
+                s->session_tab_groups.clear();
+                s->session_active_layout_tab = 0;
+                s->session_path.clear();
+                s->core.pending_session_windows.clear();
+                s->open_path = launch_path.empty() ? L"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}" : launch_path;
+            }
             // "Open the default location" drops only the saved tabs; the rest of the
             // session (sidebar, details pane, window state) still applies.
             const bool open_default_location =
@@ -1940,7 +2012,14 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
     case WM_SHOWWINDOW:
         // Sent before the window becomes visible; restore full rate right away.
-        if (s && wParam && !IsIconic(hwnd)) NoteUiActivity(*s, hwnd, true);
+        if (s && wParam && !IsIconic(hwnd)) {
+            NoteUiActivity(*s, hwnd, true);
+            if (!HiddenFrameBaselineForTest()) InvalidateRect(hwnd, nullptr, FALSE);
+        }
+        if (s && !wParam && !HiddenFrameBaselineForTest()) {
+            s->framePump.Disarm();
+            SyncUiTimerRate(*s, hwnd, false);
+        }
         break;
 
     case WM_MOUSEACTIVATE:
@@ -1995,6 +2074,10 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (s) {
             s->compositor.Resize(LOWORD(lParam), HIWORD(lParam));
             s->maximized = (wParam == SIZE_MAXIMIZED);
+            if (wParam == SIZE_MINIMIZED && !HiddenFrameBaselineForTest()) {
+                s->framePump.Disarm();
+                SyncUiTimerRate(*s, hwnd, false);
+            }
             if (wParam != SIZE_MINIMIZED && IsWindowVisible(hwnd)) NoteUiActivity(*s, hwnd, true);
             if (s->addressEditing) LayoutAddressEditor(*s);
             if (s->filterEditing && !s->filterFocusPending) LayoutFilterEditor(*s);
@@ -2010,10 +2093,12 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         BeginPaint(hwnd, &ps);
         RECT damage{};
         const bool partial = app::TakePartialDamage(hwnd, ps.rcPaint, &damage);
-        if (s) {
+        if (s && WindowNeedsFrames(*s)) {
             t_paint_damage = partial ? &damage : nullptr;
             Render(*s);
             t_paint_damage = nullptr;
+        } else if (s) {
+            s->framePump.Disarm();
         }
         EndPaint(hwnd, &ps);
         return 0;
@@ -2191,6 +2276,9 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     }
 
     case WM_FRAME_PUMP: {
+#ifdef PULSE_WITH_SELFTEST
+        if (app::startup_perf_probe::report) ++app::startup_perf_probe::frame_wakes;
+#endif
         if (!s) return 0;
         s->framePump.FrameConsumed();
         if (t_render_depth > 0) {  // dispatched by a modal loop inside a frame
@@ -2234,6 +2322,8 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     }
 
     case WM_TIMER: {
+        if (s && wParam == 0xD311) { PollDeletePreflight(*s); return 0; }
+        if (s && ui::HandleThumbnailRetryTimer(hwnd, wParam)) return 0;
         if (s && wParam == kAddressPathOpenTimer) {
             PollAddressPathOpen(*s);
             return 0;
@@ -2280,6 +2370,10 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             return 0;
         }
         if (s && wParam == kTimerUi) {
+#ifdef PULSE_WITH_SELFTEST
+            app::startup_perf_probe::WorkScope tick_work(app::startup_perf_probe::tick_ms);
+            if (app::startup_perf_probe::report) ++app::startup_perf_probe::ticks;
+#endif
             SyncUiTimerRate(*s, hwnd, IsWindowVisible(hwnd) && !IsIconic(hwnd));
             s->uiTimerPacer.NoteTick(GetTickCount64());
             bool dirty = false;
@@ -2411,8 +2505,10 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (s->sidebarScrollbarFade.Moving(now)) s->uiTimerPacer.NoteActivity(now);
             // Scroll positions advance at paint time, once per displayed frame.
             if (s->scrollAnimating) {
-                if (s->framePump.Running()) s->framePump.Arm();
-                else dirty = true;
+                if (s->framePump.Running()) {
+                    if (WindowNeedsFrames(*s)) s->framePump.Arm();
+                    else s->framePump.Disarm();
+                } else dirty = true;
             }
             if (!s->tabTracks.empty() || !s->chipTracks.empty()) {
                 TickTabTransitions(*s);
@@ -2459,8 +2555,18 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 s->trayProbeAt = GetTickCount64();
                 if (s->tray.RefreshExists()) dirty = true;
             }
-            QueueVisibleTagDiscovery(*s);
-            UpdateOperationWindow(*s, false);
+            {
+#ifdef PULSE_WITH_SELFTEST
+                app::startup_perf_probe::WorkScope tags_work(app::startup_perf_probe::tags_ms);
+#endif
+                QueueVisibleTagDiscovery(*s);
+            }
+            {
+#ifdef PULSE_WITH_SELFTEST
+                app::startup_perf_probe::WorkScope ops_work(app::startup_perf_probe::ops_ms);
+#endif
+                UpdateOperationWindow(*s, false);
+            }
             if (dirty) {
                 s->uiTimerPacer.NoteActivity(GetTickCount64());
                 s->core.sessionActivity = GetTickCount64();  // hidden windows get no paint
@@ -2741,6 +2847,9 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
 
+    case WM_DRIVE_EJECT_READY:
+        ApplyDriveEjectReady(s, lParam);
+        return 0;
     case WM_DRIVE_VERB: {
         std::unique_ptr<app::DriveVerbResult> result(reinterpret_cast<app::DriveVerbResult*>(lParam));
         if (s && result) ApplyDriveVerbResult(*s, *result);
@@ -2798,6 +2907,8 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 const bool refresh = st.completed_ops != s->opsCompleted || !completions.empty();
                 s->opsCompleted = st.completed_ops;
                 if (refresh) RequestSidebarRefresh(*s);
+                app::OperationRefreshPlan refresh_plan;
+                bool recycle_changed = false;
                 std::vector<std::wstring> tag_metadata_paths;
                 for (const auto& completed : completions) {
                     // Ask for confirmed index changes on the next tick. Keep any
@@ -2805,18 +2916,26 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     s->changes.last_query = 0;
                     s->changes.last_detail_refresh = 0;
                     // Invalidate both sides of every successful mutation. The
-                    // focused tab refreshes below; background tabs must not
+                    // visible tabs refresh below; background tabs must not
                     // reuse a stale snapshot when they are shown later.
                     for (const auto& source : completed.sources) {
                         const std::wstring parent = fs::ParentPath(source);
-                        if (!parent.empty()) s->store.MarkDirty(parent);
+                        if (!parent.empty()) {
+                            s->store.MarkDirty(parent);
+                            refresh_plan.Add(parent);
+                        }
                     }
                     for (const auto& destination : completed.destinations) {
                         const std::wstring parent = fs::ParentPath(destination);
-                        if (!parent.empty()) s->store.MarkDirty(parent);
+                        if (!parent.empty()) {
+                            s->store.MarkDirty(parent);
+                            refresh_plan.Add(parent);
+                        }
                     }
-                    for (const auto& directory : completed.refresh_directories)
+                    for (const auto& directory : completed.refresh_directories) {
                         s->store.MarkDirty(directory);
+                        refresh_plan.Add(directory);
+                    }
                     if (completed.refresh_only) continue;
                     ApplyOperationIntentCompletion(*s, completed);
                     NoteArrivalCompletion(*s, completed);
@@ -2896,7 +3015,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                                  (completed.type == ops::OpType::RealDelete &&
                                   recycle_visible))
                             BumpRecycleOccupancy(*s, -n);
-                        RefreshRecycleViews(*s, false);
+                        recycle_changed = true;
                     }
                     RefreshStarredViews(*s);
                     RefreshRecentViews(*s);
@@ -2913,12 +3032,27 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     if (finished.type == ops::OpType::EmptyRecycle)
                         ApplyEmptyRecycleFinished(*s, finished.success);
                 }
-                // An op finished: refresh the view (watcher also fires, this is immediate).
-                app::Tab* tab = ActiveTab(*s);
-                if (tab && refresh) {
+                if (recycle_changed) refresh_plan.Add(app::MakeRecyclePath());
+                // Restore destinations in other panes must not wait for a watcher.
+                if (app::Tab* tab = ActiveTab(*s); tab && refresh) {
                     s->store.MarkDirty(tab->current_path);
-                    RefreshActiveTab(*s, RefreshReason::OperationCompleted);
+                    if (tab->current_path.empty()) RefreshActiveTab(*s, RefreshReason::OperationCompleted);
+                    else refresh_plan.Add(tab->current_path);
                 }
+                app::ForEachWindowSharingCore(*s, [&](AppState& window) {
+                    std::vector<std::wstring> visible;
+                    if (const auto* layout = window.window_tabs.Active()) {
+                        for (const auto* pane : layout->VisiblePanes()) {
+                            if (const auto* tab = pane->ActiveTab()) visible.push_back(tab->current_path);
+                        }
+                    }
+                    refresh_plan.RefreshVisible(visible, [&](const std::wstring& directory) {
+                        const auto* active = ActiveTab(window);
+                        if (active && active->current_path == directory)
+                            RefreshActiveTab(window, RefreshReason::OperationCompleted);
+                        else RefreshPath(window, directory, RefreshReason::OperationCompleted);
+                    });
+                });
                 // The assistant's 查看 tabs have no watch; Ctrl+Z brings files back too.
                 if (refresh && !finished_tasks.empty()) AiAssistantRefreshLists(*s);
                 // A drag's cards are waiting over another pane: list the
@@ -3010,9 +3144,8 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     }
 
     case WM_DEFERRED_STARTUP:
-        // Posted by the first window's WM_CREATE, so it runs once the first
-        // frame is on screen; wParam is the step. One step per message lets
-        // input and frames through between them (each costs 25-35 ms). Quick
+        // Scheduled at idle by the first WM_CREATE; wParam is the step.
+        // Directory results and paints take priority over each warmup. Quick
         // Look and the operations window stay warm for the first use; both
         // are also built on demand if used earlier.
         if (s) {
@@ -3034,7 +3167,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 pulse::app::startup_trace::ScheduleFlush(hwnd, 3000);
                 return 0;
             }
-            PostMessageW(hwnd, WM_DEFERRED_STARTUP, wParam + 1, 0);
+            app::ScheduleStartupIdle(hwnd, static_cast<UINT>(wParam + 1));
         }
         return 0;
 
@@ -3305,11 +3438,21 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
 
+    case WM_ARRANGE_WINDOWS:
+        if (s && wParam < 6) ArrangeWindows(*s,static_cast<app::WindowArrangeLayout>(wParam),(GetKeyState(VK_SHIFT)&0x8000)!=0,{},lParam!=0);
+        return 0;
+    case WM_MERGE_ALL_WINDOWS:
+        if (s) MergeAllWindows(*s);
+        return 0;
+    case WM_WINDOW_ARRANGE_UNDO:
+        if (s) UndoWindowArrange(*s, wParam);
+        return 0;
     case WM_NEW_WINDOW:
         // Another window at this window's current folder.
         if (s && s->startupComplete && !s->shot.active && !s->menushot) {
             const app::Tab* tab = ActiveTab(*s);
-            OpenPulseWindow(*s, WindowInit{tab ? tab->current_path : std::wstring()});
+            OpenPulseWindow(*s, WindowInit{s->appPrefs.new_window_shows == 0 ? s->appPrefs.home_folder :
+                s->appPrefs.new_window_shows == 1 ? std::wstring() : tab ? tab->current_path : std::wstring()});
         }
         return 0;
 
@@ -3320,6 +3463,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         break;
 
     case WM_DESTROY: {
+        if (s) CancelDeletePreflight(*s);
         ReleaseDeviceFolderWatch(hwnd);
         // Closing one of several windows (M3f) tears down what the window
         // owns; services, saved state and the shared caches go with the last.
@@ -3906,6 +4050,7 @@ int RunFilePickerOperationsTest();
 #ifdef PULSE_WITH_SELFTEST
 int RunUiModuleAuditTest();
 int RunQuickPreviewAuditTest();
+int RunQuickPreviewFramePerf();
 #endif
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
@@ -3918,6 +4063,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     if (!app::shell_tags::PrepareCommandAudit(__argc, __wargv, tag_com_audit_class)) return 2;
 #endif
 #ifdef PULSE_WITH_SELFTEST
+    if (__argc == 2 && wcscmp(__wargv[1], L"--quick-preview-frame-perf") == 0)
+        return RunQuickPreviewFramePerf();
     if (__argc == 2 && wcscmp(__wargv[1], L"--quick-preview-audit") == 0)
         return RunQuickPreviewAuditTest();
     if (__argc == 2 && wcscmp(__wargv[1], L"--ui-module-audit") == 0)
@@ -4153,6 +4300,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
                 state.shot.width = std::max(320, requestedWidth);
                 state.shot.height = std::max(240, requestedHeight);
             }
+        } else if (wcscmp(__wargv[i], L"--win-e") == 0) {
+            state.shot.path = L"pulse:win-e";
+        } else if (wcscmp(__wargv[i], L"--new-window") == 0) {
+            state.shot.path = L"pulse:new-window";
+        } else if (wcscmp(__wargv[i], L"--new-tab") == 0) {
+            state.shot.path = L"pulse:new-tab";
+        } else if (wcscmp(__wargv[i], L"--this-pc") == 0) {
+            state.shot.path = L"pulse:this-pc";
         } else if (i == __argc - 1 && !IsLaunchSwitch(__wargv[i])) {
             state.shot.path = __wargv[i];
         } else if (!IsLaunchSwitch(__wargv[i]) && state.shot.path.empty()) {
@@ -4401,6 +4556,24 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         !state.colorpickshot && !state.colorpickdialog &&
         app::StartsHiddenInTray(startup_launch, state.appPrefs.start_in_tray) &&
         state.tray_controller.StartHidden(nCmdShow == SW_SHOWMAXIMIZED, state.appPrefs.notify_icon_mode != 2);
+#ifdef PULSE_WITH_SELFTEST
+    app::startup_perf_probe::Start(hwnd, state.isolatedTest, [&state] {
+        app::startup_perf_probe::Listing result;
+        if (auto* tab = ActiveTab(state)) {
+            result.ready = !tab->loading && static_cast<bool>(tab->snapshot);
+            result.entries = tab->EntryCount();
+            result.path = tab->current_path;
+        }
+        return result;
+    }, [&state](const std::wstring& path) { NavigateTo(state, path); }, [&state] {
+        if (GetEnvironmentVariableW(L"PULSE_TEST_HIDDEN_SCROLL", nullptr, 0)) {
+            state.scrollAnimating = true;
+            state.scrollHorizontal = false;
+            state.scrollTargetY = 150.0f;
+            state.scrollLastUpdateTime = std::chrono::steady_clock::now();
+        }
+    });
+#endif
     if (!start_in_tray)
         ShowWindow(hwnd, test_hidden || shell_tag || shell_tag_com ? SW_HIDE
                                                   : state.shot.active ? SW_SHOWNORMAL
@@ -4532,6 +4705,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         DestroyWindow(hwnd);
         OleUninitialize();
         return ok ? 0 : 1;
+    }
+
+    wchar_t window_management_report[32768]{};
+    if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_WINDOW_MANAGEMENT", window_management_report, ARRAYSIZE(window_management_report))) {
+        const int result = RunWindowManagementTest(state, window_management_report);
+        CleanupWindowArrange();
+        DestroyWindow(hwnd);
+        ReleaseWindowStatesAtExit();
+        OleUninitialize();
+        return result;
     }
 
     if (state.colorpickdialog) {
@@ -4718,6 +4901,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     }
     // Later windows' states hold references into the core `state` owns.
     ExitTimer tail;
+    CleanupWindowArrange();
     ReleaseWindowStatesAtExit();
     const uint64_t windows_ms = tail.Lap();
     pulse::app::hang::Stop();

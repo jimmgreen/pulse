@@ -270,6 +270,12 @@ public:
     void StartupOpen(int index);
     void NotifyIcon(int index);
     void NewTabOpen(int index);
+    void OpenPulseIcon(int index);
+    void NewWindowShows(int index);
+    void OpenThisPc(int index);
+    void OpenWinE(int index);
+    void ArrangeGap(int index);
+    void ArrangeMinimized(int index);
     void ExternalOpen(int index);  // plan §6 policy (multi-window M7b)
     void BlankClick(int index);   // 0 nothing, 1 back, 2 up
     void PreviewTrigger(int index);    // 0 hover card, 1 Space only

@@ -1,4 +1,4 @@
-// ui_renderer.cpp — Chrome orchestration (title, toolbar, status, render).
+﻿// ui_renderer.cpp — Chrome orchestration (title, toolbar, status, render).
 #include "legacy_icons.h"
 #include "ui_renderer.h"
 #include "device_crumbs.h"
@@ -13,6 +13,12 @@
 #include "bloom_accent_picker.h"
 #include "typography.h"
 #include "../app/resource.h"
+#ifdef PULSE_STARTUP_TRACE_DIAGNOSTICS
+#include "../app/startup_trace.h"
+#define PULSE_SCENE_MARK(label) app::startup_trace::Mark(label)
+#else
+#define PULSE_SCENE_MARK(label) ((void)0)
+#endif
 #include "../app/places.h"
 #include "../common/text_format.h"
 #include <windowsx.h>
@@ -318,7 +324,7 @@ ToolbarLayout MainRenderer::ToolbarLayoutAt(float w, float create_width, float f
                                           filter_width, pin_count_, selection_span, pins);
     const TitleChrome chrome = MakeTitleChrome(w, scale_, title_bar_height_);
     const float row_top = (title_bar_height_ - 36.0f * scale_) * 0.5f - 4.0f * scale_;
-    const ToolbarLayout row = MakeToolbarLayout(chrome.settings_left - 4.0f * scale_, scale_, row_top,
+    const ToolbarLayout row = MakeToolbarLayout(chrome.windows_left - 4.0f * scale_, scale_, row_top,
                                                 margin_, create_width, left, 0.0f, search_hidden_ ? -1.0f : search_min_dip_);
     out.navigation = row.navigation;
     out.address = row.address;
@@ -1118,15 +1124,22 @@ bool MainRenderer::HoverMotionDamage(D2D1_RECT_F* out) const {
 void MainRenderer::Render(const WindowViewModel& vm, const D2D1_RECT_F& rect,
                           const Theme& theme) {
     if (!compositor_ || !compositor_->Dc()) return;
+    PULSE_SCENE_MARK("scene_enter");
     ++motion_frame_;
     asst_drawn_ = false;   // DrawSettingsAssistant sets it again
     last_frame_overlay_ = OverlayUp(vm);
-    thumbnail_cache_.AdvanceFrame();
+    thumbnail_cache_.AdvanceFrame(notify_hwnd_);
     folder_thumbnail_cache_.BeginFrame();
     struct FolderFrameScope {
         FolderThumbnailCache& cache;
-        ~FolderFrameScope() { cache.EndFrame(); }
-    } folder_frame{folder_thumbnail_cache_};
+        ThumbnailCache& thumbnails;
+        bool& motion_wanted;
+        ~FolderFrameScope() {
+            cache.EndFrame();
+            thumbnails.EndInterestFrame();
+            if (thumbnails.TakeUploadFrameRequest()) motion_wanted = true;
+        }
+    } folder_frame{folder_thumbnail_cache_, thumbnail_cache_, motion_frame_wanted_};
     // One timestamp per frame: every glide and the sidebar width agree.
     motion_now_ = motion::NowMs();
     caret_due_ms_ = 0;
@@ -1166,6 +1179,7 @@ void MainRenderer::Render(const WindowViewModel& vm, const D2D1_RECT_F& rect,
     UpdateBrushes(theme);
     text_background_ = theme.bg;
     painter_.BeginFrame(theme, IsHighContrast());
+    PULSE_SCENE_MARK("scene_resources");
 
     // None effect + selected image: the (optionally blurred) wallpaper covers
     // the window base; the title scrim, one shared sheet and the pane cards
@@ -1183,6 +1197,7 @@ void MainRenderer::Render(const WindowViewModel& vm, const D2D1_RECT_F& rect,
             dc, rect, vm.window_effect, vm.dark,
             (vm.window_effect == WindowEffect::None) ? std::wstring{} : vm.background_image);
     }
+    PULSE_SCENE_MARK("scene_backdrop");
     const LayerAlphas layers = ComputeLayerAlphas(image_mode, backdrop_drawn,
         vm.backdrop_enabled, vm.dark, vm.wallpaper_look, vm.wallpaper_blur, vm.frame_transparency);
     if (!backdrop_drawn && !vm.backdrop_enabled) {
@@ -1221,6 +1236,7 @@ void MainRenderer::Render(const WindowViewModel& vm, const D2D1_RECT_F& rect,
     }
 
     if (!embedded_) DrawTitleBar(vm, rect, theme);
+    PULSE_SCENE_MARK("scene_title");
     // Over a wallpaper or Mica the docked AI panel is a card like the pane.
     ai_panel_.SetGlass(!embedded_ && card_alpha_ < 0.999f && !IsHighContrast(), card_alpha_,
                        CardFrameColor(theme, vm.dark, card_alpha_));
@@ -1244,10 +1260,13 @@ void MainRenderer::Render(const WindowViewModel& vm, const D2D1_RECT_F& rect,
         DrawStatusBar(vm, rect, theme);
     } else {
         DrawToolbar(vm, rect, theme);
+        PULSE_SCENE_MARK("scene_toolbar");
         if (favorites_bar_) DrawFavoritesBar(vm, rect, theme);
         const bool peek = SidebarPeekVisible(rect.right);
         if (!peek) DrawSidebar(vm, rect, theme);
+        PULSE_SCENE_MARK("scene_sidebar");
         DrawPane(vm, rect, theme);
+        PULSE_SCENE_MARK("scene_panes");
         if (vm.details_visible) DrawDetailsPanel(vm, rect, theme);
         else preview_handler_.Sync(notify_hwnd_, {}, L"", 0, 0, 0, 0, vm.dark,
                                    theme.bg, theme.text, false);
@@ -1572,10 +1591,12 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
             DrawTextRect(dc, markFmt.get(), brAccentText_.get(), L"P", x, markY, mark, mark);
         }
     }
+    PULSE_SCENE_MARK("scene_title_logo");
     x += mark + 8.0f * scale_;
     const float brandRight = TitleSidebarWidth(right) - 12.0f * scale_;
     const float nameWidth = MeasureLayoutText(compositor_, compositor_->DwriteFactory(),
         compositor_->HeaderFormat(), L"Pulse");
+    PULSE_SCENE_MARK("scene_title_measure");
     const WindowIdentityGeometry identity = WindowIdentityLayout(vm, right);
     if (identity.hit.right > identity.hit.left && !identity.compact) {
         // Multi-window M7c: this window's dot and name instead of the product name.
@@ -1605,6 +1626,7 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
         }
     }
 
+    PULSE_SCENE_MARK("scene_title_brand");
     if (identity.compact && identity.hit.right > identity.hit.left) {
         // M7c on the rail: the window's dot on the corner of the mark (or of
         // the toggle), ringed in the title bar's color so it stands apart.
@@ -2104,6 +2126,9 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
     MakeBrush(dc, theme.stroke_divider, brStrokeDivider_);
     const float buttonTop = groupTop + 2.0f * scale_;
     const float buttonBottom = groupBottom - 2.0f * scale_;
+    DrawButton(D2D1::RectF(chrome.windows_left, buttonTop, chrome.windows_left + chrome.settings_w, buttonBottom),
+        theme, IsHovered(vm, HitTestResult::WindowManageButton) ? theme.fill_hover : kTransparent,
+        L"\xE8A9", L"W", theme.text, true, true);
     const D2D1_RECT_F settingsRc = D2D1::RectF(chrome.settings_left, buttonTop,
         chrome.settings_left + chrome.settings_w, buttonBottom);
     // Open settings has no tab: the button shows as selected instead, with the
@@ -2551,7 +2576,7 @@ MainRenderer::TabStripMetrics MainRenderer::ComputeTabStrip(
     // button stays empty so the window can still be grabbed there; tabs
     // compact that much earlier instead.
     constexpr float kTabDragReserveDip = 56.0f;
-    const float tabsRight = chrome.settings_left - (8.0f + kTabDragReserveDip) * scale_;
+    const float tabsRight = chrome.windows_left - (8.0f + kTabDragReserveDip) * scale_;
 
     // Group chips: one at the start of each consecutive same-group run. Their
     // widths come out of the strip budget before tabs are sized; positions

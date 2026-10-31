@@ -1,4 +1,4 @@
-#include "wall_aspects.h"
+﻿#include "wall_aspects.h"
 #include "../common/preview_extensions.h"
 #include "../fs/cloud_state.h"
 #include <objbase.h>
@@ -25,7 +25,7 @@ bool IsWallPicture(const std::wstring& name, bool is_dir) {
 namespace {
 
 constexpr size_t kMaxKnown = 200000;     // ~16 bytes of payload each
-constexpr size_t kMaxProbe = 50000;      // per request; the rest come from thumbnails
+constexpr size_t kMaxProbe = 512;      // per request; the rest come from thumbnails
 constexpr ULONGLONG kNotifyMs = 150;
 
 uint16_t Be16(const uint8_t* p) { return static_cast<uint16_t>(p[0] << 8 | p[1]); }
@@ -201,19 +201,49 @@ uint64_t WallAspects::Hash(const std::wstring& path) noexcept {
     return h ? h : 1;
 }
 
-void WallAspects::Lookup(const uint64_t* hashes, float* out, size_t count) const {
+uint64_t WallAspects::ContentHash(const std::wstring& path, uint64_t modified, uint64_t size) noexcept {
+    uint64_t hash = Hash(path);
+    for (const uint64_t value : {modified, size}) {
+        for (unsigned shift = 0; shift < 64; shift += 8) {
+            hash ^= (value >> shift) & 255; hash *= 1099511628211ull;
+        }
+    }
+    return hash ? hash : 1;
+}
+
+bool WallAspects::ChangesSince(uint64_t& version, std::vector<AspectChange>& changes) const {
     std::lock_guard lock(mutex_);
-    if (known_.empty()) return;
+    changes.clear();
+    const uint64_t current = version_.load(std::memory_order_relaxed);
+    const bool complete = version == current || (!changes_.empty() && version >= changes_.front().first - 1);
+    if (complete) for (const auto& [revision, change] : changes_) if (revision > version) changes.push_back(change);
+    version = current;
+    return complete;
+}
+
+bool WallAspects::Lookup(const uint64_t* hashes, float* out, size_t count) const {
+    std::lock_guard lock(mutex_);
+    if (known_.empty()) return false;
+    bool changed = false;
     for (size_t i = 0; i < count; ++i) {
         if (!hashes[i]) continue;
         const auto it = known_.find(hashes[i]);
-        if (it != known_.end()) out[i] = it->second;
+        if (it != known_.end() && out[i] != it->second) {
+            out[i] = it->second;
+            changed = true;
+        }
     }
+    return changed;
 }
 
 bool WallAspects::Store(uint64_t hash, float aspect, float tolerance) {
     if (!hash || !(aspect > 0.0f) || !std::isfinite(aspect)) return false;
     std::lock_guard lock(mutex_);
+    return StoreLocked(hash, aspect, tolerance);
+}
+
+bool WallAspects::StoreLocked(uint64_t hash, float aspect, float tolerance) {
+    if (!hash || !(aspect > 0.0f) || !std::isfinite(aspect)) return false;
     const auto it = known_.find(hash);
     if (it != known_.end()) {
         if (std::fabs(it->second - aspect) <= tolerance * aspect) return false;
@@ -222,7 +252,9 @@ bool WallAspects::Store(uint64_t hash, float aspect, float tolerance) {
         if (known_.size() >= kMaxKnown) known_.clear();
         known_.emplace(hash, aspect);
     }
-    version_.fetch_add(1, std::memory_order_acq_rel);
+    const uint64_t revision = version_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    changes_.push_back({revision, {hash, aspect}});
+    if (changes_.size() > 8192) changes_.pop_front();
     return true;
 }
 
@@ -234,14 +266,76 @@ size_t WallAspects::SizeForTest() const {
 }
 
 void WallAspects::Probe(std::vector<std::pair<uint64_t, std::wstring>> files, HWND notify) {
+    ReplaceDemand(reinterpret_cast<uint64_t>(notify), notify, std::move(files));
+}
+
+void WallAspects::ReplaceDemand(uint64_t owner, HWND notify,
+                               std::vector<std::pair<uint64_t, std::wstring>> files) {
     if (files.size() > kMaxProbe) files.resize(kMaxProbe);
-    std::reverse(files.begin(), files.end());  // folder order first
     std::lock_guard lock(mutex_);
-    queue_ = std::move(files);
-    notify_ = notify;
-    if (running_ || queue_.empty()) return;
+    if (files.empty()) {
+        demands_.erase(owner);
+        NotifyLocked();
+        return;
+    }
+    if (!demands_.contains(owner) && demands_.size() >= 64) return;
+    auto& demand = demands_[owner];
+    if (demand.files == files && demand.notify == notify) {
+        const bool pending = std::any_of(files.begin(), files.end(), [&](const auto& file) {
+            return !known_.contains(file.first) && !demand.attempted.contains(file.first);
+        });
+        if (running_ || !pending) return;
+    }
+    std::unordered_set<uint64_t> retained;
+    for (const auto& file : files) if (demand.attempted.contains(file.first)) retained.insert(file.first);
+    demand.attempted.swap(retained);
+    demand.notify = notify; demand.files = std::move(files);
+    if (running_) return;
     running_ = true;
     if (!TrySubmitThreadpoolCallback(&WallAspects::Work, this, nullptr)) running_ = false;
+}
+
+void WallAspects::RemoveDemand(uint64_t owner) {
+    std::lock_guard lock(mutex_);
+    const auto it = demands_.find(owner);
+    if (it == demands_.end()) return;
+    const HWND window = it->second.notify;
+    demands_.erase(it);
+    if (std::none_of(demands_.begin(), demands_.end(), [window](const auto& entry) {
+        return entry.second.notify == window;
+    })) dirty_windows_.erase(window);
+}
+
+bool WallAspects::WantedLocked(uint64_t hash) const {
+    for (const auto& [owner, demand] : demands_) {
+        (void)owner;
+        for (const auto& file : demand.files) if (file.first == hash) return true;
+    }
+    return false;
+}
+
+bool WallAspects::TakeLocked(std::pair<uint64_t, std::wstring>& file) {
+    auto it = demands_.upper_bound(last_owner_);
+    for (size_t count = 0; count < demands_.size(); ++count) {
+        if (it == demands_.end()) it = demands_.begin();
+        auto& demand = it->second;
+        for (const auto& candidate : demand.files) {
+            if (known_.contains(candidate.first) || !demand.attempted.insert(candidate.first).second) continue;
+            file = candidate; last_owner_ = it->first; return true;
+        }
+        ++it;
+    }
+    return false;
+}
+
+void WallAspects::NotifyLocked() {
+    for (HWND window : dirty_windows_) {
+        const bool live = std::any_of(demands_.begin(), demands_.end(), [window](const auto& entry) {
+            return entry.second.notify == window;
+        });
+        if (live && window) InvalidateRect(window, nullptr, FALSE);
+    }
+    dirty_windows_.clear();
 }
 
 void CALLBACK WallAspects::Work(PTP_CALLBACK_INSTANCE, void* context) {
@@ -254,29 +348,35 @@ void WallAspects::Run() {
     const bool background = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN) != FALSE;
     const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE);
     ULONGLONG last_notify = GetTickCount64();
-    bool dirty = false;
     for (;;) {
         std::pair<uint64_t, std::wstring> file;
-        HWND notify = nullptr;
         {
             std::lock_guard lock(mutex_);
-            notify = notify_;
-            if (queue_.empty()) { running_ = false; break; }
-            file = std::move(queue_.back());
-            queue_.pop_back();
-            if (known_.contains(file.first)) continue;
+            if (!TakeLocked(file)) { NotifyLocked(); running_ = false; break; }
         }
-        if (Store(file.first, ProbeFileAspect(file.second), 0.0f)) dirty = true;
-        const ULONGLONG now = GetTickCount64();
-        if (dirty && now - last_notify >= kNotifyMs) {
-            if (notify) InvalidateRect(notify, nullptr, FALSE);
-            last_notify = now;
-            dirty = false;
-        }
-    }
-    if (dirty) {
+        const auto version_matches = [&] {
+            if (file.first == Hash(file.second)) return true; // Legacy Probe callers.
+            WIN32_FILE_ATTRIBUTE_DATA data{};
+            if (!GetFileAttributesExW(file.second.c_str(), GetFileExInfoStandard, &data)) return false;
+            const uint64_t modified = (static_cast<uint64_t>(data.ftLastWriteTime.dwHighDateTime) << 32) |
+                                      data.ftLastWriteTime.dwLowDateTime;
+            const uint64_t size = (static_cast<uint64_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+            return file.first == ContentHash(file.second, modified, size);
+        };
+        if (!version_matches()) continue;
+        const float aspect = ProbeFileAspect(file.second);
+        if (!version_matches()) continue;
         std::lock_guard lock(mutex_);
-        if (notify_) InvalidateRect(notify_, nullptr, FALSE);
+        if (WantedLocked(file.first) && StoreLocked(file.first, aspect, 0.0f)) {
+            for (const auto& [owner, demand] : demands_) {
+                (void)owner;
+                for (const auto& candidate : demand.files) if (candidate.first == file.first) {
+                    dirty_windows_.insert(demand.notify); break;
+                }
+            }
+        }
+        const ULONGLONG now = GetTickCount64();
+        if (now - last_notify >= kNotifyMs) { NotifyLocked(); last_notify = now; }
     }
     if (SUCCEEDED(com)) CoUninitialize();
     if (background) SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_END);
