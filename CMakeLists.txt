@@ -2238,8 +2238,8 @@ endif()
 
 foreach(address_test address_completion address_features create_progress details_tree_refresh)
     add_executable(pulse_${address_test}_test src/bench/${address_test}_test.cpp $<TARGET_OBJECTS:pulse>)
-    get_target_property(address_libraries pulse LINK_LIBRARIES)
-    target_link_libraries(pulse_${address_test}_test PRIVATE ${address_libraries})
+    # Resolve after dialog modules append their libraries to Pulse.
+    target_link_libraries(pulse_${address_test}_test PRIVATE "$<TARGET_PROPERTY:pulse,LINK_LIBRARIES>")
     foreach(address_property INCLUDE_DIRECTORIES COMPILE_DEFINITIONS COMPILE_OPTIONS LINK_OPTIONS)
         get_target_property(address_value pulse ${address_property})
         if(address_value)

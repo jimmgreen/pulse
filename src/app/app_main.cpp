@@ -4831,6 +4831,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     }
     if (state.shot.active) {
 #ifdef PULSE_WITH_TEST_HOOKS
+        wchar_t assistant_toggle_output[32768]{};
+        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_ASSISTANT_TOGGLE_HIT", nullptr, 0) &&
+            GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", nullptr, 0) &&
+            GetEnvironmentVariableW(L"PULSE_TEST_SETTINGS_FLOW", assistant_toggle_output, ARRAYSIZE(assistant_toggle_output))) {
+            extern int RunAssistantToggleHitTest(const wchar_t*);
+            const int result = RunAssistantToggleHitTest(assistant_toggle_output);
+            DestroyWindow(hwnd); OleUninitialize(); return result;
+        }
         wchar_t dialog_toggle_output[32768]{};
         if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_DIALOG_JUMP_TOGGLES", nullptr, 0) &&
             GetEnvironmentVariableW(L"PULSE_TEST_SETTINGS_FLOW", dialog_toggle_output, ARRAYSIZE(dialog_toggle_output))) {
