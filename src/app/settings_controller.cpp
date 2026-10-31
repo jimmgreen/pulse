@@ -1098,6 +1098,27 @@ bool SettingsController::CaptureGlobalSearchHotkey(uint32_t key, uint32_t modifi
     }
     const auto previous_modifiers = prefs_->global_search_modifiers;
     const auto previous_key = prefs_->global_search_key;
+    Keymap keymap = Keymap::FromPrefs(prefs_->shortcuts);
+    keymap.SetGlobalHotkey({static_cast<uint8_t>(previous_modifiers), static_cast<uint16_t>(previous_key)},
+                          prefs_->global_search_enabled);
+    const KeyChord chord{static_cast<uint8_t>(modifiers), static_cast<uint16_t>(key)};
+    const auto verdict = CheckChord(keymap, KeyAction::GlobalSearch, chord, {});
+    if (verdict.issue == ChordIssue::Duplicate || verdict.issue == ChordIssue::DuplicateFixed) {
+        global_search_error_ = FormatChord(chord) + l10n::Get(l10n::StringId::IsUsedBy) +
+            L" \u201C" + ActionName(verdict.other.action) + L"\u201D " + l10n::Get(l10n::StringId::Text2927);
+        return true;
+    }
+    if (verdict.level == ChordLevel::Block) {
+        global_search_error_ = verdict.issue == ChordIssue::Reserved
+            ? FormatChord(chord) + l10n::Get(l10n::StringId::IsReservedByWindows)
+            : l10n::Get(l10n::StringId::ASystemWideHotkeyNeedsCtrlAltOrWin);
+        return true;
+    }
+    const bool current = prefs_->global_search_enabled && modifiers == previous_modifiers && key == previous_key;
+    if (!current && !ProbeTakenChords({chord}).empty()) {
+        global_search_error_ = l10n::Get(l10n::StringId::GlobalSearchConflict);
+        return true;
+    }
     prefs_->global_search_modifiers = modifiers;
     prefs_->global_search_key = key;
     if (!prefs_->Save()) {

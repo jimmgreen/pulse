@@ -1802,20 +1802,41 @@ int wmain(int argc, wchar_t** argv) {
         ok &= Report("Escape cancels shortcut capture", !settings.global_search_hotkey_capturing() && prefs.global_search_key == VK_SPACE);
         settings.BeginGlobalSearchHotkeyCapture();
         effect = pulse::app::SettingsEffect::None;
-        settings.CaptureGlobalSearchHotkey('K', MOD_CONTROL | MOD_SHIFT);
-        ok &= Report("shortcut capture saves and applies combination", !settings.global_search_hotkey_capturing() && prefs.global_search_key == 'K' && prefs.global_search_modifiers == (MOD_CONTROL | MOD_SHIFT) && pulse::app::HasEffect(effect, pulse::app::SettingsEffect::GlobalSearch));
+        settings.CaptureGlobalSearchHotkey('C', MOD_CONTROL);
+        ok &= Report("search recorder rejects in-app conflicts without changing the binding",
+            settings.global_search_hotkey_capturing() && !settings.global_search_error().empty() &&
+            prefs.global_search_key == VK_SPACE && effect == pulse::app::SettingsEffect::None);
+        settings.CaptureGlobalSearchHotkey('L', MOD_WIN);
+        ok &= Report("search recorder reports Windows reserved combinations",
+            settings.global_search_hotkey_capturing() && !settings.global_search_error().empty() &&
+            prefs.global_search_key == VK_SPACE);
+        UINT taken_key = VK_F13;
+        const UINT taken_modifiers = MOD_CONTROL | MOD_ALT | MOD_SHIFT;
+        for (; taken_key <= VK_F24; ++taken_key)
+            if (RegisterHotKey(nullptr, 0x5C20, taken_modifiers, taken_key)) break;
+        ok &= Report("isolated conflict fixture reserves a shortcut", taken_key <= VK_F24);
+        if (taken_key <= VK_F24) {
+            settings.CaptureGlobalSearchHotkey(taken_key, taken_modifiers);
+            ok &= Report("search recorder reports occupied OS hotkeys before saving",
+                settings.global_search_hotkey_capturing() && !settings.global_search_error().empty() &&
+                prefs.global_search_key == VK_SPACE && effect == pulse::app::SettingsEffect::None);
+            UnregisterHotKey(nullptr, 0x5C20);
+        }
+        settings.CaptureGlobalSearchHotkey(taken_key, taken_modifiers);
+        ok &= Report("released shortcut saves and applies combination", !settings.global_search_hotkey_capturing() && prefs.global_search_key == taken_key && prefs.global_search_modifiers == taken_modifiers && pulse::app::HasEffect(effect, pulse::app::SettingsEffect::GlobalSearch));
         pulse::app::AppPrefs loaded;
         loaded.persist = false;
         loaded.FromJson(prefs.ToJson());
-        ok &= Report("global search preferences round trip", loaded.global_search_enabled && loaded.global_search_key == 'K' && loaded.global_search_modifiers == (MOD_CONTROL | MOD_SHIFT));
+        ok &= Report("global search preferences round trip", loaded.global_search_enabled && loaded.global_search_key == taken_key && loaded.global_search_modifiers == taken_modifiers);
         loaded.FromJson(L"{}");
         ok &= Report("older preferences retain safe defaults", !loaded.global_search_enabled && loaded.global_search_key == VK_SPACE && loaded.global_search_modifiers == MOD_ALT);
         prefs.persist = true; // This executable's data-directory stub is empty, so Save fails without touching disk.
         effect = pulse::app::SettingsEffect::None;
         settings.BeginGlobalSearchHotkeyCapture();
         settings.CaptureGlobalSearchHotkey('L', MOD_ALT);
-        ok &= Report("failed shortcut save rolls back and leaves registration unchanged", prefs.global_search_key == 'K' &&
-            prefs.global_search_modifiers == (MOD_CONTROL | MOD_SHIFT) && effect == pulse::app::SettingsEffect::None && settings.global_search_hotkey_capturing());
+        ok &= Report("failed shortcut save rolls back and leaves registration unchanged", prefs.global_search_key == taken_key &&
+            prefs.global_search_modifiers == taken_modifiers && effect == pulse::app::SettingsEffect::None && settings.global_search_hotkey_capturing() &&
+            settings.global_search_error() == pulse::l10n::Get(pulse::l10n::StringId::GlobalSearchSaveFailed));
         settings.ToggleUi(15);
         ok &= Report("failed toggle save rolls back without registration", prefs.global_search_enabled && effect == pulse::app::SettingsEffect::None);
         prefs.persist = false;
