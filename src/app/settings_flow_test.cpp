@@ -1078,4 +1078,3 @@ int RunSettingsFlowTest(AppState& s,const wchar_t* output) {
     log<<"failures="<<failures<<'\n';return failures ? 1 : 0;
 }
 #endif
-
