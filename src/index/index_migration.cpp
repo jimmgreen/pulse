@@ -192,6 +192,18 @@ bool CopyIndexForMigration(const std::wstring& source, const std::wstring& targe
         if ((a + L"\\").starts_with(b + L"\\") || (b + L"\\").starts_with(a + L"\\"))
             throw std::runtime_error("overlapping directories");
         const auto files = Inventory(from);
+        // Nothing to migrate (an index that was never built, or a machine
+        // pointing the setting back at a location that still holds its old
+        // index): adopt what is already there instead of refusing to switch.
+        // The destination passes the same privacy check as any other target.
+        if (files.empty() && !Inventory(to).empty()) {
+            if (private_target && !ProtectIndexDirectory(to.wstring())) {
+                migration.failure = ERROR_ACCESS_DENIED;
+                throw std::runtime_error("existing root is not private");
+            }
+            migration.failure = 0;
+            return true;
+        }
         for (const auto& existing : Inventory(to)) {
             const auto match = std::find_if(files.begin(), files.end(), [&](const auto& file) {
                 return Lower(file.relative) == Lower(existing.relative) && file.size == existing.size && file.hash == existing.hash;

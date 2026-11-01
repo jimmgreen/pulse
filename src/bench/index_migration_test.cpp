@@ -89,6 +89,22 @@ int main() {
     check(CopyIndexForMigration(empty_source.wstring(), (root / L"empty-target").wstring(), migration, error) &&
           RemoveMigratedIndexSource(migration, error) && !fs::exists(empty_source),
           "migration with only empty shards removes old root");
+    // A fresh index (nothing to migrate) meeting an index already at the
+    // destination - the machine that points the location back at a folder that
+    // still holds its old index - adopts it instead of failing the switch.
+    {
+        const auto adopt_source = root / L"adopt-source";
+        const auto adopt_target = root / L"adopt-target";
+        fs::create_directories(adopt_source);
+        write(adopt_target / base, "existing-index");
+        IndexMigration adopt;
+        check(CopyIndexForMigration(adopt_source.wstring(), adopt_target.wstring(), adopt, error) &&
+              adopt.files.empty() && fs::exists(adopt_target / base),
+              "an empty source adopts the index already at the destination");
+        IndexMigration again;
+        check(CopyIndexForMigration(adopt_source.wstring(), adopt_target.wstring(), again, error),
+              "the adopted destination stays usable on the next attempt");
+    }
     // Exact fixture created by this test; no external paths are enumerated for removal.
     fs::remove_all(root);
     return failures ? 1 : 0;
