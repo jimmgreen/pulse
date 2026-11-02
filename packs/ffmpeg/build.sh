@@ -12,6 +12,7 @@
 set -euo pipefail
 
 VERSION="${1:?ffmpeg version, e.g. 7.1.1}"
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo "Invalid FFmpeg release version" >&2; exit 1; }
 OUT="$(realpath -m "${2:?output directory}")"
 WORK="${WORK:-$PWD/build-pack-ffmpeg}"
 JOBS="${JOBS:-$(nproc)}"
@@ -23,13 +24,15 @@ if [ ! -f "$TARBALL" ]; then
     curl -fsSLO "https://ffmpeg.org/releases/${TARBALL}"
     curl -fsSLO "https://ffmpeg.org/releases/${TARBALL}.asc" || true
 fi
-rm -rf "ffmpeg-${VERSION}"
+SOURCE_DIR="$(realpath -m "$WORK/ffmpeg-${VERSION}")"
+[[ "$SOURCE_DIR" == "$(pwd)/ffmpeg-${VERSION}" ]] || { echo "Source directory outside build workspace" >&2; exit 1; }
+rm -rf "$SOURCE_DIR"
 tar xf "$TARBALL"
 cd "ffmpeg-${VERSION}"
 
 # Filters: scaling / pixel formats / rotation for thumbnails, tiling for
 # storyboards, resampling for audio playback.
-FILTERS=scale,setsar,format,null,anull,transpose,hflip,vflip,select,fps,tile,pad,thumbnail,aresample,aformat,volume,atempo,trim,atrim
+FILTERS=scale,setsar,setpts,subtitles,format,null,anull,transpose,hflip,vflip,select,fps,tile,pad,thumbnail,aresample,aformat,volume,atempo,trim,atrim
 
 ./configure \
     --prefix="$WORK/prefix" \
@@ -37,7 +40,7 @@ FILTERS=scale,setsar,format,null,anull,transpose,hflip,vflip,select,fps,tile,pad
     --pkg-config-flags=--static \
     --extra-ldflags="-static -static-libgcc" \
     --enable-static --disable-shared \
-    --disable-autodetect --enable-w32threads --enable-zlib --enable-libdav1d \
+    --disable-autodetect --enable-w32threads --enable-zlib --enable-libdav1d --enable-libass \
     --disable-everything \
     --disable-network --disable-devices --disable-hwaccels --disable-doc --disable-debug \
     --disable-ffplay --enable-ffmpeg --enable-ffprobe \
@@ -63,6 +66,14 @@ strip "$OUT/ffmpeg.exe" "$OUT/ffprobe.exe"
 cp COPYING.LGPLv2.1 "$OUT/LICENSE-FFmpeg-LGPL-2.1.txt"
 DAV1D_LICENSE="$(find /mingw64/share -ipath '*dav1d*' -iname 'COPYING*' -o -ipath '*dav1d*' -iname 'LICENSE*' | head -n1 || true)"
 [ -n "$DAV1D_LICENSE" ] && cp "$DAV1D_LICENSE" "$OUT/LICENSE-dav1d.txt"
+# Preserve all installed dependency notices, including transitive static libraries
+# (libass, fontconfig, FreeType, FriBidi, HarfBuzz and their dependencies).
+test -d /mingw64/share/licenses/libass
+find /mingw64/share/licenses -type f -print0 | sort -z | while IFS= read -r -d '' notice; do
+    printf '\n===== %s =====\n' "${notice#/mingw64/share/licenses/}"
+    cat "$notice"
+done > "$OUT/LICENSE-dependencies.txt"
+pacman -Q > "$OUT/DEPENDENCIES.txt"
 cat > "$OUT/SOURCE.txt" <<EOF
 Pulse FFmpeg preview pack
 FFmpeg ${VERSION}, built from the unmodified release tarball:
@@ -70,12 +81,16 @@ FFmpeg ${VERSION}, built from the unmodified release tarball:
 Build script and configuration:
   packs/ffmpeg/build.sh in the Pulse repository
 License: GNU Lesser General Public License 2.1 or later (no GPL or nonfree parts).
+Static dependency package versions are recorded in DEPENDENCIES.txt and their
+notices in LICENSE-dependencies.txt. MSYS2 source recipes and source URLs:
+  https://github.com/msys2/MINGW-packages
+The corresponding FFmpeg source tarball is published with this pack release.
 EOF
 "$OUT/ffmpeg.exe" -hide_banner -buildconf > "$OUT/BUILDCONF.txt" 2>&1
 echo "built: $(ls -la "$OUT")"
 
 # Playback requires these filters in the shipped binary, not just a developer FFmpeg.
 "$OUT/ffmpeg.exe" -hide_banner -filters > "$WORK/pack-filters.txt"
-for filter in fps scale format atempo trim atrim; do
+for filter in fps scale format atempo trim atrim setpts subtitles; do
     grep -Eq "[[:space:]]${filter}[[:space:]]" "$WORK/pack-filters.txt"
 done
