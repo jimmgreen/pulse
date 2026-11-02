@@ -34,11 +34,14 @@ cd "ffmpeg-${VERSION}"
 # storyboards, resampling for audio playback.
 FILTERS=scale,setsar,setpts,subtitles,format,null,anull,transpose,hflip,vflip,select,fps,tile,pad,thumbnail,aresample,aformat,volume,atempo,trim,atrim
 
+# libass's static HarfBuzz/Graphite dependency contains C++ objects. Use the
+# C++ linker driver so its runtime follows all archives in the link command.
 ./configure \
     --prefix="$WORK/prefix" \
     --target-os=mingw32 --arch=x86_64 \
     --pkg-config-flags=--static \
-    --extra-ldflags="-static -static-libgcc" \
+    --ld=g++ \
+    --extra-ldflags="-static -static-libgcc -static-libstdc++" \
     --enable-static --disable-shared \
     --disable-autodetect --enable-w32threads --enable-zlib --enable-libdav1d --enable-libass \
     --disable-everything \
