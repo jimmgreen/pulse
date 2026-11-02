@@ -9,7 +9,8 @@
 #
 # Runs in MSYS2 MINGW64 (see .github/workflows/preview-pack-ffmpeg.yml).
 # Usage: packs/ffmpeg/build.sh <ffmpeg-version> <output-dir>
-set -euo pipefail
+set -Eeuo pipefail
+trap 'echo "FFmpeg pack failed at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 VERSION="${1:?ffmpeg version, e.g. 7.1.1}"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo "Invalid FFmpeg release version" >&2; exit 1; }
@@ -17,6 +18,16 @@ OUT="$(realpath -m "${2:?output directory}")"
 WORK="${WORK:-$PWD/build-pack-ffmpeg}"
 JOBS="${JOBS:-$(nproc)}"
 mkdir -p "$WORK" "$OUT"
+# MSYS2 does not necessarily ship upstream copyright notices with libass.
+# Resolve the exact installed upstream version before starting the costly build.
+pacman -Ql mingw-w64-x86_64-libass > "$WORK/libass-package-files.txt"
+LIBASS_VERSION="$(pkg-config --modversion libass)"
+[[ "$LIBASS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid libass version: $LIBASS_VERSION" >&2; exit 1; }
+LIBASS_LICENSE_URL="https://raw.githubusercontent.com/libass/libass/${LIBASS_VERSION}/COPYING"
+curl --fail --location --retry 3 "$LIBASS_LICENSE_URL" -o "$OUT/LICENSE-libass.txt"
+test -s "$OUT/LICENSE-libass.txt"
+grep -q 'ISC License' "$OUT/LICENSE-libass.txt"
+grep -q 'libass contributors' "$OUT/LICENSE-libass.txt"
 cd "$WORK"
 
 TARBALL="ffmpeg-${VERSION}.tar.xz"
@@ -62,6 +73,7 @@ grep -q '^#define CONFIG_NETWORK 0' config.h
 
 make -j"$JOBS"
 make install
+set -x
 cp "$WORK/prefix/bin/ffmpeg.exe" "$WORK/prefix/bin/ffprobe.exe" "$OUT/"
 strip "$OUT/ffmpeg.exe" "$OUT/ffprobe.exe"
 
@@ -71,11 +83,11 @@ DAV1D_LICENSE="$(find /mingw64/share -ipath '*dav1d*' -iname 'COPYING*' -o -ipat
 [ -n "$DAV1D_LICENSE" ] && cp "$DAV1D_LICENSE" "$OUT/LICENSE-dav1d.txt"
 # Preserve all installed dependency notices, including transitive static libraries
 # (libass, fontconfig, FreeType, FriBidi, HarfBuzz and their dependencies).
-test -d /mingw64/share/licenses/libass
 find /mingw64/share/licenses -type f -print0 | sort -z | while IFS= read -r -d '' notice; do
     printf '\n===== %s =====\n' "${notice#/mingw64/share/licenses/}"
     cat "$notice"
 done > "$OUT/LICENSE-dependencies.txt"
+test -s "$OUT/LICENSE-dependencies.txt"
 pacman -Q > "$OUT/DEPENDENCIES.txt"
 cat > "$OUT/SOURCE.txt" <<EOF
 Pulse FFmpeg preview pack
@@ -88,6 +100,7 @@ Static dependency package versions are recorded in DEPENDENCIES.txt and their
 notices in LICENSE-dependencies.txt. MSYS2 source recipes and source URLs:
   https://github.com/msys2/MINGW-packages
 The corresponding FFmpeg source tarball is published with this pack release.
+libass ${LIBASS_VERSION} copyright notice: ${LIBASS_LICENSE_URL}
 EOF
 "$OUT/ffmpeg.exe" -hide_banner -buildconf > "$OUT/BUILDCONF.txt" 2>&1
 echo "built: $(ls -la "$OUT")"
