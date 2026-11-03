@@ -445,6 +445,16 @@ static DWORD ResolveDropTargetImpl(AppState& s, const std::vector<std::wstring>&
         s.dropBadgeY = (float)pt.y;
         InvalidateRect(s.hwnd, nullptr, FALSE);
         return effect;
+    } else if (hit.region == ui::HitTestResult::ColumnStripBlank ||
+               hit.region == ui::HitTestResult::ColumnStripRow) {
+        // Each Miller column owns its listing. Resolve its actual directory
+        // (or its folder row) before the ordinary pane/current-path fallback.
+        // A file row, stale snapshot, or unowned blank area is not a target.
+        s.springRow = -1;
+        s.dropDestDir = ColumnStripDropPath(s, hit);
+        if (s.dropDestDir.empty()) return RejectDropTarget(s);
+        s.dropPaneIndex = hit.pane_index;
+        destName = BaseName(s.dropDestDir);
     } else if (on_strip_tab) {
         s.springRow = -1;
         const app::Tab* view = s.window_tabs.items[static_cast<size_t>(hit.index)]->ActiveFolder();
