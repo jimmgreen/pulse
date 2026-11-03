@@ -8,6 +8,33 @@
 
 namespace pulse::app {
 
+// The source item in a Miller column is independent of the active pane's row.
+// The snapshot and row map must still agree after any asynchronous refresh.
+inline std::wstring ColumnStripRowItemPath(const ColumnStripState& state,
+                                          const std::wstring& current_path,
+                                          int column_id, int row_index) {
+    if (state.for_path.empty() ||
+        _wcsicmp(state.for_path.c_str(), current_path.c_str()) != 0) return {};
+    const ColumnStripColumn* col = nullptr;
+    if (column_id == ui::kColumnStripChildId) {
+        if (!state.child.path.empty()) col = &state.child;
+    } else if (column_id >= 0 && static_cast<size_t>(column_id) < state.ancestors.size()) {
+        col = &state.ancestors[static_cast<size_t>(column_id)];
+    }
+    if (!col || col->path.empty() || row_index < 0 || !col->rows || !col->rows_snapshot ||
+        col->snapshot != col->rows_snapshot ||
+        static_cast<size_t>(row_index) >= col->rows->size()) return {};
+    const int source_index = (*col->rows)[static_cast<size_t>(row_index)];
+    if (source_index < 0 ||
+        static_cast<size_t>(source_index) >= col->rows_snapshot->size()) return {};
+    const fs::DirEntry& item = (*col->rows_snapshot)[static_cast<size_t>(source_index)];
+    if (item.change_record_only || !item.recycle_path.empty() ||
+        item.name.empty() || item.name == L"." || item.name == L"..") return {};
+    std::wstring path = col->path;
+    if (path.back() != L'\\' && path.back() != L'/') path += L'\\';
+    return path + item.name;
+}
+
 // row_hit=false -> the background of this column; row_hit=true -> its folder
 // row. Return empty on any uncertain target rather than guessing a directory.
 inline std::wstring ColumnDropDestination(const ColumnStripState& state,

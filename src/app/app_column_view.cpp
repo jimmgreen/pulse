@@ -1,6 +1,8 @@
 #include "app_internal.h"
 #include "app_column_view.h"
 #include "column_drop_target.h"
+#include "../common/runtime_log.h"
+#include <utility>
 #include "../ui/column_strip_layout.h"
 #include "../ui/ui_renderer.h"
 #include <algorithm>
@@ -165,10 +167,16 @@ void SyncTab(AppState& s, app::Tab& tab) {
     if (state.for_path != tab.current_path) RebuildAncestors(s, tab);
     for (auto& col : state.ancestors) SyncColumn(s, tab, col);
 
-    const std::wstring folder = SelectedFolder(tab);
-    if (!SamePath(folder, state.child.path)) {
-        state.child = {};
-        state.child.path = folder;
+    // Suppress selection-driven child-column reflow until press/drop ends.
+    // A drag in the current body list otherwise shifts the source mid-gesture.
+    const bool pressed_in_this_tab = (s.dragPending || s.columnGesture.armed) &&
+        s.pane && s.pane->ActiveTab() == &tab;
+    if (!pressed_in_this_tab && !s.columnDragActive) {
+        const std::wstring folder = SelectedFolder(tab);
+        if (!SamePath(folder, state.child.path)) {
+            state.child = {};
+            state.child.path = folder;
+        }
     }
     SyncColumn(s, tab, state.child);
 }
@@ -293,7 +301,7 @@ void NoteColumnStripResult(AppState& s, const app::WorkResult& res) {
 }
 
 bool HandleColumnStripMouseDown(AppState& s, const ui::WindowViewModel& vm,
-                                const ui::HitTestResult& hit, int x) {
+                                const ui::HitTestResult& hit, int x, int y) {
     using R = ui::HitTestResult;
     switch (hit.region) {
     case R::PaneColumnLayout:
@@ -317,7 +325,22 @@ bool HandleColumnStripMouseDown(AppState& s, const ui::WindowViewModel& vm,
     }
     case R::ColumnStripRow: {
         app::Tab* tab = TabAtSlot(s, hit.pane_index);
-        if (tab) ClickRow(s, *tab, hit.sub_index, hit.index);
+        if (!tab || !Eligible(*tab)) return true;
+        const std::wstring item = app::ColumnStripRowItemPath(
+            tab->column_strip, tab->current_path, hit.sub_index, hit.index);
+        if (item.empty()) return true;
+        auto& press = s.columnGesture;
+        press.armed = true;
+        press.pane_index = hit.pane_index;
+        press.column_id = hit.sub_index;
+        press.row_index = hit.index;
+        press.press = POINT{x, y};
+        press.view_path = tab->current_path;
+        press.item_path = item;
+        diagnostics::runtime::Event("column_gesture_press",
+            {{"column", static_cast<uint64_t>(hit.sub_index)},
+             {"pane", static_cast<uint64_t>(hit.pane_index)}});
+        SetCapture(s.hwnd);
         return true;
     }
     case R::ColumnStripBlank:
@@ -351,6 +374,25 @@ bool HandleColumnStripMouseDown(AppState& s, const ui::WindowViewModel& vm,
     default:
         return false;
     }
+}
+
+bool FinishColumnStripMouseUp(AppState& s, const ui::HitTestResult& hit) {
+    const AppState::ColumnGesture press = std::exchange(s.columnGesture, {});
+    if (!press.armed) return false;
+    app::Tab* tab = TabAtSlot(s, press.pane_index);
+    if (!tab || !Eligible(*tab) || !SamePath(tab->current_path, press.view_path) ||
+        hit.region != ui::HitTestResult::ColumnStripRow ||
+        hit.pane_index != press.pane_index ||
+        hit.sub_index != press.column_id ||
+        !SamePath(app::ColumnStripRowItemPath(tab->column_strip, tab->current_path,
+                                             hit.sub_index, hit.index), press.item_path)) {
+        diagnostics::runtime::Event("column_gesture_cancel", {{"reason", 1}});
+        return true;
+    }
+    ClickRow(s, *tab, hit.sub_index, hit.index); // Only now commit navigation.
+    diagnostics::runtime::Event("column_gesture_click",
+                                {{"column", static_cast<uint64_t>(hit.sub_index)}});
+    return true;
 }
 
 bool SelectColumnStripRow(AppState& s, const ui::HitTestResult& hit) {
