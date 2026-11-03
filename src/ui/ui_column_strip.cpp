@@ -58,6 +58,9 @@ std::vector<StripDivider> StripDividers(const ColumnStripLayout& strip, const D2
 //  - a column's auto scroll eases to its new place (Smooth spring).
 // State per renderer and pane lives here; frames come from the renderer's
 // frame pump (RequestMotionFrame), asked for only while something moves.
+// Folder switches should not replay a row-by-row reveal. Column selection,
+// hover plates and smooth scrolling retain their existing motion behavior.
+constexpr bool kAnimateColumnCascade = false;
 constexpr float kCascadeSlideDip = 8.0f, kCascadeRowMs = 160.0f, kCascadeStaggerMs = 9.0f;
 constexpr int kCascadeRows = 10;
 constexpr float kStripHoverFadeInMs = 90.0f, kStripHoverFadeOutMs = 120.0f;
@@ -232,7 +235,8 @@ void MainRenderer::DrawColumnStrip(const WindowViewModel& vm, const PaneViewMode
         const bool rows_now = StripRowCount(*column) > 0;
         if (rows_now && !cm.had_rows) {
             cm.had_rows = true;
-            cm.born = (animate && slot.id == kColumnStripChildId) ? motion_now_ : 0;
+            cm.born = (animate && kAnimateColumnCascade && slot.id == kColumnStripChildId)
+                          ? motion_now_ : 0;
         }
         const float view_h = ColumnStripViewHeight(slot.rect);
         StepStripScroll(cm, ColumnStripScrollPx(*column, view_h), view_h, motion_now_, animate, pm.moving);

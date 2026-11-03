@@ -1,0 +1,56 @@
+name: Pulse Test Build (Windows x64)
+
+on:
+  push:
+    branches:
+      - 'pulse-test/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-build:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and run existing Windows release checks
+        shell: pwsh
+        run: ./scripts/build_release_ci.ps1 -Channel windows
+
+      - name: Prepare a standalone test-instance package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          . ./scripts/release_payload.ps1
+          $package = 'dist/pulse-test-windows'
+          New-Item -ItemType Directory -Path $package -Force | Out-Null
+          foreach ($file in $PulseReleasePayload) {
+            $source = Join-Path 'build-ci' $file
+            if (-not (Test-Path -LiteralPath $source)) { throw "Missing executable dependency: $file" }
+            Copy-Item -LiteralPath $source -Destination $package -Force
+          }
+          @'
+          @echo off
+          cd /d "%~dp0"
+          start "" "%~dp0pulse.exe" --test-instance
+          '@ | Set-Content -LiteralPath (Join-Path $package 'Start-Pulse-Test.cmd') -Encoding ascii
+          @'
+          Pulse isolated test build
+          1. Extract the entire ZIP to a separate folder.
+          2. Run Start-Pulse-Test.cmd (not the regular installed Pulse).
+          3. The --test-instance switch skips the single-instance guard and does not save regular user settings.
+          4. File operations still affect real files. Use only disposable test files for drag/drop testing.
+          This package is NOT an installer. Do not copy its files into Program Files.
+          Built from a pulse-test/* branch; not an official release.
+          '@ | Set-Content -LiteralPath (Join-Path $package 'TEST-README.txt') -Encoding ascii
+
+      - name: Upload standalone test build
+        uses: actions/upload-artifact@v4
+        with:
+          name: pulse-test-windows
+          path: dist/pulse-test-windows/
+          if-no-files-found: error
+          retention-days: 14
