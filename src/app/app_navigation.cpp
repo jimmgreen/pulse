@@ -1779,7 +1779,13 @@ bool PathHasPendingRefresh(AppState& s, const std::wstring& path) {
     bool pending = false;
     ForEachPane(s, [&](app::Pane& pane) {
         const app::Tab* tab = pane.ActiveTab();
-        if (tab && tab->current_path == path && tab->pending_generation != 0)
+        if (!tab) return;
+        if (tab->current_path == path && tab->pending_generation != 0) pending = true;
+        if (!tab->column_layout) return;
+        for (const auto& column : tab->column_strip.ancestors) {
+            if (column.path == path && column.generation != 0) pending = true;
+        }
+        if (tab->column_strip.child.path == path && tab->column_strip.child.generation != 0)
             pending = true;
     });
     return pending;
@@ -2116,7 +2122,13 @@ static bool WindowShowsFolder(AppState& s, const std::wstring& path) {
     bool shows = false;
     ForEachPane(s, [&](app::Pane& pane) {
         const app::Tab* tab = pane.ActiveTab();
-        if (tab && tab->current_path == path) shows = true;
+        if (!tab) return;
+        if (tab->current_path == path) shows = true;
+        if (!tab->column_layout) return;
+        for (const auto& column : tab->column_strip.ancestors) {
+            if (column.path == path) shows = true;
+        }
+        if (tab->column_strip.child.path == path) shows = true;
     });
     return shows;
 }

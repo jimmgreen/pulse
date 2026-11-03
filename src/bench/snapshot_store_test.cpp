@@ -94,6 +94,33 @@ void TestBounded() {
     Check(!store.IsDirty(L"C:\\snap-many\\0"), "SNAP-07 marks for folders with no entry are bounded");
     Check(store.EntryCount() == 0 && store.ResidentBytes() == 0, "SNAP-07 marks hold no listings");
 }
+
+void TestRevisionTracksFreshnessAndListing() {
+    pulse::fs::SnapshotStore store;
+    const std::wstring path = L"C:\\snap-revision";
+    const auto first = Listing(1);
+    const auto second = Listing(2);
+    store.Update(path, 4, first);
+    const auto saved = store.State(path);
+    Check(saved.snapshot == first && saved.generation == 4 && saved.revision != 0 && !saved.dirty,
+          "SNAP-08 state returns one coherent accepted listing");
+    store.MarkDirty(path);
+    const auto dirty = store.State(path);
+    Check(dirty.dirty && dirty.revision > saved.revision,
+          "SNAP-08 dirty transition advances the cache revision");
+    store.BeginRefresh(path);
+    const auto refreshing = store.State(path);
+    Check(!refreshing.dirty && refreshing.revision > dirty.revision,
+          "SNAP-08 refresh transition advances the cache revision");
+    store.Update(path, 5, second);
+    const auto replaced = store.State(path);
+    Check(replaced.snapshot == second && replaced.generation == 5 && replaced.revision > refreshing.revision,
+          "SNAP-08 accepted replacement advances the cache revision");
+    store.Update(path, 3, first);
+    const auto rejected = store.State(path);
+    Check(rejected.snapshot == second && rejected.generation == 5 && rejected.revision == replaced.revision,
+          "SNAP-09 rejected old result cannot advance or replace cache state");
+}
 } // namespace
 
 int wmain() {
@@ -102,6 +129,7 @@ int wmain() {
     TestCountEviction();
     TestCleared();
     TestBounded();
+    TestRevisionTracksFreshnessAndListing();
     std::cout << (failures ? "FAILED" : "ALL PASS") << " (" << failures << " failures)\n";
     return failures ? 1 : 0;
 }

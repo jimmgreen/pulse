@@ -23,6 +23,7 @@ struct ColumnStripColumn {
     std::wstring highlight_name;       // entry on the navigation path, if any
     int highlight_row = -1;
     uint64_t generation = 0;           // worker generation still awaited (0 = none)
+    uint64_t store_revision = 0;       // SnapshotStore state last observed
     bool requested = false;
     bool error = false;
     float scroll_dip = 0.0f;

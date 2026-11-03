@@ -103,13 +103,19 @@ void RefreshOpenCtxMenu(AppState& s);
 bool HandleShellMenuCommand(AppState& s, int cmd);
 // from_chip: the selection chip's ⋯ (adds the pinned-app rows on top).
 void ShowItemContextMenu(AppState& s, POINT screen_pt, bool from_chip = false);
+void ShowColumnItemContextMenu(AppState& s, POINT screen_pt,
+                               const std::wstring& owner_folder,
+                               const std::wstring& full_path,
+                               const std::wstring& name, bool directory);
 // Shift+F10 / Apps key: the item menu under the focused item, else the background menu.
 void ShowKeyboardContextMenu(AppState& s);
 // 解散文件夹 of these folders (each into its own parent) under one undo
 // group; returns the tasks (the assistant's file.dissolve waits for them).
 std::vector<uint64_t> DissolveFolders(AppState& s, app::Tab& tab, const std::vector<std::wstring>& folders,
                                       uint64_t group, const std::wstring& label);
-void ShowBackgroundContextMenu(AppState& s, POINT screen_pt);
+void ShowBackgroundContextMenu(AppState& s, POINT screen_pt,
+                               const std::wstring& target_folder = {});
+void CreateNewItemInFolder(AppState& s, const std::wstring& folder, bool directory);
 void ShowBreadcrumbMenu(AppState& s, std::wstring path, POINT screen_pt);
 void ShowNewDropdown(AppState& s);
 void ShowSplitDropdown(AppState& s);

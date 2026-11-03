@@ -1,5 +1,6 @@
 #include "app_internal.h"
 #include "app_column_view.h"
+#include "entry_sort.h"
 #include "../ui/column_strip_layout.h"
 #include "../ui/ui_renderer.h"
 #include <algorithm>
@@ -28,6 +29,14 @@ std::wstring Leaf(const std::wstring& path) {
     return slash == std::wstring::npos ? p : p.substr(slash + 1);
 }
 
+fs::SnapshotPtr SortedForColumn(const fs::SnapshotPtr& snapshot, const app::Tab& tab) {
+    if (!snapshot) return {};
+    auto sorted = std::make_shared<std::vector<fs::DirEntry>>(*snapshot);
+    const app::ScopedFolderSortMode folder_mode(tab.EffectiveFolderSort());
+    app::SortEntries(*sorted, tab.sort_column, tab.sort_direction);
+    return sorted;
+}
+
 bool Eligible(const app::Tab& tab) {
     return tab.column_layout && !tab.current_path.empty() &&
            !fs::IsVirtualPath(tab.current_path) && !tab.content_results &&
@@ -53,8 +62,9 @@ void RequestColumn(AppState& s, const app::Tab& tab, app::ColumnStripColumn& col
     col.error = false;
     uint64_t gen = 0;
     if (fs::SnapshotPtr fresh = s.store.GetOrStart(col.path, gen)) {
-        col.snapshot = std::move(fresh);
+        col.snapshot = SortedForColumn(fresh, tab);
         col.generation = 0;
+        col.store_revision = s.store.State(col.path).revision;
         return;
     }
     if (!col.snapshot) col.snapshot = s.store.Peek(col.path);
@@ -64,7 +74,10 @@ void RequestColumn(AppState& s, const app::Tab& tab, app::ColumnStripColumn& col
     ForEachPane(s, [&](app::Pane& pane) {
         const app::Tab* other = pane.ActiveTab();
         if (shared == 0 && other && other->pending_generation != 0 &&
-            SamePath(other->current_path, col.path)) {
+            SamePath(other->current_path, col.path) &&
+            other->sort_column == tab.sort_column &&
+            other->sort_direction == tab.sort_direction &&
+            other->EffectiveFolderSort() == tab.EffectiveFolderSort()) {
             shared = other->pending_generation;
         }
     });
@@ -103,6 +116,15 @@ void RebuildRows(app::ColumnStripColumn& col, const app::Tab& tab) {
 
 void SyncColumn(AppState& s, const app::Tab& tab, app::ColumnStripColumn& col) {
     if (col.path.empty()) return;
+    const fs::SnapshotState cached = s.store.State(col.path);
+    if (cached.revision != col.store_revision) {
+        col.store_revision = cached.revision;
+        if (cached.snapshot && cached.snapshot != col.snapshot) {
+            col.snapshot = SortedForColumn(cached.snapshot, tab);
+            col.rows.reset();
+        }
+        if (cached.dirty) col.requested = false;
+    }
     if (!col.requested) RequestColumn(s, tab, col);
     RebuildRows(col, tab);
 }
@@ -268,18 +290,23 @@ void NoteColumnStripResult(AppState& s, const app::WorkResult& res) {
     bool changed = false;
     auto apply = [&](app::ColumnStripColumn& col) {
         if (col.path.empty() || !SamePath(col.path, res.path)) return;
+        const fs::SnapshotState cached = s.store.State(col.path);
+        // The process-wide store has already arbitrated worker generations.
+        // Never let an older completion overwrite the accepted listing here.
+        if (col.generation == 0 || res.generation != col.generation) return;
+        if (!res.error && cached.snapshot && cached.generation != res.generation) return;
         if (res.error) {
-            if (col.generation == 0 || res.generation < col.generation) return;
             col.generation = 0;
             col.error = true;
             changed = true;
             return;
         }
         if (!res.snapshot) return;
-        if (col.generation != 0 && res.generation < col.generation) return;
         col.generation = 0;
         col.error = false;
         col.snapshot = res.snapshot;
+        col.store_revision = cached.revision;
+        col.rows.reset();
         changed = true;
     };
     ForEachPane(s, [&](app::Pane& pane) {
@@ -359,6 +386,29 @@ bool SelectColumnStripRow(AppState& s, const ui::HitTestResult& hit) {
     s.stripClickTick = 0; // not a folder change the next click should ignore
     const app::Tab* active = ActiveTab(s);
     return active && active->SelectedCount() > 0;
+}
+
+bool ColumnStripRowTarget(AppState& s, const ui::HitTestResult& hit,
+                          std::wstring& owner_folder, std::wstring& full_path,
+                          std::wstring& name, bool& directory) {
+    owner_folder.clear();
+    full_path.clear();
+    name.clear();
+    directory = false;
+    if (hit.region != ui::HitTestResult::ColumnStripRow) return false;
+    app::Tab* tab = TabAtSlot(s, hit.pane_index);
+    const app::ColumnStripColumn* col = tab ? StripColumn(*tab, hit.sub_index) : nullptr;
+    if (!tab || !col || !col->rows || !col->rows_snapshot || hit.index < 0 ||
+        static_cast<size_t>(hit.index) >= col->rows->size()) return false;
+    const int source = (*col->rows)[static_cast<size_t>(hit.index)];
+    if (source < 0 || static_cast<size_t>(source) >= col->rows_snapshot->size()) return false;
+    const fs::DirEntry& entry = (*col->rows_snapshot)[static_cast<size_t>(source)];
+    if (entry.change_record_only) return false;
+    owner_folder = col->path;
+    name = entry.name;
+    full_path = entry.full_path.empty() ? Join(owner_folder, name) : entry.full_path;
+    directory = entry.is_dir || entry.link_target_is_dir;
+    return !owner_folder.empty() && !full_path.empty();
 }
 
 std::wstring ColumnStripBackgroundPath(AppState& s, const ui::HitTestResult& hit) {

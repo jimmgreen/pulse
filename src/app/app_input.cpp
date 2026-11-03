@@ -4866,29 +4866,22 @@ LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             ShowItemContextMenu(*s, sp);
             return 0;
         }
-        // Column view: a row of another column is selected like a click, then
-        // gets the same item menu as a list row.
+        // Column view: resolve the row into an explicit command target. Merely
+        // opening the menu must not select it or navigate away from this pane.
         if (hit.region == ui::HitTestResult::ColumnStripRow) {
-            if (SelectColumnStripRow(*s, hit)) {
-                InvalidateRect(hwnd, nullptr, FALSE);
-                ShowItemContextMenu(*s, sp);
-            }
+            std::wstring owner, path, name;
+            bool directory = false;
+            if (ColumnStripRowTarget(*s, hit, owner, path, name, directory))
+                ShowColumnItemContextMenu(*s, sp, owner, path, name, directory);
             return 0;
         }
         if (hit.region == ui::HitTestResult::ColumnStripBlank) {
-            // Use the existing background menu and create/rename flow. Matching
-            // right-click-on-row behavior, activate this column's folder first:
-            // otherwise CmdNewFolder would silently create in tab->current_path.
+            // The menu owns an explicit folder context. Opening it must not
+            // navigate the active pane or move the Miller columns under the pointer.
             const std::wstring folder = ColumnStripBackgroundPath(*s, hit);
             if (!folder.empty()) {
-                app::Tab* tab = ActiveTab(*s);
-                if (tab && _wcsicmp(tab->current_path.c_str(), folder.c_str()) != 0)
-                    NavigateTo(*s, folder);
-                tab = ActiveTab(*s);
-                if (tab && _wcsicmp(tab->current_path.c_str(), folder.c_str()) == 0) {
-                    ShowBackgroundContextMenu(*s, sp);
-                    return 0;
-                }
+                ShowBackgroundContextMenu(*s, sp, folder);
+                return 0;
             }
             s->context_menu.Close();
             return 0;

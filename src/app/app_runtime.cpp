@@ -255,6 +255,16 @@ std::vector<std::wstring> VisibleFolderPaths(const AppState& s) {
             continue;
         paths.push_back(fs::NormalizePath(view->current_path));
         AppendDetailsTreeWatchPaths(*view, paths);
+        if (view->column_layout) {
+            for (const auto& column : view->column_strip.ancestors) {
+                if (!column.path.empty() && !fs::IsVirtualPath(column.path))
+                    paths.push_back(fs::NormalizePath(column.path));
+            }
+            if (!view->column_strip.child.path.empty() &&
+                !fs::IsVirtualPath(view->column_strip.child.path)) {
+                paths.push_back(fs::NormalizePath(view->column_strip.child.path));
+            }
+        }
     }
     return paths;
 }

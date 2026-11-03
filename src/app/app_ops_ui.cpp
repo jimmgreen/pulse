@@ -375,8 +375,15 @@ void PasteIntoCurrent(AppState& s) {
         if (!folder_id.empty()) RunDeviceVerb(s, {folder_id}, L"paste", true);
         return;
     }
-    if (!tab || tab->current_path.empty() || fs::IsVirtualPath(tab->current_path) || tab->net_readonly ||
-        app::IsUncServerRoot(tab->current_path))
+    if (!tab) return;
+    PasteIntoFolder(s, tab->current_path);
+}
+
+void PasteIntoFolder(AppState& s, const std::wstring& folder) {
+    app::Tab* tab = ActiveTab(s);
+    if (folder.empty() || fs::IsVirtualPath(folder) ||
+        (tab && _wcsicmp(tab->current_path.c_str(), folder.c_str()) == 0 && tab->net_readonly) ||
+        app::IsUncServerRoot(folder))
         return;
     ops::ClipboardData cb;
     const bool clipboard_files = ops::ReadClipboard(cb);
@@ -388,28 +395,31 @@ void PasteIntoCurrent(AppState& s) {
     if (shell_files && ops::ReadClipboardShellItems(shell_ids, shell_cut)) {
         // A phone's items: a Pulse task like any paste, selected on arrival.
         uint64_t task = 0;
-        if (SubmitDeviceTransfer(s, std::move(shell_ids), tab->current_path, shell_cut, &task)) {
-            ArmArrivalSelection(s, nullptr, task, 0);
+        if (SubmitDeviceTransfer(s, std::move(shell_ids), folder, shell_cut, &task)) {
+            if (tab && _wcsicmp(tab->current_path.c_str(), folder.c_str()) == 0)
+                ArmArrivalSelection(s, nullptr, task, 0);
             return;
         }
     }
     if (clipboard_files) {
         ops::OpRequest req;
         req.type = cb.cut ? ops::OpType::Move : ops::OpType::Copy;
-        req.dest_dir = tab->current_path;
+        req.dest_dir = folder;
         for (auto& p : cb.paths) req.sources.push_back(fs::NormalizePath(p));
         uint64_t task = 0;
         if (SubmitWithConflictResolution(s, std::move(req), &task)) {
-            ArmArrivalSelection(s, nullptr, task, 0);
+            if (tab && _wcsicmp(tab->current_path.c_str(), folder.c_str()) == 0)
+                ArmArrivalSelection(s, nullptr, task, 0);
             if (cb.cut) TrackCutClipboard(s, cb);
         }
     } else if (shell_files) {
         // Virtual files (a zip's, an attachment): the shell writes them with
         // no task to follow. The shell host runs the drop so a long copy
         // never holds this thread; in process only if it is not there.
-        ArmArrivalSelection(s, nullptr, 0, 8000);
-        if (!s.ops.RunShellVerb({ClipboardPath(tab->current_path)}, L"paste", true, s.hwnd))
-            ops::PasteShellClipboard(tab->current_path);
+        if (tab && _wcsicmp(tab->current_path.c_str(), folder.c_str()) == 0)
+            ArmArrivalSelection(s, nullptr, 0, 8000);
+        if (!s.ops.RunShellVerb({ClipboardPath(folder)}, L"paste", true, s.hwnd))
+            ops::PasteShellClipboard(folder);
     }
 }
 

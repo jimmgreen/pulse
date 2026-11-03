@@ -201,25 +201,34 @@ void CreateNewItem(AppState& s, bool folder) {
     if (!tab || tab->current_path.empty() || fs::IsVirtualPath(tab->current_path) || tab->net_readonly ||
         app::IsUncServerRoot(tab->current_path))
         return;
+    CreateNewItemInFolder(s, tab->current_path, folder);
+}
+
+void CreateNewItemInFolder(AppState& s, const std::wstring& target, bool folder) {
+    const std::wstring path = fs::NormalizePath(target);
+    if (path.empty() || fs::IsVirtualPath(path) || app::IsUncServerRoot(path)) return;
     // 自定义工具栏 "remember the last type": the New button follows what was made last.
     if (s.appPrefs.toolbar_last_new != (folder ? 0 : 1)) {
         s.appPrefs.toolbar_last_new = folder ? 0 : 1;
         if (!s.isolatedTest) s.appPrefs.Save();
     }
     std::wstring name = folder
-        ? app::UniqueChildName(tab->current_path,
+        ? app::UniqueChildName(path,
             l10n::Get(l10n::StringId::NewFolder), L"")
-        : app::UniqueChildName(tab->current_path,
+        : app::UniqueChildName(path,
             l10n::Get(l10n::StringId::NewTextDocument), L".txt");
-    std::wstring full = tab->current_path;
+    std::wstring full = path;
     if (!full.ends_with(L"\\")) full += L"\\";
     full += name;
     ops::OpRequest req;
     req.type = folder ? ops::OpType::CreateFolder : ops::OpType::CreateTextFile;
     req.sources.push_back(full);
     const auto task_id = s.ops.Submit(std::move(req));
-    app::QueueCreateRenameIntent(tab->create_rename_intents, task_id,
-        tab->current_path, tab->view_generation);
+    if (app::Tab* tab = ActiveTab(s);
+        tab && _wcsicmp(tab->current_path.c_str(), path.c_str()) == 0) {
+        app::QueueCreateRenameIntent(tab->create_rename_intents, task_id,
+            tab->current_path, tab->view_generation);
+    }
 }
 
 namespace {
@@ -2757,6 +2766,75 @@ void ShowItemContextMenu(AppState& s, POINT screen_pt, bool from_chip) {
     else if (cmd != app::CmdNone) DispatchMenuCommand(s, cmd);
 }
 
+void ShowColumnItemContextMenu(AppState& s, POINT screen_pt,
+                               const std::wstring& owner_folder,
+                               const std::wstring& full_path,
+                               const std::wstring& name, bool directory) {
+    if (!EnsureMenu(s) || owner_folder.empty() || full_path.empty()) return;
+    const std::vector<std::wstring> paths{full_path};
+    std::wstring verb_key = directory ? std::wstring(ipc::kFolderVerbKey) : std::wstring{};
+    if (!directory) {
+        const size_t slash = full_path.find_last_of(L"\\/");
+        const size_t dot = full_path.find_last_of(L'.');
+        if (dot != std::wstring::npos && (slash == std::wstring::npos || dot > slash)) {
+            verb_key = full_path.substr(dot);
+            std::transform(verb_key.begin(), verb_key.end(), verb_key.begin(), towlower);
+        }
+    }
+    StartCtxQuery(s, paths, false, verb_key);
+    s.context_menu.SeedComItemsFromCache();
+    auto base_items = BuildFinderItemMenu(s, s.ops.CanUndo(), s.ops.UndoLabel());
+    app::ApplyBuiltinMenuPrefs(base_items, s.ctxMenuPrefs, app::BuiltinMenuSurface::Item);
+    // Commands below either take the explicit row path or intentionally enter
+    // its owner folder. Remove selection-dependent actions rather than letting
+    // them operate on the unrelated active list.
+    for (int command : {app::CmdTags, app::CmdSetAlias, app::CmdBatchRename,
+                        app::CmdGroupIntoFolder, app::CmdDissolveFolder,
+                        app::CmdCloudKeep, app::CmdCloudFree}) {
+        EraseCommand(base_items, command);
+    }
+    s.context_menu.OpenMenu(std::move(base_items));
+    auto display = ExplorerMenu(s, s.context_menu.base_items());
+    const int cmd = s.menu->TrackPopup(screen_pt, std::move(display));
+    s.context_menu.CloseMenu();
+    if (HandleShellMenuCommand(s, cmd) || cmd == app::CmdNone) return;
+    switch (cmd) {
+    case app::CmdOpen:
+        if (directory) NavigateTo(s, full_path);
+        else ShellExecuteW(s.hwnd, L"open", full_path.c_str(), nullptr, owner_folder.c_str(), SW_SHOWNORMAL);
+        return;
+    case app::CmdOpenInNewTab:
+        if (directory) OpenFolderTab(s, full_path);
+        return;
+    case app::CmdCut:
+    case app::CmdCopy:
+        CollectPathsToTray(s, paths, cmd == app::CmdCut);
+        return;
+    case app::CmdCopyPath:
+        ops::WriteClipboardText(ClipboardPath(full_path));
+        return;
+    case app::CmdStageToTray:
+        StagePaths(s, paths, std::nullopt);
+        return;
+    case app::CmdDelete:
+        DeletePaths(s, paths, (GetKeyState(VK_SHIFT) & 0x8000) != 0);
+        return;
+    case app::CmdProperties:
+        s.ops.ShowProperties(paths);
+        return;
+    case app::CmdOpenTerminal:
+        s.ops.OpenTerminal(ClipboardPath(directory ? full_path : owner_folder));
+        return;
+    case app::CmdRename: {
+        NavigateTo(s, owner_folder);
+        if (app::Tab* tab = ActiveTab(s)) tab->pending_preview_rename = name;
+        return;
+    }
+    default:
+        return;
+    }
+}
+
 namespace {
 // The 新建 entries, shared with the toolbar New menu (defined below).
 std::vector<app::sysctx::NewTemplate> NewTemplatesForMenu(AppState& s, bool wait = true);
@@ -2765,10 +2843,13 @@ void AppendBackgroundNewMenu(std::vector<ui::FluentMenuItem>& items,
                              const std::vector<app::sysctx::NewTemplate>& templates);
 } // namespace
 
-void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
+void ShowBackgroundContextMenu(AppState& s, POINT screen_pt,
+                               const std::wstring& target_folder) {
     if (!EnsureMenu(s)) return;
     app::Tab* tab = ActiveTab(s);
     if (!tab) return;
+    const std::wstring menu_folder = target_folder.empty() ? tab->current_path
+                                                            : fs::NormalizePath(target_folder);
     std::wstring kind;
     app::ParsePulsePath(tab->current_path, &kind, nullptr);
     app::BackgroundViewOptions view_options;
@@ -2804,8 +2885,8 @@ void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
         // A phone folder's background menu is the shell's own.
         StartCtxQuery(s, { device_folder_id }, true, std::wstring(kDeviceVerbKeyPrefix) + ipc::kBackgroundVerbKey);
         s.context_menu.SeedComItemsFromCache();
-    } else if (tab && !tab->current_path.empty() && !fs::IsVirtualPath(tab->current_path)) {
-        StartCtxQuery(s, { tab->current_path }, true, ipc::kBackgroundVerbKey);
+    } else if (!menu_folder.empty() && !fs::IsVirtualPath(menu_folder)) {
+        StartCtxQuery(s, { menu_folder }, true, ipc::kBackgroundVerbKey);
         s.context_menu.SeedComItemsFromCache();
     } else {
         // This PC and Pulse views have no shell folder to ask: drop the last
@@ -2818,18 +2899,29 @@ void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
     bool canPaste = !s.tray.batches().empty() || ClipboardHasFiles();
     const auto recent_changes_path = app::RecentChangesMenuPath(*tab, true);
     auto base_items = app::BuildBackgroundMenu(canPaste, s.ops.CanUndo(), undoLabel);
-    app::AppendRecentChangesCommand(base_items, recent_changes_path);
-    app::AppendBackgroundViewCommands(base_items, view_options);
-    ApplyWorkspacePinLabel(base_items, s);
+    if (target_folder.empty()) {
+        app::AppendRecentChangesCommand(base_items, recent_changes_path);
+        app::AppendBackgroundViewCommands(base_items, view_options);
+        ApplyWorkspacePinLabel(base_items, s);
+    } else {
+        for (int command : {app::CmdSelectAll, app::CmdInvertSelection,
+                            app::CmdSelectWildcard, app::CmdPinWorkspace,
+                            app::CmdPinNetwork}) {
+            EraseCommand(base_items, command);
+        }
+    }
     if (!CanPinNetwork(s)) EraseCommand(base_items, app::CmdPinNetwork);
     // This PC has no path of its own to copy (Explorer offers none there).
-    if (tab->current_path.empty()) EraseCommand(base_items, app::CmdCopyPath);
-    const auto quick_paths = QuickAccessTargets(tab, true);
-    AppendQuickAccessCommand(s, base_items, quick_paths);
+    if (menu_folder.empty()) EraseCommand(base_items, app::CmdCopyPath);
+    const auto quick_paths = target_folder.empty() ? QuickAccessTargets(tab, true)
+                                                    : std::vector<std::wstring>{};
+    if (target_folder.empty()) AppendQuickAccessCommand(s, base_items, quick_paths);
     app::ApplyBuiltinMenuPrefs(base_items, s.ctxMenuPrefs, app::BuiltinMenuSurface::Background);
-    const bool can_create_here = CanCreateHere(tab);
-    const auto new_templates = can_create_here ? NewTemplatesForMenu(s, false)
-                                               : std::vector<app::sysctx::NewTemplate>{};
+    const bool target_is_active = _wcsicmp(menu_folder.c_str(), tab->current_path.c_str()) == 0;
+    const bool can_create_here = !menu_folder.empty() && !fs::IsVirtualPath(menu_folder) &&
+        !app::IsUncServerRoot(menu_folder) && (!target_is_active || !tab->net_readonly);
+    const auto new_templates = can_create_here && target_folder.empty()
+        ? NewTemplatesForMenu(s, false) : std::vector<app::sysctx::NewTemplate>{};
     if (can_create_here) AppendBackgroundNewMenu(base_items, new_templates);
     // This PC, a server's share list, the Network view and other Pulse views
     // take no new items or pastes, and have no folder of their own to open a
@@ -2857,7 +2949,7 @@ void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
     }
     // In-app Git: pull / push / refresh for a folder inside a repository.
     const std::wstring git_root = tab->git_root;
-    if (view_options.filesystem) AppendGitMenu(*tab, base_items);
+    if (view_options.filesystem && target_folder.empty()) AppendGitMenu(*tab, base_items);
     s.context_menu.OpenMenu(std::move(base_items));
     auto display = ExplorerMenu(s, s.context_menu.base_items());
 
@@ -2867,10 +2959,34 @@ void ShowBackgroundContextMenu(AppState& s, POINT screen_pt) {
     LogCtxTiming(s, cmd);
     if (HandleShellMenuCommand(s, cmd)) return;
     if (HandleQuickAccessCommand(s, cmd, quick_paths)) return;
-    if (RunShellNewCommand(s, cmd, new_templates)) return;
+    if (target_folder.empty() && RunShellNewCommand(s, cmd, new_templates)) return;
     if (cmd == app::CmdViewRecentChanges) { OpenChangeView(s, recent_changes_path); return; }
     if (cmd == app::CmdMapNetworkDrive) { RunMapNetworkDrive(s, L""); return; }
     if (HandleGitCommand(s, cmd, git_root)) return;
+    if (!target_folder.empty()) {
+        if (cmd == app::CmdCopyPath) {
+            ops::WriteClipboardText(ClipboardPath(menu_folder));
+            return;
+        }
+        if (cmd == app::CmdPaste) {
+            PasteIntoFolder(s, menu_folder);
+            return;
+        }
+        if (cmd == app::CmdNewFolder || cmd == app::CmdNewTextFile) {
+            CreateNewItemInFolder(s, menu_folder, cmd == app::CmdNewFolder);
+            return;
+        }
+        if (cmd == app::CmdOpenTerminal) {
+            s.ops.OpenTerminal(ClipboardPath(menu_folder));
+            return;
+        }
+        if (cmd == app::CmdRefresh) {
+            s.store.MarkDirty(menu_folder);
+            SyncColumnStrips(s);
+            InvalidateRect(s.hwnd, nullptr, FALSE);
+            return;
+        }
+    }
     if (cmd != app::CmdNone) DispatchMenuCommand(s, cmd);
 }
 

@@ -10,6 +10,7 @@ namespace pulse {
 bool SubmitWithConflictResolution(AppState& s, ops::OpRequest request, uint64_t* task_id = nullptr);
 void ReleaseTrayBatch(AppState& s, size_t idx);
 void PasteIntoCurrent(AppState& s);
+void PasteIntoFolder(AppState& s, const std::wstring& folder);
 void DeleteSelected(AppState& s, bool permanent);
 void DeletePaths(AppState& s, std::vector<std::wstring> paths, bool permanent);
 // A delete finished: rows that slid out return if it failed; a recycle offers
