@@ -27,6 +27,9 @@ bool SelectColumnStripRow(AppState& s, const ui::HitTestResult& hit);
 // Folder owning a column's blank space; empty for stale/invalid hit regions.
 // The path is resolved before any navigation or context-menu action.
 std::wstring ColumnStripBackgroundPath(AppState& s, const ui::HitTestResult& hit);
+// Real destination of a blank Miller column or its folder row, never a guessed
+// fallback to the active directory. Empty means the drop must be rejected.
+std::wstring ColumnStripDropPath(AppState& s, const ui::HitTestResult& hit);
 bool HandleColumnStripWheel(AppState& s, const ui::WindowViewModel& vm,
                             const ui::HitTestResult& hit, int wheel_delta);
 // Left/Right in the column view: go to the parent / enter the selected folder.

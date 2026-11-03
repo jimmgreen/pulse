@@ -1,4 +1,7 @@
 #include "../ui/column_strip_layout.h"
+#include "../app/column_drop_target.h"
+#include <memory>
+#include <vector>
 #include <cmath>
 #include <cstdio>
 
@@ -32,6 +35,50 @@ int main() {
             check(root.active && root.body.left == bounds.left && root.columns.empty(),
                   "a root folder alone is one column at the left");
         }
+    }
+    // Column drop routing uses the row-to-snapshot mapping of the hit column,
+    // never the active tab's index. Test both directions and invalid targets.
+    {
+        using pulse::app::ColumnDropDestination;
+        pulse::app::ColumnStripState state;
+        state.for_path = L"D:\\Project\\Current";
+        state.ancestors.resize(1);
+        auto& ancestor = state.ancestors[0];
+        ancestor.path = L"D:\\Project";
+        auto listing = std::make_shared<std::vector<pulse::fs::DirEntry>>();
+        listing->resize(3);
+        (*listing)[0].name = L"readme.txt";
+        (*listing)[1].name = L"Assets";
+        (*listing)[1].is_dir = true;
+        (*listing)[2].name = L"removed";
+        (*listing)[2].is_dir = true;
+        (*listing)[2].change_record_only = true;
+        ancestor.snapshot = listing;
+        ancestor.rows_snapshot = listing;
+        ancestor.rows = std::make_shared<const std::vector<int>>(std::vector<int>{0, 2, 1});
+        state.child.path = L"D:\\Project\\Current\\Selected";
+        check(ColumnDropDestination(state, L"D:\\Project\\Current", 0, -1, false) ==
+                  L"D:\\Project", "ancestor column blank targets the ancestor folder");
+        check(ColumnDropDestination(state, L"D:\\Project\\Current", 0, 2, true) ==
+                  L"D:\\Project\\Assets", "ancestor folder row uses mapped snapshot index");
+        check(ColumnDropDestination(state, L"D:\\Project\\Current", 0, 0, true).empty(),
+              "ordinary-file row is not silently treated as current folder");
+        check(ColumnDropDestination(state, L"D:\\Project\\Current", 0, 1, true).empty(),
+              "historical or deleted row is not a drop target");
+        check(ColumnDropDestination(state, L"D:\\Project\\Current", 0, 3, true).empty(),
+              "out-of-range row cannot redirect a drop");
+        check(ColumnDropDestination(state, L"D:\\Project\\Current", kColumnStripChildId, -1, false) ==
+                  state.child.path, "child column blank targets the child folder");
+        check(ColumnDropDestination(state, L"D:\\Project\\Current", -1, -1, false).empty() &&
+                  ColumnDropDestination(state, L"D:\\Project\\Current", kColumnStripBodyId, -1, false).empty(),
+              "unowned blank and current-body pseudo-column are rejected");
+        check(ColumnDropDestination(state, L"D:\\Elsewhere", 0, -1, false).empty(),
+              "stale navigation state cannot supply a destination");
+        ancestor.snapshot = std::make_shared<const std::vector<pulse::fs::DirEntry>>();
+        check(ColumnDropDestination(state, L"D:\\Project\\Current", 0, 2, true).empty(),
+              "stale row snapshot is rejected during refresh");
+        check(ColumnDropDestination(state, L"D:\\Project\\Current", 0, -1, false) ==
+                  L"D:\\Project", "column background remains targetable while row list refreshes");
     }
     return failures ? 1 : 0;
 }

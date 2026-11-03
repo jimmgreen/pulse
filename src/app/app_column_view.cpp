@@ -1,5 +1,6 @@
 #include "app_internal.h"
 #include "app_column_view.h"
+#include "column_drop_target.h"
 #include "../ui/column_strip_layout.h"
 #include "../ui/ui_renderer.h"
 #include <algorithm>
@@ -368,6 +369,16 @@ std::wstring ColumnStripBackgroundPath(AppState& s, const ui::HitTestResult& hit
     if (!tab || !Eligible(*tab) || !SamePath(tab->column_strip.for_path, tab->current_path)) return {};
     const app::ColumnStripColumn* col = StripColumn(*tab, hit.sub_index);
     return col ? col->path : std::wstring{};
+}
+
+std::wstring ColumnStripDropPath(AppState& s, const ui::HitTestResult& hit) {
+    if (hit.region != ui::HitTestResult::ColumnStripBlank &&
+        hit.region != ui::HitTestResult::ColumnStripRow) return {};
+    app::Tab* tab = TabAtSlot(s, hit.pane_index);
+    if (!tab || !Eligible(*tab)) return {};
+    return app::ColumnDropDestination(tab->column_strip, tab->current_path,
+                                      hit.sub_index, hit.index,
+                                      hit.region == ui::HitTestResult::ColumnStripRow);
 }
 
 bool UpdateColumnStripResize(AppState& s, int x) {
