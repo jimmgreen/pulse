@@ -794,6 +794,8 @@ private:
                             const D2D1_RECT_F& bounds, int pane_index, const Theme& theme);
     void DrawColumnStrip(const WindowViewModel& vm, const PaneViewModel& pane,
                          const D2D1_RECT_F& bounds, int pane_index, const Theme& theme);
+    void DrawColumnStripScroll(const WindowViewModel& vm, const PaneViewModel& pane,
+                               const D2D1_RECT_F& bounds, int pane_index, const Theme& theme);
     void DrawColumnStripColumn(const WindowViewModel& vm, const PaneViewModel& pane,
                                const ColumnStripColumnView& column, int column_id,
                                const D2D1_RECT_F& rc, int pane_index, const Theme& theme);

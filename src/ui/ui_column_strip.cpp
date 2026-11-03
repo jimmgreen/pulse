@@ -1,5 +1,4 @@
-// ui_column_strip.cpp — Column (Miller) view: ancestor columns left of the
-// regular list and the selected folder's contents to its right.
+// ui_column_strip.cpp — Column (Miller) view on one horizontally scrolling axis.
 #include "ui_renderer.h"
 #include "ui_renderer_internal.h"
 #include "../common/localization.h"
@@ -42,7 +41,8 @@ std::vector<StripDivider> StripDividers(const ColumnStripLayout& strip, const D2
     const float bottom = std::max(top, pane.bottom);
     for (const ColumnStripSlot& slot : strip.columns)
         if (IsAncestorId(slot.id)) out.push_back({slot.id, slot.rect.right, top, bottom});
-    if (strip.body.right < pane.right - 1.0f) out.push_back({kColumnStripBodyId, strip.body.right, top, bottom});
+    if (strip.body.right > pane.left && strip.body.right < pane.right - 1.0f)
+        out.push_back({kColumnStripBodyId, strip.body.right, top, bottom});
     for (const ColumnStripSlot& slot : strip.columns)
         if (slot.id == kColumnStripChildId && slot.rect.right < pane.right - 1.0f)
             out.push_back({slot.id, slot.rect.right, top, bottom});
@@ -148,7 +148,7 @@ ColumnStripLayout MainRenderer::ColumnStripGeometry(const PaneViewModel& vm,
     }
     return LayoutColumnStrip(pane_bounds, pane_bounds.top + pane_header_height_,
                              cs.ancestors.size(), cs.has_child, cs.widths_dip, scale_,
-                             cs.scroll_from_right_dip);
+                             cs.scroll_left_dip);
 }
 
 D2D1_RECT_F MainRenderer::PaneBodyBounds(const PaneViewModel& vm,
@@ -311,6 +311,17 @@ void MainRenderer::DrawColumnStrip(const WindowViewModel& vm, const PaneViewMode
                                       lx + line_w * 0.5f, divider.bottom - inset),
                           brAccent_.get());
     }
+    if (pm.moving) RequestMotionFrame();
+}
+
+// The regular list now shares the viewport, so draw this after the body list.
+void MainRenderer::DrawColumnStripScroll(const WindowViewModel& vm, const PaneViewModel& pane,
+                                         const D2D1_RECT_F& bounds, int pane_index,
+                                         const Theme& theme) {
+    ID2D1DeviceContext* dc = compositor_ ? compositor_->Dc() : nullptr;
+    if (!dc || !pane.column_strip.Active()) return;
+    const ColumnStripLayout strip = ColumnStripGeometry(pane, bounds);
+    const ColumnStripView& cs = pane.column_strip;
     D2D1_RECT_F track{}, thumb{};
     if (ColumnStripHScrollRects(strip, track, thumb)) {
         // Edge line where the scrolled strip meets the list.
@@ -330,7 +341,6 @@ void MainRenderer::DrawColumnStrip(const WindowViewModel& vm, const PaneViewMode
         FillRoundedRect(dc, brScrollbar_.get(), thumb.left, cy - h * 0.5f,
                         thumb.right - thumb.left, h, h * 0.5f);
     }
-    if (pm.moving) RequestMotionFrame();
 }
 
 void MainRenderer::DrawColumnStripColumn(const WindowViewModel& vm, const PaneViewModel& /*pane*/,

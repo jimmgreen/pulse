@@ -177,8 +177,7 @@ struct ColumnStripColumnView {
     std::unordered_set<int> empty_sources;
 };
 
-// Column view of a folder pane: ancestors on the left, the regular list in
-// the middle, and the selected folder's contents on the right.
+// All folder columns share one horizontal scrolling coordinate system.
 struct ColumnStripView {
     bool enabled = false;         // pane toggle state (header button)
     bool eligible = false;        // real folder view that can show columns
@@ -188,9 +187,9 @@ struct ColumnStripView {
     bool has_child = false;
     ColumnStripColumnView child;
     std::vector<float> widths_dip; // see ColumnStripWidthDip
-    float scroll_from_right_dip = 0.0f; // ancestor strip scroll (0 = parent visible)
+    float scroll_left_dip = -1.0f; // -1 shows latest columns initially
     int resize_column = -1;       // column id whose divider is being dragged
-    bool hscroll_pressed = false; // ancestor scrollbar thumb is being dragged
+    bool hscroll_pressed = false; // shared horizontal scrollbar thumb is dragged
 
     bool Active() const { return enabled && eligible; }
 };
