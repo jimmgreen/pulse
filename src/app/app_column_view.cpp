@@ -361,6 +361,15 @@ bool SelectColumnStripRow(AppState& s, const ui::HitTestResult& hit) {
     return active && active->SelectedCount() > 0;
 }
 
+std::wstring ColumnStripBackgroundPath(AppState& s, const ui::HitTestResult& hit) {
+    if (hit.region != ui::HitTestResult::ColumnStripBlank) return {};
+    const app::Tab* tab = TabAtSlot(s, hit.pane_index);
+    // Never act on a column from a previous directory's asynchronous snapshot.
+    if (!tab || !Eligible(*tab) || !SamePath(tab->column_strip.for_path, tab->current_path)) return {};
+    const app::ColumnStripColumn* col = StripColumn(*const_cast<app::Tab*>(tab), hit.sub_index);
+    return col ? col->path : std::wstring{};
+}
+
 bool UpdateColumnStripResize(AppState& s, int x) {
     if (s.stripHScrolling) {
         app::Tab* tab = TabAtSlot(s, s.stripResizePane);
