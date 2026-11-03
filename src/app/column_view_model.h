@@ -3,6 +3,7 @@
 #include "../fs/fs_snapshot.h"
 #include <cstdint>
 #include <memory>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -34,7 +35,9 @@ struct ColumnStripState {
     std::wstring for_path;                     // current_path the ancestors belong to
     std::vector<ColumnStripColumn> ancestors;  // farthest -> parent
     ColumnStripColumn child;                   // selected folder (path empty = none)
-    float scroll_from_right_dip = 0.0f;        // ancestor strip scroll; 0 = parent visible
+    float scroll_left_dip = -1.0f;             // whole-chain left scroll; -1 = newest
+    bool hold_scroll_on_navigate = false;     // column click preserves the viewport
+    std::map<std::wstring, float> widths_by_path; // role-independent column widths
 
     bool Empty() const { return for_path.empty() && ancestors.empty() && child.path.empty(); }
 };

@@ -20,7 +20,7 @@ size_t ColumnStripWidthSlot(int column_id, size_t ancestor_count) noexcept {
 ColumnStripLayout LayoutColumnStrip(const D2D1_RECT_F& pane_bounds, float top,
                                     size_t ancestor_count, bool child_slot,
                                     const std::vector<float>& widths_dip,
-                                    float scale, float scroll_from_right_dip) noexcept {
+                                    float scale, float scroll_left_dip) noexcept {
     ColumnStripLayout out;
     out.body = pane_bounds;
     const float unit = std::max(0.5f, scale);
@@ -29,44 +29,35 @@ ColumnStripLayout LayoutColumnStrip(const D2D1_RECT_F& pane_bounds, float top,
     if (width < min_w) return out;
 
     const float body_w = std::min(width, ColumnStripWidthDip(widths_dip, kColumnStripBodySlot) * unit);
-    float content = 0.0f;
-    for (size_t k = 1; k <= ancestor_count; ++k) content += ColumnStripWidthDip(widths_dip, k) * unit;
+    const float child_w = child_slot ? ColumnStripWidthDip(widths_dip, 0) * unit : 0.0f;
+    float ancestor_w = 0.0f;
+    for (size_t k = 1; k <= ancestor_count; ++k)
+        ancestor_w += ColumnStripWidthDip(widths_dip, k) * unit;
+    const float actual_w = ancestor_w + body_w + child_w;
+    const float natural_max = std::max(0.0f, actual_w - width);
 
-    // The selected folder's contents come before the ancestors; the column
-    // narrows to fit. A selected file adds nothing: its properties live in
-    // the details panel.
-    float trail_w = 0.0f;
-    if (child_slot) {
-        const float w = ColumnStripWidthDip(widths_dip, 0) * unit;
-        if (body_w + w <= width) trail_w = w;
-        else if (width - body_w >= min_w) trail_w = width - body_w;
-    }
-    const float viewport_w = std::max(0.0f, std::min(content, width - body_w - trail_w));
-
+    // One continuous content axis. Preserve a requested left scroll when the
+    // branch gets shorter instead of pulling the clicked folder to the right.
+    const float requested = scroll_left_dip < 0.0f
+        ? natural_max : std::max(0.0f, scroll_left_dip) * unit;
     out.active = true;
+    out.scroll_px = requested;
+    out.max_scroll_px = std::max(natural_max, requested);
+    out.content_px = std::max(actual_w, width + out.max_scroll_px);
     const float bottom = std::max(top, pane_bounds.bottom);
-    out.content_px = content;
-    out.max_scroll_px = std::max(0.0f, content - viewport_w);
-    out.scroll_px = std::clamp(out.max_scroll_px - std::max(0.0f, scroll_from_right_dip) * unit,
-                               0.0f, out.max_scroll_px);
-    out.body.left = pane_bounds.left + viewport_w;
-    out.body.right = out.body.left + body_w;
-    if (viewport_w > 0.0f) {
-        out.viewport = D2D1::RectF(pane_bounds.left, top, out.body.left, bottom);
-        float x = pane_bounds.left - out.scroll_px;
-        out.columns.reserve(ancestor_count + 1);
-        for (size_t i = 0; i < ancestor_count; ++i) {
-            const float w = ColumnStripWidthDip(widths_dip, ancestor_count - i) * unit;
-            if (x + w > out.viewport.left && x < out.viewport.right) {
-                out.columns.push_back({static_cast<int>(i), D2D1::RectF(x, top, x + w, bottom)});
-            }
-            x += w;
-        }
+    out.viewport = D2D1::RectF(pane_bounds.left, top, pane_bounds.right, bottom);
+    float x = pane_bounds.left - out.scroll_px;
+    out.columns.reserve(ancestor_count + (child_slot ? 1 : 0));
+    for (size_t i = 0; i < ancestor_count; ++i) {
+        const float w = ColumnStripWidthDip(widths_dip, ancestor_count - i) * unit;
+        if (x + w > out.viewport.left && x < out.viewport.right)
+            out.columns.push_back({static_cast<int>(i), D2D1::RectF(x, top, x + w, bottom)});
+        x += w;
     }
-    if (trail_w > 0.0f) {
-        out.columns.push_back({kColumnStripChildId,
-                               D2D1::RectF(out.body.right, top, out.body.right + trail_w, bottom)});
-    }
+    out.body = D2D1::RectF(x, pane_bounds.top, x + body_w, pane_bounds.bottom);
+    x += body_w;
+    if (child_slot && x + child_w > out.viewport.left && x < out.viewport.right)
+        out.columns.push_back({kColumnStripChildId, D2D1::RectF(x, top, x + child_w, bottom)});
     return out;
 }
 

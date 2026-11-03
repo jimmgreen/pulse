@@ -138,6 +138,17 @@ std::wstring RootTitle(const AppState& s, const std::wstring& path) {
 }
 
 void RebuildAncestors(AppState& s, app::Tab& tab) {
+    app::ColumnStripState& state = tab.column_strip;
+    const auto remember = [&](const std::wstring& path, size_t slot) {
+        if (!path.empty() && !state.widths_by_path.contains(path))
+            state.widths_by_path.emplace(path, ui::ColumnStripWidthDip(tab.column_widths_dip, slot));
+    };
+    for (size_t i = 0; i < state.ancestors.size(); ++i)
+        remember(state.ancestors[i].path,
+                 ui::ColumnStripWidthSlot(static_cast<int>(i), state.ancestors.size()));
+    remember(state.for_path, ui::kColumnStripBodySlot);
+    remember(state.child.path, 0);
+    while (state.widths_by_path.size() > 256) state.widths_by_path.erase(state.widths_by_path.begin());
     std::vector<std::wstring> chain; // parent first
     std::wstring child = tab.current_path;
     while (chain.size() < kMaxAncestors) {
@@ -174,7 +185,8 @@ void RebuildAncestors(AppState& s, app::Tab& tab) {
     // Listings may be stale after navigation; revalidate against the store.
     for (auto& col : tab.column_strip.ancestors) col.requested = false;
     tab.column_strip.for_path = tab.current_path;
-    tab.column_strip.scroll_from_right_dip = 0.0f;
+    if (!state.hold_scroll_on_navigate) state.scroll_left_dip = -1.0f;
+    state.hold_scroll_on_navigate = false;
 }
 
 void SyncTab(AppState& s, app::Tab& tab) {
@@ -235,8 +247,9 @@ bool ScrollStripBy(AppState& s, const ui::WindowViewModel& vm, int pane_index, f
     ui::ColumnStripLayout layout;
     if (!tab || !SlotLayout(s, vm, pane_index, layout) || layout.max_scroll_px <= 0.0f) return false;
     const float scale = s.scale > 0.0f ? s.scale : 1.0f;
-    float& offset = tab->column_strip.scroll_from_right_dip;
-    offset = std::clamp(offset + delta_dip, 0.0f, layout.max_scroll_px / scale);
+    float& offset = tab->column_strip.scroll_left_dip;
+    const float current = offset < 0.0f ? layout.scroll_px / scale : offset;
+    offset = std::clamp(current - delta_dip, 0.0f, layout.max_scroll_px / scale);
     InvalidateRect(s.hwnd, nullptr, FALSE);
     return true;
 }
@@ -271,7 +284,9 @@ bool ClickRow(AppState& s, app::Tab& tab, int column_id, int row) {
     if (source < 0 || static_cast<size_t>(source) >= col->rows_snapshot->size()) return false;
     const std::wstring name = (*col->rows_snapshot)[static_cast<size_t>(source)].name;
     const std::wstring folder = col->path; // col is invalidated by navigation
+    tab.column_strip.hold_scroll_on_navigate = true;
     if (!SamePath(folder, tab.current_path)) NavigateTo(s, folder);
+    else tab.column_strip.hold_scroll_on_navigate = false;
     if (app::Tab* active = ActiveTab(s)) SelectByName(s, *active, name);
     s.stripClickTick = GetTickCount64();
     return true;
@@ -334,7 +349,9 @@ bool HandleColumnStripMouseDown(AppState& s, const ui::WindowViewModel& vm,
         s.stripResizePane = hit.pane_index;
         s.stripResizeColumn = hit.sub_index;
         s.stripResizeStartX = x;
-        s.stripResizeStartDip = ui::ColumnStripWidthDip(tab->column_widths_dip, slot);
+        const ui::PaneViewModel* pane = SlotPane(vm, hit.pane_index);
+        s.stripResizeStartDip = ui::ColumnStripWidthDip(
+            pane ? pane->column_strip.widths_dip : tab->column_widths_dip, slot);
         s.hoverRegion = static_cast<int>(R::ColumnStripDivider);
         s.hoverSubIndex = hit.sub_index;
         s.hoverPaneIndex = hit.pane_index;
@@ -343,7 +360,38 @@ bool HandleColumnStripMouseDown(AppState& s, const ui::WindowViewModel& vm,
     }
     case R::ColumnStripRow: {
         app::Tab* tab = TabAtSlot(s, hit.pane_index);
-        if (tab) ClickRow(s, *tab, hit.sub_index, hit.index);
+        if (tab) {
+            ui::ColumnStripLayout layout;
+            if (SlotLayout(s, vm, hit.pane_index, layout)) {
+                const float scale = s.scale > 0.0f ? s.scale : 1.0f;
+                tab->column_strip.scroll_left_dip = layout.scroll_px / scale;
+                const app::ColumnStripColumn* col = StripColumn(*tab, hit.sub_index);
+                bool folder = false;
+                if (col && col->rows && col->rows_snapshot && hit.index >= 0 &&
+                    static_cast<size_t>(hit.index) < col->rows->size()) {
+                    const int source = (*col->rows)[static_cast<size_t>(hit.index)];
+                    if (source >= 0 && static_cast<size_t>(source) < col->rows_snapshot->size()) {
+                        const auto& entry = (*col->rows_snapshot)[static_cast<size_t>(source)];
+                        folder = entry.is_dir || entry.link_target_is_dir;
+                    }
+                }
+                float reveal = 0.0f;
+                if (folder) {
+                    const ui::PaneViewModel* pane = SlotPane(vm, hit.pane_index);
+                    const float child_w = ui::ColumnStripWidthDip(
+                        pane ? pane->column_strip.widths_dip : tab->column_widths_dip, 0) * scale;
+                    for (const auto& slot : layout.columns) {
+                        if (slot.id != hit.sub_index) continue;
+                        reveal = std::max(0.0f, slot.rect.right + child_w - layout.viewport.right) / scale;
+                        break;
+                    }
+                }
+                if (ClickRow(s, *tab, hit.sub_index, hit.index))
+                    tab->column_strip.scroll_left_dip += reveal;
+            } else {
+                ClickRow(s, *tab, hit.sub_index, hit.index);
+            }
+        }
         return true;
     }
     case R::ColumnStripBlank:
@@ -368,7 +416,8 @@ bool HandleColumnStripMouseDown(AppState& s, const ui::WindowViewModel& vm,
         s.stripHScrolling = true;
         s.stripResizePane = hit.pane_index;
         s.stripResizeStartX = x;
-        s.stripHScrollStartDip = tab->column_strip.scroll_from_right_dip;
+        s.stripHScrollStartDip = tab->column_strip.scroll_left_dip < 0.0f
+            ? layout.scroll_px / scale : tab->column_strip.scroll_left_dip;
         s.stripHScrollRatio = travel > 0.0f ? layout.max_scroll_px / travel : 0.0f;
         s.stripHScrollMaxDip = layout.max_scroll_px / scale;
         SetCapture(s.hwnd);
@@ -426,8 +475,8 @@ bool UpdateColumnStripResize(AppState& s, int x) {
         if (!tab) return true;
         const float scale = s.scale > 0.0f ? s.scale : 1.0f;
         const float moved = static_cast<float>(x - s.stripResizeStartX) * s.stripHScrollRatio / scale;
-        tab->column_strip.scroll_from_right_dip =
-            std::clamp(s.stripHScrollStartDip - moved, 0.0f, s.stripHScrollMaxDip);
+        tab->column_strip.scroll_left_dip =
+            std::clamp(s.stripHScrollStartDip + moved, 0.0f, s.stripHScrollMaxDip);
         InvalidateRect(s.hwnd, nullptr, FALSE);
         return true;
     }
@@ -443,6 +492,10 @@ bool UpdateColumnStripResize(AppState& s, int x) {
                                    ui::kColumnStripMinDip, ui::kColumnStripMaxDip);
     if (tab->column_widths_dip.size() <= slot) tab->column_widths_dip.resize(slot + 1, 0.0f);
     tab->column_widths_dip[slot] = width;
+    const app::ColumnStripColumn* col = StripColumn(*tab, s.stripResizeColumn);
+    const std::wstring path = s.stripResizeColumn == ui::kColumnStripBodyId
+        ? tab->current_path : col ? col->path : std::wstring{};
+    if (!path.empty()) tab->column_strip.widths_by_path[path] = width;
     s.hoverRegion = static_cast<int>(ui::HitTestResult::ColumnStripDivider);
     s.hoverSubIndex = s.stripResizeColumn;
     s.hoverPaneIndex = s.stripResizePane;
@@ -456,6 +509,10 @@ void ResetColumnStripWidth(AppState& s, const ui::HitTestResult& hit) {
     if (!tab) return;
     const size_t slot = ui::ColumnStripWidthSlot(hit.sub_index, tab->column_strip.ancestors.size());
     if (slot < tab->column_widths_dip.size()) tab->column_widths_dip[slot] = 0.0f;
+    const app::ColumnStripColumn* col = StripColumn(*tab, hit.sub_index);
+    const std::wstring path = hit.sub_index == ui::kColumnStripBodyId
+        ? tab->current_path : col ? col->path : std::wstring{};
+    tab->column_strip.widths_by_path.erase(path);
     while (!tab->column_widths_dip.empty() && tab->column_widths_dip.back() <= 0.0f)
         tab->column_widths_dip.pop_back();
     if (s.hwnd) InvalidateRect(s.hwnd, nullptr, FALSE);

@@ -38,23 +38,22 @@ struct ColumnStripLayout {
     // Replaces the pane bounds for everything the regular list draws:
     // same top/bottom as the pane, narrowed horizontally.
     D2D1_RECT_F body{};
-    // Area the ancestor columns scroll inside (empty when there are none).
+    // Full-width viewport shared by ancestor, regular body and child columns.
     D2D1_RECT_F viewport{};
-    float scroll_px = 0.0f;      // from the left end of the ancestor strip
-    float max_scroll_px = 0.0f;  // > 0: ancestors overflow the viewport
-    float content_px = 0.0f;     // total ancestor width
-    // Left to right: ancestors intersecting the viewport (rects may extend
-    // past it; clip to viewport), then the child column.
+    float scroll_px = 0.0f;      // from left of the complete directory chain
+    float max_scroll_px = 0.0f;
+    float content_px = 0.0f;     // may include trailing slack on a shortened branch
+    // Visible ancestor/child slots; the regular list has its own body rectangle.
     std::vector<ColumnStripSlot> columns;
 };
 
 // pane_bounds is the full pane rect; column rects span [top, pane bottom).
-// Columns line up from the left. Ancestors never drop out: when they do not fit they scroll
-// horizontally. scroll_from_right_dip = 0 keeps the parent visible next to
-// the list.
+// All columns share a horizontal coordinate system. Negative scroll_left_dip
+// shows the newest columns initially; a nonnegative offset holds their positions
+// on a branch change even if there is empty space at the far right.
 ColumnStripLayout LayoutColumnStrip(const D2D1_RECT_F& pane_bounds, float top,
                                     size_t ancestor_count, bool child_slot,
                                     const std::vector<float>& widths_dip,
-                                    float scale, float scroll_from_right_dip = 0.0f) noexcept;
+                                    float scale, float scroll_left_dip = -1.0f) noexcept;
 
 } // namespace pulse::ui

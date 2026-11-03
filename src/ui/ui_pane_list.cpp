@@ -3312,6 +3312,8 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
     if (col_badge_.pane == pane_index) DrawColumnBadge(pane_index, theme);
     if (focused && pane.wall_hint_since)
         DrawPaneWallHint(pane, pane_rect, vm.hover_region, vm.hover_control_index, theme);
+    if (pane.column_strip.Active())
+        DrawColumnStripScroll(vm, pane, pane_rect, pane_index, theme);
 
     const float radius = theme.radius_control * scale_;
     D2D1_COLOR_F frameColor = CardFrameColor(theme, vm.dark, pane_alpha_ >= 0.0f ? pane_alpha_ : card_alpha_);
