@@ -4423,8 +4423,11 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
         ? &nav_enter_[static_cast<size_t>(pane_index)] : nullptr;
     if (nav) {
         if (nav->path != vm.path) {
-            const bool animate = !nav->path.empty() && !vm.is_search && motion::SystemAnimationsEnabled() &&
-                                 !IsHighContrast();
+            // Local navigation preference: show folder contents immediately while retaining
+            // the loading skeleton and all unrelated view/hover/scroll animations.
+            constexpr bool kAnimateFolderNavigation = false;
+            const bool animate = kAnimateFolderNavigation && !nav->path.empty() && !vm.is_search &&
+                                 motion::SystemAnimationsEnabled() && !IsHighContrast();
             const auto under = [](const std::wstring& child, const std::wstring& parent) {
                 if (parent.empty() || child.size() <= parent.size()) return false;
                 if (_wcsnicmp(child.c_str(), parent.c_str(), parent.size()) != 0) return false;
