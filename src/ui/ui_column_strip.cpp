@@ -368,7 +368,9 @@ void MainRenderer::DrawColumnStripColumn(const WindowViewModel& vm, const PaneVi
     StripColumnMotion& cm = pm.columns[column_id];
     const bool hc = IsHighContrast();
     // Drawn at the eased scroll (hit-testing uses the settled one).
-    const float scroll = cm.scroll_init ? cm.scroll_shown : ColumnStripScrollPx(column, view_h);
+    const float scroll = ColumnStripVisualScroll(ColumnStripScrollPx(column, view_h),
+                                               cm.scroll_shown, cm.scroll_init,
+                                               cm.path == column.path);
     const float max_scroll = ColumnStripMaxScrollPx(column, view_h);
     const D2D1_RECT_F list_rc = D2D1::RectF(rc.left, list_top, rc.right, list_top + view_h);
     dc->PushAxisAlignedClip(list_rc, D2D1_ANTIALIAS_MODE_ALIASED);
@@ -492,7 +494,7 @@ void MainRenderer::DrawColumnStripColumn(const WindowViewModel& vm, const PaneVi
 }
 
 bool MainRenderer::HitTestColumnStrip(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds,
-                                      float x, float y, HitTestResult& out) const {
+                                      int pane_index, float x, float y, HitTestResult& out) const {
     const ColumnStripLayout strip = ColumnStripGeometry(vm, pane_bounds);
     if (!strip.active) return false;
     const ColumnStripView& cs = vm.column_strip;
@@ -535,7 +537,13 @@ bool MainRenderer::HitTestColumnStrip(const PaneViewModel& vm, const D2D1_RECT_F
         const float list_top = slot.rect.top + column_header_height_;
         const float view_h = ColumnStripViewHeight(slot.rect);
         if (y < list_top || y >= list_top + view_h) return true;
-        const float scroll = ColumnStripScrollPx(*column, view_h);
+        const float target_scroll = ColumnStripScrollPx(*column, view_h);
+        const auto& motions = StripMotionFor(this, pane_index).columns;
+        const auto motion = motions.find(slot.id);
+        const float scroll = motion == motions.end() ? target_scroll :
+            ColumnStripVisualScroll(target_scroll, motion->second.scroll_shown,
+                                    motion->second.scroll_init,
+                                    motion->second.path == column->path);
         const int row = static_cast<int>(std::floor((y - list_top + scroll) / row_height_));
         if (row >= 0 && static_cast<size_t>(row) < StripRowCount(*column)) {
             out.region = HitTestResult::ColumnStripRow;

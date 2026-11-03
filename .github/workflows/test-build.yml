@@ -2,7 +2,12 @@ name: Pulse Test Build (Windows x64)
 
 # Run only after a stage is ready for verification. Intermediate commits do not
 # justify a full Windows release build (which can take up to 90 minutes).
+# This one fully assembled feature-branch push runs one Windows build.
+# The default/main workflow is still manual-only.
 on:
+  push:
+    branches:
+      - 'pulse-test/04-interaction-stability-s0-s3'
   workflow_dispatch:
 
 # If the same test branch is requested twice, only its latest run is useful.

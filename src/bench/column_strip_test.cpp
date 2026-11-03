@@ -1,5 +1,6 @@
 #include "../ui/column_strip_layout.h"
 #include "../app/column_drop_target.h"
+#include "../app/column_interaction_rules.h"
 #include <memory>
 #include <vector>
 #include <cmath>
@@ -74,11 +75,24 @@ int main() {
               "unowned blank and current-body pseudo-column are rejected");
         check(ColumnDropDestination(state, L"D:\\Elsewhere", 0, -1, false).empty(),
               "stale navigation state cannot supply a destination");
+        check(pulse::app::ColumnStripRowItemPath(state, L"D:\\Project\\Current", 0, 0) ==
+                  L"D:\\Project\\readme.txt", "file row starts a drag without navigation");
+        check(pulse::app::ColumnStripRowItemPath(state, L"D:\\Project\\Current", 0, 2) ==
+                  L"D:\\Project\\Assets", "folder drag source follows row index mapping");
+        check(pulse::app::ColumnStripRowItemPath(state, L"D:\\Project\\Current", 0, 1).empty(),
+              "history row cannot start a drag");
         ancestor.snapshot = std::make_shared<const std::vector<pulse::fs::DirEntry>>();
         check(ColumnDropDestination(state, L"D:\\Project\\Current", 0, 2, true).empty(),
               "stale row snapshot is rejected during refresh");
         check(ColumnDropDestination(state, L"D:\\Project\\Current", 0, -1, false) ==
                   L"D:\\Project", "column background remains targetable while row list refreshes");
     }
+    check(!pulse::app::ColumnGestureExceededSlop(30, 40, 33, 43, 4, 4) &&
+           pulse::app::ColumnGestureExceededSlop(30, 40, 34, 43, 4, 4),
+          "press becomes a drag only above the Windows drag threshold");
+    check(ColumnStripVisualScroll(120, 40, true, true) == 40 &&
+          ColumnStripVisualScroll(120, 40, false, true) == 120 &&
+          ColumnStripVisualScroll(120, 40, true, false) == 120,
+          "paint and hit test use the same in-flight column scroll offset");
     return failures ? 1 : 0;
 }

@@ -48,6 +48,13 @@ struct ColumnStripLayout {
     std::vector<ColumnStripSlot> columns;
 };
 
+// Hit tests must follow the currently painted smooth-scroll offset, never
+// the eventual scroll target; otherwise a pointer can select an unseen row.
+inline float ColumnStripVisualScroll(float target, float shown, bool initialized,
+                                     bool same_path) noexcept {
+    return initialized && same_path ? shown : target;
+}
+
 // pane_bounds is the full pane rect; column rects span [top, pane bottom).
 // Columns line up from the left. Ancestors never drop out: when they do not fit they scroll
 // horizontally. scroll_from_right_dip = 0 keeps the parent visible next to

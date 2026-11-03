@@ -1399,7 +1399,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
             }
         }
         if (y >= paneRect.top + pane_header_height_ && paneVm.column_strip.Active()) {
-            if (HitTestColumnStrip(paneVm, paneRect, x, y, out)) return out;
+            if (HitTestColumnStrip(paneVm, paneRect, paneIndex, x, y, out)) return out;
             paneRc = PaneBodyBounds(paneVm, paneRect);
             if (x >= paneRc.right) {
                 // Empty room right of the last column.

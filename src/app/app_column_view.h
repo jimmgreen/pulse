@@ -13,7 +13,9 @@ void NoteColumnStripResult(AppState& s, const app::WorkResult& res);
 // Mouse-down on column-view regions (toggle button, rows, dividers).
 // Returns true when consumed.
 bool HandleColumnStripMouseDown(AppState& s, const ui::WindowViewModel& vm,
-                                const ui::HitTestResult& hit, int x);
+                                const ui::HitTestResult& hit, int x, int y);
+// The completed click is validated against the original row identity.
+bool FinishColumnStripMouseUp(AppState& s, const ui::HitTestResult& hit);
 bool UpdateColumnStripResize(AppState& s, int x);
 // Double-click on a divider restores that column's default width.
 void ResetColumnStripWidth(AppState& s, const ui::HitTestResult& hit);
