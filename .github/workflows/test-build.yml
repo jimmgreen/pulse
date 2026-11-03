@@ -1,10 +1,14 @@
 name: Pulse Test Build (Windows x64)
 
+# Run only after a stage is ready for verification. Intermediate commits do not
+# justify a full Windows release build (which can take up to 90 minutes).
 on:
-  push:
-    branches:
-      - 'pulse-test/**'
   workflow_dispatch:
+
+# If the same test branch is requested twice, only its latest run is useful.
+concurrency:
+  group: pulse-test-windows-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
