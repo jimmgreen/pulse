@@ -14,6 +14,13 @@ namespace pulse::fs {
 
 using SnapshotPtr = std::shared_ptr<const std::vector<DirEntry>>;
 
+struct SnapshotState {
+    SnapshotPtr snapshot;
+    uint64_t generation = 0;
+    uint64_t revision = 0;
+    bool dirty = false;
+};
+
 // Stable identity of a directory object. A path can point to a different
 // object after an uninstall/reinstall or a rename/recreate cycle.
 struct DirectoryIdentity {
@@ -47,6 +54,10 @@ public:
 
     // Last snapshot even if dirty (for UNC cache-first display).
     SnapshotPtr Peek(const std::wstring& path) const;
+    // Coherent cache metadata for secondary views. `revision` changes whenever
+    // the cached listing or its freshness changes, so a visible consumer can
+    // replace stale rows without polling pointer identity in separate calls.
+    SnapshotState State(const std::wstring& path) const;
 
     // Atomically update snapshot for path if generation is not older.
     // listed_at: WatchClock when its listing began (0: unknown).
@@ -79,6 +90,7 @@ private:
         SnapshotPtr snapshot;
         DirectoryIdentity identity;
         uint64_t generation = 0;
+        uint64_t revision = 0;
         size_t bytes = 0;
         bool dirty = true;
         uint64_t listed_at = 0;    // WatchClock when the snapshot's listing began
@@ -90,6 +102,7 @@ private:
     size_t capacity_;
     size_t byte_capacity_;
     size_t resident_bytes_ = 0;
+    uint64_t next_revision_ = 1;
     std::unordered_map<std::wstring, Entry> map_;
     std::list<std::wstring> lru_;
     // Changed folders with no entry: never listed here, or evicted while a

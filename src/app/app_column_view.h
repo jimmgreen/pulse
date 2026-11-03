@@ -24,6 +24,11 @@ bool ColumnStripSwallowDoubleClick(const AppState& s);
 // Right-click on a column row: selects that item the way a click does (the
 // list moves to its folder). Returns true when the item is now selected.
 bool SelectColumnStripRow(AppState& s, const ui::HitTestResult& hit);
+// Resolves a row without changing selection or navigation. Used by right-click
+// so the menu target is independent from the active browsing location.
+bool ColumnStripRowTarget(AppState& s, const ui::HitTestResult& hit,
+                          std::wstring& owner_folder, std::wstring& full_path,
+                          std::wstring& name, bool& directory);
 // Folder owning a column's blank space; empty for stale/invalid hit regions.
 // The path is resolved before any navigation or context-menu action.
 std::wstring ColumnStripBackgroundPath(AppState& s, const ui::HitTestResult& hit);

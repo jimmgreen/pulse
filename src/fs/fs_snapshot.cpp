@@ -100,6 +100,7 @@ SnapshotPtr SnapshotStore::GetOrStart(const std::wstring& path, uint64_t& out_ge
             return it->second.snapshot;
         }
         it->second.dirty = false;
+        it->second.revision = next_revision_++;
         stale_.erase(key);
         out_generation = it->second.generation;
         return nullptr;
@@ -126,6 +127,16 @@ SnapshotPtr SnapshotStore::Peek(const std::wstring& path) const {
     auto it = map_.find(key);
     if (it == map_.end()) return nullptr;
     return it->second.snapshot;
+}
+
+SnapshotState SnapshotStore::State(const std::wstring& path) const {
+    const std::wstring key = NormalizePath(path);
+    if (!path.empty() && key.empty()) return {};
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto it = map_.find(key);
+    if (it == map_.end()) return {nullptr, 0, 0, stale_.contains(key)};
+    return {it->second.snapshot, it->second.generation, it->second.revision,
+            it->second.dirty || stale_.contains(key)};
 }
 
 DirectoryIdentity SnapshotStore::Identity(const std::wstring& path) const {
@@ -157,6 +168,7 @@ void SnapshotStore::Update(const std::wstring& path, uint64_t generation,
         stale_.erase(key);
         Entry e;
         e.generation = generation;
+        e.revision = next_revision_++;
         e.dirty = false;
         e.snapshot = std::move(snapshot);
         e.identity = identity;
@@ -177,6 +189,7 @@ void SnapshotStore::Update(const std::wstring& path, uint64_t generation,
     it->second.bytes = bytes;
     resident_bytes_ += it->second.bytes;
     it->second.generation = generation;
+    it->second.revision = next_revision_++;
     it->second.listed_at = listed_at;
     it->second.dirty = false;
     lru_.splice(lru_.begin(), lru_, it->second.lru_it);
@@ -195,6 +208,7 @@ uint64_t SnapshotStore::Put(const std::wstring& path, SnapshotPtr snapshot) {
         stale_.erase(key);
         Entry e;
         e.generation = 0;
+        e.revision = next_revision_++;
         e.dirty = false;
         e.snapshot = std::move(snapshot);
         e.bytes = bytes;
@@ -211,6 +225,7 @@ uint64_t SnapshotStore::Put(const std::wstring& path, SnapshotPtr snapshot) {
     it->second.bytes = bytes;
     resident_bytes_ += it->second.bytes;
     it->second.dirty = false;
+    it->second.revision = next_revision_++;
     lru_.splice(lru_.begin(), lru_, it->second.lru_it);
     EvictToBudget(&key);
     return it->second.generation;
@@ -221,7 +236,10 @@ void SnapshotStore::MarkDirty(const std::wstring& path) {
     if (!path.empty() && key.empty()) return;
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = map_.find(key);
-    if (it != map_.end()) it->second.dirty = true;
+    if (it != map_.end()) {
+        if (!it->second.dirty) it->second.revision = next_revision_++;
+        it->second.dirty = true;
+    }
     else NoteStale(key);
 }
 
@@ -230,7 +248,10 @@ void SnapshotStore::BeginRefresh(const std::wstring& path) {
     if (!path.empty() && key.empty()) return;
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = map_.find(key);
-    if (it != map_.end()) it->second.dirty = false;
+    if (it != map_.end()) {
+        if (it->second.dirty) it->second.revision = next_revision_++;
+        it->second.dirty = false;
+    }
     stale_.erase(key);
 }
 
