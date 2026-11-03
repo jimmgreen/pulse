@@ -4829,6 +4829,11 @@ LRESULT HandleRButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 ext = StaticVerbKey(*tab, { hit.index });
             }
             if (!paths.empty()) StartCtxQuery(*s, std::move(paths), false, ext);
+        } else if (hit.region == ui::HitTestResult::ColumnStripBlank) {
+            // The ancestor/child column owns its background, not the active tab's path.
+            const std::wstring folder = ColumnStripBackgroundPath(*s, hit);
+            if (!folder.empty() && !fs::IsVirtualPath(folder))
+                StartCtxQuery(*s, { folder }, true, ipc::kBackgroundVerbKey);
         } else if (tab && !tab->current_path.empty() &&
                    !fs::IsVirtualPath(tab->current_path) &&
                    (hit.region == ui::HitTestResult::Pane ||
@@ -4868,6 +4873,24 @@ LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
                 InvalidateRect(hwnd, nullptr, FALSE);
                 ShowItemContextMenu(*s, sp);
             }
+            return 0;
+        }
+        if (hit.region == ui::HitTestResult::ColumnStripBlank) {
+            // Use the existing background menu and create/rename flow. Matching
+            // right-click-on-row behavior, activate this column's folder first:
+            // otherwise CmdNewFolder would silently create in tab->current_path.
+            const std::wstring folder = ColumnStripBackgroundPath(*s, hit);
+            if (!folder.empty()) {
+                app::Tab* tab = ActiveTab(*s);
+                if (tab && _wcsicmp(tab->current_path.c_str(), folder.c_str()) != 0)
+                    NavigateTo(*s, folder);
+                tab = ActiveTab(*s);
+                if (tab && _wcsicmp(tab->current_path.c_str(), folder.c_str()) == 0) {
+                    ShowBackgroundContextMenu(*s, sp);
+                    return 0;
+                }
+            }
+            s->context_menu.Close();
             return 0;
         }
         if (HandleFavoritesBarContextMenu(*s, hit, sp)) return 0;   // 收藏栏
