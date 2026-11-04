@@ -606,7 +606,7 @@ if(PULSE_APP_SOURCES)
     include(cmake/release_notes.cmake)
     pulse_embed_release_notes(pulse)
     set_property(SOURCE src/app/pulse.rc APPEND PROPERTY OBJECT_DEPENDS
-        "${CMAKE_CURRENT_SOURCE_DIR}/assets/global-search-logo.png"
+        "${CMAKE_CURRENT_SOURCE_DIR}/assets/pulse_icon_transparent_vector.png"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/app/pulse.ico"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/common/strings.rcinc"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/common/strings_zh_tw.rcinc"

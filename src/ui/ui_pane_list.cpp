@@ -5278,7 +5278,9 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                     ? detailsColumns.DividerX(0) - margin_
                     : nameRc.right) - cloudReserve;
             if (stripChevron && !empty_folder) {
-                DrawIconText(nameColRight + 2.0f * scale_, cell.top, 18.0f * scale_, cell.bottom - cell.top,
+                DrawIconText(stripLayout.chevron.left, cell.top,
+                             stripLayout.chevron.right - stripLayout.chevron.left,
+                             cell.bottom - cell.top,
                              kIconChevronRight, L">", theme.text_secondary, 0.55f);
             }
             const bool showStar = showRowActions;
