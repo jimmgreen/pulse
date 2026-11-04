@@ -4126,7 +4126,7 @@ D2D1_RECT_F MainRenderer::RenameFieldRect(const PaneViewModel& vm, const D2D1_RE
         const D2D1_RECT_F row = layout.ItemRect(view);
         const bool empty_folder = e.is_dir && !e.record_only && vm.empty_folders.contains(source_index);
         stripLayout = LayoutColumnStripRow(D2D1::RectF(list.left, list.top, list.right, list.bottom),
-            row.top, row.bottom, scale_, e.is_dir && !empty_folder);
+            row.top, row.bottom, scale_, e.is_dir);
         nameRc = stripLayout.text;
     }
     const bool iconGrid = vm.view_mode == ViewMode::ExtraLargeIcons ||
@@ -4711,7 +4711,9 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             // later icon/text drawing.
             const bool stripRow = vm.view_mode == ViewMode::Details && vm.column_strip.Active();
             const bool empty_folder = e.is_dir && !e.record_only && vm.empty_folders.contains(src);
-            const bool stripChevron = stripRow && e.is_dir && !empty_folder;
+            // Reserve the folder-chevron slot even when the folder-size probe
+            // says the folder is empty; only the glyph itself is conditional.
+            const bool stripChevron = stripRow && e.is_dir;
             const uint64_t row_key = std::hash<std::wstring_view>{}(std::wstring_view(e.name));
             D2D1_POINT_2F row_shift{0.0f, 0.0f};
             if (shift) row_shift = shift->Offset(row_key, D2D1::Point2F(cell.left, cell.top));
@@ -5273,7 +5275,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             const float nameColRight = (vm.view_mode == ViewMode::Details
                 ? (stripRow ? detailsColumns.right : detailsColumns.DividerX(0) - margin_)
                 : nameRc.right) - (stripChevron ? 18.0f * scale_ : 0.0f) - cloudReserve;
-            if (stripChevron) {
+            if (stripChevron && !empty_folder) {
                 DrawIconText(nameColRight + 2.0f * scale_, cell.top, 18.0f * scale_, cell.bottom - cell.top,
                              kIconChevronRight, L">", theme.text_secondary, 0.55f);
             }
