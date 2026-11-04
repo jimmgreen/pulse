@@ -38,7 +38,14 @@ struct ColumnPathLess {
         return _wcsicmp(a.c_str(), b.c_str()) < 0;
     }
 };
-using ColumnPathWidths = std::map<std::wstring, float, ColumnPathLess>;
+enum class ColumnPathWidthMode : uint8_t { Manual = 1, AutoFit = 2 };
+
+struct ColumnPathWidthSetting {
+    float width_dip = 240.0f;
+    ColumnPathWidthMode mode = ColumnPathWidthMode::Manual;
+};
+
+using ColumnPathWidths = std::map<std::wstring, ColumnPathWidthSetting, ColumnPathLess>;
 
 struct ColumnStripState {
     std::wstring for_path;                     // current_path the ancestors belong to
@@ -46,7 +53,7 @@ struct ColumnStripState {
     ColumnStripColumn child;                   // selected folder (path empty = none)
     float scroll_left_dip = -1.0f;             // whole-chain left scroll; -1 = newest
     bool hold_scroll_on_navigate = false;     // column click preserves the viewport
-    ColumnPathWidths widths_by_path;            // only user-set or one-shot fitted widths
+    ColumnPathWidths widths_by_path;            // explicit per-folder width and mode
 
     bool Empty() const { return for_path.empty() && ancestors.empty() && child.path.empty(); }
 };

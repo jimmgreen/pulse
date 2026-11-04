@@ -28,7 +28,9 @@ namespace {
 //   8 -> 9: BuiltinQuickAccess gained Pictures, Videos, Documents and Music.
 //           Older masks get the default-hidden bits (Documents, Music), so an
 //           upgrade shows Pictures and Videos the way a fresh profile does.
-constexpr int kSessionVersion = 9;
+//   9 -> 10: per-folder column widths store their interaction mode as well as
+//            their DIP width; version-9 width-only entries migrate as Manual.
+constexpr int kSessionVersion = 10;
 // First version whose quickAccessHidden uses the current bit positions.
 constexpr int kQuickAccessBitsVersion = 7;
 // First version that knows the library links.
@@ -143,19 +145,23 @@ std::vector<float> ParseDipList(const std::wstring& value) {
     return out;
 }
 
-// Persist only explicit user-set widths. Older sessions simply have none.
+// Persist explicit per-folder widths and their mode. Missing mode means the
+// legacy width-only format and is restored as Manual.
 std::wstring FormatColumnPathWidths(const ColumnPathWidths& widths) {
     std::wstring result = L"[";
     bool first = true;
-    for (const auto& [path, width] : widths) {
+    for (const auto& [path, setting] : widths) {
+        const float width = setting.width_dip;
         if (path.empty() || !std::isfinite(width) || width < 120.0f || width > 560.0f)
             continue;
         if (!first) result += L",";
         first = false;
         std::wstring escaped;
         pulse::json::Escape(path, escaped);
+        const int mode = setting.mode == ColumnPathWidthMode::AutoFit ? 2 : 1;
         result += L"{\"path\":\"" + escaped + L"\",\"width\":";
-        result += std::to_wstring(static_cast<int>(std::lround(width))) + L"}";
+        result += std::to_wstring(static_cast<int>(std::lround(width)));
+        result += L",\"mode\":" + std::to_wstring(mode) + L"}";
     }
     return result + L"]";
 }
@@ -167,8 +173,11 @@ ColumnPathWidths ParseColumnPathWidths(const std::wstring& json) {
         if (widths.size() >= 1024) return;
         const std::wstring path = fs::NormalizePath(pulse::json::ExtractString(object, L"path"));
         const int width = pulse::json::ExtractInt(object, L"width");
+        const int stored_mode = pulse::json::ExtractInt(object, L"mode");
+        const ColumnPathWidthMode mode = stored_mode == 2
+            ? ColumnPathWidthMode::AutoFit : ColumnPathWidthMode::Manual;
         if (!path.empty() && width >= 120 && width <= 560)
-            widths[path] = static_cast<float>(width);
+            widths[path] = {static_cast<float>(width), mode};
     });
     return widths;
 }

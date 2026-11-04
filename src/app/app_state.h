@@ -417,7 +417,13 @@ struct AppState : AppCoreOwner {
     int stripResizeColumn = -1;
     int stripResizeStartX = 0;
     float stripResizeStartDip = 0.0f;
+    app::Tab* stripResizeTab = nullptr;
+    std::wstring stripResizePath;
+    bool stripResizeHadSetting = false;
+    bool stripResizeMoved = false;
+    app::ColumnPathWidthSetting stripResizeOriginalSetting{};
     ULONGLONG stripClickTick = 0;
+    int stripClickPane = -1;
     bool stripHScrolling = false;        // ancestor scrollbar thumb drag
     float stripHScrollStartDip = 0.0f;   // scroll_from_right_dip at press
     float stripHScrollRatio = 0.0f;      // strip px per thumb px

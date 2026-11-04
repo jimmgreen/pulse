@@ -4696,6 +4696,12 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                 }
             }
             const ListEntryView& e = MakeVisibleEntry(vm, static_cast<size_t>(src));
+            // Column-strip layout is prepared before geometry is calculated.
+            // Keep these row properties in this loop scope for both layout and
+            // later icon/text drawing.
+            const bool stripRow = vm.view_mode == ViewMode::Details && vm.column_strip.Active();
+            const bool empty_folder = e.is_dir && !e.record_only && vm.empty_folders.contains(src);
+            const bool stripChevron = stripRow && e.is_dir && !empty_folder;
             const uint64_t row_key = std::hash<std::wstring_view>{}(std::wstring_view(e.name));
             D2D1_POINT_2F row_shift{0.0f, 0.0f};
             if (shift) row_shift = shift->Offset(row_key, D2D1::Point2F(cell.left, cell.top));
@@ -4731,6 +4737,15 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             const bool wallPic = wall_rows && WallPicture(e.name, e.is_dir);
             if (wall_rows && !wallPic) thumbRect = iconRect;
             if (wallPic) iconRect = thumbRect;
+            ColumnStripRowLayout stripLayout{};
+            if (stripRow) {
+                stripLayout = LayoutColumnStripRow(D2D1::RectF(x, y, x + w, y + h),
+                    cell.top, cell.bottom, scale_, stripChevron);
+                cell = stripLayout.cell;
+                iconRect = stripLayout.icon;
+                thumbRect = iconRect;
+                nameRc = stripLayout.text;
+            }
             if (wall_prev) {
                 const size_t at = static_cast<size_t>(i);
                 const int now_row = wall_rows->RowOf(i), was_row = wall_prev->RowOf(i);
@@ -5062,7 +5077,6 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                                                        : std::min(snappedIconW, snappedIconH);
                 uint32_t media_duration_ms = 0;
                 // A folder probed empty: neither a contents thumbnail nor the shell icon.
-                const bool empty_folder = e.is_dir && !e.record_only && vm.empty_folders.contains(src);
                 if (empty_folder) {
                     // Both forms put their ink at x 1/12..11/12, y 1/6..5/6: rest it
                     // on the name baseline like the shell artwork below.
@@ -5227,8 +5241,6 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             const size_t totalTags = tagIndices ? tagIndices->size() : (tagDots ? tagDots->size() : 0);
             const int tagDotCount = static_cast<int>(std::min<size_t>(3, totalTags));
             // Column view rows: name and a chevron on folders, no row actions.
-            const bool stripRow = vm.view_mode == ViewMode::Details && vm.column_strip.Active();
-            const bool stripChevron = stripRow && e.is_dir;
             const bool showRowActions = vm.view_mode == ViewMode::Details && !stripRow &&
                 src != vm.rename_index &&
                 (hover || (selected && vm.selected_count == 1) || e.starred);

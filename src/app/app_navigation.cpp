@@ -1886,6 +1886,16 @@ void FollowMovedFolder(AppState& s, const std::wstring& from, const std::wstring
             app::Tab& tab = pane.view;
             move.RemapHistory(tab.back_stack);
             move.RemapHistory(tab.forward_stack);
+            // Width overrides belong to folder identity, so move the whole
+            // subtree's settings with the folder (including inactive branches).
+            app::ColumnPathWidths remapped_widths;
+            for (const auto& [old_path, setting] : tab.column_strip.widths_by_path) {
+                if (const auto new_path = move.Remap(old_path))
+                    remapped_widths[*new_path] = setting;
+                else
+                    remapped_widths[old_path] = setting;
+            }
+            tab.column_strip.widths_by_path = std::move(remapped_widths);
             const auto path = move.Remap(tab.current_path);
             if (!path || *path == tab.current_path) return;
             // Rows name entries relative to the folder, so they stay valid;

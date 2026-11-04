@@ -4196,10 +4196,6 @@ LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPA
             AiAssistantMouseDown(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
             return 0;
         }
-        if (ColumnStripSwallowDoubleClick(*s)) {
-            s->stripClickTick = 0;
-            return 0;
-        }
         // The second click on a toolbar gap or the status bar after the first
         // cleared the selection: the toolbar and the status hints have changed
         // under the pointer since, so do not hit-test again. Put the selection
@@ -4225,6 +4221,15 @@ LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPA
         ui::WindowViewModel vm = BuildVm(*s, false);
         D2D1_RECT_F rect = D2D1::RectF(0, 0, (float)s->compositor.Width(), (float)s->compositor.Height());
         ui::HitTestResult hit = s->renderer.HitTest(vm, rect, (float)mx, (float)my);
+        // Suppress only the second click on a row that navigated the pane.
+        // A double-click on a divider must always reach the width state machine.
+        if (ColumnStripSwallowDoubleClick(*s, hit)) {
+            s->stripClickTick = 0;
+            s->stripClickPane = -1;
+            return 0;
+        }
+        s->stripClickTick = 0;
+        s->stripClickPane = -1;
         pulse::diagnostics::runtime::Event("file_double_click", {
             {"row_hit", hit.region == ui::HitTestResult::Row},
             {"details_view", double_tab && double_tab->view_mode == ui::ViewMode::Details},
@@ -4746,7 +4751,7 @@ LRESULT HandleCaptureChanged(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LP
                 // Capture lost mid-gesture: the card springs back home.
                 ReleaseTrayDrag(*s, false);
             }
-            EndColumnStripResize(*s);
+            EndColumnStripResize(*s, false);
             if (s->renameClickCandidate && s->renameClickDue == 0)
                 CancelRenameClick(*s);
             if (s->starDragPending || s->starDragActive) {
@@ -5272,6 +5277,12 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         if (wParam == VK_ESCAPE && s->settings.menu_drag_item() >= 0) {
             // Esc puts a dragged Pulse menu preview row back.
             s->settings.EndMenuDrag();
+            if (GetCapture() == hwnd) ReleaseCapture();
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        if (wParam == VK_ESCAPE && s->stripResizing) {
+            EndColumnStripResize(*s, false);
             if (GetCapture() == hwnd) ReleaseCapture();
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;

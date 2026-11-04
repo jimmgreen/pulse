@@ -1,6 +1,7 @@
 #include "column_strip_layout.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace pulse::ui {
 
@@ -15,6 +16,33 @@ size_t ColumnStripWidthSlot(int column_id, size_t ancestor_count) noexcept {
     if (column_id == kColumnStripChildId || column_id < 0) return 0;
     const size_t index = static_cast<size_t>(column_id);
     return index < ancestor_count ? ancestor_count - index : 0;
+}
+
+ColumnStripRowLayout LayoutColumnStripRow(const D2D1_RECT_F& column,
+                                          float row_top, float row_bottom,
+                                          float scale, bool has_chevron) noexcept {
+    ColumnStripRowLayout out;
+    const float unit = std::max(0.5f, scale);
+    const float pad = 6.0f * unit;
+    out.cell = D2D1::RectF(column.left + pad, row_top + unit,
+                           std::max(column.left + pad, column.right - pad),
+                           std::max(row_top + unit, row_bottom - unit));
+
+    const float icon_side = 16.0f * unit;
+    const float icon_left = out.cell.left + 8.0f * unit;
+    const float icon_top = static_cast<float>(std::round(
+        row_top + ((row_bottom - row_top) - icon_side) * 0.5f));
+    out.icon = D2D1::RectF(icon_left, icon_top, icon_left + icon_side, icon_top + icon_side);
+
+    const float chevron_width = has_chevron ? 18.0f * unit : 0.0f;
+    const float text_left = out.icon.right + 8.0f * unit;
+    const float text_right = std::max(text_left, out.cell.right - chevron_width - 4.0f * unit);
+    out.text = D2D1::RectF(text_left, row_top, text_right, row_bottom);
+    if (has_chevron) {
+        const float chevron_left = out.cell.right - chevron_width - 2.0f * unit;
+        out.chevron = D2D1::RectF(chevron_left, row_top, chevron_left + chevron_width, row_bottom);
+    }
+    return out;
 }
 
 ColumnStripLayout LayoutColumnStrip(const D2D1_RECT_F& pane_bounds, float top,

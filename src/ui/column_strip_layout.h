@@ -33,6 +33,19 @@ struct ColumnStripSlot {
     D2D1_RECT_F rect{};
 };
 
+// One source of truth for the row geometry shared by ancestor columns and
+// the current-folder list: icon, filename, and optional folder chevron.
+struct ColumnStripRowLayout {
+    D2D1_RECT_F cell{};
+    D2D1_RECT_F icon{};
+    D2D1_RECT_F text{};
+    D2D1_RECT_F chevron{};
+};
+
+ColumnStripRowLayout LayoutColumnStripRow(const D2D1_RECT_F& column,
+                                          float row_top, float row_bottom,
+                                          float scale, bool has_chevron) noexcept;
+
 struct ColumnStripLayout {
     bool active = false;
     // Replaces the pane bounds for everything the regular list draws:

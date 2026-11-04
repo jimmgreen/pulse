@@ -17,10 +17,10 @@ bool HandleColumnStripMouseDown(AppState& s, const ui::WindowViewModel& vm,
 bool UpdateColumnStripResize(AppState& s, int x);
 // Double-click on a divider fits current filenames once and locks that folder's width.
 void ResetColumnStripWidth(AppState& s, const ui::HitTestResult& hit);
-void EndColumnStripResize(AppState& s);
+void EndColumnStripResize(AppState& s, bool commit = true);
 // Double-click right after a column click changed the folder: swallow it so
 // the second click does not open whatever moved under the cursor.
-bool ColumnStripSwallowDoubleClick(const AppState& s);
+bool ColumnStripSwallowDoubleClick(const AppState& s, const ui::HitTestResult& hit);
 // Right-click on a column row: selects that item the way a click does (the
 // list moves to its folder). Returns true when the item is now selected.
 bool SelectColumnStripRow(AppState& s, const ui::HitTestResult& hit);

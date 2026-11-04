@@ -68,5 +68,19 @@ int main() {
         {300.0f, 220.0f, 180.0f, 260.0f, 280.0f}, 1.0f, 200.0f);
     check(approximatelyEqual(custom.body.left, 280 + 260 + 180 + 220 - 200),
           "resized columns share the same coordinates");
+
+    const D2D1_RECT_F row_column = D2D1::RectF(20, 0, 260, 600);
+    const auto folder_row = LayoutColumnStripRow(row_column, 100, 132, 1.0f, true);
+    const auto file_row = LayoutColumnStripRow(row_column, 100, 132, 1.0f, false);
+    check(approximatelyEqual(folder_row.cell.left, file_row.cell.left) &&
+          approximatelyEqual(folder_row.icon.left, file_row.icon.left) &&
+          approximatelyEqual(folder_row.text.left, file_row.text.left),
+          "folder and file names share the same icon and text origin");
+    check(approximatelyEqual(folder_row.text.right, folder_row.chevron.left - 4.0f) &&
+          approximatelyEqual(file_row.text.right, file_row.cell.right - 4.0f),
+          "only folders reserve the shared chevron region");
+    check(approximatelyEqual(folder_row.text.right - folder_row.text.left,
+                             (folder_row.chevron.left - 4.0f) - folder_row.text.left),
+          "row text width is derived from the same geometry as its chevron");
     return failures ? 1 : 0;
 }
