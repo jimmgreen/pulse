@@ -74,7 +74,8 @@ LayoutTabSnapshot CaptureLayoutTab(const LayoutTab& tab) {
         }
         snapshot.panes.push_back({view->current_path, view->view_mode,
             view->details_column_dividers, view->search_column_dividers,
-            view->column_layout, view->column_widths_dip});
+            view->column_layout, view->column_widths_dip,
+            view->column_strip.widths_by_path});
     }
     return snapshot;
 }
@@ -101,6 +102,8 @@ void RestoreLayoutTab(LayoutTab& tab, const LayoutTabSnapshot& snapshot,
         Tab* raw = pane->ActiveTab();
         tab.panes.push_back(std::move(pane));
         if (load_tab) load_tab(*raw, saved.path);
+        // The loader can reset a Tab; restore its widths only afterwards.
+        raw->column_strip.widths_by_path = saved.column_path_widths;
     }
     if (tab.panes.empty()) {
         auto pane = std::make_unique<Pane>();
@@ -126,6 +129,7 @@ void RestoreLayoutTab(LayoutTab& tab, const LayoutTabSnapshot& snapshot,
         pane->view.search_column_dividers = source.search_column_dividers;
         pane->view.column_layout = source.column_layout;
         pane->view.column_widths_dip = source.column_widths_dip;
+        pane->view.column_strip.widths_by_path = source.column_strip.widths_by_path;
         const std::wstring clone = source.current_path;
         pane->view.current_path = clone;
         Tab* raw = pane->ActiveTab();

@@ -143,6 +143,36 @@ std::vector<float> ParseDipList(const std::wstring& value) {
     return out;
 }
 
+// Persist only explicit user-set widths. Older sessions simply have none.
+std::wstring FormatColumnPathWidths(const ColumnPathWidths& widths) {
+    std::wstring result = L"[";
+    bool first = true;
+    for (const auto& [path, width] : widths) {
+        if (path.empty() || !std::isfinite(width) || width < 120.0f || width > 560.0f)
+            continue;
+        if (!first) result += L",";
+        first = false;
+        std::wstring escaped;
+        pulse::json::Escape(path, escaped);
+        result += L"{\"path\":\"" + escaped + L"\",\"width\":";
+        result += std::to_wstring(static_cast<int>(std::lround(width))) + L"}";
+    }
+    return result + L"]";
+}
+
+ColumnPathWidths ParseColumnPathWidths(const std::wstring& json) {
+    ColumnPathWidths widths;
+    if (json.size() < 2 || json.front() != L'[' || json.back() != L']') return widths;
+    pulse::json::ForEachElement(json, [&](const std::wstring& object) {
+        if (widths.size() >= 1024) return;
+        const std::wstring path = fs::NormalizePath(pulse::json::ExtractString(object, L"path"));
+        const int width = pulse::json::ExtractInt(object, L"width");
+        if (!path.empty() && width >= 120 && width <= 560)
+            widths[path] = static_cast<float>(width);
+    });
+    return widths;
+}
+
 // Section order travels as "0,1,2,6,3,4,5"; anything malformed falls back to
 // the default order (NormalizeSidebarOrder rebuilds a full permutation).
 std::vector<int> ParseSidebarOrder(const std::wstring& order_text) {
@@ -255,7 +285,9 @@ std::wstring LayoutTabsToJson(const std::vector<LayoutTabSnapshot>& tabs) {
             out += pane.column_layout ? L"true" : L"false";
             out += L",\"colWidths\":\"";
             out += FormatDipList(pane.column_widths);
-            out += L"\"}";
+            out += L"\",\"colPathWidths\":";
+            out += FormatColumnPathWidths(pane.column_path_widths);
+            out += L"}";
         }
         out += L"]}";
     }
@@ -361,6 +393,8 @@ bool ParseLayoutTabs(const std::wstring& array_json,
                     pulse::json::ExtractString(pj, L"searchCols"));
                 pane.column_layout = pulse::json::ExtractBool(pj, L"colLayout");
                 pane.column_widths = ParseDipList(pulse::json::ExtractString(pj, L"colWidths"));
+                pane.column_path_widths = ParseColumnPathWidths(
+                    pulse::json::ExtractArray(pj, L"colPathWidths"));
                 tab.panes.push_back(std::move(pane));
             }
         }

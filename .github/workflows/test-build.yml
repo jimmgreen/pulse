@@ -3,12 +3,10 @@ name: Pulse Test Build (Windows x64)
 # Run only after a stage is ready for verification. Intermediate commits do not
 # justify a full Windows release build (which can take up to 90 minutes).
 on:
-  # Only the column regression-test fix needs an automatic Windows build.
-  # Other pushes still use workflow_dispatch to avoid duplicate expensive runs.
+  # Only this completed feature branch triggers one Windows build.
+  # Avoid expensive automatic builds for other pushes or PRs.
   push:
-    branches: [main]
-    paths:
-      - 'src/bench/column_strip_test.cpp'
+    branches: [pulse-test/stable-column-widths]
   workflow_dispatch:
 
 # If the same test branch is requested twice, only its latest run is useful.
