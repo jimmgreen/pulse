@@ -40,8 +40,11 @@ ColumnStripLayout LayoutColumnStrip(const D2D1_RECT_F& pane_bounds, float top,
 
     // One continuous content axis. Preserve a requested left scroll when the
     // branch gets shorter instead of pulling the clicked folder to the right.
-    const float requested = scroll_left_dip < 0.0f
-        ? natural_max : std::max(0.0f, scroll_left_dip) * unit;
+    // A lone root has no earlier columns to reveal. Always anchor it at the
+    // pane's leading edge, even when its fixed width exceeds the viewport.
+    const float requested = (ancestor_count == 0 && !child_slot) ? 0.0f
+        : scroll_left_dip < 0.0f
+            ? natural_max : std::max(0.0f, scroll_left_dip) * unit;
     out.active = true;
     out.scroll_px = requested;
     out.max_scroll_px = std::max(natural_max, requested);

@@ -1780,12 +1780,15 @@ bool PathHasPendingRefresh(AppState& s, const std::wstring& path) {
     ForEachPane(s, [&](app::Pane& pane) {
         const app::Tab* tab = pane.ActiveTab();
         if (!tab) return;
-        if (tab->current_path == path && tab->pending_generation != 0) pending = true;
+        if (_wcsicmp(tab->current_path.c_str(), path.c_str()) == 0 &&
+            tab->pending_generation != 0) pending = true;
         if (!tab->column_layout) return;
         for (const auto& column : tab->column_strip.ancestors) {
-            if (column.path == path && column.generation != 0) pending = true;
+            if (_wcsicmp(column.path.c_str(), path.c_str()) == 0 &&
+                column.generation != 0) pending = true;
         }
-        if (tab->column_strip.child.path == path && tab->column_strip.child.generation != 0)
+        if (_wcsicmp(tab->column_strip.child.path.c_str(), path.c_str()) == 0 &&
+            tab->column_strip.child.generation != 0)
             pending = true;
     });
     return pending;
@@ -1797,7 +1800,8 @@ void RefreshPath(AppState& s, const std::wstring& path, RefreshReason reason) {
     std::vector<app::Tab*> tabs;
     ForEachPane(s, [&](app::Pane& pane) {
         app::Tab* tab = pane.ActiveTab();
-        if (tab && tab->current_path == normalized) tabs.push_back(tab);
+        if (tab && _wcsicmp(tab->current_path.c_str(), normalized.c_str()) == 0)
+            tabs.push_back(tab);
     });
     if (tabs.empty()) return;
     if (fs::IsVirtualPath(normalized) && !fs::IsRecycleViewPath(normalized)) {
@@ -2123,12 +2127,12 @@ static bool WindowShowsFolder(AppState& s, const std::wstring& path) {
     ForEachPane(s, [&](app::Pane& pane) {
         const app::Tab* tab = pane.ActiveTab();
         if (!tab) return;
-        if (tab->current_path == path) shows = true;
+        if (_wcsicmp(tab->current_path.c_str(), path.c_str()) == 0) shows = true;
         if (!tab->column_layout) return;
         for (const auto& column : tab->column_strip.ancestors) {
-            if (column.path == path) shows = true;
+            if (_wcsicmp(column.path.c_str(), path.c_str()) == 0) shows = true;
         }
-        if (tab->column_strip.child.path == path) shows = true;
+        if (_wcsicmp(tab->column_strip.child.path.c_str(), path.c_str()) == 0) shows = true;
     });
     return shows;
 }

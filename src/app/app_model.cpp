@@ -638,12 +638,14 @@ void Pane::NewTab(const std::wstring& path) {
     const auto search_columns = view.search_column_dividers;
     const bool column_layout = view.column_layout;
     auto column_widths = std::move(view.column_widths_dip);
+    auto path_widths = std::move(view.column_strip.widths_by_path);
     view = Tab{};
     view.view_mode = mode;
     view.details_column_dividers = columns;
     view.search_column_dividers = search_columns;
     view.column_layout = column_layout;
     view.column_widths_dip = std::move(column_widths);
+    view.column_strip.widths_by_path = std::move(path_widths);
     view.current_path = fs::NormalizePath(path);
     view.loading = true;
 }

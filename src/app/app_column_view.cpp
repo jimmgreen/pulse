@@ -377,9 +377,15 @@ bool HandleColumnStripMouseDown(AppState& s, const ui::WindowViewModel& vm,
                 }
                 float reveal = 0.0f;
                 if (folder) {
-                    const ui::PaneViewModel* pane = SlotPane(vm, hit.pane_index);
-                    const float child_w = ui::ColumnStripWidthDip(
-                        pane ? pane->column_strip.widths_dip : tab->column_widths_dip, 0) * scale;
+                    // The selected folder becomes the next column. Resolve
+                    // its own path-keyed width, not the previously open child slot.
+                    const int source = (*col->rows)[static_cast<size_t>(hit.index)];
+                    const std::wstring child_path = fs::NormalizePath(Join(
+                        col->path, (*col->rows_snapshot)[static_cast<size_t>(source)].name));
+                    const auto width_it = tab->column_strip.widths_by_path.find(child_path);
+                    const float child_dip = width_it == tab->column_strip.widths_by_path.end()
+                        ? ui::kColumnStripChildDefaultDip : width_it->second;
+                    const float child_w = child_dip * scale;
                     for (const auto& slot : layout.columns) {
                         if (slot.id != hit.sub_index) continue;
                         reveal = std::max(0.0f, slot.rect.right + child_w - layout.viewport.right) / scale;

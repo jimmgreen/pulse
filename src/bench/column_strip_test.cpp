@@ -39,6 +39,11 @@ int main() {
             const auto root = LayoutColumnStrip(bounds, 80 * scale, 0, false, {}, scale);
             check(root.active && approximatelyEqual(root.body.left, bounds.left) && root.columns.empty(),
                   "single root starts on pane left");
+            const auto narrow_root = LayoutColumnStrip(D2D1::RectF(0, 0, 180 * scale, 600 * scale),
+                                                       80 * scale, 0, false, {}, scale);
+            check(narrow_root.active && approximatelyEqual(narrow_root.scroll_px, 0.0f) &&
+                  approximatelyEqual(narrow_root.body.left, 0.0f),
+                  "narrow single root remains anchored at the leading edge");
         }
     }
     const auto bounds = D2D1::RectF(0, 0, 1440, 800);

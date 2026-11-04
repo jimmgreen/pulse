@@ -6,7 +6,7 @@ on:
   # Only this completed feature branch triggers one Windows build.
   # Avoid expensive automatic builds for other pushes or PRs.
   push:
-    branches: [pulse-test/stable-column-widths]
+    branches: [pulse-test/column-interaction-complete]
   workflow_dispatch:
 
 # If the same test branch is requested twice, only its latest run is useful.
