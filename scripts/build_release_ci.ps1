@@ -60,6 +60,9 @@ set "VSLANG=1033"
 $toolsetEnvironment
 cmake -S "$repo" -B "$build" -G Ninja $compilerArguments -DCMAKE_BUILD_TYPE=Release -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DPULSE_WIN81_CANDIDATE=$candidate -DPULSE_WITH_SELFTEST=ON -DPULSE_BUILD_PROGRESS_UI_TESTS=ON -DPULSE_WITH_LUMATEXT=ON -DLUMATEXT_SOURCE_DIR= -DCMAKE_PREFIX_PATH="$sdkRoot" -DPULSE_UPDATE_MANIFEST_URL="https://github.com/jimmgreen/pulse/releases/latest/download/$manifest" -DPULSE_UPDATE_PUBLIC_KEY_HEX=$publicKey
 if errorlevel 1 exit /b 1
+rem Preflight changed standalone tests before building the complete release target set.
+cmake --build "$build" --parallel 4 --target pulse_column_strip_test pulse_session_window_test
+if errorlevel 1 exit /b 1
 cmake --build "$build" --parallel 4 --target $testTargets
 exit /b %errorlevel%
 "@ | Set-Content -LiteralPath $batch -Encoding ascii
