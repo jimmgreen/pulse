@@ -1,4 +1,5 @@
 name: Pulse Test Build (Windows x64)
+run-name: Pulse Test Build — ${{ github.ref_name }}
 
 # Run only after a stage is ready for verification. Intermediate commits do not
 # justify a full Windows release build (which can take up to 90 minutes).
