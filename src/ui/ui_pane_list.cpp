@@ -5358,9 +5358,12 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                 ? (std::min)(ai_painter->AfterNameReserve(), (nameColRight - nameX) * 0.6f) : 0.0f;
             const NameTrail trail = LayoutNameTrail(
                 list_mark ? nameX + kListAliasMarkDip * scale_ : nameX, textY, textH, nameColRight - ai_reserve, cell.top, cell.bottom, scale_,
-                has_alias ? alias_line : shown_name, tagDotCount, badgeW, showStar, showNewTab, showMore,
+                has_alias ? alias_line : shown_name, stripRow ? 0 : tagDotCount,
+                stripRow ? 0.0f : badgeW, stripRow ? false : showStar,
+                stripRow ? false : showNewTab, stripRow ? false : showMore,
                 compositor_, compositor_->DwriteFactory(), nameFormat, change != nullptr,
-                vm.view_mode == ViewMode::Details ? (e.is_dir ? 3 : 2) : 0, name_matches, row_actions_);
+                stripRow ? 0 : (vm.view_mode == ViewMode::Details ? (e.is_dir ? 3 : 2) : 0),
+                name_matches, row_actions_);
             if (src == vm.rename_index) {
                 // The rename frame is drawn after every row (below): it can be
                 // wider than its own cell.
