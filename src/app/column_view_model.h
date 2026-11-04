@@ -46,6 +46,7 @@ struct ColumnPathWidthSetting {
 };
 
 using ColumnPathWidths = std::map<std::wstring, ColumnPathWidthSetting, ColumnPathLess>;
+inline constexpr size_t kMaxColumnPathWidthSettings = 1024;
 
 struct ColumnStripState {
     std::wstring for_path;                     // current_path the ancestors belong to

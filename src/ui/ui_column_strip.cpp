@@ -377,8 +377,10 @@ void MainRenderer::DrawColumnStripColumn(const WindowViewModel& vm, const PaneVi
     StripPaneMotion& pm = StripMotionFor(this, pane_index);
     StripColumnMotion& cm = pm.columns[column_id];
     const bool hc = IsHighContrast();
-    // Drawn at the eased scroll (hit-testing uses the settled one).
-    const float scroll = cm.scroll_init ? cm.scroll_shown : ColumnStripScrollPx(column, view_h);
+    // Painting and hit testing share the same in-flight visual scroll offset.
+    const float scroll = ColumnStripVisualScroll(ColumnStripScrollPx(column, view_h),
+                                                 cm.scroll_shown, cm.scroll_init,
+                                                 cm.path == column.path);
     const float max_scroll = ColumnStripMaxScrollPx(column, view_h);
     const D2D1_RECT_F list_rc = D2D1::RectF(rc.left, list_top, rc.right, list_top + view_h);
     dc->PushAxisAlignedClip(list_rc, D2D1_ANTIALIAS_MODE_ALIASED);
@@ -416,9 +418,10 @@ void MainRenderer::DrawColumnStripColumn(const WindowViewModel& vm, const PaneVi
         if (source < 0 || static_cast<size_t>(source) >= entries.size()) continue;
         const fs::DirEntry& entry = entries[static_cast<size_t>(source)];
         const float top = list_top + static_cast<float>(row) * row_height_ - scroll;
-        const bool empty_folder = entry.is_dir && column.empty_sources.contains(source);
+        const bool directory = entry.is_dir || entry.link_target_is_dir;
+        const bool empty_folder = directory && column.empty_sources.contains(source);
         const ColumnStripRowLayout row_layout = LayoutColumnStripRow(
-            rc, top, top + row_height_, scale_, entry.is_dir && !empty_folder);
+            rc, top, top + row_height_, scale_, directory && !empty_folder);
         const D2D1_RECT_F cell = row_layout.cell;
         const bool highlighted = row == column.highlight_row;
         // The pane's gliding plate draws the hover (high contrast: here).
@@ -465,8 +468,8 @@ void MainRenderer::DrawColumnStripColumn(const WindowViewModel& vm, const PaneVi
         // Nothing to open into: the empty-folder icon, and no chevron below.
         if (empty_folder) {
             DrawEmptyFolderIcon(ix, iy, icon, theme, hidden_alpha);
-        } else if (!icon_cache_.Draw(dc, dest, full, entry.name, entry.is_dir, entry.attrs, hidden_alpha)) {
-            if (entry.is_dir) DrawFolderIcon(ix, iy, icon, theme, hidden_alpha);
+        } else if (!icon_cache_.Draw(dc, dest, full, entry.name, directory, entry.attrs, hidden_alpha)) {
+            if (directory) DrawFolderIcon(ix, iy, icon, theme, hidden_alpha);
             else DrawFileIcon(ix, iy, icon, theme, hidden_alpha);
         }
         if (fs::ClassifyLink(entry.attrs, entry.reparse_tag) != fs::LinkKind::None ||
@@ -480,7 +483,7 @@ void MainRenderer::DrawColumnStripColumn(const WindowViewModel& vm, const PaneVi
                             row_layout.text.left, top,
                             std::max(0.0f, row_layout.text.right - row_layout.text.left),
                             row_height_);
-        if (entry.is_dir && !empty_folder) {
+        if (directory && !empty_folder) {
             DrawIconText(row_layout.chevron.left, top,
                          row_layout.chevron.right - row_layout.chevron.left, row_height_,
                          kIconChevronRight, L">", WithAlpha(theme.text_secondary, theme.text_secondary.a * fade), 0.55f);
@@ -503,7 +506,7 @@ void MainRenderer::DrawColumnStripColumn(const WindowViewModel& vm, const PaneVi
 }
 
 bool MainRenderer::HitTestColumnStrip(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds,
-                                      float x, float y, HitTestResult& out) const {
+                                      int pane_index, float x, float y, HitTestResult& out) const {
     const ColumnStripLayout strip = ColumnStripGeometry(vm, pane_bounds);
     if (!strip.active) return false;
     const ColumnStripView& cs = vm.column_strip;
@@ -546,7 +549,12 @@ bool MainRenderer::HitTestColumnStrip(const PaneViewModel& vm, const D2D1_RECT_F
         const float list_top = slot.rect.top + column_header_height_;
         const float view_h = ColumnStripViewHeight(slot.rect);
         if (y < list_top || y >= list_top + view_h) return true;
-        const float scroll = ColumnStripScrollPx(*column, view_h);
+        const float target_scroll = ColumnStripScrollPx(*column, view_h);
+        const auto& motions = StripMotionFor(this, pane_index).columns;
+        const auto motion = motions.find(slot.id);
+        const float scroll = motion == motions.end() ? target_scroll :
+            ColumnStripVisualScroll(target_scroll, motion->second.scroll_shown,
+                                    motion->second.scroll_init, motion->second.path == column->path);
         const int row = static_cast<int>(std::floor((y - list_top + scroll) / row_height_));
         if (row >= 0 && static_cast<size_t>(row) < StripRowCount(*column)) {
             out.region = HitTestResult::ColumnStripRow;

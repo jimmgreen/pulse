@@ -4120,6 +4120,15 @@ D2D1_RECT_F MainRenderer::RenameFieldRect(const PaneViewModel& vm, const D2D1_RE
     D2D1_RECT_F nameRc = layout.NameRect(view);
     if (const float lead = DetailsLeadDip(vm, view); lead > 0.0f)
         nameRc.left = std::min(nameRc.right, nameRc.left + std::round(lead * scale_));
+    const bool stripRow = vm.view_mode == ViewMode::Details && vm.column_strip.Active();
+    ColumnStripRowLayout stripLayout{};
+    if (stripRow) {
+        const D2D1_RECT_F row = layout.ItemRect(view);
+        const bool empty_folder = e.is_dir && !e.record_only && vm.empty_folders.contains(source_index);
+        stripLayout = LayoutColumnStripRow(D2D1::RectF(list.left, list.top, list.right, list.bottom),
+            row.top, row.bottom, scale_, e.is_dir && !empty_folder);
+        nameRc = stripLayout.text;
+    }
     const bool iconGrid = vm.view_mode == ViewMode::ExtraLargeIcons ||
                           vm.view_mode == ViewMode::LargeIcons ||
                           vm.view_mode == ViewMode::MediumIcons;
@@ -4136,10 +4145,11 @@ D2D1_RECT_F MainRenderer::RenameFieldRect(const PaneViewModel& vm, const D2D1_RE
     }
     const size_t totalTags = tagIndices ? tagIndices->size() : (tagDots ? tagDots->size() : 0);
     const int tagDotCount = static_cast<int>(std::min<size_t>(3, totalTags));
-    const float nameColRight = vm.view_mode == ViewMode::Details
-        ? (vm.column_strip.Active() ? DetailsColumns(list, vm).right - 18.0f * scale_
-                                    : DetailsColumns(list, vm).DividerX(0) - margin_)
-        : nameRc.right;
+    const float nameColRight = stripRow ? stripLayout.text.right
+        : vm.view_mode == ViewMode::Details
+            ? (vm.column_strip.Active() ? DetailsColumns(list, vm).right - 18.0f * scale_
+                                        : DetailsColumns(list, vm).DividerX(0) - margin_)
+            : nameRc.right;
     if (iconGrid && tagDotCount > 0) {
         const float fullNameW = MeasureLayoutText(
             compositor_, compositor_->DwriteFactory(), compositor_->TextFormat(), ShownName(e));

@@ -7,6 +7,7 @@
 #include "../app/session.h"
 #include "../app/app_model.h"
 #include "../app/places.h"
+#include "../fs/fs_enum.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -208,10 +209,12 @@ int main() {
     ExpectSampleWindow(parsed, "round-trip");
     ExpectMigratedWindow(parsed, "round-trip");
     const auto& saved_pane = parsed.layout_tabs[0].panes[0];
-    const auto manual_width = saved_pane.column_path_widths.find(
-        L"C:\\Users\\Example\\Documents");
-    const auto auto_width = saved_pane.column_path_widths.find(
-        L"C:\\Users\\Example\\Documents\\Archive");
+    const std::wstring manual_path =
+        pulse::fs::NormalizePath(L"C:\\Users\\Example\\Documents");
+    const std::wstring auto_path =
+        pulse::fs::NormalizePath(L"C:\\Users\\Example\\Documents\\Archive");
+    const auto manual_width = saved_pane.column_path_widths.find(manual_path);
+    const auto auto_width = saved_pane.column_path_widths.find(auto_path);
     Check(saved_pane.column_layout && saved_pane.column_path_widths.size() == 2 &&
           manual_width != saved_pane.column_path_widths.end() &&
           manual_width->second.width_dip == 320.0f &&
@@ -227,7 +230,9 @@ int main() {
     ExpectMigratedWindow(frozen, "frozen v7");
     // The parser normalizes defaults (an empty sidebarOrder becomes the default
     // order), so compare the rewritten forms rather than the raw writer output.
-    SessionSnapshot legacy_expected = SampleSession();
+    // Start from the parsed current-version sample so normalized defaults
+    // (notably sidebar order) match the parser's treatment of the frozen file.
+    SessionSnapshot legacy_expected = parsed;
     legacy_expected.layout_tabs[0].panes[0].column_layout = false;
     legacy_expected.layout_tabs[0].panes[0].column_path_widths.clear();
     Check(SessionToJson(frozen) == SessionToJson(legacy_expected),
@@ -325,7 +330,9 @@ int main() {
     if (legacy_widths.layout_tabs.size() == 1 &&
         legacy_widths.layout_tabs[0].panes.size() == 1) {
         const auto& widths = legacy_widths.layout_tabs[0].panes[0].column_path_widths;
-        const auto legacy_width = widths.find(L"C:\\Users\\Example\\Documents");
+        const std::wstring legacy_path =
+            pulse::fs::NormalizePath(L"C:\\Users\\Example\\Documents");
+        const auto legacy_width = widths.find(legacy_path);
         Check(widths.size() == 1 && legacy_width != widths.end() &&
               legacy_width->second.width_dip == 360.0f &&
               legacy_width->second.mode == ColumnPathWidthMode::Manual,
@@ -450,6 +457,19 @@ int main() {
         Check(QuickAccessDisplayKeys(links, nullptr, 0, true) ==
                   Keys{L"builtin:recent", L"builtin:desktop", L"builtin:music"},
               "quick-access order without places lists the links");
+    }
+
+    {
+        Tab source;
+        source.column_layout = true;
+        source.column_strip.widths_by_path[L"C:\\Users\\Example\\Documents"] =
+            {360.0f, ColumnPathWidthMode::AutoFit};
+        auto single = MakeSingleLayoutTab(L"C:\\Users\\Example\\Documents\\Archive", &source);
+        const auto& inherited = single->panes.front()->ActiveTab()->column_strip.widths_by_path;
+        const auto width = inherited.find(L"c:\\users\\example\\documents");
+        Check(width != inherited.end() && width->second.width_dip == 360.0f &&
+              width->second.mode == ColumnPathWidthMode::AutoFit,
+              "extracting a pane preserves case-insensitive per-folder width settings");
     }
 
     std::printf("session_window_test: %d failure(s)\n", g_failures);

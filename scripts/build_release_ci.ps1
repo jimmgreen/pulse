@@ -44,8 +44,8 @@ $testNames = @('pulse_rename_ops_test', 'pulse_child_edit_test', 'pulse_localiza
     'pulse_archive_integrity_test', 'pulse_document_completeness_test', 'pulse_preview_command_test',
     'pulse_image_preview_integrity_test', 'pulse_udf_listing_test', 'pulse_preview_integrity_test',
     'pulse_change_tracking_memory_test', 'pulse_change_feed_memory_test', 'pulse_usn_packet_queue_test',
-    'pulse_content_progress_ui_test', 'pulse_operation_presentation_test', 'pulse_column_strip_test', 'pulse_entry_sort_key_test',
-    'pulse_file_lock_test', 'pulse_dialogs_test', 'pulse_session_window_test',
+    'pulse_content_progress_ui_test', 'pulse_operation_presentation_test', 'pulse_entry_sort_key_test',
+    'pulse_file_lock_test', 'pulse_dialogs_test', 'pulse_pane_drop_test', 'pulse_selection_caps_test',
     # AI enhancement pack: catalog/install, JSON, broker, tools, MCP over real pipes.
     'pulse_ai_pack_test', 'pulse_ai_json_test', 'pulse_ai_broker_test', 'pulse_ai_tools_test', 'pulse_ai_mcp_test')
 $testTargets = (@('pulse', 'pulse_index_engine_test', 'pulse_index_host_stress',
@@ -63,11 +63,15 @@ if errorlevel 1 exit /b 1
 rem Preflight changed standalone tests before building the complete release target set.
 cmake --build "$build" --parallel 4 --target pulse_column_strip_test pulse_session_window_test
 if errorlevel 1 exit /b 1
+"$build\pulse_column_strip_test.exe"
+if errorlevel 1 exit /b 1
+"$build\pulse_session_window_test.exe"
+if errorlevel 1 exit /b 1
 cmake --build "$build" --parallel 4 --target $testTargets
 exit /b %errorlevel%
 "@ | Set-Content -LiteralPath $batch -Encoding ascii
 & $batch
-if ($LASTEXITCODE -ne 0) { throw 'Release compilation failed' }
+if ($LASTEXITCODE -ne 0) { throw 'Windows build preflight failed (compile or focused test failure)' }
 foreach ($testName in $testNames) {
     & (Join-Path $build "$testName.exe")
     if ($LASTEXITCODE -ne 0) { throw "$testName failed" }

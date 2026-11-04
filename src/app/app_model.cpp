@@ -684,6 +684,7 @@ std::unique_ptr<LayoutTab> MakeSingleLayoutTab(const std::wstring& path, const T
         pane->view.search_column_dividers = source->search_column_dividers;
         pane->view.column_layout = source->column_layout;
         pane->view.column_widths_dip = source->column_widths_dip;
+        pane->view.column_strip.widths_by_path = source->column_strip.widths_by_path;
     }
     pane->NewTab(path.empty() ? L"C:\\" : path);
     tab->panes.push_back(std::move(pane));

@@ -1,5 +1,6 @@
 #include "app_internal.h"
 #include "app_column_view.h"
+#include "column_drop_target.h"
 #include "entry_sort.h"
 #include "../ui/column_strip_layout.h"
 #include "../ui/ui_renderer.h"
@@ -198,10 +199,15 @@ void SyncTab(AppState& s, app::Tab& tab) {
     if (state.for_path != tab.current_path) RebuildAncestors(s, tab);
     for (auto& col : state.ancestors) SyncColumn(s, tab, col);
 
-    const std::wstring folder = SelectedFolder(tab);
-    if (!SamePath(folder, state.child.path)) {
-        state.child = {};
-        state.child.path = folder;
+    const bool pressed_in_this_tab = (s.dragPending || s.columnGesture.armed) &&
+        s.pane && s.pane->ActiveTab() == &tab;
+    const bool drag_in_this_tab = s.columnDragActive && s.columnDragTab == &tab;
+    if (!pressed_in_this_tab && !drag_in_this_tab) {
+        const std::wstring folder = SelectedFolder(tab);
+        if (!SamePath(folder, state.child.path)) {
+            state.child = {};
+            state.child.path = folder;
+        }
     }
     SyncColumn(s, tab, state.child);
 }
@@ -276,8 +282,9 @@ void SelectByName(AppState& s, app::Tab& tab, const std::wstring& name) {
 
 bool ClickRow(AppState& s, app::Tab& tab, int column_id, int row, int pane_index) {
     app::ColumnStripColumn* col = StripColumn(tab, column_id);
-    if (!col || !col->rows || !col->rows_snapshot || row < 0 ||
-        static_cast<size_t>(row) >= col->rows->size()) {
+    if (!Eligible(tab) || !SamePath(tab.column_strip.for_path, tab.current_path) ||
+        !col || !col->rows || !col->rows_snapshot || col->snapshot != col->rows_snapshot ||
+        row < 0 || static_cast<size_t>(row) >= col->rows->size()) {
         return false;
     }
     const int source = (*col->rows)[static_cast<size_t>(row)];
@@ -341,7 +348,7 @@ void NoteColumnStripResult(AppState& s, const app::WorkResult& res) {
 }
 
 bool HandleColumnStripMouseDown(AppState& s, const ui::WindowViewModel& vm,
-                                const ui::HitTestResult& hit, int x) {
+                                const ui::HitTestResult& hit, int x, int y) {
     using R = ui::HitTestResult;
     switch (hit.region) {
     case R::PaneColumnLayout:
@@ -380,44 +387,21 @@ bool HandleColumnStripMouseDown(AppState& s, const ui::WindowViewModel& vm,
     }
     case R::ColumnStripRow: {
         app::Tab* tab = TabAtSlot(s, hit.pane_index);
-        if (tab) {
-            ui::ColumnStripLayout layout;
-            if (SlotLayout(s, vm, hit.pane_index, layout)) {
-                const float scale = s.scale > 0.0f ? s.scale : 1.0f;
-                tab->column_strip.scroll_left_dip = layout.scroll_px / scale;
-                const app::ColumnStripColumn* col = StripColumn(*tab, hit.sub_index);
-                bool folder = false;
-                if (col && col->rows && col->rows_snapshot && hit.index >= 0 &&
-                    static_cast<size_t>(hit.index) < col->rows->size()) {
-                    const int source = (*col->rows)[static_cast<size_t>(hit.index)];
-                    if (source >= 0 && static_cast<size_t>(source) < col->rows_snapshot->size()) {
-                        const auto& entry = (*col->rows_snapshot)[static_cast<size_t>(source)];
-                        folder = entry.is_dir || entry.link_target_is_dir;
-                    }
-                }
-                float reveal = 0.0f;
-                if (folder) {
-                    // The selected folder becomes the next column. Resolve
-                    // its own path-keyed width, not the previously open child slot.
-                    const int source = (*col->rows)[static_cast<size_t>(hit.index)];
-                    const std::wstring child_path = fs::NormalizePath(Join(
-                        col->path, (*col->rows_snapshot)[static_cast<size_t>(source)].name));
-                    const auto width_it = tab->column_strip.widths_by_path.find(child_path);
-                    const float child_dip = width_it == tab->column_strip.widths_by_path.end()
-                        ? ui::kColumnStripChildDefaultDip : width_it->second.width_dip;
-                    const float child_w = child_dip * scale;
-                    for (const auto& slot : layout.columns) {
-                        if (slot.id != hit.sub_index) continue;
-                        reveal = std::max(0.0f, slot.rect.right + child_w - layout.viewport.right) / scale;
-                        break;
-                    }
-                }
-                if (ClickRow(s, *tab, hit.sub_index, hit.index, hit.pane_index))
-                    tab->column_strip.scroll_left_dip += reveal;
-            } else {
-                ClickRow(s, *tab, hit.sub_index, hit.index, hit.pane_index);
-            }
-        }
+        if (!tab || !Eligible(*tab)) return true;
+        const std::wstring item = app::ColumnStripRowItemPath(
+            tab->column_strip, tab->current_path, hit.sub_index, hit.index);
+        if (item.empty()) return true;
+        s.columnGesture = {};
+        s.columnGesture.armed = true;
+        s.columnGesture.pane_index = hit.pane_index;
+        s.columnGesture.column_id = hit.sub_index;
+        s.columnGesture.row_index = hit.index;
+        s.columnGesture.press = POINT{x, y};
+        s.columnGesture.view_path = tab->current_path;
+        s.columnGesture.item_path = item;
+        s.stripClickTick = 0;
+        s.stripClickPane = -1;
+        SetCapture(s.hwnd);
         return true;
     }
     case R::ColumnStripBlank:
@@ -441,6 +425,8 @@ bool HandleColumnStripMouseDown(AppState& s, const ui::WindowViewModel& vm,
         const float travel = (track.right - track.left) - (thumb.right - thumb.left);
         s.stripHScrolling = true;
         s.stripResizePane = hit.pane_index;
+        s.stripResizeTab = tab;
+        s.stripHScrollOriginalDip = tab->column_strip.scroll_left_dip;
         s.stripResizeStartX = x;
         s.stripHScrollStartDip = tab->column_strip.scroll_left_dip < 0.0f
             ? layout.scroll_px / scale : tab->column_strip.scroll_left_dip;
@@ -454,10 +440,57 @@ bool HandleColumnStripMouseDown(AppState& s, const ui::WindowViewModel& vm,
     }
 }
 
+bool FinishColumnStripMouseUp(AppState& s, const ui::WindowViewModel& vm,
+                               const ui::HitTestResult& hit) {
+    const AppState::ColumnGesture press = s.columnGesture;
+    s.columnGesture = {};
+    if (!press.armed) return false;
+    app::Tab* tab = TabAtSlot(s, press.pane_index);
+    if (!tab || !Eligible(*tab) || !SamePath(tab->current_path, press.view_path) ||
+        hit.region != ui::HitTestResult::ColumnStripRow ||
+        hit.pane_index != press.pane_index || hit.sub_index != press.column_id ||
+        !SamePath(app::ColumnStripRowItemPath(tab->column_strip, tab->current_path,
+                                              hit.sub_index, hit.index), press.item_path))
+        return true;
+    float reveal = 0.0f;
+    ui::ColumnStripLayout layout;
+    if (SlotLayout(s, vm, press.pane_index, layout)) {
+        const float scale = s.scale > 0.0f ? s.scale : 1.0f;
+        tab->column_strip.scroll_left_dip = layout.scroll_px / scale;
+        const app::ColumnStripColumn* col = StripColumn(*tab, hit.sub_index);
+        if (col && col->rows && col->rows_snapshot && col->snapshot == col->rows_snapshot &&
+            hit.index >= 0 && static_cast<size_t>(hit.index) < col->rows->size()) {
+            const int source = (*col->rows)[static_cast<size_t>(hit.index)];
+            if (source >= 0 && static_cast<size_t>(source) < col->rows_snapshot->size()) {
+                const fs::DirEntry& entry = (*col->rows_snapshot)[static_cast<size_t>(source)];
+                if (entry.is_dir || entry.link_target_is_dir) {
+                    const std::wstring child_path = entry.link_target_is_dir && !entry.link_target.empty()
+                        ? fs::NormalizePath(entry.link_target)
+                        : fs::NormalizePath(Join(col->path, entry.name));
+                    const auto width_it = tab->column_strip.widths_by_path.find(child_path);
+                    const float child_dip = width_it == tab->column_strip.widths_by_path.end()
+                        ? ui::kColumnStripChildDefaultDip
+                        : std::clamp(width_it->second.width_dip, ui::kColumnStripMinDip, ui::kColumnStripMaxDip);
+                    for (const auto& slot : layout.columns) {
+                        if (slot.id != hit.sub_index) continue;
+                        reveal = std::max(0.0f, slot.rect.right + child_dip * scale - layout.viewport.right) / scale;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    if (ClickRow(s, *tab, hit.sub_index, hit.index, press.pane_index))
+        tab->column_strip.scroll_left_dip += reveal;
+    return true;
+}
+
 bool SelectColumnStripRow(AppState& s, const ui::HitTestResult& hit) {
     if (hit.region != ui::HitTestResult::ColumnStripRow) return false;
     app::Tab* tab = TabAtSlot(s, hit.pane_index);
-    if (!tab || !ClickRow(s, *tab, hit.sub_index, hit.index, hit.pane_index)) return false;
+    if (!tab || !Eligible(*tab) || !SamePath(tab->column_strip.for_path, tab->current_path) ||
+        app::ColumnStripRowItemPath(tab->column_strip, tab->current_path, hit.sub_index, hit.index).empty() ||
+        !ClickRow(s, *tab, hit.sub_index, hit.index, hit.pane_index)) return false;
     s.stripClickTick = 0;
     s.stripClickPane = -1;
     const app::Tab* active = ActiveTab(s);
@@ -474,12 +507,14 @@ bool ColumnStripRowTarget(AppState& s, const ui::HitTestResult& hit,
     if (hit.region != ui::HitTestResult::ColumnStripRow) return false;
     app::Tab* tab = TabAtSlot(s, hit.pane_index);
     const app::ColumnStripColumn* col = tab ? StripColumn(*tab, hit.sub_index) : nullptr;
-    if (!tab || !col || !col->rows || !col->rows_snapshot || hit.index < 0 ||
-        static_cast<size_t>(hit.index) >= col->rows->size()) return false;
+    if (!tab || !Eligible(*tab) || !SamePath(tab->column_strip.for_path, tab->current_path) ||
+        !col || !col->rows || !col->rows_snapshot || col->snapshot != col->rows_snapshot ||
+        hit.index < 0 || static_cast<size_t>(hit.index) >= col->rows->size()) return false;
     const int source = (*col->rows)[static_cast<size_t>(hit.index)];
     if (source < 0 || static_cast<size_t>(source) >= col->rows_snapshot->size()) return false;
     const fs::DirEntry& entry = (*col->rows_snapshot)[static_cast<size_t>(source)];
-    if (entry.change_record_only) return false;
+    if (entry.change_record_only || !entry.recycle_path.empty() || entry.name.empty() ||
+        entry.name == L"." || entry.name == L"..") return false;
     owner_folder = col->path;
     name = entry.name;
     full_path = entry.full_path.empty() ? Join(owner_folder, name) : entry.full_path;
@@ -496,10 +531,23 @@ std::wstring ColumnStripBackgroundPath(AppState& s, const ui::HitTestResult& hit
     return col ? col->path : std::wstring{};
 }
 
+std::wstring ColumnStripDropPath(AppState& s, const ui::HitTestResult& hit) {
+    if (hit.region != ui::HitTestResult::ColumnStripBlank &&
+        hit.region != ui::HitTestResult::ColumnStripRow) return {};
+    app::Tab* tab = TabAtSlot(s, hit.pane_index);
+    if (!tab || !Eligible(*tab) || !SamePath(tab->column_strip.for_path, tab->current_path)) return {};
+    return app::ColumnDropDestination(tab->column_strip, tab->current_path,
+                                      hit.sub_index, hit.index,
+                                      hit.region == ui::HitTestResult::ColumnStripRow);
+}
+
 bool UpdateColumnStripResize(AppState& s, int x) {
     if (s.stripHScrolling) {
         app::Tab* tab = TabAtSlot(s, s.stripResizePane);
-        if (!tab) return true;
+        if (!tab || tab != s.stripResizeTab) {
+            EndColumnStripResize(s, false);
+            return true;
+        }
         const float scale = s.scale > 0.0f ? s.scale : 1.0f;
         const float moved = static_cast<float>(x - s.stripResizeStartX) * s.stripHScrollRatio / scale;
         tab->column_strip.scroll_left_dip =
@@ -577,6 +625,11 @@ void ResetColumnStripWidth(AppState& s, const ui::HitTestResult& hit) {
 
 void EndColumnStripResize(AppState& s, bool commit) {
     if (!s.stripResizing && !s.stripHScrolling) return;
+    if (s.stripHScrolling && !commit && s.stripResizeTab) {
+        app::Tab* tab = TabAtSlot(s, s.stripResizePane);
+        if (tab == s.stripResizeTab)
+            tab->column_strip.scroll_left_dip = s.stripHScrollOriginalDip;
+    }
     if (s.stripResizing && !commit && s.stripResizeMoved && s.stripResizeTab) {
         app::Tab* tab = TabAtSlot(s, s.stripResizePane);
         if (tab == s.stripResizeTab && !s.stripResizePath.empty()) {
@@ -594,6 +647,7 @@ void EndColumnStripResize(AppState& s, bool commit) {
     s.stripResizePath.clear();
     s.stripResizeHadSetting = false;
     s.stripResizeMoved = false;
+    s.stripHScrollOriginalDip = -1.0f;
     if (s.hwnd) InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 

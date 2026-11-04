@@ -60,6 +60,13 @@ struct ColumnStripLayout {
     std::vector<ColumnStripSlot> columns;
 };
 
+// Hit tests follow the currently painted smooth-scroll position. A path change
+// or an uninitialized motion channel uses the target until the first frame.
+inline float ColumnStripVisualScroll(float target, float shown, bool initialized,
+                                     bool same_path) noexcept {
+    return initialized && same_path ? shown : target;
+}
+
 // pane_bounds is the full pane rect; column rects span [top, pane bottom).
 // All columns share a horizontal coordinate system. Negative scroll_left_dip
 // shows the newest columns initially; a nonnegative offset holds their positions

@@ -807,7 +807,7 @@ private:
     void DrawRenameHint(const PaneViewModel& vm, const D2D1_RECT_F& field, const D2D1_RECT_F& view,
                         const Theme& theme);
     bool HitTestColumnStrip(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds,
-                            float x, float y, HitTestResult& out) const;
+                            int pane_index, float x, float y, HitTestResult& out) const;
     void DrawStatusBar(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawAddressSuggestions(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawFilterTagSuggestions(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);

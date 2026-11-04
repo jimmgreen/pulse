@@ -150,7 +150,9 @@ std::vector<float> ParseDipList(const std::wstring& value) {
 std::wstring FormatColumnPathWidths(const ColumnPathWidths& widths) {
     std::wstring result = L"[";
     bool first = true;
+    size_t emitted = 0;
     for (const auto& [path, setting] : widths) {
+        if (emitted >= kMaxColumnPathWidthSettings) break;
         const float width = setting.width_dip;
         if (path.empty() || !std::isfinite(width) || width < 120.0f || width > 560.0f)
             continue;
@@ -162,6 +164,7 @@ std::wstring FormatColumnPathWidths(const ColumnPathWidths& widths) {
         result += L"{\"path\":\"" + escaped + L"\",\"width\":";
         result += std::to_wstring(static_cast<int>(std::lround(width)));
         result += L",\"mode\":" + std::to_wstring(mode) + L"}";
+        ++emitted;
     }
     return result + L"]";
 }
@@ -170,7 +173,7 @@ ColumnPathWidths ParseColumnPathWidths(const std::wstring& json) {
     ColumnPathWidths widths;
     if (json.size() < 2 || json.front() != L'[' || json.back() != L']') return widths;
     pulse::json::ForEachElement(json, [&](const std::wstring& object) {
-        if (widths.size() >= 1024) return;
+        if (widths.size() >= kMaxColumnPathWidthSettings) return;
         const std::wstring path = fs::NormalizePath(pulse::json::ExtractString(object, L"path"));
         const int width = pulse::json::ExtractInt(object, L"width");
         const int stored_mode = pulse::json::ExtractInt(object, L"mode");

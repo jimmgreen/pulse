@@ -36,7 +36,7 @@ ColumnStripRowLayout LayoutColumnStripRow(const D2D1_RECT_F& column,
 
     const float chevron_width = has_chevron ? 18.0f * unit : 0.0f;
     const float text_left = out.icon.right + 8.0f * unit;
-    const float text_right = std::max(text_left, out.cell.right - chevron_width - 4.0f * unit);
+    const float text_right = std::max(text_left, out.cell.right - chevron_width - (has_chevron ? 6.0f : 4.0f) * unit);
     out.text = D2D1::RectF(text_left, row_top, text_right, row_bottom);
     if (has_chevron) {
         const float chevron_left = out.cell.right - chevron_width - 2.0f * unit;
@@ -68,14 +68,16 @@ ColumnStripLayout LayoutColumnStrip(const D2D1_RECT_F& pane_bounds, float top,
 
     // One continuous content axis. Preserve a requested left scroll when the
     // branch gets shorter instead of pulling the clicked folder to the right.
-    // A lone root has no earlier columns to reveal. Always anchor it at the
-    // pane's leading edge, even when its fixed width exceeds the viewport.
-    const float requested = (ancestor_count == 0 && !child_slot) ? 0.0f
-        : scroll_left_dip < 0.0f
-            ? natural_max : std::max(0.0f, scroll_left_dip) * unit;
+    // A lone root starts at the leading edge when no offset has been chosen,
+    // but a narrow pane must still honor a user's explicit horizontal scroll.
+    const bool single_root = ancestor_count == 0 && !child_slot;
+    const bool root_initial = single_root && scroll_left_dip < 0.0f;
+    const float requested = root_initial ? 0.0f
+        : scroll_left_dip < 0.0f ? natural_max
+        : std::max(0.0f, scroll_left_dip) * unit;
     out.active = true;
-    out.scroll_px = requested;
-    out.max_scroll_px = std::max(natural_max, requested);
+    out.max_scroll_px = single_root ? natural_max : std::max(natural_max, requested);
+    out.scroll_px = std::clamp(requested, 0.0f, out.max_scroll_px);
     out.content_px = std::max(actual_w, width + out.max_scroll_px);
     const float bottom = std::max(top, pane_bounds.bottom);
     out.viewport = D2D1::RectF(pane_bounds.left, top, pane_bounds.right, bottom);
