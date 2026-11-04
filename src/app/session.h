@@ -22,7 +22,8 @@ struct PaneFolderSnapshot {
     ui::DetailsColumnWidths columns{};
     std::array<float, 4> search_columns{};
     bool column_layout = false;
-    std::vector<float> column_widths; // DIP, see ui::ColumnStripWidthDip
+    std::vector<float> column_widths; // legacy slot widths, for old session readers
+    ColumnPathWidths column_path_widths; // explicitly set per-folder widths, DIP
 };
 
 struct LayoutTabSnapshot {

@@ -28,7 +28,9 @@ ColumnStripLayout LayoutColumnStrip(const D2D1_RECT_F& pane_bounds, float top,
     const float min_w = kColumnStripMinDip * unit;
     if (width < min_w) return out;
 
-    const float body_w = std::min(width, ColumnStripWidthDip(widths_dip, kColumnStripBodySlot) * unit);
+    // The body scrolls like its neighbors: clipping it in a narrow viewport
+    // must not silently change the stored width.
+    const float body_w = ColumnStripWidthDip(widths_dip, kColumnStripBodySlot) * unit;
     const float child_w = child_slot ? ColumnStripWidthDip(widths_dip, 0) * unit : 0.0f;
     float ancestor_w = 0.0f;
     for (size_t k = 1; k <= ancestor_count; ++k)

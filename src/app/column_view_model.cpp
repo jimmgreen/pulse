@@ -25,16 +25,16 @@ ui::ColumnStripColumnView ToView(const ColumnStripColumn& column) {
 void FillColumnStripView(ui::ColumnStripView& out, const Tab& tab) {
     const ColumnStripState& state = tab.column_strip;
     out.enabled = tab.column_layout;
-    out.widths_dip = tab.column_widths_dip;
+    // Legacy slot widths must never change the width of a different folder.
+    out.widths_dip.clear();
     out.scroll_left_dip = state.scroll_left_dip;
     out.eligible = tab.column_layout && !state.for_path.empty() &&
                    state.for_path == tab.current_path;
     out.ancestors.clear();
     out.has_child = false;
     if (!out.eligible) return;
-    // Retain directory widths when a column changes ancestor/body/child role.
-    // The old slot widths still provide defaults for new paths.
-    out.widths_dip = tab.column_widths_dip;
+    // Only explicit directory overrides enter these slots. Empty slots use
+    // the uniform 240 DIP default, irrespective of current column role.
     const auto assign = [&](const std::wstring& path, size_t slot) {
         const auto it = state.widths_by_path.find(path);
         if (it == state.widths_by_path.end()) return;

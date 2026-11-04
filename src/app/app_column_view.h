@@ -15,7 +15,7 @@ void NoteColumnStripResult(AppState& s, const app::WorkResult& res);
 bool HandleColumnStripMouseDown(AppState& s, const ui::WindowViewModel& vm,
                                 const ui::HitTestResult& hit, int x);
 bool UpdateColumnStripResize(AppState& s, int x);
-// Double-click on a divider restores that column's default width.
+// Double-click on a divider fits current filenames once and locks that folder's width.
 void ResetColumnStripWidth(AppState& s, const ui::HitTestResult& hit);
 void EndColumnStripResize(AppState& s);
 // Double-click right after a column click changed the folder: swallow it so

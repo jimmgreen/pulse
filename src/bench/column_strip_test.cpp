@@ -14,6 +14,9 @@ int main() {
           ColumnStripWidthSlot(kColumnStripChildId, 3) == 0 &&
           ColumnStripWidthSlot(kColumnStripBodyId, 3) == kColumnStripBodySlot,
           "column width slot identities remain unchanged");
+    check(ColumnStripWidthDip({}, 0) == kColumnStripDefaultDip &&
+          ColumnStripWidthDip({}, kColumnStripBodySlot) == kColumnStripDefaultDip,
+          "all unconfigured directory roles use a uniform 240 DIP width");
     check(ColumnStripWidthDip({1.0f, 900.0f}, 0) == kColumnStripMinDip &&
           ColumnStripWidthDip({1.0f, 900.0f}, 1) == kColumnStripMaxDip,
           "column width limits remain unchanged");
@@ -25,7 +28,7 @@ int main() {
                   approximatelyEqual(layout.viewport.right, bounds.right),
                   "body and child participate in full horizontal viewport");
             check(approximatelyEqual(layout.body.right - layout.body.left,
-                       std::fmin(kColumnStripDefaultDip, width) * scale),
+                       kColumnStripDefaultDip * scale),
                   "regular body width stays stable when offscreen");
             check(approximatelyEqual(layout.scroll_px, layout.max_scroll_px),
                   "new navigation initially reveals newest column");
@@ -51,6 +54,11 @@ int main() {
     const auto left = LayoutColumnStrip(bounds, 42, 4, true, {}, 1.0f, 0);
     check(approximatelyEqual(left.scroll_px, 0) && approximatelyEqual(left.max_scroll_px, 0),
           "manual scroll to beginning releases the extra whitespace");
+    const auto narrow = LayoutColumnStrip(D2D1::RectF(0, 0, 180, 600),
+                                          42, 0, false, {}, 1.0f);
+    check(approximatelyEqual(narrow.body.right - narrow.body.left, 240.0f) &&
+          narrow.max_scroll_px > 0.0f,
+          "narrow pane scrolls rather than narrowing the stored body width");
     const auto custom = LayoutColumnStrip(bounds, 42, 4, true,
         {300.0f, 220.0f, 180.0f, 260.0f, 280.0f}, 1.0f, 200.0f);
     check(approximatelyEqual(custom.body.left, 280 + 260 + 180 + 220 - 200),

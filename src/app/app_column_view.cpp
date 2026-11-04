@@ -3,7 +3,9 @@
 #include "entry_sort.h"
 #include "../ui/column_strip_layout.h"
 #include "../ui/ui_renderer.h"
+#include "../ui/typography.h"
 #include <algorithm>
+#include <cmath>
 #include <cwchar>
 
 namespace pulse {
@@ -139,16 +141,8 @@ std::wstring RootTitle(const AppState& s, const std::wstring& path) {
 
 void RebuildAncestors(AppState& s, app::Tab& tab) {
     app::ColumnStripState& state = tab.column_strip;
-    const auto remember = [&](const std::wstring& path, size_t slot) {
-        if (!path.empty() && !state.widths_by_path.contains(path))
-            state.widths_by_path.emplace(path, ui::ColumnStripWidthDip(tab.column_widths_dip, slot));
-    };
-    for (size_t i = 0; i < state.ancestors.size(); ++i)
-        remember(state.ancestors[i].path,
-                 ui::ColumnStripWidthSlot(static_cast<int>(i), state.ancestors.size()));
-    remember(state.for_path, ui::kColumnStripBodySlot);
-    remember(state.child.path, 0);
-    while (state.widths_by_path.size() > 256) state.widths_by_path.erase(state.widths_by_path.begin());
+    // Merely visiting a directory never creates a width setting. The previous
+    // role-slot sampling caused width changes whenever a column moved roles.
     std::vector<std::wstring> chain; // parent first
     std::wstring child = tab.current_path;
     while (chain.size() < kMaxAncestors) {
@@ -192,7 +186,13 @@ void RebuildAncestors(AppState& s, app::Tab& tab) {
 void SyncTab(AppState& s, app::Tab& tab) {
     app::ColumnStripState& state = tab.column_strip;
     if (!Eligible(tab)) {
-        if (!state.Empty()) state = {};
+        if (!state.Empty()) {
+            // A virtual folder or a temporary view change must not discard
+            // user-set widths for the real directories in this tab.
+            auto widths = std::move(state.widths_by_path);
+            state = {};
+            state.widths_by_path = std::move(widths);
+        }
         return;
     }
     if (state.for_path != tab.current_path) RebuildAncestors(s, tab);
@@ -483,19 +483,15 @@ bool UpdateColumnStripResize(AppState& s, int x) {
     if (!s.stripResizing) return false;
     app::Tab* tab = TabAtSlot(s, s.stripResizePane);
     if (!tab) return true;
-    const size_t slot = ui::ColumnStripWidthSlot(s.stripResizeColumn,
-                                                 tab->column_strip.ancestors.size());
     const float scale = s.scale > 0.0f ? s.scale : 1.0f;
     // Every divider is its column's right edge: dragging right widens it.
     const float dx = static_cast<float>(x - s.stripResizeStartX) / scale;
     const float width = std::clamp(s.stripResizeStartDip + dx,
                                    ui::kColumnStripMinDip, ui::kColumnStripMaxDip);
-    if (tab->column_widths_dip.size() <= slot) tab->column_widths_dip.resize(slot + 1, 0.0f);
-    tab->column_widths_dip[slot] = width;
     const app::ColumnStripColumn* col = StripColumn(*tab, s.stripResizeColumn);
     const std::wstring path = s.stripResizeColumn == ui::kColumnStripBodyId
         ? tab->current_path : col ? col->path : std::wstring{};
-    if (!path.empty()) tab->column_strip.widths_by_path[path] = width;
+    if (!path.empty()) tab->column_strip.widths_by_path[fs::NormalizePath(path)] = width;
     s.hoverRegion = static_cast<int>(ui::HitTestResult::ColumnStripDivider);
     s.hoverSubIndex = s.stripResizeColumn;
     s.hoverPaneIndex = s.stripResizePane;
@@ -507,14 +503,38 @@ void ResetColumnStripWidth(AppState& s, const ui::HitTestResult& hit) {
     EndColumnStripResize(s);
     app::Tab* tab = TabAtSlot(s, hit.pane_index);
     if (!tab) return;
-    const size_t slot = ui::ColumnStripWidthSlot(hit.sub_index, tab->column_strip.ancestors.size());
-    if (slot < tab->column_widths_dip.size()) tab->column_widths_dip[slot] = 0.0f;
     const app::ColumnStripColumn* col = StripColumn(*tab, hit.sub_index);
     const std::wstring path = hit.sub_index == ui::kColumnStripBodyId
         ? tab->current_path : col ? col->path : std::wstring{};
-    tab->column_strip.widths_by_path.erase(path);
-    while (!tab->column_widths_dip.empty() && tab->column_widths_dip.back() <= 0.0f)
-        tab->column_widths_dip.pop_back();
+    // Files-like explicit auto-fit: measure current filenames once, then keep
+    // the result by folder path. Navigation and refresh never recompute it.
+    ui::Compositor& compositor = s.compositor;
+    IDWriteTextFormat* format = compositor.FileNameFormat();
+    if (path.empty() || !format || !compositor.DwriteFactory()) return;
+    float widest_px = 0.0f;
+    const float scale = s.scale > 0.0f ? s.scale : 1.0f;
+    const auto measure = [&](const std::wstring& name) {
+        // Stop invoking expensive text layout once the maximum column width
+        // is reached. Still enumerate the list without allocating extra rows.
+        if (!name.empty() && widest_px / scale + 70.0f < ui::kColumnStripMaxDip)
+            widest_px = std::max(widest_px,
+                ui::typography::MeasureLine(&compositor, format, name));
+    };
+    if (hit.sub_index == ui::kColumnStripBodyId) {
+        if (!tab->snapshot) return; // Never lock an unloaded placeholder.
+        for (size_t i = 0; i < tab->EntryCount(); ++i)
+            if (tab->EntryVisible(static_cast<int>(i))) measure(tab->EntryAt(i).name);
+    } else if (col && col->rows && col->rows_snapshot) {
+        for (int source : *col->rows)
+            if (source >= 0 && static_cast<size_t>(source) < col->rows_snapshot->size())
+                measure((*col->rows_snapshot)[static_cast<size_t>(source)].name);
+    } else {
+        return; // A loading directory cannot be fitted accurately.
+    }
+    // Icon, padding, right-hand chevron, and space for name ink overhang.
+    const float fitted = std::ceil(widest_px / scale + 70.0f);
+    const float locked = std::clamp(fitted, ui::kColumnStripMinDip, ui::kColumnStripMaxDip);
+    tab->column_strip.widths_by_path[fs::NormalizePath(path)] = locked;
     if (s.hwnd) InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
@@ -601,7 +621,10 @@ void ToggleColumnLayout(AppState& s, int pane_index) {
     if (!tab) return;
     tab->column_layout = !tab->column_layout;
     if (!tab->column_layout) {
+        // Retain per-directory adjustments when toggling the view off/on.
+        auto widths = std::move(tab->column_strip.widths_by_path);
         tab->column_strip = {};
+        tab->column_strip.widths_by_path = std::move(widths);
     }
     SyncColumnStrips(s);
     if (s.hwnd) InvalidateRect(s.hwnd, nullptr, FALSE);

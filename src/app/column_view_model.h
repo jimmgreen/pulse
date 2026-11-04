@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <map>
+#include <cwchar>
 #include <string>
 #include <vector>
 
@@ -31,13 +32,21 @@ struct ColumnStripColumn {
     bool auto_scroll = true;
 };
 
+// Stable folder identity across column-role transitions and path casing.
+struct ColumnPathLess {
+    bool operator()(const std::wstring& a, const std::wstring& b) const noexcept {
+        return _wcsicmp(a.c_str(), b.c_str()) < 0;
+    }
+};
+using ColumnPathWidths = std::map<std::wstring, float, ColumnPathLess>;
+
 struct ColumnStripState {
     std::wstring for_path;                     // current_path the ancestors belong to
     std::vector<ColumnStripColumn> ancestors;  // farthest -> parent
     ColumnStripColumn child;                   // selected folder (path empty = none)
     float scroll_left_dip = -1.0f;             // whole-chain left scroll; -1 = newest
     bool hold_scroll_on_navigate = false;     // column click preserves the viewport
-    std::map<std::wstring, float> widths_by_path; // role-independent column widths
+    ColumnPathWidths widths_by_path;            // only user-set or one-shot fitted widths
 
     bool Empty() const { return for_path.empty() && ancestors.empty() && child.path.empty(); }
 };
