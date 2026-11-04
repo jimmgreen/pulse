@@ -5272,9 +5272,11 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             }
             const float cloudReserve = cloudState != 0 && !showRowActions ? 20.0f * scale_ : 0.0f;
             // A lone name column has no divider: it ends at the layout's right.
-            const float nameColRight = (vm.view_mode == ViewMode::Details
-                ? (stripRow ? detailsColumns.right : detailsColumns.DividerX(0) - margin_)
-                : nameRc.right) - (stripChevron ? 18.0f * scale_ : 0.0f) - cloudReserve;
+            const float nameColRight = stripRow
+                ? stripLayout.text.right
+                : (vm.view_mode == ViewMode::Details
+                    ? detailsColumns.DividerX(0) - margin_
+                    : nameRc.right) - cloudReserve;
             if (stripChevron && !empty_folder) {
                 DrawIconText(nameColRight + 2.0f * scale_, cell.top, 18.0f * scale_, cell.bottom - cell.top,
                              kIconChevronRight, L">", theme.text_secondary, 0.55f);
