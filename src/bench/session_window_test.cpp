@@ -233,8 +233,17 @@ int main() {
     // Start from the parsed current-version sample so normalized defaults
     // (notably sidebar order) match the parser's treatment of the frozen file.
     SessionSnapshot legacy_expected = parsed;
-    legacy_expected.layout_tabs[0].panes[0].column_layout = false;
-    legacy_expected.layout_tabs[0].panes[0].column_path_widths.clear();
+    const auto ClearV10ColumnState = [](std::vector<LayoutTabSnapshot>& tabs) {
+        for (LayoutTabSnapshot& tab : tabs) {
+            for (PaneFolderSnapshot& pane : tab.panes) {
+                pane.column_layout = false;
+                pane.column_path_widths.clear();
+            }
+        }
+    };
+    ClearV10ColumnState(legacy_expected.layout_tabs);
+    for (WindowSessionSnapshot& window : legacy_expected.windows)
+        ClearV10ColumnState(window.layout_tabs);
     Check(SessionToJson(frozen) == SessionToJson(legacy_expected),
           "frozen v7 file and the current writer preserve legacy state");
 
