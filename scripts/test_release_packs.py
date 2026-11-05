@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from ensure_release_packs import catalog, ensure
+from ensure_release_packs import catalog, catalog_source, ensure
 
 
 class ReleaseGate(unittest.TestCase):
@@ -43,12 +43,33 @@ class ReleaseGate(unittest.TestCase):
     def test_catalog_is_complete_and_tag_bound(self):
         root = Path(__file__).resolve().parents[1]
         header = root / 'src/app/pack_catalog_generated.h'
-        # Bound to the release being built, so a version bump needs no edit here.
-        tag = 'v' + (root / 'version.txt').read_text(encoding='utf-8').strip()
-        packs = catalog(header, 'jimmgreen/pulse', tag)
+        # The fork deliberately pins the upstream preview-pack release.
+        source_repository, source_tag = catalog_source(header)
+        self.assertEqual(source_repository, 'jimmgreen/pulse')
+        self.assertEqual(source_tag, 'v1.0.58')
+        packs = catalog(header, source_repository, source_tag)
         self.assertEqual(sum(len(p['files']) for p in packs), 17)
         with self.assertRaises(ValueError):
-            catalog(header, 'jimmgreen/pulse', 'wrong-tag')
+            catalog(header, source_repository, 'wrong-tag')
+
+    def test_fork_release_verifies_upstream_assets_without_uploading(self):
+        ensure(self.packs, 'test/repo', 'v1', 'source', gh=self.gh,
+               source_repository='jimmgreen/pulse', verify_only=True)
+        self.assertEqual(self.uploads, 0)
+        self.assertEqual(self.remote['v1'], {})
+
+    def test_fork_verification_rejects_missing_or_corrupt_upstream_assets(self):
+        for corrupted in [None, b'x' * len(self.assets['ffmpeg.lzms'])]:
+            with self.subTest(corrupted=corrupted):
+                self.remote['source'] = dict(self.assets)
+                if corrupted is None:
+                    del self.remote['source']['ffmpeg.lzms']
+                else:
+                    self.remote['source']['ffmpeg.lzms'] = corrupted
+                with self.assertRaises((ValueError, KeyError)):
+                    ensure(self.packs, 'test/repo', 'v1', 'source', gh=self.gh,
+                           source_repository='jimmgreen/pulse', verify_only=True)
+                self.assertEqual(self.uploads, 0)
 
     def test_new_draft_can_copy_verified_published_bundle(self):
         ensure(self.packs, 'test/repo', 'v1', 'source', gh=self.gh)

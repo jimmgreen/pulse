@@ -163,13 +163,13 @@ if ($LASTEXITCODE -ne 0) { throw 'Production compilation failed' }
 & (Join-Path $repo 'scripts/check_release_payload.ps1') -BuildDir $build
 # Content enhancement pack assets of this channel, matching the catalog in pulse.exe.
 $contentPack = Join-Path $build 'content-pack'
-& (Join-Path $repo 'scripts/check_content_pack.ps1') -PackDir $contentPack -BuildDir $build
+& (Join-Path $repo 'scripts/check_content_pack.ps1') -PackDir $contentPack -BuildDir $build -Repository $repository
 $contentDist = Join-Path $repo "dist/content-pack-$Channel"
 New-Item -ItemType Directory -Path $contentDist -Force | Out-Null
 Copy-Item -Path (Join-Path $contentPack '*') -Destination $contentDist -Force
 # AI enhancement pack assets of this channel, likewise.
 $aiPack = Join-Path $build 'ai-pack'
-& (Join-Path $repo 'scripts/check_content_pack.ps1') -Key ai -PackDir $aiPack -BuildDir $build
+& (Join-Path $repo 'scripts/check_content_pack.ps1') -Key ai -PackDir $aiPack -BuildDir $build -Repository $repository
 $aiDist = Join-Path $repo "dist/ai-pack-$Channel"
 New-Item -ItemType Directory -Path $aiDist -Force | Out-Null
 Copy-Item -Path (Join-Path $aiPack '*') -Destination $aiDist -Force
