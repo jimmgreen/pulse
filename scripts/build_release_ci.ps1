@@ -44,8 +44,8 @@ $testNames = @('pulse_rename_ops_test', 'pulse_child_edit_test', 'pulse_localiza
     'pulse_archive_integrity_test', 'pulse_document_completeness_test', 'pulse_preview_command_test',
     'pulse_image_preview_integrity_test', 'pulse_udf_listing_test', 'pulse_preview_integrity_test',
     'pulse_change_tracking_memory_test', 'pulse_change_feed_memory_test', 'pulse_usn_packet_queue_test',
-    'pulse_content_progress_ui_test', 'pulse_operation_presentation_test', 'pulse_column_strip_test', 'pulse_entry_sort_key_test',
-    'pulse_file_lock_test', 'pulse_dialogs_test',
+    'pulse_content_progress_ui_test', 'pulse_operation_presentation_test', 'pulse_entry_sort_key_test',
+    'pulse_file_lock_test', 'pulse_dialogs_test', 'pulse_pane_drop_test', 'pulse_selection_caps_test',
     # AI enhancement pack: catalog/install, JSON, broker, tools, MCP over real pipes.
     'pulse_ai_pack_test', 'pulse_ai_json_test', 'pulse_ai_broker_test', 'pulse_ai_tools_test', 'pulse_ai_mcp_test')
 $testTargets = (@('pulse', 'pulse_index_engine_test', 'pulse_index_host_stress',
@@ -60,11 +60,18 @@ set "VSLANG=1033"
 $toolsetEnvironment
 cmake -S "$repo" -B "$build" -G Ninja $compilerArguments -DCMAKE_BUILD_TYPE=Release -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DPULSE_WIN81_CANDIDATE=$candidate -DPULSE_WITH_SELFTEST=ON -DPULSE_BUILD_PROGRESS_UI_TESTS=ON -DPULSE_WITH_LUMATEXT=ON -DLUMATEXT_SOURCE_DIR= -DCMAKE_PREFIX_PATH="$sdkRoot" -DPULSE_UPDATE_MANIFEST_URL="https://github.com/jimmgreen/pulse/releases/latest/download/$manifest" -DPULSE_UPDATE_PUBLIC_KEY_HEX=$publicKey
 if errorlevel 1 exit /b 1
+rem Preflight changed standalone tests before building the complete release target set.
+cmake --build "$build" --parallel 4 --target pulse_column_strip_test pulse_session_window_test
+if errorlevel 1 exit /b 1
+"$build\pulse_column_strip_test.exe"
+if errorlevel 1 exit /b 1
+"$build\pulse_session_window_test.exe"
+if errorlevel 1 exit /b 1
 cmake --build "$build" --parallel 4 --target $testTargets
 exit /b %errorlevel%
 "@ | Set-Content -LiteralPath $batch -Encoding ascii
 & $batch
-if ($LASTEXITCODE -ne 0) { throw 'Release compilation failed' }
+if ($LASTEXITCODE -ne 0) { throw 'Windows build preflight failed (compile or focused test failure)' }
 foreach ($testName in $testNames) {
     & (Join-Path $build "$testName.exe")
     if ($LASTEXITCODE -ne 0) { throw "$testName failed" }

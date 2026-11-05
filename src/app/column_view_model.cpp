@@ -1,6 +1,8 @@
 #include "column_view_model.h"
 #include "app_model.h"
 #include "../ui/column_strip_layout.h"
+#include <cmath>
+#include <cwchar>
 
 namespace pulse::app {
 
@@ -29,7 +31,7 @@ void FillColumnStripView(ui::ColumnStripView& out, const Tab& tab) {
     out.widths_dip.clear();
     out.scroll_left_dip = state.scroll_left_dip;
     out.eligible = tab.column_layout && !state.for_path.empty() &&
-                   state.for_path == tab.current_path;
+                   _wcsicmp(state.for_path.c_str(), tab.current_path.c_str()) == 0;
     out.ancestors.clear();
     out.has_child = false;
     if (!out.eligible) return;
@@ -37,9 +39,9 @@ void FillColumnStripView(ui::ColumnStripView& out, const Tab& tab) {
     // the uniform 240 DIP default, irrespective of current column role.
     const auto assign = [&](const std::wstring& path, size_t slot) {
         const auto it = state.widths_by_path.find(path);
-        if (it == state.widths_by_path.end()) return;
+        if (it == state.widths_by_path.end() || !std::isfinite(it->second.width_dip)) return;
         if (out.widths_dip.size() <= slot) out.widths_dip.resize(slot + 1, 0.0f);
-        out.widths_dip[slot] = it->second;
+        out.widths_dip[slot] = it->second.width_dip;
     };
     out.ancestors.reserve(state.ancestors.size());
     for (size_t i = 0; i < state.ancestors.size(); ++i) {

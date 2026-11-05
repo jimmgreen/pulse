@@ -13,14 +13,17 @@ void NoteColumnStripResult(AppState& s, const app::WorkResult& res);
 // Mouse-down on column-view regions (toggle button, rows, dividers).
 // Returns true when consumed.
 bool HandleColumnStripMouseDown(AppState& s, const ui::WindowViewModel& vm,
-                                const ui::HitTestResult& hit, int x);
+                                const ui::HitTestResult& hit, int x, int y);
+// Completes a press only if release still identifies the same visible row.
+bool FinishColumnStripMouseUp(AppState& s, const ui::WindowViewModel& vm,
+                              const ui::HitTestResult& hit);
 bool UpdateColumnStripResize(AppState& s, int x);
 // Double-click on a divider fits current filenames once and locks that folder's width.
 void ResetColumnStripWidth(AppState& s, const ui::HitTestResult& hit);
-void EndColumnStripResize(AppState& s);
+void EndColumnStripResize(AppState& s, bool commit = true);
 // Double-click right after a column click changed the folder: swallow it so
 // the second click does not open whatever moved under the cursor.
-bool ColumnStripSwallowDoubleClick(const AppState& s);
+bool ColumnStripSwallowDoubleClick(const AppState& s, const ui::HitTestResult& hit);
 // Right-click on a column row: selects that item the way a click does (the
 // list moves to its folder). Returns true when the item is now selected.
 bool SelectColumnStripRow(AppState& s, const ui::HitTestResult& hit);
@@ -32,6 +35,7 @@ bool ColumnStripRowTarget(AppState& s, const ui::HitTestResult& hit,
 // Folder owning a column's blank space; empty for stale/invalid hit regions.
 // The path is resolved before any navigation or context-menu action.
 std::wstring ColumnStripBackgroundPath(AppState& s, const ui::HitTestResult& hit);
+std::wstring ColumnStripDropPath(AppState& s, const ui::HitTestResult& hit);
 bool HandleColumnStripWheel(AppState& s, const ui::WindowViewModel& vm,
                             const ui::HitTestResult& hit, int wheel_delta);
 // Left/Right in the column view: go to the parent / enter the selected folder.

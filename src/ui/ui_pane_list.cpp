@@ -4120,6 +4120,15 @@ D2D1_RECT_F MainRenderer::RenameFieldRect(const PaneViewModel& vm, const D2D1_RE
     D2D1_RECT_F nameRc = layout.NameRect(view);
     if (const float lead = DetailsLeadDip(vm, view); lead > 0.0f)
         nameRc.left = std::min(nameRc.right, nameRc.left + std::round(lead * scale_));
+    const bool stripRow = vm.view_mode == ViewMode::Details && vm.column_strip.Active();
+    ColumnStripRowLayout stripLayout{};
+    if (stripRow) {
+        const D2D1_RECT_F row = layout.ItemRect(view);
+        const bool empty_folder = e.is_dir && !e.record_only && vm.empty_folders.contains(source_index);
+        stripLayout = LayoutColumnStripRow(D2D1::RectF(list.left, list.top, list.right, list.bottom),
+            row.top, row.bottom, scale_, e.is_dir);
+        nameRc = stripLayout.text;
+    }
     const bool iconGrid = vm.view_mode == ViewMode::ExtraLargeIcons ||
                           vm.view_mode == ViewMode::LargeIcons ||
                           vm.view_mode == ViewMode::MediumIcons;
@@ -4136,10 +4145,11 @@ D2D1_RECT_F MainRenderer::RenameFieldRect(const PaneViewModel& vm, const D2D1_RE
     }
     const size_t totalTags = tagIndices ? tagIndices->size() : (tagDots ? tagDots->size() : 0);
     const int tagDotCount = static_cast<int>(std::min<size_t>(3, totalTags));
-    const float nameColRight = vm.view_mode == ViewMode::Details
-        ? (vm.column_strip.Active() ? DetailsColumns(list, vm).right - 18.0f * scale_
-                                    : DetailsColumns(list, vm).DividerX(0) - margin_)
-        : nameRc.right;
+    const float nameColRight = stripRow ? stripLayout.text.right
+        : vm.view_mode == ViewMode::Details
+            ? (vm.column_strip.Active() ? DetailsColumns(list, vm).right - 18.0f * scale_
+                                        : DetailsColumns(list, vm).DividerX(0) - margin_)
+            : nameRc.right;
     if (iconGrid && tagDotCount > 0) {
         const float fullNameW = MeasureLayoutText(
             compositor_, compositor_->DwriteFactory(), compositor_->TextFormat(), ShownName(e));
@@ -4696,6 +4706,14 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                 }
             }
             const ListEntryView& e = MakeVisibleEntry(vm, static_cast<size_t>(src));
+            // Column-strip layout is prepared before geometry is calculated.
+            // Keep these row properties in this loop scope for both layout and
+            // later icon/text drawing.
+            const bool stripRow = vm.view_mode == ViewMode::Details && vm.column_strip.Active();
+            const bool empty_folder = e.is_dir && !e.record_only && vm.empty_folders.contains(src);
+            // Reserve the folder-chevron slot even when the folder-size probe
+            // says the folder is empty; only the glyph itself is conditional.
+            const bool stripChevron = stripRow && e.is_dir;
             const uint64_t row_key = std::hash<std::wstring_view>{}(std::wstring_view(e.name));
             D2D1_POINT_2F row_shift{0.0f, 0.0f};
             if (shift) row_shift = shift->Offset(row_key, D2D1::Point2F(cell.left, cell.top));
@@ -4731,6 +4749,15 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             const bool wallPic = wall_rows && WallPicture(e.name, e.is_dir);
             if (wall_rows && !wallPic) thumbRect = iconRect;
             if (wallPic) iconRect = thumbRect;
+            ColumnStripRowLayout stripLayout{};
+            if (stripRow) {
+                stripLayout = LayoutColumnStripRow(D2D1::RectF(x, y, x + w, y + h),
+                    cell.top, cell.bottom, scale_, stripChevron);
+                cell = stripLayout.cell;
+                iconRect = stripLayout.icon;
+                thumbRect = iconRect;
+                nameRc = stripLayout.text;
+            }
             if (wall_prev) {
                 const size_t at = static_cast<size_t>(i);
                 const int now_row = wall_rows->RowOf(i), was_row = wall_prev->RowOf(i);
@@ -5062,7 +5089,6 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                                                        : std::min(snappedIconW, snappedIconH);
                 uint32_t media_duration_ms = 0;
                 // A folder probed empty: neither a contents thumbnail nor the shell icon.
-                const bool empty_folder = e.is_dir && !e.record_only && vm.empty_folders.contains(src);
                 if (empty_folder) {
                     // Both forms put their ink at x 1/12..11/12, y 1/6..5/6: rest it
                     // on the name baseline like the shell artwork below.
@@ -5227,8 +5253,6 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             const size_t totalTags = tagIndices ? tagIndices->size() : (tagDots ? tagDots->size() : 0);
             const int tagDotCount = static_cast<int>(std::min<size_t>(3, totalTags));
             // Column view rows: name and a chevron on folders, no row actions.
-            const bool stripRow = vm.view_mode == ViewMode::Details && vm.column_strip.Active();
-            const bool stripChevron = stripRow && e.is_dir;
             const bool showRowActions = vm.view_mode == ViewMode::Details && !stripRow &&
                 src != vm.rename_index &&
                 (hover || (selected && vm.selected_count == 1) || e.starred);
@@ -5248,11 +5272,15 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             }
             const float cloudReserve = cloudState != 0 && !showRowActions ? 20.0f * scale_ : 0.0f;
             // A lone name column has no divider: it ends at the layout's right.
-            const float nameColRight = (vm.view_mode == ViewMode::Details
-                ? (stripRow ? detailsColumns.right : detailsColumns.DividerX(0) - margin_)
-                : nameRc.right) - (stripChevron ? 18.0f * scale_ : 0.0f) - cloudReserve;
-            if (stripChevron) {
-                DrawIconText(nameColRight + 2.0f * scale_, cell.top, 18.0f * scale_, cell.bottom - cell.top,
+            const float nameColRight = stripRow
+                ? stripLayout.text.right
+                : (vm.view_mode == ViewMode::Details
+                    ? detailsColumns.DividerX(0) - margin_
+                    : nameRc.right) - cloudReserve;
+            if (stripChevron && !empty_folder) {
+                DrawIconText(stripLayout.chevron.left, cell.top,
+                             stripLayout.chevron.right - stripLayout.chevron.left,
+                             cell.bottom - cell.top,
                              kIconChevronRight, L">", theme.text_secondary, 0.55f);
             }
             const bool showStar = showRowActions;
@@ -5330,9 +5358,12 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                 ? (std::min)(ai_painter->AfterNameReserve(), (nameColRight - nameX) * 0.6f) : 0.0f;
             const NameTrail trail = LayoutNameTrail(
                 list_mark ? nameX + kListAliasMarkDip * scale_ : nameX, textY, textH, nameColRight - ai_reserve, cell.top, cell.bottom, scale_,
-                has_alias ? alias_line : shown_name, tagDotCount, badgeW, showStar, showNewTab, showMore,
+                has_alias ? alias_line : shown_name, stripRow ? 0 : tagDotCount,
+                stripRow ? 0.0f : badgeW, stripRow ? false : showStar,
+                stripRow ? false : showNewTab, stripRow ? false : showMore,
                 compositor_, compositor_->DwriteFactory(), nameFormat, change != nullptr,
-                vm.view_mode == ViewMode::Details ? (e.is_dir ? 3 : 2) : 0, name_matches, row_actions_);
+                stripRow ? 0 : (vm.view_mode == ViewMode::Details ? (e.is_dir ? 3 : 2) : 0),
+                name_matches, row_actions_);
             if (src == vm.rename_index) {
                 // The rename frame is drawn after every row (below): it can be
                 // wider than its own cell.

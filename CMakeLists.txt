@@ -606,7 +606,7 @@ if(PULSE_APP_SOURCES)
     include(cmake/release_notes.cmake)
     pulse_embed_release_notes(pulse)
     set_property(SOURCE src/app/pulse.rc APPEND PROPERTY OBJECT_DEPENDS
-        "${CMAKE_CURRENT_SOURCE_DIR}/assets/global-search-logo.png"
+        "${CMAKE_CURRENT_SOURCE_DIR}/assets/pulse_icon_transparent_vector.png"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/app/pulse.ico"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/common/strings.rcinc"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/common/strings_zh_tw.rcinc"
@@ -977,13 +977,20 @@ add_executable(pulse_persistence_test src/bench/persistence_regression_test.cpp
     src/ui/view_layout.cpp src/fs/fs_enum.cpp src/app/entry_group.cpp src/app/tag_ads_sync.cpp)
 target_link_libraries(pulse_persistence_test PRIVATE
     user32 shell32 ole32 uuid advapi32 shlwapi netapi32 pulse_localization)
+# Shared out-of-line dependencies of isolated app-model test executables.
+set(PULSE_APP_MODEL_TEST_SUPPORT_SOURCES
+    src/app/git_status.cpp
+    src/app/tag_query.cpp
+    src/ui/column_strip_layout.cpp)
+
 # Multi-window M0: single-window session baseline (session v8 must keep it).
 add_executable(pulse_session_window_test src/bench/session_window_test.cpp
     src/app/session.cpp src/app/session_tab_model.cpp src/app/tab_group_model.cpp src/app/window_identity.cpp
     src/app/app_model.cpp src/app/cloud_roots.cpp src/app/places.cpp src/app/entry_group.cpp src/app/tag_ads_sync.cpp
     src/app/pane_layout.cpp src/app/column_view_model.cpp src/app/search_query.cpp
     src/app/search_query_rewrite.cpp src/index/index_query.cpp src/index/search_kinds.cpp
-    src/index/content_result_store.cpp src/fs/fs_enum.cpp src/ui/view_layout.cpp)
+    src/index/content_result_store.cpp src/fs/fs_enum.cpp src/ui/view_layout.cpp
+    ${PULSE_APP_MODEL_TEST_SUPPORT_SOURCES})
 target_link_libraries(pulse_session_window_test PRIVATE
     user32 shell32 ole32 uuid advapi32 shlwapi netapi32 secur32 pulse_localization pulse_runtime_log pulse_sqlite)
 # Multi-window M7h: a split tab dropped on a window's edge brings all its panes.
@@ -992,7 +999,8 @@ add_executable(pulse_pane_drop_test src/bench/pane_drop_test.cpp src/app/pane_dr
     src/app/app_model.cpp src/app/cloud_roots.cpp src/app/places.cpp src/app/entry_group.cpp src/app/tag_ads_sync.cpp
     src/app/tab_group_model.cpp src/app/pane_layout.cpp src/app/column_view_model.cpp src/app/search_query.cpp
     src/app/search_query_rewrite.cpp src/index/index_query.cpp src/index/search_kinds.cpp
-    src/index/content_result_store.cpp src/fs/fs_enum.cpp src/ui/view_layout.cpp)
+    src/index/content_result_store.cpp src/fs/fs_enum.cpp src/ui/view_layout.cpp
+    ${PULSE_APP_MODEL_TEST_SUPPORT_SOURCES})
 target_link_libraries(pulse_pane_drop_test PRIVATE
     user32 shell32 ole32 uuid advapi32 shlwapi netapi32 secur32 pulse_localization pulse_runtime_log pulse_sqlite)
 # Toolbar / chip / item menu: what a drive, a share or a Recycle Bin item can do.
@@ -1000,7 +1008,8 @@ add_executable(pulse_selection_caps_test src/bench/selection_caps_test.cpp
     src/app/app_model.cpp src/app/cloud_roots.cpp src/app/places.cpp src/app/entry_group.cpp src/app/tag_ads_sync.cpp
     src/app/pane_layout.cpp src/app/column_view_model.cpp src/app/search_query.cpp
     src/app/search_query_rewrite.cpp src/index/index_query.cpp src/index/search_kinds.cpp
-    src/index/content_result_store.cpp src/fs/fs_enum.cpp src/ui/view_layout.cpp)
+    src/index/content_result_store.cpp src/fs/fs_enum.cpp src/ui/view_layout.cpp
+    ${PULSE_APP_MODEL_TEST_SUPPORT_SOURCES})
 target_link_libraries(pulse_selection_caps_test PRIVATE
     user32 shell32 ole32 uuid advapi32 shlwapi netapi32 secur32 pulse_localization pulse_runtime_log pulse_sqlite)
 # Multi-window M1: AppState's process-wide members alias one AppCore (compile-time checks).

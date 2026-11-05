@@ -9,9 +9,10 @@ on:
       - 'tools/zh_tw/**'
       - 'tools/actions/**'
       - '.github/workflows/l10n.yml'
+  # Product-code changes are validated by the consolidated Windows test
+  # workflow. Keep this fast workflow for localization/tooling-only PRs.
   pull_request:
     paths:
-      - 'src/**'
       - 'tools/l10n/**'
       - 'tools/zh_tw/**'
       - 'tools/actions/**'

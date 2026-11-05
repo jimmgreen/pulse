@@ -1,4 +1,5 @@
 name: Pulse Test Build (Windows x64)
+run-name: Pulse Test Build — ${{ github.ref_name }}
 
 # Run only after a stage is ready for verification. Intermediate commits do not
 # justify a full Windows release build (which can take up to 90 minutes).
@@ -6,7 +7,7 @@ on:
   # Only this completed feature branch triggers one Windows build.
   # Avoid expensive automatic builds for other pushes or PRs.
   push:
-    branches: [pulse-test/stable-column-widths]
+    branches: [pulse-test/column-interaction-complete]
   workflow_dispatch:
 
 # If the same test branch is requested twice, only its latest run is useful.

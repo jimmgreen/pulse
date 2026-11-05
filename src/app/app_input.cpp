@@ -23,6 +23,7 @@
 #include "window_overview_ui.h"
 #include "app_updates.h"
 #include "app_internal.h"
+#include "column_interaction_rules.h"
 #include "global_search_controller.h"
 #include "selection_caps.h"
 #include "app_input.h"
@@ -376,16 +377,21 @@ static DWORD ResolveDropTargetImpl(AppState& s, const std::vector<std::wstring>&
         return toolbar_effect;
     }
 
-    // Resting on a tab of the strip opens it (M6e); the tab takes the drop
-    // into the folder it shows.
-    const bool on_strip_tab = hit.region == ui::HitTestResult::Tab && hit.index >= 0 &&
-                              hit.index < static_cast<int>(s.window_tabs.items.size());
-    if (app::AdvanceTabSpring(s.springTab, s.springTabStart, on_strip_tab ? hit.index : -1, s.window_tabs.active,
-                              GetTickCount64()))
-        SwitchTab(s, static_cast<size_t>(hit.index));
-
     app::Pane* hitPane = PaneAtSlot(s, hit.pane_index);
     app::Tab* tab = hitPane ? hitPane->ActiveTab() : ActiveTab(s);
+    const bool stable_column_drag = s.columnDragActive && tab && tab->column_layout;
+    const bool on_strip_tab = hit.region == ui::HitTestResult::Tab && hit.index >= 0 &&
+                              hit.index < static_cast<int>(s.window_tabs.items.size());
+    if (stable_column_drag) {
+        s.springTab = -1;
+        s.springTabStart = 0;
+    } else if (app::AdvanceTabSpring(s.springTab, s.springTabStart,
+                                    on_strip_tab ? hit.index : -1,
+                                    s.window_tabs.active, GetTickCount64())) {
+        SwitchTab(s, static_cast<size_t>(hit.index));
+        hitPane = PaneAtSlot(s, hit.pane_index);
+        tab = hitPane ? hitPane->ActiveTab() : ActiveTab(s);
+    }
     if (!tab) return DROPEFFECT_NONE;
 
     std::wstring destName;
@@ -412,7 +418,9 @@ static DWORD ResolveDropTargetImpl(AppState& s, const std::vector<std::wstring>&
         destName = tab->EntryAt(hit.index).name;
 
         // Spring-loaded: hover 800ms on a folder row enters it (ui.md §7.8).
-        if (s.springRow != hit.index) {
+        if (stable_column_drag) {
+            s.springRow = -1;
+        } else if (s.springRow != hit.index) {
             s.springRow = hit.index;
             s.springStart = GetTickCount64();
         } else if (!s.springEntered && GetTickCount64() - s.springStart >= 800) {
@@ -445,6 +453,13 @@ static DWORD ResolveDropTargetImpl(AppState& s, const std::vector<std::wstring>&
         s.dropBadgeY = (float)pt.y;
         InvalidateRect(s.hwnd, nullptr, FALSE);
         return effect;
+    } else if (hit.region == ui::HitTestResult::ColumnStripBlank ||
+               hit.region == ui::HitTestResult::ColumnStripRow) {
+        s.springRow = -1;
+        s.dropDestDir = ColumnStripDropPath(s, hit);
+        if (s.dropDestDir.empty()) return RejectDropTarget(s);
+        s.dropPaneIndex = hit.pane_index;
+        destName = BaseName(s.dropDestDir);
     } else if (on_strip_tab) {
         s.springRow = -1;
         const app::Tab* view = s.window_tabs.items[static_cast<size_t>(hit.index)]->ActiveFolder();
@@ -499,7 +514,7 @@ static DWORD ResolveDropTargetImpl(AppState& s, const std::vector<std::wstring>&
         // Spring-loaded like a folder row (ui.md §7.8): resting 800ms on it
         // opens it here, Esc goes back. springRow holds bar entries below -1.
         const int spring_key = -2 - hit.index;
-        if (folder.empty() || ui::DropIntoOwnFolder(sources, folder)) {
+        if (stable_column_drag || folder.empty() || ui::DropIntoOwnFolder(sources, folder)) {
             s.springRow = -1;
         } else if (s.springRow != spring_key) {
             s.springRow = spring_key;
@@ -1002,12 +1017,16 @@ void StartDragOut(AppState& s) {
     s.clickCollapseIndex = -1;
     CancelScrollAnimation(s); // DoDragDrop's modal loop coexists with on-demand render
     g_internal_drag = true;
+    s.columnDragActive = tab->column_layout;
+    s.columnDragTab = s.columnDragActive ? tab : nullptr;
     if (device) g_drag_device_dir = tab->current_path;
     // A phone's read-only storage (or its root) gives a copy only.
     const DWORD allowed = device && !caps.cut ? DROPEFFECT_COPY : DROPEFFECT_COPY | DROPEFFECT_MOVE;
     DWORD effect = ui::DoFileDragDrop(paths, allowed,
         [&s] { return s.springEntered; }, tab->current_path); // Esc = 退回 when spring-entered
     g_internal_drag = false;
+    s.columnDragActive = false;
+    s.columnDragTab = nullptr;
     g_drag_device_dir.clear();
     s.springEntered = false;
     ClearDropFeedback(s);
@@ -1015,6 +1034,41 @@ void StartDragOut(AppState& s) {
         // The target took the file; refresh the listing.
         s.store.MarkDirty(tab->current_path);
         RefreshActiveTab(s, RefreshReason::OperationCompleted);
+    }
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
+// A row in an ancestor/child column is dragged by its captured full path.
+static void StartColumnStripDragOut(AppState& s, const std::wstring& path, app::Tab* source_tab) {
+    if (path.empty() || fs::IsVirtualPath(path) ||
+        GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) return;
+    const std::wstring source_dir = fs::ParentPath(path);
+    if (source_dir.empty()) return;
+    const bool device = source_tab && IsDeviceTab(source_tab);
+    CancelScrollAnimation(s);
+    s.columnDragActive = true;
+    s.columnDragTab = source_tab;
+    s.springEntered = false;
+    s.springRow = -1;
+    s.springTab = -1;
+    g_internal_drag = true;
+    g_drag_device_dir.clear();
+    if (device) g_drag_device_dir = source_tab->current_path;
+    const DWORD allowed = device ? DROPEFFECT_COPY : (DROPEFFECT_COPY | DROPEFFECT_MOVE);
+    const DWORD effect = ui::DoFileDragDrop({ClipboardPath(path)}, allowed,
+        [&s] { return s.springEntered; }, source_dir);
+    g_internal_drag = false;
+    s.columnDragActive = false;
+    s.columnDragTab = nullptr;
+    g_drag_device_dir.clear();
+    s.springEntered = false;
+    ClearDropFeedback(s);
+    if (effect == DROPEFFECT_MOVE && !device) {
+        s.store.MarkDirty(source_dir);
+        SyncColumnStrips(s);
+        if (app::Tab* active = ActiveTab(s);
+            active && _wcsicmp(active->current_path.c_str(), source_dir.c_str()) == 0)
+            RefreshActiveTab(s, RefreshReason::OperationCompleted);
     }
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
@@ -2018,6 +2072,22 @@ LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         if (AiAssistantMouseMove(*s, mx, my)) {   // Pulse 助手 owns its panel
             if (s->hoverRegion != 0 || s->hoverRow >= 0 || !s->tooltipText.empty())
                 HandleMouseLeave(s, hwnd, WM_MOUSELEAVE, 0, 0);
+            return 0;
+        }
+        if (s->columnGesture.armed) {
+            if ((wParam & MK_LBUTTON) == 0) {
+                s->columnGesture = {};
+                if (GetCapture() == hwnd) ReleaseCapture();
+            } else if (app::ColumnGestureExceededSlop(
+                           s->columnGesture.press.x, s->columnGesture.press.y, mx, my,
+                           ListDragSlop(*s, SM_CXDRAG, true), ListDragSlop(*s, SM_CYDRAG, true))) {
+                const std::wstring source = s->columnGesture.item_path;
+                app::Pane* source_pane = PaneAtSlot(*s, s->columnGesture.pane_index);
+                app::Tab* source_tab = source_pane ? source_pane->ActiveTab() : nullptr;
+                s->columnGesture = {};
+                if (GetCapture() == hwnd) ReleaseCapture();
+                StartColumnStripDragOut(*s, source, source_tab);
+            }
             return 0;
         }
         if (g_blank_deselect.armed && BlankDeselectMoved(g_blank_deselect.start, mx, my))
@@ -3189,7 +3259,7 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             ThrowTrayTop(*s, -1.0f, -30.0f, -10.0f);
             return 0;
         }
-        if (HandleColumnStripMouseDown(*s, vm, hit, mx)) {
+        if (HandleColumnStripMouseDown(*s, vm, hit, mx, my)) {
             s->dragPending = false;
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
@@ -4196,10 +4266,6 @@ LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPA
             AiAssistantMouseDown(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
             return 0;
         }
-        if (ColumnStripSwallowDoubleClick(*s)) {
-            s->stripClickTick = 0;
-            return 0;
-        }
         // The second click on a toolbar gap or the status bar after the first
         // cleared the selection: the toolbar and the status hints have changed
         // under the pointer since, so do not hit-test again. Put the selection
@@ -4225,6 +4291,15 @@ LRESULT HandleLButtonDblClk(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPA
         ui::WindowViewModel vm = BuildVm(*s, false);
         D2D1_RECT_F rect = D2D1::RectF(0, 0, (float)s->compositor.Width(), (float)s->compositor.Height());
         ui::HitTestResult hit = s->renderer.HitTest(vm, rect, (float)mx, (float)my);
+        // Suppress only the second click on a row that navigated the pane.
+        // A double-click on a divider must always reach the width state machine.
+        if (ColumnStripSwallowDoubleClick(*s, hit)) {
+            s->stripClickTick = 0;
+            s->stripClickPane = -1;
+            return 0;
+        }
+        s->stripClickTick = 0;
+        s->stripClickPane = -1;
         pulse::diagnostics::runtime::Event("file_double_click", {
             {"row_hit", hit.region == ui::HitTestResult::Row},
             {"details_view", double_tab && double_tab->view_mode == ui::ViewMode::Details},
@@ -4365,6 +4440,20 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         (void)msg;
         (void)wParam;
         g_blank_drag = BlankWindowDrag{};
+        if (s && s->columnGesture.armed) {
+            g_blank_deselect = BlankDeselect{};
+            s->paneDragPending = false;
+            s->dragPending = false;
+            const ui::WindowViewModel vm = BuildVm(*s, false);
+            const D2D1_RECT_F bounds = D2D1::RectF(0, 0, static_cast<float>(s->compositor.Width()),
+                                                   static_cast<float>(s->compositor.Height()));
+            const ui::HitTestResult hit = s->renderer.HitTest(
+                vm, bounds, static_cast<float>(GET_X_LPARAM(lParam)), static_cast<float>(GET_Y_LPARAM(lParam)));
+            FinishColumnStripMouseUp(*s, vm, hit);
+            if (GetCapture() == hwnd) ReleaseCapture();
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
         if (const BlankDeselect armed = std::exchange(g_blank_deselect, BlankDeselect{});
             s && armed.armed && !BlankDeselectMoved(armed.start, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)))
             BlankClickDeselect(*s, POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)}, armed.maximize);
@@ -4738,6 +4827,7 @@ LRESULT HandleCaptureChanged(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LP
         if (s && ToolbarPinDragging() && reinterpret_cast<HWND>(lParam) != hwnd) EndToolbarPinDrag(*s, true);
         if (s && FavoritesBarDragging() && reinterpret_cast<HWND>(lParam) != hwnd) EndFavoritesBarDrag(*s, true);
         if (s) {
+            if (s->columnGesture.armed) s->columnGesture = {};
             s->columnResizing = false;
             s->columnResizeIndex = -1;
             s->columnResizePane = -1;
@@ -4746,7 +4836,7 @@ LRESULT HandleCaptureChanged(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LP
                 // Capture lost mid-gesture: the card springs back home.
                 ReleaseTrayDrag(*s, false);
             }
-            EndColumnStripResize(*s);
+            EndColumnStripResize(*s, false);
             if (s->renameClickCandidate && s->renameClickDue == 0)
                 CancelRenameClick(*s);
             if (s->starDragPending || s->starDragActive) {
@@ -5263,6 +5353,12 @@ void ShowKeyboardContextMenu(AppState& s) {
 
 LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (!s) return DefWindowProcW(hwnd, msg, wParam, lParam);
+        if (wParam == VK_ESCAPE && s->columnGesture.armed) {
+            s->columnGesture = {};
+            if (GetCapture() == hwnd) ReleaseCapture();
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
         if (wParam == VK_ESCAPE && AiAssistantEscape(*s)) return 0;   // Pulse 助手's model menu
         if (wParam == VK_ESCAPE && SysCtxPreviewDragCancel(*s)) return 0;
         if (wParam == VK_ESCAPE && CancelMarquee(*s)) {
@@ -5272,6 +5368,12 @@ LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lP
         if (wParam == VK_ESCAPE && s->settings.menu_drag_item() >= 0) {
             // Esc puts a dragged Pulse menu preview row back.
             s->settings.EndMenuDrag();
+            if (GetCapture() == hwnd) ReleaseCapture();
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
+        if (wParam == VK_ESCAPE && (s->stripResizing || s->stripHScrolling)) {
+            EndColumnStripResize(*s, false);
             if (GetCapture() == hwnd) ReleaseCapture();
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;

@@ -7,6 +7,7 @@
 #include "../app/session.h"
 #include "../app/app_model.h"
 #include "../app/places.h"
+#include "../fs/fs_enum.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -42,6 +43,11 @@ SessionSnapshot SampleSession() {
     docs.layout = 0;
     PaneFolderSnapshot docs_pane;
     docs_pane.path = L"C:\\Users\\Example\\Documents";
+    docs_pane.column_layout = true;
+    docs_pane.column_path_widths[L"C:\\Users\\Example\\Documents"] =
+        {320.0f, ColumnPathWidthMode::Manual};
+    docs_pane.column_path_widths[L"C:\\Users\\Example\\Documents\\Archive"] =
+        {480.0f, ColumnPathWidthMode::AutoFit};
     docs.panes.push_back(docs_pane);
 
     LayoutTabSnapshot work;
@@ -195,13 +201,28 @@ int main() {
         return 0;
     }
 
-    Check(json.find(L"\"version\":9") != std::wstring::npos, "writer emits session version 9");
+    Check(json.find(L"\"version\":10") != std::wstring::npos, "writer emits session version 10");
     Check(json.find(L"\"windows\"") == std::wstring::npos,
           "writer leaves windows[] out when the snapshot has none");
     SessionSnapshot parsed;
     Check(ParseSessionJson(json, parsed), "round-trip JSON parses");
     ExpectSampleWindow(parsed, "round-trip");
     ExpectMigratedWindow(parsed, "round-trip");
+    const auto& saved_pane = parsed.layout_tabs[0].panes[0];
+    const std::wstring manual_path =
+        pulse::fs::NormalizePath(L"C:\\Users\\Example\\Documents");
+    const std::wstring auto_path =
+        pulse::fs::NormalizePath(L"C:\\Users\\Example\\Documents\\Archive");
+    const auto manual_width = saved_pane.column_path_widths.find(manual_path);
+    const auto auto_width = saved_pane.column_path_widths.find(auto_path);
+    Check(saved_pane.column_layout && saved_pane.column_path_widths.size() == 2 &&
+          manual_width != saved_pane.column_path_widths.end() &&
+          manual_width->second.width_dip == 320.0f &&
+          manual_width->second.mode == ColumnPathWidthMode::Manual &&
+          auto_width != saved_pane.column_path_widths.end() &&
+          auto_width->second.width_dip == 480.0f &&
+          auto_width->second.mode == ColumnPathWidthMode::AutoFit,
+          "v10: per-folder widths and AutoFit mode round-trip");
 
     SessionSnapshot frozen;
     Check(ParseSessionJson(kFrozenV7, frozen), "frozen v7 file parses");
@@ -209,8 +230,22 @@ int main() {
     ExpectMigratedWindow(frozen, "frozen v7");
     // The parser normalizes defaults (an empty sidebarOrder becomes the default
     // order), so compare the rewritten forms rather than the raw writer output.
-    Check(SessionToJson(frozen) == SessionToJson(parsed),
-          "frozen v7 file and the current writer parse to the same state");
+    // Start from the parsed current-version sample so normalized defaults
+    // (notably sidebar order) match the parser's treatment of the frozen file.
+    SessionSnapshot legacy_expected = parsed;
+    const auto ClearV10ColumnState = [](std::vector<LayoutTabSnapshot>& tabs) {
+        for (LayoutTabSnapshot& tab : tabs) {
+            for (PaneFolderSnapshot& pane : tab.panes) {
+                pane.column_layout = false;
+                pane.column_path_widths.clear();
+            }
+        }
+    };
+    ClearV10ColumnState(legacy_expected.layout_tabs);
+    for (WindowSessionSnapshot& window : legacy_expected.windows)
+        ClearV10ColumnState(window.layout_tabs);
+    Check(SessionToJson(frozen) == SessionToJson(legacy_expected),
+          "frozen v7 file and the current writer preserve legacy state");
 
     SessionSnapshot empty;
     Check(ParseSessionJson(SessionToJson(SessionSnapshot{}), empty) && empty.layout_tabs.empty() &&
@@ -293,6 +328,25 @@ int main() {
     Check(fresh.quick_access_hidden == qa_defaults && WindowLayoutSnapshot{}.quick_access_hidden == qa_defaults &&
               ParseSessionJson(SessionToJson(fresh), qa9) && qa9.quick_access_hidden == qa_defaults,
           "a fresh session hides Documents and Music and keeps that through a save");
+
+    SessionSnapshot legacy_widths;
+    const std::wstring v9_width_json =
+        LR"({"version":9,"layoutTabs":[{"panes":[{"path":"C:\\Users\\Example\\Documents","colPathWidths":[{"path":"C:\\Users\\Example\\Documents","width":360}]}]}]})";
+    Check(ParseSessionJson(v9_width_json, legacy_widths) &&
+          legacy_widths.layout_tabs.size() == 1 &&
+          legacy_widths.layout_tabs[0].panes.size() == 1,
+          "v9: width-only column settings parse");
+    if (legacy_widths.layout_tabs.size() == 1 &&
+        legacy_widths.layout_tabs[0].panes.size() == 1) {
+        const auto& widths = legacy_widths.layout_tabs[0].panes[0].column_path_widths;
+        const std::wstring legacy_path =
+            pulse::fs::NormalizePath(L"C:\\Users\\Example\\Documents");
+        const auto legacy_width = widths.find(legacy_path);
+        Check(widths.size() == 1 && legacy_width != widths.end() &&
+              legacy_width->second.width_dip == 360.0f &&
+              legacy_width->second.mode == ColumnPathWidthMode::Manual,
+              "v9: width-only settings migrate to Manual mode");
+    }
 
     SessionSnapshot bad_windows;
     Check(ParseSessionJson(L"{\"version\":8,\"left\":10,\"right\":20,\"windows\":[1,2]}", bad_windows) &&
@@ -412,6 +466,19 @@ int main() {
         Check(QuickAccessDisplayKeys(links, nullptr, 0, true) ==
                   Keys{L"builtin:recent", L"builtin:desktop", L"builtin:music"},
               "quick-access order without places lists the links");
+    }
+
+    {
+        Tab source;
+        source.column_layout = true;
+        source.column_strip.widths_by_path[L"C:\\Users\\Example\\Documents"] =
+            {360.0f, ColumnPathWidthMode::AutoFit};
+        auto single = MakeSingleLayoutTab(L"C:\\Users\\Example\\Documents\\Archive", &source);
+        const auto& inherited = single->panes.front()->ActiveTab()->column_strip.widths_by_path;
+        const auto width = inherited.find(L"c:\\users\\example\\documents");
+        Check(width != inherited.end() && width->second.width_dip == 360.0f &&
+              width->second.mode == ColumnPathWidthMode::AutoFit,
+              "extracting a pane preserves case-insensitive per-folder width settings");
     }
 
     std::printf("session_window_test: %d failure(s)\n", g_failures);

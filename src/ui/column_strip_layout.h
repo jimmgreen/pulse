@@ -33,6 +33,19 @@ struct ColumnStripSlot {
     D2D1_RECT_F rect{};
 };
 
+// One source of truth for the row geometry shared by ancestor columns and
+// the current-folder list: icon, filename, and optional folder chevron.
+struct ColumnStripRowLayout {
+    D2D1_RECT_F cell{};
+    D2D1_RECT_F icon{};
+    D2D1_RECT_F text{};
+    D2D1_RECT_F chevron{};
+};
+
+ColumnStripRowLayout LayoutColumnStripRow(const D2D1_RECT_F& column,
+                                          float row_top, float row_bottom,
+                                          float scale, bool has_chevron) noexcept;
+
 struct ColumnStripLayout {
     bool active = false;
     // Replaces the pane bounds for everything the regular list draws:
@@ -46,6 +59,13 @@ struct ColumnStripLayout {
     // Visible ancestor/child slots; the regular list has its own body rectangle.
     std::vector<ColumnStripSlot> columns;
 };
+
+// Hit tests follow the currently painted smooth-scroll position. A path change
+// or an uninitialized motion channel uses the target until the first frame.
+inline float ColumnStripVisualScroll(float target, float shown, bool initialized,
+                                     bool same_path) noexcept {
+    return initialized && same_path ? shown : target;
+}
 
 // pane_bounds is the full pane rect; column rects span [top, pane bottom).
 // All columns share a horizontal coordinate system. Negative scroll_left_dip

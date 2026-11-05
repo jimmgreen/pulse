@@ -1780,12 +1780,15 @@ bool PathHasPendingRefresh(AppState& s, const std::wstring& path) {
     ForEachPane(s, [&](app::Pane& pane) {
         const app::Tab* tab = pane.ActiveTab();
         if (!tab) return;
-        if (tab->current_path == path && tab->pending_generation != 0) pending = true;
+        if (_wcsicmp(tab->current_path.c_str(), path.c_str()) == 0 &&
+            tab->pending_generation != 0) pending = true;
         if (!tab->column_layout) return;
         for (const auto& column : tab->column_strip.ancestors) {
-            if (column.path == path && column.generation != 0) pending = true;
+            if (_wcsicmp(column.path.c_str(), path.c_str()) == 0 &&
+                column.generation != 0) pending = true;
         }
-        if (tab->column_strip.child.path == path && tab->column_strip.child.generation != 0)
+        if (_wcsicmp(tab->column_strip.child.path.c_str(), path.c_str()) == 0 &&
+            tab->column_strip.child.generation != 0)
             pending = true;
     });
     return pending;
@@ -1797,7 +1800,8 @@ void RefreshPath(AppState& s, const std::wstring& path, RefreshReason reason) {
     std::vector<app::Tab*> tabs;
     ForEachPane(s, [&](app::Pane& pane) {
         app::Tab* tab = pane.ActiveTab();
-        if (tab && tab->current_path == normalized) tabs.push_back(tab);
+        if (tab && _wcsicmp(tab->current_path.c_str(), normalized.c_str()) == 0)
+            tabs.push_back(tab);
     });
     if (tabs.empty()) return;
     if (fs::IsVirtualPath(normalized) && !fs::IsRecycleViewPath(normalized)) {
@@ -1882,6 +1886,16 @@ void FollowMovedFolder(AppState& s, const std::wstring& from, const std::wstring
             app::Tab& tab = pane.view;
             move.RemapHistory(tab.back_stack);
             move.RemapHistory(tab.forward_stack);
+            // Width overrides belong to folder identity, so move the whole
+            // subtree's settings with the folder (including inactive branches).
+            app::ColumnPathWidths remapped_widths;
+            for (const auto& [old_path, setting] : tab.column_strip.widths_by_path) {
+                if (const auto new_path = move.Remap(old_path))
+                    remapped_widths[*new_path] = setting;
+                else
+                    remapped_widths[old_path] = setting;
+            }
+            tab.column_strip.widths_by_path = std::move(remapped_widths);
             const auto path = move.Remap(tab.current_path);
             if (!path || *path == tab.current_path) return;
             // Rows name entries relative to the folder, so they stay valid;
@@ -2123,12 +2137,12 @@ static bool WindowShowsFolder(AppState& s, const std::wstring& path) {
     ForEachPane(s, [&](app::Pane& pane) {
         const app::Tab* tab = pane.ActiveTab();
         if (!tab) return;
-        if (tab->current_path == path) shows = true;
+        if (_wcsicmp(tab->current_path.c_str(), path.c_str()) == 0) shows = true;
         if (!tab->column_layout) return;
         for (const auto& column : tab->column_strip.ancestors) {
-            if (column.path == path) shows = true;
+            if (_wcsicmp(column.path.c_str(), path.c_str()) == 0) shows = true;
         }
-        if (tab->column_strip.child.path == path) shows = true;
+        if (_wcsicmp(tab->column_strip.child.path.c_str(), path.c_str()) == 0) shows = true;
     });
     return shows;
 }
