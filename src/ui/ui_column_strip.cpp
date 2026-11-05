@@ -288,20 +288,15 @@ void MainRenderer::DrawColumnStrip(const WindowViewModel& vm, const PaneViewMode
         }
     }
     for (const ColumnStripSlot& slot : strip.columns) {
-        const bool ancestor = IsAncestorId(slot.id);
-        if (ancestor) dc->PushAxisAlignedClip(strip.viewport, D2D1_ANTIALIAS_MODE_ALIASED);
+        // Keep text layout based on the full logical column rectangle.  The
+        // viewport is only a paint clip: a trailing child may be partially
+        // off-screen, but it must use the same filename budget after becoming
+        // an ancestor on the next navigation step.
+        dc->PushAxisAlignedClip(strip.viewport, D2D1_ANTIALIAS_MODE_ALIASED);
         if (const ColumnStripColumnView* column = StripColumn(cs, slot.id)) {
-            // A trailing child column keeps its full logical width for the
-            // horizontal scroll model, but its rectangle can extend past the
-            // pane's right edge.  Use the visible right edge for layout and
-            // text measurement; otherwise ellipsis is calculated from pixels
-            // that are immediately clipped by the pane.
-            D2D1_RECT_F visible = slot.rect;
-            visible.right = std::min(visible.right, strip.viewport.right);
-            if (visible.right > visible.left)
-                DrawColumnStripColumn(vm, pane, *column, slot.id, visible, pane_index, theme);
+            DrawColumnStripColumn(vm, pane, *column, slot.id, slot.rect, pane_index, theme);
         }
-        if (ancestor) dc->PopAxisAlignedClip();
+        dc->PopAxisAlignedClip();
     }
     for (const StripDivider& divider : StripDividers(strip, bounds, bounds.top + pane_header_height_)) {
         const float lx = divider.x;
