@@ -11,6 +11,7 @@
 
 #include <windows.h>
 #include <knownfolders.h>
+#include <shellapi.h>
 
 #include <optional>
 
@@ -419,6 +420,10 @@ InstallResult RunInstall(Payload& payload, const std::wstring& self_path, const 
                             L"Pulse", error))
             Log(L"Shortcut: " + error);
     }
+    // Existing taskbar pins deliberately keep their .lnk target across an
+    // upgrade. Explorer can otherwise retain the old icon-resource bitmap
+    // for that unchanged target even though pulse.exe has been replaced.
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
     if (real && req.tasks.startup && !o.pulse_update)
         WriteString(HKEY_CURRENT_USER, 0, kRunKey, L"Pulse", Quote(app + L"\\pulse.exe"));
 

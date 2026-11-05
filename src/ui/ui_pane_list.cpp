@@ -5270,7 +5270,11 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                     cloudState = 1;
                 else cloudState = 2;
             }
-            const float cloudReserve = cloudState != 0 && !showRowActions ? 20.0f * scale_ : 0.0f;
+            // The cloud glyph may be replaced by hover actions. Keep its slot
+            // reserved for every Details row so hover never changes the name
+            // budget.
+            const float cloudReserve = vm.onedrive_status && vm.view_mode == ViewMode::Details && !stripRow
+                ? 20.0f * scale_ : 0.0f;
             // A lone name column has no divider: it ends at the layout's right.
             const float nameColRight = stripRow
                 ? stripLayout.text.right
@@ -5342,7 +5346,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             const float device_chip_w = device_chip.empty() ? 0.0f : painter_.MeasureTagWidth(device_chip);
             const float device_chip2_w = device_chip2.empty() ? 0.0f : painter_.MeasureTagWidth(device_chip2);
             const float badgeW = device_chip_w > 0.0f ? device_chip_w + (device_chip2_w > 0.0f ? 4.0f * scale_ + device_chip2_w : 0.0f)
-                : change && !iconGrid ? ChangeBadgeWidth(*change, scale_, compositor_) : vm.view_mode == ViewMode::Details && !e.badge.empty()
+                : change && !iconGrid ? std::min(108.0f * scale_, ChangeBadgeWidth(*change, scale_, compositor_)) : vm.view_mode == ViewMode::Details && !e.badge.empty()
                 ? std::min(108.0f * scale_, painter_.MeasureTagWidth(e.badge))
                 : staged_pill ? std::min(108.0f * scale_, painter_.MeasureTagWidth(staged_text))
                 : git_pill ? std::min(108.0f * scale_, painter_.MeasureTagWidth(GitMarkText(gitMark))) : 0.0f;
@@ -5356,14 +5360,20 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             // A batch rename's new-name pill takes its room from the name (≤ 60%).
             const float ai_reserve = ai_painter && !iconGrid
                 ? (std::min)(ai_painter->AfterNameReserve(), (nameColRight - nameX) * 0.6f) : 0.0f;
+            // Details rows reserve the complete adornment area, rather than
+            // letting a tag, badge, or folder-only action shorten just that
+            // row's filename.  This keeps the visible name capacity stable
+            // while navigating between folders with different metadata.
+            const bool stable_details_trail = vm.view_mode == ViewMode::Details && !stripRow;
             const NameTrail trail = LayoutNameTrail(
                 list_mark ? nameX + kListAliasMarkDip * scale_ : nameX, textY, textH, nameColRight - ai_reserve, cell.top, cell.bottom, scale_,
                 has_alias ? alias_line : shown_name, stripRow ? 0 : tagDotCount,
                 stripRow ? 0.0f : badgeW, stripRow ? false : showStar,
                 stripRow ? false : showNewTab, stripRow ? false : showMore,
                 compositor_, compositor_->DwriteFactory(), nameFormat, change != nullptr,
-                stripRow ? 0 : (vm.view_mode == ViewMode::Details ? (e.is_dir ? 3 : 2) : 0),
-                name_matches, row_actions_);
+                stripRow ? 0 : (stable_details_trail ? 3 : 0),
+                name_matches, row_actions_, stable_details_trail ? 3 : 0,
+                stable_details_trail ? 108.0f * scale_ : 0.0f, stable_details_trail);
             if (src == vm.rename_index) {
                 // The rename frame is drawn after every row (below): it can be
                 // wider than its own cell.
@@ -5553,7 +5563,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                 if (hover && pane_index >= 0 && pane_index < static_cast<int>(hover_names_.size()))
                     hover_names_[static_cast<size_t>(pane_index)] = {src, name_truncated};
                 if (change && !iconGrid) DrawChangeBadge(compositor_, painter_, *change, trail.badge, theme, scale_);
-                if (cloudReserve > 0.0f) {
+                if (cloudState != 0) {
                     const bool darkTheme = theme.bg.r < 0.5f;
                     const D2D1_COLOR_F blue = darkTheme ? HexColor(0x62ABF5) : HexColor(0x0F6CBD);
                     const D2D1_COLOR_F green = darkTheme ? HexColor(0x6CCB5F) : HexColor(0x107C10);

@@ -1724,7 +1724,7 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                         const bool staged_pill = paneVm.view_mode == ViewMode::Details && !change && entry.badge.empty() &&
                             paneVm.staged && !paneVm.staged->empty() &&
                             paneVm.staged->contains(StagedPathHash(entry.path));
-                        const float badgeW = change && !grid ? ChangeBadgeWidth(*change, scale_, compositor_) : !entry.badge.empty()
+                        const float badgeW = change && !grid ? std::min(108.0f * scale_, ChangeBadgeWidth(*change, scale_, compositor_)) : !entry.badge.empty()
                             ? std::min(108.0f * scale_, painter_.MeasureTagWidth(entry.badge))
                             : staged_pill ? std::min(108.0f * scale_, painter_.MeasureTagWidth(
                                 pulse::l10n::Get(pulse::l10n::StringId::TrayStagedBadge)))
@@ -1735,20 +1735,24 @@ HitTestResult MainRenderer::HitTest(const WindowViewModel& vm, const D2D1_RECT_F
                         const bool rowSnippet = !entry.snippet.empty();
                         const DetailsNameLine nameLine =
                             MakeDetailsNameLine(nameRc, cell, scale_, rowSnippet);
+                        const bool stable_details_trail = paneVm.view_mode == ViewMode::Details &&
+                            !paneVm.column_strip.Active();
+                        const float cloud_reserve = stable_details_trail && paneVm.onedrive_status ? 20.0f * scale_ : 0.0f;
                         const NameTrail trail = LayoutNameTrail(
                             nameRc.left, nameLine.y, nameLine.h,
                             paneVm.view_mode == ViewMode::Details
                                 ? (paneVm.column_strip.Active() ? columns.right - 18.0f * scale_
-                                                                : columns.DividerX(0) - margin_)
+                                                                : columns.DividerX(0) - margin_ - cloud_reserve)
                                 : nameRc.right, cell.top, cell.bottom, scale_,
                             entry.name, static_cast<int>(std::min<size_t>(3, tagCount)), badgeW,
                             showActions, showActions && paneVm.hover_index == idx && entry.is_dir,
                             showActions && rowHot,
                             compositor_, compositor_->DwriteFactory(), compositor_->FileNameFormat(), change != nullptr,
-                            paneVm.view_mode == ViewMode::Details ? (entry.is_dir ? 3 : 2) : 0,
+                            stable_details_trail ? 3 : 0,
                             NameMatchRanges(entry.name, NameHighlightTerms(paneVm.filter_text,
                                 paneVm.is_search ? paneVm.search_query : L"")),
-                            row_actions_);
+                            row_actions_, stable_details_trail ? 3 : 0,
+                            stable_details_trail ? 108.0f * scale_ : 0.0f, stable_details_trail);
                         // A tag dot: the front one wins where they overlap (dot 0
                         // is drawn last), so the first dot whose right edge is
                         // past the pointer.

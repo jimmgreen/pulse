@@ -3116,7 +3116,8 @@ NameTrail LayoutNameTrail(float name_x, float text_y, float text_h,
                                  Compositor* compositor, IDWriteFactory2* factory,
                                  IDWriteTextFormat* fmt, bool change_badge = false, int action_slots = 0,
                                  const std::vector<NameMatchRange>& matches = {},
-                                 unsigned allowed_actions = 7u) {
+                                 unsigned allowed_actions = 7u, int reserved_tag_n = 0,
+                                 float reserved_badge_w = 0.0f, bool fixed_trailing = false) {
     // allowed_actions: hover buttons the user keeps (bit 0 star, bit 1 new
     // tab, bit 2 more). A turned-off button is neither drawn nor reserved.
     show_star = show_star && (allowed_actions & 1u);
@@ -3128,6 +3129,8 @@ NameTrail LayoutNameTrail(float name_x, float text_y, float text_h,
     t.show_new_tab = show_new_tab;
     t.show_more = show_more;
     t.tag_n = std::clamp(tag_n, 0, 3);
+    const int reserved_tag_slots = std::clamp(reserved_tag_n, 0, 3);
+    int tag_slots = std::max(t.tag_n, reserved_tag_slots);
     t.tag_r = 4.0f * scale;
     t.tag_cy = text_y + text_h * 0.5f;
 
@@ -3146,13 +3149,14 @@ NameTrail LayoutNameTrail(float name_x, float text_y, float text_h,
     const float full_name_width = MeasureLayoutText(compositor, factory, fmt, name) +
         HighlightPaddingWidth(name, name, matches, scale);
     const float content_width = full_name_width +
-        badge_w + gap + (t.tag_n ? gap + OverlapTagsWidth(t.tag_n, diameter) : 0.0f);
-    const bool compact_actions = action_slots == 2 || (reserve_actions &&
-        content_width + 3 * (btn + gap) > dock - name_x);
+        std::max(badge_w, reserved_badge_w) + gap +
+        (tag_slots ? gap + OverlapTagsWidth(tag_slots, diameter) : 0.0f);
+    const bool compact_actions = !fixed_trailing && (action_slots == 2 || (reserve_actions &&
+        content_width + 3 * (btn + gap) > dock - name_x));
     if (compact_actions) show_new_tab = false;
     const float readable_name = std::min(full_name_width, 96.0f * scale);
-    const float minimum_tags = t.tag_n ? gap + OverlapTagsWidth(t.tag_n, diameter) : 0.0f;
-    if (dock - name_x < readable_name + minimum_tags + 2 * (btn + gap)) {
+    const float minimum_tags = tag_slots ? gap + OverlapTagsWidth(tag_slots, diameter) : 0.0f;
+    if (!fixed_trailing && dock - name_x < readable_name + minimum_tags + 2 * (btn + gap)) {
         reserve_actions = false;
         show_star = show_new_tab = show_more = false;
     }
@@ -3180,28 +3184,35 @@ NameTrail LayoutNameTrail(float name_x, float text_y, float text_h,
     t.line_w = std::max(0.0f, dock - name_x);
 
     while (t.tag_n > 0 && t.line_w < std::min(full_name_width, 24.0f * scale) +
-        gap + OverlapTagsWidth(t.tag_n, diameter)) --t.tag_n;
+        gap + OverlapTagsWidth(tag_slots, diameter)) {
+        --t.tag_n;
+        tag_slots = std::max(t.tag_n, reserved_tag_slots);
+    }
 
     // Reserve the compact (overlapped) cluster so a long name still
     // compresses first. Spread only if leftover after the fitted name fits.
     badge_w = std::max(0.0f, badge_w);
+    reserved_badge_w = std::max(0.0f, reserved_badge_w);
     if (change_badge && dock - name_x < badge_w + 48.0f * scale +
         (t.tag_n ? gap + OverlapTagsWidth(t.tag_n, diameter) : 0.0f)) badge_w = 0.0f;
-    const float badge_gap = badge_w > 0.0f ? gap : 0.0f;
-    const float tags_w = OverlapTagsWidth(t.tag_n, diameter);
-    const float tags_gap = t.tag_n > 0 ? gap : 0.0f;
+    const float badge_slot_w = std::max(badge_w, reserved_badge_w);
+    const float badge_gap = badge_slot_w > 0.0f ? gap : 0.0f;
+    const float tags_gap = tag_slots > 0 ? gap : 0.0f;
     const float budget = std::max(0.0f,
-        dock - name_x - badge_gap - badge_w - tags_gap - tags_w);
+        dock - name_x - badge_gap - badge_slot_w - tags_gap -
+        OverlapTagsWidth(tag_slots, diameter));
     const std::wstring fitted = FitHighlightedFileName(compositor, factory, fmt, name, budget, matches, scale);
     t.name_w = std::min(budget, MeasureLayoutText(compositor, factory, fmt, fitted) +
         HighlightPaddingWidth(name, fitted, matches, scale));
     float trail_x = name_x + t.name_w;
-    if (badge_w > 0.0f && !change_badge) {
+    if (!change_badge && badge_slot_w > 0.0f) {
         trail_x += badge_gap;
-        const float badge_h = std::min(20.0f * scale, text_h);
-        const float badge_y = text_y + (text_h - badge_h) * 0.5f;
-        t.badge = D2D1::RectF(trail_x, badge_y, trail_x + badge_w, badge_y + badge_h);
-        trail_x += badge_w;
+        if (badge_w > 0.0f) {
+            const float badge_h = std::min(20.0f * scale, text_h);
+            const float badge_y = text_y + (text_h - badge_h) * 0.5f;
+            t.badge = D2D1::RectF(trail_x, badge_y, trail_x + badge_w, badge_y + badge_h);
+        }
+        trail_x += badge_slot_w;
     }
     if (t.tag_n > 0) {
         t.tag_x0 = trail_x + gap;

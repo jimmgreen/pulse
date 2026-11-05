@@ -250,6 +250,17 @@ bool pulse::app::RunChangeTrackingUiTest() {
                 ordinary_idle.tag_x0 == ordinary_hover.tag_x0 && ordinary_idle.badge.right == 0 &&
                 ordinary_hover.badge.right == 0 && ordinary_idle.star.right == 0,
                 "ordinary long folder name and tags stay still without empty badge or invisible actions");
+            const auto fixed_details = [&](int tags, float badge_width, bool hot) {
+                return LayoutNameTrail(0, 0, 24 * scale, 420 * scale, 0, 30 * scale,
+                    scale, L"A folder name with a stable details budget", tags, badge_width,
+                    hot, hot, hot, &compositor, compositor.DwriteFactory(), compositor.TextFormat(), false, 3,
+                    {}, 7u, 3, 108.0f * scale, true);
+            };
+            const auto bare_details = fixed_details(0, 0.0f, false);
+            const auto decorated_details = fixed_details(3, 96.0f * scale, true);
+            ok &= Check(bare_details.name_w == decorated_details.name_w &&
+                bare_details.line_w == decorated_details.line_w,
+                "fixed details budget ignores tag, badge and active-row state");
             const std::wstring full_name = L"DB.Browser.for.SQLite-v3.13.1-win64";
             const float full_name_width = MeasureLayoutText(&compositor, compositor.DwriteFactory(), compositor.TextFormat(), full_name);
             const float badge_width = ChangeBadgeWidth(badge, scale, &compositor);
