@@ -53,7 +53,7 @@ jobs:
           3. The --test-instance switch skips the single-instance guard and does not save regular user settings.
           4. File operations still affect real files. Use only disposable test files for drag/drop testing.
           This package is NOT an installer. Do not copy its files into Program Files.
-          Built from a pulse-test/* branch; not an official release.
+          Built by the Windows test workflow; not an official release.
           '@ | Set-Content -LiteralPath (Join-Path $package 'TEST-README.txt') -Encoding ascii
 
       - name: Upload standalone test build
@@ -61,5 +61,13 @@ jobs:
         with:
           name: pulse-test-windows
           path: dist/pulse-test-windows/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: pulse-installer-windows
+          path: dist/PulseSetup-*.exe
           if-no-files-found: error
           retention-days: 14
