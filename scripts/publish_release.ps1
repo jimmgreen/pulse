@@ -70,7 +70,7 @@ $packAssets = @()
 foreach ($key in @('content', 'ai')) {
     foreach ($channel in @('windows', 'win81')) {
         $packDir = "dist/$key-pack-$channel"
-        & "$PSScriptRoot/check_content_pack.ps1" -Key $key -PackDir $packDir
+        & "$PSScriptRoot/check_content_pack.ps1" -Key $key -PackDir $packDir -Repository $repository
         $pack = Get-Content -LiteralPath "$packDir/$key-pack-assets.json" -Raw | ConvertFrom-Json
         if ($pack.channel -ne $channel -or $pack.base_url -ne "$base/") { throw "The $key pack for $channel targets another release" }
         $packAssets += @($pack.files | ForEach-Object { Join-Path $packDir $_.asset })
@@ -84,9 +84,17 @@ foreach ($path in $packAssets) {
     $match = @($uploaded | Where-Object { $_.name -eq $item.Name -and $_.size -eq $item.Length })
     if ($match.Count -ne 1) { throw "Enhancement pack asset missing after upload: $($item.Name)" }
 }
-$packArgs = @('--tag', $tag, '--repository', $repository, '--asset-directory', 'dist/preview-packs')
-if ($env:PULSE_PREVIEW_PACK_SOURCE_TAG) { $packArgs += @('--source-tag', $env:PULSE_PREVIEW_PACK_SOURCE_TAG) }
-& python "$PSScriptRoot/ensure_release_packs.py" @packArgs
+if ($repository -eq 'jimmgreen/pulse') {
+    # The upstream release owns and republishes its preview packs. Reuse the
+    # previously published bundle when the current release does not rebuild it.
+    $packArgs = @('--tag', $tag, '--repository', $repository, '--asset-directory', 'dist/preview-packs')
+    if ($env:PULSE_PREVIEW_PACK_SOURCE_TAG) { $packArgs += @('--source-tag', $env:PULSE_PREVIEW_PACK_SOURCE_TAG) }
+    & python "$PSScriptRoot/ensure_release_packs.py" @packArgs
+} else {
+    # Fork releases keep using the verified upstream preview-pack catalog.
+    # Do not copy or republish upstream binaries into the fork's release.
+    & python "$PSScriptRoot/ensure_release_packs.py" --tag $tag --repository $repository --verify-only
+}
 if ($LASTEXITCODE -ne 0) { throw 'Preview pack verification failed; release remains a draft' }
 & gh release edit $tag --repo $repository --draft=false --latest
 if ($LASTEXITCODE -ne 0) { throw 'Could not publish the release' }

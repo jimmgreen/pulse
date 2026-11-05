@@ -25,6 +25,7 @@ jobs:
       - run: python tools/l10n/gen_strings.py --check
       - run: python tools/l10n/check_service_text.py
       - run: python tools/l10n/check_no_pick.py
+      - run: python scripts/test_release_packs.py
   build:
     needs: l10n
     runs-on: windows-2022
