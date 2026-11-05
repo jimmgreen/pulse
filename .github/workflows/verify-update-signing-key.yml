@@ -1,0 +1,109 @@
+
+name: Verify Pulse update signing key
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify ECDSA P-256 signing key
+    runs-on: windows-2022
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify Actions secret against embedded public key
+        shell: pwsh
+        env:
+          PULSE_UPDATE_PRIVATE_KEY: ${{ secrets.PULSE_UPDATE_PRIVATE_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          if ([string]::IsNullOrWhiteSpace($env:PULSE_UPDATE_PRIVATE_KEY)) {
+              throw 'PULSE_UPDATE_PRIVATE_KEY is missing.'
+          }
+
+          $ecdsa = $null
+          $verifier = $null
+
+          try {
+              # Import the private key from GitHub Secret
+              $ecdsa = [System.Security.Cryptography.ECDsa]::Create()
+              $ecdsa.ImportFromPem($env:PULSE_UPDATE_PRIVATE_KEY)
+
+              if ($ecdsa.KeySize -ne 256) {
+                  throw "Expected ECDSA P-256, got $($ecdsa.KeySize)."
+              }
+
+              # Derive the public key
+              $parameters = $ecdsa.ExportParameters($false)
+
+              $public = [byte[]]::new(65)
+              $public[0] = 4
+
+              [Array]::Copy($parameters.Q.X, 0, $public, 1, 32)
+              [Array]::Copy($parameters.Q.Y, 0, $public, 33, 32)
+
+              $actualPublicKey = [Convert]::ToHexString($public).ToLowerInvariant()
+
+              # Read the public key embedded in Pulse
+              $expectedPublicKey = (
+                  Get-Content 'cmake/update-public-key.txt' -Raw
+              ).Trim().ToLowerInvariant()
+
+              if ($actualPublicKey -cne $expectedPublicKey) {
+                  throw 'The Actions secret does not match the embedded public key.'
+              }
+
+              Write-Host 'PASS: Private key matches embedded public key.'
+
+              # Create a public-key-only verifier
+              $verifier = [System.Security.Cryptography.ECDsa]::Create()
+              $verifier.ImportParameters($parameters)
+
+              # Generate a real SHA-256 / P1363 signature
+              $payload = [System.Text.Encoding]::UTF8.GetBytes(
+                  'Pulse GitHub Actions signing-key verification'
+              )
+
+              $signature = $ecdsa.SignData(
+                  $payload,
+                  [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+                  [System.Security.Cryptography.DSASignatureFormat]::IeeeP1363FixedFieldConcatenation
+              )
+
+              if ($signature.Length -ne 64) {
+                  throw "Invalid signature length: $($signature.Length)"
+              }
+
+              # Verify the signature using the derived public key
+              $valid = $verifier.VerifyData(
+                  $payload,
+                  $signature,
+                  [System.Security.Cryptography.HashAlgorithmName]::SHA256,
+                  [System.Security.Cryptography.DSASignatureFormat]::IeeeP1363FixedFieldConcatenation
+              )
+
+              if (-not $valid) {
+                  throw 'ECDSA signature verification failed.'
+              }
+
+              Write-Host 'PASS: ECDSA P-256 signature generated.'
+              Write-Host 'PASS: SHA-256 / IEEE P1363 verification succeeded.'
+              Write-Host ''
+              Write-Host 'ALL CHECKS PASSED.' -ForegroundColor Green
+          }
+          finally {
+              if ($null -ne $verifier) {
+                  $verifier.Dispose()
+              }
+
+              if ($null -ne $ecdsa) {
+                  $ecdsa.Dispose()
+              }
+          }
