@@ -1,16 +1,15 @@
-name: Pulse Test Build (Windows x64)
-run-name: Pulse Test Build — ${{ github.ref_name }}
+name: Pulse Fast Test Build (Windows x64)
+run-name: Pulse Fast Test Build — ${{ github.ref_name }}
 
-# Run only after a stage is ready for verification. Intermediate commits do not
-# justify a full Windows release build (which can take up to 90 minutes).
+# Daily development build: compile only the runnable Windows payload plus the
+# focused column/session regressions. Full release verification remains in the
+# release workflow and scripts/build_release_ci.ps1.
 on:
-  # Only this completed feature branch triggers one Windows build.
-  # Avoid expensive automatic builds for other pushes or PRs.
   push:
-    branches: [pulse-test/column-interaction-complete]
+    branches:
+      - 'pulse-test/**'
   workflow_dispatch:
 
-# If the same test branch is requested twice, only its latest run is useful.
 concurrency:
   group: pulse-test-windows-${{ github.ref }}
   cancel-in-progress: true
@@ -21,13 +20,13 @@ permissions:
 jobs:
   test-build:
     runs-on: windows-2022
-    timeout-minutes: 90
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build and run existing Windows release checks
+      - name: Build runnable Windows test package
         shell: pwsh
-        run: ./scripts/build_release_ci.ps1 -Channel windows
+        run: ./scripts/build_test_ci.ps1
 
       - name: Prepare a standalone test-instance package
         shell: pwsh
@@ -53,7 +52,7 @@ jobs:
           3. The --test-instance switch skips the single-instance guard and does not save regular user settings.
           4. File operations still affect real files. Use only disposable test files for drag/drop testing.
           This package is NOT an installer. Do not copy its files into Program Files.
-          Built by the Windows test workflow; not an official release.
+          Built by the fast Windows test workflow; not an official release.
           '@ | Set-Content -LiteralPath (Join-Path $package 'TEST-README.txt') -Encoding ascii
 
       - name: Upload standalone test build
@@ -61,13 +60,5 @@ jobs:
         with:
           name: pulse-test-windows
           path: dist/pulse-test-windows/
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Upload Windows installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: pulse-installer-windows
-          path: dist/PulseSetup-*.exe
           if-no-files-found: error
           retention-days: 14
