@@ -422,9 +422,9 @@ void MainRenderer::DrawColumnStripColumn(const WindowViewModel& vm, const PaneVi
         const bool empty_folder = directory && column.empty_sources.contains(source);
         const ColumnStripRowLayout row_layout = LayoutColumnStripRow(
             // Keep the filename column stable when folder-size probing later
-            // discovers that a directory is empty. The chevron is optional
-            // visually, but its reserved slot must not change text ellipsis.
-            rc, top, top + row_height_, scale_, directory);
+            // discovers that a directory is empty. Every row reserves the
+            // chevron slot so files and folders have the same text budget.
+            rc, top, top + row_height_, scale_, true);
         const D2D1_RECT_F cell = row_layout.cell;
         const bool highlighted = row == column.highlight_row;
         // The pane's gliding plate draws the hover (high contrast: here).

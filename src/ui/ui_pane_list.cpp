@@ -4124,9 +4124,8 @@ D2D1_RECT_F MainRenderer::RenameFieldRect(const PaneViewModel& vm, const D2D1_RE
     ColumnStripRowLayout stripLayout{};
     if (stripRow) {
         const D2D1_RECT_F row = layout.ItemRect(view);
-        const bool empty_folder = e.is_dir && !e.record_only && vm.empty_folders.contains(source_index);
         stripLayout = LayoutColumnStripRow(D2D1::RectF(list.left, list.top, list.right, list.bottom),
-            row.top, row.bottom, scale_, e.is_dir);
+            row.top, row.bottom, scale_, true);
         nameRc = stripLayout.text;
     }
     const bool iconGrid = vm.view_mode == ViewMode::ExtraLargeIcons ||
@@ -4752,7 +4751,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             ColumnStripRowLayout stripLayout{};
             if (stripRow) {
                 stripLayout = LayoutColumnStripRow(D2D1::RectF(x, y, x + w, y + h),
-                    cell.top, cell.bottom, scale_, stripChevron);
+                    cell.top, cell.bottom, scale_, true);
                 cell = stripLayout.cell;
                 iconRect = stripLayout.icon;
                 thumbRect = iconRect;

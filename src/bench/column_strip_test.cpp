@@ -62,9 +62,10 @@ int main() {
                   eq(folder_row.icon.left, file_row.icon.left) &&
                   eq(folder_row.text.left, file_row.text.left),
                   "folder and file names share the same text origin");
-            check(eq(folder_row.text.right, folder_row.chevron.left - 4.0f * scale) &&
-                  eq(file_row.text.right, file_row.cell.right - 4.0f * scale),
-                  "text and chevron retain a four-DIP gap at every DPI");
+            const auto uniform_file_row = LayoutColumnStripRow(row_column, 100 * scale, 132 * scale, scale, true);
+            check(eq(folder_row.text.right, uniform_file_row.text.right) &&
+                  eq(folder_row.text.right, folder_row.chevron.left - 4.0f * scale),
+                  "column rows reserve one fixed text budget regardless of item kind");
         }
     }
 

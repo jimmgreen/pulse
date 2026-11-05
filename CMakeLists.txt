@@ -122,9 +122,18 @@ endif()
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated")
 configure_file(cmake/pulse_version.h.in generated/pulse_version.h @ONLY)
 
-set(PULSE_DEFAULT_UPDATE_MANIFEST "https://github.com/jimmgreen/pulse/releases/latest/download/update-manifest.json")
+set(PULSE_DEFAULT_RELEASE_REPOSITORY "fei98625/pulse")
+if(DEFINED ENV{GITHUB_REPOSITORY} AND NOT "$ENV{GITHUB_REPOSITORY}" STREQUAL "")
+    set(PULSE_DEFAULT_RELEASE_REPOSITORY "$ENV{GITHUB_REPOSITORY}")
+endif()
+set(PULSE_RELEASE_REPOSITORY "${PULSE_DEFAULT_RELEASE_REPOSITORY}" CACHE STRING
+    "GitHub owner/repository for release downloads")
+if(NOT PULSE_RELEASE_REPOSITORY MATCHES "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+    message(FATAL_ERROR "PULSE_RELEASE_REPOSITORY must be an owner/repository name")
+endif()
+set(PULSE_DEFAULT_UPDATE_MANIFEST "https://github.com/${PULSE_RELEASE_REPOSITORY}/releases/latest/download/update-manifest.json")
 if(PULSE_WIN81_CANDIDATE)
-    set(PULSE_DEFAULT_UPDATE_MANIFEST "https://github.com/jimmgreen/pulse/releases/latest/download/update-manifest-win81.json")
+    set(PULSE_DEFAULT_UPDATE_MANIFEST "https://github.com/${PULSE_RELEASE_REPOSITORY}/releases/latest/download/update-manifest-win81.json")
 endif()
 file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/cmake/update-public-key.txt" PULSE_DEFAULT_UPDATE_PUBLIC_KEY LIMIT_COUNT 1)
 set(PULSE_UPDATE_MANIFEST_URL "${PULSE_DEFAULT_UPDATE_MANIFEST}" CACHE STRING
@@ -1272,7 +1281,7 @@ set(PULSE_CONTENT_PACK_CATALOG "${CMAKE_BINARY_DIR}/generated/content_pack_catal
 add_custom_command(OUTPUT "${PULSE_CONTENT_PACK_CATALOG}"
     COMMAND pulse_pack_catalog --key content --symbol Content --version "${PULSE_VERSION}"
         --channel "${PULSE_CONTENT_PACK_CHANNEL}"
-        --base-url "https://github.com/jimmgreen/pulse/releases/download/v${PULSE_VERSION}/"
+        --base-url "https://github.com/${PULSE_RELEASE_REPOSITORY}/releases/download/v${PULSE_VERSION}/"
         --out-dir "${PULSE_CONTENT_PACK_DIR}" --header "${PULSE_CONTENT_PACK_CATALOG}"
         "$<TARGET_FILE:pulse_content>" "$<TARGET_FILE:pulse_document>"
     DEPENDS pulse_pack_catalog pulse_content pulse_document
@@ -1301,7 +1310,7 @@ set(PULSE_AI_PACK_CATALOG "${CMAKE_BINARY_DIR}/generated/ai_pack_catalog.h")
 add_custom_command(OUTPUT "${PULSE_AI_PACK_CATALOG}"
     COMMAND pulse_pack_catalog --key ai --symbol Ai --version "${PULSE_VERSION}"
         --channel "${PULSE_CONTENT_PACK_CHANNEL}"
-        --base-url "https://github.com/jimmgreen/pulse/releases/download/v${PULSE_VERSION}/"
+        --base-url "https://github.com/${PULSE_RELEASE_REPOSITORY}/releases/download/v${PULSE_VERSION}/"
         --out-dir "${PULSE_AI_PACK_DIR}" --header "${PULSE_AI_PACK_CATALOG}"
         "$<TARGET_FILE:pulse_ai>"
     DEPENDS pulse_pack_catalog pulse_ai "$<TARGET_FILE:pulse_ai>"

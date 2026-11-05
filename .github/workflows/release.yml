@@ -46,6 +46,8 @@ jobs:
           }
       - name: Build, test and package
         shell: pwsh
+        # GITHUB_REPOSITORY is a GitHub-provided default environment variable;
+        # build_release_ci.ps1 uses it for embedded update and pack URLs.
         run: ./scripts/build_release_ci.ps1 -Channel '${{ matrix.channel }}'
       - uses: actions/upload-artifact@v4
         with:
@@ -102,6 +104,8 @@ jobs:
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
+          # publish_release.ps1 uses GitHub's default GITHUB_REPOSITORY for the
+          # release target and all generated asset URLs.
           PULSE_UPDATE_PRIVATE_KEY: ${{ secrets.PULSE_UPDATE_PRIVATE_KEY }}
           PULSE_PREVIEW_PACK_SOURCE_TAG: ${{ vars.PULSE_PREVIEW_PACK_SOURCE_TAG }}
         run: ./scripts/publish_release.ps1

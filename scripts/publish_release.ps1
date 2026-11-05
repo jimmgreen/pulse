@@ -4,7 +4,8 @@ Set-Location (Split-Path -Parent $PSScriptRoot)
 $version = (Get-Content version.txt -Raw).Trim()
 if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid release version' }
 $tag = "v$version"
-$repository = 'jimmgreen/pulse'
+$repository = if ($env:GITHUB_REPOSITORY) { $env:GITHUB_REPOSITORY } else { 'fei98625/pulse' }
+if ($repository -notmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') { throw 'GITHUB_REPOSITORY must be an owner/repository name' }
 $base = "https://github.com/$repository/releases/download/$tag"
 $normal = "PulseSetup-$version.exe"
 $win81 = "PulseSetup-$version-win81.exe"
