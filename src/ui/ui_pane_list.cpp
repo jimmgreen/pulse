@@ -5364,7 +5364,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
             // row's filename.  This keeps the visible name capacity stable
             // while navigating between folders with different metadata.
             const bool stable_details_trail = vm.view_mode == ViewMode::Details && !stripRow;
-            const NameTrail trail = LayoutNameTrail(
+            NameTrail trail = LayoutNameTrail(
                 list_mark ? nameX + kListAliasMarkDip * scale_ : nameX, textY, textH, nameColRight - ai_reserve, cell.top, cell.bottom, scale_,
                 has_alias ? alias_line : shown_name, stripRow ? 0 : tagDotCount,
                 stripRow ? 0.0f : badgeW, stripRow ? false : showStar,
@@ -5373,6 +5373,22 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                 stripRow ? 0 : (stable_details_trail ? 3 : 0),
                 name_matches, row_actions_, stable_details_trail ? 3 : 0,
                 stable_details_trail ? 108.0f * scale_ : 0.0f, stable_details_trail);
+            if (stripRow) {
+                // Column view has a fixed filename cell. Do not run it through
+                // the ordinary details-view name trail, whose right padding
+                // and adornment budget make the active column truncate sooner
+                // than the ancestor/child columns.
+                trail.name_x = stripLayout.text.left;
+                trail.name_w = std::max(0.0f,
+                    stripLayout.text.right - stripLayout.text.left - 1.0f * scale_);
+                trail.line_w = trail.name_w;
+                trail.tag_n = 0;
+                trail.badge = {};
+                trail.star = {};
+                trail.new_tab = {};
+                trail.more = {};
+                trail.show_star = trail.show_new_tab = trail.show_more = false;
+            }
             if (src == vm.rename_index) {
                 // The rename frame is drawn after every row (below): it can be
                 // wider than its own cell.
