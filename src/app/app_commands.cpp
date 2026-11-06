@@ -2973,7 +2973,13 @@ void ShowBackgroundContextMenu(AppState& s, POINT screen_pt,
             return;
         }
         if (cmd == app::CmdNewFolder || cmd == app::CmdNewTextFile) {
-            CreateNewItemInFolder(s, menu_folder, cmd == app::CmdNewFolder);
+            // A column-strip background can belong to an ancestor or child of
+            // the active folder. Enter it only after the user chooses New so
+            // the created row has a visible list that can host inline rename.
+            if (!target_is_active) NavigateTo(s, menu_folder);
+            const app::Tab* create_tab = ActiveTab(s);
+            if (!create_tab || _wcsicmp(create_tab->current_path.c_str(), menu_folder.c_str()) != 0) return;
+            CreateNewItem(s, cmd == app::CmdNewFolder);
             return;
         }
         if (cmd == app::CmdOpenTerminal) {
