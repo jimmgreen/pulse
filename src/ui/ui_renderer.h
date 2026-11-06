@@ -929,7 +929,8 @@ private:
                        const D2D1_COLOR_F* foreground = nullptr, bool colorful = false);
     // Returns true when the name had to be shortened with an ellipsis.
     bool DrawTruncatedName(const std::wstring& name, float x, float y, float w, float h,
-                           const Theme& theme, bool selected, const std::vector<NameMatchRange>& matches, bool dim_extension = false);
+                           const Theme& theme, bool selected, const std::vector<NameMatchRange>& matches,
+                           bool dim_extension = false, bool allow_semibold = true);
     // Icon-grid name: up to `max_lines` centered lines; a longer name keeps
     // its end ("a…z.ext"). Returns (and sets `truncated`) when it was elided.
     bool DrawCenteredIconName(const std::wstring& name, const D2D1_RECT_F& bounds,

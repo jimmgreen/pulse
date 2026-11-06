@@ -3389,7 +3389,7 @@ IDWriteTextFormat* MainRenderer::NameSemiboldFormat() {
 
 bool MainRenderer::DrawTruncatedName(const std::wstring& name, float x, float y, float w, float h,
                                      const Theme& theme, bool selected, const std::vector<NameMatchRange>& matches,
-                                     bool dim_extension) {
+                                     bool dim_extension, bool allow_semibold) {
     (void)selected;
     if (!compositor_ || !compositor_->Dc() || !compositor_->DwriteFactory() ||
         !compositor_->FileNameFormat() || name.empty() || w <= 1.0f) {
@@ -3398,7 +3398,7 @@ bool MainRenderer::DrawTruncatedName(const std::wstring& name, float x, float y,
     ID2D1DeviceContext* dc = compositor_->Dc();
     IDWriteFactory2* factory = compositor_->DwriteFactory();
     // 今天修改的名称加粗: the caller measured the row with the same format.
-    const bool semibold = name_semibold_ && name_semibold_format_.get();
+    const bool semibold = allow_semibold && name_semibold_ && name_semibold_format_.get();
     IDWriteTextFormat* fmt = semibold ? name_semibold_format_.get() : compositor_->FileNameFormat();
     MakeBrush(dc, theme.text, brText_);
 
@@ -5351,8 +5351,12 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                 : git_pill ? std::min(108.0f * scale_, painter_.MeasureTagWidth(GitMarkText(gitMark))) : 0.0f;
             // 今天修改的名称加粗: measured and drawn at semibold, so tags and pills still follow it.
             IDWriteTextFormat* nameFormat = compositor_->FileNameFormat();
-            if (mtimeFresh && !iconGrid && !wallPic && !has_alias && src != vm.rename_index)
+            if (!stripRow && mtimeFresh && !iconGrid && !wallPic && !has_alias && src != vm.rename_index)
                 if (IDWriteTextFormat* semibold = NameSemiboldFormat()) nameFormat = semibold;
+            // Column view must not change filename metrics based on freshness,
+            // Git state, selection, or any other row status.  Status may still
+            // affect color and badges, but all column roles use regular text.
+            if (stripRow) nameFormat = compositor_->FileNameFormat();
             // List rows: [mark] alias  real name (pulse_alias.html .amark).
             const bool show_mark = has_alias && app::AliasStore::Instance().ShowMark();
             const bool list_mark = show_mark && !iconGrid;
@@ -5388,6 +5392,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                 trail.new_tab = {};
                 trail.more = {};
                 trail.show_star = trail.show_new_tab = trail.show_more = false;
+                name_semibold_ = false;
             }
             if (src == vm.rename_index) {
                 // The rename frame is drawn after every row (below): it can be
@@ -5532,7 +5537,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                 } else {
                     Theme name_theme = theme;
                     name_theme.text = nameColor;
-                    name_semibold_ = nameFormat != compositor_->FileNameFormat();
+                    name_semibold_ = !stripRow && nameFormat != compositor_->FileNameFormat();
                     const AiListPainter::NameMorph nm =
                         ai_painter && !iconGrid ? ai_painter->Morph() : AiListPainter::NameMorph{};
                     if (nm.was) {
