@@ -37,7 +37,8 @@ bool ColumnStripRowTarget(AppState& s, const ui::HitTestResult& hit,
 std::wstring ColumnStripBackgroundPath(AppState& s, const ui::HitTestResult& hit);
 std::wstring ColumnStripDropPath(AppState& s, const ui::HitTestResult& hit);
 bool HandleColumnStripWheel(AppState& s, const ui::WindowViewModel& vm,
-                            const ui::HitTestResult& hit, int wheel_delta);
+                            const ui::HitTestResult& hit, int wheel_delta,
+                            bool horizontal_input = false);
 // Left/Right in the column view: go to the parent / enter the selected folder.
 bool HandleColumnArrowKey(AppState& s, bool right);
 void ToggleColumnLayout(AppState& s, int pane_index);

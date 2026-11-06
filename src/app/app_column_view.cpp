@@ -659,12 +659,16 @@ bool ColumnStripSwallowDoubleClick(const AppState& s, const ui::HitTestResult& h
 }
 
 bool HandleColumnStripWheel(AppState& s, const ui::WindowViewModel& vm,
-                            const ui::HitTestResult& hit, int wheel_delta) {
+                            const ui::HitTestResult& hit, int wheel_delta,
+                            bool horizontal_input) {
     using R = ui::HitTestResult;
+    const bool over_column = hit.region == R::ColumnStripRow ||
+        hit.region == R::ColumnStripBlank;
     const bool horizontal = hit.region == R::ColumnStripHScroll ||
+        (horizontal_input && over_column) ||
         ((GetKeyState(VK_SHIFT) & 0x8000) != 0 &&
          hit.sub_index != ui::kColumnStripChildId &&
-         (hit.region == R::ColumnStripRow || hit.region == R::ColumnStripBlank));
+         over_column);
     if (horizontal) {
         // Wheel up reveals farther ancestors (to the left).
         ScrollStripBy(s, vm, hit.pane_index,

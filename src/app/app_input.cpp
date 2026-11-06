@@ -5181,7 +5181,22 @@ LRESULT HandleMouseWheel(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 return 0;
             }
         }
-        if (msg == WM_MOUSEHWHEEL) return DefWindowProcW(hwnd, msg, wParam, lParam);
+        if (msg == WM_MOUSEHWHEEL) {
+            POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            ScreenToClient(hwnd, &pt);
+            ui::WindowViewModel wheelVm = BuildVm(*s);
+            const D2D1_RECT_F wheelRect = D2D1::RectF(
+                0, 0, static_cast<float>(s->compositor.Width()),
+                static_cast<float>(s->compositor.Height()));
+            const ui::HitTestResult wheelHit = s->renderer.HitTest(
+                wheelVm, wheelRect, static_cast<float>(pt.x), static_cast<float>(pt.y));
+            if (HandleColumnStripWheel(*s, wheelVm, wheelHit,
+                                       -GET_WHEEL_DELTA_WPARAM(wParam), true)) {
+                RefreshScrolledHover(*s);
+                return 0;
+            }
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        }
         s->blankClickTab = nullptr;
         CancelRenameClick(*s);
         {
