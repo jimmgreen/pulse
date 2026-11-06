@@ -484,22 +484,15 @@ void MainRenderer::DrawColumnStripColumn(const WindowViewModel& vm, const PaneVi
         if (IsProtectedSystemEntry(entry.attrs)) DrawProtectedBadge(dc, dest, scale_, theme);
         const D2D1_COLOR_F name_color =
             IsHighContrast() ? theme.text : HiddenEntryNameColor(entry.attrs, theme, theme.text);
-        MakeBrush(dc, WithAlpha(name_color, name_color.a * fade), brText_);
-        // Column rectangles can land on different fractional pixels when the
-        // same folder changes from the body column to an ancestor column.
-        // Feeding that raw width to the two text backends makes a filename
-        // occasionally gain or lose its last visible character.  Quantize the
-        // text budget in logical pixels and keep a small, fixed safety margin;
-        // the column itself remains at its exact user-selected width.
-        const float logical_text_width = std::floor(
-            std::max(0.0f, row_layout.text.right - row_layout.text.left) /
-            std::max(0.5f, scale_)) - 1.0f;
-        const float stable_text_width = std::max(0.0f, logical_text_width) *
-                                        std::max(0.5f, scale_);
-        DrawTextEndEllipsis(compositor_, compositor_->FileNameFormat(), brText_.get(), entry.name,
-                            row_layout.text.left, top,
-                            stable_text_width,
-                            row_height_);
+        // Use the same filename layout and ellipsis renderer as the active
+        // column.  The active row is drawn by DrawList, so keeping a separate
+        // DrawTextEndEllipsis path here made the last visible character depend
+        // on which column happened to be active.
+        Theme name_theme = theme;
+        name_theme.text = WithAlpha(name_color, name_color.a * fade);
+        DrawTruncatedName(entry.name, row_layout.text.left, top,
+                          std::max(0.0f, row_layout.text.right - row_layout.text.left),
+                          row_height_, name_theme, false, {}, false);
         if (directory && !empty_folder) {
             DrawIconText(row_layout.chevron.left, top,
                          row_layout.chevron.right - row_layout.chevron.left, row_height_,
