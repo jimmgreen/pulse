@@ -930,7 +930,7 @@ private:
     // Returns true when the name had to be shortened with an ellipsis.
     bool DrawTruncatedName(const std::wstring& name, float x, float y, float w, float h,
                            const Theme& theme, bool selected, const std::vector<NameMatchRange>& matches,
-                           bool dim_extension = false, bool allow_semibold = true);
+                           bool dim_extension = false);
     // Icon-grid name: up to `max_lines` centered lines; a longer name keeps
     // its end ("a…z.ext"). Returns (and sets `truncated`) when it was elided.
     bool DrawCenteredIconName(const std::wstring& name, const D2D1_RECT_F& bounds,
@@ -1132,16 +1132,10 @@ private:
     uint64_t mtime_flash_until_ = 0;              // NowMs: a changed row is still glowing
     // Path -> (the modified time that glowed, NowMs it started).
     std::unordered_map<std::wstring, std::pair<uint64_t, uint64_t>> mtime_flash_started_;
-    bool name_semibold_ = false;                  // DrawTruncatedName: 今天修改的名称加粗
-    ComPtr<IDWriteTextFormat> name_semibold_format_;
-    IDWriteTextFormat* name_semibold_base_ = nullptr;
-    float name_semibold_size_ = 0.0f;
-    // FileNameFormat at semibold (same family, size and fallback).
-    IDWriteTextFormat* NameSemiboldFormat();
-    // Extra date-column width: the dots' lead and room for a semibold date.
+    // Extra date-column width for the optional freshness marker.
     float MtimeDateExtraDip() const {
         if (mtime_hint_.style == 0) return 0.0f;
-        return (mtime_hint_.style == 1 ? kMtimeDotLeadDip : 0.0f) + (mtime_hint_.bold ? 6.0f : 0.0f);
+        return mtime_hint_.style == 1 ? kMtimeDotLeadDip : 0.0f;
     }
     // Pane dividers (motion 4b): an accent knob springs in on hover and
     // stretches while dragged; snaps flash a guide line.

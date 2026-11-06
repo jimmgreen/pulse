@@ -3352,44 +3352,9 @@ void MainRenderer::DrawSinglePane(const WindowViewModel& vm, const PaneViewModel
     dc->PopAxisAlignedClip();
 }
 
-IDWriteTextFormat* MainRenderer::NameSemiboldFormat() {
-    IDWriteTextFormat* base = compositor_ ? compositor_->FileNameFormat() : nullptr;
-    IDWriteFactory2* factory = compositor_ ? compositor_->DwriteFactory() : nullptr;
-    if (!base || !factory) return nullptr;
-    if (name_semibold_format_.get() && name_semibold_base_ == base && name_semibold_size_ == base->GetFontSize())
-        return name_semibold_format_.get();
-    name_semibold_format_.reset();
-    name_semibold_base_ = base;
-    name_semibold_size_ = base->GetFontSize();
-    wchar_t family[128]{};
-    wchar_t locale[LOCALE_NAME_MAX_LENGTH]{};
-    if (FAILED(base->GetFontFamilyName(family, ARRAYSIZE(family))) ||
-        FAILED(base->GetLocaleName(locale, ARRAYSIZE(locale))))
-        return nullptr;
-    ComPtr<IDWriteFontCollection> collection;
-    base->GetFontCollection(&collection);
-    if (FAILED(factory->CreateTextFormat(family, collection.get(), DWRITE_FONT_WEIGHT_SEMI_BOLD, base->GetFontStyle(),
-                                         base->GetFontStretch(), base->GetFontSize(), locale, &name_semibold_format_)))
-        return nullptr;
-    IDWriteTextFormat* bold = name_semibold_format_.get();
-    bold->SetParagraphAlignment(base->GetParagraphAlignment());
-    bold->SetWordWrapping(base->GetWordWrapping());
-    DWRITE_LINE_SPACING_METHOD method{};
-    FLOAT spacing = 0.0f, baseline = 0.0f;
-    if (SUCCEEDED(base->GetLineSpacing(&method, &spacing, &baseline))) bold->SetLineSpacing(method, spacing, baseline);
-    // CJK names keep the same fallback fonts as the regular face.
-    ComPtr<IDWriteTextFormat1> base1, bold1;
-    if (SUCCEEDED(base->QueryInterface(__uuidof(IDWriteTextFormat1), reinterpret_cast<void**>(&base1))) &&
-        SUCCEEDED(bold->QueryInterface(__uuidof(IDWriteTextFormat1), reinterpret_cast<void**>(&bold1)))) {
-        ComPtr<IDWriteFontFallback> fallback;
-        if (SUCCEEDED(base1->GetFontFallback(&fallback)) && fallback.get()) bold1->SetFontFallback(fallback.get());
-    }
-    return bold;
-}
-
 bool MainRenderer::DrawTruncatedName(const std::wstring& name, float x, float y, float w, float h,
                                      const Theme& theme, bool selected, const std::vector<NameMatchRange>& matches,
-                                     bool dim_extension, bool allow_semibold) {
+                                     bool dim_extension) {
     (void)selected;
     if (!compositor_ || !compositor_->Dc() || !compositor_->DwriteFactory() ||
         !compositor_->FileNameFormat() || name.empty() || w <= 1.0f) {
@@ -3397,9 +3362,7 @@ bool MainRenderer::DrawTruncatedName(const std::wstring& name, float x, float y,
     }
     ID2D1DeviceContext* dc = compositor_->Dc();
     IDWriteFactory2* factory = compositor_->DwriteFactory();
-    // 今天修改的名称加粗: the caller measured the row with the same format.
-    const bool semibold = allow_semibold && name_semibold_ && name_semibold_format_.get();
-    IDWriteTextFormat* fmt = semibold ? name_semibold_format_.get() : compositor_->FileNameFormat();
+    IDWriteTextFormat* fmt = compositor_->FileNameFormat();
     MakeBrush(dc, theme.text, brText_);
 
     const auto old_wrap = fmt->GetWordWrapping();
@@ -4907,7 +4870,6 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                 mtimeMark = MtimeBucket(mtimeMarkTime, mtime_clock, &mtime_next_boundary_);
             }
             const bool mtimeMarked = mtimeMark <= mtime_last;
-            const bool mtimeFresh = mtime.bold && mtimeOwn <= 1 && mtimeOwn <= mtime_last;
             const bool mtimeOld = mtime_on && mtime.fade && mtimeOwn > mtime_last && !mtimeMarked;
             const D2D1_COLOR_F mtimeColor = mtimeMarked
                 ? MtimeColor(mtime.palette, mtimeMark, theme.bg.r < 0.5f, theme.accent, IsHighContrast())
@@ -5349,14 +5311,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                 ? std::min(108.0f * scale_, painter_.MeasureTagWidth(e.badge))
                 : staged_pill ? std::min(108.0f * scale_, painter_.MeasureTagWidth(staged_text))
                 : git_pill ? std::min(108.0f * scale_, painter_.MeasureTagWidth(GitMarkText(gitMark))) : 0.0f;
-            // 今天修改的名称加粗: measured and drawn at semibold, so tags and pills still follow it.
             IDWriteTextFormat* nameFormat = compositor_->FileNameFormat();
-            if (!stripRow && mtimeFresh && !iconGrid && !wallPic && !has_alias && src != vm.rename_index)
-                if (IDWriteTextFormat* semibold = NameSemiboldFormat()) nameFormat = semibold;
-            // Column view must not change filename metrics based on freshness,
-            // Git state, selection, or any other row status.  Status may still
-            // affect color and badges, but all column roles use regular text.
-            if (stripRow) nameFormat = compositor_->FileNameFormat();
             // List rows: [mark] alias  real name (pulse_alias.html .amark).
             const bool show_mark = has_alias && app::AliasStore::Instance().ShowMark();
             const bool list_mark = show_mark && !iconGrid;
@@ -5392,7 +5347,6 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                 trail.new_tab = {};
                 trail.more = {};
                 trail.show_star = trail.show_new_tab = trail.show_more = false;
-                name_semibold_ = false;
             }
             if (src == vm.rename_index) {
                 // The rename frame is drawn after every row (below): it can be
@@ -5537,7 +5491,6 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                 } else {
                     Theme name_theme = theme;
                     name_theme.text = nameColor;
-                    name_semibold_ = !stripRow && nameFormat != compositor_->FileNameFormat();
                     const AiListPainter::NameMorph nm =
                         ai_painter && !iconGrid ? ai_painter->Morph() : AiListPainter::NameMorph{};
                     if (nm.was) {
@@ -5563,7 +5516,6 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                         name_truncated = DrawTruncatedName(shown_name, trail.name_x, textY, trail.name_w, textH, name_theme,
                                                            selected, name_matches, detailsView && !e.is_dir && !e.hidden_ext);
                     }
-                    name_semibold_ = false;
                     // Icon grids with tag dots keep the name on one line; the
                     // single selected item still shows all of it.
                     if (iconGrid && !wallPic && name_truncated && selected && vm.selected_count == 1 &&
@@ -5765,24 +5717,7 @@ void MainRenderer::DrawList(const PaneViewModel& vm, float x, float y, float w, 
                             DrawMtimeMark(dc, brTagDot_.get(), colX + 11.0f * scale_, (cell.top + cell.bottom) * 0.5f,
                                           mtSide, mtimeMark, cut ? WithAlpha(mtimeColor, 0.55f) : mtimeColor);
                         }
-                        if (mtimeFresh && mtAvail > 1.0f) {
-                            // Changed today: semibold in the text color.
-                            IDWriteTextFormat* mtBold = NameSemiboldFormat();
-                            ComPtr<IDWriteTextLayout> mtLayout;
-                            const std::wstring mtShown = fit(date, mtAvail * 0.94f);
-                            if (mtBold && SUCCEEDED(compositor_->DwriteFactory()->CreateTextLayout(mtShown.c_str(),
-                                    static_cast<UINT32>(mtShown.size()), mtBold, mtAvail, cell.bottom - cell.top - 2.0f * scale_,
-                                    &mtLayout))) {
-                                mtLayout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-                                mtLayout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-                                mtLayout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                                MakeBrush(dc, cut ? WithAlpha(theme.text, 0.55f) : theme.text, brText_);
-                                compositor_->DrawTextLayout(D2D1::Point2F(mtLeft, cell.top + scale_), mtLayout.get(), brText_.get(),
-                                                   D2D1_DRAW_TEXT_OPTIONS_CLIP);
-                            } else {
-                                draw_detail_text(fit(date, mtAvail), mtLeft, mtAvail, DWRITE_TEXT_ALIGNMENT_LEADING);
-                            }
-                        } else if (mtimeOld) {
+                        if (mtimeOld) {
                             // Outside the range: a step lighter, so recent dates lead.
                             MakeBrush(dc, WithAlpha(secondary, secondary.a * 0.62f), brTextSecondary_);
                             draw_detail_text(fit(date, mtAvail), mtLeft, mtAvail, DWRITE_TEXT_ALIGNMENT_LEADING);

@@ -492,7 +492,7 @@ void MainRenderer::DrawColumnStripColumn(const WindowViewModel& vm, const PaneVi
         name_theme.text = WithAlpha(name_color, name_color.a * fade);
         DrawTruncatedName(entry.name, row_layout.text.left, top,
                           std::max(0.0f, row_layout.text.right - row_layout.text.left),
-                          row_height_, name_theme, false, {}, false, false);
+                          row_height_, name_theme, false, {}, false);
         if (directory && !empty_folder) {
             DrawIconText(row_layout.chevron.left, top,
                          row_layout.chevron.right - row_layout.chevron.left, row_height_,
