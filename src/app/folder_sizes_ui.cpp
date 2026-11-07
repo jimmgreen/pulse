@@ -126,7 +126,9 @@ void FillFolderSizes(AppState& s, ui::WindowViewModel& vm) {
                     shown.contains(static_cast<int>(i))) continue;
                 const std::wstring path = entry.full_path.empty() ? ChildPath(pane.path, entry.name) : entry.full_path;
                 if (fs::IsVirtualPath(path)) continue;
-                requests.push_back({path, !fs::IsUncPath(path), false});
+                // Same gate as the visible rows: off means nothing scans for
+                // the sort either; known totals still feed it.
+                requests.push_back({path, auto_sizes && !fs::IsUncPath(path), false});
                 ++count;
             }
         }
@@ -174,8 +176,8 @@ void FillFolderSizes(AppState& s, ui::WindowViewModel& vm) {
             row.pane->folder_size_labels.emplace(row.index, l10n::Get(l10n::StringId::GroupSizeEmpty).c_str());
             continue;
         }
-        // 文件夹大小 off: a folder shows a size it was asked for (a click,
-        // this session); index totals and the disk cache wait for that too.
+        // 文件夹大小 off: only a scan finished earlier this session still
+        // shows; index totals and the disk cache wait for the switch again.
         auto value = s.folderSizes.Get(row.path);
         if (!auto_sizes && value.has_value &&
             (value.source != app::FolderSizeSource::Scan || value.state == app::FolderSizeState::Cached))
@@ -193,6 +195,8 @@ void FillFolderSizes(AppState& s, ui::WindowViewModel& vm) {
         if (value.has_value) text = format::ByteSize(value.bytes);
         else if (scanning) text = l10n::Get(l10n::StringId::Calculating);
         else if (pending) row.pane->folder_size_pending.insert(row.index);
+        // 文件夹大小 off: a plain dash; the click-to-calculate offer is gone.
+        else if (!auto_sizes) { text = L"\u2014"; row.pane->folder_size_muted.insert(row.index); }
         else { text = L"\u2014"; row.pane->folder_size_idle.insert(row.index); }
         if (value.has_value && value.partial) text = L"\u2265 " + text;
         if (value.has_value && (value.state == app::FolderSizeState::Cached ||
@@ -201,7 +205,9 @@ void FillFolderSizes(AppState& s, ui::WindowViewModel& vm) {
         row.pane->folder_size_labels.emplace(row.index, std::move(text));
         // The size cell is the explicit calculate/cancel entry point; work
         // activity belongs to its tooltip, not the published numeric label.
-        row.pane->folder_size_actions.insert(row.index);
+        // 文件夹大小 off: nothing starts from the list, but a scan that is
+        // still running can be cancelled there.
+        if (auto_sizes || work.Running()) row.pane->folder_size_actions.insert(row.index);
     }
     for (const auto& slot : vm.pane_slots) if (slot.focused) {
         vm.pane.folder_size_labels = slot.pane.folder_size_labels;

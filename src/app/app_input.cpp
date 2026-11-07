@@ -3730,7 +3730,8 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 const auto work = s->folderSizes.GetWork(path);
                 s->folderSizeClickPath.clear();
                 if (work.manual && work.Running()) s->folderSizes.Cancel(path);
-                else {
+                // 文件夹大小 off: the cell no longer starts a calculation.
+                else if (s->appPrefs.folder_size_auto) {
                     s->folderSizes.Calculate(path);
                     s->folderSizeClickPath = path;
                     s->folderSizeClickTime = GetMessageTime();
