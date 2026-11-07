@@ -1873,6 +1873,12 @@ void ClearTextWidthCache() {
                 case 0: { // 基本信息
                     const int rows = (d.is_dir ? 7 : 6) +
                                      static_cast<int>(d.preview_properties.size());
+                    // 计算大小 on the 大小 row (位置 / 类型 / 大小), left
+                    // edge on the value column like the facts above it; shown
+                    // only while folder sizes are off and nothing walked here.
+                    if (d.is_dir && d.size_manual)
+                        out.size_calc = D2D1::RectF(x + 100.0f * s, y + 2 * 18.0f * s,
+                                                    x + 196.0f * s, y + 3 * 18.0f * s);
                     y += static_cast<float>(rows) * 18.0f * s + 8.0f * s;
                     break;
                 }
@@ -2621,6 +2627,7 @@ struct SettingsLayout {
     D2D1_RECT_F pinned_names_row{};
     D2D1_RECT_F alias_mark_row{};
     D2D1_RECT_F tree_sticky_row{};
+    D2D1_RECT_F folder_size_row{};
     D2D1_RECT_F thumb_cache_row{};     // 缩略图缓存: usage bar and 清除缓存
     D2D1_RECT_F thumb_cache_button{};
     D2D1_RECT_F vertical_tabs_row{};

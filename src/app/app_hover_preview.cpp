@@ -448,6 +448,8 @@ void SetFolderCard(AppState& s, const app::Tab& tab, const fs::DirEntry& entry, 
     // Its size: what the folder size service knows, else a count of its own
     // (local folders; a drive shows its capacity instead).
     if (card.drive || fs::IsUncPath(card.path)) return;
+    // 文件夹大小 off: the card only shows what is already known.
+    if (!s.appPrefs.folder_size_auto) return;
     const auto value = s.folderSizes.Get(card.path);
     const auto work = s.folderSizes.GetWork(card.path);
     if (!value.has_value && !work.Running()) {

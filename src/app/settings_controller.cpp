@@ -1246,6 +1246,13 @@ void SettingsController::ToggleUi(int index) {
         SaveAndApply(SettingsEffect::ListStyle);
         return;
     }
+    if (index == 80) {
+        // 文件夹大小: the list cells, hover preview and details panel all
+        // gate on it; same no-effect flip as the toolbar command.
+        prefs_->folder_size_auto = !prefs_->folder_size_auto;
+        SaveAndApply(SettingsEffect::None);
+        return;
+    }
     if (index == 1) {
         prefs_->ApplyLaunchOnStartup(!prefs_->launch_on_startup);
         SaveAndApply(SettingsEffect::None);

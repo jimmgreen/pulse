@@ -4419,5 +4419,8 @@
 #define IDS_OP_AUTH_TITLE_DELETE                                                         5627
 #define IDS_OP_AUTH_NOT_GRANTED_SHORT                                                    5628
 #define IDS_OP_AUTHORIZATION_ONCE                                                        5629
+#define IDS_SETTINGS_FOLDER_SIZES                                                        5630
+#define IDS_SETTINGS_FOLDER_SIZES_DESC                                                   5631
+#define IDS_DETAILS_CALC_SIZE                                                            5632
 
 #endif  // PULSE_STRING_IDS_H

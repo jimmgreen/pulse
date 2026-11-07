@@ -4426,3 +4426,6 @@ OpAuthTitleMove	IDS_OP_AUTH_TITLE_MOVE	5626	移动到这里需要管理员权限
 OpAuthTitleDelete	IDS_OP_AUTH_TITLE_DELETE	5627	删除这些项目需要管理员权限	Deleting these items needs administrator permission	刪除這些項目需要系統管理員權限
 OpAuthNotGrantedShort	IDS_OP_AUTH_NOT_GRANTED_SHORT	5628	没有获得管理员权限。	Administrator permission wasn't granted.	沒有取得系統管理員權限。
 OpAuthorizationOnce	IDS_OP_AUTHORIZATION_ONCE	5629	确认一次即可，本次操作的其余项目不会再问。	You only need to approve once; the rest of this operation won't ask again.	確認一次即可，本次操作的其餘項目不會再詢問。
+SettingsFolderSizes	IDS_SETTINGS_FOLDER_SIZES	5630	自动统计文件夹大小	Calculate folder sizes	
+SettingsFolderSizesDesc	IDS_SETTINGS_FOLDER_SIZES_DESC	5631	关闭后悬停预览、点击与详情面板都不再计算，可改在详情面板手动统计	Nothing computes folder sizes automatically; calculate on demand from the details panel	
+DetailsCalcSize	IDS_DETAILS_CALC_SIZE	5632	计算大小	Calculate size	

@@ -214,6 +214,7 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
         }
         l.alias_mark_row=row(64);
         l.tree_sticky_row=row(64);
+        l.folder_size_row=row(64);
 
         section(I::ListMtimeHint);
         l.mtime_style_card=row(seg_h); segments(l.mtime_style_card,l.mtime_style_row,4,340);

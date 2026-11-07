@@ -710,6 +710,8 @@ struct DetailsPanelView {
     std::wstring owner_text, permissions_text;
     std::wstring drive_text, fs_text, free_space_text;
     bool size_pending = false;      // folder size still computing
+    // 文件夹大小 off: the size row offers a button instead of auto-walking.
+    bool size_manual = false;
     bool starred = false;
     // 下载并预览 (C4b): a file whose content is only in the cloud. The well
     // explains and offers the download instead of a preview.
@@ -730,6 +732,7 @@ struct DetailsHitRects {
     D2D1_RECT_F open{}, new_tab{}, copy_path{}, more{}, star{}, rename{};
     D2D1_RECT_F tag_add{}, preview{}, preview_toggle{}, preview_enable{};
     D2D1_RECT_F cloud_download{};   // 下载并预览 inside the preview well
+    D2D1_RECT_F size_calc{};        // 计算大小 on the size row (folder sizes off)
     D2D1_RECT_F attr_readonly{}, attr_hidden{}, attr_advanced{};
     D2D1_RECT_F security_change{};
     std::vector<D2D1_RECT_F> preset_chips;
@@ -1208,6 +1211,7 @@ struct WindowViewModel {
     bool settings_list_smart_date = true;
     bool settings_list_zebra_rows = true;
     bool settings_list_tree_sticky = true;
+    bool settings_folder_size_auto = true;
     bool settings_menu_acrylic = true;
     bool settings_list_size_bar = false;
     bool settings_list_tag_names = false;
@@ -1463,6 +1467,7 @@ struct HitTestResult {
         DetailsPreviewToggle,
         DetailsPreviewEnable,   // preview pane on/off chip inside the well
         DetailsCloudDownload,   // 下载并预览 button in the well of a cloud-only file
+        DetailsSizeCalc,        // 计算大小 button on the size row (folder sizes off)
         DetailsResize,
         StatusBar,
         StatusBarTask,
