@@ -74,6 +74,7 @@ const SetDef kSettingDefs[] = {
     SET_SW("selection_outline", ListSelectionOutline, 9, 0, 33, list_selection_outline),
     SET_SW("thumbnail_app_badges", ListThumbnailBadges, 9, 0, 34, list_thumbnail_badges),
     SET_SW("tree_sticky", SettingsTreeSticky, 9, 0, 79, list_tree_sticky),
+    SET_SW("folder_size_auto", SettingsFolderSizes, 9, 0, 80, folder_size_auto),
     {"alias_mark", I::AliasMark, 9, 0, -1, +[](AppState&) -> int { return app::AliasStore::Instance().ShowMark() ? 1 : 0; },
      +[](AppState&, int i) { app::AliasStore::Instance().SetShowMark(i != 0); }, {}},
     {"mtime_marks", I::ListMtimeHint, 9, 0, -1, SET_GET(s.appPrefs.list_mtime_hint),

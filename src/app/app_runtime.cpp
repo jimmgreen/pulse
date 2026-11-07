@@ -2710,6 +2710,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     vm.settings_list_smart_date = s.appPrefs.list_smart_date;
     vm.settings_list_zebra_rows = s.appPrefs.list_zebra_rows;
     vm.settings_list_tree_sticky = s.appPrefs.list_tree_sticky;
+    vm.settings_folder_size_auto = s.appPrefs.folder_size_auto;
     vm.settings_menu_acrylic = s.appPrefs.menu_acrylic;
     vm.settings_list_size_bar = s.appPrefs.list_size_bar;
     vm.settings_list_tag_names = s.appPrefs.list_tag_name_color;

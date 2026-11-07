@@ -621,6 +621,7 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
         }
         toggle(lay.alias_mark_row,I::AliasMark,I::AliasMarkDesc,L"\xE8AC",vm.settings_alias_mark,39);
         toggle(lay.tree_sticky_row,I::SettingsTreeSticky,I::SettingsTreeStickyDesc,L"\xE840",vm.settings_list_tree_sticky,79);
+        toggle(lay.folder_size_row,I::SettingsFolderSizes,I::SettingsFolderSizesDesc,L"\xEDA2",vm.settings_folder_size_auto,80);
         if(lay.mtime_style_card.bottom>lay.mtime_style_card.top) {
             // 修改时间提示: style, then range / colors / switches while it is on.
             const auto& mt=vm.settings_mtime;

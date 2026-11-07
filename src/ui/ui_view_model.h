@@ -1211,6 +1211,7 @@ struct WindowViewModel {
     bool settings_list_smart_date = true;
     bool settings_list_zebra_rows = true;
     bool settings_list_tree_sticky = true;
+    bool settings_folder_size_auto = true;
     bool settings_menu_acrylic = true;
     bool settings_list_size_bar = false;
     bool settings_list_tag_names = false;
