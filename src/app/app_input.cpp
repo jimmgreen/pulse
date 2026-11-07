@@ -3194,6 +3194,14 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
             InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
+        if (hit.region == ui::HitTestResult::DetailsSizeCalc) {
+            // 文件夹大小 off: the button walks the folder once, on demand.
+            if (vm.details.is_dir && !vm.details.path.empty()) {
+                StartDetailsSizeWalk(*s, vm.details.path);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            return 0;
+        }
         if (hit.region == ui::HitTestResult::DetailsResize) {
             s->dragPending = false;
             s->detailsPanelResizing = true;

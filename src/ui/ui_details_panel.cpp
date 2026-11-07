@@ -794,6 +794,16 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
                 infoRow(pulse::l10n::Get(pulse::l10n::StringId::ColumnSize).c_str(),
                         d.size_pending ? pulse::l10n::Get(pulse::l10n::StringId::Calculating)
                                                 : d.size_text, iy);
+                if (d.is_dir && d.size_manual) {
+                    // 计算大小: text button like the 安全 section's 更改,
+                    // left-aligned with the fact values.
+                    const bool hot = IsHovered(vm, HitTestResult::DetailsSizeCalc);
+                    text(pulse::l10n::Get(pulse::l10n::StringId::DetailsCalcSize),
+                         D2D1::RectF(hit.size_calc.left, hit.size_calc.top,
+                                     hit.size_calc.right, hit.size_calc.bottom),
+                         compositor_->SmallFormat(),
+                         hot ? theme.accent_hover : theme.accent);
+                }
                 if (d.is_dir) infoRow(pulse::l10n::Get(pulse::l10n::StringId::Contains).c_str(), d.contains_text, iy);
                 infoRow(pulse::l10n::Get(pulse::l10n::StringId::Created).c_str(), d.created_text, iy);
                 infoRow(pulse::l10n::Get(pulse::l10n::StringId::ModifiedTime).c_str(), d.modified_text, iy);

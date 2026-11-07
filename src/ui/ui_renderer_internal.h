@@ -1873,6 +1873,12 @@ void ClearTextWidthCache() {
                 case 0: { // 基本信息
                     const int rows = (d.is_dir ? 7 : 6) +
                                      static_cast<int>(d.preview_properties.size());
+                    // 计算大小 on the 大小 row (位置 / 类型 / 大小), left
+                    // edge on the value column like the facts above it; shown
+                    // only while folder sizes are off and nothing walked here.
+                    if (d.is_dir && d.size_manual)
+                        out.size_calc = D2D1::RectF(x + 100.0f * s, y + 2 * 18.0f * s,
+                                                    x + 196.0f * s, y + 3 * 18.0f * s);
                     y += static_cast<float>(rows) * 18.0f * s + 8.0f * s;
                     break;
                 }

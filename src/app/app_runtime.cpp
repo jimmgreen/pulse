@@ -3225,7 +3225,8 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
                 chip.assigned = s.places.PathHasTag(dv.path, idx);
                 dv.preset_tags.push_back(std::move(chip));
             }
-            if (dv.is_dir) sizeTarget = dv.path;
+            // 文件夹大小 off: the size row offers 计算大小 instead of walking.
+            if (dv.is_dir && s.appPrefs.folder_size_auto) sizeTarget = dv.path;
         }
     }
     std::wstring requestedSizePath;
@@ -3244,6 +3245,21 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
             vm.details.contains_text = contains;
         } else {
             vm.details.size_pending = true;
+        }
+    } else if (vm.details.is_dir && !s.appPrefs.folder_size_auto && !vm.details.path.empty()) {
+        // 文件夹大小 off: show a finished walk, the walk in progress, or the
+        // 计算大小 button; a running walk is left alone until it settles.
+        std::lock_guard<std::mutex> lock(s.detailsSizeMutex);
+        if (s.detailsSize.done && s.detailsSize.path == vm.details.path) {
+            vm.details.size_text = pulse::format::ByteSize(s.detailsSize.size, true);
+            wchar_t contains[96];
+            swprintf_s(contains, l10n::Get(l10n::StringId::ContainsFormat).c_str(),
+                       s.detailsSize.files, s.detailsSize.dirs);
+            vm.details.contains_text = contains;
+        } else if (s.detailsSizeRequested == vm.details.path) {
+            vm.details.size_pending = true;
+        } else {
+            vm.details.size_manual = true;
         }
     } else if (!requestedSizePath.empty()) {
         StopDetailsSizeWalk(s);
