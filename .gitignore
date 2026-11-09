@@ -80,6 +80,9 @@ CONERR$
 /todo.md
 /tools/_split_tus.py
 
+# Local extension package artifacts (not source or release payload)
+*.pulse-ext
+
 # Local tool state
 /.pnpm-store/
 /.summary.jsonl
