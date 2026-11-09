@@ -81,7 +81,10 @@ bool AllowedProcess(HANDLE process, bool allow_elevated) {
         (process_machine ? process_machine : native_machine) != kMachine) return false;
     std::vector<BYTE> own_user, other_user, own_level, other_level, container;
     PROCESS_PROTECTION_LEVEL_INFORMATION protection{};
-    if (!GetProcessInformation(process, ProcessProtectionLevelInfo, &protection, sizeof(protection)) ||
+    const auto query_protection = reinterpret_cast<decltype(&GetProcessInformation)>(
+        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetProcessInformation"));
+    // Optional dialog integration fails closed when the OS lacks this query.
+    if (!query_protection || !query_protection(process, ProcessProtectionLevelInfo, &protection, sizeof(protection)) ||
         protection.ProtectionLevel != PROTECTION_LEVEL_NONE ||
         !TokenData(process, TokenIsAppContainer, container) || *reinterpret_cast<DWORD*>(container.data()) ||
         !TokenData(GetCurrentProcess(), TokenUser, own_user) || !TokenData(process, TokenUser, other_user) ||

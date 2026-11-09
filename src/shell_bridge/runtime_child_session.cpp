@@ -56,7 +56,10 @@ DWORD Allowed(HANDLE process) {
     if (const DWORD error = security::CheckUnrestrictedToken(other.value)) return error;
     if (elevation.TokenIsElevated || container) return ERROR_ACCESS_DENIED;
     PROCESS_PROTECTION_LEVEL_INFORMATION protection{};
-    if (!GetProcessInformation(process, ProcessProtectionLevelInfo, &protection, sizeof(protection))) return Error();
+    const auto query_protection = reinterpret_cast<decltype(&GetProcessInformation)>(
+        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetProcessInformation"));
+    if (!query_protection) return ERROR_NOT_SUPPORTED;
+    if (!query_protection(process, ProcessProtectionLevelInfo, &protection, sizeof(protection))) return Error();
     if (protection.ProtectionLevel != PROTECTION_LEVEL_NONE) return ERROR_ACCESS_DENIED;
     using MachineFn = BOOL (WINAPI*)(HANDLE, USHORT*, USHORT*);
     const auto machine_fn = reinterpret_cast<MachineFn>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "IsWow64Process2"));
