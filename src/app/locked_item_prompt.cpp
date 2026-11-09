@@ -37,7 +37,7 @@ ui::ConfirmDialogSpec LockedItemPromptSpec(const ops::OpStatus& status, bool can
 }
 
 // The dialog watches the owners and the item and comes back with Retry on its
-// own once the item is free (pulse_ops_dialogs.html §5).
+// own once the item is free.
 void PromptLockedItem(AppState& s, const ops::OpStatus& status) {
     ui::LockedItemInfo info;
     info.type = status.type;

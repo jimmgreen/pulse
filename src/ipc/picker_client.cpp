@@ -1,4 +1,6 @@
 #include "picker_client.h"
+#include "picker_session.h"
+#include <optional>
 #include "../common/picker_owner_guard.h"
 #include <array>
 
@@ -30,8 +32,35 @@ struct Child {
         if (process) WaitForSingleObject(process.Get(), 5000);
     }
 };
+// A warm standby host, when one of this bundle listens. nullopt: none answered,
+// and the caller starts a host the usual way. Once connected, negotiation or
+// request failures are terminal; never retry a potentially delivered request.
+std::optional<Message> ExchangeStandby(const std::wstring& executable, const std::wstring& desktop, const Message& request, HWND owner, HANDLE cancel) {
+    Channel channel;
+    DWORD server_pid = 0;
+    if (!ConnectStandby(executable, desktop, channel, server_pid, {cancel, 200})) return std::nullopt;
+    Message sent = request;
+    if (auto* body = std::get_if<Request>(&sent.body); body && owner) {
+        body->required_capabilities |= CallerWindow;
+        body->caller_window = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(owner));
+    }
+    AllowSetForegroundWindow(server_pid);
+    const auto negotiated = NegotiatePickerSession(channel, sent, {cancel, 5000});
+    if (!negotiated) return Terminal(request, negotiated.error == ERROR_CANCELLED ? Status::Cancelled : Status::Failed,
+                                    negotiated.error == ERROR_CANCELLED ? ERROR_SUCCESS : negotiated.error);
+    const auto delivered = channel.Send(sent, {cancel, 5000});
+    if (!delivered) return Terminal(request, delivered.error == ERROR_CANCELLED ? Status::Cancelled : Status::Failed,
+                                   delivered.error == ERROR_CANCELLED ? ERROR_SUCCESS : delivered.error);
+    Message response;
+    const auto received = channel.Receive(response, {cancel, INFINITE});
+    // Leaving closes the pipe, which closes the standby's dialog on cancellation.
+    if (!received) return Terminal(request, received.error == ERROR_CANCELLED ? Status::Cancelled : Status::Failed,
+                                   received.error == ERROR_CANCELLED ? ERROR_SUCCESS : received.error);
+    if (!ValidateResponse(sent, response)) return Terminal(request, Status::Failed, ERROR_INVALID_DATA);
+    return response;
+}
 Message Exchange(const std::wstring& executable, const std::wstring& desktop,
-                 const Message& request, HANDLE cancel) {
+                 const Message& request, HWND owner, HANDLE cancel) {
     Server server;
     auto transport = Server::Create(server);
     if (!transport) return Terminal(request, Status::Failed, transport.error);
@@ -44,6 +73,9 @@ Message Exchange(const std::wstring& executable, const std::wstring& desktop,
         return Terminal(request, Status::Failed, GetLastError());
     std::wstring command = L"\"" + executable + L"\" --picker-host " + server.Name() + L" " +
         std::to_wstring(GetCurrentProcessId());
+    // The host owns its dialog by this window (it verifies that the window is
+    // ours and only observes it; our PickerOwnerGuard keeps the modality).
+    if (owner) command += L" " + std::to_wstring(reinterpret_cast<uintptr_t>(owner));
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     startup.lpDesktop = const_cast<wchar_t*>(desktop.c_str());
@@ -58,10 +90,13 @@ Message Exchange(const std::wstring& executable, const std::wstring& desktop,
         TerminateProcess(child.process.Get(), error); // Only our still-suspended child.
         return Terminal(request, Status::Failed, error);
     }
+    // Our caller is in the foreground; let the host's dialog take it over.
+    AllowSetForegroundWindow(info.dwProcessId);
     if (ResumeThread(thread.Get()) == static_cast<DWORD>(-1))
         return Terminal(request, Status::Failed, GetLastError());
     Channel channel;
     transport = server.Accept(child.process.Get(), channel, {cancel, 10000});
+    if (transport) transport = NegotiatePickerSession(channel, request, {cancel, 10000});
     if (transport) transport = channel.Send(request, {cancel, 10000});
     Message response;
     if (transport) transport = channel.Receive(response, {cancel, INFINITE});
@@ -104,7 +139,8 @@ Message RunPickerClient(std::wstring executable, Message request, HWND owner, HA
     std::thread worker;
     try {
         worker = std::thread([&] {
-            try { response = Exchange(executable, desktop, request, stop.Get()); }
+            try { auto warm = ExchangeStandby(executable, desktop, request, owner, stop.Get());
+                response = warm ? std::move(*warm) : Exchange(executable, desktop, request, owner, stop.Get()); }
             catch (...) { response = Terminal(request, Status::Failed, ERROR_NOT_ENOUGH_MEMORY); }
             SetEvent(done.Get());
         });

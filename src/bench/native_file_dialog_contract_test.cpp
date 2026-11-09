@@ -23,6 +23,15 @@
 namespace {
 using Microsoft::WRL::ComPtr;
 int failures = 0;
+bool native_options_probe = false;
+HRESULT NativeDialog(bool save, IFileDialog** output) {
+    using Entry = HRESULT (WINAPI*)(REFCLSID, REFIID, void**);
+    static HMODULE module = LoadLibraryExW(L"comdlg32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    const auto entry = module ? reinterpret_cast<Entry>(GetProcAddress(module, "DllGetClassObject")) : nullptr;
+    ComPtr<IClassFactory> factory;
+    const HRESULT hr = entry ? entry(save ? CLSID_FileSaveDialog : CLSID_FileOpenDialog, IID_PPV_ARGS(&factory)) : HRESULT_FROM_WIN32(ERROR_MOD_NOT_FOUND);
+    return FAILED(hr) ? hr : factory->CreateInstance(nullptr, IID_PPV_ARGS(output));
+}
 std::atomic<int> cleanup_failures{0};
 constexpr UINT kDrive = WM_APP + 71;
 void Check(bool condition, const char* label) {
@@ -548,12 +557,12 @@ Observation Run(HWND owner, const std::filesystem::path& root, const wchar_t* fi
         save ? pulse::shell_bridge::DialogFactory::Save : pulse::shell_bridge::DialogFactory::Open,
         services, IID_PPV_ARGS(&dialog)) : CoCreateInstance(save ? CLSID_FileSaveDialog : CLSID_FileOpenDialog, nullptr,
             CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog));
-    if (options & FOS_PICKFOLDERS) {
+    if ((options & FOS_PICKFOLDERS) || native_options_probe) {
         using Entry = HRESULT (WINAPI*)(REFCLSID, REFIID, void**);
         static HMODULE module = LoadLibraryExW(L"comdlg32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
         auto entry = module ? reinterpret_cast<Entry>(GetProcAddress(module, "DllGetClassObject")) : nullptr;
         ComPtr<IClassFactory> factory;
-        dialog.Reset(); hr = entry ? entry(CLSID_FileOpenDialog, IID_PPV_ARGS(&factory)) : E_FAIL;
+        dialog.Reset(); hr = entry ? entry(save ? CLSID_FileSaveDialog : CLSID_FileOpenDialog, IID_PPV_ARGS(&factory)) : E_FAIL;
         if (SUCCEEDED(hr)) hr = factory->CreateInstance(nullptr, IID_PPV_ARGS(&dialog));
     }
     if (FAILED(hr)) { Check(false, "native dialog created"); return observation; }
@@ -577,8 +586,21 @@ Observation Run(HWND owner, const std::filesystem::path& root, const wchar_t* fi
         const char* label;
         std::string guid;
         bool validation_mode;
+        bool save;
         ~ClearHistory() {
-            const HRESULT cleared = dialog->ClearClientData();
+            HRESULT cleared = dialog->ClearClientData();
+            if (native_options_probe && FAILED(cleared)) {
+                ComPtr<IFileDialog> fresh;
+                GUID id{};
+                const std::wstring wide(guid.begin(), guid.end());
+                HRESULT retried = CLSIDFromString(wide.c_str(), &id);
+                if (SUCCEEDED(retried)) retried = NativeDialog(save, &fresh);
+                if (SUCCEEDED(retried)) retried = fresh->SetClientGuid(id);
+                if (SUCCEEDED(retried)) retried = fresh->ClearClientData();
+                std::printf("[FACT] fresh native GUID cleanup original=0x%08lX retry=0x%08lX\n",
+                    static_cast<unsigned long>(cleared), static_cast<unsigned long>(retried));
+                cleared = retried;
+            }
             char code[32]{};
             std::snprintf(code, sizeof(code), "0x%08lX", static_cast<unsigned long>(cleared));
             std::printf("[FACT] %s ClientGuid=%s ClearClientData HRESULT=%s\n", label, guid.c_str(), code);
@@ -591,7 +613,7 @@ Observation Run(HWND owner, const std::filesystem::path& root, const wchar_t* fi
                 Check(SUCCEEDED(cleared), "test GUID dialog history cleared");
             }
         }
-    } clear{dialog.Get(), journal_directory, label, guid_ascii, validation != nullptr};
+    } clear{dialog.Get(), journal_directory, label, guid_ascii, validation != nullptr, save};
     ComPtr<IShellItem> folder;
     hr = SHCreateItemFromParsingName(root.c_str(), nullptr, IID_PPV_ARGS(&folder));
     if (SUCCEEDED(hr)) hr = dialog->SetFolder(folder.Get());
@@ -1389,8 +1411,7 @@ int CleanupJournal(const wchar_t* argument) {
     if (FAILED(initialized)) return 2;
     for (const auto& entry : entries) {
         ComPtr<IFileDialog> dialog;
-        const HRESULT created = CoCreateInstance(entry.save ? CLSID_FileSaveDialog : CLSID_FileOpenDialog, nullptr,
-            CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog));
+        const HRESULT created = NativeDialog(entry.save, &dialog);
         const HRESULT configured = SUCCEEDED(created) ? dialog->SetClientGuid(entry.guid) : E_PENDING;
         const HRESULT cleared = SUCCEEDED(configured) ? dialog->ClearClientData() : E_PENDING;
         const HRESULT hr = FAILED(created) ? created : FAILED(configured) ? configured : cleared;
@@ -1423,10 +1444,11 @@ int wmain(int argc, wchar_t** argv) {
     const bool wrapper_events = argc == 2 && std::wstring_view(argv[1]) == L"--wrapper-events";
     const bool open_validation = argc == 2 && std::wstring_view(argv[1]) == L"--open-validation";
     const bool open_sharing = argc == 2 && std::wstring_view(argv[1]) == L"--open-sharing";
+    const bool native_options = argc == 2 && std::wstring_view(argv[1]) == L"--native-options";
     const bool open_novalidate = argc == 2 && std::wstring_view(argv[1]) == L"--open-novalidate";
     const bool save_validation = argc == 2 && std::wstring_view(argv[1]) == L"--save-validation";
     const bool save_overwrite_accept = argc == 2 && std::wstring_view(argv[1]) == L"--save-overwrite-accept";
-    if (argc != 1 && !folder_names && !wrapper_events && !open_validation && !open_sharing && !open_novalidate && !save_validation && !save_overwrite_accept) return 2;
+    if (argc != 1 && !folder_names && !wrapper_events && !open_validation && !open_sharing && !native_options && !open_novalidate && !save_validation && !save_overwrite_accept) return 2;
     const auto desktop_name = L"PulseNativeContract-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
     const HDESK desktop = CreateDesktopW(desktop_name.c_str(), nullptr, nullptr, 0, GENERIC_ALL, nullptr);
     if (!desktop || !SetThreadDesktop(desktop)) { if (desktop) CloseDesktop(desktop); return 2; }
@@ -1446,6 +1468,23 @@ int wmain(int argc, wchar_t** argv) {
     if (!CreateDirectoryW(root.c_str(), nullptr)) { DestroyWindow(owner); CoUninitialize(); return 2; }
     std::printf("[NOTE] Exact fixture and GUID journal directory: %ls\n", root.c_str());
     std::fflush(stdout);
+    if (native_options) {
+        native_options_probe = true;
+        const auto outside = root / L"ordinary.bin";
+        Check(MakeFile(outside), "strict-filter native fixture created");
+        OpenValidationDrive drive{L"ordinary.bin"};
+        const auto flags = FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR | FOS_DONTADDTORECENT |
+            FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST | FOS_STRICTFILETYPES;
+        const auto control = Run(owner, root, L"ordinary.txt", false, flags & ~FOS_STRICTFILETYPES, "advisory-filter-open", false, false, 0, &drive);
+        Check(Matches(control, outside), "native Open advisory control accepts typed outside-filter file");
+        const auto open = Run(owner, root, L"ordinary.txt", false, flags, "strict-filter-open", false, false, 0, &drive);
+        Check(open.input_confirmed && open.submitted, "strict native Open typed outside-filter filename");
+        Check(Matches(open, outside), "native Open STRICTFILETYPES keeps typed filters advisory");
+        CleanupCheck(DeleteFileW(outside.c_str()) != FALSE, "strict-filter fixture removed");
+        DestroyWindow(owner); CoUninitialize();
+        std::printf("native-options failures=%d cleanup_failures=%d\n", failures, cleanup_failures.load());
+        return failures || cleanup_failures.load() ? 1 : 0;
+    }
     if (folder_names) {
         const auto selected = root / L"named-folder";
         Check(CreateDirectoryW(selected.c_str(), nullptr) != FALSE, "named folder fixture");

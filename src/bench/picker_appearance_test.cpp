@@ -28,6 +28,19 @@ int main() {
     PickerAppearanceSnapshot value;
     Check(ParsePickerAppearanceJson(L"{}", value) && value.ui_font_scale == 100 && value.text_render == 0 &&
         value.row_height == 34 && value.smart_date && value.zebra_rows && value.thumbnail_badges, "empty object has Pulse defaults");
+    for (int action : {0, 1, 2, 99}) {
+        const int expected = action == 1 || action == 2 ? action : 0;
+        Check(ParsePickerAppearanceJson(L"{\"blank_click_action\":" + std::to_wstring(action) + L"}", value) &&
+            value.blank_click_action == expected, "blank action JSON is normalized");
+        pulse::ui::FolderPickerSpec action_spec;
+        ApplyPickerAppearanceToSpec(value, action_spec);
+        Check(action_spec.blank_click_action == expected, "blank action reaches open/save spec");
+        AppPrefs action_prefs; action_prefs.blank_click_action = action;
+        Check(PickerAppearanceFromPrefs(action_prefs).blank_click_action == expected, "main prefs retain blank action");
+    }
+    Check(ParsePickerAppearanceJson(L"{\"blank_click_go_back\":true}", value) && value.blank_click_action == 1,
+        "legacy blank back preference remains supported");
+    ParsePickerAppearanceJson(L"{}", value);
     auto colors = ResolvePickerAppearanceColors(value, false, 0x123456);
     Check(!colors.dark && colors.accent_rgb == 0x527D70, "light default uses Pulse pine accent");
     colors = ResolvePickerAppearanceColors(value, true, 0x123456);
@@ -73,6 +86,23 @@ int main() {
     Check(value.theme_mode == 1 && value.accent_rgb == 0x123ABCu && value.language == L"en-US" &&
         value.text_render == 1 && PickerAppearanceRowHeightDip(value) == 32 && value.details_columns == 0,
         "existing in-memory preferences need no Load or persistence");
+
+    Check(ParsePickerAppearanceJson(L"{}", value) && value.preview_trigger == kPreviewTriggerHover &&
+        value.hover_preview_delay_ms == 500 && value.hover_card_size == kHoverCardMedium,
+        "missing hover preferences use main window defaults");
+    Check(ParsePickerAppearanceJson(LR"({"preview_trigger":1,"hover_preview_delay_ms":800,"hover_card_size":3})", value) &&
+        value.preview_trigger == kPreviewTriggerSpace && value.hover_preview_delay_ms == 800 && value.hover_card_size == kHoverCardXLarge,
+        "hover preferences retain disabled trigger and supported delay and size");
+    ApplyPickerAppearanceToSpec(value, spec);
+    Check(spec.preview_trigger == kPreviewTriggerSpace && spec.hover_preview_delay_ms == 800 && spec.hover_card_size == kHoverCardXLarge,
+        "hover preferences reach picker spec");
+    Check(ParsePickerAppearanceJson(LR"({"preview_trigger":9,"hover_preview_delay_ms":1,"hover_card_size":9})", value) &&
+        value.preview_trigger == kPreviewTriggerHover && value.hover_preview_delay_ms == 500 && value.hover_card_size == kHoverCardMedium,
+        "invalid hover preferences normalize like main window");
+    prefs.preview_trigger = kPreviewTriggerSpace; prefs.hover_preview_delay_ms = 300; prefs.hover_card_size = kHoverCardSmall;
+    value = PickerAppearanceFromPrefs(prefs);
+    Check(value.preview_trigger == kPreviewTriggerSpace && value.hover_preview_delay_ms == 300 && value.hover_card_size == kHoverCardSmall,
+        "in-memory hover preferences use the same snapshot path");
 
     // All I/O uses a newly-owned fixture. Never call the real-user resolver here.
     GUID guid{}; wchar_t nonce[40]{};

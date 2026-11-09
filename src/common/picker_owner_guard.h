@@ -24,6 +24,9 @@ struct PickerOwnerIdentityDiagnostics {
 class PickerOwnerGuard {
 public:
     explicit PickerOwnerGuard(HWND window);
+    // Internal remote host: the authenticated parent owns the modal guard.
+    struct CallerManagedRemoteOwner { DWORD authenticated_parent_pid; };
+    PickerOwnerGuard(HWND window, CallerManagedRemoteOwner parent);
     ~PickerOwnerGuard();
     PickerOwnerGuard(const PickerOwnerGuard&) = delete;
     PickerOwnerGuard& operator=(const PickerOwnerGuard&) = delete;
@@ -33,6 +36,7 @@ public:
     bool Alive() const;
     HWND Window() const noexcept;
     // Restores only our disable transition; foreign/originally disabled owners stay untouched.
+    // Activation delegates keyboard focus restoration to the owner's handlers.
     void RestoreBeforeDialogHide(HWND dialog) noexcept;
 private:
     struct Impl;

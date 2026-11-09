@@ -1,0 +1,12 @@
+{
+  "apiVersion": 1,
+  "id": "sample.native-directory-transfer",
+  "name": "Native directory transfer example",
+  "resources": [
+    "files.transferFromDirectory",
+    "files.transferToDirectory",
+    "files.readDirectory",
+    "files.transferDirectoryTree",
+    "operations.own"
+  ]
+}

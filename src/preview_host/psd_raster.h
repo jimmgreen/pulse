@@ -20,6 +20,6 @@ namespace pulse::preview {
 bool RasterizePsdFile(const std::wstring& path, UINT max_edge, bool prefer_embedded,
                       std::vector<unsigned char>& pixels, UINT& width, UINT& height,
                       UINT& stride, UINT& source_width, UINT& source_height,
-                      std::wstring* error);
+                      std::wstring* error, bool* embedded = nullptr);
 
 } // namespace pulse::preview

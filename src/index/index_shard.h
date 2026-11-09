@@ -48,9 +48,10 @@ bool ValidateShardBase(const std::wstring& path, uint64_t expected_bytes = 0,
                        uint64_t expected_crc64 = 0);
 bool ResolveActiveShard(const ShardPaths& paths, ShardManifest& manifest,
                         std::wstring& active_path, std::wstring* error = nullptr);
+// failure_stage: 1 validation, 2 retire slot, 3 install base, 4 manifest, 5 rollback.
 bool PublishShardBase(const ShardPaths& paths, const std::wstring& temp_path,
                       uint64_t built_unix, uint64_t wal_bytes,
                       ShardManifest& published, std::wstring* error = nullptr,
-                      const std::wstring& source_id = {});
+                      const std::wstring& source_id = {}, uint32_t* failure_stage = nullptr);
 
 } // namespace pulse::index

@@ -61,12 +61,14 @@ void RequestColumn(AppState& s, const app::Tab& tab, app::ColumnStripColumn& col
     // A pane already loading this folder owns the refresh; issuing another
     // would cancel its generation.
     uint64_t shared = 0;
-    ForEachPane(s, [&](app::Pane& pane) {
-        const app::Tab* other = pane.ActiveTab();
-        if (shared == 0 && other && other->pending_generation != 0 &&
-            SamePath(other->current_path, col.path)) {
-            shared = other->pending_generation;
-        }
+    app::ForEachWindowSharingCore(s, [&](AppState& window) {
+        ForEachPane(window, [&](app::Pane& pane) {
+            const app::Tab* other = pane.ActiveTab();
+            if (shared == 0 && other && other->pending_generation != 0 &&
+                SamePath(other->current_path, col.path)) {
+                shared = other->pending_generation;
+            }
+        });
     });
     col.generation = shared != 0 ? shared
                                  : s.worker.Refresh(col.path, tab.sort_column, tab.sort_direction, 0, nullptr,

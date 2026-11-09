@@ -2,6 +2,7 @@
 #include "entry_order_hold.h"
 #include "entry_sort.h"
 #include "../fs/fs_enum.h"
+#include "../fs/drive_kind.h"
 #include <algorithm>
 #include <cstdint>
 #include <cwctype>
@@ -68,6 +69,11 @@ NotifyPatch ApplyDirNotify(std::vector<fs::DirEntry>& entries, const std::wstrin
         if (at >= 0) entries.erase(entries.begin() + at);
         return NotifyPatch::Applied;
     }
+
+    // Notification delivery does not guarantee the server is still reachable.
+    // Let the cancellable listing worker read remote metadata, never the UI.
+    if (fs::IsUncPath(folder) || fs::IsRemoteLikeDrive(folder))
+        return NotifyPatch::NeedFullEnum;
 
     if (event.action == FILE_ACTION_RENAMED_NEW_NAME) {
         const int at = FindName(entries, event.old_name.empty() ? event.name : event.old_name);
@@ -141,6 +147,10 @@ NotifyPatch ApplyDirNotifyBatch(std::vector<fs::DirEntry>& entries, const std::w
                                 const std::vector<fs::DirNotifyEvent>& events,
                                 ui::SortColumn col, ui::SortDirection sort_dir) {
     if (events.empty()) return NotifyPatch::Applied;
+    if ((fs::IsUncPath(folder) || fs::IsRemoteLikeDrive(folder)) &&
+        std::any_of(events.begin(), events.end(), [](const auto& event) {
+            return event.action != FILE_ACTION_REMOVED;
+        })) return NotifyPatch::NeedFullEnum;
     for (const auto& event : events) {
         if (event.name.empty() || event.name.find_first_of(L"\\/") != std::wstring::npos)
             return NotifyPatch::NeedFullEnum;

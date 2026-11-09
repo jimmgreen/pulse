@@ -66,7 +66,7 @@ HRESULT WINAPI Initialize(uint32_t flags) {
     if (FAILED(hr)) { ReleaseSRWLockExclusive(&initialize_lock); return hr; }
     ACTCTXW context{}; context.cbSize = sizeof(context);
     context.dwFlags = ACTCTX_FLAG_HMODULE_VALID | ACTCTX_FLAG_RESOURCE_NAME_VALID;
-    context.hModule = module; context.lpResourceName = MAKEINTRESOURCEW(2);
+    context.hModule = module; context.lpResourceName = MAKEINTRESOURCEW(module == GetModuleHandleW(nullptr) ? 1 : 2);
     activation = CreateActCtxW(&context);
     if (activation == INVALID_HANDLE_VALUE) {
         const DWORD error = GetLastError(); OleUninitialize(); ReleaseSRWLockExclusive(&initialize_lock);

@@ -152,6 +152,15 @@ void SessionTests(const fs::path& root){
 }
 }
 int wmain(int argc,wchar_t** argv){
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--auto-path") {
+        const auto expected = (fs::path(L"C:\\fixture\\current") / pulse::dialog_auto::DllName).wstring();
+        Check(!DialogAutoPathMismatch(true, expected, L"C:\\fixture\\current"), "same registered component is not a mismatch");
+        Check(!DialogAutoPathMismatch(true, expected, L"c:\\fixture\\current\\."), "case and lexical path normalization preserve registration match");
+        Check(DialogAutoPathMismatch(true, expected, L"C:\\fixture\\new"), "enabled component from another installation is a mismatch");
+        Check(!DialogAutoPathMismatch(false, expected, L"C:\\fixture\\new"), "disabled registration is not an enabled-path mismatch");
+        std::printf("Checks: %d, failures: %d\n", checks, failures);
+        return failures ? 1 : 0;
+    }
     wchar_t event_name[256]{};
     if(GetEnvironmentVariableW(L"PULSE_TEST_MANAGEMENT_CHILD",event_name,256)){
         HANDLE ready=OpenEventW(EVENT_MODIFY_STATE,FALSE,(std::wstring(event_name)+L".ready").c_str());
@@ -174,15 +183,63 @@ int wmain(int argc,wchar_t** argv){
     }
     HWND host=CreateWindowExW(0,L"STATIC",L"management fixture",0,0,0,0,0,HWND_MESSAGE,nullptr,GetModuleHandleW(nullptr),nullptr);
     Check(host!=nullptr,"private wake host");
+    if(argc==2 && std::wstring_view(argv[1])==L"--installed-default") {
+        pulse::dialog_bundle::BundleLease installed;
+        const auto error=pulse::dialog_bundle::ResolveInstalledBundle(fs::path(Self()).parent_path().wstring(),installed);
+        Check(error==0,"installed-default fixture has a verified pointer");
+        const auto selected=installed.Directory();installed=pulse::dialog_bundle::BundleLease{};
+        if(!error) {
+            {
+                DialogManagementController c(host,WM_APP+970,(root/L"state").wstring());
+                auto result=Await(c,c.Refresh());
+                Check(result && result->configuration.bundle_root==selected,"default refresh publishes resolved bundle");
+                result=Await(c,c.SelectApplication(Self()));
+                Check(result && !result->error && result->application_valid,"default application selection persists");
+                std::ifstream input(root/L"state/configuration.bin",std::ios::binary);
+                uint32_t magic=0,bundle_length=1;
+                input.read(reinterpret_cast<char*>(&magic),sizeof(magic));
+                input.read(reinterpret_cast<char*>(&bundle_length),sizeof(bundle_length));
+                Check(input && magic==0x314D4450 && bundle_length==0,"default configuration does not pin resolved version as manual selection");
+            }
+            DialogManagementController c(host,WM_APP+970,(root/L"state").wstring());
+            const auto result=Await(c,c.Refresh());
+            Check(result && result->application_valid && result->configuration.bundle_root==selected,"default configuration restores application and resolves installed pointer again");
+        }
+        DestroyWindow(host);
+        if(!failures) Check(SafeCleanup(bench,root,owned_name,bench_id,root_id),"owned installed-default fixture cleanup");
+        std::printf("Checks: %d, failures: %d\n",checks,failures);return failures?1:0;
+    }
     if(argc==3 && std::wstring_view(argv[1])==L"--auto-bundle") {
         const auto registry_name=L"Software\\PulseStartupTest_"+Unique();HKEY registry=nullptr;
-        if(RegCreateKeyExW(HKEY_CURRENT_USER,registry_name.c_str(),0,nullptr,0,KEY_ALL_ACCESS,nullptr,&registry,nullptr) || RegOverridePredefKey(HKEY_CURRENT_USER,registry)) return 2;
+        const LSTATUS create_error=RegCreateKeyExW(HKEY_CURRENT_USER,registry_name.c_str(),0,nullptr,0,KEY_ALL_ACCESS,nullptr,&registry,nullptr);
+        if(create_error!=ERROR_SUCCESS) {
+            std::printf("[FAIL] isolated registry fixture creation error=%ld\n",create_error);
+            DestroyWindow(host);return 2;
+        }
+        const LSTATUS override_error=RegOverridePredefKey(HKEY_CURRENT_USER,registry);
+        if(override_error!=ERROR_SUCCESS) {
+            std::printf("[FAIL] isolated registry fixture override error=%ld\n",override_error);
+            RegCloseKey(registry);RegDeleteTreeW(HKEY_CURRENT_USER,registry_name.c_str());
+            DestroyWindow(host);return 2;
+        }
         {
             DialogManagementController c(host,WM_APP+970,(root/L"state").wstring());
             auto result=Await(c,c.Refresh());
-            Check(result && fs::path(result->configuration.bundle_root)==fs::path(Self()).parent_path()/L"DialogBridge","formal refresh discovers components beside the executable");
+            pulse::dialog_bundle::BundleLease installed;
+            const auto installed_error=pulse::dialog_bundle::ResolveInstalledBundle(fs::path(Self()).parent_path().wstring(),installed);
+            Check(result && result->bundle_error==installed_error && result->configuration.bundle_root==installed.Directory(),"formal refresh resolves only the installed pointer snapshot");
+            installed=pulse::dialog_bundle::BundleLease{};
             result=Await(c,c.SelectBundle(argv[2]));Check(result && !result->error && result->bundle_verified,"verified component fixture accepted");
+            if(!result || result->error || !result->bundle_verified)
+                std::printf("[DETAIL] selection result=%d error=%lu bundle_error=%lu\n",result.has_value(),
+                    result ? result->error : ERROR_TIMEOUT,result ? result->bundle_error : ERROR_TIMEOUT);
             if(result && !result->error && result->bundle_verified) {
+                {
+                    DialogManagementController restored(host,WM_APP+970,(root/L"state").wstring());
+                    const auto saved=Await(restored,restored.Refresh());
+                    Check(saved && saved->bundle_verified && saved->configuration.bundle_root==result->configuration.bundle_root &&
+                        saved->configuration.manifest_digest==result->configuration.manifest_digest,"explicit experimental bundle survives controller recreation");
+                }
                 result=Await(c,c.EnableAuto());Check(result && !result->error && result->auto_enabled,"controller enable reaches actual isolated COM registration");
                 result=Await(c,c.Refresh());Check(result && result->auto_enabled,"refresh reports actual enabled registration");
                 result=Await(c,c.DisableAuto());Check(result && !result->error && !result->auto_enabled,"controller disable restores isolated COM registration");

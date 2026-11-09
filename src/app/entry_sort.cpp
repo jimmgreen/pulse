@@ -142,7 +142,9 @@ ScopedMediaSortFolder::~ScopedMediaSortFolder() {
 bool EntryLess(const fs::DirEntry& a, const fs::DirEntry& b,
                ui::SortColumn col, ui::SortDirection dir) {
     if (const EntryGrouping* grouping = CurrentEntryGrouping()) {
-        if (const int c = GroupCompare(a, b, grouping->by, grouping->clock, col, dir))
+        GroupClock clock = grouping->clock;
+        clock.folders = CurrentFolderSortMode();
+        if (const int c = GroupCompare(a, b, grouping->by, clock, col, dir))
             return c < 0;
     }
     return EntryLess(a, b, col, dir, CurrentFolderSortMode());
@@ -161,12 +163,11 @@ bool Less(const fs::DirEntry& a, const fs::DirEntry& b, ui::SortColumn col,
           const MediaSortKey* ma = nullptr, const MediaSortKey* mb = nullptr) {
     const bool a_folder = a.is_dir || (!a.link_target.empty() && a.link_target_is_dir);
     const bool b_folder = b.is_dir || (!b.link_target.empty() && b.link_target_is_dir);
-    // FoldersFirst pins folders above the direction flip below; FollowDirection
-    // feeds the group through it so descending order sends folders down.
+    // Folder placement is independent of the sort direction.
     if (a_folder != b_folder) {
         if (folders == FolderSortMode::FoldersFirst) return a_folder;
-        if (folders == FolderSortMode::FollowDirection)
-            return (dir == ui::SortDirection::Desc) ? !a_folder : a_folder;
+        if (folders == FolderSortMode::FoldersLast)
+            return !a_folder;
     }
     int cmp = 0;
     // This PC rows: its details view heads the date column 使用情况 and the
@@ -260,8 +261,9 @@ namespace {
 // (grouping and folder mode included), computed over positions so that a
 // throwing tick leaves the rows as they were.
 void SortRows(std::vector<fs::DirEntry>& entries, ui::SortColumn col, ui::SortDirection dir,
-              const FolderSizeLookup* sizes, const std::function<void()>& tick) {
+              const FolderSizeLookup* sizes, const std::function<void()>& tick, size_t keep = SIZE_MAX) {
     const size_t n = entries.size();
+    if (keep == 0) { entries.clear(); return; }
     if (n < 2) return;
     std::vector<SizeKey> size_keys;
     if (sizes) {
@@ -301,33 +303,39 @@ void SortRows(std::vector<fs::DirEntry>& entries, ui::SortColumn col, ui::SortDi
     std::vector<size_t> order(n);
     std::iota(order.begin(), order.end(), size_t{0});
     const EntryGrouping* grouping = CurrentEntryGrouping();
+    const FolderSortMode mode = CurrentFolderSortMode();
+    GroupClock clock = grouping ? grouping->clock : GroupClock{};
+    clock.date_column = col;
+    clock.folders = mode;
     std::vector<int> group_ranks;
-    if (grouping && grouping->by != GroupBy::Location) {
-        GroupClock clock = grouping->clock;
-        clock.date_column = col;
+    if (grouping) {
         group_ranks.reserve(n);
         for (const auto& entry : entries) {
             if (tick) tick();
             group_ranks.push_back(GroupRank(entry, grouping->by, clock));
         }
     }
-    const FolderSortMode mode = CurrentFolderSortMode();
-    std::sort(order.begin(), order.end(), [&](size_t x, size_t y) {
+    const auto less = [&](size_t x, size_t y) {
         if (tick) tick();
         const fs::DirEntry& a = entries[x];
         const fs::DirEntry& b = entries[y];
         if (grouping) {
             if (const int c = GroupCompareRanks(a, b, grouping->by, col, dir,
-                    group_ranks.empty() ? 0 : group_ranks[x], group_ranks.empty() ? 0 : group_ranks[y]))
+                    group_ranks.empty() ? 0 : group_ranks[x], group_ranks.empty() ? 0 : group_ranks[y], clock))
                 return c < 0;
         }
         return Less(a, b, col, dir, mode,
                     sizes ? &size_keys[x] : nullptr, sizes ? &size_keys[y] : nullptr,
                     keyed ? &name_keys[x] : nullptr, keyed ? &name_keys[y] : nullptr,
                     media ? &media_keys[x] : nullptr, media ? &media_keys[y] : nullptr);
-    });
+    };
+    keep = (std::min)(keep, n);
+    if (keep < n) {
+        std::partial_sort(order.begin(), order.begin() + keep, order.end(), less);
+        order.resize(keep);
+    } else std::sort(order.begin(), order.end(), less);
     std::vector<fs::DirEntry> sorted;
-    sorted.reserve(n);
+    sorted.reserve(keep);
     for (const size_t i : order) sorted.push_back(std::move(entries[i]));
     entries.swap(sorted);
 }
@@ -337,6 +345,11 @@ void SortRows(std::vector<fs::DirEntry>& entries, ui::SortColumn col, ui::SortDi
 void SortEntries(std::vector<fs::DirEntry>& entries, ui::SortColumn col, ui::SortDirection dir,
                  const std::function<void()>& tick) {
     SortRows(entries, col, dir, nullptr, tick);
+}
+
+void SortFirstEntries(std::vector<fs::DirEntry>& entries, ui::SortColumn col, ui::SortDirection dir,
+                      size_t keep, const std::function<void()>& tick) {
+    SortRows(entries, col, dir, nullptr, tick, keep);
 }
 
 void SortEntriesBySize(std::vector<fs::DirEntry>& entries, ui::SortDirection dir,

@@ -6,7 +6,7 @@
 namespace pulse::ops {
 
 inline OpStatus PresentOperationStatus(OpStatus status) {
-    if (status.phase == OpPhase::Completed) status.percent = 100.0f;
+    if (status.phase == OpPhase::Completed && (!status.external || status.external_outcome == ExternalOutcome::Completed)) status.percent = 100.0f;
     status.summary = path::FriendlyPathText(status.summary);
     status.last_error = path::FriendlyPathText(status.last_error);
     status.source_label = path::FriendlyPathText(status.source_label);

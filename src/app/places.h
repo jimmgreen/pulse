@@ -172,6 +172,21 @@ public:
     void EnsureDefaults();
     bool Load();
     bool Save() const;
+    // UI-owned batch: reuse mutation helpers while queueing one final disk snapshot.
+    class ScopedAsyncSave {
+    public:
+        explicit ScopedAsyncSave(PlacesCatalog& owner) : owner_(owner) { ++owner_.async_save_depth_; }
+        ~ScopedAsyncSave() {
+            if (--owner_.async_save_depth_ == 0 && owner_.async_save_dirty_) {
+                owner_.async_save_dirty_ = false;
+                owner_.QueuePlacesSave();
+            }
+        }
+        ScopedAsyncSave(const ScopedAsyncSave&) = delete;
+        ScopedAsyncSave& operator=(const ScopedAsyncSave&) = delete;
+    private:
+        PlacesCatalog& owner_;
+    };
     bool FlushTagSave() const;
     DWORD TagSaveError() const;
 
@@ -337,6 +352,8 @@ private:
     SaveSnapshot CaptureSaveSnapshot() const;
     static bool SaveSnapshotFile(const SaveSnapshot& snapshot);
     void QueuePlacesSave() const;
+    unsigned async_save_depth_ = 0;
+    mutable bool async_save_dirty_ = false;
     void StopPlacesWriter();
     void MarkPlacesDirty() const;
 

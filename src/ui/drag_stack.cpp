@@ -17,6 +17,9 @@
 // once everything is at rest. With system animations off the cards snap
 // to the pointer and vanish on release.
 #include "drag_drop.h"
+#include "drag_layout.h"
+#include "drag_feedback.h"
+#include "../common/localization.h"
 #include "ui_motion.h"
 #include "command_icons.h"
 
@@ -41,7 +44,6 @@
 #ifdef PULSE_DRAGSTACK_TEST
 // Offline render harness hooks (not compiled into Pulse.exe).
 void DragStackTestFrame(HBITMAP dib, int w, int h, POINT pos, float alpha);
-bool DragStackTestDark();
 #endif
 
 namespace pulse::ui {
@@ -87,24 +89,24 @@ constexpr UINT kStepMessage = WM_APP + 0x4D;
 constexpr int kMaxCards = 3;
 
 // Geometry in DIPs.
-constexpr float kCardH = 34.0f;
+constexpr float kCardH = 30.0f;
 constexpr float kCardMinW = 116.0f;
-constexpr float kCardMaxW = 236.0f;
-constexpr float kRadius = 8.0f;
+constexpr float kCardMaxW = 200.0f;
+constexpr float kRadius = 6.0f;
 constexpr float kPadX = 10.0f;
 constexpr float kIcon = 16.0f;
 constexpr float kGap = 8.0f;
-constexpr float kOffX = 16.0f; // lead card's top-left relative to the pointer
-constexpr float kOffY = 14.0f;
-constexpr float kWinW = 360.0f; // layered window; the lead card sits at the anchor
+constexpr float kOffX = 14.0f; // lead card's top-left relative to the pointer
+constexpr float kOffY = 12.0f;
+constexpr float kWinW = 1024.0f; // layered window; the lead card sits at the anchor
 constexpr float kWinH = 196.0f;
 constexpr float kAnchorX = 96.0f;
 constexpr float kAnchorY = 60.0f;
 
 // Resting fan of the cards behind the lead: offset (DIP) and tilt (deg).
 constexpr float kFanDx[kMaxCards] = {0.0f, 5.0f, 10.0f};
-constexpr float kFanDy[kMaxCards] = {0.0f, 4.0f, 8.0f};
-constexpr float kFanRot[kMaxCards] = {0.0f, -4.0f, 3.5f};
+constexpr float kFanDy[kMaxCards] = {0.0f, 5.0f, 10.0f};
+constexpr float kFanRot[kMaxCards] = {0.0f, 0.0f, 0.0f};
 
 // Follow springs, lead first. The lead is stiff so it feels attached to the
 // pointer; the ones behind lag more and more.
@@ -169,9 +171,19 @@ struct Card {
 
 class DragStack final : public DragVisual {
 public:
-    static DragStack* Create(const std::vector<std::wstring>& paths);
+    static DragStack* Create(const std::vector<std::wstring>& paths, bool dark);
+#ifdef PULSE_WITH_TEST_HOOKS
+    static bool SaveReference(const std::vector<std::wstring>& paths, bool dark, DWORD effect,
+                              const std::wstring& text, const wchar_t* png, float dpi_scale);
+#endif
 
     void Track() override { Step(false); }
+
+    void Feedback(const std::wstring& text) override {
+        if (feedback_ == text) return;
+        feedback_ = text;
+        Step(true);
+    }
 
     void Effect(DWORD effect) override {
         if (effect == effect_) return;
@@ -209,13 +221,15 @@ private:
     DragStack() = default;
     ~DragStack() { ReleaseSurface(); }
 
-    bool Init(const std::vector<std::wstring>& paths);
+    bool Init(const std::vector<std::wstring>& paths, bool dark);
     bool InitSurface();
     void ReleaseSurface();
     void LoadCard(Card& card, const std::wstring& path, float forced_w);
     void Step(bool force);
     void Integrate(float dt, float tx, float ty);
     void Render(float scale, float alpha);
+    float FeedbackWidth();
+    void DrawFeedback(float scale, D2D1_POINT_2F pivot);
     void DrawCard(const Card& card, bool lead, float dx, float dy, float scale,
                   D2D1_POINT_2F pivot);
     void Arm() {
@@ -250,6 +264,8 @@ private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 
     HWND hwnd_ = nullptr;
+    bool snapshot_ = false;
+    float snapshot_scale_ = 1.0f;
     bool timer_ = false;
     HANDLE tick_ = nullptr;
     HWND tick_hwnd_ = nullptr;
@@ -262,6 +278,7 @@ private:
     size_t count_ = 0;
     std::vector<Card> cards_;
     DWORD effect_ = DROPEFFECT_MOVE;
+    std::wstring feedback_;
     Phase phase_ = Phase::Live;
     POINT origin_{};  // pointer when the drag began
     POINT drop_pt_{}; // pointer when it ended
@@ -282,6 +299,7 @@ private:
     Com<IDWriteFactory> dw_;
     Com<IDWriteTextFormat> name_fmt_;
     Com<IDWriteTextFormat> badge_fmt_;
+    Com<IDWriteTextFormat> feedback_fmt_;
     Com<IDWriteTextFormat> glyph_fmt_;
     Com<IDWriteInlineObject> ellipsis_;
     Com<ID2D1SolidColorBrush> brush_;
@@ -324,17 +342,17 @@ LRESULT CALLBACK DragStack::WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
-DragStack* DragStack::Create(const std::vector<std::wstring>& paths) {
+DragStack* DragStack::Create(const std::vector<std::wstring>& paths, bool dark) {
     if (paths.empty()) return nullptr;
     auto* stack = new DragStack();
-    if (!stack->Init(paths)) {
+    if (!stack->Init(paths, dark)) {
         stack->Close();
         return nullptr;
     }
     return stack;
 }
 
-bool DragStack::Init(const std::vector<std::wstring>& paths) {
+bool DragStack::Init(const std::vector<std::wstring>& paths, bool dark) {
     animate_ = motion::SystemAnimationsEnabled();
     count_ = paths.size();
     GetCursorPos(&origin_);
@@ -354,18 +372,9 @@ bool DragStack::Init(const std::vector<std::wstring>& paths) {
         }
     }
     if (dpi == 0) dpi = 96;
-    s_ = static_cast<float>(dpi) / 96.0f;
+    s_ = snapshot_ ? snapshot_scale_ : static_cast<float>(dpi) / 96.0f;
 
-    // Theme: the row under the pointer is what is being picked up, so its
-    // colour says whether Pulse is light or dark right now.
-    if (HDC screen = GetDC(nullptr)) {
-        const COLORREF under = GetPixel(screen, origin_.x, origin_.y);
-        ReleaseDC(nullptr, screen);
-        if (under != CLR_INVALID) dark_ = Luminance(under) < 0.45f;
-    }
-#ifdef PULSE_DRAGSTACK_TEST
-    dark_ = DragStackTestDark();
-#endif
+    dark_ = dark;
     DWORD color = 0;
     BOOL opaque = FALSE;
     if (SUCCEEDED(DwmGetColorizationColor(&color, &opaque))) {
@@ -400,6 +409,7 @@ bool DragStack::Init(const std::vector<std::wstring>& paths) {
         cards_[i].y = y0;
     }
 
+    if (snapshot_) return true;
     hwnd_ = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE |
                                 WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
                             kClassName, L"", WS_POPUP, 0, 0, win_w_, win_h_, nullptr, nullptr,
@@ -450,9 +460,16 @@ bool DragStack::InitSurface() {
         return false;
     name_fmt_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
     name_fmt_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    if (FAILED(dw_->CreateTextFormat(ui_font, nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                    DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                    12.0f * s_, L"", feedback_fmt_.Put())))
+        return false;
+    feedback_fmt_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    feedback_fmt_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
     if (SUCCEEDED(dw_->CreateEllipsisTrimmingSign(name_fmt_.Get(), ellipsis_.Put()))) {
         const DWRITE_TRIMMING trim{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
         name_fmt_->SetTrimming(&trim, ellipsis_.Get());
+        feedback_fmt_->SetTrimming(&trim, ellipsis_.Get());
     }
     if (SUCCEEDED(dw_->CreateTextFormat(ui_font, nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
                                         DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
@@ -704,11 +721,13 @@ void DragStack::Step(bool force) {
 
 void DragStack::DrawCard(const Card& c, bool lead, float dx, float dy, float scale,
                          D2D1_POINT_2F pivot) {
-    const float h = kCardH * s_;
+    const float title_h = kCardH * s_;
+    const float h = title_h;
+    const float w = c.w;
     const float r = kRadius * s_;
     const float ax = kAnchorX * s_ + dx;
     const float ay = kAnchorY * s_ + dy;
-    const D2D1_MATRIX_3X2_F m = D2D1::Matrix3x2F::Rotation(c.rot, D2D1::Point2F(c.w * 0.5f, h * 0.5f)) *
+    const D2D1_MATRIX_3X2_F m = D2D1::Matrix3x2F::Rotation(c.rot, D2D1::Point2F(w * 0.5f, title_h * 0.5f)) *
                                 D2D1::Matrix3x2F::Translation(ax, ay) *
                                 D2D1::Matrix3x2F::Scale(scale, scale, pivot);
     rt_->SetTransform(m);
@@ -718,27 +737,27 @@ void DragStack::DrawCard(const Card& c, bool lead, float dx, float dy, float sca
     const float sa = dark_ ? 0.30f : 0.10f;
     brush_->SetColor(D2D1::ColorF(0, sa * 0.45f));
     rt_->FillRoundedRectangle(
-        D2D1::RoundedRect(D2D1::RectF(-3 * s_, 1 * s_, c.w + 3 * s_, h + 6 * s_), r + 3 * s_,
+        D2D1::RoundedRect(D2D1::RectF(-3 * s_, 1 * s_, w + 3 * s_, h + 6 * s_), r + 3 * s_,
                           r + 3 * s_),
         brush_.Get());
     brush_->SetColor(D2D1::ColorF(0, sa));
     rt_->FillRoundedRectangle(
-        D2D1::RoundedRect(D2D1::RectF(-1 * s_, 1 * s_, c.w + 1 * s_, h + 2.5f * s_), r + 1 * s_,
+        D2D1::RoundedRect(D2D1::RectF(-1 * s_, 1 * s_, w + 1 * s_, h + 2.5f * s_), r + 1 * s_,
                           r + 1 * s_),
         brush_.Get());
 
-    const D2D1_ROUNDED_RECT body = D2D1::RoundedRect(D2D1::RectF(0, 0, c.w, h), r, r);
+    const D2D1_ROUNDED_RECT body = D2D1::RoundedRect(D2D1::RectF(0, 0, w, h), r, r);
     brush_->SetColor(dark_ ? Rgba(lead ? 0x2F2F2F : 0x292929, 1.0f)
                            : Rgba(lead ? 0xFFFFFF : 0xF7F7F7, 1.0f));
     rt_->FillRoundedRectangle(body, brush_.Get());
     brush_->SetColor(dark_ ? D2D1::ColorF(0xFFFFFF, 0.10f) : D2D1::ColorF(0, 0.09f));
     rt_->DrawRoundedRectangle(
-        D2D1::RoundedRect(D2D1::RectF(0.5f, 0.5f, c.w - 0.5f, h - 0.5f), r, r), brush_.Get(),
+        D2D1::RoundedRect(D2D1::RectF(0.5f, 0.5f, w - 0.5f, h - 0.5f), r, r), brush_.Get(),
         1.0f);
 
     const float icon = kIcon * s_;
     const float ix = kPadX * s_;
-    const float iy = (h - icon) * 0.5f;
+    const float iy = (title_h - icon) * 0.5f;
     if (c.icon.Get()) {
         rt_->DrawBitmap(c.icon.Get(), D2D1::RectF(ix, iy, ix + icon, iy + icon), 1.0f,
                         D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
@@ -752,13 +771,13 @@ void DragStack::DrawCard(const Card& c, bool lead, float dx, float dy, float sca
 
     if (!lead) return;
 
-    // Count badge on the top-right corner.
+    // Count badge on the upper-left corner, above the stack.
     if (count_ > 1 && badge_fmt_.Get()) {
         const std::wstring text = count_ > 99 ? L"99+" : std::to_wstring(count_);
-        const float bh = 18.0f * s_;
+        const float bh = 20.0f * s_;
         const float bw = std::max(bh, (8.0f + 6.5f * static_cast<float>(text.size())) * s_);
-        const float bx = c.w - bw * 0.5f - 2 * s_;
-        const float by = -bh * 0.5f + 1 * s_;
+        const float bx = bw * 0.5f - 8 * s_;
+        const float by = -8 * s_;
         const D2D1_ROUNDED_RECT pill =
             D2D1::RoundedRect(D2D1::RectF(bx - bw * 0.5f, by, bx + bw * 0.5f, by + bh), bh * 0.5f,
                               bh * 0.5f);
@@ -772,35 +791,22 @@ void DragStack::DrawCard(const Card& c, bool lead, float dx, float dy, float sca
                        brush_.Get());
     }
 
-    // What the target will do. Move is the default and needs no glyph.
-    const wchar_t* glyph = nullptr;
-    UINT32 glyph_color = 0;
-    if (phase_ == Phase::Live && glyph_fmt_.Get()) {
-        if (effect_ == DROPEFFECT_NONE) {
-            glyph = L"\uE711"; // Cancel
-            glyph_color = 0xC42B1C;
-        } else if (!(effect_ & DROPEFFECT_MOVE) && (effect_ & DROPEFFECT_COPY)) {
-            glyph = L"\uE710"; // Add
-            glyph_color = 0;
-        } else if (!(effect_ & (DROPEFFECT_MOVE | DROPEFFECT_COPY)) && (effect_ & DROPEFFECT_LINK)) {
-            glyph = L"\uE71B"; // Link
-            glyph_color = 0;
-        }
-    }
-    if (glyph) {
-        const float gr = 8.5f * s_;
-        const D2D1_POINT_2F gc = D2D1::Point2F(1 * s_, h - 1 * s_);
-        const D2D1_ELLIPSE e = D2D1::Ellipse(gc, gr, gr);
-        const bool solid = glyph_color != 0;
-        brush_->SetColor(solid ? Rgba(glyph_color, 1.0f) : accent_);
-        rt_->FillEllipse(e, brush_.Get());
-        brush_->SetColor(dark_ ? Rgba(0x2F2F2F, 1.0f) : Rgba(0xFFFFFF, 1.0f));
-        rt_->DrawEllipse(e, brush_.Get(), 2.0f * s_);
-        brush_->SetColor((solid || !accent_light_) ? D2D1::ColorF(0xFFFFFF) : D2D1::ColorF(0x111111));
-        const D2D1_RECT_F badge = D2D1::RectF(gc.x - gr, gc.y - gr, gc.x + gr, gc.y + gr);
-        if (!command_icons::DrawGlyph(rt_.Get(), brush_.Get(), glyph, badge, 9.0f * s_))
-            rt_->DrawText(glyph, 1, glyph_fmt_.Get(), badge, brush_.Get());
-    }
+
+}
+
+float DragStack::FeedbackWidth() {
+    return LayoutDragFeedback(dw_.Get(), feedback_.empty() ? l10n::Get(l10n::StringId::DragHintReleaseCancel) : feedback_, s_, effect_ == DROPEFFECT_NONE).width;
+}
+
+void DragStack::DrawFeedback(float scale, D2D1_POINT_2F pivot) {
+    if (phase_ != Phase::Live) return;
+    const auto text = feedback_.empty() ? l10n::Get(l10n::StringId::DragHintReleaseCancel) : feedback_;
+    const auto layout = LayoutDragFeedback(dw_.Get(), text, s_, effect_ == DROPEFFECT_NONE);
+    // HTML .gcards has a fixed 36px height and .gbadge a 6px top margin.
+    rt_->SetTransform(D2D1::Matrix3x2F::Translation(kAnchorX * s_, (kAnchorY + 42) * s_) *
+        D2D1::Matrix3x2F::Scale(scale, scale, pivot));
+    DrawDragFeedback(rt_.Get(), brush_.Get(), layout, 0, 0, s_, dark_, effect_ == DROPEFFECT_NONE,
+        (effect_ & DROPEFFECT_COPY) != 0, feedback_.empty() || text == l10n::Get(l10n::StringId::DragHintReleaseCancel));
 }
 
 void DragStack::Render(float scale, float alpha) {
@@ -808,8 +814,22 @@ void DragStack::Render(float scale, float alpha) {
     const Card& lead = cards_[0];
     const float fx = lead.x - std::floor(lead.x);
     const float fy = lead.y - std::floor(lead.y);
-    const POINT win_pos{static_cast<LONG>(std::floor(lead.x) - kAnchorX * s_),
-                        static_cast<LONG>(std::floor(lead.y) - kAnchorY * s_)};
+    POINT win_pos{static_cast<LONG>(std::floor(lead.x) - kAnchorX * s_),
+                  static_cast<LONG>(std::floor(lead.y) - kAnchorY * s_)};
+    if (phase_ == Phase::Live) {
+        MONITORINFO monitor{sizeof(monitor)};
+        if (GetMonitorInfoW(MonitorFromPoint(last_pt_, MONITOR_DEFAULTTONEAREST), &monitor)) {
+            // Include the stack, shadow and separate feedback capsule so it
+            // remains readable at the right/bottom screen edges.
+            const float inset = 32.0f * s_;
+            const float x = std::clamp(lead.x, monitor.rcWork.left + inset,
+                std::max(monitor.rcWork.left + inset, monitor.rcWork.right - std::max(kCardMaxW * s_, FeedbackWidth()) - inset));
+            const float y = std::clamp(lead.y, monitor.rcWork.top + inset,
+                std::max(monitor.rcWork.top + inset, monitor.rcWork.bottom - (kCardH + 10.0f + 6.0f + 24.0f) * s_ - inset));
+            win_pos.x += static_cast<LONG>(std::floor(x) - std::floor(lead.x));
+            win_pos.y += static_cast<LONG>(std::floor(y) - std::floor(lead.y));
+        }
+    }
 
     const RECT rc{0, 0, win_w_, win_h_};
     rt_->BindDC(mem_dc_, &rc);
@@ -834,6 +854,7 @@ void DragStack::Render(float scale, float alpha) {
         }
         DrawCard(c, i == 0, dx, dy, scale, pivot);
     }
+    DrawFeedback(scale, pivot);
     rt_->SetTransform(D2D1::Matrix3x2F::Identity());
     if (rt_->EndDraw() == D2DERR_RECREATE_TARGET) {
         // Lost device on a DC target is rare; dropping the frame is fine.
@@ -843,6 +864,7 @@ void DragStack::Render(float scale, float alpha) {
     GdiFlush();
     DragStackTestFrame(dib_, win_w_, win_h_, win_pos, Clamp01(alpha));
 #endif
+    if (snapshot_) return;
     POINT src{0, 0};
     SIZE size{win_w_, win_h_};
     BLENDFUNCTION blend{AC_SRC_OVER, 0, static_cast<BYTE>(std::lround(Clamp01(alpha) * 255.0f)),
@@ -855,8 +877,42 @@ void DragStack::Render(float scale, float alpha) {
     }
 }
 
-DragVisual* CreateDragStack(const std::vector<std::wstring>& paths) {
-    return DragStack::Create(paths);
+#ifdef PULSE_WITH_TEST_HOOKS
+bool DragStack::SaveReference(const std::vector<std::wstring>& paths,bool dark,DWORD effect,
+                             const std::wstring& text,const wchar_t* png,float dpi_scale) {
+    if(paths.empty() || !png)return false;
+    DragStack stack;
+    stack.snapshot_=true;
+    stack.snapshot_scale_=std::clamp(dpi_scale,1.0f,2.5f);
+    if(!stack.Init(paths,dark) || !stack.wic_.Get())return false;
+    stack.effect_=effect;stack.feedback_=text;
+    for(size_t i=0;i<stack.cards_.size();++i) {
+        stack.cards_[i].x=stack.cards_[0].x+static_cast<float>(i)*5*stack.s_;
+        stack.cards_[i].y=stack.cards_[0].y+static_cast<float>(i)*5*stack.s_;
+        stack.cards_[i].rot=0;
+    }
+    stack.Render(1,1);
+    GdiFlush();
+    DIBSECTION dib{};
+    if(GetObjectW(stack.dib_,sizeof(dib),&dib)!=sizeof(dib) || !dib.dsBm.bmBits)return false;
+    Com<IWICBitmap> bitmap;
+    if(FAILED(stack.wic_->CreateBitmapFromMemory(static_cast<UINT>(stack.win_w_),static_cast<UINT>(stack.win_h_),
+        GUID_WICPixelFormat32bppPBGRA,static_cast<UINT>(dib.dsBm.bmWidthBytes),
+        static_cast<UINT>(dib.dsBm.bmWidthBytes*stack.win_h_),static_cast<BYTE*>(dib.dsBm.bmBits),bitmap.Put())))return false;
+    Com<IWICStream> stream;Com<IWICBitmapEncoder> encoder;Com<IWICBitmapFrameEncode> frame;
+    if(FAILED(stack.wic_->CreateStream(stream.Put())) || FAILED(stream->InitializeFromFilename(png,GENERIC_WRITE)) ||
+       FAILED(stack.wic_->CreateEncoder(GUID_ContainerFormatPng,nullptr,encoder.Put())) ||
+       FAILED(encoder->Initialize(stream.Get(),WICBitmapEncoderNoCache)) ||
+       FAILED(encoder->CreateNewFrame(frame.Put(),nullptr)) || FAILED(frame->Initialize(nullptr)))return false;
+    WICPixelFormatGUID format=GUID_WICPixelFormat32bppBGRA;
+    if(FAILED(frame->SetSize(static_cast<UINT>(stack.win_w_),static_cast<UINT>(stack.win_h_))) ||
+       FAILED(frame->SetPixelFormat(&format)) || FAILED(frame->WriteSource(bitmap.Get(),nullptr)))return false;
+    return SUCCEEDED(frame->Commit()) && SUCCEEDED(encoder->Commit());
+}
+#endif
+
+DragVisual* CreateDragStack(const std::vector<std::wstring>& paths, bool dark) {
+    return DragStack::Create(paths, dark);
 }
 
 // Pulse.exe compiles this file; the console drag test does not, and runs
@@ -864,4 +920,10 @@ DragVisual* CreateDragStack(const std::vector<std::wstring>& paths) {
 const bool g_drag_stack_registered = (SetDragVisualFactory(&CreateDragStack), true);
 
 } // namespace
+#ifdef PULSE_WITH_TEST_HOOKS
+bool SaveDragStackReference(const std::vector<std::wstring>& paths,bool dark,DWORD effect,
+                            const std::wstring& text,const wchar_t* png,float dpi_scale) {
+    return DragStack::SaveReference(paths,dark,effect,text,png,dpi_scale);
+}
+#endif
 } // namespace pulse::ui

@@ -2,7 +2,60 @@
 #include <filesystem>
 #include <fstream>
 #include <cstdio>
-int main() {
+#include <chrono>
+#include <cstring>
+#include <algorithm>
+#include <vector>
+
+// Exercise the real preparation path but cancel at its last progress callback,
+// before RecycleItem. No fixture ever enters the user's Recycle Bin.
+static int PrepareBenchmark() {
+    namespace filesystem = std::filesystem;
+    using namespace pulse::ops;
+    const HRESULT initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (FAILED(initialized)) return 2;
+    const auto root = filesystem::current_path() / L"bench_data" /
+        (L"delete-prepare-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+    if (!filesystem::create_directories(root)) { CoUninitialize(); return 2; }
+    int failures = 0;
+    constexpr int count = 24;
+    for (int i = 0; i < count; ++i) std::ofstream(root / (std::to_wstring(i) + L".txt")) << "isolated fixture";
+    for (int round = 0; round < 3; ++round) {
+        std::vector<double> timings;
+        double total = 0;
+        for (int i = 0; i < count; ++i) {
+            const auto source = root / (std::to_wstring(i) + L".txt");
+            std::atomic<bool> cancel{false};
+            bool reached_transfer = false;
+            const auto start = std::chrono::steady_clock::now();
+            ShellTransferResult result;
+            {
+                RecycleCache cache; // Each click is an independent request.
+                result = DeleteWithCurrentToken({source.wstring()}, false, nullptr, cancel,
+                    [&](const std::wstring&, float) { reached_transfer = true; cancel.store(true); }, &cache);
+            }
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            timings.push_back(ms); total += ms;
+            if (!reached_transfer || !result.cancelled || result.mutated || !result.sources.empty() ||
+                !filesystem::exists(source) || filesystem::file_size(source) != 16) {
+                std::printf("[FAIL] preparation item=%d hr=%08lx reached=%d cancelled=%d mutated=%d\n",
+                    i, static_cast<unsigned long>(result.hr), reached_transfer, result.cancelled, result.mutated);
+                ++failures;
+                break;
+            }
+        }
+        const double first = timings.front();
+        std::sort(timings.begin() + 1, timings.end());
+        std::printf("[%s] round=%d independent_requests=%zu first_ms=%.3f subsequent_median_ms=%.3f total_ms=%.3f\n",
+            failures ? "FAIL" : "PASS", round, timings.size(), first, timings[timings.size() / 2], total);
+    }
+    filesystem::remove_all(root);
+    CoUninitialize();
+    return failures ? 1 : 0;
+}
+
+int main(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "--prepare-bench") == 0) return PrepareBenchmark();
     namespace fs = std::filesystem;
     using namespace pulse::ops;
     wchar_t temp[MAX_PATH]{};

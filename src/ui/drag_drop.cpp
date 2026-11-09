@@ -596,9 +596,19 @@ ULONG ListDropSource::Release() {
 
 namespace {
 DragVisualFactory g_drag_visual_factory = nullptr;
+thread_local DragVisual* g_active_drag_visual = nullptr;
 } // namespace
 
 void SetDragVisualFactory(DragVisualFactory factory) { g_drag_visual_factory = factory; }
+
+bool SetDragVisualFeedback(const std::wstring& text) {
+    if (!g_active_drag_visual) return false;
+    g_active_drag_visual->Feedback(text);
+    return true;
+}
+
+bool DragVisualActive() { return g_active_drag_visual != nullptr; }
+
 
 namespace {
 // UI threads only, but windows may run on their own: keep it locked.
@@ -659,7 +669,7 @@ HRESULT ListDropSource::QueryContinueDrag(BOOL escape_pressed, DWORD key_state) 
 }
 
 DWORD DoFileDragDrop(const std::vector<std::wstring>& paths, DWORD allowed_effects,
-                     std::function<bool()> esc_consumed, const std::wstring& source_view) {
+                     std::function<bool()> esc_consumed, const std::wstring& source_view, bool dark) {
     // Recycle rows name the original path, which may now belong to a new file.
     if (paths.empty() || fs::IsRecycleViewPath(source_view)) return DROPEFFECT_NONE;
 
@@ -686,14 +696,16 @@ DWORD DoFileDragDrop(const std::vector<std::wstring>& paths, DWORD allowed_effec
 
     auto* source = new ListDropSource();
     source->SetEscHook(std::move(esc_consumed));
-    DragVisual* visual = g_drag_visual_factory ? g_drag_visual_factory(paths) : nullptr;
+    DragVisual* visual = g_drag_visual_factory ? g_drag_visual_factory(paths, dark) : nullptr;
     source->SetVisual(visual);
+    g_active_drag_visual = visual;
     DWORD effect = DROPEFFECT_NONE;
     // Explorer's file drags also allow LINK. Apps that open a dropped file
     // often answer LINK, and without it they show the no-drop cursor (#235).
     // Preferred DropEffect above keeps only the caller's copy/move, so drop
     // targets that pick a default (Explorer, Pulse) still copy or move.
     const HRESULT drag_hr = ::DoDragDrop(data, source, allowed_effects | DROPEFFECT_LINK, &effect);
+    g_active_drag_visual = nullptr;
     if (effect == DROPEFFECT_NONE && drag_hr == DRAGDROP_S_DROP) {
         // Optimized move (Pulse, Explorer): the target moved the items itself
         // and reports NONE so that we do not delete them; it still moved.

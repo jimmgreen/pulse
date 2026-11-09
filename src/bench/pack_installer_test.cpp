@@ -162,8 +162,8 @@ int OnlineInstall(const wchar_t* requested_root, const wchar_t* asset_directory 
         };
         std::printf("Source: downloaded catalog assets (network transport is not under test)\n");
     }
-    const PackRelease* releases[] = {&kMediaPackRelease, &kImagePackRelease, &kRawPackRelease, &kArchivePackRelease};
-    const packs::PackId ids[] = {packs::PackId::Media, packs::PackId::Images, packs::PackId::Raw, packs::PackId::Archives};
+    const PackRelease* releases[] = {&kMediaPackRelease, &kImagePackRelease, &kRawPackRelease};
+    const packs::PackId ids[] = {packs::PackId::Media, packs::PackId::Images, packs::PackId::Raw};
     for (size_t p = 0; p < std::size(releases); ++p) {
         const auto& release = *releases[p];
         std::printf("Installing %s: %ls %ls\n", asset_directory ? "downloaded assets" : "online", release.key, release.version);
@@ -225,7 +225,7 @@ int wmain(int argc, wchar_t** argv) {
     Check(!roundtrip.enabled[2] && !roundtrip.enabled[3] && roundtrip.enabled[0] && roundtrip.enabled[1],
           "RAW and archive enable states round-trip independently");
     Check(std::wstring(packs::PackMainTool(packs::PackId::Raw)) == L"pulse-rawpack.exe" &&
-          std::wstring(packs::PackMainTool(packs::PackId::Archives)) == L"7z.exe", "new pack tool routing");
+          std::wstring(packs::PackMainTool(packs::PackId::Archives)).empty(), "retired archive pack has no executable route");
 
     const std::wstring root = MakeRoot();
     const std::wstring base = root + L"\\ffmpeg";
@@ -467,7 +467,7 @@ int wmain(int argc, wchar_t** argv) {
               !PackUpdateAvailable(L"1.0.1", L"4294967296.0") && !PackUpdateAvailable(L"", L"1.2.3.4.5.6.7.8.9"),
               "unreadable catalog version is never offered");
         bool parses = true;
-        for (const PackRelease* release : {&kMediaPackRelease, &kImagePackRelease, &kRawPackRelease, &kArchivePackRelease})
+        for (const PackRelease* release : {&kMediaPackRelease, &kImagePackRelease, &kRawPackRelease})
             parses &= !release->file_count || PackUpdateAvailable(L"", release->version);
         Check(parses, "published catalog versions can be offered as updates");
     }

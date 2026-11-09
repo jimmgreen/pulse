@@ -8,7 +8,7 @@
 namespace pulse::ui { struct FolderPickerSpec; }
 namespace pulse::app {
 struct AppPrefs;
-// Appearance only: never carries paths, credentials, integration or selection
+// Presentation preferences: never carries paths, credentials, integration or selection
 // policy. Defaults and normalization match AppPrefs and MakePickerSpec.
 struct PickerAppearanceSnapshot {
     int theme_mode = -1; // -1 legacy, 0 system, 1 light, 2 dark
@@ -23,6 +23,10 @@ struct PickerAppearanceSnapshot {
     bool zebra_rows = true;
     bool size_bar = false;
     bool thumbnail_badges = true;
+    int blank_click_action = 0;
+    int preview_trigger = 0;
+    int hover_preview_delay_ms = 500;
+    int hover_card_size = 1;
     uint32_t details_columns = ui::kDetailsColumnsDefault;
 };
 struct PickerAppearanceColors { bool dark = false; uint32_t accent_rgb = 0x527D70; };

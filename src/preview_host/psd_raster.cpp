@@ -18,8 +18,8 @@ namespace {
 using Microsoft::WRL::ComPtr;
 
 constexpr ULONGLONG kDecodeBudgetMs = 4000;   // composite streaming deadline
-// Grid thumbnails decode the composite up to this size: the embedded JPEG is
-// white-matted, lossy and at most 160 px. Larger documents keep the JPEG.
+// First-pass grid thumbnails decode the composite up to this size. Larger
+// documents show their embedded JPEG until the queued composite refinement.
 constexpr uint64_t kGridCompositePixels = 32ull * 1000 * 1000;
 // Documents up to this size always use the composite (a few milliseconds).
 constexpr uint64_t kGridSmallPixels = 1000ull * 1000;
@@ -597,7 +597,8 @@ bool DecodeThumbnail(const std::vector<unsigned char>& jpeg, UINT max_edge,
 bool RasterizePsdFile(const std::wstring& path, UINT max_edge, bool prefer_embedded,
                       std::vector<unsigned char>& pixels, UINT& width, UINT& height,
                       UINT& stride, UINT& source_width, UINT& source_height,
-                      std::wstring* error) {
+                      std::wstring* error, bool* embedded) {
+    if (embedded) *embedded = false;
     Reader reader(path);
     if (!reader.ok() || reader.size() < 26) { if (error) *error = L"psd-open-failed"; return false; }
     Header header;
@@ -616,14 +617,17 @@ bool RasterizePsdFile(const std::wstring& path, UINT max_edge, bool prefer_embed
     const bool composite_first = header.real_merged && document_pixels <= kGridCompositePixels &&
         (header.merged_alpha || !jpeg_covers || document_pixels <= kGridSmallPixels);
     if (prefer_embedded && !composite_first &&
-        DecodeThumbnail(header.thumbnail, max_edge, pixels, width, height, stride))
+        DecodeThumbnail(header.thumbnail, max_edge, pixels, width, height, stride)) {
+        if (embedded) *embedded = true;
         return true;
+    }
     if (header.real_merged &&
         DecodeComposite(reader, header, max_edge, pixels, width, height, stride, error))
         return true;
     pixels.clear();
     if (DecodeThumbnail(header.thumbnail, max_edge, pixels, width, height, stride)) {
         if (error) error->clear();
+        if (embedded) *embedded = true;
         return true;
     }
     if (error && error->empty()) *error = L"psd-no-composite";

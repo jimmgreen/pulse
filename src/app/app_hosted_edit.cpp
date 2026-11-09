@@ -178,7 +178,7 @@ HWND CreateHostedEdit(AppState& s, SUBCLASSPROC proc) {
 void LayoutAddressEditor(AppState& s) {
     if (!s.hwndAddressEdit || !s.hwnd) return;
     SyncSearchBarWidth(s);
-    D2D1_RECT_F addr = s.addressSearching ? s.renderer.SearchBarRect((float)s.compositor.Width()) : s.renderer.AddressBarRect((float)s.compositor.Width());
+    D2D1_RECT_F addr = s.addressSearching ? s.renderer.SearchBarRect((float)s.compositor.Width()) : s.renderer.AddressTextRect((float)s.compositor.Width());
     if (s.addressSearching) {
         PlaceHostedEdit(s.hwndAddressEdit, s.hwnd, ui::LayoutAddressSearch(addr, s.scale).input,
                         s.scale, 0, 0);
@@ -430,7 +430,7 @@ void UpdateAddressSuggestions(AppState& s) {
     if (FillServerSuggestions(s, text)) return done();
     if (app::AliasStore::Instance().Empty()) return done();
     // Paths, shell: and %VAR% shortcuts keep the plain editor; "别名\rest"
-    // suggests the aliased folder plus the rest (pulse_alias.html).
+    // suggests the aliased folder plus the rest.
     if (text.empty() || text.find_first_of(L":%\"") != std::wstring::npos ||
         text.front() == L'\\' || text.front() == L'/') return done();
     const size_t cut = text.find_first_of(L"\\/");
@@ -513,8 +513,21 @@ void ShowFilterEditor(AppState& s, bool select_mode) {
     if (!s.tagRenameId.empty()) HideTagRenameOverlay(s, true);
     if (s.addressEditing) HideAddressEditor(s, false);
     s.filterEditing = true;
+    if (s.hwndFilterEdit && ui::PulsePaintedChildEditError(s.hwndFilterEdit)) {
+        DestroyWindow(s.hwndFilterEdit);
+        s.hwndFilterEdit = nullptr;
+    }
     if (!s.hwndFilterEdit) {
-        s.hwndFilterEdit = CreateHostedEdit(s, FilterEditProc);
+        EnsureEditVisuals(s);
+        s.hwndFilterEdit = ui::CreatePulsePaintedChildEdit(s.hwnd, L"", 0, true);
+        if (s.hwndFilterEdit) {
+            SetWindowTheme(s.hwndFilterEdit, L"", L"");
+            SendMessageW(s.hwndFilterEdit, WM_SETFONT, reinterpret_cast<WPARAM>(s.editFont), FALSE);
+            if (!SetWindowSubclass(s.hwndFilterEdit, FilterEditProc, 1, reinterpret_cast<DWORD_PTR>(&s))) {
+                DestroyWindow(s.hwndFilterEdit);
+                s.hwndFilterEdit = nullptr;
+            }
+        }
         if (!s.hwndFilterEdit) {
             s.filterEditing = false;
             s.filterSelectMode = false;
@@ -852,6 +865,7 @@ void HideRenameOverlay(AppState& s, bool commit) {
                 if (s.ops.RenameShellItem(shell_id, target)) {
                     tab->pending_selected_name = target;
                     tab->pending_selected_names = { target };
+                    tab->pending_ensure_selection_visible = true;
                     tab->pending_selection_revision = tab->selection_revision;
                     tab->held_renames.push_back({tab->EntryAt(index).name, target});
                 }
@@ -868,6 +882,7 @@ void HideRenameOverlay(AppState& s, bool commit) {
                 }
                 tab->pending_selected_name = target;
                 tab->pending_selected_names = { target };
+                tab->pending_ensure_selection_visible = true;
                 tab->pending_selection_revision = tab->selection_revision;
                 // The renamed row keeps its place even if the refresh beats
                 // the watcher event (#13).
@@ -1528,6 +1543,8 @@ LRESULT CALLBACK WorkspaceRenameEditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM 
     if (!s) return DefSubclassProc(hwnd, msg, wp, lp);
     LRESULT handled = 0;
     if (HandleHostedEditMessage(*s, hwnd, msg, wp, lp, handled)) return handled;
+    // TranslateMessage queues WM_CHAR before the keydown closes this editor.
+    if (msg == WM_CHAR && (wp == VK_RETURN || wp == VK_ESCAPE)) return 0;
     if (msg == WM_KEYDOWN && (wp == VK_RETURN || wp == VK_ESCAPE)) {
         HideWorkspaceRenameOverlay(*s, wp == VK_RETURN);
         SetFocus(s->hwnd);

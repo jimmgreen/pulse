@@ -1,0 +1,11 @@
+{
+  "apiVersion": 1,
+  "id": "example.navigation",
+  "name": "导航增强包",
+  "commands": [
+    { "id": "back", "title": "返回上一位置", "capability": "navigation.back" },
+    { "id": "forward", "title": "前往下一位置", "capability": "navigation.forward" },
+    { "id": "up", "title": "打开上级文件夹", "capability": "navigation.up" },
+    { "id": "refresh", "title": "刷新当前视图", "capability": "view.refresh" }
+  ]
+}

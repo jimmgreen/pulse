@@ -214,6 +214,26 @@ bool ParseIconDirectory(const std::vector<uint8_t>& file, std::vector<IconEntry>
     return !entries.empty();
 }
 
+bool MakeIconEntryFile(const std::vector<uint8_t>& file, const IconEntry& entry,
+                      bool cursor, std::vector<uint8_t>& out) {
+    out.clear();
+    const size_t directory = 6ull + 16ull * entry.frame;
+    if (file.size() < 6 || entry.frame >= Le16(file.data() + 4) ||
+        directory > file.size() || file.size() - directory < 16 ||
+        entry.offset > file.size() || entry.size > file.size() - entry.offset || entry.size < 16)
+        return false;
+    out = {0, 0, 1, 0, 1, 0};
+    out.insert(out.end(), file.begin() + directory, file.begin() + directory + 16);
+    out[18] = 22; out[19] = out[20] = out[21] = 0;
+    if (cursor) {
+        out[10] = 1; out[11] = 0;
+        out[12] = static_cast<uint8_t>(entry.bits);
+        out[13] = static_cast<uint8_t>(entry.bits >> 8);
+    }
+    out.insert(out.end(), file.begin() + entry.offset, file.begin() + entry.offset + entry.size);
+    return true;
+}
+
 size_t DefaultIconEntry(const std::vector<IconEntry>& entries) {
     size_t best = 0;
     for (size_t i = 1; i < entries.size(); ++i) {

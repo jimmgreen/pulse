@@ -36,7 +36,7 @@ inline std::wstring IntegrationGuidance(const WindowViewModel& vm) {
     if(vm.settings_integration_just_enabled) return l10n::Get(I::IntegrationJustOn);
     // Taking over works only while Pulse runs, and closing the window ends
     // Pulse unless it keeps running (AppPrefs::KeepsRunningInBackground).
-    // 兼容打开方式 needs a running Pulse for every double-click, so it speaks first.
+    // The compatibility fallback requires Pulse to remain running.
     if(vm.settings_integration_folders_compat && !vm.settings_keep_running) return l10n::Get(I::IntegrationHintKeepCompat);
     if(vm.settings_integration_folders_compat && !vm.settings_launch_on_startup) return l10n::Get(I::IntegrationHintLaunchCompat);
     if(vm.settings_integration_experimental && !vm.settings_keep_running) return l10n::Get(I::IntegrationHintKeep);
@@ -51,9 +51,9 @@ inline bool IntegrationShowsTry(const WindowViewModel& vm) {
 }
 inline constexpr l10n::StringId kIntegrationCover[]={l10n::StringId::IntegrationFolders,
     l10n::StringId::ThisPc,l10n::StringId::SettingsWinE};
+inline constexpr int IntegrationChoiceCount(int row) { return row == 0 ? 2 : row == 2 ? 4 : 3; }
 inline bool IntegrationCoverActive(const WindowViewModel& vm,int i) {
-    // Folders still open in Pulse under 兼容打开方式, through the takeover.
-    return vm.settings_integration_enabled && (i==0 ? (vm.settings_integration_folders_active || vm.settings_integration_folders_compat)
+    return vm.settings_integration_enabled && (i==0 ? vm.settings_integration_folders_active
         : i==1 ? vm.settings_integration_this_pc_active : vm.settings_integration_win_e_active);
 }
 
@@ -107,6 +107,24 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
     auto segments = [&](D2D1_RECT_F r, D2D1_RECT_F* output, int count, float width) {
         auto c=choice(r,width); const float w=(c.right-c.left)/count;
         for(int i=0;i<count;++i) output[i]=D2D1::RectF(c.left+i*w,c.top,c.left+(i+1)*w,c.bottom);
+    };
+    auto fitted_segments = [&](D2D1_RECT_F& r, D2D1_RECT_F* output, std::initializer_list<I> labels) {
+        std::vector<float> widths;
+        float total=0;
+        for(const auto id:labels) {
+            const float measured=painter ? painter->MeasureButtonWidth(l10n::Get(id))+12*scale : (l10n::Get(id).size()*13.0f+28)*scale;
+            const float width=(std::max)(56*scale,measured);
+            widths.push_back(width);total+=width;
+        }
+        const float available=r.right-r.left-32*scale;
+        const float shrink=(std::min)(1.0f,available/total);
+        const bool stacked=narrow || available-total<300*scale;
+        if(stacked && r.bottom-r.top<100*scale) {r.bottom+=44*scale;y+=44*scale;}
+        float x=stacked ? r.left+16*scale : r.right-16*scale-total*shrink;
+        for(size_t i=0;i<widths.size();++i) {
+            const float width=widths[i]*shrink;
+            output[i]=D2D1::RectF(x,r.bottom-44*scale,x+width,r.bottom-12*scale);x+=width;
+        }
     };
     auto button_w = [&](I id, float fallback) {
         return painter ? painter->MeasureButtonWidth(l10n::Get(id)) : fallback*scale;
@@ -168,13 +186,13 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
 
         section(I::SettingsSecTextLanguage);
         l.language_card=row(seg_h); l.language_choice=choice(l.language_card,176);
-        l.text_render_card=row(seg_h); segments(l.text_render_card,l.text_render_row,3,282);
-        l.ui_font_size_card=row(seg_h); segments(l.ui_font_size_card,l.ui_font_size_row,4,340);
+        l.text_render_card=row(seg_h); fitted_segments(l.text_render_card,l.text_render_row,{I::TextRenderAuto,I::TextRenderSharp,I::TextRenderSmooth});
+        l.ui_font_size_card=row(seg_h); fitted_segments(l.ui_font_size_card,l.ui_font_size_row,{I::UiFontSmall,I::UiFontDefault,I::UiFontLarge,I::UiFontLarger});
     } else if (page == 9) {
         section(I::SettingsSecOpenSelect);
-        l.click_open_card=row(seg_h); segments(l.click_open_card,l.click_open_row,2,282);
+        l.click_open_card=row(seg_h); fitted_segments(l.click_open_card,l.click_open_row,{I::ClickOpenDouble,I::ClickOpenSingle});
         if(vm.settings_single_click) {
-            l.name_highlight_card=row(seg_h,true); segments(l.name_highlight_card,l.name_highlight_row,2,254);
+            l.name_highlight_card=row(seg_h,true); fitted_segments(l.name_highlight_card,l.name_highlight_row,{I::NameHighlightHover,I::NameHighlightAlways});
             l.hover_select_row=row(64,true);
         }
         l.item_checkbox_row=row(64);
@@ -191,17 +209,17 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
                 const float x0=l.blank_click_row.left+54*scale,w=(std::min)(282*scale,l.blank_click_row.right-16*scale-x0)/3;
                 for(int i=0;i<3;++i) l.blank_click_choice[i]=D2D1::RectF(x0+i*w,l.blank_click_row.bottom-44*scale,x0+(i+1)*w,l.blank_click_row.bottom-12*scale);
             } else {
-                segments(l.blank_click_row,l.blank_click_choice,3,282);
+                fitted_segments(l.blank_click_row,l.blank_click_choice,{I::SettingsBlankClickOff,I::Back,I::Up});
             }
         }
 
         section(I::SettingsSecVisibleItems);
         l.hidden_files_row=row(64);
         l.protected_files_row=row(64);
-        l.folder_sort_card=row(seg_h); segments(l.folder_sort_card,l.folder_sort_row,3,282);
+        l.folder_sort_card=row(seg_h); fitted_segments(l.folder_sort_card,l.folder_sort_row,{I::FolderSortTop,I::FolderSortFollow,I::FolderSortMixed});
 
         section(I::SettingsSecListLook);
-        l.density_card=row(seg_h); segments(l.density_card,l.density_row,3,282);
+        l.density_card=row(seg_h); fitted_segments(l.density_card,l.density_row,{I::SettingsDensityCompact,I::SettingsDensityStandard,I::SettingsDensityRoomy});
         l.list_style_row[1]=row(64);   // zebra rows
         l.list_style_row[0]=row(64);   // smart date
         for(int i=2;i<7;++i) l.list_style_row[i]=row(64);
@@ -218,16 +236,38 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
         l.tree_sticky_row=row(64);
 
         section(I::ListMtimeHint);
-        l.mtime_style_card=row(seg_h); segments(l.mtime_style_card,l.mtime_style_row,4,340);
+        l.mtime_style_card=row(seg_h); fitted_segments(l.mtime_style_card,l.mtime_style_row,{I::MtimeStyleOff,I::MtimeStyleDot,I::MtimeStyleBar,I::MtimeStyleText});
         if(vm.settings_mtime.style!=0) {
-            l.mtime_range_card=row(seg_h,true); segments(l.mtime_range_card,l.mtime_range_row,4,300);
-            l.mtime_palette_card=row(seg_h,true); segments(l.mtime_palette_card,l.mtime_palette_row,6,408);
+            l.mtime_range_card=row(seg_h,true); fitted_segments(l.mtime_range_card,l.mtime_range_row,{I::MtimeRangeToday,I::MtimeRange3,I::MtimeRange7,I::MtimeRange30});
+            l.mtime_palette_card=row(seg_h,true); fitted_segments(l.mtime_palette_card,l.mtime_palette_row,{I::MtimePaletteAccent,I::MtimePaletteHeat,I::MtimePaletteTeal,I::MtimePaletteAmber,I::MtimePaletteAurora,I::MtimePaletteGraphite});
             for(auto& mtime_row : l.mtime_toggle_row) mtime_row=row(64,true);
         }
 
         section(I::SettingsSecSyncStatus);
         for(auto& sync : l.sync_row) sync=row(64);
     } else if (page == 10) {
+        section(I::SettingsSecTabs);
+        const float tile_width=156*scale;
+        const int columns=(std::max)(1,(std::min)(3,static_cast<int>((right-left-22*scale)/(tile_width+10*scale))));
+        const int tile_rows=(3+columns-1)/columns;
+        l.tab_layout_card=row(72.0f+tile_rows*104.0f);
+        for(int i=0;i<3;++i) {
+            const float cx=left+16*scale+(i%columns)*(tile_width+10*scale);
+            const float cy=l.tab_layout_card.top+64*scale+(i/columns)*104*scale;
+            l.tab_layout_choices[i]=D2D1::RectF(cx,cy,cx+(std::min)(tile_width,right-left-32*scale),cy+94*scale);
+        }
+        const bool stack_rows=right-left<760*scale;
+        l.tab_rows_card=row(stack_rows ? 112.0f : 76.0f);
+        if(stack_rows) {
+            const auto r=l.tab_rows_card;
+            const float cell=(std::min)(192*scale,r.right-r.left-32*scale)/3;
+            for(int i=0;i<3;++i) l.tab_rows_choices[i]=D2D1::RectF(r.left+16*scale+i*cell,r.bottom-44*scale,r.left+16*scale+(i+1)*cell,r.bottom-12*scale);
+        } else segments(l.tab_rows_card,l.tab_rows_choices,3,192);
+        l.vertical_tabs_row=row(64);
+        l.pinned_names_row=row(64);
+        l.close_tab_double_click_row=row(64);
+        l.close_last_tab_row=row(64);
+
         section(I::SettingsSecOpenLocation);
         l.home_folder_card=row(seg_h);
         {
@@ -235,21 +275,16 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
             l.home_folder_reset=D2D1::RectF(right-16*scale-rw,y-44*scale,right-16*scale,y-12*scale);
             l.home_folder_choose=D2D1::RectF(l.home_folder_reset.left-8*scale-cw,y-44*scale,l.home_folder_reset.left-8*scale,y-12*scale);
         }
-        l.startup_open_card=row(seg_h); segments(l.startup_open_card,l.startup_open_row,2,282);
-        l.new_tab_open_card=row(seg_h); segments(l.new_tab_open_card,l.new_tab_open_row,2,282);
+        l.startup_open_card=row(seg_h); fitted_segments(l.startup_open_card,l.startup_open_row,{I::StartupOpenLastTabs,I::OpenDefaultLocation});
+        l.new_tab_open_card=row(seg_h); fitted_segments(l.new_tab_open_card,l.new_tab_open_row,{I::NewTabOpenCurrent,I::OpenDefaultLocation});
         section(I::SettingsSecOpenWindows);
-        l.open_pulse_icon_card=row(narrow ? 108.0f : 64.0f); segments(l.open_pulse_icon_card,l.open_pulse_icon_row,3,360);
-        l.new_window_shows_card=row(narrow ? 108.0f : 64.0f); segments(l.new_window_shows_card,l.new_window_shows_row,3,330);
-        l.external_open_card=row(seg_h); segments(l.external_open_card,l.external_open_row,3,282);
+        l.open_pulse_icon_card=row(narrow ? 108.0f : 64.0f); fitted_segments(l.open_pulse_icon_card,l.open_pulse_icon_row,{I::ExternalOpenWindow,I::ExternalOpenTab,I::OpenWindowActivate});
+        l.new_window_shows_card=row(narrow ? 108.0f : 64.0f); fitted_segments(l.new_window_shows_card,l.new_window_shows_row,{I::OpenWindowStartup,I::OpenWindowThisPc,I::NewTabOpenCurrent});
+        l.external_open_card=row(seg_h); fitted_segments(l.external_open_card,l.external_open_row,{I::ExternalOpenSmart,I::ExternalOpenTab,I::ExternalOpenWindow});
 
         section(I::SettingsSecArrangeWindows);
         l.arrange_minimized_row=row(64);
-        l.arrange_gap_card=row(narrow ? 108.0f : 64.0f); segments(l.arrange_gap_card,l.arrange_gap_row,2,282);
-        section(I::SettingsSecTabs);
-        l.vertical_tabs_row=row(64);
-        l.pinned_names_row=row(64);
-        l.close_tab_double_click_row=row(64);
-        l.close_last_tab_row=row(64);
+        l.arrange_gap_card=row(narrow ? 108.0f : 64.0f); fitted_segments(l.arrange_gap_card,l.arrange_gap_row,{I::ArrangeGapNone,I::ArrangeGapSix});
     } else if (page == 11) {
         auto wrap_height = [&](std::wstring_view value, float width) {
             return painter ? painter->MeasureWrappedCaptionHeight(value,(std::max)(40*scale,width))/scale : 64.0f;
@@ -316,7 +351,24 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
     const float item_text_left=left+84*scale, item_text_right=right-16*scale;
     const I cover_desc[]={I::StartupFolderDesc,I::StartupThisPcDesc,I::StartupWinEDesc};
     for(int i=0;i<3;++i) {
-        l.integration_cover[i]=irow((std::max)(60.0f,43.0f+caption_height(l10n::Get(cover_desc[i]),item_text_right-item_text_left)/scale));
+        const int count=IntegrationChoiceCount(i);
+        const float choice_w=(i==0 ? 220.0f : i==2 ? 440.0f : 300.0f)*scale;
+        const bool stacked=right-left<(i==2 ? 760.0f : 640.0f)*scale;
+        const bool wrapped=i==2 && right-left-70*scale<choice_w;
+        const int columns=wrapped ? 2 : count;
+        const float choice_h=(wrapped ? 72.0f : 32.0f)*scale;
+        const float text_right=stacked ? right-16*scale : right-16*scale-choice_w-16*scale;
+        const float desc_h=caption_height(l10n::Get(cover_desc[i]),text_right-left-54*scale);
+        l.integration_cover[i]=irow((std::max)(64.0f,46.0f+desc_h/scale)+(stacked ? choice_h/scale+10.0f : 0.0f));
+        const auto r=l.integration_cover[i];
+        const float choice_left=stacked ? left+54*scale : right-16*scale-choice_w;
+        const float choice_top=stacked ? r.bottom-choice_h-10*scale : (r.top+r.bottom)*0.5f-16*scale;
+        l.integration_choice[i]=D2D1::RectF(choice_left,choice_top,right-16*scale,choice_top+choice_h);
+        const float w=(l.integration_choice[i].right-choice_left)/columns;
+        for(int j=0;j<count;++j) {
+            const float top=choice_top+(j/columns)*40*scale;
+            l.integration_segments[i][j]=D2D1::RectF(choice_left+(j%columns)*w,top,choice_left+(j%columns+1)*w,top+32*scale);
+        }
     }
     l.recycle_bin_row=irow((std::max)(60.0f,43.0f+caption_height(l10n::Get(I::SettingsRecycleBinDesc),item_text_right-item_text_left)/scale));
     l.integration_options_head=irow(32);
@@ -396,12 +448,18 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
         };
         if(vm.settings_dialog_enabled || info_problem)
             l.dialog_application_row=action_row(I::StartupDiagnosticsDesc,I::StartupDiagnosticsExport,l.dialog_export_button);
-        l.startup_dialog_jump_row=action_row(I::StartupJumpDesc,I::StartupJumpSettings,l.dialog_jump_button);
+        auto jump_row=[&](I title,I desc) {
+            const float width=(std::max)(40*scale,right-left-126*scale);
+            const float title_h=painter ? painter->MeasureWrappedBodyHeight(l10n::Get(title),width)/scale : 40.0f;
+            return row((std::max)(68.0f,30+title_h+wrap_height(l10n::Get(desc),width)));
+        };
+        l.dialog_jump_row=jump_row(I::DialogJumpBar,I::DialogJumpBarDesc);
+        l.dialog_jump_auto_row=jump_row(I::DialogJumpAuto,I::DialogJumpAutoDesc);
         section(I::SettingsSecStartupTray);
         l.startup_row[0]=row(64);
         l.start_in_tray_row=row(64,true);
         l.startup_row[1]=row(64);
-        l.notify_icon_card=row(seg_h); segments(l.notify_icon_card,l.notify_icon_row,3,282);
+        l.notify_icon_card=row(seg_h); fitted_segments(l.notify_icon_card,l.notify_icon_row,{I::NotifyIconAlways,I::NotifyIconBackground,I::NotifyIconNever});
 
         section(I::SettingsSecExplorer);
         l.shell_tags_row=row(52+wrap_height(l10n::Get(I::SettingsShellTagsDesc),right-left-126*scale));
@@ -419,16 +477,16 @@ float LayoutSettingsGeneral(SettingsLayout& l, const WindowViewModel& vm, float 
         l.confirm_delete_row=row(64);
 
         section(I::SettingsSecStaging);
-        l.tray_icon_card=row(seg_h); segments(l.tray_icon_card,l.tray_icon_row,3,282);
+        l.tray_icon_card=row(seg_h); fitted_segments(l.tray_icon_card,l.tray_icon_row,{I::SettingsTraySmall,I::SettingsTrayStandard,I::SettingsTrayLarge});
         l.tray_hide_row=row(64);
 
         section(I::SettingsSecChanges);
         l.change_tracking_row=row(64);
-        l.change_days_row=row(seg_h,true); segments(l.change_days_row,l.change_days,3,282);
+        l.change_days_row=row(seg_h,true); fitted_segments(l.change_days_row,l.change_days,{I::ChangeToday,I::ChangeLast3Days,I::ChangeLast7Days});
 
         section(I::SidebarNetworkLocations);
         l.lan_discovery_row=row(64);
-        l.lan_cache_card=row(seg_h,true); segments(l.lan_cache_card,l.lan_cache_row,3,282);
+        l.lan_cache_card=row(seg_h,true); fitted_segments(l.lan_cache_card,l.lan_cache_row,{I::LanCache10Min,I::LanCache1Hour,I::LanCacheSession});
         l.network_recent_row=row(64);
         l.hidden_shares_row=row(64);
         l.network_clear_row=row(64);
@@ -553,13 +611,13 @@ inline std::wstring UpdateAll(int count) {
 inline const wchar_t* FormatsSection() { return l10n::Get(l10n::StringId::Formats).c_str(); }
 inline std::wstring FormatsSummary(const WindowViewModel& vm) {
     const int packs = int(vm.settings_pack_media_installed) + int(vm.settings_pack_images_installed) +
-                      int(vm.settings_pack_raw_installed) + int(vm.settings_pack_archive_installed);
+                      int(vm.settings_pack_raw_installed);
     int codecs = 0;
     for (int i = 0; i < kPreviewCodecCount; ++i) if (vm.settings_preview_codecs & (1u << i)) ++codecs;
     const auto count = std::to_wstring(PreviewFormatCount());
     std::wstring result = l10n::IsChinese()
-        ? l10n::Cn(L"共 ") + count + l10n::Cn(L" 种格式 · 增强包 ") + std::to_wstring(packs) + L"/4"
-        : count + L" formats · Preview packs " + std::to_wstring(packs) + L"/4";
+        ? l10n::Cn(L"共 ") + count + l10n::Cn(L" 种格式 · 增强包 ") + std::to_wstring(packs) + L"/3"
+        : count + L" formats · Preview packs " + std::to_wstring(packs) + L"/3";
     if (vm.settings_preview_codecs & kPreviewCodecsDetected)
         result += std::wstring(l10n::Get(l10n::StringId::SystemExtensions_2).c_str()) + std::to_wstring(codecs) + L"/4";
     else result += l10n::Get(l10n::StringId::CheckingSystemExtensions).c_str();
@@ -590,10 +648,6 @@ inline const wchar_t* ImagesMeta() { return l10n::Get(l10n::StringId::LibheifDav
 inline const wchar_t* RawTitle() { return l10n::Get(l10n::StringId::RAWCameraPhotos).c_str(); }
 inline const wchar_t* RawDesc() { return l10n::Get(l10n::StringId::UseLibRawForPreviewsAndThumbnailsOfCameraOriginalsSuchAsCR2C).c_str(); }
 inline const wchar_t* RawMeta() { return L"LibRaw · LGPL-2.1 / CDDL"; }
-inline const wchar_t* Archive() { return l10n::Get(l10n::StringId::ArcFamArchive).c_str(); }
-inline const wchar_t* ArchiveTitle() { return l10n::Get(l10n::StringId::S7ZipArchives).c_str(); }
-inline const wchar_t* ArchiveDesc() { return l10n::Get(l10n::StringId::Use7ZipToPreviewArchiveContentsIncluding7zRARISOCABAndWIM).c_str(); }
-inline const wchar_t* ArchiveMeta() { return L"7-Zip · LGPL-2.1 + unRAR"; }
 inline const wchar_t* Install() { return l10n::Get(l10n::StringId::DownloadAndInstall).c_str(); }
 inline const wchar_t* Remove() { return l10n::Get(l10n::StringId::Remove_2).c_str(); }
 inline const wchar_t* CustomTitle() { return l10n::Get(l10n::StringId::UseExistingFFmpeg).c_str(); }
@@ -754,18 +808,6 @@ inline const wchar_t* RawPrimary(const WindowViewModel& vm) {
 inline bool ShowsRawEnable(const WindowViewModel& vm) { return vm.settings_pack_raw_installed; }
 inline std::wstring RawUpdate(const WindowViewModel& vm) {
     return UpdateLabel(vm.settings_pack_raw_installed, vm.settings_pack_raw_installing, vm.settings_pack_raw_update_version);
-}
-inline Badge ArchiveBadge(const WindowViewModel& vm) {
-    return PackBadge(vm.settings_pack_archive_available, vm.settings_pack_archive_installed,
-        vm.settings_pack_archive_installing, vm.settings_pack_archive_enabled, vm.settings_pack_archive_version);
-}
-inline const wchar_t* ArchivePrimary(const WindowViewModel& vm) {
-    return PrimaryLabel(vm.settings_pack_archive_available, vm.settings_pack_archive_installed, vm.settings_pack_archive_installing);
-}
-inline bool ShowsArchiveEnable(const WindowViewModel& vm) { return vm.settings_pack_archive_installed; }
-inline std::wstring ArchiveUpdate(const WindowViewModel& vm) {
-    return UpdateLabel(vm.settings_pack_archive_installed, vm.settings_pack_archive_installing,
-                       vm.settings_pack_archive_update_version);
 }
 // Switch and path rows exist once there is something to switch.
 inline bool ShowsEnable(const WindowViewModel& vm) { return vm.settings_pack_ffmpeg != 0 || vm.settings_pack_use_custom; }
@@ -953,6 +995,10 @@ float LayoutSettingsPacks(SettingsLayout& l, const WindowViewModel& vm, float sc
     return y + 24*scale;
     }
     y += caption_h(pack_text::PacksIntro(), right - left) + 18*scale;
+    l.pack_native_settings = row((std::max)(76.0f*scale, 49.0f*scale +
+        caption_h(l10n::Get(l10n::StringId::NativeExtensionSettingsIntro).c_str(), (std::max)(1.0f, right-left-126*scale))) / scale);
+    y += 8*scale;
+
     // Summary: how many packs, their disk use and where they live; 全部更新
     // left of 打开文件夹 while some pack has a newer release.
     const bool compact_pack = right - left < 560*font*scale;
@@ -1048,12 +1094,6 @@ float LayoutSettingsPacks(SettingsLayout& l, const WindowViewModel& vm, float sc
                 pack_text::ShowsRawEnable(vm), pack_text::RawBadge(vm), pack_text::RawDesc(),
                 pack_text::RawPrimary(vm), pack_text::RawUpdate(vm), vm.settings_pack_raw_notice);
 
-    // 7-Zip archive contents card.
-    y += 24*scale; l.pack_archive_section = row(28);
-    card_layout({&l.pack_archive_card, &l.pack_archive_badge, &l.pack_archive_enable, &l.pack_archive_primary,
-                 &l.pack_archive_update, &l.pack_archive_notice, &l.pack_archive_desc_h},
-                pack_text::ShowsArchiveEnable(vm), pack_text::ArchiveBadge(vm), pack_text::ArchiveDesc(),
-                pack_text::ArchivePrimary(vm), pack_text::ArchiveUpdate(vm), vm.settings_pack_archive_notice);
 
     // 搜索: the 内容搜索 module (its index status as the notice) and OCR, planned.
     y += 24*scale; l.pack_search_section = row(28);

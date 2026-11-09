@@ -6,6 +6,7 @@
 namespace pulse::ui {
 
 struct ToolbarPinDragState {
+    int view = -1;             // sort/filter/group drag, independent of command pins
     int index = -1;            // pin being dragged (the toolbar's pins: tools, then apps); -1 none
     float left = 0.0f;         // its left edge, px
     float dy = 0.0f;           // px below its row

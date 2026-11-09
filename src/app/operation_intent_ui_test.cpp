@@ -1,12 +1,313 @@
-#ifdef PULSE_WITH_SELFTEST
+#if defined(PULSE_WITH_SELFTEST) || defined(PULSE_WITH_TEST_HOOKS)
 #include "operation_intent_ui.h"
 #include "app_navigation.h"
 #include "app_hosted_edit.h"
 #include "create_rename_intent.h"
+#include "app_details_tree.h"
+#include "app_commands.h"
+#include "app_ops_ui.h"
+#include "delete_preflight.h"
+#include "arrival_select.h"
+#include "../ui/ui_renderer.h"
+#include <chrono>
+#include "context_menu.h"
+#include "../common/localization.h"
+#include <fstream>
 #include <cstdio>
 #include <filesystem>
 
+static bool RunDeletePreparationUiTest() {
+    using namespace pulse;
+    namespace filesystem = std::filesystem;
+    filesystem::create_directories(L"bench_data");
+    FILE* log = nullptr;
+    _wfopen_s(&log, L"bench_data/delete_preflight_ui_test.log", L"w");
+    if (!log) return false;
+    int failures = 0;
+    auto check = [&](bool ok, const char* name) {
+        fprintf(log, "[%s] %s\n", ok ? "PASS" : "FAIL", name); fflush(log); failures += !ok;
+    };
+    auto state = std::make_unique<AppState>();
+    auto& s = *state;
+    s.isolatedTest = true; s.shot.active = true;
+    s.appPrefs.persist = s.searchHistory.persist = s.ctxMenuPrefs.persist = s.places.persist = false;
+    s.hwnd = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 900, 600,
+        nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    const auto root = filesystem::current_path() / L"bench_data" /
+        (L"delete-preparation-ui-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+    const bool created = filesystem::create_directories(root);
+    check(created && s.hwnd, "isolated fixture and owner created");
+    const auto file = root / L"keep.txt";
+    if (created && s.hwnd) {
+        std::ofstream(file) << "must survive";
+        SetEnvironmentVariableW(L"PULSE_TEST_DELETE_PREFLIGHT_DELAY_MS", nullptr);
+        double create_total = 0, start_total = 0;
+        for (int i = 0; i < 8; ++i) {
+            auto begin = std::chrono::steady_clock::now();
+            ui::FileOperationCallbacks callbacks;
+            const bool made = s.delete_preflight_window.Create(s.hwnd, std::move(callbacks));
+            if (made) {
+                s.delete_preflight_window.SetPreparationOnly(true);
+                s.delete_preflight_window.SetTheme(s.darkMode, s.accentColor);
+                ops::OpStatus status;
+                status.active = true;
+                status.can_pause = false;
+                status.type = ops::OpType::RecycleDelete;
+                status.phase = ops::OpPhase::Scanning;
+                status.enumeration_complete = true;
+                status.total_items = 1;
+                status.source_label = file.wstring();
+                s.delete_preflight_window.Update(status);
+                s.delete_preflight_window.Show(false);
+            }
+            const double create_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+            create_total += create_ms;
+            check(made, "baseline synchronous preparation window created");
+            s.delete_preflight_window.Destroy();
+            begin = std::chrono::steady_clock::now();
+            DeletePaths(s, {file.wstring()}, false);
+            const double start_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+            start_total += start_ms;
+            const auto request = s.delete_preflight;
+            const auto until = GetTickCount64() + 5000;
+            while (request && !request->done.load() && GetTickCount64() < until) Sleep(1);
+            check(request && request->done.load() && !request->failed && !request->preparation_shown &&
+                !s.delete_preflight_window.IsVisible(), "fast read-only preparation finishes without constructing a window");
+            // Cancel before consumption: no task is submitted and no recycle occurs.
+            if (request) request->cancel.store(true);
+            PollDeletePreflight(s);
+            check(!s.delete_preflight, "completed request can still be canceled before submission");
+            fprintf(log, "sample=%d baseline_create_ms=%.3f async_start_ms=%.3f\n", i, create_ms, start_ms);
+        }
+        fprintf(log, "samples=8 baseline_create_total_ms=%.3f async_start_total_ms=%.3f\n", create_total, start_total);
+        SetEnvironmentVariableW(L"PULSE_TEST_DELETE_PREFLIGHT_DELAY_MS", L"30000");
+        DeletePaths(s, {file.wstring()}, false);
+        const auto slow = s.delete_preflight;
+        if (slow) {
+            slow->started_at = GetTickCount64();
+            PollDeletePreflight(s);
+            check(!slow->preparation_shown, "pending request does not construct UI inside grace period");
+            // Advance only the UI deadline; the controlled probe remains pending.
+            slow->started_at = GetTickCount64() - 200;
+            PollDeletePreflight(s);
+            check(slow->preparation_shown && s.delete_preflight_window.IsVisible(), "slow request exposes existing cancellable preparation window");
+            slow->cancel.store(true);
+            PollDeletePreflight(s);
+            const auto until = GetTickCount64() + 5000;
+            while (!slow->done.load() && GetTickCount64() < until) Sleep(1);
+            check(slow->done.load() && !s.delete_preflight && !s.delete_preflight_window.IsVisible(), "slow cancellation closes UI and retires probe");
+        } else check(false, "slow request started");
+        SetEnvironmentVariableW(L"PULSE_TEST_DELETE_PREFLIGHT_DELAY_MS", nullptr);
+        check(filesystem::exists(file) && filesystem::file_size(file) == 12, "all tests preserve source and never recycle");
+        CancelDeletePreflight(s);
+        filesystem::remove_all(root);
+    }
+    if (s.hwnd) DestroyWindow(s.hwnd);
+    s.hwnd = nullptr;
+    state.reset();
+    fprintf(log, "failures=%d\n", failures); fclose(log);
+    return failures == 0;
+}
+
+namespace pulse::ui {
+struct FileOperationWindowTestAccess {
+    static uint64_t Task(const FileOperationWindow& window) { return window.status_.task_id; }
+    static void Close(FileOperationWindow& window) { SendMessageW(window.hwnd_, WM_CLOSE, 0, 0); }
+};
+}
+
+static bool RunOperationHistoryTest() {
+    using namespace pulse;
+    std::filesystem::create_directories(L"bench_data");
+    FILE* log = nullptr;
+    _wfopen_s(&log, L"bench_data/operation_history_test.log", L"w");
+    if (!log) return false;
+    int failures = 0;
+    auto check = [&](bool ok, const char* name) {
+        fprintf(log, "[%s] %s\n", ok ? "PASS" : "FAIL", name); fflush(log); failures += !ok;
+    };
+    auto state = std::make_unique<AppState>();
+    auto& s = *state;
+    s.isolatedTest = true; s.shot.active = true;
+    s.appPrefs.persist = s.searchHistory.persist = s.ctxMenuPrefs.persist = s.places.persist = false;
+    s.hwnd = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 900, 600,
+        nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    SetWindowLongPtrW(s.hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&s));
+    const auto root = std::filesystem::current_path() / L"bench_data" /
+        (L"history-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+    std::filesystem::create_directories(root);
+    s.ops.Start([] {});
+    const auto create = [&](const wchar_t* name) {
+        ops::OpRequest request; request.type = ops::OpType::CreateTextFile;
+        request.sources = {(root / name).wstring()};
+        const auto task = s.ops.Submit(std::move(request));
+        const auto deadline = GetTickCount64() + 10000;
+        while (!s.ops.FinalStatus(task) && GetTickCount64() < deadline) Sleep(5);
+        return task;
+    };
+    const auto first = create(L"first.txt");
+    const auto second = create(L"second.txt");
+    s.ops.DrainCompletions();
+    check(s.ops.FinalStatus(first).has_value() && s.ops.FinalStatus(second).has_value(),
+        "history contains two real completed tasks");
+    check(!s.ops.UndoTask(first) && s.ops.CanUndoTask(second) &&
+        std::filesystem::exists(root / L"first.txt") && std::filesystem::exists(root / L"second.txt"),
+        "stale task undo never undoes the newer task");
+    s.menu = std::make_unique<ui::FluentMenu>();
+    const bool graphics = s.compositor.Init(s.hwnd) && s.menu->Create(s.hwnd, &s.compositor, 1.0f);
+    check(graphics && s.menu->SaveDebugSnapshot(L"bench_data/operation_history_menu.png",
+        BuildOperationHistoryMenu(s, s.ops.RecentStatuses())), "real completed history menu snapshot");
+    check(graphics && s.menu->SaveDebugSnapshot(L"bench_data/operation_history_empty.png",
+        BuildOperationHistoryMenu(s, {})), "empty history menu snapshot");
+    HandleOperationHistoryAction(s, first, 0);
+    UpdateOperationWindow(s, false);
+    check(s.operationWindow && s.operationHistoryTaskId == first &&
+        ui::FileOperationWindowTestAccess::Task(*s.operationWindow) == first,
+        "historical details remain on the selected task after current-status refresh");
+    HandleOperationHistoryAction(s, 0, 3);
+    check(s.hiddenOperationHistory.contains(first) && s.hiddenOperationHistory.contains(second) &&
+        s.ops.FinalStatus(first).has_value() && s.ops.CanUndoTask(second) &&
+        std::filesystem::exists(root / L"first.txt") && std::filesystem::exists(root / L"second.txt"),
+        "clear completed hides display records without deleting files or undo state");
+    const auto destination = root / L"target";
+    std::filesystem::create_directories(destination);
+    std::ofstream(destination / L"first.txt") << "existing";
+    ops::OpRequest transfer;
+    transfer.type = ops::OpType::Copy;
+    transfer.sources = {(root / L"first.txt").wstring()};
+    transfer.dest_dir = destination.wstring();
+    const auto transfer_task = s.ops.Submit(std::move(transfer));
+    const auto deadline = GetTickCount64() + 10000;
+    while (!s.ops.PendingConflict() && !s.ops.FinalStatus(transfer_task) && GetTickCount64() < deadline) Sleep(5);
+    const auto conflict = s.ops.PendingConflict();
+    check(conflict.has_value(), "real copy waits at deterministic name conflict");
+    if (conflict) {
+        HandleOperationStatusAction(s, 2);
+        check(s.ops.Status().pause_requested, "status pill pauses the live copy");
+        HandleOperationStatusAction(s, 2);
+        check(!s.ops.Status().pause_requested && s.ops.Status().active, "status pill resumes the same live copy");
+        HandleOperationStatusAction(s, -1);
+        check(s.operationWindow && s.operationWindow->IsVisible() &&
+            ui::FileOperationWindowTestAccess::Task(*s.operationWindow) == transfer_task,
+            "running pill body opens the current task details");
+        ui::FileOperationWindowTestAccess::Close(*s.operationWindow);
+        check(!s.operationWindow->IsVisible() && s.ops.Status().active,
+            "closing details only minimizes and leaves the copy active");
+        s.ops.ResolveConflict(conflict->token, ops::ConflictChoice::Replace, false);
+        const auto finished_by = GetTickCount64() + 10000;
+        while (!s.ops.FinalStatus(transfer_task) && GetTickCount64() < finished_by) Sleep(5);
+        const auto final = s.ops.FinalStatus(transfer_task);
+        check(final && final->phase == ops::OpPhase::Completed,
+            "minimized copy completes after conflict resolution");
+    }
+    s.operationWindow.reset(); s.ops.Stop();
+    s.menu.reset(); s.compositor.Shutdown();
+    DestroyWindow(s.hwnd); s.hwnd = nullptr;
+    state.reset();
+    std::error_code error; std::filesystem::remove_all(root, error);
+    check(!error, "isolated history fixture cleaned");
+    fprintf(log, "failures=%d\n", failures); fclose(log);
+    return failures == 0;
+}
+
+static bool RunArrivalResultsTest() {
+    using namespace pulse;
+    std::filesystem::create_directories(L"bench_data");
+    FILE* log = nullptr;
+    _wfopen_s(&log, L"bench_data/arrival_results_test.log", L"w");
+    if (!log) return false;
+    int failures = 0;
+    auto check = [&](bool ok, const char* name) {
+        fprintf(log, "[%s] %s\n", ok ? "PASS" : "FAIL", name); fflush(log); failures += !ok;
+    };
+    auto state = std::make_unique<AppState>();
+    auto& s = *state;
+    s.isolatedTest = true; s.shot.active = true;
+    s.appPrefs.persist = s.searchHistory.persist = s.ctxMenuPrefs.persist = s.places.persist = false;
+    s.hwnd = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 900, 600,
+        nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    s.window_tabs.NewTab(L"C:\\arrival-results");
+    BindCurrentLayout(s);
+    auto* tab = ActiveTab(s);
+    ArmArrivalSelection(s, s.pane, 0, 10000);
+    s.arrivalSelect.expected_only = true;
+    s.arrivalSelect.until = 0;
+    ExpectArrival(s, tab->current_path + L"\\copy (2).txt");
+    ExpectArrival(s, L"C:\\another-folder\\unrelated.txt");
+    check(!ApplyArrivalSelection(s, *s.pane, *tab, true) &&
+        s.arrivalSelect.expected.size() == 1, "missing snapshot retains only expected paths in the navigated folder");
+    auto entries = std::make_shared<std::vector<fs::DirEntry>>();
+    fs::DirEntry unrelated; unrelated.name = L"unrelated.txt";
+    entries->push_back(unrelated);
+    tab->SetSnapshot(entries);
+    check(!ApplyArrivalSelection(s, *s.pane, *tab, true) && tab->SelectedCount() == 0 &&
+        !s.arrivalSelect.expected.empty(), "partial listing does not select unrelated rows or discard pending output");
+    auto arrived = std::make_shared<std::vector<fs::DirEntry>>(*entries);
+    fs::DirEntry output; output.name = L"copy (2).txt";
+    arrived->push_back(output);
+    tab->SetSnapshot(arrived);
+    check(ApplyArrivalSelection(s, *s.pane, *tab, true) && tab->SelectedCount() == 1 &&
+        tab->EntryAt(static_cast<size_t>(tab->selected_index)).name == output.name,
+        "asynchronous listing selects only the actual keep-both output");
+    tab->SelectOnly(0);
+    check(!ApplyArrivalSelection(s, *s.pane, *tab, true) && s.arrivalSelect.dir.empty(),
+        "manual selection cancels pending result selection");
+    check(s.compositor.Init(s.hwnd), "arrival graphics initialized");
+    s.renderer.SetCompositor(&s.compositor);
+    s.compositor.Resize(900, 600);
+    s.renderer.SetScale(1); s.compositor.RecreateTextFormats(1);
+    auto many = std::make_shared<std::vector<fs::DirEntry>>();
+    for (int i = 0; i < 150; ++i) {
+        fs::DirEntry entry; entry.name = L"result_" + std::to_wstring(1000 + i) + L".txt";
+        entry.full_path = tab->current_path + L"\\" + entry.name;
+        many->push_back(std::move(entry));
+    }
+    tab->SetSnapshot(many); tab->ClearSelection();
+    ArmArrivalSelection(s, s.pane, 0, 10000);
+    ExpectArrival(s, many->at(75).full_path);
+    check(ApplyArrivalSelection(s, *s.pane, *tab, true), "replacement result already in baseline is selected");
+    auto centered = [&] {
+        ui::PaneViewModel vm; app::FillPaneViewModel(vm, *s.pane, &s.places);
+        auto bounds = FocusedPaneRect(s);
+        auto list = s.renderer.PaneListRect(vm, bounds);
+        auto item = s.renderer.ItemRectInPane(vm, bounds, vm.ViewIndex(tab->selected_index));
+        return std::abs(item.top + item.bottom - list.top - list.bottom) < 2.0f;
+    };
+    check(centered(), "arrival result is centered in the actual pane");
+    tab->scroll_y += 40;
+    const float manual_scroll = tab->scroll_y;
+    check(!ApplyArrivalSelection(s, *s.pane, *tab, true) && tab->scroll_y == manual_scroll,
+        "unchanged watcher refresh preserves manual scrolling");
+    s.arrivalSelect = {};
+    ArmArrivalSelection(s, s.pane, 0, 10000);
+    ExpectArrival(s, many->at(75).full_path);
+    check(ApplyArrivalSelection(s, *s.pane, *tab, true) && centered(),
+        "new operation centers a result even when already selected");
+    ExpectArrival(s, many->at(76).full_path);
+    check(ApplyArrivalSelection(s, *s.pane, *tab, true) && tab->SelectedCount() == 2,
+        "multiple outputs stay selected together");
+    tab->loading = false;
+    auto vm = BuildVm(s, false);
+    bool drawn = true;
+    for (int frame = 0; frame < 24; ++frame) {
+        s.compositor.Dc()->BeginDraw();
+        s.renderer.Render(vm, D2D1::RectF(0,0,900,600), ui::MakeTheme(true, ui::HexColor(0x6474C7)));
+        drawn = SUCCEEDED(s.compositor.Dc()->EndDraw()) && drawn;
+        Sleep(16);
+    }
+    check(drawn &&
+        s.compositor.SaveSnapshot(L"bench_data/arrival_center/selected.png"), "centered result screenshot saved");
+    s.renderer.SetCompositor(nullptr); s.compositor.Shutdown();
+    DestroyWindow(s.hwnd); s.hwnd = nullptr;
+    state.reset();
+    fprintf(log, "failures=%d\n", failures); fclose(log);
+    return failures == 0;
+}
+
 bool RunOperationIntentUiTest() {
+    if (GetEnvironmentVariableW(L"PULSE_TEST_OPERATION_HISTORY", nullptr, 0)) return RunOperationHistoryTest();
+    if (GetEnvironmentVariableW(L"PULSE_TEST_ARRIVAL_RESULTS", nullptr, 0)) return RunArrivalResultsTest();
+    if (GetEnvironmentVariableW(L"PULSE_TEST_DELETE_PREFLIGHT_UI", nullptr, 0)) return RunDeletePreparationUiTest();
     using namespace pulse;
     std::filesystem::create_directories(L"bench_data");
     FILE* log = nullptr;
@@ -133,11 +434,104 @@ bool RunOperationIntentUiTest() {
     }
     other->create_rename_intents.clear();
     HideRenameOverlay(s, false);
+    {
+        const auto fixture = std::filesystem::absolute(L"bench_data") /
+            (L"group-tree-ui-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+        const bool owned = !std::filesystem::exists(fixture) && std::filesystem::create_directory(fixture);
+        check(owned, "tree grouping creates an exclusive real filesystem fixture");
+        if (owned) {
+            const auto nested_path = fixture / L"nested";
+            const auto stem = l10n::Get(l10n::StringId::NewFolder);
+            const auto grouped_name = stem + L" (2)";
+            std::filesystem::create_directories(nested_path / stem);
+            std::filesystem::create_directories(fixture / grouped_name);
+            std::ofstream(nested_path / L"a.txt") << "first";
+            std::ofstream(nested_path / L"b.txt") << "second";
+            std::ofstream(nested_path / stem / L"keep.txt") << "existing child";
+            std::ofstream(fixture / grouped_name / L"keep.txt") << "existing upper";
+            other->pending_generation = 0;
+            other->current_path = fs::NormalizePath(fixture.wstring());
+            ++other->view_generation;
+            other->view_mode = ui::ViewMode::Details;
+            auto base = std::make_shared<std::vector<fs::DirEntry>>();
+            fs::EnumerateDirectory(other->current_path, *base);
+            other->SetSnapshot(base);
+            other->tree = std::make_shared<app::DetailsTree>();
+            other->tree->base = base;
+            other->tree->combined = base;
+            const auto nested = fs::NormalizePath(nested_path.wstring());
+            const auto target = nested + L"\\" + grouped_name;
+            auto key = nested;
+            CharLowerBuffW(key.data(), static_cast<DWORD>(key.size()));
+            auto& folder = other->tree->folders[key];
+            folder.path = nested; folder.expanded = true; folder.state = app::DetailsTreeFolder::State::Ready;
+            auto original_children = std::make_shared<std::vector<fs::DirEntry>>();
+            fs::EnumerateDirectory(nested, *original_children);
+            folder.listing = original_children;
+            SyncDetailsTrees(s);
+            other->ClearSelection();
+            for (size_t i = base->size(); i < other->EntryCount(); ++i) {
+                const auto entry = other->EntryAt(i);
+                if (entry.name == L"a.txt" || entry.name == L"b.txt") other->ToggleSelect(static_cast<int>(i));
+            }
+            check(other->SelectedCount() == 2, "real expanded tree selects its two child files");
+            s.ops.Start([] {});
+            DispatchMenuCommand(s, app::CmdGroupIntoFolder);
+            const auto task = other->create_rename_intents.empty() ? 0 : other->create_rename_intents.back().task_id;
+            check(task != 0 && s.groupRenameFolder == target, "production grouping command plans the child parent and conflict-free name");
+            bool finished = false;
+            const auto deadline = GetTickCount64() + 15000;
+            while (task && !finished && GetTickCount64() < deadline) {
+                auto completions = s.ops.DrainCompletions();
+                auto terminals = s.ops.DrainFinishedTasks();
+                // A terminal can arrive between the two drains; collect its
+                // preceding completion before resolving its intent.
+                auto trailing = s.ops.DrainCompletions();
+                completions.insert(completions.end(), trailing.begin(), trailing.end());
+                for (const auto& completion : completions) ApplyOperationIntentCompletion(s, completion);
+                for (const auto& terminal : terminals) {
+                    FinishOperationIntents(s, terminal);
+                    finished = finished || terminal.task_id == task;
+                }
+                if (!finished) Sleep(5);
+            }
+            check(finished && std::filesystem::exists(nested_path / grouped_name / L"a.txt") &&
+                std::filesystem::exists(nested_path / grouped_name / L"b.txt") &&
+                !std::filesystem::exists(nested_path / L"a.txt") && !std::filesystem::exists(nested_path / L"b.txt") &&
+                std::filesystem::exists(nested_path / stem / L"keep.txt") &&
+                std::filesystem::exists(fixture / grouped_name / L"keep.txt") && !std::filesystem::exists(fixture / stem),
+                "real OpsManager moves only into the child target and preserves both conflicting folders");
+            check(folder.state == app::DetailsTreeFolder::State::Idle && other->pending_generation == 0,
+                "nested completion refreshes its expanded parent without navigating the displayed root");
+            auto children = std::make_shared<std::vector<fs::DirEntry>>();
+            fs::EnumerateDirectory(nested, *children);
+            folder.generation = 1001; folder.state = app::DetailsTreeFolder::State::Loading;
+            app::WorkResult result{};
+            result.path = nested; result.generation = 1001; result.snapshot = children;
+            NoteDetailsTreeResult(s, result);
+            SyncDetailsTrees(s);
+            TryRenameDetailsTreeCreation(s);
+            const auto actual = s.renameIndex >= 0 ? other->EntryAt(static_cast<size_t>(s.renameIndex)).full_path : std::wstring{};
+            check(s.renameIndex >= static_cast<int>(base->size()) && actual == target &&
+                edit_text() == grouped_name && other->create_rename_intents.empty(),
+                "real EDIT opens the grouped child, never the same-name row at the tree root");
+            HideRenameOverlay(s, false);
+            other->create_rename_intents.clear();
+            s.ops.Stop();
+            s.watches.Stop();
+            std::error_code cleanup_error;
+            std::filesystem::remove_all(fixture, cleanup_error);
+            check(!cleanup_error && !std::filesystem::exists(fixture), "real grouping fixture cleanup");
+        }
+    }
     s.worker.Stop();
     DestroyWindow(s.hwnd); s.hwnd = nullptr;
     s.hwndRenameEdit = nullptr;
     if (s.editFont) { DeleteObject(s.editFont); s.editFont = nullptr; }
     if (s.editBrush) { DeleteObject(s.editBrush); s.editBrush = nullptr; }
+    fprintf(log, "[INFO] destroying isolated test state\n"); fflush(log);
+    state.reset();
+    fprintf(log, "[PASS] isolated test state destroyed\n"); fflush(log);
     fprintf(log, "failures=%d\n", failures); fclose(log);
     return failures == 0;
 }

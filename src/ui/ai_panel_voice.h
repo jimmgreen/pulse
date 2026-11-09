@@ -1,5 +1,4 @@
-// ai_panel_voice.h - 语音输入 (third batch, flow V in
-// plans/ai/Pulse_AI助手_第三批_操控Pulse与语音.html): the 语音设置 menu over
+// ai_panel_voice.h - 语音输入 (third batch, flow V): the 语音设置 menu over
 // the mic's chevron (.vmenu). AiPanelView draws it (ai_panel_voice.cpp);
 // app/ai_assistant_voice.cpp fills the view. The connection itself is set up
 // in Settings > AI 助手.

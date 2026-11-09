@@ -1,0 +1,11 @@
+{
+  "apiVersion": 1,
+  "id": "sample.native-inspector",
+  "name": "Native directory inspector",
+  "resources": [
+    "context.read",
+    "files.readCurrentDirectory",
+    "settings.own",
+    "audit.own"
+  ]
+}

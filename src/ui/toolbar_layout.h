@@ -1,4 +1,5 @@
 #pragma once
+#include "responsive_chrome_layout.h"
 #include <d2d1.h>
 #include <algorithm>
 #include <array>
@@ -21,10 +22,13 @@ inline constexpr const wchar_t* kToolbarSplitGlyph = L"\xF5B0";
 inline constexpr const wchar_t* kToolbarColumnsGlyph = L"\xF5B1";
 constexpr int kToolbarPinSlots = kToolbarCommandPins + kToolbarAppPins;
 struct ToolbarPinOptions {
+    std::array<int,3> view_slots{-1,-1,-1}; // view controls inserted among left pins
+    int right_from = -1;        // first pin in the right-aligned tools group
     int app_from = -1;          // index of the first app pin (a short gap goes before it)
     bool drop_mode = false;     // a file drag is over the window: pins also in the narrow tier
     float label_width = 0.0f;   // drop mode: "拖到软件上打开" / "固定到工具栏" ahead of the pins
     uint64_t separators = 0;    // bit i: the user's separator before pin i (app::ToolbarSeparatorMask)
+    std::array<int, 3> view_order{0, 1, 2}; // sort, filter, group identities
 };
 struct ToolbarLayout {
     std::array<D2D1_RECT_F, 4> navigation{};
@@ -36,6 +40,10 @@ struct ToolbarLayout {
     D2D1_RECT_F pin_label{};   // drop mode only (ToolbarPinOptions::label_width)
     uint64_t pin_dividers = 0; // bit i: a separator is drawn before pins[i] (both pins shown)
     bool narrow = false;       // the narrow tier: every pin waits in More
+    D2D1_RECT_F address_text{};
+    NavigationTier navigation_tier = NavigationTier::Full;
+    bool refresh_inside = false;
+    bool merged_search = false;
 };
 
 inline float SelectionChipSpan(float scale, float label_width, int n);
@@ -46,33 +54,20 @@ inline ToolbarLayout MakeToolbarLayout(float width, float scale, float top, floa
                                       float left, float filter_expand = 0.0f, float search_min_dip = 0.0f,
                                       float group_width = 0.0f, float sort_width = 0.0f,
                                       float filter_width = 0.0f, int pin_count = 0,
-                                      float selection_span = 0.0f, const ToolbarPinOptions& pin_options = {}) {
+                                      float selection_span = 0.0f, const ToolbarPinOptions& pin_options = {},
+                                      bool can_forward = true) {
     ToolbarLayout out;
     const float available = width - left;
-    const float nav_step = NavigationStep(available, scale);
-    float x = left + margin;
-    for (int i=0;i<3;++i) {
-        out.navigation[i] = NavigationButtonAt(x, top + 6 * scale, scale, nav_step);
-        x += nav_step;
-    }
-    // A negative search_min_dip hides the field (search master switch off).
-    const bool search_hidden = search_min_dip < 0.0f;
-    float search_width = search_hidden ? 0.0f : std::clamp(available*0.27f, 140*scale, 360*scale);
-    if (search_min_dip > 0.0f && available >= 480*scale) {
-        // While a query is being edited (>= 500 DIP requested) the address bar may
-        // shrink to 60 DIP; a results page keeps 120 DIP of breadcrumb.
-        const float address_min = (search_min_dip >= 500.0f ? 60.0f : 120.0f) * scale;
-        const float cap = width - margin - (x + margin + address_min) - nav_step - 2*margin;
-        search_width = std::max(search_width, std::min(search_min_dip*scale, cap));
-    }
-    out.search = {width-margin-search_width,top+4*scale,width-margin,top+40*scale};
-    out.address = {x+margin,top+4*scale,std::max(x+margin+60*scale,out.search.left-margin),top+40*scale};
+    const auto navigation = MakeResponsiveNavigation(width, left, top, margin, scale, can_forward, search_min_dip);
+    out.navigation = navigation.navigation;
+    out.address = navigation.address;
+    out.search = navigation.search;
+    out.address_text = navigation.address_text;
+    out.navigation_tier = navigation.tier;
+    out.refresh_inside = navigation.refresh_inside;
+    out.merged_search = navigation.merged;
     const bool overflow = available < 540*scale;
-    if (available < 480*scale && !search_hidden) {
-        out.search.left=out.search.right-32*scale;
-    }
-    out.navigation[3] = NavigationButtonAt(out.search.left - margin - nav_step, top + 6 * scale, scale, nav_step);
-    out.address.right = out.navigation[3].left-margin;
+    float x = left + margin;
     out.create = {left+margin,top+50*scale,left+margin+create_width,top+82*scale};
     out.narrow = overflow;
     // Toolbar picker T3d: cut .. delete and split / details / columns are
@@ -101,12 +96,22 @@ inline ToolbarLayout MakeToolbarLayout(float width, float scale, float top, floa
     const bool filter_open = filter_expand > 0.0f;
     // 自定义工具栏 → 排序与筛选: a negative sort / filter width hides that
     // button (an open filter shows anyway); a hidden group passes 0.
-    const bool sort_shown = sort_width >= 0.0f;
-    const bool filter_shown = filter_width >= 0.0f || filter_open;
+    const std::array<bool,3> left_view{
+        !overflow && pin_options.view_slots[0]>=0 && sort_width>=0,
+        !overflow && !filter_open && pin_options.view_slots[1]>=0 && filter_width>=0,
+        !overflow && pin_options.view_slots[2]>=0 && group_width>0};
+    const std::array<float,3> left_width{
+        available>=700*scale ? (sort_width>0?sort_width:88*scale) : 32*scale,
+        available>=700*scale ? (filter_width>0?std::max(filter_width,64*scale):88*scale) : 32*scale,
+        group_width};
+    std::array<D2D1_RECT_F,3> left_rects{};
+    const bool sort_shown = sort_width >= 0.0f && !left_view[0];
+    const bool filter_shown = (filter_width >= 0.0f || filter_open) && !left_view[1];
+    if(left_view[2])group_width=0;
     const float filter_open_w = 200*scale;
     const float chip_span = filter_open ? std::min(selection_span, SelectionChipSpan(scale, 0.0f, 0)) : selection_span;
     const bool drop_mode = pin_options.drop_mode;
-    if ((!overflow || drop_mode) && (pin_count > 0 || (drop_mode && pin_options.label_width > 0.0f))) {
+    if ((!overflow || drop_mode) && (pin_count > 0 || left_view[0] || left_view[1] || left_view[2] || (drop_mode && pin_options.label_width > 0.0f))) {
         const float view_min = (sort_shown ? 38*scale : 0.0f) + (filter_shown ? 32*scale : 0.0f) +
                                (group_width > 0.0f ? 38*scale : 0.0f) +
                                (filter_open ? filter_open_w - 32*scale + chip_span : 0.0f);
@@ -121,7 +126,17 @@ inline ToolbarLayout MakeToolbarLayout(float width, float scale, float top, floa
                 left_end = px + 4*scale;
             }
         }
+        auto insert_views = [&](int slot) {
+            for(int view:pin_options.view_order) {
+                if(view<0 || view>=3 || !left_view[view] || std::min(pin_options.view_slots[view],count)!=slot)continue;
+                const float w=left_width[view];
+                if(px+w+8*scale+view_min>view_end)continue;
+                left_rects[view]={px,top+50*scale,px+w,top+82*scale};
+                px+=w+6*scale;left_end=px+8*scale;
+            }
+        };
         for (int i=0;i<count;++i) {
+            insert_views(i);
             // The user's separators take the same 9 DIP as the gap before the apps.
             const bool divider = i > 0 && i < 64 && (pin_options.separators >> i & 1);
             const float lead = (gap && i == pin_options.app_from) || divider ? 9*scale : 0.0f;
@@ -132,6 +147,7 @@ inline ToolbarLayout MakeToolbarLayout(float width, float scale, float top, floa
             px += 34*scale;
             left_end = px + 8*scale;
         }
+        insert_views(count);
     }
     // sort_width: measured "icon + label + chevron" width (0 = legacy 88 DIP).
     float sort_w = !sort_shown ? 0.0f
@@ -166,20 +182,38 @@ inline ToolbarLayout MakeToolbarLayout(float width, float scale, float top, floa
         : filter_base + (filter_max-filter_base)*std::clamp(filter_expand,0.0f,1.0f);
     // Still too narrow to right-align: start right after the left cluster instead.
     x = std::max(left_end, view_end-block_of(filter_w));
-    // A hidden button keeps an empty rect (no paint, no hit) at its place.
-    if (sort_shown) {
-        out.sort = {x,top+50*scale,x+sort_w,top+82*scale};
-        x = out.sort.right + 6*scale;
-    } else {
-        out.sort = {x,top+50*scale,x,top+82*scale};
+    // Keep semantic rects for painting/hit testing while placing controls in
+    // the saved order. Hidden controls take no space or separator.
+    const std::array<float, 3> widths{sort_shown ? sort_w : 0.0f,
+        filter_shown ? filter_w : 0.0f, group_width > 0.0f ? group_w : 0.0f};
+    std::array<D2D1_RECT_F*, 3> rects{&out.sort, &out.filter, &out.group};
+    std::array<bool, 3> placed{};
+    bool shown = false;
+    const auto place = [&](int index) {
+        if (index < 0 || index >= 3 || placed[index]) return;
+        placed[index] = true;
+        const float w = widths[index];
+        if (w > 0.0f && shown) x += 6*scale;
+        *rects[index] = {x, top+50*scale, x+w, top+82*scale};
+        x += w;
+        shown = shown || w > 0.0f;
+    };
+    for (int index : pin_options.view_order) place(index);
+    for (int index = 0; index < 3; ++index) place(index);
+    for(int i=0;i<3;++i) if(left_view[i]) *rects[i]=left_rects[i];
+    if (!drop_mode && pin_options.right_from >= 0 && pin_options.right_from < kToolbarPinSlots) {
+        int last = pin_options.right_from;
+        for (int i = last; i < kToolbarPinSlots; ++i)
+            if (out.pins[i].right > out.pins[i].left) last = i;
+        const auto& last_pin = out.pins[last];
+        float view_left = view_end;
+        for(int i=0;i<3;++i) if(!left_view[i] && rects[i]->right>rects[i]->left) view_left=std::min(view_left,rects[i]->left);
+        const float shift = std::max(0.0f, view_left - 8*scale - chip_span - last_pin.right);
+        for (int i = pin_options.right_from; i <= last; ++i) {
+            if (out.pins[i].right <= out.pins[i].left) continue;
+            out.pins[i].left += shift; out.pins[i].right += shift;
+        }
     }
-    if (filter_shown) {
-        out.filter = {x,top+50*scale,x+filter_w,top+82*scale};
-        x = out.filter.right + 6*scale;
-    } else {
-        out.filter = {x,top+50*scale,x,top+82*scale};
-    }
-    out.group = {x,top+50*scale,group_width > 0.0f ? x+group_w : x,top+82*scale};
     return out;
 }
 
@@ -227,17 +261,23 @@ inline ToolbarSelectionChip MakeToolbarSelectionChip(const ToolbarLayout& l, flo
     ToolbarSelectionChip out;
     D2D1_RECT_F anchor = l.commands[4].right > l.commands[4].left ? l.commands[4] : l.create;
     for (const D2D1_RECT_F& pin : l.pins) if (pin.right > pin.left) anchor = pin;
-    const float x0 = anchor.right + 13*scale;   // a divider sits at x0 - 7
-    const float limit = l.sort.left - 10*scale;
+    // A moved view on the left participates in the same occupied span.
+    float limit = l.overflow.left - 10*scale;
+    for(const auto& view : {l.sort,l.filter,l.group}) {
+        if(view.right<=view.left)continue;
+        if(view.left>=anchor.right)limit=std::min(limit,view.left-10*scale);
+        else if(view.right>anchor.right)anchor=view;
+    }
+    const float chip_x = anchor.right + 13*scale;
     int count = std::clamp(action_count, 0, kSelChipMaxActions);
     const auto width = [&](float label, int n) { return SelectionChipWidth(scale, label, n); };
-    if (label_width > 0.0f && x0 + width(label_width, count) > limit) label_width = 0.0f;
-    while (count > 0 && x0 + width(label_width, count) > limit) --count;
-    if (x0 + width(label_width, count) > limit) return out;
-    out.chip = {x0, l.create.top, x0 + width(label_width, count), l.create.bottom};
-    float x = x0 + 4*scale;
+    if (label_width > 0.0f && chip_x + width(label_width, count) > limit) label_width = 0.0f;
+    while (count > 0 && chip_x + width(label_width, count) > limit) --count;
+    if (chip_x + width(label_width, count) > limit) return out;
+    out.chip = {chip_x, l.create.top, chip_x + width(label_width, count), l.create.bottom};
+    float x = chip_x + 4*scale;
     if (label_width > 0.0f) {
-        out.label = {x0 + 10*scale, l.create.top, x0 + 10*scale + label_width, l.create.bottom};
+        out.label = {chip_x + 10*scale, l.create.top, chip_x + 10*scale + label_width, l.create.bottom};
         x = out.label.right + 4*scale;
     }
     const auto place = [&](int slot) {

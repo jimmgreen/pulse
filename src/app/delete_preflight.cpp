@@ -13,6 +13,9 @@ std::wstring LongPath(const std::wstring& path) {
 }
 
 void StartDeletePreflight(const std::shared_ptr<DeletePreflight>& request) {
+    request->input_count = request->paths.size();
+    request->first_path = request->paths.empty() ? std::wstring{} : request->paths.front();
+    request->started_at = GetTickCount64();
     try {
         std::thread([request] {
             try {
@@ -61,6 +64,9 @@ void StartDeletePreflight(const std::shared_ptr<DeletePreflight>& request) {
                 }
             } catch (...) { request->failed = true; }
             request->done.store(true);
+            // Posted completion is not starved by continuous paint traffic like
+            // a synthesized WM_TIMER; the UI still validates the current request.
+            if (request->notify_window) PostMessageW(request->notify_window, WM_TIMER, 0xD311, 0);
         }).detach();
     } catch (...) { request->failed = true; request->done.store(true); }
 }

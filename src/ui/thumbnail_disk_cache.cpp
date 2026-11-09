@@ -100,6 +100,27 @@ uint64_t KeyHash(const ThumbnailStoreKey& key) {
     mix(&key.size, sizeof(key.size));
     mix(&key.modified, sizeof(key.modified));
     mix(&key.pixels, sizeof(key.pixels));
+    // Version only formats whose rendering changed, leaving photo/video caches warm.
+    const auto dot = key.path.find_last_of(L'.');
+    if (dot != std::wstring::npos) {
+        std::wstring extension = key.path.substr(dot);
+        for (auto& c : extension) c = static_cast<wchar_t>(std::towlower(c));
+        // WIC frame ordinals differ from ICO/CUR directory ordinals. Entries
+        // made before container-frame decoding can contain enlarged small icons.
+        if (extension == L".ico" || extension == L".cur") {
+            constexpr uint32_t icon_decode_policy = 1;
+            mix(&icon_decode_policy, sizeof(icon_decode_policy));
+        }
+        for (const auto* office : {L".docx", L".docm", L".doc", L".rtf", L".wps",
+             L".xlsx", L".xlsm", L".xls", L".et", L".pptx", L".pptm", L".ppsx",
+             L".ppt", L".pps", L".dps", L".odt", L".ods", L".odp", L".odg"}) {
+            if (extension != office) continue;
+            // Older Office sketches baked a second application badge into the page.
+            constexpr uint32_t office_style = 2;
+            mix(&office_style, sizeof(office_style));
+            break;
+        }
+    }
     return hash;
 }
 

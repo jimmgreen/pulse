@@ -1,10 +1,13 @@
+#include "file_operation_progress_state.h"
 #include "../common/windows_compat.h"
 #include "file_operation_dialog.h"
 #include "../ops/operation_presentation.h"
 #include "../common/localization.h"
 #include "../common/text_format.h"
+#include "../common/runtime_log.h"
 #include "typography.h"
 #include "window_helpers.h"
+#include "ui_motion.h"
 
 #include <windowsx.h>
 #include <commctrl.h>
@@ -27,6 +30,21 @@
 #pragma comment(lib, "windowscodecs.lib")
 
 namespace pulse::ui {
+// Shared with the native-task render probe: external terminal states must not
+// inherit the built-in transfer assumption that Completed always means 100%.
+float OperationDisplayPercent(const ops::OpStatus& status) {
+    if (status.phase == ops::OpPhase::Completed &&
+        (!status.external || status.external_outcome == ops::ExternalOutcome::Completed)) return 100.0f;
+    return status.percent;
+}
+std::wstring ExternalOperationDisplayTitle(const ops::OpStatus& status) {
+    if (status.active) return status.summary.empty() ? status.external_title : status.summary;
+    const auto label = status.external_outcome == ops::ExternalOutcome::Cancelled ? l10n::StringId::Canceled
+        : status.external_outcome == ops::ExternalOutcome::Partial ? l10n::StringId::OpPartialBadge
+        : status.external_outcome == ops::ExternalOutcome::Completed ? l10n::StringId::OpCompleted
+        : l10n::StringId::OpFailed;
+    return status.external_title + L" \u00b7 " + l10n::Get(label);
+}
 namespace {
 
 // Footer bands: faint shading over Mica or solid, a see-through sheet over
@@ -41,19 +59,18 @@ constexpr wchar_t kConflictClass[] = L"PulseFileConflictWindow";
 constexpr wchar_t kDeleteClass[] = L"PulsePermanentDeleteWindow";
 constexpr wchar_t kLockedClass[] = L"PulseLockedItemWindow";
 constexpr UINT_PTR kRenderTimer = 1;
-// Hides the card when its exit zoom ends, whatever the render timer does.
-constexpr UINT_PTR kCloseTimer = 6;
-// Progress window, Pulse_文件操作对话框_重设计.html §1 (DIPs). The footer
+constexpr UINT_PTR kZoomTimer = 7;
+// Progress window (DIPs). The footer
 // stays anchored to the bottom edge; everything above it is laid out from the
-// top: title 8, route 34, percent 62, graph 100–156, rows 166–202.
+// top: title 8, route 34, percent 58, graph 110–174, rows 182–218.
 constexpr float kDlgW = 440.0f;
 constexpr float kTitleH = 40.0f;      // drag strip
 constexpr float kCaptionH = 36.0f;    // minimize / close buttons
 constexpr float kPadX = 16.0f;
 constexpr float kFooterH = 56.0f;
-constexpr float kContentH = 216.0f;   // above the footer, collapsed
+constexpr float kContentH = 230.0f;   // above the footer, collapsed
 constexpr float kCollapsedH = kContentH + kFooterH;
-constexpr float kDetailsBlockH = 150.0f;
+constexpr float kDetailsBlockH = 98.0f;
 constexpr float kDetailedH = kCollapsedH + kDetailsBlockH;
 // Permission view (HTML 1j): no numbers, graph or rows, only the title, the
 // route and the shield's message (at most three lines from 62), so the card
@@ -62,17 +79,30 @@ constexpr float kAuthorizationH = 140.0f + kFooterH;
 // Partial failure: the failed items are listed in place of the percent,
 // graph and rows; the window grows or shrinks to fit the list.
 constexpr float kFailListTop = 90.0f;
-constexpr float kFailRowH = 36.0f;
+constexpr float kFailRowH = 52.0f;
 constexpr size_t kFailMaxRows = 4;
 constexpr float kFailMoreH = 22.0f;
+constexpr int kHitItemSkip = 9;
+constexpr int kHitKeepOpen = 10;
 constexpr int kHitOpen = 8;
 constexpr int kHitFailRow = 20;   // + visible row
 constexpr size_t kTimeGraphPoints = ops::OpSpeedGraph::kMaxTimePoints;
 constexpr float kPi = 3.14159265f;
 
+bool CompactTaskProgress(const ops::OpStatus& status) {
+    return status.external && status.speed_basis == ops::OpSpeedBasis::None;
+}
+float TaskLayoutReduction(const ops::OpStatus& status) {
+    return (status.external && status.source_label.empty() ? 18.0f : 0.0f) +
+        (CompactTaskProgress(status) ? 60.0f : 0.0f);
+}
+
 using pulse::ui::ScaleDip;
 
 struct TransferChrome {
+    D2D1_RECT_F more{};
+    D2D1_RECT_F item_skip{};
+    D2D1_RECT_F keep_open{};
     D2D1_RECT_F minimize{};
     D2D1_RECT_F close{};
     D2D1_RECT_F details{};
@@ -84,6 +114,9 @@ struct TransferChrome {
 };
 
 struct TransferLabels {
+    bool show_item_skip = false;
+    bool show_keep_open = false;
+    std::wstring keep_open;
     std::wstring details;
     std::wstring pause;
     const wchar_t* pause_glyph = L"\xF8AE";
@@ -116,6 +149,12 @@ bool PauseInFlight(const ops::OpStatus& status) {
     return status.phase != ops::OpPhase::Paused && ShowsPaused(status);
 }
 
+bool SupportsItemSkip(const ops::OpStatus& status) {
+    return status.active && status.authorization == ops::AuthorizationState::None &&
+        (status.type == ops::OpType::Copy || status.type == ops::OpType::Move ||
+         status.type == ops::OpType::RealDelete || status.type == ops::OpType::RecycleDelete);
+}
+
 TransferLabels MakeTransferLabels(const ops::OpStatus& status, bool detailed,
                                   const TransferFailureView& partial = {}) {
     TransferLabels labels;
@@ -126,7 +165,7 @@ TransferLabels MakeTransferLabels(const ops::OpStatus& status, bool detailed,
     labels.pause_glyph = paused ? L"\xEDDA" : L"\xF8AE";  // solid, as the HTML (F5B0 is the toolbar split icon)
     const bool emptying = status.type == ops::OpType::EmptyRecycle;
     const bool authorization = status.authorization != ops::AuthorizationState::None;
-    labels.show_details = !authorization;
+    labels.show_details = !authorization && !partial.on && status.active;
     labels.show_retry = status.active && status.authorization == ops::AuthorizationState::ActionRequired
         && status.phase != ops::OpPhase::Cancelling;
     labels.show_skip = labels.show_retry && status.can_skip_authorization;
@@ -139,6 +178,7 @@ TransferLabels MakeTransferLabels(const ops::OpStatus& status, bool detailed,
     labels.show_pause = !authorization && !emptying && status.active && status.can_pause;
     labels.cancel = status.active && !emptying
         ? l10n::Get(l10n::StringId::Cancel) : l10n::Get(l10n::StringId::Close);
+    labels.cancel_primary = !status.active && status.phase == ops::OpPhase::Completed;
     if (partial.on && !status.active) {
         labels.show_open = partial.can_open;
         labels.open = l10n::Get(l10n::StringId::OpOpenDestination);
@@ -150,6 +190,12 @@ TransferLabels MakeTransferLabels(const ops::OpStatus& status, bool detailed,
                (status.phase == ops::OpPhase::Completed || status.phase == ops::OpPhase::Failed)) {
         labels.show_open = true;
         labels.open = l10n::Get(l10n::StringId::OpOpenDestination);
+    }
+    if (status.external) {
+        labels.show_details = status.speed_basis != ops::OpSpeedBasis::None;
+        labels.show_pause = labels.show_retry = labels.show_skip = labels.show_open = false;
+        labels.cancel_retries = false;
+        labels.cancel = l10n::Get(status.active ? l10n::StringId::Cancel : l10n::StringId::Close);
     }
     return labels;
 }
@@ -184,6 +230,11 @@ TransferChrome MakeTransferChrome(float scale, float width, float height,
         chrome.open = D2D1::RectF(next_right - open_w, y0, next_right, y1);
         next_right = chrome.open.left - gap;
     }
+    if (labels.show_keep_open) {
+        const float keep_open_w = painter.MeasureButtonWidth(labels.keep_open);
+        chrome.keep_open = D2D1::RectF(next_right - keep_open_w, y0, next_right, y1);
+        next_right = chrome.keep_open.left - gap;
+    }
     if (labels.show_retry) {
         const float retry_w = (std::max)(painter.MeasureButtonWidth(labels.retry),
                                          painter.MeasureButtonWidth(labels.retry_reserve));
@@ -196,6 +247,13 @@ TransferChrome MakeTransferChrome(float scale, float width, float height,
         chrome.skip = D2D1::RectF(details_x, y0, details_x + painter.MeasureButtonWidth(labels.skip), y1);
     if (labels.show_details) chrome.details = painter.FitButtonBounds(D2D1::RectF(details_x, y0, details_x, y1),
                                              labels.details, L"\xE70D");
+    if (labels.show_item_skip) {
+        const float right = labels.show_pause ? chrome.pause.left - gap : chrome.cancel.left - gap;
+        const float w = painter.MeasureButtonWidth(l10n::Get(l10n::StringId::OpSkipCurrentItem));
+        chrome.item_skip = D2D1::RectF(right - w, y0, right, y1);
+    }
+    if (labels.show_details) chrome.more = D2D1::RectF(chrome.details.right + gap, y0,
+        chrome.details.right + gap + ScaleDip(scale, 30.0f), y1);
     return chrome;
 }
 
@@ -280,7 +338,7 @@ void StrokeArc(ID2D1DeviceContext* dc, D2D1_POINT_2F center, float radius, float
     dc->DrawGeometry(path.get(), brush.get(), stroke, style.get());
 }
 
-// Speed area (the HTML's svg): midpoint-x cubic segments, a flat fill under
+// Speed area (the HTML's svg): midpoint-x cubic segments, a fading fill under
 // the curve and a 1.5-DIP line on top.
 void DrawSpeedArea(ID2D1DeviceContext* dc, const D2D1_RECT_F& plot,
                    const std::vector<D2D1_POINT_2F>& points, D2D1_COLOR_F line_color,
@@ -304,8 +362,15 @@ void DrawSpeedArea(ID2D1DeviceContext* dc, const D2D1_RECT_F& plot,
             add_curve(sink.get());
             sink->AddLine(D2D1::Point2F(points.back().x, plot.bottom));
             sink->EndFigure(D2D1_FIGURE_END_CLOSED);
-            ComPtr<ID2D1SolidColorBrush> fill;
-            if (SUCCEEDED(sink->Close()) && SUCCEEDED(dc->CreateSolidColorBrush(fill_color, &fill)))
+            ComPtr<ID2D1GradientStopCollection> stops;
+            ComPtr<ID2D1LinearGradientBrush> fill;
+            const D2D1_GRADIENT_STOP colors[] = {
+                {0.0f, fill_color}, {1.0f, WithAlpha(fill_color, fill_color.a * 0.12f)} };
+            if (SUCCEEDED(sink->Close()) &&
+                SUCCEEDED(dc->CreateGradientStopCollection(colors, ARRAYSIZE(colors), &stops)) &&
+                SUCCEEDED(dc->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties(
+                    D2D1::Point2F(plot.left, plot.top), D2D1::Point2F(plot.left, plot.bottom)),
+                    stops.get(), &fill)))
                 dc->FillGeometry(area.get(), fill.get());
         }
     }
@@ -472,7 +537,7 @@ std::wstring FormatElapsed(uint64_t seconds) {
     return FormatDuration(seconds);
 }
 
-// File conflict, Pulse_文件操作对话框_重设计.html §2: what arrives and what
+// File conflict: what arrives and what
 // is there side by side (the shell's icon, size, time, 更大 / 较新 in green),
 // then the three choices as list rows. Hover or keyboard focus lights a row
 // with the WinUI selection bar; each row says what it will do (保留两者 names
@@ -596,6 +661,14 @@ void DrawChoiceGlyph(ID2D1DeviceContext* dc, int index, float x, float y, float 
 
 class ConflictWindow {
 public:
+    bool Snapshot(const wchar_t* path) {
+        const bool previous = compositor_.FrameCopyEnabled();
+        compositor_.SetFrameCopyEnabled(true);
+        Render();
+        const bool saved = compositor_.SaveSnapshot(path);
+        compositor_.SetFrameCopyEnabled(previous);
+        return saved;
+    }
     ConflictDialogResult Show(HWND owner, const ops::ConflictItemInfo& conflict,
                               bool dark, D2D1_COLOR_F accent) {
         owner_ = owner;
@@ -607,9 +680,13 @@ public:
         dark_ = dark;
         accent_ = accent;
         scale_ = static_cast<float>(pulse::compat::WindowDpi(owner)) / 96.0f;
+        diagnostics::runtime::Event("operation_conflict_ui_begin", {{"task", conflict.task_id}, {"token", conflict.token}});
+        diagnostics::runtime::Event("operation_conflict_icon_begin", {{"task", conflict.task_id}, {"token", conflict.token}});
         icons_[0] = ShellTypeIcon(LeafName(conflict_.source), conflict_.source_is_directory, 32.0f * scale_);
         icons_[1] = ShellTypeIcon(LeafName(conflict_.destination), conflict_.destination_is_directory,
                                   32.0f * scale_);
+        diagnostics::runtime::Event("operation_conflict_icon_end", {{"task", conflict.task_id}, {"token", conflict.token},
+            {"source_icon", icons_[0] != nullptr}, {"destination_icon", icons_[1] != nullptr}});
 
         WNDCLASSEXW wc{ sizeof(wc) };
         wc.hInstance = GetModuleHandleW(nullptr);
@@ -625,7 +702,12 @@ public:
             WS_POPUP | WS_THICKFRAME | WS_SYSMENU,
             CW_USEDEFAULT, CW_USEDEFAULT, width, height, owner, nullptr,
             wc.hInstance, this);
-        if (!hwnd_) { ReleaseIcons(); return result_; }
+        if (!hwnd_) {
+            diagnostics::runtime::Event("operation_conflict_ui_create_failed", {{"task", conflict.task_id},
+                {"token", conflict.token}, {"error", GetLastError()}}, diagnostics::runtime::Level::Error);
+            ReleaseIcons(); return result_;
+        }
+        diagnostics::runtime::Event("operation_conflict_ui_created", {{"task", conflict.task_id}, {"token", conflict.token}});
         pulse::ui::CenterOwnedWindow(hwnd_, owner_, width, height);
         EnableWindow(owner_, FALSE);
         ShowWindow(hwnd_, SW_SHOW);
@@ -643,6 +725,8 @@ public:
         hwnd_ = nullptr;
         EnableWindow(owner_, TRUE);
         ReleaseIcons();
+        diagnostics::runtime::Event("operation_conflict_ui_end", {{"task", conflict.task_id}, {"token", conflict.token},
+            {"choice", static_cast<uint64_t>(result_.choice)}, {"apply_all", result_.apply_to_all}});
         return result_;
     }
 
@@ -698,7 +782,7 @@ private:
     bool Files() const { return !conflict_.source_is_directory && !conflict_.destination_is_directory; }
 
     D2D1_RECT_F CloseRect() const { return Rect(scale_, kConflictW - 44, 4, 40, 32); }
-    static float ColumnX(int side) { return side == 0 ? kPad : kConflictW - kPad - kColW; }
+    static float ColumnX(int side) { return side == 0 ? kConflictW - kPad - kColW : kPad; }
     D2D1_RECT_F PathRect(int side) const { return Rect(scale_, ColumnX(side), kCompareTop + 90, kColW, 16); }
     D2D1_RECT_F ActionRect(int index) const {
         return Rect(scale_, kPad - 8, kActionsTop + index * (kActionH + kActionGap), kConflictW - (kPad - 8) * 2,
@@ -776,7 +860,7 @@ private:
         };
         make(head_format_, typography::FontRole::Display, 18.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
         make(sub_format_, typography::FontRole::Text, 13.0f, DWRITE_FONT_WEIGHT_NORMAL);
-        make(name_format_, typography::FontRole::Text, 14.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+        make(name_format_, typography::FontRole::Text, 12.5f, DWRITE_FONT_WEIGHT_NORMAL);
         make(body_format_, typography::FontRole::Text, 14.0f, DWRITE_FONT_WEIGHT_NORMAL);
         make(meta_format_, typography::FontRole::Text, 12.0f, DWRITE_FONT_WEIGHT_NORMAL);
     }
@@ -807,16 +891,18 @@ private:
         DrawEllipsizedText(compositor_, meta_format_.get(), Rect(s, x, y, kColW, 20), l10n::Get(label),
                            theme.text_secondary);
 
-        const auto icon = Rect(s, x, y + 28, 32, 32);
+        painter_.FillRoundedRect(Rect(s, x, y + 28, 40, 40), ScaleDip(s, 6.0f),
+                                 WithAlpha(theme.text, dark_ ? 0.08f : 0.04f));
+        const auto icon = Rect(s, x + 9, y + 37, 22, 22);
         if (ID2D1Bitmap* bitmap = IconBitmap(side))
             dc->DrawBitmap(bitmap, icon, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
         else
-            DrawPageIcon(dc, icon.left, icon.top, s);
+            DrawPageIcon(dc, icon.left, icon.top, s * 22.0f / 32.0f);
 
         const std::wstring name = LeafName(source ? conflict_.source : conflict_.destination);
         const bool directory = source ? conflict_.source_is_directory : conflict_.destination_is_directory;
-        const float tx = x + 44.0f;
-        const float tw = kColW - 44.0f;
+        const float tx = x + 50.0f;
+        const float tw = kColW - 50.0f;
         DrawEllipsizedText(compositor_, name_format_.get(), Rect(s, tx, y + 28, tw, 20), name, theme.text);
         auto meta_line = [&](float row_y, const std::wstring& value, const std::wstring& badge) {
             if (badge.empty()) {
@@ -877,12 +963,15 @@ private:
         const float y = kActionsTop + index * (kActionH + kActionGap);
         const float left = kPad - 8.0f;
         const float right = kConflictW - left;
-        DrawChoiceGlyph(compositor_.Dc(), index, (left + 14.0f) * s, (y + 17.0f) * s, s, theme.text_secondary);
+        DrawChoiceGlyph(compositor_.Dc(), index, (left + 14.0f) * s, (y + 17.0f) * s, s, accent);
         DrawEllipsizedText(compositor_, body_format_.get(), Rect(s, left + 48, y + 9, right - 40 - left - 48, 20),
                            title, theme.text);
         DrawEllipsizedText(compositor_, meta_format_.get(), Rect(s, left + 48, y + 29, right - 40 - left - 48, 16),
                            detail, theme.text_secondary);
-        painter_.DrawText(key, Rect(s, right - 12 - 16, y + 17, 16, 20), meta_format_.get(), text3,
+        const auto key_box = Rect(s, right - 36, y + 17, 24, 20);
+        painter_.FillRoundedRect(key_box, ScaleDip(s, 4.0f), WithAlpha(theme.text, dark_ ? 0.08f : 0.04f));
+        painter_.StrokeRoundedRect(key_box, ScaleDip(s, 4.0f), theme.stroke_divider);
+        painter_.DrawText(key, key_box, meta_format_.get(), text3,
                           fluent::HorizontalAlignment::Center);
     }
 
@@ -906,7 +995,6 @@ private:
                            theme.accent.g + (1.0f - theme.accent.g) * 0.28f,
                            theme.accent.b + (1.0f - theme.accent.b) * 0.28f, 1.0f);
         const D2D1_COLOR_F text3 = WithAlpha(theme.text, dark_ ? 0.544f : 0.446f);
-        const D2D1_COLOR_F ok = high_contrast ? theme.accent : dark_ ? HexColor(0x6CCB5F) : HexColor(0x0F7B0F);
         const bool moving = conflict_.type == ops::OpType::Move;
 
         fluent::ControlState close_state{};
@@ -930,8 +1018,8 @@ private:
         DrawEllipsizedText(compositor_, sub_format_.get(), Rect(s, kPad, 46, kConflictW - kPad * 2, 20), where,
                            theme.text_secondary);
 
-        DrawCompareColumn(theme, 0, text3, ok);
-        DrawCompareColumn(theme, 1, text3, ok);
+        DrawCompareColumn(theme, 0, text3, accent);
+        DrawCompareColumn(theme, 1, text3, accent);
         painter_.FillRoundedRect(Rect(s, kConflictW * 0.5f - 0.5f, kCompareTop, 1, kCompareH), 0,
                                  theme.stroke_divider);
 
@@ -1181,7 +1269,7 @@ private:
     ComPtr<IWICImagingFactory> wic_;
 };
 
-// Permanent delete, Pulse_文件操作对话框_重设计.html §3: the question as the
+// Permanent delete: the question as the
 // headline, why it can't be undone under it (a warning line with the reason
 // where there is no Recycle Bin), the first three items in a bordered list
 // with "and N more", then 改为移到回收站 · 取消 · 永久删除. Enter deletes; a
@@ -1313,7 +1401,8 @@ private:
 
     size_t MoreCount() const { return info_.paths.size() > items_.size() ? info_.paths.size() - items_.size() : 0; }
     size_t RowCount() const { return items_.size() + (MoreCount() ? 1 : 0); }
-    float FooterTop() const { return kListTop + 2.0f + static_cast<float>(RowCount()) * kRowH + 20.0f; }
+    float FooterTop() const { return kListTop + 2.0f + static_cast<float>(RowCount()) * kRowH +
+        (Counts().empty() ? 20.0f : 42.0f); }
     float HeightDip() const { return FooterTop() + kFooterH; }
 
     D2D1_RECT_F CloseRect() const { return Rect(scale_, kW - 44, 4, 40, 32); }
@@ -1405,8 +1494,7 @@ private:
         const bool high_contrast = IsHighContrast();
         const Theme theme = high_contrast ? MakeHighContrastTheme() : MakeTheme(dark_, accent_);
         pulse::ui::BeginSurface(compositor_, painter_, theme, dark_, high_contrast, backdrop_enabled_, s);
-        const D2D1_COLOR_F text3 = WithAlpha(theme.text, dark_ ? 0.544f : 0.446f);
-        const D2D1_COLOR_F warn = high_contrast ? theme.accent : dark_ ? HexColor(0xFCE100) : HexColor(0x9D5D00);
+        const D2D1_COLOR_F warn = high_contrast ? theme.danger : dark_ ? HexColor(0xFF99A4) : HexColor(0xC42B1C);
         const D2D1_COLOR_F stroke = high_contrast ? theme.text
             : dark_ ? HexColor(0xFFFFFF, 0.0698f) : HexColor(0x000000, 0.0578f);
 
@@ -1418,14 +1506,9 @@ private:
         DrawEllipsizedText(compositor_, head_format_.get(), Rect(s, kPad, 18, kW - kPad - 64, 24), Headline(),
                            theme.text);
         const std::wstring reason = Reason();
-        if (reason.empty()) {
-            DrawEllipsizedText(compositor_, sub_format_.get(), Rect(s, kPad, 46, kW - kPad * 2, 20),
-                               l10n::Get(l10n::StringId::PermDeleteWarn), theme.text_secondary);
-        } else {
-            DrawStatusIcon(dc, StatusIcon::Warning, kPad, 48, s, warn, dark_ && !high_contrast);
-            DrawEllipsizedText(compositor_, sub_format_.get(), Rect(s, kPad + 24, 46, kW - kPad * 2 - 24, 20), reason,
-                               theme.text_secondary);
-        }
+        DrawStatusIcon(dc, StatusIcon::Warning, kPad, 48, s, warn, dark_ && !high_contrast);
+        DrawEllipsizedText(compositor_, sub_format_.get(), Rect(s, kPad + 24, 46, kW - kPad * 2 - 24, 20),
+                           reason.empty() ? l10n::Get(l10n::StringId::PermDeleteWarn) : reason, warn);
 
         // The list: a 1 px border, 34-DIP rows split by dividers.
         const size_t rows = RowCount();
@@ -1446,13 +1529,8 @@ private:
             if (i >= items_.size()) {
                 const std::wstring more = l10n::Get(l10n::StringId::PermDeleteMoreLead) +
                     pulse::format::GroupedInt(MoreCount()) + l10n::Get(l10n::StringId::PermDeleteMoreEnd);
-                const std::wstring counts = Counts();
                 const float more_w = TextWidth(compositor_.DwriteFactory(), meta_format_.get(), more) / s;
                 painter_.DrawText(more, Rect(s, x0, y, more_w + 2, kRowH), meta_format_.get(), theme.text_secondary);
-                if (!counts.empty())
-                    DrawEllipsizedText(compositor_, meta_format_.get(),
-                                       Rect(s, x0 + more_w, y, (std::max)(x1 - x0 - more_w, 0.0f), kRowH),
-                                       L" \x00B7 " + counts, text3);
                 continue;
             }
             const Item& item = items_[i];
@@ -1471,6 +1549,12 @@ private:
                 painter_.DrawText(size, Rect(s, x1 - size_w - 1, y, size_w + 2, kRowH), meta_format_.get(),
                                   theme.text_secondary);
         }
+
+        const std::wstring total = Counts();
+        if (!total.empty())
+            DrawEllipsizedText(compositor_, meta_format_.get(),
+                               Rect(s, kPad, kListTop + list_h + 8, kW - kPad * 2, 20),
+                               total, theme.text_secondary);
 
         // Footer: the band all the file-operation dialogs share.
         RECT client{};
@@ -1631,7 +1715,7 @@ private:
     ComPtr<IWICImagingFactory> wic_;
 };
 
-// File in use, Pulse_文件操作对话框_重设计.html §4: 460 DIP. The programs
+// File in use: 460 DIP. The programs
 // holding the item, each with its own icon (切换到程序 when it has a window).
 // The dialog watches the programs and the file and continues on its own once
 // the file is free, so retrying is only a 立即重试 link on the waiting line;
@@ -1825,15 +1909,41 @@ private:
 
     void LoadIcons() {
         const int size = static_cast<int>(std::lround(24.0f * scale_));
+        for (auto& bitmap : bitmaps_) bitmap.reset();
+        for (HICON& icon : icons_) {
+            if (icon) DestroyIcon(icon);
+            icon = nullptr;
+        }
+        FindOwnerWindows();
         for (size_t i = 0; i < info_.owners.size() && i < kMaxRows; ++i) {
+            // Window icons can differ from the executable (hosted applications).
+            // These handles are borrowed; retain only a private, DPI-sized copy.
+            if (HWND window = windows_[i]) {
+                for (const WPARAM kind : { WPARAM(ICON_BIG), WPARAM(ICON_SMALL2) }) {
+                    DWORD_PTR result = 0;
+                    if (SendMessageTimeoutW(window, WM_GETICON, kind,
+                                            static_cast<LPARAM>(std::lround(96.0f * scale_)),
+                                            SMTO_ABORTIFHUNG | SMTO_BLOCK, 100, &result) && result)
+                        icons_[i] = static_cast<HICON>(CopyImage(reinterpret_cast<HICON>(result),
+                                                                IMAGE_ICON, size, size, 0));
+                    if (icons_[i]) break;
+                }
+                if (!icons_[i]) {
+                    HICON borrowed = reinterpret_cast<HICON>(GetClassLongPtrW(window, GCLP_HICON));
+                    if (!borrowed) borrowed = reinterpret_cast<HICON>(GetClassLongPtrW(window, GCLP_HICONSM));
+                    if (borrowed) icons_[i] = static_cast<HICON>(CopyImage(borrowed, IMAGE_ICON, size, size, 0));
+                }
+            }
+            if (icons_[i]) continue;
             HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, info_.owners[i].pid);
             if (!process) continue;
-            wchar_t image[MAX_PATH * 2]{};
+            wchar_t image[32768]{};
             DWORD length = ARRAYSIZE(image);
             if (QueryFullProcessImageNameW(process, 0, image, &length)) {
                 HICON icon = nullptr;
                 UINT id = 0;
                 if (PrivateExtractIconsW(image, 0, size, size, &icon, &id, 1, 0) == 1 && icon) icons_[i] = icon;
+                else if (icon) DestroyIcon(icon);
             }
             CloseHandle(process);
         }
@@ -2005,8 +2115,6 @@ private:
         const D2D1_COLOR_F ok = high_contrast ? theme.accent : dark_ ? HexColor(0x6CCB5F) : HexColor(0x0F7B0F);
         const D2D1_COLOR_F track = high_contrast ? WithAlpha(theme.text, 0.12f)
             : dark_ ? HexColor(0xFFFFFF, 0.06f) : HexColor(0x000000, 0.045f);
-        const D2D1_COLOR_F stroke = high_contrast ? theme.text
-            : dark_ ? HexColor(0xFFFFFF, 0.0698f) : HexColor(0x000000, 0.0578f);
         const bool keyboard = keyboard_focus_;
 
         fluent::ControlState close_state{};
@@ -2022,10 +2130,8 @@ private:
                            l10n::Get(l10n::StringId::LockCloseLead) + Verb() + l10n::Get(l10n::StringId::LockCloseEnd),
                            theme.text_secondary);
 
-        // The programs: a 1 px border, 56-DIP rows split by dividers.
+        // Program cards use the same soft surface as the HTML's owner rows.
         const auto box = Rect(s, kPad, kListTop, kW - kPad * 2, ListH());
-        painter_.StrokeRoundedRect(D2D1::RectF(box.left + 0.5f, box.top + 0.5f, box.right - 0.5f, box.bottom - 0.5f),
-                                   ScaleDip(s, 6.0f), stroke, 1.0f);
         const float x0 = kPad + 13.0f;
         const float x1 = kW - kPad - 13.0f;
         auto divider = [&](float y) {
@@ -2035,7 +2141,8 @@ private:
         for (size_t i = 0; i < Rows(); ++i) {
             const ops::LockOwner& owner = info_.owners[i];
             const float y = kListTop + 1.0f + static_cast<float>(i) * kRowH;
-            if (i > 0) divider(y);
+            painter_.FillRoundedRect(Rect(s, kPad, y, kW - kPad * 2, kRowH - 4.0f), ScaleDip(s, 6.0f),
+                                     WithAlpha(theme.text, dark_ ? 0.08f : 0.04f));
             const auto icon = Rect(s, x0, y + 16, 24, 24);
             if (ID2D1Bitmap* bitmap = IconBitmap(i))
                 dc->DrawBitmap(bitmap, icon, gone_[i] ? 0.55f : 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
@@ -2145,6 +2252,7 @@ private:
             compositor_.RecreateTextFormats(scale_);
             painter_.SetScale(scale_);
             CreateFormats();
+            LoadIcons();
             const auto* suggested = reinterpret_cast<RECT*>(lparam);
             SetWindowPos(hwnd_, nullptr, suggested->left, suggested->top, suggested->right - suggested->left,
                          suggested->bottom - suggested->top, SWP_NOZORDER | SWP_NOOWNERZORDER);
@@ -2307,6 +2415,8 @@ bool FileOperationWindow::Create(HWND owner, FileOperationCallbacks callbacks) {
 }
 
 void FileOperationWindow::Destroy() {
+    flight_.Stop();
+    pending_locate_task_ = 0;
     if (hwnd_) { HideComposedDialog(hwnd_); DestroyWindow(hwnd_); }
     hwnd_ = nullptr;
 }
@@ -2345,10 +2455,10 @@ void FileOperationWindow::CreateCardFormats() {
         out->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         out->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
     };
-    make(pct_format_, typography::FontRole::Display, 28.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
-    make(unit_format_, typography::FontRole::Display, 16.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
-    make(title_format_, typography::FontRole::Text, 14.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
-    make(speed_format_, typography::FontRole::Text, 14.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+    make(pct_format_, typography::FontRole::Display, 40.0f, DWRITE_FONT_WEIGHT_LIGHT);
+    make(unit_format_, typography::FontRole::Display, 18.0f, DWRITE_FONT_WEIGHT_NORMAL);
+    make(title_format_, typography::FontRole::Text, 16.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+    make(speed_format_, typography::FontRole::Text, 15.0f, DWRITE_FONT_WEIGHT_SEMI_BOLD);
     make(label_format_, typography::FontRole::Text, 12.0f, DWRITE_FONT_WEIGHT_NORMAL);
     make(value_format_, typography::FontRole::Text, 13.0f, DWRITE_FONT_WEIGHT_NORMAL);
     make(chip_format_, typography::FontRole::Text, 13.0f, DWRITE_FONT_WEIGHT_NORMAL);
@@ -2526,6 +2636,7 @@ void FileOperationWindow::Update(const ops::OpStatus& incoming) {
         board_scroll_ = 0;
     }
     if (had_board != board_.has_value()) ResizeForDetails(false);
+    TickZoom();
     const bool new_task = status.task_id != status_.task_id;
     const ULONGLONG now = GetTickCount64();
     if (!new_task && status.active && status_.active) {
@@ -2546,9 +2657,9 @@ void FileOperationWindow::Update(const ops::OpStatus& incoming) {
     has_held_status_ = false;
     if (status.authorization_retrying && !status_.authorization_retrying) retry_shown_tick_ = now;
     const bool was_active = status_.active;
-    const bool was_succeeded = !new_task && !status_.active &&
-        status_.phase == ops::OpPhase::Completed && status_.last_error.empty();
+    const bool was_succeeded = !new_task && TransferCanAutoClose(status_);
     if (new_task || status.authorization != status_.authorization) pressed_ = 0;
+    const bool layout_changed = TaskLayoutReduction(status) != TaskLayoutReduction(status_);
     const bool authorization_changed = (status.authorization != ops::AuthorizationState::None) !=
                                        (status_.authorization != ops::AuthorizationState::None);
     status_ = ops::PresentOperationStatus(status);
@@ -2557,89 +2668,289 @@ void FileOperationWindow::Update(const ops::OpStatus& incoming) {
         SyncGraph();   // a card built late starts with the run so far
         task_start_tick_ = now;
         task_end_tick_ = 0;
-        countdown_base_ = 0;
-        kept_ = false;
-        finish_unseen_ = false;
+        success_dismiss_at_ = 0;
+        if (keep_open_requested_) auto_close_ = true;
+        keep_open_requested_ = false;
+        locate_after_ = false;
+        pending_locate_task_ = 0;
     }
     const bool finished = !status_.active &&
         (status_.phase == ops::OpPhase::Completed || status_.phase == ops::OpPhase::Failed);
     if (!finished) task_end_tick_ = 0;
     else if (task_end_tick_ == 0) task_end_tick_ = now;
-    const bool succeeded = finished && status_.phase == ops::OpPhase::Completed &&
-        status_.last_error.empty();
+    const bool succeeded = TransferCanAutoClose(status_);
     if (succeeded && status_.failed_items == 0) {
         SyncGraph();
         graph_.Complete();
     }
-    // The countdown starts only when the finish happens in front of the user
-    // in a window the app opened (SetAutoClose); a summary opened from the
-    // pill stays until closed.
-    if (!succeeded || !auto_close_ || kept_) {
-        countdown_base_ = 0;
-        finish_unseen_ = false;
-    } else if (countdown_base_ == 0 && !was_succeeded && !closing_ && hwnd_ &&
-               IsWindowVisible(hwnd_)) {
-        if (IsIconic(hwnd_)) finish_unseen_ = true;
-        else countdown_base_ = now;
+    // Keep the completed result visible briefly before returning to the status pill.
+    // A card shrinking into the pill counts as hidden (Shown).
+    if (succeeded && !was_succeeded && auto_close_ && Shown()) {
+        success_dismiss_at_ = now + kSuccessDismissMs;
+    } else if (!succeeded || !auto_close_) {
+        success_dismiss_at_ = 0;
+    }
+    if (succeeded && !was_succeeded && auto_close_ && locate_after_ &&
+        hwnd_ && !Shown() && callbacks_.locate_results) {
+        if (closing_) pending_locate_task_ = status_.task_id;
+        else callbacks_.locate_results(status_.task_id);
     }
     if (!hwnd_) return;
-    if (authorization_changed) ResizeForDetails(true);
+    if (authorization_changed || new_task || was_active != status_.active || layout_changed)
+        ResizeForDetails(authorization_changed);
     InvalidateRect(hwnd_, nullptr, FALSE);
-    // The render timer stops once an operation ends; restart it for the next
-    // one and for the auto-close countdown.
-    if (((status_.active && !was_active) || countdown_base_ != 0) && IsWindowVisible(hwnd_))
+    // The timer also drains the short completion indicator in the footer.
+    if (((status_.active && !was_active) || success_dismiss_at_ != 0) && Shown())
         SetTimer(hwnd_, kRenderTimer, 33, nullptr);
 }
 
-void FileOperationWindow::Show(bool activate) {
+bool FileOperationWindow::FlightAnimationsEnabled() const {
+    return flight_animations_override_.value_or(motion::SystemAnimationsEnabled());
+}
+
+void FileOperationWindow::Show(bool activate, bool from_status) {
     if (!hwnd_) return;
+    const bool interrupted = closing_ || opening_;
+    const RECT initial = flight_.Bounds();
+    const float initial_alpha = flight_.Opacity();
+    const bool had_flight = flight_.Active();
+    if (interrupted) EndZoom();
+    pending_locate_task_ = 0;
     const bool was_visible = IsWindowVisible(hwnd_) != FALSE;
-    if (closing_) {
-        // Reopened during the exit zoom: put the card back at full size.
-        closing_ = false;
-        compositor_.ClearZoom();
-        ApplyWindowTheme();
-        InvalidateRect(hwnd_, nullptr, FALSE);
-    }
+    const bool zoom = (from_status || interrupted) && !was_visible && FlightAnimationsEnabled();
     if (!positioned_) {
         RECT rect{};
         GetWindowRect(hwnd_, &rect);
         pulse::ui::CenterOwnedWindow(hwnd_, owner_, rect.right - rect.left, rect.bottom - rect.top);
         positioned_ = true;
     }
+    if (!was_visible) SyncGraph();
+    flight_activate_ = activate;
+    if (zoom) {
+        DropBackdropForZoom(true);
+        Render();
+        RECT full{};
+        GetWindowRect(hwnd_, &full);
+        POINT anchor = StatusZoomOrigin();
+        ClientToScreen(hwnd_, &anchor);
+        if (flight_.Start(compositor_, owner_, full, anchor, true, kShowZoomMs,
+                          (IsHighContrast() ? MakeHighContrastTheme() : MakeTheme(dark_, accent_)).bg,
+                          had_flight ? &initial : nullptr, initial_alpha)) {
+            opening_ = true;
+            zoom_until_ = GetTickCount64() + kShowZoomMs;
+            SetTimer(hwnd_, kZoomTimer, 16, nullptr);
+            return;
+        }
+    }
+    FinishShowFromStatus();
+}
+
+POINT FileOperationWindow::StatusZoomOrigin() const {
+    RECT client{};
+    GetClientRect(hwnd_, &client);
+    // Bottom-right, where the pill sits, unless the app says exactly where.
+    POINT point{ client.right, client.bottom };
+    if (callbacks_.status_anchor) {
+        if (const auto anchor = callbacks_.status_anchor()) {
+            point = *anchor;
+            ScreenToClient(hwnd_, &point);
+        }
+    }
+    return point;
+}
+
+// The DWM backdrop does not follow the DComp zoom: drop it and paint the card
+// opaque so it moves as one piece; the frame extended over the client area
+// would otherwise stay behind as a blank sheet.
+void FileOperationWindow::DropBackdropForZoom(bool suppress_shadow) {
+    const BOOL no_transitions = TRUE;
+    DwmSetWindowAttribute(hwnd_, DWMWA_TRANSITIONS_FORCEDISABLED, &no_transitions, sizeof(no_transitions));
+    // Windows 11 draws the sizing frame of a WS_THICKFRAME window as a full-size
+    // sheet with a shadow that stays behind the shrinking card: no sizing
+    // frame while the zoom runs (EndZoom puts it back).
+    const LONG_PTR style = GetWindowLongPtrW(hwnd_, GWL_STYLE);
+    if (style & WS_THICKFRAME) {
+        SetWindowLongPtrW(hwnd_, GWL_STYLE, style & ~static_cast<LONG_PTR>(WS_THICKFRAME));
+        SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE |
+                     SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
+    }
+    const DWMNCRENDERINGPOLICY no_frame = DWMNCRP_DISABLED;
+    DwmSetWindowAttribute(hwnd_, DWMWA_NCRENDERING_POLICY, &no_frame, sizeof(no_frame));
+    // DWMWCP_ROUND (ApplyBackdrop) also gives the popup Windows 11's shadow.
+    const DWORD square = DWMWCP_DONOTROUND;
+    DwmSetWindowAttribute(hwnd_, DWMWA_WINDOW_CORNER_PREFERENCE, &square, sizeof(square));
+    const DWORD none = DWMSBT_NONE;
+    DwmSetWindowAttribute(hwnd_, DWMWA_SYSTEMBACKDROP_TYPE, &none, sizeof(none));
+    const MARGINS flat{ 0, 0, 0, 0 };
+    DwmExtendFrameIntoClientArea(hwnd_, &flat);
+    backdrop_enabled_ = false;
+    // Windows 10's shadow window would stay full size; it comes back on hide.
+    if (suppress_shadow) pulse::ui::SuppressWindowShadow(hwnd_);
+}
+
+void FileOperationWindow::EndZoom() {
+    flight_.Stop();
+    if (!hwnd_) return;
+    KillTimer(hwnd_, kZoomTimer);
+    closing_ = false;
+    opening_ = false;
+    compositor_.ClearZoom();
+    const BOOL transitions = FALSE;
+    DwmSetWindowAttribute(hwnd_, DWMWA_TRANSITIONS_FORCEDISABLED, &transitions, sizeof(transitions));
+    const LONG_PTR style = GetWindowLongPtrW(hwnd_, GWL_STYLE);
+    if (!(style & WS_THICKFRAME)) {
+        SetWindowLongPtrW(hwnd_, GWL_STYLE, style | WS_THICKFRAME);
+        SetWindowPos(hwnd_, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE |
+                     SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
+    }
+    // ApplyBackdrop turns it off again where Pulse draws its own corners.
+    const DWMNCRENDERINGPOLICY frame = DWMNCRP_USEWINDOWSTYLE;
+    DwmSetWindowAttribute(hwnd_, DWMWA_NCRENDERING_POLICY, &frame, sizeof(frame));
+    ApplyWindowTheme();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void FileOperationWindow::HideToStatus() {
+    if (!hwnd_ || closing_) return;
+    const bool was_opening = opening_;
+    const RECT initial = flight_.Bounds();
+    const float initial_alpha = flight_.Opacity();
+    const bool had_flight = flight_.Active();
+    if (opening_) EndZoom();
+    if ((!IsWindowVisible(hwnd_) && !was_opening) || IsIconic(hwnd_) || !FlightAnimationsEnabled()) {
+        closing_ = was_opening;
+        FinishHideToStatus();
+        return;
+    }
+    KillTimer(hwnd_, kRenderTimer);
+    DropBackdropForZoom(true);
+    Render();
+    RECT full{};
+    GetWindowRect(hwnd_, &full);
+    POINT anchor = StatusZoomOrigin();
+    ClientToScreen(hwnd_, &anchor);
+    closing_ = true;
+    if (!flight_.Start(compositor_, owner_, full, anchor, false, kHideZoomMs,
+                       (IsHighContrast() ? MakeHighContrastTheme() : MakeTheme(dark_, accent_)).bg,
+                       had_flight ? &initial : nullptr, initial_alpha)) {
+        FinishHideToStatus();
+        return;
+    }
+    ShowWindow(hwnd_, SW_HIDE);
+    zoom_until_ = GetTickCount64() + kHideZoomMs;
+    SetTimer(hwnd_, kZoomTimer, 16, nullptr);
+}
+
+void FileOperationWindow::TickZoom() {
+    if (!(closing_ || opening_)) return;
+    if (flight_.Active() && !flight_.Tick()) return;
+    if (closing_) FinishHideToStatus();
+    else FinishShowFromStatus();
+}
+
+void FileOperationWindow::FinishHideToStatus() {
+    if (!hwnd_) return;
+    const bool was_shown = closing_ || opening_ || IsWindowVisible(hwnd_) != FALSE;
+    KillTimer(hwnd_, kRenderTimer);
+    ShowWindow(hwnd_, SW_HIDE);
+    EndZoom();
+    const uint64_t locate = pending_locate_task_;
+    pending_locate_task_ = 0;
+    if (was_shown && callbacks_.reached_status) callbacks_.reached_status();
+    if (locate && callbacks_.locate_results) callbacks_.locate_results(locate);
+}
+
+void FileOperationWindow::FinishShowFromStatus() {
+    if (!hwnd_) return;
+    EndZoom();
+    Render();
     if (IsIconic(hwnd_)) ShowWindow(hwnd_, SW_RESTORE);
     SetWindowPos(hwnd_, HWND_TOP, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER |
-                 (activate ? 0 : SWP_NOACTIVATE) | SWP_SHOWWINDOW);
-    // SWP_SHOWWINDOW sends no WM_SHOWWINDOW; start the animation timer here.
-    if (!was_visible) {
-        SyncGraph();   // fill in what ran while the card was hidden
-        InvalidateRect(hwnd_, nullptr, FALSE);
-        SetTimer(hwnd_, kRenderTimer, 33, nullptr);
+                 (flight_activate_ ? 0 : SWP_NOACTIVATE) | SWP_SHOWWINDOW);
+    SetTimer(hwnd_, kRenderTimer, 33, nullptr);
+    if (flight_activate_) SetForegroundWindow(hwnd_);
+}
+
+bool FileOperationWindow::Shown() const {
+    return hwnd_ && !closing_ && (opening_ || IsWindowVisible(hwnd_));
+}
+
+std::vector<FluentMenuItem> FileOperationWindow::MoreItems() const {
+    std::vector<FluentMenuItem> items;
+    auto add = [&](int command, l10n::StringId id, const wchar_t* glyph = L"") -> FluentMenuItem& {
+        FluentMenuItem item;
+        item.command = command;
+        item.text = l10n::Get(id);
+        item.glyph = glyph;
+        items.push_back(std::move(item));
+        return items.back();
+    };
+    if (callbacks_.more_action) {
+        if (!status_.destination_dir.empty()) add(1, l10n::StringId::OpOpenDestination, L"\xE8B7").mnemonic = L'D';
+        add(2, l10n::StringId::OpOpenSource, L"\xE8B7");
+        if (!status_.destination_dir.empty()) add(3, l10n::StringId::OpCopyDestination, L"\xE8C8");
+        items.back().separator_after = true;
     }
-    if (activate) SetForegroundWindow(hwnd_);
+    auto& heading = add(0, l10n::StringId::OpAfterCompletion);
+    heading.heading = true;
+    if (callbacks_.locate_results && !status_.destination_dir.empty()) {
+        auto& locate = add(4, l10n::StringId::OpLocateAfter);
+        locate.checked = locate_after_;
+    }
+    auto& keep = add(5, l10n::StringId::OpKeepWindow);
+    keep.checked = !auto_close_;
+    keep.separator_after = true;
+    add(6, l10n::StringId::OpHideToStatus, L"\xE921").shortcut = L"Esc";
+    return items;
+}
+
+void FileOperationWindow::RunMoreAction(int command) {
+    if (command >= 1 && command <= 3 && callbacks_.more_action)
+        callbacks_.more_action(status_.task_id, command);
+    else if (command == 4) locate_after_ = !locate_after_;
+    else if (command == 5) {
+        keep_open_requested_ = auto_close_;
+        SetAutoClose(!keep_open_requested_);
+    } else if (command == 6) RequestDismiss();
+}
+
+void FileOperationWindow::ShowMoreMenu() {
+    FluentMenu menu;
+    if (!menu.Create(hwnd_, &compositor_, scale_)) return;
+    menu.SetTheme(dark_, accent_);
+    const auto labels = MakeTransferLabels(status_, detailed_, FailureView());
+    const auto chrome = MakeTransferChrome(scale_, static_cast<float>(compositor_.Width()),
+        static_cast<float>(compositor_.Height()), painter_, labels);
+    auto items = MoreItems();
+    FluentMenuModel model;
+    model.SetItems(items);
+    model.Layout(compositor_.DwriteFactory(), scale_);
+    POINT point{static_cast<LONG>(chrome.more.left),
+        static_cast<LONG>(chrome.more.top - model.HeightPx() - ScaleDip(scale_, 6.0f))};
+    ClientToScreen(hwnd_, &point);
+    const auto task = status_.task_id;
+    const int command = menu.TrackPopup(point, std::move(items));
+    if (status_.task_id == task) RunMoreAction(command);
 }
 
 void FileOperationWindow::SetAutoClose(bool on) {
-    auto_close_ = on;
-    if (on || countdown_base_ == 0) return;
-    countdown_base_ = 0;
+    auto_close_ = on && !keep_open_requested_;
+    if (!auto_close_) success_dismiss_at_ = 0;
     if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void FileOperationWindow::Hide() {
-    countdown_base_ = 0;
+    pending_locate_task_ = 0;
     if (!hwnd_) return;
+    KillTimer(hwnd_, kRenderTimer);
     ShowWindow(hwnd_, SW_HIDE);
-    if (closing_) {
-        closing_ = false;
-        compositor_.ClearZoom();
-        ApplyWindowTheme();
-    }
+    if (closing_ || opening_) EndZoom();
 }
 
+// A card shrinking into the status pill already counts as gone.
 bool FileOperationWindow::IsVisible() const {
-    return hwnd_ && IsWindowVisible(hwnd_);
+    return Shown();
 }
 
 void FileOperationWindow::ApplyWindowTheme() {
@@ -2653,7 +2964,8 @@ void FileOperationWindow::ResizeForDetails(bool preserve_center) {
     const int width = rect.right - rect.left;
     const int old_height = rect.bottom - rect.top;
     const float height_dip = status_.authorization != ops::AuthorizationState::None
-        ? kAuthorizationH : (detailed_ ? kDetailedH : kCollapsedH) + FailureBlockDip();
+        ? kAuthorizationH : (detailed_ && status_.active && !CompactTaskProgress(status_) ? kDetailedH : kCollapsedH) +
+            FailureBlockDip() - TaskLayoutReduction(status_);
     const int height = static_cast<int>(height_dip * scale_);
     const int y = preserve_center ? rect.top - (height - old_height) / 2 : rect.top;
     SetWindowPos(hwnd_, nullptr, rect.left, y, width, height,
@@ -2661,12 +2973,19 @@ void FileOperationWindow::ResizeForDetails(bool preserve_center) {
 }
 
 int FileOperationWindow::HitTestControl(float x, float y) const {
-    if (closing_) return 0;
     auto labels = MakeTransferLabels(status_, detailed_, FailureView());
+    labels.show_item_skip = static_cast<bool>(callbacks_.skip_current) && SupportsItemSkip(status_);
+    labels.show_keep_open = success_dismiss_at_ != 0 && auto_close_;
+    labels.keep_open = l10n::Get(l10n::StringId::OpKeepOpen);
+    if (labels.show_open && callbacks_.locate_results && status_.phase == ops::OpPhase::Completed)
+        labels.open = l10n::Get(l10n::StringId::OpLocateResults);
     if (preparation_only_) labels.show_details = false;
     const auto chrome = MakeTransferChrome(scale_,
         static_cast<float>(compositor_.Width()), static_cast<float>(compositor_.Height()),
         painter_, labels);
+    if (labels.show_item_skip && status_.current_item_token && status_.phase != ops::OpPhase::Cancelling &&
+        pulse::ui::ContainsRect(chrome.item_skip, x, y)) return kHitItemSkip;
+    if (labels.show_keep_open && pulse::ui::ContainsRect(chrome.keep_open, x, y)) return kHitKeepOpen;
     if (pulse::ui::ContainsRect(chrome.close, x, y)) return 1;
     if (pulse::ui::ContainsRect(chrome.minimize, x, y)) return 2;
     if (board_ && !status_.active) {
@@ -2678,88 +2997,27 @@ int FileOperationWindow::HitTestControl(float x, float y) const {
     if (labels.show_skip && labels.actions_enabled && pulse::ui::ContainsRect(chrome.skip, x, y)) return 7;
     if (labels.show_pause && pulse::ui::ContainsRect(chrome.pause, x, y)) return 3;
     if (pulse::ui::ContainsRect(chrome.cancel, x, y)) return 4;
+    if (labels.show_details && pulse::ui::ContainsRect(chrome.more, x, y)) return 11;
     if (labels.show_details && pulse::ui::ContainsRect(chrome.details, x, y)) return 5;
     return 0;
 }
 
-void FileOperationWindow::RequestClose() {
-    if (closing_) return;
+void FileOperationWindow::RequestDismiss(bool to_status) {
+    success_dismiss_at_ = 0;
+    if (callbacks_.dismiss) callbacks_.dismiss();
+    if (to_status) HideToStatus();
+    else Hide();
+}
+
+void FileOperationWindow::RequestCancel() {
     const bool emptying = status_.type == ops::OpType::EmptyRecycle;
-    if (status_.active && status_.phase != ops::OpPhase::Completed &&
-        status_.phase != ops::OpPhase::Failed && !emptying) {
-        if (callbacks_.cancel) callbacks_.cancel();
-        return;
-    }
-    if (callbacks_.dismiss) callbacks_.dismiss();
-    Hide();
-}
-
-bool FileOperationWindow::AutoClosePending() const {
-    return countdown_base_ != 0 && !closing_ && !status_.active &&
-           status_.phase == ops::OpPhase::Completed && status_.last_error.empty();
-}
-
-void FileOperationWindow::TickAutoClose(ULONGLONG now) {
-    if (closing_) {
-        if (now - closing_tick_ >= kCloseAnimMs) FinishAutoClose();
-        return;
-    }
-    // Hovering does not hold the card (an untouched card closes itself); a
-    // button held down or a minimized card restarts the countdown.
-    countdown_hover_ = pressed_ != 0 || IsIconic(hwnd_);
-    if (countdown_hover_) countdown_base_ = now;
-    if (now - countdown_base_ >= kAutoCloseMs) {
-        BeginAutoClose();
-        return;
-    }
-    InvalidateRect(hwnd_, nullptr, FALSE);
-}
-
-void FileOperationWindow::BeginAutoClose() {
-    closing_ = true;
-    closing_tick_ = GetTickCount64();
-    countdown_base_ = 0;
-    // The DWM backdrop does not follow the DComp zoom: drop it and paint the
-    // card opaque first so it leaves as one piece.
-    const DWORD none = DWMSBT_NONE;
-    DwmSetWindowAttribute(hwnd_, DWMWA_SYSTEMBACKDROP_TYPE, &none, sizeof(none));
-    // Without the backdrop, the frame extended over the client area is an
-    // opaque DWM sheet that stayed behind the shrinking card as a blank
-    // window. Without it the window is clear where the card is not.
-    const MARGINS flat{ 0, 0, 0, 0 };
-    DwmExtendFrameIntoClientArea(hwnd_, &flat);
-    backdrop_enabled_ = false;
-    pulse::ui::SuppressWindowShadow(hwnd_);  // Windows 10: it would stay full size
-    Render();
-    SetTimer(hwnd_, kCloseTimer, static_cast<UINT>(kCloseAnimMs), nullptr);
-    // Toward the bottom-right, where the status pill sits.
-    if (!compositor_.PlayZoom(static_cast<float>(compositor_.Width()),
-                              static_cast<float>(compositor_.Height()), false,
-                              static_cast<double>(kCloseAnimMs) / 1000.0))
-        FinishAutoClose();
-}
-
-void FileOperationWindow::FinishAutoClose() {
-    if (hwnd_) KillTimer(hwnd_, kCloseTimer);
-    if (!closing_) return;
-    closing_ = false;
-    countdown_base_ = 0;
-    if (callbacks_.dismiss) callbacks_.dismiss();
-    if (hwnd_) ShowWindow(hwnd_, SW_HIDE);
-    compositor_.ClearZoom();
-    ApplyWindowTheme();
-}
-
-// A click, key or drag on the finished card: the user is looking at it, so
-// it stays until they close it.
-void FileOperationWindow::KeepOpen() {
-    if (closing_ || kept_ || status_.active) return;
-    if (status_.phase != ops::OpPhase::Completed && status_.phase != ops::OpPhase::Failed) return;
-    kept_ = true;
-    finish_unseen_ = false;
-    if (countdown_base_ == 0) return;
-    countdown_base_ = 0;
-    if (hwnd_) InvalidateRect(hwnd_, nullptr, FALSE);
+    const bool cancelling = status_.active && status_.phase != ops::OpPhase::Completed &&
+        status_.phase != ops::OpPhase::Failed && !emptying;
+    if (cancelling && callbacks_.cancel_task) callbacks_.cancel_task(status_.task_id);
+    else if (cancelling && callbacks_.cancel) callbacks_.cancel();
+    // A cancelled task leaves nothing in the pill to go to; 关闭 on a finished
+    // card returns it to the pill like the title-bar buttons.
+    RequestDismiss(!cancelling);
 }
 
 void FileOperationWindow::SampleGraph(ULONGLONG now) {
@@ -2812,17 +3070,24 @@ void FileOperationWindow::Render() {
     const float content_w = dip_w - kPadX * 2.0f;
     auto* factory = compositor_.DwriteFactory();
     auto labels = MakeTransferLabels(status_, detailed_, FailureView());
+    labels.show_item_skip = static_cast<bool>(callbacks_.skip_current) && SupportsItemSkip(status_);
+    labels.show_keep_open = success_dismiss_at_ != 0 && auto_close_;
+    labels.keep_open = l10n::Get(l10n::StringId::OpKeepOpen);
+    if (labels.show_open && callbacks_.locate_results && status_.phase == ops::OpPhase::Completed)
+        labels.open = l10n::Get(l10n::StringId::OpLocateResults);
     if (preparation_only_) labels.show_details = false;
     const auto chrome = MakeTransferChrome(s, width, height, painter_, labels);
     const ULONGLONG now = GetTickCount64();
 
     const bool authorization = status_.authorization != ops::AuthorizationState::None;
     const bool requesting = status_.authorization == ops::AuthorizationState::Requesting;
-    const bool failed = status_.phase == ops::OpPhase::Failed;
+    const bool failed = status_.phase == ops::OpPhase::Failed || (status_.external && !status_.active &&
+        status_.external_outcome != ops::ExternalOutcome::Completed);
     const bool paused = ShowsPaused(status_);
     const bool pausing = PauseInFlight(status_);
     const bool waiting = status_.phase == ops::OpPhase::WaitingForConflict;
-    const bool scanning = status_.phase == ops::OpPhase::Scanning || !status_.enumeration_complete;
+    const bool scanning = !TransferTerminal(status_) &&
+        (status_.phase == ops::OpPhase::Scanning || !status_.enumeration_complete);
     const bool completed = status_.phase == ops::OpPhase::Completed && !failed;
     const bool cancelling = status_.phase == ops::OpPhase::Cancelling;
     // Partial failure: the rest went through, the failed items are listed.
@@ -2846,7 +3111,7 @@ void FileOperationWindow::Render() {
     const ops::OpSpeedBasis shown_basis = status_.speed_basis == ops::OpSpeedBasis::None
         ? ops::OpSpeedBasis::Bytes : status_.speed_basis;
 
-    // Colours (Pulse_文件操作对话框_重设计.html): the accent carries the
+    // Colours: the accent carries the
     // progress; paused, waiting and failed turn the graph grey. Status colours
     // show only in the title icon and the graph's end dot.
     auto mix = [](D2D1_COLOR_F a, D2D1_COLOR_F b, float t) {
@@ -2864,8 +3129,9 @@ void FileOperationWindow::Render() {
         : dark_ ? HexColor(0xFFFFFF, 0.06f) : HexColor(0x000000, 0.045f);
     const D2D1_COLOR_F stroke = high_contrast ? theme.text
         : dark_ ? HexColor(0xFFFFFF, 0.0698f) : HexColor(0x000000, 0.0578f);
-    const float fraction = status_.percent < 0.0f ? 0.0f
-        : std::clamp(status_.percent / 100.0f, 0.0f, 1.0f);
+    const float displayed_percent = OperationDisplayPercent(status_);
+    const float fraction = displayed_percent < 0.0f ? 0.0f
+        : std::clamp(displayed_percent / 100.0f, 0.0f, 1.0f);
     const bool list_mode = board_.has_value() && !authorization;
 
     const uint64_t item_count = status_.total_items > 0 ? status_.total_items
@@ -2899,7 +3165,7 @@ void FileOperationWindow::Render() {
             : moving ? l10n::StringId::OpMovedPrefix : l10n::StringId::OpCopiedPrefix)
             + pulse::format::GroupedInt(status_.completed_items) + items_suffix;
     } else if (authorization) {
-        // Pulse_文件操作对话框_重设计.html 1j: the title says what needs it.
+        // The title says what needs it.
         title = l10n::Get(status_.type == ops::OpType::Copy ? l10n::StringId::OpAuthTitleCopy
             : moving ? l10n::StringId::OpAuthTitleMove
             : deleting ? l10n::StringId::OpAuthTitleDelete
@@ -2916,13 +3182,14 @@ void FileOperationWindow::Render() {
             : moving ? l10n::StringId::OpMovingPrefix : l10n::StringId::OpCopyingPrefix)
             + pulse::format::GroupedInt(item_count) + items_suffix;
     }
+    if (status_.external) title = ExternalOperationDisplayTitle(status_);
     if (preparation_only_)
         title = l10n::Get(l10n::StringId::Delete) + L" · " + l10n::Get(l10n::StringId::OpPreparing);
     // Title, with a status icon once the task has ended.
     StatusIcon title_icon = StatusIcon::None;
     D2D1_COLOR_F icon_color = ok_color;
     if (authorization) title_icon = StatusIcon::None;
-    else if (partial) { title_icon = StatusIcon::Warning; icon_color = warn_color; }
+    else if (partial) { title_icon = StatusIcon::Warning; icon_color = bad_color; }
     else if (failed) { title_icon = StatusIcon::Error; icon_color = bad_color; }
     else if (completed) title_icon = StatusIcon::Ok;
     const float title_x = title_icon == StatusIcon::None ? kPadX : kPadX + 24.0f;
@@ -2935,36 +3202,58 @@ void FileOperationWindow::Render() {
     // Route: one line of text, source → destination.
     const std::wstring src = status_.source_label.empty()
         ? l10n::Get(l10n::StringId::OpSourceShort) : status_.source_label;
-    const bool two_ends = !status_.destination_label.empty() && !deleting && !emptying && !restoring
-                       && !creating && !renaming;
-    {
+    const bool two_ends = (!status_.destination_label.empty() && !deleting && !emptying && !restoring
+                       && !creating && !renaming) || deleting;
+    if (!status_.external || !status_.source_label.empty()) {
         const float y = 34.0f, h = 16.0f;
         if (emptying) {
-            DrawEllipsizedText(compositor_, label_format_.get(), Rect(s, kPadX, y, content_w, h),
-                               l10n::Get(l10n::StringId::OpEmptyingSub), theme.text_secondary);
+            if (TransferShowsEmptyingSubtitle(status_))
+                DrawEllipsizedText(compositor_, label_format_.get(), Rect(s, kPadX, y, content_w, h),
+                                   l10n::Get(l10n::StringId::OpEmptyingSub), theme.text_secondary);
         } else if (two_ends) {
-            const std::wstring arrow = L"\x2192";
+            const std::wstring arrow = L"\xE72A";
+            const bool to_bin = status_.type == ops::OpType::RecycleDelete;
+            const std::wstring destination = deleting
+                ? l10n::Get(to_bin ? l10n::StringId::RecycleBin : l10n::StringId::PermanentDelete)
+                : status_.destination_label;
             const float arrow_w = TextWidth(factory, label_format_.get(), arrow) / s + 8.0f;
+            constexpr float icon_w = 14.0f;
+            constexpr float icon_gap = 5.0f;
+            const float path_icons_w = icon_w * 2.0f + icon_gap * 2.0f;
             float a = TextWidth(factory, label_format_.get(), src) / s + 1.0f;
-            float b = TextWidth(factory, label_format_.get(), status_.destination_label) / s + 1.0f;
-            const float avail = content_w - arrow_w;
+            float b = TextWidth(factory, label_format_.get(), destination) / s + 1.0f;
+            const float avail = content_w - arrow_w - path_icons_w;
             if (a + b > avail) {
                 const float half = avail * 0.5f;
                 if (a < half) b = avail - a;
                 else if (b < half) a = avail - b;
                 else { a = half; b = half; }
             }
-            DrawEllipsizedText(compositor_, label_format_.get(), Rect(s, kPadX, y, a, h), src, theme.text);
-            painter_.DrawText(arrow, Rect(s, kPadX + a, y, arrow_w, h), label_format_.get(), text3,
-                              fluent::HorizontalAlignment::Center);
-            DrawEllipsizedText(compositor_, label_format_.get(), Rect(s, kPadX + a + arrow_w, y, b, h),
-                               status_.destination_label, theme.text);
+            const D2D1_COLOR_F folder = high_contrast ? theme.accent
+                : dark_ ? HexColor(0xFFCD70) : HexColor(0xBCA270);
+            const D2D1_COLOR_F destination_icon = deleting
+                ? (high_contrast ? theme.accent : bad_color) : folder;
+            float x = kPadX;
+            painter_.DrawGlyphWithFormat(L"\xE8B7", Rect(s, x, y, icon_w, h), folder, glyph_format_.get());
+            x += icon_w + icon_gap;
+            DrawEllipsizedText(compositor_, label_format_.get(), Rect(s, x, y, a, h), src, theme.text);
+            x += a;
+            painter_.DrawGlyphWithFormat(arrow, Rect(s, x, y, arrow_w, h), text3, glyph_format_.get());
+            x += arrow_w;
+            painter_.DrawGlyphWithFormat(deleting ? L"\xE74D" : L"\xE8B7",
+                Rect(s, x, y, icon_w, h), destination_icon, glyph_format_.get());
+            x += icon_w + icon_gap;
+            DrawEllipsizedText(compositor_, label_format_.get(), Rect(s, x, y, b, h), destination, theme.text);
         } else {
-            DrawEllipsizedText(compositor_, label_format_.get(), Rect(s, kPadX, y, content_w, h), src, theme.text);
+            const D2D1_COLOR_F folder = high_contrast ? theme.accent
+                : dark_ ? HexColor(0xFFCD70) : HexColor(0xBCA270);
+            painter_.DrawGlyphWithFormat(L"\xE8B7", Rect(s, kPadX, y, 14, h), folder, glyph_format_.get());
+            DrawEllipsizedText(compositor_, label_format_.get(), Rect(s, kPadX + 19, y, content_w - 19, h),
+                               src, theme.text);
         }
     }
 
-    // Title-bar buttons. The auto-close countdown drains under 关闭 instead.
+    // Title-bar buttons.
     fluent::ControlState minimize{};
     minimize.hovered = hover_ == 2;
     minimize.pressed = pressed_ == 2;
@@ -2973,7 +3262,6 @@ void FileOperationWindow::Render() {
     close.hovered = hover_ == 1;
     close.pressed = pressed_ == 1;
     painter_.DrawTitleBarButton(chrome.close, fluent::TitleBarButtonRole::Close, {}, close);
-    const bool counting = AutoClosePending() || closing_;
 
     const double live_speed = status_.speed_basis == ops::OpSpeedBasis::Items
         ? status_.items_per_second : status_.bytes_per_second;
@@ -2997,7 +3285,9 @@ void FileOperationWindow::Render() {
         ? static_cast<double>(left_bytes) / status_.bytes_per_second : 0.0;
     const bool eta_unsettled = elapsed_ms < 3000 ||
         (rate_eta > 0.0 && static_cast<double>(status_.eta_seconds) > rate_eta * 4.0 + 30.0);
-    const std::wstring time_text = partial ? std::wstring(L"\x2014")
+    const std::wstring time_text = status_.external && status_.external_outcome == ops::ExternalOutcome::Cancelled ? l10n::Get(l10n::StringId::Canceled)
+        : status_.external && status_.external_outcome == ops::ExternalOutcome::Partial ? l10n::Get(l10n::StringId::OpPartialBadge)
+        : partial ? std::wstring(L"\x2014")
         : failed ? l10n::Get(l10n::StringId::OpIncomplete)
         : completed ? l10n::Get(l10n::StringId::OpCompleted)
         : paused ? l10n::Get(l10n::StringId::OpPaused)
@@ -3016,17 +3306,20 @@ void FileOperationWindow::Render() {
                 + pulse::format::ByteSize(left_bytes) + L")";
         else remain_text = pulse::format::GroupedInt(remain_items) + l10n::Get(l10n::StringId::OpCountSuffix);
     }
-    const std::wstring remain_line = remain_text.empty() ? std::wstring()
+    const std::wstring remain_line = remain_text.empty() || (failed && remain_items == 0) ? std::wstring()
         : l10n::Get(status_.enumeration_complete ? l10n::StringId::OpRemainingShort : l10n::StringId::OpDiscoveredPending) + L" " + remain_text;
     const std::wstring dot = L"  \x00B7  ";
     const std::wstring took = l10n::Get(l10n::StringId::OpTookLead) + FormatElapsed(elapsed_ms / 1000);
 
-    const float hero_y = 62.0f;
-    const float graph_top = 100.0f;
-    const float graph_h = 56.0f;
-    const float rows_top = 166.0f;
+    const float route_reduction = status_.external && status_.source_label.empty() ? 18.0f : 0.0f;
+    const bool compact_progress = CompactTaskProgress(status_);
+    const float hero_y = 58.0f - route_reduction;
+    const float graph_top = 110.0f - route_reduction;
+    const float graph_h = compact_progress ? 4.0f : 64.0f;
+    const float rows_top = graph_top + graph_h + 8.0f;
     const float row_h = 18.0f;
-    const bool indeterminate = scanning || status_.percent < 0.0f;
+    const bool indeterminate = TransferIndeterminate(status_);
+    const bool unknown_terminal_progress = TransferTerminal(status_) && displayed_percent < 0.0f;
 
     if (preparation_only_) {
         DrawEllipsizedText(compositor_, value_format_.get(),
@@ -3058,10 +3351,13 @@ void FileOperationWindow::Render() {
                 l10n::Get(l10n::StringId::OpItemPrefix) + status_.current_item, text3);
     } else if (!list_mode) {
         // --- Hero: percent on the left, speed or state on the right --------
-        const D2D1_RECT_F right_box = Rect(s, dip_w - kPadX - 220.0f, hero_y + 10.0f, 220.0f, 20.0f);
-        if (indeterminate) {
+        const D2D1_RECT_F right_box = Rect(s, dip_w - kPadX - 220.0f, hero_y + 4.0f, 220.0f, 20.0f);
+        if (unknown_terminal_progress) {
             DrawEllipsizedText(compositor_, value_format_.get(), Rect(s, kPadX, hero_y + 10.0f, content_w * 0.55f, 20.0f),
-                               l10n::Get(!status_.enumeration_complete ? l10n::StringId::OpScanningAndCopying :
+                l10n::Get(failed ? l10n::StringId::OpIncomplete : l10n::StringId::OpCompleted), theme.text_secondary);
+        } else if (indeterminate) {
+            DrawEllipsizedText(compositor_, value_format_.get(), Rect(s, kPadX, hero_y + 10.0f, content_w * 0.55f, 20.0f),
+                               l10n::Get(status_.external ? l10n::StringId::OpPreparing : !status_.enumeration_complete ? l10n::StringId::OpScanningAndCopying :
                                    (scanning ? l10n::StringId::OpScanning : l10n::StringId::OpPreparing)),
                                theme.text_secondary);
             if (status_.total_items > 0) {
@@ -3075,26 +3371,26 @@ void FileOperationWindow::Render() {
         } else {
             const bool muted = failed || paused || cancelling;
             const int whole = static_cast<int>(std::floor(fraction * 100.0f + (completed ? 0.5f : 0.0f)));
-            const std::wstring pct = std::to_wstring(completed ? 100 : whole);
+            const std::wstring pct = std::to_wstring(whole);
             const float pct_w = TextWidth(factory, pct_format_.get(), pct) / s;
-            painter_.DrawText(pct, Rect(s, kPadX - 1, hero_y, pct_w + 4, 32), pct_format_.get(),
+            painter_.DrawText(pct, Rect(s, kPadX - 1, hero_y, pct_w + 4, 44), pct_format_.get(),
                               muted ? theme.text_secondary : theme.text);
-            painter_.DrawText(L"%", Rect(s, kPadX + pct_w - 1, hero_y + 7, 20, 24), unit_format_.get(),
+            painter_.DrawText(L"%", Rect(s, kPadX + pct_w + 1, hero_y + 17, 20, 24), unit_format_.get(),
                               theme.text_secondary);
         }
         if (!indeterminate) {
             std::wstring state;
             if (completed) {
+                painter_.DrawText(took, right_box, speed_format_.get(), theme.text,
+                                  fluent::HorizontalAlignment::Right);
                 if (average > 0.0) {
-                    const std::wstring speed = FormatSpeedText(shown_basis, average);
-                    const float speed_w = TextWidth(factory, speed_format_.get(), speed) / s;
-                    painter_.DrawText(speed, right_box, speed_format_.get(), theme.text,
-                                      fluent::HorizontalAlignment::Right);
-                    painter_.DrawText(l10n::Get(l10n::StringId::OpAverageLead),
-                                      Rect(s, dip_w - kPadX - 220.0f, hero_y + 10.0f, 220.0f - speed_w - 6.0f, 20.0f),
+                    painter_.DrawText(l10n::Get(l10n::StringId::OpAverageLead) + FormatSpeedText(shown_basis, average),
+                                      Rect(s, dip_w - kPadX - 220.0f, hero_y + 26.0f, 220.0f, 18.0f),
                                       label_format_.get(), theme.text_secondary, fluent::HorizontalAlignment::Right);
                 }
-            } else if (failed) state = l10n::Get(l10n::StringId::OpIncomplete);
+            } else if (failed) {
+                if (!unknown_terminal_progress) state = l10n::Get(l10n::StringId::OpIncomplete);
+            }
             else if (cancelling) state = l10n::Get(l10n::StringId::OpCancelling);
             else if (pausing) state = l10n::Get(l10n::StringId::OpPausing);
             else if (paused) state = l10n::Get(l10n::StringId::OpPaused);
@@ -3104,13 +3400,18 @@ void FileOperationWindow::Render() {
             else painter_.DrawText(FormatSpeedText(shown_basis, live_speed), right_box, speed_format_.get(),
                                    theme.text, fluent::HorizontalAlignment::Right);
             if (!state.empty())
-                painter_.DrawText(state, right_box, value_format_.get(), theme.text_secondary,
+                painter_.DrawText(state, right_box, value_format_.get(), paused ? warn_color : theme.text_secondary,
                                   fluent::HorizontalAlignment::Right);
+            if (!completed && !failed && !cancelling && status_.speed_basis != ops::OpSpeedBasis::None) {
+                const std::wstring sub = paused || waiting ? remain_line : time_text;
+                painter_.DrawText(sub, Rect(s, dip_w - kPadX - 220.0f, hero_y + 26.0f, 220.0f, 18.0f),
+                                  label_format_.get(), theme.text_secondary, fluent::HorizontalAlignment::Right);
+            }
         }
 
         // --- Speed graph: a flat track, the area up to the progress ---------
         const auto plot = Rect(s, kPadX, graph_top, content_w, graph_h);
-        const float radius = ScaleDip(s, 4.0f);
+        const float radius = ScaleDip(s, compact_progress ? 2.0f : 4.0f);
         painter_.FillRoundedRect(plot, radius, track);
         const bool clipped = PushRoundedClip(dc, plot, radius);
         if (indeterminate) {
@@ -3121,6 +3422,10 @@ void FileOperationWindow::Render() {
             const float x = -bar_w + (content_w + bar_w) * eased;
             painter_.FillRoundedRect(Rect(s, kPadX + x, graph_top + graph_h - 3.0f, bar_w, 3.0f),
                                      ScaleDip(s, 1.5f), accent);
+        } else if (compact_progress) {
+            if (!unknown_terminal_progress && fraction > 0.0f)
+                painter_.FillRoundedRect(Rect(s, kPadX, graph_top, content_w * fraction, graph_h), radius,
+                    failed || cancelling ? text3 : accent);
         } else {
             double max_value = 0.0;
             for (const auto& point : graph_.points) max_value = (std::max)(max_value, point.v);
@@ -3144,7 +3449,7 @@ void FileOperationWindow::Render() {
                                                     grey ? 0.10f : (dark_ ? 0.20f : 0.13f));
                 DrawSpeedArea(dc, plot, points, line, fill, s);
                 ComPtr<ID2D1SolidColorBrush> dot_brush;
-                if (!completed && SUCCEEDED(dc->CreateSolidColorBrush(failed ? bad_color : line, &dot_brush)))
+                if (SUCCEEDED(dc->CreateSolidColorBrush(completed ? ok_color : failed ? bad_color : line, &dot_brush)))
                     dc->FillEllipse(D2D1::Ellipse(points.back(), ScaleDip(s, 3.0f), ScaleDip(s, 3.0f)),
                                     dot_brush.get());
             }
@@ -3155,7 +3460,7 @@ void FileOperationWindow::Render() {
         if (failed) {
             // pulse_shell errors are Simplified; known messages are localized and
             // file names are kept as they are on disk.
-            const std::wstring error = status_.last_error.empty() ? l10n::Get(l10n::StringId::OpFailed)
+            const std::wstring error = status_.last_error.empty() ? l10n::Get(status_.external_outcome == ops::ExternalOutcome::Cancelled ? l10n::StringId::Canceled : status_.external_outcome == ops::ExternalOutcome::Partial ? l10n::StringId::OpPartialBadge : l10n::StringId::OpFailed)
                                                                   : l10n::ServiceErrorText(status_.last_error);
             DrawEllipsizedText(compositor_, chip_format_.get(), Rect(s, kPadX, rows_top + 2, content_w, row_h),
                                error, theme.text);
@@ -3164,14 +3469,22 @@ void FileOperationWindow::Render() {
                                    Rect(s, kPadX, rows_top + 2 + row_h, content_w, row_h), remain_line,
                                    theme.text_secondary);
         } else if (completed) {
-            std::wstring line = took;
-            if (byte_basis && status_.total_bytes > 0) line += dot + pulse::format::ByteSize(status_.total_bytes);
+            const std::wstring result = !status_.destination_label.empty()
+                ? l10n::Get(l10n::StringId::OpDestination) + L": " + status_.destination_label
+                : l10n::Get(l10n::StringId::OpAllCompleted);
             DrawEllipsizedText(compositor_, label_format_.get(), Rect(s, kPadX, rows_top, content_w, row_h),
+                               result, theme.text);
+            std::wstring line = pulse::format::GroupedInt(status_.completed_items) + items_suffix;
+            if (byte_basis && status_.total_bytes > 0) line += dot + pulse::format::ByteSize(status_.total_bytes);
+            DrawEllipsizedText(compositor_, label_format_.get(), Rect(s, kPadX, rows_top + row_h, content_w, row_h),
                                line, theme.text_secondary);
         } else {
             std::wstring item_line;
-            if (emptying && status_.current_item.empty()) item_line = l10n::Get(l10n::StringId::OpEmptyingSub);
-            else item_line = status_.current_item.empty() ? src : status_.current_item;
+            if (TransferShowsEmptyingSubtitle(status_) && status_.current_item.empty())
+                item_line = l10n::Get(l10n::StringId::OpEmptyingSub);
+            else if (!status_.external || !status_.current_item.empty() || !status_.source_label.empty())
+                item_line = l10n::Get(l10n::StringId::OpItemPrefix) +
+                (status_.current_item.empty() ? src : status_.current_item);
             std::wstring counter;
             if (status_.total_items > 0 && !scanning)
                 counter = pulse::format::GroupedInt(status_.completed_items) + L" / " +
@@ -3191,7 +3504,6 @@ void FileOperationWindow::Render() {
                 if (byte_basis) second += dot + pulse::format::ByteSize(status_.transferred_bytes);
             } else if (!scanning && !remain_line.empty()) {
                 second = remain_line;
-                if (!paused && !waiting && status_.speed_basis != ops::OpSpeedBasis::None) second += dot + time_text;
             }
             if (!second.empty())
                 DrawEllipsizedText(compositor_, label_format_.get(),
@@ -3231,12 +3543,9 @@ void FileOperationWindow::Render() {
                                          theme.stroke_divider);
             }
             const bool done = row.state == FailureRow::State::Done;
-            painter_.DrawGlyphWithFormat(L"\xE8A5", Rect(s, kPadX + 8, y, 18, kFailRowH), theme.text_secondary,
+            painter_.DrawGlyphWithFormat(L"\xE8A5", Rect(s, kPadX + 8, y + 6, 18, 18), theme.text_secondary,
                                          glyph_format_.get());
             const std::wstring name = LeafName(row.failure.source);
-            const float name_w = (std::min)(170.0f, TextWidth(factory, chip_format_.get(), name) / s + 2.0f);
-            DrawEllipsizedText(compositor_, chip_format_.get(), Rect(s, kPadX + 34, y, name_w, kFailRowH),
-                               name, theme.text);
             float action_left = kPadX + content_w - 6.0f;
             if (row.state == FailureRow::State::Failed && callbacks_.retry_failed) {
                 const auto button = Rect(s, action_left - retry_w, y + (kFailRowH - 24.0f) * 0.5f, retry_w, 24.0f);
@@ -3261,11 +3570,14 @@ void FileOperationWindow::Render() {
                                                  glyph_format_.get());
                 action_left = right - w - (done ? 22.0f : 4.0f);
             }
-            const float reason_x = kPadX + 34.0f + name_w + 10.0f;
-            if (action_left > reason_x + 8.0f)
-                DrawEllipsizedText(compositor_, label_format_.get(),
-                                   Rect(s, reason_x, y, action_left - reason_x - 6.0f, kFailRowH),
-                                   row.failure.reason, theme.text_secondary);
+            const float text_x = kPadX + 34.0f;
+            const float text_w = (std::max)(action_left - text_x - 6.0f, 0.0f);
+            DrawEllipsizedText(compositor_, chip_format_.get(), Rect(s, text_x, y + 6, text_w, 18),
+                               name, theme.text);
+            DrawEllipsizedText(compositor_, label_format_.get(), Rect(s, text_x, y + 25, text_w, 18),
+                               done ? done_label : row.failure.reason,
+                               done ? ok_color : row.state == FailureRow::State::Retrying
+                                   ? theme.text_secondary : bad_color);
         }
         if (board_->unlisted > 0) {
             const float y = rows_y + kFailRowH * static_cast<float>(visible);
@@ -3288,11 +3600,10 @@ void FileOperationWindow::Render() {
     }
 
     // --- Details: a two-column label / value list ------------------------------
-    if (detailed_ && !authorization && !preparation_only_) {
-        const float top = kContentH + fail_block;
-        painter_.FillRoundedRect(D2D1::RectF(ScaleDip(s, kPadX), ScaleDip(s, top),
-                                             ScaleDip(s, kPadX + content_w), ScaleDip(s, top) + 1.0f),
-                                 0, theme.stroke_divider);
+    if (detailed_ && status_.active && !authorization && !preparation_only_ && !CompactTaskProgress(status_)) {
+        const float top = kContentH + fail_block - TaskLayoutReduction(status_);
+        painter_.FillRoundedRect(Rect(s, kPadX, top, content_w, kDetailsBlockH - 12.0f), ScaleDip(s, 6.0f),
+                                 WithAlpha(theme.text, dark_ ? 0.08f : 0.04f));
         const std::wstring detail_labels[6] = {
             l10n::Get(l10n::StringId::OpProcessedItems), l10n::Get(l10n::StringId::OpTransferredBytes),
             l10n::Get(l10n::StringId::OpAverageSpeed), l10n::Get(l10n::StringId::OpPeakSpeed),
@@ -3307,13 +3618,15 @@ void FileOperationWindow::Render() {
             average > 0.0 ? FormatSpeedText(shown_basis, average) : std::wstring(L"\x2014"),
             peak_speed > 0.0 ? FormatSpeedText(shown_basis, peak_speed) : std::wstring(L"\x2014"),
             FormatElapsed(elapsed_ms / 1000), time_text };
-        const float col_w = (content_w - 16.0f) * 0.5f;
+        const float col_w = (content_w - 24.0f - 16.0f) * 0.5f;
         for (int i = 0; i < 6; ++i) {
-            const float x = kPadX + (col_w + 16.0f) * static_cast<float>(i % 2);
-            const float y = top + 13.0f + 44.0f * static_cast<float>(i / 2);
-            DrawEllipsizedText(compositor_, label_format_.get(), Rect(s, x, y, col_w, 16), detail_labels[i],
+            const float x = kPadX + 12.0f + (col_w + 16.0f) * static_cast<float>(i % 2);
+            const float y = top + 10.0f + 24.0f * static_cast<float>(i / 2);
+            const float value_w = (std::min)(col_w * 0.66f,
+                TextWidth(factory, label_format_.get(), detail_values[i]) / s + 1.0f);
+            DrawEllipsizedText(compositor_, label_format_.get(), Rect(s, x, y, col_w - value_w - 8.0f, 18), detail_labels[i],
                                theme.text_secondary);
-            DrawEllipsizedText(compositor_, value_format_.get(), Rect(s, x, y + 16, col_w, 18), detail_values[i],
+            DrawEllipsizedText(compositor_, label_format_.get(), Rect(s, x + col_w - value_w, y, value_w, 18), detail_values[i],
                                theme.text);
         }
     }
@@ -3323,12 +3636,31 @@ void FileOperationWindow::Render() {
     painter_.FillRoundedRect(D2D1::RectF(0, footer_top, width, height), 0,
         OpFooter(hwnd_, backdrop_enabled_, dark_));
     painter_.FillRoundedRect(D2D1::RectF(0, footer_top, width, footer_top + 1.0f), 0, theme.stroke_divider);
+    if (success_dismiss_at_ != 0 && auto_close_) {
+        const float remaining = std::clamp(
+            static_cast<float>(success_dismiss_at_ > now ? success_dismiss_at_ - now : 0) /
+                static_cast<float>(kSuccessDismissMs), 0.0f, 1.0f);
+        painter_.FillRoundedRect(D2D1::RectF(0, footer_top, width * remaining,
+            footer_top + ScaleDip(s, 2.0f)), 0, ok_color);
+    }
 
+    if (labels.show_keep_open) {
+        fluent::ControlState keep_state{};
+        keep_state.hovered = hover_ == kHitKeepOpen;
+        keep_state.pressed = pressed_ == kHitKeepOpen;
+        painter_.DrawButton({chrome.keep_open, labels.keep_open, {}, fluent::ButtonKind::Transparent, keep_state});
+    }
     fluent::ControlState detail_state{};
     detail_state.hovered = hover_ == 5;
     detail_state.pressed = pressed_ == 5;
     if (labels.show_details) painter_.DrawButton({ chrome.details, labels.details,
         detailed_ ? L"\xE70E" : L"\xE70D", fluent::ButtonKind::Transparent, detail_state });
+    if (labels.show_details) {
+        fluent::ControlState more_state{};
+        more_state.hovered = hover_ == 11;
+        more_state.pressed = pressed_ == 11;
+        painter_.DrawButton({chrome.more, {}, L"\xE712", fluent::ButtonKind::Transparent, more_state});
+    }
     if (labels.show_pause) {
         fluent::ControlState pause_state{};
         pause_state.enabled = status_.active && !failed && !cancelling && !waiting;
@@ -3360,6 +3692,14 @@ void FileOperationWindow::Render() {
         open_state.pressed = pressed_ == kHitOpen;
         painter_.DrawButton({ chrome.open, labels.open, {}, fluent::ButtonKind::Standard, open_state });
     }
+    if (labels.show_item_skip) {
+        fluent::ControlState state{};
+        state.enabled = status_.current_item_token != 0 && status_.phase != ops::OpPhase::Cancelling;
+        state.hovered = hover_ == kHitItemSkip;
+        state.pressed = pressed_ == kHitItemSkip;
+        painter_.DrawButton({chrome.item_skip, l10n::Get(l10n::StringId::OpSkipCurrentItem), {},
+            fluent::ButtonKind::Standard, state});
+    }
     fluent::ControlState cancel_state{};
     cancel_state.enabled = !cancelling;
     cancel_state.hovered = hover_ == 4;
@@ -3367,17 +3707,6 @@ void FileOperationWindow::Render() {
     painter_.DrawButton({ chrome.cancel, labels.cancel, {},
                           labels.cancel_primary ? fluent::ButtonKind::Primary : fluent::ButtonKind::Standard,
                           cancel_state });
-    if (counting) {
-        // Auto-close: a ring around × drains over kAutoCloseMs; a held button
-        // or a minimized card keeps it full.
-        const float left = closing_ || countdown_hover_ ? 1.0f
-            : 1.0f - std::clamp(static_cast<float>(now - countdown_base_) / kAutoCloseMs, 0.0f, 1.0f);
-        const D2D1_POINT_2F c = D2D1::Point2F((chrome.close.left + chrome.close.right) * 0.5f,
-                                              (chrome.close.top + chrome.close.bottom) * 0.5f);
-        const float r = ScaleDip(s, 11.0f);
-        StrokeArc(dc, c, r, 0.0f, 360.0f, WithAlpha(ok_color, 0.18f), ScaleDip(s, 2.0f));
-        StrokeArc(dc, c, r, 360.0f * (1.0f - left), 360.0f * left, ok_color, ScaleDip(s, 2.0f));
-    }
     pulse::ui::EndSurface(compositor_);
 }
 
@@ -3415,6 +3744,11 @@ LRESULT FileOperationWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM l
         return 0;
     case WM_NCHITTEST: {
         auto labels = MakeTransferLabels(status_, detailed_, FailureView());
+        labels.show_item_skip = static_cast<bool>(callbacks_.skip_current) && SupportsItemSkip(status_);
+        labels.show_keep_open = success_dismiss_at_ != 0 && auto_close_;
+        labels.keep_open = l10n::Get(l10n::StringId::OpKeepOpen);
+        if (labels.show_open && callbacks_.locate_results && status_.phase == ops::OpPhase::Completed)
+            labels.open = l10n::Get(l10n::StringId::OpLocateResults);
         if (preparation_only_) labels.show_details = false;
         const auto chrome = MakeTransferChrome(scale_,
             static_cast<float>(compositor_.Width()), static_cast<float>(compositor_.Height()),
@@ -3432,19 +3766,9 @@ LRESULT FileOperationWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM l
     case WM_SIZE:
         if (compositor_.Dc() && wparam != SIZE_MINIMIZED)
             compositor_.Resize(LOWORD(lparam), HIWORD(lparam));
-        if (wparam == SIZE_RESTORED && finish_unseen_) {
-            // Finished while minimized: count down now that it is seen.
-            finish_unseen_ = false;
-            if (auto_close_ && !kept_ && !closing_ && !status_.active &&
-                status_.phase == ops::OpPhase::Completed && status_.last_error.empty()) {
-                countdown_base_ = GetTickCount64();
-                SetTimer(hwnd_, kRenderTimer, 33, nullptr);
-            }
-        }
         InvalidateRect(hwnd_, nullptr, FALSE);
         return 0;
     case WM_ENTERSIZEMOVE:
-        KeepOpen();
         break;
     case WM_MOVE:
         compositor_.UpdateTextRenderingParams(
@@ -3462,12 +3786,12 @@ LRESULT FileOperationWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM l
         return 0;
     }
     case WM_TIMER:
-        if (wparam == kRenderTimer && !IsWindowVisible(hwnd_)) {
-            KillTimer(hwnd_, kRenderTimer);
+        if (wparam == kZoomTimer) {
+            TickZoom();
             return 0;
         }
-        if (wparam == kCloseTimer) {
-            FinishAutoClose();
+        if (wparam == kRenderTimer && (closing_ || !IsWindowVisible(hwnd_))) {
+            KillTimer(hwnd_, kRenderTimer);
             return 0;
         }
         if (wparam == kRenderTimer && has_held_status_ && GetTickCount64() >= hold_until_) {
@@ -3476,12 +3800,20 @@ LRESULT FileOperationWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM l
         }
         if (wparam == kRenderTimer) {
             const ULONGLONG now = GetTickCount64();
-            if (closing_ || AutoClosePending()) {
-                TickAutoClose(now);
+            if (success_dismiss_at_ != 0 && auto_close_) {
+                if (now >= success_dismiss_at_) {
+                    success_dismiss_at_ = 0;
+                    diagnostics::runtime::Event("operation_ui_success_close", {{"task", status_.task_id},
+                        {"type", static_cast<uint64_t>(status_.type)}});
+                    if (callbacks_.dismiss) callbacks_.dismiss();
+                    pending_locate_task_ = locate_after_ ? status_.task_id : 0;
+                    HideToStatus();
+                    return 0;
+                }
+                InvalidateRect(hwnd_, nullptr, FALSE);
                 return 0;
             }
-            // Only a running operation animates (speed graph, live dot); a
-            // finished one is redrawn by Update and input alone.
+            // A running operation animates the speed graph and live dot.
             if (!status_.active) {
                 KillTimer(hwnd_, kRenderTimer);
                 return 0;
@@ -3514,13 +3846,12 @@ LRESULT FileOperationWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM l
         InvalidateRect(hwnd_, nullptr, FALSE);
         return 0;
     case WM_RBUTTONDOWN:
-        KeepOpen();
         return 0;
     case WM_LBUTTONDOWN:
+        if (closing_) return 0;   // already on its way into the pill
         pressed_ = HitTestControl(static_cast<float>(GET_X_LPARAM(lparam)),
                                   static_cast<float>(GET_Y_LPARAM(lparam)));
-        // Closing (1) and minimizing (2) are not a reason to keep the card.
-        if (pressed_ != 1 && pressed_ != 2) KeepOpen();
+        // Header controls dismiss the card without canceling the operation.
         SetCapture(hwnd_);
         InvalidateRect(hwnd_, nullptr, FALSE);
         return 0;
@@ -3532,19 +3863,39 @@ LRESULT FileOperationWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM l
         ReleaseCapture();
         if (hit == pressed) {
             auto labels = MakeTransferLabels(status_, detailed_, FailureView());
+            labels.show_item_skip = static_cast<bool>(callbacks_.skip_current) && SupportsItemSkip(status_);
+            labels.show_keep_open = success_dismiss_at_ != 0 && auto_close_;
+            labels.keep_open = l10n::Get(l10n::StringId::OpKeepOpen);
+            if (labels.show_open && callbacks_.locate_results && status_.phase == ops::OpPhase::Completed)
+                labels.open = l10n::Get(l10n::StringId::OpLocateResults);
             if (preparation_only_) labels.show_details = false;
-            if (hit == 4 && labels.cancel_retries && board_) {
+            diagnostics::runtime::Event("operation_ui_action", {{"task", status_.task_id},
+                {"type", static_cast<uint64_t>(status_.type)}, {"phase", static_cast<uint64_t>(status_.phase)},
+                {"control", static_cast<uint64_t>(hit)}, {"active", status_.active}});
+            if (hit == kHitItemSkip && callbacks_.skip_current && status_.current_item_token) {
+                callbacks_.skip_current(status_.task_id, status_.current_item_token);
+            } else if (hit == 11) {
+                ShowMoreMenu();
+            } else if (hit == kHitKeepOpen) {
+                keep_open_requested_ = true;
+                SetAutoClose(false);
+            } else if (hit == 4 && labels.cancel_retries && board_) {
                 std::vector<size_t> rows(board_->rows.size());
                 for (size_t i = 0; i < rows.size(); ++i) rows[i] = i;
                 RetryFailureRows(rows);
-            } else if (hit == 1 || hit == 4) {
-                RequestClose();
-            } else if (hit == kHitOpen && callbacks_.open_folder && !status_.destination_dir.empty()) {
-                callbacks_.open_folder(status_.destination_dir);
+            } else if (hit == 1 || hit == 2) {
+                RequestDismiss();
+            } else if (hit == 4) {
+                RequestCancel();
+            } else if (hit == kHitOpen && (callbacks_.open_folder || callbacks_.locate_results) && !status_.destination_dir.empty()) {
+                if (callbacks_.locate_results && status_.phase == ops::OpPhase::Completed) {
+                    const auto task = status_.task_id;
+                    RequestDismiss();
+                    callbacks_.locate_results(task);
+                } else if (callbacks_.open_folder) callbacks_.open_folder(status_.destination_dir);
             } else if (hit >= kHitFailRow && board_) {
                 RetryFailureRows({ board_scroll_ + static_cast<size_t>(hit - kHitFailRow) });
-            } else if (hit == 2) ShowWindow(hwnd_, SW_MINIMIZE);
-            else if (hit == 3 && status_.active &&
+            } else if (hit == 3 && status_.active &&
                      status_.phase != ops::OpPhase::WaitingForConflict &&
                      status_.phase != ops::OpPhase::Cancelling) {
                 if (ShowsPaused(status_)) {
@@ -3567,14 +3918,19 @@ LRESULT FileOperationWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM l
     }
     case WM_KEYDOWN:
         if (wparam == VK_ESCAPE) {
-            RequestClose();
+            if (!closing_) RequestDismiss();
             return 0;
         }
-        KeepOpen();
         break;
     case WM_CLOSE:
-        RequestClose();
+        if (!closing_) RequestDismiss();
         return 0;
+    case WM_SYSCOMMAND:
+        if ((wparam & 0xFFF0) == SC_MINIMIZE) {
+            RequestDismiss();
+            return 0;
+        }
+        break;
     case WM_PAINT: {
         PAINTSTRUCT paint{};
         BeginPaint(hwnd_, &paint);
@@ -3585,6 +3941,8 @@ LRESULT FileOperationWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM l
     case WM_ERASEBKGND:
         return 1;
     case WM_DESTROY:
+        flight_.Stop();
+        KillTimer(hwnd_, kZoomTimer);
         KillTimer(hwnd_, kRenderTimer);
         compositor_.Shutdown();
         hwnd_ = nullptr;
@@ -3599,6 +3957,14 @@ ConflictDialogResult ShowFileConflictDialog(HWND owner,
                                             D2D1_COLOR_F accent) {
     ConflictWindow window;
     return window.Show(owner, conflict, dark, accent);
+}
+
+bool SaveFileConflictDialogFrame(HWND window, const std::wstring& path) {
+    wchar_t name[64]{};
+    if (GetWindowThreadProcessId(window, nullptr) != GetCurrentThreadId() ||
+        !GetClassNameW(window, name, 64) || wcscmp(name, kConflictClass)) return false;
+    auto* view = reinterpret_cast<ConflictWindow*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    return view && view->Snapshot(path.c_str());
 }
 
 PermanentDeleteChoice ShowPermanentDeleteDialog(HWND owner, const PermanentDeleteInfo& info,

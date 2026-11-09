@@ -125,6 +125,24 @@ TerminalLaunchResult LaunchTerminal(const std::wstring& executable, const std::w
     return {ERROR_SUCCESS, error, true};
 }
 
+TerminalLaunchResult LaunchTerminalOrShell(const std::wstring& wt_arguments, const std::wstring& directory,
+    HWND owner, const ShellCommandApi& api, std::wstring* launched) {
+    // Only "the program is not there" moves on; a cancelled UAC prompt or a
+    // bad folder is the user's answer and stops here.
+    const auto missing = [](DWORD error) {
+        return error == ERROR_FILE_NOT_FOUND || error == ERROR_NO_ASSOCIATION;
+    };
+    if (launched) *launched = L"wt.exe";
+    auto result = LaunchTerminal(L"wt.exe", wt_arguments, directory, owner, api);
+    if (!missing(result.error)) return result;
+    for (const wchar_t* shell : {L"pwsh.exe", L"powershell.exe", L"cmd.exe"}) {
+        if (launched) *launched = shell;
+        result = LaunchTerminal(shell, {}, directory, owner, api);
+        if (!missing(result.error)) return result;
+    }
+    return result;
+}
+
 std::wstring QuoteWindowsArgument(std::wstring_view value) {
     std::wstring quoted = L"\"";
     size_t slashes = 0;

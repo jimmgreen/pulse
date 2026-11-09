@@ -257,14 +257,14 @@ bool BuiltinMenuShared(BuiltinMenuItem item) {
 
 uint64_t BuiltinMenuPresetHidden(BuiltinMenuPreset preset) {
     switch (preset) {
-    case BuiltinMenuPreset::Slim: return kSlimHidden;
-    case BuiltinMenuPreset::Standard: return kStandardHidden;
+    case BuiltinMenuPreset::Slim: return kSlimHidden & ~Bits({B::RowStar, B::RowNewTab, B::RowMore});
+    case BuiltinMenuPreset::Standard: return kStandardHidden & ~Bits({B::RowStar, B::RowNewTab, B::RowMore});
     default: return 0;
     }
 }
 
 BuiltinMenuPreset BuiltinMenuPresetFor(uint64_t builtin_hidden) {
-    builtin_hidden &= kAllBits;
+    builtin_hidden &= kAllBits & ~Bits({B::RowStar, B::RowNewTab, B::RowMore});
     for (int i = 0; i < static_cast<int>(BuiltinMenuPreset::Count); ++i) {
         const auto preset = static_cast<BuiltinMenuPreset>(i);
         if (BuiltinMenuPresetHidden(preset) == builtin_hidden) return preset;

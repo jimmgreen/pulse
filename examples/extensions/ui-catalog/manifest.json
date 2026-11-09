@@ -1,0 +1,525 @@
+{
+  "apiVersion": 1,
+  "id": "sample.ui-catalog",
+  "name": "Pulse component catalog",
+  "commands": [
+    {
+      "id": "details",
+      "title": "Details",
+      "capability": "view.setMode",
+      "args": {
+        "mode": "details"
+      }
+    },
+    {
+      "id": "tiles",
+      "title": "Tiles",
+      "capability": "view.setMode",
+      "args": {
+        "mode": "tiles"
+      }
+    }
+  ],
+  "panel": {
+    "title": "Workspace controls",
+    "ui": {
+      "version": 1,
+      "state": [
+        {
+          "key": "name",
+          "value": "Pulse"
+        },
+        {
+          "key": "enabled",
+          "value": "true"
+        },
+        {
+          "key": "mode",
+          "value": "0"
+        },
+        {
+          "key": "tab",
+          "value": "0"
+        },
+        {
+          "key": "item",
+          "value": "0"
+        },
+        {
+          "key": "review",
+          "value": "true"
+        },
+        {
+          "key": "radio",
+          "value": "true"
+        },
+        {
+          "key": "step",
+          "value": "1"
+        },
+        {
+          "key": "segment",
+          "value": "0"
+        },
+        {
+          "key": "row",
+          "value": ""
+        },
+        {
+          "key": "treeRow",
+          "value": ""
+        },
+        {
+          "key": "tableRow",
+          "value": ""
+        },
+        {
+          "key": "query",
+          "value": ""
+        },
+        {
+          "key": "ratio",
+          "value": "50"
+        },
+        {
+          "key": "section",
+          "value": "true"
+        },
+        {
+          "key": "staging",
+          "value": "true"
+        },
+        {
+          "key": "infoVisible",
+          "value": "true"
+        }
+      ],
+      "root": {
+        "type": "scrollView",
+        "id": "root",
+        "children": [
+          {
+            "type": "tabs",
+            "id": "workspace-tabs",
+            "state": "tab",
+            "children": [
+              {
+                "type": "tab",
+                "id": "settings-tab",
+                "text": "Settings",
+                "children": [
+                  {
+                    "type": "group",
+                    "id": "settings",
+                    "text": "Local preferences",
+                    "children": [
+                      {
+                        "type": "textInput",
+                        "id": "name-input",
+                        "state": "name",
+                        "text": "Review name",
+                        "placeholder": "Enter a review name",
+                        "trailingGlyph": "\ue721",
+                        "keycap": "Enter",
+                        "badgeText": "Local"
+                      },
+                      {
+                        "type": "text",
+                        "id": "name-output",
+                        "binding": "state.name"
+                      },
+                      {
+                        "type": "checkbox",
+                        "id": "enabled-check",
+                        "text": "Enable review flag",
+                        "state": "enabled"
+                      },
+                      {
+                        "type": "select",
+                        "id": "mode-select",
+                        "state": "mode",
+                        "options": [
+                          "Review",
+                          "Ready"
+                        ]
+                      },
+                      {
+                        "id": "review-switch",
+                        "type": "switch",
+                        "text": "Review mode",
+                        "state": "review"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tab",
+                "id": "results-tab",
+                "text": "Results",
+                "children": [
+                  {
+                    "type": "list",
+                    "id": "result-list",
+                    "state": "item",
+                    "options": [
+                      "First result",
+                      "Second result",
+                      "Third result"
+                    ]
+                  }
+                ],
+                "closeCommand": "details"
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "id": "host-view",
+            "binding": "context.viewMode"
+          },
+          {
+            "type": "grid",
+            "id": "view-actions",
+            "columns": 2,
+            "children": [
+              {
+                "type": "button",
+                "id": "details-button",
+                "text": "Details view",
+                "command": "details",
+                "kind": "primary"
+              },
+              {
+                "type": "button",
+                "id": "tiles-button",
+                "text": "Tiles view",
+                "command": "tiles"
+              }
+            ]
+          },
+          {
+            "id": "review-progress",
+            "type": "progress",
+            "kind": "ring",
+            "status": "normal",
+            "value": 75
+          },
+          {
+            "type": "radio",
+            "id": "catalog-radio",
+            "text": "Review selected",
+            "state": "radio"
+          },
+          {
+            "type": "slider",
+            "id": "catalog-slider",
+            "text": "Review level",
+            "stops": 4,
+            "state": "step"
+          },
+          {
+            "type": "segmented",
+            "id": "catalog-segmented",
+            "options": [
+              "All",
+              "Reviewed"
+            ],
+            "state": "segment"
+          },
+          {
+            "type": "badge",
+            "id": "catalog-badge",
+            "text": "Ready",
+            "kind": "success",
+            "dot": true
+          },
+          {
+            "type": "tag",
+            "id": "catalog-tag",
+            "text": "Review tag",
+            "color": "#4488CC"
+          },
+          {
+            "type": "infoBar",
+            "id": "catalog-infoBar",
+            "text": "Review workspace",
+            "message": "Actions use declared host capabilities.",
+            "kind": "informational",
+            "actions": [
+              {
+                "id": "info-details",
+                "text": "Details",
+                "command": "details"
+              }
+            ],
+            "visibleBinding": "state.infoVisible",
+            "closeCommand": "dismissInfo"
+          },
+          {
+            "type": "splitButton",
+            "id": "catalog-splitButton",
+            "text": "Details",
+            "command": "details",
+            "menu": [
+              {
+                "id": "split-tiles",
+                "text": "Tiles",
+                "command": "tiles"
+              }
+            ]
+          },
+          {
+            "type": "menuButton",
+            "id": "catalog-menuButton",
+            "text": "View menu",
+            "menu": [
+              {
+                "id": "view-submenu",
+                "text": "Choose view",
+                "children": [
+                  {
+                    "id": "menu-details",
+                    "text": "Details",
+                    "command": "details"
+                  },
+                  {
+                    "id": "menu-tiles",
+                    "text": "Tiles",
+                    "command": "tiles"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "sidebarItem",
+            "id": "catalog-sidebarItem",
+            "text": "Review",
+            "detail": "Local catalog",
+            "selected": true,
+            "command": "details"
+          },
+          {
+            "type": "breadcrumb",
+            "id": "catalog-breadcrumb",
+            "text": "Workspace",
+            "current": true,
+            "separator": false,
+            "command": "details"
+          },
+          {
+            "type": "emptyState",
+            "id": "catalog-emptyState",
+            "text": "No remaining reviews",
+            "message": "All local sample entries are ready."
+          },
+          {
+            "type": "virtualList",
+            "id": "catalog-virtualList",
+            "state": "row",
+            "rows": [
+              {
+                "id": "virtual-one",
+                "text": "First local row"
+              },
+              {
+                "id": "virtual-two",
+                "text": "Second local row"
+              }
+            ]
+          },
+          {
+            "type": "tree",
+            "id": "catalog-tree",
+            "state": "treeRow",
+            "rows": [
+              {
+                "id": "tree-parent",
+                "text": "Review group",
+                "children": [
+                  {
+                    "id": "tree-child",
+                    "text": "Review entry"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "dataTable",
+            "id": "catalog-dataTable",
+            "state": "tableRow",
+            "columns": [
+              {
+                "id": "name",
+                "text": "Name"
+              },
+              {
+                "id": "status",
+                "text": "Status"
+              }
+            ],
+            "rows": [
+              {
+                "id": "table-one",
+                "cells": [
+                  "Sample",
+                  "Ready"
+                ]
+              }
+            ]
+          },
+          {
+            "type": "button",
+            "id": "catalog-button",
+            "text": "Toggle review",
+            "kind": "toggle",
+            "state": "review"
+          },
+          {
+            "type": "text",
+            "id": "catalog-text",
+            "text": "Only visible while review is enabled",
+            "visibleBinding": "state.review"
+          },
+          {
+            "type": "stack",
+            "id": "catalog-stack",
+            "children": [
+              {
+                "type": "divider",
+                "id": "catalog-divider"
+              }
+            ]
+          },
+          {
+            "type": "trayCard",
+            "id": "catalog-trayCard",
+            "text": "Local review tray",
+            "detail": "Display-only example",
+            "itemCount": 2,
+            "command": "details"
+          },
+          {
+            "type": "commandSearch",
+            "id": "catalog-commandSearch",
+            "text": "Filter sample",
+            "placeholder": "Type local text",
+            "keycap": "Ctrl+K",
+            "state": "query"
+          },
+          {
+            "type": "splitPane",
+            "id": "catalog-splitPane",
+            "state": "ratio",
+            "children": [
+              {
+                "id": "split-left",
+                "type": "text",
+                "text": "Left pane"
+              },
+              {
+                "id": "split-right",
+                "type": "text",
+                "text": "Right pane"
+              }
+            ]
+          },
+          {
+            "type": "sidebarSection",
+            "id": "catalog-sidebarSection",
+            "text": "Review section",
+            "state": "section",
+            "children": [
+              {
+                "id": "section-label",
+                "type": "text",
+                "text": "Local section content"
+              }
+            ]
+          },
+          {
+            "type": "driveItem",
+            "id": "catalog-driveItem",
+            "text": "Sample drive",
+            "capacity": 25,
+            "freeBytes": 750000,
+            "totalBytes": 1000000,
+            "command": "details"
+          },
+          {
+            "type": "paneHeader",
+            "id": "catalog-paneHeader",
+            "text": "Review pane",
+            "summary": "Sample rows",
+            "filterText": "All",
+            "filterCommand": "details",
+            "sortCommand": "tiles"
+          },
+          {
+            "type": "fileRow",
+            "id": "catalog-fileRow",
+            "text": "sample.txt",
+            "fileType": "Text",
+            "fileSize": "1 KB",
+            "status": "Reviewed",
+            "kind": "success",
+            "tagColors": [
+              "#4488CC"
+            ]
+          },
+          {
+            "type": "stagingTray",
+            "id": "catalog-stagingTray",
+            "text": "Staging preview",
+            "helper": "No files are staged",
+            "countLabel": "1 sample",
+            "itemCount": 1,
+            "actionText": "Details",
+            "command": "details",
+            "state": "staging",
+            "children": [
+              {
+                "type": "stagingItem",
+                "id": "catalog-stagingItem",
+                "text": "Sample item",
+                "missing": false
+              }
+            ]
+          },
+          {
+            "type": "statusBar",
+            "id": "catalog-statusBar",
+            "text": "Ready",
+            "centerText": "Local catalog",
+            "rightText": "No external access"
+          },
+          {
+            "type": "tooltip",
+            "id": "catalog-tooltip",
+            "text": "Host tooltip rendering sample"
+          },
+          {
+            "type": "titleBarButton",
+            "id": "catalog-titleBarButton",
+            "text": "Declared details action",
+            "role": "custom",
+            "command": "details"
+          }
+        ]
+      },
+      "actions": [
+        {
+          "id": "dismissInfo",
+          "updates": [
+            {
+              "key": "infoVisible",
+              "value": "false"
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -23,7 +23,6 @@
 #include "jpeg_embedded_preview.h"
 #include "tiff_reduce.h"
 #include "raw_pack.h"
-#include "archive_pack.h"
 #include "media_pack.h"
 #include "metafile_raster.h"
 #include "office_doc_model.h"
@@ -985,7 +984,8 @@ static bool DecodeIconEntry(const std::wstring& path, UINT pixels, uint32_t fram
         return false;
     const size_t selected = frame_index == 0 ? preview::DefaultIconEntry(entries)
                                              : (std::min<size_t>)(frame_index - 1, entries.size() - 1);
-    if (cursor) file[2] = 1;  // WIC's icon decoder reads cursors once they claim to be icons
+    std::vector<uint8_t> selected_file;
+    if (!preview::MakeIconEntryFile(file, entries[selected], cursor, selected_file)) return false;
     ComPtr<IWICImagingFactory> factory;
     ComPtr<IWICStream> stream;
     ComPtr<IWICBitmapDecoder> decoder;
@@ -994,10 +994,10 @@ static bool DecodeIconEntry(const std::wstring& path, UINT pixels, uint32_t fram
     UINT cw = 0, ch = 0;
     if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))) ||
         FAILED(factory->CreateStream(&stream)) ||
-        FAILED(stream->InitializeFromMemory(file.data(), static_cast<DWORD>(file.size()))) ||
+        FAILED(stream->InitializeFromMemory(selected_file.data(), static_cast<DWORD>(selected_file.size()))) ||
         FAILED(factory->CreateDecoder(GUID_ContainerFormatIco, nullptr, &decoder)) ||
         FAILED(decoder->Initialize(stream.Get(), WICDecodeMetadataCacheOnDemand)) ||
-        FAILED(decoder->GetFrame(entries[selected].frame, &frame)) ||
+        FAILED(decoder->GetFrame(0, &frame)) ||
         !FramePixels(factory.Get(), frame.Get(), canvas, cw, ch))
         return false;
     r.source_width = cw;
@@ -1355,17 +1355,6 @@ static DecodeStep RunRawPack(const DecodeRequest& q, DecodeResult& r) {
     return DecodeStep::Next;
 }
 
-static bool MakeEnhancedArchiveListing(const std::wstring& path, std::wstring& text,
-                                       uint32_t& bytes_read, std::wstring* error, bool allow_pack) {
-    if (preview::MakeArchiveListing(path, text, bytes_read, error)) return true;
-    // Preserve deliberate native limits/cancellation rather than retrying work.
-    if (error && (error->find(L"cancel") != std::wstring::npos ||
-                  error->find(L"limit") != std::wstring::npos)) return false;
-    // Archive contents are useful in the preview pane, not in grid thumbnails.
-    if (!allow_pack || !preview::ArchivePackAvailable()) return false;
-    return preview::ArchivePackListing(path, text, bytes_read, error);
-}
-
 // SVG through Direct2D; markup that does not render is shown as text.
 static bool AcceptsVector(const DecodeRequest& q) {
     return preview::IsVectorExtension(q.extension);
@@ -1428,21 +1417,31 @@ static DecodeStep RunPdf(const DecodeRequest& q, DecodeResult& r) {
     return DecodeStep::Failed;
 }
 
-// Archives: contents tree instead of a hex dump. A file that is not a readable
-// archive falls through to the entries below.
+// The main host routes plugin previews first. These formats require that route;
+// never turn a missing archive plugin into a hex dump.
+static bool RequiresArchivePlugin(const DecodeRequest& q) {
+    return q.extension == L".7z" || q.extension == L".rar";
+}
+
+// Other archives use the built-in contents tree.
 static bool AcceptsArchive(const DecodeRequest& q) {
-    return !q.is_directory && preview::IsArchiveExtension(q.extension) && !q.offline;
+    return !q.is_directory && preview::IsArchiveExtension(q.extension) &&
+        (!q.offline || RequiresArchivePlugin(q));
 }
 static DecodeStep RunArchive(const DecodeRequest& q, DecodeResult& r) {
-    if (!MakeEnhancedArchiveListing(q.path, r.text, r.bytes_read, &r.error, !q.grid))
+    if (RequiresArchivePlugin(q)) {
+        r.error = L"archive-plugin-required";
+        return DecodeStep::Failed;
+    }
+    if (!preview::MakeArchiveListing(q.path, r.text, r.bytes_read, &r.error))
         return DecodeStep::Next;
     r.kind = ipc::PreviewContentKind::Archive;
     return DecodeStep::Made;
 }
 
 // PSD/PSB: the merged composite with its transparency; grid thumbnails of
-// large opaque documents use the embedded JPEG when it covers the requested
-// size (RasterizePsdFile). Installed shell providers are not
+// large documents show the embedded JPEG first, then explicitly request the
+// composite in a background refinement. Installed shell providers are not
 // preferred any more - common ones return the white-matted image labelled
 // opaque (white or washed-out thumbnails). Files the reader cannot decode
 // still reach the shell thumbnail (Next).
@@ -1450,9 +1449,10 @@ static bool AcceptsPsd(const DecodeRequest& q) {
     return !q.is_directory && !q.offline && preview::IsPsdExtension(q.extension);
 }
 static DecodeStep RunPsd(const DecodeRequest& q, DecodeResult& r) {
-    if (!preview::RasterizePsdFile(q.path, q.cap, q.grid, r.pixels, r.width, r.height,
-            r.stride, r.source_width, r.source_height, nullptr))
-        return DecodeStep::Next;
+    const bool refine = q.grid && (q.request.flags & ipc::kPreviewRequestFlagPsdRefine);
+    if (!preview::RasterizePsdFile(q.path, q.cap, q.grid && !refine, r.pixels, r.width, r.height,
+            r.stride, r.source_width, r.source_height, nullptr, &r.embedded_psd))
+        return refine ? DecodeStep::Failed : DecodeStep::Next;
     return MadeBitmap(r);
 }
 
@@ -2181,7 +2181,7 @@ static DecodeStep RunSniffed(const DecodeRequest& q, DecodeResult& r) {
         if (!made && r.error == L"pdf-thumbnail-budget") return DecodeStep::Failed;
         break;
     case preview::SniffedFormat::Archive:
-        if (!MakeEnhancedArchiveListing(q.path, r.text, r.bytes_read, &r.error, !q.grid)) {
+        if (!preview::MakeArchiveListing(q.path, r.text, r.bytes_read, &r.error)) {
             r.text.clear();
             r.bytes_read = 0;
             return DecodeStep::Next;

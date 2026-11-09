@@ -1,0 +1,55 @@
+Pulse open/save dialog shared places — 2026-11-03
+
+Scope
+- Expose main Pulse workspaces, starred files/folders and starred folder groups.
+- Drag selected dialog entries to the Starred section to add references, or to a
+  starred group to add folders. Duplicate additions do not toggle favorites off.
+- Drag to a workspace or starred directory using the existing copy/move policy
+  and operation/conflict UI. No filesystem probing is added to UI hit testing.
+- Favorite file clicks navigate to its parent and select it without accepting.
+- Dragging from Save retains the previously typed output filename. Escape cancels.
+- Persist collapse state for the two new sections.
+- Hidden first-frame preparation accepts DXGI_STATUS_OCCLUDED after successful
+  drawing. The visible takeover readiness check still requires a presented frame.
+
+Shared data
+- Keep v1 mapping compatible; v2 carries bounded shared catalogs and main host PID.
+- Mutations go to the main catalog, with asynchronous coalesced persistence.
+- If the main process is unavailable, saved catalogs are loaded read-only on a
+  worker. Navigation and directory copy/move remain available; adding favorites
+  reports that Pulse must be opened. The dialog never starts a second writer.
+- Current protocol bounds: 384 shared rows, paths shorter than 1024 wchar_t,
+  labels/group IDs shorter than 128 wchar_t, at most 64 favorites per drop.
+
+Verification
+- Agent: pulse_picker_places_snapshot_test, 45 checks passed (snapshot, protocol,
+  endpoint validation and read-only saved catalog parsing).
+- Agent: pulse_places_save_order_test --picker, 6 checks passed (queued save,
+  duplicate requests, ordering and failed-write retry).
+- pulse_picker_places_policy_test: 13 passed, including empty groups, self-drop,
+  file destinations, group folder-only constraints and offline behavior.
+- pulse_picker_layout_test: 12 passed in actual user context with an isolated
+  test registry key. Restricted-context attempts could not write that key.
+- pulse.exe --picker-shared-places-test: all 5 actual-window scenarios passed
+  on the user desktop with temporary fixture files and an injected catalog.
+  No user files or favorites were changed. Cases: multi-favorite/idempotency,
+  Ctrl-copy to workspace, Escape cancellation, favorite-file location, Save name.
+- Visual snapshots inspected for Open, workspace drop and Save at current DPI.
+- tools/l10n/gen_strings.py --check passed; affected diff whitespace checks passed.
+- Release build: pulse and pulse_picker_ui_proof; TEST_HOOKS and SELFTEST OFF.
+
+Evidence
+- build/picker-shared-ui-test.log
+- bench_data/picker-shared-places-20261103-shared-1.png through -shared-5.png
+- bench_data/picker-shared-delivery-20261103/verify_installer.py
+
+Limits
+- UI tests use the real picker with an isolated catalog provider; the main-process
+  wire protocol and persistence are tested separately, not by changing user data.
+- No claim of a full historical regression or third-party Photoshop retest.
+
+Installer
+- dist/PulseSetup-1.0.58-test-picker-places-20261103.exe (11,850,464 bytes)
+- SHA256: 98ddbacbe4d15cd6c2e789981d4bce2ae041f5f1bbe3f7a3309ac7c13ac365fa
+- All 46 payload hashes, compressed hash and private-bundle dependency closure
+  verified. Packaged pulse.exe and PulsePickerUiProof.dll match the final build.

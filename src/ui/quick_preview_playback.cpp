@@ -19,9 +19,11 @@ constexpr UINT_PTR kVideoTimer = 8;
 constexpr UINT_PTR kScrubTimer = 9;
 constexpr ULONGLONG kSeekIntervalMs = 80;
 constexpr float kPlaybackHeight = 76.0f;
+constexpr int kEnableTrackPlayback = 0x40000000;
 // Rollback switch: false restores the text-button bar and full-bleed video.
 constexpr bool kVideoChrome = true;
 constexpr float kChromeBarHeight = 56.0f;
+constexpr float kWidePlaybackWidth = 900.0f;
 // Rollback switch: false leaves an undecodable video track as a black frame.
 constexpr bool kCodecHint = true;
 constexpr float kRates[] = {1.0f, 1.25f, 1.5f, 2.0f, 0.5f};
@@ -109,7 +111,8 @@ bool QuickPreviewWindow::HasPlayback() const noexcept {
     return frame_count_ > 1 || video_.active();
 }
 float QuickPreviewWindow::PlaybackHeight() const noexcept {
-    return HasPlayback() ? (kVideoChrome ? kChromeBarHeight : kPlaybackHeight) * scale_ : 0.0f;
+    if (embedded_ && HasPlayback() && kVideoChrome) return (std::min)((video_.active() ? 80.0f : 40.0f) * scale_, (std::max)(0.0f, static_cast<float>(compositor_.Height()) - FooterHeight()));
+    return HasPlayback() ? (kVideoChrome ? (video_.active() && compositor_.Width() < kWidePlaybackWidth * scale_ ? 96.0f : kChromeBarHeight) : kPlaybackHeight) * scale_ : 0.0f;
 }
 D2D1_RECT_F QuickPreviewWindow::PlaybackRect() const {
     // Directly above the footer.
@@ -121,7 +124,7 @@ QuickPreviewWindow::PlaybackGeometry QuickPreviewWindow::PlaybackLayout() const 
     PlaybackGeometry g;
     const auto bar = PlaybackRect();
     const float s = scale_;
-    const float cy = (bar.top + bar.bottom) * 0.5f;
+    const float cy = bar.top + 28.0f * s;
     const bool video = video_.active();
     g.button_count = video ? 2 : 3;
     g.play_index = video ? 0 : 1;
@@ -138,9 +141,55 @@ QuickPreviewWindow::PlaybackGeometry QuickPreviewWindow::PlaybackLayout() const 
         return rect;
     };
     g.chip = slot(70.0f * s);
-    if (video) {
+    if (video && bar.right >= kWidePlaybackWidth * s) {
+        g.subtitles = slot(80.0f * s);
+        g.audio_tracks = slot(90.0f * s);
         g.speed = slot(42.0f * s);
+        g.volume_value = slot(44.0f * s);
+        g.volume_track = slot(72.0f * s);
         g.volume = slot(36.0f * s);
+    } else if (video) {
+        const float y = bar.top + 72.0f * s;
+        g.volume = D2D1::RectF(14 * s, y - 18 * s, 50 * s, y + 18 * s);
+        g.volume_track = D2D1::RectF(58 * s, y - 14 * s, 130 * s, y + 14 * s);
+        g.volume_value = D2D1::RectF(138 * s, y - 14 * s, 182 * s, y + 14 * s);
+        g.speed = D2D1::RectF(188 * s, y - 18 * s, 230 * s, y + 18 * s);
+        const float tracks_width = (std::max)(0.0f, (bar.right - 250 * s) * 0.5f);
+        g.audio_tracks = D2D1::RectF(238 * s, y - 18 * s, 238 * s + tracks_width, y + 18 * s);
+        g.subtitles = D2D1::RectF(g.audio_tracks.right + 4 * s, y - 18 * s, bar.right - 8 * s, y + 18 * s);
+    }
+    if (embedded_) {
+        // Sidebar uses two compact rows; actions and hit testing stay shared.
+        g = {};
+        g.button_count = video ? 2 : 3;
+        g.play_index = video ? 0 : 1;
+        const float edge = 8*s, end = bar.right - edge;
+        float left = edge;
+        for (int i = 0; i < g.button_count; ++i) {
+            const float size = (i == g.play_index ? 28.0f : 24.0f)*s;
+            g.buttons[i] = D2D1::RectF(left, bar.top + (40*s-size)*0.5f,
+                                      left+size, bar.top+(40*s+size)*0.5f);
+            left += size + 2*s;
+        }
+        g.time_left = D2D1::RectF(left+2*s, bar.top+8*s, left+42*s, bar.top+32*s);
+        g.time_right = D2D1::RectF(end-40*s, bar.top+8*s, end, bar.top+32*s);
+        g.track = D2D1::RectF(left+46*s, bar.top+8*s, end-44*s, bar.top+32*s);
+        if (video && bar.bottom-bar.top >= 80*s) {
+            const float top = bar.top+44*s, bottom = bar.top+72*s;
+            g.volume = D2D1::RectF(edge, top, edge+24*s, bottom);
+            g.volume_track = D2D1::RectF(edge+30*s, top, end-188*s, bottom);
+            g.speed = D2D1::RectF(end-180*s, top, end-150*s, bottom);
+            g.audio_tracks = D2D1::RectF(end-146*s, top, end-68*s, bottom);
+            g.subtitles = D2D1::RectF(end-64*s, top, end, bottom);
+        }
+        const auto fit = [&](D2D1_RECT_F& rect) {
+            if (rect.left < 0 || rect.top < 0 || rect.right > bar.right ||
+                rect.bottom > bar.bottom || rect.right <= rect.left) rect = {};
+        };
+        for (int i = 0; i < g.button_count; ++i) fit(g.buttons[i]);
+        fit(g.time_left); fit(g.time_right); fit(g.track); fit(g.volume);
+        fit(g.volume_track); fit(g.speed); fit(g.audio_tracks); fit(g.subtitles);
+        return g;
     }
     const bool hours = video && video_.Snapshot().duration >= int64_t{36000000000};
     const float time_width = (hours ? 56.0f : 44.0f) * s;
@@ -158,8 +207,8 @@ D2D1_RECT_F QuickPreviewWindow::VideoFrameRect(const VideoPreview::State& state)
     const float s = scale_;
     // Side/top margins frame the picture; the bottom one leaves room for the
     // seek bar's time bubble, which cannot draw over the video window.
-    const D2D1_RECT_F box = D2D1::RectF(content.left + 16.0f * s, content.top + 12.0f * s,
-                                        content.right - 16.0f * s, content.bottom - 28.0f * s);
+    const D2D1_RECT_F box = D2D1::RectF(content.left + (embedded_ ? 4.0f : 16.0f) * s, content.top + (embedded_ ? 4.0f : 12.0f) * s,
+                                        content.right - (embedded_ ? 4.0f : 16.0f) * s, content.bottom - (embedded_ ? 4.0f : 28.0f) * s);
     const float bw = box.right - box.left, bh = box.bottom - box.top;
     if (bw < 48.0f * s || bh < 48.0f * s) return content;
     if (!state.width || !state.height) return box;
@@ -229,7 +278,9 @@ bool QuickPreviewWindow::PlaybackHover(POINT point) {
         const auto g = PlaybackLayout();
         for (int i = 0; i < g.button_count; ++i)
             if (Contains(g.buttons[i], point)) button = i;
-        if (Contains(g.volume, point)) button = 3;
+        if (Contains(g.volume, point) || Contains(g.volume_track, point)) button = 3;
+        if (Contains(g.audio_tracks, point)) button = 5;
+        if (Contains(g.subtitles, point)) button = 6;
         if (Contains(g.speed, point)) button = 4;
         if (Contains(g.track, point)) hover_x = static_cast<float>(point.x);
     }
@@ -239,19 +290,99 @@ bool QuickPreviewWindow::PlaybackHover(POINT point) {
     playback_hover_button_ = button;
     return AudioHover(point) || changed;
 }
-bool QuickPreviewWindow::PlaybackWheel(POINT point, float steps) {
-    if (!kVideoChrome || !video_.active() || !Contains(PlaybackLayout().volume, point)) return false;
-    playback_volume_ = std::clamp(playback_volume_ + steps * 0.05f, 0.0f, 1.0f);
-    if (steps > 0 && playback_muted_) {
-        playback_muted_ = false;
-        video_.SetMuted(false);
-    }
+void QuickPreviewWindow::SetPlaybackVolume(float value) {
+    playback_volume_ = std::clamp(value, 0.0f, 1.0f);
+    playback_muted_ = false;
+    video_.SetMuted(false);
     video_.SetVolume(playback_volume_);
-    playback_note_ = Label(L"\x97F3\x91CF ", L"Volume ") +
-        std::to_wstring(std::lround(playback_volume_ * 100.0f)) + L"%";
-    playback_note_until_ = GetTickCount64() + 1200;
     InvalidateRect(hwnd_, nullptr, FALSE);
+}
+void QuickPreviewWindow::DragPlaybackVolume(float x) {
+    const auto track = PlaybackLayout().volume_track;
+    SetPlaybackVolume(static_cast<float>(playback::Fraction(x, track.left, track.right)));
+}
+bool QuickPreviewWindow::PlaybackWheel(POINT point, float steps) {
+    if (!kVideoChrome || !video_.active()) return false;
+    const auto g = PlaybackLayout();
+    if (!Contains(g.volume, point) && !Contains(g.volume_track, point) &&
+        !Contains(g.volume_value, point)) return false;
+    SetPlaybackVolume(playback_volume_ + steps * 0.05f);
     return true;
+}
+std::vector<FluentMenuItem> QuickPreviewWindow::PlaybackTrackItems(
+    bool subtitles, const VideoPreview::State& state) const {
+    const auto& tracks = subtitles ? state.subtitle_tracks : state.audio_tracks;
+    const bool available = state.ready && SUCCEEDED(state.error) &&
+        (subtitles ? state.can_select_subtitle : state.can_select_audio);
+    const int selected = subtitles ? state.subtitle_track : state.audio_track;
+    std::vector<FluentMenuItem> items;
+    if (!state.ffmpeg && (subtitles ? state.ffmpeg_subtitles_available : state.ffmpeg_available)) {
+        FluentMenuItem item;
+        item.command = kEnableTrackPlayback;
+        item.text = l10n::Get(subtitles ? l10n::StringId::PreviewEnableSubtitles
+                                        : l10n::StringId::PreviewEnableAudioTracks);
+        item.enabled = state.ready && SUCCEEDED(state.error);
+        item.separator_after = true;
+        items.push_back(std::move(item));
+    }
+    if (!available) {
+        FluentMenuItem item;
+        item.text = l10n::Get(subtitles && !state.ffmpeg_subtitles_available
+            ? (state.ffmpeg_available ? l10n::StringId::PreviewSubtitlePackUnsupported
+                                      : l10n::StringId::PreviewSubtitlePackHint)
+            : l10n::StringId::PreviewTrackUnavailable);
+        item.enabled = false;
+        items.push_back(std::move(item));
+    }
+    if (subtitles) {
+        FluentMenuItem item;
+        item.command = 1;
+        item.text = l10n::Get(l10n::StringId::PreviewSubtitlesOff);
+        item.enabled = available;
+        item.radio_group = true;
+        item.radio = selected < 0;
+        items.push_back(std::move(item));
+    }
+    for (size_t i = 0; i < tracks.size(); ++i) {
+        FluentMenuItem item;
+        item.command = static_cast<int>(i) + 2;
+        item.text = tracks[i].label;
+        item.enabled = available && tracks[i].supported;
+        item.radio_group = true;
+        item.radio = selected == tracks[i].id;
+        items.push_back(std::move(item));
+    }
+    return items;
+}
+void QuickPreviewWindow::ShowPlaybackTracks(bool subtitles, POINT point) {
+    const auto state = video_.Snapshot();
+    const auto& tracks = subtitles ? state.subtitle_tracks : state.audio_tracks;
+    const bool available = state.ready && SUCCEEDED(state.error) &&
+        (subtitles ? state.can_select_subtitle : state.can_select_audio);
+    const uint64_t generation = generation_;
+    auto items = PlaybackTrackItems(subtitles, state);
+    if (!text_menu_.Create(hwnd_, &compositor_, scale_)) return;
+    text_menu_.SetTheme(dark_, accent_);
+    text_menu_.SetTopmost(true);
+    ClientToScreen(hwnd_, &point);
+    const int command = text_menu_.TrackPopup(point, std::move(items));
+    if (generation != generation_ || !video_.active()) return;
+    if (command == kEnableTrackPlayback && !state.ffmpeg &&
+        (subtitles ? state.ffmpeg_subtitles_available : state.ffmpeg_available)) {
+        video_.EnableTrackPlayback();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
+    if (!available) return;
+    if (subtitles && command == 1) video_.SelectSubtitleTrack(-1);
+    else if (command >= 2 && static_cast<size_t>(command - 2) < tracks.size()) {
+        const auto& track = tracks[command - 2];
+        if (track.supported) {
+            if (subtitles) video_.SelectSubtitleTrack(track.id);
+            else video_.SelectAudioTrack(track.id);
+        }
+    }
+    InvalidateRect(hwnd_, nullptr, FALSE);
 }
 D2D1_RECT_F QuickPreviewWindow::PlaybackButtonRect(int button) const {
     if (kVideoChrome) {
@@ -272,7 +403,7 @@ D2D1_RECT_F QuickPreviewWindow::PlaybackTrackRect() const {
 }
 void QuickPreviewWindow::BeginVideo() {
     if (safe_mode_ || OfflinePlaceholder() || (item_.attrs & FILE_ATTRIBUTE_DIRECTORY) ||
-        !VideoPreview::Supports(item_.path)) return;
+        !VideoPreview::Supports(item_.path) || native_preview_.Available(owner_, item_.path)) return;
     handler_.Reset();
     video_.Open(hwnd_, item_.path);
     ffmpeg_noted_ = false;
@@ -286,7 +417,8 @@ void QuickPreviewWindow::BeginVideo() {
     SetTimer(hwnd_, kVideoTimer, 50, nullptr);
 }
 void QuickPreviewWindow::CancelPlaybackScrub() {
-    const bool was_dragging = playback_drag_;
+    const bool was_dragging = playback_drag_ || playback_volume_drag_;
+    playback_volume_drag_ = false;
     playback_drag_ = false;
     playback_resume_ = false;
     playback_scrub_pending_ = false;
@@ -411,6 +543,16 @@ bool QuickPreviewWindow::PlaybackMouseDown(POINT point) {
     const auto state = video_.Snapshot();
     if (kVideoChrome && video) {
         const auto g = PlaybackLayout();
+        if (Contains(g.volume_track, point)) {
+            playback_volume_drag_ = true;
+            SetCapture(hwnd_);
+            DragPlaybackVolume(static_cast<float>(point.x));
+            return true;
+        }
+        if (Contains(g.audio_tracks, point) || Contains(g.subtitles, point)) {
+            ShowPlaybackTracks(Contains(g.subtitles, point), point);
+            return true;
+        }
         if (Contains(g.volume, point)) {
             playback_muted_ = !playback_muted_;
             video_.SetMuted(playback_muted_);
@@ -467,6 +609,7 @@ void QuickPreviewWindow::EndPlaybackDrag(bool resume) {
 }
 
 float QuickPreviewWindow::PlaybackBarOpacity() {
+    if (embedded_) return 1.0f;
     // The pointer is polled: over the video it belongs to the player's window.
     const uint64_t now = GetTickCount64();
     POINT cursor{};
@@ -477,7 +620,7 @@ float QuickPreviewWindow::PlaybackBarOpacity() {
         pointer_tick_ = now;
     }
     const auto state = video_.Snapshot();
-    if (!state.playing || playback_drag_ || playback_hover_x_ >= 0.0f || playback_hover_button_ >= 0 ||
+    if (!state.playing || playback_drag_ || playback_volume_drag_ || playback_hover_x_ >= 0.0f || playback_hover_button_ >= 0 ||
         VideoPreview::IsAudio(item_.path))
         pointer_tick_ = now;
     const uint64_t idle = now - pointer_tick_;
@@ -625,6 +768,7 @@ void QuickPreviewWindow::DrawPlaybackChrome(ID2D1DeviceContext* dc, ID2D1SolidCo
     // Transport buttons: a filled round play/pause plus frame steps.
     for (int i = 0; i < g.button_count; ++i) {
         const auto rect = g.buttons[i];
+        if (rect.right <= rect.left || rect.bottom <= rect.top) continue;
         if (i == g.play_index) {
             const float r = (rect.right - rect.left) * 0.5f;
             const auto centre = D2D1::Point2F((rect.left + rect.right) * 0.5f, (rect.top + rect.bottom) * 0.5f);
@@ -675,30 +819,34 @@ void QuickPreviewWindow::DrawPlaybackChrome(ID2D1DeviceContext* dc, ID2D1SolidCo
     // Seek track: thicker under the pointer or while dragging.
     const auto track = g.track;
     const float y = (track.top + track.bottom) * 0.5f;
-    const bool active = seekable && (playback_hover_x_ >= 0.0f || playback_drag_);
-    const float thick = (active ? 6.0f : 4.0f) * s;
-    const auto rail = D2D1::RectF(track.left, y - thick * 0.5f, track.right, y + thick * 0.5f);
-    dc->FillRoundedRectangle(D2D1::RoundedRect(rail, thick * 0.5f, thick * 0.5f),
-                             tint(seekable ? (dark_ ? 0.18f : 0.14f) : 0.07f));
-    const float thumb = track.left + static_cast<float>(fraction) * (track.right - track.left);
-    if (thumb > track.left + 0.5f) {
-        const auto filled = D2D1::RectF(track.left, rail.top, thumb, rail.bottom);
-        dc->FillRoundedRectangle(D2D1::RoundedRect(filled, thick * 0.5f, thick * 0.5f),
-                                 tint(enabled ? 1.0f : 0.35f));
-    }
-    if (active && !playback_drag_ && playback_hover_x_ >= 0.0f) {
-        const float gx = std::clamp(playback_hover_x_, track.left, track.right);
-        dc->DrawLine(D2D1::Point2F(gx, y - 6.0f * s), D2D1::Point2F(gx, y + 6.0f * s),
-                     tint(0.6f), 2.0f * s);
-    }
-    if (enabled && white.get() && shade.get()) {
-        const float r = (playback_drag_ ? 8.0f : 7.0f) * s;
-        dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(thumb, y + 1.0f * s), r + 1.0f * s, r + 1.0f * s), shade.get());
-        dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(thumb, y), r, r), white.get());
+    const bool has_track = track.right > track.left && track.bottom > track.top;
+    const bool active = has_track && seekable && (playback_hover_x_ >= 0.0f || playback_drag_);
+    if (has_track) {
+        const float thick = (active ? 6.0f : 4.0f) * s;
+        const auto rail = D2D1::RectF(track.left, y - thick * 0.5f, track.right, y + thick * 0.5f);
+        dc->FillRoundedRectangle(D2D1::RoundedRect(rail, thick * 0.5f, thick * 0.5f),
+                                 tint(seekable ? (dark_ ? 0.18f : 0.14f) : 0.07f));
+        const float thumb = track.left + static_cast<float>(fraction) * (track.right - track.left);
+        if (thumb > track.left + 0.5f) {
+            const auto filled = D2D1::RectF(track.left, rail.top, thumb, rail.bottom);
+            dc->FillRoundedRectangle(D2D1::RoundedRect(filled, thick * 0.5f, thick * 0.5f),
+                                     tint(enabled ? 1.0f : 0.35f));
+        }
+        if (active && !playback_drag_ && playback_hover_x_ >= 0.0f) {
+            const float gx = std::clamp(playback_hover_x_, track.left, track.right);
+            dc->DrawLine(D2D1::Point2F(gx, y - 6.0f * s), D2D1::Point2F(gx, y + 6.0f * s),
+                         tint(0.6f), 2.0f * s);
+        }
+        if (enabled && white.get() && shade.get()) {
+            const float r = (playback_drag_ ? 8.0f : 7.0f) * s;
+            dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(thumb, y + 1.0f * s), r + 1.0f * s, r + 1.0f * s), shade.get());
+            dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(thumb, y), r, r), white.get());
+        }
+
     }
 
     // Volume and speed (video / audio only).
-    if (video) {
+    if (video && g.volume.right > g.volume.left) {
         hover_fill(g.volume, 3);
         const IconPen pen{dc, factory.get(), g.volume, s};
         ID2D1Brush* b = tint(0.95f);
@@ -711,6 +859,22 @@ void QuickPreviewWindow::DrawPlaybackChrome(ID2D1DeviceContext* dc, ID2D1SolidCo
             pen.Arc(10.3f, 5.3f, 10.3f, 10.7f, 3.9f, b);
             if (playback_volume_ > 0.5f) pen.Arc(12.1f, 3.4f, 12.1f, 12.6f, 6.4f, b);
         }
+        const float volume_y = (g.volume_track.top + g.volume_track.bottom) * 0.5f;
+        const float volume_x = g.volume_track.left + playback_volume_ * (g.volume_track.right - g.volume_track.left);
+        dc->DrawLine(D2D1::Point2F(g.volume_track.left, volume_y), D2D1::Point2F(g.volume_track.right, volume_y), tint(0.2f), 4 * s);
+        dc->DrawLine(D2D1::Point2F(g.volume_track.left, volume_y), D2D1::Point2F(volume_x, volume_y), tint(playback_muted_ ? 0.35f : 1.0f), 4 * s);
+        dc->FillEllipse(D2D1::Ellipse(D2D1::Point2F(volume_x, volume_y), 5 * s, 5 * s), tint(1.0f));
+        text(std::to_wstring(std::lround(playback_volume_ * 100)) + L"%", g.volume_value, tint(0.85f));
+        const auto track_button = [&](bool subtitle, const D2D1_RECT_F& rect, int id) {
+            const bool selectable = enabled && (subtitle
+                ? (state.can_select_subtitle || (!state.ffmpeg && state.ffmpeg_subtitles_available))
+                : (state.can_select_audio || (!state.ffmpeg && state.ffmpeg_available)));
+            hover_fill(rect, id);
+            DrawUiText(dc, l10n::Get(subtitle ? l10n::StringId::PreviewSubtitles : l10n::StringId::PreviewAudioTracks),
+                format, rect, tint(selectable ? 0.95f : 0.35f)->GetColor(), DWRITE_TEXT_ALIGNMENT_CENTER);
+        };
+        track_button(false, g.audio_tracks, 5);
+        track_button(true, g.subtitles, 6);
         hover_fill(g.speed, 4);
         text(RateLabel(playback_rate_), g.speed, tint(std::abs(playback_rate_ - 1.0f) < 0.01f ? 0.9f : 1.0f));
     }
@@ -725,6 +889,7 @@ void QuickPreviewWindow::DrawPlaybackChrome(ID2D1DeviceContext* dc, ID2D1SolidCo
     std::wstring chip;
     if (GetTickCount64() < playback_note_until_) chip = playback_note_;
     else if (video && CodecCardVisible(state)) chip = state.codec;
+    else if (video && state.opening) chip = l10n::Get(l10n::StringId::PreviewLoading);
     else if (video && FAILED(state.error)) chip = Label(L"\x65E0\x6CD5\x64AD\x653E", L"Can't play");
     else if (video && FAILED(state.control_error)) chip = Label(L"\x64CD\x4F5C\x4E0D\x53EF\x7528", L"Unavailable");
     else if (video && !state.ready) chip = Label(L"\x52A0\x8F7D\x4E2D", L"Loading");
@@ -733,7 +898,7 @@ void QuickPreviewWindow::DrawPlaybackChrome(ID2D1DeviceContext* dc, ID2D1SolidCo
                                     : state.position);
     else if (video && !audio) chip = ResolutionLabel(state.width, state.height);
     else if (!video) chip = std::to_wstring(frame_delay_ms_) + L" ms";
-    if (!chip.empty()) {
+    if (!chip.empty() && g.chip.right > g.chip.left && g.chip.bottom > g.chip.top) {
         const float h = 22.0f * s;
         const float cy = (g.chip.top + g.chip.bottom) * 0.5f;
         const auto pill = D2D1::RectF(g.chip.left, cy - h * 0.5f, g.chip.right, cy + h * 0.5f);
@@ -765,6 +930,7 @@ void QuickPreviewWindow::DrawPlaybackChrome(ID2D1DeviceContext* dc, ID2D1SolidCo
     brush->SetColor(original);
 }
 bool QuickPreviewWindow::CodecCardVisible(const VideoPreview::State& state) const {
+    if (state.opening) return false;
     if (state.unsupported_audio) {
         const auto content = ContentRect();
         // Fall back to the status text when the existing card cannot fit.

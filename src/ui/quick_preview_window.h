@@ -5,6 +5,7 @@
 
 #include "ui_compositor.h"
 #include "thumbnail_cache.h"
+#include "native_preview_view.h"
 #include "archive_preview.h"
 #include "markdown_view.h"
 #include "table_view.h"
@@ -21,6 +22,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+#include <deque>
 
 namespace pulse::ui {
 
@@ -28,6 +30,9 @@ class QuickPreviewWindow {
 public:
     std::vector<std::shared_future<void>> SuspendVolume(const std::wstring& root);
     void ResumeVolume(const std::wstring& root);
+    // An app popup over the pane hides a shell preview handler's topmost
+    // overlay (kept loaded); false shows it again.
+    void SetHandlerCovered(bool covered);
 
     QuickPreviewWindow() = default;
     ~QuickPreviewWindow();
@@ -42,9 +47,15 @@ public:
     // the owner and media start muted until Activate.
     void Show(const QuickPreviewItem& item, bool dark, WindowEffect effect, bool safe_mode,
               const POINT* zoom_from = nullptr, bool activate = true);
+    bool InitializeEmbedded(HWND owner, UINT navigate_message, UINT open_message, UINT command_message);
+    void ShowEmbedded(const QuickPreviewItem& item, RECT bounds, bool dark, bool safe_mode);
+    void SetEmbeddedBounds(RECT bounds);
+    bool embedded() const noexcept { return embedded_; }
     void Activate();
     void Update(const QuickPreviewItem& item);
     void SetStarred(bool starred);
+    // Content-search highlights without opening the interactive find bar.
+    void SetSearchQuery(const std::wstring& query);
     // The app's accent colour (open button); call before Show.
     void SetAccent(const D2D1_COLOR_F& accent);
     // Settings > 快速预览 > 预览窗口; call before Show. What the window changes
@@ -69,15 +80,17 @@ public:
     std::wstring TakeOpenPath() { std::wstring path; path.swap(open_path_); return path; }
 
 private:
+    bool embedded_ = false;
+    bool embedded_open_ = false;
     std::vector<std::wstring> suspended_volumes_;
 
-#ifdef PULSE_WITH_SELFTEST
+    friend struct DetailsPreviewProbe;
+    friend struct NativePreviewProbe;
     friend struct QuickPreviewAuditTest;
-#endif
     friend struct QuickPreviewPlaybackProbe;
     friend struct PreviewDeadlineProbe;
     // Pages: multi-page PDF / AI read as a continuous scroll (quick_preview_pages.cpp).
-    enum class NativeKind { None, Bitmap, Text, Hex, Archive, Pages, Markdown, Table, Tree };
+    enum class NativeKind { None, Bitmap, Text, Hex, Archive, Pages, Markdown, Table, Tree, Model };
     enum class ChromeButton { None, Prev, Next, More, Open, Size };
 
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
@@ -109,12 +122,12 @@ private:
     bool PlaybackMouseDown(POINT point);
     void EndPlaybackDrag(bool resume);
     void DrawPlayback(ID2D1DeviceContext* dc, ID2D1SolidColorBrush* brush);
-    // Icon playback bar (kVideoChrome): buttons | time | track | time | volume | speed | chip.
+    // Timeline row; media add a second row for volume, speed and track menus.
     struct PlaybackGeometry {
         D2D1_RECT_F buttons[3]{};
         int button_count = 0;
         int play_index = 0;
-        D2D1_RECT_F time_left{}, track{}, time_right{}, volume{}, speed{}, chip{};
+        D2D1_RECT_F time_left{}, track{}, time_right{}, volume{}, volume_track{}, volume_value{}, audio_tracks{}, subtitles{}, speed{}, chip{};
     };
     PlaybackGeometry PlaybackLayout() const;
     void DrawPlaybackChrome(ID2D1DeviceContext* dc, ID2D1SolidColorBrush* brush);
@@ -124,7 +137,11 @@ private:
     // FFmpeg playback is composed here, clipped like the video child.
     void DrawFfmpegFrame(ID2D1DeviceContext* dc, const D2D1_RECT_F& frame, float radius);
     bool PlaybackHover(POINT client);             // true when hover state changed
-    bool PlaybackWheel(POINT client, float steps);  // wheel over the volume button
+    void SetPlaybackVolume(float value);
+    void DragPlaybackVolume(float x);
+    std::vector<FluentMenuItem> PlaybackTrackItems(bool subtitles, const VideoPreview::State& state) const;
+    void ShowPlaybackTracks(bool subtitles, POINT point);
+    bool PlaybackWheel(POINT client, float steps);  // wheel over the volume controls
     // Card shown instead of a black frame when no decoder handles the video track.
     bool CodecCardVisible(const VideoPreview::State& state) const;
     void DrawCodecCard(ID2D1DeviceContext* dc, const D2D1_RECT_F& content,
@@ -321,6 +338,34 @@ private:
     ComPtr<IDWriteTextLayout> UiLayout(std::wstring_view text, IDWriteTextFormat* format,
                                        float width, float height,
                                        DWRITE_TEXT_ALIGNMENT alignment = DWRITE_TEXT_ALIGNMENT_LEADING) const;
+    struct UiLayoutEntry {
+        std::wstring text;
+        ComPtr<IDWriteTextFormat> format;
+        float width = 0, height = 0;
+        DWRITE_TEXT_ALIGNMENT alignment = DWRITE_TEXT_ALIGNMENT_LEADING;
+        ComPtr<IDWriteTextLayout> layout;
+    };
+    mutable std::deque<UiLayoutEntry> ui_layout_cache_;
+    mutable size_t ui_layout_text_bytes_ = 0;
+    mutable uint64_t ui_layout_generation_ = 0;
+    mutable uint64_t ui_layout_creations_ = 0, ui_layout_hits_ = 0, ui_sign_creations_ = 0;
+    uint64_t ui_brush_creations_ = 0;
+    struct UiTrimmingEntry {
+        ComPtr<IDWriteTextFormat> format;
+        ComPtr<IDWriteInlineObject> sign;
+    };
+    mutable std::deque<UiTrimmingEntry> ui_trimming_cache_;
+    struct UiBrushEntry {
+        D2D1_COLOR_F color{};
+        ComPtr<ID2D1SolidColorBrush> brush;
+    };
+    ComPtr<ID2D1Device> ui_brush_device_;
+    std::deque<UiBrushEntry> ui_brush_cache_;
+    ComPtr<ID2D1Device> backdrop_device_;
+    ComPtr<ID2D1BitmapBrush> backdrop_brush_;
+    bool backdrop_dark_ = false;
+    HRESULT CreateUiBrush(ID2D1DeviceContext* dc, const D2D1_COLOR_F& color,
+                          ID2D1SolidColorBrush** result);
     float UiTextWidth(std::wstring_view text, IDWriteTextFormat* format) const;
     void DrawUiText(ID2D1DeviceContext* dc, std::wstring_view text, IDWriteTextFormat* format,
                     const D2D1_RECT_F& rect, const D2D1_COLOR_F& color,
@@ -354,12 +399,14 @@ private:
     // Room for every visible PDF page at full size plus the thumbnail strip;
     // a smaller budget would evict an on-screen page and re-request it forever.
     // Room for a few full-window pictures (a 4K window's frame is ~32 MB).
+    NativePreviewView native_preview_;
     ThumbnailCache thumbnails_{160ull * 1024ull * 1024ull, 192};
     PreviewHandlerHost handler_;
     VideoPreview video_;
     AudioWaveform waveform_;
     D2D1_RECT_F audio_wave_rect_{};
     float audio_hover_x_ = -1.0f;                // pointer x over the waveform, or -1
+    bool playback_volume_drag_ = false;
     bool playback_drag_ = false;
     bool playback_resume_ = false;
     bool playback_scrub_pending_ = false;
@@ -367,7 +414,7 @@ private:
     double playback_scrub_fraction_ = 0;
     ULONGLONG playback_last_seek_ms_ = 0;
     float playback_hover_x_ = -1.0f;   // pointer x over the seek track, or -1
-    int playback_hover_button_ = -1;   // 0..2 transport, 3 volume, 4 speed
+    int playback_hover_button_ = -1;   // 0..2 transport, 3 volume, 4 speed, 5 audio, 6 subtitles
     float playback_volume_ = 1.0f;     // session-wide
     bool playback_muted_ = false;      // session-wide
     float playback_rate_ = 1.0f;       // per file
@@ -533,6 +580,8 @@ private:
     bool selecting_ = false;
     bool find_open_ = false;
     std::wstring find_query_;
+    std::wstring search_query_;
+    bool pending_search_reveal_ = false;
     std::vector<uint32_t> find_matches_;
     uint32_t find_index_ = 0;
     HWND find_edit_ = nullptr;

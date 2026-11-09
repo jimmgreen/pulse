@@ -60,7 +60,8 @@ public:
     // Runs inside RestoreWindow() just before a hidden window is shown again
     // (tray click, tray "Open", a second launch), so the app can reset it first.
     void SetBeforeRestore(std::function<void()> hook) { before_restore_ = std::move(hook); }
-    CallbackResult HandleCallback(LPARAM event);
+    CallbackResult HandleCallback(LPARAM event,
+        const std::function<int(POINT, HWND)>& show_menu = {});
 
     bool IsVisible() const noexcept { return icon_added_; }
 

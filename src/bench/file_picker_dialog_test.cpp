@@ -3,6 +3,7 @@
 #include "../common/localization.h"
 #include "../common/windows_compat.h"
 #include "../ui/folder_picker_dialog.h"
+#include "picker_interaction_test_api.h"
 
 #include <atomic>
 #include <chrono>
@@ -174,20 +175,25 @@ bool HasPaths(const Outcome& outcome, const std::vector<std::wstring>& expected)
 }
 } // namespace
 
+#include "picker_view_switch_test.h"
+
 int RunFilePickerDialogTest(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--view-switch") return RunPickerViewSwitchTest();
     const bool owner_focus_interactive = argc == 3 && std::wstring_view(argv[1]) == L"--owner-focus" && std::wstring_view(argv[2]) == L"--interactive";
     const bool owner_focus = (argc == 2 && std::wstring_view(argv[1]) == L"--owner-focus") || owner_focus_interactive;
     const bool outcomes = argc == 2 && std::wstring_view(argv[1]) == L"--outcomes";
     const bool save_interactive = argc == 3 && std::wstring_view(argv[1]) == L"--save" && std::wstring_view(argv[2]) == L"--interactive";
     const bool save = (argc == 2 && std::wstring_view(argv[1]) == L"--save") || save_interactive;
     const bool mockup_panels = argc == 2 && std::wstring_view(argv[1]) == L"--mockup-panels";
+    const bool blank_click = argc == 2 && std::wstring_view(argv[1]) == L"--blank-click";
+    const bool create_selection = argc == 2 && std::wstring_view(argv[1]) == L"--create-selection";
     const bool input_surfaces = argc == 2 && std::wstring_view(argv[1]) == L"--input-surfaces";
-    if (!mockup_panels && !owner_focus && !save && !outcomes && !input_surfaces && (argc != 2 || std::wstring_view(argv[1]) != L"--interaction")) {
+    if (!create_selection && !blank_click && !mockup_panels && !owner_focus && !save && !outcomes && !input_surfaces && (argc != 2 || std::wstring_view(argv[1]) != L"--interaction")) {
         std::puts("Use --interaction, --input-surfaces, --outcomes or --owner-focus for scoped file picker regression cases.");
         return 2;
     }
     // Surface regression runs without activating any window on the user's desktop.
-    if ((owner_focus && !owner_focus_interactive) || input_surfaces || outcomes || (save && !save_interactive)) {
+    if ((owner_focus && !owner_focus_interactive) || create_selection || blank_click || input_surfaces || outcomes || (save && !save_interactive)) {
         const auto name = L"PulsePickerInputs_" + std::to_wstring(GetCurrentProcessId());
         HDESK desktop = CreateDesktopW(name.c_str(), nullptr, nullptr, 0, GENERIC_ALL, nullptr);
         if (!desktop || !SetThreadDesktop(desktop)) return 3;
@@ -203,7 +209,136 @@ int RunFilePickerDialogTest(int argc, wchar_t** argv) {
         if (!pass) ++failures;
     };
     try {
-        Fixture fixture(owner_focus || outcomes || save || mockup_panels);
+        Fixture fixture(create_selection || blank_click || owner_focus || outcomes || save || mockup_panels);
+        if (create_selection) {
+            int scenario = 0;
+            for (const auto mode : {PickerMode::File, PickerMode::Save}) for (const auto view : {ViewMode::Details, ViewMode::MediumIcons}) {
+                const auto parent = fixture.root / (L"creation-" + std::to_wstring(++scenario));
+                std::filesystem::create_directory(parent);
+                for (int i = 0; i < 100; ++i)
+                    std::filesystem::create_directory(parent / (L"a-existing-" + std::to_wstring(i)));
+                std::ofstream(parent / L"existing.txt") << "preserve";
+                FolderPickerSpec spec; spec.mode = mode; spec.initial_path = parent.wstring();
+                spec.persist_layout = false; spec.filename = mode == PickerMode::Save ? L"save-target.txt" : L"";
+                const auto outcome = Run(spec, [&](HWND hwnd, const std::atomic<bool>& done) {
+                    PickerInteractionTest query;
+                    const auto read = [&] {
+                        query = {};
+                        return Send(hwnd, kPickerInteractionTestMessage, 0, reinterpret_cast<LPARAM>(&query)) && query.ready;
+                    };
+                    if (!Until(read, done)) return false;
+                    PickerViewSwitchTest request; request.begin = true; request.mode = static_cast<int>(view);
+                    if (!Send(hwnd, kPickerViewSwitchTestMessage, 0, reinterpret_cast<LPARAM>(&request)) || !Until(read, done)) return false;
+                    const auto creating = [&] {
+                        return read() && query.rename_edit && query.selected_paths.size() == 1;
+                    };
+                    if (!PostMessageW(hwnd, WM_KEYDOWN, VK_F7, 0) || !Until(creating, done)) return false;
+                    const auto first = query.selected_paths.front();
+                    check("new folder stays in parent, selects actual result and scrolls into view",
+                        SamePickerPath(query.current, parent.wstring()) && query.selected_visible && std::filesystem::is_directory(first));
+                    if (!Send(query.rename_edit, WM_KEYDOWN, VK_ESCAPE) || !Until([&] { return read() && !query.rename_edit; }, done)) return false;
+                    check("Escape cancels naming without deleting or entering the created folder",
+                        query.selected_paths == std::vector<std::wstring>{first} && std::filesystem::is_directory(first) &&
+                        SamePickerPath(query.current, parent.wstring()));
+                    GUITHREADINFO keyboard{sizeof(GUITHREADINFO)};
+                    check("Escape returns keyboard focus to the file list",
+                        GetGUIThreadInfo(GetWindowThreadProcessId(hwnd, nullptr), &keyboard) && keyboard.hwndFocus == hwnd);
+                    if (!PostMessageW(hwnd, WM_KEYDOWN, VK_F7, 0) || !Until(creating, done)) return false;
+                    const auto second = query.selected_paths.front();
+                    check("repeated creation picks a unique name and preserves the first folder",
+                        second != first && std::filesystem::is_directory(first) && std::filesystem::is_directory(second));
+                    wchar_t edit_capture_base[32768]{};
+                    if (GetEnvironmentVariableW(L"PULSE_PICKER_TEST_SNAPSHOT", edit_capture_base, ARRAYSIZE(edit_capture_base))) {
+                        const auto capture = std::wstring(edit_capture_base) + L"-editing-" + std::to_wstring(scenario) + L".png";
+                        SetPropW(hwnd, L"Pulse.PickerTestSnapshot", const_cast<wchar_t*>(capture.c_str()));
+                        Send(hwnd, WM_PAINT);
+                        RemovePropW(hwnd, L"Pulse.PickerTestSnapshot");
+                        check("inline naming visual capture exists", std::filesystem::exists(capture));
+                    }
+                    const auto renamed = (parent / L"Renamed folder").wstring();
+                    if (!SetText(query.rename_edit, L"bad/name") || !Send(query.rename_edit, WM_KEYDOWN, VK_RETURN) || !read()) return false;
+                    check("invalid name keeps inline editor available for correction", query.rename_edit != nullptr && std::filesystem::exists(second));
+                    if (!query.rename_edit) return false;
+                    if (!SetText(query.rename_edit, L"Renamed folder") || !Send(query.rename_edit, WM_KEYDOWN, VK_RETURN) ||
+                        !Until([&] { return read() && !query.rename_edit && query.selected_paths == std::vector<std::wstring>{renamed}; }, done)) return false;
+                    check("inline rename retains selection and visibility after listing refresh",
+                        query.selected_visible && std::filesystem::is_directory(renamed) && !std::filesystem::exists(second) &&
+                        SamePickerPath(query.current, parent.wstring()));
+                    PickerInteractionTest create_text; create_text.command = 24;
+                    if (!Send(hwnd, kPickerInteractionTestMessage, 0, reinterpret_cast<LPARAM>(&create_text)) || !Until(creating, done)) return false;
+                    const auto original_text = query.selected_paths.front();
+                    check("new text file uses actual completion and starts inline naming in place",
+                        query.selected_visible && SamePickerPath(query.current, parent.wstring()) &&
+                        std::filesystem::is_regular_file(original_text) && std::filesystem::path(original_text).extension() == L".txt");
+                    DWORD begin = 0, end = 0;
+                    Send(query.rename_edit, EM_GETSEL, reinterpret_cast<WPARAM>(&begin), reinterpret_cast<LPARAM>(&end));
+                    check("new file naming selects its stem and preserves the extension",
+                        begin == 0 && end == std::filesystem::path(original_text).stem().wstring().size());
+                    const auto renamed_text = (parent / L"Renamed document.txt").wstring();
+                    if (!SetText(query.rename_edit, L"Renamed document.txt") || !Send(query.rename_edit, WM_KEYDOWN, VK_RETURN) ||
+                        !Until([&] { return read() && !query.rename_edit && query.selected_paths == std::vector<std::wstring>{renamed_text}; }, done)) return false;
+                    check("new file remains selected and visible after rename",
+                        query.selected_visible && std::filesystem::is_regular_file(renamed_text) && !std::filesystem::exists(original_text));
+                    wchar_t capture_base[32768]{};
+                    if (GetEnvironmentVariableW(L"PULSE_PICKER_TEST_SNAPSHOT", capture_base, ARRAYSIZE(capture_base))) {
+                        const auto capture = std::wstring(capture_base) + L"-" + std::to_wstring(scenario) + L".png";
+                        SetPropW(hwnd, L"Pulse.PickerTestSnapshot", const_cast<wchar_t*>(capture.c_str()));
+                        Send(hwnd, WM_PAINT);
+                        RemovePropW(hwnd, L"Pulse.PickerTestSnapshot");
+                        check("created item visual capture exists", std::filesystem::exists(capture));
+                    }
+                    if (!PostMessageW(hwnd, WM_KEYDOWN, VK_F7, 0) || !Until(creating, done)) return false;
+                    const auto retained = query.selected_paths.front();
+                    PickerInteractionTest address; address.key = 'L'; address.ctrl = true;
+                    const auto other = (fixture.root / L"nested").wstring();
+                    if (!Send(hwnd, kPickerInteractionTestMessage, 0, reinterpret_cast<LPARAM>(&address)) ||
+                        !SetText(GetDlgItem(hwnd, kPathId), other) || !Send(GetDlgItem(hwnd, kPathId), WM_KEYDOWN, VK_RETURN) ||
+                        !Until([&] { return read() && SamePickerPath(query.current, other); }, done)) return false;
+                    check("navigation discards stale creation selection and editor without deleting its result",
+                        !query.rename_edit && query.selected_paths.empty() && std::filesystem::is_directory(retained));
+                    return PostMessageW(hwnd, WM_CLOSE, 0, 0) != FALSE;
+                });
+                check("open/save creation finishes without accepting or navigating into the result",
+                    outcome.driven && outcome.status == FilePickerStatus::Cancelled);
+            }
+            CoUninitialize();
+            return failures ? 1 : 0;
+        }
+        if (blank_click) {
+            for (const auto mode : {PickerMode::File, PickerMode::Save}) for (const auto view : {ViewMode::Details, ViewMode::MediumIcons}) {
+                FolderPickerSpec spec; spec.mode = mode; spec.initial_path = (fixture.root / L"nested").wstring();
+                spec.persist_layout = false; spec.blank_click_action = 1;
+                const auto outcome = Run(spec, [&](HWND hwnd, const std::atomic<bool>& done) {
+                    PickerInteractionTest query;
+                    auto read = [&] { query = {}; return Send(hwnd, kPickerInteractionTestMessage, 0, reinterpret_cast<LPARAM>(&query)) && query.ready; };
+                    if (!Until(read, done)) return false;
+                    PickerViewSwitchTest request; request.begin = true; request.mode = static_cast<int>(view);
+                    if (!Send(hwnd, kPickerViewSwitchTestMessage, 0, reinterpret_cast<LPARAM>(&request)) || !Until(read, done) || !query.blank_ready) return false;
+                    const auto double_at = [&](POINT point) {
+                        const LPARAM at = MAKELPARAM(point.x, point.y);
+                        return Send(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, at) && Send(hwnd, WM_LBUTTONUP, 0, at) &&
+                            Send(hwnd, WM_LBUTTONDBLCLK, MK_LBUTTON, at) && Send(hwnd, WM_LBUTTONUP, 0, at);
+                    };
+                    if (!double_at(query.blank) || !Until([&] { return read() && SamePickerPath(query.current, fixture.root.wstring()); }, done)) return false;
+                    check("open/save blank double click reaches parent in details/icons", true);
+                    // A folder double-click must enter that folder, never invoke blank navigation.
+                    query = {}; query.folder = true;
+                    if (!Send(hwnd, kPickerInteractionTestMessage, 0, reinterpret_cast<LPARAM>(&query)) || !query.ready || !double_at(query.item)) return false;
+                    if (!Until([&] { return read() && SamePickerPath(query.current, (fixture.root / L"nested").wstring()); }, done)) return false;
+                    check("folder double click opens folder instead of blank navigation", true);
+                    if (mode == PickerMode::File) {
+                        if (!read() || !double_at(query.item)) return false;
+                        return true;
+                    }
+                    return PostMessageW(hwnd, WM_CLOSE, 0, 0) != FALSE;
+                });
+                check("scoped real picker blank gesture completes", mode == PickerMode::File
+                    ? HasPaths(outcome, {(fixture.root / L"nested" / L"inside.txt").wstring()})
+                    : outcome.driven && outcome.status == FilePickerStatus::Cancelled);
+            }
+            CoUninitialize();
+            return failures ? 1 : 0;
+        }
         if (mockup_panels) {
             wchar_t snapshot_base[32768]{};
             const bool has_base = GetEnvironmentVariableW(L"PULSE_PICKER_TEST_SNAPSHOT", snapshot_base, 32768) != 0;

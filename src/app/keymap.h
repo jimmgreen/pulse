@@ -160,6 +160,9 @@ private:
 const Keymap& ActiveKeymap();
 void SetActiveKeymap(Keymap keymap);
 
+// Workspace digits are a fallback; configured actions and retired defaults win.
+int WorkspaceShortcutIndex(const Keymap& keymap, KeyChord chord);
+
 // Shown keys. Menus, tooltips and hints are written with the default keys:
 // ShownShortcut("Ctrl+Shift+C") is the key that now runs that action ("" when
 // it has none), RemapShortcutText does that for every key in a sentence, and

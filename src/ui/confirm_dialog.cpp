@@ -4,6 +4,7 @@
 #include "confirm_dialog_view.h"
 #include "ui_motion.h"
 #include "window_helpers.h"
+#include "surface_capture.h"
 
 #include <windowsx.h>
 #include <algorithm>
@@ -113,6 +114,13 @@ public:
         return choice_;
     }
 
+    bool SaveFrame(const std::wstring& path) {
+        // DWM's acrylic backdrop is not part of the application's swapchain.
+        // Capture the same live controls over their opaque host theme surface.
+        const bool saved = CaptureDialogSurface(path, [this] { Render(true); });
+        Render();
+        return saved;
+    }
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
         auto* self = reinterpret_cast<ConfirmWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
@@ -252,7 +260,7 @@ private:
         return moving;
     }
 
-    void Render() {
+    void Render(bool opaque_capture = false) {
         if (compositor_.NeedsRecovery()) {
             if (!compositor_.Recover()) return;
             compositor_.RecreateTextFormats(scale_);
@@ -262,9 +270,10 @@ private:
         if (!compositor_.Dc()) return;
         const bool high_contrast = IsHighContrast();
         Theme theme = high_contrast ? MakeHighContrastTheme() : MakeTheme(dark_, accent_);
-        if (!high_contrast && backdrop_enabled_ && IsAcrylicBackdrop(hwnd_)) ApplyGlass(theme, dark_);
+        const bool backdrop = backdrop_enabled_ && !opaque_capture;
+        if (!high_contrast && backdrop && IsAcrylicBackdrop(hwnd_)) ApplyGlass(theme, dark_);
         const bool moving = StepMotion();
-        BeginSurface(compositor_, painter_, theme, dark_, high_contrast, backdrop_enabled_,
+        BeginSurface(compositor_, painter_, theme, dark_, high_contrast, backdrop,
                      scale_);
         DrawConfirmDialog(compositor_, painter_, theme, spec_, layout_, formats_, visual_,
                           dark_, high_contrast);
@@ -430,6 +439,16 @@ ConfirmChoice ShowConfirmDialogEx(HWND owner, const ConfirmDialogSpec& spec, boo
 bool ShowConfirmDialog(HWND owner, const ConfirmDialogSpec& spec, bool dark,
                        D2D1_COLOR_F accent) {
     return ShowConfirmDialogEx(owner, spec, dark, accent) == ConfirmChoice::Confirm;
+}
+
+bool SaveConfirmDialogFrame(HWND window, const std::wstring& path) {
+    wchar_t name[64]{};
+    DWORD process = 0;
+    const DWORD thread = GetWindowThreadProcessId(window, &process);
+    if (process != GetCurrentProcessId() || thread != GetCurrentThreadId() ||
+        !GetClassNameW(window, name, 64) || std::wstring_view(name) != kConfirmClass) return false;
+    auto* instance = reinterpret_cast<ConfirmWindow*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    return instance && instance->SaveFrame(path);
 }
 
 } // namespace pulse::ui

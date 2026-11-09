@@ -39,6 +39,9 @@ enum RuntimeCheck : uint32_t {
     ShellResultContract = 2,    // IShellItem/array reconstruction belongs to wrapper.
 };
 enum class AccessPolicy { None, LocalOpenV1, LocalSaveV1 };
+inline constexpr uint32_t kExtendedFileDialogOptions = static_cast<uint32_t>(FOS_STRICTFILETYPES | FOS_ALLNONSTORAGEITEMS |
+    FOS_CREATEPROMPT | FOS_SHAREAWARE | FOS_HIDEMRUPLACES | FOS_HIDEPINNEDPLACES |
+    FOS_OKBUTTONNEEDSINTERACTION | FOS_FORCEPREVIEWPANEON | FOS_SUPPORTSTREAMABLEITEMS);
 // Separately observed native getter evidence, never an invented setter call.
 struct PreparationContext {
     std::optional<std::u16string> resolved_initial_directory;
@@ -50,12 +53,14 @@ struct PreparationContext {
     bool native_save_defaults_supported = false;
     bool save_no_test_create_supported = false;
     bool save_properties_owned = false;
+    bool native_options_supported = false;
 };
 enum class ValidationCategory { Unknown, DefaultOpen, DefaultSave, Folder, OpenSkipAccessValidation, LocalOpenAccessV1, LocalSaveAccessV1 };
 struct ContractDecision {
     // Settings absent from the host wire require an explicitly capable in-process provider.
     std::optional<std::u16string> title, ok_button_label, file_name_label;
     std::optional<std::u16string> open_default_extension;
+    uint32_t native_options = 0; // Negotiated extended bits, bound to effective_options at runtime.
     bool require_unencrypted_save = false;
     bool skip_open_access_validation = false;
     bool allow_missing_open = false;
@@ -87,5 +92,12 @@ uint32_t DefaultDialogOptions(DialogFactory factory);
 ContractDecision PrepareFileDialogContract(DialogFactory factory, std::span<const SetterCall> calls,
                                           const ipc::picker::RequestId& id, AccessPolicy policy = AccessPolicy::None,
                                           const PreparationContext& context = {});
+// The out-of-process request for a prepared decision: decision.request plus
+// local-save access and caller labels (pulse.exe applies them exactly as the
+// in-process provider does). nullopt when the decision relies on something the
+// pulse.exe host does not carry yet (native extended options, share-aware
+// saves, Open default extension, missing-file Open), so the caller keeps its
+// in-process or native route.
+std::optional<ipc::picker::Message> BridgeRequestFor(const ContractDecision& decision);
 }
 

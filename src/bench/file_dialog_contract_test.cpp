@@ -29,6 +29,58 @@ bool NativeReasonIs(const ContractDecision& d, NativeReason reason) {
 }
 }
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--native-options") {
+        PreparationContext context;
+        context.native_options_supported = true;
+        context.native_save_defaults_supported = true;
+        context.open_missing_supported = true;
+        for (const auto flags : {0x1042u, 0x1242u}) {
+            auto calls = Baseline(); calls[0].value = flags; calls.push_back(Types());
+            auto decision = PrepareFileDialogContract(DialogFactory::Open, calls, Id(), AccessPolicy::LocalOpenV1, context);
+            Check(decision.effective_options == flags && RuntimeContractCertified(decision), "Firefox Open preserves original single/multiple options and certifies");
+        }
+        for (const uint32_t flag : {uint32_t(FOS_STRICTFILETYPES), uint32_t(FOS_ALLNONSTORAGEITEMS), uint32_t(FOS_CREATEPROMPT),
+             uint32_t(FOS_SHAREAWARE), uint32_t(FOS_HIDEMRUPLACES), uint32_t(FOS_HIDEPINNEDPLACES),
+             uint32_t(FOS_OKBUTTONNEEDSINTERACTION), uint32_t(FOS_FORCEPREVIEWPANEON), uint32_t(FOS_SUPPORTSTREAMABLEITEMS)}) {
+            auto calls = Baseline();
+            if (flag == FOS_ALLNONSTORAGEITEMS) calls[0].value &= ~FOS_FORCEFILESYSTEM;
+            calls[0].value |= flag;
+            auto decision = PrepareFileDialogContract(DialogFactory::Open, calls, Id(), AccessPolicy::LocalOpenV1, context);
+            Check(RuntimeContractCertified(decision) && decision.native_options == flag, "extended Open option is preserved and runtime-bound");
+            auto old = context; old.native_options_supported = false;
+            Check(!PrepareFileDialogContract(DialogFactory::Open,calls,Id(),AccessPolicy::LocalOpenV1,old).request, "old provider does not silently drop new semantics");
+            auto corrupted = decision; corrupted.native_options = 0;
+            Check(!RuntimeContractCertified(corrupted), "runtime rejects stripped extended options");
+            calls = Baseline(DialogFactory::Save);
+            if (flag == FOS_ALLNONSTORAGEITEMS) calls[0].value &= ~FOS_FORCEFILESYSTEM;
+            calls[0].value |= flag;
+            decision = PrepareFileDialogContract(DialogFactory::Save,calls,Id(),AccessPolicy::LocalSaveV1,context);
+            Check(RuntimeLocalSaveContractCertified(decision) && decision.native_options == flag, "extended Save option is preserved and runtime-bound");
+        }
+        auto calls = Baseline(); calls[0].value |= FOS_ALLNONSTORAGEITEMS;
+        Check(PrepareFileDialogContract(DialogFactory::Open,calls,Id(),AccessPolicy::LocalOpenV1,context).disposition == Disposition::InvalidArgument,
+            "mutually exclusive filesystem and nonstorage options reject without pretending compatibility");
+        calls = Baseline(); calls[0].value &= ~FOS_FILEMUSTEXIST; calls[0].value |= FOS_CREATEPROMPT;
+        auto create = PrepareFileDialogContract(DialogFactory::Open,calls,Id(),AccessPolicy::LocalOpenV1,context);
+        Check(create.allow_missing_open && !create.skip_open_access_validation && RuntimeContractCertified(create), "create prompt allows a missing leaf without NOVALIDATE");
+        for (const bool options_first : {false, true}) {
+            auto shell = Text(Setting::Folder, u"::{645FF040-5081-101B-9F08-00AA002F954E}");
+            auto opts = Options(FOS_ALLNONSTORAGEITEMS | FOS_FILEMUSTEXIST | FOS_NOCHANGEDIR);
+            std::vector<SetterCall> ordered = options_first ? std::vector<SetterCall>{opts, shell} : std::vector<SetterCall>{shell, opts};
+            const auto virtual_folder = PrepareFileDialogContract(DialogFactory::Open, ordered, Id(), AccessPolicy::LocalOpenV1, context);
+            Check(virtual_folder.request && RuntimeContractCertified(virtual_folder), "virtual folder uses final options regardless of setter order");
+            ordered.push_back(Options(FOS_FORCEFILESYSTEM | FOS_FILEMUSTEXIST));
+            Check(!PrepareFileDialogContract(DialogFactory::Open, ordered, Id(), AccessPolicy::LocalOpenV1, context).request,
+                "later filesystem-only options reject an earlier virtual folder");
+        }
+        calls = Baseline(); calls[0].value |= 0x400000u;
+        Check(!PrepareFileDialogContract(DialogFactory::Open,calls,Id(),AccessPolicy::LocalOpenV1,context).request,"reserved bit remains rejected");
+        calls = Baseline();
+        auto original = PrepareFileDialogContract(DialogFactory::Open,calls,Id(),AccessPolicy::LocalOpenV1);
+        Check(original.native_options == 0 && RuntimeContractCertified(original),"original Pulse local Open policy stays certified");
+        std::cout << "Checks=" << checks << " failures=" << failures << '\n'; return failures ? 1 : 0;
+    }
+
     if (argc == 2 && std::string_view(argv[1]) == "--open-filter-separators") {
         for (const auto* pattern : {u"*.txt;", u"*.txt;;", u";*.txt", u"*.txt;;*.zip;", u";;*.txt;;"}) {
             auto calls = Baseline(); auto types = Types(); types.filters = {{u"Generic", pattern}}; calls.push_back(types);
@@ -152,19 +204,39 @@ int main(int argc, char** argv) {
         std::cout << "Checks=" << checks << " failures=" << failures << '\n'; return failures ? 1 : 0;
     }
     if (argc == 2 && std::string_view(argv[1]) == "--folders") {
-        for (uint32_t extra : {0u, uint32_t{FOS_ALLOWMULTISELECT}}) {
+        for (uint32_t flags : {0x1060u, 0x1260u, 0x101828u}) {
             auto folder = Baseline()[1];
             auto types = Types(); types.native_result = E_UNEXPECTED;
-            std::vector<SetterCall> calls{Options(0x1060 | extra), Text(Setting::FileName), Text(Setting::Title, u"Select"), types, folder};
+            auto index = Text(Setting::FileTypeIndex); index.value = 1; index.native_result = E_UNEXPECTED;
+            std::vector<SetterCall> calls{Options(flags), Text(Setting::FileName), Text(Setting::Title, u"Select"), types, folder, index};
             const auto d = PrepareFileDialogContract(DialogFactory::Open, calls, Id(), AccessPolicy::LocalOpenV1);
             Check(d.request && std::get<wire::Request>(d.request->body).operation == wire::Operation::PickFolder, "folder replay admitted");
             Check(RuntimeContractCertified(d), "runtime admits folder contract");
-            Check(d.request && ((std::get<wire::Request>(d.request->body).options & wire::AllowMultiSelect) != 0) == (extra != 0), "folder multiselect preserved");
+            Check(d.request && ((std::get<wire::Request>(d.request->body).options & wire::AllowMultiSelect) != 0) == ((flags & FOS_ALLOWMULTISELECT) != 0), "folder multiselect preserved");
             calls[1].text = u"folder";
             Check(PrepareFileDialogContract(DialogFactory::Open, calls, Id(), AccessPolicy::LocalOpenV1).request.has_value(), "nonempty folder filename preserved");
             calls[1].text.clear();
+            calls.back().native_result = E_ACCESSDENIED;
+            Check(NativeReasonIs(PrepareFileDialogContract(DialogFactory::Open, calls, Id(), AccessPolicy::LocalOpenV1), NativeReason::SetterFailed), "folder index errors other than native no-effect rejection remain native");
+            calls.back().native_result = E_UNEXPECTED;
             calls[3].native_result = E_FAIL;
             Check(NativeReasonIs(PrepareFileDialogContract(DialogFactory::Open, calls, Id(), AccessPolicy::LocalOpenV1), NativeReason::SetterFailed), "unknown failed setter remains native");
+        }
+        for (const auto factory : {DialogFactory::Open, DialogFactory::Save}) {
+            auto calls = Baseline(factory);
+            auto index = Text(Setting::FileTypeIndex); index.value = 1; index.native_result = E_UNEXPECTED;
+            calls.push_back(index);
+            Check(NativeReasonIs(PrepareFileDialogContract(factory, calls, Id()), NativeReason::SetterFailed), "ordinary file dialog index failure remains native");
+        }
+        {
+            auto calls = Baseline();
+            calls.push_back(Types());
+            calls.push_back(Options(calls[0].value | FOS_PICKFOLDERS));
+            auto index = Text(Setting::FileTypeIndex); index.value = 1; index.native_result = E_UNEXPECTED;
+            calls.push_back(index);
+            const auto decision = PrepareFileDialogContract(DialogFactory::Open, calls, Id(), AccessPolicy::LocalOpenV1);
+            Check(NativeReasonIs(decision, NativeReason::SetterFailed) && decision.call_index == calls.size() - 1,
+                "folder index failure after successful file types is never ignored");
         }
         std::cout << "Checks=" << checks << " failures=" << failures << '\n'; return failures ? 1 : 0;
     }
@@ -231,6 +303,28 @@ int main(int argc, char** argv) {
     Check(NativeReasonIs(PrepareFileDialogContract(DialogFactory::Open, calls, Id()), NativeReason::UnrecognizedSuccess), "non-S_OK result not invented as normal success");
     calls = Baseline(); calls.push_back(Types()); calls.push_back(Types());
     Check(NativeReasonIs(PrepareFileDialogContract(DialogFactory::Open, calls, Id()), NativeReason::UnsupportedSettingOrder), "duplicate successful SetFileTypes trace remains native");
+    {
+        // WinForms without a Filter calls SetFileTypes(0, ...); native returns S_OK.
+        auto empty = Types(); empty.filters.clear();
+        for (const auto factory : {DialogFactory::Open, DialogFactory::Save}) {
+            auto empty_calls = Baseline(factory); empty_calls.push_back(empty);
+            const auto prepared = PrepareFileDialogContract(factory, empty_calls, Id());
+            Check(prepared.disposition == Disposition::Prepared && prepared.request &&
+                std::get<wire::Request>(prepared.request->body).filters.empty(),
+                "native-accepted empty SetFileTypes prepares with no filters");
+        }
+        auto later = Baseline(); later.push_back(empty); later.push_back(Types());
+        const auto replaced = PrepareFileDialogContract(DialogFactory::Open, later, Id());
+        Check(replaced.request && std::get<wire::Request>(replaced.request->body).filters.size() == 2,
+            "a later native-accepted SetFileTypes after an empty one supplies the filters");
+        auto index_after_empty = Baseline(); index_after_empty.push_back(empty);
+        auto one = Text(Setting::FileTypeIndex); one.value = 1; index_after_empty.push_back(one);
+        Check(NativeReasonIs(PrepareFileDialogContract(DialogFactory::Open, index_after_empty, Id()), NativeReason::UnsupportedSettingOrder),
+            "filter index after only an empty list stays native");
+        auto failed_empty = Baseline(); auto rejected = empty; rejected.native_result = E_INVALIDARG; failed_empty.push_back(rejected);
+        Check(NativeReasonIs(PrepareFileDialogContract(DialogFactory::Open, failed_empty, Id()), NativeReason::SetterFailed),
+            "empty list rejected by native still follows native");
+    }
     calls = Baseline(); calls.push_back(index); calls.push_back(Types());
     Check(NativeReasonIs(PrepareFileDialogContract(DialogFactory::Open, calls, Id()), NativeReason::UnsupportedSettingOrder), "index before file types not silently reordered");
     for (uint32_t invalid_index : {0u, 3u}) {
@@ -340,8 +434,8 @@ int main(int argc, char** argv) {
     Check(NativeReasonIs(PrepareFileDialogContract(DialogFactory::Save, calls, Id()), NativeReason::UnsupportedOptions),
         "Save shortcut-preservation semantics remain native until separately verified");
     calls = Baseline(); calls[0].value |= FOS_PICKFOLDERS | FOS_NODEREFERENCELINKS;
-    Check(NativeReasonIs(PrepareFileDialogContract(DialogFactory::Open, calls, Id()), NativeReason::UnsupportedOptions),
-        "Folder shortcut-preservation semantics remain native until separately verified");
+    Check(RuntimeContractCertified(PrepareFileDialogContract(DialogFactory::Open, calls, Id(), AccessPolicy::LocalOpenV1)),
+        "Folder shortcut preservation retains a certified directory-only contract");
     for (const auto& pair : {std::pair{Setting::Events, NativeReason::Events}, {Setting::Customize, NativeReason::Customization},
         {Setting::Place, NativeReason::Places},
         {Setting::ClientGuid, NativeReason::Persistence}, {Setting::ClearClientData, NativeReason::Persistence},

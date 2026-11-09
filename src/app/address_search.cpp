@@ -203,6 +203,7 @@ void ShowAddressSearch(AppState& s) {
 }
 
 void SyncSearchBarWidth(AppState& s) {
+    s.renderer.SetNavigationForward(ActiveTab(s) && ActiveTab(s)->CanGoForward());
     // Editing gets room to read the whole query; a results page keeps a wider,
     // clearly active field so the query stays visible and clickable.
     const float dip = s.addressSearching ? 520.0f : IsAddressSearchResults(ActiveTab(s)) ? 360.0f : 0.0f;

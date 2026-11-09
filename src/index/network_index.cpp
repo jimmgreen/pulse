@@ -2008,7 +2008,8 @@ SearchResult MergeSearchResults(const Query& query, SearchResult local,
         unique.reserve(result.hits.size());
         for (auto& hit : result.hits) {
             if (std::any_of(unique.begin(), unique.end(), [&](const Hit& existing) {
-                return CompareStringOrdinal(existing.path.c_str(), -1, hit.path.c_str(), -1, TRUE) == CSTR_EQUAL;
+                return CompareStringOrdinal(existing.path.c_str(), -1, hit.path.c_str(), -1, TRUE) == CSTR_EQUAL &&
+                    CompareStringOrdinal(existing.recycle_path.c_str(), -1, hit.recycle_path.c_str(), -1, TRUE) == CSTR_EQUAL;
             })) {
                 if (result.total) --result.total;
             } else unique.push_back(std::move(hit));

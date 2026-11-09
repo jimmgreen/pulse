@@ -386,7 +386,7 @@ bool DecodeFolderThumbnail(const std::wstring& path, UINT pixels, std::vector<ui
     });
     uint64_t key = HashText(1469598103934665603ull, path);
     key = HashBytes(key, &cap, sizeof(cap)); key = HashBytes(key, &single, sizeof(single));
-    constexpr unsigned style = 4; key = HashBytes(key, &style, sizeof(style));
+    constexpr unsigned style = 5; key = HashBytes(key, &style, sizeof(style));
     uint64_t signature = HashBytes(key, &directory.ftLastWriteTime, sizeof(FILETIME));
     for (const auto& entry : entries) {
         signature = HashText(signature, entry.name);

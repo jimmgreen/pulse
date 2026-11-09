@@ -1,0 +1,27 @@
+Win+E direct routing audit — 2026-11-04
+
+Removed foreground geometry as a routing veto. Fullscreen and unknown geometry
+are diagnostic observations only; callback no longer queries window geometry.
+Existing setting/endpoint gates and accepted/rejected delivery ownership remain.
+
+Inspected: shell_window_sync, settings_controller IntegrationAction, app_prefs
+compat upgrade, shell_integration_registry, explorer_window_takeover,
+win_e_hotkey/foreground, app_launcher and integration_host.
+No further fullscreen/application-size veto found in these entry points.
+Compatibility observer does not disable folder direct registration.
+Retained failure guards: failed admission/launch; observer view identity,
+supported folder/readable selection, existing baseline and single-tab checks.
+These observer guards avoid closing unrelated tabs or untransferable views.
+
+Validation:
+- pulse and pulse_open_handoff_test affected targets built successfully.
+- --keyboard-queue: 118 PASS on actual desktop, including native HWND geometry,
+  accepted/rejected/repeat/release, failed post, cancellation and delivery queue.
+- Restricted initial run: 117 PASS, shell desktop lookup failed; retained log.
+  Same unmodified test passed with desktop access. No weakened assertions.
+- No actual game/anti-cheat session or physical Win+E presentation verification.
+- No user preferences, registry or taskbar pins changed during this audit.
+
+Evidence: bench_data/win-e-fullscreen-build.log,
+bench_data/win-e-fullscreen-test.log,
+bench_data/win-e-fullscreen-desktop-test.log.

@@ -6,7 +6,7 @@ namespace pulse {
 namespace ai_agent {
 
 // ------------------------------------------------------- search_files --
-// Flow A (plans/ai/Pulse_AI助手_第一批扩展.html): the model only turns the
+// Flow A: the model only turns the
 // sentence into conditions; Pulse's own search runs them in the active tab
 // (sortable, previewable, Back returns to the folder) and the 搜索条件 card
 // follows the answer. A chip's × and + 条件 search again locally: no model.

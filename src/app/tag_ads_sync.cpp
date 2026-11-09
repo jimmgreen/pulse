@@ -8,6 +8,7 @@
 #include <cwctype>
 #include <set>
 #include <memory>
+#include <shlwapi.h>
 namespace pulse::app {
 namespace {
 std::mutex mutex;
@@ -72,6 +73,23 @@ bool Save(const std::map<std::wstring, TagAdsUpdate>& records) {
     }
     return WriteUtf8FileAtomic(loaded_dir + L"\\tag_ads_pending.dat",text);
 }
+bool MissingError(DWORD error) {
+    return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+}
+bool MissingOnAccessibleVolume(const std::wstring& path, DWORD error) {
+    if (!MissingError(error)) return false;
+    auto parent = fs::NormalizePath(path);
+    while (!PathIsRootW(parent.c_str())) {
+        const auto next = fs::ParentPath(parent);
+        if (next == parent) return false;
+        parent = next;
+        const auto attributes = GetFileAttributesW(parent.c_str());
+        if (attributes != INVALID_FILE_ATTRIBUTES)
+            return (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        if (!MissingError(GetLastError())) return false;
+    }
+    return false;
+}
 }
 bool HasPendingTagAds(const std::wstring& path) {
     std::lock_guard lock(mutex); Load();
@@ -91,19 +109,31 @@ std::wstring TagAdsFailureMessage(const TagAdsFailure& failure) {
         L" " + failure.path + L" (" + stage + L", " + std::to_wstring(failure.error) + L")";
 }
 void ApplyTagAdsNotice(TagAdsNoticeState& owned, const std::vector<TagAdsFailure>& failures,
-                       std::wstring& title, std::wstring& message, bool show_new) {
+                       std::wstring& title, std::wstring& message, bool show_new,
+                       const std::wstring& current_path) {
     const bool owns_banner = !owned.message.empty() && title == owned.title && message == owned.message;
     owned = {};
-    if (failures.empty()) {
+    const auto current = Key(current_path);
+    auto directory = current;
+    if (!directory.empty() && directory.back() != L'\\') directory += L'\\';
+    const TagAdsFailure* shown = nullptr;
+    for (const auto& failure : failures) {
+        // Journal errors affect all tag edits; stream errors belong to the folder
+        // containing the file, not whichever folder happens to be active now.
+        if (!current_path.empty() && failure.stage != TagAdsFailureStage::JournalRead &&
+            failure.stage != TagAdsFailureStage::JournalWrite) {
+            const auto path = Key(failure.path);
+            if (directory.empty() || (path != current && !path.starts_with(directory))) continue;
+        }
+        if (!shown || failure.stage != TagAdsFailureStage::Pending) shown = &failure;
+    }
+    if (!shown) {
         if (owns_banner) { title.clear(); message.clear(); }
         return;
     }
     // A later unrelated notification owns its banner; a sync retry cannot erase it.
     if (!owns_banner && (!show_new || !title.empty() || !message.empty())) return;
     owned.title = l10n::Get(l10n::StringId::FileTagSync).c_str();
-    const TagAdsFailure* shown = &failures.back();
-    for (const auto& failure : failures)
-        if (failure.stage != TagAdsFailureStage::Pending) shown = &failure;
     owned.message = TagAdsFailureMessage(*shown);
     title = owned.title; message = owned.message;
 }
@@ -147,6 +177,25 @@ static std::vector<std::wstring> SyncBatch(const std::vector<TagAdsUpdate>& upda
     for (auto it = staged.begin(); it != staged.end() && attempted_count < 64;) {
         if (attempted && attempted->contains(it->first)) { ++it; continue; }
         ++attempted_count;
+        // CREATE_ALWAYS on an ADS can recreate its missing host file. Retire
+        // stale paths only after finding an accessible ancestor; offline shares
+        // and inaccessible volumes must retain their durable retry intent.
+        const HANDLE host = CreateFileW(it->second.path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if (host == INVALID_HANDLE_VALUE) {
+            const DWORD error = GetLastError();
+            if (MissingOnAccessibleVolume(it->second.path, error)) {
+                it = staged.erase(it);
+                continue;
+            }
+            report(it->second.path, TagAdsFailureStage::StreamWrite, error);
+            if (attempted && diagnostics) (*attempted)[it->first] = diagnostics->back();
+            ++it;
+            continue;
+        }
+        // Keep the host alive until the stream write finishes, even if a move
+        // or delete races this retry after the existence check.
+        const std::unique_ptr<void, decltype(&CloseHandle)> keep_host(host, CloseHandle);
         if (WriteTagAdsV2(it->second.path,it->second.tags)) it = staged.erase(it);
         else {
             const DWORD error = GetLastError();

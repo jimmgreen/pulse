@@ -3,14 +3,19 @@
 set(PULSE_PICKER_INPROCESS_SOURCES
     src/picker_inprocess/picker_ui_bootstrap.cpp
     src/picker_inprocess/picker_ui_bootstrap_v2.cpp
+    src/app/new_item_name.cpp src/app/create_rename_intent.cpp
     src/app/picker_appearance.cpp
+    src/app/frame_pump.cpp
     src/picker_inprocess/picker_ui.rc
     src/ui/folder_picker_dialog.cpp src/common/picker_owner_guard.cpp
+    src/common/picker_layout_settings.cpp
     src/ui/folder_picker_loader.cpp
     src/ui/folder_picker_model.cpp
+    src/ui/details_column_menu_model.cpp
     src/ui/folder_picker_view.cpp
     src/ui/folder_picker_art.cpp
     src/ui/folder_picker_operations.cpp
+    src/ui/drag_drop.cpp
     src/ui/file_save_model.cpp
     src/ui/file_save_revalidation.cpp
     src/ui/file_save_access_policy.cpp
@@ -26,6 +31,7 @@ set(PULSE_PICKER_INPROCESS_SOURCES
     src/ui/ui_compositor.cpp
     src/ui/window_helpers.cpp
     src/ui/window_material.cpp
+    src/ui/ui_pane_zoom_motion.cpp
     src/ui/ui_renderer.cpp
     src/ui/ui_column_strip.cpp
     src/ui/ui_address_search.cpp
@@ -54,6 +60,26 @@ set(PULSE_PICKER_INPROCESS_SOURCES
     src/ui/folder_thumbnail_cache.cpp
     src/ui/video_preview.cpp
     src/ui/ffmpeg_playback.cpp
+    src/ui/quick_preview_window.cpp
+    src/picker_inprocess/native_preview_view_unavailable.cpp
+    src/ui/quick_preview_chrome.cpp
+    src/ui/quick_preview_text_draw.cpp
+    src/ui/quick_preview_pages.cpp
+    src/ui/quick_preview_playback.cpp
+    src/ui/quick_preview_audio.cpp
+    src/ui/audio_waveform.cpp
+    src/ui/markdown_view.cpp
+    src/ui/markdown_image_metadata.cpp
+    src/ui/visible_text_renderer.cpp
+    src/ui/math_formula.cpp
+    src/ui/math_syntax.cpp
+    src/ui/math_layout.cpp
+    src/ui/math_macro.cpp
+    src/ui/math_alphabet.cpp
+    src/ui/math_font_metrics.cpp
+    src/ui/math_font_face.cpp
+    src/ui/table_view.cpp
+    src/ui/tree_view.cpp
     src/ui/preview_handler_host.cpp
     src/ui/preview_format_catalog.cpp
     src/ui/name_highlight.cpp
@@ -75,6 +101,12 @@ set(PULSE_PICKER_INPROCESS_SOURCES
     src/ui/ai_panel_view.cpp
     src/ui/ai_panel_peek.cpp
     src/ui/ai_panel_conversation.cpp
+    src/ui/ai_panel_history.cpp
+    src/ui/ai_panel_rich.cpp
+    src/ui/ai_rich_text.cpp
+    src/ui/syntax_highlight.cpp
+    src/preview_host/markdown_document.cpp
+    third_party/md4c/md4c.c
     src/ui/ai_panel_voice.cpp
     src/ui/ai_panel_icons.cpp
     src/ui/ai_list_overlay.cpp
@@ -105,6 +137,7 @@ set(PULSE_PICKER_INPROCESS_SOURCES
     src/app/tab_group_model.cpp
     src/app/cloud_roots.cpp
     src/app/entry_group.cpp
+    src/app/entry_sort.cpp
     src/app/pane_layout.cpp
     src/app/column_view_model.cpp
     src/ops/ops_manager_authorization.cpp
@@ -124,14 +157,27 @@ else()
     list(APPEND PULSE_PICKER_INPROCESS_SOURCES src/picker_inprocess/picker_ui.def)
 endif()
 add_library(pulse_picker_ui_proof SHARED EXCLUDE_FROM_ALL ${PULSE_PICKER_INPROCESS_SOURCES})
+# Ninja's RC rule does not discover nested resource includes. Recompile the
+# DLL's string tables whenever the generated catalog or its IDs change.
+set_property(SOURCE src/picker_inprocess/picker_ui.rc APPEND PROPERTY OBJECT_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/app/resource.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/common/string_ids.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/common/strings.rcinc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/common/strings_zh_tw.rcinc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/picker_inprocess/picker_ui.manifest")
 set_target_properties(pulse_picker_ui_proof PROPERTIES OUTPUT_NAME PulsePickerUiProof)
+target_compile_definitions(pulse_picker_ui_proof PRIVATE MD4C_USE_UTF16)
 target_link_libraries(pulse_picker_ui_proof PRIVATE
-    pulse_localization pulse_runtime_log pulse_fs_watch pulse_text pulse_sqlite_core
+    pulse_localization pulse_runtime_log pulse_fs_watch pulse_text pulse_sqlite_core pulse_virtual_disk
     d3d11 d2d1 dwrite dxgi dcomp dwmapi shcore ole32 oleaut32 shell32 uuid
     comctl32 advapi32 shlwapi version windowscodecs gdi32 gdiplus uxtheme
     netapi32 mpr bcrypt propsys cfgmgr32 winhttp crypt32 secur32
     mf mfplat mfreadwrite mfuuid mfplay winmm psapi)
 target_link_options(pulse_picker_ui_proof PRIVATE /MANIFEST:NO)
+# Built for size like Release pulse.exe (PULSE_SIZE_DEFAULT in CMakeLists.txt).
+if(PULSE_SIZE_DEFAULT)
+    target_compile_options(pulse_picker_ui_proof PRIVATE $<$<CONFIG:Release>:/Os /Oi- /Ob1 /Gw>)
+endif()
 pulse_enable_lumatext(pulse_picker_ui_proof)
 
 add_executable(pulse_picker_inprocess_test EXCLUDE_FROM_ALL src/bench/picker_inprocess_test.cpp)
@@ -161,7 +207,7 @@ target_link_options(pulse_luma_binding_fixture PRIVATE /DELAYLOAD:lumatext.dll)
 add_executable(pulse_luma_binding_test EXCLUDE_FROM_ALL src/bench/optional_luma_binding_test.cpp)
 
 # Keep proof-only phase diagnostics confined to the affected translation units.
-set_property(SOURCE src/ui/folder_picker_dialog.cpp src/ui/lumatext_renderer.cpp src/ui/ui_compositor.cpp src/picker_inprocess/picker_ui_bootstrap_v2.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+set_property(SOURCE src/ui/folder_picker_dialog.cpp src/ui/quick_preview_window.cpp src/ui/lumatext_renderer.cpp src/ui/ui_compositor.cpp src/picker_inprocess/picker_ui_bootstrap_v2.cpp APPEND PROPERTY COMPILE_DEFINITIONS
     "$<$<STREQUAL:$<TARGET_PROPERTY:NAME>,pulse_picker_ui_proof>:PULSE_PICKER_INPROCESS_PROOF=1>")
 add_library(pulse_module_location_fixture SHARED EXCLUDE_FROM_ALL src/bench/module_location_fixture.cpp)
 add_executable(pulse_module_location_test EXCLUDE_FROM_ALL src/bench/module_location_test.cpp)
@@ -179,3 +225,6 @@ add_executable(pulse_picker_activation_stack_test EXCLUDE_FROM_ALL src/bench/pic
 add_executable(pulse_picker_low_integrity_owner_test EXCLUDE_FROM_ALL src/bench/picker_low_integrity_owner_test.cpp)
 target_link_libraries(pulse_picker_low_integrity_owner_test PRIVATE advapi32 ole32 user32)
 
+
+add_executable(pulse_picker_native_options_ui_test EXCLUDE_FROM_ALL src/bench/picker_native_options_ui_test.cpp)
+target_link_libraries(pulse_picker_native_options_ui_test PRIVATE ole32 user32)

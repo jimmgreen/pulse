@@ -83,7 +83,7 @@ void FilenamePredicates(const std::filesystem::path& base) {
 void Handoff() {
     for (const std::wstring query : {L"ext:pdf", L"size:>1mb", L"a|b", L"\"exact name\"", L"folder:", L"path:\"C:\\original folder\" ext:pdf"}) {
         const auto original = app::SplitSearchQueryText(query);
-        for (const std::wstring folder : {L"", L"\\\\server\\share with spaces"}) {
+        for (const std::wstring folder : {L"", L"pulse:recycle", L"\\\\server\\share with spaces"}) {
             const auto path = GlobalSearchHandoffPath({query, false, folder});
             const auto transferred = app::SplitSearchQueryText(path.substr(std::wstring(L"pulse:search:").size()));
             Check(original.filename_needle == transferred.filename_needle &&

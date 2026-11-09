@@ -1,4 +1,5 @@
 #include "file_dialog_wrapper.h"
+#include "../common/picker_shell_namespace.h"
 #include "picker_shell_results.h"
 #include "file_dialog_events.h"
 #include "file_dialog_inprocess_session.h"
@@ -6,6 +7,7 @@
 #include "file_dialog_properties.h"
 #include "../common/picker_navigation.h"
 #include "../ipc/picker_client.h"
+#include "../ui/file_save_model.h"
 
 #include <shlobj.h>
 #include <propsys.h>
@@ -21,6 +23,21 @@ namespace pulse::shell_bridge {
 namespace {
 namespace wire = ipc::picker;
 using Microsoft::WRL::ComPtr;
+// The pulse.exe host's pre-UI local-save check (picker_host_mode.cpp), run by
+// the caller so a target the host would decline never crosses the pipe.
+bool BridgeSaveTargetResolves(const wire::Request& body) {
+    const auto wide = [](const std::u16string& text) { return std::wstring(text.begin(), text.end()); };
+    ui::SaveTargetRequest target;
+    target.directory = wide(body.initial_directory);
+    target.filename = body.filename.empty() ? L"pulse-validation" : wide(body.filename);
+    for (const auto& filter : body.filters) target.filters.push_back({wide(filter.label), wide(filter.pattern)});
+    target.filter_index = body.filter_index;
+    target.default_extension = wide(body.default_extension);
+    target.native_save_defaults = (body.options & wire::SaveNativeDefaults) != 0;
+    target.no_test_file_create = (body.options & wire::SaveNoTestFileCreate) != 0;
+    target.require_existing_save_parent = (body.options & wire::SaveRequireExistingParent) != 0;
+    return ui::ResolveSaveTarget(target).state == ui::SaveTargetState::Resolved;
+}
 class FileDialog final : public IFileOpenDialog, public IFileSaveDialog, public IFileDialogCustomize, public IFileDialog2, public IOleWindow {
 public:
     FileDialog(DialogFactory factory, ComPtr<IFileDialog> native, ComPtr<IFileDialog2> native2, FileDialogBridgeServices services)
@@ -68,7 +85,7 @@ public:
         readonly_properties_result_ = false;
         properties_accepted_ = false;
         if (properties_owned_) { const HRESULT reset = properties_.ResetEdits(); if (FAILED(reset)) return reset; }
-        close_result_ = S_OK; close_requested_ = false; inprocess_used_ = false; allow_missing_result_ = false;
+        close_result_ = S_OK; close_requested_ = false; inprocess_used_ = false; allow_missing_result_ = false; result_native_options_ = 0;
         try {
             if (services_.resolve_on_show) {
                 auto resolve = std::move(services_.resolve_on_show);
@@ -85,7 +102,7 @@ public:
                 services_ = std::move(resolved);
                 // Deferred capture is not authorization. IPC cannot represent
                 // the retained event/custom-control contract.
-                if (!services_.inprocess_provider && (!subscriptions_.empty() || !custom_controls_.empty()))
+                if (!services_.inprocess_provider && !services_.load_inprocess_provider && (!subscriptions_.empty() || !custom_controls_.empty()))
                     MarkNativeOnly("deferred-contract-needs-inprocess");
                 ObserveNativeReason("deferred-services-bound-at-show");
             }
@@ -97,57 +114,101 @@ public:
             for (size_t i = 0; i < 2; ++i) { id[4 + i] = static_cast<uint8_t>(guid.Data2 >> (i * 8)); id[6 + i] = static_cast<uint8_t>(guid.Data3 >> (i * 8)); }
             for (size_t i = 0; i < 8; ++i) id[8 + i] = guid.Data4[i];
             const auto policy = factory_ == DialogFactory::Save ? services_.save_access_policy : services_.access_policy;
-            PreparationContext context;
-            context.save_properties_owned = properties_owned_ && services_.inprocess_provider &&
-                (services_.inprocess_provider->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_PROPERTIES);
-            context.client_state_owned = services_.inprocess_provider && static_cast<bool>(client_state_);
-            context.filesystem_places_owned = services_.inprocess_provider &&
-                (services_.inprocess_provider->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_FILESYSTEM_PLACES);
-            if (context.client_state_owned && client_guid_ && !explicit_folder_) {
+            const auto provided = [&](uint32_t feature) {
+                return services_.inprocess_provider && (services_.inprocess_provider->api.implemented_features & feature);
+            };
+            // pulse.exe route: basic dialogs only; everything retained for
+            // events, custom controls, properties or places stays in-process.
+            const bool bridge_route = services_.prefer_bridge && (services_.run_bridge || !services_.executable.empty()) &&
+                subscriptions_.empty() && custom_controls_.empty() && !custom_group_ && !properties_owned_ && places_.empty();
+            // The pulse.exe host carries local-save access and caller-validated
+            // Open/Save over the pipe; native extended options, places,
+            // properties and missing-file Open remain provider features.
+            const auto make_context = [&](bool bridge) {
+                PreparationContext c;
+                c.native_options_supported = !bridge && provided(PULSE_PICKER_UI_V2_FEATURE_NATIVE_OPTIONS);
+                c.save_properties_owned = !bridge && properties_owned_ && provided(PULSE_PICKER_UI_V2_FEATURE_PROPERTIES);
+                c.client_state_owned = (bridge || services_.inprocess_provider) && static_cast<bool>(client_state_);
+                c.filesystem_places_owned = !bridge && provided(PULSE_PICKER_UI_V2_FEATURE_FILESYSTEM_PLACES);
+                c.native_save_defaults_supported = bridge || provided(PULSE_PICKER_UI_V2_FEATURE_SAVE_NATIVE_DEFAULTS);
+                c.save_no_test_create_supported = bridge || provided(PULSE_PICKER_UI_V2_FEATURE_SAVE_NO_TEST_CREATE);
+                c.save_caller_validation_supported = bridge || provided(PULSE_PICKER_UI_V2_FEATURE_SAVE_SKIP_ACCESS);
+                c.open_missing_supported = !bridge && provided(PULSE_PICKER_UI_V2_FEATURE_OPEN_MISSING);
+                c.caller_validation_supported = bridge || provided(PULSE_PICKER_UI_V2_FEATURE_OPEN_SKIP_ACCESS);
+                return c;
+            };
+            if ((bridge_route || services_.inprocess_provider) && client_state_ && client_guid_ && !explicit_folder_) {
                 if (auto remembered = client_state_->Read(*client_guid_)) {
                     ComPtr<IShellItem> folder;
                     if (SHCreateItemFromParsingName(remembered->c_str(), nullptr, IID_PPV_ARGS(&folder)) == S_OK)
                         native_->SetFolder(folder.Get());
                 }
             }
-            context.native_save_defaults_supported = services_.inprocess_provider &&
-                (services_.inprocess_provider->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_SAVE_NATIVE_DEFAULTS);
-            context.save_no_test_create_supported = services_.inprocess_provider &&
-                (services_.inprocess_provider->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_SAVE_NO_TEST_CREATE);
-            context.save_caller_validation_supported = services_.inprocess_provider &&
-                (services_.inprocess_provider->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_SAVE_SKIP_ACCESS);
-            context.open_missing_supported = services_.inprocess_provider &&
-                (services_.inprocess_provider->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_OPEN_MISSING);
-            context.caller_validation_supported = services_.inprocess_provider &&
-                (services_.inprocess_provider->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_OPEN_SKIP_ACCESS);
             // Only the new explicit policy resolves the mirrored native starting folder.
             // GetFolder is documented before Show; it does not display a dialog.
-            if (((policy == AccessPolicy::LocalOpenV1 && factory_ == DialogFactory::Open) ||
-                (policy == AccessPolicy::LocalSaveV1 && factory_ == DialogFactory::Save)) && !native_only_) {
+            // False: the folder cannot be represented for this route.
+            const auto resolve_initial = [&](PreparationContext& c) {
+                if (!(((policy == AccessPolicy::LocalOpenV1 && factory_ == DialogFactory::Open) ||
+                    (policy == AccessPolicy::LocalSaveV1 && factory_ == DialogFactory::Save)) && !native_only_)) return true;
                 ComPtr<IShellItem> folder;
                 PWSTR path = nullptr;
                 SFGAOF attributes = SFGAO_FILESYSTEM | SFGAO_FOLDER;
                 const HRESULT folder_hr = native_->GetFolder(&folder);
                 if (SUCCEEDED(folder_hr) && folder && SUCCEEDED(folder->GetAttributes(attributes, &attributes)) &&
-                    (attributes & (SFGAO_FILESYSTEM | SFGAO_FOLDER)) == (SFGAO_FILESYSTEM | SFGAO_FOLDER) &&
-                    SUCCEEDED(folder->GetDisplayName(SIGDN_FILESYSPATH, &path))) {
+                    (attributes & SFGAO_FOLDER) &&
+                    ((attributes & SFGAO_FILESYSTEM) || c.native_options_supported) &&
+                    SUCCEEDED(folder->GetDisplayName((attributes & SFGAO_FILESYSTEM) ? SIGDN_FILESYSPATH : SIGDN_DESKTOPABSOLUTEPARSING, &path))) {
                     std::u16string resolved;
                     bool copied = false;
                     try { copied = CopyText(path, resolved); }
                     catch (...) { CoTaskMemFree(path); throw; }
                     CoTaskMemFree(path);
-                    if (copied) context.resolved_initial_directory = std::move(resolved);
-                    else {
+                    if (!copied) return false;
+                    c.resolved_initial_directory = std::move(resolved);
+                    return true;
+                }
+                CoTaskMemFree(path);
+                return false;
+            };
+            std::optional<wire::Message> bridge_request;
+            ContractDecision decision;
+            if (bridge_route) {
+                auto c = make_context(true);
+                if (resolve_initial(c)) {
+                    auto candidate = PrepareFileDialogContract(factory_, calls_, id, policy, c);
+                    if (!native_only_ && candidate.disposition == Disposition::Prepared && candidate.request &&
+                        services_.validation_verified && services_.validation_verified(candidate)) {
+                        bridge_request = BridgeRequestFor(candidate);
+                        // A host answer after the pipe is crossed is terminal, so
+                        // run the host's local-save target check here first: a
+                        // target it would decline keeps the in-process route.
+                        if (bridge_request && candidate.supported_access_policy == AccessPolicy::LocalSaveV1 &&
+                            !BridgeSaveTargetResolves(std::get<wire::Request>(bridge_request->body))) bridge_request.reset();
+                        if (bridge_request) decision = std::move(candidate);
+                    }
+                }
+                ObserveNativeReason(bridge_request ? "bridge-route-selected" : "bridge-route-declined");
+            }
+            if (!bridge_request) {
+                if (!services_.inprocess_provider && services_.load_inprocess_provider && !native_only_) {
+                    // Deferred provider: only a Show that leaves the pulse.exe
+                    // route loads the in-process UI; failure keeps it native.
+                    std::shared_ptr<const FileDialogInprocessProvider> loaded;
+                    try { loaded = services_.load_inprocess_provider(); } catch (...) {}
+                    ObserveNativeReason(loaded ? "provider-loaded-on-demand" : "provider-load-on-demand-failed");
+                    if (!loaded) {
                         shown_ = true;
                         return services_.show_native ? services_.show_native(native_.Get(), owner) : native_->Show(owner);
                     }
-                } else {
-                    CoTaskMemFree(path);
+                    services_.inprocess_provider = std::move(loaded);
+                }
+                auto context = make_context(false);
+                if (!resolve_initial(context)) {
                     shown_ = true;
                     return services_.show_native ? services_.show_native(native_.Get(), owner) : native_->Show(owner);
                 }
+                decision = PrepareFileDialogContract(factory_, calls_, id, policy, context);
             }
-            const auto decision = PrepareFileDialogContract(factory_, calls_, id, policy, context);
             if (services_.observe_contract) {
                 try { services_.observe_contract(decision, native_only_, shown_, subscriptions_.size()); }
                 catch (...) {} // A diagnostic failure must not change dialog behavior.
@@ -156,12 +217,14 @@ public:
                 services_.validation_verified && services_.validation_verified(decision);
             shown_ = true;
             const bool local_save = decision.supported_access_policy == AccessPolicy::LocalSaveV1;
-            if (local_save && !services_.inprocess_provider)
+            // The v1 pipe without bridge_request cannot carry local save or labels.
+            if (local_save && !services_.inprocess_provider && !bridge_request)
                 return services_.show_native ? services_.show_native(native_.Get(), owner) : native_->Show(owner);
-            if ((decision.title || decision.ok_button_label || decision.file_name_label || decision.open_default_extension || decision.require_unencrypted_save) && !services_.inprocess_provider)
+            if ((decision.title || decision.ok_button_label || decision.file_name_label || decision.open_default_extension || decision.require_unencrypted_save) &&
+                !services_.inprocess_provider && !bridge_request)
                 return services_.show_native ? services_.show_native(native_.Get(), owner) : native_->Show(owner);
             if (!eligible) return services_.show_native ? services_.show_native(native_.Get(), owner) : native_->Show(owner);
-            if (services_.inprocess_provider && !custom_group_) {
+            if (services_.inprocess_provider && !custom_group_ && !bridge_request) {
                 if (factory_ != DialogFactory::Open && !local_save)
                     return services_.show_native ? services_.show_native(native_.Get(), owner) : native_->Show(owner);
                 DWORD owner_pid = 0;
@@ -196,11 +259,13 @@ public:
                     session.reset();
                     return services_.show_native ? services_.show_native(native_.Get(), owner) : native_->Show(owner);
                 }
+                result_native_options_ = decision.effective_options.value_or(0);
                 inprocess_ = std::move(session); inprocess_used_ = true; bridge_result_ = true;
                 allow_missing_result_ = decision.allow_missing_open || decision.no_test_file_create;
                 PulsePickerUiV2Callbacks callbacks{}; callbacks.size = sizeof(callbacks);
                 callbacks.context = this; callbacks.callback = InprocessEvent;
                 if (local_save) callbacks.overwrite = InprocessOverwrite;
+                if (result_native_options_ & FOS_SHAREAWARE) callbacks.share_violation = InprocessShareViolation;
                 PulsePickerUiV2Result result{}; std::wstring path;
                 inprocess_callback_seen_ = false;
                 const HRESULT shown = inprocess_->Show(callbacks, result, path);
@@ -216,7 +281,7 @@ public:
                     return services_.show_native ? services_.show_native(native_.Get(), owner) : native_->Show(owner);
                 }
                 if (FAILED(shown) || result.status != PULSE_PICKER_UI_V2_ACCEPTED) return shown;
-                const HRESULT materialized = CreatePickerShellItemArray(ResultOperation(), inprocess_->AcceptedPaths(), &items_, allow_missing_result_);
+                const HRESULT materialized = CreatePickerShellItemArray(ResultOperation(), inprocess_->AcceptedPaths(), &items_, allow_missing_result_, result_native_options_);
                 if (FAILED(materialized)) return materialized;
                 const HRESULT first = items_->GetItemAt(0, &item_);
                 if (FAILED(first)) { items_.Reset(); return first; }
@@ -244,7 +309,7 @@ public:
             bridge_result_ = true;
             cancel_.Reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
             if (!cancel_) return HRESULT_FROM_WIN32(GetLastError());
-            const auto& request = *decision.request;
+            const auto& request = bridge_request ? *bridge_request : *decision.request;
             const auto response = services_.run_bridge ? services_.run_bridge(request, owner, cancel_.Get()) :
                 wire::RunPickerClient(services_.executable, request, owner, cancel_.Get());
             cancel_.Reset();
@@ -273,6 +338,23 @@ public:
             result_index_ = result.filter_index + 1;
             result_count_ = paths.size();
             items_ = std::move(items); item_ = std::move(item);
+            if (bridge_request) {
+                // As the in-process route after acceptance: every result goes
+                // to Recent unless excluded, and the client folder is remembered.
+                result_native_options_ = decision.effective_options.value_or(0);
+                readonly_properties_result_ = decision.require_unencrypted_save;
+                if (decision.effective_options && !(*decision.effective_options & FOS_DONTADDTORECENT)) {
+                    for (DWORD i = 0; i < result_count_; ++i) { ComPtr<IShellItem> recent; if (SUCCEEDED(items_->GetItemAt(i, &recent))) SHAddToRecentDocs(SHARD_SHELLITEM, recent.Get()); }
+                }
+                if (client_state_ && client_guid_) {
+                    ComPtr<IShellItem> parent;
+                    PWSTR folder = nullptr;
+                    if (item_->GetParent(&parent) == S_OK && parent->GetDisplayName(SIGDN_FILESYSPATH, &folder) == S_OK &&
+                        !client_state_->Write(*client_guid_, folder)) ObserveNativeReason("client-state-write-failed");
+                    CoTaskMemFree(folder);
+                }
+                return S_OK;
+            }
             if (decision.supported_access_policy == AccessPolicy::LocalOpenV1 && decision.effective_options &&
                 !(*decision.effective_options & FOS_DONTADDTORECENT)) {
                 // Caller-side attribution. This void public API has no HRESULT;
@@ -379,7 +461,7 @@ public:
         if (inprocess_) {
             if (!folder) return E_INVALIDARG;
             PWSTR text = nullptr;
-            const HRESULT extracted = folder->GetDisplayName(SIGDN_FILESYSPATH, &text);
+            const HRESULT extracted = folder->GetDisplayName(picker_shell::Enabled(result_native_options_) ? SIGDN_DESKTOPABSOLUTEPARSING : SIGDN_FILESYSPATH, &text);
             if (FAILED(extracted)) return extracted;
             std::wstring path;
             try { path = text ? text : L""; } catch (...) { CoTaskMemFree(text); return E_OUTOFMEMORY; }
@@ -397,9 +479,9 @@ public:
         PWSTR path = nullptr;
         SFGAOF attributes = SFGAO_FILESYSTEM | SFGAO_FOLDER;
         if (SUCCEEDED(call.native_result) && folder && SUCCEEDED(folder->GetAttributes(attributes, &attributes)) &&
-            (attributes & (SFGAO_FILESYSTEM | SFGAO_FOLDER)) == (SFGAO_FILESYSTEM | SFGAO_FOLDER) &&
-            SUCCEEDED(folder->GetDisplayName(SIGDN_FILESYSPATH, &path))) {
-            try { call.filesystem_folder = CopyText(path, call.text); }
+            (attributes & SFGAO_FOLDER) &&
+            SUCCEEDED(folder->GetDisplayName((attributes & SFGAO_FILESYSTEM) ? SIGDN_FILESYSPATH : SIGDN_DESKTOPABSOLUTEPARSING, &path))) {
+            try { const bool copied = CopyText(path, call.text); call.filesystem_folder = copied && (attributes & SFGAO_FILESYSTEM); }
             catch (...) { CoTaskMemFree(path); MarkNativeOnly("folder-snapshot-allocation"); return E_OUTOFMEMORY; }
         }
         CoTaskMemFree(path);
@@ -886,7 +968,7 @@ private:
                 return SHGetKnownFolderItem(FOLDERID_ComputerFolder, KF_FLAG_DEFAULT, nullptr, IID_PPV_ARGS(item));
             if (path.empty()) return DiagnosticResult("getter-ShellItem-empty", E_FAIL);
             if (part == SnapshotPart::Candidate && (!(snapshot.flags & PULSE_PICKER_UI_V2_STATE_CANDIDATE_READY) || snapshot.candidates.size() != 1)) return E_UNEXPECTED;
-            return CreatePickerShellItem(part == SnapshotPart::Folder ? wire::Operation::PickFolder : ResultOperation(), path, item, part != SnapshotPart::Folder && allow_missing_result_);
+            return CreatePickerShellItem(part == SnapshotPart::Folder ? wire::Operation::PickFolder : ResultOperation(), path, item, part != SnapshotPart::Folder && allow_missing_result_, result_native_options_);
         } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; } catch (...) { return E_FAIL; }
     }
     HRESULT SnapshotArray(bool result, IShellItemArray** items) {
@@ -897,7 +979,7 @@ private:
             if (result && !(snapshot.flags & PULSE_PICKER_UI_V2_STATE_CANDIDATE_READY)) return E_UNEXPECTED;
             const auto& paths = result ? snapshot.candidates : snapshot.selections;
             if (paths.empty()) return E_FAIL;
-            return CreatePickerShellItemArray(ResultOperation(), paths, items, allow_missing_result_);
+            return CreatePickerShellItemArray(ResultOperation(), paths, items, allow_missing_result_, result_native_options_);
         } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; } catch (...) { return E_FAIL; }
     }
     static HRESULT WINAPI InprocessOverwrite(void* context, const PulsePickerUiV2OverwriteEvent* event, uint32_t* response) noexcept {
@@ -943,6 +1025,57 @@ private:
             if (native_response == FDEOR_DEFAULT) *response = PULSE_PICKER_UI_V2_OVERWRITE_DEFAULT;
             else if (native_response == FDEOR_ACCEPT) *response = PULSE_PICKER_UI_V2_OVERWRITE_ACCEPT;
             else if (native_response == FDEOR_REFUSE) *response = PULSE_PICKER_UI_V2_OVERWRITE_REFUSE;
+            else return E_UNEXPECTED;
+            return S_OK; // First handled response wins, including DEFAULT.
+        }
+        return S_OK; // All E_NOTIMPL leaves the initialized DEFAULT response.
+
+    }
+    static HRESULT WINAPI InprocessShareViolation(void* context, const PulsePickerUiV2OverwriteEvent* event, uint32_t* response) noexcept {
+        auto* self = static_cast<FileDialog*>(context);
+        self->inprocess_callback_seen_ = true;
+        if (!response) return E_POINTER;
+        *response = PULSE_PICKER_UI_V2_OVERWRITE_DEFAULT;
+        try { return event ? self->DispatchShareViolation(*event, response) : E_INVALIDARG; }
+        catch (const std::bad_alloc&) { return E_OUTOFMEMORY; } catch (...) { return E_FAIL; }
+    }
+    HRESULT DispatchShareViolation(const PulsePickerUiV2OverwriteEvent& event, uint32_t* response) {
+        if (FAILED(Thread()) || !inprocess_) return RPC_E_WRONG_THREAD;
+        if (!(result_native_options_ & FOS_SHAREAWARE)) return E_NOTIMPL;
+        const HRESULT observed = inprocess_->ObserveShareViolation(event);
+        DiagnosticResult("inprocess-share-violation-observe", observed);
+        if (FAILED(observed)) return observed;
+        struct Exit { FileDialogInprocessSession* session; ~Exit() { session->LeaveEvent(); } } exit{inprocess_.get()};
+        if (subscriptions_.empty()) return S_OK;
+        struct Entry { DWORD cookie; ComPtr<IFileDialogEvents> proxy; uint64_t order; };
+        std::vector<Entry> subscriptions;
+        for (const auto& [cookie, value] : subscriptions_) subscriptions.push_back({cookie, value.proxy, value.order});
+        std::sort(subscriptions.begin(), subscriptions.end(), [](const Entry& a, const Entry& b) { return a.order < b.order; });
+        const std::wstring target(event.target.data, event.target.units);
+        FileDialogInprocessSnapshot snapshot;
+        const HRESULT queried = inprocess_->Read(snapshot);
+        if (FAILED(queried)) return queried;
+        if (std::find(snapshot.candidates.begin(), snapshot.candidates.end(), target) == snapshot.candidates.end()) return E_UNEXPECTED;
+        ComPtr<IShellItem> item;
+        // The target already exists but is locked. Re-running Save validation
+        // here would reject it before the caller receives OnShareViolation.
+        const HRESULT materialized = CreatePickerShellItem(wire::Operation::OpenFiles, target, &item, false, result_native_options_);
+        if (FAILED(materialized)) return materialized;
+        for (const auto& subscription : subscriptions) {
+            const auto current = subscriptions_.find(subscription.cookie);
+            if (current == subscriptions_.end() || current->second.order != subscription.order) continue;
+            FDE_SHAREVIOLATION_RESPONSE native_response = FDESVR_DEFAULT;
+            const HRESULT hr = subscription.proxy->OnShareViolation(Identity(), item.Get(), &native_response);
+            char diagnostic[160]{};
+            std::snprintf(diagnostic, sizeof(diagnostic), "inprocess-share-violation-sink order=%llu rawhr=0x%08lX response=%u",
+                subscription.order, static_cast<unsigned long>(hr), static_cast<unsigned>(native_response));
+            ObserveNativeReason(diagnostic);
+            if (inprocess_->Closed()) { *response = PULSE_PICKER_UI_V2_OVERWRITE_REFUSE; return S_OK; }
+            if (hr == E_NOTIMPL) continue;
+            if (hr != S_OK) return hr;
+            if (native_response == FDESVR_DEFAULT) *response = PULSE_PICKER_UI_V2_OVERWRITE_DEFAULT;
+            else if (native_response == FDESVR_ACCEPT) *response = PULSE_PICKER_UI_V2_OVERWRITE_ACCEPT;
+            else if (native_response == FDESVR_REFUSE) *response = PULSE_PICKER_UI_V2_OVERWRITE_REFUSE;
             else return E_UNEXPECTED;
             return S_OK; // First handled response wins, including DEFAULT.
         }
@@ -1050,7 +1183,7 @@ private:
             const std::wstring path(event.proposed_folder.data, event.proposed_folder.units);
             hr = picker_navigation::IsComputerPath(path) ?
                 SHGetKnownFolderItem(FOLDERID_ComputerFolder, KF_FLAG_DEFAULT, nullptr, IID_PPV_ARGS(&proposed)) :
-                CreatePickerShellItem(wire::Operation::PickFolder, path, &proposed);
+                CreatePickerShellItem(wire::Operation::PickFolder, path, &proposed, false, result_native_options_);
             if (FAILED(hr)) return hr;
         }
         for (const auto& entry : snapshot) {
@@ -1249,7 +1382,8 @@ private:
         catch (...) { return E_FAIL; }
     }
     bool CanCaptureInprocess() const noexcept {
-        return services_.inprocess_provider || static_cast<bool>(services_.resolve_on_show);
+        return services_.inprocess_provider || static_cast<bool>(services_.resolve_on_show) ||
+            static_cast<bool>(services_.load_inprocess_provider);
     }
     FileDialogCustomControl* FindCustom(DWORD id) {
         for (auto& control : custom_controls_) if (control.id == id) return &control;
@@ -1562,6 +1696,7 @@ private:
     std::unique_ptr<FileDialogInprocessSession> inprocess_;
     bool inprocess_used_ = false;
     bool inprocess_callback_seen_ = false;
+    uint32_t result_native_options_ = 0;
     bool allow_missing_result_ = false;
     std::shared_ptr<FileDialogClientState> client_state_;
     std::optional<GUID> client_guid_;

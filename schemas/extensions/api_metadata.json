@@ -1,0 +1,80 @@
+{
+  "formatVersion": 1,
+  "byteLimits": {
+    "manifestBytes": 65536,
+    "idBytes": 64,
+    "labelBytes": 128
+  },
+  "developerFeatures": [
+    "nativePackages"
+  ],
+  "developmentNotes": [
+    "Native DLL packages run in the Pulse process after explicit enablement.",
+    "Resource declarations disclose package capabilities during installation; they do not authorize individual calls or sandbox native code.",
+    "The broker retains operation names, request shape, snapshot freshness, task ownership and file-operation confirmation checks."
+  ],
+  "resourceApi": {
+    "version": 1,
+    "entryPoint": "ResourceService::Call",
+    "transport": "Native host broker; operation names describe the internal request protocol, not an executable MCP entry.",
+    "operations": [
+      {
+        "op": "context.get",
+        "resourceDeclaration": "context.read"
+      },
+      {
+        "op": "files.list",
+        "resourceDeclaration": "files.readCurrentDirectory"
+      },
+      {
+        "op": "files.stat",
+        "resourceDeclaration": "files.readCurrentDirectory"
+      },
+      {
+        "op": "operations.get",
+        "resourceDeclaration": "operations.own"
+      },
+      {
+        "op": "operations.cancel",
+        "resourceDeclaration": "operations.own"
+      },
+      {
+        "op": "settings.get",
+        "resourceDeclaration": "settings.own"
+      },
+      {
+        "op": "settings.set",
+        "resourceDeclaration": "settings.own"
+      },
+      {
+        "op": "audit.list",
+        "resourceDeclaration": "audit.own"
+      },
+      {
+        "op": "files.prepareRename",
+        "resourceDeclaration": "files.renameCurrentDirectory"
+      },
+      {
+        "op": "files.commitRename",
+        "resourceDeclaration": "files.renameCurrentDirectory"
+      }
+    ],
+    "limits": {
+      "opaqueTokenLifetimeSeconds": 300,
+      "settingsKeys": 64,
+      "settingsBytes": 16384,
+      "auditOwnRecords": 128,
+      "auditGlobalRecords": 1024
+    },
+    "notes": [
+      "Opaque file cursors and entries are principal/owner/current-snapshot bound, valid five minutes; no path or claimed caller is accepted.",
+      "Settings are persistent per package and use expectedVersion compare-and-swap; null deletes a key.",
+      "Audit exposes only this principal session records and does not record request payloads or paths.",
+      "operations.get/cancel act only on owned task IDs. Resource discovery does not expose a caller-supplied identity or executable MCP resource tool."
+    ],
+    "responseSchema": {
+      "$ref": "resource-response.schema.json"
+    },
+    "resourceDeclarationPolicy": "Installation disclosure only; native code runs in process without per-call permission gates."
+  }
+}

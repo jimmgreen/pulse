@@ -6,10 +6,14 @@
 #include "app_messages.h"
 #include "../common/path_utils.h"
 #include "../fs/fs_enum.h"
+#include "window_registry.h"
+#include "shell_window_sync.h"
+#include "../common/utf8_file.h"
 #include <objbase.h>
 #include <filesystem>
 #include <algorithm>
 #include <vector>
+#include <fstream>
 
 namespace pulse {
 namespace {
@@ -57,6 +61,87 @@ std::string Utf8(const std::wstring& value) {
         result.data(), count, nullptr, nullptr);
     return result;
 }
+struct LiveShellProbe {
+    std::wstring directory;
+    std::string last_report;
+};
+LiveShellProbe& LiveShell() { static LiveShellProbe probe; return probe; }
+bool InitializeLiveShell(AppState& state) {
+    if (state.isolatedTest || Environment(L"PULSE_TEST_LIVE_SHELL_ENTRY") != L"1") return false;
+    wchar_t executable[32768]{};
+    if (!GetModuleFileNameW(nullptr, executable, ARRAYSIZE(executable))) return false;
+    const auto directory = Canonical(Environment(L"PULSE_TEST_DATA_DIR"), true);
+    const auto bench = Canonical(std::filesystem::path(executable).parent_path().parent_path() / L"bench_data", true);
+    if (directory.empty() || bench.empty() ||
+        !Same(Canonical(std::filesystem::path(directory).parent_path(), true), bench) ||
+        !std::filesystem::path(directory).filename().wstring().starts_with(L"shell-entry-live-")) return false;
+    LiveShell().directory = directory;
+    // This is a normal singleton and real external-open endpoint, using only
+    // the explicitly supplied fixture profile. Registration is driven outside.
+    state.appPrefs.persist = false;
+    state.appPrefs.auto_check_updates = false;
+    return true;
+}
+void LiveShellControl(AppState& state) {
+    const auto& live = LiveShell();
+    if (live.directory.empty()) return;
+    std::ifstream input(std::filesystem::path(live.directory) / L"live-control.txt");
+    int mode = -1, compat = 0, enabled = 0, pc_mode = state.appPrefs.open_this_pc;
+    int folders = state.appPrefs.open_folders_in_pulse ? 1 : 0;
+    if (!(input >> mode >> compat >> enabled) || mode < 0 || mode > 2) return;
+    if (input >> pc_mode) { if (pc_mode < 0 || pc_mode > 2) return; }
+    if (input >> folders) { if (folders < 0 || folders > 1) return; }
+    const bool registered_win_e = state.appPrefs.ReadWinE();
+    const bool changed = state.appPrefs.take_over_win_e != registered_win_e || state.appPrefs.open_win_e != mode ||
+        state.appPrefs.open_this_pc != pc_mode ||
+        state.appPrefs.open_folders_in_pulse != (folders != 0) ||
+        state.appPrefs.integration_enabled != (enabled != 0) ||
+        state.appPrefs.integration_folders_compat != (compat != 0);
+    state.appPrefs.open_win_e = mode;
+    state.appPrefs.take_over_win_e = registered_win_e;
+    state.appPrefs.open_this_pc = pc_mode;
+    state.appPrefs.open_folders_in_pulse = folders != 0;
+    state.appPrefs.integration_enabled = enabled != 0;
+    state.appPrefs.integration_folders_compat = compat != 0;
+    state.appPrefs.take_over_explorer_windows = false;
+    if (changed) { SyncShellWindows(state); InvalidateRect(state.hwnd, nullptr, FALSE); }
+}
+void LiveShellPresented(AppState& state) {
+    auto& live = LiveShell();
+    if (live.directory.empty()) return;
+    std::string report = "PID\t" + std::to_string(GetCurrentProcessId()) + "\nPRESENTED\t" +
+        std::to_string(reinterpret_cast<uintptr_t>(state.hwnd)) + "\n";
+    state.core.windows.ForEach([&](HWND hwnd, const AppState& window) {
+        const auto* tab = ActiveTab(const_cast<AppState&>(window));
+        report += "WINDOW\t" + std::to_string(reinterpret_cast<uintptr_t>(hwnd)) + "\t" +
+            std::to_string(window.window_tabs.items.size()) + "\t" +
+            std::to_string(tab ? tab->pending_generation : 0) + "\t" +
+            std::to_string(tab ? tab->applied_generation : 0) + "\t" +
+            (tab ? Utf8(tab->current_path) : "<no-tab>") + "\n";
+        if (tab) {
+            const auto selected = tab->SelectedIndices();
+            report += "SELECTION\t" + std::to_string(reinterpret_cast<uintptr_t>(hwnd)) + "\t" +
+                std::to_string(selected.size()) + "\n";
+            for (const int index : selected) {
+                if (index >= 0 && static_cast<size_t>(index) < tab->EntryCount())
+                    report += "SELECTED\t" + std::to_string(reinterpret_cast<uintptr_t>(hwnd)) + "\t" +
+                        Utf8(tab->EntryAt(index).name) + "\n";
+            }
+        }
+    });
+    report += "MODE\t" + std::to_string(state.appPrefs.open_win_e) + "\t" +
+        std::to_string(state.appPrefs.integration_folders_compat) + "\t" +
+        std::to_string(state.appPrefs.integration_enabled) + "\t" + std::to_string(state.appPrefs.open_this_pc) + "\n";
+    report += "WINE\t" + std::to_string(state.appPrefs.integration_win_e) + "\t" +
+        std::to_string(state.appPrefs.take_over_win_e) + "\t" +
+        std::to_string(state.core.win_e_hotkey && state.core.win_e_hotkey->Active()) + "\n";
+    report += "FOLDERS\t" + std::to_string(state.appPrefs.open_folders_in_pulse) + "\t" +
+        std::to_string(state.shell_windows && state.shell_windows->Running()) + "\n";
+    std::wstring wide_report;
+    if (report != live.last_report && DecodeUtf8Bytes(std::vector<uint8_t>(report.begin(), report.end()), wide_report) &&
+        WriteUtf8FileAtomic(live.directory + L"\\live-state.tsv", wide_report))
+        live.last_report = std::move(report);
+}
 void Finish(AppState& state, Probe& probe, bool presented) {
     if (probe.finished) return;
     probe.finished = true;
@@ -81,6 +166,7 @@ void Finish(AppState& state, Probe& probe, bool presented) {
 }
 
 void InitializeEntryCommandProbe(AppState& state) {
+    if (InitializeLiveShell(state)) return;
     if (!state.isolatedTest || state.shot.active || state.menushot) return;
     const auto nonce = Environment(app::entry_probe::kEnvironment);
     if (nonce.empty()) return;
@@ -132,6 +218,7 @@ void InitializeEntryCommandProbe(AppState& state) {
 }
 
 void EntryCommandProbePresented(AppState& state) {
+    LiveShellPresented(state);
     auto& probe = Current();
     if (!probe.enabled || probe.finished || probe.window != state.hwnd) return;
     ++probe.observed_frames;
@@ -167,6 +254,7 @@ void EntryCommandProbePresented(AppState& state) {
 }
 
 void TickEntryCommandProbe(AppState& state) {
+    LiveShellControl(state);
     auto& probe = Current();
     if (probe.enabled && !probe.finished && probe.window == state.hwnd && GetTickCount64() - probe.since >= 25000)
         Finish(state, probe, false);

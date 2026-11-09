@@ -12,12 +12,10 @@ std::vector<std::shared_future<void>> MainRenderer::SuspendVolume(const std::wst
         hover_video_failed_ = false;
         hover_frame_serial_ = ~0ull;
     }
-    pending.push_back(preview_handler_.SuspendVolume(root));
     return pending;
 }
 void MainRenderer::ResumeVolume(const std::wstring& root) {
     std::erase(suspended_volumes_, root);
-    preview_handler_.ResumeVolume(root);
 }
 std::vector<std::shared_future<void>> QuickPreviewWindow::SuspendVolume(const std::wstring& root) {
     if (std::find(suspended_volumes_.begin(), suspended_volumes_.end(), root) == suspended_volumes_.end())

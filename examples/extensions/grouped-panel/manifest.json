@@ -1,0 +1,122 @@
+{
+  "apiVersion": 1,
+  "id": "example.grouped-panel",
+  "name": "分组工具面板",
+  "commands": [
+    {
+      "id": "extra-large",
+      "title": "超大图标",
+      "capability": "view.setMode",
+      "args": {
+        "mode": "extra_large_icons"
+      }
+    },
+    {
+      "id": "large",
+      "title": "大图标",
+      "capability": "view.setMode",
+      "args": {
+        "mode": "large_icons"
+      }
+    },
+    {
+      "id": "medium",
+      "title": "中等图标",
+      "capability": "view.setMode",
+      "args": {
+        "mode": "medium_icons"
+      }
+    },
+    {
+      "id": "small",
+      "title": "小图标",
+      "capability": "view.setMode",
+      "args": {
+        "mode": "small_icons"
+      }
+    },
+    {
+      "id": "list",
+      "title": "列表",
+      "capability": "view.setMode",
+      "args": {
+        "mode": "list"
+      }
+    },
+    {
+      "id": "details",
+      "title": "详细信息",
+      "capability": "view.setMode",
+      "args": {
+        "mode": "details"
+      }
+    },
+    {
+      "id": "tiles",
+      "title": "平铺",
+      "capability": "view.setMode",
+      "args": {
+        "mode": "tiles"
+      }
+    },
+    {
+      "id": "content",
+      "title": "内容",
+      "capability": "view.setMode",
+      "args": {
+        "mode": "content"
+      }
+    }
+  ],
+  "panel": {
+    "title": "视图工作组",
+    "description": "切换当前文件夹视图；选择会保存为文件夹视图偏好。",
+    "commands": [
+      "extra-large",
+      "large",
+      "medium",
+      "small",
+      "list",
+      "details",
+      "tiles",
+      "content"
+    ],
+    "fields": [
+      {
+        "label": "当前视图",
+        "binding": "context.viewMode"
+      }
+    ],
+    "layout": "grid",
+    "density": "comfortable",
+    "groups": [
+      {
+        "title": "详细浏览",
+        "description": "先查看内容与详细列表。",
+        "commands": [
+          "content",
+          "details",
+          "tiles",
+          "list"
+        ]
+      },
+      {
+        "title": "图标浏览",
+        "commands": [
+          "small",
+          "medium",
+          "large",
+          "extra-large"
+        ]
+      }
+    ],
+    "primaryCommand": "details",
+    "titleTone": "accent"
+  },
+  "toolbar": {
+    "commands": [
+      "details",
+      "extra-large"
+    ]
+  }
+}

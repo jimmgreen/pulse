@@ -1,5 +1,4 @@
-// dup_finder.cpp - 查找重复文件 in a tab (task 46; plans/ai/任务46_重复文件与AI整理.html
-// scenes ②-⑤). The scan is flow E's (ai_dup_scan.h) on a worker; everything
+// dup_finder.cpp - 查找重复文件 in a tab (task 46, scenes ②-⑤). The scan is flow E's (ai_dup_scan.h) on a worker; everything
 // else runs on the UI thread of the window that started it.
 #include "dup_finder.h"
 

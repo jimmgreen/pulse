@@ -65,6 +65,8 @@ public:
         uint64_t ui_wait_deadline = 0;
         // Internal delivery only; never encoded as part of the v2 request.
         std::shared_ptr<std::atomic<OpenDeliveryState>> delivery;
+        // Internal quick-search intent; v2 wire requests cannot encode it.
+        bool reveal = false;
     };
     static std::vector<unsigned char> EncodeOpenRequest(const OpenRequest& request);
     static bool DecodeOpenRequest(const COPYDATASTRUCT* data, OpenRequest& request);
@@ -76,6 +78,10 @@ public:
     using WakePoster = BOOL (WINAPI*)(HWND, UINT, WPARAM, LPARAM);
     OpenSubmission SubmitOpenRequest(OpenRequest request, uint64_t now, HWND host, UINT wake,
                                      WakePoster post = &PostMessageW);
+    // Hook-safe local admission: one try_lock, a preallocated request and a
+    // fixed slot. No tracing, allocation, expired-cache scan or waiting.
+    bool TrySubmitKeyboardOpen(OpenRequest& request, uint64_t now, HWND host, UINT wake,
+                               WakePoster post = &PostMessageW) noexcept;
     std::optional<OpenRequest> TakeQueuedOpenRequest(uint64_t now = GetTickCount64(), bool reserve_slot = false);
     // A claimed request reserves its original capacity slot until finished.
     // UI thread only; defer returns it to the queue without a second admission.
@@ -96,6 +102,7 @@ private:
     mutable std::mutex requests_mutex_;
     bool accepting_requests_ = true;
     std::deque<OpenRequest> open_queue_;
+    std::optional<OpenRequest> keyboard_open_;
     std::shared_ptr<std::atomic<OpenDeliveryState>> open_claim_;
     std::shared_ptr<const ExplorerOpenContext> open_claim_explorer_;
     OpenFailures open_failures_;

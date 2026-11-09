@@ -1,0 +1,35 @@
+Taskbar activation / 2026-11-04
+
+Cause: an empty repeated launch uses open_pulse_icon (default 0 = new window).
+The installed stable launcher and versioned runtime had no shared explicit
+AppUserModelID. A separate pinned launch could therefore create a real second
+window. Tray counts and multi-window indicators correctly count real windows.
+
+Changes:
+- Stable launcher, runtime, main windows and installer-created app shortcuts
+  use Pulse.FileManager. Window relaunch properties point to the stable launcher
+  with --activate, including its catalog display-name resource and application icon.
+- --activate restores the most recent existing window, preserving tabs. Busy
+  targets defer; explicit new-window and existing icon preferences remain intact.
+- Cold activation consumes the token and uses normal session restoration.
+- Shortcut identity upgrades preserve customized properties and avoid rewriting
+  already correct shortcuts. Utility/uninstall shortcuts are excluded.
+- taskbar_identity reports HRESULT; external_launch_decision/result report
+  entry/mode/action/window counts/status without folder paths. entry 1 is activation.
+
+Validation:
+- Actual external_open policy compiled independently: 84 PASS, 0 FAIL.
+  bench_data/taskbar-activation-audit/policy-test.log
+- Native HWND property-store and built-launcher resource checks:
+  15 PASS; bench_data/taskbar-identity-test.log
+- Native persisted shortcut checks:
+  5 PASS; bench_data/taskbar-shortcut-test.log
+- Release main, launcher and focused test targets build passed:
+  bench_data/taskbar-identity-build.log (existing action_registry unused-parameter warning).
+
+Limitations: no interaction with the user's taskbar, pins or preferences;
+no computer-use tools. Actual taskbar click/visual grouping needs user validation.
+Existing pins cache their original identity/command: remove the old pin and pin
+the running updated application once. Existing extra windows are not closed.
+Full live-window test cases were extended but not executed because production
+test hooks are disabled. Normal saved multi-window session restoration is retained.

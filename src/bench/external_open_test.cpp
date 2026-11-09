@@ -41,7 +41,23 @@ int main() {
     ExternalOpenWindow duplicate; duplicate.shows_folder = true;
     ExternalOpenWindow busy_duplicate = duplicate; busy_duplicate.busy = true;
     {
+        for (const auto window : {Idle(), hidden, minimized}) {
+            for (int repeat = 0; repeat != 3; ++repeat)
+                Check(Is(DecideActivationTarget({window}), A::Activate, R::Explicit, 0),
+                    "taskbar repeated activation only reveals the existing window");
+        }
+        Check(Is(DecideActivationTarget({busy, Idle()}), A::Deferred, R::Busy, 0),
+            "taskbar activation defers busy MRU without creating or switching windows");
+        Check(DecideActivationTarget({}).action == A::NewWindow,
+            "cold taskbar activation permits one initial window");
+    }
+    {
         Check(Is(DecideLaunchTarget(0, {busy}), A::NewWindow, R::Policy, 0), "launch mode 0 explicitly creates despite busy existing window");
+        Check(Is(DecideLaunchTarget(0, {Idle(), hidden}), A::Activate, R::Policy, 1) &&
+            DecideLaunchTarget(0, {Idle(), hidden}).restore, "launch mode 0 brings back a window closed to the tray instead of adding one");
+        ExternalOpenWindow busy_hidden = hidden; busy_hidden.busy = true;
+        Check(Is(DecideLaunchTarget(0, {busy_hidden}), A::NewWindow, R::Policy, 0), "launch mode 0 still creates when the tray window is busy");
+        Check(Is(DecideLaunchTarget(0, {hidden}, true), A::NewWindow, R::Explicit, 0), "explicit new window is not redirected to the tray window");
         Check(Is(DecideLaunchTarget(1, {busy, hidden}), A::Tab, R::Policy, 1) &&
             DecideLaunchTarget(1, {busy, hidden}).restore, "launch mode 1 chooses available MRU and restores it");
         Check(Is(DecideLaunchTarget(1, {busy}), A::Deferred, R::Busy, 0) &&

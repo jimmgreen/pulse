@@ -1,4 +1,5 @@
 #include "single_instance_coordinator.h"
+#include "../common/runtime_log.h"
 #include "open_request_pipe.h"
 #include "explorer_submission_port.h"
 
@@ -12,6 +13,16 @@
 
 namespace pulse::app {
 namespace {
+
+void TraceOpenRequest(const SingleInstanceCoordinator::OpenRequest& request, uint64_t phase, uint64_t code) noexcept {
+    // The wire identity is random, never derived from a path or filename.
+    uint64_t high = 0, low = 0;
+    memcpy(&high, request.id.data(), sizeof(high));
+    memcpy(&low, request.id.data() + sizeof(high), sizeof(low));
+    diagnostics::runtime::Event("external_open", {{"id_high", high}, {"id_low", low},
+        {"phase", phase}, {"code", code}, {"entry", request.explorer ? 1u : request.reveal ? 2u : 0u},
+        {"handoff_id", request.explorer && request.explorer->handoff ? request.explorer->handoff->diagnostics.id : 0}});
+}
 
 constexpr wchar_t kMutexName[] = L"Local\\Pulse.Singleton";
 constexpr wchar_t kWindowClass[] = L"PulseMainWindow";
@@ -64,6 +75,7 @@ auto RequestKey(const SingleInstanceCoordinator::OpenRequest& request) {
     return std::make_pair(bool(request.explorer), request.id);
 }
 bool QueueLive(const SingleInstanceCoordinator::OpenRequest& request, uint64_t now) {
+    if (request.delivery && request.delivery->load() == SingleInstanceCoordinator::OpenDeliveryState::Cancelled) return false;
     if (request.explorer) return request.explorer->handoff &&
         now < request.explorer->handoff->deadline_tick && request.explorer->handoff->state == HandoffState::Pending;
     return now < (request.execution_started ? request.ui_wait_deadline : request.deadline);
@@ -163,6 +175,8 @@ void SingleInstanceCoordinator::Release() {
     if (pipe_service_) pipe_service_->Stop();
     pipe_service_.reset();
     std::lock_guard lock(requests_mutex_);
+    if (keyboard_open_) CompleteDelivery(*keyboard_open_, false);
+    keyboard_open_.reset();
     for (const auto& request : open_queue_) CompleteDelivery(request, false);
     open_queue_.clear(); accepted_.clear();
     if (open_claim_) {
@@ -388,7 +402,7 @@ bool SingleInstanceCoordinator::ForwardOpenPath(const std::wstring& path,
 
 std::vector<unsigned char> SingleInstanceCoordinator::EncodeOpenRequest(const OpenRequest& request) {
     try {
-        if (request.explorer || request.explorer_received || request.path.size() >= kMaxForwardedPathChars || request.path.find(L'\0') != std::wstring::npos)
+        if (request.reveal || request.explorer || request.explorer_received || request.path.size() >= kMaxForwardedPathChars || request.path.find(L'\0') != std::wstring::npos)
             return {};
         OpenRequestHeader header;
         header.chars = static_cast<uint32_t>(request.path.size() + 1);
@@ -429,7 +443,7 @@ SingleInstanceCoordinator::OpenAcceptance SingleInstanceCoordinator::AcceptOpenR
     std::erase_if(accepted_, [now](const auto& item) { return item.second.deadline <= now &&
         (!item.second.delivery || item.second.delivery->load() != OpenDeliveryState::Queued); });
     if (const auto found = accepted_.find(RequestKey(request)); found != accepted_.end())
-        return found->second.path == request.path && found->second.deadline == request.deadline
+        return found->second.path == request.path && found->second.reveal == request.reveal && found->second.deadline == request.deadline
             ? OpenAcceptance::Duplicate : OpenAcceptance::Invalid;
     // Do not evict a live ID: its delayed retry would open a duplicate tab.
     if (accepted_.size() >= 256) return OpenAcceptance::Invalid;
@@ -450,7 +464,8 @@ void SingleInstanceCoordinator::CompleteDelivery(const OpenRequest& request, boo
         (!request.delivery || request.delivery->load() != OpenDeliveryState::Dispatched)) request.explorer->handoff->Cancel();
     if (!request.delivery) return;
     auto expected = OpenDeliveryState::Queued;
-    request.delivery->compare_exchange_strong(expected, dispatched ? OpenDeliveryState::Dispatched : OpenDeliveryState::Cancelled);
+    if (request.delivery->compare_exchange_strong(expected, dispatched ? OpenDeliveryState::Dispatched : OpenDeliveryState::Cancelled))
+        TraceOpenRequest(request, 1, static_cast<uint64_t>(dispatched ? OpenDeliveryState::Dispatched : OpenDeliveryState::Cancelled));
 }
 SingleInstanceCoordinator::OpenSubmission SingleInstanceCoordinator::SubmitOpenRequest(
     OpenRequest request, uint64_t now, HWND host, UINT wake, WakePoster post) {
@@ -459,22 +474,34 @@ SingleInstanceCoordinator::OpenSubmission SingleInstanceCoordinator::SubmitOpenR
 }
 SingleInstanceCoordinator::OpenSubmission SingleInstanceCoordinator::SubmitOpenRequestImpl(
     OpenRequest request, uint64_t now, HWND host, UINT wake, WakePoster post, bool internal) {
+    OpenRequest evidence;
+    evidence.id = request.id; evidence.explorer = request.explorer; evidence.reveal = request.reveal;
+    const auto report = [&](OpenSubmission result) {
+        // Retry/duplicate storms are sampled globally; accepted requests and
+        // delivery outcomes always retain their correlation identity.
+        static std::atomic<uint64_t> next_sample{0};
+        auto due = next_sample.load(std::memory_order_relaxed);
+        const bool sample = now >= due && next_sample.compare_exchange_strong(due, now + 1000);
+        if (result == OpenSubmission::Accepted || sample)
+            TraceOpenRequest(evidence, 0, static_cast<uint64_t>(result));
+        return result;
+    };
     std::lock_guard lock(requests_mutex_);
     // A committed delivery owns its lease independently of the queue. Recognize
     // only that exact context before applying Pending admission requirements.
     if (internal && accepting_requests_ && now < request.deadline) {
         const auto found = accepted_.find(RequestKey(request));
         if (found != accepted_.end() && found->second.explorer == request.explorer &&
-            found->second.path == request.path && found->second.deadline == request.deadline &&
+            found->second.path == request.path && found->second.reveal == request.reveal && found->second.deadline == request.deadline &&
             found->second.delivery && found->second.delivery->load() == OpenDeliveryState::Dispatched)
-            return OpenSubmission::Duplicate;
+            return report(OpenSubmission::Duplicate);
     }
     if (internal && (!request.explorer || !request.explorer->selection_read || !QueueLive(request, now)))
-        return OpenSubmission::Invalid;
+        return report(OpenSubmission::Invalid);
     if (!accepting_requests_ || request.execution_started || request.ui_wait_deadline ||
         now >= request.deadline || request.deadline - now > 60000 ||
         request.path.size() >= kMaxForwardedPathChars || request.path.find(L'\0') != std::wstring::npos ||
-        std::all_of(request.id.begin(), request.id.end(), [](unsigned char value) { return value == 0; })) return OpenSubmission::Invalid;
+        std::all_of(request.id.begin(), request.id.end(), [](unsigned char value) { return value == 0; })) return report(OpenSubmission::Invalid);
     // A paused UI must not let expired owned requests exhaust admission capacity.
     // Match the delivery identity: an ID may already have a newer acceptance.
     for (auto queued = open_queue_.begin(); queued != open_queue_.end();) {
@@ -490,30 +517,57 @@ SingleInstanceCoordinator::OpenSubmission SingleInstanceCoordinator::SubmitOpenR
     std::erase_if(accepted_, [now](const auto& item) { return item.second.deadline <= now &&
         (!item.second.delivery || item.second.delivery->load() != OpenDeliveryState::Queued); });
     if (const auto found = accepted_.find(RequestKey(request)); found != accepted_.end())
-        return found->second.path == request.path && found->second.deadline == request.deadline && found->second.explorer == request.explorer ? OpenSubmission::Duplicate : OpenSubmission::Invalid;
-    if (open_queue_.size() + (open_claim_ ? 1u : 0u) >= OpenQueueCapacity || accepted_.size() >= 256) return OpenSubmission::Retry;
+        return report(found->second.path == request.path && found->second.reveal == request.reveal && found->second.deadline == request.deadline && found->second.explorer == request.explorer ? OpenSubmission::Duplicate : OpenSubmission::Invalid);
+    if (open_queue_.size() + (open_claim_ ? 1u : 0u) + (keyboard_open_ ? 1u : 0u) >= OpenQueueCapacity || accepted_.size() >= 256) return report(OpenSubmission::Retry);
     DWORD pid = 0;
     if (!host || !IsWindow(host) || !GetWindowThreadProcessId(host, &pid) || pid != GetCurrentProcessId() || !wake || !post)
-        return OpenSubmission::Retry;
-    if (request.delivery && request.delivery->load() != OpenDeliveryState::Pending) return OpenSubmission::Invalid;
+        return report(OpenSubmission::Retry);
+    if (request.delivery && request.delivery->load() != OpenDeliveryState::Pending) return report(OpenSubmission::Invalid);
     try {
         if (!request.delivery) request.delivery = std::make_shared<std::atomic<OpenDeliveryState>>(OpenDeliveryState::Pending);
         open_queue_.push_back(std::move(request));
         try { accepted_.emplace(RequestKey(open_queue_.back()), open_queue_.back()); }
-        catch (...) { open_queue_.pop_back(); return OpenSubmission::Retry; }
-    } catch (...) { return OpenSubmission::Retry; }
+        catch (...) { open_queue_.pop_back(); return report(OpenSubmission::Retry); }
+    } catch (...) { return report(OpenSubmission::Retry); }
     // Only a wake is posted. The mutex prevents consumption before the commit.
     if (!post(host, wake, 0, 0)) {
         accepted_.erase(RequestKey(open_queue_.back()));
         open_queue_.pop_back();
-        return OpenSubmission::Retry;
+        return report(OpenSubmission::Retry);
     }
     open_queue_.back().delivery->store(OpenDeliveryState::Queued);
-    return OpenSubmission::Accepted;
+    return report(OpenSubmission::Accepted);
+}
+bool SingleInstanceCoordinator::TrySubmitKeyboardOpen(OpenRequest& request, uint64_t now, HWND host, UINT wake, WakePoster post) noexcept {
+    std::unique_lock lock(requests_mutex_, std::try_to_lock);
+    if (!lock.owns_lock() || !accepting_requests_ || keyboard_open_ ||
+        open_queue_.size() + (open_claim_ ? 1u : 0u) >= OpenQueueCapacity ||
+        request.path != L"pulse:win-e" || request.explorer || !request.delivery ||
+        request.delivery->load() != OpenDeliveryState::Pending || !host || !wake || !post) return false;
+    DWORD pid = 0;
+    if (!GetWindowThreadProcessId(host, &pid) || pid != GetCurrentProcessId()) return false;
+    request.deadline = now + 10000;
+    keyboard_open_.emplace(std::move(request));
+    if (!post(host, wake, 0, 0)) {
+        request = std::move(*keyboard_open_);
+        keyboard_open_.reset();
+        return false;
+    }
+    keyboard_open_->delivery->store(OpenDeliveryState::Queued);
+    return true;
 }
 std::optional<SingleInstanceCoordinator::OpenRequest> SingleInstanceCoordinator::TakeQueuedOpenRequest(uint64_t now, bool reserve_slot) {
     std::lock_guard lock(requests_mutex_);
     if (!accepting_requests_ || (reserve_slot && open_claim_)) return std::nullopt;
+    if (keyboard_open_) {
+        auto request = std::move(*keyboard_open_); keyboard_open_.reset();
+        if (QueueLive(request, now)) {
+            if (reserve_slot) { open_claim_ = request.delivery; open_claim_explorer_.reset(); request.execution_started = true; }
+            return std::optional<OpenRequest>(std::move(request));
+        }
+        CompleteDelivery(request, false);
+        if (open_failures_.timed_out != UINT32_MAX) ++open_failures_.timed_out;
+    }
     while (!open_queue_.empty()) {
         auto request = std::move(open_queue_.front()); open_queue_.pop_front();
         if (QueueLive(request, now)) {

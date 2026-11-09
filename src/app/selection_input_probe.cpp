@@ -4,11 +4,564 @@
 #include "app_sidebar_refresh.h"
 #include "app_runtime.h"
 #include "app_ops_ui.h"
+#include "marquee_selection.h"
+#include "../ui/view_layout.h"
+#include "../ui/ui_renderer.h"
 #include <algorithm>
 #include <cstdio>
+#include <atomic>
+#include <thread>
 
 using namespace pulse;
 namespace {
+int CheckMarqueeClick(AppState& s, FILE* log) {
+    const auto pump = [&](ULONGLONG duration) {
+        const auto deadline = GetTickCount64() + duration;
+        while (GetTickCount64() < deadline) {
+            MSG message{};
+            while (GetTickCount64() < deadline && PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+            Sleep(1);
+        }
+    };
+    auto* tab = ActiveTab(s);
+    if (!s.isolatedTest || !tab || tab->EntryCount() < 8) return 2;
+    const bool grouped_probe = GetEnvironmentVariableW(L"PULSE_TEST_MARQUEE_GROUPED_ONLY", nullptr, 0) != 0;
+    if (grouped_probe) {
+        if (tab->EntryCount() < 2500) {
+            fprintf(log, "[ERROR] grouped probe requires 2500 fixture items\n");
+            fflush(log);
+            return 2;
+        }
+        tab->group_by = 2; // Date grouping, using the fixture's timestamps.
+        if (GetEnvironmentVariableW(L"PULSE_TEST_MARQUEE_COLLAPSED", nullptr, 0)) {
+            const auto view = BuildVm(s);
+            const auto* groups = view.pane.Groups();
+            if (!groups || groups->size() < 2) {
+                fprintf(log, "[ERROR] collapsed-group fixture requires two date groups\n");
+                return 2;
+            }
+            tab->collapsed_groups[tab->current_path].insert(groups->front().key);
+            ++tab->group_collapse_rev;
+            fprintf(log, "[PASS] first date group collapsed before cross-screen selection\n");
+        }
+    }
+    const auto trace = [&](const char* stage, int scenario) {
+        fprintf(log, "[STATE] scenario=%d stage=%s count=%zu snapshot=%p revision=%llu generation=%llu pending=%d active=%d dirty=%d drag=%d collapse=%d capture=%d\n",
+            scenario, stage, static_cast<size_t>(tab->SelectedCount()), static_cast<const void*>(tab->snapshot.get()),
+            static_cast<unsigned long long>(tab->selection_revision), static_cast<unsigned long long>(tab->view_generation),
+            s.listSelection.PendingBand(), s.listSelection.BandActive(), s.listSelection.dirty, s.listSelection.PendingFile(), s.listSelection.DeferredIndex(), GetCapture() == s.hwnd);
+        fflush(log);
+    };
+    tab->view_mode = ui::ViewMode::Details;
+    tab->scroll_y = 0;
+    s.appPrefs.single_click_open = false;
+    s.shot.active = false;
+    ShowWindow(s.hwnd, SW_SHOWNORMAL);
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+    UpdateWindow(s.hwnd);
+    pump(1200);
+    int failures = 0;
+    if (grouped_probe || GetEnvironmentVariableW(L"PULSE_TEST_MARQUEE_SCROLL_ONLY", nullptr, 0) ||
+        GetEnvironmentVariableW(L"PULSE_TEST_MARQUEE_PHYSICAL_ONLY", nullptr, 0)) {
+        if (tab->EntryCount() < 100) {
+            fprintf(log, "[ERROR] cross-screen/physical fixture requires 100 items; actual=%zu\n", tab->EntryCount());
+            fflush(log);
+            return 2;
+        }
+        const auto points = [&](POINT& top, POINT& bottom, POINT& middle, int& middle_source, float& row_height) {
+            const auto current = BuildVm(s);
+            for (const auto& slot : current.pane_slots) {
+                if (!slot.focused) continue;
+                if (grouped_probe && (!slot.pane.Groups() || slot.pane.Groups()->empty())) {
+                    fprintf(log, "[ERROR] date-grouped layout was not produced\n");
+                    fflush(log);
+                    return false;
+                }
+                const auto list = s.renderer.PaneListRect(slot.pane, slot.rect);
+                ui::ViewLayout layout(slot.pane.view_mode, list, slot.pane.EntryCount(), slot.pane.scroll_x,
+                    slot.pane.scroll_y, s.scale, s.renderer.ListRowHeightDip(slot.pane, list), slot.pane.Groups());
+                const auto range = layout.VisibleRange();
+                std::vector<std::pair<POINT, int>> rows;
+                for (int row = range.first; row <= range.second && row < static_cast<int>(slot.pane.EntryCount()); ++row) {
+                    const auto rect = layout.ItemRect(row);
+                    if (rect.top < list.top || rect.bottom > list.bottom) continue;
+                    const int y = static_cast<int>((rect.top + rect.bottom) * 0.5f);
+                    row_height = rect.bottom - rect.top;
+                    const int source = slot.pane.SourceIndex(row);
+                    for (int x = static_cast<int>(list.right - 30 * s.scale); x > list.left; --x) {
+                        const auto hit = s.renderer.HitTest(current,
+                            {0, 0, float(s.compositor.Width()), float(s.compositor.Height())}, float(x), float(y));
+                        if (hit.region == ui::HitTestResult::Row && hit.index == source &&
+                            !s.renderer.PointInItemGrip(slot.pane, slot.rect, source, float(x), float(y))) {
+                            rows.push_back({{x, y}, source});
+                            break;
+                        }
+                    }
+                }
+                if (rows.size() < 8) return false;
+                top = rows.front().first;
+                bottom = rows.back().first;
+                middle = rows[rows.size() / 2].first;
+                middle_source = rows[rows.size() / 2].second;
+                return true;
+            }
+            return false;
+        };
+        const auto mouse = [&](UINT message, WPARAM keys, POINT point) {
+            SendMessageW(s.hwnd, message, keys, MAKELPARAM(point.x, point.y));
+        };
+        if (GetEnvironmentVariableW(L"PULSE_TEST_MARQUEE_PHYSICAL_ONLY", nullptr, 0)) {
+            const auto error = [&](const char* stage) {
+                fprintf(log, "[ERROR] physical environment/input stage=%s win32_error=%lu foreground=%p expected=%p\n",
+                    stage, GetLastError(), static_cast<void*>(GetForegroundWindow()), static_cast<void*>(s.hwnd));
+                fflush(log);
+                return 2;
+            };
+            const auto screen_capture = [&](const std::wstring& path) {
+                if (GetForegroundWindow() != s.hwnd) {
+                    error("screen capture requires foreground fixture window");
+                    return false;
+                }
+                const HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
+                if (dwm) {
+                    const auto flush = reinterpret_cast<HRESULT(WINAPI*)()>(GetProcAddress(dwm, "DwmFlush"));
+                    if (flush) flush();
+                    FreeLibrary(dwm);
+                }
+                RECT client{};
+                GetClientRect(s.hwnd, &client);
+                POINT origin{};
+                ClientToScreen(s.hwnd, &origin);
+                const int width = client.right, height = client.bottom;
+                if (width <= 0 || height <= 0) return false;
+                BITMAPINFO info{};
+                info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+                info.bmiHeader.biWidth = width;
+                info.bmiHeader.biHeight = -height;
+                info.bmiHeader.biPlanes = 1;
+                info.bmiHeader.biBitCount = 32;
+                info.bmiHeader.biCompression = BI_RGB;
+                const DWORD bytes = static_cast<DWORD>(width) * static_cast<DWORD>(height) * 4;
+                const HDC screen = GetDC(nullptr);
+                const HDC memory = screen ? CreateCompatibleDC(screen) : nullptr;
+                void* pixels = nullptr;
+                const HBITMAP bitmap = memory ? CreateDIBSection(screen, &info, DIB_RGB_COLORS, &pixels, nullptr, 0) : nullptr;
+                const HGDIOBJ old = bitmap ? SelectObject(memory, bitmap) : nullptr;
+                bool okay = bitmap && BitBlt(memory, 0, 0, width, height, screen, origin.x, origin.y, SRCCOPY | CAPTUREBLT);
+                if (okay) {
+                    GdiFlush();
+                    BITMAPFILEHEADER header{};
+                    header.bfType = 0x4d42;
+                    header.bfOffBits = sizeof(header) + sizeof(BITMAPINFOHEADER);
+                    header.bfSize = header.bfOffBits + bytes;
+                    FILE* output = nullptr;
+                    okay = _wfopen_s(&output, path.c_str(), L"wb") == 0 && output;
+                    if (output) {
+                        okay = fwrite(&header, sizeof(header), 1, output) == 1 &&
+                            fwrite(&info.bmiHeader, sizeof(info.bmiHeader), 1, output) == 1 &&
+                            fwrite(pixels, bytes, 1, output) == 1;
+                        okay = fclose(output) == 0 && okay;
+                    }
+                }
+                if (old) SelectObject(memory, old);
+                if (bitmap) DeleteObject(bitmap);
+                if (memory) DeleteDC(memory);
+                if (screen) ReleaseDC(nullptr, screen);
+                fprintf(log, "[%s] actual client screen capture %ls\n", okay ? "PASS" : "FAIL", path.c_str());
+                fflush(log);
+                return okay;
+            };
+            struct RestoreMouse {
+                POINT cursor{};
+                RestoreMouse() { GetCursorPos(&cursor); }
+                ~RestoreMouse() {
+                    INPUT release{};
+                    release.type = INPUT_MOUSE;
+                    release.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+                    SendInput(1, &release, sizeof(INPUT));
+                    SetCursorPos(cursor.x, cursor.y);
+                }
+            } restore_mouse;
+            ShowWindow(s.hwnd, SW_SHOWNORMAL);
+            SetForegroundWindow(s.hwnd);
+            SetFocus(s.hwnd);
+            pump(300);
+            if (GetForegroundWindow() != s.hwnd) {
+                BringWindowToTop(s.hwnd);
+                SetForegroundWindow(s.hwnd);
+                pump(300);
+                if (GetForegroundWindow() != s.hwnd) {
+                    const DWORD foreground_thread = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
+                    const DWORD current_thread = GetCurrentThreadId();
+                    const bool attached = foreground_thread && foreground_thread != current_thread &&
+                        AttachThreadInput(current_thread, foreground_thread, TRUE);
+                    BringWindowToTop(s.hwnd);
+                    SetForegroundWindow(s.hwnd);
+                    SetFocus(s.hwnd);
+                    if (attached) AttachThreadInput(current_thread, foreground_thread, FALSE);
+                    pump(300);
+                    if (GetForegroundWindow() != s.hwnd) return error("foreground activation after temporary input attachment");
+                }
+            }
+            const auto physical = [&](POINT client, DWORD flags) {
+                ClientToScreen(s.hwnd, &client);
+                INPUT input{};
+                input.type = INPUT_MOUSE;
+                input.mi.dx = MulDiv(client.x - GetSystemMetrics(SM_XVIRTUALSCREEN), 65535,
+                    std::max(1, GetSystemMetrics(SM_CXVIRTUALSCREEN) - 1));
+                input.mi.dy = MulDiv(client.y - GetSystemMetrics(SM_YVIRTUALSCREEN), 65535,
+                    std::max(1, GetSystemMetrics(SM_CYVIRTUALSCREEN) - 1));
+                input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | flags;
+                SetLastError(ERROR_SUCCESS);
+                const UINT sent = SendInput(1, &input, sizeof(INPUT));
+                if (sent != 1) {
+                    fprintf(log, "[ERROR] SendInput flags=%lu sent=%u error=%lu screen=(%ld,%ld)\n",
+                        flags, sent, GetLastError(), client.x, client.y);
+                    fflush(log);
+                }
+                return sent == 1;
+            };
+            for (int repeat = 0; repeat < 3; ++repeat) {
+                POINT top{}, bottom{}, middle{};
+                int target_source = -1;
+                float row_height = 0;
+                tab->scroll_y = 0;
+                tab->ClearSelection();
+                InvalidateRect(s.hwnd, nullptr, FALSE);
+                UpdateWindow(s.hwnd);
+                pump(200);
+                if (!points(top, bottom, middle, target_source, row_height)) return error("locate visible rows");
+                const auto current = BuildVm(s);
+                const auto list = s.renderer.PaneListRect(current.pane, FocusedPaneRect(s));
+                POINT edge{bottom.x, static_cast<LONG>(list.bottom - 1)};
+                top.x -= static_cast<LONG>(80 * s.scale);
+                const auto hit = s.renderer.HitTest(current,
+                    {0, 0, float(s.compositor.Width()), float(s.compositor.Height())}, float(top.x), float(top.y));
+                if (hit.region != ui::HitTestResult::Row ||
+                    s.renderer.PointInItemGrip(current.pane, FocusedPaneRect(s), hit.index, float(top.x), float(top.y))) return error("start row whitespace hit test");
+                if (!physical(top, MOUSEEVENTF_LEFTDOWN)) return error("drag press");
+                pump(30);
+                if (!physical(edge, 0)) return error("drag move to edge");
+                const auto deadline = GetTickCount64() + 4000;
+                do { pump(25); } while (tab->scroll_y < 8 * row_height && GetTickCount64() < deadline);
+                const float scrolled = tab->scroll_y;
+                if (!physical(edge, MOUSEEVENTF_LEFTUP)) return error("drag release");
+                pump(10);
+                const auto multiple = tab->SelectedCount();
+                if (!points(top, bottom, middle, target_source, row_height)) return error("locate visible rows");
+                if (!physical(middle, MOUSEEVENTF_LEFTDOWN) || !physical(middle, MOUSEEVENTF_LEFTUP)) return error("single click");
+                pump(10);
+                const bool immediate = tab->SelectedCount() == 1 && tab->IsSelected(target_source);
+                fprintf(log, "[%s] physical immediate single selection count=%zu target=%d\n",
+                    immediate ? "PASS" : "FAIL", static_cast<size_t>(tab->SelectedCount()), target_source);
+                failures += !immediate;
+                wchar_t immediate_data[32768]{};
+                if (GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", immediate_data, ARRAYSIZE(immediate_data))) {
+                    UpdateWindow(s.hwnd);
+                    failures += !screen_capture(std::wstring(immediate_data) + L"\\physical-immediate-" +
+                        std::to_wstring(repeat) + L".bmp");
+                }
+                if (!physical({middle.x - 5, middle.y - 1}, 0)) return error("post-click hover move");
+                pump(500);
+                const bool okay = scrolled >= 8 * row_height && multiple > 8 && tab->SelectedCount() == 1 &&
+                    tab->IsSelected(target_source) && !s.listSelection.BandActive() && !s.listSelection.PendingBand();
+                fprintf(log, "[%s] physical repeat=%d scroll=%.1f before=%zu selected_count=%zu index=%d target=%d active=%d pending=%d\n",
+                    okay ? "PASS" : "FAIL", repeat, scrolled, static_cast<size_t>(multiple),
+                    static_cast<size_t>(tab->SelectedCount()), tab->selected_index, target_source, s.listSelection.BandActive(), s.listSelection.PendingBand());
+                failures += !okay;
+                wchar_t data[32768]{};
+                if (GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", data, ARRAYSIZE(data))) {
+                    const auto base = std::wstring(data) + L"\\physical-" + std::to_wstring(repeat);
+                    const bool screen_fast = screen_capture(base + L"-screen-fast.bmp");
+                    const bool fast = s.compositor.SaveSnapshot((base + L"-fast.png").c_str());
+                    InvalidateRect(s.hwnd, nullptr, FALSE);
+                    UpdateWindow(s.hwnd);
+                    const bool screen_full = screen_capture(base + L"-screen-full.bmp");
+                    const bool full = s.compositor.SaveSnapshot((base + L"-full.png").c_str());
+                    failures += !(fast && full && screen_fast && screen_full);
+                    fprintf(log, "[%s] physical snapshots saved\n", fast && full ? "PASS" : "FAIL");
+                }
+                fflush(log);
+            }
+            return failures ? 1 : 0;
+        }
+        for (int repeat = 0; repeat < (grouped_probe ? 4 : 3); ++repeat) for (bool reverse : {false, true}) {
+            POINT top{}, bottom{}, middle{};
+            int target_source = -1;
+            float row_height = 0;
+            tab->scroll_y = 0;
+            tab->ClearSelection();
+            if (!points(top, bottom, middle, target_source, row_height)) return 2;
+            tab->scroll_y = reverse ? 16 * row_height : 0;
+            InvalidateRect(s.hwnd, nullptr, FALSE);
+            UpdateWindow(s.hwnd);
+            if (!points(top, bottom, middle, target_source, row_height)) return 2;
+            POINT start = reverse ? bottom : top;
+            start.x -= static_cast<LONG>(80 * s.scale);
+            const auto start_vm = BuildVm(s);
+            const auto start_hit = s.renderer.HitTest(start_vm,
+                {0, 0, float(s.compositor.Width()), float(s.compositor.Height())}, float(start.x), float(start.y));
+            if (start_hit.region != ui::HitTestResult::Row ||
+                s.renderer.PointInItemGrip(start_vm.pane, FocusedPaneRect(s), start_hit.index, float(start.x), float(start.y))) {
+                fprintf(log, "[ERROR] cross-screen start must be row whitespace\n");
+                return 2;
+            }
+            const POINT first_end = reverse ? top : bottom;
+            mouse(WM_LBUTTONDOWN, MK_LBUTTON, start);
+            mouse(WM_MOUSEMOVE, MK_LBUTTON, first_end);
+            UpdateMarqueeFrame(s);
+            UpdateWindow(s.hwnd);
+            tab->scroll_y += (reverse ? -8 : 8) * row_height;
+            UpdateMarqueeFrame(s);
+            InvalidateRect(s.hwnd, nullptr, FALSE);
+            UpdateWindow(s.hwnd);
+            if (!points(top, bottom, middle, target_source, row_height)) return 2;
+            const POINT end = reverse ? top : bottom;
+            mouse(WM_MOUSEMOVE, MK_LBUTTON, end);
+            UpdateMarqueeFrame(s);
+            UpdateWindow(s.hwnd);
+            mouse(WM_LBUTTONUP, 0, end);
+            const auto multiple = tab->SelectedCount();
+            bool stages_single = true;
+            const auto check_single = [&] {
+                stages_single &= tab->SelectedCount() == 1 && tab->IsSelected(target_source);
+            };
+            mouse(WM_LBUTTONDOWN, MK_LBUTTON, middle);
+            if (grouped_probe) check_single();
+            if (grouped_probe) {
+                trace("down", repeat);
+                if (repeat == 1) mouse(WM_MOUSEMOVE, 0, middle);
+                if (repeat == 2 && GetCapture() == s.hwnd) ReleaseCapture();
+                if (repeat == 3) {
+                    auto replacement = std::make_shared<std::vector<fs::DirEntry>>(*tab->snapshot);
+                    tab->SetSnapshot(replacement);
+                }
+                trace("after-injection", repeat);
+                check_single();
+            }
+            mouse(WM_LBUTTONUP, 0, middle);
+            if (grouped_probe) { trace("up", repeat); check_single(); }
+            UpdateWindow(s.hwnd);
+            if (grouped_probe) { trace("first-frame", repeat); check_single(); }
+            mouse(WM_MOUSEMOVE, 0, top);
+            pump(100);
+            if (grouped_probe) { trace("100ms", repeat); check_single(); }
+            pump(400);
+            if (grouped_probe) { trace("500ms", repeat); check_single(); }
+            const bool normal = multiple > 8 && tab->SelectedCount() == 1 && tab->IsSelected(target_source);
+            const bool okay = normal && (!grouped_probe || (stages_single &&
+                !s.listSelection.BandActive() && !s.listSelection.PendingBand() && s.listSelection.DeferredIndex() < 0));
+            if (grouped_probe) fprintf(log, "[EXPECT] scenario=%d committed plain click remains target-only through cancellation and frames\n", repeat);
+            fprintf(log, "[%s] cross-screen repeat=%d reverse=%d before=%zu selected_count=%zu index=%d target=%d\n",
+                okay ? "PASS" : "FAIL", repeat, reverse, static_cast<size_t>(multiple),
+                static_cast<size_t>(tab->SelectedCount()), tab->selected_index, target_source);
+            failures += !okay;
+            wchar_t data[32768]{};
+            if (GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", data, ARRAYSIZE(data))) {
+                const auto base = std::wstring(data) + L"\\cross-screen-" + std::to_wstring(repeat * 2 + int(reverse));
+                const bool fast = s.compositor.SaveSnapshot((base + L"-fast.png").c_str());
+                InvalidateRect(s.hwnd, nullptr, FALSE);
+                UpdateWindow(s.hwnd);
+                const bool full = s.compositor.SaveSnapshot((base + L"-full.png").c_str());
+                fprintf(log, "[%s] cross-screen snapshots saved\n", fast && full ? "PASS" : "FAIL");
+                failures += !(fast && full);
+            }
+            fflush(log);
+        }
+        if (grouped_probe) {
+            POINT top{}, bottom{}, middle{};
+            int target_source = -1;
+            float row_height = 0;
+            if (!points(top, bottom, middle, target_source, row_height)) return 2;
+            const auto check = [&](bool okay, const char* label) {
+                fprintf(log, "[%s] %s\n", okay ? "PASS" : "FAIL", label);
+                failures += !okay;
+            };
+            const std::vector<int> original{target_source, target_source + 1, target_source + 2};
+            tab->SelectIndices(original);
+            mouse(WM_LBUTTONDOWN, MK_LBUTTON, middle);
+            mouse(WM_MOUSEMOVE, MK_LBUTTON, bottom);
+            UpdateMarqueeFrame(s);
+            check(s.listSelection.BandActive(), "Esc fixture activates marquee");
+            SendMessageW(s.hwnd, WM_KEYDOWN, VK_ESCAPE, 0);
+            check(tab->SelectedIndices() == original && !s.listSelection.BandActive() && !s.listSelection.PendingBand(),
+                "Esc after active plain marquee restores pre-press multiple selection");
+
+            const auto current = BuildVm(s);
+            POINT name = middle;
+            bool found_name = false;
+            const auto bounds = FocusedPaneRect(s);
+            for (int x = static_cast<int>(bounds.left); x < static_cast<int>(bounds.right); ++x) {
+                const auto hit = s.renderer.HitTest(current,
+                    {0, 0, float(s.compositor.Width()), float(s.compositor.Height())}, float(x), float(middle.y));
+                if (hit.region == ui::HitTestResult::Row && hit.index == target_source &&
+                    s.renderer.PointInItemName(current.pane, bounds, target_source, float(x), float(middle.y))) {
+                    name.x = x; found_name = true; break;
+                }
+            }
+            check(found_name, "locate filename drag grip");
+            if (found_name) {
+                tab->SelectIndices(original);
+                mouse(WM_LBUTTONDOWN, MK_LBUTTON, name);
+                check(tab->SelectedIndices() == original && s.listSelection.PendingFile(),
+                    "filename drag press preserves full payload selection");
+                // Cancel before movement so no OLE file drag or file open occurs.
+                if (GetCapture() == s.hwnd) ReleaseCapture();
+            }
+            tab->SelectIndices(original);
+            HandleListRowClick(s, target_source, true, false);
+            check(tab->SelectedIndices() == original, "Ctrl selected-row press defers toggle");
+            FinishListRowClick(s);
+            check(!tab->IsSelected(target_source) && tab->SelectedCount() == 2, "Ctrl release toggles target only");
+            tab->SelectOnly(target_source);
+            HandleListRowClick(s, target_source + 2, false, true);
+            FinishListRowClick(s);
+            check(tab->SelectedCount() == 3 && tab->IsSelected(target_source + 1), "Shift click retains range semantics");
+            // Pure marquee delta checks avoid changing real keyboard state.
+            for (bool ctrl : {false, true}) {
+                app::MarqueeSelection gesture;
+                std::unordered_set<int> selected{1, 2};
+                const std::unordered_set<int> base = selected;
+                bool all = false;
+                std::vector<int> hits{2, 3};
+                gesture.Apply(selected, all, base, true, ctrl, 10, hits);
+                const std::unordered_set<int> expected = ctrl ? std::unordered_set<int>{1, 3} : std::unordered_set<int>{1, 2, 3};
+                check(!all && selected == expected, ctrl ? "Ctrl marquee toggles against original base" : "Shift marquee adds to original base");
+            }
+            fflush(log);
+        }
+        return failures ? 1 : 0;
+    }
+    const auto vm = BuildVm(s);
+    for (const auto& slot : vm.pane_slots) {
+        if (!slot.focused) continue;
+        const auto list = s.renderer.PaneListRect(slot.pane, slot.rect);
+        ui::ViewLayout layout(slot.pane.view_mode, list, slot.pane.EntryCount(), slot.pane.scroll_x,
+            slot.pane.scroll_y, s.scale, s.renderer.ListRowHeightDip(slot.pane, list), slot.pane.Groups());
+        const auto visible = layout.VisibleRange();
+        const int row_count = std::min(18, std::min(static_cast<int>(slot.pane.EntryCount()), visible.second));
+        if (row_count < 8) return 2;
+        const int middle = row_count / 2;
+        POINT names[18]{}, blanks[18]{}, right_blanks[18]{};
+        int sources[18]{};
+        for (int row = 0; row < row_count; ++row) {
+            const auto rect = layout.ItemRect(row);
+            if (rect.top < list.top || rect.bottom > list.bottom) {
+                fprintf(log, "[ERROR] eight fully visible rows required\n");
+                return 2;
+            }
+            const int y = static_cast<int>((rect.top + rect.bottom) / 2);
+            bool name_found = false, blank_found = false;
+            int name_right = 0;
+            sources[row] = slot.pane.SourceIndex(row);
+            for (int x = static_cast<int>(list.left); x < static_cast<int>(list.right); ++x) {
+                const auto hit = s.renderer.HitTest(vm,
+                    {0, 0, float(s.compositor.Width()), float(s.compositor.Height())}, float(x), float(y));
+                if (hit.region != ui::HitTestResult::Row || hit.index != sources[row]) continue;
+                if (s.renderer.PointInItemName(slot.pane, slot.rect, hit.index, float(x), float(y))) {
+                    if (!name_found) names[row] = {x, y};
+                    name_found = true;
+                    name_right = x;
+                }
+                if (name_found && x > name_right + 24 * s.scale && !s.renderer.PointInItemGrip(slot.pane, slot.rect, hit.index, float(x), float(y))) {
+                    if (!blank_found) blanks[row] = {x, y};
+                    right_blanks[row] = {x, y}; blank_found = true;
+                }
+            }
+            if (!name_found || !blank_found) {
+                fprintf(log, "[ERROR] cannot locate visible row %d name/blank points\n", row);
+                return 2;
+            }
+        }
+        const auto mouse = [&](UINT message, WPARAM keys, POINT p) {
+            SendMessageW(s.hwnd, message, keys, MAKELPARAM(p.x, p.y));
+        };
+        for (bool reverse : {false, true}) for (bool name : {false, true}) {
+            tab->ClearSelection();
+            const POINT start = reverse ? right_blanks[row_count - 1] : blanks[0];
+            const POINT end = reverse ? blanks[0] : right_blanks[row_count - 1];
+            mouse(WM_LBUTTONDOWN, MK_LBUTTON, start);
+            mouse(WM_MOUSEMOVE, MK_LBUTTON, end);
+            UpdateMarqueeFrame(s);
+            UpdateWindow(s.hwnd);
+            mouse(WM_LBUTTONUP, 0, end);
+            const auto multiple = tab->SelectedCount();
+            const POINT target = name ? names[middle] : blanks[middle];
+            mouse(WM_LBUTTONDOWN, MK_LBUTTON, target);
+            mouse(WM_LBUTTONUP, 0, target);
+            UpdateWindow(s.hwnd);
+            mouse(WM_MOUSEMOVE, 0, blanks[row_count - 2]);
+            UpdateWindow(s.hwnd);
+            pump(500);
+            wchar_t data[32768]{};
+            if (GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", data, ARRAYSIZE(data))) {
+                const auto suffix = std::to_wstring(int(reverse) * 2 + int(name)) + L".png";
+                const auto base = std::wstring(data) + L"\\";
+                const bool fast = s.compositor.SaveSnapshot((base + L"marquee-fast-click-" + suffix).c_str());
+                InvalidateRect(s.hwnd, nullptr, FALSE);
+                UpdateWindow(s.hwnd);
+                const bool full = s.compositor.SaveSnapshot((base + L"forced-full-" + suffix).c_str());
+                fprintf(log, "[%s] fast/full snapshots saved\n", fast && full ? "PASS" : "FAIL");
+                failures += !(fast && full);
+            }
+            const bool okay = multiple >= static_cast<size_t>(row_count) && tab->SelectedCount() == 1 && tab->IsSelected(sources[middle]);
+            fprintf(log, "[%s] marquee reverse=%d click_name=%d before=%zu selected_count=%zu index=%d\n",
+                okay ? "PASS" : "FAIL", reverse, name, static_cast<size_t>(multiple),
+                static_cast<size_t>(tab->SelectedCount()), tab->selected_index);
+            fflush(log);
+            failures += !okay;
+        }
+        // Keep events synchronous to exercise both a queued burst and frames
+        // interleaved between release, click, and hover without opening files.
+        for (int repeat = 0; repeat < 3; ++repeat) {
+            for (bool reverse : {false, true}) for (bool paints : {false, true}) {
+                for (bool slight_move : {false, true}) for (int location = 0; location < 3; ++location) {
+                    tab->ClearSelection();
+                    const POINT start = reverse ? right_blanks[row_count - 1] : blanks[0];
+                    const POINT end = reverse ? blanks[0] : right_blanks[row_count - 1];
+                    mouse(WM_LBUTTONDOWN, MK_LBUTTON, start);
+                    mouse(WM_MOUSEMOVE, MK_LBUTTON, end);
+                    if (paints) UpdateWindow(s.hwnd);
+                    mouse(WM_LBUTTONUP, 0, end);
+                    const auto multiple = tab->SelectedCount();
+                    if (paints) UpdateWindow(s.hwnd);
+                    const POINT target = location == 0 ? names[middle] : location == 1 ? blanks[middle] : right_blanks[middle];
+                    mouse(WM_LBUTTONDOWN, MK_LBUTTON, target);
+                    if (slight_move) mouse(WM_MOUSEMOVE, MK_LBUTTON, {target.x, target.y + 1});
+                    if (paints) UpdateWindow(s.hwnd);
+                    mouse(WM_LBUTTONUP, 0, slight_move ? POINT{target.x, target.y + 1} : target);
+                    if (paints) UpdateWindow(s.hwnd);
+                    PostMessageW(s.hwnd, WM_MOUSEMOVE, 0, MAKELPARAM(blanks[row_count - 2].x, blanks[row_count - 2].y));
+                    pump(500);
+                    const bool okay = multiple >= static_cast<size_t>(row_count) && tab->SelectedCount() == 1 && tab->IsSelected(sources[middle]);
+                    fprintf(log, "[%s] burst repeat=%d reverse=%d paints=%d slight_move=%d location=%d before=%zu selected_count=%zu index=%d\n",
+                        okay ? "PASS" : "FAIL", repeat, reverse, paints, slight_move, location,
+                        static_cast<size_t>(multiple), static_cast<size_t>(tab->SelectedCount()), tab->selected_index);
+                    failures += !okay;
+                    // Save every timing/location combination once, plus failures.
+                    wchar_t data[32768]{};
+                    if ((repeat == 0 || !okay) && GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", data, ARRAYSIZE(data))) {
+                        const int id = (((repeat * 2 + int(reverse)) * 2 + int(paints)) * 2 + int(slight_move)) * 3 + location;
+                        const auto base = std::wstring(data) + L"\\burst-" + std::to_wstring(id);
+                        const bool fast = s.compositor.SaveSnapshot((base + L"-fast.png").c_str());
+                        InvalidateRect(s.hwnd, nullptr, FALSE);
+                        UpdateWindow(s.hwnd);
+                        const bool full = s.compositor.SaveSnapshot((base + L"-full.png").c_str());
+                        fprintf(log, "[%s] burst snapshots id=%d\n", fast && full ? "PASS" : "FAIL", id);
+                        failures += !(fast && full);
+                    }
+                    fflush(log);
+                }
+            }
+        }
+        return failures ? 1 : 0;
+    }
+    return 2;
+}
+
 int CheckDeleteSelection(AppState& s, FILE* log) {
     wchar_t data[32768]{};
     if (!s.isolatedTest || !GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", data, ARRAYSIZE(data))) return 2;
@@ -27,28 +580,60 @@ int CheckDeleteSelection(AppState& s, FILE* log) {
         }
     }
     s.appPrefs.confirm_recycle_delete = false;
+    if (GetEnvironmentVariableW(L"PULSE_TEST_DELETE_LATENCY_ICONS", nullptr, 0)) {
+        tab->view_mode = ui::ViewMode::LargeIcons;
+        ShowWindow(s.hwnd, SW_SHOWNOACTIVATE);
+        InvalidateRect(s.hwnd, nullptr, FALSE);
+    }
     int failures = 0;
-    const auto pump = [] {
+    std::atomic<ULONGLONG> posted_at{0};
+    ULONGLONG handler_at = 0, handler_done_at = 0;
+    const auto pump = [&] {
         MSG msg{};
-        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        if (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            const bool deletion = msg.hwnd == s.hwnd && msg.message == WM_KEYDOWN && msg.wParam == VK_DELETE;
+            if (deletion) handler_at = GetTickCount64();
+            const auto dispatch_start = GetTickCount64();
             TranslateMessage(&msg); DispatchMessageW(&msg);
-        }
-        Sleep(10);
+            const auto dispatch_ms = GetTickCount64() - dispatch_start;
+            if (dispatch_ms >= 100) {
+                fprintf(log, "[SLOW_MESSAGE] message=0x%x wparam=%llu elapsed=%llu ms\n", msg.message,
+                    static_cast<unsigned long long>(msg.wParam), dispatch_ms);
+                fflush(log);
+            }
+            if (deletion) handler_done_at = GetTickCount64();
+        } else Sleep(1);
     };
     const auto remove = [&](std::vector<int> indices, int remaining, const wchar_t* expected, const char* label) {
-        tab->SelectIndices(indices);
+        if (!indices.empty()) tab->SelectIndices(indices);
         const auto paths = SelectedFullPaths(*tab);
-        DeleteSelected(s, false);
+        fprintf(log, "[STATE] window_visible=%d undo_capsule_visible=%d rows=%zu\n",
+            IsWindowVisible(s.hwnd) != FALSE, s.notification_toast.IsVisible(), tab->EntryCount());
+        const auto started = GetTickCount64();
+        posted_at.store(0);
+        handler_at = handler_done_at = 0;
+        std::jthread input([&] {
+            Sleep(20);
+            posted_at.store(GetTickCount64());
+            PostMessageW(s.hwnd, WM_KEYDOWN, VK_DELETE, 0);
+        });
+        ULONGLONG preflight_ms = 0, removed_ms = 0;
         const auto deadline = GetTickCount64() + 15000;
         bool completed = false;
         while (GetTickCount64() < deadline) {
             pump();
+            if (handler_done_at && !preflight_ms && !s.delete_preflight) preflight_ms = GetTickCount64() - started;
+            if (!removed_ms && std::all_of(paths.begin(), paths.end(), [](const auto& path) {
+                return GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES;
+            })) removed_ms = GetTickCount64() - started;
             completed = !tab->loading && tab->EntryCount() == static_cast<size_t>(remaining);
             for (const auto& path : paths) completed &= GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES;
             if (completed) break;
         }
-        const auto settled = GetTickCount64() + 500;
-        while (GetTickCount64() < settled) pump();
+        fprintf(log, "[TIMING] %s queued=%llu handler=%llu preflight=%llu absent=%llu list=%llu ms\n", label,
+            handler_at ? handler_at - posted_at.load() : 0, handler_done_at ? handler_done_at - handler_at : 0,
+            preflight_ms ? preflight_ms - (posted_at.load() - started) : 0,
+            removed_ms ? removed_ms - (posted_at.load() - started) : 0, GetTickCount64() - posted_at.load());
         const std::wstring actual = tab->selected_index >= 0 ? tab->EntryAt(tab->selected_index).name : L"";
         const bool okay = completed && actual == expected && (remaining || tab->SelectedCount() == 0);
         fprintf(log, "[%s] %s actual=%ls index=%d remaining=%zu\n", okay ? "PASS" : "FAIL", label,
@@ -57,6 +642,14 @@ int CheckDeleteSelection(AppState& s, FILE* log) {
         failures += !okay;
         return okay;
     };
+    if (GetEnvironmentVariableW(L"PULSE_TEST_DELETE_LATENCY_ONLY", nullptr, 0)) {
+        if (!remove({0}, 4, L"b.txt", "Del selects b")) return 1;
+        if (!remove({}, 3, L"c.txt", "immediate Del selects c")) return 1;
+        if (!remove({}, 2, L"d.txt", "immediate Del selects d")) return 1;
+        if (!remove({}, 1, L"e.txt", "immediate Del selects e")) return 1;
+        if (!remove({}, 0, L"", "immediate Del clears final selection")) return 1;
+        return failures ? 1 : 0;
+    }
     if (!remove({2}, 4, L"d.txt", "real recycle command: middle selection follows successor")) return 1;
     if (!remove({3}, 3, L"d.txt", "real recycle command: last selection follows predecessor")) return 1;
     if (!remove({1, 2}, 1, L"a.txt", "real recycle command: multiple deletion follows surviving neighbor")) return 1;
@@ -240,9 +833,26 @@ int CheckKeyboardSelection(AppState& s, FILE* log) {
 }
 }
 // Runs only in an explicitly isolated --shot test instance with fixture files.
+int RunSelectionRefreshProbe(AppState& s, FILE* log);
+int RunBackgroundDragProbe(AppState& s, FILE* log);
 int RunSelectionInputProbe(AppState& s, const wchar_t* output) {
     FILE* log = nullptr;
     if (_wfopen_s(&log, output, L"w") || !log) return 2;
+    if (GetEnvironmentVariableW(L"PULSE_TEST_BACKGROUND_DRAG_ONLY", nullptr, 0)) {
+        const int result = RunBackgroundDragProbe(s, log);
+        std::fclose(log);
+        return result;
+    }
+    if (GetEnvironmentVariableW(L"PULSE_TEST_SELECTION_REFRESH_ONLY", nullptr, 0)) {
+        const int result = RunSelectionRefreshProbe(s, log);
+        std::fclose(log);
+        return result;
+    }
+    if (GetEnvironmentVariableW(L"PULSE_TEST_MARQUEE_CLICK_ONLY", nullptr, 0)) {
+        const int result = CheckMarqueeClick(s, log);
+        std::fclose(log);
+        return result;
+    }
     if (GetEnvironmentVariableW(L"PULSE_TEST_DELETE_SELECTION_ONLY", nullptr, 0)) {
         const int result = CheckDeleteSelection(s, log);
         std::fclose(log);

@@ -1,5 +1,7 @@
 // explorer_window_takeover.cpp — see explorer_window_takeover.h.
 #include "explorer_window_takeover.h"
+#include "explorer_source_lifetime.h"
+#include "../common/runtime_log.h"
 #include "explorer_source_scope.h"
 #include "explorer_open_context.h"
 #include "explorer_submission_port.h"
@@ -42,6 +44,7 @@ namespace {
 constexpr UINT kStopMessage = WM_APP + 1;   // thread messages
 constexpr UINT kScanMessage = WM_APP + 2;
 constexpr UINT kPollMs = 50;
+constexpr UINT kDiscoveryMs = 1000;
 
 struct PidlDeleter {
     void operator()(std::remove_pointer_t<PIDLIST_ABSOLUTE>* pidl) const noexcept { CoTaskMemFree(pidl); }
@@ -145,9 +148,11 @@ struct WindowIdentity {
 };
 
 struct Candidate {
+    uint64_t diagnostic_id = diagnostics::runtime::NextId();
     HWND hwnd = nullptr;
     ULONGLONG registered_at = 0;
     ULONGLONG view_ready_at = 0;
+    ExplorerSelectionStability selection_stability;
     ComPtr<IWebBrowser2> browser;
     DWORD process_id = 0;
     DWORD thread_id = 0;
@@ -157,16 +162,26 @@ struct Candidate {
     std::shared_ptr<const ExplorerOpenContext> context;
 };
 
+bool SourceWindowGone(const Candidate& candidate) {
+    return ExplorerSourceDestroyed(candidate.hwnd, candidate.process_id, candidate.thread_id);
+}
+
 class Watcher {
 public:
     explicit Watcher(ExplorerWindowTakeover::Shared& shared) : shared_(shared) {}
     ~Watcher() {
         if (window_events_) UnhookWinEvent(window_events_);
         event_watcher_ = nullptr;
-        for (auto& candidate : candidates_)
-            if (candidate.submitted.handoff) candidate.submitted.handoff->Cancel();
+        for (auto& candidate : candidates_) {
+            if (const auto handoff = candidate.submitted.handoff) {
+                handoff->ConfirmClose(SourceWindowGone(candidate));
+                handoff->FailClose();
+                handoff->Cancel();
+            }
+        }
         if (point_ && advise_cookie_) point_->Unadvise(advise_cookie_);
         if (timer_) KillTimer(nullptr, timer_);
+        if (discovery_timer_) KillTimer(nullptr, discovery_timer_);
     }
     Watcher(const Watcher&) = delete;
     Watcher& operator=(const Watcher&) = delete;
@@ -175,6 +190,7 @@ public:
         TraceExplorerScope(shared_.scope, "start-shellwindows");
         HRESULT hr = CoCreateInstance(CLSID_ShellWindows, nullptr, CLSCTX_ALL, IID_PPV_ARGS(&windows_));
         TraceExplorerScope(shared_.scope, "start-shellwindows-result", hr);
+        diagnostics::runtime::Event("explorer_watcher_start", {{"phase", 0}, {"hr", static_cast<uint32_t>(hr)}});
         if (FAILED(hr)) {
             TraceShellWindows(L"takeover: CoCreateInstance(ShellWindows) hr=0x%08x", static_cast<unsigned>(hr));
             return false;
@@ -189,9 +205,21 @@ public:
             }
         }
         TraceExplorerScope(shared_.scope, "start-baseline");
+        // A visible Explorer may not have registered its Shell view yet. It is
+        // still user-owned at startup and must not be admitted by a later scan.
+        if (!shared_.scope && !EnumWindows([](HWND hwnd, LPARAM param) -> BOOL {
+                if (HasClass(hwnd, L"CabinetWClass"))
+                    reinterpret_cast<Watcher*>(param)->known_.insert(hwnd);
+                return TRUE;
+            }, reinterpret_cast<LPARAM>(this))) {
+            diagnostics::runtime::Event("explorer_watcher_start", {{"phase", 3},
+                {"hr", static_cast<uint32_t>(HRESULT_FROM_WIN32(GetLastError()))}}, diagnostics::runtime::Level::Error);
+            return false;
+        }
         if (!ForEachExplorerWindow([&](HWND hwnd, IWebBrowser2*) {
             if (!shared_.scope || !ExplorerScopeWindow(*shared_.scope, hwnd)) known_.insert(hwnd);
         })) {
+            diagnostics::runtime::Event("explorer_watcher_start", {{"phase", 1}, {"hr", static_cast<uint32_t>(E_FAIL)}}, diagnostics::runtime::Level::Error);
             TraceExplorerScope(shared_.scope, "start-reject-incomplete-baseline", E_FAIL); return false;
         }
         if (shared_.scope) { Scan(); TraceExplorerScope(shared_.scope, "start-scoped-ready", S_OK); return true; }
@@ -210,14 +238,30 @@ public:
         }
         TraceShellWindows(L"takeover: watching, %zu windows already open, advise hr=0x%08x",
                           known_.size(), static_cast<unsigned>(hr));
-        return SUCCEEDED(hr);
+        diagnostics::runtime::Event("explorer_watcher_start", {{"phase", 2}, {"hr", static_cast<uint32_t>(hr)},
+            {"baseline_windows", known_.size()}, {"window_hook", window_events_ != nullptr}},
+            FAILED(hr) ? diagnostics::runtime::Level::Error : diagnostics::runtime::Level::Info);
+        // Registration callbacks can be missed during subscription or transient
+        // Shell enumeration failure. Keep a slow discovery timer independent of
+        // the short-lived handoff polling timer; no UI thread filesystem work.
+        discovery_timer_ = SetTimer(nullptr, 0, kDiscoveryMs, nullptr);
+        if (!discovery_timer_) diagnostics::runtime::Event("explorer_watcher_start", {{"phase", 4},
+            {"hr", static_cast<uint32_t>(HRESULT_FROM_WIN32(GetLastError()))}}, diagnostics::runtime::Level::Error);
+        if (FAILED(hr) && !discovery_timer_) return false;
+        Scan();
+        return true;
+    }
+
+    void Timer(UINT_PTR id) {
+        if (id == discovery_timer_) Scan();
+        else if (id == timer_) Poll();
     }
 
     void Scan(bool keep_new_windows = false) {
         TraceExplorerScope(shared_.scope, "scan-enter");
         for (auto it = known_.begin(); it != known_.end();) it = IsWindow(*it) ? std::next(it) : known_.erase(it);
         std::erase_if(shift_windows_, [](const auto& entry) { return !entry.second->Matches(); });
-        ForEachExplorerWindow([&](HWND hwnd, IWebBrowser2* browser) {
+        const bool complete = ForEachExplorerWindow([&](HWND hwnd, IWebBrowser2* browser) {
             if (shared_.scope && !ExplorerScopeWindow(*shared_.scope, hwnd)) return;
             if (!hwnd || !known_.insert(hwnd).second) {
                 TraceExplorerScope(shared_.scope, "scan-reject-known", S_FALSE); return;
@@ -225,12 +269,14 @@ public:
             DWORD pid = 0;
             GetWindowThreadProcessId(hwnd, &pid);
             if (pid == GetCurrentProcessId() || !IsExplorerProcess(pid)) {
+                diagnostics::runtime::Event("explorer_candidate", {{"candidate_id", diagnostics::runtime::NextId()}, {"reason", 3}});
                 TraceExplorerScope(shared_.scope, "scan-reject-process", E_ACCESSDENIED); return;
             }
             // Shift held: File Explorer is wanted this time.
             const auto retained = shift_windows_.find(hwnd);
             if (keep_new_windows || (GetAsyncKeyState(VK_SHIFT) & 0x8000) ||
                 (retained != shift_windows_.end() && retained->second->Matches())) {
+                diagnostics::runtime::Event("explorer_candidate", {{"candidate_id", diagnostics::runtime::NextId()}, {"reason", 1}});
                 TraceExplorerScope(shared_.scope, "scan-reject-shift", S_FALSE);
                 TraceShellWindows(L"takeover: hwnd=%p left alone (Shift)", hwnd);
                 return;
@@ -247,25 +293,55 @@ public:
                                                                &exited, &kernel, &user);
             if (process) CloseHandle(process);
             if (!identified || !candidate.thread_id) {
+                diagnostics::runtime::Event("explorer_candidate", {{"candidate_id", candidate.diagnostic_id}, {"reason", 4}});
                 TraceExplorerScope(shared_.scope, "scan-reject-process-time", HRESULT_FROM_WIN32(GetLastError())); return;
             }
-            if (!ScopedView(candidate)) return;
+            if (!ScopedView(candidate)) {
+                diagnostics::runtime::Event("explorer_candidate", {{"candidate_id", candidate.diagnostic_id}, {"reason", 5}});
+                return;
+            }
             candidate.identity = std::make_shared<WindowIdentity>();
             candidate.identity->window = hwnd;
             if (GetPropW(hwnd, candidate.identity->property.c_str()) ||
                 !SetPropW(hwnd, candidate.identity->property.c_str(), candidate.identity.get())) {
+                diagnostics::runtime::Event("explorer_candidate", {{"candidate_id", candidate.diagnostic_id}, {"reason", 6}});
                 TraceExplorerScope(shared_.scope, "scan-reject-window-marker", E_ACCESSDENIED); return;
             }
             candidates_.push_back(std::move(candidate));
             TraceExplorerScope(shared_.scope, "scan-admitted", S_OK);
             TraceShellWindows(L"takeover: new Explorer window hwnd=%p", hwnd);
         });
+        if (complete != scan_complete_) {
+            diagnostics::runtime::Event("explorer_watcher_scan", {{"complete", complete}});
+            scan_complete_ = complete;
+        }
         UpdateTimer();
     }
 
     void Poll() {
         for (auto it = candidates_.begin(); it != candidates_.end();) {
+            if (const auto handoff = it->submitted.handoff;
+                handoff && handoff->state == HandoffState::Closing) {
+                // Observe destruction before timeout/stop: a successful HRESULT
+                // is only acceptance and Explorer can ignore a close request.
+                if (handoff->ConfirmClose(SourceWindowGone(*it))) {
+                    TraceExplorerScope(shared_.scope, "handoff-source-destroyed", S_OK);
+                    it = candidates_.erase(it);
+                } else if (GetTickCount64() >= handoff->deadline_tick) {
+                    diagnostics::runtime::Event("explorer_source_close_unconfirmed", {
+                        {"request_id", handoff->diagnostics.id},
+                        {"source_exists", IsWindow(it->hwnd) != FALSE},
+                        {"marker_matches", it->identity && it->identity->Matches()},
+                        {"source_pid", it->process_id}});
+                    handoff->FailClose(HandoffState::Expired);
+                    TraceExplorerScope(shared_.scope, "handoff-source-still-open", E_FAIL);
+                    it = candidates_.erase(it);
+                } else ++it;
+                continue;
+            }
             if (GetAsyncKeyState(VK_SHIFT) & 0x8000) {
+                if (!it->submitted.handoff) diagnostics::runtime::Event("explorer_candidate",
+                    {{"candidate_id", it->diagnostic_id}, {"reason", 1}});
                 if (it->submitted.handoff) it->submitted.handoff->Cancel();
                 it = candidates_.erase(it);
                 continue;
@@ -276,7 +352,7 @@ public:
                 else if (GetTickCount64() >= handoff->deadline_tick) handoff->Cancel(HandoffState::Expired);
                 const auto state = handoff->state.load();
                 if (state == HandoffState::Pending) {
-                    // No close is possible before presentation. Avoid repeatedly
+                    // No close is possible before background preparation. Avoid repeatedly
                     // enumerating Shell COM while the UI is still pending; retain
                     // the full scoped window identity and unchanged deadline.
                     if (!IsWindow(it->hwnd) || (shared_.scope && !ExplorerScopeWindow(*shared_.scope, it->hwnd)))
@@ -293,37 +369,40 @@ public:
             }
             // Admission/pre-submit, Ready and the final Quit recheck continue to
             // require the complete folder, selection and single-tab evidence.
-            if (!IsWindow(it->hwnd) || !ScopedView(*it)) {
+            if (!IsWindow(it->hwnd) || (!it->submitted.handoff && !ScopedView(*it))) {
+                if (!it->submitted.handoff) diagnostics::runtime::Event("explorer_candidate",
+                    {{"candidate_id", it->diagnostic_id}, {"reason", 7}});
                 if (it->submitted.handoff) it->submitted.handoff->Cancel();
                 it = candidates_.erase(it);
                 continue;
             }
             if (it->submitted.handoff) {
                 const auto handoff = it->submitted.handoff;
-                ExplorerTakeoverRequest current;
                 if (shared_.stopping || GetTickCount64() >= handoff->deadline_tick)
                     handoff->Cancel(HandoffState::Expired);
                 const auto state = handoff->state.load();
                 if (state == HandoffState::Pending) { ++it; continue; }
-                const SourceCloseStep step = state == HandoffState::Ready
-                    ? DecideSourceClose(CloseProbe(*it, current)) : SourceCloseStep::Abort;
-                // Waiting must leave Ready cancellable by navigation, Stop or expiry.
-                if (step == SourceCloseStep::Wait) { ++it; continue; }
-                if (step == SourceCloseStep::Close) FinishClose(*it);
-                // A changed selection has no presentation acknowledgement. Retain
-                // the source rather than closing on an unconfirmed follow-up.
-                else handoff->Cancel();
-                it = candidates_.erase(it);
+                // FinishClose owns the complete final COM revalidation. An
+                // identical preliminary scan adds latency, not authorization.
+                if (state == HandoffState::Ready) {
+                    if (FinishClose(*it) == SourceCloseStep::Wait) { ++it; continue; }
+                } else handoff->Cancel();
+                if (handoff->state == HandoffState::Closing) ++it;
+                else it = candidates_.erase(it);
                 continue;
             }
             ExplorerWindowProbe probe;
-            const ULONGLONG now = GetTickCount64();
-            probe.age_ms = static_cast<unsigned>(now - it->registered_at);
             ExplorerTakeoverRequest request;
             Read(*it, probe, request);
+            const ULONGLONG now = GetTickCount64();
+            probe.age_ms = static_cast<unsigned>(now - it->registered_at);
+            probe.selection_read = request.selection_read;
+            probe.stable_age_ms = it->selection_stability.Observe(probe.age_ms,
+                probe.view_ready && probe.supported && request.selection_read, request.folder, request.names);
             // This PC opened while 「此电脑」 is left to File Explorer: the user
             // chose Explorer for it (the desktop icon, Win+E set to This PC).
-            if (probe.supported && request.folder.empty() && !shared_.take_this_pc) probe.supported = false;
+            const bool this_pc_retained = probe.supported && request.folder.empty() && !shared_.take_this_pc;
+            if (this_pc_retained) probe.supported = false;
             if (probe.view_ready && !it->view_ready_at) it->view_ready_at = now;
             probe.view_age_ms = it->view_ready_at ? static_cast<unsigned>(now - it->view_ready_at) : 0;
             const ExplorerTakeoverStep step = DecideExplorerTakeover(probe);
@@ -331,6 +410,13 @@ public:
                 ++it;
                 continue;
             }
+            diagnostics::runtime::Event("explorer_candidate", {{"candidate_id", it->diagnostic_id},
+                {"reason", this_pc_retained ? 8u : !probe.view_ready ? 9u : !probe.supported ?
+                    (request.folder.empty() ? 2u : 10u) : !request.selection_read ? 11u :
+                    step == ExplorerTakeoverStep::Take ? 0u : 12u}, {"age_ms", probe.age_ms},
+                {"view_age_ms", probe.view_age_ms}, {"stable_age_ms", probe.stable_age_ms}, {"view_ready", probe.view_ready},
+                {"supported", probe.supported}, {"selection_read", request.selection_read}, {"selected", probe.selected},
+                {"tabs", static_cast<uint64_t>(CountTabs(GetAncestor(it->hwnd, GA_ROOT)))}});
             TraceShellWindows(L"takeover: hwnd=%p %s after %u ms folder=[%s] selected=%zu", it->hwnd,
                               step == ExplorerTakeoverStep::Take ? L"taken" : L"left", probe.age_ms,
                               request.folder.c_str(), request.names.size());
@@ -350,6 +436,7 @@ private:
         if (!watcher || !hwnd || object != OBJID_WINDOW || child != CHILDID_SELF) return;
         if (event == EVENT_OBJECT_DESTROY) {
             watcher->shift_windows_.erase(hwnd);
+            watcher->known_.erase(hwnd);
             return;
         }
         if (!(GetAsyncKeyState(VK_SHIFT) & 0x8000) || !HasClass(hwnd, L"CabinetWClass") ||
@@ -479,7 +566,10 @@ private:
 
     SourceCloseProbe CloseProbe(const Candidate& candidate, ExplorerTakeoverRequest& current) {
         SourceCloseProbe probe;
-        if (!ScopedView(candidate)) return probe;
+        // The complete close probe below already reads the folder, selection
+        // and Shell view count. Apply the test scope to that same evidence;
+        // recursively running ScopedView here repeats the expensive COM scan.
+        if (shared_.scope && !ExplorerScopeWindow(*shared_.scope, candidate.hwnd)) return probe;
         DWORD pid = 0;
         const DWORD tid = GetWindowThreadProcessId(candidate.hwnd, &pid);
         HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
@@ -505,6 +595,8 @@ private:
         probe.single_tab = complete && root && views == 1 && (tabs == 1 || (tabs == 0 && !IsWindows11()));
         ExplorerWindowProbe view;
         Read(candidate, view, current);
+        if (shared_.scope && !ExplorerScopeView(*shared_.scope, true,
+                CanonicalExplorerScopePath(current.folder), views, tabs)) return probe;
         probe.identity_kept = view.view_ready && view.supported && current.selection_read &&
                               current.folder == candidate.submitted.folder;
         auto previous = candidate.submitted.names;
@@ -515,16 +607,24 @@ private:
         probe.sent_selection = !candidate.submitted.names.empty();
         probe.view_age_ms = candidate.view_ready_at
             ? static_cast<unsigned>(GetTickCount64() - candidate.view_ready_at) : 0;
+        if (candidate.submitted.handoff && DecideSourceClose(probe) == SourceCloseStep::Abort)
+            candidate.submitted.handoff->diagnostics.Emit(HandoffPhase::Rejected, 2,
+                (!probe.identity_kept ? 1u : 0u) | (!probe.single_tab ? 2u : 0u) |
+                (probe.selection_changed ? 4u : 0u));
         return probe;
     }
 
-    void FinishClose(Candidate& candidate) {
-        // Re-read after the initial decision: COM calls can pump messages and
-        // the user can change the folder, selection or tab count meanwhile.
+    SourceCloseStep FinishClose(Candidate& candidate) {
+        // Re-read immediately before claiming close: preparation may have
+        // completed long after admission, and COM calls can pump messages.
         ExplorerTakeoverRequest current;
-        if (DecideSourceClose(CloseProbe(candidate, current)) != SourceCloseStep::Close) {
+        const auto step = DecideSourceClose(CloseProbe(candidate, current));
+        if (step == SourceCloseStep::Wait) return step;
+        if (step != SourceCloseStep::Close) {
+            if (step == SourceCloseStep::SelectAndKeep)
+                candidate.submitted.handoff->diagnostics.Emit(HandoffPhase::Rejected, 6);
             candidate.submitted.handoff->Cancel();
-            return;
+            return step;
         }
         {
             std::lock_guard lock(shared_.handoffs_mutex);
@@ -532,29 +632,39 @@ private:
             // holding it: Stop must not wait indefinitely on an Explorer call.
             DWORD pid = 0;
             const DWORD tid = GetWindowThreadProcessId(candidate.hwnd, &pid);
+            const int tabs = CountTabs(GetAncestor(candidate.hwnd, GA_ROOT));
             if (shared_.stopping || !candidate.identity->Matches() ||
                 pid != candidate.process_id || tid != candidate.thread_id ||
+                (tabs != 1 && (tabs != 0 || IsWindows11())) ||
                 !candidate.submitted.handoff->ClaimClose(GetTickCount64())) {
+                candidate.submitted.handoff->diagnostics.Emit(HandoffPhase::Rejected, 3, shared_.stopping);
                 candidate.submitted.handoff->Cancel();
-                return;
+                return SourceCloseStep::Abort;
             }
         }
         if (shared_.scope) {
             if (!SetEvent(shared_.scope->evidence->close_authorized_event)) {
                 TraceExplorerScope(shared_.scope, "handoff-close-signal-failed", HRESULT_FROM_WIN32(GetLastError()));
-                return;
+                candidate.submitted.handoff->FailClose();
+                return SourceCloseStep::Abort;
             }
             TraceExplorerScope(shared_.scope, "handoff-close-authorized", S_OK);
         }
         const HRESULT hr = candidate.browser->Quit();
+        candidate.submitted.handoff->diagnostics.Emit(HandoffPhase::QuitResult, static_cast<uint32_t>(hr));
         if (shared_.scope) shared_.scope->evidence->quit = SUCCEEDED(hr);
+        if (!candidate.submitted.handoff->ConfirmClose(SourceWindowGone(candidate)) && FAILED(hr))
+            candidate.submitted.handoff->FailClose();
         TraceShellWindows(L"takeover: hwnd=%p Quit hr=0x%08x", candidate.hwnd, static_cast<unsigned>(hr));
+        return SourceCloseStep::Close;
     }
 
     bool Take(Candidate& candidate, ExplorerTakeoverRequest request) {
         if (!request.selection_read || shared_.stopping) return false;
         request.handoff = std::make_shared<ExplorerHandoff>(GetTickCount64() + 10000);
         candidate.submitted = request;
+        diagnostics::runtime::Event("explorer_candidate_link", {{"candidate_id", candidate.diagnostic_id},
+            {"request_id", request.handoff->diagnostics.id}});
         candidate.context = MakeExplorerOpenContext(request.folder, request.names, request.handoff, request.selection_read);
         if (!candidate.context) { request.handoff->Cancel(); return false; }
         {
@@ -571,7 +681,9 @@ private:
         }
         // Never acquire the port's queue lock while holding handoffs_mutex:
         // Stop revokes the port before synchronizing close commitment.
+        candidate.submitted.handoff->diagnostics.Emit(HandoffPhase::Submitted, 0, candidate.context->names.size());
         if (!shared_.port || !shared_.port->Submit(candidate.context)) {
+            candidate.submitted.handoff->diagnostics.Emit(HandoffPhase::Rejected, 1);
             candidate.submitted.handoff->Cancel();
             TraceExplorerScope(shared_.scope, "handoff-submit-rejected", E_FAIL);
             return false;
@@ -600,6 +712,8 @@ private:
     std::set<HWND> known_;
     std::vector<Candidate> candidates_;
     UINT_PTR timer_ = 0;
+    UINT_PTR discovery_timer_ = 0;
+    bool scan_complete_ = true;
 };
 
 DWORD WINAPI TakeoverThread(void* param) {
@@ -611,6 +725,8 @@ DWORD WINAPI TakeoverThread(void* param) {
     const HRESULT initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     TraceExplorerScope(shared->scope, "thread-initialize-result", initialized);
     if (FAILED(initialized)) {
+        diagnostics::runtime::Event("explorer_watcher_start", {{"phase", 5},
+            {"hr", static_cast<uint32_t>(initialized)}}, diagnostics::runtime::Level::Error);
         if (shared->scope) shared->scope->evidence->stopped = true;
         return 1;
     }
@@ -631,7 +747,7 @@ DWORD WINAPI TakeoverThread(void* param) {
                 continue;
             }
             if (!msg.hwnd && msg.message == WM_TIMER) {
-                watcher.Poll();
+                watcher.Timer(static_cast<UINT_PTR>(msg.wParam));
                 continue;
             }
             if (!msg.hwnd && msg.message == kStopMessage) continue;
@@ -660,6 +776,8 @@ ExplorerWindowTakeover::ExplorerWindowTakeover(std::shared_ptr<ExplorerSubmissio
         if (!thread_) shared_->scope->evidence->stopped = true;
     }
     if (!thread_) {
+        diagnostics::runtime::Event("explorer_watcher_start", {{"phase", 6},
+            {"hr", static_cast<uint32_t>(HRESULT_FROM_WIN32(GetLastError()))}}, diagnostics::runtime::Level::Error);
         if (shared_->port) shared_->port->Revoke();
         delete param;
     }

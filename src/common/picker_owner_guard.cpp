@@ -203,11 +203,12 @@ struct PickerOwnerGuard::Impl {
     bool foreign_registered = false;
     HWINEVENTHOOK foreign_hook = nullptr;
     std::shared_ptr<ForeignLifetime> foreign_lifetime;
-    explicit Impl(HWND value) : window(value) {
+    explicit Impl(HWND value, DWORD remote_parent = 0) : window(value) {
         if (!window) return;
         stage = PickerOwnerFailureStage::Window;
         thread = GetWindowThreadProcessId(window, &pid);
         if (!thread || !pid || !IsWindow(window)) { error = ERROR_INVALID_WINDOW_HANDLE; return; }
+        if (remote_parent && (pid != remote_parent || pid == GetCurrentProcessId())) { error = ERROR_ACCESS_DENIED; return; }
         stage = PickerOwnerFailureStage::OpenProcess;
         process.Reset(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid));
         if (!process) { error = GetLastError(); if (!error) error = ERROR_GEN_FAILURE; return; }
@@ -256,6 +257,7 @@ struct PickerOwnerGuard::Impl {
         const auto name = L"Local\\Pulse.PickerClient.Owner." + std::to_wstring(pid) + L"." +
             std::to_wstring(creation.dwHighDateTime) + L"." + std::to_wstring(creation.dwLowDateTime) + L"." +
             std::to_wstring(reinterpret_cast<UINT_PTR>(window));
+        if (!remote_parent) {
         stage = PickerOwnerFailureStage::SecurityAttributes;
         CurrentUserSecurityAttributes security;
         if (!security) { error = ERROR_ACCESS_DENIED; return; }
@@ -269,6 +271,7 @@ struct PickerOwnerGuard::Impl {
             if (!error) error = ERROR_GEN_FAILURE; return;
         }
         locked = true;
+        }
         stage = PickerOwnerFailureStage::WindowIdentity;
         if (!SameWindow()) { error = ERROR_INVALID_WINDOW_HANDLE; return; }
         if (pid != GetCurrentProcessId()) {
@@ -357,7 +360,10 @@ struct PickerOwnerGuard::Impl {
             const HWND now=GetForegroundWindow();
             if(now==foreground || now==dialog || now==window || IsChild(dialog,now)) {
                 SetActiveWindow(window);
-                if(Alive() && IsWindowEnabled(window) && GetActiveWindow()==window) SetFocus(window);
+                // Activation synchronously calls the host's WM_ACTIVATE and
+                // WM_SETFOCUS handlers. They own focus restoration (including
+                // choosing a child control or switching to another window).
+                // A second SetFocus here overwrites that reentrant decision.
             }
         }
     }
@@ -377,6 +383,8 @@ struct PickerOwnerGuard::Impl {
     }
 };
 PickerOwnerGuard::PickerOwnerGuard(HWND window) : impl_(std::make_unique<Impl>(window)) {}
+PickerOwnerGuard::PickerOwnerGuard(HWND window, CallerManagedRemoteOwner parent)
+    : impl_(std::make_unique<Impl>(window, parent.authenticated_parent_pid)) {}
 PickerOwnerGuard::~PickerOwnerGuard() = default;
 DWORD PickerOwnerGuard::Error() const noexcept { return impl_->error; }
 PickerOwnerFailureStage PickerOwnerGuard::FailureStage() const noexcept { return impl_->error ? impl_->stage : PickerOwnerFailureStage::None; }

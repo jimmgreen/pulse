@@ -14,6 +14,7 @@
 #include "typography.h"
 #include "../app/resource.h"
 #include "../app/places.h"
+#include "../app/keymap.h"
 #include "../common/text_format.h"
 #include <windowsx.h>
 #include <d2d1effects.h>
@@ -49,7 +50,7 @@ void DrawSidebarInsertionLine(ID2D1DeviceContext* dc, ID2D1SolidColorBrush* brus
 // come from the renderer's frame pump (RequestMotionFrame), so idle stays
 // idle: nothing ticks once everything has settled.
 constexpr motion::SpringSpec kPillLead{900.0f, 60.0f};
-constexpr motion::SpringSpec kPillTrail{300.0f, 30.0f};
+
 constexpr float kPillMaxStretch = 1.9f;  // times the row height
 constexpr float kHoverFadeInMs = 90.0f, kHoverFadeOutMs = 120.0f;
 
@@ -59,7 +60,7 @@ struct ChevronTurn {
 };
 
 struct SidebarMotion {
-    motion::SpringRectMotion lead, trail, hover;
+    motion::SpringRectMotion lead, hover;
     uint64_t hover_context = 0;
     float hover_alpha = 0.0f;
     D2D1_RECT_F hover_rect{}, hover_target{};
@@ -141,6 +142,14 @@ float ChevronAngle(SidebarMotion& m, const std::wstring& key, bool expanded, uin
 }
 
 } // namespace
+
+bool SidebarSelectionMovingForTest(const MainRenderer* renderer) {
+    const auto& m = SidebarMotionFor(renderer);
+    return m.lead.Active(motion::NowMs());
+}
+D2D1_RECT_F SidebarHoverPositionForTest(const MainRenderer* renderer) {
+    return SidebarMotionFor(renderer).hover_rect;
+}
 
 D2D1_RECT_F MainRenderer::SidebarRect(float w, float h) const {
     float top = title_bar_height_ + margin_;
@@ -271,7 +280,6 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
         sm.animations_checked = motion_now_ ? motion_now_ : 1;
         sm.animations = motion::SystemAnimationsEnabled();
         sm.lead.SetAnimationsEnabled(sm.animations);
-        sm.trail.SetAnimationsEnabled(sm.animations);
         sm.hover.SetAnimationsEnabled(sm.animations);
     }
     bool sidebar_moving = false;
@@ -370,9 +378,11 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
         const int64_t key = static_cast<int64_t>(std::hash<std::wstring>{}(item.path)) ^
                             (static_cast<int64_t>(slot.group) << 48);
         const D2D1_RECT_F lead = sm.lead.Update(context, key, slot.rc, motion_frame_, motion_now_, kPillLead);
-        const D2D1_RECT_F trail = sm.trail.Update(context, key, slot.rc, motion_frame_, motion_now_, kPillTrail);
+        // One continuously retargeted spring keeps the transition without a second
+        // stretching tail competing with hover during rapid tab changes.
+        const D2D1_RECT_F trail = lead;
         const D2D1_RECT_F pill = StretchPill(lead, trail, scale_);
-        if (sm.lead.Active(motion_now_) || sm.trail.Active(motion_now_)) sidebar_moving = true;
+        if (sm.lead.Active(motion_now_)) sidebar_moving = true;
         const float radius = (compact ? theme.radius_control : theme.radius_flyout) * scale_;
         // Same fills the static rows use (Painter::DrawSidebarItem / rail).
         D2D1_COLOR_F fill = theme.fill_selected;
@@ -386,7 +396,6 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
     }
     if (pill_slot < 0) {
         sm.lead.Hide();
-        sm.trail.Hide();
     }
     const auto isPillSlot = [&](const SidebarSlot& slot) {
         return pill_slot >= 0 && &slot == &slots[static_cast<size_t>(pill_slot)];
@@ -447,7 +456,7 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
                 }
                 if (group.badge_count > 0) {
                     // 网络位置: devices found on this network that the user has
-                    // not looked at yet (pulse_network_design.html §06).
+                    // not looked at yet.
                     IDWriteTextFormat* fmt = compositor_->SmallFormat();
                     wchar_t num[4]{};
                     if (group.badge_count > 9) wcscpy_s(num, L"9+");
@@ -763,7 +772,7 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             continue;
         }
         if (slot.kind == SidebarSlot::TrayPanel) {
-            // Shelf redesign (pulse_tray_redesign.html): strip / drop / shelf.
+            // Shelf redesign: strip / drop / shelf.
             DrawTrayShelf(vm, slot.rc, theme);
             continue;
         }
@@ -787,6 +796,9 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             continue;
         }
         if (item.workspace_child_number > 0 && !compact) {
+            const bool held = vm.sidebar_pin_drag_index == slot.run;
+            const bool hot = held || IsHovered(vm, HitTestResult::SidebarItem, slot.run);
+            if (hot) painter_.FillRoundedRect(slot.rc, 5.0f * scale_, theme.fill_hover);
             const float left = slot.rc.left + (46.0f - static_cast<float>(item.indent) * 16.0f) * scale_;
             MakeBrush(dc, theme.stroke_divider, brStrokeDivider_);
             dc->DrawLine(D2D1::Point2F(left - 9.0f * scale_, slot.rc.top - 2.0f * scale_),
@@ -803,6 +815,7 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             case ViewMode::Content: glyph = L"\xE8A9"; break;
             default: break;
             }
+            if (hot) glyph = L"\xE784";
             DrawIconText(slot.rc.right - 26.0f * scale_, slot.rc.top, 22.0f * scale_, slot.rc.bottom - slot.rc.top,
                          glyph, L"", theme.text_secondary, 0.62f);
             continue;
@@ -1046,16 +1059,23 @@ void MainRenderer::DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rec
                     painter_.DrawText(item.badge, badge, compositor_->SmallFormat(), theme.accent, fluent::HorizontalAlignment::Center);
                 }
                 if (item.workspace_dirty) {
-                    const bool wide = l10n::Get(l10n::StringId::WorkspaceUpdate).size() <= 3 && slot.rc.right - slot.rc.left >= 224.0f * scale_;
-                    const auto drift = D2D1::RectF(slot.rc.left + 46.0f * scale_, slot.rc.top + 46.0f * scale_, slot.rc.right - 4.0f * scale_, slot.rc.bottom - 2.0f * scale_);
-                    painter_.FillRoundedRect(drift, 5.0f * scale_, WithAlpha(D2D1::ColorF(0xDFA54A), 0.12f));
-                    painter_.DrawText(l10n::Get(l10n::StringId::WorkspaceLayoutChanged),
-                        D2D1::RectF(drift.left + 4.0f * scale_, drift.top, wide ? WorkspaceActionRect(slot.rc, scale_, 2).left : drift.right, wide ? drift.bottom : slot.rc.top + 62.0f * scale_),
-                        compositor_->SmallFormat(), theme.text_secondary);
+                    const auto drift = WorkspaceDriftRect(slot.rc, scale_);
+                    const auto warning = vm.dark ? D2D1::ColorF(0xF5C26B) : D2D1::ColorF(0x985A00);
+                    const auto background = vm.dark ? WithAlpha(D2D1::ColorF(0xF5B450),0.12f)
+                                                       : WithAlpha(D2D1::ColorF(0xE8A028),0.14f);
+                    painter_.FillRoundedRect(drift,7.0f*scale_,IsHighContrast() ? theme.surface_card : background);
+                    const float label_left=drift.left+9.0f*scale_;
+                    const float label_right=WorkspaceActionRect(slot.rc,scale_,2).left-6.0f*scale_;
+                    MakeBrush(dc,theme.text,brText_);
+                    DrawTextEndEllipsis(compositor_,compositor_->SmallFormat(),brText_.get(),
+                        l10n::Get(l10n::StringId::WorkspaceLayoutChanged),label_left,drift.top,
+                        (std::max)(1.0f,label_right-label_left),drift.bottom-drift.top);
                     for (int action = 2; action < 4; ++action) {
                         const auto button = WorkspaceActionRect(slot.rc, scale_, action);
+                        if (IsHovered(vm,HitTestResult::SidebarWorkspaceAction,slot.run,action))
+                            painter_.FillRoundedRect(button,5.0f*scale_,theme.fill_hover);
                         painter_.DrawText(l10n::Get(action == 2 ? l10n::StringId::WorkspaceUpdate : l10n::StringId::WorkspaceRestore),
-                            button, compositor_->SmallFormat(), theme.accent, fluent::HorizontalAlignment::Center);
+                            button,compositor_->SmallFormat(),IsHighContrast() ? theme.text : warning,fluent::HorizontalAlignment::Center);
                     }
                 }
                 const auto rgb = item.workspace_color_rgb;
@@ -1255,7 +1275,11 @@ void MainRenderer::DrawWorkspacePreview(const WindowViewModel& vm, const D2D1_RE
     }
     wchar_t count[64]{};
     swprintf_s(count, l10n::Get(l10n::StringId::WorkspacePanes).c_str(), static_cast<int>(entry->workspace_panes.size()));
-    const auto footer = std::wstring(count) + (entry->workspace_index < 9 ? L"    Ctrl+Alt+" + std::to_wstring(entry->workspace_index + 1) : L"");
+    const app::KeyChord workspace_key{app::kKeyCtrl | app::kKeyAlt,
+        static_cast<uint16_t>('1' + entry->workspace_index)};
+    const bool has_shortcut = entry->workspace_index >= 0 && entry->workspace_index < 9 &&
+        app::WorkspaceShortcutIndex(app::ActiveKeymap(), workspace_key) == entry->workspace_index;
+    const auto footer = std::wstring(count) + (has_shortcut ? L"    " + app::FormatChord(workspace_key) : L"");
     painter_.DrawText(footer, D2D1::RectF(left + 12.0f * scale_, top + 180.0f * scale_, right - 12.0f * scale_, top + 202.0f * scale_), compositor_->SmallFormat(), theme.text_secondary);
 }
 

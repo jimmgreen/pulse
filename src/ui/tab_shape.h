@@ -15,6 +15,11 @@ struct ChromeTabShape {
 void FillChromeTab(ID2D1DeviceContext* dc, ID2D1Brush* brush,
                    const D2D1_RECT_F& bounds, const ChromeTabShape& shape);
 
+// A hairline along the tab's silhouette. A connected tab's outline is open at
+// the bottom, so it runs from shoulder to shoulder into the sheet below.
+void StrokeChromeTabEdge(ID2D1DeviceContext* dc, ID2D1Brush* brush,
+                         const D2D1_RECT_F& bounds, const ChromeTabShape& shape, float width);
+
 // Straight accent strip whose ends are clipped by the tab's rounded path.
 // bottom=true anchors the strip to the tab's bottom edge (tab-group style).
 void FillChromeTabAccent(ID2D1DeviceContext* dc, ID2D1Brush* brush,

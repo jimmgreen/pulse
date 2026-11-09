@@ -1,0 +1,13 @@
+{
+  "formatVersion": 1,
+  "templates": [
+    "directory-browser",
+    "directory-transfer",
+    "directory-workbench",
+    "file-operations",
+    "inspector",
+    "live-data",
+    "reactive-panel",
+    "rename-panel"
+  ]
+}

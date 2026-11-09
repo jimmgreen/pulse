@@ -1,4 +1,7 @@
 #include "../picker_inprocess/picker_ui_api_v2.h"
+#ifdef PULSE_REMOTE_PROVIDER_TEST
+#include "../shell_bridge/file_dialog_remote_provider.h"
+#endif
 #include <objbase.h>
 #include <cstdio>
 #include <filesystem>
@@ -10,8 +13,18 @@
 #include <wincodec.h>
 #include <wrl/client.h>
 #include <set>
+#include <mutex>
 
 namespace {
+// Snapshot requests: the remote picker HWND lives in pulse.exe, so pass the
+// path as a global atom; in-process pickers accept a same-process pointer.
+HANDLE SnapshotRequest(const std::wstring& path) {
+#ifdef PULSE_REMOTE_PROVIDER_TEST
+    return reinterpret_cast<HANDLE>(static_cast<ULONG_PTR>(GlobalAddAtomW(path.c_str())));
+#else
+    return const_cast<wchar_t*>(path.c_str());
+#endif
+}
 struct DpiApi {
     using GetThread = DPI_AWARENESS_CONTEXT (WINAPI*)();
     using SetThread = DPI_AWARENESS_CONTEXT (WINAPI*)(DPI_AWARENESS_CONTEXT);
@@ -102,17 +115,31 @@ struct StartupVisibility {
     bool requested = false, shown = false, moved_visible = false, pixels_before_show = false;
     bool folder_trigger = false;
     unsigned visible_positions = 0;
-    ~StartupVisibility() { if (hook) UnhookWindowsHookEx(hook); if (active == this) active = nullptr; }
+    ~StartupVisibility() {
+        if (hook) UnhookWindowsHookEx(hook); if (active == this) active = nullptr;
+#ifdef PULSE_REMOTE_PROVIDER_TEST
+        if (observer.joinable()) { PostThreadMessageW(observer_thread, WM_QUIT, 0, 0); observer.join(); }
+        if (remote == this) remote = nullptr;
+#endif
+    }
     bool Install(const std::wstring& path) {
         snapshot = path;
         active = this;
+#ifdef PULSE_REMOTE_PROVIDER_TEST
+        return InstallRemote();
+#else
         hook = SetWindowsHookExW(WH_CALLWNDPROC, Observe, nullptr, GetCurrentThreadId());
         return hook != nullptr;
+#endif
     }
     static bool SameRect(const RECT& left, const RECT& right) {
         return left.left == right.left && left.top == right.top && left.right == right.right && left.bottom == right.bottom;
     }
-    void Verify() const {
+    void Verify() {
+        Observed([this] { return shown; }, 2000);
+#ifdef PULSE_REMOTE_PROVIDER_TEST
+        std::lock_guard guard(lock);
+#endif
         Check(requested && shown && visible_positions > 0, "record actual initial host request and first visible window position");
         Check(pixels_before_show, "first visible position already has covered translucent chrome and opaque rendered content");
         Check(SameRect(first, expected), "first visible rectangle equals host final requested placement");
@@ -164,21 +191,80 @@ struct StartupVisibility {
                 if (GetClassNameW(message->hwnd, name, 128) && wcscmp(name, L"PulseFolderPickerWindow") == 0)
                     state->window = message->hwnd;
             }
-            if (state->window == message->hwnd && message->message == WM_WINDOWPOSCHANGED && IsWindowVisible(message->hwnd)) {
-                const auto prior = dpi.set_thread(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-                RECT rectangle{}; GetWindowRect(message->hwnd, &rectangle);
-                if (prior) dpi.set_thread(prior);
-                ++state->visible_positions;
-                if (!state->shown) {
-                    state->shown = true;
-                    state->first = rectangle;
-                    state->pixels_before_show = state->HasRenderedPixels();
-                    std::printf("STARTUP first-visible=%ld,%ld,%ld,%ld snapshot=%d\n", rectangle.left, rectangle.top,
-                        rectangle.right, rectangle.bottom, state->pixels_before_show);
-                } else if (!SameRect(state->first, rectangle)) state->moved_visible = true;
-            }
+            if (state->window == message->hwnd && message->message == WM_WINDOWPOSCHANGED && IsWindowVisible(message->hwnd))
+                state->Record(message->hwnd);
         }
         return CallNextHookEx(nullptr, code, wp, lp);
+    }
+    void Record(HWND hwnd) {
+        const auto prior = dpi.set_thread(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        RECT rectangle{}; GetWindowRect(hwnd, &rectangle);
+        if (prior) dpi.set_thread(prior);
+        ++visible_positions;
+        if (!shown) {
+            shown = true;
+            first = rectangle;
+            pixels_before_show = HasRenderedPixels();
+            std::printf("STARTUP first-visible=%ld,%ld,%ld,%ld snapshot=%d\n", rectangle.left, rectangle.top,
+                rectangle.right, rectangle.bottom, pixels_before_show);
+        } else if (!SameRect(first, rectangle)) moved_visible = true;
+    }
+#ifdef PULSE_REMOTE_PROVIDER_TEST
+    // The remote picker HWND lives in pulse.exe, where a WH_CALLWNDPROC hook on
+    // this thread cannot see it. Out-of-context WinEvents arrive in order on a
+    // dedicated thread, so creation, first visibility and every later move are
+    // still observed (rectangles are read when each event is delivered).
+    inline static StartupVisibility* remote = nullptr;
+    std::mutex lock;
+    std::thread observer;
+    DWORD observer_thread = 0;
+    static void CALLBACK WinEvent(HWINEVENTHOOK, DWORD event, HWND hwnd, LONG object, LONG child, DWORD, DWORD) {
+        auto* state = remote;
+        if (!state || !hwnd || object != OBJID_WINDOW || child != CHILDID_SELF) return;
+        std::lock_guard guard(state->lock);
+        if (!state->window) {
+            wchar_t name[128]{};
+            if (GetClassNameW(hwnd, name, 128) && wcscmp(name, L"PulseFolderPickerWindow") == 0) state->window = hwnd;
+        }
+        if (state->window == hwnd && (event == EVENT_OBJECT_SHOW || event == EVENT_OBJECT_LOCATIONCHANGE) && IsWindowVisible(hwnd))
+            state->Record(hwnd);
+    }
+    bool InstallRemote() {
+        HANDLE ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!ready) return false;
+        remote = this;
+        std::atomic<bool> installed{false};
+        observer = std::thread([this, ready, &installed] {
+            const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            MSG message{};
+            PeekMessageW(&message, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
+            const HWINEVENTHOOK hook_handle = SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_LOCATIONCHANGE, nullptr, WinEvent,
+                0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+            observer_thread = GetCurrentThreadId();
+            installed = hook_handle != nullptr;
+            SetEvent(ready);
+            while (hook_handle && GetMessageW(&message, nullptr, 0, 0) > 0) DispatchMessageW(&message);
+            if (hook_handle) UnhookWinEvent(hook_handle);
+            if (SUCCEEDED(com)) CoUninitialize();
+        });
+        WaitForSingleObject(ready, INFINITE);
+        CloseHandle(ready);
+        return installed;
+    }
+#endif
+    // Events reach the remote observer asynchronously; give them a bounded
+    // moment before reading what was observed.
+    template <class Done> bool Observed(Done done, DWORD timeout_ms) {
+#ifdef PULSE_REMOTE_PROVIDER_TEST
+        const auto deadline = GetTickCount64() + timeout_ms;
+        for (;;) {
+            { std::lock_guard guard(lock); if (done()) return true; }
+            if (GetTickCount64() >= deadline) return false;
+            Sleep(5);
+        }
+#else
+        (void)timeout_ms; return done();
+#endif
     }
 };
 struct State {
@@ -203,11 +289,13 @@ struct State {
     StartupVisibility* startup = nullptr;
     bool mask_sequence = false;
     std::wstring mask_folder;
-    std::atomic<unsigned> mask_type{99}, mask_results{0};
+    std::atomic<unsigned> mask_type{99}, mask_results{0}, callbacks_active{0};
     std::vector<unsigned> mask_type_events;
     int startup_terminal = 0;
     unsigned startup_changing = 0, startup_changed = 0;
+    bool folder_single = false;
     bool initial_empty = false, labels = false, labels_empty = false, multi = false, multi_close = false, open_missing = false, combo = false;
+    bool list_ten = false;
     std::wstring title, screenshot;
     std::thread driver;
     unsigned item_events=0,file_ok_events=0;
@@ -282,6 +370,7 @@ HRESULT ValueInputUi(State& state,const PulsePickerUiV2Event* event) {
 }
 HRESULT WINAPI Callback(void* opaque, const PulsePickerUiV2Event* event) {
     auto& state = *static_cast<State*>(opaque);
+    struct Active { std::atomic<unsigned>& count; explicit Active(std::atomic<unsigned>& c) : count(c) { ++count; } ~Active() { --count; } } active{state.callbacks_active};
     try {
         if (state.callback_navigation) {
             auto folder = [&]() {
@@ -385,7 +474,7 @@ HRESULT WINAPI Callback(void* opaque, const PulsePickerUiV2Event* event) {
                 const bool valid = event->control_id == 107 && event->property_value_count == 1 && event->property_values &&
                     std::wstring(event->property_values[0].data, event->property_values[0].units) == L"edited last scalar";
                 Check(valid, "eight-field panel edits the exact final scalar after scrolling");
-                SetPropW(event->window, L"Pulse.PickerTestSnapshot", const_cast<wchar_t*>(state.screenshot.c_str()));
+                SetPropW(event->window, L"Pulse.PickerTestSnapshot", SnapshotRequest(state.screenshot));
                 SendMessageW(event->window, WM_PAINT, 0, 0);
                 RemovePropW(event->window, L"Pulse.PickerTestSnapshot");
                 std::printf("PROPERTY_SCROLL_SCREENSHOT=%ls\n", state.screenshot.c_str()); std::fflush(stdout);
@@ -427,7 +516,7 @@ HRESULT WINAPI Callback(void* opaque, const PulsePickerUiV2Event* event) {
             state.navigated = queried == S_OK && state.place_path == folder.data();
             Check(state.navigated, "sidebar place click commits exact requested navigation destination");
             if (state.navigated && !state.screenshot.empty()) {
-                SetPropW(event->window, L"Pulse.PickerTestSnapshot", const_cast<wchar_t*>(state.screenshot.c_str()));
+                SetPropW(event->window, L"Pulse.PickerTestSnapshot", SnapshotRequest(state.screenshot));
                 SendMessageW(event->window, WM_PAINT, 0, 0);
                 RemovePropW(event->window, L"Pulse.PickerTestSnapshot");
                 std::printf("COMPUTER_SCREENSHOT=%ls\n", state.screenshot.c_str());
@@ -444,7 +533,7 @@ HRESULT WINAPI Callback(void* opaque, const PulsePickerUiV2Event* event) {
             snapshot.folder={folder.data(),static_cast<uint32_t>(folder.size()),0};snapshot.filename={filename.data(),static_cast<uint32_t>(filename.size()),0};
             snapshot.selection={selection.data(),static_cast<uint32_t>(selection.size()),0};snapshot.candidate={candidate.data(),static_cast<uint32_t>(candidate.size()),0};
             snapshot.selection_paths={selections.data(),static_cast<uint32_t>(selections.size()),0};snapshot.candidate_paths={candidates.data(),static_cast<uint32_t>(candidates.size()),0};
-            Check(state.api->Query(state.session,event->show_id,event->generation,&snapshot)==S_OK && snapshot.candidate_count==2 &&
+            Check(state.api->Query(state.session,event->show_id,event->generation,&snapshot)==S_OK && snapshot.candidate_count==(state.list_ten ? 10u : state.folder_single ? 1u : 2u) &&
                 std::wstring(candidate.data())==std::wstring(candidates.data()) && candidates[snapshot.candidate_paths.units]==0,"multi FileOk exposes complete same-generation candidates and first-item consistency");
             if(state.multi_close) Check(state.api->Close(state.session,event->show_id,state.requested)==S_OK,"multi candidate Close wins before committing any output array");
             return S_OK;
@@ -476,11 +565,14 @@ HRESULT WINAPI Callback(void* opaque, const PulsePickerUiV2Event* event) {
             auto& probe = *state.startup;
             probe.requested = true;
             if (probe.folder_trigger) Check(!state.ready, "initial FolderChanged host initialization precedes READY");
-            HWND actual = nullptr;
+            HWND actual = nullptr, observed = nullptr;
+            bool shown_before = true;
+            probe.Observed([&] { observed = probe.window; return observed != nullptr; }, 2000);
+            probe.Observed([&] { shown_before = probe.shown; return true; }, 0);
             Check(state.api->GetWindow(state.session, event->show_id, &actual) == S_OK && actual == event->window &&
-                actual == probe.window, "initial host callback obtains the observed real picker HWND");
-            Check(!IsWindowVisible(actual) && !probe.shown, "picker is hidden when initial host callback begins");
-            Check(SetPropW(actual, L"Pulse.PickerTestSnapshot", const_cast<wchar_t*>(probe.snapshot.c_str())) != FALSE,
+                actual == observed, "initial host callback obtains the observed real picker HWND");
+            Check(!IsWindowVisible(actual) && !shown_before, "picker is hidden when initial host callback begins");
+            Check(SetPropW(actual, L"Pulse.PickerTestSnapshot", SnapshotRequest(probe.snapshot)) != FALSE,
                 "request actual compositor snapshot before first visibility");
             const auto previous = dpi.set_thread(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
             RECT initial{}; GetWindowRect(actual, &initial);
@@ -534,8 +626,13 @@ HRESULT WINAPI Callback(void* opaque, const PulsePickerUiV2Event* event) {
         state.window = event->window;
         DWORD pid = 0;
         const DWORD tid = GetWindowThreadProcessId(event->window, &pid);
+#ifdef PULSE_REMOTE_PROVIDER_TEST
+        Check(event->window && IsWindowVisible(event->window) && pid != GetCurrentProcessId() && pid && tid,
+            "READY carries visible remote process HWND");
+#else
         Check(event->window && IsWindowVisible(event->window) && pid == GetCurrentProcessId() && tid == state.thread,
             "READY carries visible own process and STA HWND");
+#endif
         HWND actual = nullptr;
         const HRESULT got = state.api->GetWindow(state.session, event->show_id, &actual);
         Check(got == S_OK && actual == event->window, "callback GetWindow returns actual HWND");
@@ -591,7 +688,7 @@ HRESULT WINAPI Callback(void* opaque, const PulsePickerUiV2Event* event) {
             const auto capture = [&](const wchar_t* suffix) {
                 const auto path = std::filesystem::absolute(std::filesystem::path(L"bench_data") / (L"picker-prominent-" + std::to_wstring(GetCurrentProcessId()) + suffix + L".png"));
                 const auto text = path.wstring();
-                SetPropW(event->window, L"Pulse.PickerTestSnapshot", const_cast<wchar_t*>(text.c_str()));
+                SetPropW(event->window, L"Pulse.PickerTestSnapshot", SnapshotRequest(text));
                 SendMessageW(event->window, WM_PAINT, 0, 0);
                 RemovePropW(event->window, L"Pulse.PickerTestSnapshot");
                 Check(std::filesystem::exists(path), "prominent layout screenshot captured");
@@ -615,22 +712,28 @@ HRESULT WINAPI Callback(void* opaque, const PulsePickerUiV2Event* event) {
             wchar_t title[2048]{};GetWindowTextW(event->window,title,2048);
             Check(std::wstring(title)==state.title,"explicit caller title reaches actual picker HWND including empty");
             if(!state.screenshot.empty()) {
-                SetPropW(event->window,L"Pulse.PickerTestSnapshot",const_cast<wchar_t*>(state.screenshot.c_str()));
+                SetPropW(event->window,L"Pulse.PickerTestSnapshot",SnapshotRequest(state.screenshot));
                 SendMessageW(event->window,WM_PAINT,0,0);
                 std::printf("LABEL_SCREENSHOT=%ls\n",state.screenshot.c_str());
                 RemovePropW(event->window,L"Pulse.PickerTestSnapshot");
             }
         }
         if (state.property_edit) {
-            SetPropW(event->window, L"Pulse.PickerTestSnapshot", const_cast<wchar_t*>(state.screenshot.c_str()));
+#ifndef PULSE_REMOTE_PROVIDER_TEST
+            SetPropW(event->window, L"Pulse.PickerTestSnapshot", SnapshotRequest(state.screenshot));
             SendMessageW(event->window, WM_PAINT, 0, 0);
             RemovePropW(event->window, L"Pulse.PickerTestSnapshot");
+#endif
             std::printf("PROPERTY_SCREENSHOT=%ls\n", state.screenshot.c_str()); std::fflush(stdout);
             state.driver = std::thread([&state] {
                 Sleep(150);
                 HWND edit = nullptr;
+                auto read_text = [](HWND window, wchar_t* buffer, UINT capacity) {
+                    DWORD_PTR ignored = 0;
+                    return SendMessageTimeoutW(window, WM_GETTEXT, capacity, reinterpret_cast<LPARAM>(buffer), SMTO_ABORTIFHUNG, 2000, &ignored) != 0;
+                };
                 for (HWND child = GetWindow(state.window, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT)) {
-                    wchar_t text[128]{}; GetWindowTextW(child, text, 128);
+                    wchar_t text[128]{}; read_text(child, text, 128);
                     if (IsWindowVisible(child) && std::wstring_view(text) == L"original metadata") { edit = child; break; }
                 }
                 DWORD_PTR ignored = 0;
@@ -641,7 +744,7 @@ HRESULT WINAPI Callback(void* opaque, const PulsePickerUiV2Event* event) {
                     const auto previous = window_context ? dpi.set_thread(window_context(state.window)) : nullptr;
                     HWND last = nullptr;
                     for (HWND child = GetWindow(state.window, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT)) {
-                        wchar_t text[128]{}; GetWindowTextW(child, text, 128);
+                        wchar_t text[128]{}; read_text(child, text, 128);
                         if (std::wstring_view(text) == L"last scalar original") { last = child; break; }
                     }
                     const bool initially_hidden = last && !IsWindowVisible(last);
@@ -712,12 +815,14 @@ HRESULT WINAPI Callback(void* opaque, const PulsePickerUiV2Event* event) {
             return S_OK;
         }
         if(state.menus) {
-            SetPropW(event->window,L"Pulse.PickerTestSnapshot",const_cast<wchar_t*>(state.screenshot.c_str()));
+            SetPropW(event->window,L"Pulse.PickerTestSnapshot",SnapshotRequest(state.screenshot));
             SendMessageW(event->window,WM_PAINT,0,0);
             RemovePropW(event->window,L"Pulse.PickerTestSnapshot");
             std::printf("MENU_SCREENSHOT=%ls\n",state.screenshot.c_str());
             state.driver=std::thread([&state,window=event->window] {
                 if(!SetThreadDesktop(GetThreadDesktop(state.thread)))return;
+                // Popups belong to the picker HWND thread (pulse.exe for the remote provider).
+                DWORD ui_pid=0;const DWORD ui_thread=GetWindowThreadProcessId(window,&ui_pid);
                 HWND edit=nullptr;for(unsigned i=0;i<1000 && IsWindow(window);++i) {
                     edit=GetDlgItem(window,102);if(edit && IsWindowEnabled(edit))break;
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -730,13 +835,13 @@ HRESULT WINAPI Callback(void* opaque, const PulsePickerUiV2Event* event) {
                     if(!PostMessageW(window,WM_KEYDOWN,VK_RETURN,0))return false;
                     HWND menu=nullptr;
                     for(unsigned i=0;i<1000 && IsWindow(window);++i) {
-                        EnumThreadWindows(state.thread,[](HWND hwnd,LPARAM out)->BOOL {
+                        EnumThreadWindows(ui_thread,[](HWND hwnd,LPARAM out)->BOOL {
                             wchar_t name[64]{};GetClassNameW(hwnd,name,64);
                             if(IsWindowVisible(hwnd) && std::wstring_view(name)==L"PulseFluentMenu") {*reinterpret_cast<HWND*>(out)=hwnd;return FALSE;}return TRUE;
                         },reinterpret_cast<LPARAM>(&menu));
                         if(menu)break;std::this_thread::sleep_for(std::chrono::milliseconds(10));
                     }
-                    DWORD pid=0;if(!menu || GetWindowThreadProcessId(menu,&pid)!=state.thread || pid!=GetCurrentProcessId())return false;
+                    DWORD pid=0;if(!menu || GetWindowThreadProcessId(menu,&pid)!=ui_thread || pid!=ui_pid)return false;
                     if(!PostMessageW(menu,WM_KEYDOWN,VK_RETURN,0))return false;
                     for(unsigned i=0;i<1000 && IsWindowVisible(menu);++i)std::this_thread::sleep_for(std::chrono::milliseconds(10));
                     return !IsWindowVisible(menu);
@@ -755,16 +860,34 @@ HRESULT WINAPI Callback(void* opaque, const PulsePickerUiV2Event* event) {
         if (state.mask_sequence) {
             state.driver=std::thread([&state,window=event->window] {
                 if(!SetThreadDesktop(GetThreadDesktop(state.thread)))return;
+                // Popups belong to the picker HWND thread (pulse.exe for the remote provider).
+                DWORD ui_pid=0;const DWORD ui_thread=GetWindowThreadProcessId(window,&ui_pid);
                 const HWND edit=GetDlgItem(window,102);if(!edit)return;
                 const auto send=[](HWND target,UINT message,WPARAM wp,LPARAM lp=0) {
                     DWORD_PTR ignored=0;return SendMessageTimeoutW(target,message,wp,lp,SMTO_ABORTIFHUNG,2000,&ignored)!=0;
                 };
                 const wchar_t* names[]={L"literal",L"wildcard",L"all"};
                 for(unsigned step=0;step<3;++step) {
-                    if(!send(window,WM_SYSKEYDOWN,'N') || !send(edit,WM_KEYDOWN,VK_TAB) || !PostMessageW(window,WM_KEYDOWN,VK_RETURN,0))return;
+                    // In-process, an outstanding callback (READY, FileOk) blocks
+                    // these sends. A remote host must still run cross-thread
+                    // sends during a callback, so wait until none is active and
+                    // then confirm Alt+N really focused the filename: the editor is
+                    // disabled while a filter change reloads, and a Tab from the
+                    // type field would otherwise land on Cancel.
+                    for(unsigned retry=0;retry<500 && state.callbacks_active.load();++retry)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    bool focused=false;
+                    for(unsigned retry=0;retry<500 && IsWindow(window) && !focused;++retry) {
+                        if(IsWindowEnabled(edit) && send(window,WM_SYSKEYDOWN,'N')) {
+                            GUITHREADINFO info{sizeof(info)};
+                            focused=GetGUIThreadInfo(ui_thread,&info)!=FALSE && info.hwndFocus==edit;
+                        }
+                        if(!focused)std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    }
+                    if(!focused || !send(edit,WM_KEYDOWN,VK_TAB) || !PostMessageW(window,WM_KEYDOWN,VK_RETURN,0))return;
                     HWND menu=nullptr;
                     for(unsigned retry=0;retry<500 && IsWindow(window);++retry) {
-                        EnumThreadWindows(state.thread,[](HWND candidate,LPARAM output)->BOOL {
+                        EnumThreadWindows(ui_thread,[](HWND candidate,LPARAM output)->BOOL {
                             wchar_t name[64]{};GetClassNameW(candidate,name,64);
                             if(IsWindowVisible(candidate) && std::wstring_view(name)==L"PulseFluentMenu") {
                                 *reinterpret_cast<HWND*>(output)=candidate;return FALSE;
@@ -773,7 +896,7 @@ HRESULT WINAPI Callback(void* opaque, const PulsePickerUiV2Event* event) {
                         if(menu)break;std::this_thread::sleep_for(std::chrono::milliseconds(10));
                     }
                     DWORD pid=0;
-                    if(!menu || GetWindowThreadProcessId(menu,&pid)!=state.thread || pid!=GetCurrentProcessId())return;
+                    if(!menu || GetWindowThreadProcessId(menu,&pid)!=ui_thread || pid!=ui_pid)return;
                     RECT bounds{};if(!GetClientRect(menu,&bounds))return;
                     const LPARAM point=MAKELPARAM((bounds.right-bounds.left)/2,(bounds.bottom-bounds.top)*static_cast<int>(2*(step+1)+1)/8);
                     if(!send(menu,WM_MOUSEMOVE,0,point) || !send(menu,WM_LBUTTONDOWN,MK_LBUTTON,point) ||
@@ -809,16 +932,33 @@ HRESULT WINAPI Callback(void* opaque, const PulsePickerUiV2Event* event) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
                 DWORD pid=0;
-                if(!edit || !IsWindowEnabled(edit) || GetWindowThreadProcessId(window,&pid)!=state.thread || pid!=GetCurrentProcessId()) return;
+                const DWORD window_thread = GetWindowThreadProcessId(window, &pid);
+#ifdef PULSE_REMOTE_PROVIDER_TEST
+                if(!edit || !IsWindowEnabled(edit) || !window_thread || !pid) return;
+#else
+                if(!edit || !IsWindowEnabled(edit) || window_thread!=state.thread || pid!=GetCurrentProcessId()) return;
+#endif
                 if(state.multi) {
                     DWORD_PTR ignored=0;
-                    const wchar_t* names=state.open_missing ? L"\"owned.txt\" \"missing-parent\\missing.txt\"" : L"\"owned.txt\" \"second.txt\"";
+                    if(state.list_ten) {
+                        const bool attached=AttachThreadInput(GetCurrentThreadId(),state.thread,TRUE)!=FALSE;
+                        BYTE keys[256]{},saved[256]{};GetKeyboardState(saved);
+                        SendMessageTimeoutW(window,WM_KEYDOWN,VK_HOME,0,SMTO_ABORTIFHUNG,2000,&ignored);
+                        std::copy(std::begin(saved),std::end(saved),std::begin(keys));keys[VK_CONTROL]=0x80;
+                        SetKeyboardState(keys);
+                        const bool selected=SendMessageTimeoutW(window,WM_KEYDOWN,'A',0,SMTO_ABORTIFHUNG,2000,&ignored)!=0;
+                        SetKeyboardState(saved);
+                        if(attached)AttachThreadInput(GetCurrentThreadId(),state.thread,FALSE);
+                        state.driver_ok=attached && selected && PostMessageW(window,WM_KEYDOWN,VK_RETURN,0);
+                        return;
+                    }
+                    const wchar_t* names=state.folder_single ? L"owned.txt" : state.open_missing ? L"\"owned.txt\" \"missing-parent\\missing.txt\"" : L"\"owned.txt\" \"second.txt\"";
                     state.driver_ok=SendMessageTimeoutW(edit,WM_SETTEXT,0,reinterpret_cast<LPARAM>(names),SMTO_ABORTIFHUNG,2000,&ignored)!=0 && PostMessageW(edit,WM_KEYDOWN,VK_RETURN,0);
                 } else {
                     DWORD_PTR ignored=0;
                     const bool focus_request=SendMessageTimeoutW(window,WM_SYSKEYDOWN,'N',0,SMTO_ABORTIFHUNG,2000,&ignored)!=0;
                     GUITHREADINFO info{sizeof(info)};
-                    const bool focused=GetGUIThreadInfo(state.thread,&info)!=FALSE && info.hwndFocus==edit;
+                    const bool focused=GetGUIThreadInfo(window_thread,&info)!=FALSE && info.hwndFocus==edit;
                     std::printf("COMBO_DRIVER filename request=%u focused=%u focus=%p edit=%p\n",focus_request?1u:0u,focused?1u:0u,info.hwndFocus,edit);std::fflush(stdout);
                     if(!focus_request || !focused) return;
                     const bool first=SendMessageTimeoutW(edit,WM_KEYDOWN,VK_TAB,0,SMTO_ABORTIFHUNG,2000,&ignored)!=0;
@@ -828,14 +968,14 @@ HRESULT WINAPI Callback(void* opaque, const PulsePickerUiV2Event* event) {
                     if(!opened) return;
                     HWND menu=nullptr;
                     for(unsigned i=0;i<1000 && IsWindow(window);++i) {
-                        EnumThreadWindows(state.thread,[](HWND hwnd,LPARAM value)->BOOL {
+                        EnumThreadWindows(window_thread,[](HWND hwnd,LPARAM value)->BOOL {
                             wchar_t name[64]{};GetClassNameW(hwnd,name,64);
                             if(IsWindowVisible(hwnd) && std::wstring_view(name)==L"PulseFluentMenu") { *reinterpret_cast<HWND*>(value)=hwnd;return FALSE; }return TRUE;
                         },reinterpret_cast<LPARAM>(&menu));
                         if(menu) break;std::this_thread::sleep_for(std::chrono::milliseconds(10));
                     }
                     DWORD menu_pid=0;
-                    const bool owned_menu=menu && GetWindowThreadProcessId(menu,&menu_pid)==state.thread && menu_pid==GetCurrentProcessId() && IsWindowVisible(menu);
+                    const bool owned_menu=menu && GetWindowThreadProcessId(menu,&menu_pid)==window_thread && menu_pid==pid && IsWindowVisible(menu);
                     if(owned_menu) state.driver_ok=PostMessageW(menu,WM_KEYDOWN,VK_RETURN,0)!=FALSE;
                     std::printf("COMBO_DRIVER menu=%p owned=%u select_post=%u\n",menu,owned_menu?1u:0u,state.driver_ok?1u:0u);std::fflush(stdout);
                 }
@@ -874,10 +1014,12 @@ int Run(const wchar_t* dll, const wchar_t* selected_case, bool interactive) {
     const bool extension_channel=wcscmp(selected_case,L"open-extension")==0;
     const bool labels_empty=wcscmp(selected_case,L"labels-empty")==0;
     const bool labels=labels_empty || wcscmp(selected_case,L"labels")==0;
+    const bool folder_single=wcscmp(selected_case,L"folder-links-accept")==0;
+    const bool folder_links=folder_single || wcscmp(selected_case,L"folder-links-multi-accept")==0;
     const bool multi_close=wcscmp(selected_case,L"multi-close")==0;
     const bool cross_accept = wcscmp(selected_case, L"cross-thread-accept") == 0;
     const bool open_missing=wcscmp(selected_case,L"open-missing")==0;
-    const bool multi=open_missing || multi_close || cross_accept || wcscmp(selected_case,L"multi-accept")==0;
+    const bool multi=folder_links || open_missing || multi_close || cross_accept || wcscmp(selected_case,L"multi-accept")==0;
     const bool values=wcscmp(selected_case,L"value-controls")==0;
     const bool menus=wcscmp(selected_case,L"menu-open")==0;
     const bool combo=wcscmp(selected_case,L"combo-select")==0;
@@ -896,6 +1038,12 @@ int Run(const wchar_t* dll, const wchar_t* selected_case, bool interactive) {
     const bool inspect = wcscmp(selected_case, L"custom-inspect") == 0;
     const bool custom = inspect || wcscmp(selected_case, L"custom-update") == 0;
     if (inspect) interactive = true;
+#ifdef PULSE_REMOTE_PROVIDER_TEST
+    // The remote picker presents from pulse.exe and its readiness requires a
+    // composed frame. DWM only composes the input desktop, so a private
+    // desktop that is never switched to always reports DXGI occlusion.
+    interactive = true;
+#endif
     const bool query = wcscmp(selected_case, L"query") == 0;
     const bool reentrant = wcscmp(selected_case, L"reentrant-owner") == 0;
     const bool cross_cancel = wcscmp(selected_case, L"cross-thread-cancel") == 0;
@@ -909,18 +1057,25 @@ int Run(const wchar_t* dll, const wchar_t* selected_case, bool interactive) {
         (L"picker-v2-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64())));
     std::filesystem::create_directories(directory.parent_path());
     if (!CreateDirectoryW(directory.c_str(), nullptr)) return 2;
-    const auto file = directory / L"owned.txt";
-    HANDLE created = CreateFileW(file.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (created == INVALID_HANDLE_VALUE) { RemoveDirectoryW(directory.c_str()); return 2; }
-    CloseHandle(created);
+    const bool list_ten=GetEnvironmentVariableW(L"PULSE_TEST_PICKER_TEN_JPG",nullptr,0)!=0;
+    const auto file = directory / (list_ten ? L"00.jpg" : L"owned.txt");
+    HANDLE created = folder_links ? INVALID_HANDLE_VALUE : CreateFileW(file.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (folder_links) { if (!CreateDirectoryW(file.c_str(),nullptr)) return 2; }
+    else { if (created == INVALID_HANDLE_VALUE) { RemoveDirectoryW(directory.c_str()); return 2; } CloseHandle(created); }
     std::vector<std::filesystem::path> mask_files;
+    if(list_ten) for(int i=2;i<10;++i) {
+        const auto image=directory/(L"0"+std::to_wstring(i)+L".jpg");
+        HANDLE fixture=CreateFileW(image.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
+        if(fixture==INVALID_HANDLE_VALUE)return 2;CloseHandle(fixture);mask_files.push_back(image);
+    }
     if(mask_sequence)for(const auto* stem:{L"literal",L"wildcard",L"all"})for(const auto* suffix:{L".txt",L".md",L".xlsx"}) {
         const auto path=directory/(std::wstring(stem)+suffix);
         HANDLE fixture=CreateFileW(path.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);
         if(fixture==INVALID_HANDLE_VALUE)return 2;CloseHandle(fixture);mask_files.push_back(path);
     }
-    const auto second_file=open_missing ? directory/L"missing-parent"/L"missing.txt" : directory/L"second.txt";
-    if(multi && !open_missing) { HANDLE second=CreateFileW(second_file.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);if(second==INVALID_HANDLE_VALUE) return 2;CloseHandle(second); }
+    const auto second_file=open_missing ? directory/L"missing-parent"/L"missing.txt" : directory/(list_ten ? L"01.jpg" : L"second.txt");
+    if(folder_links) { if (!CreateDirectoryW(second_file.c_str(),nullptr)) return 2; }
+    else if(multi && !open_missing) { HANDLE second=CreateFileW(second_file.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr);if(second==INVALID_HANDLE_VALUE) return 2;CloseHandle(second); }
     const auto desktop_name = L"PulseV2Proof-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
     HDESK previous_desktop = GetThreadDesktop(GetCurrentThreadId());
     HDESK desktop = interactive ? nullptr : CreateDesktopW(desktop_name.c_str(), nullptr, nullptr, 0, GENERIC_ALL, nullptr);
@@ -937,12 +1092,19 @@ int Run(const wchar_t* dll, const wchar_t* selected_case, bool interactive) {
     HMODULE module = nullptr;
     bool unload_safe = true;
     if (SUCCEEDED(com)) {
+#ifdef PULSE_REMOTE_PROVIDER_TEST
+        std::shared_ptr<const pulse::shell_bridge::FileDialogInprocessProvider> remote_provider;
+        const HRESULT api_hr = pulse::shell_bridge::LoadFileDialogRemoteProvider(dll, remote_provider, true);
+        PulsePickerUiV2Api api = remote_provider ? remote_provider->api : PulsePickerUiV2Api{};
+        Check(api_hr == S_OK && !GetModuleHandleW(L"PulsePickerUiProof.dll"), "remote provider without caller UI DLL");
+#else
         module = LoadLibraryExW(dll, nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
         Check(module != nullptr, "load explicit absolute UI DLL");
         using GetApi = HRESULT (WINAPI*)(uint32_t, uint32_t, PulsePickerUiV2Api*);
         const auto get = module ? reinterpret_cast<GetApi>(GetProcAddress(module, "PulsePickerUiGetApiV2")) : nullptr;
         PulsePickerUiV2Api api{};
         const HRESULT api_hr = get ? get(PULSE_PICKER_UI_V2_VERSION, sizeof(api), &api) : E_NOINTERFACE;
+#endif
         std::printf("API result=%08lX capabilities=%u; internal proof required_capabilities=0, NOT production certification\n",
             static_cast<unsigned long>(api_hr), api.capabilities);
         const bool valid = api_hr == S_OK && api.size == sizeof(api) && api.version == 2 && api.Initialize && api.ValidateConfig &&
@@ -988,6 +1150,13 @@ int Run(const wchar_t* dll, const wchar_t* selected_case, bool interactive) {
                     nullptr, nullptr, GetModuleHandleW(nullptr), &reentry) : nullptr;
                 Check(owner != nullptr, "own STA owner created");
                 if (owner) {
+                    if (interactive) {
+                        // A real visible host is required for composed frames;
+                        // consume a launcher's SW_HIDE before showing it.
+                        ShowWindow(owner, SW_HIDE);
+                        ShowWindow(owner, SW_SHOWNOACTIVATE);
+                        UpdateWindow(owner);
+                    }
                     const std::wstring folder = directory.wstring(), filename = initial_empty ? L"" : L"owned.txt", title = custom ? L"Pulse Custom Controls Inspection" : L"Pulse internal v2 proof";
                     PulsePickerUiV2Config config{}; config.size = sizeof(config); config.version = 2;
                     config.required_capabilities = 0; config.owner = owner; config.access_policy = PULSE_PICKER_UI_V2_ACCESS_LOCAL_OPEN_V1;
@@ -1093,10 +1262,13 @@ int Run(const wchar_t* dll, const wchar_t* selected_case, bool interactive) {
                         config.open_options|=PULSE_PICKER_UI_V2_OPEN_USE_DEFAULT_EXTENSION;
                         Check(api.ValidateConfig(session,&config)==S_OK,"real UI accepts generic Open extension mask config");
                         const auto original=mask_patterns[2];
-                        for(const auto* invalid:{L"report*.txt",L"C:\\*.xlsx",L"*.x?",L"*.xl*;",L"*.a b"}) {
+                        for(const auto* invalid:{L"report*.txt",L"C:\\*.xlsx",L"*.x?",L"*.a b"}) {
                             mask_patterns[2]=invalid;mask_filters[2].pattern=Text(mask_patterns[2]);
                             Check(api.ValidateConfig(session,&config)==HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED),"real UI rejects unsupported mask scope before Show");
                         }
+                        // Native semicolon lists ignore empty segments (picker_open_filter.h).
+                        mask_patterns[2]=L"*.xl*;";mask_filters[2].pattern=Text(mask_patterns[2]);
+                        Check(api.ValidateConfig(session,&config)==S_OK,"real UI accepts trailing empty mask segment like native Open");
                         mask_patterns[2]=original;mask_filters[2].pattern=Text(mask_patterns[2]);
                         config.access_policy=PULSE_PICKER_UI_V2_ACCESS_LOCAL_SAVE_V1;config.open_options=0;config.default_extension={};
                         Check(api.ValidateConfig(session,&config)==HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED),"real UI retains Save mask rejection");
@@ -1137,7 +1309,11 @@ int Run(const wchar_t* dll, const wchar_t* selected_case, bool interactive) {
                         menu_controls[1].has_selected=1;menu_controls[1].selected_item_id=0;
                         config.controls=menu_controls;config.control_count=2;
                     }
-                    if(multi) {Check((api.implemented_features&PULSE_PICKER_UI_V2_FEATURE_MULTI_SELECT)!=0,"multi feature explicitly negotiated");config.open_options|=PULSE_PICKER_UI_V2_OPEN_ALLOW_MULTI_SELECT;}
+                    if(multi && !folder_single) {Check((api.implemented_features&PULSE_PICKER_UI_V2_FEATURE_MULTI_SELECT)!=0,"multi feature explicitly negotiated");config.open_options|=PULSE_PICKER_UI_V2_OPEN_ALLOW_MULTI_SELECT;}
+                    if(folder_links) {
+                        config.access_policy=PULSE_PICKER_UI_V2_ACCESS_FOLDER_V1;
+                        config.open_options|=PULSE_PICKER_UI_V2_OPEN_NO_DEREFERENCE_LINKS;
+                    }
                     if(open_missing) {
                         Check((api.implemented_features&PULSE_PICKER_UI_V2_FEATURE_OPEN_MISSING)!=0,"missing Open feature explicitly negotiated");
                         config.open_options|=PULSE_PICKER_UI_V2_OPEN_ALLOW_MISSING|PULSE_PICKER_UI_V2_OPEN_SKIP_ACCESS_VALIDATION;
@@ -1177,7 +1353,7 @@ int Run(const wchar_t* dll, const wchar_t* selected_case, bool interactive) {
                         state.external_navigation = external_navigation;
                         state.places = places; state.place_path = place_path;
                         if (computer) state.screenshot = (directory.parent_path() / (L"picker-computer-" + std::to_wstring(GetCurrentProcessId()) + L".png")).wstring();
-                        state.labels=labels;state.labels_empty=labels_empty;state.multi=multi;state.multi_close=multi_close;state.open_missing=open_missing;state.combo=combo;state.title=labels_empty ? L"" : title;
+                        state.list_ten=list_ten;state.folder_single=folder_single;state.labels=labels;state.labels_empty=labels_empty;state.multi=multi;state.multi_close=multi_close;state.open_missing=open_missing;state.combo=combo;state.title=labels_empty ? L"" : title;
                         if(labels) state.screenshot=(directory.parent_path()/(L"picker-labels-"+std::to_wstring(GetCurrentProcessId())+(labels_empty ? L"-empty.png" : L"-long.png"))).wstring();
                         state.caller_dpi = dpi.get_thread(); state.prominent = prominent; state.prominent_control = &prominent_controls[prominent_index]; state.prominent_parent = prominent_nested ? &prominent_controls[1] : nullptr; state.query = query; state.custom = custom; state.inspect = inspect; state.initial_empty = initial_empty; state.requested = close_ok ? S_OK : kClose;
                         PulsePickerUiV2Callbacks callbacks{}; callbacks.size = sizeof(callbacks); callbacks.callback = Callback; callbacks.context = &state;
@@ -1235,11 +1411,20 @@ int Run(const wchar_t* dll, const wchar_t* selected_case, bool interactive) {
                                 Check(state.startup_changing == 2 && state.startup_changed == 0 && FAILED(shown) &&
                                     result.status != PULSE_PICKER_UI_V2_ACCEPTED, "real directory admission failure and rejected fallback produce explicit error");
                             Check(result.path.units == 0 && path[0] == 0, "failed initialization exposes no selected result");
+                        } else if(list_ten) {
+                            Check(state.driver_ok && state.file_ok_events==1 && shown==S_OK && result.status==PULSE_PICKER_UI_V2_ACCEPTED && result.path_count==10,"ten JPG list selections accepted after real worker FileOk");
+                            size_t at=0;bool exact=true;
+                            for(int i=0;i<10;++i) {
+                                const auto expected=(directory/(L"0"+std::to_wstring(i)+L".jpg")).wstring();
+                                if(at>=result.paths.units) {exact=false;break;}
+                                const std::wstring actual=packed.data()+at;exact &= actual==expected;at+=actual.size()+1;
+                            }
+                            Check(exact && at==result.paths.units && std::wstring(path.data())==file.wstring(),"ten JPG packed results retain exact order and complete paths");
                         } else if(multi && !multi_close) {
-                            Check(state.driver_ok && state.file_ok_events==1 && shown==S_OK && result.status==PULSE_PICKER_UI_V2_ACCEPTED && result.path_count==2,"multi typed-path request accepted both candidates after real worker FileOk");
+                            Check(state.driver_ok && state.file_ok_events==1 && shown==S_OK && result.status==PULSE_PICKER_UI_V2_ACCEPTED && result.path_count==(folder_single ? 1u : 2u),"multi typed-path request accepted both candidates after real worker FileOk");
                             const std::wstring first=packed.empty() ? L"" : packed.data();
                             const std::wstring second=result.paths.units>first.size()+1 ? packed.data()+first.size()+1 : L"";
-                            Check(first==file.wstring() && second==second_file.wstring() && std::wstring(path.data())==first && result.paths.units==first.size()+second.size()+2,"multi packed paths exact order and first item agree");
+                            Check(first==file.wstring() && (folder_single || second==second_file.wstring()) && std::wstring(path.data())==first && result.paths.units==first.size()+(folder_single ? 1 : second.size()+2),"multi packed paths exact order and first item agree");
                             if(open_missing) Check(GetFileAttributesW(second_file.c_str())==INVALID_FILE_ATTRIBUTES &&
                                 GetFileAttributesW(second_file.parent_path().c_str())==INVALID_FILE_ATTRIBUTES,
                                 "real missing Open accepts both paths without creating file or parent");
@@ -1267,6 +1452,38 @@ int Run(const wchar_t* dll, const wchar_t* selected_case, bool interactive) {
                 HWND stale = nullptr;
                 Check(FAILED(api.GetWindow(session, 1, &stale)), "old session rejected after Shutdown");
                 Check(FAILED(api.Shutdown(session)), "second Shutdown rejected");
+#ifdef PULSE_REMOTE_PROVIDER_TEST
+                if (wcscmp(selected_case, L"ready-close") == 0) {
+                    const auto previous_session = session;
+                    session = 0;
+                    Check(api.Initialize(&init, &session) == S_OK && session && session != previous_session,
+                        "same provider reinitializes with fresh session");
+                    if (session) {
+                        Check(FAILED(api.Shutdown(previous_session)), "old token cannot shutdown new session");
+                        HWND repeat_owner = CreateWindowW(L"STATIC", L"Remote repeat owner", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                            100, 100, 300, 200, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+                        const auto folder = directory.wstring();
+                        PulsePickerUiV2Config repeat{}; repeat.size = sizeof(repeat); repeat.version = 2;
+                        repeat.owner = repeat_owner; repeat.access_policy = PULSE_PICKER_UI_V2_ACCESS_LOCAL_OPEN_V1;
+                        repeat.initial_folder = Text(folder);
+                        State repeat_state; repeat_state.api = &api; repeat_state.session = session;
+                        repeat_state.owner = repeat_owner; repeat_state.thread = GetCurrentThreadId();
+                        repeat_state.caller_dpi = dpi.get_thread();
+                        PulsePickerUiV2Callbacks repeat_callbacks{}; repeat_callbacks.size = sizeof(repeat_callbacks);
+                        repeat_callbacks.callback = Callback; repeat_callbacks.context = &repeat_state;
+                        std::vector<wchar_t> repeat_path(PULSE_PICKER_UI_V2_MAX_UNITS + 1);
+                        PulsePickerUiV2Result repeat_result{}; repeat_result.size = sizeof(repeat_result);
+                        repeat_result.path = {repeat_path.data(), static_cast<uint32_t>(repeat_path.size()), 0};
+                        Check(api.ValidateConfig(session, &repeat) == S_OK, "repeat configuration accepted");
+                        const auto repeat_hr = api.Show(session, &repeat, &repeat_callbacks, &repeat_result);
+                        Check(repeat_state.ready && repeat_hr == kClose && repeat_result.terminal_hr == kClose &&
+                            repeat_result.status == PULSE_PICKER_UI_V2_CLOSED, "second actual remote Show closes exactly");
+                        Check(IsWindowEnabled(repeat_owner), "repeat owner restored");
+                        DestroyWindow(repeat_owner);
+                        Check(api.Shutdown(session) == S_OK, "repeat session shuts down");
+                    }
+                }
+#endif
             }
         }
         // The UI component may pin itself. Release only this test's explicit load.
@@ -1277,14 +1494,70 @@ int Run(const wchar_t* dll, const wchar_t* selected_case, bool interactive) {
     if (previous_dpi) dpi.set_thread(previous_dpi);
     if (!interactive) Check(SetThreadDesktop(previous_desktop) != FALSE, "restore caller desktop");
     if (!interactive) Check(CloseDesktop(desktop) != FALSE, "close private desktop");
-    if(multi && !open_missing) Check(DeleteFileW(second_file.c_str())!=FALSE,"delete own second file");
+    if(folder_links) Check(RemoveDirectoryW(second_file.c_str())!=FALSE,"delete own second directory");
+    else if(multi && !open_missing) Check(DeleteFileW(second_file.c_str())!=FALSE,"delete own second file");
     for(const auto& path:mask_files)Check(DeleteFileW(path.c_str())!=FALSE,"delete exact owned mask fixture");
-    Check(DeleteFileW(file.c_str()) != FALSE, "delete own file");
+    Check((folder_links ? RemoveDirectoryW(file.c_str()) : DeleteFileW(file.c_str())) != FALSE, "delete own file or directory");
     Check(RemoveDirectoryW(directory.c_str()) != FALSE, "delete own empty fixture directory");
     return failures ? 1 : 0;
 }
 }
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 3 && std::wstring_view(argv[2]) == L"folder-links-config") {
+        if (!std::filesystem::path(argv[1]).is_absolute()) return 2;
+        const HRESULT apartment = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        if (FAILED(apartment)) return 2;
+        HMODULE module = LoadLibraryExW(argv[1], nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+        Check(module != nullptr, "load actual production picker provider");
+        const auto get = module ? reinterpret_cast<decltype(&PulsePickerUiGetApiV2)>(GetProcAddress(module, "PulsePickerUiGetApiV2")) : nullptr;
+        PulsePickerUiV2Api api{}; api.size = sizeof(api);
+        const bool available = get && get(2, sizeof(api), &api) == S_OK && api.Initialize && api.ValidateConfig && api.Shutdown;
+        Check(available, "production provider exports actual v2 validation");
+        bool safe = true;
+        if (available) {
+            PulsePickerUiV2Initialize init{}; init.size = sizeof(init); init.version = 2;
+            PulsePickerUiV2Session session = 0;
+            Check(api.Initialize(&init, &session) == S_OK && session, "initialize actual STA provider");
+            if (session) {
+                HWND owner = CreateWindowExW(0, L"STATIC", L"folder config fixture", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, GetModuleHandleW(nullptr), nullptr);
+                const std::wstring folder = std::filesystem::absolute(L"bench_data").wstring();
+                PulsePickerUiV2Config config{}; config.size = sizeof(config); config.version = 2;
+                config.owner = owner; config.initial_folder = Text(folder);
+                config.access_policy = PULSE_PICKER_UI_V2_ACCESS_FOLDER_V1;
+                // Match the proof-provider production session; do not claim native parity.
+                config.required_capabilities = 0;
+                for (const uint32_t multiple : {0u, uint32_t(PULSE_PICKER_UI_V2_OPEN_ALLOW_MULTI_SELECT)}) {
+                    config.open_options = PULSE_PICKER_UI_V2_OPEN_NO_DEREFERENCE_LINKS | multiple;
+                    const HRESULT accepted = api.ValidateConfig(session, &config);
+                    std::printf("FOLDER_CONFIG multi=%u hr=%08lX\n", multiple, static_cast<unsigned long>(accepted));
+                    Check(accepted == S_OK, "actual folder provider accepts propagated no-dereference single/multi protocol");
+                    config.required_capabilities = PULSE_PICKER_UI_V2_CAP_FOLDER_V1;
+                    Check(FAILED(api.ValidateConfig(session, &config)), "proof provider does not advertise unverified native parity");
+                    config.required_capabilities = 0;
+                    for (const uint32_t invalid : {uint32_t(PULSE_PICKER_UI_V2_OPEN_SKIP_ACCESS_VALIDATION), uint32_t(PULSE_PICKER_UI_V2_OPEN_ALLOW_MISSING), uint32_t(PULSE_PICKER_UI_V2_OPEN_USE_DEFAULT_EXTENSION), 0x80000000u}) {
+                        config.open_options |= invalid;
+                        Check(FAILED(api.ValidateConfig(session, &config)), "actual folder provider rejects unrelated or unsafe option");
+                        config.open_options &= ~invalid;
+                    }
+                    const std::wstring extension = L"txt";
+                    config.default_extension = Text(extension);
+                    Check(FAILED(api.ValidateConfig(session, &config)), "actual folder provider rejects file extension semantics");
+                    config.default_extension = {};
+                    config.filter_count = 1;
+                    Check(FAILED(api.ValidateConfig(session, &config)), "actual folder provider rejects file filter semantics");
+                    config.filter_count = 0;
+                }
+                if (owner) DestroyWindow(owner);
+                safe = api.Shutdown(session) == S_OK;
+                Check(safe, "shutdown actual provider config probe");
+            }
+        }
+        if (module && safe) FreeLibrary(module);
+        CoUninitialize();
+        std::printf("Checks=%u failures=%u\n", checks, failures);
+        return failures ? 1 : 0;
+    }
+
     if (argc != 3 && !(argc == 4 && wcscmp(argv[3], L"--interactive") == 0)) { std::printf("Usage: picker_inprocess_v2_test ABSOLUTE_UI_DLL property-edit|property-mutate|property-scroll|menu-open|computer-navigate|places-navigate|startup-visibility|startup-folder-visibility|startup-folder-close|startup-folder-cancel|startup-folder-error|ready-close|cross-thread-owner|cross-thread-accept|cross-thread-cancel|close-ok|query|reentrant-owner|custom-update|custom-inspect|initial-empty|open-extension|open-mask-sequence|labels|labels-empty|combo-select|multi-accept|multi-close|open-missing [--interactive]\n"); return 2; }
     HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!done) return 2;

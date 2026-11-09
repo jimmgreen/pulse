@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 namespace pulse::app {
+bool DialogAutoPathMismatch(bool enabled, const std::wstring& registered, const std::wstring& bundle_root);
 enum class DialogManagementOperation { Refresh, SelectBundle, SelectApplication, Launch, Disable, EnableAuto, DisableAuto, ExportDiagnostics };
 struct DialogManagementConfiguration {
     std::wstring bundle_root, application;
@@ -22,7 +23,7 @@ struct DialogManagementResult {
     DialogManagementOperation operation = DialogManagementOperation::Refresh;
     uint64_t generation = 0;
     DWORD error = 0;
-    bool auto_enabled = false, auto_conflict = false;
+    bool auto_enabled = false, auto_conflict = false, auto_path_mismatch = false;
     DWORD auto_error = 0, bundle_error = 0;
     std::wstring auto_dll, diagnostics_path;
     bool launcher_started = false;

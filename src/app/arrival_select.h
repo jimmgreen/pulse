@@ -3,7 +3,7 @@
 // A paste, a drop, 压缩 or a shell verb (7-Zip's "extract here", "create
 // shortcut") arms the pane's folder. Rows that were not listed when it was
 // armed, or that the operation reports as its results, are selected as the
-// listing shows them, with the first one scrolled into view. Pulse's own
+// listing shows them, with the first one centered in the pane. Pulse's own
 // operations stay armed until shortly after their task ends; shell verbs for
 // a few seconds after the last arrival. Changing the selection by hand, or
 // leaving the folder, disarms it.
@@ -28,6 +28,8 @@ void NoteArrivalFinished(AppState& s, const ops::FinishedTask& finished);
 // False for shell verbs that only open, show or remove things; true for the
 // rest, unnamed handler commands (archivers) included.
 bool ShellVerbMayCreate(const std::wstring& verb);
+void CenterResultInPane(AppState& s, app::Pane& pane, app::Tab& tab, int index);
+void CenterResultInPane(AppState& s, app::Pane& pane, app::Tab& tab, int index);
 // After a listing update of `tab`; true when it changed the selection.
 bool ApplyArrivalSelection(AppState& s, app::Pane& pane, app::Tab& tab, bool focused);
 }

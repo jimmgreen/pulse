@@ -7,6 +7,8 @@
 #include "tray_reveal.h"
 #include "app_runtime.h"
 #include "app_hosted_edit.h"
+#include "app_ops_ui.h"
+#include "app_commands.h"
 #include "app_catalog.h"
 #include "places.h"
 #include "session.h"
@@ -25,6 +27,10 @@ namespace {
 // in their own isolated data dir.
 bool HotkeyAllowed(const AppState& s) {
     if (!s.isolatedTest) return true;
+#ifdef PULSE_WITH_TEST_HOOKS
+    if (GetEnvironmentVariableW(L"PULSE_TEST_DOUBLE_CTRL_SETTINGS", nullptr, 0) &&
+        GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", nullptr, 0)) return true;
+#endif
 #ifdef PULSE_WITH_SELFTEST
     return GetEnvironmentVariableW(L"PULSE_TEST_GLOBAL_HOTKEY", nullptr, 0) > 0;
 #else
@@ -101,11 +107,70 @@ GlobalSearchContext MakeGlobalSearchContext(const AppState& s) {
     return context;
 }
 
+} // namespace
+
 // Events land on whichever window is most recent: the popup outlives the
 // window that opened it.
 GlobalSearchEvents MakeGlobalSearchEvents(AppState& s) {
     GlobalSearchEvents events;
     auto* core = &s.core;
+    events.toggle_theme = [core] {
+        if (AppState* window = core->windows.MostRecent()) {
+            ToggleTheme(*window);
+            window->globalSearchWindow.SetAppearance(window->darkMode,
+                ui::WindowEffectFromId(window->appPrefs.window_effect),
+                window->appPrefs.background_image, window->accentColor);
+        }
+    };
+    events.clear_search_history = [core] {
+        if (core->searchHistory.Clear() && core->searchHistory.persist)
+            core->searchHistoryWriter.Submit(core->searchHistory);
+    };
+    events.stage_paths = [core](const std::vector<std::wstring>& paths) {
+        if (AppState* window = core->windows.MostRecent()) StagePaths(*window, paths, std::nullopt);
+    };
+    events.staged_paths = [core] {
+        std::vector<std::wstring> paths;
+        for (const auto& batch : core->tray.batches())
+            for (const auto& item : batch.items) paths.push_back(item.path);
+        return paths;
+    };
+    events.unstage_path = [core](const std::wstring& path) {
+        if (AppState* window = core->windows.MostRecent()) UnstagePath(*window, path);
+    };
+    events.clear_staging = [core] {
+        if (AppState* window = core->windows.MostRecent()) ClearTrayWithUndo(*window);
+    };
+    events.open_path = [core](const std::wstring& path, bool directory, bool location) {
+        AppState* window = core->windows.MostRecent();
+        if (!window || (!directory && !location)) return false;
+        const auto& prefs = window->appPrefs;
+        if (!prefs.open_folders_in_pulse && !(prefs.integration_enabled && prefs.integration_folders)) return false;
+        // Use the normal external-open queue so busy windows defer the request
+        // and files are selected in their containing folder without Explorer.
+        using Coordinator = app::SingleInstanceCoordinator;
+        Coordinator::OpenRequest request;
+        GUID id{};
+        auto submitted = Coordinator::OpenSubmission::Invalid;
+        if (SUCCEEDED(CoCreateGuid(&id))) {
+            CopyMemory(request.id.data(), &id, sizeof(id));
+            const auto now = GetTickCount64();
+            request.deadline = now + 10000;
+            request.path = path;
+            request.reveal = location;
+            submitted = window->single_instance.SubmitOpenRequest(std::move(request), now,
+                core->host.Hwnd(), WM_OPEN_EXTERNAL);
+        }
+        if (submitted != Coordinator::OpenSubmission::Accepted && submitted != Coordinator::OpenSubmission::Duplicate) {
+            RevealWindow(*window);
+            auto detail = l10n::Get(l10n::StringId::ExternalOpenQueueFailedDetail);
+            if (const auto token = detail.find(L"{n}"); token != std::wstring::npos) detail.replace(token, 3, L"1");
+            window->notification_toast.ShowError(window->hwnd,
+                l10n::Get(l10n::StringId::ExternalOpenQueueFailedTitle),
+                detail);
+        }
+        return true;
+    };
     events.resized = [core](int width, int height) {
         AppState* window = core->windows.MostRecent();
         if (!window) return;
@@ -132,6 +197,7 @@ GlobalSearchEvents MakeGlobalSearchEvents(AppState& s) {
     return events;
 }
 
+namespace {
 // Appearance, context and callbacks: before every summon and the pre-warm.
 void PrepareGlobalSearchWindow(AppState& s) {
     s.globalSearchWindow.SetAppearance(s.darkMode, ui::WindowEffectFromId(s.appPrefs.window_effect),
@@ -229,15 +295,22 @@ void ToggleSearchSwitch(AppState& s) {
     ApplySearchSwitch(s, purge);
 }
 
-void PublishPickerPlaces(AppState& s) {
+void PublishPickerPlaces(AppState& s, bool force) {
     if (s.isolatedTest) return;
     static ULONGLONG last = 0;
     const auto now = GetTickCount64();
-    if (now - last < 2000) return;
+    if (!force && now - last < 2000) return;
     last = now;
     AppState* window = s.core.windows.MostRecent();
     if (!window) window = &s;
     picker_places::Snapshot snapshot;
+    snapshot.endpoint = s.core.host.Hwnd();
+    for (const auto& w : window->places.workspaces)
+        snapshot.workspaces.push_back({w.root, w.name, w.color_rgb});
+    for (const auto& item : window->places.starred_items)
+        snapshot.starred_items.push_back({item.path, static_cast<uint32_t>(item.kind), item.group});
+    for (const auto& group : window->places.starred_groups)
+        snapshot.starred_groups.push_back({group.id, group.name});
     if (const auto* tab = ActiveTab(*window); tab && !fs::IsVirtualPath(tab->current_path)) snapshot.current = tab->current_path;
     for (const auto& folder : KnownFolders(*window)) snapshot.folders.push_back({folder.path, folder.label, folder.open, folder.pinned});
     picker_places::Publish(snapshot);
@@ -278,10 +351,12 @@ bool HandleGlobalSearchHotkeyCapture(AppState& s, unsigned key) {
 void ToggleGlobalSearch(AppState& s, bool double_ctrl) {
     diagnostics::runtime::Event("search_summon", {{"double_ctrl", double_ctrl},
         {"visible", s.globalSearchWindow.Visible()}});
+    if (!s.appPrefs.global_search_enabled || !s.appPrefs.search_enabled) return;
+    // Queued input may arrive after the setting was disabled.
+    if (double_ctrl && !s.appPrefs.global_search_double_ctrl) return;
+    if (double_ctrl ? !s.core.doubleCtrl.Running() : !s.globalSearchHotkey.Registered()) return;
     // Two Ctrl taps over an Open / Save dialog go to its jump bar.
     if (double_ctrl && s.core.dialogJump.FocusSearch()) return;
-    if (!s.appPrefs.global_search_enabled || !s.appPrefs.search_enabled) return;
-    if (double_ctrl ? !s.core.doubleCtrl.Running() : !s.globalSearchHotkey.Registered()) return;
     if (s.globalSearchWindow.Visible()) {
         s.globalSearchWindow.Hide();
         return;

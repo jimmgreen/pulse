@@ -1,6 +1,8 @@
 #include "../shell_bridge/picker_shell_results.h"
 #include "../common/path_utils.h"
+#include "../common/picker_shell_namespace.h"
 #include <wrl/client.h>
+#include <wrl/implements.h>
 #include <filesystem>
 #include <cstdio>
 
@@ -73,11 +75,88 @@ bool CreateFixture(const std::filesystem::path& path) {
     CloseHandle(file);
     return ok;
 }
+
+class StreamItem final : public Microsoft::WRL::RuntimeClass<
+    Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>, IShellItem> {
+public:
+    ComPtr<IStream> stream;
+    HRESULT bind_result = S_OK;
+    unsigned binds = 0;
+    bool read_only = false;
+    HRESULT STDMETHODCALLTYPE BindToHandler(IBindCtx* context, REFGUID handler, REFIID iid, void** output) override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        ++binds;
+        BIND_OPTS options{}; options.cbStruct = sizeof(options);
+        read_only = context && SUCCEEDED(context->GetBindOptions(&options)) &&
+            (options.grfMode & (STGM_WRITE | STGM_READWRITE | STGM_CREATE)) == 0;
+        if (handler != BHID_Stream) return E_NOTIMPL;
+        if (FAILED(bind_result)) return bind_result;
+        return stream ? stream.CopyTo(iid, output) : E_UNEXPECTED;
+    }
+    HRESULT STDMETHODCALLTYPE GetParent(IShellItem**) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetDisplayName(SIGDN, PWSTR*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetAttributes(SFGAOF, SFGAOF*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE Compare(IShellItem*, SICHINTF, int*) override { return E_NOTIMPL; }
+};
 }
 
 int main(int argc, char** argv) {
     const HRESULT initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (FAILED(initialized)) return 2;
+    if (argc == 2 && std::string_view(argv[1]) == "--shell-native-options") {
+        constexpr wchar_t recycle[] = L"::{645FF040-5081-101B-9F08-00AA002F954E}";
+        constexpr uint32_t stream_options = static_cast<uint32_t>(FOS_SUPPORTSTREAMABLEITEMS);
+        auto provider = Microsoft::WRL::Make<StreamItem>();
+        Check(provider && SUCCEEDED(CreateStreamOnHGlobal(nullptr, TRUE, &provider->stream)), "controlled real IStream provider initialized");
+        if (provider && provider->stream) {
+            ULONG written = 0;
+            provider->stream->Write("provider bytes", 14, &written);
+            LARGE_INTEGER zero{}; provider->stream->Seek(zero, STREAM_SEEK_SET, nullptr);
+            Check(SUCCEEDED(pulse::picker_shell::ValidateStream(provider.Get())) && provider->binds == 1 && provider->read_only,
+                "stream validation obtains BHID_Stream using read-only bind context");
+            ULARGE_INTEGER position{}; provider->stream->Seek(zero, STREAM_SEEK_CUR, &position);
+            Check(position.QuadPart == 0, "stream validation does not consume provider content");
+            provider->bind_result = STG_E_SHAREVIOLATION;
+            Check(pulse::picker_shell::Error(pulse::picker_shell::ValidateStream(provider.Get())) == ERROR_SHARING_VIOLATION,
+                "provider storage sharing error retains sharing callback semantics");
+            provider->bind_result = E_ACCESSDENIED;
+            Check(pulse::picker_shell::Error(pulse::picker_shell::ValidateStream(provider.Get())) == ERROR_ACCESS_DENIED,
+                "provider access failure remains an access error");
+        }
+        ComPtr<IShellItem> item;
+        Check(SUCCEEDED(CreatePickerShellItem(Operation::PickFolder, recycle, &item, false, FOS_ALLNONSTORAGEITEMS)), "ALLNONSTORAGEITEMS returns actual virtual Shell folder");
+        SFGAOF attributes = 0;
+        Check(item && SUCCEEDED(item->GetAttributes(SFGAO_FOLDER | SFGAO_FILESYSTEM, &attributes)) &&
+            (attributes & SFGAO_FOLDER) && !(attributes & SFGAO_FILESYSTEM), "virtual result retains source namespace attributes");
+        PWSTR path = nullptr;
+        Check(item && FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && !path, "virtual item has no fabricated filesystem path");
+        CoTaskMemFree(path);
+        std::wstring name;
+        Check(SUCCEEDED(pulse::picker_shell::Name(item.Get(), SIGDN_DESKTOPABSOLUTEPARSING, name)) && pulse::picker_shell::IsParsingName(name), "virtual result retains reparsable Shell identity");
+        ComPtr<IShellItemArray> array;
+        Check(SUCCEEDED(CreatePickerShellItemArray(Operation::PickFolder, {recycle}, &array, false, FOS_ALLNONSTORAGEITEMS)), "real virtual result array construction");
+        Check(FAILED(CreatePickerShellItem(Operation::PickFolder, recycle, &item)) && !item, "legacy filesystem policy still rejects virtual item");
+        Check(CreatePickerShellItem(Operation::PickFolder, recycle, &item, false, FOS_ALLNONSTORAGEITEMS | FOS_FORCEFILESYSTEM) == E_INVALIDARG && !item, "mutually exclusive Shell options rejected");
+        Check(FAILED(CreatePickerShellItem(Operation::PickFolder, recycle, &item, false, stream_options)) && !item, "streamable policy does not accept arbitrary virtual folder");
+        using pulse::picker_shell::IsSelectable;
+        Check(IsSelectable(SFGAO_STREAM, false, stream_options) && !IsSelectable(0, false, stream_options), "streamable policy requires source SFGAO_STREAM");
+        Check(IsSelectable(SFGAO_STREAM | SFGAO_FOLDER, false, stream_options), "streamable folder can be returned as a file");
+        Check(IsSelectable(0, false, FOS_ALLNONSTORAGEITEMS) && !IsSelectable(SFGAO_STREAM, false, stream_options | FOS_FORCEFILESYSTEM), "all-items and forced-filesystem retain distinct semantics");
+        const auto zip = std::filesystem::current_path() / L"bench_data" /
+            (L"picker-stream-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()) + L".zip");
+        const unsigned char empty_zip[22] = {'P','K',5,6};
+        HANDLE file = CreateFileW(zip.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        DWORD written = 0;
+        const bool created = file != INVALID_HANDLE_VALUE && WriteFile(file, empty_zip, sizeof(empty_zip), &written, nullptr) && written == sizeof(empty_zip);
+        if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+        Check(created, "isolated valid ZIP stream fixture created");
+        Check(created && SUCCEEDED(CreatePickerShellItem(Operation::OpenFiles, zip.wstring(), &item, false, stream_options)) && SamePath(item.Get(), zip), "actual streamable Shell folder returns its real file identity");
+        attributes = 0;
+        Check(item && SUCCEEDED(item->GetAttributes(SFGAO_STREAM | SFGAO_FOLDER, &attributes)) && (attributes & SFGAO_STREAM) && (attributes & SFGAO_FOLDER), "ZIP source advertises both stream and folder attributes");
+        Check(DeleteFileW(zip.c_str()) != FALSE, "owned ZIP stream fixture removed");
+        CoUninitialize(); return failures ? 1 : 0;
+    }
     const auto bench = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() / L"bench_data";
     const auto root = std::filesystem::absolute(bench / (L"shell-results-" + std::to_wstring(GetCurrentProcessId()) +
         L"-" + std::to_wstring(GetTickCount64())));

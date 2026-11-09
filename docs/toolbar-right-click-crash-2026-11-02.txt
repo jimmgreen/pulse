@@ -1,0 +1,31 @@
+筛选右键闪退：本机转储定位与修复（2026-11-02）
+
+真实崩溃证据
+%LOCALAPPDATA%/Pulse/Diagnostics/Crashes/
+20261102T020228.372Z-app-20261028T111027Z-359C5732-30324-27312-1.json/.dmp
+本地时间10:02:28，exception_code=0xC00000FD，context=wndproc，breadcrumb action512(WM_MOUSEMOVE)。
+安装版与当时build/pulse.exe SHA256一致：
+3722cf9e13fab865e81fc83b037f0f39d4a2452b67c5738d57430a1cf7bf97a0。
+使用匹配EXE的x64展开信息，调用链：
+_alloca_probe -> NormalizePath -> folder_size::Key -> FolderSizes::Sync ->
+FillFolderSizes -> BuildVm -> HandleMouseMove -> WndProcImpl -> WndProc -> user32。
+NormalizePath尝试申请65664字节栈；启动函数本身已常驻761336字节栈帧。
+并非筛选配置错误；弹出菜单嵌套消息循环中的鼠标刷新耗尽剩余栈。
+
+修复
+- AppState在wWinMain中使用unique_ptr持有，生命周期与原来保持一致。
+- wWinMain全部16个32768字符测试/截图路径缓冲改为RAII堆存储，容量和条件不变。
+- 没有扩大线程栈，也没有关闭文件夹大小或菜单鼠标事件。
+- 新EXE展开信息：wWinMain栈帧22552字节，相比旧版减少738784字节，约97%。
+
+验证
+- pulse受影响目标构建通过；差异检查通过。
+- 隔离目录真实子文件夹、folder_size_auto开启，等待目录枚举。
+- 3轮×排序/筛选/分组×自定义/移除=18次真实右键。
+- 菜单打开期间向主窗和菜单发送WM_MOUSEMOVE，并同步RedrawWindow，覆盖嵌套刷新。
+- 63 PASS，failures=0，进程退出码0。
+- 日志：bench_data/toolbar-crash-20261102/toolbar.log。
+上次测试只验证菜单打开/选择，没有充分覆盖打开后的主窗鼠标移动及文件夹大小刷新。
+本次没有运行完整历史回归，没有修改个人设置或执行安装。
+
+修复安装包：dist/PulseSetup-1.0.58-test-toolbar-crash-20261102.exe

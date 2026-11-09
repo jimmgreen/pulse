@@ -1,6 +1,6 @@
 // ai_panel_icons.h — Line icons of the Pulse 助手 panel.
 //
-// The 24x24 path data of plans/ai/pulse_ai_assistant_v2.html, drawn with D2D
+// The design's 24x24 path data, drawn with D2D
 // path geometries (1.6 stroke, round caps and joins) so the panel matches the
 // approved design. Geometries are built once per D2D factory.
 #pragma once
@@ -50,7 +50,7 @@ enum class AiIcon : uint8_t {
     CheckCircle,
     AlertCircle,
     EyeOff,
-    // Error cards (plans/ai/Pulse_AI助手_错误与快捷键.html).
+    // Error cards.
     Key,
     Wallet,
     Cloud,
@@ -60,7 +60,7 @@ enum class AiIcon : uint8_t {
     Gear,
     Swap,
     Warn,
-    // First batch of extensions (plans/ai/Pulse_AI助手_第一批扩展.html).
+    // First batch of extensions.
     Bolt,
     Package,
     Rename,
@@ -68,12 +68,12 @@ enum class AiIcon : uint8_t {
     Lock,
     Skip,
     Sliders,
-    // Second batch (plans/ai/Pulse_AI助手_第二批扩展.html).
+    // Second batch.
     Hdd,
     Install,
     Temp,
     Trash,
-    // Third batch (plans/ai/Pulse_AI助手_第三批_操控Pulse与语音.html).
+    // Third batch.
     Split,
     NewWindow,
     Desktop,
@@ -85,7 +85,7 @@ enum class AiIcon : uint8_t {
     Monitor,
     Rocket,
     WinSettings,
-    // P4 (plans/ai/P4_全部领域接入.html).
+    // P4.
     Pin,
     Palette,
     Git,

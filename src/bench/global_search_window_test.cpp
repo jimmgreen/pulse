@@ -2,11 +2,26 @@
 #include <memory>
 #include <string>
 #include "../app/global_search_window.h"
+namespace {
+bool reject_search_activation = false;
+HWND search_activation_other = nullptr;
+BOOL WINAPI SearchTestSetForegroundWindow(HWND window) {
+    return reject_search_activation ? FALSE : ::SetForegroundWindow(window);
+}
+HWND WINAPI SearchTestGetForegroundWindow() {
+    return reject_search_activation ? search_activation_other : ::GetForegroundWindow();
+}
+}
+#define SetForegroundWindow SearchTestSetForegroundWindow
+#define GetForegroundWindow SearchTestGetForegroundWindow
 #include "../app/global_search_window.cpp"
+#undef SetForegroundWindow
+#undef GetForegroundWindow
 #include <wincodec.h>
 #include <iostream>
 #include <filesystem>
 #include <fstream>
+#include "../common/current_user_security.h"
 
 namespace pulse {
 struct GlobalSearchWindowTestPeer {
@@ -27,6 +42,143 @@ struct ContentRefreshTestPeer {
 namespace {
 std::vector<std::pair<std::wstring, bool>> recorded_opens;
 void RecordOpen(std::wstring path, bool location) { recorded_opens.emplace_back(std::move(path), location); }
+
+int RunActivationDeniedTests() {
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    pulse::l10n::Initialize(GetModuleHandleW(nullptr), L"en-US");
+    const auto root = std::filesystem::absolute(L"bench_data/search-activation-denied");
+    std::filesystem::create_directories(root / L"profile");
+    SetEnvironmentVariableW(L"LOCALAPPDATA", (root / L"profile").c_str());
+    pulse::diagnostics::runtime::Initialize((root / L"profile").wstring(), "search-activation-test");
+    int failures = 0;
+    const auto check = [&](bool ok, const char* label) {
+        std::cout << (ok ? "[PASS] " : "[FAIL] ") << label << '\n';
+        if (!ok) ++failures;
+    };
+    search_activation_other = CreateWindowExW(0, L"STATIC", L"Activation fixture", WS_POPUP,
+        0, 0, 100, 100, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    check(search_activation_other != nullptr, "create independent foreground fixture");
+    {
+        pulse::GlobalSearchWindow window;
+        reject_search_activation = true;
+        const bool shown = window.Show(nullptr, true, 1, root.wstring());
+        check(shown, "activation refusal is not a search-window open failure");
+        check(window.Visible(), "activation refusal keeps the search window available to click");
+        reject_search_activation = false;
+        auto& state = pulse::GlobalSearchWindowTestPeer::Get(window);
+        check(window.Show(nullptr, true, 1, root.wstring()) && window.Visible() &&
+            GetForegroundWindow() == state.hwnd && GetFocus() == state.edit,
+            "subsequent permitted activation focuses the existing search edit");
+        window.Hide();
+        check(!window.Visible(), "explicit dismissal still hides search");
+    }
+    DestroyWindow(search_activation_other); search_activation_other = nullptr;
+    pulse::diagnostics::runtime::Shutdown();
+    CoUninitialize();
+    std::cout << "RESULT " << (failures ? "FAIL" : "PASS") << " activation-denied\n";
+    return failures ? 1 : 0;
+}
+
+int RunOpenRoutingTests() {
+    using State = pulse::GlobalSearchWindowTestPeer::State;
+    pulse::l10n::Initialize(GetModuleHandleW(nullptr), L"en-US");
+    int failures = 0;
+    auto check = [&](bool ok, const char* label) {
+        std::cout << (ok ? "[PASS] " : "[FAIL] ") << label << '\n';
+        if (!ok) ++failures;
+    };
+    State state;
+    state.rows.push_back({});
+    state.rows.front().path = L"\\\\server\\share\\folder\\file.txt";
+    state.selected = 0;
+    int routed = 0;
+    bool route = true, saw_directory = false, saw_location = false;
+    state.events.open_path = [&](const std::wstring& path, bool directory, bool location) {
+        ++routed;
+        saw_directory = directory;
+        saw_location = location;
+        check(path == state.rows.front().path, "routing preserves the full UNC result path");
+        return route;
+    };
+    recorded_opens.clear();
+    state.Open(true, RecordOpen);
+    check(routed == 1 && saw_location && !saw_directory && recorded_opens.empty(),
+        "host-handled file reveal never launches the Shell fallback");
+    state.rows.front().directory = true;
+    state.Open(false, RecordOpen);
+    check(routed == 2 && saw_directory && !saw_location && recorded_opens.empty(),
+        "folder opens can be handled by Pulse directly");
+    route = false;
+    state.Open(true, RecordOpen);
+    check(recorded_opens.size() == 1 && recorded_opens.back().second,
+        "unhandled requests retain the Shell location action");
+    state.rows.front().directory = false;
+    state.Open(false, RecordOpen);
+    check(recorded_opens.size() == 2 && !recorded_opens.back().second,
+        "ordinary file opening retains its associated application action");
+    state.rows.front().app = true;
+    const int before_app = routed;
+    state.Open(true, RecordOpen);
+    check(routed == before_app && recorded_opens.size() == 3 && !recorded_opens.back().second,
+        "application results launch without a folder routing callback");
+    state.rows.front().app = false;
+    state.stale = true;
+    state.Open(false, RecordOpen);
+    check(routed == before_app && recorded_opens.size() == 3,
+        "stale results cannot route or launch");
+    return failures ? 1 : 0;
+}
+
+int RunReopenStateTests() {
+    using State = pulse::GlobalSearchWindowTestPeer::State;
+    pulse::l10n::Initialize(GetModuleHandleW(nullptr), L"en-US");
+    int failures = 0;
+    auto check = [&](bool ok, const char* label) {
+        std::cout << (ok ? "[PASS] " : "[FAIL] ") << label << '\n';
+        if (!ok) ++failures;
+    };
+    State state;
+    state.hwnd = state.edit = CreateWindowExW(0, L"EDIT", L"", WS_POPUP,
+        0, 0, 100, 20, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    check(state.edit != nullptr, "hidden query edit created");
+    if (!state.edit) return 1;
+    wchar_t executable[32768]{};
+    GetModuleFileNameW(nullptr, executable, ARRAYSIZE(executable));
+    const std::wstring folder = std::filesystem::path(executable).parent_path().wstring();
+    state.context.recent_files = {{executable, false}};
+    state.Changed();
+    check(state.rows.size() == 1 && state.rows.front().path == executable,
+          "prewarm populates its original recent context");
+    state.context.recent_files = {{folder, true}};
+    state.Changed(true);
+    check(state.showing_recent && state.rows.size() == 1 && state.rows.front().path == folder &&
+          state.rows.front().directory && state.total == 1 && state.selected == 0 && !state.busy,
+          "reopen replaces prewarm rows with current recent context before presentation");
+    check(state.appear_start == 0, "empty-query reopen does not replay list entrance");
+    state.appear_start = pulse::ui::motion::NowMs();
+    state.Changed(true);
+    check(state.appear_start == 0, "rapid empty-query reopen also completes prior entrance");
+    state.context.recent_files.clear();
+    state.Changed(true);
+    check(state.rows.empty() && state.total == 0 && state.selected == -1,
+          "empty current context cannot expose cached recent rows");
+
+    SetWindowTextW(state.edit, L"needle");
+    state.showing_recent = false;
+    state.rows.push_back({});
+    state.rows.back().path = L"old-result";
+    state.Changed();
+    check(state.stale && state.rows.size() == 1 && state.rows.front().path == L"old-result" && state.busy,
+          "ordinary query edits retain dimmed results while refreshing");
+    const auto old_generation = state.generation;
+    state.Changed(true);
+    check(state.query == L"needle" && !state.showing_recent && !state.stale && state.rows.empty() &&
+          state.busy && state.generation > old_generation,
+          "nonempty reopen refreshes the query without exposing old results");
+    check(state.selected == 0 && state.scroll == 0 && state.scroll_target == 0,
+          "nonempty reopen resets stale selection and scroll");
+    return failures ? 1 : 0;
+}
 
 int RunSelectionIdentityTests() {
     using State = pulse::GlobalSearchWindowTestPeer::State;
@@ -215,6 +367,40 @@ void Pump(DWORD milliseconds) {
         Sleep(10);
     } while (GetTickCount64() < end);
 }
+bool CapturePresentedFrame(pulse::ui::Compositor& compositor, const std::wstring& path) {
+    auto* source = compositor.HeldFrame();
+    if (!source) return false;
+    const auto size = source->GetPixelSize();
+    Microsoft::WRL::ComPtr<ID2D1Bitmap1> readback;
+    const auto properties = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+        source->GetPixelFormat());
+    HRESULT result = compositor.Dc()->CreateBitmap(size, nullptr, 0, &properties, &readback);
+    if (SUCCEEDED(result)) result = readback->CopyFromBitmap(nullptr, source, nullptr);
+    D2D1_MAPPED_RECT mapped{};
+    if (FAILED(result) || FAILED(readback->Map(D2D1_MAP_OPTIONS_READ, &mapped))) return false;
+    Microsoft::WRL::ComPtr<IWICImagingFactory> factory;
+    Microsoft::WRL::ComPtr<IWICBitmap> bitmap;
+    Microsoft::WRL::ComPtr<IWICStream> stream;
+    Microsoft::WRL::ComPtr<IWICBitmapEncoder> encoder;
+    Microsoft::WRL::ComPtr<IWICBitmapFrameEncode> frame;
+    result = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
+    if (SUCCEEDED(result)) result = factory->CreateBitmapFromMemory(size.width, size.height, GUID_WICPixelFormat32bppPBGRA,
+        mapped.pitch, mapped.pitch * size.height, mapped.bits, &bitmap);
+    if (SUCCEEDED(result)) result = factory->CreateStream(&stream);
+    if (SUCCEEDED(result)) result = stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE);
+    if (SUCCEEDED(result)) result = factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder);
+    if (SUCCEEDED(result)) result = encoder->Initialize(stream.Get(), WICBitmapEncoderNoCache);
+    if (SUCCEEDED(result)) result = encoder->CreateNewFrame(&frame, nullptr);
+    if (SUCCEEDED(result)) result = frame->Initialize(nullptr);
+    if (SUCCEEDED(result)) result = frame->WriteSource(bitmap.Get(), nullptr);
+    if (SUCCEEDED(result)) result = frame->Commit();
+    if (SUCCEEDED(result)) result = encoder->Commit();
+    readback->Unmap();
+    return SUCCEEDED(result);
+}
+bool CapturePresentedFrame(pulse::GlobalSearchWindowTestPeer::State& state, const std::wstring& path) {
+    return CapturePresentedFrame(state.compositor, path);
+}
 bool Capture(pulse::GlobalSearchWindowTestPeer::State& state, const std::wstring& path) {
     Pump(30);
     const UINT width = static_cast<UINT>(state.Px(state.width)), height = static_cast<UINT>(state.Px(state.height));
@@ -365,8 +551,121 @@ int RunProviderStatusRender(const std::filesystem::path& parent) {
     return failures ? 1 : 0;
 }
 }
+int RunLiveRecycleSearch(const std::wstring& name) {
+    const auto utf8 = [](const std::wstring& value) {
+        const int bytes = WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
+        std::string text(static_cast<size_t>(bytes), '\0');
+        WideCharToMultiByte(CP_UTF8, 0, value.data(), static_cast<int>(value.size()), text.data(), bytes, nullptr, nullptr);
+        return text;
+    };
+    wchar_t original[32768]{}, report[32768]{};
+    GetEnvironmentVariableW(L"PULSE_TEST_LIVE_RECYCLE_PATH", original, 32768);
+    GetEnvironmentVariableW(L"PULSE_TEST_LIVE_RECYCLE_REPORT", report, 32768);
+    if (!*original || !*report) return 2;
+    std::ofstream log{std::filesystem::path(report)};
+    if (!log) return 2;
+    int failures = 0;
+    auto check = [&](bool ok, const char* label) {
+        log << (ok ? "[PASS] " : "[FAIL] ") << label << std::endl;
+        if (!ok) ++failures;
+    };
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    pulse::l10n::Initialize(GetModuleHandleW(nullptr), L"zh-CN");
+    {
+        pulse::GlobalSearchWindow window;
+        pulse::GlobalSearchHandoff handed;
+        bool handoff = false;
+        window.SetHandoffHandler([&](const auto& request) { handed = request; handoff = true; });
+        check(window.Show(nullptr, true, 1, L""), "show real global search popup");
+        auto& state = pulse::GlobalSearchWindowTestPeer::Get(window);
+        // The parent intentionally starts helpers hidden. A second explicit
+        // show overrides STARTUPINFO's first-ShowWindow visibility setting.
+        ShowWindow(state.hwnd, SW_SHOWNORMAL);
+        SetForegroundWindow(state.hwnd);
+        SetFocus(state.edit);
+        check(IsWindowVisible(state.hwnd) != FALSE, "live search fixture is visible despite hidden process startup");
+        SetWindowTextW(state.edit, name.c_str());
+        state.Changed();
+        int matched = -1;
+        unsigned recycle_messages = 0, debounce_messages = 0, deactivated_messages = 0;
+        const auto deadline = GetTickCount64() + 20000;
+        while (GetTickCount64() < deadline && matched < 0) {
+            MSG message;
+            while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+                if (message.hwnd == state.hwnd && message.message == pulse::kRecycleResult) ++recycle_messages;
+                if (message.hwnd == state.hwnd && message.message == WM_TIMER && message.wParam == pulse::kDebounce) ++debounce_messages;
+                if (message.hwnd == state.hwnd && message.message == WM_ACTIVATEAPP && !message.wParam) ++deactivated_messages;
+                TranslateMessage(&message); DispatchMessageW(&message);
+            }
+            for (size_t i = 0; i < state.rows.size(); ++i) {
+                const auto& row = state.rows[i];
+                if (row.name == name && !row.recycle_path.empty() &&
+                    pulse::path::EqualInsensitive(pulse::path::StripExtendedPathPrefix(row.path),
+                        pulse::path::StripExtendedPathPrefix(original))) matched = static_cast<int>(i);
+            }
+            if (matched < 0) Sleep(20);
+        }
+        check(matched >= 0, "real current-user recycled filename appears in global results");
+        wchar_t edit_text[32768]{};
+        GetWindowTextW(state.edit, edit_text, 32768);
+        log << "[DIAG] sid=" << utf8(pulse::CurrentUserSidString()) << " query=" << utf8(state.query)
+            << " edit=" << utf8(edit_text) << " scope=" << utf8(state.ScopePath())
+            << " generation=" << state.generation << " visible=" << window.Visible()
+            << " composing=" << state.composing << " content=" << state.content_mode
+            << " recycle_ready=" << state.recycle_ready << " recycle_error=" << state.recycle_result.error
+            << " recycle_hits=" << state.recycle_result.hits.size() << " rows=" << state.rows.size()
+            << " local_ready=" << state.providers.local_ready << " network_ready=" << state.providers.network_ready
+            << " provider_error=" << state.providers.Error() << " recycle_messages=" << recycle_messages
+            << " debounce_messages=" << debounce_messages << " deactivate_messages=" << deactivated_messages << std::endl;
+        if (matched < 0) {
+            pulse::index::Query direct_query;
+            direct_query.needle = name;
+            const auto direct = pulse::app::SearchRecycleBin(direct_query);
+            size_t named = 0;
+            for (const auto& hit : direct.hits) if (hit.name == name) ++named;
+            log << "[DIAG] direct_error=" << direct.error << " direct_hits=" << direct.hits.size()
+                << " direct_named=" << named << std::endl;
+        }
+        if (matched >= 0) {
+            state.selected = matched;
+            state.ClampSelection(); state.Paint();
+            check(state.rows[matched].name == name && !state.rows[matched].recycle_path.empty(),
+                "display row retains original label and recycle identity");
+            auto screenshot = std::filesystem::path(report); screenshot.replace_extension(L".png");
+            check(Capture(state, screenshot.wstring()), "capture visible recycle search result");
+            recorded_opens.clear();
+            state.Open(false, RecordOpen);
+            check(handoff && handed.folder == L"pulse:recycle" && !handed.content &&
+                handed.query == L"\"" + name + L"\"", "opening hands off exact filename into recycle scope");
+            check(recorded_opens.empty(), "opening never invokes original-path shell action");
+        }
+        window.Shutdown();
+    }
+    CoUninitialize();
+    log << "failures=" << failures << std::endl;
+    return failures ? 1 : 0;
+}
+
+#include "global_search_embedded_preview_test.inc"
+#include "global_search_mockup_flow_test.inc"
+#include "global_search_header_test.inc"
+
 int wmain(int argc, wchar_t** argv) {
+    if (argc > 3 && std::wstring_view(argv[1]) == L"--image-preview")
+        return RunImagePreviewProbe(argv[2], argv[3]);
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--embedded-preview")
+        return RunEmbeddedPreviewTests(argc > 2 ? argv[2] : L"bench_data/search-embedded-preview");
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--shared-header-offscreen")
+        return RunSharedSearchHeaderTests(argc > 2 ? argv[2] : L"bench_data/search-shared-header");
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--mockup-flow")
+        return RunMockupFlow(argc > 2 ? argv[2] : L"bench_data/search-mockup-flow", argc > 3);
+    wchar_t live_name[1024]{};
+    if (GetEnvironmentVariableW(L"PULSE_TEST_LIVE_RECYCLE_NAME", live_name, 1024))
+        return RunLiveRecycleSearch(live_name);
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--activation-denied") return RunActivationDeniedTests();
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--open-routing") return RunOpenRoutingTests();
     if (argc > 1 && std::wstring_view(argv[1]) == L"--selection-identity") return RunSelectionIdentityTests();
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--reopen-state") return RunReopenStateTests();
     if (argc > 1 && std::wstring_view(argv[1]) == L"--provider-status-render")
         return RunProviderStatusRender(argc > 2 ? argv[2] : L"bench_data/global-search-provider-status");
     using SetAwareness = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
@@ -374,7 +673,9 @@ int wmain(int argc, wchar_t** argv) {
     if (set_awareness) set_awareness(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     pulse::l10n::Initialize(GetModuleHandleW(nullptr), L"zh-CN");
-    std::filesystem::path output = argc > 1 ? argv[1] : L"bench_data/global-search-window";
+    const bool cancel_only = argc > 1 && std::wstring_view(argv[1]) == L"--cancel-only";
+    std::filesystem::path output = cancel_only ? L"bench_data/global-search-cancel" :
+        (argc > 1 ? argv[1] : L"bench_data/global-search-window");
     std::filesystem::create_directories(output);
     const auto profile = output / L"profile";
     std::filesystem::create_directories(profile);
@@ -384,6 +685,61 @@ int wmain(int argc, wchar_t** argv) {
     pulse::GlobalSearchWindow window;
     check(window.Show(nullptr, true, 1, output.wstring()), "Show creates independent visible window");
     auto& state = pulse::GlobalSearchWindowTestPeer::Get(window);
+    if (cancel_only) {
+        SetActiveWindow(nullptr);
+        std::cout << "[INFO] null foreground fixture=" << (GetForegroundWindow() == nullptr) << '\n';
+        window.Hide();
+        check(window.Show(nullptr, true, 1, output.wstring()), "Summon after local deactivation");
+        check(window.Visible() && GetForegroundWindow() == state.hwnd && GetFocus() == state.edit,
+            "Search owns foreground and edit focus before accepting Escape");
+        for (int cycle = 0; cycle < 8; ++cycle) {
+            SendMessageW(state.edit, WM_KEYDOWN, VK_ESCAPE, 0);
+            Pump(20);
+            check(!window.Visible(), "Native edit Escape hides search without reopening");
+            check(window.Show(nullptr, true, 1, output.wstring()) && GetForegroundWindow() == state.hwnd &&
+                GetFocus() == state.edit, "Repeated summon retains keyboard ownership");
+        }
+        window.Hide();
+        pulse::GlobalSearchContext refreshed;
+        refreshed.show_apps = false;
+        refreshed.recent_files.push_back({std::filesystem::absolute(output).wstring(), true});
+        window.SetContext(std::move(refreshed));
+        state.compositor.CaptureNextFrame();
+        check(window.Show(nullptr, true, 1, output.wstring()), "Show refreshed recent context");
+        check(state.rows.size() == 1 && state.rows.front().path == std::filesystem::absolute(output).wstring() &&
+            state.appear_start == 0, "Current recent content is ready without entrance animation at Show return");
+        check(CapturePresentedFrame(state, (output / L"reopen-first-frame.png").wstring()), "Capture first submitted frame without pumping messages");
+        state.compositor.ReleaseHeldFrame();
+        state.Cancel();
+        const auto files = output / L"files";
+        std::filesystem::create_directories(files);
+        std::ofstream(files / L"needle.txt") << "pulse-global-search-cancellation-fixture";
+        state.content_mode = true;
+        state.current_only = true;
+        state.current_folder = files.wstring();
+        pulse::index::ContentIndexConfig config;
+        config.roots = {{files.wstring()}};
+        state.contents.Resume();
+        state.contents.Configure(config);
+        const auto deadline = GetTickCount64() + 5000;
+        while (state.contents.GetConfig().roots.empty() && GetTickCount64() < deadline) Pump(30);
+        SetWindowTextW(state.edit, L"pulse-global-search-cancellation-fixture");
+        state.Search();
+        check(state.contents.CurrentGeneration() == state.generation, "Content query dispatched");
+        const auto generation = state.generation;
+        const auto started = GetTickCount64();
+        state.Key(VK_ESCAPE);
+        check(!window.Visible() && state.generation != generation && state.contents.CurrentGeneration() == 0,
+            "Escape hides and cancels content query");
+        check(GetTickCount64() - started < 250, "Escape does not wait for worker");
+        Pump(200);
+        check(!window.Visible() && !state.busy, "Late completion does not reopen search");
+        check(window.Show(nullptr, true, 1, files.wstring()), "Search can reopen after cancellation");
+        state.Cancel();
+        window.Shutdown();
+        CoUninitialize();
+        return failed ? 1 : 0;
+    }
     check(window.Visible() && GetFocus() == state.edit, "Show focuses native IME edit");
     check(GetWindow(state.hwnd, GW_OWNER) == nullptr, "Hidden main owner cannot hide popup");
     check((GetWindowLongPtrW(state.hwnd, GWL_EXSTYLE) & WS_EX_NOREDIRECTIONBITMAP) != 0,

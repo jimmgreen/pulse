@@ -6,7 +6,7 @@ namespace pulse {
 namespace ai_agent {
 
 // ------------------------------------------------- find_duplicates (E) --
-// plans/ai/Pulse_AI助手_第二批扩展.html flow E: the local funnel, the groups
+// Flow E: the local funnel, the groups
 // with what each keeps and why, one confirmation, then the copies go to the
 // Recycle Bin behind DuplicateCleanupGuard (keepers locked and re-checked).
 

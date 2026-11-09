@@ -1,0 +1,53 @@
+{
+  "apiVersion": 1,
+  "id": "example.selection-panel",
+  "name": "文件信息",
+  "commands": [
+    {
+      "id": "back",
+      "title": "返回上一位置",
+      "capability": "navigation.back"
+    },
+    {
+      "id": "forward",
+      "title": "前往下一位置",
+      "capability": "navigation.forward"
+    },
+    {
+      "id": "up",
+      "title": "打开上级文件夹",
+      "capability": "navigation.up"
+    },
+    {
+      "id": "refresh",
+      "title": "刷新当前视图",
+      "capability": "view.refresh"
+    }
+  ],
+  "panel": {
+    "title": "当前选择",
+    "description": "跟随当前窗口显示目录和选择信息。只读取已加载的列表，不打开文件，也不上传数据。",
+    "commands": [
+      "up",
+      "back",
+      "forward",
+      "refresh"
+    ],
+    "fields": [
+      {
+        "label": "当前目录",
+        "binding": "context.directory",
+        "empty": "尚无目录"
+      },
+      {
+        "label": "已选数量",
+        "binding": "context.selectionCount"
+      },
+      {
+        "label": "单选条目",
+        "binding": "context.selectionName",
+        "empty": "未单选可读取名称的条目"
+      }
+    ]
+  }
+}

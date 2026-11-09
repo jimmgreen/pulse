@@ -9,13 +9,14 @@
 #include "favorites_bar_layout.h"
 #include "folder_thumbnail_cache.h"
 #include "render_caches.h"
-#include "archive_preview.h"
 #include "name_highlight.h"
 #include "drive_capacity.h"
-#include "preview_handler_host.h"
 #include "video_preview.h"
+#include "hover_animation.h"
 #include "ui_motion.h"
+#include "motion_probe.h"
 #include "item_check_motion.h"
+#include "item_artwork_hit.h"
 #include "link_pill.h"
 #include "ui_view_morph.h"
 #include "group_wheel.h"
@@ -26,12 +27,16 @@
 namespace pulse::ui {
 
 class MainRenderer {
+    friend struct TitleLayoutTestAccess;
     friend struct FilenameRenderTest;
     friend struct PaneHeaderIconTest;
     friend struct FolderSizesUiTest;
     friend struct ColumnResizeUiTest;
     friend struct UiModuleAuditTest;
+    friend struct QuickPreviewAuditTest;
+    friend struct ItemGripTest;
 public:
+    std::vector<int> HiddenTitleTabs(const WindowViewModel& vm, float width) const;
     void SetResourceModule(HINSTANCE module) { resource_module_ = module; }
     HINSTANCE ResourceModule() const { return resource_module_ ? resource_module_ : GetModuleHandleW(nullptr); }
     std::vector<std::shared_future<void>> SuspendVolume(const std::wstring& root);
@@ -50,8 +55,6 @@ public:
     void SetCompositor(Compositor* comp);
     void InvalidateTypography();
     void SetIconNotifyWindow(HWND hwnd);
-    void NotifyPreviewActivate(bool active) { preview_handler_.NotifyAppActivate(active); }
-    void NotifyPreviewOwnerMoved() { preview_handler_.Reposition(); }
     // The hover preview card, over everything Render drew (ui_hover_preview.cpp).
     // Also stops the card's video when the view is no longer visible.
     void DrawHoverPreview(const HoverPreviewView& view, const D2D1_RECT_F& client,
@@ -98,13 +101,16 @@ public:
                              bool photo_first = true);
 
     // Layout metrics (DIPs).
+    void UpdateTabLayout(const WindowViewModel& vm, float width);
     float TitleBarHeight() const { return title_bar_height_; }
+    float TitleControlsHeight() const { return (!vertical_tabs_ && !embedded_ ? kTabRowHeight : kTitleBarHeight) * scale_; }
     float ToolbarHeight() const { return toolbar_height_; }
     // Where the panes start: the sidebar plus the docked Pulse 助手 column.
     float EffectiveSidebarWidth(float window_width) const;
     // The sidebar alone (title bar brand, tab strip, the sidebar itself).
     float SidebarOwnWidth(float window_width) const;
     float TitleSidebarWidth(float window_width) const;
+    float TitleBrandWidth(const WindowViewModel& vm, float window_width) const;
     // Pulse 助手 (ai_panel_view.h). Docked it is a column right of the
     // sidebar, which folds to its rail while it is open (not persisted).
     AiPanelView& AiPanel() { return ai_panel_; }
@@ -132,7 +138,7 @@ public:
     // The bar hidden, the address bar ends in ★⌄ (the favorites dropdown).
     bool FavoritesButtonShown() const { return !favorites_bar_ && !embedded_; }
     D2D1_RECT_F AddressFavoritesRect(float window_width) const {
-        const D2D1_RECT_F a = AddressBarRect(window_width);
+        const D2D1_RECT_F a = ToolbarLayoutAt(window_width, 0).address_text;
         return D2D1::RectF(a.right - 32 * scale_, a.top + 4 * scale_, a.right - 4 * scale_, a.bottom - 4 * scale_);
     }
     FavoritesBarLayout FavoritesBarLayoutAt(const WindowViewModel& vm, float window_width) const;
@@ -150,14 +156,24 @@ public:
     // turns animations off). Re-setting the current state is a no-op.
     void SetSidebarCollapsed(bool on, bool animate = false);
     bool SidebarCollapsed() const { return sidebar_collapsed_; }
+    bool SidebarAutoCollapsed(float window_width) const {
+        return window_width / scale_ < kSidebarRailWindowDip;
+    }
+    bool SidebarRailVisible(float window_width) const {
+        return SidebarAutoCollapsed(window_width) || sidebar_collapsed_;
+    }
     bool SidebarAnimating() const { return collapse_anim_; }
     // Hover peek: the collapsed rail shows the full sidebar as an overlay
     // above the panes without relayout.
-    void SetSidebarPeek(bool on) { sidebar_peek_ = on; }
+    void SetSidebarPeek(bool on, bool pinned = false) {
+        sidebar_peek_ = on;
+        sidebar_peek_pinned_ = on && pinned;
+    }
     bool SidebarPeek() const { return sidebar_peek_; }
+    bool SidebarPeekPinned() const { return sidebar_peek_pinned_; }
     bool SidebarPeekVisible(float window_width) const {
-        return sidebar_peek_ && sidebar_collapsed_ && !collapse_anim_ &&
-               window_width / scale_ >= kSidebarRailWindowDip;
+        return sidebar_peek_ && SidebarRailVisible(window_width) &&
+               (SidebarAutoCollapsed(window_width) || !collapse_anim_);
     }
     // Expanded width, ignoring the collapse state.
     float SidebarFullWidth(float window_width) const;
@@ -168,6 +184,7 @@ public:
                                          int action_count) const;
     // 0 = default width; otherwise the minimum search field width in DIP.
     void SetSearchBarMinWidth(float dip) { search_min_dip_ = dip; }
+    void SetNavigationForward(bool enabled) { navigation_can_forward_ = enabled; }
     // Search master switch off: no search field in the toolbar.
     void SetSearchHidden(bool hidden) { search_hidden_ = hidden; }
     bool SearchHidden() const { return search_hidden_; }
@@ -175,10 +192,11 @@ public:
     void SetToolbarGroup(int group_by) { toolbar_group_ = group_by; }
     // 自定义工具栏 → 排序与筛选: which of 排序 / 筛选 / 分组 the toolbar shows
     // (the caller already forces an active filter or grouping on).
-    void SetToolbarView(bool sort, bool filter, bool group) {
+    void SetToolbarView(bool sort, bool filter, bool group, std::array<int, 3> order = {0, 1, 2}) {
         toolbar_show_sort_ = sort;
         toolbar_show_filter_ = filter;
         toolbar_show_group_ = group;
+        toolbar_view_order_ = order;
     }
     // 自定义工具栏: the New button's main action (0 folder, 1 the type made
     // last, 2 menu only), whether that last type was a text document, and how
@@ -195,6 +213,8 @@ public:
         pin_drop_label_ = std::move(drop_label);
     }
     // The user's separators between pinned tools (bit i: before pin i).
+    void SetToolbarViewSlots(std::array<int,3> slots) { pin_view_slots_ = slots; }
+    void SetToolbarRightFrom(int slot) { pin_right_from_ = slot; }
     void SetToolbarSeparators(uint64_t mask) { pin_separators_ = mask; }
     float ToolbarPinLabelWidth() const;
     // Selection chip input for the toolbar layout (the row reserves its room).
@@ -259,7 +279,7 @@ public:
             details_value_ = visible ? 1.0f : 0.0f;
         }
         details_visible_ = visible;
-        if (!visible) { EndDetailsPreviewPan(); details_preview_ready_ = false; }
+        if (!visible) details_preview_bounds_ = {};
     }
     // Preferred width, capped by the window so the file list keeps a usable width.
     float DetailsPanelWidth(float window_w) const;
@@ -279,6 +299,8 @@ public:
     D2D1_RECT_F DetailsPanelRect(float w, float h) const;
 
     D2D1_RECT_F ContentRect(float w, float h) const;
+    void SetExtensionDockVisible(bool visible) { extension_dock_visible_ = visible; }
+    D2D1_RECT_F ExtensionDockRect(float w, float h) const;
     D2D1_RECT_F PaneListRect(const D2D1_RECT_F& pane_bounds, float extra_top = 0.0f,
                              ViewMode mode = ViewMode::Details) const;
     D2D1_RECT_F PaneListRect(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds) const;
@@ -288,6 +310,8 @@ public:
     // details and icons sit one step further left.
     D2D1_RECT_F PaneMediumIconsRect(const D2D1_RECT_F& pane_bounds,
                                     float filter_expand = 1.0f, bool wall = false) const;
+    D2D1_RECT_F PaneZoomChipRect(const PaneViewModel& pane, const D2D1_RECT_F& bounds) const;
+    D2D1_RECT_F PaneExpandRect(const D2D1_RECT_F& bounds) const;
     D2D1_RECT_F PaneCloseRect(const D2D1_RECT_F& bounds) const;
     D2D1_RECT_F PaneViewButtonRect(const D2D1_RECT_F& pane_bounds,
                                    float filter_expand = 1.0f) const;
@@ -326,22 +350,12 @@ public:
                                float expand = 1.0f, bool has_text = false) const;
     D2D1_RECT_F FilterClearRect(const D2D1_RECT_F& pane_bounds, float expand) const;
 
-    bool BeginDetailsPreviewPan(float x, float y);
-    void MoveDetailsPreviewPan(float x, float y);
-    void EndDetailsPreviewPan() { details_preview_dragging_ = false; details_preview_drag_pending_ = false; }
-    bool DetailsPreviewDragging() const { return details_preview_dragging_; }
-    bool DetailsPreviewPointerActive() const { return details_preview_dragging_ || details_preview_drag_pending_; }
-    bool CanDetailsPreviewPan() const { return details_preview_ready_; }
-    // Archive listings draw an interactive tree instead of a pannable surface.
-    bool DetailsPreviewIsArchive() const { return details_preview_ready_ && details_preview_archive_; }
-    bool ClickDetailsPreview(float x, float y);
-    bool HoverDetailsPreview(float x, float y);
-    bool TickDetailsPreview(ULONGLONG now) {
-        if (details_zoom_label_until_ && now >= details_zoom_label_until_) {
-            details_zoom_label_until_ = 0;
-            return true;
-        }
-        return false;
+    D2D1_RECT_F DetailsPreviewBounds() const { return details_preview_bounds_; }
+    // The operation pill as last drawn (client px; empty when not shown), and
+    // its pop when the operation card lands in it.
+    D2D1_RECT_F TaskPillRect() const { return task_pill_rect_; }
+    void PopTaskPill() {
+        if (motion::SystemAnimationsEnabled()) task_pill_pop_at_ = GetTickCount64();
     }
     // Highlight glides and copy confirmations (ui_motion.h). True while another
     // frame is needed; false once everything has settled, so idle stays idle.
@@ -356,6 +370,7 @@ public:
         bool active = sidebar_pill_.Active(motion_now) || settings_nav_pill_.Active(motion_now) ||
                       settings_nav_hover_.Active(motion_now) || collapse_anim_ || details_anim_ ||
                       ai_panel_.Animating();
+        for (const auto& entry : settings_segment_motion_) active = active || entry.second.Active(motion_now);
         for (const auto& m : list_hover_motion_) active = active || m.Active(motion_now);
         for (const auto& m : list_shift_) active = active || m.Active(motion_now);
         for (const auto& m : view_morph_) active = active || m.Active(motion_now);
@@ -391,11 +406,26 @@ public:
     }
     // The last TickMotion found nothing but decorative motion running.
     bool DecorativeMotionOnly() const { return decorative_only_; }
+    D2D1_RECT_F HoverMotionPositionForTest() const { return list_hover_motion_[0].Current(); }
 
     // Partial redraw (plans/Pulse_局部重绘方案.md). Only a quiet window
     // redraws part of itself: nothing moves but the list hover plates and no
     // overlay is up, now or in the frame before. Anything else is a full frame.
     bool PartialRedrawSafe(const WindowViewModel& vm) const;
+    struct FramePerf {
+        uint64_t render_us = 0;
+        uint64_t pane_us = 0;
+        uint64_t list_us = 0;
+        // Row phases are disjoint; name_* is nested within row_text_us.
+        uint64_t row_prepare_us = 0, row_icons_us = 0, row_text_us = 0, row_columns_us = 0;
+        uint64_t name_fit_us = 0, name_draw_us = 0;
+        uint64_t row_prepare_fallbacks = 0, row_icons_fallbacks = 0;
+        uint64_t row_text_fallbacks = 0, row_columns_fallbacks = 0;
+        uint32_t list_rows = 0;
+        uint32_t name_draws = 0;
+    };
+    const FramePerf& LastFramePerf() const { return frame_perf_; }
+    void ResetFramePerf() { frame_perf_ = {}; }
     // Where a row hover change in a details list repaints: both rows as drawn
     // in the last full frame and the plate's path. False: redraw everything.
     bool HoverRowDamage(int pane_index, int old_source, int new_source, D2D1_RECT_F* out) const;
@@ -430,8 +460,6 @@ public:
         f.count = f.last_count;
         f.start = motion::NowMs();
     }
-    void ScrollDetailsPreview(float steps, float x, float y, bool horizontal = false);
-    void ToggleDetailsPreviewFit(float x, float y);
 
     // Date = modified. Values double as details_column_set.h bits: append only.
     // Status: cloud-file state (仅在云端 / 已在本地 / 始终保留), only drawn in
@@ -445,7 +473,9 @@ public:
     static constexpr bool IsMediaColumn(ColumnKind kind) noexcept { return kind >= ColumnKind::MediaTaken; }
     static SortColumn MediaSortColumn(ColumnKind kind) noexcept;
     static std::wstring MediaColumnLabel(ColumnKind kind, uint8_t media_columns);
-    static constexpr size_t kMaxDetailsColumns = 8;
+    DetailsColumnWidths ResizeMediaDetailsColumnDivider(const D2D1_RECT_F& bounds,
+        const PaneViewModel& view, int divider, float cursor_x) const;
+    static constexpr size_t kMaxDetailsColumns = 11;
     static_assert(kDetailsColumnModified == 1u << static_cast<uint32_t>(ColumnKind::Date) &&
                   kDetailsColumnType == 1u << static_cast<uint32_t>(ColumnKind::Type) &&
                   kDetailsColumnSize == 1u << static_cast<uint32_t>(ColumnKind::Size) &&
@@ -466,6 +496,10 @@ public:
         int count = 4;
         // Narrow search view: the folder path is drawn under the name.
         bool two_line = false;
+        // Folder and search views: the optional columns after FirstOrderable()
+        // follow details_column_order and can be dragged in the header.
+        bool reorderable = false;
+        int FirstOrderable() const { return Has(ColumnKind::Path) ? 2 : 1; }
 
         float DividerX(int index) const {
             float x = left;
@@ -551,10 +585,24 @@ public:
     // Optional details columns (details_column_set.h bits).
     void SetDetailsColumns(uint32_t mask) { details_columns_ = NormalizeDetailsColumns(mask); }
     uint32_t DetailsColumnsMask() const { return details_columns_; }
+    // Their display order (details_column_set.h), dragged in the header.
+    void SetDetailsColumnOrder(const DetailsColumnOrder& order) {
+        details_order_ = NormalizeDetailsColumnOrder(order);
+    }
+    const DetailsColumnOrder& DetailsColumnOrderValue() const { return details_order_; }
     // Which stored slot holds a column's manual width (-1: flexible / none).
     // Folder views: DetailsColumnWidths order. Search views: 0 name, 1 modified,
     // 2 type, 3 size.
     static int ManualColumnSlot(ColumnKind kind, bool search_view) noexcept;
+    // Header drag: the insertion slot (column index the dragged column would
+    // go before; count = after the last) nearest to x for column `from`, or
+    // -1 when the drop would not change the order. *line_x gets the
+    // insertion line's x.
+    static int ColumnDropSlot(const DetailsColumnLayout& layout, int from, float x,
+                              float* line_x = nullptr) noexcept;
+    // The order after dropping column `from` at `slot` (ColumnDropSlot).
+    static DetailsColumnOrder ReorderedColumns(const DetailsColumnLayout& layout,
+                                               const DetailsColumnOrder& order, int from, int slot) noexcept;
     // Columns shown by the last painted Details header of a pane: bit
     // (1 << ColumnKind), plus bit 8 for the two-line search layout. 0 = unknown.
     uint32_t PaintedColumnMask(int pane_index) const {
@@ -589,9 +637,12 @@ public:
                                       const PaneViewModel& vm) const;
     // A media folder in details view (PaneViewModel::media_columns): 名称 then
     // 拍摄日期 · 尺寸 · 相机 · 大小 / 标题 · 艺术家 · 专辑 · 时长 /
-    // 时长 · 分辨率 · 帧率 · 大小; fixed widths, not resizable.
+    // 时长 · 分辨率 · 帧率 · 大小; user widths are stored per media type.
     DetailsColumnLayout MediaColumns(const D2D1_RECT_F& pane_bounds,
                                      const PaneViewModel& vm) const;
+    static int MediaColumnSlot(ColumnKind kind, int media) noexcept;
+    std::array<float, 4> ResizeMediaColumnDivider(const D2D1_RECT_F& bounds,
+        const PaneViewModel& view, int divider, float cursor_x) const;
     DetailsColumnWidths ResizeDetailsColumnDivider(
         const D2D1_RECT_F& pane_bounds,
         const DetailsColumnWidths& dividers,
@@ -617,11 +668,8 @@ public:
     }
     bool PointInItemName(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds,
                          int source_index, float x, float y) const;
-    // The item's drag handle: icon + name in Details / List / Small icons
-    // (the rest of the row starts a marquee, like File Explorer). Icon grids
-    // and the photo wall: an unselected item drags from the middle of its
-    // picture and its name text, a selected one from the whole picture.
-    // The whole cell in the other views.
+    // Rendered text and icons/thumbnails start dragging. Selection does not
+    // enlarge this target; unused cell space starts a marquee.
     bool PointInItemGrip(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds,
                          int source_index, float x, float y, bool selected = false) const;
     // Details tree: view row whose chevron is under (x, y), else -1.
@@ -649,6 +697,7 @@ public:
     D2D1_RECT_F TitleBarRect(float w) const;
     D2D1_RECT_F ToolbarRect(float w) const;
     D2D1_RECT_F AddressBarRect(float w) const;
+    D2D1_RECT_F AddressTextRect(float w) const { return ToolbarLayoutAt(w, 0).address_text; }
     // The 别名 suggestion list under the path editor, and the row at (x, y) or -1.
     D2D1_RECT_F AddressSuggestionsRect(float w, size_t count) const;
     int AddressSuggestionAt(float w, size_t count, float x, float y) const;
@@ -762,6 +811,7 @@ public:
     bool ReleaseTabWidths();
     // Settings > 快捷键: how far to scroll so the open popover is in view (0: it is).
     float SettingsShortcutsRevealDelta(const WindowViewModel& vm, float window_w, float window_h) const;
+    D2D1_RECT_F NativeSettingsRect(float window_w, float window_h, const WindowViewModel& vm) const;
     float SettingsMaxScroll(const WindowViewModel& vm, float window_w, float window_h) const;
     // The settings page's scrollbar as drawn (false: the page fits, no bar).
     bool SettingsScrollbarGeometry(const WindowViewModel& vm, float window_w, float window_h,
@@ -797,6 +847,7 @@ private:
         float end_x = 0.0f;
         std::vector<float> extra; // per tab: px shift from group chips before it
         struct Chip {
+            float top = 0.0f;
             float left = 0.0f;
             float width = 0.0f;
             int group = -1; // index into WindowViewModel::tab_groups
@@ -812,15 +863,31 @@ private:
         float view_left = 0.0f, view_right = 0.0f; // tab clip span when overflowing
         float arrow_w = 0.0f;
         float scroll = 0.0f, max_scroll = 0.0f;
+        int rows = 1, total_rows = 1;
+        float new_y = 0.0f;
         float new_x = 0.0f;       // "+" button left edge
+        std::vector<D2D1_RECT_F> item_rects;
+        std::vector<int> hidden_indices;
+        std::vector<bool> icon_only;
+        D2D1_RECT_F overflow_button{};
         float Width(const WindowViewModel& vm, size_t i) const {
+            if (i < item_rects.size()) return item_rects[i].right - item_rects[i].left;
             if (vm.tabs[i].pinned) return pinned_w;
             return static_cast<int>(i) == active ? active_w : w;
+        }
+        D2D1_RECT_F ItemRect(const WindowViewModel& vm, size_t i) const {
+            if (i < item_rects.size()) return item_rects[i];
+            const float left = x0 + static_cast<float>(i) * pitch
+                + (i < extra.size() ? extra[i] : 0.0f);
+            return D2D1::RectF(left, y, left + Width(vm, i), y + h);
         }
     };
     TabStripMetrics ComputeTabStrip(const WindowViewModel& vm, float window_w) const;
     void DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
+    // Toolbar icon colours from the theme: the resting ink, and each tone's
+    // accent colour into icon_tone_colors_.
+    D2D1_COLOR_F PrepareIconTones(const Theme& theme, bool dark);
     void DrawFavoritesBar(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawToolbarApps(const WindowViewModel& vm, const ToolbarLayout& layout, const Theme& theme);
     void DrawSidebar(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
@@ -848,6 +915,18 @@ private:
                         const Theme& theme);
     bool HitTestColumnStrip(const PaneViewModel& vm, const D2D1_RECT_F& pane_bounds,
                             float x, float y, HitTestResult& out) const;
+    void BeginPaneZoomMotion(const WindowViewModel& vm);
+    void DrawPaneZoomMotion(const WindowViewModel& vm, const D2D1_RECT_F& full);
+    struct PaneZoomMotion {
+        ComPtr<ID2D1Bitmap1> snapshot;
+        std::vector<D2D1_RECT_F> before, last;
+        std::vector<int> indices;
+        std::vector<std::wstring> paths;
+        int previous = -1, excluded = -1, preset = 0;
+        uint64_t start = 0;
+        bool restoring = false;
+        D2D1_SIZE_U size{};
+    } pane_zoom_motion_;
     void DrawStatusBar(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawAddressSuggestions(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawFilterTagSuggestions(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
@@ -858,6 +937,7 @@ private:
     void DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawSettingsContext(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawSettingsPulseMenu(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
+    void DrawSettingsSegmentPlate(int key, int selected, D2D1_RECT_F bounds, bool enabled = true);
     void DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
     void DrawSettingsSysCtx(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme);
@@ -1013,6 +1093,7 @@ private:
     std::unique_ptr<RenderCaches> owned_caches_;
     RenderCaches& caches_;
     ShellIconCache& icon_cache_ = caches_.icons;
+    ItemArtworkHitCache item_artwork_hits_;
     OpenWithIconCache& open_with_icons_ = caches_.open_with_icons;
     std::unordered_map<ID2D1Bitmap*, ComPtr<ID2D1Effect>> tray_shadows_;
     ThumbnailCache& thumbnail_cache_ = caches_.thumbnails;
@@ -1020,7 +1101,6 @@ private:
     bool folder_thumbnails_enabled_ = true;
     ThumbnailCache& details_cache_ = caches_.details;
     ThumbnailCache& hover_cache_ = caches_.hover;
-    PreviewHandlerHost preview_handler_;
     HWND notify_hwnd_ = nullptr;
     bool embedded_ = false;
     bool favorites_bar_ = false;
@@ -1034,15 +1114,21 @@ private:
     float sidebar_width_dip_ = 224.0f;
     bool vertical_tabs_ = false;
     float search_min_dip_ = 0.0f;
+    bool navigation_can_forward_ = false;
+    mutable float title_brand_width_ = 0.0f;
+    mutable bool title_brand_name_ = true;
     bool search_hidden_ = false;
     int toolbar_group_ = -1;
     bool toolbar_show_sort_ = true;
+    std::array<int, 3> toolbar_view_order_{0, 1, 2};
     bool toolbar_show_filter_ = true;
     bool toolbar_show_group_ = true;
     int new_primary_ = 0;
     bool new_last_text_ = false;
     int pin_count_ = 0;
     int pin_app_from_ = -1;
+    std::array<int,3> pin_view_slots_{-1,-1,-1};
+    int pin_right_from_ = -1;
     uint64_t pin_separators_ = 0;
     bool pin_drop_mode_ = false;
     std::wstring pin_drop_label_;
@@ -1062,6 +1148,7 @@ private:
     AiPanelView ai_panel_;
     void ApplySidebarCollapse(bool animate);
     bool sidebar_peek_ = false;
+    bool sidebar_peek_pinned_ = false;
     bool collapse_anim_ = false;
     GroupWheel group_wheel_;
     WindowOverviewView window_overview_;
@@ -1071,6 +1158,7 @@ private:
     uint64_t collapse_start_ = 0;  // motion::NowMs()
     static constexpr float kSidebarCollapseMs = 200.0f;
     mutable bool pane_close_visible_ = false;
+    mutable bool pane_expand_visible_ = false;
     float pane_header_height_ = 40.0f;
     float focused_banner_height_ = 0.0f;
     float column_header_height_ = 32.0f;
@@ -1083,13 +1171,16 @@ private:
     bool thumbnail_badges_ = true;
     unsigned row_actions_ = 7u;
     uint32_t details_columns_ = kDetailsColumnsDefault;
+    DetailsColumnOrder details_order_ = kDetailsColumnOrderDefault;
     // Motion state: highlight plates glide between items (ui_motion.h).
+    uintptr_t content_tab_identity_ = 0;
     uint64_t motion_frame_ = 0;
     uint64_t motion_now_ = 0;  // motion::NowMs() sampled once per Render
     motion::RectMotion sidebar_pill_;
     motion::RectMotion settings_nav_pill_;
+    std::unordered_map<int, motion::RectMotion> settings_segment_motion_;
     motion::RectMotion settings_nav_hover_;
-    std::array<motion::RectMotion, 8> list_hover_motion_{};
+    std::array<motion::ListHoverMotion, 8> list_hover_motion_{};
     std::array<LinkPillMotion, 8> link_pill_motion_{};
     std::array<motion::ListShiftMotion, 8> list_shift_{};
     std::array<motion::ViewMorphMotion, 8> view_morph_{};
@@ -1143,8 +1234,11 @@ private:
     bool list_loading_active_ = false;
     // Tab strip overflow state: ComputeTabStrip clamps the scroll and reveals
     // a newly active tab, so hit testing and drawing always agree.
+    mutable int tab_first_row_ = 0;
     mutable float tab_scroll_ = 0.0f;
     mutable int tab_scroll_active_ = -1;
+    mutable float tab_rows_width_ = 0;
+    mutable int tab_rows_mode_ = -1, tab_rows_limit_ = 0;
     // Address bar scroll (see ScrollBreadcrumb): target and shown offsets,
     // eased per frame; a new path starts at its end again.
     mutable float crumb_scroll_ = 0.0f;
@@ -1159,7 +1253,7 @@ private:
     bool folder_size_anim_active_ = false;
     bool decorative_only_ = false;   // TickMotion: only the shimmer/skeleton/spinner run
     motion::CopyFeedback copy_feedback_;
-    // Tab strip motion (pulse_motion_v2.html "Tabs"): slots spring when tabs
+    // Tab strip motion: slots spring when tabs
     // open or close, the active plate glides, new tabs pop in, closed ones
     // fade out, a lifted tab grows. Visual only: hit-testing keeps the slots.
     struct TabSlotMotion {
@@ -1195,6 +1289,8 @@ private:
     std::unordered_map<std::wstring, std::pair<uint64_t, uint64_t>> mtime_flash_started_;
     bool name_semibold_ = false;                  // DrawTruncatedName: 今天修改的名称加粗
     ComPtr<IDWriteTextFormat> name_semibold_format_;
+    std::array<ComPtr<IDWriteTextFormat>, 2> name_nowrap_formats_;
+    std::array<IDWriteTextFormat*, 2> name_nowrap_bases_{};
     IDWriteTextFormat* name_semibold_base_ = nullptr;
     float name_semibold_size_ = 0.0f;
     // FileNameFormat at semibold (same family, size and fallback).
@@ -1244,7 +1340,19 @@ private:
     bool ticks_active_ = false;          // copy feedback, group wheel, thumbnails
     bool frame_partial_ = false;
     D2D1_RECT_F frame_damage_{};
+    FramePerf frame_perf_{};
     bool last_frame_overlay_ = true;     // the last frame drew a floating overlay
+    struct PaintedSelection {
+        const void* owner = nullptr;
+        const void* snapshot = nullptr;
+        uint64_t revision = 0;
+        int focus = -1;
+        int count = 0;
+        bool all = false;
+        bool operator==(const PaintedSelection&) const = default;
+    };
+    std::vector<PaintedSelection> painted_selections_;
+    static std::vector<PaintedSelection> FrameSelections(const WindowViewModel& vm);
     // Settings > AI 助手's EDIT fields as last drawn (SettingsAssistantField).
     bool asst_drawn_ = false;
     D2D1_RECT_F asst_fields_[kAsstFields]{};
@@ -1257,19 +1365,25 @@ private:
     bool OverlayUp(const WindowViewModel& vm) const;
     bool NonHoverMotionActive() const;
     mutable std::vector<D2D1_RECT_F> landing_rects_;   // this frame's landing rows (window px)
-    void RequestMotionFrame() const { motion_frame_wanted_ = true; }
+    void RequestMotionFrame(const std::source_location& location = std::source_location::current()) const {
+        motion_probe::Record(location);
+        motion_frame_wanted_ = true;
+    }
     static constexpr ULONGLONG kTaskPillDoneMs = 1600;
     static constexpr ULONGLONG kTaskPillFadeMs = 300;
+    uint64_t task_pill_id_ = 0;
+    uint64_t undo_chip_identity_ = 0, undo_chip_bump_at_ = 0;
     bool task_pill_was_active_ = false;
     bool task_pill_spinning_ = false;
     bool task_pill_animate_ = true;
     ULONGLONG task_pill_done_at_ = 0;
-    ULONGLONG task_pill_pop_at_ = 0;     // finish pop (pulse_ops_dialogs.html pillpop)
-    static constexpr ULONGLONG kTaskPillPopMs = 500;
-    // With 撤销 / 打开 the finished pill stays 6 s (held while hovered).
-    static constexpr ULONGLONG kTaskPillActionsMs = 6000;
+    ULONGLONG task_pill_pop_at_ = 0;     // finish pop
+    static constexpr ULONGLONG kTaskPillPopMs = 400;
+    // Completed operations collapse to a persistent icon after 12 seconds.
+    static constexpr ULONGLONG kTaskPillActionsMs = 12000;
     ULONGLONG task_pill_hold_ms_ = kTaskPillDoneMs;
-    D2D1_RECT_F task_action_rects_[2]{};   // as last drawn; empty = not offered
+    D2D1_RECT_F task_pill_rect_{};
+    D2D1_RECT_F task_action_rects_[3]{};   // as last drawn; empty = not offered
     mutable ColumnAutoWidths auto_widths_{};
     mutable float auto_widths_scale_ = -1.0f;
     mutable std::wstring auto_widths_language_;
@@ -1308,15 +1422,8 @@ private:
     float details_from_ = 0.0f;
     uint64_t details_anim_start_ = 0;
     float details_width_ = 340.0f;
-    PreviewViewport details_viewport_;
-    std::wstring details_preview_identity_;
-    bool details_preview_ready_ = false;
-    bool details_preview_dragging_ = false;
-    bool details_preview_drag_pending_ = false;
-    bool details_preview_archive_ = false;
-    ArchivePreview details_archive_;
-    POINT details_preview_pointer_{};
-    ULONGLONG details_zoom_label_until_ = 0;
+    bool extension_dock_visible_ = false;
+    D2D1_RECT_F details_preview_bounds_{};
 
     mutable ComPtr<ID2D1SolidColorBrush> brBg_;
     mutable ComPtr<ID2D1SolidColorBrush> brText_;
@@ -1348,6 +1455,13 @@ private:
     // scales from (20 DIP elsewhere). icon_stroke_px_ 0 = off.
     float icon_stroke_px_ = 0.0f;
     float icon_box_dip_ = 20.0f;
+    // Two-tone command icons (toolbar buttons at rest): while icon_tones_ is
+    // set, DrawIconText draws an icon's accent part in its category colour
+    // (command_icons::ToneOf), indexed by command_icons::Tone and
+    // filled by PrepareIconTones.
+    bool icon_tones_ = false;
+    D2D1_COLOR_F icon_tone_colors_[8]{};   // command_icons::Tone::Count (checked in ui_renderer.cpp)
+    ComPtr<ID2D1SolidColorBrush> brIconTone_;
     ComPtr<ID2D1PathGeometry> link_arrow_geometry_;
     ComPtr<ID2D1PathGeometry> play_triangle_geometry_;
     // Empty-folder icon: back/front in a 24-unit box, and a 96-unit large form.
@@ -1366,8 +1480,27 @@ private:
     std::wstring hover_video_path_;
     ComPtr<ID2D1Bitmap> hover_frame_bitmap_;   // FFmpeg frames, reused while the size stays
     ComPtr<ID2D1Device> hover_frame_device_;
+    ComPtr<ID2D1Device> wall_gradient_device_;
+    ComPtr<ID2D1LinearGradientBrush> wall_gradient_;
+    struct IconFinalLayout {
+        std::wstring text;
+        ComPtr<IDWriteTextFormat> format;
+        float width = 0, height = 0;
+        float measured_height = 0;
+        ComPtr<IDWriteTextLayout> layout;
+    };
+    std::vector<IconFinalLayout> icon_final_layouts_;
+    size_t icon_final_text_bytes_ = 0;
+    uint64_t icon_final_generation_ = 0;
+    uint64_t icon_final_creations_ = 0, icon_final_hits_ = 0;
+    struct ThisPcNaturalWidths {
+        std::wstring key;
+        float free = 0, total = 0, type = 0, usage = 0;
+    };
+    mutable std::vector<ThisPcNaturalWidths> this_pc_widths_;
     uint64_t hover_frame_serial_ = ~0ull;
     unsigned hover_frame_ms_ = 0;
+    HoverAnimation hover_image_animation_;
     bool hover_video_failed_ = false;          // this path cannot play: keep the poster
     // The card's shape (ui_hover_preview.cpp): what earlier frames learned of
     // this path's preview, and the size easing toward it (px, 0 = closed).
@@ -1382,9 +1515,6 @@ private:
                              const Theme& theme, bool high_contrast);
     D2D1_RECT_F hover_card_rect_{}, hover_list_rect_{};
     float hover_scroll_max_ = 0.0f;
-    ComPtr<IDWriteTextLayout> details_text_layout_;
-    std::wstring details_layout_text_;
-    float details_layout_scale_ = 0;
     std::unordered_map<int, ComPtr<IDWriteTextFormat>> sized_icon_formats_;
     ComPtr<ID2D1DeviceContext5> empty_state_svg_dc_;
     ComPtr<ID2D1SvgDocument> empty_state_svg_;

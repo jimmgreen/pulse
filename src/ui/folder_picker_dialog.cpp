@@ -1,13 +1,32 @@
+#include "view_zoom.h"
+#include "picker_hover_preview.h"
+#include "quick_preview_window.h"
+#include "../common/picker_shell_namespace.h"
 #include "../common/picker_places_snapshot.h"
+#include "../common/picker_places_saved.h"
+#include "picker_places_ui.h"
+#include "picker_places_request.h"
+#include "picker_places_menu.h"
+#include "picker_ole_drop.h"
+#ifdef PULSE_WITH_TEST_HOOKS
+#include "../bench/picker_places_test_api.h"
+#include "../bench/picker_view_switch_test_api.h"
+#include "../bench/picker_interaction_test_api.h"
+#endif
 #include "../common/picker_user_storage.h"
 #include "picker_custom_layout.h"
 #include "../common/picker_owner_guard.h"
 #include "picker_proof_trace.h"
+#include "picker_marquee.h"
+#include "picker_blank_click.h"
+#include "../app/create_rename_intent.h"
 #include "edit_host.h"
 #include "../fs/drive_kind.h"
 #include "../common/windows_compat.h"
 #include "folder_picker_dialog.h"
 #include "../common/picker_navigation.h"
+#include "../common/picker_layout_settings.h"
+#include "../common/runtime_log.h"
 
 #include "address_search_layout.h"
 #include "drive_capacity.h"
@@ -23,6 +42,8 @@
 #include "../common/display_path.h"
 #include "../common/localization.h"
 #include "../common/text_format.h"
+#include "../app/details_column_menu.h"
+#include "../app/frame_pump.h"
 #include "../ops/clipboard.h"
 
 #include <commctrl.h>
@@ -98,10 +119,15 @@ constexpr wchar_t kPickerClass[] = L"PulseFolderPickerWindow";
 constexpr UINT kListingMessage = WM_APP + 1;
 constexpr UINT kValidationMessage = WM_APP + 2;
 constexpr UINT kEndAddressMessage = WM_APP + 3;
+constexpr UINT kEndRenameMessage = WM_APP + 95;
 constexpr UINT kEmbeddedNavigationMessage = WM_APP + 4;
 constexpr UINT kFolderCommitMessage = WM_APP + 6;
 constexpr UINT kExternalNavigationMessage = WM_APP + 7;
+constexpr UINT kPickerDropMessage = WM_APP + 8;
+constexpr UINT kPickerFrameMessage = WM_APP + 9;
+constexpr UINT kHoverListingMessage = WM_APP + 10;
 constexpr DWORD kInitialFolderTimeoutMs = 5000;
+constexpr UINT_PTR kSharedPlacesTimer = 0x504c;
 constexpr UINT kCustomUpdateMessage = WM_APP + 5;
 constexpr int kCustomFocusBase = 1000;
 constexpr int kCustomEditBase = 2000;
@@ -109,6 +135,8 @@ constexpr size_t PULSE_CUSTOM_EDIT_MAX = 32767;
 constexpr UINT_PTR kLoadTimer = 1;
 constexpr UINT_PTR kSearchTimer = 2;
 constexpr UINT_PTR kMotionTimer = 3;
+constexpr UINT_PTR kMarqueeTimer = 4;
+constexpr UINT_PTR kHoverTimer = 5;
 constexpr int kPathEditId = 101;
 constexpr int kFilenameEditId = 102;
 constexpr int kSearchEditId = 103;
@@ -294,6 +322,7 @@ public:
     bool Show(HWND owner, const FolderPickerSpec& spec, bool dark, D2D1_COLOR_F accent,
               FilePickerResult& out) {
         owner_ = owner;
+        if (!owner_ && spec.placement_owner && IsWindow(spec.placement_owner)) owner_ = spec.placement_owner;
         dark_ = dark;
         accent_ = accent;
         spec_ = spec;
@@ -303,7 +332,8 @@ public:
         options_.filters = spec.filters;
         options_.show_hidden = spec.show_hidden;
         options_.no_dereference_links = spec.no_dereference_links;
-        options_.advisory_file_filters = spec.advisory_file_filters;
+        options_.advisory_file_filters = spec.advisory_file_filters && !(mode_ == PickerMode::Save && (spec.native_options & FOS_STRICTFILETYPES));
+        options_.native_options = spec.native_options;
         options_.skip_access_validation = spec.skip_access_validation;
         options_.allow_missing_open = spec.allow_missing_open;
         options_.require_existing_open_parent = spec.require_existing_open_parent;
@@ -317,6 +347,15 @@ public:
         }
         options_.filter_index = options_.filters.empty() ? 0 : (std::min)(spec.filter_index, options_.filters.size() - 1);
         view_mode_ = g_last_view[mode_index_];
+        persist_layout_ = spec.persist_layout && GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR",nullptr,0)==0;
+        if (persist_layout_ && picker_layout::Load(static_cast<int>(mode_),layout_settings_)) {
+            view_mode_ = static_cast<ViewMode>(layout_settings_.view_mode);
+            icon_dip_ = NormalizeIconDip(view_mode_, layout_settings_.icon_dip, scale_);
+            options_.sort = static_cast<PickerSort>(layout_settings_.sort);
+            options_.descending = layout_settings_.descending;
+            for (unsigned i=0;i<std::size(collapsed_);++i) collapsed_[i]=(layout_settings_.collapsed_mask & (1u<<i))!=0;
+        }
+        if (IsZoomIconMode(view_mode_)) { last_icon_mode_ = view_mode_; last_icon_dip_ = icon_dip_; }
         filename_text_ = spec.filename;
 
         chrome_.mode = mode_;
@@ -335,7 +374,11 @@ public:
         UpdateFilterText();
         focus_ = kPickList;
 
-        pulse_places_ = picker_places::Read();
+        pulse_places_ = spec.read_shared_places ? spec.read_shared_places() : picker_places::Read();
+        if (!pulse_places_.shared_available && !spec.read_shared_places) {
+            try { saved_places_ = std::async(std::launch::async, [] { return picker_places::ReadSaved(); }); }
+            catch (...) { }
+        }
         places_ = spec.places;
         PickerProofPhase("known-places-before");
         for (PickerPlace& place : KnownPlaces()) {
@@ -353,7 +396,7 @@ public:
         std::wstring start = NormalizePickerInput(spec.initial_path);
         if (start.empty()) start = g_last_folder[mode_index_];
         if (start.empty()) start = fallback_;
-        scale_ = static_cast<float>(pulse::compat::WindowDpi(owner ? owner : GetDesktopWindow()))
+        scale_ = static_cast<float>(pulse::compat::WindowDpi(owner_ ? owner_ : GetDesktopWindow()))
                / 96.0f;
 
         WNDCLASSEXW wc{ sizeof(wc) };
@@ -370,7 +413,7 @@ public:
             WS_POPUP | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX,
             CW_USEDEFAULT, CW_USEDEFAULT,
             static_cast<int>(kDefaultWidth * scale_), static_cast<int>(kDefaultHeight * scale_),
-            owner, nullptr, wc.hInstance, this);
+            owner_, nullptr, wc.hInstance, this);
         PickerProofPhase("create-window-after");
         if (!hwnd_) {
             if (!native_error_) native_error_ = GetLastError();
@@ -381,6 +424,7 @@ public:
         // can differ from the owner's guess above.
         CenterOwnedWindow(hwnd_, owner_, static_cast<int>(kDefaultWidth * scale_),
                           static_cast<int>(kDefaultHeight * scale_));
+        if (persist_layout_) picker_layout::RestorePlacement(hwnd_,owner_,layout_settings_);
         loader_ = std::make_unique<PickerLoader>(hwnd_, kListingMessage, kValidationMessage,
             spec_.on_dialog_event ? kFolderCommitMessage : 0);
         AddClipboardFormatListener(hwnd_);
@@ -423,7 +467,8 @@ public:
         }
         initial_show_allowed_ = true;
         PickerProofPhase("show-window-before");
-        ShowWindow(hwnd_, SW_SHOW);
+        ShowWindow(hwnd_, layout_settings_.maximized ? SW_SHOWMAXIMIZED : SW_SHOW);
+        layout_shown_ = true;
         if (NotifyEmbedded(PickerDialogEvent::Shown) != S_OK) FailPaintedEdit(ERROR_FUNCTION_FAILED);
         PickerProofPhase("show-window-after");
         SetForegroundWindow(hwnd_);
@@ -525,6 +570,9 @@ public:
             path.empty() ? picker_navigation::kComputerPath : path);
         if (veto != S_OK) return veto;
         if (done_) return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+        EndRename(false);
+        create_rename_intents_.clear();
+        select_after_paths_.clear();
         external_listing_.reset();
         auto load_options = options_;
         load_options.search.clear();
@@ -554,6 +602,7 @@ public:
         history_.Navigate(current_);
         searching_ = false; search_text_.clear(); options_.search.clear();
         if (search_edit_) { setting_edits_ = true; SetWindowTextW(search_edit_, L""); setting_edits_ = false; }
+        EndMarquee(false);
         current_ = path;
         selected_ = anchor_ = -1;
         selected_set_.clear(); select_after_.clear(); typeahead_.clear();
@@ -594,6 +643,14 @@ private:
     void Navigate(std::wstring path, bool push_history, std::wstring select_after = {},
                   bool verified = false) {
         if (external_navigation_) return;
+        if (push_history && !initial_load_) user_interacted_ = true;
+        create_consent_paths_.clear();
+        share_consent_paths_.clear(); share_consent_targets_.clear(); share_consent_save_identity_.reset(); share_consent_save_parent_.reset();
+        EndRename(false);
+        create_rename_intents_.clear();
+        select_after_paths_.clear();
+        CancelBlankClick();
+        CancelPlacesDrag();
         const bool computer = picker_navigation::IsComputerPath(path);
         if (computer) path.clear();
         const bool moved = !SamePickerPath(path, current_) || (computer && !current_verified_);
@@ -626,6 +683,7 @@ private:
         }
         current_verified_ = verified;
         entries_.clear();
+        DismissHover();
         snapshot_.reset();
         typeahead_.clear();
         selected_ = -1;
@@ -652,7 +710,7 @@ private:
     void GoUp() {
         if (current_.empty()) return;
         const std::wstring child = current_;
-        Navigate(PickerParent(child), true, child, current_verified_);
+        Navigate(picker_shell::IsParsingName(child) ? picker_shell::Parent(child) : PickerParent(child), true, child, current_verified_);
     }
 
     void GoBack() {
@@ -723,6 +781,7 @@ private:
 
     void OnListing(std::unique_ptr<PickerListing> listing) {
         if (!listing || listing->generation != generation_) return;
+        CancelPlacesDrag();
         if (external_navigation_) { external_listing_ = std::move(listing); return; }
         KillTimer(hwnd_, kLoadTimer);
         waiting_ = false;
@@ -747,24 +806,42 @@ private:
         initial_load_ = false;
         const bool notify_folder = embedded_folder_pending_ && listing->error == ERROR_SUCCESS;
         embedded_folder_pending_ = false;
+        DismissHover();
         entries_ = std::move(listing->entries);
         snapshot_ = std::move(listing->snapshot);
         if (current_.empty()) RefreshDrivesFromListing();
-        if (!select_after_.empty()) {
+        if (!select_after_.empty() && select_after_paths_.empty()) select_after_paths_.push_back(select_after_);
+        int arrival = -1;
+        if (!select_after_paths_.empty()) {
+            selected_set_.clear();
             for (size_t i = 0; i < entries_.size(); ++i) {
-                if (SamePickerPath(entries_[i].path, select_after_)) {
-                    Select(static_cast<int>(i), false, false, false, false);
-                    break;
+                if (std::any_of(select_after_paths_.begin(), select_after_paths_.end(),
+                    [&](const auto& path) { return SamePickerPath(entries_[i].path, path); })) {
+                    selected_set_.insert(static_cast<int>(i));
+                    if (arrival < 0) arrival = static_cast<int>(i);
+                    if (!allow_multiselect_) break;
                 }
             }
+            selected_ = anchor_ = arrival;
+            SyncSelectedNames();
+            select_after_paths_.clear();
             select_after_.clear();
         }
+        if (arrival >= 0) EnsureVisible(arrival);
         ClampScroll();
         UpdateChosen();
         if (notify_folder && embedded_ready_ && NotifyEmbedded(PickerDialogEvent::FolderChanged) != S_OK)
             FailPaintedEdit(ERROR_FUNCTION_FAILED);
         if (!external_navigation_queue_.empty()) PostMessageW(hwnd_, kExternalNavigationMessage, 0, 0);
         if (!reload_notice_.empty()) chrome_.notice = std::exchange(reload_notice_, {});
+        std::vector<app::CreateRenameEntry> rename_entries;
+        for (const auto& entry : entries_) rename_entries.push_back({entry.name, entry.path});
+        if (const auto intent = app::SelectCreateRenameIntent(create_rename_intents_, current_, generation_,
+            rename_entries, true, !rename_path_.empty())) {
+            Select(static_cast<int>(intent->entry_index));
+            app::ConsumeCreateRenameIntent(create_rename_intents_, intent->task_id);
+            RenameSelection();
+        }
         Invalidate();
     }
 
@@ -880,6 +957,13 @@ private:
         PickerProofFocus("save-focus-restore", focus_, GetDlgCtrlID(target));
         SetFocus(target); // Preserve text/selection; do not select all or synthesize input.
     }
+    static constexpr UINT kDetailsPreviewNavigateMessage = WM_APP + 231;
+    static constexpr UINT kDetailsPreviewOpenMessage = WM_APP + 232;
+
+    bool HasRequiredInteraction() const {
+        return !(spec_.native_options & FOS_OKBUTTONNEEDSINTERACTION) || user_interacted_;
+    }
+
     void UpdateChosen() {
         if (pending_overwrite_ && (!validating_ || overwrite_generation_ != generation_)) ClearOverwrite();
         PublishEmbeddedState();
@@ -887,7 +971,7 @@ private:
         if (filename_edit_) EnableWindow(filename_edit_, !validating_ && !waiting_ && !no_embedded_folder);
         if (!no_embedded_folder) RestoreSaveFocus();
         chosen_.clear();
-        if (validating_ || waiting_ || no_embedded_folder) return;
+        if (validating_ || waiting_ || no_embedded_folder || !HasRequiredInteraction()) return;
         if (!filename_text_.empty()) {
             chosen_ = filename_text_;
             return;
@@ -966,6 +1050,7 @@ private:
         index = std::clamp(index, 0, count - 1);
         selected_ = index;
         if (!focus_only) {
+            user_interacted_ = true;
             if (allow_multiselect_ && extend && anchor_ >= 0) {
                 if (!toggle) selected_set_.clear();
                 for (int i = (std::min)(anchor_, index); i <= (std::max)(anchor_, index); ++i)
@@ -1013,6 +1098,8 @@ private:
             return;
         }
         validation_navigation_only_ = false;
+        create_consent_paths_.clear();
+        share_consent_paths_.clear(); share_consent_targets_.clear(); share_consent_save_identity_.reset(); share_consent_save_parent_.reset();
         RememberSaveFocus();
         validating_ = true;
         chrome_.notice = l10n::Get(l10n::StringId::CheckingTheSelectedItems).c_str();
@@ -1044,7 +1131,7 @@ private:
     void SubmitSelection() {
         if (spec_.on_dialog_event && !embedded_folder_committed_) return;
         if (!FlushPaintedEdits()) return;
-        if (validating_) return;
+        if (validating_ || !HasRequiredInteraction()) return;
         std::vector<std::wstring> names;
         if (mode_ == PickerMode::Folder && filename_from_selection_ && !selected_set_.empty()) {
             std::vector<int> picked(selected_set_.begin(), selected_set_.end());
@@ -1089,6 +1176,42 @@ private:
             validation->save_access_diagnostic->cleanup_error != ERROR_SUCCESS)) {
             FailPaintedEdit(validation->error ? validation->error : ERROR_FUNCTION_FAILED); return;
         }
+        if (validation->error == ERROR_SHARING_VIOLATION && (spec_.native_options & FOS_SHAREAWARE) && !validation->paths.empty()) {
+            const bool same_save_identity = !validation->save_snapshot ||
+                (share_consent_save_identity_ == validation->save_snapshot->TargetIdentity() && share_consent_save_parent_ &&
+                    *share_consent_save_parent_ == validation->save_snapshot->ParentIdentity());
+            uint32_t response = share_consent_paths_ == validation->paths && same_save_identity &&
+                share_consent_targets_.contains(validation->failed_path) ? 1u : 0u;
+            if (response != 1 && spec_.on_share_violation) {
+                embedded_state_.candidate = validation->paths.front(); embedded_state_.candidates = validation->paths;
+                ++embedded_state_.generation;
+                const auto callback_generation = embedded_state_.generation;
+                if (NotifyEmbedded(PickerDialogEvent::Snapshot) != S_OK) { FailPaintedEdit(ERROR_FUNCTION_FAILED); return; }
+                HRESULT hr = E_FAIL;
+                ++embedded_callback_depth_;
+                try { hr = spec_.on_share_violation(hwnd_, embedded_state_, validation->failed_path, response); } catch (...) {}
+                --embedded_callback_depth_;
+                if (!embedded_callback_depth_ && !pending_navigation_.empty() && !done_ &&
+                    !PostMessageW(hwnd_, kEmbeddedNavigationMessage, 0, 0)) FailPaintedEdit(ERROR_FUNCTION_FAILED);
+                if (done_ || validation->generation != generation_ || callback_generation != embedded_state_.generation ||
+                    (spec_.owner_guard && !spec_.owner_guard->Alive()) ||
+                    (spec_.cancel_event && WaitForSingleObject(spec_.cancel_event, 0) == WAIT_OBJECT_0)) {
+                    ClearEmbeddedCandidate(); UpdateChosen(); return;
+                }
+                if (hr != S_OK || response > 2) { FailPaintedEdit(ERROR_FUNCTION_FAILED); return; }
+            }
+            // Only ACCEPT bypasses this observed sharing conflict. DEFAULT uses
+            // the ordinary error surface and REFUSE keeps the dialog open.
+            if (response == 1) {
+                share_consent_paths_ = validation->paths; share_consent_targets_.insert(validation->failed_path);
+                if (validation->save_snapshot) {
+                    share_consent_save_identity_ = validation->save_snapshot->TargetIdentity();
+                    share_consent_save_parent_ = validation->save_snapshot->ParentIdentity();
+                }
+                validation->error = ERROR_SUCCESS;
+            }
+            else if (response == 2) { ClearEmbeddedCandidate(); UpdateChosen(); Invalidate(); return; }
+        }
         if (validation->error != ERROR_SUCCESS) {
             if (spec_.validate_local_save_access_v1) ClearEmbeddedCandidate();
             chrome_.notice = validation->error == ERROR_UNSUPPORTED_TYPE
@@ -1117,6 +1240,35 @@ private:
             UpdateChosen();
             Invalidate();
             return;
+        }
+        if ((spec_.native_options & FOS_STRICTFILETYPES) && mode_ == PickerMode::Save) {
+            auto strict = options_; strict.advisory_file_filters = false;
+            if (std::any_of(validation->paths.begin(), validation->paths.end(), [&](const auto& path) {
+                return !PickerMatchesFilter(PickerLeafName(path), mode_, strict);
+            })) {
+                ClearEmbeddedCandidate();
+                chrome_.notice = l10n::Get(l10n::StringId::TheSelectedFileDoesNotMatchTheFileType);
+                UpdateChosen(); Invalidate(); return;
+            }
+        }
+        const bool missing_target = !validation->missing_paths.empty() ||
+            (validation->save_snapshot && !validation->save_snapshot->TargetExists());
+        if ((spec_.native_options & FOS_CREATEPROMPT) && missing_target && create_consent_paths_ != validation->paths) {
+            ConfirmDialogSpec confirm;
+            confirm.title = chrome_.title;
+            confirm.message = l10n::Get(l10n::StringId::PickerCreateMissingFile);
+            confirm.items = validation->missing_paths.empty() ? validation->paths : validation->missing_paths;
+            confirm.confirm_text = l10n::Get(l10n::StringId::Create);
+            confirm.cancel_text = l10n::Get(l10n::StringId::Cancel);
+            confirm.default_choice = ConfirmChoice::Cancel;
+            confirm.cancel_event = spec_.cancel_event;
+            const auto prompt_generation = generation_;
+            if (!ShowConfirmDialog(hwnd_, confirm, dark_, accent_) || done_ || generation_ != prompt_generation ||
+                (spec_.owner_guard && !spec_.owner_guard->Alive()) ||
+                (spec_.cancel_event && WaitForSingleObject(spec_.cancel_event, 0) == WAIT_OBJECT_0)) {
+                ClearEmbeddedCandidate(); UpdateChosen(); Invalidate(); return;
+            }
+            create_consent_paths_ = validation->paths;
         }
         if (validation->overwrite_required) {
             if (!loader_ || !validation->save_snapshot) return;
@@ -1161,7 +1313,7 @@ private:
         if (spec_.validate_local_save_access_v1 && !validation->save_access_checked) {
             if (!loader_ || !validation->save_snapshot) { FailPaintedEdit(ERROR_INVALID_DATA); return; }
             validating_ = true; UpdateChosen();
-            loader_->CheckSaveAccess(++generation_, std::move(*validation->save_snapshot), false, 0, spec_.require_unencrypted_save, spec_.skip_access_validation);
+            loader_->CheckSaveAccess(++generation_, std::move(*validation->save_snapshot), false, 0, spec_.require_unencrypted_save, spec_.skip_access_validation, spec_.native_options);
             Invalidate(); return;
         }
         if (!FlushPaintedEdits()) return;
@@ -1205,7 +1357,7 @@ private:
             RememberSaveFocus();
             validating_ = true;
             if (filename_edit_) EnableWindow(filename_edit_, FALSE);
-            loader_->CheckSaveAccess(++generation_, std::move(*validation->save_snapshot), true, embedded_state_.generation, spec_.require_unencrypted_save, spec_.skip_access_validation);
+            loader_->CheckSaveAccess(++generation_, std::move(*validation->save_snapshot), true, embedded_state_.generation, spec_.require_unencrypted_save, spec_.skip_access_validation, spec_.native_options);
             Invalidate(); return;
         }
         if (spec_.owner_guard && !spec_.owner_guard->Alive()) { result_.clear(); done_ = true; return; }
@@ -1216,6 +1368,27 @@ private:
         PostMessageW(hwnd_, WM_NULL, 0, 0);
     }
 
+    void SyncDetailsPreview() {
+        const auto bounds = renderer_.DetailsPreviewBounds();
+        const auto& details = vm_.details;
+        if (!vm_.details_visible || !details.has_selection || waiting_ || !IsWindowVisible(hwnd_) || IsIconic(hwnd_) ||
+            bounds.right <= bounds.left || bounds.bottom <= bounds.top || picker_shell::IsParsingName(details.path)) {
+            details_preview_.Close(); return;
+        }
+        if (!details_preview_.InitializeEmbedded(hwnd_, kDetailsPreviewNavigateMessage, kDetailsPreviewOpenMessage, 0)) return;
+        QuickPreviewItem item;
+        item.path = details.path; item.name = details.name; item.attrs = details.attrs;
+        item.modified = details.modified_value; item.size = details.size_value;
+        item.position = selected_ + 1; item.count = static_cast<int>(entries_.size());
+        RECT rect{static_cast<LONG>(bounds.left), static_cast<LONG>(bounds.top),
+            static_cast<LONG>(bounds.right), static_cast<LONG>(bounds.bottom)};
+        details_preview_.SetAccent(accent_);
+        const auto& shown = details_preview_.item();
+        if (!details_preview_.visible() || shown.path != item.path || shown.modified != item.modified || shown.size != item.size)
+            details_preview_.ShowEmbedded(item, rect, dark_, false);
+        else details_preview_.SetEmbeddedBounds(rect);
+    }
+
     void Cancel() {
         if (operating_) return;
         result_.clear();
@@ -1223,13 +1396,41 @@ private:
         PostMessageW(hwnd_, WM_NULL, 0, 0);
     }
 
+    void SaveLayout() noexcept {
+        if (!persist_layout_ || !layout_shown_ || layout_saved_ || !hwnd_ || !IsWindow(hwnd_)) return;
+        layout_saved_ = true;
+        try {
+            layout_settings_.view_mode=static_cast<int>(view_mode_);
+            layout_settings_.icon_dip=icon_dip_;
+            layout_settings_.sort=static_cast<int>(options_.sort);
+            layout_settings_.descending=options_.descending;
+            layout_settings_.sidebar_width=renderer_.SidebarWidthDip();
+            layout_settings_.collapsed_mask=0;
+            for(unsigned i=0;i<std::size(collapsed_);++i) if(collapsed_[i]) layout_settings_.collapsed_mask|=1u<<i;
+            picker_layout::CapturePlacement(hwnd_,layout_settings_);
+            const bool saved=picker_layout::Save(static_cast<int>(mode_),layout_settings_);
+            diagnostics::runtime::Event("picker_layout_save",{{"success",saved?1u:0u},{"mode",static_cast<uint32_t>(mode_)}});
+        } catch (...) { }
+    }
+
     void Close() noexcept {
+        details_preview_.Close();
+        EndRename(false);
+        CancelBlankClick();
+        DismissHover();
+        ole_drop_.Revoke();
+        queued_drop_.reset();
+        operation_session_.Cancel();
+        CancelPlacesDrag();
+        EndMarquee(false);
         done_ = true;
         if (!hwnd_) return;
+        SaveLayout();
         RemoveClipboardFormatListener(hwnd_);
         KillTimer(hwnd_, kLoadTimer);
         KillTimer(hwnd_, kSearchTimer);
         KillTimer(hwnd_, kMotionTimer);
+        KillTimer(hwnd_, kSharedPlacesTimer);
         // Stop the loader first: after this no listing can be posted, so the
         // ones already queued are all that must be freed.
         PickerProofPhase("close-loader-before");
@@ -1277,6 +1478,234 @@ private:
         return item;
     }
 
+    void RefreshSharedPlaces() {
+        auto latest = spec_.read_shared_places ? spec_.read_shared_places() : picker_places::Read();
+        if (latest.shared_available || spec_.read_shared_places) pulse_places_ = std::move(latest);
+        else {
+            pulse_places_.shared_available = false;
+            pulse_places_.endpoint = nullptr;
+            if (saved_places_.valid() && saved_places_.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+                try {
+                    auto saved = saved_places_.get();
+                    pulse_places_.workspaces = std::move(saved.workspaces);
+                    pulse_places_.starred_items = std::move(saved.starred_items);
+                    pulse_places_.starred_groups = std::move(saved.starred_groups);
+                } catch (...) { }
+            }
+        }
+        Invalidate();
+    }
+
+    void CancelPlacesDrag() {
+        const bool captured = places_drag_.pending || places_drag_.active;
+        places_drag_ = {};
+        vm_.drag_badge.clear();
+        SetDragVisualFeedback({});
+        vm_.sidebar_drop_index = -1;
+        if (captured && hwnd_ && GetCapture() == hwnd_) ReleaseCapture();
+    }
+
+    PickerPlacesDrop ResolveFilesystemDrop(const std::vector<std::wstring>& sources, POINT point,
+                                          DWORD keys, DWORD allowed, DWORD preferred = 0) {
+        if (done_ || waiting_ || validating_ || operating_ || queued_drop_ || sources.empty() ||
+            std::any_of(sources.begin(), sources.end(), [](const auto& source) {
+                return !IsPickerDiskPath(source);
+            })) return {};
+        const auto hit = HitAt(static_cast<float>(point.x), static_cast<float>(point.y));
+        PickerPlacesDrop target;
+        if (hit.main.region == HitTestResult::Row && hit.main.index >= 0 &&
+            hit.main.index < static_cast<int>(entries_.size())) {
+            const auto& entry = entries_[hit.main.index];
+            if (entry.kind == PickerEntryKind::Folder || entry.kind == PickerEntryKind::Drive)
+                target.destination = entry.path;
+        } else if (hit.chrome == kPickNone &&
+                   (hit.main.region == HitTestResult::Pane || hit.main.region == HitTestResult::None) &&
+                   ContainsRect(renderer_.PaneListRect(vm_.pane, PaneBounds()),
+                                static_cast<float>(point.x), static_cast<float>(point.y)) && current_verified_) {
+            target.destination = current_;
+        } else {
+            std::vector<picker_places::StarredItem> items;
+            for (const auto& source : sources) items.push_back({source, 1, {}});
+            target = ResolvePickerPlacesDrop(vm_, pulse_places_, hit.main, items, keys);
+            // External sources have no trusted folder kind; never guess that
+            // metadata or perform filesystem reads on OLE's DragOver thread.
+            if (target.favorite) return {};
+        }
+        if (target.destination.empty() || !IsPickerDiskPath(target.destination) ||
+            DropIntoOwnFolder(sources, target.destination)) return {};
+        target.effect = ComputeDropEffect(keys, sources.front(), target.destination,
+                                         allowed & (DROPEFFECT_COPY | DROPEFFECT_MOVE), preferred);
+        if (target.effect == DROPEFFECT_MOVE && std::all_of(sources.begin(), sources.end(),
+            [&](const auto& source) { return SamePickerPath(PickerParent(source), target.destination); })) return {};
+        return target;
+    }
+
+    void ShowFilesystemDrop(const PickerPlacesDrop& target, POINT point) {
+        const auto hit = HitAt(static_cast<float>(point.x), static_cast<float>(point.y));
+        vm_.sidebar_drop_index = target.effect != DROPEFFECT_NONE && hit.main.region == HitTestResult::SidebarItem
+            ? hit.main.index : -1;
+        vm_.drag_badge = target.effect == DROPEFFECT_NONE ? std::wstring() :
+            std::wstring(l10n::Get(target.effect == DROPEFFECT_MOVE ? l10n::StringId::DropMove : l10n::StringId::DropCopy)) +
+            PickerLeafName(target.destination);
+        vm_.drag_badge_x = static_cast<float>(point.x);
+        vm_.drag_badge_y = static_cast<float>(point.y);
+        vm_.drag_badge_move = target.effect == DROPEFFECT_MOVE;
+        SetDragVisualFeedback(vm_.drag_badge);
+        Invalidate();
+    }
+
+    void RegisterPickerDrop() {
+        DropTargetCallbacks callbacks;
+        callbacks.drag_over = [this](const auto& sources, POINT point, DWORD keys, DWORD allowed, DWORD preferred) {
+            const auto target = ResolveFilesystemDrop(sources, point, keys, allowed, preferred);
+            ShowFilesystemDrop(target, point);
+            return target.effect;
+        };
+        callbacks.drag_leave = [this] { vm_.drag_badge.clear(); SetDragVisualFeedback({}); vm_.sidebar_drop_index = -1; Invalidate(); };
+        callbacks.drop = [this](const auto& sources, POINT point, DWORD keys, DWORD allowed, DWORD preferred) {
+            const auto target = ResolveFilesystemDrop(sources, point, keys, allowed, preferred);
+            vm_.drag_badge.clear(); vm_.sidebar_drop_index = -1; Invalidate();
+            SetDragVisualFeedback({});
+            if (target.effect == DROPEFFECT_NONE) return DWORD{DROPEFFECT_NONE};
+            ops::OpRequest request;
+            request.type = target.effect == DROPEFFECT_MOVE ? ops::OpType::Move : ops::OpType::Copy;
+            request.sources = sources;
+            request.dest_dir = target.destination;
+            queued_drop_ = std::make_unique<ops::OpRequest>(std::move(request));
+            if (!PostMessageW(hwnd_, kPickerDropMessage, 0, 0)) {
+                queued_drop_.reset();
+                return DWORD{DROPEFFECT_NONE};
+            }
+            return target.effect;
+        };
+        ole_drop_.Register(hwnd_, std::move(callbacks));
+    }
+
+    void BeginPlacesDrag(int row, POINT point) {
+        if (row < 0 || row >= static_cast<int>(entries_.size())) return;
+        CancelPlacesDrag();
+        focus_ = kPickList;
+        EndAddressEdit(false);
+        SetFocus(hwnd_);
+        auto& drag = places_drag_;
+        drag.filename_before = filename_text_;
+        drag.filename_from_selection = filename_from_selection_;
+        drag.ctrl = KeyDown(VK_CONTROL);
+        drag.shift = KeyDown(VK_SHIFT);
+        drag.deferred_click = !drag.shift && selected_set_.contains(row);
+        if (!drag.deferred_click) Select(row, drag.shift, drag.ctrl);
+        else selected_ = row;
+        drag.row = row;
+        drag.start = point;
+        drag.pending = true;
+        SetCapture(hwnd_);
+        Invalidate();
+    }
+
+    void MovePlacesDrag(POINT point, DWORD keys) {
+        auto& drag = places_drag_;
+        if (!(keys & MK_LBUTTON)) { CancelPlacesDrag(); Invalidate(); return; }
+        if (drag.pending && (std::abs(point.x - drag.start.x) >= GetSystemMetrics(SM_CXDRAG) ||
+                             std::abs(point.y - drag.start.y) >= GetSystemMetrics(SM_CYDRAG))) {
+            drag.pending = false;
+            drag.active = true;
+            if (mode_ == PickerMode::Save) {
+                SetFilename(drag.filename_before);
+                filename_from_selection_ = drag.filename_from_selection;
+            }
+            std::vector<int> indices(selected_set_.begin(), selected_set_.end());
+            std::sort(indices.begin(), indices.end());
+            for (int index : indices) if (index >= 0 && index < static_cast<int>(entries_.size())) {
+                const auto& entry = entries_[index];
+                if (entry.kind != PickerEntryKind::Drive)
+                    drag.items.push_back({entry.path, entry.kind == PickerEntryKind::Folder ? 2u : 1u, {}});
+            }
+        }
+        if (!drag.active) return;
+        RECT client{};
+        GetClientRect(hwnd_, &client);
+        if (!PtInRect(&client, point) && ole_drop_.Ready() && !drag.items.empty()) {
+            std::vector<std::wstring> paths;
+            for (const auto& item : drag.items) paths.push_back(item.path);
+            CancelPlacesDrag();
+            Invalidate();
+            ole_drag_out_ = true;
+            const DWORD effect = DoFileDragDrop(paths, DROPEFFECT_COPY | DROPEFFECT_MOVE, {}, current_, dark_);
+            ole_drag_out_ = false;
+            if (!done_) {
+                if (queued_drop_) PostMessageW(hwnd_, kPickerDropMessage, 0, 0);
+                else if (effect != DROPEFFECT_NONE) Reload();
+            }
+            return;
+        }
+        const auto hit = HitAt(static_cast<float>(point.x), static_cast<float>(point.y));
+        drag.target = ResolvePickerPlacesDrop(vm_, pulse_places_, hit.main, drag.items, keys);
+        if (!drag.target.favorite) {
+            std::vector<std::wstring> sources;
+            for (const auto& item : drag.items) sources.push_back(item.path);
+            drag.target = ResolveFilesystemDrop(sources, point, keys, DROPEFFECT_COPY | DROPEFFECT_MOVE);
+        } else if (done_ || waiting_ || validating_ || operating_ || queued_drop_) {
+            drag.target.effect = DROPEFFECT_NONE;
+        }
+        vm_.sidebar_drop_index = drag.target.effect != DROPEFFECT_NONE && hit.main.region == HitTestResult::SidebarItem ? hit.main.index : -1;
+        vm_.drag_badge = drag.target.favorite && drag.target.effect != DROPEFFECT_NONE ? std::wstring(l10n::Get(l10n::StringId::FavoritesBarDropAdd)) :
+            drag.target.effect != DROPEFFECT_NONE ? std::wstring(l10n::Get(drag.target.effect == DROPEFFECT_MOVE ?
+                l10n::StringId::DropMove : l10n::StringId::DropCopy)) + PickerLeafName(drag.target.destination) : std::wstring();
+        vm_.drag_badge_x = static_cast<float>(point.x);
+        vm_.drag_badge_y = static_cast<float>(point.y);
+        vm_.drag_badge_move = drag.target.effect == DROPEFFECT_MOVE;
+        SetDragVisualFeedback(vm_.drag_badge);
+        UpdateHover(hit);
+        SetCursor(LoadCursorW(nullptr, drag.target.effect == DROPEFFECT_NONE ? IDC_NO : IDC_ARROW));
+        Invalidate();
+    }
+
+    void FinishPlacesDrag(POINT point, DWORD keys) {
+        if (places_drag_.active) MovePlacesDrag(point, keys | MK_LBUTTON);
+        auto drag = std::move(places_drag_);
+        places_drag_ = {};
+        vm_.drag_badge.clear();
+        SetDragVisualFeedback({});
+        vm_.sidebar_drop_index = -1;
+        if (GetCapture() == hwnd_) ReleaseCapture();
+        if (drag.pending) {
+            if (drag.deferred_click) Select(drag.row, drag.shift, drag.ctrl);
+        } else if (drag.active && drag.target.effect != DROPEFFECT_NONE) {
+            if (drag.target.favorite) {
+                operating_ = true;
+                const bool okay = RunPickerFavoriteRequest(hwnd_, pulse_places_, drag.items, drag.target.group, spec_.add_shared_favorites);
+                operating_ = false;
+                if (done_) return;
+                chrome_.notice = okay ? std::wstring() : l10n::Get(l10n::StringId::PickerFavoritesUnavailable);
+                RefreshSharedPlaces();
+            } else {
+                ops::OpRequest request;
+                request.type = drag.target.effect == DROPEFFECT_MOVE ? ops::OpType::Move : ops::OpType::Copy;
+                for (const auto& item : drag.items) request.sources.push_back(item.path);
+                request.dest_dir = drag.target.destination;
+                ExecuteOperation(std::move(request));
+            }
+        } else if (drag.active && drag.target.favorite) {
+            chrome_.notice = l10n::Get(l10n::StringId::PickerFavoritesUnavailable);
+        }
+        Invalidate();
+    }
+
+    void OpenSharedPlace(const std::wstring& path) {
+        if (path.starts_with(kPickerGroupPrefix)) {
+            const auto group = path.substr(std::size(kPickerGroupPrefix) - 1);
+            if (!folded_favorite_groups_.erase(group)) folded_favorite_groups_.insert(group);
+            Invalidate();
+            return;
+        }
+        const auto item = std::find_if(pulse_places_.starred_items.begin(), pulse_places_.starred_items.end(),
+            [&](const auto& entry) { return SamePickerPath(entry.path, path); });
+        if (item != pulse_places_.starred_items.end() && item->kind == 1) {
+            const auto split = path.find_last_of(L"\\/");
+            if (split != path.npos) Navigate(path.substr(0, split + 1), true, path);
+        } else if (!path.empty()) Navigate(path, true);
+    }
+
     void BuildSidebar() {
         vm_.sidebar.clear();
         auto add_context = [&](int id, const std::wstring& label, bool opened) {
@@ -1294,23 +1723,27 @@ private:
             for (const auto& place : spec_.places) caller.items.push_back(PlaceItem(place));
             vm_.sidebar.push_back(std::move(caller));
         }
-        add_context(4, l10n::Get(l10n::StringId::PickerPulseOpenPlaces), true);
-        add_context(5, l10n::Get(l10n::StringId::Recent), false);
         SidebarGroup quick;
         quick.id = kGroupQuick;
         quick.header = l10n::Get(l10n::StringId::PickerQuickAccess);
         quick.collapsed = collapsed_[0];
         for (const PickerPlace& place : places_) {
+            if ((spec_.native_options & FOS_HIDEPINNEDPLACES) && std::none_of(spec_.bottom_places.begin(), spec_.bottom_places.end(), [&](const auto& added) { return SamePickerPath(added.path, place.path); })) continue;
             if (std::any_of(spec_.places.begin(), spec_.places.end(), [&](const auto& added) { return SamePickerPath(added.path, place.path); })) continue;
             quick.items.push_back(PlaceItem(place));
         }
         for (const auto& entry : pulse_places_.folders) {
-            if (!entry.pinned) continue;
+            if (!entry.pinned || (spec_.native_options & FOS_HIDEPINNEDPLACES)) continue;
             picker_user_storage::Path parsed;
             if (!picker_user_storage::Parse(entry.path, parsed) || std::any_of(quick.items.begin(), quick.items.end(), [&](const auto& item) { return SamePickerPath(item.path, parsed.value); })) continue;
             quick.items.push_back(PlaceItem({entry.label.empty() ? PickerLeafName(parsed.value) : entry.label, parsed.value, L"\xE8B7"}));
         }
-        vm_.sidebar.push_back(std::move(quick));
+        if (!quick.items.empty()) vm_.sidebar.push_back(std::move(quick));
+        if (!(spec_.native_options & FOS_HIDEPINNEDPLACES))
+            AppendPickerSharedPlaces(vm_, pulse_places_, collapsed_[6], collapsed_[7], folded_favorite_groups_, PickerLeafName);
+        add_context(4, l10n::Get(l10n::StringId::PickerPulseOpenPlaces), true);
+        if (!(spec_.native_options & FOS_HIDEMRUPLACES))
+            add_context(5, l10n::Get(l10n::StringId::Recent), false);
 
         SidebarGroup drives;
         drives.id = kGroupDrives;
@@ -1320,10 +1753,11 @@ private:
         drives.navigation_path = L"";
         drives.items = drives_;
         vm_.sidebar.push_back(std::move(drives));
+        FilterPickerHiddenPlaces(vm_, layout_settings_.hidden_places);
     }
 
     int CollapseSlot(int group_id) const {
-        return std::clamp(group_id - 1, 0, 5);
+        return std::clamp(group_id - 1, 0, 7);
     }
 
     // The main window's view model, reduced to what the embedded renderer
@@ -1334,7 +1768,22 @@ private:
         vm_.can_go_back = history_.CanGoBack();
         vm_.can_go_forward = history_.CanGoForward();
         vm_.tray_deck.hidden = true;
-        vm_.details_visible = false;
+        vm_.details_visible = (spec_.native_options & FOS_FORCEPREVIEWPANEON) != 0;
+        vm_.details = {};
+        vm_.details.preview_only = true;
+        vm_.details.preview_enabled = true;
+        if (vm_.details_visible) {
+            if (const auto* entry = SelectedEntry(); entry && selected_set_.size() == 1) {
+                auto& details = vm_.details;
+                details.has_selection = true;
+                details.name = entry->name; details.path = entry->path;
+                details.is_dir = entry->kind == PickerEntryKind::Folder || entry->kind == PickerEntryKind::Drive;
+                details.attrs = details.is_dir ? FILE_ATTRIBUTE_DIRECTORY : 0;
+                details.modified_value = (static_cast<uint64_t>(entry->modified.dwHighDateTime) << 32) | entry->modified.dwLowDateTime;
+                details.size_value = entry->size;
+                details.view_generation = generation_;
+            }
+        }
         vm_.settings_open = false;
         vm_.window_effect = WindowEffect::MicaAlt;
         vm_.address_searching = searching_;
@@ -1361,10 +1810,20 @@ private:
         pane.can_go_forward = vm_.can_go_forward;
         pane.can_go_up = !current_.empty();
         pane.can_create = !current_.empty() && error_.empty() && !waiting_;
-        pane.selected_index = selected_;
+        // selected_ is the keyboard caret and may have been Ctrl-deselected.
+        // Use the main pane's separate selection and focus-ring channels.
+        const bool caret_selected = selected_set_.contains(selected_);
+        pane.selected_index = caret_selected ? selected_ : -1;
+        pane.focus_ring_source = caret_selected ? -1 : selected_;
+        pane.marquee_active = marquee_.active;
+        pane.marquee_rect = marquee_.active ? marquee_.Rect(scroll_, renderer_.PaneListRect(pane, PaneBounds())) : D2D1_RECT_F{};
         pane.selected_indices = &selected_set_;
         pane.selected_count = static_cast<int>(selected_set_.size());
+        pane.rename_index = rename_path_.empty() ? -1 : rename_index_;
+        pane.rename_text = rename_edit_ && !rename_path_.empty() ? ReadEdit(rename_edit_) : std::wstring();
         pane.view_mode = view_mode_;
+        pane.icon_dip = icon_dip_;
+        pane.details_column_dividers = layout_settings_.column_widths;
         pane.sort_column = ColumnFromSort(options_.sort);
         pane.sort_direction = options_.descending ? SortDirection::Desc : SortDirection::Asc;
         pane.focused = focus_ == kPickList;
@@ -1468,17 +1927,23 @@ private:
     D2D1_COLOR_F EditForeground() const { return ColorFromRef(EditTextColor(dark_)); }
     D2D1_COLOR_F EditBackground() const { return ColorFromRef(EditBackColor(dark_)); }
     HBRUSH EditBrush() const { return EditBackBrush(edit_brush_); }
+    IDWriteTextFormat* EditFormat(HWND edit) {
+        return edit == rename_edit_ && GetPropW(edit, L"Pulse.EditWrap") && compositor_.FileNameFormat()
+            ? compositor_.FileNameFormat() : compositor_.TextFormat();
+    }
 
     void CreateFonts() {
         if (font_) { DeleteObject(font_); font_ = nullptr; }
         font_ = typography::CreateEditFont(scale_);
+        if (rename_font_) DeleteObject(rename_font_);
+        rename_font_ = typography::CreateEditFont(scale_, 13.0f);
         for (HWND edit : AllEdits())
             if (edit && font_) SendMessageW(edit, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
     }
 
-    HWND MakeEdit(int id, const wchar_t* text) {
-        HWND edit = spec_.pulse_painted_plain_child ? CreatePulsePaintedChildEdit(hwnd_, text)
-            : CreateRedirectedChildEdit(hwnd_, text);
+    HWND MakeEdit(int id, const wchar_t* text, DWORD style = 0) {
+        HWND edit = spec_.pulse_painted_plain_child ? CreatePulsePaintedChildEdit(hwnd_, text, style)
+            : CreateRedirectedChildEdit(hwnd_, text, style);
         if (!edit) {
             if (spec_.pulse_painted_plain_child) {
                 const DWORD error = GetLastError(); native_error_ = error ? error : ERROR_GEN_FAILURE;
@@ -1496,7 +1961,7 @@ private:
     }
 
     std::vector<HWND> AllEdits() const {
-        std::vector<HWND> edits{path_edit_,filename_edit_,search_edit_};
+        std::vector<HWND> edits{path_edit_,filename_edit_,search_edit_,rename_edit_};
         for(HWND edit:custom_edits_)if(edit)edits.push_back(edit);
         return edits;
     }
@@ -1521,7 +1986,16 @@ private:
         if (search_edit_) ShowWindow(search_edit_, SW_HIDE);
     }
 
-    void FailPaintedEdit(DWORD error) {
+    void FailPaintedEdit(DWORD error, const char* stage = "other") {
+#ifdef PULSE_WITH_TEST_HOOKS
+        std::fprintf(stderr, "[PICKER-EDIT-FAIL] stage=%s occluded=%d error=%lu rename_error=%lu filename_error=%lu focus_id=%d rename_active=%d rendering=%d frame=%llu\n",
+            stage, first_present_occluded_, error, rename_edit_ ? PulsePaintedChildEditError(rename_edit_) : 0,
+            filename_edit_ ? PulsePaintedChildEditError(filename_edit_) : 0, GetDlgCtrlID(GetFocus()),
+            !rename_path_.empty(), rendering_frame_, static_cast<unsigned long long>(painted_frame_));
+        std::fflush(stderr);
+#else
+        (void)stage;
+#endif
         native_error_ = error ? error : ERROR_FUNCTION_FAILED;
         result_.clear(); done_ = true;
         if (hwnd_) PostMessageW(hwnd_, WM_NULL, 0, 0);
@@ -1539,7 +2013,7 @@ private:
         if (!CheckPaintedEdits()) return;
         for (HWND edit : AllEdits()) {
             if (edit && IsWindowVisible(edit) &&
-                !PresentChildEdit(compositor_, compositor_.TextFormat(), EditForeground(), EditBackground(), edit) &&
+                !PresentChildEdit(compositor_, EditFormat(edit), EditForeground(), EditBackground(), edit) &&
                 spec_.pulse_painted_plain_child) { FailPaintedEdit(PulsePaintedChildEditError(edit)); return; }
         }
     }
@@ -1551,7 +2025,13 @@ private:
         if (!CheckPaintedEdits()) return false;
         const auto previous = painted_frame_;
         PresentEdits();
-        if (!done_) UpdateWindow(hwnd_);
+        if (!done_) {
+            // Multi-selection chips hide the filename editor. With no visible
+            // edits, PresentEdits cannot invalidate the parent, but this flush
+            // still requires a newly presented frame before accepting paths.
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            UpdateWindow(hwnd_);
+        }
         // A newly shown HWND can remain DXGI-occluded during its first DWM
         // transition. Readiness still requires an actually presented frame.
         struct FirstPresentRetryScope {
@@ -1572,7 +2052,7 @@ private:
             if(!done_ && painted_frame_==0){InvalidateRect(hwnd_,nullptr,FALSE);UpdateWindow(hwnd_);}
         }
         if (!CheckPaintedEdits()) return false;
-        if (painted_frame_ == previous) { FailPaintedEdit(ERROR_FUNCTION_FAILED); return false; }
+        if (painted_frame_ == previous) { FailPaintedEdit(ERROR_FUNCTION_FAILED, "flush-no-present"); return false; }
         return true;
     }
     void DrawPaintedEdits() {
@@ -1586,7 +2066,7 @@ private:
             MapWindowPoints(edit, hwnd_, reinterpret_cast<POINT*>(&rect), 2);
             const auto bounds = D2D1::RectF(static_cast<float>(rect.left), static_cast<float>(rect.top),
                 static_cast<float>(rect.right), static_cast<float>(rect.bottom));
-            if (!DrawPulsePaintedChildEdit(compositor_, compositor_.TextFormat(), EditForeground(), EditBackground(), edit, bounds)) {
+            if (!DrawPulsePaintedChildEdit(compositor_, EditFormat(edit), EditForeground(), EditBackground(), edit, bounds)) {
                 FailPaintedEdit(PulsePaintedChildEditError(edit)); return;
             }
         }
@@ -1624,6 +2104,7 @@ private:
                      searching_, 0.0f);
         PlaceOneEdit(filename_edit_, chrome_layout_.filename, chrome_.selected_names.size() <= 1);
         PlaceCustomEdits();
+        PlaceRenameEdit();
     }
 
     void PlaceCustomEdits() {
@@ -1721,6 +2202,7 @@ private:
     }
 
     void InputChanged(HWND edit) {
+        if (edit == rename_edit_) { PlaceRenameEdit(); Invalidate(); return; }
         if (setting_edits_) return;
         const int custom_index=GetDlgCtrlID(edit)-kCustomEditBase;
         if(custom_index>=0 && static_cast<size_t>(custom_index)<custom_edits_.size() && custom_edits_[custom_index]==edit) {
@@ -1741,6 +2223,7 @@ private:
         if (validating_) { ++generation_; validating_ = false; }
         chrome_.notice.clear();
         if (edit == filename_edit_) {
+            user_interacted_ = true;
             filename_text_ = ReadEdit(edit);
             filename_from_selection_ = false;
             selected_set_.clear();
@@ -1760,6 +2243,11 @@ private:
         if (!self) return DefSubclassProc(hwnd, msg, wparam, lparam);
         switch (msg) {
         case WM_KEYDOWN:
+            if (hwnd == self->rename_edit_) {
+                if (wparam == VK_RETURN || wparam == VK_ESCAPE) { self->EndRename(wparam == VK_RETURN); return 0; }
+            }
+            self->DismissHover();
+            if (self->HandleViewKey(wparam)) return 0;
             if (wparam == VK_RETURN) {
                 if (hwnd == self->path_edit_) self->SubmitPath();
                 else if (hwnd == self->filename_edit_) self->SubmitSelection();
@@ -1785,6 +2273,8 @@ private:
                 return 0;
             }
             break;
+        case WM_MOUSEWHEEL:
+            return SendMessageW(self->hwnd_, msg, wparam, lparam);
         case WM_SYSKEYDOWN:
             if (wparam == VK_LEFT) { self->GoBack(); return 0; }
             if (wparam == VK_RIGHT) { self->GoForward(); return 0; }
@@ -1796,11 +2286,15 @@ private:
             if (wparam == VK_RETURN || wparam == VK_ESCAPE || wparam == VK_TAB) return 0;
             break;
         case WM_SETFOCUS:
+            if (hwnd == self->rename_edit_) { self->focus_ = kPickList; break; }
             PickerProofFocus("edit-setfocus", self->focus_, GetDlgCtrlID(hwnd));
             self->focus_ = GetDlgCtrlID(hwnd)>=kCustomEditBase ? kCustomFocusBase+GetDlgCtrlID(hwnd)-kCustomEditBase : hwnd == self->path_edit_ ? kPickAddress
                          : hwnd == self->filename_edit_ ? kPickFilename : kPickSearch;
             break;
         case WM_KILLFOCUS:
+            if (hwnd == self->rename_edit_ && !self->rename_path_.empty())
+                PostMessageW(self->hwnd_, kEndRenameMessage, self->rename_serial_, 0);
+            self->DismissHover();
             // Clicking away from the path field ends the edit, like the main
             // window's address bar. Posted: the edit is mid-message here.
             if (hwnd == self->path_edit_ && self->address_editing_)
@@ -1811,10 +2305,10 @@ private:
                              msg == WM_LBUTTONDOWN || msg == WM_LBUTTONDBLCLK;
         if(msg==WM_CHAR)PickerProofPhase("edit-char-dispatch-before");
         LRESULT result = 0;
-        if (!HandleChildEditMessage(self->compositor_, self->compositor_.TextFormat(),
+        if (!HandleChildEditMessage(self->compositor_, self->EditFormat(hwnd),
                                     self->EditForeground(), self->EditBackground(),
                                     self->EditBrush(), hwnd, msg, wparam, lparam, result)) {
-            result = DefPresentedChildEditProc(self->compositor_, self->compositor_.TextFormat(),
+            result = DefPresentedChildEditProc(self->compositor_, self->EditFormat(hwnd),
                                                self->EditForeground(), self->EditBackground(),
                                                hwnd, msg, wparam, lparam);
         }
@@ -1828,7 +2322,8 @@ private:
     void ApplyRendererSettings() {
         renderer_.SetResourceModule(spec_.module_instance);
         renderer_.SetEmbedded(kPickerTitleDip, PickerFooterDip(mode_) + CustomHeightDip());
-        renderer_.SetSidebarWidthDip(kSidebarDip);
+        renderer_.SetDetailsPanelVisible((spec_.native_options & FOS_FORCEPREVIEWPANEON) != 0);
+        renderer_.SetSidebarWidthDip(layout_settings_.sidebar_width);
         if (spec_.row_height_dip > 0.0f) renderer_.SetRowHeightDip(spec_.row_height_dip);
         renderer_.SetListStyle(spec_.list_smart_date, spec_.list_zebra_rows, spec_.list_size_bar,
                                false, spec_.selection_outline);
@@ -2049,7 +2544,9 @@ private:
 
     void Relayout() {
         if (!compositor_.Dc()) return;
+        DismissHover("hover-layout");
         renderer_.SetEmbedded(kPickerTitleDip, PickerFooterDip(mode_) + CustomHeightDip());
+        renderer_.SetDetailsPanelVisible((spec_.native_options & FOS_FORCEPREVIEWPANEON) != 0);
         SyncVm();
         SyncOpenDropDown();
         chrome_layout_ = LayoutPickerChrome(Width(), Height(), chrome_, painter_, scale_);
@@ -2086,6 +2583,7 @@ private:
         PULSE_PICKER_TRACE_POINT("list-before");
         renderer_.Render(vm_, RendererRect(), theme);
         PULSE_PICKER_TRACE_POINT("list-after");
+        SyncDetailsPreview();
         painter_.BeginFrame(theme, hc);
         UpdateSummary();
         SyncOpenDropDown();
@@ -2103,6 +2601,14 @@ private:
         PULSE_PICKER_TRACE_POINT("painted-edits-before");
         DrawPaintedEdits();
         PULSE_PICKER_TRACE_POINT("painted-edits-after");
+        auto hover_bounds = RendererRect();
+        hover_bounds.bottom = chrome_layout_.footer.top;
+        renderer_.DrawHoverPreview(hover_preview_.view, hover_bounds, theme, hc);
+        if (hover_preview_.view.visible) {
+            const UINT interval = renderer_.HoverPreviewFrameMs();
+            if (interval) SetTimer(hwnd_, kHoverTimer, interval, nullptr);
+            else KillTimer(hwnd_, kHoverTimer);
+        }
         PULSE_PICKER_TRACE_POINT("main-end-draw-before");
         const HRESULT end_hr = dc->EndDraw();
         PULSE_PICKER_TRACE_POINT("main-end-draw-after");
@@ -2113,14 +2619,36 @@ private:
             return;
         }
         if (spec_.pulse_painted_plain_child && FAILED(end_hr)) { FailPaintedEdit(ERROR_FUNCTION_FAILED); return; }
-        if (const auto snapshot = reinterpret_cast<const wchar_t*>(
-                RemovePropW(hwnd_, L"Pulse.PickerTestSnapshot")))
-            compositor_.SaveSnapshot(snapshot);
+#if defined(PULSE_WITH_TEST_HOOKS) || defined(PULSE_PICKER_INPROCESS_PROOF)
+        // Test-only snapshot request. Values up to 0xFFFF are global atoms
+        // naming the path, usable when the picker HWND lives in another
+        // process; larger values are same-process string pointers.
+        if (const HANDLE request = RemovePropW(hwnd_, L"Pulse.PickerTestSnapshot")) {
+            const auto value = reinterpret_cast<ULONG_PTR>(request);
+            if (value <= 0xFFFF) {
+                wchar_t path[256]{};
+                if (GlobalGetAtomNameW(static_cast<ATOM>(value), path, 256)) compositor_.SaveSnapshot(path);
+                GlobalDeleteAtom(static_cast<ATOM>(value));
+            } else {
+                compositor_.SaveSnapshot(static_cast<const wchar_t*>(request));
+            }
+        }
+#endif
         PULSE_PICKER_TRACE_POINT("main-present-before");
         const HRESULT present_hr = compositor_.Present();
+#ifdef PULSE_WITH_TEST_HOOKS
+        if (present_hr == S_OK && view_switch_test_.begin && view_switch_test_.count < view_switch_test_.frames.size()) {
+            LARGE_INTEGER now{}; QueryPerformanceCounter(&now);
+            view_switch_test_.frames[view_switch_test_.count++] = now.QuadPart;
+        }
+#endif
         PULSE_PICKER_TRACE_POINT("main-present-after");
         if (preparing_first_frame_) {
-            initial_frame_prepared_ = present_hr == S_OK && !compositor_.NeedsRecovery();
+            // The HWND is deliberately hidden here. DXGI may report occlusion
+            // even though drawing succeeded; visible readiness is checked by
+            // FlushPaintedEdits after ShowWindow, not by this preparation pass.
+            initial_frame_prepared_ = SUCCEEDED(end_hr) &&
+                (present_hr == S_OK || present_hr == DXGI_STATUS_OCCLUDED) && !compositor_.NeedsRecovery();
             if (FAILED(present_hr)) FailPaintedEdit(ERROR_FUNCTION_FAILED);
             return;
         }
@@ -2135,7 +2663,17 @@ private:
         } else PresentEdits();
         // List hover glides, view morphs, the loading shimmer and thumbnail
         // fades run on the shared renderer's clock.
-        if (renderer_.TickMotion(GetTickCount64()) || filter_t < 1.0f) SetTimer(hwnd_, kMotionTimer, 16, nullptr);
+        const bool moving = renderer_.TickMotion(GetTickCount64()) || filter_t < 1.0f;
+        bool use_frame_pump = frame_pump_.Running();
+#ifdef PULSE_WITH_TEST_HOOKS
+        use_frame_pump = use_frame_pump && !view_switch_test_.timer;
+#endif
+        if (use_frame_pump) {
+            if (moving && IsWindowVisible(hwnd_) && !IsIconic(hwnd_)) {
+                if (filter_t >= 1.0f && renderer_.DecorativeMotionOnly()) frame_pump_.ArmPaced(1000.0 / 30.0);
+                else frame_pump_.Arm();
+            } else frame_pump_.Disarm();
+        } else if (moving) SetTimer(hwnd_, kMotionTimer, 16, nullptr);
         else KillTimer(hwnd_, kMotionTimer);
     }
 
@@ -2167,6 +2705,54 @@ private:
         return HitAt(static_cast<float>(GET_X_LPARAM(lparam)), static_cast<float>(GET_Y_LPARAM(lparam)));
     }
 
+    bool SidebarResizeAt(float x,float y) const {
+        const auto sidebar=renderer_.SidebarRect(RendererWidth(),Height());
+        return std::abs(x-sidebar.right)<=4.0f*scale_ && y>=sidebar.top && y<sidebar.bottom;
+    }
+
+    void ResizeLayout(float x) {
+        if (sidebar_resizing_) {
+            const auto sidebar=renderer_.SidebarRect(RendererWidth(),Height());
+            const float maximum=std::max(kSidebarMinWidthDip,RendererWidth()/scale_-320.0f);
+            renderer_.SetSidebarWidthDip(std::clamp((x-sidebar.left)/scale_,kSidebarMinWidthDip,maximum));
+            layout_settings_.sidebar_width=renderer_.SidebarWidthDip();
+        } else if (column_resizing_>=0) {
+            layout_settings_.column_widths=renderer_.ResizeDetailsColumnDivider(
+                PaneBounds(),layout_settings_.column_widths,column_resizing_,x,vm_.pane.cloud_status_column);
+        }
+        Relayout(); Invalidate();
+    }
+
+    void DismissHover(const char* reason = "hover-input") {
+        if (!hover_preview_.view.path.empty()) PickerProofPhase(reason);
+        if (hwnd_) KillTimer(hwnd_, kHoverTimer);
+        hover_preview_.Cancel();
+        hover_started_ = 0;
+        vm_.tooltip_text.clear();
+        if (hwnd_ && compositor_.Dc()) {
+            renderer_.DrawHoverPreview({}, RendererRect(), MakeTheme(dark_, accent_), IsHighContrast());
+            Invalidate();
+        }
+    }
+
+    void HoverTick() {
+        const auto foreground = GetForegroundWindow();
+        if (done_ || waiting_ || validating_ || operating_ || GetCapture() || menu_.IsOpen() ||
+            !IsWindowVisible(hwnd_) || IsIconic(hwnd_) ||
+            (foreground != GetAncestor(hwnd_, GA_ROOT) && foreground != GetAncestor(hwnd_, GA_ROOTOWNER))) {
+            DismissHover("hover-inactive"); return;
+        }
+        if (spec_.preview_trigger == 0) {
+            hover_preview_.Tick(renderer_, hwnd_, kHoverListingMessage, options_);
+        } else if (hover_started_ && GetTickCount64() - hover_started_ >= 500) {
+            vm_.tooltip_text = hover_preview_.view.name;
+            vm_.tooltip_x = static_cast<float>(hover_point_.x);
+            vm_.tooltip_y = static_cast<float>(hover_point_.y);
+            KillTimer(hwnd_, kHoverTimer);
+        }
+        Invalidate();
+    }
+
     void UpdateHover(const Hit& hit) {
         const int region = static_cast<int>(hit.main.region);
         const bool changed = chrome_.hover != hit.chrome || vm_.hover_region != region ||
@@ -2176,10 +2762,72 @@ private:
         vm_.hover_region = region;
         vm_.hover_control_index = hit.main.index;
         vm_.hover_sub_index = hit.main.sub_index;
+        if (hit.main.region == HitTestResult::Row && hit.main.index >= 0 &&
+            static_cast<size_t>(hit.main.index) < entries_.size() && !GetCapture() && !waiting_) {
+            const auto& entry = entries_[static_cast<size_t>(hit.main.index)];
+            if (hover_preview_.view.path != entry.path) {
+                DismissHover();
+                SyncVm();
+                const DWORD attrs = snapshot_ && static_cast<size_t>(hit.main.index) < snapshot_->size()
+                    ? (*snapshot_)[static_cast<size_t>(hit.main.index)].attrs : 0;
+                hover_preview_.Candidate(entry, attrs, renderer_.ItemRectInPane(vm_.pane, PaneBounds(), hit.main.index),
+                    hover_point_, hwnd_, spec_.hover_preview_delay_ms, spec_.hover_card_size);
+                PickerProofPhase("hover-candidate");
+                hover_started_ = GetTickCount64();
+                SetTimer(hwnd_, kHoverTimer, 50, nullptr);
+            }
+        } else if (!hover_preview_.view.path.empty()) DismissHover("hover-nonrow");
         if (changed) Invalidate();
     }
 
     // ---- scrolling ---------------------------------------------------------
+
+    void EndMarquee(bool restore) {
+        if (!marquee_.pending && !marquee_.active) return;
+        if (restore) {
+            selected_set_ = marquee_.before;
+            selected_ = marquee_.caret; anchor_ = marquee_.anchor;
+        }
+        marquee_.Reset();
+        KillTimer(hwnd_, kMarqueeTimer);
+        if (GetCapture() == hwnd_) ReleaseCapture();
+        if (restore) { SyncSelectedNames(); UpdateChosen(); Invalidate(); }
+    }
+
+    void BeginMarquee(float x, float y) {
+        marquee_.Begin(selected_set_, selected_, anchor_, x, y, scroll_, KeyDown(VK_CONTROL), KeyDown(VK_SHIFT));
+        focus_ = kPickList;
+        if (address_editing_) EndAddressEdit(false);
+        SetFocus(hwnd_);
+        SetCapture(hwnd_);
+    }
+
+    void UpdateMarquee(float x, float y, bool scroll_tick = false) {
+        if (!marquee_.pending && !marquee_.active) return;
+        const bool first = marquee_.pending;
+        if (!marquee_.Move(x, y, (std::max)(1.0f, GetSystemMetrics(SM_CXDRAG) * scale_),
+                (std::max)(1.0f, GetSystemMetrics(SM_CYDRAG) * scale_))) return;
+        SyncVm();
+        const auto list = renderer_.PaneListRect(vm_.pane, PaneBounds());
+        if (scroll_tick) {
+            const float edge = 16 * scale_;
+            const float overflow = y < list.top + edge ? y - list.top - edge :
+                y > list.bottom - edge ? y - list.bottom + edge : 0;
+            if (overflow != 0) ScrollPaneTo(scroll_ + std::clamp(overflow * 0.3f, -48 * scale_, 48 * scale_));
+            SyncVm();
+        }
+        marquee_.hits.clear();
+        renderer_.ItemsInRectInPane(vm_.pane, PaneBounds(), marquee_.Rect(scroll_, list), marquee_.hits);
+        if (marquee_.Apply(selected_set_, static_cast<int>(entries_.size())) || first) {
+            user_interacted_ = true;
+            selected_ = selected_set_.empty() ? -1 : *std::min_element(selected_set_.begin(), selected_set_.end());
+            anchor_ = selected_;
+            editing_selection_names_ = false;
+            SyncSelectedNames(); UpdateChosen();
+        }
+        SetTimer(hwnd_, kMarqueeTimer, 16, nullptr);
+        Invalidate();
+    }
 
     void ScrollPaneTo(float value) {
         scroll_ = value;
@@ -2231,6 +2879,14 @@ private:
     void Wheel(WPARAM wparam, LPARAM lparam) {
         POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
         ScreenToClient(hwnd_, &point);
+        if ((GET_KEYSTATE_WPARAM(wparam) & MK_CONTROL) &&
+            ContainsRect(PaneBounds(), static_cast<float>(point.x), static_cast<float>(point.y)) &&
+            !marquee_.active && !marquee_.pending) {
+            const int step = ConsumeIconZoomWheel(GET_WHEEL_DELTA_WPARAM(wparam), GetTickCount64(),
+                zoom_wheel_remainder_, zoom_wheel_tick_);
+            if (step) ZoomIcons(step, &point);
+            return;
+        }
         const float steps = static_cast<float>(GET_WHEEL_DELTA_WPARAM(wparam)) / WHEEL_DELTA;
         const float delta = -steps * renderer_.RowHeight() * 3.0f;
         const D2D1_RECT_F sidebar = renderer_.SidebarRect(RendererWidth(), Height());
@@ -2278,6 +2934,7 @@ private:
 
     int TrackPickerPopup(POINT point, std::vector<FluentMenuItem> items,
                          FluentMenu::FilterFn filter = nullptr) {
+        DismissHover();
         const HWND previous = GetFocus();
         const int command = menu_.TrackPopup(point, std::move(items), std::move(filter));
         RestoreMenuFocus(previous);
@@ -2285,6 +2942,7 @@ private:
     }
 
     int TrackPickerDropdown(RECT anchor, std::vector<FluentMenuItem> items) {
+        DismissHover();
         const HWND previous = GetFocus();
         const int command = menu_.TrackDropdown(anchor, std::move(items));
         RestoreMenuFocus(previous);
@@ -2330,13 +2988,41 @@ private:
         Reload();
     }
 
-    void SetViewMode(ViewMode mode) {
-        if (view_mode_ == mode) return;
+    void SetViewMode(ViewMode mode, float dip = 0, const POINT* pointer = nullptr) {
+        dip = NormalizeIconDip(mode, dip, scale_);
+        if (view_mode_ == mode && icon_dip_ == dip) return;
+        DismissHover();
+        SyncVm();
+        int anchor = selected_;
+        float offset = 0;
+        if (pointer) {
+            const auto hit = HitAt(static_cast<float>(pointer->x), static_cast<float>(pointer->y));
+            if (hit.main.region == HitTestResult::Row) anchor = hit.main.index;
+        }
+        if (anchor >= 0) offset = renderer_.ItemRectInPane(vm_.pane, PaneBounds(), anchor).top;
+        EndMarquee(true);
         view_mode_ = mode;
+        icon_dip_ = dip;
+        if (IsZoomIconMode(mode)) { last_icon_mode_ = mode; last_icon_dip_ = dip; }
         g_last_view[mode_index_] = mode;
+        SyncVm();
+        if (anchor >= 0) scroll_ += renderer_.ItemRectInPane(vm_.pane, PaneBounds(), anchor).top - offset;
         ClampScroll();
-        if (selected_ >= 0) EnsureVisible(selected_);
+        if (!pointer && selected_ >= 0) EnsureVisible(selected_);
         Invalidate();
+    }
+
+    void ZoomIcons(int step, const POINT* pointer = nullptr) {
+        const auto next = ResolveIconZoom(view_mode_, icon_dip_, last_icon_mode_, last_icon_dip_, step, scale_);
+        SetViewMode(next.mode, next.dip, pointer);
+    }
+
+    bool HandleViewKey(WPARAM key) {
+        if (KeyDown(VK_CONTROL) && KeyDown(VK_SHIFT) && !KeyDown(VK_MENU) && key >= '1' && key <= '8') {
+            SetViewMode(static_cast<ViewMode>(key - '1'));
+            return true;
+        }
+        return false;
     }
 
     // The pane's "…" button: everything the old toolbar row offered.
@@ -2391,6 +3077,87 @@ private:
         Invalidate();
     }
 
+    void ManagePlaces(picker_places::ManagePlacesRequest request) {
+        if (operating_ || done_) return;
+        operating_ = true;
+        const bool okay = RunPickerPlacesRequest(hwnd_, [snapshot = pulse_places_, request = std::move(request), mutate = spec_.manage_shared_places] {
+            return mutate ? mutate(request) : picker_places::RequestManagePlaces(snapshot, request);
+        });
+        operating_ = false;
+        if (done_) return;
+        chrome_.notice = okay ? std::wstring() : l10n::Get(l10n::StringId::PickerPlacesUpdateFailed);
+        RefreshSharedPlaces();
+    }
+
+    void AddFavorites(std::vector<picker_places::StarredItem> items) {
+        if (operating_ || done_ || items.empty()) return;
+        operating_ = true;
+        const bool okay = RunPickerFavoriteRequest(hwnd_, pulse_places_, std::move(items), {}, spec_.add_shared_favorites);
+        operating_ = false;
+        if (done_) return;
+        chrome_.notice = okay ? std::wstring() : l10n::Get(l10n::StringId::PickerPlacesUpdateFailed);
+        RefreshSharedPlaces();
+    }
+
+    std::vector<picker_places::StarredItem> SelectedPlaces() const {
+        std::vector<int> indices(selected_set_.begin(), selected_set_.end());
+        std::sort(indices.begin(), indices.end());
+        std::vector<picker_places::StarredItem> items;
+        for (int index : indices) if (index >= 0 && index < static_cast<int>(entries_.size())) {
+            const auto& entry = entries_[index];
+            items.push_back({entry.path, entry.kind == PickerEntryKind::File || entry.kind == PickerEntryKind::Image ? 1u : 2u, {}});
+        }
+        return items;
+    }
+
+    std::wstring AskPlaceName(POINT client, const std::wstring& value, l10n::StringId label) {
+        menu_.SetTheme(dark_, accent_);
+        menu_.SetInitialFilterText(value);
+        menu_.SetSelectAllOnOpen(true);
+        menu_.SetFilterPlaceholder(l10n::Get(label).c_str());
+        const auto rows = [](const std::wstring& name) {
+            return std::vector<FluentMenuItem>{Item(1, l10n::Get(l10n::StringId::ConfirmDefault).c_str(), L"", !name.empty())};
+        };
+        ClientToScreen(hwnd_, &client);
+        const int command = TrackPickerPopup(client, rows(value), rows);
+        return !done_ && (command == 1 || menu_.LastFilterCommitted()) ? menu_.LastFilterQuery() : std::wstring();
+    }
+
+    void ShowSidebarMenu(const std::wstring& path, POINT point) {
+        using Action = picker_places::ManagePlacesAction;
+        const auto snapshot = pulse_places_;
+        const auto hidden = layout_settings_.hidden_places;
+        const int command = TrackAt(point, BuildPickerPlacesMenu(snapshot, path, hidden, snapshot.shared_available));
+        if (done_ || command <= 0) return;
+        const auto group = path.starts_with(kPickerGroupPrefix) ? path.substr(std::size(kPickerGroupPrefix) - 1) : std::wstring();
+        if (command == 1 && !path.empty() && std::none_of(hidden.begin(), hidden.end(),
+            [&](const auto& item) { return SamePickerPath(item, path); })) layout_settings_.hidden_places.push_back(path);
+        else if (command == 2) layout_settings_.hidden_places.clear();
+        else if (command >= 200 && command < 200 + static_cast<int>(hidden.size())) {
+            const auto& restore = hidden[command - 200];
+            std::erase_if(layout_settings_.hidden_places, [&](const auto& item) { return SamePickerPath(item, restore); });
+        } else if (command >= 100 && command < 100 + static_cast<int>(snapshot.starred_groups.size()))
+            ManagePlaces({Action::SetGroup, {path}, snapshot.starred_groups[command - 100].id, {}});
+        else if (command == 3) OpenSharedPlace(path);
+        else if (command == 4) CopyTextToClipboard(hwnd_, path::FriendlyPathText(path));
+        else if (command == 5) ManagePlaces({Action::Remove, {path}, {}, {}});
+        else if (command == 6) AddFavorites({{path, 2, {}}});
+        else if (command == 7) ManagePlaces({Action::PinWorkspace, {path}, {}, {}});
+        else if (command == 8) ManagePlaces({Action::UnpinWorkspace, {path}, {}, {}});
+        else if (command == 10 || command == 11) ManagePlaces({command == 10 ? Action::MoveWorkspaceUp : Action::MoveWorkspaceDown, {path}, {}, {}});
+        else if (command == 13) ManagePlaces({Action::DeleteGroup, {}, group, {}});
+        else if (command == 15) ManagePlaces({Action::SetGroup, {path}, {}, {}});
+        else if (command == 9 || command == 12 || command == 14) {
+            std::wstring value = command == 14 ? l10n::Get(l10n::StringId::FavoritesGroupDefaultName) : PickerLeafName(path);
+            for (const auto& entry : snapshot.starred_groups) if (entry.id == group) value = entry.name;
+            for (const auto& entry : snapshot.workspaces) if (SamePickerPath(entry.root, path)) value = entry.name;
+            const auto name = AskPlaceName(point, value, command == 9 ? l10n::StringId::WorkspaceNameLabel : l10n::StringId::FavoritesGroupName);
+            if (!name.empty()) ManagePlaces({command == 9 ? Action::RenameWorkspace : command == 12 ? Action::RenameGroup : Action::CreateGroup,
+                command == 12 ? std::vector<std::wstring>{} : std::vector<std::wstring>{path}, command == 12 ? group : std::wstring(), name});
+        }
+        Relayout(); Invalidate();
+    }
+
     void ShowAddressMenu(std::wstring path, POINT point) {
         std::vector<FluentMenuItem> items;
         items.push_back(Item(1, l10n::Get(l10n::StringId::EditAddress).c_str(), L"\xE8AC"));
@@ -2402,11 +3169,32 @@ private:
         else if (command == 2) CopyTextToClipboard(hwnd_, path::FriendlyPathText(path));
     }
 
+    void ShowColumnMenu(POINT point) {
+        const auto mask = spec_.explicit_details_columns || spec_.details_columns ? spec_.details_columns : kDetailsColumnsDefault;
+        SyncVm();
+        const auto columns = renderer_.DetailsColumns(PaneBounds(), vm_.pane);
+        uint32_t visible = 0;
+        for (int i = 0; i < columns.count; ++i) visible |= 1u << static_cast<unsigned>(columns.kinds[i]);
+        const int command = TrackAt(point, app::BuildDetailsColumnMenu(mask, visible));
+        if (done_) return;
+        const auto next = app::ApplyDetailsColumnCommand(mask, command);
+        if (next != mask) {
+            spec_.details_columns = next;
+            spec_.explicit_details_columns = true;
+            renderer_.SetDetailsColumns(next);
+            Relayout(); Invalidate();
+        }
+    }
+
     void ShowRowMenu(int index, POINT client) {
         if (index < 0 || index >= static_cast<int>(entries_.size())) return;
         if (selected_set_.find(index) == selected_set_.end()) Select(index);
         const PickerEntry entry = entries_[static_cast<size_t>(index)];
         const bool container = entry.kind == PickerEntryKind::Folder || entry.kind == PickerEntryKind::Drive;
+        const auto chosen_places = SelectedPlaces();
+        const bool all_starred = !chosen_places.empty() && std::all_of(chosen_places.begin(), chosen_places.end(), [&](const auto& item) {
+            return std::any_of(pulse_places_.starred_items.begin(), pulse_places_.starred_items.end(), [&](const auto& star) { return SamePickerPath(star.path, item.path); });
+        });
         std::vector<FluentMenuItem> items;
         items.push_back(Item(1, container ? l10n::Get(l10n::StringId::Open).c_str()
                                           : l10n::Get(l10n::StringId::PickerSelect).c_str(),
@@ -2425,6 +3213,10 @@ private:
         items.back().shortcut = L"F2";
         items.back().separator_after = true;
         items.push_back(Item(3, l10n::Get(l10n::StringId::CopyPath).c_str(), L"\xE8C8"));
+        items.back().shortcut = L"Ctrl+Shift+C";
+        items.push_back(Item(20, l10n::Get(all_starred ? l10n::StringId::Unstar : l10n::StringId::Star).c_str(), L"\xE734", pulse_places_.shared_available));
+        if (container && chosen_places.size() == 1)
+            items.push_back(Item(21, l10n::Get(l10n::StringId::PinWorkspace).c_str(), L"\xE8F1", pulse_places_.shared_available));
         if (entry.kind != PickerEntryKind::Drive)
             items.push_back(Item(4, l10n::Get(l10n::StringId::Delete).c_str(), L"\xE74D"));
         items.back().separator_after = true;
@@ -2440,13 +3232,21 @@ private:
             SHOpenWithDialog(hwnd_, &info);
             break;
         }
-        case 3: CopyTextToClipboard(hwnd_, path::FriendlyPathText(entry.path)); break;
+        case 3: CopySelectionPaths(); break;
         case 4: DeleteSelection(); break;
         case 5: SHObjectProperties(hwnd_, SHOP_FILEPATH, entry.path.c_str(), nullptr); break;
         case 6: CopySelection(true); break;
         case 7: CopySelection(false); break;
         case 8: Paste(); break;
         case 9: RenameSelection(); break;
+        case 20:
+            if (all_starred) {
+                std::vector<std::wstring> paths;
+                for (const auto& item : chosen_places) paths.push_back(item.path);
+                ManagePlaces({picker_places::ManagePlacesAction::Remove, std::move(paths), {}, {}});
+            } else AddFavorites(chosen_places);
+            break;
+        case 21: ManagePlaces({picker_places::ManagePlacesAction::PinWorkspace, {entry.path}, {}, {}}); break;
         }
     }
 
@@ -2457,17 +3257,56 @@ private:
         items.back().separator_after = true;
         items.push_back(Item(1, l10n::Get(l10n::StringId::NewFolder).c_str(), L"\xE8F4",
                              !current_.empty() && !waiting_));
+        items.push_back(Item(24, l10n::Get(l10n::StringId::NewTextDocument).c_str(), L"\xE8A5", !current_.empty() && !waiting_));
         items.push_back(Item(2, l10n::Get(l10n::StringId::Refresh).c_str(), L"\xE72C"));
         items.back().separator_after = true;
         items.push_back(SortMenu());
         items.push_back(HiddenItem(3));
+        items.push_back(Item(20, l10n::Get(l10n::StringId::FavoritesStarHere).c_str(), L"\xE734", pulse_places_.shared_available && !current_.empty()));
+        items.push_back(Item(21, l10n::Get(l10n::StringId::PinWorkspace).c_str(), L"\xE8F1", pulse_places_.shared_available && !current_.empty()));
+        items.push_back(Item(22, l10n::Get(l10n::StringId::CopyPath).c_str(), L"\xE8C8", !current_.empty()));
+        items.push_back(Item(23, l10n::Get(l10n::StringId::Undo).c_str(), L"\xE7A7", operation_session_.CanUndo() && !operating_));
+        items.back().shortcut = L"Ctrl+Z";
         const int command = TrackAt(client, std::move(items));
         if (done_ || command <= 0) return;
         if (command == 1) NewFolder();
+        else if (command == 24) NewItem(false);
         else if (command == 2) Reload();
         else if (command == 3) ToggleHidden();
         else if (command == 4) Paste();
+        else if (command == 20) AddFavorites({{current_, 2, {}}});
+        else if (command == 21) ManagePlaces({picker_places::ManagePlacesAction::PinWorkspace, {current_}, {}, {}});
+        else if (command == 22) CopyTextToClipboard(hwnd_, path::FriendlyPathText(current_));
+        else if (command == 23) UndoOperation();
         else HandleSortCommand(command);
+    }
+
+    void CopySelectionPaths() {
+        std::wstring text;
+        for (const auto& item : SelectedPlaces()) {
+            if (!text.empty()) text += L"\r\n";
+            text += path::FriendlyPathText(item.path);
+        }
+        if (text.empty()) text = path::FriendlyPathText(current_);
+        if (!text.empty()) CopyTextToClipboard(hwnd_, text);
+    }
+
+    void UndoOperation() {
+        if (operating_ || waiting_ || validating_ || !operation_session_.CanUndo()) return;
+        operating_ = true;
+        const auto result = operation_session_.Undo(hwnd_, dark_, accent_);
+        operating_ = false;
+        if (done_) return;
+        bool removed_current = false;
+        for (const auto& completion : result.completed) {
+            if (completion.type != ops::OpType::RecycleDelete && completion.type != ops::OpType::RealDelete) continue;
+            for (const auto& source : completion.sources) removed_current |= SamePickerPath(source, current_);
+        }
+        if (removed_current) Navigate(PickerParent(current_), true);
+        else Reload();
+        reload_notice_ = result.error;
+        chrome_.notice = result.error;
+        FocusList();
     }
 
     std::vector<std::wstring> OperationPaths() const {
@@ -2483,6 +3322,7 @@ private:
     }
 
     void CopySelection(bool cut) {
+        if (picker_shell::IsParsingName(current_)) return;
         if (waiting_ || validating_ || operating_) return;
         const auto paths = OperationPaths();
         if (paths.empty()) return;
@@ -2501,32 +3341,43 @@ private:
     }
 
     bool CanPaste() const {
-        return !current_.empty() && current_verified_ && !waiting_ && !validating_ && !operating_ &&
+        return !current_.empty() && !picker_shell::IsParsingName(current_) && current_verified_ && !waiting_ && !validating_ && !operating_ &&
                IsClipboardFormatAvailable(CF_HDROP);
     }
 
-    void ExecuteOperation(ops::OpRequest request, const ops::ClipboardData* clipboard = nullptr) {
+    void ExecuteOperation(ops::OpRequest request, const ops::ClipboardData* clipboard = nullptr, bool unique_create = false) {
         if (operating_ || done_) return;
+        const bool create_item = request.type == ops::OpType::CreateFolder || request.type == ops::OpType::CreateTextFile;
+        const auto operation_parent = current_;
+        const auto operation_generation = generation_;
         operating_ = true;
-        const auto result = RunPickerOperation(hwnd_, std::move(request), dark_, accent_);
+        const auto result = operation_session_.Run(hwnd_, std::move(request), dark_, accent_, unique_create);
         operating_ = false;
         if (done_) return;
-        std::wstring destination;
+        std::vector<std::wstring> destinations;
+        uint64_t create_task = 0;
         std::vector<std::wstring> moved;
         for (const auto& completion : result.completed) {
             if (completion.refresh_only) continue;
             if (completion.type == ops::OpType::Move)
                 moved.insert(moved.end(), completion.sources.begin(), completion.sources.end());
-            if (!completion.destinations.empty()) destination = completion.destinations.front();
+            for (const auto& path : completion.destinations)
+                if (SamePickerPath(PickerParent(path), operation_parent)) destinations.push_back(path);
+            if (create_item && !destinations.empty()) create_task = completion.task_id;
         }
         if (clipboard && clipboard->cut && std::all_of(clipboard->paths.begin(), clipboard->paths.end(),
             [&](const auto& source) {
                 return std::any_of(moved.begin(), moved.end(), [&](const auto& p) { return SamePickerPath(source, p); });
             }))
             ops::CompleteCutClipboard(clipboard->sequence, clipboard->paths);
-        if (!destination.empty()) ClearSelection();
+        if (generation_ != operation_generation || !SamePickerPath(current_, operation_parent)) return;
+        if (!destinations.empty()) ClearSelection();
         Reload();
-        if (!destination.empty()) select_after_ = destination;
+        select_after_paths_ = destinations;
+        if (create_item && create_task && !destinations.empty()) {
+            app::QueueCreateRenameIntent(create_rename_intents_, create_task, current_, generation_);
+            app::CompleteCreateRenameIntent(create_rename_intents_, create_task, current_, generation_, destinations.front());
+        }
         reload_notice_ = result.error;
         chrome_.notice = result.error;
         FocusList();
@@ -2547,29 +3398,71 @@ private:
         ExecuteOperation(std::move(request), &clipboard);
     }
 
+    void PlaceRenameEdit() {
+        if (!rename_edit_ || rename_path_.empty() || rename_index_ < 0) return;
+        SyncVm();
+        auto field = renderer_.RenameFieldRect(vm_.pane, renderer_.PaneListRect(vm_.pane, PaneBounds()), rename_index_);
+        const bool wraps = view_mode_ == ViewMode::MediumIcons || view_mode_ == ViewMode::LargeIcons || view_mode_ == ViewMode::ExtraLargeIcons;
+        if (wraps) SetPropW(rename_edit_, L"Pulse.EditWrap", reinterpret_cast<HANDLE>(1));
+        else RemovePropW(rename_edit_, L"Pulse.EditWrap");
+        // Like the main window, native EDIT stays single-line; the shared
+        // presenter owns icon-grid wrapping and maps selection to those lines.
+        const float wrap_width = field.right - field.left - 6 * scale_ - 4;
+        if (wraps && wrap_width > 1)
+            SetPropW(rename_edit_, L"Pulse.EditWrapW", reinterpret_cast<HANDLE>(static_cast<UINT_PTR>(std::lround(wrap_width * 64))));
+        else RemovePropW(rename_edit_, L"Pulse.EditWrapW");
+        const HFONT font = wraps ? rename_font_ : font_;
+        if (font && reinterpret_cast<HFONT>(SendMessageW(rename_edit_, WM_GETFONT, 0, 0)) != font)
+            SendMessageW(rename_edit_, WM_SETFONT, reinterpret_cast<WPARAM>(font), FALSE);
+        const float inset = 3 * scale_;
+        SetWindowPos(rename_edit_, HWND_TOP, static_cast<int>(field.left + inset), static_cast<int>(field.top + 2 * scale_),
+            std::max(24, static_cast<int>(field.right - field.left - 2 * inset)),
+            std::max(18, static_cast<int>(field.bottom - field.top - 4 * scale_)), SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+
+    void EndRename(bool commit) {
+        if (rename_path_.empty()) return;
+        const auto path = rename_path_;
+        const auto name = rename_edit_ ? ReadEdit(rename_edit_) : std::wstring();
+        const bool current = rename_generation_ == generation_ && SamePickerPath(PickerParent(path), current_);
+        if (commit && current && (name.empty() || !IsPickerFolderName(name))) {
+            chrome_.notice = ErrorText(ERROR_INVALID_NAME, name);
+            Invalidate();
+            return;
+        }
+        const bool owned_focus = rename_edit_ && GetFocus() == rename_edit_;
+        rename_path_.clear();
+        rename_index_ = -1;
+        ++rename_serial_;
+        if (rename_edit_) ShowWindow(rename_edit_, SW_HIDE);
+        if (owned_focus && !done_) FocusList();
+        if (!commit || !current || name == PickerLeafName(path)) { Invalidate(); return; }
+        ops::OpRequest request;
+        request.type = ops::OpType::Rename;
+        request.sources = {path}; request.new_name = name;
+        ExecuteOperation(std::move(request));
+    }
+
     void RenameSelection() {
+        if (picker_shell::IsParsingName(current_)) return;
         if (waiting_ || validating_ || operating_ || selected_set_.size() != 1) return;
         const auto paths = OperationPaths();
         if (paths.size() != 1) return;
-        const std::wstring name = PickerLeafName(paths.front());
-        menu_.SetTheme(dark_, accent_);
-        menu_.SetInitialFilterText(name);
-        menu_.SetSelectAllOnOpen(true);
-        menu_.SetFilterPlaceholder(l10n::Get(l10n::StringId::NewName).c_str());
-        auto rows = [](const std::wstring& value) {
-            return std::vector<FluentMenuItem>{Item(1, l10n::Get(l10n::StringId::Rename).c_str(), L"\xE8AC", !value.empty())};
-        };
-        SyncVm();
-        const auto anchor = ScreenRect(renderer_.ItemRectInPane(vm_.pane, PaneBounds(), *selected_set_.begin()));
-        const int command = TrackPickerPopup({anchor.left, anchor.bottom}, rows(name), rows);
-        if (done_ || (command != 1 && !menu_.LastFilterCommitted())) return;
-        const auto new_name = menu_.LastFilterQuery();
-        if (new_name.empty() || new_name == name) return;
-        ops::OpRequest request;
-        request.type = ops::OpType::Rename;
-        request.sources = paths;
-        request.new_name = new_name;
-        ExecuteOperation(std::move(request));
+        EndRename(false);
+        EnsureVisible(selected_);
+        if (!rename_edit_) rename_edit_ = MakeEdit(104, L"");
+        if (!rename_edit_) return;
+        rename_path_ = paths.front(); rename_index_ = selected_; rename_generation_ = generation_; ++rename_serial_;
+        const auto name = PickerLeafName(rename_path_);
+        SetWindowTextW(rename_edit_, name.c_str());
+        PlaceRenameEdit();
+        SetFocus(rename_edit_);
+        const bool folder = SelectedEntry() && SelectedEntry()->kind == PickerEntryKind::Folder;
+        if (!folder) SetPropW(rename_edit_, L"Pulse.EditDimExt", reinterpret_cast<HANDLE>(1));
+        else RemovePropW(rename_edit_, L"Pulse.EditDimExt");
+        const auto dot = name.find_last_of(L'.');
+        SendMessageW(rename_edit_, EM_SETSEL, 0, !folder && dot != std::wstring::npos && dot > 0 ? static_cast<LPARAM>(dot) : -1);
+        Invalidate();
     }
 
     void ShowSearchSetting(HitTestResult::Region region) {
@@ -2584,53 +3477,42 @@ private:
         TrackPickerDropdown(ScreenRect(scope ? layout.scope : mode ? layout.mode : layout.options), std::move(items));
     }
 
-    // Deletes to the Recycle Bin with the shell's own confirmation and progress.
-    void DeleteSelection() {
-        std::wstring list;
-        for (int i : selected_set_) {
-            if (i < 0 || i >= static_cast<int>(entries_.size())) continue;
-            const PickerEntry& entry = entries_[static_cast<size_t>(i)];
-            if (entry.kind == PickerEntryKind::Drive) continue;
-            list += entry.path;
-            list.push_back(L'\0');
-        }
-        if (list.empty()) return;
-        list.push_back(L'\0');
-        SHFILEOPSTRUCTW op{};
-        op.hwnd = hwnd_;
-        op.wFunc = FO_DELETE;
-        op.pFrom = list.c_str();
-        op.fFlags = FOF_ALLOWUNDO;
-        SHFileOperationW(&op);
-        if (!done_) { ClearSelection(); Reload(); }
+    void DeleteSelection(bool permanent = false) {
+        if (picker_shell::IsParsingName(current_)) return;
+        if (waiting_ || validating_ || operating_) return;
+        const auto paths = OperationPaths();
+        if (paths.empty()) return;
+        ConfirmDialogSpec confirm;
+        confirm.title = l10n::Get(permanent ? l10n::StringId::PermanentlyDelete : l10n::StringId::Delete);
+        confirm.confirm_text = confirm.title;
+        confirm.cancel_text = l10n::Get(l10n::StringId::Cancel);
+        wchar_t message[256]{};
+        swprintf_s(message, l10n::Get(permanent ? l10n::StringId::PermanentDeleteManyFormat : l10n::StringId::RecycleConfirmManyFormat).c_str(), paths.size());
+        confirm.message = message;
+        confirm.danger = permanent;
+        confirm.default_choice = ConfirmChoice::Cancel;
+        confirm.cancel_event = spec_.cancel_event;
+        confirm.items_total = paths.size();
+        for (size_t i = 0; i < std::min<size_t>(paths.size(), 5); ++i) confirm.items.push_back(PickerLeafName(paths[i]));
+        if (!ShowConfirmDialog(hwnd_, confirm, dark_, accent_) || done_) return;
+        ops::OpRequest request;
+        request.type = permanent ? ops::OpType::RealDelete : ops::OpType::RecycleDelete;
+        request.sources = paths;
+        ExecuteOperation(std::move(request));
     }
 
-    void NewFolder() {
-        if (current_.empty() || waiting_ || validating_ || !loader_) return;
-        menu_.SetTheme(dark_, accent_);
-        menu_.SetInitialFilterText(l10n::Get(l10n::StringId::NewFolder).c_str());
-        menu_.SetSelectAllOnOpen(true);
-        menu_.SetFilterPlaceholder(l10n::Get(l10n::StringId::FolderName).c_str());
-        auto rows = [](const std::wstring& name) {
-            FluentMenuItem item;
-            item.command = 1;
-            item.text = l10n::Get(l10n::StringId::CreateFolder).c_str();
-            item.enabled = !name.empty();
-            return std::vector<FluentMenuItem>{std::move(item)};
-        };
-        // Anchored under the pane's view button, where the command lives.
-        const D2D1_RECT_F anchor = renderer_.PaneViewButtonRect(PaneBounds());
-        const RECT screen = ScreenRect(anchor);
-        const int picked = TrackPickerPopup({screen.left, screen.bottom}, rows(L"New folder"), rows);
-        if (done_ || (picked != 1 && !menu_.LastFilterCommitted())) return;
-        const auto name = menu_.LastFilterQuery();
-        if (name.empty()) return;
-        validation_navigation_only_ = false;
-        validating_ = true;
-        chrome_.notice = l10n::Get(l10n::StringId::CreatingFolder).c_str();
-        UpdateChosen();
-        loader_->CreateFolder(++generation_, current_, name);
-        Invalidate();
+    void NewFolder() { NewItem(true); }
+
+    void NewItem(bool folder) {
+        if (picker_shell::IsParsingName(current_)) return;
+        if (current_.empty() || waiting_ || validating_ || operating_ || !loader_) return;
+        EndRename(false);
+        ops::OpRequest request;
+        request.type = folder ? ops::OpType::CreateFolder : ops::OpType::CreateTextFile;
+        const auto name = l10n::Get(folder ? l10n::StringId::NewFolder : l10n::StringId::NewTextDocument) +
+            (folder ? L"" : L".txt");
+        request.sources = {current_ + (current_.back() == L'\\' ? L"" : L"\\") + name};
+        ExecuteOperation(std::move(request), nullptr, true);
     }
 
     // ---- focus and keys ----------------------------------------------------
@@ -2781,6 +3663,7 @@ private:
 
     void SelectAll() {
         if (!allow_multiselect_) return;
+        user_interacted_ = true;
         if (validating_) { ++generation_; validating_ = false; }
         selected_set_.clear();
         for (int i = 0; i < static_cast<int>(entries_.size()); ++i) {
@@ -2792,6 +3675,12 @@ private:
     }
 
     bool HandleKey(WPARAM key) {
+        DismissHover();
+        if (HandleViewKey(key)) return true;
+        if (marquee_.pending || marquee_.active) {
+            if (key == VK_ESCAPE) EndMarquee(true);
+            return true;
+        }
         if (key == 'G' && (GetKeyState(VK_CONTROL) & 0x8000)) {
             auto latest = picker_places::Read();
             picker_user_storage::Path parsed;
@@ -2835,6 +3724,10 @@ private:
             return true;
         case VK_TAB: MoveFocus(shift ? -1 : 1); return true;
         case VK_RETURN:
+            if (KeyDown(VK_MENU) && focus_ == kPickList && SelectedEntry()) {
+                SHObjectProperties(hwnd_, SHOP_FILEPATH, SelectedEntry()->path.c_str(), nullptr);
+                return true;
+            }
             if (focus_ != kPickList) Activate(focus_);
             else EnterOnList();
             return true;
@@ -2860,13 +3753,15 @@ private:
         case VK_F4: BeginAddressEdit(); return true;
         case VK_F3: BeginSearch(); return true;
         case VK_F2: if (focus_ == kPickList) RenameSelection(); return true;
-        case VK_DELETE: if (focus_ == kPickList) DeleteSelection(); return true;
+        case VK_F7: NewFolder(); return true;
+        case VK_DELETE: if (focus_ == kPickList) DeleteSelection(shift); return true;
+        case VK_F10: if (!shift) break; [[fallthrough]];
         case VK_APPS: {
             if (selected_ >= 0) {
                 SyncVm();
                 const D2D1_RECT_F item = renderer_.ItemRectInPane(vm_.pane, PaneBounds(), selected_);
                 ShowRowMenu(selected_, {static_cast<LONG>(item.left + 24.0f * scale_), static_cast<LONG>(item.bottom)});
-            }
+            } else { const auto pane = PaneBounds(); ShowBlankMenu({static_cast<LONG>(pane.left + 24 * scale_), static_cast<LONG>(pane.top + 64 * scale_)}); }
             return true;
         }
         case 'L': if (ctrl) { BeginAddressEdit(); return true; } break;
@@ -2874,7 +3769,8 @@ private:
         case 'K': if (ctrl) { BeginSearch(); return true; } break;
         case 'E': if (ctrl) { BeginSearch(); return true; } break;
         case 'A': if (ctrl) { SelectAll(); return true; } break;
-        case 'C': if (ctrl && focus_ == kPickList) { CopySelection(false); return true; } break;
+        case 'C': if (ctrl && focus_ == kPickList) { if (shift) CopySelectionPaths(); else CopySelection(false); return true; } break;
+        case 'Z': if (ctrl && focus_ == kPickList) { UndoOperation(); return true; } break;
         case 'X': if (ctrl && focus_ == kPickList) { CopySelection(true); return true; } break;
         case 'V': if (ctrl && focus_ == kPickList) { Paste(); return true; } break;
         case 'N': if (ctrl && shift) { NewFolder(); return true; } break;
@@ -2902,6 +3798,26 @@ private:
     }
 
     // ---- mouse -------------------------------------------------------------
+
+    void CancelBlankClick() {
+        blank_click_.Reset();
+        const bool captured = std::exchange(blank_capture_, false);
+        if (captured && GetCapture() == hwnd_) ReleaseCapture();
+    }
+
+    bool BlankListHit(const Hit& hit, float x, float y) {
+        return hit.chrome == kPickNone &&
+            (hit.main.region == HitTestResult::Pane || hit.main.region == HitTestResult::None) &&
+            ContainsRect(renderer_.PaneListRect(vm_.pane, PaneBounds()), x, y);
+    }
+
+    void RunBlankDoubleClick() {
+        switch (PickerBlankNavigation(spec_.blank_click_action, history_.CanGoBack(), !current_.empty())) {
+        case PickerBlankAction::Back: GoBack(); break;
+        case PickerBlankAction::Up: GoUp(); break;
+        default: break;
+        }
+    }
 
     void PressMain(const HitTestResult& hit, float x, float y, bool double_click) {
         using R = HitTestResult;
@@ -2940,12 +3856,23 @@ private:
             if (double_click) OpenEntry(hit.index);
             return;
         case R::ColumnHeader: {
+            if (hit.sub_index == static_cast<int>(MainRenderer::ColumnKind::Status)) return;   // display-only
             const PickerSort sort = SortFromColumn(hit.column);
             if (options_.sort == sort) options_.descending = !options_.descending;
             else { options_.sort = sort; options_.descending = false; }
             Reload();
             return;
         }
+        case R::ColumnDivider:
+            if (double_click) {
+                std::array<float,4> search{};
+                renderer_.AutoFitColumnDivider(PaneBounds(),layout_settings_.column_widths,false,search,hit.index,vm_.pane.cloud_status_column);
+                Relayout();
+            } else {
+                column_resizing_=hit.index;
+                SetCapture(hwnd_);
+            }
+            return;
         case R::Scrollbar:
             if (hit.sub_index == 1) return;  // the picker never scrolls sideways
             BeginScrollbarDrag(hit, y);
@@ -2960,7 +3887,8 @@ private:
             return;
         case R::PaneEmptyNewFolder: NewFolder(); return;
         case R::SidebarItem:
-            if (!hit.path.empty()) Navigate(hit.path, true);
+        case R::SidebarItemExpand:
+            OpenSharedPlace(hit.path);
             return;
         case R::SidebarHeader:
             if (hit.index >= 0 && hit.index < static_cast<int>(vm_.sidebar.size())) {
@@ -3002,6 +3930,64 @@ private:
             return 0;
         }
         switch (message) {
+        case kPickerDropMessage: {
+            if (ole_drag_out_) return 0;
+            auto request = std::move(queued_drop_);
+            if (request && !done_) ExecuteOperation(std::move(*request));
+            return 0;
+        }
+#ifdef PULSE_WITH_TEST_HOOKS
+        case kPickerOleTestMessage: {
+            auto* query = reinterpret_cast<PickerOleTestDrop*>(lparam);
+            auto* target = ole_drop_.TestTarget();
+            if (!query || !query->source || !target) return FALSE;
+            auto* data = FileDataObject::Create({query->source});
+            if (!data) return FALSE;
+            POINT point = query->point;
+            ClientToScreen(hwnd_, &point);
+            DWORD effect = DROPEFFECT_COPY;
+            const POINTL screen{point.x, point.y};
+            const HRESULT entered = target->DragEnter(data, MK_CONTROL, screen, &effect);
+            HRESULT dropped = E_FAIL;
+            if (SUCCEEDED(entered) && effect) dropped = target->Drop(data, MK_CONTROL, screen, &effect);
+            else target->DragLeave();
+            query->effect = effect;
+            data->Release();
+            return SUCCEEDED(dropped);
+        }
+        case kPickerPlacesTestPointMessage: {
+            auto* query = reinterpret_cast<PickerPlacesTestPoint*>(lparam);
+            if (!query || waiting_ || !initial_show_allowed_) return FALSE;
+            SyncVm();
+            if (query->kind == PickerPlacesTestPoint::Kind::Row) {
+                for (size_t i = 0; i < entries_.size(); ++i) if (query->path && SamePickerPath(entries_[i].path, query->path)) {
+                    const auto cell = renderer_.ItemRectInPane(vm_.pane, PaneBounds(), static_cast<int>(i));
+                    const float y = (cell.top + cell.bottom) / 2;
+                    for (float x = cell.left; x < cell.right; x += 2) {
+                        if (renderer_.PointInItemName(vm_.pane, PaneBounds(), static_cast<int>(i), x, y)) {
+                            query->point = {static_cast<LONG>(x + 2), static_cast<LONG>(y)}; return TRUE;
+                        }
+                    }
+                }
+                return FALSE;
+            }
+            const auto sidebar = renderer_.SidebarRect(RendererWidth(), Height());
+            const float maximum = renderer_.SidebarMaxScroll(vm_, RendererWidth(), Height());
+            for (float scroll = 0;; scroll = std::min(maximum, scroll + 80 * scale_)) {
+                vm_.sidebar_scroll = scroll;
+                for (float y = sidebar.top; y < std::min(sidebar.bottom, chrome_layout_.footer.top); y += 3) {
+                    const float x = (sidebar.left + sidebar.right) / 2;
+                    const auto hit = renderer_.HitTest(vm_, RendererRect(), x, y);
+                    const bool matched = query->kind == PickerPlacesTestPoint::Kind::FavoriteHeader
+                        ? hit.region == HitTestResult::SidebarHeader && hit.index >= 0 && hit.index < static_cast<int>(vm_.sidebar.size()) && vm_.sidebar[hit.index].id == kPickerFavoritesSection
+                        : hit.region == HitTestResult::SidebarItem && query->path && SamePickerPath(hit.path, query->path);
+                    if (matched) { query->point = {static_cast<LONG>(x), static_cast<LONG>(y + 2)}; Invalidate(); return TRUE; }
+                }
+                if (scroll >= maximum) break;
+            }
+            return FALSE;
+        }
+#endif
         case WM_CREATE: {
             scale_ = static_cast<float>(pulse::compat::WindowDpi(hwnd_)) / 96.0f;
             backdrop_enabled_ = ApplyBackdrop(hwnd_, dark_);
@@ -3019,6 +4005,7 @@ private:
             renderer_.SetCompositor(&compositor_);
             renderer_.SetScale(scale_);
             renderer_.SetIconNotifyWindow(hwnd_);
+            frame_pump_.Start(hwnd_, kPickerFrameMessage);
             ApplyRendererSettings();
             CreateFonts();
             edit_brush_ = CreateSolidBrush(dark_ ? RGB(30, 30, 30) : RGB(255, 255, 255));
@@ -3034,6 +4021,8 @@ private:
             menu_.Create(hwnd_, &compositor_, scale_);
             menu_.SetTheme(dark_, accent_);
             Relayout();
+            SetTimer(hwnd_, kSharedPlacesTimer, 1000, nullptr);
+            RegisterPickerDrop();
             return 0;
         }
         case WM_WINDOWPOSCHANGING:
@@ -3050,6 +4039,15 @@ private:
             info->ptMinTrackSize.y = static_cast<LONG>(kMinHeight * scale_);
             return 0;
         }
+        case kDetailsPreviewNavigateMessage:
+            if (const int next = selected_ + static_cast<int>(wparam); next >= 0 && next < static_cast<int>(entries_.size())) Select(next);
+            return 0;
+        case kDetailsPreviewOpenMessage: {
+            const auto path = details_preview_.TakeOpenPath();
+            if (!path.empty()) { user_interacted_ = true; ValidateNames({path}); }
+            else OpenEntry(selected_);
+            return 0;
+        }
         case WM_SIZE:
             if (compositor_.Dc()) compositor_.Resize(LOWORD(lparam), HIWORD(lparam));
             Relayout();
@@ -3058,6 +4056,12 @@ private:
         case WM_MOVE:
             compositor_.UpdateTextRenderingParams(MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST));
             PlaceEdits();
+            SyncDetailsPreview();
+            return 0;
+        case WM_SETTINGCHANGE:
+        case WM_THEMECHANGED:
+            RefreshHighContrast();
+            InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         case WM_DPICHANGED: {
             scale_ = HIWORD(wparam) / 96.0f;
@@ -3076,6 +4080,7 @@ private:
             return 0;
         }
         case WM_ACTIVATE:
+            if (LOWORD(wparam) == WA_INACTIVE) DismissHover();
             Invalidate();
             break;
         case WM_CTLCOLOREDIT: {
@@ -3109,10 +4114,97 @@ private:
                 Navigate(std::move(request.path), request.history, std::move(request.selection), request.verified);
             }
             return 0;
+        case kEndRenameMessage:
+            if (wparam == rename_serial_) EndRename(true);
+            return 0;
         case kEndAddressMessage:
             if (address_editing_ && GetFocus() != path_edit_) EndAddressEdit(false);
             return 0;
+#ifdef PULSE_WITH_TEST_HOOKS
+        case kPickerInteractionTestMessage: {
+            auto* request = reinterpret_cast<PickerInteractionTest*>(lparam);
+            if (!request) return FALSE;
+            if (request->command == 24) NewItem(false);
+            if (request->key) {
+                BYTE before[256]{}; GetKeyboardState(before);
+                BYTE keys[256]{};
+                keys[VK_CONTROL] = request->ctrl ? 0x80 : 0;
+                keys[VK_SHIFT] = request->shift ? 0x80 : 0;
+                SetKeyboardState(keys);
+                HWND target = request->edit_id ? GetDlgItem(hwnd_, request->edit_id) : hwnd_;
+                SendMessageW(target, WM_KEYDOWN, request->key, 0);
+                SetKeyboardState(before);
+            }
+            SyncVm();
+            request->ready = !waiting_ && !entries_.empty();
+            request->current = current_;
+            request->selected_paths = OperationPaths();
+            request->rename_edit = !rename_path_.empty() && rename_edit_ && IsWindowVisible(rename_edit_) ? rename_edit_ : nullptr;
+            request->selected_visible = false;
+            if (selected_ >= 0) {
+                const auto row = renderer_.ItemRectInPane(vm_.pane, PaneBounds(), selected_);
+                const auto list = renderer_.PaneListRect(vm_.pane, PaneBounds());
+                request->selected_visible = row.top >= list.top && row.bottom <= list.bottom;
+            }
+            request->blank_ready = false;
+            const auto blank_list = renderer_.PaneListRect(vm_.pane, PaneBounds());
+            for (float y = blank_list.bottom - 12; y > blank_list.top && !request->blank_ready; y -= 12) {
+                const float x = blank_list.right - 24;
+                if (BlankListHit(HitAt(x, y), x, y)) {
+                    request->blank = {static_cast<LONG>(x), static_cast<LONG>(y)};
+                    request->blank_ready = !waiting_;
+                }
+            }
+            request->mode = static_cast<int>(view_mode_);
+            request->dip = IconDip(view_mode_, icon_dip_, scale_);
+            request->visible = hover_preview_.view.visible;
+            request->listing_ready = hover_preview_.view.listing &&
+                hover_preview_.view.listing->state == HoverFolderInfo::State::Ready;
+            for (size_t i = 0; i < entries_.size(); ++i) {
+                if ((entries_[i].kind == PickerEntryKind::Folder) != request->folder) continue;
+                const auto rect = renderer_.ItemRectInPane(vm_.pane, PaneBounds(), static_cast<int>(i));
+                request->item = {static_cast<LONG>(rect.left + 40 * scale_), static_cast<LONG>((rect.top + rect.bottom) / 2)};
+                request->screen_item = request->item; ClientToScreen(hwnd_, &request->screen_item);
+                break;
+            }
+            const auto card = renderer_.HoverCardRect();
+            request->card = {static_cast<LONG>(card.left), static_cast<LONG>(card.top), static_cast<LONG>(card.right), static_cast<LONG>(card.bottom)};
+            request->footer = {0, static_cast<LONG>(chrome_layout_.footer.top), static_cast<LONG>(Width()), static_cast<LONG>(Height())};
+            return TRUE;
+        }
+        case kPickerViewSwitchTestMessage: {
+            auto* request = reinterpret_cast<PickerViewSwitchTest*>(lparam);
+            if (!request) return FALSE;
+            if (request->begin) {
+                frame_pump_.Disarm();
+                KillTimer(hwnd_, kMotionTimer);
+                view_switch_test_ = *request;
+                view_switch_test_.count = 0;
+                SetViewMode(static_cast<ViewMode>(request->mode));
+            }
+            *request = view_switch_test_;
+            request->ready = !waiting_ && !entries_.empty();
+            return TRUE;
+        }
+#endif
+        case kPickerFrameMessage:
+            frame_pump_.FrameConsumed();
+            if (done_ || !IsWindowVisible(hwnd_) || IsIconic(hwnd_)) {
+                frame_pump_.Disarm();
+                return 0;
+            }
+            Invalidate();
+            // Like the main window, paint on the compositor clock while giving
+            // queued input precedence over animation frames.
+            if (!rendering_frame_ && HIWORD(GetQueueStatus(QS_INPUT)) == 0) UpdateWindow(hwnd_);
+            return 0;
+        case kHoverListingMessage:
+            hover_preview_.Receive(PickerLoader::Take(lparam));
+            Invalidate(); return 0;
         case WM_TIMER:
+            if (wparam == kHoverTimer) { HoverTick(); return 0; }
+            if (wparam == kSharedPlacesTimer) { RefreshSharedPlaces(); return 0; }
+            if (wparam == kMarqueeTimer) { UpdateMarquee(marquee_.cursor.x, marquee_.cursor.y, true); return 0; }
             if (wparam == kSearchTimer) { ApplySearchNow(); return 0; }
             if (wparam == kMotionTimer) { Invalidate(); return 0; }
             if (wparam == kLoadTimer) {
@@ -3132,11 +4224,23 @@ private:
             OnValidation(PickerLoader::TakeValidation(lparam));
             return 0;
         case WM_MOUSEMOVE: {
+            blank_click_.Move(GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam),
+                GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG));
+            if (places_drag_.pending || places_drag_.active) {
+                MovePlacesDrag(POINT{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)}, static_cast<DWORD>(wparam)); return 0;
+            }
+            if (marquee_.pending || marquee_.active) {
+                UpdateMarquee(static_cast<float>(GET_X_LPARAM(lparam)), static_cast<float>(GET_Y_LPARAM(lparam))); return 0;
+            }
+            if (sidebar_resizing_ || column_resizing_>=0) { ResizeLayout(static_cast<float>(GET_X_LPARAM(lparam))); return 0; }
             if (custom_bar_drag_) { DragCustomScrollbar(static_cast<float>(GET_Y_LPARAM(lparam))); return 0; }
             if (dragging_scrollbar_) {
                 DragScrollbar(static_cast<float>(GET_Y_LPARAM(lparam)));
                 return 0;
             }
+            hover_point_ = {GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+            if (hover_preview_.view.visible && hover_preview_.view.folder &&
+                ContainsRect(renderer_.HoverCardRect(), static_cast<float>(hover_point_.x), static_cast<float>(hover_point_.y))) return 0;
             UpdateHover(HitAt(lparam));
             TRACKMOUSEEVENT track{ sizeof(track), TME_LEAVE, hwnd_, 0 };
             TrackMouseEvent(&track);
@@ -3150,6 +4254,16 @@ private:
             catch (const std::bad_alloc&) { return static_cast<LRESULT>(E_OUTOFMEMORY); }
             catch (...) { return static_cast<LRESULT>(E_FAIL); }
         case WM_MOUSEWHEEL: {
+            POINT card_point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+            ScreenToClient(hwnd_, &card_point);
+            if (!(GET_KEYSTATE_WPARAM(wparam) & MK_CONTROL) && hover_preview_.view.visible && hover_preview_.view.folder &&
+                ContainsRect(renderer_.HoverCardRect(), static_cast<float>(card_point.x), static_cast<float>(card_point.y))) {
+                hover_preview_.view.folder_scroll = std::clamp(hover_preview_.view.folder_scroll -
+                    static_cast<float>(GET_WHEEL_DELTA_WPARAM(wparam)) / WHEEL_DELTA * renderer_.HoverFolderRowHeight() * 3,
+                    0.0f, renderer_.HoverFolderScrollMax());
+                Invalidate(); return 0;
+            }
+            DismissHover();
             POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)}; ScreenToClient(hwnd_, &point);
             if (!spec_.custom_controls.empty() && ContainsRect(CustomPanel(), static_cast<float>(point.x), static_cast<float>(point.y))) {
                 ScrollCustom(-static_cast<float>(GET_WHEEL_DELTA_WPARAM(wparam)) / WHEEL_DELTA * 38 * scale_); return 0;
@@ -3159,15 +4273,23 @@ private:
             return 0;
         case WM_LBUTTONDOWN:
         case WM_LBUTTONDBLCLK: {
+            DismissHover();
             const float x = static_cast<float>(GET_X_LPARAM(lparam));
             const float y = static_cast<float>(GET_Y_LPARAM(lparam));
+            const Hit blank_hit = HitAt(x, y);
+            const bool blank_press = spec_.blank_click_action != app::kBlankClickOff &&
+                !waiting_ && !validating_ && !operating_ && !searching_ &&
+                !KeyDown(VK_CONTROL) && !KeyDown(VK_SHIFT) && !KeyDown(VK_MENU) &&
+                BlankListHit(blank_hit, x, y);
+            blank_click_.Begin(blank_press, message == WM_LBUTTONDBLCLK, generation_,
+                static_cast<int>(x), static_cast<int>(y));
             const auto custom_bar = CustomScrollbar();
             if (fluent::ScrollbarHitTest(custom_bar, x, y)) {
                 const auto thumb = fluent::ScrollbarThumbRect(custom_bar, scale_);
                 custom_bar_grab_ = fluent::ScrollbarGrabOffset(thumb.top, thumb.bottom - thumb.top, y);
                 custom_bar_drag_ = true; SetCapture(hwnd_); DragCustomScrollbar(y); return 0;
             }
-            const Hit hit = HitAt(x, y);
+            const Hit& hit = blank_hit;
             chrome_.show_focus = false;
             if (hit.chrome == kPickFilename) { FocusFilename(); return 0; }
             if (hit.chrome != kPickNone) {
@@ -3177,11 +4299,65 @@ private:
                 Invalidate();
                 return 0;
             }
+            if (SidebarResizeAt(x,y)) {
+                if (message==WM_LBUTTONDBLCLK) {
+                    layout_settings_.sidebar_width=kSidebarDip;
+                    renderer_.SetSidebarWidthDip(kSidebarDip);
+                    Relayout(); Invalidate();
+                } else { sidebar_resizing_=true; SetCapture(hwnd_); }
+                return 0;
+            }
+            if (message == WM_LBUTTONDOWN && allow_multiselect_ && !waiting_ && !validating_ && !operating_ &&
+                ContainsRect(renderer_.PaneListRect(vm_.pane, PaneBounds()), x, y) &&
+                (hit.main.region == HitTestResult::Pane || hit.main.region == HitTestResult::None ||
+                 (hit.main.region == HitTestResult::Row && !renderer_.PointInItemGrip(vm_.pane, PaneBounds(), hit.main.index, x, y)))) {
+                BeginMarquee(x, y); return 0;
+            }
+            if (message == WM_LBUTTONDOWN && hit.main.region == HitTestResult::Row &&
+                !waiting_ && !validating_ && !operating_) {
+                BeginPlacesDrag(hit.main.index, POINT{static_cast<LONG>(x), static_cast<LONG>(y)});
+                return 0;
+            }
             PressMain(hit.main, x, y, message == WM_LBUTTONDBLCLK);
+            if (blank_press && !done_) { blank_capture_ = true; SetCapture(hwnd_); }
             if (!done_) Invalidate();
             return 0;
         }
         case WM_LBUTTONUP: {
+            const bool blank_capture = std::exchange(blank_capture_, false);
+            const int release_x = GET_X_LPARAM(lparam), release_y = GET_Y_LPARAM(lparam);
+            app::BlankPaneClickRelease blank_release;
+            blank_release.marquee_active = marquee_.active;
+            blank_release.owns_capture = GetCapture() == hwnd_;
+            blank_release.modified = KeyDown(VK_CONTROL) || KeyDown(VK_SHIFT) || KeyDown(VK_MENU);
+            blank_release.blank_list_hit = !waiting_ && !validating_ && !operating_ && !searching_ &&
+                BlankListHit(HitAt(lparam), static_cast<float>(release_x), static_cast<float>(release_y));
+            blank_release.drag_width = GetSystemMetrics(SM_CXDRAG);
+            blank_release.drag_height = GetSystemMetrics(SM_CYDRAG);
+            const bool blank_double = blank_click_.Release(blank_release, generation_, release_x, release_y);
+            if (places_drag_.pending || places_drag_.active) {
+                FinishPlacesDrag(POINT{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)}, static_cast<DWORD>(wparam)); return 0;
+            }
+            if (marquee_.pending || marquee_.active) {
+                const bool click = marquee_.pending;
+                const bool modified = marquee_.additive;
+                const auto hit = HitAt(lparam);
+                if (!click) UpdateMarquee(static_cast<float>(GET_X_LPARAM(lparam)), static_cast<float>(GET_Y_LPARAM(lparam)));
+                EndMarquee(false);
+                if (click) {
+                    if (hit.main.region == HitTestResult::Row) Select(hit.main.index, KeyDown(VK_SHIFT), KeyDown(VK_CONTROL));
+                    else if (!modified) ClearSelection();
+                }
+                if (blank_double) RunBlankDoubleClick();
+                Invalidate(); return 0;
+            }
+            if (blank_double) {
+                if (GetCapture() == hwnd_) ReleaseCapture();
+                RunBlankDoubleClick();
+                Invalidate(); return 0;
+            }
+            if (blank_capture && GetCapture() == hwnd_) ReleaseCapture();
+            if (sidebar_resizing_ || column_resizing_>=0) { sidebar_resizing_=false; column_resizing_=-1; ReleaseCapture(); return 0; }
             if (custom_bar_drag_) { custom_bar_drag_ = false; ReleaseCapture(); return 0; }
             if (dragging_scrollbar_) {
                 dragging_scrollbar_ = false;
@@ -3215,7 +4391,12 @@ private:
             const float y = static_cast<float>(GET_Y_LPARAM(lparam));
             const Hit hit = HitAt(x, y);
             const POINT point{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
-            if (hit.main.region == HitTestResult::BreadcrumbSegment || hit.main.region == HitTestResult::AddressBar) {
+            if (hit.main.region == HitTestResult::SidebarItem || hit.main.region == HitTestResult::SidebarItemExpand || hit.main.region == HitTestResult::SidebarHeader ||
+                hit.main.region == HitTestResult::SidebarBlank) {
+                ShowSidebarMenu(hit.main.region==HitTestResult::SidebarItem || hit.main.region==HitTestResult::SidebarItemExpand ? hit.main.path : std::wstring(),point);
+            } else if (hit.main.region == HitTestResult::ColumnHeader || hit.main.region == HitTestResult::ColumnDivider) {
+                ShowColumnMenu(point);
+            } else if (hit.main.region == HitTestResult::BreadcrumbSegment || hit.main.region == HitTestResult::AddressBar) {
                 ShowAddressMenu(hit.main.region == HitTestResult::BreadcrumbSegment ? hit.main.path : current_, point);
             } else if (hit.main.region == HitTestResult::Row && hit.main.index >= 0) {
                 focus_ = kPickList;
@@ -3227,7 +4408,31 @@ private:
             }
             return 0;
         }
+        case WM_SETCURSOR:
+            if (LOWORD(lparam)==HTCLIENT) {
+                POINT point{}; GetCursorPos(&point); ScreenToClient(hwnd_,&point);
+                const auto hit=HitAt(static_cast<float>(point.x),static_cast<float>(point.y));
+                if (sidebar_resizing_ || column_resizing_>=0 || (hit.chrome==kPickNone &&
+                    (SidebarResizeAt(static_cast<float>(point.x),static_cast<float>(point.y)) || hit.main.region==HitTestResult::ColumnDivider))) {
+                    SetCursor(LoadCursorW(nullptr,IDC_SIZEWE)); return TRUE;
+                }
+            }
+            break;
+        case WM_KILLFOCUS:
+            DismissHover();
+            break;
+        case WM_CANCELMODE:
+            CancelBlankClick();
+            DismissHover();
+            CancelPlacesDrag();
+            EndMarquee(true);
+            break;
         case WM_CAPTURECHANGED:
+            blank_capture_ = false;
+            blank_click_.CancelPress();
+            CancelPlacesDrag();
+            EndMarquee(true);
+            sidebar_resizing_=false; column_resizing_=-1;
             dragging_scrollbar_ = false;
             return 0;
         case WM_XBUTTONUP:
@@ -3235,9 +4440,13 @@ private:
             else if (GET_XBUTTON_WPARAM(wparam) == XBUTTON2) GoForward();
             return TRUE;
         case WM_KEYDOWN:
+            if (wparam == VK_ESCAPE && (places_drag_.pending || places_drag_.active)) {
+                CancelPlacesDrag(); Invalidate(); return 0;
+            }
             if (HandleKey(wparam)) return 0;
             break;
         case WM_SYSKEYDOWN:
+            if (wparam == VK_RETURN && HandleKey(wparam)) return 0;
             if (wparam == VK_UP) { GoUp(); return 0; }
             if (wparam == VK_LEFT) { GoBack(); return 0; }
             if (wparam == VK_RIGHT) { GoForward(); return 0; }
@@ -3270,6 +4479,11 @@ private:
         case WM_ERASEBKGND:
             return 1;
         case WM_DESTROY:
+            DismissHover();
+            frame_pump_.Stop();
+            ole_drop_.Revoke();
+            queued_drop_.reset();
+            SaveLayout();
             menu_.Dismiss();
             KillTimer(hwnd_, kMotionTimer);
             renderer_.SetIconNotifyWindow(nullptr);
@@ -3278,6 +4492,7 @@ private:
             }
             path_edit_ = filename_edit_ = search_edit_ = nullptr;
             if (font_) { DeleteObject(font_); font_ = nullptr; }
+            if (rename_font_) { DeleteObject(rename_font_); rename_font_ = nullptr; }
             if (edit_brush_) { DeleteObject(edit_brush_); edit_brush_ = nullptr; }
             compositor_.Shutdown();
             done_ = true;
@@ -3287,6 +4502,10 @@ private:
     }
 
     bool rendering_frame_ = false;
+    app::FramePump frame_pump_;
+#ifdef PULSE_WITH_TEST_HOOKS
+    PickerViewSwitchTest view_switch_test_;
+#endif
     uint64_t painted_frame_ = 0;
     bool initial_show_allowed_ = false;
     bool preparing_first_frame_ = false;
@@ -3307,6 +4526,7 @@ private:
     std::wstring reload_notice_;
     std::vector<std::wstring> cut_paths_;
     HFONT font_ = nullptr;
+    HFONT rename_font_ = nullptr;
     HBRUSH edit_brush_ = nullptr;
     Compositor compositor_;
     fluent::Painter painter_{&compositor_};
@@ -3322,22 +4542,55 @@ private:
     std::unique_ptr<PickerLoader> loader_;
     std::vector<PickerPlace> places_;
     std::vector<SidebarItem> drives_;
-    bool collapsed_[6] = {};
+    bool collapsed_[8] = {};
+    std::unordered_set<std::wstring> folded_favorite_groups_;
+    std::future<picker_places::Snapshot> saved_places_;
+    PickerPlacesDrag places_drag_;
+    PickerOleDrop ole_drop_;
+    std::unique_ptr<ops::OpRequest> queued_drop_;
+    bool ole_drag_out_ = false;
     picker_places::Snapshot pulse_places_;
     std::wstring current_;
     std::vector<PickerEntry> entries_;
     fs::SnapshotPtr snapshot_;
     std::unordered_set<int> selected_set_;
+    PickerMarquee marquee_;
+    PickerBlankClick blank_click_;
+    bool blank_capture_ = false;
+    PickerOperationSession operation_session_;
     int selected_ = -1;
     int anchor_ = -1;
     float scroll_ = 0.0f;
     ViewMode view_mode_ = ViewMode::Details;
+    float icon_dip_ = 0, last_icon_dip_ = 0;
+    ViewMode last_icon_mode_ = ViewMode::MediumIcons;
+    int zoom_wheel_remainder_ = 0;
+    ULONGLONG zoom_wheel_tick_ = 0;
+    PickerHoverPreview hover_preview_;
+    QuickPreviewWindow details_preview_;
+    bool user_interacted_ = false;
+    std::vector<std::wstring> create_consent_paths_, share_consent_paths_;
+    std::unordered_set<std::wstring> share_consent_targets_;
+    std::optional<SaveObjectIdentity> share_consent_save_identity_, share_consent_save_parent_;
+    ULONGLONG hover_started_ = 0;
+    POINT hover_point_{};
+    picker_layout::State layout_settings_;
+    bool persist_layout_=false, layout_shown_=false, layout_saved_=false;
+    bool sidebar_resizing_=false;
+    int column_resizing_=-1;
     std::wstring error_;
     std::wstring chosen_;
     std::wstring filename_text_;
     std::wstring search_text_;
     std::wstring fallback_;
     std::wstring select_after_;
+    std::vector<std::wstring> select_after_paths_;
+    std::vector<app::CreateRenameIntent> create_rename_intents_;
+    HWND rename_edit_ = nullptr;
+    std::wstring rename_path_;
+    int rename_index_ = -1;
+    uint64_t rename_generation_ = 0;
+    WPARAM rename_serial_ = 0;
     std::vector<std::wstring> result_;
     bool custom_bar_drag_ = false;
     float custom_bar_grab_ = 0;

@@ -43,6 +43,7 @@ struct FluentMenuSwatch {
     wchar_t mnemonic = 0;          // keyboard access key (case-insensitive), 0 = none
     std::wstring label;
     fluent::MenuPictogram pictogram = fluent::MenuPictogram::None;
+    bool custom_color = false;   // color-wheel dot that opens a custom picker
 };
 
 struct FluentMenuItem {
@@ -83,6 +84,7 @@ struct FluentMenuItem {
     bool heading = false;
     uint16_t match_start = 0;
     uint16_t match_length = 0;
+    int drag_command = 0;         // optional toolbar drag identity; never dispatched as a command
 };
 
 // Access key of a row: explicit mnemonic, else trailing "(X)" / "（X）" in text
@@ -189,6 +191,8 @@ public:
     bool SaveDebugSnapshot(const wchar_t* png_path, std::vector<FluentMenuItem> items,
                            int hover_row = -1);
 
+    int DraggedCommand() const { return dragged_command_; }
+    POINT DragPoint() const { return drag_point_; }
     bool IsOpen() const { return open_; }
     void Dismiss(); // immediate (no animation); safe anytime
     // Safe from the owner window while TrackPopup's modal loop is running
@@ -223,8 +227,11 @@ public:
     // Motion v2 "newmenu": the next popup grows out of this button (screen
     // px) - the container morphs from the button's pill, then rows fade in.
     void SetMorphFrom(RECT screen_rc) { morph_button_ = screen_rc; morph_next_ = true; }
-    // Align an ordinary selection menu below its control; cleared after use.
-    void SetDropdownRect(RECT screen_rc) { dropdown_rect_ = screen_rc; dropdown_ = true; }
+    // Align below its control, or centered above an icon; flip at screen edges.
+    // Cleared after use.
+    void SetDropdownRect(RECT screen_rc, bool prefer_above = false) {
+        dropdown_rect_ = screen_rc; dropdown_ = true; dropdown_above_ = prefer_above;
+    }
     // Position the visible card at a screen point, excluding its transparent shadow.
     static POINT CardOrigin(POINT point) { return {point.x - kShadowMargin, point.y - kShadowMargin}; }
     // Override the filter-mode minimum width (dips) for the next TrackPopup;
@@ -244,6 +251,9 @@ public:
     // and dismiss on clicks that land in windows of other threads, which the
     // modal loop cannot otherwise observe. Sticky until changed.
     void SetTopmost(bool topmost) { topmost_ = topmost; }
+    // Notification-area menus have a hidden owner: activate the popup itself
+    // and cancel when another process/window takes foreground ownership.
+    void SetActivateOnOpen(bool activate) { activate_on_open_ = activate; }
 
     // Acrylic menus (process wide, Settings > menu acrylic). Turning it on also
     // makes every Compositor keep a GPU copy of its last frame: menus blur what
@@ -351,6 +361,8 @@ private:
     bool dark_ = false;
     D2D1_COLOR_F accent_{};
 
+    int drag_row_ = -1, dragged_command_ = 0;
+    POINT drag_start_{}, drag_point_{};
     FluentMenuModel model_;
     FilterFn filter_fn_;
     std::wstring filter_query_;
@@ -369,9 +381,12 @@ private:
     bool anchor_to_rect_ = false;
     RECT dropdown_rect_{};
     bool dropdown_ = false;
+    bool dropdown_above_ = false;
     POINT popup_pt_{};
     bool top_center_ = false;
     bool topmost_ = false;
+    bool activate_on_open_ = false;
+    bool activation_confirmed_ = false;
     bool acrylic_active_ = false;  // decided when a popup opens
     HWND external_edit_ = nullptr; // borrowed; never moved, hidden or destroyed
     HWND edit_ = nullptr;

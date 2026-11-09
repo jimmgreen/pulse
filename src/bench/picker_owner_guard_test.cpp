@@ -157,6 +157,102 @@ void AttachedQueues() {
         AttachThreadInput(GetCurrentThreadId(), owner.tid, FALSE);
     }
 }
+
+struct FocusOwner {
+    HWND window = nullptr, edit = nullptr, other = nullptr;
+    bool switch_on_enable = false, switch_on_activate = false;
+    static LRESULT CALLBACK Proc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+        auto* self = reinterpret_cast<FocusOwner*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        if (message == WM_NCCREATE) {
+            self = static_cast<FocusOwner*>(reinterpret_cast<CREATESTRUCTW*>(lparam)->lpCreateParams);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+        }
+        if (self && message == WM_ENABLE && wparam && self->switch_on_enable)
+            SetForegroundWindow(self->other);
+        if (self && message == WM_ACTIVATE && LOWORD(wparam) != WA_INACTIVE && self->edit) {
+            if (self->switch_on_activate) SetForegroundWindow(self->other);
+            else SetFocus(self->edit);
+            return 0;
+        }
+        return DefWindowProcW(hwnd, message, wparam, lparam);
+    }
+    FocusOwner() {
+        WNDCLASSW wc{};
+        wc.lpfnWndProc = Proc; wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = L"Pulse.OwnerGuard.FocusRegression";
+        RegisterClassW(&wc);
+        WNDCLASSW plain{};
+        plain.lpfnWndProc = DefWindowProcW; plain.hInstance = wc.hInstance;
+        plain.lpszClassName = L"Pulse.OwnerGuard.FocusPopup";
+        RegisterClassW(&plain);
+        window = CreateWindowW(wc.lpszClassName, L"Pulse isolated owner focus test", WS_OVERLAPPEDWINDOW,
+            80, 80, 320, 180, nullptr, nullptr, wc.hInstance, this);
+        edit = CreateWindowW(L"EDIT", L"Host-selected keyboard focus", WS_CHILD | WS_VISIBLE,
+            8, 8, 250, 24, window, nullptr, wc.hInstance, nullptr);
+        other = CreateWindowW(plain.lpszClassName, L"Pulse isolated other window", WS_OVERLAPPEDWINDOW,
+            420, 80, 320, 180, nullptr, nullptr, wc.hInstance, nullptr);
+        ShowWindow(window, SW_SHOWNOACTIVATE); ShowWindow(other, SW_SHOWNOACTIVATE);
+    }
+    ~FocusOwner() { DestroyWindow(other); DestroyWindow(window); }
+};
+
+// The host's activation callback is the deterministic
+// reentrancy point; no timing sleeps or synthetic focus API stubs are used.
+void FocusRestoration(bool legacy_tail = false) {
+    FocusOwner owner;
+    Check(owner.window && owner.edit && owner.other, "create isolated owner focus windows");
+    const HWND previous_foreground = GetForegroundWindow();
+    const DWORD foreground_thread = GetWindowThreadProcessId(previous_foreground, nullptr);
+    const DWORD fixture_thread = GetCurrentThreadId();
+    const bool attached = foreground_thread && foreground_thread != fixture_thread &&
+        AttachThreadInput(fixture_thread, foreground_thread, TRUE) != FALSE;
+    SetForegroundWindow(owner.window);
+    if (attached) AttachThreadInput(fixture_thread, foreground_thread, FALSE);
+    const bool ready = GetForegroundWindow() == owner.window;
+    Check(ready, "fixture obtains foreground before running focus assertions");
+    if (!ready) return;
+    for (const char* action : {"accept preserves host-selected child focus", "cancel preserves host-selected child focus",
+                              "close preserves host-selected child focus"}) {
+        SetForegroundWindow(owner.window);
+        pulse::PickerOwnerGuard guard(owner.window);
+        HWND dialog = CreateWindowW(L"Pulse.OwnerGuard.FocusPopup", L"Pulse isolated picker close", WS_POPUP | WS_CAPTION,
+            100, 100, 280, 120, owner.window, nullptr, GetModuleHandleW(nullptr), nullptr);
+        ShowWindow(dialog, SW_SHOW); SetForegroundWindow(dialog);
+        std::printf("focus fixture: guard=%lu foreground=%p dialog=%p active=%p enabled=%d\n",
+            guard.Error(), static_cast<void*>(GetForegroundWindow()), static_cast<void*>(dialog),
+            static_cast<void*>(GetActiveWindow()), IsWindowEnabled(dialog));
+        Check(!guard.Error() && GetForegroundWindow() == dialog, "picker is foreground before restoration");
+        guard.RestoreBeforeDialogHide(dialog);
+        // Negative control: replay precisely the removed post-activation tail.
+        // This must fail the same child-focus assertions without changing the
+        // production guard or relaxing the expected result.
+        if (legacy_tail && guard.Alive() && IsWindowEnabled(owner.window) && GetActiveWindow() == owner.window)
+            SetFocus(owner.window);
+        Check(IsWindowEnabled(owner.window) && GetForegroundWindow() == owner.window && GetFocus() == owner.edit, action);
+        ShowWindow(dialog, SW_HIDE); DestroyWindow(dialog);
+        Check(GetForegroundWindow() == owner.window && GetFocus() == owner.edit, "hide/destroy preserves restored host child focus");
+    }
+    for (int timing = 0; timing < 3; ++timing) {
+        SetForegroundWindow(owner.window);
+        pulse::PickerOwnerGuard guard(owner.window);
+        HWND dialog = CreateWindowW(L"Pulse.OwnerGuard.FocusPopup", L"Pulse isolated picker switch", WS_POPUP | WS_CAPTION,
+            100, 100, 280, 120, owner.window, nullptr, GetModuleHandleW(nullptr), nullptr);
+        ShowWindow(dialog, SW_SHOW); SetForegroundWindow(dialog);
+        Check(!guard.Error() && GetForegroundWindow() == dialog, "picker foreground before external activation boundary");
+        if (timing == 0) SetForegroundWindow(owner.other);
+        owner.switch_on_enable = timing == 1;
+        owner.switch_on_activate = timing == 2;
+        guard.RestoreBeforeDialogHide(dialog);
+        Check(IsWindowEnabled(owner.window) && GetForegroundWindow() == owner.other && GetFocus() == owner.other,
+            "restoration does not reclaim foreground after user/enable/activation switch");
+        ShowWindow(dialog, SW_HIDE); DestroyWindow(dialog);
+        Check(GetForegroundWindow() == owner.other && GetFocus() == owner.other, "picker hide/destroy does not reclaim switched foreground");
+        owner.switch_on_enable = owner.switch_on_activate = false;
+    }
+    const HWND foreground = GetForegroundWindow();
+    if ((foreground == owner.window || foreground == owner.other) && IsWindow(previous_foreground))
+        SetForegroundWindow(previous_foreground);
+}
 }
 
 constexpr UINT ForeignEnable = WM_APP + 91;
@@ -270,6 +366,11 @@ void ForeignDisabled(bool low = false, HWND reverse_owner = nullptr) {
 }
 
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && (wcscmp(argv[1], L"--focus-only") == 0 || wcscmp(argv[1], L"--focus-legacy-tail") == 0)) {
+        FocusRestoration(wcscmp(argv[1], L"--focus-legacy-tail") == 0);
+        std::printf("Checks: %d, failures: %d\n", checks, failures);
+        return failures ? 1 : 0;
+    }
     if (argc == 3 && wcscmp(argv[1], L"--foreign") == 0) return ForeignChild(argv[2]);
     if (argc == 3 && wcscmp(argv[1], L"--foreign-low") == 0) return ForeignChild(argv[2], true);
     if (argc == 3 && wcscmp(argv[1], L"--reverse-low") == 0) return ForeignChild(argv[2], true, true);

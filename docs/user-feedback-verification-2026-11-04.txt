@@ -1,0 +1,30 @@
+﻿User feedback fixes — 2026-11-04
+
+Scope delivered together:
+- Open/Save picker: shared icon zoom policy and wheel accumulation, Ctrl+Shift+1..8 from list and edits, shared hover card renderer/content helpers, inherited hover preferences, asynchronous folder listing, dismissal on input/deactivation/layout, custom icon-size persistence with v2 layout compatibility.
+- Setup: bounded publication retry for transient non-delete-sharing file locks. Reproduced Win32 error 5 without changing ACLs. Permanent denial still fails safely with source/destination/error diagnostics.
+- Win+E: fullscreen/unknown foreground defers to system entry and confirmed Explorer handoff. Real Shell desktop retains fast direct route. Missing identity marker alone cannot prove Explorer destruction. Adds route/geometry/close-confirmation evidence.
+- Diagnostic export: creates a unique child in the selected destination, preserves existing contents and prior packages, preserves actual failure details, records failure stages/native errors, retains partial ZIP without reporting failed user-log collection as success.
+
+Validation evidence:
+- bench_data/picker-interaction-live.log: 36 PASS, actual Open/Save windows, light theme.
+- bench_data/picker-interaction-dark.log: 36 PASS, actual Open/Save windows, dark theme. Captured shared card screenshots inspected.
+- Picker appearance 29 PASS; picker layout 17 PASS including old v2 payload. Isolated registry execution initially failed writes; identical layout test passed on normal desktop with an isolated test key.
+- bench_data/win-e-handoff-desktop-20261104.log: 193 PASS, including real Shell desktop, private fullscreen HWND, source marker removal and source destruction. Actual game was not available; no claim of reproducing its input behavior.
+- Setup publication locks: 8 PASS (bench_data/setup-publication-locks-20261104.log); version transaction A/B/C: 28 PASS (bench_data/setup-publish-transaction-20261104.log). Active rollback now logs separately from recovery of an interrupted prior update.
+- bench_data/diagnostics-package-test.log: 18 PASS; bench_data/diagnostics-export-test.log: 0 failures.
+- Supplied Desktop/Diagnostics/Runtime exported through the new production package function: 37 runtime files, ZIP contains 41 entries, manifest complete=true, independent ZIP CRC verification passed. No source files were changed.
+- Localization generator --check passed. Main/picker/setup scoped build passed. Existing unrelated action_registry.cpp unused-parameter warning remains.
+
+Limits:
+- Supplied installation screenshot establishes publication error 5, not the exact process/ACL causing it. Temporary file occupancy is a reproduced mechanism, not an assertion about that machine.
+- Supplied Win+E logs lack foreground/fullscreen data and do not uniquely establish the game-related root cause. New routing avoids direct Pulse submission in that situation; new evidence supports subsequent field diagnosis.
+- The former export UI erased the specific error and logged no terminal stage; the original three failures cannot be uniquely classified retrospectively.
+- No installation on the user's current machine was performed. Previous installed binaries remain until the new installer is run.
+
+Final artifact:
+- dist/PulseSetup-1.0.58-feedback-fixes-20261104.exe
+- 12,350,296 bytes; SHA256 9d6c7d9e9cbe38bb9f8d0167c6fdb23e31d5835146204505c59a9149ed823a09
+- 46 payload files individually verified; embedded setup bootstrap and main/preview/index/picker bytes match current builds.
+- Packaging and embedded resource checks passed; no installation performed.
+- Manifest verification: bench_data/feedback-installer-verification.json

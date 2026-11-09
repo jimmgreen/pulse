@@ -52,11 +52,13 @@ FileDialogInprocessSession::~FileDialogInprocessSession() {
 }
 HRESULT FileDialogInprocessSession::Prepare(const ContractDecision& decision, HWND owner, const std::vector<FileDialogCustomControl>& controls, const std::vector<FileDialogPlace>& places, const std::vector<FileDialogPropertyView>& properties) {
     if (!provider_ || !provider_->module_lifetime || !Table(provider_->api) || session_) return Unsupported();
+    if (!decision.effective_options || decision.native_options != (*decision.effective_options & kExtendedFileDialogOptions)) return Unsupported();
     const bool save = decision.validation_category == ValidationCategory::LocalSaveAccessV1 && decision.supported_access_policy == AccessPolicy::LocalSaveV1;
     const bool open = decision.validation_category == ValidationCategory::LocalOpenAccessV1 && decision.supported_access_policy == AccessPolicy::LocalOpenV1;
     const bool folder = open && decision.effective_options && (*decision.effective_options & FOS_PICKFOLDERS);
     const uint32_t required = (folder ? PULSE_PICKER_UI_V2_CAP_FOLDER_V1 : save ? PULSE_PICKER_UI_V2_CAP_SAVE_LOCAL_V1 : PULSE_PICKER_UI_V2_CAP_OPEN_LOCAL_V1) |
         PULSE_PICKER_UI_V2_CAP_STANDARD_EVENTS | PULSE_PICKER_UI_V2_CAP_STATE_QUERY | (controls.empty() && properties.empty() ? 0u : PULSE_PICKER_UI_V2_CAP_CUSTOM_BUTTONS);
+    if (decision.native_options && !(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_NATIVE_OPTIONS)) return Unsupported();
     if (!provider_->allow_unverified_proof && (provider_->api.capabilities & required) != required) return Unsupported();
     if (decision.require_unencrypted_save && (!save || !(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_SAVE_UNENCRYPTED))) return Unsupported();
     if (!controls.empty() && !provider_->api.UpdateControl) return Unsupported();
@@ -86,18 +88,19 @@ HRESULT FileDialogInprocessSession::Prepare(const ContractDecision& decision, HW
         if (decision.native_save_defaults && (caller || !(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_SAVE_NATIVE_DEFAULTS))) return Unsupported();
         if (caller && (!(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_SAVE_SKIP_ACCESS) || decision.require_unencrypted_save)) return Unsupported();
         const uint32_t required_native = caller ? (FOS_OVERWRITEPROMPT | FOS_NOVALIDATE) : decision.native_save_defaults ? FOS_OVERWRITEPROMPT : (FOS_OVERWRITEPROMPT | FOS_NOREADONLYRETURN | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR);
-        const uint32_t optional_native = (decision.no_test_file_create ? FOS_NOTESTFILECREATE : 0u) | (decision.native_save_defaults ? FOS_NOREADONLYRETURN : 0u) | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR | FOS_FORCEFILESYSTEM | FOS_DONTADDTORECENT | FOS_FORCESHOWHIDDEN | FOS_DEFAULTNOMINIMODE;
+        const uint32_t optional_native = (decision.no_test_file_create ? FOS_NOTESTFILECREATE : 0u) | (decision.native_save_defaults ? FOS_NOREADONLYRETURN : 0u) | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR | FOS_FORCEFILESYSTEM | FOS_DONTADDTORECENT | FOS_FORCESHOWHIDDEN | FOS_DEFAULTNOMINIMODE | kExtendedFileDialogOptions;
         if ((*decision.effective_options & required_native) != required_native || (*decision.effective_options & ~(required_native | optional_native))) return Unsupported();
         const uint32_t options = wire::OverwritePrompt | ((*decision.effective_options & FOS_FORCESHOWHIDDEN) ? wire::ShowHidden : 0u);
         if (request->options != options) return Unsupported();
         expected = wire::Save | (request->filters.empty() ? 0u : wire::Filters);
     } else if (folder) {
-        if (!request->filters.empty() || !request->default_extension.empty() || (request->options & ~(wire::ShowHidden | wire::AllowMultiSelect))) return Unsupported();
-        expected = wire::Folder | ((request->options & wire::AllowMultiSelect) ? wire::MultiSelect : 0u);
+        if (!request->filters.empty() || !request->default_extension.empty() || (request->options & ~(wire::ShowHidden | wire::AllowMultiSelect | wire::NoDereferenceLinks))) return Unsupported();
+        expected = wire::Folder | ((request->options & wire::AllowMultiSelect) ? wire::MultiSelect : 0u) |
+            ((request->options & wire::NoDereferenceLinks) ? wire::PreserveLinks : 0u);
     } else {
         // Open remains advisory; Save has its independent extension contract.
         const bool skip = decision.skip_open_access_validation;
-        if (decision.allow_missing_open && (!skip || !(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_OPEN_MISSING))) return Unsupported();
+        if (decision.allow_missing_open && ((!skip && !(*decision.effective_options & FOS_CREATEPROMPT)) || !(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_OPEN_MISSING))) return Unsupported();
         if (decision.require_existing_open_parent && !decision.allow_missing_open) return Unsupported();
         if (skip && !(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_OPEN_SKIP_ACCESS)) return Unsupported();
         const uint32_t access = skip ? wire::SkipAccessValidation : wire::ValidateLocalOpenAccessV1;
@@ -150,6 +153,7 @@ HRESULT FileDialogInprocessSession::Prepare(const ContractDecision& decision, HW
     control_items_.resize(custom_.size()); controls_.reserve(custom_.size());
     for (size_t i = 0; i < custom_.size(); ++i) controls_.push_back(custom_[i].Abi(control_items_[i]));
     config_.controls = controls_.data(); config_.control_count = static_cast<uint32_t>(controls_.size());
+    config_.native_options = (provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_NATIVE_OPTIONS) ? decision.effective_options.value_or(0) : 0u;
     config_.size = sizeof(config_); config_.version = 2; config_.owner = owner;
     config_.required_capabilities = provider_->allow_unverified_proof ? 0 : required;
     if (decision.skip_open_access_validation) config_.open_options |= PULSE_PICKER_UI_V2_OPEN_SKIP_ACCESS_VALIDATION;
@@ -259,7 +263,9 @@ HRESULT FileDialogInprocessSession::Observe(const PulsePickerUiV2Event& event) {
         static_cast<unsigned long>(hr), actual ? 1u : 0u, actual == event.window ? 1u : 0u,
         pid == GetCurrentProcessId() ? 1u : 0u, thread == GetCurrentThreadId() ? 1u : 0u);
     Report(diagnostic);
-    if (hr != S_OK || actual != event.window || !actual || thread != GetCurrentThreadId() || pid != GetCurrentProcessId()) {
+    const bool identity = provider_->validate_remote_window ? provider_->validate_remote_window(session_, actual) :
+        thread == GetCurrentThreadId() && pid == GetCurrentProcessId();
+    if (hr != S_OK || actual != event.window || !actual || !identity) {
         Report("observe-failed stage=window"); return E_UNEXPECTED;
     }
     show_ = event.show_id; event_kind_ = event.kind; event_generation_ = event.generation;
@@ -272,6 +278,15 @@ HRESULT FileDialogInprocessSession::ObserveOverwrite(const PulsePickerUiV2Overwr
     common.show_id = event.show_id; common.generation = event.generation; common.window = event.window;
     const HRESULT hr = Observe(common);
     if (hr == S_OK) event_kind_ = 0xFFFFFFFFu; // Internal overwrite scope, never FileOk/GetResult eligibility.
+    return hr;
+}
+HRESULT FileDialogInprocessSession::ObserveShareViolation(const PulsePickerUiV2OverwriteEvent& event) {
+    if (!(config_.native_options & FOS_SHAREAWARE) || event.size != sizeof(event) || event.reserved ||
+        !event.target.data || !event.target.units || event.target.units > PULSE_PICKER_UI_V2_MAX_UNITS) return E_INVALIDARG;
+    PulsePickerUiV2Event common{}; common.size = sizeof(common); common.kind = PULSE_PICKER_UI_V2_EVENT_READY;
+    common.show_id = event.show_id; common.generation = event.generation; common.window = event.window;
+    const HRESULT hr = Observe(common);
+    if (hr == S_OK) event_kind_ = 0xFFFFFFFEu; // Internal share-violation scope, never FileOk/GetResult eligibility.
     return hr;
 }
 HRESULT FileDialogInprocessSession::Read(FileDialogInprocessSnapshot& output) const noexcept {

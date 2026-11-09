@@ -185,6 +185,47 @@ int Caller() {
     Check(connect_timeout.error == ERROR_TIMEOUT, "client retry timeout");
     Check(Connect(server.Name(), GetCurrentProcess(), channel, {cancel.Get(), 1000}).error == ERROR_CANCELLED, "client cancellation");
     Check(WaitOptions{}.timeout_ms == INFINITE, "user wait has no default deadline");
+
+    // Standby host pipe (this process plays both sides).
+    {
+        wchar_t own_image[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, own_image, MAX_PATH);
+        Channel standby_client;
+        DWORD server_pid = 0;
+        const auto absent_start = GetTickCount64();
+        const auto absent = ConnectStandby(own_image, {}, standby_client, server_pid);
+        Check(absent.error == ERROR_FILE_NOT_FOUND && GetTickCount64() - absent_start < 150, "no standby fails fast for the cold path");
+        Check(StandbyPipeName().rfind(L"\\\\.\\pipe\\Pulse.PickerStandby.", 0) == 0, "standby pipe name is local and per user/session");
+        Check(StandbyIdleMutexName(L"C:\\A\\pulse.exe") == StandbyIdleMutexName(L"c:\\a\\PULSE.EXE") &&
+            StandbyIdleMutexName(L"C:\\A\\pulse.exe") != StandbyIdleMutexName(L"C:\\B\\pulse.exe"), "idle mutex is per bundle, case-insensitive");
+        // Verified server: the client sees its own image, so the request flows.
+        StandbyServer standby;
+        Check(static_cast<bool>(StandbyServer::Create(standby)), "create standby listener");
+        Channel host_side;
+        DWORD client_pid = 0;
+        TransportResult accepted;
+        std::thread host([&] { accepted = standby.Accept(host_side, client_pid, {nullptr, 5000}); });
+        const auto connected = ConnectStandby(own_image, {}, standby_client, server_pid, {nullptr, 2000});
+        host.join();
+        Check(connected && accepted && server_pid == GetCurrentProcessId() && client_pid == GetCurrentProcessId(), "verified standby connects both ways");
+        Message request;
+        request.request_id[0] = 7;
+        request.body = Request{};
+        if (connected && accepted) {
+            Message received;
+            Check(standby_client.Send(request, {nullptr, 2000}) && host_side.Receive(received, {nullptr, 2000}) && received == request,
+                "request crosses the standby pipe");
+        }
+        // A listener whose image is not the expected pulse.exe is refused.
+        StandbyServer impostor;
+        Check(static_cast<bool>(StandbyServer::Create(impostor)), "second standby instance can listen");
+        Channel impostor_side, refused_client;
+        TransportResult impostor_accept;
+        std::thread other([&] { impostor_accept = impostor.Accept(impostor_side, client_pid, {nullptr, 3000}); });
+        const auto refused = ConnectStandby(L"C:\\Elsewhere\\pulse.exe", {}, refused_client, server_pid, {nullptr, 2000});
+        other.join();
+        Check(refused.error == ERROR_ACCESS_DENIED && !refused_client, "standby with another image is refused");
+    }
     std::cout << "Checks: " << checks << ", failures: " << failures << std::endl;
     return failures ? 1 : 0;
 }

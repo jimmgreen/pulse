@@ -109,9 +109,9 @@ Bytes JpegSolid(UINT w, UINT h, unsigned char r, unsigned char g, unsigned char 
 }
 // Opaque solid red RGB document (PackBits rows) whose embedded thumbnail is
 // `jpeg`, so the pixels tell which source a grid thumbnail came from.
-Bytes OpaquePsd(uint32_t width, uint32_t height, const Bytes& jpeg, uint32_t thumb_w, uint32_t thumb_h) {
+Bytes OpaquePsd(uint32_t width, uint32_t height, const Bytes& jpeg, uint32_t thumb_w, uint32_t thumb_h, bool psb = false) {
     Bytes out{'8','B','P','S'};
-    Be16(out, 1); out.resize(out.size() + 6);
+    Be16(out, psb ? 2 : 1); out.resize(out.size() + 6);
     Be16(out, 3); Be32(out, height); Be32(out, width); Be16(out, 8); Be16(out, 3);
     Be32(out, 0);   // colour mode data
     Bytes resource{'8','B','I','M'};
@@ -126,7 +126,7 @@ Bytes OpaquePsd(uint32_t width, uint32_t height, const Bytes& jpeg, uint32_t thu
     if (resource.size() & 1) resource.push_back(0);
     Be32(out, static_cast<uint32_t>(resource.size()));
     out.insert(out.end(), resource.begin(), resource.end());
-    Be32(out, 0);   // no layers
+    Be32(out, 0); if (psb) Be32(out, 0);   // no layers
     Be16(out, 1);   // PackBits composite
     const auto packed = [width](unsigned char value) {
         Bytes row;
@@ -140,7 +140,10 @@ Bytes OpaquePsd(uint32_t width, uint32_t height, const Bytes& jpeg, uint32_t thu
     };
     const Bytes rows[3] = {packed(255), packed(0), packed(0)};
     for (const Bytes& row : rows)
-        for (uint32_t y = 0; y < height; ++y) Be16(out, static_cast<uint16_t>(row.size()));
+        for (uint32_t y = 0; y < height; ++y) {
+            if (psb) Be32(out, static_cast<uint32_t>(row.size()));
+            else Be16(out, static_cast<uint16_t>(row.size()));
+        }
     for (const Bytes& row : rows)
         for (uint32_t y = 0; y < height; ++y) out.insert(out.end(), row.begin(), row.end());
     return out;
@@ -293,7 +296,7 @@ bool Workbook(const fs::path& path, const std::string& date, const std::string& 
     });
 }
 }
-int wmain() {
+int wmain(int argc, wchar_t** argv) {
     using namespace pulse::preview;
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     int failures = 0;
@@ -301,6 +304,45 @@ int wmain() {
     const auto parent = fs::absolute(L"bench_data"); fs::create_directories(parent);
     const auto root = parent / (L"preview-data-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
     if (!fs::create_directory(root)) return 1;
+    if (argc >= 2 && std::wstring_view(argv[1]) == L"--psd-progressive") {
+        const auto jpeg = JpegSolid(160, 120, 0, 255, 0);
+        auto data = OpaquePsd(11648, 8736, jpeg, 160, 120);
+        const auto file = root / L"large.psd";
+        check(!jpeg.empty() && Write(file, data), "create 11648x8736 PSD with 160x120 JPEG");
+        Bytes pixels; UINT w = 0, h = 0, stride = 0, sw = 0, sh = 0;
+        bool embedded = false; std::wstring error;
+        const auto decode = [&](bool fast, UINT edge) {
+            return RasterizePsdFile(file.wstring(), edge, fast, pixels, w, h, stride, sw, sh, &error, &embedded);
+        };
+        auto started = GetTickCount64();
+        check(decode(true, 512) && embedded && w == 160 && h == 120 && pixels[1] > 240 &&
+            sw == 11648 && sh == 8736, "large PSD first pass exposes embedded JPEG origin and source dimensions");
+        printf("first_pass_ms=%llu\n", GetTickCount64() - started);
+        started = GetTickCount64();
+        check(decode(false, 512) && !embedded && w == 512 && h == 384 && pixels[2] == 255 &&
+            pixels[1] == 0, "large PSD refinement returns full grid resolution composite");
+        printf("refinement_ms=%llu\n", GetTickCount64() - started);
+        check(decode(true, 128) && embedded && w == 128, "embedded origin survives size-covered first pass");
+        if (argc == 3 && std::wstring_view(argv[2]) == L"--keep-fixture") {
+            const auto retained = root / L"progressive.psd";
+            check(Write(retained, data), "retain fixture for cache integration test");
+            wprintf(L"fixture=%ls\n", retained.c_str());
+        }
+        data.resize(data.size() - 1024);
+        check(Write(file, data) && decode(false, 512) && embedded && w == 160 && pixels[1] > 240,
+            "broken composite fallback remains explicitly embedded and cannot be cached as refined");
+        check(Write(file, OpaquePsd(11648, 8736, jpeg, 160, 120, true)) &&
+            decode(true, 512) && embedded && w == 160 && decode(false, 512) && !embedded && w == 512,
+            "large PSB also transitions from embedded preview to composite");
+        std::error_code cleanup_error;
+        if (argc < 3) {
+            if (root.parent_path() == parent && root.filename().wstring().starts_with(L"preview-data-"))
+                fs::remove_all(root, cleanup_error);
+            check(!cleanup_error && !fs::exists(root), "private progressive fixtures removed");
+        }
+        CoUninitialize();
+        return failures ? 1 : 0;
+    }
     auto decode = [&](const Bytes& data, UINT edge, Bytes& pixels, std::wstring& error) {
         const auto file = root / L"indexed.psd";
         if (!Write(file, data)) return false;

@@ -148,7 +148,8 @@ void TrayController::HandleTaskbarCreated() {
     if (wanted_visible_) SetVisible(true);
 }
 
-TrayController::CallbackResult TrayController::HandleCallback(LPARAM event) {
+TrayController::CallbackResult TrayController::HandleCallback(
+    LPARAM event, const std::function<int(POINT, HWND)>& show_menu) {
     if (!hwnd_) return CallbackResult::NotHandled;
     switch (LOWORD(event)) {
     case WM_LBUTTONUP:
@@ -158,26 +159,9 @@ TrayController::CallbackResult TrayController::HandleCallback(LPARAM event) {
     case WM_RBUTTONUP: {
         POINT point{};
         GetCursorPos(&point);
-        HMENU menu = CreatePopupMenu();
-        if (!menu) return CallbackResult::Handled;
-        AppendMenuW(menu, MF_STRING, 1, l10n::Get(l10n::StringId::Open).c_str());
-        AppendMenuW(menu, MF_STRING, 3, l10n::Get(l10n::StringId::ActNewWindow).c_str());
-        HMENU layouts=CreatePopupMenu();
-        if (layouts) {
-            const l10n::StringId ids[]={l10n::StringId::ArrangeSideBySide,l10n::StringId::ArrangeStacked,l10n::StringId::ArrangeColumns,l10n::StringId::ArrangeTile,l10n::StringId::ArrangeMain,l10n::StringId::ArrangeCascade};
-            for(int i=0;i<6;++i) AppendMenuW(layouts,MF_STRING,10+i,l10n::Get(ids[i]).c_str());
-            AppendMenuW(menu,MF_POPUP,reinterpret_cast<UINT_PTR>(layouts),l10n::Get(l10n::StringId::SettingsSecArrangeWindows).c_str());
-        }
-        AppendMenuW(menu,MF_STRING,4,l10n::Get(l10n::StringId::ActMergeWindows).c_str());
-        AppendMenuW(menu,MF_SEPARATOR,0,nullptr);
-        AppendMenuW(menu, MF_STRING, 2, l10n::Get(l10n::StringId::TrayExit).c_str());
-        // The menu owner must be foreground or the menu will not dismiss
-        // (KB135788); the icon window owns it even while the UI is hidden.
-        SetForegroundWindow(icon_window_);
-        const int command = TrackPopupMenu(
-            menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY,
-            point.x, point.y, 0, icon_window_, nullptr);
-        DestroyMenu(menu);
+        if (!show_menu) return CallbackResult::Handled;
+        // The popup owns foreground activation; the icon host may be hidden.
+        const int command = show_menu(point, icon_window_);
         PostMessageW(icon_window_, WM_NULL, 0, 0);
         if (command == 1) RestoreWindow();
         if (command == 3) PostMessageW(hwnd_, WM_NEW_WINDOW, 0, 0);

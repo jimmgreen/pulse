@@ -252,6 +252,7 @@ struct TagQueryChipView {
 struct AiListOverlay;
 
 struct PaneViewModel {
+    std::vector<std::wstring> history_preview_paths;
     using FilterMap = std::vector<int>;
     using TagDots = std::unordered_map<int, std::vector<D2D1_COLOR_F>>;
 
@@ -389,7 +390,12 @@ struct PaneViewModel {
     int selected_count = 0;
     bool all_selected = false;
     const std::unordered_set<int>* selected_indices = nullptr;
+    const void* selection_owner = nullptr;
+    uint64_t selection_revision = 0;
     int hover_index = -1;
+    std::wstring drag_parent_path;
+    bool drop_parent = false;
+    float drop_parent_progress = -1.0f;
     int drop_target_index = -1;   // folder row under an OLE drag (accent 2px stroke)
     float drop_spring_progress = -1.0f;  // 0..1 until the folder spring-opens; <0 = none
     bool header_drop = false;     // pane title bar is a navigate-to-folder target
@@ -420,6 +426,7 @@ struct PaneViewModel {
     // Manual details column widths (DIP, see DetailsColumnWidths). All zeroes
     // select the responsive defaults.
     DetailsColumnWidths details_column_dividers{};
+    std::array<std::array<float, 4>, 3> media_column_widths{};
     std::array<float, 4> search_column_dividers{};
     // "Group by" (app::GroupBy value) and its spans over view rows.
     int group_by = 0;
@@ -495,6 +502,7 @@ std::vector<BreadcrumbSegment> SplitBreadcrumb(const std::wstring& path);
 struct SidebarItem {
     int workspace_index = -1;
     int workspace_child_number = 0;
+    int workspace_parent_index = -1;
     ViewMode workspace_child_view = ViewMode::Details;
     int workspace_layout = 0;
     std::wstring workspace_root;
@@ -603,7 +611,7 @@ struct TrayPuffView {
     float size = 1.0f;         // final scale
 };
 
-// One row of the open tray view (pulse_tray_redesign.html openHTML).
+// One row of the open tray view.
 struct TrayOpenRow {
     uint64_t id = 0;
     std::wstring path, name, size;
@@ -653,7 +661,7 @@ struct TrayDeckView {
     bool comparing = false;          // compare table replaces the card stack
     TrayCompareView compare;
 
-    // Shelf redesign (pulse_tray_redesign.html). The panel is one of three
+    // Shelf redesign. The panel is one of three
     // layers: a 40 dip strip when empty, two drop halves while files are
     // dragged over the window, and the shelf (fan + release + 送到 chips).
     int stage = 0;                   // TrayStage: 0 strip, 1 drop, 2 shelf
@@ -802,7 +810,6 @@ struct DetailsPanelView {
 struct DetailsHitRects {
     D2D1_RECT_F open{}, new_tab{}, copy_path{}, more{}, star{}, rename{};
     D2D1_RECT_F tag_add{}, preview{}, preview_toggle{}, preview_enable{};
-    D2D1_RECT_F cloud_download{};   // 下载并预览 inside the preview well
     D2D1_RECT_F attr_readonly{}, attr_hidden{}, attr_advanced{};
     D2D1_RECT_F security_change{};
     std::vector<D2D1_RECT_F> preset_chips;
@@ -815,7 +822,19 @@ struct DetailsHitRects {
 // The AI chip at the left end of the status bar (app ai_status.h, Pulse 助手).
 enum class StatusAiState : uint8_t { Hidden, Idle, Busy, Waiting, Done, Error, Warn };
 
+struct UndoHistoryRowView {
+    uint64_t task_id = 0;
+    std::wstring label, detail;
+    std::wstring time;             // HH:MM it was recorded; empty when unknown
+    bool undone = false, supported = true, elsewhere = false;
+    std::wstring icon_glyph = L"\xE8A5";
+};
+
 struct StatusBarView {
+    bool can_undo = false, can_redo = false, history_open = false;
+    int history_offset = 0;
+    std::wstring undo_label;
+    std::vector<UndoHistoryRowView> history;
     bool query_active = false;
     bool query_cancellable = false;
     float query_progress = -1.0f; // 0..1 of this query's candidates; negative means unknown.
@@ -832,10 +851,12 @@ struct StatusBarView {
     bool task_is_update = false;   // Noninteractive, centered progress; never opens file operations.
     bool task_active = false;      // file operation running (drives the progress pill)
     bool task_failed = false;      // last operation ended with an error: no success check
+    uint64_t task_id = 0;          // resets completion age when another operation becomes current
     bool task_paused = false;      // paused or pausing: amber pill
+    uint32_t task_queued = 0;      // operations waiting behind the running one ("+N")
     uint64_t task_failed_items = 0; // partial failure: red pill until the next operation
     bool task_can_undo = false;    // finished pill offers 撤销 (sub_index 0)
-    bool task_can_open = false;    // finished pill offers 打开 (sub_index 1)
+    bool task_can_open = false;    // finished pill offers locate (sub_index 1); resume uses 2
     std::wstring performance_text; // development diagnostics; empty hides it
     std::wstring performance_compact_text;
     StatusAiState ai_state = StatusAiState::Hidden;
@@ -999,11 +1020,10 @@ enum class PackAction : int {
     ImagesRemove,       // image pack: uninstall
     ImagesEnable,       // image pack: on / off
     RawInstall, RawRemove, RawEnable,
-    ArchiveInstall, ArchiveRemove, ArchiveEnable,
     TriggerHover, TriggerSpace,                         // 预览方式: hover card / Space only
     HoverDelayShort, HoverDelayMedium, HoverDelayLong,  // 悬停延迟: 0.3 / 0.5 / 0.8 s
     HoverSizeSmall, HoverSizeMedium, HoverSizeLarge, HoverSizeXLarge,  // 卡片尺寸: 小 / 中 / 大 / 特大
-    Update, ImagesUpdate, RawUpdate, ArchiveUpdate,     // 更新到: the catalog's newer release
+    Update, ImagesUpdate, RawUpdate,     // 更新到: the catalog's newer release
     AutoUpdate,         // 自动更新增强包: on / off
     UpdateAll,          // 增强包 page: 全部更新 (every pack with a newer release)
     ManagePacks,        // 快速预览 page: open the 增强包 page
@@ -1021,6 +1041,7 @@ enum class PackAction : int {
     SpaceClose, SpacePlayPause,          // 空格键（视频和动图）
     LoopAnimations, LoopAll, LoopNone,   // 循环播放: 仅动图 / 动图和视频 / 不循环
     HoldOff, HoldShort, HoldMedium, HoldLong,  // 按住预览: 关 / 0.3 / 0.5 / 0.8 s
+    NativeSettings,
 };
 
 // A tab dragged out of another window, over this one (multi-window M7h): the
@@ -1052,7 +1073,22 @@ struct FilterTagSuggestionView {
     int count = 0;
 };
 
+struct PaneLayoutControls {
+    bool visible = true;
+    int preset = 0, zoom_index = -1, focus_index = 0, target_index = -1;
+    int preview_preset = -1, peek_index = -1;
+    bool compare = false, tray_open = false;
+    std::vector<std::wstring> pane_names, pane_paths;
+    std::vector<std::vector<std::wstring>> pane_previews;
+    std::vector<std::vector<std::wstring>> pane_preview_sizes;
+    std::vector<std::vector<bool>> pane_preview_dirs;
+    std::vector<size_t> pane_counts;
+    std::vector<std::wstring> preview_names;
+    int preview_target_index = -1;
+};
+
 struct WindowViewModel {
+    PaneLayoutControls layout_controls;
     AiPanelViewModel ai_panel;   // Pulse 助手 (ai_panel_view.h)
     std::wstring window_title;
     // Multi-window M7c: with two or more windows the title bar shows this
@@ -1138,6 +1174,7 @@ struct WindowViewModel {
 
     // OLE drag feedback (1B-2). Indices follow HitTestResult indexing.
     int breadcrumb_hover = -1;    // placed segment under the mouse
+    bool drag_folders_active = false;
     int breadcrumb_drop = -1;     // placed segment under a drag
     int sidebar_drop_index = -1;  // sidebar item under a drag
     int tab_drop_index = -1;      // a tab dragged from another window lands before this tab (M6b)
@@ -1227,6 +1264,15 @@ struct WindowViewModel {
     bool splitter_pressed = false;
     bool details_resize_pressed = false;
     bool column_resize_pressed = false;
+    // Details header drag (column reorder): the pane slot, the dragged
+    // display column, the insertion slot (-1: no change) and its line x,
+    // and the pointer's x for the floating header.
+    int column_drag_pane = -1;
+    int column_drag_from = -1;
+    int column_drag_slot = -1;
+    float column_drag_line_x = 0.0f;
+    float column_drag_cursor_x = 0.0f;
+    float column_drag_grab_dx = 0.0f;   // pointer x minus the column's left edge
     int hover_pane_index = -1;
 
     struct ContentFolderView { std::wstring path, status; bool error = false; };
@@ -1261,13 +1307,10 @@ struct WindowViewModel {
     std::wstring settings_pack_images_notice;
     std::wstring settings_pack_images_update_version;
     bool settings_pack_raw_installed = false, settings_pack_raw_enabled = true, settings_pack_raw_installing = false;
+    std::vector<std::wstring> settings_native_archive_extensions;
     bool settings_pack_raw_available = false;
     float settings_pack_raw_progress = 0.0f;
     std::wstring settings_pack_raw_version, settings_pack_raw_notice, settings_pack_raw_update_version;
-    bool settings_pack_archive_installed = false, settings_pack_archive_enabled = true, settings_pack_archive_installing = false;
-    bool settings_pack_archive_available = false;
-    float settings_pack_archive_progress = 0.0f;
-    std::wstring settings_pack_archive_version, settings_pack_archive_notice, settings_pack_archive_update_version;
     // 高级 > 下载源 (app::UpdateSource) and 测速: per row (mirror 1, mirror 2, GitHub)
     // milliseconds, or -1 not run, -2 running, -3 failed; the system proxy GitHub uses.
     uint32_t settings_pack_download_source = 0;
@@ -1278,6 +1321,13 @@ struct WindowViewModel {
     // 0 外观, 1 search/index, 2 context menu, 3 about, 4 duplicates, 5 quick look, 6 system menu,
     // 7 shortcuts, 8 packs, 9 文件列表, 10 标签页与窗口, 11 启动与集成, 12 文件操作,
     // 13 AI 与 MCP (kSettingsPageAi, under 增强包), 14 AI 助手 (kSettingsPageAssistant)
+    struct SettingsSearchResult { std::wstring title, category; int page = 0; int command = 0; };
+    std::wstring settings_search_query;
+    bool settings_search_edit_visible = false;
+    int settings_search_selected = 0;
+    int settings_search_target = 0;
+    float settings_search_target_alpha = 0.0f;
+    std::vector<SettingsSearchResult> settings_search_results;
     int settings_page = 0;
     // Settings > AI 助手 (filled on that page); the sidebar's 新 until it was opened.
     AssistantPageView settings_assistant;
@@ -1301,6 +1351,8 @@ struct WindowViewModel {
     bool settings_keep_running = false;
     bool settings_show_hidden_files = false;
     bool settings_show_protected_os_files = false;
+    int tab_layout = 0; // 0: single row, 1: aligned, 2: title width
+    int tab_max_rows = 3;
     bool show_pinned_tab_names = true;
     bool settings_list_smart_date = true;
     bool settings_list_zebra_rows = true;
@@ -1332,7 +1384,7 @@ struct WindowViewModel {
     int settings_lan_cache_mode = 0;  // 0 10 min, 1 1 h, 2 this session
     bool settings_show_hints = true;
     bool settings_tips_seen = false;   // any teaching bubble already shown
-    int settings_folder_sort = 0; // 0 folders first, 1 follow direction, 2 mixed
+    int settings_folder_sort = 0; // 0 folders first, 1 folders last, 2 mixed
     int settings_startup_open = 0; // 0 last tabs, 1 default location
     int settings_notify_icon = 0;  // 0 always, 1 in the background, 2 never (#57)
     int settings_new_tab_open = 0; // 0 current folder, 1 default location
@@ -1487,6 +1539,7 @@ struct HitTestResult {
         NavBack,
         NavForward,
         NavUp,
+        DropParent,
         NavRefresh,
         NewButton,
         Cut,
@@ -1523,7 +1576,7 @@ struct HitTestResult {
         NetworkIndexAdd,
         PaneBannerButton,         // index = ui::PaneBannerAction
         SettingsContentIndex,
-        SettingsFind, SettingsDisclosure, SettingsTheme, SettingsDropdown,
+        SettingsFind, SettingsSearchResult, SettingsSearchClear, SettingsDisclosure, SettingsTheme, SettingsDropdown,
         SettingsContentAction,
         AddressSearchClear,
         AddressSearchClose,
@@ -1583,9 +1636,10 @@ struct HitTestResult {
         DetailsPreview,
         DetailsPreviewToggle,
         DetailsPreviewEnable,   // preview pane on/off chip inside the well
-        DetailsCloudDownload,   // 下载并预览 button in the well of a cloud-only file
         DetailsResize,
         StatusBar,
+        StatusUndo, StatusUndoHistory, StatusRedo, UndoHistoryRow, UndoHistorySurface,
+        PaneExpand, PaneLayoutPeek, PaneLayoutPreset, PaneLayoutZoom, PaneLayoutRestore, PaneLayoutCell, PaneLayoutTray, PaneLayoutCompare,
         StatusBarTask,
         StatusBarCancelSearch,
         SettingsNav,
@@ -1605,6 +1659,7 @@ struct HitTestResult {
         SettingsFolderSort,
         SettingsStartupOpen,
         SettingsNotifyIcon,
+        SettingsTabLayout, SettingsTabRows,
         SettingsNewTabOpen,
         SettingsOpenPulseIcon,
         SettingsNewWindowShows,

@@ -5,6 +5,7 @@
 #include "transfer_rate_estimator.h"
 #include "../common/localization.h"
 #include "../common/runtime_log.h"
+#include "../common/delete_diagnostics.h"
 #include "../fs/drive_kind.h"
 #include <sherrors.h>
 #include <algorithm>
@@ -176,7 +177,11 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
             }
         }
         if (transfer_cancel_.load()) break;
-        SetProgressStatus([&](OpStatus& status) {
+        const auto current_item = item_control_.Begin(task_id, transfer_cancel_);
+        diagnostics::runtime::Event("operation_item_begin", {{"task", task_id}, {"token", current_item->token},
+            {"type", static_cast<uint64_t>(req.type)}, {"index", index}});
+        SetStatus([&](OpStatus& status) {
+            status.current_item_token = current_item->token;
             status.current_item = source;
             status.last_error.clear();
             status.phase = OpPhase::Running;
@@ -206,7 +211,8 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
             const auto update = [&](OpStatus& status) {
                 status.authorization = AuthorizationState::None;
                 status.authorization_retrying = false;
-                status.current_item = item.empty() ? source : item;
+                status.current_item = source; // The skip target is this selected root, not a changing child.
+                (void)item;
                 status.completed_items = completed.size();
                 status.percent = req.sources.empty() ? 0.0f :
                     static_cast<float>((completed.size() + skipped + failed_items + refused.size() +
@@ -226,17 +232,20 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
                 (source.starts_with(L"\\\\") && !source.starts_with(L"\\\\?\\")) ||
                 source.starts_with(L"\\\\?\\UNC\\") || ::pulse::fs::IsRemoteLikeDrive(source);
             const unsigned workers = remote ? 8u : 1u;
-            NativeDeleteOutcome native = DeleteNative(source, transfer_cancel_, progress, workers);
+            diagnostics::runtime::Event("operation_delete_backend_begin", {{"task", task_id}, {"token", current_item->token}, {"backend", 0}});
+            NativeDeleteOutcome native = DeleteNative(source, current_item->cancel, progress, workers);
+            diagnostics::runtime::Event("operation_delete_backend_end", {{"task", task_id}, {"token", current_item->token},
+                {"backend", 0}, {"error", native.error}, {"cancelled", native.cancelled}, {"mutated", native.mutated}});
             // In use for a moment: tried again here, at once, rather than by
             // the Shell, whose attempt takes about a second on an item held.
             while (!native.done && !native.cancelled && !native.enumeration_failed && !native.mutated && !native_mutated && NativeInUse(native.error) &&
                    in_use_retries < std::size(kInUseRetryMs) && failures_in_a_row < kInUseRetryMaxFailuresInARow) {
                 native_mutated = native_mutated || native.mutated;
-                if (!WaitUnlessCancelled(transfer_cancel_, kInUseRetryMs[in_use_retries++])) {
+                if (!WaitUnlessCancelled(current_item->cancel, kInUseRetryMs[in_use_retries++])) {
                     native.cancelled = true;
                     break;
                 }
-                native = DeleteNative(source, transfer_cancel_, progress, workers);
+                native = DeleteNative(source, current_item->cancel, progress, workers);
             }
             native_mutated = native_mutated || native.mutated;
             native_terminal = native.mutated || native.enumeration_failed || native.cancelled;
@@ -265,20 +274,24 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
                 if (choice == AuthorizationChoice::Skip) { ++skipped; result = ShellTransferResult{}; break; }
                 defer_authorization = false;
             }
+            diagnostics::runtime::Event("operation_delete_backend_begin", {{"task", task_id}, {"token", current_item->token}, {"backend", authorized ? 2u : 1u}});
             result = authorized
-                ? DeleteWithElevatedHelper({source}, permanent, UiWindow(), transfer_cancel_, callbacks)
-                : DeleteWithCurrentToken({source}, permanent, UiWindow(), transfer_cancel_, progress,
+                ? DeleteWithElevatedHelper({source}, permanent, UiWindow(), current_item->cancel, callbacks)
+                : DeleteWithCurrentToken({source}, permanent, UiWindow(), current_item->cancel, progress,
                                          permanent ? nullptr : &recycle_cache);
-            if (!authorized && !result.mutated && PermissionFailure(result.hr) && !transfer_cancel_.load()) {
+            diagnostics::runtime::Event("operation_delete_backend_end", {{"task", task_id}, {"token", current_item->token},
+                {"backend", authorized ? 2u : 1u}, {"hr", static_cast<uint32_t>(result.hr)},
+                {"cancelled", result.cancelled}, {"mutated", result.mutated}});
+            if (!authorized && !result.mutated && PermissionFailure(result.hr) && !current_item->cancel.load()) {
                 authorized = true;
                 continue;
             }
             if (!authorized && !result.mutated && !result.cancelled && InUseFailure(result.hr) &&
                 in_use_retries < std::size(kInUseRetryMs) && failures_in_a_row < kInUseRetryMaxFailuresInARow) {
-                if (!WaitUnlessCancelled(transfer_cancel_, kInUseRetryMs[in_use_retries++])) break;
+                if (!WaitUnlessCancelled(current_item->cancel, kInUseRetryMs[in_use_retries++])) break;
                 continue;
             }
-            if (SUCCEEDED(result.hr) || result.mutated || transfer_cancel_.load() || !authorized) break;
+            if (SUCCEEDED(result.hr) || result.mutated || current_item->cancel.load() || !authorized) break;
             authorization_error = DeleteError(result);
             const auto choice = WaitForAuthorization(task_id, authorization_error, source);
             if (choice == AuthorizationChoice::Retry) { retrying = true; continue; }
@@ -289,7 +302,16 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
             }
             break;
         }
+        const bool item_skipped = item_control_.Finish(current_item);
+        SetStatus([](OpStatus& status) { status.current_item_token = 0; });
+        diagnostics::runtime::Event("operation_item_end", {{"task", task_id}, {"token", current_item->token},
+            {"hr", static_cast<uint32_t>(result.hr)}, {"skip", item_skipped}, {"cancel", transfer_cancel_.load()},
+            {"mutated", result.mutated || native_mutated}});
         if (native_mutated) result.mutated = true;
+        diagnostics::deletion::Item(task_id, index, source, result.hr,
+            std::any_of(result.sources.begin(), result.sources.end(), [&](const auto& actual) {
+                return diagnostics::deletion::Key(actual) == diagnostics::deletion::Key(source);
+            }), result.cancelled, result.mutated);
         completed.insert(completed.end(), result.sources.begin(), result.sources.end());
         if (permanent) completed_roots.insert(result.sources.begin(), result.sources.end());
         const auto finish_item = [&](OpStatus& status) {
@@ -311,6 +333,10 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
             refresh.refresh_only = true;
             std::lock_guard lock(mutex_);
             completions_.push_back(std::move(refresh));
+        }
+        if (item_skipped && !transfer_cancel_.load()) {
+            if (result.sources.empty()) ++skipped;
+            continue;
         }
         if (result.cancelled && !PermissionFailure(result.hr)) transfer_cancel_.store(true);
         if (transfer_cancel_.load()) break;
@@ -343,6 +369,9 @@ void OpsManager::RunAuthorizedDelete(const OpRequest& req, uint64_t task_id) {
         PushUndo(finished, task_id);
     }
     const bool cancelled = transfer_cancel_.load();
+    if (req.sources.size() > diagnostics::deletion::kItemLimit)
+        diagnostics::runtime::Event("file_delete_diagnostics_limit", {{"task", task_id},
+            {"sources", req.sources.size()}, {"item_limit", diagnostics::deletion::kItemLimit}});
     // Items held open by another program say by which (a bounded number:
     // each probe asks Restart Manager).
     if (!cancelled) {

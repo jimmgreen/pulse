@@ -1,3 +1,4 @@
+#include "dialog_jump_popup_geometry.h"
 #include "dialog_jump.h"
 #include "app_catalog.h"
 #include "jump_history.h"
@@ -14,6 +15,7 @@
 #include <dwmapi.h>
 #include <dwrite_2.h>
 #include <objbase.h>
+#include <shlobj.h>
 #include <uxtheme.h>
 #include <windowsx.h>
 #include <wrl/client.h>
@@ -21,6 +23,8 @@
 #include <cmath>
 #include <cstring>
 #include <tuple>
+#include <filesystem>
+#include <fstream>
 #include <cwctype>
 #include <map>
 #include <numeric>
@@ -35,11 +39,11 @@ constexpr UINT kMsgFocus = WM_APP + 2;        // FocusSearch
 constexpr UINT kMsgIndexStatus = WM_APP + 3;
 constexpr UINT kMsgIndexResult = WM_APP + 4;
 constexpr UINT kMsgStop = WM_APP + 5;
-constexpr UINT_PTR kTimerRestore = 1, kTimerAddress = 2, kTimerSearch = 3, kTimerProbe = 4, kTimerAnim = 5, kTimerGiveUp = 6, kTimerAuto = 7;
+constexpr UINT_PTR kTimerAddress = 2, kTimerSearch = 3, kTimerProbe = 4, kTimerAnim = 5, kTimerGiveUp = 6, kTimerAuto = 7;
 constexpr int kHotkeyId = 0x5054;
 constexpr uint64_t kSession = 0x50554c53444a4d50ull;
 // Geometry in DIPs, after the approved quick jump mockup (scene A).
-constexpr float kStripHeight = 44, kStripInset = 16, kAccentLine = 2, kStripRadius = 10;
+constexpr float kStripHeight = 44, kStripInset = 0, kAccentLine = 2, kStripRadius = 10;
 constexpr float kQueryWidth = 210, kQueryFocusWidth = 300, kQueryHeight = 30;
 constexpr float kChipHeight = 28, kChipMaxText = 168;
 constexpr float kListWidth = 520, kListPad = 6, kRowHeight = 38, kGroupHeight = 25, kListGap = 0;
@@ -92,10 +96,6 @@ std::wstring PlainPath(const std::wstring& path) {
     if (path.rfind(L"\\\\?\\", 0) == 0) return path.substr(4);
     return path;
 }
-std::wstring FolderInput(std::wstring path) {
-    if (!path.empty() && path.back() != L'\\') path += L'\\';
-    return path;
-}
 
 DWORD IntegrityOf(HANDLE process) {
     HANDLE token = nullptr;
@@ -134,6 +134,15 @@ HWND FirstEdit(HWND parent) {
         return FALSE;
     }, reinterpret_cast<LPARAM>(&found));
     return found;
+}
+
+bool IsAddressEdit(HWND dialog, HWND edit) {
+    if (!edit || !IsChild(dialog, edit) || ClassOf(edit) != L"Edit") return false;
+    for (HWND parent = GetParent(edit); parent && parent != dialog; parent = GetParent(parent)) {
+        const auto name = ClassOf(parent);
+        if (name == L"Breadcrumb Parent" || name == L"Address Band Root") return true;
+    }
+    return false;
 }
 
 // A common file dialog: #32770 with a shell view inside. The file name box is
@@ -542,6 +551,7 @@ struct DialogJump::Impl {
     float scale = 1.0f;
     float width = 0;  // strip width in DIPs
     Placement placement = Placement::Below;
+    bool list_above = true;
     RECT strip_px{};
 
     // Layout (DIPs, strip client coordinates).
@@ -550,6 +560,7 @@ struct DialogJump::Impl {
     float query_width = kQueryWidth, query_from = kQueryWidth, query_to = kQueryWidth;
     ULONGLONG anim_start = 0;
     bool edit_focused = false;
+    bool search_requested = false;
     Hot hover = Hot::None;
     size_t hover_chip = 0;
     bool tracking = false, list_tracking = false;
@@ -564,9 +575,6 @@ struct DialogJump::Impl {
     bool index_started = false;
     uint32_t search_id = 0;
 
-    std::wstring restore_text, set_text;
-    HWND restore_edit = nullptr;
-    int restore_ticks = 0;
     std::wstring address_path;
     int address_ticks = 0;
     bool address_keys_sent = false;
@@ -774,6 +782,7 @@ void DialogJump::Impl::Attach(const DialogInfo& info) {
 }
 
 void DialogJump::Impl::Detach() {
+    search_requested = false;
     KillTimer(bar.hwnd, kTimerAddress);
     KillTimer(bar.hwnd, kTimerAuto);
     auto_pending = false;
@@ -913,23 +922,25 @@ void DialogJump::Impl::Place() {
     const int height = static_cast<int>(std::lround(kStripHeight * scale));
     const int inset = static_cast<int>(std::lround(kStripInset * scale));
     int left = frame.left + inset, right = frame.right - inset;
-    const int min_width = static_cast<int>(std::lround(420 * scale));
-    if (right - left < min_width) {
-        const int mid = (frame.left + frame.right) / 2;
-        left = mid - min_width / 2;
-        right = left + min_width;
+    left = std::max<LONG>(left, mi.rcWork.left);
+    right = std::min<LONG>(right, mi.rcWork.right);
+    if (right <= left) return;
+    // Reserve visible space below the dialog rather than covering its controls.
+    if (frame.bottom + height > mi.rcWork.bottom) {
+        RECT outer{};
+        if (!GetWindowRect(dlg.dialog, &outer)) return;
+        const LONG overflow = frame.bottom + height - mi.rcWork.bottom;
+        const LONG shift = std::min(overflow, std::max(0L, frame.top - mi.rcWork.top));
+        const LONG shrink = overflow - shift;
+        if (outer.bottom - outer.top - shrink < static_cast<LONG>(200 * scale)) return;
+        if (!SetWindowPos(dlg.dialog, nullptr, outer.left, outer.top - shift,
+            outer.right - outer.left, outer.bottom - outer.top - shrink,
+            SWP_NOZORDER | SWP_NOACTIVATE)) return;
+        if (FAILED(DwmGetWindowAttribute(dlg.dialog, DWMWA_EXTENDED_FRAME_BOUNDS, &frame, sizeof(frame))))
+            GetWindowRect(dlg.dialog, &frame);
     }
-    int top = frame.bottom;
+    const int top = frame.bottom;
     placement = Placement::Below;
-    if (top + height > mi.rcWork.bottom) {
-        if (frame.top - height >= mi.rcWork.top) {
-            top = frame.top - height;
-            placement = Placement::Above;
-        } else {
-            top = std::max(frame.top, mi.rcWork.top);
-            placement = Placement::InsideTop;
-        }
-    }
     strip_px = {left, top, right, top + height};
     if (rescaled && edit) {
         if (HFONT font = ui::typography::CreateEditFont(scale, 13.0f)) {
@@ -1070,9 +1081,13 @@ void DialogJump::Impl::PaintBar() {
     }
     bar.Fill(flipped ? D2D1::RectF(0, kStripHeight - kAccentLine, width, kStripHeight) : D2D1::RectF(0, 0, width, kAccentLine),
              pal.accent, 0);
-    // P mark.
-    bar.Fill(logo_rect, pal.logo, 6);
-    bar.Text(L"P", logo_rect, 12.0f, pal.logo_text, DWRITE_FONT_WEIGHT_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER);
+    // Reuse the application's embedded icon through the asynchronous icon cache.
+    if (icons) {
+        wchar_t executable[32768]{};
+        const DWORD length = GetModuleFileNameW(nullptr, executable, ARRAYSIZE(executable));
+        if (length && length < ARRAYSIZE(executable))
+            icons->Draw(dc, logo_rect, executable, L"pulse.exe", false, FILE_ATTRIBUTE_NORMAL);
+    }
     // Search box: widens with a soft accent ring while it has the focus.
     if (edit_focused) {
         bar.Fill(Inflate(query_rect, 3), pal.accent_soft, 10);
@@ -1162,7 +1177,7 @@ void DialogJump::Impl::PaintList() {
     GetClientRect(list.hwnd, &rc);
     const float w = static_cast<float>(rc.right) / scale, h = static_cast<float>(rc.bottom) / scale;
     // Rises from the strip: round on the free side, square where it meets it.
-    const bool down = placement == Placement::Above;
+    const bool down = !list_above;
     const D2D1_RECT_F card{0, 0, w, h};
     if (auto shape = RoundedShape(dc, card, down ? 0.0f : 10.0f, down ? 10.0f : 0.0f)) {
         list.brush->SetColor(pal.card);
@@ -1300,7 +1315,7 @@ void DialogJump::Impl::BuildPlaceRows() {
 // The empty search box with the focus: where this program's dialogs usually
 // go. False (and nothing shown) when there is no history.
 bool DialogJump::Impl::ShowFrequent() {
-    if (!ctx.remember || !dlg.dialog) return false;
+    if (!search_requested || !ctx.remember || !dlg.dialog) return false;
     std::vector<size_t> visited;
     for (size_t i = 0; i < ctx.folders.size(); ++i)
         if (scores[i] > 0) visited.push_back(i);
@@ -1330,12 +1345,20 @@ void DialogJump::Impl::ShowList() {
     const int w = static_cast<int>(std::lround(w_dip * scale));
     const int h = static_cast<int>(std::lround(ListHeight() * scale));
     const int gap = static_cast<int>(std::lround(kListGap * scale));
-    int x = strip_px.left;
-    if (list_mode == ListMode::Places) x = std::max(static_cast<int>(strip_px.left), static_cast<int>(strip_px.left + std::lround(more_rect.right * scale)) - w);
-    const bool up = placement != Placement::Above;
-    const int y = up ? strip_px.top - gap - h : strip_px.bottom + gap;
-    SetWindowPos(list.hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-    const RECT shape{x, y, x + w, y + h};
+    RECT actual{};
+    if (!GetClientRect(bar.hwnd,&actual)) return;
+    POINT origin{};
+    if (!ClientToScreen(bar.hwnd,&origin)) return;
+    OffsetRect(&actual,origin.x,origin.y);
+    MONITORINFO mi{sizeof(mi)};
+    if (!GetMonitorInfoW(MonitorFromWindow(bar.hwnd,MONITOR_DEFAULTTONEAREST),&mi)) return;
+    const bool places=list_mode==ListMode::Places;
+    const auto positioned=PlaceDialogJumpPopup(actual,mi.rcWork,places ? more_rect.right : query_rect.left,
+        scale,w,h,gap,places,placement!=Placement::Above);
+    const RECT shape=positioned.rect;
+    const bool up=list_above=positioned.above;
+    SetWindowPos(list.hwnd,HWND_TOPMOST,shape.left,shape.top,shape.right-shape.left,shape.bottom-shape.top,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW);
     list_shadow.Show(list.hwnd, shape, scale, up ? 10.0f : 0.0f, up ? 0.0f : 10.0f, up ? -0.8f : 0.8f, !up, up,
                      pal.shadow);
     InvalidateRect(list.hwnd, nullptr, FALSE);
@@ -1344,6 +1367,7 @@ void DialogJump::Impl::ShowList() {
 }
 
 void DialogJump::Impl::HideList() {
+    search_requested = false;
     if (list.hwnd && IsWindowVisible(list.hwnd)) ShowWindow(list.hwnd, SW_HIDE);
     list_shadow.Hide();
     if (list_mode == ListMode::Places) InvalidateRect(bar.hwnd, nullptr, FALSE);
@@ -1365,6 +1389,8 @@ void DialogJump::Impl::OnSearchChanged() {
     KillTimer(bar.hwnd, kTimerGiveUp);
     if (index_started) index_client.CancelSession(kSession);
     searching = false;
+    // SetWindowText during attachment also sends EN_CHANGE; it is not a user search.
+    if (!search_requested) return;
     if (query.empty()) {
         if (!ShowFrequent() && list_mode == ListMode::Search) HideList();
         return;
@@ -1443,21 +1469,15 @@ void DialogJump::Impl::Navigate(const std::wstring& path, bool dir, bool record)
     if (path.empty() || !dlg.dialog || !IsWindow(dlg.dialog)) return;
     auto_pending = false;  // the user went somewhere first
     if (record && ctx.remember && history) history->Record(dir ? path : Parent(path), dlg_app);
-    KillTimer(bar.hwnd, kTimerRestore);
-    if (dir && (dlg.folder_picker || !dlg.name_edit)) {
+    KillTimer(bar.hwnd, kTimerAddress);
+    if (dir) {
         NavigateAddressBar(path);
         return;
     }
-    // The file name box: a folder path there plus OK moves the dialog; the
-    // name that was typed is put back once it has.
-    const std::wstring typed = TextOf(dlg.name_edit);
-    set_text = dir ? FolderInput(path) : path;
-    if (!SetText(dlg.name_edit, set_text)) return;
+    // Only an explicitly chosen file may submit the host dialog. Folder jumps
+    // must never invoke IDOK: some hosts accept it instead of navigating.
+    if (!SetText(dlg.name_edit, path)) return;
     PostMessageW(dlg.dialog, WM_COMMAND, MAKEWPARAM(IDOK, BN_CLICKED), reinterpret_cast<LPARAM>(dlg.ok));
-    restore_text = dir && typed.find_first_of(L"\\/:") == std::wstring::npos ? typed : std::wstring();
-    restore_edit = dlg.name_edit;
-    restore_ticks = 0;
-    if (dir) SetTimer(bar.hwnd, kTimerRestore, 90, nullptr);
     ReturnToDialog();
 }
 
@@ -1492,6 +1512,7 @@ void DialogJump::Impl::SendAddressKeys() {
 
 void DialogJump::Impl::FocusEdit() {
     if (!showing || !dlg.dialog || !edit) return;
+    search_requested = true;
     const HWND foreground = GetForegroundWindow();
     const DWORD foreground_thread = foreground ? GetWindowThreadProcessId(foreground, nullptr) : 0;
     const DWORD self = GetCurrentThreadId();
@@ -1501,9 +1522,11 @@ void DialogJump::Impl::FocusEdit() {
     SetFocus(edit);
     if (attach) AttachThreadInput(self, foreground_thread, FALSE);
     SendMessageW(edit, EM_SETSEL, 0, -1);
+    if (list_mode == ListMode::Hidden) OnSearchChanged();
 }
 
 void DialogJump::Impl::OnEditFocus(bool focused) {
+    if (!focused) search_requested = false;
     if (focused == edit_focused) return;
     edit_focused = focused;
     UpdateFieldBrush();
@@ -1513,7 +1536,7 @@ void DialogJump::Impl::OnEditFocus(bool focused) {
     anim_start = GetTickCount64();
     SetTimer(bar.hwnd, kTimerAnim, 10, nullptr);
     if (!focused && list_mode == ListMode::Search) HideList();
-    if (focused && list_mode == ListMode::Hidden) {
+    if (focused && search_requested && list_mode == ListMode::Hidden) {
         if (!query.empty()) OnSearchChanged();
         else ShowFrequent();
     }
@@ -1525,6 +1548,7 @@ bool DialogJump::Impl::EditKey(WPARAM key) {
     switch (key) {
     case VK_DOWN:
     case VK_UP:
+        search_requested = true;
         if (list_mode == ListMode::Hidden) {
             if (!query.empty()) OnSearchChanged();
             else ShowFrequent();
@@ -1555,6 +1579,9 @@ LRESULT CALLBACK DialogJump::Impl::ListProc(HWND hwnd, UINT msg, WPARAM wp, LPAR
 
 LRESULT CALLBACK DialogJump::Impl::EditProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data) {
     auto* self = reinterpret_cast<Impl*>(data);
+    if (msg == WM_LBUTTONDOWN) self->FocusEdit();
+    if ((msg == WM_CHAR && (wp >= 0x20 || wp == VK_BACK)) || msg == WM_PASTE || msg == WM_CUT)
+        self->search_requested = true;
     if (msg == WM_KEYDOWN && self->EditKey(wp)) return 0;
     if (msg == WM_CHAR && (wp == VK_RETURN || wp == VK_ESCAPE || wp == L'\n')) return 0;  // no beep
     if (!self->bar.comp || !self->edit_format) return DefSubclassProc(hwnd, msg, wp, lp);
@@ -1699,31 +1726,27 @@ LRESULT DialogJump::Impl::HandleBar(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             DialogInfo info;
             if (GetForegroundWindow() == probe_target && ProbeDialog(probe_target, info)) Attach(info);
             else if (++probe_tries >= 30 || !IsWindow(probe_target)) KillTimer(hwnd, kTimerProbe);
-        } else if (wp == kTimerRestore) {
-            // Put the typed name back once the dialog has taken the path.
-            const std::wstring now = IsWindow(restore_edit) ? TextOf(restore_edit) : std::wstring();
-            if (!IsWindow(restore_edit) || (!now.empty() && now != set_text)) {
-                KillTimer(hwnd, kTimerRestore);
-            } else if (++restore_ticks >= 2) {
-                KillTimer(hwnd, kTimerRestore);
-                SetText(restore_edit, restore_text);
-                if (!restore_text.empty()) {
-                    DWORD_PTR ignored = 0;
-                    SendMessageTimeoutW(restore_edit, EM_SETSEL, 0, -1, SMTO_ABORTIFHUNG, 300, &ignored);
-                }
-            }
         } else if (wp == kTimerAddress) {
+            if (!IsWindow(dlg.dialog) || GetForegroundWindow() != dlg.dialog) {
+                KillTimer(hwnd, kTimerAddress);
+                return 0;
+            }
             if (!address_keys_sent) {
-                if (ModifiersDown() && ++address_ticks < 40) return 0;
+                if (ModifiersDown()) {
+                    if (++address_ticks >= 40) KillTimer(hwnd, kTimerAddress);
+                    return 0;
+                }
                 address_ticks = 0;
                 SendAddressKeys();
                 return 0;
             }
             GUITHREADINFO gti{sizeof(gti)};
             const HWND focus = dlg.dialog && GetGUIThreadInfo(dlg.tid, &gti) ? gti.hwndFocus : nullptr;
-            if (focus && focus != dlg.name_edit && IsChild(dlg.dialog, focus) && ClassOf(focus) == L"Edit") {
+            if (focus != dlg.name_edit && IsAddressEdit(dlg.dialog, focus)) {
                 KillTimer(hwnd, kTimerAddress);
-                SetText(focus, address_path);
+                if (!SetText(focus, PlainPath(address_path))) return 0;
+                GUITHREADINFO confirmed{sizeof(confirmed)};
+                if (!GetGUIThreadInfo(dlg.tid, &confirmed) || confirmed.hwndFocus != focus || ModifiersDown()) return 0;
                 INPUT keys[2]{};
                 keys[0].type = keys[1].type = INPUT_KEYBOARD;
                 keys[0].ki.wVk = keys[1].ki.wVk = VK_RETURN;
@@ -1882,3 +1905,271 @@ bool DialogJump::FocusSearch() {
     return true;
 }
 } // namespace pulse::app
+
+namespace pulse::app {
+#ifdef PULSE_WITH_TEST_HOOKS
+int RunDialogJumpNavigationTest(const wchar_t* output) {
+    namespace fs = std::filesystem;
+    fs::create_directories(output);
+    std::ofstream log(fs::path(output) / L"navigation-results.txt");
+    if (!log) return 4;
+    log << "START real shell dialog directory navigation" << std::endl;
+    const fs::path root = fs::absolute(L"bench_data") / (L"jump-navigation-" + std::to_wstring(GetCurrentProcessId()));
+    const fs::path destination = root / L"Downloads";
+    fs::create_directories(destination);
+    int failures = 0;
+    // Exercise Windows' host behavior independently of installed takeover registration.
+    const HMODULE native = LoadLibraryExW(L"comdlg32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    using ClassObject = HRESULT (WINAPI*)(REFCLSID, REFIID, void**);
+    const auto factory_entry = native ? reinterpret_cast<ClassObject>(GetProcAddress(native, "DllGetClassObject")) : nullptr;
+    for (int mode = 0; mode < 3; ++mode) {
+        ComPtr<IFileDialog> dialog;
+        ComPtr<IClassFactory> factory;
+        HRESULT created = factory_entry ? factory_entry(mode == 1 ? CLSID_FileSaveDialog : CLSID_FileOpenDialog,
+            IID_PPV_ARGS(&factory)) : E_NOINTERFACE;
+        if (SUCCEEDED(created)) created = factory->CreateInstance(nullptr, IID_PPV_ARGS(&dialog));
+        if (FAILED(created)) { log << "[FAIL] create mode=" << mode << " hr=" << std::hex << created << std::endl; ++failures; continue; }
+        FILEOPENDIALOGOPTIONS options{};
+        dialog->GetOptions(&options);
+        dialog->SetOptions(options | FOS_NOCHANGEDIR | FOS_DONTADDTORECENT | (mode == 2 ? FOS_PICKFOLDERS : 0));
+        ComPtr<IShellItem> start;
+        SHCreateItemFromParsingName(root.c_str(), nullptr, IID_PPV_ARGS(&start));
+        dialog->SetFolder(start.Get());
+        dialog->SetFileName(L"keep-this-name.txt");
+        dialog->SetTitle(L"Pulse isolated jump navigation test");
+        DialogJump::Impl jump;
+        jump.instance = GetModuleHandleW(nullptr);
+        jump.ctx.remember = false;
+        jump.bar.hwnd = CreateWindowExW(WS_EX_TOOLWINDOW, L"STATIC", L"Jump navigation fixture",
+            WS_POPUP, 0, 0, 10, 10, nullptr, nullptr, jump.instance, nullptr);
+        if (!jump.bar.hwnd) { log << "[FAIL] timer window error=" << GetLastError() << std::endl; ++failures; continue; }
+        ShowWindow(jump.bar.hwnd, SW_HIDE); // Consume a test launcher's initial show override.
+        struct Driver {
+            DialogJump::Impl* jump;
+            IFileDialog* dialog;
+            std::ofstream* log;
+            std::wstring target;
+            int mode, ticks = 0, submitted_tick = 0;
+            bool started = false, submitted = false, navigated = false, kept_name = false;
+            static void CALLBACK Tick(HWND window, UINT, UINT_PTR, DWORD) {
+                auto* self = reinterpret_cast<Driver*>(GetPropW(window, L"Pulse.JumpDriver"));
+                if (!self) return;
+                ++self->ticks;
+                if (self->ticks == 1) *self->log << "timer entered" << std::endl;
+                if (self->ticks < 10) return; // Let the native dialog finish its initial focus setup.
+                if (!self->started) {
+                    HWND host = nullptr;
+                    EnumThreadWindows(GetCurrentThreadId(), [](HWND candidate, LPARAM parameter) -> BOOL {
+                        if (ClassOf(candidate) == L"#32770" && TextOf(candidate) == L"Pulse isolated jump navigation test") {
+                            *reinterpret_cast<HWND*>(parameter) = candidate;
+                            return FALSE;
+                        }
+                        return TRUE;
+                    }, reinterpret_cast<LPARAM>(&host));
+                    if (self->ticks == 1) *self->log << "host=" << host << std::endl;
+                    if (!host || !IsWindowVisible(host)) {
+                        return;
+                    }
+                    auto& info = self->jump->dlg;
+                    info.dialog = host; info.tid = GetWindowThreadProcessId(host, &info.pid);
+                    info.save = self->mode == 1; info.folder_picker = self->mode == 2; info.modern = true;
+                    EnumChildWindows(host, [](HWND child, LPARAM parameter) -> BOOL {
+                        auto* info = reinterpret_cast<DialogInfo*>(parameter);
+                        if (ClassOf(child) == L"Edit" && (GetDlgCtrlID(child) == 0x480 ||
+                            ClassOf(GetParent(GetParent(child))) == L"FloatNotifySink")) info->name_edit = child;
+                        return TRUE;
+                    }, reinterpret_cast<LPARAM>(&info));
+                    const DWORD foreground_thread = GetWindowThreadProcessId(GetForegroundWindow(), nullptr);
+                    const DWORD self_thread = GetCurrentThreadId();
+                    const bool attached = foreground_thread && foreground_thread != self_thread &&
+                        AttachThreadInput(self_thread, foreground_thread, TRUE);
+                    SetForegroundWindow(host);
+                    if (attached) AttachThreadInput(self_thread, foreground_thread, FALSE);
+                    *self->log << "starting folder pick" << std::endl;
+                    self->started = true;
+                    // Exercise the same quick-access row selection path as Downloads.
+                    self->jump->rows = {{DialogJump::Impl::Row::Kind::Item, L"Downloads", self->target, true}};
+                    self->jump->Pick(0);
+                    *self->log << "folder pick scheduled" << std::endl;
+                } else if (!self->submitted) {
+                    GUITHREADINFO focus{sizeof(focus)};
+                    GetGUIThreadInfo(self->jump->dlg.tid, &focus);
+                    const bool ready = self->jump->address_keys_sent && IsAddressEdit(self->jump->dlg.dialog, focus.hwndFocus);
+                    self->jump->HandleBar(window, WM_TIMER, kTimerAddress, 0);
+                    if (self->ticks == 15) {
+                        *self->log << "address_keys=" << self->jump->address_keys_sent
+                            << " foreground=" << GetForegroundWindow() << " host=" << self->jump->dlg.dialog << std::endl;
+                        for (HWND item = focus.hwndFocus; item; item = GetParent(item)) {
+                            const auto name = ClassOf(item);
+                            *self->log << "focus ancestor=";
+                            for (wchar_t ch : name) *self->log << static_cast<char>(ch < 128 ? ch : L'?');
+                            *self->log << " id=" << GetDlgCtrlID(item) << std::endl;
+                        }
+                    }
+                    if (ready) { self->submitted = true; self->submitted_tick = self->ticks; }
+                }
+                if ((self->submitted && self->ticks - self->submitted_tick > 30) || self->ticks > 120) {
+                    KillTimer(window, 91);
+                    PostMessageW(self->jump->dlg.dialog, WM_CLOSE, 0, 0);
+                }
+            }
+        } driver{&jump, dialog.Get(), &log, destination.wstring(), mode};
+        struct FolderObserver final : IFileDialogEvents {
+            Driver& driver;
+            ULONG references = 1;
+            explicit FolderObserver(Driver& value) : driver(value) {}
+            HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+                if (!out) return E_POINTER;
+                *out = nullptr;
+                if (iid != IID_IUnknown && iid != IID_IFileDialogEvents) return E_NOINTERFACE;
+                *out = static_cast<IFileDialogEvents*>(this); AddRef(); return S_OK;
+            }
+            ULONG STDMETHODCALLTYPE AddRef() override { return ++references; }
+            ULONG STDMETHODCALLTYPE Release() override { const ULONG left = --references; if (!left) delete this; return left; }
+            HRESULT STDMETHODCALLTYPE OnFileOk(IFileDialog*) override { return S_OK; }
+            HRESULT STDMETHODCALLTYPE OnFolderChanging(IFileDialog*, IShellItem*) override { return S_OK; }
+            HRESULT STDMETHODCALLTYPE OnFolderChange(IFileDialog* current) override {
+                ComPtr<IShellItem> folder;
+                PWSTR path = nullptr;
+                if (SUCCEEDED(current->GetFolder(&folder)) && SUCCEEDED(folder->GetDisplayName(SIGDN_FILESYSPATH, &path))) {
+                    driver.navigated = SamePath(path, driver.target);
+                    CoTaskMemFree(path);
+                }
+                if (driver.navigated) {
+                    PWSTR name = nullptr;
+                    if (SUCCEEDED(current->GetFileName(&name))) {
+                        driver.kept_name = std::wstring(name) == L"keep-this-name.txt";
+                        CoTaskMemFree(name);
+                    }
+                }
+                return S_OK;
+            }
+            HRESULT STDMETHODCALLTYPE OnSelectionChange(IFileDialog*) override { return S_OK; }
+            HRESULT STDMETHODCALLTYPE OnShareViolation(IFileDialog*, IShellItem*, FDE_SHAREVIOLATION_RESPONSE* response) override { *response = FDESVR_DEFAULT; return S_OK; }
+            HRESULT STDMETHODCALLTYPE OnTypeChange(IFileDialog*) override { return S_OK; }
+            HRESULT STDMETHODCALLTYPE OnOverwrite(IFileDialog*, IShellItem*, FDE_OVERWRITE_RESPONSE* response) override { *response = FDEOR_DEFAULT; return S_OK; }
+        };
+        ComPtr<FolderObserver> observer;
+        observer.Attach(new FolderObserver(driver));
+        DWORD cookie = 0;
+        dialog->Advise(observer.Get(), &cookie);
+        const bool property = SetPropW(jump.bar.hwnd, L"Pulse.JumpDriver", &driver) != FALSE;
+        const UINT_PTR timer = SetTimer(jump.bar.hwnd, 91, 30, Driver::Tick);
+        log << "mode=" << mode << " property=" << property << " timer=" << timer << std::endl;
+        const HRESULT result = dialog->Show(nullptr);
+        dialog->Unadvise(cookie);
+        KillTimer(jump.bar.hwnd, 91);
+        KillTimer(jump.bar.hwnd, kTimerAddress);
+        const bool okay = result == HRESULT_FROM_WIN32(ERROR_CANCELLED) && driver.navigated && (mode != 1 || driver.kept_name);
+        log << (okay ? "[PASS] " : "[FAIL] ") << "mode=" << mode << " directory row navigates without accepting; save name retained"
+            << " result=" << std::hex << result << std::dec << " navigated=" << driver.navigated
+            << " kept=" << driver.kept_name << std::endl;
+        if (!okay) ++failures;
+        RemovePropW(jump.bar.hwnd, L"Pulse.JumpDriver");
+        DestroyWindow(jump.bar.hwnd); jump.bar.hwnd = nullptr;
+    }
+    if (root.parent_path() == fs::absolute(L"bench_data") && root.filename().wstring().starts_with(L"jump-navigation-")) {
+        std::error_code error; fs::remove_all(root, error);
+    }
+    if (native) FreeLibrary(native);
+    return failures ? 1 : 0;
+}
+#endif
+
+int RunDialogJumpPlacementCapture(const wchar_t* output) {
+    std::filesystem::create_directories(output);
+    std::ofstream log(std::filesystem::path(output)/L"results.txt");
+    int failures=0;
+    auto check=[&](bool ok,const char* label){log<<(ok?"[PASS] ":"[FAIL] ")<<label<<'\n';if(!ok)++failures;};
+    DialogJump::Impl f;
+    f.instance=GetModuleHandleW(nullptr);
+    f.bar.hwnd=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_NOREDIRECTIONBITMAP,L"STATIC",L"Jump fixture",WS_POPUP,0,0,800,44,nullptr,nullptr,f.instance,nullptr);
+    f.list.hwnd=CreateWindowExW(WS_EX_TOOLWINDOW|WS_EX_NOREDIRECTIONBITMAP,L"STATIC",L"Jump popup fixture",WS_POPUP,0,0,520,200,nullptr,nullptr,f.instance,nullptr);
+    f.icons=std::make_unique<ui::ShellIconCache>(); f.ctx.index=false; f.UpdatePalette();
+    MONITORINFO mi{sizeof(mi)};GetMonitorInfoW(MonitorFromWindow(f.bar.hwnd,MONITOR_DEFAULTTOPRIMARY),&mi);
+    f.dlg.dialog=CreateWindowExW(0,L"STATIC",L"Isolated dialog fixture",WS_OVERLAPPEDWINDOW,80,80,800,500,nullptr,nullptr,f.instance,nullptr);
+    ShowWindow(f.dlg.dialog,SW_SHOWNOACTIVATE);
+    for(int i=0;i<3;++i) {
+        SetWindowPos(f.dlg.dialog,nullptr,mi.rcWork.left+80,i==0?mi.rcWork.top+80:mi.rcWork.bottom-500,800,500,SWP_NOZORDER|SWP_NOACTIVATE);
+        if(i==2) ShowWindow(f.dlg.dialog,SW_MAXIMIZE);
+        f.Place();RECT frame{};
+        DwmGetWindowAttribute(f.dlg.dialog,DWMWA_EXTENDED_FRAME_BOUNDS,&frame,sizeof(frame));
+        check(f.strip_px.top==frame.bottom,"below dialog");
+        check(f.strip_px.bottom<=mi.rcWork.bottom,"inside work area");
+        check(f.strip_px.left==frame.left&&f.strip_px.right==frame.right,"aligned edges");
+        for(int j=0;j<30;++j){f.PaintBar();MSG msg{};while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)){TranslateMessage(&msg);DispatchMessageW(&msg);}Sleep(20);}
+        check(f.bar.comp&&f.bar.comp->SaveSnapshot((std::filesystem::path(output)/(std::to_wstring(i)+L"-bar.png")).c_str()),"compositor screenshot");
+        // Exercise the real popup path against stale cached strip geometry.
+        const RECT saved_strip = f.strip_px;
+        f.strip_px = {0, 0, 800, 44};
+        f.rows = {
+            {DialogJump::Impl::Row::Kind::Group, l10n::Get(StringId::DialogJumpFrequent), {}, true},
+            {DialogJump::Impl::Row::Kind::Item, L"Desktop fixture", L"C:\\PulseFixture\\Desktop", true},
+            {DialogJump::Impl::Row::Kind::Item, L"Downloads fixture", L"C:\\PulseFixture\\Downloads", true}};
+        for (bool places : {false, true}) {
+            f.list_mode = places ? DialogJump::Impl::ListMode::Places : DialogJump::Impl::ListMode::Search;
+            f.ShowList();
+            RECT actual_bar{}, actual_popup{};
+            GetClientRect(f.bar.hwnd, &actual_bar);
+            POINT origin{}; ClientToScreen(f.bar.hwnd, &origin);
+            OffsetRect(&actual_bar, origin.x, origin.y);
+            GetWindowRect(f.list.hwnd, &actual_popup);
+            const auto expected = PlaceDialogJumpPopup(actual_bar, mi.rcWork,
+                places ? f.more_rect.right : f.query_rect.left, f.scale,
+                static_cast<int>(std::lround(std::min(kListWidth, f.width) * f.scale)),
+                static_cast<int>(std::lround(f.ListHeight() * f.scale)),
+                static_cast<int>(std::lround(kListGap * f.scale)), places, true);
+            check(EqualRect(&actual_popup, &expected.rect),
+                places ? "real places popup uses live bar origin despite stale cache"
+                       : "real search popup uses live bar origin despite stale cache");
+            f.PaintList();
+            check(f.list.comp && f.list.comp->SaveSnapshot((std::filesystem::path(output) /
+                (std::to_wstring(i) + (places ? L"-places.png" : L"-search.png"))).c_str()),
+                "popup compositor screenshot");
+            f.HideList();
+        }
+        f.strip_px = saved_strip;
+        log<<"scenario="<<i<<" dialog="<<frame.left<<","<<frame.top<<","<<frame.right<<","<<frame.bottom<<" bar="<<f.strip_px.left<<","<<f.strip_px.top<<","<<f.strip_px.right<<","<<f.strip_px.bottom<<'\n';
+    }
+    f.edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE, 40, 8, 210, 26,
+        f.bar.hwnd, nullptr, f.instance, nullptr);
+    f.ctx.remember = true;
+    f.ctx.folders = {{L"C:\\PulseFixture\\Desktop", L"Desktop fixture", false, false}};
+    f.scores = {1.0}; f.exists = {1};
+    f.search_requested = false;
+    f.HideList();
+    SetWindowTextW(f.edit, L"");
+    f.HandleBar(f.bar.hwnd, WM_COMMAND, MAKEWPARAM(0, EN_CHANGE), reinterpret_cast<LPARAM>(f.edit));
+    f.OnEditFocus(true);
+    check(f.list_mode == DialogJump::Impl::ListMode::Hidden && !IsWindowVisible(f.list.hwnd),
+        "passive edit initialization and focus never expand frequent dropdown");
+    f.showing = true;
+    f.HandleBar(f.bar.hwnd, kMsgFocus, 0, 0);
+    check(f.list_mode == DialogJump::Impl::ListMode::Search && IsWindowVisible(f.list.hwnd),
+        "explicit FocusSearch expands frequent dropdown even if edit already focused");
+    f.OnEditFocus(false);
+    f.OnEditFocus(true);
+    check(!f.search_requested && f.list_mode == DialogJump::Impl::ListMode::Hidden &&
+        !IsWindowVisible(f.list.hwnd), "passive refocus after blur does not reopen dropdown");
+    f.HandleBar(f.bar.hwnd, kMsgFocus, 0, 0);
+    check(f.list_mode == DialogJump::Impl::ListMode::Search && IsWindowVisible(f.list.hwnd),
+        "explicit FocusSearch still reopens after blur");
+    f.EditKey(VK_ESCAPE);
+    f.OnEditFocus(false);
+    f.OnEditFocus(true);
+    check(!f.search_requested && f.list_mode == DialogJump::Impl::ListMode::Hidden &&
+        !IsWindowVisible(f.list.hwnd), "dismissed dropdown stays closed on passive refocus");
+    f.EditKey(VK_DOWN);
+    check(f.list_mode == DialogJump::Impl::ListMode::Search && IsWindowVisible(f.list.hwnd),
+        "explicit arrow key reopens dismissed dropdown");
+    f.HideList();
+    f.HandleBar(f.bar.hwnd, kMsgContext, 0, 0);
+    check(f.list_mode == DialogJump::Impl::ListMode::Hidden && !IsWindowVisible(f.list.hwnd),
+        "passive context refresh leaves dropdown closed");
+    DestroyWindow(f.edit); f.edit = nullptr;
+    f.HideList(); f.list.comp.reset(); DestroyWindow(f.list.hwnd);
+    f.icons.reset();f.bar.comp.reset();DestroyWindow(f.bar.hwnd);DestroyWindow(f.dlg.dialog);
+    if(f.edit_font)DeleteObject(f.edit_font);if(f.field_brush)DeleteObject(f.field_brush);
+    return failures?1:0;
+}
+}

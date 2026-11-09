@@ -1,5 +1,6 @@
 #include "../app/app_worker.h"
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 
 namespace {
@@ -17,6 +18,10 @@ BOOL WINAPI FixtureAttributes(LPCWSTR path, GET_FILEEX_INFO_LEVELS, LPVOID outpu
     }
     auto& data = *static_cast<WIN32_FILE_ATTRIBUTE_DATA*>(output);
     data = {}; data.dwFileAttributes = FILE_ATTRIBUTE_NORMAL; data.nFileSizeLow = 7;
+    const DWORD stamp = value.ends_with(L"z.txt") ? 100 : value.ends_with(L"a.txt") ? 300 : 200;
+    data.ftLastWriteTime.dwLowDateTime = stamp;
+    data.ftCreationTime.dwLowDateTime = stamp;
+    data.ftLastAccessTime.dwLowDateTime = stamp;
     return TRUE;
 }
 }
@@ -25,6 +30,10 @@ BOOL WINAPI FixtureAttributes(LPCWSTR path, GET_FILEEX_INFO_LEVELS, LPVOID outpu
 #undef GetFileAttributesExW
 
 namespace pulse::fs {
+bool IsDevicePath(const std::wstring&) { return false; }
+std::wstring FormatDevicePath(const DevicePath&) { return {}; }
+uint64_t WatchClock() noexcept { return 0; }
+void WaitForStartingWatch(const std::wstring&, DWORD, DWORD) {}
 bool IsVirtualPath(const std::wstring& p) { return p.starts_with(L"pulse:"); }
 bool IsUncPath(const std::wstring& p) { return p.starts_with(L"\\\\"); }
 DWORD ReadReparseTag(const std::wstring&) { return 0; }
@@ -35,17 +44,15 @@ NetSnapshotWrite BeginNetSnapshotWrite(const std::wstring&) { return {}; }
 bool SaveNetSnapshot(const NetSnapshotWrite&, const SnapshotPtr&) { return true; }
 }
 namespace pulse::app {
+namespace startup_trace { void Mark(const char*) noexcept {} }
+void RefreshDriveEjectable(const std::wstring&, uint8_t) {}
+std::vector<ThisPcLauncher> CurrentThisPcLaunchers() { return {}; }
+DeviceRegistry& DeviceRegistry::Instance() { std::abort(); }
+std::vector<fs::DeviceInfo> DeviceRegistry::Devices() const { return {}; }
+fs::DeviceError DeviceRegistry::ListFolder(const std::wstring&, std::vector<fs::DirEntry>&,
+    const std::function<bool()>&) { std::abort(); }
 std::wstring FindGitRoot(const std::wstring&) { return {}; }
 void ResolveLinksInPlace(const std::wstring&, std::vector<fs::DirEntry>&, const std::function<bool()>&) {}
-ScopedEntryGrouping::ScopedEntryGrouping(int, const std::wstring&) {}
-ScopedEntryGrouping::~ScopedEntryGrouping() = default;
-bool EntryLess(const fs::DirEntry& a, const fs::DirEntry& b, ui::SortColumn, ui::SortDirection direction) {
-    return direction == ui::SortDirection::Asc ? a.name < b.name : a.name > b.name;
-}
-void SortEntriesBySize(std::vector<fs::DirEntry>&, ui::SortDirection, const FolderSizeLookup&, const std::function<void()>&) {}
-void SortEntries(std::vector<fs::DirEntry>& entries, ui::SortColumn col, ui::SortDirection dir, const std::function<void()>& tick) {
-    std::sort(entries.begin(), entries.end(), [&](const fs::DirEntry& a, const fs::DirEntry& b) { if (tick) tick(); return EntryLess(a, b, col, dir); });
-}
 }
 namespace pulse::diagnostics::runtime {
 void Event(const char*, std::initializer_list<Field>, Level) noexcept {}
@@ -75,6 +82,15 @@ struct Results {
         const auto& item = it->second.snapshot->front();
         const auto stamp = (static_cast<uint64_t>(item.mtime.dwHighDateTime) << 32) | item.mtime.dwLowDateTime;
         return !it->second.cancelled && !it->second.error && item.name == name && (!time || stamp == time);
+    }
+    bool Order(uint64_t generation, const std::vector<std::wstring>& names) {
+        std::lock_guard lock(mutex);
+        const auto it = values.find(generation);
+        if (it == values.end() || it->second.error || it->second.cancelled || !it->second.snapshot ||
+            it->second.snapshot->size() != names.size()) return false;
+        for (size_t i = 0; i < names.size(); ++i)
+            if ((*it->second.snapshot)[i].name != names[i]) return false;
+        return true;
     }
     bool Empty(uint64_t generation) {
         std::lock_guard lock(mutex);
@@ -149,6 +165,28 @@ int main() {
         const auto subsequent = worker.LoadPaths(L"pulse:recent", {L"C:\\fixture\\subsequent.txt"}, columns, ascending);
         check(first_done && results.Wait(subsequent) && results.Item(completed, L"completed.txt") &&
               results.Item(subsequent, L"subsequent.txt"), "request completed before next submission remains independently delivered");
+        const std::vector<std::wstring> manual_paths{L"C:\\fixture\\m.txt", L"C:\\fixture\\z.txt", L"C:\\fixture\\a.txt"};
+        const auto original_paths = manual_paths;
+        for (const auto column : {ui::SortColumn::Name, ui::SortColumn::Mtime,
+                                  ui::SortColumn::Created, ui::SortColumn::Accessed}) {
+            for (const auto direction : {ui::SortDirection::Asc, ui::SortDirection::Desc}) {
+                std::vector<std::wstring> expected = column == ui::SortColumn::Name
+                    ? std::vector<std::wstring>{L"a.txt", L"m.txt", L"z.txt"}
+                    : std::vector<std::wstring>{L"z.txt", L"m.txt", L"a.txt"};
+                if (direction == ui::SortDirection::Desc) std::reverse(expected.begin(), expected.end());
+                for (int refresh = 0; refresh < 2; ++refresh) {
+                    const auto sorted = worker.LoadPaths(L"pulse:starred", manual_paths, column, direction,
+                        false, {}, 0, app::FolderSortMode::Mixed);
+                    check(results.Wait(sorted) && results.Order(sorted, expected),
+                        refresh ? "favorites refresh retains selected column order" : "favorites real worker sorts name/date in both directions");
+                }
+            }
+        }
+        check(manual_paths == original_paths, "favorites sorting leaves source manual order unchanged");
+        const auto recent_order = worker.LoadPaths(L"pulse:recent", manual_paths, ui::SortColumn::Name,
+            ui::SortDirection::Asc, true, {300, 200, 100});
+        check(results.Wait(recent_order) && results.Order(recent_order, {L"m.txt", L"z.txt", L"a.txt"}),
+            "recent retains supplied opened order");
         worker.Stop();
         check(!results.Has(cancelled), "cancelled consumer cannot publish late data to remaining consumers");
     }

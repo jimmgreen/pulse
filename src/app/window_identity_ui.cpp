@@ -26,8 +26,19 @@ constexpr int kCmdAutoName = 1;
 constexpr int kCmdOverview = 2;
 constexpr int kCmdColorBase = 10;
 
-// A round dot in `rgb` with a light rim, so it reads on any taskbar.
-HICON MakeDotIcon(uint32_t rgb, int size) {
+// The taskbar follows the Windows mode (SystemUsesLightTheme), not Pulse's
+// theme; its surface color rings the dot so it separates from the icon.
+uint32_t TaskbarSurfaceRgb() {
+    DWORD light = 0, size = sizeof(light);
+    const bool read = RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                                   L"SystemUsesLightTheme", RRF_RT_REG_DWORD, nullptr, &light, &size) == ERROR_SUCCESS;
+    return read && light ? 0xEEEEEE : 0x202020;
+}
+
+// The window's dot in the overlay's bottom-right corner, ringed in the
+// taskbar color - the same mark as the title bar's rail dot, small enough
+// not to read as a notification badge. Transparent elsewhere.
+HICON MakeDotIcon(uint32_t rgb, uint32_t ring_rgb, int size) {
     if (size <= 0) return nullptr;
     BITMAPV5HEADER bi{};
     bi.bV5Size = sizeof(bi);
@@ -48,23 +59,25 @@ HICON MakeDotIcon(uint32_t rgb, int size) {
         if (color) DeleteObject(color);
         return nullptr;
     }
-    const float center = size * 0.5f;
-    const float outer = center - 0.5f;
-    const float rim = (std::max)(1.0f, size / 10.0f);
-    const float fr = static_cast<float>((rgb >> 16) & 0xFF);
-    const float fg = static_cast<float>((rgb >> 8) & 0xFF);
-    const float fb = static_cast<float>(rgb & 0xFF);
+    // In 16ths of the overlay edge: centre (11, 11), ring 5, dot 3.5.
+    const float unit = size / 16.0f;
+    const float center = 11.0f * unit;
+    const float ring = 5.0f * unit;
+    const float dot = 3.5f * unit;
+    const auto channel = [](uint32_t c, int shift) { return static_cast<float>((c >> shift) & 0xFF); };
     auto* px = static_cast<uint32_t*>(bits);
     for (int y = 0; y < size; ++y) {
         for (int x = 0; x < size; ++x) {
             const float dx = x + 0.5f - center;
             const float dy = y + 0.5f - center;
             const float d = std::sqrt(dx * dx + dy * dy);
-            const float alpha = std::clamp(outer - d + 0.5f, 0.0f, 1.0f);
-            const float fill = std::clamp(outer - rim - d + 0.5f, 0.0f, 1.0f);
-            const auto mix = [fill](float c) { return static_cast<uint32_t>(std::lround(c * fill + 255.0f * (1.0f - fill))); };
+            const float alpha = std::clamp(ring - d + 0.5f, 0.0f, 1.0f);
+            const float fill = std::clamp(dot - d + 0.5f, 0.0f, 1.0f);
+            const auto mix = [&](int shift) {
+                return static_cast<uint32_t>(std::lround(channel(rgb, shift) * fill + channel(ring_rgb, shift) * (1.0f - fill)));
+            };
             const uint32_t a = static_cast<uint32_t>(std::lround(alpha * 255.0f));
-            px[y * size + x] = (a << 24) | (mix(fr) << 16) | (mix(fg) << 8) | mix(fb);
+            px[y * size + x] = a ? (a << 24) | (mix(16) << 16) | (mix(8) << 8) | mix(0) : 0;
         }
     }
     std::vector<BYTE> zeros(static_cast<size_t>(((size + 15) / 16) * 2 * size), 0);
@@ -92,8 +105,12 @@ std::wstring WindowDisplayName(const AppState& s) {
     return L"Pulse";
 }
 
+// Names and dots tell open windows apart, so a window closed to the tray
+// (hidden, still registered) does not count as one of several.
 bool WindowIdentityShown(const AppState& s) {
-    return app::ShowsWindowIdentity(s.core.windows.Count());
+    size_t open = 0;
+    s.core.windows.ForEach([&open](HWND, const AppState& w) { if (!w.hidden_to_tray) ++open; });
+    return app::ShowsWindowIdentity(open);
 }
 
 UINT TaskbarButtonCreatedMessage() {
@@ -108,7 +125,7 @@ void SyncWindowOverlay(AppState& s) {
     std::wstring label;
     if (show) {
         const int size = pulse::compat::SystemMetricsForDpi(SM_CXSMICON, pulse::compat::WindowDpi(s.hwnd));
-        next = MakeDotIcon(app::kWindowColors[s.identity.color], size);
+        next = MakeDotIcon(app::kWindowColors[s.identity.color], TaskbarSurfaceRgb(), size);
         label = WindowDisplayName(s);
     }
     if (next || s.identity_overlay) {
@@ -145,7 +162,7 @@ void SyncWindowIdentities(AppState& any) {
 
 bool HandleWindowIdentityPress(AppState& s, const ui::HitTestResult& hit, POINT client) {
     if (hit.region != ui::HitTestResult::WindowIdentity || !s.hwnd) return false;
-    s.dragPending = false;
+    s.listSelection.EndFile();
     POINT screen = client;
     ClientToScreen(s.hwnd, &screen);
     // Still part of the title bar: a drag moves the window (and can merge it).
@@ -158,7 +175,7 @@ bool HandleWindowIdentityPress(AppState& s, const ui::HitTestResult& hit, POINT 
 
 bool HandleWindowIdentityDoubleClick(AppState& s, const ui::HitTestResult& hit, POINT client) {
     if (hit.region != ui::HitTestResult::WindowIdentity || !s.hwnd) return false;
-    s.dragPending = false;
+    s.listSelection.EndFile();
     POINT screen = client;
     ClientToScreen(s.hwnd, &screen);
     ShowWindowIdentityMenu(s, screen);

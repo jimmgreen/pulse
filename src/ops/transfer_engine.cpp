@@ -1,7 +1,9 @@
 // transfer_engine.cpp — See transfer_engine.h.
 #include "transfer_engine.h"
+#include "../common/worker_thread.h"
 #include "owned_transfer_output.h"
 #include "../fs/drive_kind.h"
+#include "../common/runtime_log.h"
 #include <winioctl.h>
 #include <algorithm>
 #include <chrono>
@@ -18,26 +20,39 @@ std::wstring VolumeRoot(const std::wstring& path) {
     return root.data();
 }
 
-Storage StorageOf(const std::wstring& path) {
+Storage StorageOf(const std::wstring& path, uint64_t endpoint = 0) {
+    const bool diagnostic = diagnostics::runtime::Enabled();
+    const auto started = GetTickCount64();
+    uint64_t drive_type = 0, bus = 0, seek_bytes = 0;
+    DWORD query_error = 0, bus_error = 0;
+    const auto finish = [&](Storage storage, DWORD error = ERROR_SUCCESS) {
+        if (diagnostic) diagnostics::runtime::Event("copy_storage_probe", {
+            {"storage", static_cast<uint64_t>(storage)}, {"endpoint", endpoint}, {"drive_type", drive_type},
+            {"bus_type", bus}, {"error", error}, {"seek_query_error", query_error},
+            {"seek_descriptor_bytes", seek_bytes}, {"bus_query_error", bus_error},
+            {"elapsed_ms", GetTickCount64() - started}});
+        return storage;
+    };
     const std::wstring root = VolumeRoot(path);
-    if (root.empty()) return Storage::Unknown;
-    if (::pulse::fs::IsRemoteLikeDrive(root)) return Storage::Remote;  // includes cloud mounts
-    switch (GetDriveTypeW(root.c_str())) {
-    case DRIVE_REMOTE: return Storage::Remote;
+    if (root.empty()) return finish(Storage::Unknown, GetLastError());
+    if (::pulse::fs::IsRemoteLikeDrive(root)) return finish(Storage::Remote);  // includes cloud mounts
+    drive_type = GetDriveTypeW(root.c_str());
+    switch (drive_type) {
+    case DRIVE_REMOTE: return finish(Storage::Remote);
     case DRIVE_REMOVABLE:
-    case DRIVE_CDROM: return Storage::Removable;
+    case DRIVE_CDROM: return finish(Storage::Removable);
     case DRIVE_FIXED: break;
-    default: return Storage::Unknown;
+    default: return finish(Storage::Unknown);
     }
     // \\?\Volume{...}\ works for drive letters and mount points alike; the
     // device is opened without the trailing backslash and without access.
     wchar_t volume[MAX_PATH]{};
-    if (!GetVolumeNameForVolumeMountPointW(root.c_str(), volume, MAX_PATH)) return Storage::Unknown;
+    if (!GetVolumeNameForVolumeMountPointW(root.c_str(), volume, MAX_PATH)) return finish(Storage::Unknown, GetLastError());
     std::wstring device = volume;
     if (!device.empty() && device.back() == L'\\') device.pop_back();
     HANDLE handle = CreateFileW(device.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                                 OPEN_EXISTING, 0, nullptr);
-    if (handle == INVALID_HANDLE_VALUE) return Storage::Unknown;
+    if (handle == INVALID_HANDLE_VALUE) return finish(Storage::Unknown, GetLastError());
     STORAGE_PROPERTY_QUERY query{};
     query.PropertyId = StorageDeviceSeekPenaltyProperty;
     query.QueryType = PropertyStandardQuery;
@@ -45,10 +60,21 @@ Storage StorageOf(const std::wstring& path) {
     DWORD returned = 0;
     const BOOL ok = DeviceIoControl(handle, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof(query),
                                     &seek, sizeof(seek), &returned, nullptr);
+    query_error = ok ? ERROR_SUCCESS : GetLastError();
+    seek_bytes = returned;
+    if (diagnostic) {
+        query.PropertyId = StorageDeviceProperty;
+        STORAGE_DEVICE_DESCRIPTOR descriptor{};
+        DWORD descriptor_bytes = 0;
+        const BOOL bus_ok = DeviceIoControl(handle, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof(query),
+                &descriptor, sizeof(descriptor), &descriptor_bytes, nullptr);
+        if (bus_ok && descriptor_bytes >= sizeof(descriptor)) bus = descriptor.BusType;
+        else bus_error = bus_ok ? ERROR_INVALID_DATA : GetLastError();
+    }
     CloseHandle(handle);
     // A volume over several disks has no single answer.
-    if (!ok || returned < sizeof(seek)) return Storage::Unknown;
-    return seek.IncursSeekPenalty ? Storage::Spinning : Storage::Solid;
+    if (!ok || returned < sizeof(seek)) return finish(Storage::Unknown, query_error ? query_error : ERROR_INVALID_DATA);
+    return finish(seek.IncursSeekPenalty ? Storage::Spinning : Storage::Solid);
 }
 
 unsigned ThreadsFor(Storage storage) {
@@ -72,20 +98,20 @@ constexpr auto kTakeWait = std::chrono::milliseconds(100);
 }  // namespace
 
 unsigned TransferThreadCount(const std::wstring& source, const std::wstring& dest_dir) {
-    return (std::min)(ThreadsFor(StorageOf(source)), ThreadsFor(StorageOf(dest_dir)));
+    return (std::min)(ThreadsFor(StorageOf(source, 1)), ThreadsFor(StorageOf(dest_dir, 2)));
 }
 
 bool IsSolidToSpinningTransfer(const std::wstring& source, const std::wstring& dest_dir) {
-    return StorageOf(source) == Storage::Solid && StorageOf(dest_dir) == Storage::Spinning;
+    return StorageOf(source, 1) == Storage::Solid && StorageOf(dest_dir, 2) == Storage::Spinning;
 }
 
 unsigned MediumTransferThreadCount(const std::wstring& source, const std::wstring& dest_dir) {
-    return StorageOf(source) == Storage::Solid && StorageOf(dest_dir) == Storage::Solid ? 4u : 1u;
+    return StorageOf(source, 1) == Storage::Solid && StorageOf(dest_dir, 2) == Storage::Solid ? 4u : 1u;
 }
 
 TransferTarget DescribeTransferTarget(const std::wstring& source, const std::wstring& dest_dir) {
     TransferTarget target;
-    const Storage storage = StorageOf(dest_dir);
+    const Storage storage = StorageOf(dest_dir, 2);
     target.slow = storage == Storage::Remote || storage == Storage::Removable;
     target.spinning = storage == Storage::Spinning;
     const std::wstring source_root = VolumeRoot(source);
@@ -110,7 +136,19 @@ SmallCopyPool::SmallCopyPool(unsigned threads, std::atomic<bool>& cancel, std::a
     // Bound queued metadata independently of the byte budget.
     capacity_ = bounded_medium_ ? 128 : (std::max<size_t>)(threads * 4, 1024);
     threads_.reserve(threads);
-    for (unsigned i = 0; i < threads; ++i) threads_.emplace_back([this] { Worker(); });
+    try {
+        for (unsigned i = 0; i < threads; ++i) threads_.push_back(StartWorkerThread([this] { Worker(); }));
+    } catch (...) {
+        // A failed constructor does not run our destructor. No jobs have been
+        // submitted yet, so wake and retire the partially constructed pool.
+        {
+            std::lock_guard lock(mutex_);
+            closing_ = true;
+        }
+        work_cv_.notify_all();
+        for (auto& thread : threads_) thread.join();
+        throw;
+    }
 }
 
 SmallCopyPool::~SmallCopyPool() {

@@ -242,7 +242,7 @@ float MainRenderer::SelectionChipLabelWidth(float width, int selected) const {
         return 0.0f;
     return std::ceil(typography::MeasureLine(compositor_,compositor_->SmallFormat(),SelectionChipLabel(selected)));
 }
-// Pinned apps (prototype app_pins.html): program icons after the pinned
+// Pinned apps: program icons after the pinned
 // commands. The dot under an icon says it opens every selected (or dragged)
 // item, a ring some of them; an app that opens none is dimmed. In drop mode
 // they sit on a faint accent band behind a label, and the app under the
@@ -362,18 +362,43 @@ ToolbarSelectionChip MainRenderer::SelectionChipAt(const ToolbarLayout& layout, 
     if (selected <= 0 || embedded_) return {};
     return MakeToolbarSelectionChip(layout,scale_,SelectionChipLabelWidth(width,selected),action_count);
 }
+D2D1_COLOR_F MainRenderer::PrepareIconTones(const Theme& theme, bool dark) {
+    using command_icons::Tone;
+    const auto set=[this](Tone tone,D2D1_COLOR_F color) { icon_tone_colors_[static_cast<size_t>(tone)]=color; };
+    // A slightly softer ink than body text, and one accent part per icon in
+    // its command's colour (pulse_toolbar_icons.html, 分类色). Navigation and
+    // the clipboard follow the user's accent, as a foreground: a touch deeper
+    // on light, lifted on dark; the other hues are fixed per theme.
+    const D2D1_COLOR_F ink=dark ? D2D1::ColorF(1.0f,1.0f,1.0f,0.86f) : HexColor(0x3A465E);
+    const D2D1_COLOR_F accent=dark ? MixColor(theme.accent,HexColor(0xFFFFFF),0.30f)
+                                   : MixColor(theme.accent,HexColor(0x000000),0.14f);
+    set(Tone::None,ink);
+    set(Tone::Nav,accent);
+    set(Tone::Clip,accent);
+    set(Tone::New,HexColor(dark ? 0x5ED29B : 0x18874F));
+    set(Tone::Edit,HexColor(dark ? 0xFF9B5E : 0xC2560F));
+    set(Tone::Danger,HexColor(dark ? 0xFF8B85 : 0xC42B1C));
+    set(Tone::View,HexColor(dark ? 0xAE9BFF : 0x6A4FD6));
+    set(Tone::Place,HexColor(dark ? 0xF3B744 : 0xC7860A));
+    return ink;
+}
+
 void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rect, const Theme& theme) {
     auto* dc = compositor_->Dc();
     struct IconScope {
-        float* stroke; float* box;
-        ~IconScope() { *stroke=0.0f; *box=20.0f; }
-    } icon_scope{&icon_stroke_px_,&icon_box_dip_};
+        float* stroke; float* box; bool* tones;
+        ~IconScope() { *stroke=0.0f; *box=20.0f; *tones=false; }
+    } icon_scope{&icon_stroke_px_,&icon_box_dip_,&icon_tones_};
     icon_stroke_px_=kIconStrokeDip*scale_;
     icon_box_dip_=kIconBoxDip;
+    // Buttons at rest: the toolbar ink, with each icon's accent part in its
+    // command colour. Pressed, toggled-on, disabled and dragged buttons, and
+    // the accent-filled New button, draw the whole icon in one colour.
+    const D2D1_COLOR_F ink=IsHighContrast() ? theme.text_secondary : PrepareIconTones(theme,vm.dark);
     const float left = EffectiveSidebarWidth(rect.right);
     const bool compact = rect.right-left < 600*scale_;
-    const auto layout = ToolbarLayoutAt(rect.right,NewButtonWidthPx(compact),vm.pane.filter_expand);
-    const bool searchOverlay=vm.address_searching && rect.right-left<480*scale_;
+    auto layout = ToolbarLayoutAt(rect.right,NewButtonWidthPx(compact),vm.pane.filter_expand);
+    const bool searchOverlay=vm.address_searching && layout.merged_search;
     ToolbarMotion& tm=ToolbarMotionFor(this);
     if (motion_now_-tm.animations_checked > 2000 || !tm.animations_checked) {
         // The Windows animation switch, re-read every couple of seconds.
@@ -399,7 +424,13 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
     };
     if (searchOverlay || !plates) tm.nav.Reset();
     if (searchOverlay || !plates || (vm.address_editing && !vm.address_searching)) tm.crumbs.Reset();
-    if (!searchOverlay) {
+    {
+        if (!searchOverlay) {
+            fluent::ControlState address_state{};
+            address_state.focused = vm.address_editing && !vm.address_searching;
+            address_state.hovered = !vm.address_editing && IsHovered(vm, HitTestResult::AddressBar);
+            painter_.DrawTextFieldFrame(layout.address, address_state);
+        }
         const wchar_t* nav_glyphs[] = {kIconBack,kIconForward,kIconUp,kIconRefresh};
         const HitTestResult::Region nav_hits[] = {HitTestResult::NavBack,HitTestResult::NavForward,HitTestResult::NavUp,HitTestResult::NavRefresh};
         if (plates) {
@@ -421,19 +452,27 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             fluent::ButtonSpec button;
             button.bounds = r; button.glyph = nav_glyphs[i];
             button.state.enabled = enabled;
+            if (i == 2 && vm.drag_folders_active && !vm.pane.drag_parent_path.empty()) {
+                painter_.StrokeRoundedRect(r, theme.radius_control * scale_, WithAlpha(theme.accent, vm.pane.drop_parent ? 1.0f : 0.3f));
+                if (vm.pane.drop_parent && vm.pane.drop_parent_progress >= 0) {
+                    const float progress = std::clamp(vm.pane.drop_parent_progress, 0.0f, 1.0f);
+                    painter_.FillRoundedRect(D2D1::RectF(r.left + 4 * scale_, r.bottom - 4 * scale_,
+                        r.left + 4 * scale_ + (r.right - r.left - 8 * scale_) * progress, r.bottom - 2 * scale_), scale_, theme.accent);
+                    if (vm.pane.drop_parent_progress < 1.0f) RequestMotionFrame();
+                }
+            }
             button.state.hovered = !plates && enabled && IsHovered(vm, nav_hits[i]);
             // DrawCommandButton's look, with the toolbar's icon size.
             if (button.state.hovered)
                 painter_.FillRoundedRect(r, theme.radius_control * scale_, theme.fill_hover);
             DrawIconText(r.left, r.top, r.right - r.left, r.bottom - r.top, nav_glyphs[i], L"",
-                         enabled ? theme.text_secondary : theme.text_disabled);
+                         enabled ? ink : theme.text_disabled);
         }
+    }
+    if (!searchOverlay) {
         // Breadcrumb address bar: segments clickable, empty area -> edit mode.
         D2D1_RECT_F addrRc = AddressBarRect(rect.right);
-        fluent::ControlState addrState{};
-        addrState.focused = vm.address_editing && !vm.address_searching;
-        addrState.hovered = !vm.address_editing && IsHovered(vm, HitTestResult::AddressBar);
-        painter_.DrawTextFieldFrame(addrRc, addrState);
+        // Frame precedes inline refresh/search buttons so it cannot paint over them.
         // A long path scrolled toward its root eases there, and back to its
         // end 1.5 s after the pointer leaves (SettleBreadcrumbScroll).
         const bool addr_hot = IsHovered(vm, HitTestResult::AddressBar) ||
@@ -559,6 +598,9 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
                     dc->DrawRoundedRectangle(
                         D2D1::RoundedRect(seg.rc, theme.radius_control * scale_, theme.radius_control * scale_),
                         brAccent_.get(), 2.0f * scale_);
+                } else if (vm.drag_folders_active && i + 1 < placed.size()) {
+                    MakeBrush(dc, WithAlpha(theme.accent, 0.3f), brFillHover_);
+                    dc->DrawRoundedRectangle(D2D1::RoundedRect(seg.rc, 5.0f * scale_, 5.0f * scale_), brFillHover_.get(), scale_);
                 } else if (!plates && (int)i == vm.breadcrumb_hover) {
                     MakeBrush(dc, theme.fill_hover, brFillHover_);
                     FillRoundedRect(dc, brFillHover_.get(), seg.rc.left, seg.rc.top,
@@ -589,7 +631,7 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
                 }
                 float text_left = seg.rc.left + 8 * scale_;
                 if (seg.alias) {
-                    // 别名 crumb: the mark, then the alias (pulse_alias.html).
+                    // 别名 crumb: the mark, then the alias.
                     const float m = kAliasMarkDip * scale_;
                     const float my = std::round((seg.rc.top + seg.rc.bottom - m) * 0.5f);
                     const float mx = std::round(text_left);
@@ -601,8 +643,8 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
                               : WithAlpha(theme.text_secondary, 0.85f), brText_);
                 // Width measured exactly; let the ink use the right padding as slack
                 // so the trailing glyph is not shaved by the clip rect.
-                DrawTextRect(dc, compositor_->AddressFormat(), brText_.get(), seg.text,
-                    text_left, seg.rc.top, seg.rc.right - text_left,
+                DrawTextEndEllipsis(compositor_, compositor_->AddressFormat(), brText_.get(), seg.text,
+                    text_left, seg.rc.top, (std::max)(0.0f, seg.rc.right - text_left),
                     seg.rc.bottom - seg.rc.top);
             }
             if (strip_scope.layer) { dc->PopLayer(); strip_scope.layer = false; }
@@ -707,11 +749,11 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
     }
     {
         // The painter's primary-button glyph colour, in its glyph slot.
-        const D2D1_COLOR_F ink=IsHighContrast() ? (primary_enabled ? theme.accent_text : theme.text_disabled)
+        const D2D1_COLOR_F primary_ink=IsHighContrast() ? (primary_enabled ? theme.accent_text : theme.text_disabled)
             : !primary_enabled ? D2D1::ColorF(1.0f,1.0f,1.0f,vm.dark ? 0.43f : 0.90f)
             : vm.dark ? D2D1::ColorF(0.0f,0.0f,0.0f,1.0f) : D2D1::ColorF(1.0f,1.0f,1.0f,1.0f);
         DrawIconText(layout.create.left+8*scale_,layout.create.top,20*scale_,layout.create.bottom-layout.create.top,
-                     primary_glyph.c_str(),L"",ink);
+                     primary_glyph.c_str(),L"",primary_ink);
     }
     if (newArrow.right > newArrow.left && newArrow.left > layout.create.left) {
         auto divider=theme.accent_text;
@@ -741,9 +783,11 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
         // The customize button (prototype #custBtn, T5): sliders, accent
         // while the popover is open.
         const bool open=ToolbarPickerOpen();
+        icon_tones_=!open;
         DrawButton(layout.overflow,theme,!plates && IsHovered(vm,HitTestResult::ToolbarMore) ? theme.fill_hover
                    : open ? theme.fill_selected : kTransparent,
-            L"\xE9E9",L"",open ? theme.accent : theme.text_secondary,true,true);
+            L"\xE9E9",L"",open ? theme.accent : ink,true,true);
+        icon_tones_=false;
     }
     // Pinned commands (自定义工具栏), after a divider.
     const ToolbarPinDragState& pin_drag=PinDragFor(this);
@@ -757,12 +801,19 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             FillRect(dc,brStrokeDivider_.get(),slot.left-7*scale_,slot.top+7*scale_,scale_,18*scale_);
         }
         const bool dragged=pin_drag.index==static_cast<int>(i);
+        if (dragged) {
+            ComPtr<ID2D1SolidColorBrush> target_brush;
+            dc->CreateSolidColorBrush(pin_drag.out ? theme.danger : theme.accent, &target_brush);
+            if (target_brush.get()) dc->DrawRoundedRectangle(D2D1::RoundedRect(slot, 4*scale_, 4*scale_),
+                target_brush.get(), scale_, PreviewDashes(dc));
+        }
         const bool preview=pin_drag.preview_command!=0 && pin.command==pin_drag.preview_command;
         // Toggle tools that are on look like the selected pane buttons.
         const bool hovered=pin.enabled && IsHovered(vm,HitTestResult::ToolbarPin,static_cast<int>(i));
         D2D1_COLOR_F bg=hovered && !plates ? theme.fill_hover : pin.checked ? theme.fill_selected : kTransparent;
-        D2D1_COLOR_F fg=!pin.enabled ? theme.text_disabled : pin.checked ? theme.accent : theme.text_secondary;
+        D2D1_COLOR_F fg=!pin.enabled ? theme.text_disabled : pin.checked ? theme.accent : ink;
         if (dragged && pin_drag.out) { fg.a*=0.35f; bg.a*=0.35f; }
+        const bool resting=pin.enabled && !pin.checked && !(dragged && pin_drag.out);
         PinMotion& pm=tm.pins.Touch(L"c"+std::to_wstring(pin.command),pin.checked,motion_frame_,motion_now_,tm.animations);
         float turn=0.0f, glyph_scale=1.0f;
         tm.pins.Turn(pm,motion_now_,turn,glyph_scale);
@@ -789,16 +840,29 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
             faint.a*=0.5f;
             DrawIconText(b.left,b.top,b.right-b.left,b.bottom-b.top,pin.glyph,L"",faint);
         } else if (turn==0.0f && glyph_scale==1.0f) {
+            icon_tones_=resting;
             DrawButton(b,theme,bg,split_pin ? L"" : pin.glyph.c_str(),L"",fg,true,true);
             if (split_pin) DrawPaneHeaderIcon(b,split_icon(),fg);
+            icon_tones_=false;
         } else {
             if (bg.a > 0.0f) painter_.FillRoundedRect(b,theme.radius_control*scale_,bg);
             const AroundCentre spin(dc,centre,glyph_scale,turn);
+            icon_tones_=resting;
             if (split_pin) DrawPaneHeaderIcon(b,split_icon(),fg);
             else DrawIconText(b.left,b.top,b.right-b.left,b.bottom-b.top,pin.glyph,L"",fg);
+            icon_tones_=false;
         }
     }
     DrawToolbarApps(vm,layout,theme);
+    if (pin_drag.out) {
+        painter_.StrokeRoundedRect(layout.overflow, 4*scale_, theme.danger, 1.5f*scale_);
+        const std::wstring release_label = l10n::Get(l10n::StringId::ToolbarDragReleaseMore);
+        const float width = MeasureTextWidth(compositor_->DwriteFactory(), compositor_->SmallFormat(), release_label);
+        const float x = std::clamp(pin_drag.left, 4*scale_, std::max(4*scale_, layout.overflow.right-width));
+        MakeBrush(dc, theme.danger, brAccentText_);
+        DrawTextEndEllipsis(compositor_, compositor_->SmallFormat(), brAccentText_.get(), release_label,
+            x, layout.create.bottom + 2*scale_, width+1, 22*scale_);
+    }
     // The picker's hovered pinned tile: its pin breathes an accent ring
     // (prototype .tb.linked: 1.5 px strong to 3 px soft, 0.9 s each way).
     if (pin_drag.linked>=0 && static_cast<size_t>(pin_drag.linked)<layout.pins.size() &&
@@ -862,6 +926,16 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
     tm.pins.Sweep(motion_frame_);
     if (tm.pins.moving) toolbar_moving=true;
     tm.pins.moving=false;
+    if(pin_drag.view>=0 && pin_drag.view<3) {
+        D2D1_RECT_F* views[]{&layout.sort,&layout.filter,&layout.group};
+        auto& view=*views[pin_drag.view];
+        ComPtr<ID2D1SolidColorBrush> brush;
+        dc->CreateSolidColorBrush(pin_drag.out?theme.danger:theme.accent,&brush);
+        if(brush.get())dc->DrawRoundedRectangle(D2D1::RoundedRect(view,4*scale_,4*scale_),brush.get(),scale_,PreviewDashes(dc));
+        const float width=view.right-view.left;
+        view={pin_drag.left,view.top+pin_drag.dy,pin_drag.left+width,view.bottom+pin_drag.dy};
+        painter_.FillRoundedRect(view,4*scale_,theme.fill_hover);
+    }
     const auto command = [&](D2D1_RECT_F bounds, const wchar_t* glyph, l10n::StringId label,
                              HitTestResult::Region region, bool dropdown, float turn = 0.0f) {
         fluent::ButtonSpec button;
@@ -880,7 +954,9 @@ void MainRenderer::DrawToolbar(const WindowViewModel& vm, const D2D1_RECT_F& rec
         painter_.DrawButton(button);
         const float icon_left=button.icon_only ? bounds.left : bounds.left+8*scale_;
         const float icon_w=button.icon_only ? bounds.right-bounds.left : 20*scale_;
-        DrawIconText(icon_left,bounds.top,icon_w,bounds.bottom-bounds.top,glyph,L"",theme.text_secondary);
+        icon_tones_=true;
+        DrawIconText(icon_left,bounds.top,icon_w,bounds.bottom-bounds.top,glyph,L"",ink);
+        icon_tones_=false;
     };
     // The divider after 新建 comes with the first pin (above); the pane
     // buttons are pins now (T3d), so More needs none.

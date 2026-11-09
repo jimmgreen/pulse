@@ -5,7 +5,7 @@
 // HitTestResult::SettingsShortcuts, handled in app/shortcut_page.cpp; data:
 // app::ShortcutSettings.
 //
-// Layout follows the approved mockup (pulse_shortcuts_mockup.html v2): the
+// Layout follows the approved mockup: the
 // tools sit on the title row, then the conflict strip, the filter bar and the
 // group cards in up to three masonry columns. Popovers hang under the row
 // they edit; the undo toast stays at the bottom of the viewport.

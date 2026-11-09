@@ -16,7 +16,7 @@ namespace pulse::ui {
 
 struct RenderCaches {
     // The grid decodes on several hosts at once, visible tiles first.
-    RenderCaches() { thumbnails.SetParallelism(0); }
+    RenderCaches() { thumbnails.SetParallelism(0); folder_thumbnails.ShareUploadBudget(thumbnails); }
     RenderCaches(const RenderCaches&) = delete;
     RenderCaches& operator=(const RenderCaches&) = delete;
 

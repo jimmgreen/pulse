@@ -1,6 +1,9 @@
 """Create a NEW, explicitly experimental, architecture-specific dialog bundle.
 No installation, registry mutation, component execution, overwrite, or cleanup.
 """
+import shutil
+import tempfile
+import time
 import argparse
 import hashlib
 import json
@@ -21,12 +24,12 @@ CONTRACT = {'manifest': 1, 'picker_ui_abi': 2, 'runtime_session': 1,
 # Explicit Windows runtime requirements, not copied from PATH/System32. Unknown
 # names fail unless a matching local dependency exists. No OS availability claim.
 SYSTEM = set('''kernel32.dll kernelbase.dll ntdll.dll user32.dll gdi32.dll gdi32full.dll
-advapi32.dll ole32.dll oleaut32.dll shell32.dll shlwapi.dll comdlg32.dll comctl32.dll
+advapi32.dll ole32.dll oleaut32.dll oleacc.dll shell32.dll shlwapi.dll comdlg32.dll comctl32.dll
 uuid.dll rpcrt4.dll combase.dll imm32.dll winmm.dll version.dll uxtheme.dll dwmapi.dll
 shcore.dll d3d11.dll d2d1.dll dwrite.dll dxgi.dll dcomp.dll windowscodecs.dll gdiplus.dll
 bcrypt.dll bcryptprimitives.dll crypt32.dll cryptbase.dll secur32.dll sspicli.dll
 winhttp.dll wininet.dll ws2_32.dll dnsapi.dll iphlpapi.dll netapi32.dll mpr.dll
-propsys.dll cfgmgr32.dll setupapi.dll userenv.dll wtsapi32.dll powrprof.dll profapi.dll
+propsys.dll cfgmgr32.dll setupapi.dll userenv.dll wtsapi32.dll powrprof.dll profapi.dll virtdisk.dll
 psapi.dll dbghelp.dll dbgcore.dll imagehlp.dll wintrust.dll normaliz.dll usp10.dll
 msvcrt.dll ucrtbase.dll mf.dll mfplat.dll mfreadwrite.dll mfuuid.dll mfplay.dll
 avrt.dll msacm32.dll msimg32.dll opengl32.dll glu32.dll winspool.drv hid.dll
@@ -98,13 +101,19 @@ def record(path, relative, role, arch=None):
         item.update(machine=pe.machine, imports=pe.normal, delay_imports=pe.delay)
     return item
 
-def plan(build, version, arch, repository, automatic=False):
+def plan(build, version, arch, repository, automatic=False, runtime_items=()):
     if arch not in MACHINES or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,63}', version):
         raise PackageError('invalid architecture or version label')
     if not Path(build).is_absolute() or not Path(repository).is_absolute(): raise PackageError('absolute build/repository paths required')
     build, repository = no_links(build), no_links(repository)
     local = entries(build)
     pending = [(name, 'entry') for name in roots(arch, automatic)] + [(name, 'dynamic-helper') for name in DYNAMIC]
+    for source, relative in runtime_items:
+        safe_relative(relative)
+        if not relative.startswith('licenses/'):
+            if '/' in relative or Path(source).resolve() != (build / relative).resolve():
+                raise PackageError('runtime binary must be a build direct child')
+            pending.append((relative, 'entry'))
     seen, sources, files, errors, os_dependencies = set(), {}, [], [], set()
     while pending:
         name, role = pending.pop(0)
@@ -138,12 +147,113 @@ def plan(build, version, arch, repository, automatic=False):
         path = repository / source
         try: files.append(record(path, relative, 'license')); sources[relative] = path
         except (OSError, ValueError) as error: errors.append(f'license {source}: {error}')
+    for source, relative in runtime_items:
+        if not relative.startswith('licenses/'): continue
+        existing = next((item for item in files if item['path'].lower() == relative.lower()), None)
+        if existing:
+            if digest(source) != existing['sha256']: errors.append(f'conflicting runtime license: {relative}')
+        else:
+            files.append(record(source, relative, 'license')); sources[relative] = source
     if errors: raise PackageError('\n'.join(errors))
     if len(files) > 512 or len({f['path'].lower() for f in files}) != len(files): raise PackageError('manifest size/case collision')
     manifest = {'schema': 1, 'version': version, 'architecture': arch, 'contract': CONTRACT,
                 'dynamic_helpers': DYNAMIC, 'system_dependencies': sorted(os_dependencies),
                 'files': sorted(files, key=lambda f: f['path'].lower())}
     return manifest, sources
+
+def publish_directory(source, destination):
+    # Windows can transiently refuse a freshly copied image directory while a
+    # reader holds it without delete sharing. Never replace an existing target;
+    # bounded retries do not waive the caller's post-publication verification.
+    delays = (0.05, 0.1, 0.2, 0.4, 0.8)
+    for attempt in range(len(delays) + 1):
+        try:
+            source.rename(destination)
+            return
+        except OSError as error:
+            if getattr(error, 'winerror', None) not in (5, 32, 33) or attempt == len(delays):
+                raise
+            time.sleep(delays[attempt])
+
+
+def package_addressed(build, bridge, version, arch, repository, runtime_items=()):
+    """Publish a complete private schema-1 closure; never update a live bundle."""
+    bridge = no_links(bridge)
+    # Build in a new sibling directory, so only a fully verified bundle can
+    # acquire its final name. Both paths are on the same filesystem.
+    with tempfile.TemporaryDirectory(prefix='.dialog-staging-', dir=bridge.parent) as staging:
+        candidate = Path(staging) / 'bundle'
+        package(build, candidate, version, arch, repository, automatic=True, runtime_items=runtime_items)
+        manifest_hash = digest(candidate / 'manifest.json')
+        destination = bridge / manifest_hash
+        if destination.exists() or destination.is_symlink():
+            existing = verify(destination)
+            if existing['schema'] != 1 or digest(destination / 'manifest.json') != manifest_hash:
+                raise PackageError('existing content-addressed bundle mismatch')
+        else:
+            publish_directory(candidate, destination)
+        verify(destination)
+    return {'schema': 1, 'directory': f'DialogBridge/{manifest_hash}',
+            'manifest_sha256': manifest_hash}
+
+
+def verify_installed(directory):
+    """Validate the installed pointer and its self-contained runtime bundle."""
+    directory = no_links(directory)
+    pointer_path = no_links(directory / 'dialog-current.json')
+    if pointer_path.stat().st_size > 1024: raise PackageError('dialog pointer bound')
+    pointer = json.loads(pointer_path.read_text(encoding='utf-8'), object_pairs_hook=unique_object)
+    if not isinstance(pointer, dict) or set(pointer) != {'schema', 'directory', 'manifest_sha256'} or type(pointer['schema']) is not int or pointer['schema'] != 1:
+        raise PackageError('dialog pointer schema')
+    manifest_hash = pointer['manifest_sha256']
+    if not isinstance(manifest_hash, str) or not re.fullmatch(r'[0-9a-f]{64}', manifest_hash):
+        raise PackageError('dialog pointer hash')
+    if pointer['directory'] != f'DialogBridge/{manifest_hash}':
+        raise PackageError('dialog pointer directory/hash mismatch')
+    bundle = no_links(directory / pointer['directory'])
+    if digest(no_links(bundle / 'manifest.json')) != manifest_hash:
+        raise PackageError('dialog pointer manifest hash mismatch')
+    manifest = verify(bundle)
+    if manifest['schema'] != 1: raise PackageError('installed dialog bundle requires schema 1')
+    names = {item['path'].lower() for item in manifest['files']}
+    if not all(name.lower() in names for name in roots(manifest['architecture'], automatic=True)):
+        raise PackageError('installed dialog bundle requires automatic components')
+    forbidden = {'manifest.json', 'verified.json'}
+    for arch in MACHINES:
+        forbidden.update(name.lower() for name in roots(arch, True)
+                         if name.lower() not in {'pulse.exe', 'lumatext.dll', 'pulse_shell.exe'})
+    if any(path.name.lower() in forbidden for path in directory.iterdir()):
+        raise PackageError('flat dialog component in installed root')
+    if any(path.suffix.lower() in ('.exe', '.dll') and path.name.lower() != 'pulse.exe'
+           for path in directory.iterdir()):
+        raise PackageError('duplicate runtime binary in installed root')
+    launcher = record(directory / 'pulse.exe', 'pulse.exe', 'entry', manifest['architecture'])
+    if any(not system(dep) for dep in launcher['imports'] + launcher['delay_imports']):
+        raise PackageError('stable launcher requires non-system dependency')
+    return pointer
+
+
+def package_installed(build, output, version, arch, repository, items):
+    """Root is only a stable launcher; all application and dialog files share one version."""
+    output = Path(output)
+    if not output.is_absolute(): raise PackageError('absolute NEW output required')
+    no_links(output.parent)
+    if output.exists() or output.is_symlink(): raise PackageError('output already exists; never overwrite or clean')
+    if output.is_relative_to(Path(build).absolute()): raise PackageError('output must be outside build directory')
+    launcher = Path(build) / 'pulse_launcher.exe'
+    launcher_record = record(launcher, 'pulse.exe', 'entry', arch)
+    output.mkdir()
+    with launcher.open('rb') as src, (output / 'pulse.exe').open('xb') as dst:
+        shutil.copyfileobj(src, dst)
+    if digest(output / 'pulse.exe') != launcher_record['sha256']:
+        raise PackageError('launcher changed during copy')
+    bridge = output / 'DialogBridge'
+    bridge.mkdir()
+    pointer = package_addressed(build, bridge, version, arch, repository, items)
+    with (output / 'dialog-current.json').open('x', encoding='utf-8', newline='\n') as stream:
+        json.dump(pointer, stream, separators=(',', ':')); stream.write('\n')
+    return verify_installed(output)
+
 
 def unique_object(pairs):
     result = {}
@@ -157,7 +267,7 @@ def verify(directory, require_marker=True):
     no_links(manifest_path)
     if manifest_path.stat().st_size > 1024 * 1024: raise PackageError('manifest bound')
     manifest = json.loads(manifest_path.read_text(encoding='utf-8'), object_pairs_hook=unique_object)
-    if set(manifest) != {'schema', 'version', 'architecture', 'contract', 'dynamic_helpers', 'system_dependencies', 'files'} or manifest['schema'] != 1:
+    if set(manifest) != {'schema', 'version', 'architecture', 'contract', 'dynamic_helpers', 'system_dependencies', 'files'} or manifest['schema'] not in (1, 2):
         raise PackageError('manifest schema')
     arch = manifest['architecture']
     if arch not in MACHINES or manifest['contract'] != CONTRACT or manifest['dynamic_helpers'] != DYNAMIC:
@@ -212,12 +322,12 @@ def verify(directory, require_marker=True):
     if actual_files != expected: raise PackageError('unlisted/missing bundle files')
     return manifest
 
-def package(build, output, version, arch, repository, automatic=False):
+def package(build, output, version, arch, repository, automatic=False, runtime_items=()):
     output = Path(output)
     if not output.is_absolute(): raise PackageError('absolute NEW output required')
     no_links(output.parent)
     if output.exists() or output.is_symlink(): raise PackageError('output already exists; never overwrite or clean')
-    manifest, sources = plan(build, version, arch, repository, automatic)
+    manifest, sources = plan(build, version, arch, repository, automatic, runtime_items)
     if output.is_relative_to(Path(build).absolute()): raise PackageError('output must be outside build directory')
     output.mkdir()  # Exclusive creation; failure leaves existing data unchanged.
     # Any failure leaves an incomplete unverified directory for diagnosis.

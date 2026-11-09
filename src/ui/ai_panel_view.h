@@ -1,4 +1,4 @@
-// ai_panel_view.h — The Pulse 助手 panel (plans/ai/pulse_ai_assistant_v2.html).
+// ai_panel_view.h — The Pulse 助手 panel.
 //
 // Drawn in the main window by MainRenderer. Docked (the default) it is a
 // column right of the sidebar rail and the toolbar and panes move over;
@@ -559,13 +559,13 @@ struct AiBlockView {
     // after the buttons in any tone.
     std::vector<AiCheckView> checklist;
     std::wstring note;
-    // P3 (plans/ai/P3_AI接入动作表.html). Result: `partial` some step failed
+    // P3. Result: `partial` some step failed
     // (the amber warn icon). Confirm: `cf_icon` the tile's icon, `tag_amber`
     // the tag in amber (外部效果), `file` + `file_note` the .cf-file row.
     bool partial = false;
     AiIcon cf_icon = AiIcon::Shield;
     bool tag_amber = false;
-    // P4c (plans/ai/P4_全部领域接入.html ② ③). Confirm: `cf_rows` the items
+    // P4c. Confirm: `cf_rows` the items
     // (.cf-rows, at most 3), `cf_more` its grey last row (还有 3 个 · 共 18.4
     // MB), `cf_bin` the accent line with a check under it (.cf-bin: 回收站放得
     // 下…). `arm`: the card takes two clicks (a permanent delete); the first

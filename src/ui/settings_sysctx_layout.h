@@ -4,7 +4,7 @@
 // ui_settings_sysctx.cpp; clicks: HitTestResult::SettingsSysCtx, handled in
 // app/settings_ui.cpp; data: app::SystemCtxModel.
 //
-// Layout follows the prototype (pulse_system_ctx_manager.html): intro with
+// Layout follows the prototype: intro with
 // the page commands, the 本地 / 系统 layer cards, then scene list | entries |
 // preview & details. Narrow windows drop the third column and open the
 // details under the selected row instead.

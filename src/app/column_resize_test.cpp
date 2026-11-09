@@ -1,4 +1,3 @@
-#ifdef PULSE_WITH_SELFTEST
 #include "../ui/ui_renderer_internal.h"
 #include "../common/windows_compat.h"
 #include <algorithm>
@@ -9,7 +8,7 @@
 
 namespace pulse::ui {
 struct ColumnResizeUiTest {
-    static bool Run() {
+    static bool Run(bool media_only = false) {
         const std::filesystem::path root = L"bench_data/column-resize";
         std::filesystem::create_directories(root);
         std::ofstream log(root / L"results.log");
@@ -24,6 +23,75 @@ struct ColumnResizeUiTest {
             Compositor compositor;
             if (!hwnd || !compositor.Init(hwnd)) { if (hwnd) DestroyWindow(hwnd); return false; }
             MainRenderer renderer; renderer.SetCompositor(&compositor);
+            if (media_only) {
+                WindowViewModel settings; settings.settings_open = true; settings.settings_page = 9;
+                const auto settings_bounds = D2D1::RectF(0, 0, 1200, 4000);
+                const auto layout = MakeSettingsLayout(settings, settings_bounds, 1.0f,
+                    renderer.title_bar_height_, renderer.status_height_, &renderer.painter_);
+                const auto row = layout.list_style_row[6];
+                const auto hit = renderer.HitTest(settings, settings_bounds,
+                    (row.left + row.right) * 0.5f, (row.top + row.bottom) * 0.5f);
+                check(row.bottom > row.top && hit.region == HitTestResult::SettingsToggle && hit.index == 80,
+                      "media settings row hits its dedicated toggle id 80");
+                for (float scale : {1.0f, 1.5f, 2.0f}) for (int media : {1, 2, 3})
+                for (int width : {540, 1200, 2000}) {
+                    renderer.SetScale(scale); compositor.RecreateTextFormats(scale);
+                    compositor.Resize(static_cast<UINT>(width * scale), static_cast<UINT>(700 * scale));
+                    const auto theme = MakeTheme(false, HexColor(0x0078D4));
+                    renderer.UpdateBrushes(theme); renderer.text_background_ = theme.bg;
+                    renderer.painter_.BeginFrame(theme, false);
+                    PaneViewModel pane; pane.view_mode = ViewMode::Details; pane.media_columns = static_cast<uint8_t>(media);
+                    pane.path = L"C:\\media-test";
+                    for (int item_index = 0; item_index < 5; ++item_index) {
+                        ListEntryView entry; entry.name = L"Photo-" + std::to_wstring(item_index) + L".jpg";
+                        entry.type_text = L"JPEG"; entry.date_text = L"2026-11-04";
+                        entry.created_text = entry.accessed_text = entry.date_text;
+                        entry.size_text = L"1.6 MB"; pane.entries.push_back(entry);
+                    }
+                    pane.media_cell = [](int, SortColumn col) -> std::wstring {
+                        if (col == SortColumn::MediaDims) return L"4000 × 2242";
+                        if (col == SortColumn::MediaTaken) return L"2026-11-04";
+                        return L"Camera";
+                    };
+                    const auto bounds = D2D1::RectF(0, 0, width * scale, 700 * scale);
+                    const auto body = renderer.PaneBodyBounds(pane, bounds);
+                    renderer.SetDetailsColumns(0);
+                    const auto unchecked = renderer.DetailsColumns(body, pane);
+                    check(!unchecked.Has(MainRenderer::ColumnKind::Date) && !unchecked.Has(MainRenderer::ColumnKind::Size),
+                          "media layout respects unchecked ordinary columns");
+                    renderer.SetDetailsColumns(kDetailsColumnsAll);
+                    const auto before = renderer.DetailsColumns(body, pane);
+                    if (width >= 1200) check(before.Has(MainRenderer::ColumnKind::Date) &&
+                        before.Has(MainRenderer::ColumnKind::Created) && before.Has(MainRenderer::ColumnKind::Accessed) &&
+                        before.Has(MainRenderer::ColumnKind::Type), "selected ordinary columns survive media layout");
+                    for (int divider = 0; divider < before.count - 1; ++divider) {
+                        log << "media=" << media << " width=" << width << " scale=" << scale << " divider=" << divider << std::endl;
+                        auto resized = pane;
+                        resized.media_column_widths[media - 1] = renderer.ResizeMediaColumnDivider(
+                            body, pane, divider, before.DividerX(divider) + 12 * scale);
+                        resized.details_column_dividers = renderer.ResizeMediaDetailsColumnDivider(
+                            body, pane, divider, before.DividerX(divider) + 12 * scale);
+                        const auto after = renderer.DetailsColumns(body, resized);
+                        check(after.count == before.count && after.kinds == before.kinds,
+                              "media resize keeps visible column identity at narrow width and DPI");
+                        check(std::abs(after.DividerX(divider) - before.DividerX(divider) - 12 * scale) < 0.1f,
+                              "media divider follows pointer using media kind mapping");
+
+                    }
+                    pane.media_column_widths[media - 1] = renderer.ResizeMediaColumnDivider(
+                        body, pane, 0, before.DividerX(0) + 12 * scale);
+                    WindowViewModel vm;
+                    auto* dc = compositor.Dc(); dc->BeginDraw(); dc->Clear(theme.bg);
+                    renderer.DrawSinglePane(vm, pane, bounds, 0, true, false, theme);
+                    check(SUCCEEDED(dc->EndDraw()), "render media columns after resize");
+                    const auto shot = root / (L"media-" + std::to_wstring(media) + L"-" +
+                        std::to_wstring(width) + L"-" + std::to_wstring(static_cast<int>(scale * 100)) + L".png");
+                    check(compositor.SaveSnapshot(shot.c_str()), "save media renderer screenshot");
+                }
+                DestroyWindow(hwnd);
+                return ok;
+            }
+#ifdef PULSE_WITH_SELFTEST
             for (float scale : {1.0f, 1.5f, 2.0f}) for (bool dark : {false, true}) for (int width : {540, 760}) {
                 renderer.SetScale(scale); compositor.RecreateTextFormats(scale);
                 compositor.Resize(static_cast<UINT>(width*scale), static_cast<UINT>(700*scale));
@@ -183,12 +251,17 @@ struct ColumnResizeUiTest {
             }
             typography::SetUiFontScale(old_font); typography::SetTextRenderMode(old_mode);
             l10n::SetLanguage(l10n::LanguageId(old_language));
+#endif
         }
         DestroyWindow(hwnd); return ok;
     }
 };
 }
 namespace pulse::app {
+bool RunMediaColumnResizeCapture() {
+    return ui::ColumnResizeUiTest::Run(true);
+}
+#ifdef PULSE_WITH_SELFTEST
 bool RunColumnResizeUiTest() {
     const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (FAILED(hr)) return false;
@@ -196,5 +269,5 @@ bool RunColumnResizeUiTest() {
     const bool ok = ui::ColumnResizeUiTest::Run();
     CoUninitialize(); return ok;
 }
-}
 #endif
+}

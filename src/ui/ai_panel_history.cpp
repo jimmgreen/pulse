@@ -1,6 +1,5 @@
 // ai_panel_history.cpp - 55 P3 历史对话: the layer that slides in from the
-// left over the assistant panel, below its header (plans/ai/
-// 55_AI对话成熟化_效果图.html ④: .hist, .hs, .grp, .hi, .hfoot).
+// left over the assistant panel, below its header.
 //
 // The panel's own background shows through: DrawContent clips the
 // conversation and the composer away where the layer is, so a glass panel

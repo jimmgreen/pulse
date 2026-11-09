@@ -1,5 +1,5 @@
-// action_policy.h - What the assistant may do with an action, and how
-// (plans/ai/P3_AI接入动作表.html §2). MCP (P5) reads the same answer.
+// action_policy.h - What the assistant may do with an action, and how.
+// MCP (P5) reads the same answer.
 //
 //   Direct   Read / View / Organize / Create: runs at once; the card shows
 //            old -> new and undoes the call as one group
@@ -42,7 +42,7 @@ Policy AiPolicy(std::string_view id, std::wstring_view target = {}) noexcept;
 const char* RiskName(ActionRisk risk) noexcept;   // "view", "organize", ...
 
 // The switch in 设置 › 增强包 › AI 与 MCP that lets AI apps (MCP) run an
-// action (plans/ai/P5_外部AI与收尾.html §2): 查看与界面 (read and view),
+// action: 查看与界面 (read and view),
 // 整理 Pulse (organize and settings), 新建, 移动、重命名和删除 (the file
 // steps), Pulse 之外的效果 (programs, Git, shell verbs, system); Locked
 // actions are only the user's, whatever is switched on.

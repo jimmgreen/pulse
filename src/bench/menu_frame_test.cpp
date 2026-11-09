@@ -3,6 +3,9 @@
 #include "../ui/text_contrast_scope.h"
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <string>
 namespace pulse::ui {
 struct FluentMenuTestPeer {
@@ -51,6 +54,7 @@ int wmain(int argc, wchar_t** argv) {
             return 2;
         }
         const bool dark = argc > 3 && std::wstring(argv[3]) == L"dark";
+        const bool dpi_only = argc > 4 && std::wstring(argv[4]) == L"dpi-only";
         menu.SetTheme(dark, D2D1::ColorF(0.2f, 0.4f, 0.8f));
         std::vector<FluentMenuItem> items;
         for (int i = 0; i < 16; ++i) {
@@ -61,9 +65,36 @@ int wmain(int argc, wchar_t** argv) {
             items.push_back(std::move(item));
         }
         if (argc > 1 && !menu.SaveDebugSnapshot(argv[1], items, 1)) { ++failures; std::printf("[FAIL] main snapshot\n"); }
+        if (dpi_only && argc > 1) {
+            const auto bytes = [](const std::filesystem::path& path) {
+                std::ifstream stream(path, std::ios::binary);
+                return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>{});
+            };
+            const auto baseline = bytes(argv[1]);
+            for (const float dpi : {144.0f, 192.0f}) {
+                compositor.Dc()->SetDpi(dpi, dpi);
+                const auto path = std::wstring(argv[1]) + L".dpi-" + std::to_wstring(static_cast<int>(dpi)) + L".png";
+                const bool saved = menu.SaveDebugSnapshot(path.c_str(), items, 1);
+                float x = 0, y = 0; compositor.Dc()->GetDpi(&x, &y);
+                const bool same = saved && !baseline.empty() && bytes(path) == baseline;
+                const bool restored = x == dpi && y == dpi;
+                if (!same || !restored) ++failures;
+                std::printf("[%s] inherited DPI %.0f: identical snapshot=%d restored=%d\n",
+                    same && restored ? "PASS" : "FAIL", dpi, same, restored);
+            }
+        }
         FluentMenuTestPeer::Prepare(menu, items);
         const char* names[] = {"main", "submenu", "tooltip"};
         for (int kind = 0; kind < 3; ++kind) {
+            if (dpi_only) {
+                compositor.Dc()->SetDpi(144, 192);
+                const bool drawn = FluentMenuTestPeer::Draw(menu, kind);
+                float x = 0, y = 0; compositor.Dc()->GetDpi(&x, &y);
+                const bool restored = x == 144 && y == 192;
+                if (!drawn || !restored) ++failures;
+                std::printf("[%s] %s non-square owner DPI restored\n", drawn && restored ? "PASS" : "FAIL", names[kind]);
+                continue;
+            }
             int warmup_failures = 0;
             for (int i = 0; i < 10; ++i) if (!FluentMenuTestPeer::Draw(menu, kind)) ++warmup_failures;
             if (warmup_failures) {

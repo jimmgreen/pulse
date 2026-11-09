@@ -10,7 +10,21 @@
 
 namespace pulse::picker_places {
 struct Entry { std::wstring path, label; bool open = false, pinned = false; };
-struct Snapshot { std::wstring current; std::vector<Entry> folders; };
+struct Workspace { std::wstring root, name; uint32_t color_rgb = 0; };
+struct StarredItem { std::wstring path; uint32_t kind = 0; std::wstring group; };
+struct StarredGroup { std::wstring id, name; };
+struct Snapshot {
+    std::wstring current;
+    std::vector<Entry> folders;
+    std::vector<Workspace> workspaces;
+    std::vector<StarredItem> starred_items;
+    std::vector<StarredGroup> starred_groups;
+    HWND endpoint = nullptr;
+    DWORD endpoint_pid = 0;
+    bool shared_available = false;
+};
+void PublishShared(const Snapshot& snapshot);
+void ReadShared(Snapshot& snapshot);
 namespace detail {
 constexpr DWORD kMagic = 0x31535050;
 struct Row { DWORD path_length, label_length, flags; wchar_t path[1024], label[128]; };
@@ -63,6 +77,7 @@ inline bool Valid(const Payload& p) {
 }
 }
 inline void Publish(const Snapshot& snapshot) {
+    PublishShared(snapshot);
     static detail::Writer writer;
     if (!writer.blob || !writer.mutex) return;
     // Allocate the bounded copy off the stack before taking the writer lock.
@@ -120,6 +135,7 @@ inline Snapshot ReadMapping(const std::wstring& name) {
     return result;
 }
 }
-inline Snapshot Read() { return detail::ReadMapping(detail::Name()); }
+inline Snapshot Read() { auto result = detail::ReadMapping(detail::Name()); ReadShared(result); return result; }
 }
+#include "picker_places_shared.h"
 

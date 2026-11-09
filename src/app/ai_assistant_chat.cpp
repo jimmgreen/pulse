@@ -1,7 +1,6 @@
 // ai_assistant_chat.cpp - Pulse 助手's conversation and the A2 demo driver.
 //
-// The demo follows the design's script (plans/ai/pulse_ai_assistant_v2.html,
-// scenes 2-6) with the open folder's real entries: think, look at the window,
+// The demo follows the design's script (scenes 2-6) with the open folder's real entries: think, look at the window,
 // read the folder, propose a plan, ask in the conversation, "sort", report.
 // It never touches a file; a note at the top of the conversation says so.
 // A3 swaps this driver for the DeepSeek agent loop, keeping the blocks.

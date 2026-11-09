@@ -1,0 +1,48 @@
+name: Extension contracts
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'schemas/extensions/**'
+      - 'examples/extensions/**'
+      - 'sdk/typescript/**'
+      - 'tools/extensions/**'
+      - 'docs/extensions*.md'
+      - 'docs/Pulse-增强包开放能力与AI协同实施方案-2026-11-03.md'
+      - 'src/app/extensions/**'
+      - 'src/app/actions/action_inventory.h'
+      - '.github/workflows/extensions.yml'
+  pull_request:
+    paths:
+      - 'schemas/extensions/**'
+      - 'examples/extensions/**'
+      - 'sdk/typescript/**'
+      - 'tools/extensions/**'
+      - 'docs/extensions*.md'
+      - 'docs/Pulse-增强包开放能力与AI协同实施方案-2026-11-03.md'
+      - 'src/app/extensions/**'
+      - 'src/app/actions/action_inventory.h'
+      - '.github/workflows/extensions.yml'
+
+jobs:
+  contracts:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.8'
+      - name: Check generated public contracts
+        run: python tools/extensions/generate_sdk.py --check
+      - name: Check internal capability inventory
+        run: python tools/extensions/catalog.py --check
+      - name: Check contract generation and tooling boundaries
+        run: python -m unittest discover -s tools/extensions -p "test_*.py"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install pinned SDK type checker
+        run: npm ci --ignore-scripts --no-audit --no-fund --prefix tools/extensions/typecheck
+      - name: Compile SDK templates and invalid-argument assertions
+        run: python tools/extensions/typecheck_sdk.py --tsc tools/extensions/typecheck/node_modules/typescript/lib/tsc.js --output build-sdk-types

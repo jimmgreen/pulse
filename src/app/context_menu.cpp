@@ -742,19 +742,5 @@ std::vector<ui::FluentMenuItem> BuildCommandPalette(const std::wstring& query,
     return items;
 }
 
-std::wstring UniqueChildName(const std::wstring& dir, const std::wstring& base,
-                             const std::wstring& ext) {
-    auto exists = [&](const std::wstring& name) {
-        std::wstring full = dir;
-        if (!full.empty() && full.back() != L'\\') full += L'\\';
-        full += name;
-        return pulse::path::Exists(full);
-    };
-    std::wstring candidate = base + ext;
-    for (int i = 2; exists(candidate); ++i) {
-        candidate = base + L" (" + std::to_wstring(i) + L")" + ext;
-    }
-    return candidate;
-}
 
 } // namespace pulse::app

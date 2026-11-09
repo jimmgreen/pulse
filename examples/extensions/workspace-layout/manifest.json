@@ -1,0 +1,58 @@
+{
+  "apiVersion": 1,
+  "id": "example.workspace-layout",
+  "name": "工作区布局",
+  "commands": [
+    {
+      "id": "single",
+      "title": "单窗格",
+      "capability": "workspace.setLayout",
+      "args": {
+        "layout": "single"
+      }
+    },
+    {
+      "id": "side_by_side",
+      "title": "左右双窗格",
+      "capability": "workspace.setLayout",
+      "args": {
+        "layout": "side_by_side"
+      }
+    },
+    {
+      "id": "stacked",
+      "title": "上下双窗格",
+      "capability": "workspace.setLayout",
+      "args": {
+        "layout": "stacked"
+      }
+    },
+    {
+      "id": "three",
+      "title": "三窗格",
+      "capability": "workspace.setLayout",
+      "args": {
+        "layout": "three"
+      }
+    },
+    {
+      "id": "four",
+      "title": "四窗格",
+      "capability": "workspace.setLayout",
+      "args": {
+        "layout": "four"
+      }
+    }
+  ],
+  "panel": {
+    "title": "窗格布局",
+    "description": "复用已有窗格；隐藏窗格和标签页会保留。新窗格使用当前目录，布局可能随会话保存。",
+    "commands": [
+      "single",
+      "side_by_side",
+      "stacked",
+      "three",
+      "four"
+    ]
+  }
+}

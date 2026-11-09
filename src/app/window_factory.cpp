@@ -1,4 +1,5 @@
 #include "window_factory.h"
+#include "extensions/native/package_lifecycle.h"
 #include "../ui/ui_renderer.h"
 
 #include "app_messages.h"
@@ -114,6 +115,11 @@ HWND OpenPulseWindow(AppState& from, const WindowInit& init) {
         const auto it = std::find_if(g_windows.begin(), g_windows.end(),
                                      [state](const std::unique_ptr<AppState>& w) { return w.get() == state; });
         if (it != g_windows.end()) g_windows.erase(it);
+        return nullptr;
+    }
+    // Each real owner participates so closing the first window cannot stop store trust monitoring.
+    if (!extensions::native::StartPackageMonitoring(hwnd)) {
+        DestroyWindow(hwnd);
         return nullptr;
     }
     ShowWindow(hwnd, maximize ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL);

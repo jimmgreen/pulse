@@ -1,6 +1,7 @@
 // batch_rename_dialog.h — Modal 批量重命名 dialog (steps + live preview).
 #pragma once
 #include "../app/batch_rename.h"
+#include "../app/batch_rename_plan.h"
 #include "../app/batch_rename_presets.h"
 #include <windows.h>
 #include <d2d1.h>
@@ -37,6 +38,15 @@ struct BatchRenameAiTask {
 };
 
 struct BatchRenameDialogOptions {
+    // Host-prepared names are reviewed using the normal preview and confirmation.
+    // Sources/plan are prepared off the UI thread; this mode never edits rules or presets.
+    std::optional<std::vector<std::wstring>> proposed_names;
+    std::vector<app::rename::Source> proposed_sources;
+    std::optional<app::rename::Plan> proposed_plan;
+    std::function<bool()> review_valid;
+    // Internal isolated-host probe only; delivered after two actual preview frames.
+    std::function<void(HWND, std::function<bool(const std::wstring&)>)> on_review_ready;
+
     std::wstring ai_model;   // shown in the AI bar and sent as "model"; empty = no connection
     // Starts a chat/completions request with this body. Null (with error
     // set) when it cannot start. Unset: the AI bar cannot send.

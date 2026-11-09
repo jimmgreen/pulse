@@ -30,7 +30,7 @@ Pulse 通过 stdio 提供 MCP 服务：`pulse.exe --mcp-stdio`。它只负责转
 
 ## 工具
 
-一共 9 个。前 7 个是只读或只新建的基础工具；`find_actions` 和 `run_actions` 能使用 Pulse 的全部动作，和菜单、快捷键、命令面板用的是同一张表。
+当前开发分支共有 12 个工具。`find_actions` 和 `run_actions` 使用与菜单、快捷键、命令面板相同的动作表，执行范围仍受当前授权限制。三个只读开发工具提供增强包发现、模板与校验；它们不会把内部动作表开放成增强包权限。
 
 | 工具 | 参数 | 作用 | 是否询问用户 |
 | --- | --- | --- | --- |
@@ -43,8 +43,25 @@ Pulse 通过 stdio 提供 MCP 服务：`pulse.exe --mcp-stdio`。它只负责转
 | `find_actions` | `query`（几个词），或 `domain: "settings"` | 查找动作，返回参数、当前值，以及本应用能不能用 | 不询问 |
 | `run_actions` | `steps`（1–12 步，每步 `{action, args, wait}`） | 按顺序执行动作 | 由每个动作所在的分组决定，见下文 |
 | `undo_last` | 无 | 撤销 AI 应用最近一次改动 | 不询问 |
+| `describe_extension_api` | 无，传 `{}` | 返回公开能力、绑定、限制及完整 manifest JSON Schema；支持 structuredCapabilityDetails 时附参数、目标及副作用详情 | 不询问 |
+| `validate_extension_manifest` | `manifest`（JSON 文本字符串，≤65,536 个 UTF-8 字节） | 复用宿主解析器校验文本，返回 `valid` 和 `error`；不读取文件、不安装或执行 | 不询问 |
+| `get_extension_template` | `template`（发现结果中的固定模板ID，不是路径） | 返回经当前宿主校验的内置清单文本、`validated:true` 和 `executed:false`；不安装或执行 | 不询问 |
 
 `wait` 可以取 `listing_loaded`、`op_finished`、`preview_open`。选择类的步骤会自己等文件夹加载完，最多等 1.5 秒。
+
+### 开发增强包
+
+先调用 `describe_extension_api({})`，按照返回的 `manifestSchema`、能力与限制生成清单；有 `declarativeTemplates` 时，可从 `templates` 中选择ID调用 `get_extension_template({"template":"transfer-panel"})`。返回的 `manifest` 是JSON文本数据，可编辑后交给 `validate_extension_manifest({"manifest":"完整 JSON 文本"})`。错误参数返回 `invalid_args`；清单内容不合法返回正常结果 `{"valid":false,"error":"诊断"}`；通过时返回 `{"valid":true,"error":""}`。三工具仍经过既有连接身份与客户端授权，不改变 AI 权限设置。模板中的示例身份应由作者修改，模板校验通过也不代表实际功能已验收。
+
+发现结果中的可选 `developerFeatures` 用于识别开发工具支持；`isolatedDevReload` 表示所选宿主支持显式隔离开发会话，不是新增增强包权限或 MCP 执行工具。旧 v1 宿主可能没有该字段，不能只按 `apiVersion` 猜测支持。完整创建、测试、预览、开发重载、归档及诊断流程见[增强包作者指南](../../sdk/native/README.md)。
+
+`structuredCapabilityDetails` 表示可读取新增的 `capabilityDetails` 和 `bindingDetails`，所有旧字段保留。能力详情包含 `id`、`summary`、`effect`、`target`、`modifiesFiles`、`persistsPreferences`、`supportsCancellation`、`argsRequired` 和 `argsSchema`；绑定详情包含 `id`、`summary`、`displayOnly:true`。客户端先做特性探测，不把旧宿主缺失的详情解释成“无副作用”。
+
+`controlledFileTransfers` 描述两个增强包声明式命令：`files.copySelectionToOtherPane` 与 `files.moveSelectionToOtherPane`。它们不接收参数，要求两个可见本地文件夹窗格、最多64个普通文件及逐次原生确认。这里的发现不增加MCP执行工具，也不能把AI工具的身份、确认或撤销资格转交给增强包。`supportsCancellation:true` 指宿主任务可取消，不表示清单可以填写任务ID或确认布尔。边界与示例见[增强包作者指南](../../sdk/native/README.md)。
+
+当前导航和刷新不修改用户文件内容，`view.setMode` 也不改用户文件内容，但会保存文件夹视图偏好；workspace.setLayout可能保存窗口布局/会话，停用不会还原。`persistsPreferences:false` 仅表示不直接修改可配置偏好；导航仍可记录普通历史或最近位置，不能推断宿主状态/缓存零写入。四种无参能力的 `argsSchema` 为 `null`，view.setMode与workspace.setLayout分别提供完整参数Schema并要求args.mode或args.layout；后者先发现workspaceLayouts，作用调用窗口，设置页拒绝多栏。当前不提供取消能力。AI 生成清单前应核对目标、参数及副作用，再调用校验工具；发现不授予执行权限，新增详情也不新增 MCP 执行工具，不开放内部动作 inventory 或完整 CapabilityService。
+
+校验通过仅代表协议合法，仍需保存清单、本地加载和 UI 验收。完整返回字段、可复制 AI 指令、示例及应用内截图流程见 [增强包 SDK](../../sdk/native/README.md)。部署时应配套更新 Pulse 主程序与 AI 增强包；旧版宿主不具备这两个工具。
 
 ### `find_actions` 返回什么
 
@@ -172,3 +189,6 @@ Pulse 在执行之前会先检查整串步骤。下面任何一条不满足，�
 - `src/bench/ai_mcp_test.cpp`：协议、参数校验、`pulse_not_running`、`client_not_approved` 等。
 - `src/bench/ai_broker_test.cpp`：管道和授权。
 - `selftest_1b2.cpp` 的 `TestMcpRunActions`：分组和预检。
+
+
+增强包开发工具的模型说明与输入 Schema 由 `src/app/extensions/developer_tool_catalog.h` 统一提供给内置助手和 MCP；模板枚举来自生成目录。此项归并限于三个只读开发工具，其他执行工具及其权限检查保持独立。修改返回的模板后仍须重新调用清单校验，获取模板不会安装或执行它。

@@ -8,6 +8,7 @@
 #include "window_helpers.h"
 
 #include <d2d1effects.h>
+#pragma comment(lib, "dxguid.lib")
 #include <windowsx.h>
 #include <algorithm>
 #include <cmath>
@@ -22,9 +23,6 @@ constexpr UINT_PTR kFrameTimer = 1;
 constexpr UINT_PTR kPrefetchTimer = 2;
 constexpr UINT_PTR kCaretTimer = 3;
 constexpr UINT kDestroyMessage = WM_APP + 41;
-// CLSID_D2D1Shadow (d2d1.lib does not export the effect CLSIDs).
-constexpr GUID kShadowClsid = { 0xC67EA361, 0x1863, 0x4e69,
-    { 0x89, 0xDB, 0x69, 0x5D, 0x3E, 0x9D, 0x5B, 0x53 } };
 
 // Geometry in DIPs, as in the prototype (#pop, .tile, .ptabs).
 constexpr float kMargin = 28.0f;     // around the card: shadow, notch, pop overshoot
@@ -36,9 +34,9 @@ constexpr float kDescY = 86.0f, kDescH = 24.0f;
 constexpr float kGridY = 120.0f;
 constexpr float kPadBottom = 12.0f;
 constexpr float kFootH = 36.0f;      // under the grid: a divider, then the 快捷键 row
-constexpr float kGridMax = 370.0f;
+constexpr float kGridMax = 280.0f;   // about three rows and a section heading; the rest scrolls
 constexpr int kCols = 5;
-constexpr float kTileGap = 8.0f, kTileH = 76.0f;
+constexpr float kTileGap = 8.0f, kTileH = 64.0f;   // compact: icon 20, label, optional note
 constexpr float kSecH = 24.0f, kSecGap = 12.0f;
 constexpr float kSearchW = 150.0f;
 constexpr float kRadius = 12.0f;
@@ -207,6 +205,21 @@ public:
         if (quit) PostQuitMessage(static_cast<int>(quit_code));
     }
 
+#if defined(PULSE_WITH_SELFTEST) || defined(PULSE_WITH_TEST_HOOKS)
+    HWND Probe(const wchar_t* keyword, POINT* center, const wchar_t* snapshot) {
+        if (snapshot) { Render(); if (!compositor_.SaveSnapshot(snapshot)) return nullptr; }
+        if (keyword && center) {
+            for (size_t i = 0; i < spec_->pins.size(); ++i) {
+                if (spec_->pins[i].keywords != keyword) continue;
+                const auto r = TileRect(kTools, i);
+                *center = POINT{static_cast<LONG>((r.left+r.right)/2), static_cast<LONG>((r.top+r.bottom)/2)};
+                return page_ == kTools && Inside(GridRect(), static_cast<float>(center->x), static_cast<float>(center->y)) ? hwnd_ : nullptr;
+            }
+            return nullptr;
+        }
+        return hwnd_;
+    }
+#endif
 private:
     // ---- geometry -------------------------------------------------------
     float S(float dip) const { return dip * scale_; }
@@ -906,7 +919,7 @@ private:
         dc->FillRoundedRectangle(D2D1::RoundedRect(card, radius, radius), BrushOf(D2D1::ColorF(0, 0, 0, 1)));
         list->Close();
         dc->SetTarget(target.get());
-        if (FAILED(dc->CreateEffect(kShadowClsid, &shadow))) { shadow.reset(); return shadow; }
+        if (FAILED(dc->CreateEffect(CLSID_D2D1Shadow, &shadow))) { shadow.reset(); return shadow; }
         shadow->SetInput(0, list.get());
         shadow->SetValue(D2D1_SHADOW_PROP_BLUR_STANDARD_DEVIATION, 9.0f * scale_);
         shadow->SetValue(D2D1_SHADOW_PROP_COLOR, D2D1::Vector4F(0, 0, 0, dark_ ? 0.55f : 0.26f));
@@ -982,8 +995,8 @@ private:
         // Art and label, centred as a column (icon 20 + gap 6 + label).
         const std::wstring& note = on_toolbar ? spec_->on_toolbar_text : (t ? t->badge : spec_->add_app_text);
         const bool has_note = t && !note.empty();
-        const float art_cy = r.top + S(has_note ? 24.0f : 28.0f);
-        const float label_top = r.top + S(has_note ? 40.0f : 45.0f);
+        const float art_cy = r.top + S(has_note ? 18.0f : 22.0f);
+        const float label_top = r.top + S(has_note ? 31.0f : 36.0f);
         const float dim = (on && !on_toolbar) || add || hot ? 1.0f : 0.6f;
         if (add) {
             Glyph(L"\xE710", D2D1::Point2F((r.left + r.right) * 0.5f, art_cy), S(20.0f), Alpha(pal.accent, alpha));
@@ -1610,4 +1623,9 @@ void ShowToolbarPicker(HWND owner, ToolbarCustomizeSpec& spec, bool dark, D2D1_C
     window.Run(owner, spec, dark, accent);
 }
 
+#if defined(PULSE_WITH_SELFTEST) || defined(PULSE_WITH_TEST_HOOKS)
+HWND ProbeToolbarPicker(const wchar_t* keyword, POINT* center, const wchar_t* snapshot) {
+    return g_window ? g_window->Probe(keyword, center, snapshot) : nullptr;
+}
+#endif
 } // namespace pulse::ui

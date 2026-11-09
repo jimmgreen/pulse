@@ -1,4 +1,4 @@
-// ai_mcp_run.h - One MCP run_actions call (plans/ai/P5_外部AI与收尾.html):
+// ai_mcp_run.h - One MCP run_actions call:
 // the broker's call thread (ai_tools_actions.cpp) hands it to the UI thread,
 // which runs the steps with the assistant's runners (ai_assistant_agent.cpp)
 // and asks the user with Pulse's confirm dialog instead of chat cards.

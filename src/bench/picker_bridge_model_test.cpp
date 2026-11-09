@@ -174,5 +174,32 @@ int main() {
     reply = app::CompletePickerBridge(request, outcome, wire::ErrorSource::HResult);
     Check(wire::ValidateResponse(request, reply) && std::get<wire::Response>(reply.body).error_source == wire::ErrorSource::HResult &&
         std::get<wire::Response>(reply.body).error_code == static_cast<uint32_t>(E_ACCESSDENIED), "HRESULT source and bits preserved separately from Win32");
+
+    // Out-of-process local save and labels map onto the spec exactly as the
+    // in-process provider maps its V2 options.
+    wire::Request local_save;
+    local_save.operation = wire::Operation::SaveFile;
+    local_save.required_capabilities = wire::Save | wire::LocalSaveAccessV1 | wire::DialogLabels;
+    local_save.options = wire::OverwritePrompt | wire::ValidateLocalSaveAccessV1 | wire::SaveNativeDefaults | wire::SaveNoTestFileCreate | wire::SaveRequireExistingParent;
+    local_save.initial_directory = u"C:\\fixture";
+    local_save.filename = u"report";
+    local_save.label_flags = wire::LabelTitle | wire::LabelOkButton;
+    local_save.title = u"导出";
+    local_save.ok_button_label = u"导出(&E)";
+    wire::Message local_save_message{{9}, local_save};
+    prepared = app::PreparePickerBridge(local_save_message);
+    spec = std::get_if<ui::FolderPickerSpec>(&prepared);
+    Check(spec && spec->mode == ui::PickerMode::Save && spec->validate_local_save_access_v1 && spec->native_save_defaults &&
+        spec->no_test_file_create && spec->require_existing_save_parent && !spec->require_unencrypted_save && !spec->skip_access_validation &&
+        spec->explicit_title && spec->title == L"导出" && spec->has_ok_button_label && spec->ok_button_label == L"导出(&E)" &&
+        !spec->has_file_name_label, "local save options and labels reach the spec");
+    local_save.options = wire::OverwritePrompt | wire::ValidateLocalSaveAccessV1 | wire::SaveSkipAccessValidation;
+    local_save_message.body = local_save;
+    prepared = app::PreparePickerBridge(local_save_message);
+    spec = std::get_if<ui::FolderPickerSpec>(&prepared);
+    Check(spec && spec->validate_local_save_access_v1 && spec->skip_access_validation && !spec->native_save_defaults, "caller-validated save skips Pulse access validation");
+    local_save.options = wire::OverwritePrompt | wire::ValidateLocalSaveAccessV1 | wire::SaveSkipAccessValidation | wire::SaveNativeDefaults;
+    local_save_message.body = local_save;
+    Check(rejected(local_save_message, wire::Status::Failed), "contradictory save options are a protocol failure");
     return failures ? 1 : 0;
 }

@@ -1,0 +1,1420 @@
+{
+  "formatVersion": 1,
+  "grantsAuthority": false,
+  "decisions": [
+    {
+      "action": "nav.open",
+      "decision": "restricted",
+      "module": "导航",
+      "ownerSource": "src/app/app_navigation.h",
+      "reason": "导航目标可能跨出当前目录或启动外部文件",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；拟新增受限导航接口，以当前目录不透明条目和 owner 绑定导航目标",
+      "entryConditions": "分离目录导航与外部启动；验证失效条目、目录切换和 owner 销毁"
+    },
+    {
+      "action": "nav.go",
+      "decision": "planned",
+      "module": "导航",
+      "ownerSource": "src/app/app_navigation.h",
+      "reason": "导航目标可能跨出当前目录或启动外部文件",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增受限导航接口，以当前目录不透明条目和 owner 绑定导航目标",
+      "entryConditions": "分离目录导航与外部启动；验证失效条目、目录切换和 owner 销毁"
+    },
+    {
+      "action": "nav.back",
+      "decision": "publicMapped",
+      "module": "导航",
+      "ownerSource": "src/app/app_navigation.h",
+      "reason": "已由CapabilityService提供显式参数适配与调用者/owner校验；内部action本身不授予包",
+      "publicCapabilities": [
+        "navigation.back"
+      ],
+      "proposedInterface": "仅通过 navigation.back；不接受内部action ID",
+      "entryConditions": "包声明能力并启用；当前调用者代际有效；参数严格校验"
+    },
+    {
+      "action": "nav.forward",
+      "decision": "publicMapped",
+      "module": "导航",
+      "ownerSource": "src/app/app_navigation.h",
+      "reason": "已由CapabilityService提供显式参数适配与调用者/owner校验；内部action本身不授予包",
+      "publicCapabilities": [
+        "navigation.forward"
+      ],
+      "proposedInterface": "仅通过 navigation.forward；不接受内部action ID",
+      "entryConditions": "包声明能力并启用；当前调用者代际有效；参数严格校验"
+    },
+    {
+      "action": "nav.up",
+      "decision": "publicMapped",
+      "module": "导航",
+      "ownerSource": "src/app/app_navigation.h",
+      "reason": "已由CapabilityService提供显式参数适配与调用者/owner校验；内部action本身不授予包",
+      "publicCapabilities": [
+        "navigation.up"
+      ],
+      "proposedInterface": "仅通过 navigation.up；不接受内部action ID",
+      "entryConditions": "包声明能力并启用；当前调用者代际有效；参数严格校验"
+    },
+    {
+      "action": "nav.refresh",
+      "decision": "publicMapped",
+      "module": "导航",
+      "ownerSource": "src/app/app_navigation.h",
+      "reason": "已由CapabilityService提供显式参数适配与调用者/owner校验；内部action本身不授予包",
+      "publicCapabilities": [
+        "view.refresh"
+      ],
+      "proposedInterface": "仅通过 view.refresh；不接受内部action ID",
+      "entryConditions": "包声明能力并启用；当前调用者代际有效；参数严格校验"
+    },
+    {
+      "action": "nav.open_in_new_tab",
+      "decision": "planned",
+      "module": "导航",
+      "ownerSource": "src/app/app_navigation.h",
+      "reason": "导航目标可能跨出当前目录或启动外部文件",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增受限导航接口，以当前目录不透明条目和 owner 绑定导航目标",
+      "entryConditions": "分离目录导航与外部启动；验证失效条目、目录切换和 owner 销毁"
+    },
+    {
+      "action": "nav.reveal",
+      "decision": "planned",
+      "module": "导航",
+      "ownerSource": "src/app/app_navigation.h",
+      "reason": "导航目标可能跨出当前目录或启动外部文件",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增受限导航接口，以当前目录不透明条目和 owner 绑定导航目标",
+      "entryConditions": "分离目录导航与外部启动；验证失效条目、目录切换和 owner 销毁"
+    },
+    {
+      "action": "nav.recent_changes",
+      "decision": "planned",
+      "module": "导航",
+      "ownerSource": "src/app/app_navigation.h",
+      "reason": "导航目标可能跨出当前目录或启动外部文件",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增受限导航接口，以当前目录不透明条目和 owner 绑定导航目标",
+      "entryConditions": "分离目录导航与外部启动；验证失效条目、目录切换和 owner 销毁"
+    },
+    {
+      "action": "nav.recycle_bin",
+      "decision": "planned",
+      "module": "导航",
+      "ownerSource": "src/app/app_navigation.h",
+      "reason": "导航目标可能跨出当前目录或启动外部文件",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增受限导航接口，以当前目录不透明条目和 owner 绑定导航目标",
+      "entryConditions": "分离目录导航与外部启动；验证失效条目、目录切换和 owner 销毁"
+    },
+    {
+      "action": "tab.new",
+      "decision": "publicMapped",
+      "module": "标签页",
+      "ownerSource": "src/app/tab_controller.h",
+      "reason": "通过显式宿主适配与caller/owner校验；不接受内部action ID",
+      "publicCapabilities": [
+        "tabs.new"
+      ],
+      "proposedInterface": "仅通过 tabs.new；作用于当前owner窗口的顶栏layout tabs或可见pane",
+      "entryConditions": "包声明并启用；caller代际有效；索引按执行时可见顺序校验；最后或固定标签不关闭；不允许关闭owner窗口"
+    },
+    {
+      "action": "tab.close",
+      "decision": "publicMapped",
+      "module": "标签页",
+      "ownerSource": "src/app/tab_controller.h",
+      "reason": "通过显式宿主适配与caller/owner校验；不接受内部action ID",
+      "publicCapabilities": [
+        "tabs.closeActive"
+      ],
+      "proposedInterface": "仅通过 tabs.closeActive；作用于当前owner窗口的顶栏layout tabs或可见pane",
+      "entryConditions": "包声明并启用；caller代际有效；索引按执行时可见顺序校验；最后或固定标签不关闭；不允许关闭owner窗口"
+    },
+    {
+      "action": "tab.close_others",
+      "decision": "planned",
+      "module": "标签页",
+      "ownerSource": "src/app/tab_controller.h",
+      "reason": "操作用户标签及持久显示状态，需要明确目标归属",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前 owner 标签句柄接口，不接受全局索引",
+      "entryConditions": "定义稳定标签句柄、已关闭目标拒绝与关闭前保护；测试多窗口隔离"
+    },
+    {
+      "action": "tab.duplicate",
+      "decision": "publicMapped",
+      "module": "标签页",
+      "ownerSource": "src/app/tab_controller.h",
+      "reason": "通过显式宿主适配与caller/owner校验；不接受内部action ID",
+      "publicCapabilities": [
+        "tabs.duplicate"
+      ],
+      "proposedInterface": "仅通过 tabs.duplicate；作用于当前owner窗口的顶栏layout tabs或可见pane",
+      "entryConditions": "包声明并启用；caller代际有效；索引按执行时可见顺序校验；最后或固定标签不关闭；不允许关闭owner窗口"
+    },
+    {
+      "action": "tab.pin",
+      "decision": "planned",
+      "module": "标签页",
+      "ownerSource": "src/app/tab_controller.h",
+      "reason": "操作用户标签及持久显示状态，需要明确目标归属",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前 owner 标签句柄接口，不接受全局索引",
+      "entryConditions": "定义稳定标签句柄、已关闭目标拒绝与关闭前保护；测试多窗口隔离"
+    },
+    {
+      "action": "tab.rename",
+      "decision": "planned",
+      "module": "标签页",
+      "ownerSource": "src/app/tab_controller.h",
+      "reason": "操作用户标签及持久显示状态，需要明确目标归属",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前 owner 标签句柄接口，不接受全局索引",
+      "entryConditions": "定义稳定标签句柄、已关闭目标拒绝与关闭前保护；测试多窗口隔离"
+    },
+    {
+      "action": "tab.color",
+      "decision": "planned",
+      "module": "标签页",
+      "ownerSource": "src/app/tab_controller.h",
+      "reason": "操作用户标签及持久显示状态，需要明确目标归属",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前 owner 标签句柄接口，不接受全局索引",
+      "entryConditions": "定义稳定标签句柄、已关闭目标拒绝与关闭前保护；测试多窗口隔离"
+    },
+    {
+      "action": "tab.group",
+      "decision": "planned",
+      "module": "标签页",
+      "ownerSource": "src/app/tab_controller.h",
+      "reason": "操作用户标签及持久显示状态，需要明确目标归属",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前 owner 标签句柄接口，不接受全局索引",
+      "entryConditions": "定义稳定标签句柄、已关闭目标拒绝与关闭前保护；测试多窗口隔离"
+    },
+    {
+      "action": "tab.activate",
+      "decision": "publicMapped",
+      "module": "标签页",
+      "ownerSource": "src/app/tab_controller.h",
+      "reason": "通过显式宿主适配与caller/owner校验；不接受内部action ID",
+      "publicCapabilities": [
+        "tabs.activate"
+      ],
+      "proposedInterface": "仅通过 tabs.activate；作用于当前owner窗口的顶栏layout tabs或可见pane",
+      "entryConditions": "包声明并启用；caller代际有效；索引按执行时可见顺序校验；最后或固定标签不关闭；不允许关闭owner窗口"
+    },
+    {
+      "action": "tab.to_window",
+      "decision": "planned",
+      "module": "标签页",
+      "ownerSource": "src/app/tab_controller.h",
+      "reason": "操作用户标签及持久显示状态，需要明确目标归属",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前 owner 标签句柄接口，不接受全局索引",
+      "entryConditions": "定义稳定标签句柄、已关闭目标拒绝与关闭前保护；测试多窗口隔离"
+    },
+    {
+      "action": "window.layout",
+      "decision": "publicMapped",
+      "module": "窗口布局",
+      "ownerSource": "src/app/window_registry.h",
+      "reason": "已由CapabilityService提供显式参数适配与调用者/owner校验；内部action本身不授予包",
+      "publicCapabilities": [
+        "workspace.setLayout"
+      ],
+      "proposedInterface": "仅通过 workspace.setLayout；不接受内部action ID",
+      "entryConditions": "包声明能力并启用；当前调用者代际有效；参数严格校验；仅schema布局预设，不授权创建/关闭其他窗口"
+    },
+    {
+      "action": "pane.focus",
+      "decision": "publicMapped",
+      "module": "分栏",
+      "ownerSource": "src/app/tab_transfer.h",
+      "reason": "通过显式宿主适配与caller/owner校验；不接受内部action ID",
+      "publicCapabilities": [
+        "panes.focus"
+      ],
+      "proposedInterface": "仅通过 panes.focus；作用于当前owner窗口的顶栏layout tabs或可见pane",
+      "entryConditions": "包声明并启用；caller代际有效；索引按执行时可见顺序校验；最后或固定标签不关闭；不允许关闭owner窗口"
+    },
+    {
+      "action": "pane.mark_target",
+      "decision": "planned",
+      "module": "分栏",
+      "ownerSource": "src/app/tab_transfer.h",
+      "reason": "分栏目标会影响后续导航与传输接收方",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增 owner 内分栏句柄与显式焦点/目标接口",
+      "entryConditions": "验证分栏合并后句柄失效及传输目标不随焦点漂移"
+    },
+    {
+      "action": "pane.to_window",
+      "decision": "planned",
+      "module": "分栏",
+      "ownerSource": "src/app/tab_transfer.h",
+      "reason": "分栏目标会影响后续导航与传输接收方",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增 owner 内分栏句柄与显式焦点/目标接口",
+      "entryConditions": "验证分栏合并后句柄失效及传输目标不随焦点漂移"
+    },
+    {
+      "action": "window.new",
+      "decision": "planned",
+      "module": "窗口布局",
+      "ownerSource": "src/app/window_registry.h",
+      "reason": "窗口生命周期或跨窗口操作可能影响其他工作区",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前 owner 窗口操作接口；跨窗口目标单独授权",
+      "entryConditions": "先确定窗口生命周期/会话撤销和跨窗口确认模型，验证关闭竞态"
+    },
+    {
+      "action": "window.close",
+      "decision": "planned",
+      "module": "窗口布局",
+      "ownerSource": "src/app/window_registry.h",
+      "reason": "窗口生命周期或跨窗口操作可能影响其他工作区",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前 owner 窗口操作接口；跨窗口目标单独授权",
+      "entryConditions": "先确定窗口生命周期/会话撤销和跨窗口确认模型，验证关闭竞态"
+    },
+    {
+      "action": "window.reopen",
+      "decision": "planned",
+      "module": "窗口布局",
+      "ownerSource": "src/app/window_registry.h",
+      "reason": "窗口生命周期或跨窗口操作可能影响其他工作区",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前 owner 窗口操作接口；跨窗口目标单独授权",
+      "entryConditions": "先确定窗口生命周期/会话撤销和跨窗口确认模型，验证关闭竞态"
+    },
+    {
+      "action": "window.activate",
+      "decision": "planned",
+      "module": "窗口布局",
+      "ownerSource": "src/app/window_registry.h",
+      "reason": "窗口生命周期或跨窗口操作可能影响其他工作区",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前 owner 窗口操作接口；跨窗口目标单独授权",
+      "entryConditions": "先确定窗口生命周期/会话撤销和跨窗口确认模型，验证关闭竞态"
+    },
+    {
+      "action": "window.arrange",
+      "decision": "planned",
+      "module": "窗口布局",
+      "ownerSource": "src/app/window_registry.h",
+      "reason": "窗口生命周期或跨窗口操作可能影响其他工作区",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前 owner 窗口操作接口；跨窗口目标单独授权",
+      "entryConditions": "先确定窗口生命周期/会话撤销和跨窗口确认模型，验证关闭竞态"
+    },
+    {
+      "action": "window.merge",
+      "decision": "planned",
+      "module": "窗口布局",
+      "ownerSource": "src/app/window_registry.h",
+      "reason": "窗口生命周期或跨窗口操作可能影响其他工作区",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前 owner 窗口操作接口；跨窗口目标单独授权",
+      "entryConditions": "先确定窗口生命周期/会话撤销和跨窗口确认模型，验证关闭竞态"
+    },
+    {
+      "action": "window.overview",
+      "decision": "planned",
+      "module": "窗口布局",
+      "ownerSource": "src/app/window_registry.h",
+      "reason": "窗口生命周期或跨窗口操作可能影响其他工作区",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前 owner 窗口操作接口；跨窗口目标单独授权",
+      "entryConditions": "先确定窗口生命周期/会话撤销和跨窗口确认模型，验证关闭竞态"
+    },
+    {
+      "action": "window.maximize",
+      "decision": "planned",
+      "module": "窗口布局",
+      "ownerSource": "src/app/window_registry.h",
+      "reason": "窗口生命周期或跨窗口操作可能影响其他工作区",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前 owner 窗口操作接口；跨窗口目标单独授权",
+      "entryConditions": "先确定窗口生命周期/会话撤销和跨窗口确认模型，验证关闭竞态"
+    },
+    {
+      "action": "sidebar.toggle",
+      "decision": "planned",
+      "module": "侧栏",
+      "ownerSource": "src/app/actions/action_registry.cpp",
+      "reason": "当前实现操作宿主侧栏显示与分组状态",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增 owner 内侧栏显示枚举接口",
+      "entryConditions": "枚举分组白名单、持久化影响和窄布局回归通过"
+    },
+    {
+      "action": "sidebar.section",
+      "decision": "planned",
+      "module": "侧栏",
+      "ownerSource": "src/app/actions/action_registry.cpp",
+      "reason": "当前实现操作宿主侧栏显示与分组状态",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增 owner 内侧栏显示枚举接口",
+      "entryConditions": "枚举分组白名单、持久化影响和窄布局回归通过"
+    },
+    {
+      "action": "favbar.toggle",
+      "decision": "planned",
+      "module": "收藏栏",
+      "ownerSource": "src/app/favorites_bar.h",
+      "reason": "只需显示控制，不应连带授权收藏数据写入",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增 owner 内收藏栏显示开关",
+      "entryConditions": "显示开关与收藏写入分离；主题/窄布局检查通过"
+    },
+    {
+      "action": "details.toggle",
+      "decision": "planned",
+      "module": "详情面板",
+      "ownerSource": "src/app/actions/action_registry.cpp",
+      "reason": "面板显示可能触发所选文件读取",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增 owner 内详情显示接口",
+      "entryConditions": "限定当前选择与受控预览读取，失效选择和云文件行为明确"
+    },
+    {
+      "action": "app.settings_page",
+      "decision": "planned",
+      "module": "应用界面",
+      "ownerSource": "src/app/app_commands.h",
+      "reason": "当前入口打开宿主设置或帮助界面",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增受限宿主页面枚举接口",
+      "entryConditions": "仅允许非敏感页面，禁止借页面导航自动修改权限"
+    },
+    {
+      "action": "app.shortcut_help",
+      "decision": "planned",
+      "module": "应用界面",
+      "ownerSource": "src/app/app_commands.h",
+      "reason": "当前入口打开宿主设置或帮助界面",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增受限宿主页面枚举接口",
+      "entryConditions": "仅允许非敏感页面，禁止借页面导航自动修改权限"
+    },
+    {
+      "action": "app.exit",
+      "decision": "restricted",
+      "module": "应用界面",
+      "ownerSource": "src/app/app_commands.h",
+      "reason": "权威动作风险为UserOnly，必须由用户本人触发",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；拟新增受限宿主页面枚举接口",
+      "entryConditions": "仅允许非敏感页面，禁止借页面导航自动修改权限"
+    },
+    {
+      "action": "view.mode",
+      "decision": "publicMapped",
+      "module": "视图",
+      "ownerSource": "src/app/actions/action_registry.cpp",
+      "reason": "已由CapabilityService提供显式参数适配与调用者/owner校验；内部action本身不授予包",
+      "publicCapabilities": [
+        "view.setMode"
+      ],
+      "proposedInterface": "仅通过 view.setMode；不接受内部action ID",
+      "entryConditions": "包声明能力并启用；当前调用者代际有效；参数严格校验；仅schema枚举模式，不代表照片墙/全部视图选项已开放"
+    },
+    {
+      "action": "view.icon_size",
+      "decision": "planned",
+      "module": "视图",
+      "ownerSource": "src/app/actions/action_registry.cpp",
+      "reason": "改变视图参数或持久默认值，需要严格参数与作用域",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增 owner 内视图选项枚举接口；全局应用另列权限",
+      "entryConditions": "定义合法排序/分组/列参数和当前目录作用域，区分临时与持久设置"
+    },
+    {
+      "action": "view.wall",
+      "decision": "planned",
+      "module": "视图",
+      "ownerSource": "src/app/actions/action_registry.cpp",
+      "reason": "改变视图参数或持久默认值，需要严格参数与作用域",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增 owner 内视图选项枚举接口；全局应用另列权限",
+      "entryConditions": "定义合法排序/分组/列参数和当前目录作用域，区分临时与持久设置"
+    },
+    {
+      "action": "view.sort",
+      "decision": "publicMapped",
+      "module": "视图",
+      "ownerSource": "src/app/actions/action_registry.cpp",
+      "reason": "已通过显式能力适配作用于当前聚焦分栏的已加载普通目录；不接受任意条目或pane ID；排序可能保存目录视图偏好",
+      "publicCapabilities": [
+        "view.setSort"
+      ],
+      "proposedInterface": "仅通过 view.setSort；内部action ID不是权限",
+      "entryConditions": "包声明并启用、caller/owner代际有效；非加载中的普通目录；虚拟页/搜索结果拒绝；column/direction严格枚举，已有文件夹优先规则仍生效"
+    },
+    {
+      "action": "view.group",
+      "decision": "planned",
+      "module": "视图",
+      "ownerSource": "src/app/actions/action_registry.cpp",
+      "reason": "改变视图参数或持久默认值，需要严格参数与作用域",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增 owner 内视图选项枚举接口；全局应用另列权限",
+      "entryConditions": "定义合法排序/分组/列参数和当前目录作用域，区分临时与持久设置"
+    },
+    {
+      "action": "view.folders_first",
+      "decision": "planned",
+      "module": "视图",
+      "ownerSource": "src/app/actions/action_registry.cpp",
+      "reason": "改变视图参数或持久默认值，需要严格参数与作用域",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增 owner 内视图选项枚举接口；全局应用另列权限",
+      "entryConditions": "定义合法排序/分组/列参数和当前目录作用域，区分临时与持久设置"
+    },
+    {
+      "action": "view.folder_sizes",
+      "decision": "planned",
+      "module": "视图",
+      "ownerSource": "src/app/actions/action_registry.cpp",
+      "reason": "改变视图参数或持久默认值，需要严格参数与作用域",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增 owner 内视图选项枚举接口；全局应用另列权限",
+      "entryConditions": "定义合法排序/分组/列参数和当前目录作用域，区分临时与持久设置"
+    },
+    {
+      "action": "view.columns",
+      "decision": "planned",
+      "module": "视图",
+      "ownerSource": "src/app/actions/action_registry.cpp",
+      "reason": "改变视图参数或持久默认值，需要严格参数与作用域",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增 owner 内视图选项枚举接口；全局应用另列权限",
+      "entryConditions": "定义合法排序/分组/列参数和当前目录作用域，区分临时与持久设置"
+    },
+    {
+      "action": "view.apply_all",
+      "decision": "restricted",
+      "module": "视图",
+      "ownerSource": "src/app/actions/action_registry.cpp",
+      "reason": "改变视图参数或持久默认值，需要严格参数与作用域",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；拟新增 owner 内视图选项枚举接口；全局应用另列权限",
+      "entryConditions": "定义合法排序/分组/列参数和当前目录作用域，区分临时与持久设置"
+    },
+    {
+      "action": "view.filter",
+      "decision": "planned",
+      "module": "视图",
+      "ownerSource": "src/app/actions/action_registry.cpp",
+      "reason": "改变视图参数或持久默认值，需要严格参数与作用域",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增 owner 内视图选项枚举接口；全局应用另列权限",
+      "entryConditions": "定义合法排序/分组/列参数和当前目录作用域，区分临时与持久设置"
+    },
+    {
+      "action": "view.compare",
+      "decision": "planned",
+      "module": "视图",
+      "ownerSource": "src/app/actions/action_registry.cpp",
+      "reason": "改变视图参数或持久默认值，需要严格参数与作用域",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增 owner 内视图选项枚举接口；全局应用另列权限",
+      "entryConditions": "定义合法排序/分组/列参数和当前目录作用域，区分临时与持久设置"
+    },
+    {
+      "action": "select.items",
+      "decision": "planned",
+      "module": "选择模型",
+      "ownerSource": "src/app/actions/action_args.h",
+      "reason": "选择变化影响后续文件操作，不能用任意路径冒充条目",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前快照不透明条目的选择接口",
+      "entryConditions": "验证条目所属快照、范围上限和快速切换后的失效拒绝"
+    },
+    {
+      "action": "select.all",
+      "decision": "publicMapped",
+      "module": "选择模型",
+      "ownerSource": "src/app/actions/action_args.h",
+      "reason": "已通过显式能力适配作用于当前聚焦分栏的已加载普通目录；不接受任意条目或pane ID",
+      "publicCapabilities": [
+        "selection.selectAll"
+      ],
+      "proposedInterface": "仅通过 selection.selectAll；内部action ID不是权限",
+      "entryConditions": "包声明并启用、caller/owner代际有效；非加载中的普通目录；虚拟页/搜索结果拒绝；仅当前过滤后可见项目参与全选/反选，其他分栏不变"
+    },
+    {
+      "action": "select.invert",
+      "decision": "publicMapped",
+      "module": "选择模型",
+      "ownerSource": "src/app/actions/action_args.h",
+      "reason": "已通过显式能力适配作用于当前聚焦分栏的已加载普通目录；不接受任意条目或pane ID",
+      "publicCapabilities": [
+        "selection.invert"
+      ],
+      "proposedInterface": "仅通过 selection.invert；内部action ID不是权限",
+      "entryConditions": "包声明并启用、caller/owner代际有效；非加载中的普通目录；虚拟页/搜索结果拒绝；仅当前过滤后可见项目参与全选/反选，其他分栏不变"
+    },
+    {
+      "action": "select.pattern",
+      "decision": "planned",
+      "module": "选择模型",
+      "ownerSource": "src/app/actions/action_args.h",
+      "reason": "选择变化影响后续文件操作，不能用任意路径冒充条目",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前快照不透明条目的选择接口",
+      "entryConditions": "验证条目所属快照、范围上限和快速切换后的失效拒绝"
+    },
+    {
+      "action": "select.clear",
+      "decision": "publicMapped",
+      "module": "选择模型",
+      "ownerSource": "src/app/actions/action_args.h",
+      "reason": "已通过显式能力适配作用于当前聚焦分栏的已加载普通目录；不接受任意条目或pane ID",
+      "publicCapabilities": [
+        "selection.clear"
+      ],
+      "proposedInterface": "仅通过 selection.clear；内部action ID不是权限",
+      "entryConditions": "包声明并启用、caller/owner代际有效；非加载中的普通目录；虚拟页/搜索结果拒绝；清空当前分栏选择，其他分栏不变"
+    },
+    {
+      "action": "edit.undo",
+      "decision": "restricted",
+      "module": "撤销",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "撤销风险由历史操作决定，可能恢复或覆盖文件",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；不公开任意撤销栈；仅考虑包自有任务的可撤销操作",
+      "entryConditions": "建立任务归属与撤销计划确认，验证用户操作不被其他包撤销"
+    },
+    {
+      "action": "file.copy",
+      "decision": "restricted",
+      "module": "文件操作",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "当前动作触及文件、剪贴板或宿主交互，需按操作拆分参数",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；拟新增当前目录条目句柄的受控文件请求，不接受任意路径",
+      "entryConditions": "建立逐操作准备/确认/执行协议，验证冲突、取消、过期选择及审计"
+    },
+    {
+      "action": "file.cut",
+      "decision": "restricted",
+      "module": "文件操作",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "当前动作触及文件、剪贴板或宿主交互，需按操作拆分参数",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；拟新增当前目录条目句柄的受控文件请求，不接受任意路径",
+      "entryConditions": "建立逐操作准备/确认/执行协议，验证冲突、取消、过期选择及审计"
+    },
+    {
+      "action": "file.copy_path",
+      "decision": "restricted",
+      "module": "文件操作",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "当前动作触及文件、剪贴板或宿主交互，需按操作拆分参数",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；拟新增当前目录条目句柄的受控文件请求，不接受任意路径",
+      "entryConditions": "建立逐操作准备/确认/执行协议，验证冲突、取消、过期选择及审计"
+    },
+    {
+      "action": "file.paste",
+      "decision": "restricted",
+      "module": "文件操作",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "当前动作触及文件、剪贴板或宿主交互，需按操作拆分参数",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；拟新增当前目录条目句柄的受控文件请求，不接受任意路径",
+      "entryConditions": "建立逐操作准备/确认/执行协议，验证冲突、取消、过期选择及审计"
+    },
+    {
+      "action": "file.copy_to",
+      "decision": "publicMapped",
+      "module": "文件操作",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "仅映射当前选择传输到另一分栏的子集，内部任意目的地/跨窗口变体未公开",
+      "publicCapabilities": [
+        "files.copySelectionToOtherPane"
+      ],
+      "proposedInterface": "仅通过 files.copySelectionToOtherPane；不接受内部action ID",
+      "entryConditions": "包声明能力并启用；当前调用者代际有效；参数严格校验；源/目标准备通过且每次经原生确认，任务归属与取消受控"
+    },
+    {
+      "action": "file.move_to",
+      "decision": "publicMapped",
+      "module": "文件操作",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "仅映射当前选择传输到另一分栏的子集，内部任意目的地/跨窗口变体未公开",
+      "publicCapabilities": [
+        "files.moveSelectionToOtherPane"
+      ],
+      "proposedInterface": "仅通过 files.moveSelectionToOtherPane；不接受内部action ID",
+      "entryConditions": "包声明能力并启用；当前调用者代际有效；参数严格校验；源/目标准备通过且每次经原生确认，任务归属与取消受控"
+    },
+    {
+      "action": "file.new_folder",
+      "decision": "planned",
+      "module": "文件操作",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "当前动作触及文件、剪贴板或宿主交互，需按操作拆分参数",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前目录条目句柄的受控文件请求，不接受任意路径",
+      "entryConditions": "建立逐操作准备/确认/执行协议，验证冲突、取消、过期选择及审计"
+    },
+    {
+      "action": "file.new_file",
+      "decision": "planned",
+      "module": "文件操作",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "当前动作触及文件、剪贴板或宿主交互，需按操作拆分参数",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前目录条目句柄的受控文件请求，不接受任意路径",
+      "entryConditions": "建立逐操作准备/确认/执行协议，验证冲突、取消、过期选择及审计"
+    },
+    {
+      "action": "file.rename",
+      "decision": "planned",
+      "module": "文件操作",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "当前动作触及文件、剪贴板或宿主交互，需按操作拆分参数",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前目录条目句柄的受控文件请求，不接受任意路径",
+      "entryConditions": "建立逐操作准备/确认/执行协议，验证冲突、取消、过期选择及审计"
+    },
+    {
+      "action": "file.batch_rename",
+      "decision": "planned",
+      "module": "文件操作",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "当前动作触及文件、剪贴板或宿主交互，需按操作拆分参数",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前目录条目句柄的受控文件请求，不接受任意路径",
+      "entryConditions": "建立逐操作准备/确认/执行协议，验证冲突、取消、过期选择及审计"
+    },
+    {
+      "action": "file.group_into_folder",
+      "decision": "planned",
+      "module": "文件操作",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "当前动作触及文件、剪贴板或宿主交互，需按操作拆分参数",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前目录条目句柄的受控文件请求，不接受任意路径",
+      "entryConditions": "建立逐操作准备/确认/执行协议，验证冲突、取消、过期选择及审计"
+    },
+    {
+      "action": "file.dissolve",
+      "decision": "planned",
+      "module": "文件操作",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "当前动作触及文件、剪贴板或宿主交互，需按操作拆分参数",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前目录条目句柄的受控文件请求，不接受任意路径",
+      "entryConditions": "建立逐操作准备/确认/执行协议，验证冲突、取消、过期选择及审计"
+    },
+    {
+      "action": "file.organize",
+      "decision": "planned",
+      "module": "文件操作",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "当前动作触及文件、剪贴板或宿主交互，需按操作拆分参数",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前目录条目句柄的受控文件请求，不接受任意路径",
+      "entryConditions": "建立逐操作准备/确认/执行协议，验证冲突、取消、过期选择及审计"
+    },
+    {
+      "action": "file.find_duplicates",
+      "decision": "planned",
+      "module": "文件操作",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "当前动作触及文件、剪贴板或宿主交互，需按操作拆分参数",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前目录条目句柄的受控文件请求，不接受任意路径",
+      "entryConditions": "建立逐操作准备/确认/执行协议，验证冲突、取消、过期选择及审计"
+    },
+    {
+      "action": "file.zip",
+      "decision": "planned",
+      "module": "文件操作",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "当前动作触及文件、剪贴板或宿主交互，需按操作拆分参数",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前目录条目句柄的受控文件请求，不接受任意路径",
+      "entryConditions": "建立逐操作准备/确认/执行协议，验证冲突、取消、过期选择及审计"
+    },
+    {
+      "action": "file.recycle",
+      "decision": "restricted",
+      "module": "文件操作",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "删除用户数据需要单独删除授权与逐次原生确认",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；拟新增当前目录条目句柄的受控文件请求，不接受任意路径",
+      "entryConditions": "建立逐操作准备/确认/执行协议，验证冲突、取消、过期选择及审计"
+    },
+    {
+      "action": "file.delete_permanent",
+      "decision": "restricted",
+      "module": "文件操作",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "不可恢复删除必须保留用户专用确认边界",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；拟新增当前目录条目句柄的受控文件请求，不接受任意路径",
+      "entryConditions": "建立逐操作准备/确认/执行协议，验证冲突、取消、过期选择及审计"
+    },
+    {
+      "action": "recycle.restore",
+      "decision": "restricted",
+      "module": "回收站",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "回收站影响用户已删除文件及恢复目标",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；不提供通用回收站写入入口；仅考虑包自有任务恢复",
+      "entryConditions": "需要精确对象身份、恢复冲突计划与逐次原生确认"
+    },
+    {
+      "action": "recycle.empty",
+      "decision": "restricted",
+      "module": "回收站",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "不可恢复删除必须保留用户专用确认边界",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；不提供通用回收站写入入口；仅考虑包自有任务恢复",
+      "entryConditions": "需要精确对象身份、恢复冲突计划与逐次原生确认"
+    },
+    {
+      "action": "file.properties",
+      "decision": "planned",
+      "module": "文件操作",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "当前动作触及文件、剪贴板或宿主交互，需按操作拆分参数",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前目录条目句柄的受控文件请求，不接受任意路径",
+      "entryConditions": "建立逐操作准备/确认/执行协议，验证冲突、取消、过期选择及审计"
+    },
+    {
+      "action": "file.context_menu",
+      "decision": "restricted",
+      "module": "文件操作",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "当前动作触及文件、剪贴板或宿主交互，需按操作拆分参数",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；拟新增当前目录条目句柄的受控文件请求，不接受任意路径",
+      "entryConditions": "建立逐操作准备/确认/执行协议，验证冲突、取消、过期选择及审计"
+    },
+    {
+      "action": "file.terminal",
+      "decision": "restricted",
+      "module": "文件操作",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "当前动作触及文件、剪贴板或宿主交互，需按操作拆分参数",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；拟新增当前目录条目句柄的受控文件请求，不接受任意路径",
+      "entryConditions": "建立逐操作准备/确认/执行协议，验证冲突、取消、过期选择及审计"
+    },
+    {
+      "action": "file.compute_size",
+      "decision": "planned",
+      "module": "文件操作",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "当前动作触及文件、剪贴板或宿主交互，需按操作拆分参数",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前目录条目句柄的受控文件请求，不接受任意路径",
+      "entryConditions": "建立逐操作准备/确认/执行协议，验证冲突、取消、过期选择及审计"
+    },
+    {
+      "action": "shell.verbs",
+      "decision": "restricted",
+      "module": "Shell适配",
+      "ownerSource": "src/app/context_menu.h",
+      "reason": "Shell扩展和verb可能启动任意外部程序",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；保留用户Shell菜单；不将verb字符串作为增强包命令",
+      "entryConditions": "仅在独立外部执行权限、目标校验与逐次确认协议完成后重新评审"
+    },
+    {
+      "action": "shell.run_verb",
+      "decision": "restricted",
+      "module": "Shell适配",
+      "ownerSource": "src/app/context_menu.h",
+      "reason": "外部程序或远程副作用无法由宿主完整约束",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；保留用户Shell菜单；不将verb字符串作为增强包命令",
+      "entryConditions": "仅在独立外部执行权限、目标校验与逐次确认协议完成后重新评审"
+    },
+    {
+      "action": "cloud.keep",
+      "decision": "restricted",
+      "module": "云文件",
+      "ownerSource": "src/fs/cloud_state.h",
+      "reason": "改变系统或设备状态，当前增强包不获得此权限",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；保留用户云文件操作入口",
+      "entryConditions": "需供应商语义、流量/离线影响和可取消确认协议后重新评审"
+    },
+    {
+      "action": "cloud.free",
+      "decision": "restricted",
+      "module": "云文件",
+      "ownerSource": "src/fs/cloud_state.h",
+      "reason": "改变系统或设备状态，当前增强包不获得此权限",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；保留用户云文件操作入口",
+      "entryConditions": "需供应商语义、流量/离线影响和可取消确认协议后重新评审"
+    },
+    {
+      "action": "tag.toggle",
+      "decision": "planned",
+      "module": "标签",
+      "ownerSource": "src/app/tag_view.h",
+      "reason": "标签编辑属于用户共享元数据，不能跨包隐式修改",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增显式用户授权的标签对象接口",
+      "entryConditions": "明确用户共享与包私有范围；验证标签ID、事务回滚和删除引用"
+    },
+    {
+      "action": "tag.clear",
+      "decision": "planned",
+      "module": "标签",
+      "ownerSource": "src/app/tag_view.h",
+      "reason": "标签编辑属于用户共享元数据，不能跨包隐式修改",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增显式用户授权的标签对象接口",
+      "entryConditions": "明确用户共享与包私有范围；验证标签ID、事务回滚和删除引用"
+    },
+    {
+      "action": "tag.panel",
+      "decision": "planned",
+      "module": "标签",
+      "ownerSource": "src/app/tag_view.h",
+      "reason": "标签编辑属于用户共享元数据，不能跨包隐式修改",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增显式用户授权的标签对象接口",
+      "entryConditions": "明确用户共享与包私有范围；验证标签ID、事务回滚和删除引用"
+    },
+    {
+      "action": "tag.create",
+      "decision": "planned",
+      "module": "标签",
+      "ownerSource": "src/app/tag_view.h",
+      "reason": "标签编辑属于用户共享元数据，不能跨包隐式修改",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增显式用户授权的标签对象接口",
+      "entryConditions": "明确用户共享与包私有范围；验证标签ID、事务回滚和删除引用"
+    },
+    {
+      "action": "tag.edit",
+      "decision": "planned",
+      "module": "标签",
+      "ownerSource": "src/app/tag_view.h",
+      "reason": "标签编辑属于用户共享元数据，不能跨包隐式修改",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增显式用户授权的标签对象接口",
+      "entryConditions": "明确用户共享与包私有范围；验证标签ID、事务回滚和删除引用"
+    },
+    {
+      "action": "tag.delete",
+      "decision": "planned",
+      "module": "标签",
+      "ownerSource": "src/app/tag_view.h",
+      "reason": "标签编辑属于用户共享元数据，不能跨包隐式修改",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增显式用户授权的标签对象接口",
+      "entryConditions": "明确用户共享与包私有范围；验证标签ID、事务回滚和删除引用"
+    },
+    {
+      "action": "tag.group",
+      "decision": "planned",
+      "module": "标签",
+      "ownerSource": "src/app/tag_view.h",
+      "reason": "标签编辑属于用户共享元数据，不能跨包隐式修改",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增显式用户授权的标签对象接口",
+      "entryConditions": "明确用户共享与包私有范围；验证标签ID、事务回滚和删除引用"
+    },
+    {
+      "action": "smartview.save",
+      "decision": "planned",
+      "module": "智能视图",
+      "ownerSource": "src/app/tag_query.h",
+      "reason": "保存查询改变持久用户视图",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增受限查询AST的智能视图保存接口",
+      "entryConditions": "定义无代码查询语法、包归属、重名处理和撤销"
+    },
+    {
+      "action": "fav.add",
+      "decision": "planned",
+      "module": "收藏",
+      "ownerSource": "src/app/favorites_bar.h",
+      "reason": "收藏属于用户持久数据",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增条目句柄收藏接口",
+      "entryConditions": "用户明确接受持久变更，验证去重、撤销与包卸载语义"
+    },
+    {
+      "action": "quick_access.pin",
+      "decision": "planned",
+      "module": "快速访问",
+      "ownerSource": "src/app/places.h",
+      "reason": "固定项目改变用户共享导航入口",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增受限当前目录固定接口",
+      "entryConditions": "限定当前条目并定义持久化与撤销；不得写入任意Shell位置"
+    },
+    {
+      "action": "recent.remove",
+      "decision": "planned",
+      "module": "最近记录",
+      "ownerSource": "src/app/places.h",
+      "reason": "移除记录涉及用户历史隐私与持久数据",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增仅包自身来源历史记录清理接口",
+      "entryConditions": "先建立记录来源标记，禁止清除其他用户活动"
+    },
+    {
+      "action": "workspace.pin",
+      "decision": "planned",
+      "module": "工作区",
+      "ownerSource": "src/app/window_registry.h",
+      "reason": "固定工作区持久保存多窗口或目录信息",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增用户确认的当前工作区保存接口",
+      "entryConditions": "定义目录信息脱敏、保存范围、覆盖确认和卸载保留行为"
+    },
+    {
+      "action": "alias.set",
+      "decision": "planned",
+      "module": "别名",
+      "ownerSource": "src/app/folder_alias.h",
+      "reason": "别名影响持久路径解析或导入导出文件",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增受限别名对象接口，导入导出单独用户文件选择",
+      "entryConditions": "验证目标目录身份、循环引用、冲突和受控文件选择"
+    },
+    {
+      "action": "alias.display",
+      "decision": "planned",
+      "module": "别名",
+      "ownerSource": "src/app/folder_alias.h",
+      "reason": "别名影响持久路径解析或导入导出文件",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增受限别名对象接口，导入导出单独用户文件选择",
+      "entryConditions": "验证目标目录身份、循环引用、冲突和受控文件选择"
+    },
+    {
+      "action": "alias.manage",
+      "decision": "planned",
+      "module": "别名",
+      "ownerSource": "src/app/folder_alias.h",
+      "reason": "别名影响持久路径解析或导入导出文件",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增受限别名对象接口，导入导出单独用户文件选择",
+      "entryConditions": "验证目标目录身份、循环引用、冲突和受控文件选择"
+    },
+    {
+      "action": "alias.export",
+      "decision": "restricted",
+      "module": "别名",
+      "ownerSource": "src/app/folder_alias.h",
+      "reason": "别名影响持久路径解析或导入导出文件",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；拟新增受限别名对象接口，导入导出单独用户文件选择",
+      "entryConditions": "验证目标目录身份、循环引用、冲突和受控文件选择"
+    },
+    {
+      "action": "tray.add",
+      "decision": "planned",
+      "module": "暂存托盘",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "托盘可引用多个目录并触发批量文件操作",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增包自有托盘条目句柄接口",
+      "entryConditions": "验证条目来源、失效和批量上限；传输/压缩须独立确认与取消"
+    },
+    {
+      "action": "tray.remove",
+      "decision": "planned",
+      "module": "暂存托盘",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "托盘可引用多个目录并触发批量文件操作",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增包自有托盘条目句柄接口",
+      "entryConditions": "验证条目来源、失效和批量上限；传输/压缩须独立确认与取消"
+    },
+    {
+      "action": "tray.find_stale",
+      "decision": "planned",
+      "module": "暂存托盘",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "托盘可引用多个目录并触发批量文件操作",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增包自有托盘条目句柄接口",
+      "entryConditions": "验证条目来源、失效和批量上限；传输/压缩须独立确认与取消"
+    },
+    {
+      "action": "tray.send_to",
+      "decision": "planned",
+      "module": "暂存托盘",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "托盘可引用多个目录并触发批量文件操作",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增包自有托盘条目句柄接口",
+      "entryConditions": "验证条目来源、失效和批量上限；传输/压缩须独立确认与取消"
+    },
+    {
+      "action": "tray.zip",
+      "decision": "planned",
+      "module": "暂存托盘",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "托盘可引用多个目录并触发批量文件操作",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增包自有托盘条目句柄接口",
+      "entryConditions": "验证条目来源、失效和批量上限；传输/压缩须独立确认与取消"
+    },
+    {
+      "action": "tray.compare",
+      "decision": "planned",
+      "module": "暂存托盘",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "托盘可引用多个目录并触发批量文件操作",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增包自有托盘条目句柄接口",
+      "entryConditions": "验证条目来源、失效和批量上限；传输/压缩须独立确认与取消"
+    },
+    {
+      "action": "tray.text_diff",
+      "decision": "planned",
+      "module": "暂存托盘",
+      "ownerSource": "src/app/app_ops_ui.h",
+      "reason": "托盘可引用多个目录并触发批量文件操作",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增包自有托盘条目句柄接口",
+      "entryConditions": "验证条目来源、失效和批量上限；传输/压缩须独立确认与取消"
+    },
+    {
+      "action": "search.files",
+      "decision": "planned",
+      "module": "搜索",
+      "ownerSource": "src/app/global_search_controller.h",
+      "reason": "搜索范围和内容结果可能泄露当前目录之外数据",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增授权范围内可取消搜索资源接口",
+      "entryConditions": "限定scope、结果分页/预算/代际；全盘索引读取另行授权"
+    },
+    {
+      "action": "search.open",
+      "decision": "planned",
+      "module": "搜索",
+      "ownerSource": "src/app/global_search_controller.h",
+      "reason": "搜索范围和内容结果可能泄露当前目录之外数据",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增授权范围内可取消搜索资源接口",
+      "entryConditions": "限定scope、结果分页/预算/代际；全盘索引读取另行授权"
+    },
+    {
+      "action": "search.advanced",
+      "decision": "planned",
+      "module": "搜索",
+      "ownerSource": "src/app/global_search_controller.h",
+      "reason": "搜索范围和内容结果可能泄露当前目录之外数据",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增授权范围内可取消搜索资源接口",
+      "entryConditions": "限定scope、结果分页/预算/代际；全盘索引读取另行授权"
+    },
+    {
+      "action": "search.project",
+      "decision": "planned",
+      "module": "搜索",
+      "ownerSource": "src/app/global_search_controller.h",
+      "reason": "搜索范围和内容结果可能泄露当前目录之外数据",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增授权范围内可取消搜索资源接口",
+      "entryConditions": "限定scope、结果分页/预算/代际；全盘索引读取另行授权"
+    },
+    {
+      "action": "search.global",
+      "decision": "planned",
+      "module": "搜索",
+      "ownerSource": "src/app/global_search_controller.h",
+      "reason": "搜索范围和内容结果可能泄露当前目录之外数据",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增授权范围内可取消搜索资源接口",
+      "entryConditions": "限定scope、结果分页/预算/代际；全盘索引读取另行授权"
+    },
+    {
+      "action": "index.status",
+      "decision": "planned",
+      "module": "索引",
+      "ownerSource": "src/app/global_search_controller.h",
+      "reason": "索引状态与系统服务安装的权限边界不同",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增脱敏只读索引状态接口；安装保持用户操作",
+      "entryConditions": "状态不得泄露无权目录；服务安装仅经独立系统权限与用户确认"
+    },
+    {
+      "action": "index.install_full",
+      "decision": "restricted",
+      "module": "索引",
+      "ownerSource": "src/app/global_search_controller.h",
+      "reason": "改变系统或设备状态，当前增强包不获得此权限",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；拟新增脱敏只读索引状态接口；安装保持用户操作",
+      "entryConditions": "状态不得泄露无权目录；服务安装仅经独立系统权限与用户确认"
+    },
+    {
+      "action": "preview.toggle",
+      "decision": "planned",
+      "module": "预览",
+      "ownerSource": "src/app/app_commands.h",
+      "reason": "预览可能加载第三方解析器或触发云下载",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前选择受控预览接口，云下载保持单独确认",
+      "entryConditions": "复用隔离预览宿主，验证取消/代际/文件读取授权"
+    },
+    {
+      "action": "preview.step",
+      "decision": "planned",
+      "module": "预览",
+      "ownerSource": "src/app/app_commands.h",
+      "reason": "预览可能加载第三方解析器或触发云下载",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增当前选择受控预览接口，云下载保持单独确认",
+      "entryConditions": "复用隔离预览宿主，验证取消/代际/文件读取授权"
+    },
+    {
+      "action": "preview.cloud_download",
+      "decision": "restricted",
+      "module": "预览",
+      "ownerSource": "src/app/app_commands.h",
+      "reason": "改变系统或设备状态，当前增强包不获得此权限",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；拟新增当前选择受控预览接口，云下载保持单独确认",
+      "entryConditions": "复用隔离预览宿主，验证取消/代际/文件读取授权"
+    },
+    {
+      "action": "drive.eject",
+      "decision": "restricted",
+      "module": "设备",
+      "ownerSource": "src/app/drive_verbs.h",
+      "reason": "改变系统或设备状态，当前增强包不获得此权限",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；保留用户设备管理界面",
+      "entryConditions": "设备身份、未完成I/O保护与原生确认方案完成后重新评审"
+    },
+    {
+      "action": "drive.disconnect",
+      "decision": "restricted",
+      "module": "设备",
+      "ownerSource": "src/app/drive_verbs.h",
+      "reason": "改变系统或设备状态，当前增强包不获得此权限",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；保留用户设备管理界面",
+      "entryConditions": "设备身份、未完成I/O保护与原生确认方案完成后重新评审"
+    },
+    {
+      "action": "drive.unlock",
+      "decision": "restricted",
+      "module": "设备",
+      "ownerSource": "src/app/drive_verbs.h",
+      "reason": "权威动作风险为UserOnly，必须由用户本人触发",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；保留用户设备管理界面",
+      "entryConditions": "设备身份、未完成I/O保护与原生确认方案完成后重新评审"
+    },
+    {
+      "action": "net.map_drive",
+      "decision": "restricted",
+      "module": "网络位置",
+      "ownerSource": "src/app/places.h",
+      "reason": "改变系统或设备状态，当前增强包不获得此权限",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；拟新增显式授权网络位置对象接口，不提供凭据字符串",
+      "entryConditions": "拆分只读发现与持久连接；验证远程范围、取消和凭据由用户输入"
+    },
+    {
+      "action": "net.connect_server",
+      "decision": "restricted",
+      "module": "网络位置",
+      "ownerSource": "src/app/places.h",
+      "reason": "网络操作涉及远程凭据、发现范围及用户记录",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；拟新增显式授权网络位置对象接口，不提供凭据字符串",
+      "entryConditions": "拆分只读发现与持久连接；验证远程范围、取消和凭据由用户输入"
+    },
+    {
+      "action": "net.place",
+      "decision": "planned",
+      "module": "网络位置",
+      "ownerSource": "src/app/places.h",
+      "reason": "网络操作涉及远程凭据、发现范围及用户记录",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增显式授权网络位置对象接口，不提供凭据字符串",
+      "entryConditions": "拆分只读发现与持久连接；验证远程范围、取消和凭据由用户输入"
+    },
+    {
+      "action": "net.recent",
+      "decision": "planned",
+      "module": "网络位置",
+      "ownerSource": "src/app/places.h",
+      "reason": "网络操作涉及远程凭据、发现范围及用户记录",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增显式授权网络位置对象接口，不提供凭据字符串",
+      "entryConditions": "拆分只读发现与持久连接；验证远程范围、取消和凭据由用户输入"
+    },
+    {
+      "action": "net.rescan",
+      "decision": "planned",
+      "module": "网络位置",
+      "ownerSource": "src/app/places.h",
+      "reason": "网络操作涉及远程凭据、发现范围及用户记录",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增显式授权网络位置对象接口，不提供凭据字符串",
+      "entryConditions": "拆分只读发现与持久连接；验证远程范围、取消和凭据由用户输入"
+    },
+    {
+      "action": "net.system_settings",
+      "decision": "restricted",
+      "module": "网络位置",
+      "ownerSource": "src/app/places.h",
+      "reason": "网络操作涉及远程凭据、发现范围及用户记录",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；拟新增显式授权网络位置对象接口，不提供凭据字符串",
+      "entryConditions": "拆分只读发现与持久连接；验证远程范围、取消和凭据由用户输入"
+    },
+    {
+      "action": "git.refresh",
+      "decision": "planned",
+      "module": "Git",
+      "ownerSource": "src/app/git_ui.h",
+      "reason": "Git可能运行外部工具或访问远程仓库",
+      "publicCapabilities": [],
+      "proposedInterface": "保留现有用户Git入口，拟只读仓库状态资源单独设计",
+      "entryConditions": "读状态先约束仓库范围；pull/push需外部执行与逐次确认模型"
+    },
+    {
+      "action": "git.pull",
+      "decision": "restricted",
+      "module": "Git",
+      "ownerSource": "src/app/git_ui.h",
+      "reason": "外部程序或远程副作用无法由宿主完整约束",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；保留现有用户Git入口，拟只读仓库状态资源单独设计",
+      "entryConditions": "读状态先约束仓库范围；pull/push需外部执行与逐次确认模型"
+    },
+    {
+      "action": "git.push",
+      "decision": "restricted",
+      "module": "Git",
+      "ownerSource": "src/app/git_ui.h",
+      "reason": "外部程序或远程副作用无法由宿主完整约束",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；保留现有用户Git入口，拟只读仓库状态资源单独设计",
+      "entryConditions": "读状态先约束仓库范围；pull/push需外部执行与逐次确认模型"
+    },
+    {
+      "action": "toolbar.open_with",
+      "decision": "restricted",
+      "module": "工具栏",
+      "ownerSource": "src/app/app_commands.h",
+      "reason": "外部程序或远程副作用无法由宿主完整约束",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；保留用户工具栏配置，增强包仅使用自身声明菜单",
+      "entryConditions": "禁止持久化任意命令行；独立外部执行协议通过后重新评审"
+    },
+    {
+      "action": "toolbar.pin_app",
+      "decision": "restricted",
+      "module": "工具栏",
+      "ownerSource": "src/app/app_commands.h",
+      "reason": "工具配置可能保存外部可执行文件或改变全局菜单",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；保留用户工具栏配置，增强包仅使用自身声明菜单",
+      "entryConditions": "禁止持久化任意命令行；独立外部执行协议通过后重新评审"
+    },
+    {
+      "action": "toolbar.customize",
+      "decision": "restricted",
+      "module": "工具栏",
+      "ownerSource": "src/app/app_commands.h",
+      "reason": "工具配置可能保存外部可执行文件或改变全局菜单",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；保留用户工具栏配置，增强包仅使用自身声明菜单",
+      "entryConditions": "禁止持久化任意命令行；独立外部执行协议通过后重新评审"
+    },
+    {
+      "action": "toolbar.tools",
+      "decision": "restricted",
+      "module": "工具栏",
+      "ownerSource": "src/app/app_commands.h",
+      "reason": "工具配置可能保存外部可执行文件或改变全局菜单",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；保留用户工具栏配置，增强包仅使用自身声明菜单",
+      "entryConditions": "禁止持久化任意命令行；独立外部执行协议通过后重新评审"
+    },
+    {
+      "action": "settings.read",
+      "decision": "planned",
+      "module": "全局设置",
+      "ownerSource": "src/app/actions/action_settings.h",
+      "reason": "全局设置可改变Windows集成；包级settings资源不等价",
+      "publicCapabilities": [],
+      "proposedInterface": "保留全局写入限制；拟脱敏全局只读设置白名单",
+      "entryConditions": "逐key分类系统副作用和隐私，用户授权与迁移/回滚测试通过"
+    },
+    {
+      "action": "settings.set",
+      "decision": "restricted",
+      "module": "全局设置",
+      "ownerSource": "src/app/actions/action_settings.h",
+      "reason": "全局设置可改变Windows集成；包级settings资源不等价",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；保留全局写入限制；拟脱敏全局只读设置白名单",
+      "entryConditions": "逐key分类系统副作用和隐私，用户授权与迁移/回滚测试通过"
+    },
+    {
+      "action": "keymap.read",
+      "decision": "planned",
+      "module": "快捷键",
+      "ownerSource": "src/app/keymap.h",
+      "reason": "快捷键配置影响全局输入与其他用户命令",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增仅本包命令快捷键申请接口",
+      "entryConditions": "检测冲突、用户确认及卸载恢复，禁止覆盖系统/权限入口"
+    },
+    {
+      "action": "keymap.set",
+      "decision": "planned",
+      "module": "快捷键",
+      "ownerSource": "src/app/keymap.h",
+      "reason": "快捷键配置影响全局输入与其他用户命令",
+      "publicCapabilities": [],
+      "proposedInterface": "拟新增仅本包命令快捷键申请接口",
+      "entryConditions": "检测冲突、用户确认及卸载恢复，禁止覆盖系统/权限入口"
+    },
+    {
+      "action": "assistant.prefs",
+      "decision": "restricted",
+      "module": "AI权限与会话",
+      "ownerSource": "src/app/ai_assistant_chat.h",
+      "reason": "权威动作风险为UserOnly，必须由用户本人触发",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；仅保留用户入口，不允许增强包替用户配置或提交",
+      "entryConditions": "必须由用户直接操作，不通过增强包授权转授"
+    },
+    {
+      "action": "assistant.organize_here",
+      "decision": "restricted",
+      "module": "AI权限与会话",
+      "ownerSource": "src/app/ai_assistant_chat.h",
+      "reason": "权威动作风险为UserOnly，必须由用户本人触发",
+      "publicCapabilities": [],
+      "proposedInterface": "当前不开放；仅保留用户入口，不允许增强包替用户配置或提交",
+      "entryConditions": "必须由用户直接操作，不通过增强包授权转授"
+    }
+  ]
+}

@@ -479,6 +479,7 @@ int wmain(int argc, wchar_t** argv) {
         const uint32_t pixels = argc >= 4 ? static_cast<uint32_t>(_wtoi(argv[3])) : 256u;
         return RunProbe(argv[2], pixels ? pixels : 256u, argc >= 5 ? argv[4] : nullptr);
     }
+    const bool office_only = argc == 2 && wcscmp(argv[1], L"--office-only") == 0;
     const bool vector_only = argc == 2 && wcscmp(argv[1], L"--vector-only") == 0;
     // GDI+ writes the EMF+ fixture, and the host renders metafiles through it.
     Gdiplus::GdiplusStartupInput gdiplus_input;
@@ -488,7 +489,7 @@ int wmain(int argc, wchar_t** argv) {
     (void)gdiplus_token;
     Check(gdiplus_ready, L"start GDI+ for the metafile fixtures");
 
-    if (!vector_only) {
+    if (!vector_only && !office_only) {
         Check(preview::VideoCodecDisplayName(L"{34363248-0000-0010-8000-00AA00389B71}") == L"H.264 (AVC)",
               L"codec: screenshot H264 subtype is a readable codec name");
         Check(preview::VideoCodecDisplayName(L" 34363268-0000-0010-8000-00aa00389b71 ") == L"H.264 (AVC)",
@@ -519,7 +520,7 @@ int wmain(int argc, wchar_t** argv) {
     CreateDirectoryW(root.c_str(), nullptr);
     const auto path = [&](const wchar_t* name) { return root + L"\\" + name; };
 
-    if (!vector_only) {
+    if (!vector_only && !office_only) {
         std::vector<unsigned char> utf8 = {'h','e','l','l','o','\n'};
         std::vector<unsigned char> le = {0xFF,0xFE,'A',0,0x2D,0x4E};
         std::vector<unsigned char> be = {0xFE,0xFF,0, 'B',0x4E,0x2D};
@@ -618,7 +619,8 @@ int wmain(int argc, wchar_t** argv) {
         return 0;
     }
 
-    if (!vector_only) {
+    if (!office_only) {
+    if (!vector_only && !office_only) {
         // PULSE_PREVIEW_BENCH=<file>: time a real document's first preview against
         // its repeats. This is where shell providers (Office, PDF) show their
         // one-time handler load, and it runs on the freshly started host on purpose.
@@ -817,6 +819,7 @@ int wmain(int argc, wchar_t** argv) {
     Check(preview::IsPdfRasterExtension(L".pdf") && preview::IsPdfRasterExtension(L".ai") &&
           preview::IsNativeExtension(L".pdf") && !preview::IsImageExtension(L".pdf"),
           L"pdf/ai classify as PDFium documents and stay off the system preview handler");
+    }
     const auto pixelAt = [](const Result& r, UINT x, UINT y) -> const unsigned char* {
         if (x >= r.response.width || y >= r.response.height || !r.response.stride) return nullptr;
         const size_t at = static_cast<size_t>(r.response.stride) * y + x * 4u;
@@ -828,6 +831,7 @@ int wmain(int argc, wchar_t** argv) {
     const auto isWhite = [](const unsigned char* p) {
         return p && p[0] > 240 && p[1] > 240 && p[2] > 240;
     };
+    if (!office_only) {
     {
         // One 200x100 pt page with a red box inset 20 pt; xref offsets exact.
         const std::string stream = "1 0 0 rg 20 20 160 60 re f\n";
@@ -1097,6 +1101,10 @@ int wmain(int argc, wchar_t** argv) {
         Check(!preview::ReadZipEntry(path(L"sample.bin"), "a", 1u << 20, member, &zipError),
               L"non-zip file is not read as a package");
     }
+
+    }
+    if (office_only)
+        Check(WriteBytes(path(L"sample.bin"), {0, 1, 2, 3, 0, 255}), L"create non-package Office fixture");
 
     // ---- Office text sketches: document models and grid thumbnails ----
     {
@@ -1675,14 +1683,8 @@ int wmain(int argc, wchar_t** argv) {
                    std::abs(px[1] - static_cast<int>((rgb >> 8) & 0xFF)) <= tolerance &&
                    std::abs(px[0] - static_cast<int>(rgb & 0xFF)) <= tolerance;
         };
-        const auto badgeColour = [&](const Result& r, UINT edge, UINT32 rgb) {
-            // Badge: a 52 px square inset 6 px from the bottom-left corner at
-            // edge 256, scaled by max(0.75, edge / 256). Sample inside its bottom
-            // edge, clear of the rounded corner and the letter.
-            const float f = (std::max)(0.75f, edge / 256.0f);
-            const UINT x = static_cast<UINT>(20 * f);
-            const UINT y = static_cast<UINT>(r.response.height - 9 * f);
-            return sketchPixel(r, x, y, rgb, 6);
+        const auto uncoveredCorner = [&](const Result& r, UINT32 rgb) {
+            return r.response.height >= 9 && sketchPixel(r, 20, r.response.height - 9, rgb, 6);
         };
         Result page;
         const auto pageStart = std::chrono::steady_clock::now();
@@ -1693,22 +1695,22 @@ int wmain(int argc, wchar_t** argv) {
               page.response.width == 181 && page.response.height == 256 &&
               page.response.source_width == 0 && HasInk(page),
               L"docx grid thumbnail at 256 is an A4 page sketch (181x256, no fake source size)");
-        Check(pageOk && sketchPixel(page, 12, 12, 0xFFFFFF, 2) && badgeColour(page, 256, 0x2B579A),
-              L"docx page sketch has a white margin and the Word blue badge");
-        Check(pageOk && sketchPixel(page, 52, page.response.height - 9, 0x2B579A, 6),
-              L"type badge is 52 px at 256 (blue beyond the old 28 px square)");
+        Check(pageOk && sketchPixel(page, 12, 12, 0xFFFFFF, 2) && uncoveredCorner(page, 0xFFFFFF),
+              L"docx page sketch keeps white margins without a Word badge");
+        Check(pageOk && sketchPixel(page, 52, page.response.height - 9, 0xFFFFFF, 6),
+              L"docx page content remains uncovered across the former badge area");
         Result card;
         Check(host.Request(path(L"sketch.docx"), card, MAXDWORD, 128) && card.response.status == 0 &&
               card.response.width == 96 && card.response.height == 128 && HasInk(card) &&
-              badgeColour(card, 128, 0x2B579A),
+              uncoveredCorner(card, 0xFFFFFF),
               L"docx grid thumbnail below 200 is the 3:4 summary card");
-        Check(sketchPixel(card, 46, card.response.height - 9, 0x2B579A, 6),
-              L"card type badge spans half the card width (48 px at 128, medium icons)");
+        Check(sketchPixel(card, 46, card.response.height - 9, 0xFFFFFF, 6),
+              L"docx summary card keeps its lower content uncovered");
         Result sheetCard;
         Check(host.Request(path(L"sketch.xlsx"), sheetCard, MAXDWORD, 128) && sheetCard.response.status == 0 &&
               sheetCard.response.width == 128 && sheetCard.response.height == 100 &&
-              sketchPixel(sheetCard, 48, sheetCard.response.height - 9, 0x217346, 6),
-              L"xlsx medium-icon sketch badge spans half the shorter side (50 px at 128x100)");
+              sketchPixel(sheetCard, 48, sheetCard.response.height - 9, 0xFFFFFF, 6),
+              L"xlsx medium-icon sketch keeps its lower cells uncovered");
         Result smallest;
         Check(host.Request(path(L"sketch.docx"), smallest, MAXDWORD, 64) && smallest.response.status == 0 &&
               smallest.response.width == 48 && smallest.response.height == 64,
@@ -1723,8 +1725,8 @@ int wmain(int argc, wchar_t** argv) {
         Result grid;
         Check(host.Request(path(L"sketch.xlsx"), grid, MAXDWORD, 256) && grid.response.status == 0 &&
               grid.response.width == 256 && grid.response.height == 200 && HasInk(grid) &&
-              sketchPixel(grid, 60, 3, 0xF1F3F5, 3) && badgeColour(grid, 256, 0x217346),
-              L"xlsx grid thumbnail is a 256x200 sheet sketch with headers and the Excel green badge");
+              sketchPixel(grid, 60, 3, 0xF1F3F5, 3) && uncoveredCorner(grid, 0xFFFFFF),
+              L"xlsx grid thumbnail preserves sheet headers and uncovered lower cells");
 
         // PowerPoint / WPS / OpenDocument sketches.
         {
@@ -1882,8 +1884,8 @@ int wmain(int argc, wchar_t** argv) {
             Result pptxGrid;
             Check(host.Request(path(L"slides.pptx"), pptxGrid, MAXDWORD, 256) && pptxGrid.response.status == 0 &&
                   pptxGrid.response.kind == ipc::PreviewContentKind::Bitmap && pptxGrid.response.width == 256 &&
-                  pptxGrid.response.height == 144 && HasInk(pptxGrid) && badgeColour(pptxGrid, 256, 0xC43E1C),
-                  L"pptx grid thumbnail is a 256x144 first-slide sketch with the PowerPoint orange badge");
+                  pptxGrid.response.height == 144 && HasInk(pptxGrid) && uncoveredCorner(pptxGrid, 0xFFFFFF),
+                  L"pptx first-slide sketch preserves its lower-left background without a badge");
             Result blankGrid;
             Check(host.Request(path(L"blank.pptx"), blankGrid, MAXDWORD, 256) && blankGrid.response.status == 0 &&
                   blankGrid.response.width == 256 && blankGrid.response.height == 192,
@@ -1899,8 +1901,8 @@ int wmain(int argc, wchar_t** argv) {
             Result odtGrid;
             Check(host.Request(path(L"thumb.odt"), odtGrid, MAXDWORD, 256) && odtGrid.response.status == 0 &&
                   odtGrid.response.width == 182 && odtGrid.response.height == 256 &&
-                  sketchPixel(odtGrid, 91, 100, 0xD02020, 12) && badgeColour(odtGrid, 256, 0x2B579A),
-                  L"odt grid thumbnail is the embedded Thumbnails/thumbnail.png, scaled, with the badge");
+                  sketchPixel(odtGrid, 91, 100, 0xD02020, 12) && uncoveredCorner(odtGrid, 0xD02020),
+                  L"odt embedded thumbnail preserves its red lower-left content without a badge");
 
             // Legacy Excel / WPS spreadsheets (BIFF8).
             Check(WriteBytes(path(L"sheet.xls"), BuildCompoundFile(L"Workbook", BuildXlsStream())) &&
@@ -1929,7 +1931,7 @@ int wmain(int argc, wchar_t** argv) {
             Result xlsGrid;
             Check(host.Request(path(L"sheet.xls"), xlsGrid, MAXDWORD, 256) && xlsGrid.response.status == 0 &&
                   xlsGrid.response.width == 256 && xlsGrid.response.height == 200 && HasInk(xlsGrid) &&
-                  badgeColour(xlsGrid, 256, 0x217346),
+                  uncoveredCorner(xlsGrid, 0xFFFFFF),
                   L"xls grid thumbnail is the sheet sketch when no thumbnail is stored");
             Result etPane;
             Check(host.Request(path(L"sheet.et"), etPane, MAXDWORD, 1024) && etPane.response.status == 0 &&
@@ -1959,7 +1961,7 @@ int wmain(int argc, wchar_t** argv) {
             if (SUCCEEDED(linkCom)) CoUninitialize();
             Result link;
             Check(host.Request(path(L"slides.lnk"), link, MAXDWORD, 256) && link.response.status == 0 &&
-                  link.response.width == 256 && link.response.height == 144 && badgeColour(link, 256, 0xC43E1C),
+                  link.response.width == 256 && link.response.height == 144 && uncoveredCorner(link, 0xFFFFFF),
                   L"a shortcut previews the file it points to");
             Result folderLink;
             Check(host.Request(path(L"folder.lnk"), folderLink, MAXDWORD, 256) && folderLink.response.status != 0 &&
@@ -1982,7 +1984,7 @@ int wmain(int argc, wchar_t** argv) {
         Result blankThumb;
         Check(host.Request(path(L"blank_thumb.docx"), blankThumb, MAXDWORD, 256) &&
               blankThumb.response.status == 0 && blankThumb.response.width == 181 &&
-              blankThumb.response.height == 256 && badgeColour(blankThumb, 256, 0x2B579A),
+              blankThumb.response.height == 256 && uncoveredCorner(blankThumb, 0xFFFFFF),
               L"docx with an all-white embedded thumbnail gets the sketch instead");
         Result broken;
         Check(WriteBytes(path(L"sample.bin"), {0, 1, 2, 3, 0, 255}),
@@ -1991,6 +1993,7 @@ int wmain(int argc, wchar_t** argv) {
               L"non-office files are unaffected by the sketch");
     }
 
+    if (!office_only) {
     // ---- archive listings: ZIP central directory, tar through libarchive ----
     Check(preview::IsArchiveExtension(L".zip") && preview::IsArchiveExtension(L".7z") &&
           preview::IsArchiveExtension(L".rar") && preview::IsNativeExtension(L".zip"),
@@ -2116,7 +2119,7 @@ int wmain(int argc, wchar_t** argv) {
           broken.text.find(L"not svg") != std::wstring::npos,
           L"an SVG that cannot be rendered falls back to its text preview");
 
-    if (!vector_only) {
+    if (!vector_only && !office_only) {
         Check(CreateDirectoryW(path(L"subdir").c_str(), nullptr), L"create directory fixture");
         Result dirExtended;
         Check(host.Request(L"\\\\?\\" + path(L"subdir"), dirExtended) &&
@@ -2162,6 +2165,8 @@ int wmain(int argc, wchar_t** argv) {
               restarted.response.kind == ipc::PreviewContentKind::Text,
               L"restarted host serves requests");
         host.Stop();
+    }
+
     }
 
     host.Stop();

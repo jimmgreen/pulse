@@ -1,0 +1,41 @@
+ICO/CUR preview resolution correction
+
+Reproduction: public ImageGlass 3FR.ico sample (not the reporter's original file)
+https://raw.githubusercontent.com/d2phap/ImageGlass/develop/source/__assets/__app/_ext_icons/3FR.ico
+SHA256 06849c2e7d8b4fa27744bdc4ecf9547b7cad7b81582228218afd1e21e16371b1
+
+The file directory contains 16/24/32/48/64/96/128/256 pixel entries in that order.
+On this machine WIC GetFrame returns 96/64/128/48/256/32/24/16 instead.
+The old default selected directory index 7 and passed it directly to WIC;
+the resulting 16x16 bitmap was then enlarged in the grid. The header's claim
+that directory order equals WIC frame order was incorrect.
+
+Fix: create an in-memory single-entry ICO containing exactly the chosen payload,
+then decode its sole frame. CUR hotspots are converted to proper ICO planes/bits.
+Default largest/deepest selection and explicit preview-size selection are retained.
+Only one image is decoded. Existing decode memory bounds and asynchronous workers
+remain in use. Small-only icons remain valid, without fabricated source resolution.
+
+Cache: ICO/CUR-specific decode-policy salt changes their disk key, invalidating
+old low-quality results without clearing PNG/JPEG or all user thumbnails. Actual
+low-resolution-only icons are not rejected from caching.
+
+Validation:
+- pulse_icon_decode_test: 93 PASS. Actual preview-host IPC, ascending/descending
+  directories, explicit entries identified by pixel colour, ICO/CUR, budgeted grid
+  requests 48/96/144/256/512, bad payload bounds, genuine 16-only source.
+- pulse_thumbnail_writer_test --icon-cache-version: 20 PASS. Real old entries miss;
+  fresh high-resolution entries remain warm hits; PNG/JPEG keys/entries unchanged.
+- Public sample through real host: before 16x16, after 256x256 at request 256.
+- 24 direct budgeted preview requests: QPC median 1.366ms, maximum 9.740ms on this
+  machine. This bypasses Pulse's thumbnail disk cache; OS file caching may be warm.
+  These timings are not a guarantee for other machines or other icon files.
+- Inspected equal-size comparison generated from real before/after host rasters.
+  bench_data/ico-quality/comparison.png
+- Relevant Release targets built: pulse, Pulse.Preview, PulsePickerUiProof.
+
+Evidence in bench_data/ico-quality/: wic-order.log, decode-test.log, cache-test.log,
+sample-after.log, timing.log, build-final.log, before.bmp, after.bmp, package.log.
+No computer-use tools, user cache deletion or user preference edits were performed.
+The reporter's original machine/files were not available; use the delivered build
+for final verification on that machine.

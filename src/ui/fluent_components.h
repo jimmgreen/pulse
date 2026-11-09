@@ -41,6 +41,12 @@ enum class MenuPictogram {
     LayoutFour,
     LayoutColumns,
     LayoutCascade,
+    LayoutMainRight,
+    LayoutMainTop,
+    WindowNew,
+    WindowOverview,
+    WindowDetach,
+    WindowMerge,
 };
 
 inline constexpr wchar_t kOmnibarHintKey[] = L"Ctrl+K";
@@ -289,6 +295,9 @@ struct CommandSearchBoxSpec {
     std::wstring_view placeholder;
     std::wstring_view keycap;
     ControlState state{};
+    std::wstring_view text;
+    bool suppress_text = false;
+    bool hosted_edit = false;
 };
 
 struct SplitButtonSpec {
@@ -312,6 +321,7 @@ struct SegmentedItemSpec {
     ControlState state{};
     SegmentPosition position = SegmentPosition::Single;
     bool shared_track = false;
+    bool suppress_plate = false;
 };
 
 struct BadgeSpec {
@@ -489,7 +499,7 @@ public:
                   HorizontalAlignment alignment, const D2D1_COLOR_F& background);
     void DrawGlyph(std::wstring_view glyph, const D2D1_RECT_F& bounds,
                    const D2D1_COLOR_F& color);
-    // 别名 mark (pulse_alias.html .amark): a soft-accent rounded tile with a
+    // 别名 mark: a soft-accent rounded tile with a
     // tag drawn in the accent. `tile` is its 14-DIP square.
     void DrawAliasMark(const D2D1_RECT_F& tile);
     void DrawPaneLayoutIcon(const D2D1_RECT_F& bounds, MenuPictogram kind, const D2D1_COLOR_F& color);

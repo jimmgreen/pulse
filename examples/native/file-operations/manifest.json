@@ -1,0 +1,10 @@
+{
+  "apiVersion": 1,
+  "id": "sample.native-file-operations",
+  "name": "Native file operations example",
+  "resources": [
+    "files.transferCurrentSelection",
+    "files.deleteCurrentSelection",
+    "operations.own"
+  ]
+}

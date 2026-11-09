@@ -5,6 +5,8 @@
 // through `AppState::core` (plus same-named reference aliases while call sites
 // migrate). One AppCore outlives every AppState that uses it.
 #pragma once
+#include "recycle_refresh_state.h"
+namespace pulse::app { class RecycleShellWatch; }
 #include "../fs/fs_recycle.h"
 #include "../fs/fs_snapshot.h"
 #include "../fs/fs_watch.h"
@@ -25,6 +27,7 @@
 #include "dir_notify_queue.h"
 #include "duplicate_scan.h"
 #include "explorer_window_takeover.h"
+#include "win_e_hotkey.h"
 #include "external_open.h"
 #include "external_open_notice.h"
 #include "folder_sizes.h"
@@ -100,6 +103,8 @@ struct AppCore {
     // The network page's 最近访问 and LAN discovery cache (app_network_page.cpp).
     std::shared_ptr<NetworkPageLoad> networkPage;
     fs::RecycleBinInfo recycle_info;
+    app::RecycleRefreshGate recycle_refresh_gate;
+    std::shared_ptr<app::RecycleShellWatch> recycle_shell_watch;
     // SHQueryRecycleBin and $I files lag IFileOperation; retry occupancy/list
     // after recycle mutations and ignore occupancy that still matches the
     // pre-mutation count while an optimistic update is showing.
@@ -162,6 +167,9 @@ struct AppCore {
         index::Query query;
         index::SearchResult local;
         index::SearchResult network;
+        index::SearchResult recycle;
+        std::shared_ptr<std::atomic<bool>> recycle_cancel;
+        bool recycle_ready = false;
         bool local_ready = false;
         bool network_ready = false;
         bool network_snapshot = false; // Captured for this request, not global root configuration.
@@ -212,6 +220,7 @@ struct AppCore {
     std::unique_ptr<app::ShellWindowRegistry> shell_windows;
     std::vector<app::ShellWindowEntry> shell_windows_published;
     std::unique_ptr<app::ExplorerWindowTakeover> explorer_takeover;   // experimental (B站 #1 2b)
+    std::unique_ptr<app::WinEHotkey> win_e_hotkey;
 
     // Cut state mirrored into list rows (ui.md §5.2 rule 6: 55% opacity).
     std::vector<std::wstring> cutPaths;

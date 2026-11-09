@@ -73,8 +73,8 @@ void ToolbarTests() {
             // Off: no field and no narrow-window search button either.
             CHECK(hidden.search.right - hidden.search.left <= 0.5f);
             // The address bar takes the room the field used.
-            CHECK(hidden.address.right > shown.address.right);
-            CHECK(hidden.address.right <= hidden.navigation[3].left);
+            CHECK(hidden.address_text.right > shown.address_text.right);
+            CHECK(hidden.address_text.right <= hidden.navigation[3].left);
             CHECK(hidden.navigation[3].right <= w - margin + 0.5f);
             // Everything else in the toolbar is unchanged.
             CHECK(hidden.create.left == shown.create.left && hidden.create.right == shown.create.right);
@@ -83,6 +83,29 @@ void ToolbarTests() {
     // A results page asks for a wider field; hidden still wins.
     const auto editing = pulse::ui::MakeToolbarLayout(1400.0f, 1.0f, 0.0f, 8.0f, 84.0f, 0.0f, 0.0f, 520.0f);
     CHECK(editing.search.right - editing.search.left >= 500.0f);
+    for (float scale : scales) {
+        for (float width : {320.0f, 459.0f, 460.0f, 599.0f, 600.0f, 759.0f, 760.0f, 1100.0f}) {
+            const auto layout = pulse::ui::MakeResponsiveNavigation(width * scale, 0, 0, 8 * scale, scale, false, 0);
+            CHECK(layout.merged == (width < 460));
+            CHECK(layout.refresh_inside == (width < 760));
+            CHECK((layout.navigation[1].right > layout.navigation[1].left) == (width >= 600));
+            CHECK(layout.address_text.right <= layout.navigation[3].left);
+            CHECK(layout.navigation[3].right <= width * scale - 8 * scale);
+            if (width >= 460 && width < 600) CHECK(layout.search.right - layout.search.left == 112 * scale);
+            if (width >= 600 && width < 760) {
+                CHECK(layout.search.right - layout.search.left >= 180 * scale);
+                CHECK(layout.search.right - layout.search.left <= 260 * scale);
+            }
+            const auto query = pulse::ui::MakeResponsiveNavigation(width * scale, 0, 0, 8 * scale, scale, false, 520);
+            CHECK(query.search.left >= query.navigation[2].right);
+            CHECK(query.search.right > query.search.left);
+            if (width < 460) {
+                CHECK(query.address.right == query.address.left);
+                CHECK(query.navigation[3].right == query.navigation[3].left);
+                CHECK(query.search.right - query.search.left >= 200 * scale);
+            }
+        }
+    }
 }
 
 } // namespace

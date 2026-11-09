@@ -7,14 +7,17 @@
 #include "link_resolve.h"
 #include "cloud_roots.h"
 #include "device_registry.h"
+#include "this_pc_devices.h"
 #include "../common/localization.h"
 #include "../fs/fs_enum.h"
 #include "../fs/bitlocker_volume.h"
 #include "../fs/bounded_enumeration.h"
+#include "../fs/drive_kind.h"
 #include "../fs/fs_recycle.h"
 #include "../fs/fs_net_cache.h"
 #include "../fs/fs_watch.h"
 #include "../common/runtime_log.h"
+#include "../common/delete_diagnostics.h"
 #include <cstdlib>
 #include <exception>
 #include <string>
@@ -26,6 +29,9 @@
 namespace pulse::app {
 
 namespace {
+#ifdef PULSE_WORKER_BATCH_TEST
+std::atomic<unsigned> raw_listing_batches_created{0};
+#endif
 
 std::wstring WorkKey(const std::wstring& path, ui::SortColumn col,
                      ui::SortDirection dir, int group_by, FolderSortMode folders) {
@@ -93,9 +99,11 @@ uint64_t WorkerPool::Refresh(const std::wstring& path, ui::SortColumn col,
                              ui::SortDirection dir, int group_by,
                              std::shared_ptr<const FolderSizeLookup> folder_sizes,
                              FolderSortMode folders) {
+    const bool network_job = fs::IsUncPath(path) || fs::IsRemoteLikeDrive(path);
     std::lock_guard<std::mutex> lock(mutex_);
     uint64_t gen = ++global_gen_;
     const std::wstring key = WorkKey(path, col, dir, group_by, folders);
+    const bool superseding = current_gen_.contains(key);
     current_gen_[key] = gen;
     // Only supersede the same path+sort request. Separate panes may show the
     // same directory with different sort orders.
@@ -107,6 +115,27 @@ uint64_t WorkerPool::Refresh(const std::wstring& path, ui::SortColumn col,
     }
     queue_ = std::move(filtered);
     WorkItem work{ path, key, gen, col, dir };
+    work.network_job = network_job;
+    // Only requests already queued together share physical work. A refresh
+    // superseding the same presentation always starts a fresh batch.
+    if (!fs::IsVirtualPath(path) && !path.empty()) {
+        for (auto& pending : queue_) {
+            if (superseding) break;
+            if (pending.path == path && pending.request_key != key && !pending.load_paths &&
+                (!pending.raw_listing || !pending.raw_listing->started.load())) {
+                if (!pending.raw_listing) {
+                    pending.raw_listing = std::make_shared<RawListingBatch>();
+                    pending.raw_listing->subscribers.emplace_back(pending.request_key, pending.generation);
+#ifdef PULSE_WORKER_BATCH_TEST
+                    ++raw_listing_batches_created;
+#endif
+                }
+                work.raw_listing = pending.raw_listing;
+                break;
+            }
+        }
+        if (work.raw_listing) work.raw_listing->subscribers.emplace_back(key, gen);
+    }
     work.cache_write = fs::BeginNetSnapshotWrite(path);
     work.group_by = group_by;
     work.folder_sort = folders;
@@ -123,6 +152,7 @@ uint64_t WorkerPool::LoadPaths(const std::wstring& view_path,
                                bool preserve_order,
                                std::vector<uint64_t> display_times,
                                int group_by, FolderSortMode folders) {
+    const bool network_job = fs::IsUncPath(view_path) || fs::IsRemoteLikeDrive(view_path);
     std::lock_guard<std::mutex> lock(mutex_);
     const uint64_t gen = ++global_gen_;
     // Virtual consumers can share a path/sort but have different Recent
@@ -131,6 +161,7 @@ uint64_t WorkerPool::LoadPaths(const std::wstring& view_path,
         L"\x1fpaths:" + std::to_wstring(gen);
     current_gen_[key] = gen;
     WorkItem item{ view_path, key, gen, col, dir };
+    item.network_job = network_job;
     item.load_paths = true;
     item.preserve_order = preserve_order;
     item.group_by = group_by;
@@ -284,7 +315,18 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
                 fs::DirectoryIdentity identity;
                 std::wstring git_root;
             };
-            auto listing = fs::RunBoundedEnumeration<Listing>(fs::IsUncPath(item.path),
+            const auto batch_cancelled = [&] {
+                if (!item.raw_listing) return cancelled();
+                std::lock_guard lock(mutex_);
+                if (!running_) return true;
+                for (const auto& [key, generation] : item.raw_listing->subscribers) {
+                    const auto it = current_gen_.find(key);
+                    if (it != current_gen_.end() && it->second == generation) return false;
+                }
+                return true;
+            };
+            const auto enumerate = [&] {
+            return fs::RunBoundedEnumeration<Listing>(item.network_job,
                 [path = item.path](const std::atomic_bool& cancel) {
                     Listing result;
                     fs::EnumerateDirectory(path, result.entries, &cancel);
@@ -302,31 +344,47 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
                             result.entries.push_back(std::move(e));
                         }
                         // Phones (the device thread's last listing, device_registry.h);
-                        // none: the "no phone connected" tile, which opens the help.
                         const auto devices = pulse::app::DeviceRegistry::Instance().Devices();
-                        if (devices.empty()) {
-                            fs::DirEntry e;
-                            e.name = l10n::Get(l10n::StringId::DeviceNonePlaceholder);
-                            e.full_path = L"pulse:device:none";
-                            e.attrs = FILE_ATTRIBUTE_NORMAL;
-                            e.pc_device = fs::kPcDevicePlaceholder;
-                            result.entries.push_back(std::move(e));
-                        }
-                        for (const auto& device : devices) {
-                            fs::DirEntry e;
-                            e.name = device.name;
-                            e.full_path = fs::FormatDevicePath(fs::DevicePath{device.key, L"", {}});
-                            e.attrs = FILE_ATTRIBUTE_NORMAL;
-                            e.pc_device = fs::PcDeviceFlags(device);
-                            result.entries.push_back(std::move(e));
-                        }
+                        app::AppendThisPcDevices(result.entries, devices);
                     }
                     fs::QueryDirectoryIdentity(path, result.identity);
                     if (cancel) throw fs::EnumerationCancelled();
                     if (!fs::IsVirtualPath(path) && !fs::IsUncPath(path))
                         result.git_root = FindGitRoot(path);
                     return result;
-                }, cancelled);
+                }, batch_cancelled);
+            };
+            Listing listing;
+            if (const auto batch = item.raw_listing) {
+                std::unique_lock lock(batch->mutex);
+                if (!batch->started) {
+                    batch->started = true;
+                    batch->listed_at = res.listed_at;
+                    lock.unlock();
+                    try {
+                        auto raw = enumerate();
+                        lock.lock();
+                        batch->entries = std::move(raw.entries);
+                        batch->identity = raw.identity;
+                        batch->git_root = std::move(raw.git_root);
+                    } catch (...) {
+                        lock.lock();
+                        batch->error = std::current_exception();
+                    }
+                    batch->done = true;
+                    batch->ready.notify_all();
+                } else {
+                    while (!batch->done) {
+                        if (cancelled()) throw fs::EnumerationCancelled();
+                        batch->ready.wait_for(lock, std::chrono::milliseconds(20));
+                    }
+                }
+                if (batch->error) std::rethrow_exception(batch->error);
+                listing.entries = batch->entries;
+                listing.identity = batch->identity;
+                listing.git_root = batch->git_root;
+                res.listed_at = batch->listed_at;
+            } else listing = enumerate();
             *entries = std::move(listing.entries);
             res.identity = listing.identity;
             res.git_root = std::move(listing.git_root);
@@ -349,7 +407,10 @@ WorkResult WorkerPool::Process(const WorkItem& item) {
     auto t1 = std::chrono::steady_clock::now();
     res.enum_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
     diagnostics::runtime::Event("navigation_enumerated", {{"generation", item.generation},
-        {"entries", entries->size()}, {"elapsed_us", static_cast<uint64_t>(res.enum_ms * 1000.0)}});
+        {"entries", entries->size()}, {"elapsed_us", static_cast<uint64_t>(res.enum_ms * 1000.0)},
+        {"directory_id", diagnostics::deletion::Id(diagnostics::deletion::Key(item.path))}});
+    if (!item.load_paths)
+        diagnostics::deletion::Snapshot(item.path, *entries, item.generation, 0);
 
     // Check cancellation before sort.
     {
@@ -438,7 +499,7 @@ void WorkerPool::WorkerThread() {
         {
             std::unique_lock<std::mutex> lock(mutex_);
             const auto eligible = [&](const WorkItem& candidate) {
-                return !fs::IsUncPath(candidate.path) || active_network_jobs_ < max_network_jobs_;
+                return !candidate.network_job || active_network_jobs_ < max_network_jobs_;
             };
             cv_.wait(lock, [&] {
                 return stopped_ || !running_ || io_queue_.Ready() ||
@@ -449,7 +510,7 @@ void WorkerPool::WorkerThread() {
             if (next != queue_.end()) {
                 item = std::move(*next);
                 queue_.erase(next);
-                network_job = fs::IsUncPath(item.path);
+                network_job = item.network_job;
                 if (network_job) ++active_network_jobs_;
             } else if (io_queue_.Ready()) {
                 io_job = io_queue_.Pop();

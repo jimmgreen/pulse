@@ -1,4 +1,5 @@
 #include "quick_access.h"
+#include "workspace_sidebar.h"
 #include "context_menu.h"
 #include "app_commands.h"
 #include "app_navigation.h"
@@ -346,8 +347,8 @@ void UndoWorkspaceRemoval(AppState& s) {
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
-void ShowWorkspaceMenu(AppState& s, int index, POINT point) {
-    if (index < 0 || index >= static_cast<int>(s.places.workspaces.size()) || !EnsureMenu(s)) return;
+std::vector<ui::FluentMenuItem> BuildWorkspaceMenuItems(AppState& s, int index) {
+    if (index < 0 || index >= static_cast<int>(s.places.workspaces.size())) return {};
     using I = l10n::StringId;
     std::vector<ui::FluentMenuItem> items;
     auto add = [&](int command, I text, bool enabled = true) {
@@ -366,12 +367,36 @@ void ShowWorkspaceMenu(AppState& s, int index, POINT point) {
     for (size_t i : {size_t{2}, size_t{5}, size_t{7}, size_t{8}}) items[i].separator_after = true;
     items[4].shortcut = L"F2";
     items[9].shortcut = L"Delete";
-    items[5].has_swatch = true;
-    items[5].swatch_color = ui::HexColor(s.places.workspaces[static_cast<size_t>(index)].color_rgb);
+    items[5].command = 0;
+    items[5].text.clear();
+    const auto palette = TagColorPalette(s);
+    for (size_t i : {size_t{0}, size_t{1}, size_t{3}, size_t{2}, size_t{5}, size_t{4}, size_t{6}}) {
+        if (i >= palette.size()) continue;
+        ui::FluentMenuSwatch swatch;
+        swatch.command = 100 + static_cast<int>(i);
+        swatch.checked = palette[i] == s.places.workspaces[static_cast<size_t>(index)].color_rgb;
+        swatch.color = ui::HexColor(palette[i]);
+        items[5].quick_swatches.push_back(std::move(swatch));
+    }
+    ui::FluentMenuSwatch custom;
+    custom.command = 6;
+    custom.custom_color = true;
+    items[5].quick_swatches.push_back(std::move(custom));
+    return items;
+}
+
+void ShowWorkspaceMenu(AppState& s, int index, POINT point) {
+    if (index < 0 || index >= static_cast<int>(s.places.workspaces.size()) || !EnsureMenu(s)) return;
+    const auto items = BuildWorkspaceMenuItems(s, index);
+    const auto palette = TagColorPalette(s);
     const auto root = s.places.workspaces[static_cast<size_t>(index)].root;
     const int command = s.menu->TrackPopup(point, items);
     index = s.places.FindWorkspace(root);
     if (index < 0) return;
+    if (command >= 100 && command < 100 + static_cast<int>(palette.size())) {
+        s.places.workspaces[static_cast<size_t>(index)].color_rgb = palette[static_cast<size_t>(command - 100)];
+        s.places.Save();
+    }
     switch (command) {
     case 1: OpenWorkspace(s, index); break;
     case 2: OpenWorkspaceNewTab(s, index); break;
@@ -392,6 +417,54 @@ void ShowWorkspaceMenu(AppState& s, int index, POINT point) {
     case 10: RemoveWorkspaceWithUndo(s, index); break;
     }
     InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
+std::vector<ui::FluentMenuItem> BuildWorkspacePaneMenuItems(const AppState& s, int workspace, int pane) {
+    if (workspace < 0 || workspace >= static_cast<int>(s.places.workspaces.size())) return {};
+    const auto& saved = s.places.workspaces[static_cast<size_t>(workspace)];
+    const int pane_count = saved.pane_paths.empty() ? 1 : static_cast<int>(saved.pane_paths.size());
+    if (pane < 0 || pane >= pane_count) return {};
+    std::vector<ui::FluentMenuItem> items;
+    for (auto [command, text] : {std::pair{1, l10n::StringId::Open},
+                                 std::pair{2, l10n::StringId::OpenNewTab},
+                                 std::pair{3, l10n::StringId::CopyPath}}) {
+        ui::FluentMenuItem item;
+        item.command = command;
+        item.text = l10n::Get(text);
+        items.push_back(std::move(item));
+    }
+    for (auto [command, text] : {std::pair{4, l10n::StringId::WorkspaceMoveUp},
+                                 std::pair{5, l10n::StringId::WorkspaceMoveDown}}) {
+        ui::FluentMenuItem item;
+        item.command = command;
+        item.text = l10n::Get(text);
+        item.enabled = command == 4 ? pane > 0 : pane + 1 < pane_count;
+        items.push_back(std::move(item));
+    }
+    items[0].glyph = L"\xE8B7";
+    items[1].glyph = L"\xE8A7";
+    items[2].glyph = L"\xE8C8";
+    items[3].glyph = L"\xE74A";
+    items[4].glyph = L"\xE74B";
+    return items;
+}
+
+void ShowWorkspacePaneMenu(AppState& s, int workspace, int pane, POINT point) {
+    const auto items = BuildWorkspacePaneMenuItems(s, workspace, pane);
+    if (items.empty() || !EnsureMenu(s)) return;
+    const auto& saved = s.places.workspaces[static_cast<size_t>(workspace)];
+    const std::wstring root = saved.root;
+    const std::wstring path = saved.pane_paths.empty() ? saved.root : saved.pane_paths[static_cast<size_t>(pane)];
+    const int command = s.menu->TrackPopup(point, items);
+    if (command == 1) ActivateWorkspacePane(s, workspace, pane);
+    else if (command == 2) OpenFolderTab(s, path);
+    else if (command == 3) ops::WriteClipboardText(path);
+    else if (command == 4 || command == 5) {
+        workspace = s.places.FindWorkspace(root);
+        if (workspace >= 0 && pane < static_cast<int>(s.places.workspaces[static_cast<size_t>(workspace)].pane_paths.size()) &&
+            s.places.workspaces[static_cast<size_t>(workspace)].pane_paths[static_cast<size_t>(pane)] == path)
+            MoveWorkspacePane(s, workspace, pane, pane + (command == 4 ? -1 : 1));
+    }
 }
 
 void ShowNetworkPlaceMenu(AppState& s, const std::wstring& unc, POINT point) {

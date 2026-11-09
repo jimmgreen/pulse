@@ -14,6 +14,7 @@
 //     killing the launcher kills the host (job object).
 // LOCALAPPDATA points into a scratch directory; the real packs are untouched.
 #include "../app/ai_broker.h"
+#include "../app/extensions/developer_tools.h"
 #include "../app/ai_launcher.h"
 #include "../app/pack_installer.h"
 #include "../common/json_value.h"
@@ -305,8 +306,120 @@ std::string Lower(std::string s) {
 
 } // namespace
 
-int main() {
+int ExtensionToolsOnly() {
+    const std::wstring pipe = L"\\\\.\\pipe\\Pulse.Tools.extensions." + std::to_wstring(GetCurrentProcessId());
+    std::atomic<DWORD> host_pid{0};
+    BrokerOptions options;
+    options.pipe_name = pipe;
+    options.verify_peer = [&](HANDLE p) {
+        ULONG pid = 0;
+        return GetNamedPipeClientProcessId(p, &pid) && pid == host_pid.load();
+    };
+    ToolBroker broker(options);
+    broker.Register({"pulse.describe_extension_api", PermissionClass::Read, extensions::DescribeExtensionApiTool});
+    broker.Register({"pulse.validate_extension_manifest", PermissionClass::Read, extensions::ValidateExtensionManifestTool});
+    broker.Register({"pulse.get_extension_template", PermissionClass::Read, extensions::GetExtensionTemplateTool});
+    DWORD error = 0;
+    if (!broker.Start(error)) { Check(false, "extension broker starts"); return 1; }
+    {
+        Child c;
+        const auto host = ModuleDirectory() + L"\\Pulse.AI.exe";
+        if (!c.Start(L"\"" + host + L"\" --mcp --server \"" + ModulePath() + L"\" --pipe " + pipe)) {
+            Check(false, "MCP host starts"); return 1;
+        }
+        host_pid = c.pid();
+        json::Value init = json::Value::Object(), r;
+        init.set("protocolVersion", "2025-06-18");
+        init.set("capabilities", json::Value::Object());
+        init.set("clientInfo", Args({{"name", "extension-developer-test"}, {"version", "1"}}));
+        c.Send(Request(1, "initialize", init));
+        Check(c.Response(1, r) && r.find("result"), "extension MCP handshake");
+        c.Send(Notification("notifications/initialized"));
+        c.Send(Request(2, "tools/list"));
+        bool listed = c.Response(2, r) && r.find("result") && r.find("result")->find("tools");
+        const auto* list = listed ? r.find("result")->find("tools") : nullptr;
+        Check(list && list->size() == 12 && list->at(9).get_string("name") == "describe_extension_api" &&
+              list->at(10).get_string("name") == "validate_extension_manifest" &&
+              list->at(11).get_string("name") == "get_extension_template", "extension tools discoverable over MCP");
+        c.Send(Request(3, "tools/call", CallParams("describe_extension_api")));
+        bool failed = true;
+        const bool described = c.Response(3, r) && !ToolText(r, &failed).empty() && !failed;
+        const auto* data = described ? r.find("result")->find("structuredContent") : nullptr;
+        Check(data && data->find("manifestSchema") && data->find("capabilities") &&
+              data->find("capabilities")->size() == 8 && data->find("workspaceLayouts") &&
+              data->find("workspaceLayouts")->size() == 5 && data->find("viewModes") &&
+              data->find("viewModes")->size() == 8, "production contract returned through MCP broker");
+        const std::atomic<bool> describe_cancelled{false};
+        const auto shared_description = extensions::DescribeExtensionApiTool(
+            {L"extension discovery parity test", json::Value::Object(), describe_cancelled});
+        Check(data && shared_description.ok && data->find("capabilityDetails") && data->find("bindingDetails") &&
+              json::Serialize(*data) == json::Serialize(shared_description.data),
+              "real MCP discovery equals the complete shared built-in assistant adapter result");
+        const std::string manifest = R"({"id":"test","name":"Test","apiVersion":1,"commands":[]})";
+        c.Send(Request(4, "tools/call", CallParams("validate_extension_manifest", Args({{"manifest", manifest}}))));
+        const bool validated = c.Response(4, r) && !ToolText(r, &failed).empty() && !failed;
+        data = validated ? r.find("result")->find("structuredContent") : nullptr;
+        Check(data && data->get_bool("valid") && data->get_string("error").empty(), "valid manifest accepted through production adapter");
+        c.Send(Request(5, "tools/call", CallParams("validate_extension_manifest", Args({{"manifest", "{"}}))));
+        const bool invalid = c.Response(5, r) && !ToolText(r, &failed).empty() && !failed;
+        data = invalid ? r.find("result")->find("structuredContent") : nullptr;
+        Check(data && !data->get_bool("valid", true) && !data->get_string("error").empty(), "invalid manifest is a validation result, not transport failure");
+        c.Send(Request(6, "tools/call", CallParams("validate_extension_manifest", Args({{"path", "C:\\missing.json"}}))));
+        Check(c.Response(6, r) && ToolErrorIs(r, "invalid_args"), "file paths are not accepted as manifest input");
+        c.Send(Request(7, "tools/call", CallParams("describe_extension_api", Args({{"extra", true}}))));
+        Check(c.Response(7, r) && ToolErrorIs(r, "invalid_args"), "discovery rejects unknown arguments");
+        c.Send(Request(8, "tools/call", CallParams("validate_extension_manifest", Args({{"manifest", 42}}))));
+        Check(c.Response(8, r) && ToolErrorIs(r, "invalid_args"), "validation rejects non-string input");
+        std::string boundary = manifest;
+        boundary.resize(65536, ' ');
+        c.Send(Request(9, "tools/call", CallParams("validate_extension_manifest", Args({{"manifest", boundary}}))));
+        const bool boundary_ok = c.Response(9, r) && !ToolText(r, &failed).empty() && !failed;
+        data = boundary_ok ? r.find("result")->find("structuredContent") : nullptr;
+        Check(data && data->get_bool("valid"), "64 KiB manifest accepted over real MCP transport");
+        std::string multibyte;
+        for (int i = 0; i < 22000; ++i) multibyte += "\xe4\xb8\xad";
+        c.Send(Request(10, "tools/call", CallParams("validate_extension_manifest", Args({{"manifest", multibyte}}))));
+        Check(c.Response(10, r) && ToolErrorIs(r, "invalid_args"), "MCP enforces UTF-8 byte limit for multibyte text");
+        const std::string view_manifest = R"({"apiVersion":1,"id":"view","name":"View","commands":[{"id":"details","title":"Details","capability":"view.setMode","args":{"mode":"details"}}]})";
+        c.Send(Request(11, "tools/call", CallParams("validate_extension_manifest", Args({{"manifest", view_manifest}}))));
+        const bool view_ok = c.Response(11, r) && !ToolText(r, &failed).empty() && !failed;
+        data = view_ok ? r.find("result")->find("structuredContent") : nullptr;
+        Check(data && data->get_bool("valid"), "typed view command accepted over MCP");
+        auto invalid_view = view_manifest;
+        invalid_view.replace(invalid_view.find("\"mode\":\"details\""), 16, "\"mode\":\"bogus\"");
+        c.Send(Request(12, "tools/call", CallParams("validate_extension_manifest", Args({{"manifest", invalid_view}}))));
+        const bool view_invalid = c.Response(12, r) && !ToolText(r, &failed).empty() && !failed;
+        data = view_invalid ? r.find("result")->find("structuredContent") : nullptr;
+        Check(data && !data->get_bool("valid", true), "unknown view mode rejected over MCP");
+        c.Send(Request(20, "tools/call", CallParams("get_extension_template", Args({{"template", "transfer-panel"}}))));
+        const bool template_ok = c.Response(20, r) && !ToolText(r, &failed).empty() && !failed;
+        data = template_ok ? r.find("result")->find("structuredContent") : nullptr;
+        const auto template_text = data ? data->get_string("manifest") : std::string{};
+        Check(data && data->get_bool("validated") && !data->get_bool("executed", true) && !template_text.empty(),
+            "real MCP returns a validated template without execution");
+        const auto shared_template = extensions::GetExtensionTemplateTool(
+            {L"template parity test", Args({{"template", "transfer-panel"}}), describe_cancelled});
+        Check(data && shared_template.ok && json::Serialize(*data) == json::Serialize(shared_template.data),
+            "MCP template equals shared assistant adapter output");
+        c.Send(Request(21, "tools/call", CallParams("validate_extension_manifest", Args({{"manifest", template_text}}))));
+        Check(c.Response(21, r) && r.find("result") && r.find("result")->find("structuredContent") &&
+            r.find("result")->find("structuredContent")->get_bool("valid"), "retrieved template completes MCP validate round trip");
+        c.Send(Request(22, "tools/call", CallParams("get_extension_template", Args({{"template", "../outside.json"}}))));
+        Check(c.Response(22, r) && ToolErrorIs(r, "invalid_args"), "MCP rejects template path traversal at its schema boundary");
+        c.CloseInput();
+        Check(c.WaitExit(5000) == 0, "MCP host exits cleanly");
+    }
+    broker.Stop();
+    std::printf("extension_mcp_test: %d passed, %d failed\n", g_passed, g_failed);
+    return g_failed ? 1 : 0;
+}
+
+int main(int argc, char** argv) {
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+#ifdef PULSE_EXTENSION_MCP_ONLY
+    if (argc == 1) return ExtensionToolsOnly();
+#endif
+    if (argc == 2 && std::string(argv[1]) == "--extensions-only") return ExtensionToolsOnly();
     const std::wstring build = ModuleDirectory();
     const std::wstring host = build + L"\\Pulse.AI.exe";
     const std::wstring self = ModulePath();
@@ -398,7 +511,7 @@ int main() {
         c.Send(Request(3, "tools/list"));
         bool shape = c.Response(3, r) && r.find("result") && r.find("result")->find("tools");
         const json::Value* tools = shape ? r.find("result")->find("tools") : nullptr;
-        shape = shape && tools->size() == 9 && tools->at(0).get_string("name") == "get_context";
+        shape = shape && tools->size() == 12 && tools->at(0).get_string("name") == "get_context";
         std::string names;
         for (size_t i = 0; shape && i < tools->size(); ++i) {
             const json::Value& t = tools->at(i);
@@ -411,8 +524,8 @@ int main() {
                      t.find("annotations") != nullptr;
         }
         Check(shape && names == "get_context list_folder search get_properties reveal create_zip find_actions run_actions "
-                                "undo_last ",
-              "tools/list: the 9 tools (P5 adds find_actions, run_actions) in a fixed order, plain names, strict "
+                                "undo_last describe_extension_api validate_extension_manifest get_extension_template ",
+              "tools/list: the 12 tools in a fixed order, plain names, strict "
               "object schemas");
         bool zip_hints = false;
         for (size_t i = 0; tools && i < tools->size(); ++i)
@@ -593,7 +706,7 @@ int main() {
         list_modern.set("_meta", ModernMeta());
         c.Send(Request(50, "tools/list", list_modern));
         Check(c.Response(50, r) && r.find("result")->get_string("resultType") == "complete" &&
-                  r.find("result")->find("tools")->size() == 9 && r.find("result")->find("ttlMs"),
+                  r.find("result")->find("tools")->size() == 12 && r.find("result")->find("ttlMs"),
               "modern tools/list: resultType and ttlMs");
         json::Value call_modern = CallParams("list_folder", Args({{"path", "C:\\m"}}));
         call_modern.set("_meta", ModernMeta());
@@ -620,7 +733,7 @@ int main() {
         c.Send(Request(1, "initialize", init));
         if (!c.Response(1, r)) return false;
         c.Send(Request(2, "tools/list"));
-        if (!c.Response(2, r) || r.find("result")->find("tools")->size() != 9) return false;
+        if (!c.Response(2, r) || r.find("result")->find("tools")->size() != 12) return false;
         c.Send(Request(3, "tools/call", CallParams("list_folder", Args({{"path", "C:\\Data"}}))));
         return c.Response(3, r, nullptr, 15000);
     };

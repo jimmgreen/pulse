@@ -18,16 +18,6 @@ struct Saved {
 };
 std::vector<Saved> saved;
 UINT_PTR timer = 0, expiry_timer = 0;
-struct Spawned {
-    HWND source, window;
-    app::LayoutTab *tab;
-    size_t index;
-    app::LayoutTab *copy = nullptr;
-    std::wstring copy_path;
-    uint64_t selection = 0, view = 0;
-    size_t back = 0, forward = 0;
-};
-std::vector<Spawned> spawned;
 ULONGLONG started = 0, expires = 0;
 uintptr_t generation = 0, batch_generation = 0;
 bool animations = true;
@@ -44,7 +34,6 @@ void Forget() {
     if (expiry_timer)
         KillTimer(nullptr, expiry_timer);
     expiry_timer = 0;
-    spawned.clear();
     for (const auto &v : saved)
         if (Live(v))
             RemovePropW(v.hwnd, kToken);
@@ -87,15 +76,10 @@ void CleanupWindowArrange() {
 void SetWindowArrangeAnimations(bool enabled) {
     animations = enabled;
 }
-static bool ArrangeWindowsImpl(AppState &s, app::WindowArrangeLayout layout, bool all_monitors,
-                               const std::vector<HWND> &order, bool force_include) {
-    Stop();
-    if (!Eligible(s) || s.ops.Status().active)
-        return false;
+std::vector<HWND> WindowArrangementCandidates(AppState &s, bool all_monitors,
+                                              const std::vector<HWND> &order, bool force_include) {
+    if (!Eligible(s) || s.ops.Status().active) return {};
     const HMONITOR monitor = MonitorFromWindow(s.hwnd, MONITOR_DEFAULTTONEAREST);
-    MONITORINFO mi{sizeof(mi)};
-    if (!GetMonitorInfoW(monitor, &mi))
-        return false;
     std::vector<HWND> windows;
     auto add = [&](HWND hwnd) {
         auto *other = s.core.windows.Lookup(hwnd);
@@ -111,80 +95,46 @@ static bool ArrangeWindowsImpl(AppState &s, app::WindowArrangeLayout layout, boo
         add(hwnd);
     add(s.hwnd);
     s.core.windows.ForEach([&](HWND hwnd, AppState &) { add(hwnd); });
+    return windows;
+}
+static bool ArrangeWindowsImpl(AppState &s, app::WindowArrangeLayout layout, bool all_monitors,
+                               const std::vector<HWND> &order, bool force_include) {
+    Stop();
+    if (!Eligible(s) || s.ops.Status().active)
+        return false;
+    const HMONITOR monitor = MonitorFromWindow(s.hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi{sizeof(mi)};
+    if (!GetMonitorInfoW(monitor, &mi))
+        return false;
+    auto windows = WindowArrangementCandidates(s, all_monitors, order, force_include);
     const UINT dpi = static_cast<UINT>(96.0f * s.scale);
     const int gap = s.appPrefs.arrange_gap ? MulDiv(6, static_cast<int>(dpi), 96) : 0;
     MINMAXINFO minimum{};
     SendMessageW(s.hwnd, WM_GETMINMAXINFO, 0, reinterpret_cast<LPARAM>(&minimum));
-    const int mw = minimum.ptMinTrackSize.x, mh = minimum.ptMinTrackSize.y;
-    std::vector<Spawned> new_windows;
-    struct Rollback {
-        AppState &source;
-        std::vector<Spawned> &windows;
-        ~Rollback() {
-            for (auto it = windows.rbegin(); it != windows.rend(); ++it) {
-                auto *dst = source.core.windows.Lookup(it->window);
-                if (!dst || dst->window_tabs.items.size() != 1)
-                    continue;
-                if (it->tab && dst->window_tabs.items[0].get() == it->tab &&
-                    MoveLayoutTab(*dst, 0, source, it->index, TransferSource::Closing))
-                    DestroyWindow(it->window);
-                else if (it->copy && dst->window_tabs.items[0].get() == it->copy)
-                    DestroyWindow(it->window);
-            }
-        }
-    } rollback{s, new_windows};
-    // Check room before creating or transferring a tab.
-    if (windows.size() < 2) {
-        const size_t desired =
-            layout == app::WindowArrangeLayout::Columns ? 3
-            : (layout == app::WindowArrangeLayout::SideBySide || layout == app::WindowArrangeLayout::Stacked)
-                ? 2
-                : s.window_tabs.items.size();
-        if (desired < 2 || (desired > s.window_tabs.items.size() && desired != 2))
-            return false;
-        if (app::CalculateWindowArrangement(layout, mi.rcWork, desired, gap, mw, mh,
-                                            MulDiv(32, static_cast<int>(dpi), 96))
-                .empty())
-            return false;
-        for (size_t i = 1; i < desired; ++i) {
-            WindowInit init;
-            init.monitor = monitor;
-            app::LayoutTab *moved = nullptr;
-            if (s.window_tabs.items.size() > 1) {
-                init.adopt_from = &s;
-                init.adopt_index = s.window_tabs.active + 1 < s.window_tabs.items.size() ? s.window_tabs.active + 1
-                                                                                         : s.window_tabs.active - 1;
-                moved = s.window_tabs.items[init.adopt_index].get();
-            } else {
-                if (layout != app::WindowArrangeLayout::SideBySide && layout != app::WindowArrangeLayout::Stacked)
-                    break;
-                auto *tab = s.window_tabs.Active();
-                auto *folder = tab ? tab->ActiveFolder() : nullptr;
-                if (!folder)
-                    break;
-                init.path = folder->current_path;
-            }
-            const HWND created = OpenPulseWindow(s, init);
-            if (!created)
-                return false;
-            Spawned record{s.hwnd, created, moved, init.adopt_index, nullptr, {}};
-            if (!moved) {
-                auto *dst = s.core.windows.Lookup(created);
-                record.copy = dst ? dst->window_tabs.Active() : nullptr;
-                record.copy_path = init.path;
-                if (auto *folder = record.copy ? record.copy->ActiveFolder() : nullptr) {
-                    record.selection = folder->selection_revision;
-                    record.view = folder->view_generation;
-                    record.back = folder->back_stack.size();
-                    record.forward = folder->forward_stack.size();
-                }
-            }
-            new_windows.push_back(std::move(record));
-            add(created);
-        }
+    for (HWND hwnd : windows) {
+        MINMAXINFO value{};
+        SendMessageW(hwnd, WM_GETMINMAXINFO, 0, reinterpret_cast<LPARAM>(&value));
+        minimum.ptMinTrackSize.x = (std::max)(minimum.ptMinTrackSize.x, value.ptMinTrackSize.x);
+        minimum.ptMinTrackSize.y = (std::max)(minimum.ptMinTrackSize.y, value.ptMinTrackSize.y);
     }
+    const int mw = minimum.ptMinTrackSize.x, mh = minimum.ptMinTrackSize.y;
     if (windows.size() < 2)
         return false;
+    const auto calculate = [&](RECT work, const std::vector<HWND>& group, int spacing, int min_w, int min_h, int step) {
+        std::vector<SIZE> sizes;
+        if (layout == app::WindowArrangeLayout::Cascade) {
+            for (HWND hwnd : group) {
+                RECT bounds{};
+                if (IsZoomed(hwnd) || IsIconic(hwnd)) {
+                    WINDOWPLACEMENT placement{sizeof(placement)};
+                    if (!GetWindowPlacement(hwnd, &placement)) return std::vector<RECT>{};
+                    bounds = placement.rcNormalPosition;
+                } else if (!GetWindowRect(hwnd, &bounds)) return std::vector<RECT>{};
+                sizes.push_back({bounds.right - bounds.left, bounds.bottom - bounds.top});
+            }
+        }
+        return app::CalculateWindowArrangement(layout, work, group.size(), spacing, min_w, min_h, step, sizes);
+    };
     std::vector<RECT> rects;
     if (all_monitors) {
         std::vector<HWND> grouped;
@@ -201,14 +151,21 @@ static bool ArrangeWindowsImpl(AppState &s, app::WindowArrangeLayout layout, boo
                     group.push_back(hwnd);
             MONITORINFO info{sizeof(info)};
             if (!GetMonitorInfoW(m, &info))
-                continue;
+                return false;
             auto *first = s.core.windows.Lookup(group.front());
             const int scale = static_cast<int>(96.0f * first->scale);
             MINMAXINFO group_min{};
-            SendMessageW(group.front(), WM_GETMINMAXINFO, 0, reinterpret_cast<LPARAM>(&group_min));
-            const auto positions = app::CalculateWindowArrangement(
-                layout, info.rcWork, group.size(), s.appPrefs.arrange_gap ? MulDiv(6, scale, 96) : 0,
+            for (HWND hwnd : group) {
+                MINMAXINFO value{};
+                SendMessageW(hwnd, WM_GETMINMAXINFO, 0, reinterpret_cast<LPARAM>(&value));
+                group_min.ptMinTrackSize.x = (std::max)(group_min.ptMinTrackSize.x, value.ptMinTrackSize.x);
+                group_min.ptMinTrackSize.y = (std::max)(group_min.ptMinTrackSize.y, value.ptMinTrackSize.y);
+            }
+            const auto positions = calculate(
+                info.rcWork, group, s.appPrefs.arrange_gap ? MulDiv(6, scale, 96) : 0,
                 group_min.ptMinTrackSize.x, group_min.ptMinTrackSize.y, MulDiv(32, scale, 96));
+            if (positions.size() != group.size())
+                return false;
             for (size_t i = 0; i < positions.size(); ++i) {
                 grouped.push_back(group[i]);
                 rects.push_back(positions[i]);
@@ -216,7 +173,7 @@ static bool ArrangeWindowsImpl(AppState &s, app::WindowArrangeLayout layout, boo
         }
         windows = std::move(grouped);
     } else
-        rects = app::CalculateWindowArrangement(layout, mi.rcWork, windows.size(), gap, mw, mh,
+        rects = calculate(mi.rcWork, windows, gap, mw, mh,
                                                 MulDiv(32, static_cast<int>(dpi), 96));
     if (rects.size() < 2)
         return false;
@@ -238,8 +195,6 @@ static bool ArrangeWindowsImpl(AppState &s, app::WindowArrangeLayout layout, boo
         v.target = rects[i];
         saved.push_back(v);
     }
-    spawned = std::move(new_windows);
-    new_windows.clear();
     batch_generation = ++generation;
     for (auto &v : saved) {
         ShowWindow(v.hwnd, SW_SHOWNOACTIVATE);
@@ -286,28 +241,6 @@ void UndoWindowArrange(AppState &s, WPARAM requested_generation) {
                 SetWindowPlacement(v.hwnd, &v.placement);
                 if (!v.visible)
                     ShowWindow(v.hwnd, SW_HIDE);
-            }
-        }
-    if (GetTickCount64() <= expires)
-        for (auto it = spawned.rbegin(); it != spawned.rend(); ++it) {
-            auto live = [&](HWND hwnd) {
-                return std::any_of(saved.begin(), saved.end(),
-                                   [&](const Saved &v) { return v.hwnd == hwnd && Live(v); });
-            };
-            auto *src = s.core.windows.Lookup(it->source);
-            auto *dst = s.core.windows.Lookup(it->window);
-            if (src && dst && live(it->source) && live(it->window) && Eligible(*src) && Eligible(*dst) &&
-                dst->window_tabs.items.size() == 1) {
-                if (it->tab && dst->window_tabs.items.front().get() == it->tab &&
-                    MoveLayoutTab(*dst, 0, *src, it->index, TransferSource::Closing))
-                    DestroyWindow(it->window);
-                else if (it->copy && dst->window_tabs.Active() == it->copy) {
-                    auto *folder = it->copy->ActiveFolder();
-                    if (folder && folder->current_path == it->copy_path &&
-                        folder->selection_revision == it->selection && folder->view_generation == it->view &&
-                        folder->back_stack.size() == it->back && folder->forward_stack.size() == it->forward)
-                        DestroyWindow(it->window);
-                }
             }
         }
     Forget();

@@ -1,5 +1,4 @@
-// ai_assistant_voice.h - 语音输入 (third batch, flow V in
-// plans/ai/Pulse_AI助手_第三批_操控Pulse与语音.html): the composer's
+// ai_assistant_voice.h - 语音输入 (third batch, flow V): the composer's
 // microphone. A click checks the connection, the microphone and Windows'
 // privacy switch, then records (ai_voice_capture.h); each sentence is
 // uploaded once to the speech service (ai_voice_service.h) and its words are

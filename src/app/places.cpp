@@ -738,6 +738,11 @@ void PlacesCatalog::StopPlacesWriter() {
 bool PlacesCatalog::Save() const {
     if (!persist) return true;
     if (load_failed) return false;
+    if (async_save_depth_) {
+        MarkPlacesDirty();
+        async_save_dirty_ = true;
+        return true;
+    }
     const SaveSnapshot snapshot = CaptureSaveSnapshot();
     uint64_t revision;
     {

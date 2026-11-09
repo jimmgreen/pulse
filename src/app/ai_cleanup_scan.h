@@ -1,5 +1,5 @@
 // ai_cleanup_scan.h - Read-only measurements behind the assistant's space
-// tools (plans/ai/Pulse_AI助手_第二批扩展.html, flow D): where a drive's
+// tools (flow D): where a drive's
 // space went, and what in the user's own folders can safely go.
 //
 // Nothing here changes a file. Folder sizes come from Pulse's index (the

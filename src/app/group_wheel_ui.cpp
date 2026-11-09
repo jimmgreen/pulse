@@ -4,11 +4,13 @@
 #include "entry_group.h"
 #include "entry_sort.h"
 #include "media_columns_ui.h"
+#include "window_registry.h"
 #include "../common/text_format.h"
 #include "../common/localization.h"
 #include "../common/string_ids.h"
 #include "../ui/command_icons.h"
 #include "../ui/group_wheel.h"
+#include "../ui/confirm_dialog.h"
 #include "../ui/ui_motion.h"
 #include "../ui/ui_renderer.h"
 
@@ -62,6 +64,7 @@ std::wstring Format(l10n::StringId id, int n) {
 std::wstring Label(app::GroupBy by, int rank, const std::wstring& key, const fs::DirEntry& e,
                    const app::TagCatalogSnapshot* tags, const app::GroupClock& clock) {
     using l10n::StringId;
+    if (rank == app::kFolderGroupRank) return l10n::Get(StringId::GroupFolders);
     if (app::IsMediaGroup(by)) {
         if (rank < 0) return l10n::Get(StringId::GroupFolders);
         const std::wstring label = app::MediaGroupLabel(clock, rank);
@@ -112,6 +115,7 @@ ui::GroupWheelOption BuildOption(const app::Tab& tab, const ModeStyle& mode,
     }
     const app::GroupBy by = app::GroupByFromInt(mode.value);
     app::GroupClock clock = by == app::GroupBy::Date ? app::MakeGroupClock(tab.sort_column) : app::GroupClock{};
+    clock.folders = tab.EffectiveFolderSort();
     if (by == app::GroupBy::Tag) clock.tags = app::TagGroupsForFolder(tab.current_path);
     if (app::IsMediaGroup(by)) clock.media = app::MediaGroupsForFolder(tab.current_path, by);
     const auto catalog = by == app::GroupBy::Tag ? app::CurrentTagCatalog() : nullptr;
@@ -294,6 +298,52 @@ int g_wheel_accum = 0;
 
 } // namespace
 
+bool ApplySortToAllFolders(AppState& s, int column, bool desc, int folder, bool confirm) {
+    auto usable = [](const app::Tab* tab) {
+        return tab && !tab->content_results && !tab->search_content_active &&
+            !tab->current_path.empty() && !fs::IsVirtualPath(tab->current_path);
+    };
+    const auto option = std::find_if(std::begin(kSortColumns), std::end(kSortColumns),
+        [column](const auto& item) { return static_cast<int>(item.column) == column &&
+            item.column != ui::SortColumn::Path; });
+    if (!usable(ActiveTab(s)) || option == std::end(kSortColumns) || folder < 0 || folder > 2) return false;
+    const std::wstring source = ActiveTab(s)->current_path;
+    if (confirm) {
+        ui::ConfirmDialogSpec spec;
+        spec.title = l10n::Get(l10n::StringId::ApplyViewAllTitle);
+        spec.message = l10n::Get(l10n::StringId::ApplySortAllMessage);
+        spec.confirm_text = l10n::Get(l10n::StringId::ApplyViewAllConfirm);
+        spec.cancel_text = l10n::Get(l10n::StringId::Cancel);
+        if (!ui::ShowConfirmDialog(s.hwnd, spec, s.darkMode, s.accentColor)) return false;
+        if (!usable(ActiveTab(s)) || ActiveTab(s)->current_path != source) return false;
+    }
+    const auto sort_column = static_cast<ui::SortColumn>(column);
+    const auto direction = desc ? ui::SortDirection::Desc : ui::SortDirection::Asc;
+    s.appPrefs.folder_sorts.ApplyToAll({sort_column, direction});
+    s.appPrefs.folder_sort_mode = folder;
+    app::SetFolderSortMode(app::FolderSortModeFromInt(folder));
+    s.appPrefs.Save();
+    app::ForEachWindowSharingCore(s, [&](AppState& window) {
+        std::vector<std::wstring> paths;
+        ForEachPane(window, [&](app::Pane& pane) {
+            auto* tab = pane.ActiveTab();
+            if (!usable(tab)) return;
+            tab->sort_column = sort_column;
+            tab->sort_direction = direction;
+            tab->folder_sort = -1;
+            tab->search_relevance = false;
+            if (std::find(paths.begin(), paths.end(), tab->current_path) == paths.end())
+                paths.push_back(tab->current_path);
+        });
+        for (const auto& path : paths) {
+            window.store.MarkDirty(path);
+            RefreshPath(window, path, RefreshReason::Explicit);
+        }
+        InvalidateRect(window.hwnd, nullptr, FALSE);
+    });
+    return true;
+}
+
 void OpenGroupWheel(AppState& s) {
     app::Tab* tab = ActiveTab(s);
     if (!tab) return;
@@ -405,6 +455,9 @@ void OpenSortWheel(AppState& s) {
     data.cancel_text = l10n::Get(l10n::StringId::Cancel);
     data.direction_text = l10n::Get(l10n::StringId::SortWheelDirection);
     data.folder_text = l10n::Get(l10n::StringId::SortWheelFolders);
+    if (!tab->content_results && !tab->search_content_active && !tab->current_path.empty() &&
+        !fs::IsVirtualPath(tab->current_path))
+        data.apply_all_text = l10n::Get(l10n::StringId::ApplyGroupAllShort);
     data.folder_names = {l10n::Get(l10n::StringId::SortWheelFolderTop), l10n::Get(l10n::StringId::SortWheelFolderFollow),
                          l10n::Get(l10n::StringId::SortWheelFolderMixed)};
 
@@ -476,12 +529,15 @@ bool GroupWheelMessage(AppState& s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
             Kick(s, hwnd);
             return true;
         }
-        if (g_kind == WheelKind::Group && wheel.HitApplyAll(x, y)) {
+        if (wheel.HitApplyAll(x, y)) {
             const int value = wheel.SelectedValue();
+            const bool desc = wheel.Desc();
+            const int folder = wheel.Folder();
             SwallowNextDoubleClick();
             wheel.Close();
             Kick(s, hwnd);
-            ApplyGroupToAllFolders(s, value);
+            if (g_kind == WheelKind::Sort) ApplySortToAllFolders(s, value, desc, folder);
+            else ApplyGroupToAllFolders(s, value);
             Kick(s, hwnd);
             return true;
         }

@@ -279,7 +279,7 @@ bool ResortForFolderSizes(AppState& s) {
     // Rows must not move under a press (the click resolves by index), a drag
     // or the rename box.
     const bool busy = s.scrollAnimating || s.scrollbarDragging ||
-        s.renameIndex >= 0 || s.marqueeActive || s.dragPending ||
+        s.renameIndex >= 0 || s.listSelection.BandActive() || s.listSelection.PendingFile() ||
         (GetKeyState(VK_LBUTTON) & 0x8000) != 0 || (GetKeyState(VK_RBUTTON) & 0x8000) != 0;
     ForEachPane(s, [&](app::Pane& pane) {
         app::Tab* tab = pane.ActiveTab();

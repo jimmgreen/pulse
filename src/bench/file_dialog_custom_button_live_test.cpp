@@ -1,5 +1,9 @@
 #include "../shell_bridge/file_dialog_wrapper.h"
+#ifdef PULSE_REMOTE_PROVIDER_TEST
+#include "../shell_bridge/file_dialog_remote_provider.h"
+#else
 #include "../shell_bridge/file_dialog_ui_provider.h"
+#endif
 #include <shlobj.h>
 #include <wrl/client.h>
 #include <atomic>
@@ -49,7 +53,12 @@ LRESULT CALLBACK ObserveInput(int code, WPARAM wp, LPARAM lp) {
 }
 bool Owned(HWND window, DWORD thread) {
     DWORD pid = 0;
+#ifdef PULSE_REMOTE_PROVIDER_TEST
+    (void)thread;
+    return window && IsWindow(window) && GetWindowThreadProcessId(window, &pid) && pid != GetCurrentProcessId();
+#else
     return window && IsWindow(window) && GetWindowThreadProcessId(window, &pid) == thread && pid == GetCurrentProcessId();
+#endif
 }
 class Sink final : public IFileDialogEvents, public IFileDialogControlEvents {
     std::atomic<ULONG> refs_{1}; State& state_; unsigned index_;
@@ -194,7 +203,11 @@ int wmain(int argc, wchar_t** argv) {
         Check(SUCCEEDED(com), "calling STA initialized");
         if (SUCCEEDED(com) && created != INVALID_HANDLE_VALUE) {
             std::shared_ptr<const FileDialogInprocessProvider> provider;
+#ifdef PULSE_REMOTE_PROVIDER_TEST
+            const HRESULT loaded = LoadFileDialogRemoteProvider(argv[1], provider, true);
+#else
             const HRESULT loaded = LoadFileDialogUiProvider(argv[1], provider, true);
+#endif
             std::printf("PROVIDER hr=%08lX\n", static_cast<unsigned long>(loaded));
             Check(loaded == S_OK && provider, "real proof provider loaded with explicit test gate");
             if (loaded == S_OK && provider) {

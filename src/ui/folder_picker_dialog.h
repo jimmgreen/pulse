@@ -7,6 +7,7 @@
 // Folders are read off the UI thread.
 
 #include "folder_picker_model.h"
+#include "../common/picker_places_snapshot.h"
 
 #include <d2d1.h>
 #include <windows.h>
@@ -54,6 +55,13 @@ struct PickerCustomControl {
 HRESULT UpdatePickerCustomControl(HWND window, const PickerCustomControl& control);
 struct FilePickerResult;
 struct FolderPickerSpec {
+    // Optional shared-place provider for hosts with an existing catalog.
+    // Reads run on the dialog thread and must be nonblocking; mutations run on a worker.
+    std::function<picker_places::Snapshot()> read_shared_places;
+    std::function<bool(const std::vector<picker_places::StarredItem>&, const std::wstring&)> add_shared_favorites;
+    std::function<bool(const picker_places::ManagePlacesRequest&)> manage_shared_places;
+    uint32_t native_options = 0; // Raw FILEOPENDIALOGOPTIONS; zero keeps standalone defaults.
+    bool persist_layout = false; // In-process takeover remembers presentation per host and mode.
     PickerMode mode = PickerMode::Folder;
     std::wstring title;         // empty: "Choose a folder" / "Choose background image" / "Open"
     bool explicit_title = false, has_ok_button_label = false, has_file_name_label = false;
@@ -78,11 +86,19 @@ struct FolderPickerSpec {
     bool list_zebra_rows = true;
     bool list_size_bar = false;
     bool thumbnail_badges = true;
+    int blank_click_action = 0;          // AppPrefs: off, back (parent fallback), or up.
+    int preview_trigger = 0;
+    int hover_preview_delay_ms = 500;
+    int hover_card_size = 1;
     uint32_t details_columns = 0;         // Without explicit_details_columns, 0 uses defaults.
     bool explicit_details_columns = false;
     std::vector<PickerPlace> bottom_places;
     std::vector<PickerPlace> places;      // extra quick-access rows, shown first
     pulse::PickerOwnerGuard* owner_guard = nullptr; // borrowed through Show; acquired once by caller or detailed entry
+    // Without a guarded owner: a window (typically another process's, whose
+    // own guard keeps the modality) that only owns and places the dialog: its
+    // z-order, monitor/DPI and centring. Never enabled, disabled or observed.
+    HWND placement_owner = nullptr;
     HANDLE cancel_event = nullptr; // borrowed until Show returns; bridge disconnect cancellation
     // File acceptance only; listing and Image format restrictions remain strict.
     bool advisory_file_filters = false;
@@ -103,6 +119,7 @@ struct FolderPickerSpec {
     std::function<HRESULT(HWND, PickerDialogEvent, const PickerDialogSnapshot&, const std::wstring&)> on_dialog_event;
     // Response: 0=Pulse prompt, 1=accept subject to revalidation, 2=refuse.
     std::function<HRESULT(HWND, const PickerDialogSnapshot&, const std::wstring&, uint32_t&)> on_overwrite;
+    std::function<HRESULT(HWND, const PickerDialogSnapshot&, const std::wstring&, uint32_t&)> on_share_violation;
     std::function<void(HWND, const std::wstring&, HRESULT)> on_navigation_complete;
     std::function<HRESULT(HWND)> on_ready;
     std::function<HRESULT(HWND, const FilePickerResult&)> on_file_ok;

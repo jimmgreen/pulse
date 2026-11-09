@@ -1,3 +1,4 @@
+#include "../common/app_runtime_paths.h"
 // shell_tag_menu.cpp - File Explorer "Pulse tags >" submenu (see header).
 #include "shell_tag_menu.h"
 #include "shell_tag_registry.h"
@@ -48,9 +49,7 @@ ShellTagState& State() {
 }
 
 std::wstring ModulePath() {
-    wchar_t path[MAX_PATH * 4]{};
-    const DWORD n = GetModuleFileNameW(nullptr, path, ARRAYSIZE(path));
-    return n > 0 && n < ARRAYSIZE(path) ? std::wstring(path, n) : std::wstring();
+    return app_runtime_paths::StableEntryPath();
 }
 
 std::wstring IconDirectory() {

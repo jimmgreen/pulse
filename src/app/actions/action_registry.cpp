@@ -121,7 +121,7 @@ std::wstring Current(const std::vector<ui::FluentMenuItem>& rows) {
     return {};
 }
 
-BackgroundViewOptions ViewOptions(AppState& s, const Tab& tab) {
+BackgroundViewOptions ViewOptions(AppState&, const Tab& tab) {
     std::wstring kind;
     ParsePulsePath(tab.current_path, &kind, nullptr);
     const bool search = kind == L"search" || kind == L"saved-search";
@@ -130,8 +130,8 @@ BackgroundViewOptions ViewOptions(AppState& s, const Tab& tab) {
     o.view_mode = tab.view_mode;
     o.sort_column = tab.sort_column;
     o.sort_direction = tab.sort_direction;
-    o.folder_sort = s.appPrefs.folder_sort_mode;
-    o.can_sort = kind != L"starred" && kind != L"recent";
+    o.folder_sort = static_cast<int>(tab.EffectiveFolderSort());
+    o.can_sort = kind != L"recent";
     o.indexed_search = search && !tab.content_results;
     o.show_path = search || kind == L"recycle";
     o.group_virtual = search || IsTagViewKind(kind) || kind == L"recycle";

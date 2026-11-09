@@ -1,6 +1,17 @@
+#include "animation_input_budget.h"
+#include "archive_plugin_migration.h"
+#include "frame_perf_environment.h"
+#include <filesystem>
+#include "file_click_controller.h"
+#include "../common/app_runtime_paths.h"
+#include "../common/app_identity.h"
+namespace pulse::app { bool RunMediaColumnResizeCapture(); }
+#include "../ui/edit_host.h"
 #include "quick_access.h"
 #include "pane_close.h"
 #include "picker_host_mode.h"
+#include "picker_remote_host.h"
+#include "picker_places_commands.h"
 #include "../ui/thumbnail_retry_timer.h"
 #include "drive_eject_ui.h"
 #include "app_diagnostics.h"
@@ -29,6 +40,7 @@
 #include "tag_view.h"
 #include "tag_rules.h"
 #include "filter_animation.h"
+#include "rename_click_timing.h"
 #include "sidebar_resize.h"
 #include "ui_timer_pacer.h"
 #include <dwmapi.h>
@@ -80,6 +92,7 @@
 #include "context_menu_prefs.h"
 #include "app_prefs.h"
 #include "startup_launch.h"
+#include "../common/shell_open_entry.h"
 #include "entry_sort.h"
 #include "drop_staging.h"
 #include "folder_sizes_ui.h"
@@ -89,6 +102,14 @@
 #include "search_query.h"
 #include "settings_controller.h"
 #include "single_instance_coordinator.h"
+#include "extensions/runtime.h"
+#include "extensions/native/session.h"
+#include "extensions/native/crash_guard.h"
+#include "extensions/native/package_lifecycle.h"
+#ifdef PULSE_WITH_TEST_HOOKS
+#include "extensions/native/package_probe.h"
+#include "extensions/native/ui_probe.h"
+#endif
 #include "external_open_dispatch.h"
 #include "address_path_open.h"
 #include "settings_transfer_ui.h"
@@ -101,8 +122,10 @@
 #include "window_merge.h"
 #include "window_arrange_ui.h"
 #include "window_management_test.h"
+#include "hover_motion_test.h"
 #include "reopen_closed.h"
 #include "tray_controller.h"
+#include "window_management_ui.h"
 #include "ai_launcher.h"
 #include "ai_service.h"
 #include "ai_settings_ui.h"
@@ -242,7 +265,8 @@ bool TestAiBroker() {
 #include "host_routing.h"
 #include "startup_trace.h"
 #include "../ui/text_contrast_scope.h"
-#ifdef PULSE_WITH_SELFTEST
+#include "../ui/lumatext_renderer.h"
+#if defined(PULSE_WITH_SELFTEST) || defined(PULSE_WITH_TEST_HOOKS)
 #include "startup_perf_probe.h"
 #endif
 #include <commctrl.h>
@@ -251,6 +275,7 @@ bool TestAiBroker() {
 
 using namespace pulse;
 namespace pulse {
+int RunRecycleSearchLiveTest(AppState&, const wchar_t*);
 void DispatchMenuCommand(AppState& s, int cmd); // app_commands.cpp (--menushot PULSE_TEST_MENU_RUN)
 constexpr UINT_PTR kTimerDeviceHelpTest = 0xD2B1;  // PULSE_TEST_DEVICE_HELP_MS (test instances)
 }
@@ -500,7 +525,7 @@ static void RevealExpandedName(AppState& s) {
         }
     }
     if (s.revealDone || !tab) return;
-    if (s.renameIndex >= 0 || s.marqueeActive || GetTickCount64() - s.revealSince > 600) {
+    if (s.renameIndex >= 0 || s.listSelection.BandActive() || GetTickCount64() - s.revealSince > 600) {
         s.revealDone = true;
         return;
     }
@@ -536,7 +561,7 @@ static thread_local const RECT* t_paint_damage = nullptr;
 // Motion the app runs itself (scrolling, layout, theme): it moves pixels the
 // partial-redraw damage does not know about.
 static bool AppMotion(const AppState& s) {
-    return s.scrollAnimating || s.marqueeAutoScroll || s.themeReveal.start || s.paneLayoutMotion.start ||
+    return s.scrollAnimating || s.listSelection.auto_scroll || s.themeReveal.start || s.paneLayoutMotion.start ||
            s.trayAnimating;
 }
 
@@ -547,7 +572,30 @@ void Render(AppState& s) {
     }
     FrameScope frame_scope;
     pulse::app::startup_trace::Mark("frame_begin");
+    const auto thread_cpu = [] (uint64_t& value) {
+        FILETIME created{}, exited{}, kernel{}, user{};
+        if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user)) return false;
+        const auto ticks = [](FILETIME t) { return (static_cast<uint64_t>(t.dwHighDateTime) << 32) | t.dwLowDateTime; };
+        value = (ticks(kernel) + ticks(user)) / 10;
+        return true;
+    };
+    uint64_t cpu_before = 0;
+    const bool cpu_before_valid = thread_cpu(cpu_before);
     auto t0 = std::chrono::steady_clock::now();
+    const uint64_t sampled_frame_id = app::hang::BeginFrame();
+    struct SampledFrameScope {
+        uint64_t id;
+        std::chrono::steady_clock::time_point start;
+        ~SampledFrameScope() {
+            if (!id) return;
+            app::hang::EndFrame(id);
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - start).count();
+            if (elapsed >= 50000) diagnostics::runtime::Event("slow_frame_aborted",
+                {{"frame_id", id}, {"elapsed_us", static_cast<uint64_t>(elapsed)}}, diagnostics::runtime::Level::Warning);
+        }
+    } sampled_frame_scope{sampled_frame_id, t0};
+
 
     if (s.compositor.NeedsRecovery()) {
         if (!s.compositor.Recover()) {
@@ -573,7 +621,14 @@ void Render(AppState& s) {
     }
 
     ID2D1DeviceContext* dc = s.compositor.Dc();
+    const auto frame_setup_end = std::chrono::steady_clock::now();
     const auto draw_start = std::chrono::steady_clock::now();
+    const auto elapsed_us = [](std::chrono::steady_clock::time_point start,
+                               std::chrono::steady_clock::time_point end) {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
+    };
+    const auto* luma_stats = s.compositor.GetLumaTextStats();
+    const ui::LumaTextStats luma_before = luma_stats ? *luma_stats : ui::LumaTextStats{};
     dc->BeginDraw();
 
     const bool system_high_contrast = ui::IsHighContrast();
@@ -590,7 +645,9 @@ void Render(AppState& s) {
     if (s.scrollAnimating) UpdateSmoothScroll(s);
     UpdateMarqueeFrame(s);
     UpdateProcessMetrics(s);
+    const auto build_vm_start = std::chrono::steady_clock::now();
     ui::WindowViewModel vm = BuildVm(s);
+    const auto build_vm_end = std::chrono::steady_clock::now();
     const auto explorer_frame = CaptureExplorerFrame(s, vm);
     const auto trace_explorer_frame_failure = [&](HRESULT draw, HRESULT present, bool hidden) {
         ForEachPane(s, [&](app::Pane& pane) {
@@ -608,7 +665,9 @@ void Render(AppState& s) {
 
     D2D1_RECT_F rect = D2D1::RectF(0, 0, (float)s.compositor.Width(), (float)s.compositor.Height());
     ui::HoverPreviewView hover_card;
+    const auto hover_model_start = std::chrono::steady_clock::now();
     FillHoverPreviewView(s, vm, hover_card);
+    const auto hover_model_end = std::chrono::steady_clock::now();
     if (hover_card.visible) vm.tooltip_text.clear();  // the card already names the file
     // Partial redraw: only a quiet window repaints just the damage; anything
     // floating or moving besides the hover plates makes it a whole frame.
@@ -626,7 +685,9 @@ void Render(AppState& s) {
     s.renderer.SetFrameDamage(partial ? &damage : nullptr);
     if (partial) dc->PushAxisAlignedClip(damage, D2D1_ANTIALIAS_MODE_ALIASED);
     dc->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+    const auto scene_start = std::chrono::steady_clock::now();
     s.renderer.Render(vm, rect, theme);
+    const auto scene_end = std::chrono::steady_clock::now();
     pulse::app::startup_trace::Mark("frame_scene");
     if (const auto* text_stats = s.compositor.GetLumaTextStats()) {
         const auto count = [](const char* label, std::uint64_t us) { pulse::app::startup_trace::Counter(label, static_cast<double>(us) / 1000.0); };
@@ -639,17 +700,29 @@ void Render(AppState& s) {
         count("luma_upload_ms", text_stats->upload_time_us);
         count("luma_composition_ms", text_stats->composition_time_us);
     }
+    const auto overlay_start = std::chrono::steady_clock::now();
     TickDragLanding(s);
     s.renderer.DrawHoverPreview(hover_card, rect, theme, hc);  // also the dwell line, and stops a video
     s.renderer.DrawStarFlight(theme);
     AfterHoverPreviewDraw(s);
     s.notification_toast.Draw(s.compositor, theme, s.scale, hc);
+    if (s.filterEditing && s.hwndFilterEdit && IsWindowVisible(s.hwndFilterEdit)) {
+        RECT edit_bounds{};
+        GetClientRect(s.hwndFilterEdit, &edit_bounds);
+        MapWindowPoints(s.hwndFilterEdit, s.hwnd, reinterpret_cast<POINT*>(&edit_bounds), 2);
+        ui::DrawPulsePaintedChildEdit(s.compositor, HostedEditFormat(s, s.hwndFilterEdit),
+            HostedEditForeground(s), HostedEditBackground(s), s.hwndFilterEdit,
+            D2D1::RectF(static_cast<float>(edit_bounds.left), static_cast<float>(edit_bounds.top),
+                static_cast<float>(edit_bounds.right), static_cast<float>(edit_bounds.bottom)));
+    }
     DrawThemeReveal(s, dc, rect);
     if (partial) dc->PopAxisAlignedClip();
     s.renderer.SetFrameDamage(nullptr);
     pulse::app::startup_trace::Mark("frame_overlays");
 
+    const auto end_draw_start = std::chrono::steady_clock::now();
     const HRESULT end_hr = dc->EndDraw();
+    const auto end_draw_end = std::chrono::steady_clock::now();
     pulse::app::startup_trace::Mark("frame_drawn");
     const auto draw_end = std::chrono::steady_clock::now();
     s.timing.draw_ms = std::chrono::duration<double, std::milli>(draw_end - draw_start).count();
@@ -677,7 +750,7 @@ void Render(AppState& s) {
     if (app::ExplorerNavigationLease::FrameSucceeded(end_hr, presented_hr, hidden_capture))
         HotEntryProbePresented(s);
     pulse::app::startup_trace::Mark("frame_present");
-#ifdef PULSE_WITH_SELFTEST
+#if defined(PULSE_WITH_SELFTEST) || defined(PULSE_WITH_TEST_HOOKS)
     if (!hidden_capture) app::startup_perf_probe::Presented(s.hwnd);
 #endif
     const auto present_end = std::chrono::steady_clock::now();
@@ -693,12 +766,14 @@ void Render(AppState& s) {
         OutputDebugStringW(line);
     }
     s.timing.present_ms = std::chrono::duration<double, std::milli>(present_end - present_start).count();
+    const auto post_present_start = std::chrono::steady_clock::now();
 
     if (s.renameIndex >= 0) LayoutRenameOverlay(s);
     RevealExpandedName(s);
     if (!s.tagRenameId.empty()) LayoutTagRenameOverlay(s);
     if (!s.workspaceRenameRoot.empty()) LayoutWorkspaceRenameOverlay(s);
     if (s.addressEditing) LayoutAddressEditor(s);
+    LayoutSettingsSearch(s);
     if (s.filterEditing) LayoutFilterEditor(s);
     AiAssistantLayout(s);
     SyncShellWindows(s);
@@ -713,8 +788,122 @@ void Render(AppState& s) {
         s.timing.first_frame_recorded = true;
     }
 
+#ifdef PULSE_WITH_SELFTEST
+    const bool frame_diagnostic_probe = s.isolatedTest &&
+        GetEnvironmentVariableW(L"PULSE_TEST_FRAME_DIAGNOSTICS", nullptr, 0) > 0;
+    if (frame_diagnostic_probe) Sleep(120); // deterministic wait-vs-CPU and stack/export regression
+#else
+    constexpr bool frame_diagnostic_probe = false;
+#endif
     auto t1 = std::chrono::steady_clock::now();
+    app::hang::EndFrame(sampled_frame_scope.id);
+    sampled_frame_scope.id = 0;
     s.lastFrameMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    const uint64_t frame_us = elapsed_us(t0, t1);
+    uint64_t cpu_after = 0;
+    const bool cpu_valid = thread_cpu(cpu_after) && cpu_before_valid && cpu_after >= cpu_before;
+    const uint64_t cpu_us = cpu_valid ? cpu_after - cpu_before : 0;
+    const uint64_t draw_us = elapsed_us(draw_start, draw_end);
+    static uint32_t slow_frame_records = 0;
+    static uint64_t slow_frame_sequence = 0;
+    if ((frame_us >= 50000 || draw_us >= 50000) && (!s.isolatedTest || frame_diagnostic_probe) &&
+        (frame_diagnostic_probe || slow_frame_records < 1000)) {
+        if (++slow_frame_records == 1000) {
+            app::hang::StopFrameWatch();
+            diagnostics::runtime::Event("slow_frame_budget_exhausted", {{"limit", 1000}}, diagnostics::runtime::Level::Warning);
+        }
+        const uint64_t slow_frame_id = sampled_frame_id ? sampled_frame_id : ++slow_frame_sequence;
+        CaptureFramePerfFont(s.compositor.FileNameFormat(), static_cast<int>(ui::typography::CurrentTextRenderMode()),
+            ui::typography::UiFontScalePercent(), static_cast<int>(std::lround(s.scale * 1000.0f)));
+        const auto* stats = s.compositor.GetLumaTextStats();
+        const auto delta = [stats](uint64_t ui::LumaTextStats::*member, uint64_t before) {
+            return stats && stats->*member >= before ? stats->*member - before : 0;
+        };
+        diagnostics::runtime::Event("slow_frame", {
+            {"frame_id", slow_frame_id},
+            {"frame_us", frame_us}, {"draw_us", draw_us},
+            {"frame_setup_us", elapsed_us(t0, frame_setup_end)},
+            {"pre_scene_us", elapsed_us(draw_start, build_vm_start)},
+            {"build_vm_us", elapsed_us(build_vm_start, build_vm_end)},
+            {"hover_model_us", elapsed_us(hover_model_start, hover_model_end)},
+            {"scene_us", elapsed_us(scene_start, scene_end)},
+            {"overlay_us", elapsed_us(overlay_start, end_draw_start)},
+            {"end_draw_us", elapsed_us(end_draw_start, end_draw_end)},
+            {"present_us", elapsed_us(present_start, present_end)},
+            {"view_mode", static_cast<uint32_t>(vm.pane.view_mode)}
+        }, diagnostics::runtime::Level::Warning);
+        DXGI_ADAPTER_DESC active_adapter{};
+        const bool adapter_valid = s.compositor.AdapterDescription(active_adapter);
+        diagnostics::runtime::Event("slow_frame_adapter", {
+            {"frame_id", slow_frame_id}, {"valid", adapter_valid}, {"vendor", active_adapter.VendorId},
+            {"device", active_adapter.DeviceId}, {"luid_low", active_adapter.AdapterLuid.LowPart},
+            {"luid_high", static_cast<uint32_t>(active_adapter.AdapterLuid.HighPart)}
+        });
+        diagnostics::runtime::Event("slow_frame_cpu", {
+            {"frame_id", slow_frame_id}, {"ui_cpu_us", cpu_us}, {"ui_cpu_valid", cpu_valid},
+            {"high_contrast_queries", ui::SystemHighContrastState().QueryCount()}
+        }, diagnostics::runtime::Level::Warning);
+        diagnostics::runtime::Event("slow_frame_detail", {
+            {"frame_id", slow_frame_id},
+            {"model_to_hover_us", elapsed_us(build_vm_end, hover_model_start)},
+            {"post_present_us", elapsed_us(post_present_start, t1)},
+            {"entries", vm.pane.EntryCount()},
+            {"hover_region", static_cast<uint32_t>(s.hoverRegion + 1)},
+            {"hover_row", static_cast<uint32_t>(s.hoverRow + 1)},
+            {"hover_card", hover_card.visible}, {"partial_redraw", partial},
+            {"scale_milli", static_cast<uint32_t>(std::lround(s.scale * 1000.0f))},
+            {"luma_enabled", s.compositor.LumaTextEnabled()},
+            {"end_draw_hr", static_cast<uint32_t>(end_hr)},
+            {"present_hr", static_cast<uint32_t>(presented_hr)}
+        }, diagnostics::runtime::Level::Warning);
+        diagnostics::runtime::Event("slow_frame_luma", {
+            {"frame_id", slow_frame_id},
+            {"luma_layout_us", delta(&ui::LumaTextStats::layout_time_us, luma_before.layout_time_us)},
+            {"luma_draw_us", delta(&ui::LumaTextStats::draw_time_us, luma_before.draw_time_us)},
+            {"luma_end_us", delta(&ui::LumaTextStats::frame_end_time_us, luma_before.frame_end_time_us)},
+            {"luma_raster_us", delta(&ui::LumaTextStats::raster_time_us, luma_before.raster_time_us)},
+            {"luma_upload_us", delta(&ui::LumaTextStats::upload_time_us, luma_before.upload_time_us)},
+            {"luma_surface_misses", delta(&ui::LumaTextStats::surface_cache_misses, luma_before.surface_cache_misses)},
+            {"luma_fallbacks", delta(&ui::LumaTextStats::fallback_draws, luma_before.fallback_draws)}
+        }, diagnostics::runtime::Level::Warning);
+        diagnostics::runtime::Event("slow_frame_luma_reasons", {
+            {"frame_id", slow_frame_id},
+            {"fallback_text", delta(&ui::LumaTextStats::fallback_text, luma_before.fallback_text)},
+            {"fallback_layout", delta(&ui::LumaTextStats::fallback_layout, luma_before.fallback_layout)},
+            {"fallback_split", delta(&ui::LumaTextStats::fallback_split, luma_before.fallback_split)},
+            {"fail_input", delta(&ui::LumaTextStats::fail_input, luma_before.fail_input)},
+            {"fail_font", delta(&ui::LumaTextStats::fail_font, luma_before.fail_font)},
+            {"fail_layout", delta(&ui::LumaTextStats::fail_layout, luma_before.fail_layout)},
+            {"fail_bounds", delta(&ui::LumaTextStats::fail_bounds, luma_before.fail_bounds)},
+            {"fail_backend", delta(&ui::LumaTextStats::fail_backend, luma_before.fail_backend)},
+            {"recording_end_time_us", delta(&ui::LumaTextStats::recording_end_time_us, luma_before.recording_end_time_us)},
+            {"shaping_time_us", delta(&ui::LumaTextStats::shaping_time_us, luma_before.shaping_time_us)},
+            {"composition_time_us", delta(&ui::LumaTextStats::composition_time_us, luma_before.composition_time_us)}
+        }, diagnostics::runtime::Level::Warning);
+        const auto& render_perf = s.renderer.LastFramePerf();
+        diagnostics::runtime::Event("slow_frame_render", {
+            {"frame_id", slow_frame_id}, {"render_us", render_perf.render_us},
+            {"pane_us", render_perf.pane_us}, {"list_us", render_perf.list_us},
+            {"list_rows", render_perf.list_rows}, {"name_draws", render_perf.name_draws}
+        }, diagnostics::runtime::Level::Warning);
+        diagnostics::runtime::Event("slow_frame_rows", {
+            {"frame_id", slow_frame_id},
+            {"row_prepare_us", render_perf.row_prepare_us},
+            {"row_icons_us", render_perf.row_icons_us},
+            {"row_text_us", render_perf.row_text_us},
+            {"row_columns_us", render_perf.row_columns_us},
+            {"name_fit_us", render_perf.name_fit_us},
+            {"name_draw_us", render_perf.name_draw_us},
+            {"row_prepare_fallbacks", render_perf.row_prepare_fallbacks},
+            {"row_icons_fallbacks", render_perf.row_icons_fallbacks},
+            {"row_text_fallbacks", render_perf.row_text_fallbacks},
+            {"row_columns_fallbacks", render_perf.row_columns_fallbacks}
+        }, diagnostics::runtime::Level::Warning);
+    }
+#ifdef PULSE_WITH_TEST_HOOKS
+    extern void RecordViewSwitchFrame(AppState&, double, HRESULT, HRESULT, bool);
+    if (s.isolatedTest) RecordViewSwitchFrame(s, s.lastFrameMs, end_hr, presented_hr, hidden_capture);
+#endif
     // FPS = frames presented per second over a sliding ~1 s window of
     // continuous rendering. Pulse paints on demand: 1/dt of two adjacent
     // paints reported the idle gap as "1 FPS" and back-to-back paints as
@@ -1048,12 +1237,22 @@ static void ExitPulse(AppState& s) {
 static LRESULT HandleSystemBroadcast(AppState& s, app::SystemBroadcast kind, WPARAM wParam) {
     switch (kind) {
     case app::SystemBroadcast::Theme:
+        {
+            const auto start = GetTickCount64();
+            const bool refreshed = ui::RefreshHighContrast();
+            diagnostics::runtime::Event("high_contrast_refresh", {{"ok", refreshed},
+                {"enabled", ui::IsHighContrast()}, {"elapsed_ms", GetTickCount64() - start},
+                {"queries", ui::SystemHighContrastState().QueryCount()}});
+        }
         if (s.themeOverride == ui::ThemeMode::Auto) s.darkMode = ui::ShouldUseDarkMode(s.themeOverride);
         app::ForEachWindowSharingCore(s, [](AppState& window) {
             if (window.appPrefs.accent_rgb.empty()) ApplyAccentFromPrefs(window, true);
             ApplyAppWindowChrome(window);
             InvalidateRect(window.hwnd, nullptr, FALSE);
         });
+        // The taskbar dots are ringed in the taskbar's color, which follows
+        // the Windows mode rather than Pulse's own theme.
+        SyncWindowIdentities(s);
         return 0;
     case app::SystemBroadcast::Volumes:
         app::InvalidateDriveEjectableCache();
@@ -1156,6 +1355,9 @@ static BOOL QueueExternalOpen(AppState& s, std::wstring path) {
 // A second launch or the Explorer tag verb reached the host window (the
 // single-instance endpoint, host_window.h); `s` is the window that handles it.
 static BOOL HandleInstanceCopyData(AppState& s, COPYDATASTRUCT* cds) {
+    if (cds && (cds->dwData == picker_places::detail::kAddStarredMessage ||
+        cds->dwData == picker_places::kAddStarredBatchMessage || cds->dwData == picker_places::kManagePlacesMessage))
+        return HandlePickerAddStarred(s, cds) ? TRUE : FALSE;
     if (app::ShellTagRequest tag_request; app::DecodeShellTagRequest(cds, tag_request)) {
         // Explorer "Pulse tags" verb: tag in place, never raise the window.
         QueueShellTagRequest(s, std::move(tag_request), false);
@@ -1240,6 +1442,8 @@ static void StartMenuServices(AppState& s) {
 }
 
 static void StartSearchServices(AppState& s) {
+    // Isolated UI probes must not attach to or leave behind per-user search agents.
+    if (s.isolatedTest || s.shot.active) return;
     const HWND service_window = ServiceWindow(s);
     // Search off: no index client, so nothing starts the service or a helper.
     if (s.appPrefs.search_enabled) s.index.Start(service_window, WM_INDEX_NOTIFY, WM_INDEX_SEARCH);
@@ -1267,6 +1471,21 @@ static void StartDeferredServices(AppState& s) {
 LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     pulse::app::startup_trace::MessageScope trace_message(msg);
     AppState* s = GetAppState(hwnd);
+    if (msg && msg == pulse::ArchivePluginMigrationNoticeMessage()) {
+        if (s && pulse::IsArchivePluginMigrationNoticeTarget(hwnd, wParam)) {
+            s->notification_toast.Show(hwnd, l10n::Get(l10n::StringId::ArchivePluginMigrationTitle),
+                l10n::Get(l10n::StringId::ArchivePluginMigrationBody));
+        }
+        return 0;
+    }
+    if (s && msg == ui::PulsePaintedChildEditFailureMessage() &&
+        reinterpret_cast<HWND>(wParam) == s->hwndFilterEdit) {
+        // Retain the user's query if both raster paths fail; the normal filter
+        // affordance remains available for a fresh editor on the next open.
+        HideFilterEditor(*s, true);
+        return 0;
+    }
+
     // A Chinese / Japanese IME in native mode can report a Ctrl or Alt chord
     // as VK_PROCESSKEY; every shortcut below compares the real key.
     if ((msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) && wParam == VK_PROCESSKEY &&
@@ -1328,6 +1547,9 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         pulse::app::startup_trace::Mark("wm_create");
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(s));
         s->hwnd = hwnd;
+        const HRESULT taskbar_identity = pulse::app_identity::SetWindow(hwnd, pulse::app_runtime_paths::StableEntryPath());
+        pulse::diagnostics::runtime::Event("taskbar_identity", {{"hresult", static_cast<uint32_t>(taskbar_identity)}},
+            FAILED(taskbar_identity) ? pulse::diagnostics::runtime::Level::Error : pulse::diagnostics::runtime::Level::Info);
         s->core.windows.Add(hwnd, s);
         // Later windows (M4a) skip the process-level setup below: services,
         // saved state and the tray already belong to the first window.
@@ -1515,6 +1737,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                                  s->appPrefs.list_selection_outline);
         s->renderer.SetTreeSticky(s->appPrefs.list_tree_sticky);
         s->renderer.SetDetailsColumns(s->appPrefs.details_columns);
+        s->renderer.SetDetailsColumnOrder(s->appPrefs.details_column_order);
         s->renderer.SetRowActions(app::RowActionMask(s->ctxMenuPrefs.builtin_hidden,
             s->ctxMenuPrefs.BuiltinOrder(app::BuiltinMenuSurface::RowButtons)));
         s->renderer.SetThumbnailBadges(s->appPrefs.list_thumbnail_badges);
@@ -1726,6 +1949,11 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         AddClipboardFormatListener(hwnd);
 
         if (init_core) {
+            if (s->open_path == L"pulse:activate") {
+                // A cold taskbar activation uses normal startup/session policy;
+                // the internal entry token must never become a navigation path.
+                s->open_path.clear();
+            }
             const bool explicit_launch = s->open_path == L"pulse:win-e" ||
                 s->open_path == L"pulse:new-window" || s->open_path == L"pulse:new-tab" ||
                 s->open_path == L"pulse:this-pc";
@@ -1941,7 +2169,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             GetWindowRect(hwnd, &before);
             POINT at{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             const LRESULT result = DefWindowProcW(hwnd, msg, wParam, lParam);
-            if (activates || !IsWindow(hwnd)) return result;
+            if (activates || !IsWindow(hwnd) || s->overview.open) return result;
             RECT after{};
             POINT now{};
             GetWindowRect(hwnd, &after);
@@ -1968,7 +2196,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
     case WM_NCLBUTTONDBLCLK:
         // The tab strip's double click maximizes: undo its first click's deselect.
-        if (s && wParam == HTCAPTION) {
+        if (s && !s->overview.open && wParam == HTCAPTION) {
             POINT at{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             if (ScreenToClient(hwnd, &at)) RestoreBlankDeselect(*s, at);
         }
@@ -1987,7 +2215,8 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             s->tray_controller.Retarget(hwnd);
             InstallTrayRevealHook(*s);
         }
-        const auto result = s->tray_controller.HandleCallback(lParam);
+        const auto result = s->tray_controller.HandleCallback(lParam,
+            [&](POINT point, HWND owner) { return TrackTrayMenu(*s, point, owner); });
         if (result == app::TrayController::CallbackResult::ExitRequested)
             ExitPulse(*s);
         return 0;
@@ -2014,6 +2243,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             s->detailsScroll *= ratio;
         }
         RECT* rc = reinterpret_cast<RECT*>(lParam);
+        s->renderer.SetScale(s->scale);
         SetWindowPos(hwnd, nullptr, rc->left, rc->top,
             rc->right - rc->left, rc->bottom - rc->top,
             SWP_NOZORDER | SWP_NOACTIVATE);
@@ -2041,6 +2271,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
 
     case WM_SETTINGCHANGE:
+    case WM_THEMECHANGED:
     case WM_DEVICECHANGE:
     case WM_QUERYENDSESSION:
     case WM_ENDSESSION: {
@@ -2067,14 +2298,25 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
     case WM_MOUSEACTIVATE:
         // Single click opens: the click that brings the window forward only selects.
-        if (s && LOWORD(lParam) == HTCLIENT && GetForegroundWindow() != GetAncestor(hwnd, GA_ROOT))
+        if (s && LOWORD(lParam) == HTCLIENT && GetForegroundWindow() != GetAncestor(hwnd, GA_ROOT)) {
             s->activateClickTick = GetTickCount64();
+            POINT point{};
+            if (HIWORD(lParam) == WM_LBUTTONDOWN && GetCursorPos(&point) &&
+                ScreenToClient(hwnd, &point) && DeferFileMouseActivation(*s, point)) {
+                s->deferredFileActivation = true;
+                return MA_NOACTIVATE;
+            }
+        }
         // Likewise on the tab strip: that click does not clear the selection.
         if (s && LOWORD(lParam) == HTCAPTION && GetForegroundWindow() != GetAncestor(hwnd, GA_ROOT))
             g_caption_activate_tick = GetTickCount64();
         break;
 
     case WM_ACTIVATE:
+        if (s && LOWORD(wParam) == WA_INACTIVE) {
+            CancelFileClick(*s);
+            pulse::CloseSidebarPeek(*s);
+        }
         if (s && LOWORD(wParam) != WA_INACTIVE) {
             s->core.windows.Touch(hwnd);
             RetargetTagRules(hwnd);
@@ -2085,7 +2327,6 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             // File operation progress follows the window used last (M4c).
             if (AppState* ui = GetAppState(s->ops.UiWindow()); ui && ui != s) MoveOperationUi(*ui, *s);
         }
-        if (s) s->renderer.NotifyPreviewActivate(LOWORD(wParam) != WA_INACTIVE);
         if (s && LOWORD(wParam) != WA_INACTIVE) {
             std::wstring kind, page;
             const auto* tab = ActiveTab(*s);
@@ -2095,26 +2336,28 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         break;
 
+    case WM_KILLFOCUS:
+        if (s) CancelFileClick(*s);
+        break;
+
     case WM_ACTIVATEAPP:
         if (s && !wParam) {
-            s->detailsPreviewPanning = false;
-            s->renderer.EndDetailsPreviewPan();
+            CancelFileClick(*s);
             if (GetCapture() == hwnd) ReleaseCapture();
         }
-        if (s) s->renderer.NotifyPreviewActivate(wParam != 0);
         return 0;
 
     case WM_MOVE:
         if (s) {
             s->compositor.UpdateTextRenderingParams(
                 MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST));
-            s->renderer.NotifyPreviewOwnerMoved();
         }
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
 
     case WM_SIZE: {
         if (s) {
+            if (wParam == SIZE_MINIMIZED) s->detailsPreview.Close();
             s->compositor.Resize(LOWORD(lParam), HIWORD(lParam));
             s->maximized = (wParam == SIZE_MAXIMIZED);
             if (wParam == SIZE_MINIMIZED && !HiddenFrameBaselineForTest()) {
@@ -2207,7 +2450,8 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             } else {
                 title = l10n::Get(freed ? l10n::StringId::CloudFreedToast : l10n::StringId::CloudKeptToast);
             }
-            s->notification_toast.ShowSnack(s->hwnd, icon, std::move(title), {}, {}, {}, 3000);
+            if (lParam > 0) s->notification_toast.ShowSnack(s->hwnd, icon, std::move(title), {}, {}, {}, 3000);
+            else ShowStatusFeedback(*s, std::move(title));
         }
         return 0;
 
@@ -2319,7 +2563,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     }
 
     case WM_FRAME_PUMP: {
-#ifdef PULSE_WITH_SELFTEST
+#if defined(PULSE_WITH_SELFTEST) || defined(PULSE_WITH_TEST_HOOKS)
         if (app::startup_perf_probe::report) ++app::startup_perf_probe::frame_wakes;
 #endif
         if (!s) return 0;
@@ -2334,7 +2578,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             return 0;
         }
         if (!IsWindowVisible(hwnd) || IsIconic(hwnd) ||
-            (!s->scrollAnimating && !s->marqueeAutoScroll && !s->themeReveal.start && !s->paneLayoutMotion.start &&
+            (!s->scrollAnimating && !s->listSelection.auto_scroll && !s->themeReveal.start && !s->paneLayoutMotion.start &&
              !s->trayAnimating && !s->renderer.TickMotion(GetTickCount64()))) {
             s->framePump.Disarm();  // WM_PAINT re-arms once shown again
             return 0;
@@ -2346,13 +2590,15 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (s->uiTimerPacer.TickOverdue(GetTickCount64())) WndProcImpl(hwnd, WM_TIMER, kTimerUi, 0);
         // Paint now rather than queue a low-priority WM_PAINT; Render re-arms
         // while anything still moves. Posted messages outrank input, so when
-        // input is waiting the frame becomes an ordinary WM_PAINT instead:
-        // a slow frame must never starve the mouse and keyboard.
+        // input is waiting a recent frame yields to ordinary WM_PAINT. Bound
+        // that deferral so continuous mouse movement cannot starve animation.
         // Only hover plates gliding: their paths are all that changes.
         D2D1_RECT_F plates{};
         const bool plates_only = !AppMotion(*s) && s->renderer.HoverMotionDamage(&plates);
         if (plates_only) app::InvalidatePartial(hwnd, app::DamagePixels(plates));
-        if (HIWORD(GetQueueStatus(QS_INPUT)) != 0) {
+        const double since_frame_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - s->lastFrameTime).count();
+        if (app::YieldAnimationToInput(HIWORD(GetQueueStatus(QS_INPUT)) != 0, since_frame_ms)) {
             if (!plates_only) InvalidateRect(hwnd, nullptr, FALSE);
             return 0;
         }
@@ -2365,6 +2611,13 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     }
 
     case WM_TIMER: {
+        if (s && extensions::native::HandlePackageMonitoringTimer(hwnd, wParam, *s)) return 0;
+        if (s && wParam == kStatusFeedbackTimer) {
+            KillTimer(hwnd, kStatusFeedbackTimer);
+            s->status_feedback.clear();
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return 0;
+        }
         if (s && wParam == pulse::kHoldPreviewTimer) {   // 按住预览
             pulse::HoldPreviewTimer(*s);
             return 0;
@@ -2418,7 +2671,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         if (s && wParam == kTimerUi) {
             PublishPickerPlaces(*s);
-#ifdef PULSE_WITH_SELFTEST
+#if defined(PULSE_WITH_SELFTEST) || defined(PULSE_WITH_TEST_HOOKS)
             app::startup_perf_probe::WorkScope tick_work(app::startup_perf_probe::tick_ms);
             if (app::startup_perf_probe::report) ++app::startup_perf_probe::ticks;
 #endif
@@ -2462,6 +2715,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             const ULONGLONG now = GetTickCount64();
             TickUpdates(*s, now);
             TickQuickPreviewSelection(*s, now);
+            SyncDetailsPreview(*s);
             if (TickSidebarRefresh(*s, now)) {
                 // The sidebar model is shared: whichever window's timer picks
                 // up the new drives, every window shows them.
@@ -2471,7 +2725,6 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 });
             }
             TickSessionAutosave(*s, hwnd, now);
-            if (s->renderer.TickDetailsPreview(now)) dirty = true;
             const bool app_motion = s->themeReveal.start || s->paneLayoutMotion.start;
             if (s->renderer.TickMotion(now) || app_motion) {
                 // Paced by the frame pump when it runs; the timer only
@@ -2502,23 +2755,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (PumpRecycleRefresh(*s, now)) dirty = true;
             MaybePrefetchHoverCtxMenu(*s);
             s->places.FlushPendingSave(false);
-            if (s->renameClickCandidate && s->renameClickDue != 0 &&
-                now >= s->renameClickDue) {
-                app::Tab* tab = ActiveTab(*s);
-                const int index = s->renameClickIndex;
-                const bool valid = s->pane == s->renameClickPane &&
-                    tab == s->renameClickTab && tab &&
-                    tab->SelectedCount() == 1 && tab->selected_index == index &&
-                    index >= 0 && index < tab->CountBound() &&
-                    (s->renameClickPath.empty() ||
-                     EntryFullPath(*tab, index) == s->renameClickPath) &&
-                    s->renameIndex < 0 && s->tagRenameId.empty() &&
-                    !s->addressEditing && !s->filterEditing &&
-                    !s->dragPending && !s->marqueePending && !s->marqueeActive &&
-                    !s->scrollbarDragging && !s->splitterDragging;
-                CancelRenameClick(*s);
-                if (valid) RenameSelected(*s);
-            }
+            TickFileClick(*s, now);
             if (TickHoverSelect(*s, now)) dirty = true;
             // Search affordance: expand only the focused pane, then reveal
             // the hosted edit once it has enough room for stable text layout.
@@ -2534,10 +2771,13 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 if (s->pane) s->pane->filter_expand = 1.0f;
                 LayoutFilterEditor(*s);
                 s->filterIgnoreKillFocus = true;
+                // The EDIT owns input; its image is painted in the parent frame.
                 ShowWindow(s->hwndFilterEdit, SW_SHOW);
                 SetForegroundWindow(GetAncestor(s->hwndFilterEdit, GA_ROOT));
                 SetFocus(s->hwndFilterEdit);
                 SendMessageW(s->hwndFilterEdit, EM_SETSEL, 0, -1);
+                RedrawWindow(s->hwndFilterEdit, nullptr, nullptr,
+                    RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
                 s->filterFocusPending = false;
                 s->filterIgnoreKillFocus = false;
                 dirty = true;
@@ -2617,13 +2857,13 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 if (s->tray.RefreshExists()) dirty = true;
             }
             {
-#ifdef PULSE_WITH_SELFTEST
+#if defined(PULSE_WITH_SELFTEST) || defined(PULSE_WITH_TEST_HOOKS)
                 app::startup_perf_probe::WorkScope tags_work(app::startup_perf_probe::tags_ms);
 #endif
                 QueueVisibleTagDiscovery(*s);
             }
             {
-#ifdef PULSE_WITH_SELFTEST
+#if defined(PULSE_WITH_SELFTEST) || defined(PULSE_WITH_TEST_HOOKS)
                 app::startup_perf_probe::WorkScope ops_work(app::startup_perf_probe::ops_ms);
 #endif
                 UpdateOperationWindow(*s, false);
@@ -2655,12 +2895,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         D2D1_RECT_F bounds = D2D1::RectF(0, 0,
             (float)s->compositor.Width(), (float)s->compositor.Height());
         ui::HitTestResult hit = s->renderer.HitTest(vm, bounds, (float)pt.x, (float)pt.y);
-        if (s->renderer.DetailsPreviewDragging() ||
-            (hit.region == ui::HitTestResult::DetailsPreview && s->renderer.CanDetailsPreviewPan() &&
-             !s->renderer.DetailsPreviewIsArchive())) {
-            SetCursor(ui::PreviewGrabCursor(s->renderer.DetailsPreviewDragging()));
-            return TRUE;
-        }
+
         if (hit.region == ui::HitTestResult::DetailsPreviewToggle) {
             SetCursor(LoadCursorW(nullptr, IDC_HAND));
             return TRUE;
@@ -2712,7 +2947,10 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             SetCursor(LoadCursorW(nullptr, IDC_IBEAM));
             return TRUE;
         }
-        if (hit.region == ui::HitTestResult::StatusBarTask || hit.region == ui::HitTestResult::StatusBarCancelSearch) {
+        if (hit.region == ui::HitTestResult::StatusBarTask || hit.region == ui::HitTestResult::StatusBarCancelSearch ||
+            hit.region == ui::HitTestResult::StatusUndo || hit.region == ui::HitTestResult::StatusRedo ||
+            hit.region == ui::HitTestResult::StatusUndoHistory ||
+            (hit.region == ui::HitTestResult::UndoHistoryRow && hit.sub_index != 2)) {
             SetCursor(LoadCursorW(nullptr, IDC_HAND));
             return TRUE;
         }
@@ -2736,25 +2974,26 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     }
 
     case WM_CANCELMODE:
+        if (s) CancelFileClick(*s);
+        if (s) s->deferredFileActivation = false;
         HandleSidebarResize(s, hwnd, msg, lParam);
         if (s) s->settings.EndMenuDrag();
-        if (s) { s->detailsPreviewPanning = false; s->renderer.EndDetailsPreviewPan(); }
         if (GetCapture() == hwnd) ReleaseCapture();
         break;
     case WM_MOUSEMOVE:
         if (s) pulse::HoldPreviewMouseMove(*s, POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)});
         if (s) pulse::UpdateSidebarPeek(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
         if (HandleSidebarResize(s, hwnd, msg, lParam)) return 0;
-        if (HandleDetailsPreviewPointer(s, hwnd, msg, wParam, lParam)) return 0;
         return HandleMouseMove(s, hwnd, msg, wParam, lParam);
 
     case WM_MOUSELEAVE:
-        if (s) pulse::CloseSidebarPeek(*s);
+        if (s && !s->renderer.SidebarPeekPinned()) pulse::CloseSidebarPeek(*s);
         return HandleMouseLeave(s, hwnd, msg, wParam, lParam);
 
     case WM_LBUTTONDOWN:
+        if (s && !s->deferredFileActivation && s->hwndSettingsSearchEdit &&
+            GetFocus() == s->hwndSettingsSearchEdit) SetFocus(hwnd);
         if (HandleSidebarResize(s, hwnd, msg, lParam)) return 0;
-        if (HandleDetailsPreviewPointer(s, hwnd, msg, wParam, lParam)) return 0;
         return HandleLButtonDown(s, hwnd, msg, wParam, lParam);
 
     case WM_LBUTTONDBLCLK:
@@ -2763,16 +3002,19 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case WM_LBUTTONUP:
         if (s) pulse::HoldPreviewButtonUp(*s);   // a peek closes on release
         if (HandleSidebarResize(s, hwnd, msg, lParam)) return 0;
-        if (HandleDetailsPreviewPointer(s, hwnd, msg, wParam, lParam)) return 0;
         return HandleLButtonUp(s, hwnd, msg, wParam, lParam);
 
     case WM_CAPTURECHANGED:
         HandleSidebarResize(s, hwnd, msg, lParam);
-        if (s) { s->detailsPreviewPanning = false; s->renderer.EndDetailsPreviewPan(); }
         return HandleCaptureChanged(s, hwnd, msg, wParam, lParam);
 
     case WM_RBUTTONDOWN:
+        if (s && GetFocus() == s->hwndSettingsSearchEdit) SetFocus(hwnd);
         return HandleRButtonDown(s, hwnd, msg, wParam, lParam);
+
+    case WM_MBUTTONDOWN:
+        if (s && GetFocus() == s->hwndSettingsSearchEdit) SetFocus(hwnd);
+        break;
 
     case WM_MBUTTONUP:
         if (s && pulse::HandleTabMiddleClick(*s, GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam))) return 0;
@@ -2844,12 +3086,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
     case WM_KEYDOWN:
         if (s && HandleGlobalSearchHotkeyCapture(*s, static_cast<UINT>(wParam))) return 0;
-        if (s && wParam == VK_ESCAPE && s->detailsPreviewPanning) {
-            s->detailsPreviewPanning = false;
-            s->renderer.EndDetailsPreviewPan();
-            if (GetCapture() == hwnd) ReleaseCapture();
-            return 0;
-        }
+
         // Shift flips the shelf's copy / move label live.
         if (s && wParam == VK_SHIFT && !s->tray.batches().empty()) {
             s->uiTimerPacer.NoteActivity(GetTickCount64());
@@ -2865,6 +3102,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         break;
 
     case WM_COMMAND: {
+        if (s && reinterpret_cast<HWND>(lParam) == s->hwndSettingsSearchEdit && HIWORD(wParam) == EN_CHANGE) { SyncSettingsSearch(*s); return 0; }
         if (s && reinterpret_cast<HWND>(lParam) == s->hwndFilterEdit &&
             HIWORD(wParam) == EN_CHANGE) {
             SyncFilterEditor(*s);
@@ -2940,9 +3178,17 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
 
+    case WM_DETAILS_TREE_RENAME:
+        if (s) TryRenameDetailsTreeCreation(*s);
+        return 0;
+
+    case WM_RECYCLE_SHELL_CHANGED:
+        if (s) OnRecycleShellChanged(*s, wParam, lParam);
+        return 0;
+
     case WM_RECYCLE_INFO: {
         auto* info = reinterpret_cast<fs::RecycleBinInfo*>(lParam);
-        if (s && info && ApplyQueriedRecycleInfo(*s, *info))
+        if (s && info && ApplyQueriedRecycleInfo(*s, *info, static_cast<uint64_t>(wParam)))
             InvalidateRect(hwnd, nullptr, FALSE);
         delete info;
         return 0;
@@ -3002,6 +3248,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     if (completed.refresh_only) continue;
                     ApplyOperationIntentCompletion(*s, completed);
                     NoteArrivalCompletion(*s, completed);
+                    NoteDeleteCompletion(*s, completed);
                     if (completed.type == ops::OpType::Copy) {
                         for (size_t i = 0; i < completed.sources.size() &&
                                            i < completed.destinations.size(); ++i) {
@@ -3102,6 +3349,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     if (tab->current_path.empty()) RefreshActiveTab(*s, RefreshReason::OperationCompleted);
                     else refresh_plan.Add(tab->current_path);
                 }
+                std::unordered_set<std::wstring> refreshed_directories;
                 app::ForEachWindowSharingCore(*s, [&](AppState& window) {
                     std::vector<std::wstring> visible;
                     if (const auto* layout = window.window_tabs.Active()) {
@@ -3110,6 +3358,10 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                         }
                     }
                     refresh_plan.RefreshVisible(visible, [&](const std::wstring& directory) {
+                        // Physical listings rebind all windows in RefreshPath.
+                        // Virtual providers retain their per-window sessions.
+                        if (!fs::IsVirtualPath(directory) &&
+                            !refreshed_directories.insert(path::FoldedKey(directory)).second) return;
                         const auto* active = ActiveTab(window);
                         if (active && active->current_path == directory)
                             RefreshActiveTab(window, RefreshReason::OperationCompleted);
@@ -3310,7 +3562,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
     case WM_SETTINGS_TASK_RESULT: {
         auto* result = reinterpret_cast<app::SettingsTaskResult*>(lParam);
         if (s && result) {
-            if (!result->ok && result->task.kind ==
+            if (!result->ok && result->error.empty() && result->task.kind ==
                     app::SettingsTaskKind::DiagnosticsExport)
                 result->error = l10n::Get(l10n::StringId::DiagnosticsExportFailed);
             const auto effect = s->settings.CompleteTask(*result, s->index.ServiceInstalled());
@@ -3342,6 +3594,24 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         index::SearchResult result;
         if (!s->index.TakeResult(id, result)) return 0;
         AcceptIndexProviderResult(SearchResultWindow(*s, id), id, std::move(result), false);
+        return 0;
+    }
+
+    case WM_RECYCLE_SEARCH: {
+        std::unique_ptr<RecycleSearchReply> result(reinterpret_cast<RecycleSearchReply*>(lParam));
+        if (!s || !result) return 0;
+        const auto id = static_cast<uint32_t>(wParam);
+        auto& owner = SearchResultWindow(*s, id);
+        auto found = owner.pendingIndexSearches.find(id);
+        if (found == owner.pendingIndexSearches.end()) return 0;
+        auto& pending = found->second;
+        if (pending.recycle_cancel != result->cancelled || result->cancelled->load()) return 0;
+        pending.recycle = std::move(result->result);
+        pending.recycle_ready = true;
+        if (pending.local_ready) {
+            auto local = pending.local;
+            AcceptIndexProviderResult(owner, id, std::move(local), false);
+        }
         return 0;
     }
 
@@ -3377,6 +3647,20 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     case WM_UPDATE_INSTALL:
         if (s) InstallUpdate(*s);
+        return 0;
+    case WM_HISTORY_REDO:
+        if (s) s->ops.Redo();
+        return 0;
+    case WM_DRAG_RETURN:
+        if (s && !s->dragReturnPath.empty()) {
+            NavigateTo(*s, s->dragReturnPath);
+            s->arrivalSelect = {};
+            ArmArrivalSelection(*s, s->pane, 0, 10000);
+            s->arrivalSelect.expected_only = true;
+            s->arrivalSelect.until = 0;
+            for (const auto& path : s->dragReturnPaths) ExpectArrival(*s, path);
+            if (s->pane) if (auto* tab = s->pane->ActiveTab()) ApplyArrivalSelection(*s, *s->pane, *tab, true);
+        }
         return 0;
     case WM_SHOW_RELEASE_NOTES:
         if (s) ShowReleaseNotes(*s);
@@ -3416,24 +3700,28 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
     }
 
+    case WM_DETAILS_PREVIEW_NAVIGATE:
     case WM_QUICK_PREVIEW_NAVIGATE:
         if (s) NavigateQuickPreview(*s, static_cast<int>(wParam));
         return 0;
 
+    case WM_DETAILS_PREVIEW_OPEN:
     case WM_QUICK_PREVIEW_OPEN:
         if (s) {
             // wParam 1: an item inside the previewed folder (Quick Look list).
-            const std::wstring inner = wParam == 1 ? s->quickPreview.TakeOpenPath() : std::wstring();
+            const std::wstring inner = wParam == 1 ? (msg == WM_DETAILS_PREVIEW_OPEN ? s->detailsPreview : s->quickPreview).TakeOpenPath() : std::wstring();
             if (!inner.empty()) OpenPath(*s, inner);
             else OpenSelected(*s);
         }
         return 0;
 
+    case WM_DETAILS_PREVIEW_COMMAND:
     case WM_QUICK_PREVIEW_COMMAND:
         if (s) {
+            auto& preview = msg == WM_DETAILS_PREVIEW_COMMAND ? s->detailsPreview : s->quickPreview;
             ui::QuickPreviewCommand command;
-            if (s->quickPreview.TakeCommand(static_cast<UINT_PTR>(lParam), command))
-                HandleQuickPreviewCommand(*s, command);
+            if (preview.TakeCommand(static_cast<UINT_PTR>(lParam), command))
+                HandleQuickPreviewCommand(*s, preview, command);
         }
         return 0;
 
@@ -3487,7 +3775,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             ForEachPane(*s, [&](app::Pane& pane) {
                 if (auto* tab = pane.ActiveTab())
                     app::ApplyTagAdsNotice(tab->tag_ads_notice, result->failures,
-                        tab->banner_title, tab->banner_message, tab == ActiveTab(*s));
+                        tab->banner_title, tab->banner_message, tab == ActiveTab(*s), tab->current_path);
             });
             InvalidateRect(hwnd, nullptr, FALSE);
         }
@@ -3520,6 +3808,7 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         return 0;
 
     case WM_NCDESTROY:
+        pulse::app_identity::ClearWindow(hwnd);
         // A window opened by OpenPulseWindow owns its state: retired here and
         // freed on the host's next message, after this window is gone.
         if (s && RetireWindowState(*s)) SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -3532,9 +3821,12 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         if (s) UndoWorkspaceRemoval(*s);
         return 0;
     case WM_DESTROY: {
+        extensions::native::StopPackageMonitoring(hwnd);
+        extensions::native::ReleasePackageOwner(hwnd);
         if (s) ClearWorkspaceActions(*s);
         if (s) CancelDeletePreflight(*s);
         ReleaseDeviceFolderWatch(hwnd);
+        if (s) ReleaseRecycleShellWatch(*s, hwnd);
         // Closing one of several windows (M3f) tears down what the window
         // owns; services, saved state and the shared caches go with the last.
         const bool last_window = !s || s->core.windows.IsLastWindow(hwnd);
@@ -3668,7 +3960,10 @@ LRESULT CALLBACK WndProcImpl(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                 }
             }
         }
-        if (last_window) PostQuitMessage(0);
+        if (last_window) {
+            extensions::PrepareShutdown();
+            PostQuitMessage(0);
+        }
         return 0;
     }
     }
@@ -4085,7 +4380,9 @@ bool SkipSingletonFromArgv() {
         GetEnvironmentVariableW(L"PULSE_TEST_STARTUP_FAIL", nullptr, 0) > 0) return true;
 #endif
     for (int i = 1; i < __argc; ++i) {
-        if (wcscmp(__wargv[i], L"--selftest") == 0 ||
+        if (wcscmp(__wargv[i], L"--extension-store") == 0 ||
+            wcscmp(__wargv[i], L"--extension-manifest") == 0 ||
+            wcscmp(__wargv[i], L"--selftest") == 0 ||
             wcscmp(__wargv[i], L"--picker-live") == 0 ||
             wcscmp(__wargv[i], L"--material-selftest") == 0 ||
             wcscmp(__wargv[i], L"--seed-shell-verbs") == 0 ||
@@ -4116,14 +4413,50 @@ static bool IsLaunchSwitch(const wchar_t* arg) {
 #ifdef PULSE_WITH_TEST_HOOKS
 int RunFilePickerDialogTest(int argc, wchar_t** argv);
 int RunFilePickerOperationsTest();
+int RunPickerSharedPlacesUiTest();
+int RunPickerPlacesActionsUiTest();
+int RunPickerFilesystemDropUiTest();
 #endif
 #ifdef PULSE_WITH_SELFTEST
 int RunUiModuleAuditTest();
+#endif
+#if defined(PULSE_WITH_SELFTEST) || defined(PULSE_WITH_TEST_HOOKS)
 int RunQuickPreviewAuditTest();
 int RunQuickPreviewFramePerf();
 #endif
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
+    pulse::app_identity::SetProcess();
+#ifdef PULSE_WITH_TEST_HOOKS
+    // The window-management probe's child must not reach normal routing.
+    if (__argc == 4 && wcscmp(__wargv[1], L"--test-instance") == 0 &&
+        wcscmp(__wargv[2], L"--tray-foreground-test-host") == 0) {
+        if (!GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", nullptr, 0)) return 2;
+        return RunTrayForegroundTestHost(__wargv[3]);
+    }
+#endif
+    const auto extension_startup = pulse::extensions::PrepareStartup(__argc, __wargv);
+    struct ExtensionShutdown {
+        ~ExtensionShutdown() { pulse::extensions::native::StopAll(); pulse::extensions::PrepareShutdown(); }
+    } extension_shutdown;
+    if (extension_startup.exit_requested) return extension_startup.exit_code;
+    // Before any package can start: a native package that crashed or hung
+    // Pulse last time stays off until a different build is installed.
+    bool extension_isolated = false;
+    for (int i = 1; i < __argc; ++i) extension_isolated |= wcscmp(__wargv[i], L"--test-instance") == 0;
+    const std::vector<std::wstring> crash_disabled_extensions =
+        pulse::extensions::native::crash_guard::ApplyAtStartup(extension_isolated);
+    // Versioned paths validate their bundle once. Finish that filesystem work
+    // before any UI or CLI branch can request the cached installation identity.
+    bool runtime_paths_ready = false;
+    try {
+        std::thread prepare_paths([&] {
+            try { runtime_paths_ready = !pulse::app_runtime_paths::StableEntryPath().empty(); }
+            catch (...) {}
+        });
+        prepare_paths.join();
+    } catch (...) {}
+    if (!runtime_paths_ready) return 2;
     // pulse.exe --mcp-stdio, started by AI clients: only the launcher, before
     // anything of the app (no window, no D2D, no single instance).
     if (pulse::app::ai::IsMcpStdioLaunch(__argc, __wargv)) return pulse::app::ai::RunMcpStdioLauncher(hInstance);
@@ -4132,17 +4465,34 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     std::optional<CLSID> tag_com_audit_class;
     if (!app::shell_tags::PrepareCommandAudit(__argc, __wargv, tag_com_audit_class)) return 2;
 #endif
-#ifdef PULSE_WITH_SELFTEST
+#if defined(PULSE_WITH_SELFTEST) || defined(PULSE_WITH_TEST_HOOKS)
+    if (__argc == 2 && wcscmp(__wargv[1], L"--tag-rule-reuse-test") == 0)
+        return pulse::RunTagRuleReuseTest();
     if (__argc == 2 && wcscmp(__wargv[1], L"--quick-preview-frame-perf") == 0)
         return RunQuickPreviewFramePerf();
     if (__argc == 2 && wcscmp(__wargv[1], L"--quick-preview-audit") == 0)
         return RunQuickPreviewAuditTest();
+#endif
+#ifdef PULSE_WITH_SELFTEST
     if (__argc == 2 && wcscmp(__wargv[1], L"--ui-module-audit") == 0)
         return RunUiModuleAuditTest();
     if (__argc == 2 && wcscmp(__wargv[1], L"--startup-rollback-test") == 0)
         return RunStartupRollbackTest(hInstance, WndProc);
 #endif
 #ifdef PULSE_WITH_TEST_HOOKS
+    if (__argc == 3 && wcscmp(__wargv[1], L"--dialog-jump-navigation-test") == 0) {
+        if (FAILED(OleInitialize(nullptr))) return 3;
+        pulse::compat::EnableDpiAwareness();
+        const int result = app::RunDialogJumpNavigationTest(__wargv[2]);
+        OleUninitialize();
+        return result;
+    }
+    if (__argc == 2 && wcscmp(__wargv[1], L"--picker-shared-places-test") == 0)
+        return RunPickerSharedPlacesUiTest();
+    if (__argc == 2 && wcscmp(__wargv[1], L"--picker-places-actions-test") == 0)
+        return RunPickerPlacesActionsUiTest();
+    if (__argc == 2 && wcscmp(__wargv[1], L"--picker-filesystem-drop-test") == 0)
+        return RunPickerFilesystemDropUiTest();
     if (__argc == 2 && wcscmp(__wargv[1], L"--picker-operations-test") == 0)
         return RunFilePickerOperationsTest();
     if (__argc >= 3 && wcscmp(__wargv[1], L"--picker-dialog-test") == 0)
@@ -4150,18 +4500,71 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
 #else
     // Release builds leave the picker suites out; fail fast instead of
     // opening a window that a test script would wait on.
-    if (__argc >= 2 && (wcscmp(__wargv[1], L"--picker-operations-test") == 0 ||
+    if (__argc >= 2 && (wcscmp(__wargv[1], L"--dialog-jump-navigation-test") == 0 ||
+                        wcscmp(__wargv[1], L"--picker-shared-places-test") == 0 ||
+                        wcscmp(__wargv[1], L"--picker-places-actions-test") == 0 ||
+                        wcscmp(__wargv[1], L"--picker-filesystem-drop-test") == 0 ||
+                        wcscmp(__wargv[1], L"--picker-operations-test") == 0 ||
                         wcscmp(__wargv[1], L"--picker-dialog-test") == 0))
         return 2;
 #endif
-    pulse::crash::Initialize({pulse::crash::ProcessRole::App, false, {}});
+    pulse::crash::Config crash_config{pulse::crash::ProcessRole::App, false, {}};
+#ifdef PULSE_WITH_SELFTEST
+    if (GetEnvironmentVariableW(L"PULSE_TEST_FRAME_DIAGNOSTICS", nullptr, 0) &&
+        GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", nullptr, 0))
+        crash_config.data_root = app::GetPulseDataDir();
+#endif
+    pulse::crash::Initialize(crash_config);
     pulse::app::startup_trace::Mark("crash_handler");
     pulse::compat::EnableDpiAwareness();
+    (void)ui::SystemHighContrastState(); // Initialize before any window can paint.
     // OLE init (drag & drop + clipboard); implies STA COM init.
     OleInitialize(nullptr);
+#ifdef PULSE_WITH_TEST_HOOKS
+    if (__argc == 2 && wcscmp(__wargv[1], L"--test-instance") == 0 &&
+        GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", nullptr, 0) &&
+        (GetEnvironmentVariableW(L"PULSE_TEST_OPERATION_PILL", nullptr, 0) ||
+         GetEnvironmentVariableW(L"PULSE_TEST_DRAG_REFERENCE", nullptr, 0) ||
+         GetEnvironmentVariableW(L"PULSE_TEST_HISTORY_REFERENCE", nullptr, 0))) {
+        extern int RunContentProgressUiTest(int, char**);
+        char program[] = "pulse";
+        char pill_filter[] = "--operation-pill-only";
+        char drag_filter[] = "--drag-reference-only";
+        char history_filter[] = "--history-reference-only";
+        char* filter = GetEnvironmentVariableW(L"PULSE_TEST_DRAG_REFERENCE", nullptr, 0) ? drag_filter :
+            GetEnvironmentVariableW(L"PULSE_TEST_HISTORY_REFERENCE", nullptr, 0) ? history_filter : pill_filter;
+        char* args[] = {program, filter};
+        const int result = RunContentProgressUiTest(2, args);
+        OleUninitialize();
+        return result;
+    }
+    if (__argc == 2 && wcscmp(__wargv[1], L"--test-instance") == 0 &&
+        GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", nullptr, 0) &&
+        GetEnvironmentVariableW(L"PULSE_TEST_OPERATION_INTENT_UI", nullptr, 0)) {
+        l10n::Initialize(hInstance, L"zh-CN");
+        extern bool RunOperationIntentUiTest();
+        const int result = RunOperationIntentUiTest() ? 0 : 1;
+        OleUninitialize();
+        return result;
+    }
+#endif
+    if (__argc >= 2 && wcscmp(__wargv[1], L"--picker-remote-host") == 0) {
+        wchar_t* end = nullptr;
+        const unsigned long pid = __argc == 4 ? wcstoul(__wargv[3], &end, 10) : 0;
+        const int result = pid && end && !*end ? app::RunPickerRemoteHost(__wargv[2], pid) : 2;
+        OleUninitialize();
+        return result;
+    }
     if (__argc >= 2 && wcscmp(__wargv[1], L"--picker-host") == 0) {
         l10n::Initialize(hInstance, L"system");
-        const int result = __argc == 4 ? app::RunPickerHostMode(__wargv[2], __wargv[3]) : 2;
+        const int result = __argc == 4 ? app::RunPickerHostMode(__wargv[2], __wargv[3]) :
+            __argc == 5 ? app::RunPickerHostMode(__wargv[2], __wargv[3], __wargv[4]) : 2;
+        OleUninitialize();
+        return result;
+    }
+    if (__argc == 2 && wcscmp(__wargv[1], L"--picker-standby") == 0) {
+        l10n::Initialize(hInstance, L"system");
+        const int result = app::RunPickerStandbyMode();
         OleUninitialize();
         return result;
     }
@@ -4192,7 +4595,13 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         }
     }
 
-    AppState state;
+    // This state lives for the whole message loop; keep the UI thread's stack
+    // available for nested popup dispatch and shell/path processing.
+    auto state_storage = std::make_unique<AppState>();
+    AppState& state = *state_storage;
+    struct ShellCacheShutdown {
+        ~ShellCacheShutdown() { StopShellRegistryWatch(); }
+    } shell_cache_shutdown;
     pulse::app::startup_trace::Mark("appstate");
     state.safeMode = pulse::crash::SafeModeRequested();
     if (!PrepareHotEntryProbe(state)) return 1;
@@ -4218,6 +4627,17 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
             return rc;
         }
     }
+#endif
+
+#if defined(PULSE_STARTUP_TRACE_DIAGNOSTICS)
+    const auto perf_directory = std::filesystem::path(app::GetPulseDataDir()) / L"Diagnostics" / L"Perf";
+    std::error_code perf_error;
+    std::filesystem::create_directories(perf_directory, perf_error);
+    const bool frame_watch_ready = !perf_error && app::hang::StartFrameWatch(
+        (perf_directory / (L"frame-" + std::to_wstring(GetCurrentProcessId()) + L".log")).wstring());
+    diagnostics::runtime::Event("frame_watch_status", {{"ready", frame_watch_ready}, {"schema", 1},
+        {"directory_error", static_cast<uint32_t>(perf_error.value())}});
+    struct FrameWatchLifetime { ~FrameWatchLifetime() { app::hang::StopFrameWatch(); } } frame_watch_lifetime;
 #endif
 
     // Load previous session before parsing overrides.
@@ -4259,7 +4679,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     // Parse command line.
     unsigned long restart_after = 0;  // --restart-after <pid>
     for (int i = 1; i < __argc; ++i) {
-        if (wcscmp(__wargv[i], L"--shot") == 0 && i + 1 < __argc) {
+        if ((wcscmp(__wargv[i], L"--extension-manifest") == 0 ||
+             wcscmp(__wargv[i], L"--extension-dev") == 0 ||
+             wcscmp(__wargv[i], L"--extension-store") == 0 ||
+             wcscmp(__wargv[i], L"--extension-native") == 0) && i + 1 < __argc) {
+            ++i; // Already loaded before UI initialization; never a navigation path.
+        } else if (wcscmp(__wargv[i], L"--shot") == 0 && i + 1 < __argc) {
             state.shot.active = true;
             state.shot.output = __wargv[++i];
         } else if (wcscmp(__wargv[i], L"--menushot") == 0 && i + 1 < __argc) {
@@ -4377,6 +4802,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
                 state.shot.width = std::max(320, requestedWidth);
                 state.shot.height = std::max(240, requestedHeight);
             }
+        } else if (wcscmp(__wargv[i], pulse::shell_open_entry::kArgument) == 0) {
+            if (i + 1 >= __argc) return 1;
+            const wchar_t* shell_args[] = {__wargv[0], __wargv[i], __wargv[i + 1]};
+            state.shot.path = pulse::shell_open_entry::Parse(3, shell_args);
+            if (state.shot.path.empty()) return 1;
+            ++i;
+        } else if (wcscmp(__wargv[i], L"--activate") == 0) {
+            state.shot.path = L"pulse:activate";
         } else if (wcscmp(__wargv[i], L"--win-e") == 0) {
             state.shot.path = L"pulse:win-e";
         } else if (wcscmp(__wargv[i], L"--new-window") == 0) {
@@ -4541,8 +4974,18 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
                     SetTimer(host, kAiChipTimer, static_cast<UINT>(wait + 50), nullptr);
                 return 0;
             }
-            if (app::IsHostRoutedMessage(message))
-                return target ? SendMessageW(target->hwnd, message, wParam, lParam) : 0;
+            if (app::IsHostRoutedMessage(message)) {
+                if (target) return SendMessageW(target->hwnd, message, wParam, lParam);
+                if (message == WM_RECYCLE_SEARCH)
+                    delete reinterpret_cast<RecycleSearchReply*>(lParam);
+                else if (message == WM_RECYCLE_INFO) {
+                    std::unique_ptr<fs::RecycleBinInfo> info(reinterpret_cast<fs::RecycleBinInfo*>(lParam));
+                    if (info) ApplyQueriedRecycleInfo(state, *info, static_cast<uint64_t>(wParam));
+                } else if (message == WM_RECYCLE_SHELL_CHANGED) {
+                    OnRecycleShellChanged(state, wParam, lParam);
+                }
+                return 0;
+            }
             if (const auto kind = app::ClassifySystemBroadcast(message, wParam, lParam);
                 kind != app::SystemBroadcast::None) {
                 if (target) return HandleSystemBroadcast(*target, kind, wParam);
@@ -4601,6 +5044,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         nullptr, nullptr, hInstance, &state);
 
     if (!hwnd) return 1;
+    if (!extensions::native::StartPackageMonitoring(hwnd)) { DestroyWindow(hwnd); return 2; }
     pulse::app::startup_trace::Mark("create_window");
     if (!SkipSingletonFromArgv() && !state.single_instance.PublishEndpoint(state.core.host.Hwnd(), WM_OPEN_EXTERNAL)) {
         DestroyWindow(hwnd);
@@ -4609,10 +5053,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     // Diagnostics: sample thread stacks while the UI thread is stalled.
     for (int i = 1; i < __argc; ++i) {
         if (wcscmp(__wargv[i], L"--hang-watch") != 0) continue;
-        wchar_t exe[MAX_PATH]{};
-        GetModuleFileNameW(nullptr, exe, MAX_PATH);
-        std::wstring log = exe;
-        log = log.substr(0, log.find_last_of(L'\\') + 1) + L"pulse_hang.log";
+        // Installed binaries live in a read-only version directory. Keep the
+        // opt-in samples in the same writable/exported location as crash logs.
+        const std::wstring diagnostics_dir = app::GetPulseDataDir() + L"\\Diagnostics";
+        CreateDirectoryW(diagnostics_dir.c_str(), nullptr);
+        const std::wstring crashes_dir = diagnostics_dir + L"\\Crashes";
+        CreateDirectoryW(crashes_dir.c_str(), nullptr);
+        const std::wstring log = crashes_dir + L"\\pulse_hang-" +
+            std::to_wstring(GetCurrentProcessId()) + L".log";
         pulse::app::hang::Start(hwnd, log);
         break;
     }
@@ -4638,7 +5086,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         !state.colorpickshot && !state.colorpickdialog &&
         app::StartsHiddenInTray(startup_launch, state.appPrefs.start_in_tray) &&
         state.tray_controller.StartHidden(nCmdShow == SW_SHOWMAXIMIZED, state.appPrefs.notify_icon_mode != 2);
-#ifdef PULSE_WITH_SELFTEST
+#if defined(PULSE_WITH_SELFTEST) || defined(PULSE_WITH_TEST_HOOKS)
     app::startup_perf_probe::Start(hwnd, state.isolatedTest, [&state] {
         app::startup_perf_probe::Listing result;
         if (auto* tab = ActiveTab(state)) {
@@ -4672,6 +5120,39 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         SetForegroundWindow(hwnd);
         pulse::app::startup_trace::Mark("activated");
     }
+
+    if (!extensions::native::StartFromArguments(state, __argc, __wargv)) {
+        DestroyWindow(hwnd);
+        ReleaseWindowStatesAtExit();
+        OleUninitialize();
+        return 2;
+    }
+    if (!crash_disabled_extensions.empty()) {
+        std::wstring names;
+        for (const auto& name : crash_disabled_extensions) names += (names.empty() ? L"" : L", ") + name;
+        std::wstring message(l10n::Get(l10n::StringId::ExtensionCrashDisabledFormat));
+        if (const size_t at = message.find(L"{names}"); at != std::wstring::npos) message.replace(at, 7, names);
+        state.notification_toast.Show(hwnd, l10n::Get(l10n::StringId::ExtensionCrashDisabledTitle), message);
+    }
+    if (!state.isolatedTest) pulse::StartArchivePluginMigrationNotice(hwnd);
+
+
+#ifdef PULSE_WITH_TEST_HOOKS
+    std::vector<wchar_t> native_probe_path(32768);
+    if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", nullptr, 0) &&
+        GetEnvironmentVariableW(L"PULSE_TEST_NATIVE_CASE", nullptr, 0) &&
+        GetEnvironmentVariableW(L"PULSE_TEST_EXTENSION_CAPTURE", native_probe_path.data(),
+                                static_cast<DWORD>(native_probe_path.size()))) {
+        const bool installed = GetEnvironmentVariableW(L"PULSE_TEST_NATIVE_PACKAGES", nullptr, 0) != 0;
+        const bool ok = installed
+            ? extensions::native::RunPackageProbe(state, native_probe_path.data())
+            : extensions::native::RunUiProbe(state, native_probe_path.data());
+        DestroyWindow(hwnd);
+        ReleaseWindowStatesAtExit();
+        OleUninitialize();
+        return ok ? 0 : 1;
+    }
+#endif
 
     if (state.menushot) {
         // Render the built-in item menu to a PNG (GUI verification for 1B-2).
@@ -4789,15 +5270,83 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         return ok ? 0 : 1;
     }
 
-    wchar_t window_management_report[32768]{};
-    if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_WINDOW_MANAGEMENT", window_management_report, ARRAYSIZE(window_management_report))) {
-        const int result = RunWindowManagementTest(state, window_management_report);
+#ifdef PULSE_WITH_TEST_HOOKS
+    if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_MEDIA_COLUMNS_ONLY", nullptr, 0)) {
+        const bool ok = app::RunMediaColumnResizeCapture();
+        DestroyWindow(hwnd); ReleaseWindowStatesAtExit(); OleUninitialize(); return ok ? 0 : 1;
+    }
+#endif
+    std::vector<wchar_t> jump_capture(32768);
+    if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_DIALOG_JUMP_CAPTURE", jump_capture.data(), static_cast<DWORD>(jump_capture.size()))) {
+        const int result = app::RunDialogJumpPlacementCapture(jump_capture.data());
+        DestroyWindow(hwnd); ReleaseWindowStatesAtExit(); OleUninitialize(); return result;
+    }
+#ifdef PULSE_WITH_TEST_HOOKS
+    std::vector<wchar_t> recycle_search_report(32768);
+    if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_RECYCLE_SEARCH", recycle_search_report.data(), static_cast<DWORD>(recycle_search_report.size()))) {
+        const int result = pulse::RunRecycleSearchLiveTest(state, recycle_search_report.data());
+        DestroyWindow(hwnd);
+        ReleaseWindowStatesAtExit();
+        OleUninitialize();
+        return result;
+    }
+
+    std::vector<wchar_t> window_management_report(32768);
+    std::vector<wchar_t> background_drag_report(32768);
+    std::vector<wchar_t> file_click_report(32768);
+    if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_FILE_CLICK_REPORT", file_click_report.data(), static_cast<DWORD>(file_click_report.size()))) {
+        extern int RunFileClickProbe(AppState&, FILE*);
+        FILE* report = nullptr;
+        int result = 2;
+        if (_wfopen_s(&report, file_click_report.data(), L"w") == 0 && report) {
+            result = RunFileClickProbe(state, report);
+            std::fclose(report);
+        }
+        DestroyWindow(hwnd);
+        ReleaseWindowStatesAtExit();
+        OleUninitialize();
+        return result;
+    }
+    if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_BACKGROUND_DRAG_REPORT", background_drag_report.data(), static_cast<DWORD>(background_drag_report.size()))) {
+        extern int RunBackgroundDragProbe(AppState&, FILE*);
+        FILE* report = nullptr;
+        int result = 2;
+        if (_wfopen_s(&report, background_drag_report.data(), L"w") == 0 && report) {
+            result = WaitForShotReady(state) ? RunBackgroundDragProbe(state, report) : 4;
+            std::fclose(report);
+        }
+        DestroyWindow(hwnd);
+        ReleaseWindowStatesAtExit();
+        OleUninitialize();
+        return result;
+    }
+    std::vector<wchar_t> hover_motion_report(32768);
+    if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_HOVER_MOTION", hover_motion_report.data(), static_cast<DWORD>(hover_motion_report.size()))) {
+        const int result = RunHoverMotionTest(state, hover_motion_report.data());
+        DestroyWindow(hwnd);
+        ReleaseWindowStatesAtExit();
+        OleUninitialize();
+        return result;
+    }
+    if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_WINDOW_MANAGEMENT", window_management_report.data(), static_cast<DWORD>(window_management_report.size()))) {
+        const int result = RunWindowManagementTest(state, window_management_report.data());
         CleanupWindowArrange();
         DestroyWindow(hwnd);
         ReleaseWindowStatesAtExit();
         OleUninitialize();
         return result;
     }
+
+    std::vector<wchar_t> details_preview_report(32768);
+    if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_DETAILS_PREVIEW_REPORT", details_preview_report.data(), static_cast<DWORD>(details_preview_report.size()))) {
+        extern int RunDetailsPreviewProbe(AppState&, const wchar_t*);
+        const int result = WaitForShotReady(state) ? RunDetailsPreviewProbe(state, details_preview_report.data()) : 4;
+        DestroyWindow(hwnd);
+        ReleaseWindowStatesAtExit();
+        OleUninitialize();
+        return result;
+    }
+#endif
 
     if (state.colorpickdialog) {
         // Interactive smoke test: open the picker centered on the work area.
@@ -4813,62 +5362,155 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
     }
 
 #ifdef PULSE_WITH_SELFTEST
-    wchar_t p1_probe[32768]{};
+    std::vector<wchar_t> p1_probe(32768);
     if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", nullptr, 0) > 0 &&
-        GetEnvironmentVariableW(L"PULSE_TEST_P1_FLOW", p1_probe, ARRAYSIZE(p1_probe))) {
+        GetEnvironmentVariableW(L"PULSE_TEST_P1_FLOW", p1_probe.data(), static_cast<DWORD>(p1_probe.size()))) {
         extern int RunP1RegressionProbe(AppState&, const wchar_t*);
-        const int result = WaitForShotReady(state) ? RunP1RegressionProbe(state, p1_probe) : 4;
+        const int result = WaitForShotReady(state) ? RunP1RegressionProbe(state, p1_probe.data()) : 4;
         DestroyWindow(hwnd);
         OleUninitialize();
         return result;
     }
 #endif
+#ifdef PULSE_WITH_TEST_HOOKS
     if (GetEnvironmentVariableW(L"PULSE_TEST_DIALOG_MANAGEMENT_UI", nullptr, 0) ||
         GetEnvironmentVariableW(L"PULSE_TEST_WORKSPACE_UI", nullptr, 0)) {
         extern int RunGuardedDialogManagementUiTest(AppState&);
         const int result = RunGuardedDialogManagementUiTest(state);
         DestroyWindow(hwnd); OleUninitialize(); return result;
     }
+    std::vector<wchar_t> apply_all_sort_probe(32768);
+    if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_APPLY_ALL_SORT", apply_all_sort_probe.data(), static_cast<DWORD>(apply_all_sort_probe.size()))) {
+        extern int RunApplyAllSortProbe(AppState&, const wchar_t*);
+        const int result = RunApplyAllSortProbe(state, apply_all_sort_probe.data());
+        DestroyWindow(hwnd);
+        OleUninitialize();
+        return result;
+    }
+    std::vector<wchar_t> view_switch_probe(32768);
+    if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_VIEW_SWITCH", view_switch_probe.data(), static_cast<DWORD>(view_switch_probe.size()))) {
+        extern int RunViewSwitchProbe(AppState&, const wchar_t*);
+        const int result = RunViewSwitchProbe(state, view_switch_probe.data());
+        DestroyWindow(hwnd);
+        OleUninitialize();
+        return result;
+    }
+#endif
     if (state.shot.active) {
 #ifdef PULSE_WITH_TEST_HOOKS
-        wchar_t assistant_toggle_output[32768]{};
+        std::vector<wchar_t> layout_shortcut_output(32768);
+        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", nullptr, 0) &&
+            GetEnvironmentVariableW(L"PULSE_TEST_DOUBLE_CTRL_SETTINGS", layout_shortcut_output.data(),
+                static_cast<DWORD>(layout_shortcut_output.size()))) {
+            extern int RunDoubleCtrlSettingsTest(AppState&, const wchar_t*);
+            const int result = WaitForShotReady(state) ? RunDoubleCtrlSettingsTest(state, layout_shortcut_output.data()) : 4;
+            DestroyWindow(hwnd); OleUninitialize(); return result;
+        }
+        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", nullptr, 0) &&
+            GetEnvironmentVariableW(L"PULSE_TEST_LAYOUT_SHORTCUTS", layout_shortcut_output.data(),
+                static_cast<DWORD>(layout_shortcut_output.size()))) {
+            extern int RunLayoutShortcutTest(AppState&, const wchar_t*);
+            const int result = WaitForShotReady(state) ? RunLayoutShortcutTest(state, layout_shortcut_output.data()) : 4;
+            DestroyWindow(hwnd); OleUninitialize(); return result;
+        }
+        std::wstring toolbar_interaction_output(32768, L'\0');
+        if (state.isolatedTest && (GetEnvironmentVariableW(L"PULSE_TEST_TOOLBAR_INTERACTION_ONLY", nullptr, 0) ||
+            GetEnvironmentVariableW(L"PULSE_TEST_SIDEBAR_NARROW_ONLY", nullptr, 0)) &&
+            GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", nullptr, 0) &&
+            GetEnvironmentVariableW(L"PULSE_TEST_SEARCH_FLOW", toolbar_interaction_output.data(), static_cast<DWORD>(toolbar_interaction_output.size()))) {
+            extern int RunToolbarInteractionTest(AppState&, const wchar_t*);
+            extern int RunSidebarNarrowTest(AppState&, const wchar_t*);
+            const bool sidebar_probe = GetEnvironmentVariableW(L"PULSE_TEST_SIDEBAR_NARROW_ONLY", nullptr, 0) != 0;
+            const int result = !WaitForShotReady(state) ? 4 : sidebar_probe ?
+                RunSidebarNarrowTest(state, toolbar_interaction_output.c_str()) : RunToolbarInteractionTest(state, toolbar_interaction_output.c_str());
+            DestroyWindow(hwnd); OleUninitialize(); return result;
+        }
+        std::vector<wchar_t> search_ui_output(32768);
+        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_SETTINGS_SEARCH", nullptr, 0) &&
+            GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", nullptr, 0) &&
+            GetEnvironmentVariableW(L"PULSE_TEST_SETTINGS_FLOW", search_ui_output.data(), static_cast<DWORD>(search_ui_output.size()))) {
+            extern int RunSettingsSearchTest(AppState&, const wchar_t*);
+            const int result = RunSettingsSearchTest(state, search_ui_output.data());
+            DestroyWindow(hwnd); OleUninitialize(); return result;
+        }
+        std::vector<wchar_t> stable_entry_output(32768);
+        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_STABLE_ENTRY_REGISTRATION", nullptr, 0) &&
+            GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", nullptr, 0) &&
+            GetEnvironmentVariableW(L"PULSE_TEST_SETTINGS_FLOW", stable_entry_output.data(), static_cast<DWORD>(stable_entry_output.size()))) {
+            extern int RunStableEntryRegistrationTest(const wchar_t*);
+            const int result = RunStableEntryRegistrationTest(stable_entry_output.data());
+            DestroyWindow(hwnd); OleUninitialize(); return result;
+        }
+        std::vector<wchar_t> integration_ui_output(32768);
+        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_SETTINGS_INTEGRATION", nullptr, 0) &&
+            GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", nullptr, 0) &&
+            GetEnvironmentVariableW(L"PULSE_TEST_SETTINGS_FLOW", integration_ui_output.data(), static_cast<DWORD>(integration_ui_output.size()))) {
+            extern int RunSettingsIntegrationUiTest(AppState&, const wchar_t*);
+            const int result = RunSettingsIntegrationUiTest(state, integration_ui_output.data());
+            DestroyWindow(hwnd); OleUninitialize(); return result;
+        }
+        std::vector<wchar_t> assistant_toggle_output(32768);
         if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_ASSISTANT_TOGGLE_HIT", nullptr, 0) &&
             GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", nullptr, 0) &&
-            GetEnvironmentVariableW(L"PULSE_TEST_SETTINGS_FLOW", assistant_toggle_output, ARRAYSIZE(assistant_toggle_output))) {
+            GetEnvironmentVariableW(L"PULSE_TEST_SETTINGS_FLOW", assistant_toggle_output.data(), static_cast<DWORD>(assistant_toggle_output.size()))) {
             extern int RunAssistantToggleHitTest(const wchar_t*);
-            const int result = RunAssistantToggleHitTest(assistant_toggle_output);
+            const int result = RunAssistantToggleHitTest(assistant_toggle_output.data());
             DestroyWindow(hwnd); OleUninitialize(); return result;
         }
-        wchar_t dialog_toggle_output[32768]{};
+        std::vector<wchar_t> dialog_toggle_output(32768);
         if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_DIALOG_JUMP_TOGGLES", nullptr, 0) &&
-            GetEnvironmentVariableW(L"PULSE_TEST_SETTINGS_FLOW", dialog_toggle_output, ARRAYSIZE(dialog_toggle_output))) {
+            GetEnvironmentVariableW(L"PULSE_TEST_SETTINGS_FLOW", dialog_toggle_output.data(), static_cast<DWORD>(dialog_toggle_output.size()))) {
             extern int RunDialogJumpToggleTest(AppState&, const wchar_t*);
-            const int result = RunDialogJumpToggleTest(state, dialog_toggle_output);
+            const int result = RunDialogJumpToggleTest(state, dialog_toggle_output.data());
             DestroyWindow(hwnd); OleUninitialize(); return result;
         }
-        wchar_t experience_probe[32768]{};
-        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_FOLDER_SIZE_EXPERIENCE", experience_probe, ARRAYSIZE(experience_probe))) {
+        std::vector<wchar_t> experience_probe(32768);
+        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_FOLDER_SIZE_EXPERIENCE", experience_probe.data(), static_cast<DWORD>(experience_probe.size()))) {
             extern int RunFolderSizeExperienceProbe(AppState&, const wchar_t*);
-            const int result = WaitForShotReady(state) ? RunFolderSizeExperienceProbe(state, experience_probe) : 4;
+            const int result = WaitForShotReady(state) ? RunFolderSizeExperienceProbe(state, experience_probe.data()) : 4;
             DestroyWindow(hwnd); OleUninitialize(); return result;
         }
-        wchar_t folder_probe[32768]{};
-        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_FOLDER_THUMB_FLOW", folder_probe, ARRAYSIZE(folder_probe))) {
+        std::vector<wchar_t> folder_probe(32768);
+        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_FOLDER_THUMB_FLOW", folder_probe.data(), static_cast<DWORD>(folder_probe.size()))) {
             extern int RunFolderThumbnailProbe(AppState&, const wchar_t*);
-            const int result = WaitForShotReady(state) ? RunFolderThumbnailProbe(state, folder_probe) : 4;
+            const int result = WaitForShotReady(state) ? RunFolderThumbnailProbe(state, folder_probe.data()) : 4;
             DestroyWindow(hwnd);
             OleUninitialize();
             return result;
         }
-        wchar_t selection_probe[32768]{};
-        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_SELECTION_FLOW", selection_probe, ARRAYSIZE(selection_probe))) {
+        std::vector<wchar_t> selection_probe(32768);
+        std::vector<wchar_t> playback_probe(32768);
+        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_PLAYBACK_TRACKS", playback_probe.data(), static_cast<DWORD>(playback_probe.size()))) {
+            extern int PulsePlaybackUiMain(int, wchar_t**);
+            wchar_t program[] = L"pulse";
+            wchar_t mode[] = L"--tracks-only";
+            wchar_t* args[] = {program, mode, playback_probe.data()};
+            const int result = PulsePlaybackUiMain(3, args);
+            DestroyWindow(hwnd);
+            OleUninitialize();
+            return result;
+        }
+        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_SELECTION_FLOW", selection_probe.data(), static_cast<DWORD>(selection_probe.size()))) {
             extern int RunSelectionInputProbe(AppState&, const wchar_t*);
-            const int result = WaitForShotReady(state) ? RunSelectionInputProbe(state, selection_probe) : 4;
+            const int result = WaitForShotReady(state) ? RunSelectionInputProbe(state, selection_probe.data()) : 4;
             DestroyWindow(hwnd);
             OleUninitialize();
             return result;
         }
 #endif
+        if (state.isolatedTest && state.shot.active) {
+            wchar_t fixture[256]{};
+            if (GetEnvironmentVariableW(L"PULSE_TEST_TAB_LAYOUT",fixture,ARRAYSIZE(fixture))) {
+                state.appPrefs.tab_layout=std::clamp(_wtoi(fixture),0,2);
+                for(int i=0;i<20;++i) NewTab(state, app::MakeSettingsPath(L"tabs"));
+                for(size_t i=0;i<state.window_tabs.items.size();++i)
+                    state.window_tabs.items[i]->title=L"Project "+std::to_wstring(i+1);
+                state.window_tabs.items[0]->pinned=true;
+                SwitchTab(state,8);
+            }
+            if (GetEnvironmentVariableW(L"PULSE_TEST_SETTINGS_QUERY",fixture,ARRAYSIZE(fixture)))
+                state.settingsSearchQuery=fixture;
+        }
         wchar_t settings_fixture[32]{};
         if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_SETTINGS_EXPANDED",settings_fixture,ARRAYSIZE(settings_fixture)))
             state.settingsExpanded=static_cast<unsigned>(wcstoul(settings_fixture,nullptr,10)) & 0x3f0fu;
@@ -4877,40 +5519,40 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
             state.settings.SetScroll(static_cast<float>(_wtof(settings_fixture))*state.scale,
                 state.renderer.SettingsMaxScroll(vm,static_cast<float>(state.compositor.Width()),static_cast<float>(state.compositor.Height())));
         }
-        wchar_t panel_shot[32768]{};
-        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_OPTIONS_SHOT", panel_shot, ARRAYSIZE(panel_shot))) {
+        std::vector<wchar_t> panel_shot(32768);
+        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_OPTIONS_SHOT", panel_shot.data(), static_cast<DWORD>(panel_shot.size()))) {
             ShowAddressSearch(state);
             ShowSearchOptions(state);
         }
-        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_HISTORY_SHOT", panel_shot, ARRAYSIZE(panel_shot))) {
+        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_HISTORY_SHOT", panel_shot.data(), static_cast<DWORD>(panel_shot.size()))) {
             state.searchHistory.Record(L"setup-dia", app::MakeSearchPath(L"setup-dia"));
             state.searchHistory.Record(L"项目预算", app::MakeSearchPath(L"content:项目预算"));
             ShowAddressSearch(state);
             ShowAddressSearchHistory(state);
         }
 #ifdef PULSE_WITH_SELFTEST
-        wchar_t settings_interactions[32768]{};
-        wchar_t quicklook_settings[32768]{};
-        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_QUICKLOOK_SETTINGS", quicklook_settings, ARRAYSIZE(quicklook_settings))) {
+        std::vector<wchar_t> settings_interactions(32768);
+        std::vector<wchar_t> quicklook_settings(32768);
+        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_QUICKLOOK_SETTINGS", quicklook_settings.data(), static_cast<DWORD>(quicklook_settings.size()))) {
             extern int RunQuickLookSettingsTest(AppState&, const wchar_t*);
-            const int result = RunQuickLookSettingsTest(state, quicklook_settings);
+            const int result = RunQuickLookSettingsTest(state, quicklook_settings.data());
             DestroyWindow(hwnd); OleUninitialize(); return result;
         }
-        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_SETTINGS_INTERACTIONS",settings_interactions,ARRAYSIZE(settings_interactions))) {
+        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_SETTINGS_INTERACTIONS",settings_interactions.data(),static_cast<DWORD>(settings_interactions.size()))) {
             extern int RunSettingsInteractionTest(AppState&,const wchar_t*);
-            const int result=RunSettingsInteractionTest(state,settings_interactions);
+            const int result=RunSettingsInteractionTest(state,settings_interactions.data());
             DestroyWindow(hwnd);OleUninitialize();return result;
         }
-        wchar_t settings_flow[32768]{};
-        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_SETTINGS_FLOW",settings_flow,ARRAYSIZE(settings_flow))) {
+        std::vector<wchar_t> settings_flow(32768);
+        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_SETTINGS_FLOW",settings_flow.data(),static_cast<DWORD>(settings_flow.size()))) {
             extern int RunSettingsFlowTest(AppState&,const wchar_t*);
-            const int result=RunSettingsFlowTest(state,settings_flow);
+            const int result=RunSettingsFlowTest(state,settings_flow.data());
             DestroyWindow(hwnd);OleUninitialize();return result;
         }
-        wchar_t flow_output[32768]{};
-        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_SEARCH_FLOW", flow_output, ARRAYSIZE(flow_output))) {
+        std::vector<wchar_t> flow_output(32768);
+        if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_SEARCH_FLOW", flow_output.data(), static_cast<DWORD>(flow_output.size()))) {
             extern int RunSearchFlowTest(AppState&, const wchar_t*);
-            const int result = RunSearchFlowTest(state, flow_output);
+            const int result = RunSearchFlowTest(state, flow_output.data());
             DestroyWindow(hwnd);
             OleUninitialize();
             return result;
@@ -4994,6 +5636,26 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int nCmdShow) {
         return rc;
     }
 
+#ifdef PULSE_WITH_SELFTEST
+    if (state.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_FRAME_DIAGNOSTICS", nullptr, 0)) {
+        Render(state);
+        Sleep(1100); // Refresh the sampler's rate budget after cold-start work.
+        Render(state);
+        app::hang::StopFrameWatch();
+        std::wstring export_error;
+        const auto destination = (std::filesystem::path(app::GetPulseDataDir()) / L"export").wstring();
+        std::filesystem::create_directories(destination);
+        bool exported = false;
+        std::thread export_worker([&] {
+            exported = ExportAppDiagnostics(destination, false, false, export_error);
+        });
+        export_worker.join(); // Match the settings page's background export.
+        DestroyWindow(hwnd);
+        ReleaseWindowStatesAtExit();
+        OleUninitialize();
+        return exported ? 0 : 3;
+    }
+#endif
     MSG msg{};
     BOOL ret;
     while ((ret = GetMessageW(&msg, nullptr, 0, 0)) != 0) {

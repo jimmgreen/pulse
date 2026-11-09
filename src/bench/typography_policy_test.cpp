@@ -2,10 +2,13 @@
 #include "../ui/fluent_components.h"
 #include "../ui/fluent_menu.h"
 #include "../ui/edit_host.h"
+#include "../ui/file_name_breaks.h"
 #include "../common/localization.h"
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <chrono>
+#include <limits>
 
 namespace pulse::ui::fluent {
 struct PainterTestPeer {
@@ -208,10 +211,98 @@ void Check(bool ok, const char* label) {
     std::printf("[%s] %s\n", ok ? "PASS" : "FAIL", label);
     if (!ok) ++failures;
 }
+float DirectAdvance(IDWriteFactory2* factory, IDWriteTextFormat* format, const std::wstring& text) {
+    if (text.empty()) return 0;
+    IDWriteTextLayout* layout = nullptr;
+    if (FAILED(factory->CreateTextLayout(text.data(), static_cast<UINT32>(text.size()), format, 10000, 100, &layout)))
+        return std::numeric_limits<float>::quiet_NaN();
+    layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    DWRITE_TEXT_METRICS metrics{}; DWRITE_OVERHANG_METRICS overhang{};
+    const HRESULT hr = layout->GetMetrics(&metrics);
+    layout->GetOverhangMetrics(&overhang);
+    layout->Release();
+    return SUCCEEDED(hr) ? metrics.widthIncludingTrailingWhitespace + (std::max)(overhang.right, 0.0f) + 1.0f
+                         : std::numeric_limits<float>::quiet_NaN();
+}
+int AdvanceCacheRegression() {
+    using namespace pulse::ui;
+    IDWriteFactory2* factory = nullptr;
+    const HRESULT hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory2), reinterpret_cast<IUnknown**>(&factory));
+    Check(SUCCEEDED(hr) && factory, "create real DirectWrite factory for advance reference");
+    if (!factory) return 1;
+    const std::vector<std::wstring> names = {L"", L"a.txt", L"Report final revision 12.tar.gz", L"项目报告（最终版）.docx",
+        L"繁體中文、標點測試！.png", L"emoji 😀👨‍👩‍👧‍👦 image.jpg", L"עברית العربية mixed 123.pdf",
+        L"leading trailing   ", L"space  gap\tcolumn\tname.txt", L"very_long-file.name.extension",
+        L"e\u0301 combining_字符.heic", L"()[] closing brackets) version_02.jpeg"};
+    const auto compare = [&](IDWriteTextFormat* format, const char* label) {
+        bool width_ok = true, wrap_ok = true;
+        for (const auto& name : names) {
+            const float expected = DirectAdvance(factory, format, name);
+            const float cold = typography::MeasureAdvance(factory, format, name);
+            const float warm = typography::MeasureAdvance(factory, format, name);
+            width_ok &= std::isfinite(expected) && std::abs(cold - expected) <= .0001f && std::abs(warm - expected) <= .0001f;
+            for (float width : {32.0f, 74.0f, 128.0f, (std::max)(1.0f, expected - .01f)}) {
+                const auto direct = WrapFileName([&](const std::wstring& value) { return DirectAdvance(factory, format, value); }, name, width, 3);
+                for (int pass = 0; pass < 2; ++pass) {
+                    const auto cached = WrapFileName([&](const std::wstring& value) { return typography::MeasureAdvance(factory, format, value); }, name, width, 3);
+                    wrap_ok &= direct.size() == cached.size();
+                    for (size_t i = 0; i < (std::min)(direct.size(), cached.size()); ++i)
+                        wrap_ok &= direct[i].start == cached[i].start && direct[i].length == cached[i].length;
+                }
+            }
+        }
+        std::printf("configuration=%s\n", label);
+        Check(width_ok, "cold/warm public advance equals direct DWrite reference including trailing whitespace/overhang");
+        Check(wrap_ok, "cold/warm filename wrap line boundaries equal direct reference");
+    };
+    for (int variant = 0; variant < 3; ++variant) {
+        IDWriteTextFormat* format = nullptr;
+        const HRESULT created = factory->CreateTextFormat(variant == 2 ? L"Consolas" : L"Segoe UI", nullptr,
+            variant == 1 ? DWRITE_FONT_WEIGHT_BOLD : DWRITE_FONT_WEIGHT_NORMAL,
+            variant == 2 ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL,
+            variant == 1 ? DWRITE_FONT_STRETCH_CONDENSED : DWRITE_FONT_STRETCH_NORMAL,
+            variant == 0 ? 14.0f : 19.5f, L"zh-CN", &format);
+        Check(SUCCEEDED(created) && format, "create font family/size/weight/style/stretch variant");
+        if (!format) continue;
+        typography::InvalidateMeasurements();
+        compare(format, "fresh font variant");
+        // Mutate the same format identity after warming: these must not hit
+        // cached widths from the old layout attributes.
+        Check(SUCCEEDED(format->SetIncrementalTabStop(83.0f)), "change same-format tab stop");
+        compare(format, "changed tab stop");
+        Check(SUCCEEDED(format->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING)) &&
+            SUCCEEDED(format->SetReadingDirection(DWRITE_READING_DIRECTION_RIGHT_TO_LEFT)), "change same-format alignment/reading direction");
+        compare(format, "RTL trailing");
+        Check(SUCCEEDED(format->SetFlowDirection(DWRITE_FLOW_DIRECTION_BOTTOM_TO_TOP)), "change same-format flow direction");
+        compare(format, "bottom-to-top flow");
+        typography::InvalidateMeasurements();
+        compare(format, "invalidated measurement generation");
+        format->Release();
+    }
+    IDWriteTextFormat* format = nullptr;
+    factory->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+        DWRITE_FONT_STRETCH_NORMAL, 14, L"en-US", &format);
+    if (format) {
+        std::vector<std::wstring> mixed;
+        for (int i = 0; i < 128; ++i) mixed.push_back(std::to_wstring(i) + L"_" + names[1 + i % (names.size() - 1)]);
+        typography::InvalidateMeasurements();
+        for (int pass = 0; pass < 2; ++pass) {
+            const auto start = std::chrono::steady_clock::now();
+            double checksum = 0;
+            for (const auto& name : mixed) checksum += typography::MeasureAdvance(factory, format, name);
+            std::printf("[TIMING] advance 128 mixed names %s=%.3f ms checksum=%.3f\n", pass ? "repeat" : "first",
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count(), checksum);
+        }
+        format->Release();
+    } else Check(false, "create timing text format");
+    factory->Release();
+    return failures ? 1 : 0;
+}
 }
 
 int wmain(int argc, wchar_t** argv) {
     using namespace pulse::ui;
+    if (argc == 2 && std::wstring(argv[1]) == L"--advance-cache") return AdvanceCacheRegression();
     if (argc == 2 && std::wstring(argv[1]) == L"--menu-identity") {
         Check(FluentMenuTestPeer::CheckSnapshotReplacement(),
             "open flyout rejects swapped/shifted/reordered snapshots; reopen uses accepted IDs");

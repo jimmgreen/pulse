@@ -1,0 +1,40 @@
+框选与点选重构验证（2026-11-03）
+
+本次范围
+- 将列表点选、框选、自动滚动、取消与提交集中到 app_list_selection 模块。
+- ListSelectionGesture 用 Idle/BandPending/BandActive/FilePending 互斥阶段替代分散开关；新按下取消旧手势，失去捕获不再提交旧框选。
+- 文件名拖动保留多选；未拖动的释放提交单选或 Ctrl 减选。手势绑定窗格、标签、快照、视图代次和选择修订，过期手势不能回写。
+- 回收站和搜索目录刷新也遵守用户最新选择修订，取消原先虚拟路径例外。
+- 回收站按 recycle_path 恢复身份，搜索按 full_path；不再仅凭显示名称误选同名项。
+
+根因对照
+修复前专项模型测试：普通目录 3 项通过，回收站/搜索共 6 项失败。后台刷新捕获旧多选后，用户已点单行或清空，旧刷新仍会恢复之前的选择。
+修复后该目标扩展为 12 项，普通目录/回收站/搜索的单选、清空、不变恢复、明确指定新文件选择意图全部通过。回收站包含同名称、同原始路径、不同 recycle_path 的条目。
+
+本次实际验证
+1. pulse_list_selection_gesture_test：11 PASS。
+2. pulse_listing_selection_identity_test：12 PASS。
+3. 真实窗口消息流程，内存构造 2500 条带独立身份的回收站记录，按日期分组，只框第 4 至第 7 个可见行，而非全选。点选已选行、未选行、Esc 清空、再点另一行，随后让旧刷新返回并重排快照：12 PASS。检查选择模型及首帧视图模型。
+4. 折叠日期分组后上下两个方向跨屏框选，覆盖正常释放、无按键移动、捕获丢失、快照切换，以及 Esc/Ctrl/Shift/文件拖动准备：26 PASS（其中包含截图保存检查）。
+5. 真正 SendInput 鼠标拖动、边缘自动滚动和单击：连续 3 轮，框选 17 项后立即单选，3 轮均 count=1；保存即时及后续实际屏幕截图，目视检查 physical-immediate-2.bmp 仅一行高亮。此测试共 19 PASS（包含截图检查）。
+6. 生产构建关闭 PULSE_WITH_TEST_HOOKS 与 PULSE_WITH_SELFTEST，构建主程序及对话框宿主并打包；测试 probe 不进入生产构建。
+
+测试过程与限制
+- 新窗口 probe 首次使用了非当前窗格布局，修正为 focused pane slot；随后普通测试窗口只有 9 个完整行，未达到用例 10 行前提，改为最大化测试窗口后通过。两次退出 2 不计为功能通过。
+- 首次受限桌面无法激活测试窗口，退出 2；随后在可交互桌面执行相同鼠标测试通过。
+- 没有删除、恢复或修改用户回收站内容。回收站刷新竞争使用真实产品恢复函数、真实窗口输入处理和合成内存记录验证；并不声称穷尽用户机器上的全部触发时序。
+- 未运行不相关的全量历史测试。
+
+证据
+bench_data/selection-refactor-20261103/refresh/result.log
+bench_data/selection-refactor-20261103/grouped/result.log
+bench_data/selection-refactor-20261103/physical/result.log
+bench_data/selection-refactor-20261103/physical/physical-immediate-2.bmp
+build/listing_identity_fixed_build.log
+build/selection-refactor-release-build.log
+
+安装包
+dist/PulseSetup-1.0.58-test-selection-refactor-20261103.exe
+11796984 字节
+SHA256: bf12655b48ddcf5547813e36e5944000b4245e0df1ec16d6ae01b186e92c0f20
+解包验证 46 个文件哈希、压缩包哈希、版本化组件闭包通过；包内真实主程序与最终生产构建的 pulse.exe 哈希一致。

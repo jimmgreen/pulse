@@ -1,7 +1,13 @@
+#include "extensions/native/settings_pages_host.h"
+#include "extensions/native/previews_adapter.h"
+#include "pane_layout_controls.h"
+#include "recycle_shell_watch.h"
 // app_runtime.cpp — extracted from app_main.cpp.
 #include "app_window_title.h"
 #include "dialog_management_ui.h"
 #include "../fs/drive_kind.h"
+#include "../fs/bounded_enumeration.h"
+#include "folder_statistics.h"
 #include "../fs/device_path.h"
 #include "../common/shell_id.h"
 #include "device_registry.h"
@@ -395,35 +401,45 @@ static DWORD QueryLaunchArgumentAttributes(const std::wstring& path) {
     return WaitForSingleObject(query->done, 1000) == WAIT_OBJECT_0 ? query->attrs : INVALID_FILE_ATTRIBUTES;
 }
 
-std::wstring ResolveOpenFolderPath(std::wstring path) {
+std::wstring ResolveOpenFolderPath(std::wstring path, bool reveal) {
     while (!path.empty() && (path.front() == L'"' || path.back() == L'"')) {
         if (path.front() == L'"') path.erase(path.begin());
         if (!path.empty() && path.back() == L'"') path.pop_back();
     }
     if (path.empty()) return {};
+    if (reveal) {
+        // A result directory may carry a trailing separator, including extended paths.
+        while (path.size() > 1 && (path.back() == L'\\' || path.back() == L'/') &&
+               path[path.size() - 2] != L':') path.pop_back();
+    }
     const DWORD attrs = LaunchArgumentAttributes(path);
     if (attrs != INVALID_FILE_ATTRIBUTES &&
-        (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        (reveal || (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0)) {
         path = fs::ParentPath(path);
     }
     return fs::NormalizePath(path);
 }
 
-void SelectLaunchedFile(AppState& s, const std::wstring& raw) {
+void SelectLaunchedFile(AppState& s, const std::wstring& raw, bool reveal) {
     std::wstring path = raw;
     while (!path.empty() && (path.front() == L'"' || path.back() == L'"')) {
         if (path.front() == L'"') path.erase(path.begin());
         if (!path.empty() && path.back() == L'"') path.pop_back();
     }
+    if (reveal) {
+        // A result directory may carry a trailing separator, including extended paths.
+        while (path.size() > 1 && (path.back() == L'\\' || path.back() == L'/') &&
+               path[path.size() - 2] != L':') path.pop_back();
+    }
     const DWORD attrs = LaunchArgumentAttributes(path);
-    if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) return;
+    if (attrs == INVALID_FILE_ATTRIBUTES || (!reveal && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0)) return;
     const size_t slash = path.find_last_of(L"\\/");
     const std::wstring leaf = slash == std::wstring::npos ? path : path.substr(slash + 1);
     if (leaf.empty()) return;
     if (app::Tab* tab = ActiveTab(s)) SelectNameInTab(s, *tab, leaf);
 }
 
-void OpenFolderInNewTab(AppState& s, const std::wstring& raw) {
+void OpenFolderInNewTab(AppState& s, const std::wstring& raw, bool reveal) {
     if (app::IsThisPcArgument(raw)) {
         // The This PC verb (设为默认文件管理器): This PC is the empty path,
         // which only OpenTabAt keeps (NewTab turns it into C:\). FindFolderTab
@@ -433,7 +449,7 @@ void OpenFolderInNewTab(AppState& s, const std::wstring& raw) {
         RevealWindow(s);
         return;
     }
-    const std::wstring path = ResolveOpenFolderPath(raw);
+    const std::wstring path = ResolveOpenFolderPath(raw, reveal);
     // Back from the tray with "open the default location" at startup: an
     // explicit folder starts over on its own, as launching with it would.
     if (!path.empty() && !IsWindowVisible(s.hwnd) && TakeFreshStart(s)) StartFreshAt(s, path);
@@ -442,7 +458,7 @@ void OpenFolderInNewTab(AppState& s, const std::wstring& raw) {
     else InvalidateRect(s.hwnd, nullptr, FALSE);
     // A file (Pulse as a file's default app, a launcher's "open containing
     // folder") shows up selected instead of silently opening its folder (#40).
-    if (!path.empty()) SelectLaunchedFile(s, raw);
+    if (!path.empty()) SelectLaunchedFile(s, raw, reveal);
 }
 
 void PostWorkerResult(AppState& s, app::WorkResult res) {
@@ -455,10 +471,21 @@ void PostWorkerResult(AppState& s, app::WorkResult res) {
 D2D1_RECT_F FocusedPaneRect(const AppState& s) {
     D2D1_RECT_F content = s.renderer.ContentRect(
         static_cast<float>(s.compositor.Width()), static_cast<float>(s.compositor.Height()));
+    const auto& motion = s.paneLayoutMotion;
+    if (motion.start && std::fabs(motion.content.left - content.left) < .5f &&
+        std::fabs(motion.content.top - content.top) < .5f &&
+        std::fabs(motion.content.right - content.right) < .5f &&
+        std::fabs(motion.content.bottom - content.bottom) < .5f) {
+        for (const auto& [pane, bounds] : motion.last)
+            if (pane == s.pane) return bounds;
+    }
+    if (const auto* layout = s.window_tabs.Active(); layout && ZoomedPane(*layout)) return content;
     return app::FocusedWindowPaneRect(Root(s).get(), s.pane, content, s.scale);
 }
 
 app::Pane* PaneAtSlot(AppState& s, int index) {
+    if (const auto* layout = s.window_tabs.Active())
+        if (auto* zoomed = ZoomedPane(*layout)) return zoomed;
     if (!Root(s)) return s.pane;
     std::vector<app::Pane*> visible;
     Root(s)->CollectPanes(visible);
@@ -529,7 +556,7 @@ void RecordRecentOpen(AppState& s, const std::wstring& path,
 // Drag spring-loading: how far the 800 ms rest on the folder row under the
 // drag has come (the ring around its icon); <0 when no folder is arming.
 static float DropSpringProgress(const AppState& s) {
-    if (s.springRow < 0 || s.springRow != s.dropRow || s.springEntered || !s.springStart) return -1.0f;
+    if (s.springRow < 0 || s.springRow != s.dropRow || !s.springStart) return -1.0f;
     return (std::min)(1.0f, static_cast<float>(GetTickCount64() - s.springStart) / 800.0f);
 }
 
@@ -571,19 +598,26 @@ static void AnimatePaneLayout(AppState& s, const D2D1_RECT_F& content,
                std::fabs(a.right - b.right) < 0.5f && std::fabs(a.bottom - b.bottom) < 0.5f;
     };
     const uint64_t now = ui::motion::NowMs();
-    if (laid.size() != m.last.size() && !m.last.empty() && same_rect(content, m.content) && !s.splitterDragging &&
+    const void* owner = s.window_tabs.Active();
+    if (m.owner != owner) { m = {}; m.owner = owner; }
+    bool changed = laid.size() != m.target.size();
+    for (size_t i = 0; !changed && i < laid.size(); ++i)
+        changed = laid[i].first != m.target[i].first || !same_rect(laid[i].second, m.target[i].second);
+    if (changed && !m.last.empty() && same_rect(content, m.content) && !s.splitterDragging &&
         ui::motion::SystemAnimationsEnabled()) {
         m.from = m.last;
         m.start = now;
     }
-    if (!same_rect(content, m.content)) m.start = 0;
+    m.target.clear();
+    for (const auto& [pane, r] : laid) m.target.emplace_back(pane, r);
+    if (!same_rect(content, m.content) || s.splitterDragging) m.start = 0;
     m.content = content;
     if (m.start) {
         const float ms = static_cast<float>(now - m.start);
-        if (ms >= static_cast<float>(ui::motion::SpringSettleMs(ui::motion::spring::Smooth))) {
+        if (ms >= static_cast<float>(kPaneLayoutTransitionMs)) {
             m.start = 0;
         } else {
-            const float p = ui::motion::SpringProgress(ui::motion::spring::Smooth, ms);
+            const float p = PaneLayoutProgress(ms / static_cast<float>(kPaneLayoutTransitionMs));
             const D2D1_RECT_F first_final = laid.empty() ? D2D1_RECT_F{} : laid[0].second;
             for (auto& [pane, r] : laid) {
                 D2D1_RECT_F f = r;
@@ -618,11 +652,18 @@ static void AnimatePaneLayout(AppState& s, const D2D1_RECT_F& content,
 }
 
 void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
+    FillPaneLayoutControls(s, vm);
     D2D1_RECT_F content = s.renderer.ContentRect(
         static_cast<float>(s.compositor.Width()), static_cast<float>(s.compositor.Height()));
     std::vector<std::pair<app::Pane*, D2D1_RECT_F>> laid;
     std::vector<app::SplitterLayout> splitters;
     if (Root(s)) app::LayoutWindowPanes(*Root(s), content, s.scale, laid, &splitters);
+    if (const auto* layout = s.window_tabs.Active()) {
+        if (auto* zoomed = ZoomedPane(*layout)) {
+            laid.assign(1, {zoomed, content});
+            splitters.clear();
+        }
+    }
     AnimatePaneLayout(s, content, laid, splitters);
     vm.pane_slots.clear();
     vm.splitters.clear();
@@ -690,7 +731,7 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
                 // 增强包 nav badge, on every page (the controller caches 2 s).
                 const auto& packs = s.settings.Packs();
                 vm.settings_pack_updates = int(!packs.update_version.empty()) + int(!packs.images_update_version.empty()) +
-                                           int(!packs.raw_update_version.empty()) + int(!packs.archive_update_version.empty());
+                                           int(!packs.raw_update_version.empty());
             }
             if (vm.settings_page == 8) {
                 // 内容搜索 module: its install directory is read at most every 2 s.
@@ -744,6 +785,10 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
                 vm.settings_pack_images_installing = packs.images_installing;
                 vm.settings_pack_images_progress = packs.images_progress;
                 vm.settings_pack_images_update_version = packs.images_update_version;
+                for (const auto* ext : {L".7z", L".rar"}) {
+                    if (extensions::native::PreviewsAdapter::Available(s.hwnd, std::wstring(L"sample") + ext))
+                        vm.settings_native_archive_extensions.emplace_back(ext);
+                }
                 vm.settings_pack_raw_available = packs.raw_available;
                 vm.settings_pack_raw_installed = packs.raw_installed;
                 vm.settings_pack_raw_enabled = packs.raw_enabled;
@@ -752,14 +797,6 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
                 vm.settings_pack_raw_installing = packs.raw_installing;
                 vm.settings_pack_raw_progress = packs.raw_progress;
                 vm.settings_pack_raw_update_version = packs.raw_update_version;
-                vm.settings_pack_archive_available = packs.archive_available;
-                vm.settings_pack_archive_installed = packs.archive_installed;
-                vm.settings_pack_archive_enabled = packs.archive_enabled;
-                vm.settings_pack_archive_version = packs.archive_version;
-                vm.settings_pack_archive_notice = packs.archive_notice;
-                vm.settings_pack_archive_installing = packs.archive_installing;
-                vm.settings_pack_archive_progress = packs.archive_progress;
-                vm.settings_pack_archive_update_version = packs.archive_update_version;
                 vm.settings_pack_download_source = packs.download_source;
                 for (int row = 0; row < app::kSourceProbeCount; ++row)
                     vm.settings_pack_speed_ms[row] = app::SourceProbeResult(row);
@@ -769,9 +806,9 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
                 if (s.shot.active && s.isolatedTest &&
                     GetEnvironmentVariableW(L"PULSE_TEST_PACK_PROGRESS", fake_progress, ARRAYSIZE(fake_progress))) {
                     vm.settings_pack_installing = vm.settings_pack_images_installing =
-                        vm.settings_pack_raw_installing = vm.settings_pack_archive_installing = true;
+                        vm.settings_pack_raw_installing = true;
                     vm.settings_pack_progress = vm.settings_pack_images_progress =
-                        vm.settings_pack_raw_progress = vm.settings_pack_archive_progress =
+                        vm.settings_pack_raw_progress =
                         static_cast<float>(_wtoi(fake_progress)) / 100.0f;
                 }
             }
@@ -1253,6 +1290,13 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
                 slot.pane.column_strip.resize_column = s.stripResizeColumn;
             if (s.stripHScrolling && static_cast<int>(i) == s.stripResizePane)
                 slot.pane.column_strip.hscroll_pressed = true;
+            if (s.dragFilesOver && !slot.pane.path.empty() && !fs::IsVirtualPath(slot.pane.path)) {
+                slot.pane.drag_parent_path = fs::ParentPath(slot.pane.path);
+                if (slot.pane.drag_parent_path == slot.pane.path) slot.pane.drag_parent_path.clear();
+            }
+            slot.pane.drop_parent = s.dropParent && (static_cast<int>(i) == s.dropPaneIndex || (s.dropPaneIndex < 0 && slot.focused));
+            if (slot.pane.drop_parent && s.springStart)
+                slot.pane.drop_parent_progress = (std::min)(1.0f, float(GetTickCount64() - s.springStart) / 800.0f);
             if (static_cast<int>(i) == s.dropPaneIndex) {
                 slot.pane.drop_target_index = s.dropRow;
                 slot.pane.header_drop = s.dropHeader;
@@ -1262,7 +1306,7 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
                 slot.pane.rename_index = s.renameIndex;
                 slot.pane.rename_text = RenameEditText(s);
                 FillRenameHint(s, slot.pane);
-                if (s.marqueeActive) {
+                if (s.listSelection.BandActive()) {
                     slot.pane.marquee_active = true;
                     slot.pane.marquee_rect = MarqueeDisplayRect(s);
                 }
@@ -1394,47 +1438,91 @@ void ApplyRecycleOccupancy(AppState& s) {
             break;
         }
     }
-    ForEachPane(s, [&](app::Pane& pane) {
-        app::Tab* tab = pane.ActiveTab();
-        if (!IsRecycleTab(tab)) return;
-        tab->banner_title = l10n::Get(l10n::StringId::RecycleBin);
-        tab->banner_message = detail;
+    app::ForEachWindowSharingCore(s, [&](AppState& window) {
+        ForEachPane(window, [&](app::Pane& pane) {
+            app::Tab* tab = pane.ActiveTab();
+            if (!IsRecycleTab(tab)) return;
+            tab->banner_title = l10n::Get(l10n::StringId::RecycleBin);
+            tab->banner_message = detail;
+        });
+        if (window.hwnd) InvalidateRect(window.hwnd, nullptr, FALSE);
     });
 }
 
 void RequestRecycleOccupancy(AppState& s) {
     const HWND hwnd = ServiceWindow(s);
-    s.worker.EnqueueIo([hwnd] {
+    if (!hwnd) return;
+    auto& gate = s.core.recycle_refresh_gate;
+    const uint64_t request = gate.Begin();
+    if (!request) return;
+    auto& watch = s.core.recycle_shell_watch;
+    if (!watch || watch->owner != hwnd) {
+        if (watch) watch->Cancel();
+        watch = std::make_shared<app::RecycleShellWatch>(hwnd);
+    }
+    s.worker.EnqueueIo([hwnd, request, watch] {
+        const HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        struct Uninitialize { HRESULT result; ~Uninitialize() { if (SUCCEEDED(result)) CoUninitialize(); } } uninitialize{apartment};
+        watch->Register(WM_RECYCLE_SHELL_CHANGED);
         auto* info = new fs::RecycleBinInfo{};
         fs::QueryRecycleBinInfo(*info);
-        if (hwnd && PostMessageW(hwnd, WM_RECYCLE_INFO, 0, reinterpret_cast<LPARAM>(info)))
+        if (PostMessageW(hwnd, WM_RECYCLE_INFO, static_cast<WPARAM>(request), reinterpret_cast<LPARAM>(info)))
             return;
         delete info;
     });
 }
 
-bool ApplyQueriedRecycleInfo(AppState& s, const fs::RecycleBinInfo& info) {
+bool ApplyQueriedRecycleInfo(AppState& s, const fs::RecycleBinInfo& info, uint64_t request) {
+    if (request) {
+        const auto completion = s.core.recycle_refresh_gate.Complete(request);
+        if (!completion.matched) return false;
+        if (!completion.current) {
+            s.recycle_refresh_left = (std::max)(s.recycle_refresh_left, 1);
+            if (!s.recycle_refresh_at) s.recycle_refresh_at = GetTickCount64() + 300;
+            return false;
+        }
+    }
     if (!info.valid) return false;
-    // Shell often reports the pre-mutation count for a second or two. Keep the
-    // optimistic occupancy until a query actually moves off that baseline.
-    if (s.recycle_info_guard &&
-        info.items == s.recycle_ignore_items &&
-        s.recycle_info.valid &&
-        s.recycle_info.items != s.recycle_ignore_items)
-        return false;
+    if (s.recycle_info_guard && info.items == s.recycle_ignore_items &&
+        s.recycle_info.valid && s.recycle_info.items != s.recycle_ignore_items) return false;
     s.recycle_info = info;
-    if (info.items != s.recycle_ignore_items)
-        s.recycle_info_guard = false;
+    if (info.items != s.recycle_ignore_items) s.recycle_info_guard = false;
     ApplyRecycleOccupancy(s);
     return true;
 }
 
+void OnRecycleShellChanged(AppState& s, WPARAM wparam, LPARAM lparam) {
+    PIDLIST_ABSOLUTE* pidls = nullptr;
+    LONG event = 0;
+    HANDLE lock = SHChangeNotification_Lock(reinterpret_cast<HANDLE>(wparam), static_cast<DWORD>(lparam),
+        &pidls, &event);
+    if (!lock) return;
+    SHChangeNotification_Unlock(lock);
+    s.core.recycle_refresh_gate.Invalidate();
+    s.recycle_refresh_left = 3;
+    if (!s.recycle_refresh_at) s.recycle_refresh_at = GetTickCount64() + 300;
+}
+
+void ReleaseRecycleShellWatch(AppState& s, HWND hwnd) {
+    auto& watch = s.core.recycle_shell_watch;
+    if (watch && watch->owner == hwnd) {
+        watch->Cancel();
+        watch.reset();
+        auto& gate = s.core.recycle_refresh_gate;
+        gate.Invalidate();
+        gate.active_request = 0;
+        gate.visible = false;
+    }
+}
+
 void RefreshRecycleViews(AppState& s, bool query_occupancy) {
+    RefreshRecycleSearches(s);
     RefreshPath(s, app::MakeRecyclePath());
     if (query_occupancy) RequestRecycleOccupancy(s);
 }
 
 void ScheduleRecycleRefresh(AppState& s) {
+    s.core.recycle_refresh_gate.Invalidate();
     s.recycle_ignore_items = s.recycle_info.valid ? s.recycle_info.items : 0;
     s.recycle_info_guard = true;
     s.recycle_refresh_left = 3;
@@ -1476,14 +1564,35 @@ void ApplyEmptyRecycleFinished(AppState& s, bool emptied) {
 }
 
 bool PumpRecycleRefresh(AppState& s, ULONGLONG now) {
-    if (s.recycle_refresh_left <= 0 || s.recycle_refresh_at == 0 || now < s.recycle_refresh_at)
-        return false;
+    auto& gate = s.core.recycle_refresh_gate;
+    bool visible = false;
+    app::ForEachWindowSharingCore(s, [&](AppState& window) {
+        if (!window.hwnd || !IsWindowVisible(window.hwnd) || IsIconic(window.hwnd)) return;
+        for (const auto& entry : window.sidebar.quick_access)
+            if (entry.path == app::MakeRecyclePath()) { visible = true; break; }
+        ForEachPane(window, [&](app::Pane& pane) { visible |= IsRecycleTab(pane.ActiveTab()); });
+    });
+    const bool became_visible = visible && !gate.visible;
+    gate.visible = visible;
+    if (!visible) return false;
+    const bool needs_fallback = !s.core.recycle_shell_watch || !s.core.recycle_shell_watch->Active() ||
+        !s.recycle_info.valid;
+    // Reconcile on return to a visible window. Only a failed Shell registration
+    // falls back to a minute poll; background windows never scan all bins.
+    if (became_visible || (needs_fallback && now >= gate.fallback_at)) {
+        gate.fallback_at = now + 60000;
+        s.recycle_info_guard = false;
+        RequestRecycleOccupancy(s);
+    }
+    if (s.recycle_refresh_left <= 0 || !s.recycle_refresh_at || now < s.recycle_refresh_at) return false;
+    // A final settled query must be authoritative, including an external change
+    // that happens to restore the pre-mutation count.
+    if (s.recycle_refresh_left == 1) s.recycle_info_guard = false;
     RefreshRecycleViews(s, true);
     --s.recycle_refresh_left;
     if (s.recycle_refresh_left > 0)
         s.recycle_refresh_at = now + (s.recycle_refresh_left == 2 ? 900ull : 1600ull);
-    else
-        s.recycle_refresh_at = 0;
+    else s.recycle_refresh_at = 0;
     return true;
 }
 
@@ -1541,45 +1650,23 @@ void StartDetailsSizeWalk(AppState& s, const std::wstring& path) {
                         sp->detailsSizeGeneration.load(std::memory_order_relaxed);
                     processed = requestGeneration;
                 }
-                uint64_t size = 0, files = 0, dirs = 0;
-                std::vector<std::wstring> stack{request};
-                while (!stack.empty() &&
-                       sp->detailsSizeGeneration.load(std::memory_order_relaxed) ==
-                           requestGeneration) {
-                    std::wstring dir = std::move(stack.back());
-                    stack.pop_back();
-                    WIN32_FIND_DATAW fd{};
-                    HANDLE h = FindFirstFileExW((dir + L"\\*").c_str(), FindExInfoBasic, &fd,
-                                                FindExSearchNameMatch, nullptr,
-                                                FIND_FIRST_EX_LARGE_FETCH);
-                    if (h == INVALID_HANDLE_VALUE) continue;
-                    do {
-                        if (sp->detailsSizeGeneration.load(std::memory_order_relaxed) !=
-                            requestGeneration) break;
-                        if (fd.cFileName[0] == L'.' &&
-                            (fd.cFileName[1] == L'\0' ||
-                             (fd.cFileName[1] == L'.' && fd.cFileName[2] == L'\0')))
-                            continue;
-                        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                            ++dirs;
-                            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0)
-                                stack.push_back(dir + L"\\" + fd.cFileName);
-                        } else {
-                            ++files;
-                            size += (static_cast<uint64_t>(fd.nFileSizeHigh) << 32) |
-                                    fd.nFileSizeLow;
+                uint64_t version = 0;
+                for (;;) {
+                    const auto cancelled = [sp, requestGeneration] {
+                        return sp->detailsSizeGeneration.load(std::memory_order_relaxed) != requestGeneration;
+                    };
+                    try {
+                        const auto result = app::SharedFolderStatistics().Read(request, cancelled, version);
+                        if (cancelled()) break;
+                        version = result.version;
+                        {
+                            std::lock_guard<std::mutex> lock(sp->detailsSizeMutex);
+                            if (sp->detailsSizeRequested != request || cancelled()) break;
+                            sp->detailsSize = {request, result.bytes, result.files, result.directories, true, result.partial};
                         }
-                    } while (FindNextFileW(h, &fd));
-                    FindClose(h);
+                        if (sp->hwnd) InvalidateRect(sp->hwnd, nullptr, FALSE);
+                    } catch (...) { break; }
                 }
-                if (sp->detailsSizeGeneration.load(std::memory_order_relaxed) !=
-                    requestGeneration) continue;
-                {
-                    std::lock_guard<std::mutex> lock(sp->detailsSizeMutex);
-                    if (sp->detailsSizeRequested != request) continue;
-                    sp->detailsSize = {request, size, files, dirs, true};
-                }
-                if (sp->hwnd) InvalidateRect(sp->hwnd, nullptr, FALSE);
             }
         });
     }
@@ -1794,7 +1881,7 @@ void MarkTrayExit(AppState& s, const std::vector<std::wstring>& paths, bool stag
 }
 
 // Release mode the shelf shows right now: the tray-wide mode, flipped while
-// Shift is held (pulse_tray_redesign.html effMode).
+// Shift is held.
 bool TrayEffectiveMove(const AppState& s) {
     const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
     return s.trayMoveMode != shift;
@@ -2198,8 +2285,7 @@ static std::wstring ContextStatusHint(AppState& s, StatusHintAction& action) {
         action = StatusHintAction::Compare;
         return l10n::Get(I::HintSplit);
     }
-    action = StatusHintAction::Shortcuts;
-    return l10n::Get(s.appPrefs.search_enabled ? I::StatusHintIdle : I::StatusHintIdleNoSearch);
+    return l10n::Get(I::StatusIntroHint);
 }
 
 static const std::wstring& StatusHintActionText(StatusHintAction action) {
@@ -2231,7 +2317,7 @@ constexpr ULONGLONG kTeachMaxShowMs = 15000;
 
 bool TeachBusy(const AppState& s) {
     return !s.dropBadge.empty() || s.renameIndex >= 0 || s.addressEditing || s.addressSearching ||
-           s.filterEditing || !s.tagRenameId.empty() || s.marqueeActive || GetCapture() != nullptr ||
+           s.filterEditing || !s.tagRenameId.empty() || s.listSelection.BandActive() || GetCapture() != nullptr ||
            GetForegroundWindow() != s.hwnd;
 }
 
@@ -2520,7 +2606,7 @@ static void FillTrayOpen(AppState& s, ui::TrayDeckView& deck, ULONGLONG now) {
     if (!deck.cmp_shown) v.compare = false;
 }
 
-// Shelf part of the tray view (pulse_tray_redesign.html).
+// Shelf part of the tray view.
 static void FillTrayShelf(AppState& s, ui::TrayDeckView& deck, ULONGLONG now) {
     const auto& a = s.trayShelf;
     auto progress = [now](ULONGLONG at, float ms) {
@@ -2656,18 +2742,20 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     if (s.settings.TakeMediaPackResult()) {
         s.renderer.EvictThumbnails();
         s.quickPreview.OnMediaPackInstalled();
+        s.detailsPreview.OnMediaPackInstalled();
     }
     if (s.settings.TakeImagePackResult()) {
         s.renderer.EvictThumbnails();
         s.quickPreview.OnImagePackInstalled();
+        s.detailsPreview.OnImagePackInstalled();
     }
     const bool raw_installed = s.settings.TakeRawPackResult();
-    const bool archive_installed = s.settings.TakeArchivePackResult();
-    if (raw_installed || archive_installed) {
+    if (raw_installed) {
         s.renderer.EvictThumbnails();
         s.quickPreview.OnExtraPackInstalled();
+        s.detailsPreview.OnExtraPackInstalled();
     }
-    if (s.quickPreview.visible()) {
+    if (s.quickPreview.visible() || s.detailsPreview.visible()) {
         ui::MediaPackOffer offer, image_offer;
         s.settings.FillMediaPackOffer(offer);
         s.settings.FillImagePackOffer(image_offer);
@@ -2683,7 +2771,9 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
             }
         }
         s.quickPreview.SetMediaPackOffer(offer);
+        s.detailsPreview.SetMediaPackOffer(offer);
         s.quickPreview.SetImagePackOffer(image_offer);
+        s.detailsPreview.SetImagePackOffer(image_offer);
         ui::CloudDownloadOffer cloud;
         if (fs::IsCloudPlaceholder(s.quickPreview.item().attrs)) {
             cloud.path = s.quickPreview.item().path;
@@ -2691,6 +2781,13 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
             cloud.provider = app::CloudRootLabelFor(cloud.path);
         }
         s.quickPreview.SetCloudDownloadOffer(cloud);
+        cloud = {};
+        if (fs::IsCloudPlaceholder(s.detailsPreview.item().attrs)) {
+            cloud.path = s.detailsPreview.item().path;
+            cloud.percent = app::CloudDownloadPercent(cloud.path);
+            cloud.provider = app::CloudRootLabelFor(cloud.path);
+        }
+        s.detailsPreview.SetCloudDownloadOffer(cloud);
     }
     UpdateFolderCompare(s);
     s.changes.visible_paths.clear();
@@ -2716,6 +2813,10 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
             vm.pane.can_create_folder = true;
     }
     app::FillWindowTabStrip(vm, s.window_tabs);
+    if(s.window_tabs.active<vm.tabs.size()) {
+        const auto* layout=s.window_tabs.Active();
+        if(layout&&ZoomedPane(*layout)) vm.tabs[s.window_tabs.active].title += L" · "+l10n::Get(l10n::StringId::AiCtlExpand);
+    }
     // Rail: devices found on this network that no window has shown yet.
     if (const int badge = NetworkRailBadge(s); badge > 0) {
         for (auto& group : vm.sidebar)
@@ -2748,6 +2849,8 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     vm.settings_hover_select = s.appPrefs.hover_select;
     vm.settings_item_checkboxes = s.appPrefs.item_checkboxes;
     vm.settings_vertical_tabs = s.appPrefs.vertical_tabs;
+    vm.tab_layout = s.appPrefs.tab_layout;
+    vm.tab_max_rows = s.appPrefs.tab_max_rows;
     vm.settings_tray_hide_empty = s.appPrefs.tray_hide_when_empty;
     vm.settings_lan_discovery = s.appPrefs.lan_discovery;
     vm.settings_network_recent = s.appPrefs.network_recent_enabled;
@@ -2796,7 +2899,69 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
         vm.status.selection_text = std::wstring(count) + L"  \u00B7  " +
             (bytes ? pulse::format::ByteSize(*bytes, true) : l10n::Get(l10n::StringId::LoadingEllipsis));
     }
+    vm.status.can_undo = s.ops.CanUndo();
+    vm.status.can_redo = s.ops.CanRedo();
+    vm.status.history_open = s.undoHistoryOpen;
+    vm.status.history_offset = s.undoHistoryOffset;
+    vm.status.undo_label = l10n::Get(l10n::StringId::OpHistory);
+    const auto undo_history = s.ops.UndoHistorySummary();
+    for (const auto& item : undo_history) {
+        const auto& e = item;
+        ui::UndoHistoryRowView row;
+        row.task_id = e.task_id; row.undone = item.undone; row.supported = e.supported;
+        if (e.recorded_at != 0) {
+            FILETIME utc{static_cast<DWORD>(e.recorded_at & 0xFFFFFFFFu), static_cast<DWORD>(e.recorded_at >> 32)};
+            FILETIME local{};
+            SYSTEMTIME clock{};
+            if (FileTimeToLocalFileTime(&utc, &local) && FileTimeToSystemTime(&local, &clock)) {
+                wchar_t stamp[16]{};
+                swprintf_s(stamp, L"%02u:%02u", static_cast<unsigned>(clock.wHour), static_cast<unsigned>(clock.wMinute));
+                row.time = stamp;
+            }
+        }
+        auto verb = l10n::StringId::Operation;
+        switch (e.type) {
+        case ops::OpType::Copy: row.icon_glyph = L"\xE8C8"; verb = l10n::StringId::TrayIntentCopy; break;
+        case ops::OpType::Move: row.icon_glyph = L"\xE7C2"; verb = l10n::StringId::TrayIntentMove; break;
+        case ops::OpType::Rename: row.icon_glyph = L"\xE8AC"; verb = l10n::StringId::Rename; break;
+        case ops::OpType::BatchRename: row.icon_glyph = L"\xE8AC"; verb = l10n::StringId::BatchRename; break;
+        case ops::OpType::CreateFolder: row.icon_glyph = L"\xE8F4"; verb = l10n::StringId::NewFolder; break;
+        case ops::OpType::CreateTextFile: verb = l10n::StringId::NewTextDocument; break;
+        case ops::OpType::RestoreRecycle: row.icon_glyph = L"\xE7A7"; verb = l10n::StringId::Restore; break;
+        case ops::OpType::RealDelete: row.icon_glyph = L"\xE74D"; verb = l10n::StringId::PermanentlyDelete; break;
+        default: row.icon_glyph = L"\xE74D"; verb = l10n::StringId::Delete; break;
+        }
+        row.label = e.label.empty() ? l10n::Get(verb) + L" · " + std::to_wstring(e.source_count) : e.label;
+        const auto& first_path = item.PreviewPath();
+        const size_t path_count = item.PreviewCount();
+        if (path_count != 0) {
+            const auto leaf = [](const std::wstring& value) {
+                std::wstring short_path = path::FriendlyPathText(value);
+                while (short_path.size() > 3 && (short_path.back() == L'\\' || short_path.back() == L'/')) short_path.pop_back();
+                const auto slash = short_path.find_last_of(L"\\/");
+                return slash == std::wstring::npos || slash + 1 == short_path.size() ? short_path : short_path.substr(slash + 1);
+            };
+            const auto folder = fs::ParentPath(first_path);
+            row.detail = leaf(folder);
+            if (e.source_count != 0 && e.destination_count != 0 &&
+                (e.type == ops::OpType::Copy || e.type == ops::OpType::Move)) {
+                const auto source_folder = fs::ParentPath(e.first_source);
+                const auto destination_folder = fs::ParentPath(e.first_destination);
+                row.detail = leaf(source_folder) + L" → " + leaf(destination_folder);
+            } else if (path_count == 1) row.detail += L" · " + leaf(first_path);
+            if (auto* active = ActiveTab(s)) row.elsewhere = _wcsicmp(fs::ParentPath(first_path).c_str(), fs::NormalizePath(active->current_path).c_str()) != 0;
+        }
+        if (item.redo_cleared) row.detail += L" · " + l10n::Get(l10n::StringId::HistoryRedoCleared);
+        if (!item.undone && e.supported && vm.status.undo_label == l10n::Get(l10n::StringId::OpHistory)) {
+            vm.status.undo_label = l10n::Get(l10n::StringId::Undo) + L" " + l10n::Get(verb) +
+                L" · " + std::to_wstring(e.source_count);
+        }
+        vm.status.history.push_back(std::move(row));
+    }
+    std::stable_partition(vm.status.history.begin(), vm.status.history.end(), [](const auto& row) { return row.undone; });
+    vm.status.history_offset = std::clamp(vm.status.history_offset, 0, std::max(0, static_cast<int>(vm.status.history.size()) - 1));
     ops::OpStatus st = s.ops.Status();
+    vm.status.task_id = st.task_id;
     if (st.active || !st.last_error.empty() || !st.summary.empty()) {
         vm.status.task_text = st.last_error.empty() ? st.summary
             : st.summary + L" — " + st.last_error;
@@ -2804,8 +2969,16 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
         vm.status.task_active = st.active;
         vm.status.task_failed = !st.last_error.empty();
         vm.status.task_paused = st.active && (st.phase == ops::OpPhase::Paused || st.pause_requested);
+        if (st.active) vm.status.task_queued = static_cast<uint32_t>(s.ops.QueuedTransferCount());
+        if (vm.status.task_paused) {
+            vm.status.task_text = l10n::Get(st.type == ops::OpType::Copy ? l10n::StringId::OpCopyPaused
+                : st.type == ops::OpType::Move ? l10n::StringId::OpMovePaused
+                : st.type == ops::OpType::RealDelete || st.type == ops::OpType::RecycleDelete
+                    ? l10n::StringId::OpDeletePaused
+                : st.type == ops::OpType::RestoreRecycle ? l10n::StringId::OpRestorePaused : l10n::StringId::OpPaused);
+        }
         if (!st.active && st.phase == ops::OpPhase::Completed && st.last_error.empty()) {
-            // The finished pill offers 撤销 / 打开 (pulse_ops_dialogs.html).
+            // The finished pill offers 撤销 / 打开.
             vm.status.task_can_undo = s.ops.CanUndoTask(st.task_id);
             vm.status.task_can_open = (st.type == ops::OpType::Copy || st.type == ops::OpType::Move) &&
                                       !st.destination_dir.empty();
@@ -2862,7 +3035,9 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
                 s.lastFps, s.workingSetMb);
         }
         vm.status.performance_compact_text = compactPerf;
-    } else {
+    } else if (!s.appPrefs.status_hints_learned && s.appPrefs.show_hints &&
+               undo_history.empty() && !st.active && st.task_id == 0 &&
+               vm.status.task_text.empty()) {
         const auto region = static_cast<ui::HitTestResult::Region>(s.hoverRegion);
         if (HoverHintIsCommand(region) && !s.addressSearching && !s.filterEditing) {
             // Tooltips may carry extra lines; the status bar only has room for the first.
@@ -2880,6 +3055,11 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
                 vm.status.hint_action_text = StatusHintActionText(action) + L" \u2192";
             }
         }
+    }
+    if (!s.status_feedback.empty()) {
+        vm.status.hint_text = s.status_feedback;
+        vm.status.hint_action = 0;
+        vm.status.hint_action_text.clear();
     }
     pulse::FillAiStatusVm(vm);   // the AI chip at the left end of the status bar
     // "已暂存" row pills (tray redesign).
@@ -2903,6 +3083,13 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     if (!s.dragLanding.names.empty()) {
         if (app::Tab* tab = ActiveTab(s)) FillLandingRows(s, s.pane, tab->current_path, vm.pane);
     }
+    if (s.dragFilesOver && !vm.pane.path.empty() && !fs::IsVirtualPath(vm.pane.path)) {
+        vm.pane.drag_parent_path = fs::ParentPath(vm.pane.path);
+        if (vm.pane.drag_parent_path == vm.pane.path) vm.pane.drag_parent_path.clear();
+    }
+    vm.pane.drop_parent = s.dropParent;
+    if (s.dropParent && s.springStart)
+        vm.pane.drop_parent_progress = (std::min)(1.0f, float(GetTickCount64() - s.springStart) / 800.0f);
     vm.pane.drop_target_index = s.dropRow;
     vm.pane.drop_spring_progress = DropSpringProgress(s);
     vm.pane.rename_index = s.renameIndex;
@@ -2923,12 +3110,13 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     FillAddressSearchView(s, vm);
     vm.splitter_pressed = s.splitterDragging;
     vm.details_resize_pressed = s.detailsPanelResizing;
-    if (s.marqueeActive) {
+    if (s.listSelection.BandActive()) {
         vm.pane.marquee_active = true;
         vm.pane.marquee_rect = MarqueeDisplayRect(s);
     }
     vm.breadcrumb_hover = s.breadcrumbHover;
     vm.breadcrumb_drop = s.dropBreadcrumb;
+    vm.drag_folders_active = s.dragFilesOver;
     vm.sidebar_drop_index = s.dropSidebar;
     vm.tab_drop_index = s.tabDropIndex;
     vm.tab_file_drop = s.springTab;
@@ -3274,6 +3462,11 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
             swprintf_s(contains, l10n::Get(l10n::StringId::ContainsFormat).c_str(),
                        s.detailsSize.files, s.detailsSize.dirs);
             vm.details.contains_text = contains;
+            if (s.detailsSize.partial) {
+                const auto incomplete = l10n::Get(l10n::StringId::Incomplete);
+                vm.details.size_text += incomplete;
+                vm.details.contains_text += incomplete;
+            }
         } else {
             vm.details.size_pending = true;
         }
@@ -3306,8 +3499,16 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     }
     vm.hover_pane_index = s.hoverPaneIndex;
     vm.column_resize_pressed = s.columnResizing;
+    if (s.columnHeaderDrag.active) {
+        vm.column_drag_pane = s.columnHeaderDrag.pane;
+        vm.column_drag_from = s.columnHeaderDrag.from;
+        vm.column_drag_slot = s.columnHeaderDrag.slot;
+        vm.column_drag_line_x = s.columnHeaderDrag.line_x;
+        vm.column_drag_cursor_x = s.columnHeaderDrag.cursor_x;
+        vm.column_drag_grab_dx = s.columnHeaderDrag.grab_dx;
+    }
     // No hover tips while a marquee owns the pointer.
-    vm.tooltip_text = s.marqueeActive ? std::wstring{} : s.tooltipText;
+    vm.tooltip_text = s.listSelection.BandActive() ? std::wstring{} : s.tooltipText;
     if (s.teachTip >= 0) {
         using I = l10n::StringId;
         static constexpr I kTitles[] = {I::TeachMiddleTitle, I::TeachTrayTitle, I::TeachCompareTitle,
@@ -3323,6 +3524,9 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     vm.tooltip_x = static_cast<float>(s.hoverPoint.x);
     vm.tooltip_y = static_cast<float>(s.hoverPoint.y);
     pulse::FillAiAssistantVm(s, vm);   // Pulse 助手 and its chip (after FillAiStatusVm, may set a tip)
+    // Tab wrapping changes the toolbar origin; settle it before pane hit geometry.
+    RECT tab_client{};
+    if (GetClientRect(s.hwnd, &tab_client)) s.renderer.UpdateTabLayout(vm, static_cast<float>(tab_client.right));
     FillPaneSlots(s, vm);
     {
         // File-list scrollbars: the hovered pane's (or the dragged, focused one's) expands.
@@ -3370,7 +3574,8 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
         // A hidden filter or group control still shows while it is in effect.
         s.renderer.SetToolbarView(s.appPrefs.toolbar_show_sort,
                                   s.appPrefs.toolbar_show_filter || !vm.pane.filter_text.empty(),
-                                  s.appPrefs.toolbar_show_group || toolbar_group > 0);
+                                  s.appPrefs.toolbar_show_group || toolbar_group > 0,
+                                  app::ToolbarViewLayoutOrder(s.appPrefs.toolbar_view_order));
     }
     // Toolbar follows the pointer: a file drag over the window swaps the
     // selection chip and the pinned commands for the pinned apps.
@@ -3407,6 +3612,17 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
             app::ToolbarAppBreakAfter(s.appPrefs.toolbar_app_breaks, s.appPrefs.toolbar_apps[k]))
             separators |= uint64_t{1} << (app_from + k + 1);
     s.renderer.SetToolbarSeparators(drop_mode ? 0 : separators);
+    s.renderer.SetToolbarRightFrom(drop_mode ? -1 : app::ToolbarRightFrom(s.appPrefs.toolbar_tools));
+    s.renderer.SetToolbarViewSlots(drop_mode ? std::array<int, 3>{-1, -1, -1} : app::ToolbarViewSlots(s.appPrefs.toolbar_tools));
+    FillSettingsSearchVm(s, vm);
+    if (s.undoHistoryOpen && s.hoverRegion == ui::HitTestResult::UndoHistoryRow && s.hoverControlIndex >= 0 &&
+        static_cast<size_t>(s.hoverControlIndex) < vm.status.history.size()) {
+        const uint64_t id = vm.status.history[s.hoverControlIndex].task_id;
+        const auto paths = s.ops.UndoHistoryPreviewPaths(id);
+        vm.pane.history_preview_paths = paths;
+        for (auto& slot : vm.pane_slots) slot.pane.history_preview_paths = paths;
+    }
+    extensions::native::SyncSettingsPagesHost(s, vm);
     return vm;
 }
 
@@ -3483,6 +3699,9 @@ std::wstring TooltipForHover(AppState& s) {
     }
     case R::TabNew: return text(s.appPrefs.show_hints ? I::TipxNewTab : I::TooltipNewTab);
     case R::ThemeToggle: return text(I::TooltipToggleTheme);
+    case R::StatusUndo: return s.ops.CanUndo() ? s.ops.UndoLabel() + L"  Ctrl+Z" : text(I::HistoryLocked);
+    case R::StatusRedo: return text(I::HistoryRedo) + L"  Ctrl+Y";
+    case R::StatusUndoHistory: return text(I::OpHistory);
     case R::StatusBarAi: return text(I::AiChipTip);   // Pulse 助手  Ctrl+J
     case R::WindowManageButton: return text(I::WindowManage);
     case R::SettingsButton: return text(I::Settings);
@@ -3630,6 +3849,18 @@ std::wstring TooltipForHover(AppState& s) {
             ? actions[static_cast<size_t>(s.hoverControlIndex)].label : std::wstring{};
     }
     case R::PaneColumnLayout: return text(I::ColumnLayout);
+    case R::PaneExpand:
+    case R::PaneLayoutZoom: return text(I::PaneZoom) + L"  Ctrl+Alt+Enter";
+    case R::PaneLayoutRestore: return text(I::PaneZoomRestore);
+    case R::PaneLayoutCompare: return text(I::CompareSideBySide);
+    case R::PaneLayoutTray: return text(I::SplitLayout);
+    case R::PaneLayoutCell: return text(I::LayoutPeekHint);
+    case R::PaneLayoutPreset: {
+        const I names[] = {I::LayoutSingle,I::LayoutVertical,I::LayoutHorizontal,I::LayoutThree,I::LayoutFour};
+        if(s.hoverControlIndex<0||s.hoverControlIndex>4)return {};
+        const wchar_t* keys[]={L"  Ctrl+Alt+1",L"  Ctrl+Alt+2",L"",L"  Ctrl+Alt+3",L"  Ctrl+Alt+4"};
+        return text(names[s.hoverControlIndex])+keys[s.hoverControlIndex];
+    }
     case R::PaneClose: return text(I::WorkspaceClosePane);
     case R::PaneViewButton: return text(I::More);
     case R::FilterBox: return text(s.appPrefs.show_hints ? I::TipxFilter : I::FilterCurrent);
@@ -3654,8 +3885,9 @@ std::wstring TooltipForHover(AppState& s) {
     case R::DetailsPreview: return L"";
     case R::StatusBarTask:
         if (s.hoverSubIndex == 0) return s.ops.UndoLabel();
-        if (s.hoverSubIndex == 1) return s.ops.Status().destination_dir;
-        return text(I::OpDetails);
+        if (s.hoverSubIndex == 1) return text(I::OpLocateResults) + L" · " + s.ops.Status().destination_dir;
+        if (s.hoverSubIndex == 2) return text(I::OpResume);
+        return text(s.ops.Status().active ? I::OpDetails : I::OpHistory);
     case R::StatusBarCancelSearch: return text(I::ContentCancelSearch);
     case R::DetailsNewTab: return text(I::OpenNewTab);
     case R::DetailsCopyPath: return text(I::CopyPath);
@@ -3693,7 +3925,7 @@ std::wstring TooltipForHover(AppState& s) {
     case R::WindowIdentity: return text(I::WindowIdentityTip);
     case R::SidebarToggle:
         // The extra line only describes collapsing; an expanded-from-rail state keeps the plain name.
-        return text(s.appPrefs.show_hints && !s.appPrefs.sidebar_collapsed ? I::TipxSidebar : I::ToggleSidebar);
+        return text(s.appPrefs.show_hints && !SidebarRailActive(s) ? I::TipxSidebar : I::ToggleSidebar);
     // On the icon rail there is no text to read, so every row (and every folded
     // section's icon) names itself on hover.
     case R::SidebarHeader: return SidebarRailActive(s) ? s.hoverLabel : L"";
@@ -3821,7 +4053,7 @@ std::wstring TooltipForHover(AppState& s) {
 std::wstring EntryFullPath(const app::Tab& tab, int index) {
     if (!tab.snapshot || index < 0 || index >= static_cast<int>(tab.EntryCount())) return L"";
     const fs::DirEntry& e = tab.EntryAt(static_cast<size_t>(index));
-    if (e.change_record_only) return L"";
+    if (e.change_record_only || !e.recycle_path.empty()) return L"";
     if (!e.full_path.empty()) return e.full_path;
     if (fs::IsVirtualPath(tab.current_path)) return L"";
     std::wstring full = tab.current_path;
@@ -3834,6 +4066,10 @@ std::vector<std::wstring> SelectedFullPaths(const app::Tab& tab) {
     std::vector<std::wstring> out;
     if (!tab.snapshot) return out;
     const auto indices = tab.SelectedIndices();
+    for (int index : indices) {
+        if (index >= 0 && static_cast<size_t>(index) < tab.EntryCount() &&
+            !tab.EntryAt(static_cast<size_t>(index)).recycle_path.empty()) return out;
+    }
     out.reserve(indices.size());
     for (int index : indices) {
         std::wstring full = EntryFullPath(tab, index);
@@ -3850,6 +4086,10 @@ std::vector<std::wstring> SelectedShellIds(const app::Tab& tab) {
     std::vector<std::wstring> out;
     if (!tab.snapshot) return out;
     const auto indices = tab.SelectedIndices();
+    for (int index : indices) {
+        if (index >= 0 && static_cast<size_t>(index) < tab.EntryCount() &&
+            !tab.EntryAt(static_cast<size_t>(index)).recycle_path.empty()) return out;
+    }
     out.reserve(indices.size());
     for (int index : indices) {
         if (index < 0 || index >= static_cast<int>(tab.EntryCount())) continue;

@@ -1,0 +1,108 @@
+{
+  "apiVersion": 1,
+  "commands": [
+    {
+      "id": "refreshHost",
+      "title": "Refresh current folder",
+      "capability": "view.refresh"
+    }
+  ],
+  "id": "sample.settings-form",
+  "name": "Review settings",
+  "panel": {
+    "title": "Review settings",
+    "ui": {
+      "version": 1,
+      "state": [
+        {
+          "key": "displayName",
+          "value": ""
+        },
+        {
+          "key": "submitted",
+          "value": "false"
+        },
+        {
+          "key": "enabled",
+          "value": "true"
+        }
+      ],
+      "actions": [
+        {
+          "id": "saveSettings",
+          "validate": [
+            "display-name"
+          ],
+          "updates": [
+            {
+              "key": "submitted",
+              "value": "true"
+            }
+          ]
+        },
+        {
+          "id": "editAgain",
+          "updates": [
+            {
+              "key": "submitted",
+              "value": "false"
+            }
+          ]
+        }
+      ],
+      "root": {
+        "type": "scrollView",
+        "id": "form-root",
+        "children": [
+          {
+            "type": "group",
+            "id": "identity",
+            "text": "Local review preferences",
+            "children": [
+              {
+                "type": "text",
+                "id": "form-help",
+                "text": "Enter a display name, then save these local preferences."
+              },
+              {
+                "type": "textInput",
+                "id": "display-name",
+                "text": "Display name",
+                "placeholder": "2\u201340 characters",
+                "state": "displayName",
+                "validation": {
+                  "required": true,
+                  "minLength": 2,
+                  "maxLength": 40,
+                  "message": "Enter a display name with 2\u201340 characters."
+                }
+              },
+              {
+                "type": "switch",
+                "id": "review-enabled",
+                "text": "Enable local review mode",
+                "state": "enabled"
+              },
+              {
+                "type": "button",
+                "id": "submit-settings",
+                "text": "Save local settings",
+                "kind": "primary",
+                "command": "saveSettings"
+              }
+            ]
+          },
+          {
+            "type": "infoBar",
+            "id": "saved-notice",
+            "text": "Local settings saved",
+            "message": "These preferences belong to this panel session.",
+            "kind": "success",
+            "visibleBinding": "state.submitted",
+            "closeCommand": "editAgain"
+          }
+        ]
+      }
+    }
+  }
+}

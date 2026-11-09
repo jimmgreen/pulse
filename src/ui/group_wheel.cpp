@@ -470,10 +470,10 @@ void GroupWheel::DrawFooter(ID2D1DeviceContext* dc, fluent::Painter* painter) {
     };
     button(cancel_rect_, data_.cancel_text, kEsc, fluent::ButtonKind::Standard, kFooterCancel);
     button(ok_rect_, data_.apply_text, kEnter, fluent::ButtonKind::Primary, kFooterApply);
-    // Left: "apply to all folders" (group picker; not for session-only groups).
+    // Left: "apply to all folders" (not for session-only groups).
     const bool apply_all = data_.options.empty() ||
         data_.options[static_cast<size_t>(std::lround(Clamp(t_)))].apply_all;
-    if (!data_.apply_all_text.empty() && !data_.sort_controls && apply_all) {
+    if (!data_.apply_all_text.empty() && apply_all) {
         const float left = panel_.left + 12.0f * s;
         const float w = std::min(painter->MeasureButtonWidth(data_.apply_all_text) + pad,
                                  cancel_rect_.left - 12.0f * s - left);

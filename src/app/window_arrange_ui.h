@@ -2,6 +2,8 @@
 #include "window_arrange.h"
 namespace pulse {
 struct AppState;
+std::vector<HWND> WindowArrangementCandidates(AppState &s, bool all_monitors = false,
+    const std::vector<HWND> &order = {}, bool force_include = false);
 bool ArrangeWindows(AppState &s, app::WindowArrangeLayout layout, bool all_monitors = false,
                     const std::vector<HWND> &order = {}, bool force_include = false);
 WPARAM WindowArrangeGeneration();

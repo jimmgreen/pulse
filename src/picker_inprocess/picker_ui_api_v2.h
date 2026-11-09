@@ -66,6 +66,8 @@
 #define PULSE_PICKER_UI_V2_CONTROL_PROMINENT 0x4u
 #define PULSE_PICKER_UI_V2_FEATURE_CUSTOM_PROMINENT_GROUP 0x80000u
 #define PULSE_PICKER_UI_V2_FEATURE_CUSTOM_PROMINENT_CONTROL 0x100000u
+#define PULSE_PICKER_UI_V2_FEATURE_NATIVE_OPTIONS 0x200000u
+#define PULSE_PICKER_UI_V2_NATIVE_OPTIONS_MASK 0xF237FBEEu
 #define PULSE_PICKER_UI_V2_DARK 0x1u
 // Deliberately distinct from FILEOPENDIALOGOPTIONS. The wrapper must map and
 // validate every native setting; no flags are silently discarded. Local file
@@ -73,7 +75,8 @@
 // access policies. Multiselect requires its explicit option and feature.
 // LocalOpenV1 filters are advisory for a typed file: the listing uses the selected
 // filter, but worker validation may accept an existing ordinary file outside it.
-// Strict filter enforcement is not represented by this ABI and is unsupported.
+// FEATURE_NATIVE_OPTIONS carries STRICTFILETYPES for Save; Open keeps native
+// advisory typed-filter semantics even when the caller supplies that flag.
 // A wire adapter must require the paired AdvisoryFileFilters/AdvisoryFilters
 // contract when mapping nonempty filters; do not silently reinterpret strict.
 #define PULSE_PICKER_UI_V2_OPEN_SHOW_HIDDEN 0x1u
@@ -204,6 +207,7 @@ typedef struct PulsePickerUiV2Config {
     uint32_t place_count;
     const PulsePickerUiV2Property* properties;
     uint32_t property_count;
+    uint32_t native_options; // Original FILEOPENDIALOGOPTIONS; requires FEATURE_NATIVE_OPTIONS.
 } PulsePickerUiV2Config;
 
 // All four strings are one coherent UI snapshot; empty means no current item.
@@ -266,6 +270,7 @@ typedef struct PulsePickerUiV2Callbacks {
     PulsePickerUiV2Callback callback;
     void* context; // Caller keeps valid until synchronous Show returns.
     PulsePickerUiV2OverwriteCallback overwrite; // Optional: absent/E_NOTIMPL means DEFAULT.
+    PulsePickerUiV2OverwriteCallback share_violation; // FDESVR_DEFAULT/ACCEPT/REFUSE (0/1/2); identity rules match overwrite.
 } PulsePickerUiV2Callbacks;
 typedef struct PulsePickerUiV2Result {
     uint32_t size;

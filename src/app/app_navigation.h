@@ -19,6 +19,11 @@ void OpenWorkspaceNewWindow(AppState& s, int index);
 void SaveCurrentWorkspace(AppState& s);
 index::Query MakeSearchPageQuery(const app::Tab& tab, const std::wstring& rest,
                                         size_t offset);
+struct RecycleSearchReply {
+    std::shared_ptr<std::atomic<bool>> cancelled;
+    index::SearchResult result;
+};
+void RefreshRecycleSearches(AppState& s);
 void DispatchIndexSearch(AppState& s, const index::Query& query, uint32_t id);
 void RequestSearchPage(AppState& s, app::Tab& tab, const std::wstring& rest,
                               bool reset);

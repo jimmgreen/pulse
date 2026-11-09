@@ -1,3 +1,4 @@
+#include "../common/app_runtime_paths.h"
 #include "../common/windows_compat.h"
 #include "settings_transfer_ui.h"
 
@@ -276,12 +277,11 @@ void FinishSettingsTransfer(AppState& s, const app::SettingsTaskResult& result) 
 }
 
 bool RestartPulse(AppState& s) {
-    std::vector<wchar_t> exe(32768);
-    const DWORD length = GetModuleFileNameW(nullptr, exe.data(), static_cast<DWORD>(exe.size()));
+    const auto exe = app_runtime_paths::StableEntryPath();
     bool started = false;
-    if (length > 0 && length < exe.size()) {
+    if (!exe.empty()) {
         // The new Pulse reopens this session's windows, as after an update.
-        std::wstring command = L"\"" + std::wstring(exe.data(), length) + L"\" " +
+        std::wstring command = L"\"" + exe + L"\" " +
                                kRestartAfterArgument + L" " + std::to_wstring(GetCurrentProcessId()) +
                                L" --restore-update-session";
         STARTUPINFOW startup{};

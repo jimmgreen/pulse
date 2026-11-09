@@ -1,5 +1,6 @@
 #include "file_dialog_contract.h"
 #include "../common/picker_open_filter.h"
+#include "../common/picker_shell_namespace.h"
 
 namespace pulse::shell_bridge {
 // Native contract references:
@@ -63,6 +64,9 @@ static ContractDecision PrepareMapping(DialogFactory factory, std::span<const Se
     if (calls.size() > 256) return Native(NativeReason::Limit);
     if (policy != AccessPolicy::None && policy != AccessPolicy::LocalOpenV1 && policy != AccessPolicy::LocalSaveV1) return Invalid();
     uint32_t options = DefaultDialogOptions(factory);
+    uint32_t final_options = options;
+    for (const auto& call : calls)
+        if (call.setting == Setting::Options && call.native_result == S_OK) final_options = call.value;
     uint32_t index = 1;
     bool types_set = false, folder_set = false, extension_set = false;
     wire::Request body;
@@ -70,7 +74,9 @@ static ContractDecision PrepareMapping(DialogFactory factory, std::span<const Se
     std::optional<std::u16string> title, ok_label, filename_label, open_extension;
     for (size_t i = 0; i < calls.size(); ++i) {
         const auto& call = calls[i];
-        if (call.setting == Setting::FileTypes && call.native_result == E_UNEXPECTED && (options & FOS_PICKFOLDERS) && !types_set) continue;
+        // Native folder dialogs reject both filter setters without changing state.
+        if ((call.setting == Setting::FileTypes || call.setting == Setting::FileTypeIndex) &&
+            call.native_result == E_UNEXPECTED && (options & FOS_PICKFOLDERS) && !types_set) continue;
         if (FAILED(call.native_result)) return Native(NativeReason::SetterFailed, i, call.native_result);
         if (call.native_result != S_OK) return Native(NativeReason::UnrecognizedSuccess, i, call.native_result);
         switch (call.setting) {
@@ -79,7 +85,10 @@ static ContractDecision PrepareMapping(DialogFactory factory, std::span<const Se
             break;
         case Setting::FileTypes:
             if (types_set || (options & FOS_PICKFOLDERS)) return Native(NativeReason::UnsupportedSettingOrder, i);
-            if (call.filters.empty() || call.filters.size() > wire::kMaxFilters) return Invalid(i);
+            // Native accepts an empty list (WinForms without a Filter) and keeps
+            // listing every file, exactly as if SetFileTypes was never called.
+            if (call.filters.empty()) break;
+            if (call.filters.size() > wire::kMaxFilters) return Invalid(i);
             for (const auto& filter : call.filters) {
                 if (filter.label.empty() || !TextValid(filter.label) || !TextValid(filter.pattern)) return Invalid(i);
                 if (factory == DialogFactory::Open ? !picker_filter::OpenPattern(std::u16string_view(filter.pattern)) : !Pattern(filter.pattern))
@@ -101,7 +110,10 @@ static ContractDecision PrepareMapping(DialogFactory factory, std::span<const Se
         }
         case Setting::Folder:
             if (!TextValid(call.text)) return Invalid(i);
-            if (!call.filesystem_folder || !AbsoluteDirectory(call.text)) return Native(NativeReason::NonFilesystemFolder, i);
+            if ((!call.filesystem_folder || !AbsoluteDirectory(call.text)) &&
+                !(context.native_options_supported && picker_shell::Enabled(final_options) &&
+                  picker_shell::IsParsingName(std::wstring_view(reinterpret_cast<const wchar_t*>(call.text.data()), call.text.size()))))
+                return Native(NativeReason::NonFilesystemFolder, i);
             body.initial_directory = call.text;
             folder_set = true;
             break;
@@ -164,13 +176,14 @@ static ContractDecision PrepareMapping(DialogFactory factory, std::span<const Se
         }
     }
     constexpr uint32_t common = FOS_NOCHANGEDIR | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_DONTADDTORECENT | FOS_FORCESHOWHIDDEN | FOS_DEFAULTNOMINIMODE;
-    const uint32_t allowed = common | (factory == DialogFactory::Save ? FOS_OVERWRITEPROMPT | FOS_NOREADONLYRETURN | FOS_NOVALIDATE | FOS_NOTESTFILECREATE :
-        FOS_PICKFOLDERS | FOS_FILEMUSTEXIST | FOS_ALLOWMULTISELECT | FOS_NODEREFERENCELINKS | FOS_NOVALIDATE);
-    if ((options & ~allowed) || ((options & (FOS_NODEREFERENCELINKS | FOS_NOVALIDATE)) && (options & FOS_PICKFOLDERS)))
+    const uint32_t allowed = common | (context.native_options_supported ? kExtendedFileDialogOptions : 0u) | (factory == DialogFactory::Save ? FOS_OVERWRITEPROMPT | FOS_NOREADONLYRETURN | FOS_NOVALIDATE | FOS_NOTESTFILECREATE :
+        FOS_PICKFOLDERS | FOS_FILEMUSTEXIST | FOS_ALLOWMULTISELECT | FOS_NODEREFERENCELINKS | FOS_NOVALIDATE | FOS_OVERWRITEPROMPT);
+    if ((options & ~allowed) || ((options & FOS_NOVALIDATE) && (options & FOS_PICKFOLDERS)))
         return Native(NativeReason::UnsupportedOptions);
+    if (FAILED(picker_shell::ValidateOptions(options))) return Invalid();
     const bool local_open = policy == AccessPolicy::LocalOpenV1 && factory == DialogFactory::Open &&
         (!(options & FOS_NOVALIDATE) || context.caller_validation_supported);
-    const bool allow_missing_open = local_open && (options & FOS_NOVALIDATE) && !(options & FOS_FILEMUSTEXIST) && context.open_missing_supported;
+    const bool allow_missing_open = local_open && ((options & FOS_NOVALIDATE) || (context.native_options_supported && (options & FOS_CREATEPROMPT))) && !(options & FOS_FILEMUSTEXIST) && context.open_missing_supported;
     if (allow_missing_open && open_extension && !open_extension->empty()) return Native(NativeReason::UnsupportedExtension);
     const bool local_save = policy == AccessPolicy::LocalSaveV1 && factory == DialogFactory::Save;
     const bool no_test_create = local_save && (options & FOS_NOTESTFILECREATE) && context.save_no_test_create_supported && !(options & FOS_NOVALIDATE);
@@ -189,7 +202,10 @@ static ContractDecision PrepareMapping(DialogFactory factory, std::span<const Se
     if (!caller_save && !native_save && !allow_missing_open && ((!local_open && !(options & FOS_NOCHANGEDIR)) || (!(options & FOS_PATHMUSTEXIST) && !(local_open && (options & FOS_PICKFOLDERS)) && !local_existing_file))) return Native(NativeReason::MissingValidationOptions);
     if ((local_open || local_save) && context.resolved_initial_directory) {
         if (!TextValid(*context.resolved_initial_directory)) return Invalid();
-        if (!AbsoluteDirectory(*context.resolved_initial_directory)) return Native(NativeReason::NonFilesystemFolder);
+        if (!AbsoluteDirectory(*context.resolved_initial_directory) &&
+            !(context.native_options_supported && picker_shell::Enabled(options) &&
+              picker_shell::IsParsingName(std::wstring_view(reinterpret_cast<const wchar_t*>(context.resolved_initial_directory->data()), context.resolved_initial_directory->size()))))
+            return Native(NativeReason::NonFilesystemFolder);
         body.initial_directory = *context.resolved_initial_directory;
         folder_set = true;
     }
@@ -216,7 +232,7 @@ static ContractDecision PrepareMapping(DialogFactory factory, std::span<const Se
     }
     if (options & FOS_FORCESHOWHIDDEN) body.options |= wire::ShowHidden;
     // FOS_NODEREFERENCELINKS selects the shortcut itself, not its target. Only
-    // OpenFiles is admitted here; this is not a promise about all reparse points.
+    // Folder mode still requires a directory and rejects shortcut files.
     if (options & FOS_NODEREFERENCELINKS) {
         body.options |= wire::NoDereferenceLinks;
         body.required_capabilities |= wire::PreserveLinks;
@@ -239,6 +255,7 @@ static ContractDecision PrepareMapping(DialogFactory factory, std::span<const Se
     std::vector<uint8_t> encoded;
     if (wire::Encode(request, encoded) != wire::CodecError::None) return Invalid();
     ContractDecision decision;
+    decision.native_options = options & kExtendedFileDialogOptions;
     decision.require_unencrypted_save = readonly_ownership;
     decision.skip_save_access_validation = caller_save;
     decision.native_save_defaults = native_save;
@@ -274,6 +291,34 @@ ContractDecision PrepareFileDialogContract(DialogFactory factory, std::span<cons
             (*decision.effective_options & FOS_NOVALIDATE) ? ValidationCategory::OpenSkipAccessValidation : ValidationCategory::DefaultOpen;
     }
     return decision;
+}
+
+std::optional<wire::Message> BridgeRequestFor(const ContractDecision& decision) {
+    if (decision.disposition != Disposition::Prepared || !decision.request || !decision.effective_options) return std::nullopt;
+    if (decision.native_options || (*decision.effective_options & FOS_SHAREAWARE) || decision.allow_missing_open ||
+        decision.require_existing_open_parent || decision.open_default_extension) return std::nullopt;
+    auto message = *decision.request;
+    auto* body = std::get_if<wire::Request>(&message.body);
+    if (!body) return std::nullopt;
+    if (decision.supported_access_policy == AccessPolicy::LocalSaveV1) {
+        body->required_capabilities |= wire::LocalSaveAccessV1;
+        body->options |= wire::ValidateLocalSaveAccessV1;
+        if (decision.native_save_defaults) body->options |= wire::SaveNativeDefaults;
+        if (decision.no_test_file_create) body->options |= wire::SaveNoTestFileCreate;
+        if (decision.require_existing_save_parent) body->options |= wire::SaveRequireExistingParent;
+        if (decision.require_unencrypted_save) body->options |= wire::SaveRequireUnencrypted;
+        if (decision.skip_save_access_validation) body->options |= wire::SaveSkipAccessValidation;
+    } else if (decision.native_save_defaults || decision.no_test_file_create || decision.require_existing_save_parent ||
+               decision.require_unencrypted_save || decision.skip_save_access_validation) {
+        return std::nullopt;
+    }
+    if (decision.title) { body->label_flags |= wire::LabelTitle; body->title = *decision.title; }
+    if (decision.ok_button_label) { body->label_flags |= wire::LabelOkButton; body->ok_button_label = *decision.ok_button_label; }
+    if (decision.file_name_label) { body->label_flags |= wire::LabelFileName; body->file_name_label = *decision.file_name_label; }
+    if (body->label_flags) body->required_capabilities |= wire::DialogLabels;
+    std::vector<uint8_t> encoded;
+    if (wire::Encode(message, encoded) != wire::CodecError::None) return std::nullopt;
+    return message;
 }
 }
 

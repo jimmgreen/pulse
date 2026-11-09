@@ -8,7 +8,7 @@
 #include <cmath>
 
 // Settings > 系统右键菜单 (page 6). Geometry and texts: settings_sysctx_layout.h;
-// data: app::SystemCtxModel. Visual reference: pulse_system_ctx_manager.html.
+// data: app::SystemCtxModel.
 namespace pulse::ui {
 
 namespace {
@@ -326,7 +326,7 @@ void MainRenderer::DrawSettingsSysCtx(const WindowViewModel& vm, const D2D1_RECT
         divider(h.left, h.right, o.rows_top.top);
 
         if (v->overview.shown) {
-            // ---- 概览 cards (pulse_system_ctx_manager.html: .ov / .ovc / .stat / .rank / .mini) ----
+            // ---- 概览 cards ----
             const SysCtxOverview& ov = v->overview;
             const SysCtxOverviewLayout& g = o.overview;
             const D2D1_COLOR_F tile = D2D1::ColorF(0, 0, 0, dark ? 0.18f : 0.05f);

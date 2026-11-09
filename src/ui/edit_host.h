@@ -4,8 +4,9 @@
 
 namespace pulse::ui {
 // Explicit non-layered presentation of the existing Pulse edit bitmap. Native
-// EDIT remains the input/IME model; its text painting is never a fallback.
-HWND CreatePulsePaintedChildEdit(HWND parent, const wchar_t* text = L"", DWORD edit_style = 0);
+// EDIT remains the input/IME model. Optional native raster fallback is drawn
+// offscreen into the same parent frame, never onto a separate child surface.
+HWND CreatePulsePaintedChildEdit(HWND parent, const wchar_t* text = L"", DWORD edit_style = 0, bool allow_native_raster = false);
 DWORD PulsePaintedChildEditError(HWND hwnd);
 // Host invokes this within the main compositor's frame, using child-client
 // bounds mapped to parent pixels. It keeps the real EDIT's input/IME geometry.

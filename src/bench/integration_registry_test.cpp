@@ -110,6 +110,33 @@ int wmain() {
     const std::wstring shell = L"Software\\Classes\\Directory\\shell", command = shell + L"\\open\\command";
     const std::wstring win = L"Software\\Classes\\CLSID\\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}\\shell\\opennewwindow\\command";
     const std::wstring pc = L"Software\\Classes\\CLSID\\{20D04FE0-3AEA-1069-A2D8-08002B30309D}\\shell";
+    for (const auto kind : {ShellIntegrationKind::Directory, ShellIntegrationKind::Drive,
+        ShellIntegrationKind::ThisPc, ShellIntegrationKind::RecycleBin, ShellIntegrationKind::WinE}) {
+        Clear();
+        Check(ApplyShellIntegration(kind, exe, true), "explicit shell command applies");
+        const std::wstring group = kind == ShellIntegrationKind::Directory ? L"Directory" :
+            kind == ShellIntegrationKind::Drive ? L"Drive" : kind == ShellIntegrationKind::ThisPc ? L"ThisPc" :
+            kind == ShellIntegrationKind::RecycleBin ? L"RecycleBin" : L"WinE";
+        const std::wstring key = kind == ShellIntegrationKind::WinE ? win :
+            kind == ShellIntegrationKind::ThisPc ? pc + L"\\open\\command" :
+            kind == ShellIntegrationKind::RecycleBin ? L"Software\\Classes\\CLSID\\{645FF040-5081-101B-9F08-00AA002F954E}\\shell\\open\\command" :
+            L"Software\\Classes\\" + group + L"\\shell\\open\\command";
+        const auto current = Read(key);
+        auto old = std::wstring(reinterpret_cast<const wchar_t*>(current.bytes.data()));
+        const auto marker = old.find(L"--shell-open ");
+        Check(marker != std::wstring::npos, "new registrations identify shell origin");
+        if (marker == std::wstring::npos) continue;
+        old.erase(marker, std::wstring(L"--shell-open ").size());
+        if (kind == ShellIntegrationKind::WinE) old = L"\"" + exe + L"\" --win-e";
+        Set(key, L"", old);
+        Check(SetLegacySnapshotCommand(L"Software\\Pulse\\ShellIntegration\\Backups\\v1\\" + group, Read(key)),
+            "legacy shell command fixture updates only its owned snapshot");
+        Check(ReadShellIntegration(kind, exe), "legacy exact shell command remains enabled");
+        Check(ApplyShellIntegration(kind, exe, true) && Read(key) == current,
+            "reapplying upgrades legacy command to explicit origin");
+        Check(ApplyShellIntegration(kind, exe, false), "upgraded registration preserves restoration snapshot");
+    }
+    Clear();
     {
         Set(win, L"", L"\"C:\\ThirdParty\\manager.exe\" /open", REG_EXPAND_SZ);
         const Value third_party = Read(win);
@@ -217,7 +244,7 @@ int wmain() {
             HasShellIntegrationOwnership(ShellIntegrationKind::RecycleBin, exe),
             "Recycle Bin takeover applies and reads back");
         const Value bin_command = Read(bin + L"\\open\\command");
-        const std::wstring expected = L"\"" + exe + L"\" \"::{645FF040-5081-101B-9F08-00AA002F954E}\"";
+        const std::wstring expected = L"\"" + exe + L"\" --shell-open \"::{645FF040-5081-101B-9F08-00AA002F954E}\"";
         Check(bin_command.exists && bin_command.bytes.size() == (expected.size() + 1) * sizeof(wchar_t) &&
             std::wstring(reinterpret_cast<const wchar_t*>(bin_command.bytes.data())) == expected &&
             Read(bin + L"\\open\\command", L"DelegateExecute").exists && Read(bin).exists,

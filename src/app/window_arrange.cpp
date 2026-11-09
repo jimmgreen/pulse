@@ -3,7 +3,7 @@
 #include <cmath>
 namespace pulse::app {
 std::vector<RECT> CalculateWindowArrangement(WindowArrangeLayout layout, RECT w, size_t n, int gap, int mw, int mh,
-                                             int cascade_step) {
+                                             int cascade_step, const std::vector<SIZE>& original_sizes) {
     std::vector<RECT> out;
     if (!n || n > 4096 || w.right <= w.left || w.bottom <= w.top)
         return out;
@@ -11,10 +11,6 @@ std::vector<RECT> CalculateWindowArrangement(WindowArrangeLayout layout, RECT w,
     mw = (std::max)(1, mw);
     mh = (std::max)(1, mh);
     const int width = w.right - w.left, height = w.bottom - w.top;
-    if (layout == WindowArrangeLayout::SideBySide || layout == WindowArrangeLayout::Stacked)
-        n = (std::min)(n, size_t{2});
-    if (layout == WindowArrangeLayout::Columns)
-        n = (std::min)(n, size_t{3});
     auto grid = [&](RECT area, size_t count, int cols) {
         const int rows = (static_cast<int>(count) + cols - 1) / cols;
         const int aw = area.right - area.left - gap * (cols - 1), ah = area.bottom - area.top - gap * (rows - 1);
@@ -30,13 +26,44 @@ std::vector<RECT> CalculateWindowArrangement(WindowArrangeLayout layout, RECT w,
     if (layout == WindowArrangeLayout::Cascade) {
         if (width < mw || height < mh)
             return {};
-        const int step = (std::min)((std::max)(0, cascade_step), (std::min)((width - mw) / static_cast<int>(n),
-                                                                            (height - mh) / static_cast<int>(n)));
-        const int offset = step * static_cast<int>(n - 1);
-        for (size_t i = 0; i < n; ++i) {
-            const int d = step * static_cast<int>(i);
-            out.push_back({w.left + d, w.top + d, w.right - offset + d, w.bottom - offset + d});
+        if (!original_sizes.empty()) {
+            if (original_sizes.size() != n) return {};
+            int widest = 0, tallest = 0;
+            for (const auto size : original_sizes) {
+                if (size.cx <= 0 || size.cy <= 0) return {};
+                widest = (std::max)(widest, (std::min)(width, static_cast<int>(size.cx)));
+                tallest = (std::max)(tallest, (std::min)(height, static_cast<int>(size.cy)));
+            }
+            const int intervals = static_cast<int>((std::max)(size_t{1}, n - 1));
+            const int step = (std::min)((std::max)(0, cascade_step),
+                (std::min)((width - widest) / intervals, (height - tallest) / intervals));
+            for (size_t i = 0; i < n; ++i) {
+                const int d = step * static_cast<int>(i);
+                out.push_back({w.left + d, w.top + d,
+                    w.left + d + (std::min)(width, static_cast<int>(original_sizes[i].cx)),
+                    w.top + d + (std::min)(height, static_cast<int>(original_sizes[i].cy))});
+            }
+        } else {
+            const int step = (std::min)((std::max)(0, cascade_step), (std::min)((width - mw) / static_cast<int>(n),
+                                                                                (height - mh) / static_cast<int>(n)));
+            const int offset = step * static_cast<int>(n - 1);
+            for (size_t i = 0; i < n; ++i) {
+                const int d = step * static_cast<int>(i);
+                out.push_back({w.left + d, w.top + d, w.right - offset + d, w.bottom - offset + d});
+            }
         }
+    } else if (layout == WindowArrangeLayout::MainRight && n > 1) {
+        const int main_width = (width - gap) * 3 / 5;
+        const int side_width = width - gap - main_width;
+        if (main_width < mw || height < mh) return {};
+        out.push_back({w.left + side_width + gap, w.top, w.right, w.bottom});
+        if (!grid({w.left, w.top, w.left + side_width, w.bottom}, n - 1, 1)) return {};
+    } else if (layout == WindowArrangeLayout::MainTop && n > 1) {
+        const int main_height = (height - gap) * 3 / 5;
+        if (width < mw || main_height < mh) return {};
+        out.push_back({w.left, w.top, w.right, w.top + main_height});
+        if (!grid({w.left, w.top + main_height + gap, w.right, w.bottom}, n - 1,
+                  static_cast<int>(n - 1))) return {};
     } else if (layout == WindowArrangeLayout::Main && n > 1) {
         const int main_width = (width - gap) * 3 / 5;
         if (main_width < mw || height < mh)
@@ -60,7 +87,9 @@ std::vector<RECT> CalculateWindowArrangement(WindowArrangeLayout layout, RECT w,
                 }
         if (!found)
             return {};
-    } else if (!grid(w, n, layout == WindowArrangeLayout::Stacked ? 1 : static_cast<int>(n)))
+    } else if (!grid(w, n, layout == WindowArrangeLayout::Stacked ? 1
+                          : layout == WindowArrangeLayout::Columns ? (std::min)(3, static_cast<int>(n))
+                                                                   : static_cast<int>(n)))
         return {};
     return out;
 }

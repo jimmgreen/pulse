@@ -30,6 +30,9 @@ void ClearWorkspaceActions(AppState& s);
 void RenameWorkspace(AppState& s, int index);
 void RemoveWorkspaceWithUndo(AppState& s, int index);
 void UndoWorkspaceRemoval(AppState& s);
+std::vector<ui::FluentMenuItem> BuildWorkspaceMenuItems(AppState& s, int index);
+std::vector<ui::FluentMenuItem> BuildWorkspacePaneMenuItems(const AppState& s, int workspace, int pane);
+void ShowWorkspacePaneMenu(AppState& s, int workspace, int pane, POINT point);
 void ShowWorkspaceMenu(AppState& s, int index, POINT point);
 // Right-click on a pinned network location row: open, unpin (#236).
 void ShowNetworkPlaceMenu(AppState& s, const std::wstring& unc, POINT point);

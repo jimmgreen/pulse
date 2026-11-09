@@ -7,8 +7,13 @@
 #include <filesystem>
 #include <iostream>
 #include <cmath>
+#include "history_reference_probe.inc"
+#include "operation_flight_probe.inc"
+#include "pane_layout_probe.inc"
+#include "title_layout_probe.inc"
+#include "drag_reference_probe.inc"
 
-int main(int argc, char** argv) {
+int RunContentProgressUiTest(int argc, char** argv) {
     using namespace pulse;
     CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);
     l10n::Initialize(GetModuleHandleW(nullptr),L"zh-CN");
@@ -26,6 +31,13 @@ int main(int argc, char** argv) {
     s.renderer.SetCompositor(&s.compositor);
     s.window_tabs.EnsureDefault(); s.pane=s.window_tabs.Active()->FocusedPane();
     auto* tab=ActiveTab(s);
+    if (GetEnvironmentVariableW(L"PULSE_TEST_TITLE_LAYOUT", nullptr, 0)) return RunTitleLayoutProbe(s);
+    if (GetEnvironmentVariableW(L"PULSE_TEST_PANE_LAYOUT", nullptr, 0)) return RunPaneLayoutProbe(s);
+    if (GetEnvironmentVariableW(L"PULSE_TEST_OPERATION_FLIGHT", nullptr, 0)) return RunOperationFlightProbe(s);
+    if (argc > 1 && std::string_view(argv[1]) == "--history-reference-only") return RunHistoryReferenceProbe(s);
+    if (argc > 1 && std::string_view(argv[1]) == "--drag-reference-only") {
+        return RunDragReferenceProbe(s);
+    }
     tab->current_path=app::MakeSearchPath(L"content:季度预算");
     tab->view_mode=ui::ViewMode::Details;
     auto store=std::make_shared<index::ContentResultStore>(nullptr,0);
@@ -117,8 +129,9 @@ int main(int argc, char** argv) {
         s.renderer.SetCompositor(nullptr); s.compositor.Shutdown(); DestroyWindow(s.hwnd); s.hwnd=nullptr;
         CoUninitialize(); return failures ? 1:0;
     }
+    const bool pill_only = argc > 1 && std::string_view(argv[1]) == "--operation-pill-only";
     const bool update_only = argc > 1 && std::string_view(argv[1]) == "--update-only";
-    if (!update_only) {
+    if (!update_only && !pill_only) {
     const auto output=std::filesystem::absolute(L"../bench_data/content-progress-ui");
     std::filesystem::create_directories(output);
     auto capture=[&](const wchar_t* label, bool hovered=false) {
@@ -208,6 +221,7 @@ int main(int argc, char** argv) {
     check(!BuildVm(s,false).status.query_active && !tab->content_count_final && tab->banner_title==l10n::Get(l10n::StringId::ResultLimitTitle),
         "truncated query remains incomplete and hides progress");
     }
+    if (!pill_only) {
     // Update integration: use the production BuildVm adapter and renderer, never a network/installer.
     tab->search_content_active = false;
     tab->pending_generation = 0;
@@ -287,14 +301,16 @@ int main(int argc, char** argv) {
     s.shot.active = false;
     check(!BuildVm(s, false).status.task_is_update, "fixture cannot leak progress into idle runtime");
 
-    // Operation pill (pulse_ops_dialogs.html 状态栏胶囊): finished with 撤销 /
+    }
+    tab->current_path = L"C:\\Fixture";
+    // Operation pill: finished with 撤销 /
     // 打开, partial failure, paused; the two actions have their own targets.
     {
         l10n::SetLanguage(L"zh-CN");   // the update loop above ends in en-US
         const auto output = std::filesystem::absolute(L"../bench_data/content-progress-ui");
         std::filesystem::create_directories(output);
         s.scale = 1.0f; s.compositor.RecreateTextFormats(1.0f); s.renderer.SetScale(1.0f);
-        const auto rect = D2D1::RectF(0, 0, 1100, 720);
+        auto rect = D2D1::RectF(0, 0, 1100, 720);
         s.compositor.Resize(1100, 720);
         for (const bool dark : {true, false}) {
             const auto theme = ui::MakeTheme(dark, ui::HexColor(0x6474C7));
@@ -316,7 +332,26 @@ int main(int argc, char** argv) {
             frame(running, L"running");
             auto paused = running;
             paused.status.task_paused = true;
+            paused.status.task_text = l10n::Get(l10n::StringId::OpCopyPaused);
             frame(paused, L"paused");
+            int resume_hits = 0;
+            for (float x = 0; x < rect.right; ++x) {
+                const auto pill_hit = s.renderer.HitTest(paused, rect, x, rect.bottom - 12);
+                if (pill_hit.region == ui::HitTestResult::StatusBarTask && pill_hit.sub_index == 2) ++resume_hits;
+            }
+            check(resume_hits > 0, "paused pill exposes resume action index 2");
+            const auto wide_rect = rect;
+            rect.right = 360;
+            s.compositor.Resize(360, 720);
+            frame(paused, L"paused-narrow");
+            int narrow_resume = 0;
+            for (float x = 0; x < rect.right; ++x) {
+                const auto pill_hit = s.renderer.HitTest(paused, rect, x, rect.bottom - 12);
+                if (pill_hit.region == ui::HitTestResult::StatusBarTask && pill_hit.sub_index == 2) ++narrow_resume;
+            }
+            check(narrow_resume > 0, "narrow paused pill retains a bounded resume target");
+            rect = wide_rect;
+            s.compositor.Resize(1100, 720);
             auto done = base;
             done.status.task_text = L"\x5df2\x590d\x5236 12 \x4e2a\x9879\x76ee";
             done.status.task_can_undo = done.status.task_can_open = true;
@@ -336,6 +371,31 @@ int main(int argc, char** argv) {
             }
             check(undo_x > 0 && open_x > undo_x && plain > 0,
                   "finished pill: undo and open have their own targets, the rest opens details");
+            if (dark) {
+                Sleep(12050);
+                frame(done, L"done-compact");
+                int compact_hits = 0, compact_actions = 0;
+                for (float x = 0; x < rect.right; ++x) {
+                    const auto pill_hit = s.renderer.HitTest(done, rect, x, y);
+                    if (pill_hit.region == ui::HitTestResult::StatusBarTask) {
+                        ++compact_hits;
+                        if (pill_hit.sub_index >= 0) ++compact_actions;
+                    }
+                }
+                check(compact_hits > 0 && compact_hits <= 32 && compact_actions == 0,
+                      "after 12 seconds a clickable icon remains without stale action targets");
+                rect.right = 360;
+                s.compositor.Resize(360, 720);
+                frame(done, L"done-compact-narrow");
+                int narrow_compact = 0;
+                for (float x = 0; x < rect.right; ++x)
+                    if (s.renderer.HitTest(done, rect, x, y).region == ui::HitTestResult::StatusBarTask) ++narrow_compact;
+                check(narrow_compact > 0 && narrow_compact <= 32, "compact narrow pill matches visible icon bounds");
+                rect = wide_rect;
+                s.compositor.Resize(1100, 720);
+                frame(running, nullptr);
+                frame(done, nullptr);
+            }
             auto hover = done;
             hover.hover_region = ui::HitTestResult::StatusBarTask;
             hover.hover_sub_index = 0;
@@ -369,3 +429,7 @@ int main(int argc, char** argv) {
     s.renderer.SetCompositor(nullptr); s.compositor.Shutdown(); DestroyWindow(s.hwnd); s.hwnd=nullptr;
     CoUninitialize(); return failures ? 1:0;
 }
+
+#ifndef PULSE_PROGRESS_UI_EMBEDDED
+int main(int argc, char** argv) { return RunContentProgressUiTest(argc, argv); }
+#endif

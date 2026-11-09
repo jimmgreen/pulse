@@ -1,6 +1,6 @@
 #pragma once
-// Setup wizard window (P2): Direct2D/DirectWrite drawing of the pages in
-// installer-prototype/pulse-installer-prototype.html. Runs the install
+// Setup wizard window (P2): Direct2D/DirectWrite drawing of the setup
+// pages. Runs the install
 // engine on a worker thread.
 
 #include "setup_engine.h"

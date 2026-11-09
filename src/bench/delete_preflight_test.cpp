@@ -10,6 +10,34 @@ static bool Wait(const std::shared_ptr<DeletePreflight>& request) {
     return request->done.load();
 }
 int main() {
+    const HWND receiver = CreateWindowExW(0, L"STATIC", L"", 0, 0, 0, 0, 0,
+        HWND_MESSAGE, nullptr, GetModuleHandleW(nullptr), nullptr);
+    if (!receiver) return 1;
+    auto notified = std::make_shared<DeletePreflight>();
+    notified->notify_window = receiver;
+    StartDeletePreflight(notified);
+    MSG completion{};
+    bool received = false;
+    const auto notification_deadline = GetTickCount64() + 5000;
+    while (!received && GetTickCount64() < notification_deadline) {
+        received = PeekMessageW(&completion, receiver, WM_TIMER, WM_TIMER, PM_REMOVE) != FALSE;
+        if (!received) Sleep(1);
+    }
+    DestroyWindow(receiver);
+    if (!received || completion.wParam != 0xD311 || !notified->done.load()) {
+        std::puts("[FAIL] completion must wake the UI without a polling timer"); return 1;
+    }
+    std::puts("[PASS] completion wakes the UI without a polling timer");
+    DeletePreflight display;
+    display.started_at = 1000;
+    if (ShouldShowDeletePreparation(display, 1199) || !ShouldShowDeletePreparation(display, 1200)) return 1;
+    display.done.store(true);
+    if (ShouldShowDeletePreparation(display, 1500)) return 1;
+    display.done.store(false); display.cancel.store(true);
+    if (ShouldShowDeletePreparation(display, 1500)) return 1;
+    display.cancel.store(false); display.preparation_shown = true;
+    if (ShouldShowDeletePreparation(display, 1500)) return 1;
+    std::puts("[PASS] preparation window only for pending uncanceled work after grace period");
     auto request = std::make_shared<DeletePreflight>();
     std::atomic<bool> entered{false}, release{false};
     request->paths = {L"Z:\\preflight-read-only-test"};

@@ -177,10 +177,6 @@ public:
         bool raw_available = false;
         float raw_progress = 0.0f;
         std::wstring raw_version, raw_notice, raw_update_version;
-        bool archive_installed = false, archive_enabled = true, archive_installing = false;
-        bool archive_available = false;
-        float archive_progress = 0.0f;
-        std::wstring archive_version, archive_notice, archive_update_version;
     };
     const PackState& Packs();
 
@@ -215,10 +211,6 @@ public:
     bool TakeRawPackResult();
     bool RemoveRawPack();
     bool ToggleRawPack();
-    bool InstallArchivePack(HWND notify);
-    bool TakeArchivePackResult();
-    bool RemoveArchivePack();
-    bool ToggleArchivePack();
     // Installs the catalog's newer release over an installed pack, copying
     // its unchanged files; the pack's switches stay as they are.
     bool UpdatePack(packs::PackId id, HWND notify);
@@ -267,6 +259,7 @@ public:
     void ClickMode(int index);      // 鼠标与选择: 0/1 double/single click, 2/3 name band on hover/always
     // Optional Details columns (ui/details_column_set.h bits), every folder.
     void DetailsColumns(uint32_t mask);
+    void DetailsColumnOrder(const ui::DetailsColumnOrder& order);
     void StartupOpen(int index);
     void NotifyIcon(int index);
     void NewTabOpen(int index);
@@ -385,11 +378,11 @@ private:
     uint64_t offer_checked_ = 0;
     bool offer_missing_ = false;   // published, not installed, no own FFmpeg
     void RefreshPacks();
+    PackInstaller raw_installer_;
     PackInstaller media_installer_;
     uint64_t image_offer_checked_ = 0;
     bool image_offer_missing_ = false;   // published, not installed
     PackInstaller image_installer_;
-    PackInstaller raw_installer_, archive_installer_;
     PackInstaller& InstallerFor(packs::PackId id);
     std::wstring& NoticeFor(packs::PackId id);
     bool InstallPack(packs::PackId id, HWND notify, bool automatic = false);

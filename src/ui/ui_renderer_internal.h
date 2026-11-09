@@ -1,5 +1,8 @@
+#include "ellipsis_layout_cache.h"
+#include "pane_layout_strip.h"
 // ui_renderer_internal.h — Draw + HitTest shared geometry (not a public API).
 #pragma once
+#include <list>
 #include "ui_renderer.h"
 #include "layer_alphas.h"
 #include "empty_state_layout.h"
@@ -17,6 +20,8 @@
 #include "../common/text_format.h"
 #include "../common/display_path.h"
 #include "preview_format_catalog.h"
+#include "../common/preview_extensions.h"
+#include "../common/ffmpeg_tool.h"
 #include "link_type_text.h"
 #include "recent_day_label.h"
 #include "drive_capacity.h"
@@ -85,11 +90,17 @@ struct TextWidthKeyEqual {
     }
 };
 
-thread_local std::unordered_map<TextWidthKey, float, TextWidthKeyHash, TextWidthKeyEqual>
+using TextWidthLru = std::list<const TextWidthKey*>;
+struct TextWidthValue { float width; TextWidthLru::iterator position; };
+thread_local TextWidthLru g_text_width_lru;
+thread_local size_t g_text_width_bytes = 0;
+thread_local std::unordered_map<TextWidthKey, TextWidthValue, TextWidthKeyHash, TextWidthKeyEqual>
     g_text_width_cache;
 constexpr size_t kTextWidthCacheLimit = 4096;
 
 void ClearTextWidthCache() {
+    g_text_width_bytes = 0;
+    g_text_width_lru.clear();
     g_text_width_cache.clear();
 }
 
@@ -175,7 +186,7 @@ void ClearTextWidthCache() {
     constexpr const wchar_t* kIconChevronDown = L"\xE70D";
     constexpr const wchar_t* kIconCloseSmall = L"\xE711";
     constexpr const wchar_t* kIconPinFilled = L"\xE841";
-    // The 别名 mark (14 DIP) and its gaps (pulse_alias.html .amark).
+    // The 别名 mark (14 DIP) and its gaps.
     constexpr float kAliasMarkDip = 14.0f;
     constexpr float kCrumbAliasMarkDip = 19.0f;   // breadcrumb: mark + 5
     constexpr float kListAliasMarkDip = 22.0f;    // list row: mark + 8
@@ -340,7 +351,8 @@ void ClearTextWidthCache() {
         entry.path = !source.full_path.empty() ? source.full_path
                      : (fs::IsVirtualPath(vm.path) ? L"" : JoinDirName(vm.path, source.name));
         if (!entry.path.empty()) entry.alias = app::AliasStore::Instance().Shown(entry.path);
-        entry.thumb_path = !source.is_dir && fs::IsDevicePath(entry.path) ? source.shell_id : std::wstring();
+        entry.thumb_path = !source.recycle_path.empty() ? source.recycle_path
+            : (!source.is_dir && fs::IsDevicePath(entry.path) ? source.shell_id : std::wstring());
         entry.attrs = source.attrs;
         entry.size_value = source.size;
         entry.modified_value = (static_cast<uint64_t>(source.mtime.dwHighDateTime) << 32) |
@@ -449,6 +461,12 @@ void ClearTextWidthCache() {
                 entry.badge_color = HexColor(starred->badge_rgb);
             }
         }
+        if (!source.recycle_path.empty()) {
+            const auto label = pulse::l10n::Get(pulse::l10n::StringId::RecycleBin);
+            entry.badge = label;
+            entry.badge_color = HexColor(0x808080);
+            entry.type_text = label + L" \u00B7 " + entry.type_text;
+        }
         constexpr size_t kMaxCachedRows = 256;
         if (cache.rows.size() >= kMaxCachedRows && !cache.order.empty()) {
             cache.rows.erase(cache.order.front());
@@ -537,18 +555,22 @@ void ClearTextWidthCache() {
         return bounds;
     }
 
+    D2D1_RECT_F WorkspaceDriftRect(const D2D1_RECT_F& row, float scale) {
+        const float inset=std::clamp(row.right-row.left-164.0f*scale,6.0f*scale,46.0f*scale);
+        return D2D1::RectF(row.left+inset,row.top+46.0f*scale,row.right-4.0f*scale,row.top+74.0f*scale);
+    }
+
     D2D1_RECT_F WorkspaceActionRect(const D2D1_RECT_F& row, float scale, int action) {
         if (action == 4) return D2D1::RectF(row.left + 8.0f * scale, row.top + 68.0f * scale, row.right - 8.0f * scale, row.top + 96.0f * scale);
-        if (action >= 2 && l10n::Get(l10n::StringId::WorkspaceUpdate).size() <= 3 && row.right - row.left >= 224.0f * scale) {
-            const float right = row.right - (action == 2 ? 38.0f : 4.0f) * scale;
-            return D2D1::RectF(right - 34.0f * scale, row.top + 46.0f * scale, right, row.top + 74.0f * scale);
-        }
         if (action >= 2) {
-            const float mid = (row.left + row.right) * 0.5f;
-            return D2D1::RectF(action == 2 ? row.left + 6.0f * scale : mid,
-                              row.top + 62.0f * scale,
-                              action == 2 ? mid : row.right - 6.0f * scale,
-                              row.bottom - 4.0f * scale);
+            const auto drift=WorkspaceDriftRect(row,scale);
+            const auto button_width=[&](l10n::StringId id) {
+                const auto count=l10n::Get(id).size();
+                return (count<=3 ? 34.0f : 14.0f+static_cast<float>(count)*6.5f)*scale;
+            };
+            const float right=drift.right-4.0f*scale-(action==2 ? button_width(l10n::StringId::WorkspaceRestore)+6.0f*scale : 0.0f);
+            return D2D1::RectF(right-button_width(action==2 ? l10n::StringId::WorkspaceUpdate : l10n::StringId::WorkspaceRestore),
+                drift.top+3.0f*scale,right,drift.bottom-3.0f*scale);
         }
         const float right = row.right - (action == 0 ? 52.0f : 28.0f) * scale;
         return D2D1::RectF((std::max)(row.left, right - 24.0f * scale),
@@ -559,7 +581,7 @@ void ClearTextWidthCache() {
     float SidebarItemHeight(const SidebarItem& item, const SidebarMetrics& m) {
         if (item.workspace_child_number > 0) return 26.0f * m.scale;
         if (item.workspace_empty) return 100.0f * m.scale;
-        if (item.workspace_index >= 0) return (item.workspace_dirty ? (l10n::Get(l10n::StringId::WorkspaceUpdate).size() <= 3 && m.available_width >= 224.0f * m.scale ? 76.0f : 90.0f) : 44.0f) * m.scale;
+        if (item.workspace_index >= 0) return (item.workspace_dirty ? 76.0f : 44.0f) * m.scale;
         if (item.is_drive) return m.driveH;
         if (item.is_tag) return m.tagH;
         return m.itemH;
@@ -830,7 +852,8 @@ void ClearTextWidthCache() {
                 SidebarSlot slot;
                 slot.kind = item.is_drive ? SidebarSlot::Drive
                           : item.is_tag ? SidebarSlot::Tag : SidebarSlot::Item;
-                slot.rc = D2D1::RectF(innerL + item.indent * 16.0f * scale, y, innerR, y + h);
+                const int depth = item.indent + (has_header ? 1 : 0);
+                slot.rc = D2D1::RectF(innerL + depth * 16.0f * scale, y, innerR, y + h);
                 slot.group = g;
                 slot.item = i;
                 slot.run = run++;
@@ -851,7 +874,7 @@ void ClearTextWidthCache() {
 
     }
 
-    // Staging tray shelf (pulse_tray_redesign.html): every interactive rect
+    // Staging tray shelf: every interactive rect
     // of the three layers, shared by drawing and hit-testing. Layers anchor
     // to the panel top, so a growing panel reveals them from the top down.
     struct TrayShelfGeom {
@@ -982,7 +1005,7 @@ void ClearTextWidthCache() {
         return g;
     }
 
-    // Open view (pulse_tray_redesign.html .op): header 47, filter chips 34,
+    // Open view: header 47, filter chips 34,
     // grouped list, footer 80 (selection line + split button).
     struct TrayOpenGeom {
         D2D1_RECT_F title{}, count{}, collapse{};
@@ -1602,11 +1625,30 @@ void ClearTextWidthCache() {
     // ---------------------------------------------------------------------
 
     // Fixed 16:10 band driven by the panel width; no manual resize.
-    float DetailsPreviewHeight(const D2D1_RECT_F& panel, float scale, float expansion = 0.0f) {
+    float DetailsPreviewHeight(const D2D1_RECT_F& panel, float scale, float expansion,
+                               const DetailsPanelView& details) {
         const float w = panel.right - panel.left - 24.0f * scale - 24.0f * scale;
-        const float h = w * 10.0f / 16.0f;
+        const float h = w * 0.85f;
         const float available = std::max(1.0f, panel.bottom - panel.top - 40.0f * scale);
-        const float normal = std::min(available, std::clamp(h, 160.0f * scale, 360.0f * scale));
+        std::wstring extension;
+        const auto dot = details.path.find_last_of(L'.');
+        const auto slash = details.path.find_last_of(L"/\\");
+        if (dot != std::wstring::npos && (slash == std::wstring::npos || dot > slash)) {
+            extension = details.path.substr(dot);
+            std::transform(extension.begin(), extension.end(), extension.begin(),
+                           [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
+        }
+        const bool media = !details.is_dir && details.multi_count <= 1 &&
+            (preview::IsVideoExtension(extension) || preview::IsAudioExtension(extension) ||
+             ffmpeg::IsVideoExtension(extension) || ffmpeg::IsAudioExtension(extension));
+        const bool document = !details.is_dir && (preview::IsTextExtension(extension) ||
+            preview::IsPdfRasterExtension(extension) || preview::IsArchiveExtension(extension) ||
+            extension == L".docx" || extension == L".epub" || extension == L".xlsx");
+        // Text/pages need readable vertical space; media gets only two control rows.
+        const float content = media ? std::clamp(w*9.0f/16.0f, 150.0f*scale, 300.0f*scale)
+            : document ? std::clamp(w*1.15f, 280.0f*scale, 400.0f*scale)
+            : std::clamp(h, 220.0f*scale, 360.0f*scale);
+        const float normal = std::min(available, content + (media ? 88.0f : 26.0f)*scale);
         return normal + (available - normal) * std::clamp(expansion, 0.0f, 1.0f);
     }
     float DetailsPreviewBand(float preview_h, float scale) {
@@ -1840,17 +1882,6 @@ void ClearTextWidthCache() {
         return typography::MeasureLine(compositor, format, text);
     }
 
-    // 下载并预览 button: centred near the bottom of the preview well; the
-    // explanation sits above it. Empty when the well is too short for both.
-    inline D2D1_RECT_F DetailsCloudButtonRect(const D2D1_RECT_F& preview, float s, float label_w) {
-        if (preview.bottom - preview.top < 132.0f * s) return {};
-        const float w = std::min(preview.right - preview.left - 24.0f * s, label_w + 16.0f * s + 6.0f * s + 32.0f * s);
-        if (w < 60.0f * s) return {};
-        const float cx = (preview.left + preview.right) * 0.5f;
-        const float bottom = preview.bottom - 16.0f * s;
-        return D2D1::RectF(std::round(cx - w * 0.5f), bottom - 30.0f * s, std::round(cx + w * 0.5f), bottom);
-    }
-
     void LayoutDetailsPanel(const D2D1_RECT_F& panel, float scale,
                             const DetailsPanelView& d, IDWriteFactory2* dwrite,
                             IDWriteTextFormat* small_fmt, Compositor* compositor,
@@ -1864,12 +1895,6 @@ void ClearTextWidthCache() {
         out.preview = D2D1::RectF(x, panel.top + pad, panel.right - pad,
                                   panel.top + pad + preview_h);
         const float previewBottom = panel.top + pad + preview_h;
-        if (d.cloud_online && d.preview_enabled && d.multi_count <= 1 && d.cloud_download_percent < 0) {
-            const std::wstring label = pulse::l10n::Get(pulse::l10n::StringId::CloudDownloadPreview);
-            const float label_w = dwrite && small_fmt
-                ? MeasureLayoutText(compositor, dwrite, small_fmt, label) : 90.0f * s;
-            out.cloud_download = DetailsCloudButtonRect(out.preview, s, label_w);
-        }
         // Preview off: no fold bar and no well to hit up there.
         if (d.preview_enabled) {
             out.preview_toggle = D2D1::RectF(x, previewBottom, panel.right - pad,
@@ -1897,7 +1922,7 @@ void ClearTextWidthCache() {
             // Buttons size to their measured label width; leftover space is
             // shared equally so the row still spans the panel. Very narrow
             // panels shrink proportionally (labels then ellipsize on draw).
-            const float rowH = 48.0f * s;
+            const float rowH = 40.0f * s;
             const float gap = 6.0f * s;
             const float avail = w - gap * 3.0f;
             const float equal = avail / 4.0f;
@@ -2009,8 +2034,10 @@ float MeasureTextWidth(IDWriteFactory2* factory, IDWriteTextFormat* fmt, const s
     if (!factory || !fmt || text.empty()) return 0.0f;
     const std::uint64_t generation = typography::Generation();
     if (const auto cached = g_text_width_cache.find(TextWidthLookup{fmt, text, generation});
-        cached != g_text_width_cache.end())
-        return cached->second;
+        cached != g_text_width_cache.end()) {
+        g_text_width_lru.splice(g_text_width_lru.end(), g_text_width_lru, cached->second.position);
+        return cached->second.width;
+    }
     const float fallback = fmt->GetFontSize() * static_cast<float>(text.size());
     ComPtr<IDWriteTextLayout> layout;
     if (FAILED(factory->CreateTextLayout(text.c_str(), (UINT32)text.size(), fmt,
@@ -2021,8 +2048,21 @@ float MeasureTextWidth(IDWriteFactory2* factory, IDWriteTextFormat* fmt, const s
     DWRITE_OVERHANG_METRICS om{};
     layout->GetOverhangMetrics(&om);
     const float width = m.widthIncludingTrailingWhitespace + std::max(0.0f, om.right) + 1.0f;
-    if (g_text_width_cache.size() >= kTextWidthCacheLimit) g_text_width_cache.clear();
-    g_text_width_cache.emplace(TextWidthKey{fmt, text, generation}, width);
+    constexpr size_t budget = 2 * 1024 * 1024;
+    const size_t bytes = text.size() * sizeof(wchar_t);
+    if (bytes <= budget) {
+        while (!g_text_width_cache.empty() &&
+               (g_text_width_cache.size() >= kTextWidthCacheLimit || g_text_width_bytes + bytes > budget)) {
+            auto oldest = g_text_width_cache.find(*g_text_width_lru.front());
+            g_text_width_lru.pop_front();
+            g_text_width_bytes -= oldest->first.text.size() * sizeof(wchar_t);
+            g_text_width_cache.erase(oldest);
+        }
+        auto inserted = g_text_width_cache.emplace(TextWidthKey{fmt, text, generation}, TextWidthValue{width, {}}).first;
+        g_text_width_lru.push_back(&inserted->first);
+        inserted->second.position = std::prev(g_text_width_lru.end());
+        g_text_width_bytes += bytes;
+    }
     return width;
 }
 
@@ -2035,6 +2075,7 @@ struct StatusBarMetrics {
     D2D1_RECT_F task{};
     D2D1_RECT_F cancel_search{};
     D2D1_RECT_F hint_action{};   // empty unless the hint carries a clickable action
+    D2D1_RECT_F undo_chip{}, undo_button{}, redo_button{}, status_label{}, selection_label{};
     D2D1_RECT_F ai_chip{};       // the AI chip at the far left; empty when hidden
     bool ai_chip_text = false;   // the chip has room for its words (else "✦ AI" only)
     float content_left = 0.0f;   // where everything else starts (right of the AI chip)
@@ -2042,6 +2083,26 @@ struct StatusBarMetrics {
     float pad = 0.0f;
     float right_reserved = 0.0f;
 };
+
+constexpr float kUndoHistoryRowHeight = 44.0f;
+// drag_undo_mockup .hsec: undone rows (listed first) sit under their own
+// 24 DIP heading while the list is scrolled to the top.
+bool UndoHistoryUndoneSection(const WindowViewModel& vm) {
+    return vm.status.history_offset == 0 && !vm.status.history.empty() && vm.status.history.front().undone;
+}
+D2D1_RECT_F UndoHistoryBounds(const WindowViewModel& vm, const D2D1_RECT_F& full, float scale) {
+    const bool section = !vm.status.history.empty() && vm.status.history.front().undone;
+    const float height = (114.0f + (section ? 24.0f : 0.0f) +
+                          46.0f * static_cast<float>(std::min<size_t>(vm.status.history.size(), 7))) * scale;
+    return D2D1::RectF(full.left + 12 * scale, std::max(full.top + 60 * scale, full.bottom - 36 * scale - height),
+        // drag_undo_mockup .hist: 440 DIP wide.
+        std::min(full.right - 12 * scale, full.left + 452 * scale), full.bottom - 36 * scale);
+}
+
+float UndoHistoryRowTop(const WindowViewModel& vm, const D2D1_RECT_F& card, size_t index, float scale) {
+    return card.top + (48.0f + 46.0f * static_cast<float>(index - vm.status.history_offset) +
+        (UndoHistoryUndoneSection(vm) ? 24.0f : 0.0f) + (vm.status.history[index].undone ? 0.0f : 24.0f)) * scale;
+}
 
 constexpr float kAiChipMaxTextDip = 240.0f;
 
@@ -2055,6 +2116,7 @@ StatusBarMetrics MakeStatusBarMetrics(const WindowViewModel& vm, const D2D1_RECT
     // The AI chip (Pulse 助手) takes the far left; the status text starts
     // right of it.
     D2D1_RECT_F rect = full;
+    rect.right -= PaneLayoutStripWidth(vm, full.right-full.left, scale, factory, small_format) + (vm.layout_controls.visible ? 12*scale : 0);
     m.content_left = m.pad;
     if (vm.status.ai_state != StatusAiState::Hidden) {
         // Widths measured in the small face, scaled to the chip's 12.5 DIP.
@@ -2115,13 +2177,47 @@ StatusBarMetrics MakeStatusBarMetrics(const WindowViewModel& vm, const D2D1_RECT
     }
     if (centered_progress) {
         const float cancel_width = vm.status.query_cancellable ? 30.0f * scale : 0.0f;
-        const float width = std::min(std::max(0.0f, rect.right - rect.left - 2.0f * m.pad),
+        const float width = std::min(std::max(0.0f, rect.right - rect.left - 2.0f * (m.undo_chip.right > m.undo_chip.left ? m.content_left : m.pad)),
             MeasureTextWidth(factory, small_format, vm.status.query_active ? vm.status.query_text : vm.status.task_text) + 112.0f * scale + cancel_width);
         const float left = (rect.left + rect.right - width) * 0.5f;
         m.task = D2D1::RectF(left, m.bar.top, left + width - cancel_width, m.bar.bottom);
         if (vm.status.query_cancellable)
             m.cancel_search = D2D1::RectF(m.task.right + 8.0f * scale, m.bar.top + 2.0f * scale,
                 left + width, m.bar.bottom - 2.0f * scale);
+    }
+    // HTML order: AI, item count, optional selection count, history, flexible trailing area.
+    const float gap = 14 * scale;
+    const float left_limit = centered_progress ? m.task.left - gap :
+        rect.right - m.pad - (has_task ? std::min(190.0f * scale, (rect.right - m.content_left) * 0.32f) : 0.0f);
+    float cursor = m.content_left;
+    const auto column = [&](const std::wstring& text, D2D1_RECT_F& out) {
+        if (text.empty()) return;
+        const float width = std::min(std::max(0.0f, left_limit - cursor - (centered_progress ? 0.0f : 120 * scale)),
+            MeasureTextWidth(factory, small_format, path::FriendlyPathText(text)));
+        out = D2D1::RectF(cursor, m.bar.top, cursor + width, m.bar.bottom);
+        cursor += width + gap;
+    };
+    column(vm.status.status_text, m.status_label);
+    column(vm.status.selection_text, m.selection_label);
+    const float controls = (vm.status.can_redo ? 98.0f : 70.0f) * scale;
+    const float preferred = std::min(240.0f * scale,
+        MeasureTextWidth(factory, small_format, vm.status.undo_label) + controls);
+    const float available = std::max(0.0f, left_limit - cursor);
+    if (available >= controls + 24 * scale) {
+        m.undo_chip = D2D1::RectF(cursor, (m.bar.top + m.bar.bottom) * 0.5f - 11 * scale, cursor + std::min(preferred, available), (m.bar.top + m.bar.bottom) * 0.5f + 11 * scale);
+        m.undo_button = m.undo_chip; m.undo_button.right = cursor + 28 * scale;
+        if (vm.status.can_redo) { m.redo_button = m.undo_chip; m.redo_button.left = m.redo_button.right - 28 * scale; }
+        cursor = m.undo_chip.right + gap;
+    }
+    if (!centered_progress) {
+        // Right-side hints yield before the count or history capsule.
+        m.right_reserved = std::min(m.right_reserved, std::max(m.pad, rect.right - cursor));
+        if (m.hint_action.left < cursor) m.hint_action = {};
+        if (has_task) {
+            // file_ops_mockup: the pill follows the counts and history directly.
+            m.task.left = cursor;
+            m.task.right = std::max(m.task.left, rect.right - m.right_reserved);
+        }
     }
     return m;
 }
@@ -2196,21 +2292,12 @@ void DrawTextEndEllipsis(Compositor* compositor, IDWriteTextFormat* fmt,
                                  D2D1::ColorF(0, 0.0f), fmt->GetTextAlignment())) {
         return;
     }
-    ComPtr<IDWriteTextLayout> layout;
-    if (!factory || FAILED(factory->CreateTextLayout(text.c_str(), (UINT32)text.size(), fmt,
-                                                     w, h, &layout)) || !layout.get()) {
+    auto* layout=CachedEllipsisLayout(factory,fmt,text,w,h);
+    if (!layout) {
         DrawTextEndEllipsis(compositor->Dc(), factory, fmt, br, text, x, y, w, h);
         return;
     }
-    layout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-    layout->SetTextAlignment(fmt->GetTextAlignment());
-    if (MeasureTextWidth(factory, fmt, text) > w) {
-        DWRITE_TRIMMING trimming{ DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0 };
-        ComPtr<IDWriteInlineObject> ellipsis;
-        factory->CreateEllipsisTrimmingSign(layout.get(), &ellipsis);
-        layout->SetTrimming(&trimming, ellipsis.get());
-    }
-    compositor->DrawTextLayout(D2D1::Point2F(x, y), layout.get(), br, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    compositor->DrawTextLayout(D2D1::Point2F(x, y), layout, br, D2D1_DRAW_TEXT_OPTIONS_CLIP);
 }
 
 void DrawTabTitle(ID2D1DeviceContext* dc, IDWriteFactory2* factory,
@@ -2353,6 +2440,11 @@ TitleChrome MakeTitleChrome(float window_w, float scale, float title_h) {
     TitleChrome c;
     const float ctrl_w = 46.0f * scale;
     c.chrome_left = window_w - ctrl_w * 3.0f;
+    if (window_w < 600.0f * scale) {
+        c.windows_left = c.settings_left = c.theme_left = c.chrome_left;
+        c.group_left = c.group_right = c.chrome_left;
+        return c;
+    }
     c.theme_w = 36.0f * scale;
     c.settings_w = 36.0f * scale;
     const float group_pad = 2.0f * scale;
@@ -2373,7 +2465,7 @@ constexpr float kSettingsNavW = 200.0f;
 // 5: 快速预览, 6: 系统右键菜单, 7: 快捷键, 8: 增强包; 0 and 9-12 split the former 通用 page:
 // 0 外观, 9 文件列表, 10 标签页与窗口, 11 启动与集成, 12 文件操作.
 // 13 AI 与 MCP has no row (under 增强包); 14 AI 助手 follows 增强包.
-constexpr int kSettingsNavCount = 15;
+constexpr int kSettingsNavCount = 16;
 inline bool IsGeneralSettingsPage(int page) noexcept { return page == 0 || (page >= 9 && page <= 12); }
 // Sidebar order, top to bottom, in five groups (关于 3 sits at the bottom, 6 has no row).
 constexpr int kSettingsNavOrder[] = {0, 9, 10, 11, 12, 1, 5, 8, 14, 2, 7, 4};
@@ -2543,6 +2635,9 @@ inline PulsePreviewLayout LayoutPulsePreview(const WindowViewModel& vm, const D2
 // anonymous namespace so MakeSettingsLayout (ui_settings_layout.cpp) exists
 // once instead of being compiled into every settings file.
 struct SettingsLayout {
+    D2D1_RECT_F search_box{};
+    D2D1_RECT_F search_clear{}, search_empty_clear{};
+    std::vector<D2D1_RECT_F> search_results;
     // Rows of vm.settings_items; only Pulse's own commands (group 5) are laid
     // out. Windows and other software are managed on 系统右键菜单 (page 6).
     std::vector<D2D1_RECT_F> context_rows;
@@ -2578,8 +2673,8 @@ struct SettingsLayout {
     D2D1_RECT_F performance_row{}, disclosure[4]{}, filename_status{};
     D2D1_RECT_F startup_lead{}, startup_overview[3]{}, startup_restore_row{}, startup_restore_button{};
     StartupDialogInfoLayout startup_dialog_info;
-    D2D1_RECT_F startup_dialog_jump_row{}, dialog_badge{};
-    D2D1_RECT_F dialog_toggle_row{}, dialog_scope_button{}, dialog_export_button{}, dialog_retry_button{}, dialog_jump_button{};
+    D2D1_RECT_F dialog_badge{};
+    D2D1_RECT_F dialog_toggle_row{}, dialog_scope_button{}, dialog_export_button{}, dialog_retry_button{};
     D2D1_RECT_F dialog_management_section{}, dialog_management_intro{}, dialog_management_status{};
     D2D1_RECT_F dialog_bundle_row{}, dialog_application_row{}, dialog_actions_row{}, dialog_empty_row{};
     D2D1_RECT_F dialog_auto_enable{}, dialog_auto_disable{};
@@ -2590,6 +2685,7 @@ struct SettingsLayout {
     D2D1_RECT_F integration_section{}, integration_badge{}, integration_bar{}, integration_list_head{};
     D2D1_RECT_F integration_chip[4]{};
     D2D1_RECT_F integration_choice[3]{};
+    D2D1_RECT_F integration_segments[3][4]{};
     D2D1_RECT_F integration_cover[3]{}, integration_options_head{}, integration_try{}, integration_hint_text{}, integration_hint_action{};
     float integration_text_right = 0.0f;
     // Quick Look page: 预览方式 (hover card or Space) and the hover delay.
@@ -2606,7 +2702,7 @@ struct SettingsLayout {
     D2D1_RECT_F preview_codec_text[kPreviewCodecCount]{}, preview_codec_badge[kPreviewCodecCount]{};
     D2D1_RECT_F preview_codec_row[kPreviewCodecCount]{}, preview_codec_button[kPreviewCodecCount]{};
     // 预览增强包 page (5), see LayoutSettingsPacks.
-    D2D1_RECT_F pack_update_all{}, pack_manage{};
+    D2D1_RECT_F pack_update_all{}, pack_manage{}, pack_native_settings{}, native_settings_content{};
     // 增强包 page, 搜索: the 内容搜索 module and the planned OCR one.
     D2D1_RECT_F pack_search_section{}, pack_content_card{}, pack_content_badge{}, pack_content_enable{},
         pack_content_primary{}, pack_content_update{}, pack_content_notice{};
@@ -2631,9 +2727,6 @@ struct SettingsLayout {
     float pack_images_desc_h = 0.0f;
     D2D1_RECT_F pack_raw_card{}, pack_raw_badge{}, pack_raw_enable{}, pack_raw_primary{}, pack_raw_update{}, pack_raw_notice{};
     float pack_raw_desc_h = 0.0f;
-    D2D1_RECT_F pack_archive_section{}, pack_archive_card{}, pack_archive_badge{}, pack_archive_enable{}, pack_archive_primary{},
-        pack_archive_update{}, pack_archive_notice{};
-    float pack_archive_desc_h = 0.0f;
     D2D1_RECT_F content_header{}, content_types{}, content_pause{}, content_options{}, content_rebuild{}, content_empty{};
     D2D1_RECT_F body{};
     D2D1_RECT_F nav{};
@@ -2673,6 +2766,7 @@ struct SettingsLayout {
     D2D1_RECT_F startup_open_row[2]{};
     D2D1_RECT_F notify_icon_card{};
     D2D1_RECT_F notify_icon_row[3]{};
+    D2D1_RECT_F tab_layout_card{}, tab_layout_choices[3]{}, tab_rows_card{}, tab_rows_choices[3]{};
     D2D1_RECT_F new_tab_open_card{};
     D2D1_RECT_F new_tab_open_row[2]{};
     D2D1_RECT_F open_pulse_icon_card{};
@@ -2938,6 +3032,9 @@ HitTestResult::Region StatusBarHitRegion(const WindowViewModel& vm, const D2D1_R
     IDWriteTextFormat* fmt = compositor ? compositor->SmallFormat() : nullptr;
     const StatusBarMetrics sb = MakeStatusBarMetrics(
         vm, rect, scale, status_height, factory, fmt);
+    if (ContainsPt(sb.undo_button, x, y)) return HitTestResult::StatusUndo;
+    if (vm.status.can_redo && ContainsPt(sb.redo_button, x, y)) return HitTestResult::StatusRedo;
+    if (ContainsPt(sb.undo_chip, x, y)) return HitTestResult::StatusUndoHistory;
     if (sb.ai_chip.right > sb.ai_chip.left && ContainsPt(sb.ai_chip, x, y)) return HitTestResult::StatusBarAi;
     if (vm.status.query_cancellable && ContainsPt(sb.cancel_search, x, y)) return HitTestResult::StatusBarCancelSearch;
     if (sb.hint_action.right > sb.hint_action.left && ContainsPt(sb.hint_action, x, y))

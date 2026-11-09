@@ -1,0 +1,67 @@
+Folder direct opening audit -- 2026-11-04
+
+Evidence
+User confirmed a normal desktop folder. Supplied 111111 runtime session
+app-48364 records integration=1, takeover=1, compat=1. Seven handoffs are
+observer-originated (external_open entry=1), with native candidates already
+875-1125 ms old when accepted. Candidate age is not a measured visible time.
+The previous SettingsController policy explicitly disabled folder registration
+when compatibility was selected. This explains why observer handoffs occurred.
+
+Changes
+Folder registration now depends on the master and folder selections only.
+Compatibility supplements, rather than disables, the direct verb. Startup
+upgrades enabled old compatibility configurations through ApplyFolderOpen,
+preserving explicit disabled selections and the existing registry backup.
+UI status requires actual folder registration. Migration failures are error
+events. explorer_takeover_config includes folders_requested,
+folders_direct_desired and folders_direct_active, including changes in its
+event suppression key. Compatibility descriptions now explain fallback scope.
+
+Other paths audited
+- Settings actions for other scopes and repair use the same direct policy.
+- Settings import excludes machine-local integration choices.
+- RestoreOthers disables integration only for explicit restore-system action.
+- Normal uninstall restores associations; upgrade uninstall skips restoration.
+- Legacy residue repair requires absent commands and absent backups; it does
+  not remove a valid owned folder command.
+- Launcher native fallback occurs only before a host is successfully created;
+  no registry removal and no post-launch timeout fallback.
+- Win+E native fallback follows cancelled delivery, not successful dispatch.
+- ApplyDefaultFileManager forwards its explicit requested on/off value.
+
+Remaining findings / limits
+The separately identified directory-move failure gap is now addressed:
+new files are committed before association migration, owned commands are
+verified at the new location, and only then does the current uninstall engine
+remove the old installation in upgrade mode. Partial migration failures retain
+both executable locations and return an installation failure. Startup and
+shared runtime registration follow old-install cleanup.
+Explicit Explorer/COM callers that bypass default verbs remain observer
+coverage; direct registration alone cannot prove they never show Explorer.
+No measured 99 percent coverage claim is made.
+The previous extension build blocker has been removed from the production
+configuration by its owning work. A newly added reactive probe source required
+CMake regeneration before the main executable linked successfully. Production
+payload targets and setup then built successfully. Release rebuild and installer verification
+are recorded separately in bench_data/folder-direct-release-build.log and
+bench_data/folder-direct-installer-verification.json. No installed-app desktop
+double-click result is claimed: the user requested the installer to test it.
+
+Validation
+The focused pulse_app_controllers_test --integration-compat uses real AppPrefs
+Load, SettingsController actions and registry implementation under an isolated
+HKCU override and isolated preferences. It covers old-config migration, both
+compatibility switch directions, unrelated scope changes and repair, explicit
+folder/master off, injected registry write failure, retry and cleanup.
+Final focused test result: 17 PASS, 0 FAIL. Affected app_prefs,
+settings_controller and shell_window_sync objects compiled successfully.
+Localized generated outputs check and source diff whitespace check passed.
+No full historical suite or global association mutation used.
+Directory-move handoff fault-injection tests cover partial association failure,
+old uninstall failure, shared runtime failure, and the successful operation order.
+The five additional path-boundary checks cover same/different directories,
+both nesting directions, name-prefix lookalikes, and case/slash normalization.
+Final installer-migration target result: 9 PASS, 0 FAIL, recorded in
+bench_data/folder-direct-setup-test.log. Its isolated fault-injection checks do
+not claim a real cross-directory install/uninstall was performed.

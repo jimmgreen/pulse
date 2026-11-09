@@ -1,5 +1,5 @@
 // action_params.h - What each action takes when the assistant runs it, and
-// the assistant's lookup of the action table (plans/ai/P3_AI接入动作表.html).
+// the assistant's lookup of the action table.
 //
 // A spec is "name:kind" words: kinds are bool, string, path, folder,
 // folders, paths, pane, setting, any, selector, or the values with | (for

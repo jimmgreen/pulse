@@ -28,7 +28,7 @@ namespace {
 constexpr float kW = 720.f, kH = 468.f, kTitle = 40.f;
 // Welcome hero block offset: centres the logo..path group between titlebar and footer.
 constexpr float kWelcomeDy = 30.f;
-constexpr UINT WM_ENGINE_PHASE = WM_APP + 1, WM_ENGINE_BUSY = WM_APP + 2, WM_ENGINE_DONE = WM_APP + 3;
+constexpr UINT WM_ENGINE_PHASE = WM_APP + 1, WM_ENGINE_BUSY = WM_APP + 2, WM_ENGINE_DONE = WM_APP + 3, WM_ENGINE_LOCKED = WM_APP + 4;
 constexpr float kPi = 3.14159265f;
 float EaseOut(float t) { const float u = 1 - t; return 1 - u * u * u; }  // cubic, no powf
 
@@ -118,7 +118,7 @@ enum Id : int {
 
 enum class Page { Welcome, Options, Install, Done, Error, Uninstall };
 enum class UnState { Idle, Running, Done, Failed };
-enum class Dialog { None, Busy, Cancel };
+enum class Dialog { None, Busy, Cancel, Locked, Cleanup };
 
 class Wizard {
 public:
@@ -162,7 +162,10 @@ private:
     // ---- device ----
     bool CreateFactories();
     bool EnsureDevice();
-    void ReleaseDevice() { SafeRelease(brush_); SafeRelease(logo_); SafeRelease(logo_small_); SafeRelease(rt_); }
+    void ReleaseDevice() { SafeRelease(brush_); SafeRelease(logo_); SafeRelease(logo_small_); SafeRelease(rt_); SafeRelease(window_rt_); }
+#ifdef PULSE_SETUP_UI_CAPTURE
+    bool CaptureProbe(const wchar_t* path);
+#endif
     void LoadLogo();
     float Dpi() const { return static_cast<float>(dpi_); }
     float Scale() const { return dpi_ / 96.f; }
@@ -203,6 +206,7 @@ private:
     void PaintDone();
     void PaintError();
     void PaintDialog();
+    void PaintLockDialog();
     void PaintUninstall();
     float CardTop(float y) const { return y - scroll_; }
 
@@ -250,7 +254,8 @@ private:
     ID2D1Factory* d2d_ = nullptr;
     IDWriteFactory* dwrite_ = nullptr;
     IWICImagingFactory* wic_ = nullptr;
-    ID2D1HwndRenderTarget* rt_ = nullptr;
+    ID2D1RenderTarget* rt_ = nullptr;
+    ID2D1HwndRenderTarget* window_rt_ = nullptr;
     ID2D1SolidColorBrush* brush_ = nullptr;
     ID2D1Bitmap* logo_ = nullptr;
     ID2D1Bitmap* logo_small_ = nullptr;
@@ -286,6 +291,10 @@ private:
     bool engine_done_ = false, busy_given_up_ = false;
     ULONGLONG done_time_ = 0;
     ULONGLONG glow_frame_ = 0;  // last welcome-glow repaint (throttled to ~30 fps)
+    FileLockReport locked_report_;
+    FileLockReport displayed_locks_;
+    size_t locked_cleanup_versions_ = 0, displayed_cleanup_versions_ = 0;
+    float lock_scroll_ = 0, lock_scroll_max_ = 0;
     HANDLE busy_answer_event_ = nullptr;
     std::atomic<bool> busy_retry_{false};
     bool slow_ = false;
@@ -333,8 +342,10 @@ bool Wizard::EnsureDevice() {
                                                     D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE),
                                                     Dpi(), Dpi());
     if (FAILED(d2d_->CreateHwndRenderTarget(
-            props, D2D1::HwndRenderTargetProperties(hwnd_, D2D1::SizeU(rc.right, rc.bottom)), &rt_)))
+            props, D2D1::HwndRenderTargetProperties(hwnd_, D2D1::SizeU(rc.right, rc.bottom)), &window_rt_)))
         return false;
+    rt_ = window_rt_;
+    rt_->AddRef();
     rt_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
     rt_->CreateSolidColorBrush(theme_.text, &brush_);
     LoadLogo();
@@ -696,6 +707,47 @@ void Wizard::PaintTitleBar() {
     if (can_close) Hit(kCloseX, close_r, false);
 }
 
+#ifdef PULSE_SETUP_UI_CAPTURE
+// Test executable only: exercise the same painter without requiring an unlocked
+// desktop. The shipping installer has no capture entry point.
+bool Wizard::CaptureProbe(const wchar_t* path) {
+    ReleaseDevice();
+    IWICBitmap* bitmap = nullptr;
+    HRESULT hr = wic_->CreateBitmap(static_cast<UINT>(kW * Scale()), static_cast<UINT>(kH * Scale()),
+        GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, &bitmap);
+    if (SUCCEEDED(hr)) hr = d2d_->CreateWicBitmapRenderTarget(bitmap,
+        D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), Dpi(), Dpi()), &rt_);
+    if (SUCCEEDED(hr)) {
+        rt_->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+        hr = rt_->CreateSolidColorBrush(theme_.text, &brush_);
+    }
+    if (SUCCEEDED(hr)) {
+        LoadLogo();
+        Paint();
+        wchar_t scroll[16]{};
+        if (GetEnvironmentVariableW(L"PULSE_SETUP_TEST_LOCK_SCROLL", scroll, 16)) {
+            lock_scroll_ = static_cast<float>(_wtoi(scroll));
+            Paint();
+        }
+    }
+    IWICStream* stream = nullptr;
+    IWICBitmapEncoder* encoder = nullptr;
+    IWICBitmapFrameEncode* frame = nullptr;
+    if (SUCCEEDED(hr)) hr = wic_->CreateStream(&stream);
+    if (SUCCEEDED(hr)) hr = stream->InitializeFromFilename(path, GENERIC_WRITE);
+    if (SUCCEEDED(hr)) hr = wic_->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder);
+    if (SUCCEEDED(hr)) hr = encoder->Initialize(stream, WICBitmapEncoderNoCache);
+    if (SUCCEEDED(hr)) hr = encoder->CreateNewFrame(&frame, nullptr);
+    if (SUCCEEDED(hr)) hr = frame->Initialize(nullptr);
+    if (SUCCEEDED(hr)) hr = frame->WriteSource(bitmap, nullptr);
+    if (SUCCEEDED(hr)) hr = frame->Commit();
+    if (SUCCEEDED(hr)) hr = encoder->Commit();
+    SafeRelease(frame); SafeRelease(encoder); SafeRelease(stream); SafeRelease(bitmap);
+    return SUCCEEDED(hr);
+}
+#endif
+
 void Wizard::PaintPage(Page p, float dx, float alpha) {
     if (alpha <= 0.01f) return;
     rt_->SetTransform(D2D1::Matrix3x2F::Translation(dx, 0));
@@ -755,15 +807,6 @@ void Wizard::PaintWelcome() {
         const float dk = k * (.55f + .45f * breath), dr = 128 * (.88f + .20f * breath);
         glow(dot, dr, dr, {{0, WithAlpha(core, .70f * dk)}, {.10f, WithAlpha(hot, .55f * dk)}, {.30f, WithAlpha(gold, .30f * dk)},
                            {.55f, WithAlpha(gold, .10f * dk)}, {.80f, WithAlpha(gold, .025f * dk)}, {1, WithAlpha(gold, 0)}});
-        // Soft drop shadow: stacked rounded rects, tinted navy on light themes.
-        const D2D1_COLOR_F shade = theme_.dark ? Hex(0x000000) : Hex(0x1C1F34);
-        const float sa = theme_.dark ? 2.1f : .6f;
-        for (int i = 14; i >= 1; --i) {
-            const float sp = i * 1.5f, oy = 8 + i * 1.25f;
-            Fill({lx + 6 - sp * .5f, ly + oy - sp * .3f, lx + 90 + sp * .5f, ly + oy + 92 + sp * .3f}, WithAlpha(shade, .016f * sa),
-                 21 + sp * .6f);
-        }
-        glow({cx, ly + 98}, 60, 9.6f, {{0, WithAlpha(shade, .30f * sa)}, {1, WithAlpha(shade, 0)}});
     }
     if (logo_) rt_->DrawBitmap(logo_, {kW / 2 - 48, 54 + kWelcomeDy, kW / 2 + 48, 150 + kWelcomeDy}, 1, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
 
@@ -1159,13 +1202,14 @@ void Wizard::PaintInstall() {
 void Wizard::PaintDone() {
     const float t = std::min(1.f, (GetTickCount64() - page_time_) / 900.f);
     std::vector<std::pair<std::wstring, D2D1_COLOR_F>> pills;
-    if (req_.tasks.index_service && !req_.options.test)
+    if (req_.tasks.index_service && !req_.options.test && (result_.index_running || !result_.index_configured))
         pills.push_back(result_.index_running ? std::pair{std::wstring(T(Str::SumIndex)), theme_.success}
                                               : std::pair{std::wstring(T(Str::SumIndexFailed)), theme_.warn});
     if (result_.defaults_written && req_.tasks.global_search) pills.push_back({T(Str::SumGlobalSearch), theme_.success});
     if (result_.defaults_written && req_.tasks.ai_assistant) pills.push_back({T(Str::SumAiAssistant), theme_.success});
     if (result_.verbs_seeded) pills.push_back({T(Str::SumMenu), theme_.success});
     if (result_.startup) pills.push_back({T(Str::SumStart), theme_.success});
+    if (result_.dialog_cleanup_pending) pills.push_back({T(Str::CleanupPending), theme_.warn});
     std::vector<float> row_widths;
     std::vector<size_t> row_starts;
     for (size_t i = 0; i < pills.size(); ++i) {
@@ -1296,7 +1340,7 @@ void Wizard::PaintUninstall() {
             std::lock_guard lock(file_mutex_);
             line = un_item_;
         } else if (un_state_ == UnState::Done) {
-            line = T(ures_.reboot_needed ? Str::UnDoneReboot : Str::UnDone);
+            line = T(ures_.dialog_cleanup_pending ? Str::UnDoneDialogRetained : ures_.reboot_needed ? Str::UnDoneReboot : Str::UnDone);
             color = theme_.text2;
         } else {
             line = std::wstring(T(Str::UnFailed)) + L" " + ures_.error;
@@ -1328,6 +1372,7 @@ void Wizard::PaintUninstall() {
 }
 
 void Wizard::PaintDialog() {
+    if (dialog_ == Dialog::Locked || dialog_ == Dialog::Cleanup) { PaintLockDialog(); return; }
     hits_.clear();  // modal
     Hit(kMin, {kW - 92, 0, kW - 46, kTitle}, false);
     const float t = std::min(1.f, (GetTickCount64() - dialog_time_) / 220.f);
@@ -1360,6 +1405,74 @@ void Wizard::PaintDialog() {
            busy ? Btn::Normal : Btn::Danger, 96, 32, true);
     rt_->SetTransform(D2D1::Matrix3x2F::Identity());
     if (t < 1) hits_.resize(1);
+}
+
+void Wizard::PaintLockDialog() {
+    hits_.clear();
+    Hit(kMin, {kW - 92, 0, kW - 46, kTitle}, false);
+    const bool cleanup = dialog_ == Dialog::Cleanup;
+    Fill({0, kTitle, kW, kH}, theme_.scrim);
+    const D2D1_RECT_F card{60, 58, kW - 60, kH - 18};
+    for (int i = 5; i > 0; --i)
+        Fill({card.left - i * 2.f, card.top + 5 - i, card.right + i * 2.f, card.bottom + 5 + i}, Hex(0, .035f), 10.f + i);
+    Fill(card, theme_.win, 10);
+    Stroke(card, theme_.stroke, 10);
+    Icon(8, card.left + 22, card.top + 23, theme_.warn);
+    Text(T(cleanup ? Str::CleanupTitle : Str::LockedTitle),
+         {card.left + 52, card.top + 18, card.right - 22, card.top + 46}, 18, theme_.text, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+    const bool owners = !displayed_locks_.programs.empty();
+    const auto description = T(cleanup ? (owners ? Str::CleanupText : Str::CleanupUnknown) : Str::LockedText);
+    const float text_h = TextHeight(description, 12.5f, card.right - card.left - 44);
+    Text(description, {card.left + 22, card.top + 55, card.right - 22, card.top + 55 + text_h},
+         12.5f, theme_.text2, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true);
+    const float section_y = card.top + 66 + text_h;
+    Text(T(owners ? Str::CleanupApps : Str::LockedTitle),
+         {card.left + 22, section_y, card.right - 22, section_y + 20}, 12, theme_.text, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+    if (cleanup) Text(std::wstring(T(Str::CleanupVersions)) + L": " + std::to_wstring(displayed_cleanup_versions_),
+         {card.left + 230, section_y, card.right - 22, section_y + 20}, 11.5f, theme_.text3,
+         DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING);
+    const float footer_y = card.bottom - 62;
+    const auto hint = T(cleanup ? Str::CleanupHint : !owners ? Str::LockedUnknown : Str::LockedLog);
+    const float hint_h = TextHeight(hint, 11.5f, card.right - card.left - 44);
+    const D2D1_RECT_F list{card.left + 22, section_y + 26, card.right - 22, footer_y - hint_h - 20};
+    Fill(list, theme_.card, 6);
+    Stroke(list, theme_.stroke, 6);
+    const size_t rows = owners ? displayed_locks_.programs.size() : displayed_locks_.files.size();
+    const float available = std::max(1.f, list.bottom - list.top - 8);
+    lock_scroll_max_ = std::max(0.f, static_cast<float>(rows) * 42.f - available);
+    lock_scroll_ = std::clamp(lock_scroll_, 0.f, lock_scroll_max_);
+    rt_->PushAxisAlignedClip({list.left + 1, list.top + 1, list.right - 1, list.bottom - 1}, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    for (size_t i = 0; i < rows; ++i) {
+        const float y = list.top + 4 + static_cast<float>(i) * 42 - lock_scroll_;
+        if (y + 42 < list.top || y > list.bottom) continue;
+        std::wstring title, detail;
+        if (owners) {
+            const auto& program = displayed_locks_.programs[i];
+            title = program.name.empty() ? L"PID " + std::to_wstring(program.pid) : program.name;
+            detail = L"PID " + std::to_wstring(program.pid);
+        } else {
+            const auto& path = displayed_locks_.files[i];
+            const auto slash = path.find_last_of(L"\\/");
+            title = slash == std::wstring::npos ? path : path.substr(slash + 1);
+            detail = path;
+        }
+        Text(title, {list.left + 12, y + 2, list.right - 15, y + 22}, 12.5f, theme_.text, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+        Text(detail, {list.left + 12, y + 23, list.right - 15, y + 39}, 10.5f, theme_.text3);
+        if (i + 1 < rows) Line(list.left + 12, y + 41, list.right - 12, y + 41, theme_.divider, .7f);
+    }
+    rt_->PopAxisAlignedClip();
+    if (lock_scroll_max_ > 0) {
+        const float thumb = std::max(20.f, available * available / (available + lock_scroll_max_));
+        const float y = list.top + 4 + (available - thumb) * lock_scroll_ / lock_scroll_max_;
+        Fill({list.right - 6, y, list.right - 3, y + thumb}, theme_.text3, 1.5f);
+    }
+    Text(hint, {card.left + 22, footer_y - hint_h - 10, card.right - 22, footer_y - 10},
+         11.5f, theme_.text2, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true);
+    Line(card.left, footer_y, card.right, footer_y, theme_.divider, 1);
+    Button(kOpenLog, T(Str::OpenLog), card.left + 18, footer_y + 15, Btn::Ghost);
+    const float primary = Button(kDlgPrimary, T(Str::Retry), card.right - 22, footer_y + 15, Btn::Primary, 96, 32, true);
+    Button(kDlgSecondary, T(cleanup ? Str::CleanupKeep : Str::Cancel), card.right - 30 - primary,
+           footer_y + 15, Btn::Normal, 96, 32, true);
 }
 
 // ======================================================================
@@ -1409,6 +1522,10 @@ void Wizard::SyncFromEdits() {
 void Wizard::Activate(int id) {
     if (probe_ && (id == kInstall || id == kOptInstall || id == kLaunch || id == kUnStart || id == kOpenLog)) return;
     if (probe_ && (id == kCloseX || id == kCloseDone)) { DestroyWindow(hwnd_); return; }
+    if ((id == kCloseX || id == kCancelInstall) && (dialog_ == Dialog::Locked || dialog_ == Dialog::Cleanup)) {
+        Activate(kDlgSecondary);
+        return;
+    }
     switch (id) {
         case kMin: ShowWindow(hwnd_, SW_MINIMIZE); break;
         case kUnClose:
@@ -1449,12 +1566,18 @@ void Wizard::Activate(int id) {
         case kCloseDone: CloseWith(page_ == Page::Done ? kExitOk : outcome_.exit_code); break;
         case kOpenLog: ShellExecuteW(hwnd_, L"open", LogPath().c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
         case kDlgPrimary:
-            if (dialog_ == Dialog::Busy) { busy_retry_ = true; SetEvent(busy_answer_event_); }
+            if (dialog_ == Dialog::Cleanup) Log(L"Dialog cleanup user action: retry");
+            if (dialog_ == Dialog::Busy || dialog_ == Dialog::Locked || dialog_ == Dialog::Cleanup) { busy_retry_ = true; SetEvent(busy_answer_event_); }
             else paused_ = false;
             dialog_ = Dialog::None;
             break;
         case kDlgSecondary:
-            if (dialog_ == Dialog::Busy) { busy_retry_ = false; busy_given_up_ = true; SetEvent(busy_answer_event_); }
+            if (dialog_ == Dialog::Cleanup) Log(L"Dialog cleanup user action: keep for now");
+            if (dialog_ == Dialog::Busy || dialog_ == Dialog::Locked || dialog_ == Dialog::Cleanup) {
+                busy_retry_ = false;
+                if (dialog_ != Dialog::Cleanup) busy_given_up_ = true;
+                SetEvent(busy_answer_event_);
+            }
             else { cancel_ = true; paused_ = false; }
             dialog_ = Dialog::None;
             break;
@@ -1504,6 +1627,21 @@ void Wizard::EngineThread(InstallRequest request) {
         while (paused_ && !cancel_) Sleep(50);
         if (slow_) Sleep(40);  // test installs only: make the progress page observable
         return !cancel_.load();
+    };
+    cb.locked = [this](const FileLockReport& report) {
+        { std::lock_guard lock(file_mutex_); locked_report_ = report; }
+        PostMessageW(hwnd_, WM_ENGINE_LOCKED, 0, 0);
+        WaitForSingleObject(busy_answer_event_, INFINITE);
+        return busy_retry_.load();
+    };
+    cb.cleanup_locked = [this](const DialogCleanupReport& report) {
+        { std::lock_guard lock(file_mutex_); locked_report_ = report.locks;
+          if (locked_report_.files.empty()) for (const auto& entry : report.blocked_directories)
+              locked_report_.files.push_back(entry.directory);
+          locked_cleanup_versions_ = report.blocked_directories.size(); }
+        PostMessageW(hwnd_, WM_ENGINE_LOCKED, 1, 0);
+        WaitForSingleObject(busy_answer_event_, INFINITE);
+        return busy_retry_.load();
     };
     cb.busy = [this]() {
         PostMessageW(hwnd_, WM_ENGINE_BUSY, 0, 0);
@@ -1684,7 +1822,7 @@ LRESULT Wizard::Proc(UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_SIZE:
-            if (rt_) rt_->Resize(D2D1::SizeU(LOWORD(lp), HIWORD(lp)));
+            if (window_rt_) window_rt_->Resize(D2D1::SizeU(LOWORD(lp), HIWORD(lp)));
             Invalidate();
             return 0;
         case WM_ERASEBKGND:
@@ -1740,12 +1878,22 @@ LRESULT Wizard::Proc(UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         case WM_MOUSEWHEEL:
+            if (dialog_ == Dialog::Locked || dialog_ == Dialog::Cleanup) {
+                lock_scroll_ = std::clamp(lock_scroll_ - GET_WHEEL_DELTA_WPARAM(wp) / 120.f * 42.f, 0.f, lock_scroll_max_);
+                Invalidate();
+                return 0;
+            }
             if (page_ == Page::Options && dialog_ == Dialog::None) {
                 scroll_ = std::clamp(scroll_ - GET_WHEEL_DELTA_WPARAM(wp) / 120.f * 48.f, 0.f, max_scroll_);
                 Invalidate();
             }
             return 0;
         case WM_KEYDOWN:
+            if ((dialog_ == Dialog::Locked || dialog_ == Dialog::Cleanup) &&
+                (wp == VK_NEXT || wp == VK_PRIOR || wp == VK_DOWN || wp == VK_UP)) {
+                lock_scroll_ = std::clamp(lock_scroll_ + (wp == VK_NEXT || wp == VK_DOWN ? 84.f : -84.f), 0.f, lock_scroll_max_);
+                Invalidate(); return 0;
+            }
             if (wp == VK_TAB) { MoveFocus(GetKeyState(VK_SHIFT) < 0); return 0; }
             if ((wp == VK_RETURN || wp == VK_SPACE) && focus_ != kNone) {
                 for (const auto& h : hits_) if (h.id == focus_) { Activate(focus_); return 0; }
@@ -1756,7 +1904,7 @@ LRESULT Wizard::Proc(UINT msg, WPARAM wp, LPARAM lp) {
                 return 0;
             }
             if (wp == VK_ESCAPE) {
-                if (dialog_ != Dialog::None) Activate(dialog_ == Dialog::Busy ? kDlgSecondary : kDlgPrimary);
+                if (dialog_ != Dialog::None) Activate(dialog_ == Dialog::Cancel ? kDlgPrimary : kDlgSecondary);
                 else if (page_ == Page::Options) Show(Page::Welcome);
                 else Activate(kCloseX);
                 return 0;
@@ -1776,6 +1924,18 @@ LRESULT Wizard::Proc(UINT msg, WPARAM wp, LPARAM lp) {
             phase_ = static_cast<Phase>(wp);
             Invalidate();
             return 0;
+        case WM_ENGINE_LOCKED: {
+            { std::lock_guard lock(file_mutex_); displayed_locks_ = locked_report_;
+              displayed_cleanup_versions_ = locked_cleanup_versions_; }
+            dialog_ = wp ? Dialog::Cleanup : Dialog::Locked;
+            lock_scroll_ = 0;
+            focus_ = kDlgPrimary;
+            keyboard_focus_ = true;
+            dialog_time_ = GetTickCount64();
+            FlashWindow(hwnd_, TRUE);
+            Invalidate();
+            return 0;
+        }
         case WM_ENGINE_BUSY:
             dialog_ = Dialog::Busy;
             dialog_time_ = GetTickCount64();
@@ -1827,6 +1987,10 @@ LRESULT Wizard::Proc(UINT msg, WPARAM wp, LPARAM lp) {
             Activate(kCloseX);  // Alt+F4 follows the close button's rules
             return 0;
         case WM_DESTROY:
+            busy_retry_ = false;
+            cancel_ = true;
+            paused_ = false;
+            SetEvent(busy_answer_event_);
             KillTimer(hwnd_, 1);
             PostQuitMessage(0);
             return 0;
@@ -1898,6 +2062,20 @@ WizardOutcome Wizard::Run() {
         }
         if (GetEnvironmentVariableW(L"PULSE_SETUP_TEST_SLIDE", value, 16)) slide_ = std::clamp(_wtoi(value), 0, 5);
         if (GetEnvironmentVariableW(L"PULSE_SETUP_TEST_SCROLL", value, 16)) scroll_ = static_cast<float>(std::max(0, _wtoi(value)));
+        if (GetEnvironmentVariableW(L"PULSE_SETUP_TEST_LOCKS", value, 16)) {
+            page_ = prev_page_ = Page::Install;
+            dialog_ = _wtoi(value) == 2 ? Dialog::Locked : Dialog::Cleanup;
+            displayed_cleanup_versions_ = 4;
+            displayed_locks_.programs = {{6888, L"QQ"}, {18832, L"QQ"}, {36772, L"Weixin"},
+                {4096, L"Adobe Photoshop — document editing session"}, {8192, L"Browser"}};
+            if (_wtoi(value) == 3) {
+                displayed_locks_.programs.clear();
+                displayed_locks_.files = {L"C:\\Program Files\\Pulse\\DialogBridge\\9b3c1fcadc5b7e985b8a859cba86d8069e3163dfb447265f93bfe1392fc2a893\\PulseDialogAuto64.dll"};
+            }
+            dialog_time_ = GetTickCount64() - 1000;
+            focus_ = kDlgPrimary;
+            keyboard_focus_ = true;
+        }
         result_.defaults_written = true;
         result_.verbs_seeded = true;
         result_.startup = true;
@@ -1907,6 +2085,17 @@ WizardOutcome Wizard::Run() {
         done_bytes_ = 42 * 1048576;
         slide_time_ = GetTickCount64() - 1000;
     }
+#ifdef PULSE_SETUP_UI_CAPTURE
+    if (probe_) {
+        wchar_t output[32768]{};
+        if (GetEnvironmentVariableW(L"PULSE_SETUP_TEST_CAPTURE", output, 32768)) {
+            const bool captured = CaptureProbe(output);
+            DestroyWindow(hwnd_);
+            outcome_.exit_code = captured ? 0 : 1;
+            return outcome_;
+        }
+    }
+#endif
     ShowWindow(hwnd_, SW_SHOWNORMAL);
     SetForegroundWindow(hwnd_);
     SetTimer(hwnd_, 1, 16, nullptr);

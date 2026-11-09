@@ -19,6 +19,7 @@ bool Await(HANDLE pipe, OVERLAPPED& overlap, HANDLE peer, const Tick& tick, DWOR
     }
 }
 bool Exact(HANDLE pipe, HANDLE peer, void* buffer, DWORD count, bool write, const Tick& tick, DWORD timeout_ms) {
+    if (!count) return true;
     Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     if (!event) return false;
     auto* bytes = static_cast<unsigned char*>(buffer);

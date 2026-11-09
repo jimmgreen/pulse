@@ -9,6 +9,348 @@
 
 namespace pulse::ui {
 struct ThumbnailCacheTestAccess {
+    static bool RealDownloadRetryRegression() {
+        bool ok = true;
+        const auto check = [&](bool value, const char* name) {
+            std::printf("[%s] %s\n", value ? "PASS" : "FAIL", name); std::fflush(stdout); ok &= value;
+        };
+        const HRESULT initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        const auto directory = std::filesystem::absolute(L"bench_data") /
+            (L"download-retry-live-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+        std::filesystem::create_directories(directory);
+        const auto path = directory / L"downloading.png";
+        std::vector<char> complete;
+        {
+            ComPtr<IWICImagingFactory> factory;
+            ComPtr<IWICStream> stream;
+            ComPtr<IWICBitmapEncoder> encoder;
+            ComPtr<IWICBitmapFrameEncode> frame;
+            HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                IID_PPV_ARGS(&factory));
+            if (SUCCEEDED(hr)) hr = factory->CreateStream(&stream);
+            if (SUCCEEDED(hr)) hr = stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE);
+            if (SUCCEEDED(hr)) hr = factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder);
+            if (SUCCEEDED(hr)) hr = encoder->Initialize(stream.get(), WICBitmapEncoderNoCache);
+            if (SUCCEEDED(hr)) hr = encoder->CreateNewFrame(&frame, nullptr);
+            if (SUCCEEDED(hr)) hr = frame->Initialize(nullptr);
+            if (SUCCEEDED(hr)) hr = frame->SetSize(2, 2);
+            WICPixelFormatGUID format = GUID_WICPixelFormat24bppBGR;
+            if (SUCCEEDED(hr)) hr = frame->SetPixelFormat(&format);
+            BYTE pixels[] = {0, 0, 255, 0, 0, 255, 0, 0, 255, 0, 0, 255};
+            if (SUCCEEDED(hr)) hr = frame->WritePixels(2, 6, sizeof(pixels), pixels);
+            if (SUCCEEDED(hr)) hr = frame->Commit();
+            if (SUCCEEDED(hr)) hr = encoder->Commit();
+            check(SUCCEEDED(hr), "encode isolated complete PNG fixture with WIC");
+        }
+        if (ok) {
+            std::ifstream input(path, std::ios::binary);
+            complete.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+            check(complete.size() > 32, "complete PNG contains image data beyond partial header");
+        }
+        ComPtr<ID3D11Device> d3d;
+        ComPtr<IDXGIDevice> dxgi;
+        ComPtr<ID2D1Device> device;
+        ComPtr<ID2D1DeviceContext> dc;
+        HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION, &d3d, nullptr, nullptr);
+        if (SUCCEEDED(hr)) hr = d3d->QueryInterface(IID_PPV_ARGS(&dxgi));
+        if (SUCCEEDED(hr)) hr = D2D1CreateDevice(dxgi.get(), nullptr, &device);
+        if (SUCCEEDED(hr)) hr = device->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc);
+        check(SUCCEEDED(hr), "create real graphics context for partial download retry");
+        if (ok) {
+            const auto write = [&](size_t length) {
+                std::ofstream output(path, std::ios::binary | std::ios::trunc);
+                output.write(complete.data(), static_cast<std::streamsize>(length));
+                output.close();
+                return output.good();
+            };
+            check(write(24), "write only PNG header to same download path");
+            ThumbnailCache cache;
+            cache.SetParallelism(1); cache.SetDeviceContext(dc.get());
+            const uint64_t frozen_size = complete.size();
+            const auto key = cache.Key(path.wstring(), 128, 10, frozen_size);
+            const auto draw = [&] {
+                return cache.DrawGridThumbnail(dc.get(), D2D1::RectF(0, 0, 128, 128),
+                    path.wstring(), FILE_ATTRIBUTE_NORMAL, 128, 1, 10, frozen_size, 1, false, nullptr);
+            };
+            draw();
+            bool rejected = false;
+            const auto first_deadline = GetTickCount64() + 15000;
+            while (!rejected && GetTickCount64() < first_deadline) {
+                { std::lock_guard lock(cache.mutex_);
+                  const auto item = cache.items_.find(key);
+                  rejected = item != cache.items_.end() && item->second.failed &&
+                      item->second.transient && !cache.pending_.contains(key); }
+                if (!rejected) Sleep(10);
+            }
+            check(rejected, "real preview host rejects incomplete PNG and schedules retry");
+            check(write(complete.size()), "finish PNG at identical path without changing snapshot identity");
+            bool bitmap = false;
+            bool red_pixels = false;
+            const auto retry_deadline = GetTickCount64() + 15000;
+            while (!bitmap && GetTickCount64() < retry_deadline) {
+                bool ready_to_draw = false;
+                { std::lock_guard lock(cache.mutex_);
+                  const auto item = cache.items_.find(key);
+                  ready_to_draw = !cache.pending_.contains(key);
+                  red_pixels |= item != cache.items_.end() && !item->second.failed &&
+                      item->second.pixels.size() >= 4 && item->second.pixels[2] == 255 &&
+                      item->second.pixels[1] == 0; }
+                if (ready_to_draw) bitmap = draw() == PreviewDrawResult::Bitmap;
+                if (!bitmap) Sleep(10);
+            }
+            check(bitmap, "real draw retries host and uploads completed PNG bitmap at unchanged size and mtime key");
+            {
+                std::lock_guard lock(cache.mutex_);
+                const auto item = cache.items_.find(key);
+                if (item != cache.items_.end())
+                    std::printf("[INFO] decoded PNG width=%u height=%u red_before_upload=%d failed=%d retry_history=%d\n",
+                        item->second.w, item->second.h, red_pixels, item->second.failed,
+                        cache.transient_failures_.contains(key));
+                check(item != cache.items_.end() && !item->second.failed && item->second.w == 2 &&
+                    item->second.h == 2 && red_pixels &&
+                    !cache.transient_failures_.contains(key), "real decoded pixels are red and retry history is cleared");
+            }
+            ThumbnailCache::Request stale;
+            stale.key = key; stale.path = path.wstring(); stale.epoch = cache.epoch_.load() - 1;
+            ThumbnailCache::Item failed; failed.failed = true;
+            check(!cache.StoreResult(stale, std::move(failed)) && draw() == PreviewDrawResult::Bitmap,
+                "cancelled old decode cannot overwrite actual completed download bitmap");
+            cache.Reset();
+        }
+        std::error_code error;
+        std::filesystem::remove(path, error);
+        if (!error) std::filesystem::remove(directory, error);
+        check(!error, "remove isolated partial download fixture after host shutdown");
+        if (SUCCEEDED(initialized)) CoUninitialize();
+        return ok;
+    }
+    static bool DownloadRetryRegression() {
+        bool ok = true;
+        const auto check = [&](bool value, const char* name) {
+            std::printf("[%s] %s\n", value ? "PASS" : "FAIL", name); ok &= value;
+        };
+        ThumbnailCache cache;
+        ThumbnailCache::Request req;
+        req.path = L"downloading.PNG"; req.pixels = 256;
+        req.key = cache.Key(req.path, req.pixels, 10, 100);
+        req.identity = cache.Key(req.path, 0, 10, 100);
+        req.epoch = cache.epoch_.load();
+        bool retries = true;
+        for (unsigned i = 0; i < 8; ++i) {
+            ThumbnailCache::Item failed; failed.failed = true;
+            const auto before = GetTickCount64();
+            cache.StoreResult(req, std::move(failed));
+            const auto& stored = cache.items_.at(req.key);
+            retries &= stored.transient && stored.retry_at > before && stored.retry_at <= GetTickCount64() + 30000;
+        }
+        check(retries, "incomplete image remains retryable after a long download with bounded backoff");
+        check(cache.Key(req.path, req.pixels, 10, 101) != req.key &&
+            cache.Key(req.path, req.pixels, 11, 100) != req.key,
+            "size or timestamp updates bypass old negative cache");
+        ThumbnailCache::Item good; good.kind = ipc::PreviewContentKind::Bitmap;
+        cache.StoreResult(req, std::move(good));
+        check(!cache.items_.at(req.key).failed && !cache.transient_failures_.contains(req.key),
+            "completed image replaces failure and clears retry history");
+        cache.Evict(); cache.pending_.insert(req.key);
+        ThumbnailCache::Item old; old.failed = true;
+        check(!cache.StoreResult(req, std::move(old)) && cache.pending_.contains(req.key),
+            "cancelled generation cannot replace completion or remove new pending request");
+        req.epoch = cache.epoch_.load(); req.path = L"unsupported.xyz";
+        ThumbnailCache::Item unsupported; unsupported.failed = true;
+        cache.StoreResult(req, std::move(unsupported));
+        check(!cache.items_.at(req.key).transient, "unsupported non-image remains a permanent negative");
+        ok = RealDownloadRetryRegression() && ok;
+        return ok;
+    }
+    static bool PsdProgressiveRegression(const char* fixture) {
+        bool ok = true;
+        const auto check = [&](bool value, const char* name) {
+            std::printf("[%s] %s\n", value ? "PASS" : "FAIL", name); std::fflush(stdout); ok &= value;
+        };
+        const auto image = [](uint32_t edge) {
+            ThumbnailCache::Item item;
+            item.kind = ipc::PreviewContentKind::Bitmap;
+            item.w = edge; item.h = edge * 3 / 4; item.stride = edge * 4;
+            item.source_width = 11648; item.source_height = 8736;
+            item.pixels.assign(static_cast<size_t>(item.stride) * item.h, 255);
+            item.cost = item.pixels.size();
+            return item;
+        };
+        {
+            ThumbnailCache cache;
+            ThumbnailCache::Request req;
+            req.id = 1; req.key = L"psd"; req.path = L"test.psd"; req.identity = L"psd";
+            req.epoch = cache.epoch_.load(); req.pixels = 512;
+            auto first = image(160); first.needs_psd_refine = true;
+            check(cache.StoreResult(req, std::move(first)), "PSD first image is retained before refinement");
+            cache.running_ = true; // Exercise scheduling without creating a worker.
+            cache.lane_count_ = 4;
+            cache.QueuePsdRefinement(req); cache.QueuePsdRefinement(req);
+            check(cache.queue_.size() == 1 && cache.pending_.contains(req.key), "PSD refinement is queued once while pending");
+            auto ordinary = req; ordinary.id = 2; ordinary.key = L"ordinary";
+            cache.queue_.push_back(ordinary);
+            ThumbnailCache::Request selected; bool slow = false;
+            check(cache.TakeRequestLocked(selected, slow) && selected.id == 2,
+                "ordinary first images precede queued PSD refinement");
+            check(cache.TakeRequestLocked(selected, slow) && slow && !selected.urgent &&
+                (selected.flags & ipc::kPreviewRequestFlagPsdRefine), "PSD refinement occupies a slow slot without priority boost");
+            auto second_refine = selected; second_refine.id = 3; second_refine.key = L"second-refine";
+            cache.queue_.push_back(second_refine);
+            ThumbnailCache::Request concurrent;
+            check(!cache.TakeRequestLocked(concurrent, slow), "large PSD refinements cannot occupy all slow lanes concurrently");
+            auto first_psd = ordinary; first_psd.id = 4; first_psd.timeout_ms = 8000;
+            cache.queue_.push_back(first_psd);
+            check(cache.TakeRequestLocked(concurrent, slow) && concurrent.id == 4,
+                "incoming PSD first pass can use another slow lane while refinement runs");
+            cache.queue_.clear();
+            ThumbnailCache::Item failure; failure.failed = true; failure.transient = true;
+            check(!cache.StoreResult(selected, std::move(failure)) && cache.items_.at(req.key).w == 160 &&
+                !cache.pending_.contains(req.key) && !cache.items_.at(req.key).needs_psd_refine,
+                "failed PSD refinement preserves first image without automatic retry");
+            check(cache.StoreResult(selected, image(512)) && cache.items_.at(req.key).w == 512,
+                "successful PSD refinement replaces low resolution image");
+            selected.interest_tracked = true;
+            cache.items_.at(req.key).needs_psd_refine = true;
+            check(!cache.StoreResult(selected, image(256)) && cache.items_.at(req.key).w == 512 &&
+                cache.items_.at(req.key).needs_psd_refine,
+                "offscreen refinement cannot overwrite displayed result");
+            cache.QueuePsdRefinement(selected);
+            check(cache.queue_.empty(), "offscreen PSD refinement is not queued");
+            cache.Evict(); cache.pending_.insert(req.key);
+            check(!cache.StoreResult(req, image(160)) && cache.pending_.contains(req.key),
+                "stale PSD completion cannot clear a replacement generation");
+            cache.running_ = false;
+        }
+        {
+            ComPtr<ID3D11Device> d3d;
+            HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION, &d3d, nullptr, nullptr);
+            ComPtr<IDXGIDevice> dxgi;
+            if (SUCCEEDED(hr)) hr = d3d->QueryInterface(IID_PPV_ARGS(&dxgi));
+            ComPtr<ID2D1Device> device;
+            if (SUCCEEDED(hr)) hr = D2D1CreateDevice(dxgi.get(), nullptr, &device);
+            ComPtr<ID2D1DeviceContext> dc;
+            if (SUCCEEDED(hr)) hr = device->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc);
+            check(SUCCEEDED(hr), "create real graphics context for PSD return-to-view test");
+            if (SUCCEEDED(hr)) {
+                ThumbnailCache cache;
+                cache.SetDeviceContext(dc.get());
+                ThumbnailCache::Request req;
+                req.path = L"return.psd"; req.pixels = 512;
+                req.key = cache.Key(req.path, 512, 0, 0); req.identity = cache.Key(req.path, 0, 0, 0);
+                req.epoch = cache.epoch_.load();
+                auto first = image(160); first.needs_psd_refine = true;
+                cache.StoreResult(req, std::move(first));
+                cache.running_ = true; // Keep this a deterministic paint/scheduling check.
+                cache.DrawGridThumbnail(dc.get(), D2D1::RectF(0, 0, 512, 384), req.path, 0,
+                    512, 0, 0, 0, 1.0f, false, nullptr);
+                check(cache.queue_.size() == 1 && (cache.queue_.front().flags & ipc::kPreviewRequestFlagPsdRefine),
+                    "returning to cached PSD queues its cancelled refinement from production draw path");
+                cache.queue_.clear(); cache.pending_.clear();
+                cache.StoreResult(req, image(512));
+                cache.DrawGridThumbnail(dc.get(), D2D1::RectF(0, 0, 1024, 768), req.path, 0,
+                    1024, 0, 0, 0, 1.0f, false, nullptr);
+                check(cache.queue_.size() == 1 && cache.queue_.front().pixels == 1024 &&
+                    cache.queue_.front().key != req.key,
+                    "enlarging PSD requests a new 1024px decode from production draw path");
+                cache.running_ = false;
+            }
+        }
+        if (!fixture) return ok;
+        struct Store final : ThumbnailStore {
+            std::atomic<unsigned> loads{0}, saves{0}, saved_width{0};
+            std::atomic<bool> forced{false};
+            bool legacy = true;
+            bool hot = false;
+            StoredThumbnail saved;
+            bool Load(const ThumbnailStoreKey&, StoredThumbnail& out) override {
+                ++loads;
+                if (hot) { out = saved; return true; }
+                if (!legacy) return false;
+                out.width = 160; out.height = 120;
+                out.source_width = 11648; out.source_height = 8736;
+                out.pixels.assign(160 * 120 * 4, 255); return true;
+            }
+            void Save(const ThumbnailStoreKey& key, uint32_t, const StoredThumbnail& out) override {
+                saved = out;
+                forced = key.keep_always; saved_width = out.width; ++saves;
+            }
+        } store;
+        const auto path = std::filesystem::absolute(std::filesystem::path(fixture));
+        check(std::filesystem::is_regular_file(path), "large PSD fixture exists for real worker test");
+        if (!std::filesystem::is_regular_file(path)) return false;
+        ThumbnailCache::SetGridStore(&store);
+        for (const bool legacy : {true, false}) {
+            store.legacy = legacy; store.loads = 0; store.saves = 0; store.saved_width = 0; store.forced = false;
+            ThumbnailCache cache;
+            cache.SetParallelism(1);
+            ThumbnailCache::Request req;
+            req.id = 1; req.path = path.wstring(); req.key = L"old-psd-cache"; req.identity = req.path;
+            req.epoch = cache.epoch_.load(); req.pixels = 512; req.timeout_ms = 8000;
+            req.size = std::filesystem::file_size(path);
+            {
+                std::lock_guard lock(cache.mutex_);
+                cache.pending_.insert(req.key); cache.queue_.push_back(req); cache.StartWorkersLocked();
+            }
+            cache.cv_.notify_one();
+            const auto deadline = GetTickCount64() + 15000;
+            bool saw_first = false;
+            while (!store.saves && GetTickCount64() < deadline) {
+                { std::lock_guard lock(cache.mutex_);
+                  const auto it = cache.items_.find(req.key);
+                  saw_first |= it != cache.items_.end() && it->second.w == 160; }
+                Sleep(1);
+            }
+            check(saw_first, legacy ? "legacy low resolution image is visible during upgrade" :
+                "cold real-host PSD publishes embedded first image before composite");
+            check(store.loads == 1 && store.saves == 1 && store.saved_width == 512 && store.forced,
+                legacy ? "legacy 160px disk entry upgrades through real host and forces 512px persistence" :
+                "cold PSD upgrades through real host without persisting embedded JPEG");
+            {
+                std::lock_guard lock(cache.mutex_);
+                const auto it = cache.items_.find(req.key);
+                check(it != cache.items_.end() && it->second.w == 512 && !it->second.failed &&
+                    it->second.pixels.size() >= 4 && it->second.pixels[2] == 255 && it->second.pixels[1] == 0,
+                    "real worker publishes actual composite pixels rather than enlarging embedded JPEG");
+            }
+            cache.Reset();
+        }
+        store.hot = true;
+        for (const uint32_t edge : {512u, 1024u}) {
+            store.loads = 0; store.saves = 0;
+            ThumbnailCache cache;
+            cache.SetParallelism(1);
+            ThumbnailCache::Request req;
+            req.id = 1; req.path = path.wstring(); req.key = L"hot-psd"; req.identity = req.path;
+            req.epoch = cache.epoch_.load(); req.pixels = edge; req.timeout_ms = 8000;
+            req.size = std::filesystem::file_size(path);
+            {
+                std::lock_guard lock(cache.mutex_);
+                cache.pending_.insert(req.key); cache.queue_.push_back(req); cache.StartWorkersLocked();
+            }
+            cache.cv_.notify_one();
+            const auto deadline = GetTickCount64() + 15000;
+            bool complete = false;
+            while (!complete && GetTickCount64() < deadline) {
+                {
+                    std::lock_guard lock(cache.mutex_);
+                    const auto it = cache.items_.find(req.key);
+                    complete = it != cache.items_.end() && it->second.w == edge &&
+                        !it->second.needs_psd_refine && !cache.pending_.contains(req.key);
+                }
+                if (!complete) Sleep(1);
+            }
+            check(complete && store.loads == 1 && (edge == 512 ? store.saves == 0 :
+                store.saves == 1 && store.saved_width == 1024), edge == 512 ?
+                "hot PSD returns refined 512px cached pixels without another decode" :
+                "zoomed PSD upgrades cached 512px image to real 1024px composite");
+            cache.Reset();
+        }
+        ThumbnailCache::SetGridStore(nullptr);
+        return ok;
+    }
+
     static bool InterestRegression() {
         ThumbnailCache cache;
         const HWND a = reinterpret_cast<HWND>(1), b = reinterpret_cast<HWND>(2);
@@ -429,15 +771,38 @@ struct ThumbnailCacheTestAccess {
         auto& item = cache.items_[key];
         item.lru_position = cache.lru_.begin();
         item.w = 2; item.h = 2; item.stride = 8; item.pixels.assign(16, 255);
+        const auto rect = D2D1::RectF(0, 0, 32, 32);
+        const auto window = reinterpret_cast<HWND>(1);
+        cache.AdvanceFrame(window);
+        cache.interests_[window].drawing.insert(key);
+        cache.EndInterestFrame();
+        ThumbnailCache::Request outgoing;
+        outgoing.key = key; outgoing.interest_tracked = true;
+        cache.queue_.push_back(outgoing); cache.pending_.insert(key);
+        cache.AdvanceFrame(window);
+        bool cached_only = cache.DrawCachedGridThumbnail(dc.get(), rect, L"upload.gif", 0,
+            256, 1, 1, 1, true, nullptr) == PreviewDrawResult::Pending;
+        cached_only &= !item.bitmap.get() && item.pixels.size() == 16 &&
+            cache.interests_[window].drawing.empty() && !cache.TakeUploadFrameRequest();
+        cache.EndInterestFrame();
+        cached_only &= cache.queue_.empty() && cache.pending_.empty();
+        cached_only &= cache.DrawCachedGridThumbnail(dc.get(), rect, L"missing.gif", 0,
+            256, 1, 1, 1, true, nullptr) == PreviewDrawResult::Pending && cache.queue_.empty();
         cache.BeginFrame(); cache.upload_elapsed_us_ = 3000;
         cache.PrepareBitmap(key, true);
-        bool ok = !item.bitmap.get() && item.pixels.size() == 16 && cache.TakeRetryDeadline() != 0;
+        bool ok = cached_only && !item.bitmap.get() && item.pixels.size() == 16 && cache.TakeRetryDeadline() != 0;
         cache.upload_probe_ = [](ThumbnailCache& target) {
             if (target.mutex_.try_lock()) target.mutex_.unlock();
             else std::abort();
         };
         cache.BeginFrame(); cache.PrepareBitmap(key, true);
         ok &= item.bitmap.get() && item.pixels.empty() && !item.upload_token;
+        ok &= cache.DrawCachedGridThumbnail(dc.get(), rect, L"upload.gif", 0,
+            256, 1, 1, 1, true, nullptr) == PreviewDrawResult::Bitmap;
+        cache.still_by_identity_[cache.Key(L"upload.gif", 0, 1, 1)] = key;
+        ok &= cache.DrawCachedGridThumbnail(dc.get(), rect, L"upload.gif", 0,
+            128, 1, 1, 1, true, nullptr) == PreviewDrawResult::Bitmap && cache.queue_.empty();
+        std::printf("[%s] outgoing thumbnails reuse uploaded sizes without decode interest or upload\n", ok ? "PASS" : "FAIL");
         item.bitmap.reset(); item.pixels.assign(16, 255); item.w = 0;
         cache.BeginFrame(); cache.PrepareBitmap(key, true);
         ok &= !item.bitmap.get() && item.pixels.size() == 16 && !item.upload_token;
@@ -848,3 +1213,5 @@ bool RunThumbnailUploadRegression() { return pulse::ui::ThumbnailCacheTestAccess
 bool RunThumbnailInterestRegression() { return pulse::ui::ThumbnailCacheTestAccess::InterestRegression(); }
 
 bool RunThumbnailRetryRegression() { return pulse::ui::ThumbnailCacheTestAccess::RetryRegression(); }
+bool RunThumbnailDownloadRetryRegression() { return pulse::ui::ThumbnailCacheTestAccess::DownloadRetryRegression(); }
+bool RunPsdProgressiveRegression(const char* fixture) { return pulse::ui::ThumbnailCacheTestAccess::PsdProgressiveRegression(fixture); }

@@ -2,12 +2,15 @@
 #pragma once
 #include "app_runtime.h"
 #include "app_hover.h"
+#include "app_list_selection.h"
 
 namespace pulse {
+std::vector<ui::FluentMenuItem> BuildTitleTabOverflowItems(AppState& state);
+void ShowTitleTabOverflow(AppState& state, POINT anchor);
 bool HandleBrowserNavigation(AppState& s, LPARAM command);
+bool DeferFileMouseActivation(AppState& s, POINT client);
 bool HandleListCharacter(AppState& s, wchar_t ch);
 void TickQuickPreviewSelection(AppState& s, ULONGLONG now);
-bool HandleDetailsPreviewPointer(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 LRESULT HandleMouseMove(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 LRESULT HandleMouseLeave(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -43,23 +46,7 @@ bool PointInList(const AppState& s, int mx, int my);
 // bar). Restore with `maximizing` only takes back such a click.
 bool BlankClickDeselect(AppState& s, POINT client, bool maximize = false);
 bool RestoreBlankDeselect(AppState& s, POINT client, bool maximizing = false);
-void ResetMarquee(AppState& s);
-void ApplyMarqueeSelection(AppState& s);
-// Marquee start in current pane pixels (it moves with the scrolled content).
-POINT MarqueeStartOnScreen(const AppState& s);
-// The marquee rectangle to draw, in current pane pixels.
-D2D1_RECT_F MarqueeDisplayRect(const AppState& s);
-// Starts/stops edge auto-scroll for the marquee. Scrolling happens in
-// UpdateMarqueeFrame on display frames; Tick (kTimerMarqueeScroll) only asks
-// for the next frame while the pointer rests.
-void UpdateMarqueeAutoScroll(AppState& s);
-void TickMarqueeAutoScroll(AppState& s);
-// Render, once per frame: advances edge auto-scroll by elapsed time and
-// applies a band the pointer or scrolling changed since the last frame.
-void UpdateMarqueeFrame(AppState& s);
-void HandleListRowClick(AppState& s, int index, bool ctrl, bool shift);
-void FinishListRowClick(AppState& s);
-void CancelRenameClick(AppState& s);
+void CancelFileClick(AppState& s);
 // 悬停选中 (single click mode): resting on a row selects it. True when it did.
 bool TickHoverSelect(AppState& s, ULONGLONG now);
 bool PointInHitItemName(AppState& s, const ui::WindowViewModel& vm,

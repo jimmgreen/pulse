@@ -2,6 +2,7 @@
 #include "command_icons.h"
 #include "../common/localization.h"
 #include "fluent_components.h"
+#include "window_action_icon.h"
 #include "tab_shape.h"
 #include "typography.h"
 
@@ -721,6 +722,14 @@ void Painter::DrawPaneLayoutIcon(const D2D1_RECT_F& bounds, MenuPictogram kind,
         return;
     }
     EnsureStrokeStyle();
+    if (kind >= MenuPictogram::WindowNew && kind <= MenuPictogram::WindowMerge) {
+        const float inset = (std::min)(Width(bounds), Height(bounds)) * 0.08f;
+        DrawWindowActionIcon(dc_, D2D1::RectF(bounds.left + inset, bounds.top + inset,
+            bounds.right - inset, bounds.bottom - inset),
+            static_cast<WindowActionIcon>(static_cast<int>(kind) - static_cast<int>(MenuPictogram::WindowNew) + 1),
+            ScratchBrush(color));
+        return;
+    }
     const float box = std::min(Width(bounds), Height(bounds)) * 0.72f;
     if (box < 6.0f) {
         return;
@@ -1510,6 +1519,13 @@ void Painter::DrawMenuItem(const MenuItemSpec& spec) {
         caption.left += Px(16.0f);
         caption.right -= Px(16.0f);
         caption.top += Px(6.0f);
+        if (!spec.shortcut.empty()) {
+            auto detail = caption;
+            const float width = MeasureTextWidth(compositor_, CaptionFormat(), spec.shortcut);
+            detail.left = (std::max)(caption.left, caption.right - width);
+            caption.right = detail.left - Px(12.0f);
+            DrawText(spec.shortcut, detail, CaptionFormat(), theme_->text_secondary, HorizontalAlignment::Right);
+        }
         DrawText(spec.text, caption, CaptionFormat(), theme_->text_secondary);
         if (spec.separator_after) {
             const float y = spec.bounds.bottom - 0.5f;
@@ -1868,7 +1884,7 @@ void Painter::DrawSidebarItem(const SidebarItemSpec& spec) {
         return;
     }
     if (spec.detail.empty() && spec.alias_mark) {
-        // 别名: the name, then the mark right after it (pulse_alias.html).
+        // 别名: the name, then the mark right after it.
         const float mark = Px(14.0f);
         const float gap = Px(6.0f);
         const float avail = (std::max)(0.0f, Width(content) - mark - gap);
@@ -2320,6 +2336,9 @@ void Painter::DrawCommandSearchBox(const CommandSearchBoxSpec& spec) {
     field.leading_glyph = kSearch;
     field.state = spec.state;
     field.trailing_keycap = spec.keycap;
+    field.text = spec.text;
+    field.suppress_text = spec.suppress_text;
+    field.hosted_edit = spec.hosted_edit;
     DrawTextField(field);
 }
 
@@ -2428,7 +2447,7 @@ void Painter::DrawSegmentedItem(const SegmentedItemSpec& spec) {
         return;
     }
     const float radius = !spec.shared_track && spec.position == SegmentPosition::Middle
-                             ? 0.0f : Px(theme_->radius_control);
+                             ? 0.0f : Px(spec.shared_track ? 6.0f : theme_->radius_control);
     D2D1_COLOR_F fill = Rgba(0x000000, 0);
     if (spec.state.selected || spec.state.checked) {
         fill = high_contrast_ ? theme_->fill_selected
@@ -2436,20 +2455,27 @@ void Painter::DrawSegmentedItem(const SegmentedItemSpec& spec) {
     } else if (spec.state.enabled && (spec.state.hovered || spec.state.pressed)) {
         fill = spec.state.pressed ? theme_->fill_pressed : theme_->fill_hover;
     }
+    if (!spec.state.enabled) fill.a *= 0.35f;
     const auto plate = spec.shared_track ? Inset(spec.bounds, Px(3.0f)) : spec.bounds;
-    if (fill.a > 0.0f) {
+    if (!spec.suppress_plate && spec.shared_track && spec.state.enabled &&
+        (spec.state.selected || spec.state.checked) && !high_contrast_) {
+        const auto shadow=D2D1::RectF(plate.left,plate.top+Px(1),plate.right,plate.bottom+Px(1));
+        FillRoundedRect(shadow,radius,Rgba(0x000000,dark_ ? 32 : 18));
+    }
+    if (!spec.suppress_plate && fill.a > 0.0f) {
         if (radius > 0.0f) {
             FillRoundedRect(plate, radius, fill);
         } else {
             dc_->FillRectangle(plate, ScratchBrush(fill));
         }
     }
-    if (!spec.shared_track || spec.state.selected || spec.state.checked) {
+    if (!spec.suppress_plate && (!spec.shared_track || spec.state.selected || spec.state.checked)) {
         StrokeRoundedRect(plate, radius,
                           high_contrast_ ? theme_->stroke_card : theme_->stroke_divider);
     }
 
-    const D2D1_COLOR_F foreground = spec.state.enabled ? ((spec.state.selected || spec.state.checked) ? theme_->accent : theme_->text_secondary)
+    const auto accent = spec.shared_track && dark_ && !high_contrast_ ? MixColor(theme_->accent, HexColor(0xFFFFFF), 0.3f) : theme_->accent;
+    const D2D1_COLOR_F foreground = spec.state.enabled ? ((spec.state.selected || spec.state.checked) ? accent : theme_->text_secondary)
                                                         : theme_->text_disabled;
     auto content = Inset(spec.bounds, Px(spec.shared_track ? 3.0f : 6.0f));
     if (!spec.glyph.empty()) {
@@ -2461,7 +2487,7 @@ void Painter::DrawSegmentedItem(const SegmentedItemSpec& spec) {
         content.left += spec.text.empty() ? 0.0f : icon_width + Px(4.0f);
     }
     if (!spec.text.empty()) {
-        DrawText(spec.text, content, BodyFormat(), foreground,
+        DrawText(spec.text, content, spec.shared_track ? NavFormat() : BodyFormat(), foreground,
                  spec.glyph.empty() ? HorizontalAlignment::Center
                                     : HorizontalAlignment::Left);
     }

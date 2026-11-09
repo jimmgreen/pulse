@@ -38,7 +38,7 @@ void MainRenderer::DrawSettingsContext(const WindowViewModel& vm,const D2D1_RECT
     DrawSettingsPulseMenu(vm,rect,theme);
 }
 
-// Same cards, rows, chips and tabs as DrawSettingsSysCtx (pulse_system_ctx_manager.html).
+// Same cards, rows, chips and tabs as DrawSettingsSysCtx.
 void MainRenderer::DrawSettingsPulseMenu(const WindowViewModel& vm,const D2D1_RECT_F& rect,const Theme& theme) {
     using I=l10n::StringId;
     const auto l=MakeSettingsLayout(vm,rect,scale_,title_bar_height_,status_height_,&painter_);

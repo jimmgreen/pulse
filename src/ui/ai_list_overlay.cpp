@@ -1,8 +1,6 @@
 // ai_list_overlay.cpp — Pulse 助手 in the file list (see ai_list_overlay.h).
 //
-// Sizes and timings are the design's (plans/ai/pulse_ai_assistant_v2.html:
-// .reader .readrow .seen .hprog .watch .dest .ghost .bump .newpill and the
-// readList / showDest / organizeAnim scripts), CSS pixels used as DIPs.
+// Sizes and timings are the design's, CSS pixels used as DIPs.
 #include "ai_list_overlay.h"
 #include "ai_panel_draw.h"
 

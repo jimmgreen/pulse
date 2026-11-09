@@ -42,7 +42,7 @@ Props ReadProps(const Job& job);
 // Replaces whatever `owner` still has queued (its folder changed) and reads
 // these first; paths whose cached values are current are skipped.
 void Request(const void* owner, std::vector<Job> jobs);
-// Bumped whenever a value is stored; the window timer repaints and re-sorts
+// Bumped when a batch is stored (up to 32 files or 150 ms of reading); the window timer repaints and re-sorts
 // media-ordered listings when it moves (like CloudSyncProbe::Revision).
 uint64_t Revision();
 // The cached value for this exact file version; nullptr while pending or

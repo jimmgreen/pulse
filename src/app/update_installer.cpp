@@ -1,3 +1,4 @@
+#include "../common/app_runtime_paths.h"
 #include "update_installer.h"
 #include "update_download_cleanup.h"
 #include "update_transport.h"
@@ -214,14 +215,7 @@ bool UpdateInstaller::TakeResult(DWORD& error) {
 bool UpdateInstaller::Launch(HWND owner, DWORD& error) {
     error = ERROR_INVALID_STATE;
     if (!state_ || state_->downloading || state_->installing || state_->error || state_->guard.value == INVALID_HANDLE_VALUE) return false;
-    std::wstring executable(32768, L'\0');
-    const DWORD size = GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
-    if (!size || size >= executable.size()) {
-        error = ERROR_BAD_PATHNAME;
-        diagnostics::runtime::Event("update_launch_path_failed", {{"operation", state_->operation_id}, {"code", error}});
-        return false;
-    }
-    executable.resize(size);
+    const auto executable = app_runtime_paths::StableEntryPath();
     const std::wstring parameters = UpdateInstallParameters(executable);
     if (parameters.empty()) {
         error = ERROR_BAD_PATHNAME;

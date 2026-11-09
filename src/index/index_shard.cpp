@@ -1,6 +1,7 @@
 #include "index_shard.h"
 #include "../common/json_utils.h"
 #include <algorithm>
+#include <atomic>
 #include <cwctype>
 #include <fstream>
 #include <sstream>
@@ -266,8 +267,11 @@ bool ResolveActiveShard(const ShardPaths& paths, ShardManifest& manifest,
 bool PublishShardBase(const ShardPaths& paths, const std::wstring& temp_path,
                       uint64_t built_unix, uint64_t wal_bytes,
                       ShardManifest& published, std::wstring* error,
-                      const std::wstring& source_id) {
+                      const std::wstring& source_id, uint32_t* failure_stage) {
+    if (failure_stage) *failure_stage = 0;
     if (!ValidateShardBase(temp_path)) {
+        if (failure_stage) *failure_stage = 1;
+        SetLastError(ERROR_INVALID_DATA);
         SetError(error, L"V9 base 校验失败");
         return false;
     }
@@ -276,10 +280,47 @@ bool PublishShardBase(const ShardPaths& paths, const std::wstring& temp_path,
     ResolveActiveShard(paths, current, active, nullptr);
     const uint8_t target = current.source_id.empty() ? 0 : static_cast<uint8_t>(1 - current.active_slot);
     const std::wstring target_path = SlotPath(paths, target);
-    if (!MoveFileExW(temp_path.c_str(), target_path.c_str(),
-                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        SetError(error, L"无法发布 V9 base");
+    // A reader may keep an older A/B slot mapped across several publishes.
+    // Windows allows renaming that file but not replacing its mapped contents.
+    // Keep the current manifest's active slot untouched until commit succeeds.
+    for (const auto& slot : {paths.base_a, paths.base_b}) {
+        WIN32_FIND_DATAW data{};
+        const HANDLE find = FindFirstFileW((slot + L".retired.*").c_str(), &data);
+        if (find == INVALID_HANDLE_VALUE) continue;
+        do {
+            if (!(data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+                DeleteFileW((paths.directory + L"\\" + data.cFileName).c_str());
+        } while (FindNextFileW(find, &data));
+        FindClose(find);
+    }
+    static std::atomic<uint64_t> serial{0};
+    std::wstring retired = target_path + L".retired." + std::to_wstring(GetCurrentProcessId()) +
+        L"." + std::to_wstring(GetTickCount64()) + L"." + std::to_wstring(++serial);
+    if (!MoveFileExW(target_path.c_str(), retired.c_str(), MOVEFILE_WRITE_THROUGH)) {
+        const DWORD code = GetLastError();
+        if (code != ERROR_FILE_NOT_FOUND) {
+            if (failure_stage) *failure_stage = 2;
+            SetError(error, L"无法发布 V9 base");
+            SetLastError(code);
+            return false;
+        }
+        retired.clear();
+    }
+    auto restore = [&](DWORD code, uint32_t stage, bool installed) {
+        bool restored = true;
+        // The caller can have the incoming base mapped already. Move it back
+        // instead of deleting it, then put the previous inactive slot back.
+        if (installed) restored = MoveFileExW(target_path.c_str(), temp_path.c_str(), MOVEFILE_WRITE_THROUGH) != FALSE;
+        if (restored && !retired.empty())
+            restored = MoveFileExW(retired.c_str(), target_path.c_str(), MOVEFILE_WRITE_THROUGH) != FALSE;
+        if (failure_stage) *failure_stage = restored ? stage : 5;
+        SetLastError(code);
         return false;
+    };
+    if (!MoveFileExW(temp_path.c_str(), target_path.c_str(), MOVEFILE_WRITE_THROUGH)) {
+        const DWORD code = GetLastError();
+        SetError(error, L"无法发布 V9 base");
+        return restore(code, 3, false);
     }
     ShardManifest next;
     next.version = 9;
@@ -301,7 +342,8 @@ bool PublishShardBase(const ShardPaths& paths, const std::wstring& temp_path,
     next.source_id = source_id.empty()
         ? (current.source_id.empty() ? L"aggregate" : current.source_id)
         : source_id;
-    if (!SaveShardManifest(paths.manifest, next, error)) return false;
+    if (!SaveShardManifest(paths.manifest, next, error)) return restore(GetLastError(), 4, true);
+    if (!retired.empty()) DeleteFileW(retired.c_str());
     published = next;
     return true;
 }

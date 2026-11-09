@@ -1,4 +1,5 @@
 #include "../common/picker_open_filter.h"
+#include "../common/picker_shell_namespace.h"
 #include "../common/windows_compat.h"
 #include "../ui/folder_picker_loader.h"
 #include <filesystem>
@@ -44,6 +45,103 @@ std::unique_ptr<PickerValidation> WaitValidation(HWND window) {
 }
 }
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--createprompt-open") {
+        const auto base = std::filesystem::current_path() / L"bench_data" /
+            (L"picker-createprompt-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+        if (!CreateDirectoryW(base.c_str(), nullptr)) return 2;
+        const auto file = base / L"existing.txt";
+        HANDLE fixture = CreateFileW(file.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        Check(fixture != INVALID_HANDLE_VALUE, "create isolated CREATEPROMPT existing-file fixture");
+        if (fixture != INVALID_HANDLE_VALUE) CloseHandle(fixture);
+        HWND window = CreateWindowExW(0, L"STATIC", L"Create prompt validation", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, nullptr, nullptr);
+        Check(window != nullptr, "private CREATEPROMPT result window");
+        if (window) {
+            {
+                PickerLoader loader(window, kListing, kValidation);
+                PickerOptions options; options.native_options = FOS_CREATEPROMPT;
+                options.allow_missing_open = true; options.require_existing_open_parent = true;
+                options.validate_local_open_access_v1 = true;
+                uint64_t generation = 1;
+                auto validate = [&](std::vector<std::wstring> names) {
+                    loader.Validate(generation++, base.wstring(), std::move(names), PickerMode::File, options);
+                    return WaitValidation(window);
+                };
+                auto result = validate({L"new.txt"});
+                Check(result && !result->error && result->paths == std::vector<std::wstring>{(base / L"new.txt").wstring()} &&
+                    result->missing_paths == result->paths, "CREATEPROMPT missing leaf reaches UI confirmation without skip-access policy");
+                result = validate({L"existing.txt"});
+                Check(result && !result->error && result->paths == std::vector<std::wstring>{file.wstring()} && result->missing_paths.empty(),
+                    "CREATEPROMPT preserves existing-file access validation and missing metadata");
+                HANDLE lock = CreateFileW(file.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+                Check(lock != INVALID_HANDLE_VALUE, "hold owned exclusive CREATEPROMPT file");
+                result = validate({L"new.txt", L"existing.txt"});
+                Check(result && result->error == ERROR_SHARING_VIOLATION && result->paths.empty() && result->missing_paths.empty(),
+                    "CREATEPROMPT cannot bypass an existing selected file sharing denial");
+                if (lock != INVALID_HANDLE_VALUE) CloseHandle(lock);
+                result = validate({L"absent\\new.txt"});
+                Check(result && result->error && result->paths.empty(), "CREATEPROMPT still enforces existing-parent policy");
+                options.native_options = 0;
+                result = validate({L"new.txt"});
+                Check(result && result->error == ERROR_NOT_SUPPORTED, "missing Open without explicit create policy retains legacy rejection");
+            }
+            DestroyWindow(window);
+        }
+        Check(GetFileAttributesW((base / L"new.txt").c_str()) == INVALID_FILE_ATTRIBUTES &&
+            GetFileAttributesW((base / L"absent").c_str()) == INVALID_FILE_ATTRIBUTES, "CREATEPROMPT validation creates no file or directory");
+        Check(DeleteFileW(file.c_str()) && RemoveDirectoryW(base.c_str()), "owned CREATEPROMPT fixtures removed");
+        std::cout << "failures=" << failures << '\n'; return failures ? 1 : 0;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--shell-native-options") {
+        constexpr wchar_t recycle[] = L"::{645FF040-5081-101B-9F08-00AA002F954E}";
+        PickerOptions options; options.native_options = FOS_ALLNONSTORAGEITEMS;
+        Check(NormalizePickerInput(recycle) == recycle && PickerParent(recycle).empty(), "Shell parsing name and namespace root parent remain intact");
+        const auto listing = ReadPickerListing(recycle, PickerMode::File, options);
+        Check(!listing.error && listing.path == recycle && listing.snapshot && listing.snapshot->size() == listing.entries.size(), "virtual folder enumerates real Shell items on loader path");
+        const auto blocked = ReadPickerListing(recycle, PickerMode::File);
+        Check(blocked.error != ERROR_SUCCESS, "filesystem-only loader still rejects virtual directory");
+        const auto base = std::filesystem::current_path() / L"bench_data" /
+            (L"picker-shell-filter-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+        const bool created = CreateDirectoryW(base.c_str(), nullptr) != FALSE;
+        Check(created, "create isolated Shell filesystem filter fixture");
+        if (created) {
+            for (const auto* name : {L"visible.txt", L"hidden.txt", L"excluded.jpg"}) {
+                HANDLE file = CreateFileW((base / name).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+                Check(file != INVALID_HANDLE_VALUE, "create owned Shell filter file");
+                if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+            }
+            Check(SetFileAttributesW((base / L"hidden.txt").c_str(), FILE_ATTRIBUTE_HIDDEN) != FALSE, "set owned Shell hidden fixture");
+            options.filters = {{L"Text", L"*.txt"}};
+            auto filtered = ReadPickerListing(base.wstring(), PickerMode::File, options);
+            Check(!filtered.error && filtered.entries.size() == 1 && filtered.entries.front().name == L"visible.txt", "Shell listing filters actual filename extension and hides hidden items");
+            options.show_hidden = true;
+            filtered = ReadPickerListing(base.wstring(), PickerMode::File, options);
+            Check(!filtered.error && filtered.entries.size() == 2, "Shell enumeration honors explicit hidden-items option");
+            options.search = L"visible";
+            filtered = ReadPickerListing(base.wstring(), PickerMode::File, options);
+            Check(!filtered.error && filtered.entries.size() == 1 && filtered.entries.front().name == L"visible.txt", "Shell listing preserves search filter");
+            for (const auto* name : {L"visible.txt", L"hidden.txt", L"excluded.jpg"}) Check(DeleteFileW((base / name).c_str()) != FALSE, "delete owned Shell filter file");
+            Check(RemoveDirectoryW(base.c_str()) != FALSE, "remove empty owned Shell fixture");
+            options.filters.clear(); options.search.clear(); options.show_hidden = false;
+        }
+        HWND window = CreateWindowExW(0, L"STATIC", L"Shell validation", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, nullptr, nullptr);
+        Check(window != nullptr, "private Shell validation result window");
+        if (window) {
+            {
+                PickerLoader loader(window, kListing, kValidation);
+                loader.Validate(1, L"", {recycle}, PickerMode::Folder, options);
+                auto result = WaitValidation(window);
+                Check(result && !result->error && result->paths.size() == 1 && pulse::picker_shell::IsParsingName(result->paths.front()), "worker accepts virtual folder with Shell identity");
+                loader.Validate(2, L"", {recycle}, PickerMode::File, options);
+                result = WaitValidation(window);
+                Check(result && !result->error && result->navigate == recycle && result->paths.empty(), "virtual folder in Open mode navigates instead of becoming file");
+                for (uint64_t generation = 3; generation < 30; ++generation) loader.Load(generation, recycle, PickerMode::File, options);
+            }
+            MSG message{};
+            Check(!PeekMessageW(&message, window, kListing, kValidation, PM_REMOVE), "cancelled Shell enumeration drains posted payloads");
+            DestroyWindow(window);
+        }
+        std::cout << "failures=" << failures << '\n'; return failures ? 1 : 0;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--open-filter-separators") {
         for (const auto* pattern : {L"*.zip;", L"*.zip;;", L";*.zip", L"*.zip;;*.rar;"}) {
             PickerOptions options; options.filters = {{L"Generic",pattern}};
@@ -265,6 +363,28 @@ int main(int argc, char** argv) {
             result = validate({L"second.txt", L"ordinary.txt"});
             Check(result && result->error == ERROR_SHARING_VIOLATION && result->paths.empty() && result->navigate.empty(),
                 "sharing denial after a readable prefix rejects entire batch");
+            options.native_options = FOS_SHAREAWARE;
+            result = validate({L"second.txt", L"ordinary.txt"});
+            Check(result && result->error == ERROR_SHARING_VIOLATION &&
+                result->paths == std::vector<std::wstring>{second_file.wstring(), file.wstring()} && result->failed_path == file.wstring(),
+                "share-aware policy retains every validated candidate for caller decision");
+            options.native_options |= FOS_ALLNONSTORAGEITEMS;
+            result = validate({L"second.txt", L"ordinary.txt"});
+            Check(result && result->error == ERROR_SHARING_VIOLATION && result->paths.size() == 2,
+                "Shell namespace mode retains filesystem access and sharing validation");
+            result = validate({L"ordinary.txt", L"missing.txt"});
+            Check(result && result->error == ERROR_FILE_NOT_FOUND && result->paths.empty(),
+                "share-aware candidate retention cannot hide another selection error");
+            SaveTargetRequest save_request; save_request.directory = base.wstring(); save_request.filename = L"ordinary.txt";
+            const auto save_captured = CaptureSaveConfirmation(save_request);
+            Check(save_captured.snapshot.has_value(), "exclusive content lock still permits Save metadata capture");
+            if (save_captured.snapshot) {
+                loader.CheckSaveAccess(generation++, *save_captured.snapshot, false, 0, false, false, FOS_SHAREAWARE);
+                result = WaitValidation(window);
+                Check(result && result->error == ERROR_SHARING_VIOLATION && result->save_access_checked && result->save_snapshot &&
+                    result->paths == std::vector<std::wstring>{file.wstring()}, "share-aware Save retains checked snapshot and candidate for caller decision");
+            }
+            options.native_options = 0;
             if (lock != INVALID_HANDLE_VALUE) CloseHandle(lock);
             result = validate({L"missing.txt"});
             Check(result && result->error == ERROR_FILE_NOT_FOUND && result->paths.empty(), "missing retains exact error");
@@ -439,6 +559,22 @@ int main(int argc, char** argv) {
             preserve.no_dereference_links = true;
             preserve.filters = {{L"All", L"*.*"}};
             uint64_t generation = 1;
+            for (const auto* name : {L"file.lnk", L"dead.lnk", L"folder.lnk", L"target.txt"}) {
+                loader.Validate(generation++, base.wstring(), {name}, PickerMode::Folder, preserve);
+                const auto result = WaitValidation(window);
+                Check(result && result->error == ERROR_UNSUPPORTED_TYPE && result->paths.empty() && result->navigate.empty(),
+                    "folder no-dereference rejects shortcut files and ordinary files without resolving targets");
+                Check(!PickerShowsEntry(FILE_ATTRIBUTE_NORMAL, name, PickerMode::Folder, preserve),
+                    "folder no-dereference listing excludes non-directory objects");
+            }
+            loader.Validate(generation++, base.wstring(), {L"folder"}, PickerMode::Folder, preserve);
+            const auto directory = WaitValidation(window);
+            Check(directory && directory->error == ERROR_SUCCESS && directory->paths == std::vector<std::wstring>{(base / L"folder").wstring()},
+                "folder no-dereference accepts an existing directory");
+            loader.Validate(generation++, base.wstring(), {L"missing"}, PickerMode::Folder, preserve);
+            const auto missing = WaitValidation(window);
+            Check(missing && missing->error == ERROR_FILE_NOT_FOUND && missing->paths.empty(),
+                "folder no-dereference retains existence validation");
             for (const auto* name : {L"file.lnk", L"dead.lnk", L"folder.lnk"}) {
                 loader.Validate(generation++, base.wstring(), {name}, PickerMode::File, preserve);
                 auto result = WaitValidation(window);

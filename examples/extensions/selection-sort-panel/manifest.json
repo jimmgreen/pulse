@@ -1,0 +1,424 @@
+{
+  "apiVersion": 1,
+  "id": "sample.selection-sort-panel",
+  "name": "Selection and sorting",
+  "commands": [
+    {
+      "id": "all",
+      "title": "Select all visible items",
+      "capability": "selection.selectAll"
+    },
+    {
+      "id": "invert",
+      "title": "Invert visible selection",
+      "capability": "selection.invert"
+    },
+    {
+      "id": "clear",
+      "title": "Clear selection",
+      "capability": "selection.clear"
+    },
+    {
+      "id": "sort-name-ascending",
+      "title": "name ascending",
+      "capability": "view.setSort",
+      "args": {
+        "column": "name",
+        "direction": "ascending"
+      }
+    },
+    {
+      "id": "sort-name-descending",
+      "title": "name descending",
+      "capability": "view.setSort",
+      "args": {
+        "column": "name",
+        "direction": "descending"
+      }
+    },
+    {
+      "id": "sort-modified-ascending",
+      "title": "modified ascending",
+      "capability": "view.setSort",
+      "args": {
+        "column": "modified",
+        "direction": "ascending"
+      }
+    },
+    {
+      "id": "sort-modified-descending",
+      "title": "modified descending",
+      "capability": "view.setSort",
+      "args": {
+        "column": "modified",
+        "direction": "descending"
+      }
+    },
+    {
+      "id": "sort-created-ascending",
+      "title": "created ascending",
+      "capability": "view.setSort",
+      "args": {
+        "column": "created",
+        "direction": "ascending"
+      }
+    },
+    {
+      "id": "sort-created-descending",
+      "title": "created descending",
+      "capability": "view.setSort",
+      "args": {
+        "column": "created",
+        "direction": "descending"
+      }
+    },
+    {
+      "id": "sort-accessed-ascending",
+      "title": "accessed ascending",
+      "capability": "view.setSort",
+      "args": {
+        "column": "accessed",
+        "direction": "ascending"
+      }
+    },
+    {
+      "id": "sort-accessed-descending",
+      "title": "accessed descending",
+      "capability": "view.setSort",
+      "args": {
+        "column": "accessed",
+        "direction": "descending"
+      }
+    },
+    {
+      "id": "sort-type-ascending",
+      "title": "type ascending",
+      "capability": "view.setSort",
+      "args": {
+        "column": "type",
+        "direction": "ascending"
+      }
+    },
+    {
+      "id": "sort-type-descending",
+      "title": "type descending",
+      "capability": "view.setSort",
+      "args": {
+        "column": "type",
+        "direction": "descending"
+      }
+    },
+    {
+      "id": "sort-size-ascending",
+      "title": "size ascending",
+      "capability": "view.setSort",
+      "args": {
+        "column": "size",
+        "direction": "ascending"
+      }
+    },
+    {
+      "id": "sort-size-descending",
+      "title": "size descending",
+      "capability": "view.setSort",
+      "args": {
+        "column": "size",
+        "direction": "descending"
+      }
+    },
+    {
+      "id": "sort-path-ascending",
+      "title": "path ascending",
+      "capability": "view.setSort",
+      "args": {
+        "column": "path",
+        "direction": "ascending"
+      }
+    },
+    {
+      "id": "sort-path-descending",
+      "title": "path descending",
+      "capability": "view.setSort",
+      "args": {
+        "column": "path",
+        "direction": "descending"
+      }
+    },
+    {
+      "id": "run",
+      "title": "Sort by name then select all",
+      "capability": "workflow.run",
+      "args": {
+        "workflow": "sortAndSelect"
+      }
+    },
+    {
+      "id": "cancel",
+      "title": "Cancel owned workflow",
+      "capability": "workflow.cancel"
+    }
+  ],
+  "workflows": [
+    {
+      "id": "sortAndSelect",
+      "steps": [
+        "sort-name-ascending",
+        "all"
+      ]
+    }
+  ],
+  "panel": {
+    "title": "Selection and sorting",
+    "ui": {
+      "version": 1,
+      "state": [
+        {
+          "key": "status",
+          "value": "idle"
+        },
+        {
+          "key": "error",
+          "value": ""
+        },
+        {
+          "key": "progress",
+          "value": "0"
+        }
+      ],
+      "root": {
+        "type": "scrollView",
+        "id": "selection-sort-root",
+        "children": [
+          {
+            "type": "text",
+            "id": "scope-help",
+            "text": "Acts on the focused pane in an ordinary loaded folder. Selection follows visible filtered items. Sorting may save folder preferences; completed workflow steps are not rolled back."
+          },
+          {
+            "type": "button",
+            "id": "select-all",
+            "text": "Select all",
+            "command": "all"
+          },
+          {
+            "type": "button",
+            "id": "select-invert",
+            "text": "Invert selection",
+            "command": "invert"
+          },
+          {
+            "type": "button",
+            "id": "select-clear",
+            "text": "Clear selection",
+            "command": "clear"
+          },
+          {
+            "type": "stack",
+            "id": "sort-name",
+            "orientation": "horizontal",
+            "children": [
+              {
+                "type": "button",
+                "id": "sort-name-ascending",
+                "text": "name ascending",
+                "command": "sort-name-ascending",
+                "flex": 1,
+                "minWidth": 140
+              },
+              {
+                "type": "button",
+                "id": "sort-name-descending",
+                "text": "name descending",
+                "command": "sort-name-descending",
+                "flex": 1,
+                "minWidth": 140
+              }
+            ]
+          },
+          {
+            "type": "stack",
+            "id": "sort-modified",
+            "orientation": "horizontal",
+            "children": [
+              {
+                "type": "button",
+                "id": "sort-modified-ascending",
+                "text": "modified ascending",
+                "command": "sort-modified-ascending",
+                "flex": 1,
+                "minWidth": 140
+              },
+              {
+                "type": "button",
+                "id": "sort-modified-descending",
+                "text": "modified descending",
+                "command": "sort-modified-descending",
+                "flex": 1,
+                "minWidth": 140
+              }
+            ]
+          },
+          {
+            "type": "stack",
+            "id": "sort-created",
+            "orientation": "horizontal",
+            "children": [
+              {
+                "type": "button",
+                "id": "sort-created-ascending",
+                "text": "created ascending",
+                "command": "sort-created-ascending",
+                "flex": 1,
+                "minWidth": 140
+              },
+              {
+                "type": "button",
+                "id": "sort-created-descending",
+                "text": "created descending",
+                "command": "sort-created-descending",
+                "flex": 1,
+                "minWidth": 140
+              }
+            ]
+          },
+          {
+            "type": "stack",
+            "id": "sort-accessed",
+            "orientation": "horizontal",
+            "children": [
+              {
+                "type": "button",
+                "id": "sort-accessed-ascending",
+                "text": "accessed ascending",
+                "command": "sort-accessed-ascending",
+                "flex": 1,
+                "minWidth": 140
+              },
+              {
+                "type": "button",
+                "id": "sort-accessed-descending",
+                "text": "accessed descending",
+                "command": "sort-accessed-descending",
+                "flex": 1,
+                "minWidth": 140
+              }
+            ]
+          },
+          {
+            "type": "stack",
+            "id": "sort-type",
+            "orientation": "horizontal",
+            "children": [
+              {
+                "type": "button",
+                "id": "sort-type-ascending",
+                "text": "type ascending",
+                "command": "sort-type-ascending",
+                "flex": 1,
+                "minWidth": 140
+              },
+              {
+                "type": "button",
+                "id": "sort-type-descending",
+                "text": "type descending",
+                "command": "sort-type-descending",
+                "flex": 1,
+                "minWidth": 140
+              }
+            ]
+          },
+          {
+            "type": "stack",
+            "id": "sort-size",
+            "orientation": "horizontal",
+            "children": [
+              {
+                "type": "button",
+                "id": "sort-size-ascending",
+                "text": "size ascending",
+                "command": "sort-size-ascending",
+                "flex": 1,
+                "minWidth": 140
+              },
+              {
+                "type": "button",
+                "id": "sort-size-descending",
+                "text": "size descending",
+                "command": "sort-size-descending",
+                "flex": 1,
+                "minWidth": 140
+              }
+            ]
+          },
+          {
+            "type": "stack",
+            "id": "sort-path",
+            "orientation": "horizontal",
+            "children": [
+              {
+                "type": "button",
+                "id": "sort-path-ascending",
+                "text": "path ascending",
+                "command": "sort-path-ascending",
+                "flex": 1,
+                "minWidth": 140
+              },
+              {
+                "type": "button",
+                "id": "sort-path-descending",
+                "text": "path descending",
+                "command": "sort-path-descending",
+                "flex": 1,
+                "minWidth": 140
+              }
+            ]
+          },
+          {
+            "type": "button",
+            "id": "workflow-start",
+            "text": "Sort by name, then select all",
+            "command": "run",
+            "kind": "primary"
+          },
+          {
+            "type": "button",
+            "id": "workflow-cancel",
+            "text": "Cancel workflow",
+            "command": "cancel"
+          },
+          {
+            "type": "text",
+            "id": "selection-count",
+            "binding": "context.selectionCount"
+          },
+          {
+            "type": "text",
+            "id": "workflow-status",
+            "binding": "state.status"
+          },
+          {
+            "type": "text",
+            "id": "workflow-error",
+            "binding": "state.error"
+          },
+          {
+            "type": "progress",
+            "id": "workflow-progress",
+            "binding": "state.progress"
+          },
+          {
+            "type": "virtualList",
+            "id": "workflow-monitor",
+            "dataSource": {
+              "source": "context.workflow",
+              "pageSize": 1,
+              "statusState": "status",
+              "errorState": "error",
+              "progressState": "progress"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

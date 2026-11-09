@@ -17,7 +17,7 @@ struct AppState;
 // its contents have been presented. Deferred/Failed never carry a target.
 enum class ExternalOpenStatus { Dispatched, Deferred, Failed };
 struct ExternalOpenResult { ExternalOpenStatus status = ExternalOpenStatus::Failed; AppState* target = nullptr; };
-ExternalOpenResult OpenExternalFolder(AppState& mru, const std::wstring& raw);
+ExternalOpenResult OpenExternalFolder(AppState& mru, const std::wstring& raw, bool reveal = false);
 bool ExternalOpenWindowBusy(const AppState& state);
 
 // WM_CONVERT_EXTERNAL_OPEN, the toast after such an open was clicked (M7b,

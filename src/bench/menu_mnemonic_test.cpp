@@ -59,6 +59,15 @@ std::vector<FluentMenuItem> SampleMenu() {
 }
 
 void PureChecks() {
+    pulse::ui::FluentMenuModel model;
+    auto heading = Row(0, L"Hold Shift to arrange all monitors");
+    heading.heading = true;
+    model.SetItems({Row(1, L"Arrange"), heading, Row(2, L"Done")});
+    model.Layout(nullptr, 1.0f);
+    Check(model.HitTestRow(model.RowTopPx(1) + model.RowHeightPx(1)/2) == -1,
+          "instruction headings have no mouse hit target");
+    Check(model.HitTestRow(model.RowTopPx(0) + model.RowHeightPx(0)/2) == 0 &&
+          model.NextEnabled(0, 1) == 2, "action hover remains available and keyboard skips headings");
     using pulse::ipc::MenuMnemonic;
     Check(MenuMnemonic(L"&Edit") == L'E' && MenuMnemonic(L"Cu&t") == L'T' &&
           MenuMnemonic(L"e&x") == L'X', "raw label: access key follows a single ampersand, upper-cased");

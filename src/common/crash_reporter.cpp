@@ -62,6 +62,7 @@ DWORD g_os_build = 0;
 bool g_initialized = false;
 bool g_safe_mode = false;
 LPTOP_LEVEL_EXCEPTION_FILTER g_previous_filter = nullptr;
+std::atomic<FaultAttribution> g_attribution{nullptr};
 struct Maintenance {
     std::wstring root;
     HANDLE wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -334,7 +335,8 @@ bool WriteDump(const std::wstring& stem, EXCEPTION_POINTERS* exception) noexcept
 }
 
 void WriteJson(const std::wstring& stem, EXCEPTION_POINTERS* exception,
-               const char* context, bool recoverable, bool dump_written) noexcept {
+               const char* context, bool recoverable, bool dump_written,
+               const char* extension) noexcept {
     const std::wstring path = JoinPath(g_diagnostics_root, stem + L".json");
     HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
                               CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -353,13 +355,14 @@ void WriteJson(const std::wstring& stem, EXCEPTION_POINTERS* exception,
         "  \"role\":\"%ls\",\n  \"pid\":%lu,\n  \"tid\":%lu,\n"
         "  \"exception_code\":\"0x%08lX\",\n  \"exception_address\":\"%p\",\n"
         "  \"context\":\"%s\",\n  \"recoverable\":%s,\n  \"dump_written\":%s,\n"
-        "  \"uptime_ms\":%llu,\n  \"os\":\"%lu.%lu.%lu\",\n  \"breadcrumbs\":[",
+        "  \"uptime_ms\":%llu,\n  \"os\":\"%lu.%lu.%lu\",\n  \"extension\":\"%s\",\n"
+        "  \"breadcrumbs\":[",
         stem.c_str(), now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute,
         now.wSecond, now.wMilliseconds, PULSE_VERSION_STRING, PULSE_BUILD_ID,
         RoleToken(g_config.role), GetCurrentProcessId(), GetCurrentThreadId(), code,
         address, context ? context : "unknown", recoverable ? "true" : "false",
         dump_written ? "true" : "false", GetTickCount64() - g_started_tick,
-        g_os_major, g_os_minor, g_os_build);
+        g_os_major, g_os_minor, g_os_build, extension ? extension : "");
     const uint64_t newest = g_breadcrumb_sequence.load(std::memory_order_acquire);
     const uint64_t first = newest > kBreadcrumbCount ? newest - kBreadcrumbCount + 1 : 1;
     bool emitted = false;
@@ -393,6 +396,13 @@ LONG WriteReport(EXCEPTION_POINTERS* exception, const char* context,
         ? exception->ExceptionRecord->ExceptionCode : 0xE0000001u;
     void* address = exception && exception->ExceptionRecord
         ? exception->ExceptionRecord->ExceptionAddress : nullptr;
+    // Attribute first: the hook records the plugin for the next start even if
+    // the dump below runs out of stack or the process is killed mid-write.
+    const char* extension = nullptr;
+    if (!recoverable) {
+        if (const FaultAttribution attribution = g_attribution.load(std::memory_order_acquire))
+            extension = attribution(address);
+    }
     const std::wstring stem = EventStem();
     HANDLE lease = CreateFileW(JoinPath(g_diagnostics_root, stem + L".writing").c_str(), GENERIC_WRITE, 0,
         nullptr, CREATE_NEW, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr);
@@ -401,7 +411,7 @@ LONG WriteReport(EXCEPTION_POINTERS* exception, const char* context,
         return EXCEPTION_EXECUTE_HANDLER;
     }
     const bool dump_written = WriteDump(stem, exception);
-    WriteJson(stem, exception, context, recoverable, dump_written);
+    WriteJson(stem, exception, context, recoverable, dump_written, extension);
     if (!dump_written) WriteFallback(stem, code, address, context);
     if (lease != INVALID_HANDLE_VALUE) CloseHandle(lease);
     if (recoverable) {
@@ -490,6 +500,10 @@ LONG ReportRecoverable(EXCEPTION_POINTERS* exception, const char* context) noexc
     WriteReport(&pointers, context, false);
     TerminateProcess(GetCurrentProcess(), 3);
     __assume(false);
+}
+
+void SetFaultAttribution(FaultAttribution attribution) noexcept {
+    g_attribution.store(attribution, std::memory_order_release);
 }
 
 bool SafeModeRequested() noexcept {

@@ -15,6 +15,9 @@
 #endif
 
 namespace pulse::app::rename {
+#ifdef PULSE_TEST_RENAME_REUSE
+size_t regex_compile_attempts = 0;
+#endif
 namespace {
 
 bool IsSpace(wchar_t c) { return c == L' ' || c == L'\t' || c == 0x3000 || c == 0x00A0; }
@@ -230,7 +233,13 @@ bool PatternHasExt(const std::wstring& p) {
     return p.find(L"{ext}") != std::wstring::npos || p.find(L"{扩展名}") != std::wstring::npos;
 }
 
-void ApplyStep(std::wstring& stem, std::wstring& ext, const Step& st, Ctx& ctx) {
+struct CompiledStep {
+    std::wregex expression;
+    std::wstring replacement;
+    bool invalid = false;
+};
+
+void ApplyStep(std::wstring& stem, std::wstring& ext, const Step& st, const CompiledStep& compiled, Ctx& ctx) {
     auto on = [&](auto&& f) {
         stem = f(stem);
         if (ctx.ext_too && ext.size() > 1) ext = L"." + f(ext.substr(1));
@@ -239,15 +248,9 @@ void ApplyStep(std::wstring& stem, std::wstring& ext, const Step& st, Ctx& ctx) 
     case StepType::Replace: {
         if (st.find.empty()) break;
         try {
-            auto flags = std::regex_constants::ECMAScript;
-            if (!st.match_case) flags |= std::regex_constants::icase;
-            const std::wregex re(st.regex ? st.find : EscapeRegex(st.find), flags);
-            std::wstring with = st.with;
-            if (!st.regex)  // literal text: "$" must not read as a group reference
-                for (size_t p = with.find(L'$'); p != std::wstring::npos; p = with.find(L'$', p + 2))
-                    with.insert(p, 1, L'$');
+            if (compiled.invalid) { ctx.bad_regex = true; break; }
             const auto mf = st.all ? std::regex_constants::format_default : std::regex_constants::format_first_only;
-            on([&](const std::wstring& s) { return std::regex_replace(s, re, with, mf); });
+            on([&](const std::wstring& s) { return std::regex_replace(s, compiled.expression, compiled.replacement, mf); });
         } catch (const std::regex_error&) {
             ctx.bad_regex = true;
         }
@@ -317,8 +320,8 @@ bool IsReservedStem(const std::wstring& name) {
     return false;
 }
 
-std::wstring Key(const Source& s, const std::wstring& name) {
-    return Lower(ParentOf(s.path)) + L"\\" + Lower(name);
+std::wstring Key(const std::wstring& parent, const std::wstring& name) {
+    return parent + L"\\" + Lower(name);
 }
 
 } // namespace
@@ -387,6 +390,28 @@ Plan Resolve(const std::vector<Source>& sources, const std::vector<Step>& steps,
     Plan plan;
     const size_t n = sources.size();
     plan.rows.resize(n);
+    std::vector<std::wstring> parents;
+    parents.reserve(n);
+    for (const auto& source : sources) parents.push_back(Lower(ParentOf(source.path)));
+
+    std::vector<CompiledStep> compiled(steps.size());
+    if (n && !names) for (size_t j = 0; j < steps.size(); ++j) {
+        const auto& st = steps[j];
+        if (!st.on || st.type != StepType::Replace || st.find.empty()) continue;
+        auto& c = compiled[j];
+        try {
+            auto flags = std::regex_constants::ECMAScript;
+            if (!st.match_case) flags |= std::regex_constants::icase;
+#ifdef PULSE_TEST_RENAME_REUSE
+            ++regex_compile_attempts;
+#endif
+            c.expression.assign(st.regex ? st.find : EscapeRegex(st.find), flags);
+            c.replacement = st.with;
+            if (!st.regex)
+                for (size_t p = c.replacement.find(L'$'); p != std::wstring::npos;
+                     p = c.replacement.find(L'$', p + 2)) c.replacement.insert(p, 1, L'$');
+        } catch (const std::regex_error&) { c.invalid = true; }
+    }
 
     // Numbering order.
     std::vector<size_t> order(n);
@@ -397,9 +422,13 @@ Plan Resolve(const std::vector<Source>& sources, const std::vector<Step>& steps,
     else if (opts.order == Order::Modified)
         std::stable_sort(order.begin(), order.end(),
                          [&](size_t a, size_t b) { return sources[a].modified < sources[b].modified; });
-    else if (opts.order == Order::Name)
+    else if (opts.order == Order::Name) {
+        std::vector<std::wstring> keys;
+        keys.reserve(n);
+        for (const auto& source : sources) keys.push_back(Lower(source.name));
         std::stable_sort(order.begin(), order.end(),
-                         [&](size_t a, size_t b) { return Lower(sources[a].name) < Lower(sources[b].name); });
+                         [&](size_t a, size_t b) { return keys[a] < keys[b]; });
+    }
     std::vector<size_t> index_of(n);
     for (size_t j = 0; j < n; ++j) index_of[order[j]] = j;
     if (opts.daily) {
@@ -423,7 +452,8 @@ Plan Resolve(const std::vector<Source>& sources, const std::vector<Step>& steps,
         if (names) {
             if (i < names->size() && !(*names)[i].empty()) Split((*names)[i], stem, ext);
         } else {
-            for (const auto& st : steps) if (st.on) ApplyStep(stem, ext, st, ctx);
+            for (size_t j = 0; j < steps.size(); ++j)
+                if (steps[j].on) ApplyStep(stem, ext, steps[j], compiled[j], ctx);
         }
         if (ctx.bad_regex) plan.bad_regex = true;
 
@@ -460,7 +490,7 @@ Plan Resolve(const std::vector<Source>& sources, const std::vector<Step>& steps,
     for (int pass = 0; pass < 8; ++pass) {
         std::unordered_map<std::wstring, size_t> held;  // key -> row
         for (size_t i = 0; i < n; ++i)
-            if (!renaming(base_status[i]) || skipped[i]) held.emplace(Key(sources[i], sources[i].name), i);
+            if (!renaming(base_status[i]) || skipped[i]) held.emplace(Key(parents[i], sources[i].name), i);
         bool changed = false;
         for (size_t i = 0; i < n; ++i) {
             Row& r = plan.rows[i];
@@ -481,7 +511,7 @@ Plan Resolve(const std::vector<Source>& sources, const std::vector<Step>& steps,
             }
             const Source& s = sources[i];
             auto taken_by = [&](const std::wstring& name, size_t& other, bool& outside) {
-                auto it = held.find(Key(s, name));
+                auto it = held.find(Key(parents[i], name));
                 if (it != held.end() && it->second != i) { other = it->second; outside = false; return true; }
                 if (exists && exists(s.path, Lower(name))) { outside = true; return true; }
                 return false;
@@ -515,7 +545,7 @@ Plan Resolve(const std::vector<Source>& sources, const std::vector<Step>& steps,
                     continue;
                 }
             }
-            held[Key(s, r.new_name)] = i;
+            held[Key(parents[i], r.new_name)] = i;
         }
         if (!changed) break;
     }
@@ -524,14 +554,14 @@ Plan Resolve(const std::vector<Source>& sources, const std::vector<Step>& steps,
     //    current name goes after that row. Cycles (swaps) are held back.
     std::unordered_map<std::wstring, size_t> current;  // old key -> renaming row
     for (size_t i = 0; i < n; ++i)
-        if (plan.rows[i].Renames()) current.emplace(Key(sources[i], sources[i].name), i);
+        if (plan.rows[i].Renames()) current.emplace(Key(parents[i], sources[i].name), i);
     std::vector<int> state(n, 0);  // 0 new, 1 visiting, 2 done
     std::vector<size_t> out;
     std::function<bool(size_t)> visit = [&](size_t i) -> bool {
         if (state[i] == 2) return true;
         if (state[i] == 1) return false;
         state[i] = 1;
-        auto it = current.find(Key(sources[i], plan.rows[i].new_name));
+        auto it = current.find(Key(parents[i], plan.rows[i].new_name));
         if (it != current.end() && it->second != i && !visit(it->second)) {
             state[i] = 0;
             return false;
@@ -558,11 +588,11 @@ Plan Resolve(const std::vector<Source>& sources, const std::vector<Step>& steps,
         again = false;
         std::unordered_set<std::wstring> kept;
         for (size_t i = 0; i < n; ++i)
-            if (!plan.rows[i].Renames()) kept.insert(Key(sources[i], sources[i].name));
+            if (!plan.rows[i].Renames()) kept.insert(Key(parents[i], sources[i].name));
         for (size_t i = 0; i < n; ++i) {
             Row& r = plan.rows[i];
             if (!r.Renames() || Lower(r.new_name) == Lower(sources[i].name)) continue;
-            if (kept.count(Key(sources[i], r.new_name))) {
+            if (kept.count(Key(parents[i], r.new_name))) {
                 r.wanted = r.new_name;
                 r.new_name = sources[i].name;
                 r.status = RowStatus::Conflict;

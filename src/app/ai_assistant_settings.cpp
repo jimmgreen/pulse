@@ -1,4 +1,5 @@
 #include "ai_assistant_settings.h"
+#include "ai_assistant_settings_cache.h"
 #include "ai_assistant.h"
 #include "ai_assistant_chat.h"
 #include "ai_assistant_voice.h"
@@ -1241,11 +1242,8 @@ std::vector<std::string> OtherSaved() {
 // ---- The view -------------------------------------------------------------
 
 // What does not change with typing, read at most every 2 s or after a change.
-struct Cached {
-    ULONGLONG at = 0;
-    unsigned epoch = 0;
+struct Cached : app::AssistantSettingsFields {
     ui::AssistantPageView view;
-    std::string voice_mic;   // the saved microphone id
 };
 
 Cached& Cache() {
@@ -1253,9 +1251,11 @@ Cached& Cache() {
     return *cache;
 }
 
-void Refresh(ui::AssistantPageView& v) {
+void Refresh(Cached& cache) {
+    auto& v = cache.view;
     bool malformed = false;
     const ai::Settings settings = ai::LoadSettings(&malformed);
+    cache.Assign(settings, ai::Providers(), ServiceUrl);
     const ai::Provider& current = ai::CurrentProvider();
     v = {};
     v.enabled = settings.enabled;
@@ -1349,9 +1349,8 @@ void FillAssistantSettingsVm(AppState& s, ui::WindowViewModel& vm) {
     Cached& cache = Cache();
     const ULONGLONG now = GetTickCount64();
     const unsigned epoch = g_epoch.load(std::memory_order_relaxed);
-    if (!cache.at || now - cache.at >= 2000 || cache.epoch != epoch) {
-        Refresh(cache.view);
-        cache.voice_mic = LoadVoice().mic;
+    if (cache.NeedsRefresh(now, epoch)) {
+        Refresh(cache);
         cache.at = now;
         cache.epoch = epoch;
     }
@@ -1368,7 +1367,9 @@ void FillAssistantSettingsVm(AppState& s, ui::WindowViewModel& vm) {
     v.needs_key = p.needs_key;
     v.custom = ai::IsCustomProvider(p);
     v.console = p.key_url && *p.key_url ? ai::ModelHost(p.key_url) : std::wstring();
-    v.url = u.stage == AsstStage::Setup ? ServiceUrl(ai::LoadSettings(), p) : AiAgentBaseUrl();
+    if (u.stage == AsstStage::Setup) {
+        v.url = cache.SetupUrl(p.id);
+    } else v.url = AiAgentBaseUrl();
     v.url_default = !v.custom && v.url == std::wstring(p.base_url);
     v.url_editing = u.url_editing;
     v.key_typed = u.lengths[static_cast<int>(AsstField::Key)] > 0;

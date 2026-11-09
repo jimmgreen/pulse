@@ -15,6 +15,8 @@ struct FileDialogInprocessProvider {
     PulsePickerUiV2Api api{};
     std::shared_ptr<void> module_lifetime;
     bool allow_unverified_proof = false;
+    // Remote providers bind HWND to their authenticated live child and session.
+    std::function<bool(PulsePickerUiV2Session, HWND)> validate_remote_window;
 };
 struct FileDialogInprocessSnapshot {
     uint64_t show = 0, generation = 0;
@@ -60,6 +62,7 @@ public:
     HRESULT Show(const PulsePickerUiV2Callbacks&, PulsePickerUiV2Result&, std::wstring& path);
     HRESULT Observe(const PulsePickerUiV2Event&);
     HRESULT ObserveOverwrite(const PulsePickerUiV2OverwriteEvent&);
+    HRESULT ObserveShareViolation(const PulsePickerUiV2OverwriteEvent&);
     void LeaveEvent() noexcept { event_kind_ = 0; event_generation_ = 0; }
     HRESULT Read(FileDialogInprocessSnapshot&) const noexcept;
     HRESULT CompleteFileOk(HRESULT);

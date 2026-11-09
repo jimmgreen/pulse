@@ -1,5 +1,11 @@
+#include "../common/app_runtime_paths.h"
 #include "window_jump_list.h"
 #include "../common/localization.h"
+
+// Before propkey.h, which needs the COM types; WIN32_LEAN_AND_MEAN keeps them
+// out of windows.h, and targets without the app PCH get nothing else first.
+#include <windows.h>
+#include <objbase.h>
 
 #include <array>
 #include <propkey.h>
@@ -7,7 +13,6 @@
 #include <shobjidl.h>
 #include <string>
 #include <thread>
-#include <windows.h>
 #include <wrl/client.h>
 
 namespace pulse::app {
@@ -33,10 +38,8 @@ bool AddTask(IObjectCollection *tasks, const wchar_t *exe, const wchar_t *argume
 } // namespace
 
 void WriteWindowJumpList(const std::array<std::wstring, 3> &titles) {
-    wchar_t exe[32768]{};
-    const DWORD length = GetModuleFileNameW(nullptr, exe, ARRAYSIZE(exe));
-    if (!length || length >= ARRAYSIZE(exe))
-        return;
+    const auto exe = app_runtime_paths::StableEntryPath();
+    if (exe.empty()) return;
     ComPtr<ICustomDestinationList> list;
     if (FAILED(CoCreateInstance(CLSID_DestinationList, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&list))))
         return;
@@ -54,8 +57,8 @@ void WriteWindowJumpList(const std::array<std::wstring, 3> &titles) {
     ComPtr<IObjectCollection> tasks;
     if (FAILED(
             CoCreateInstance(CLSID_EnumerableObjectCollection, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&tasks))) ||
-        !AddTask(tasks.Get(), exe, L"--new-window", titles[0]) || !AddTask(tasks.Get(), exe, L"--new-tab", titles[1]) ||
-        !AddTask(tasks.Get(), exe, L"--this-pc", titles[2])) {
+        !AddTask(tasks.Get(), exe.c_str(), L"--new-window", titles[0]) || !AddTask(tasks.Get(), exe.c_str(), L"--new-tab", titles[1]) ||
+        !AddTask(tasks.Get(), exe.c_str(), L"--this-pc", titles[2])) {
         list->AbortList();
         return;
     }

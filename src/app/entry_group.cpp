@@ -157,6 +157,9 @@ GroupClock MakeGroupClock(ui::SortColumn sort_column) {
 }
 
 int GroupRank(const fs::DirEntry& e, GroupBy g, const GroupClock& c) {
+    if (c.folders != FolderSortMode::Mixed && g != GroupBy::None &&
+        g != GroupBy::ThisPc && g != GroupBy::Network && g != GroupBy::AiDup && IsFolder(e))
+        return kFolderGroupRank;
     switch (g) {
     case GroupBy::Date: return DateRank(Ticks(GroupDateOf(e, c.date_column)), c);
     case GroupBy::Name: {
@@ -211,29 +214,26 @@ int GroupRank(const fs::DirEntry& e, GroupBy g, const GroupClock& c) {
 
 int GroupCompare(const fs::DirEntry& a, const fs::DirEntry& b, GroupBy g,
                  const GroupClock& clock, ui::SortColumn col, ui::SortDirection dir) {
-    if (g == GroupBy::None) return 0;
-    if (g == GroupBy::Location) return ParentCompare(a, b);
-    if (IsMediaGroup(g)) {
-        const int ra = GroupRank(a, g, clock);
-        const int rb = GroupRank(b, g, clock);
-        if (ra == rb) return 0;
-        // Folders first and unknown values last, whichever way the groups run.
-        if (ra < 0 || rb < 0) return ra < 0 ? -1 : 1;
-        const int unknown = clock.media ? clock.media->Unknown() : 0;
-        if (ra == unknown || rb == unknown) return ra == unknown ? 1 : -1;
-        return (ra < rb) != FlipGroups(g, col, dir) ? -1 : 1;
-    }
-    const int ra = g == GroupBy::Date ? DateRank(Ticks(GroupDateOf(a, col)), clock) : GroupRank(a, g, clock);
-    const int rb = g == GroupBy::Date ? DateRank(Ticks(GroupDateOf(b, col)), clock) : GroupRank(b, g, clock);
-    return GroupCompareRanks(a, b, g, col, dir, ra, rb);
+    GroupClock active = clock;
+    active.date_column = col;
+    return GroupCompareRanks(a, b, g, col, dir, GroupRank(a, g, active), GroupRank(b, g, active), active);
 }
 
 int GroupCompareRanks(const fs::DirEntry& a, const fs::DirEntry& b, GroupBy g,
-                      ui::SortColumn col, ui::SortDirection dir, int ra, int rb) {
+                      ui::SortColumn col, ui::SortDirection dir, int ra, int rb, const GroupClock& clock) {
     if (g == GroupBy::None) return 0;
+    if (ra == kFolderGroupRank || rb == kFolderGroupRank) {
+        if (ra == rb) return 0;
+        return (ra == kFolderGroupRank) == (clock.folders == FolderSortMode::FoldersFirst) ? -1 : 1;
+    }
     if (g == GroupBy::Location) return ParentCompare(a, b);
     const bool flip = FlipGroups(g, col, dir);
-    // Folders stay the first group for Size/Type even when reversed.
+    if (IsMediaGroup(g) && ra != rb) {
+        // Mixed retains the field's folder bucket; missing metadata stays last.
+        if (ra < 0 || rb < 0) return ra < 0 ? -1 : 1;
+        const int unknown = clock.media ? clock.media->Unknown() : 0;
+        if (ra == unknown || rb == unknown) return ra == unknown ? 1 : -1;
+    }
     const bool pinned = g == GroupBy::Size || g == GroupBy::Type;
     if (ra != rb) {
         if (pinned && (ra == 0 || rb == 0)) return ra == 0 ? -1 : 1;
@@ -248,6 +248,7 @@ int GroupCompareRanks(const fs::DirEntry& a, const fs::DirEntry& b, GroupBy g,
 
 std::wstring GroupKey(const fs::DirEntry& e, GroupBy g, const GroupClock& clock) {
     const int rank = GroupRank(e, g, clock);
+    if (rank == kFolderGroupRank) return L"folders";
     if (g == GroupBy::Type && rank == 1) {
         std::wstring ext(Extension(e.name));
         for (auto& ch : ext) ch = static_cast<wchar_t>(std::towlower(ch));
@@ -287,9 +288,10 @@ std::wstring GroupLocationLabel(const fs::DirEntry& e) {
 }
 
 void StableGroupOrder(std::vector<fs::DirEntry>& entries, std::vector<std::wstring>* parallel,
-                      GroupBy g, ui::SortColumn col, ui::SortDirection dir) {
+                      GroupBy g, ui::SortColumn col, ui::SortDirection dir, FolderSortMode folders) {
     if (g == GroupBy::None || entries.size() < 2) return;
-    const GroupClock clock = g == GroupBy::Date ? MakeGroupClock(col) : GroupClock{};
+    GroupClock clock = g == GroupBy::Date ? MakeGroupClock(col) : GroupClock{};
+    clock.folders = folders;
     std::vector<size_t> order(entries.size());
     for (size_t i = 0; i < order.size(); ++i) order[i] = i;
     std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) {

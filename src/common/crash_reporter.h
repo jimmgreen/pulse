@@ -33,4 +33,10 @@ bool SafeModeRequested() noexcept;
 const std::wstring& DiagnosticsRoot() noexcept;
 const wchar_t* RoleName(ProcessRole role) noexcept;
 
+// Called from the crash path for a fatal report with the faulting address.
+// Returns the id of the extension whose image contains it, or nullptr. It
+// runs inside the exception filter: no allocation, no locks, no throwing.
+using FaultAttribution = const char* (*)(const void* address) noexcept;
+void SetFaultAttribution(FaultAttribution attribution) noexcept;
+
 } // namespace pulse::crash

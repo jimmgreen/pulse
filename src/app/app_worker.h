@@ -21,6 +21,19 @@
 
 namespace pulse::app {
 
+struct RawListingBatch {
+    std::mutex mutex;
+    std::condition_variable ready;
+    std::atomic_bool started{false};
+    bool done = false;
+    std::exception_ptr error;
+    std::vector<fs::DirEntry> entries;
+    fs::DirectoryIdentity identity;
+    std::wstring git_root;
+    uint64_t listed_at = 0;
+    std::vector<std::pair<std::wstring, uint64_t>> subscribers;
+};
+
 struct WorkItem {
     std::wstring path;
     std::wstring request_key;
@@ -37,6 +50,9 @@ struct WorkItem {
     // Known folder totals for a Size sort (#58); null sorts folders as 0 bytes.
     std::shared_ptr<const FolderSizeLookup> folder_sizes;
     fs::NetSnapshotWrite cache_write;
+    std::shared_ptr<RawListingBatch> raw_listing;
+    // Classified before taking the queue lock; mapped/cloud drives share UNC quotas.
+    bool network_job = false;
 };
 
 struct WorkResult {

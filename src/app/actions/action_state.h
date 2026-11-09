@@ -1,5 +1,5 @@
 // action_state.h - What the AI sees of a window, what it selects, and what it
-// waits for (plans/ai/P2_状态与选中.html).
+// waits for.
 //
 //   StateSnapshot   get_state: tabs, panes in screen order, selection, tray,
 //                   preview, a modal dialog, panels, the running file task

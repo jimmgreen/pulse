@@ -11,6 +11,7 @@
 #include "window_factory.h"
 #include "window_merge.h"
 #include "window_registry.h"
+#include "../common/runtime_log.h"
 
 #include <algorithm>
 #include <vector>
@@ -68,22 +69,23 @@ void ForgetOpenToast(AppCore& core) {
 
 bool ExternalOpenWindowBusy(const AppState& state) { return IsBusy(state); }
 
-ExternalOpenResult OpenExternalFolder(AppState& mru, const std::wstring& raw) {
+ExternalOpenResult OpenExternalFolder(AppState& mru, const std::wstring& raw, bool reveal) {
+    const bool activate = raw == L"pulse:activate";
     const bool icon = raw.empty();
     const bool win_e = raw == L"pulse:win-e";
     const bool explicit_window = raw == L"pulse:new-window" || raw == L"pulse:this-pc";
     const bool explicit_tab = raw == L"pulse:new-tab";
-    const bool launch = icon || win_e || explicit_window || explicit_tab || app::IsThisPcArgument(raw);
+    const bool launch = activate || icon || win_e || explicit_window || explicit_tab || app::IsThisPcArgument(raw);
     const bool this_pc = launch;
     const auto* current = ActiveTab(mru);
     const std::wstring path = icon || win_e || raw == L"pulse:new-window" || explicit_tab
         ? (mru.appPrefs.new_window_shows == 0 ? mru.appPrefs.home_folder :
            mru.appPrefs.new_window_shows == 1 ? std::wstring() :
            current ? current->current_path : std::wstring())
-        : this_pc ? std::wstring() : ResolveOpenFolderPath(raw);
+        : this_pc ? std::wstring() : ResolveOpenFolderPath(raw, reveal);
     // Screenshot runs stay one window (plan §8.7); nothing to open stays as before.
     if (mru.shot.active || (!this_pc && path.empty())) {
-        OpenFolderInNewTab(mru, raw);
+        OpenFolderInNewTab(mru, raw, reveal);
         return {ExternalOpenStatus::Dispatched, &mru};
     }
     AppCore& core = mru.core;
@@ -118,11 +120,19 @@ ExternalOpenResult OpenExternalFolder(AppState& mru, const std::wstring& raw) {
     request.new_window = false;
     request.can_dedupe = !this_pc;
     request.tick = now;
-    const app::ExternalOpenDecision decision = launch
-        ? app::DecideLaunchTarget(explicit_tab ? 1 : icon ? mru.appPrefs.open_pulse_icon :
-                                 win_e ? mru.appPrefs.open_win_e : mru.appPrefs.open_this_pc, snapshot, explicit_window)
+    const int launch_mode = activate ? 2 : explicit_tab ? 1 : icon ? mru.appPrefs.open_pulse_icon :
+        win_e ? mru.appPrefs.open_win_e : mru.appPrefs.open_this_pc;
+    const app::ExternalOpenDecision decision = activate ? app::DecideActivationTarget(snapshot) : launch
+        ? app::DecideLaunchTarget(launch_mode, snapshot, explicit_window)
         : app::DecideOpenTarget(request, snapshot, batch, policy);
 
+    const uint64_t launch_entry = activate ? 1u : icon ? 2u : win_e ? 3u : explicit_window ? 4u : explicit_tab ? 5u : 6u;
+    const auto log_launch = [&](const char* event, uint64_t status) {
+        if (launch) diagnostics::runtime::Event(event, {{"entry", launch_entry},
+            {"mode", static_cast<uint64_t>(launch_mode)}, {"action", static_cast<uint64_t>(decision.action)},
+            {"windows_before", snapshot.size()}, {"windows_after", core.windows.Count()}, {"status", status}});
+    };
+    log_launch("external_launch_decision", 0);
     AppState* target = nullptr;
     bool opened = false;
     HWND into = nullptr;  // where "make it a tab" sends the tabs back
@@ -139,6 +149,7 @@ ExternalOpenResult OpenExternalFolder(AppState& mru, const std::wstring& raw) {
     };
     switch (decision.action) {
     case app::ExternalOpenAction::Deferred:
+        log_launch("external_launch_result", static_cast<uint64_t>(ExternalOpenStatus::Deferred));
         return {ExternalOpenStatus::Deferred, nullptr};
     case app::ExternalOpenAction::Activate:
     case app::ExternalOpenAction::Tab:
@@ -148,15 +159,18 @@ ExternalOpenResult OpenExternalFolder(AppState& mru, const std::wstring& raw) {
         target = windows[decision.window];
         if (launch) {
             if (decision.action != app::ExternalOpenAction::Activate) OpenTabAt(*target, path);
+            // Taskbar activation preserves the existing tabs even when normal
+            // close-to-tray reopening is configured to start at a fresh location.
+            if (activate) target->hidden_to_tray = false;
             RevealWindow(*target);
-        } else OpenFolderInNewTab(*target, raw);
+        } else OpenFolderInNewTab(*target, raw, reveal);
         opened = decision.action != app::ExternalOpenAction::Activate;
         break;
     case app::ExternalOpenAction::NewWindow:
         if ((target = open_window(mru, nullptr, 0)) != nullptr) {
             opened = true;
             into = windows.front()->hwnd;
-            if (!this_pc) SelectLaunchedFile(*target, raw);
+            if (!this_pc) SelectLaunchedFile(*target, raw, reveal);
             RevealWindow(*target);
         }
         break;
@@ -168,16 +182,18 @@ ExternalOpenResult OpenExternalFolder(AppState& mru, const std::wstring& raw) {
         if (index >= 0 && (target = open_window(from, &from, static_cast<size_t>(index))) != nullptr) {
             opened = true;
             into = from.hwnd;
-            OpenFolderInNewTab(*target, raw);
+            OpenFolderInNewTab(*target, raw, reveal);
         }
         break;
     }
     }
     if (!target) {
-return {ExternalOpenStatus::Failed, nullptr};
+        log_launch("external_launch_result", static_cast<uint64_t>(ExternalOpenStatus::Failed));
+        return {ExternalOpenStatus::Failed, nullptr};
     }
 
     if (launch) {
+        log_launch("external_launch_result", static_cast<uint64_t>(ExternalOpenStatus::Dispatched));
         if (opened && decision.reason == app::ExternalOpenReason::Busy)
             target->notification_toast.ShowSnack(target->hwnd, ui::SnackIcon::Window,
                 l10n::Get(l10n::StringId::OpenBusyNewWindow), L"", {});
@@ -293,6 +309,8 @@ void NoteUserInput(AppState& any, const MSG& msg) {
         const uint64_t now = GetTickCount64();
         w->previous_use_tick = app::PreviousUseTick(w->previous_use_tick, w->last_input_tick, now);
         w->last_input_tick = now;
+        if (auto* layout = w->window_tabs.Active(); layout && layout->explorer_transaction)
+            layout->explorer_transaction->user_interacted = true;
     }
 }
 

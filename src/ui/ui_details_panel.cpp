@@ -2,7 +2,6 @@
 #include "ui_renderer.h"
 #include "../fs/cloud_state.h"
 #include "preview_footer_layout.h"
-#include "preview_notice.h"
 #include "ui_renderer_internal.h"
 #include "../common/localization.h"
 #include "tab_shape.h"
@@ -59,6 +58,7 @@ D2D1_RECT_F MainRenderer::DetailsPanelRect(float w, float h) const {
 }
 void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F& rect,
                                     const Theme& theme) {
+    details_preview_bounds_ = {};
     const D2D1_RECT_F panel = DetailsPanelRect(rect.right, rect.bottom);
     if (panel.right - panel.left <= 1.0f || !compositor_ || !compositor_->Dc()) return;
     ID2D1DeviceContext* dc = compositor_->Dc();
@@ -66,7 +66,7 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
     const DetailsPanelView& d = vm.details;
     // Preview off => zero-height well: the panel starts at the name row.
     const float previewH = d.preview_enabled
-        ? DetailsPreviewHeight(panel, s, d.preview_expansion) : 0.0f;
+        ? DetailsPreviewHeight(panel, s, d.preview_expansion, d) : 0.0f;
     DetailsHitRects hit;
     LayoutDetailsPanel(panel, s, d, compositor_->DwriteFactory(),
                        compositor_->SmallFormat(), compositor_, previewH, hit);
@@ -85,22 +85,6 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
     } else if (!d.has_selection && dm.seen) {
         dm.path.clear();
         dm.sweep_at = 0;
-    }
-    const std::wstring identity = d.path + L"|" + std::to_wstring(d.modified_value) +
-        L"|" + std::to_wstring(d.size_value);
-    if (identity != details_preview_identity_ || !d.has_selection) {
-        details_preview_identity_ = identity;
-        details_viewport_ = {};
-        details_text_layout_.reset();
-        details_layout_text_.clear();
-        details_preview_ready_ = false;
-        EndDetailsPreviewPan();
-    }
-    if (!d.preview_enabled) {
-        // Collapsed well: drop pan/zoom state so nothing stale paints if the
-        // preview is switched back on for another file.
-        details_viewport_ = {};
-        details_preview_ready_ = false;
     }
     // The inspector stays an independent right-hand card, with its own scroll
     // and splitter. File-pane opacity must not fade these controls.
@@ -188,8 +172,6 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
     };
 
     if (!d.has_selection) {
-        preview_handler_.Sync(notify_hwnd_, {}, L"", 0, 0, 0, 0, vm.dark,
-                              theme.bg, theme.text, false);
         const D2D1_RECT_F content = D2D1::RectF(
             panel.left + 16.0f * s, panel.top + 16.0f * s,
             panel.right - 16.0f * s, panel.bottom - 16.0f * s);
@@ -225,323 +207,23 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
     const float previewTop = panel.top + pad;
     float y = previewTop;
 
-    // Direct preview stays pinned so the HWND overlay can track it.
-    {
-        const D2D1_RECT_F previewRc = D2D1::RectF(panel.left + pad, previewTop,
+    // Content and playback are rendered by the same embedded host as Space.
+    // This renderer owns only the panel layout and metadata beneath it.
+    if (d.preview_enabled && previewH > 0.0f) {
+        const auto preview = D2D1::RectF(panel.left + pad, previewTop,
             panel.right - pad, previewTop + previewH);
-        const bool placeholderOnly = d.is_dir || d.multi_count > 1;
-        // Off: neither the preview child process nor the handler host runs for
-        // this selection, which is the whole point of the switch.
-        const bool preview_on = d.preview_enabled;
-        const bool handlerPreview = preview_on && !vm.safe_mode && !placeholderOnly &&
-            !d.cloud_online && PreviewHandlerHost::CanHost(d.path);
-        if (!placeholderOnly) {
-            MakeBrush(dc, theme.fill_hover, brFillInput_);
-            FillRoundedRect(dc, brFillInput_.get(), previewRc.left, previewRc.top,
-                            previewRc.right - previewRc.left,
-                            previewRc.bottom - previewRc.top, 6.0f * s);
-        }
-
-        const float grip = 2.0f * s;
-        const D2D1_RECT_F overlayRc = D2D1::RectF(previewRc.left + 2.0f * s,
-            previewRc.top + 2.0f * s, previewRc.right - 2.0f * s,
-            previewRc.bottom - grip);
-        D2D1_RECT_F contentRc = overlayRc;
-        std::wstring previewText;
-        bool truncated = false;
-        uint32_t bytesRead = 0;
-        std::wstring previewError;
-        preview::Integrity integrity;
-        PreviewDrawResult previewResult = PreviewDrawResult::Failed;
-        uint32_t pageCount = 1, pageDelay = 0;  // paged document: count > 1, delay 0
-        if (preview_on && !d.is_dir && d.multi_count <= 1) {
-            std::vector<PreviewProperty> ignored;
-            details_cache_.Properties(d.path, d.attrs, d.view_generation,
-                                        d.modified_value, d.size_value, ignored);
-            if (!handlerPreview) {
-                previewResult = details_cache_.Draw(dc, contentRc, d.path, d.attrs, 2048u,
-                    d.view_generation, d.modified_value, d.size_value, 1.0f,
-                    &previewText, &truncated, &bytesRead, true, &previewError,
-                    nullptr, nullptr, nullptr, nullptr, 0, &pageCount, &pageDelay, nullptr,
-                    nullptr, nullptr, nullptr, nullptr, &details_viewport_, nullptr,
-                    false, nullptr, nullptr, &integrity);
+        if (d.multi_count <= 1) {
+            details_preview_bounds_ = D2D1::RectF(preview.left + 2.0f * s,
+                preview.top + 2.0f * s, preview.right - 2.0f * s, preview.bottom - 2.0f * s);
+            if (!d.is_dir) {
+                std::vector<PreviewProperty> ignored;
+                details_cache_.Properties(d.path, d.attrs, d.view_generation,
+                    d.modified_value, d.size_value, ignored);
             }
-        }
-
-        const auto notice = PreviewNotice(previewError, previewText, integrity);
-        if (!handlerPreview && !notice.empty()) {
-            MakeBrush(dc, theme.fill_hover, brFillInput_);
-            dc->FillRectangle(overlayRc, brFillInput_.get());
-            const float noticeHeight = DrawPreviewNotice(dc, compositor_->DwriteFactory(),
-                compositor_->SmallFormat(), notice, overlayRc, s, theme.text, theme.fill_hover);
-            contentRc.top = std::min(contentRc.bottom, contentRc.top + noticeHeight);
-            if (previewResult == PreviewDrawResult::Bitmap && contentRc.bottom > contentRc.top)
-                details_cache_.Draw(dc, contentRc, d.path, d.attrs, 2048u,
-                    d.view_generation, d.modified_value, d.size_value, 1.0f,
-                    nullptr, nullptr, nullptr, true, nullptr,
-                    nullptr, nullptr, nullptr, nullptr, 0, nullptr, nullptr, nullptr,
-                    nullptr, nullptr, nullptr, nullptr, &details_viewport_, nullptr,
-                    false, nullptr, nullptr, &integrity);
-        }
-
-        details_preview_ready_ = !placeholderOnly && !handlerPreview &&
-            (previewResult == PreviewDrawResult::Bitmap || previewResult == PreviewDrawResult::Text ||
-             previewResult == PreviewDrawResult::Hex || previewResult == PreviewDrawResult::Archive);
-        if (!details_preview_ready_) EndDetailsPreviewPan();
-        preview_handler_.Sync(notify_hwnd_, overlayRc, d.path, d.attrs, d.view_generation,
-                              d.modified_value, d.size_value, vm.dark, theme.bg, theme.text,
-                              handlerPreview);
-        const auto handlerState = preview_handler_.state();
-        if (handlerPreview) {
-            if (handlerState == PreviewHandlerHost::State::Shown) {
-                previewResult = PreviewDrawResult::Pending;
-            } else if (handlerState == PreviewHandlerHost::State::Loading ||
-                       handlerState == PreviewHandlerHost::State::Idle) {
-                previewResult = PreviewDrawResult::Pending;
-            } else {
-                previewResult = PreviewDrawResult::Failed;
-                previewError = L"handler-failed";
-            }
-        }
-
-        if (!handlerPreview && previewResult == PreviewDrawResult::Bitmap && pageCount > 1 &&
-            pageDelay == 0 && compositor_->DwriteFactory() && compositor_->SmallFormat()) {
-            // PDF: the pane keeps its fast first page; the badge tells how many
-            // pages Space opens.
-            const bool zh = pulse::l10n::IsChinese();
-            const std::wstring label = zh
-                ? pulse::l10n::Cn(L"\x5171 ") + std::to_wstring(pageCount) + pulse::l10n::Cn(L" \x9875")
-                : std::to_wstring(pageCount) + L" pages";
-            ComPtr<IDWriteTextLayout> badgeLayout;
-            compositor_->DwriteFactory()->CreateTextLayout(label.data(),
-                static_cast<UINT32>(label.size()), compositor_->SmallFormat(), 1000.0f, 100.0f,
-                &badgeLayout);
-            if (badgeLayout.get()) {
-                badgeLayout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-                badgeLayout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
-                badgeLayout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-                DWRITE_TEXT_METRICS metrics{};
-                badgeLayout->GetMetrics(&metrics);
-                D2D1_RECT_F page = details_viewport_.ContentRect();
-                page.right = std::min(page.right, contentRc.right);
-                page.bottom = std::min(page.bottom, contentRc.bottom);
-                const float padX = 8.0f * s, margin = 8.0f * s;
-                const float badgeH = metrics.height + 6.0f * s;
-                const float badgeW = metrics.width + padX * 2.0f;
-                const D2D1_RECT_F badge = D2D1::RectF(page.right - margin - badgeW,
-                    page.bottom - margin - badgeH, page.right - margin, page.bottom - margin);
-                ComPtr<ID2D1SolidColorBrush> badgeFill, badgeText;
-                dc->CreateSolidColorBrush(D2D1::ColorF(0x000000, 0.58f), &badgeFill);
-                dc->CreateSolidColorBrush(D2D1::ColorF(0xFFFFFF), &badgeText);
-                if (badgeFill.get() && badgeText.get()) {
-                    dc->FillRoundedRectangle(D2D1::RoundedRect(badge, badgeH * 0.5f, badgeH * 0.5f),
-                                             badgeFill.get());
-                    compositor_->DrawTextLayout(D2D1::Point2F(badge.left + padX,
-                                                     badge.top + (badgeH - metrics.height) * 0.5f),
-                                       badgeLayout.get(), badgeText.get());
-                }
-            }
-        }
-
-        details_preview_archive_ = false;
-        if (!handlerPreview && previewResult == PreviewDrawResult::Archive &&
-            details_archive_.SetPayload(previewText, [&] {
-                const std::wstring alias = d.path.empty() ? std::wstring() : app::AliasStore::Instance().Shown(d.path);
-                return alias.empty() ? d.name : alias;   // 别名 heads the folder card too
-            }(), d.size_value)) {
-            details_preview_archive_ = true;
-            details_viewport_.SetContent(contentRc, 0, 0, false);
-            details_archive_.Draw(dc, compositor_, contentRc, theme, s, false);
-        } else if (!handlerPreview && (previewResult == PreviewDrawResult::Text ||
-            previewResult == PreviewDrawResult::Hex || previewResult == PreviewDrawResult::Archive)) {
-            if (!preview_mono_format_.get() && compositor_->DwriteFactory()) {
-                typography::CreateTextFormat(compositor_->DwriteFactory(),
-                    {typography::FontRole::Monospace, 11.0f * s},
-                    &preview_mono_format_);
-                if (preview_mono_format_.get()) {
-                    preview_mono_format_->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-                    preview_mono_format_->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
-                }
-            }
-            if (previewText.empty()) {
-                details_viewport_.SetContent(contentRc, 0, 0, false);
-                text(pulse::l10n::Get(pulse::l10n::StringId::EmptyFile), contentRc,
-                     compositor_->SmallFormat(), theme.text_secondary);
-            } else if (preview_mono_format_.get()) {
-                MakeBrush(dc, theme.text, brText_);
-                D2D1_RECT_F clipRc = contentRc;
-                clipRc.bottom -= 18.0f * s;
-                if (!details_text_layout_.get() || details_layout_text_ != previewText || details_layout_scale_ != s) {
-                    details_text_layout_.reset();
-                    details_layout_text_ = previewText;
-                    details_layout_scale_ = s;
-                    compositor_->DwriteFactory()->CreateTextLayout(previewText.data(),
-                        static_cast<UINT32>(previewText.size()), preview_mono_format_.get(),
-                        std::max(1.0f, clipRc.right - clipRc.left), 1000000.0f, &details_text_layout_);
-                }
-                if (details_text_layout_.get()) {
-                    DWRITE_TEXT_METRICS metrics{};
-                    details_text_layout_->GetMetrics(&metrics);
-                    details_viewport_.SetContent(clipRc, metrics.widthIncludingTrailingWhitespace,
-                        metrics.height, false);
-                    const auto target = details_viewport_.ContentRect();
-                    dc->PushAxisAlignedClip(clipRc, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-                    compositor_->DrawTextLayout(D2D1::Point2F(target.left, target.top), details_text_layout_.get(),
-                        brText_.get());
-                    dc->PopAxisAlignedClip();
-                }
-            }
-            std::wstring footer = pulse::l10n::Get(previewResult == PreviewDrawResult::Hex
-                ? pulse::l10n::StringId::HexPrefix : pulse::l10n::StringId::TextPrefix);
-            footer += pulse::format::ByteSize(bytesRead, true);
-            if (truncated) footer += pulse::l10n::Get(pulse::l10n::StringId::TruncatedSuffix);
-            text(footer, D2D1::RectF(contentRc.left, contentRc.bottom - 18.0f * s,
-                                     contentRc.right, contentRc.bottom),
-                 compositor_->SmallFormat(), theme.text_secondary);
-        } else if (handlerPreview && handlerState == PreviewHandlerHost::State::Shown) {
-            // System preview handler paints into the overlay HWND.
-        } else if (preview_on && d.cloud_online && d.multi_count <= 1 &&
-                   previewResult != PreviewDrawResult::Bitmap) {
-            // 下载并预览 (C4b): what is missing, why Pulse waits, and the one
-            // button that downloads; a progress bar takes its place meanwhile.
-            IDWriteFactory2* dw = compositor_->DwriteFactory();
-            IDWriteTextFormat* fmt = compositor_->SmallFormat();
-            const std::wstring provider = d.cloud_provider.empty()
-                ? pulse::l10n::Get(pulse::l10n::StringId::CloudProviderGeneric) : d.cloud_provider;
-            const auto fill = [](std::wstring str, std::wstring_view key, const std::wstring& value) {
-                if (const size_t at = str.find(key); at != std::wstring::npos) str.replace(at, key.size(), value);
-                return str;
-            };
-            const bool downloading = d.cloud_download_percent >= 0;
-            const std::wstring note = downloading
-                ? fill(fill(pulse::l10n::Get(pulse::l10n::StringId::CloudDownloadingFrom), L"{provider}", provider),
-                       L"{n}", std::to_wstring(d.cloud_download_percent))
-                : fill(fill(pulse::l10n::Get(pulse::l10n::StringId::CloudOnlyNote), L"{size}",
-                            pulse::format::ByteSize(d.size_value, true)), L"{provider}", provider);
-            const bool button = !downloading && hit.cloud_download.right > hit.cloud_download.left;
-            const float bottom = button ? hit.cloud_download.top - 12.0f * s : contentRc.bottom;
-            const float textW = std::max(40.0f * s, (contentRc.right - contentRc.left) - 32.0f * s);
-            const float cx = (contentRc.left + contentRc.right) * 0.5f;
-            ComPtr<IDWriteTextLayout> noteLayout;
-            if (dw && fmt)
-                dw->CreateTextLayout(note.data(), static_cast<UINT32>(note.size()), fmt, textW, 400.0f * s,
-                                     &noteLayout);
-            float textH = 18.0f * s;
-            if (noteLayout.get()) {
-                noteLayout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-                noteLayout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
-                noteLayout->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
-                DWRITE_TEXT_METRICS metrics{};
-                if (SUCCEEDED(noteLayout->GetMetrics(&metrics))) textH = metrics.height;
-            }
-            const float iconH = 30.0f * s, gap = 10.0f * s, barH = 4.0f * s;
-            const float group = iconH + gap + textH + (downloading ? gap + barH : 0.0f);
-            const float top = contentRc.top + std::max(8.0f * s, ((bottom - contentRc.top) - group) * 0.5f);
-            DrawIconText(contentRc.left, top, contentRc.right - contentRc.left, iconH,
-                         downloading ? L"\xE896" : L"\xE753", downloading ? L"\x2193" : L"\x2601",
-                         theme.text_secondary, 1.0f);
-            if (noteLayout.get() && bottom > top + iconH + gap) {
-                dc->PushAxisAlignedClip(D2D1::RectF(contentRc.left, contentRc.top, contentRc.right, bottom),
-                                        D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-                MakeBrush(dc, theme.text_secondary, brText_);
-                dc->DrawTextLayout(D2D1::Point2F(cx - textW * 0.5f, top + iconH + gap), noteLayout.get(),
-                                   brText_.get());
-                dc->PopAxisAlignedClip();
-            }
-            if (downloading) {
-                const float barW = std::min(220.0f * s, textW);
-                const float by = top + iconH + gap + textH + gap;
-                MakeBrush(dc, theme.fill_hover, brFillHover_);
-                FillRoundedRect(dc, brFillHover_.get(), cx - barW * 0.5f, by, barW, barH, barH * 0.5f);
-                const float done = barW * std::clamp(static_cast<float>(d.cloud_download_percent) / 100.0f, 0.0f, 1.0f);
-                if (done >= barH) {
-                    MakeBrush(dc, theme.accent, brAccent_);
-                    FillRoundedRect(dc, brAccent_.get(), cx - barW * 0.5f, by, done, barH, barH * 0.5f);
-                }
-            } else if (button) {
-                const D2D1_RECT_F& rc = hit.cloud_download;
-                const bool hot = IsHovered(vm, HitTestResult::DetailsCloudDownload);
-                MakeBrush(dc, hot ? theme.accent_hover : theme.accent, brAccent_);
-                FillRoundedRect(dc, brAccent_.get(), rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, 5.0f * s);
-                const std::wstring label = pulse::l10n::Get(pulse::l10n::StringId::CloudDownloadPreview);
-                const float glyphW = 16.0f * s, glyphGap = 6.0f * s;
-                const float labelW = dw && fmt ? MeasureLayoutText(compositor_, dw, fmt, label) : 0.0f;
-                const float startX = std::max(rc.left + 8.0f * s,
-                                              (rc.left + rc.right - (glyphW + glyphGap + labelW)) * 0.5f);
-                DrawIconText(startX, rc.top, glyphW, rc.bottom - rc.top, L"\xE896", L"\x2193",
-                             theme.accent_text, 1.0f);
-                ComPtr<IDWriteTextLayout> labelLayout;
-                const float labelBox = std::max(1.0f, rc.right - 8.0f * s - (startX + glyphW + glyphGap));
-                if (dw && fmt)
-                    dw->CreateTextLayout(label.data(), static_cast<UINT32>(label.size()), fmt, labelBox,
-                                         rc.bottom - rc.top, &labelLayout);
-                if (labelLayout.get()) {
-                    labelLayout->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-                    labelLayout->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
-                    labelLayout->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-                    MakeBrush(dc, theme.accent_text, brText_);
-                    dc->DrawTextLayout(D2D1::Point2F(startX + glyphW + glyphGap, rc.top), labelLayout.get(),
-                                       brText_.get());
-                }
-            }
-        } else if (preview_on && previewResult != PreviewDrawResult::Bitmap) {
-            const bool filePlaceholder = !d.is_dir && d.multi_count <= 1;
-            std::wstring state;
-            if (d.multi_count > 1)
-                {
-                    wchar_t count[64]{};
-                    swprintf_s(count,
-                        pulse::l10n::Get(pulse::l10n::StringId::ItemsCountFormat).c_str(),
-                        d.multi_count);
-                    state = count;
-                }
-            else if (pulse::fs::IsCloudPlaceholder(d.attrs))
-                state = pulse::l10n::Get(pulse::l10n::StringId::OnlineToPreview);
-            else if (previewResult == PreviewDrawResult::Pending)
-                state = pulse::l10n::Get(pulse::l10n::StringId::PreviewLoading);
-            else if (previewError == L"path-unavailable")
-                state = pulse::l10n::Get(pulse::l10n::StringId::PreviewMoved);
-            else if (previewError == L"image-decode-failed")
-                state = pulse::l10n::Get(pulse::l10n::StringId::PreviewImageDecode);
-            else if (previewError == L"provider-failed")
-                state = pulse::l10n::Get(pulse::l10n::StringId::PreviewNoSystemProvider);
-            else if (previewError == L"handler-failed")
-                state = pulse::l10n::Get(pulse::l10n::StringId::PreviewLoadFailed);
-            else
-                state = pulse::l10n::Get(pulse::l10n::StringId::PreviewUnsupported);
-            if (filePlaceholder) {
-                centeredText(state, contentRc, compositor_->SmallFormat(),
-                             theme.text_secondary);
-            } else {
-                const float icon = 58.0f * s;
-                const bool showState = !d.is_dir || d.multi_count > 1;
-                const float stateGap = 8.0f * s;
-                const float stateHeight = 20.0f * s;
-                const float groupHeight = icon + (showState ? stateGap + stateHeight : 0.0f);
-                const float contentCenterX = (contentRc.left + contentRc.right) * 0.5f;
-                const float iconTop = contentRc.top +
-                    ((contentRc.bottom - contentRc.top) - groupHeight) * 0.5f;
-                const D2D1_RECT_F iconRc = D2D1::RectF(contentCenterX - icon * 0.5f,
-                    iconTop, contentCenterX + icon * 0.5f, iconTop + icon);
-                const float hidden_alpha = HiddenEntryAlpha(d.attrs);
-                if (ID2D1Bitmap* bmp = icon_cache_.BitmapFor(d.path, d.name, d.is_dir, d.attrs,
-                                                             icon)) {
-                    dc->DrawBitmap(bmp, &iconRc, hidden_alpha,
-                                   D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
-                } else if (d.is_dir) {
-                    DrawFolderIcon(iconRc.left, iconRc.top, icon, theme, hidden_alpha);
-                } else {
-                    DrawFileIcon(iconRc.left, iconRc.top, icon, theme, hidden_alpha);
-                }
-                if (d.is_link)
-                    DrawLinkOverlay(iconRc.left, iconRc.top, icon, theme, hidden_alpha);
-                if (IsProtectedSystemEntry(d.attrs)) DrawProtectedBadge(dc, iconRc, scale_, theme);
-                if (showState && !state.empty())
-                    centeredText(state,
-                        D2D1::RectF(contentRc.left, iconRc.bottom + stateGap,
-                                    contentRc.right, iconRc.bottom + stateGap + stateHeight),
-                        compositor_->SmallFormat(), theme.text_secondary);
-            }
+        } else {
+            wchar_t count[64]{};
+            swprintf_s(count, l10n::Get(l10n::StringId::ItemsCountFormat).c_str(), d.multi_count);
+            centeredText(count, preview, compositor_->SmallFormat(), theme.text_secondary);
         }
     }
     const auto toggle = hit.preview_toggle;
@@ -568,11 +250,6 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
         DrawTextEndEllipsis(compositor_, compositor_->SmallFormat(),
             brText_.get(), caption_alias.empty() ? d.name : caption_alias, footer.caption.left, footer.caption.top,
             footer.caption.right - footer.caption.left, footer.caption.bottom - footer.caption.top);
-    }
-    if (details_viewport_.image && GetTickCount64() < details_zoom_label_until_) {
-        const auto label = std::to_wstring(static_cast<int>(std::lround(details_viewport_.zoom * 100))) + L"%";
-        text(label, footer.zoom,
-            compositor_->SmallFormat(), theme.text_secondary, true);
     }
     if (d.preview_only) { dc->PopAxisAlignedClip(); return; }
     y = previewTop + DetailsPreviewBand(previewH, s) - d.scroll_y * s;
@@ -704,18 +381,18 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
                                           static_cast<float>(motion::CopyFeedback::kPopMs))
                     : 1.0f;
                 const float cx = (rc.left + rc.right) * 0.5f;
-                const float cy = rc.top + 14.0f * s;
+                const float cy = rc.top + 11.0f * s;
                 const float half = 9.0f * s;
                 D2D1_MATRIX_3X2_F saved{};
                 dc->GetTransform(&saved);
                 dc->SetTransform(D2D1::Matrix3x2F::Scale(std::max(0.05f, pop), std::max(0.05f, pop),
                                                          D2D1::Point2F(cx, cy)) * saved);
                 (void)half;
-                DrawIconText(rc.left, rc.top + 5.0f * s, rc.right - rc.left, 18.0f * s,
+                DrawIconText(rc.left, rc.top + 3.0f * s, rc.right - rc.left, 16.0f * s,
                              L"\xE73E", L"\x2713", theme.accent, 1.0f);
                 dc->SetTransform(saved);
             } else {
-                DrawIconText(rc.left, rc.top + 5.0f * s, rc.right - rc.left, 18.0f * s,
+                DrawIconText(rc.left, rc.top + 3.0f * s, rc.right - rc.left, 16.0f * s,
                              glyph, fallback, primary ? theme.accent_text
                                                       : theme.text_secondary, 1.0f);
             }
@@ -724,7 +401,7 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
             // Draw through a private text layout so the shared format is never
             // mutated; narrow cells ellipsize (hover tooltip keeps full text).
             const float textW = rc.right - rc.left - 4.0f * s;
-            const float textH = rc.bottom - rc.top - 28.0f * s;
+            const float textH = rc.bottom - rc.top - 22.0f * s;
             ComPtr<IDWriteTextLayout> tl;
             if (compositor_->DwriteFactory() &&
                 SUCCEEDED(compositor_->DwriteFactory()->CreateTextLayout(
@@ -735,7 +412,7 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
                 const DWRITE_TRIMMING trim{ DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0 };
                 tl->SetTrimming(&trim, nullptr);
                 MakeBrush(dc, fg, brText_);
-                compositor_->DrawTextLayout(D2D1::Point2F(rc.left + 2.0f * s, rc.top + 26.0f * s),
+                compositor_->DrawTextLayout(D2D1::Point2F(rc.left + 2.0f * s, rc.top + 21.0f * s),
                                    tl.get(), brText_.get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
             }
         };
@@ -751,7 +428,7 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
                   IsHovered(vm, HitTestResult::DetailsCopyPath), false, copied_ms);
         rowButton(hit.more, L"\xE712", L"...", pulse::l10n::Get(kDetailsButtonLabels[3]).c_str(),
                   IsHovered(vm, HitTestResult::DetailsMore), false);
-        y += 48.0f * s + 4.0f * s;
+        y += 40.0f * s + 4.0f * s;
     }
 
     auto infoRow = [&](const wchar_t* label, const std::wstring& value, float& iy) {
@@ -920,53 +597,6 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
     dc->PopAxisAlignedClip();
 }
 
-bool MainRenderer::BeginDetailsPreviewPan(float x, float y) {
-    if (!details_preview_ready_) return false;
-    details_preview_dragging_ = false;
-    details_preview_drag_pending_ = true;
-    details_preview_pointer_ = POINT{static_cast<LONG>(x), static_cast<LONG>(y)};
-    return true;
-}
-void MainRenderer::MoveDetailsPreviewPan(float x, float y) {
-    if (details_preview_drag_pending_) {
-        if (std::abs(x - details_preview_pointer_.x) < GetSystemMetrics(SM_CXDRAG) &&
-            std::abs(y - details_preview_pointer_.y) < GetSystemMetrics(SM_CYDRAG)) return;
-        details_preview_drag_pending_ = false;
-        details_preview_dragging_ = true;
-    }
-    if (!details_preview_dragging_) return;
-    if (details_preview_archive_)
-        details_archive_.ScrollPixels(details_preview_pointer_.y - y);
-    else
-        details_viewport_.Pan(x - details_preview_pointer_.x, y - details_preview_pointer_.y);
-    details_preview_pointer_ = POINT{static_cast<LONG>(x), static_cast<LONG>(y)};
-}
-void MainRenderer::ScrollDetailsPreview(float steps, float x, float y, bool horizontal) {
-    if (!details_preview_ready_) return;
-    if (details_preview_archive_) {
-        details_archive_.Scroll(horizontal ? 0.0f : steps);
-        details_archive_.Hover(x, y);
-    } else if (details_viewport_.image) {
-        details_viewport_.ZoomAt(details_viewport_.zoom * std::pow(1.15f, steps), x, y);
-        details_zoom_label_until_ = GetTickCount64() + 1200;
-    } else {
-        details_viewport_.Pan(horizontal ? -steps * 48 * scale_ : 0,
-                              horizontal ? 0 : steps * 48 * scale_);
-    }
-}
-bool MainRenderer::ClickDetailsPreview(float x, float y) {
-    return DetailsPreviewIsArchive() && details_archive_.Click(x, y);
-}
-bool MainRenderer::HoverDetailsPreview(float x, float y) {
-    if (!DetailsPreviewIsArchive()) return false;
-    return details_archive_.Contains(x, y) ? details_archive_.Hover(x, y) : details_archive_.Leave();
-}
-void MainRenderer::ToggleDetailsPreviewFit(float x, float y) {
-    if (DetailsPreviewIsArchive()) { details_archive_.Click(x, y); return; }
-    if (details_preview_ready_) details_viewport_.ToggleFit(x, y);
-    details_zoom_label_until_ = GetTickCount64() + 1200;
-}
-
 float MainRenderer::DetailsContentHeightDip(const WindowViewModel& vm, float w, float h) {
     const D2D1_RECT_F panel = DetailsPanelRect(w, h);
     if (panel.right - panel.left <= 1.0f) return 0.0f;
@@ -974,7 +604,7 @@ float MainRenderer::DetailsContentHeightDip(const WindowViewModel& vm, float w, 
     LayoutDetailsPanel(panel, scale_, vm.details,
                        compositor_ ? compositor_->DwriteFactory() : nullptr,
                        compositor_ ? compositor_->SmallFormat() : nullptr,
-                       compositor_, DetailsPreviewHeight(panel, scale_, vm.details.preview_expansion), hit);
+                       compositor_, DetailsPreviewHeight(panel, scale_, vm.details.preview_expansion, vm.details), hit);
     return hit.content_height_dip;
 }
 

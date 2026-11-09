@@ -16,6 +16,7 @@
 #include "index_config.h"
 #include "../common/crash_reporter.h"
 #include "../common/diagnostics_exporter.h"
+#include "../common/runtime_log.h"
 #include "index_paths.h"
 #include "index_path_service.h"
 #include "network_agent_host.h"
@@ -1258,6 +1259,21 @@ void ConfigureServiceRecovery(SC_HANDLE svc) {
     }
 }
 
+int EnsureInstalledServiceState() {
+    SetMachineIndexScope(true);
+    IndexConfig config;
+    if (!LoadMachineConfig(config, nullptr)) return ERROR_INVALID_DATA;
+    pulse::diagnostics::runtime::Event("index_service_configuration", {{"install", 0},
+        {"search_enabled", config.search_enabled}});
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    if (!scm) return static_cast<int>(GetLastError());
+    SC_HANDLE service = OpenServiceW(scm, kServiceName, SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_STOP);
+    const DWORD error = service ? EnsureServiceState(service, config.search_enabled) : GetLastError();
+    if (service) CloseServiceHandle(service);
+    CloseServiceHandle(scm);
+    return static_cast<int>(error);
+}
+
 int InstallService() {
     SetMachineIndexScope(true);
     // Repair ProgramData ACLs on every install so older SY/BA-only trees become
@@ -1265,8 +1281,10 @@ int InstallService() {
     (void)MachineDataRoot();
     (void)MachineIndexRoot();
     IndexConfig config;
-    LoadMachineConfig(config, nullptr);
-    SaveMachineConfig(config, nullptr);
+    if (!LoadMachineConfig(config, nullptr)) return ERROR_INVALID_DATA;
+    pulse::diagnostics::runtime::Event("index_service_configuration", {{"install", 1},
+        {"search_enabled", config.search_enabled}});
+    if (!SaveMachineConfig(config, nullptr)) return ERROR_WRITE_FAULT;
     const std::wstring bin = L"\"" + SelfPath() + L"\" --service";
 
     DWORD last_err = ERROR_GEN_FAILURE;
@@ -1275,7 +1293,7 @@ int InstallService() {
         if (!scm) return static_cast<int>(GetLastError());
 
         SC_HANDLE svc = OpenServiceW(scm, kServiceName,
-                                     SERVICE_START | SERVICE_QUERY_STATUS |
+                                     SERVICE_START | SERVICE_STOP | SERVICE_QUERY_STATUS |
                                          SERVICE_CHANGE_CONFIG | READ_CONTROL | WRITE_DAC);
         if (!svc && GetLastError() == ERROR_SERVICE_DOES_NOT_EXIST) {
             svc = CreateServiceW(scm, kServiceName, L"Pulse Index",
@@ -1301,17 +1319,7 @@ int InstallService() {
             desc.lpDescription = text;
             ChangeServiceConfig2W(svc, SERVICE_CONFIG_DESCRIPTION, &desc);
             ConfigureServiceRecovery(svc);
-            last_err = EnsureServiceRunning(
-                [&](SERVICE_STATUS_PROCESS& status) -> DWORD {
-                    DWORD needed = 0;
-                    return QueryServiceStatusEx(svc, SC_STATUS_PROCESS_INFO,
-                        reinterpret_cast<LPBYTE>(&status), sizeof(status), &needed)
-                        ? ERROR_SUCCESS : GetLastError();
-                },
-                [&]() -> DWORD {
-                    return StartServiceW(svc, 0, nullptr) ? ERROR_SUCCESS : GetLastError();
-                },
-                [](DWORD delay) { Sleep(delay); });
+            last_err = EnsureServiceState(svc, config.search_enabled);
         }
         CloseServiceHandle(svc);
         CloseServiceHandle(scm);
@@ -1458,7 +1466,15 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         : pulse::crash::ProcessRole::IndexHelper;
     pulse::crash::Initialize({role, service_mode, {}});
 
-    if (a1 == L"--install") return InstallService();
+    if (a1 == L"--install" || a1 == L"--ensure-service-state") {
+        const bool install = a1 == L"--install";
+        const int result = install ? InstallService() : EnsureInstalledServiceState();
+        pulse::diagnostics::runtime::Event("index_service_configuration_result", {{"install", install},
+            {"error", static_cast<DWORD>(result)}}, result ? pulse::diagnostics::runtime::Level::Error
+                                                         : pulse::diagnostics::runtime::Level::Info);
+        pulse::diagnostics::runtime::Flush();
+        return result;
+    }
     if (a1 == L"--uninstall") return UninstallService();
     if (a1 == L"--export-diagnostics") return ExportDiagnosticsCommand(args);
     if (a1 == L"--configure-volume" || a1 == L"--set-index-path" ||

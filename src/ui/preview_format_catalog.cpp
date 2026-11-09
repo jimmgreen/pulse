@@ -104,9 +104,8 @@ std::vector<PreviewFormatGroup> BuildGroups() {
 
     std::vector<std::wstring> archives;
     AppendTable(archives, f::kArchive);
-    add(L"压缩包与镜像", L"Archives & images", L"内置读取优先；7-Zip 增强包补充格式支持；加密、分卷缺失或读取不完整时明确提示",
-        L"Built-in readers first; the 7-Zip pack adds formats; encrypted, missing-volume or incomplete previews are explicitly marked",
-        std::move(archives));
+    const auto& archive_note = l10n::Get(l10n::StringId::ArchivePluginRequired);
+    add(L"压缩包与镜像", L"Archives & images", archive_note.c_str(), archive_note.c_str(), std::move(archives));
 
     std::vector<std::wstring> fonts;
     AppendTable(fonts, f::kFont);
@@ -271,7 +270,7 @@ PreviewFormatState PreviewFormatSupport(const WindowViewModel& vm, size_t group,
     if (preview::IsFamilyExtension(preview::PreviewFamily::Raw, ext))
         return {PreviewFormatSource::PackOrSystem, vm.settings_pack_raw_installed && vm.settings_pack_raw_enabled};
     if (preview::IsArchiveExtension(ext) && !preview::IsOneOf(ext, {L".zip", L".tar", L".iso", L".udf"}))
-        return {PreviewFormatSource::PackOrSystem, vm.settings_pack_archive_installed && vm.settings_pack_archive_enabled};
+        return {PreviewFormatSource::Plugin, Contains(vm.settings_native_archive_extensions, ext)};
     const auto in = [&](const auto& table) { return std::find(std::begin(table), std::end(table), ext) != std::end(table); };
     if ((in(ffmpeg::kVideoExtensions) || in(ffmpeg::kAudioExtensions)) &&
         !preview::IsVideoExtension(ext) && !preview::IsAudioExtension(ext))

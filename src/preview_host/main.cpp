@@ -11,6 +11,7 @@
 #include "folder_thumbnail.h"
 #include "preview_integrity.h"
 #include "../common/runtime_log.h"
+#include "../common/preview_diagnostics.h"
 #include "preview_file_utils.h"
 #include "preview_properties.h"
 #include <windows.h>
@@ -51,7 +52,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
     if (__argc < 2) return 2;
     const DWORD owner = wcstoul(__wargv[1], nullptr, 10);
-    const std::wstring pipeName = ipc::PreviewPipeName(owner);
+    const bool process_pipe = __argc > 2 && wcscmp(__wargv[2], L"--process-pipe") == 0;
+    const std::wstring pipeName = ipc::PreviewPipeName(owner, process_pipe ? GetCurrentProcessId() : 0);
     CurrentUserSecurityAttributes pipeSecurity;
     if (!pipeSecurity) return 3;
     HANDLE pipe = CreateNamedPipeW(pipeName.c_str(),
@@ -71,11 +73,18 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
         preview::DecodeBudgetScope budget_scope(req.magic == ipc::kPreviewBudgetRequestMagic &&
             (req.flags & ipc::kPreviewRequestFlagGrid) ? &budget_session : nullptr);
         const auto request_started = GetTickCount64();
+        const auto path_id = preview::DiagnosticPathId(path);
+        if (!(req.flags & ipc::kPreviewRequestFlagGrid)) diagnostics::runtime::TextEvent("preview_host_request",
+            {{"extension", preview::DiagnosticExtension(path)}}, {{"request", req.request_id},
+            {"generation", req.generation}, {"path_id", path_id}, {"pixels", req.pixel_size},
+            {"kind", static_cast<uint32_t>(req.kind)}, {"flags", req.flags}});
         const auto terminal = [&](const char* event, uint32_t stage, DWORD error,
                                   diagnostics::runtime::Level level) {
-            diagnostics::runtime::Event(event, {{"request", req.request_id},
+            diagnostics::runtime::TextEvent(event, {{"extension", preview::DiagnosticExtension(path)}}, {{"request", req.request_id},
                 {"generation", req.generation}, {"elapsed_ms", GetTickCount64() - request_started},
-                {"stage", stage}, {"error", error}, {"flags", req.flags}}, level);
+                {"stage", stage}, {"error", error}, {"flags", req.flags},
+                {"path_id", path_id}, {"pixels", req.pixel_size},
+                {"kind", static_cast<uint32_t>(req.kind)}}, level);
         };
         std::vector<uint8_t> pixels;
         std::wstring previewText;
@@ -173,6 +182,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             response.text_chars = static_cast<uint32_t>(previewText.size());
             response.error_chars = static_cast<uint32_t>(errorText.size());
             response.bytes_read = bytesRead;
+            if (result.embedded_psd) response.flags |= ipc::kPreviewFlagEmbeddedPsd;
             if (truncated) response.flags |= ipc::kPreviewFlagTruncated;
             // Grid thumbnails mark videos with their playing time.
             if (made && response.kind == ipc::PreviewContentKind::Bitmap &&

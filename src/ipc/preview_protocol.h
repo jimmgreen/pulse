@@ -34,6 +34,7 @@ enum class PreviewRequestKind : uint32_t {
     Content = 0,
     Properties = 1,
 };
+constexpr uint32_t kPreviewFlagEmbeddedPsd = 1u << 1;
 constexpr uint32_t kPreviewFlagTruncated = 1u << 0;
 // Source encoding of a Text preview, stored in response flag bits 8..11.
 constexpr uint32_t kPreviewFlagEncodingShift = 8;
@@ -59,6 +60,7 @@ constexpr uint32_t kPreviewRequestFlagDocumentImage = 1u << 6;
 // cheaper picture (embedded cover or thumbnail) or fail fast where the full
 // path would spend seconds on something the card cannot use.
 constexpr uint32_t kPreviewRequestFlagCard = 1u << 7;
+constexpr uint32_t kPreviewRequestFlagPsdRefine = 1u << 8;
 constexpr uint32_t kPreviewMaxTextChars = 32768;
 constexpr uint32_t kPreviewMaxArchiveChars = 512u * 1024u;
 constexpr uint32_t kPreviewMaxTableChars = 2u * 1024u * 1024u;
@@ -119,8 +121,10 @@ struct PreviewResponse {
     uint32_t duration_ms = 0;
     preview::Integrity integrity;
 };
-inline std::wstring PreviewPipeName(DWORD pid) {
-    return L"\\\\.\\pipe\\PulsePreview-" + std::to_wstring(pid);
+inline std::wstring PreviewPipeName(DWORD pid, DWORD host_pid = 0) {
+    auto name = L"\\\\.\\pipe\\PulsePreview-" + std::to_wstring(pid);
+    if (host_pid) name += L"-" + std::to_wstring(host_pid);
+    return name;
 }
 inline bool ReadAll(HANDLE h, void* data, DWORD bytes) {
     auto* p = static_cast<unsigned char*>(data);

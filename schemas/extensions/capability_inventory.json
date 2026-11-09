@@ -1,0 +1,973 @@
+{
+  "formatVersion": 1,
+  "publicApiVersion": null,
+  "source": "src/app/actions/action_inventory.h",
+  "capabilities": [
+    {
+      "internalActionId": "nav.open",
+      "internalRisk": "View",
+      "riskDependsOnTarget": true,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "nav.go",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "nav.back",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "nav.forward",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "nav.up",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "nav.refresh",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "nav.open_in_new_tab",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "nav.reveal",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "nav.recent_changes",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "nav.recycle_bin",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "tab.new",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "tab.close",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "tab.close_others",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "tab.duplicate",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "tab.pin",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "tab.rename",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "tab.color",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "tab.group",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "tab.activate",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "tab.to_window",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "window.layout",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "pane.focus",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "pane.mark_target",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "pane.to_window",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "window.new",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "window.close",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "window.reopen",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "window.activate",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "window.arrange",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "window.merge",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "window.overview",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "window.maximize",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "sidebar.toggle",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "sidebar.section",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "favbar.toggle",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "details.toggle",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "app.settings_page",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "app.shortcut_help",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "app.exit",
+      "internalRisk": "UserOnly",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "view.mode",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "view.icon_size",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "view.wall",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "view.sort",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "view.group",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "view.folders_first",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "view.folder_sizes",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "view.columns",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "view.apply_all",
+      "internalRisk": "Organize",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "view.filter",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "view.compare",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "select.items",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "select.all",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "select.invert",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "select.pattern",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "select.clear",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "edit.undo",
+      "internalRisk": "View",
+      "riskDependsOnTarget": true,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "file.copy",
+      "internalRisk": "Organize",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "file.cut",
+      "internalRisk": "Organize",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "file.copy_path",
+      "internalRisk": "Organize",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "file.paste",
+      "internalRisk": "Move",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "file.copy_to",
+      "internalRisk": "Move",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "file.move_to",
+      "internalRisk": "Move",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "file.new_folder",
+      "internalRisk": "Create",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "file.new_file",
+      "internalRisk": "Create",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "file.rename",
+      "internalRisk": "Move",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "file.batch_rename",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "file.group_into_folder",
+      "internalRisk": "Move",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "file.dissolve",
+      "internalRisk": "Move",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "file.organize",
+      "internalRisk": "Move",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "file.find_duplicates",
+      "internalRisk": "Read",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "file.zip",
+      "internalRisk": "Create",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "file.recycle",
+      "internalRisk": "Delete",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "file.delete_permanent",
+      "internalRisk": "PermanentDelete",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "recycle.restore",
+      "internalRisk": "Move",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "recycle.empty",
+      "internalRisk": "PermanentDelete",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "file.properties",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "file.context_menu",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "file.terminal",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "file.compute_size",
+      "internalRisk": "Read",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "shell.verbs",
+      "internalRisk": "Read",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "shell.run_verb",
+      "internalRisk": "External",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "cloud.keep",
+      "internalRisk": "System",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "cloud.free",
+      "internalRisk": "System",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "tag.toggle",
+      "internalRisk": "Organize",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "tag.clear",
+      "internalRisk": "Organize",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "tag.panel",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "tag.create",
+      "internalRisk": "Organize",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "tag.edit",
+      "internalRisk": "Organize",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "tag.delete",
+      "internalRisk": "Organize",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "tag.group",
+      "internalRisk": "Organize",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "smartview.save",
+      "internalRisk": "Organize",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "fav.add",
+      "internalRisk": "Organize",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "quick_access.pin",
+      "internalRisk": "Organize",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "recent.remove",
+      "internalRisk": "Organize",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "workspace.pin",
+      "internalRisk": "Organize",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "alias.set",
+      "internalRisk": "Organize",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "alias.display",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "alias.manage",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "alias.export",
+      "internalRisk": "Create",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "tray.add",
+      "internalRisk": "Organize",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "tray.remove",
+      "internalRisk": "Organize",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "tray.find_stale",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "tray.send_to",
+      "internalRisk": "Move",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "tray.zip",
+      "internalRisk": "Create",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "tray.compare",
+      "internalRisk": "Read",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "tray.text_diff",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "search.files",
+      "internalRisk": "Read",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "search.open",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "search.advanced",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "search.project",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "search.global",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "index.status",
+      "internalRisk": "Read",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "index.install_full",
+      "internalRisk": "System",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "preview.toggle",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "preview.step",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "preview.cloud_download",
+      "internalRisk": "System",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "drive.eject",
+      "internalRisk": "System",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "drive.disconnect",
+      "internalRisk": "System",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "drive.unlock",
+      "internalRisk": "UserOnly",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "net.map_drive",
+      "internalRisk": "System",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "net.connect_server",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "net.place",
+      "internalRisk": "Organize",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "net.recent",
+      "internalRisk": "Organize",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "net.rescan",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "net.system_settings",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "git.refresh",
+      "internalRisk": "Read",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "git.pull",
+      "internalRisk": "External",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "git.push",
+      "internalRisk": "External",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "toolbar.open_with",
+      "internalRisk": "External",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "toolbar.pin_app",
+      "internalRisk": "Organize",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "toolbar.customize",
+      "internalRisk": "View",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "toolbar.tools",
+      "internalRisk": "Organize",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "settings.read",
+      "internalRisk": "Read",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "settings.set",
+      "internalRisk": "View",
+      "riskDependsOnTarget": true,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "keymap.read",
+      "internalRisk": "Read",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "keymap.set",
+      "internalRisk": "Organize",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "assistant.prefs",
+      "internalRisk": "UserOnly",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    },
+    {
+      "internalActionId": "assistant.organize_here",
+      "internalRisk": "UserOnly",
+      "riskDependsOnTarget": false,
+      "status": "internal",
+      "publicId": null
+    }
+  ]
+}

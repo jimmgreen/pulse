@@ -1,6 +1,7 @@
 #include "start_pin_registration.h"
 #include "setup_common.h"
 #include "setup_registry.h"
+#include "setup_dialog_versions.h"
 #include <shlobj.h>
 #include <vector>
 
@@ -14,6 +15,8 @@ constexpr wchar_t kProgId[] = L"Software\\Classes\\Pulse.StartPin.Request";
 }
 
 bool RegisterStartPin(const std::wstring& app, std::wstring& error) {
+    const auto runtime_dll = InstalledRuntimeFile(app, L"pulse_start_pin.dll");
+    if (runtime_dll.empty()) { error = L"Cannot resolve Start pin runtime."; return false; }
     const std::wstring verb = std::wstring(kProgId) + L"\\shell\\PulseStartPin";
     const std::wstring command = verb + L"\\command";
     struct PreviousValue {
@@ -60,7 +63,7 @@ bool RegisterStartPin(const std::wstring& app, std::wstring& error) {
         error = L"Start pin registration failed: " + key + L": " + Win32Error(status);
         return false;
     };
-    const bool ok = write(kServer, L"", NormalizeDir(app) + L"\\pulse_start_pin.dll") &&
+    const bool ok = write(kServer, L"", runtime_dll) &&
            write(kServer, L"ThreadingModel", L"Apartment") &&
            write(kExtension, L"", L"Pulse.StartPin.Request") &&
            write(verb.c_str(), L"", L"Pulse") &&
@@ -102,7 +105,13 @@ bool UnregisterStartPin(const std::wstring& app, std::wstring& error) {
         error = L"Cannot read Start pin registration owner.";
         return false;
     }
-    if (!SameDirectory(*dll, NormalizeDir(app) + L"\\pulse_start_pin.dll")) return true;
+    const auto root = NormalizeDir(app);
+    const auto prefix = root + L"\\";
+    const bool version_owned = dll->size() > prefix.size() &&
+        CompareStringOrdinal(dll->data(), static_cast<int>(prefix.size()), prefix.c_str(), -1, TRUE) == CSTR_EQUAL &&
+        IsDialogVersionFile(dll->substr(prefix.size())) &&
+        EqualsNoCase(dll->substr(dll->find_last_of(L"\\")+1), L"pulse_start_pin.dll");
+    if (!SameDirectory(*dll, root + L"\\pulse_start_pin.dll") && !version_owned) return true;
     const std::wstring command = std::wstring(kProgId) + L"\\shell\\PulseStartPin\\command";
     auto owns = [&](const wchar_t* root, const wchar_t* key, const wchar_t* name, const wchar_t* expected) {
         HKEY handle = nullptr;

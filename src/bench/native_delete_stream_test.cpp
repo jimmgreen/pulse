@@ -1,9 +1,28 @@
 #define PULSE_NATIVE_DELETE_TEST
+#include <windows.h>
+namespace {
+unsigned work_attempts = 0, work_created = 0, work_closed = 0;
+bool fail_work_creation = false;
+PTP_WORK WINAPI TestCreateWork(PTP_WORK_CALLBACK callback, PVOID context, PTP_CALLBACK_ENVIRON environment) {
+    ++work_attempts;
+    if (fail_work_creation) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); return nullptr; }
+    auto work = CreateThreadpoolWork(callback, context, environment);
+    work_created += work != nullptr;
+    return work;
+}
+void WINAPI TestCloseWork(PTP_WORK work) { ++work_closed; CloseThreadpoolWork(work); }
+void ResetWorkCounts() { work_attempts = work_created = work_closed = 0; }
+}
+#define CreateThreadpoolWork TestCreateWork
+#define CloseThreadpoolWork TestCloseWork
 #include "../ops/native_delete_stream.h"
+#undef CreateThreadpoolWork
+#undef CloseThreadpoolWork
 #include <filesystem>
 #include <winioctl.h>
 #include <fstream>
 #include <iostream>
+#include <stdexcept>
 namespace fs = std::filesystem;
 int wmain() {
     const fs::path root = fs::current_path() / L"bench_data" /
@@ -75,10 +94,36 @@ int wmain() {
     check(run(tree).done && pulse::ops::native_delete::disposition_probes == 2,
           "next root probes disposition capability again");
     pulse::ops::native_delete::force_disposition_unsupported = false;
+    ResetWorkCounts();
     fs::create_directory(tree);
     for (int i = 0; i < 96; ++i) std::ofstream(tree / std::to_wstring(i));
     check(pulse::ops::native_delete::DeleteNative(tree.wstring(), cancel, [](const auto&, float) {}, 4).done,
           "four worker bounded batches succeed");
+    check(work_created == 1 && work_closed == 1, "one work object spans all drains and closes at traversal end");
+    fs::create_directory(tree);
+    std::ofstream(tree / L"single");
+    ResetWorkCounts();
+    check(pulse::ops::native_delete::DeleteNative(tree.wstring(), cancel, [](const auto&, float) {}, 4).done && work_attempts == 0,
+          "singleton batch does not create threadpool work");
+    fs::create_directory(tree);
+    for (int i = 0; i < 96; ++i) std::ofstream(tree / std::to_wstring(i));
+    ResetWorkCounts();
+    fail_work_creation = true;
+    const auto creation_failure = pulse::ops::native_delete::DeleteNative(tree.wstring(), cancel, [](const auto&, float) {}, 4);
+    fail_work_creation = false;
+    check(creation_failure.done && work_attempts == 1 && work_created == 0,
+          "work creation failure uses synchronous fallback for the remaining traversal");
+    fs::create_directory(tree);
+    for (int i = 0; i < 96; ++i) std::ofstream(tree / std::to_wstring(i));
+    ResetWorkCounts();
+    bool progress_threw = false;
+    try {
+        pulse::ops::native_delete::DeleteNative(tree.wstring(), cancel,
+            [](const auto&, float) { throw std::runtime_error("fixture progress exception"); }, 4);
+    } catch (const std::runtime_error&) { progress_threw = true; }
+    check(progress_threw && work_created == 1 && work_closed == 1,
+          "progress exception joins callbacks and releases persistent work");
+    check(run(tree).done, "exception fixture cleanup");
     fs::create_directory(tree);
     for (int i = 0; i < 96; ++i) std::ofstream(tree / std::to_wstring(i));
     auto batch_cancel = pulse::ops::native_delete::DeleteNative(tree.wstring(), cancel,

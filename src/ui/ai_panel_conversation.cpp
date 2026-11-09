@@ -1,8 +1,8 @@
 // ai_panel_conversation.cpp — the Pulse 助手 conversation: user bubbles,
 // thinking, tool steps, plan / confirm / result cards, the streamed answer.
 //
-// Sizes, margins and motion follow v2.css ("messages" … "result card") of
-// plans/ai/pulse_ai_assistant_v2.html; CSS pixels are DIPs. Blocks are laid
+// Sizes, margins and motion follow the design's "messages" … "result card"
+// styles; CSS pixels are DIPs. Blocks are laid
 // out top to bottom with CSS margin collapsing, so spacing matches the page.
 #include "ai_panel_view.h"
 #include "ai_panel_draw.h"

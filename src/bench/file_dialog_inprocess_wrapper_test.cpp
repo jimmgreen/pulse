@@ -68,6 +68,9 @@ struct Script {
     unsigned item_calls = 0, corrupt_packed = 0;
     std::wstring second;
     bool custom = false, button_close = false, save = false, overwrite = false;
+    bool native_options_case = false, share = false;
+    uint32_t expected_native_options = 0;
+    unsigned share_mode = 0, share_calls = 0;
     uint32_t overwrite_response = PULSE_PICKER_UI_V2_OVERWRITE_DEFAULT;
     unsigned overwrite_calls = 0, overwrite_mode = 0;
     std::vector<unsigned> overwrite_order;
@@ -91,6 +94,8 @@ HRESULT WINAPI NavigateFixture(PulsePickerUiV2Session, uint64_t, PulsePickerUiV2
 }
 HRESULT WINAPI Initialize(const PulsePickerUiV2Initialize*, PulsePickerUiV2Session* out) { ++script->initialized; *out = 1; return S_OK; }
 HRESULT WINAPI Validate(PulsePickerUiV2Session, const PulsePickerUiV2Config* config) {
+    if (script->native_options_case)
+        Check(config->native_options == script->expected_native_options, "complete original native options reach the UI config");
     if(script->prominent_kind){const auto& control=config->controls[script->prominent_nested?1:0];
         Check(control.kind==script->prominent_kind&&bool(control.state&PULSE_PICKER_UI_V2_CONTROL_PROMINENT)==(script->prominent_kind!=6&&script->prominent_kind!=8)&&bool(control.has_parent)==script->prominent_nested,"generic prominence preserves native layout policy and parent identity");}
     if(script->no_test_save) Check((config->save_options&PULSE_PICKER_UI_V2_SAVE_NO_TEST_CREATE) &&
@@ -273,6 +278,17 @@ HRESULT WINAPI Show(PulsePickerUiV2Session, const PulsePickerUiV2Config* config,
         hr=changed(script->keywords_index,keywords,2);Check(hr==S_OK,"metadata vector values remain distinct without semicolon parsing");
     }
     bool refused = false;
+    if (hr == S_OK && script->share) {
+        script->candidate = true;
+        PulsePickerUiV2OverwriteEvent event{}; event.size = sizeof(event); event.show_id = 1; event.generation = script->generation;
+        event.window = script->window; event.target = {script->file.data(), static_cast<uint32_t>(script->file.size())};
+        uint32_t response = 99;
+        if (script->share_mode == 5) ++event.generation;
+        hr = callbacks->share_violation ? callbacks->share_violation(callbacks->context, &event, &response) : E_UNEXPECTED;
+        if (script->share_mode == 5) Check(FAILED(hr) && script->share_calls == 0, "stale sharing event never reaches caller");
+        else Check(hr == S_OK && response == script->overwrite_response, "sharing response maps through actual COM event proxy");
+        refused = response == PULSE_PICKER_UI_V2_OVERWRITE_REFUSE;
+    }
     if (hr == S_OK && script->overwrite) {
         script->candidate = true;
         PulsePickerUiV2OverwriteEvent event{}; event.size = sizeof(event); event.show_id = 1; event.generation = script->generation;
@@ -395,7 +411,7 @@ public:
             if(script->missing_veto){if(state_.calls>1)Check(dialog->Close(HRESULT_FROM_WIN32(ERROR_CANCELLED))==S_OK,"cancel Save after veto");return S_FALSE;}
             return S_OK;
         }
-        if (script->missing_open) {
+        if (script->missing_open || script->folder_mode) {
             ComPtr<IShellItem> single;const HRESULT one=dialog->GetResult(&single);
             Check(script->folder_multi ? one==E_UNEXPECTED&&!single : one==S_OK&&single,"missing FileOk single-result semantics");
             ComPtr<IFileOpenDialog> open;dialog->QueryInterface(IID_PPV_ARGS(&open));
@@ -447,7 +463,7 @@ public:
             if (script->property_close) Check(dialog->Close(HRESULT_FROM_WIN32(ERROR_CANCELLED)) == S_OK, "property FileOk Close cancellation remains exact");
             return S_OK;
         }
-        if (script->overwrite_mode) return S_OK;
+        if (script->overwrite_mode || script->native_options_case) return S_OK;
         if (state_.notimpl_case) return state_.notimpl_sink ? E_NOTIMPL : S_OK;
         if (state_.multi_mode) {
             if (state_.role == 1 && state_.calls == 1 && state_.multi_mode >= 3)
@@ -492,7 +508,25 @@ public:
             script->fail_update=true;Check(custom->SetEditBoxText(213,L"rejected")==E_ACCESSDENIED,"failed edit publish reports failure");
             PWSTR text=nullptr;Check(custom->GetEditBoxText(213,&text)==S_OK && text && std::wstring(text)==L"live text","failed edit publish restores native value");CoTaskMemFree(text);
         } ComPtr<IShellItem> item; Check(FAILED(dialog->GetResult(&item)) && !item, "result unavailable outside FileOk before acceptance"); return Notification(1); }
-    HRESULT STDMETHODCALLTYPE OnShareViolation(IFileDialog*, IShellItem*, FDE_SHAREVIOLATION_RESPONSE* response) override { *response = FDESVR_DEFAULT; return S_OK; }
+    HRESULT STDMETHODCALLTYPE OnShareViolation(IFileDialog* dialog, IShellItem* item, FDE_SHAREVIOLATION_RESPONSE* response) override {
+        *response = FDESVR_DEFAULT;
+        if (!script->share) return S_OK;
+        ++script->share_calls;
+        PWSTR path = nullptr;
+        Check(item && item->GetDisplayName(SIGDN_FILESYSPATH, &path) == S_OK && path && script->file == path,
+            "share event exposes exact existing Shell item");
+        CoTaskMemFree(path);
+        ComPtr<IShellItem> result;
+        Check(FAILED(dialog->GetResult(&result)) && !result, "share event does not authorize provisional results");
+        if (script->share_mode == 3) {
+            Check(dialog->Close(kClose) == S_OK, "Close during share event wins");
+            *response = FDESVR_ACCEPT; return E_FAIL;
+        }
+        if (script->share_mode == 4 && state_.role == 1) return E_NOTIMPL;
+        *response = script->overwrite_response == PULSE_PICKER_UI_V2_OVERWRITE_ACCEPT ? FDESVR_ACCEPT :
+            script->overwrite_response == PULSE_PICKER_UI_V2_OVERWRITE_REFUSE ? FDESVR_REFUSE : FDESVR_DEFAULT;
+        return S_OK;
+    }
     HRESULT STDMETHODCALLTYPE OnOverwrite(IFileDialog* dialog, IShellItem* item, FDE_OVERWRITE_RESPONSE* response) override {
         ++script->overwrite_calls;
         PWSTR path = nullptr; const HRESULT named = item->GetDisplayName(SIGDN_FILESYSPATH, &path);
@@ -533,11 +567,15 @@ void FolderCase(const std::wstring& folder, bool multi) {
     Check(CreateIsolatedDialog(DialogFactory::Open, services, IID_PPV_ARGS(&dialog)) == S_OK, "isolated folder factory");
     if (!dialog) return;
     ComPtr<IShellItem> item; Check(SHCreateItemFromParsingName(folder.c_str(), nullptr, IID_PPV_ARGS(&item)) == S_OK, "folder fixture item");
-    Check(dialog->SetOptions(static_cast<FILEOPENDIALOGOPTIONS>(multi ? 0x1260 : 0x1060)) == S_OK, "folder options");
+    Check(dialog->SetOptions(static_cast<FILEOPENDIALOGOPTIONS>(multi ? 0x1260 : 0x101828)) == S_OK, "folder options");
     Check(dialog->SetFileName(L"named-folder") == S_OK && dialog->SetTitle(L"Select") == S_OK, "folder text setters");
     const COMDLG_FILTERSPEC filter{L"All", L"*.*"};
     Check(dialog->SetFileTypes(1, &filter) == E_UNEXPECTED, "native folder filter HRESULT preserved");
+    Check(dialog->SetFileTypeIndex(1) == E_UNEXPECTED, "native folder filter index HRESULT preserved without blocking folder replacement");
     Check(dialog->SetFolder(item.Get()) == S_OK, "folder explicit location");
+    SinkState observer; observer.expected = state.file;
+    ComPtr<IFileDialogEvents> sink; sink.Attach(new Sink(observer));
+    Check(dialog->Advise(sink.Get(), &observer.cookie) == S_OK, "folder event subscription");
     if (navigation_case) {
         api.implemented_features |= PULSE_PICKER_UI_V2_FEATURE_NAVIGATE; api.Navigate = NavigateFixture;
         show_action = [&] {
@@ -1253,6 +1291,64 @@ void OpenMissing(const std::wstring& folder) {
         Check(!std::filesystem::exists(folder+L"\\missing.txt")&&!std::filesystem::exists(folder+L"\\absent"),"missing Open creates no files or parents");
     }
 }
+void NativeOptions(const std::wstring& folder) {
+    for (unsigned variant = 0; variant < 11; ++variant) {
+        Script state; script = &state; state.folder = folder; state.file = folder + L"\\owned.txt";
+        const bool unsupported_provider = variant == 10;
+        state.native_options_case = true; state.share = variant >= 2 && !unsupported_provider;
+        state.save = variant == 8 || variant == 9;
+        state.share_mode = state.save ? variant - 8 : state.share ? variant - 2 : 0;
+        const uint32_t flags = (state.save ? DefaultDialogOptions(DialogFactory::Save) | FOS_FORCEFILESYSTEM : 0x1042u) |
+            FOS_DONTADDTORECENT | (state.share ? FOS_SHAREAWARE : 0u) | (unsupported_provider ? FOS_STRICTFILETYPES : 0u);
+        state.expected_native_options = flags;
+        state.overwrite_response = state.share_mode == 1 || state.share_mode == 3 ? PULSE_PICKER_UI_V2_OVERWRITE_REFUSE :
+            state.share_mode == 2 || state.share_mode == 5 ? PULSE_PICKER_UI_V2_OVERWRITE_DEFAULT : PULSE_PICKER_UI_V2_OVERWRITE_ACCEPT;
+        auto provider = std::make_shared<FileDialogInprocessProvider>();
+        provider->module_lifetime = std::make_shared<int>(1); provider->allow_unverified_proof = true;
+        auto& api = provider->api; api.size = sizeof(api); api.version = 2;
+        api.implemented_features = variant == 1 || unsupported_provider ? 0u : PULSE_PICKER_UI_V2_FEATURE_NATIVE_OPTIONS;
+        api.Initialize = Initialize; api.ValidateConfig = Validate; api.Show = Show; api.Query = Query;
+        api.GetWindow = Window; api.Close = Close; api.Shutdown = Shutdown;
+        if (variant == 1) state.expected_native_options = 0;
+        FileDialogBridgeServices services; services.access_policy = AccessPolicy::LocalOpenV1;
+        services.save_access_policy = AccessPolicy::LocalSaveV1;
+        services.inprocess_provider = provider;
+        services.validation_verified = [](const ContractDecision& decision) {
+            return RuntimeContractCertified(decision) || RuntimeLocalSaveContractCertified(decision);
+        };
+        unsigned native_calls = 0;
+        services.show_native = [&](IFileDialog*, HWND) { ++native_calls; return E_FAIL; };
+        ComPtr<IFileDialog> open;
+        Check(CreateIsolatedDialog(state.save ? DialogFactory::Save : DialogFactory::Open, services, IID_PPV_ARGS(&open)) == S_OK, "native options isolated wrapper");
+        if (!open) continue;
+        ComPtr<IShellItem> initial; SHCreateItemFromParsingName(folder.c_str(), nullptr, IID_PPV_ARGS(&initial));
+        Check(open->SetFolder(initial.Get()) == S_OK && open->SetOptions(flags) == S_OK, "Firefox options accepted with real native mirror");
+        if (state.save) Check(open->SetDefaultExtension(L"txt") == S_OK, "Save sharing default extension retained");
+        SinkState first; first.expected = state.file; first.role = 1;
+        SinkState second; second.expected = state.file; second.role = 2;
+        ComPtr<IFileDialogEvents> sink; sink.Attach(new Sink(first)); open->Advise(sink.Get(), &first.cookie);
+        ComPtr<IFileDialogEvents> extra;
+        if (state.share_mode == 4) { extra.Attach(new Sink(second)); open->Advise(extra.Get(), &second.cookie); }
+        HANDLE held = state.save ? CreateFileW(state.file.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr) : INVALID_HANDLE_VALUE;
+        if (state.save) Check(held != INVALID_HANDLE_VALUE, "Save sharing callback uses an actually locked existing file");
+        const HRESULT shown = open->Show(nullptr);
+        if (held != INVALID_HANDLE_VALUE) CloseHandle(held);
+        if (unsupported_provider) {
+            Check(native_calls == 1 && !state.shown && shown == E_FAIL, "old provider uses only native UI when an extended option is required");
+            open->Unadvise(first.cookie); continue;
+        }
+        const bool cancelled = state.share && state.share_mode == 1;
+        const bool closed = state.share && state.share_mode == 3;
+        const bool stale = state.share && state.share_mode == 5;
+        Check(!native_calls && state.shown == 1 && (cancelled ? shown == HRESULT_FROM_WIN32(ERROR_CANCELLED) : closed ? shown == kClose : stale ? FAILED(shown) : shown == S_OK),
+            "Firefox and sharing paths finish without a second native dialog");
+        Check(state.share_calls == (!state.share || stale ? 0u : state.share_mode == 4 ? 2u : 1u), "sharing subscription order and E_NOTIMPL continuation");
+        ComPtr<IShellItem> result;
+        Check(cancelled || closed || stale ? FAILED(open->GetResult(&result)) && !result : open->GetResult(&result) == S_OK && result,
+            "only accepted share or Firefox results are available after Show");
+        open->Unadvise(first.cookie); if (extra) open->Unadvise(second.cookie);
+    }
+}
 int wmain(int argc, wchar_t** argv) {
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED); if (FAILED(com)) return 2;
     const auto root = std::filesystem::absolute(std::filesystem::path(L"bench_data") / (L"inprocess-wrapper-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64())));
@@ -1271,7 +1367,8 @@ int wmain(int argc, wchar_t** argv) {
             Check(false, "load real UI validator"); DeleteFileW(file.c_str()); RemoveDirectoryW(root.c_str()); CoUninitialize(); return 1;
         }
     }
-    if (argc == 2 && std::wstring_view(argv[1]) == L"--null-extension") { NullExtension(root.wstring()); }
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--native-options") { isolated_native = true; NativeOptions(root.wstring()); }
+    else if (argc == 2 && std::wstring_view(argv[1]) == L"--null-extension") { NullExtension(root.wstring()); }
     else if (argc == 2 && std::wstring_view(argv[1]) == L"--prominent-controls") { ProminentControls(root.wstring()); }
     else if (argc == 2 && std::wstring_view(argv[1]) == L"--save-no-test-create") { SaveNoTestCreate(root.wstring()); }
     else if (argc == 2 && std::wstring_view(argv[1]) == L"--prominent-group") { ProminentGroup(root.wstring()); }

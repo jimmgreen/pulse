@@ -4,6 +4,10 @@ from pathlib import Path
 import struct
 import tempfile
 import unittest
+from unittest import mock
+import ctypes
+import os
+import threading
 import pack
 from pe_dependencies import PE, PEError
 
@@ -55,6 +59,167 @@ class PackageTests(unittest.TestCase):
     def plan(self): return pack.plan(self.build, 'experiment-1', 'x64', self.repo)
     def package(self): return pack.package(self.build, self.output, 'experiment-1', 'x64', self.repo)
 
+    def installed(self):
+        image(self.build / 'pulse_launcher.exe', normal=['kernel32.dll'])
+        for name in pack.roots('x64', True)[-2:]: image(self.build / name)
+        return pack.package_installed(self.build, self.output, 'same-version', 'x64', self.repo,
+                                      [(self.build / 'pulse.exe', 'pulse.exe'),
+                                       (self.build / 'lumatext.dll', 'lumatext.dll')])
+
+    def test_installed_private_schema1_closure(self):
+        pointer = self.installed()
+        self.assertEqual(pointer, pack.verify_installed(self.output))
+        self.assertEqual(set(pointer), {'schema', 'directory', 'manifest_sha256'})
+        bundle = self.output / pointer['directory']
+        self.assertEqual(pointer['directory'], 'DialogBridge/' + pack.digest(bundle / 'manifest.json'))
+        manifest = pack.verify(bundle)
+        self.assertEqual(manifest['schema'], 1)
+        self.assertTrue((bundle / 'pulse.exe').is_file())
+        self.assertTrue((bundle / 'normal.dll').is_file())
+        self.assertTrue((bundle / 'delayed.dll').is_file())
+        self.assertFalse((self.output / 'manifest.json').exists())
+        self.assertFalse((self.output / 'PulseDialogAuto64.dll').exists())
+        # Neither the private host nor its dependency resolution uses root files.
+        image(self.output / 'pulse.exe', normal=['user32.dll'])
+        self.assertFalse((self.output / 'lumatext.dll').exists())
+        self.assertEqual(pointer, pack.verify_installed(self.output))
+
+    def test_same_content_reused_same_version_new_build_separated(self):
+        first = self.installed()
+        bridge = self.output / 'DialogBridge'
+        old_manifest = self.output / first['directory'] / 'manifest.json'
+        before = old_manifest.stat().st_mtime_ns
+        reused = pack.package_addressed(self.build, bridge, 'same-version', 'x64', self.repo)
+        self.assertEqual(first, reused)
+        self.assertEqual(old_manifest.stat().st_mtime_ns, before)
+        source = self.build / 'pulse.exe'
+        source.write_bytes(source.read_bytes() + b'new build same version')
+        second = pack.package_addressed(self.build, bridge, 'same-version', 'x64', self.repo)
+        self.assertNotEqual(first['directory'], second['directory'])
+        self.assertEqual(len(list(bridge.iterdir())), 2)
+        self.assertEqual(pack.verify(old_manifest.parent)['version'], 'same-version')
+        self.assertEqual(pack.verify(self.output / second['directory'])['version'], 'same-version')
+
+    def test_all_runtime_files_share_private_closure(self):
+        for name in pack.roots('x64', True)[-2:]: image(self.build / name)
+        image(self.build / 'pulse_launcher.exe', normal=['kernel32.dll'])
+        image(self.build / 'Pulse.AI.exe', normal=['runtime-only.dll'])
+        image(self.build / 'runtime-only.dll', normal=['kernel32.dll'])
+        pointer = pack.package_installed(self.build, self.output, 'same-version', 'x64', self.repo,
+            [(self.build / name, name) for name in ('pulse.exe', 'lumatext.dll', 'Pulse.AI.exe')])
+        private = self.output / pointer['directory']
+        self.assertEqual({p.name for p in self.output.iterdir()}, {'pulse.exe', 'dialog-current.json', 'DialogBridge'})
+        self.assertEqual((self.output / 'pulse.exe').read_bytes(), (self.build / 'pulse_launcher.exe').read_bytes())
+        self.assertTrue((private / 'Pulse.AI.exe').is_file())
+        self.assertTrue((private / 'runtime-only.dll').is_file())
+        self.assertEqual((private / 'pulse.exe').read_bytes(), (self.build / 'pulse.exe').read_bytes())
+        pack.verify_installed(self.output)
+
+    def test_installed_pointer_rejects_hash_paths_schema_and_extra_keys(self):
+        pointer = self.installed()
+        path = self.output / 'dialog-current.json'
+        invalid = [dict(pointer, schema=True), dict(pointer, schema=2), dict(pointer, extra=1),
+                   dict(pointer, directory='../bundle'), dict(pointer, directory='DialogBridge/' + '0' * 64),
+                   dict(pointer, manifest_sha256=pointer['manifest_sha256'].upper()),
+                   dict(pointer, directory='DialogBridge/' + '0' * 64, manifest_sha256='0' * 64)]
+        for bad in invalid:
+            with self.subTest(bad=bad):
+                path.write_text(json.dumps(bad), encoding='utf-8')
+                with self.assertRaises((pack.PackageError, OSError)): pack.verify_installed(self.output)
+        path.write_text('{"schema":1,"schema":1}', encoding='utf-8')
+        with self.assertRaisesRegex(pack.PackageError, 'duplicate'): pack.verify_installed(self.output)
+
+    def test_private_missing_dependency_never_resolves_from_root(self):
+        pointer = self.installed()
+        bundle = self.output / pointer['directory']
+        (self.output / 'normal.dll').write_bytes((bundle / 'normal.dll').read_bytes())
+        (bundle / 'normal.dll').unlink()
+        with self.assertRaises(OSError): pack.verify_installed(self.output)
+
+    def test_pointer_binds_raw_manifest_bytes(self):
+        pointer = self.installed()
+        manifest = self.output / pointer['directory'] / 'manifest.json'
+        manifest.write_bytes(manifest.read_bytes() + b'\n')
+        with self.assertRaisesRegex(pack.PackageError, 'manifest hash mismatch'): pack.verify_installed(self.output)
+
+    def test_no_flat_bridge_components_or_corrupt_reuse(self):
+        pointer = self.installed()
+        flat = self.output / 'PulsePickerUiProof.dll'
+        image(flat)
+        with self.assertRaisesRegex(pack.PackageError, 'flat dialog'): pack.verify_installed(self.output)
+        flat.unlink()
+        private = self.output / pointer['directory'] / 'pulse.exe'
+        private.write_bytes(private.read_bytes() + b'tamper')
+        with self.assertRaisesRegex(pack.PackageError, 'mismatch'):
+            pack.package_addressed(self.build, self.output / 'DialogBridge', 'same-version', 'x64', self.repo)
+
+    def test_publication_retries_only_bounded_windows_sharing_failures(self):
+        original = Path.rename
+        attempts = []
+        def temporarily_busy(source, destination):
+            attempts.append(1)
+            if len(attempts) <= 2:
+                error = PermissionError('temporary sharing denial'); error.winerror = 5
+                raise error
+            return original(source, destination)
+        with mock.patch.object(Path, 'rename', temporarily_busy), mock.patch.object(pack.time, 'sleep') as sleep:
+            pointer = self.installed()
+            self.assertEqual(pointer, pack.verify_installed(self.output))
+            self.assertEqual(sleep.call_args_list, [mock.call(0.05), mock.call(0.1)])
+            self.assertEqual(len(attempts), 3)
+
+    def test_permanent_publication_denial_never_publishes_pointer(self):
+        error = PermissionError('persistent access denial'); error.winerror = 5
+        with mock.patch.object(Path, 'rename', side_effect=error) as rename, mock.patch.object(pack.time, 'sleep') as sleep:
+            with self.assertRaises(PermissionError): self.installed()
+            self.assertEqual(rename.call_count, 6)
+            self.assertEqual(sleep.call_count, 5)
+        self.assertFalse((self.output / 'dialog-current.json').exists())
+        self.assertEqual(list((self.output / 'DialogBridge').iterdir()), [])
+
+    def test_publication_other_error_is_not_retried(self):
+        error = OSError('disk failure'); error.winerror = 112
+        with mock.patch.object(Path, 'rename', side_effect=error) as rename, mock.patch.object(pack.time, 'sleep') as sleep:
+            with self.assertRaises(OSError): self.installed()
+            self.assertEqual(rename.call_count, 1)
+            sleep.assert_not_called()
+        self.assertFalse((self.output / 'dialog-current.json').exists())
+
+    def test_post_publication_verification_still_rejects_mutation(self):
+        original = pack.publish_directory
+        def changed(source, destination):
+            original(source, destination)
+            image = destination / 'pulse.exe'
+            image.write_bytes(image.read_bytes() + b'changed after publish')
+        with mock.patch.object(pack, 'publish_directory', changed):
+            with self.assertRaisesRegex(pack.PackageError, 'mismatch'): self.installed()
+        self.assertFalse((self.output / 'dialog-current.json').exists())
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows directory sharing semantics')
+    def test_real_windows_directory_lease_released_during_retry(self):
+        source, destination = self.base / 'held-directory', self.base / 'published-directory'
+        source.mkdir(); (source / 'fixture').write_bytes(b'preserved')
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+                                      ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+        kernel.CreateFileW.restype = ctypes.c_void_p
+        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+        handle = kernel.CreateFileW(str(source), 0x80000000, 3, None, 3, 0x02000000, None)
+        self.assertNotEqual(handle, ctypes.c_void_p(-1).value)
+        try:
+            with self.assertRaises(OSError) as denied: source.rename(destination)
+            self.assertIn(denied.exception.winerror, (5, 32, 33))
+            # Release the real no-delete-sharing lease while publication retries.
+            release = threading.Timer(0.1, lambda: kernel.CloseHandle(handle))
+            release.start()
+            try: pack.publish_directory(source, destination)
+            finally: release.join()
+        except BaseException:
+            # If the precondition failed before the timer, release our own lease.
+            if 'release' not in locals(): kernel.CloseHandle(handle)
+            raise
+        self.assertEqual((destination / 'fixture').read_bytes(), b'preserved')
+
     def test_recursive_normal_delay_and_licenses(self):
         manifest = self.package()
         self.assertEqual(manifest, pack.verify(self.output))
@@ -80,6 +245,17 @@ class PackageTests(unittest.TestCase):
         with self.assertRaises(pack.PackageError) as caught: self.plan()
         self.assertIn('normal.dll', str(caught.exception)); self.assertIn('delayed.dll', str(caught.exception))
         self.assertFalse(self.output.exists())
+
+    def test_system_dependencies_match_native_verifier(self):
+        source = (Path(__file__).resolve().parents[2] / 'src/common/dialog_bundle.cpp').read_text(encoding='utf-8')
+        native = source.split('static const std::string names = R"(', 1)[1].split(')";', 1)[0]
+        self.assertEqual(pack.SYSTEM, set(native.split()))
+
+    def test_accessibility_uses_windows_runtime(self):
+        image(self.build / 'normal.dll', normal=['oleacc.dll'])
+        manifest, sources = self.plan()
+        self.assertIn('oleacc.dll', manifest['system_dependencies'])
+        self.assertNotIn('oleacc.dll', sources)
 
     def test_unknown_dependency_fails(self):
         image(self.build / 'normal.dll', normal=['unknown-vendor.dll'])

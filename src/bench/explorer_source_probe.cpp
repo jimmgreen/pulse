@@ -132,6 +132,27 @@ std::vector<Source> Sources(IShellWindows* windows, bool* complete = nullptr, st
     if (complete) *complete = ok;
     return result;
 }
+HRESULT PrepareFixtureSelection(const Source& source) {
+    ComPtr<IServiceProvider> provider;
+    ComPtr<IShellBrowser> browser;
+    ComPtr<IShellView> view;
+    ComPtr<IFolderView2> folder_view;
+    ComPtr<IShellFolder> folder;
+    HRESULT hr = source.browser.As(&provider);
+    if (SUCCEEDED(hr)) hr = provider->QueryService(SID_STopLevelBrowser, IID_PPV_ARGS(&browser));
+    if (SUCCEEDED(hr)) hr = browser->QueryActiveShellView(&view);
+    if (SUCCEEDED(hr) && !view) hr = E_FAIL;
+    if (SUCCEEDED(hr)) hr = view.As(&folder_view);
+    if (SUCCEEDED(hr)) hr = folder_view->GetFolder(IID_PPV_ARGS(&folder));
+    PIDLIST_RELATIVE child = nullptr;
+    wchar_t name[] = L"selected.txt";
+    if (SUCCEEDED(hr)) hr = folder->ParseDisplayName(nullptr, nullptr, name, nullptr, &child, nullptr);
+    if (SUCCEEDED(hr) && child)
+        hr = view->SelectItem(child, SVSI_SELECT | SVSI_DESELECTOTHERS | SVSI_ENSUREVISIBLE | SVSI_FOCUSED);
+    else if (SUCCEEDED(hr)) hr = E_FAIL;
+    CoTaskMemFree(child);
+    return hr;
+}
 bool Read(const Source& source, std::wstring& path, std::vector<std::wstring>& names) {
     ComPtr<IServiceProvider> provider;
     ComPtr<IShellBrowser> browser;
@@ -245,7 +266,7 @@ std::vector<wchar_t> ChildEnvironment(const std::wstring& fixture) {
     block.push_back(0); return block;
 }
 bool RunHandoff(const Source& source, const std::filesystem::path& control_root, const std::wstring& pulse,
-        bool busy, bool crash, bool resume, uint64_t owner, std::string& report, bool& stopped) {
+        bool busy, bool crash, bool resume, bool external, uint64_t owner, std::string& report, bool& stopped) {
     if (crash) report += "CASE\tcontrolled-owned-Pulse-crash\n";
     const auto before = pulse::app::ObserveExplorerSource(source.window);
     if (!pulse::app::UnchangedAvailableSource(before, before)) return false;
@@ -253,6 +274,7 @@ bool RunHandoff(const Source& source, const std::filesystem::path& control_root,
     token.hwnd = reinterpret_cast<uint64_t>(source.window); token.pid = source.pid; token.tid = source.tid;
     token.created = source.created; token.busy = crash ? 2u : resume ? 3u : busy ? 1u : 0u;
     token.owner = owner;
+    token.reserved = external ? pulse::app::kExplorerScopeExternalEmptySelection : 0;
     Handle close_authorized{CreateEventW(nullptr, TRUE, FALSE, pulse::app::ExplorerScopeCloseEventName(token).c_str())};
     const DWORD close_event_error = GetLastError();
     if (!close_authorized.value || close_event_error == ERROR_ALREADY_EXISTS) {
@@ -388,15 +410,16 @@ bool RunHandoff(const Source& source, const std::filesystem::path& control_root,
     }
     if (!clean_stop) report += "FAIL\tno graceful Watcher stop report; no source style mutation attempted\n";
     return exit_code == 0 && clean_stop && samples && sampled_unchanged && (busy ? source_unchanged && !close_signal : close_signal) &&
-        text.find("PASS\tproduction Watcher UI handoff presented/close") != std::string::npos;
+        text.find("PASS\tproduction Watcher background-prepare/source-close/actual-present") != std::string::npos;
 
 }
 int Probe(const std::filesystem::path& control_root, HDESK desktop, HDESK original,
-          const std::wstring& desktop_name, std::string& report, const std::wstring& pulse, bool busy, bool crash, bool resume) {
+          const std::wstring& desktop_name, std::string& report, const std::wstring& pulse, bool busy, bool crash, bool resume,
+          const std::wstring& external_folder) {
     wchar_t system[32768]{};
     if (!GetWindowsDirectoryW(system, ARRAYSIZE(system))) return 1;
     const auto explorer = (std::filesystem::path(system) / L"explorer.exe").wstring();
-    const auto fixture_path = control_root / L"source";
+    const auto fixture_path = external_folder.empty() ? control_root / L"source" : std::filesystem::path(external_folder);
     const auto image = Canonical(explorer), fixture = Canonical(fixture_path.wstring());
     if (image.empty() || fixture.empty()) return 1;
     // Keep this uniquely created directory from being renamed/replaced during
@@ -429,23 +452,30 @@ int Probe(const std::filesystem::path& control_root, HDESK desktop, HDESK origin
         report += "INCONCLUSIVE\tincomplete baseline; Explorer not launched\n"; return 2;
     }
     report += "BASELINE\t" + std::to_string(baseline.size()) + "\n";
-    std::wstring command = L"\"" + explorer + L"\" /select,\"" + (fixture_path / L"selected.txt").wstring() + L"\"";
-    STARTUPINFOW startup{}; startup.cb = sizeof(startup);
-    auto desktop_arg = desktop_name; startup.lpDesktop = desktop_arg.data();
-    startup.dwFlags = STARTF_USESHOWWINDOW; startup.wShowWindow = SW_SHOWNOACTIVATE;
-    PROCESS_INFORMATION process{};
-    if (!CreateProcessW(explorer.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr,
-            fixture_path.c_str(), &startup, &process)) {
-        report += "FAIL\tCreateProcess error=" + std::to_string(GetLastError()) + "\n"; return 1;
+    if (external_folder.empty()) {
+        std::wstring command = L"\"" + explorer + L"\" /select,\"" + (fixture_path / L"selected.txt").wstring() + L"\"";
+        STARTUPINFOW startup{}; startup.cb = sizeof(startup);
+        auto desktop_arg = desktop_name; startup.lpDesktop = desktop_arg.data();
+        startup.dwFlags = STARTF_USESHOWWINDOW; startup.wShowWindow = SW_SHOWNOACTIVATE;
+        PROCESS_INFORMATION process{};
+        if (!CreateProcessW(explorer.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr,
+                fixture_path.c_str(), &startup, &process)) {
+            report += "FAIL\tCreateProcess error=" + std::to_string(GetLastError()) + "\n"; return 1;
+        }
+        // The launcher may hand off to an existing process. Never terminate it.
+        CloseHandle(process.hThread); CloseHandle(process.hProcess);
+        report += "LAUNCH\tpid=" + std::to_string(process.dwProcessId) + "\n";
+    } else {
+        report += "EXTERNAL\texpected_selection=empty\tfolder=" + Utf8(fixture) + "\n";
+        std::cout << "WAITING\tbaseline recorded; trigger external application now\tfolder=" << Utf8(fixture) << std::endl;
     }
-    // The launcher may hand off to an existing process. Never terminate it.
-    CloseHandle(process.hThread); CloseHandle(process.hProcess);
-    report += "LAUNCH\tpid=" + std::to_string(process.dwProcessId) + "\n";
     std::set<HWND> reported;
+    std::set<HWND> selection_prepared;
     const auto discovery_started = GetTickCount64();
-    const auto deadline = discovery_started + 15000;
+    const auto budget = external_folder.empty() ? 15000u : 90000u;
+    const auto deadline = discovery_started + budget;
     unsigned scan_number = 0;
-    report += "DISCOVERY\tstarted=" + std::to_string(discovery_started) + "\tdeadline=" + std::to_string(deadline) + "\tbudget_ms=15000\n";
+    report += "DISCOVERY\tstarted=" + std::to_string(discovery_started) + "\tdeadline=" + std::to_string(deadline) + "\tbudget_ms=" + std::to_string(budget) + "\n";
     while (GetTickCount64() < deadline) {
         const auto scan_started = GetTickCount64();
         ++scan_number;
@@ -478,7 +508,16 @@ int Probe(const std::filesystem::path& control_root, HDESK desktop, HDESK origin
             detail += "\taccepted=" + std::to_string(exact) + "\tscan_elapsed_ms=" + std::to_string(GetTickCount64() - scan_started) + "\n";
             report += detail;
             if (!exact) continue;
-            const bool selection = names.size() == 1 && names.front() == L"selected.txt";
+            const bool selection = external_folder.empty() ? names.size() == 1 && names.front() == L"selected.txt" : names.empty();
+            if (!selection && external_folder.empty() && names.empty() &&
+                GetTickCount64() - discovery_started >= 1000 && selection_prepared.insert(source.window).second) {
+                // /select can be ignored while Explorer restores its view. Set
+                // up only this verified new fixture; the next scan must read
+                // the real selection back before Pulse is even launched.
+                const HRESULT selected = PrepareFixtureSelection(source);
+                report += "FIXTURE_PREPARE_SELECTION\thresult=" + HResultText(selected) + "\n";
+                continue;
+            }
             if (!selection && GetTickCount64() + 1000 < deadline) {
                 report += "FIXTURE_WAIT\treason=expected-selection-pending\ttick=" + std::to_string(GetTickCount64()) + "\n";
                 continue;
@@ -500,7 +539,7 @@ int Probe(const std::filesystem::path& control_root, HDESK desktop, HDESK origin
                 }
                 owner.window = source.window; owner.value = owner_value;
                 bool stopped = false;
-                handoff_pass = RunHandoff(source, control_root, pulse, busy, crash, resume, owner.value, report, stopped);
+                handoff_pass = RunHandoff(source, control_root, pulse, busy, crash, resume, !external_folder.empty(), owner.value, report, stopped);
                 if (!stopped) {
                     report += "FAIL\tWatcher stop not confirmed; no driver Quit issued\n"; return 1;
                 }
@@ -509,6 +548,10 @@ int Probe(const std::filesystem::path& control_root, HDESK desktop, HDESK origin
                     return handoff_pass && !busy && !crash ? 0 : 1;
                 }
                 report += "CLEANUP\tWatcher stopped before driver source revalidation\n";
+                if (!external_folder.empty()) {
+                    report += "SOURCE\texternal native source retained; no driver cleanup Quit\n";
+                    return handoff_pass && (busy || crash) ? 0 : 1;
+                }
             }
             // Recheck immediately before the only mutation, including PID age,
             // COM identity, desktop membership, canonical folder and tab count.
@@ -538,14 +581,15 @@ int Probe(const std::filesystem::path& control_root, HDESK desktop, HDESK origin
 
 int wmain(int argc, wchar_t** argv) {
     bool current_desktop = false, busy = false, crash = false, resume = false;
-    std::wstring pulse;
+    std::wstring pulse, external_folder;
     for (int index = 1; index < argc; ++index) {
         if (wcscmp(argv[index], L"--current-desktop") == 0) current_desktop = true;
         else if (wcscmp(argv[index], L"--busy") == 0) busy = true;
         else if (wcscmp(argv[index], L"--busy-resume") == 0) resume = true;
         else if (wcscmp(argv[index], L"--crash") == 0) crash = true;
         else if (wcscmp(argv[index], L"--handoff") == 0 && index + 1 < argc) pulse = argv[++index];
-        else { std::cerr << "Usage: pulse_explorer_source_probe [--current-desktop [--handoff <absolute pulse.exe> [--busy|--busy-resume|--crash]]]\n"; return 1; }
+        else if (wcscmp(argv[index], L"--external-folder") == 0 && index + 1 < argc) external_folder = argv[++index];
+        else { std::cerr << "Usage: pulse_explorer_source_probe [--current-desktop [--handoff <absolute pulse.exe> [--busy|--busy-resume|--crash] [--external-folder <absolute fixture>]]]\n"; return 1; }
     }
     if ((!pulse.empty() && (!current_desktop || !std::filesystem::path(pulse).is_absolute() || Canonical(pulse).empty())) ||
         ((busy || crash || resume) && pulse.empty()) || (static_cast<unsigned>(busy) + static_cast<unsigned>(crash) + static_cast<unsigned>(resume) > 1)) {
@@ -563,15 +607,32 @@ int wmain(int argc, wchar_t** argv) {
     wchar_t executable[32768]{};
     if (!GetModuleFileNameW(nullptr, executable, ARRAYSIZE(executable))) return 1;
     const auto bench = std::filesystem::path(executable).parent_path().parent_path() / L"bench_data";
+    if (!external_folder.empty()) {
+        const auto canonical = Canonical(external_folder);
+        const DWORD attributes = GetFileAttributesW(external_folder.c_str());
+        if (!current_desktop || pulse.empty() || !std::filesystem::path(external_folder).is_absolute() ||
+            canonical.empty() || !Same(Canonical(std::filesystem::path(canonical).parent_path().wstring()), Canonical(bench.wstring())) ||
+            attributes == INVALID_FILE_ATTRIBUTES || !(attributes & FILE_ATTRIBUTE_DIRECTORY) || (attributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+            std::cerr << "FAIL: external folder requires current-desktop handoff and an existing direct bench_data directory without reparse points\n";
+            return 1;
+        }
+        external_folder = canonical;
+    }
     const auto suffix = std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
     const auto fixture = bench / (L"explorer-source-" + suffix);
     if (!CreateDirectoryW(bench.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) return 1;
     if (!CreateDirectoryW(fixture.c_str(), nullptr)) return 1;
-    const auto source_directory = fixture / L"source";
-    if (!CreateDirectoryW(source_directory.c_str(), nullptr)) return 1;
-    Handle selected{CreateFileW((source_directory / L"selected.txt").c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr)};
-    if (selected.value == INVALID_HANDLE_VALUE) return 1;
-    CloseHandle(selected.value); selected.value = nullptr;
+    if (external_folder.empty()) {
+        const auto source_directory = fixture / L"source";
+        if (!CreateDirectoryW(source_directory.c_str(), nullptr)) return 1;
+        Handle selected{CreateFileW((source_directory / L"selected.txt").c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr)};
+        if (selected.value == INVALID_HANDLE_VALUE) return 1;
+    } else {
+        Handle path_file{CreateFileW((fixture / L"external-folder.txt").c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr)};
+        DWORD written = 0;
+        const auto bytes = static_cast<DWORD>(external_folder.size() * sizeof(wchar_t));
+        if (path_file.value == INVALID_HANDLE_VALUE || !WriteFile(path_file.value, external_folder.data(), bytes, &written, nullptr) || written != bytes) return 1;
+    }
     const auto original = GetThreadDesktop(GetCurrentThreadId());
     const auto desktop_name = current_desktop ? observer_desktop : L"PulseExplorerSourceProbe." + suffix;
     const auto desktop = current_desktop ? original :
@@ -586,7 +647,7 @@ int wmain(int argc, wchar_t** argv) {
     if (desktop) {
         const HRESULT initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         if (SUCCEEDED(initialized)) {
-            result = Probe(fixture, desktop, original, desktop_name, report, pulse, busy, crash, resume);
+            result = Probe(fixture, desktop, original, desktop_name, report, pulse, busy, crash, resume, external_folder);
             CoUninitialize();
         } else report += "FAIL\tCOM initialization failed\thresult=" + HResultText(initialized) + "\n";
     } else report += "FAIL\trequired desktop unavailable\terror=" + std::to_string(desktop_error) + "\n";

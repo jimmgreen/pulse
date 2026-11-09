@@ -2,22 +2,26 @@
 #pragma once
 
 inline constexpr PackFile kMediaPackFiles[] = {
-    {L"BUILDCONF.txt", 1030, L"1d416be6139aaefeb3374da5b54c9d09719caf4ae838be144f9a2df208ef33dd", 576, L"a74ed9da8ce76c81477bcf5aefe84b5b42e1e5e283312536d08a1119161ae35b", L"ffmpeg-BUILDCONF.txt.lzms"},
-    {L"ffmpeg.exe", 18718208, L"9dcce6f16e496f66e57a16dc3ffb419e4d73a9c92cd9808f270e2d3b7d5266d4", 7405152, L"39bc05bde5b0a2c8ff5e13eadf9593fe0f441364cb3828c3e0b4dbfca5827218", L"ffmpeg-ffmpeg.exe.lzms"},
-    {L"ffprobe.exe", 18613248, L"1705bf6910b2b844eb7fda0ffed3966bb8948c517f127fa20a42f244bc597d0d", 7343054, L"5991c0584149835e252789a7f957e0440cd7fb5ef9ff71f162177a877e7a734f", L"ffmpeg-ffprobe.exe.lzms"},
-    {L"LICENSE-dav1d.txt", 1317, L"dd92c3c2247c5651606fc23a5e2d6a1ebc5ace9a3e49cbde0e12f05ad1cb1ee5", 916, L"86145eb1e52f41c61d9c50f42b835dac734bb4bae7ab6a6a8b3ee2c308f09a87", L"ffmpeg-LICENSE-dav1d.txt.lzms"},
-    {L"LICENSE-FFmpeg-LGPL-2.1.txt", 26526, L"b634ab5640e258563c536e658cad87080553df6f34f62269a21d554844e58bfe", 9710, L"33cc1bc8fcc4a84722997c4b2ba21a6ce7ecdef68cceb51832676c88627dd0f7", L"ffmpeg-LICENSE-FFmpeg-LGPL-2.1.txt.lzms"},
-    {L"SOURCE.txt", 296, L"378f77467284a1616bd39c738c06109cdd672c15d4cdcf5821de1e277b4188ce", 288, L"4b13a8ac3d9ca2e1ce792eb3e394e93a1dc83ab0a1a4b5103e68b3a5af11c70e", L"ffmpeg-SOURCE.txt.lzms"},
+    {L"BUILDCONF.txt", 1100, L"6bf03bb3154846a885befa2bcc2d9d3ef44064a8dfae9463a2d011eb8c62bc13", 612, L"e3880fefe38b5235cba9e72dcf5de945206119346190745eec48be679bcd7d99"},
+    {L"DEPENDENCIES.txt", 3161, L"30c1c807acfd38d94e9e65984043a80b839823b3c190fe92e0e5b0bb93fc5384", 1416, L"b995d2d23a38ccf5250d2d87b1299291672649a341d5f3f0dda594b5b97b7481"},
+    {L"ffmpeg.exe", 24072704, L"f438fed24def480ac03c4b9d89a91f4d5036e699d01510c947ac3169c9cfa99f", 9750488, L"c564888bbee809d391536f5e067c18a46b373a52a1adf1790d80a92ada647c75"},
+    {L"ffprobe.exe", 23967232, L"5a59b058085957dcfaa9f1f6f4503687b702cdb0980ae1af338a5c3401b83440", 9680542, L"664ea01e6ea6fc86fb0a5ead54258bf047d5049490ad1adc7f79e0978c17b49b"},
+    {L"LICENSE-dav1d.txt", 1317, L"dd92c3c2247c5651606fc23a5e2d6a1ebc5ace9a3e49cbde0e12f05ad1cb1ee5", 916, L"86145eb1e52f41c61d9c50f42b835dac734bb4bae7ab6a6a8b3ee2c308f09a87"},
+    {L"LICENSE-dependencies.txt", 677591, L"e4a1bc89ca3f0ad48e18e405a5a223c5e0d94388b153e735ebb83c1be01f6efc", 182012, L"2a781b254aec7c10e0ba29266b345179a6e1b98f215e80340b87dde98589c822"},
+    {L"LICENSE-FFmpeg-LGPL-2.1.txt", 26526, L"b634ab5640e258563c536e658cad87080553df6f34f62269a21d554844e58bfe", 9710, L"33cc1bc8fcc4a84722997c4b2ba21a6ce7ecdef68cceb51832676c88627dd0f7"},
+    {L"LICENSE-libass.txt", 755, L"f7e30699d02798351e7f839e3d3bfeb29ce65e44efa7735c225464c4fd7dfe9c", 640, L"ba5737f008dc8d91ac7fc0a883aa16c5cdd515a029a927b423adb9a3e1e1de66"},
+    {L"SOURCE.txt", 663, L"f63cec7c5a1c87f519f04ebf5cbf73d999942ce2730646c4eb1b2f275fc0cc0a", 546, L"91b4b72984dd8407a89a0e0b601d7b6eee19307489c446e3a46941f314251645"},
 };
-inline constexpr PackRelease kMediaPackRelease{L"ffmpeg", L"1.0.2", L"https://github.com/jimmgreen/pulse/releases/download/v1.0.58/", kMediaPackFiles, std::size(kMediaPackFiles)};
+inline constexpr PackRelease kMediaPackRelease{L"ffmpeg", L"1.0.5", L"https://github.com/jimmgreen/pulse/releases/download/pack-ffmpeg-1.0.5/",
+    kMediaPackFiles, sizeof(kMediaPackFiles) / sizeof(kMediaPackFiles[0])};
 
 inline constexpr PackFile kImagePackFiles[] = {
-    {L"heif.dll", 3281408, L"1d15e773475eb8ce17a4857459fbe196d05961ac6dd391c68a44209179c55831", 1175912, L"fd207a53a598a53bc3932c01b8a86181c6ddfc33528927d320c16bf89b054cac", L"images-heif.dll.lzms"},
-    {L"libde265.dll", 536064, L"51d95d4a840ee9c9a82dac808366232ee549e8cd3bd01434f2113a2adc4ec60f", 236436, L"cfa33d3de269a2ab31e4b56f7a640bedc31cd1219ae2fdda1e9d54ff50dafdd8", L"images-libde265.dll.lzms"},
+    {L"heif.dll", 3281408, L"80f34fe3578adc3673d1e651b400b60dc316c87d6acc72d225b1382be4fae45e", 1175916, L"3edd8639dc393ba7f632262de97a80e20449a48cb527ff56aab8ac48d27d3bd1", L"images-heif.dll.lzms"},
+    {L"libde265.dll", 535552, L"2c713983a261a83482265c31e76da9b5212e2691397d157095c8d802054eb978", 236408, L"b0c09125ebe788bc5572f3242aac2c9ab458062a02b8d3b969b33cfa5aa23536", L"images-libde265.dll.lzms"},
     {L"pulse-imgpack.exe", 3073024, L"e0609abeab1f6ed41680eca6c52ae280c338b0b62d1712a31f3c87aa54a256ff", 1093532, L"0a41846a8be59d1507b5b57a90993ed85b91928c47459d516329d9e2c278f31a", L"images-pulse-imgpack.exe.lzms"},
     {L"THIRD_PARTY_NOTICES.txt", 122210, L"53ffd248d30b57c63e98d300cf7ebc328c72318a47744c220cf6312473eeeba9", 34492, L"5e06512e8a5e52ea3dd7fe9ff1d46581a7db3ca75edf60292b00c2963e5bd136", L"images-THIRD_PARTY_NOTICES.txt.lzms"},
 };
-inline constexpr PackRelease kImagePackRelease{L"images", L"1.0.2", L"https://github.com/jimmgreen/pulse/releases/download/v1.0.58/", kImagePackFiles, std::size(kImagePackFiles)};
+inline constexpr PackRelease kImagePackRelease{L"images", L"1.0.3", L"https://github.com/jimmgreen/pulse/releases/download/pack-images-1.0.3/", kImagePackFiles, std::size(kImagePackFiles)};
 
 inline constexpr PackFile kRawPackFiles[] = {
     {L"pulse-rawpack.exe", 173056, L"4eb07ac1684ee7318da5cf1b4c63b4c735c1dde4750306e28760ec8066e88c68", 79038, L"f13e567c9e0cfc99fa4aae87751c46d24fdd1dd080ee3c150efd73e05ee1c86d", L"raw-pulse-rawpack.exe.lzms"},
@@ -26,10 +30,3 @@ inline constexpr PackFile kRawPackFiles[] = {
 };
 inline constexpr PackRelease kRawPackRelease{L"raw", L"1.0.2", L"https://github.com/jimmgreen/pulse/releases/download/v1.0.58/", kRawPackFiles, std::size(kRawPackFiles)};
 
-inline constexpr PackFile kArchivePackFiles[] = {
-    {L"7z.dll", 1908736, L"bbd705e3b58ca7677c1e9e67473f166a6712da034dcb567d571fbb67507a443f", 754450, L"33b256c217edfa5d81cfabe740e7378815cfec36eb79b551d18e083769dbf802", L"archive-7z.dll.lzms"},
-    {L"7z.exe", 575488, L"4a41aa37786c7eae7451e81c2c97458d5d1ae5a3a8154637a0d5f77adc05e619", 219174, L"3f42f16ea44ab02ae201e98b11558c91b1e66337872aee2c4a3cc33f5960b259", L"archive-7z.exe.lzms"},
-    {L"License.txt", 6031, L"519ac0a4bded9c18ea02e0afb71f663d8c47373bd9facd3ac96a79f51d77765d", 2242, L"911666a80c81363c28106cfac2d09f99b3d7f68eb929a1bfade1ee60387b9cb4", L"archive-License.txt.lzms"},
-    {L"NOTICE.txt", 307, L"88a4e61cc4858cb4086acd028b16fea1a76ddd9eabc7b09a8bec7dc3f840eb89", 308, L"7e27daea019f5eb04908489f8759eabd17a8831ada71871cad072d6fbce8e1c5", L"archive-NOTICE.txt.lzms"},
-};
-inline constexpr PackRelease kArchivePackRelease{L"archive", L"1.0.2", L"https://github.com/jimmgreen/pulse/releases/download/v1.0.58/", kArchivePackFiles, std::size(kArchivePackFiles)};

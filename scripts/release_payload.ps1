@@ -1,6 +1,6 @@
 # Shared production executables for installer payload, signing and symbol packaging.
-$PulseReleaseExecutables = @('pulse.exe', 'Pulse.AI.exe', 'Pulse.Content.exe', 'Pulse.Document.exe', 'Pulse.Index.exe',
-    'Pulse.Preview.exe', 'pulse_shell.exe', 'pulse_integration.exe', 'pulse_elevated.exe')
+$PulseReleaseExecutables = @('pulse.exe', 'pulse_launcher.exe', 'Pulse.AI.exe', 'Pulse.Content.exe', 'Pulse.Document.exe', 'Pulse.Index.exe',
+    'Pulse.Preview.exe', 'pulse_shell.exe', 'pulse_integration.exe', 'pulse_elevated.exe', 'pulse_hotkey_broker.exe')
 $PulseReleaseRuntimeDlls = @('lumatext.dll', 'pdfium.dll', 'pulse_start_pin.dll')
 $PulseReleasePayload = $PulseReleaseExecutables + $PulseReleaseRuntimeDlls
 # Content helpers ship with the app so same-version local builds use their

@@ -20,6 +20,7 @@
 #include "../common/display_path.h"
 #include "../common/text_format.h"
 #include "../fs/drive_label.h"
+#include "../fs/drive_kind.h"
 #include "../ui/drive_capacity.h"
 #include "../ops/clipboard.h"
 #include "../ops/source_listing.h"
@@ -645,12 +646,14 @@ void Pane::NewTab(const std::wstring& path) {
     const ui::ViewMode mode = view.view_mode;
     const auto columns = view.details_column_dividers;
     const auto search_columns = view.search_column_dividers;
+    const auto media_columns = view.media_column_widths;
     const bool column_layout = view.column_layout;
     auto column_widths = std::move(view.column_widths_dip);
     view = Tab{};
     view.view_mode = mode;
     view.details_column_dividers = columns;
     view.search_column_dividers = search_columns;
+    view.media_column_widths = media_columns;
     view.column_layout = column_layout;
     view.column_widths_dip = std::move(column_widths);
     view.current_path = fs::NormalizePath(path);
@@ -688,6 +691,7 @@ std::unique_ptr<LayoutTab> MakeSingleLayoutTab(const std::wstring& path, const T
     if (source) {
         pane->view.view_mode = source->view_mode;
         pane->view.details_column_dividers = source->details_column_dividers;
+        pane->view.media_column_widths = source->media_column_widths;
         pane->view.search_column_dividers = source->search_column_dividers;
         pane->view.column_layout = source->column_layout;
         pane->view.column_widths_dip = source->column_widths_dip;
@@ -749,6 +753,11 @@ LayoutTab& WindowTabs::NewTabAt(size_t index, const std::wstring& path) {
 
 void WindowTabs::CloseTab(size_t idx) {
     if (idx >= items.size() || items.size() <= 1) return;
+    if (const auto& transaction = items[idx]->explorer_transaction) {
+        transaction->handoff->Cancel();
+        const auto phase = transaction->handoff->state.load();
+        if (phase == HandoffState::Closing || phase == HandoffState::Closed) return;
+    }
     if (items[idx]->pinned) return;
     items.erase(items.begin() + static_cast<ptrdiff_t>(idx));
     if (active >= items.size()) active = items.size() - 1;
@@ -757,6 +766,11 @@ void WindowTabs::CloseTab(size_t idx) {
 
 std::unique_ptr<LayoutTab> WindowTabs::TakeTab(size_t idx, bool allow_last) {
     if (idx >= items.size() || (items.size() <= 1 && !allow_last) || !items[idx]) return nullptr;
+    if (const auto& transaction = items[idx]->explorer_transaction) {
+        transaction->handoff->Cancel();
+        const auto phase = transaction->handoff->state.load();
+        if (phase == HandoffState::Closing || phase == HandoffState::Closed) return nullptr;
+    }
     std::unique_ptr<LayoutTab> tab = std::move(items[idx]);
     items.erase(items.begin() + static_cast<ptrdiff_t>(idx));
     if (items.empty()) active = 0;
@@ -1076,10 +1090,10 @@ bool StagingTray::RefreshExists() {
     bool changed = false;
     for (auto& batch : batches_) {
         for (auto& it : batch.items) {
-            // Network paths are not probed: a dead share would stall the UI thread.
+            // Mapped shares and user-mode cloud mounts can stall just like UNC paths.
             const bool unc = it.path.starts_with(L"\\\\?\\UNC\\") ||
                 (it.path.starts_with(L"\\\\") && !it.path.starts_with(L"\\\\?\\"));
-            if (unc) continue;
+            if (unc || fs::IsRemoteLikeDrive(it.path)) continue;
             const bool now = GetFileAttributesW(it.path.c_str()) != INVALID_FILE_ATTRIBUTES;
             if (now != it.exists) {
                 it.exists = now;
@@ -1627,45 +1641,20 @@ static std::wstring StatusText(const Tab& tab) {
     }
     wchar_t buf[128];
     swprintf_s(buf, l10n::Get(l10n::StringId::StatusItemsFormat).c_str(),
-        tab.directory_count + tab.file_count, tab.directory_count, tab.file_count);
+        tab.directory_count + tab.file_count);
     return buf;
 }
 
 static std::wstring SelectionText(const Tab& tab) {
     const int count = tab.SelectedCount();
-    if (count <= 0) return l10n::Get(l10n::StringId::NotSelected);
+    if (count <= 0) return {};
     // Only the details tree's "more" row: it is not an item.
     if (count == 1 && tab.TreeEntries() && tab.selected_index >= 0 &&
         tab.tree->IsPlaceholder(static_cast<size_t>(tab.selected_index)))
-        return l10n::Get(l10n::StringId::NotSelected);
-    if (count == 1 && tab.snapshot && tab.selected_index >= 0 &&
-        tab.selected_index < static_cast<int>(tab.EntryCount())) {
-        const auto& e = tab.EntryAt(tab.selected_index);
-        wchar_t buf[256];
-        swprintf_s(buf, l10n::Get(l10n::StringId::SelectedOneFormat).c_str(), e.name.c_str(),
-                   pulse::format::ByteSize(e.size, true).c_str());
-        // A row inside an expanded folder: where it is, from the current folder.
-        const size_t slash = e.full_path.find_last_of(L'\\');
-        const size_t base = tab.current_path.size() + (tab.current_path.ends_with(L'\\') ? 0 : 1);
-        if (tab.TreeEntries() && slash != std::wstring::npos && slash > base &&
-            _wcsnicmp(e.full_path.c_str(), tab.current_path.c_str(), tab.current_path.size()) == 0) {
-            wchar_t where[300];
-            swprintf_s(where, l10n::Get(l10n::StringId::SelectedInFolderFormat).c_str(),
-                       e.full_path.substr(base, slash - base).c_str());
-            return std::wstring(buf) + L"  \u00B7  " + where;
-        }
-        return buf;
-    }
-    wchar_t buf[64];
+        return {};
+    wchar_t buf[64]{};
     swprintf_s(buf, l10n::Get(l10n::StringId::SelectedCountFormat).c_str(), count);
-    // Content-search selections are summed asynchronously in BuildVm.
-    if (tab.content_results || !tab.snapshot) return buf;
-    uint64_t bytes = 0;
-    int files = 0;
-    tab.SelectionSizeSummary(&bytes, &files, nullptr);
-    // Like Explorer: folder sizes are unknown here, so show the files' total.
-    if (files <= 0) return buf;
-    return std::wstring(buf) + L"  \u00B7  " + pulse::format::ByteSize(bytes, true);
+    return buf;
 }
 
 static ui::SidebarGroup ConvertGroup(const std::wstring& header, const std::vector<SidebarEntry>& src,
@@ -1988,7 +1977,7 @@ index::ContentResultStore::Filter ContentFilter(const std::wstring& text, const 
         }
         sets.push_back(std::move(set));
     }
-    return [pattern=NamePattern(name),sets=std::move(sets)](const fs::DirEntry& entry) {
+    return [pattern=NamePattern(name, true),sets=std::move(sets)](const fs::DirEntry& entry) {
         if(!pattern.Matches(entry.name)) return false;
         if(sets.empty()) return true;
         const std::wstring key=ToLowerCopy(entry.full_path);
@@ -2012,7 +2001,7 @@ void CollectFilterMatches(const Tab& tab, const PlacesCatalog* places, std::vect
     ParseFilterText(tab.filter_text, name_needle, tag_terms);
     if (name_needle.empty() && tag_terms.empty())
         name_needle = ToLowerCopy(tab.filter_text);
-    const NamePattern pattern(name_needle);
+    const NamePattern pattern(name_needle, true);
     const auto* rows = tab.TreeEntries();
     if (!rows) rows = tab.snapshot.get();
     const int available = static_cast<int>((std::min)(static_cast<size_t>(n), rows->size()));
@@ -2095,7 +2084,7 @@ void FillPaneViewModelBody(ui::PaneViewModel& out, const Pane& pane, const Place
     out.can_create_folder = out.can_create;  // the app adds a writable phone folder
     // The network page and a server's share list: 连接服务器 takes 新建's slot.
     out.connect_server = tab->current_path == L"pulse:networks" || IsUncServerRoot(tab->current_path);
-    out.curated_order = virtual_kind == L"starred" || virtual_kind == L"recent" || virtual_kind == L"changes" ||
+    out.curated_order = virtual_kind == L"recent" || virtual_kind == L"changes" ||
                         virtual_kind == L"ai-list";
     out.is_starred = virtual_kind == L"starred";
     out.is_recent = virtual_kind == L"recent";
@@ -2167,6 +2156,8 @@ void FillPaneViewModelBody(ui::PaneViewModel& out, const Pane& pane, const Place
         out.selected_count = 0;
     out.all_selected = tab->all_selected;
     out.selected_indices = tab->all_selected ? nullptr : &tab->selected;
+    out.selection_owner = tab;
+    out.selection_revision = tab->selection_revision;
     out.focus_first_hint = tab->HasFocusHint();
     out.focus_ring_source = tab->HasCaret() && !tab->IsSelected(tab->caret_index) ? tab->caret_index : -1;
     out.scroll_y = tab->scroll_y;
@@ -2179,6 +2170,7 @@ void FillPaneViewModelBody(ui::PaneViewModel& out, const Pane& pane, const Place
     out.sort_column = tab->sort_column;
     out.sort_direction = tab->sort_direction;
     out.details_column_dividers = tab->details_column_dividers;
+    out.media_column_widths = tab->media_column_widths;
     out.search_column_dividers = tab->search_column_dividers;
     FillColumnStripView(out.column_strip, *tab);
     // This PC in details view: its own columns, and 存储总览 over two or more
@@ -2286,6 +2278,7 @@ void FillPaneViewModelBody(ui::PaneViewModel& out, const Pane& pane, const Place
     if (out.group_by != 0 && tab->snapshot && !tab->content_results && !out.compare_active) {
         const GroupBy by = GroupByFromInt(out.group_by);
         GroupClock clock = by == GroupBy::Date ? MakeGroupClock(tab->sort_column) : GroupClock{};
+        clock.folders = tab->EffectiveFolderSort();
         // Tag groups re-split when the catalog changes; dates at midnight;
         // media groups as values come in (each paced re-sort pass).
         const auto tag_catalog = by == GroupBy::Tag ? CurrentTagCatalog() : nullptr;
@@ -2293,7 +2286,7 @@ void FillPaneViewModelBody(ui::PaneViewModel& out, const Pane& pane, const Place
         const uint64_t day_key = by == GroupBy::Tag ? (tag_catalog ? tag_catalog->revision : 0)
                                : media_groups ? tab->media_resort_revision : clock.today;
         const int sort_key = static_cast<int>(tab->sort_column) * 2 +
-                             static_cast<int>(tab->sort_direction);
+                             static_cast<int>(tab->sort_direction) + 128 * static_cast<int>(clock.folders);
         if (!tab->view_groups || tab->view_groups_snapshot != tab->snapshot ||
             tab->view_groups_filter != out.filter_map || tab->view_groups_by != out.group_by ||
             tab->view_groups_sort != sort_key || tab->view_groups_day != day_key ||
@@ -2322,7 +2315,7 @@ void FillPaneViewModelBody(ui::PaneViewModel& out, const Pane& pane, const Place
                 const int rank = GroupRank(e, by, clock);
                 if (groups->empty() || prev < 0 ||
                     GroupCompareRanks(entries[static_cast<size_t>(prev)], e, by,
-                                      tab->sort_column, tab->sort_direction, prev_rank, rank) != 0) {
+                                      tab->sort_column, tab->sort_direction, prev_rank, rank, clock) != 0) {
                     ui::ListGroup g;
                     g.first = static_cast<int>(row);
                     g.rank = rank;
@@ -2338,6 +2331,7 @@ void FillPaneViewModelBody(ui::PaneViewModel& out, const Pane& pane, const Place
                     if (by == GroupBy::AiDup) g.label = e.change_old_path;
                     if (media_groups)   // empty: 未知 (the renderer names it)
                         g.label = g.rank < 0 ? l10n::Get(l10n::StringId::GroupFolders) : MediaGroupLabel(clock, g.rank);
+                    if (rank == kFolderGroupRank) g.label = l10n::Get(l10n::StringId::GroupFolders);
                     if (!seen.insert(g.key).second) {
                         contiguous = false;
                         break;
@@ -2667,6 +2661,7 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
                     sub.indent = 1;
                     sub.fallback_text = std::to_wstring(j + 1);
                     sub.workspace_child_number = static_cast<int>(j + 1);
+                    sub.workspace_parent_index = i;
                     sub.workspace_child_view = j < w.pane_views.size() ? w.pane_views[j] : ui::ViewMode::Details;
                     sub.icon_glyph = L"\xE8B7";
                     sub.icon_color = ui::HexColor(w.color_rgb);
@@ -2734,14 +2729,14 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
                 std::move(row));
             ++starred_insert;
         };
-        const auto folder_row = [](const StarredItem& entry, int indent) {
+        const auto starred_row = [](const StarredItem& entry, int indent) {
             ui::SidebarItem child;
             child.label = TabTitle(entry.path);
             child.path = entry.path;
             child.indent = indent;
             child.starred_child = true;
-            child.icon_glyph = L"\xE8B7";
-            child.fallback_text = L"Dir";
+            child.icon_glyph = entry.kind == PlaceItemKind::File ? L"\xE8A5" : L"\xE8B7";
+            child.fallback_text = entry.kind == PlaceItemKind::File ? L"File" : L"Dir";
             child.icon_color = ui::HexColor(0xFBBF24);
             child.badge = entry.badge;
             child.badge_color = ui::HexColor(entry.badge_rgb);
@@ -2750,7 +2745,7 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
         // 收藏夹分组与分隔线: a group folds its folders under one row; a
         // separator is a line above the next row.
         bool line = false;
-        for (const auto& row : places->StarredRows(true)) {
+        for (const auto& row : places->StarredRows(false)) {
             if (row.kind == StarredRow::Kind::Separator) {
                 line = true;
                 continue;
@@ -2772,10 +2767,10 @@ ui::WindowViewModel BuildWindowViewModel(const Pane& pane,
                 header.divider_above = std::exchange(line, false);
                 add(std::move(header));
                 if (group->collapsed) continue;
-                for (size_t member : row.members) add(folder_row(places->starred_items[member], 2));
+                for (size_t member : row.members) add(starred_row(places->starred_items[member], 2));
                 continue;
             }
-            ui::SidebarItem child = folder_row(places->starred_items[row.index], 1);
+            ui::SidebarItem child = starred_row(places->starred_items[row.index], 1);
             child.divider_above = std::exchange(line, false);
             add(std::move(child));
         }

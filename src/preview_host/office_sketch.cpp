@@ -59,9 +59,6 @@ void SetError(std::wstring* error, const wchar_t* text) {
 
 constexpr wchar_t kPageFont[] = L"SimSun";
 constexpr wchar_t kUiFont[] = L"Microsoft YaHei UI";
-constexpr UINT32 kWordBlue = 0x2B579A;
-constexpr UINT32 kExcelGreen = 0x217346;
-constexpr UINT32 kPowerPointOrange = 0xC43E1C;
 constexpr float kReadablePx = 4.0f;   // smaller text becomes grey bars
 
 // A WIC bitmap with a software Direct2D target, read back as PBGRA.
@@ -152,37 +149,6 @@ std::wstring Collapse(const std::wstring& text) {
         out += c;
     }
     return out;
-}
-
-// Type badge, bottom-left, `size` pixels square.
-void BadgeBox(Canvas& canvas, const wchar_t* letter, UINT32 color, float size) {
-    constexpr float kBase = 52.0f;
-    const float scale = size / kBase;
-    const float inset = 6.0f * scale;
-    const float h = static_cast<float>(canvas.height);
-    const D2D1_ROUNDED_RECT box{D2D1::RectF(inset, h - inset - size, inset + size, h - inset),
-                                8.0f * scale, 8.0f * scale};
-    auto shadow = canvas.Brush(0x000000, 0.18f);
-    D2D1_ROUNDED_RECT drop = box;
-    drop.rect.top += 1.5f * scale; drop.rect.bottom += 1.5f * scale;
-    canvas.rt->FillRoundedRectangle(drop, shadow.Get());
-    canvas.rt->FillRoundedRectangle(box, canvas.Brush(color).Get());
-    if (auto format = Format(L"Segoe UI", 32.0f * scale, true, DWRITE_TEXT_ALIGNMENT_CENTER)) {
-        format->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-        canvas.rt->DrawText(letter, 1, format.Get(), box.rect, canvas.Brush(0xFFFFFF).Get());
-    }
-}
-
-// Grid sizes (edge >= kOfficeSketchPageEdge): 52 px at edge 256 (about 29% of
-// an A4 page's width), never more than 32% of the shorter side. Medium icons
-// draw the sketch at ~50 px on screen where its text is unreadable anyway, so
-// the badge takes half the shorter side to stay recognizable.
-void Badge(Canvas& canvas, const wchar_t* letter, UINT32 color, UINT edge) {
-    const float shorter = static_cast<float>((std::min)(canvas.width, canvas.height));
-    const float scale = (std::max)(0.75f, edge / 256.0f);
-    const float size = edge >= kOfficeSketchPageEdge ? (std::min)(52.0f * scale, shorter * 0.32f)
-                                                     : shorter * 0.5f;
-    BadgeBox(canvas, letter, color, size);
 }
 
 void Frame(Canvas& canvas) {
@@ -325,7 +291,6 @@ bool DrawWordPage(const DocModel& doc, UINT edge, Canvas& canvas) {
     }
     canvas.rt->PopAxisAlignedClip();
     Frame(canvas);
-    Badge(canvas, L"W", kWordBlue, edge);
     return true;
 }
 
@@ -395,7 +360,6 @@ bool DrawWordCard(const DocModel& doc, UINT edge, Canvas& canvas) {
         }
     }
     Frame(canvas);
-    Badge(canvas, L"W", kWordBlue, edge);
     return true;
 }
 
@@ -467,7 +431,6 @@ bool DrawSheet(const std::wstring& path, UINT edge, Canvas& canvas, std::wstring
         canvas.rt->DrawLine(D2D1::Point2F(0, y), D2D1::Point2F(W, y), grid.Get(), 1.0f);
     }
     Frame(canvas);
-    Badge(canvas, L"X", kExcelGreen, edge);
     return true;
 }
 
@@ -576,13 +539,12 @@ bool DrawSlide(const SlideModel& model, UINT edge, Canvas& canvas) {
     }
     for (const SlideText& text : model.texts) DrawSlideText(canvas, text, scale);
     Frame(canvas);
-    Badge(canvas, L"P", kPowerPointOrange, edge);
     return true;
 }
 
 // ---- OpenDocument: the thumbnail every ODF writer stores --------------------------------
 
-bool DrawOdfThumbnail(const std::wstring& path, std::wstring_view extension, UINT edge, Canvas& canvas,
+bool DrawOdfThumbnail(const std::wstring& path, UINT edge, Canvas& canvas,
                       std::wstring* error) {
     std::vector<unsigned char> png;
     if (!ReadZipEntry(path, "Thumbnails/thumbnail.png", 8u << 20, png, error)) return false;
@@ -615,9 +577,6 @@ bool DrawOdfThumbnail(const std::wstring& path, std::wstring_view extension, UIN
                                                      static_cast<float>(canvas.height)),
                           1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
     Frame(canvas);
-    if (extension == L".odt") Badge(canvas, L"W", kWordBlue, edge);
-    else if (extension == L".ods") Badge(canvas, L"X", kExcelGreen, edge);
-    else if (extension == L".odp") Badge(canvas, L"P", kPowerPointOrange, edge);
     return true;
 }
 
@@ -679,7 +638,7 @@ bool RenderOfficeSketch(const std::wstring& path, std::wstring_view extension, U
         if (!ReadSlideModel(path, slides, error)) return false;
         drawn = DrawSlide(slides, edge, canvas);
     } else if (IsOpenDocument(extension)) {
-        drawn = DrawOdfThumbnail(path, extension, edge, canvas, error);
+        drawn = DrawOdfThumbnail(path, edge, canvas, error);
     } else if (IsWordLike(extension)) {
         // By content: .doc files are often .docx or RTF under the old name.
         DocModel doc;

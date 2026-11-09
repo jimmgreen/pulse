@@ -23,7 +23,8 @@ inline bool AcceptTagAdsResult(uint64_t& current, uint64_t incoming) {
     return true;
 }
 void ApplyTagAdsNotice(TagAdsNoticeState& owned, const std::vector<TagAdsFailure>& failures,
-                       std::wstring& title, std::wstring& message, bool show_new);
+                       std::wstring& title, std::wstring& message, bool show_new,
+                       const std::wstring& current_path = {});
 // Called on the serial ADS lane; persists intent before changing any stream.
 std::vector<std::wstring> SyncTagAdsUpdates(const std::vector<TagAdsUpdate>& updates,
                                          std::vector<TagAdsFailure>* diagnostics = nullptr);

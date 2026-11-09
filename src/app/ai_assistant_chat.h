@@ -114,8 +114,7 @@ struct AiChat {
     ui::AiBlockView& Add(ui::AiBlockKind kind, uint64_t now_ms);
 };
 
-// A failed turn (the agent builds it from the stream's error; error card A in
-// plans/ai/Pulse_AI助手_错误与快捷键.html).
+// A failed turn (the agent builds it from the stream's error; error card A).
 struct AiChatError {
     ui::AiErrTone tone = ui::AiErrTone::Err;
     ui::AiIcon icon = ui::AiIcon::AlertCircle;

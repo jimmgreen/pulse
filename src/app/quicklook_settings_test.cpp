@@ -85,19 +85,18 @@ int RunQuickLookSettingsTest(pulse::AppState& s, const wchar_t* output) {
         vm.settings_version = L"test";
         vm.settings_pack_root = L"C:\\Users\\Example\\AppData\\Local\\Pulse\\packs";
         vm.settings_pack_media_available = vm.settings_pack_images_available = true;
-        vm.settings_pack_raw_available = vm.settings_pack_archive_available = true;
+        vm.settings_pack_raw_available = true;
         log << "case language=" << (language[0] == L'z' ? "zh" : "en") << " font=" << font
             << " dpi=" << scale << " width=" << width << '\n';
         for (const bool installed : {false, true}) {
             vm.settings_preview_codecs = ui::kPreviewCodecsDetected | (installed ? 15u : 0u);
             vm.settings_pack_images_installed = vm.settings_pack_images_enabled = installed;
             vm.settings_pack_raw_installed = vm.settings_pack_raw_enabled = installed;
-            vm.settings_pack_archive_installed = vm.settings_pack_archive_enabled = installed;
             vm.settings_pack_media_installed = vm.settings_pack_ffmpeg_enabled = installed;
             vm.settings_pack_ffmpeg = installed ? 1 : 0;
             vm.settings_pack_bytes = installed ? 100 * 1024 * 1024 : 0;
-            vm.settings_pack_installed = installed ? 4 : 0;
-            vm.settings_pack_images_version = vm.settings_pack_raw_version = vm.settings_pack_archive_version = L"1.0.0";
+            vm.settings_pack_installed = installed ? 3 : 0;
+            vm.settings_pack_images_version = vm.settings_pack_raw_version = L"1.0.0";
             const auto lay = ui::MakeSettingsLayout(vm, rect, scale, s.renderer.TitleBarHeight(), 28*scale, &painter);
             check(lay.preview_formats.bottom > lay.preview_formats.top && lay.disclosure[2].bottom > lay.disclosure[2].top,
                 "Quick Look format overview has an expanded interactive header");
@@ -105,8 +104,8 @@ int RunQuickLookSettingsTest(pulse::AppState& s, const wchar_t* output) {
                   lay.preview_codec_group.bottom < lay.pack_section.top && lay.pack_section.bottom <= lay.pack_summary.top,
                 "formats and system extensions precede preview packs");
             check(lay.pack_card.bottom <= lay.pack_source_group.top && lay.pack_source_group.bottom < lay.pack_images_card.top &&
-                  lay.pack_images_card.bottom < lay.pack_raw_card.top && lay.pack_raw_card.bottom < lay.pack_archive_card.top,
-                "all four pack managers remain separately laid out");
+                  lay.pack_images_card.bottom < lay.pack_raw_card.top,
+                "all three pack managers remain separately laid out");
             {   // 高级: background updates above the uninstall choice, each row its own switch.
                 const auto a = lay.pack_auto_update_row, r = lay.pack_remove_row;
                 check(a.bottom > a.top && a.top >= lay.pack_group.top && a.bottom <= r.top && r.bottom <= lay.pack_group.bottom,
@@ -167,21 +166,19 @@ int RunQuickLookSettingsTest(pulse::AppState& s, const wchar_t* output) {
             if (installed) {
                 // Current packs show no 更新到; older ones show it left of 卸载, with its own target.
                 check(lay.pack_update.right <= lay.pack_update.left && lay.pack_images_update.right <= lay.pack_images_update.left &&
-                      lay.pack_raw_update.right <= lay.pack_raw_update.left && lay.pack_archive_update.right <= lay.pack_archive_update.left,
+                      lay.pack_raw_update.right <= lay.pack_raw_update.left,
                       "current packs offer no update");
                 auto older = vm;
-                older.settings_pack_version = older.settings_pack_images_version = older.settings_pack_raw_version =
-                    older.settings_pack_archive_version = L"1.0.1";
+                older.settings_pack_version = older.settings_pack_images_version = older.settings_pack_raw_version = L"1.0.1";
                 older.settings_pack_update_version = older.settings_pack_images_update_version =
-                    older.settings_pack_raw_update_version = older.settings_pack_archive_update_version = L"1.0.2";
+                    older.settings_pack_raw_update_version = L"1.0.2";
                 const auto u = ui::MakeSettingsLayout(older, rect, scale, s.renderer.TitleBarHeight(), 28*scale, &painter);
                 using Lay = ui::SettingsLayout;
                 struct UpdateCard { D2D1_RECT_F Lay::* card; D2D1_RECT_F Lay::* update; D2D1_RECT_F Lay::* primary; ui::PackAction action; };
                 const UpdateCard cards[] = {
                     {&Lay::pack_card, &Lay::pack_update, &Lay::pack_primary, ui::PackAction::Update},
                     {&Lay::pack_images_card, &Lay::pack_images_update, &Lay::pack_images_primary, ui::PackAction::ImagesUpdate},
-                    {&Lay::pack_raw_card, &Lay::pack_raw_update, &Lay::pack_raw_primary, ui::PackAction::RawUpdate},
-                    {&Lay::pack_archive_card, &Lay::pack_archive_update, &Lay::pack_archive_primary, ui::PackAction::ArchiveUpdate}};
+                    {&Lay::pack_raw_card, &Lay::pack_raw_update, &Lay::pack_raw_primary, ui::PackAction::RawUpdate}};
                 bool placed = true, targets = true;
                 for (const auto& c : cards) {
                     const auto card = u.*c.card, update = u.*c.update, primary = u.*c.primary;

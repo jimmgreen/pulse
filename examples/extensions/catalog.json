@@ -1,0 +1,25 @@
+{
+  "formatVersion": 1,
+  "templates": [
+    "navigation",
+    "navigation-panel",
+    "selection-panel",
+    "view-panel",
+    "workspace-panel",
+    "dock-panel",
+    "grouped-panel",
+    "workspace-layout",
+    "transfer-panel",
+    "ui-tree",
+    "ui-catalog",
+    "settings-form",
+    "collection-browser",
+    "task-monitor",
+    "property-sheet",
+    "workflow-navigation",
+    "transfer-workflow",
+    "resource-client",
+    "selection-sort-panel",
+    "workspace-control-panel"
+  ]
+}

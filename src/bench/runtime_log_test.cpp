@@ -1,7 +1,9 @@
 #include "../common/runtime_log.h"
+#include "../app/win_e_diagnostics.h"
 #include "../common/diagnostics_exporter.h"
 #include <windows.h>
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -15,12 +17,145 @@ std::string Read(const std::filesystem::path& file) {
     return {std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
 }
 }
-int main() {
+int main(int argc, char** argv) {
     const auto root = std::filesystem::absolute(std::filesystem::path(L"bench_data") /
-        (L"runtime-log-" + std::to_wstring(GetCurrentProcessId())));
+        (L"runtime-log-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64())));
     std::filesystem::create_directories(root);
     bool ok = true;
-    auto check = [&](bool value, const char* label) { ok &= value; std::cout << (value ? "[PASS] " : "[FAIL] ") << label << '\n'; };
+    auto check = [&](bool value, const char* label) {
+        ok &= value;
+        std::cout << (value ? "[PASS] " : "[FAIL] ") << label << '\n';
+        if (!value) {
+            const auto health = GetHealth();
+            std::cout << "[HEALTH] error=" << health.last_write_error << " failures=" << health.write_errors
+                << " operation=" << health.last_write_operation << " pending=" << health.pending_events << '\n';
+        }
+    };
+    if (argc == 2 && std::string_view(argv[1]) == "--win-e-foreground") {
+        check(Initialize(root.wstring(), "wine"), "initialize shortcut diagnostic fixture");
+        const RECT monitor{0, 0, 2560, 1440};
+        pulse::app::LogWinEForeground(true, 123, true, monitor, monitor);
+        pulse::app::LogWinEForeground(false, 456, false, {}, {});
+        pulse::app::LogWinEGate(1, 789);
+        check(Flush(), "flush actual production foreground records");
+        check(GetHealth().dropped_events == 0, "foreground records fit logger field limit");
+        Shutdown();
+        const auto file = root / L"Diagnostics" / L"Runtime" /
+            (L"wine-" + std::to_wstring(GetCurrentProcessId()) + L".jsonl");
+        const auto contents = Read(file);
+        check(contents.find("\"kind_at_log\":1") != std::string::npos &&
+            contents.find("\"foreground_pid\":123") != std::string::npos,
+            "fullscreen evidence is persisted");
+        check(contents.find("\"kind_at_log\":2") != std::string::npos &&
+            contents.find("\"foreground_pid\":456") != std::string::npos,
+            "unknown foreground evidence is persisted");
+        check(contents.find("\"observed_left_win\":1") != std::string::npos &&
+            contents.find("\"async_win\":0") != std::string::npos &&
+            contents.find("\"eligible\":0") != std::string::npos,
+            "modifier disagreement evidence is persisted");
+        return ok ? 0 : 1;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--critical-burst") {
+        check(Initialize(root.wstring(), "burst"), "initialize critical burst measurement");
+        const auto snapshot = root / L"Diagnostics" / L"Runtime" /
+            (L"burst-" + std::to_wstring(GetCurrentProcessId()) + L".critical.jsonl");
+        Event("repeated_failure", {{"error", 5}, {"operation", 111}}, Level::Error);
+        const auto first_start = GetTickCount64();
+        while (Read(snapshot).find("repeated_failure") == std::string::npos &&
+            GetTickCount64() - first_start < 2000) Sleep(1);
+        check(Read(snapshot).find("repeated_failure") != std::string::npos,
+            "first failure persists without Flush");
+        const auto first_ms = GetTickCount64() - first_start;
+        const auto start = GetTickCount64();
+        std::vector<std::thread> producers;
+        for (unsigned thread = 0; thread < 4; ++thread) producers.emplace_back([thread] {
+            for (unsigned i = 0; i < 50; ++i) {
+                Event("repeated_failure", {{"error", 5}, {"operation", 1000 + thread * 50 + i}}, Level::Error);
+                Sleep(5);
+            }
+        });
+        for (auto& producer : producers) producer.join();
+        check(Flush(), "Flush persists all concurrent repeated failures");
+        const auto contents = Read(snapshot);
+        check(contents.find("\"occurrences\":201") != std::string::npos &&
+            contents.find("\"operation\":111") != std::string::npos,
+            "concurrent burst retains exact count and first evidence");
+        std::cout << "[MEASURE] events=201 critical_writes=" << GetHealth().critical_writes
+            << " burst_ms=" << GetTickCount64() - start << " first_ms=" << first_ms << '\n';
+        check(GetHealth().critical_writes < 50, "repeated burst coalesces critical snapshot writes");
+        Event("repeated_failure", {{"error", 5}, {"operation", 2202}}, Level::Error);
+        const auto bounded_start = GetTickCount64();
+        while (Read(snapshot).find("\"occurrences\":202") == std::string::npos &&
+            GetTickCount64() - bounded_start < 2000) Sleep(1);
+        check(Read(snapshot).find("\"occurrences\":202") != std::string::npos,
+            "deferred count persists within a bounded interval without Flush");
+        std::cout << "[MEASURE] deferred_ms=" << GetTickCount64() - bounded_start << '\n';
+        Event("new_failure", {{"error", 6}}, Level::Error);
+        const auto new_start = GetTickCount64();
+        while (Read(snapshot).find("new_failure") == std::string::npos &&
+            GetTickCount64() - new_start < 2000) Sleep(1);
+        check(Read(snapshot).find("new_failure") != std::string::npos,
+            "a new failure pattern is not held behind the duplicate interval");
+        std::cout << "[MEASURE] new_pattern_ms=" << GetTickCount64() - new_start << '\n';
+        Event("repeated_failure", {{"error", 5}, {"operation", 2203}}, Level::Error);
+        Shutdown();
+        check(Read(snapshot).find("\"occurrences\":203") != std::string::npos,
+            "shutdown forces the deferred final count to disk");
+        const auto failure_root = root / "forced-failure";
+        std::filesystem::create_directory(failure_root);
+        check(Initialize(failure_root.wstring(), "burst"), "initialize forced duplicate failure fixture");
+        Event("repeated_failure", {{"error", 5}}, Level::Error);
+        check(Flush(), "persist first evidence before duplicate failure injection");
+        const auto locked_snapshot = failure_root / "Diagnostics" / "Runtime" / snapshot.filename();
+        HANDLE snapshot_lock = CreateFileW(locked_snapshot.c_str(), GENERIC_READ, FILE_SHARE_READ,
+            nullptr, OPEN_EXISTING, 0, nullptr);
+        check(snapshot_lock != INVALID_HANDLE_VALUE, "lock duplicate snapshot against replacement");
+        Event("repeated_failure", {{"error", 5}}, Level::Error);
+        check(!Flush() && GetHealth().write_errors > 0 &&
+            Read(locked_snapshot).find("\"occurrences\":1") != std::string::npos,
+            "Flush forces a deferred duplicate and reports replacement failure without erasing evidence");
+        if (snapshot_lock != INVALID_HANDLE_VALUE) CloseHandle(snapshot_lock);
+        Shutdown();
+        return ok ? 0 : 1;
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--text-fields") {
+        check(Initialize(root.wstring(), "text_test"), "initialize isolated text logging");
+        std::wstring path = LR"(C:\中文\"component".exe)";
+        path += wchar_t(10); path += wchar_t(9);
+        SetLastError(ERROR_ACCESS_DENIED);
+        TextEvent("component_path", {{"path", path}, {"reason", L"attached"}}, {{"pid", 42}});
+        check(GetLastError() == ERROR_ACCESS_DENIED, "text logging preserves caller error");
+        path.assign(L"mutated_after_enqueue");
+        std::wstring long_value(kMaxTextFieldLength + 20, L'x');
+        TextEvent("long_path", {{"path", long_value}});
+        std::wstring surrogate(kMaxTextFieldLength - 1, L'y');
+        surrogate += L"\xd83d\xde00";
+        TextEvent("surrogate_boundary", {{"path", surrogate}});
+        TextEvent("duplicate_field", {{"pid", L"invalid"}}, {{"pid", 3}});
+        Event("legacy_numeric", {{"number", 123}});
+        check(Flush(), "flush text and legacy events");
+        Shutdown();
+        const auto file = root / L"Diagnostics" / L"Runtime" /
+            (L"text_test-" + std::to_wstring(GetCurrentProcessId()) + L".jsonl");
+        const auto text = Read(file);
+        check(text.find(R"("path":"C:\\\u4e2d\u6587\\\"component\".exe\u000a\u0009")") != std::string::npos,
+            "Chinese path, backslashes, quotes and control characters are JSON escaped");
+        check(text.find("mutated_after_enqueue") == std::string::npos,
+            "queued text owns its value before caller mutation");
+        check(text.find("\"path\":\"" + std::string(kMaxTextFieldLength, 'x') + "\"") != std::string::npos &&
+            text.find(std::string(kMaxTextFieldLength + 1, 'x')) == std::string::npos,
+            "text truncates at documented limit");
+        check(text.find("\\ud83d") == std::string::npos && text.find("surrogate_boundary") != std::string::npos,
+            "truncation does not split surrogate pair");
+        check(text.find("\"reason\":\"attached\"") != std::string::npos &&
+            text.find("\"pid\":42") != std::string::npos && text.find("\"number\":123") != std::string::npos,
+            "text fields are strings and legacy fields remain numbers");
+        check(text.find("\"text_truncated\":true") != std::string::npos,
+            "truncated text emits explicit record metadata");
+        check(text.find("duplicate_field") == std::string::npos, "reject mixed-type duplicate field keys");
+        std::filesystem::remove_all(root);
+        return ok ? 0 : 1;
+    }
     Event("not_initialized");
     check(!Enabled(), "uninitialized logging is disabled");
     check(!Initialize(root.wstring(), "C:\\private\\secret.txt"), "reject path as component identifier");
@@ -46,6 +181,10 @@ int main() {
     Event("operation_warning", {{"error", 5}}, Level::Warning);
     check(Flush(), "flush writes queued events before returning");
     check(GetHealth().pending_events == 0 && GetHealth().write_errors == 0, "drained logger exposes healthy status");
+    const auto batch_health = GetHealth();
+    check(batch_health.log_opens < batch_health.log_writes,
+        "burst records reuse a validated log handle within each batch");
+    std::cout << "[COUNT] opens=" << batch_health.log_opens << " writes=" << batch_health.log_writes << '\n';
     Shutdown();
     const auto file = root / L"Diagnostics" / L"Runtime" / (L"test-" + std::to_wstring(GetCurrentProcessId()) + L".jsonl");
     const auto text = Read(file);
@@ -128,6 +267,54 @@ int main() {
     check(!Flush() && Read(locked_path).find("write_recovered") != std::string::npos,
         "subsequent successful writes do not hide earlier evidence loss");
     Shutdown();
+    for (bool temporary_lock : {true, false}) {
+        const auto rotation_lock_root = root / (temporary_lock ? L"rotation-short-lock" : L"rotation-permanent-lock");
+        std::filesystem::create_directory(rotation_lock_root);
+        check(Initialize(rotation_lock_root.wstring(), "test", {4096, 60000}), "initialize rotation lock fixture");
+        check(Flush(), "rotation lock fixture starts healthy");
+        const auto rotation_path = rotation_lock_root / L"Diagnostics" / L"Runtime" / file.filename();
+        const auto old_path = std::filesystem::path(rotation_path.wstring() + L".1");
+        { std::ofstream seed(old_path); seed << "previous evidence"; }
+        HANDLE rotation_lock = CreateFileW(old_path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+            nullptr, OPEN_EXISTING, 0, nullptr);
+        check(rotation_lock != INVALID_HANDLE_VALUE, "lock rotation destination against replacement");
+        std::thread unlocker;
+        std::atomic<bool> unlock_ready{false};
+        std::atomic<ULONGLONG> unlocked_at{0};
+        if (temporary_lock) {
+            const auto opens = GetHealth().log_opens;
+            unlocker = std::thread([=, &unlock_ready, &unlocked_at] {
+                unlock_ready = true;
+                const auto deadline = GetTickCount64() + 1000;
+                while (GetHealth().log_opens == opens && GetTickCount64() < deadline) Sleep(1);
+                Sleep(5);
+                CloseHandle(rotation_lock);
+                unlocked_at = GetTickCount64();
+            });
+            while (!unlock_ready.load()) Sleep(0);
+        }
+        // A single large line necessarily rotates the 4 KiB fixture.
+        const std::wstring large(2048, L'中');
+        const auto lock_test_start = GetTickCount64();
+        TextEvent("rotation_lock_event", {{"reason", large}});
+        const bool flushed = Flush();
+        const auto flush_finished = GetTickCount64();
+        if (temporary_lock) {
+            unlocker.join();
+            if (!flushed) std::cout << "[LOCK TIMING] release_ms=" << (unlocked_at.load() - lock_test_start)
+                << " flush_ms=" << (flush_finished - lock_test_start) << '\n';
+            check(flushed && GetHealth().write_errors == 0 &&
+                Read(rotation_path).find("rotation_lock_event") != std::string::npos,
+                "short rotation lock retries without losing the pending record");
+        } else {
+            check(!flushed && GetHealth().write_errors > 0 &&
+                std::string_view(GetHealth().last_write_operation) == "rotate" &&
+                Read(old_path) == "previous evidence",
+                "permanent rotation lock fails Flush and preserves previous evidence");
+            CloseHandle(rotation_lock);
+        }
+        Shutdown();
+    }
     const auto critical_failures = root / L"critical-write-failure";
     std::filesystem::create_directory(critical_failures);
     check(Initialize(critical_failures.wstring(), "test"), "initialize critical write failure fixture");

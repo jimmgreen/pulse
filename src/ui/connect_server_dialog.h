@@ -1,4 +1,4 @@
-// connect_server_dialog.h - 连接服务器 (pulse_network_design.html §02): one
+// connect_server_dialog.h - 连接服务器: one
 // address field with a live "将被理解为" line, server suggestions, 连接后固定
 // and 同时映射为驱动器 with a drive letter. The same window, in rename mode,
 // renames a network pin (one field and a note).

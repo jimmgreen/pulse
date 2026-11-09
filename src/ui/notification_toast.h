@@ -32,8 +32,8 @@ public:
     void SetKind(fluent::InfoBarKind kind) noexcept { kind_ = kind; }
     // A one-line capsule at the bottom center (M7i): an icon, what happened
     // (`text`) and a quieter `detail`, up to two buttons and a shortcut chip.
-    // It goes after `duration_ms` (paused under the cursor), with a line that
-    // runs down; only the buttons act, the close button and Esc dismiss.
+    // It goes after `duration_ms` (paused under the cursor); only the buttons
+    // act, the close button and Esc dismiss.
     void ShowSnack(HWND owner, SnackIcon icon, std::wstring text, std::wstring detail,
                    std::vector<SnackAction> actions, std::wstring key = {}, UINT duration_ms = 6000);
     // The next ShowSnack replaces the capsule that is up (its plate morphs)
@@ -104,6 +104,7 @@ private:
     D2D1_RECT_F stack_area_{};   // the drawn ghosts (hover keeps the fan open)
     float Expand() const noexcept;
     bool StackMoving() const noexcept;
+    void AccountTime(ULONGLONG now) noexcept;  // spend time on the expiry unless paused
     void DrawGhosts(Compositor& compositor, const SnackPalette& pal, float scale, float height,
                     const Pose& pose, bool high_contrast);
 };

@@ -180,10 +180,6 @@ void ShellIconCache::Reset() {
     bitmaps_.clear();
     artwork_bounds_.clear();
     generic_index_.clear();
-    for (auto& [_, list] : image_lists_)
-        if (list) list->Release();
-    image_lists_.clear();
-    wic_.reset();
     device_binding_.Bind(nullptr);
     dc_ = nullptr;
     std::lock_guard<std::mutex> lock(mutex_);
@@ -202,24 +198,6 @@ int ShellIconCache::ImageListId(float desired_pixels) noexcept {
     if (desired_pixels <= 32.0f) return SHIL_LARGE;
     if (desired_pixels <= 64.0f) return SHIL_EXTRALARGE;
     return SHIL_JUMBO;
-}
-
-IImageList* ShellIconCache::EnsureImageList(int id) {
-    if (const auto cached = image_lists_.find(id); cached != image_lists_.end())
-        return cached->second;
-    INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_WIN95_CLASSES };
-    InitCommonControlsEx(&icc);
-    IImageList* list = nullptr;
-    if (FAILED(SHGetImageList(id, IID_IImageList, reinterpret_cast<void**>(&list))) || !list)
-        return nullptr;
-    image_lists_.emplace(id, list);
-    return list;
-}
-
-bool ShellIconCache::EnsureWic() {
-    if (wic_.get()) return true;
-    return SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
-                                      IID_PPV_ARGS(&wic_))) && wic_.get();
 }
 
 bool ShellIconCache::NeedsExactIcon(const std::wstring& name, bool is_dir,
@@ -284,14 +262,15 @@ void ShellIconCache::WorkerLoop() {
             std::unique_lock<std::mutex> lock(mutex_);
             cv_.wait(lock, [&] { return !running_ || !queue_.empty() || !convert_queue_.empty(); });
             if (!running_) break;
-            if (!queue_.empty()) {
-                // Index lookups first: they are cheap and unlock conversions.
-                path = std::move(queue_.front());
-                queue_.pop();
-            } else {
+            if (!convert_queue_.empty()) {
+                // Publish available artwork before resolving more paths. Shell
+                // queries for a directory of program shortcuts are not cheap.
                 convert_key = convert_queue_.front();
                 convert_queue_.pop_front();
                 convert = true;
+            } else {
+                path = std::move(queue_.front());
+                queue_.pop();
             }
         }
         if (convert) {
@@ -385,52 +364,27 @@ void ShellIconCache::WorkerLoop() {
     if (SUCCEEDED(com_hr)) CoUninitialize();
 }
 
-ComPtr<ID2D1Bitmap> ShellIconCache::BitmapFromIcon(HICON icon, IconArtworkBounds& bounds, bool jumbo) {
-    ComPtr<ID2D1Bitmap> bitmap;
-    if (!icon || !dc_ || !EnsureWic()) return bitmap;
-    ComPtr<IWICBitmap> wicBitmap;
-    if (FAILED(wic_->CreateBitmapFromHICON(icon, &wicBitmap)) || !wicBitmap.get()) {
-        return bitmap;
+void ShellIconCache::RequestConversion(uint64_t key) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (ready_pixels_.contains(key) || convert_pending_.contains(key)) return;
+        convert_pending_.insert(key);
+        convert_queue_.push_back(key);
+        StartWorkerLocked();
     }
-    ComPtr<IWICFormatConverter> converter;
-    if (FAILED(wic_->CreateFormatConverter(&converter)) || !converter.get()) {
-        return bitmap;
-    }
-    if (FAILED(converter->Initialize(wicBitmap.get(), GUID_WICPixelFormat32bppPBGRA,
-                                     WICBitmapDitherTypeNone, nullptr, 0.0,
-                                     WICBitmapPaletteTypeMedianCut))) {
-        return bitmap;
-    }
-    UINT width = 0, height = 0;
-    if (FAILED(converter->GetSize(&width, &height)) || !width || !height ||
-        width > 1024 || height > 1024) return bitmap;
-    std::vector<uint8_t> pixels(static_cast<size_t>(width) * height * 4u);
-    if (FAILED(converter->CopyPixels(nullptr, width * 4u,
-        static_cast<UINT>(pixels.size()), pixels.data()))) return bitmap;
-    bounds = MeasureIconArtwork(pixels, width, height);
-    if (jumbo) CropUndersizedIcon(pixels, width, height, bounds);
-    const auto props = D2D1::BitmapProperties(
-        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-    dc_->CreateBitmap(D2D1::SizeU(width, height), pixels.data(), width * 4u, props, &bitmap);
-    return bitmap;
+    cv_.notify_one();
 }
 
 ID2D1Bitmap* ShellIconCache::BitmapForIndex(int index, int list_id) {
     if (index < 0 || !dc_) return nullptr;
-    IImageList* image_list = EnsureImageList(list_id);
-    if (!image_list) return nullptr;
     const uint64_t key = IconKey(list_id, index);
-    auto it = bitmaps_.find(key);
+    const auto it = bitmaps_.find(key);
     if (it != bitmaps_.end()) return it->second.get();
     if (ID2D1Bitmap* ready = UploadReady(key)) return ready;
-    HICON icon = nullptr;
-    if (FAILED(image_list->GetIcon(index, ILD_TRANSPARENT, &icon)) || !icon) {
-        return nullptr;
-    }
-    IconArtworkBounds bounds;
-    ComPtr<ID2D1Bitmap> bitmap = BitmapFromIcon(icon, bounds, list_id == SHIL_JUMBO);
-    DestroyIcon(icon);
-    return StoreBitmap(key, std::move(bitmap), bounds);
+    // Shell extraction and WIC conversion can take several milliseconds per
+    // program icon. Ordinary paints use the same worker as animation prefetch.
+    RequestConversion(key);
+    return nullptr;
 }
 
 ID2D1Bitmap* ShellIconCache::StoreBitmap(uint64_t key, ComPtr<ID2D1Bitmap> bitmap,
@@ -477,14 +431,7 @@ void ShellIconCache::Prefetch(const std::wstring& path, const std::wstring& name
     if (index < 0) return;
     const uint64_t key = IconKey(ImageListId(desired_dips), index);
     if (bitmaps_.contains(key)) return;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (ready_pixels_.contains(key) || convert_pending_.contains(key)) return;
-        convert_pending_.insert(key);
-        convert_queue_.push_back(key);
-        StartWorkerLocked();
-    }
-    cv_.notify_one();
+    RequestConversion(key);
 }
 
 bool ShellIconCache::Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,

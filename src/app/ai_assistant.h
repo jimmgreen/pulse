@@ -1,5 +1,5 @@
-// ai_assistant.h - Pulse 助手, the in-app assistant panel
-// (plans/ai/pulse_ai_assistant_v2.html): open/close and docking, the
+// ai_assistant.h - Pulse 助手, the in-app assistant panel: open/close and
+// docking, the
 // composer's EDIT, pointer routing for the panel, ai.json "assistant" prefs
 // and the view model ui::AiPanelView draws.
 #pragma once

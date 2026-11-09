@@ -1,6 +1,7 @@
 #include "picker_shell_results.h"
 
 #include "../common/path_utils.h"
+#include "../common/picker_shell_namespace.h"
 #include "../ui/file_save_model.h"
 #include <shlobj.h>
 #include <wrl/client.h>
@@ -108,9 +109,24 @@ HRESULT MissingFilesystemItem(const std::wstring& path, IShellItem** output) {
     return SHCreateItemFromParsingName(path.c_str(), context.Get(), IID_PPV_ARGS(output));
 }
 
-HRESULT Item(Operation operation, const std::wstring& input, IShellItem** output, bool allow_missing) {
+HRESULT Item(Operation operation, const std::wstring& input, IShellItem** output, bool allow_missing, uint32_t native_options) {
     if (operation != Operation::OpenFiles && operation != Operation::PickFolder && operation != Operation::SaveFile)
         return E_INVALIDARG;
+    if (FAILED(picker_shell::ValidateOptions(native_options))) return E_INVALIDARG;
+    if (input.empty() || input.size() >= ipc::picker::kMaxStringUnits || input.find(L'\0') != input.npos) return E_INVALIDARG;
+    if (picker_shell::IsParsingName(input) || (operation != Operation::SaveFile && picker_shell::Enabled(native_options))) {
+        if (!picker_shell::Enabled(native_options) || operation == Operation::SaveFile) return E_INVALIDARG;
+        ComPtr<IShellItem> item;
+        HRESULT hr = SHCreateItemFromParsingName(input.c_str(), nullptr, IID_PPV_ARGS(&item));
+        SFGAOF attributes = 0;
+        if (SUCCEEDED(hr)) hr = item->GetAttributes(SFGAO_FILESYSTEM | SFGAO_FOLDER | SFGAO_STREAM, &attributes);
+        if (SUCCEEDED(hr)) {
+            if (!picker_shell::IsSelectable(attributes, operation == Operation::PickFolder, native_options))
+                return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+            return item.CopyTo(output);
+        }
+        if (picker_shell::IsParsingName(input)) return hr;
+    }
     auto path = pulse::path::StripExtendedPathPrefix(input);
     if (!AbsolutePath(path)) return E_INVALIDARG;
     if (operation == Operation::SaveFile) {
@@ -145,12 +161,12 @@ HRESULT Item(Operation operation, const std::wstring& input, IShellItem** output
 }
 } // namespace
 
-HRESULT CreatePickerShellItem(Operation operation, const std::wstring& path, IShellItem** item, bool allow_missing) noexcept {
+HRESULT CreatePickerShellItem(Operation operation, const std::wstring& path, IShellItem** item, bool allow_missing, uint32_t native_options) noexcept {
     if (!item) return E_POINTER;
     *item = nullptr;
     try {
         ComPtr<IShellItem> result;
-        const HRESULT hr = Item(operation, path, &result, allow_missing);
+        const HRESULT hr = Item(operation, path, &result, allow_missing, native_options);
         if (FAILED(hr)) return hr;
         if (!result) return E_UNEXPECTED;
         return result.CopyTo(item);
@@ -159,7 +175,7 @@ HRESULT CreatePickerShellItem(Operation operation, const std::wstring& path, ISh
 }
 
 HRESULT CreatePickerShellItemArray(Operation operation, const std::vector<std::wstring>& paths,
-                                  IShellItemArray** items, bool allow_missing) noexcept {
+                                  IShellItemArray** items, bool allow_missing, uint32_t native_options) noexcept {
     if (!items) return E_POINTER;
     *items = nullptr;
     if (paths.empty() || paths.size() > ipc::picker::kMaxPaths ||
@@ -171,7 +187,7 @@ HRESULT CreatePickerShellItemArray(Operation operation, const std::vector<std::w
         ids.reserve(paths.size());
         for (const auto& path : paths) {
             ComPtr<IShellItem> item;
-            HRESULT hr = CreatePickerShellItem(operation, path, &item, allow_missing);
+            HRESULT hr = CreatePickerShellItem(operation, path, &item, allow_missing, native_options);
             if (FAILED(hr)) return hr;
             PIDLIST_ABSOLUTE raw = nullptr;
             hr = SHGetIDListFromObject(item.Get(), &raw);

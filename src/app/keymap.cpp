@@ -576,6 +576,13 @@ Keymap::Translation Keymap::Translate(KeyChord pressed) const {
 }
 
 const Keymap& ActiveKeymap() { return g_active; }
+
+int WorkspaceShortcutIndex(const Keymap& keymap, KeyChord chord) {
+    if (chord.mods != (kKeyCtrl | kKeyAlt) || chord.vk < '1' || chord.vk > '9') return -1;
+    const auto route = keymap.Translate(chord);
+    if (route.kind != Keymap::Translation::Pass || route.action != KeyAction::Count) return -1;
+    return chord.vk - '1';
+}
 void SetActiveKeymap(Keymap keymap) { g_active = std::move(keymap); }
 
 // ---- conflict checks --------------------------------------------------------

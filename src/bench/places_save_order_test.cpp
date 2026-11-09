@@ -1,4 +1,5 @@
 #include "../app/places.h"
+#include "../app/picker_places_catalog.h"
 #include "../common/utf8_file.h"
 #include <filesystem>
 #include <iostream>
@@ -40,7 +41,7 @@ struct PlacesSaveTestAccess {
     }
 };
 }
-int wmain() {
+int wmain(int argc, wchar_t** argv) {
     using namespace pulse::app;
     namespace fs = std::filesystem;
     const auto parent = fs::absolute(L"bench_data").lexically_normal();
@@ -48,6 +49,61 @@ int wmain() {
     fs::create_directories(parent);
     if (!fs::create_directory(base)) return 1;
     const auto old = (base / L"old.txt").wstring(), added = (base / L"added.txt").wstring();
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--picker") {
+        {
+            using Action = pulse::picker_places::ManagePlacesAction;
+            PlacesCatalog catalog; catalog.persist = false;
+            catalog.ToggleStarred(L"C:\\folder", PlaceItemKind::Folder);
+            catalog.ToggleStarred(L"C:\\file.txt", PlaceItemKind::File);
+            auto apply = [&](Action action, std::vector<std::wstring> paths, std::wstring group = {}, std::wstring name = {}) {
+                PlacesCatalog::ScopedAsyncSave queued(catalog);
+                return ApplyPickerStarredManagement(catalog, {action, std::move(paths), std::move(group), std::move(name)});
+            };
+            Check(apply(Action::CreateGroup, {L"C:\\folder"}, {}, L"Group") &&
+                apply(Action::CreateGroup, {L"C:\\folder"}, {}, L"Group") && catalog.starred_groups.size() == 1,
+                "picker create group retry is idempotent");
+            const auto group = catalog.starred_groups[0].id;
+            Check(!apply(Action::SetGroup, {L"C:\\folder", L"C:\\file.txt"}, group) &&
+                catalog.FindStarred(L"C:\\file.txt")->group.empty(), "picker group change rejects mixed batch before mutation");
+            Check(apply(Action::SetGroup, {L"C:\\folder"}) && catalog.FindStarred(L"C:\\folder")->group.empty(),
+                "picker can move favorite out of group");
+            Check(apply(Action::SetGroup, {L"C:\\folder"}, group) && apply(Action::RenameGroup, {}, group, L"Renamed") &&
+                apply(Action::RenameGroup, {}, group, L"Renamed"), "picker group assignment and rename retry succeed");
+            Check(apply(Action::DeleteGroup, {}, group) && apply(Action::DeleteGroup, {}, group) &&
+                catalog.IsStarred(L"C:\\folder") && catalog.FindStarred(L"C:\\folder")->group.empty(),
+                "picker deleting group retains members and tolerates retry");
+            Check(apply(Action::Remove, {L"C:\\folder"}) && apply(Action::Remove, {L"C:\\folder"}) &&
+                !catalog.IsStarred(L"C:\\folder"), "picker removal retry never restores favorite");
+        }
+        fixture = base.wstring();
+        {
+            PlacesCatalog catalog;
+            Arm(1);
+            {
+                PlacesCatalog::ScopedAsyncSave queued(catalog);
+                for (int retry = 0; retry < 2; ++retry)
+                    if (!catalog.IsStarred(old)) catalog.ToggleStarred(old, PlaceItemKind::File);
+                Check(catalog.starred_items.size() == 1 && !fs::exists(base / L"places.json"),
+                    "picker duplicate add stays in memory without synchronous disk write");
+            }
+            Check(WaitForSingleObject(entered, 3000) == WAIT_OBJECT_0,
+                "picker scope queues writer and returns before writer finishes");
+            Release(); PlacesSaveTestAccess::Stop(catalog);
+            PlacesCatalog loaded; loaded.persist = false;
+            Check(loaded.Load() && loaded.IsStarred(old), "picker queued favorite reaches saved catalog");
+            HANDLE locked = CreateFileW((fixture + L"\\places.json").c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+            Check(locked != INVALID_HANDLE_VALUE, "picker test injects persistence failure");
+            { PlacesCatalog::ScopedAsyncSave queued(catalog); catalog.ToggleStarred(added, PlaceItemKind::File); }
+            PlacesSaveTestAccess::Stop(catalog);
+            Check(catalog.IsStarred(added) && PlacesSaveTestAccess::Dirty(catalog), "failed picker background save retains accepted favorite and retry state");
+            if (locked != INVALID_HANDLE_VALUE) CloseHandle(locked);
+            Check(catalog.FlushPendingSave(true), "picker failed save can retry after file unlock");
+        }
+        CloseHandle(entered); CloseHandle(released); CloseHandle(dirty_entered);
+        if (base.parent_path() != parent || !base.filename().wstring().starts_with(L"places-save-order-")) return 1;
+        fs::remove_all(base);
+        return failures ? 1 : 0;
+    }
     for (int scenario = 0; scenario < 4; ++scenario) {
         const auto dir = base / std::to_wstring(scenario); fs::create_directory(dir); fixture = dir.wstring();
         {

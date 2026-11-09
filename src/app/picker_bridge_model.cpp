@@ -54,7 +54,8 @@ PickerBridgePreparation PreparePickerBridge(const wire::Message& request) {
         return Terminal(request, wire::Status::Unsupported, wire::ErrorSource::Win32, ERROR_NOT_SUPPORTED);
     if (validation != wire::CodecError::None)
         return Terminal(request, wire::Status::Failed, wire::ErrorSource::Protocol, ERROR_INVALID_DATA);
-    constexpr uint32_t supported = wire::Open | wire::Folder | wire::Save | wire::MultiSelect | wire::Filters | wire::PreserveLinks | wire::AdvisoryFilters | wire::ExplicitAccessPolicy | wire::LocalOpenAccessV1;
+    constexpr uint32_t supported = wire::Open | wire::Folder | wire::Save | wire::MultiSelect | wire::Filters | wire::PreserveLinks | wire::AdvisoryFilters | wire::ExplicitAccessPolicy | wire::LocalOpenAccessV1 |
+        wire::LocalSaveAccessV1 | wire::DialogLabels | wire::CallerWindow;
     if ((body->required_capabilities & ~supported) ||
         (body->operation == wire::Operation::PickFolder &&
             (!body->filename.empty() || (body->required_capabilities & (wire::MultiSelect | wire::Filters)))))
@@ -88,6 +89,22 @@ PickerBridgePreparation PreparePickerBridge(const wire::Message& request) {
     spec.advisory_file_filters = (body->options & wire::AdvisoryFileFilters) != 0;
     spec.no_dereference_links = (body->options & wire::NoDereferenceLinks) != 0;
     spec.allow_multiselect = (body->options & wire::AllowMultiSelect) != 0;
+    // Local save: the same spec the in-process provider builds from its V2
+    // save options (picker_ui_bootstrap_v2.cpp), so both paths validate alike.
+    if (body->options & wire::ValidateLocalSaveAccessV1) {
+        spec.validate_local_save_access_v1 = true;
+        spec.skip_access_validation = (body->options & wire::SaveSkipAccessValidation) != 0;
+        spec.native_save_defaults = (body->options & wire::SaveNativeDefaults) != 0;
+        spec.no_test_file_create = (body->options & wire::SaveNoTestFileCreate) != 0;
+        spec.require_existing_save_parent = (body->options & wire::SaveRequireExistingParent) != 0;
+        spec.require_unencrypted_save = (body->options & wire::SaveRequireUnencrypted) != 0;
+    }
+    spec.explicit_title = (body->label_flags & wire::LabelTitle) != 0;
+    spec.has_ok_button_label = (body->label_flags & wire::LabelOkButton) != 0;
+    spec.has_file_name_label = (body->label_flags & wire::LabelFileName) != 0;
+    spec.title = Wide(body->title);
+    spec.ok_button_label = Wide(body->ok_button_label);
+    spec.file_name_label = Wide(body->file_name_label);
     for (const auto& filter : body->filters) spec.filters.push_back({Wide(filter.label), Wide(filter.pattern)});
     return spec;
 }

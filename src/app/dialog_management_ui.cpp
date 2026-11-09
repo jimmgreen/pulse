@@ -79,7 +79,7 @@ void DialogManagementReady(AppState& s) {
         const DWORD previous_error=current->error;
         if(operation!=app::DialogManagementOperation::Refresh || result.error) current->error=result.error;
         const bool redraw=current->busy || current->restoring || operation!=app::DialogManagementOperation::Refresh ||
-            current->snapshot.auto_enabled!=result.auto_enabled || current->snapshot.auto_conflict!=result.auto_conflict ||
+            current->snapshot.auto_path_mismatch!=result.auto_path_mismatch || current->snapshot.auto_enabled!=result.auto_enabled || current->snapshot.auto_conflict!=result.auto_conflict ||
             current->snapshot.auto_error!=result.auto_error || current->snapshot.bundle_verified!=result.bundle_verified ||
             current->snapshot.bundle_error!=result.bundle_error || previous_error!=current->error;
         current->snapshot=std::move(result);
@@ -119,14 +119,15 @@ void FillDialogManagementVm(AppState& s,ui::WindowViewModel& vm) {
     const auto& snapshot=current->snapshot;
     vm.settings_dialog_busy=current->busy;
     vm.settings_integration_restore_busy=current->restoring;
-    vm.settings_dialog_enabled=snapshot.auto_enabled;
+    vm.settings_dialog_enabled=snapshot.auto_enabled && !snapshot.auto_path_mismatch;
     vm.settings_dialog_conflict=snapshot.auto_conflict;
-    vm.settings_dialog_failed=current->error || snapshot.auto_error || (!snapshot.bundle_verified && !snapshot.auto_enabled && !current->busy);
+    vm.settings_dialog_failed=snapshot.auto_path_mismatch || current->error || snapshot.auto_error || (!snapshot.bundle_verified && !snapshot.auto_enabled && !current->busy);
     vm.settings_dialog_scope_expanded=current->scope_expanded;
     vm.settings_dialog_can_enable_auto=snapshot.bundle_verified;
     if(current->busy) vm.settings_dialog_status=l10n::Get(I::StartupDialogsChecking);
     else if(snapshot.auto_conflict) vm.settings_dialog_status=l10n::Get(I::StartupDialogsConflict);
     else if(current->error || snapshot.auto_error) vm.settings_dialog_status=l10n::Get(I::StartupDialogsFailed);
+    else if(snapshot.auto_path_mismatch) vm.settings_dialog_status=l10n::Get(I::StartupDialogsPathMismatch);
     else if(!snapshot.bundle_verified && !snapshot.auto_enabled) vm.settings_dialog_status=l10n::Get(I::StartupDialogsMissing);
     else vm.settings_dialog_status=l10n::Get(snapshot.auto_enabled ? I::StartupDialogsOn : I::StartupDialogsOff);
     const DWORD error=current->error ? current->error : snapshot.auto_error ? snapshot.auto_error : (!snapshot.bundle_verified ? snapshot.bundle_error : 0);
@@ -134,7 +135,7 @@ void FillDialogManagementVm(AppState& s,ui::WindowViewModel& vm) {
     if(!current->notice.empty()) vm.settings_dialog_status+=L"\n"+current->notice;
 }
 void DialogManagementAction(AppState& s,int action) {
-    if(action==14) {GoTo(s,1,I::DialogJumpBar);return;}
+    if(action==14) {GoTo(s,11,I::DialogJumpBar);return;}
     if(action>=20 && action<=22) {
         const I targets[]={I::SettingsIntegration,I::StartupDialogsTitle,I::SettingsSecStartupTray};GoTo(s,11,targets[action-20]);return;
     }
@@ -146,7 +147,7 @@ void DialogManagementAction(AppState& s,int action) {
     auto current=s.core.dialogManagement;
     if(!current || !current->controller || current->busy || current->restoring) return;
     if(action!=10 && action!=11 && action!=12 && action!=15) return;
-    const bool disabling=action==15 || (action==11 ? current->retry_disable : current->snapshot.auto_enabled);
+    const bool disabling=action==15 || (!current->snapshot.auto_path_mismatch && (action==11 ? current->retry_disable : current->snapshot.auto_enabled));
     if((action==15 || ((action==10 || action==11) && !disabling)) && !Confirm(s,action==15)) return;
     // Confirmation pumps messages: recheck shared state before submitting.
     if(current->busy || current->restoring) return;
@@ -172,14 +173,17 @@ bool TestDialogManagementBackgroundVm(AppState& s) {
     fixture->refreshed=GetTickCount64();
     s.core.dialogManagement=fixture;
     bool passed=true;
-    for(int variant=0;variant<3;++variant) {
+    for(int variant=0;variant<4;++variant) {
         fixture->snapshot.auto_conflict=variant==1;
+        fixture->snapshot.auto_path_mismatch=variant==3;
         fixture->error=variant==2 ? ERROR_ACCESS_DENIED : ERROR_SUCCESS;
         fixture->refreshing=false;
         ui::WindowViewModel before{},during{};
         FillDialogManagementVm(s,before);
         fixture->refreshing=true;
         FillDialogManagementVm(s,during);
+        if (variant == 3) passed=passed && !during.settings_dialog_enabled && during.settings_dialog_failed &&
+            during.settings_dialog_status==l10n::Get(l10n::StringId::StartupDialogsPathMismatch);
         passed=passed && before.settings_dialog_busy==during.settings_dialog_busy &&
             !during.settings_dialog_busy &&
             before.settings_dialog_status==during.settings_dialog_status &&

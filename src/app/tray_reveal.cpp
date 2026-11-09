@@ -2,22 +2,27 @@
 #include "tray_reveal.h"
 #include "app_internal.h"
 #include "startup_location.h"
+#include "window_identity_ui.h"
 
 namespace pulse {
 
 void HideMainWindowToTray(AppState& s) {
     s.hidden_to_tray = true;
     s.tray_controller.HideWindow(WantsTrayIcon(s, true));
+    SyncWindowIdentities(s);  // it no longer counts as an open window
 }
 
 void RevealWindow(AppState& s) {
     const HWND tray_window = s.tray_controller.Window();
     if (!tray_window || tray_window == s.hwnd || !s.hwnd) {
         s.tray_controller.RestoreWindow();
-        return;
+    } else {
+        ShowWindow(s.hwnd, IsIconic(s.hwnd) ? SW_RESTORE : SW_SHOW);
+        SetForegroundWindow(s.hwnd);
     }
-    ShowWindow(s.hwnd, IsIconic(s.hwnd) ? SW_RESTORE : SW_SHOW);
-    SetForegroundWindow(s.hwnd);
+    // Back on screen: it counts again (the restore hook cleared the flag).
+    s.hidden_to_tray = false;
+    SyncWindowIdentities(s);
 }
 
 bool WantsTrayIcon(const AppState& s, bool window_hidden) {
@@ -45,6 +50,7 @@ void StartFreshAt(AppState& s, const std::wstring& path) {
 void InstallTrayRevealHook(AppState& s) {
     s.tray_controller.SetBeforeRestore([&s] {
         if (TakeFreshStart(s)) StartFreshAt(s, app::DefaultLocation(s.appPrefs));
+        SyncWindowIdentities(s);  // counts as an open window again
         // A sign-in launch into the tray (startup_launch.h) shows the icon even
         // when neither setting keeps it; back to the usual rule once revealed.
         s.tray_controller.SetVisible(WantsTrayIcon(s, false));

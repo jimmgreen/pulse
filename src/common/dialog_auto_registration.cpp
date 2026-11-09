@@ -181,6 +181,25 @@ DWORD Enable(const std::wstring& p) {
     diagnostics::runtime::Event("dialog_auto_enable", {{"error", e}}); return e;
 }
 bool IsEnabledFor(const std::wstring& p) noexcept { try { auto s = Inspect(); return s.enabled && !s.conflict && !s.error && s.dll_path == p; } catch (...) { return false; } }
+bool PreferOutOfProcess() noexcept {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, config, 0, KEY_QUERY_VALUE | RegistryView, &key) != ERROR_SUCCESS) return true;
+    DWORD type = 0, value = 1, size = sizeof(value);
+    const LSTATUS read = RegQueryValueExW(key, L"Host", nullptr, &type, reinterpret_cast<BYTE*>(&value), &size);
+    RegCloseKey(key);
+    return read != ERROR_SUCCESS || type != REG_DWORD || size != sizeof(value) || value != 0;
+}
+// Remote host is the default; a REG_DWORD RemoteHost=0 opts back into the
+// in-process UI. A failed remote start still falls back to in-process.
+bool PreferRemoteHost() noexcept {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, config, 0, KEY_QUERY_VALUE | RegistryView, &key) != ERROR_SUCCESS) return true;
+    DWORD type = 0, value = 0, size = sizeof(value);
+    const LSTATUS read = RegQueryValueExW(key, L"RemoteHost", nullptr, &type, reinterpret_cast<BYTE*>(&value), &size);
+    RegCloseKey(key);
+    if (read != ERROR_SUCCESS || type != REG_DWORD || size != sizeof(value)) return true;
+    return value != 0;
+}
 }
 
 

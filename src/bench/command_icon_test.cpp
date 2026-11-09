@@ -76,7 +76,8 @@ void Gallery(IWICImagingFactory* wic, ID2D1Factory* factory, const wchar_t* file
         L"Import",L"Export",L"Bolt",L"Camera",L"Fav bar",L"Full screen",L"Save",L"Unlock",L"Eject",
         L"Skip",L"Disconnect",L"Music",L"Wrench",L"Timer",L"Help",L"Puzzle",L"Sparkle",
         L"Wi-Fi",L"Mic",L"Checkbox",L"Highlight",L"Key",L"Bold",L"Layers",L"Globe",L"Flag",L"Phone",
-        L"Check circle",L"Check filled",L"Blocked",L"Down"
+        L"Check circle",L"Check filled",L"Blocked",L"Down",
+        L"Dialog",L"User",L"Exit",L"Pane expand",L"Pane restore",L"New file",L"Redo"
     };
     static_assert(std::size(names) == static_cast<size_t>(Icon::Count)-1);
     constexpr int kRows = static_cast<int>((std::size(names) + 10) / 11);

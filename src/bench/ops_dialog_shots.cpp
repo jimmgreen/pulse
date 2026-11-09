@@ -1,5 +1,5 @@
-// Renders the progress card (pulse_ops_dialogs.html §1–§4) in each state to
-// PNG and checks the 2.5 s auto-close. Usage: pulse_ops_dialog_shots [out-dir] [locale]
+// Renders the progress card in each state to
+// PNG and checks dismissal, cancellation, and delayed success close. Usage: pulse_ops_dialog_shots [out-dir] [locale]
 // Add --copy-pipeline-only as the third argument for eight focused pipeline images.
 #include "../common/windows_compat.h"
 #include "../common/localization.h"
@@ -15,10 +15,27 @@
 
 namespace pulse::ui {
 struct FileOperationWindowTestAccess {
+    static void More(FileOperationWindow& window, int command) { window.RunMoreAction(command); }
+    static bool MoreShot(FileOperationWindow& window, const std::filesystem::path& path) {
+        FluentMenu menu;
+        if (!menu.Create(window.hwnd_, &window.compositor_, window.scale_)) return false;
+        menu.SetTheme(window.dark_, window.accent_);
+        return menu.SaveDebugSnapshot(path.c_str(), window.MoreItems());
+    }
     static HWND Handle(FileOperationWindow& window) { return window.hwnd_; }
+    static int KeepOpenControl() { return 10; }
+    static POINT FindControl(FileOperationWindow& window, int control) {
+        RECT client{};
+        GetClientRect(window.hwnd_, &client);
+        for (int y = 0; y < client.bottom; ++y)
+            for (int x = 0; x < client.right; ++x)
+                if (window.HitTestControl(static_cast<float>(x), static_cast<float>(y)) == control)
+                    return {x, y};
+        return {-1, -1};
+    }
     static void Size(FileOperationWindow& window, UINT dpi, bool detailed) {
         window.detailed_ = detailed;
-        RECT rect{0, 0, MulDiv(440, dpi, 96), MulDiv(detailed ? 422 : 272, dpi, 96)};
+        RECT rect{0, 0, MulDiv(440, dpi, 96), MulDiv(detailed ? 384 : 286, dpi, 96)};
         SendMessageW(window.hwnd_, WM_DPICHANGED, MAKELONG(dpi, dpi), reinterpret_cast<LPARAM>(&rect));
     }
     static void Graph(FileOperationWindow& window, float upto, double base, bool by_progress = true) {
@@ -41,11 +58,6 @@ struct FileOperationWindowTestAccess {
         window.task_start_tick_ = now - ms;
         window.task_end_tick_ = ended ? now : 0;
     }
-    static void Countdown(FileOperationWindow& window, ULONGLONG ago, bool hover) {
-        window.countdown_base_ = GetTickCount64() - ago;
-        window.countdown_hover_ = hover;
-    }
-    static bool Pending(FileOperationWindow& window) { return window.AutoClosePending(); }
     static const ops::OpStatus& Shown(FileOperationWindow& window) { return window.status_; }
     static void RetryRows(FileOperationWindow& window, const std::vector<size_t>& rows) {
         window.RetryFailureRows(rows);
@@ -61,10 +73,6 @@ struct FileOperationWindowTestAccess {
         return rect.bottom - rect.top;
     }
     static bool CanRetry(FileOperationWindow& window) { return window.FailureView().can_retry; }
-    static bool Closing(FileOperationWindow& window) { return window.closing_; }
-    static void Tick(FileOperationWindow& window, ULONGLONG now) { window.TickAutoClose(now); }
-    static ULONGLONG Base(FileOperationWindow& window) { return window.countdown_base_; }
-    static void Keep(FileOperationWindow& window) { window.KeepOpen(); }
     static void Place(FileOperationWindow& window, int x, int y) {
         window.positioned_ = true;
         SetWindowPos(window.hwnd_, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -85,15 +93,36 @@ void Check(bool pass, const char* label) {
     if (!pass) ++failures;
 }
 
+void CALLBACK ChooseMoreDestination(HWND, UINT, UINT_PTR timer, DWORD) {
+    HWND menu = FindWindowW(L"PulseFluentMenu", nullptr);
+    if (!menu || !IsWindowVisible(menu)) return;
+    KillTimer(nullptr, timer);
+    PostMessageW(menu, WM_KEYDOWN, L'D', 0);
+}
+
+void PumpFor(ULONGLONG duration_ms) {
+    const ULONGLONG until = GetTickCount64() + duration_ms;
+    MSG message{};
+    while (GetTickCount64() < until) {
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+        Sleep(5);
+    }
+}
+
 pulse::ops::OpStatus Running(pulse::ops::OpType type, float percent) {
     using namespace pulse;
     ops::OpStatus st;
     st.task_id = 11;
+    st.current_item_token = 17;
     st.active = true;
     st.type = type;
     st.phase = ops::OpPhase::Running;
     st.percent = percent;
     st.source_label = L"Downloads";
+    st.destination_dir = L"D:\\Backup\\Projects 2026";
     st.destination_label = L"D:\\Backup\\Projects 2026";
     st.current_item = L"raw\\2026-10-17\\DSC_04187.NEF";
     st.total_items = 2003;
@@ -119,8 +148,25 @@ int wmain(int argc, wchar_t** argv) {
     if (argc > 1) { output = argv[1]; std::filesystem::create_directories(output); }
 
     int dismissed = 0;
+    int cancelled = 0;
+    int paused = 0;
+    int resumed = 0;
+    uint64_t skipped_task = 0, skipped_item = 0;
+    uint64_t located_task = 0, menu_task = 0;
+    int menu_action = 0;
     ui::FileOperationCallbacks callbacks;
+    int reached_status = 0;
     callbacks.dismiss = [&] { ++dismissed; };
+    callbacks.reached_status = [&] { ++reached_status; };
+    callbacks.cancel = [&] { ++cancelled; };
+    callbacks.locate_results = [&](uint64_t task) { located_task = task; };
+    callbacks.more_action = [&](uint64_t task, int action) { menu_task = task; menu_action = action; };
+    callbacks.pause = [&] { ++paused; };
+    callbacks.resume = [&] { ++resumed; };
+    callbacks.skip_current = [&](uint64_t task, uint64_t item) {
+        skipped_task = task;
+        skipped_item = item;
+    };
     // Partial failure retries: each call spawns one fake task per call.
     struct RetryCall { uint64_t task; std::vector<size_t> items; };
     std::vector<RetryCall> retry_calls;
@@ -269,6 +315,7 @@ int wmain(int argc, wchar_t** argv) {
     const Scale scales[] = { {96, L"100"}, {144, L"150"}, {192, L"200"} };
     for (const bool dark : {true, false}) {
         window.SetTheme(dark, ui::HexColor(0x6474C7));
+        window.SetAutoClose(true);
         const std::wstring theme = dark ? L"dark" : L"light";
         for (const auto& scale : scales) {
             const bool full = scale.dpi == 96;
@@ -300,11 +347,8 @@ int wmain(int argc, wchar_t** argv) {
             window.Update(done);
             Access::Graph(window, 1.0f, 212.0 * mb);
             Access::Elapsed(window, 88000, true);
-            Access::Countdown(window, 1100, false);
             shot(L"05-done-countdown" + sfx);
-            Access::Countdown(window, 0, true);
             shot(L"06-done-hover" + sfx);
-            Access::Countdown(window, 0, false);
             window.Hide();
 
             auto fail = Running(ops::OpType::Move, 41.0f);
@@ -354,66 +398,180 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
 
-    // Auto-close: a success seen while visible counts down 3 s, then zooms
-    // out and dismisses; a click on the finished card keeps it; failures
-    // never auto-close.
+    // Header dismissal keeps a task running; only the footer cancels it. Success
+    // remains visible for 1.2 s before it returns to the status pill.
     {
-        window.SetTheme(true, ui::HexColor(0x6474C7));
+        auto interactive = Running(ops::OpType::Copy, 50.0f);
+        interactive.task_id = 20;
         Access::Size(window, 96, false);
-        Access::Place(window, -4000, -4000);  // keep the pointer off the card
-        auto st = Running(ops::OpType::Copy, 50.0f);
-        st.task_id = 21;
-        window.Update(st);
+        window.Update(interactive);
         window.Show(false);
-        Check(!Access::Pending(window), "no countdown while running");
-        auto done = st;
-        done.active = false;
-        done.phase = ops::OpPhase::Completed;
-        done.percent = 100.0f;
-        window.Update(done);
-        Check(Access::Pending(window), "countdown starts on a visible success");
-        const ULONGLONG base = Access::Base(window);
-        Access::Tick(window, base + 1200);
-        Check(window.IsVisible() && !Access::Closing(window), "still open at 1.2 s");
-        Access::Tick(window, base + 2600);
-        Check(window.IsVisible() && !Access::Closing(window), "still open at 2.6 s");
-        Access::Tick(window, base + 3100);
-        Check(Access::Closing(window), "exit animation starts after 3 s");
-        Access::Tick(window, base + 3100 + 250);
-        Check(!window.IsVisible() && dismissed == 1, "closed and dismissed after the zoom");
+        auto click = [&](int control) {
+            const POINT point = Access::FindControl(window, control);
+            if (point.x < 0) return false;
+            SendMessageW(Access::Handle(window), WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(point.x, point.y));
+            SendMessageW(Access::Handle(window), WM_LBUTTONUP, 0, MAKELPARAM(point.x, point.y));
+            return true;
+        };
+        Check(click(3) && paused == 1 && resumed == 0, "pause button invokes pause");
+        interactive.phase = ops::OpPhase::Paused;
+        window.Update(interactive);
+        Check(click(3) && resumed == 1, "continue button invokes resume");
+        interactive.phase = ops::OpPhase::Running;
+        window.Update(interactive);
+        Check(click(9) && skipped_task == interactive.task_id && skipped_item == interactive.current_item_token,
+              "skip button targets the displayed task and item token");
+        const int collapsed = Access::Height(window);
+        Check(click(5) && Access::Height(window) > collapsed, "details click expands the window");
+        Check(click(5) && Access::Height(window) == collapsed, "details click collapses the window");
+        Check(Access::FindControl(window, 11).x >= 0, "more button has a separate hit target");
+        const UINT_PTR menu_timer = SetTimer(nullptr, 0, 100, ChooseMoreDestination);
+        Check(click(11) && menu_task == interactive.task_id && menu_action == 1,
+              "more button opens Fluent menu and keyboard selection invokes destination action");
+        KillTimer(nullptr, menu_timer);
+        if (!output.empty()) Check(Access::MoreShot(window, output / L"16-more-menu.png"), "save real Fluent more menu");
+        for (int command : {1, 2, 3}) {
+            Access::More(window, command);
+            Check(menu_task == interactive.task_id && menu_action == command, "more action retains exact task identity");
+        }
+        Access::More(window, 5);
+        window.SetAutoClose(true);
+        interactive.active = false;
+        interactive.phase = ops::OpPhase::Completed;
+        interactive.percent = 100;
+        window.Update(interactive);
+        PumpFor(1400);
+        Check(window.IsVisible(), "keep-open menu choice survives host auto-close refresh");
+        POINT locate = Access::FindControl(window, 8);
+        Check(locate.x >= 0 && click(8) && located_task == interactive.task_id && !window.IsVisible(),
+              "completion locate invokes the exact task and dismisses");
+        dismissed = 0;
+        interactive.task_id = 201;
+        interactive.active = true;
+        interactive.phase = ops::OpPhase::Running;
+        window.Update(interactive);
+        window.SetAutoClose(true);
+        window.Show(false);
+        Access::More(window, 4);
+        interactive.active = false;
+        interactive.phase = ops::OpPhase::Completed;
+        window.Update(interactive);
+        PumpFor(1400);
+        Check(!window.IsVisible() && located_task == interactive.task_id, "auto-locate runs after the completion hold");
+        dismissed = 0;
+        interactive.task_id = 202;
+        interactive.active = true;
+        interactive.phase = ops::OpPhase::Running;
+        window.Update(interactive);
+        window.Show(false);
+        Access::More(window, 4);
+        Check(click(1) && !window.IsVisible(), "auto-locate task can be minimized first");
+        interactive.active = false;
+        interactive.phase = ops::OpPhase::Completed;
+        window.Update(interactive);
+        Check(located_task == interactive.task_id, "hidden task still auto-locates on completion");
+        dismissed = 0;
+        interactive.task_id = 203;
+        interactive.active = true;
+        interactive.phase = ops::OpPhase::Running;
+        window.Update(interactive);
+        interactive.current_item_token = 0;
+        window.Update(interactive);
+        Check(Access::FindControl(window, 9).x < 0, "skip is disabled without a current item token");
+        auto live = Running(ops::OpType::Copy, 50.0f); live.task_id = 21;
+        window.Update(live); window.Show(false);
+        SendMessageW(Access::Handle(window), WM_KEYDOWN, VK_ESCAPE, 0);
+        Check(!window.IsVisible() && cancelled == 0 && dismissed == 1,
+              "Escape hides the live operation without canceling it");
+        PumpFor(450);
+        Check(reached_status == 1 && !IsWindowVisible(Access::Handle(window)),
+              "the card lands in the status pill once it has shrunk away");
+        // Reopened from the pill while still shrinking: it comes back whole.
+        window.Show(false);
+        SendMessageW(Access::Handle(window), WM_KEYDOWN, VK_ESCAPE, 0);
+        // Without system animations the card is gone at once; with them it is
+        // still shrinking and has not reached the pill.
+        const int landed = reached_status;
+        window.Show(false, true);
+        PumpFor(450);
+        Check(window.IsVisible() && IsWindowVisible(Access::Handle(window)) && reached_status == landed,
+              "reopening from the pill mid-shrink keeps the card shown");
+        Check(SendMessageW(Access::Handle(window), WM_KEYDOWN, VK_ESCAPE, 0) == 0 && !window.IsVisible(),
+              "the reopened card hides to the pill again");
+        PumpFor(450);
+        dismissed = 1;
 
-        auto fail = st;
-        fail.task_id = 22;
-        window.Update(fail);
         window.Show(false);
-        fail.active = false;
-        fail.phase = ops::OpPhase::Failed;
-        fail.last_error = L"Access is denied.";
-        window.Update(fail);
-        Check(!Access::Pending(window), "failure does not auto-close");
-        window.Hide();
+        POINT close = Access::FindControl(window, 1);
+        if (close.x >= 0) {
+            SendMessageW(Access::Handle(window), WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(close.x, close.y));
+            SendMessageW(Access::Handle(window), WM_LBUTTONUP, 0, MAKELPARAM(close.x, close.y));
+        }
+        Check(close.x >= 0 && !window.IsVisible() && cancelled == 0 && dismissed == 2,
+              "title-bar close hides the live operation without canceling it");
 
-        auto late = done;
-        late.task_id = 23;
-        window.Update(late);
         window.Show(false);
-        Check(!Access::Pending(window), "summary opened after the finish stays open");
-        window.Hide();
+        POINT minimize = Access::FindControl(window, 2);
+        if (minimize.x >= 0) {
+            SendMessageW(Access::Handle(window), WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(minimize.x, minimize.y));
+            SendMessageW(Access::Handle(window), WM_LBUTTONUP, 0, MAKELPARAM(minimize.x, minimize.y));
+        }
+        Check(minimize.x >= 0 && !window.IsVisible() && cancelled == 0 && dismissed == 3,
+              "the other title-bar control also returns the operation to the status area");
 
-        auto kept = st;
-        kept.task_id = 24;
-        window.Update(kept);
         window.Show(false);
-        kept.active = false;
-        kept.phase = ops::OpPhase::Completed;
-        kept.percent = 100.0f;
-        window.Update(kept);
-        Check(Access::Pending(window), "a new task counts down again");
-        Access::Keep(window);
-        Check(!Access::Pending(window) && window.IsVisible(), "a click on the finished card keeps it open");
-        window.Update(kept);
-        Check(!Access::Pending(window), "kept stays kept on the next update");
-        window.Hide();
+        POINT cancel = Access::FindControl(window, 4);
+        if (cancel.x >= 0) {
+            SendMessageW(Access::Handle(window), WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(cancel.x, cancel.y));
+            SendMessageW(Access::Handle(window), WM_LBUTTONUP, 0, MAKELPARAM(cancel.x, cancel.y));
+        }
+        Check(cancel.x >= 0 && !window.IsVisible() && cancelled == 1 && dismissed == 4,
+              "the footer cancel button cancels and dismisses the operation");
+
+        auto live_success = Running(ops::OpType::Copy, 50.0f); live_success.task_id = 23;
+        Access::Size(window, 96, true);
+        window.Update(live_success); window.Show(false);
+        const int expanded_h = Access::Height(window);
+        live_success.active = false; live_success.phase = ops::OpPhase::Completed; live_success.percent = 100;
+        window.Update(live_success);
+        Check(Access::Height(window) < expanded_h, "completion folds the live details panel before showing the result");
+        Access::Graph(window, 1.0f, 212.0 * mb);
+        Access::Elapsed(window, 88000, true);
+        Check(window.IsVisible() && dismissed == 4, "success remains visible during the completion hold");
+        shot(L"12-completed-hold");
+        PumpFor(1400);
+        Check(!window.IsVisible() && dismissed == 5, "success closes after the 1.2-second completion hold");
+
+        auto live_kept = Running(ops::OpType::Copy, 50.0f); live_kept.task_id = 24;
+        live_kept.destination_dir = L"D:\\Backup\\Projects 2026";
+        window.SetAutoClose(true);
+        Access::Size(window, 144, false);
+        window.Update(live_kept); window.Show(false);
+        live_kept.active = false; live_kept.phase = ops::OpPhase::Completed; live_kept.percent = 100;
+        live_kept.completed_items = live_kept.total_items;
+        live_kept.transferred_bytes = live_kept.total_bytes;
+        window.Update(live_kept);
+        Access::Graph(window, 1.0f, 212.0 * mb);
+        Access::Elapsed(window, 88000, true);
+        shot(L"13-completed-before-keep-150");
+        POINT keep = Access::FindControl(window, Access::KeepOpenControl());
+        if (keep.x >= 0) {
+            SendMessageW(Access::Handle(window), WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(keep.x, keep.y));
+            SendMessageW(Access::Handle(window), WM_LBUTTONUP, 0, MAKELPARAM(keep.x, keep.y));
+        }
+        Check(keep.x >= 0 && window.IsVisible(), "completion offers a keep-open action");
+        shot(L"13-completed-keep-open-150");
+        PumpFor(1400);
+        Check(window.IsVisible() && dismissed == 5, "keep-open action cancels the success countdown");
+
+        auto st = Running(ops::OpType::Copy, 50.0f); st.task_id = 25;
+        st.active = false; st.phase = ops::OpPhase::Failed; st.last_error = L"Access denied";
+        window.Update(st); window.Show(false); window.Update(st);
+        Check(window.IsVisible(), "failure remains visible"); window.Hide();
+        st.task_id = 26; st.phase = ops::OpPhase::Completed; st.last_error.clear();
+        window.SetAutoClose(false);
+        window.Update(st); window.Show(false); window.Update(st);
+        Check(window.IsVisible(), "explicit finished summary stays visible"); window.Hide();
     }
 
     // Partial failure (部分失败): the rest went through; failed items are listed
@@ -453,13 +611,14 @@ int wmain(int argc, wchar_t** argv) {
         const int plain_h = Access::Height(window);
         auto st = partial_status(dark ? 31 : 61, 5, 6);
         window.Update(st);
+        window.Show(false); // Verify visibility through failure/retry transitions.
         Access::Graph(window, 1.0f, 212.0 * mb);
         Access::Elapsed(window, 88000, true);
         Check(Access::Board(window), "partial failure lists the failed items");
-        Check(Access::Height(window) == plain_h + MulDiv(90 + 4 * 36 + 22 + 2 + 14 - 216, 96, 96),
+        Check(Access::Height(window) == plain_h + MulDiv(90 + 4 * 52 + 22 + 2 + 14 - 230, 96, 96),
               "window fits four rows and the more line");
         Check(Access::Shown(window).failed_items == 6, "six items still failed");
-        Check(!Access::Pending(window), "partial failure does not auto-close");
+        Check(window.IsVisible(), "partial failure does not auto-close");
         Check(Access::CanRetry(window),
               "footer offers to retry the failed items");
         shot(L"12-partial" + sfx);
@@ -503,7 +662,7 @@ int wmain(int argc, wchar_t** argv) {
         Check(retry_calls.size() == 3 && retry_calls[2].task == again.task_id &&
               retry_calls[2].items == std::vector<size_t>{ 0 }, "a second retry goes through the retry's list");
         window.Update(finished(next_spawn - 1, true));
-        Check(Access::Shown(window).failed_items == 1 && !Access::Pending(window),
+        Check(Access::Shown(window).failed_items == 1 && window.IsVisible(),
               "the unlisted failure keeps the card open");
 
         auto other = Running(ops::OpType::Copy, 10.0f);
@@ -512,8 +671,10 @@ int wmain(int argc, wchar_t** argv) {
         Check(!Access::Board(window) && Access::Height(window) == plain_h, "another task clears the list");
     }
     {
-        // Everything retried successfully: reads as a success and closes itself.
+        // Everything retried successfully: the completion is briefly visible
+        // before the card returns to the status area.
         window.SetTheme(true, ui::HexColor(0x6474C7));
+        window.SetAutoClose(true);
         Access::Size(window, 96, false);
         Access::Place(window, -4000, -4000);
         auto st = partial_status(71, 1, 1);
@@ -523,7 +684,9 @@ int wmain(int argc, wchar_t** argv) {
         window.Update(finished(next_spawn - 1, true));
         Check(Access::Shown(window).phase == ops::OpPhase::Completed && Access::Shown(window).failed_items == 0,
               "all retried: shown as completed");
-        Check(Access::Pending(window), "all retried: auto-close counts down");
+        Check(window.IsVisible(), "all retried: completion stays visible briefly");
+        PumpFor(1400);
+        Check(!window.IsVisible(), "all retried: completion closes after the hold");
         window.Hide();
         auto global = partial_status(72, 1, 1);
         window.Update(global);

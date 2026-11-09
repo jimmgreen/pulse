@@ -1,5 +1,5 @@
 ﻿#pragma once
-// Photo wall aspect ratios (Pulse_视图切换与图标密度方案.html, P2): width /
+// Photo wall aspect ratios (P2): width /
 // height of pictures and videos. Decoded thumbnails report theirs while they
 // are drawn; a background probe reads the rest from the file header (JPEG with
 // its EXIF orientation, PNG, GIF, BMP, WebP) or, for other formats, the

@@ -33,6 +33,24 @@ int main() {
     bool ok = true;
     auto check = [&](bool condition, const char* label) { std::cout << (condition ? "[PASS] " : "[FAIL] ") << label << '\n'; ok &= condition; };
     const auto never = [] { return false; };
+    check(pulse::ipc::DeadlinePipeIo(INVALID_HANDLE_VALUE, nullptr, 0, false, 0, never),
+          "empty payload requires no event or pipe access");
+    {
+        Pipe pipe(0);
+        uint8_t actual[16]{};
+        std::thread fragments([&] {
+            for (uint8_t i = 0; i < 16; ++i) {
+                DWORD written = 0;
+                WriteFile(pipe.client, &i, 1, &written, nullptr);
+                Sleep(2);
+            }
+        });
+        bool received = pulse::ipc::DeadlinePipeIo(pipe.server, actual, sizeof(actual), false,
+            GetTickCount64() + 2000, never);
+        fragments.join();
+        for (uint8_t i = 0; i < 16; ++i) received &= actual[i] == i;
+        check(received, "fragmented frame safely resets and reuses one operation event");
+    }
     {
         Pipe pipe(1); uint8_t bytes[16]{}; const auto begin = GetTickCount64();
         const bool read = pipe.valid() && pulse::ipc::DeadlinePipeIo(pipe.server, bytes, sizeof(bytes), false, begin + 150, never);

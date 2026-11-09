@@ -1,5 +1,4 @@
-// action_files.h - File operations as run_actions steps (全面打通 P4c,
-// plans/ai/P4_全部领域接入.html ② ③).
+// action_files.h - File operations as run_actions steps (全面打通 P4c).
 //
 // A file step never runs at once: the assistant shows the user what it would
 // do (the first batch's plan card for moves, copies, renames; the second

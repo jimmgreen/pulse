@@ -1,4 +1,5 @@
 #include "../app/marquee_selection.h"
+#include "../ui/picker_marquee.h"
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -41,6 +42,27 @@ bool Step(Delta& delta, Set& selected, bool& all, const Set& base,
         (!all || selected.empty());
 }
 void Regression() {
+    {
+        pulse::ui::PickerMarquee gesture;
+        Set selected{0, 1};
+        gesture.Begin(selected, 1, 0, 100, 100, 0, true, false);
+        Check(!gesture.Move(102, 102, 4, 4) && gesture.Move(110, 120, 4, 4), "picker respects drag threshold");
+        gesture.hits = {1, 2};
+        gesture.Apply(selected, 3);
+        Check(selected == Set({0, 2}), "picker Ctrl marquee toggles against immutable starting selection");
+        gesture.hits = {2}; gesture.Apply(selected, 3);
+        Check(selected == Set({0, 1, 2}), "picker shrink restores crossed item and retains explicit all-selection");
+        const auto rectangle = gesture.Rect(40, {0, 0, 200, 200});
+        Check(rectangle.top == 60 && rectangle.bottom == 120, "picker marquee anchor follows scrolled content");
+        gesture.Begin(selected, 2, 0, 0, 0, 0, false, true);
+        gesture.hits = {3}; gesture.Apply(selected, 4);
+        Check(selected == Set({0, 1, 2, 3}), "picker Shift marquee adds without compacting away filenames");
+        gesture.Begin(selected, 2, 0, 0, 0, 0, false, false);
+        gesture.hits = {2}; gesture.Apply(selected, 4);
+        Check(selected == Set({2}) && gesture.before == Set({0, 1, 2, 3}), "picker replace marquee retains cancellation baseline");
+        gesture.Reset();
+        Check(!gesture.pending && !gesture.active && gesture.before.empty(), "picker release resets gesture state");
+    }
     std::mt19937 rng(0x51983u);
     bool random_ok = true;
     for (int mode = 0; mode < 3; ++mode) {

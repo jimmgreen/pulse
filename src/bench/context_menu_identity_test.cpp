@@ -89,7 +89,10 @@ int wmain() {
         bool presets = true;
         for (int i = 0; i < static_cast<int>(BuiltinMenuPreset::Count); ++i) {
             const auto preset = static_cast<BuiltinMenuPreset>(i);
-            presets &= app::BuiltinMenuPresetFor(app::BuiltinMenuPresetHidden(preset)) == preset;
+            const auto hidden = app::BuiltinMenuPresetHidden(preset);
+            presets &= app::BuiltinMenuPresetFor(hidden) == preset;
+            presets &= app::RowActionMask(hidden) == app::kRowActionsAll;
+            presets &= app::BuiltinMenuPresetFor(hidden | app::BuiltinMenuBit(BuiltinMenuItem::RowStar)) == preset;
         }
         const uint64_t slim = app::BuiltinMenuPresetHidden(BuiltinMenuPreset::Slim);
         presets &= (slim & app::BuiltinMenuBit(BuiltinMenuItem::Paste)) == 0 &&

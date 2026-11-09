@@ -1,0 +1,18 @@
+Win + E 和任务栏图标：激活已有窗口（2026-11-02）
+
+新增第四项，复用OpenWindowActivate文字；前三项语义及默认值不变。
+open_win_e=2写入和读取保留，UI选择index3/IntegrationAction29；窄窗口菜单同时增加activate。
+沿用现有DecideLaunchTarget(mode2)和RevealWindow，只激活最近可用窗口，不导航或新建标签。
+没有可用窗口时现有策略创建新窗口；忙碌模态窗口仍按原策略延后处理。
+
+验证：
+- pulse及两个测试目标构建成功。
+- pulse_app_controllers_test --integration-segments：6项通过。
+- pulse_external_open_test：73项通过，包括mode2激活、忙碌延后、无窗口创建策略。
+- 实际窗口PULSE_TEST_WIN_E_ACTIVATE_ONLY过滤：19项通过，exit0。两窗MRU、普通/最小化/隐藏状态、标签与路径保持、隔离文件设置持久化。
+  bench_data/win-e-activate-final-20261102/routing.log
+- PULSE_TEST_SETTINGS_INTEGRATION+PULSE_TEST_WIN_E_ACTIVATE_ONLY过滤：20项通过，exit0。
+  620/1280 DIP、100/150%缩放，第四项点击及命中、中文文字适配、截图。
+  bench_data/win-e-ui-final-20261102/ui.log和同目录win-e-activate-*.png；宽浅色和窄深色截图目视正常。
+- 未修改用户系统接管注册；实际GUI调用内部入口，未向系统发送Win+E。无窗口首启只覆盖策略测试。
+- 首版GUI用例在已有大型测试函数中引入额外栈空间导致栈溢出；拆分独立noinline过滤函数后复测通过，未据此改产品逻辑。

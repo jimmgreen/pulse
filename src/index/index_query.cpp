@@ -239,6 +239,7 @@ void ApplyExt(Term& t, std::wstring_view raw) {
 bool IsColon(wchar_t c) { return c == L':' || c == L'：'; }
 
 bool LooksLikeAbsPath(std::wstring_view s) {
+    if (s == L"pulse:recycle") return true;
     if (s.size() >= 2 && ((s[0] >= L'A' && s[0] <= L'Z') || (s[0] >= L'a' && s[0] <= L'z')) &&
         s[1] == L':') return true;
     return s.size() >= 2 && s[0] == L'\\' && s[1] == L'\\';

@@ -23,6 +23,7 @@ struct Counters {
     int native = 0, bridge = 0;
     wire::Status result = wire::Status::Cancelled;
     std::vector<std::u16string> paths;
+    std::optional<wire::Request> last; // the request the host received
 };
 FileDialogBridgeServices Services(Counters& counters, bool verified) {
     FileDialogBridgeServices services;
@@ -30,6 +31,7 @@ FileDialogBridgeServices Services(Counters& counters, bool verified) {
     services.show_native = [&](IFileDialog*, HWND) { ++counters.native; return HRESULT_FROM_WIN32(ERROR_CANCELLED); };
     services.run_bridge = [&](const wire::Message& request, HWND, HANDLE) {
         ++counters.bridge;
+        counters.last = std::get<wire::Request>(request.body);
         wire::Response response;
         response.operation = std::get<wire::Request>(request.body).operation;
         response.status = counters.result;
@@ -283,6 +285,75 @@ int main() {
         auto dialog = Make(Services(counts, true)); Configure(dialog.Get(), folder);
         Check(dialog->Show(nullptr) == HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED) && counts.bridge == 1 && counts.native == 0,
             "late host Unsupported cannot reopen native dialog");
+    }
+    {
+        // pulse.exe route: a basic local Save with a caller title crosses the
+        // pipe with local-save access and labels, with no in-process provider.
+        Counters counts; counts.result = wire::Status::Accepted; counts.paths = {U16(folder / L"bridge-save.txt")};
+        auto services = Services(counts, true); services.prefer_bridge = true; services.save_access_policy = AccessPolicy::LocalSaveV1;
+        auto dialog = Make(services, DialogFactory::Save); Configure(dialog.Get(), folder, DialogFactory::Save);
+        dialog->SetFileName(L"bridge-save"); dialog->SetTitle(L"Export");
+        const auto hr = dialog->Show(nullptr);
+        const bool carried = counts.last && (counts.last->required_capabilities & wire::LocalSaveAccessV1) &&
+            (counts.last->options & wire::ValidateLocalSaveAccessV1) && (counts.last->required_capabilities & wire::DialogLabels) &&
+            (counts.last->label_flags & wire::LabelTitle) && counts.last->title == u"Export";
+        Check(hr == S_OK && counts.bridge == 1 && counts.native == 0 && carried, "basic local save goes to pulse.exe with access and labels", hr);
+        PWSTR name = nullptr;
+        Check(SUCCEEDED(dialog->GetFileName(&name)) && name && std::wstring(name) == L"bridge-save.txt", "pulse.exe save result is the dialog result");
+        CoTaskMemFree(name);
+    }
+    {
+        // A target the host would decline is checked before the pipe, so the
+        // terminal host answer is never reached: without a provider, native.
+        Counters counts; counts.result = wire::Status::Accepted; counts.paths = {U16(folder / L"x.txt")};
+        auto services = Services(counts, true); services.prefer_bridge = true; services.save_access_policy = AccessPolicy::LocalSaveV1;
+        auto dialog = Make(services, DialogFactory::Save); Configure(dialog.Get(), folder, DialogFactory::Save);
+        dialog->SetFileName(L"CON");
+        dialog->Show(nullptr);
+        Check(counts.bridge == 0 && counts.native == 1, "unresolvable save target stays off the pipe");
+    }
+    {
+        // Without the preference a local Save keeps its previous route.
+        Counters counts; counts.result = wire::Status::Accepted; counts.paths = {U16(folder / L"bridge-save.txt")};
+        auto services = Services(counts, true); services.save_access_policy = AccessPolicy::LocalSaveV1;
+        auto dialog = Make(services, DialogFactory::Save); Configure(dialog.Get(), folder, DialogFactory::Save);
+        dialog->SetFileName(L"bridge-save");
+        dialog->Show(nullptr);
+        Check(counts.bridge == 0 && counts.native == 1, "local save without pulse.exe preference is unchanged");
+    }
+    {
+        // Deferred provider: a basic pulse.exe Show never loads the in-process UI.
+        Counters counts; counts.result = wire::Status::Accepted; counts.paths = {U16(folder / L"bridge-save.txt")};
+        int loads = 0;
+        auto services = Services(counts, true); services.prefer_bridge = true; services.save_access_policy = AccessPolicy::LocalSaveV1;
+        services.load_inprocess_provider = [&loads] { ++loads; return std::shared_ptr<const FileDialogInprocessProvider>{}; };
+        auto dialog = Make(services, DialogFactory::Save); Configure(dialog.Get(), folder, DialogFactory::Save);
+        dialog->SetFileName(L"bridge-save");
+        const auto hr = dialog->Show(nullptr);
+        Check(hr == S_OK && counts.bridge == 1 && loads == 0, "basic pulse.exe dialog never loads the in-process provider", hr);
+    }
+    {
+        // A dialog the host cannot carry (a captured place) loads the provider
+        // once at Show; an unavailable provider keeps that Show native.
+        Counters counts; int loads = 0;
+        auto services = Services(counts, true); services.prefer_bridge = true;
+        services.load_inprocess_provider = [&loads] { ++loads; return std::shared_ptr<const FileDialogInprocessProvider>{}; };
+        auto dialog = Make(services); Configure(dialog.Get(), folder);
+        ComPtr<IShellItem> place;
+        const bool placed = SUCCEEDED(CreatePickerShellItem(wire::Operation::PickFolder, folder.wstring(), &place)) &&
+            SUCCEEDED(dialog->AddPlace(place.Get(), FDAP_TOP));
+        dialog->Show(nullptr);
+        Check(placed && loads == 1 && counts.bridge == 0 && counts.native == 1, "non-basic dialog loads the provider on demand, native when unavailable");
+    }
+    {
+        // A dialog already bound to native never loads the in-process UI.
+        Counters counts; int loads = 0;
+        auto services = Services(counts, true); services.prefer_bridge = true;
+        services.load_inprocess_provider = [&loads] { ++loads; return std::shared_ptr<const FileDialogInprocessProvider>{}; };
+        auto dialog = Make(services);
+        dialog->SetOptions(DefaultDialogOptions(DialogFactory::Open) | FOS_FORCEFILESYSTEM | FOS_DONTADDTORECENT | FOS_ALLNONSTORAGEITEMS);
+        dialog->Show(nullptr);
+        Check(loads <= 1 && counts.native == 1 && counts.bridge == 0, "unsupported native options stay native");
     }
     {
         Counters counts; counts.result = wire::Status::Accepted; counts.paths = {U16(fixture)};

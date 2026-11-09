@@ -425,9 +425,36 @@ int CheckFilters() {
     tab.content_results.reset();
     return failures?1:0;
 }
+
+int CheckPinyinFilters() {
+    int failures = 0;
+    app::Pane pane;
+    auto rows = std::make_shared<std::vector<fs::DirEntry>>(2);
+    (*rows)[0].name = L"中文文件.txt";
+    (*rows)[1].name = L"other.txt";
+    pane.view.SetSnapshot(rows);
+    app::PlacesCatalog places;
+    places.persist = false;
+    for (const auto* query : {L"zhongwen", L"ZW", L"wenjian", L"wj"}) {
+        pane.view.filter_text = query;
+        std::vector<int> matches;
+        app::CollectFilterMatches(pane.view, nullptr, matches);
+        ui::PaneViewModel model;
+        app::FillPaneViewModel(model, pane, nullptr);
+        const bool good = matches == std::vector<int>{0} && model.EntryCount() == 1 &&
+            app::ContentFilter(query, places)((*rows)[0]);
+        std::printf("[%s] pinyin filter and selection agree\n", good ? "PASS" : "FAIL");
+        failures += !good;
+    }
+    const bool wildcard = !app::NamePattern(L"zhong*", true).Matches((*rows)[0].name) &&
+        app::NamePattern(L"*.txt", true).Matches((*rows)[0].name);
+    std::printf("[%s] wildcard remains literal\n", wildcard ? "PASS" : "FAIL");
+    return failures + !wildcard;
+}
 }
 int wmain(int argc, wchar_t** argv) {
     if (argc != 2) return 2;
+    if (std::wstring_view(argv[1]) == L"--check-pinyin") return CheckPinyinFilters();
     if (std::wstring_view(argv[1]) == L"--check") return CheckFilters() | CheckSnapshotLifetime() | CheckDerivedCaches() | CheckFilterCapacity();
     if (std::wstring_view(argv[1]) == L"--filter-capacity") return BenchFilterCapacity();
     if (std::wstring_view(argv[1]) == L"--group-bench") return BenchGroups();

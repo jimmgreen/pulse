@@ -96,6 +96,12 @@ bool TickChangeTracking(AppState& s) {
     bool changed = false;
     const bool hovering = s.hoverRegion == static_cast<int>(ui::HitTestResult::ChangeBadge) ||
         s.hoverRegion == static_cast<int>(ui::HitTestResult::ChangeOpen);
+    if (state.hover_ready_at && !hovering) state.hover_ready_at = 0;
+    if (state.hover_ready_at && GetTickCount64() >= state.hover_ready_at) {
+        state.hover_ready_at = 0;
+        state.popover.visible = true;
+        changed = true;
+    }
     if (state.popover.visible && !hovering && GetTickCount64() > state.hover_deadline) {
         state.popover.visible = false;
         changed = true;
@@ -113,6 +119,7 @@ bool TickChangeTracking(AppState& s) {
         if (!state.enabled) state.summaries.clear();
         state.requested_paths.clear();
         state.popover.visible = false;
+        state.hover_ready_at = 0;
         state.summary_request = 0;
         state.summary_pending = false;
         state.details.clear();
@@ -345,18 +352,21 @@ void FillChangePane(AppState& s, app::Tab& tab, ui::PaneViewModel& pane, const D
 void UpdateChangeHover(AppState& s, const ui::HitTestResult& hit, POINT point) {
     auto& state = s.changes;
     if (hit.region == ui::HitTestResult::ChangeOpen) { state.hover_deadline = GetTickCount64() + 350; return; }
-    if (hit.region != ui::HitTestResult::ChangeBadge) return;
+    if (hit.region != ui::HitTestResult::ChangeBadge) { state.hover_ready_at = 0; return; }
     const auto path = HitPath(s, hit);
     const auto found = state.summaries.find(SummaryKey(path, s.appPrefs.change_tracking_days));
-    if (found == state.summaries.end()) return;
+    if (found == state.summaries.end()) { state.hover_ready_at = 0; state.popover.visible = false; return; }
     const auto badge = Badge(found->second, s.appPrefs.change_tracking_days);
-    if (badge.label.empty()) { state.popover.visible = false; return; }
-    if (state.hover_path != path || !state.popover.visible) {
+    if (badge.label.empty()) { state.hover_ready_at = 0; state.popover.visible = false; return; }
+    // Dwell belongs to the badge, not an exact screen pixel.
+    if (state.hover_path != path || state.popover.pane_index != hit.pane_index ||
+        state.popover.row_index != hit.index || (!state.popover.visible && !state.hover_ready_at)) {
+        state.popover.visible = false;
+        state.hover_ready_at = GetTickCount64() + 650;
         state.hover_path = path;
         state.popover.x = static_cast<float>(point.x);
         state.popover.y = static_cast<float>(point.y);
     }
-    state.popover.visible = true;
     state.popover.summary = badge.tooltip;
     state.popover.pane_index = hit.pane_index;
     state.popover.row_index = hit.index;

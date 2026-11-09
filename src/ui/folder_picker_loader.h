@@ -17,6 +17,7 @@ struct PickerFolderCommit {
 struct PickerValidation {
     uint64_t generation = 0;
     std::vector<std::wstring> paths;
+    std::vector<std::wstring> missing_paths;
     std::wstring navigate;
     DWORD error = ERROR_SUCCESS;
     std::wstring failed_path;
@@ -42,7 +43,7 @@ public:
     void ValidateSave(uint64_t generation, SaveTargetRequest request);
     void RevalidateSave(uint64_t generation, SaveConfirmationSnapshot snapshot);
     void CheckSaveAccess(uint64_t generation, SaveConfirmationSnapshot snapshot,
-                         bool after_file_ok, uint64_t ui_generation, bool require_unencrypted = false, bool skip_access_validation = false);
+                         bool after_file_ok, uint64_t ui_generation, bool require_unencrypted = false, bool skip_access_validation = false, uint32_t native_options = 0);
     static std::unique_ptr<PickerListing> Take(LPARAM lparam);
     static std::unique_ptr<PickerFolderCommit> TakeFolderCommit(LPARAM lparam);
     static std::unique_ptr<PickerValidation> TakeValidation(LPARAM lparam);

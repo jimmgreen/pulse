@@ -1,0 +1,12 @@
+{
+  "apiVersion": 1,
+  "id": "sample.native-directory-browser",
+  "name": "Native directory browser example",
+  "resources": [
+    "context.read",
+    "context.events",
+    "files.readDirectory",
+    "files.watchDirectory",
+    "files.open"
+  ]
+}

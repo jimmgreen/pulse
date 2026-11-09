@@ -122,12 +122,16 @@ public:
     virtual void Track() = 0;
     // The effect the current target answered (DROPEFFECT_*).
     virtual void Effect(DWORD effect) = 0;
+    virtual void Feedback(const std::wstring& text) { (void)text; }
     // The drag ended. The visual animates out and frees itself; the caller
     // must not touch it afterwards.
     virtual void Finish(DWORD effect, bool cancelled) = 0;
 };
-using DragVisualFactory = DragVisual* (*)(const std::vector<std::wstring>& paths);
+using DragVisualFactory = DragVisual* (*)(const std::vector<std::wstring>& paths, bool dark);
 void SetDragVisualFactory(DragVisualFactory factory);
+// Returns false for foreign drags or when the optional visual is unavailable.
+bool SetDragVisualFeedback(const std::wstring& text);
+bool DragVisualActive();
 
 // Landing in the real slots (pulse_motion_v2, rolando-sound-cards): a drop
 // into a folder that a Pulse list shows asks the card stack to wait at the
@@ -168,9 +172,10 @@ private:
 };
 
 // Runs the modal DoDragDrop loop. Returns the performed DROPEFFECT_*.
+// dark is the source window theme; file artwork must never determine card colours.
 DWORD DoFileDragDrop(const std::vector<std::wstring>& paths, DWORD allowed_effects,
                      std::function<bool()> esc_consumed,
-                     const std::wstring& source_view = {});
+                     const std::wstring& source_view, bool dark);
 
 // ---------------------------------------------------------------------------
 // Drop-in target.

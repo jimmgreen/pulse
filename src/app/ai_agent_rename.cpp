@@ -6,7 +6,7 @@ namespace pulse {
 namespace ai_agent {
 
 // ------------------------------------------------------- rename_files --
-// Flow B (plans/ai/Pulse_AI助手_第一批扩展.html): the model gives one rule in
+// Flow B: the model gives one rule in
 // the batch rename engine's steps; Pulse reads the dates taken, makes every
 // name on this PC, shows old → new and asks once. 在批量重命名中调整… opens
 // the dialog with the rule filled in.

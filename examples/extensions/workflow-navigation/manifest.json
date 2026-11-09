@@ -1,0 +1,129 @@
+{
+  "apiVersion": 1,
+  "id": "sample.workflow-navigation",
+  "name": "workflow-navigation",
+  "commands": [
+    {
+      "id": "up",
+      "title": "Parent folder",
+      "capability": "navigation.up"
+    },
+    {
+      "id": "details",
+      "title": "Details view",
+      "capability": "view.setMode",
+      "args": {
+        "mode": "details"
+      }
+    },
+    {
+      "id": "refresh",
+      "title": "Refresh",
+      "capability": "view.refresh"
+    },
+    {
+      "id": "run",
+      "title": "Run declared workflow",
+      "capability": "workflow.run",
+      "args": {
+        "workflow": "main"
+      }
+    },
+    {
+      "id": "cancelWorkflow",
+      "title": "Cancel owned workflow",
+      "capability": "workflow.cancel"
+    }
+  ],
+  "workflows": [
+    {
+      "id": "main",
+      "steps": [
+        "up",
+        "details",
+        "refresh"
+      ]
+    }
+  ],
+  "panel": {
+    "title": "workflow-navigation",
+    "ui": {
+      "version": 1,
+      "state": [
+        {
+          "key": "workflowStatus",
+          "value": "idle"
+        },
+        {
+          "key": "workflowError",
+          "value": ""
+        },
+        {
+          "key": "workflowProgress",
+          "value": "0"
+        }
+      ],
+      "root": {
+        "type": "scrollView",
+        "id": "workflow-root",
+        "children": [
+          {
+            "type": "text",
+            "id": "workflow-help",
+            "text": "Runs declared commands in order. Transfer steps still require native confirmation; completed steps are not rolled back."
+          },
+          {
+            "type": "stack",
+            "id": "workflow-actions",
+            "orientation": "horizontal",
+            "children": [
+              {
+                "type": "button",
+                "id": "workflow-start",
+                "text": "Start workflow",
+                "command": "run",
+                "kind": "primary",
+                "flex": 1,
+                "minWidth": 140
+              },
+              {
+                "type": "button",
+                "id": "workflow-cancel",
+                "text": "Cancel workflow",
+                "command": "cancelWorkflow",
+                "flex": 1,
+                "minWidth": 140
+              }
+            ]
+          },
+          {
+            "type": "progress",
+            "id": "workflow-progress",
+            "binding": "state.workflowProgress"
+          },
+          {
+            "type": "text",
+            "id": "workflow-status",
+            "binding": "state.workflowStatus"
+          },
+          {
+            "type": "text",
+            "id": "workflow-error",
+            "binding": "state.workflowError"
+          },
+          {
+            "type": "virtualList",
+            "id": "workflow-monitor",
+            "dataSource": {
+              "source": "context.workflow",
+              "pageSize": 1,
+              "statusState": "workflowStatus",
+              "errorState": "workflowError",
+              "progressState": "workflowProgress"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

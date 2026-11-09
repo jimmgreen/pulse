@@ -1,3 +1,4 @@
+#include "../ipc/picker_session.h"
 #include "../ipc/picker_client.h"
 
 #include <iostream>
@@ -52,7 +53,7 @@ int FakeHost(const wchar_t* pipe, const wchar_t* parent_pid) {
     Channel channel;
     if (!parent || !Connect(pipe, parent.Get(), channel)) return 2;
     Message request;
-    if (!channel.Receive(request, {nullptr, 5000})) return 3;
+    if (!ReceivePickerSessionRequest(channel, request, {nullptr, 5000})) return 3;
     const auto& body = std::get<Request>(request.body);
     if (body.filename == u"crash") return 7;
     if (body.filename == u"hang") {
@@ -156,7 +157,8 @@ Status StatusOf(const Message& message) { return std::get<Response>(message.body
 }
 int wmain(int argc, wchar_t** argv) {
     if (argc == 4 && std::wstring_view(argv[1]) == L"--owner-fixture") return ExternalOwnerChild(argv[2], argv[3]);
-    if (argc == 4 && std::wstring_view(argv[1]) == L"--picker-host") return FakeHost(argv[2], argv[3]);
+    // The client appends the caller's owner HWND when it has one.
+    if ((argc == 4 || argc == 5) && std::wstring_view(argv[1]) == L"--picker-host") return FakeHost(argv[2], argv[3]);
     const auto name = L"PulsePickerClientTest." + std::to_wstring(GetCurrentProcessId());
     HDESK desktop = CreateDesktopW(name.c_str(), nullptr, nullptr, 0, GENERIC_ALL, nullptr);
     Check(desktop && SetThreadDesktop(desktop), "isolated desktop selected");
@@ -171,6 +173,31 @@ int wmain(int argc, wchar_t** argv) {
     Message request; request.request_id[0] = 1;
     auto& body = std::get<Request>(request.body);
     SetTimer(owner, 1, 30, nullptr);
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--session") {
+        for (const auto operation : {Operation::OpenFiles, Operation::SaveFile, Operation::PickFolder}) {
+            body.operation = operation;
+            body.required_capabilities = operation == Operation::OpenFiles ? Open : operation == Operation::SaveFile ? Save : Folder;
+            const auto accepted = RunPickerClient(executable, request, owner);
+            Check(StatusOf(accepted) == Status::Accepted && ValidateResponse(request, accepted),
+                "negotiated client returns matching operation result");
+            Check(IsWindowEnabled(owner), "negotiated client restores owner");
+        }
+        body.operation = Operation::OpenFiles; body.required_capabilities = Open;
+        for (const auto* filename : {u"cancel", u"unsupported", u"wrong-id", u"crash"}) {
+            body.filename = filename;
+            const auto result = RunPickerClient(executable, request, owner);
+            const auto expected = body.filename == u"cancel" ? Status::Cancelled :
+                body.filename == u"unsupported" ? Status::Unsupported : Status::Failed;
+            Check(StatusOf(result) == expected, "negotiated client preserves terminal outcome");
+            Check(IsWindowEnabled(owner), "negotiated failure restores owner");
+        }
+        Check(ticks > 0, "negotiated client pumps caller messages");
+        KillTimer(owner, 1);
+        DestroyWindow(owner);
+        CloseDesktop(desktop);
+        std::cout << "Checks: " << checks << ", failures: " << failures << '\n';
+        return failures ? 1 : 0;
+    }
     const auto accepted = RunPickerClient(executable, request, owner);
     Check(StatusOf(accepted) == Status::Accepted && ValidateResponse(request, accepted), "real child result accepted");
     Check(IsWindowEnabled(owner), "enabled owner restored after acceptance");

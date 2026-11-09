@@ -1,4 +1,5 @@
 #pragma once
+#include "entry_sort.h"
 #include "../fs/fs_enum.h"
 #include "../ui/ui_view_model.h"
 #include <cstdint>
@@ -86,6 +87,7 @@ struct GroupClock {
     // column when it is a date (created / accessed), otherwise modified.
     // GroupCompare takes the column from its own argument.
     ui::SortColumn date_column = ui::SortColumn::Mtime;
+    FolderSortMode folders = FolderSortMode::Mixed;
     std::shared_ptr<const TagGroupMap> tags;  // GroupBy::Tag only
     std::shared_ptr<const MediaGroupMap> media;  // Media* only
 };
@@ -93,6 +95,10 @@ GroupClock MakeGroupClock(ui::SortColumn sort_column = ui::SortColumn::Mtime);
 
 // The time GroupBy::Date uses for a list sorted by `sort_column`.
 const FILETIME& GroupDateOf(const fs::DirEntry& e, ui::SortColumn sort_column) noexcept;
+
+// A separate directory group is shared by sorting, headers and collapse keys.
+// Fixed virtual groups retain their own hierarchy; Mixed uses the chosen field.
+inline constexpr int kFolderGroupRank = -2;
 
 // Date ranks: 0 future, 1 today, 2 yesterday, 3 earlier this week, 4 last week,
 // 5 earlier this month, 6 last month, 7 earlier this year, 8 a long time ago.
@@ -113,7 +119,8 @@ int GroupCompare(const fs::DirEntry& a, const fs::DirEntry& b, GroupBy g,
 // Same comparison using ranks prepared once per row (except Location, which
 // still compares parent paths). Date ranks must use the active sort column.
 int GroupCompareRanks(const fs::DirEntry& a, const fs::DirEntry& b, GroupBy g,
-                      ui::SortColumn col, ui::SortDirection dir, int ra, int rb);
+                      ui::SortColumn col, ui::SortDirection dir, int ra, int rb,
+                      const GroupClock& clock = {});
 
 // Stable key for collapse state ("d3", "t:pdf", ...).
 std::wstring GroupKey(const fs::DirEntry& e, GroupBy g, const GroupClock& clock);
@@ -126,7 +133,7 @@ std::wstring MediaGroupLabel(const GroupClock& clock, int rank);
 // group order; order inside a group is kept. For views whose order comes from
 // elsewhere (indexed search pages) rather than the sorting worker.
 void StableGroupOrder(std::vector<fs::DirEntry>& entries, std::vector<std::wstring>* parallel,
-                      GroupBy g, ui::SortColumn col, ui::SortDirection dir);
+                      GroupBy g, ui::SortColumn col, ui::SortDirection dir, FolderSortMode folders);
 
 // Active grouping for EntryLess on the current thread. The worker and the
 // notify patcher wrap their sorts in a scope instead of threading the group

@@ -157,6 +157,49 @@ int wmain(int argc, wchar_t** argv) {
             L"start failure preserves its error", 0, ERROR_ACCESS_DENIED);
         run({SERVICE_STOPPED, SERVICE_RUNNING}, 0, 1,
             L"concurrent successful startup is accepted", 0, ERROR_SERVICE_ALREADY_RUNNING);
+        run({SERVICE_STOPPED, SERVICE_STOPPED}, ERROR_SERVICE_NOT_ACTIVE, 1,
+            L"enabled service stopping cleanly before running still fails with 1062");
+        auto policy = [&](bool enabled, std::vector<DWORD> states, DWORD expected,
+                          unsigned expected_starts, unsigned expected_stops, const wchar_t* label,
+                          DWORD query_error = 0, DWORD stop_error = 0) {
+            size_t next = 0;
+            unsigned starts = 0, stops = 0;
+            DWORD waited = 0;
+            const DWORD result = EnsureServiceState(enabled,
+                [&](SERVICE_STATUS_PROCESS& status) -> DWORD {
+                    status.dwCurrentState = states[(std::min)(next++, states.size() - 1)];
+                    return query_error;
+                },
+                [&]() -> DWORD { ++starts; return ERROR_SUCCESS; },
+                [&]() -> DWORD { ++stops; return stop_error; },
+                [&](DWORD delay) { waited += delay; });
+            Check(result == expected && starts == expected_starts && stops == expected_stops && waited <= 33500, label);
+        };
+        policy(false, {SERVICE_STOPPED}, 0, 0, 0,
+            L"install and migration keep disabled search stopped without a start request");
+        policy(false, {SERVICE_RUNNING, SERVICE_STOP_PENDING, SERVICE_STOPPED}, 0, 0, 1,
+            L"disabled configuration stops an existing running service exactly once");
+        policy(false, {SERVICE_START_PENDING, SERVICE_STOPPED}, 0, 0, 0,
+            L"disabled startup may stop cleanly without being reported as 1062");
+        policy(false, {SERVICE_START_PENDING, SERVICE_RUNNING, SERVICE_STOPPED}, 0, 0, 1,
+            L"disabled configuration waits for pending startup then stops it");
+        policy(false, {SERVICE_RUNNING, SERVICE_STOPPED}, 0, 0, 1,
+            L"concurrent stop is confirmed through status", 0, ERROR_SERVICE_NOT_ACTIVE);
+        policy(false, {SERVICE_RUNNING}, ERROR_ACCESS_DENIED, 0, 1,
+            L"disabled policy preserves stop access failures", 0, ERROR_ACCESS_DENIED);
+        policy(false, {SERVICE_STOPPED}, ERROR_INVALID_DATA, 0, 0,
+            L"disabled policy preserves status query failures", ERROR_INVALID_DATA);
+        policy(false, {SERVICE_STOP_PENDING}, ERROR_SERVICE_REQUEST_TIMEOUT, 0, 0,
+            L"disabled policy does not swallow a stuck stop");
+        policy(true, {SERVICE_STOPPED, SERVICE_RUNNING}, 0, 1, 0,
+            L"enabled policy starts normally and checks survival");
+        policy(true, {SERVICE_STOPPED, SERVICE_STOPPED}, ERROR_SERVICE_NOT_ACTIVE, 1, 0,
+            L"enabled policy does not reinterpret genuine 1062 as disabled search");
+        Check(!RestartServiceAfterMigrationFailure(false, SERVICE_RUNNING) &&
+              !RestartServiceAfterMigrationFailure(false, SERVICE_STOPPED) &&
+              !RestartServiceAfterMigrationFailure(true, SERVICE_STOPPED) &&
+              RestartServiceAfterMigrationFailure(true, SERVICE_RUNNING),
+              L"migration rollback never enables disabled search and preserves prior stopped state");
         return failures ? 1 : 0;
     }
     if (argc > 1 && std::wstring_view(argv[1]) == L"--live-dedup-only") {

@@ -164,7 +164,7 @@ bool SyncDeviceSidebar(AppState& state) {
         e.fallback = L"Phone";
         e.color = ui::HexColor(0x60A5FA);
         if (device.locked) {
-            // Waiting for Allow / Trust on the phone (pulse_devices_cloud.html).
+            // Waiting for Allow / Trust on the phone.
             e.badge = l10n::Get(l10n::StringId::DeviceLockedChip);
             e.badge_rgb = 0xB7791F;
         }

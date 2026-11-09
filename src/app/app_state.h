@@ -13,7 +13,8 @@
 #include "../ui/quick_preview_window.h"
 #include "list_type_ahead.h"
 #include "preview_selection_follow.h"
-#include "marquee_selection.h"
+#include "list_selection_gesture.h"
+#include "file_click_gesture.h"
 #include "../ui/text_diff_window.h"
 #include "../ui/bloom_accent_picker.h"
 #include "../fs/fs_enum.h"
@@ -260,6 +261,7 @@ struct AppState : AppCoreOwner {
     HWND hwnd = nullptr;
     ui::Compositor compositor;
     ui::NotificationToast notification_toast;
+    std::wstring status_feedback;
     // Held through a pointer so this header needs only ui_view_model.h; sources
     // that call the renderer include ui_renderer.h.
     ui::MainRendererPtr renderer_owner = ui::MakeMainRenderer(core.render_caches);
@@ -267,6 +269,8 @@ struct AppState : AppCoreOwner {
     // Vsync-paced frames while highlight glides / list shifts run (frame_pump.h).
     app::FramePump framePump;
     ui::QuickPreviewWindow quickPreview;
+    ui::QuickPreviewWindow detailsPreview;
+    bool detailsPreviewDark = false;
     // View row the quick preview was anchored to when Delete ran from inside
     // it; SyncQuickPreview re-anchors there once the listing drops the entry
     // so the preview steps to the neighbouring file instead of closing.
@@ -391,6 +395,9 @@ struct AppState : AppCoreOwner {
         bool size_started = false;      // this card asked folderSizes to count
     } hoverPreview;
     int dropPaneIndex = -1;
+    bool dropParent = false;
+    std::wstring dragReturnPath;
+    std::vector<std::wstring> dragReturnPaths;
     bool dropHeader = false;            // drop on pane title bar → open folder
     bool scrollbarDragging = false;
     bool scrollbarHorizontal = false;
@@ -403,6 +410,11 @@ struct AppState : AppCoreOwner {
     app::ScrollbarFade sidebarScrollbarFade;
     // Settings and file-list scrollbars: always thin, expanded while hovered
     // or dragged (the same control and fade as the sidebar's).
+    std::wstring settingsSearchQuery;
+    int settingsSearchSelected = 0;
+    int settingsSearchTarget = 0;
+    ULONGLONG settingsSearchTargetUntil = 0;
+    HWND hwndSettingsSearchEdit = nullptr;
     bool settingsScrollbarHot = false;
     app::ScrollbarFade settingsScrollbarFade;
     bool paneScrollbarHot = false;
@@ -419,6 +431,20 @@ struct AppState : AppCoreOwner {
     bool columnResizing = false;
     int columnResizeIndex = -1;
     int columnResizePane = -1;
+    // Details header press/drag (column_header_drag.cpp).
+    struct ColumnHeaderDrag {
+        bool pending = false;      // pressed on a draggable header, not moved yet
+        bool active = false;       // past the threshold: reordering
+        int pane = -1;
+        int from = -1;             // display column
+        int slot = -1;             // insertion slot, -1 = no change
+        bool sortable = false;     // a plain click sorts by `column`
+        ui::SortColumn column = ui::SortColumn::Name;
+        POINT start{};
+        float grab_dx = 0.0f;
+        float line_x = 0.0f;
+        float cursor_x = 0.0f;
+    } columnHeaderDrag;
 
     // Column view divider drag and click bookkeeping (app_column_view.cpp).
     bool stripResizing = false;
@@ -608,7 +634,8 @@ struct AppState : AppCoreOwner {
     // Motion v2 "layout": a preset that adds or removes panes lets them glide
     // to their new rects (smooth spring); new panes grow in from their edge.
     struct PaneLayoutMotion {
-        std::vector<std::pair<const void*, D2D1_RECT_F>> last, from;
+        std::vector<std::pair<const void*, D2D1_RECT_F>> last, from, target;
+        const void* owner = nullptr;
         D2D1_RECT_F content{};
         uint64_t start = 0;   // ui::motion::NowMs, 0 when idle
     } paneLayoutMotion;
@@ -621,6 +648,7 @@ struct AppState : AppCoreOwner {
         std::unordered_set<std::wstring> baseline;  // listed when armed
         std::unordered_set<std::wstring> expected;  // reported by the operation
         std::vector<std::wstring> chosen;           // what it selected last
+        bool expected_only = false;                // explicit reveal: only actual task outputs
         uint64_t task_id = 0;
         uint64_t armed_at = 0;
         uint64_t until = 0;                         // 0 while the task runs
@@ -634,6 +662,11 @@ struct AppState : AppCoreOwner {
     std::vector<ZipJob> zipJobs;
     std::unique_ptr<ui::FileOperationWindow> operationWindow;
     uint64_t operationUiTaskId = 0;
+    bool undoHistoryOpen = false;
+    int undoHistoryOffset = 0;
+    uint64_t undoHistoryNotified = 0;
+    uint64_t operationHistoryTaskId = 0;
+    std::unordered_set<uint64_t> hiddenOperationHistory;
     uint64_t operationDismissedTaskId = 0;
     uint64_t conflictUiToken = 0;
     uint64_t lockPromptTaskId = 0;   // failed op whose "file in use" prompt was shown
@@ -677,21 +710,9 @@ struct AppState : AppCoreOwner {
     // 合并到文件夹: renaming the new folder joins the action's undo step.
     std::wstring groupRenameFolder;
     uint64_t groupRenameUndo = 0;
-    bool renameClickCandidate = false;
-    app::Pane* renameClickPane = nullptr;
-    app::Tab* renameClickTab = nullptr;
-    int renameClickIndex = -1;
-    ULONGLONG renameClickDue = 0;
-    ULONGLONG renameClickStarted = 0;
-    std::wstring renameClickPath;
-    // Single click opens (appPrefs.single_click_open): the row a plain press
-    // landed on opens on release unless the press became a drag or marquee.
-    bool singleOpenCandidate = false;
-    app::Pane* singleOpenPane = nullptr;
-    app::Tab* singleOpenTab = nullptr;
-    int singleOpenIndex = -1;
-    ULONGLONG singleOpenTick = 0;    // the double click right after an open is swallowed
+    app::FileClickGesture fileClick;
     ULONGLONG activateClickTick = 0; // WM_MOUSEACTIVATE: that click only brings the window forward
+    bool deferredFileActivation = false; // Background file press activates only if released without dragging.
     ULONGLONG hoverSelectFired = 0;  // ctxHoverSince of the hover that already selected
     // A click on a folder's size label that started a calculation; the
     // double-click it turns into opens the folder and stops that calculation.
@@ -768,12 +789,6 @@ struct AppState : AppCoreOwner {
     int springTab = -1;
     ULONGLONG springTabStart = 0;
 
-    // Drag-out bookkeeping.
-    bool dragPending = false;
-    POINT dragStartPt{};
-    int clickCollapseIndex = -1;
-    bool clickToggleOnRelease = false;
-
     // Tag drag-reorder gesture (sidebar 标签组), QFluentKit TabBar model:
     // the dragged tag follows cursor deltas 1:1, swaps with a sibling when its
     // edge crosses the sibling's center (sibling slides 150 ms InOutQuad), and
@@ -806,6 +821,8 @@ struct AppState : AppCoreOwner {
 
     // Quick-access pin drag: pinned folders reorder inside the section.
     bool pinDragPending = false;
+    int workspacePaneDragParent = -1;
+    int workspacePaneDragFrom = -1;
     bool pinDragActive = false;
     POINT pinDragStartPt{};
     std::wstring pinDragPath;
@@ -888,7 +905,7 @@ struct AppState : AppCoreOwner {
     int trayWheelAccum = 0;     // sub-notch wheel delta accumulator
     size_t trayDeckLastTotal = 0; // collect detection (stack resets to newest)
 
-    // Staging tray shelf (pulse_tray_redesign.html): strip / drop / shelf
+    // Staging tray shelf: strip / drop / shelf
     // layers, sprung panel height, live copy-move mode. TickTrayShelf
     // advances it; BuildVm copies it into vm.tray_deck.
     struct TrayShelfAnim {
@@ -965,7 +982,6 @@ struct AppState : AppCoreOwner {
     // Preview generation on/off: off skips the preview child process entirely,
     // so no decode work happens for the selection at all.
     bool detailsPreviewEnabled = true;
-    bool detailsPreviewPanning = false;
     float detailsPreviewExpansion = 0.0f;
     float detailsPreviewExpansionFrom = 0.0f;
     ULONGLONG detailsPreviewFoldStart = 0;
@@ -992,23 +1008,11 @@ struct AppState : AppCoreOwner {
         std::wstring path;
         uint64_t size = 0, files = 0, dirs = 0;
         bool done = false;
+        bool partial = false;
     } detailsSize;
 
-    // Rubber-band (marquee) selection in the file list.
-    bool marqueePending = false;
-    bool marqueeActive = false;
-    bool marqueeAdditive = false;
-    bool marqueeToggle = false;      // Ctrl: items in the band flip against marqueeBase
-    // Press on a row outside its icon + name (Details / List): a release
-    // without movement clicks that row with these modifiers; movement turns
-    // it into a marquee.
-    int marqueeRowIndex = -1;
-    bool marqueeRowCtrl = false;
-    bool marqueeRowShift = false;
-    // Selection before the press, restored when Esc cancels the marquee.
-    std::unordered_set<int> marqueeBefore;
-    bool marqueeBeforeAll = false;
-    int marqueeBeforeIndex = -1;
+    // One owner and one mutually exclusive phase for list pointer selection.
+    app::ListSelectionGesture listSelection;
     app::Pane* blankClickPane = nullptr;
     app::Tab* blankClickTab = nullptr;
     uint64_t blankClickGeneration = 0;
@@ -1018,25 +1022,6 @@ struct AppState : AppCoreOwner {
     DWORD blankDoubleTime = 0;
     POINT blankDoublePoint{};
     bool blankDoublePending = false;
-    POINT marqueeStart{};
-    POINT marqueeCur{};
-    std::unordered_set<int> marqueeBase;
-    pulse::app::MarqueeSelection marqueeDelta;
-    std::vector<int> marqueeHits;
-    app::MarqueeContext marqueeContext;
-    uint64_t marqueeRevision = 0;
-    bool marqueeRevisionTracked = false;
-    // Tab scroll offset when the marquee started. marqueeStart is in that
-    // moment's pane pixels, so scrolling carries the start with the content.
-    float marqueeOriginScrollX = 0.0f;
-    float marqueeOriginScrollY = 0.0f;
-    // Edge auto-scroll is on. Frames follow the display clock (framePump);
-    // kTimerMarqueeScroll only keeps them coming when the pump is unavailable.
-    bool marqueeAutoScroll = false;
-    std::chrono::steady_clock::time_point marqueeScrollLast{};
-    // Pointer moved since the band was last applied; Render applies it once
-    // per frame instead of once per mouse message.
-    bool marqueeSelectionDirty = false;
 
     // After a "new folder/file" op lands, select it and start renaming.
 

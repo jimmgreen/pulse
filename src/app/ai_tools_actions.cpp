@@ -1,6 +1,6 @@
-// ai_tools_actions.cpp - pulse.find_actions and pulse.run_actions (P5,
-// plans/ai/P5_外部AI与收尾.html §1 §3).
+// ai_tools_actions.cpp - pulse.find_actions and pulse.run_actions (P5).
 #include "ai_tools_actions.h"
+#include "../common/ai_action_request.h"
 #include "ai_tools_ui.h"
 #include "app_state.h"
 #include "actions/action_files.h"
@@ -136,10 +136,13 @@ ToolOutcome FindActionsTool(HWND host, const ToolCall& call, const Settings& set
 
 ToolOutcome RunActionsTool(HWND host, const ToolCall& call, const Settings& settings,
                            std::function<void(AllowRule)> add_rule, std::shared_ptr<McpActionsRun>& finished) {
+    if (call.cancelled) return Cancelled();
+    if (const auto error = pulse::ai::ValidateActionRequest(call.args); !error.empty())
+        return ToolOutcome::Fail("invalid_args", error);
     auto run = std::make_shared<McpActionsRun>();
     run->client = call.client;
     if (const json::Value* steps = call.args.find("steps"); steps && steps->is_array())
-        for (size_t i = 0; i < steps->size() && i < 12; ++i) run->steps.push_back(steps->at(i));
+        for (size_t i = 0; i < steps->size(); ++i) run->steps.push_back(steps->at(i));
     if (run->steps.empty()) return ToolOutcome::Fail("invalid_args", "steps is empty");
     run->allowed = McpAllowedGroups(settings);
     const Settings rules = settings;   // a copy: the call outlives nothing it borrows

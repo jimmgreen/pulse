@@ -1,4 +1,5 @@
 #include "../common/dialog_bundle.h"
+#include "../common/dialog_bundle_pointer.h"
 #include "../common/json_value.h"
 #include "../dialog_launcher/managed_launch_profile.h"
 #include <bcrypt.h>
@@ -77,12 +78,80 @@ struct Fixture {
 }
 int wmain(int argc,wchar_t** argv){
     std::cout<<std::unitbuf;
+    if(argc==3&&std::wstring_view(argv[1])==L"--resolve-installed") {bundle::BundleLease lease;DWORD e=bundle::ResolveInstalledBundle(argv[2],lease);Check(e==0,"read-only installed pointer verification",e);if(!e)Check(bundle::RecheckDirectory(lease)==0,"retained installed snapshot recheck");return failures?1:0;}
     if(argc==3&&std::wstring_view(argv[1])==L"--verify") {bundle::BundleLease lease;DWORD e=bundle::VerifyBundle(argv[2],{},lease);Check(e==0,"read-only supplied bundle verification",e);if(!e)Check(bundle::RecheckDirectory(lease)==0,"retained supplied bundle directory recheck");return failures?1:0;}
-    if(argc!=1)return 2;
+    const bool installed_only=argc==2 && std::wstring_view(argv[1])==L"--installed-pointer";
+    if(argc!=1 && !installed_only)return 2;
     try {
         const auto bench=fs::path(Self()).parent_path().parent_path()/L"bench_data";fs::create_directories(bench);
         const auto root=bench/(L"dialog-bundle-test-"+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(GetTickCount64()));Need(CreateDirectoryW(root.c_str(),nullptr)!=FALSE);
         unsigned next=0;
+        if(installed_only) {
+            const auto app=root/L"app";fs::create_directories(app/L"DialogBridge");
+            Fixture source(root/L"source");
+            const auto manifest=pulse::json::Serialize(source.manifest);
+            const auto digest=Hash({manifest.begin(),manifest.end()});
+            const auto selected=app/L"DialogBridge"/pulse::json::Wide(digest);
+            fs::rename(source.dir,selected);
+            auto pointer=Value::Object();pointer.set("schema",1);pointer.set("directory","DialogBridge/"+digest);pointer.set("manifest_sha256",digest);
+            auto publish=[&](const Value& value){WriteText(app/L"dialog-current.json",pulse::json::Serialize(value));};
+            bundle::BundleLease lease;
+            auto reject=[&](const char* label){const auto e=bundle::ResolveInstalledBundle(app.wstring(),lease);Check(e!=0&&!lease,label,e);};
+            reject("missing pointer never falls back to root");
+            publish(pointer);
+            {
+                const auto pointer_path=app/L"dialog-current.json";
+                const HANDLE snapshot=bundle::detail::OpenPointerSnapshot(pointer_path.c_str());
+                Need(snapshot!=INVALID_HANDLE_VALUE);
+                const HANDLE writer=CreateFileW(pointer_path.c_str(),GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,0,nullptr);
+                Check(writer==INVALID_HANDLE_VALUE,"pointer snapshot forbids in-place writes");
+                if(writer!=INVALID_HANDLE_VALUE)CloseHandle(writer);
+                WriteText(app/L"next-pointer.json","{}");
+                const auto backup=app/L"previous-pointer.json";
+                const BOOL retired=MoveFileExW(pointer_path.c_str(),backup.c_str(),MOVEFILE_WRITE_THROUGH);
+                const DWORD retire_error=retired ? ERROR_SUCCESS : GetLastError();
+                Check(retired!=FALSE,"installer retires pointer to backup during open snapshot",retire_error);
+                const BOOL published=retired && MoveFileExW((app/L"next-pointer.json").c_str(),pointer_path.c_str(),MOVEFILE_WRITE_THROUGH);
+                const DWORD publish_error=published ? ERROR_SUCCESS : GetLastError();
+                Check(published!=FALSE,"installer publishes next pointer during open snapshot",publish_error);
+                std::array<char,1024> bytes{};DWORD read=0;
+                const BOOL read_ok=ReadFile(snapshot,bytes.data(),static_cast<DWORD>(bytes.size()),&read,nullptr);
+                Check(read_ok && std::string(bytes.data(),read)==pulse::json::Serialize(pointer),"open pointer snapshot reads original complete bytes after publication");
+                CloseHandle(snapshot);
+                publish(pointer);
+            }
+            auto error=bundle::ResolveInstalledBundle(app.wstring(),lease);
+            Check(error==0&&lease.Directory()==selected.wstring(),"pointer resolves digest-bound private bundle",error);
+            Check(lease.Host()==(selected/L"pulse.exe").wstring(),"host belongs to private directory");
+            WriteText(app/L"pulse.exe","main application replaceable");
+            Check(DeleteFileW((app/L"pulse.exe").c_str())!=FALSE,"lease does not pin root executable");
+            Check(DeleteFileW((app/L"dialog-current.json").c_str())!=FALSE,"pointer can be replaced while lease lives");
+            publish(pointer);
+            Check(bundle::RecheckDirectory(lease)==0,"selected snapshot survives pointer replacement");
+            lease=bundle::BundleLease{};
+            auto bad=pointer;bad.set("directory","DialogBridge/../"+digest);publish(bad);reject("pointer path traversal rejected");
+            bad=pointer;bad.set("directory","DialogBridge\\"+digest);publish(bad);reject("pointer backslash path rejected");
+            bad=pointer;bad.set("manifest_sha256",std::string(64,'A'));publish(bad);reject("nonlowercase digest rejected");
+            bad=pointer;bad.set("unexpected",true);publish(bad);reject("unknown pointer key rejected");
+            bad=pointer;bad.set("schema",2);publish(bad);reject("unknown pointer schema rejected");
+            WriteText(app/L"dialog-current.json",std::string(1025,' '));reject("oversized pointer rejected");
+            WriteText(app/L"dialog-current.json","{broken");reject("malformed pointer rejected");
+            WriteText(app/L"dialog-current.json","{\"schema\":1,\"schema\":1,\"directory\":\"DialogBridge/"+digest+"\",\"manifest_sha256\":\""+digest+"\"}");reject("duplicate pointer keys rejected");
+            publish(pointer);WriteText(selected/L"manifest.json",manifest+" ");reject("manifest raw byte digest mismatch rejected");
+            WriteText(selected/L"manifest.json",manifest);
+            Fixture legacy(root/L"legacy");legacy.manifest.set("schema",2);legacy.Commit();
+            error=bundle::VerifyBundle(legacy.dir.wstring(),{},lease);
+            Check(error==0,"explicit legacy schema2 remains readable",error);lease=bundle::BundleLease{};
+            error=bundle::ResolveInstalledBundle(legacy.dir.wstring(),lease);
+            Check(error!=0&&!lease,"installed resolver does not fall back to legacy root",error);
+            // A pointer file itself must not redirect reads to another directory.
+            Need(DeleteFileW((app/L"dialog-current.json").c_str())!=FALSE);
+            WriteText(root/L"pointer-target.json",pulse::json::Serialize(pointer));
+            if(CreateSymbolicLinkW((app/L"dialog-current.json").c_str(),(root/L"pointer-target.json").c_str(),0x2))
+                reject("reparse pointer rejected");
+            else std::cout<<"[SKIP] reparse pointer fixture requires symlink permission error="<<GetLastError()<<'\n';
+            std::cout<<"checks="<<checks<<" failures="<<failures<<'\n';return failures?1:0;
+        }
         const auto run=[&](const char* name,const std::function<void(Fixture&)>& alter,DWORD expected=ERROR_INVALID_DATA){Fixture f(root/std::to_wstring(++next));alter(f);bundle::BundleLease lease;const DWORD e=bundle::VerifyBundle(f.dir.wstring(),{},lease);Check(e==expected,name,e);Check(!lease,"failure returns empty lease");};
         {
             Fixture f(root/std::to_wstring(++next));bundle::BundleLease lease;DWORD e=bundle::VerifyBundle(f.dir.wstring(),{},lease);Check(!e&&!!lease,"valid synthetic full bundle",e);
@@ -115,7 +184,25 @@ int wmain(int argc,wchar_t** argv){
         run("absolute path rejected",[](auto& f){f.Change(0,[](auto& e){e.set("path","C:/outside.exe");});f.Commit();});
         run("ADS rejected",[](auto& f){f.Change(0,[](auto& e){e.set("path","pulse.exe:payload");});f.Commit();});
         run("case collision rejected",[](auto& f){f.Change(1,[](auto& e){e.set("path","PULSEDIALOGLAUNCHER.EXE");});f.Commit();});
-        run("unknown schema rejected",[](auto& f){f.manifest.set("schema",2);f.Commit();},ERROR_REVISION_MISMATCH);
+        run("unknown schema rejected",[](auto& f){f.manifest.set("schema",3);f.Commit();},ERROR_REVISION_MISMATCH);
+        {
+            Fixture f(root/std::to_wstring(++next));f.manifest.set("schema",2);f.Commit();
+            WriteText(f.dir/L"uninstall.exe","installer generated");
+            WriteText(f.dir/L"setup-defaults.ini","settings");WriteText(f.dir/L".pulse-files","owned files");
+            WriteText(f.dir/L".pulse-setup/backup/pulse.exe","previous version");
+            WriteText(f.dir/L"DialogBridge/user-note.txt","unowned legacy data");
+            bundle::BundleLease lease;const DWORD e=bundle::VerifyBundle(f.dir.wstring(),{},lease);
+            Check(e==0,"installed shared root accepts exact setup metadata and excluded backup trees",e);
+            if(!e) {
+                WriteText(f.dir/L"rogue.dll","unexpected code");
+                Check(bundle::RecheckDirectory(lease)!=0,"installed root still rejects undeclared DLL");
+                Need(DeleteFileW((f.dir/L"rogue.dll").c_str())!=FALSE);
+                Check(bundle::RecheckDirectory(lease)==0,"installed shared root retains identity checks");
+            }
+        }
+        run("portable bundle rejects installer exceptions",[](auto& f){WriteText(f.dir/L".pulse-files","metadata");});
+        run("installed bundle rejects unknown directories",[](auto& f){f.manifest.set("schema",2);f.Commit();WriteText(f.dir/L"plugins/rogue.dll","unexpected code");});
+        run("installed bundle rejects byte tampering",[](auto& f){f.manifest.set("schema",2);f.Commit();WriteText(f.dir/L"pulse.exe","tampered");});
         run("unknown contract rejected",[](auto& f){auto c=*f.manifest.find("contract");c.set("picker_ui_abi",3);f.manifest.set("contract",c);f.Commit();},ERROR_REVISION_MISMATCH);
         run("wrong scalar type rejected",[](auto& f){f.Change(0,[](auto& e){e.set("size",true);});f.Commit();});
         run("fractional file size rejected",[](auto& f){f.Change(0,[](auto& e){e.set("size",1.5);});f.Commit();});

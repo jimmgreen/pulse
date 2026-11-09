@@ -18,6 +18,7 @@
 namespace pulse::diagnostics {
 namespace {
 namespace fs = std::filesystem;
+std::string PathJson(const std::wstring& value);
 constexpr size_t kReadLimit = 64 * 1024 * 1024;
 std::string Narrow(std::wstring_view s) {
     std::string out; out.reserve(s.size());
@@ -163,6 +164,9 @@ std::string SanitizeRuntime(std::string_view text, uint64_t& rejected) {
         const auto event = json::ExtractString(w, L"event");
         if (!json::ConfigSyntax(w, false).Object() || !Token(event)) { ++rejected; continue; }
         std::string record = "{\"event\":\"" + Narrow(event) + "\"";
+        const size_t truncated = json::ValuePosition(w, L"text_truncated");
+        if (truncated != std::wstring::npos && w.compare(truncated, 4, L"true") == 0)
+            record += ",\"text_truncated\":true";
         for (const wchar_t* key : {L"utc", L"component", L"version", L"build", L"level", L"evidence"}) {
             const auto value = json::ExtractString(w, key);
             if (Token(value)) record += ",\"" + Narrow(key) + "\":\"" + Narrow(value) + "\"";
@@ -172,10 +176,109 @@ std::string SanitizeRuntime(std::string_view text, uint64_t& rejected) {
             if (value != "null") record += ",\"" + Narrow(key) + "\":" + value;
         }
         const auto data = json::ExtractObject(w, L"data");
-        record += ",\"data\":" + (data.empty() ? "{}" : NumericObject(data)) + "}\n";
+        std::string fields = data.empty() ? "{}" : NumericObject(data);
+        if (event == L"win_e_context_process") {
+            const auto program = json::ExtractString(data, L"program");
+            const bool basename = !program.empty() && program.size() <= 255 &&
+                program != L"." && program != L".." &&
+                program.find_first_of(L"\\/:\"<>|?*") == std::wstring::npos &&
+                std::none_of(program.begin(), program.end(), [](wchar_t c) {
+                    return c < 32 || (c >= 127 && c <= 159);
+                });
+            if (basename) {
+                fields.pop_back();
+                if (fields.size() > 1) fields += ',';
+                fields += "\"program\":" + PathJson(program) + '}';
+            }
+        }
+        if (json::ExtractString(w, L"component") == L"dialog_auto") {
+            std::vector<const wchar_t*> allowed;
+            if (event == L"loaded_bridge" || event == L"loaded_picker" || event == L"caller_process") allowed = {L"path"};
+            else if (event == L"registration_snapshot") allowed = {L"registered_dll", L"loaded_dll"};
+            else if (event == L"provider_load") allowed = {L"host"};
+            else if (event == L"bridge_trace") allowed = {L"detail"};
+            else if (event == L"contract_decision") allowed = {L"reason_name"};
+            for (const auto* key : allowed) {
+                const auto value = json::ExtractString(data, key);
+                if (value.empty() || value.size() > 8192) continue;
+                fields.pop_back();
+                if (fields.size() > 1) fields += ',';
+                fields += "\"" + Narrow(key) + "\":" + PathJson(value) + '}';
+            }
+        }
+        record += ",\"data\":" + fields + "}\n";
         out += record;
     }
     return out;
+}
+
+namespace {
+std::string PathJson(const std::wstring& value) {
+    std::wstring escaped; json::Escape(value, escaped);
+    const int count = WideCharToMultiByte(CP_UTF8, 0, escaped.data(), static_cast<int>(escaped.size()), nullptr, 0, nullptr, nullptr);
+    std::string bytes(count, '\0');
+    if (count) WideCharToMultiByte(CP_UTF8, 0, escaped.data(), static_cast<int>(escaped.size()), bytes.data(), count, nullptr, nullptr);
+    return "\"" + bytes + "\"";
+}
+std::string ComponentEvidence(const fs::path& path) {
+    WIN32_FILE_ATTRIBUTE_DATA data{};
+    const bool exists = GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data) != FALSE;
+    const DWORD metadata_error = exists ? 0 : GetLastError();
+    std::string contents; DWORD error = 0;
+    const bool read = ReadPlain(path, contents, error);
+    const uint64_t size = (uint64_t(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+    const uint64_t modified = (uint64_t(data.ftLastWriteTime.dwHighDateTime) << 32) | data.ftLastWriteTime.dwLowDateTime;
+    return "{\"path\":" + PathJson(path.wstring()) + ",\"status\":\"" +
+        (read ? "present" : (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) ? "missing" : "error") +
+        "\",\"read_error\":" + std::to_string(error) + ",\"metadata_error\":" + std::to_string(metadata_error) +
+        ",\"size\":" + (exists ? std::to_string(size) : "null") + ",\"modified_filetime\":" + (exists ? std::to_string(modified) : "null") +
+        ",\"file_version\":\"" + (read ? Version(path) : "") + "\",\"sha256\":\"" + (read ? Hash(contents) : "") + "\"}";
+}
+std::string DialogInstallation(const ExportOptions& options) {
+    wchar_t module[32768]{}; const DWORD length = GetModuleFileNameW(nullptr, module, 32768);
+    std::string out = "{\"exporting_executable\":" + PathJson(std::wstring(module, length < 32768 ? length : 0)) +
+        ",\"install_directory\":" + PathJson(options.install_directory) + ",\"registrations\":[";
+    std::vector<fs::path> directories;
+    if (!options.install_directory.empty()) directories.push_back(fs::path(options.install_directory) / L"DialogBridge");
+    for (int arch = 0; arch != 2; ++arch) {
+        if (arch) out += ',';
+        const REGSAM view = arch ? KEY_WOW64_32KEY : KEY_WOW64_64KEY;
+        const wchar_t* key = arch ? L"Software\\Pulse\\DialogAuto32" : L"Software\\Pulse\\DialogAuto";
+        HKEY handle = nullptr; const LSTATUS opened = RegOpenKeyExW(HKEY_CURRENT_USER, key, 0, KEY_QUERY_VALUE | view, &handle);
+        wchar_t value[32768]{}; DWORD bytes = sizeof(value), enabled = 0, number_bytes = sizeof(enabled);
+        const LSTATUS read = opened ? opened : RegGetValueW(handle, nullptr, L"DllPath", RRF_RT_REG_SZ, nullptr, value, &bytes);
+        const LSTATUS enabled_error = opened ? opened : RegGetValueW(handle, nullptr, L"Enabled", RRF_RT_REG_DWORD, nullptr, &enabled, &number_bytes);
+        if (handle) RegCloseKey(handle);
+        const std::wstring registered = read == ERROR_SUCCESS ? value : L"";
+        out += "{\"architecture\":\"" + std::string(arch ? "x86" : "x64") + "\",\"dll_path\":" + PathJson(registered) +
+            ",\"read_error\":" + std::to_string(read) + ",\"configured_enabled\":" + std::to_string(enabled) + ",\"enabled_read_error\":" + std::to_string(enabled_error) + "}";
+        out.pop_back(); out += ",\"com_servers\":[";
+        bool first_server = true;
+        for (const auto* clsid : {L"{DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7}", L"{C0B4E2F3-BA21-4773-8DBA-335EC946EB8B}"}) {
+            const std::wstring subkey = std::wstring(L"Software\\Classes\\CLSID\\") + clsid + L"\\InprocServer32";
+            HKEY server = nullptr;
+            const LSTATUS open_error = RegOpenKeyExW(HKEY_CURRENT_USER, subkey.c_str(), 0, KEY_QUERY_VALUE | view, &server);
+            wchar_t target[32768]{}; DWORD target_bytes = sizeof(target);
+            const LSTATUS target_error = open_error ? open_error : RegGetValueW(server, nullptr, nullptr, RRF_RT_REG_SZ, nullptr, target, &target_bytes);
+            if (server) RegCloseKey(server);
+            if (!first_server) out += ','; first_server = false;
+            out += "{\"clsid\":" + PathJson(clsid) + ",\"path\":" + PathJson(target_error ? L"" : target) +
+                ",\"read_error\":" + std::to_string(target_error) + ",\"matches_configuration\":" +
+                (!target_error && !registered.empty() && registered == target ? "true" : "false") + "}";
+            if (!target_error && fs::path(target).is_absolute()) directories.push_back(fs::path(target).parent_path());
+        }
+        out += "]}";
+        if (!registered.empty() && fs::path(registered).is_absolute()) directories.push_back(fs::path(registered).parent_path());
+        if (!options.install_directory.empty()) directories.push_back(fs::path(options.install_directory) / L"DialogBridge" / (arch ? L"x86" : L"x64"));
+    }
+    out += "],\"components\":["; bool first = true;
+    if (length && length < 32768) { out += ComponentEvidence(module); first = false; }
+    std::sort(directories.begin(), directories.end()); directories.erase(std::unique(directories.begin(), directories.end()), directories.end());
+    for (const auto& directory : directories) for (const auto* name : {L"pulse.exe", L"PulseDialogAuto64.dll", L"PulseDialogAuto32.dll", L"PulseFileDialogRuntimeUiProof64R8.dll", L"PulseFileDialogRuntimeUiProof32R8.dll", L"PulsePickerUiProof.dll", L"PulseDialogLauncher.exe"}) {
+        if (!first) out += ','; first = false; out += ComponentEvidence(directory / name);
+    }
+    return out + "]}";
+}
 }
 
 bool WriteSupportReport(const ExportOptions& options, bool copied, bool flushed, const runtime::Health& health, std::wstring* error) {
@@ -185,6 +288,7 @@ bool WriteSupportReport(const ExportOptions& options, bool copied, bool flushed,
             ",\"logger\":{\"enabled\":" + (health.enabled ? "true" : "false") + ",\"initialization_error\":" + std::to_string(health.initialization_error) +
             ",\"write_errors\":" + std::to_string(health.write_errors) + ",\"last_write_error\":" + std::to_string(health.last_write_error) +
             ",\"dropped_events\":" + std::to_string(health.dropped_events) + ",\"pending_events\":" + std::to_string(health.pending_events) + "}";
+        report += ",\"dialog_installation\":" + DialogInstallation(options);
         std::string contents; DWORD read_error = 0;
         const bool config_ok = !options.configuration_file.empty() && ReadPlain(options.configuration_file, contents, read_error);
         const auto config = config_ok ? Wide(contents) : std::wstring{};
@@ -201,7 +305,7 @@ bool WriteSupportReport(const ExportOptions& options, bool copied, bool flushed,
         report += ",\"fixed_drives\":" + (options.collect_environment ? Drives() : "[]");
         report += ",\"binaries\":["; bool first = true;
         std::vector<std::pair<std::wstring, fs::path>> binaries;
-        if (!options.install_directory.empty()) for (const wchar_t* name : {L"pulse.exe", L"Pulse.Index.exe", L"Pulse.Preview.exe", L"pulse_shell.exe"})
+        if (!options.install_directory.empty()) for (const wchar_t* name : {L"pulse.exe", L"Pulse.Index.exe", L"Pulse.Preview.exe", L"pulse_shell.exe", L"pulse_hotkey_broker.exe"})
             binaries.emplace_back(name, fs::path(options.install_directory) / name);
         // The content enhancement pack, when this user installed it.
         const std::wstring content_pack = packs::InstalledPackDirectory(packs::PacksRoot().empty() ? std::wstring{} : packs::PacksRoot() + L"\\content");

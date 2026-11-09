@@ -8,6 +8,7 @@
 #include "tag_ads_sync.h"
 #include "column_view_model.h"
 #include "explorer_handoff.h"
+#include "explorer_open_transaction.h"
 #include "entry_order_hold.h"
 #include "entry_sort.h"
 #include "create_rename_intent.h"
@@ -100,6 +101,7 @@ struct Tab {
     std::map<std::wstring, std::set<std::wstring>> collapsed_groups;
     uint64_t group_collapse_rev = 0;
     ui::DetailsColumnWidths details_column_dividers{};
+    std::array<std::array<float, 4>, 3> media_column_widths{};
     std::array<float, 4> search_column_dividers{};
     std::wstring filter_text;
     bool show_hidden_files = false;
@@ -144,6 +146,12 @@ struct Tab {
     std::wstring pending_selected_name;
     std::wstring pending_preview_rename;
     std::vector<std::wstring> pending_selected_names;
+    // Identity capture belongs to a refresh; explicit name intents remain separate.
+    uint64_t pending_selection_key_revision = UINT64_MAX;
+    std::vector<std::wstring> pending_selection_keys;
+    std::vector<std::wstring> pending_selection_key_names;
+    std::wstring pending_selection_focus_key;
+    std::wstring pending_selection_key_focus_name;
     uint64_t pending_selection_revision = UINT64_MAX;
     bool pending_ensure_selection_visible = false;
     // File Explorer order hold (#13): change patches and non-explicit
@@ -454,6 +462,7 @@ void SetMediaPaneDecorator(MediaPaneDecorator decorator);
 
 // One window tab = one working layout (pane count, split ratios, each column).
 struct LayoutTab {
+    std::unique_ptr<ExplorerOpenTransaction> explorer_transaction;
     std::wstring title; // empty = derive from the focused folder
     uint32_t marker_rgb = 0;
     bool pinned = false;
@@ -463,6 +472,12 @@ struct LayoutTab {
     std::unique_ptr<SplitContainer> root;
     int focused_index = 0;
     int target_index = -1;
+    // Presentation only: the split tree and all background panes stay intact.
+    int zoomed_pane_index = -1;
+    int layout_hover_region = 0, layout_hover_index = -1;
+    int layout_preview_preset = -1, layout_peek_index = -1;
+    bool layout_tray_open = false, layout_hover_drag = false;
+    uint64_t layout_hover_since = 0, layout_leave_at = 0;
     // Two-pane folder compare. Inputs of the last pass decide when to redo it.
     bool compare = false;
     bool compare_diff_only = false;

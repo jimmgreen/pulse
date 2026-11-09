@@ -1,5 +1,6 @@
 // tag_rules.cpp — see tag_rules.h.
 #include "tag_rules.h"
+#include "tag_rule_roots.h"
 
 #include "app_commands.h"
 #include "app_messages.h"
@@ -14,6 +15,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cwctype>
+#include <cstdio>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -43,9 +46,11 @@ std::atomic<HWND> g_target{nullptr};
 struct Watch {
     std::wstring folder;
     std::thread thread;
+    HANDLE stop = nullptr;
+    std::atomic_bool armed{false};
+    ~Watch() { if (stop) CloseHandle(stop); }
 };
 std::vector<std::unique_ptr<Watch>> g_watches;
-HANDLE g_stop = nullptr;
 
 std::wstring RulesPath() { return app::GetPulseDataDir() + L"\\tag_rules.json"; }
 
@@ -133,6 +138,40 @@ void Save() {
     WriteUtf8FileAtomic(RulesPath(), out);
 }
 
+bool PublishHit(const std::wstring& path, HANDLE stop) {
+    for (;;) {
+        bool post = false;
+        {
+            std::lock_guard lock(g_hits_mutex);
+            post = g_hits.empty();
+            const auto result = tag_rules_detail::EnqueueHit(g_hits, path);
+            if (result == tag_rules_detail::EnqueueResult::Duplicate) return true;
+            // At most 1024 Windows paths, including while the UI is busy.
+            if (result == tag_rules_detail::EnqueueResult::Added) {
+                if (HWND target = g_target.load(); post && target) PostMessageW(target, WM_TAG_RULE_HIT, 0, 0);
+                return true;
+            }
+        }
+        if (WaitForSingleObject(stop, 20) != WAIT_TIMEOUT) return false;
+    }
+}
+
+bool CompensateRoot(const std::wstring& root, HANDLE stop) {
+    std::error_code error;
+    std::filesystem::recursive_directory_iterator cursor(root,
+        std::filesystem::directory_options::skip_permission_denied, error), end;
+    while (!error && cursor != end && WaitForSingleObject(stop, 0) == WAIT_TIMEOUT) {
+        const auto path = cursor->path().wstring();
+        const DWORD attributes = GetFileAttributesW(path.c_str());
+        if (attributes != INVALID_FILE_ATTRIBUTES) {
+            if (attributes & FILE_ATTRIBUTE_REPARSE_POINT) cursor.disable_recursion_pending();
+            if (!(attributes & FILE_ATTRIBUTE_DIRECTORY) && !PublishHit(path, stop)) return false;
+        }
+        cursor.increment(error);
+    }
+    return !error && cursor == end;
+}
+
 void WatchFolder(Watch* watch, HANDLE stop) {
     HANDLE dir = CreateFileW(watch->folder.c_str(), FILE_LIST_DIRECTORY,
                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
@@ -142,6 +181,7 @@ void WatchFolder(Watch* watch, HANDLE stop) {
     std::vector<DWORD> storage(8 * 1024);   // DWORD-aligned, as the API wants
     BYTE* buffer = reinterpret_cast<BYTE*>(storage.data());
     const DWORD buffer_bytes = static_cast<DWORD>(storage.size() * sizeof(DWORD));
+    bool dirty = false;
     while (done) {
         OVERLAPPED ov{};
         ov.hEvent = done;
@@ -150,14 +190,26 @@ void WatchFolder(Watch* watch, HANDLE stop) {
                                    nullptr))
             break;
         HANDLE waits[2] = {stop, done};
+        watch->armed = true;
         DWORD bytes = 0;
+        // Arm before reconciliation so changes made during the scan remain
+        // covered. Failed scans retain the dirty state and retry cancellably.
+        while (dirty && WaitForSingleObject(stop, 0) == WAIT_TIMEOUT) {
+            dirty = !CompensateRoot(watch->folder, stop);
+            if (dirty && WaitForSingleObject(stop, 250) != WAIT_TIMEOUT) break;
+        }
         if (WaitForMultipleObjects(2, waits, FALSE, INFINITE) != WAIT_OBJECT_0 + 1) {
             CancelIoEx(dir, &ov);
             GetOverlappedResult(dir, &ov, &bytes, TRUE);
             break;
         }
         if (!GetOverlappedResult(dir, &ov, &bytes, FALSE)) break;
-        if (bytes == 0) continue;   // overflow: those files are not offered
+        if (bytes == 0) {
+            // Kernel overflow makes this root dirty. Stream reconciliation
+            // with backpressure instead of materializing the entire subtree.
+            dirty = true;
+            continue;
+        }
         std::vector<std::wstring> found;
         for (size_t offset = 0;;) {
             const auto* info = reinterpret_cast<const FILE_NOTIFY_INFORMATION*>(buffer + offset);
@@ -171,22 +223,18 @@ void WatchFolder(Watch* watch, HANDLE stop) {
             offset += info->NextEntryOffset;
         }
         if (found.empty()) continue;
-        bool post = false;
-        {
-            std::lock_guard lock(g_hits_mutex);
-            post = g_hits.empty();
-            g_hits.insert(g_hits.end(), found.begin(), found.end());
+        for (const auto& path : found) {
+            const DWORD attributes = GetFileAttributesW(path.c_str());
+            if (attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                !PublishHit(path, stop)) break;
         }
-        if (HWND target = g_target.load(); post && target) PostMessageW(target, WM_TAG_RULE_HIT, 0, 0);
     }
     if (done) CloseHandle(done);
     CloseHandle(dir);
 }
 
 void Restart() {
-    const HWND target = g_target.load();
-    StopTagRules();
-    StartTagRules(target);
+    StartTagRules(g_target.load());
 }
 
 std::wstring Formatted(l10n::StringId id, const std::wstring& a, const std::wstring& b = {}) {
@@ -207,31 +255,40 @@ std::wstring RuleLabel(const TagRule& rule) {
 void StartTagRules(HWND target) {
     g_target = target;
     Load();
-    if (!g_watches.empty() || g_rules.empty()) return;
-    g_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (!g_stop) return;
     // One watcher per folder (a folder inside another watched one is covered).
     std::vector<std::wstring> folders;
     for (const auto& rule : g_rules) {
-        bool covered = false;
-        for (const auto& folder : folders) covered = covered || SameText(folder, rule.folder) || Inside(rule.folder, folder);
-        if (!covered) folders.push_back(rule.folder);
+        folders.push_back(rule.folder);
     }
+    folders = tag_rules_detail::MinimalRoots(std::move(folders));
+    std::erase_if(g_watches, [&](auto& watch) {
+        if (std::any_of(folders.begin(), folders.end(), [&](const auto& folder) {
+                return SameText(folder, watch->folder);
+            })) return false;
+        SetEvent(watch->stop);
+        if (watch->thread.joinable()) watch->thread.join();
+        return true;
+    });
     for (const auto& folder : folders) {
+        if (std::any_of(g_watches.begin(), g_watches.end(), [&](const auto& watch) {
+                return SameText(folder, watch->folder);
+            })) continue;
         auto watch = std::make_unique<Watch>();
         watch->folder = folder;
-        watch->thread = std::thread(WatchFolder, watch.get(), g_stop);
+        watch->stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!watch->stop) continue;
         g_watches.push_back(std::move(watch));
+        auto& added = g_watches.back();
+        try { added->thread = std::thread(WatchFolder, added.get(), added->stop); }
+        catch (...) { g_watches.pop_back(); }
     }
 }
 
 void StopTagRules() {
-    if (g_stop) SetEvent(g_stop);
+    for (auto& watch : g_watches) SetEvent(watch->stop);
     for (auto& watch : g_watches)
         if (watch->thread.joinable()) watch->thread.join();
     g_watches.clear();
-    if (g_stop) CloseHandle(g_stop);
-    g_stop = nullptr;
 }
 
 void RetargetTagRules(HWND target) {
@@ -257,6 +314,8 @@ void HandleTagRuleHits(AppState& s) {
     };
     for (const auto& path : hits) {
         if (!seen.insert(path).second || Transient(Leaf(path))) continue;
+        // Revalidate at consumption: queued paths may have been deleted or
+        // replaced since the producer checked them.
         const DWORD attributes = GetFileAttributesW(path.c_str());
         if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
         for (const auto& rule : g_rules) {
@@ -381,5 +440,71 @@ bool HandleTagRulesCommand(AppState& s, const std::wstring& tag_id, int command,
         s.notification_toast.ShowSnack(s.hwnd, ui::SnackIcon::Suggest,
                                        Formatted(l10n::StringId::TagRuleCreated, label, tag_name), std::wstring{}, {});
     return true;
+}
+int RunTagRuleReuseTest() {
+    // Dedicated command-line process only: never load or save user rules.
+    StopTagRules();
+    g_loaded = true;
+    g_rules.clear();
+    g_target = nullptr;
+    const auto root = std::filesystem::absolute(L"bench_data").wstring() +
+        L"\\tag_rule_reuse_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount64());
+    std::error_code error;
+    std::filesystem::create_directories(root + L"\\child", error);
+    if (error) return 1;
+    bool ok = true;
+    g_rules.push_back({root + L"\\child", {}, L"fixture", false});
+    StartTagRules(nullptr);
+    g_rules.push_back({root, {}, L"fixture", false});
+    Restart();
+    ok = ok && g_watches.size() == 1 && SameText(g_watches.front()->folder, root);
+    const auto retained = g_watches.front()->thread.get_id();
+    g_rules.push_back({root, L".txt", L"second-fixture", false});
+    Restart();
+    ok = ok && g_watches.size() == 1 && g_watches.front()->thread.get_id() == retained;
+    g_rules.erase(g_rules.begin() + 1, g_rules.end());
+    Restart();
+    ok = ok && g_watches.size() == 1 && SameText(g_watches.front()->folder, root + L"\\child");
+    // Allow the native watch to arm, then force producer backpressure.
+    const auto arm_deadline = GetTickCount64() + 2000;
+    while (!g_watches.front()->armed && GetTickCount64() < arm_deadline) Sleep(1);
+    ok = ok && g_watches.front()->armed;
+    std::vector<std::wstring> files;
+    for (int i = 0; i < 1200; ++i) {
+        auto path = root + L"\\child\\file" + std::to_wstring(i) + L".txt";
+        HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                                  CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) { ok = false; break; }
+        CloseHandle(file);
+        files.push_back(std::move(path));
+    }
+    std::unordered_set<std::wstring> seen;
+    const auto drain = [&] {
+        std::lock_guard lock(g_hits_mutex);
+        ok = ok && g_hits.size() <= 1024;
+        seen.insert(g_hits.begin(), g_hits.end());
+        g_hits.clear();
+    };
+    const auto until = GetTickCount64() + 10000;
+    while (seen.size() < files.size() && GetTickCount64() < until) { drain(); Sleep(5); }
+    ok = ok && seen.size() == files.size();
+    StopTagRules();
+    drain();
+    seen.clear();
+    HANDLE stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    std::atomic_bool complete{false};
+    bool reconciled = false;
+    std::thread scan([&] { reconciled = CompensateRoot(root, stop); complete = true; });
+    while (!complete) { drain(); Sleep(1); }
+    scan.join();
+    drain();
+    ok = ok && reconciled && seen.size() == files.size();
+    CloseHandle(stop);
+    for (const auto& file : files) DeleteFileW(file.c_str());
+    RemoveDirectoryW((root + L"\\child").c_str());
+    RemoveDirectoryW(root.c_str());
+    g_rules.clear();
+    std::printf("[%s] Tag watcher root diff, retained thread, 1200 notifications, bounded reconciliation\n", ok ? "PASS" : "FAIL");
+    return ok ? 0 : 1;
 }
 } // namespace pulse

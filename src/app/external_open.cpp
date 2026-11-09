@@ -8,7 +8,20 @@ ExternalOpenDecision DecideLaunchTarget(int mode, const std::vector<ExternalOpen
     ExternalOpenDecision decision;
     decision.reason = explicit_window ? ExternalOpenReason::Explicit : ExternalOpenReason::Policy;
     decision.action = ExternalOpenAction::NewWindow;
-    if (explicit_window || windows.empty() || mode == 0) return decision;
+    if (explicit_window || windows.empty()) return decision;
+    if (mode == 0) {
+        // A window closed to the tray is gone as far as the user can tell:
+        // bring it back instead of opening a second one beside it (which
+        // left a hidden window registered and counted as one of several).
+        for (size_t i = 0; i < windows.size(); ++i) {
+            if (!windows[i].hidden || windows[i].busy) continue;
+            decision.action = ExternalOpenAction::Activate;
+            decision.window = i;
+            decision.restore = true;
+            return decision;
+        }
+        return decision;
+    }
     for (size_t i = 0; i < windows.size(); ++i) {
         if (windows[i].busy) continue;
         decision.action = mode == 2 ? ExternalOpenAction::Activate : ExternalOpenAction::Tab;
@@ -18,6 +31,18 @@ ExternalOpenDecision DecideLaunchTarget(int mode, const std::vector<ExternalOpen
     }
     decision.action = ExternalOpenAction::Deferred;
     decision.reason = ExternalOpenReason::Busy;
+    return decision;
+}
+
+ExternalOpenDecision DecideActivationTarget(const std::vector<ExternalOpenWindow>& windows) {
+    ExternalOpenDecision decision;
+    decision.reason = ExternalOpenReason::Explicit;
+    decision.action = windows.empty() ? ExternalOpenAction::NewWindow :
+        windows.front().busy ? ExternalOpenAction::Deferred : ExternalOpenAction::Activate;
+    if (!windows.empty()) {
+        if (windows.front().busy) decision.reason = ExternalOpenReason::Busy;
+        else decision.restore = windows.front().hidden || windows.front().minimized;
+    }
     return decision;
 }
 

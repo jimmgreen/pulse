@@ -24,8 +24,7 @@
 
 #pragma comment(lib, "uxtheme.lib")
 
-// Advanced search, in the dialog family of batch rename / confirm / progress
-// (pulse 复制自动关闭与高级搜索_效果图.html §2):
+// Advanced search, in the dialog family of batch rename / confirm / progress:
 //   52-dip title bar (tile, title, scope subtitle, names | contents switch)
 //   -> one keyword box -> "try" recipe chips -> a card of type/date/size/
 //   location rows -> collapsible expert options -> a footer band with a

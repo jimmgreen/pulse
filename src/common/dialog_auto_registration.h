@@ -18,4 +18,13 @@ DWORD Disable();
 DWORD DisableFor(const std::wstring& absolute_dll);
 Status Inspect();
 bool IsEnabledFor(const std::wstring& absolute_dll) noexcept;
+// DWORD "Host" under ConfigKey: 0 shows every intercepted dialog in-process
+// (the PulsePickerUiProof provider); missing or nonzero shows basic dialogs in
+// pulse.exe (docs/dialog-out-of-process-plan-20261107.md).
+bool PreferOutOfProcess() noexcept;
+// DWORD "RemoteHost" under ConfigKey: nonzero shows dialogs with events, custom
+// controls or properties in pulse.exe --picker-remote-host as well (instead of
+// loading PulsePickerUiProof.dll in-process). Off until the remote host passes
+// its real-UI checks (docs/dialog-out-of-process-plan-20261107.md, stage 5d).
+bool PreferRemoteHost() noexcept;
 }

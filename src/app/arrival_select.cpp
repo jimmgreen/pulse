@@ -40,10 +40,9 @@ std::vector<std::wstring> SelectedNames(const app::Tab& tab) {
     return names;
 }
 
-// A copy to the other pane (#58-13) or a drop there selects rows in a pane
-// without focus. EnsureRowVisible measures the focused pane, so bring the row
-// into this pane's own view; its scroll is the tab's, not the focused one's.
-void RevealInPane(AppState& s, app::Pane& pane, app::Tab& tab, int index) {
+} // namespace
+
+void CenterResultInPane(AppState& s, app::Pane& pane, app::Tab& tab, int index) {
     ui::PaneViewModel vm;
     app::FillPaneViewModel(vm, pane, &s.places);
     int row = index;
@@ -53,14 +52,20 @@ void RevealInPane(AppState& s, app::Pane& pane, app::Tab& tab, int index) {
     }
     const D2D1_RECT_F content = s.renderer.ContentRect(
         static_cast<float>(s.compositor.Width()), static_cast<float>(s.compositor.Height()));
-    const D2D1_RECT_F bounds = app::FocusedWindowPaneRect(Root(s).get(), &pane, content, s.scale);
+    const D2D1_RECT_F bounds = &pane == s.pane ? FocusedPaneRect(s) :
+        app::FocusedWindowPaneRect(Root(s).get(), &pane, content, s.scale);
     const D2D1_RECT_F list = s.renderer.PaneListRect(vm, bounds);
     const D2D1_RECT_F item = s.renderer.ItemRectInPane(vm, bounds, row);
-    if (item.top < list.top) tab.scroll_y += item.top - list.top;
-    else if (item.bottom > list.bottom) tab.scroll_y += item.bottom - list.bottom;
+    if (list.bottom <= list.top) return;
+    tab.scroll_y += (item.top + item.bottom - list.top - list.bottom) * 0.5f;
     tab.scroll_y = std::clamp(tab.scroll_y, 0.0f, s.renderer.MaxScrollForPane(vm, bounds));
+    if (&pane == s.pane) {
+        s.scrollTargetY = tab.scroll_y;
+        s.scrollAnimating = false;
+    }
 }
 
+namespace {
 void AddExpected(AppState& window, const std::vector<std::wstring>& paths) {
     auto& a = window.arrivalSelect;
     for (const auto& path : paths)
@@ -127,7 +132,7 @@ void NoteArrivalFinished(AppState& s, const ops::FinishedTask& finished) {
     });
 }
 
-bool ApplyArrivalSelection(AppState& s, app::Pane& pane, app::Tab& tab, bool focused) {
+bool ApplyArrivalSelection(AppState& s, app::Pane& pane, app::Tab& tab, bool /*focused*/) {
     auto& a = s.arrivalSelect;
     if (a.dir.empty()) return false;
     const uint64_t now = GetTickCount64();
@@ -147,7 +152,8 @@ bool ApplyArrivalSelection(AppState& s, app::Pane& pane, app::Tab& tab, bool foc
         if (!tab.EntryVisible(static_cast<int>(i))) continue;
         std::wstring name(tab.EntryAt(i).name);
         const std::wstring key = Lower(name);
-        if (!a.baseline.contains(key) || a.expected.contains(key)) pick.push_back(std::move(name));
+        if ((!a.expected_only && !a.baseline.contains(key)) || a.expected.contains(key))
+            pick.push_back(std::move(name));
     }
     if (pick.empty()) return false;
     std::vector<std::wstring> keys;
@@ -155,14 +161,13 @@ bool ApplyArrivalSelection(AppState& s, app::Pane& pane, app::Tab& tab, bool foc
     for (const auto& name : pick) keys.push_back(Lower(name));
     std::sort(keys.begin(), keys.end());
     if (!a.task_id) a.until = std::max(a.until, now + kAfterArrivalMs);
-    if (keys == current) {
+    if (keys == current && !a.chosen.empty()) {
         a.chosen = std::move(keys);
         return false;
     }
     tab.RemapSelection(pick, pick.front(), false);
     a.chosen = SelectedNames(tab);
-    if (focused && tab.selected_index >= 0) EnsureRowVisible(s, tab, tab.selected_index);
-    else if (tab.selected_index >= 0) RevealInPane(s, pane, tab, tab.selected_index);
+    if (tab.selected_index >= 0) CenterResultInPane(s, pane, tab, tab.selected_index);
     InvalidateRect(s.hwnd, nullptr, FALSE);
     return true;
 }

@@ -300,7 +300,7 @@ bool Compositor::DrawLumaText(std::wstring_view text, IDWriteTextFormat* format,
     if (lumaText_->Draw(text, format, bounds, foreground, background, alignment)) {
         return true;
     }
-    lumaText_->RecordFallback();
+    lumaText_->RecordFallback(0);
     return false;
 }
 
@@ -315,7 +315,7 @@ void Compositor::DrawTextLayout(D2D1_POINT_2F origin, IDWriteTextLayout* layout,
                                   (options & D2D1_DRAW_TEXT_OPTIONS_CLIP) != 0)) {
             return;
         }
-        lumaText_->RecordFallback();
+        lumaText_->RecordFallback(1);
     }
     dc_->DrawTextLayout(origin, layout, brush, options);
 }
@@ -330,7 +330,7 @@ bool Compositor::DrawLumaTextSplit(std::wstring_view text, IDWriteTextFormat* fo
                              background)) {
         return true;
     }
-    lumaText_->RecordFallback();
+    lumaText_->RecordFallback(2);
     return false;
 }
 
@@ -768,71 +768,47 @@ bool Compositor::Recover() {
 }
 
 bool Compositor::SaveSnapshot(const wchar_t* path) {
-    if (!swapChain_.get() || !d3dDevice_.get()) return false;
-
-    ComPtr<ID3D11Texture2D> backBuffer;
-    HRESULT hr = swapChain_->GetBuffer(0, IID_PPV_ARGS(&backBuffer));
-    if (FAILED(hr)) return false;
-
-    D3D11_TEXTURE2D_DESC desc{};
-    backBuffer->GetDesc(&desc);
-
-    ComPtr<ID3D11DeviceContext> ctx;
-    d3dDevice_->GetImmediateContext(&ctx);
-
-    desc.Usage = D3D11_USAGE_STAGING;
-    desc.BindFlags = 0;
-    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    desc.MiscFlags = 0;
-    ComPtr<ID3D11Texture2D> staging;
-    hr = d3dDevice_->CreateTexture2D(&desc, nullptr, &staging);
-    if (FAILED(hr)) return false;
-
-    ctx->CopyResource(staging.get(), backBuffer.get());
-
-    D3D11_MAPPED_SUBRESOURCE mapped{};
-    hr = ctx->Map(staging.get(), 0, D3D11_MAP_READ, 0, &mapped);
-    if (FAILED(hr)) return false;
-
+    if (!dc_.get() || !targetBitmap_.get()) return false;
+    // Present rotates flip-model buffers. A pre-Present frame copy identifies
+    // the frame actually drawn, rather than the next writable back buffer.
+    auto* source_bitmap = FrameCopyEnabled() && frameCopy_.get() ? frameCopy_.get() : targetBitmap_.get();
+    const auto size = source_bitmap->GetPixelSize();
+    const auto pixel_format = source_bitmap->GetPixelFormat();
+    ComPtr<ID2D1Bitmap1> readable;
+    const auto properties = D2D1::BitmapProperties1(
+        D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+        pixel_format, 96.0f, 96.0f);
+    if (FAILED(dc_->CreateBitmap(size, nullptr, 0, &properties, &readable)) ||
+        FAILED(readable->CopyFromBitmap(nullptr, source_bitmap, nullptr))) return false;
+    D2D1_MAPPED_RECT mapped{};
+    if (FAILED(readable->Map(D2D1_MAP_OPTIONS_READ, &mapped))) return false;
+    struct Unmap {
+        ID2D1Bitmap1* bitmap;
+        ~Unmap() { bitmap->Unmap(); }
+    } unmap{readable.get()};
     ComPtr<IWICImagingFactory> wic;
-    hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
-        IID_PPV_ARGS(&wic));
-    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
-
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(&wic)))) return false;
     ComPtr<IWICStream> stream;
-    hr = wic->CreateStream(&stream);
-    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
-    hr = stream->InitializeFromFilename(path, GENERIC_WRITE);
-    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
-
+    if (FAILED(wic->CreateStream(&stream)) || FAILED(stream->InitializeFromFilename(path, GENERIC_WRITE))) return false;
     ComPtr<IWICBitmapEncoder> encoder;
-    hr = wic->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder);
-    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
-    hr = encoder->Initialize(stream.get(), WICBitmapEncoderNoCache);
-    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
-
+    if (FAILED(wic->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder)) ||
+        FAILED(encoder->Initialize(stream.get(), WICBitmapEncoderNoCache))) return false;
     ComPtr<IWICBitmapFrameEncode> frame;
-    hr = encoder->CreateNewFrame(&frame, nullptr);
-    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
-    hr = frame->Initialize(nullptr);
-    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
-
-    hr = frame->SetSize(desc.Width, desc.Height);
-    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
-
+    if (FAILED(encoder->CreateNewFrame(&frame, nullptr)) || FAILED(frame->Initialize(nullptr)) ||
+        FAILED(frame->SetSize(size.width, size.height))) return false;
     WICPixelFormatGUID format = GUID_WICPixelFormat32bppBGRA;
-    hr = frame->SetPixelFormat(&format);
-    if (FAILED(hr)) { ctx->Unmap(staging.get(), 0); return false; }
-
-    hr = frame->WritePixels(desc.Height, mapped.RowPitch, mapped.RowPitch * desc.Height,
-        static_cast<BYTE*>(mapped.pData));
-    ctx->Unmap(staging.get(), 0);
-    if (FAILED(hr)) return false;
-
-    hr = frame->Commit();
-    if (FAILED(hr)) return false;
-    hr = encoder->Commit();
-    return SUCCEEDED(hr);
+    if (FAILED(frame->SetPixelFormat(&format))) return false;
+    // PNG stores straight alpha; DComp surfaces store premultiplied alpha.
+    // Let WIC perform the conversion, just as the extension-panel exporter does.
+    const auto input_format = pixel_format.alphaMode == D2D1_ALPHA_MODE_PREMULTIPLIED
+        ? GUID_WICPixelFormat32bppPBGRA : pixel_format.alphaMode == D2D1_ALPHA_MODE_IGNORE
+        ? GUID_WICPixelFormat32bppBGR : GUID_WICPixelFormat32bppBGRA;
+    ComPtr<IWICBitmap> source;
+    if (FAILED(wic->CreateBitmapFromMemory(size.width, size.height, input_format,
+        mapped.pitch, mapped.pitch * size.height, mapped.bits, &source))) return false;
+    if (FAILED(frame->WriteSource(source.get(), nullptr)) || FAILED(frame->Commit())) return false;
+    return SUCCEEDED(encoder->Commit());
 }
 
 static void CreateFormat(IDWriteFactory2* factory, float size, DWRITE_FONT_WEIGHT weight,

@@ -9,12 +9,18 @@ namespace pulse::ipc {
 template<class Stopped>
 bool DeadlinePipeIo(HANDLE pipe, uint8_t* bytes, DWORD size, bool write,
                     ULONGLONG deadline, Stopped stopped) {
+    if (!size) return true;
+    struct Event {
+        HANDLE handle = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        ~Event() { const DWORD error = GetLastError(); if (handle) CloseHandle(handle); SetLastError(error); }
+    } event;
+    if (!event.handle) return false;
     while (size) {
         if (stopped()) { SetLastError(ERROR_OPERATION_ABORTED); return false; }
         if (deadline && GetTickCount64() >= deadline) { SetLastError(ERROR_TIMEOUT); return false; }
         OVERLAPPED operation{};
-        operation.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-        if (!operation.hEvent) return false;
+        operation.hEvent = event.handle;
+        ResetEvent(event.handle);
         DWORD transferred = 0;
         BOOL ok = write ? WriteFile(pipe, bytes, size, &transferred, &operation)
                         : ReadFile(pipe, bytes, size, &transferred, &operation);
@@ -42,7 +48,6 @@ bool DeadlinePipeIo(HANDLE pipe, uint8_t* bytes, DWORD size, bool write,
                 break;
             }
         }
-        CloseHandle(operation.hEvent);
         if (!ok || !transferred) { SetLastError(error ? error : ERROR_BROKEN_PIPE); return false; }
         bytes += transferred; size -= transferred;
     }

@@ -7,10 +7,18 @@
 #pragma once
 #include <windows.h>
 #include <string>
+#include <cstdint>
 
 namespace pulse::app::hang {
 
 void Start(HWND hwnd, const std::wstring& log_path);
 void Stop();
+
+// Call lifecycle and frame boundaries on the UI thread. Nested frames return 0.
+// IDs can be joined to frame timing records. The monitor never uses DbgHelp.
+bool StartFrameWatch(const std::wstring& log_path);
+void StopFrameWatch();
+uint64_t BeginFrame();
+void EndFrame(uint64_t id);
 
 } // namespace pulse::app::hang

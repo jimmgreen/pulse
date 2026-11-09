@@ -187,8 +187,7 @@ std::wstring KnownFolder(const KNOWNFOLDERID& id);
 std::wstring ResolveTaskDest(std::wstring d);
 void ToolTask(AppState& s, const app::ai::ModelToolCall& call, const json::Value& args);
 // ---------------------------------------------------------- space (D) --
-// disk_usage and find_cleanup (plans/ai/Pulse_AI助手_第二批扩展.html, flow
-// D): where a drive's space went, then what in the user's own folders can
+// disk_usage and find_cleanup (flow D): where a drive's space went, then what in the user's own folders can
 // go to the Recycle Bin, after the user ticks and confirms it in Pulse.
 
 constexpr double kGiB = 1024.0 * 1024.0 * 1024.0;
@@ -238,7 +237,7 @@ void ToolFindCleanup(AppState& s, const app::ai::ModelToolCall& call, const json
 // ai_agent_dups.cpp
 void ToolFindDuplicates(AppState& s, const app::ai::ModelToolCall& call, const json::Value& args);
 // --------------------------------------------------------- run_actions --
-// P3 (plans/ai/P3_AI接入动作表.html), grown from the third batch's
+// P3, grown from the third batch's
 // control_pulse (flow F): the assistant runs actions of the action table
 // (actions/action_registry.h) by id, in order. View, organize and create
 // actions run at once; programs and system actions ask first (one confirm
@@ -383,7 +382,7 @@ CtlStep CtlArgs(AppState& s, CtlRun& run, const std::string& id, const json::Val
 bool IsChooser(std::string_view id);
 CtlStep CtlChooser(AppState& s, const std::string& id);
 // ------------------------------------------------------ file steps (P4c) --
-// plans/ai/P4_全部领域接入.html ② ③: a move, copy, rename or delete in
+// A move, copy, rename or delete in
 // run_actions shows its plan card (the first batch's 整理计划 row for moves,
 // the second batch's Recycle Bin card, the red two-click card for a permanent
 // delete); only after 确认 does Pulse queue the menus' own requests, under one
@@ -419,7 +418,7 @@ using app::actions::SettingText;
 json::Value SettingJson(const SetDef& d, int v);
 // ---------------------------------------------------------------- stream --
 
-// Error card A (plans/ai/Pulse_AI助手_错误与快捷键.html): red needs the user,
+// Error card A: red needs the user,
 // amber passes on its own. "DeepSeek" only for the official service; a custom
 // address is named by its host.
 using ui::AiErrAct;

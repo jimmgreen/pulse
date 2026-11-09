@@ -1,0 +1,43 @@
+{
+  "apiVersion": 1,
+  "id": "sample.resource-client",
+  "name": "Scoped resource client",
+  "resources": [
+    "context.read",
+    "files.readCurrentDirectory",
+    "operations.own",
+    "settings.own",
+    "audit.own"
+  ],
+  "commands": [
+    {
+      "id": "refresh",
+      "title": "Refresh folder",
+      "capability": "view.refresh"
+    }
+  ],
+  "panel": {
+    "title": "Scoped resource probe",
+    "ui": {
+      "version": 1,
+      "root": {
+        "type": "group",
+        "id": "resource-root",
+        "text": "Host-held scoped resources",
+        "children": [
+          {
+            "type": "text",
+            "id": "resource-help",
+            "text": "This fixture declares scoped resource permissions for the native host probe. It does not execute resource requests or scripts from the panel."
+          },
+          {
+            "type": "button",
+            "id": "resource-refresh",
+            "text": "Refresh current folder",
+            "command": "refresh"
+          }
+        ]
+      }
+    }
+  }
+}

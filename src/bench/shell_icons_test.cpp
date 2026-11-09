@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstring>
 #include <algorithm>
+#include <filesystem>
 
 static bool TestArtworkBounds() {
     bool ok = true;
@@ -156,8 +157,73 @@ static bool WriteSmallIco(const std::wstring& path) {
 
 namespace pulse::ui {
 struct ShellIconCacheTestAccess {
-    static bool Wait(ShellIconCache& cache) {
-        const auto end = GetTickCount64() + 10000;
+    static bool MeasureShortcuts(const std::filesystem::path& folder) {
+        ShellIconCache cache;
+        std::vector<std::wstring> paths;
+        for (const auto& file : std::filesystem::directory_iterator(std::filesystem::absolute(folder))) {
+            if (file.path().extension() == L".lnk") paths.push_back(std::filesystem::path(file.path()).make_preferred().wstring());
+        }
+        const auto started = std::chrono::steady_clock::now();
+        for (const auto& path : paths) cache.RequestExact(path);
+        if (!Wait(cache, 60000)) {
+            std::printf("[FAIL] shortcut icon queries exceeded 60 seconds\n");
+            return false;
+        }
+        const auto indexed = std::chrono::steady_clock::now();
+        {
+            std::lock_guard lock(cache.mutex_);
+            if (cache.exact_index_.size() != paths.size()) {
+                std::printf("[FAIL] only %zu/%zu shortcut indices resolved\n", cache.exact_index_.size(), paths.size());
+                return false;
+            }
+        }
+        ComPtr<ID3D11Device> d3d;
+        ComPtr<IDXGIDevice> dxgi;
+        ComPtr<ID2D1Factory1> factory;
+        ComPtr<ID2D1Device> device;
+        ComPtr<ID2D1DeviceContext> context;
+        if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION, &d3d, nullptr, nullptr)) ||
+            FAILED(d3d->QueryInterface(IID_PPV_ARGS(&dxgi))) ||
+            FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, IID_PPV_ARGS(&factory))) ||
+            FAILED(factory->CreateDevice(dxgi.get(), &device)) ||
+            FAILED(device->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &context))) return false;
+        cache.SetDeviceContext(context.get());
+        const auto draw_start = std::chrono::steady_clock::now();
+        size_t ready = 0;
+        double longest_ms = 0;
+        for (const auto& path : paths) {
+            const auto one = std::chrono::steady_clock::now();
+            ready += cache.ExactBitmapFor(path, 48) != nullptr;
+            longest_ms = (std::max)(longest_ms, std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - one).count());
+        }
+        const double draw_ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - draw_start).count();
+        std::printf("shortcuts=%zu index_ms=%.3f first_draw_ms=%.3f longest_icon_ms=%.3f ready=%zu\n",
+            paths.size(), std::chrono::duration<double, std::milli>(indexed - started).count(),
+            draw_ms, longest_ms, ready);
+        std::fflush(stdout);
+        size_t completed = 0;
+        for (const auto& path : paths) completed += ReadyBitmap(cache, path, L"", false, FILE_ATTRIBUTE_NORMAL, 48) != nullptr;
+        std::printf("[%s] %zu/%zu exact shortcut bitmaps eventually available; completion_ms=%.3f\n",
+            completed == paths.size() ? "PASS" : "FAIL", completed, paths.size(),
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - draw_start).count());
+        return paths.size() == 265 && completed == paths.size();
+    }
+    static ID2D1Bitmap* ReadyBitmap(ShellIconCache& cache, const std::wstring& path,
+        const std::wstring& name, bool is_dir, DWORD attrs, float size) {
+        const auto deadline = GetTickCount64() + 10000;
+        do {
+            auto* bitmap = path.empty() ? cache.BitmapFor(path, name, is_dir, attrs, size)
+                                       : cache.ExactBitmapFor(path, size);
+            if (bitmap) return bitmap;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        } while (GetTickCount64() < deadline);
+        return nullptr;
+    }
+    static bool Wait(ShellIconCache& cache, ULONGLONG timeout_ms = 10000) {
+        const auto end = GetTickCount64() + timeout_ms;
         while (GetTickCount64() < end) {
             {
                 std::lock_guard lock(cache.mutex_);
@@ -242,8 +308,29 @@ struct ShellIconCacheTestAccess {
         check(graphics, "create Direct2D software device");
         if (graphics) {
             cache.SetDeviceContext(context.get());
+            {
+                ShellIconCache pending;
+                pending.SetDeviceContext(context.get());
+                // Hold the worker before dispatch: a draw must only queue the
+                // work, even when the native Shell index is already known.
+                pending.running_ = true;
+                pending.generic_index_[L"<dir>"] = cache.generic_index_.at(L"<dir>");
+                const auto* first = pending.BitmapFor(L"", L"", true, FILE_ATTRIBUTE_DIRECTORY, 48);
+                const auto* second = pending.BitmapFor(L"", L"", true, FILE_ATTRIBUTE_DIRECTORY, 48);
+                check(!first && !second && pending.convert_queue_.size() == 1 &&
+                      pending.convert_pending_.size() == 1 && pending.bitmaps_.empty(),
+                      "ordinary paints queue one conversion without extracting icons on the UI thread");
+                {
+                    std::lock_guard lock(pending.mutex_);
+                    pending.running_ = false;
+                    pending.StartWorkerLocked();
+                }
+                pending.cv_.notify_one();
+                check(ReadyBitmap(pending, L"", L"", true, FILE_ATTRIBUTE_DIRECTORY, 48) != nullptr,
+                      "queued ordinary icon becomes available after worker dispatch");
+            }
             for (const float size : {16.0f, 24.0f, 32.0f, 48.0f, 96.0f, 256.0f}) {
-                auto* bitmap = cache.BitmapFor(L"", L"", true, FILE_ATTRIBUTE_DIRECTORY, size);
+                auto* bitmap = ReadyBitmap(cache, L"", L"", true, FILE_ATTRIBUTE_DIRECTORY, size);
                 check(bitmap && bitmap->GetPixelSize().width >= 16,
                       "native folder converts to Direct2D bitmap at requested scale");
                 const auto bounds = cache.CachedArtworkBounds(L"", L"", true,
@@ -265,20 +352,20 @@ struct ShellIconCacheTestAccess {
             check(second_ok, "second window context on the same device");
             if (second_ok) {
                 second->SetTarget(second_target.get());
-                auto* const before = cache.BitmapFor(L"", L"", true, FILE_ATTRIBUTE_DIRECTORY, 32);
+                auto* const before = ReadyBitmap(cache, L"", L"", true, FILE_ATTRIBUTE_DIRECTORY, 32);
                 // Held so a flushed cache cannot free it or hand its address to a new bitmap.
                 ComPtr<ID2D1Bitmap> held;
                 if (before) { before->AddRef(); held.p = before; }
                 const size_t cached = cache.bitmaps_.size();
                 cache.SetDeviceContext(second.get());
                 check(cache.bitmaps_.size() == cached &&
-                          cache.BitmapFor(L"", L"", true, FILE_ATTRIBUTE_DIRECTORY, 32) == before,
+                          ReadyBitmap(cache, L"", L"", true, FILE_ATTRIBUTE_DIRECTORY, 32) == before,
                       "another window on the same device keeps the cached bitmaps");
                 second->BeginDraw();
                 if (held.get()) second->DrawBitmap(held.get(), D2D1::RectF(0, 0, 32, 32));
                 check(before && SUCCEEDED(second->EndDraw()), "a cached icon draws in the other window");
                 context.reset();
-                check(cache.BitmapFor(L"", L"", true, FILE_ATTRIBUTE_DIRECTORY, 20) != nullptr,
+                check(ReadyBitmap(cache, L"", L"", true, FILE_ATTRIBUTE_DIRECTORY, 20) != nullptr,
                       "icons still convert after the first window's context is released");
                 cache.SetDeviceContext(second.get());
             }
@@ -293,16 +380,16 @@ struct ShellIconCacheTestAccess {
             check(WriteSmallIco(ico), "generated an icon file with only 32- and 48-pixel images");
             cache.RequestExact(ico);
             check(Wait(cache), "the generated icon file's own icon resolves");
-            auto* const large = cache.BitmapFor(ico, L"small only.ico", false, FILE_ATTRIBUTE_NORMAL, 256);
+            auto* const large = ReadyBitmap(cache, ico, L"small only.ico", false, FILE_ATTRIBUTE_NORMAL, 256);
             const auto large_px = large ? large->GetPixelSize() : D2D1_SIZE_U{};
             const uint32_t large_native = cache.CachedNativeSide(ico, L"small only.ico", false, FILE_ATTRIBUTE_NORMAL, 256);
             std::printf("small-only icon at 256: bitmap %ux%u native %u\n", large_px.width, large_px.height, large_native);
             check(large && large_px.width == 48 && large_px.height == 48 && large_native == 48,
                   "an icon without a large image is cut to its 48-pixel image at the large size");
-            auto* const own = cache.BitmapFor(ico, L"small only.ico", false, FILE_ATTRIBUTE_NORMAL, 48);
+            auto* const own = ReadyBitmap(cache, ico, L"small only.ico", false, FILE_ATTRIBUTE_NORMAL, 48);
             check(own && cache.CachedNativeSide(ico, L"small only.ico", false, FILE_ATTRIBUTE_NORMAL, 48) == 0,
                   "the same icon at its own size is drawn as it is");
-            auto* const folder = cache.BitmapFor(L"", L"", true, FILE_ATTRIBUTE_DIRECTORY, 256);
+            auto* const folder = ReadyBitmap(cache, L"", L"", true, FILE_ATTRIBUTE_DIRECTORY, 256);
             check(folder && folder->GetPixelSize().width == 256 &&
                       cache.CachedNativeSide(L"", L"", true, FILE_ATTRIBUTE_DIRECTORY, 256) == 0,
                   "a folder's real large icon stays whole");
@@ -312,7 +399,7 @@ struct ShellIconCacheTestAccess {
             check(cache.artwork_bounds_.empty(), "device replacement clears artwork metadata");
             if (!context.get()) context = std::move(second);
             cache.SetDeviceContext(context.get());
-            check(cache.BitmapFor(L"", L"", true, FILE_ATTRIBUTE_DIRECTORY, 32) != nullptr,
+            check(ReadyBitmap(cache, L"", L"", true, FILE_ATTRIBUTE_DIRECTORY, 32) != nullptr,
                   "device recreation preserves native indices and rebuilds bitmap");
             cache.Reset();
         }
@@ -322,6 +409,12 @@ struct ShellIconCacheTestAccess {
 }
 
 int main(int argc, char** argv) {
+    if (argc == 3 && std::strcmp(argv[1], "--shortcut-latency") == 0) {
+        const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        const bool ok = pulse::ui::ShellIconCacheTestAccess::MeasureShortcuts(std::filesystem::path(argv[2]));
+        if (SUCCEEDED(hr)) CoUninitialize();
+        return ok ? 0 : 1;
+    }
     const bool bounds_ok = TestArtworkBounds();
     if (argc == 2 && std::strcmp(argv[1], "--bounds-only") == 0) return bounds_ok ? 0 : 1;
     const HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);

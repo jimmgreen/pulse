@@ -3,6 +3,7 @@
 // Only included by explicitly enabled test builds. Never writes user settings.
 #include <windows.h>
 #include "../fs/fs_enum.h"
+#include "../ui/motion_probe.h"
 #include <psapi.h>
 #include <cstdio>
 #include <share.h>
@@ -23,6 +24,7 @@ inline std::function<void()> hidden_action;
 inline std::wstring original, target;
 inline ULONGLONG created = 0, stage_start = 0, idle_start = 0;
 inline int stage = 0, sample = 0;
+inline unsigned navigation_rounds = 1, navigation_round = 0, navigation_settle_ms = 1000;
 inline bool first_present = false;
 inline bool startup_only = false;
 inline bool minimize_probe = false;
@@ -69,6 +71,7 @@ inline void Record(const char* event, size_t entries = 0) {
 }
 inline void Finish(const char* event) {
     Record(event);
+    ui::motion_probe::Flush();
     KillTimer(window, kTimer);
     fclose(report);
     report = nullptr;
@@ -95,6 +98,9 @@ inline void Presented(HWND hwnd) {
         stage_start = Now();
     } else if (stage == 4 && current.ready && current.path == original) {
         Record("return_listing_presented", current.entries);
+        if (++navigation_round < navigation_rounds) {
+            stage = 1; stage_start = Now(); return;
+        }
         stage = 5;
         idle_start = stage_start = Now();
         SetTimer(window, kTimer, 5000, Tick);
@@ -124,7 +130,7 @@ inline void CALLBACK Tick(HWND, UINT, UINT_PTR, DWORD) {
         else SetTimer(window, kTimer, static_cast<UINT>((50000000ULL - elapsed + 9999) / 10000), Tick);
     } else if (stage == 1 || stage == 3) {
         // Leave navigation out of the paint stack and allow startup warmups to settle.
-        if (Now() - stage_start < 10000000ULL) return;
+        if (Now() - stage_start < static_cast<ULONGLONG>(navigation_settle_ms) * 10000) return;
         const bool outbound = stage == 1;
         stage = outbound ? 2 : 4;
         stage_start = Now();
@@ -161,6 +167,7 @@ inline void Start(HWND hwnd, bool isolated, std::function<Listing()> read,
     if (!n || n >= ARRAYSIZE(output) || !t || t >= ARRAYSIZE(destination) || wcscmp(scope, L"selection") != 0) return;
     report = _wfsopen(output, L"wb", _SH_DENYNO);
     if (!report) return;
+    ui::motion_probe::Enable();
     FILETIME c{}, e{}, k{}, u{};
     GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u);
     created = stage_start = FileTimeValue(c);
@@ -170,6 +177,11 @@ inline void Start(HWND hwnd, bool isolated, std::function<Listing()> read,
     hidden_repaint_probe = GetEnvironmentVariableW(L"PULSE_TEST_HIDDEN_REPAINT", nullptr, 0) > 0;
     minimize_probe = GetEnvironmentVariableW(L"PULSE_TEST_IDLE_MINIMIZE", nullptr, 0) > 0;
     startup_only = GetEnvironmentVariableW(L"PULSE_TEST_STARTUP_ONLY", nullptr, 0) > 0;
+    wchar_t rounds[16]{};
+    if (GetEnvironmentVariableW(L"PULSE_TEST_NAVIGATION_ROUNDS", rounds, ARRAYSIZE(rounds))) {
+        navigation_rounds = (std::clamp)(wcstoul(rounds, nullptr, 10), 1ul, 100ul);
+        navigation_settle_ms = 50;
+    }
     window = hwnd; target = fs::NormalizePath(destination); listing = std::move(read); navigate = std::move(go);
     fprintf(report, "event,process_ms,stage_ms,entries,working_set_bytes,private_commit_bytes,cpu_ms,ticks,presents,tick_ms,tags_ms,ops_ms,frame_wakes\n");
     Record("probe_started");

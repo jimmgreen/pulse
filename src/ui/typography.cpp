@@ -302,7 +302,7 @@ float InkPad(IDWriteTextFormat* format) noexcept {
     return std::max(4.0f, size * 0.25f);
 }
 
-float MeasureAdvance(IDWriteFactory2* factory, IDWriteTextFormat* format,
+static float MeasureAdvanceUncached(IDWriteFactory2* factory, IDWriteTextFormat* format,
                      std::wstring_view text) {
     if (!factory || !format || text.empty()) return 0.0f;
     const float fallback = format->GetFontSize() * static_cast<float>(text.size());
@@ -338,11 +338,12 @@ struct MeasureKey {
     const void* compositor = nullptr;
     const void* format = nullptr;
     float size = 0.0f;
+    float tab_stop = 0.0f;
     std::uint32_t style = 0; // weight | style << 16 | stretch << 20 | luma << 24
     std::wstring text;
     bool operator==(const MeasureKey& other) const noexcept {
         return compositor == other.compositor && format == other.format &&
-               size == other.size && style == other.style && text == other.text;
+               size == other.size && tab_stop == other.tab_stop && style == other.style && text == other.text;
     }
 };
 
@@ -355,6 +356,7 @@ struct MeasureKeyHash {
         mix(std::hash<const void*>{}(key.compositor));
         mix(std::hash<const void*>{}(key.format));
         mix(std::hash<float>{}(key.size));
+        mix(std::hash<float>{}(key.tab_stop));
         mix(key.style);
         return h;
     }
@@ -368,6 +370,40 @@ struct MeasureCache {
 constexpr size_t kMeasureCacheLimit = 16384;
 
 } // namespace
+
+float MeasureAdvance(IDWriteFactory2* factory, IDWriteTextFormat* format,
+                     std::wstring_view text) {
+    if (!factory || !format || text.empty() || text.size() > 1024)
+        return MeasureAdvanceUncached(factory, format, text);
+    // Filename wrapping repeatedly measures the same prefixes and suffixes:
+    // folder sampling, the visible labels, then the old labels during a morph.
+    // Cache the exact DirectWrite result; do not approximate glyph advances or
+    // change the shared rename/grid line-break rules.
+    thread_local MeasureCache cache;
+    const auto generation = Generation();
+    if (cache.generation != generation) {
+        cache.widths.clear();
+        cache.generation = generation;
+    }
+    MeasureKey key;
+    key.compositor = factory;
+    key.format = format;
+    key.size = format->GetFontSize();
+    key.style = static_cast<std::uint32_t>(format->GetFontWeight()) & 0xFFFFu;
+    key.style |= (static_cast<std::uint32_t>(format->GetFontStyle()) & 0xFu) << 16;
+    key.style |= (static_cast<std::uint32_t>(format->GetFontStretch()) & 0xFu) << 20;
+    key.style |= (static_cast<std::uint32_t>(format->GetTextAlignment()) & 3u) << 24;
+    key.style |= (static_cast<std::uint32_t>(format->GetReadingDirection()) & 3u) << 26;
+    key.style |= (static_cast<std::uint32_t>(format->GetFlowDirection()) & 3u) << 28;
+    key.text.assign(text.data(), text.size());
+    // Tab stops are mutable even when the font format itself is reused.
+    key.tab_stop = format->GetIncrementalTabStop();
+    if (const auto found = cache.widths.find(key); found != cache.widths.end()) return found->second;
+    const float width = MeasureAdvanceUncached(factory, format, text);
+    if (cache.widths.size() >= kMeasureCacheLimit) cache.widths.clear();
+    cache.widths.emplace(std::move(key), width);
+    return width;
+}
 
 float MeasureLine(Compositor* compositor, IDWriteTextFormat* format,
                   std::wstring_view text) {

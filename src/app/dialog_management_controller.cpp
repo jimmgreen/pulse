@@ -1,3 +1,4 @@
+#include "../common/app_runtime_paths.h"
 #include "dialog_management_controller.h"
 #include "../common/dialog_auto_registration.h"
 #include "../common/dialog_bundle.h"
@@ -14,6 +15,12 @@
 #include <array>
 namespace pulse::app {
 std::wstring GetPulseDataDir();
+bool DialogAutoPathMismatch(bool enabled, const std::wstring& registered, const std::wstring& bundle_root) {
+    if (!enabled || bundle_root.empty()) return false;
+    const auto expected = (std::filesystem::path(bundle_root) / dialog_auto::DllName).lexically_normal().wstring();
+    const auto actual = std::filesystem::path(registered).lexically_normal().wstring();
+    return CompareStringOrdinal(expected.c_str(), -1, actual.c_str(), -1, TRUE) != CSTR_EQUAL;
+}
 namespace {
 namespace fs = std::filesystem;
 using Profile = dialog_launcher::ManagedLaunchProfile;
@@ -107,6 +114,8 @@ struct DialogManagementController::State {
     HWND host=nullptr;UINT wake=0;bool stopping=false;uint64_t generation=0;
     std::deque<Command> commands;std::vector<DialogManagementResult> results;
     std::wstring requested_root;fs::path root;bool initialized=false;
+    fs::path install_root;
+    bool installed_default=true;
     DialogManagementConfiguration configuration;
     bool Current(uint64_t value){std::lock_guard lock(mutex);return !stopping && generation==value;}
     DWORD Initialize() {
@@ -122,18 +131,28 @@ struct DialogManagementController::State {
         if(!CreateDirectoryW((root/L"operations").c_str(),security.get()) && GetLastError()!=ERROR_ALREADY_EXISTS) return GetLastError();
         if(const DWORD error=NoReparse(root/L"operations")) return error;
         if(!requested_root.empty()) {const DWORD error=ReadConfiguration(root/L"configuration.bin",configuration);if(error) return error;}
-        std::wstring executable(32768,L'\0');
-        const DWORD length=GetModuleFileNameW(nullptr,executable.data(),static_cast<DWORD>(executable.size()));
-        if(!length || length>=executable.size()) return ERROR_BAD_PATHNAME;
-        executable.resize(length);
-        configuration.bundle_root=(fs::path(executable).parent_path()/L"DialogBridge").wstring();
-        configuration.manifest_digest.clear();
+        install_root=app_runtime_paths::InstallRoot();
+        if(install_root.empty()) return ERROR_BAD_PATHNAME;
+        installed_default=configuration.bundle_root.empty() ||
+            _wcsicmp(configuration.bundle_root.c_str(),install_root.c_str())==0 ||
+            _wcsicmp(configuration.bundle_root.c_str(),(install_root/L"DialogBridge").c_str())==0;
+        if(installed_default) {
+            configuration.bundle_root.clear();
+            configuration.manifest_digest.clear();
+        }
         initialized=true;return ERROR_SUCCESS;
     }
     void Verify(DialogManagementResult& result,dialog_bundle::BundleLease& bundle) {
-        result.configuration=configuration;
-        result.bundle_error=dialog_bundle::VerifyBundle(configuration.bundle_root,configuration.manifest_digest,bundle);
+        result.bundle_error=installed_default ? dialog_bundle::ResolveInstalledBundle(install_root.wstring(),bundle) :
+            dialog_bundle::VerifyBundle(configuration.bundle_root,configuration.manifest_digest,bundle);
         result.bundle_verified=result.bundle_error==ERROR_SUCCESS;
+        result.configuration=configuration;
+        if(installed_default) {
+            result.configuration.bundle_root=bundle.Directory();
+            result.configuration.manifest_digest=bundle.ManifestDigest();
+        }
+        result.auto_path_mismatch=(installed_default && result.auto_enabled && !result.bundle_verified) ||
+            DialogAutoPathMismatch(result.auto_enabled,result.auto_dll,result.configuration.bundle_root);
         auto application=configuration.application;
         result.application_valid=!application.empty() && ValidateApplication(application)==ERROR_SUCCESS;
     }
@@ -212,16 +231,25 @@ struct DialogManagementController::State {
                 if(!result.error){next.bundle_root=selected.Directory();next.manifest_digest=selected.ManifestDigest();}
             } else {next.application=command.path;result.error=ValidateApplication(next.application);}
             if(!result.error && Current(command.generation)){
-                result.error=SaveConfiguration(root,next);if(!result.error) configuration=std::move(next);
+                result.error=SaveConfiguration(root,next);if(!result.error) {
+                    configuration=std::move(next);
+                    if(command.operation==DialogManagementOperation::SelectBundle) installed_default=false;
+                }
             }
         }
         dialog_bundle::BundleLease bundle;Verify(result,bundle);
         if(command.operation==DialogManagementOperation::EnableAuto) {
             result.error=result.bundle_verified ? dialog_bundle::RecheckDirectory(bundle) : result.bundle_error;
+            // Legacy root bundles remain inspectable/launchable explicitly, but
+            // automatic registration must never pin the main application's exe.
+            if(!result.error && _wcsicmp(bundle.Directory().c_str(),install_root.c_str())==0)
+                result.error=ERROR_NOT_SUPPORTED;
             if(!result.error && Current(command.generation)) result.error=dialog_auto::Enable((fs::path(bundle.Directory())/dialog_auto::DllName).wstring());
             const auto status=dialog_auto::Inspect();
             result.auto_enabled=status.enabled;result.auto_conflict=status.conflict;
             result.auto_error=status.error;result.auto_dll=status.dll_path;
+            result.auto_path_mismatch=(installed_default && result.auto_enabled && !result.bundle_verified) ||
+                DialogAutoPathMismatch(result.auto_enabled,result.auto_dll,result.configuration.bundle_root);
         }
         if(command.operation==DialogManagementOperation::Launch) {
             if(!result.bundle_verified || !result.application_valid) result.error=ERROR_INVALID_DATA;

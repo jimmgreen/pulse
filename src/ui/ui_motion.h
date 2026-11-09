@@ -200,8 +200,11 @@ public:
     // row travels from where it was to its new slot (motion v2 "sort" /
     // "filter": full FLIP of the visible rows) and rows that were not on
     // screen fade in.
+    // Grid membership changes snap: a straight FLIP across a wrapped row
+    // crosses unrelated cells. Keep arrival flashes and explicit rearranges.
     void BeginFrame(uint64_t context, float scroll_x, float scroll_y, size_t count,
-                    uint64_t frame, uint64_t now, bool allowed, uint64_t arrangement = 0) noexcept {
+                    uint64_t frame, uint64_t now, bool allowed, uint64_t arrangement = 0,
+                    bool slide_membership = true) noexcept {
         const bool continuous = valid_ && context == context_ &&
                                 (frame == frame_ || frame == frame_ + 1);
         const bool same_view = continuous && scroll_x == scroll_x_ && scroll_y == scroll_y_;
@@ -221,6 +224,7 @@ public:
         }
         if (trigger_) {
             shifts_.clear();
+            slide_ = rearranged || slide_membership;
             if (rearranged) appear_.clear();
             reflow_ = rearranged;
             grew_ = count > count_;
@@ -246,7 +250,7 @@ public:
             if (it != previous_.end()) {
                 const float dx = it->second.x - pos.x;
                 const float dy = it->second.y - pos.y;
-                if (dx != 0.0f || dy != 0.0f) shifts_[key] = D2D1_POINT_2F{dx, dy};
+                if (slide_ && (dx != 0.0f || dy != 0.0f)) shifts_[key] = D2D1_POINT_2F{dx, dy};
             } else if (reflow_) {
                 appear_[key] = now_;
             } else if (grew_) {
@@ -320,6 +324,7 @@ private:
     float ShiftProgress() const noexcept;
     bool valid_ = false;
     bool trigger_ = false;
+    bool slide_ = true;
     bool grew_ = false;
     bool reflow_ = false;
     uint64_t arrangement_ = 0;
@@ -341,7 +346,7 @@ private:
 // function of elapsed time: no per-frame integration state, frame drops never
 // change the path, and the same curve can be baked into a DComp animation.
 // k: stiffness, c: damping. Values match the motion tokens of the design
-// prototype (pulse_motion_v2.html).
+// prototype.
 struct SpringSpec {
     float k = 520.0f;
     float c = 34.0f;
@@ -402,6 +407,7 @@ inline float ListShiftMotion::ShiftProgress() const noexcept {
 // different refresh rates follow the same path.
 class SpringRectMotion {
 public:
+    D2D1_RECT_F Current() const noexcept { return current_; }
     D2D1_RECT_F Update(uint64_t context, int64_t key, const D2D1_RECT_F& target,
                        uint64_t frame, uint64_t now, SpringSpec spec) noexcept {
         const bool continuous = visible_ && context == context_ &&
@@ -509,6 +515,41 @@ private:
     float vel_[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     D2D1_RECT_F to_{};
     D2D1_RECT_F current_{};
+};
+
+// File-list hover keeps velocity when the pointer changes speed between rows.
+// Retain the whole traversed span until settled for partial repaint damage.
+class ListHoverMotion {
+public:
+    D2D1_RECT_F Update(uint64_t context, int64_t key, const D2D1_RECT_F& target,
+                      uint64_t frame, uint64_t now) noexcept {
+        const bool continuous = visible_ && context == context_ &&
+            (frame == frame_ || frame == frame_ + 1);
+        const auto previous = spring_.Current();
+        const bool moving = spring_.Active(now);
+        const auto current = spring_.Update(context,key,target,frame,now,{1600.0f,80.0f});
+        if (!continuous || !moving) span_ = current;
+        if (continuous) Include(previous);
+        Include(current);
+        Include(target);
+        visible_ = true; context_ = context; key_ = key; frame_ = frame;
+        return current;
+    }
+    bool Active(uint64_t now) const noexcept { return spring_.Active(now); }
+    void SetAnimationsEnabled(bool enabled) noexcept { spring_.SetAnimationsEnabled(enabled); }
+    void Hide() noexcept { spring_.Hide(); visible_ = false; span_ = {}; }
+    D2D1_RECT_F Current() const noexcept { return spring_.Current(); }
+    D2D1_RECT_F Span() const noexcept { return span_; }
+private:
+    void Include(const D2D1_RECT_F& r) noexcept {
+        span_.left = std::min(span_.left,r.left); span_.top = std::min(span_.top,r.top);
+        span_.right = std::max(span_.right,r.right); span_.bottom = std::max(span_.bottom,r.bottom);
+    }
+    SpringRectMotion spring_;
+    D2D1_RECT_F span_{};
+    uint64_t context_ = 0, frame_ = 0;
+    int64_t key_ = 0;
+    bool visible_ = false;
 };
 
 } // namespace pulse::ui::motion

@@ -3,7 +3,7 @@
 #include "app_runtime.h"
 #include "../ui/quick_preview_command.h"
 
-namespace pulse::ui { struct ToolbarCustomizeSpec; struct ToolbarPickerTile; }
+namespace pulse::ui { struct ToolbarCustomizeSpec; struct ToolbarPickerTile; struct FluentMenuItem; }
 namespace pulse::app { struct SelectionCaps; struct DriveVerbResult; }
 
 namespace pulse {
@@ -80,6 +80,7 @@ std::wstring CommonExtension(const app::Tab& tab,
 std::wstring StaticVerbKey(const app::Tab& tab, const std::vector<int>& indices);
 void PrefetchStaticVerbs(AppState& s, const std::wstring& ext);
 void StartShellRegistryWatch(HWND hwnd);
+// Last-window shutdown also cancels and joins background menu-cache readers.
 void StopShellRegistryWatch();
 void SeedShellVerbCache(AppState& s);
 // WM_SHELL_VERB_SEED: merges the parsed machine cache unless a newer seed started.
@@ -151,8 +152,10 @@ void ShowSortDropdown(AppState& s);
 // Toolbar "Group" button: the group-by choices on their own.
 void ShowGroupDropdown(AppState& s);
 void ShowToolbarPinMenu(AppState& s, int slot, POINT screen);
+void ShowToolbarViewMenu(AppState& s, ui::HitTestResult::Region region, POINT screen);
 // A pinned app (index into toolbar_apps): separator after it, unpin, 自定义工具栏.
 void ShowToolbarAppPinMenu(AppState& s, size_t app, POINT screen);
+std::vector<ui::FluentMenuItem> BuildToolbarMoreItems(AppState& s);
 void ShowToolbarMore(AppState& s);
 // Toolbar selection chip, linked to the Pulse item menu: the first plain
 // built-in commands of the item menu as the user configured it (order and
@@ -171,6 +174,10 @@ bool ToolbarNewCreatesFolder(const AppState& s);
 // The 自定义工具栏 popover; page 0 tools, 1 apps.
 void ShowToolbarCustomize(AppState& s, int page = 0);
 // Toolbar picker T3c: a toolbar pin pressed while the picker is open.
+void BeginToolbarViewDrag(AppState& s, int view, POINT pt);
+bool BeginToolbarSeparatorDrag(AppState& s, POINT pt);
+void RestoreToolbarDrag(AppState& s);
+void BeginToolbarMenuDrag(AppState& s, int tool, POINT screen);
 bool ToolbarPinDragging();
 void BeginToolbarPinDrag(AppState& s, int index, POINT pt);
 void MoveToolbarPinDrag(AppState& s, POINT pt);
@@ -217,7 +224,7 @@ void ShowRecyclePlaceMenu(AppState& s, POINT screen_pt);
 // searches). Used on startup, after a language switch, and when the volume set
 // changes (a plugged-in stick, a mounted image).
 void RefreshSidebarModel(AppState& s);
-// "手机连上了却看不到？" (pulse_devices_cloud.html): the three things to check.
+// "手机连上了却看不到？": the three things to check.
 void ShowDeviceHelp(AppState& s);
 // Navigation-pane background menu: show or hide sections, expand or collapse them all.
 void ShowSidebarSectionsMenu(AppState& s, POINT screen_pt);
@@ -248,6 +255,8 @@ void ToggleQuickPreview(AppState& s);
 void NavigateQuickPreview(AppState& s, int direction);
 // File verb requested from inside the quick preview (WM_QUICK_PREVIEW_COMMAND).
 void HandleQuickPreviewCommand(AppState& s, const ui::QuickPreviewCommand& command);
+void HandleQuickPreviewCommand(AppState& s, ui::QuickPreviewWindow& preview,
+                               const ui::QuickPreviewCommand& command);
 // Quick Look on `item` (the focused tab's selected row); activate false: the
 // press-and-hold peek, which leaves the focus and the mouse with Pulse.
 void OpenQuickPreview(AppState& s, const ui::QuickPreviewItem& item, bool activate);
@@ -280,3 +289,5 @@ bool SysCtxPreviewDragEnd(AppState& s, int x, int y);
 bool SysCtxPreviewDragCancel(AppState& s);
 void ToggleTheme(AppState& s);
 } // namespace pulse
+
+namespace pulse { void SyncDetailsPreview(AppState& s); }

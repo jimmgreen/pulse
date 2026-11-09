@@ -1,5 +1,6 @@
 // shell_window_registry.cpp — see shell_window_registry.h.
 #include "shell_window_registry.h"
+#include "../common/runtime_log.h"
 
 // shlobj.h first: it brings in objbase (`interface`) under WIN32_LEAN_AND_MEAN.
 #include <shlobj.h>
@@ -39,6 +40,22 @@ struct ShellWindowRegistry::Shared {
 };
 
 namespace {
+
+// Numeric-only bridge evidence. Per-object query budgets and per-slot result
+// changes keep COM probing and retry loops from producing repeated log storms.
+void BridgeEvent(unsigned phase, uint64_t key, HRESULT hr, uint64_t detail = 0,
+                 const GUID* service = nullptr, const GUID* iid = nullptr) {
+#ifndef PULSE_SHELL_WINDOW_REGISTRY_TEST
+    uint64_t service_low = 0, service_high = 0, iid_low = 0, iid_high = 0;
+    if (service) { memcpy(&service_low, service, 8); memcpy(&service_high, reinterpret_cast<const BYTE*>(service) + 8, 8); }
+    if (iid) { memcpy(&iid_low, iid, 8); memcpy(&iid_high, reinterpret_cast<const BYTE*>(iid) + 8, 8); }
+    diagnostics::runtime::Event("shell_registry_bridge", {{"phase", phase}, {"pane_key", key},
+        {"hr", static_cast<uint32_t>(hr)}, {"detail", detail}, {"service_low", service_low},
+        {"service_high", service_high}, {"iid_low", iid_low}, {"iid_high", iid_high}});
+#else
+    (void)phase; (void)key; (void)hr; (void)detail; (void)service; (void)iid;
+#endif
+}
 
 constexpr DWORD kRetryFirstMs = 250;
 constexpr DWORD kRetryMaxMs = 5000;
@@ -149,6 +166,7 @@ public:
     FolderView(uint64_t key, HWND window, UINT message) : key_(key), window_(window), message_(message) {}
     void SetFolder(UniquePidl folder) { folder_ = std::move(folder); }
     PCIDLIST_ABSOLUTE Folder() const { return folder_.get(); }
+    uint64_t Key() const { return key_; }
 
     IFACEMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
         if (!ppv) return E_POINTER;
@@ -187,6 +205,7 @@ public:
     IFACEMETHODIMP SaveViewState() override { return E_NOTIMPL; }
     IFACEMETHODIMP SelectItem(PCUITEMID_CHILD item, SVSIF flags) override {
         TraceShellWindows(L"SelectItem key=%llx flags=0x%x", static_cast<unsigned long long>(key_), flags);
+        if (select_logs_ < 16) { ++select_logs_; BridgeEvent(5, key_, S_OK, flags); }
         if (!item) return E_INVALIDARG;
         // SVSI_DESELECT (0) alone: nothing to show.
         if ((flags & (SVSI_SELECT | SVSI_EDIT | SVSI_FOCUSED | SVSI_ENSUREVISIBLE)) == 0) return S_OK;
@@ -213,6 +232,7 @@ private:
     const HWND window_;
     const UINT message_;
     UniquePidl folder_;
+    unsigned select_logs_ = 0;
 };
 
 // IWebBrowserApp::get_Document result. The shell only queries it for
@@ -259,14 +279,17 @@ public:
         wchar_t guid[40]{};
         StringFromGUID2(service, guid, ARRAYSIZE(guid));
         TraceShellWindows(L"QueryService %s", guid);
-        if (service == IID_IFolderView || service == IID_IShellView) return view_->QueryInterface(riid, ppv);
-        return E_NOINTERFACE;
+        const HRESULT hr = service == IID_IFolderView || service == IID_IShellView
+            ? view_->QueryInterface(riid, ppv) : E_NOINTERFACE;
+        if (query_logs_ < 16) { ++query_logs_; BridgeEvent(4, view_->Key(), hr, 0, &service, &riid); }
+        return hr;
     }
 
 private:
     ~FolderDocument() = default;
     std::atomic<long> refs_{1};
     ComPtr<FolderView> view_;
+    unsigned query_logs_ = 0;
 };
 
 // What IShellWindows holds for a pane. Location* also lets programs that list
@@ -516,6 +539,16 @@ private:
     struct Registered {
         long cookie = 0, window_cookie = 0;
         bool pending = false, bound = false, ready = false, revoking = false;
+        HRESULT diagnostic_results[3]{};
+        bool diagnostic_seen[3]{};
+        void Log(unsigned phase, uint64_t key, HRESULT hr, uint64_t detail) {
+            const unsigned index = phase - 1;
+            if (!diagnostic_seen[index] || diagnostic_results[index] != hr) {
+                BridgeEvent(phase, key, hr, detail);
+                diagnostic_seen[index] = true;
+                diagnostic_results[index] = hr;
+            }
+        }
         std::wstring path;
         HWND window = nullptr;  // as published (ShellWindowEntry::window)
         ComPtr<FolderView> view;
@@ -552,6 +585,7 @@ private:
             VARIANT root; VariantInit(&root);
             hr = windows_->RegisterPending(static_cast<long>(shared_.window_thread), &location,
                 &root, SWC_BROWSER, &entry.cookie);
+            entry.Log(1, slot.first, hr, static_cast<uint64_t>(slot.second));
             entry.pending = SUCCEEDED(hr);
         }
         if (SUCCEEDED(hr) && !entry.bound && !shared_.stopping) {
@@ -563,10 +597,12 @@ private:
                 entry.app.Attach(new BrowserApp(window, document.Get(), entry.view.Get()));
             }
             hr = windows_->Register(entry.app.Get(), HandleToLong(window), SWC_BROWSER, &entry.window_cookie);
+            entry.Log(2, slot.first, hr, entry.window_cookie == entry.cookie);
             entry.bound = SUCCEEDED(hr);
         }
         if (SUCCEEDED(hr) && !shared_.stopping) {
             hr = windows_->OnNavigate(entry.cookie, &location);
+            entry.Log(3, slot.first, hr, static_cast<uint64_t>(slot.second));
             if (SUCCEEDED(hr)) {
                 entry.view->SetFolder(std::move(folder));
                 entry.path = path;

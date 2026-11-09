@@ -2,6 +2,7 @@
 #include "index_config.h"
 #include "index_migration.h"
 #include "index_directory_security.h"
+#include "index_service_start.h"
 #include <windows.h>
 #include <winsvc.h>
 
@@ -21,45 +22,8 @@ DWORD ServiceState(SC_HANDLE service, DWORD& state) {
     return ERROR_SUCCESS;
 }
 
-DWORD WaitForState(SC_HANDLE service, DWORD target) {
-    const ULONGLONG deadline = GetTickCount64() + 60000;
-    do {
-        DWORD state = 0;
-        const DWORD error = ServiceState(service, state);
-        if (error) return error;
-        if (state == target) return ERROR_SUCCESS;
-        if (target == SERVICE_RUNNING && state == SERVICE_STOPPED) return ERROR_SERVICE_NOT_ACTIVE;
-        Sleep(100);
-    } while (GetTickCount64() < deadline);
-    return ERROR_SERVICE_REQUEST_TIMEOUT;
-}
-
-DWORD StartAndWait(SC_HANDLE service) {
-    if (!StartServiceW(service, 0, nullptr)) {
-        const DWORD error = GetLastError();
-        if (error != ERROR_SERVICE_ALREADY_RUNNING) return error;
-    }
-    const DWORD error = WaitForState(service, SERVICE_RUNNING);
-    if (error) return error;
-    Sleep(3500);
-    DWORD state = 0;
-    const DWORD query = ServiceState(service, state);
-    return query ? query : state == SERVICE_RUNNING ? ERROR_SUCCESS : ERROR_SERVICE_NOT_ACTIVE;
-}
-
 DWORD StopAndWait(SC_HANDLE service) {
-    DWORD state = 0;
-    DWORD error = ServiceState(service, state);
-    if (error || state == SERVICE_STOPPED) return error;
-    if (state == SERVICE_START_PENDING) {
-        error = WaitForState(service, SERVICE_RUNNING);
-        if (error) return error;
-    }
-    if (state != SERVICE_STOP_PENDING) {
-        SERVICE_STATUS status{};
-        if (!ControlService(service, SERVICE_CONTROL_STOP, &status)) return GetLastError();
-    }
-    return WaitForState(service, SERVICE_STOPPED);
+    return EnsureServiceState(service, false);
 }
 }
 
@@ -107,29 +71,33 @@ int ConfigureServiceIndexPath(const std::wstring& path) {
     DWORD state = 0;
     DWORD error = ServiceState(service.value, state);
     if (error) return static_cast<int>(error);
-    const bool restart = state != SERVICE_STOPPED;
+    const bool restart = RestartServiceAfterMigrationFailure(previous.search_enabled, state);
     error = StopAndWait(service.value);
     if (error) return static_cast<int>(error);
     IndexMigration migration;
     std::wstring message;
     if (!CopyIndexForMigration(previous.index_path, path, migration, message, true)) {
-        if (restart && StartAndWait(service.value)) return ERROR_SERVICE_NOT_ACTIVE;
+        if (restart) {
+            if (const DWORD start_error = EnsureServiceState(service.value, true)) return static_cast<int>(start_error);
+        }
         return static_cast<int>(migration.failure);
     }
     // Do not publish a new root while the old process still owns mapped files/deltas.
     if (!ConfigureIndexPath(migration.target, nullptr)) {
         DiscardIndexMigrationCopies(migration);
-        if (restart && StartAndWait(service.value)) return ERROR_SERVICE_NOT_ACTIVE;
+        if (restart) {
+            if (const DWORD start_error = EnsureServiceState(service.value, true)) return static_cast<int>(start_error);
+        }
         return ERROR_WRITE_FAULT;
     }
-    error = StartAndWait(service.value);
+    error = EnsureServiceState(service.value, previous.search_enabled);
     if (error) {
         // Do not restore configuration until the unsuccessful new host has stopped.
-        if (StopAndWait(service.value) == 0 && SaveMachineConfig(previous, nullptr)) {
-            DiscardIndexMigrationCopies(migration);
-            if (restart && StartAndWait(service.value)) return ERROR_SERVICE_NOT_ACTIVE;
-        } else {
-            return ERROR_SERVICE_NOT_ACTIVE;
+        if (const DWORD stop_error = StopAndWait(service.value)) return static_cast<int>(stop_error);
+        if (!SaveMachineConfig(previous, nullptr)) return ERROR_WRITE_FAULT;
+        DiscardIndexMigrationCopies(migration);
+        if (restart) {
+            if (const DWORD start_error = EnsureServiceState(service.value, true)) return static_cast<int>(start_error);
         }
         return static_cast<int>(error);
     }

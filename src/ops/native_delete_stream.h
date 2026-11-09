@@ -111,40 +111,62 @@ NativeDeleteOutcome DeleteNative(const std::wstring& source, std::atomic<bool>& 
     struct Ready { std::wstring path; DWORD attributes; };
     std::vector<Ready> ready;
     if (workers > 1) ready.reserve(32);
+    // These atomics and the callable outlive the one reusable work object.
+    // Every drain waits before changing the batch or resetting its state.
+    std::atomic<size_t> next{0};
+    std::atomic<DWORD> failure{ERROR_SUCCESS};
+    std::atomic<bool> changed{false};
+    std::atomic<bool> supported{true};
+    auto work = [&]() {
+        while (!cancel.load() && failure.load() == ERROR_SUCCESS) {
+            const size_t index = next.fetch_add(1);
+            if (index >= ready.size()) break;
+            bool capability = supported.load();
+            const DWORD code = DeleteNativeItem(ready[index].path, ready[index].attributes, capability);
+            if (!capability) supported.store(false);
+            if (code == ERROR_SUCCESS) changed.store(true);
+            else if (code != ERROR_FILE_NOT_FOUND && code != ERROR_PATH_NOT_FOUND) {
+                DWORD expected = ERROR_SUCCESS;
+                failure.compare_exchange_strong(expected, code);
+            }
+        }
+    };
+    struct WorkOwner {
+        PTP_WORK value = nullptr;
+        bool pending = false;
+        ~WorkOwner() {
+            if (!value) return;
+            if (pending) WaitForThreadpoolWorkCallbacks(value, FALSE);
+            CloseThreadpoolWork(value);
+        }
+    } pool_work;
+    bool creation_attempted = false;
     const auto drain = [&]() {
         if (ready.empty()) return true;
-        std::atomic<size_t> next{0};
-        std::atomic<DWORD> failure{ERROR_SUCCESS};
-        std::atomic<bool> changed{false};
-        std::atomic<bool> supported{disposition_supported};
-        auto work = [&]() {
-            while (!cancel.load() && failure.load() == ERROR_SUCCESS) {
-                const size_t index = next.fetch_add(1);
-                if (index >= ready.size()) break;
-                bool capability = supported.load();
-                const DWORD code = DeleteNativeItem(ready[index].path, ready[index].attributes, capability);
-                if (!capability) supported.store(false);
-                if (code == ERROR_SUCCESS) changed.store(true);
-                else if (code != ERROR_FILE_NOT_FOUND && code != ERROR_PATH_NOT_FOUND) {
-                    DWORD expected = ERROR_SUCCESS;
-                    failure.compare_exchange_strong(expected, code);
-                }
-            }
-        };
+        next = 0;
+        failure = ERROR_SUCCESS;
+        changed = false;
+        supported = disposition_supported;
         const size_t count = (std::min)(ready.size(),
             static_cast<size_t>((std::min)(workers, 8u)));
-        const auto callback = [](PTP_CALLBACK_INSTANCE, void* context, PTP_WORK) {
-            (*static_cast<decltype(work)*>(context))();
-        };
-        PTP_WORK pool_work = CreateThreadpoolWork(callback,
-            const_cast<void*>(static_cast<const void*>(&work)), nullptr);
-        if (pool_work) {
-            for (size_t i = 1; i < count; ++i) SubmitThreadpoolWork(pool_work);
+        if (count > 1) {
+            if (!creation_attempted) {
+                creation_attempted = true;
+                const auto callback = [](PTP_CALLBACK_INSTANCE, void* context, PTP_WORK) {
+                    (*static_cast<decltype(work)*>(context))();
+                };
+                pool_work.value = CreateThreadpoolWork(callback,
+                    const_cast<void*>(static_cast<const void*>(&work)), nullptr);
+            }
+            if (pool_work.value) {
+                pool_work.pending = true;
+                for (size_t i = 1; i < count; ++i) SubmitThreadpoolWork(pool_work.value);
+            }
         }
         work();
-        if (pool_work) {
-            WaitForThreadpoolWorkCallbacks(pool_work, FALSE);
-            CloseThreadpoolWork(pool_work);
+        if (pool_work.pending) {
+            WaitForThreadpoolWorkCallbacks(pool_work.value, FALSE);
+            pool_work.pending = false;
         }
         disposition_supported = supported.load();
         outcome.mutated = outcome.mutated || changed.load();

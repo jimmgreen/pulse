@@ -47,6 +47,7 @@ DEFAULT_LAYOUT = [
     ("{build}/Pulse.Index.exe", "Pulse.Index.exe"),
     ("{build}/Pulse.Preview.exe", "Pulse.Preview.exe"),
     ("{build}/pulse_elevated.exe", "pulse_elevated.exe"),
+    ("{build}/pulse_hotkey_broker.exe", "pulse_hotkey_broker.exe"),
     ("{build}/pulse_shell.exe", "pulse_shell.exe"),
     ("{build}/pulse_start_pin.dll", "pulse_start_pin.dll"),
     ("{build}/pulse_integration.exe", "pulse_integration.exe"),
@@ -123,8 +124,8 @@ def main() -> int:
     stub = Path(args.stub)
     started = time.time()
     items = collect(root, build)
-    # Reuse the strict dependency closure and integrity manifest builder. A
-    # private staging directory keeps incomplete bundles out of build outputs.
+    # Ship one verified application/dialog runtime under its content hash;
+    # the root contains only the stable launcher and version pointer.
     sys.path.insert(0, str(root / "tools" / "pack_dialog_experiment"))
     import pack as dialog_pack
     actual_build = build if build.is_absolute() else root / build
@@ -133,11 +134,11 @@ def main() -> int:
     if arch is None:
         raise SystemExit("unsupported Pulse architecture for dialog bundle")
     with tempfile.TemporaryDirectory(prefix="pulse-dialog-") as staging:
-        bundle = Path(staging) / "DialogBridge"
-        dialog_pack.package(actual_build, bundle, args.version, arch, root, automatic=True)
-        dialog_pack.verify(bundle)
-        items.extend((f, "DialogBridge/" + f.relative_to(bundle).as_posix())
-                     for f in sorted(bundle.rglob("*")) if f.is_file())
+        bundle = Path(staging) / "installed"
+        dialog_pack.package_installed(actual_build, bundle, args.version, arch, root, items)
+        dialog_pack.verify_installed(bundle)
+        items = [(f, f.relative_to(bundle).as_posix())
+                 for f in sorted(bundle.rglob("*")) if f.is_file()]
         xz, stats = build_payload(items, args.version, args.channel)
     stub_bytes = stub.read_bytes()
     trailer = TRAILER.pack(MAGIC, len(stub_bytes), len(xz), hashlib.sha256(xz).digest())

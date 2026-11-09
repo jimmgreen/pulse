@@ -1,8 +1,11 @@
 #include "global_search_window.h"
+#include "recycle_search.h"
 #include "../common/runtime_log.h"
 #include "global_search_result_state.h"
+#include "global_search_query.h"
 #include "app_catalog.h"
 #include "folder_alias.h"
+#include "../fs/fs_enum.h"
 #include "jump_history.h"
 #include "jump_match.h"
 #include "../ui/FluentTokens.h"
@@ -14,6 +17,12 @@
 #include "../ui/svg_bitmap.h"
 #include "../ui/edit_host.h"
 #include "../ui/shell_icons.h"
+#include "../ui/thumbnail_cache.h"
+#include "../ui/quick_preview_window.h"
+#include "../ui/name_highlight.h"
+#include "../ui/icon_size_slider.h"
+#include "../ui/fluent_menu.h"
+#include "../ui/address_search_control.h"
 #include "../ui/ui_motion.h"
 #include "../common/path_utils.h"
 #include <uxtheme.h>
@@ -37,8 +46,8 @@
 #include <wrl/client.h>
 #include <wincodec.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
-#include <condition_variable>
 #include <cwctype>
 #include <mutex>
 #include <numeric>
@@ -50,18 +59,20 @@ namespace {
 using Microsoft::WRL::ComPtr;
 using l10n::StringId;
 constexpr UINT kIndexStatus = WM_APP + 181, kIndexResult = WM_APP + 182, kContentResult = WM_APP + 183;
-constexpr UINT kNetworkResult = WM_APP + 184, kThumbnailResult = WM_APP + 185;
+constexpr UINT kNetworkResult = WM_APP + 184;
+constexpr UINT kPreviewNavigate = WM_APP + 189, kPreviewOpen = WM_APP + 190;
 constexpr UINT kAppsReady = WM_APP + 186;  // the Start menu app list is in
+constexpr UINT kRecycleResult = WM_APP + 187;
+constexpr UINT kDirectoryResult = WM_APP + 188;
 constexpr UINT_PTR kDebounce = 1;
 constexpr UINT_PTR kConnectTimeout = 2;
 constexpr UINT_PTR kScopeTooltipTimer = 3;
 constexpr UINT_PTR kAnimationTimer = 4;
 constexpr uint64_t kSession = 0x50554c534547534full;
-// Layout in DIPs (pulse_global_search.html).
+// Layout in DIPs.
 constexpr float kHeader = 72, kFooter = 42, kRow = 52, kContentRow = 78, kGroupRow = 30;
 constexpr float kSide = 216, kPreview = 318, kResizeBorder = 6;
 constexpr float kFieldLeft = 62, kFieldTop = 14, kFieldHeight = 44, kFieldRight = 70;
-constexpr float kEditCornerRadius = 8;
 constexpr float kMinWidth = 640, kMinHeight = 420, kDefaultWidth = 960, kDefaultHeight = 620;
 constexpr size_t kMaximumResults = 200;
 // Aliased folders listed ahead of the best matches.
@@ -127,43 +138,6 @@ void OpenResult(std::wstring path, bool location) {
         if (SUCCEEDED(initialized)) CoUninitialize();
     }).detach();
 }
-// Preview thumbnails come from the shell on a worker: thumbnail handlers and
-// network paths can take a while. Only the newest request is served.
-struct ThumbnailWorker {
-    std::mutex mutex;
-    std::condition_variable wake;
-    std::wstring path;
-    uint64_t wanted = 0, served = 0;
-    HBITMAP bitmap = nullptr;
-    uint64_t bitmap_id = 0;
-    HWND notify = nullptr;
-    bool stop = false;
-    static void Run(std::shared_ptr<ThumbnailWorker> self) {
-        const HRESULT initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-        for (;;) {
-            std::wstring path; uint64_t id = 0; HWND notify = nullptr;
-            {
-                std::unique_lock lock(self->mutex);
-                self->wake.wait(lock, [&] { return self->stop || self->wanted != self->served; });
-                if (self->stop) break;
-                path = self->path; id = self->wanted; notify = self->notify; self->served = id;
-            }
-            HBITMAP result = nullptr;
-            ComPtr<IShellItemImageFactory> factory;
-            if (SUCCEEDED(SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&factory))))
-                factory->GetImage(SIZE{256, 256}, SIIGBF_RESIZETOFIT | SIIGBF_BIGGERSIZEOK, &result);
-            {
-                std::lock_guard lock(self->mutex);
-                if (self->bitmap) DeleteObject(self->bitmap);
-                self->bitmap = result; self->bitmap_id = id;
-            }
-            if (notify) PostMessageW(notify, kThumbnailResult, 0, 0);
-        }
-        std::lock_guard lock(self->mutex);
-        if (self->bitmap) { DeleteObject(self->bitmap); self->bitmap = nullptr; }
-        if (SUCCEEDED(initialized)) CoUninitialize();
-    }
-};
 D2D1_COLOR_F WithAlpha(D2D1_COLOR_F color, float alpha) { color.a = alpha; return color; }
 D2D1_COLOR_F Mix(D2D1_COLOR_F a, D2D1_COLOR_F b, float t) {
     return {a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t};
@@ -182,19 +156,54 @@ struct GlobalSearchWindow::Impl {
     // line taller than the default field; everything below moves down by it.
     float grow = 0;
     std::wstring current_folder, current_folder_tip, query, error;
+    std::wstring raw_query, last_search_query;
+    app::GlobalSearchParsedQuery parsed_query;
+    std::optional<app::GlobalSearchCalculation> calculation;
+    double previous_answer = 0;
+    std::vector<app::GlobalSearchCommand> commands;
+    bool command_mode = false;
     struct Row {
         std::wstring name, path, snippet; bool directory = false;
         uint64_t size = 0, mtime = 0; bool network = false;
         bool app = false;  // a Start menu program (path: its AppsFolder item)
         std::wstring alias;  // a folder found by its alias, shown as 「alias · name」
+        std::wstring recycle_path;
     };
     std::vector<Row> rows;
+    struct DirectoryRequest {
+        std::atomic_bool cancelled{false};
+        std::mutex mutex;
+        std::vector<Row> rows;
+        std::wstring error;
+    };
+    std::shared_ptr<DirectoryRequest> directory_request;
+    std::wstring browse_folder;
+    std::vector<std::wstring> browse_history, marked_paths;
+    std::vector<std::wstring> breadcrumb_paths;
+    bool grid_view = false, tray_open = false;
+    size_t tray_offset = 0;
+    D2D1_RECT_F tray_bounds{};
+    bool row_drag_pending = false, row_dragging = false;
+    POINT row_drag_start{};
+    int timeline_first = -1, timeline_last = -1, timeline_anchor = -1;
+    D2D1_RECT_F timeline_rect{};
+    float tile_width = 150;
+    D2D1_RECT_F tile_size_slider{};
+    bool tile_size_dragging = false;
     int selected = 0, first = 0;
     uint32_t generation = 1;
     size_t total = 0;
     index::IndexClient filenames;
     index::NetworkAgentClient network;
     index::SearchResult local_result, network_result;
+    index::SearchResult recycle_result;
+    struct RecycleRequest {
+        std::atomic<bool> cancelled{false};
+        std::mutex mutex;
+        index::SearchResult result;
+    };
+    std::shared_ptr<RecycleRequest> recycle_request;
+    bool recycle_ready = true;
     app::GlobalProviderStatus providers;
     index::ContentSearchClient contents;
     ComPtr<ID2D1Factory> factory;
@@ -208,8 +217,15 @@ struct GlobalSearchWindow::Impl {
     float empty_art_scale = 0;
     ui::Compositor compositor;
     ui::fluent::Painter painter;
+    ui::FluentMenu result_menu;
+    bool result_menu_open = false;
     ui::WindowMaterial material;
     ui::ShellIconCache icons;
+    ui::ThumbnailCache grid_thumbnails;
+    ui::QuickPreviewWindow preview;
+    bool preview_dark = true, preview_occluded = false;
+    ui::QuickPreviewItem preview_requested;
+    bool grid_cache_ready = false;
     ui::WindowEffect effect = ui::WindowEffect::None;
     std::wstring background_image;
     D2D1_COLOR_F accent_color = ui::GetAccentColor();
@@ -241,18 +257,15 @@ struct GlobalSearchWindow::Impl {
     float content_height = 0, scroll = 0, scroll_target = 0, recent_block = 0;
     uint64_t frame = 0, appear_start = 0, toast_until = 0, last_tick = 0;
     std::wstring toast;
-    ui::motion::SpringRectMotion plate_motion, scope_motion, mode_motion;
+    ui::motion::SpringRectMotion plate_motion, scope_motion;
     uint64_t layout_epoch = 1;
     enum Hot { HotNone, HotRow, HotScope, HotAddPlace, HotKind, HotDate, HotMode, HotEsc, HotHandoff, HotPreviewOpen,
-               HotPreviewLocation, HotPreviewCopy, HotRecentQuery, HotClearFilters, HotSearchContent };
+               HotPreviewLocation, HotPreviewCopy, HotRecentQuery, HotClearFilters, HotSearchContent,
+               HotView, HotBack, HotExitFolder, HotTray, HotStage, HotTrayItem, HotTrayRemove, HotTrayClear, HotTileSize, HotToken, HotCalculation, HotTimeline, HotAlternative, HotTrayPanel, HotBreadcrumb,
+               HotSearchScope, HotSearchClear, HotSearchField };
     struct HotSpot { D2D1_RECT_F rect; Hot kind; int index; };
     std::vector<HotSpot> hot;
     Hot hover_kind = HotNone; int hover_index = -1;
-    std::shared_ptr<ThumbnailWorker> thumbnails;
-    ComPtr<ID2D1Bitmap> thumbnail;
-    std::wstring thumbnail_path, thumbnail_wanted;
-    uint64_t thumbnail_request = 0;
-    ID2D1RenderTarget* thumbnail_target = nullptr;
 
     static constexpr index::SearchKind kKinds[] = {index::SearchKind::Any, index::SearchKind::Folder, index::SearchKind::Document,
         index::SearchKind::Image, index::SearchKind::Video, index::SearchKind::Audio, index::SearchKind::Archive, index::SearchKind::Code};
@@ -266,8 +279,7 @@ struct GlobalSearchWindow::Impl {
     D2D1_COLOR_F EditBackground() const { return FieldColor(); }
     D2D1_COLOR_F FieldColor() const {
         const auto theme = Theme();
-        if (ui::IsHighContrast()) return theme.header_bg;
-        return dark ? D2D1::ColorF(0x2c2d33) : D2D1::ColorF(0xfbfbfd);
+        return ui::AddressSearchHostedFill(theme, ui::IsHighContrast());
     }
     static UINT32 Rgb(D2D1_COLOR_F color) {
         return (static_cast<UINT32>(std::lround(color.r * 255)) << 16) |
@@ -306,15 +318,19 @@ struct GlobalSearchWindow::Impl {
         return RGB(static_cast<BYTE>(color.r * 255), static_cast<BYTE>(color.g * 255), static_cast<BYTE>(color.b * 255));
     }
     D2D1_COLOR_F Color(UINT32 value) const { return D2D1::ColorF(value); }
-    void Invalidate() { if (hwnd) InvalidateRect(hwnd, nullptr, FALSE); }
+    void Invalidate() { SyncPreview(); if (hwnd) InvalidateRect(hwnd, nullptr, FALSE); }
     float Header() const { return kHeader + grow; }
-    float ListTop() const { return Header() + 1; }
+    float ListTop() const { return Header() + 43; }
     float ListBottom() const { return height - kFooter; }
     float SideWidth() const { return width >= 700 ? kSide : 0; }
     float PreviewWidth() const { return preview_open && width >= 760 ? kPreview : 0; }
     float ListLeft() const { return SideWidth() + (SideWidth() > 0 ? 1.0f : 0.0f); }
     float ListRight() const { return width - PreviewWidth(); }
     float RowHeight() const { return content_mode && !showing_recent ? kContentRow : kRow; }
+    bool IsGrid() const { return grid_view && !content_mode && !command_mode; }
+    bool HasSearchQuery() const { return !query.empty() || (!content_mode && (kind_filter != 0 || date_filter != 0 || timeline_first >= 0)); }
+    int GridColumns() const { return std::max(1, static_cast<int>((ListRight() - ListLeft() - 16) / tile_width)); }
+    float TileHeight() const { return tile_width * .75f + 54; }
     int PageSize() const { return std::max(1, static_cast<int>((ListBottom() - ListTop() - 12) / RowHeight())); }
 
     // ---- list layout -----------------------------------------------------
@@ -339,6 +355,12 @@ struct GlobalSearchWindow::Impl {
     }
     void BuildLayout() {
         row_top.assign(rows.size(), 0);
+        if (IsGrid()) {
+            recent_block = 0;
+            for (size_t i = 0; i < rows.size(); ++i) row_top[i] = 8 + static_cast<float>(i / GridColumns()) * TileHeight();
+            content_height = 16 + static_cast<float>((rows.size() + GridColumns() - 1) / GridColumns()) * TileHeight();
+            ClampScroll(); return;
+        }
         float y = 6;
         recent_block = showing_recent && !context.recent_queries.empty() ? 70.0f : 0.0f;
         y += recent_block;
@@ -368,7 +390,7 @@ struct GlobalSearchWindow::Impl {
         if (row_top.size() != rows.size()) BuildLayout();
         if (reveal_selection && selected >= 0 && selected < static_cast<int>(row_top.size())) {
             const float view = ListBottom() - ListTop();
-            const float top = row_top[static_cast<size_t>(selected)], bottom = top + RowHeight();
+            const float top = row_top[static_cast<size_t>(selected)], bottom = top + (IsGrid() ? TileHeight() : RowHeight());
             const bool first_in_group = top - kGroupRow <= 6 + recent_block + 1 ||
                 (selected > 0 && row_top[static_cast<size_t>(selected) - 1] + RowHeight() + 1 < top);
             const float want_top = first_in_group ? top - kGroupRow - 4 : top - 4;
@@ -379,6 +401,11 @@ struct GlobalSearchWindow::Impl {
         if (!animations) scroll = scroll_target;
     }
     void Cancel() {
+        if (directory_request) directory_request->cancelled = true;
+        directory_request.reset();
+        if (recycle_request) recycle_request->cancelled = true;
+        recycle_request.reset();
+        recycle_ready = true;
         ++generation;
         filenames.CancelSession(kSession);
         contents.Suspend();
@@ -387,6 +414,8 @@ struct GlobalSearchWindow::Impl {
     }
     void Hide() {
         Trace("search_hide");
+        ClosePreview();
+        if (result_menu_open) result_menu.Dismiss();
         Cancel();
         HideScopeTooltip();
         handoff_hover = false;
@@ -412,15 +441,34 @@ struct GlobalSearchWindow::Impl {
         best_count = folder_count = jump_count = app_count = 0;
         total = rows.size();
     }
-    void Changed() {
+    void Changed(bool reopening = false) {
         Cancel();
+        if (!command_mode) last_search_query = raw_query;
         const int count = GetWindowTextLengthW(edit);
         query.resize(static_cast<size_t>(count) + 1);
         GetWindowTextW(edit, query.data(), count + 1);
         query.resize(static_cast<size_t>(count));
+        raw_query = query;
+        parsed_query = content_mode ? app::GlobalSearchParsedQuery{raw_query, {}} : app::ParseGlobalSearchQuery(raw_query);
+        calculation = !content_mode ? app::EvaluateGlobalSearchCalculation(raw_query, previous_answer) : std::nullopt;
+        query = parsed_query.query;
+        marked_paths.clear();
+        command_mode = !raw_query.empty() && raw_query.front() == L'>';
+        commands = command_mode ? app::MatchGlobalSearchCommands(raw_query) : std::vector<app::GlobalSearchCommand>{};
+        if (command_mode) {
+            rows.clear(); showing_recent = stale = busy = false; selected = commands.empty() ? -1 : 0;
+            for (const auto command : commands) { Row row; row.name = CommandLabel(command); rows.push_back(std::move(row)); }
+            best_count = folder_count = jump_count = app_count = 0;
+            BuildLayout(); Invalidate(); return;
+        }
+        if (calculation) {
+            rows.clear(); showing_recent = stale = busy = false; selected = -1;
+            BuildLayout(); Invalidate(); return;
+        }
+        if (!browse_folder.empty() && !content_mode) { SearchDirectory(); return; }
         // Refining a search keeps the previous rows (dimmed) until the new
         // results land, so the list does not blank out on every keystroke.
-        const bool keep = !query.empty() && !showing_recent && !rows.empty() && content_mode == stale_content_mode;
+        const bool keep = !reopening && !query.empty() && !showing_recent && !rows.empty() && content_mode == stale_content_mode;
         stale = keep;
         stale_content_mode = content_mode;
         if (!keep) { rows.clear(); selected = first = 0; best_count = folder_count = jump_count = app_count = 0; scroll = scroll_target = 0; }
@@ -434,11 +482,15 @@ struct GlobalSearchWindow::Impl {
             selected = 0;
         }
         total = 0; error.clear(); truncated = false;
-        local_result = {}; network_result = {}; providers = {};
+        local_result = {}; network_result = {}; recycle_result = {}; providers = {};
         if (CountsKey() != counts_key) for (auto& item : scopes) item.counted = false;
         keyboard_nav = false;
-        showing_recent = query.empty();
-        if (showing_recent) { FillRecent(); selected = rows.empty() ? -1 : 0; appear_start = ui::motion::NowMs(); }
+        showing_recent = !HasSearchQuery();
+        if (showing_recent) {
+            FillRecent(); selected = rows.empty() ? -1 : 0;
+            // A summon presents the refreshed recent list in its first frame.
+            appear_start = reopening ? 0 : ui::motion::NowMs();
+        }
         else {
             // Known folders and apps match in memory, so they show at once; the
             // index results join them.
@@ -447,8 +499,8 @@ struct GlobalSearchWindow::Impl {
         }
         ++layout_epoch;
         BuildLayout();
-        if (!query.empty() && !composing) { busy = true; SetTimer(hwnd, kDebounce, 140, nullptr); }
-        RequestThumbnail();
+        if (HasSearchQuery() && !composing) { busy = true; SetTimer(hwnd, kDebounce, 140, nullptr); }
+        SyncPreview();
         Invalidate();
     }
     std::wstring FilterTokens() const {
@@ -458,15 +510,30 @@ struct GlobalSearchWindow::Impl {
         if (kind == index::SearchKind::Folder) out += L" folder:";
         else if (kind != index::SearchKind::Any) out += std::wstring(L" type:") + index::KindId(kind);
         out += kDateTokens[date_filter];
+        if (timeline_first >= 0) {
+            SYSTEMTIME local{}; GetLocalTime(&local);
+            local.wHour = local.wMinute = local.wSecond = local.wMilliseconds = 0;
+            FILETIME stamp{}; SystemTimeToFileTime(&local, &stamp);
+            const uint64_t today = (static_cast<uint64_t>(stamp.dwHighDateTime) << 32) | stamp.dwLowDateTime;
+            const auto date = [&](int days) {
+                const uint64_t ticks = today - static_cast<uint64_t>(days) * 864000000000ull;
+                FILETIME file{static_cast<DWORD>(ticks), static_cast<DWORD>(ticks >> 32)};
+                SYSTEMTIME time{}; FileTimeToSystemTime(&file, &time);
+                wchar_t text[16]{}; swprintf_s(text, L"%04u-%02u-%02u", time.wYear, time.wMonth, time.wDay);
+                return std::wstring(text);
+            };
+            out += L" dm:" + date((11 - timeline_first) * 7 + 6) + L".." + date((11 - timeline_last) * 7);
+        }
         return out;
     }
     std::wstring ScopePath() const {
+        if (!browse_folder.empty()) return browse_folder;
         if (scope <= 0 || scope >= static_cast<int>(scopes.size())) return {};
         return scopes[static_cast<size_t>(scope)].path;
     }
     void Search() {
         KillTimer(hwnd, kDebounce);
-        if (!IsWindowVisible(hwnd) || composing || query.empty()) return;
+        if (!IsWindowVisible(hwnd) || composing || !HasSearchQuery()) return;
         const auto folder = ScopePath();
         if (content_mode) {
             index::ContentSearchRequest request;
@@ -485,6 +552,17 @@ struct GlobalSearchWindow::Impl {
             request.session_id = kSession; request.needle = query + FilterTokens(); request.limit = kMaximumResults;
             if (!search_pinyin) request.needle = L"nopinyin: " + request.needle;
             request.path_prefix = folder;
+            recycle_ready = !folder.empty();
+            if (!recycle_ready) {
+                auto job = std::make_shared<RecycleRequest>();
+                recycle_request = job;
+                std::thread([job, request, notify = hwnd, id = generation] {
+                    auto result = app::SearchRecycleBin(request, [&] { return job->cancelled.load(); });
+                    if (job->cancelled) return;
+                    { std::lock_guard lock(job->mutex); job->result = std::move(result); }
+                    if (!job->cancelled) PostMessageW(notify, kRecycleResult, id, 0);
+                }).detach();
+            }
             filenames.SearchAsync(request, generation);
             const bool network_scope = folder.empty() || IsNetworkPath(folder);
             providers.ExpectNetwork(network_scope && !network.Roots().empty());
@@ -608,7 +686,10 @@ struct GlobalSearchWindow::Impl {
         index::Query request;
         request.needle = search_pinyin ? query + FilterTokens() : L"nopinyin: " + query + FilterTokens();
         request.limit = kMaximumResults;
-        const auto merged = index::MergeSearchResults(request, local_result, network_result, true);
+        auto candidates = local_result;
+        candidates.total += recycle_result.total;
+        candidates.hits.insert(candidates.hits.end(), recycle_result.hits.begin(), recycle_result.hits.end());
+        const auto merged = index::MergeSearchResults(request, std::move(candidates), network_result, true);
         auto aliases = AliasRows();
         const auto same = [](const std::wstring& l, const std::wstring& r) {
             const auto a = path::StripExtendedPathPrefix(l), b = path::StripExtendedPathPrefix(r);
@@ -623,11 +704,12 @@ struct GlobalSearchWindow::Impl {
                       aliases.end());
         size_t duplicates = 0;
         for (const auto& hit : merged.hits) {
-            if (listed(aliases, hit.path) || listed(jump_rows, hit.path)) {
+            if (hit.recycle_path.empty() && (listed(aliases, hit.path) || listed(jump_rows, hit.path))) {
                 ++duplicates;  // already listed under its alias or 跳转
                 continue;
             }
             Row row{hit.name, hit.path, {}, hit.is_dir};
+            row.recycle_path = hit.recycle_path;
             row.size = hit.size; row.mtime = hit.mtime; row.network = IsNetworkPath(hit.path);
             rows.push_back(std::move(row));
         }
@@ -639,8 +721,8 @@ struct GlobalSearchWindow::Impl {
         rows.insert(rows.begin() + static_cast<std::ptrdiff_t>(jump_count + best_count), app_rows.begin(), app_rows.end());
         app_count = app_rows.size();
         total = (std::max)(merged.total - (std::min)(merged.total, duplicates) + alias_count + jump_count + app_count, rows.size());
-        truncated = total > rows.size(); busy = providers.Busy();
-        error = providers.Error() ? Text(rows.empty() ? StringId::GlobalSearchFailed : StringId::SearchIncomplete) : std::wstring{};
+        truncated = total > rows.size(); busy = providers.Busy() || !recycle_ready;
+        error = (providers.Error() || recycle_result.error) ? Text(rows.empty() ? StringId::GlobalSearchFailed : StringId::SearchIncomplete) : std::wstring{};
         if (!busy) KillTimer(hwnd, kConnectTimeout);
         if (!had_rows && !rows.empty()) appear_start = ui::motion::NowMs();
         BuildLayout();
@@ -649,11 +731,16 @@ struct GlobalSearchWindow::Impl {
         ClampSelection(false);
         if (restored < 0) selected = rows.empty() ? -1 : 0;
         UpdateCounts();
-        RequestThumbnail();
+        SyncPreview();
         Invalidate();
     }
     void TimeoutFilenames() {
         providers.Timeout();
+        if (!recycle_ready) {
+            if (recycle_request) recycle_request->cancelled = true;
+            recycle_ready = true;
+            recycle_result.error = ERROR_TIMEOUT;
+        }
         MergeFilenames();
     }
     void AcceptFilenames(bool from_network, uint32_t id, index::SearchResult result) {
@@ -674,8 +761,21 @@ struct GlobalSearchWindow::Impl {
         return out;
     }
     void Open(bool location, void (*open_result)(std::wstring, bool) = OpenResult) {
+        if (command_mode) { ExecuteCommand(); return; }
         if (stale || rows.empty() || selected < 0 || selected >= static_cast<int>(rows.size())) return;
         const auto& row = rows[static_cast<size_t>(selected)];
+        if (!row.recycle_path.empty()) {
+            if (!handoff) return;
+            auto request = MakeHandoff();
+            request.folder = L"pulse:recycle";
+            request.content = false;
+            request.query = L"\"" + row.name + L"\"";
+            request.filters.clear();
+            const auto handler = handoff;
+            Hide();
+            handler(request);
+            return;
+        }
         auto path = row.path;
         if (row.app) {
             // An app has no location to reveal and stays out of the recent files.
@@ -685,7 +785,9 @@ struct GlobalSearchWindow::Impl {
         const bool directory = row.directory;
         const auto search = MakeHandoff();
         const auto opened = events.opened;
-        Hide(); open_result(path, location);
+        const auto route = events.open_path;
+        Hide();
+        if (!route || !route(path, directory, location)) open_result(path, location);
         if (opened) opened(search, path, directory);
     }
     void Handoff() {
@@ -710,8 +812,52 @@ struct GlobalSearchWindow::Impl {
         return path::StripExtendedPathPrefix(scopes[static_cast<size_t>(hover_index)].path);
     }
     void CopyPath() {
+        if (command_mode || calculation) return;
+        if (!marked_paths.empty()) {
+            std::wstring text;
+            for (const auto& path : marked_paths) { if (!text.empty()) text += L"\r\n"; text += path::StripExtendedPathPrefix(path); }
+            CopyText(text); return;
+        }
         if (selected < 0 || selected >= static_cast<int>(rows.size())) return;
         const auto path = path::StripExtendedPathPrefix(rows[static_cast<size_t>(selected)].path);
+        CopyText(path);
+    }
+    void CopyCalculation(bool expression) {
+        if (!calculation) return;
+        CopyText(expression ? raw_query : calculation->text);
+        if (!expression && calculation->has_value) previous_answer = calculation->value;
+    }
+    const std::wstring& CommandLabel(app::GlobalSearchCommand command) const {
+        switch (command) {
+        case app::GlobalSearchCommand::ToggleTheme: return Text(StringId::TooltipToggleTheme);
+        case app::GlobalSearchCommand::ToggleView: return Text(StringId::AiCtlStepView);
+        case app::GlobalSearchCommand::OpenStaging: return Text(StringId::TrayShelfTitle);
+        case app::GlobalSearchCommand::ClearStaging: return Text(StringId::TrayMenuClear);
+        case app::GlobalSearchCommand::ContinueSearch: return Text(StringId::GlobalSearchHandoff);
+        case app::GlobalSearchCommand::ClearHistory: return Text(StringId::SearchHistoryClear);
+        }
+        return Text(StringId::Open);
+    }
+    void ExecuteCommand() {
+        if (selected < 0 || selected >= static_cast<int>(commands.size())) return;
+        switch (commands[static_cast<size_t>(selected)]) {
+        case app::GlobalSearchCommand::ToggleTheme: if (events.toggle_theme) events.toggle_theme(); break;
+        case app::GlobalSearchCommand::ToggleView: grid_view = !grid_view; break;
+        case app::GlobalSearchCommand::OpenStaging: tray_open = true; break;
+        case app::GlobalSearchCommand::ClearStaging: if (events.clear_staging) events.clear_staging(); break;
+        case app::GlobalSearchCommand::ContinueSearch:
+            if (handoff) {
+                auto request = MakeHandoff(); request.query = app::NormalizeGlobalSearchQuery(last_search_query);
+                const auto handler = handoff; Hide(); handler(request);
+            }
+            return;
+        case app::GlobalSearchCommand::ClearHistory:
+            if (events.clear_search_history) events.clear_search_history();
+            context.recent_queries.clear(); break;
+        }
+        SetWindowTextW(edit, L"");
+    }
+    void CopyText(const std::wstring& path) {
         if (!OpenClipboard(hwnd)) return;
         EmptyClipboard();
         const size_t bytes = (path.size() + 1) * sizeof(wchar_t);
@@ -732,19 +878,96 @@ struct GlobalSearchWindow::Impl {
     }
     void SetScope(int index) {
         if (index < 0 || index >= static_cast<int>(scopes.size())) return;
+        browse_folder.clear(); browse_history.clear();
         scope = scope == index && index != 0 ? 0 : index;
         Changed();
     }
     void SetMode(bool content) {
         if (content_mode == content) return;
         content_mode = content;
+        SendMessageW(edit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(Text(content_mode ? StringId::SearchContentHint : StringId::SearchNameHint).c_str()));
         Changed();
+    }
+    void SearchScopeMenu() {
+        if (!EnsureTarget() || !result_menu.Create(hwnd, &compositor, scale)) return;
+        result_menu.SetTheme(dark, accent_color);
+        std::vector<ui::FluentMenuItem> items;
+        for (size_t i = 0; i < scopes.size(); ++i) {
+            ui::FluentMenuItem item;
+            item.command = static_cast<int>(i) + 1; item.text = scopes[i].label; item.glyph = scopes[i].glyph;
+            item.checked = browse_folder.empty() && scope == static_cast<int>(i);
+            item.radio = item.checked; item.radio_group = true; items.push_back(std::move(item));
+        }
+        const auto bounds = SearchFieldLayout().scope;
+        POINT point{Px(bounds.left) - ui::FluentMenu::kShadowMargin, Px(bounds.bottom + 4) - ui::FluentMenu::kShadowMargin};
+        ClientToScreen(hwnd, &point);
+        result_menu_open = true;
+        const int chosen = result_menu.TrackPopup(point, std::move(items));
+        result_menu_open = false;
+        if (!IsWindowVisible(hwnd)) return;
+        if (chosen > 0 && chosen <= static_cast<int>(scopes.size())) {
+            browse_folder.clear(); browse_history.clear(); scope = chosen - 1; Changed();
+        }
+        SetFocus(edit);
     }
     void TogglePreview() {
         preview_open = !preview_open;
-        RequestThumbnail();
+        BuildLayout();
+        SyncPreview();
         ClampSelection();
         Invalidate();
+    }
+    void SearchDirectory() {
+        auto job = std::make_shared<DirectoryRequest>();
+        directory_request = job;
+        const auto folder = browse_folder;
+        const auto compiled = index::ParseQuery(query + FilterTokens());
+        rows.clear(); showing_recent = stale = false; busy = true; error.clear();
+        best_count = folder_count = jump_count = app_count = 0;
+        selected = -1; scroll = scroll_target = 0;
+        BuildLayout(); Invalidate();
+        std::thread([job, folder, compiled, failure_label = Text(StringId::GlobalSearchFailed), notify = hwnd, id = generation] {
+            std::vector<fs::DirEntry> entries;
+            std::vector<Row> result;
+            std::wstring failure;
+            try {
+                fs::EnumerationOptions options;
+                options.cancelled = [job] { return job->cancelled.load(); };
+                fs::EnumerateDirectory(folder, entries, options);
+                for (const auto& entry : entries) {
+                    if (job->cancelled) return;
+                    const std::wstring full = folder + (folder.back() == L'\\' ? L"" : L"\\") + entry.name;
+                    const uint64_t modified = (static_cast<uint64_t>(entry.mtime.dwHighDateTime) << 32) | entry.mtime.dwLowDateTime;
+                    bool matches = compiled.groups.empty();
+                    for (const auto& group : compiled.groups) {
+                        if (std::all_of(group.begin(), group.end(), [&](const index::Term& term) {
+                            return index::MatchTerm(full, entry.name, entry.is_dir, entry.size, modified, term);
+                        })) { matches = true; break; }
+                    }
+                    if (matches) result.push_back({entry.name, full, L"", entry.is_dir, entry.size, modified, IsNetworkPath(full)});
+                }
+                std::stable_sort(result.begin(), result.end(), [](const Row& a, const Row& b) {
+                    return a.directory != b.directory ? a.directory : StrCmpLogicalW(a.name.c_str(), b.name.c_str()) < 0;
+                });
+            } catch (...) { failure = failure_label; }
+            if (job->cancelled) return;
+            { std::lock_guard lock(job->mutex); job->rows = std::move(result); job->error = std::move(failure); }
+            if (!job->cancelled) PostMessageW(notify, kDirectoryResult, id, 0);
+        }).detach();
+    }
+    void EnterFolder() {
+        if (stale || selected < 0 || selected >= static_cast<int>(rows.size())) return;
+        const auto row = rows[static_cast<size_t>(selected)];
+        if (!row.directory || !row.recycle_path.empty()) return;
+        browse_history.push_back(browse_folder);
+        browse_folder = row.path;
+        SetWindowTextW(edit, L"");
+    }
+    void BackFolder() {
+        if (browse_folder.empty()) return;
+        browse_folder = browse_history.empty() ? ParentPath(browse_folder) : browse_history.back();
+        if (!browse_history.empty()) browse_history.pop_back();
+        Changed();
     }
     void PickPlace() {
         ComPtr<IFileOpenDialog> dialog;
@@ -802,6 +1025,22 @@ struct GlobalSearchWindow::Impl {
     bool Key(WPARAM key) {
         if (composing) return false;
         const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0, shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        const bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+        if (ctrl && key == 'A' && keyboard_nav && !command_mode) { MarkRange(0, static_cast<int>(rows.size()) - 1); swallow_char = 1; Invalidate(); return true; }
+        if (ctrl && key == 'K') { swallow_char = 11; POINT point{Px(ListLeft() + 90), Px(ListTop() + 45)}; ClientToScreen(hwnd, &point); ResultMenu(point); return true; }
+        if (alt && key == 'A') { StageSelection(); return true; }
+        if (alt && (key == '1' || key == '2')) { grid_view = key == '2'; BuildLayout(); Invalidate(); return true; }
+        if (ctrl && key == VK_SPACE) { ToggleMarked(); swallow_char = L' '; return true; }
+        if (key == VK_RETURN && calculation && !shift) { CopyCalculation(ctrl); return true; }
+        if (key == VK_ESCAPE && tray_open) { tray_open = false; Invalidate(); return true; }
+        if (key == VK_RIGHT && keyboard_nav && !IsGrid()) { EnterFolder(); return true; }
+        if (IsGrid() && keyboard_nav && (key == VK_LEFT || key == VK_RIGHT)) {
+            const int previous = selected;
+            selected += key == VK_RIGHT ? 1 : -1; ClampSelection();
+            if (shift) MarkRange(previous, selected);
+            Invalidate(); return true;
+        }
+        if (key == VK_BACK && raw_query.empty() && !browse_folder.empty()) { BackFolder(); return true; }
         if (key == VK_ESCAPE) { if (preview_open) TogglePreview(); else Hide(); return true; }
         if (key == VK_RETURN) {
             if (shift) Handoff();
@@ -810,12 +1049,15 @@ struct GlobalSearchWindow::Impl {
         }
         if (key == VK_UP || key == VK_DOWN || key == VK_PRIOR || key == VK_NEXT) {
             if (rows.empty()) return true;
+            const int previous = selected;
             if (selected < 0) selected = key == VK_UP || key == VK_PRIOR ? static_cast<int>(rows.size()) - 1 : 0;
-            else selected = std::max(0, selected + (key == VK_UP ? -1 : key == VK_DOWN ? 1 : key == VK_PRIOR ? -PageSize() : PageSize()));
+            else selected = std::max(0, selected + (key == VK_UP ? -(IsGrid() ? GridColumns() : 1) : key == VK_DOWN ? (IsGrid() ? GridColumns() : 1) : key == VK_PRIOR ? -PageSize() : PageSize()));
             keyboard_nav = true;
-            ClampSelection(); RequestThumbnail(); Invalidate(); return true;
+            ClampSelection();
+            if (shift) MarkRange(previous, selected);
+            Invalidate(); return true;
         }
-        if (key == VK_TAB) { content_mode = !content_mode; Changed(); return true; }
+        if (key == VK_TAB) { SetMode(!content_mode); return true; }
         if (key == VK_SPACE && (keyboard_nav || preview_open) && !ctrl && !rows.empty()) {
             swallow_char = L' '; TogglePreview(); return true;
         }
@@ -833,13 +1075,15 @@ struct GlobalSearchWindow::Impl {
     }
     static LRESULT CALLBACK EditProc(HWND window, UINT message, WPARAM wp, LPARAM lp, UINT_PTR, DWORD_PTR data) {
         auto* self = reinterpret_cast<Impl*>(data);
+        if (message == WM_SETFOCUS || message == WM_KILLFOCUS) self->Invalidate();
         if (message == WM_IME_STARTCOMPOSITION) { self->composing = true; self->Cancel(); }
         if (message == WM_IME_ENDCOMPOSITION) {
             self->composing = false;
             const auto result = self->DefaultEdit(window, message, wp, lp);
             self->Changed(); return result;
         }
-        if (message == WM_KEYDOWN && self->Key(wp)) return 0;
+        if ((message == WM_KEYDOWN || message == WM_SYSKEYDOWN) && self->Key(wp)) return 0;
+        if (message == WM_SYSCHAR && (wp == L'a' || wp == L'A' || wp == L'1' || wp == L'2')) return 0;
         if (message == WM_CHAR && self->swallow_char) {
             const bool same = static_cast<wchar_t>(wp) == self->swallow_char;
             self->swallow_char = 0;
@@ -855,27 +1099,23 @@ struct GlobalSearchWindow::Impl {
         return ui::DefPresentedChildEditProc(compositor, edit_format.Get(), Theme().text,
             EditBackground(), window, message, wp, lp);
     }
-    // Segment (文件名 | 内容) inside the right end of the field.
+    // The same active search field layout used beside the main address bar.
     D2D1_RECT_F FieldRect() const { return {kFieldLeft, kFieldTop, width - kFieldRight, kFieldTop + kFieldHeight + grow}; }
-    float ModeItemWidth(bool content_item) { return TextWidth(Text(content_item ? StringId::SearchModeContent : StringId::SearchModeName), 12.5f) + 24; }
-    D2D1_RECT_F ModeRect() {
-        const auto field = FieldRect();
-        const float w = ModeItemWidth(false) + ModeItemWidth(true) + 6;
-        const float mid = (field.top + field.bottom) / 2;
-        return {field.right - 7 - w, mid - 15, field.right - 7, mid + 15};
-    }
+    ui::AddressSearchLayout SearchFieldLayout() const { return ui::LayoutAddressSearchControl(FieldRect(), 1, false); }
+    D2D1_RECT_F ModeRect() const { return SearchFieldLayout().mode; }
     void Layout() {
         RECT rect{}; GetClientRect(hwnd, &rect);
         width = static_cast<float>(rect.right) / scale; height = static_cast<float>(rect.bottom) / scale;
         if (target) {
-            if (target.Get() == compositor.Dc()) compositor.Resize(rect.right, rect.bottom);
+            if (target.Get() == compositor.Dc() &&
+                (compositor.Width() != rect.right || compositor.Height() != rect.bottom))
+                compositor.Resize(rect.right, rect.bottom);
             target->SetDpi(96 * scale, 96 * scale);
             ComPtr<ID2D1HwndRenderTarget> window_target;
             if (SUCCEEDED(target.As(&window_target))) window_target->Resize(D2D1::SizeU(static_cast<UINT32>(rect.right), static_cast<UINT32>(rect.bottom)));
         }
-        // The query line follows the interface font size like every other
-        // hosted edit (UI family, 20 DIP x font size x DPI).
-        if (HFONT font = ui::typography::CreateEditFont(scale, 20.0f)) {
+        // Use the address-search hosted edit's UI family and 14-DIP sizing.
+        if (HFONT font = ui::typography::CreateEditFont(scale)) {
             if (edit_font) DeleteObject(edit_font);
             edit_font = font;
         }
@@ -883,19 +1123,20 @@ struct GlobalSearchWindow::Impl {
             edit_format.Reset();
             write_factory->CreateTextFormat(ui::typography::PreferredTextFamily(), nullptr, DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
-                static_cast<float>(ui::typography::EditFontPixels(scale, 20.0f)), l10n::LocaleName(), &edit_format);
+                static_cast<float>(ui::typography::EditFontPixels(scale)), l10n::LocaleName(), &edit_format);
         }
         SendMessageW(edit, WM_SETFONT, reinterpret_cast<WPARAM>(edit_font), TRUE);
-        // The hint reads lighter than the query: 16 DIP against 20.
+        // Use the main address-search editor's typography for input and hint.
         SetPropW(edit, L"Pulse.EditCueSize",
-            reinterpret_cast<HANDLE>(static_cast<INT_PTR>(ui::typography::EditFontPixels(scale, 16.0f))));
+            reinterpret_cast<HANDLE>(static_cast<INT_PTR>(ui::typography::EditFontPixels(scale))));
         // One text line plus 4 DIP inside the 44 DIP field; taller fonts grow the header.
         const float line_dip = static_cast<float>(ui::EditLineHeight(edit, edit_font, 1 << 16)) / scale;
         grow = std::max(0.0f, std::ceil(line_dip + 14.0f - kFieldHeight));
         const float field_h = std::ceil(line_dip + 4.0f);
         const auto field = FieldRect();
-        const float edit_left = field.left + 42;
-        const float edit_right = ModeRect().left - 10;
+        const auto input = SearchFieldLayout().input;
+        const float edit_left = input.left;
+        const float edit_right = input.right;
         const float edit_width = std::max(40.0f, edit_right - edit_left);
         const float edit_top = (field.top + field.bottom - field_h) / 2;
         MoveWindow(edit, Px(edit_left), Px(edit_top), Px(edit_width), Px(field_h), TRUE);
@@ -943,6 +1184,17 @@ struct GlobalSearchWindow::Impl {
     void Label(const std::wstring& text, D2D1_RECT_F rect, float size, UINT32 color, bool bold = false, const wchar_t* face = L"Segoe UI", bool highlight = false, DWRITE_TEXT_ALIGNMENT alignment = DWRITE_TEXT_ALIGNMENT_LEADING) {
         LabelC(text, rect, size, Color(color), bold, face, highlight, alignment);
     }
+    std::wstring name_highlight_query;
+    bool name_highlight_pinyin = true;
+    std::vector<index::Term> name_highlight_terms;
+    std::vector<ui::NameMatchRange> FilenameHighlightRanges(std::wstring_view name) {
+        if (name_highlight_query != query || name_highlight_pinyin != search_pinyin) {
+            name_highlight_query = query;
+            name_highlight_pinyin = search_pinyin;
+            name_highlight_terms = ui::NameHighlightTerms({}, search_pinyin ? query : L"nopinyin: " + query);
+        }
+        return ui::NameMatchRanges(name, name_highlight_terms);
+    }
     void LabelC(const std::wstring& text, D2D1_RECT_F rect, float size, D2D1_COLOR_F color, bool bold = false, const wchar_t* face = L"Segoe UI", bool highlight = false, DWRITE_TEXT_ALIGNMENT alignment = DWRITE_TEXT_ALIGNMENT_LEADING, bool wrap = false) {
         if (text.empty() || rect.right <= rect.left) return;
         ComPtr<IDWriteTextFormat> format;
@@ -962,7 +1214,17 @@ struct GlobalSearchWindow::Impl {
         if (highlight && !query.empty() && SUCCEEDED(write_factory->CreateTextLayout(text.data(), static_cast<UINT32>(text.size()), format.Get(),
             std::max(0.0f, rect.right - rect.left), std::max(0.0f, rect.bottom - rect.top), &layout))) {
             ComPtr<ID2D1SolidColorBrush> accent;
-            if (SUCCEEDED(target->CreateSolidColorBrush(MarkColor(), &accent))) {
+            if (!content_mode) {
+                const auto matches = FilenameHighlightRanges(text);
+                if (target.Get() == compositor.Dc()) {
+                    // This surface uses DIPs; the target applies the monitor DPI.
+                    ui::DrawNameHighlightBackground(&compositor, layout.Get(), {rect.left, rect.top},
+                        rect, matches, Theme(), 1.0f);
+                } else if (SUCCEEDED(target->CreateSolidColorBrush(MarkColor(), &accent))) {
+                    for (const auto& match : matches)
+                        layout->SetDrawingEffect(accent.Get(), {match.start, match.length});
+                }
+            } else if (SUCCEEDED(target->CreateSolidColorBrush(MarkColor(), &accent))) {
                 // Every word of the query is marked where it occurs.
                 size_t begin = 0;
                 while ((begin = query.find_first_not_of(L" \t", begin)) != std::wstring::npos) {
@@ -1088,46 +1350,67 @@ struct GlobalSearchWindow::Impl {
             SHGFI_TYPENAME | SHGFI_USEFILEATTRIBUTES)) return info.szTypeName;
         return {};
     }
-    void RequestThumbnail() {
-        if (!preview_open || selected < 0 || selected >= static_cast<int>(rows.size())) return;
-        const auto& path = rows[static_cast<size_t>(selected)].path;
-        if (path == thumbnail_wanted) return;
-        thumbnail_wanted = path;
-        thumbnail.Reset(); thumbnail_path.clear();
-        if (!thumbnails) {
-            thumbnails = std::make_shared<ThumbnailWorker>();
-            thumbnails->notify = hwnd;
-            std::thread(ThumbnailWorker::Run, thumbnails).detach();
-        }
-        {
-            std::lock_guard lock(thumbnails->mutex);
-            thumbnails->path = path; thumbnails->wanted = ++thumbnail_request;
-        }
-        thumbnails->wake.notify_one();
+    void ClearPreviewMessages() {
+        if (!hwnd) return;
+        MSG pending{};
+        while (PeekMessageW(&pending, hwnd, kPreviewNavigate, kPreviewOpen, PM_REMOVE)) {}
+        preview.TakeOpenPath();
     }
-    void TakeThumbnail() {
-        if (!thumbnails || !target) return;
-        HBITMAP bitmap = nullptr; uint64_t id = 0;
-        {
-            std::lock_guard lock(thumbnails->mutex);
-            bitmap = thumbnails->bitmap; id = thumbnails->bitmap_id; thumbnails->bitmap = nullptr;
+    void ClosePreview() {
+        ClearPreviewMessages();
+        preview.Close();
+        preview_occluded = false;
+        preview_requested = {};
+    }
+    D2D1_RECT_F PreviewContentBounds() const {
+        const float top = Header() + 1;
+        return {width - PreviewWidth() + 16, top + 16, width - 16,
+            top + 16 + std::max(ListBottom() - top - 280, 70.0f)};
+    }
+    void SyncPreview() {
+        if (!hwnd || !IsWindowVisible(hwnd) || IsIconic(hwnd) || PreviewWidth() <= 0 ||
+            command_mode || calculation || stale || selected < 0 || selected >= static_cast<int>(rows.size())) {
+            ClosePreview();
+            return;
         }
-        if (!bitmap) return;
-        if (id == thumbnail_request) {
-            ComPtr<IWICImagingFactory> wic;
-            ComPtr<IWICBitmap> source;
-            ComPtr<IWICFormatConverter> converter;
-            thumbnail.Reset();
-            if (SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))) &&
-                SUCCEEDED(wic->CreateBitmapFromHBITMAP(bitmap, nullptr, WICBitmapUseAlpha, &source)) &&
-                SUCCEEDED(wic->CreateFormatConverter(&converter)) &&
-                SUCCEEDED(converter->Initialize(source.Get(), GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom)) &&
-                SUCCEEDED(target->CreateBitmapFromWicBitmap(converter.Get(), nullptr, &thumbnail))) {
-                thumbnail_path = thumbnail_wanted; thumbnail_target = target.Get();
+        const auto& row = rows[static_cast<size_t>(selected)];
+        if (row.app || row.path.empty()) { ClosePreview(); return; }
+        const auto box = PreviewContentBounds();
+        RECT bounds{Px(box.left), Px(box.top), Px(box.right), Px(box.bottom)};
+        if (box.bottom > ListBottom() - 94 || bounds.right <= bounds.left || bounds.bottom <= bounds.top) {
+            ClosePreview(); return;
+        }
+        // No file-command channel: the search panel only exposes its existing open/path actions.
+        if (!preview.InitializeEmbedded(hwnd, kPreviewNavigate, kPreviewOpen, 0)) return;
+        ui::QuickPreviewItem item;
+        item.path = row.recycle_path.empty() ? row.path : row.recycle_path;
+        item.name = row.name;
+        item.attrs = row.directory ? FILE_ATTRIBUTE_DIRECTORY : 0;
+        item.modified = row.mtime; item.size = row.size;
+        item.position = selected + 1; item.count = static_cast<int>(rows.size());
+        preview.SetAccent(accent_color);
+        // The host refreshes disk facts itself; compare the requested result identity.
+        const auto& shown = preview_requested;
+        if ((!preview.visible() && !preview_occluded) || preview_dark != dark || shown.path != item.path ||
+            shown.modified != item.modified || shown.size != item.size || shown.attrs != item.attrs) {
+            ClearPreviewMessages();
+            preview_dark = dark;
+            preview_requested = item;
+            preview.ShowEmbedded(item, bounds, dark, false);
+        } else preview.SetEmbeddedBounds(bounds);
+        preview.SetSearchQuery(content_mode ? query : std::wstring{});
+        // These overlays share the parent surface; child HWNDs otherwise cover them.
+        // Hide only the surface so closing an overlay preserves decoding and scroll state.
+        const bool occluded = (tray_open && events.staged_paths) ||
+            (scope_tooltip_visible && !TooltipText().empty());
+        if (occluded) {
+            if (preview.visible()) {
+                ClearPreviewMessages();
+                if (GetFocus() == preview.hwnd() || IsChild(preview.hwnd(), GetFocus())) SetFocus(edit);
+                ShowWindow(preview.hwnd(), SW_HIDE);
             }
-            Invalidate();
-        }
-        DeleteObject(bitmap);
+        } else if (preview_occluded) ShowWindow(preview.hwnd(), SW_SHOWNOACTIVATE);
+        preview_occluded = occluded;
     }
     std::wstring FooterStatus() const {
         if (!error.empty()) return rows.empty() ? L"" : error;
@@ -1190,29 +1473,38 @@ struct GlobalSearchWindow::Impl {
         }
         return p;
     }
-    void AddHot(D2D1_RECT_F rect, Hot kind, int index = 0) { hot.push_back({rect, kind, index}); }
+    void AddHot(D2D1_RECT_F rect, Hot kind, int index = 0) {
+        if (kind == HotRow) { rect.top = std::max(rect.top, ListTop()); rect.bottom = std::min(rect.bottom, ListBottom()); }
+        if (rect.bottom > rect.top && rect.right > rect.left) hot.push_back({rect, kind, index});
+    }
     bool Hovered(Hot kind, int index = 0) const { return hover_kind == kind && hover_index == index; }
 
     void DrawHeader(const Palette& p) {
         const float mid = (kFieldTop + kFieldTop + kFieldHeight + grow) / 2;
         DrawLogo({20, mid - 15, 50, mid + 15});
         const auto field = FieldRect();
-        FillC(field, FieldColor(), kEditCornerRadius);
-        StrokeC(field, p.line, kEditCornerRadius);
-        FillC({field.left + 10, field.bottom - 2, field.right - 10, field.bottom}, p.accent, 1);
-        CommandIcon(L"\xE721", {field.left + 14, mid - 12, field.left + 38, mid + 12}, 17, p.muted);
-        // name / content segment
-        const auto seg = ModeRect();
-        AddHot(seg, HotMode);
-        FillC(seg, p.chip, 7);
-        const float name_w = ModeItemWidth(false);
-        const D2D1_RECT_F name_rect{seg.left + 3, seg.top + 3, seg.left + 3 + name_w, seg.bottom - 3};
-        const D2D1_RECT_F content_rect{name_rect.right, seg.top + 3, seg.right - 3, seg.bottom - 3};
-        const auto plate = mode_motion.Update(1, content_mode ? 1 : 0, content_mode ? content_rect : name_rect, frame, ui::motion::NowMs(), ui::motion::spring::Snappy);
-        FillC(plate, dark ? D2D1::ColorF(0x464851) : D2D1::ColorF(0xffffff), 5);
-        if (!dark) StrokeC(plate, p.line, 5);
-        LabelC(Text(StringId::SearchModeName), name_rect, 12.5f, content_mode ? p.muted : p.text, false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_CENTER);
-        LabelC(Text(StringId::SearchModeContent), content_rect, 12.5f, content_mode ? p.text : p.muted, false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_CENTER);
+        const auto layout = SearchFieldLayout();
+        AddHot(field, HotSearchField);
+        AddHot(layout.scope, HotSearchScope); AddHot(layout.mode, HotMode); AddHot(layout.close, HotSearchClear);
+        ui::AddressSearchControlState control;
+        control.focused = GetFocus() == edit; control.content = content_mode;
+        control.current = !ScopePath().empty();
+        control.scope_label = browse_folder.empty() && scope >= 0 && scope < static_cast<int>(scopes.size())
+            ? scopes[static_cast<size_t>(scope)].label : LeafName(browse_folder);
+        if (Hovered(HotSearchScope)) control.hover = ui::AddressSearchPart::Scope;
+        else if (Hovered(HotMode)) control.hover = ui::AddressSearchPart::Mode;
+        else if (Hovered(HotSearchClear)) control.hover = ui::AddressSearchPart::Close;
+        else if (Hovered(HotSearchField)) control.hover = ui::AddressSearchPart::Field;
+        painter.SetScale(1);
+        const auto theme = Theme();
+        if (painter.BeginFrame(theme, ui::IsHighContrast())) {
+            ui::DrawAddressSearchControl(painter, compositor.Dc(), theme, field, layout, 1, control,
+                [&](float x, float y, float w, float h, const wchar_t* glyph, D2D1_COLOR_F color, float ratio) {
+                    CommandIcon(glyph, {x, y, x + w, y + h}, std::min(w, h) * ratio, color);
+                },
+                [&](const std::wstring& text, D2D1_RECT_F bounds, D2D1_COLOR_F color) { LabelC(text, bounds, 12, color); },
+                [&](const std::wstring& text) { return TextWidth(text, 12); });
+        }
         // Esc
         const D2D1_RECT_F esc{width - 56, mid - 11, width - 20, mid + 11};
         AddHot(esc, HotEsc);
@@ -1242,7 +1534,7 @@ struct GlobalSearchWindow::Impl {
     void DrawSide(const Palette& p) {
         const float side = SideWidth();
         if (side <= 0) return;
-        const float top = ListTop(), bottom = ListBottom();
+        const float top = Header() + 1, bottom = ListBottom();
         FillC({side, top, side + 1, bottom}, p.line);
         target->PushAxisAlignedClip({0, top, side, bottom}, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         float y = top + 8;
@@ -1314,11 +1606,31 @@ struct GlobalSearchWindow::Impl {
         row_y += 4;
         LabelC(Text(StringId::SearchChipDate), {20, row_y, side - 12, row_y + 22}, 11.5f, p.faint);
         row_y += 26;
-        chips(row_y, 5, [&](int i) { return Text(kDateLabels[i]); }, [](int) { return 0u; }, date_filter, HotDate);
+        if (!content_mode) {
+            timeline_rect = {18, row_y, side - 18, row_y + 48};
+            std::array<size_t, 12> counts{};
+            FILETIME time{}; GetSystemTimeAsFileTime(&time);
+            const uint64_t now = (static_cast<uint64_t>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
+            for (const auto& row : rows) {
+                if (!row.mtime || row.mtime > now) continue;
+                const auto age = (now - row.mtime) / (7ull * 864000000000ull);
+                if (age < 12) ++counts[11 - static_cast<size_t>(age)];
+            }
+            const size_t max_count = std::max<size_t>(1, *std::max_element(counts.begin(), counts.end()));
+            const float bw = (timeline_rect.right - timeline_rect.left) / 12;
+            for (int i = 0; i < 12; ++i) {
+                const float x = timeline_rect.left + i * bw;
+                AddHot({x, row_y, x + bw, row_y + 48}, HotTimeline, i);
+                const float h = std::max(2.0f, 48 * static_cast<float>(counts[static_cast<size_t>(i)]) / static_cast<float>(max_count));
+                FillC({x, row_y + 48 - h, x + bw - 3, row_y + 48}, timeline_first >= 0 && i >= timeline_first && i <= timeline_last ? p.accent : WithAlpha(p.faint, .45f), 2);
+            }
+            LabelC(Text(StringId::GlobalSearchTimelineResults), {18, row_y + 50, side - 18, row_y + 75}, 10.5f, p.faint);
+        }
         target->PopAxisAlignedClip();
     }
     void DrawRow(size_t i, float y, float left, float right, const Palette& p, float alpha) {
         const auto& row = rows[i];
+        if (IsMarked(row.path)) FillC({left, y, right, y + RowHeight()}, p.sel, 8);
         const bool sel = static_cast<int>(i) == selected && (keyboard_nav || !showing_recent);
         const float h = RowHeight();
         const bool content_row = content_mode && !showing_recent;
@@ -1327,17 +1639,21 @@ struct GlobalSearchWindow::Impl {
         const D2D1_RECT_F rect{left, y, right, y + h};
         if (Hovered(HotRow, static_cast<int>(i)) && !sel) FillC(rect, p.hover, 7);
         const float icon_top = content_row ? y + 10 : y + (h - 28) / 2;
-        icons.Draw(compositor.Dc(), {left + 12, icon_top, left + 40, icon_top + 28}, row.path, row.name, row.directory,
-            row.directory ? FILE_ATTRIBUTE_DIRECTORY : 0);
+        const D2D1_RECT_F icon_rect{left + 12, icon_top, left + 40, icon_top + 28};
+        if (!icons.Draw(compositor.Dc(), icon_rect, row.recycle_path.empty() ? row.path : row.recycle_path, row.name, row.directory,
+            row.directory ? FILE_ATTRIBUTE_DIRECTORY : 0))
+            CommandIcon(row.directory ? L"\xE8B7" : L"\xE8A5", icon_rect, 22, p.faint);
         const float text_left = left + 52;
-        const float hints_w = sel ? (row.app ? 90.0f : row.directory || preview_open ? 150.0f : 205.0f) : 0.0f;
-        const float meta_w = sel ? 0.0f : 112.0f;
+        const bool show_hints = sel && right - left >= 460;
+        const float hints_w = show_hints ? (row.app ? 90.0f : row.directory || preview_open ? 150.0f : 205.0f) : 0.0f;
+        const float meta_w = sel || right - left < 360 ? 0.0f : 112.0f;
         const float text_right = right - 12 - std::max(hints_w, meta_w);
         const float name_top = content_row ? y + 8 : y + 7;
         LabelC(row.alias.empty() ? row.name : row.alias + L" \x00B7 " + row.name, {text_left, name_top, text_right, name_top + 20}, 14,
                p.text, false, L"Segoe UI", !showing_recent);
         const float path_top = name_top + 20;
         std::wstring parent = row.app ? Text(StringId::TypeApplication) : path::StripExtendedPathPrefix(ParentPath(row.path));
+        if (!row.recycle_path.empty()) parent = Text(StringId::RecycleBin) + L" · " + parent;
         float path_left = text_left;
         if (row.network) {
             CommandIcon(L"\xE8CE", {text_left, path_top + 2, text_left + 14, path_top + 15}, 10, p.faint);
@@ -1346,13 +1662,13 @@ struct GlobalSearchWindow::Impl {
         LabelC(MiddleEllipsis(parent, text_right - path_left, 12), {path_left, path_top, text_right, path_top + 17}, 12, p.faint);
         if (content_row && !row.snippet.empty())
             LabelC(row.snippet, {text_left, path_top + 19, right - 16, path_top + 41}, 12.5f, p.muted, false, L"Segoe UI", true);
-        if (!sel && !row.app) {
+        if (!sel && !row.app && meta_w > 0) {
             const auto time = FormatTime(row.mtime);
             const auto size = row.directory ? Text(StringId::KindFolder) : row.size || row.mtime ? FormatSize(row.size) : std::wstring{};
             const float mt = content_row ? y + 9 : y + 8;
             LabelC(time, {right - 12 - meta_w, mt, right - 12, mt + 17}, 11.5f, p.faint, false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_TRAILING);
             LabelC(size, {right - 12 - meta_w, mt + 17, right - 12, mt + 34}, 11.5f, p.faint, false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_TRAILING);
-        } else if (sel) {
+        } else if (show_hints) {
             const float mid = content_row ? y + 20 : y + h / 2;
             float r = right - 12;
             if (!row.app) r = KeyHint(L"Ctrl \x21B5", Text(StringId::Location), r, mid, p.muted, p.key) - 12;
@@ -1372,7 +1688,7 @@ struct GlobalSearchWindow::Impl {
             LabelC(error, {left + 16, y, right - 16, y + 40}, 14, p.muted, false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_CENTER);
             return;
         }
-        if (query.empty()) {
+        if (!HasSearchQuery() && browse_folder.empty()) {
             if (empty_art_target != target.Get() || empty_art_scale != scale) {
                 empty_art.Reset(); empty_art_target = target.Get(); empty_art_scale = scale;
                 ui::CreateSvgResourceBitmap(target.Get(), IDR_EMPTY_FOLDER_SVG,
@@ -1382,7 +1698,7 @@ struct GlobalSearchWindow::Impl {
             LabelC(Text(StringId::GlobalSearchEmpty), {left, y + 36, right, y + 62}, 14, p.muted, false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_CENTER);
             return;
         }
-        const bool filtered = scope != 0 || (!content_mode && (kind_filter != 0 || date_filter != 0));
+        const bool filtered = scope != 0 || !parsed_query.tokens.empty() || (!content_mode && (kind_filter != 0 || date_filter != 0 || timeline_first >= 0));
         LabelC(Text(StringId::GlobalSearchNoResults), {left, y, right, y + 26}, 15, p.text, false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_CENTER);
         if (filtered) LabelC(Text(StringId::GlobalSearchNoFilteredResults), {left, y + 26, right, y + 48}, 12.5f, p.muted, false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_CENTER);
         const auto& action = Text(filtered ? StringId::EmptyActClearFilters : content_mode ? StringId::SearchModeName : StringId::EmptyActContent);
@@ -1393,7 +1709,241 @@ struct GlobalSearchWindow::Impl {
         FillC(button, Hovered(kind) ? p.hover : p.chip, 7);
         LabelC(action, button, 12.5f, p.accent_text, false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_CENTER);
     }
+    void DrawResultBar(const Palette& p) {
+        const float l = ListLeft() + 14, r = ListRight() - 14, y = Header() + 8;
+        const float segment = std::min(140.0f, (r - l) * .5f);
+        tile_size_slider = {};
+        const float slider_width = std::min(ui::kIconSizeSliderWidth, r - segment - 10 - l);
+        if (IsGrid() && slider_width >= 70) tile_size_slider = {r - segment - 10 - slider_width, y, r - segment - 10, y + 28};
+        const float content_end = tile_size_slider.right > tile_size_slider.left ? tile_size_slider.left - 8 : r - segment - 10;
+        FillC({ListLeft(), ListTop() - 1, ListRight(), ListTop()}, p.line);
+        float x = l;
+        if (!browse_folder.empty() && content_end - l > 55) {
+            AddHot({x, y, x + 26, y + 28}, HotBack);
+            LabelC(L"\x2190", {x, y, x + 26, y + 28}, 14, p.muted); x += 28;
+            breadcrumb_paths.clear();
+            for (auto path = browse_folder; !path.empty() && breadcrumb_paths.size() < 64;) {
+                breadcrumb_paths.push_back(path);
+                const auto parent = ParentPath(path);
+                if (parent == path) break;
+                path = parent;
+            }
+            std::reverse(breadcrumb_paths.begin(), breadcrumb_paths.end());
+            const float end = content_end;
+            AddHot({x, y, std::min(x + 22, end), y + 28}, HotExitFolder);
+            LabelC(L"…", {x, y, std::min(x + 22, end), y + 28}, 12, p.muted); x += 24;
+            size_t start = breadcrumb_paths.empty() ? 0 : breadcrumb_paths.size() - 1;
+            float used = std::min(120.0f, TextWidth(LeafName(browse_folder), 12) + 12);
+            while (start > 0) {
+                const float needed = std::min(120.0f, TextWidth(LeafName(breadcrumb_paths[start - 1]), 12) + 12) + 10;
+                if (used + needed > end - x) break;
+                used += needed; --start;
+            }
+            for (size_t i = start; i < breadcrumb_paths.size() && x < end; ++i) {
+                const auto label = LeafName(breadcrumb_paths[i]);
+                const float w = std::min({120.0f, TextWidth(label, 12) + 12, end - x});
+                AddHot({x, y, x + w, y + 28}, HotBreadcrumb, static_cast<int>(i));
+                LabelC(label, {x + 3, y, x + w - 3, y + 28}, 12, i + 1 == breadcrumb_paths.size() ? p.text : p.muted); x += w;
+                if (i + 1 < breadcrumb_paths.size()) { LabelC(L"›", {x, y, x + 10, y + 28}, 12, p.faint); x += 10; }
+            }
+        } else {
+            if (parsed_query.tokens.empty()) {
+                const auto count = std::to_wstring(rows.size());
+                const auto label = showing_recent ? Text(StringId::Recent) + L" · " + count : count + Text(StringId::GlobalSearchResults);
+                LabelC(label, {x, y, content_end, y + 28}, 12, p.faint);
+            }
+            for (size_t i = 0; i < parsed_query.tokens.size(); ++i) {
+                const auto& token = parsed_query.tokens[i];
+                const float w = std::min(160.0f, TextWidth(token.label, 12) + 30);
+                if (x + w > content_end) break;
+                const D2D1_RECT_F rect{x, y + 2, x + w, y + 26};
+                FillC(rect, p.sel, 12); AddHot(rect, HotToken, static_cast<int>(i));
+                LabelC(token.label + L" \x00d7", {x + 8, y + 2, x + w - 5, y + 26}, 12, p.accent_text); x += w + 6;
+            }
+        }
+        FillC({r - segment, y, r, y + 28}, p.chip, 7);
+        for (int i = 0; i != 2; ++i) {
+            D2D1_RECT_F rect{r - segment + i * segment / 2 + 3, y + 3, r - segment + (i + 1) * segment / 2 - 3, y + 25};
+            AddHot(rect, HotView, i);
+            if ((grid_view ? 1 : 0) == i) FillC(rect, p.key, 5);
+            LabelC(Text(i ? StringId::GlobalSearchThumbnails : StringId::ViewList), rect, 12, p.muted, false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
+        if (tile_size_slider.right > tile_size_slider.left) {
+            AddHot(tile_size_slider, HotTileSize);
+            ui::DrawIconSizeSlider(compositor.Dc(), brush.Get(), tile_size_slider, tile_width - 24, 1, scale,
+                Theme(), tile_size_dragging || Hovered(HotTileSize));
+        }
+    }
+    void UpdateTileSize(float x) {
+        const float value = ui::IconSizeSliderValueAt(tile_size_slider, x, 1, scale);
+        if (value <= 0 || tile_width == value + 24) return;
+        tile_width = value + 24;
+        ++layout_epoch; BuildLayout(); ClampSelection(false); Invalidate();
+    }
+    bool IsMarked(const std::wstring& path) const {
+        return std::find(marked_paths.begin(), marked_paths.end(), path) != marked_paths.end();
+    }
+    void ToggleMarked() {
+        if (command_mode || calculation) return;
+        if (selected < 0 || selected >= static_cast<int>(rows.size())) return;
+        const auto& row = rows[static_cast<size_t>(selected)];
+        if (row.path.empty() || row.app || !row.recycle_path.empty()) return;
+        const auto it = std::find(marked_paths.begin(), marked_paths.end(), row.path);
+        if (it == marked_paths.end()) marked_paths.push_back(row.path); else marked_paths.erase(it);
+        Invalidate();
+    }
+    void MarkRange(int from, int to) {
+        if (rows.empty() || command_mode) return;
+        const int first_index = std::clamp(std::min(from, to), 0, static_cast<int>(rows.size()) - 1);
+        const int last_index = std::clamp(std::max(from, to), 0, static_cast<int>(rows.size()) - 1);
+        for (int i = first_index; i <= last_index; ++i) {
+            const auto& row = rows[static_cast<size_t>(i)];
+            if (!row.app && row.recycle_path.empty() && !IsMarked(row.path)) marked_paths.push_back(row.path);
+        }
+    }
+    void StageSelection() {
+        if (!events.stage_paths || stale || command_mode || calculation) return;
+        auto paths = marked_paths;
+        if (paths.empty() && selected >= 0 && selected < static_cast<int>(rows.size())) {
+            const auto& row = rows[static_cast<size_t>(selected)];
+            if (!row.path.empty() && !row.app && row.recycle_path.empty()) paths.push_back(row.path);
+        }
+        if (!paths.empty()) { events.stage_paths(paths); ShowToast(Text(StringId::TrayStagedBadge)); }
+        Invalidate();
+    }
+    void CopyFiles() {
+        if (command_mode || calculation || stale) return;
+        auto paths = marked_paths;
+        if (paths.empty() && selected >= 0 && selected < static_cast<int>(rows.size())) {
+            const auto& row = rows[static_cast<size_t>(selected)];
+            if (!row.path.empty() && !row.app && row.recycle_path.empty()) paths.push_back(row.path);
+        }
+        if (paths.empty() || !OpenClipboard(hwnd)) return;
+        size_t chars = 1;
+        for (const auto& path : paths) chars += path.size() + 1;
+        HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, sizeof(DROPFILES) + chars * sizeof(wchar_t));
+        if (memory) {
+            if (auto* drop = static_cast<DROPFILES*>(GlobalLock(memory))) {
+                drop->pFiles = sizeof(DROPFILES); drop->fWide = TRUE;
+                auto* out = reinterpret_cast<wchar_t*>(reinterpret_cast<BYTE*>(drop) + sizeof(DROPFILES));
+                for (const auto& path : paths) { memcpy(out, path.c_str(), (path.size() + 1) * sizeof(wchar_t)); out += path.size() + 1; }
+                GlobalUnlock(memory); EmptyClipboard();
+                if (!SetClipboardData(CF_HDROP, memory)) GlobalFree(memory);
+                else ShowToast(Text(StringId::CopiedShort));
+            } else GlobalFree(memory);
+        }
+        CloseClipboard();
+    }
+    void ResultMenu(POINT point) {
+        if (command_mode) return;
+        if (selected < 0 || selected >= static_cast<int>(rows.size()) || stale) return;
+        if (!EnsureTarget() || !result_menu.Create(hwnd, &compositor, scale)) return;
+        result_menu.SetTheme(dark, accent_color);
+        std::vector<ui::FluentMenuItem> items;
+        const auto add = [&](int id, StringId text, const wchar_t* glyph, const wchar_t* shortcut = L"") {
+            ui::FluentMenuItem item;
+            item.command = id; item.text = Text(text); item.glyph = glyph; item.shortcut = shortcut;
+            items.push_back(std::move(item));
+        };
+        add(1, StringId::Open, L"\xE8E5", L"Enter");
+        if (rows[static_cast<size_t>(selected)].directory) add(2, StringId::GlobalSearchEnterFolder, L"\xE8B7", L"\x2192");
+        add(3, StringId::HintActOpenPath, L"\xE838", L"Ctrl+Enter");
+        items.back().separator_after = true;
+        add(4, StringId::CopyPath, L"\xE71B", L"Ctrl+C");
+        add(7, StringId::Copy, L"\xE8C8");
+        if (events.stage_paths) add(5, StringId::CtxAddToTray, L"\xE7B8", L"Alt+A");
+        if (handoff) add(6, StringId::GlobalSearchHandoff, L"\xE721", L"Shift+Enter");
+        const auto menu_generation = generation;
+        const auto menu_path = rows[static_cast<size_t>(selected)].path;
+        point.x -= ui::FluentMenu::kShadowMargin;
+        point.y -= ui::FluentMenu::kShadowMargin;
+        result_menu_open = true;
+        const int chosen = result_menu.TrackPopup(point, std::move(items));
+        result_menu_open = false;
+        if (!IsWindowVisible(hwnd) || generation != menu_generation || selected < 0 || selected >= static_cast<int>(rows.size()) ||
+            rows[static_cast<size_t>(selected)].path != menu_path) return;
+        SetFocus(edit);
+        switch (chosen) {
+        case 1: Open(false); break;
+        case 2: EnterFolder(); break;
+        case 3: Open(true); break;
+        case 4: CopyPath(); break;
+        case 5: StageSelection(); break;
+        case 6: Handoff(); break;
+        case 7: CopyFiles(); break;
+        default: break;
+        }
+    }
+    void DrawGrid(const Palette& p) {
+        const float left = ListLeft(), right = ListRight(), top = ListTop(), bottom = ListBottom();
+        target->PushAxisAlignedClip({left, top, right, bottom}, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        if (!grid_cache_ready) {
+            grid_thumbnails.SetParallelism(ui::ThumbnailCache::DefaultParallelism());
+            grid_thumbnails.SetNotifyWindow(hwnd); grid_cache_ready = true;
+        }
+        grid_thumbnails.SetDeviceContext(compositor.Dc());
+        grid_thumbnails.BeginFrame(); grid_thumbnails.AdvanceFrame(hwnd);
+        const float cell = (right - left - 16) / static_cast<float>(GridColumns());
+        for (size_t i = 0; i < rows.size(); ++i) {
+            const float y = top + row_top[i] - scroll;
+            if (y + TileHeight() < top || y > bottom) continue;
+            const auto& row = rows[i];
+            const float x = left + 8 + static_cast<float>(i % GridColumns()) * cell;
+            const D2D1_RECT_F rect{x, y, x + cell - 6, y + TileHeight() - 6};
+            AddHot(rect, HotRow, static_cast<int>(i));
+            if (static_cast<int>(i) == selected || IsMarked(row.path)) FillC(rect, p.sel, 9);
+            else if (Hovered(HotRow, static_cast<int>(i))) FillC(rect, p.hover, 9);
+            D2D1_RECT_F art{x + 8, y + 8, x + cell - 14, y + TileHeight() - 54};
+            FillC(art, p.chip, 7);
+            const DWORD attrs = row.directory ? FILE_ATTRIBUTE_DIRECTORY : 0;
+            const auto result = grid_thumbnails.DrawGridThumbnail(compositor.Dc(), art, row.path, attrs,
+                static_cast<uint32_t>(Px(tile_width)), generation, row.mtime, row.size, 1, false, nullptr);
+            if (result != ui::PreviewDrawResult::Bitmap) {
+                const float cx = (art.left + art.right) / 2, cy = (art.top + art.bottom) / 2;
+                icons.Draw(compositor.Dc(), {cx - 24, cy - 24, cx + 24, cy + 24}, row.path, row.name, row.directory, attrs);
+            }
+            LabelC(row.name, {x + 8, art.bottom + 4, rect.right - 6, art.bottom + 25}, 13, p.text, false, L"Segoe UI", true);
+            LabelC(row.directory ? Text(StringId::Folder) : FormatSize(row.size), {x + 8, art.bottom + 25, rect.right - 6, rect.bottom}, 11.5f, p.faint);
+            if (IsMarked(row.path)) LabelC(L"\x2713", {x + 12, y + 10, x + 34, y + 32}, 14, p.accent_text);
+        }
+        if (rows.empty()) DrawEmpty(left, right, top, bottom, p);
+        grid_thumbnails.EndInterestFrame();
+        target->PopAxisAlignedClip();
+    }
     void DrawList(const Palette& p, uint64_t now) {
+        DrawResultBar(p);
+        if (command_mode) {
+            const float l = ListLeft() + 10, r = ListRight() - 10;
+            for (size_t i = 0; i < commands.size(); ++i) {
+                const float y = ListTop() + 8 + static_cast<float>(i) * 48;
+                const D2D1_RECT_F rect{l, y, r, y + 44};
+                AddHot(rect, HotRow, static_cast<int>(i));
+                if (selected == static_cast<int>(i)) FillC(rect, p.sel, 8);
+                LabelC(L">", {l + 12, y, l + 36, y + 44}, 18, p.accent_text);
+                LabelC(CommandLabel(commands[i]), {l + 44, y, r - 30, y + 44}, 14, p.text);
+            }
+            if (commands.empty()) DrawEmpty(ListLeft(), ListRight(), ListTop(), ListBottom(), p);
+            return;
+        }
+        if (calculation) {
+            const D2D1_RECT_F card{ListLeft() + 14, ListTop() + 16, ListRight() - 14, ListTop() + 148};
+            FillC(card, p.chip, 12); AddHot(card, HotCalculation);
+            LabelC(raw_query + L" =", {card.left + 20, card.top + 12, card.right - 20, card.top + 36}, 13, p.muted);
+            LabelC(calculation->text, {card.left + 20, card.top + 38, card.right - 20, card.top + 90}, 30, p.text, true);
+            KeyHint(L"\x21B5", Text(StringId::Copy), card.right - 20, card.bottom - 23, p.muted, p.key);
+            float x = card.left + 16, y = card.bottom + 10;
+            for (size_t i = 0; i < calculation->alternatives.size(); ++i) {
+                const auto& item = calculation->alternatives[i];
+                const float w = TextWidth(item.text, 12) + 20;
+                if (x + w > card.right) { x = card.left + 16; y += 32; }
+                if (y + 28 > ListBottom()) break;
+                const D2D1_RECT_F rect{x, y, x + w, y + 26};
+                FillC(rect, p.chip, 12); AddHot(rect, HotAlternative, static_cast<int>(i));
+                LabelC(item.text, {x + 10, y, x + w - 10, y + 26}, 12, p.muted); x += w + 6;
+            }
+            return;
+        }
+        if (IsGrid()) { DrawGrid(p); return; }
         const float left = ListLeft(), right = ListRight(), top = ListTop(), bottom = ListBottom();
         target->PushAxisAlignedClip({left, top, right, bottom}, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         const float lx = left + 8, rx = right - 8;
@@ -1475,24 +2025,18 @@ struct GlobalSearchWindow::Impl {
     void DrawPreview(const Palette& p) {
         const float pw = PreviewWidth();
         if (pw <= 0) return;
-        const float x0 = width - pw, top = ListTop(), bottom = ListBottom();
+        const float x0 = width - pw, top = Header() + 1, bottom = ListBottom();
         FillC({x0, top, x0 + 1, bottom}, p.line);
+        if (command_mode || calculation) return;
         if (selected < 0 || selected >= static_cast<int>(rows.size())) return;
         const auto& row = rows[static_cast<size_t>(selected)];
         const float l = x0 + 16, r = width - 16;
-        const D2D1_RECT_F thumb_box{l, top + 16, r, top + 196};
-        FillC(thumb_box, p.chip, 9);
-        StrokeC(thumb_box, p.line, 9);
-        if (thumbnail && thumbnail_target == target.Get() && thumbnail_path == row.path) {
-            const auto size = thumbnail->GetSize();
-            const float box_w = thumb_box.right - thumb_box.left - 24, box_h = thumb_box.bottom - thumb_box.top - 24;
-            const float k = std::min({box_w / std::max(1.0f, size.width), box_h / std::max(1.0f, size.height), 1.0f * scale});
-            const float w = size.width * k, h = size.height * k;
+        const auto thumb_box = PreviewContentBounds();
+        target->PushAxisAlignedClip({x0, top, width, bottom - 94}, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        if (row.app) {
+            FillC(thumb_box, p.chip, 9);
             const float cx = (thumb_box.left + thumb_box.right) / 2, cy = (thumb_box.top + thumb_box.bottom) / 2;
-            target->DrawBitmap(thumbnail.Get(), {cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2}, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-        } else {
-            const float cx = (thumb_box.left + thumb_box.right) / 2, cy = (thumb_box.top + thumb_box.bottom) / 2;
-            icons.Draw(compositor.Dc(), {cx - 24, cy - 24, cx + 24, cy + 24}, row.path, row.name, row.directory, row.directory ? FILE_ATTRIBUTE_DIRECTORY : 0);
+            icons.Draw(compositor.Dc(), {cx - 24, cy - 24, cx + 24, cy + 24}, row.path, row.name, false, 0);
         }
         float y = thumb_box.bottom + 14;
         LabelC(row.name, {l, y, r, y + 44}, 15, p.text, true, L"Segoe UI", !showing_recent, DWRITE_TEXT_ALIGNMENT_LEADING, true);
@@ -1512,6 +2056,7 @@ struct GlobalSearchWindow::Impl {
         meta(StringId::ColumnType, row.app ? Text(StringId::GlobalSearchGroupApps) : TypeName(row));
         if (!row.directory && (row.size || row.mtime)) meta(StringId::ColumnSize, FormatSize(row.size));
         meta(StringId::ModifiedTime, FormatTime(row.mtime));
+        target->PopAxisAlignedClip();
         // actions
         const float b = bottom - 16;
         const D2D1_RECT_F location{l, b - 32, (l + r) / 2 - 3, b};
@@ -1520,7 +2065,7 @@ struct GlobalSearchWindow::Impl {
         const D2D1_RECT_F open = row.app ? D2D1_RECT_F{l, b - 32, r, b} : D2D1_RECT_F{l, b - 70, r, b - 38};
         AddHot(open, HotPreviewOpen);
         FillC(open, Hovered(HotPreviewOpen) ? Theme().accent_hover : p.accent, 7);
-        LabelC(Text(StringId::Open), open, 13, D2D1::ColorF(1, 1, 1, 1), false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_CENTER);
+        LabelC(Text(row.recycle_path.empty() ? StringId::Open : StringId::RecycleBin), open, 13, D2D1::ColorF(1, 1, 1, 1), false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_CENTER);
         if (row.app) return;
         AddHot(location, HotPreviewLocation); AddHot(copy, HotPreviewCopy);
         for (auto [rect, label, kind] : {std::tuple{location, StringId::HintActOpenPath, HotPreviewLocation}, std::tuple{copy, StringId::CopyPath, HotPreviewCopy}}) {
@@ -1533,13 +2078,13 @@ struct GlobalSearchWindow::Impl {
         const float bottom = ListBottom(), mid = bottom + kFooter / 2;
         FillC({0, bottom, width, bottom + 1}, p.line);
         float x = 20;
-        const bool waiting = busy || (providers.network_expected && !providers.network_ready && !content_mode && !query.empty());
-        if (!query.empty()) {
+        const bool waiting = busy || (providers.network_expected && !providers.network_ready && !content_mode && HasSearchQuery());
+        if (HasSearchQuery() || !browse_folder.empty()) {
             FillC({x, mid - 3, x + 6, mid + 3}, waiting ? D2D1::ColorF(0xe6b44c) : D2D1::ColorF(0x46c27a), 3);
             x += 14;
         }
-        std::wstring status = query.empty() ? std::wstring{} : FooterStatus();
-        if (!query.empty() && !busy && error.empty() && !content_mode) {
+        std::wstring status = !HasSearchQuery() && browse_folder.empty() ? std::wstring{} : FooterStatus();
+        if (HasSearchQuery() && !busy && error.empty() && !content_mode) {
             size_t net = 0;
             for (const auto& row : rows) net += row.network ? 1 : 0;
             if (net) status += L" \x00b7 " + Text(StringId::GlobalSearchLocal) + L" " + std::to_wstring(rows.size() - net) +
@@ -1547,6 +2092,25 @@ struct GlobalSearchWindow::Impl {
         }
         if (truncated) status += L" \x00b7 " + Text(StringId::GlobalSearchTruncatedShort);
         float right = width - 16;
+        if (events.staged_paths) {
+            const auto staged = events.staged_paths();
+            const auto title = Text(StringId::TrayShelfTitle) + L" " + std::to_wstring(staged.size());
+            const float w = TextWidth(title, 12) + 20;
+            const D2D1_RECT_F rect{right - w, mid - 14, right, mid + 14};
+            AddHot(rect, HotTray); FillC(rect, tray_open ? p.sel : p.chip, 7);
+            LabelC(title, {rect.left + 10, rect.top, rect.right - 10, rect.bottom}, 12, p.muted);
+            right = rect.left - 10;
+        }
+        if (!marked_paths.empty()) {
+            status = std::to_wstring(marked_paths.size()) + L" " + Text(StringId::GlobalSearchSelect);
+            const float w = TextWidth(Text(StringId::CtxAddToTray), 12) + 20;
+            if (right - w > x + 100) {
+                D2D1_RECT_F rect{right - w, mid - 14, right, mid + 14};
+                AddHot(rect, HotStage); FillC(rect, p.chip, 7);
+                LabelC(Text(StringId::CtxAddToTray), {rect.left + 10, rect.top, rect.right - 10, rect.bottom}, 12, p.muted);
+                right = rect.left - 10;
+            }
+        }
         handoff_rect = {};
         if (handoff) {
             const auto& label = Text(StringId::GlobalSearchHandoff);
@@ -1570,12 +2134,37 @@ struct GlobalSearchWindow::Impl {
         }
         LabelC(status, {x, mid - 10, std::min(right, x + status_w + 2), mid + 10}, 12, p.muted);
     }
+    void DrawTray(const Palette& p) {
+        if (!tray_open || !events.staged_paths) return;
+        const auto paths = events.staged_paths();
+        const float right = width - 14, left = std::max(14.0f, right - 310);
+        const size_t visible = std::min(paths.size(), static_cast<size_t>(std::max(1.0f, (height - 180) / 32)));
+        tray_offset = std::min(tray_offset, paths.size() - visible);
+        const float bottom = ListBottom() - 8, top = bottom - 82 - static_cast<float>(visible) * 32;
+        tray_bounds = {left, top, right, bottom}; AddHot(tray_bounds, HotTrayPanel);
+        FillC({left, top, right, bottom}, dark ? Color(0x2b2c32) : Color(0xffffff), 10); StrokeC({left, top, right, bottom}, p.line, 10);
+        LabelC(Text(StringId::TrayShelfTitle) + L" " + std::to_wstring(paths.size()), {left + 12, top + 6, right - 12, top + 34}, 13, p.text, true);
+        for (size_t i = 0; i < visible; ++i) {
+            const size_t index = tray_offset + i;
+            const float y = top + 38 + static_cast<float>(i) * 32;
+            AddHot({left + 8, y, right - 38, y + 30}, HotTrayItem, static_cast<int>(index));
+            AddHot({right - 34, y, right - 8, y + 30}, HotTrayRemove, static_cast<int>(index));
+            LabelC(LeafName(paths[index]), {left + 12, y, right - 38, y + 30}, 12, p.text);
+            LabelC(L"\x00d7", {right - 30, y, right - 8, y + 30}, 14, p.muted);
+        }
+        if (paths.empty()) LabelC(Text(StringId::StagingTrayEmpty), {left + 12, top + 34, right - 12, bottom - 10}, 12, p.faint);
+        else {
+            AddHot({left + 10, bottom - 34, right - 10, bottom - 6}, HotTrayClear);
+            LabelC(Text(StringId::TrayMenuClear), {left + 12, bottom - 34, right - 12, bottom - 6}, 12, p.muted);
+        }
+    }
     void Paint() {
         PAINTSTRUCT paint{}; BeginPaint(hwnd, &paint);
         Render();
         EndPaint(hwnd, &paint);
     }
     void Render() {
+        SyncPreview();
         if (EnsureTarget()) {
             const auto theme = Theme();
             const auto p = MakePalette(theme);
@@ -1598,13 +2187,14 @@ struct GlobalSearchWindow::Impl {
             DrawList(p, now);
             DrawPreview(p);
             DrawFooter(p);
+            DrawTray(p);
             DrawScopeTooltip(theme);
             const HRESULT rendered = target->EndDraw();
             if (FAILED(rendered)) {
                 compositor.NotifyDeviceLost(rendered); empty_art.Reset(); empty_art_target = nullptr; logo.Reset(); logo_target = nullptr;
-                thumbnail.Reset(); thumbnail_target = nullptr; icons.Reset(); brush.Reset(); target.Reset();
+                icons.Reset(); brush.Reset(); target.Reset();
             } else if (live) compositor.Present();
-            const bool moving = plate_motion.Active(now) || scope_motion.Active(now) || mode_motion.Active(now) ||
+            const bool moving = plate_motion.Active(now) || scope_motion.Active(now) ||
                 std::fabs(scroll_target - scroll) >= 0.5f || (animations && now - appear_start < 560) || busy || (!toast.empty() && now < toast_until + 20);
             if (moving) SetTimer(hwnd, kAnimationTimer, 10, nullptr);
             else KillTimer(hwnd, kAnimationTimer);
@@ -1635,14 +2225,70 @@ struct GlobalSearchWindow::Impl {
         const int index = spot->index;
         switch (spot->kind) {
         case HotRow:
-            selected = index; keyboard_nav = true; ClampSelection(); RequestThumbnail(); Invalidate(); break;
+            if (GetKeyState(VK_SHIFT) & 0x8000) MarkRange(selected, index);
+            selected = index; keyboard_nav = true;
+            if (GetKeyState(VK_CONTROL) & 0x8000) ToggleMarked();
+            ClampSelection(); Invalidate(); break;
+        case HotView: grid_view = index != 0; scroll = scroll_target = 0; ++layout_epoch; BuildLayout(); Invalidate(); break;
+        case HotTileSize: tile_size_dragging = true; SetCapture(hwnd); UpdateTileSize(x); break;
+        case HotBack: BackFolder(); break;
+        case HotExitFolder: browse_folder.clear(); browse_history.clear(); Changed(); break;
+        case HotBreadcrumb:
+            if (index >= 0 && index < static_cast<int>(breadcrumb_paths.size()) && breadcrumb_paths[static_cast<size_t>(index)] != browse_folder) {
+                browse_history.push_back(browse_folder); browse_folder = breadcrumb_paths[static_cast<size_t>(index)]; Changed();
+            }
+            break;
+        case HotStage: StageSelection(); break;
+        case HotTray: tray_open = !tray_open; Invalidate(); break;
+        case HotTrayClear: if (events.clear_staging) events.clear_staging(); Invalidate(); break;
+        case HotTrayRemove:
+        case HotTrayItem:
+            if (events.staged_paths) {
+                const auto paths = events.staged_paths();
+                if (index >= 0 && index < static_cast<int>(paths.size())) {
+                    const auto path = paths[static_cast<size_t>(index)];
+                    if (spot->kind == HotTrayRemove) { if (events.unstage_path) events.unstage_path(path); }
+                    else {
+                        const auto route = events.open_path; Hide();
+                        if (!route || !route(path, false, true)) OpenResult(path, true);
+                        return;
+                    }
+                }
+            }
+            Invalidate(); break;
+        case HotCalculation: CopyCalculation(false); break;
+        case HotAlternative:
+            if (calculation && index >= 0 && index < static_cast<int>(calculation->alternatives.size())) {
+                const auto text = calculation->alternatives[static_cast<size_t>(index)].query;
+                SetWindowTextW(edit, text.c_str());
+            }
+            break;
+        case HotToken:
+            if (index >= 0 && index < static_cast<int>(parsed_query.tokens.size())) {
+                const auto token = parsed_query.tokens[static_cast<size_t>(index)];
+                auto text = raw_query; text.erase(token.start, token.length); SetWindowTextW(edit, text.c_str());
+            }
+            break;
+        case HotTimeline:
+            if (timeline_first == index && timeline_last == index) {
+                timeline_first = timeline_last = timeline_anchor = -1; Changed();
+            } else { timeline_anchor = timeline_first = timeline_last = index; SetCapture(hwnd); Invalidate(); }
+            break;
         case HotScope: SetScope(index); break;
         case HotAddPlace: PickPlace(); break;
         case HotKind: kind_filter = kind_filter == index ? 0 : index; Changed(); break;
         case HotDate: date_filter = date_filter == index ? 0 : index; Changed(); break;
-        case HotMode: SetMode(x >= ModeRect().left + 3 + ModeItemWidth(false)); break;
+        case HotMode: SetMode(!content_mode); break;
+        case HotSearchScope: SearchScopeMenu(); break;
+        case HotSearchClear:
+            if (GetWindowTextLengthW(edit) > 0) SetWindowTextW(edit, L""); else Hide();
+            break;
+        case HotSearchField: SetFocus(edit); break;
         case HotEsc: Hide(); return;
-        case HotPreviewOpen: Open(false); return;
+        case HotPreviewOpen:
+            if (selected >= 0 && selected < static_cast<int>(rows.size()) && rows[static_cast<size_t>(selected)].directory) EnterFolder();
+            else Open(false);
+            return;
         case HotPreviewLocation: Open(true); return;
         case HotPreviewCopy: CopyPath(); break;
         case HotRecentQuery:
@@ -1651,7 +2297,12 @@ struct GlobalSearchWindow::Impl {
                 SendMessageW(edit, EM_SETSEL, 0, -1);
             }
             break;
-        case HotClearFilters: scope = 0; kind_filter = 0; date_filter = 0; Changed(); break;
+        case HotClearFilters: {
+            scope = 0; kind_filter = 0; date_filter = 0; timeline_first = timeline_last = -1;
+            auto text = raw_query;
+            for (auto it = parsed_query.tokens.rbegin(); it != parsed_query.tokens.rend(); ++it) text.erase(it->start, it->length);
+            SetWindowTextW(edit, text.c_str()); break;
+        }
         case HotSearchContent: SetMode(!content_mode); break;
         default: break;
         }
@@ -1697,6 +2348,8 @@ struct GlobalSearchWindow::Impl {
             return 0;
         case WM_THEMECHANGED:
         case WM_SETTINGCHANGE:
+            ui::RefreshHighContrast();
+            ApplyAppearance(); return 0;
         case WM_DWMCOLORIZATIONCOLORCHANGED:
             ApplyAppearance(); return 0;
         case WM_SIZE: if (edit) Layout(); return 0;
@@ -1708,9 +2361,16 @@ struct GlobalSearchWindow::Impl {
             Layout(); return 0;
         }
         case WM_CLOSE: Hide(); return 0;
-        case WM_ACTIVATEAPP: if (!wp) Hide(); return 0;
+        case WM_ACTIVATEAPP:
+            if (!wp) {
+                DWORD active_process = 0;
+                if (result_menu_open) GetWindowThreadProcessId(GetForegroundWindow(), &active_process);
+                if (!result_menu_open || active_process != GetCurrentProcessId()) Hide();
+            }
+            return 0;
         case WM_SETFOCUS: SetFocus(edit); return 0;
-        case WM_KEYDOWN: if (Key(wp)) return 0; break;
+        case WM_KEYDOWN:
+        case WM_SYSKEYDOWN: if (Key(wp)) return 0; break;
         case WM_COMMAND: if (reinterpret_cast<HWND>(lp) == edit && HIWORD(wp) == EN_CHANGE) Changed(); return 0;
         case WM_CTLCOLOREDIT: {
             const auto dc = reinterpret_cast<HDC>(wp); SetBkColor(dc, Background());
@@ -1742,6 +2402,17 @@ struct GlobalSearchWindow::Impl {
             }
             return 0;
         case WM_MOUSEMOVE: {
+            if (tile_size_dragging && (wp & MK_LBUTTON)) UpdateTileSize(static_cast<float>(GET_X_LPARAM(lp)) / scale);
+            if (timeline_anchor >= 0 && (wp & MK_LBUTTON)) {
+                const float x = static_cast<float>(GET_X_LPARAM(lp)) / scale;
+                const int index = std::clamp(static_cast<int>((x - timeline_rect.left) * 12 / (timeline_rect.right - timeline_rect.left)), 0, 11);
+                timeline_first = std::min(timeline_anchor, index); timeline_last = std::max(timeline_anchor, index); Invalidate();
+            }
+            if (row_drag_pending && (wp & MK_LBUTTON)) {
+                const POINT point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+                if (std::abs(point.x - row_drag_start.x) >= GetSystemMetrics(SM_CXDRAG) ||
+                    std::abs(point.y - row_drag_start.y) >= GetSystemMetrics(SM_CYDRAG)) row_dragging = true;
+            }
             if (!tracking_mouse) {
                 TRACKMOUSEEVENT tracking{sizeof(tracking), TME_LEAVE, hwnd, 0};
                 tracking_mouse = TrackMouseEvent(&tracking) != FALSE;
@@ -1759,24 +2430,94 @@ struct GlobalSearchWindow::Impl {
             break;
         case WM_LBUTTONDOWN:
             Click(static_cast<float>(GET_X_LPARAM(lp)) / scale, static_cast<float>(GET_Y_LPARAM(lp)) / scale);
+            if (const auto* spot = HitAt(static_cast<float>(GET_X_LPARAM(lp)) / scale, static_cast<float>(GET_Y_LPARAM(lp)) / scale);
+                spot && spot->kind == HotRow) {
+                row_drag_pending = true; row_drag_start = {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)}; SetCapture(hwnd);
+            }
             if (IsWindowVisible(hwnd)) SetFocus(edit);
             return 0;
+        case WM_LBUTTONUP:
+            if (tile_size_dragging) { UpdateTileSize(static_cast<float>(GET_X_LPARAM(lp)) / scale); tile_size_dragging = false; Invalidate(); }
+            if (timeline_anchor >= 0) { timeline_anchor = -1; Changed(); }
+            if (row_dragging) {
+                const auto* spot = HitAt(static_cast<float>(GET_X_LPARAM(lp)) / scale, static_cast<float>(GET_Y_LPARAM(lp)) / scale);
+                if (spot && spot->kind == HotTray) StageSelection();
+            }
+            row_drag_pending = row_dragging = false;
+            if (GetCapture() == hwnd) ReleaseCapture();
+            return 0;
+        case WM_CAPTURECHANGED: row_drag_pending = row_dragging = tile_size_dragging = false; timeline_anchor = -1; break;
+        case WM_CONTEXTMENU: {
+            POINT screen{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            if (screen.x == -1 && screen.y == -1) { screen = {Px(ListLeft() + 80), Px(ListTop() + 40)}; ClientToScreen(hwnd, &screen); }
+            else {
+                POINT client = screen; ScreenToClient(hwnd, &client);
+                const auto* spot = HitAt(static_cast<float>(client.x) / scale, static_cast<float>(client.y) / scale);
+                if (!spot || spot->kind != HotRow) return 0;
+                selected = spot->index; keyboard_nav = true; Invalidate();
+            }
+            ResultMenu(screen); return 0;
+        }
         case WM_LBUTTONDBLCLK: {
             const auto* spot = HitAt(static_cast<float>(GET_X_LPARAM(lp)) / scale, static_cast<float>(GET_Y_LPARAM(lp)) / scale);
             if (spot && spot->kind == HotRow) { selected = spot->index; Open(false); }
             return 0;
         }
-        case WM_MOUSEWHEEL:
+        case WM_MOUSEWHEEL: {
+            POINT point{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)}; ScreenToClient(hwnd, &point);
+            if (tray_open && Contains(tray_bounds, point.x / scale, point.y / scale)) {
+                const int steps = GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
+                tray_offset = static_cast<size_t>(std::max(0, static_cast<int>(tray_offset) - steps * 3)); Invalidate(); return 0;
+            }
+            if (PreviewWidth() > 0 && point.x / scale >= ListRight()) {
+                if (preview.visible()) SendMessageW(preview.hwnd(), message, wp, lp);
+                return 0;
+            }
             scroll_target -= static_cast<float>(GET_WHEEL_DELTA_WPARAM(wp)) / WHEEL_DELTA * RowHeight() * 2.5f;
             ClampScroll();
             if (!animations) scroll = scroll_target;
             Invalidate(); return 0;
+        }
+        case kDirectoryResult:
+            if (wp == generation && directory_request) {
+                std::lock_guard lock(directory_request->mutex);
+                rows = std::move(directory_request->rows); error = directory_request->error;
+                busy = false; total = rows.size(); selected = rows.empty() ? -1 : 0;
+                folder_count = static_cast<size_t>(std::count_if(rows.begin(), rows.end(), [](const Row& row) { return row.directory; }));
+                ++layout_epoch; BuildLayout(); Invalidate();
+            }
+            return 0;
         case kIndexStatus: Invalidate(); return 0;
-        case kThumbnailResult: TakeThumbnail(); return 0;
+        case kPreviewNavigate:
+            if (preview.visible() && !stale) {
+                selected += static_cast<INT_PTR>(wp) < 0 ? -1 : 1;
+                ClampSelection(); keyboard_nav = true; Invalidate();
+            }
+            return 0;
+        case kPreviewOpen: {
+            auto child = preview.TakeOpenPath();
+            if (!preview.visible() || stale) return 0;
+            if (wp && !child.empty()) {
+                Hide(); OpenResult(std::move(child), false);
+            } else Open(false);
+            return 0;
+        }
+        case WM_SHOWWINDOW:
+            if (!wp) ClosePreview();
+            else Invalidate();
+            break;
         case kAppsReady:
             apps = *app_catalog.Apps();
             if (IsWindowVisible(hwnd) && !query.empty() && !content_mode && !showing_recent && !providers.Busy()) MergeFilenames();
             return 0;
+        case kRecycleResult: {
+            if (static_cast<uint32_t>(wp) != generation || content_mode || !recycle_request ||
+                recycle_request->cancelled) return 0;
+            { std::lock_guard lock(recycle_request->mutex); recycle_result = std::move(recycle_request->result); }
+            recycle_ready = true;
+            MergeFilenames();
+            return 0;
+        }
         case kIndexResult: {
             index::SearchResult result;
             if (filenames.TakeResult(static_cast<uint32_t>(wp), result) && IsWindowVisible(hwnd)) {
@@ -1820,7 +2561,7 @@ struct GlobalSearchWindow::Impl {
                 else if (update.progress.error && update.progress.error != ERROR_CANCELLED) error = Text(StringId::GlobalSearchFailed);
                 if (!had_rows && !rows.empty()) { selected = 0; appear_start = ui::motion::NowMs(); }
                 BuildLayout();
-                ClampSelection(false); RequestThumbnail(); Invalidate();
+                ClampSelection(false); Invalidate();
             }
             return 0;
         }
@@ -1838,13 +2579,24 @@ struct GlobalSearchWindow::Impl {
     bool Show(HWND owner, bool use_dark, float requested_scale, const std::wstring& folder, bool pinyin) {
         diagnostic_id = diagnostics::runtime::NextId();
         diagnostic_events = 0;
+        const uint64_t show_started = GetTickCount64();
+        uint64_t phase_started = show_started;
+        // Keep slow opens diagnosable even after the short window-message trace expires.
+        const auto phase = [&](uint64_t stage) {
+            const uint64_t now = GetTickCount64();
+            const uint64_t elapsed = now - phase_started;
+            diagnostics::runtime::Event("search_show_phase", {{"id", diagnostic_id}, {"stage", stage},
+                {"elapsed_ms", elapsed}, {"total_ms", now - show_started}},
+                elapsed >= 1000 ? diagnostics::runtime::Level::Warning : diagnostics::runtime::Level::Info);
+            phase_started = now;
+        };
         diagnostic_until = diagnostics::runtime::Enabled() ? GetTickCount64() + 10000 : 0;
         diagnostic_foreground = GetForegroundWindow();
         Trace("search_show_begin");
         dark = use_dark; scale = requested_scale > 0 ? requested_scale : 1;
         search_pinyin = pinyin;
         animations = ui::motion::SystemAnimationsEnabled();
-        plate_motion.SetAnimationsEnabled(animations); scope_motion.SetAnimationsEnabled(animations); mode_motion.SetAnimationsEnabled(animations);
+        plate_motion.SetAnimationsEnabled(animations); scope_motion.SetAnimationsEnabled(animations);
         // Follow the pointer even when that monitor only shows the desktop.
         POINT cursor{};
         const HMONITOR active_monitor = GetCursorPos(&cursor)
@@ -1857,33 +2609,79 @@ struct GlobalSearchWindow::Impl {
         current_folder_tip = path::StripExtendedPathPrefix(folder);
         if (folder.empty()) current_only = false;
         HideScopeTooltip();
-        if (!Create()) return false;
+        if (!Create()) {
+            diagnostics::runtime::Event("search_window_create_failed", {{"id", diagnostic_id},
+                {"error", GetLastError()}, {"elapsed_ms", GetTickCount64() - show_started}},
+                diagnostics::runtime::Level::Error);
+            return false;
+        }
+        phase(1); // window and preview/search clients
         if (folder_changed && scope > 0 && scope < static_cast<int>(scopes.size()) && scopes[static_cast<size_t>(scope)].kind == ScopeKind::Current) scope = 0;
         Prepare();
+        phase(2); // context, application catalogue and appearance
         BOOL is_dark = dark; DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &is_dark, sizeof(is_dark));
         const int corner = DWMWCP_ROUND;
         DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
-        SendMessageW(edit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(Text(StringId::GlobalSearchPlaceholder).c_str()));
+        SendMessageW(edit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(Text(content_mode ? StringId::SearchContentHint : StringId::SearchNameHint).c_str()));
         MONITORINFO monitor{sizeof(monitor)}; GetMonitorInfoW(active_monitor, &monitor);
         const RECT place = Placement(monitor.rcWork);
         SetWindowPos(hwnd, HWND_TOPMOST, place.left, place.top, place.right - place.left, place.bottom - place.top,
-                     SWP_SHOWWINDOW | SWP_FRAMECHANGED | SWP_NOACTIVATE);
+                     SWP_FRAMECHANGED | SWP_NOACTIVATE);
         Layout();
-        // Raw Input double-Ctrl arrives on a background queue, unlike WM_HOTKEY.
-        // Hand focus over as the dialog jump bar does, before asking Windows
-        // to activate us; a rejected activation otherwise flashes the frame.
+        phase(3); // monitor placement and control layout
+        Changed(true);
+        phase(4); // recent items or query refresh
+        Render();
+        phase(5); // first frame
+        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        phase(6); // native show
+        // WM_HOTKEY can activate directly. Only join the foreground input
+        // queue when that fails (for example, background Raw Input double-Ctrl).
         const HWND active = GetForegroundWindow();
         const DWORD active_thread = active ? GetWindowThreadProcessId(active, nullptr) : 0;
         const DWORD self = GetCurrentThreadId();
-        const bool attached = active_thread && active_thread != self &&
-            AttachThreadInput(self, active_thread, TRUE) != FALSE;
-        SetForegroundWindow(hwnd);
+        BOOL activated = SetForegroundWindow(hwnd);
+        const bool direct_accepted = activated != FALSE;
+        bool attached = false;
+        DWORD attach_error = 0;
+        const bool fallback = GetForegroundWindow() != hwnd && active_thread && active_thread != self;
+        if (fallback) {
+            attached = AttachThreadInput(self, active_thread, TRUE) != FALSE;
+            if (attached) activated = SetForegroundWindow(hwnd);
+            else attach_error = GetLastError();
+        }
+        // A deactivated input queue can retain this window as its active
+        // window while the desktop has no foreground window. Reset that stale
+        // local activation before requesting a fresh foreground transition.
+        if (!GetForegroundWindow() && GetActiveWindow() == hwnd) {
+            SetActiveWindow(nullptr);
+            activated = SetForegroundWindow(hwnd);
+        }
         if (GetForegroundWindow() == hwnd) SetFocus(edit);
         if (attached) AttachThreadInput(self, active_thread, FALSE);
+        diagnostics::runtime::Event("search_activation_attempt", {{"id", diagnostic_id},
+            {"accepted", activated != FALSE}, {"attached", attached},
+            {"direct_accepted", direct_accepted}, {"fallback", fallback}, {"attach_error", attach_error},
+            {"foreground_thread", active_thread}, {"elapsed_ms", GetTickCount64() - phase_started},
+            {"active", reinterpret_cast<uintptr_t>(GetActiveWindow())},
+            {"foreground", reinterpret_cast<uintptr_t>(GetForegroundWindow())}});
+        phase(7); // foreground handoff
+        if (GetForegroundWindow() != hwnd) {
+            // A visible window is still usable when Windows denies or delays
+            // foreground activation. Do not turn that into an open failure or
+            // destroy the user's click target; WM_SETFOCUS handles later focus.
+            diagnostics::runtime::Event("search_activation_deferred", {{"id", diagnostic_id},
+                {"window", reinterpret_cast<uintptr_t>(hwnd)}, {"visible", IsWindowVisible(hwnd) != FALSE},
+                {"foreground", reinterpret_cast<uintptr_t>(GetForegroundWindow())},
+                {"accepted", activated != FALSE}, {"attached", attached}, {"attach_error", attach_error},
+                {"foreground_thread", active_thread},
+                {"elapsed_ms", GetTickCount64() - show_started}}, diagnostics::runtime::Level::Warning);
+        }
         SendMessageW(edit, EM_SETSEL, 0, -1);
+        diagnostic_until = diagnostics::runtime::Enabled() ? GetTickCount64() + 10000 : 0;
         Trace("search_show_end");
         if (diagnostic_until) SetTimer(hwnd, kDiagnosticTimer, 50, nullptr);
-        Changed(); return true;
+        return true;
     }
     static float MonitorScale(HMONITOR monitor) {
         float result = 0;
@@ -2007,10 +2805,8 @@ struct GlobalSearchWindow::Impl {
         if (prewarm_timer) KillTimer(nullptr, prewarm_timer);
         if (prewarm_owner == this) prewarm_owner = nullptr;
         Cancel(); filenames.Stop(); network.Stop(); contents.Stop();
-        if (thumbnails) {
-            { std::lock_guard lock(thumbnails->mutex); thumbnails->stop = true; thumbnails->notify = nullptr; }
-            thumbnails->wake.notify_one();
-        }
+        grid_thumbnails.SetNotifyWindow(nullptr);
+        ClosePreview();
         if (edit) RemoveWindowSubclass(edit, EditProc, 1);
         if (hwnd) DestroyWindow(hwnd);
         if (edit_font) DeleteObject(edit_font);

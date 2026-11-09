@@ -13,6 +13,7 @@ struct CreateRenameIntent {
     uint64_t view_generation = 0;
     std::wstring actual_path;
     bool ready = false;
+    std::wstring target_parent; // may be an expanded child of the bound view parent
 };
 struct CreateRenameEntry {
     std::wstring_view name;
@@ -23,7 +24,7 @@ struct CreateRenameSelection {
     size_t entry_index = 0;
 };
 void QueueCreateRenameIntent(std::vector<CreateRenameIntent>& intents, uint64_t task_id,
-    std::wstring_view parent, uint64_t view_generation);
+    std::wstring_view parent, uint64_t view_generation, std::wstring_view target_parent = {});
 bool CompleteCreateRenameIntent(std::vector<CreateRenameIntent>& intents, uint64_t task_id,
     std::wstring_view current_parent, uint64_t view_generation, std::wstring_view actual_created_path);
 // Success is delivered before terminal IDs; retain only successfully armed intents.

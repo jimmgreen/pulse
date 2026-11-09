@@ -7,6 +7,7 @@
 
 namespace pulse::app {
 inline constexpr wchar_t kExplorerScopeOwner[] = L"Pulse.ExplorerScope.TestOwner";
+inline constexpr uint32_t kExplorerScopeExternalEmptySelection = 1;
 struct ExplorerScopeEvidence {
     HANDLE close_authorized_event = nullptr; // Opened only by the fully gated test probe.
     ~ExplorerScopeEvidence() { if (close_authorized_event) CloseHandle(close_authorized_event); }

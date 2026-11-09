@@ -43,7 +43,7 @@ public:
 
     bool Apply(std::unordered_set<int>& selected, bool& all_selected,
         const std::unordered_set<int>& base, bool additive, bool toggle,
-        int count, std::vector<int>& hits) {
+        int count, std::vector<int>& hits, bool compact_all = true) {
         std::sort(hits.begin(), hits.end());
         hits.erase(std::unique(hits.begin(), hits.end()), hits.end());
         bool changed = false;
@@ -78,7 +78,7 @@ public:
             else { ++old; ++next; }
         }
         previous_.assign(hits.begin(), hits.end());
-        if (count > 0 && selected.size() == static_cast<size_t>(count)) {
+        if (compact_all && count > 0 && selected.size() == static_cast<size_t>(count)) {
             all_selected = true;
             selected.swap(expanded_);
         }

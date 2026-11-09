@@ -7,6 +7,7 @@
 #include <dwmapi.h>
 #include <cmath>
 #include <algorithm>
+#include "high_contrast_state.h"
 
 namespace pulse::ui {
 
@@ -110,6 +111,7 @@ inline D2D1_COLOR_F AutoAccentText(D2D1_COLOR_F accent) noexcept {
 
 // Layout metrics in DIPs at 100% scale. Scaled at use (SetScale, etc.).
 inline constexpr float kTitleBarHeight = 48.0f;
+inline constexpr float kTabRowHeight = 44.0f;
 
 // ---------------------------------------------------------------------------
 // Resolved runtime theme (colors already premultiplied by desired alpha).
@@ -252,14 +254,6 @@ inline D2D1_COLOR_F GetAccentColor() noexcept {
 #ifndef DWMSBT_TABBEDWINDOW
 #define DWMSBT_TABBEDWINDOW 4
 #endif
-
-inline bool IsHighContrast() noexcept {
-    HIGHCONTRASTW hc{ sizeof(hc) };
-    if (SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hc), &hc, 0)) {
-        return (hc.dwFlags & HCF_HIGHCONTRASTON) != 0;
-    }
-    return false;
-}
 
 // Text boxes in high contrast use the system window colors, like the rest of the
 // high-contrast theme; otherwise the window's own colors.

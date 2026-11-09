@@ -426,6 +426,7 @@ struct PreviewHandlerHost::WorkerState {
         DWORD attrs = 0;
         bool enabled = false;
         bool app_active = true;
+        bool covered = false;
         bool immediate = false;
     };
 
@@ -494,7 +495,9 @@ struct PreviewHandlerHost::WorkerState {
         if (!ClientToScreen(owner, &origin)) return;
         const int width = std::max(1L, bounds.right - bounds.left);
         const int height = std::max(1L, bounds.bottom - bounds.top);
-        if (shown && !app_active && !OverlayOwnsForeground()) {
+        // Our own popups (the toolbar picker) count as foreground we own, so a
+        // topmost overlay would sit on top of them: covered hides it outright.
+        if (shown && (covered || (!app_active && !OverlayOwnsForeground()))) {
             pan.Disable();
             SetWindowPos(hwnd, HWND_NOTOPMOST, origin.x, origin.y, width, height,
                          SWP_NOACTIVATE | SWP_HIDEWINDOW);
@@ -694,6 +697,7 @@ struct PreviewHandlerHost::WorkerState {
     std::wstring provider_path;
     DWORD attrs = 0;
     bool app_active = true;
+    bool covered = false;
     bool shown = false;
     int placed_x = INT_MIN;
     int placed_y = INT_MIN;
@@ -832,6 +836,7 @@ void PreviewHandlerHost::Publish(bool enabled, HWND owner, const RECT& bounds,
     command.attrs = attrs;
     command.enabled = enabled;
     command.app_active = app_active_;
+    command.covered = covered_;
     command.immediate = immediate;
     {
         std::lock_guard<std::mutex> lock(worker_->mutex);
@@ -878,6 +883,18 @@ void PreviewHandlerHost::NotifyAppActivate(bool active) {
     {
         std::lock_guard<std::mutex> lock(worker_->mutex);
         worker_->command.app_active = active;
+        worker_->BumpLocked();
+    }
+    SetEvent(worker_->wake);
+}
+
+void PreviewHandlerHost::SetCovered(bool covered) {
+    if (covered_ == covered) return;
+    covered_ = covered;
+    if (!worker_) return;
+    {
+        std::lock_guard<std::mutex> lock(worker_->mutex);
+        worker_->command.covered = covered;
         worker_->BumpLocked();
     }
     SetEvent(worker_->wake);
@@ -1130,6 +1147,7 @@ DWORD WINAPI PreviewHandlerHost::WorkerMain(void* parameter) {
             self->path = command.path;
             self->attrs = command.attrs;
             self->app_active = command.app_active;
+            self->covered = command.covered;
             if (!command.enabled) {
                 self->Unload();
                 self->HideWindow();

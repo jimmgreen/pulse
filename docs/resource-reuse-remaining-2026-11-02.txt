@@ -1,0 +1,103 @@
+Pulse 审查剩余项处理与总对照（2026-11-02）
+
+依据：Downloads/Pulse-资源复用与代码减负审查-2026-11-01.md。
+本轮处理此前按“先画像”保留的O3、O4b、O6、O7；全部性能测量串行进行，
+不与本任务构建并跑。实际文件只使用工作区bench_data隔离夹具，无computer use。
+
+O3 回收站批次scratch
+文件数组提升到一次EmptyFolders生命周期，批间clear释放每条路径；仅保留最多
+2MiB的数组容量，超过则释放再进入下一批。元数据预算、完整枚举后删除、取消、
+失败保留$I及线程创建失败同步降级不变。没有引入常驻线程池。
+同样6个payload各4096文件，共24576真实文件、两批：
+  不复用：扩容48次，删除8191.085ms，线程创建8次、调用合计0.206ms。
+  复用：  扩容26次，删除6991.327ms，线程创建8次、调用合计0.196ms。
+单组前后耗时不作为稳定吞吐提升承诺；计数证明数组扩容减少。
+线程时间仅计std::thread构造调用，不包含完整生命周期CPU；未据此推导常驻池收益。
+证据：build/recycle-batch-reuse.log；入口pulse_recycle_batch_reuse_test。
+
+O4b 重复critical快照
+首条/新类别立即提交；只对已知类别的重复计数按250ms窗口合并，Flush和退出强制。
+未持久化的重复不得推进Flush完成水位；保留首次错误、最新记录及精确累计次数。
+同样201事件：96次critical快照写→5次；首条无Flush落盘16→15ms。
+突发总时间781→797ms，没有吞吐改善证据。自动合并提交281ms，包含调度与I/O，
+不是严格250ms落盘保证。并发、首条、新类别、Flush精确201、退出203、失败保留旧证据、
+原有日志轮转及写失败回归通过。
+证据：build/o4b-baseline-measure.log、o4b-after-measure.log、o4b-regression.log。
+修改前快照：build/o4b-baseline；入口pulse_runtime_log_test --critical-burst。
+
+O6 永久删除ThreadpoolWork
+一次DeleteNative最多懒创建一个work；单项直接执行；创建失败本任务不反复尝试，
+同步处理；每批Wait之后才切换context，RAII在所有退出路径先等待再关闭work。
+不是新增OS线程池；Windows底层线程本来就在复用。
+三轮真实文件对照的对象创建：
+  单文件1→0；4096文件128→1；128目录×4文件128→1；128目录×1文件128→0。
+中位删除ms分别：0.876→0.656、1224.008→1309.567、313.330→310.039、128.336→142.608。
+只确认管理对象减少，不能声称总体删除变快。失败创建、进度异常、取消、混合单项批次
+生命周期验证通过。原定向删除测试通过；符号链接创建因权限1314跳过，junction不跟随通过。
+证据：build/native_delete_reuse_comparison.log、native_delete_reuse_summary.json、
+native_delete_reuse_regression.log。持久回归已纳入pulse_native_delete_stream_test，
+不依赖临时baseline快照；可选pulse_native_delete_reuse_bench --verify-only。
+
+O7 手机/MTP菜单日志
+普通HostLog保留原即时写实现。菜单head（含原生行数）也立即写；后续明细使用
+局部同步batch，最多64行/32KiB，函数退出即Flush。不增加后台线程或长期队列。
+即时写与batch共用mutex，仅文件Flush期间持锁，不跨GetCommandString等COM调用。
+保持UTF8文本、UTF16截断及逐行轮转边界；打开文件由RAII保护分配异常退出。
+独立真实日志文件的1000行对照：1000 opens/writes→16；283323us→6047us。
+跨12次轮转时两代文件内容一致，批量28 opens/writes；时间280181us→25048us。
+这是日志helper测量，不是手机菜单端到端加速倍数。
+证据：build/host-log-batch-baseline.txt；入口pulse_host_log_batch_test。
+首条和失败概要仍即时；硬终止/进程崩溃可丢失尚未Flush的最多64行明细，这是批量的
+持久化边界，不能宣称每条崩溃前都已落盘。无真实手机端到端验证。
+
+原报告23个编号项总对照
+R1：最终网格layout/metrics有界复用，drawing effect绘后清除。
+R2：预览chrome布局、ellipsis、brush按窗口/格式/设备有界复用。
+R3：棋盘与照片墙渐变设备资源复用。
+R4：宽度/FitIconName双预算LRU及字体代际失效。
+R5：目录缩略图锁外上传、过期校验、共享帧预算、CPU恢复副本。
+R6：This PC自然宽度有界复用，固定小数组；仍扫描最多128条生成可靠内容key。
+BG1：共享有界统计、独立订阅取消、退休配额、revision失效；冷启动握手已再优化。
+BG2：面包屑本地/网络额度、在途合并、32项/2MiB/500ms完成缓存及后台revision验证。
+BG3：顺序无关监听根、集合diff、1024去重队列及补偿扫描。
+BG4：兼容的尚未开始请求共享原始枚举，不同展示独立排序，单窗不新增副本。
+BG5：悬浮top-K及流式只计数，保留全量统计/时间预算/可见性语义。
+O1：枚举内预算和未完整枚举不删除，保留恢复信息。
+O2：部分线程创建失败清理/同步降级；故障注入通过。
+O3：空批不建线程、及时完成唤醒、本轮有界scratch；常驻线程池不强行引入。
+O4：每批验证/复用日志句柄，轮转边界重开，减少Record复制。
+O4b：本轮重复critical有界合并，首条/Flush/退出不推迟。
+O5：零长度不创建event，独立I/O上下文复用event和受协议上限约束的接收buffer。
+O6：本轮单删除任务复用ThreadpoolWork。
+O7：本轮菜单行有界batch，保留普通日志和首条即时路径。
+S1：一次规划预编译正则。
+S2：同代读取一份Settings，复用展示字段，不扩大凭证驻留。
+S3：名称排序key和parent冲突key预计算，保留Unicode与稳定排序。
+S4：仅flash=true复制旧名称。
+前述已完成项的实测与边界见resource-reuse-verification-2026-11-01.txt及两份followup记录。
+
+仍明确保留现状的条件性建议
+1. 回收站常驻worker：本轮只消除明确扩容，保留已验证异常/取消协议，不强加长期池。
+2. 不合并不同语义的列表索引大小与完整详情计数，不跨provider安全域缓存。
+   BG4只覆盖同批未开始请求，未宣称所有跨消费者物理扫描都已消除。
+3. 未编号HDD缓冲策略StorageOf缓存：线程预算无法可靠反推SSD/HDD，任务目标不能
+   替代真实parent挂载点。缺少卷身份/设备代际失效时不复用旧分类，也不取消动态内存查询。
+   只读查询确认本机C无寻道惩罚、D/E/F/G有寻道惩罚；没有做这些卷的写入性能与热插拔验证。
+4. 大文件拆分和重复helper合并仅属维护性，不为减少行数移动稳定代码或取消安全检查。
+这些是明确处置，不记作已经实现的性能优化或已通过的硬件场景。
+
+最终接入验证
+最新pulse、pulse_shell及对应测试目标构建通过。构建中app_input.cpp:2049仍有
+用户原有pointer_moved未使用警告，本轮未修改该文件。
+pulse_host_log_batch_test最终版本通过，包括400条并发即时/批量共锁完整性、
+open后分配异常释放handle，以及跨轮转已提交block后异常重试不重复记录。
+最终1000行对照仍为1000→16 opens/writes（273971us→6478us），
+12次轮转批量28 opens/writes，内容两代完全一致。
+pulse_native_delete_stream_test新增持久用例与既有相关用例通过；符号链接1314仍为SKIP，
+未把跳过记为通过。pulse_native_delete_reuse_bench --verify-only全部通过。
+pulse_resource_thread_test线程失败、同步取消、预算、20001文件和占用部分失败全部通过。
+最终日志：build/host-log-batch-final.log、native-delete-final.log、
+native-delete-work-final.log、recycle-resource-final.log。
+最新主程序使用隔离设置实际开窗、A/B两轮往返、观察5秒并退出0；
+证据bench_data/remaining-final-20261102/navigation.csv。该次仅作集成冒烟，不用于性能排名。
+本轮涉及文件git diff --check通过。未提交、未打包、未安装，保留用户其他未提交修改。

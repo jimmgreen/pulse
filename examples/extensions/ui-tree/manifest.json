@@ -1,0 +1,164 @@
+{
+  "apiVersion": 1,
+  "id": "sample.ui-tree",
+  "name": "UI tree workspace",
+  "commands": [
+    {
+      "id": "details",
+      "title": "Details",
+      "capability": "view.setMode",
+      "args": {
+        "mode": "details"
+      }
+    },
+    {
+      "id": "tiles",
+      "title": "Tiles",
+      "capability": "view.setMode",
+      "args": {
+        "mode": "tiles"
+      }
+    }
+  ],
+  "panel": {
+    "title": "Workspace controls",
+    "ui": {
+      "version": 1,
+      "state": [
+        {
+          "key": "name",
+          "value": "Pulse"
+        },
+        {
+          "key": "enabled",
+          "value": "true"
+        },
+        {
+          "key": "mode",
+          "value": "0"
+        },
+        {
+          "key": "tab",
+          "value": "0"
+        },
+        {
+          "key": "item",
+          "value": "0"
+        },
+        {
+          "key": "review",
+          "value": "true"
+        }
+      ],
+      "root": {
+        "type": "scrollView",
+        "id": "root",
+        "children": [
+          {
+            "type": "tabs",
+            "id": "workspace-tabs",
+            "state": "tab",
+            "children": [
+              {
+                "type": "tab",
+                "id": "settings-tab",
+                "text": "Settings",
+                "children": [
+                  {
+                    "type": "group",
+                    "id": "settings",
+                    "text": "Local preferences",
+                    "children": [
+                      {
+                        "type": "textInput",
+                        "id": "name-input",
+                        "state": "name",
+                        "text": "Review name",
+                        "placeholder": "Enter a review name"
+                      },
+                      {
+                        "type": "text",
+                        "id": "name-output",
+                        "binding": "state.name"
+                      },
+                      {
+                        "type": "checkbox",
+                        "id": "enabled-check",
+                        "text": "Enable review flag",
+                        "state": "enabled"
+                      },
+                      {
+                        "type": "select",
+                        "id": "mode-select",
+                        "state": "mode",
+                        "options": [
+                          "Review",
+                          "Ready"
+                        ]
+                      },
+                      {
+                        "id": "review-switch",
+                        "type": "switch",
+                        "text": "Review mode",
+                        "state": "review"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tab",
+                "id": "results-tab",
+                "text": "Results",
+                "children": [
+                  {
+                    "type": "list",
+                    "id": "result-list",
+                    "state": "item",
+                    "options": [
+                      "First result",
+                      "Second result",
+                      "Third result"
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "text",
+            "id": "host-view",
+            "binding": "context.viewMode"
+          },
+          {
+            "type": "grid",
+            "id": "view-actions",
+            "columns": 2,
+            "children": [
+              {
+                "type": "button",
+                "id": "details-button",
+                "text": "Details view",
+                "command": "details",
+                "kind": "primary"
+              },
+              {
+                "type": "button",
+                "id": "tiles-button",
+                "text": "Tiles view",
+                "command": "tiles"
+              }
+            ]
+          },
+          {
+            "id": "review-progress",
+            "type": "progress",
+            "kind": "ring",
+            "status": "normal",
+            "value": 75
+          }
+        ]
+      }
+    }
+  }
+}

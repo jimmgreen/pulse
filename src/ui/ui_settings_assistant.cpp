@@ -467,11 +467,13 @@ void MainRenderer::DrawSettingsAssistant(const WindowViewModel& vm, const D2D1_R
         sub_row(o.voice_pause_row, asst_text::T(I::AiVoicePauseHeading), {}, o.voice_pause[0].left);
         painter_.DrawSegmentedTrack(D2D1::RectF(o.voice_pause[0].left, o.voice_pause[0].top,
                                                 o.voice_pause[2].right, o.voice_pause[2].bottom));
+        if (v.voice_pause >= 0 && v.voice_pause < 3) DrawSettingsSegmentPlate(100001, v.voice_pause, o.voice_pause[v.voice_pause]);
         for (int i = 0; i < 3; ++i) {
             fluent::SegmentedItemSpec item{};
             item.bounds = o.voice_pause[i];
             item.text = asst_text::PauseLabel(i);
             item.state.checked = i == v.voice_pause;
+            item.suppress_plate = item.state.checked;
             item.state.hovered = hovered(kAsstVoicePauseBase + i);
             item.shared_track = true;
             item.position = i == 0 ? fluent::SegmentPosition::First
@@ -501,11 +503,13 @@ void MainRenderer::DrawSettingsAssistant(const WindowViewModel& vm, const D2D1_R
         sub_row(o.hist_keep_row, asst_text::T(I::AiHistKeepRow), asst_text::T(I::AiHistKeepDesc), o.hist_keep[0].left);
         painter_.DrawSegmentedTrack(D2D1::RectF(o.hist_keep[0].left, o.hist_keep[0].top, o.hist_keep[3].right,
                                                 o.hist_keep[3].bottom));
+        if (v.history_keep >= 0 && v.history_keep < 4) DrawSettingsSegmentPlate(100002, v.history_keep, o.hist_keep[v.history_keep]);
         for (int i = 0; i < 4; ++i) {
             fluent::SegmentedItemSpec item{};
             item.bounds = o.hist_keep[i];
             item.text = asst_text::KeepLabel(i);
             item.state.checked = i == v.history_keep;
+            item.suppress_plate = item.state.checked;
             item.state.hovered = hovered(kAsstHistKeepBase + i);
             item.shared_track = true;
             item.position = i == 0 ? fluent::SegmentPosition::First

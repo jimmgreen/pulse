@@ -55,6 +55,19 @@ void Sample(AppState& state) {
 }
 }
 bool PrepareHotEntryProbe(AppState& state) {
+    if (Env(L"PULSE_TEST_LIVE_SHELL_ENTRY") == L"1") {
+        wchar_t executable[32768]{};
+        if (!GetModuleFileNameW(nullptr, executable, ARRAYSIZE(executable))) return false;
+        const auto fixture = Canonical(Env(L"PULSE_TEST_DATA_DIR"));
+        const auto bench = Canonical(std::filesystem::path(executable).parent_path().parent_path() / L"bench_data");
+        if (fixture.empty() || bench.empty() ||
+            !Same(Canonical(std::filesystem::path(fixture).parent_path()), bench) ||
+            !std::filesystem::path(fixture).filename().wstring().starts_with(L"shell-entry-live-")) return false;
+        // Keep the real singleton/forwarding route, but resolve every data read
+        // and write to the validated test profile even in non-selftest builds.
+        detail::HotEntryDataDirectory::directory_ = fixture;
+        return true;
+    }
     const auto nonce = Env(L"PULSE_TEST_HOT_ENTRY");
     if (nonce.empty()) return true;
     if (!Env(L"PULSE_TEST_STARTUP_FAIL").empty()) return false;

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <functional>
 
 namespace pulse::fs {
 
@@ -29,7 +30,11 @@ std::wstring RecycleIndexPath(const std::wstring& content_path);
 // Append live items belonging to the current user under one $Recycle.Bin root.
 // Missing directories are empty; access/enumeration failures return false.
 bool EnumerateRecycleBinAtRoot(const std::wstring& recycle_root, std::vector<DirEntry>& out);
+bool EnumerateRecycleBinAtRoot(const std::wstring& recycle_root, std::vector<DirEntry>& out,
+    const std::function<bool()>& cancelled);
 void EnumerateRecycleBin(std::vector<DirEntry>& out, RecycleBinInfo* info = nullptr);
+void EnumerateRecycleBin(std::vector<DirEntry>& out, RecycleBinInfo* info,
+    const std::function<bool()>& cancelled);
 
 inline bool IsRecycleViewPath(const std::wstring& path) {
     return path == L"pulse:recycle";

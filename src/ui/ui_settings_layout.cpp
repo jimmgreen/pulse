@@ -20,13 +20,17 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
         rect.right - rect.left < 1000 * scale ? 200.0f : 220.0f) * scale;
     l.nav = D2D1::RectF(l.body.left, l.body.top, l.body.left + nav_width, l.body.bottom);
     l.content = D2D1::RectF(l.nav.right, l.body.top, l.body.right, l.body.bottom);
+    l.search_box = D2D1::RectF(l.nav.left + 8*scale, l.nav.top + 10*scale, l.nav.right - 8*scale, l.nav.top + 46*scale);
+    if (nav_width < 100*scale && vm.settings_search_edit_visible) l.search_box.right = (std::min)(l.body.right-8*scale, l.nav.left+252*scale);
+    if (!vm.settings_search_query.empty() && (nav_width >= 100*scale || vm.settings_search_edit_visible)) l.search_clear = D2D1::RectF(l.search_box.right-30*scale, l.search_box.top+4*scale, l.search_box.right-4*scale, l.search_box.bottom-4*scale);
+    const float nav_top = l.nav.top + 52*scale;
     {
         // 关于 (3) stays at the bottom; 系统右键菜单 (6) has no row of its own: the
         // 右键菜单 (2) layer cards switch between the two, see ctx_layer.
         const bool compact = nav_width < 100.0f * scale;
         const float about_top = l.nav.bottom - 92.0f * scale;
         l.nav_row[3] = D2D1::RectF(l.nav.left + 8*scale, about_top, l.nav.right - 8*scale, about_top + 40*scale);
-        const float avail = about_top - 12.0f * scale - l.nav.top;
+        const float avail = about_top - 12.0f * scale - nav_top;
         const int rows = static_cast<int>(std::size(kSettingsNavOrder));
         // Roomiest arrangement that fits: headings, then separators, then tighter rows.
         float pitch = 44.0f, row_h = 38.0f, head = 28.0f, top_pad = 10.0f;
@@ -43,7 +47,7 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
         float sep = 13.0f;
         const bool about_in_list = needed() > avail;
         if (about_in_list) {
-            const float room = (l.nav.bottom - l.nav.top) / scale - 6.0f;
+            const float room = (l.nav.bottom - nav_top) / scale - 6.0f;
             auto fits = [&]() { return top_pad + (rows + 1) * pitch + kSettingsNavGroups * sep <= room; };
             if (!fits()) { pitch = 34.0f; row_h = 31.0f; sep = 11.0f; }
             if (!fits()) { pitch = 32.0f; row_h = 30.0f; sep = 9.0f; top_pad = 4.0f; }
@@ -53,7 +57,7 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
                 row_h = pitch - 2.0f;
             }
         }
-        float y = l.nav.top + top_pad * scale;
+        float y = nav_top + top_pad * scale;
         int group = 0;
         for (int k = 0; k < rows; ++k) {
             if (group < kSettingsNavGroups && kSettingsNavGroupStart[group] == k) {
@@ -86,7 +90,17 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
         if (painter) return painter->MeasureButtonWidth(label);
         return 88.0f * scale;
     };
-    l.content_origin = l.content.top - vm.settings_scroll;
+    l.content_origin = l.content.top - (vm.settings_page == kSettingsPageNativeExtensions && vm.settings_search_query.empty() ? 0.0f : vm.settings_scroll);
+    if (!vm.settings_search_query.empty()) {
+        if (vm.settings_search_results.empty()) l.search_empty_clear = D2D1::RectF(l.content.left+20*scale, l.content_origin+132*scale, (std::min)(l.content.right-20*scale,l.content.left+92*scale), l.content_origin+164*scale);
+        float result_y = l.content_origin + 76*scale;
+        for (size_t i = 0; i < vm.settings_search_results.size(); ++i) {
+            l.search_results.push_back(D2D1::RectF(l.content.left + pad, result_y, l.content.right - pad, result_y + 64*scale));
+            result_y += 72*scale;
+        }
+        l.content_h = result_y - l.content_origin + pad;
+        return l;
+    }
     float y = l.content_origin + pad;
     y += 36.0f * scale;
     y += 8.0f * scale;
@@ -128,10 +142,6 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
             y += h*scale;
         }
         l.global_search_apps_row = D2D1::RectF(card_left, y, card_right, y + 68*scale);
-        y += 68*scale;
-        l.dialog_jump_row = D2D1::RectF(card_left, y, card_right, y + 68*scale);
-        y += 68*scale;
-        l.dialog_jump_auto_row = D2D1::RectF(card_left, y, card_right, y + 68*scale);
         y += 68*scale;
         l.search_pinyin_row = D2D1::RectF(card_left, y, card_right, y + 68*scale);
         y += 68*scale;
@@ -528,6 +538,15 @@ SettingsLayout MakeSettingsLayout(const WindowViewModel& vm, const D2D1_RECT_F& 
         y = LayoutSettingsSysCtx(l, vm, scale, y, painter);
     } else if (vm.settings_page == 7) {
         y = LayoutSettingsShortcuts(l, vm, scale, y, painter);
+    } else if (vm.settings_page == kSettingsPageNativeExtensions) {
+        const float left = (std::min)(l.content.right, l.content.left + pad);
+        const float right = (std::max)(left, l.content.right - pad);
+        const float intro = painter ? painter->MeasureWrappedCaptionHeight(l10n::Get(l10n::StringId::NativeExtensionSettingsIntro), (std::max)(1.0f, right-left)) : 36.0f*scale;
+        const float bottom = (std::max)(l.content.top, l.content.bottom - pad);
+        const float top = (std::min)(bottom, l.content.top + 60.0f*scale + intro + 18.0f*scale);
+        l.native_settings_content = D2D1::RectF(left, top, right, bottom);
+        l.content_h = l.content.bottom - l.content.top;
+        return l;
     } else if (vm.settings_page == kSettingsPageAi) {
         y = LayoutSettingsAi(l, vm, scale, y, painter);
     } else if (vm.settings_page == kSettingsPageAssistant) {

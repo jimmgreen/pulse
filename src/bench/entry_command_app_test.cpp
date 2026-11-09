@@ -238,8 +238,8 @@ int Relay(const std::filesystem::path& self, int argc, wchar_t** argv) {
         fixture.filename() != L"entry-command-" + std::wstring(contract.nonce)) return 2;
     const std::wstring expected = contract.kind == Kind::Folder ? contract.target_path :
         contract.kind == Kind::ThisPc ? L"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}" :
-        contract.kind == Kind::RecycleBin ? L"::{645FF040-5081-101B-9F08-00AA002F954E}" : L"--win-e";
-    const bool arguments_match = argc == 2 && argv[1] == expected;
+        contract.kind == Kind::RecycleBin ? L"::{645FF040-5081-101B-9F08-00AA002F954E}" : L"pulse:win-e";
+    const bool arguments_match = argc == 3 && std::wstring_view(argv[1]) == L"--shell-open" && argv[2] == expected;
     std::wstring argv_text = L"\xFEFF" L"argc=" + std::to_wstring(argc) + L"\r\n";
     for (int index = 0; index < argc; ++index) argv_text += std::to_wstring(index) + L"\t" + argv[index] + L"\r\n";
     if (!WriteNew(fixture / L"relay-argv.utf16.txt", argv_text.data(), static_cast<DWORD>(argv_text.size() * sizeof(wchar_t)))) return 1;

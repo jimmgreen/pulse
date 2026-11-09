@@ -85,10 +85,8 @@ void HoldPreviewTimer(AppState& s) {
     }
     // The press became a peek: its release neither opens, renames, drags
     // nor draws a marquee.
-    s.singleOpenCandidate = false;
-    CancelRenameClick(s);
-    s.dragPending = false;
-    s.marqueePending = false;
+    CancelFileClick(s);
+    CancelListSelection(s);
     HideHoverPreview(s);
     g_hold.shown = true;
     OpenQuickPreview(s, item, false);
@@ -146,8 +144,8 @@ ui::QuickPreviewOptions QuickPreviewOptionsFromPrefs(const app::AppPrefs& prefs)
 
 // What the window changed itself (size menu, L, a dragged size) goes to the
 // prefs; Settings shows it from there.
-static void SaveQuickPreviewOptions(AppState& s) {
-    const ui::QuickPreviewOptions& options = s.quickPreview.options();
+static void SaveQuickPreviewOptions(AppState& s, ui::QuickPreviewWindow& preview) {
+    const ui::QuickPreviewOptions& options = preview.options();
     if (options == QuickPreviewOptionsFromPrefs(s.appPrefs)) return;
     auto& prefs = s.appPrefs;
     prefs.preview_size = app::NormalizePreviewSize(options.size_mode);
@@ -164,11 +162,16 @@ static void SaveQuickPreviewOptions(AppState& s) {
 }
 
 void HandleQuickPreviewCommand(AppState& s, const ui::QuickPreviewCommand& command) {
+    HandleQuickPreviewCommand(s, s.quickPreview, command);
+}
+
+void HandleQuickPreviewCommand(AppState& s, ui::QuickPreviewWindow& preview,
+                               const ui::QuickPreviewCommand& command) {
     if (command.action == ui::QuickPreviewAction::SaveOptions) {
-        SaveQuickPreviewOptions(s);
+        SaveQuickPreviewOptions(s, preview);
         return;
     }
-    if (!s.quickPreview.visible() || command.target.path.empty()) return;
+    if (!preview.visible() || command.target.path.empty()) return;
     if (command.action == ui::QuickPreviewAction::InstallMediaPack) {
         // Same download as Settings > 预览增强包; BuildVm feeds its progress
         // back to the card and reopens the preview once it is installed.
@@ -189,7 +192,7 @@ void HandleQuickPreviewCommand(AppState& s, const ui::QuickPreviewCommand& comma
     const auto action = command.action;
     if (action == ui::QuickPreviewAction::OpenInNewTab) {
         if (!(target.attrs & FILE_ATTRIBUTE_DIRECTORY)) return;
-        s.quickPreview.Close();
+        preview.Close();
         OpenFolderTab(s, target.path);
         InvalidateRect(s.hwnd, nullptr, FALSE);
         return;
@@ -217,7 +220,7 @@ void HandleQuickPreviewCommand(AppState& s, const ui::QuickPreviewCommand& comma
             break;
         case ui::QuickPreviewAction::Rename: {
             // Reuse the existing inline editor in the item's containing folder.
-            s.quickPreview.Close();
+            preview.Close();
             const auto parent = fs::ParentPath(target.path);
             NavigateTo(s, parent);
             if (auto* tab = ActiveTab(s); tab && tab->current_path == fs::NormalizePath(parent)) {
@@ -260,14 +263,15 @@ void HandleQuickPreviewCommand(AppState& s, const ui::QuickPreviewCommand& comma
     case ui::QuickPreviewAction::ToggleStar:
         ToggleStarred(s, target.path, target.attrs & FILE_ATTRIBUTE_DIRECTORY
             ? app::PlaceItemKind::Folder : app::PlaceItemKind::File);
-        s.quickPreview.SetStarred(s.places.IsStarred(target.path));
+        preview.SetStarred(s.places.IsStarred(target.path));
         break;
     case ui::QuickPreviewAction::Rename:
-        s.quickPreview.Close();
+        preview.Close();
         ShowRenameOverlay(s);
         break;
     case ui::QuickPreviewAction::Delete:
-        s.quickPreviewAnchorView = BuildVm(s).pane.ViewIndex(index);
+        if (&preview == &s.quickPreview)
+            s.quickPreviewAnchorView = BuildVm(s).pane.ViewIndex(index);
         DeleteSelected(s, command.shift);
         break;
     case ui::QuickPreviewAction::Properties: s.ops.ShowProperties(target.path); break;

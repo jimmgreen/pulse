@@ -3,6 +3,8 @@
 // thread. The fake phones live in a temp folder that is removed afterwards;
 // the real shell source is only listed (read-only), never written.
 #include "../fs/device_path.h"
+#include "../app/this_pc_devices.h"
+#include <cstring>
 #include "../fs/device_source.h"
 #include "../fs/device_worker.h"
 
@@ -315,7 +317,28 @@ void ShellSourceSmoke() {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "--this-pc") == 0) {
+        DeviceInfo phone;
+        phone.key = L"0123456789ab";
+        phone.name = L"Test phone";
+        DeviceInfo second = phone;
+        second.key = L"abcdef012345";
+        second.locked = true;
+        const std::vector<std::vector<DeviceInfo>> snapshots = {{}, {phone}, {phone, second}, {phone}, {}};
+        const char* labels[] = {"no device: no group rows", "connected: one group row",
+            "two devices including locked: two group rows", "one removed: remaining row", "last removed: no group rows"};
+        for (size_t i = 0; i < snapshots.size(); ++i) {
+            std::vector<DirEntry> entries(1);
+            entries.front().name = L"Drive";
+            pulse::app::AppendThisPcDevices(entries, snapshots[i]);
+            size_t device_rows = 0;
+            for (const auto& entry : entries) if (entry.pc_device) ++device_rows;
+            Check(device_rows == snapshots[i].size() && entries.size() == snapshots[i].size() + 1
+                && entries.front().name == L"Drive", labels[i]);
+        }
+        return g_passed ? 0 : 1;
+    }
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     wchar_t temp[MAX_PATH]{};
     GetTempPathW(MAX_PATH, temp);

@@ -58,6 +58,10 @@ enum class Str {
     SumStart,
     Close,
     Launch,
+    LockedTitle,
+    LockedText,
+    LockedUnknown,
+    LockedLog,
     BusyTitle,
     BusyText,
     Retry,
@@ -82,6 +86,7 @@ enum class Str {
     UnBtn,
     UnDone,
     UnDoneReboot,
+    UnDoneDialogRetained,
     UnFailed,
     UnBusyText,
     IntegrationIncomplete,
@@ -103,6 +108,14 @@ enum class Str {
     AiDemoPrompt,
     AiDemoReply,
     AiDemoAction,
+    CleanupTitle,
+    CleanupText,
+    CleanupKeep,
+    CleanupHint,
+    CleanupPending,
+    CleanupApps,
+    CleanupUnknown,
+    CleanupVersions,
     Count
 };
 

@@ -12,7 +12,7 @@
 namespace pulse::ui {
 
 struct WindowViewModel;
-enum class PreviewFormatSource { BuiltIn, Pack, PackOrSystem };
+enum class PreviewFormatSource { BuiltIn, Pack, PackOrSystem, Plugin };
 struct PreviewFormatState {
     PreviewFormatSource source = PreviewFormatSource::BuiltIn;
     bool available = true;

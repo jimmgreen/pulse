@@ -1,0 +1,33 @@
+Follow-up diagnosis: Pulse-diagnostics-20261104-193401-23520-0
+
+Exported evidence, local time UTC+8:
+- 19:31:22..25: external_launch_result entry=3, mode=0, action=2;
+  windows_before/after 1->2->3->4->5->6. This is the shared Win+E / Explorer
+  taskbar launch entry honoring the configured New window mode.
+- 19:32:02: entry=2, mode=0, windows 1->2. The Pulse launch arrived without
+  --activate. No entry=1 activation event was found in the exported logs.
+- taskbar_identity HRESULT=0; registration did not report a property-store error.
+- takeover=1 and compat=1. ExplorerTakeoverEnabled uses OR for these toggles;
+  enabling both does not create a second observer or improve coverage.
+
+Previous fix covered pinning through a running window's relaunch properties,
+but setup shortcuts still used empty arguments. Pinning such a shortcut can
+retain the ordinary launch behavior. Correct ordinary setup shortcuts to use
+--activate and migrate legacy shortcuts even if their AppID already matches.
+Keep explicit --new-window and utility shortcuts unchanged.
+
+The exported logs do not identify the source shortcut used for pinning. Local
+shortcut inspection is supporting evidence only, not proof of the reporter's
+pin source. Windows may keep a cached old pin; replace it from the updated
+Start menu shortcut after installation.
+
+Win+E / Explorer taskbar behavior is separately configurable in Settings:
+Win + E and the taskbar icon -> Activate window (or New tab if desired).
+No application preferences or taskbar pins were modified by this investigation.
+
+Implemented: setup ordinary shortcuts now persist --activate; legacy empty
+arguments migrate even with a correct AppID; explicit custom arguments remain.
+Existing desktop shortcuts migrate even when desktop shortcut creation is unchecked.
+Native shortcut COM tests: 7/7 PASS (setup_shortcut_activation_test.log).
+Setup build and package checks passed (taskbar-shortcut-package.log).
+No actual installation or taskbar interaction performed.

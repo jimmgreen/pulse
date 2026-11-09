@@ -5,6 +5,9 @@
 #include "../fs/drive_kind.h"
 
 #include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <vector>
 
@@ -42,7 +45,62 @@ void Fill(Tab& tab, const wchar_t* path, std::vector<fs::DirEntry> entries) {
 
 } // namespace
 
-int main() {
+namespace {
+int RunTrayRefreshTest() {
+    namespace disk = std::filesystem;
+    const auto root = disk::absolute(disk::path(L"bench_data") /
+        (L"tray_refresh_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount64())));
+    std::error_code error;
+    if (!disk::create_directories(root, error) || error) {
+        Check(false, "create isolated tray refresh fixture");
+        return 1;
+    }
+    const auto file = root / L"item.txt";
+    { std::ofstream output(file); output << "fixture"; }
+    StagingTray tray;
+    tray.Collect({file.wstring()}, false);
+    Check(tray.batches()[0].items[0].exists, "local tray fixture initially exists");
+    Check(disk::remove(file, error) && !error, "delete isolated tray fixture");
+
+    struct Environment {
+        std::wstring name, value;
+        bool present = false;
+        explicit Environment(const wchar_t* key) : name(key) {
+            const DWORD size = GetEnvironmentVariableW(key, nullptr, 0);
+            present = size != 0;
+            if (size) {
+                value.resize(size);
+                value.resize(GetEnvironmentVariableW(key, value.data(), size));
+            }
+        }
+        ~Environment() { SetEnvironmentVariableW(name.c_str(), present ? value.c_str() : nullptr); }
+    } data_dir(L"PULSE_TEST_DATA_DIR"), remote_drives(L"PULSE_TEST_REMOTE_LIKE_DRIVES");
+    const wchar_t marked[] = {fs::DriveLetterOf(file.wstring()), 0};
+    SetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", root.c_str());
+    SetEnvironmentVariableW(L"PULSE_TEST_REMOTE_LIKE_DRIVES", marked);
+    Check(fs::IsRemoteLikeDrive(file.wstring()), "fixture drive marked remote-like");
+    Check(tray.batches()[0].items[0].path.starts_with(L"\\\\?\\"), "tray stores extended drive paths");
+    Check(!tray.RefreshExists() && tray.batches()[0].items[0].exists,
+          "remote-like refresh preserves known existence despite missing backing file");
+    const std::wstring unc = L"\\\\pulse-tray-fixture.invalid\\share\\item.txt";
+    tray.ReplacePath(file.wstring(), unc);
+    Check(!tray.RefreshExists() && tray.batches()[0].items[0].exists,
+          "UNC refresh preserves existence without accessing the share");
+    tray.ReplacePath(unc, file.wstring());
+    SetEnvironmentVariableW(L"PULSE_TEST_REMOTE_LIKE_DRIVES", nullptr);
+    Check(!fs::IsRemoteLikeDrive(file.wstring()), "fixture returns to ordinary local drive");
+    Check(tray.RefreshExists() && !tray.batches()[0].items[0].exists,
+          "local deletion still updates tray existence");
+    SetEnvironmentVariableW(L"PULSE_TEST_REMOTE_LIKE_DRIVES", marked);
+    Check(!tray.RefreshExists() && !tray.batches()[0].items[0].exists,
+          "remote-like refresh preserves previously missing state");
+    Check(disk::remove(root, error) && !error, "remove isolated empty fixture directory");
+    return g_failures ? 1 : 0;
+}
+} // namespace
+
+int main(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "--tray-refresh-only") == 0) return RunTrayRefreshTest();
     Check(IsUncServerRoot(L"\\\\nas") && IsUncServerRoot(L"\\\\nas\\") && IsUncServerRoot(L"\\\\?\\UNC\\nas"),
           "\\\\server is a server root");
     Check(!IsUncServerRoot(L"\\\\nas\\share") && !IsUncServerRoot(L"C:\\") && !IsUncServerRoot(L"\\\\?\\C:\\x"),
@@ -66,6 +124,21 @@ int main() {
     tab.ToggleSelect(1);
     caps = ComputeSelectionCaps(tab, &places);
     Check(caps.cut && caps.copy && caps.del && !caps.rename, "two files: no single rename");
+
+    // Search may contain an original-path replacement alongside a recycled item.
+    auto recycled = Entry(L"a", L"C:\\work\\a");
+    recycled.recycle_path = L"C:\\$Recycle.Bin\\S-1-5-21-test\\$Rtest";
+    Fill(tab, L"pulse:search", {recycled, Entry(L"a", L"C:\\work\\a")});
+    tab.ToggleSelect(0);
+    caps = ComputeSelectionCaps(tab, &places);
+    Check(RecycleSelectionOf(tab) == RecycleSelection::All && caps.del &&
+          !caps.copy && !caps.cut && !caps.rename && !caps.tags,
+          "recycled search result: only permanent deletion allowed");
+    tab.ToggleSelect(1);
+    caps = ComputeSelectionCaps(tab, &places);
+    Check(RecycleSelectionOf(tab) == RecycleSelection::Mixed && !caps.del &&
+          !caps.copy && !caps.cut && !caps.rename && !caps.tags,
+          "mixed original-path replacement: no ordinary mutation allowed");
 
     // This PC: drives.
     Fill(tab, L"", {Entry(L"Win11 (C:)", L"C:\\", DRIVE_FIXED), Entry(L"USB (H:)", L"H:\\", DRIVE_REMOVABLE),

@@ -1,4 +1,4 @@
-// Conflict dialog (pulse_ops_dialogs.html §3): hovering a cut-off source or
+// Conflict dialog: hovering a cut-off source or
 // destination path shows it whole (#55), R / S / K and Alt+R pick, Tab +
 // Enter picks the focused choice, the 对其余 N 个 switch carries apply_to_all,
 // Escape cancels. Drives the real dialog; optional argv[1] is a folder that
@@ -129,7 +129,7 @@ bool SaveShot(HWND dialog, HWND tip, const std::wstring& path) {
 }
 
 // Layout in DIPs (file_operation_dialog.cpp ConflictWindow).
-constexpr float kSourcePathX = 24 + 100, kDestinationPathX = 266.5f + 100, kPathY = 82 + 90 + 8;
+constexpr float kSourcePathX = 266.5f + 100, kDestinationPathX = 24 + 100, kPathY = 82 + 90 + 8;
 constexpr float kRowX = 280;
 float RowY(int index) { return 204 + index * 56.0f + 27; }
 constexpr float kApplyY = 390 + 32;

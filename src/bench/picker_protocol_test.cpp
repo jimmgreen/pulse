@@ -37,7 +37,7 @@ void Check(bool ok, const char* name) {
     if (!ok) ++failures;
     std::cout << (ok ? "[PASS] " : "[FAIL] ") << name << '\n';
 }
-Message Make(std::variant<Request, Response, Cancel> body = Request{}) {
+Message Make(decltype(Message::body) body = Request{}) {
     Message m;
     m.request_id[0] = 1;
     m.body = std::move(body);
@@ -114,9 +114,85 @@ void LocalOpenPolicyChecks() {
     message = Make(request);
     Check(Encode(message, encoded) == CodecError::InvalidSemantics, "local V1 cannot change Save validation");
 }
+void SessionChecks() {
+    const auto hello = Make(SessionHello{});
+    const auto welcome = MakeSessionWelcome(hello);
+    const auto request = Make();
+    RoundTrip(hello);
+    RoundTrip(welcome);
+    RoundTrip(Make(SessionWelcome{0, 0, 0}));
+    Check(ValidateSessionWelcome(hello, welcome), "session compatible welcome");
+    Check(ValidateSessionRequest(hello, welcome, request), "session binds request");
+    Check(!ValidateSessionWelcome(hello, Make(SessionWelcome{0, 0, 0})), "session explicit rejection");
+    for (const auto body : {SessionHello{3, 4, kSessionBasic, Open}, SessionHello{1, 1, kSessionBasic, Open},
+             SessionHello{2, 2, 0x80000001, Open}, SessionHello{2, 2, kSessionBasic, 0x80000001}}) {
+        const auto unsupported = Make(body);
+        RoundTrip(unsupported);
+        const auto rejected = MakeSessionWelcome(unsupported);
+        Check(std::get<SessionWelcome>(rejected.body) == SessionWelcome{0, 0, 0} &&
+            !ValidateSessionWelcome(unsupported, rejected), "session incompatible requirement rejected");
+        Check(!ValidateSessionWelcome(unsupported, welcome), "session unsupported hello cannot accept ordinary welcome");
+    }
+    auto changed = welcome;
+    changed.request_id[0] = 2;
+    Check(!ValidateSessionWelcome(hello, changed), "session changed welcome id rejected");
+    changed = request; changed.request_id[0] = 2;
+    Check(!ValidateSessionRequest(hello, welcome, changed), "session changed request id rejected");
+    changed = request; std::get<Request>(changed.body).required_capabilities |= MultiSelect;
+    Check(!ValidateSessionRequest(hello, welcome, changed), "session request capability drift rejected");
+    for (const auto body : {SessionWelcome{3, kSessionBasic, kRequestCapabilities},
+             SessionWelcome{2, 0, kRequestCapabilities}, SessionWelcome{2, kSessionBasic, 0}}) {
+        const auto invalid = Make(body);
+        RoundTrip(invalid);
+        Check(!ValidateSessionWelcome(hello, invalid), "session missing or unsupported selection rejected");
+    }
+    auto future = Make(SessionWelcome{2, 0x80000001, kRequestCapabilities | 0x80000000});
+    RoundTrip(future);
+    Check(ValidateSessionWelcome(hello, future), "session future optional welcome bits tolerated");
+    Check(!ValidateSessionWelcome(request, welcome) && !ValidateSessionWelcome(hello, request) &&
+        !ValidateSessionRequest(hello, welcome, Make(Cancel{})), "session wrong kinds rejected");
+    Check(std::get<SessionWelcome>(MakeSessionWelcome(request).body).version == 0,
+        "session wrong hello kind produces rejection");
+    Check(ValidateSessionWelcome(Make(SessionHello{1, 3, 0, Open}), welcome), "session compatible version range selects V2 basic");
+    for (const auto body : {SessionHello{0, 2, 1, Open}, SessionHello{3, 2, 1, Open}, SessionHello{2, 0, 1, Open}})
+        Reject(Make(body));
+    Reject(Make(SessionWelcome{0, 1, 0}));
+    Reject(Make(SessionWelcome{0, 0, Open}));
+    changed = hello; changed.request_id = {}; Reject(changed);
+    Check(!ValidateSessionWelcome(changed, welcome), "session zero hello id rejected");
+    changed = welcome; changed.request_id = {}; Reject(changed);
+    std::vector<uint8_t> wire;
+    Encode(hello, wire);
+    Put(wire, 28, 0);
+    auto output = request;
+    Check(Decode(wire, output) == CodecError::InvalidSemantics && output == request,
+        "session malformed hello wire preserves output");
+    Encode(welcome, wire); Put(wire, 28, 0);
+    Check(Decode(wire, output) == CodecError::InvalidSemantics && output == request,
+        "session malformed rejection wire preserves output");
+    for (const auto& legacy : {request, Make(Response{}), Make(Cancel{})}) {
+        RoundTrip(legacy);
+        Encode(legacy, wire);
+        std::vector<uint8_t> expected(28, 0);
+        expected[0] = 'P'; expected[1] = 'P'; expected[2] = 'C'; expected[3] = 'K';
+        expected[4] = 1; expected[6] = static_cast<uint8_t>(legacy.body.index() + 1); expected[12] = 1;
+        if (std::holds_alternative<Request>(legacy.body)) {
+            expected.resize(60, 0); Put(expected, 28, 1); Put(expected, 32, Open);
+        } else if (std::holds_alternative<Response>(legacy.body)) {
+            expected.resize(52, 0); Put(expected, 28, 1); Put(expected, 32, 2);
+        }
+        Put(expected, 8, static_cast<uint32_t>(expected.size() - 28));
+        Check(wire == expected, "session legacy V1 wire unchanged");
+    }
+}
 int main(int argc, char** argv) {
     SetUnhandledExceptionFilter(TraceException);
     std::cout << std::unitbuf;
+    if (argc == 2 && std::string_view(argv[1]) == "--session") {
+        SessionChecks();
+        std::cout << "Checks: " << checks << ", failures: " << failures << '\n';
+        return failures ? 1 : 0;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--local-open") {
         LocalOpenPolicyChecks();
         std::cout << "Checks: " << checks << ", failures: " << failures << '\n';
@@ -311,6 +387,53 @@ int main(int argc, char** argv) {
     wire[45] = 0xd8; Check(Decode(wire, decoded) != CodecError::None, "wire unmatched high surrogate rejected");
     wire[45] = 0xdc; Check(Decode(wire, decoded) != CodecError::None, "wire unmatched low surrogate rejected");
     wire.assign(kMaxMessageBytes + 1, 0); Check(Decode(wire, decoded) != CodecError::None, "overlarge message rejected");
+
+    // Local save access and dialog labels (out-of-process Save).
+    const auto local_save = [] {
+        Request s; s.operation = Operation::SaveFile; s.required_capabilities = Save | LocalSaveAccessV1;
+        s.options = OverwritePrompt | ValidateLocalSaveAccessV1; s.initial_directory = u"C:\\Work"; s.filename = u"Report";
+        return s;
+    };
+    auto s = local_save();
+    Check(Encode(Make(s), wire) == CodecError::None && Decode(wire, decoded) == CodecError::None && decoded == Make(s), "local save round trip");
+    s = local_save(); s.options |= SaveNativeDefaults | SaveNoTestFileCreate | SaveRequireExistingParent;
+    Check(Encode(Make(s), wire) == CodecError::None && Decode(wire, decoded) == CodecError::None && decoded == Make(s), "local save options round trip");
+    s = local_save(); s.options &= ~ValidateLocalSaveAccessV1; Check(Encode(Make(s), wire) == CodecError::InvalidSemantics, "local save capability needs its option");
+    s = local_save(); s.required_capabilities &= ~LocalSaveAccessV1; Check(Encode(Make(s), wire) == CodecError::InvalidSemantics, "local save option needs its capability");
+    s = local_save(); s.options &= ~OverwritePrompt; Check(Encode(Make(s), wire) == CodecError::InvalidSemantics, "local save requires overwrite prompt");
+    s = local_save(); s.options |= SaveSkipAccessValidation | SaveRequireUnencrypted; Check(Encode(Make(s), wire) == CodecError::InvalidSemantics, "caller save excludes unencrypted");
+    s = local_save(); s.options |= SaveSkipAccessValidation | SaveNativeDefaults; Check(Encode(Make(s), wire) == CodecError::InvalidSemantics, "caller save excludes native defaults");
+    s = local_save(); s.options |= SaveRequireExistingParent; Check(Encode(Make(s), wire) == CodecError::InvalidSemantics, "existing parent needs no-test-create");
+    s = local_save(); s.options |= SaveNoTestFileCreate | SaveRequireUnencrypted; Check(Encode(Make(s), wire) == CodecError::InvalidSemantics, "no-test-create excludes unencrypted");
+    q = Request{}; q.options = SaveNativeDefaults; Check(Encode(Make(q), wire) == CodecError::InvalidSemantics, "save option rejected on open");
+    q = Request{}; q.operation = Operation::OpenFiles; q.required_capabilities = Open | LocalSaveAccessV1; q.options = ValidateLocalSaveAccessV1;
+    Check(Encode(Make(q), wire) == CodecError::InvalidSemantics, "local save access rejected on open");
+
+    s = local_save(); s.required_capabilities |= DialogLabels; s.label_flags = LabelTitle | LabelOkButton | LabelFileName;
+    s.title = u"导出报告"; s.ok_button_label = u"导出"; s.file_name_label = u"名称:";
+    Check(Encode(Make(s), wire) == CodecError::None && Decode(wire, decoded) == CodecError::None && decoded == Make(s), "labels round trip");
+    s.label_flags = LabelTitle; s.ok_button_label.clear(); s.file_name_label.clear(); s.title.clear();
+    Check(Encode(Make(s), wire) == CodecError::None && Decode(wire, decoded) == CodecError::None && decoded == Make(s), "explicit empty title round trip");
+    s.label_flags = 0; Check(Encode(Make(s), wire) == CodecError::InvalidSemantics, "label capability needs flags");
+    s = local_save(); s.label_flags = LabelTitle; Check(Encode(Make(s), wire) == CodecError::InvalidSemantics, "label flags need capability");
+    s = local_save(); s.required_capabilities |= DialogLabels; s.label_flags = LabelTitle; s.ok_button_label = u"OK";
+    Check(Encode(Make(s), wire) == CodecError::InvalidSemantics, "unset label must be empty");
+    s.label_flags = LabelOkButton; s.ok_button_label = u"Line\nbreak"; Check(Encode(Make(s), wire) == CodecError::InvalidSemantics, "label control characters rejected");
+    s.ok_button_label.assign(kMaxLabelUnits + 1, u'x'); Check(Encode(Make(s), wire) == CodecError::InvalidSemantics, "overlong label rejected");
+    s.label_flags = 8; s.ok_button_label.clear(); Check(Encode(Make(s), wire) == CodecError::InvalidSemantics, "unknown label flag rejected");
+    s = local_save(); s.required_capabilities |= DialogLabels; s.label_flags = LabelTitle; s.title = u"T";
+    Encode(Make(s), wire); wire.pop_back(); wire.pop_back();
+    Check(Decode(wire, decoded) != CodecError::None, "truncated label section rejected");
+    s = local_save(); Encode(Make(s), wire); Put(wire, 32, Save | LocalSaveAccessV1 | DialogLabels);
+    Check(Decode(wire, decoded) != CodecError::None, "label capability without label section rejected");
+
+    // Caller window, for a standby host without a command line.
+    q = Request{}; q.required_capabilities |= CallerWindow; q.caller_window = 0x0000'7ff6'1234'5678ull;
+    Check(Encode(Make(q), wire) == CodecError::None && Decode(wire, decoded) == CodecError::None && decoded == Make(q), "caller window round trip (64-bit)");
+    q.caller_window = 0; Check(Encode(Make(q), wire) == CodecError::InvalidSemantics, "caller window capability needs a window");
+    q = Request{}; q.caller_window = 42; Check(Encode(Make(q), wire) == CodecError::InvalidSemantics, "caller window needs its capability");
+    q = Request{}; q.required_capabilities |= CallerWindow; q.caller_window = 42; Encode(Make(q), wire); wire.resize(wire.size() - 4);
+    Check(Decode(wire, decoded) != CodecError::None, "truncated caller window rejected");
     std::cout << "Checks: " << checks << ", failures: " << failures << '\n';
     return failures ? 1 : 0;
 }

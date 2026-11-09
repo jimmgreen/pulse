@@ -1,5 +1,4 @@
-// action_args.h - Actions run with arguments (全面打通 P4,
-// plans/ai/P4_全部领域接入.html).
+// action_args.h - Actions run with arguments (全面打通 P4).
 //
 // The palette runs an action as its menu row does; the assistant (and MCP in
 // P5) names what to act on: which tab, which tag, what name, which keys. A

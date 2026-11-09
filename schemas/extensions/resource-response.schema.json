@@ -1,0 +1,691 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pulse.local/schemas/extensions/resource-response.schema.json",
+  "title": "Pulse resource responses v1",
+  "description": "Choose x-operationResponses[request.op] to validate a response. No response op field is transmitted. Root accepts any known operation response.",
+  "x-operationResponses": {
+    "context.get": {
+      "$ref": "#/$defs/resourceContextResponse"
+    },
+    "files.list": {
+      "$ref": "#/$defs/resourceListResponse"
+    },
+    "files.stat": {
+      "$ref": "#/$defs/resourceFileMetadataResponse"
+    },
+    "operations.get": {
+      "$ref": "#/$defs/resourceTaskResponse"
+    },
+    "operations.cancel": {
+      "$ref": "#/$defs/resourceCancelResponse"
+    },
+    "settings.get": {
+      "$ref": "#/$defs/resourceSettingsResponse"
+    },
+    "settings.set": {
+      "$ref": "#/$defs/resourceSettingsResponse"
+    },
+    "audit.list": {
+      "$ref": "#/$defs/resourceAuditResponse"
+    },
+    "files.prepareRename": {
+      "$ref": "#/$defs/resourceRenamePreparedResponse"
+    },
+    "files.commitRename": {
+      "$ref": "#/$defs/resourceRenameCommittedResponse"
+    }
+  },
+  "anyOf": [
+    {
+      "$ref": "#/$defs/resourceContextResponse"
+    },
+    {
+      "$ref": "#/$defs/resourceListResponse"
+    },
+    {
+      "$ref": "#/$defs/resourceFileMetadataResponse"
+    },
+    {
+      "$ref": "#/$defs/resourceTaskResponse"
+    },
+    {
+      "$ref": "#/$defs/resourceCancelResponse"
+    },
+    {
+      "$ref": "#/$defs/resourceSettingsResponse"
+    },
+    {
+      "$ref": "#/$defs/resourceAuditResponse"
+    },
+    {
+      "$ref": "#/$defs/resourceRenamePreparedResponse"
+    },
+    {
+      "$ref": "#/$defs/resourceRenameCommittedResponse"
+    }
+  ],
+  "$defs": {
+    "resourceUint64": {
+      "type": "string",
+      "pattern": "^(?:0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]{1}|1844674407370955161[0-4]|18446744073709551615)$",
+      "maxLength": 20,
+      "description": "Canonical unsigned decimal uint64, 0..18446744073709551615. No JavaScript number conversion."
+    },
+    "resourceTaskId": {
+      "type": "string",
+      "pattern": "^(?!0$)(?:0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]{1}|1844674407370955161[0-4]|18446744073709551615)$",
+      "maxLength": 20,
+      "description": "Canonical unsigned decimal uint64, 0..18446744073709551615. No JavaScript number conversion."
+    },
+    "resourceFailure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ok",
+        "error"
+      ],
+      "properties": {
+        "ok": {
+          "const": false
+        },
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code"
+          ],
+          "properties": {
+            "code": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "resourceFileMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "sizeBytes",
+        "directory",
+        "reparsePoint",
+        "attributes",
+        "modifiedFileTime"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "sizeBytes": {
+          "$ref": "#/$defs/resourceUint64"
+        },
+        "directory": {
+          "type": "boolean"
+        },
+        "reparsePoint": {
+          "type": "boolean"
+        },
+        "attributes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "modifiedFileTime": {
+          "$ref": "#/$defs/resourceUint64",
+          "description": "Windows FILETIME ticks since 1601-01-01 UTC, encoded as uint64 decimal string."
+        }
+      }
+    },
+    "resourceListedFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "sizeBytes",
+        "directory",
+        "reparsePoint",
+        "attributes",
+        "modifiedFileTime",
+        "entry"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "sizeBytes": {
+          "$ref": "#/$defs/resourceUint64"
+        },
+        "directory": {
+          "type": "boolean"
+        },
+        "reparsePoint": {
+          "type": "boolean"
+        },
+        "attributes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "modifiedFileTime": {
+          "$ref": "#/$defs/resourceUint64",
+          "description": "Windows FILETIME ticks since 1601-01-01 UTC, encoded as uint64 decimal string."
+        },
+        "entry": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      }
+    },
+    "resourceContextData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "directory",
+        "selectionCount",
+        "selectionName",
+        "viewMode",
+        "loading"
+      ],
+      "properties": {
+        "directory": {
+          "type": "string"
+        },
+        "selectionCount": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "selectionName": {
+          "type": "string"
+        },
+        "viewMode": {
+          "enum": [
+            "extra_large_icons",
+            "large_icons",
+            "medium_icons",
+            "small_icons",
+            "list",
+            "details",
+            "tiles",
+            "content",
+            null
+          ],
+          "description": "Stable manifest view.setMode machine value, independent of locale. Null when there is no active tab or the host mode is not publicly mapped; UI context.viewMode remains a localized label."
+        },
+        "loading": {
+          "type": "boolean"
+        }
+      }
+    },
+    "resourceListData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entries",
+        "nextCursor",
+        "total"
+      ],
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/resourceListedFile"
+          },
+          "maxItems": 256
+        },
+        "nextCursor": {
+          "type": "string",
+          "pattern": "^(?:|[0-9a-f]{32})$"
+        },
+        "total": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      }
+    },
+    "resourceTaskItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "destination",
+        "state",
+        "error",
+        "cleanupError"
+      ],
+      "properties": {
+        "source": {
+          "type": "string"
+        },
+        "destination": {
+          "type": "string"
+        },
+        "state": {
+          "type": "integer",
+          "enum": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5
+          ]
+        },
+        "error": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "cleanupError": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        }
+      }
+    },
+    "resourceTaskData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "taskId",
+        "cancelRequested",
+        "terminal",
+        "completed",
+        "transferredBytes",
+        "totalBytes",
+        "items"
+      ],
+      "properties": {
+        "taskId": {
+          "$ref": "#/$defs/resourceTaskId"
+        },
+        "cancelRequested": {
+          "type": "boolean"
+        },
+        "terminal": {
+          "type": "boolean"
+        },
+        "completed": {
+          "type": "boolean"
+        },
+        "transferredBytes": {
+          "$ref": "#/$defs/resourceUint64"
+        },
+        "totalBytes": {
+          "$ref": "#/$defs/resourceUint64"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/resourceTaskItem"
+          },
+          "maxItems": 64
+        }
+      }
+    },
+    "resourceCancelData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "accepted",
+        "taskId"
+      ],
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "taskId": {
+          "$ref": "#/$defs/resourceTaskId"
+        }
+      }
+    },
+    "resourceSettingsData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "values"
+      ],
+      "properties": {
+        "version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "values": {
+          "type": "object",
+          "maxProperties": 64,
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9._-]{1,64}$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 1024,
+            "x-maxUtf8Bytes": 1024
+          },
+          "description": "Persistent store additionally enforces total serialized size <=16384 bytes; values are UTF-8 strings."
+        }
+      }
+    },
+    "resourceAuditItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "monotonicMs",
+        "operation",
+        "outcome"
+      ],
+      "properties": {
+        "sequence": {
+          "$ref": "#/$defs/resourceUint64"
+        },
+        "monotonicMs": {
+          "$ref": "#/$defs/resourceUint64"
+        },
+        "operation": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "outcome": {
+          "type": "string",
+          "maxLength": 128
+        }
+      }
+    },
+    "resourceAuditData": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/resourceAuditItem"
+      },
+      "maxItems": 128
+    },
+    "resourceContextResponse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ok",
+            "data"
+          ],
+          "properties": {
+            "ok": {
+              "const": true
+            },
+            "data": {
+              "$ref": "#/$defs/resourceContextData"
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/resourceFailure"
+        }
+      ]
+    },
+    "resourceListResponse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ok",
+            "data"
+          ],
+          "properties": {
+            "ok": {
+              "const": true
+            },
+            "data": {
+              "$ref": "#/$defs/resourceListData"
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/resourceFailure"
+        }
+      ]
+    },
+    "resourceFileMetadataResponse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ok",
+            "data"
+          ],
+          "properties": {
+            "ok": {
+              "const": true
+            },
+            "data": {
+              "$ref": "#/$defs/resourceFileMetadata"
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/resourceFailure"
+        }
+      ]
+    },
+    "resourceTaskResponse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ok",
+            "data"
+          ],
+          "properties": {
+            "ok": {
+              "const": true
+            },
+            "data": {
+              "$ref": "#/$defs/resourceTaskData"
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/resourceFailure"
+        }
+      ]
+    },
+    "resourceCancelResponse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ok",
+            "data"
+          ],
+          "properties": {
+            "ok": {
+              "const": true
+            },
+            "data": {
+              "$ref": "#/$defs/resourceCancelData"
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/resourceFailure"
+        }
+      ]
+    },
+    "resourceSettingsResponse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ok",
+            "data"
+          ],
+          "properties": {
+            "ok": {
+              "const": true
+            },
+            "data": {
+              "$ref": "#/$defs/resourceSettingsData"
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/resourceFailure"
+        }
+      ]
+    },
+    "resourceAuditResponse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ok",
+            "data"
+          ],
+          "properties": {
+            "ok": {
+              "const": true
+            },
+            "data": {
+              "$ref": "#/$defs/resourceAuditData"
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/resourceFailure"
+        }
+      ]
+    },
+    "resourceRenameRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entry",
+        "originalName",
+        "newLeafName",
+        "status"
+      ],
+      "properties": {
+        "entry": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "originalName": {
+          "type": "string"
+        },
+        "newLeafName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "description": "One valid Windows leaf name, at most 255 UTF-16 code units; no path separators, reserved name, trailing dot or space."
+        },
+        "status": {
+          "enum": [
+            "ready",
+            "unchanged"
+          ]
+        }
+      }
+    },
+    "resourceRenamePreparedData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "planId",
+        "expiresInMs",
+        "rows"
+      ],
+      "properties": {
+        "planId": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{48}$",
+          "minLength": 48,
+          "maxLength": 48
+        },
+        "expiresInMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 60000
+        },
+        "rows": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/resourceRenameRow"
+          }
+        }
+      }
+    },
+    "resourceRenameCommittedData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "taskId",
+        "status"
+      ],
+      "properties": {
+        "taskId": {
+          "$ref": "#/$defs/resourceTaskId"
+        },
+        "status": {
+          "const": "submitted"
+        }
+      }
+    },
+    "resourceRenamePreparedResponse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ok",
+            "data"
+          ],
+          "properties": {
+            "ok": {
+              "const": true
+            },
+            "data": {
+              "$ref": "#/$defs/resourceRenamePreparedData"
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/resourceFailure"
+        }
+      ]
+    },
+    "resourceRenameCommittedResponse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "ok",
+            "data"
+          ],
+          "properties": {
+            "ok": {
+              "const": true
+            },
+            "data": {
+              "$ref": "#/$defs/resourceRenameCommittedData"
+            }
+          }
+        },
+        {
+          "$ref": "#/$defs/resourceFailure"
+        }
+      ]
+    }
+  }
+}

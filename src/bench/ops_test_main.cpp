@@ -1,3 +1,4 @@
+#include "../app/delete_departure.h"
 // ops_test_main.cpp — Stage 1B-1 ops-layer self test (console).
 //
 // Drives the full stack: OpsManager -> ShellClient -> pipe -> pulse_shell.exe
@@ -23,6 +24,7 @@
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <memory>
 #include <atomic>
@@ -454,7 +456,217 @@ int RunCopyAliasOnly() {
 }
 
 int RunRetryTemplateTest(bool memory_only);
+#include "operation_skip_test.inc"
+#include "undo_history_summary_test.inc"
+#include <unordered_set>
+static int RunUndoRedoHistoryTests() {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    const auto root = std::filesystem::current_path() / L"bench_data" /
+        (L"undo-redo-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()));
+    std::filesystem::create_directories(root / L"to");
+    pulse::diagnostics::runtime::Initialize((root.parent_path() / L"undo-redo-diagnostics").wstring(), "undo_redo_test");
+    ops::OpsManager manager;
+    manager.Start([] {}, false);
+    const auto wait = [&] {
+        const auto deadline = GetTickCount64() + 15000;
+        while (manager.UndoHistory().busy && GetTickCount64() < deadline) Sleep(5);
+        const auto status = manager.Status();
+        if (manager.UndoHistory().busy || status.phase == ops::OpPhase::Failed)
+            fwprintf(stderr, L"[history diagnostic] busy=%d task=%llu phase=%d type=%d completed=%llu error=%ls\n",
+                manager.UndoHistory().busy, static_cast<unsigned long long>(status.task_id),
+                static_cast<int>(status.phase), static_cast<int>(status.type),
+                static_cast<unsigned long long>(status.completed_items), status.last_error.c_str());
+        return !manager.UndoHistory().busy;
+    };
+    const auto run = [&](ops::OpRequest request) {
+        const auto task = manager.Submit(std::move(request));
+        Check(task && wait(), L"history task reaches terminal state");
+        return task;
+    };
+    const auto undone = [&](uint64_t task) {
+        const auto snapshot = manager.UndoHistory();
+        for (const auto& item : snapshot.entries) if (item.entry.task_id == task) return item.undone;
+        return false;
+    };
+    const auto a = (root / L"a.txt").wstring();
+    const auto moved = (root / L"to" / L"a.txt").wstring();
+    const auto renamed = (root / L"to" / L"b.txt").wstring();
+    const auto trash = (root / L"permanent.txt").wstring();
+    MakeFile(a, "payload", 7); MakeFile(trash, "discard", 7);
+    const auto first = run(SimpleOp(ops::OpType::Move, {a.c_str()}, (root / L"to").c_str()));
+    auto rename = SimpleOp(ops::OpType::Rename, {moved.c_str()}); rename.new_name = L"b.txt";
+    const auto second = run(std::move(rename));
+    const auto permanent = run(SimpleOp(ops::OpType::RealDelete, {trash.c_str()}));
+    const auto before = manager.UndoHistory();
+    Check(std::any_of(before.entries.begin(), before.entries.end(), [&](const auto& item) {
+        return item.entry.task_id == permanent && !item.entry.supported && !item.undone;
+    }), L"permanent delete remains a non-undoable history record");
+    Check(manager.UndoTo(first) && wait() && Exists(a) && !Exists(renamed) && undone(first) && undone(second),
+        L"multi-step undo skips unsupported delete and reverses rename before move");
+    Check(manager.RedoTo(second) && wait() && Exists(renamed) && !Exists(a) && !undone(first) && !undone(second),
+        L"multi-step redo preserves original dependency order");
+    const auto replay_result = manager.UndoHistory();
+    Check(replay_result.completed_sequence == 2 && replay_result.completed_steps == 2 &&
+        replay_result.completed_redo && replay_result.completed_success,
+        L"replay completion reports the actual successful step count");
+    Check(manager.UndoTask(second) && wait() && manager.CanRedo(), L"single-task undo exposes redo");
+    const auto missing = (root / L"missing.txt").wstring();
+    run(SimpleOp(ops::OpType::Move, {missing.c_str()}, (root / L"to").c_str()));
+    Check(manager.CanRedo() && undone(second), L"failed new operation preserves redo history");
+    const auto fresh = (root / L"fresh.txt").wstring();
+    const auto fresh_output = (root / L"to" / L"fresh.txt").wstring();
+    MakeFile(fresh, "fresh", 5);
+    const auto newer = run(SimpleOp(ops::OpType::Move, {fresh.c_str()}, (root / L"to").c_str()));
+    const auto after = manager.UndoHistory();
+    Check(!manager.CanRedo() && std::none_of(after.entries.begin(), after.entries.end(),
+        [](const auto& item) { return item.undone; }) && std::any_of(after.entries.begin(), after.entries.end(),
+        [&](const auto& item) { return item.entry.task_id == newer && item.redo_cleared; }),
+        L"successful new operation clears redo and marks its own history entry");
+    DeleteFileW(fresh_output.c_str());
+    Check(manager.UndoTask(newer) && wait() && !undone(newer) && manager.CanUndoTask(newer),
+        L"failed undo retains the original entry instead of migrating history");
+    MakeFile(fresh_output, "fresh", 5);
+    Check(manager.UndoTask(newer) && wait() && Exists(fresh) && undone(newer),
+        L"failed undo can be retried after its source is restored");
+    const auto x = (root / L"x.txt").wstring(), y = (root / L"y.txt").wstring();
+    const auto x_to = (root / L"to" / L"x.txt").wstring();
+    MakeFile(x, "x", 1); MakeFile(y, "y", 1);
+    const auto batch = run(SimpleOp(ops::OpType::Move, {x.c_str(), y.c_str()}, (root / L"to").c_str()));
+    DeleteFileW(x_to.c_str());
+    Check(manager.UndoTask(batch) && wait() && Exists(y) && !undone(batch),
+        L"partially completed inverse retains its step when a later subrequest fails");
+    MakeFile(x_to, "x", 1);
+    Check(manager.UndoTask(batch) && wait() && Exists(x) && Exists(y) && undone(batch),
+        L"retry resumes after committed subrequests without repeating them");
+    Check(!manager.UndoTo(99999999) && !manager.RedoTo(permanent), L"unknown and unsupported targets are rejected");
+    const auto copied = run(SimpleOp(ops::OpType::Copy, {x.c_str()}, (root / L"to").c_str()));
+    Check(manager.UndoTask(copied) && wait() && !Exists(x_to) && manager.CanRedo(),
+        L"undo copy recycles only its actual output");
+    Check(manager.Redo() && wait() && Exists(x_to) && FileSize(x_to) == 1,
+        L"redo copy restores the original committed output");
+    const auto folder = (root / L"created").wstring();
+    const auto created = run(SimpleOp(ops::OpType::CreateFolder, {folder.c_str()}));
+    MakeFile(folder + L"\\preserve.txt", "contents", 8);
+    Check(manager.UndoTask(created) && wait() && !Exists(folder) && manager.Redo() && wait() &&
+        FileSize(folder + L"\\preserve.txt") == 8,
+        L"redo created folder restores recycled contents instead of recreating an empty folder");
+    const auto saved_history = manager.UndoToJson();
+    Check(manager.UndoFromJson(saved_history), L"legacy history fields restore without a schema migration");
+    const auto restored_history = manager.UndoHistory();
+    std::unordered_set<uint64_t> restored_ids;
+    bool unique = !restored_history.entries.empty();
+    uint64_t maximum = 0;
+    for (const auto& item : restored_history.entries) {
+        unique &= item.entry.task_id != 0 && restored_ids.insert(item.entry.task_id).second;
+        maximum = (std::max)(maximum, item.entry.task_id);
+    }
+    Check(unique, L"restored records receive unique nonzero session identities");
+    const auto restored_next = restored_history.entries.front().entry.task_id;
+    Check(manager.UndoTask(restored_next) && wait() && !Exists(folder) && manager.Redo() && wait() && Exists(folder),
+        L"restored identity can undo and redo the exact latest persisted step");
+    const auto after_restore = run(SimpleOp(ops::OpType::CreateTextFile, {(root / L"after-restore.txt").c_str()}));
+    Check(after_restore > maximum, L"task allocation after restore cannot collide with restored history identities");
+    {
+        ops::OpsManager queued;
+        Check(queued.UndoFromJson(saved_history), L"inactive manager can load existing history");
+        const auto latest = queued.UndoHistory().entries.front().entry.task_id;
+        queued.Submit(SimpleOp(ops::OpType::CreateTextFile, {(root / L"not-executed.txt").c_str()}));
+        Check(!queued.CanUndo() && !queued.CanUndoTask(latest) && !queued.CanRedo() && queued.UndoHistory().busy,
+            L"queued operations disable history controls consistently with replay admission");
+    }
+    manager.Stop();
+    pulse::diagnostics::runtime::Shutdown();
+    std::error_code error; std::filesystem::remove_all(root, error);
+    Check(!error, L"isolated undo-redo fixture cleanup");
+    CoUninitialize();
+    wprintf(L"undo-redo: %d passed, %d failed\n", g_pass, g_fail);
+    return g_fail ? 1 : 0;
+}
+
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--undo-history-summary-only") return RunUndoHistorySummaryTests();
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--undo-redo-history-only") return RunUndoRedoHistoryTests();
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--skip-item-only") return RunOperationSkipTests();
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--delete-completion-only") {
+        setvbuf(stdout, nullptr, _IONBF, 0);
+        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        const auto base = SandboxRoot();
+        if (base.empty()) return 2;
+        const auto root = std::filesystem::path(base).parent_path() /
+            (L"delete_feedback_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount64()));
+        std::filesystem::create_directories(root);
+        g_ops.Start([] {});
+        std::optional<ops::FinishedTask> finished_result;
+        const auto wait = [&](uint64_t task_id, uint64_t timeout) {
+            const auto deadline = GetTickCount64() + timeout;
+            while (GetTickCount64() < deadline) {
+                MSG message{};
+                while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+                    TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+                for (const auto& finished : g_ops.DrainFinishedTasks()) {
+                    if (finished.task_id == task_id) { finished_result = finished; return true; }
+                }
+                MsgWaitForMultipleObjects(0, nullptr, FALSE, 10, QS_ALLINPUT);
+            }
+            const auto status = g_ops.Status();
+            fwprintf(stderr, L"[DELETE WAIT] phase=%u active=%d authorization=%u completed=%llu current=%s error=%s\n",
+                static_cast<unsigned>(status.phase), status.active, static_cast<unsigned>(status.authorization),
+                static_cast<unsigned long long>(status.completed_ops), status.current_item.c_str(), status.last_error.c_str());
+            return false;
+        };
+        for (unsigned scenario = 0; scenario < 3; ++scenario) {
+            const auto locked = root / (L"locked" + std::to_wstring(scenario));
+            const auto free = root / (L"free" + std::to_wstring(scenario));
+            Check(MakeFile(locked.wstring(), "keep", 4) && MakeFile(free.wstring(), "remove", 6),
+                L"create isolated locked/free deletion fixture");
+            HANDLE handle = CreateFileW(locked.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                nullptr, OPEN_EXISTING, 0, nullptr);
+            Check(handle != INVALID_HANDLE_VALUE, L"deny delete sharing on isolated file");
+            std::vector<std::wstring> leaving;
+            uint64_t since = 0, done = 0, task = 0;
+            ops::OpRequest request;
+            request.type = ops::OpType::RealDelete;
+            if (scenario != 0) request.sources.push_back(free.wstring());
+            if (scenario != 1) request.sources.push_back(locked.wstring());
+            g_ops.DrainCompletions();
+            finished_result.reset();
+            const auto submitted = g_ops.Submit(request);
+            Check(submitted != 0, L"normal operations manager accepts the delete request");
+            Check(leaving.empty(), L"pending deletion never starts a row departure");
+            const bool terminal = wait(submitted, 10000);
+            Check(terminal && finished_result && finished_result->task_id == submitted,
+                L"isolated delete task publishes its own FinishedTask terminal result");
+            if (!terminal) {
+                g_ops.CancelCurrent();
+                if (!wait(submitted, 5000)) {
+                    if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+                    g_ops.Stop();
+                    CoUninitialize();
+                    return 1;
+                }
+            }
+            for (const auto& completed : g_ops.DrainCompletions())
+                pulse::app::RecordConfirmedDelete(completed, leaving, since, done, task, GetTickCount64());
+            Check(std::find(leaving.begin(), leaving.end(), locked.wstring()) == leaving.end() &&
+                std::filesystem::exists(locked), L"failed occupied file remains visible and exists on disk");
+            Check((std::find(leaving.begin(), leaving.end(), free.wstring()) != leaving.end()) == (scenario != 0),
+                L"success and mixed result dispatch animate only confirmed deleted files");
+            ops::CompletedOperation refresh;
+            refresh.task_id = 123; refresh.type = ops::OpType::RealDelete;
+            refresh.sources = {locked.wstring()}; refresh.refresh_only = true;
+            Check(!pulse::app::RecordConfirmedDelete(refresh, leaving, since, done, task, GetTickCount64()),
+                L"refresh-only completion cannot hide an occupied file");
+            if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+        }
+        g_ops.Stop();
+        std::filesystem::remove_all(root);
+        CoUninitialize();
+        return g_fail ? 1 : 0;
+    }
+
     if (argc == 2 && std::wstring_view(argv[1]) == L"--copy-alias-only") return RunCopyAliasOnly();
     if (argc > 1 && std::wstring_view(argv[1]) == L"--retry-template-only") return RunRetryTemplateTest(false);
     if (argc > 1 && std::wstring_view(argv[1]) == L"--retry-template-memory") return RunRetryTemplateTest(true);
@@ -865,11 +1077,16 @@ int wmain(int argc, wchar_t** argv) {
             Check(app::RequestUpdateShutdown(idle, false, [&] {
                       Check(idle.Submit({}) == 0, L"shutdown callback cannot enqueue new work");
                       return false;
-                  }) == app::kUpdateShutdownBusy,
+                  }) == app::kUpdateShutdownCloseFailed,
                   L"failed window close rejects update installation");
             Check(app::RequestUpdateShutdown(idle, false, [] { return true; }) ==
                       app::kUpdateShutdownAccepted,
                   L"failed close restores admission and allows a later update retry");
+            Check(app::RequestUpdateShutdown(idle, false, [] { return true; }) ==
+                      app::kUpdateShutdownAccepted,
+                  L"remaining shared-core windows accept update shutdown while admission stays closed");
+            Check(!app::RequestUpdateLaunch(idle, false, [] {}),
+                  L"another installer cannot launch while shared-core shutdown is prepared");
             bool rejected_all = true;
             for (const auto type : {ops::OpType::Copy, ops::OpType::Move, ops::OpType::RecycleDelete,
                     ops::OpType::RealDelete, ops::OpType::Rename, ops::OpType::CreateFolder,
@@ -910,6 +1127,8 @@ int wmain(int argc, wchar_t** argv) {
 
     // --- Setup sandbox ------------------------------------------------------
     const bool conflict_snapshot_only = argc > 1 && std::wstring_view(argv[1]) == L"--conflict-snapshot-only";
+    const bool copy_diagnostics_only = argc > 1 && std::wstring_view(argv[1]) == L"--copy-diagnostics-only";
+    const bool isolated_fixture = conflict_snapshot_only || copy_diagnostics_only;
     size_t conflict_workload_count = 128;
     if (conflict_snapshot_only && argc > 2) {
         size_t parsed = 0;
@@ -926,9 +1145,9 @@ int wmain(int argc, wchar_t** argv) {
         conflict_workload_count = parsed;
     }
     const auto sandbox_root = SandboxRoot();
-    const std::wstring root = conflict_snapshot_only && !sandbox_root.empty()
+    const std::wstring root = isolated_fixture && !sandbox_root.empty()
         ? (std::filesystem::path(sandbox_root).parent_path() /
-           (L"conflict_snapshot_" + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount64()))).wstring()
+           ((copy_diagnostics_only ? L"copy_diagnostics_" : L"conflict_snapshot_") + std::to_wstring(GetCurrentProcessId()) + L"_" + std::to_wstring(GetTickCount64()))).wstring()
         : sandbox_root;
     if (root.empty()) {
         fprintf(stderr, "[test] cannot locate bench_data/opstest\n");
@@ -938,7 +1157,7 @@ int wmain(int argc, wchar_t** argv) {
     std::wstring dstDir = root + L"\\dst";
     // Exact, workspace-contained sandbox path.
     std::error_code cleanup_error;
-    if (!conflict_snapshot_only) std::filesystem::remove_all(std::filesystem::path(root), cleanup_error);
+    if (!isolated_fixture) std::filesystem::remove_all(std::filesystem::path(root), cleanup_error);
     if (!cleanup_error) std::filesystem::create_directories(srcDir, cleanup_error);
     if (!cleanup_error) std::filesystem::create_directories(dstDir, cleanup_error);
     if (cleanup_error) {
@@ -969,6 +1188,81 @@ int wmain(int argc, wchar_t** argv) {
     });
     Sleep(800); // let the ops worker bring up ShellClient before direct IPC calls
     fprintf(stderr, "[test] ops started\n");
+
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--copy-diagnostics-only") {
+        const auto log_root = root + L"\\copy-diagnostics";
+        Check(diagnostics::runtime::Initialize(log_root, "copy_test"), L"copy diagnostics initialized");
+        const auto source = srcDir + L"\\diagnostic.bin";
+        Check(MakePatternFile(source, 64ull * 1024 * 1024), L"diagnostic source created");
+        g_ops.SetVerifyCopies(false);
+        const auto success = RunOp(SimpleOp(ops::OpType::Copy, {source.c_str()}, dstDir.c_str()));
+        Check(success.phase == ops::OpPhase::Completed && FileHash(source) == FileHash(dstDir + L"\\diagnostic.bin"),
+              L"diagnostic copy preserves bytes");
+        const auto missing = srcDir + L"\\missing.bin";
+        const auto failed = RunOp(SimpleOp(ops::OpType::Copy, {missing.c_str()}, dstDir.c_str()));
+        Check(failed.phase == ops::OpPhase::Failed, L"diagnostic copy failure retained");
+        const auto cancel_dest = dstDir + L"\\cancel";
+        MakeDir(cancel_dest);
+        const auto previous = g_ops.Status().completed_ops;
+        g_pause_when_active.store(true);
+        g_ops.Submit(SimpleOp(ops::OpType::Copy, {source.c_str()}, cancel_dest.c_str()));
+        const auto wait_start = GetTickCount64();
+        while (g_pause_when_active.load() && GetTickCount64() - wait_start < 5000) Sleep(10);
+        Check(!g_pause_when_active.load(), L"diagnostic copy pause observed");
+        Sleep(5500); // No copy callbacks: the independent monitor must still report.
+        g_ops.CancelCurrent();
+        Check(WaitOpDone(previous) && g_ops.Status().phase == ops::OpPhase::Failed &&
+              g_ops.Status().last_error.find(l10n::Get(l10n::StringId::Canceled)) != std::wstring::npos,
+              L"diagnostic paused copy cancels");
+        g_ops.Stop();
+        Check(diagnostics::runtime::Flush(), L"copy diagnostics flushed");
+        diagnostics::runtime::Shutdown();
+        std::string logs;
+        for (const auto& item : std::filesystem::recursive_directory_iterator(log_root)) {
+            if (!item.is_regular_file()) continue;
+            std::ifstream file(item.path(), std::ios::binary);
+            logs.append(std::istreambuf_iterator<char>(file), {});
+        }
+        const auto count = [&](const std::string& needle) {
+            size_t found = 0, offset = 0;
+            while ((offset = logs.find(needle, offset)) != std::string::npos) { ++found; offset += needle.size(); }
+            return found;
+        };
+        Check(count("\"event\":\"copy_monitor_begin\"") == 3 && count("\"event\":\"copy_monitor_end\"") == 3,
+              L"copy diagnostic start/end cover success failure cancellation");
+        Check(count("\"event\":\"copy_api_begin\"") >= 1 && count("\"event\":\"copy_api_end\"") >= 1,
+              L"real large copy logs API boundaries");
+        Check(count("\"event\":\"copy_heartbeat\"") >= 1 && count("\"event\":\"copy_heartbeat\"") <= 3 &&
+              logs.find("\"paused\":1") != std::string::npos && logs.find("\"interval_bytes\":0") != std::string::npos,
+              L"callback-free pause produces throttled heartbeat");
+        const auto event_has = [&](const char* event, std::initializer_list<const char*> fields) {
+            const std::string event_key = std::string("\"event\":\"") + event + "\"";
+            size_t offset = 0;
+            while ((offset = logs.find(event_key, offset)) != std::string::npos) {
+                const auto end = logs.find('\n', offset);
+                const auto line = logs.substr(offset, end == std::string::npos ? end : end - offset);
+                const bool matches = std::all_of(fields.begin(), fields.end(),
+                    [&](const char* field) { return line.find(field) != std::string::npos; });
+                if (matches) return true;
+                offset += event_key.size();
+            }
+            return false;
+        };
+        // One large serial copy queries the target classification, not a source thread-count probe.
+        Check(event_has("copy_storage_probe", {"\"endpoint\":2", "\"storage\":", "\"error\":",
+                  "\"bus_type\":", "\"bus_query_error\":", "\"seek_query_error\":"}),
+              L"storage evidence includes target endpoint bus and query errors");
+        Check(event_has("copy_buffer_policy", {"\"file_bytes\":67108864", "\"memory_known\":1",
+                  "\"unbuffered\":", "\"available_bytes\":", "\"remaining_large_bytes\":"}),
+              L"buffer decision records real file size memory and buffering mode");
+        Check(event_has("copy_device_topology", {"\"physical_known\":", "\"shared_physical_device\":"}),
+              L"topology records explicit knowledge and shared-device result");
+        Check(event_has("copy_preparation_end", {"\"task\":", "\"elapsed_ms\":"}),
+              L"preparation boundary records task and elapsed time");
+        Check(logs.find("diagnostic.bin") == std::string::npos, L"diagnostic events omit filename");
+        CoUninitialize();
+        return g_fail ? 1 : 0;
+    }
 
     if (argc > 1 && std::wstring_view(argv[1]) == L"--conflict-snapshot-only") {
         wprintf(L"[INFO] conflict fixture: %ls\n", root.c_str());
@@ -1095,6 +1389,68 @@ int wmain(int argc, wchar_t** argv) {
         Check(restored.last_error.empty() && FileSize(one) == 3 && FileSize(two) == 6 && FileSize(three) == 5,
               L"real shell batch restores original-path identities through the shared index");
         DeleteFileW(one.c_str()); DeleteFileW(two.c_str()); DeleteFileW(three.c_str());
+        g_ops.Stop();
+        CoUninitialize();
+        return g_fail ? 1 : 0;
+    }
+
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--completion-locations-only") {
+        const auto source = srcDir + L"\\locate-result.txt";
+        const auto original = dstDir + L"\\locate-result.txt";
+        MakeFile(source, "new", 3);
+        MakeFile(original, "old", 3);
+        auto request = SimpleOp(ops::OpType::Copy, {source.c_str()}, dstDir.c_str());
+        request.collision_policy = ops::CollisionPolicy::KeepBoth;
+        g_ops.DrainCompletions();
+        const auto status = RunOp(request);
+        const auto pending = g_ops.TaskLocations(status.task_id);
+        const auto notifications = g_ops.DrainCompletions();
+        const auto retained = g_ops.TaskLocations(status.task_id);
+        Check(status.phase == ops::OpPhase::Completed && pending.destinations.size() == 1 &&
+              pending.destinations.front() != original && Exists(pending.destinations.front()),
+              L"locate results uses the committed keep-both name before notification drain");
+        Check(retained.sources == pending.sources && retained.destinations == pending.destinations &&
+              retained.sources == std::vector<std::wstring>{source} && !notifications.empty(),
+              L"locate results retains exact source and output paths after notification drain");
+        Check(g_ops.TaskLocations(0).destinations.empty() &&
+              g_ops.TaskLocations(status.task_id + 1000).destinations.empty(),
+              L"locate results never adopts another task for unknown identities");
+        g_ops.Stop();
+        CoUninitialize();
+        return g_fail ? 1 : 0;
+    }
+
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--partial-move-refresh-only") {
+        const auto source_folder = srcDir + L"\\merge";
+        const auto target_folder = dstDir + L"\\merge";
+        MakeDir(source_folder);
+        MakeDir(target_folder);
+        const auto source = source_folder + L"\\locked.txt";
+        const auto target = target_folder + L"\\locked.txt";
+        Check(MakeFile(source, "retained", 8), L"prepare locked move source");
+        HANDLE lock = CreateFileW(source.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                  nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        Check(lock != INVALID_HANDLE_VALUE, L"deny source deletion while allowing copy");
+        auto request = SimpleOp(ops::OpType::Move, {source_folder.c_str()}, dstDir.c_str());
+        request.collision_policy = ops::CollisionPolicy::Replace;
+        g_ops.DrainCompletions();
+        const auto status = RunOp(request);
+        const auto completions = g_ops.DrainCompletions();
+        Check(Exists(source) && Exists(target), L"failed source deletion retains both copies");
+        Check(status.phase != ops::OpPhase::Completed, L"partial move does not report success");
+        Check(!g_ops.CanUndoTask(status.task_id), L"failed move does not enter undo");
+        bool source_refresh = false, target_refresh = false, false_remap = false;
+        for (const auto& completion : completions) {
+            false_remap |= !completion.sources.empty() || !completion.destinations.empty();
+            if (!completion.refresh_only) continue;
+            for (const auto& directory : completion.refresh_directories) {
+                source_refresh |= directory == source_folder;
+                target_refresh |= directory == target_folder;
+            }
+        }
+        Check(source_refresh && target_refresh, L"partial move refreshes both affected directories");
+        Check(!false_remap, L"refresh does not publish failed move identity remapping");
+        if (lock != INVALID_HANDLE_VALUE) CloseHandle(lock);
         g_ops.Stop();
         CoUninitialize();
         return g_fail ? 1 : 0;
@@ -1932,7 +2288,7 @@ int wmain(int argc, wchar_t** argv) {
         Check(FileHash(large_target) == source_hash, L"copy source and destination hashes match");
         {
             // The progress card's history is recorded by the engine, so a card
-            // shown late still draws the run (pulse_ops_dialogs.html speed graph).
+            // shown late still draws the run.
             const auto history = g_ops.SpeedGraph(completed.task_id);
             bool ordered = history.by_progress;
             for (size_t i = 1; i < history.points.size(); ++i)

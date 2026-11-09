@@ -10,6 +10,7 @@
 #include "app_internal.h"
 #include "app_details_tree.h"
 #include "app_messages.h"
+#include "create_rename_intent.h"
 #include "entry_sort.h"
 #include "../common/localization.h"
 #include "../common/text_format.h"
@@ -530,6 +531,35 @@ void SyncDetailsTrees(AppState& s) {
     });
     if (watches_changed) SyncVisibleWatches(s);
     for (const DetailsTree* t : finished) ReportRecursion(s, *t);
+    // BuildVm owns this rebuild; open the editor later from the message loop
+    // so ShowRenameOverlay cannot reenter an unfinished view build.
+    if (s.hwnd && s.renameIndex < 0) {
+        if (auto* tab = ActiveTab(s); tab && tab->TreeEntries() &&
+            app::PendingCreateRenameIntent(tab->create_rename_intents, tab->current_path, tab->view_generation)) {
+            const bool nested = std::any_of(tab->create_rename_intents.begin(), tab->create_rename_intents.end(),
+                [](const auto& intent) { return intent.ready && !intent.target_parent.empty() && intent.target_parent != intent.parent; });
+            if (nested) PostMessageW(s.hwnd, WM_DETAILS_TREE_RENAME, 0, 0);
+        }
+    }
+}
+
+void TryRenameDetailsTreeCreation(AppState& s) {
+    auto* tab = ActiveTab(s);
+    if (!tab || !tab->TreeEntries() || s.renameIndex >= 0) return;
+    for (size_t i = 0; i < tab->EntryCount(); ++i) {
+        if (IsDetailsTreePlaceholder(*tab, static_cast<int>(i))) continue;
+        const auto entry = tab->EntryAt(i);
+        const app::CreateRenameEntry candidate{entry.name, entry.full_path};
+        const auto selected = app::SelectCreateRenameIntent(tab->create_rename_intents,
+            tab->current_path, tab->view_generation, {&candidate, 1}, true, false);
+        if (!selected) continue;
+        tab->SelectOnly(static_cast<int>(i));
+        EnsureRowVisible(s, *tab, static_cast<int>(i));
+        ShowRenameOverlay(s);
+        if (s.renameIndex == static_cast<int>(i))
+            app::ConsumeCreateRenameIntent(tab->create_rename_intents, selected->task_id);
+        return;
+    }
 }
 
 void AppendDetailsTreeWatchPaths(const app::Tab& tab, std::vector<std::wstring>& paths) {

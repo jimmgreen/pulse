@@ -64,6 +64,8 @@ struct ExplorerWindowProbe {
     bool view_ready = false;      // its folder view exists and reports a folder
     bool supported = false;       // a file system folder or This PC
     size_t selected = 0;          // items selected in it
+    bool selection_read = false;
+    unsigned stable_age_ms = 0;   // same readable folder + selection in consecutive observations
 };
 
 // IShellWindows::Item explicitly returns S_FALSE/null for a missing entry.
@@ -78,20 +80,29 @@ constexpr ShellWindowItemResult ClassifyShellWindowItem(HRESULT result, bool has
 
 enum class ExplorerTakeoverStep { Wait, Take, Leave };
 
-constexpr unsigned kExplorerViewTimeoutMs = 4000;     // no view by then: leave it
-// After the view is ready: a selection arriving this soon goes along with the
-// request; a later one follows it (kExplorerLateSelectionMs).
-constexpr unsigned kExplorerSelectionGraceMs = 150;
-// The source stays open this long after its view is ready, because
-// /select often applies 590-640 ms after it (Windows 11 23H2).
-constexpr unsigned kExplorerLateSelectionMs = 800;
+constexpr unsigned kExplorerViewTimeoutMs = 4000;     // admission observation bound
+// Nonempty selections must remain unchanged across a short observation
+// window; empty selections use one short grace window for late selection.
+constexpr unsigned kExplorerSelectionGraceMs = 100;
+constexpr unsigned kExplorerLateSelectionMs = 100;
 // Changes within this interval may be a late programmatic selection; they
 // still require a new presentation acknowledgement before any source close.
 constexpr unsigned kExplorerProgrammaticSelectionMs = 1500;
 
-// Wait for the view, leave virtual locations (Control Panel, Home, network…)
-// alone, and take the window as soon as its view is ready — Pulse shows the
-// folder while the source remains usable.
+// Pure observation state: unreadable results, folder changes and selection
+// changes reset stability. Item enumeration order is not a selection change.
+class ExplorerSelectionStability {
+public:
+    unsigned Observe(unsigned age_ms, bool readable, const std::wstring& folder,
+                     const std::vector<std::wstring>& names);
+private:
+    bool valid_ = false;
+    unsigned since_ms_ = 0;
+    std::wstring folder_;
+    std::vector<std::wstring> names_;
+};
+
+// Wait for stable contents before submitting, bounded by registration age.
 ExplorerTakeoverStep DecideExplorerTakeover(const ExplorerWindowProbe& probe);
 
 // The source window once Pulse has acknowledged the folder.

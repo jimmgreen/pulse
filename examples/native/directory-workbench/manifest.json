@@ -1,0 +1,13 @@
+{
+  "apiVersion": 1,
+  "id": "sample.native-directory-workbench",
+  "name": "Directory workbench",
+  "resources": [
+    "context.read",
+    "context.events",
+    "files.readDirectory",
+    "files.watchDirectory",
+    "files.open",
+    "settings.own"
+  ]
+}

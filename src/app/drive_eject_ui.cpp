@@ -75,6 +75,7 @@ void ApplyDriveEjectReady(AppState* state, LPARAM raw) {
                 if (path::OnVolume(window.hoverPreview.path, root)) HideHoverPreview(window);
                 Append(releases, window.renderer.SuspendVolume(root));
                 Append(releases, window.quickPreview.SuspendVolume(root));
+                Append(releases, window.detailsPreview.SuspendVolume(root));
                 InvalidateRect(window.hwnd, nullptr, FALSE);
             });
         }
@@ -112,6 +113,7 @@ void InheritDriveEjectSuspension(AppState& state) {
     for (const auto& root : task->plan.roots) {
         state.renderer.SuspendVolume(root);
         state.quickPreview.SuspendVolume(root);
+        state.detailsPreview.SuspendVolume(root);
     }
 }
 
@@ -130,6 +132,7 @@ void CompletePreparedDriveEject(AppState& state, const std::wstring& root) {
             app::ForEachWindowSharingCore(state, [&](AppState& window) {
                 window.renderer.ResumeVolume(volume);
                 window.quickPreview.ResumeVolume(volume);
+                window.detailsPreview.ResumeVolume(volume);
             });
         }
         SyncVisibleWatches(state);

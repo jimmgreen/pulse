@@ -1,0 +1,31 @@
+网络断开卡死反馈：本轮修复与验证
+
+证据与边界
+- 用户说明进入文件夹、播放视频时均可能卡死。
+- 用户 Diagnostics 日志有约 15～16 秒目录枚举超时、预览超时和视频停帧，但没有卡死线程堆栈；不能据此确定所有卡死的唯一根因。
+
+本轮改动
+1. snapshot_patch.cpp：网络目录（UNC、映射 SMB、remote-like 云盘）的新增、修改、重命名通知不再在调用线程同步 FindFirstFileExW。保持原快照，返回 NeedFullEnum，让既有后台刷新处理。纯删除通知无需读盘，仍即时更新。混合批次不会部分修改快照。
+2. app_model.cpp：暂存栏每两秒的存在检查跳过 remote-like 盘，与 UNC 一致；离线不能当成文件已删除。
+3. app_worker.cpp/h：任务入队前缓存网络分类，映射盘与 UNC 共用网络并发及隔离枚举名额，为本地导航保留容量。旧代码对本地也已有隔离枚举和取消，本轮没有首次引入取消能力。
+4. app_main.cpp：显式 --hang-watch 的日志改到可写的 Pulse/Diagnostics/Crashes/pulse_hang-PID.log，可随诊断导出；没有默认启用线程采样。
+
+验证
+- pulse_link_destination_test --remote-notify-only：35 项通过。
+- pulse_worker_enum_cancel_test：25 项通过，包括阻塞提供程序、映射/云盘容量、本地导航、取消及迟到结果。
+- pulse_selection_caps_test --tray-refresh-only：10 项通过。
+- pulse、PulsePickerUiProof 构建成功；相关 diff --check 通过。
+- 发布载荷无 selftest dispatcher，静态运行库检查通过。
+- 实机独立 --test-instance 打开不可达 UNC（192.0.2.1 测试地址）：启动等待 25 秒后，80 次 WM_NULL 探测全部通过，最慢 7.3ms；正常 WM_CLOSE 退出。没有断开本机网络，没有保存用户设置。
+- 首次受限执行未能写入诊断日志；放开运行限制后的首次探测发生于启动阶段，超过 1 秒。记录该结果，不把启动阶段算成通过。最后一次测试明确等待启动后才测响应。
+- 最后一次实机确认 --hang-watch 日志在当前用户 Diagnostics/Crashes 中成功写入。
+- 测试脚本、打包验证脚本及对应 pulse.map 在 bench_data/network-hang-20261102。
+
+未验证/未宣称修复
+- 没有用户的飞牛 NAS / CloudDrive / 网盘断网环境，未复现真实播放过程中断网。
+- 本轮未改视频解码器；目录通知造成的界面阻塞在播放期间也可能发生，但不能证明它解释了全部播放卡死。
+- 相邻的会话恢复暂存栏属性读取、TS 内容探测等路径未在本轮扩展修改，不能宣称所有同步网络入口已消除。
+
+复测包
+dist/PulseSetup-1.0.58-test-network-hang-20261102.exe
+若仍卡死，先完全退出 Pulse，再启动安装目录的 pulse.exe --hang-watch，复现后收集 Diagnostics（含 Crashes 中的 pulse_hang 日志）。

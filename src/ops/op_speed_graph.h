@@ -6,7 +6,7 @@
 
 namespace pulse::ops {
 
-// The progress card's speed history (pulse_ops_dialogs.html, speed graph).
+// The progress card's speed history (speed graph).
 // OpsManager records it in the background for the running task, so a card
 // first shown late (or reopened after being hidden) draws the whole run;
 // the card keeps sampling the same way while it is visible.

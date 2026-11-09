@@ -45,7 +45,7 @@ inline const wchar_t* PackMainTool(PackId id) {
     case PackId::Media: return L"ffmpeg.exe";
     case PackId::Images: return L"pulse-imgpack.exe";
     case PackId::Raw: return L"pulse-rawpack.exe";
-    case PackId::Archives: return L"7z.exe";
+    case PackId::Archives: return L""; // Retired identity; no executable route.
     }
     return L"";
 }
@@ -233,6 +233,7 @@ struct ResolvedPack {
 
 inline ResolvedPack ResolvePackUncached(PackId id) {
     ResolvedPack out;
+    if (id == PackId::Archives) return out;
     const PackSettings settings = LoadPackSettings();
     if (!settings.enabled[static_cast<uint32_t>(id)]) return out;
     if (id == PackId::Media && settings.use_custom_ffmpeg) {

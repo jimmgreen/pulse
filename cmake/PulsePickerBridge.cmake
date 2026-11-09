@@ -7,6 +7,10 @@ add_executable(pulse_picker_transport_test src/bench/picker_transport_test.cpp
     src/ipc/picker_transport.cpp src/ipc/picker_protocol.cpp)
 target_link_libraries(pulse_picker_transport_test PRIVATE advapi32 bcrypt)
 
+add_executable(pulse_picker_session_test src/bench/picker_session_test.cpp
+    src/ipc/picker_transport.cpp src/ipc/picker_protocol.cpp)
+target_link_libraries(pulse_picker_session_test PRIVATE advapi32 bcrypt)
+
 add_executable(pulse_file_save_model_test src/bench/file_save_model_test.cpp src/ui/file_save_model.cpp)
 
 add_executable(pulse_file_save_revalidation_test src/bench/file_save_revalidation_test.cpp
@@ -179,6 +183,11 @@ add_executable(pulse_file_dialog_custom_button_live_test EXCLUDE_FROM_ALL
     src/bench/file_dialog_custom_button_live_test.cpp
     src/shell_bridge/file_dialog_ui_provider.cpp ${_inprocess_wrapper_test_sources})
 target_link_libraries(pulse_file_dialog_custom_button_live_test PRIVATE shell32 ole32 uuid advapi32 bcrypt user32)
+
+add_executable(pulse_file_dialog_multiselect_live_test EXCLUDE_FROM_ALL
+    src/bench/file_dialog_multiselect_live_test.cpp
+    src/shell_bridge/file_dialog_ui_provider.cpp ${_inprocess_wrapper_test_sources})
+target_link_libraries(pulse_file_dialog_multiselect_live_test PRIVATE shell32 ole32 uuid advapi32 bcrypt user32)
 target_sources(pulse_file_dialog_inprocess_wrapper_test PRIVATE
     src/shell_bridge/file_dialog_activation.cpp src/shell_bridge/file_dialog_class_factory.cpp)
 
@@ -195,3 +204,33 @@ target_link_libraries(pulse_native_open_extension_probe PRIVATE ole32 shell32 uu
 
 add_executable(pulse_native_empty_properties_probe EXCLUDE_FROM_ALL src/bench/native_empty_properties_probe.cpp)
 target_link_libraries(pulse_native_empty_properties_probe PRIVATE ole32 shell32 uuid)
+
+# Experimental duplex callbacks stay separate from production capability admission.
+add_executable(pulse_picker_event_protocol_test src/bench/picker_event_protocol_test.cpp src/ipc/picker_protocol.cpp)
+add_executable(pulse_picker_event_state_test src/bench/picker_event_state_test.cpp src/ipc/picker_protocol.cpp)
+add_executable(pulse_picker_event_client_test src/bench/picker_event_client_test.cpp
+    src/ipc/picker_event_client.cpp src/ipc/picker_transport.cpp src/ipc/picker_protocol.cpp)
+target_link_libraries(pulse_picker_event_client_test PRIVATE advapi32 bcrypt user32 ole32)
+
+add_executable(pulse_picker_event_adapter_test src/bench/picker_event_adapter_test.cpp src/app/picker_event_adapter.cpp src/ipc/picker_protocol.cpp)
+
+# Complete ABI transport: share the existing picker implementation in pulse.exe.
+target_sources(pulse PRIVATE src/picker_inprocess/picker_ui_bootstrap.cpp src/picker_inprocess/picker_ui_bootstrap_v2.cpp)
+set_property(SOURCE src/picker_inprocess/picker_ui_bootstrap.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+    "$<$<STREQUAL:$<TARGET_PROPERTY:NAME>,pulse>:PULSE_PICKER_EXE_HOST=1>")
+add_executable(pulse_picker_remote_protocol_test EXCLUDE_FROM_ALL src/bench/picker_remote_protocol_test.cpp src/ipc/picker_remote_protocol.cpp)
+add_executable(pulse_picker_remote_v2_test EXCLUDE_FROM_ALL src/bench/picker_inprocess_v2_test.cpp
+    src/shell_bridge/file_dialog_remote_provider.cpp src/ipc/picker_remote_protocol.cpp
+    src/ipc/picker_transport.cpp src/ipc/picker_protocol.cpp src/common/picker_owner_guard.cpp)
+target_compile_definitions(pulse_picker_remote_v2_test PRIVATE PULSE_REMOTE_PROVIDER_TEST=1)
+target_link_libraries(pulse_picker_remote_v2_test PRIVATE ole32 user32 windowscodecs advapi32 bcrypt)
+add_executable(pulse_picker_open_bench EXCLUDE_FROM_ALL src/bench/picker_open_bench.cpp
+    src/shell_bridge/file_dialog_remote_provider.cpp src/ipc/picker_remote_protocol.cpp
+    src/ipc/picker_transport.cpp src/ipc/picker_protocol.cpp src/common/picker_owner_guard.cpp)
+target_link_libraries(pulse_picker_open_bench PRIVATE ole32 user32 shell32 advapi32 bcrypt)
+add_executable(pulse_file_dialog_remote_multiselect_live_test EXCLUDE_FROM_ALL
+    src/bench/file_dialog_multiselect_live_test.cpp
+    src/shell_bridge/file_dialog_remote_provider.cpp src/ipc/picker_remote_protocol.cpp
+    ${_inprocess_wrapper_test_sources})
+target_compile_definitions(pulse_file_dialog_remote_multiselect_live_test PRIVATE PULSE_REMOTE_PROVIDER_TEST=1)
+target_link_libraries(pulse_file_dialog_remote_multiselect_live_test PRIVATE shell32 ole32 uuid advapi32 bcrypt user32)

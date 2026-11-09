@@ -1,3 +1,4 @@
+#include "delete_departure.h"
 #include "delete_preflight.h"
 // app_ops_ui.cpp — extracted from app_main.cpp.
 #include "app_internal.h"
@@ -6,6 +7,7 @@
 #include "../ui/fluent_menu.h"
 #include "../ui/drag_drop.h"
 #include "../ui/file_operation_dialog.h"
+#include "../ui/ui_renderer.h"
 #include "../ui/batch_rename_dialog.h"
 #include "../ui/ai_list_overlay.h"
 #include "../ui/quick_preview_window.h"
@@ -31,6 +33,7 @@
 #include "reopen_closed.h"
 #include "paste_source.h"
 #include "arrival_select.h"
+#include "tray_reveal.h"
 #include "resource.h"
 #include "../index/document_reader.h"
 #include "../ops/clipboard.h"
@@ -345,8 +348,8 @@ void HandleTrayMessage(AppState& s, UINT message) {
     }
 }
 
-// Ctrl+V: the system clipboard. The tray is released from the shelf only
-// (pulse_tray_redesign.html); Ctrl+C no longer stages.
+// Ctrl+V: the system clipboard. The tray is released from the shelf only;
+// Ctrl+C no longer stages.
 void PasteIntoCurrent(AppState& s) {
     app::Tab* tab = ActiveTab(s);
     if (IsDeviceTab(tab)) {
@@ -438,7 +441,8 @@ void DeleteSelected(AppState& s, bool permanent) {
     if(DeferContentSelection(s,[=](AppState& v){DeleteSelected(v,permanent);})) return;
     app::Tab* tab = ActiveTab(s);
     if (!tab) return;
-    if (IsRecycleTab(tab)) {
+    if (app::RecycleSelectionOf(*tab) == app::RecycleSelection::Mixed) return;
+    if (IsRecycleTab(tab) || app::RecycleSelectionOf(*tab) == app::RecycleSelection::All) {
         std::vector<std::wstring> paths;
         size_t item_count = 0;
         if (tab->snapshot) {
@@ -511,21 +515,6 @@ ui::PermanentDeleteChoice ConfirmPermanentDelete(AppState& s, const std::vector<
 
 }
 
-// Motion 5b: the rows slide out now; the listing drops them when the delete
-// lands. Small selections only (the list animates up to 30 changed rows).
-static void MarkLeavingRows(AppState& s, const std::vector<std::wstring>& paths, uint64_t task) {
-    if (paths.empty() || paths.size() > 64 || task == 0) return;
-    const uint64_t now = ui::motion::NowMs();
-    if (s.leavingPaths.empty() || s.leavingDoneAt || now - s.leavingSince > 8000) {
-        s.leavingPaths.clear();
-        s.leavingSince = now;
-    }
-    s.leavingPaths.insert(s.leavingPaths.end(), paths.begin(), paths.end());
-    s.leavingDoneAt = 0;
-    s.leavingTask = task;
-    if (s.hwnd) InvalidateRect(s.hwnd, nullptr, FALSE);
-}
-
 // A phone has no Recycle Bin: Pulse asks as Explorer does ("permanently
 // delete?", this location has no Recycle Bin), then Explorer's engine deletes.
 static void DeleteDeviceSelection(AppState& s, const app::Tab& tab) {
@@ -549,8 +538,12 @@ static void DeleteDeviceSelection(AppState& s, const app::Tab& tab) {
     req.type = ops::OpType::RealDelete;
     req.sources = std::move(ids);
     req.refresh_directories.push_back(tab.current_path);
-    const uint64_t task = s.ops.Submit(std::move(req));
-    MarkLeavingRows(s, rows, task);
+    s.ops.Submit(std::move(req));
+}
+
+void NoteDeleteCompletion(AppState& s, const ops::CompletedOperation& completed) {
+    if (app::RecordConfirmedDelete(completed, s.leavingPaths, s.leavingSince, s.leavingDoneAt,
+        s.leavingTask, ui::motion::NowMs()) && s.hwnd) InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
 void NoteDeleteFinished(AppState& s, const ops::FinishedTask& done) {
@@ -576,39 +569,37 @@ void NoteDeleteFinished(AppState& s, const ops::FinishedTask& done) {
             s.recycleRefusal = why;
         if (first) PostMessageW(s.hwnd, WM_RECYCLE_REFUSED, 0, 0);
     }
-    // An undo that recycles what it had created (new folders) is not a
-    // delete the user can take back: its step is not on the undo stack, so
-    // the snack's Undo would undo something else.
-    if (done.type != ops::OpType::RecycleDelete || !done.success || done.sources.empty() || done.is_undo ||
-        !s.ops.CanUndo() || !s.hwnd)
-        return;
-    // 重复文件's 移到回收站 says what it freed in its own snack (dup_finder.cpp).
-    if (app::dup::OwnsTask(done.task_id)) return;
-    std::wstring title = l10n::Get(l10n::StringId::DeleteSnackTitle);
-    if (const size_t at = title.find(L"{n}"); at != std::wstring::npos)
-        title.replace(at, 3, std::to_wstring(done.sources.size()));
-    s.notification_toast.ShowSnack(s.hwnd, ui::SnackIcon::Undo, std::move(title),
-        l10n::Get(l10n::StringId::DeleteSnackDetail),
-        {ui::SnackAction{l10n::Get(l10n::StringId::SnackUndo), WM_UNDO_DELETE}}, L"Ctrl+Z");
+    // A finished recycle no longer raises an Undo capsule: the status bar's
+    // undo chip names the step and takes it back (Ctrl+Z still works).
 }
 
 void CancelDeletePreflight(AppState& s) {
-    if (s.delete_preflight) s.delete_preflight->cancel.store(true);
+    if (s.delete_preflight) {
+        s.delete_preflight->cancel.store(true);
+        s.delete_preflight->cancelled = true;
+        s.delete_preflight->terminal = s.delete_preflight->task_id == 0;
+        if (s.delete_preflight->confirmation)
+            PostMessageW(s.delete_preflight->confirmation, WM_CLOSE, 0, 0);
+    }
     s.delete_preflight.reset();
     KillTimer(s.hwnd, 0xD311);
     s.delete_preflight_window.Destroy();
 }
 
-void DeletePaths(AppState& s, std::vector<std::wstring> paths, bool permanent) {
-    if (paths.empty()) return;
+std::shared_ptr<DeletePreflight> DeletePaths(AppState& s, std::vector<std::wstring> paths, bool permanent,
+    bool recycle_only, bool force_confirmation) {
+    if (paths.empty() || (recycle_only && s.delete_preflight)) return {};
     CancelDeletePreflight(s);
     const auto show_failure = [&s] {
         s.notification_toast.ShowSnack(s.hwnd, ui::SnackIcon::Suggest,
             l10n::Get(l10n::StringId::Delete), l10n::Get(l10n::StringId::OperationFailedMessage), {}, {}, 5000);
     };
     auto request = std::make_shared<DeletePreflight>();
+    request->notify_window = s.hwnd;
     request->paths = std::move(paths);
     request->permanent = permanent;
+    request->recycle_only = recycle_only;
+    request->force_confirmation = force_confirmation;
     if (s.isolatedTest && GetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", nullptr, 0)) {
         wchar_t delay_text[32]{};
         const DWORD length = GetEnvironmentVariableW(L"PULSE_TEST_DELETE_PREFLIGHT_DELAY_MS", delay_text, 32);
@@ -623,35 +614,47 @@ void DeletePaths(AppState& s, std::vector<std::wstring> paths, bool permanent) {
         }
     }
     s.delete_preflight = request;
-    ui::FileOperationCallbacks callbacks;
-    callbacks.cancel = [request] { request->cancel.store(true); };
-    callbacks.dismiss = callbacks.cancel;
-    if (!s.delete_preflight_window.Create(s.hwnd, std::move(callbacks))) {
-        CancelDeletePreflight(s);
-        show_failure();
-        return;
-    }
-    s.delete_preflight_window.SetPreparationOnly(true);
-    s.delete_preflight_window.SetTheme(s.darkMode, s.accentColor);
-    ops::OpStatus status;
-    status.active = true;
-    status.can_pause = false;
-    status.type = permanent ? ops::OpType::RealDelete : ops::OpType::RecycleDelete;
-    status.phase = ops::OpPhase::Scanning;
-    status.enumeration_complete = true;
-    status.total_items = request->paths.size();
-    status.source_label = ClipboardPath(request->paths.front());
-    s.delete_preflight_window.Update(status);
-    s.delete_preflight_window.Show(false);
-    if (!SetTimer(s.hwnd, 0xD311, 30, nullptr)) { CancelDeletePreflight(s); show_failure(); return; }
     StartDeletePreflight(request);
+    if (!SetTimer(s.hwnd, 0xD311, 30, nullptr)) {
+        request->dispatch_failed = true;
+        CancelDeletePreflight(s);
+        request->terminal = true;
+        show_failure();
+    }
+    return request;
 }
 
 void PollDeletePreflight(AppState& s) {
     const auto request = s.delete_preflight;
     if (!request) return;
     if (request->cancel.load()) { CancelDeletePreflight(s); return; }
-    if (!request->done.load()) return;
+    if (!request->done.load()) {
+        if (!ShouldShowDeletePreparation(*request, GetTickCount64())) return;
+        request->preparation_shown = true;
+        ui::FileOperationCallbacks callbacks;
+        callbacks.cancel = [request] { request->cancel.store(true); };
+        callbacks.dismiss = callbacks.cancel;
+        if (!s.delete_preflight_window.Create(s.hwnd, std::move(callbacks))) {
+            request->dispatch_failed = true;
+            CancelDeletePreflight(s);
+            s.notification_toast.ShowSnack(s.hwnd, ui::SnackIcon::Suggest,
+                l10n::Get(l10n::StringId::Delete), l10n::Get(l10n::StringId::OperationFailedMessage), {}, {}, 5000);
+            return;
+        }
+        s.delete_preflight_window.SetPreparationOnly(true);
+        s.delete_preflight_window.SetTheme(s.darkMode, s.accentColor);
+        ops::OpStatus status;
+        status.active = true;
+        status.can_pause = false;
+        status.type = request->permanent ? ops::OpType::RealDelete : ops::OpType::RecycleDelete;
+        status.phase = ops::OpPhase::Scanning;
+        status.enumeration_complete = true;
+        status.total_items = request->input_count;
+        status.source_label = ClipboardPath(request->first_path);
+        s.delete_preflight_window.Update(status);
+        s.delete_preflight_window.Show(false);
+        return;
+    }
     struct CompletionCleanup {
         HWND owner;
         std::shared_ptr<DeletePreflight> request;
@@ -670,8 +673,14 @@ void PollDeletePreflight(AppState& s) {
     s.delete_preflight_window.Destroy();
     if (request->cancel.load()) return;
     if (request->failed) {
+        request->terminal = true;
         s.notification_toast.ShowSnack(s.hwnd, ui::SnackIcon::Suggest,
             l10n::Get(l10n::StringId::Delete), l10n::Get(l10n::StringId::OperationFailedMessage), {}, {}, 5000);
+        return;
+    }
+    if (request->recycle_only && !request->direct.empty()) {
+        request->failed = true;
+        request->terminal = true;
         return;
     }
     auto paths = std::move(request->paths);
@@ -684,8 +693,7 @@ void PollDeletePreflight(AppState& s) {
             ops::OpRequest req;
             req.type = ops::OpType::RealDelete;
             req.sources = std::move(direct);
-            const std::vector<std::wstring> leaving = req.sources;
-            MarkLeavingRows(s, leaving, s.ops.Submit(std::move(req)));
+            s.ops.Submit(std::move(req));
             if (paths.empty()) return;
         }
     }
@@ -694,16 +702,40 @@ void PollDeletePreflight(AppState& s) {
         if (choice == ui::PermanentDeleteChoice::Cancel || !still_current()) return;
         // 移到回收站 from the dialog: the user already confirmed, don't ask again.
         if (choice == ui::PermanentDeleteChoice::Recycle) permanent = false;
-    } else if (s.appPrefs.confirm_recycle_delete) {
-        const ui::ConfirmDialogSpec confirm = BuildRecycleDeleteConfirm(paths);
-        if (!ui::ShowConfirmDialog(s.hwnd, confirm, s.darkMode, s.accentColor) || !still_current()) return;
+    } else if (request->force_confirmation || s.appPrefs.confirm_recycle_delete) {
+        ui::ConfirmDialogSpec confirm = BuildRecycleDeleteConfirm(paths);
+        if (request->force_confirmation) confirm.default_choice = ui::ConfirmChoice::Cancel;
+        request->waiting_confirmation = true;
+        std::weak_ptr<DeletePreflight> weak = request;
+        const bool isolated = s.isolatedTest;
+        confirm.on_open = [weak, isolated](HWND window) {
+            if (const auto value = weak.lock()) {
+                value->confirmation = window;
+                if (isolated && value->confirmation_observer) value->confirmation_observer(window);
+            }
+        };
+        const bool accepted = ui::ShowConfirmDialogEx(s.hwnd, confirm, s.darkMode, s.accentColor) == ui::ConfirmChoice::Confirm;
+        request->waiting_confirmation = false;
+        request->confirmation = nullptr;
+        if (!accepted || !still_current()) {
+            request->cancelled = true;
+            request->terminal = true;
+            return;
+        }
     }
-    if (!still_current()) return;
+    if (!still_current()) { request->cancelled = true; request->terminal = true; return; }
     ops::OpRequest req;
     req.type = permanent ? ops::OpType::RealDelete : ops::OpType::RecycleDelete;
     req.sources = std::move(paths);
-    const std::vector<std::wstring> leaving = req.sources;
-    MarkLeavingRows(s, leaving, s.ops.Submit(std::move(req)));
+    request->task_id = s.ops.Submit(std::move(req));
+    if (request->task_id && request->recycle_only && !s.ops.RetainTask(request->task_id)) {
+        s.ops.CancelTask(request->task_id);
+        request->failed = true;
+    }
+    if (!request->task_id) {
+        request->failed = true;
+        request->terminal = true;
+    }
 }
 
 void OfferPermanentDeleteForRefused(AppState& s) {
@@ -732,7 +764,7 @@ void OfferPermanentDeleteForRefused(AppState& s) {
 // Stage 1B-2: built-in Fluent context menu + new-item dropdown.
 void RestoreSelected(AppState& s) {
     app::Tab* tab = ActiveTab(s);
-    if (!tab || !tab->snapshot || !IsRecycleTab(tab)) return;
+    if (!tab || !tab->snapshot || app::RecycleSelectionOf(*tab) != app::RecycleSelection::All) return;
     std::vector<std::wstring> paths;
     std::vector<std::wstring> parents;
     std::unordered_set<std::wstring> parent_keys;
@@ -822,7 +854,7 @@ void CollectToTray(AppState& s, bool move_intent) {
     CollectPathsToTray(s, paths, move_intent);
 }
 
-// Ctrl+C / Ctrl+X: the system clipboard only (pulse_tray_redesign.html).
+// Ctrl+C / Ctrl+X: the system clipboard only.
 // The shelf offers to stage this copy until the clipboard changes.
 void CollectPathsToTray(AppState& s, const std::vector<std::wstring>& paths, bool move_intent) {
     if (paths.empty()) return;
@@ -841,7 +873,7 @@ void CollectPathsToTray(AppState& s, const std::vector<std::wstring>& paths, boo
     if (s.hwnd) {
         std::wstring title = l10n::Get(move_intent ? l10n::StringId::TrayCutOffer : l10n::StringId::TrayCopiedOffer);
         title = FillText(std::move(title), L"{n}", std::to_wstring(paths.size()));
-        s.notification_toast.ShowSnack(s.hwnd, ui::SnackIcon::Suggest, std::move(title), {}, {}, {}, 2800);
+        ShowStatusFeedback(s, std::move(title));
         InvalidateRect(s.hwnd, nullptr, FALSE);
     }
 }
@@ -913,11 +945,62 @@ void TakeTrayClip(AppState& s) {
     StagePaths(s, offer.paths, offer.move);
     if (s.hwnd) InvalidateRect(s.hwnd, nullptr, FALSE);
 }
+void HandleUndoHistoryAction(AppState& s, uint64_t task_id, bool undone, bool locate) {
+    const auto history = s.ops.UndoHistory();
+    const auto found = std::find_if(history.entries.begin(), history.entries.end(), [&](const auto& row) {
+        return row.entry.task_id == task_id && row.undone == undone;
+    });
+    if (found == history.entries.end()) return;
+    const auto& item = *found;
+    if (locate) {
+        const auto& paths = item.undone || item.entry.destinations.empty() ? item.entry.sources : item.entry.destinations;
+        if (paths.empty()) return;
+        const auto folder = fs::ParentPath(paths.front());
+        if (folder.empty()) return;
+        NavigateTo(s, folder);
+        s.arrivalSelect = {};
+        ArmArrivalSelection(s, s.pane, 0, 10000);
+        s.arrivalSelect.expected_only = true;
+        s.arrivalSelect.until = 0;
+        for (const auto& path : paths) ExpectArrival(s, path);
+        if (s.pane) if (auto* tab = s.pane->ActiveTab()) ApplyArrivalSelection(s, *s.pane, *tab, true);
+        s.undoHistoryOpen = false;
+    } else if (item.entry.supported) {
+        if (item.undone) s.ops.RedoTo(item.entry.task_id);
+        else s.ops.UndoTo(item.entry.task_id);
+    }
+    s.undoHistoryOffset = 0;
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+}
+
+static void LocateOperationResults(AppState& s, uint64_t task_id) {
+    const auto results = s.ops.TaskLocations(task_id);
+    if (results.destinations.empty()) return;
+    const std::wstring folder = fs::ParentPath(results.destinations.front());
+    if (folder.empty()) return;
+    RevealWindow(s);
+    NavigateTo(s, folder);
+    s.arrivalSelect = {};
+    ArmArrivalSelection(s, s.pane, 0, 10000);
+    s.arrivalSelect.expected_only = true;
+    // Slow network listings may not return within the ordinary settle
+    // window. The existing hard cap still bounds an absent result.
+    s.arrivalSelect.until = 0;
+    for (const auto& path : results.destinations) ExpectArrival(s, path);
+    if (s.pane) {
+        if (auto* tab = s.pane->ActiveTab())
+            ApplyArrivalSelection(s, *s.pane, *tab, true);
+    }
+}
+
 bool EnsureOperationWindow(AppState& s) {
     if (s.operationWindow) return true;
     const HWND hwnd = s.hwnd;
     if (!hwnd || !IsWindow(hwnd)) return false;
     ui::FileOperationCallbacks operation_callbacks;
+    operation_callbacks.cancel_task = [hwnd](uint64_t task) {
+        if (AppState* state = GetAppState(hwnd)) state->ops.CancelTask(task);
+    };
     operation_callbacks.cancel = [hwnd] {
         if (AppState* state = GetAppState(hwnd)) state->ops.CancelCurrent();
     };
@@ -949,10 +1032,60 @@ bool EnsureOperationWindow(AppState& s) {
     operation_callbacks.open_folder = [hwnd](const std::wstring& folder) {
         if (AppState* state = GetAppState(hwnd)) NavigateTo(*state, folder);
     };
+    operation_callbacks.locate_results = [hwnd](uint64_t task_id) {
+        if (AppState* state = GetAppState(hwnd)) LocateOperationResults(*state, task_id);
+    };
+    operation_callbacks.more_action = [hwnd](uint64_t task_id, int action) {
+        AppState* state = GetAppState(hwnd);
+        if (!state) return;
+        const auto status = state->ops.QueryTask(task_id);
+        const auto locations = state->ops.TaskLocations(task_id);
+        std::wstring folder;
+        if (action == 2) {
+            if (!locations.sources.empty()) folder = fs::ParentPath(locations.sources.front());
+        } else {
+            if (status) folder = status->destination_dir;
+            if (folder.empty() && !locations.destinations.empty())
+                folder = fs::ParentPath(locations.destinations.front());
+        }
+        if (folder.empty()) return;
+        if (action == 3) ops::WriteClipboardText(ClipboardPath(folder));
+        else if (action == 1 || action == 2) {
+            RevealWindow(*state);
+            NewTab(*state, folder);
+        }
+    };
+    operation_callbacks.skip_current = [hwnd](uint64_t task, uint64_t token) {
+        if (AppState* state = GetAppState(hwnd)) state->ops.SkipCurrentItem(task, token);
+    };
     operation_callbacks.dismiss = [hwnd] {
         if (AppState* state = GetAppState(hwnd)) {
+            state->operationHistoryTaskId = 0;
             state->operationDismissedTaskId = state->ops.Status().task_id;
             state->operationPinnedByUser = false;
+        }
+    };
+    // The card shrinks into the status pill and grows back out of it.
+    operation_callbacks.status_anchor = [hwnd]() -> std::optional<POINT> {
+        AppState* state = GetAppState(hwnd);
+        if (!state || !IsWindowVisible(hwnd) || IsIconic(hwnd)) return std::nullopt;
+        const D2D1_RECT_F pill = state->renderer.TaskPillRect();
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        // No pill drawn yet: the right end of the status bar, where it appears.
+        POINT point = pill.right > pill.left
+            ? POINT{ static_cast<LONG>(pill.left + 60.0f * state->scale),
+                     static_cast<LONG>(pill.top + 11.0f * state->scale) }
+            : POINT{ client.right - static_cast<LONG>(80.0f * state->scale),
+                     client.bottom - static_cast<LONG>(14.0f * state->scale) };
+        ClientToScreen(hwnd, &point);
+        return point;
+    };
+    operation_callbacks.reached_status = [hwnd] {
+        if (AppState* state = GetAppState(hwnd)) {
+            state->renderer.PopTaskPill();
+            if (state->framePump.Running()) state->framePump.Arm();
+            InvalidateRect(hwnd, nullptr, FALSE);
         }
     };
     s.operationWindow = std::make_unique<ui::FileOperationWindow>();
@@ -1002,8 +1135,10 @@ void MoveOperationUi(AppState& from, AppState& to) {
 }
 
 void PinAndShowOperationWindow(AppState& s) {
+    s.operationHistoryTaskId = 0;
     if (AppState* ui = GetAppState(s.ops.UiWindow()); ui && ui != &s) MoveOperationUi(*ui, s);
     const ops::OpStatus status = s.ops.Status();
+
     if (!status.active && status.summary.empty() && status.last_error.empty()) return;
     if (!EnsureOperationWindow(s)) return;
     s.operationDismissedTaskId = 0;
@@ -1015,7 +1150,107 @@ void PinAndShowOperationWindow(AppState& s) {
     // like any other card; opened afterwards to see the result: the user
     // closes it.
     s.operationWindow->SetAutoClose(status.active);
+    s.operationWindow->Show(true, true);
+}
+
+void HandleOperationHistoryAction(AppState& s, uint64_t task_id, int action) {
+    if (action == 3) {
+        for (const auto& status : s.ops.RecentStatuses()) s.hiddenOperationHistory.insert(status.task_id);
+        const auto current = s.ops.Status();
+        if (!current.active && current.task_id) s.hiddenOperationHistory.insert(current.task_id);
+        return;
+    }
+    if (action == 1) { LocateOperationResults(s, task_id); return; }
+    if (action == 2) {
+        if (s.ops.CanUndoTask(task_id)) s.ops.UndoTask(task_id);
+        return;
+    }
+    const auto selected = s.ops.FinalStatus(task_id);
+    if (!selected || !EnsureOperationWindow(s)) return;
+    s.operationHistoryTaskId = task_id;
+    s.operationPinnedByUser = true;
+    s.operationWindow->Update(*selected);
+    s.operationWindow->SetAutoClose(false);
     s.operationWindow->Show(true);
+}
+
+std::vector<ui::FluentMenuItem> BuildOperationHistoryMenu(AppState& s, const std::vector<ops::OpStatus>& history) {
+    std::vector<ui::FluentMenuItem> items;
+    ui::FluentMenuItem heading;
+    heading.text = l10n::Get(l10n::StringId::OpHistory); heading.heading = true;
+    items.push_back(std::move(heading));
+    for (size_t i = 0; i < history.size(); ++i) {
+        const auto& status = history[i];
+        const int base = 100 + static_cast<int>(i) * 3;
+        ui::FluentMenuItem row;
+        row.text = status.summary.empty() ? status.source_label : status.summary;
+        if (row.text.empty()) row.text = l10n::Get(l10n::StringId::OpDetails);
+        row.glyph = status.phase == ops::OpPhase::Failed ? L"\xEA39" : L"\xE73E";
+        row.shortcut = ClipboardPath(status.destination_dir);
+        const auto locations = s.ops.TaskLocations(status.task_id);
+        if (row.shortcut.empty() && !locations.destinations.empty())
+            row.shortcut = ClipboardPath(fs::ParentPath(locations.destinations.front()));
+        row.tooltip = row.shortcut;
+        ui::FluentMenuItem details;
+        details.command = base; details.text = l10n::Get(l10n::StringId::OpDetails);
+        row.children.push_back(std::move(details));
+        ui::FluentMenuItem locate;
+        locate.command = base + 1; locate.text = l10n::Get(l10n::StringId::OpLocateResults);
+        locate.enabled = !locations.destinations.empty();
+        row.children.push_back(std::move(locate));
+        ui::FluentMenuItem undo;
+        undo.command = base + 2; undo.text = l10n::Get(l10n::StringId::Undo);
+        undo.enabled = s.ops.CanUndoTask(status.task_id);
+        row.children.push_back(std::move(undo));
+        items.push_back(std::move(row));
+    }
+    if (history.empty()) {
+        ui::FluentMenuItem empty;
+        empty.text = l10n::Get(l10n::StringId::NoRecent); empty.enabled = false;
+        items.push_back(std::move(empty));
+    }
+    ui::FluentMenuItem clear;
+    clear.command = 1; clear.text = l10n::Get(l10n::StringId::OpClearCompleted);
+    clear.enabled = !history.empty(); items.push_back(std::move(clear));
+    return items;
+}
+
+void HandleOperationStatusAction(AppState& s, int action) {
+    const auto current = s.ops.Status();
+    if (action == 0) {
+        if (s.ops.CanUndoTask(current.task_id)) s.ops.UndoTask(current.task_id);
+        return;
+    }
+    if (action == 1) { LocateOperationResults(s, current.task_id); return; }
+    if (action == 2) {
+        if (current.active && current.can_pause) {
+            if (current.pause_requested || current.phase == ops::OpPhase::Paused) s.ops.ResumeCurrent();
+            else s.ops.PauseCurrent();
+        }
+        return;
+    }
+    if (current.active || current.phase == ops::OpPhase::Failed) { PinAndShowOperationWindow(s); return; }
+    if (!s.menu) return;
+    auto history = s.ops.RecentStatuses();
+    std::erase_if(s.hiddenOperationHistory, [&](uint64_t task_id) {
+        return task_id != current.task_id && std::none_of(history.begin(), history.end(),
+            [&](const auto& status) { return status.task_id == task_id; });
+    });
+    if (current.task_id && std::none_of(history.begin(), history.end(),
+        [&](const auto& status) { return status.task_id == current.task_id; })) history.insert(history.begin(), current);
+    std::erase_if(history, [&](const auto& status) { return s.hiddenOperationHistory.contains(status.task_id); });
+    auto items = BuildOperationHistoryMenu(s, history);
+    POINT point{}; GetCursorPos(&point);
+    const int command = s.menu->TrackPopup(point, std::move(items));
+    if (command == 1) {
+        HandleOperationHistoryAction(s, 0, 3);
+        return;
+    }
+    if (command < 100) return;
+    const auto index = static_cast<size_t>((command - 100) / 3);
+    if (index >= history.size()) return;
+    const auto& selected = history[index];
+    HandleOperationHistoryAction(s, selected.task_id, (command - 100) % 3);
 }
 
 // Both batch-rename entries (the selection and the tray) submit through here.
@@ -1043,12 +1278,9 @@ static void ShowBatchRenameDone(AppState& s) {
     // A failure is reported by the operations UI; the rows that did change
     // still come back with the list refresh.
     if (!note.success || !s.hwnd) return;
+    // The renamed rows flash in place; the status bar's undo chip offers the
+    // step back, so no capsule repeats it.
     AiListFlashRows(note.folder, note.names);
-    std::wstring title = FillText(l10n::Get(l10n::StringId::BrDoneSnack), L"{n}", std::to_wstring(note.names.size()));
-    std::vector<ui::SnackAction> actions;
-    if (s.ops.CanUndo()) actions.push_back({l10n::Get(l10n::StringId::SnackUndo), WM_UNDO_DELETE});
-    s.notification_toast.ShowSnack(s.hwnd, ui::SnackIcon::Undo, std::move(title), {}, std::move(actions),
-                                   s.ops.CanUndo() ? L"Ctrl+Z" : L"");
     InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 
@@ -1161,6 +1393,7 @@ static size_t SubmitBatchRename(AppState& s, const std::vector<std::wstring>& pa
         if (req.sources.empty()) return 0;
         if (select_in) {
             select_in->pending_selected_names = req.new_names;
+            select_in->pending_ensure_selection_visible = true;
             select_in->pending_selected_name = req.new_names.front();
         }
         BatchRenameNote note;
@@ -1204,6 +1437,7 @@ static size_t SubmitBatchRename(AppState& s, const std::vector<std::wstring>& pa
     if (req.sources.empty()) return 0;
     if (select_in) {
         select_in->pending_selected_names = req.new_names;
+        select_in->pending_ensure_selection_visible = true;
         select_in->pending_selected_name = req.new_names.front();
     }
     renamed = req.sources.size();
@@ -1235,10 +1469,33 @@ void UpdateOperationWindow(AppState& s, bool allow_conflict_dialog) {
         UpdateOperationWindow(*ui, allow_conflict_dialog);
         return;
     }
+
+    const auto history = s.ops.UndoHistory();
+    if (history.completed_sequence != s.undoHistoryNotified) {
+        s.undoHistoryNotified = history.completed_sequence;
+        if (history.completed_steps > 0 || !history.completed_success) {
+            wchar_t title[128]{};
+            swprintf_s(title, l10n::Get(history.completed_redo ? l10n::StringId::HistoryRedoneSteps :
+                l10n::StringId::HistoryUndoneSteps).c_str(), static_cast<unsigned>(history.completed_steps));
+            std::vector<ui::SnackAction> actions;
+            if (!history.completed_redo && s.ops.CanRedo())
+                actions.push_back({l10n::Get(l10n::StringId::HistoryRedo), WM_HISTORY_REDO});
+            if (history.completed_redo && s.ops.CanUndo())
+                actions.push_back({l10n::Get(l10n::StringId::SnackUndo), WM_UNDO_DELETE});
+            s.notification_toast.ShowSnack(s.hwnd, ui::SnackIcon::Undo, title,
+                history.completed_success ? L"" : l10n::Get(l10n::StringId::HistoryStopped), std::move(actions));
+        }
+    }
     // Built on first show (EnsureOperationWindow): most windows never need one.
     const auto now = std::chrono::steady_clock::now();
     const ops::OpStatus status = s.ops.Status();
+    if (!s.appPrefs.status_hints_learned && (status.task_id != 0 || !history.entries.empty())) {
+        s.appPrefs.status_hints_learned = true;
+        s.appPrefs.Save();
+    }
 
+    if (s.operationHistoryTaskId && !status.active) return;
+    if (status.active) s.operationHistoryTaskId = 0;
     if (status.active && status.task_id != s.operationUiTaskId) {
         s.operationUiTaskId = status.task_id;
         s.operationAutoShown = false;
@@ -1329,9 +1586,7 @@ void UpdateOperationWindow(AppState& s, bool allow_conflict_dialog) {
     if (s.operationPinnedByUser) return;
 
     if (status.phase == ops::OpPhase::Completed) {
-        // The window closes itself 2.5 s after a successful finish (held
-        // while hovered, pulse_ops_dialogs.html §4); only the finish time is
-        // kept here.
+        // The live window closes immediately on success; retain completion time only.
         if (s.operationFinishedAt.time_since_epoch().count() == 0)
             s.operationFinishedAt = now;
     } else if (status.phase == ops::OpPhase::Failed) {

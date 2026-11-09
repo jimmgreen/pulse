@@ -21,7 +21,7 @@
 
 namespace pulse::ui {
 // Archive: `text` carries the archive tree payload for ArchivePreview.
-enum class PreviewDrawResult { Pending, Bitmap, Text, Hex, Failed, Archive, Markdown, Table, Tree };
+enum class PreviewDrawResult { Pending, Bitmap, Text, Hex, Failed, Archive, Markdown, Table, Tree, Custom };
 
 struct PreviewProperty {
     std::wstring label;
@@ -40,7 +40,7 @@ struct ThumbnailStoreKey {
     DWORD attrs;
     uint32_t pixels;
     uint64_t modified, size;
-    bool keep_always = false;  // folder composites: kept however quick
+    bool keep_always = false;  // folder composites and refined PSDs: kept however quick
 };
 // Second level under the in-memory LRU for thumbnails that were expensive to
 // make (thumbnail_disk_cache.h). Called on the grid cache's worker threads.
@@ -111,6 +111,11 @@ public:
     std::shared_future<void> SuspendVolume(const std::wstring& root);
     void ResumeVolume(const std::wstring& root);
     void BeginFrame();
+    // Link only caches drawn in the same UI frame; setup precedes drawing.
+    void ShareUploadBudget(ThumbnailCache& other) {
+        if (!other.shared_upload_budget_) other.shared_upload_budget_ = std::make_shared<UploadBudget>();
+        shared_upload_budget_ = other.shared_upload_budget_;
+    }
     uint64_t NextRetryDeadline();
     uint64_t WindowRetryDeadline(HWND window);
     // Earliest retry encountered by Draw since the previous call. Zero means idle.
@@ -143,6 +148,12 @@ public:
     // shared_text is reset on every call; empty payloads return a null holder.
     // A nonempty holder owns immutable text independently of cache lifetime.
     // media_duration_ms (optional): a video's playing time, 0 when unknown.
+    // Outgoing view animations reuse uploaded artwork without keeping decode
+    // requests alive or uploading results that the target view will not use.
+    PreviewDrawResult DrawCachedGridThumbnail(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
+        const std::wstring& path, DWORD attrs, uint32_t pixel_size,
+        uint64_t modified, uint64_t size, float opacity, bool align_bottom,
+        D2D1_RECT_F* artwork);
     PreviewDrawResult DrawGridThumbnail(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,
         const std::wstring& path, DWORD attrs, uint32_t pixel_size, uint64_t generation,
         uint64_t modified, uint64_t size, float opacity, bool align_bottom,
@@ -168,14 +179,13 @@ public:
     bool Stats(const std::wstring& path, uint32_t pixel_size, uint64_t modified,
                uint64_t size, ImageStats& stats);
 private:
-#ifdef PULSE_WITH_SELFTEST
     friend struct QuickPreviewAuditTest;
-#endif
     friend struct PreviewDeadlineProbe;
     friend struct ThumbnailCacheTestAccess;
     friend class FolderThumbnailCache;
     friend struct FolderThumbnailCacheTestAccess;
     struct Item {
+        bool needs_psd_refine = false;
         uint64_t upload_token = 0;
         bool upload_failed = false;
         ComPtr<ID2D1Bitmap> bitmap;
@@ -211,6 +221,7 @@ private:
         std::list<std::wstring>::iterator lru_position;
     };
     struct Request {
+        uint64_t queued_at = GetTickCount64();
         uint32_t id = 0;
         uint64_t generation = 0;
         uint32_t pixels = 0;
@@ -235,6 +246,8 @@ private:
     void PrepareBitmap(const std::wstring& key, bool budgeted);
     uint64_t upload_sequence_ = 0, device_generation_ = 0, upload_elapsed_us_ = 0;
     size_t upload_bytes_ = 0;
+    struct UploadBudget { std::atomic<uint64_t> elapsed_us{0}; std::atomic<size_t> bytes{0}; };
+    std::shared_ptr<UploadBudget> shared_upload_budget_;
     bool upload_frame_pending_ = false;
     void (*upload_probe_)(ThumbnailCache&) = nullptr;
     Item* StaleBitmap(const std::wstring& identity, const std::wstring& except_key);
@@ -262,6 +275,7 @@ private:
     static bool IsTransientResponse(bool transport_ok, const Request& request, uint32_t status);
     void SelectDetailsLocked(const std::wstring& identity);
     bool StoreResult(const Request& request, Item result);
+    void QueuePsdRefinement(const Request& request);
     void Touch(Item& item);
     bool Connect(uint32_t lane, const Request& request, uint64_t started);
     void LogFailure(uint32_t lane, const Request& request, uint64_t started, uint32_t stage,
@@ -323,6 +337,7 @@ private:
     bool visible_order_ = false;
     bool boost_hosts_ = false;
     uint32_t slow_in_flight_ = 0;
+    uint32_t psd_refinements_in_flight_ = 0;
     bool lane_busy_[kMaxLanes]{};
     std::atomic<bool> warm_{false};
     uint64_t frame_ = 1;

@@ -1,5 +1,6 @@
 #include "../common/windows_compat.h"
 #include "folder_picker_model.h"
+#include "../common/picker_shell_namespace.h"
 
 #include <algorithm>
 #include <cwctype>
@@ -144,6 +145,7 @@ void SortPickerEntries(std::vector<PickerEntry>& entries, const PickerOptions& o
 }
 
 std::wstring PickerParent(std::wstring_view path) {
+    if (picker_shell::IsParsingName(path)) return picker_shell::Parent(path);
     if (path.empty() || IsDriveRoot(path) || IsShareRoot(path)) return L"";
     std::wstring_view trimmed = path;
     while (trimmed.size() > 1 && IsSeparator(trimmed.back())) trimmed.remove_suffix(1);
@@ -165,6 +167,7 @@ std::wstring NormalizePickerInput(std::wstring_view text) {
         value = value.substr(1, value.size() - 2);
         trim();
     }
+    if (picker_shell::IsParsingName(value)) return value;
     // Pulse keeps long-path prefixes internally; the picker shows plain paths.
     if (value.rfind(L"\\\\?\\UNC\\", 0) == 0) value = L"\\\\" + value.substr(8);
     else if (value.rfind(L"\\\\?\\", 0) == 0) value = value.substr(4);
@@ -184,6 +187,27 @@ std::wstring NormalizePickerInput(std::wstring_view text) {
     if (value.size() >= 2 && value[1] == L':') value[0] = static_cast<wchar_t>(std::towupper(value[0]));
     while (value.size() > 3 && value.back() == L'\\') value.pop_back();
     return value;
+}
+
+bool IsPickerFolderName(std::wstring_view name) {
+    if (name.empty() || name == L"." || name == L".." || name.back() == L'.' ||
+        std::iswspace(name.back()) || name.find_first_of(L"\\/:*?\"<>|") != name.npos) return false;
+    for (wchar_t ch : name) if (ch < 32) return false;
+    std::wstring stem(name.substr(0, name.find(L'.')));
+    for (auto& ch : stem) ch = static_cast<wchar_t>(std::towupper(ch));
+    return stem != L"CON" && stem != L"PRN" && stem != L"AUX" && stem != L"NUL" &&
+        !(stem.size() == 4 && (stem.substr(0, 3) == L"COM" || stem.substr(0, 3) == L"LPT") && stem[3] >= L'0' && stem[3] <= L'9');
+}
+
+bool IsPickerDiskPath(std::wstring_view path) {
+    if (path.size() > 32767 || path.find(L'\0') != path.npos || path.find_first_of(L"\r\n") != path.npos) return false;
+    if (path.starts_with(L"\\\\?\\UNC\\")) return IsPickerDiskPath(std::wstring(L"\\\\") + std::wstring(path.substr(8)));
+    if (path.starts_with(L"\\\\?\\")) path.remove_prefix(4);
+    if (path.size() >= 3 && ((path[0] >= L'A' && path[0] <= L'Z') || (path[0] >= L'a' && path[0] <= L'z')) &&
+        path[1] == L':' && IsSeparator(path[2])) return true;
+    if (!path.starts_with(L"\\\\") || path.size() < 5 || path[2] == L'.' || path[2] == L'?') return false;
+    const auto split = path.find(L'\\', 2);
+    return split != path.npos && split > 2 && split + 1 < path.size() && path[split + 1] != L'\\';
 }
 
 bool SamePickerPath(std::wstring_view a, std::wstring_view b) {

@@ -2,7 +2,6 @@
 // Markdown (headings, lists, quotes, inline code, links, rules, code blocks
 // with a copy button, scrolling tables, local path chips), messages, and the
 // selection across them with its mini toolbar; the composer's quote chip.
-// plans/ai/55_AI对话成熟化_效果图.html, scenes 1-2 and 5.
 #include "ai_panel_rich.h"
 
 #include "ai_panel_draw.h"

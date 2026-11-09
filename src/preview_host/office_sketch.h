@@ -36,8 +36,8 @@ bool IsSketchOnlyExtension(std::wstring_view extension);
 //    where the slide places them (layout defaults when it does not), text too
 //    small to read as grey bars, pictures / charts / tables as grey boxes.
 //  - OpenDocument: the embedded thumbnail, scaled.
-// A type badge (Word blue W, Excel green X, PowerPoint orange P) sits
-// bottom-left. For files Windows has no thumbnail for; it is not a real
+// Application badges are drawn separately by the UI, without covering the document.
+// For files Windows has no thumbnail for; it is not a real
 // rendering of the document. False (with *error) for max_edge below
 // kOfficeSketchMinEdge or files that are not readable packages.
 bool RenderOfficeSketch(const std::wstring& path, std::wstring_view extension, UINT max_edge,

@@ -1,0 +1,35 @@
+Diagnostic review: Pulse-diagnostics-20261104-163512-40808-0
+Times below are China Standard Time (UTC+08:00).
+
+Export
+The manifest reports complete=true, 36 files, 905147 bytes. The support
+report records copy_complete=true, flush_completed=true, zero dropped
+events and zero write errors. Pulse-diagnostics.zip is present (927159 bytes);
+all 40 ZIP entries pass a CRC integrity read.
+The exported log snapshot ends during export; absence of export_end inside
+that snapshot is not evidence of an export failure.
+
+Explorer takeover
+app-40808.jsonl records successful hook/configuration at 16:34:48.
+At 16:34:56.110, win_e_chord accepted=1; at 16:34:56.144,
+win_e_delivery state=2 (Dispatched), native_fallback=0, error=0.
+At 16:35:00.055, a supported Explorer candidate begins handoff request 1.
+Close is requested at 00.119; phase 6 (Closed) occurs at 00.301;
+phase 12 (Committed) at 01.048; phase 13 (Presented) at 01.107.
+The Closed phase requires observed disappearance, rather than merely a
+successful Quit call. A baseline Explorer window existed at startup.
+
+Limits
+The Win+E event and later Explorer candidate have no shared correlation ID.
+Their approximately four-second separation does not establish whether they
+belong to the same user action. There is no recorded game/fullscreen state
+for this event. These logs cannot establish that fullscreen double-opening
+has been eliminated. They also contain no new installation publication
+failure evidence. Historical update/preview errors must not be attributed
+to this new session.
+
+Evidence
+User/Runtime/app-40808.jsonl, sequences 21-24, 50-77, 82-84.
+User/support-report.json; User/diagnostics-manifest.json.
+Source mapping: explorer_handoff_diagnostics.h, explorer_handoff.h,
+explorer_window_takeover.cpp, single_instance_coordinator.h.

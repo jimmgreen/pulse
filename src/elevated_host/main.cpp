@@ -65,8 +65,9 @@ int Run(DWORD parent_id, const Nonce& nonce) {
     manager.Start([&] { SetEvent(changed.Get()); });
     std::thread receiver([&] {
         uint64_t last_request = 0;
+        std::vector<unsigned char> payload;
         while (!stopping.load()) {
-            Header header; std::vector<unsigned char> payload;
+            Header header;
             if (!ReadFrame(pipe.Get(), parent.Get(), nonce, header, payload)) break;
             Reader reader{payload};
             if (header.kind == Kind::Shutdown && header.request == 0 && reader.Done()) break;

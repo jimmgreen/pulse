@@ -183,6 +183,7 @@ int wmain(int argc, wchar_t** argv) {
     Check(app::IsHostRoutedMessage(WM_SHELLCTX_ITEMS), "shell context menu rows reach the active window (M4a)");
     Check(app::IsHostRoutedMessage(WM_NETWORK_LIVE_SEARCH),
           "a tab's live network search is routed: the tab may move to another window (M6f)");
+    Check(app::IsHostRoutedMessage(WM_RECYCLE_SEARCH), "recycle search results reach a Pulse window");
     Check(!app::IsHostRoutedMessage(WM_DUP_VOLUMES), "per-dialog results stay on their window");
     bool window_local = true;
     for (UINT m : {WM_FRAME_PUMP, WM_QUICK_PREVIEW_NAVIGATE, WM_QUICK_PREVIEW_OPEN, WM_QUICK_PREVIEW_COMMAND,
@@ -207,6 +208,10 @@ int wmain(int argc, wchar_t** argv) {
     Check(settings(nullptr) == SystemBroadcast::Theme && settings(L"ImmersiveColorSet") == SystemBroadcast::Theme &&
               settings(L"HighContrast") == SystemBroadcast::Theme,
           "theme setting changes are host broadcasts");
+    Check(ClassifySystemBroadcast(WM_THEMECHANGED, 0, 0) == SystemBroadcast::Theme &&
+              ClassifySystemBroadcast(WM_SETTINGCHANGE, SPI_SETHIGHCONTRAST,
+                  reinterpret_cast<LPARAM>(L"Accessibility")) == SystemBroadcast::Theme,
+          "theme and explicit high contrast broadcasts refresh the snapshot");
     Check(settings(L"Environment") == SystemBroadcast::None && settings(L"intl") == SystemBroadcast::None,
           "other setting changes are ignored");
     DEV_BROADCAST_HDR volume{};
@@ -267,6 +272,7 @@ int wmain(int argc, wchar_t** argv) {
     const HWND router_hwnd = router.Hwnd();
     std::thread([router_hwnd, window] {
         PostMessageW(router_hwnd, WM_INDEX_NOTIFY, 0, 0);
+        PostMessageW(router_hwnd, WM_RECYCLE_SEARCH, 0, 0);
         PostMessageW(window, WM_FRAME_PUMP, 0, 0);
         PostMessageW(router_hwnd, WM_WORKER_RESULT, 0, 0);
         PostMessageW(window, WM_DETAILS_META, 0, 0);
@@ -274,7 +280,7 @@ int wmain(int argc, wchar_t** argv) {
         PostMessageW(router_hwnd, WM_FRAME_PUMP, 0, 0);  // not routed: never reaches the window
     }).join();
     Pump(100);
-    const std::vector<UINT> expected_order{WM_INDEX_NOTIFY, WM_FRAME_PUMP, WM_WORKER_RESULT, WM_DETAILS_META,
+    const std::vector<UINT> expected_order{WM_INDEX_NOTIFY, WM_RECYCLE_SEARCH, WM_FRAME_PUMP, WM_WORKER_RESULT, WM_DETAILS_META,
                                            WM_OPS_NOTIFY};
     Check(window && router_hwnd && g_window_order == expected_order,
           "routed and direct posts arrive in posting order; unrouted ids stay on the host");

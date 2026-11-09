@@ -428,6 +428,7 @@ void ClientCase(const std::wstring& executable, const Desktop& desktop,
         ULONGLONG readiness_ms = 0, filename_read_ms = 0;
         std::wstring initial_filename;
         bool owner_disabled = false, action_posted = false, owner_restored = false, timed_out = false;
+        bool picker_owned = false, picker_over_owner_monitor = false;
         bool wrapper_configured = false, no_cancel_result = false;
         int verified_requests = 0, native_shows = 0;
         HRESULT wrapper_result = E_UNEXPECTED, shell_result = E_UNEXPECTED;
@@ -495,6 +496,11 @@ void ClientCase(const std::wstring& executable, const Desktop& desktop,
             if (edit) GetWindowThreadProcessId(edit, &result.edit_pid);
             result.edit_visible = edit && IsWindowVisible(edit);
             result.owner_disabled = !IsWindowEnabled(owner);
+            // The host owns its dialog by the caller's window (z-order, no own
+            // taskbar button) and opens it on the owner's monitor.
+            result.picker_owned = picker && GetWindow(picker, GW_OWNER) == owner;
+            result.picker_over_owner_monitor = picker &&
+                MonitorFromWindow(picker, MONITOR_DEFAULTTONULL) == MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST);
             if (result.input_ready) {
                 wchar_t text[512]{};
                 DWORD_PTR length = 0;
@@ -832,9 +838,14 @@ void ClientCase(const std::wstring& executable, const Desktop& desktop,
                << L" read_error=" << result.filename_read_error << L" read_ms=" << result.filename_read_ms
                << L" read_length=" << result.filename_read_length << L" expected=[" << filename
                << L"] initial_actual=[" << result.initial_filename << L"] final_match=" << result.filename_matches << std::endl;
+    if (const auto* reply = std::get_if<Response>(&result.response.body))
+        std::wcout << L"[DIAG] client response status=" << static_cast<int>(reply->status) << L" source=" << static_cast<int>(reply->error_source)
+                   << L" error=" << reply->error_code << std::endl;
     Check(result.picker_found && result.input_ready && result.filename_matches,
           "RunPickerClient launches real Pulse UI with ready requested filename", result.filename_read_error);
     Check(result.owner_disabled, "real client owner is modal while host UI is open");
+    Check(result.picker_owned, "host dialog is owned by the caller window");
+    Check(result.picker_over_owner_monitor, "host dialog opens on the caller window's monitor");
     Check(result.action_posted && !result.timed_out, "real UI action returns through client without watchdog cancellation");
     const auto* response = std::get_if<Response>(&result.response.body);
     const std::wstring expected_path = expected.wstring();
@@ -1065,12 +1076,15 @@ int wmain(int argc, wchar_t** argv) {
     const bool iat_only = argc == 3 && std::wstring(argv[2]) == L"--iat";
     const bool ex_only = argc == 3 && std::wstring(argv[2]) == L"--ex";
     const bool factory_only = argc == 3 && std::wstring(argv[2]) == L"--factory";
+    const bool session_cold = argc == 3 && std::wstring(argv[2]) == L"--session-cold";
+    const bool session_standby = argc == 3 && std::wstring(argv[2]) == L"--session-standby";
+    const bool standby_only = session_standby || (argc == 3 && std::wstring(argv[2]) == L"--standby");
     const bool dll_only = argc == 4 && std::wstring(argv[2]) == L"--dll" && std::filesystem::path(argv[3]).is_absolute();
     const bool dll_filters_only = argc == 4 && std::wstring(argv[2]) == L"--dll-filters" && std::filesystem::path(argv[3]).is_absolute();
     const bool dll_novalidate = argc == 4 && std::wstring(argv[2]) == L"--dll-novalidate" && std::filesystem::path(argv[3]).is_absolute();
     const bool novalidate_only = wrapper_novalidate || dll_novalidate;
     const std::wstring probe_path = dll_only || dll_filters_only || dll_novalidate ? argv[3] : L"";
-    if (argc != 2 && !wrapper_only && !wrapper_cancel_only && !wrapper_links_only && !wrapper_filters_only && !legacy_only && !iat_only && !legacy_ansi_only && !ex_only && !factory_only && !dll_only && !dll_filters_only && !wrapper_novalidate && !dll_novalidate) { std::cerr << "Usage: pulse_picker_host_test <pulse.exe> [--wrapper|--wrapper-cancel|--wrapper-links|--wrapper-filters|--wrapper-novalidate|--legacy|--legacy-ansi|--iat|--ex|--factory|--dll <absolute same-bitness DLL>|--dll-filters <absolute same-bitness DLL>|--dll-novalidate <absolute same-bitness DLL>]\n"; return 2; }
+    if (argc != 2 && !session_cold && !wrapper_only && !wrapper_cancel_only && !wrapper_links_only && !wrapper_filters_only && !legacy_only && !iat_only && !legacy_ansi_only && !ex_only && !factory_only && !standby_only && !dll_only && !dll_filters_only && !wrapper_novalidate && !dll_novalidate) { std::cerr << "Usage: pulse_picker_host_test <pulse.exe> [--session-cold|--session-standby|--standby|--wrapper|--wrapper-cancel|--wrapper-links|--wrapper-filters|--wrapper-novalidate|--legacy|--legacy-ansi|--iat|--ex|--factory|--dll <absolute same-bitness DLL>|--dll-filters <absolute same-bitness DLL>|--dll-novalidate <absolute same-bitness DLL>]\n"; return 2; }
     Desktop desktop;
     Check(desktop.handle != nullptr, "isolated non-active desktop created", GetLastError());
     if (!desktop.handle) return 1;
@@ -1157,6 +1171,54 @@ int wmain(int argc, wchar_t** argv) {
         ClientCase(executable, desktop, fixture, false, false);
         ClientCase(executable, desktop, fixture, true, false);
         ClientCase(executable, desktop, fixture, false, true);
+    }
+    if (session_cold) {
+        // A direct v1 request still reaches the same host before negotiated calls.
+        Case(executable, desktop, fixture, "cancel");
+        ClientCase(executable, desktop, fixture, false, false);
+        ClientCase(executable, desktop, fixture, true, false);
+        ClientCase(executable, desktop, fixture, false, true);
+    }
+    if (standby_only) {
+        // Warm standby on this isolated desktop (a test-hook build honours
+        // PULSE_PICKER_STANDBY_TEST instead of the user's interception
+        // registration). A kill-on-close job ends it and every successor.
+        PipeHandle job(CreateJobObjectW(nullptr, nullptr));
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        const bool job_ready = job && SetInformationJobObject(job.Get(), JobObjectExtendedLimitInformation, &limits, sizeof(limits));
+        SetEnvironmentVariableW(L"PULSE_PICKER_STANDBY_TEST", L"1");
+        std::wstring command = L"\"" + executable + L"\" --picker-standby";
+        std::wstring desktop_name = desktop.name;
+        STARTUPINFOW startup{}; startup.cb = sizeof(startup); startup.lpDesktop = desktop_name.data();
+        PROCESS_INFORMATION info{};
+        bool started = job_ready && CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED,
+            nullptr, nullptr, &startup, &info);
+        if (started) started = AssignProcessToJobObject(job.Get(), info.hProcess) && ResumeThread(info.hThread) != static_cast<DWORD>(-1);
+        if (info.hThread) CloseHandle(info.hThread);
+        if (info.hProcess) CloseHandle(info.hProcess);
+        Check(started, "standby started on the isolated desktop", GetLastError());
+        const auto listening = [&](DWORD ms) {
+            const auto name = StandbyPipeName(desktop.name);
+            const auto start = GetTickCount64();
+            while (GetTickCount64() - start < ms) {
+                if (WaitNamedPipeW(name.c_str(), 50)) return true;
+                Sleep(20);
+            }
+            return false;
+        };
+        Check(started && listening(10000), "standby listens before the first request");
+        std::cout << "[CASE] standby warm open" << std::endl;
+        ClientCase(executable, desktop, fixture, false, false);
+        Check(listening(10000), "a successor standby listens after the first request");
+        std::cout << "[CASE] standby warm save" << std::endl;
+        ClientCase(executable, desktop, fixture, true, false);
+        SetEnvironmentVariableW(L"PULSE_PICKER_STANDBY_TEST", nullptr);
+    }
+    if (session_cold || session_standby) {
+        Check(DeleteFileW(fixture.c_str()) != FALSE && RemoveDirectoryW(directory.c_str()) != FALSE, "session fixture cleaned up");
+        std::cout << "Checks: " << checks << ", failures: " << failures << std::endl;
+        return failures ? 1 : 0;
     }
     if (legacy_only || legacy_ansi_only) {
         ClientCase(executable, desktop, fixture, false, false, false, false, true, false, legacy_ansi_only);

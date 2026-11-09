@@ -102,6 +102,38 @@ struct FolderThumbnailCacheTestAccess {
         cache.queue_.clear(); cache.StoreResult(current, bitmap());
         check(draw(L"B", 2) == PreviewDrawResult::Bitmap && !folders.Tick(GetTickCount64()),
             "completed bitmap is retained until TTL");
+        ThumbnailCache ordinary;
+        folders.ShareUploadBudget(ordinary);
+        folders.BeginFrame();
+        ordinary.shared_upload_budget_->bytes = 4194304;
+        cache.items_.at(current.key).bitmap.reset();
+        check(draw(L"B", 2) == PreviewDrawResult::Pending && folders.TakeUploadFrameRequest(),
+            "ordinary uploads exhaust shared folder frame budget and request retry");
+        folders.BeginFrame();
+        check(draw(L"B", 2) == PreviewDrawResult::Bitmap &&
+            !cache.items_.at(current.key).pixels.empty() && ordinary.shared_upload_budget_->bytes == 16,
+            "next frame uploads folder once and retains CPU recovery pixels");
+        const auto uploaded_bytes = ordinary.shared_upload_budget_->bytes.load();
+        draw(L"B", 2);
+        check(ordinary.shared_upload_budget_->bytes == uploaded_bytes,
+            "warm folder draw performs no upload");
+        static bool upload_was_unlocked = false;
+        const auto original_epoch = cache.epoch_.load(std::memory_order_relaxed);
+        cache.items_.at(current.key).bitmap.reset();
+        cache.upload_probe_ = [](ThumbnailCache& target) {
+            upload_was_unlocked = target.mutex_.try_lock();
+            if (upload_was_unlocked) target.mutex_.unlock();
+            target.epoch_.fetch_add(1, std::memory_order_relaxed);
+        };
+        folders.BeginFrame();
+        draw(L"B", 2);
+        check(upload_was_unlocked && !cache.items_.at(current.key).bitmap.get() &&
+            !cache.items_.at(current.key).pixels.empty(),
+            "folder uploads outside mutex and rejects changed epoch without losing recovery pixels");
+        cache.upload_probe_ = nullptr;
+        cache.epoch_.store(original_epoch, std::memory_order_relaxed);
+        folders.BeginFrame();
+        draw(L"B", 2);
         cache.items_.at(current.key).retry_at = GetTickCount64();
         check(folders.Tick(GetTickCount64()), "expired artwork schedules child-mtime validation");
         folders.Refresh();

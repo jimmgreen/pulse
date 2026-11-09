@@ -1,0 +1,2798 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "root"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "state": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "key",
+          "value"
+        ],
+        "properties": {
+          "key": {
+            "$ref": "#/$defs/identifier"
+          },
+          "value": {
+            "type": "string",
+            "maxLength": 1024
+          }
+        }
+      }
+    },
+    "root": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/uiNode"
+        },
+        {
+          "not": {
+            "required": [
+              "flex"
+            ]
+          }
+        }
+      ]
+    },
+    "actions": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/identifier"
+          },
+          "updates": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "key",
+                "value"
+              ],
+              "properties": {
+                "key": {
+                  "$ref": "#/$defs/identifier"
+                },
+                "value": {
+                  "type": "string",
+                  "maxLength": 1024
+                }
+              }
+            }
+          },
+          "dataOperation": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "target",
+              "operation"
+            ],
+            "properties": {
+              "target": {
+                "$ref": "#/$defs/identifier"
+              },
+              "operation": {
+                "enum": [
+                  "refresh",
+                  "nextPage",
+                  "cancel",
+                  "retry"
+                ]
+              }
+            }
+          },
+          "validate": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/$defs/identifier"
+            }
+          }
+        },
+        "anyOf": [
+          {
+            "required": [
+              "updates"
+            ]
+          },
+          {
+            "required": [
+              "dataOperation"
+            ]
+          }
+        ]
+      },
+      "description": "Local updates and optional owned data-source operation; at least one required. validate references input IDs with validation; failure blocks the entire action. Host additionally checks references, state types, disjoint IDs and budgets. No scripts or arbitrary paths."
+    }
+  },
+  "x-maxNodes": 128,
+  "x-maxDepth": 8,
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "uiNode": {
+      "description": "General-purpose Pulse controls. Host additionally validates UTF-8 budgets, IDs, state/command references and layout bounds. Shell controls remain internal.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "stack"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "children": {
+              "type": "array",
+              "maxItems": 128,
+              "items": {
+                "$ref": "#/$defs/uiNode"
+              }
+            },
+            "gap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 32
+            },
+            "orientation": {
+              "enum": [
+                "vertical",
+                "horizontal"
+              ]
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "const": 0,
+              "default": 0,
+              "description": "Wrap constrained container content in scrollView."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "grid"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "children": {
+              "type": "array",
+              "maxItems": 128,
+              "items": {
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/uiNode"
+                  },
+                  {
+                    "not": {
+                      "required": [
+                        "flex"
+                      ]
+                    }
+                  }
+                ]
+              }
+            },
+            "gap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 32
+            },
+            "columns": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "const": 0,
+              "default": 0,
+              "description": "Wrap constrained container content in scrollView."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "group"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "children": {
+              "type": "array",
+              "maxItems": 128,
+              "items": {
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/uiNode"
+                  },
+                  {
+                    "not": {
+                      "required": [
+                        "flex"
+                      ]
+                    }
+                  }
+                ]
+              }
+            },
+            "gap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 32
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "const": 0,
+              "default": 0,
+              "description": "Wrap constrained container content in scrollView."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "scrollView"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "children": {
+              "type": "array",
+              "maxItems": 128,
+              "items": {
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/uiNode"
+                  },
+                  {
+                    "not": {
+                      "required": [
+                        "flex"
+                      ]
+                    }
+                  }
+                ]
+              }
+            },
+            "gap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 32
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded. A positive maximum must not be below minHeight."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "text"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "binding": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "role": {
+              "enum": [
+                "body",
+                "caption",
+                "section"
+              ]
+            },
+            "alignment": {
+              "enum": [
+                "left",
+                "center",
+                "right"
+              ]
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded. A positive maximum must not be below minHeight."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "button"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "command": {
+              "$ref": "#/$defs/identifier"
+            },
+            "kind": {
+              "enum": [
+                "standard",
+                "primary",
+                "danger",
+                "transparent",
+                "toggle",
+                "transparentToggle"
+              ]
+            },
+            "state": {
+              "$ref": "#/$defs/identifier"
+            },
+            "glyph": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "keycap": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "iconOnly": {
+              "type": "boolean"
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded. A positive maximum must not be below minHeight."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "toggle",
+                      "transparentToggle"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              "then": {
+                "required": [
+                  "state"
+                ]
+              },
+              "else": {
+                "required": [
+                  "command"
+                ],
+                "not": {
+                  "required": [
+                    "state"
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id",
+            "text"
+          ],
+          "properties": {
+            "type": {
+              "const": "textInput"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 1024,
+              "minLength": 1
+            },
+            "state": {
+              "$ref": "#/$defs/identifier"
+            },
+            "placeholder": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "glyph": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "trailingGlyph": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "keycap": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "badgeText": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "validation": {
+              "$ref": "#/$defs/uiValidation"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded. A positive maximum must not be below minHeight."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "required": [
+                  "validation"
+                ]
+              },
+              "then": {
+                "required": [
+                  "state"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "checkbox"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "state": {
+              "$ref": "#/$defs/identifier"
+            },
+            "checked": {
+              "type": "boolean"
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded. A positive maximum must not be below minHeight."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id",
+            "options"
+          ],
+          "properties": {
+            "type": {
+              "const": "select"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "state": {
+              "$ref": "#/$defs/identifier"
+            },
+            "options": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "minItems": 1
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded. A positive maximum must not be below minHeight."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "progress"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "binding": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "value": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100
+            },
+            "kind": {
+              "enum": [
+                "bar",
+                "ring"
+              ],
+              "default": "bar"
+            },
+            "status": {
+              "enum": [
+                "normal",
+                "paused",
+                "error",
+                "indeterminate"
+              ],
+              "default": "normal"
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded. A positive maximum must not be below minHeight."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "divider"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded. A positive maximum must not be below minHeight."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id",
+            "children"
+          ],
+          "properties": {
+            "type": {
+              "const": "tabs"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "children": {
+              "type": "array",
+              "maxItems": 128,
+              "items": {
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/uiNode"
+                  },
+                  {
+                    "not": {
+                      "required": [
+                        "flex"
+                      ]
+                    }
+                  }
+                ]
+              },
+              "minItems": 1
+            },
+            "gap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 32
+            },
+            "state": {
+              "$ref": "#/$defs/identifier"
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "const": 0,
+              "default": 0,
+              "description": "Wrap constrained container content in scrollView."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "tab"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "children": {
+              "type": "array",
+              "maxItems": 128,
+              "items": {
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/uiNode"
+                  },
+                  {
+                    "not": {
+                      "required": [
+                        "flex"
+                      ]
+                    }
+                  }
+                ]
+              }
+            },
+            "gap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 32
+            },
+            "glyph": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "closeCommand": {
+              "$ref": "#/$defs/identifier"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "const": 0,
+              "default": 0,
+              "description": "Wrap constrained container content in scrollView."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "switch"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "state": {
+              "$ref": "#/$defs/identifier"
+            },
+            "checked": {
+              "type": "boolean"
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded. A positive maximum must not be below minHeight."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "radio"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "state": {
+              "$ref": "#/$defs/identifier"
+            },
+            "checked": {
+              "type": "boolean"
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded. A positive maximum must not be below minHeight."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "slider"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "state": {
+              "$ref": "#/$defs/identifier"
+            },
+            "stops": {
+              "type": "integer",
+              "minimum": 2,
+              "maximum": 64
+            },
+            "value": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 63
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded. A positive maximum must not be below minHeight."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id",
+            "options"
+          ],
+          "properties": {
+            "type": {
+              "const": "segmented"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "state": {
+              "$ref": "#/$defs/identifier"
+            },
+            "options": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "minItems": 1
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded. A positive maximum must not be below minHeight."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "badge"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "kind": {
+              "enum": [
+                "neutral",
+                "accent",
+                "success",
+                "warning",
+                "danger",
+                "keycap"
+              ]
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "dot": {
+              "type": "boolean"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded. A positive maximum must not be below minHeight."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "tag"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "color": {
+              "type": "string",
+              "pattern": "^(#[0-9a-fA-F]{6})?$"
+            },
+            "bordered": {
+              "type": "boolean"
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded. A positive maximum must not be below minHeight."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "infoBar"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "kind": {
+              "enum": [
+                "informational",
+                "success",
+                "warning",
+                "error",
+                "neutral"
+              ]
+            },
+            "message": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "glyph": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "closeCommand": {
+              "$ref": "#/$defs/identifier"
+            },
+            "actions": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 2,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "text",
+                  "command"
+                ],
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/identifier"
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "command": {
+                    "$ref": "#/$defs/identifier"
+                  },
+                  "enabled": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded. A positive maximum must not be below minHeight."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id",
+            "command",
+            "menu"
+          ],
+          "properties": {
+            "type": {
+              "const": "splitButton"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "command": {
+              "$ref": "#/$defs/identifier"
+            },
+            "glyph": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "menu": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 64,
+              "items": {
+                "$ref": "#/$defs/uiMenuItem"
+              }
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded. A positive maximum must not be below minHeight."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id",
+            "menu"
+          ],
+          "properties": {
+            "type": {
+              "const": "menuButton"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "glyph": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "menu": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 64,
+              "items": {
+                "$ref": "#/$defs/uiMenuItem"
+              }
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded. A positive maximum must not be below minHeight."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "emptyState"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "glyph": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "message": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded. A positive maximum must not be below minHeight."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "virtualList"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 240
+            },
+            "state": {
+              "$ref": "#/$defs/identifier"
+            },
+            "rows": {
+              "type": "array",
+              "maxItems": 4096,
+              "items": {
+                "$ref": "#/$defs/uiListRow"
+              }
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "dataSource": {
+              "$ref": "#/$defs/uiDataSource"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded. A positive maximum must not be below minHeight."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          },
+          "oneOf": [
+            {
+              "required": [
+                "rows"
+              ],
+              "not": {
+                "required": [
+                  "dataSource"
+                ]
+              }
+            },
+            {
+              "required": [
+                "dataSource"
+              ],
+              "not": {
+                "required": [
+                  "rows"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id"
+          ],
+          "properties": {
+            "type": {
+              "const": "tree"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 240
+            },
+            "state": {
+              "$ref": "#/$defs/identifier"
+            },
+            "rows": {
+              "type": "array",
+              "maxItems": 4096,
+              "items": {
+                "$ref": "#/$defs/uiTreeRow"
+              }
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "dataSource": {
+              "$ref": "#/$defs/uiDataSource"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded. A positive maximum must not be below minHeight."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          },
+          "oneOf": [
+            {
+              "required": [
+                "rows"
+              ],
+              "not": {
+                "required": [
+                  "dataSource"
+                ]
+              }
+            },
+            {
+              "required": [
+                "dataSource"
+              ],
+              "not": {
+                "required": [
+                  "rows"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id",
+            "columns"
+          ],
+          "properties": {
+            "type": {
+              "const": "dataTable"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "text": {
+              "type": "string",
+              "maxLength": 1024
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 240
+            },
+            "state": {
+              "$ref": "#/$defs/identifier"
+            },
+            "rows": {
+              "type": "array",
+              "maxItems": 4096,
+              "items": {
+                "$ref": "#/$defs/uiTableRow"
+              }
+            },
+            "columns": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 16,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id",
+                  "text"
+                ],
+                "properties": {
+                  "id": {
+                    "$ref": "#/$defs/identifier"
+                  },
+                  "text": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "width": {
+                    "type": "integer",
+                    "minimum": 48,
+                    "maximum": 800,
+                    "default": 160
+                  }
+                }
+              }
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "dataSource": {
+              "$ref": "#/$defs/uiDataSource"
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded. A positive maximum must not be below minHeight."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          },
+          "oneOf": [
+            {
+              "required": [
+                "rows"
+              ],
+              "not": {
+                "required": [
+                  "dataSource"
+                ]
+              }
+            },
+            {
+              "required": [
+                "dataSource"
+              ],
+              "not": {
+                "required": [
+                  "rows"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "id",
+            "children"
+          ],
+          "properties": {
+            "type": {
+              "const": "splitPane"
+            },
+            "id": {
+              "$ref": "#/$defs/identifier"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "visible": {
+              "type": "boolean"
+            },
+            "minHeight": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096
+            },
+            "enabledBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "visibleBinding": {
+              "type": "string",
+              "pattern": "^state\\.[A-Za-z0-9._-]+$"
+            },
+            "children": {
+              "type": "array",
+              "maxItems": 2,
+              "items": {
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/uiNode"
+                  },
+                  {
+                    "not": {
+                      "required": [
+                        "flex"
+                      ]
+                    }
+                  }
+                ]
+              },
+              "minItems": 2
+            },
+            "gap": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 32
+            },
+            "orientation": {
+              "enum": [
+                "vertical",
+                "horizontal"
+              ]
+            },
+            "state": {
+              "$ref": "#/$defs/identifier"
+            },
+            "value": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 100,
+              "default": 50
+            },
+            "minWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0
+            },
+            "maxWidth": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4096,
+              "default": 0,
+              "description": "Zero means unbounded; minimum must not exceed a nonzero maximum. Narrow viewport takes precedence."
+            },
+            "maxHeight": {
+              "const": 0,
+              "default": 0,
+              "description": "Wrap constrained container content in scrollView."
+            },
+            "flex": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 16,
+              "default": 0,
+              "description": "Only valid on a direct child of stack; host rejects other contexts, including explicit zero."
+            }
+          }
+        }
+      ]
+    },
+    "uiValidation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "message"
+      ],
+      "properties": {
+        "required": {
+          "type": "boolean"
+        },
+        "minLength": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "maxLength": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      },
+      "description": "Lengths count Unicode code points; minLength<=maxLength; required cannot have maxLength0. Incomplete initial/editing values allowed; actions with validate are blocked atomically if a field fails."
+    },
+    "uiMenuItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "text"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "command": {
+          "$ref": "#/$defs/identifier"
+        },
+        "glyph": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "shortcut": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "checked": {
+          "type": "boolean"
+        },
+        "separator": {
+          "type": "boolean"
+        },
+        "children": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/uiMenuItem"
+          }
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "command"
+          ],
+          "not": {
+            "required": [
+              "children"
+            ]
+          }
+        },
+        {
+          "required": [
+            "children"
+          ],
+          "not": {
+            "required": [
+              "command"
+            ]
+          }
+        }
+      ],
+      "description": "Host enforces globally unique menu IDs, 128 menu/action items total and depth 4."
+    },
+    "uiListRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "glyph": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "command": {
+          "$ref": "#/$defs/identifier"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      }
+    },
+    "uiDataSource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source"
+      ],
+      "properties": {
+        "source": {
+          "enum": [
+            "context.directoryEntries",
+            "context.transferTask",
+            "context.workflow"
+          ]
+        },
+        "pageSize": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256
+        },
+        "filterState": {
+          "$ref": "#/$defs/identifier"
+        },
+        "sortState": {
+          "$ref": "#/$defs/identifier"
+        },
+        "statusState": {
+          "$ref": "#/$defs/identifier"
+        },
+        "errorState": {
+          "$ref": "#/$defs/identifier"
+        },
+        "progressState": {
+          "$ref": "#/$defs/identifier"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "source": {
+                "enum": [
+                  "context.transferTask",
+                  "context.workflow"
+                ]
+              }
+            },
+            "required": [
+              "source"
+            ]
+          },
+          "then": {
+            "properties": {
+              "pageSize": {
+                "const": 1
+              }
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "filterState"
+                  ]
+                },
+                {
+                  "required": [
+                    "sortState"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      ],
+      "description": "Directory source reads current pane memory snapshot only, default pageSize64. transferTask reads the extension-owned latest controlled transfer, default/pageSize1, no filter/sort. State keys must be declared; output keys distinct from each other and input/selection keys."
+    },
+    "uiTreeRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "glyph": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "command": {
+          "$ref": "#/$defs/identifier"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "expanded": {
+          "type": "boolean"
+        },
+        "children": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "$ref": "#/$defs/uiTreeRow"
+          }
+        }
+      }
+    },
+    "uiTableRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "cells"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "glyph": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "command": {
+          "$ref": "#/$defs/identifier"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "cells": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "string",
+            "maxLength": 1024
+          }
+        }
+      }
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Shared UiTree semantic constraints, not a JSON/native execution transport. Native model data_source/context bindings/data operations remain UNAVAILABLE. pulse.ui.data separately binds providers to existing empty model data nodes; see api-catalog."
+}

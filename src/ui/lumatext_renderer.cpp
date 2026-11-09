@@ -82,6 +82,7 @@ bool Contains(const std::wstring& value, const wchar_t* fragment) {
 
 struct LumaTextRenderer::Impl {
     LumaTextStats stats;
+    bool Fail(std::uint64_t& counter) noexcept { ++counter; return false; }
     bool trace_timings = false;
     std::uint64_t TraceClock() const noexcept {
         if (!trace_timings) return 0;
@@ -516,6 +517,10 @@ struct LumaTextRenderer::Impl {
         wchar_t trace[16]{};
         const DWORD trace_length = GetEnvironmentVariableW(L"PULSE_STARTUP_TRACE", trace, ARRAYSIZE(trace));
         trace_timings = trace_length > 0 && trace_length < ARRAYSIZE(trace) && trace[0] != L'0';
+#if defined(PULSE_STARTUP_TRACE_DIAGNOSTICS)
+        // Runtime slow-frame reports need timings even without a startup trace file.
+        trace_timings = true;
+#endif
         auto context_desc = LumaText::Descriptor<lt_context_desc>();
         context_desc.dwrite_factory = dwrite;
         context_desc.cpu_cache_limit_bytes = kGlyphCacheLimit;
@@ -759,7 +764,7 @@ struct LumaTextRenderer::Impl {
             format->GetFontStyle() != DWRITE_FONT_STYLE_NORMAL ||
             format->GetFontStretch() != DWRITE_FONT_STRETCH_NORMAL ||
             text.size() > UINT32_MAX) {
-            return false;
+            return Fail(stats.fail_input);
         }
         struct BusyGuard {
             bool& flag;
@@ -769,11 +774,11 @@ struct LumaTextRenderer::Impl {
         const float width = bounds.right - bounds.left;
         const float height = bounds.bottom - bounds.top;
         const float font_size = format->GetFontSize();
-        if (!(width > 0.0f) || !(height > 0.0f) || !(font_size > 0.0f)) return false;
+        if (!(width > 0.0f) || !(height > 0.0f) || !(font_size > 0.0f)) return Fail(stats.fail_input);
 
         std::uint32_t family = 0;
         LumaText::FontCascade* cascade = nullptr;
-        if (!ResolveCascade(format, text, family, cascade) || !cascade) return false;
+        if (!ResolveCascade(format, text, family, cascade) || !cascade) return Fail(stats.fail_font);
 
         LayoutKey key;
         key.text.assign(text);
@@ -784,10 +789,10 @@ struct LumaTextRenderer::Impl {
         key.width_64 = kUnboundedWidth64;
         key.alignment = DWRITE_TEXT_ALIGNMENT_LEADING;
         LumaText::TextLayout* layout = GetLayout(key, font_size, *cascade);
-        if (!layout || !*layout) return false;
+        if (!layout || !*layout) return Fail(stats.fail_layout);
 
         auto metrics = LumaText::Descriptor<lt_text_metrics>();
-        if (lt_text_layout_get_metrics(layout->get(), &metrics) != LT_OK) return false;
+        if (lt_text_layout_get_metrics(layout->get(), &metrics) != LT_OK) return Fail(stats.fail_backend);
         // Dest is an ink clip. Advance-only overflow left the last glyph's
         // optical weight / Mitchell lobe shaved off ("File" → "Fil").
         const float ink = pulse::ui::typography::InkPad(format);
@@ -796,12 +801,12 @@ struct LumaTextRenderer::Impl {
                 std::lround(std::max(1.0f, width - ink) * 64.0f));
             key.ellipsis = LT_TEXT_ELLIPSIS_END;
             layout = GetLayout(key, font_size, *cascade);
-            if (!layout || !*layout) return false;
-            if (lt_text_layout_get_metrics(layout->get(), &metrics) != LT_OK) return false;
+            if (!layout || !*layout) return Fail(stats.fail_layout);
+            if (lt_text_layout_get_metrics(layout->get(), &metrics) != LT_OK) return Fail(stats.fail_backend);
             // An ellipsized layout that still overflows would be clipped
             // mid-glyph with no "..." (long Explorer verbs in the fixed-width
             // context menu). DirectWrite trims correctly; let it draw.
-            if (metrics.line_count > 1 || metrics.width + ink > width + 0.5f) return false;
+            if (metrics.line_count > 1 || metrics.width + ink > width + 0.5f) return Fail(stats.fail_bounds);
         }
         const float floor_x = std::floor(bounds.left);
         const float phase_x = bounds.left - floor_x;
@@ -860,7 +865,7 @@ struct LumaTextRenderer::Impl {
         stats.surface_cache_misses++;
 
         Microsoft::WRL::ComPtr<ID2D1CommandList> commands;
-        if (FAILED(recording_dc->CreateCommandList(&commands)) || !commands) return false;
+        if (FAILED(recording_dc->CreateCommandList(&commands)) || !commands) return Fail(stats.fail_backend);
         recording_dc->SetTarget(commands.Get());
         recording_dc->BeginDraw();
         auto frame_desc = LumaText::Descriptor<lt_frame_desc>();
@@ -870,7 +875,7 @@ struct LumaTextRenderer::Impl {
         if (lt_frame_begin(renderer.get(), &frame_desc, frame.put()) != LT_OK) {
             recording_dc->EndDraw();
             recording_dc->SetTarget(nullptr);
-            return false;
+            return Fail(stats.fail_backend);
         }
 
         auto draw = LumaText::Descriptor<lt_draw_text_desc>();
@@ -915,7 +920,7 @@ struct LumaTextRenderer::Impl {
         recording_dc->SetTarget(nullptr);
         if (result != LT_OK || end_result != LT_OK || FAILED(recording_result) ||
             FAILED(commands->Close())) {
-            return false;
+            return Fail(stats.fail_backend);
         }
 
         const float ink_width = std::min(width, std::max(1.0f, metrics.width + 2.0f));
@@ -944,14 +949,14 @@ struct LumaTextRenderer::Impl {
     // SetDrawingEffect(ID2D1SolidColorBrush) keep their colour.
     bool DrawLayout(D2D1_POINT_2F origin, IDWriteTextLayout* layout,
                     const D2D1_COLOR_F& foreground, bool clip) {
-        if (!layout_renderer || !target_dc || !layout) return false;
+        if (!layout_renderer || !target_dc || !layout) return Fail(stats.fail_input);
         float dpi_x = 96.0f, dpi_y = 96.0f;
         target_dc->GetDpi(&dpi_x, &dpi_y);
         auto frame_desc = LumaText::Descriptor<lt_frame_desc>();
         frame_desc.dpi_x = dpi_x;
         frame_desc.dpi_y = dpi_y;
         LumaText::Frame frame;
-        if (lt_frame_begin(layout_renderer.get(), &frame_desc, frame.put()) != LT_OK) return false;
+        if (lt_frame_begin(layout_renderer.get(), &frame_desc, frame.put()) != LT_OK) return Fail(stats.fail_backend);
         auto draw = LumaText::Descriptor<lt_draw_text_desc>();
         draw.origin_x = origin.x;
         draw.origin_y = origin.y;
@@ -982,7 +987,7 @@ struct LumaTextRenderer::Impl {
         const lt_result end_result = lt_frame_end(frame.get());
         TraceElapsed(end_start, stats.frame_end_time_us);
         stats.draw_calls++;
-        return result == LT_OK && end_result == LT_OK;
+        return (result == LT_OK && end_result == LT_OK) || Fail(stats.fail_backend);
     }
 
     // Locate the extension with the complete shaped line, not a separately
@@ -992,13 +997,12 @@ struct LumaTextRenderer::Impl {
                    std::uint32_t split, const D2D1_COLOR_F& split_foreground,
                    const D2D1_COLOR_F& background) {
         ID2D1DeviceContext* dc = target_dc.Get();
-        if (!dc || busy || !renderer || !format || split == 0 || split >= text.size()) return false;
+        if (!dc || busy || !renderer || !format || split == 0 || split >= text.size()) return Fail(stats.fail_input);
         std::uint32_t family = 0;
         LumaText::FontCascade* cascade = nullptr;
         const float font_size = format->GetFontSize();
-        if (!(font_size > 0.0f) || !ResolveCascade(format, text, family, cascade) || !cascade) {
-            return false;
-        }
+        if (!(font_size > 0.0f)) return Fail(stats.fail_input);
+        if (!ResolveCascade(format, text, family, cascade) || !cascade) return Fail(stats.fail_font);
         LayoutKey key;
         key.text.assign(text);
         key.family = family;
@@ -1008,18 +1012,18 @@ struct LumaTextRenderer::Impl {
         key.width_64 = kUnboundedWidth64;
         key.alignment = DWRITE_TEXT_ALIGNMENT_LEADING;
         LumaText::TextLayout* layout = GetLayout(key, font_size, *cascade);
-        if (!layout || !*layout) return false;
+        if (!layout || !*layout) return Fail(stats.fail_layout);
         auto metrics = LumaText::Descriptor<lt_text_metrics>();
-        if (lt_text_layout_get_metrics(layout->get(), &metrics) != LT_OK) return false;
+        if (lt_text_layout_get_metrics(layout->get(), &metrics) != LT_OK) return Fail(stats.fail_backend);
         // DrawOn would ellipsize this line, and the split would no longer
         // index the drawn glyphs.
         const float ink = pulse::ui::typography::InkPad(format);
-        if (metrics.width + ink > bounds.right - bounds.left + 0.5f) return false;
+        if (metrics.width + ink > bounds.right - bounds.left + 0.5f) return Fail(stats.fail_bounds);
         float split_x = 0.0f, split_y = 0.0f;
         auto hit = LumaText::Descriptor<lt_hit_test_metrics>();
         if (lt_text_layout_hit_test_position(layout->get(), split, false,
                                              &split_x, &split_y, &hit) != LT_OK) {
-            return false;
+            return Fail(stats.fail_backend);
         }
         const float cut = std::round(bounds.left + split_x);
         const auto tail = text.substr(split);
@@ -1028,14 +1032,14 @@ struct LumaTextRenderer::Impl {
                    (c >= L'0' && c <= L'9') || c == L'_';
         });
         float tail_width = 0;
-        if (stable_tail && !Measure(tail, format, tail_width, nullptr)) return false;
+        if (stable_tail && !Measure(tail, format, tail_width, nullptr)) return Fail(stats.fail_backend);
         const float top = bounds.top - 8.0f, bottom = bounds.bottom + 8.0f;
         dc->PushAxisAlignedClip(D2D1::RectF(std::floor(bounds.left) - 8.0f, top, cut, bottom),
                                 D2D1_ANTIALIAS_MODE_ALIASED);
         const bool head = DrawOn(dc, text, format, bounds, foreground, background,
                                  DWRITE_TEXT_ALIGNMENT_LEADING);
         dc->PopAxisAlignedClip();
-        if (!head) return false;
+        if (!head) return false; // DrawOn already recorded the failure category.
         dc->PushAxisAlignedClip(D2D1::RectF(cut, top, std::ceil(bounds.right) + 8.0f, bottom),
                                 D2D1_ANTIALIAS_MODE_ALIASED);
         if (stable_tail) {
@@ -2084,8 +2088,11 @@ const LumaTextStats& LumaTextRenderer::Stats() const noexcept {
     return impl_->stats;
 }
 
-void LumaTextRenderer::RecordFallback() noexcept {
+void LumaTextRenderer::RecordFallback(unsigned api) noexcept {
     impl_->stats.fallback_draws++;
+    if (api == 0) ++impl_->stats.fallback_text;
+    else if (api == 1) ++impl_->stats.fallback_layout;
+    else ++impl_->stats.fallback_split;
 }
 
 } // namespace pulse::ui

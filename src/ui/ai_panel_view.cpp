@@ -1,6 +1,6 @@
 // ai_panel_view.cpp — Pulse 助手 panel: layout, drawing, hit testing.
 //
-// Sizes are the design's CSS pixels (plans/ai/pulse_ai_assistant_v2.html),
+// Sizes are the design's CSS pixels,
 // used as DIPs.
 #include "ai_panel_view.h"
 #include "ai_panel_draw.h"
@@ -1051,7 +1051,7 @@ void AiPanelView::DrawStatusChip(Compositor* compositor, const Theme& theme, con
     const bool busy = chip.state == AiChipState::Busy;
     const bool waiting = chip.state == AiChipState::Waiting;
     const bool done = chip.state == AiChipState::Done;
-    // A failed turn (plans/ai/Pulse_AI助手_错误与快捷键.html .chip.e / .chip.w).
+    // A failed turn.
     const bool failed = chip.state == AiChipState::Error;
     const bool unfinished = chip.state == AiChipState::Warn;
     const bool anim = motion::SystemAnimationsEnabled();

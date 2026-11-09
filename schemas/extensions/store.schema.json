@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Pulse local declarative package registry v1",
+  "description": "Maintainer contract for registry.json; manage it through pulse-ext, not by editing it. The host additionally enforces a 64 KiB UTF-8 limit, decoded UTF-8 string byte limits, unique package IDs, content hashes and enabled manifest identity. This is not a publisher identity or authorization scheme.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["formatVersion", "packages"],
+  "properties": {
+    "formatVersion": {"const": 1},
+    "packages": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name", "enabled", "activeRevision"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._-]+$"},
+          "name": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[^\\u0000-\\u001f\\u007f]*$", "description": "Nonblank display name; at most 128 decoded UTF-8 bytes, enforced by the host."},
+          "enabled": {"type": "boolean"},
+          "activeRevision": {"$ref": "#/$defs/revision"},
+          "previousRevision": {"$ref": "#/$defs/revision"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "revision": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 of exact UTF-8 manifest bytes; relative blob location is versions/<revision>.json. Never a filesystem path supplied by the package."}
+  }
+}

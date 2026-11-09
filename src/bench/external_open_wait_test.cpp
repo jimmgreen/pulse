@@ -15,6 +15,35 @@ int wmain() {
     HWND host = CreateWindowExW(0, L"STATIC", L"owned wait test", 0, 0, 0, 1, 1, HWND_MESSAGE, nullptr, GetModuleHandleW(nullptr), nullptr);
     check(host != nullptr, "own hidden message-only host");
     const auto now = GetTickCount64();
+    {
+        Coordinator reveal_queue;
+        Coordinator::OpenRequest reveal;
+        reveal.id[0] = 99;
+        reveal.deadline = now + 10000;
+        reveal.path = L"C:\\fixture\\folder";
+        reveal.reveal = true;
+        check(Coordinator::EncodeOpenRequest(reveal).empty(), "internal reveal cannot silently lose intent on v2 wire");
+        check(reveal_queue.SubmitOpenRequest(reveal, now, host, WM_APP + 125) == Coordinator::OpenSubmission::Accepted,
+            "folder reveal enters owned queue");
+        auto open_same_id = reveal;
+        open_same_id.reveal = false;
+        check(reveal_queue.SubmitOpenRequest(open_same_id, now, host, WM_APP + 125) == Coordinator::OpenSubmission::Invalid,
+            "same ID with different reveal intent is rejected");
+        check(reveal_queue.SubmitOpenRequest(reveal, now, host, WM_APP + 125) == Coordinator::OpenSubmission::Duplicate,
+            "same reveal retry remains duplicate");
+        auto claimed = reveal_queue.TakeQueuedOpenRequest(now, true);
+        check(claimed && claimed->reveal, "claim retains reveal intent");
+        if (claimed) {
+            AdvanceOpenWait(claimed->ui_wait_deadline, now, true);
+            reveal_queue.FinishOpenClaim(std::move(*claimed), true);
+        }
+        auto resumed = reveal_queue.TakeQueuedOpenRequest(now + 1, true);
+        check(resumed && resumed->reveal && resumed->path == reveal.path, "busy retry preserves reveal and full path");
+        if (resumed) {
+            Coordinator::CompleteDelivery(*resumed, true);
+            reveal_queue.FinishOpenClaim(std::move(*resumed), false);
+        }
+    }
     auto make = [&](unsigned id) { Coordinator::OpenRequest r; r.id[0] = static_cast<unsigned char>(id); r.deadline = now + 1000;
         r.path = L"pulse:new-window"; r.delivery = std::make_shared<std::atomic<Coordinator::OpenDeliveryState>>(Coordinator::OpenDeliveryState::Pending); return r; };
     Coordinator coordinator;

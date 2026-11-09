@@ -65,4 +65,9 @@ ConfirmChoice ShowConfirmDialogEx(HWND owner, const ConfirmDialogSpec& spec, boo
 bool ShowConfirmDialog(HWND owner, const ConfirmDialogSpec& spec, bool dark,
                        D2D1_COLOR_F accent);
 
+// Captures the existing native confirmation surface without changing its state.
+// Only a live confirmation window on the calling UI thread is accepted.
+// Live controls on an opaque host-theme surface; DWM acrylic is not captured.
+bool SaveConfirmDialogFrame(HWND window, const std::wstring& path);
+
 } // namespace pulse::ui

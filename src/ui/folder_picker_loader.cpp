@@ -3,6 +3,7 @@
 #include "../common/picker_navigation.h"
 #include "../common/picker_open_filter.h"
 #include "../common/picker_user_storage.h"
+#include "../common/picker_shell_namespace.h"
 
 #include "../common/display_path.h"
 #include "../common/localization.h"
@@ -16,6 +17,7 @@
 #include <cwctype>
 #include <cwchar>
 #include <shobjidl.h>
+#include <shlobj.h>
 #include <wrl/client.h>
 #include <array>
 
@@ -49,8 +51,19 @@ DWORD ListingError(const std::wstring& path, DWORD enumeration_error) {
 
 // Probe only directory admission, on the existing worker. Enumeration and
 // access validation retain their original paths and cancellation generation.
-DWORD ProbeFolder(const std::wstring& path, const std::function<bool()>& cancelled) {
+DWORD ProbeFolder(const std::wstring& path, const std::function<bool()>& cancelled, uint32_t native_options) {
     if (path.empty() || picker_navigation::IsComputerPath(path)) return ERROR_SUCCESS;
+    if (picker_shell::IsParsingName(path) || picker_shell::Enabled(native_options)) {
+        if (!picker_shell::Enabled(native_options) || FAILED(picker_shell::ValidateOptions(native_options))) return ERROR_NOT_SUPPORTED;
+        picker_shell::Apartment apartment;
+        if (FAILED(apartment.Result())) return picker_shell::Error(apartment.Result());
+        Microsoft::WRL::ComPtr<IShellItem> item;
+        HRESULT hr = SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&item));
+        SFGAOF attributes = 0;
+        if (SUCCEEDED(hr)) hr = item->GetAttributes(SFGAO_FOLDER, &attributes);
+        if (cancelled()) return ERROR_CANCELLED;
+        return FAILED(hr) ? picker_shell::Error(hr) : (attributes & SFGAO_FOLDER) ? ERROR_SUCCESS : ERROR_DIRECTORY;
+    }
     picker_user_storage::Path storage;
     if (!picker_user_storage::Parse(path, storage)) return ERROR_NOT_SUPPORTED;
     const DWORD admission = picker_user_storage::CheckAncestors(storage, false,
@@ -83,8 +96,72 @@ DWORD ProbeFolder(const std::wstring& path, const std::function<bool()>& cancell
 // The main window's enumeration (fs::EnumerateDirectory) feeds both the
 // picker's own rows (filtering, validation, type-ahead) and the directory
 // snapshot the shared pane renderer draws, in one order.
+PickerListing ReadShellListing(const std::wstring& path, PickerMode mode, const PickerOptions& options,
+                               const std::function<bool()>& cancelled) {
+    PickerListing listing; listing.path = path;
+    if (!picker_shell::Enabled(options.native_options) || FAILED(picker_shell::ValidateOptions(options.native_options))) {
+        listing.error = ERROR_NOT_SUPPORTED; return listing;
+    }
+    picker_shell::Apartment apartment;
+    if (FAILED(apartment.Result())) { listing.error = picker_shell::Error(apartment.Result()); return listing; }
+    Microsoft::WRL::ComPtr<IShellItem> folder;
+    Microsoft::WRL::ComPtr<IShellFolder> shell_folder;
+    Microsoft::WRL::ComPtr<IEnumIDList> enumerator;
+    HRESULT hr = SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&folder));
+    if (SUCCEEDED(hr)) hr = folder->BindToHandler(nullptr, BHID_SFObject, IID_PPV_ARGS(&shell_folder));
+    SHCONTF flags = static_cast<SHCONTF>(SHCONTF_FOLDERS | SHCONTF_NONFOLDERS);
+    if (options.show_hidden) flags = static_cast<SHCONTF>(flags | SHCONTF_INCLUDEHIDDEN | SHCONTF_INCLUDESUPERHIDDEN);
+    if (SUCCEEDED(hr)) hr = shell_folder->EnumObjects(nullptr, flags, &enumerator);
+    if (FAILED(hr)) { listing.error = picker_shell::Error(hr); return listing; }
+    auto rows = std::make_shared<std::vector<fs::DirEntry>>();
+    while (enumerator && !cancelled()) {
+        Microsoft::WRL::ComPtr<IShellItem> item;
+        PITEMID_CHILD child = nullptr;
+        hr = enumerator->Next(1, &child, nullptr);
+        if (hr == S_FALSE) break;
+        if (FAILED(hr)) { listing.error = picker_shell::Error(hr); break; }
+        hr = SHCreateItemWithParent(nullptr, shell_folder.Get(), child, IID_PPV_ARGS(&item));
+        CoTaskMemFree(child);
+        if (FAILED(hr)) continue;
+        PickerEntry entry;
+        SFGAOF attributes = 0;
+        hr = item->GetAttributes(SFGAO_FOLDER | SFGAO_FILESYSTEM | SFGAO_STREAM | SFGAO_HIDDEN | SFGAO_SYSTEM, &attributes);
+        if (FAILED(hr)) continue;
+        const bool folder_item = (attributes & SFGAO_FOLDER) != 0;
+        if (!options.show_hidden && (attributes & (SFGAO_HIDDEN | SFGAO_SYSTEM))) continue;
+        if (FAILED(picker_shell::Name(item.Get(), SIGDN_NORMALDISPLAY, entry.name))) continue;
+        if (FAILED(picker_shell::Name(item.Get(), SIGDN_DESKTOPABSOLUTEPARSING, entry.path))) continue;
+        entry.shell_attributes = attributes;
+        entry.kind = folder_item && (mode == PickerMode::Folder || !picker_shell::IsStream(attributes, options.native_options)) ? PickerEntryKind::Folder : PickerEntryKind::File;
+        if (attributes & SFGAO_FILESYSTEM) {
+            std::wstring filesystem_path;
+            if (SUCCEEDED(picker_shell::Name(item.Get(), SIGDN_FILESYSPATH, filesystem_path))) {
+                const auto slash = filesystem_path.find_last_of(L"\\/");
+                entry.name = filesystem_path.substr(slash == filesystem_path.npos ? 0 : slash + 1);
+            }
+        }
+        const DWORD display_attributes = entry.kind == PickerEntryKind::Folder ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+        if (!PickerShowsEntry(display_attributes, entry.name, mode, options)) continue;
+        if (!folder_item && !picker_shell::IsSelectable(attributes, false, options.native_options)) continue;
+        entry.source = rows->size();
+        fs::DirEntry row; row.name = entry.name; row.full_path = entry.path;
+        row.shell_id = entry.path; row.is_dir = entry.kind == PickerEntryKind::Folder;
+        row.attrs = row.is_dir ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+        rows->push_back(std::move(row)); listing.entries.push_back(std::move(entry));
+    }
+    if (cancelled()) { listing.error = ERROR_CANCELLED; listing.entries.clear(); return listing; }
+    SortPickerEntries(listing.entries, options);
+    auto sorted = std::make_shared<std::vector<fs::DirEntry>>();
+    sorted->reserve(listing.entries.size());
+    for (const auto& entry : listing.entries) sorted->push_back(std::move((*rows)[entry.source]));
+    listing.snapshot = std::move(sorted);
+    return listing;
+}
+
 PickerListing ReadListing(const std::wstring& path, PickerMode mode, const PickerOptions& options,
                           const std::function<bool()>& cancelled) {
+    if (picker_shell::IsParsingName(path) || (!path.empty() && !picker_navigation::IsComputerPath(path) && picker_shell::Enabled(options.native_options)))
+        return ReadShellListing(path, mode, options, cancelled);
     if (picker_navigation::IsComputerPath(path)) {
         auto listing = ReadListing(L"", mode, options, cancelled);
         listing.path = path;
@@ -143,6 +220,8 @@ PickerListing ReadListing(const std::wstring& path, PickerMode mode, const Picke
 std::wstring ResolvePath(const std::wstring& current, const std::wstring& input) {
     auto path = NormalizePickerInput(input);
     if (path.empty()) return {};
+    if (picker_shell::IsParsingName(path)) return path;
+    if (picker_shell::IsParsingName(current)) return current + L"\\" + path;
     if (path.rfind(L"\\", 0) != 0 && !(path.size() > 1 && path[1] == L':')) {
         if (current.empty()) return {};
         path = current + L"\\" + path;
@@ -259,8 +338,11 @@ DWORD OpenExtension(const PickerOptions& options, std::wstring& extension) {
 PickerValidation ValidatePaths(const std::wstring& current, const std::vector<std::wstring>& names,
                                PickerMode mode, const PickerOptions& options, const std::function<bool()>& cancelled) {
     PickerValidation result;
+    if (FAILED(picker_shell::ValidateOptions(options.native_options))) { result.error = ERROR_INVALID_PARAMETER; return result; }
     if (names.empty()) { result.error = ERROR_INVALID_NAME; return result; }
-    if ((options.allow_missing_open && (mode != PickerMode::File || !options.skip_access_validation || options.validate_local_open_access_v1)) ||
+    const bool create_prompt = (options.native_options & FOS_CREATEPROMPT) != 0;
+    if ((options.allow_missing_open && (mode != PickerMode::File ||
+            (!create_prompt && (!options.skip_access_validation || options.validate_local_open_access_v1)))) ||
         (options.require_existing_open_parent && !options.allow_missing_open)) {
         result.error = ERROR_NOT_SUPPORTED; return result;
     }
@@ -277,11 +359,68 @@ PickerValidation ValidatePaths(const std::wstring& current, const std::vector<st
     }
     // LocalOpen applies the same access/shortcut checks to every selected file.
     // No prefix escapes on an error: the batch is cleared below.
+    std::wstring sharing_path;
     for (const auto& name : names) {
         if (cancelled()) { result.error = ERROR_CANCELLED; break; }
         auto path = ResolvePath(current, name);
         result.failed_path = path.empty() ? name : path;
         if (path.empty()) { result.error = ERROR_INVALID_NAME; break; }
+        if (picker_shell::IsParsingName(path) || picker_shell::Enabled(options.native_options)) {
+            if (!picker_shell::Enabled(options.native_options)) { result.error = ERROR_NOT_SUPPORTED; break; }
+            picker_shell::Apartment apartment;
+            Microsoft::WRL::ComPtr<IShellItem> item;
+            HRESULT hr = apartment.Result();
+            if (SUCCEEDED(hr)) hr = SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(&item));
+            SFGAOF attributes = 0;
+            if (SUCCEEDED(hr)) hr = item->GetAttributes(SFGAO_FOLDER | SFGAO_FILESYSTEM | SFGAO_STREAM, &attributes);
+            DWORD filesystem_attributes = INVALID_FILE_ATTRIBUTES;
+            if (SUCCEEDED(hr) && (attributes & SFGAO_FILESYSTEM)) {
+                std::wstring filesystem_path;
+                if (SUCCEEDED(picker_shell::Name(item.Get(), SIGDN_FILESYSPATH, filesystem_path)))
+                    filesystem_attributes = GetFileAttributesW(NativePath(filesystem_path).c_str());
+            }
+            const bool provider_stream = SUCCEEDED(hr) && picker_shell::IsStream(attributes, options.native_options) &&
+                (!(attributes & SFGAO_FILESYSTEM) || (filesystem_attributes != INVALID_FILE_ATTRIBUTES &&
+                    (filesystem_attributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_OFFLINE | FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS))));
+            if (SUCCEEDED(hr) && (attributes & SFGAO_FILESYSTEM) && !provider_stream) {
+                hr = picker_shell::Name(item.Get(), SIGDN_FILESYSPATH, path);
+                if (FAILED(hr)) { result.error = picker_shell::Error(hr); break; }
+                // Real disk items retain the existing shortcut, extension,
+                // access and sharing checks even in a Shell namespace listing.
+            } else if (SUCCEEDED(hr)) {
+                const bool folder_item = (attributes & SFGAO_FOLDER) != 0;
+                if (folder_item && mode != PickerMode::Folder && !picker_shell::IsStream(attributes, options.native_options)) {
+                    if (names.size() != 1) { result.error = ERROR_DIRECTORY; break; }
+                    result.navigate = path;
+                } else if (!picker_shell::IsSelectable(attributes, mode == PickerMode::Folder, options.native_options)) {
+                    result.error = ERROR_NOT_SUPPORTED; break;
+                } else {
+                    std::wstring display;
+                    hr = picker_shell::Name(item.Get(), SIGDN_NORMALDISPLAY, display);
+                    if (FAILED(hr)) { result.error = picker_shell::Error(hr); break; }
+                    if (mode != PickerMode::Folder && !(mode == PickerMode::File && options.advisory_file_filters) &&
+                        !PickerMatchesFilter(display, mode, options)) { result.error = ERROR_UNSUPPORTED_TYPE; break; }
+                    std::wstring canonical;
+                    hr = picker_shell::Name(item.Get(), SIGDN_DESKTOPABSOLUTEPARSING, canonical);
+                    if (FAILED(hr)) { result.error = picker_shell::Error(hr); break; }
+                    if (provider_stream && mode != PickerMode::Folder && !options.skip_access_validation) {
+                        hr = picker_shell::ValidateStream(item.Get());
+                        if (cancelled()) { result.error = ERROR_CANCELLED; break; }
+                        if (FAILED(hr)) {
+                            result.error = picker_shell::Error(hr);
+                            if (result.error == ERROR_SHARING_VIOLATION && (options.native_options & FOS_SHAREAWARE)) {
+                                if (sharing_path.empty()) sharing_path = canonical;
+                                result.error = ERROR_SUCCESS;
+                            } else break;
+                        }
+                    }
+                    result.paths.push_back(std::move(canonical));
+                }
+                continue;
+            }
+            if (picker_shell::IsParsingName(path)) { result.error = picker_shell::Error(hr); break; }
+            // Existing filesystem rules retain missing-name and default-extension handling.
+        }
         if (options.allow_missing_open) {
             picker_user_storage::Path storage;
             if (!picker_user_storage::Parse(path, storage)) { result.error = ERROR_INVALID_NAME; break; }
@@ -315,7 +454,7 @@ PickerValidation ValidatePaths(const std::wstring& current, const std::vector<st
             }
         }
         bool missing = false;
-        if (options.allow_missing_open && options.skip_access_validation &&
+        if (options.allow_missing_open && (options.skip_access_validation || create_prompt) &&
             (result.error == ERROR_FILE_NOT_FOUND || result.error == ERROR_PATH_NOT_FOUND)) {
             if (cancelled()) { result.error = ERROR_CANCELLED; break; }
             picker_user_storage::Path storage;
@@ -330,6 +469,7 @@ PickerValidation ValidatePaths(const std::wstring& current, const std::vector<st
                 if (!(parent_attributes & FILE_ATTRIBUTE_DIRECTORY)) { result.error = ERROR_DIRECTORY; break; }
             }
             missing = true;
+            result.missing_paths.push_back(path);
             result.error = ERROR_SUCCESS;
             attributes = FILE_ATTRIBUTE_NORMAL;
         }
@@ -345,14 +485,18 @@ PickerValidation ValidatePaths(const std::wstring& current, const std::vector<st
             result.error = ERROR_UNSUPPORTED_TYPE;
             break;
         } else {
-            if (options.validate_local_open_access_v1) {
+            if (options.validate_local_open_access_v1 && !missing) {
                 result.error = CheckLocalOpenAccessV1(path, cancelled);
-                if (result.error) break;
+                if (result.error == ERROR_SHARING_VIOLATION && (options.native_options & FOS_SHAREAWARE)) {
+                    if (sharing_path.empty()) sharing_path = path;
+                    result.error = ERROR_SUCCESS;
+                } else if (result.error) break;
             }
             result.paths.push_back(path);
         }
     }
-    if (result.error != ERROR_SUCCESS) { result.paths.clear(); result.navigate.clear(); }
+    if (result.error != ERROR_SUCCESS) { result.paths.clear(); result.missing_paths.clear(); result.navigate.clear(); }
+    else if (!sharing_path.empty()) { result.error = ERROR_SHARING_VIOLATION; result.failed_path = std::move(sharing_path); }
     else result.failed_path.clear();
     return result;
 }
@@ -360,13 +504,7 @@ PickerValidation ValidatePaths(const std::wstring& current, const std::vector<st
 PickerValidation MakeFolder(const std::wstring& current, const std::wstring& name) {
     PickerValidation result;
     result.failed_path = name;
-    bool invalid = current.empty() || name.empty() || name == L"." || name == L".." ||
-        name.back() == L'.' || std::iswspace(name.back()) || name.find_first_of(L"\\/:*?\"<>|") != std::wstring::npos;
-    for (wchar_t c : name) invalid = invalid || c < 32;
-    auto stem = name.substr(0, name.find(L'.'));
-    for (auto& c : stem) c = static_cast<wchar_t>(std::towupper(c));
-    invalid = invalid || stem == L"CON" || stem == L"PRN" || stem == L"AUX" || stem == L"NUL" ||
-        (stem.size() == 4 && (stem.substr(0, 3) == L"COM" || stem.substr(0, 3) == L"LPT") && stem[3] >= L'0' && stem[3] <= L'9');
+    const bool invalid = current.empty() || !IsPickerFolderName(name);
     if (invalid) { result.error = ERROR_INVALID_NAME; return result; }
     const auto path = ResolvePath(current, name);
     if (path.empty()) { result.error = ERROR_INVALID_NAME; return result; }
@@ -438,7 +576,7 @@ void PickerLoader::Load(uint64_t generation, std::wstring path, PickerMode mode,
         auto cancelled = [&] { return target->serial.load() != serial; };
         DWORD admission_error = ERROR_SUCCESS;
         if (target->folder_commit_message) {
-            admission_error = ProbeFolder(path, cancelled);
+            admission_error = ProbeFolder(path, cancelled, options.native_options);
             if (cancelled()) return;
             if (admission_error == ERROR_SUCCESS) {
                 auto commit = std::make_unique<PickerFolderCommit>();
@@ -541,10 +679,10 @@ void PickerLoader::RevalidateSave(uint64_t generation, SaveConfirmationSnapshot 
 }
 
 void PickerLoader::CheckSaveAccess(uint64_t generation, SaveConfirmationSnapshot snapshot,
-                                   bool after_file_ok, uint64_t ui_generation, bool require_unencrypted, bool skip_access_validation) {
+                                   bool after_file_ok, uint64_t ui_generation, bool require_unencrypted, bool skip_access_validation, uint32_t native_options) {
     std::lock_guard guard(target_->lock);
     ++target_->serial;
-    target_->pending = [target = target_.get(), generation, snapshot = std::move(snapshot), after_file_ok, ui_generation, require_unencrypted, skip_access_validation](uint64_t serial) {
+    target_->pending = [target = target_.get(), generation, snapshot = std::move(snapshot), after_file_ok, ui_generation, require_unencrypted, skip_access_validation, native_options](uint64_t serial) {
         auto cancelled = [&] { return target->serial.load() != serial; };
         if (cancelled()) return;
         auto result = std::make_unique<PickerValidation>();
@@ -564,6 +702,11 @@ void PickerLoader::CheckSaveAccess(uint64_t generation, SaveConfirmationSnapshot
             auto access = ValidateLocalSaveAccessV1(*fresh.snapshot, cancelled, {}, require_unencrypted);
             result->error = access.error;
             if (!access.error && access.state == SaveAccessState::Ready) {
+                result->paths.push_back(fresh.snapshot->Path());
+                result->save_snapshot = std::move(fresh.snapshot);
+                result->save_access_checked = true;
+                result->save_file_ok_checked = after_file_ok;
+            } else if (access.error == ERROR_SHARING_VIOLATION && (native_options & FOS_SHAREAWARE)) {
                 result->paths.push_back(fresh.snapshot->Path());
                 result->save_snapshot = std::move(fresh.snapshot);
                 result->save_access_checked = true;

@@ -20,10 +20,13 @@ struct Probe {
     bool ready_written = false, disabled_by_probe = false, resumed = false;
     uint64_t received_tick = 0;
     size_t baseline_tabs = 0, baseline_windows = 0;
+    const void* baseline_active = nullptr;
+    uint64_t closed_observed_tick = 0;
     unsigned receive_attempts = 0, receive_successes = 0, deferred = 0, dispatched = 0;
     std::shared_ptr<app::ExplorerHandoff> delivery_handoff;
     std::shared_ptr<app::ExplorerHandoff> presented_handoff;
     uint64_t presented_generation = 0, presented_tick = 0;
+    uint64_t prepared_tick = 0;
     app::ExplorerSourceObservation initial_source;
     std::string report;
     std::array<std::string, 64> navigation;
@@ -91,6 +94,7 @@ void ExplorerTakeoverProbeDelivery(AppState& state, const std::shared_ptr<app::E
         if (!probe.receive_attempts) {
             probe.baseline_tabs = TabCount(state);
             probe.baseline_windows = state.core.windows.Count();
+            probe.baseline_active = state.window_tabs.Active();
         }
         ++probe.receive_attempts;
     } else if (std::strcmp(stage, "received") == 0) {
@@ -126,9 +130,11 @@ void ExplorerTakeoverProbePresented(AppState& state, const app::Tab* tab, bool a
     { std::lock_guard lock(probe.scope->evidence->mutex); request = probe.scope->evidence->submitted; }
     const auto& lease = *tab->explorer_handoff;
     if (!request.handoff || lease.handoff != request.handoff || !lease.listing_complete ||
-        !lease.generation || tab->pending_generation || tab->applied_generation != lease.generation ||
+        !lease.generation || !lease.prepared_tick || request.handoff->state != app::HandoffState::Closed ||
+        tab->pending_generation || tab->applied_generation != lease.generation ||
         !request.handoff->received.load()) return;
     probe.presented_handoff = lease.handoff;
+    probe.prepared_tick = lease.prepared_tick;
     probe.presented_generation = lease.generation; probe.presented_tick = GetTickCount64();
     ExplorerTakeoverProbeNavigation(state, tab, "successful-presented", 1);
 }
@@ -162,14 +168,6 @@ void InitializeExplorerTakeoverProbe(AppState& state) {
         directory_attributes == INVALID_FILE_ATTRIBUTES || !(directory_attributes & FILE_ATTRIBUTE_DIRECTORY) ||
         std::filesystem::path(directory).filename().wstring().find(L"explorer-source-") != 0) return;
     // Control files never enter the watched source directory.
-    const auto source_path = std::filesystem::path(directory) / L"source";
-    const auto source = app::CanonicalExplorerScopePath(source_path.wstring());
-    const auto source_parent = app::CanonicalExplorerScopePath(std::filesystem::path(source).parent_path().wstring());
-    const DWORD source_attributes = GetFileAttributesW(source_path.c_str());
-    if (source.empty() || source_parent.empty() || _wcsicmp(source_parent.c_str(), directory.c_str()) != 0 ||
-        _wcsicmp(std::filesystem::path(source).filename().c_str(), L"source") != 0 ||
-        source_attributes == INVALID_FILE_ATTRIBUTES || !(source_attributes & FILE_ATTRIBUTE_DIRECTORY) ||
-        (source_attributes & FILE_ATTRIBUTE_REPARSE_POINT)) return;
     auto scope = std::make_shared<app::ExplorerSourceScope>();
     HANDLE config = CreateFileW((directory + L"\\scope-token.bin").c_str(), GENERIC_READ, FILE_SHARE_READ,
         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -178,7 +176,35 @@ void InitializeExplorerTakeoverProbe(AppState& state) {
     const bool valid = GetFileSizeEx(config, &size) && size.QuadPart == static_cast<LONGLONG>(sizeof(scope->token)) &&
         ReadFile(config, &scope->token, sizeof(scope->token), &read, nullptr) && read == sizeof(scope->token);
     CloseHandle(config);
-    if (!valid || scope->token.magic != 0x50585345 || scope->token.version != 1 || scope->token.reserved || scope->token.busy > 3) return;
+    if (!valid || scope->token.magic != 0x50585345 || scope->token.version != 1 ||
+        scope->token.reserved > app::kExplorerScopeExternalEmptySelection || scope->token.busy > 3) return;
+    const bool external = scope->token.reserved == app::kExplorerScopeExternalEmptySelection;
+    auto source_path = std::filesystem::path(directory) / L"source";
+    if (external) {
+        HANDLE path_file = CreateFileW((directory + L"\\external-folder.txt").c_str(), GENERIC_READ, FILE_SHARE_READ,
+            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (path_file == INVALID_HANDLE_VALUE) return;
+        LARGE_INTEGER path_size{};
+        std::wstring supplied;
+        bool path_valid = GetFileSizeEx(path_file, &path_size) && path_size.QuadPart > 0 &&
+            path_size.QuadPart < 32768 * static_cast<LONGLONG>(sizeof(wchar_t)) && path_size.QuadPart % sizeof(wchar_t) == 0;
+        if (path_valid) {
+            supplied.resize(static_cast<size_t>(path_size.QuadPart) / sizeof(wchar_t));
+            path_valid = ReadFile(path_file, supplied.data(), static_cast<DWORD>(path_size.QuadPart), &read, nullptr) &&
+                read == path_size.QuadPart && supplied.find(L'\0') == std::wstring::npos && std::filesystem::path(supplied).is_absolute();
+        }
+        CloseHandle(path_file);
+        if (!path_valid) return;
+        source_path = supplied;
+    }
+    const auto source = app::CanonicalExplorerScopePath(source_path.wstring());
+    const auto source_parent = app::CanonicalExplorerScopePath(std::filesystem::path(source).parent_path().wstring());
+    const DWORD source_attributes = GetFileAttributesW(source_path.c_str());
+    if (source.empty() || source_parent.empty() ||
+        _wcsicmp(source_parent.c_str(), external ? bench.c_str() : directory.c_str()) != 0 ||
+        (!external && _wcsicmp(std::filesystem::path(source).filename().c_str(), L"source") != 0) ||
+        source_attributes == INVALID_FILE_ATTRIBUTES || !(source_attributes & FILE_ATTRIBUTE_DIRECTORY) ||
+        (source_attributes & FILE_ATTRIBUTE_REPARSE_POINT)) return;
     scope->folder = source;
     if (!app::ExplorerScopeWindow(*scope, reinterpret_cast<HWND>(scope->token.hwnd))) return;
     scope->evidence->close_authorized_event = OpenEventW(EVENT_MODIFY_STATE, FALSE,
@@ -225,8 +251,10 @@ void TickExplorerTakeoverProbe(AppState& state) {
         }
         now = GetTickCount64();
         const auto handoff_state = request.handoff ? request.handoff->state.load() : app::HandoffState::Pending;
+        if (handoff_state == app::HandoffState::Closed && !probe.closed_observed_tick)
+            probe.closed_observed_tick = now;
         const bool presented = request.handoff && probe.presented_handoff == request.handoff &&
-            probe.presented_generation != 0 && probe.presented_tick != 0;
+            probe.presented_generation != 0 && probe.prepared_tick != 0 && probe.presented_tick >= probe.prepared_tick;
         const bool terminal = busy ? received && handoff_state == app::HandoffState::Expired :
             presented && evidence->quit && !IsWindow(source) && handoff_state == app::HandoffState::Closed;
         // Discovery and delivery are separate test budgets. Never truncate the
@@ -242,6 +270,12 @@ void TickExplorerTakeoverProbe(AppState& state) {
             stop_reason = "crash-fixture-watchdog";
         } else if (terminal) stop_reason = "expected-terminal";
         else if (failed_terminal) stop_reason = "failed-handoff-terminal";
+        else if (handoff_state == app::HandoffState::Closed) {
+            // This budget checks the real post-close frame; it never extends
+            // the source-close authorization deadline.
+            if (now - probe.closed_observed_tick < 3000) return;
+            stop_reason = "post-close-presentation-timeout";
+        }
         else if (budget_handoff) {
             if (now < budget_handoff->deadline_tick) return;
             stop_reason = "handoff-deadline";
@@ -256,15 +290,19 @@ void TickExplorerTakeoverProbe(AppState& state) {
         if (tab) for (int index : tab->SelectedIndices())
             if (index >= 0 && static_cast<size_t>(index) < tab->EntryCount() && tab->EntryVisible(index) &&
                 tab->EntryAt(index).name == L"selected.txt") selected = true;
+        const bool external = probe.scope->token.reserved == app::kExplorerScopeExternalEmptySelection;
+        const bool expected_selection = external ? tab && tab->SelectedIndices().empty() : selected;
+        const auto expected_names = external ? std::vector<std::wstring>{} : std::vector<std::wstring>{L"selected.txt"};
         const bool source_unchanged = app::UnchangedAvailableSource(probe.initial_source, app::ObserveExplorerSource(source));
         probe.pass = terminal && probe.scope->token.busy != 2 && probe.receive_attempts == 1 && probe.receive_successes == 1 &&
             probe.delivery_handoff == request.handoff && (busy ? (source_unchanged && !evidence->quit &&
             tab && !target_folder && probe.dispatched == 0 && probe.deferred &&
-                now >= request.handoff->deadline_tick && TabCount(state) == probe.baseline_tabs) :
+                now >= request.handoff->deadline_tick && TabCount(state) == probe.baseline_tabs &&
+                state.window_tabs.Active() == probe.baseline_active) :
             (probe.dispatched == 1 && (!resume || (probe.resumed && probe.deferred &&
                 TabCount(state) == probe.baseline_tabs + 1 && state.core.windows.Count() == probe.baseline_windows)) &&
-            presented && request.selection_read && request.names == std::vector<std::wstring>{L"selected.txt"} &&
-            tab && tab->applied_generation == probe.presented_generation && target_folder && selected && tab->snapshot && !tab->loading && tab->applied_generation != 0 &&
+            presented && request.selection_read && request.names == expected_names &&
+            tab && tab->applied_generation == probe.presented_generation && target_folder && expected_selection && tab->snapshot && !tab->loading && tab->applied_generation != 0 &&
             tab->snapshot_path == tab->current_path && IsWindowVisible(state.hwnd) && !IsIconic(state.hwnd)));
         probe.report = std::string("CASE\t") + (busy ? "busy-expiry" : resume ? "busy-resume" : "success") +
             "\nSTATE\tsource_unchanged_available=" + std::to_string(source_unchanged) +
@@ -282,14 +320,15 @@ void TickExplorerTakeoverProbe(AppState& state) {
         probe.report += "REQUEST\tchannel=Watcher-to-owned-queue-to-UI\tapplied_generation=" +
             std::to_string(tab ? tab->applied_generation : 0) + "\tpresented_generation=" + std::to_string(probe.presented_generation) +
             "\tpresented_tick=" + std::to_string(probe.presented_tick) +
+            "\tprepared_tick=" + std::to_string(probe.prepared_tick) +
             "\tnow=" + std::to_string(now) + "\tdeadline=" + std::to_string(request.handoff ? request.handoff->deadline_tick : 0) + "\n";
         probe.stopping = now;
         if (state.explorer_takeover) { state.explorer_takeover->Stop(); state.explorer_takeover.reset(); }
     }
     if (!evidence->stopped && now - probe.stopping < 10000) return;
     probe.report += std::string("STOPPED\t") + (evidence->stopped ? "1\n" : "0\n");
-    probe.report += probe.pass && evidence->stopped ? "PASS\tproduction Watcher UI handoff presented/close\n" :
-        "FAIL\tproduction Watcher UI handoff presented/close\n";
+    probe.report += probe.pass && evidence->stopped ? "PASS\tproduction Watcher background-prepare/source-close/actual-present\n" :
+        "FAIL\tproduction Watcher background-prepare/source-close/actual-present\n";
     Write(state, probe);
 }
 }

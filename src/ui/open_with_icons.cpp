@@ -128,8 +128,43 @@ bool NeedsPlate(const std::vector<uint8_t>& data) {
     return count > 0 && opaque > 0 && opaque * 10 < count * 7 && light * 10 >= opaque * 9;
 }
 
+bool ResolvePhotoshopIcon(IWICImagingFactory* wic, uint32_t edge,
+                          UINT& width, UINT& height, std::vector<uint8_t>& data) {
+    auto load = [&](std::wstring file) {
+        if (file.empty()) return false;
+        wchar_t expanded[32768]{};
+        const DWORD count = ExpandEnvironmentStringsW(file.c_str(), expanded, ARRAYSIZE(expanded));
+        if (!count || count > ARRAYSIZE(expanded)) return false;
+        file = expanded;
+        PathUnquoteSpacesW(file.data());
+        file.resize(wcslen(file.c_str()));
+        if (_wcsicmp(PathFindFileNameW(file.c_str()), L"Photoshop.exe") != 0) return false;
+        return LoadIconResource(wic, file, 0, edge, width, height, data);
+    };
+    // A document family badge identifies its editor, not a generic viewer
+    // selected independently for .psd and .psb in Windows.
+    for (const auto* extension : {L".psd", L".psb"})
+        if (load(QueryAssociation(ASSOCSTR_EXECUTABLE, extension))) return true;
+    for (const HKEY root : {HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE}) {
+        for (const REGSAM view : {KEY_WOW64_64KEY, KEY_WOW64_32KEY}) {
+            HKEY key = nullptr;
+            if (RegOpenKeyExW(root, L"Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\Photoshop.exe",
+                    0, KEY_QUERY_VALUE | view, &key) != ERROR_SUCCESS) continue;
+            wchar_t file[32768]{};
+            DWORD bytes = sizeof(file);
+            const auto result = RegGetValueW(key, nullptr, nullptr,
+                RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND, nullptr, file, &bytes);
+            RegCloseKey(key);
+            if (result == ERROR_SUCCESS && load(file)) return true;
+        }
+    }
+    return false;
+}
+
 bool ResolveIcon(IWICImagingFactory* wic, const std::wstring& extension, uint32_t edge,
                  UINT& width, UINT& height, std::vector<uint8_t>& data) {
+    if (preview::IsPsdExtension(extension))
+        return ResolvePhotoshopIcon(wic, edge, width, height, data);
     std::wstring reference = QueryAssociation(ASSOCSTR_APPICONREFERENCE, extension);
     if (!reference.empty() && reference.front() == L'@') {
         wchar_t file[MAX_PATH * 2]{};
@@ -205,14 +240,16 @@ OpenWithIconCache::Badge OpenWithIconCache::BadgeFor(const std::wstring& name, u
     if (!dc_ || extension.empty() || extension == L".lnk" || extension == L".url") return {};
     if (preview::IsImageExtension(extension) || preview::IsVectorExtension(extension) ||
         preview::IsFamilyExtension(preview::PreviewFamily::MetaFile, extension) ||
-        preview::IsFamilyExtension(preview::PreviewFamily::Psd, extension) ||
         preview::IsOneOf(extension, {L".apng", L".jxl", L".raw", L".dng", L".cr2", L".cr3",
             L".nef", L".nrw", L".arw", L".sr2", L".orf", L".rw2", L".raf", L".pef"})) return {};
     const uint32_t bucket = BucketPixels(pixels);
-    const std::wstring key = extension + L"|" + std::to_wstring(bucket);
+    const std::wstring family = preview::IsPsdExtension(extension) ? L".psd" : extension;
+    const std::wstring key = family + L"|" + std::to_wstring(bucket);
+    const wchar_t* format_label = extension == L".psd" ? L"PSD" : extension == L".psb" ? L"PSB" : nullptr;
     Badge previous;
     if (const auto it = entries_.find(key); it != entries_.end()) {
-        previous = {it->second.bitmap.get(), it->second.needs_plate};
+        previous = {it->second.bitmap.get(), it->second.needs_plate,
+                    it->second.missing ? format_label : nullptr};
         if (it->second.epoch == epoch_.load(std::memory_order_relaxed)) return previous;
     }
     Pixels ready;
@@ -229,7 +266,7 @@ OpenWithIconCache::Badge OpenWithIconCache::BadgeFor(const std::wstring& name, u
                 queue_.pop_front();
             }
             pending_.insert(key);
-            queue_.push_back({key, extension, bucket, epoch_.load(std::memory_order_relaxed)});
+            queue_.push_back({key, family, bucket, epoch_.load(std::memory_order_relaxed)});
             StartWorkerLocked();
             cv_.notify_one();
         }
@@ -241,7 +278,7 @@ OpenWithIconCache::Badge OpenWithIconCache::BadgeFor(const std::wstring& name, u
     if (ready.data.empty()) {
         replacement.missing = true;
         entries_[key] = std::move(replacement);
-        return {};
+        return {nullptr, false, format_label};
     }
     const D2D1_BITMAP_PROPERTIES props = D2D1::BitmapProperties(
         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));

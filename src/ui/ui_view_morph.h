@@ -100,6 +100,7 @@ public:
                 elapsed_ = 0;
                 running_ = true;
                 frames_ = 0;
+                text_warmup_next_ = 0;
             } else {
                 running_ = false;
                 from_.clear();
@@ -151,6 +152,8 @@ public:
     bool Running() const noexcept { return running_; }
     int FromMode() const noexcept { return from_mode_; }
     uint32_t FramesSinceStart() const noexcept { return frames_; }
+    int TextWarmupNext() const noexcept { return text_warmup_next_; }
+    void AdvanceTextWarmup(int next) noexcept { text_warmup_next_ = next; }
 
     // Opacity for the text / metadata layer: the new layout's labels arrive
     // once the shapes are mostly in place, so they never smear across.
@@ -218,6 +221,7 @@ private:
     uint64_t last_now_ = 0;
     uint64_t elapsed_ = 0;  // morph clock: real time, capped per frame
     uint32_t frames_ = 0;
+    int text_warmup_next_ = 0;
     LayoutParams layout_{};
     LayoutParams from_layout_{};
     std::unordered_map<uint64_t, Rects> previous_;

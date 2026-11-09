@@ -1110,8 +1110,8 @@ ArgRun KeymapSet(AppState& s, const json::Value& args) {
 ArgRun WindowArrangeRun(AppState& s, const json::Value& args) {
     const auto* value=args.find("layout");
     if (!value || !value->is_string()) return Fail("layout is required", I::ArrangeUnavailable);
-    constexpr std::string_view names[]={"side_by_side","stacked","columns","tile","main","cascade"};
-    for (int i=0;i<6;++i) if (value->as_string()==names[i]) {
+    constexpr std::string_view names[]={"side_by_side","stacked","columns","tile","main","cascade","main_right","main_top"};
+    for (int i=0;i<8;++i) if (value->as_string()==names[i]) {
         const auto layout=static_cast<WindowArrangeLayout>(i);
         if (!ArrangeWindows(s,layout)) return Fail("windows cannot be arranged now",I::ArrangeUnavailable);
         ArgRun result; result.ok=true; result.title=Text(WindowArrangeLabel(layout));

@@ -1938,8 +1938,11 @@ bool Engine::CommitMappedFile(const std::wstring& path) {
     if (MachineIndexScope()) {
         const ShardPaths paths = AggregateShardPaths();
         ShardManifest published;
-        if (!PublishShardBase(paths, tmp, built_unix_, 0, published, nullptr)) {
+        uint32_t failure_stage = 0;
+        if (!PublishShardBase(paths, tmp, built_unix_, 0, published, nullptr, {}, &failure_stage)) {
             const DWORD error = GetLastError();
+            diagnostics::runtime::Event("filename_publish_stage_failed", {{"operation", index_operation},
+                {"error", error}, {"stage", failure_stage}}, IndexErrorLevel(error));
             return fail("filename_publish_shard_failed", error);
         }
     } else {
@@ -2683,6 +2686,9 @@ void Engine::MergeBase(bool force, const char* reason) {
     }
     const bool wrote = WriteIndexFile(path, snap, vols, built);
     DWORD save_error = wrote ? ERROR_SUCCESS : GetLastError();
+    // Serialization is finished. Release the full snapshot before mapping the
+    // next base or compacting a failed merge's overlay, not after memory sampling.
+    snap = Store{};
     bool committed = false;
     {
         std::unique_lock<std::shared_mutex> lock(mutex_);
@@ -2697,6 +2703,9 @@ void Engine::MergeBase(bool force, const char* reason) {
         } else {
             if (wrote) save_error = GetLastError();
             built_unix_ = previous_built;
+            // A failed publication does not reclaim names. Run the same bounded
+            // local maintenance used during backoff without discarding pending work.
+            CompactNamePoolLocked(GetTickCount64());
         }
     }
     if (committed) RemoveLegacyVolumeShards();

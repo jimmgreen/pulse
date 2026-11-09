@@ -7,11 +7,19 @@
 namespace { std::atomic<bool> fixture_enabled{false}; }
 namespace pulse::dialog_auto {
 bool IsEnabledFor(const std::wstring&) noexcept { return fixture_enabled.load(); }
+// The existing cases exercise the in-process provider route.
+bool PreferOutOfProcess() noexcept { return false; }
+bool PreferRemoteHost() noexcept { return false; }
+Status Inspect() {
+    wchar_t path[32768]{}; GetModuleFileNameW(nullptr, path, 32768);
+    return {fixture_enabled.load(), false, ERROR_SUCCESS, path};
+}
 }
 #include "../shell_bridge/file_dialog_auto_server.cpp"
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
+#include <fstream>
 namespace {
 class UiEvents final : public IFileDialogEvents {
     std::atomic<ULONG> refs_{1};
@@ -125,6 +133,34 @@ int wmain(int argc, wchar_t** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
     int failures = 0;
     auto check = [&](bool ok, const char* name) { std::printf("[%s] %s\n", ok ? "PASS" : "FAIL", name); failures += !ok; };
+    if (argc > 1 && wcscmp(argv[1], L"--diagnostics") == 0) {
+        const auto root = std::filesystem::absolute(std::filesystem::path(L"bench_data") /
+            (L"dialog-diagnostics-" + std::to_wstring(GetCurrentProcessId())));
+        check(log::Initialize(root.wstring(), "dialog_auto"), "initialize isolated diagnostic log");
+        module = GetModuleHandleW(nullptr);
+        LogModule("loaded_bridge", module);
+        LogModule("missing_component", nullptr);
+        LogRegistration(42);
+        ObserveNativeReason("setter seq=5 method=SetFileTypeIndex hr=0x8000FFFF value=1", nullptr, 42);
+        check(wcscmp(ContractReason(shell::NativeReason::SetterFailed), L"SetterFailed") == 0,
+            "contract reason has readable name");
+        check(log::Flush(), "diagnostics flush"); log::Shutdown();
+        std::string all;
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
+            if (entry.path().extension() != L".jsonl") continue;
+            std::ifstream input(entry.path(), std::ios::binary);
+            all.append(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+        }
+        check(all.find("loaded_bridge") != std::string::npos && all.find("pe_timestamp") != std::string::npos &&
+            all.find("file_dialog_auto_server_test.exe") != std::string::npos, "mapped component path and PE identity logged");
+        check(all.find("registered_dll") != std::string::npos && all.find("path_match") != std::string::npos,
+            "registration and loaded path comparison logged");
+        check(all.find("SetFileTypeIndex hr=0x8000FFFF") != std::string::npos && all.find("\"dialog\":42") != std::string::npos,
+            "readable failed setter retains dialog correlation");
+        check(all.find("missing_component") != std::string::npos && all.find("\"error\":126") != std::string::npos,
+            "missing component reports explicit error");
+        return failures ? 1 : 0;
+    }
     const auto initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (FAILED(initialized)) return 2;
     module = GetModuleHandleW(nullptr);

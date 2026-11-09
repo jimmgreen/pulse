@@ -1,0 +1,188 @@
+{
+  "apiVersion": 1,
+  "id": "sample.workspace-control-panel",
+  "name": "Tabs and panes",
+  "commands": [
+    {
+      "id": "new-tab",
+      "title": "New tab",
+      "capability": "tabs.new"
+    },
+    {
+      "id": "duplicate-tab",
+      "title": "Duplicate focused folder",
+      "capability": "tabs.duplicate"
+    },
+    {
+      "id": "close-tab",
+      "title": "Close active tab",
+      "capability": "tabs.closeActive"
+    },
+    {
+      "id": "activate-first",
+      "title": "Activate first tab",
+      "capability": "tabs.activate",
+      "args": {
+        "index": 0
+      }
+    },
+    {
+      "id": "activate-second",
+      "title": "Activate second tab",
+      "capability": "tabs.activate",
+      "args": {
+        "index": 1
+      }
+    },
+    {
+      "id": "focus-first",
+      "title": "Focus first visible pane",
+      "capability": "panes.focus",
+      "args": {
+        "index": 0
+      }
+    },
+    {
+      "id": "focus-second",
+      "title": "Focus second visible pane",
+      "capability": "panes.focus",
+      "args": {
+        "index": 1
+      }
+    },
+    {
+      "id": "run",
+      "title": "Activate first, then duplicate",
+      "capability": "workflow.run",
+      "args": {
+        "workflow": "activate-and-duplicate"
+      }
+    },
+    {
+      "id": "cancel",
+      "title": "Cancel workflow",
+      "capability": "workflow.cancel"
+    }
+  ],
+  "workflows": [
+    {
+      "id": "activate-and-duplicate",
+      "steps": [
+        "activate-first",
+        "duplicate-tab"
+      ]
+    }
+  ],
+  "panel": {
+    "title": "Tabs and panes",
+    "ui": {
+      "version": 1,
+      "state": [
+        {
+          "key": "status",
+          "value": "idle"
+        },
+        {
+          "key": "error",
+          "value": ""
+        },
+        {
+          "key": "progress",
+          "value": "0"
+        }
+      ],
+      "root": {
+        "type": "scrollView",
+        "id": "workspace-control-root",
+        "children": [
+          {
+            "type": "text",
+            "id": "scope",
+            "text": "Controls this window’s top-level tabs and visible panes. New tab uses your preferences. Duplicate opens the focused folder in a new single-pane tab. The last tab and pinned tabs cannot be closed."
+          },
+          {
+            "type": "button",
+            "id": "new-tab",
+            "text": "New tab",
+            "command": "new-tab"
+          },
+          {
+            "type": "button",
+            "id": "duplicate-tab",
+            "text": "Duplicate focused folder",
+            "command": "duplicate-tab"
+          },
+          {
+            "type": "button",
+            "id": "close-tab",
+            "text": "Close active tab",
+            "command": "close-tab"
+          },
+          {
+            "type": "button",
+            "id": "activate-first",
+            "text": "Activate first tab",
+            "command": "activate-first"
+          },
+          {
+            "type": "button",
+            "id": "activate-second",
+            "text": "Activate second tab",
+            "command": "activate-second"
+          },
+          {
+            "type": "button",
+            "id": "focus-first",
+            "text": "Focus first visible pane",
+            "command": "focus-first"
+          },
+          {
+            "type": "button",
+            "id": "focus-second",
+            "text": "Focus second visible pane",
+            "command": "focus-second"
+          },
+          {
+            "type": "button",
+            "id": "workflow-start",
+            "text": "Activate first tab, then duplicate",
+            "command": "run",
+            "kind": "primary"
+          },
+          {
+            "type": "button",
+            "id": "workflow-cancel",
+            "text": "Cancel workflow",
+            "command": "cancel"
+          },
+          {
+            "type": "text",
+            "id": "workflow-status",
+            "binding": "state.status"
+          },
+          {
+            "type": "text",
+            "id": "workflow-error",
+            "binding": "state.error"
+          },
+          {
+            "type": "progress",
+            "id": "workflow-progress",
+            "binding": "state.progress"
+          },
+          {
+            "type": "virtualList",
+            "id": "workflow-monitor",
+            "dataSource": {
+              "source": "context.workflow",
+              "pageSize": 1,
+              "statusState": "status",
+              "errorState": "error",
+              "progressState": "progress"
+            }
+          }
+        ]
+      }
+    }
+  }
+}

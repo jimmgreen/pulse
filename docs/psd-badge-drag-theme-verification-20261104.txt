@@ -1,0 +1,66 @@
+PSD family badges, thumbnail fidelity and drag themes -- 2026-11-04
+
+Requested policy
+PSD and PSB display the real installed Photoshop executable icon. If Photoshop
+cannot be resolved, use their respective PSD/PSB format labels. Do not change
+Windows default applications. Both extensions now share one icon cache entry
+per pixel bucket and the same asynchronous refresh, so one cannot display a
+generic Player while the other displays a fallback. Lookup accepts Photoshop
+from either format's association or registered 32/64-bit App Paths entries.
+Generic viewers and host executables are not used for this family badge.
+
+Drag theme
+The old code inferred theme from a screen pixel under the mouse. Dark artwork
+could therefore produce a dark drag card in a light window. Theme is now an
+explicit required argument from the main window (including staging shelf) or
+picker, through the native drag entry and visual factory. No artwork sampling
+or test-only theme override remains. Existing feedback/footer layout is kept.
+
+Thumbnail evidence
+The screenshot's 16bit5x5 PSD/PSB and 32bit5x5 PSD are 5 by 5 pixels;
+1layer/2layers are 101 by 55, and 32bit PSD/PSB are 100 by 150. Actual decoding
+returns those source dimensions with embedded=false, even for larger requests.
+The 1600 by 1200 0layers PSD returns 128/512/1024-target composite images.
+The generated 11648 by 8736 fixture first returns its 160 by 120 embedded JPEG,
+then a real 512 by 384 or 1024 by 768 composite. Hot cache returns the refined
+pixels without another decode; zoom requests a new target size. Production
+PSD decode/cache policy was left unchanged because these tests found no defect.
+
+Verification
+- open_with_icons_test: 30 PASS, 0 FAIL; shared family bitmap, pending work,
+  refresh, fallback labels, and normal photo/video/document behavior.
+- thumbnail cache --psd-progressive: 23 PASS, 0 FAIL; real preview host and
+  actual draw path, cold/hot cache, legacy low-resolution and zoom cases.
+- Direct decode audit: 42 successful combinations of supplied/generated files,
+  requested edge and first/refinement policy.
+- Native drag boundary test: 100 PASS, 0 FAIL, including explicit light/dark.
+- Four affected drag production sources compiled independently without warnings.
+- Offscreen production drag renders inspected in light/multiple-file and
+  dark/150%-scale modes: readable feedback, no clipping or overlapping text.
+  Images: build/dragshot/feedback-theme-light.png and feedback-theme-dark-150.png.
+- Logs: bench_data/psd-badge-family-{build,test}.log,
+  bench_data/psd-hd-audit/{decode,build-cache,cache-test}.log,
+  bench_data/drag_theme_{compile,test}.log.
+
+No computer use, user-file changes, global association edits or installed-app
+interaction was performed. The icon cache test supplies resolved pixels; it
+does not claim a real Photoshop installation was available on this machine.
+
+Follow-up: open/save blank double click
+Picker appearance transfer now carries the normalized main-window
+blank_click_action, including the older blank_click_go_back setting. Both
+standalone and in-process dialogs use their existing read-only preferences
+path; system file associations and the picker request protocol are unchanged.
+Empty list double clicks use the shared blank-click release policy and history
+versus parent choice. Modifiers, marquee movement, changed navigation generation,
+file hits and lost capture cancel the gesture. Owned blank capture is released
+on button-up, navigation, close and cancellation. The disabled preference stays
+disabled. Configuration tests: 42 PASS; gesture/policy tests: 14 PASS.
+Final main and picker builds are recorded in bench_data/picker-blank-final-build.log.
+An isolated executable compiled the actual dialog with test hooks and linked
+the production picker objects, without enabling hooks in the release build.
+Actual WM input on a private desktop passed 12 checks across Open/Save and
+Details/MediumIcons: blank double click reaches parent, folder double click
+enters the folder, and file double click returns the exact expected file.
+Log: bench_data/picker_blank_live_test.log. Final redundant-hit-test removal
+is included in bench_data/picker-blank-final-rebuild.log.

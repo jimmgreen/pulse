@@ -1,4 +1,4 @@
-// app_toolbar_apps.cpp — pinned apps on the toolbar (prototype app_pins.html):
+// app_toolbar_apps.cpp — pinned apps on the toolbar:
 // view model, click, drop mode, the chip ⋯ rows and the 自定义工具栏 section.
 // Program data (names, icons, which types an app opens) comes from
 // toolbar_apps.h; opening goes through OpsManager::OpenProgramIn with the

@@ -43,7 +43,7 @@ struct GroupWheelData {
     std::vector<GroupWheelOption> options;
     int applied = 0;            // index into options
     std::wstring current_text, apply_text, cancel_text;
-    std::wstring apply_all_text;   // group picker footer button; empty = hidden
+    std::wstring apply_all_text;   // footer button; empty = hidden
     std::wstring click_apply_text; // centre row pill while the pointer is on it
     // Sort picker: direction + folder segments under the preview, the preview
     // shows `files` instead of group headers, and Left/Right set the direction.

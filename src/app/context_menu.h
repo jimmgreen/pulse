@@ -5,6 +5,7 @@
 // so the console self-test can assert the verb list, hit-test and dispatch
 // without a GUI.
 #pragma once
+#include <functional>
 #include "../ui/fluent_menu.h"
 #include "../ui/view_layout.h"
 #include "../ui/ui_view_model.h"
@@ -45,7 +46,7 @@ enum MenuCmd : int {
     CmdSortAscending,
     CmdSortDescending,
     CmdFolderSortTop,     // 文件夹优先：始终置顶
-    CmdFolderSortFollow,  // 文件夹优先：跟随排序方向
+    CmdFolderSortFollow,  // 文件夹优先：置底
     CmdFolderSortMixed,   // 文件夹优先：与文件混排
     CmdSortCreated = 31,  // 排序方式：创建日期
     CmdSortAccessed = 32, // 排序方式：访问日期
@@ -270,7 +271,7 @@ struct BackgroundViewOptions {
     ui::ViewMode view_mode = ui::ViewMode::Details;
     ui::SortColumn sort_column = ui::SortColumn::Name;
     ui::SortDirection sort_direction = ui::SortDirection::Asc;
-    int folder_sort = 0; // 0 folders first, 1 follow direction, 2 mixed
+    int folder_sort = 0; // 0 folders first, 1 folders last, 2 mixed
     bool wall = false;   // the icon view is a photo wall
     bool details_panel = false;
     bool can_sort = true;
@@ -334,5 +335,7 @@ std::vector<ui::FluentMenuItem> BuildCommandPalette(const std::wstring& query,
 // "base.ext", "base (2).ext", ... — first name not colliding under dir.
 std::wstring UniqueChildName(const std::wstring& dir, const std::wstring& base,
                              const std::wstring& ext);
+std::wstring UniqueChildName(const std::wstring& dir, const std::wstring& base,
+                             const std::wstring& ext, const std::function<bool()>& cancelled);
 
 } // namespace pulse::app

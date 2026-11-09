@@ -112,8 +112,9 @@ static ShellTransferResult RunAuthorizedRequest(elevated::Kind kind, const eleva
         return true;
     };
     try {
+        std::vector<unsigned char> payload;
         for (;;) {
-            Header header; std::vector<unsigned char> payload;
+            Header header;
             if (!tick() || !ReadFrame(session.pipe.Get(), session.process.Get(), session.nonce, header, payload, tick) || header.request != sequence) break;
             Reader reader{payload};
             if (header.kind == Kind::Progress) {

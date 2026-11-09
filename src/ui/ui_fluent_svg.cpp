@@ -45,6 +45,7 @@ command_icons::Icon CommandIconForResource(int resource_id) noexcept {
     case IDR_FLUENT_ADD_SVG: return I::Add;
     case IDR_FLUENT_PC_SVG: return I::Computer;
     case IDR_FLUENT_TAG_SVG: return I::Tag;
+    case IDR_FLUENT_WORKSPACE_SVG: return I::Workspace;
     case IDR_FLUENT_PICTURES_SVG: return I::Image;
     case IDR_FLUENT_VIDEOS_SVG: return I::Video;
     case IDR_FLUENT_MUSIC_SVG: return I::Music;
@@ -464,6 +465,7 @@ int FluentSvgIdForGlyph(std::wstring_view glyph) {
     if (glyph == L"\xE8EF") return IDR_FLUENT_COPY_SVG;
     if (glyph == L"\xE8A9") return IDR_FLUENT_APPS_SVG;
     if (glyph == L"\xE8EC") return IDR_FLUENT_TAG_SVG;
+    if (glyph == L"\xF5BE") return IDR_FLUENT_WORKSPACE_SVG;
     // The library folders in 快速访问, in the same color set as 下载 and 桌面
     // (Fluent has no color music note: headphones stand for 音乐).
     if (glyph == L"\xE91B") return IDR_FLUENT_PICTURES_SVG;

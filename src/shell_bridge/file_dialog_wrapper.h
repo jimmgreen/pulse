@@ -28,6 +28,14 @@ struct FileDialogBridgeServices {
     AccessPolicy access_policy = AccessPolicy::None; // Opt-in; Save/native parity unchanged.
     // Absent by default. Explicit v2 provider; no runtime admission is enabled here.
     std::shared_ptr<const FileDialogInprocessProvider> inprocess_provider;
+    // Show basic dialogs (no events, custom controls, properties or places)
+    // in pulse.exe over the picker pipe even when an in-process provider is
+    // available; anything the host cannot carry keeps the in-process route.
+    bool prefer_bridge = false;
+    // Optional: load inprocess_provider only when a Show actually takes the
+    // in-process route (a pulse.exe Show never loads it). Called on the Show
+    // STA; null means the provider is unavailable and that Show stays native.
+    std::function<std::shared_ptr<const FileDialogInprocessProvider>()> load_inprocess_provider;
     // Diagnostic only, no paths. IID is borrowed for this call, or null.
     // Includes harmless unsupported QI probes as well as actual native gates.
     std::function<void(const char* reason, const IID* iid)> on_native_reason;

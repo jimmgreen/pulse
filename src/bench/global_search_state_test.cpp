@@ -20,6 +20,16 @@ int main() {
         check(cleared.Selection(first) == -1, "late provider cannot silently revive an explicitly cleared selection");
     }
     std::vector<Row> normalized{{L"C:\\Fixture\\A.txt"}};
+    struct RecycledRow { std::wstring path, recycle_path; };
+    std::vector<RecycledRow> recycled{{L"C:\\same.txt", L"C:\\bin\\$R1"},
+        {L"C:\\same.txt", L"C:\\bin\\$R2"}, {L"C:\\same.txt", {}}};
+    const auto recycled_position = GlobalSearchPosition::Capture(recycled, 1, 1);
+    std::swap(recycled[0], recycled[1]);
+    check(recycled_position.Selection(recycled) == 0,
+        "recycled items with identical original paths retain payload selection identity");
+    recycled.erase(recycled.begin());
+    check(recycled_position.Selection(recycled) == -1,
+        "removed recycle result never selects live replacement at its original path");
     check(GlobalSearchPosition::Find(normalized, L"\\\\?\\c:\\fixture\\a.TXT") == 0,
           "selection uses Windows path identity including extended prefix and case");
     for (DWORD error : {DWORD{ERROR_CONNECTION_ABORTED}, DWORD{ERROR_INVALID_DATA}}) {

@@ -8,8 +8,10 @@
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <chrono>
 #include "../app/link_resolve.h"
 #include "../app/snapshot_patch.h"
+#include "../fs/drive_kind.h"
 #include "../ops/shortcut_launch.h"
 
 static int failures;
@@ -167,7 +169,84 @@ static void TestNotifyRefresh(const std::filesystem::path& root,
     }
 }
 
-int main() {
+static int TestRemoteNotify() {
+    using namespace pulse;
+    const auto root = std::filesystem::absolute(L"bench_data/remote-notify-" +
+        std::to_wstring(GetCurrentProcessId()));
+    std::filesystem::create_directories(root);
+    std::ofstream(root / L"plain.txt") << "new size";
+    fs::DirEntry initial;
+    initial.name = L"plain.txt";
+    initial.size = 123;
+    const wchar_t letter[] = {fs::DriveLetterOf(root.wstring()), 0};
+    SetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", root.c_str());
+    SetEnvironmentVariableW(L"PULSE_TEST_REMOTE_LIKE_DRIVES", letter);
+    Check(fs::IsRemoteLikeDrive(root.wstring()), "isolated drive is classified remote-like");
+    for (const auto& folder : {root.wstring(), fs::NormalizePath(root.wstring()),
+            std::wstring(L"\\\\pulse-offline.invalid\\share"),
+            std::wstring(L"\\\\?\\UNC\\pulse-offline.invalid\\share")}) {
+        for (const DWORD action : {FILE_ACTION_ADDED, FILE_ACTION_MODIFIED, FILE_ACTION_RENAMED_NEW_NAME}) {
+            fs::DirNotifyEvent event;
+            event.action = action;
+            event.name = L"plain.txt";
+            event.old_name = L"old.txt";
+            for (bool batch : {false, true}) {
+                std::vector<fs::DirEntry> entries{initial};
+                const auto started = GetTickCount64();
+                const auto result = batch ? app::ApplyDirNotifyBatch(entries, folder, {event},
+                    ui::SortColumn::Name, ui::SortDirection::Asc) :
+                    app::ApplyDirNotify(entries, folder, event, ui::SortColumn::Name, ui::SortDirection::Asc);
+                Check(result == app::NotifyPatch::NeedFullEnum && entries.size() == 1 &&
+                    entries[0].name == initial.name && entries[0].size == initial.size &&
+                    GetTickCount64() - started < 500,
+                    "remote metadata notification returns promptly with snapshot untouched");
+            }
+        }
+        fs::DirNotifyEvent removed;
+        removed.action = FILE_ACTION_REMOVED;
+        removed.name = initial.name;
+        std::vector<fs::DirEntry> entries{initial};
+        Check(app::ApplyDirNotifyBatch(entries, folder, {removed}, ui::SortColumn::Name,
+            ui::SortDirection::Asc) == app::NotifyPatch::Applied && entries.empty(),
+            "remote removal needs no metadata read");
+        fs::DirNotifyEvent modified = removed;
+        modified.action = FILE_ACTION_MODIFIED;
+        entries = {initial};
+        Check(app::ApplyDirNotifyBatch(entries, folder, {removed, modified}, ui::SortColumn::Name,
+            ui::SortDirection::Asc) == app::NotifyPatch::NeedFullEnum && entries.size() == 1 &&
+            entries[0].size == initial.size, "mixed remote batch does not partially mutate snapshot");
+    }
+    SetEnvironmentVariableW(L"PULSE_TEST_REMOTE_LIKE_DRIVES", nullptr);
+    SetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", nullptr);
+    fs::DirNotifyEvent modified;
+    modified.action = FILE_ACTION_MODIFIED;
+    modified.name = initial.name;
+    std::vector<fs::DirEntry> entries{initial};
+    Check(app::ApplyDirNotifyBatch(entries, root.wstring(), {modified}, ui::SortColumn::Name,
+        ui::SortDirection::Asc) == app::NotifyPatch::Applied && entries[0].size == 8,
+        "local metadata refresh remains incremental");
+    Check(DeleteFileW((root / L"plain.txt").c_str()) && RemoveDirectoryW(root.c_str()), "remove isolated fixtures");
+    return failures ? 1 : 0;
+}
+
+int main(int argc, char** argv) {
+    if (argc == 3 && strcmp(argv[1], "--shortcut-latency") == 0) {
+        const auto root = std::filesystem::absolute(std::filesystem::path(argv[2]));
+        std::vector<pulse::fs::DirEntry> entries;
+        const auto start = std::chrono::steady_clock::now();
+        pulse::fs::EnumerateDirectory(root.wstring(), entries);
+        const auto listed = std::chrono::steady_clock::now();
+        pulse::app::ResolveLinksInPlace(root.wstring(), entries, {});
+        const auto resolved = std::chrono::steady_clock::now();
+        const auto count = std::count_if(entries.begin(), entries.end(), [](const auto& entry) {
+            return !entry.link_target.empty();
+        });
+        printf("shortcuts=%zu resolved=%zu enumerate_ms=%.3f resolve_ms=%.3f\n", entries.size(),
+            static_cast<size_t>(count), std::chrono::duration<double, std::milli>(listed - start).count(),
+            std::chrono::duration<double, std::milli>(resolved - listed).count());
+        return entries.size() == 265 && count == 265 ? 0 : 1;
+    }
+    if (argc == 2 && strcmp(argv[1], "--remote-notify-only") == 0) return TestRemoteNotify();
     using namespace pulse;
     const auto root = std::filesystem::absolute(L"bench_data/link-destination-" +
         std::to_wstring(GetCurrentProcessId()));

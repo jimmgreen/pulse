@@ -15,7 +15,7 @@ struct FolderSort {
     bool operator==(const FolderSort&) const = default;
 };
 
-// Real folders only (same keys as FolderViewPrefs); virtual views such as
+// Real folders and This PC (empty navigation path); virtual views such as
 // search results keep the tab's order and are never stored.
 class FolderSortPrefs {
 public:

@@ -12,7 +12,7 @@ bool CloseWorkspacePane(AppState& s, app::Pane* pane) {
     if (s.addressEditing) HideAddressEditor(s, false);
     if (s.filterEditing) HideFilterEditor(s, true);
     if (s.quickPreview.visible()) s.quickPreview.Close();
-    CancelRenameClick(s);
+    CancelFileClick(s);
     s.blankClickPane = nullptr;
     s.blankClickTab = nullptr;
     s.blankDoublePane = nullptr;

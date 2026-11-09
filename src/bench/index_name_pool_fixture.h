@@ -44,6 +44,49 @@ bool EngineTestAccess::NamePoolFixture() {
         std::cout << "[MAINTENANCE_JSON] " << source.filename_timing_.Maintenance().Json() << '\n';
     }
     for (bool mapped : {false, true}) {
+        const auto data = dir / (mapped ? L"failed-merge-mapped" : L"failed-merge-heap");
+        std::filesystem::create_directories(data);
+        SetActiveIndexDirectory(data.wstring());
+        Engine e;
+        if (!(mapped ? Load(e, base_path.wstring()) : Build(e))) {
+            check(false, "prepare failed merge fixture");
+            continue;
+        }
+        e.ready_ = true;
+        const auto blocked = CacheFilePath() + L".tmp";
+        check(CreateDirectoryW(blocked.c_str(), nullptr) != FALSE, "block snapshot output with isolated directory");
+        for (unsigned attempt = 0; attempt < 2; ++attempt) {
+            std::wstring name(240, L'x');
+            for (unsigned i = 0; i < 4600; ++i) {
+                name.back() = i % 2 ? L'b' : L'a';
+                Usn(e, 90, 20, name.c_str(), USN_REASON_RENAME_NEW_NAME);
+            }
+            Usn(e, 90, 20, L"failure-final", USN_REASON_RENAME_NEW_NAME);
+            const auto pending = e.struct_changes_;
+            const auto capacity = e.live_.pool.capacity();
+            const auto built = e.built_unix_;
+            e.merge_retry_after_tick_ = 0;
+            e.name_pool_retry_after_tick_ = 0;
+            e.MergeBase(true, "structural_threshold");
+            const auto id = e.FindByFrnLocked(e.vols_.front(), 90);
+            Query query; query.needle = L"failure-final";
+            check(e.merge_failures_ == attempt + 1 && e.struct_changes_ == pending &&
+                e.built_unix_ == built && e.NameOf(id) == L"failure-final" && e.Search(query).total == 1,
+                "repeated failed merges retain pending changes, base timestamp and searchable names");
+            check(e.pool_waste_ == 0 && e.live_.pool.capacity() < capacity &&
+                e.filename_timing_.Maintenance().pool.successes == attempt + 1,
+                "failed merge immediately reclaims obsolete names in heap and mapped overlays");
+            check(e.MaintenanceMergeReason(GetTickCount64(), 64ull << 20) == nullptr,
+                "failed merge still backs off full publication");
+        }
+        check(RemoveDirectoryW(blocked.c_str()) != FALSE, "remove isolated snapshot failure");
+        e.merge_retry_after_tick_ = 0;
+        e.MergeBase(true, "structural_threshold");
+        check(e.merge_failures_ == 0 && e.struct_changes_ == 0 && e.map_ &&
+            e.NameOf(e.FindByFrnLocked(e.vols_.front(), 90)) == L"failure-final",
+            "publication recovers with retained changes after repeated failures");
+    }
+    for (bool mapped : {false, true}) {
         const auto data = dir / (mapped ? L"mapped" : L"heap");
         std::filesystem::create_directories(data);
         SetActiveIndexDirectory(data.wstring());

@@ -92,6 +92,10 @@ ExternalOpenDecision DecideOpenTarget(const ExternalOpenRequest& request,
 ExternalOpenDecision DecideLaunchTarget(int mode, const std::vector<ExternalOpenWindow>& windows,
                                       bool explicit_window = false);
 
+// Taskbar activation restores only the MRU window. A busy MRU defers without
+// navigating, choosing another window or manufacturing a new one.
+ExternalOpenDecision DecideActivationTarget(const std::vector<ExternalOpenWindow>& windows);
+
 // Compatibility helpers: always return an empty batch / false respectively.
 // Arguments remain to avoid changing unrelated routing/conversion callers.
 ExternalOpenBatch NextOpenBatch(const ExternalOpenBatch& batch, const ExternalOpenRequest& request,

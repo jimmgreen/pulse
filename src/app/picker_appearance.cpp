@@ -1,5 +1,6 @@
 #include "picker_appearance.h"
 #include "app_prefs.h"
+#include "blank_pane_click.h"
 #include "../ui/folder_picker_dialog.h"
 #include "../common/json_utils.h"
 #include "../common/utf8_file.h"
@@ -52,6 +53,10 @@ void Normalize(PickerAppearanceSnapshot& value) {
     if (value.text_render < 0 || value.text_render > 2) value.text_render = 0;
     if (value.row_height < 24 || value.row_height > 48) value.row_height = 34;
     value.details_columns = ui::NormalizeDetailsColumns(value.details_columns);
+    value.blank_click_action = NormalizeBlankClickAction(value.blank_click_action);
+    value.preview_trigger = NormalizePreviewTrigger(value.preview_trigger);
+    value.hover_preview_delay_ms = NormalizeHoverPreviewDelay(value.hover_preview_delay_ms);
+    value.hover_card_size = NormalizeHoverCardSize(value.hover_card_size);
 }
 PickerAppearanceReadResult Failure(DWORD error) {
     PickerAppearanceReadResult result;
@@ -75,6 +80,10 @@ PickerAppearanceSnapshot PickerAppearanceFromPrefs(const AppPrefs& prefs) {
     value.size_bar = prefs.list_size_bar;
     value.thumbnail_badges = prefs.list_thumbnail_badges;
     value.details_columns = prefs.details_columns;
+    value.blank_click_action = prefs.blank_click_action;
+    value.preview_trigger = prefs.preview_trigger;
+    value.hover_preview_delay_ms = prefs.hover_preview_delay_ms;
+    value.hover_card_size = prefs.hover_card_size;
     Normalize(value);
     return value;
 }
@@ -94,6 +103,11 @@ bool ParsePickerAppearanceJson(const std::wstring& json, PickerAppearanceSnapsho
     value.size_bar = pulse::json::ExtractBool(json, L"list_size_bar", false);
     value.thumbnail_badges = pulse::json::ExtractBool(json, L"list_thumbnail_badges", true);
     value.details_columns = static_cast<uint32_t>(Integer(json, L"details_columns", static_cast<int>(ui::kDetailsColumnsDefault)));
+    value.blank_click_action = Integer(json, L"blank_click_action",
+        pulse::json::ExtractBool(json, L"blank_click_go_back", false) ? kBlankClickBack : kBlankClickOff);
+    value.preview_trigger = Integer(json, L"preview_trigger", kPreviewTriggerHover);
+    value.hover_preview_delay_ms = Integer(json, L"hover_preview_delay_ms", 500);
+    value.hover_card_size = Integer(json, L"hover_card_size", kHoverCardMedium);
     Normalize(value);
     if (Integer(json, L"details_columns_v", 1) < 2) value.details_columns |= ui::kDetailsColumnStatus;
     output = std::move(value);
@@ -153,6 +167,10 @@ void ApplyPickerAppearanceToSpec(const PickerAppearanceSnapshot& snapshot, ui::F
     spec.list_zebra_rows = snapshot.zebra_rows;
     spec.list_size_bar = snapshot.size_bar;
     spec.thumbnail_badges = snapshot.thumbnail_badges;
+    spec.blank_click_action = NormalizeBlankClickAction(snapshot.blank_click_action);
+    spec.preview_trigger = snapshot.preview_trigger;
+    spec.hover_preview_delay_ms = snapshot.hover_preview_delay_ms;
+    spec.hover_card_size = snapshot.hover_card_size;
     spec.details_columns = snapshot.details_columns;
     spec.explicit_details_columns = true;
 }

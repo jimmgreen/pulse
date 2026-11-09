@@ -1,4 +1,5 @@
 #include "../app/settings_controller.h"
+#include "../app/shell_integration_registry.h"
 #include "../app/address_bar_command.h"
 #include "../app/session.h"
 #include "../app/layout_pane_selection.h"
@@ -440,10 +441,11 @@ bool TestShellWindowPlan() {
         file && top && share && trailing && roots);
 
     using S = ExplorerTakeoverStep;
-    auto step = [](unsigned age, bool ready, bool supported, size_t selected, unsigned view_age = 0) {
+    auto step = [](unsigned age, bool ready, bool supported, size_t selected, unsigned stable_age = 0, bool readable = true) {
         ExplorerWindowProbe probe;
         probe.age_ms = age;
-        probe.view_age_ms = view_age;
+        probe.stable_age_ms = stable_age;
+        probe.selection_read = readable;
         probe.view_ready = ready;
         probe.supported = supported;
         probe.selected = selected;
@@ -454,10 +456,44 @@ bool TestShellWindowPlan() {
         step(kExplorerViewTimeoutMs, false, false, 0) == S::Leave);
     passed &= Report("explorer takeover: virtual locations are left to File Explorer",
         step(50, true, false, 0) == S::Leave && step(50, true, false, 2) == S::Leave);
-    passed &= Report("explorer takeover: a selection is taken at once, a plain folder soon after its view",
-        step(50, true, true, 1) == S::Take && step(5000, true, true, 0, 0) == S::Wait &&
-        step(50, true, true, 0, kExplorerSelectionGraceMs - 1) == S::Wait &&
-        step(50, true, true, 0, kExplorerSelectionGraceMs) == S::Take);
+    passed &= Report("explorer takeover: selection settles quickly; empty folders use one short late-selection grace",
+        step(50, true, true, 1) == S::Wait &&
+        step(200, true, true, 1, kExplorerSelectionGraceMs - 1) == S::Wait &&
+        step(200, true, true, 1, kExplorerSelectionGraceMs) == S::Take &&
+        step(1000, true, true, 0, kExplorerLateSelectionMs - 1) == S::Wait &&
+        step(1000, true, true, 0, kExplorerLateSelectionMs) == S::Take);
+    passed &= Report("explorer takeover: bounded observation cannot submit unstable or unreadable selection",
+        step(1000, true, true, 1, 500, false) == S::Wait &&
+        step(kExplorerViewTimeoutMs, true, true, 1, 0) == S::Leave &&
+        step(kExplorerViewTimeoutMs, true, true, 1, 500) == S::Leave &&
+        step(kExplorerViewTimeoutMs, true, true, 0, 0, false) == S::Leave);
+    ExplorerSelectionStability observation;
+    const std::wstring observed_folder = L"C:\\fixture";
+    auto observe = [&](unsigned age, bool readable, const std::vector<std::wstring>& names) {
+        return observation.Observe(age, readable, observed_folder, names);
+    };
+    passed &= Report("explorer takeover: late selected item joins initial transaction after stable observation",
+        step(0, true, true, 0, observe(0, true, {})) == S::Wait &&
+        step(50, true, true, 0, observe(50, true, {})) == S::Wait &&
+        step(80, true, true, 1, observe(80, true, {L"selected.txt"})) == S::Wait &&
+        step(179, true, true, 1, observe(179, true, {L"selected.txt"})) == S::Wait &&
+        step(180, true, true, 1, observe(180, true, {L"selected.txt"})) == S::Take);
+    passed &= Report("explorer takeover: selection order is stable; unreadable samples reset observation",
+        observe(800, true, {L"a", L"b"}) == 0 && observe(950, true, {L"b", L"a"}) == 150 &&
+        observe(960, false, {}) == 0 && observe(1100, true, {L"b", L"a"}) == 0);
+    passed &= Report("explorer takeover: folder changes and emptied selections restart the observation window",
+        observation.Observe(1200, true, L"C:\\other", {L"a", L"b"}) == 0 &&
+        observation.Observe(1250, true, L"C:\\other", {}) == 0 &&
+        step(1349, true, true, 0, observation.Observe(1349, true, L"C:\\other", {})) == S::Wait &&
+        step(1350, true, true, 0, observation.Observe(1350, true, L"C:\\other", {})) == S::Take);
+    ExplorerSelectionStability changing;
+    bool bounded = true;
+    for (unsigned age = 0; age <= kExplorerViewTimeoutMs; age += 100) {
+        const auto stable = changing.Observe(age, true, observed_folder, {std::to_wstring(age)});
+        bounded &= step(age, true, true, 1, stable) ==
+            (age == kExplorerViewTimeoutMs ? S::Leave : S::Wait);
+    }
+    passed &= Report("explorer takeover: continuously changing nonempty selection leaves at fixed bound", bounded);
 
     using C = SourceCloseStep;
     auto close = [](bool identity, bool single_tab, bool changed, bool sent, unsigned view_age) {
@@ -552,6 +588,24 @@ bool TestShortcutKeymap() {
     auto chord = [](const wchar_t* text) { KeyChord c{}; k::ParseChord(text, c); return c; };
     bool passed = true;
     k::Keymap fresh;
+    bool layouts_keep_keys = true;
+    for (uint16_t digit = '1'; digit <= '4'; ++digit) {
+        const KeyChord key{k::kKeyCtrl | k::kKeyAlt, digit};
+        layouts_keep_keys = layouts_keep_keys && fresh.Find(key).action == KeyAction::Layout &&
+            k::WorkspaceShortcutIndex(fresh, key) == -1;
+    }
+    passed &= Report("keymap: all four layout defaults beat workspace fallback", layouts_keep_keys);
+    passed &= Report("keymap: unbound workspace digits still work",
+        k::WorkspaceShortcutIndex(fresh, chord(L"Ctrl+Alt+5")) == 4 &&
+        k::WorkspaceShortcutIndex(fresh, chord(L"Ctrl+Alt+9")) == 8 &&
+        k::WorkspaceShortcutIndex(fresh, chord(L"Ctrl+Alt+Shift+5")) == -1);
+    auto layout_custom = k::Keymap::FromPrefs({L"Layout=Ctrl+Alt+Shift", L"CopyPath=Ctrl+Alt+5"});
+    const auto custom_layout = layout_custom.Translate(chord(L"Ctrl+Alt+Shift+2"));
+    passed &= Report("keymap: custom layout canonical keys never become workspace shortcuts",
+        custom_layout.kind == k::Keymap::Translation::Rewrite &&
+        custom_layout.target == chord(L"Ctrl+Alt+2") &&
+        k::WorkspaceShortcutIndex(layout_custom, custom_layout.target) == -1 &&
+        k::WorkspaceShortcutIndex(layout_custom, chord(L"Ctrl+Alt+5")) == -1);
     passed &= Report("keymap: Ctrl+G is 合并到文件夹, Ctrl+Shift+G 解散文件夹 by default",
         fresh.Find(chord(L"Ctrl+G")).action == KeyAction::GroupIntoFolder &&
         fresh.Find(chord(L"Ctrl+Shift+G")).action == KeyAction::DissolveFolder &&
@@ -962,6 +1016,19 @@ bool TestThisPc() {
         reloaded.folder_views.Find(L"") == ViewMode::Tiles);
     reloaded.FromJson(L"{\"folder_view_this_pc\":-1}");
     passed &= Report("this pc: an unset choice stays unset", !reloaded.folder_views.Find(L""));
+    const pulse::app::FolderSort pc_sort{SortColumn::Size, SortDirection::Desc};
+    passed &= Report("this pc: sort can be saved independently",
+        prefs.folder_sorts.Set(L"", pc_sort) && prefs.folder_sorts.Find(L"") == pc_sort &&
+        !prefs.folder_sorts.Find(L"C:\\") && !prefs.folder_sorts.Set(L"pulse:recent", pc_sort));
+    prefs.folder_sorts.SetFolderMode(L"", 2);
+    reloaded.FromJson(prefs.ToJson());
+    passed &= Report("this pc: sort and direction survive preferences reload",
+        reloaded.folder_sorts.Find(L"") == pc_sort && reloaded.folder_sorts.FindFolderMode(L"") == 2);
+    reloaded.folder_sorts.ApplyToAll({SortColumn::Name, SortDirection::Asc});
+    passed &= Report("this pc: apply to all folders preserves independent sort",
+        reloaded.folder_sorts.Find(L"") == pc_sort && reloaded.folder_sorts.FindFolderMode(L"") == 2);
+    reloaded.FromJson(L"{}");
+    passed &= Report("this pc: older preferences use default sort", !reloaded.folder_sorts.Find(L""));
 
     // Labels from the reporting machine; sorted as text they read C, G, F, D, E.
     const wchar_t* labels[] = { L"Win11", L"新加卷", L"资料安装盘", L"项目盘", L"软件池" };
@@ -1589,7 +1656,77 @@ bool TestPackAutoUpdate() {
     return passed;
 }
 
+bool TestCompatibleFolderUpgrade() {
+    using namespace pulse::app;
+    const std::wstring scratch_path = L"Software\\PulseTest\\CompatUpgrade-" + std::to_wstring(GetCurrentProcessId());
+    HKEY scratch = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, scratch_path.c_str(), 0, nullptr, 0, KEY_ALL_ACCESS,
+        nullptr, &scratch, nullptr) != ERROR_SUCCESS)
+        return Report("compat: isolated registry is writable", false);
+    if (RegOverridePredefKey(HKEY_CURRENT_USER, scratch) != ERROR_SUCCESS) {
+        RegCloseKey(scratch);
+        RegDeleteTreeW(HKEY_CURRENT_USER, scratch_path.c_str());
+        return Report("compat: registry override is available", false);
+    }
+    const std::wstring directory = L"bench_data\\compat-upgrade-" + std::to_wstring(GetCurrentProcessId());
+    bool ok = Report("compat: isolated preferences created", CreateDirectoryW(directory.c_str(), nullptr) != FALSE);
+    test_prefs_directory = directory;
+    AppPrefs prefs;
+    prefs.integration_configured = true;
+    prefs.integration_enabled = true;
+    prefs.integration_folders = true;
+    prefs.integration_folders_compat = true;
+    prefs.integration_win_e = false;
+    prefs.integration_this_pc = false;
+    prefs.integration_recycle_bin = false;
+    ContextMenuPrefs context;
+    context.persist = false;
+    pulse::index::IndexClient index;
+    pulse::index::NetworkAgentClient network;
+    SettingsController settings;
+    settings.BindUi(prefs, context, index, network, {});
+    ok &= Report("compat: old configuration saved in isolated directory", prefs.Save());
+    ok &= Report("compat: startup restores direct folder registration", prefs.Load() &&
+        prefs.open_folders_in_pulse && prefs.ReadFolderOpen() && settings.IntegrationState() == 1);
+    settings.IntegrationAction(9);
+    ok &= Report("compat: disabling fallback keeps direct registration", prefs.ReadFolderOpen());
+    settings.IntegrationAction(9);
+    ok &= Report("compat: enabling fallback keeps direct registration", prefs.ReadFolderOpen());
+    for (const int action : {2, 3, 4, 7, 5}) {
+        settings.IntegrationAction(action);
+        ok &= Report("compat: changing another scope or repairing preserves direct registration", prefs.ReadFolderOpen());
+        if (action != 5) settings.IntegrationAction(action);
+    }
+    settings.IntegrationAction(1);
+    ok &= Report("compat: disabled folder selection survives startup", prefs.Load() &&
+        !prefs.integration_folders && !prefs.ReadFolderOpen());
+    settings.IntegrationAction(0);
+    settings.IntegrationAction(1);
+    ok &= Report("compat: disabled master survives startup", prefs.Load() &&
+        !prefs.integration_enabled && prefs.integration_folders && !prefs.ReadFolderOpen());
+    prefs.integration_enabled = true;
+    ok &= Report("compat: enabled old configuration saved for failed upgrade", prefs.Save());
+    SetIntegrationWriteHookForTesting([](const std::wstring&, const std::wstring&) { return false; });
+    ok &= Report("compat: failed startup registration is never reported active", prefs.Load() &&
+        !prefs.open_folders_in_pulse && !prefs.ReadFolderOpen() && settings.IntegrationState() != 1);
+    SetIntegrationWriteHookForTesting(nullptr);
+    settings.IntegrationAction(5);
+    ok &= Report("compat: retry restores direct registration after failure", prefs.ReadFolderOpen() &&
+        prefs.open_folders_in_pulse && settings.IntegrationState() == 1);
+    test_prefs_directory.clear();
+    ok &= Report("compat: isolated preferences removed", DeleteFileW((directory + L"\\app.json").c_str()) &&
+        RemoveDirectoryW(directory.c_str()));
+    const bool detached = RegOverridePredefKey(HKEY_CURRENT_USER, nullptr) == ERROR_SUCCESS;
+    RegCloseKey(scratch);
+    ok &= Report("compat: isolated registry removed", detached &&
+        RegDeleteTreeW(HKEY_CURRENT_USER, scratch_path.c_str()) == ERROR_SUCCESS);
+    SHDeleteEmptyKeyW(HKEY_CURRENT_USER, L"Software\\PulseTest");
+    return ok;
+}
+
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--integration-compat")
+        return TestCompatibleFolderUpgrade() ? 0 : 1;
     if (argc == 2 && std::wstring_view(argv[1]) == L"--explorer-takeover") {
         pulse::l10n::Initialize(GetModuleHandleW(nullptr), L"zh-CN");
         return TestShellWindowPlan() ? 0 : 1;
@@ -1683,6 +1820,43 @@ int wmain(int argc, wchar_t** argv) {
     if (argc == 2 && std::wstring(argv[1]) == L"--default-manager") {
         pulse::l10n::Initialize(GetModuleHandleW(nullptr), L"zh-CN");
         return TestDefaultFileManager() ? 0 : 1;
+    }
+    if (argc == 2 && std::wstring(argv[1]) == L"--integration-segments") {
+        using namespace pulse::app;
+        AppPrefs prefs;
+        prefs.persist = false;
+        ContextMenuPrefs context;
+        context.persist = false;
+        pulse::index::IndexClient index;
+        pulse::index::NetworkAgentClient network;
+        SettingsController settings;
+        settings.BindUi(prefs, context, index, network, {});
+        bool ok = true;
+        const auto disabled = prefs.ToJson();
+        for (int action : {20, 21, 23, 24, 25, 26, 27, 28, 29}) settings.IntegrationAction(action);
+        ok &= Report("disabled integration segments cannot change choices", prefs.ToJson() == disabled);
+        settings.IntegrationAction(0);
+        settings.IntegrationAction(20);
+        ok &= Report("folder Explorer segment releases only folder scope",
+            !prefs.integration_folders && prefs.integration_this_pc && prefs.integration_win_e);
+        settings.IntegrationAction(21);
+        settings.IntegrationAction(25);
+        settings.IntegrationAction(28);
+        ok &= Report("tab segments keep scopes enabled and save tab routing",
+            prefs.integration_folders && prefs.integration_this_pc && prefs.integration_win_e &&
+            prefs.open_this_pc == 1 && prefs.open_win_e == 1);
+        settings.IntegrationAction(24);
+        settings.IntegrationAction(29);
+        ok &= Report("Win E activate preserves other entry routing",
+            prefs.integration_win_e && prefs.open_win_e == 2 && prefs.open_this_pc == 0);
+        settings.IntegrationAction(27);
+        ok &= Report("window segments save independent window routing",
+            prefs.open_this_pc == 0 && prefs.open_win_e == 0);
+        settings.IntegrationAction(23);
+        settings.IntegrationAction(26);
+        ok &= Report("Explorer segments release their own scopes without disabling folders",
+            prefs.integration_folders && !prefs.integration_this_pc && !prefs.integration_win_e);
+        return ok ? 0 : 1;
     }
     if (argc == 2 && std::wstring(argv[1]) == L"--integration-settings") {
         using namespace pulse::app;
@@ -1868,6 +2042,29 @@ int wmain(int argc, wchar_t** argv) {
         return ok ? 0 : 1;
     }
     pulse::l10n::Initialize(GetModuleHandleW(nullptr), L"zh-CN");
+    if (argc == 2 && std::wstring(argv[1]) == L"--media-columns-toggle") {
+        pulse::app::AppPrefs prefs;
+        prefs.persist = false;
+        prefs.media_columns = true;
+        prefs.arrange_include_minimized = false;
+        pulse::app::ContextMenuPrefs context;
+        context.persist = false;
+        pulse::index::IndexClient index;
+        pulse::index::NetworkAgentClient network;
+        pulse::app::SettingsController settings;
+        pulse::app::SettingsEffect effect = pulse::app::SettingsEffect::None;
+        pulse::app::SettingsController::UiCallbacks callbacks;
+        callbacks.apply_effects = [&](auto value) { effect = value; };
+        settings.BindUi(prefs, context, index, network, std::move(callbacks));
+        settings.ToggleUi(80);
+        bool ok = Report("media toggle changes media columns only", !prefs.media_columns &&
+            !prefs.arrange_include_minimized && pulse::app::HasEffect(effect, pulse::app::SettingsEffect::ListStyle));
+        settings.ToggleUi(81);
+        ok &= Report("arrange minimized has independent toggle", prefs.arrange_include_minimized && !prefs.media_columns);
+        settings.ToggleUi(80);
+        ok &= Report("media columns can be enabled again", prefs.media_columns && prefs.arrange_include_minimized);
+        return ok ? 0 : 1;
+    }
     if (argc == 2 && std::wstring(argv[1]) == L"--global-search") {
         pulse::app::AppPrefs prefs;
         prefs.persist = false;

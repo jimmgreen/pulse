@@ -111,11 +111,13 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
                                     right - r.left - 54*s, theme.text_secondary);
         painter_.DrawSegmentedTrack(D2D1::RectF(choices[0].left, choices[0].top,
                                                 choices[count - 1].right, choices[count - 1].bottom));
+        if (checked >= 0 && checked < count) DrawSettingsSegmentPlate(110000 + static_cast<int>(first), checked, choices[checked]);
         for (int i = 0; i < count; ++i) {
             fluent::SegmentedItemSpec item{};
             item.bounds = choices[i];
             item.text = label(i);
             item.state.checked = i == checked;
+            item.suppress_plate = item.state.checked;
             item.state.hovered = hovered(static_cast<PackAction>(static_cast<int>(first) + i));
             item.shared_track = true;
             item.position = i == 0 ? fluent::SegmentPosition::First
@@ -249,6 +251,14 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
     return;
     }
 
+    card(lay.pack_native_settings);
+    hover_row(lay.pack_native_settings, PackAction::NativeSettings);
+    setting(lay.pack_native_settings, L"\xE713", l10n::Get(l10n::StringId::NativeExtensionSettingsTitle),
+        l10n::Get(l10n::StringId::NativeExtensionSettingsIntro));
+    painter_.DrawGlyph(L"\xE76C", D2D1::RectF(lay.pack_native_settings.right-38*s,
+        lay.pack_native_settings.top+24*s, lay.pack_native_settings.right-18*s,
+        lay.pack_native_settings.top+44*s), theme.text_secondary);
+
     // Summary: count, disk use and location.
     {
         const auto& r = lay.pack_summary;
@@ -355,15 +365,6 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
                PackAction::RawEnable, PackAction::RawInstall, PackAction::RawRemove,
                vm.settings_pack_raw_notice, lay.pack_raw_update, pack_text::RawUpdate(vm), PackAction::RawUpdate});
 
-    // 7-Zip archive contents.
-    text(pack_text::Archive(), lay.pack_archive_section);
-    draw_card({lay.pack_archive_card, lay.pack_archive_badge, lay.pack_archive_enable, lay.pack_archive_primary,
-               lay.pack_archive_notice, L"\xE8B7",
-               pack_text::ArchiveTitle(), pack_text::ArchiveDesc(), pack_text::ArchiveMeta(), pack_text::ArchiveBadge(vm),
-               pack_text::ShowsArchiveEnable(vm), vm.settings_pack_archive_enabled, vm.settings_pack_archive_installed,
-               vm.settings_pack_archive_installing, vm.settings_pack_archive_available, vm.settings_pack_archive_progress, pack_text::ArchivePrimary(vm),
-               PackAction::ArchiveEnable, PackAction::ArchiveInstall, PackAction::ArchiveRemove,
-               vm.settings_pack_archive_notice, lay.pack_archive_update, pack_text::ArchiveUpdate(vm), PackAction::ArchiveUpdate});
 
     // 搜索: 内容搜索 (index status in the notice box once installed) and OCR.
     text(pack_text::SearchSection(), lay.pack_search_section);

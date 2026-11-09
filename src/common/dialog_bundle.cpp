@@ -1,4 +1,5 @@
 #include "dialog_bundle.h"
+#include "dialog_bundle_pointer.h"
 #include "json_value.h"
 #include <bcrypt.h>
 #include <algorithm>
@@ -59,15 +60,17 @@ std::wstring Final(HANDLE h) {
     if (result.starts_with(LR"(\\?\)")) result.erase(0, 4);
     return result;
 }
-File Open(const fs::path& path, bool directory) {
-    File f(CreateFileW(path.c_str(), directory ? FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES : GENERIC_READ,
+File Open(const fs::path& path, bool directory, bool pointer_snapshot = false) {
+    File f(pointer_snapshot ? detail::OpenPointerSnapshot(path.c_str()) : CreateFileW(path.c_str(), directory ? FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES : GENERIC_READ,
         directory ? FILE_SHARE_READ | FILE_SHARE_WRITE : FILE_SHARE_READ, nullptr, OPEN_EXISTING,
         FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr));
     Win(f.h != INVALID_HANDLE_VALUE); BY_HANDLE_FILE_INFORMATION info{};
     Win(GetFileInformationByHandle(f.h, &info) != FALSE);
     Require(!(info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT), ERROR_NOT_SUPPORTED);
     Require(!!(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == directory, ERROR_DIRECTORY);
-    Require(_wcsicmp(Final(f.h).c_str(), path.c_str()) == 0, ERROR_BAD_PATHNAME);
+    // The pointer's directory entry may already have been atomically replaced;
+    // its checked non-reparse handle still names the original complete snapshot.
+    if(!pointer_snapshot) Require(_wcsicmp(Final(f.h).c_str(), path.c_str()) == 0, ERROR_BAD_PATHNAME);
     return f;
 }
 std::vector<unsigned char> Read(HANDLE h, size_t limit) {
@@ -90,7 +93,7 @@ std::string Digest(const std::vector<unsigned char>& b) {
 }
 Value Parse(const std::vector<unsigned char>& b) { Value v; Require(json::Parse(std::string_view(reinterpret_cast<const char*>(b.data()), b.size()), v, nullptr, {1024 * 1024, 16})); return v; }
 bool System(const std::string& s) {
-    static const std::string names = R"( kernel32.dll kernelbase.dll ntdll.dll user32.dll gdi32.dll gdi32full.dll advapi32.dll ole32.dll oleaut32.dll shell32.dll shlwapi.dll comdlg32.dll comctl32.dll uuid.dll rpcrt4.dll combase.dll imm32.dll winmm.dll version.dll uxtheme.dll dwmapi.dll shcore.dll d3d11.dll d2d1.dll dwrite.dll dxgi.dll dcomp.dll windowscodecs.dll gdiplus.dll bcrypt.dll bcryptprimitives.dll crypt32.dll cryptbase.dll secur32.dll sspicli.dll winhttp.dll wininet.dll ws2_32.dll dnsapi.dll iphlpapi.dll netapi32.dll mpr.dll propsys.dll cfgmgr32.dll setupapi.dll userenv.dll wtsapi32.dll powrprof.dll profapi.dll psapi.dll dbghelp.dll dbgcore.dll imagehlp.dll wintrust.dll normaliz.dll usp10.dll msvcrt.dll ucrtbase.dll mf.dll mfplat.dll mfreadwrite.dll mfuuid.dll mfplay.dll avrt.dll msacm32.dll msimg32.dll opengl32.dll glu32.dll winspool.drv hid.dll urlmon.dll cabinet.dll cryptui.dll d3d9.dll d3d12.dll dxcore.dll dinput8.dll wevtapi.dll wldap32.dll winusb.dll wlanapi.dll sensapi.dll authz.dll dwmapi.dll rstrtmgr.dll xmllite.dll )";
+    static const std::string names = R"( kernel32.dll kernelbase.dll ntdll.dll user32.dll gdi32.dll gdi32full.dll advapi32.dll ole32.dll oleaut32.dll oleacc.dll shell32.dll shlwapi.dll comdlg32.dll comctl32.dll uuid.dll rpcrt4.dll combase.dll imm32.dll winmm.dll version.dll uxtheme.dll dwmapi.dll shcore.dll d3d11.dll d2d1.dll dwrite.dll dxgi.dll dcomp.dll windowscodecs.dll gdiplus.dll bcrypt.dll bcryptprimitives.dll crypt32.dll cryptbase.dll secur32.dll sspicli.dll winhttp.dll wininet.dll ws2_32.dll dnsapi.dll iphlpapi.dll netapi32.dll mpr.dll propsys.dll cfgmgr32.dll setupapi.dll userenv.dll wtsapi32.dll powrprof.dll profapi.dll virtdisk.dll psapi.dll dbghelp.dll dbgcore.dll imagehlp.dll wintrust.dll normaliz.dll usp10.dll msvcrt.dll ucrtbase.dll mf.dll mfplat.dll mfreadwrite.dll mfuuid.dll mfplay.dll avrt.dll msacm32.dll msimg32.dll opengl32.dll glu32.dll winspool.drv hid.dll urlmon.dll cabinet.dll cryptui.dll d3d9.dll d3d12.dll dxcore.dll dinput8.dll wevtapi.dll wldap32.dll winusb.dll wlanapi.dll sensapi.dll authz.dll dwmapi.dll rstrtmgr.dll xmllite.dll )";
     if (names.find(" " + s + " ") != names.npos) return true;
     if (!(s.starts_with("api-ms-win-") || s.starts_with("ext-ms-win-")) || !s.ends_with(".dll")) return false;
     return std::all_of(s.begin(),s.end() - 4,[](char c) { return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-'; });
@@ -145,6 +148,7 @@ struct BundleLease::State {
     std::vector<File> directories,files;
     std::vector<std::pair<std::wstring,BY_HANDLE_FILE_INFORMATION>> identities;
     std::set<std::string> expected;
+    bool installed=false;
 };
 namespace {
 void Keep(BundleLease::State& s, const fs::path& path, File f) {
@@ -153,11 +157,18 @@ void Keep(BundleLease::State& s, const fs::path& path, File f) {
 }
 void Enumerate(const BundleLease::State& s) {
     std::set<std::string> found; size_t count=0;
-    for(const auto& item:fs::recursive_directory_iterator(s.directory)) {
+    for(auto it=fs::recursive_directory_iterator(s.directory);it!=fs::recursive_directory_iterator();++it) {
+        const auto& item=*it;
         Require(++count<=2048,ERROR_FILE_TOO_LARGE); auto attr=GetFileAttributesW(item.path().c_str()); Win(attr!=INVALID_FILE_ATTRIBUTES);
         Require(!(attr&FILE_ATTRIBUTE_REPARSE_POINT),ERROR_NOT_SUPPORTED);
         const auto relative=Lower(json::Utf8(item.path().lexically_relative(s.directory).generic_wstring()));
+        // Installer transaction backups and unowned legacy data are never component
+        // search paths. Keep them outside the installed component identity set.
+        if(s.installed && (attr&FILE_ATTRIBUTE_DIRECTORY) && (relative==".pulse-setup" || relative=="dialogbridge")) {
+            it.disable_recursion_pending(); continue;
+        }
         if(attr&FILE_ATTRIBUTE_DIRECTORY) { Require(relative=="licenses" || relative.starts_with("licenses/")); continue; }
+        if(s.installed && (relative=="uninstall.exe" || relative=="setup-defaults.ini" || relative==".pulse-files")) continue;
         Require(found.insert(relative).second && s.expected.contains(relative));
     } Require(found==s.expected);
     for(const auto& [path,old]:s.identities) { auto f=Open(path,false); BY_HANDLE_FILE_INFORMATION now{}; Win(GetFileInformationByHandle(f.h,&now)!=FALSE);
@@ -190,7 +201,8 @@ DWORD VerifyBundle(const std::wstring& directory, std::string_view expected_dige
         s->directory=Final(s->directories.back().h);
         auto mf=Open(root/L"manifest.json",false); auto raw=Read(mf.h,1024*1024); s->digest=Digest(raw);
         Require(expected_digest.empty()||s->digest==expected_digest,ERROR_REVISION_MISMATCH);
-        auto manifest=Parse(raw); Keys(manifest,{"schema","version","architecture","contract","dynamic_helpers","system_dependencies","files"}); Require(Int(At(manifest,"schema"))==1,ERROR_REVISION_MISMATCH);
+        auto manifest=Parse(raw); Keys(manifest,{"schema","version","architecture","contract","dynamic_helpers","system_dependencies","files"});
+        const auto schema=Int(At(manifest,"schema")); Require(schema==1 || schema==2,ERROR_REVISION_MISMATCH); s->installed=schema==2;
         const auto version=Text(At(manifest,"version")); Require(!version.empty()&&version.size()<=64);
         Require(std::all_of(version.begin(),version.end(),[](char c){return(c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='.'||c=='-';}));
         Require(version[0]!='_'&&version[0]!='.'&&version[0]!='-');
@@ -234,6 +246,36 @@ DWORD VerifyBundle(const std::wstring& directory, std::string_view expected_dige
         for(auto group:{"licenses/lumatext/","licenses/pdfium/"}) Require(std::any_of(s->expected.begin(),s->expected.end(),[&](const auto& x){return x.starts_with(group);}),ERROR_FILE_NOT_FOUND);
         s->launcher=(root/L"PulseDialogLauncher.exe").wstring(); s->host=(root/L"pulse.exe").wstring(); s->runtime=(root/json::Wide(runtime)).wstring(); s->ui=(root/L"PulsePickerUiProof.dll").wstring();
         Enumerate(*s); output.state_=std::move(s); return ERROR_SUCCESS;
+    } catch(const Failure& f) {return f.error;} catch(const fs::filesystem_error& e) {return static_cast<DWORD>(e.code().value());} catch(...) {return ERROR_NOT_ENOUGH_MEMORY;}
+}
+DWORD ResolveInstalledBundle(const std::wstring& directory, BundleLease& output) noexcept {
+    output=BundleLease{};
+    try {
+        Require(directory.size()>=3 && directory[1]==L':' && directory[2]==L'\\' &&
+            directory.find(L'/')==directory.npos && directory.find(L':',2)==directory.npos &&
+            directory.find(L'\0')==directory.npos,ERROR_BAD_PATHNAME);
+        const fs::path root(directory);
+        Require(root.is_absolute() && root.lexically_normal()==root,ERROR_BAD_PATHNAME);
+        std::vector<File> ancestors;
+        auto path=root.root_path(); ancestors.push_back(Open(path,true));
+        for(const auto& part:root.relative_path()) {path/=part;ancestors.push_back(Open(path,true));}
+        std::string digest, relative;
+        {
+            auto pointer=Open(root/L"dialog-current.json",false,true);
+            const auto value=Parse(Read(pointer.h,1024));
+            Keys(value,{"schema","directory","manifest_sha256"});
+            Require(Int(At(value,"schema"))==1,ERROR_REVISION_MISMATCH);
+            digest=Text(At(value,"manifest_sha256"));
+            relative=Text(At(value,"directory"));
+            Require(Hex(digest) && relative=="DialogBridge/"+digest,ERROR_BAD_PATHNAME);
+        }
+        auto selected=root/json::Wide(relative); selected.make_preferred();
+        BundleLease lease;
+        const DWORD error=VerifyBundle(selected.wstring(),digest,lease);
+        if(error) return error;
+        Require(!lease.state_->installed,ERROR_REVISION_MISMATCH);
+        output=std::move(lease);
+        return ERROR_SUCCESS;
     } catch(const Failure& f) {return f.error;} catch(const fs::filesystem_error& e) {return static_cast<DWORD>(e.code().value());} catch(...) {return ERROR_NOT_ENOUGH_MEMORY;}
 }
 }

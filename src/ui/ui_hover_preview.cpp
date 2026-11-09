@@ -223,8 +223,12 @@ VideoPreview::State MainRenderer::HoverVideoState() const {
 
 void MainRenderer::DrawHoverPreview(const HoverPreviewView& view, const D2D1_RECT_F& client,
                                     const Theme& theme, bool high_contrast) {
-    if (path::OnAnyVolume(view.path, suspended_volumes_)) return;
     hover_frame_ms_ = 0;
+    const bool suspended = path::OnAnyVolume(view.path, suspended_volumes_);
+    hover_image_animation_.Bind(view.path, view.modified, view.size,
+        view.visible && !view.folder && !view.video && !view.instant && !suspended &&
+        (!view.owner || !IsIconic(view.owner)));
+    if (suspended) return;
     const auto stop_video = [&] {
         if (hover_video_ && hover_video_->active()) hover_video_->Reset();
         hover_video_path_.clear();
@@ -236,6 +240,9 @@ void MainRenderer::DrawHoverPreview(const HoverPreviewView& view, const D2D1_REC
         return;
     }
     if (hover_bench_) return;
+    // Office cards use budgeted thumbnail uploads. Renew their allowance on
+    // every paint, including timer-only paints while the pointer stays still.
+    hover_cache_.BeginFrame();
     hover_card_rect_ = D2D1_RECT_F{};
     hover_list_rect_ = D2D1_RECT_F{};
     hover_scroll_max_ = 0.0f;
@@ -424,11 +431,28 @@ void MainRenderer::DrawHoverPreview(const HoverPreviewView& view, const D2D1_REC
     const bool heif_wait = !video_showing && HeifPhoto(view.name) &&
         hover_cache_.Draw(dc, content, view.path, view.attrs, kHeifQuickEdge, 1, view.modified, view.size, 0.0f,
             nullptr, nullptr, nullptr, true) == PreviewDrawResult::Pending;
-    const PreviewDrawResult result = video_showing ? PreviewDrawResult::Bitmap : heif_wait ? PreviewDrawResult::Pending :
+    const auto animation_now = GetTickCount64();
+    const auto animation_frame = hover_image_animation_.Request(animation_now);
+    uint32_t animation_count = 1, animation_delay = 0;
+    PreviewDrawResult result = video_showing ? PreviewDrawResult::Bitmap : heif_wait ? PreviewDrawResult::Pending :
         hover_cache_.Draw(dc, content, view.path, view.attrs, 1024u, 1,
         view.modified, view.size, show_well ? 1.0f : 0.0f, &preview_text, nullptr, nullptr,
-        !OfficeDocument(view.name), nullptr, nullptr, nullptr, nullptr, nullptr, 0, nullptr, nullptr, nullptr,
+        !OfficeDocument(view.name), nullptr, nullptr, nullptr, nullptr, nullptr,
+        animation_frame, &animation_count, &animation_delay, nullptr,
         &decoded_w, &decoded_h);
+    if (!view.video && !view.instant) {
+        if (result == PreviewDrawResult::Bitmap)
+            hover_image_animation_.Commit(animation_count, animation_delay, animation_now);
+        else if (hover_image_animation_.Waiting()) {
+            const auto fallback = hover_cache_.Draw(dc, content, view.path, view.attrs, 1024u, 1,
+                view.modified, view.size, show_well ? 1.0f : 0.0f, nullptr, nullptr, nullptr, true,
+                nullptr, nullptr, nullptr, nullptr, nullptr, hover_image_animation_.Current(),
+                nullptr, nullptr, nullptr, &decoded_w, &decoded_h);
+            if (result != PreviewDrawResult::Pending) hover_image_animation_.Stop();
+            if (fallback == PreviewDrawResult::Bitmap) result = fallback;
+        }
+        if (const auto delay = hover_image_animation_.NextDelay(animation_now)) hover_frame_ms_ = delay;
+    }
     const bool textual = result == PreviewDrawResult::Text || result == PreviewDrawResult::Hex ||
                          result == PreviewDrawResult::Markdown;
     // The facts after the preview: the host works one request at a time, and
@@ -1114,6 +1138,7 @@ MainRenderer::HoverBenchSample MainRenderer::BenchHoverPreview(const std::wstrin
     // HEIF, as the card: the embedded thumbnail, timed on its own.
     if (!warm_run && HeifPhoto(name)) {
         for (;;) {
+            hover_cache_.BeginFrame();
             dc->SetTarget(target.get());
             dc->BeginDraw();
             const PreviewDrawResult quick = hover_cache_.Draw(dc, D2D1::RectF(4.0f, 4.0f, 380.0f, 380.0f), path,
@@ -1129,6 +1154,7 @@ MainRenderer::HoverBenchSample MainRenderer::BenchHoverPreview(const std::wstrin
         }
     }
     for (;;) {
+        hover_cache_.BeginFrame();
         if (properties_first && sample.properties_ms < 0.0 &&
             hover_cache_.Properties(path, attrs, 1, modified, size, properties))
             sample.properties_ms = clock.Ms();
@@ -1184,6 +1210,7 @@ int MainRenderer::PrefetchHoverPreview(const std::wstring& path, DWORD attrs, ui
     dc->GetTarget(&previous);
     const size_t slash = path.find_last_of(L"\\/");
     const std::wstring name = slash == std::wstring::npos ? path : path.substr(slash + 1);
+    hover_cache_.BeginFrame();
     dc->SetTarget(target.get());
     dc->BeginDraw();
     // HEIF: the thumbnail first, as the card does; the photo follows once

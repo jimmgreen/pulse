@@ -65,7 +65,7 @@ void DispatchQueuedExternalOpen(AppState& state) {
         else if (app::AdvanceOpenWait(request->ui_wait_deadline, now, false) == app::OpenWaitAction::Cancel)
             notice.TimedOut(false);
         else {
-            const auto result = OpenExternalFolder(*target, request->path);
+            const auto result = OpenExternalFolder(*target, request->path, request->reveal);
             if (result.status == ExternalOpenStatus::Deferred) {
                 defer = app::AdvanceOpenWait(request->ui_wait_deadline, now, true) == app::OpenWaitAction::Defer;
                 if (!defer) notice.TimedOut(false);

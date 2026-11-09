@@ -12,12 +12,12 @@ namespace pulse::app {
 // How folders are ordered against files in the details list.
 enum class FolderSortMode : uint8_t {
     FoldersFirst = 0,  // folders stay on top, reversed order included (File Explorer)
-    FollowDirection,   // folders lead ascending order and trail descending order
+    FoldersLast,   // folders always follow files, independent of direction
     Mixed,             // one order for folders and files
 };
 
 constexpr FolderSortMode FolderSortModeFromInt(int value) noexcept {
-    return value == 1 ? FolderSortMode::FollowDirection
+    return value == 1 ? FolderSortMode::FoldersLast
          : value == 2 ? FolderSortMode::Mixed
                       : FolderSortMode::FoldersFirst;
 }
@@ -55,6 +55,8 @@ bool EntryLess(const fs::DirEntry& a, const fs::DirEntry& b,
 // comparison and may throw to abandon the sort, which leaves `entries` untouched.
 void SortEntries(std::vector<fs::DirEntry>& entries, ui::SortColumn col, ui::SortDirection dir,
                  const std::function<void()>& tick = {});
+void SortFirstEntries(std::vector<fs::DirEntry>& entries, ui::SortColumn col, ui::SortDirection dir,
+                      size_t keep, const std::function<void()>& tick = {});
 
 // Folder totals for Size order (#58), keyed by lower-cased folder name.
 using FolderSizeLookup = std::unordered_map<std::wstring, uint64_t>;

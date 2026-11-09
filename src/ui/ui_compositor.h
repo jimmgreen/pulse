@@ -45,6 +45,7 @@ struct ComPtr {
 };
 
 class Compositor {
+    friend struct QuickPreviewAuditTest;
 public:
     Compositor();
     ~Compositor();
@@ -80,6 +81,11 @@ public:
     ID2D1DeviceContext* Dc() const { return dc_.get(); }
     IDWriteFactory2* DwriteFactory() const { return dwriteFactory_.get(); }
     HWND Hwnd() const { return hwnd_; }
+    bool AdapterDescription(DXGI_ADAPTER_DESC& description) const {
+        ComPtr<IDXGIAdapter> adapter;
+        return dxgiDevice_.get() && SUCCEEDED(dxgiDevice_->GetAdapter(&adapter)) &&
+            SUCCEEDED(adapter->GetDesc(&description));
+    }
 
     void RecreateTextFormats(float scale);
     bool UpdateTextRenderingParams(HMONITOR monitor);
