@@ -2308,33 +2308,6 @@ foreach(unified_target IN LISTS unified_targets)
     endif()
 endforeach()
 
-# Capture the completed Pulse target, including optional selftest dependencies.
-if(PULSE_BUILD_PROGRESS_UI_TESTS)
-    get_target_property(progress_ui_sources pulse SOURCES)
-    # pch_app_state.cpp's OBJECT_OUTPUTS names pulse's PCH; compiling it here
-    # too would make two rules generate pulse_app_state.pch.
-    list(FILTER progress_ui_sources EXCLUDE REGEX "pch_app_state[.]cpp$")
-    get_target_property(progress_ui_libraries pulse LINK_LIBRARIES)
-    add_executable(pulse_content_progress_ui_test src/bench/content_progress_ui_test.cpp ${progress_ui_sources})
-    target_link_libraries(pulse_content_progress_ui_test PRIVATE ${progress_ui_libraries})
-    add_dependencies(pulse_content_progress_ui_test pulse_content_pack)
-    foreach(progress_property INCLUDE_DIRECTORIES COMPILE_DEFINITIONS LINK_OPTIONS)
-        get_target_property(progress_value pulse ${progress_property})
-        if(progress_value)
-            set_property(TARGET pulse_content_progress_ui_test PROPERTY ${progress_property} "${progress_value}")
-        endif()
-    endforeach()
-    # Address search editor stability reuses the compiled Pulse objects.
-    add_executable(pulse_address_edit_stability_test src/bench/address_edit_stability_test.cpp $<TARGET_OBJECTS:pulse>)
-    target_link_libraries(pulse_address_edit_stability_test PRIVATE ${progress_ui_libraries})
-    foreach(progress_property INCLUDE_DIRECTORIES COMPILE_DEFINITIONS COMPILE_OPTIONS LINK_OPTIONS)
-        get_target_property(progress_value pulse ${progress_property})
-        if(progress_value)
-            set_property(TARGET pulse_address_edit_stability_test PROPERTY ${progress_property} "${progress_value}")
-        endif()
-    endforeach()
-endif()
-
 foreach(address_test address_completion address_features create_progress details_tree_refresh)
     add_executable(pulse_${address_test}_test src/bench/${address_test}_test.cpp $<TARGET_OBJECTS:pulse>)
     # Resolve after dialog modules append their libraries to Pulse.
@@ -3117,3 +3090,31 @@ target_include_directories(pulse_frame_watch_test PRIVATE src)
 
 add_executable(pulse_high_contrast_state_test EXCLUDE_FROM_ALL src/bench/high_contrast_state_test.cpp)
 target_link_libraries(pulse_high_contrast_state_test PRIVATE user32)
+
+# Capture Pulse only after all modules append their sources and dependencies.
+if(PULSE_BUILD_PROGRESS_UI_TESTS)
+    get_target_property(progress_ui_sources pulse SOURCES)
+    # pch_app_state.cpp's OBJECT_OUTPUTS names pulse's PCH; compiling it here
+    # too would make two rules generate pulse_app_state.pch.
+    list(FILTER progress_ui_sources EXCLUDE REGEX "pch_app_state[.]cpp$")
+    # The standalone test already compiles this probe's included implementation.
+    list(FILTER progress_ui_sources EXCLUDE REGEX "operation_pill_probe[.]cpp$")
+    add_executable(pulse_content_progress_ui_test src/bench/content_progress_ui_test.cpp ${progress_ui_sources})
+    target_link_libraries(pulse_content_progress_ui_test PRIVATE "$<TARGET_PROPERTY:pulse,LINK_LIBRARIES>")
+    add_dependencies(pulse_content_progress_ui_test pulse_content_pack)
+    foreach(progress_property INCLUDE_DIRECTORIES COMPILE_DEFINITIONS LINK_OPTIONS)
+        get_target_property(progress_value pulse ${progress_property})
+        if(progress_value)
+            set_property(TARGET pulse_content_progress_ui_test PROPERTY ${progress_property} "${progress_value}")
+        endif()
+    endforeach()
+    # Address search editor stability reuses the compiled Pulse objects.
+    add_executable(pulse_address_edit_stability_test src/bench/address_edit_stability_test.cpp $<TARGET_OBJECTS:pulse>)
+    target_link_libraries(pulse_address_edit_stability_test PRIVATE "$<TARGET_PROPERTY:pulse,LINK_LIBRARIES>")
+    foreach(progress_property INCLUDE_DIRECTORIES COMPILE_DEFINITIONS COMPILE_OPTIONS LINK_OPTIONS)
+        get_target_property(progress_value pulse ${progress_property})
+        if(progress_value)
+            set_property(TARGET pulse_address_edit_stability_test PROPERTY ${progress_property} "${progress_value}")
+        endif()
+    endforeach()
+endif()
