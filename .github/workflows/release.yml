@@ -28,7 +28,8 @@ jobs:
   build:
     needs: l10n
     runs-on: windows-2022
-    timeout-minutes: 60
+    # Cold verification already takes ~48 minutes before the production rebuild.
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
