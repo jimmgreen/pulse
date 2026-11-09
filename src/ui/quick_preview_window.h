@@ -50,6 +50,9 @@ public:
     bool InitializeEmbedded(HWND owner, UINT navigate_message, UINT open_message, UINT command_message);
     void ShowEmbedded(const QuickPreviewItem& item, RECT bounds, bool dark, bool safe_mode);
     void SetEmbeddedBounds(RECT bounds);
+    // Subtract a parent-rendered flyout from the child without closing or
+    // reloading its preview. Empty bounds restore the complete child.
+    void SetEmbeddedOcclusion(const D2D1_RECT_F& parent_bounds);
     bool embedded() const noexcept { return embedded_; }
     void Activate();
     void Update(const QuickPreviewItem& item);
@@ -82,6 +85,9 @@ public:
 private:
     bool embedded_ = false;
     bool embedded_open_ = false;
+    bool embedded_occluded_ = false;
+    bool handler_covered_ = false;
+    RECT embedded_occlusion_{}, embedded_region_bounds_{};
     std::vector<std::wstring> suspended_volumes_;
 
     friend struct DetailsPreviewProbe;

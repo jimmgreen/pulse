@@ -8,8 +8,13 @@
 #include <filesystem>
 #include <cstdio>
 #include <algorithm>
+#include <cmath>
 using Microsoft::WRL::ComPtr;
 namespace pulse::ui {
+struct MarkdownScrollbarTest {
+    static auto Bar(const MarkdownView& view, bool horizontal) { return view.Scrollbar(horizontal); }
+    static float Position(const MarkdownView& view, bool horizontal) { return horizontal ? view.scroll_x_ : view.scroll_; }
+};
 struct TableViewTestAccess {
     static const auto& Tabs(const TableView& view) { return view.tab_rects_; }
     static auto Previous(const TableView& view) { return view.previous_sheet_; }
@@ -81,6 +86,66 @@ struct Canvas {
         return bytes;
     }
 };
+void MarkdownScrollbars(Canvas& c, float scale, bool dark) {
+    using pulse::ui::MarkdownScrollbarTest;
+    const auto rect = D2D1::RectF(0, 0, 600 * scale, 300 * scale);
+    const auto theme = pulse::ui::MakeTheme(dark, pulse::ui::HexColor(0x0078d4));
+    std::wstring source = L"# Scrollbar regression\n\n";
+    for (int row = 0; row < 40; ++row) {
+        for (int col = 0; col < 16; ++col) source += row == 1 ? L"| --- " : L"| Long column value ";
+        source += L"|\n";
+    }
+    std::wstring payload;
+    Check(pulse::preview::MakeMarkdownDocument(source, payload), "parse wide and tall Markdown fixture");
+    pulse::ui::MarkdownView view;
+    Check(view.SetPayload(payload, L""), "load scrollbar fixture");
+    auto draw = [&](const D2D1_RECT_F& bounds) {
+        c.Begin(dark);
+        view.Draw(c.dc.Get(), c.factory.Get(), bounds, theme, dark, scale, nullptr, 1, 0, 0, {});
+        c.End();
+    };
+    draw(rect);
+    Check(!view.ScrollbarMouseDown(50 * scale, 40 * scale), "content clicks do not start scrollbar gestures");
+    for (bool horizontal : {false, true}) {
+        auto bar = MarkdownScrollbarTest::Bar(view, horizontal);
+        Check(bar.maximum > 0 && bar.travel > 0, "overflow produces draggable scrollbar");
+        const float x = (bar.thumb.left + bar.thumb.right) * 0.5f;
+        const float y = (bar.thumb.top + bar.thumb.bottom) * 0.5f;
+        Check(view.OverScrollbar(x, y), "painted thumb belongs to scrollbar hit lane");
+        Check(view.ScrollbarMouseDown(x, y) && view.DraggingScrollbar(), "thumb press starts drag before text selection");
+        Check(view.ScrollbarMouseMove(x + (horizontal ? bar.travel * 0.5f : 0),
+            y + (horizontal ? 0 : bar.travel * 0.5f)), "drag moves document on intended axis");
+        Check(std::abs(MarkdownScrollbarTest::Position(view, horizontal) - bar.maximum * 0.5f) < 0.1f,
+            "thumb displacement maps to document scroll range");
+        view.ScrollbarMouseMove(x + (horizontal ? 100000.0f : 0), y + (horizontal ? 0 : 100000.0f));
+        Check(std::abs(MarkdownScrollbarTest::Position(view, horizontal) - bar.maximum) < 0.1f,
+            "drag outside viewport clamps at document end");
+        view.EndScrollbarDrag();
+        Check(!view.DraggingScrollbar() && !view.ScrollbarMouseMove(x, y), "release or cancellation ends drag");
+        bar = MarkdownScrollbarTest::Bar(view, horizontal);
+        const float track_x = horizontal ? bar.hit.left + 1 : x;
+        const float track_y = horizontal ? y : bar.hit.top + 1;
+        Check(view.ScrollbarMouseDown(track_x, track_y) && !view.DraggingScrollbar() &&
+            MarkdownScrollbarTest::Position(view, horizontal) < bar.maximum, "track click pages toward pointer");
+        bar = MarkdownScrollbarTest::Bar(view, horizontal);
+        Check(view.ScrollbarMouseDown((bar.thumb.left + bar.thumb.right) * 0.5f,
+            (bar.thumb.top + bar.thumb.bottom) * 0.5f) && view.DraggingScrollbar(), "drag can restart after track click");
+        draw(D2D1::RectF(0, 0, 590 * scale, 290 * scale));
+        Check(!view.DraggingScrollbar(), "resize cancels stale drag geometry");
+        draw(rect);
+    }
+    auto bar = MarkdownScrollbarTest::Bar(view, false);
+    view.ScrollbarMouseDown((bar.thumb.left + bar.thumb.right) * 0.5f, (bar.thumb.top + bar.thumb.bottom) * 0.5f);
+    view.Clear();
+    Check(!view.DraggingScrollbar() && !view.ScrollbarMouseDown(598 * scale, 20 * scale),
+        "clearing selection cancels drag and removes stale hit lanes");
+    pulse::preview::MakeMarkdownDocument(L"short", payload);
+    view.SetPayload(payload, L"");
+    draw(rect);
+    Check(!view.OverScrollbar(598 * scale, 20 * scale) && !view.OverScrollbar(20 * scale, 298 * scale),
+        "short documents do not steal edge clicks");
+}
+
 void Markdown(Canvas& c, float scale, bool dark) {
     const auto rect = D2D1::RectF(0, 0, 600 * scale, 300 * scale);
     const auto theme = pulse::ui::MakeTheme(dark, pulse::ui::HexColor(0x0078d4));
@@ -247,9 +312,10 @@ void Headers(Canvas& c, float scale, bool dark) {
 }
 int wmain(int argc, wchar_t** argv) {
     const bool markdown = argc < 2 || std::wstring_view(argv[1]) == L"--markdown";
+    const bool scrollbars = argc < 2 || std::wstring_view(argv[1]) == L"--markdown-scrollbars";
     const bool headers = argc < 2 || std::wstring_view(argv[1]) == L"--headers";
     const bool tabs = argc < 2 || std::wstring_view(argv[1]) == L"--sheet-tabs";
-    if (!markdown && !headers && !tabs) return 2;
+    if (!markdown && !scrollbars && !headers && !tabs) return 2;
     const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     std::filesystem::create_directories(L"bench_data");
     for (float scale : {1.0f, 1.5f, 2.0f}) {
@@ -259,6 +325,7 @@ int wmain(int argc, wchar_t** argv) {
         if (!ready) continue;
         for (bool dark : {false, true}) {
             if (markdown) Markdown(canvas, scale, dark);
+            if (scrollbars) MarkdownScrollbars(canvas, scale, dark);
             if (headers) Headers(canvas, scale, dark);
             if (tabs) SheetTabs(canvas, scale, dark);
         }

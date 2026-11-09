@@ -282,6 +282,9 @@ void ApplySort(AppState& s, int value, bool desc, int folder) {
 }
 
 void Kick(AppState& s, HWND hwnd) {
+    // The picker is parent-rendered; remove its footprint from the embedded
+    // child before the first frame, including while the picker fades closed.
+    s.detailsPreview.SetEmbeddedOcclusion(s.renderer.GroupWheelPicker().OcclusionBounds());
     if (s.framePump.Running()) s.framePump.Arm();
     InvalidateRect(hwnd, nullptr, FALSE);
 }

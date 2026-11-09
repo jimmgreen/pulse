@@ -24,6 +24,8 @@ struct DocumentImageSession;
 
 class MarkdownView {
     friend struct PreviewBufferLifetimeTest;
+    friend struct DetailsPreviewProbe;
+    friend struct MarkdownScrollbarTest;
     friend struct ThumbnailCacheTestAccess;
 public:
     ~MarkdownView();
@@ -77,6 +79,11 @@ public:
 
     bool Scroll(float wheel_steps);
     bool ScrollHorizontal(float wheel_steps);
+    bool OverScrollbar(float x, float y) const;
+    bool ScrollbarMouseDown(float x, float y);
+    bool ScrollbarMouseMove(float x, float y);
+    void EndScrollbarDrag() noexcept { scrollbar_drag_ = 0; }
+    bool DraggingScrollbar() const noexcept { return scrollbar_drag_ != 0; }
     bool Key(UINT vk);  // PgUp / PgDn / Home / End / Up / Down
     void Reveal(uint32_t offset);
     // Plain-text offset under a point (clamped into the nearest block).
@@ -139,6 +146,13 @@ private:
                     uint32_t start, uint32_t end, const D2D1_COLOR_F& color);
     int BlockAt(float x, float doc_y) const;
     void ClampScroll();
+    struct ScrollbarGeometry {
+        D2D1_RECT_F hit{}, thumb{};
+        float travel = 0.0f, maximum = 0.0f;
+    };
+    ScrollbarGeometry Scrollbar(bool horizontal) const;
+    int scrollbar_drag_ = 0; // 1 vertical, 2 horizontal
+    float scrollbar_press_ = 0.0f, scrollbar_start_ = 0.0f;
 
     MarkdownImageMetadata image_metadata_;
     HWND notify_ = nullptr;

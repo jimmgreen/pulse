@@ -64,6 +64,13 @@ public:
     void Close();                          // fades out (instant without animation)
     bool IsOpen() const noexcept { return open_; }
     bool Visible() const noexcept { return open_ || closing_; }
+    // Parent-client pixels, including the 6px entrance/exit translation and
+    // three-sigma shadow (9px deviation, 6px drop). Stable through the fade.
+    D2D1_RECT_F OcclusionBounds() const noexcept {
+        if (!Visible()) return {};
+        return {panel_.left - 27.0f * scale_, panel_.top - 27.0f * scale_,
+                panel_.right + 27.0f * scale_, panel_.bottom + 33.0f * scale_};
+    }
     // 0..1 open amount, frame-stable (follows the fade; 0/1 without animation).
     float OpenAmount() const noexcept { return Visible() ? fade_value_ : 0.0f; }
     bool IsSortPicker() const noexcept { return data_.sort_controls; }

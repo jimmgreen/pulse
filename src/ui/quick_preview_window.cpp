@@ -169,7 +169,8 @@ void FillHitRange(ID2D1DeviceContext* dc, IDWriteTextLayout* layout,
 } // namespace
 
 void QuickPreviewWindow::SetHandlerCovered(bool covered) {
-    handler_.SetCovered(covered);
+    handler_covered_ = covered;
+    handler_.SetCovered(covered || embedded_occluded_);
 }
 
 QuickPreviewWindow::~QuickPreviewWindow() {
@@ -2212,6 +2213,9 @@ HCURSOR QuickPreviewWindow::ContentCursor(POINT client) const {
         client.y < content.top || client.y >= content.bottom)
         return LoadCursorW(nullptr, IDC_ARROW);
     if (native_kind_ == NativeKind::Markdown &&
+        (markdown_.DraggingScrollbar() || markdown_.OverScrollbar(static_cast<float>(client.x), static_cast<float>(client.y))))
+        return LoadCursorW(nullptr, IDC_ARROW);
+    if (native_kind_ == NativeKind::Markdown &&
         markdown_.IsClickable(static_cast<float>(client.x), static_cast<float>(client.y)))
         return LoadCursorW(nullptr, IDC_HAND);
     if (native_kind_ == NativeKind::Markdown) {
@@ -3098,6 +3102,13 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
             return 0;
         }
         if (native_kind_ == NativeKind::Markdown &&
+            markdown_.ScrollbarMouseDown(static_cast<float>(point.x), static_cast<float>(point.y))) {
+            selecting_ = false;
+            if (markdown_.DraggingScrollbar()) SetCapture(hwnd_);
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        }
+        if (native_kind_ == NativeKind::Markdown &&
             markdown_.Click(static_cast<float>(point.x), static_cast<float>(point.y))) {
             // Contents entry or next-chapter link: the click is spent.
             InvalidateRect(hwnd_, nullptr, FALSE);
@@ -3150,6 +3161,13 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
             return 0;
         }
         const D2D1_RECT_F content = ContentRect();
+        if (native_kind_ == NativeKind::Markdown &&
+            markdown_.ScrollbarMouseDown(static_cast<float>(point.x), static_cast<float>(point.y))) {
+            selecting_ = false;
+            if (markdown_.DraggingScrollbar()) SetCapture(hwnd_);
+            InvalidateRect(hwnd_, nullptr, FALSE);
+            return 0;
+        }
         if (native_kind_ == NativeKind::Archive) {
             // Folder listing: double-click opens the item in the main window.
             if (archive_.IsFolderListing() && archive_.HasSelection() &&
@@ -3190,6 +3208,15 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
     case WM_MOUSEMOVE: {
         POINT point{};
         ClientPoint(lparam, point);
+        if (markdown_.DraggingScrollbar()) {
+            if (!(wparam & MK_LBUTTON)) {
+                markdown_.EndScrollbarDrag();
+                if (GetCapture() == hwnd_) ReleaseCapture();
+            } else if (markdown_.ScrollbarMouseMove(static_cast<float>(point.x), static_cast<float>(point.y))) {
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            return 0;
+        }
         if (playback_volume_drag_) {
             DragPlaybackVolume(static_cast<float>(point.x));
             return 0;
@@ -3299,6 +3326,12 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
         EndPlaybackDrag(message == WM_LBUTTONUP);
         panning_ = false;
         selecting_ = false;
+        if (markdown_.DraggingScrollbar()) {
+            if (message == WM_LBUTTONUP)
+                markdown_.ScrollbarMouseMove(static_cast<float>(GET_X_LPARAM(lparam)), static_cast<float>(GET_Y_LPARAM(lparam)));
+            markdown_.EndScrollbarDrag();
+            InvalidateRect(hwnd_, nullptr, FALSE);
+        }
         if (table_.Dragging()) {
             table_.MouseUp();
             InvalidateRect(hwnd_, nullptr, FALSE);

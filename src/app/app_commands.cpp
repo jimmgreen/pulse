@@ -6211,6 +6211,7 @@ void SyncDetailsPreview(AppState& s) {
         bounds.right <= bounds.left || bounds.bottom <= bounds.top ||
         !SelectedQuickPreviewItem(s, item)) {
         s.detailsPreview.Close();
+        s.detailsPreview.SetEmbeddedOcclusion({});
         return;
     }
     RECT rect{static_cast<LONG>(bounds.left), static_cast<LONG>(bounds.top),
@@ -6230,6 +6231,9 @@ void SyncDetailsPreview(AppState& s) {
         s.detailsPreview.SetEmbeddedBounds(rect);
         s.detailsPreview.SetStarred(item.starred);
     }
+    // Visible() includes the closing animation. Keep the same preview session
+    // and scroll position; restore its whole region only once the flyout is gone.
+    s.detailsPreview.SetEmbeddedOcclusion(s.renderer.GroupWheelPicker().OcclusionBounds());
 }
 
 void SyncQuickPreview(AppState& s) {

@@ -696,7 +696,10 @@ int RunSidebarNarrowTest(AppState& s, const wchar_t* output) {
     SetWindowPos(s.hwnd,nullptr,previous.left,previous.top,previous.right-previous.left,previous.bottom-previous.top,SWP_NOZORDER|SWP_NOACTIVATE);
     Render(s);log<<"failures="<<failures<<std::endl;return failures?1:0;
 }
-namespace pulse::ui { HWND ProbeToolbarPicker(const wchar_t*, POINT*, const wchar_t*); }
+namespace pulse::ui {
+HWND ProbeToolbarPicker(const wchar_t*, POINT*, const wchar_t*);
+bool ProbeToolbarPickerLayout(const wchar_t*, const wchar_t*);
+}
 namespace {
 bool CaptureLiveMenu(HWND menu, const std::filesystem::path& path) {
     RECT r{};
@@ -755,6 +758,8 @@ struct ToolbarInteractionProbe {
     bool menu_seen = false, picker_seen = false, dragged = false, captured = false;
     bool hover_processed = false;
     bool tooltip_cleared = false;
+    bool layout_only = false, layout_passed = false;
+    std::filesystem::path layout_report;
 };
 ToolbarInteractionProbe* interaction_probe = nullptr;
 void CALLBACK DriveToolbarInteraction(HWND, UINT, UINT_PTR timer, DWORD) {
@@ -806,6 +811,12 @@ void CALLBACK DriveToolbarInteraction(HWND, UINT, UINT_PTR timer, DWORD) {
     const HWND picker = ui::ProbeToolbarPicker(nullptr,nullptr,nullptr);
     if (!picker) return;
     p.picker_seen = true;
+    if (p.layout_only) {
+        KillTimer(nullptr, timer);
+        p.layout_passed = ui::ProbeToolbarPickerLayout(p.layout_report.c_str(), p.screenshot.c_str());
+        ui::CloseToolbarPicker();
+        return;
+    }
     if (p.menu_choice >= 0) { ui::CloseToolbarPicker(); return; }
     if (p.phase++ == 0) {
         SendMessageW(picker,WM_MOUSEWHEEL,MAKEWPARAM(0,static_cast<WORD>(-120*20)),0);
@@ -863,6 +874,25 @@ int RunToolbarInteractionTest(AppState& s, const wchar_t* output) {
     const auto prefs=s.appPrefs; const bool dark=s.darkMode;
     s.appPrefs.persist=false;
     s.appPrefs.folder_size_auto=true;
+    if (GetEnvironmentVariableW(L"PULSE_TEST_TOOLBAR_LAYOUT_ONLY", nullptr, 0)) {
+        ToolbarInteractionProbe probe;
+        probe.state = &s;
+        probe.started = GetTickCount64();
+        probe.layout_only = true;
+        const auto folder = std::filesystem::path(output).parent_path();
+        probe.layout_report = folder / L"toolbar-picker-layout-metrics.txt";
+        probe.screenshot = folder / L"toolbar-picker-layout";
+        interaction_probe = &probe;
+        const auto timer = SetTimer(nullptr, 0, 150, DriveToolbarInteraction);
+        ShowToolbarCustomize(s);
+        KillTimer(nullptr, timer);
+        interaction_probe = nullptr;
+        check(probe.picker_seen && probe.layout_passed, "picker labels, descriptions and work-area layout at 100/150/200 percent DPI");
+        s.appPrefs = prefs;
+        s.darkMode = dark;
+        log << "failures=" << failures << std::endl;
+        return failures ? 1 : 0;
+    }
     if (GetEnvironmentVariableW(L"PULSE_TEST_TOOLBAR_DRAG_ONLY", nullptr, 0)) {
         s.appPrefs.window_effect=L"none";
         s.appPrefs.background_image.clear();
