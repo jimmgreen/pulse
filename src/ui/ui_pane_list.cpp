@@ -4042,10 +4042,12 @@ IDWriteTextFormat* MainRenderer::NameSemiboldFormat() {
     IDWriteTextFormat* base = compositor_ ? compositor_->FileNameFormat() : nullptr;
     IDWriteFactory2* factory = compositor_ ? compositor_->DwriteFactory() : nullptr;
     if (!base || !factory) return nullptr;
-    if (name_semibold_format_.get() && name_semibold_base_ == base && name_semibold_size_ == base->GetFontSize())
+    if (name_semibold_format_.get() && name_semibold_base_.get() == base && name_semibold_size_ == base->GetFontSize())
         return name_semibold_format_.get();
     name_semibold_format_.reset();
-    name_semibold_base_ = base;
+    base->AddRef();
+    name_semibold_base_.reset();
+    name_semibold_base_.p = base;
     name_semibold_size_ = base->GetFontSize();
     wchar_t family[128]{};
     wchar_t locale[LOCALE_NAME_MAX_LENGTH]{};
@@ -4088,9 +4090,11 @@ bool MainRenderer::DrawTruncatedName(const std::wstring& name, float x, float y,
     const bool semibold = name_semibold_ && name_semibold_format_.get();
     IDWriteTextFormat* base_fmt = semibold ? name_semibold_format_.get() : compositor_->FileNameFormat();
     const size_t format_slot = semibold ? 1u : 0u;
-    if (name_nowrap_bases_[format_slot] != base_fmt || !name_nowrap_formats_[format_slot].get()) {
+    if (name_nowrap_bases_[format_slot].get() != base_fmt || !name_nowrap_formats_[format_slot].get()) {
         name_nowrap_formats_[format_slot].reset();
-        name_nowrap_bases_[format_slot] = base_fmt;
+        base_fmt->AddRef();
+        name_nowrap_bases_[format_slot].reset();
+        name_nowrap_bases_[format_slot].p = base_fmt;
         wchar_t family[128]{};
         wchar_t locale[LOCALE_NAME_MAX_LENGTH]{};
         if (SUCCEEDED(base_fmt->GetFontFamilyName(family, ARRAYSIZE(family))) &&

@@ -1291,8 +1291,9 @@ private:
     bool name_semibold_ = false;                  // DrawTruncatedName: 今天修改的名称加粗
     ComPtr<IDWriteTextFormat> name_semibold_format_;
     std::array<ComPtr<IDWriteTextFormat>, 2> name_nowrap_formats_;
-    std::array<IDWriteTextFormat*, 2> name_nowrap_bases_{};
-    IDWriteTextFormat* name_semibold_base_ = nullptr;
+    // Retain cache keys: a released COM format can be recreated at the same address.
+    std::array<ComPtr<IDWriteTextFormat>, 2> name_nowrap_bases_;
+    ComPtr<IDWriteTextFormat> name_semibold_base_;
     float name_semibold_size_ = 0.0f;
     // FileNameFormat at semibold (same family, size and fallback).
     IDWriteTextFormat* NameSemiboldFormat();

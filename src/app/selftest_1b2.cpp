@@ -3870,6 +3870,12 @@ void TestViewZoomAnchor() {
         };
         press(seg_wall);
         const ui::WindowViewModel wvm = BuildVm(*state);
+        // Wall rows arrive from a worker; the first frame intentionally uses the icon grid.
+        const ULONGLONG wall_start = GetTickCount64();
+        while (!state->renderer.ListRowHeightDip(wvm.pane_slots.front().pane, wvm.pane_slots.front().rect).wall &&
+               GetTickCount64() - wall_start < 5000) Sleep(10);
+        Check(state->renderer.ListRowHeightDip(wvm.pane_slots.front().pane, wvm.pane_slots.front().rect).wall != nullptr,
+              L"photo wall: background rows become ready before checking wall geometry");
         const D2D1_RECT_F wall_item = state->renderer.ItemRectInPane(wvm.pane_slots.front().pane,
                                                                      wvm.pane_slots.front().rect, 3);
         Check(tab->wall && tab->view_mode == ViewMode::LargeIcons && wvm.pane_slots.front().pane.wall &&
@@ -4063,11 +4069,19 @@ void TestFolderSorts() {
     Check(prefs.folder_sorts.Find(L"\\\\?\\c:\\b\\") == newest &&
           prefs.folder_sorts.Find(L"C:/B/") == newest,
           L"folder sorts: case, separators, trailing slash and extended prefix agree");
+    Check(prefs.folder_sorts.Set(L"", newest) &&
+          prefs.folder_sorts.Find(L"pulse:this-pc") == newest &&
+          !prefs.folder_sorts.Set(L"pulse:this-pc", newest),
+          L"folder sorts: This PC empty path saves under its stable virtual key");
+    const auto invalid_column = static_cast<SortColumn>(static_cast<int>(SortColumn::MediaFps) + 1);
     Check(!prefs.folder_sorts.Set(L"pulse:search:x", newest) &&
-          !prefs.folder_sorts.Set(L"", newest) &&
           !prefs.folder_sorts.Set(L"relative", newest) &&
-          !prefs.folder_sorts.Set(L"C:\\Bad", { static_cast<SortColumn>(9), SortDirection::Asc }),
-          L"folder sorts: virtual, nonabsolute and invalid values are rejected");
+          !prefs.folder_sorts.Set(L"C:\\Bad", { static_cast<SortColumn>(-1), SortDirection::Asc }) &&
+          !prefs.folder_sorts.Set(L"C:\\Bad", { invalid_column, SortDirection::Asc }) &&
+          !prefs.folder_sorts.Set(L"", { invalid_column, SortDirection::Asc }) &&
+          !prefs.folder_sorts.Set(L"C:\\Bad", { SortColumn::Name, static_cast<SortDirection>(2) }) &&
+          prefs.folder_sorts.Find(L"") == newest && !prefs.folder_sorts.Find(L"C:\\Bad"),
+          L"folder sorts: other virtual, nonabsolute and invalid values are rejected without changing choices");
     const std::wstring unc = L"\\\\server\\share\\照片";
     prefs.folder_sorts.Set(unc, biggest);
     AppPrefs reloaded;
@@ -4075,10 +4089,11 @@ void TestFolderSorts() {
     reloaded.FromJson(prefs.ToJson());
     Check(reloaded.folder_sorts.Find(L"C:\\B") == newest &&
           reloaded.folder_sorts.Find(unc) == biggest &&
+          reloaded.folder_sorts.Find(L"") == newest &&
           reloaded.folder_sorts.Find(L"C:\\A") == by_name,
           L"folder sorts: preferences round trip including UNC and Unicode");
     bool every_survives = true;
-    for (int c = 0; c < 5; ++c) {
+    for (int c = 0; c <= static_cast<int>(SortColumn::MediaFps); ++c) {
         for (int d = 0; d < 2; ++d) {
             const FolderSort each{ static_cast<SortColumn>(c), static_cast<SortDirection>(d) };
             prefs.folder_sorts.Set(L"C:\\Every", each);
@@ -4091,7 +4106,8 @@ void TestFolderSorts() {
     prefs.folder_views.ApplyToAll(ViewMode::List);
     prefs.folder_sorts.ApplyToAll(biggest);
     Check(!prefs.folder_sorts.Find(L"C:\\B") && !prefs.folder_views.Find(L"C:\\B") &&
-          prefs.folder_sorts.Default() == biggest && prefs.folder_views.Default() == ViewMode::List,
+          prefs.folder_sorts.Default() == biggest && prefs.folder_views.Default() == ViewMode::List &&
+          prefs.folder_sorts.Find(L"") == newest,
           L"folder sorts: apply to all replaces defaults and forgets per-folder choices");
     reloaded.FromJson(prefs.ToJson());
     Check(reloaded.folder_sorts.Default() == biggest &&
@@ -4125,7 +4141,7 @@ void TestFolderSorts() {
               L"folder groups: old preferences keep folders ungrouped");
     }
     prefs.ResetToDefaults();
-    Check(prefs.folder_sorts.Default() == by_name &&
+    Check(prefs.folder_sorts.Default() == by_name && !prefs.folder_sorts.Find(L"") &&
           prefs.folder_views.Default() == ViewMode::Details,
           L"folder sorts: reset restores defaults");
 

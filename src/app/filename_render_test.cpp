@@ -218,6 +218,43 @@ struct FilenameRenderTest {
             MainRenderer renderer;
             renderer.SetCompositor(&compositor);
             log << "LumaText=" << compositor.LumaTextEnabled() << std::endl;
+            // Exercise both bounded caches across rapid format destruction/recreation.
+            bool rebuilt_formats_match = true;
+            const auto same_face = [](IDWriteTextFormat* source, IDWriteTextFormat* cached) {
+                if (!source || !cached || source->GetFontSize() != cached->GetFontSize() ||
+                    source->GetFontWeight() != cached->GetFontWeight()) return false;
+                wchar_t source_family[128]{}, cached_family[128]{};
+                wchar_t source_locale[LOCALE_NAME_MAX_LENGTH]{}, cached_locale[LOCALE_NAME_MAX_LENGTH]{};
+                return SUCCEEDED(source->GetFontFamilyName(source_family, ARRAYSIZE(source_family))) &&
+                    SUCCEEDED(cached->GetFontFamilyName(cached_family, ARRAYSIZE(cached_family))) &&
+                    SUCCEEDED(source->GetLocaleName(source_locale, ARRAYSIZE(source_locale))) &&
+                    SUCCEEDED(cached->GetLocaleName(cached_locale, ARRAYSIZE(cached_locale))) &&
+                    wcscmp(source_family, cached_family) == 0 && wcscmp(source_locale, cached_locale) == 0;
+            };
+            for (int rebuild = 0; rebuild < 24; ++rebuild) {
+                const float scale = rebuild % 2 ? 1.5f : 1.0f;
+                l10n::Initialize(GetModuleHandleW(nullptr), rebuild % 3 ? L"zh-CN" : L"en-US");
+                compositor.RecreateTextFormats(scale);
+                renderer.SetScale(scale);
+                auto* dc = compositor.Dc();
+                dc->BeginDraw();
+                for (bool bold : {false, true}) {
+                    renderer.name_semibold_ = bold;
+                    auto* source = bold ? renderer.NameSemiboldFormat() : compositor.FileNameFormat();
+                    renderer.DrawTruncatedName(L"Drawing-设计.dwg", 20, 10, 380, 40,
+                        MakeTheme(false, HexColor(0x0078D4)), false, {}, true);
+                    auto* cached = renderer.name_nowrap_formats_[bold ? 1 : 0].get();
+                    const bool matches = same_face(source, cached) &&
+                        source->GetFontSize() == compositor.FileNameFormat()->GetFontSize();
+                    if (!matches) log << "stale cache rebuild=" << rebuild << " source=" << source
+                        << " source-size=" << (source ? source->GetFontSize() : 0)
+                        << " cached-size=" << (cached ? cached->GetFontSize() : 0) << std::endl;
+                    rebuilt_formats_match &= matches;
+                }
+                rebuilt_formats_match &= SUCCEEDED(dc->EndDraw());
+            }
+            renderer.name_semibold_ = false;
+            check(rebuilt_formats_match, "rapid DPI and language rebuilds keep both filename cache faces current");
             const wchar_t* names[] = {L"Drawing1.dwg", L"Drawing2.dwg", L"图纸设计2.dwg",
                 L"office-final.pdf", L"README", L".gitignore", L"archive.tar.gz",
                 L"Drawing1234567890-very-long-file-name.dwg"};
