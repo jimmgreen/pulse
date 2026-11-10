@@ -373,15 +373,6 @@ const wchar_t* WindowEffectLabel(WindowEffect effect) noexcept {
     }
 }
 
-WindowEffect WindowEffectFromId(std::wstring_view id) noexcept {
-    if (id == L"acrylic-material" || id == L"acrylic" || id == L"dwm-blur")
-        return WindowEffect::Acrylic;
-    if (id == L"mica") return WindowEffect::Mica;
-    if (id == L"mica-alt" || id == L"miac-alt") return WindowEffect::MicaAlt;
-    if (id == L"none") return WindowEffect::None;
-    return WindowEffect::MicaAlt;
-}
-
 bool SampleTarget(ID2D1DeviceContext* dc, const D2D1_RECT_F& rect, float margin, TargetSample& sample) noexcept {
     sample = TargetSample{};
     if (!dc || !(rect.right > rect.left) || !(rect.bottom > rect.top)) return false;

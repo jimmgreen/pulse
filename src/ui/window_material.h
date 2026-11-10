@@ -14,7 +14,6 @@ inline constexpr int kWindowEffectCount = 4;
 
 const wchar_t* WindowEffectId(WindowEffect effect) noexcept;
 const wchar_t* WindowEffectLabel(WindowEffect effect) noexcept;
-WindowEffect WindowEffectFromId(std::wstring_view id) noexcept;
 bool WindowEffectUsesBackdrop(WindowEffect effect) noexcept;
 bool ApplyWindowEffect(HWND hwnd, WindowEffect effect, bool dark) noexcept;
 
