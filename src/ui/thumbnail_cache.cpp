@@ -9,6 +9,7 @@
 #include "../common/preview_extensions.h"
 #include "../common/module_location.h"
 #include "thumbnail_artwork_layout.h"
+#include "folder_thumbnail_resample.h"
 #include <algorithm>
 #include <cwctype>
 #include <iterator>
@@ -28,8 +29,8 @@ namespace {
 std::atomic<uint32_t> g_preview_cache_sequence{1};
 std::atomic<ThumbnailStore*> g_grid_store{nullptr};
 
-// Transport failures retry after 1 s, 4 s, then 15 s; the fourth in a row is
-// kept as a real failure so a file that always hangs its provider settles.
+// Non-image transport failures settle after three retries. Images below use
+// bounded backoff while visible, including when their decoder host fails.
 constexpr uint32_t kTransientRetryMs[] = {1000, 4000, 15000};
 
 bool UploadBitmap(ID2D1DeviceContext* dc, ComPtr<ID2D1Bitmap>& bitmap,
@@ -382,6 +383,7 @@ void ThumbnailCache::DropOverflowLocked() {
 
 ThumbnailCache::~ThumbnailCache() { Reset(); }
 void ThumbnailCache::SetDeviceContext(ID2D1DeviceContext* dc) {
+    if (folder_revisit_) folder_revisit_->SetDeviceContext(dc);
     // Another window's context on the same device keeps every bitmap.
     std::lock_guard lock(mutex_);
     if (!device_binding_.Bind(dc)) return;
@@ -422,6 +424,7 @@ void ThumbnailCache::Reset() {
     for (auto& lane : extra_lanes_)
         if (lane.worker.joinable()) lane.worker.join();
     StopChildren();
+    if (folder_revisit_) folder_revisit_->Reset();
     std::lock_guard lock(mutex_); queue_.clear(); pending_.clear(); items_.clear(); lru_.clear(); folder_requests_.clear();
     wanted_.clear(); interests_.clear(); interest_window_ = nullptr; slow_in_flight_ = 0; psd_refinements_in_flight_ = 0;
     still_by_identity_.clear(); transient_failures_.clear(); retry_interest_.clear();
@@ -430,6 +433,7 @@ void ThumbnailCache::Reset() {
     epoch_.fetch_add(1, std::memory_order_relaxed);
 }
 void ThumbnailCache::BeginFrame() {
+    if (folder_revisit_) folder_revisit_->BeginFrame();
     std::lock_guard lock(mutex_);
     upload_elapsed_us_ = 0; upload_bytes_ = 0;
     if (shared_upload_budget_) { shared_upload_budget_->elapsed_us = 0; shared_upload_budget_->bytes = 0; }
@@ -514,6 +518,7 @@ void ThumbnailCache::ResumeVolume(const std::wstring& root) {
 void ThumbnailCache::Evict() {
     epoch_.fetch_add(1, std::memory_order_relaxed);
     std::lock_guard lock(mutex_);
+    if (folder_revisit_) folder_revisit_->Evict();
     queue_.clear(); pending_.clear(); items_.clear(); lru_.clear(); folder_requests_.clear();
     still_by_identity_.clear(); transient_failures_.clear(); retry_interest_.clear();
     wanted_.clear(); interests_.clear(); interest_window_ = nullptr;
@@ -558,7 +563,7 @@ void ThumbnailCache::PrepareBitmap(const std::wstring& key, bool budgeted) {
         const auto it = items_.find(key);
         if (it == items_.end()) return;
         auto& item = it->second;
-        if (item.bitmap.get() || item.failed || item.pixels.empty() || item.upload_token || !dc_) return;
+        if ((item.bitmap.get() && !item.bitmap_dirty) || item.failed || item.pixels.empty() || item.upload_token || !dc_) return;
         const auto elapsed = shared_upload_budget_ ? shared_upload_budget_->elapsed_us.load() : upload_elapsed_us_;
         const auto bytes = shared_upload_budget_ ? shared_upload_budget_->bytes.load() : upload_bytes_;
         if (budgeted && (elapsed >= 3000 || (bytes &&
@@ -599,6 +604,7 @@ void ThumbnailCache::PrepareBitmap(const std::wstring& key, bool budgeted) {
         item.upload_failed = !uploaded;
         if (uploaded && device_generation_ == device && epoch_.load(std::memory_order_relaxed) == epoch) {
             item.bitmap = std::move(bitmap);
+            item.bitmap_dirty = false;
             if (folder_thumbnail_) item.pixels = std::move(pixels);
         }
         else {
@@ -1043,7 +1049,47 @@ void ThumbnailCache::QueuePsdRefinement(const Request& request) {
     cv_.notify_one();
 }
 
+void ThumbnailCache::RememberFolder(const Request& req, const Item& result, Item compact) {
+    if (!folder_revisit_) return;
+    auto& revisit = *folder_revisit_;
+    if (result.failed) {
+        if (result.transient) return;
+        std::lock_guard lock(revisit.mutex_);
+        if (auto old = revisit.items_.find(req.identity); old != revisit.items_.end()) {
+            revisit.cache_bytes_ -= old->second.cost;
+            revisit.lru_.erase(old->second.lru_position);
+            revisit.items_.erase(old);
+        }
+        revisit.still_by_identity_.erase(req.identity);
+        return;
+    }
+    if (compact.pixels.empty()) {
+        // A later small-size decode must update an existing large-size fallback,
+        // without reserving a duplicate tier for every tiny folder icon.
+        { std::lock_guard lock(revisit.mutex_);
+          if (!revisit.items_.contains(req.identity)) return; }
+        if (result.kind != ipc::PreviewContentKind::Bitmap ||
+            !CompactFolderPixels(result.pixels, result.w, result.h, result.stride,
+                compact.pixels, compact.w, compact.h)) return;
+    }
+    compact.stride = compact.w * 4;
+    compact.kind = ipc::PreviewContentKind::Bitmap;
+    compact.artwork_bounds = result.artwork_bounds;
+    compact.cost = compact.pixels.size() * 2;
+    Request stored;
+    stored.key = stored.identity = req.identity;
+    stored.epoch = revisit.epoch_.load(std::memory_order_relaxed);
+    revisit.StoreResult(stored, std::move(compact));
+}
+
 bool ThumbnailCache::StoreResult(const Request& req, Item result) {
+    Item compact;
+    // Resample on the worker before taking the lock used by UI drawing.
+    if (folder_revisit_ && (req.flags & ipc::kPreviewRequestFlagFolderThumbnail) &&
+        !result.failed && result.kind == ipc::PreviewContentKind::Bitmap &&
+        (std::max)(result.w, result.h) > 128)
+        CompactFolderPixels(result.pixels, result.w, result.h, result.stride,
+            compact.pixels, compact.w, compact.h);
     std::lock_guard lock(mutex_);
     // An old decode must not remove a replacement request queued after Evict().
     if (req.epoch != epoch_.load(std::memory_order_relaxed)) return false;
@@ -1093,6 +1139,7 @@ bool ThumbnailCache::StoreResult(const Request& req, Item result) {
             transient_failures_.erase(req.key);
             result.retry_at = GetTickCount64() + 30000;
         }
+        RememberFolder(req, result, std::move(compact));
         result.transient = false;
         result.cost *= 2; // CPU pixels retained for device recovery plus GPU bitmap.
     }
@@ -1109,7 +1156,9 @@ bool ThumbnailCache::StoreResult(const Request& req, Item result) {
         result.transient = true;
         result.retry_at = GetTickCount64() + 15000;
         transient_failures_.erase(req.key);
-    } else if (result.failed && !result.transient &&
+    } else if (result.failed && (result.transient || result.error == L"image-decode-failed" ||
+        result.error == L"image-page-decode-failed" || result.error == L"gif-truncated" ||
+        result.error == L"gif-open-failed") &&
         req.kind == ipc::PreviewRequestKind::Content && req.frame_index == 0 &&
         !(req.attrs & FILE_ATTRIBUTE_DIRECTORY) &&
         !(req.flags & ipc::kPreviewRequestFlagFolderThumbnail) &&
@@ -1119,14 +1168,13 @@ bool ThumbnailCache::StoreResult(const Request& req, Item result) {
                 [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
             return preview::IsImageExtension(extension);
         }()) {
-        // A decoder can reject an image while its writer is still downloading.
-        // Metadata may not change until close, so do not permanently cache this
-        // refusal. Visible-interest timers retry without probing files on the UI.
+        // Partial saves can look like corrupt data. Probe only four times
+        // per snapshot identity; a corrupt image must eventually settle.
         auto& attempts = transient_failures_[req.key];
-        attempts = (std::min)(attempts + 1, 4u);
+        attempts = (std::min)(attempts + 1, 5u);
         constexpr uint32_t retry_ms[] = {1000, 4000, 15000, 30000};
-        result.transient = true;
-        result.retry_at = GetTickCount64() + retry_ms[attempts - 1];
+        result.transient = attempts <= std::size(retry_ms);
+        result.retry_at = result.transient ? GetTickCount64() + retry_ms[attempts - 1] : 0;
     } else if (result.failed && result.transient) {
         const uint32_t attempts = ++transient_failures_[req.key];
         if (attempts > std::size(kTransientRetryMs)) {
@@ -1147,6 +1195,10 @@ bool ThumbnailCache::StoreResult(const Request& req, Item result) {
     }
 
     if (auto old = items_.find(req.key); old != items_.end()) {
+        if (preserve_bitmap_on_replace_ && old->second.bitmap.get() && !result.failed) {
+            result.bitmap_dirty = old->second.bitmap_dirty || old->second.pixels != result.pixels;
+            result.bitmap = std::move(old->second.bitmap);
+        }
         cache_bytes_ -= old->second.cost;
         lru_.erase(old->second.lru_position);
         items_.erase(old);
@@ -1204,7 +1256,8 @@ bool ThumbnailCache::StoreResult(const Request& req, Item result) {
 }
 
 bool ThumbnailCache::IsTransientResponse(bool transport_ok, const Request& request, uint32_t status) {
-    return !transport_ok || ((request.flags & ipc::kPreviewRequestFlagFolderThumbnail) && status == ERROR_TIMEOUT);
+    return !transport_ok || status == ERROR_SHARING_VIOLATION || status == ERROR_LOCK_VIOLATION ||
+        ((request.flags & ipc::kPreviewRequestFlagFolderThumbnail) && status == ERROR_TIMEOUT);
 }
 
 bool ThumbnailCache::FolderRequestCurrent(const Request& request) {

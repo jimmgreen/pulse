@@ -395,7 +395,10 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
             allow({"children", "gap"});
         }
         if (t == UiNodeType::Stack) {
-            allow({"orientation"});
+            allow({"orientation", "alignment"});
+        }
+        if (t == UiNodeType::Group) {
+            allow({"bordered"});
         }
         if (t == UiNodeType::Grid) {
             allow({"columns"});
@@ -411,7 +414,7 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
             allow({"command", "kind", "state", "glyph", "keycap", "iconOnly"});
         }
         if (t == UiNodeType::TextInput) {
-            allow({"state", "placeholder", "glyph", "trailingGlyph", "keycap", "badgeText"});
+            allow({"state", "placeholder", "glyph", "trailingGlyph", "keycap", "badgeText", "kind"});
         }
         if (check) {
             allow({"state", "checked"});
@@ -429,7 +432,7 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
             allow({"value", "binding", "kind", "status"});
         }
         if (t == UiNodeType::Slider) {
-            allow({"state", "stops", "value"});
+            allow({"state", "stops", "value", "options"});
         }
         if (t == UiNodeType::Badge) {
             allow({"kind", "dot"});
@@ -541,6 +544,7 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
             }
         }
         auto& kind = t == UiNodeType::Button                                ? n.button_kind
+                     : t == UiNodeType::TextInput                           ? n.input_kind
                      : (t == UiNodeType::Badge || t == UiNodeType::FileRow) ? n.badge_kind
                      : t == UiNodeType::InfoBar                             ? n.info_kind
                                                                             : n.progress_kind;
@@ -656,6 +660,7 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
                          {"standard", "primary", "danger", "transparent", "toggle", "transparentToggle"},
                          path + ".kind") ||
             !enumeration(n.progress_kind, {"bar", "ring"}, path + ".kind") ||
+            !enumeration(n.input_kind, {"text", "password"}, path + ".kind") ||
             !enumeration(n.progress_state, {"normal", "paused", "error", "indeterminate"},
                          path + ".status") ||
             !enumeration(n.text_role, {"body", "caption", "section"}, path + ".role") ||
@@ -687,6 +692,12 @@ bool ParseUiTree(const json::Value& value, const std::vector<std::string>& comma
         }
         if (choice && n.options.empty()) {
             return fail(path + ".options", "required");
+        }
+        if (t == UiNodeType::Group && !v.find("bordered")) {
+            n.bordered = false;  // plain heading unless the group asks to be a card
+        }
+        if (t == UiNodeType::Slider && !n.options.empty() && n.options.size() != static_cast<size_t>(n.stops)) {
+            return fail(path + ".options", "one caption per stop");
         }
         if (const auto* children = v.find("children")) {
             if (!children->is_array()) {

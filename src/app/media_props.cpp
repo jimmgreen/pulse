@@ -1,4 +1,5 @@
 #include "media_props.h"
+#include "media_matroska.h"
 #include <propsys.h>
 #include <propkey.h>
 #include <shobjidl.h>
@@ -9,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cwctype>
 #include <unordered_map>
 
 namespace pulse::app::media {
@@ -79,12 +81,29 @@ struct Shared {
     size_t busy = 0;             // jobs taken off the queue, not yet stored
     std::atomic<uint64_t> revision{0};
     bool started = false;
+    std::unordered_map<const void*, std::weak_ptr<std::atomic<bool>>> owners;
+    std::unordered_map<std::wstring, uint64_t> folder_revisions;
+    uint64_t cache_reset_revision = 0;
     std::unordered_map<std::wstring, Cached> cache;
 };
 
 Shared& State() {
     static Shared* shared = new Shared();
     return *shared;
+}
+
+std::wstring FolderKey(std::wstring folder) {
+    while (!folder.empty() && (folder.back() == L'\\' || folder.back() == L'/')) folder.pop_back();
+    std::transform(folder.begin(), folder.end(), folder.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+    return folder;
+}
+
+void CancelLocked(Shared& s, const void* owner) {
+    const auto found = s.owners.find(owner);
+    if (found == s.owners.end()) return; // inactive panes must not scan another pane's queue on every paint
+    if (const auto generation = found->second.lock()) generation->store(true, std::memory_order_release);
+    s.owners.erase(found);
+    std::erase_if(s.queue, [owner](const Job& job) { return job.owner == owner; });
 }
 
 bool Current(const Shared& s, const Job& job) {
@@ -112,8 +131,10 @@ void Run() {
                 job = std::move(s.queue.front());
                 s.queue.pop_front();
                 // Another tab may have queued the same file before it was cached.
-                if (Current(s, job) || std::any_of(results.begin(), results.end(), [&](const Result& r) {
-                    return r.job.path == job.path && r.job.mtime == job.mtime && r.job.size == job.size;
+                if ((job.cancelled && job.cancelled->load(std::memory_order_acquire)) || Current(s, job) || std::any_of(results.begin(), results.end(), [&](const Result& r) {
+                    return (!r.job.cancelled || !r.job.cancelled->load(std::memory_order_acquire)) &&
+                        r.job.owner == job.owner && r.job.path == job.path &&
+                        r.job.mtime == job.mtime && r.job.size == job.size;
                 })) continue;
                 ++s.busy;
             }
@@ -125,13 +146,23 @@ void Run() {
         {
             std::lock_guard lock(s.m);
             if (!results.empty()) {
-                if (s.cache.size() + results.size() > kCacheLimit) s.cache.clear();
+                const uint64_t next = s.revision.load(std::memory_order_relaxed) + 1;
+                bool published = false;
                 for (auto& result : results) {
                     const auto& job = result.job;
+                    if (job.cancelled && job.cancelled->load(std::memory_order_acquire)) continue;
+                    if (s.cache.size() >= kCacheLimit && !s.cache.contains(job.path)) {
+                        s.cache.clear();
+                        s.folder_revisions.clear();
+                        s.cache_reset_revision = next;
+                    }
                     s.cache[job.path] = Cached{job.mtime, job.size, std::move(result.props)};
+                    const size_t slash = job.path.find_last_of(L"\\/");
+                    s.folder_revisions[FolderKey(job.path.substr(0, slash))] = next;
+                    published = true;
                 }
                 s.busy -= results.size();
-                s.revision.fetch_add(1, std::memory_order_release);
+                if (published) s.revision.store(next, std::memory_order_release);
             }
         }
     }
@@ -158,7 +189,8 @@ std::wstring CameraLabel(const std::wstring& make, const std::wstring& model) {
 
 Props ReadProps(const Job& job) {
     Props out;
-    if (job.kind == Kind::None || (job.attrs & kNeverOpen)) return out;
+    if ((job.cancelled && job.cancelled->load(std::memory_order_acquire)) ||
+        job.kind == Kind::None || (job.attrs & kNeverOpen)) return out;
     const PROPERTYKEY photo_keys[] = {PKEY_Photo_DateTaken, PKEY_Image_HorizontalSize,
         PKEY_Image_VerticalSize, PKEY_Photo_CameraManufacturer, PKEY_Photo_CameraModel};
     const PROPERTYKEY music_keys[] = {PKEY_Title, PKEY_Music_Artist, PKEY_Music_AlbumArtist,
@@ -169,14 +201,20 @@ Props ReadProps(const Job& job) {
     UINT count = ARRAYSIZE(photo_keys);
     if (job.kind == Kind::Music) { keys = music_keys; count = ARRAYSIZE(music_keys); }
     if (job.kind == Kind::Video) { keys = video_keys; count = ARRAYSIZE(video_keys); }
+    // Worker-side fallback also works when no Shell property handler exists.
+    const auto finish = [&]() {
+        if (job.kind == Kind::Video &&
+            (!job.cancelled || !job.cancelled->load(std::memory_order_acquire))) ReadMatroskaProps(job.path, out);
+        return out;
+    };
     IShellItem2* item = nullptr;
     if (FAILED(SHCreateItemFromParsingName(ShellPath(job.path).c_str(), nullptr,
-                                          IID_PPV_ARGS(&item))) || !item) return out;
+                                          IID_PPV_ARGS(&item))) || !item) return finish();
     IPropertyStore* store = nullptr;
     // Ask only for columns used by this media kind, avoiding unrelated property providers.
     const HRESULT hr = item->GetPropertyStoreForKeys(keys, count, GPS_DEFAULT, IID_PPV_ARGS(&store));
     item->Release();
-    if (FAILED(hr) || !store) return out;
+    if (FAILED(hr) || !store) return finish();
     switch (job.kind) {
     case Kind::Photo:
         out.taken = Number(store, PKEY_Photo_DateTaken);
@@ -202,11 +240,25 @@ Props ReadProps(const Job& job) {
         break;
     }
     store->Release();
-    return out;
+    return finish();
 }
 
 uint64_t Revision() {
     return State().revision.load(std::memory_order_acquire);
+}
+
+uint64_t Revision(const std::wstring& folder) {
+    Shared& s = State();
+    const auto key = FolderKey(folder);
+    std::lock_guard lock(s.m);
+    const auto found = s.folder_revisions.find(key);
+    return found == s.folder_revisions.end() ? s.cache_reset_revision : found->second;
+}
+
+void Cancel(const void* owner) {
+    Shared& s = State();
+    std::lock_guard lock(s.m);
+    CancelLocked(s, owner);
 }
 
 void Request(const void* owner, std::vector<Job> jobs) {
@@ -215,11 +267,15 @@ void Request(const void* owner, std::vector<Job> jobs) {
     {
         std::lock_guard lock(s.m);
         // This owner's previous folder; then its new files go first.
-        std::erase_if(s.queue, [owner](const Job& job) { return job.owner == owner; });
+        CancelLocked(s, owner);
+        std::erase_if(s.owners, [](const auto& entry) { return entry.second.expired(); });
+        auto generation = std::make_shared<std::atomic<bool>>(false);
+        s.owners[owner] = generation;
         std::deque<Job> fresh;
         for (Job& job : jobs) {
             if (job.kind == Kind::None || Current(s, job)) continue;
             job.owner = owner;
+            job.cancelled = generation;
             fresh.push_back(std::move(job));
         }
         s.queue.insert(s.queue.begin(), std::make_move_iterator(fresh.begin()),

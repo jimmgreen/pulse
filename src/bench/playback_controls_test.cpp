@@ -1,6 +1,8 @@
-#include "../ui/playback_timeline.h"
+﻿#include "../ui/playback_timeline.h"
 #include "../ui/video_preview.h"
 #include "../common/runtime_log.h"
+#include "preview_resource_test_metrics.h"
+#include <atomic>
 #include <windows.h>
 #include <objbase.h>
 #include <cmath>
@@ -9,6 +11,16 @@
 #include <functional>
 #include <limits>
 
+#ifdef PULSE_VIDEO_PREVIEW_TESTING
+namespace pulse::ui { extern void (*g_video_preview_open_for_test)(); }
+static HANDLE slow_video_release = nullptr;
+static std::atomic<unsigned> slow_video_live{0};
+static void SlowVideoOpen() {
+    ++slow_video_live;
+    WaitForSingleObject(slow_video_release, 15000);
+    --slow_video_live;
+}
+#endif
 using pulse::ui::VideoPreview;
 static int failures = 0;
 static int layout_messages = 0;
@@ -26,7 +38,7 @@ void Pump(unsigned ms) {
     const auto end = GetTickCount64() + ms;
     do {
         MSG msg{};
-        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        while (GetTickCount64() < end && PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
             TranslateMessage(&msg); DispatchMessageW(&msg);
         }
         Sleep(5);
@@ -38,6 +50,49 @@ bool Until(const std::function<bool()>& condition, unsigned ms = 10000) {
     return false;
 }
 int wmain(int argc, wchar_t** argv) {
+#ifdef PULSE_VIDEO_PREVIEW_TESTING
+    if (argc == 2 && wcscmp(argv[1], L"--resource-bounds") == 0) {
+        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        HWND owner = CreateWindowExW(WS_EX_TOOLWINDOW, L"STATIC", L"slow video fixture", WS_OVERLAPPEDWINDOW,
+            -30000, -30000, 300, 300, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        slow_video_release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        pulse::ui::g_video_preview_open_for_test = SlowVideoOpen;
+        const auto before = PreviewResourceMetrics::Capture("before");
+        for (int batch = 0; batch < 2; ++batch) {
+            for (int i = 0; i < 16; ++i) {
+                VideoPreview video;
+                video.Open(owner, L"isolated-slow.mp4");
+                Pump(15);
+                if (batch == 1) Check(video.Snapshot().error == HRESULT_FROM_WIN32(ERROR_BUSY),
+                    "saturated open reports retryable busy without a worker");
+            }
+            const auto held = PreviewResourceMetrics::Capture(batch ? "second-batch-held" : "first-batch-held");
+            Check(slow_video_live > 0 && slow_video_live <= 4, "slow video workers stay bounded across object destruction");
+            Check(held.threads <= before.threads + 4, "slow video thread count respects process admission bound");
+        }
+        SetEvent(slow_video_release);
+        Check(Until([] { return slow_video_live == 0; }, 5000), "slow video workers complete after release");
+        Pump(150);
+        {
+            ResetEvent(slow_video_release);
+            VideoPreview video;
+            video.Open(owner, L"isolated-resumed.mp4");
+            Check(Until([] { return slow_video_live == 1; }, 2000), "video reopens after capacity is released");
+            video.Reset();
+            SetEvent(slow_video_release);
+            Check(Until([] { return slow_video_live == 0; }, 5000), "reopened video releases after reset");
+        }
+        Pump(150);
+        const auto after = PreviewResourceMetrics::Capture("final");
+        Check(after.handles <= before.handles + 2 && after.threads <= before.threads,
+            "video thread and handle counts return near baseline");
+        Check(GetWindow(owner, GW_CHILD) == nullptr, "retired video HWNDs are destroyed after worker release");
+        pulse::ui::g_video_preview_open_for_test = nullptr;
+        DestroyWindow(owner); CloseHandle(slow_video_release); CoUninitialize();
+        return failures ? 1 : 0;
+    }
+#endif
+
     struct TestLog {
         bool enabled = false;
         TestLog() {

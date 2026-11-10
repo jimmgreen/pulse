@@ -51,6 +51,10 @@ bool Amd64Dll(std::string_view bytes) {
 }
 }
 
+bool ValidateNativeImageBytes(std::string_view bytes) {
+    return bytes.size() <= kMaxNativeImageBytes && Amd64Dll(bytes);
+}
+
 static bool OpenVerifiedFile(const std::wstring& path, std::string_view expected_sha256,
     HANDLE& verified_file, std::string& error, std::vector<HANDLE>* ancestor_locks, bool dll) {
     verified_file = INVALID_HANDLE_VALUE;

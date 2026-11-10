@@ -39,6 +39,7 @@ FILES = [
     'sdk/native/include/pulse/tasks.h',
     'sdk/native/include/pulse/staging.h',
     'sdk/native/include/pulse/settings_pages.h',
+    'sdk/native/include/pulse/dialogs.h',
     'sdk/native/include/pulse/fileops.h',
     'sdk/native/include/pulse/ui_model.h',
     'sdk/native/ui-model.schema.json',

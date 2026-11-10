@@ -2043,6 +2043,9 @@ void PlacesCatalog::RemapPaths(const std::vector<std::pair<std::wstring, std::ws
         valid.emplace_back(std::move(old_norm), std::move(new_norm));
     }
     if (valid.empty()) return;
+    // Operation completion runs on the UI thread. Publish the remapped paths
+    // immediately, but never wait there for the catalog writer or storage.
+    ScopedAsyncSave queued_save(*this);
     // Every path follows the move whose source it is or lies under.
     const auto apply = [&](const PathRoots& roots) {
         bool changed = false;

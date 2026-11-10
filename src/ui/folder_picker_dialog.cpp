@@ -2256,11 +2256,7 @@ private:
                 return 0;
             }
             if (wparam == VK_ESCAPE) {
-                if (hwnd == self->path_edit_) self->EndAddressEdit(true);
-                else if (hwnd == self->search_edit_) {
-                    if (!ReadEdit(hwnd).empty()) SetWindowTextW(hwnd, L"");
-                    else self->ExitSearch();
-                } else self->Cancel();
+                self->Cancel();
                 return 0;
             }
             if (wparam == VK_TAB) { self->MoveFocus(KeyDown(VK_SHIFT) ? -1 : 1); return 0; }
@@ -2344,7 +2340,7 @@ private:
         for (size_t i = 0; i < spec_.custom_controls.size(); ++i) {
             const auto& control = spec_.custom_controls[i];
             if (!(EffectiveControl(i) & 2) || control.kind == 5) continue;
-            if (control.property_layout || control.kind == 1 || control.kind == 6 || control.has_parent) return false;
+            if (control.property_layout || control.kind == 1 || control.kind == 6 || control.kind == kPickerCustomSeparator || control.has_parent) return false;
             any = true;
         }
         return any;
@@ -2368,14 +2364,15 @@ private:
     float CustomHeightDip() const {
         if (PropertySidebar()) return 0.0f;
         if (CompactCustom()) return std::min(128.0f, 8.0f + 40.0f * static_cast<float>((CompactCustomCount() + CompactCustomColumns() - 1) / CompactCustomColumns()));
-        bool prominent = false;
+        bool prominent = false, separators = false;
         float content = 20.0f;
         for (size_t i = 0; i < spec_.custom_controls.size(); ++i) {
             if (spec_.custom_controls[i].kind == 5 || !(EffectiveControl(i) & 2)) continue;
             prominent |= ProminentControl(i);
+            separators |= spec_.custom_controls[i].kind == kPickerCustomSeparator;
             content += CustomRowHeight(i);
         }
-        if (prominent) return std::clamp(content, 120.0f, 220.0f);
+        if (prominent || separators) return std::clamp(content, 120.0f, 220.0f);
         for (const auto& control : spec_.custom_controls) if (control.property_layout)
             return std::clamp(Height() / std::max(0.1f, scale_) - 260.0f, 120.0f, 220.0f);
         for (size_t i=0;i<spec_.custom_controls.size();++i) if (spec_.custom_controls[i].kind != 5 && (EffectiveControl(i)&2)) return 120.0f;
@@ -2409,6 +2406,7 @@ private:
         const auto& control=spec_.custom_controls[index];
         if(control.property_layout==2)return 0.0f;
         if(control.kind==1)return 26.0f;
+        if(control.kind==kPickerCustomSeparator)return 18.0f;
         if(control.kind==6) {
             size_t count=0;for(const auto& item:control.items)if(item.state&2)++count;
             return static_cast<float>(count)*30.0f;
@@ -2480,6 +2478,11 @@ private:
             const auto rect = CustomRect(i);
             const auto& control = spec_.custom_controls[i];
             if (control.property_layout && (rect.top < CustomPanel().top || rect.bottom > CustomPanel().bottom)) continue;
+            if (control.kind == kPickerCustomSeparator) {
+                const float y = (rect.top + rect.bottom) * 0.5f;
+                painter_.FillRoundedRect(D2D1::RectF(rect.left, y, rect.right, y + scale_), 0, theme.stroke_divider);
+                continue;
+            }
             std::wstring caption=control.label;
             if(control.kind==3 && control.has_selected) for(const auto& item:control.items)
                 if(item.id==control.selected_item_id) { caption=item.label;break; }
@@ -2689,7 +2692,7 @@ private:
         hit.chrome = HitTestPickerChrome(chrome_layout_, chrome_, x, y);
         if (!spec_.custom_controls.empty() && ContainsRect(CustomPanel(), x, y)) {
             for (size_t i = 0; i < spec_.custom_controls.size(); ++i)
-                if (spec_.custom_controls[i].kind != 1 && spec_.custom_controls[i].kind != 5 && EffectiveControl(i) == 3 && ContainsRect(CustomRect(i), x, y))
+                if (PickerCustomInteractive(spec_.custom_controls[i].kind) && EffectiveControl(i) == 3 && ContainsRect(CustomRect(i), x, y))
                     hit.chrome = kCustomFocusBase + static_cast<int>(i);
             return hit;
         }
@@ -3525,7 +3528,7 @@ private:
             order.push_back(kPickFilter);
         }
         for (size_t i = 0; i < spec_.custom_controls.size(); ++i)
-            if (spec_.custom_controls[i].kind != 1 && spec_.custom_controls[i].kind != 5 && EffectiveControl(i) == 3)
+            if (PickerCustomInteractive(spec_.custom_controls[i].kind) && EffectiveControl(i) == 3)
                 order.push_back(kCustomFocusBase + static_cast<int>(i));
         order.push_back(kPickCancel);
         if (!chosen_.empty() && !waiting_ && !validating_) { order.push_back(kPickPrimary); if(chrome_.primary_drop_down) order.push_back(kPickPrimaryDropDown); }
@@ -3719,7 +3722,6 @@ private:
         switch (key) {
         case VK_ESCAPE:
             if (chrome_.overwrite_pending) ResolveOverwrite(false);
-            else if (searching_) ExitSearch();
             else Cancel();
             return true;
         case VK_TAB: MoveFocus(shift ? -1 : 1); return true;

@@ -285,7 +285,10 @@ struct State {
     bool prominent = false;
     const PulsePickerUiV2Control* prominent_control = nullptr;
     const PulsePickerUiV2Control* prominent_parent = nullptr;
+    bool separators = false;
     bool query = false, ready = false, custom = false, inspect = false, window_cancel = false;
+    int escape_case = 0;
+    bool escape_watchdog = false;
     StartupVisibility* startup = nullptr;
     bool mask_sequence = false;
     std::wstring mask_folder;
@@ -686,7 +689,7 @@ HRESULT WINAPI Callback(void* opaque, const PulsePickerUiV2Event* event) {
         }
         if (state.prominent) {
             const auto capture = [&](const wchar_t* suffix) {
-                const auto path = std::filesystem::absolute(std::filesystem::path(L"bench_data") / (L"picker-prominent-" + std::to_wstring(GetCurrentProcessId()) + suffix + L".png"));
+                const auto path = std::filesystem::absolute(std::filesystem::path(L"bench_data") / ((state.separators ? L"picker-separators-" : L"picker-prominent-") + std::to_wstring(GetCurrentProcessId()) + suffix + L".png"));
                 const auto text = path.wstring();
                 SetPropW(event->window, L"Pulse.PickerTestSnapshot", SnapshotRequest(text));
                 SendMessageW(event->window, WM_PAINT, 0, 0);
@@ -694,6 +697,13 @@ HRESULT WINAPI Callback(void* opaque, const PulsePickerUiV2Event* event) {
                 Check(std::filesystem::exists(path), "prominent layout screenshot captured");
                 std::printf("PROMINENT_SCREENSHOT=%ls\n", text.c_str());
             };
+            if (state.separators) {
+                PulsePickerUiV2Control separator{}; separator.size = sizeof(separator);
+                separator.kind = PULSE_PICKER_UI_V2_CONTROL_SEPARATOR; separator.id = 2027; separator.state = 0;
+                Check(state.api->UpdateControl(state.session, event->show_id, &separator) == S_OK, "hide standalone separator during actual Show");
+                separator.state = 3;
+                Check(state.api->UpdateControl(state.session, event->show_id, &separator) == S_OK, "restore standalone separator during actual Show");
+            }
             capture(L"-ordinary");
             auto group = *state.prominent_control;
             group.state |= PULSE_PICKER_UI_V2_CONTROL_PROMINENT;
@@ -992,6 +1002,24 @@ HRESULT WINAPI Callback(void* opaque, const PulsePickerUiV2Event* event) {
             Check(state.api->UpdateControl(state.session, state.show, &control) == E_INVALIDARG, "update unknown ID fails");
             if (state.inspect) { std::printf("INSPECT own Pulse custom controls ready; button 42 closes with exact HRESULT; up to 180 seconds\n"); std::fflush(stdout); return S_OK; }
         }
+        if (state.escape_case) {
+            if (state.escape_case == 2) SendMessageW(event->window, WM_KEYDOWN, VK_F4, 0);
+            if (state.escape_case == 3) SendMessageW(event->window, WM_KEYDOWN, VK_F3, 0);
+            if (state.escape_case == 4) SetFocus(event->window);
+            HWND focused = GetFocus();
+            Check(focused == event->window || IsChild(event->window, focused), "Escape targets actual focused picker control");
+            Check(PostMessageW(focused, WM_KEYDOWN, VK_ESCAPE, 0) != FALSE, "post one Escape key to real picker");
+            state.driver = std::thread([&state, window = event->window] {
+                const auto deadline = GetTickCount64() + 3000;
+                while (IsWindow(window) && GetTickCount64() < deadline) Sleep(10);
+                if (IsWindow(window)) {
+                    state.escape_watchdog = true;
+                    std::printf("[FAIL] single Escape did not close dialog within three seconds\n"); std::fflush(stdout);
+                    PostMessageW(window, WM_CLOSE, 0, 0);
+                }
+            });
+            return S_OK;
+        }
         if (state.window_cancel) {
             Check(PostMessageW(event->window, WM_CLOSE, 0, 0) != FALSE, "post actual picker window cancellation");
             return S_OK;
@@ -1003,6 +1031,10 @@ HRESULT WINAPI Callback(void* opaque, const PulsePickerUiV2Event* event) {
     } catch (...) { state.api->Close(state.session, event ? event->show_id : 0, E_UNEXPECTED); return E_UNEXPECTED; }
 }
 int Run(const wchar_t* dll, const wchar_t* selected_case, bool interactive) {
+    const int escape_case = wcscmp(selected_case, L"escape-filename") == 0 ? 1 :
+        wcscmp(selected_case, L"escape-address") == 0 ? 2 : wcscmp(selected_case, L"escape-search") == 0 ? 3 :
+        wcscmp(selected_case, L"escape-list") == 0 ? 4 : 0;
+    const bool separators = wcscmp(selected_case, L"separators") == 0 || wcscmp(selected_case, L"separators-dark") == 0;
     const bool property_scroll = wcscmp(selected_case, L"property-scroll") == 0;
     const bool property_mutate = wcscmp(selected_case, L"property-mutate") == 0;
     const bool property_edit = property_scroll || property_mutate || wcscmp(selected_case, L"property-edit") == 0;
@@ -1034,7 +1066,7 @@ int Run(const wchar_t* dll, const wchar_t* selected_case, bool interactive) {
         wcscmp(prominent_case, L"combo") == 0 ? PULSE_PICKER_UI_V2_CONTROL_COMBO :
         wcscmp(prominent_case, L"button") == 0 ? PULSE_PICKER_UI_V2_CONTROL_BUTTON :
         wcscmp(prominent_case, L"menu") == 0 ? PULSE_PICKER_UI_V2_CONTROL_MENU : PULSE_PICKER_UI_V2_CONTROL_GROUP;
-    const bool prominent = prominent_kind != PULSE_PICKER_UI_V2_CONTROL_GROUP || wcscmp(selected_case, L"custom-prominent") == 0;
+    const bool prominent = separators || prominent_kind != PULSE_PICKER_UI_V2_CONTROL_GROUP || wcscmp(selected_case, L"custom-prominent") == 0;
     const bool inspect = wcscmp(selected_case, L"custom-inspect") == 0;
     const bool custom = inspect || wcscmp(selected_case, L"custom-update") == 0;
     if (inspect) interactive = true;
@@ -1049,7 +1081,7 @@ int Run(const wchar_t* dll, const wchar_t* selected_case, bool interactive) {
     const bool cross_cancel = wcscmp(selected_case, L"cross-thread-cancel") == 0;
     const bool cross_owner = cross_cancel || cross_accept || wcscmp(selected_case, L"cross-thread-owner") == 0;
     const bool close_ok = wcscmp(selected_case, L"close-ok") == 0;
-    if (!external_navigation && !mask_sequence && !startup_terminal && !startup_visibility && !values && !property_edit && !menus && !places && !extension_channel && !labels && !multi && !combo && !initial_empty && !prominent && !custom && !query && !close_ok && !reentrant && !cross_owner && wcscmp(selected_case, L"ready-close") != 0) return 2;
+    if (!escape_case && !external_navigation && !mask_sequence && !startup_terminal && !startup_visibility && !values && !property_edit && !menus && !places && !extension_channel && !labels && !multi && !combo && !initial_empty && !prominent && !custom && !query && !close_ok && !reentrant && !cross_owner && wcscmp(selected_case, L"ready-close") != 0) return 2;
     if (!std::filesystem::path(dll).is_absolute()) return 2;
     Check(dpi.Available(), "required caller DPI APIs dynamically available");
     if (!dpi.Available()) return 1;
@@ -1252,6 +1284,25 @@ int Run(const wchar_t* dll, const wchar_t* selected_case, bool interactive) {
                         config.control_count = prominent_nested || prominent_kind == PULSE_PICKER_UI_V2_CONTROL_GROUP ? 3 : 2;
                         Check((api.implemented_features & (prominent_kind == PULSE_PICKER_UI_V2_CONTROL_GROUP ? PULSE_PICKER_UI_V2_FEATURE_CUSTOM_PROMINENT_GROUP : PULSE_PICKER_UI_V2_FEATURE_CUSTOM_PROMINENT_CONTROL)) != 0, "prominent group feature advertised");
                     }
+                    PulsePickerUiV2Control separator_controls[5]{};
+                    if (separators) {
+                        for (unsigned i = 0; i < 5; ++i) {
+                            auto& control = separator_controls[i];
+                            control.size = sizeof(control); control.id = 2024 + i; control.state = 3;
+                            control.kind = i == 0 ? PULSE_PICKER_UI_V2_CONTROL_GROUP :
+                                i == 2 || i == 4 ? PULSE_PICKER_UI_V2_CONTROL_BUTTON : PULSE_PICKER_UI_V2_CONTROL_SEPARATOR;
+                            if (i == 1 || i == 2) { control.has_parent = 1; control.parent_id = 2024; }
+                        }
+                        separator_controls[0].label = Text(group_label);
+                        separator_controls[2].label = Text(button_label);
+                        separator_controls[4].label = Text(prominent_labels[0]);
+                        config.controls = separator_controls; config.control_count = 5;
+                        config.appearance = wcscmp(selected_case, L"separators-dark") == 0 ? PULSE_PICKER_UI_V2_DARK : 0;
+                        Check(api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_CUSTOM_SEPARATOR, "separator feature explicitly advertised");
+                        separator_controls[1].state = 7;
+                        Check(api.ValidateConfig(session, &config) == E_INVALIDARG, "separator rejects unsupported prominence");
+                        separator_controls[1].state = 3;
+                    }
                     const std::wstring mask_labels[]={L"Text",L"Literal",L"Extension mask",L"All"};
                     std::wstring mask_patterns[]={L"*.txt",L"*.md",L"*.xl*;*.xlsx",L"*.*"};
                     PulsePickerUiV2Filter mask_filters[4]{};
@@ -1344,6 +1395,7 @@ int Run(const wchar_t* dll, const wchar_t* selected_case, bool interactive) {
                         state.mask_sequence=mask_sequence;state.mask_folder=folder;
                         state.startup_terminal = startup_terminal;
                         state.window_cancel = cross_cancel;
+                        state.escape_case = escape_case;
                         state.values=values;state.value_controls=value_controls;
                         state.menus=menus;
                         if(menus)state.screenshot=(directory.parent_path()/(L"picker-menu-open-"+std::to_wstring(GetCurrentProcessId())+L".png")).wstring();
@@ -1355,7 +1407,13 @@ int Run(const wchar_t* dll, const wchar_t* selected_case, bool interactive) {
                         if (computer) state.screenshot = (directory.parent_path() / (L"picker-computer-" + std::to_wstring(GetCurrentProcessId()) + L".png")).wstring();
                         state.list_ten=list_ten;state.folder_single=folder_single;state.labels=labels;state.labels_empty=labels_empty;state.multi=multi;state.multi_close=multi_close;state.open_missing=open_missing;state.combo=combo;state.title=labels_empty ? L"" : title;
                         if(labels) state.screenshot=(directory.parent_path()/(L"picker-labels-"+std::to_wstring(GetCurrentProcessId())+(labels_empty ? L"-empty.png" : L"-long.png"))).wstring();
-                        state.caller_dpi = dpi.get_thread(); state.prominent = prominent; state.prominent_control = &prominent_controls[prominent_index]; state.prominent_parent = prominent_nested ? &prominent_controls[1] : nullptr; state.query = query; state.custom = custom; state.inspect = inspect; state.initial_empty = initial_empty; state.requested = close_ok ? S_OK : kClose;
+                        state.separators = separators;
+                        state.caller_dpi = dpi.get_thread(); state.prominent = prominent; state.prominent_control = &prominent_controls[prominent_index]; state.prominent_parent = prominent_nested ? &prominent_controls[1] : nullptr;
+                        if (separators) {
+                            state.prominent_control = &separator_controls[2];
+                            state.prominent_parent = &separator_controls[0];
+                        }
+                        state.query = query; state.custom = custom; state.inspect = inspect; state.initial_empty = initial_empty; state.requested = close_ok ? S_OK : kClose;
                         PulsePickerUiV2Callbacks callbacks{}; callbacks.size = sizeof(callbacks); callbacks.callback = Callback; callbacks.context = &state;
                         std::vector<wchar_t> path(PULSE_PICKER_UI_V2_MAX_UNITS + 1, L'X');
                         PulsePickerUiV2Result result{}; result.size = sizeof(result); result.path = {path.data(), static_cast<uint32_t>(path.size()), 0};
@@ -1428,7 +1486,8 @@ int Run(const wchar_t* dll, const wchar_t* selected_case, bool interactive) {
                             if(open_missing) Check(GetFileAttributesW(second_file.c_str())==INVALID_FILE_ATTRIBUTES &&
                                 GetFileAttributesW(second_file.parent_path().c_str())==INVALID_FILE_ATTRIBUTES,
                                 "real missing Open accepts both paths without creating file or parent");
-                        } else if (cross_cancel) {
+                        } else if (cross_cancel || escape_case) {
+                            if (escape_case) Check(state.ready && !state.escape_watchdog, "single Escape closes without watchdog WM_CLOSE");
                             Check(state.ready && shown == HRESULT_FROM_WIN32(ERROR_CANCELLED) &&
                                 result.status == PULSE_PICKER_UI_V2_CANCELLED && result.path.units == 0 && path[0] == 0,
                                 "cross-thread owner window cancellation returns no selection");

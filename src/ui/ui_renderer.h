@@ -45,6 +45,7 @@ public:
     MainRenderer();
     ~MainRenderer();
     void PruneWallViews(const std::vector<PaneSlotView>& panes) const;
+    void ReleaseWallViews();
     // Draws from caches shared with other windows (AppCore::render_caches).
     explicit MainRenderer(RenderCaches& caches);
     MainRenderer(const MainRenderer&) = delete;

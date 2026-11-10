@@ -41,6 +41,13 @@ constexpr UINT kMsgIndexResult = WM_APP + 4;
 constexpr UINT kMsgStop = WM_APP + 5;
 constexpr UINT_PTR kTimerAddress = 2, kTimerSearch = 3, kTimerProbe = 4, kTimerAnim = 5, kTimerGiveUp = 6, kTimerAuto = 7;
 constexpr int kHotkeyId = 0x5054;
+// Window properties follow the HWND's lifetime, unlike a process-local HWND set.
+// A destroyed/reused handle must get a fresh automatic-navigation opportunity.
+constexpr wchar_t kAutoJumpVisited[] = L"Pulse.DialogJump.AutoVisited.v1";
+static bool ClaimAutoJump(HWND dialog) {
+    if (GetPropW(dialog, kAutoJumpVisited)) return false;
+    return SetPropW(dialog, kAutoJumpVisited, reinterpret_cast<HANDLE>(1)) != FALSE;
+}
 constexpr uint64_t kSession = 0x50554c53444a4d50ull;
 // Geometry in DIPs, after the approved quick jump mockup (scene A).
 constexpr float kStripHeight = 44, kStripInset = 0, kAccentLine = 2, kStripRadius = 10;
@@ -763,9 +770,10 @@ void DialogJump::Impl::Attach(const DialogInfo& info) {
         rows.clear();
         list_mode = ListMode::Hidden;
         dlg_app = ProcessExeName(info.pid);
-        // Auto-jump once the fresh context is in (or after 700 ms without).
-        auto_pending = true;
-        SetTimer(bar.hwnd, kTimerAuto, 700, nullptr);
+        // Losing foreground, hiding or minimizing detaches the bar, not the
+        // dialog session. Keep its one-shot decision on the dialog itself.
+        auto_pending = ClaimAutoJump(info.dialog);
+        if (auto_pending) SetTimer(bar.hwnd, kTimerAuto, 700, nullptr);
     }
     KillTimer(bar.hwnd, kTimerProbe);
     if (const HWND service_window = service.load()) PostMessageW(service_window, context_message.load(), 0, 0);
@@ -2076,7 +2084,86 @@ int RunDialogJumpNavigationTest(const wchar_t* output) {
 }
 #endif
 
+// Exercises the real attach/detach/timer path without sending address keystrokes.
+// Zero-sized message-only windows make Place return before creating graphics.
+static int RunDialogJumpAutoLifecycleTest(const wchar_t* output) {
+    std::filesystem::create_directories(output);
+    std::ofstream log(std::filesystem::path(output) / L"auto-lifecycle-results.txt");
+    if (!log) return 4;
+    int failures = 0;
+    const auto check = [&](bool ok, const char* label) {
+        log << (ok ? "[PASS] " : "[FAIL] ") << label << std::endl;
+        if (!ok) ++failures;
+    };
+    DialogJump::Impl f;
+    f.instance = GetModuleHandleW(nullptr);
+    const auto create = [&] {
+        return CreateWindowExW(0, L"STATIC", L"Jump lifecycle fixture", 0,
+            0, 0, 0, 0, HWND_MESSAGE, nullptr, f.instance, nullptr);
+    };
+    f.bar.hwnd = create();
+    f.list.hwnd = create();
+    const HWND dialog = create(), other = create();
+    if (!f.bar.hwnd || !f.list.hwnd || !dialog || !other) return 4;
+    f.shared_context.auto_jump = true;
+    f.shared_context.current = L"C:\\JumpFixture\\PulseCurrent";
+    f.shared_context.index = false;
+    f.shared_history = std::make_shared<JumpHistory>();
+    f.shared_history->Open({});
+    DialogInfo info;
+    info.dialog = dialog;
+    info.tid = GetWindowThreadProcessId(dialog, &info.pid);
+    auto* previous_impl = t_impl;
+    t_impl = &f;
+    f.Attach(info);
+    check(f.auto_pending, "first attachment arms automatic navigation");
+    f.HandleBar(f.bar.hwnd, WM_TIMER, kTimerAuto, 0);
+    check(f.address_path == f.shared_context.current && !f.auto_pending,
+        "first automatic navigation still uses the current Pulse folder");
+    check(f.shared_history->Size() == 0, "automatic navigation never records a history visit");
+    const std::wstring chosen = L"D:\\JumpFixture\\UserChosen";
+    f.Navigate(chosen, true);
+    check(f.address_path == chosen && f.shared_history->Size() == 1,
+        "manual jump stages the chosen folder and records one visit");
+    f.Evaluate(other);
+    check(!f.dlg.dialog && !f.auto_pending, "leaving the foreground detaches the bar");
+    f.Attach(info);
+    check(!f.auto_pending, "reattaching the same live dialog never rearms automatic navigation");
+    f.HandleBar(f.bar.hwnd, WM_TIMER, kTimerAuto, 0);
+    check(f.address_path == chosen, "returning to the dialog preserves the last selected folder");
+    check(f.shared_history->Size() == 1, "passive reattachment does not pollute history");
+    DialogJump::Impl::OnDialogEvent(nullptr, EVENT_OBJECT_HIDE, dialog, OBJID_WINDOW, CHILDID_SELF, info.tid, 0);
+    f.Attach(info);
+    check(!f.auto_pending, "hiding and showing the same dialog does not rearm navigation");
+    DialogInfo second = info;
+    second.dialog = other;
+    f.Attach(second);
+    check(f.auto_pending, "a distinct dialog gets its own initial automatic navigation");
+    f.HandleBar(f.bar.hwnd, WM_TIMER, kTimerAuto, 0);
+    f.Attach(info);
+    check(!f.auto_pending, "switching dialog A to B and back to A preserves A's one-shot state");
+    f.Detach();
+    const bool old_claimed = GetPropW(dialog, kAutoJumpVisited) != nullptr;
+    DestroyWindow(dialog);
+    const HWND replacement_dialog = create();
+    check(old_claimed && replacement_dialog && !GetPropW(replacement_dialog, kAutoJumpVisited),
+        "new window never inherits a destroyed dialog's property even if its HWND is reused");
+    info.dialog = replacement_dialog;
+    f.Attach(info);
+    check(f.auto_pending, "a new dialog after destruction can automatically navigate again");
+    f.Detach();
+    DestroyWindow(replacement_dialog);
+    t_impl = previous_impl;
+    DestroyWindow(other);
+    DestroyWindow(f.list.hwnd);
+    DestroyWindow(f.bar.hwnd);
+    if (f.field_brush) DeleteObject(f.field_brush);
+    return failures ? 1 : 0;
+}
+
 int RunDialogJumpPlacementCapture(const wchar_t* output) {
+    if (GetEnvironmentVariableW(L"PULSE_TEST_DIALOG_JUMP_AUTO_ONLY", nullptr, 0))
+        return RunDialogJumpAutoLifecycleTest(output);
     std::filesystem::create_directories(output);
     std::ofstream log(std::filesystem::path(output)/L"results.txt");
     int failures=0;

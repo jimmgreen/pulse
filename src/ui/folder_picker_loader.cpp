@@ -310,7 +310,7 @@ DWORD CheckLocalOpenAccessV1(const std::wstring& input, const std::function<bool
 bool ValidOpenExtension(std::wstring_view extension) {
     if (extension.empty()) return true; // Explicit empty setter is distinct from absent.
     if (extension.size() > 255 || extension.back() == L'.' || extension.back() == L' ') return false;
-    if (extension.find_first_of(L"<>:\"/\\|") != extension.npos) return false;
+    if (extension.find_first_of(L"<>:\"/\\") != extension.npos) return false;
     for (size_t i = 0; i < extension.size(); ++i) {
         const auto c = static_cast<unsigned>(extension[i]);
         if (c < 32) return false;
@@ -324,13 +324,14 @@ DWORD OpenExtension(const PickerOptions& options, std::wstring& extension) {
     if (!options.use_default_extension) return ERROR_SUCCESS;
     if (!ValidOpenExtension(options.default_extension)) return ERROR_INVALID_NAME;
     extension = options.default_extension;
-    if (!options.extension_filter_changed || options.filters.empty()) return ERROR_SUCCESS;
+    if (options.filters.empty()) return ERROR_SUCCESS;
     if (options.filter_index >= options.filters.size()) return ERROR_INVALID_PARAMETER;
     const auto& pattern = options.filters[options.filter_index].pattern;
     if (!picker_filter::OpenPattern(std::wstring_view(pattern))) return ERROR_NOT_SUPPORTED;
     const auto selected = picker_filter::FirstLiteralExtension(std::wstring_view(pattern));
-    // Native Open restores the caller's original default for a first mask,
-    // including all files; it never guesses a later concrete alternative.
+    // Native Open uses the selected first literal mask from initial display,
+    // not just after a type change. A wildcard first mask restores the caller's
+    // original default; later alternatives never supply a guessed extension.
     if (!selected.empty()) extension.assign(selected);
     return ERROR_SUCCESS;
 }
@@ -439,9 +440,9 @@ PickerValidation ValidatePaths(const std::wstring& current, const std::vector<st
         if (result.error == ERROR_FILE_NOT_FOUND && mode == PickerMode::File &&
             options.use_default_extension && options.typed_names && !extension.empty() &&
             leaf.find(L'.') == leaf.npos) {
-            // Wildcard defaults may accompany exact selections, but are never
-            // expanded into an arbitrary matching file during missing-name lookup.
-            if (extension.find_first_of(L"*?") != extension.npos) {
+            // Wildcard/pipe defaults may accompany exact selections, but are
+            // never expanded or truncated during missing-name lookup.
+            if (extension.find_first_of(L"*?|") != extension.npos) {
                 result.error = ERROR_INVALID_NAME;
                 break;
             }

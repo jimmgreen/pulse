@@ -8,6 +8,8 @@ using Microsoft::WRL::ComPtr;
 namespace {
 constexpr size_t kMaxItems = 128;
 constexpr size_t kMaxText = 32768;
+constexpr size_t kMaxStoreItems = 1024;
+constexpr size_t kMaxOpaqueBytes = 1024 * 1024;
 struct Value {
     PROPVARIANT value{};
     ~Value() { PropVariantClear(&value); }
@@ -21,6 +23,14 @@ bool Safe(const PROPVARIANT& value) {
     case VT_I4: case VT_UI4: case VT_I8: case VT_UI8: case VT_R4: case VT_R8:
     case VT_BOOL: case VT_DATE: case VT_FILETIME: return true;
     case VT_LPWSTR: return Text(value.pwszVal);
+    // Preserve uncollected document payloads without exposing them as editable
+    // text. Memory stores deep-copy these values; no COM object is retained.
+    case VT_BLOB: return value.blob.cbSize <= kMaxOpaqueBytes && (!value.blob.cbSize || value.blob.pBlobData);
+    case VT_VECTOR | VT_UI1: return value.caub.cElems <= kMaxOpaqueBytes && (!value.caub.cElems || value.caub.pElems);
+    case VT_CF: return value.pclipdata && value.pclipdata->cbSize >= sizeof(value.pclipdata->ulClipFmt) &&
+        value.pclipdata->cbSize <= kMaxOpaqueBytes &&
+        (value.pclipdata->cbSize == sizeof(value.pclipdata->ulClipFmt) || value.pclipdata->pClipData);
+    case VT_CLSID: return value.puuid != nullptr;
     case VT_VECTOR | VT_LPWSTR:
         if (value.calpwstr.cElems > kMaxItems || (value.calpwstr.cElems && !value.calpwstr.pElems)) return false;
         for (ULONG i = 0; i < value.calpwstr.cElems; ++i) if (!Text(value.calpwstr.pElems[i])) return false;
@@ -29,7 +39,7 @@ bool Safe(const PROPVARIANT& value) {
     }
 }
 }
-HRESULT FileDialogProperties::Clone(IPropertyStore* source, IPropertyStore** result) {
+HRESULT FileDialogProperties::Clone(IPropertyStore* source, IPropertyStore** result, CaptureStatus* status) {
     if (!result) return E_POINTER;
     *result = nullptr;
     ComPtr<IPropertyStore> copy;
@@ -37,20 +47,26 @@ HRESULT FileDialogProperties::Clone(IPropertyStore* source, IPropertyStore** res
     if (FAILED(hr)) return hr;
     DWORD count = 0;
     if (source) { hr = source->GetCount(&count); if (FAILED(hr)) return hr; }
-    if (count > kMaxItems) return E_NOTIMPL;
-    size_t total_text = 0;
+    if (status) status->count = count;
+    if (count > kMaxStoreItems) return E_NOTIMPL;
+    size_t total_text = 0, total_opaque = 0;
     for (DWORD i = 0; i < count; ++i) {
         PROPERTYKEY key{};
         Value value;
+        if (status) { status->index = i; status->type = VT_EMPTY; }
         hr = source->GetAt(i, &key); if (FAILED(hr)) return hr;
         hr = source->GetValue(key, &value.value); if (FAILED(hr)) return hr;
+        if (status) status->type = value.value.vt;
         if (!Safe(value.value)) return E_NOTIMPL;
         if (value.value.vt == VT_LPWSTR && value.value.pwszVal) total_text += wcslen(value.value.pwszVal);
         if (value.value.vt == (VT_VECTOR | VT_LPWSTR)) {
             for (ULONG j = 0; j < value.value.calpwstr.cElems; ++j)
                 if (value.value.calpwstr.pElems[j]) total_text += wcslen(value.value.calpwstr.pElems[j]);
         }
-        if (total_text > 262144) return E_NOTIMPL;
+        if (value.value.vt == VT_BLOB) total_opaque += value.value.blob.cbSize;
+        if (value.value.vt == (VT_VECTOR | VT_UI1)) total_opaque += value.value.caub.cElems;
+        if (value.value.vt == VT_CF) total_opaque += value.value.pclipdata->cbSize;
+        if (total_text > 262144 || total_opaque > kMaxOpaqueBytes) return E_NOTIMPL;
         // Memory property stores own a deep PROPVARIANT copy after SetValue.
         hr = copy->SetValue(key, value.value); if (FAILED(hr)) return hr;
     }
@@ -81,7 +97,8 @@ HRESULT FileDialogProperties::MakeFields(IPropertyStore* store, const std::vecto
 }
 HRESULT FileDialogProperties::SetStore(IPropertyStore* store) noexcept try {
     ComPtr<IPropertyStore> original, working;
-    HRESULT hr = Clone(store, &original); if (FAILED(hr)) return hr;
+    capture_status_ = {};
+    HRESULT hr = Clone(store, &original, &capture_status_); if (FAILED(hr)) return hr;
     hr = Clone(original.Get(), &working); if (FAILED(hr)) return hr;
     std::vector<DialogPropertyField> fields;
     hr = MakeFields(working.Get(), descriptions_, fields); if (FAILED(hr)) return hr;

@@ -5,6 +5,7 @@ namespace pulse::picker_filter {
 // Open supports basename-independent extension masks only. Question marks,
 // path syntax and filename-prefix globs remain outside this contract. Native
 // semicolon lists ignore empty segments, but an entirely empty list is rejected.
+// A pipe is literal (and cannot match a filesystem name), not a list separator.
 template<class Char>
 bool OpenPattern(std::basic_string_view<Char> pattern) {
     bool valid_part = false;
@@ -20,7 +21,7 @@ bool OpenPattern(std::basic_string_view<Char> pattern) {
         if (part.size() <= 2 || part[0] != Char('*') || part[1] != Char('.') || part.back() == Char('.')) return false;
         for (const Char c : part.substr(2)) {
             if (c <= Char(' ') || c == Char('?') || c == Char('<') || c == Char('>') || c == Char(':') ||
-                c == Char('"') || c == Char('/') || c == Char('\\') || c == Char('|')) return false;
+                c == Char('"') || c == Char('/') || c == Char('\\')) return false;
         }
         valid_part = true;
         if (end == pattern.npos) return true;

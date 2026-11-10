@@ -116,6 +116,9 @@ enum class Str {
     CleanupApps,
     CleanupUnknown,
     CleanupVersions,
+    EndRetry,
+    EndConfirm,
+    EndFailed,
     Count
 };
 

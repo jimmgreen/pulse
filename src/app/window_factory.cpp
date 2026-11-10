@@ -123,6 +123,9 @@ HWND OpenPulseWindow(AppState& from, const WindowInit& init) {
         return nullptr;
     }
     ShowWindow(hwnd, maximize ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL);
+    // Existing windows can keep posting animation frames ahead of WM_PAINT.
+    // Submit this visible window's first frame before returning to that queue.
+    RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW);
     return hwnd;
 }
 

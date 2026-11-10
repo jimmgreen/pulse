@@ -742,6 +742,22 @@ DWORD DoFileDragDrop(const std::vector<std::wstring>& paths, DWORD allowed_effec
 WindowDropTarget::WindowDropTarget(HWND hwnd, DropTargetCallbacks cb)
     : hwnd_(hwnd), cb_(std::move(cb)) {}
 
+WindowDropTarget::~WindowDropTarget() { StopScroll(); }
+
+void WindowDropTarget::StopScroll() {
+    if (scrolling_) KillTimer(hwnd_, kScrollTimer);
+    scrolling_ = false;
+}
+
+void WindowDropTarget::TickScroll() {
+    if (!scrolling_ || sources_.empty() || !cb_.drag_scroll) return;
+    POINT point{};
+    if (!GetCursorPos(&point) || WindowFromPoint(point) != hwnd_) return;
+    ScreenToClient(hwnd_, &point);
+    if (cb_.drag_scroll(point) && cb_.drag_over)
+        cb_.drag_over(sources_, point, keys_, allowed_, preferred_);
+}
+
 HRESULT WindowDropTarget::QueryInterface(REFIID riid, void** out) {
     if (!out) return E_POINTER;
     if (riid == IID_IUnknown || riid == IID_IDropTarget) {
@@ -768,6 +784,7 @@ POINT WindowDropTarget::ClientPoint(POINTL pt) const {
 HRESULT WindowDropTarget::DragEnter(IDataObject* obj, DWORD key_state, POINTL pt,
                                     DWORD* effect) {
     if (!effect) return E_POINTER;
+    StopScroll();
     sources_.clear();
     preferred_ = 0;
     if (!ExtractHDropPaths(obj, sources_) && !ExtractShellItemIds(obj, sources_)) {
@@ -776,6 +793,10 @@ HRESULT WindowDropTarget::DragEnter(IDataObject* obj, DWORD key_state, POINTL pt
     }
     preferred_ = PreferredDropEffect(obj);
     const DWORD allowed = *effect & (DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK);
+    allowed_ = allowed;
+    keys_ = key_state;
+    if (hwnd_ && allowed && cb_.drag_scroll && !scrolling_)
+        scrolling_ = SetTimer(hwnd_, kScrollTimer, 50, nullptr) != 0;
     *effect = allowed && cb_.drag_over ? cb_.drag_over(sources_, ClientPoint(pt), key_state, allowed, preferred_) & allowed
                             : DROPEFFECT_NONE;
     return S_OK;
@@ -788,12 +809,18 @@ HRESULT WindowDropTarget::DragOver(DWORD key_state, POINTL pt, DWORD* effect) {
         return S_OK;
     }
     const DWORD allowed = *effect & (DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK);
+    allowed_ = allowed;
+    keys_ = key_state;
+    if (!allowed) StopScroll();
+    else if (hwnd_ && cb_.drag_scroll && !scrolling_)
+        scrolling_ = SetTimer(hwnd_, kScrollTimer, 50, nullptr) != 0;
     *effect = allowed && cb_.drag_over ? cb_.drag_over(sources_, ClientPoint(pt), key_state, allowed, preferred_) & allowed
                             : DROPEFFECT_NONE;
     return S_OK;
 }
 
 HRESULT WindowDropTarget::DragLeave() {
+    StopScroll();
     sources_.clear();
     preferred_ = 0;
     if (cb_.drag_leave) cb_.drag_leave();
@@ -801,6 +828,7 @@ HRESULT WindowDropTarget::DragLeave() {
 }
 
 HRESULT WindowDropTarget::Drop(IDataObject* obj, DWORD key_state, POINTL pt, DWORD* effect) {
+    StopScroll();
     if (!effect) return E_POINTER;
     const DWORD allowed = *effect & (DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK);
     std::vector<std::wstring> sources;

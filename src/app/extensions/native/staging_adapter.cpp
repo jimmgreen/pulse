@@ -62,14 +62,15 @@ std::filesystem::path Destination(std::wstring value) {
 void Inspect(const std::filesystem::path& root, std::vector<std::wstring>* sources) {
     size_t count = 0, bytes = 0, top = 0;
     for (const auto& entry : std::filesystem::directory_iterator(root)) {
-        if (++top > 256) throw std::runtime_error("Too many top-level staging items");
+        if (++top > 4096) throw std::runtime_error("Too many top-level staging items");
         if (sources) sources->push_back(entry.path().wstring());
     }
     for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
         const auto path = entry.path(); const DWORD attrs = GetFileAttributesW(path.c_str());
         if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_REPARSE_POINT)) throw std::runtime_error("Staging tree contains reparse or inaccessible entries");
         bytes += Utf8(path.wstring()).size();
-        if (++count > 8192 || bytes > 4 * 1024 * 1024) throw std::runtime_error("Staging tree budget exceeded");
+        // Counting only: archives routinely hold hundreds of thousands of entries.
+        if (++count > 2000000 || bytes > (size_t{1} << 30)) throw std::runtime_error("Staging tree budget exceeded");
     }
     if (sources && sources->empty()) throw std::runtime_error("Cannot commit an empty stage");
 }

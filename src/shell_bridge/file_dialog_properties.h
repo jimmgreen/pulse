@@ -15,6 +15,8 @@ struct DialogPropertyField {
 // Bounded in-memory snapshots only. No property handlers or file writes.
 class FileDialogProperties {
 public:
+    struct CaptureStatus { DWORD count = 0; DWORD index = MAXDWORD; VARTYPE type = VT_EMPTY; };
+    const CaptureStatus& LastCaptureStatus() const noexcept { return capture_status_; }
     HRESULT SetStore(IPropertyStore* store) noexcept;
     HRESULT SetCollected(IPropertyDescriptionList* list) noexcept;
     HRESULT Edit(REFPROPERTYKEY key, const std::vector<std::wstring>& values) noexcept;
@@ -23,9 +25,10 @@ public:
     const std::vector<DialogPropertyField>& Fields() const noexcept { return fields_; }
 private:
     struct Description { PROPERTYKEY key{}; VARTYPE type = VT_EMPTY; std::wstring label; };
-    static HRESULT Clone(IPropertyStore* source, IPropertyStore** result);
+    static HRESULT Clone(IPropertyStore* source, IPropertyStore** result, CaptureStatus* status = nullptr);
     HRESULT MakeFields(IPropertyStore* store, const std::vector<Description>& descriptions,
         std::vector<DialogPropertyField>& result) const;
+    CaptureStatus capture_status_;
     Microsoft::WRL::ComPtr<IPropertyStore> original_;
     Microsoft::WRL::ComPtr<IPropertyStore> working_;
     std::vector<Description> descriptions_;

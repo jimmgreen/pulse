@@ -13,6 +13,9 @@
     "PULSE_CONTEXT_NAVIGATION": "2u",
     "PULSE_CONTEXT_SELECTION": "4u",
     "PULSE_CONTEXT_VIEW": "8u",
+    "PULSE_DIALOG_BUTTON_DANGER": "2",
+    "PULSE_DIALOG_BUTTON_PRIMARY": "1",
+    "PULSE_DIALOG_BUTTON_STANDARD": "0",
     "PULSE_DIRECTORY_ENTRY_FOLDER": "1u",
     "PULSE_DIRECTORY_ENTRY_REPARSE": "2u",
     "PULSE_DIRECTORY_INVALIDATED": "2u",
@@ -142,6 +145,7 @@
     "abi.h",
     "commands.h",
     "context.h",
+    "dialogs.h",
     "directories.h",
     "dispatch.h",
     "fileops.h",
@@ -175,6 +179,15 @@
     ],
     "PULSE_CONTEXT_VERSION_1": [
       "1u"
+    ],
+    "PULSE_DIALOGS_INTERFACE_NAME": [
+      "\" pulse . dialogs \""
+    ],
+    "PULSE_DIALOGS_VERSION_1": [
+      "1u"
+    ],
+    "PULSE_DIALOG_NO_BUTTON": [
+      "0xFFFFFFFFu"
     ],
     "PULSE_DIRECTORIES_INTERFACE_NAME": [
       "\" pulse . directories \""
@@ -316,6 +329,15 @@
     ],
     "constant:PULSE_CONTEXT_VIEW": [
       "8"
+    ],
+    "constant:PULSE_DIALOG_BUTTON_DANGER": [
+      "2"
+    ],
+    "constant:PULSE_DIALOG_BUTTON_PRIMARY": [
+      "1"
+    ],
+    "constant:PULSE_DIALOG_BUTTON_STANDARD": [
+      "0"
     ],
     "constant:PULSE_DIRECTORY_ENTRY_FOLDER": [
       "1"
@@ -999,6 +1021,126 @@
       "const char *__cdecl TypeName<int(__cdecl *)(void *,unsigned __int64)>(void)"
     ],
     "field:PulseContextV1.version": [
+      "4",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseDialogButton.id": [
+      "8",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseDialogButton.kind": [
+      "4",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseDialogButton.size": [
+      "0",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseDialogButton.text": [
+      "24",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseDialogRequest.button_count": [
+      "20",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseDialogRequest.buttons": [
+      "56",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<const struct PulseDialogButton*>(void)"
+    ],
+    "field:PulseDialogRequest.cancel_button": [
+      "16",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseDialogRequest.default_button": [
+      "12",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseDialogRequest.height": [
+      "8",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseDialogRequest.message": [
+      "40",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseDialogRequest.model": [
+      "64",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<const struct PulseUiModelTree*>(void)"
+    ],
+    "field:PulseDialogRequest.size": [
+      "0",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseDialogRequest.title": [
+      "24",
+      "16",
+      "8",
+      "const char *__cdecl TypeName<struct PulseStringView>(void)"
+    ],
+    "field:PulseDialogRequest.width": [
+      "4",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseDialogsV1.close": [
+      "32",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,unsigned __int64)>(void)"
+    ],
+    "field:PulseDialogsV1.context": [
+      "8",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<void*>(void)"
+    ],
+    "field:PulseDialogsV1.set_states": [
+      "24",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,unsigned __int64,const struct PulseUiState *,unsigned int)>(void)"
+    ],
+    "field:PulseDialogsV1.show": [
+      "16",
+      "8",
+      "8",
+      "const char *__cdecl TypeName<int(__cdecl *)(void *,const struct PulseDialogRequest *,void (__cdecl *)(void *,unsigned __int64,const struct PulseUiState *,unsigned int),void (__cdecl *)(void *,unsigned __int64,int,struct PulseStringView,const struct PulseUiState *,unsigned int),void *,unsigned __int64 *)>(void)"
+    ],
+    "field:PulseDialogsV1.size": [
+      "0",
+      "4",
+      "4",
+      "const char *__cdecl TypeName<unsigned int>(void)"
+    ],
+    "field:PulseDialogsV1.version": [
       "4",
       "4",
       "4",
@@ -4129,6 +4271,31 @@
       "8",
       "const char *__cdecl TypeName<struct PulseContextV1>(void)"
     ],
+    "type:PulseDialogButton": [
+      "40",
+      "8",
+      "const char *__cdecl TypeName<struct PulseDialogButton>(void)"
+    ],
+    "type:PulseDialogClosed": [
+      "8",
+      "8",
+      "const char *__cdecl TypeName<void(__cdecl *)(void *,unsigned __int64,int,struct PulseStringView,const struct PulseUiState *,unsigned int)>(void)"
+    ],
+    "type:PulseDialogRequest": [
+      "72",
+      "8",
+      "const char *__cdecl TypeName<struct PulseDialogRequest>(void)"
+    ],
+    "type:PulseDialogStateChanged": [
+      "8",
+      "8",
+      "const char *__cdecl TypeName<void(__cdecl *)(void *,unsigned __int64,const struct PulseUiState *,unsigned int)>(void)"
+    ],
+    "type:PulseDialogsV1": [
+      "40",
+      "8",
+      "const char *__cdecl TypeName<struct PulseDialogsV1>(void)"
+    ],
     "type:PulseDirectoriesV1": [
       "80",
       "8",
@@ -4810,6 +4977,69 @@
         "subscribe",
         "unsubscribe",
         "get_selection"
+      ]
+    },
+    "PulseDialogButton": {
+      "declarations": [
+        "uint32_t size",
+        "uint32_t kind",
+        "PulseStringView id",
+        "PulseStringView text"
+      ],
+      "fields": [
+        "size",
+        "kind",
+        "id",
+        "text"
+      ]
+    },
+    "PulseDialogClosed": {
+      "declaration": "void ( PULSE_CALL * PulseDialogClosed ) ( void * user , uint64_t dialog , PulseStatus status , PulseStringView button , const PulseUiState * states , uint32_t count )"
+    },
+    "PulseDialogRequest": {
+      "declarations": [
+        "uint32_t size",
+        "uint32_t width",
+        "uint32_t height",
+        "uint32_t default_button",
+        "uint32_t cancel_button",
+        "uint32_t button_count",
+        "PulseStringView title",
+        "PulseStringView message",
+        "const PulseDialogButton * buttons",
+        "const PulseUiModelTree * model"
+      ],
+      "fields": [
+        "size",
+        "width",
+        "height",
+        "default_button",
+        "cancel_button",
+        "button_count",
+        "title",
+        "message",
+        "buttons",
+        "model"
+      ]
+    },
+    "PulseDialogStateChanged": {
+      "declaration": "void ( PULSE_CALL * PulseDialogStateChanged ) ( void * user , uint64_t dialog , const PulseUiState * changes , uint32_t count )"
+    },
+    "PulseDialogsV1": {
+      "declarations": [
+        "uint32_t size , version",
+        "void * context",
+        "PulseStatus ( PULSE_CALL * show ) ( void * , const PulseDialogRequest * , PulseDialogStateChanged , PulseDialogClosed , void * user , uint64_t * dialog )",
+        "PulseStatus ( PULSE_CALL * set_states ) ( void * , uint64_t dialog , const PulseUiState * states , uint32_t count )",
+        "PulseStatus ( PULSE_CALL * close ) ( void * , uint64_t dialog )"
+      ],
+      "fields": [
+        "size",
+        "version",
+        "context",
+        "show",
+        "set_states",
+        "close"
       ]
     },
     "PulseDirectoriesV1": {

@@ -113,7 +113,7 @@ bool ValidInstallPath(const std::wstring& p) {
 enum Id : int {
     kNone, kMin, kCloseX, kInstall, kAgree, kLicense, kToOptions, kBack, kAppEdit, kBrowseApp, kTglIndex,
     kIndexEdit, kBrowseIndex, kTglStartup, kTglDesktop, kTglGlobal, kTglAi, kOptBack, kOptInstall, kCancelInstall, kLaunch,
-    kCloseDone, kOpenLog, kDlgPrimary, kDlgSecondary, kDot0, kDot1, kDot2, kDot3, kDot4, kDot5, kTglCleanup, kUnStart, kUnClose,
+    kCloseDone, kOpenLog, kDlgPrimary, kDlgSecondary, kDlgEndRetry, kDot0, kDot1, kDot2, kDot3, kDot4, kDot5, kTglCleanup, kUnStart, kUnClose,
 };
 
 enum class Page { Welcome, Options, Install, Done, Error, Uninstall };
@@ -297,6 +297,7 @@ private:
     float lock_scroll_ = 0, lock_scroll_max_ = 0;
     HANDLE busy_answer_event_ = nullptr;
     std::atomic<bool> busy_retry_{false};
+    std::atomic<bool> end_locks_{false}, end_locks_failed_{false};
     bool slow_ = false;
     bool probe_ = false;
     int slide_ = 0;
@@ -1432,7 +1433,7 @@ void Wizard::PaintLockDialog() {
          {card.left + 230, section_y, card.right - 22, section_y + 20}, 11.5f, theme_.text3,
          DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING);
     const float footer_y = card.bottom - 62;
-    const auto hint = T(cleanup ? Str::CleanupHint : !owners ? Str::LockedUnknown : Str::LockedLog);
+    const auto hint = T(end_locks_failed_ ? Str::EndFailed : cleanup ? Str::CleanupHint : !owners ? Str::LockedUnknown : Str::LockedLog);
     const float hint_h = TextHeight(hint, 11.5f, card.right - card.left - 44);
     const D2D1_RECT_F list{card.left + 22, section_y + 26, card.right - 22, footer_y - hint_h - 20};
     Fill(list, theme_.card, 6);
@@ -1470,9 +1471,14 @@ void Wizard::PaintLockDialog() {
          11.5f, theme_.text2, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true);
     Line(card.left, footer_y, card.right, footer_y, theme_.divider, 1);
     Button(kOpenLog, T(Str::OpenLog), card.left + 18, footer_y + 15, Btn::Ghost);
-    const float primary = Button(kDlgPrimary, T(Str::Retry), card.right - 22, footer_y + 15, Btn::Primary, 96, 32, true);
-    Button(kDlgSecondary, T(cleanup ? Str::CleanupKeep : Str::Cancel), card.right - 30 - primary,
-           footer_y + 15, Btn::Normal, 96, 32, true);
+    const bool can_end = std::any_of(displayed_locks_.programs.begin(), displayed_locks_.programs.end(),
+        [](const LockedProgram& program) { return program.CanEnd(); });
+    float right = card.right - 22;
+    if (can_end) right -= Button(kDlgEndRetry, T(Str::EndRetry), right, footer_y + 15,
+        Btn::Primary, 128, 32, true) + 8;
+    right -= Button(kDlgPrimary, T(Str::Retry), right, footer_y + 15, can_end ? Btn::Normal : Btn::Primary, 64, 32, true) + 8;
+    Button(kDlgSecondary, T(cleanup ? Str::CleanupKeep : Str::Cancel), right,
+           footer_y + 15, Btn::Normal, 80, 32, true);
 }
 
 // ======================================================================
@@ -1565,6 +1571,18 @@ void Wizard::Activate(int id) {
         case kLaunch: outcome_.launch = true; CloseWith(kExitOk); break;
         case kCloseDone: CloseWith(page_ == Page::Done ? kExitOk : outcome_.exit_code); break;
         case kOpenLog: ShellExecuteW(hwnd_, L"open", LogPath().c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
+        case kDlgEndRetry:
+            if (dialog_ != Dialog::Locked && dialog_ != Dialog::Cleanup) break;
+            if (std::none_of(displayed_locks_.programs.begin(), displayed_locks_.programs.end(),
+                [](const LockedProgram& program) { return program.CanEnd(); })) break;
+            if (MessageBoxW(hwnd_, T(Str::EndConfirm), T(Str::EndRetry),
+                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES) break;
+            Log(L"Lock dialog user action: end verified processes and retry");
+            end_locks_ = true;
+            busy_retry_ = true;
+            SetEvent(busy_answer_event_);
+            dialog_ = Dialog::None;
+            break;
         case kDlgPrimary:
             if (dialog_ == Dialog::Cleanup) Log(L"Dialog cleanup user action: retry");
             if (dialog_ == Dialog::Busy || dialog_ == Dialog::Locked || dialog_ == Dialog::Cleanup) { busy_retry_ = true; SetEvent(busy_answer_event_); }
@@ -1628,20 +1646,32 @@ void Wizard::EngineThread(InstallRequest request) {
         if (slow_) Sleep(40);  // test installs only: make the progress page observable
         return !cancel_.load();
     };
-    cb.locked = [this](const FileLockReport& report) {
+    const auto finish_lock_answer = [this](const FileLockReport& report) {
+        if (end_locks_.exchange(false)) {
+            bool failed = false;
+            for (const auto& program : report.programs) {
+                const DWORD error = EndLockedProgram(program);
+                failed = failed || error != ERROR_SUCCESS;
+                Log(L"End lock owner PID " + std::to_wstring(program.pid) + L": Win32=" + std::to_wstring(error));
+            }
+            end_locks_failed_ = failed;
+        }
+        return busy_retry_.load();
+    };
+    cb.locked = [this, &finish_lock_answer](const FileLockReport& report) {
         { std::lock_guard lock(file_mutex_); locked_report_ = report; }
         PostMessageW(hwnd_, WM_ENGINE_LOCKED, 0, 0);
         WaitForSingleObject(busy_answer_event_, INFINITE);
-        return busy_retry_.load();
+        return finish_lock_answer(report);
     };
-    cb.cleanup_locked = [this](const DialogCleanupReport& report) {
+    cb.cleanup_locked = [this, &finish_lock_answer](const DialogCleanupReport& report) {
         { std::lock_guard lock(file_mutex_); locked_report_ = report.locks;
           if (locked_report_.files.empty()) for (const auto& entry : report.blocked_directories)
               locked_report_.files.push_back(entry.directory);
           locked_cleanup_versions_ = report.blocked_directories.size(); }
         PostMessageW(hwnd_, WM_ENGINE_LOCKED, 1, 0);
         WaitForSingleObject(busy_answer_event_, INFINITE);
-        return busy_retry_.load();
+        return finish_lock_answer(report.locks);
     };
     cb.busy = [this]() {
         PostMessageW(hwnd_, WM_ENGINE_BUSY, 0, 0);
@@ -2068,6 +2098,7 @@ WizardOutcome Wizard::Run() {
             displayed_cleanup_versions_ = 4;
             displayed_locks_.programs = {{6888, L"QQ"}, {18832, L"QQ"}, {36772, L"Weixin"},
                 {4096, L"Adobe Photoshop — document editing session"}, {8192, L"Browser"}};
+            for (auto& program : displayed_locks_.programs) program.started.dwLowDateTime = 1;
             if (_wtoi(value) == 3) {
                 displayed_locks_.programs.clear();
                 displayed_locks_.files = {L"C:\\Program Files\\Pulse\\DialogBridge\\9b3c1fcadc5b7e985b8a859cba86d8069e3163dfb447265f93bfe1392fc2a893\\PulseDialogAuto64.dll"};

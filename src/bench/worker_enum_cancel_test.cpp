@@ -50,6 +50,7 @@ namespace pulse::app::startup_trace {
 void Mark(const char*) noexcept {}
 }
 namespace pulse::diagnostics::runtime {
+bool Enabled() noexcept { return false; }
 void Event(const char*, std::initializer_list<Field>, Level) noexcept {}
 }
 static int failures = 0;

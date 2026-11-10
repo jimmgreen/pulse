@@ -16,6 +16,8 @@ namespace {
 
 constexpr size_t kEntryLimit = 256;
 constexpr size_t kQueueLimit = 64;
+constexpr size_t kReadyLimit = 256;
+constexpr size_t kReadyBytes = 4 * 1024 * 1024;
 
 std::wstring LowerExtension(const std::wstring& name) {
     const size_t slash = name.find_last_of(L"\\/");
@@ -208,6 +210,8 @@ void OpenWithIconCache::Reset() {
         queue_.clear();
         pending_.clear();
         ready_.clear();
+        ready_order_.clear();
+        ready_bytes_ = 0;
     }
     cv_.notify_all();
     if (worker_.joinable()) worker_.join();
@@ -223,6 +227,8 @@ void OpenWithIconCache::InvalidateAssociations() {
         queue_.clear();
         pending_.clear();
         ready_.clear();
+        ready_order_.clear();
+        ready_bytes_ = 0;
     }
     // Keep displayed icons until their replacements are ready. Registry
     // notifications can repeat even when the actual default app is unchanged.
@@ -257,8 +263,10 @@ OpenWithIconCache::Badge OpenWithIconCache::BadgeFor(const std::wstring& name, u
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (const auto it = ready_.find(key); it != ready_.end()) {
+            ready_bytes_ -= it->second.data.size();
             ready = std::move(it->second);
             ready_.erase(it);
+            std::erase(ready_order_, key);
             have_ready = true;
         } else if (!pending_.contains(key)) {
             if (queue_.size() >= kQueueLimit) {
@@ -292,6 +300,27 @@ OpenWithIconCache::Badge OpenWithIconCache::BadgeFor(const std::wstring& name, u
     return {entry.bitmap.get(), entry.needs_plate};
 }
 
+void OpenWithIconCache::PublishReadyLocked(const std::wstring& key, Pixels pixels) {
+    if (const auto found = ready_.find(key); found != ready_.end()) {
+        ready_bytes_ -= found->second.data.size();
+        ready_.erase(found);
+        std::erase(ready_order_, key);
+    }
+    if (pixels.data.size() > kReadyBytes) return;
+    while (!ready_order_.empty() && (ready_.size() >= kReadyLimit ||
+            ready_bytes_ + pixels.data.size() > kReadyBytes)) {
+        const auto found = ready_.find(ready_order_.front());
+        if (found != ready_.end()) {
+            ready_bytes_ -= found->second.data.size();
+            ready_.erase(found);
+        }
+        ready_order_.pop_front();
+    }
+    ready_bytes_ += pixels.data.size();
+    ready_order_.push_back(key);
+    ready_[key] = std::move(pixels);
+}
+
 void OpenWithIconCache::WorkerLoop() {
     const HRESULT com_hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     ComPtr<IWICImagingFactory> wic;
@@ -315,7 +344,8 @@ void OpenWithIconCache::WorkerLoop() {
             std::lock_guard<std::mutex> lock(mutex_);
             if (request.epoch != epoch_.load(std::memory_order_relaxed)) continue;
             pending_.erase(request.key);
-            ready_[request.key] = std::move(pixels);
+            if (!running_) continue;
+            PublishReadyLocked(request.key, std::move(pixels));
         }
         repaint_.InvalidateAll();
     }

@@ -1,0 +1,5 @@
+LIBRARY 7z.dll
+EXPORTS
+    GetNumberOfFormats
+    GetHandlerProperty2
+    CreateObject

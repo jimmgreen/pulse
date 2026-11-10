@@ -167,6 +167,13 @@ struct ExtensionTreeView::Impl {
                 return &item;
         return nullptr;
     }
+    // A text field's trailing badge may name a state value ("state.ext") so it follows a choice.
+    std::string BadgeText(const UiNode &node) const {
+        if (!node.badge_text.starts_with("state."))
+            return node.badge_text;
+        auto at = state.find(node.badge_text.substr(6));
+        return at == state.end() ? std::string{} : at->second;
+    }
     bool BooleanBinding(const std::string &binding) const {
         if (binding.empty())
             return true;
@@ -515,8 +522,7 @@ struct ExtensionTreeView::Impl {
             FluentMenuItem choice;
             choice.command = static_cast<int>(index) + 1;
             choice.text = Wide(node.options[index]);
-            choice.radio = true;
-            choice.radio_group = true;
+            // Like Pulse's own dropdowns: the check alone marks the choice (radio adds a dot to every row).
             choice.checked = selected == static_cast<int>(index);
             choices.push_back(std::move(choice));
         }
@@ -671,7 +677,9 @@ struct ExtensionTreeView::Impl {
             visual.hovered = hovered == item.window;
             visual.pressed = pressed == item.window;
             visual.focused = GetFocus() == item.window;
-            visual.keyboard_focus = visual.focused;
+            // Text fields show focus with their accent underline; a ring on top doubles it.
+            visual.keyboard_focus = visual.focused && node.type != UiNodeType::TextInput &&
+                                    node.type != UiNodeType::CommandSearch;
             dc->PushAxisAlignedClip(item.clip, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             if (item.data)
                 item.data->Draw(painter, compositor, theme, visual);
@@ -685,7 +693,12 @@ struct ExtensionTreeView::Impl {
                 control.pressed_part = pressed_part;
                 control.scale = scale;
                 control.dark = dark;
-                successful = DrawExtensionControl(node, control, compositor, painter, theme) && successful;
+                if (node.badge_text.starts_with("state.")) {
+                    auto resolved = node;
+                    resolved.badge_text = BadgeText(node);
+                    successful = DrawExtensionControl(resolved, control, compositor, painter, theme) && successful;
+                } else
+                    successful = DrawExtensionControl(node, control, compositor, painter, theme) && successful;
             }
             auto error = validation_errors.find(node.id);
             if (error != validation_errors.end())
@@ -1318,9 +1331,14 @@ struct ExtensionTreeView::Impl {
         default:
             break;
         }
+        // A message-only info bar (no action, no close) is not a control: keep it out of the tab order,
+        // otherwise it takes the dialog's initial focus ahead of the field below it.
+        if (node.type == UiNodeType::InfoBar && node.actions.empty() && node.close_command.empty())
+            style &= ~static_cast<DWORD>(WS_TABSTOP);
         if (type) {
             HWND child = (node.type == UiNodeType::TextInput || node.type == UiNodeType::CommandSearch)
-                             ? CreatePulsePaintedChildEdit(host, Wide(node.text).c_str())
+                             ? CreatePulsePaintedChildEdit(host, Wide(node.text).c_str(),
+                                   node.input_kind == "password" ? static_cast<DWORD>(ES_PASSWORD) : 0)
                              : CreateWindowExW(0, type, Wide(node.text).c_str(), style, 0, 0, 1, 1, host, nullptr,
                                                GetModuleHandleW(nullptr), nullptr);
             if (!child) {
@@ -1461,8 +1479,8 @@ struct ExtensionTreeView::Impl {
                     trailing += 18 * scale;
                 if (!node.keycap.empty())
                     trailing += painter.MeasureBadgeWidth(Wide(node.keycap)) + 6 * scale;
-                if (!node.badge_text.empty())
-                    trailing += painter.MeasureBadgeWidth(Wide(node.badge_text)) + 6 * scale;
+                if (const auto badge = BadgeText(node); !badge.empty())
+                    trailing += painter.MeasureBadgeWidth(Wide(badge)) + 6 * scale;
                 int line = EditLineHeight(item->window, font, height);
                 desired.left = x + inset;
                 desired.top = y + (height - line) / 2;
@@ -1508,18 +1526,20 @@ struct ExtensionTreeView::Impl {
         };
         bool reserved = total > client.bottom;
         auto viewport_for = [&](bool reserve) {
-            return D2D1_RECT_F{8, 8, std::max(9.0f, static_cast<float>(client.right) - 8 - (reserve ? 14 * scale : 0)),
-                               std::max(9.0f, static_cast<float>(client.bottom) - 8)};
+            constexpr float inset = static_cast<float>(kExtensionTreeContentInset);
+            return D2D1_RECT_F{inset, inset,
+                               std::max(inset + 1, static_cast<float>(client.right) - inset - (reserve ? 14 * scale : 0)),
+                               std::max(inset + 1, static_cast<float>(client.bottom) - inset)};
         };
         auto viewport = viewport_for(reserved);
         total = static_cast<int>(
                     std::ceil(layout.Arrange(tree.root, viewport, static_cast<float>(scroll), scale, options))) +
-                16;
+                2 * kExtensionTreeContentInset;
         if ((total > client.bottom) != reserved) {
             viewport = viewport_for(total > client.bottom);
             total = static_cast<int>(
                         std::ceil(layout.Arrange(tree.root, viewport, static_cast<float>(scroll), scale, options))) +
-                    16;
+                    2 * kExtensionTreeContentInset;
         }
         int clamped = std::clamp(scroll, 0, std::max(0, total - static_cast<int>(client.bottom)));
         if (clamped != scroll) {
@@ -1741,6 +1761,9 @@ std::optional<std::string> ExtensionTreeView::StateValue(const std::string &key)
     return entry == impl_->state.end() ? std::nullopt : std::optional<std::string>(entry->second);
 }
 bool ExtensionTreeView::InputComposing() const { return !impl_->composing.empty(); }
+int ExtensionTreeView::ContentHeight() const {
+    return std::max(0, impl_->total - 2 * kExtensionTreeContentInset);
+}
 uint64_t ExtensionTreeView::StateRevision() const { return impl_->state_revision; }
 std::vector<extensions::UiStateEntry> ExtensionTreeView::StateValues() const {
     std::vector<extensions::UiStateEntry> values;

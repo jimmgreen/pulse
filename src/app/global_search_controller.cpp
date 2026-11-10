@@ -104,6 +104,9 @@ GlobalSearchContext MakeGlobalSearchContext(const AppState& s) {
     context.history = s.core.jumpHistory;
     context.width = s.appPrefs.global_search_width;
     context.height = s.appPrefs.global_search_height;
+    context.positioned = s.appPrefs.global_search_positioned;
+    context.x = s.appPrefs.global_search_x;
+    context.y = s.appPrefs.global_search_y;
     return context;
 }
 
@@ -171,11 +174,14 @@ GlobalSearchEvents MakeGlobalSearchEvents(AppState& s) {
         }
         return true;
     };
-    events.resized = [core](int width, int height) {
+    events.placement_changed = [core](int x, int y, int width, int height) {
         AppState* window = core->windows.MostRecent();
         if (!window) return;
         window->appPrefs.global_search_width = std::clamp(width, 0, 4000);
         window->appPrefs.global_search_height = std::clamp(height, 0, 4000);
+        window->appPrefs.global_search_positioned = true;
+        window->appPrefs.global_search_x = x;
+        window->appPrefs.global_search_y = y;
         window->appPrefs.Save();
     };
     events.pin_folder = [core](const std::wstring& path) {

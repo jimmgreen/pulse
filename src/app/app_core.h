@@ -6,7 +6,7 @@
 // migrate). One AppCore outlives every AppState that uses it.
 #pragma once
 #include "recycle_refresh_state.h"
-namespace pulse::app { class RecycleShellWatch; }
+namespace pulse::app { class RecycleShellWatch; class ExtensionStoreController; }
 #include "../fs/fs_recycle.h"
 #include "../fs/fs_snapshot.h"
 #include "../fs/fs_watch.h"
@@ -25,6 +25,7 @@ namespace pulse::app { class RecycleShellWatch; }
 #include "context_menu_controller.h"
 #include "context_menu_prefs.h"
 #include "dir_notify_queue.h"
+#include "dir_notify_async.h"
 #include "duplicate_scan.h"
 #include "explorer_window_takeover.h"
 #include "win_e_hotkey.h"
@@ -77,6 +78,8 @@ struct AppCore {
 
     fs::SnapshotStore store;
     app::WorkerPool worker;
+    // Shared by all settings windows; destroyed after the live window loop ends.
+    std::shared_ptr<app::ExtensionStoreController> extension_store;
     fs::DirWatchSet watches;
     std::shared_ptr<DriveEjectTask> drive_eject;
     struct DirNotifyBatch {
@@ -89,6 +92,8 @@ struct AppCore {
     // Taken from notify_queue on the UI thread (DrainDirNotifies); holds the
     // batches of folders that were patched moments ago.
     app::DirNotifyPacer<DirNotifyBatch> notify_pacer;
+    app::DirNotifyAsync notify_async;
+    uint64_t notify_async_round = 0;
     struct CoalescedSizePatch {
         std::wstring path;
         std::wstring name;
@@ -181,6 +186,8 @@ struct AppCore {
 
     // Session autosave: last written JSON, so unchanged state is never rewritten.
     std::wstring sessionSavedJson;
+    std::wstring sessionSavedLayoutJson;
+    std::shared_ptr<const std::wstring> sessionSavedUndo;
     // Shutdown messages can arrive while WM_CREATE is rolling back.
     bool updateSessionPrepared = false;
     bool restoreUpdateSession = false;

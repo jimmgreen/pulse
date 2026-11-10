@@ -142,7 +142,7 @@ template <class A> void Fields(A &a, Result &v) {
     Visit(a, v.status, v.flags, v.win32_error, v.terminal_hr, v.filter_index, v.show_id, v.generation, v.path, v.paths);
 }
 bool Valid(const Control &c) {
-    if (c.kind < 1 || c.kind > 8 || c.has_parent > 1 || c.has_selected > 1 || c.checked > 1 || (c.state & ~7u) ||
+    if (c.kind < 1 || c.kind > PULSE_PICKER_UI_V2_CONTROL_SEPARATOR || c.has_parent > 1 || c.has_selected > 1 || c.checked > 1 || (c.state & ~7u) ||
         c.items.size() > 32)
         return false;
     for (auto &i : c.items)

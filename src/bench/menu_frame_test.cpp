@@ -12,12 +12,12 @@ struct FluentMenuTestPeer {
     static void Prepare(FluentMenu& menu, const std::vector<FluentMenuItem>& items) {
         menu.model_.SetItems(items);
         menu.model_.Layout(menu.compositor_->DwriteFactory(), menu.scale_, 280.0f * menu.scale_);
-        menu.sub_model_.SetItems(items);
-        menu.sub_model_.Layout(menu.compositor_->DwriteFactory(), menu.scale_, 280.0f * menu.scale_);
+        menu.first_sub_.model.SetItems(items);
+        menu.first_sub_.model.Layout(menu.compositor_->DwriteFactory(), menu.scale_, 280.0f * menu.scale_);
         menu.motion_ = false;
         menu.open_t_ms_ = -1.0f;
         menu.hover_row_ = 1;
-        menu.sub_hover_ = 1;
+        menu.first_sub_.hover = 1;
     }
     static bool Draw(FluentMenu& menu, int kind) {
         if (kind == 0) return menu.Render();

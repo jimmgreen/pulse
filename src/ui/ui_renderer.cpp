@@ -1,3 +1,4 @@
+#include "tab_width_fit.h"
 #include "pane_header_icons.h"
 #include "tab_rows_layout.h"
 #include "tab_pager_layout.h"
@@ -149,6 +150,7 @@ void MainRenderer::SetIconNotifyWindow(HWND hwnd) {
     // The caches may be shared by every Pulse window (RenderCaches): each
     // renderer registers its own window and leaves the others in place.
     if (notify_hwnd_ && notify_hwnd_ != hwnd) {
+        ReleaseWallViews();
         icon_cache_.RemoveNotifyWindow(notify_hwnd_);
         open_with_icons_.RemoveNotifyWindow(notify_hwnd_);
         thumbnail_cache_.RemoveNotifyWindow(notify_hwnd_);
@@ -2371,6 +2373,7 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
     // ---- Tab motion bookkeeping: which tabs appeared or went away. ----
     const uint64_t tnow = motion_now_;
     const bool tabDragging = dragI >= 0;
+    const bool stripMotion = TabStripMotionSupported(!strip.item_rects.empty(), vm.tab_layout);
     bool tabMoving = false;
     {
         std::vector<uintptr_t> ids;
@@ -2380,7 +2383,7 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
         std::sort(ids.begin(), ids.end());
         if (ids != tab_ids_prev_) {
             const bool primed = !tab_ids_prev_.empty() && !tabDragging;
-            if (primed) tab_anim_on_ = motion::SystemAnimationsEnabled();
+            tab_anim_on_ = motion::SystemAnimationsEnabled();
             if (primed && tab_anim_on_) {
                 for (uintptr_t id : ids)
                     if (!std::binary_search(tab_ids_prev_.begin(), tab_ids_prev_.end(), id))
@@ -2415,7 +2418,7 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
         const float w = strip.Width(vm, i);
         if (vm.tabs[i].id) {
             TabSlotMotion& m = tab_slots_[vm.tabs[i].id];
-            if (!tabDragging && strip.item_rects.empty()) {
+            if (!tabDragging && stripMotion) {
                 m.rect.SetAnimationsEnabled(tab_anim_on_);
                 const D2D1_RECT_F r = m.rect.Update(1, static_cast<int64_t>(tab_gen_),
                     D2D1::RectF(left, 0.0f, left + w, 1.0f), motion_frame_, tnow, motion::spring::Smooth);
@@ -2424,7 +2427,7 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
             }
             m.seen = motion_frame_;
             m.last = D2D1::RectF(left, tabY, left + w, tabY + tabH);
-            m.title = vm.tabs[i].title;
+            if (m.title != vm.tabs[i].title) m.title = vm.tabs[i].title;
         }
         lefts[i] = left;
         if (vm.tabs[i].active) activeI = static_cast<int>(i);
@@ -2434,7 +2437,7 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
         const float left = lefts[i];
         const auto it = vm.tabs[i].id ? tab_slots_.find(vm.tabs[i].id) : tab_slots_.end();
         const uint64_t born = it != tab_slots_.end() ? it->second.born : 0;
-        if (strip.item_rects.empty() && born && tnow - born < popMs) {
+        if (stripMotion && born && tnow - born < popMs) {
             tabMoving = true;
             const float p = motion::SpringProgress(motion::spring::Pop, static_cast<float>(tnow - born));
             const float alpha = (std::clamp)(p, 0.0f, 1.0f);
@@ -2463,7 +2466,7 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
     // under the other tabs, at rest on top as before.
     bool plateGliding = false;
     D2D1_RECT_F plateRc{};
-    if (strip.item_rects.empty() && activeI >= 0 && !tabDragging && vm.tabs[static_cast<size_t>(activeI)].id) {
+    if (stripMotion && activeI >= 0 && !tabDragging && vm.tabs[static_cast<size_t>(activeI)].id) {
         const size_t i = static_cast<size_t>(activeI);
         const float w = strip.Width(vm, i);
         tab_plate_.SetAnimationsEnabled(tab_anim_on_);
@@ -2476,6 +2479,7 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
             drawTab(i, plateRc.left, false, 1, plateRc.right - plateRc.left);
         }
     }
+    if (!stripMotion || tabDragging || activeI < 0) tab_plate_.Hide();
     for (size_t i = 0; i < vm.tabs.size(); ++i) {
         if (vm.tabs[i].hidden) continue;
         if (inDragRun(static_cast<int>(i))) continue;
@@ -2485,7 +2489,7 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
     if (activeI >= 0 && !inDragRun(activeI) && !vm.tabs[static_cast<size_t>(activeI)].hidden)
         drawSlot(static_cast<size_t>(activeI), plateGliding ? 2 : 0);
     // Closed tabs fade and shrink to .88 in place (120 ms, ease-in).
-    if (!strip.item_rects.empty()) tab_ghosts_.clear();
+    if (!stripMotion) tab_ghosts_.clear();
     for (auto it = tab_ghosts_.begin(); it != tab_ghosts_.end();) {
         const float e = static_cast<float>(tnow - it->start) / 120.0f;
         if (e >= 1.0f) { it = tab_ghosts_.erase(it); continue; }
@@ -2652,11 +2656,12 @@ void MainRenderer::DrawTitleBar(const WindowViewModel& vm, const D2D1_RECT_F& re
         for (const int direction : {-1, 1}) {
             const float ax = direction < 0 ? strip.view_left - strip.arrow_w : strip.view_right;
             const bool enabled = direction < 0 ? strip.scroll > 0.5f : strip.scroll < strip.max_scroll - 0.5f;
-            const bool hot = enabled && IsHovered(vm, HitTestResult::TabScroll, direction);
+            if (!enabled) continue; // Keep the slot, but hide arrows at either endpoint.
+            const bool hot = IsHovered(vm, HitTestResult::TabScroll, direction);
             DrawButton(D2D1::RectF(ax, tabY, ax + strip.arrow_w, tabY + tabH), theme,
                        hot ? theme.fill_hover : kTransparent,
                        direction < 0 ? kIconChevronLeft : kIconChevronRight, direction < 0 ? L"<" : L">",
-                       enabled ? theme.text_secondary : WithAlpha(theme.text_secondary, theme.text_secondary.a * 0.35f),
+                       theme.text_secondary,
                        true, true, 0.7f);
         }
     }
@@ -3349,7 +3354,6 @@ MainRenderer::TabStripMetrics MainRenderer::ComputeTabStrip(
             }
         }
         float available = std::max(0.0f,gross-chipsTotal);
-        float overflow_width = 44.0f*scale_;
         m.y = m.new_y = 4.0f * scale_;
         m.h = (kTabRowHeight - 4.0f) * scale_;
         m.item_rects.resize(vm.tabs.size());
@@ -3369,35 +3373,18 @@ MainRenderer::TabStripMetrics MainRenderer::ComputeTabStrip(
         }
         const float gaps = visible.empty() ? 0 : static_cast<float>(visible.size()-1)*gap;
         if (total + gaps > available && !visible.empty()) {
-            const float each = (available-gaps)/static_cast<float>(visible.size());
-            if (each >= 104.0f*scale_) {
-                for (const auto i : visible) widths[i] = std::min(widths[i],each);
-            } else {
-                const size_t active = m.active >= 0 ? static_cast<size_t>(m.active) : visible.front();
-                const float active_width = std::min(widths[active],140.0f*scale_);
+            // Preserve readable labels; scroll instead of collapsing into icons.
+            if (!FitTabWidths(widths, visible, available - gaps, kTabMinW * scale_)) {
                 for (const auto i : visible) {
-                    widths[i] = i == active ? active_width : 40.0f*scale_;
-                    m.icon_only[i] = i != active;
+                    if (!vm.tabs[i].pinned)
+                        widths[i] = std::max(std::min(widths[i], kTabMinW * scale_),
+                            vm.tabs[i].active ? kTabActiveMinW * scale_ : 0.0f);
                 }
-                const float icons_total = active_width + static_cast<float>(visible.size()-1)*(40.0f*scale_+gap);
-                if (icons_total > available) {
-                    const float reserve = std::min(44.0f*scale_,available*.5f);
-                    overflow_width = reserve;
-                    widths[active] = std::max(0.0f,std::min(active_width, available-reserve-2*gap));
-                    if (widths[active] < 56.0f*scale_) m.icon_only[active] = true;
-                    std::vector<size_t> nearest;
-                    for (const auto i : visible) if (i != active) nearest.push_back(i);
-                    std::stable_sort(nearest.begin(),nearest.end(),[active](size_t a,size_t b) {
-                        return std::abs(static_cast<int>(a)-static_cast<int>(active)) <
-                               std::abs(static_cast<int>(b)-static_cast<int>(active));
-                    });
-                    const int keep = std::max(0,static_cast<int>((available-widths[active]-reserve)/(42.0f*scale_)));
-                    for (size_t j = static_cast<size_t>(keep); j < nearest.size(); ++j) {
-                        widths[nearest[j]] = 0;
-                        m.hidden_indices.push_back(static_cast<int>(nearest[j]));
-                    }
-                    std::sort(m.hidden_indices.begin(),m.hidden_indices.end());
-                }
+                m.overflow = true;
+                m.arrow_w = std::min(kTabScrollArrowW * scale_, gross * .25f);
+                m.view_left = m.x0 + m.arrow_w;
+                m.view_right = std::max(m.view_left, tabsRight - 36.0f * scale_ - m.arrow_w);
+                m.x0 = m.view_left;
             }
         }
         float x = m.x0;
@@ -3413,14 +3400,27 @@ MainRenderer::TabStripMetrics MainRenderer::ComputeTabStrip(
             m.item_rects[i] = D2D1::RectF(x,m.y,x+widths[i],m.y+m.h);
             x += widths[i]+gap;
         }
-        if (!m.hidden_indices.empty()) {
-            m.overflow_button = D2D1::RectF(x,m.y,x+overflow_width,m.y+m.h);
-            x += overflow_width+gap;
-        }
         m.new_x = m.end_x = x;
         m.w = 104.0f*scale_; m.pitch = m.w+gap;
         m.active_w = m.active >= 0 ? widths[static_cast<size_t>(m.active)] : m.w;
-        tab_scroll_ = 0;
+        if (m.overflow) {
+            m.max_scroll = std::max(0.0f, x - gap - m.view_right);
+            if (m.active >= 0 && m.active != tab_scroll_active_) {
+                const auto& active = m.item_rects[static_cast<size_t>(m.active)];
+                if (active.left < m.view_left + tab_scroll_) tab_scroll_ = active.left - m.view_left;
+                if (active.right > m.view_right + tab_scroll_) tab_scroll_ = active.right - m.view_right;
+            }
+            tab_scroll_ = std::clamp(tab_scroll_, 0.0f, m.max_scroll);
+            m.scroll = tab_scroll_;
+            for (auto& item : m.item_rects) { item.left -= m.scroll; item.right -= m.scroll; }
+            for (auto& chip : m.chips) chip.left -= m.scroll;
+            m.x0 -= m.scroll;
+            m.end_x -= m.scroll;
+            m.new_x = tabsRight - 32.0f * scale_;
+        } else {
+            tab_scroll_ = 0;
+        }
+        tab_scroll_active_ = m.active;
         return m;
     }
 

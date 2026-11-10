@@ -783,10 +783,42 @@ void TestNativeSendToDrop() {
     RemoveDirectoryW(root.c_str());
 }
 
+void TestNestedMenuTree() {
+    DynamicMenu menu;
+    menu.populate = false;
+    pulse::shell::CtxHandlerSlot slot;
+    slot.menu = &menu; slot.menu2 = &menu; slot.menu3 = &menu;
+    slot.hmenu = CreatePopupMenu(); slot.id_first = 100; slot.id_last = 200;
+    menu.QueryContextMenu(slot.hmenu, 0, 100, 200, CMF_NORMAL);
+    HMENU second = CreatePopupMenu(), third = CreatePopupMenu();
+    AppendMenuW(menu.submenu, MF_POPUP, reinterpret_cast<UINT_PTR>(second), L"&Second");
+    AppendMenuW(second, MF_POPUP, reinterpret_cast<UINT_PTR>(third), L"&Third");
+    AppendMenuW(third, MF_STRING, 123, L"&Run");
+    AppendMenuW(second, MF_STRING | MF_GRAYED, 124, L"Disabled sibling");
+    std::vector<pulse::shell::CtxItemOut> rows;
+    pulse::shell::CollectHandlerItems(slot, false, rows);
+    Check(rows.size() == 5 && rows[0].has_children && rows[1].has_children &&
+          rows[2].has_children && rows[3].id == 123 && rows[4].id == 124 && !rows[4].enabled,
+          "host preserves nested headers, fourth-level leaf, and disabled sibling");
+    if (rows.size() == 5) {
+        auto depth = [](const auto& row) -> int {
+            if constexpr (requires { row.depth; }) return row.depth;
+            else return row.child ? 1 : 0;
+        };
+        Check(depth(rows[0]) == 0 && depth(rows[1]) == 1 && depth(rows[2]) == 2 &&
+              depth(rows[3]) == 3 && depth(rows[4]) == 2,
+              "host emits preorder depth across nested sibling transition");
+    }
+    DestroyMenu(slot.hmenu);
+}
+
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
     if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) return 2;
+    if (argc > 1 && wcscmp(argv[1], L"--nested-only") == 0) {
+        TestNestedMenuTree(); CoUninitialize(); return passed ? 0 : 1;
+    }
     if (argc > 1 && wcscmp(argv[1], L"--registered-command") == 0) {
         TestRegisteredExplorerCommand();
         CoUninitialize();

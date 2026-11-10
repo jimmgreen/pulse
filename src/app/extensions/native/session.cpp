@@ -13,6 +13,7 @@
 #include "staging_adapter_host.h"
 #include "settings_pages_adapter.h"
 #include "settings_pages_host.h"
+#include "dialogs_adapter.h"
 #include "directories_adapter.h"
 #include "fileops_adapter.h"
 #include "../../../../sdk/native/include/pulse/ui_events.h"
@@ -50,6 +51,7 @@ struct Session {
     std::unique_ptr<TasksAdapter> tasks;
     std::unique_ptr<StagingAdapter> staging;
     std::unique_ptr<SettingsPagesAdapter> settings_pages;
+    std::unique_ptr<DialogsAdapter> dialogs;
     std::unique_ptr<DirectoriesAdapter> directories;
     std::unique_ptr<FileOpsAdapter> fileops;
     std::unique_ptr<Module> module;
@@ -60,6 +62,7 @@ struct Session {
     void Stop() {
         if (closing) return;
         closing = true;
+        if (dialogs) dialogs->Close();
         if (settings_pages) settings_pages->Close();
         if (commands) commands->Close();
         if (previews) previews->Close();
@@ -74,7 +77,7 @@ struct Session {
         if (directories) directories->Close();
     }
     bool Drain() {
-        if (!closing || (settings_pages && settings_pages->InCallback()) || (tasks && tasks->CallbackActive()) || (staging && staging->CallbackActive()) || (previews && previews->CallbackActive()) || (commands && commands->CallbackActive()) || (ui && ui->InCallback()) || (files && files->CallbackActive()) || (resources && resources->CallbackActive()) || (dispatch && dispatch->CallbackActive()) || (context && context->CallbackActive()) || (directories && directories->CallbackActive())) return false;
+        if (!closing || (dialogs && dialogs->CallbackActive()) || (settings_pages && settings_pages->InCallback()) || (tasks && tasks->CallbackActive()) || (staging && staging->CallbackActive()) || (previews && previews->CallbackActive()) || (commands && commands->CallbackActive()) || (ui && ui->InCallback()) || (files && files->CallbackActive()) || (resources && resources->CallbackActive()) || (dispatch && dispatch->CallbackActive()) || (context && context->CallbackActive()) || (directories && directories->CallbackActive())) return false;
         if (!module) return true;
         if (module->Close() != PULSE_OK) return false;
         if (staging) {
@@ -108,6 +111,7 @@ PulseStatus PULSE_CALL Query(void* context, PulseStringView name, uint32_t versi
     auto* session = static_cast<Session*>(context);
     if (!session || GetCurrentThreadId() != session->thread || session->closing || !ValidateCallerBinding(session->caller)) return PULSE_ERROR_STATE;
     if (Name(name, PULSE_SETTINGS_PAGES_INTERFACE_NAME)) return session->settings_pages->Query(version, out, size);
+    if (Name(name, PULSE_DIALOGS_INTERFACE_NAME)) return session->dialogs->Query(version, out, size);
     if (Name(name, PULSE_UI_MODEL_INTERFACE)) return session->ui->QueryModel(version, out, size);
     if (Name(name, PULSE_UI_DATA_INTERFACE)) return session->ui->QueryData(version, out, size);
     if (Name(name, PULSE_UI_MOUNT_INTERFACE)) return session->ui->QueryMount(version, out, size);
@@ -191,6 +195,10 @@ bool Start(AppState& owner, size_t package, const std::wstring& path, bool activ
     });
     session->ui->SyncHost(owner, [&owner] { ClampScroll(owner); });
     session->settings_pages = std::make_unique<SettingsPagesAdapter>(owner.hwnd, owner.darkMode, owner.accentColor, owner.scale, [weak] {
+        const auto value = weak.lock();
+        return value && !value->closing && ValidateCallerBinding(value->caller);
+    });
+    session->dialogs = std::make_unique<DialogsAdapter>(owner.hwnd, owner.darkMode, owner.accentColor, [weak] {
         const auto value = weak.lock();
         return value && !value->closing && ValidateCallerBinding(value->caller);
     });

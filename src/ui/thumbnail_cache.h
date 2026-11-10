@@ -1,4 +1,4 @@
-﻿#include <future>
+#include <future>
 #pragma once
 #include "ui_compositor.h"
 #include <utility>
@@ -115,6 +115,7 @@ public:
     void ShareUploadBudget(ThumbnailCache& other) {
         if (!other.shared_upload_budget_) other.shared_upload_budget_ = std::make_shared<UploadBudget>();
         shared_upload_budget_ = other.shared_upload_budget_;
+        if (folder_revisit_) folder_revisit_->ShareUploadBudget(other);
     }
     uint64_t NextRetryDeadline();
     uint64_t WindowRetryDeadline(HWND window);
@@ -216,6 +217,7 @@ private:
         // instead of being remembered as "this file has no preview".
         bool transient = false;
         bool folder_refresh_complete = false;
+        bool bitmap_dirty = false;
         uint64_t retry_at = 0;
         size_t cost = 0;
         std::list<std::wstring>::iterator lru_position;
@@ -244,6 +246,10 @@ private:
     // different size is pending or being retried, so a thumbnail never drops
     // back to the file-type icon once it has been shown.
     void PrepareBitmap(const std::wstring& key, bool budgeted);
+    void RememberFolder(const Request& request, const Item& result, Item compact);
+    // A worker-fed compact tier; it never starts a preview host of its own.
+    std::unique_ptr<ThumbnailCache> folder_revisit_;
+    bool preserve_bitmap_on_replace_ = false;
     uint64_t upload_sequence_ = 0, device_generation_ = 0, upload_elapsed_us_ = 0;
     size_t upload_bytes_ = 0;
     struct UploadBudget { std::atomic<uint64_t> elapsed_us{0}; std::atomic<size_t> bytes{0}; };

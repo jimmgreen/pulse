@@ -11,9 +11,45 @@
 #include <iterator>
 
 HRESULT WINAPI AuditNativeDrag(IDataObject*, IDropSource*, DWORD, DWORD*);
+namespace {
+bool edge_fixture = false;
+bool edge_timer = false;
+HWND edge_hwnd = reinterpret_cast<HWND>(1);
+UINT_PTR WINAPI EdgeSetTimer(HWND hwnd, UINT_PTR id, UINT interval, TIMERPROC proc) {
+    if (!edge_fixture) return ::SetTimer(hwnd, id, interval, proc);
+    edge_timer = true;
+    return id;
+}
+BOOL WINAPI EdgeKillTimer(HWND hwnd, UINT_PTR id) {
+    if (!edge_fixture) return ::KillTimer(hwnd, id);
+    edge_timer = false;
+    return TRUE;
+}
+BOOL WINAPI EdgeGetCursorPos(POINT* pt) {
+    if (!edge_fixture) return ::GetCursorPos(pt);
+    *pt = POINT{12, 24};
+    return TRUE;
+}
+HWND WINAPI EdgeWindowFromPoint(POINT pt) {
+    return edge_fixture ? edge_hwnd : ::WindowFromPoint(pt);
+}
+BOOL WINAPI EdgeScreenToClient(HWND hwnd, POINT* pt) {
+    return edge_fixture ? TRUE : ::ScreenToClient(hwnd, pt);
+}
+}
+#define SetTimer EdgeSetTimer
+#define KillTimer EdgeKillTimer
+#define GetCursorPos EdgeGetCursorPos
+#define WindowFromPoint EdgeWindowFromPoint
+#define ScreenToClient EdgeScreenToClient
 #define DoDragDrop AuditNativeDrag
 #include "../ui/drag_drop.cpp"
 #undef DoDragDrop
+#undef SetTimer
+#undef KillTimer
+#undef GetCursorPos
+#undef WindowFromPoint
+#undef ScreenToClient
 
 namespace {
 int failures = 0;
@@ -154,7 +190,59 @@ bool SourceWouldDelete(DWORD returned, DWORD performed) {
     return returned == DROPEFFECT_MOVE || performed == DROPEFFECT_MOVE;
 }
 
-int wmain() {
+int EdgeScrollTest() {
+    using namespace pulse::ui;
+    edge_fixture = true;
+    unsigned ticks = 0, hits = 0;
+    bool at_edge = true;
+    DropTargetCallbacks callbacks;
+    callbacks.drag_scroll = [&](POINT) { ++ticks; return at_edge; };
+    callbacks.drag_over = [&](const auto&, POINT, DWORD, DWORD, DWORD) {
+        ++hits;
+        return DROPEFFECT_COPY;
+    };
+    callbacks.drop = [&](const auto&, POINT, DWORD, DWORD, DWORD) {
+        Check(!edge_timer, "drop stops the timer before executing its operation");
+        return DROPEFFECT_COPY;
+    };
+    auto* target = new WindowDropTarget(edge_hwnd, std::move(callbacks));
+    auto* data = FileDataObject::Create({L"C:\\fixture\\source.txt"});
+    DWORD effect = DROPEFFECT_COPY;
+    target->DragEnter(data, 0, POINTL{}, &effect);
+    Check(edge_timer, "supported drag starts the scroll timer");
+    target->TickScroll();
+    target->TickScroll();
+    Check(ticks == 2 && hits == 3, "stationary edge hover keeps ticking and refreshes the drop row");
+    at_edge = false;
+    target->TickScroll();
+    Check(ticks == 3 && hits == 3, "leaving the edge does not refresh or scroll the drop row");
+    effect = DROPEFFECT_NONE;
+    target->DragOver(0, POINTL{}, &effect);
+    target->TickScroll();
+    Check(!edge_timer && ticks == 3, "an unsupported effect pauses edge scrolling");
+    effect = DROPEFFECT_COPY;
+    target->DragOver(0, POINTL{}, &effect);
+    Check(edge_timer, "a supported effect resumes the timer");
+    target->DragLeave();
+    target->TickScroll();
+    Check(!edge_timer && ticks == 3, "DragLeave stops scrolling, including a queued timer tick");
+    effect = DROPEFFECT_COPY;
+    target->DragEnter(data, 0, POINTL{}, &effect);
+    target->Drop(data, 0, POINTL{}, &effect);
+    target->TickScroll();
+    Check(!edge_timer && ticks == 3, "Drop stops subsequent scroll ticks");
+    effect = DROPEFFECT_COPY;
+    target->DragEnter(data, 0, POINTL{}, &effect);
+    target->Release();
+    Check(!edge_timer, "target destruction releases its scroll timer");
+    data->Release();
+    edge_fixture = false;
+    printf("Drag edge scroll: %d passed, %d failed\n", passed, failures);
+    return failures ? 1 : 0;
+}
+
+int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && wcscmp(argv[1], L"--edge-scroll") == 0) return EdgeScrollTest();
     using namespace pulse::ui;
     setvbuf(stdout, nullptr, _IONBF, 0);
     for (DWORD allowed : { DWORD(DROPEFFECT_NONE), DWORD(DROPEFFECT_COPY),

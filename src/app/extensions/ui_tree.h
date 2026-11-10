@@ -50,6 +50,7 @@ struct UiNode {
     int min_width = 0, max_width = 0, max_height = 0, flex = 0;
     std::string button_kind = "standard";
     std::string placeholder;
+    std::string input_kind = "text";  // TextInput: text / password
     std::string progress_kind = "bar";
     std::string progress_state = "normal";
     std::string glyph, keycap, detail, message, color, close_command;

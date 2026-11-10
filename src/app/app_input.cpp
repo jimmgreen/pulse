@@ -220,6 +220,53 @@ bool UpdateSplitterDrag(AppState& s, int mx, int my) {
     s.hoverControlIndex = s.splitterDragIndex;
     return true;
 }
+bool TickDropEdgeScroll(AppState& s, POINT point) {
+    const auto vm = BuildVm(s, false);
+    const auto bounds = D2D1::RectF(0, 0, static_cast<float>(s.compositor.Width()),
+                                  static_cast<float>(s.compositor.Height()));
+    const auto hit = s.renderer.HitTest(vm, bounds, static_cast<float>(point.x),
+                                      static_cast<float>(point.y));
+    const int index = hit.pane_index;
+    if (index < 0 || index >= static_cast<int>(vm.pane_slots.size())) return false;
+    app::Pane* pane = PaneAtSlot(s, index);
+    app::Tab* tab = pane ? pane->ActiveTab() : nullptr;
+    if (!tab) return false;
+    const auto& slot = vm.pane_slots[static_cast<size_t>(index)];
+    auto list = s.renderer.PaneListRect(slot.pane, slot.rect);
+    list.top = s.renderer.StickyTreeRows(slot.pane, list).Bottom();
+    if (point.x < list.left || point.x >= list.right ||
+        point.y < list.top || point.y >= list.bottom) return false;
+    // List mode flows into horizontal columns; all other lists scroll vertically.
+    const bool horizontal = slot.pane.view_mode == ui::ViewMode::List;
+    const float start = horizontal ? list.left : list.top;
+    const float end = horizontal ? list.right : list.bottom;
+    const float position = static_cast<float>(horizontal ? point.x : point.y);
+    const float edge = std::min(32.0f * s.scale, (end - start) * 0.25f);
+    if (edge <= 0.0f) return false;
+    float penetration = 0.0f;
+    if (position < start + edge) penetration = -(start + edge - position) / edge;
+    else if (position > end - edge) penetration = (position - end + edge) / edge;
+    if (penetration == 0.0f) return false;
+    const float maximum = horizontal ? s.renderer.MaxScrollXForPane(slot.pane, slot.rect)
+                                     : s.renderer.MaxScrollForPane(slot.pane, slot.rect);
+    float& offset = horizontal ? tab->scroll_x : tab->scroll_y;
+    const float step = std::copysign((4.0f + 20.0f * std::abs(penetration)) * s.scale, penetration);
+    const float next = std::clamp(offset + step, 0.0f, maximum);
+    if (next == offset) return false;
+    if (pane == s.pane) CancelScrollAnimation(s);
+    offset = next;
+    if (pane == s.pane) {
+        s.scrollTargetX = tab->scroll_x;
+        s.scrollTargetY = tab->scroll_y;
+        MaybePrefetchSearchPage(s);
+    }
+    // A moving row must not spring-open underneath a stationary pointer.
+    s.springRow = -1;
+    s.springStart = 0;
+    InvalidateRect(s.hwnd, nullptr, FALSE);
+    return true;
+}
+
 void ClearDropFeedback(AppState& s) {
     HoverPaneLayoutControls(s, ui::HitTestResult{});
     ui::SetDragVisualFeedback({});
@@ -783,15 +830,15 @@ static DWORD ResolveDropTargetImpl(AppState& s, const std::vector<std::wstring>&
         return _wcsicmp(path::StripExtendedPathPrefix(fs::ParentPath(source)).c_str(),
             path::StripExtendedPathPrefix(s.dropDestDir).c_str()) == 0;
     });
-    if (already_here) {
+    DWORD effect = layout_drop ? ((key_state & MK_SHIFT) ? DROPEFFECT_MOVE : DROPEFFECT_COPY) & allowed
+        : FolderDropEffect(key_state, sources, s.dropDestDir, allowed, preferred_effect);
+    if (already_here && effect == DROPEFFECT_MOVE) {
         wchar_t badge[1024]{};
         swprintf_s(badge, l10n::Get(l10n::StringId::DragDropAlreadyHereFormat).c_str(), destName.c_str());
         s.dropBadge = badge;
         InvalidateRect(s.hwnd, nullptr, FALSE);
         return DROPEFFECT_NONE;
     }
-    DWORD effect = layout_drop ? ((key_state & MK_SHIFT) ? DROPEFFECT_MOVE : DROPEFFECT_COPY) & allowed
-        : FolderDropEffect(key_state, sources, s.dropDestDir, allowed, preferred_effect);
     if (effect == DROPEFFECT_NONE) return RejectDropTarget(s);
     if (effect == DROPEFFECT_LINK) {
         s.dropBadge = l10n::Get(l10n::StringId::DropLink) + L"「" + destName + L"」";
@@ -1531,7 +1578,8 @@ static void ArmFileClick(AppState& s, const ui::WindowViewModel& vm, const ui::H
         ? vm.pane_slots[static_cast<size_t>(hit.pane_index)].pane : vm.pane;
     if (tab && pane.column_strip.Active() && hit.index >= 0 &&
         hit.index < static_cast<int>(tab->EntryCount()) && tab->EntryAt(hit.index).is_dir) single = false;
-    s.fileClick.Begin(FileClickIdentityFor(s, hit.index), static_cast<uint32_t>(GetMessageTime()), single, rename);
+    s.fileClick.Begin(FileClickIdentityFor(s, hit.index), static_cast<uint32_t>(GetMessageTime()), single, rename,
+        GetDoubleClickTime());
 }
 
 bool PointInHitItemName(AppState& s, const ui::WindowViewModel& vm,
@@ -3033,7 +3081,7 @@ LRESULT HandleLButtonDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARA
         if (AiAssistantMouseDown(*s, mx, my)) return 0;   // Pulse 助手
         if (DismissPathEditorOutside(*s, mx, my)) return 0;  // chose a 别名 suggestion
         if (ClickFilterTagSuggestion(*s, mx, my)) return 0;  // the filter box's # completion
-        CancelFileClick(*s);
+        s->fileClick.InterruptForPress();
         CancelScrollAnimation(*s);
         // Commit explicitly before changing pane/selection; a click on a
         // non-focusable part of the owner need not produce WM_KILLFOCUS.
@@ -4680,7 +4728,8 @@ LRESULT HandleLButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             const auto* click_tab = ActiveTab(*s);
             const auto click_action = s->fileClick.Release(release_item, GetTickCount64(), GetDoubleClickTime(),
                 file_click_completed, PointInHitItemName(*s, click_vm, click_hit, click_x, click_y),
-                click_tab && click_tab->SelectedCount() == 1 && click_tab->selected_index == click_item.index);
+                click_tab && click_tab->SelectedCount() == 1 && click_tab->selected_index == click_item.index,
+                static_cast<uint32_t>(GetMessageTime()));
             s->listSelection.ClearDeferred();
             const bool activate = s->deferredFileActivation && s->listSelection.PendingFile();
             s->deferredFileActivation = false;
@@ -5061,7 +5110,7 @@ LRESULT HandleRButtonUp(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
 
 LRESULT HandleMouseWheel(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         if (s && s->undoHistoryOpen) {
-            const int count = static_cast<int>(s->ops.UndoHistory().entries.size());
+            const int count = static_cast<int>(s->ops.UndoHistoryCount());
             s->undoHistoryOffset = std::clamp(s->undoHistoryOffset + (GET_WHEEL_DELTA_WPARAM(wParam) < 0 ? 1 : -1), 0, std::max(0, count - 1));
             InvalidateRect(hwnd, nullptr, FALSE); return 0;
         }
@@ -5088,9 +5137,6 @@ LRESULT HandleMouseWheel(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM
                 return 0;
             }
         }
-        if (msg == WM_MOUSEHWHEEL) return DefWindowProcW(hwnd, msg, wParam, lParam);
-        s->blankClickTab = nullptr;
-        CancelFileClick(*s);
         {
             // Overflowing tab strip scrolls under the wheel, on any page.
             POINT tp{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
@@ -5098,11 +5144,15 @@ LRESULT HandleMouseWheel(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             if (tp.y >= 0 && static_cast<float>(tp.y) < s->renderer.TitleBarHeight() &&
                 s->renderer.ScrollTabStrip(BuildVm(*s, false), static_cast<float>(s->compositor.Width()),
                     static_cast<float>(tp.x), static_cast<float>(tp.y),
+                    (msg == WM_MOUSEHWHEEL ? -1.0f : 1.0f) *
                     static_cast<float>(GET_WHEEL_DELTA_WPARAM(wParam)) / static_cast<float>(WHEEL_DELTA))) {
                 InvalidateRect(hwnd, nullptr, FALSE);
                 return 0;
             }
         }
+        if (msg == WM_MOUSEHWHEEL) return DefWindowProcW(hwnd, msg, wParam, lParam);
+        s->blankClickTab = nullptr;
+        CancelFileClick(*s);
         if (IsSettingsTab(ActiveTab(*s))) {
             const int delta = GET_WHEEL_DELTA_WPARAM(wParam);
             ui::WindowViewModel svm = BuildVm(*s);

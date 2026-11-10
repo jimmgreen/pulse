@@ -284,7 +284,7 @@ int main(int argc, char** argv) {
                 options.default_extension=invalid;result=validate({L"stem"});
                 Check(result && result->error==ERROR_INVALID_NAME && result->paths.empty(),"invalid default extension rejected before file acceptance");
             }
-            for (const auto* complex : {L"td;bt", L".td", L"tar.gz", L"*.td;*.bt", L"*", L"a b"}) {
+            for (const auto* complex : {L"td;bt", L".td", L"tar.gz", L"*.td;*.bt", L"*", L"a b", L"txt||"}) {
                 options.default_extension = complex;
                 result = validate({L"stem", L"explicit.md"});
                 Check(result && !result->error && result->paths == std::vector<std::wstring>{(base/L"stem").wstring(), (base/L"explicit.md").wstring()}, "complex default preserves exact and multiple existing names");
@@ -296,13 +296,30 @@ int main(int argc, char** argv) {
                 result = validate({L"absent"});
                 Check(result && result->error && result->paths.empty(), "missing literal candidate remains an error");
             }
+            options.default_extension = L"txt||";
+            result = validate({L"fallback"});
+            Check(result && result->error && result->paths.empty(), "pipe default without filters is not truncated into existing txt file");
+            options.filters = {{L"All", L"*.*"}};
+            result = validate({L"fallback"});
+            Check(result && result->error && result->paths.empty(), "all-files filter does not truncate pipe default");
+            options.filters = {{L"Drawing shape", L"*.txt;*.md||"}};
+            result = validate({L"fallback"});
+            Check(result && !result->error && result->paths == std::vector<std::wstring>{(base/L"fallback.txt").wstring()},
+                "initial first literal mask supplies missing-name suffix even with pipe default");
+            options.filters[0].pattern = L"*.md||;*.txt";
+            result = validate({L"fallback"});
+            Check(result && result->error && result->paths.empty(), "pipe first mask is not truncated and later masks are not searched");
+            result = validate({L"explicit.md", L"stem"});
+            Check(result && !result->error && result->paths == std::vector<std::wstring>{(base/L"explicit.md").wstring(), (base/L"stem").wstring()},
+                "pipe first mask preserves exact outside-filter names and exact extensionless names");
+            options.filters.clear();
             options.default_extension = L"*.txt";
             result = validate({L"fallback"});
             Check(result && result->error && result->paths.empty(), "wildcard suffix does not choose a matching file");
             options.default_extension=L"txt";
             options.filters={{L"Text",L"*.txt"},{L"Markdown",L"*.md"},{L"All",L"*.*"}};
             options.filter_index=1;result=validate({L"fallback"});
-            Check(result && !result->error && result->paths==std::vector<std::wstring>{(base/L"fallback.txt").wstring()},"programmatic initial type index preserves explicit default extension");
+            Check(result && !result->error && result->paths==std::vector<std::wstring>{(base/L"fallback.md").wstring()},"programmatic initial type index uses first literal mask as native Open does");
             options.extension_filter_changed=true;result=validate({L"fallback"});
             Check(result && !result->error && result->paths==std::vector<std::wstring>{(base/L"fallback.md").wstring()},"type change updates missing-name extension candidate");
             options.filters.push_back({L"Generic extension mask",L"*.xl*;*.xlsx"});
@@ -313,6 +330,11 @@ int main(int argc, char** argv) {
             Check(result && !result->error && result->paths==std::vector<std::wstring>{(base/L"fallback.txt").wstring()},"all-files type restores original default extension");
         }
         PickerOptions masks;masks.filters={{L"Generic",L"*.xl*;*.xlsx"}};
+        PickerOptions pipe_masks; pipe_masks.filters = {{L"Drawing shape", L"*.txt;*.md||"}};
+        const auto pipe_listing = ReadPickerListing(base.wstring(), PickerMode::File, pipe_masks);
+        Check(!pipe_listing.error && !pipe_listing.entries.empty(), "literal pipe mask listing succeeds");
+        for (const auto& entry : pipe_listing.entries)
+            Check(entry.name.ends_with(L".txt"), "pipe masks never broaden into the stripped extension");
         for(const auto* name:{L"book.xls",L"BOOK.XLSX",L"book.xl",L"book.xlsm"})
             Check(PickerMatchesFilter(name,PickerMode::File,masks),"extension mask matches generic star suffix case-insensitively");
         for(const auto* name:{L"book.txt",L"book.doc",L"bookxlsx",L"LICENSE"})

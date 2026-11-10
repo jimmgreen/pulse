@@ -76,6 +76,12 @@ bool RunPackageProbe(AppState& owner, const std::wstring& directory) {
         }
         auto* tab = ActiveTab(owner);
         passed = passed && Wait([&] { tab = ActiveTab(owner); return tab && !tab->loading && tab->snapshot; });
+        if (GetEnvironmentVariableW(L"PULSE_TEST_NATIVE_STAGING", nullptr, 0)) {
+            passed = passed && RunArchiveStagingProbe(owner, directory, report);
+            StopOwner(owner.hwnd);
+            report << "Result: " << (passed ? "PASS" : "FAIL") << '\n';
+            return passed;
+        }
         wchar_t compression_probe[4]{};
         if (GetEnvironmentVariableW(L"PULSE_TEST_NATIVE_COMPRESSION", compression_probe, 4)) {
             passed = passed && RunArchiveCompressionProbe(owner, directory, report);

@@ -1,3 +1,4 @@
+#include "../ui/window_material.h"
 #include "../common/windows_compat.h"
 #include "../common/localization.h"
 #include "settings_controller.h"
@@ -782,7 +783,7 @@ void SettingsController::SaveAndApply(SettingsEffect effect) const {
 }
 
 void SettingsController::WindowEffect(std::wstring_view effect_id) {
-    if (!compat::ModernWindows() && effect_id != L"none") return;
+    if (!ui::WindowEffectSupported(ui::WindowEffectFromId(effect_id))) return;
     static constexpr std::wstring_view ids[] = {
         L"none", L"acrylic-material", L"mica", L"mica-alt"
     };

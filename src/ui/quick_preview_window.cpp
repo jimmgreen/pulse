@@ -74,6 +74,7 @@ constexpr UINT_PTR kPreviewDeadlineTimer = 31;
 constexpr UINT_PTR kFindEditCaretTimer = 71;
 constexpr UINT_PTR kZoomCloseTimer = 72;
 constexpr UINT_PTR kNavSlideTimer = 74;  // the next item slides in (motion phase 6)
+constexpr UINT_PTR kSizeProbeTimer = 76;
 constexpr UINT_PTR kFitTimer = 75;       // 适应内容 once the first frame tells the size
 constexpr double kZoomOpenSeconds = 0.22;
 constexpr double kZoomCloseSeconds = 0.15;
@@ -363,6 +364,9 @@ void QuickPreviewWindow::Show(const QuickPreviewItem& item, bool dark, WindowEff
         find_edit_brush_ = nullptr;
     }
     ++generation_;
+    size_probe_.Cancel();
+    probe_w_ = probe_h_ = 0;
+    KillTimer(hwnd_, kSizeProbeTimer);
     ResetView();
     ResetAnimation();
     icon_request_ = 0; icon_sizes_.clear(); icon_selected_ = -1; icon_pill_rects_.clear();
@@ -374,6 +378,7 @@ void QuickPreviewWindow::Show(const QuickPreviewItem& item, bool dark, WindowEff
         InvalidateRect(hwnd_, nullptr, FALSE);
         return;
     }
+    BeginContentSizeProbe();
     StartKeyHint();
     RECT owner_rect{};
     GetWindowRect(owner_, &owner_rect);
@@ -456,12 +461,16 @@ void QuickPreviewWindow::Update(const QuickPreviewItem& item) {
     title_ = PreviewTitle(item_);
     RefreshItemFacts();
     ++generation_;
+    size_probe_.Cancel();
+    probe_w_ = probe_h_ = 0;
+    KillTimer(hwnd_, kSizeProbeTimer);
     handler_immediate_ = false;
     ResetView();
     ResetAnimation();
     icon_request_ = 0; icon_sizes_.clear(); icon_selected_ = -1; icon_pill_rects_.clear();
     handler_.Reset();
     BeginVideo();
+    BeginContentSizeProbe();
     if (!same) StartKeyHint();
     // 适应内容 follows each item's shape around the window's centre, unless
     // the window was sized by hand, maximized or is full screen.
@@ -489,6 +498,8 @@ void QuickPreviewWindow::Close() {
     embedded_open_ = false;
     if (!hwnd_ || closing_) return;
     commands_.Clear();
+    size_probe_.Cancel();
+    KillTimer(hwnd_, kSizeProbeTimer);
     fit_pending_ = false;
     KillTimer(hwnd_, kFitTimer);
     LeaveFullScreen(false);   // the next Show places the window again
@@ -718,27 +729,13 @@ int QuickPreviewWindow::SizingChromeHeight() const {
     return static_cast<int>(std::lround(HeaderHeight() + FooterHeight() + playback));
 }
 
-bool QuickPreviewWindow::ProbeContentSize(uint32_t& width, uint32_t& height) const {
-    width = height = 0;
-    if (!image_item_ || item_.path.empty() || (item_.attrs & FILE_ATTRIBUTE_DIRECTORY) ||
-        OfflinePlaceholder()) return false;
-    // Network files can stall the UI thread: their first frame sizes them.
-    std::wstring path = item_.path;
-    if (path.rfind(L"\\\\?\\", 0) == 0) path.erase(0, 4);
-    if (path.rfind(L"\\\\", 0) == 0 || path.rfind(L"UNC\\", 0) == 0) return false;
-    if (path.size() >= 2 && path[1] == L':') {
-        const wchar_t root[4] = {path[0], L':', L'\\', 0};
-        if (GetDriveTypeW(root) == DRIVE_REMOTE) return false;
-    }
-    HANDLE file = CreateFileW(item_.path.c_str(), GENERIC_READ,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-        FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return false;
-    std::vector<uint8_t> head(128 * 1024);   // JPEG EXIF blocks come before the frame header
-    DWORD read = 0;
-    const BOOL ok = ReadFile(file, head.data(), static_cast<DWORD>(head.size()), &read, nullptr);
-    CloseHandle(file);
-    return ok && ProbeImageSize(head.data(), read, width, height);
+void QuickPreviewWindow::BeginContentSizeProbe() {
+    size_probe_.Cancel();
+    probe_w_ = probe_h_ = 0;
+    KillTimer(hwnd_, kSizeProbeTimer);
+    if (!image_item_ || embedded_ || item_.path.empty() ||
+        (item_.attrs & FILE_ATTRIBUTE_DIRECTORY) || OfflinePlaceholder()) return;
+    if (size_probe_.Start(generation_, item_.path)) SetTimer(hwnd_, kSizeProbeTimer, 30, nullptr);
 }
 
 bool QuickPreviewWindow::ContentPixelSize(uint32_t& width, uint32_t& height) const {
@@ -755,7 +752,9 @@ bool QuickPreviewWindow::ContentPixelSize(uint32_t& width, uint32_t& height) con
         height = state.height;
         return width && height;
     }
-    return ProbeContentSize(width, height);
+    width = probe_w_; height = probe_h_;
+    if (image_turns_ & 1) std::swap(width, height);
+    return width && height;
 }
 
 RECT QuickPreviewWindow::PlanRect(int mode, POINT centre, bool use_remembered) {
@@ -3420,6 +3419,18 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
             else KillTimer(hwnd_, kZoomCloseTimer);
             return 0;
         }
+        if (wparam == kSizeProbeTimer) {
+            if (auto result = size_probe_.Take(generation_, item_.path)) {
+                KillTimer(hwnd_, kSizeProbeTimer);
+                probe_w_ = result->width; probe_h_ = result->height;
+                if (fit_pending_ && visible() && probe_w_ && probe_h_) {
+                    fit_pending_ = false;
+                    uint32_t width = 0, height = 0;
+                    if (ContentPixelSize(width, height)) FitToContent(width, height);
+                }
+            }
+            return 0;
+        }
         if (wparam == kFitTimer) {
             KillTimer(hwnd_, kFitTimer);
             FitToContent(fit_w_, fit_h_);
@@ -3794,6 +3805,8 @@ LRESULT QuickPreviewWindow::HandleMessage(UINT message, WPARAM wparam, LPARAM lp
         Close();
         return 0;
     case WM_DESTROY:
+        size_probe_.Cancel();
+        KillTimer(hwnd_, kSizeProbeTimer);
         ResetPlayback();
         ResetAnimation();
         handler_.Reset();

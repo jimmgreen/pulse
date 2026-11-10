@@ -4,6 +4,7 @@
 
 namespace pulse::ui {
 struct FolderThumbnailCacheTestAccess {
+#include "folder_thumbnail_revisit_live.inc"
     static int Live(const wchar_t* folder) {
         wchar_t full[32768]{};
         const DWORD length = GetFullPathNameW(folder, ARRAYSIZE(full), full, nullptr);
@@ -53,7 +54,185 @@ struct FolderThumbnailCacheTestAccess {
         std::printf("[%s] live folder worker IPC upload and WARP drawing\n", ok ? "PASS" : "FAIL");
         return ok ? 0 : 1;
     }
-    static int Run() {
+    static bool Revisit(ID2D1DeviceContext* dc) {
+        FolderThumbnailCache folders;
+        folders.SetDeviceContext(dc);
+        auto& cache = folders.cache_;
+        cache.running_ = true; // Inject completions without starting a host.
+        bool loaded = true;
+        const auto draw = [&](int index) {
+            return folders.Draw(dc, D2D1::RectF(0, 0, 512, 512),
+                L"long-scroll-return" + std::to_wstring(index), FILE_ATTRIBUTE_DIRECTORY,
+                512, 1, 1, 0, 1, false, nullptr);
+        };
+        for (int first = 0; first < 40; first += 8) {
+            folders.BeginFrame();
+            for (int i = first; i < first + 8; ++i) draw(i);
+            folders.EndFrame();
+            for (auto& [key, visible] : folders.visible_)
+                visible.since = GetTickCount64() - 160;
+            folders.BeginFrame();
+            for (int i = first; i < first + 8; ++i) draw(i);
+            folders.EndFrame();
+            loaded &= cache.queue_.size() == 8;
+            while (!cache.queue_.empty()) {
+                auto request = cache.queue_.front();
+                cache.queue_.pop_front();
+                ThumbnailCache::Item item;
+                item.kind = ipc::PreviewContentKind::Bitmap;
+                item.w = item.h = 512;
+                item.stride = 2048;
+                item.pixels.assign(512 * 512 * 4, 255);
+                item.cost = item.pixels.size();
+                loaded &= cache.StoreResult(request, std::move(item));
+            }
+            // Give each upload a fresh frame budget while preserving the
+            // screen's visibility, then prove every source image was drawn.
+            for (int i = first; i < first + 8; ++i) {
+                cache.BeginFrame();
+                loaded &= draw(i) == PreviewDrawResult::Bitmap;
+            }
+        }
+        std::printf("[%s] five screens load and draw forty distinct 512px folder thumbnails\n",
+            loaded ? "PASS" : "FAIL");
+        const bool bounded = cache.cache_bytes_ <= cache.budget_bytes_ && cache.items_.size() < 40;
+        std::printf("[%s] full-resolution cache stays bounded beyond its resident capacity\n",
+            bounded ? "PASS" : "FAIL");
+        folders.BeginFrame();
+        int warm = 0;
+        for (int i = 0; i < 8; ++i) warm += draw(i) == PreviewDrawResult::Bitmap;
+        folders.EndFrame();
+        const bool immediate = warm == 8 && cache.upload_bytes_ == 0 &&
+            cache.folder_revisit_ && cache.folder_revisit_->upload_bytes_ == 0 &&
+            cache.queue_.empty() && cache.pending_.empty();
+        std::printf("[%s] returning after forty folders immediately draws eight thumbnails without decode or upload (warm=%d upload=%zu)\n",
+            immediate ? "PASS" : "FAIL", warm, cache.upload_bytes_);
+        return loaded && bounded && immediate;
+    }
+    static bool RevisitBoundaries(ID2D1DeviceContext* dc) {
+        FolderThumbnailCache folders;
+        folders.SetDeviceContext(dc);
+        auto& cache = folders.cache_;
+        cache.running_ = true;
+        bool ok = true;
+        const auto check = [&](bool value, const char* label) {
+            std::printf("[%s] %s\n", value ? "PASS" : "FAIL", label);
+            ok &= value;
+        };
+        check(cache.folder_revisit_ != nullptr, "folder revisit tier exists");
+        if (!cache.folder_revisit_) return false;
+        auto& compact = *cache.folder_revisit_;
+        const auto request = [&](int index) {
+            ThumbnailCache::Request req;
+            req.id = cache.next_id_++;
+            req.path = L"revisit-boundary" + std::to_wstring(index);
+            req.identity = req.path + L"\nfolder-stack";
+            req.key = cache.Key(req.identity, 512, 1, 0);
+            req.pixels = 512;
+            req.attrs = FILE_ATTRIBUTE_DIRECTORY;
+            req.flags = ipc::kPreviewRequestFlagFolderThumbnail;
+            req.epoch = cache.epoch_.load(std::memory_order_relaxed);
+            cache.folder_requests_[req.key] = req.id;
+            cache.pending_.insert(req.key);
+            return req;
+        };
+        const auto image = [](uint8_t value = 255) {
+            ThumbnailCache::Item item;
+            item.kind = ipc::PreviewContentKind::Bitmap;
+            item.w = item.h = 512;
+            item.stride = 2048;
+            item.pixels.assign(512 * 512 * 4, value);
+            item.cost = item.pixels.size();
+            return item;
+        };
+        auto original = request(0);
+        cache.StoreResult(original, image());
+        compact.PrepareBitmap(original.identity, false);
+        bool bounded = true;
+        for (int i = 1; i < 80; ++i) {
+            auto next = request(i);
+            cache.StoreResult(next, image());
+            compact.PrepareBitmap(next.identity, false);
+            bounded &= compact.cache_bytes_ <= 8ull * 1024 * 1024 &&
+                compact.items_.size() <= 128 && compact.items_.size() <= compact.max_items_ &&
+                cache.cache_bytes_ + compact.cache_bytes_ <= 40ull * 1024 * 1024;
+        }
+        check(bounded && !compact.items_.contains(original.identity),
+            "eighty folders bound both tiers to forty MiB and evict oldest compact artwork");
+        auto retained = request(16);
+        check(!cache.items_.contains(retained.key) && compact.items_.contains(retained.identity),
+            "compact artwork outlives full-resolution eviction");
+        if (!compact.items_.contains(retained.identity)) return false;
+        auto* before = compact.items_.at(retained.identity).bitmap.get();
+        const auto old_pixels = compact.items_.at(retained.identity).pixels;
+        auto stale = retained;
+        ++stale.id;
+        check(!cache.StoreResult(stale, image(128)) &&
+            compact.items_.at(retained.identity).pixels == old_pixels &&
+            compact.items_.at(retained.identity).bitmap.get() == before,
+            "stale folder completion cannot replace compact artwork");
+        ThumbnailCache::Item transient;
+        transient.failed = transient.transient = true;
+        check(cache.StoreResult(retained, std::move(transient)) &&
+            compact.items_.contains(retained.identity),
+            "transient failure preserves compact artwork after full-resolution eviction");
+        if (!compact.items_.contains(retained.identity)) return false;
+        retained = request(16);
+        cache.StoreResult(retained, image(128));
+        check(compact.items_.at(retained.identity).bitmap.get() == before &&
+            compact.items_.at(retained.identity).bitmap_dirty &&
+            compact.items_.at(retained.identity).pixels != old_pixels,
+            "changed folder pixels keep previous compact bitmap until replacement upload");
+        compact.PrepareBitmap(retained.identity, false);
+        check(compact.items_.at(retained.identity).bitmap.get() &&
+            !compact.items_.at(retained.identity).bitmap_dirty &&
+            !compact.items_.at(retained.identity).pixels.empty(),
+            "replacement compact upload completes and retains recovery pixels");
+        folders.SetDeviceContext(nullptr);
+        folders.SetDeviceContext(dc);
+        check(!compact.items_.at(retained.identity).bitmap.get() &&
+            !compact.items_.at(retained.identity).pixels.empty(),
+            "device reset releases compact GPU bitmap and retains pixels");
+        compact.PrepareBitmap(retained.identity, false);
+        check(compact.items_.at(retained.identity).bitmap.get() != nullptr,
+            "compact artwork recovers after device reset");
+        retained = request(16);
+        auto small_image = image(64);
+        small_image.w = small_image.h = 64;
+        small_image.stride = 256;
+        small_image.pixels.assign(64 * 64 * 4, 64);
+        small_image.cost = small_image.pixels.size();
+        const auto small_pixels = small_image.pixels;
+        check(cache.StoreResult(retained, std::move(small_image)) &&
+            compact.items_.contains(retained.identity) &&
+            compact.items_.at(retained.identity).w == 64 &&
+            compact.items_.at(retained.identity).h == 64 &&
+            compact.items_.at(retained.identity).pixels == small_pixels,
+            "successful 64px refresh replaces older compact pixels at native resolution");
+        retained = request(16);
+        ThumbnailCache::Item empty;
+        empty.failed = true;
+        check(cache.StoreResult(retained, std::move(empty)) &&
+            !compact.items_.contains(retained.identity),
+            "authoritative empty folder removes compact artwork");
+        auto before_evict = request(81);
+        cache.StoreResult(before_evict, image());
+        auto late = request(82);
+        cache.Evict();
+        check(cache.items_.empty() && cache.cache_bytes_ == 0 &&
+            compact.items_.empty() && compact.cache_bytes_ == 0 &&
+            !cache.StoreResult(late, image()) && compact.items_.empty(),
+            "eviction clears both tiers and rejects late results from the previous epoch");
+        auto after_evict = request(83);
+        check(cache.StoreResult(after_evict, image()) && !compact.items_.empty(),
+            "current epoch can repopulate compact artwork after eviction");
+        folders.Reset();
+        check(cache.items_.empty() && cache.cache_bytes_ == 0 &&
+            compact.items_.empty() && compact.cache_bytes_ == 0,
+            "reset releases full-resolution and compact artwork");
+        return ok;
+    }
+    static int Run(bool revisit_only = false) {
         ComPtr<ID3D11Device> d3d;
         HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
             D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION, &d3d, nullptr, nullptr);
@@ -64,11 +243,15 @@ struct FolderThumbnailCacheTestAccess {
         ComPtr<ID2D1DeviceContext> dc;
         if (SUCCEEDED(hr)) hr = device->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc);
         if (FAILED(hr)) { std::printf("[FAIL] WARP initialization: %08lx\n", hr); return 1; }
+        const bool revisit_draw_ok = Revisit(dc.get());
+        const bool revisit_boundaries_ok = RevisitBoundaries(dc.get());
+        const bool revisit_ok = revisit_draw_ok && revisit_boundaries_ok;
+        if (revisit_only) return revisit_ok ? 0 : 1;
         FolderThumbnailCache folders;
         auto& cache = folders.cache_;
         folders.SetDeviceContext(dc.get());
         cache.running_ = true; // Deterministic scheduler; inject worker completions below.
-        bool ok = true;
+        bool ok = revisit_ok;
         auto check = [&](bool condition, const char* label) {
             std::printf("[%s] %s\n", condition ? "PASS" : "FAIL", label); ok &= condition;
         };
@@ -186,10 +369,58 @@ struct FolderThumbnailCacheTestAccess {
         folders.BeginFrame(); folders.EndFrame();
         check(folders.visible_.empty() && !folders.Tick(GetTickCount64() + 60000),
             "leaving icon view stops all folder scheduling");
+        // Two disjoint screens at the largest bucket: return must reuse the
+        // actual D2D bitmap, with no new host work or GPU upload.
+        FolderThumbnailCache scrolling;
+        scrolling.SetDeviceContext(dc.get());
+        auto& sc = scrolling.cache_;
+        sc.running_ = true;
+        const auto scroll_draw = [&](int i) {
+            return scrolling.Draw(dc.get(), D2D1::RectF(0, 0, 512, 512),
+                L"scroll-return" + std::to_wstring(i), FILE_ATTRIBUTE_DIRECTORY,
+                512, 1, 1, 0, 1, false, nullptr);
+        };
+        const auto load_screen = [&](int first) {
+            scrolling.BeginFrame();
+            for (int i = first; i < first + 8; ++i) scroll_draw(i);
+            scrolling.EndFrame();
+            for (auto& [key, visible] : scrolling.visible_)
+                visible.since = GetTickCount64() - 160;
+            for (int i = first; i < first + 8; ++i) scroll_draw(i);
+            while (!sc.queue_.empty()) {
+                auto request = sc.queue_.front(); sc.queue_.pop_front();
+                auto image = bitmap();
+                image.w = image.h = 512; image.stride = 2048;
+                image.pixels.assign(512 * 512 * 4, 255); image.cost = image.pixels.size();
+                sc.StoreResult(request, std::move(image));
+            }
+            for (int i = first; i < first + 8; ++i) {
+                sc.BeginFrame();
+                scroll_draw(i);
+            }
+        };
+        load_screen(0);
+        load_screen(8);
+        check(sc.items_.size() == 16, "two 512px folder screens remain resident");
+        scrolling.BeginFrame();
+        int warm = 0;
+        for (int i = 0; i < 8; ++i)
+            warm += scroll_draw(i) == PreviewDrawResult::Bitmap;
+        scrolling.EndFrame();
+        check(warm == 8 && sc.queue_.empty() && sc.pending_.empty() &&
+            sc.upload_bytes_ == 0,
+            "return scrolling displays eight warm bitmaps without decode or upload");
+        load_screen(16);
+        check(sc.cache_bytes_ <= sc.budget_bytes_ && sc.items_.size() <= 16,
+            "further scrolling evicts old artwork within the memory ceiling");
+        scrolling.Reset();
+        check(sc.items_.empty() && sc.cache_bytes_ == 0,
+            "closing the cache releases retained scroll artwork");
         FolderThumbnailCache pressure;
         pressure.SetDeviceContext(dc.get());
         auto& packed = pressure.cache_;
         packed.running_ = true;
+        packed.budget_bytes_ = 16ull * 1024 * 1024; // Exercise pressure independently of the default.
         auto pressure_draw = [&](int i) {
             return pressure.Draw(dc.get(), D2D1::RectF(0, 0, 256, 256), L"pressure" + std::to_wstring(i),
                 FILE_ATTRIBUTE_DIRECTORY, 512, 1, 1, 0, 1, false, nullptr);
@@ -303,7 +534,11 @@ struct FolderThumbnailCacheTestAccess {
 };
 }
 int wmain(int argc, wchar_t** argv) {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    if (argc == 4 && std::wstring_view(argv[1]) == L"--live-scroll")
+        return pulse::ui::FolderThumbnailCacheTestAccess::LiveScroll(argv[2], argv[3]);
     if (argc == 3 && std::wstring_view(argv[1]) == L"--live")
         return pulse::ui::FolderThumbnailCacheTestAccess::Live(argv[2]);
-    return pulse::ui::FolderThumbnailCacheTestAccess::Run();
+    return pulse::ui::FolderThumbnailCacheTestAccess::Run(
+        argc == 2 && std::wstring_view(argv[1]) == L"--revisit");
 }

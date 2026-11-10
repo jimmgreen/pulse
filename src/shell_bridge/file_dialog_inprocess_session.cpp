@@ -69,6 +69,8 @@ HRESULT FileDialogInprocessSession::Prepare(const ContractDecision& decision, HW
         !(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_CUSTOM_COMBOBOX)) return Unsupported();
     for (const auto& control : controls) {
         if (!ProminenceSupported(control, provider_->api.implemented_features)) return Unsupported();
+        if (control.kind == PULSE_PICKER_UI_V2_CONTROL_SEPARATOR &&
+            !(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_CUSTOM_SEPARATOR)) return Unsupported();
         if(control.kind==6 && !(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_CUSTOM_RADIO))return Unsupported();
         if(control.kind==7 && !(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_CUSTOM_CHECK))return Unsupported();
         if(control.kind==8 && !(provider_->api.implemented_features & PULSE_PICKER_UI_V2_FEATURE_CUSTOM_EDIT))return Unsupported();

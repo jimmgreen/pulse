@@ -1,3 +1,5 @@
+#include "../app/win_e_fast_entry.h"
+#include "../app/single_instance_coordinator.h"
 #include "../common/dialog_bundle.h"
 #include "../common/app_identity.h"
 #include "../common/runtime_log.h"
@@ -40,7 +42,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR arguments, int show) {
         if (wcscmp(argv[i], L"--ai") == 0 || wcscmp(argv[i], L"--mcp") == 0 || wcscmp(argv[i], L"--mcp-stdio") == 0 ||
             wcscmp(argv[i], L"--seed-shell-verbs") == 0 || wcscmp(argv[i], L"--shot") == 0 ||
             wcscmp(argv[i], L"--selftest") == 0 || wcscmp(argv[i], L"--test-instance") == 0) wait = true;
+    const auto fast = !wait ? pulse::app::TryWinEFastEntry(argc, argv,
+        [] { return pulse::app::SingleInstanceCoordinator::FindPrimaryEndpoint().has_value(); },
+        [] { pulse::app::SingleInstanceCoordinator existing;
+             return existing.ForwardOpenPath(L"pulse:win-e", 2000); }) : std::nullopt;
     if (argv) LocalFree(argv);
+    if (fast) return *fast;
     std::wstring image(32768, L'\0');
     const DWORD size = GetModuleFileNameW(nullptr, image.data(), static_cast<DWORD>(image.size()));
     if (!size || size >= image.size()) return LaunchFailed(ERROR_BAD_PATHNAME, shell_target, 0);

@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <cmath>
+#include <commctrl.h>
 
 namespace pulse::ui {
 struct DetailsPreviewProbe {
@@ -199,6 +200,12 @@ bool DetailsRegionRestored(HWND preview) {
     return restored;
 }
 
+LRESULT CALLBACK CountDetailsPaint(HWND hwnd, UINT message, WPARAM wp, LPARAM lp,
+    UINT_PTR, DWORD_PTR data) {
+    if (message == WM_PAINT) ++*reinterpret_cast<unsigned*>(data);
+    return DefSubclassProc(hwnd, message, wp, lp);
+}
+
 } // namespace
 
 int RunDetailsPreviewProbe(pulse::AppState& s, const wchar_t* report) {
@@ -221,8 +228,9 @@ int RunDetailsPreviewProbe(pulse::AppState& s, const wchar_t* report) {
         }
     };
     const bool occlusion_only = GetEnvironmentVariableW(L"PULSE_TEST_DETAILS_PREVIEW_OCCLUSION", nullptr, 0) != 0;
+    const bool sync_only = GetEnvironmentVariableW(L"PULSE_TEST_DETAILS_PREVIEW_SYNC", nullptr, 0) != 0;
     auto* tab = ActiveTab(s);
-    if (!tab || tab->EntryCount() < (occlusion_only ? 1u : 2u)) { fclose(log); return 3; }
+    if (!tab || tab->EntryCount() < (occlusion_only || sync_only ? 1u : 2u)) { fclose(log); return 3; }
     const auto folder = std::filesystem::path(report).parent_path();
     s.showDetailsPanel = true;
     s.renderer.SetDetailsPanelVisible(true);
@@ -237,6 +245,97 @@ int RunDetailsPreviewProbe(pulse::AppState& s, const wchar_t* report) {
         InvalidateRect(s.hwnd, nullptr, FALSE); UpdateWindow(s.hwnd);
         SyncDetailsPreview(s); pump(700);
     };
+    if (sync_only) {
+        select(0);
+        auto& preview = s.detailsPreview;
+        check(preview.visible(), "selected file opens embedded preview");
+        const auto generation = ui::DetailsPreviewProbe::Generation(preview);
+        ValidateRect(preview.hwnd(), nullptr);
+        for (int i = 0; i < 30; ++i) SyncDetailsPreview(s);
+        check(!GetUpdateRect(preview.hwnd(), nullptr, FALSE),
+            "unchanged details sync does not repaint embedded preview");
+        check(ui::DetailsPreviewProbe::Generation(preview) == generation,
+            "unchanged details sync preserves preview generation");
+        auto accent = s.accentColor;
+        accent.a = 0.25f;
+        preview.SetAccent(accent);
+        check(!GetUpdateRect(preview.hwnd(), nullptr, FALSE),
+            "alpha-only accent input remains opaque without repaint");
+        accent.r = accent.r < 0.5f ? 0.75f : 0.25f;
+        preview.SetAccent(accent);
+        check(GetUpdateRect(preview.hwnd(), nullptr, FALSE) != FALSE,
+            "changed accent schedules preview repaint");
+        ValidateRect(preview.hwnd(), nullptr);
+        preview.SetAccent(accent);
+        check(!GetUpdateRect(preview.hwnd(), nullptr, FALSE),
+            "repeated changed accent does not schedule another repaint");
+        preview.SetAccent(s.accentColor);
+        UpdateWindow(preview.hwnd());
+        pump(500);
+        const auto parent_style = GetWindowLongPtrW(s.hwnd, GWL_STYLE);
+        check((parent_style & WS_CLIPCHILDREN) != 0, "main window clips independently rendered child previews");
+        ValidateRect(preview.hwnd(), nullptr);
+        InvalidateRect(s.hwnd, nullptr, FALSE);
+        check(!GetUpdateRect(preview.hwnd(), nullptr, FALSE),
+            "parent invalidation leaves independent child preview valid");
+        UpdateWindow(s.hwnd);
+        const auto scroll_before = tab->scroll_y;
+        const int selected_before = tab->selected_index;
+        const auto path_before = preview.item().path;
+        unsigned child_paints = 0;
+        const bool observed = SetWindowSubclass(preview.hwnd(), CountDetailsPaint, 3,
+            reinterpret_cast<DWORD_PTR>(&child_paints)) != FALSE;
+        check(observed, "wheel probe observes embedded preview paints");
+        RECT client{};
+        GetClientRect(s.hwnd, &client);
+        POINT wheel{(client.right - client.left) / 2, (client.bottom - client.top) / 2};
+        ClientToScreen(s.hwnd, &wheel);
+        for (int i = 0; i < 20; ++i) {
+            SendMessageW(s.hwnd, WM_MOUSEWHEEL, MAKEWPARAM(0, static_cast<WORD>(-WHEEL_DELTA)),
+                MAKELPARAM(wheel.x, wheel.y));
+            UpdateWindow(s.hwnd);
+            SyncDetailsPreview(s);
+            pump(20);
+        }
+        pump(400);
+        if (observed) RemoveWindowSubclass(preview.hwnd(), CountDetailsPaint, 3);
+        check(tab->scroll_y > scroll_before, "twenty list wheel messages move the file listing");
+        check(tab->selected_index == selected_before && preview.item().path == path_before &&
+            ui::DetailsPreviewProbe::Generation(preview) == generation,
+            "list wheel scrolling preserves selected file and preview generation");
+        check(observed && child_paints == 0,
+            "list wheel scrolling does not repaint unchanged static preview");
+        fprintf(log, "[WHEEL] scroll_before=%.1f scroll_after=%.1f child_paints=%u\n",
+            scroll_before, tab->scroll_y, child_paints);
+        const auto previous_history = s.ops.UndoToJson();
+        std::wstring sources;
+        for (int i = 0; i < 1000; ++i) {
+            if (i) sources += L",";
+            sources += L"\"C:/details-scroll-fixture/item-" + std::to_wstring(i) + L".txt\"";
+        }
+        std::wstring history = L"[";
+        for (int i = 0; i < 12; ++i) {
+            if (i) history += L",";
+            history += L"{\"type\":0,\"sup\":true,\"dest\":\"C:/details-scroll-fixture/dest\",\"name\":\"\",\"src\":[";
+            history += sources + L"]}";
+        }
+        history += L"]";
+        check(s.ops.UndoFromJson(history), "isolated history fixture loads twelve thousand source paths");
+        s.undoHistoryOpen = false;
+        const auto closed_vm = BuildVm(s);
+        check(closed_vm.status.history.size() <= 1 && !closed_vm.status.undo_label.empty(),
+            "closed history BuildVm keeps only pill summary and undo label");
+        s.undoHistoryOpen = true;
+        const auto open_vm = BuildVm(s);
+        check(open_vm.status.history.size() == 12,
+            "open history BuildVm includes all twelve operation rows");
+        s.undoHistoryOpen = false;
+        check(s.ops.UndoFromJson(previous_history), "isolated history fixture restores prior history");
+        preview.Close();
+        fprintf(log, "failures=%d\n", failures);
+        fclose(log);
+        return failures ? 1 : 0;
+    }
     if (occlusion_only) {
         // Suppress first-run teaching bubbles for this isolated capture only.
         s.teachTip = s.teachCandidate = -1;

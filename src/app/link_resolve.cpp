@@ -1,6 +1,8 @@
 // link_resolve.cpp — See link_resolve.h. Worker threads live for the whole
 // session, so COM is initialized once per thread via a thread_local guard.
 #include "link_resolve.h"
+#include "link_resolve_batch.h"
+#include "../fs/drive_kind.h"
 #include <shobjidl.h>
 #include <shlobj.h>
 #include <wrl/client.h>
@@ -184,6 +186,9 @@ bool ResolveLink(const std::wstring& lnk_path, fs::DirEntry& e) {
 
     const std::wstring target = fs::NormalizePath(raw);
     e.link_destination = raw;
+    // Listing a local shortcut must not connect to its saved network target.
+    // Opening the shortcut explicitly still uses normal Shell launch behavior.
+    if (fs::IsUncPath(target) || fs::IsRemoteLikeDrive(target)) return false;
     WIN32_FILE_ATTRIBUTE_DATA data{};
     if (!GetFileAttributesExW(target.c_str(), GetFileExInfoStandard, &data))
         return false;
@@ -205,16 +210,14 @@ void ResolveLinksInPlace(const std::wstring& parent_path,
             (!e.is_dir && (HasLnkSuffix(e.name) || HasUrlSuffix(e.name)))) { any = true; break; }
     }
     if (!any) return;
-    for (size_t i = 0; i < entries.size(); ++i) {
-        if (cancel && cancel()) return;
-        fs::DirEntry& e = entries[i];
+    ResolveLinkBatch(entries, [parent_path](fs::DirEntry& e) {
         const bool reparse = fs::ClassifyLink(e.attrs, e.reparse_tag) != fs::LinkKind::None;
-        if (!reparse && (e.is_dir || (!HasLnkSuffix(e.name) && !HasUrlSuffix(e.name)))) continue;
+        if (!reparse && (e.is_dir || (!HasLnkSuffix(e.name) && !HasUrlSuffix(e.name)))) return;
         e.link_destination = std::wstring();
-        if (e.cloud_recall || e.change_record_only) continue;
+        if (e.cloud_recall || e.change_record_only) return;
         std::wstring full = e.full_path;
         if (full.empty()) {
-            if (parent_path.empty() || fs::IsVirtualPath(parent_path)) continue;
+            if (parent_path.empty() || fs::IsVirtualPath(parent_path)) return;
             full = parent_path;
             if (full.back() != L'\\') full += L'\\';
             full += e.name;
@@ -222,7 +225,7 @@ void ResolveLinksInPlace(const std::wstring& parent_path,
         if (reparse) e.link_destination = ReparseDestination(full);
         else if (HasUrlSuffix(e.name)) e.link_destination = UrlDestination(full);
         else ResolveLink(full, e);
-    }
+    }, [&cancel] { return cancel && cancel(); });
 }
 
 } // namespace pulse::app

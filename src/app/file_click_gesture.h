@@ -21,21 +21,38 @@ enum class FileClickAction { None, Open, Rename };
 class FileClickGesture {
 public:
     void Cancel() { *this = {}; }
+    // A new down cancels the old action, but not the recent completed click.
+    // Windows may send DOWN again instead of DBLCLK after a tiny pointer drift.
+    void InterruptForPress() {
+        item_ = {};
+        pressed_ = single_open_ = opened_ = rename_ = releasing_capture_ = false;
+        first_time_ = 0;
+        rename_due_ = 0;
+    }
     void CancelRename() { rename_ = false; rename_due_ = 0; }
-    void Begin(FileClickIdentity item, uint32_t message_time, bool single_open, bool rename) {
-        Cancel();
+    void Begin(FileClickIdentity item, uint32_t message_time, bool single_open, bool rename,
+               uint32_t interval = 500) {
+        const bool rapid_repeat = recent_item_ == item && recent_item_.Valid() &&
+            static_cast<uint32_t>(message_time - recent_release_time_) <= interval;
+        InterruptForPress();
         if (!item.Valid()) return;
         item_ = std::move(item);
         pressed_ = true;
         first_time_ = message_time;
         single_open_ = single_open;
-        rename_ = rename && !single_open;
+        rename_ = rename && !single_open && !rapid_repeat;
     }
     FileClickAction Release(const FileClickIdentity& item, uint64_t now, uint32_t interval,
                             bool click, bool name, bool selected_only) {
+        return Release(item, now, interval, click, name, selected_only, static_cast<uint32_t>(now));
+    }
+    FileClickAction Release(const FileClickIdentity& item, uint64_t now, uint32_t interval,
+                            bool click, bool name, bool selected_only, uint32_t message_time) {
         if (!pressed_) return FileClickAction::None;
         if (!click || item != item_) { Cancel(); return FileClickAction::None; }
         pressed_ = false;
+        recent_item_ = item_;
+        recent_release_time_ = message_time;
         if (single_open_) {
             opened_ = true;
             return FileClickAction::Open;
@@ -74,6 +91,8 @@ public:
     const FileClickIdentity& Item() const { return item_; }
 private:
     FileClickIdentity item_;
+    FileClickIdentity recent_item_;
+    uint32_t recent_release_time_ = 0;
     uint32_t first_time_ = 0;
     uint64_t rename_due_ = 0;
     bool pressed_ = false;

@@ -111,7 +111,12 @@ NotifyPatch ApplyDirNotify(std::vector<fs::DirEntry>& entries, const std::wstrin
             return NotifyPatch::Applied;
         }
         if (NeedsLinkResolution(entry)) return NotifyPatch::NeedFullEnum;
-        PlaceEntryHeld(entries, at, std::move(entry), col, sort_dir);
+        if (at >= 0 && !SameEntrySortPosition(entries[static_cast<size_t>(at)], entry, col, sort_dir)) {
+            entries.erase(entries.begin() + at);
+            InsertAtGroupEnd(entries, std::move(entry), col, sort_dir);
+        } else {
+            PlaceEntryHeld(entries, at, std::move(entry), col, sort_dir);
+        }
         return NotifyPatch::Applied;
     }
 
@@ -143,22 +148,49 @@ struct FoldedNameEqual {
 
 } // namespace
 
-NotifyPatch ApplyDirNotifyBatch(std::vector<fs::DirEntry>& entries, const std::wstring& folder,
-                                const std::vector<fs::DirNotifyEvent>& events,
-                                ui::SortColumn col, ui::SortDirection sort_dir) {
-    if (events.empty()) return NotifyPatch::Applied;
-    if ((fs::IsUncPath(folder) || fs::IsRemoteLikeDrive(folder)) &&
-        std::any_of(events.begin(), events.end(), [](const auto& event) {
-            return event.action != FILE_ACTION_REMOVED;
-        })) return NotifyPatch::NeedFullEnum;
-    for (const auto& event : events) {
-        if (event.name.empty() || event.name.find_first_of(L"\\/") != std::wstring::npos)
-            return NotifyPatch::NeedFullEnum;
-        if (event.action != FILE_ACTION_REMOVED && event.action != FILE_ACTION_RENAMED_NEW_NAME &&
-            event.action != FILE_ACTION_ADDED && event.action != FILE_ACTION_MODIFIED)
-            return NotifyPatch::NeedFullEnum;
+PreparedDirNotifyBatch PrepareDirNotifyBatch(const std::wstring& folder,
+    const std::vector<fs::DirNotifyEvent>& events) {
+    PreparedDirNotifyBatch prepared;
+    prepared.events = events;
+    const bool metadata_needed = std::any_of(events.begin(), events.end(), [](const auto& event) {
+        return event.action != FILE_ACTION_REMOVED;
+    });
+    if (metadata_needed && (fs::IsUncPath(folder) || fs::IsRemoteLikeDrive(folder))) {
+        prepared.need_full_enum = true;
+        return prepared;
     }
+    for (const auto& event : events) {
+        if (event.name.empty() || event.name.find_first_of(L"\\/") != std::wstring::npos ||
+            (event.action != FILE_ACTION_REMOVED && event.action != FILE_ACTION_RENAMED_NEW_NAME &&
+             event.action != FILE_ACTION_ADDED && event.action != FILE_ACTION_MODIFIED)) {
+            prepared.need_full_enum = true;
+            return prepared;
+        }
+        if (event.action == FILE_ACTION_REMOVED || prepared.metadata.contains(event.name)) continue;
+        fs::DirEntry entry;
+        std::optional<fs::DirEntry> value;
+        if (FillDirEntry(folder, event.name, entry)) {
+            if (NeedsLinkResolution(entry)) {
+                prepared.need_full_enum = true;
+                return prepared;
+            }
+            value = std::move(entry);
+        }
+        prepared.metadata.emplace(event.name, std::move(value));
+    }
+    return prepared;
+}
 
+NotifyPatch ApplyDirNotifyBatch(std::vector<fs::DirEntry>& entries, const std::wstring& folder,
+    const std::vector<fs::DirNotifyEvent>& events, ui::SortColumn col, ui::SortDirection sort_dir) {
+    return ApplyPreparedDirNotifyBatch(entries, PrepareDirNotifyBatch(folder, events), col, sort_dir);
+}
+
+NotifyPatch ApplyPreparedDirNotifyBatch(std::vector<fs::DirEntry>& entries,
+    const PreparedDirNotifyBatch& prepared, ui::SortColumn col, ui::SortDirection sort_dir) {
+    if (prepared.need_full_enum) return NotifyPatch::NeedFullEnum;
+    const auto& events = prepared.events;
+    if (events.empty()) return NotifyPatch::Applied;
     constexpr size_t kNone = static_cast<size_t>(-1);
     std::unordered_map<std::wstring, size_t, FoldedNameHash, FoldedNameEqual> where;
     where.reserve(entries.size() + events.size());
@@ -167,18 +199,9 @@ NotifyPatch ApplyDirNotifyBatch(std::vector<fs::DirEntry>& entries, const std::w
         const auto it = where.find(name);
         return it == where.end() ? kNone : it->second;
     };
-    // Reuse each stat during replay. Preflight before moving entries so a link
-    // refresh request leaves the caller's entire snapshot untouched.
-    std::unordered_map<std::wstring, std::optional<fs::DirEntry>> stats;
+    // Preparation owns all filesystem work; replay reads its immutable results.
     const auto stat = [&](const std::wstring& name) -> const std::optional<fs::DirEntry>& {
-        auto it = stats.find(name);
-        if (it == stats.end()) {
-            fs::DirEntry entry;
-            std::optional<fs::DirEntry> result;
-            if (FillDirEntry(folder, name, entry)) result = std::move(entry);
-            it = stats.emplace(name, std::move(result)).first;
-        }
-        return it->second;
+        return prepared.metadata.at(name);
     };
     for (const auto& event : events) {
         if (event.action == FILE_ACTION_REMOVED) continue;
@@ -191,10 +214,10 @@ NotifyPatch ApplyDirNotifyBatch(std::vector<fs::DirEntry>& entries, const std::w
     }
 
     // Replays the per-event rules on slots instead of a vector: rows keep
-    // their slot, and a row that has to move (new, or its group changed) gets
+    // their slot, and a row that has to move (new, or its sort key changed) gets
     // a new slot after every original one. Appended slots are merged in at
     // their sort position: a pasted or extracted item shows up where it
-    // belongs right away, while renamed and modified rows stay put (#13).
+    // belongs right away, while renamed rows stay put (#13).
     struct Slot {
         fs::DirEntry entry;
         bool live = true;
@@ -208,8 +231,9 @@ NotifyPatch ApplyDirNotifyBatch(std::vector<fs::DirEntry>& entries, const std::w
         where.erase(slots[slot].entry.name);
         slots[slot].live = false;
     };
-    const auto place = [&](size_t slot, fs::DirEntry entry) {
-        if (slot != kNone && SameEntryGroup(slots[slot].entry, entry, col, sort_dir)) {
+    const auto place = [&](size_t slot, fs::DirEntry entry, bool renamed) {
+        if (slot != kNone && SameEntryGroup(slots[slot].entry, entry, col, sort_dir) &&
+            (renamed || SameEntrySortPosition(slots[slot].entry, entry, col, sort_dir))) {
             where.erase(slots[slot].entry.name);
             slots[slot].entry = std::move(entry);
             where[slots[slot].entry.name] = slot;
@@ -237,12 +261,12 @@ NotifyPatch ApplyDirNotifyBatch(std::vector<fs::DirEntry>& entries, const std::w
                 if (at != kNone) drop(dup);
                 else slot = dup;
             }
-            place(slot, *entry);
+            place(slot, *entry, true);
             continue;
         }
         const auto& entry = stat(event.name);
         if (!entry) drop(find(event.name));
-        else place(find(event.name), *entry);
+        else place(find(event.name), *entry, false);
     }
 
     std::vector<size_t> appended;

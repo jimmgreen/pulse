@@ -1,3 +1,4 @@
+#include "context_working_directory.h"
 #include "host_log_batch.h"
 #include "recycle_restore_index.h"
 #include "../common/recycle_restore.h"
@@ -698,10 +699,12 @@ void ExecuteShellVerb(Request* req) {
             for (wchar_t c : verb) verb_a.push_back(c < 0x80 ? static_cast<char>(c) : '?');
         }
         if (SUCCEEDED(hr)) {
+            const auto dir = pulse::shell::ContextWorkingDirectory(ToParsingPath(req->sources.front()), background);
             CMINVOKECOMMANDINFOEX info{};
             info.cbSize = sizeof(info);
             info.fMask = CMIC_MASK_UNICODE;
             info.hwnd = owner;
+            info.lpDirectoryW = dir.empty() ? nullptr : dir.c_str();
             if (verb.empty()) {
                 info.lpVerb = MAKEINTRESOURCEA(default_id);
                 info.lpVerbW = MAKEINTRESOURCEW(default_id);
@@ -1218,6 +1221,7 @@ void SendCtxItems(uint32_t session_id, const std::vector<CtxItemOut>& items,
         if (it.separator_after) item_flags |= CTX_ITEM_SEPARATOR_AFTER;
         if (it.has_children) item_flags |= CTX_ITEM_HAS_CHILDREN;
         if (it.child) item_flags |= CTX_ITEM_CHILD;
+        item_flags |= PackCtxItemDepth(it.depth);
         item_flags |= pulse::ipc::PackCtxItemMnemonic(it.mnemonic);
         w.PutU32(item_flags);
         w.PutString(it.verb);
@@ -1418,13 +1422,7 @@ void CtxInvoke(const CtxSessionData& d, IContextMenu* menu, UINT id_first,
             HostLog(L"taskbarpin: TaskbarPinManager unavailable, using InvokeCommand");
         }
     }
-    std::wstring dir = ToParsingPath(d.paths.front());
-    if (IsShellNamespacePath(dir)) {
-        dir.clear();  // a phone item has no directory to run in
-    } else if (!d.background) {
-        const auto slash = dir.find_last_of(L'\\');
-        if (slash != std::wstring::npos && slash > 2) dir.resize(slash);
-    }
+    const auto dir = pulse::shell::ContextWorkingDirectory(ToParsingPath(d.paths.front()), d.background);
     CMINVOKECOMMANDINFOEX info{};
     info.cbSize = sizeof(info);
     info.fMask = CMIC_MASK_UNICODE;

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <windows.h>
 #include <cstdint>
 #include <memory>
@@ -64,6 +64,8 @@ public:
     static bool IsAudio(const std::wstring& path);
     // card: the hover preview card's silent loop. Starts muted, lets the
     // pointer through to the owner, and decodes FFmpeg frames at card size.
+    // Four process-wide workers include retired decoders. At capacity Open
+    // reports ERROR_BUSY; selecting/opening again retries after a worker exits.
     void Open(HWND owner, const std::wstring& path, bool card = false);
     void Reset();
     std::vector<std::shared_future<void>> SuspendVolume(const std::wstring& root);

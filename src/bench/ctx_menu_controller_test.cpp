@@ -11,6 +11,7 @@
 #include <windows.h>
 #include <cstdio>
 #include <string>
+#include <string_view>
 
 namespace pulse::app { std::wstring GetPulseDataDir() { return {}; } }
 
@@ -106,7 +107,12 @@ int RowIndex(const std::vector<pulse::ui::FluentMenuItem>& rows, const wchar_t* 
 
 } // namespace
 
-int wmain() {
+#include "shell_action_routing_test.inc"
+#include "nested_menu_controller_test.inc"
+
+int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--nested-only") return NestedMenuControllerTests();
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--shell-actions") return ShellActionRoutingTests();
     using namespace pulse;
     app::ContextMenuPrefs prefs;
     prefs.persist = false;
@@ -793,42 +799,63 @@ int wmain() {
     }
 
     {
-        app::ContextMenuPrefs prefs;
+        app::ContextMenuPrefs catalog_prefs;
         const auto category = ipc::CtxMenuCategory::Software;
         for (int i = 0; i < 400; ++i) {
             const auto key = L"v:catalog-" + std::to_wstring(i);
-            prefs.RecordSeen(key, key.substr(2), false, category);
+            catalog_prefs.RecordSeen(key, key.substr(2), false, category);
         }
-        prefs.SetItemEnabled(L"v:catalog-0", false);
-        prefs.RecordSeen(L"v:catalog-1", L"catalog-1", false, category);
-        Check(prefs.RecordSeen(L"v:new-visible", L"New visible", false, category) && prefs.seen.size() == 400,
+        catalog_prefs.SetItemEnabled(L"v:catalog-0", false);
+        catalog_prefs.RecordSeen(L"v:catalog-1", L"catalog-1", false, category);
+        Check(catalog_prefs.RecordSeen(L"v:new-visible", L"New visible", false, category) && catalog_prefs.seen.size() == 400,
               "saturated settings catalog admits newly visible Shell row within bound");
         const auto has = [&](const std::wstring& key) {
-            for (const auto& row : prefs.seen) if (row.key == key) return true;
+            for (const auto& row : catalog_prefs.seen) if (row.key == key) return true;
             return false;
         };
         Check(has(L"v:catalog-0") && has(L"v:catalog-1") && !has(L"v:catalog-2") && has(L"v:new-visible"),
               "catalog retirement preserves configured and recently encountered rows first");
-        for (const auto& row : prefs.seen) prefs.SetItemEnabled(row.key, false);
-        prefs.RecordSeen(L"v:after-configured", L"After configured", false, category);
-        Check(prefs.seen.size() == 400 && has(L"v:after-configured") &&
-              prefs.item_enabled.contains(L"v:catalog-0") && !prefs.item_enabled.at(L"v:catalog-0"),
+        for (const auto& row : catalog_prefs.seen) catalog_prefs.SetItemEnabled(row.key, false);
+        catalog_prefs.RecordSeen(L"v:after-configured", L"After configured", false, category);
+        Check(catalog_prefs.seen.size() == 400 && has(L"v:after-configured") &&
+              catalog_prefs.item_enabled.contains(L"v:catalog-0") && !catalog_prefs.item_enabled.at(L"v:catalog-0"),
               "all-configured catalog still admits new rows without losing evicted override");
-        prefs.RecordSeen(L"v:catalog-0", L"catalog-0", false, category);
-        Check(has(L"v:catalog-0") && !prefs.RowEnabled(L"v:catalog-0", category, false),
+        catalog_prefs.RecordSeen(L"v:catalog-0", L"catalog-0", false, category);
+        Check(has(L"v:catalog-0") && !catalog_prefs.RowEnabled(L"v:catalog-0", category, false),
               "rediscovered retired row keeps the user's hidden preference");
         app::ContextMenuPrefs loaded;
-        Check(loaded.FromJson(prefs.ToJson()) && loaded.seen.size() <= 400 &&
+        Check(loaded.FromJson(catalog_prefs.ToJson()) && loaded.seen.size() <= 400 &&
               !loaded.RowEnabled(L"v:catalog-0", category, false),
               "bounded discovery catalog and retained overrides survive persistence");
         for (int i = 0; i < 50; ++i) {
-            auto extra = prefs.seen.back();
+            auto extra = catalog_prefs.seen.back();
             extra.text = L"overflow-" + std::to_wstring(i); extra.key = L"v:" + extra.text;
-            prefs.seen.push_back(std::move(extra));
+            catalog_prefs.seen.push_back(std::move(extra));
         }
-        Check(loaded.FromJson(prefs.ToJson()) && loaded.seen.size() == 400 &&
+        Check(loaded.FromJson(catalog_prefs.ToJson()) && loaded.seen.size() == 400 &&
               !loaded.RowEnabled(L"v:catalog-0", category, false),
               "loading oversized legacy catalog enforces bound without dropping overrides");
+    }
+
+    {
+        // Native command, pin and package tokens are larger than Shell IDs.
+        // They must reach their own dispatchers, not be consumed as COM verbs.
+        for (int command : {app::CmdShellComLast + 1, 0x20000000, 0x2FFFFFFF,
+                            0x30000000, 0x40000000}) {
+            app::ContextMenuController controller;
+            int invoked = 0, waited = 0, refreshed = 0;
+            app::ContextMenuController::ShellOperations operations;
+            operations.invoke = [&](uint32_t, uint32_t, auto, auto) { ++invoked; };
+            controller.SetShellOperations(std::move(operations));
+            const bool handled = controller.ExecuteShellCommand(command,
+                [&] { ++waited; }, [&] { ++refreshed; });
+            Check(!handled && invoked == 0 && waited == 0 && refreshed == 0,
+                  "non-Shell command falls through without invoking or waiting for Explorer");
+        }
+        app::ContextMenuController controller;
+        int refreshed = 0;
+        Check(controller.ExecuteShellCommand(app::CmdShellComLast, {}, [&] { ++refreshed; }) && refreshed == 1,
+              "last reserved Shell ID remains handled, including stale tokens");
     }
 
     std::printf("%s\n", failures ? "FAILED" : "ALL PASSED");

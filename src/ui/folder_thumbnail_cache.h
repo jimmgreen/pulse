@@ -22,7 +22,10 @@ public:
     void Refresh();
     void BeginFrame();
     void ShareUploadBudget(ThumbnailCache& other) { cache_.ShareUploadBudget(other); }
-    bool TakeUploadFrameRequest() { return cache_.TakeUploadFrameRequest(); }
+    bool TakeUploadFrameRequest() {
+        const bool compact = cache_.folder_revisit_->TakeUploadFrameRequest();
+        return cache_.TakeUploadFrameRequest() || compact;
+    }
     void EndFrame();
     bool Tick(uint64_t now);
     PreviewDrawResult Draw(ID2D1DeviceContext* dc, const D2D1_RECT_F& dest,

@@ -260,7 +260,7 @@ def outputs():
                                ["create", "commit", "get", "cancel", "release", "choose_destination"])
     staging.update({
         "thread": "choose_destination synchronous owner UI; create callback and create/commit/release disk work on host workers; get callback synchronous caller thread; commit confirmation/submission on owner UI",
-        "limits": {"stages": 16, "destinationUtf8Bytes": 131072, "treeEntries": 8192, "topLevelItems": 256, "treePathUtf8Bytes": 4194304},
+        "limits": {"stages": 16, "destinationUtf8Bytes": 131072, "treeEntries": 2000000, "topLevelItems": 4096, "treePathUtf8Bytes": 1073741824},
         "destination": "Existing ordinary local drive directory; private hidden host-created staging directory beneath destination preserves volume. choose_destination uses the standard host folder picker.",
         "commit": "Join writers before commit. Host validates nonempty ordinary tree, rejects reparse points and repeated commit, then confirms and submits standard file operations. Snapshot task_id identifies submitted operation; acceptance is not completion.",
         "lifetime": "Borrowed callback strings expire on return. Finish writers before release. Close blocks create/commit/choose; get/cancel/release remain valid through destroy. Close never removes writer output; remaining cleanup starts after destroy.",
@@ -281,8 +281,20 @@ def outputs():
         "validationStatus": "P1.6 settings lifecycle and real-host persistence/conflict/theme/scroll acceptance recorded in the implementation roadmap",
         "documentation": "sdk/native/README.md"
     })
-    refreshed_names = ("pulse.ui", "pulse.ui.model", "pulse.ui.data", "pulse.directories", "pulse.context", "pulse.fileops", "pulse.ui.mount", "pulse.commands", "pulse.preview", "pulse.tasks", "pulse.staging", "pulse.settings.pages")
-    catalog["interfaces"] = [item for item in catalog["interfaces"] if item["name"] not in refreshed_names] + [model, data, directories, context, fileops, mount, commands, preview, tasks, staging, settings_pages]
+    dialogs = header_interface("dialogs.h", "pulse.dialogs", "PulseDialogsV1",
+                               "PULSE_DIALOGS_INTERFACE_NAME", "PULSE_DIALOGS_VERSION_1",
+                               ["show", "set_states", "close"])
+    dialogs.update({
+        "thread": "Owner UI thread for all calls and callbacks; show returns at once and the dialog answers later",
+        "limits": {"dialogsPerSession": 1, "buttons": 3, "titleUtf8Bytes": 128, "messageUtf8Bytes": 2048,
+                   "widthDip": [360, 720], "formHeightDip": 640},
+        "presentation": "Host-drawn Fluent modal over the owner window: title, optional message, optional UI-model form, 1-3 footer buttons (standard/primary/danger). Text inputs with kind password are masked.",
+        "lifetime": "Model and strings copied by show. closed runs exactly once with every declared state unless the session stops first; borrowed values expire at callback return.",
+        "sample": "extensions/7zip: password prompt, compression options and checksum results",
+        "documentation": "sdk/native/include/pulse/dialogs.h"
+    })
+    refreshed_names = ("pulse.ui", "pulse.ui.model", "pulse.ui.data", "pulse.directories", "pulse.context", "pulse.fileops", "pulse.ui.mount", "pulse.commands", "pulse.preview", "pulse.tasks", "pulse.staging", "pulse.settings.pages", "pulse.dialogs")
+    catalog["interfaces"] = [item for item in catalog["interfaces"] if item["name"] not in refreshed_names] + [model, data, directories, context, fileops, mount, commands, preview, tasks, staging, settings_pages, dialogs]
     from native_author_mcp import TOOLS
     catalog["authoring"] = {
         "mcpServer": "tools/extensions/native_author_mcp.py",

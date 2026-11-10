@@ -3,7 +3,15 @@
 #include <string>
 #include <vector>
 namespace pulse::setup {
-struct LockedProgram { DWORD pid = 0; std::wstring name; };
+struct LockedProgram {
+    DWORD pid = 0;
+    std::wstring name;
+    FILETIME started{};
+    bool CanEnd() const { return pid > 4 && pid != GetCurrentProcessId() && (started.dwLowDateTime || started.dwHighDateTime); }
+};
+// Explicit user action only; verifies the recorded creation time using the same
+// handle used to terminate, so a reused PID is never acted on.
+DWORD EndLockedProgram(const LockedProgram& program);
 struct FileLockReport {
     std::vector<std::wstring> files;
     std::vector<LockedProgram> programs;

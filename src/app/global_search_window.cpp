@@ -1694,7 +1694,7 @@ struct GlobalSearchWindow::Impl {
                 ui::CreateSvgResourceBitmap(target.Get(), IDR_EMPTY_FOLDER_SVG,
                     D2D1::SizeU(static_cast<UINT32>(Px(200)), static_cast<UINT32>(Px(200 * 360.0f / 512))), D2D1::SizeF(512, 360), &empty_art);
             }
-            if (empty_art) target->DrawBitmap(empty_art.Get(), {cx - 100, y - 110, cx + 100, y + 30}, dark ? 0.9f : 0.6f);
+            if (empty_art) target->DrawBitmap(empty_art.Get(), {cx - 100, y - 110, cx + 100, y + 30}, 1.0f);
             LabelC(Text(StringId::GlobalSearchEmpty), {left, y + 36, right, y + 62}, 14, p.muted, false, L"Segoe UI", false, DWRITE_TEXT_ALIGNMENT_CENTER);
             return;
         }
@@ -2321,6 +2321,8 @@ struct GlobalSearchWindow::Impl {
         if (right) return HTRIGHT;
         if (top) return HTTOP;
         if (bottom) return HTBOTTOM;
+        const float x = pt.x / scale, y = pt.y / scale;
+        if (y < Header() && !Contains(FieldRect(), x, y) && !HitAt(x, y)) return HTCAPTION;
         return HTCLIENT;
     }
     LRESULT Message(UINT message, WPARAM wp, LPARAM lp) {
@@ -2342,10 +2344,19 @@ struct GlobalSearchWindow::Impl {
             info->ptMinTrackSize = {Px(kMinWidth), Px(kMinHeight)};
             return 0;
         }
-        case WM_EXITSIZEMOVE:
-            if (events.resized) events.resized(static_cast<int>(std::lround(width)), static_cast<int>(std::lround(height)));
+        case WM_EXITSIZEMOVE: {
+            RECT rect{};
+            if (GetWindowRect(hwnd, &rect)) {
+                context.positioned = true;
+                context.x = rect.left; context.y = rect.top;
+                context.width = static_cast<int>(std::lround(width));
+                context.height = static_cast<int>(std::lround(height));
+                if (events.placement_changed)
+                    events.placement_changed(rect.left, rect.top, context.width, context.height);
+            }
             SetFocus(edit);
             return 0;
+        }
         case WM_THEMECHANGED:
         case WM_SETTINGCHANGE:
             ui::RefreshHighContrast();
@@ -2597,9 +2608,11 @@ struct GlobalSearchWindow::Impl {
         search_pinyin = pinyin;
         animations = ui::motion::SystemAnimationsEnabled();
         plate_motion.SetAnimationsEnabled(animations); scope_motion.SetAnimationsEnabled(animations);
-        // Follow the pointer even when that monitor only shows the desktop.
+        // Until explicitly moved, follow the pointer; afterwards restore the saved monitor.
         POINT cursor{};
-        const HMONITOR active_monitor = GetCursorPos(&cursor)
+        const HMONITOR active_monitor = context.positioned
+            ? MonitorFromPoint(POINT{context.x, context.y}, MONITOR_DEFAULTTONEAREST)
+            : GetCursorPos(&cursor)
             ? MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST)
             : MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTONEAREST);
         if (const float monitor_scale = MonitorScale(active_monitor); monitor_scale > 0) scale = monitor_scale;
@@ -2694,14 +2707,16 @@ struct GlobalSearchWindow::Impl {
         }
         return result;
     }
-    // Centred, a quarter down the work area, at the saved size.
+    // Saved screen position and DIP size, clamped after monitor/work-area changes.
     RECT Placement(const RECT& work) const {
         const float want_w = context.width > 0 ? static_cast<float>(context.width) : kDefaultWidth;
         const float want_h = context.height > 0 ? static_cast<float>(context.height) : kDefaultHeight;
         const int w = std::clamp(Px(want_w), std::min(Px(kMinWidth), static_cast<int>(work.right - work.left) - Px(32)), static_cast<int>(work.right - work.left) - Px(32));
         const int h = std::clamp(Px(want_h), std::min(Px(kMinHeight), static_cast<int>(work.bottom - work.top) - Px(32)), static_cast<int>(work.bottom - work.top) - Px(32));
         const int x = work.left + (work.right - work.left - w) / 2, y = work.top + (work.bottom - work.top - h) / 4;
-        return {x, y, x + w, y + h};
+        const int left = context.positioned ? std::clamp(context.x, static_cast<int>(work.left), static_cast<int>(work.right) - w) : x;
+        const int top = context.positioned ? std::clamp(context.y, static_cast<int>(work.top), static_cast<int>(work.bottom) - h) : y;
+        return {left, top, left + w, top + h};
     }
     // Per show: scopes, the program list and the appearance.
     void Prepare() {

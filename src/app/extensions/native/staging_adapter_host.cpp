@@ -40,6 +40,9 @@ StagingBackend MakeStagingBackend(HWND owner, CallerBinding caller) {
         auto* app = GetAppState(owner);
         if (!app || !ValidateCallerBinding(caller)) return {};
         using I = l10n::StringId;
+        const std::wstring package = Wide(caller.Package().id);
+        const auto& trusted = app->appPrefs.extension_publish_trusted;
+        const bool always = std::find(trusted.begin(), trusted.end(), package) != trusted.end();
         ui::ConfirmDialogSpec spec;
         spec.title = l10n::Get(I::ExtensionPublishTitle);
         spec.message = l10n::Get(I::ExtensionPublishMessage);
@@ -47,19 +50,33 @@ StagingBackend MakeStagingBackend(HWND owner, CallerBinding caller) {
         Replace(spec.message, L"{path}", stage.destination);
         spec.confirm_text = l10n::Get(I::ConfirmContinue);
         spec.cancel_text = l10n::Get(I::Cancel);
+        spec.secondary_text = l10n::Get(I::ExtensionPublishAlways);
         spec.note = l10n::Get(I::ExtensionPublishNote);
         spec.items_total = stage.sources.size();
         for (const auto& path : stage.sources) {
             if (spec.items.size() == ui::kConfirmMaxItemRows) break;
             spec.items.push_back(std::filesystem::path(path).filename().wstring());
+            // A staged folder shows as a folder, not the document mark.
+            const DWORD attrs = GetFileAttributesW(path.c_str());
+            spec.item_glyphs.push_back(
+                attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) ? L"\xE8B7" : L"");
         }
         spec.cancel_event = stage.cancel_event;
         const bool isolated = app->isolatedTest;
         spec.on_open = [isolated](HWND window) { if (window && isolated && confirm_observer) confirm_observer(window); };
-        RecordExtensionCall(caller, "staging.commit", "confirmation");
-        const auto choice = ui::ShowConfirmDialogEx(owner, spec, app->darkMode, app->accentColor);
+        // Generated output is undoable and goes through conflict resolution, so a
+        // package the user chose to always allow publishes without this question.
+        RecordExtensionCall(caller, "staging.commit", always ? "trusted" : "confirmation");
+        const auto choice = always ? ui::ConfirmChoice::Confirm
+                                   : ui::ShowConfirmDialogEx(owner, spec, app->darkMode, app->accentColor);
         app = GetAppState(owner);
-        if (choice != ui::ConfirmChoice::Confirm || !app || !ValidateCallerBinding(caller) ||
+        if (app && choice == ui::ConfirmChoice::Secondary) {
+            auto& list = app->appPrefs.extension_publish_trusted;
+            if (std::find(list.begin(), list.end(), package) == list.end()) list.push_back(package);
+            if (!app->isolatedTest) app->appPrefs.Save();
+        }
+        if ((choice != ui::ConfirmChoice::Confirm && choice != ui::ConfirmChoice::Secondary) || !app ||
+            !ValidateCallerBinding(caller) ||
             (stage.cancel_event && WaitForSingleObject(stage.cancel_event, 0) == WAIT_OBJECT_0)) {
             RecordExtensionCall(caller, "staging.commit", "cancelled");
             return {PULSE_ERROR_STATE, 0};
@@ -73,7 +90,16 @@ StagingBackend MakeStagingBackend(HWND owner, CallerBinding caller) {
         request.refresh_directories.push_back(stage.destination);
         uint64_t task = 0;
         if (!SubmitWithConflictResolution(*app, std::move(request), &task)) return {};
-        ArmArrivalSelection(*app, nullptr, task, 0);
+        // Publication may target another pane (or a folder no longer shown).
+        // Never arm the archive's source folder for output written elsewhere.
+        const auto destination = fs::NormalizePath(stage.destination);
+        const app::Pane* target = nullptr;
+        ForEachPane(*app, [&](app::Pane& pane) {
+            const auto* tab = pane.ActiveTab();
+            if (tab && _wcsicmp(fs::NormalizePath(tab->current_path).c_str(), destination.c_str()) == 0 &&
+                (!target || &pane == app->pane)) target = &pane;
+        });
+        if (target) ArmArrivalSelection(*app, target, task, 0);
         RecordExtensionCall(caller, "staging.commit", "submitted:" + std::to_string(task));
         return {PULSE_OK, task};
     };

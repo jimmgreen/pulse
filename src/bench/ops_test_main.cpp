@@ -458,8 +458,10 @@ int RunCopyAliasOnly() {
 int RunRetryTemplateTest(bool memory_only);
 #include "operation_skip_test.inc"
 #include "undo_history_summary_test.inc"
+#include "undo_history_persistence_test.inc"
+#include "undo_history_progress_test.inc"
 #include <unordered_set>
-static int RunUndoRedoHistoryTests() {
+static int RunUndoRedoHistoryTests(bool progress_only = false) {
     setvbuf(stdout, nullptr, _IONBF, 0);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     const auto root = std::filesystem::current_path() / L"bench_data" /
@@ -502,14 +504,24 @@ static int RunUndoRedoHistoryTests() {
     Check(std::any_of(before.entries.begin(), before.entries.end(), [&](const auto& item) {
         return item.entry.task_id == permanent && !item.entry.supported && !item.undone;
     }), L"permanent delete remains a non-undoable history record");
+    const auto persisted_before_undo = manager.UndoJsonSnapshot();
     Check(manager.UndoTo(first) && wait() && Exists(a) && !Exists(renamed) && undone(first) && undone(second),
         L"multi-step undo skips unsupported delete and reverses rename before move");
+    const auto persisted_after_undo = manager.UndoJsonSnapshot();
+    Check(persisted_after_undo != persisted_before_undo && manager.UndoHistorySummary(false).empty() &&
+        manager.UndoHistoryCount() == before.entries.size(),
+        L"undo invalidates persistence and hides undone or unsupported rows from collapsed summary");
     Check(manager.RedoTo(second) && wait() && Exists(renamed) && !Exists(a) && !undone(first) && !undone(second),
         L"multi-step redo preserves original dependency order");
+    const auto persisted_after_redo = manager.UndoJsonSnapshot();
+    Check(persisted_after_redo != persisted_after_undo && persisted_after_redo->find(L"b.txt") != std::wstring::npos &&
+        persisted_after_redo->size() == persisted_before_undo->size(),
+        L"redo republishes original persisted paths after reverse operations");
     const auto replay_result = manager.UndoHistory();
     Check(replay_result.completed_sequence == 2 && replay_result.completed_steps == 2 &&
         replay_result.completed_redo && replay_result.completed_success,
         L"replay completion reports the actual successful step count");
+    Check(HistoryProgressMatches(manager), L"lightweight progress matches successful redo sequence and steps");
     Check(manager.UndoTask(second) && wait() && manager.CanRedo(), L"single-task undo exposes redo");
     const auto missing = (root / L"missing.txt").wstring();
     run(SimpleOp(ops::OpType::Move, {missing.c_str()}, (root / L"to").c_str()));
@@ -526,6 +538,8 @@ static int RunUndoRedoHistoryTests() {
     DeleteFileW(fresh_output.c_str());
     Check(manager.UndoTask(newer) && wait() && !undone(newer) && manager.CanUndoTask(newer),
         L"failed undo retains the original entry instead of migrating history");
+    Check(HistoryProgressMatches(manager) && !manager.HistoryProgress().completed_success,
+        L"lightweight progress preserves failed undo notification");
     MakeFile(fresh_output, "fresh", 5);
     Check(manager.UndoTask(newer) && wait() && Exists(fresh) && undone(newer),
         L"failed undo can be retried after its source is restored");
@@ -540,6 +554,19 @@ static int RunUndoRedoHistoryTests() {
     Check(manager.UndoTask(batch) && wait() && Exists(x) && Exists(y) && undone(batch),
         L"retry resumes after committed subrequests without repeating them");
     Check(!manager.UndoTo(99999999) && !manager.RedoTo(permanent), L"unknown and unsupported targets are rejected");
+    if (progress_only) {
+        Check(HistoryProgressMatches(manager) && manager.HistoryProgress().has_entries &&
+            !manager.HistoryProgress().busy && manager.CanRedo() && !manager.Status().active,
+            L"rename history progress preserves final state and redo admission");
+        manager.Stop();
+        pulse::diagnostics::runtime::Shutdown();
+        std::error_code error;
+        std::filesystem::remove_all(root, error);
+        Check(!error, L"isolated rename history fixture cleanup");
+        wprintf(L"history-progress-behavior: %d passed, %d failed\n", g_pass, g_fail);
+        CoUninitialize();
+        return g_fail ? 1 : 0;
+    }
     const auto copied = run(SimpleOp(ops::OpType::Copy, {x.c_str()}, (root / L"to").c_str()));
     Check(manager.UndoTask(copied) && wait() && !Exists(x_to) && manager.CanRedo(),
         L"undo copy recycles only its actual output");
@@ -575,6 +602,8 @@ static int RunUndoRedoHistoryTests() {
         Check(!queued.CanUndo() && !queued.CanUndoTask(latest) && !queued.CanRedo() && queued.UndoHistory().busy,
             L"queued operations disable history controls consistently with replay admission");
     }
+    Check(HistoryProgressMatches(manager) && manager.HistoryProgress().completed_sequence > 0,
+        L"lightweight history preserves completed undo-redo notification state");
     manager.Stop();
     pulse::diagnostics::runtime::Shutdown();
     std::error_code error; std::filesystem::remove_all(root, error);
@@ -585,6 +614,10 @@ static int RunUndoRedoHistoryTests() {
 }
 
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--undo-history-persistence-only") return RunUndoHistoryPersistenceTests();
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--undo-history-progress-behavior") return RunUndoRedoHistoryTests(true);
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--undo-history-progress-only") return RunUndoHistoryProgressTests(false);
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--undo-history-progress-baseline") return RunUndoHistoryProgressTests(true);
     if (argc == 2 && std::wstring_view(argv[1]) == L"--undo-history-summary-only") return RunUndoHistorySummaryTests();
     if (argc == 2 && std::wstring_view(argv[1]) == L"--undo-redo-history-only") return RunUndoRedoHistoryTests();
     if (argc == 2 && std::wstring_view(argv[1]) == L"--skip-item-only") return RunOperationSkipTests();
@@ -1128,7 +1161,8 @@ int wmain(int argc, wchar_t** argv) {
     // --- Setup sandbox ------------------------------------------------------
     const bool conflict_snapshot_only = argc > 1 && std::wstring_view(argv[1]) == L"--conflict-snapshot-only";
     const bool copy_diagnostics_only = argc > 1 && std::wstring_view(argv[1]) == L"--copy-diagnostics-only";
-    const bool isolated_fixture = conflict_snapshot_only || copy_diagnostics_only;
+    const bool same_folder_only = argc > 1 && std::wstring_view(argv[1]) == L"--same-folder-only";
+    const bool isolated_fixture = conflict_snapshot_only || copy_diagnostics_only || same_folder_only;
     size_t conflict_workload_count = 128;
     if (conflict_snapshot_only && argc > 2) {
         size_t parsed = 0;
@@ -1823,6 +1857,35 @@ int wmain(int argc, wchar_t** argv) {
         }
         g_ops.Stop();
         wprintf(L"Audit: %d passed, %d failed\n", g_pass, g_fail);
+        return g_fail ? 1 : 0;
+    }
+
+
+    if (same_folder_only) {
+        const auto file = srcDir + L"\\same.txt";
+        MakeFile(file, payload, sizeof(payload) - 1);
+        for (int pass = 0; pass < 2; ++pass) {
+            auto status = RunOp(SimpleOp(ops::OpType::Copy, {file.c_str()}, srcDir.c_str()));
+            size_t copies = 0;
+            bool contents = true;
+            for (const auto& item : std::filesystem::directory_iterator(srcDir)) {
+                if (!item.path().filename().wstring().starts_with(L"same")) continue;
+                ++copies;
+                std::ifstream stream(item.path(), std::ios::binary);
+                const std::string bytes((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+                contents = contents && bytes == payload;
+            }
+            Check(status.last_error.empty() && copies == static_cast<size_t>(pass + 2) && contents,
+                L"same-folder copy preserves source and creates a unique identical duplicate");
+        }
+        auto status = RunOp(SimpleOp(ops::OpType::Move, {file.c_str()}, srcDir.c_str()));
+        Check(status.last_error.empty() && status.summary.empty() && Exists(file),
+            L"same-folder move stays a silent no-op");
+        status = RunOp(SimpleOp(ops::OpType::Copy, {file.c_str()}, dstDir.c_str()));
+        Check(status.last_error.empty() && Exists(file) && FileSize(dstDir + L"\\same.txt") == sizeof(payload) - 1,
+            L"cross-folder copy retains source and writes destination");
+        g_ops.Stop();
+        wprintf(L"Same folder: %d passed, %d failed\n", g_pass, g_fail);
         return g_fail ? 1 : 0;
     }
 

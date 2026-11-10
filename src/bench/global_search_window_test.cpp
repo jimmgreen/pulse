@@ -2,6 +2,7 @@
 #include <memory>
 #include <string>
 #include "../app/global_search_window.h"
+#include "../app/app_prefs.h"
 namespace {
 bool reject_search_activation = false;
 HWND search_activation_other = nullptr;
@@ -650,7 +651,158 @@ int RunLiveRecycleSearch(const std::wstring& name) {
 #include "global_search_mockup_flow_test.inc"
 #include "global_search_header_test.inc"
 
+int RunPlacementTests() {
+    using State = pulse::GlobalSearchWindowTestPeer::State;
+    int failures = 0;
+    const auto check = [&](bool ok, const char* name) {
+        std::cout << (ok ? "[PASS] " : "[FAIL] ") << name << '\n';
+        if (!ok) ++failures;
+    };
+    State state;
+    state.hwnd = CreateWindowExW(0, L"STATIC", L"Placement fixture", WS_POPUP,
+        110, 120, 960, 620, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    state.edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD,
+        62, 14, 700, 44, state.hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+    check(state.hwnd && state.edit, "create isolated native placement fixture");
+    if (!state.hwnd || !state.edit) return 1;
+    const auto hit = [&](int x, int y) {
+        POINT point{x, y}; ClientToScreen(state.hwnd, &point);
+        return state.HitTestFrame(MAKELPARAM(point.x, point.y));
+    };
+    check(hit(30, 35) == HTCAPTION && hit(400, 65) == HTCAPTION, "logo and blank header start native dragging");
+    check(hit(100, 35) == HTCLIENT, "query input remains interactive");
+    state.hot.push_back({{904, 25, 940, 47}, State::HotEsc, -1});
+    check(hit(920, 35) == HTCLIENT, "escape button remains interactive");
+    check(hit(2, 2) == HTTOPLEFT && hit(300, 2) == HTTOP, "resize border takes precedence over dragging");
+    check(hit(300, 200) == HTCLIENT, "results do not drag the popup");
+    bool moved = false;
+    state.events.placement_changed = [&](int x, int y, int w, int h) { moved = x == 110 && y == 120 && w == 960 && h == 620; };
+    state.Message(WM_EXITSIZEMOVE, 0, 0);
+    check(moved && state.context.positioned, "native move completion captures and publishes screen position");
+    const RECT work{0, 0, 1920, 1080};
+    const RECT saved = state.Placement(work);
+    check(saved.left == 110 && saved.top == 120, "reopen placement retains moved position");
+    pulse::app::AppPrefs prefs;
+    prefs.global_search_positioned = true;
+    prefs.global_search_x = -1800; prefs.global_search_y = 80;
+    prefs.global_search_width = 960; prefs.global_search_height = 620;
+    pulse::app::AppPrefs loaded;
+    check(loaded.FromJson(prefs.ToJson()) && loaded.global_search_positioned && loaded.global_search_x == -1800 &&
+        loaded.global_search_y == 80, "preferences round trip preserves negative monitor position");
+    State restarted;
+    restarted.context.positioned = loaded.global_search_positioned;
+    restarted.context.x = loaded.global_search_x; restarted.context.y = loaded.global_search_y;
+    restarted.context.width = loaded.global_search_width; restarted.context.height = loaded.global_search_height;
+    restarted.scale = 1.5f;
+    const RECT secondary{-2560, 0, 0, 1440};
+    const RECT restored = restarted.Placement(secondary);
+    check(restored.left == -1800 && restored.top == 80 && restored.right - restored.left == 1440 &&
+        restored.bottom - restored.top == 930, "restart restores secondary-monitor position with DPI-scaled size");
+    const RECT disconnected = restarted.Placement(work);
+    check(disconnected.left >= work.left && disconnected.top >= work.top && disconnected.right <= work.right &&
+        disconnected.bottom <= work.bottom, "disconnected monitor position is clamped into the remaining work area");
+    pulse::app::AppPrefs legacy;
+    check(legacy.FromJson(L"{}") && !legacy.global_search_positioned, "legacy preferences keep first-show automatic placement");
+    std::cout << "RESULT " << (failures ? "FAIL" : "PASS") << " placement\n";
+    return failures ? 1 : 0;
+}
+
+
+int RunPlacementLiveTests() {
+    using SetAwareness = BOOL(WINAPI*)(DPI_AWARENESS_CONTEXT);
+    const auto set_awareness = reinterpret_cast<SetAwareness>(GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext"));
+    if (set_awareness) set_awareness(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    pulse::l10n::Initialize(GetModuleHandleW(nullptr), L"en-US");
+    const auto root = std::filesystem::absolute(L"bench_data/search_position_fix/live");
+    std::filesystem::create_directories(root / L"profile");
+    SetEnvironmentVariableW(L"LOCALAPPDATA", (root / L"profile").c_str());
+    SetEnvironmentVariableW(L"PULSE_TEST_DATA_DIR", (root / L"profile").c_str());
+    int failures = 0;
+    const auto check = [&](bool ok, const char* name) {
+        std::cout << (ok ? "[PASS] " : "[FAIL] ") << name << std::endl;
+        if (!ok) ++failures;
+    };
+    pulse::GlobalSearchContext context;
+    context.show_apps = false;
+    RECT moved{};
+    {
+        pulse::GlobalSearchWindow window;
+        window.SetContext(context);
+        check(window.Show(nullptr, true, 1, root.wstring()), "show real quick-search window");
+        auto& state = pulse::GlobalSearchWindowTestPeer::Get(window);
+        MONITORINFO info{sizeof(info)};
+        GetMonitorInfoW(MonitorFromWindow(state.hwnd, MONITOR_DEFAULTTONEAREST), &info);
+        const int x = info.rcWork.left + 24, y = info.rcWork.top + 24;
+        SetWindowPos(state.hwnd, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        SendMessageW(state.hwnd, WM_EXITSIZEMOVE, 0, 0);
+        GetWindowRect(state.hwnd, &moved);
+        check(moved.left == x && moved.top == y, "move real HWND and complete native placement notification");
+        POINT logo{state.Px(30), state.Px(35)}; ClientToScreen(state.hwnd, &logo);
+        check(SendMessageW(state.hwnd, WM_NCHITTEST, 0, MAKELPARAM(logo.x, logo.y)) == HTCAPTION,
+            "real search-window logo hit-test exposes native caption dragging");
+        context = state.context;
+        window.Hide();
+        check(!window.Visible(), "hide real quick-search window");
+        check(window.Show(nullptr, true, 1, root.wstring()), "reopen real quick-search window");
+        RECT reopened{}; GetWindowRect(state.hwnd, &reopened);
+        check(EqualRect(&moved, &reopened), "hide and reopen preserves real HWND rectangle");
+        RECT input{}; GetWindowRect(state.edit, &input);
+        MapWindowPoints(HWND_DESKTOP, state.hwnd, reinterpret_cast<POINT*>(&input), 2);
+        const auto layout = state.SearchFieldLayout();
+        check(std::abs(input.left - state.Px(layout.input.left)) <= 1 &&
+            std::abs(input.right - state.Px(layout.input.right)) <= 1 &&
+            input.left >= state.Px(layout.scope.right) && input.right <= state.Px(layout.mode.left),
+            "native search input stays between scope and mode controls at monitor DPI");
+        Pump(30);
+        state.compositor.CaptureNextFrame();
+        state.Render();
+        check(CapturePresentedFrame(state, (root / L"reopened.png").wstring()), "capture actual composed reopened search window");
+        state.compositor.ReleaseHeldFrame();
+        window.Hide();
+    }
+    pulse::app::AppPrefs prefs;
+    prefs.global_search_positioned = context.positioned;
+    prefs.global_search_x = context.x; prefs.global_search_y = context.y;
+    prefs.global_search_width = context.width; prefs.global_search_height = context.height;
+    const auto json = prefs.ToJson();
+    const auto snapshot = root / L"placement.utf16.json";
+    {
+        std::ofstream file(snapshot, std::ios::binary);
+        const wchar_t bom = 0xfeff;
+        file.write(reinterpret_cast<const char*>(&bom), sizeof(bom));
+        file.write(reinterpret_cast<const char*>(json.data()), static_cast<std::streamsize>(json.size() * sizeof(wchar_t)));
+        check(file.good(), "write isolated preference JSON snapshot to disk");
+    }
+    std::wstring disk_json(json.size(), L'\0');
+    {
+        std::ifstream file(snapshot, std::ios::binary);
+        file.seekg(sizeof(wchar_t));
+        file.read(reinterpret_cast<char*>(disk_json.data()), static_cast<std::streamsize>(disk_json.size() * sizeof(wchar_t)));
+        check(file.good(), "reopen isolated preference JSON snapshot from disk");
+    }
+    pulse::app::AppPrefs loaded;
+    check(loaded.FromJson(disk_json), "parse persisted preference JSON in fresh settings object");
+    context.positioned = loaded.global_search_positioned;
+    context.x = loaded.global_search_x; context.y = loaded.global_search_y;
+    context.width = loaded.global_search_width; context.height = loaded.global_search_height;
+    {
+        pulse::GlobalSearchWindow restarted;
+        restarted.SetContext(context);
+        check(restarted.Show(nullptr, true, 1, root.wstring()), "create fresh quick-search window with persisted context");
+        auto& state = pulse::GlobalSearchWindowTestPeer::Get(restarted);
+        RECT restored{}; GetWindowRect(state.hwnd, &restored);
+        check(EqualRect(&moved, &restored), "fresh search window restores persisted screen rectangle");
+        restarted.Hide();
+    }
+    CoUninitialize();
+    std::cout << "RESULT " << (failures ? "FAIL" : "PASS") << " placement-live\n";
+    return failures ? 1 : 0;
+}
+
 int wmain(int argc, wchar_t** argv) {
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--placement-live") return RunPlacementLiveTests();
+    if (argc > 1 && std::wstring_view(argv[1]) == L"--placement") return RunPlacementTests();
     if (argc > 3 && std::wstring_view(argv[1]) == L"--image-preview")
         return RunImagePreviewProbe(argv[2], argv[3]);
     if (argc > 1 && std::wstring_view(argv[1]) == L"--embedded-preview")

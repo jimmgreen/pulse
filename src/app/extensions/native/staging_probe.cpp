@@ -71,6 +71,13 @@ bool RunArchiveStagingProbe(AppState& owner, const std::wstring& directory, std:
             if (!item.undone && item.entry.generated_output) id = std::max(id, item.entry.task_id);
         return id;
     };
+    const auto output_selected = [&] {
+        auto* tab = ActiveTab(owner);
+        if (!tab || tab->loading || tab->SelectedCount() != 1) return false;
+        for (size_t i = 0; i < tab->EntryCount(); ++i)
+            if (tab->EntryAt(i).name == L"hello.txt" && tab->IsSelected(static_cast<int>(i))) return true;
+        return false;
+    };
     int confirmations = 0, conflicts = 0;
     bool approve = false, picker_approve = false, picker_shown = false;
     const UINT_PTR timer = SetTimer(owner.hwnd, 0x53544745, 20, DialogTimer);
@@ -111,6 +118,14 @@ bool RunArchiveStagingProbe(AppState& owner, const std::wstring& directory, std:
         "actual plugin publishes real archive output through host operations");
     const auto published = task();
     check(published && owner.ops.CanUndoTask(published), "published task has host undo history");
+    check(Wait(output_selected), "extracted output is automatically selected without locate action");
+    if (GetEnvironmentVariableW(L"PULSE_TEST_STAGING_SELECTION_ONLY", nullptr, 0)) {
+        check(invoke(L"native:sample.native-archive:extract-here") &&
+            Wait([&] { return conflicts > 0 && Read(hello) == "Hello archive" && clean(); }),
+            "second real extraction replaces output after reselecting archive");
+        check(Wait(output_selected), "second extraction automatically selects output without locate action");
+        return passed;
+    }
     HandleOperationHistoryAction(owner, published, 1);
     check(Wait([&] { auto* tab = ActiveTab(owner); if (!tab || tab->loading) return false;
         for (size_t i = 0; i < tab->EntryCount(); ++i) if (tab->EntryAt(i).name == L"hello.txt" && tab->IsSelected(static_cast<int>(i))) return true;
@@ -122,6 +137,7 @@ bool RunArchiveStagingProbe(AppState& owner, const std::wstring& directory, std:
     { std::ofstream file(hello, std::ios::binary); file << "original document"; }
     check(invoke(L"native:sample.native-archive:extract-here") && Wait([&] { return Read(hello) == "Hello archive" && clean(); }) && conflicts > 0,
         "real conflict Replace publishes extracted content");
+    check(Wait(output_selected), "reselecting archive and extracting again automatically selects replaced output");
     const auto replaced = task();
     check(owner.ops.UndoTask(replaced) && Wait([&] { return Read(hello) == "original document" && clean(); }), "undo restores original replaced content");
     check(owner.ops.Redo() && Wait([&] { return Read(hello) == "Hello archive" && clean(); }), "redo publishes replacement after temporary cleanup");

@@ -66,5 +66,39 @@ int main() {
         "drag or keyboard cancellation cannot later rename");
     click.Begin(a, 0xfffffff0u, false, false); click.Release(a, 120, 500, true, false, true);
     check(click.DoubleClick(a, 0x20u, 500) == FileClickAction::Open, "message time wrap uses unsigned elapsed interval");
+    for (const bool selected : {false, true}) {
+        click.Cancel();
+        click.Begin(a, 100, false, selected);
+        click.Release(a, 120, 500, true, true, true);
+        // Two normal downs: Windows did not recognize a double click after
+        // pointer drift. The previous click must still prevent a rename.
+        click.Begin(a, 200, false, true);
+        click.Release(a, 220, 500, true, true, true);
+        check(!click.RenamePending() && click.Tick(a, 800, true, true) == FileClickAction::None,
+            selected ? "fast displaced selected clicks cannot rename" : "fast displaced selection clicks cannot rename");
+    }
+    for (const uint32_t interval : {200u, 500u, 900u}) {
+        click.Cancel();
+        click.Begin(a, 100, false, false, interval);
+        click.Release(a, 1000, interval, true, true, true, 120);
+        click.InterruptForPress();
+        click.Begin(a, 120 + interval, false, true, interval);
+        click.Release(a, 2000, interval, true, true, true, 140 + interval);
+        check(!click.RenamePending(), "rapid repeat uses event time and configured system interval, not delayed dispatch time");
+        click.InterruptForPress();
+        click.Begin(a, 141 + interval * 2, false, true, interval);
+        click.Release(a, 3000, interval, true, true, true, 161 + interval * 2);
+        check(click.Tick(a, 3000 + interval, true, true) == FileClickAction::Rename,
+            "deliberate slow name click still renames after rapid-repeat guard expires");
+    }
+    click.Cancel();
+    click.Begin(a, 0xffffff00u, false, false);
+    click.Release(a, 0xfffffff0u, 500, true, true, true, 0xfffffff0u);
+    click.InterruptForPress(); click.Begin(a, 0x20u, false, true);
+    click.Release(a, 0x40u, 500, true, true, true, 0x40u);
+    check(!click.RenamePending(), "rapid-repeat protection handles message-time wrap");
+    click.Cancel();
+    click.Begin(b, 0x60u, false, true); click.Release(b, 0x80u, 500, true, true, true);
+    check(click.RenamePending(), "cancelled gesture and different file do not inherit repeat suppression");
     return failures ? 1 : 0;
 }

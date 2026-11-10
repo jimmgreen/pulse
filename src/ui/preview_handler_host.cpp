@@ -1,6 +1,7 @@
 ﻿#include <thread>
 #include <stdexcept>
 #include "preview_handler_host.h"
+#include "preview_resource_budget.h"
 #include "preview_handler_pan.h"
 #include "../common/preview_extensions.h"
 #include "../common/file_placeholder.h"
@@ -28,6 +29,7 @@ using Microsoft::WRL::ComPtr;
 namespace pulse::ui {
 #ifdef PULSE_PREVIEW_HANDLER_TESTING
 IUnknown* (*g_preview_handler_factory_for_test)() = nullptr;
+std::atomic<uint32_t> g_preview_handler_provider_for_test{0};
 #endif
 namespace {
 
@@ -135,16 +137,15 @@ void ClearSlowProvider(const std::wstring& extension) {
     g_slow_providers.erase(extension);
 }
 
-// The overlay belongs to the preview apartment but is owned by our window, and
-// that apartment may be stuck inside a provider call. Hiding the position
-// change is posted, and the owner is dropped, so neither hides an empty box on
-// screen forever nor makes window destruction wait for the stuck thread.
+// Provider HWNDs have no cross-thread Win32 owner. Their logical owner is
+// tracked by STA window events; retirement only queues an asynchronous hide,
+// so a provider blocked inside COM cannot hold up the UI or owner destruction.
 void DetachOverlay(HWND overlay) {
     if (!overlay) return;
     SetWindowPos(overlay, HWND_NOTOPMOST, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW |
                  SWP_ASYNCWINDOWPOS);
-    SetWindowLongPtrW(overlay, GWLP_HWNDPARENT, 0);
+
 }
 
 struct ClsidHash {
@@ -218,7 +219,7 @@ bool ExtensionHasTextContentType(const std::wstring& extension) {
 
 bool FindPreviewHandlerClsid(const std::wstring& extension, CLSID& clsid) {
 #ifdef PULSE_PREVIEW_HANDLER_TESTING
-    if (g_preview_handler_factory_for_test) { clsid = GUID_NULL; return true; }
+    if (g_preview_handler_factory_for_test) { clsid = GUID_NULL; clsid.Data1 = g_preview_handler_provider_for_test.load(); return true; }
 #endif
     static std::unordered_map<std::wstring, CLSID> cache;
     // A lookup that found nothing is remembered, but only for a while: the shell
@@ -435,16 +436,35 @@ struct PreviewHandlerHost::WorkerState {
         if (wake) CloseHandle(wake);
     }
 
+    static inline thread_local WorkerState* event_target = nullptr;
+
+    static void CALLBACK OwnerEvent(HWINEVENTHOOK, DWORD, HWND window, LONG object,
+                                    LONG child, DWORD, DWORD) {
+        auto* self = event_target;
+        if (!self || !window || object != OBJID_WINDOW || child != CHILDID_SELF) return;
+        {
+            std::lock_guard<std::mutex> lock(self->mutex);
+            if (self->stop || !self->command.enabled) return;
+        }
+        if (window == self->owner || window == self->owner_root || IsChild(window, self->owner))
+            self->PlaceOverlay();
+    }
+
     bool EnsureWindow() {
         if (hwnd && IsWindow(hwnd)) return true;
         hwnd = nullptr;
         overlay.store(nullptr, std::memory_order_release);
         if (!owner || !IsWindow(owner)) return false;
         RegisterClassOnce();
+        placed_clip = {LONG_MIN, LONG_MIN, LONG_MIN, LONG_MIN};
+        owner_root = GetAncestor(owner, GA_ROOT);
+        embedded = (GetWindowLongPtrW(owner, GWL_STYLE) & WS_CHILD) != 0;
+        // A UI-thread HWND owner makes owner destruction and owner changes
+        // wait for a blocked provider STA. Keep this tool window independent.
         hwnd = CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kClassName, L"",
             WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
-            0, 0, 0, 0, owner, nullptr, GetModuleHandleW(nullptr), this);
+            0, 0, 0, 0, nullptr, nullptr, GetModuleHandleW(nullptr), this);
         // Published for the owner, which may need to hide it while this thread
         // is inside a provider call. Cleared on WM_DESTROY so it cannot go stale.
         overlay.store(hwnd, std::memory_order_release);
@@ -485,6 +505,13 @@ struct PreviewHandlerHost::WorkerState {
 
     void PlaceOverlay() {
         if (!hwnd || !owner) return;
+        if (!IsWindow(owner) || !IsWindowVisible(owner) || IsIconic(owner_root)) {
+            HideWindow();
+            return;
+        }
+        // Embedded panes do not receive WM_MOVE when an ancestor moves. Keep
+        // provider windows on the STA and follow ancestor window events.
+        if (handler && state.load(std::memory_order_acquire) == State::Shown) shown = true;
 #ifdef PULSE_PREVIEW_HANDLER_TESTING
         g_test_place_calls.fetch_add(1, std::memory_order_relaxed);
         struct PlaceDone {
@@ -495,6 +522,24 @@ struct PreviewHandlerHost::WorkerState {
         if (!ClientToScreen(owner, &origin)) return;
         const int width = std::max(1L, bounds.right - bounds.left);
         const int height = std::max(1L, bounds.bottom - bounds.top);
+        if (embedded) {
+            RECT visible{origin.x, origin.y, origin.x + width, origin.y + height};
+            for (HWND ancestor = owner; ancestor; ancestor = GetParent(ancestor)) {
+                RECT client{};
+                GetClientRect(ancestor, &client);
+                MapWindowPoints(ancestor, nullptr, reinterpret_cast<POINT*>(&client), 2);
+                IntersectRect(&visible, &visible, &client);
+                if (!(GetWindowLongPtrW(ancestor, GWL_STYLE) & WS_CHILD)) break;
+            }
+            OffsetRect(&visible, -origin.x, -origin.y);
+            if (!EqualRect(&visible, &placed_clip)) {
+                HRGN region = CreateRectRgnIndirect(&visible);
+                if (region) {
+                    if (SetWindowRgn(hwnd, region, TRUE)) placed_clip = visible;
+                    else DeleteObject(region);
+                }
+            }
+        }
         // Our own popups (the toolbar picker) count as foreground we own, so a
         // topmost overlay would sit on top of them: covered hides it outright.
         if (shown && (covered || (!app_active && !OverlayOwnsForeground()))) {
@@ -518,7 +563,7 @@ struct PreviewHandlerHost::WorkerState {
         // every step of a window drag only makes the window manager re-evaluate
         // the topmost band, with the provider's window (another process) inside.
         const bool raise = !shown || size_changed;
-        SetWindowPos(hwnd, raise ? HWND_TOPMOST : nullptr, origin.x, origin.y, width, height,
+        SetWindowPos(hwnd, raise ? (embedded ? HWND_TOP : HWND_TOPMOST) : nullptr, origin.x, origin.y, width, height,
                      SWP_NOACTIVATE | (raise ? 0 : SWP_NOZORDER) |
                          (shown ? SWP_SHOWWINDOW : SWP_NOREDRAW));
         if (handler && shown && size_changed) {
@@ -548,6 +593,7 @@ struct PreviewHandlerHost::WorkerState {
             site->Release();
             site = nullptr;
         }
+        provider_lease.Reset();
         shown = false;
     }
 
@@ -587,6 +633,10 @@ struct PreviewHandlerHost::WorkerState {
         if (path.empty() || !IsCurrent(opening_identity) || !EnsureWindow()) return false;
         CLSID clsid{};
         if (!FindPreviewHandlerClsid(ExtensionOf(path), clsid)) return false;
+        wchar_t provider_key[40]{};
+        StringFromGUID2(clsid, provider_key, static_cast<int>(std::size(provider_key)));
+        auto opening_lease = PreviewProviderBudget().TryAcquire(provider_key);
+        if (!opening_lease) { report(9, HRESULT_FROM_WIN32(ERROR_BUSY)); return false; }
         HRESULT activation = E_FAIL;
         ComPtr<IUnknown> unknown = CreateHandler(clsid, activation);
         if (!unknown) { report(2, activation); return false; }
@@ -656,6 +706,7 @@ struct PreviewHandlerHost::WorkerState {
         RedrawWindow(hwnd, nullptr, nullptr,
                      RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_NOERASE);
         EnablePan();
+        provider_lease = std::move(opening_lease);
         return true;
     }
 
@@ -672,6 +723,8 @@ struct PreviewHandlerHost::WorkerState {
     ULONGLONG command_tick = 0;
     bool stop = false;
     HANDLE wake = nullptr;
+    PreviewResourceBudget::Lease apartment_lease;
+    PreviewResourceBudget::Lease provider_lease;
     HANDLE thread = nullptr;
     std::atomic<State> state{State::Idle};
     // Read by the owner while this thread is inside a provider call.
@@ -699,6 +752,9 @@ struct PreviewHandlerHost::WorkerState {
     bool app_active = true;
     bool covered = false;
     bool shown = false;
+    bool embedded = false;
+    HWND owner_root = nullptr;
+    RECT placed_clip{LONG_MIN, LONG_MIN, LONG_MIN, LONG_MIN};
     int placed_x = INT_MIN;
     int placed_y = INT_MIN;
     int placed_w = 0;
@@ -789,7 +845,16 @@ PreviewHandlerHost::~PreviewHandlerHost() {
 
 void PreviewHandlerHost::EnsureWorker() {
     if (worker_) return;
+    if (GetTickCount64() < admission_retry_) return;
+    auto lease = PreviewApartmentBudget().TryAcquire();
+    if (!lease) {
+        apartment_busy_ = true;
+        admission_retry_ = GetTickCount64() + 1000;
+        return;
+    }
+    apartment_busy_ = false;
     auto worker = std::make_shared<WorkerState>();
+    worker->apartment_lease = std::move(lease);
     worker->wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     if (!worker->wake) return;
     auto* argument = new std::shared_ptr<WorkerState>(worker);
@@ -802,7 +867,7 @@ void PreviewHandlerHost::EnsureWorker() {
 }
 
 PreviewHandlerHost::State PreviewHandlerHost::state() const {
-    return worker_ ? worker_->state.load(std::memory_order_acquire) : State::Idle;
+    return worker_ ? worker_->state.load(std::memory_order_acquire) : (apartment_busy_ ? State::Failed : State::Idle);
 }
 
 void PreviewHandlerHost::SetNotifyWindow(HWND hwnd) {
@@ -1108,6 +1173,7 @@ DWORD WINAPI PreviewHandlerHost::WorkerMain(void* parameter) {
     std::unique_ptr<std::shared_ptr<WorkerState>> argument(
         static_cast<std::shared_ptr<WorkerState>*>(parameter));
     std::shared_ptr<WorkerState> self = *argument;
+    auto apartment_lease = std::move(self->apartment_lease);
     const HRESULT com_result = CoInitializeEx(nullptr,
         COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     if (FAILED(com_result)) {
@@ -1118,6 +1184,10 @@ DWORD WINAPI PreviewHandlerHost::WorkerMain(void* parameter) {
         return 0;
     }
 
+    WorkerState::event_target = self.get();
+    const HWINEVENTHOOK owner_events = SetWinEventHook(EVENT_OBJECT_DESTROY,
+        EVENT_OBJECT_LOCATIONCHANGE, nullptr, WorkerState::OwnerEvent,
+        GetCurrentProcessId(), 0, WINEVENT_OUTOFCONTEXT);
     MSG message{};
     PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE);
     uint64_t applied_version = 0;
@@ -1231,6 +1301,8 @@ DWORD WINAPI PreviewHandlerHost::WorkerMain(void* parameter) {
         }
     }
 
+    if (owner_events) UnhookWinEvent(owner_events);
+    WorkerState::event_target = nullptr;
     self->Unload();
     self->HideWindow();
     if (self->hwnd) DestroyWindow(self->hwnd);

@@ -21,7 +21,15 @@ FolderThumbnailCache::DebugStats FolderThumbnailCache::ReadDebugStats() {
     }
     return stats;
 }
-FolderThumbnailCache::FolderThumbnailCache() { cache_.SetFolderThumbnail(true); }
+// Keep two eight-item screens even at 512px (CPU recovery + GPU = 2 MiB
+// each). RenderCaches offsets this allowance against the ordinary grid budget.
+FolderThumbnailCache::FolderThumbnailCache() : cache_(32ull * 1024 * 1024, 256) {
+    cache_.SetFolderThumbnail(true);
+    cache_.folder_revisit_ = std::make_unique<ThumbnailCache>(8ull * 1024 * 1024, 128);
+    cache_.folder_revisit_->SetFolderThumbnail(true);
+    cache_.folder_revisit_->preserve_bitmap_on_replace_ = true;
+    cache_.folder_revisit_->ShareUploadBudget(cache_);
+}
 void FolderThumbnailCache::Reset() { visible_.clear(); cache_.Reset(); }
 void FolderThumbnailCache::Refresh() {
     std::lock_guard lock(cache_.mutex_);
@@ -163,6 +171,13 @@ PreviewDrawResult FolderThumbnailCache::Draw(ID2D1DeviceContext* dc,
     const bool settled_without_artwork = found != cache_.items_.end() ? found->second.failed :
         visible->second.attempted && !cache_.pending_.contains(key);
     lock.unlock();
+    auto& revisit = *cache_.folder_revisit_;
+    // Keep a GPU-ready compact copy before the full-size entry can be evicted.
+    revisit.PrepareBitmap(identity, true);
+    {
+        std::lock_guard revisit_lock(revisit.mutex_);
+        if (auto kept = revisit.items_.find(identity); kept != revisit.items_.end()) revisit.Touch(kept->second);
+    }
     cache_.PrepareBitmap(draw_key, true);
     lock.lock();
     const auto ready = cache_.items_.find(draw_key);
@@ -175,6 +190,20 @@ PreviewDrawResult FolderThumbnailCache::Draw(ID2D1DeviceContext* dc,
         bitmap.p = item->bitmap.get();
         bitmap->AddRef();
         lock.unlock();
+        dc->DrawBitmap(bitmap.get(), &fitted, std::clamp(opacity, 0.0f, 1.0f),
+            D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
+        return PreviewDrawResult::Bitmap;
+    }
+    lock.unlock();
+    std::unique_lock revisit_lock(revisit.mutex_);
+    if (auto kept = revisit.items_.find(identity); kept != revisit.items_.end() && kept->second.bitmap.get()) {
+        auto& compact = kept->second;
+        revisit.Touch(compact);
+        const auto fitted = ContainedThumbnailRect(dest, compact.w, compact.h, compact.artwork_bounds, align_bottom);
+        if (artwork) *artwork = ThumbnailArtworkRect(fitted, compact.artwork_bounds);
+        ComPtr<ID2D1Bitmap> bitmap;
+        bitmap.p = compact.bitmap.get(); bitmap->AddRef();
+        revisit_lock.unlock();
         dc->DrawBitmap(bitmap.get(), &fitted, std::clamp(opacity, 0.0f, 1.0f),
             D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
         return PreviewDrawResult::Bitmap;

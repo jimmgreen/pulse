@@ -46,7 +46,7 @@ std::shared_ptr<const MediaColumnsState> Build(const Tab& tab) {
     media::Tally tally;
     for (const fs::DirEntry& e : *tab.snapshot) tally.Add(e.name, e.is_dir);
     state->kind = media::Classify(tally);
-    if (state->kind == media::Kind::None) return state;
+    if (state->kind == media::Kind::None) { media::Cancel(&tab); return state; }
     state->prefix = Prefix(tab.current_path);
     std::vector<media::Job> jobs;
     for (const fs::DirEntry& e : *tab.snapshot) {
@@ -91,8 +91,17 @@ std::wstring Cell(const MediaColumnsState& state, int source, ui::SortColumn col
 void Decorate(const Tab& tab, ui::PaneViewModel& out) {
     if (!g_enabled.load(std::memory_order_relaxed) || tab.view_mode != ui::ViewMode::Details ||
         out.this_pc_columns || out.is_search || out.content_results || out.column_strip.Active() ||
-        tab.loading || !tab.snapshot || !Eligible(tab.current_path))
+        tab.loading || !tab.snapshot || !Eligible(tab.current_path)) {
+        // Grouping still needs metadata outside Details. Cancel only this tab.
+        if (!g_enabled.load(std::memory_order_relaxed) ||
+            !IsMediaGroup(GroupByFromInt(tab.EffectiveGroup())) || tab.loading ||
+            !tab.snapshot || !Eligible(tab.current_path)) {
+            media::Cancel(&tab);
+            tab.media_snapshot.reset();
+            tab.media_state.reset();
+        }
         return;
+    }
     if (tab.media_snapshot != tab.snapshot || !tab.media_state) {
         tab.media_snapshot = tab.snapshot;
         tab.media_state = Build(tab);
@@ -252,7 +261,6 @@ constexpr uint64_t kResortIntervalMs = 400;
 bool ResortForMediaProps(AppState& s) {
     bool waiting = false;
     const uint64_t now = GetTickCount64();
-    const uint64_t revision = app::media::Revision();
     // Rows must not move under a press (the click resolves by index), a drag
     // or the rename box.
     const bool busy = s.scrollAnimating || s.scrollbarDragging ||
@@ -261,6 +269,7 @@ bool ResortForMediaProps(AppState& s) {
     ForEachPane(s, [&](app::Pane& pane) {
         app::Tab* tab = pane.ActiveTab();
         if (!tab) return;
+        const uint64_t revision = app::media::Revision(tab->current_path);
         const bool grouped = app::IsMediaGroup(app::GroupByFromInt(tab->EffectiveGroup()));
         // Grouping needs the values in any view; the columns only ask in Details.
         if (grouped && tab->snapshot && !tab->loading && !tab->content_results &&

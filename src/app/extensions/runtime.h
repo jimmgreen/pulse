@@ -32,6 +32,8 @@ bool PackageEnabled(size_t package);
 void SetPackageEnabled(size_t package, bool enabled);
 uint64_t PackageGeneration(size_t package);
 bool PackageStoreMode();
+// UI-thread only: immutable startup store, empty in manifest/development mode.
+std::wstring PackageStoreRoot();
 // Host-only UI-thread diagnostic; no policy contents or authorization authority.
 uint64_t StoreTrustCheckSequence();
 // Legacy single-package compatibility refers only to slot zero, never the selected UI panel.

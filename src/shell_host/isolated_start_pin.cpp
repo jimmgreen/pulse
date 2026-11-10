@@ -289,6 +289,7 @@ HRESULT IsolatedStartPinSession::Query(const std::vector<std::wstring> &paths, H
         item.separator_after = (bits & 2) != 0;
         item.has_children = (bits & 4) != 0;
         item.child = (bits & 8) != 0;
+        item.depth = static_cast<uint8_t>((bits >> 8) & 0xFF);
         item.mnemonic = static_cast<wchar_t>(mnemonic);
     }
     if (!ipc::TryCtxItemIcons(r, items) || r.remaining()) {
@@ -396,7 +397,7 @@ int RunIsolatedStartPin(int argc, wchar_t **argv) {
                     for (const auto &item : items) {
                         w.PutU32(item.id);
                         w.PutU32((item.enabled ? 1u : 0u) | (item.separator_after ? 2u : 0u) |
-                                 (item.has_children ? 4u : 0u) | (item.child ? 8u : 0u));
+                                 (item.has_children ? 4u : 0u) | (item.child ? 8u : 0u) | (uint32_t(item.depth) << 8));
                         w.PutU32(item.mnemonic);
                         w.PutString(item.verb);
                         w.PutString(item.text);

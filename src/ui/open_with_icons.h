@@ -68,6 +68,7 @@ private:
     };
     void StartWorkerLocked();
     void WorkerLoop();
+    void PublishReadyLocked(const std::wstring& key, Pixels pixels);
 
     D2DDeviceBinding device_binding_;
     ID2D1DeviceContext* dc_ = nullptr;  // device_binding_'s private context
@@ -79,6 +80,8 @@ private:
     std::deque<Request> queue_;
     std::unordered_set<std::wstring> pending_;
     std::unordered_map<std::wstring, Pixels> ready_;
+    std::deque<std::wstring> ready_order_;
+    size_t ready_bytes_ = 0;
     std::atomic<uint32_t> epoch_{1};
     std::thread worker_;
     std::atomic<bool> running_{false};

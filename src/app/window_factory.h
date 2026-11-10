@@ -20,7 +20,7 @@ struct AppState;
 
 // Style of every Pulse main window (see WinMain for why WS_CAPTION without
 // WS_SYSMENU).
-constexpr DWORD kMainWindowStyle = WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+constexpr DWORD kMainWindowStyle = WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN;
 
 struct WindowInit {
     std::wstring path;  // folder of the first tab ("" = This PC)

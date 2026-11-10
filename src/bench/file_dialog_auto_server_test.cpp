@@ -164,6 +164,82 @@ int wmain(int argc, wchar_t** argv) {
     const auto initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (FAILED(initialized)) return 2;
     module = GetModuleHandleW(nullptr);
+    if (argc == 2 && (wcscmp(argv[1], L"--picker-host") == 0 || wcscmp(argv[1], L"--picker-host-ui") == 0)) {
+        fixture_enabled = true;
+        const IID required[] = {
+            {0xfc4801a3,0x2ba9,0x11cf,{0xa2,0x29,0x00,0xaa,0x00,0x3d,0x73,0x52}},
+            {0x79eac9ee,0xbaf9,0x11ce,{0x8c,0x82,0x00,0xaa,0x00,0x4b,0xa9,0x0b}}
+        };
+        for (const auto& clsid : {CLSID_FileOpenDialog, CLSID_FileSaveDialog}) {
+            ComPtr<IClassFactory> native_factory; ComPtr<IFileDialog> native;
+            HRESULT hr = Native(clsid, CLSCTX_INPROC_SERVER, nullptr, IID_PPV_ARGS(&native_factory));
+            if (SUCCEEDED(hr)) hr = native_factory->CreateInstance(nullptr, IID_PPV_ARGS(&native));
+            check(SUCCEEDED(hr) && native, "system comdlg factory reference available");
+            auto services = Services();
+            if (wcscmp(argv[1], L"--picker-host-ui") == 0) {
+                // Exercise real provider UI independently of elevated test-runner admission.
+                services = {};
+                const auto executable = std::filesystem::absolute(L"build/pulse.exe").wstring();
+                check(SUCCEEDED(Provider(executable, services.inprocess_provider)), "real UI provider loads");
+                services.on_native_reason = [](const char* reason, const IID*) { std::printf("REASON %s\n", reason); };
+                services.observe_contract = [](const shell::ContractDecision& d, bool native, bool, size_t) { std::printf("CONTRACT reason=%u native=%u\n", unsigned(d.reason), native); };
+                services.access_policy = shell::AccessPolicy::LocalOpenV1;
+                services.save_access_policy = shell::AccessPolicy::LocalSaveV1;
+                services.validation_verified = [](const shell::ContractDecision& decision) {
+                    return shell::RuntimeContractCertified(decision) || shell::RuntimeLocalSaveContractCertified(decision);
+                };
+            }
+            ComPtr<IFileDialog> routed;
+            const auto created = shell::WrapNativeFileDialog(clsid == CLSID_FileOpenDialog ? shell::DialogFactory::Open : shell::DialogFactory::Save,
+                native.Get(), services, IID_PPV_ARGS(&routed));
+            check(created == S_OK && routed, "system picker uses Pulse wrapper");
+            ComPtr<IObjectWithSite> site;
+            if (routed) routed.As(&site);
+            check(bool(site), "wrapper exposes site contract");
+            if (site) {
+                ComPtr<IUnknown> identity, from_site;
+                routed.As(&identity); site.As(&from_site);
+                check(identity == from_site, "site preserves wrapper COM identity");
+                ComPtr<UiEvents> owner; owner.Attach(new UiEvents);
+                check(site->SetSite(owner.Get()) == S_OK, "site setter succeeds");
+                ComPtr<IFileDialogEvents> restored;
+                check(site->GetSite(IID_PPV_ARGS(&restored)) == S_OK && restored.Get() == owner.Get(), "site roundtrip preserves identity");
+                check(site->SetSite(nullptr) == S_OK, "site clears retained owner");
+            }
+
+            for (const auto& iid : required) {
+                ComPtr<IUnknown> expected, actual;
+                const auto original_hr = native ? native->QueryInterface(iid, &expected) : E_FAIL;
+                const auto routed_hr = routed ? routed->QueryInterface(iid, &actual) : E_FAIL;
+                std::printf("PICKER_INTERFACE iid=%08lx native=%08lx routed=%08lx\n", iid.Data1,
+                    static_cast<unsigned long>(original_hr), static_cast<unsigned long>(routed_hr));
+                check(routed_hr == original_hr && bool(actual) == bool(expected),
+                    "observed PickerHost interface remains available before Show");
+            }
+            if (routed && wcscmp(argv[1], L"--picker-host-ui") == 0) {
+                ComPtr<IShellItem> folder;
+                const auto fixture_path = std::filesystem::absolute(L"bench_data/picker_host_fix").wstring();
+                SHCreateItemFromParsingName(fixture_path.c_str(), nullptr, IID_PPV_ARGS(&folder));
+                if (folder) routed->SetFolder(folder.Get());
+                routed->SetOptions(FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_DONTADDTORECENT | FOS_NOCHANGEDIR |
+                    (clsid == CLSID_FileOpenDialog ? FOS_FILEMUSTEXIST : FOS_OVERWRITEPROMPT | FOS_NOREADONLYRETURN));
+                routed->SetTitle(L"Pulse isolated PickerHost regression");
+                ComPtr<UiEvents> events; events.Attach(new UiEvents);
+                active_dialog = routed.Get(); active_events = events.Get();
+                const auto timer = SetTimer(nullptr, 0, 800, [](HWND window, UINT message, UINT_PTR id, DWORD tick) {
+                    CancelTimer(window, message, id, tick);
+                    if (active_dialog) active_dialog->Close(HRESULT_FROM_WIN32(ERROR_CANCELLED));
+                });
+                const auto shown = timer ? routed->Show(nullptr) : E_FAIL;
+                if (timer) KillTimer(nullptr, timer);
+                active_dialog = nullptr; active_events = nullptr;
+                check(shown == HRESULT_FROM_WIN32(ERROR_CANCELLED) && events->pulse_visible && !events->native,
+                    "Pulse picker window becomes visible and cancellation returns unchanged");
+            }
+        }
+        CoUninitialize();
+        return failures ? 1 : 0;
+    }
     void* value = reinterpret_cast<void*>(1);
     check(DllGetClassObject(CLSID_NULL, IID_IClassFactory, &value) == CLASS_E_CLASSNOTAVAILABLE && !value, "unknown class rejected");
     check(DllGetClassObject(CLSID_FileOpenDialog, IID_IClassFactory, nullptr) == E_POINTER, "null output rejected");

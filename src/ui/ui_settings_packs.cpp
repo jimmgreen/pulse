@@ -125,6 +125,122 @@ void MainRenderer::DrawSettingsPacks(const WindowViewModel& vm, const D2D1_RECT_
             painter_.DrawSegmentedItem(item);
         }
     };
+    if (vm.settings_page == 8) {
+        using I = l10n::StringId;
+        for (int i=0;i<3;++i) {
+            fluent::SegmentedItemSpec tab{};
+            tab.bounds=lay.store_tabs[i];
+            tab.text=store_text::Tab(i);
+            const int selected=vm.settings_store_browse ? 0 : vm.settings_store_installed ? 1 : 2;
+            tab.state.checked=selected==i;
+            tab.state.hovered=hovered(i==0 ? PackAction::StoreBrowse : i==1 ? PackAction::StoreInstalled : PackAction::StoreManage);
+            tab.position=fluent::SegmentPosition::Single;
+            painter_.DrawSegmentedItem(tab);
+        }
+        if (!vm.settings_store_browse && vm.settings_store_installed) {
+            const auto& view=vm.settings_store_view;
+            auto caption=[&](std::wstring_view value,D2D1_RECT_F r,D2D1_COLOR_F color) {
+                if (r.bottom<=r.top) return;
+                painter_.DrawWrappedCaption(value,D2D1::Point2F(r.left,r.top),r.right-r.left,color);
+            };
+            auto bar=[&](std::wstring_view value,D2D1_RECT_F r,fluent::InfoBarKind kind) {
+                if (r.bottom<=r.top) return;
+                const auto color=painter_.StatusToneColor(kind);
+                painter_.FillRoundedRect(D2D1::RectF(r.left-12*s,r.top-6*s,r.right+12*s,r.bottom+6*s),6*s,WithAlpha(color,vm.dark?0.12f:0.07f));
+                caption(value,r,theme.text_secondary);
+            };
+            button(lay.store_refresh,l10n::Get(I::Refresh),PackAction::InstalledRefresh,
+                fluent::ButtonKind::Standard,store_text::CanRefreshInstalled(view));
+            caption(l10n::Get(view.installed_loading ? I::StoreInstalledLoading : I::StoreInstalledFailed),
+                lay.store_state,view.installed_loading ? theme.text_secondary : painter_.StatusToneColor(fluent::InfoBarKind::Error));
+            bar(view.installed_error,lay.store_notice,fluent::InfoBarKind::Error);
+            bar(l10n::Get(I::StoreRestart),lay.store_restart,fluent::InfoBarKind::Warning);
+            caption(l10n::Get(I::StoreInstalledEmpty),lay.store_empty,theme.text_secondary);
+            for (size_t i=0;i<lay.installed_items.size() && i<view.installed.size();++i) {
+                const auto& c=lay.installed_items[i]; const auto& item=view.installed[i];
+                card(c.bounds);
+                caption(item.name,c.name,theme.text);
+                caption(item.id,c.id,theme.text_secondary);
+                caption(item.publisher,c.publisher,theme.text_secondary);
+                caption(item.version,c.version,theme.text_secondary);
+                fluent::BadgeSpec badge{};
+                badge.bounds=c.badge; badge.text=store_text::InstalledBadge(item);
+                badge.kind=item.enabled ? fluent::BadgeKind::Success : fluent::BadgeKind::Warning;
+                painter_.DrawBadge(badge);
+                caption(l10n::Get(I::StoreNativeCode),c.native_code,theme.text_secondary);
+                caption(item.status,c.status,theme.text_secondary);
+                caption(item.notice,c.notice,theme.text_secondary);
+                const auto action=[&](PackAction base) { return static_cast<PackAction>(static_cast<int>(base)+static_cast<int>(i)); };
+                button(c.enable,l10n::Get(I::ExtensionPackageEnable),action(PackAction::InstalledEnableBase),fluent::ButtonKind::Standard,item.can_enable && !view.installed_busy && i<10000);
+                button(c.disable,l10n::Get(I::ExtensionPackageDisable),action(PackAction::InstalledDisableBase),fluent::ButtonKind::Standard,item.can_disable && !view.installed_busy && i<10000);
+                button(c.uninstall,l10n::Get(I::StoreUninstall),action(PackAction::InstalledUninstallBase),fluent::ButtonKind::Standard,item.can_uninstall && !view.installed_busy && i<10000);
+                button(c.rollback,l10n::Get(I::StoreRollback),action(PackAction::InstalledRollbackBase),fluent::ButtonKind::Standard,item.can_rollback && !view.installed_busy && i<10000);
+            }
+            return;
+        }
+        if (vm.settings_store_browse) {
+            const auto& view=vm.settings_store_view;
+            auto caption=[&](std::wstring_view value,D2D1_RECT_F r,D2D1_COLOR_F color) {
+                if (r.bottom<=r.top) return;
+                painter_.DrawWrappedCaption(value,D2D1::Point2F(r.left,r.top),r.right-r.left,color);
+            };
+            auto bar=[&](std::wstring_view value,D2D1_RECT_F r,fluent::InfoBarKind kind) {
+                if (r.bottom<=r.top) return;
+                const auto color=painter_.StatusToneColor(kind);
+                painter_.FillRoundedRect(D2D1::RectF(r.left-12*s,r.top-6*s,r.right+12*s,r.bottom+6*s),6*s,WithAlpha(color,vm.dark?0.12f:0.07f));
+                caption(value,r,theme.text_secondary);
+            };
+            button(lay.store_refresh,l10n::Get(I::Refresh),PackAction::StoreRefresh,
+                fluent::ButtonKind::Standard,store_text::CanRefresh(view));
+            if (view.busy) button(lay.store_cancel,l10n::Get(I::Cancel),PackAction::StoreCancel);
+            // An explicit badge distinguishes cached/offline results from online data.
+            if (view.state==ExtensionStoreView::State::Offline) {
+                fluent::BadgeSpec badge{};
+                badge.bounds=lay.store_state;
+                badge.bounds.right=(std::min)(badge.bounds.right,badge.bounds.left+painter_.MeasureBadgeWidth(store_text::State(view)));
+                badge.text=store_text::State(view); badge.kind=fluent::BadgeKind::Warning;
+                painter_.DrawBadge(badge);
+            } else caption(store_text::State(view),lay.store_state,
+                view.state==ExtensionStoreView::State::Failed ? painter_.StatusToneColor(fluent::InfoBarKind::Error) : theme.text_secondary);
+            bar(l10n::Get(I::StoreTrust),lay.store_trust,fluent::InfoBarKind::Informational);
+            bar(view.notice,lay.store_notice,view.state==ExtensionStoreView::State::Failed ? fluent::InfoBarKind::Error : fluent::InfoBarKind::Informational);
+            bar(l10n::Get(I::StoreRestart),lay.store_restart,fluent::InfoBarKind::Warning);
+            card(D2D1::RectF(lay.store_manage.left-12*s,lay.store_manage.top-6*s,lay.store_manage.right+12*s,lay.store_manage.bottom+6*s));
+            hover_row(lay.store_manage,PackAction::StoreManage);
+            caption(l10n::Get(I::StoreOfficialManage),lay.store_manage,theme.accent);
+            const bool any_official = std::any_of(view.items.begin(), view.items.end(),
+                                                  [](const auto& item) { return item.official; });
+            caption(l10n::Get(any_official ? I::StoreOfficial : I::StoreCommunity),lay.store_section,theme.text);
+            caption(l10n::Get(I::StoreCommunity),lay.store_community_section,theme.text);
+            caption(l10n::Get(view.items.empty() ? I::StoreEmpty : I::StoreCommunityEmpty),lay.store_empty,theme.text_secondary);
+            for (size_t i=0;i<lay.store_items.size() && i<view.items.size();++i) {
+                const auto& c=lay.store_items[i]; const auto& item=view.items[i];
+                card(c.bounds);
+                // Icon tile in the package's own color with its glyph in white.
+                const auto tile=item.icon_color;
+                const D2D1_COLOR_F tile_color=D2D1::ColorF(((tile>>16)&0xFF)/255.0f,((tile>>8)&0xFF)/255.0f,(tile&0xFF)/255.0f);
+                painter_.FillRoundedRect(c.icon,10*s,tile_color);
+                painter_.DrawGlyph(item.icon_glyph,c.icon,D2D1::ColorF(1,1,1));
+                if (c.name.bottom>c.name.top) painter_.DrawWrappedSection(item.name,D2D1::Point2F(c.name.left,c.name.top),c.name.right-c.name.left,theme.text);
+                // A verified mark before the publisher: official packages are signed with Pulse's pinned key.
+                auto publisher=c.publisher;
+                if (item.official) {
+                    painter_.DrawGlyph(L"\xE73E",D2D1::RectF(publisher.left,publisher.top,publisher.left+14*s,publisher.bottom),theme.accent);
+                    publisher.left+=18*s;
+                }
+                caption(item.official ? l10n::Get(I::StoreOfficial) : item.publisher,publisher,theme.text_secondary);
+                caption(item.summary,c.summary,theme.text);
+                caption(item.status,c.status,theme.accent);
+                if (!item.version.empty()) {
+                    const std::wstring meta=L"v"+item.version+(item.size.empty() ? std::wstring{} : L" · "+item.size);
+                    painter_.DrawText(meta,c.version,compositor_->SmallFormat(),theme.text_secondary);
+                }
+                button(c.button,item.button_label,static_cast<PackAction>(static_cast<int>(PackAction::StoreItemBase)+static_cast<int>(i)),
+                    fluent::ButtonKind::Primary,item.action_enabled);
+            }
+            return;
+        }
+    }
     if (vm.settings_page != 8) {
     text(pack_text::TriggerSection(), lay.trigger_section);
     const int trigger = vm.settings_preview_trigger == 1 ? 1 : 0;

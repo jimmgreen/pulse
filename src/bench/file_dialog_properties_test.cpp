@@ -94,10 +94,74 @@ int wmain() {
             untouched->GetValue(PKEY_Author, &value);
             check(value.vt == VT_LPWSTR && std::wstring(value.pwszVal) == L"Alice; Bob", "cancel restores original scalar type and text"); PropVariantClear(&value);
         }
+        ComPtr<IPropertyStore> rich;
+        PSCreateMemoryPropertyStore(IID_PPV_ARGS(&rich));
+        for (DWORD i = 0; i < 256; ++i) {
+            PROPERTYKEY key = PKEY_Rating; key.pid = 10000 + i;
+            value.vt = VT_UI4; value.ulVal = i;
+            rich->SetValue(key, value); PropVariantClear(&value);
+        }
+        BYTE bytes[] = {0, 1, 127, 255};
+        PROPERTYKEY blob_key = PKEY_Rating; blob_key.pid = 11000;
+        value.vt = VT_BLOB; value.blob.cbSize = sizeof(bytes); value.blob.pBlobData = bytes;
+        check(rich->SetValue(blob_key, value) == S_OK, "seed uncollected binary metadata");
+        value = {};
+        PROPERTYKEY vector_key = blob_key; ++vector_key.pid;
+        value.vt = VT_VECTOR | VT_UI1; value.caub.cElems = sizeof(bytes); value.caub.pElems = bytes;
+        check(rich->SetValue(vector_key, value) == S_OK, "seed uncollected byte vector");
+        value = {};
+        CLIPDATA clip{sizeof(bytes) + sizeof(LONG), CF_DIB, bytes};
+        PROPERTYKEY clip_key = vector_key; ++clip_key.pid;
+        value.vt = VT_CF; value.pclipdata = &clip;
+        check(rich->SetValue(clip_key, value) == S_OK, "seed clipboard thumbnail metadata");
+        value = {};
+        FileDialogProperties rich_model;
+        const auto rich_hr = rich_model.SetStore(rich.Get());
+        check(rich_hr == S_OK, "large document property store captures without native fallback");
+        if (rich_hr == S_OK) {
+            check(rich_model.SetCollected(list.Get()) == S_OK && rich_model.Fields().size() == 2,
+                "only requested text fields become controls");
+            check(rich_model.Edit(PKEY_Title, {L"New document title"}) == S_OK, "edit text with opaque metadata retained");
+            ComPtr<IPropertyStore> rich_result;
+            check(rich_model.Snapshot(&rich_result) == S_OK, "snapshot rich document metadata");
+            if (rich_result) {
+                rich_result->GetValue(blob_key, &value);
+                check(value.vt == VT_BLOB && value.blob.cbSize == sizeof(bytes) &&
+                    memcmp(value.blob.pBlobData, bytes, sizeof(bytes)) == 0, "binary metadata survives edits byte for byte");
+                PropVariantClear(&value);
+                rich_result->GetValue(vector_key, &value);
+                check(value.vt == (VT_VECTOR | VT_UI1) && value.caub.cElems == sizeof(bytes) &&
+                    memcmp(value.caub.pElems, bytes, sizeof(bytes)) == 0, "byte vector survives edits byte for byte");
+                PropVariantClear(&value);
+                rich_result->GetValue(clip_key, &value);
+                check(value.vt == VT_CF && value.pclipdata && value.pclipdata->ulClipFmt == CF_DIB &&
+                    value.pclipdata->cbSize == clip.cbSize && memcmp(value.pclipdata->pClipData, bytes, sizeof(bytes)) == 0,
+                    "clipboard thumbnail survives edits byte for byte");
+                PropVariantClear(&value);
+            }
+            check(rich_model.ResetEdits() == S_OK, "cancel restores large metadata snapshot");
+        }
+        ComPtr<IPropertyStore> too_many;
+        PSCreateMemoryPropertyStore(IID_PPV_ARGS(&too_many));
+        for (DWORD i = 0; i < 1025; ++i) {
+            PROPERTYKEY key = PKEY_Rating; key.pid = 20000 + i;
+            value.vt = VT_UI4; value.ulVal = i;
+            too_many->SetValue(key, value); PropVariantClear(&value);
+        }
+        check(model.SetStore(too_many.Get()) == E_NOTIMPL && model.Fields()[0].values[0] == L"Original",
+            "property count bound remains transactional");
+        ComPtr<IPropertyStore> aggregate;
+        PSCreateMemoryPropertyStore(IID_PPV_ARGS(&aggregate));
+        std::vector<BYTE> half(512 * 1024 + 1);
+        value.vt = VT_BLOB; value.blob.cbSize = static_cast<ULONG>(half.size()); value.blob.pBlobData = half.data();
+        aggregate->SetValue(blob_key, value); aggregate->SetValue(vector_key, value); value = {};
+        check(model.SetStore(aggregate.Get()) == E_NOTIMPL && model.Fields()[0].values[0] == L"Original",
+            "aggregate opaque payload bound remains transactional");
         ComPtr<IPropertyStore> bad;
         PSCreateMemoryPropertyStore(IID_PPV_ARGS(&bad));
-        value.vt = VT_BLOB; value.blob.cbSize = 0; value.blob.pBlobData = nullptr;
-        bad->SetValue(PKEY_Comment, value); PropVariantClear(&value);
+        std::vector<BYTE> oversized(1024 * 1024 + 1);
+        value.vt = VT_BLOB; value.blob.cbSize = static_cast<ULONG>(oversized.size()); value.blob.pBlobData = oversized.data();
+        check(bad->SetValue(PKEY_Comment, value) == S_OK, "seed oversized metadata bound case"); value = {};
         check(FAILED(model.SetStore(bad.Get())) && model.Fields()[0].values[0] == L"Original", "unsupported data rejects transaction");
         check(FAILED(model.Edit(PKEY_Title, { L"a", L"b" })) && model.Fields()[0].values[0] == L"Original", "invalid edit preserves model");
     }

@@ -2703,6 +2703,18 @@ struct SettingsLayout {
     D2D1_RECT_F preview_codec_row[kPreviewCodecCount]{}, preview_codec_button[kPreviewCodecCount]{};
     // 预览增强包 page (5), see LayoutSettingsPacks.
     D2D1_RECT_F pack_update_all{}, pack_manage{}, pack_native_settings{}, native_settings_content{};
+    D2D1_RECT_F store_tabs[3]{}, store_refresh{}, store_cancel{}, store_state{},
+        store_trust{}, store_notice{}, store_restart{}, store_manage{}, store_section{}, store_empty{},
+        store_community_section{};
+    struct StoreCard {
+        D2D1_RECT_F bounds{}, icon{}, name{}, publisher{}, summary{}, version{}, status{}, button{};
+    };
+    std::vector<StoreCard> store_items;
+    struct InstalledCard {
+        D2D1_RECT_F bounds{}, name{}, id{}, version{}, publisher{}, badge{}, native_code{}, status{}, notice{};
+        D2D1_RECT_F enable{}, disable{}, uninstall{}, rollback{};
+    };
+    std::vector<InstalledCard> installed_items;
     // 增强包 page, 搜索: the 内容搜索 module and the planned OCR one.
     D2D1_RECT_F pack_search_section{}, pack_content_card{}, pack_content_badge{}, pack_content_enable{},
         pack_content_primary{}, pack_content_update{}, pack_content_notice{};

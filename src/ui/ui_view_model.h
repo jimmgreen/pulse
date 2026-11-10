@@ -7,6 +7,7 @@
 #include "window_material.h"
 #include "fluent_components.h"
 #include "release_note_view.h"
+#include "extension_store_view.h"
 #include "sysctx_view.h"
 #include "shortcuts_view.h"
 #include "ai_settings_view.h"
@@ -1042,6 +1043,13 @@ enum class PackAction : int {
     LoopAnimations, LoopAll, LoopNone,   // 循环播放: 仅动图 / 动图和视频 / 不循环
     HoldOff, HoldShort, HoldMedium, HoldLong,  // 按住预览: 关 / 0.3 / 0.5 / 0.8 s
     NativeSettings,
+    StoreBrowse, StoreManage, StoreRefresh, StoreCancel,
+    StoreItemBase = 10000, // plus the index in settings_store_view.items (stable)
+    StoreInstalled = 1000, InstalledRefresh = 1001,
+    InstalledEnableBase = 20000, // plus displayed index in settings_store_view.installed
+    InstalledDisableBase = 30000,
+    InstalledUninstallBase = 40000,
+    InstalledRollbackBase = 50000,
 };
 
 // A tab dragged out of another window, over this one (multi-window M7h): the
@@ -1329,6 +1337,9 @@ struct WindowViewModel {
     float settings_search_target_alpha = 0.0f;
     std::vector<SettingsSearchResult> settings_search_results;
     int settings_page = 0;
+    bool settings_store_browse = true;
+    bool settings_store_installed = false; // browse wins; both false select legacy packs management
+    ExtensionStoreView settings_store_view;
     // Settings > AI 助手 (filled on that page); the sidebar's 新 until it was opened.
     AssistantPageView settings_assistant;
     bool settings_assistant_new = false;

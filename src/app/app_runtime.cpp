@@ -1,4 +1,5 @@
 #include "extensions/native/settings_pages_host.h"
+#include "extension_store_ui.h"
 #include "extensions/native/previews_adapter.h"
 #include "pane_layout_controls.h"
 #include "recycle_shell_watch.h"
@@ -734,6 +735,7 @@ void FillPaneSlots(AppState& s, ui::WindowViewModel& vm) {
                                            int(!packs.raw_update_version.empty());
             }
             if (vm.settings_page == 8) {
+                FillExtensionStoreView(s, vm);
                 // 内容搜索 module: its install directory is read at most every 2 s.
                 static uint64_t checked_at = 0;
                 static int content_state = static_cast<int>(app::ContentPackState::Missing);
@@ -2904,21 +2906,12 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
     vm.status.history_open = s.undoHistoryOpen;
     vm.status.history_offset = s.undoHistoryOffset;
     vm.status.undo_label = l10n::Get(l10n::StringId::OpHistory);
-    const auto undo_history = s.ops.UndoHistorySummary();
+    const auto undo_history = s.ops.UndoHistorySummary(s.undoHistoryOpen);
+    const bool history_has_entries = s.ops.HistoryProgress().has_entries;
     for (const auto& item : undo_history) {
         const auto& e = item;
         ui::UndoHistoryRowView row;
         row.task_id = e.task_id; row.undone = item.undone; row.supported = e.supported;
-        if (e.recorded_at != 0) {
-            FILETIME utc{static_cast<DWORD>(e.recorded_at & 0xFFFFFFFFu), static_cast<DWORD>(e.recorded_at >> 32)};
-            FILETIME local{};
-            SYSTEMTIME clock{};
-            if (FileTimeToLocalFileTime(&utc, &local) && FileTimeToSystemTime(&local, &clock)) {
-                wchar_t stamp[16]{};
-                swprintf_s(stamp, L"%02u:%02u", static_cast<unsigned>(clock.wHour), static_cast<unsigned>(clock.wMinute));
-                row.time = stamp;
-            }
-        }
         auto verb = l10n::StringId::Operation;
         switch (e.type) {
         case ops::OpType::Copy: row.icon_glyph = L"\xE8C8"; verb = l10n::StringId::TrayIntentCopy; break;
@@ -2930,6 +2923,26 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
         case ops::OpType::RestoreRecycle: row.icon_glyph = L"\xE7A7"; verb = l10n::StringId::Restore; break;
         case ops::OpType::RealDelete: row.icon_glyph = L"\xE74D"; verb = l10n::StringId::PermanentlyDelete; break;
         default: row.icon_glyph = L"\xE74D"; verb = l10n::StringId::Delete; break;
+        }
+        if (!item.undone && e.supported && vm.status.undo_label == l10n::Get(l10n::StringId::OpHistory)) {
+            vm.status.undo_label = l10n::Get(l10n::StringId::Undo) + L" " + l10n::Get(verb) +
+                L" · " + std::to_wstring(e.source_count);
+        }
+        // The closed history pill needs identity and label only. Never format
+        // hidden rows or normalize their paths during scrolling/animation.
+        if (!s.undoHistoryOpen) {
+            vm.status.history.push_back(std::move(row));
+            continue;
+        }
+        if (e.recorded_at != 0) {
+            FILETIME utc{static_cast<DWORD>(e.recorded_at & 0xFFFFFFFFu), static_cast<DWORD>(e.recorded_at >> 32)};
+            FILETIME local{};
+            SYSTEMTIME clock{};
+            if (FileTimeToLocalFileTime(&utc, &local) && FileTimeToSystemTime(&local, &clock)) {
+                wchar_t stamp[16]{};
+                swprintf_s(stamp, L"%02u:%02u", static_cast<unsigned>(clock.wHour), static_cast<unsigned>(clock.wMinute));
+                row.time = stamp;
+            }
         }
         row.label = e.label.empty() ? l10n::Get(verb) + L" · " + std::to_wstring(e.source_count) : e.label;
         const auto& first_path = item.PreviewPath();
@@ -2952,10 +2965,6 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
             if (auto* active = ActiveTab(s)) row.elsewhere = _wcsicmp(fs::ParentPath(first_path).c_str(), fs::NormalizePath(active->current_path).c_str()) != 0;
         }
         if (item.redo_cleared) row.detail += L" · " + l10n::Get(l10n::StringId::HistoryRedoCleared);
-        if (!item.undone && e.supported && vm.status.undo_label == l10n::Get(l10n::StringId::OpHistory)) {
-            vm.status.undo_label = l10n::Get(l10n::StringId::Undo) + L" " + l10n::Get(verb) +
-                L" · " + std::to_wstring(e.source_count);
-        }
         vm.status.history.push_back(std::move(row));
     }
     std::stable_partition(vm.status.history.begin(), vm.status.history.end(), [](const auto& row) { return row.undone; });
@@ -3036,7 +3045,7 @@ ui::WindowViewModel BuildVm(AppState& s, bool probe_details) {
         }
         vm.status.performance_compact_text = compactPerf;
     } else if (!s.appPrefs.status_hints_learned && s.appPrefs.show_hints &&
-               undo_history.empty() && !st.active && st.task_id == 0 &&
+               !history_has_entries && !st.active && st.task_id == 0 &&
                vm.status.task_text.empty()) {
         const auto region = static_cast<ui::HitTestResult::Region>(s.hoverRegion);
         if (HoverHintIsCommand(region) && !s.addressSearching && !s.filterEditing) {

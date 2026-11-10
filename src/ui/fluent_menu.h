@@ -27,6 +27,7 @@
 #include <dwrite_3.h>
 #include <chrono>
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -303,9 +304,9 @@ private:
     // the owner compositor's frame copy; false keeps the solid plate.
     bool EnsurePlate(Surface& s, const D2D1_RECT_F& card, POINT origin, ID2D1Image* target);
     void Present(BYTE alpha, int y_offset_px);
-    // One-level flyout for FluentMenuItem::children.
+    // Cascading flyouts share one modal loop and preserve each parent card.
     bool EnsureSubWindow();
-    void OpenSubmenu(int row);
+    void OpenSubmenu(int row, size_t depth = 0);
     void CloseSubmenu();
     void OnSubMouse(POINT client_pt, bool button_up);
     bool RenderSub();
@@ -423,18 +424,34 @@ private:
     };
     std::vector<IconBitmap> icon_bitmaps_;  // a menu holds a few dozen rows at most
 
-    // Flyout (one level, FluentMenuItem::children).
-    HWND sub_hwnd_ = nullptr;
-    Surface sub_surf_;
-    Surface tip_surf_;             // hover tooltip staging
-    FluentMenuModel sub_model_;
-    int sub_parent_row_ = -1;      // row in model_ whose children are shown
-    int sub_hover_ = -1;
-    int sub_hover_swatch_ = -1;
-    int sub_pending_row_ = -1;     // hover-to-open delay target
+    struct SubmenuState {
+        ~SubmenuState();
+        HWND hwnd = nullptr;
+        Surface surf;
+        FluentMenuModel model;
+        int parent_row = -1;
+        int hover = -1;
+        int hover_swatch = -1;
+        int x = 0, y = 0;
+        ::pulse::ui::motion::SpringRectMotion plate;
+        uint64_t plate_frame = 0;
+        bool animating = false, fade = false;
+        std::chrono::steady_clock::time_point anim_start;
+        int dx = 0, dy = 0, from_dx = 0, from_dy = 0;
+        BYTE alpha = 255;
+        int pending_row = -1;
+        std::chrono::steady_clock::time_point pending_since;
+    };
+    SubmenuState first_sub_;
+    std::vector<std::unique_ptr<SubmenuState>> deeper_subs_;
+    SubmenuState* sub_ = &first_sub_;
+    Surface tip_surf_;
+    int sub_pending_row_ = -1;
     std::chrono::steady_clock::time_point sub_pending_since_;
-    int sub_x_ = 0;                // flyout window origin (screen px)
-    int sub_y_ = 0;
+    size_t SubmenuDepth() const;
+    SubmenuState* SubmenuAt(size_t depth);
+    void CloseSubmenusFrom(size_t depth);
+    void SelectDeepestSubmenu();
 
     // Motion (see the header comment). motion_ samples SystemAnimationsEnabled
     // once per TrackPopup.
@@ -447,18 +464,8 @@ private:
     bool morph_ = false;           // this open morphs from morph_from_
     D2D1_RECT_F morph_from_{};     // the button pill in surface px
     ::pulse::ui::motion::SpringRectMotion plate_;
-    ::pulse::ui::motion::SpringRectMotion sub_plate_;
     uint64_t plate_frame_ = 0;
-    uint64_t sub_plate_frame_ = 0;
     uint64_t plate_context_ = 0;   // bumped per TrackPopup
-    bool sub_animating_ = false;
-    bool sub_fade_ = false;        // true: fade+slide in, false: glide to new header
-    std::chrono::steady_clock::time_point sub_anim_start_;
-    int sub_dx_ = 0;               // presented offset from sub_x_/sub_y_
-    int sub_dy_ = 0;
-    int sub_from_dx_ = 0;
-    int sub_from_dy_ = 0;
-    BYTE sub_alpha_ = 255;         // cap for PresentSub while fading in
 };
 
 } // namespace pulse::ui

@@ -38,7 +38,7 @@ bool BridgeSaveTargetResolves(const wire::Request& body) {
     target.require_existing_save_parent = (body.options & wire::SaveRequireExistingParent) != 0;
     return ui::ResolveSaveTarget(target).state == ui::SaveTargetState::Resolved;
 }
-class FileDialog final : public IFileOpenDialog, public IFileSaveDialog, public IFileDialogCustomize, public IFileDialog2, public IOleWindow {
+class FileDialog final : public IFileOpenDialog, public IFileSaveDialog, public IFileDialogCustomize, public IFileDialog2, public IOleWindow, public IObjectWithSite {
 public:
     FileDialog(DialogFactory factory, ComPtr<IFileDialog> native, ComPtr<IFileDialog2> native2, FileDialogBridgeServices services)
         : factory_(factory), native_(std::move(native)), native2_(std::move(native2)), services_(std::move(services)), thread_(GetCurrentThreadId()),
@@ -51,6 +51,12 @@ public:
         else if (iid == IID_IFileOpenDialog && factory_ == DialogFactory::Open) *output = static_cast<IFileOpenDialog*>(this);
         else if (iid == IID_IFileSaveDialog && factory_ == DialogFactory::Save) *output = static_cast<IFileSaveDialog*>(this);
         else if (iid == IID_IFileDialog2 && native2_) *output = static_cast<IFileDialog2*>(this);
+        else if (iid == IID_IObjectWithSite) {
+            ComPtr<IObjectWithSite> site;
+            const HRESULT hr = native_.As(&site);
+            if (FAILED(hr)) return hr;
+            *output = static_cast<IObjectWithSite*>(this);
+        }
         else if (iid == IID_IOleWindow) {
             *output = static_cast<IOleWindow*>(this);
         }
@@ -71,6 +77,20 @@ public:
         }
         if (!count) delete this;
         return count;
+    }
+    HRESULT STDMETHODCALLTYPE SetSite(IUnknown* site) override {
+        if (FAILED(Thread())) return RPC_E_WRONG_THREAD;
+        ComPtr<IObjectWithSite> target;
+        const HRESULT hr = native_.As(&target);
+        return SUCCEEDED(hr) ? target->SetSite(site) : hr;
+    }
+    HRESULT STDMETHODCALLTYPE GetSite(REFIID iid, void** output) override {
+        if (!output) return E_POINTER;
+        *output = nullptr;
+        if (FAILED(Thread())) return RPC_E_WRONG_THREAD;
+        ComPtr<IObjectWithSite> target;
+        const HRESULT hr = native_.As(&target);
+        return SUCCEEDED(hr) ? target->GetSite(iid, output) : hr;
     }
     HRESULT STDMETHODCALLTYPE Show(HWND owner) override {
         if (FAILED(Thread())) return RPC_E_WRONG_THREAD;
@@ -137,13 +157,15 @@ public:
                 c.caller_validation_supported = bridge || provided(PULSE_PICKER_UI_V2_FEATURE_OPEN_SKIP_ACCESS);
                 return c;
             };
-            if ((bridge_route || services_.inprocess_provider) && client_state_ && client_guid_ && !explicit_folder_) {
+            const auto restore_client_folder = [&] {
+                if (!client_state_ || !client_guid_ || explicit_folder_) return;
                 if (auto remembered = client_state_->Read(*client_guid_)) {
                     ComPtr<IShellItem> folder;
                     if (SHCreateItemFromParsingName(remembered->c_str(), nullptr, IID_PPV_ARGS(&folder)) == S_OK)
                         native_->SetFolder(folder.Get());
                 }
-            }
+            };
+            if (bridge_route) restore_client_folder();
             // Only the new explicit policy resolves the mirrored native starting folder.
             // GetFolder is documented before Show; it does not display a dialog.
             // False: the folder cannot be represented for this route.
@@ -202,6 +224,9 @@ public:
                     }
                     services_.inprocess_provider = std::move(loaded);
                 }
+                // Event/custom-control dialogs load their provider only here.
+                // Restore history before resolving that route's initial folder.
+                if (!bridge_route && services_.inprocess_provider) restore_client_folder();
                 auto context = make_context(false);
                 if (!resolve_initial(context)) {
                     shown_ = true;
@@ -661,20 +686,13 @@ public:
         metadata_seen_ = true; readonly_collection_ = false;
         const HRESULT captured = properties_.SetStore(properties);
         DiagnosticResult("properties-capture", captured);
-        if (FAILED(captured) && properties) {
-            DWORD count = 0;
-            if (properties->GetCount(&count) == S_OK) {
-                for (DWORD i = 0; i < std::min<DWORD>(count, 16); ++i) {
-                    PROPERTYKEY key{}; PROPVARIANT value{};
-                    const HRESULT key_hr = properties->GetAt(i, &key);
-                    const HRESULT value_hr = key_hr == S_OK ? properties->GetValue(key, &value) : key_hr;
-                    char diagnostic[128]{};
-                    std::snprintf(diagnostic, sizeof(diagnostic), "property-store-schema index=%lu type=%u hr=0x%08lX",
-                        static_cast<unsigned long>(i), static_cast<unsigned>(value.vt), static_cast<unsigned long>(value_hr));
-                    ObserveNativeReason(diagnostic);
-                    PropVariantClear(&value);
-                }
-            }
+        if (FAILED(captured)) {
+            const auto& status = properties_.LastCaptureStatus();
+            char diagnostic[144]{};
+            std::snprintf(diagnostic, sizeof(diagnostic), "property-store-failure count=%lu index=%lu type=%u hr=0x%08lX",
+                static_cast<unsigned long>(status.count), static_cast<unsigned long>(status.index),
+                static_cast<unsigned>(status.type), static_cast<unsigned long>(captured));
+            ObserveNativeReason(diagnostic);
         }
         if (captured != S_OK) { properties_owned_ = false; return Unsupported(Setting::SaveProperties, result); }
         properties_owned_ = true;
@@ -815,7 +833,24 @@ public:
         return AddValueControl(8,id,text,FALSE);
     }
     HRESULT STDMETHODCALLTYPE AddSeparator(DWORD id) override {
-        return CustomizeCall("AddSeparator", false, id, 0, 0, [&](IFileDialogCustomize* customize) { return customize->AddSeparator(id); });
+        if (!CanCaptureInprocess())
+            return CustomizeCall("AddSeparator", false, id, 0, 0, [&](IFileDialogCustomize* c) { return c->AddSeparator(id); });
+        if (const auto hr = Mutable(); FAILED(hr)) return hr;
+        ComPtr<IFileDialogCustomize> native;
+        HRESULT hr = native_.As(&native); if (FAILED(hr)) return hr;
+        hr = native->AddSeparator(id);
+        if (hr != S_OK) { MarkNativeOnly("separator-native-failure"); return hr; }
+        try {
+            FileDialogCustomControl control;
+            control.kind = PULSE_PICKER_UI_V2_CONTROL_SEPARATOR;
+            control.id = id; control.has_parent = custom_group_;
+            control.parent = control.has_parent ? custom_group_id_ : 0;
+            if (FindCustom(id) || custom_controls_.size() >= 16) {
+                MarkNativeOnly("separator-unrepresentable"); return hr;
+            }
+            custom_controls_.push_back(std::move(control));
+        } catch (...) { MarkNativeOnly("separator-allocation"); }
+        return hr;
     }
     HRESULT STDMETHODCALLTYPE AddText(DWORD id, LPCWSTR text) override {
         return CustomizeCall("AddText", false, id, 0, 0, [&](IFileDialogCustomize* customize) { return customize->AddText(id, text); });

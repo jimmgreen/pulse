@@ -9,6 +9,7 @@
 
 namespace pulse::ui {
 struct ThumbnailCacheTestAccess {
+#include "thumbnail_editor_save_test.inc"
     static bool RealDownloadRetryRegression() {
         bool ok = true;
         const auto check = [&](bool value, const char* name) {
@@ -125,6 +126,42 @@ struct ThumbnailCacheTestAccess {
         if (SUCCEEDED(initialized)) CoUninitialize();
         return ok;
     }
+    static bool BoundedImageRetryRegression() {
+        bool ok = true;
+        auto check = [&](bool value, const char* label) { std::printf("[%s] %s\n", value ? "PASS" : "FAIL", label); ok &= value; };
+        ThumbnailCache cache;
+        ThumbnailCache::Request req;
+        req.path = L"corrupt.png"; req.pixels = 128;
+        req.key = cache.Key(req.path, 128, 1, 100); req.epoch = cache.epoch_.load();
+        unsigned retries = 0;
+        for (unsigned i = 0; i < 100; ++i) {
+            ThumbnailCache::Item result; result.failed = true; result.error = L"image-decode-failed";
+            cache.StoreResult(req, std::move(result));
+            if (cache.items_.at(req.key).transient) ++retries;
+        }
+        check(retries == 4 && cache.items_.at(req.key).retry_at == 0,
+              "unchanged corrupt image has four retries and then no timer, even with duplicate failures");
+        std::printf("[RESOURCE] retries across 100 failures=%u (bounded expected=4)\n", retries);
+        req.key = cache.Key(req.path, 128, 2, 100);
+        ThumbnailCache::Item temporary; temporary.failed = true; temporary.error = L"image-decode-failed";
+        cache.StoreResult(req, std::move(temporary));
+        check(cache.items_.at(req.key).transient, "changed file identity starts a new retry budget");
+        req.key = L"codec-missing";
+        ThumbnailCache::Item unsupported; unsupported.failed = true; unsupported.error = L"image-codec-missing:HEIC";
+        cache.StoreResult(req, std::move(unsupported));
+        check(!cache.items_.at(req.key).transient, "missing codec is permanent until capability or identity changes");
+        req.key = L"save-transport";
+        for (unsigned i = 0; i < 4; ++i) {
+            ThumbnailCache::Item transport; transport.failed = transport.transient = true;
+            cache.StoreResult(req, std::move(transport));
+        }
+        check(cache.items_.at(req.key).transient, "four transient save failures retain final recovery opportunity");
+        ThumbnailCache::Item bitmap; bitmap.kind = ipc::PreviewContentKind::Bitmap;
+        cache.StoreResult(req, std::move(bitmap));
+        check(!cache.transient_failures_.contains(req.key), "successful save clears retry history");
+        return ok;
+    }
+
     static bool DownloadRetryRegression() {
         bool ok = true;
         const auto check = [&](bool value, const char* name) {
@@ -137,14 +174,15 @@ struct ThumbnailCacheTestAccess {
         req.identity = cache.Key(req.path, 0, 10, 100);
         req.epoch = cache.epoch_.load();
         bool retries = true;
-        for (unsigned i = 0; i < 8; ++i) {
-            ThumbnailCache::Item failed; failed.failed = true;
+        for (unsigned i = 0; i < 5; ++i) {
+            ThumbnailCache::Item failed; failed.failed = true; failed.error = L"image-decode-failed";
             const auto before = GetTickCount64();
             cache.StoreResult(req, std::move(failed));
             const auto& stored = cache.items_.at(req.key);
-            retries &= stored.transient && stored.retry_at > before && stored.retry_at <= GetTickCount64() + 30000;
+            retries &= i < 4 ? stored.transient && stored.retry_at > before && stored.retry_at <= GetTickCount64() + 30000
+                            : !stored.transient && stored.retry_at == 0;
         }
-        check(retries, "incomplete image remains retryable after a long download with bounded backoff");
+        check(retries, "incomplete image gets four bounded retries then waits for file identity change");
         check(cache.Key(req.path, req.pixels, 10, 101) != req.key &&
             cache.Key(req.path, req.pixels, 11, 100) != req.key,
             "size or timestamp updates bypass old negative cache");
@@ -1214,4 +1252,7 @@ bool RunThumbnailInterestRegression() { return pulse::ui::ThumbnailCacheTestAcce
 
 bool RunThumbnailRetryRegression() { return pulse::ui::ThumbnailCacheTestAccess::RetryRegression(); }
 bool RunThumbnailDownloadRetryRegression() { return pulse::ui::ThumbnailCacheTestAccess::DownloadRetryRegression(); }
+bool RunThumbnailEditorSaveRegression() { return pulse::ui::ThumbnailCacheTestAccess::EditorSaveRegression(); }
 bool RunPsdProgressiveRegression(const char* fixture) { return pulse::ui::ThumbnailCacheTestAccess::PsdProgressiveRegression(fixture); }
+
+bool RunBoundedImageRetryRegression() { return pulse::ui::ThumbnailCacheTestAccess::BoundedImageRetryRegression(); }

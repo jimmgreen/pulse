@@ -23,7 +23,9 @@ bool ResolveLink(const std::wstring& lnk_path, fs::DirEntry& e);
 bool IsInstallerCachePath(const std::wstring& path, const std::wstring& windows_dir);
 
 // Read immediate display destinations for .lnk, .url, symlink and junction entries,
-// and preserve existing .lnk penetration behavior. No recursive resolution or UI.
+// and preserve local .lnk penetration behavior. Network targets are not probed.
+// Optional metadata has a 100 ms batch budget and an independent provider quota;
+// unfinished entries retain their original metadata. No recursive resolution or UI.
 // parent_path is the
 // enumerated directory (entries with full_path set ignore it). cancel()
 // returning true aborts early (entries resolved so far keep their link_target).

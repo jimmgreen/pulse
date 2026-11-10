@@ -174,6 +174,7 @@ enum MenuCmd : int {
     CmdDupReapplyRules = 5203,           // 重复文件 tab row: 按规则重新标
     CmdShellStaticBase = 6000,
     CmdShellComBase = 8000,
+    CmdShellComLast = CmdShellComBase + 0x7FFF, // live and predicted Shell menu IDs
 };
 
 // One merged Explorer row (registry static verb or pulse_shell COM item),

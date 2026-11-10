@@ -42,10 +42,16 @@ set_source_files_properties(setup.rc PROPERTIES OBJECT_DEPENDS ${CMAKE_CURRENT_B
 
 # Wizard UI + install engine; installed copies run as the uninstaller.
 add_executable(pulse_setup WIN32
+    setup_desktop_launch.cpp
     setup_runtime_transaction.cpp setup_dialog_versions.cpp setup_dialog_migration.cpp setup_file_locks.cpp setup_main.cpp setup_engine.cpp setup_common.cpp setup_log.cpp setup_options.cpp setup_process.cpp
     setup_registry.cpp setup_service.cpp setup_shortcut.cpp setup_transaction.cpp setup_strings.cpp
     start_pin_registration.cpp
     setup_ui.cpp setup_uninstall.cpp setup.rc setup.manifest ${CMAKE_CURRENT_BINARY_DIR}/setup.ico)
+target_link_libraries(pulse_setup PRIVATE oleaut32)
+
+add_executable(pulse_setup_desktop_launch_test setup_desktop_launch_test.cpp setup_desktop_launch.cpp)
+target_link_libraries(pulse_setup_desktop_launch_test PRIVATE shell32 ole32 oleaut32 uuid advapi32 user32)
+set_target_properties(pulse_setup_desktop_launch_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 target_include_directories(pulse_setup PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 add_library(pulse_setup_dialog_bundle STATIC ../common/dialog_bundle.cpp ../common/json_value.cpp)
 target_compile_definitions(pulse_setup_dialog_bundle PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)

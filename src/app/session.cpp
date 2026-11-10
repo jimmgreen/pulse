@@ -425,7 +425,11 @@ std::wstring SessionToJson(const SessionSnapshot& snap) {
     f << L"  \"detailsPreviewOnly\":" << (snap.details_preview_only ? L"true" : L"false") << L",\n";
     f << L"  \"detailsPreview\":" << (snap.details_preview ? L"true" : L"false") << L",\n";
     f << L"  \"tray\":" << trayJson << L",\n";
-    f << L"  \"undo\":" << (snap.undo_json.empty() ? L"[]" : snap.undo_json) << L",\n";
+    f << L"  \"undo\":";
+    if (snap.undo_snapshot) f << *snap.undo_snapshot;
+    else if (snap.undo_json.empty()) f << L"[]";
+    else f << snap.undo_json;
+    f << L",\n";
     f << L"  \"activeTab\":" << snap.active_layout_tab << L",\n";
     f << L"  \"tabGroups\":" << TabGroupsToJson(snap.tab_groups) << L",\n";
     f << L"  \"layoutTabs\":" << LayoutTabsToJson(snap.layout_tabs);

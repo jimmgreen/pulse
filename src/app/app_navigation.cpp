@@ -1,3 +1,4 @@
+#include "media_props.h"
 #include "pane_layout_controls.h"
 #include "recycle_search.h"
 #include "../common/delete_diagnostics.h"
@@ -1153,6 +1154,10 @@ void LoadVirtualView(AppState& s, app::Tab& tab, const std::wstring& path, PathL
         StartLoadingPath(s, tab, app::ResolveWorkspaceFolderPath(path, s.places.workspaces), reason);
         return;
     }
+    app::media::Cancel(&tab);
+    tab.media_snapshot.reset();
+    tab.media_state.reset();
+    tab.media_resort_revision = 0;
     CancelUnsharedDirectoryRequest(s, tab);
     if (tab.explorer_handoff) ExplorerTakeoverProbeNavigation(s, &tab, "navigation-reset");
     tab.explorer_handoff.reset();
@@ -1404,6 +1409,10 @@ void StartLoadingPath(AppState& s, app::Tab& tab, const std::wstring& path, Path
     // Tab history may already have assigned current_path; compare the stored
     // origin instead so navigating away and back cannot revive an old request.
     (void)app::PendingCreateRenameIntent(tab.create_rename_intents, normalized, tab.view_generation);
+    app::media::Cancel(&tab);
+    tab.media_snapshot.reset();
+    tab.media_state.reset();
+    tab.media_resort_revision = 0;
     CancelUnsharedDirectoryRequest(s, tab);
     if (tab.explorer_handoff) ExplorerTakeoverProbeNavigation(s, &tab, "navigation-reset");
     tab.explorer_handoff.reset();
@@ -2181,11 +2190,37 @@ void QueueSnapshotValidation(AppState& s, app::Tab& tab) {
 // it, copying each snapshot once. Returns false when a full enumeration should
 // run instead: an unsupported event, no visible tab, or more patch work than a
 // background re-enumeration costs.
+static void EnqueueNotifyPreparation(AppState& s, std::function<void()> job) {
+    // The process host outlives the worker; no window/AppState object crosses
+    // threads. Wake only on completion so a slow provider leaves idle pacing alone.
+    s.worker.EnqueueIo([notify = ServiceWindow(s), job = std::move(job)] {
+        job();
+        PostMessageW(notify, WM_UI_KICK, 0, 0);
+    });
+}
+
 static bool ApplyNotifiesToVisible(AppState& s, const std::wstring& path,
-                                   const std::vector<fs::DirNotifyEvent>& events) {
+                                   const std::vector<fs::DirNotifyEvent>& events,
+                                   const app::PreparedDirNotifyBatch* prepared = nullptr) {
     if (events.empty()) return true;
-    // The batch is merged in one O(entries + events log events) pass, but every
-    // touched file is stat'ed on this thread, so huge bursts go async instead.
+    if (!prepared && (s.core.notify_async.Pending(path) ||
+        std::any_of(events.begin(), events.end(), [](const auto& event) {
+            return event.action != FILE_ACTION_REMOVED;
+        }))) {
+        app::DirNotifyAsync::Guards guards;
+        app::ForEachWindowSharingCore(s, [&](AppState& window) {
+            ForEachPane(window, [&](app::Pane& pane) {
+                const auto* tab = pane.ActiveTab();
+                if (tab && tab->current_path == path && tab->snapshot)
+                    guards.push_back({tab, tab->view_generation, tab->snapshot});
+            });
+        });
+        if (guards.empty()) return false;
+        return s.core.notify_async.Queue(path, events, s.core.notify_async_round, std::move(guards),
+            [&](std::function<void()> job) { EnqueueNotifyPreparation(s, std::move(job)); });
+    }
+    // Large bursts use the listing worker; smaller batches replay prepared
+    // metadata (or pure removals) without probing the filesystem here.
     constexpr size_t kMaxIncrementalEvents = 512;
     if (events.size() > kMaxIncrementalEvents) return false;
     bool any = false;
@@ -2198,8 +2233,10 @@ static bool ApplyNotifiesToVisible(AppState& s, const std::wstring& path,
         auto copy = std::make_shared<std::vector<fs::DirEntry>>(*tab->snapshot);
         const app::ScopedEntryGrouping grouping(tab->EffectiveGroup(), tab->current_path);
         const app::ScopedFolderSortMode folder_mode(tab->EffectiveFolderSort());
-        if (app::ApplyDirNotifyBatch(*copy, path, events, tab->sort_column, tab->sort_direction) ==
-            app::NotifyPatch::NeedFullEnum) {
+        const auto patch = prepared
+            ? app::ApplyPreparedDirNotifyBatch(*copy, *prepared, tab->sort_column, tab->sort_direction)
+            : app::ApplyDirNotifyBatch(*copy, path, events, tab->sort_column, tab->sort_direction);
+        if (patch == app::NotifyPatch::NeedFullEnum) {
             need_full = true;
             return;
         }
@@ -2509,6 +2546,41 @@ static void ApplyDirNotifiesToWindow(AppState& s, const std::vector<AppState::Di
 }
 
 bool DrainDirNotifies(AppState& s) {
+    ++s.core.notify_async_round;
+    const auto completed = s.core.notify_async.TakeReady(
+        [&](std::function<void()> job) { EnqueueNotifyPreparation(s, std::move(job)); });
+    for (const auto& result : completed) {
+        bool visible = false;
+        bool stale = result.fallback;
+        app::ForEachWindowSharingCore(s, [&](AppState& window) {
+            ForEachPane(window, [&](app::Pane& pane) {
+                const auto* tab = pane.ActiveTab();
+                if (!tab || tab->current_path != result.path) return;
+                visible = true;
+                if (tab->pending_generation || std::none_of(result.guards.begin(), result.guards.end(),
+                    [&](const auto& guard) { return guard.Matches(tab, tab->view_generation, tab->snapshot); }))
+                    stale = true;
+            });
+        });
+        if (!visible) { s.store.MarkDirty(result.path); continue; }
+        if (!stale) {
+            app::ForEachWindowSharingCore(s, [&](AppState& window) {
+                if (!WindowShowsFolder(window, result.path)) return;
+                if (!ApplyNotifiesToVisible(window, result.path, result.prepared.events, &result.prepared)) stale = true;
+                if (window.hwnd) InvalidateRect(window.hwnd, nullptr, FALSE);
+            });
+        }
+        if (stale) {
+            // A new listing/navigation owns its snapshot. Retain its generation;
+            // the dirty mark requests another pass when an in-flight scan lands.
+            s.store.MarkDirty(result.path);
+            bool pending = false;
+            app::ForEachWindowSharingCore(s, [&](AppState& window) {
+                pending = pending || PathHasPendingRefresh(window, result.path);
+            });
+            if (!pending) RefreshPath(s, result.path);
+        }
+    }
     // The watches, their queue and the size patches are shared by every
     // window: take them once and hand them to each window.
     std::vector<AppState::DirNotifyBatch> incoming;
@@ -2554,7 +2626,7 @@ bool DrainDirNotifies(AppState& s) {
     }
     for (const auto& patch : due)
         if (!was_shown(patch.path)) s.store.MarkDirty(patch.path);
-    return holding;
+    return holding || !completed.empty();
 }
 
 void RestoreNavigationReturnSelection(AppState& s, app::Tab& tab,

@@ -10,6 +10,7 @@
 #include <wrl/client.h>
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cwctype>
 #include <filesystem>
 #include <fstream>
@@ -307,6 +308,35 @@ void Card(Gdiplus::Graphics& g, Picture& pic, float x, float y, float w, float h
     }
     g.Restore(state);
 }
+// Rounded convex polygon; each corner is a quadratic curve emitted as a cubic.
+void RoundedPolygon(Gdiplus::GraphicsPath& path, const Gdiplus::PointF* points, int count, float radius) {
+    const auto Toward = [radius](const Gdiplus::PointF& from, const Gdiplus::PointF& corner) {
+        const float dx = from.X - corner.X, dy = from.Y - corner.Y;
+        const float length = std::sqrt(dx * dx + dy * dy);
+        return Gdiplus::PointF(corner.X + dx / length * radius, corner.Y + dy / length * radius);
+    };
+    Gdiplus::PointF previous_end;
+    for (int i = 0; i < count; ++i) {
+        const auto& corner = points[i];
+        const auto start = Toward(points[(i + count - 1) % count], corner);
+        const auto end = Toward(points[(i + 1) % count], corner);
+        if (i) path.AddLine(previous_end, start);
+        path.AddBezier(start,
+            Gdiplus::PointF(start.X + (corner.X - start.X) * 2 / 3, start.Y + (corner.Y - start.Y) * 2 / 3),
+            Gdiplus::PointF(end.X + (corner.X - end.X) * 2 / 3, end.Y + (corner.Y - end.Y) * 2 / 3), end);
+        previous_end = end;
+    }
+    path.CloseFigure();
+}
+// Upright card sized to the picture: 3:4 to 16:10 inside max_w x max_h (border included).
+void FitCard(const Picture& pic, float max_w, float max_h, float& w, float& h) {
+    constexpr float border = 6;
+    const float ratio = pic.data.empty() ? 124.0f / 104.0f :
+        std::clamp(static_cast<float>(pic.width) / static_cast<float>(pic.height), 0.75f, 1.6f);
+    float iw = max_w - border, ih = iw / ratio;
+    if (ih > max_h - border) { ih = max_h - border; iw = ih * ratio; }
+    w = iw + border; h = ih + border;
+}
 bool Render(std::vector<Picture>& pictures, UINT cap, bool single, std::vector<uint8_t>& out) {
     GdiSession session; if (!session.token) return false;
     out.assign(size_t(cap)*cap*4, 0);
@@ -314,25 +344,43 @@ bool Render(std::vector<Picture>& pictures, UINT cap, bool single, std::vector<u
     Gdiplus::Graphics g(&bitmap); g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
     g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
     g.ScaleTransform(static_cast<float>(cap)/256.0f, static_cast<float>(cap)/256.0f);
+    // Ground shadow: a radial falloff, since GDI+ has no blur.
+    Gdiplus::GraphicsPath ground; ground.AddEllipse(10.0f, 212.0f, 236.0f, 24.0f);
+    Gdiplus::PathGradientBrush ground_brush(&ground);
+    ground_brush.SetCenterColor(Gdiplus::Color(56,0,0,0));
+    Gdiplus::Color ground_edge(0,0,0,0); INT edge_count = 1;
+    ground_brush.SetSurroundColors(&ground_edge, &edge_count);
+    g.FillPath(&ground_brush,&ground);
     Gdiplus::GraphicsPath back;
-    back.AddArc(18,44,28,28,180,90); back.AddLine(32,44,92,44);
-    back.AddBezier(92.0f,44.0f,96.0f,44.0f,99.0f,45.4f,102.0f,48.0f); back.AddLine(102,48,116,60);
-    back.AddLine(116,60,224,60); back.AddArc(210,60,28,28,270,90);
-    back.AddLine(238,74,238,212); back.AddArc(210,198,28,28,0,90);
-    back.AddLine(224,226,32,226); back.AddArc(18,198,28,28,90,90); back.CloseFigure();
-    Gdiplus::LinearGradientBrush back_brush(Gdiplus::Point(0,44),Gdiplus::Point(0,226),Gdiplus::Color(233,174,43),Gdiplus::Color(210,147,15));
+    back.AddArc(26,50,24,24,180,90); back.AddLine(38,50,92,50);
+    back.AddBezier(92.0f,50.0f,96.0f,50.0f,99.0f,51.4f,102.0f,54.0f); back.AddLine(102,54,114,64);
+    back.AddLine(114,64,218,64); back.AddArc(206,64,24,24,270,90);
+    back.AddLine(230,76,230,214); back.AddLine(230,214,26,214); back.CloseFigure();
+    Gdiplus::LinearGradientBrush back_brush(Gdiplus::Point(0,50),Gdiplus::Point(0,214),Gdiplus::Color(233,174,43),Gdiplus::Color(210,147,15));
     g.FillPath(&back_brush,&back);
-    if (single) Card(g,pictures[0],48,30,160,120,0);
-    else {
-        if (pictures.size()>2) Card(g,pictures[2],78,34,124,100,11);
-        if (pictures.size()>1) Card(g,pictures[1],54,34,124,100,-11);
-        Card(g,pictures[0],66,26,124,104,0);
+    // Cards stand upright; their bottoms tuck 8 units behind the front leaf.
+    const float top = single ? 146.0f : 152.0f, bottom = top + 8.0f;
+    if (!single) {
+        if (pictures.size()>2) Card(g,pictures[2],120,bottom-22-124,96,124,0);
+        if (pictures.size()>1) Card(g,pictures[1],40,bottom-12-124,96,124,0);
     }
-    const float top = single ? 104.0f : 110.0f;
-    Gdiplus::GraphicsPath front; Rounded(front,18,top,220,214-top,12);
-    Gdiplus::LinearGradientBrush front_brush(Gdiplus::PointF(0,top),Gdiplus::PointF(0,214),Gdiplus::Color(255,216,102),Gdiplus::Color(255,194,51));
+    float w = 0, h = 0;
+    FitCard(pictures[0], single ? 176.0f : 150.0f, single ? 132.0f : 128.0f, w, h);
+    Card(g,pictures[0],128-w/2,bottom-h,w,h,0);
+    Gdiplus::LinearGradientBrush pocket(Gdiplus::PointF(0,top-30),Gdiplus::PointF(0,top+1),
+        Gdiplus::Color(0,110,60,0),Gdiplus::Color(87,110,60,0));
+    g.FillRectangle(&pocket,26.0f,top-30,204.0f,31.0f);
+    // Front leaf opened toward the viewer: the top edge is wider than the bottom.
+    const Gdiplus::PointF leaf[] = {{10,top},{246,top},{230,222},{26,222}};
+    Gdiplus::GraphicsPath front; RoundedPolygon(front,leaf,4,11);
+    Gdiplus::LinearGradientBrush front_brush(Gdiplus::PointF(0,top-0.5f),Gdiplus::PointF(0,222.5f),
+        Gdiplus::Color(255,235,176),Gdiplus::Color(246,180,42));
+    const Gdiplus::Color front_colors[] = {Gdiplus::Color(255,235,176),Gdiplus::Color(255,218,110),Gdiplus::Color(246,180,42)};
+    const Gdiplus::REAL front_stops[] = {0.0f,0.07f,1.0f};
+    front_brush.SetInterpolationColors(front_colors,front_stops,3);
     g.FillPath(&front_brush,&front);
-    Gdiplus::Pen highlight(Gdiplus::Color(230,255,241,184),1.6f); g.DrawLine(&highlight,30.0f,top+0.8f,226.0f,top+0.8f);
+    Gdiplus::Pen highlight(Gdiplus::Color(242,255,250,228),1.4f); g.DrawLine(&highlight,21.0f,top+1.4f,235.0f,top+1.4f);
+    Gdiplus::Pen outline(Gdiplus::Color(46,150,90,0),1.0f); g.DrawPath(&outline,&front);
     g.Flush(Gdiplus::FlushIntentionSync); return g.GetLastStatus() == Gdiplus::Ok;
 }
 } // namespace
@@ -386,7 +434,7 @@ bool DecodeFolderThumbnail(const std::wstring& path, UINT pixels, std::vector<ui
     });
     uint64_t key = HashText(1469598103934665603ull, path);
     key = HashBytes(key, &cap, sizeof(cap)); key = HashBytes(key, &single, sizeof(single));
-    constexpr unsigned style = 5; key = HashBytes(key, &style, sizeof(style));
+    constexpr unsigned style = 6; key = HashBytes(key, &style, sizeof(style));
     uint64_t signature = HashBytes(key, &directory.ftLastWriteTime, sizeof(FILETIME));
     for (const auto& entry : entries) {
         signature = HashText(signature, entry.name);

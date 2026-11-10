@@ -20,7 +20,7 @@ namespace pulse::shell {
 namespace {
 
 constexpr wchar_t kContextMenuCategory[] = L"windows.fileExplorerContextMenus";
-constexpr int kMaxSubCommandDepth = 3;
+constexpr int kMaxSubCommandDepth = 16;
 constexpr int kMaxSubCommands = 64;
 
 std::wstring Lower(std::wstring text) {

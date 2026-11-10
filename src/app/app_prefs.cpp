@@ -1,3 +1,4 @@
+#include "../ui/window_effect_support.h"
 #include "../common/app_runtime_paths.h"
 // app_prefs.cpp — Persist general settings; sync 开机自启 with the Run key.
 #include "app_prefs.h"
@@ -114,6 +115,8 @@ void AppPrefs::ResetToDefaults() {
     global_search_key = 32;
     global_search_width = 0;
     global_search_height = 0;
+    global_search_positioned = false;
+    global_search_x = global_search_y = 0;
     global_search_double_ctrl = true;
     global_search_double_ctrl_ms = 300;
     dialog_jump_bar = true;
@@ -138,7 +141,7 @@ void AppPrefs::ResetToDefaults() {
     change_tracking_days = 7;
     theme_mode = -1;
     language = L"system";
-    window_effect = L"mica-alt";
+    window_effect = ui::WindowEffectSupported(ui::WindowEffect::MicaAlt) ? L"mica-alt" : L"none";
     menu_acrylic = true;
     background_image.clear();
     wallpaper_look = 50;
@@ -165,6 +168,7 @@ void AppPrefs::ResetToDefaults() {
     accent_follow_system = false;
     custom_tag_colors.clear();
     recent_tags.clear();
+    extension_publish_trusted.clear();
     picker_folders.clear();
     shortcuts.clear();
     duplicate_scan_scope = 0;
@@ -319,6 +323,10 @@ std::wstring AppPrefs::ToJson() const {
     out += L",\n  \"global_search_key\":" + std::to_wstring(global_search_key);
     out += L",\n  \"global_search_width\":" + std::to_wstring(global_search_width);
     out += L",\n  \"global_search_height\":" + std::to_wstring(global_search_height);
+    out += L",\n  \"global_search_positioned\":";
+    out += global_search_positioned ? L"true" : L"false";
+    out += L",\n  \"global_search_x\":" + std::to_wstring(global_search_x);
+    out += L",\n  \"global_search_y\":" + std::to_wstring(global_search_y);
     out += L",\n  \"global_search_double_ctrl\":";
     out += global_search_double_ctrl ? L"true" : L"false";
     out += L",\n  \"global_search_double_ctrl_ms\":" + std::to_wstring(global_search_double_ctrl_ms);
@@ -465,6 +473,13 @@ std::wstring AppPrefs::ToJson() const {
     for (size_t i = 0; i < recent_tags.size(); ++i) {
         std::wstring escaped;
         pulse::json::Escape(recent_tags[i], escaped);
+        if (i > 0) out += L",";
+        out += L"\"" + escaped + L"\"";
+    }
+    out += L"],\n  \"extension_publish_trusted\":[";
+    for (size_t i = 0; i < extension_publish_trusted.size(); ++i) {
+        std::wstring escaped;
+        pulse::json::Escape(extension_publish_trusted[i], escaped);
         if (i > 0) out += L",";
         out += L"\"" + escaped + L"\"";
     }
@@ -617,6 +632,9 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     global_search_key = key > 0 && key <= 254 ? static_cast<uint32_t>(key) : 32;
     global_search_width = std::clamp(pulse::json::ExtractInt(json, L"global_search_width", 0), 0, 4000);
     global_search_height = std::clamp(pulse::json::ExtractInt(json, L"global_search_height", 0), 0, 4000);
+    global_search_positioned = pulse::json::ExtractBool(json, L"global_search_positioned", false);
+    global_search_x = std::clamp(pulse::json::ExtractInt(json, L"global_search_x", 0), -1000000, 1000000);
+    global_search_y = std::clamp(pulse::json::ExtractInt(json, L"global_search_y", 0), -1000000, 1000000);
     global_search_double_ctrl = pulse::json::ExtractBool(json, L"global_search_double_ctrl", true);
     dialog_jump_bar = pulse::json::ExtractBool(json, L"dialog_jump_bar", true);
     dialog_jump_auto = pulse::json::ExtractBool(json, L"dialog_jump_auto", false);
@@ -661,6 +679,7 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     window_effect = pulse::json::ExtractString(json, L"window_effect", L"mica-alt");
     if (window_effect == L"dwm-blur") window_effect = L"acrylic-material";
     else if (window_effect.empty()) window_effect = L"mica-alt";
+    if (!ui::WindowEffectSupported(ui::WindowEffect::MicaAlt)) window_effect = L"none";
     menu_acrylic = pulse::json::ExtractBool(json, L"menu_acrylic", true);
     background_image = pulse::json::ExtractString(json, L"background_image");
     row_height = pulse::json::ExtractInt(json, L"row_height", 34);
@@ -752,6 +771,8 @@ bool AppPrefs::FromJson(const std::wstring& json) {
     }
     recent_tags = pulse::json::ExtractStringArray(json, L"recent_tags");
     if (recent_tags.size() > 5) recent_tags.resize(5);
+    extension_publish_trusted = pulse::json::ExtractStringArray(json, L"extension_publish_trusted");
+    if (extension_publish_trusted.size() > 64) extension_publish_trusted.resize(64);
     picker_folders = pulse::json::ExtractStringArray(json, L"picker_folders");
     std::erase_if(picker_folders, [](const std::wstring& line) {
         const size_t bar = line.find(L'|');

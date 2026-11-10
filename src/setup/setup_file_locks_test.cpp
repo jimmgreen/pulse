@@ -4,7 +4,7 @@
 #include <iostream>
 #include <iterator>
 using namespace pulse::setup;
-int ModuleFallback() {
+int ModuleFallback(bool end_owner = false) {
     unsigned checks = 0, failures = 0;
     auto check = [&](bool ok, const char* text) { ++checks; if (!ok) ++failures; std::cout << (ok ? "[PASS] " : "[FAIL] ") << text << '\n'; };
     const auto suffix = std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
@@ -31,9 +31,16 @@ int ModuleFallback() {
     std::cout << "Restart Manager status=" << report.identification_error << ", module_scan_complete=" << report.module_scan_complete << '\n';
     check(std::filesystem::file_size(file) == original_size && started && WaitForSingleObject(child.hProcess, 0) == WAIT_TIMEOUT,
         "owner remains running and DLL bytes remain present");
+    if (end_owner) {
+        bool ended = false;
+        for (const auto& program : report.programs) if (program.pid == child.dwProcessId)
+            ended = program.CanEnd() && EndLockedProgram(program) == ERROR_SUCCESS;
+        check(ended && WaitForSingleObject(child.hProcess, 0) == WAIT_OBJECT_0,
+            "identified module owner can be ended using recorded identity");
+    }
     SetEvent(release);
     if (started) {
-        check(WaitForSingleObject(child.hProcess, 10000) == WAIT_OBJECT_0, "module holder exits voluntarily");
+        check(WaitForSingleObject(child.hProcess, 10000) == WAIT_OBJECT_0, end_owner ? "module holder exit completes after explicit action" : "module holder exits voluntarily");
         CloseHandle(child.hThread); CloseHandle(child.hProcess);
     }
     check(InspectReplacementLocks(root.wstring(), {L"version.dll"}, true).Ready(), "mapped DLL retry is ready after owner exits");
@@ -53,6 +60,7 @@ int wmain(int argc, wchar_t** argv) {
         return 0;
     }
     if (argc == 2 && std::wstring(argv[1]) == L"--module-fallback") return ModuleFallback();
+    if (argc == 2 && std::wstring(argv[1]) == L"--end-module-owner") return ModuleFallback(true);
     if (argc == 5 && std::wstring(argv[1]) == L"--hold-loaded") {
         HANDLE ready = OpenEventW(EVENT_MODIFY_STATE, FALSE, argv[3]);
         HANDLE release = OpenEventW(SYNCHRONIZE, FALSE, argv[4]);
@@ -95,6 +103,22 @@ int wmain(int argc, wchar_t** argv) {
     check(identified, "Restart Manager identifies external holder PID");
     std::cout << "Restart Manager status=" << locked.identification_error << '\n';
     { std::ifstream in(file, std::ios::binary); std::string contents((std::istreambuf_iterator<char>(in)), {}); check(contents == "original-component", "inspection preserves original bytes while locked"); }
+    const bool end_mode = argc == 2 && std::wstring(argv[1]) == L"--end-owner";
+    if (end_mode && started) {
+        LockedProgram owner{child.dwProcessId, L"isolated holder"};
+        FILETIME exited{}, kernel{}, user{};
+        check(GetProcessTimes(child.hProcess, &owner.started, &exited, &kernel, &user) != FALSE, "capture exact fixture process identity");
+        auto stale = owner; ++stale.started.dwLowDateTime;
+        check(EndLockedProgram(stale) == ERROR_INVALID_DATA && WaitForSingleObject(child.hProcess, 0) == WAIT_TIMEOUT,
+            "stale PID identity leaves live process untouched");
+        auto unknown = owner; unknown.started = {};
+        check(EndLockedProgram(unknown) == ERROR_ACCESS_DENIED, "unverified identity is not ended");
+        auto self = owner; self.pid = GetCurrentProcessId();
+        check(EndLockedProgram(self) == ERROR_ACCESS_DENIED, "setup cannot terminate itself");
+        check(EndLockedProgram(owner) == ERROR_SUCCESS && WaitForSingleObject(child.hProcess, 0) == WAIT_OBJECT_0,
+            "explicit end action terminates only exact isolated owner");
+        check(EndLockedProgram(owner) == ERROR_SUCCESS, "already exited owner is idempotent");
+    }
     SetEvent(release);
     if (started) { check(WaitForSingleObject(child.hProcess, 10000) == WAIT_OBJECT_0, "holder releases normally"); CloseHandle(child.hThread); CloseHandle(child.hProcess); }
     check(InspectReplacementLocks(root.wstring(), {L"DialogBridge\\pulse.exe", L"missing.dll"}).Ready(), "retry succeeds after release");

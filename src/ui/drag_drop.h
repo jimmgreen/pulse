@@ -188,6 +188,8 @@ struct DropTargetCallbacks {
     // absent), so the badge matches what the drop will actually do.
     std::function<DWORD(const std::vector<std::wstring>& sources, POINT pt,
                         DWORD key_state, DWORD allowed, DWORD preferred)> drag_over;
+    // Timer-driven scrolling; true asks the target to refresh its row hit test.
+    std::function<bool(POINT)> drag_scroll;
     std::function<void()> drag_leave;
     // Same arguments as drag_over. Returns one allowed performed effect, or NONE.
     std::function<DWORD(const std::vector<std::wstring>& sources, POINT pt,
@@ -197,6 +199,9 @@ struct DropTargetCallbacks {
 class WindowDropTarget final : public IDropTarget {
 public:
     WindowDropTarget(HWND hwnd, DropTargetCallbacks cb);
+    ~WindowDropTarget();
+    static constexpr UINT_PTR kScrollTimer = 0xD512;
+    void TickScroll();
 
     IFACEMETHODIMP QueryInterface(REFIID riid, void** out) override;
     IFACEMETHODIMP_(ULONG) AddRef() override { return ++ref_; }
@@ -208,6 +213,10 @@ public:
 
 private:
     POINT ClientPoint(POINTL pt) const;
+    void StopScroll();
+    DWORD allowed_ = 0;
+    DWORD keys_ = 0;
+    bool scrolling_ = false;
 
     LONG ref_ = 1;
     HWND hwnd_ = nullptr;

@@ -588,18 +588,31 @@ void CollectSubmenuLeaves(IContextMenu* menu, IContextMenu2* menu2, IContextMenu
             deadline = GetTickCount64() + kNestedFlyoutBudgetMs;
     }
     const int sub_count = GetMenuItemCount(submenu);
-    for (int j = 0; j < sub_count && static_cast<int>(kids.size()) < kMaxSubmenuChildren; ++j) {
+    for (int j = 0; j < sub_count && j < kMaxSubmenuChildren &&
+         static_cast<int>(kids.size()) < pulse::ipc::kMaxMenuTreeRows; ++j) {
         MENUITEMINFOW sub{ sizeof(sub) };
         sub.fMask = MIIM_ID | MIIM_STATE | MIIM_FTYPE | MIIM_SUBMENU;
         if (!GetMenuItemInfoW(submenu, j, TRUE, &sub)) continue;
-        if (sub.fType & MFT_SEPARATOR) continue;
+        if (sub.fType & MFT_SEPARATOR) {
+            if (!kids.empty()) kids.back().separator_after = true;
+            continue;
+        }
         if (sub.hSubMenu) {
-            if (depth >= 1) continue;
-            const bool nested_enabled =
-                parent_enabled && !(sub.fState & (MFS_DISABLED | MFS_GRAYED));
+            if (depth + 1 >= pulse::ipc::kMaxMenuDepth) continue;
+            CtxItemOut header;
+            header.enabled = parent_enabled && !(sub.fState & (MFS_DISABLED | MFS_GRAYED));
+            header.child = true;
+            header.depth = static_cast<uint8_t>(depth + 1);
+            header.has_children = true;
+            header.text = MenuItemText(submenu, static_cast<UINT>(j), &header.mnemonic);
+            header.icon = MenuItemIcon(submenu, static_cast<UINT>(j));
+            if (header.text.empty()) continue;
+            const size_t index = kids.size();
+            kids.push_back(std::move(header));
             CollectSubmenuLeaves(menu, menu2, menu3, sub.hSubMenu, static_cast<UINT>(j),
-                                 background, id_first, nested_enabled, depth + 1, deadline,
+                                 background, id_first, kids[index].enabled, depth + 1, deadline,
                                  kids, open_with);
+            if (kids.size() == index + 1) kids.pop_back();
             continue;
         }
         wchar_t child_mnemonic = 0;
@@ -610,6 +623,7 @@ void CollectSubmenuLeaves(IContextMenu* menu, IContextMenu2* menu2, IContextMenu
         item.id = sub.wID;
         item.enabled = parent_enabled && !(sub.fState & (MFS_DISABLED | MFS_GRAYED));
         item.child = true;
+        item.depth = static_cast<uint8_t>(depth + 1);
         item.verb = CtxVerbOf(menu, sub.wID, id_first);
         // 选择其他应用 carries the builtin "openas" verb but belongs to the flyout.
         if (!open_with && IsBuiltinContextVerb(item.verb, background)) continue;

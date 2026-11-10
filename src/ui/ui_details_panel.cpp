@@ -186,7 +186,7 @@ void MainRenderer::DrawDetailsPanel(const WindowViewModel& vm, const D2D1_RECT_F
         const D2D1_RECT_F art = D2D1::RectF(
             (content.left + content.right - artWidth) * 0.5f, top,
             (content.left + content.right + artWidth) * 0.5f, top + artHeight);
-        const float svgOpacity = theme.bg.r > 0.5f ? 0.68f : 1.0f;
+        const float svgOpacity = 1.0f;
         if (!DrawNoSelectionSvg(art, svgOpacity)) {
             fluent::EmptyStateSpec empty;
             empty.bounds = content;

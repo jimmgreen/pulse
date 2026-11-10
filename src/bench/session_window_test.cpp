@@ -5,6 +5,7 @@
 // passing: old files migrate to windows[0], and the single-window fields that
 // older versions read stay ahead of windows[] in the file.
 #include "../app/session.h"
+#include "../app/session_save.h"
 #include "../app/app_model.h"
 #include "../app/places.h"
 
@@ -180,9 +181,42 @@ const wchar_t kFrozenV7[] =
 #include "session_window_v7_fixture.inc"
     ;
 
+int RunSessionHistorySaveTests() {
+    auto snapshot = SampleSession();
+    snapshot.undo_json.clear();
+    snapshot.undo_snapshot = std::make_shared<const std::wstring>(L"[{\"marker\":1}]");
+    std::wstring saved, layout, written;
+    std::shared_ptr<const std::wstring> undo;
+    int writes = 0;
+    bool fail = false;
+    const auto writer = [&](const std::wstring& json) { ++writes; written = json; return !fail; };
+    const auto save = [&](bool force = false) {
+        return SaveChangedSessionSnapshot(snapshot, saved, layout, undo, force, writer);
+    };
+    Check(save() && writes == 1 && save() && writes == 1, "history save: unchanged session skips full write");
+    SessionSnapshot parsed;
+    Check(ParseSessionJson(written, parsed) && parsed.undo_json == *snapshot.undo_snapshot,
+        "history save: shared history survives actual session serialization and parse");
+    Check(save(true) && writes == 2, "history save: force writes unchanged state");
+    snapshot.maximized = !snapshot.maximized;
+    Check(save() && writes == 3, "history save: layout change writes same undo snapshot");
+    const auto old = snapshot.undo_snapshot;
+    snapshot.undo_snapshot = std::make_shared<const std::wstring>(L"[{\"marker\":2}]");
+    Check(save() && writes == 4 && *old == L"[{\"marker\":1}]", "history save: new history identity writes and held payload is immutable");
+    snapshot.maximized = !snapshot.maximized;
+    fail = true;
+    const auto saved_before = saved;
+    Check(!save() && writes == 5 && saved == saved_before, "history save: failed write retains saved state");
+    fail = false;
+    Check(save() && writes == 6 && save() && writes == 6, "history save: failure retries then becomes clean");
+    std::printf("history-session-save: %d failed\n", g_failures);
+    return g_failures ? 1 : 0;
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "--history-save-only") == 0) return RunSessionHistorySaveTests();
     const SessionSnapshot sample = SampleSession();
     const std::wstring json = SessionToJson(sample);
     wchar_t dump[4]{};

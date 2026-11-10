@@ -3,6 +3,12 @@
 
 namespace pulse::ui {
 struct OpenWithIconCacheTest {
+    static void Publish(OpenWithIconCache& cache, unsigned index, size_t bytes) {
+        OpenWithIconCache::Pixels pixels; pixels.data.resize(bytes);
+        cache.PublishReadyLocked(L".test" + std::to_wstring(index), std::move(pixels));
+    }
+    static size_t ReadyCount(OpenWithIconCache& cache) { return cache.ready_.size(); }
+    static size_t ReadyBytes(OpenWithIconCache& cache) { return cache.ready_bytes_; }
     static void HoldWorker(OpenWithIconCache& cache) { cache.running_ = true; }
     static size_t Queued(OpenWithIconCache& cache) { return cache.queue_.size(); }
     static void Complete(OpenWithIconCache& cache, const wchar_t* extension, bool found) {
@@ -12,7 +18,7 @@ struct OpenWithIconCacheTest {
             pixels.width = pixels.height = 1;
             pixels.data = {0, 0, 255, 255};
         }
-        cache.ready_[key] = std::move(pixels);
+        cache.PublishReadyLocked(key, std::move(pixels));
         cache.pending_.erase(key);
     }
 };
@@ -36,6 +42,17 @@ int main() {
     if (SUCCEEDED(hr)) hr = device->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc);
     check(SUCCEEDED(hr), "create real software D2D device");
     if (FAILED(hr)) return 1;
+    {
+        OpenWithIconCache bounded;
+        for (unsigned i = 0; i < 2000; ++i) OpenWithIconCacheTest::Publish(bounded, i, 96 * 96 * 4);
+        check(OpenWithIconCacheTest::ReadyCount(bounded) <= 256 && OpenWithIconCacheTest::ReadyBytes(bounded) <= 4 * 1024 * 1024,
+            "abandoned ready results stay within count and byte budgets");
+        for (unsigned i = 0; i < 2000; ++i) OpenWithIconCacheTest::Publish(bounded, i, 0);
+        check(OpenWithIconCacheTest::ReadyCount(bounded) <= 256, "missing-icon results also have a count bound");
+        bounded.InvalidateAssociations();
+        check(OpenWithIconCacheTest::ReadyCount(bounded) == 0 && OpenWithIconCacheTest::ReadyBytes(bounded) == 0,
+            "association invalidation resets pending result accounting");
+    }
     OpenWithIconCache cache;
     cache.SetDeviceContext(dc.get());
     OpenWithIconCacheTest::HoldWorker(cache);

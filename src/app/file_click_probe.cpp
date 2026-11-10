@@ -73,7 +73,7 @@ int RunFileClickProbe(pulse::AppState& s, FILE* log) {
         const auto end = GetTickCount64() + duration;
         MSG message{};
         while (GetTickCount64() < end) {
-            while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+            while (GetTickCount64() < end && PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
                 TranslateMessage(&message); DispatchMessageW(&message);
             }
             Sleep(1);
@@ -131,7 +131,9 @@ int RunFileClickProbe(pulse::AppState& s, FILE* log) {
     };
     const auto locate = [&](POINT& point, int& row) {
         auto* tab = ActiveTab(s);
-        tab->view_mode = ui::ViewMode::Details;
+        wchar_t view[32]{};
+        GetEnvironmentVariableW(L"PULSE_TEST_FILE_CLICK_VIEW", view, ARRAYSIZE(view));
+        tab->view_mode = wcscmp(view, L"icons") == 0 ? ui::ViewMode::LargeIcons : ui::ViewMode::Details;
         tab->scroll_y = 0;
         const auto vm = BuildVm(s, false);
         const auto bounds = D2D1::RectF(0, 0, static_cast<float>(s.compositor.Width()), static_cast<float>(s.compositor.Height()));
@@ -166,7 +168,10 @@ int RunFileClickProbe(pulse::AppState& s, FILE* log) {
     };
     const auto click = [&] { event(WM_LBUTTONDOWN, MK_LBUTTON); event(WM_LBUTTONUP); };
     const auto interval = static_cast<ULONGLONG>(GetDoubleClickTime());
+    fprintf(log, "[SYSTEM] double_click_ms=%llu cx=%d cy=%d\n", interval,
+        GetSystemMetrics(SM_CXDOUBLECLK), GetSystemMetrics(SM_CYDOUBLECLK));
     const auto physical = [&](DWORD flags) {
+        const auto injected_at = GetTickCount64();
         POINT screen = point;
         ClientToScreen(s.hwnd, &screen);
         HWND hit = WindowFromPoint(screen);
@@ -181,6 +186,9 @@ int RunFileClickProbe(pulse::AppState& s, FILE* log) {
         if (!check(SendInput(1, &input, sizeof(INPUT)) == 1, "physical file click input delivered")) return false;
         pointer.pressed = (flags & MOUSEEVENTF_LEFTDOWN) != 0;
         pump(15);
+        fprintf(log, "[INPUT] flags=%lu injected=%llu pump_elapsed=%llu x=%ld y=%ld\n",
+            flags, injected_at, GetTickCount64() - injected_at, point.x, point.y);
+        fflush(log);
         return true;
     };
     const auto physical_click = [&] { return physical(MOUSEEVENTF_LEFTDOWN) && physical(MOUSEEVENTF_LEFTUP); };
@@ -198,6 +206,35 @@ int RunFileClickProbe(pulse::AppState& s, FILE* log) {
     if (!physical_click()) return 4;
     pump(interval + 100);
     check(s.renameIndex == row && IsWindowVisible(s.hwndRenameEdit), "slow name click opens actual rename editor");
+    for (const bool preselected : {false, true}) {
+        if (!reset()) return 3;
+        if (!preselected) ActiveTab(s)->ClearSelection();
+        pump(interval + 100);
+        const POINT first = point;
+        if (!physical_click()) return 4;
+        point.x += GetSystemMetrics(SM_CXDOUBLECLK) + 8;
+        if (!physical_click()) return 4;
+        pump(interval + 100);
+        check(s.renameIndex < 0 && !s.fileClick.RenamePending(), preselected
+            ? "fast displaced clicks on selected name never become rename"
+            : "fast displaced selection clicks never become rename");
+        check(ActiveTab(s)->current_path == root, "unrecognized displaced double click never guesses an open");
+        point = first;
+        if (s.renameIndex >= 0) HideRenameOverlay(s, false);
+        pump(interval + 100);
+        if (!physical_click()) return 4;
+        pump(interval + 100);
+        check(s.renameIndex == row, "slow name click after rapid sequence still enters rename");
+    }
+    if (!reset()) return 3;
+    ActiveTab(s)->ClearSelection();
+    pump(interval + 100);
+    if (!physical_click()) return 4;
+    pump(interval + 100);
+    check(s.renameIndex < 0, "first selecting click alone never renames");
+    if (!physical_click()) return 4;
+    pump(interval + 100);
+    check(s.renameIndex == row, "select then deliberate slow click keeps native rename route");
     if (!reset()) return 3;
     event(WM_LBUTTONDOWN, MK_LBUTTON); pump(interval + 100);
     check(s.renameIndex < 0, "held first press cannot start rename");

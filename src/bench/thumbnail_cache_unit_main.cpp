@@ -1,7 +1,9 @@
 ﻿#include <cstring>
 bool RunThumbnailCacheTests();
+bool RunBoundedImageRetryRegression();
 bool RunThumbnailRetryRegression();
 bool RunThumbnailDownloadRetryRegression();
+bool RunThumbnailEditorSaveRegression();
 bool RunThumbnailInterestRegression();
 bool RunThumbnailVolumeRegression();
 bool RunThumbnailMemoryRegression();
@@ -10,6 +12,8 @@ bool RunThumbnailIdleRegression(bool baseline);
 bool RunThumbnailUploadRegression();
 bool RunPsdProgressiveRegression(const char* fixture);
 int main(int argc, char** argv) {
+    if (argc == 2 && std::strcmp(argv[1], "--bounded-image-retry") == 0) return RunBoundedImageRetryRegression() ? 0 : 1;
+    if (argc == 2 && std::strcmp(argv[1], "--editor-save") == 0) return RunThumbnailEditorSaveRegression() ? 0 : 1;
     if (argc == 2 && std::strcmp(argv[1], "--download-retry") == 0) return RunThumbnailDownloadRetryRegression() ? 0 : 1;
     if (argc >= 2 && std::strcmp(argv[1], "--psd-progressive") == 0)
         return RunPsdProgressiveRegression(argc >= 3 ? argv[2] : nullptr) ? 0 : 1;

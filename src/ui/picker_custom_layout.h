@@ -1,6 +1,11 @@
 #pragma once
 #include <algorithm>
+#include <cstdint>
 namespace pulse::ui {
+constexpr uint32_t kPickerCustomSeparator = 9;
+inline bool PickerCustomInteractive(uint32_t kind) {
+    return kind != 1 && kind != 5 && kind != kPickerCustomSeparator;
+}
 struct PickerCustomSections {
     float prominent_top = 0;
     float content_height = 0;

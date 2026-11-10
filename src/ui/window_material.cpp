@@ -144,13 +144,6 @@ IWICBitmapSource* ToDisplayPixels(IWICImagingFactory* wic, IWICBitmapFrameDecode
     return converter.get();
 }
 
-// The kernel's build: under a compatibility layer RtlGetVersion reports 7601 /
-// 9200 on Windows 11 and Mica / rounded corners were wrongly turned off.
-bool IsWindows11OrLater() noexcept {
-    static const bool value = pulse::os::TrueWindowsBuild() >= 22000;
-    return value;
-}
-
 DWORD BackdropTypeForEffect(WindowEffect effect) noexcept {
     switch (effect) {
     case WindowEffect::Acrylic: return DWMSBT_TRANSIENTWINDOW;
@@ -553,7 +546,7 @@ bool ApplyWindowEffect(HWND hwnd, WindowEffect effect, bool dark) noexcept {
     const DWORD corner = DWMWCP_ROUND;
     DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
 
-    if (IsHighContrast() || !compat::ModernWindows() || !IsWindows11OrLater()) {
+    if (IsHighContrast() || !WindowEffectSupported(effect)) {
         effect = WindowEffect::None;
     }
 
@@ -583,7 +576,7 @@ bool ApplyWindowEffect(HWND hwnd, WindowEffect effect, bool dark) noexcept {
         DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &caption, sizeof(caption));
     }
 
-    const MARGINS margins{ -1 };
+    const MARGINS margins = effect == WindowEffect::None ? MARGINS{} : MARGINS{ -1 };
     DwmExtendFrameIntoClientArea(hwnd, &margins);
     return WindowEffectUsesBackdrop(effect) && SUCCEEDED(hr);
 }

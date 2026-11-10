@@ -16,6 +16,7 @@
 #include "video_preview.h"
 #include "audio_waveform.h"
 #include "quick_preview_command.h"
+#include "quick_preview_size_probe.h"
 #include "open_with_icons.h"
 
 #include <string>
@@ -270,7 +271,9 @@ private:
     void EnterFullScreen();
     void LeaveFullScreen(bool restore_rect);
     bool ContentPixelSize(uint32_t& width, uint32_t& height) const;  // decoded / probed
-    bool ProbeContentSize(uint32_t& width, uint32_t& height) const;  // file header only
+    void BeginContentSizeProbe();
+    QuickPreviewSizeProbe size_probe_;
+    uint32_t probe_w_ = 0, probe_h_ = 0;
     int SizingChromeHeight() const;
     void FitToContent(uint32_t width, uint32_t height);              // 适应内容, keeps the centre
     void ReportOptions();

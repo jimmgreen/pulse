@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <chrono>
 #include "../app/link_resolve.h"
+#include "../app/link_resolve_batch.h"
 #include "../app/snapshot_patch.h"
 #include "../fs/drive_kind.h"
 #include "../ops/shortcut_launch.h"
@@ -229,7 +230,63 @@ static int TestRemoteNotify() {
     return failures ? 1 : 0;
 }
 
+static int TestBoundedLinks() {
+    using namespace pulse::app;
+    std::vector<int> entries{1, 2, 3};
+    ResolveLinkBatch(entries, [](int& value) { value += 10; }, [] { return false; });
+    Check(entries == std::vector<int>({11, 12, 13}), "completed link metadata is retained");
+    auto release = std::make_shared<std::atomic_bool>(false);
+    auto started = std::make_shared<std::atomic<unsigned>>(0);
+    const auto stalled = [release, started](int& value) {
+        ++*started;
+        while (!release->load()) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        value = 99;
+    };
+    entries = {1};
+    const auto start = std::chrono::steady_clock::now();
+    ResolveLinkBatch(entries, stalled, [] { return false; }, std::chrono::milliseconds(20));
+    Check(entries[0] == 1 && std::chrono::steady_clock::now() - start < std::chrono::milliseconds(500),
+        "stalled provider returns within budget without replacing listing");
+    std::vector<int> second{2};
+    ResolveLinkBatch(second, stalled, [] { return false; }, std::chrono::milliseconds(20));
+    std::vector<int> third{3};
+    ResolveLinkBatch(third, stalled, [] { return false; });
+    Check(started->load() == 2 && third[0] == 3, "stalled providers cannot exhaust navigation threads");
+    *release = true;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (active_link_batches && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    Check(!active_link_batches && entries[0] == 1 && second[0] == 2,
+        "late completion releases quota without writing to published snapshots");
+    ResolveLinkBatch(third, [](int& value) { value = 99; }, [] { return true; });
+    Check(third[0] == 3, "cancelled navigation does not resolve metadata");
+    ResolveLinkBatch(third, [](int&) { throw 1; }, [] { return false; });
+    Check(third[0] == 3 && !active_link_batches, "provider failure keeps listing and releases quota");
+
+    const auto root = std::filesystem::absolute(L"bench_data/bounded-links-" + std::to_wstring(GetCurrentProcessId()));
+    std::filesystem::create_directories(root);
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    Check(SUCCEEDED(com), "initialize shortcut fixture COM");
+    const auto shortcut = root / L"offline.lnk";
+    Check(MakeShortcut(shortcut, L"\\\\192.0.2.1\\pulse-unreachable\\target.txt"), "create offline network shortcut");
+    pulse::fs::DirEntry entry;
+    const auto before = std::chrono::steady_clock::now();
+    Check(!ResolveLink(shortcut.wstring(), entry) && entry.link_target.empty() &&
+        !entry.link_destination.empty() && std::chrono::steady_clock::now() - before < std::chrono::milliseconds(500),
+        "offline shortcut preserves destination without probing target");
+    std::vector<pulse::fs::DirEntry> listing;
+    pulse::fs::EnumerateDirectory(root.wstring(), listing);
+    const auto batch_start = std::chrono::steady_clock::now();
+    ResolveLinksInPlace(root.wstring(), listing, {});
+    Check(listing.size() == 1 && std::chrono::steady_clock::now() - batch_start < std::chrono::milliseconds(500),
+        "directory containing offline shortcut remains promptly available");
+    Check(DeleteFileW(shortcut.c_str()) && RemoveDirectoryW(root.c_str()), "remove bounded-link fixtures");
+    if (SUCCEEDED(com)) CoUninitialize();
+    return failures ? 1 : 0;
+}
+
 int main(int argc, char** argv) {
+    if (argc == 2 && strcmp(argv[1], "--bounded-links") == 0) return TestBoundedLinks();
     if (argc == 3 && strcmp(argv[1], "--shortcut-latency") == 0) {
         const auto root = std::filesystem::absolute(std::filesystem::path(argv[2]));
         std::vector<pulse::fs::DirEntry> entries;

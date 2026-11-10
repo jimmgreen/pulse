@@ -946,14 +946,14 @@ void TakeTrayClip(AppState& s) {
     if (s.hwnd) InvalidateRect(s.hwnd, nullptr, FALSE);
 }
 void HandleUndoHistoryAction(AppState& s, uint64_t task_id, bool undone, bool locate) {
-    const auto history = s.ops.UndoHistory();
-    const auto found = std::find_if(history.entries.begin(), history.entries.end(), [&](const auto& row) {
-        return row.entry.task_id == task_id && row.undone == undone;
+    const auto history = s.ops.UndoHistorySummary();
+    const auto found = std::find_if(history.begin(), history.end(), [&](const auto& row) {
+        return row.task_id == task_id && row.undone == undone;
     });
-    if (found == history.entries.end()) return;
+    if (found == history.end()) return;
     const auto& item = *found;
     if (locate) {
-        const auto& paths = item.undone || item.entry.destinations.empty() ? item.entry.sources : item.entry.destinations;
+        const auto paths = s.ops.UndoHistoryPreviewPaths(task_id);
         if (paths.empty()) return;
         const auto folder = fs::ParentPath(paths.front());
         if (folder.empty()) return;
@@ -965,9 +965,9 @@ void HandleUndoHistoryAction(AppState& s, uint64_t task_id, bool undone, bool lo
         for (const auto& path : paths) ExpectArrival(s, path);
         if (s.pane) if (auto* tab = s.pane->ActiveTab()) ApplyArrivalSelection(s, *s.pane, *tab, true);
         s.undoHistoryOpen = false;
-    } else if (item.entry.supported) {
-        if (item.undone) s.ops.RedoTo(item.entry.task_id);
-        else s.ops.UndoTo(item.entry.task_id);
+    } else if (item.supported) {
+        if (item.undone) s.ops.RedoTo(item.task_id);
+        else s.ops.UndoTo(item.task_id);
     }
     s.undoHistoryOffset = 0;
     InvalidateRect(s.hwnd, nullptr, FALSE);
@@ -1122,6 +1122,7 @@ void MoveOperationUi(AppState& from, AppState& to) {
     to.operationAutoShown = from.operationAutoShown;
     to.operationPinnedByUser = from.operationPinnedByUser;
     to.operationStartedAt = from.operationStartedAt;
+    to.operationAutoShowFrom = from.operationAutoShowFrom;
     to.operationFinishedAt = from.operationFinishedAt;
     const bool shown = OperationWindowVisible(from);
     if (shown) from.operationWindow->Hide();
@@ -1470,7 +1471,7 @@ void UpdateOperationWindow(AppState& s, bool allow_conflict_dialog) {
         return;
     }
 
-    const auto history = s.ops.UndoHistory();
+    const auto history = s.ops.HistoryProgress();
     if (history.completed_sequence != s.undoHistoryNotified) {
         s.undoHistoryNotified = history.completed_sequence;
         if (history.completed_steps > 0 || !history.completed_success) {
@@ -1489,7 +1490,7 @@ void UpdateOperationWindow(AppState& s, bool allow_conflict_dialog) {
     // Built on first show (EnsureOperationWindow): most windows never need one.
     const auto now = std::chrono::steady_clock::now();
     const ops::OpStatus status = s.ops.Status();
-    if (!s.appPrefs.status_hints_learned && (status.task_id != 0 || !history.entries.empty())) {
+    if (!s.appPrefs.status_hints_learned && (status.task_id != 0 || history.has_entries)) {
         s.appPrefs.status_hints_learned = true;
         s.appPrefs.Save();
     }
@@ -1501,6 +1502,7 @@ void UpdateOperationWindow(AppState& s, bool allow_conflict_dialog) {
         s.operationAutoShown = false;
         s.operationPinnedByUser = false;
         s.operationStartedAt = now;
+        s.operationAutoShowFrom = now;
         s.operationFinishedAt = {};
     }
 
@@ -1574,9 +1576,13 @@ void UpdateOperationWindow(AppState& s, bool allow_conflict_dialog) {
         const bool emptying = status.type == ops::OpType::EmptyRecycle;
         const auto delay = emptying ? std::chrono::milliseconds(400) : kOperationAutoShowDelay;
         const bool nearly_done = !emptying && status.percent >= 90.0f;
+        // A modal prompt (for example an archive password or the write confirmation) must stay
+        // above progress, and the delay restarts after it so the window does not pop up in the
+        // short gap between two prompts.
+        if (!IsWindowEnabled(s.hwnd)) s.operationAutoShowFrom = now;
         if (!quick_type && !s.operationAutoShown && !nearly_done &&
             status.phase != ops::OpPhase::WaitingForConflict &&
-            now - s.operationStartedAt >= delay) {
+            now - s.operationAutoShowFrom >= delay) {
             s.operationAutoShown = true;
             if (!OperationWindowVisible(s)) ShowOperationWindow(s, status, false);
         }

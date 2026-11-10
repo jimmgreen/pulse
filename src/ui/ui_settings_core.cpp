@@ -328,12 +328,12 @@ void MainRenderer::DrawSettingsCore(const WindowViewModel& vm, const D2D1_RECT_F
             control.state.hovered=IsHovered(vm,H::SettingsDropdown,id);
             painter_.DrawButton(control);
         };
-        label(lay.effect_card,l10n::Get(I::SettingsWindowEffect),l10n::Get(compat::ModernWindows() ? I::SettingsWindowEffectDesc : I::EffectUnavailable),L"\xE81E",lay.effect_card.right-16*scale_);
+        label(lay.effect_card,l10n::Get(I::SettingsWindowEffect),l10n::Get(WindowEffectSupported(WindowEffect::Mica) ? I::SettingsWindowEffectDesc : I::EffectUnavailable),L"\xE81E",lay.effect_card.right-16*scale_);
         for(int i=0;i<kWindowEffectCount;++i) {
             const auto r=lay.effect_row[i];
             auto preview=r;preview.bottom-=22*scale_;
-            const bool enabled=i==0 || compat::ModernWindows();
-            const bool selected=i==static_cast<int>(compat::ModernWindows() ? vm.window_effect : WindowEffect::None);
+            const bool enabled=WindowEffectSupported(static_cast<WindowEffect>(i));
+            const bool selected=i==static_cast<int>(SupportedWindowEffect(vm.window_effect));
             const bool hovered=enabled && IsHovered(vm,H::SettingsEffect,i);
             const float tint[]={0.0f,0.22f,0.065f,0.16f};
             auto background=BlendOver(WithAlpha(theme.accent,tint[i]),theme.surface_title);

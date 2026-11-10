@@ -120,6 +120,8 @@ inline wchar_t MenuMnemonic(std::wstring_view raw) {
 
 // At most this many children per software-owned submenu flyout.
 inline constexpr int kMaxSubmenuChildren = 16;
+inline constexpr int kMaxMenuDepth = 16;
+inline constexpr int kMaxMenuTreeRows = 512;
 // Static-verb command packing: parent index * stride + child (0 = parent).
 // Stays inside CmdShellStaticBase..CmdShellComBase (2000 slots).
 inline constexpr int kStaticVerbStride = kMaxSubmenuChildren + 1;

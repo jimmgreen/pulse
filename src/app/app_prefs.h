@@ -139,6 +139,8 @@ struct AppPrefs {
     // Quick search popup size in DIP after the user resized it; 0 = default.
     int global_search_width = 0;
     int global_search_height = 0;
+    bool global_search_positioned = false;
+    int global_search_x = 0, global_search_y = 0;
     // Two clean Ctrl taps summon the quick search popup too (with global search on).
     bool global_search_double_ctrl = true;
     int global_search_double_ctrl_ms = 300; // longest gap between the taps: 200 / 300 / 400
@@ -245,6 +247,8 @@ struct AppPrefs {
     std::vector<uint32_t> custom_tag_colors;
     // Tag ids the tag panel lists under 最近用过, newest first (at most 5).
     std::vector<std::wstring> recent_tags;
+    // Extension package ids whose generated files publish without asking each time.
+    std::vector<std::wstring> extension_publish_trusted;
     // Pulse's folder picker, per entry point (#58-9): one "key|folder" line
     // each, newest first, so the tray, duplicate scan, quick access... each
     // open where they were last used instead of overwriting one another.

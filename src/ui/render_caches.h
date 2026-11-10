@@ -25,7 +25,9 @@ struct RenderCaches {
     // Grid/list thumbnails and the details-pane preview decode through
     // separate hosts and budgets: a 2048 px selection preview (up to 16 MB)
     // must neither evict the visible grid nor queue ahead of it.
-    ThumbnailCache thumbnails{96ull * 1024ull * 1024ull, 1024};
+    // Grid + folder artwork remains capped at 112 MiB in total. Reserve
+    // 32 MiB full-size + 8 MiB compact folder artwork, without growing the total.
+    ThumbnailCache thumbnails{72ull * 1024ull * 1024ull, 1024};
     FolderThumbnailCache folder_thumbnails;
     ThumbnailCache details{48ull * 1024ull * 1024ull, 24};
     // The hover preview card: its own host, so resting on a file never

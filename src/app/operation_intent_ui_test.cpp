@@ -286,6 +286,64 @@ static bool RunArrivalResultsTest() {
     ExpectArrival(s, many->at(76).full_path);
     check(ApplyArrivalSelection(s, *s.pane, *tab, true) && tab->SelectedCount() == 2,
         "multiple outputs stay selected together");
+    // A second archive operation must not inherit the previous operation's
+    // selected outputs after the user selects the source archive again.
+    tab->SelectOnly(0);
+    ArmArrivalSelection(s, s.pane, 701, 0);
+    ops::CompletedOperation extracted;
+    extracted.task_id = 701;
+    extracted.type = ops::OpType::Move;
+    extracted.destinations = {many->at(50).full_path, many->at(51).full_path};
+    NoteArrivalCompletion(s, extracted);
+    check(ApplyArrivalSelection(s, *s.pane, *tab, true) && tab->IsSelected(50) && tab->IsSelected(51) &&
+        !tab->IsSelected(0), "repeat extraction replaces archive selection with actual outputs");
+
+    tab->SelectOnly(0);
+    ArmArrivalSelection(s, s.pane, 702, 0);
+    tab->SelectOnly(1);
+    extracted.task_id = 702;
+    NoteArrivalCompletion(s, extracted);
+    check(!ApplyArrivalSelection(s, *s.pane, *tab, true) && tab->IsSelected(1) && s.arrivalSelect.dir.empty(),
+        "manual selection before first output prevents late selection theft");
+
+    s.arrivalSelect = {}; tab->SelectOnly(0);
+    ArmArrivalSelection(s, s.pane, 703, 0);
+    auto with_temporary = std::make_shared<std::vector<fs::DirEntry>>(*many);
+    fs::DirEntry temporary; temporary.name = L".pulse-stage-unrelated";
+    with_temporary->push_back(temporary);
+    tab->SetSnapshot(with_temporary);
+    check(!ApplyArrivalSelection(s, *s.pane, *tab, true) && tab->IsSelected(0),
+        "tracked operations ignore unrelated and staging arrivals");
+    extracted.task_id = 703;
+    extracted.destinations = {many->at(52).full_path + L"\\nested.txt"};
+    NoteArrivalCompletion(s, extracted);
+    check(ApplyArrivalSelection(s, *s.pane, *tab, true) && tab->IsSelected(52),
+        "nested extraction output selects its visible top-level folder");
+
+    tab->SetSnapshot(many); tab->SelectOnly(0); s.arrivalSelect = {};
+    ArmArrivalSelection(s, s.pane, 704, 0);
+    ArmArrivalSelection(s, s.pane, 705, 0);
+    extracted.task_id = 704; extracted.destinations = {many->at(53).full_path};
+    NoteArrivalCompletion(s, extracted);
+    extracted.task_id = 705; extracted.destinations = {many->at(54).full_path};
+    NoteArrivalCompletion(s, extracted);
+    ops::FinishedTask finished; finished.task_id = 705; finished.success = true;
+    NoteArrivalFinished(s, finished);
+    check(ApplyArrivalSelection(s, *s.pane, *tab, true) && tab->IsSelected(53) && tab->IsSelected(54),
+        "concurrent copy and extraction retain both actual result sets");
+
+    s.arrivalSelect = {}; tab->SelectOnly(0);
+    const auto shell_started = GetTickCount64();
+    ArmArrivalSelection(s, s.pane, 0, 8000);
+    check(s.arrivalSelect.until >= shell_started + 60000,
+        "external archive dialog has time before its first output");
+    ++tab->view_generation;
+    check(!ApplyArrivalSelection(s, *s.pane, *tab, true) && s.arrivalSelect.dir.empty(),
+        "navigation generation change invalidates pending result selection");
+    // Restore the screenshot's multi-output selection and centering.
+    ArmArrivalSelection(s, s.pane, 706, 0);
+    ExpectArrival(s, many->at(75).full_path); ExpectArrival(s, many->at(76).full_path);
+    ApplyArrivalSelection(s, *s.pane, *tab, true);
     tab->loading = false;
     auto vm = BuildVm(s, false);
     bool drawn = true;
@@ -295,6 +353,7 @@ static bool RunArrivalResultsTest() {
         drawn = SUCCEEDED(s.compositor.Dc()->EndDraw()) && drawn;
         Sleep(16);
     }
+    std::filesystem::create_directories(L"bench_data/arrival_center");
     check(drawn &&
         s.compositor.SaveSnapshot(L"bench_data/arrival_center/selected.png"), "centered result screenshot saved");
     s.renderer.SetCompositor(nullptr); s.compositor.Shutdown();

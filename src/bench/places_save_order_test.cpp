@@ -35,6 +35,9 @@ void PlacesSaveTestStage(unsigned stage) {
 struct PlacesSaveTestAccess {
     static void Queue(const PlacesCatalog& value) { value.QueuePlacesSave(); }
     static void Stop(PlacesCatalog& value) { value.StopPlacesWriter(); }
+    static std::unique_lock<std::mutex> HoldIo(PlacesCatalog& value) {
+        return std::unique_lock(value.places_save_io_mutex_);
+    }
     static bool Dirty(const PlacesCatalog& value) {
         std::lock_guard lock(value.places_save_mutex_);
         return value.places_save_due_ != 0;
@@ -49,6 +52,56 @@ int wmain(int argc, wchar_t** argv) {
     fs::create_directories(parent);
     if (!fs::create_directory(base)) return 1;
     const auto old = (base / L"old.txt").wstring(), added = (base / L"added.txt").wstring();
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--rename") {
+        fixture = base.wstring();
+        const auto final = (base / L"final.txt").wstring();
+        {
+            PlacesCatalog catalog;
+            catalog.persist = false;
+            catalog.ToggleStarred(old, PlaceItemKind::File);
+            catalog.RecordRecent(old, PlaceItemKind::File);
+            catalog.persist = true;
+            Check(catalog.Save(), "rename baseline catalog is persisted");
+            auto io = PlacesSaveTestAccess::HoldIo(catalog);
+            HANDLE completed = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            ULONGLONG elapsed = 0;
+            std::jthread rename([&] {
+                const auto start = GetTickCount64();
+                catalog.RemapPaths(old, added);
+                catalog.RemapPaths(added, final);
+                elapsed = GetTickCount64() - start;
+                SetEvent(completed);
+            });
+            Check(WaitForSingleObject(completed, 300) == WAIT_OBJECT_0,
+                "rename completion returns while catalog disk writer is blocked");
+            io.unlock();
+            rename.join();
+            CloseHandle(completed);
+            std::cout << "rename_completion_ms=" << elapsed << '\n';
+            PlacesSaveTestAccess::Stop(catalog);
+            Check(catalog.IsStarred(final) && !catalog.IsStarred(old) && !catalog.IsStarred(added),
+                "successive renames immediately update in-memory assignments");
+            PlacesCatalog loaded;
+            loaded.persist = false;
+            Check(loaded.Load() && loaded.IsStarred(final) && !loaded.IsStarred(old) &&
+                loaded.FindRecent(final) != nullptr && loaded.FindRecent(old) == nullptr,
+                "latest rename survives queued writer ordering and reload");
+            HANDLE locked = CreateFileW((fixture + L"\\places.json").c_str(), GENERIC_READ, 0,
+                nullptr, OPEN_EXISTING, 0, nullptr);
+            Check(locked != INVALID_HANDLE_VALUE, "rename persistence failure is injected");
+            catalog.RemapPaths(final, old);
+            PlacesSaveTestAccess::Stop(catalog);
+            Check(catalog.IsStarred(old) && PlacesSaveTestAccess::Dirty(catalog),
+                "failed rename save preserves in-memory result and pending retry");
+            if (locked != INVALID_HANDLE_VALUE) CloseHandle(locked);
+            Check(catalog.FlushPendingSave(true) && !PlacesSaveTestAccess::Dirty(catalog),
+                "rename save retries successfully after disk becomes available");
+        }
+        CloseHandle(entered); CloseHandle(released); CloseHandle(dirty_entered);
+        if (base.parent_path() != parent || !base.filename().wstring().starts_with(L"places-save-order-")) return 1;
+        fs::remove_all(base);
+        return failures ? 1 : 0;
+    }
     if (argc == 2 && std::wstring_view(argv[1]) == L"--picker") {
         {
             using Action = pulse::picker_places::ManagePlacesAction;

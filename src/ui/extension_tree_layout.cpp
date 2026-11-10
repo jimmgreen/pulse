@@ -13,6 +13,8 @@ D2D1_RECT_F Intersect(D2D1_RECT_F a, D2D1_RECT_F b) {
 bool Contains(D2D1_RECT_F rect, float x, float y) {
     return x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
 }
+constexpr float kCardPadX = 16, kCardPadY = 12;
+bool Card(const UiNode &node) { return node.type == UiNodeType::Group && node.bordered; }
 bool Container(UiNodeType type) {
     return type == UiNodeType::Stack || type == UiNodeType::Grid || type == UiNodeType::Group ||
            type == UiNodeType::Tabs || type == UiNodeType::Tab || type == UiNodeType::ScrollView ||
@@ -117,9 +119,12 @@ float ExtensionTreeLayout::Measure(const UiNode &node, float width, const Extens
     if (node.type == UiNodeType::SplitPane)
         return ConstrainHeight(node, std::max(240, node.min_height) * scale_);
     const float gap = node.gap * scale_;
+    const bool card = Card(node);
+    if (card)
+        width = std::max(1.0f, width - 2 * kCardPadX * scale_);
     float used = 0;
-    if (node.type == UiNodeType::Group || node.type == UiNodeType::Tabs || node.type == UiNodeType::SidebarSection ||
-        node.type == UiNodeType::StagingTray)
+    if ((node.type == UiNodeType::Group && (!card || !node.text.empty())) || node.type == UiNodeType::Tabs ||
+        node.type == UiNodeType::SidebarSection || node.type == UiNodeType::StagingTray)
         used = callbacks.measure(node, width) + gap;
     auto flow = ChildFlow(node, width, callbacks);
     float row = 0;
@@ -136,7 +141,7 @@ float ExtensionTreeLayout::Measure(const UiNode &node, float width, const Extens
     }
     if (column)
         used += row + gap;
-    return ConstrainHeight(node, std::max(0.0f, used - gap));
+    return ConstrainHeight(node, std::max(0.0f, used - gap) + (card ? 2 * kCardPadY * scale_ : 0.0f));
 }
 void ExtensionTreeLayout::Reset() {
     viewports_.clear();
@@ -193,9 +198,18 @@ float ExtensionTreeLayout::Place(const UiNode &node, float x, float y, float wid
         }
         return visible ? height : 0;
     }
+    // A bordered group is a card: its heading and children sit inside the padding; the card's own
+    // bounds (placed last) cover the whole card so it can paint the surface under them.
+    const bool card = Card(node);
+    const float card_x = x, card_y = y, card_width = width;
+    if (card) {
+        x += kCardPadX * scale_;
+        y += kCardPadY * scale_;
+        width = std::max(1.0f, width - 2 * kCardPadX * scale_);
+    }
     float heading = 0;
-    if (node.type == UiNodeType::Group || node.type == UiNodeType::Tabs || node.type == UiNodeType::SidebarSection ||
-        node.type == UiNodeType::StagingTray) {
+    if ((node.type == UiNodeType::Group && (!card || !node.text.empty())) || node.type == UiNodeType::Tabs ||
+        node.type == UiNodeType::SidebarSection || node.type == UiNodeType::StagingTray) {
         float height = callbacks.measure(node, width);
         D2D1_RECT_F bounds{x, y, x + width, y + height};
         placements_[&node] = {bounds, ancestors};
@@ -246,14 +260,28 @@ float ExtensionTreeLayout::Place(const UiNode &node, float x, float y, float wid
         float available = allocated_height > 0 ? allocated_height : root ? root_height : node.min_height * scale_;
         Distribute(heights, limits, weights, available - (count ? gap * static_cast<float>(count - 1) : 0));
     }
+    // A horizontal stack with alignment "center" centres each child on the row (a title beside a switch).
+    std::vector<float> offsets(node.children.size(), 0);
+    if (node.type == UiNodeType::Stack && node.orientation == "horizontal" && node.alignment == "center") {
+        float tallest = 0;
+        for (size_t index = 0; index < node.children.size(); ++index)
+            if (ChildVisible(node, index, callbacks)) {
+                offsets[index] = Measure(node.children[index], flow.widths[index], callbacks);
+                tallest = std::max(tallest, offsets[index]);
+            }
+        for (auto &offset : offsets)
+            offset = std::max(0.0f, (tallest - offset) / 2);
+    }
     auto place_children = [&]() {
         float used = heading, row = 0, left = x;
         int column = 0;
         for (size_t index = 0; index < node.children.size(); ++index) {
             bool child_visible = visible && ChildVisible(node, index, callbacks);
             float height =
-                Place(node.children[index], left, y + used - (scrolling ? scrolling->offset : 0), flow.widths[index],
-                      root_height, child_clip, child_visible, enabled, ancestors, callbacks, false, heights[index]);
+                Place(node.children[index], left, y + used + offsets[index] - (scrolling ? scrolling->offset : 0),
+                      flow.widths[index], root_height, child_clip, child_visible, enabled, ancestors, callbacks, false,
+                      heights[index]) +
+                (child_visible ? offsets[index] : 0);
             if (!child_visible)
                 continue;
             row = std::max(row, height);
@@ -280,6 +308,13 @@ float ExtensionTreeLayout::Place(const UiNode &node, float x, float y, float wid
         ancestors.pop_back();
         placements_[&node] = {{x, y, x + width, y + viewport_height}, own_ancestors};
         return visible ? viewport_height : 0;
+    }
+    if (card) {
+        const float height = ConstrainHeight(node, std::max(allocated_height, content + 2 * kCardPadY * scale_));
+        const D2D1_RECT_F bounds{card_x, card_y, card_x + card_width, card_y + height};
+        placements_[&node] = {bounds, own_ancestors};
+        callbacks.place(node, bounds, clip, visible, enabled);
+        return visible ? height : 0;
     }
     float height = ConstrainHeight(node, std::max(allocated_height, content));
     placements_[&node] = {{x, y, x + width, y + height}, own_ancestors};

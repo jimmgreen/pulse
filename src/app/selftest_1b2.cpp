@@ -326,17 +326,17 @@ struct FluentMenuTestPeer {
         FluentMenuItem clear;
         clear.command = 120;
         clear.text = L"No color dot";
-        menu.sub_model_.SetItems({strip, clear});
-        menu.sub_model_.Layout(nullptr, scale);
+        menu.first_sub_.model.SetItems({strip, clear});
+        menu.first_sub_.model.Layout(nullptr, scale);
         // Deliberately different parent width: submenu hits must use its own geometry.
         menu.model_.SetItems({clear});
         menu.model_.Layout(nullptr, scale, 800.0f);
         const int y = menu.kShadowMargin + static_cast<int>(
-            menu.sub_model_.RowTopPx(0) + menu.sub_model_.RowHeightPx() * 0.5f);
+            menu.first_sub_.model.RowTopPx(0) + menu.first_sub_.model.RowHeightPx() * 0.5f);
         for (int i = 0; i < 8; ++i) {
             int x = -1;
-            for (int candidate = 0; candidate < menu.sub_model_.WidthPx() + menu.kShadowMargin; ++candidate) {
-                if (menu.HitTestSwatch(menu.sub_model_, 0, static_cast<float>(candidate)) == i) {
+            for (int candidate = 0; candidate < menu.first_sub_.model.WidthPx() + menu.kShadowMargin; ++candidate) {
+                if (menu.HitTestSwatch(menu.first_sub_.model, 0, static_cast<float>(candidate)) == i) {
                     x = candidate;
                     break;
                 }
@@ -344,18 +344,18 @@ struct FluentMenuTestPeer {
             if (x < 0) return false;
             menu.open_ = true;
             menu.animating_out_ = false;
-            menu.sub_parent_row_ = 0;
+            menu.first_sub_.parent_row = 0;
             menu.OnSubMouse(POINT{x, y}, false);
-            if (menu.sub_hover_swatch_ != i) return false;
+            if (menu.first_sub_.hoverswatch_ != i) return false;
             menu.OnSubMouse(POINT{x, y}, true);
             if (menu.result_ != 90 + i) return false;
         }
         menu.open_ = true;
         menu.animating_out_ = false;
-        menu.sub_parent_row_ = 0;
+        menu.first_sub_.parent_row = 0;
         menu.OnSubMouse(POINT{menu.kShadowMargin + 10,
-            menu.kShadowMargin + static_cast<int>(menu.sub_model_.RowTopPx(1) +
-                menu.sub_model_.RowHeightPx() * 0.5f)}, true);
+            menu.kShadowMargin + static_cast<int>(menu.first_sub_.model.RowTopPx(1) +
+                menu.first_sub_.model.RowHeightPx() * 0.5f)}, true);
         return menu.result_ == 120;
     }
 };

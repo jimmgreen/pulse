@@ -1,9 +1,9 @@
 // Pulse setup bootstrapper: wizard (setup_ui) or silent install engine.
 //
 // The process starts unelevated (asInvoker). A machine install relaunches
-// itself elevated and waits, so Pulse can afterwards be restarted with the
-// original user's token (--restore-update-session after /PULSEUPDATE=1),
-// which is what Inno's ExecAsOriginalUser provided.
+// itself elevated and waits. The installer asks the interactive desktop to
+// restart Pulse, so neither a low-integrity parent nor the admin token leaks
+// into the GUI (--restore-update-session after /PULSEUPDATE=1).
 
 #include <windows.h>
 #include <objbase.h>
@@ -19,6 +19,7 @@
 #include "setup_strings.h"
 #include "setup_ui.h"
 #include "setup_uninstall.h"
+#include "setup_desktop_launch.h"
 #include "../common/os_version.h"
 
 using namespace pulse::setup;
@@ -59,15 +60,11 @@ void ShowError(const Options& o, const std::wstring& text) {
 
 void LaunchPulse(const std::wstring& app, const wchar_t* args) {
     const std::wstring exe = app + L"\\pulse.exe";
-    std::wstring command = Quote(exe) + L" " + args;
-    STARTUPINFOW si{sizeof(si)};
-    PROCESS_INFORMATION pi{};
-    if (CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, FALSE, 0, nullptr, app.c_str(), &si, &pi)) {
-        CloseHandle(pi.hThread);
-        CloseHandle(pi.hProcess);
-        Log(L"Started " + command);
+    const HRESULT result = LaunchFromDesktop(exe, args, app);
+    if (SUCCEEDED(result)) {
+        Log(L"Requested desktop-user launch: " + Quote(exe) + L" " + args);
     } else {
-        Log(L"Could not restart Pulse as the original user: " + Win32Error(GetLastError()));
+        Log(L"Desktop-user launch failed: " + std::to_wstring(static_cast<unsigned long>(result)));
     }
 }
 
@@ -210,10 +207,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         bool launch = false;
         const int code = RunElevated(o, self, app_dir, launch);
         Log(L"Elevated setup exited with " + std::to_wstring(code));
-        if (code == kExitOk && !app_dir.empty()) {
-            if (o.pulse_update) LaunchPulse(app_dir, L"--restore-update-session");
-            else if (launch) LaunchPulse(app_dir, L"");
-        }
+        // The installer child asks the desktop to launch. This parent may itself
+        // be low-integrity (for example a downloaded installer opened by a host).
         return code;
     }
 
@@ -236,9 +231,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         const std::string data = WideToUtf8(result.app_dir) + (launch ? "\nlaunch" : "\n");
         WriteWholeFile(o.result_file, data.data(), data.size());
     }
-    // Already elevated (no unelevated parent): restart Pulse ourselves. Test
-    // installs never start Pulse, which would share the user's real profile.
-    if (!o.elevated_child && !o.test && result.exit_code == kExitOk) {
+    // Use the desktop token from the installer child as well as direct installs.
+    // Never start the GUI with either a low-integrity parent or the admin token.
+    if (!o.test && result.exit_code == kExitOk) {
         if (o.pulse_update) LaunchPulse(result.app_dir, L"--restore-update-session");
         else if (launch) LaunchPulse(result.app_dir, L"");
     }

@@ -23,6 +23,7 @@ LRESULT HandleMouseWheel(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 LRESULT HandleKeyDown(AppState* s, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 bool UpdateSplitterDrag(AppState& s, int mx, int my);
 void ClearDropFeedback(AppState& s);
+bool TickDropEdgeScroll(AppState& s, POINT point);
 std::wstring BaseName(const std::wstring& path);
 bool PointOnPaneHeader(const AppState& s, const ui::WindowViewModel& vm,
                               int pane_index, float x, float y);

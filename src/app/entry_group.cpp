@@ -157,8 +157,9 @@ GroupClock MakeGroupClock(ui::SortColumn sort_column) {
 }
 
 int GroupRank(const fs::DirEntry& e, GroupBy g, const GroupClock& c) {
+    // A folder's tag determines its group; folder placement applies within it.
     if (c.folders != FolderSortMode::Mixed && g != GroupBy::None &&
-        g != GroupBy::ThisPc && g != GroupBy::Network && g != GroupBy::AiDup && IsFolder(e))
+        g != GroupBy::Tag && g != GroupBy::ThisPc && g != GroupBy::Network && g != GroupBy::AiDup && IsFolder(e))
         return kFolderGroupRank;
     switch (g) {
     case GroupBy::Date: return DateRank(Ticks(GroupDateOf(e, c.date_column)), c);

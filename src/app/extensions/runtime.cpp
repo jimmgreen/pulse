@@ -177,6 +177,7 @@ void SetPackageEnabled(size_t package, bool enabled) {
 }
 uint64_t PackageGeneration(size_t package) { return package < packages.size() ? packages[package].generation : 0; }
 bool PackageStoreMode() { return package_store_mode; }
+std::wstring PackageStoreRoot() { return package_store_mode ? trust_root : std::wstring{}; }
 
 void PrepareShutdown() {
     shutting_down = true;

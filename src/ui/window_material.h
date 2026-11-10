@@ -1,6 +1,7 @@
 // window_material.h — DWM backdrop + custom-image sampling for Mica / Acrylic.
 #pragma once
 #include "ui_compositor.h"
+#include "window_effect_support.h"
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -8,13 +9,6 @@
 #include <vector>
 
 namespace pulse::ui {
-
-enum class WindowEffect {
-    None = 0,
-    Acrylic,
-    Mica,
-    MicaAlt
-};
 
 inline constexpr int kWindowEffectCount = 4;
 

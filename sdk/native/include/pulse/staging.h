@@ -47,7 +47,7 @@ typedef struct PulseStagingV1 {
    validates the complete ordinary tree then queues normal owner confirmation
    and file operations; acceptance is not completion. Empty stages, reparse
    trees, repeated commit and path replacement are rejected. Commit tree budget:
-   <=8192 entries, <=256 top-level items and <=4 MiB UTF-8 paths.
+   <=2,000,000 entries, <=4096 top-level items and <=1 GiB UTF-8 paths.
    release accepts unsubmitted or terminal stages and asynchronously cleans them.
    Stop rejects create/commit but get/cancel/release remain valid through destroy.
    Stop never deletes a directory while plugin writers may still run. Remaining

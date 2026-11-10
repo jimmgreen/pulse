@@ -13,6 +13,7 @@
 #include "../fs/bitlocker_volume.h"
 #include "../fs/bounded_enumeration.h"
 #include "../fs/drive_kind.h"
+#include "../fs/enumeration_schedule.h"
 #include "../fs/fs_recycle.h"
 #include "../fs/fs_net_cache.h"
 #include "../fs/fs_watch.h"
@@ -99,7 +100,7 @@ uint64_t WorkerPool::Refresh(const std::wstring& path, ui::SortColumn col,
                              ui::SortDirection dir, int group_by,
                              std::shared_ptr<const FolderSizeLookup> folder_sizes,
                              FolderSortMode folders) {
-    const bool network_job = fs::IsUncPath(path) || fs::IsRemoteLikeDrive(path);
+    const bool network_job = fs::NeedsBoundedEnumeration(path);
     std::lock_guard<std::mutex> lock(mutex_);
     uint64_t gen = ++global_gen_;
     const std::wstring key = WorkKey(path, col, dir, group_by, folders);
@@ -152,7 +153,7 @@ uint64_t WorkerPool::LoadPaths(const std::wstring& view_path,
                                bool preserve_order,
                                std::vector<uint64_t> display_times,
                                int group_by, FolderSortMode folders) {
-    const bool network_job = fs::IsUncPath(view_path) || fs::IsRemoteLikeDrive(view_path);
+    const bool network_job = fs::NeedsBoundedEnumeration(view_path);
     std::lock_guard<std::mutex> lock(mutex_);
     const uint64_t gen = ++global_gen_;
     // Virtual consumers can share a path/sort but have different Recent

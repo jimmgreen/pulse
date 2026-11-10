@@ -34,6 +34,7 @@ struct StaticVerb {
 // 以管理员身份运行 / 以其他用户身份运行: the registry command beside these verbs
 // (batfile: cmd.exe /C "%1") runs unelevated when started as a command line.
 // Only ShellExecuteEx with the verb itself asks Windows for the elevation.
+// Install and print also require Shell association handling (including DDE).
 inline bool ShellOwnsStaticVerb(std::wstring_view verb) noexcept {
     const auto same = [verb](std::wstring_view name) {  // registry keys: ASCII, any case
         if (verb.size() != name.size()) return false;
@@ -44,7 +45,7 @@ inline bool ShellOwnsStaticVerb(std::wstring_view verb) noexcept {
         }
         return true;
     };
-    return same(L"runas") || same(L"runasuser");
+    return same(L"runas") || same(L"runasuser") || same(L"install") || same(L"print");
 }
 
 // ext is ".dwg" (file), or a location key ":folder" / ":drive" / ":bg".

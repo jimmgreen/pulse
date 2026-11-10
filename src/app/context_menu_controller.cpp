@@ -17,10 +17,12 @@ namespace {
 // The submenu each row sits in: children follow their parent row.
 std::vector<std::wstring> ParentKeys(const std::vector<ops::ShellMenuItem>& items) {
     std::vector<std::wstring> parents(items.size());
-    std::wstring current;
+    std::vector<std::wstring> path;
     for (size_t i = 0; i < items.size(); ++i) {
-        if (!items[i].child) current = items[i].clsid + L'\x1F' + items[i].text;
-        else parents[i] = current;
+        const size_t depth = items[i].depth ? items[i].depth : items[i].child ? 1 : 0;
+        if (depth < path.size()) path.resize(depth);
+        if (!path.empty()) parents[i] = path.back();
+        path.push_back(parents[i] + items[i].clsid + L'\x1F' + items[i].text + L'\x1E');
     }
     return parents;
 }
@@ -28,7 +30,7 @@ std::vector<std::wstring> ParentKeys(const std::vector<ops::ShellMenuItem>& item
 // A cached row and a live row are the same command: same handler, same
 // submenu, and the same verb (or, without one, the same label).
 bool SameComCommand(const ops::ShellMenuItem& cached, const ops::ShellMenuItem& live) {
-    if (cached.child != live.child || cached.has_children != live.has_children ||
+    if (cached.child != live.child || cached.depth != live.depth || cached.has_children != live.has_children ||
         cached.clsid != live.clsid)
         return false;
     if (!cached.verb.empty() || !live.verb.empty()) return cached.verb == live.verb;
@@ -78,7 +80,7 @@ bool SameLayoutRows(const std::vector<ops::ShellMenuItem>& a,
     for (size_t i = 0; i < a.size(); ++i) {
         if ((a[i].id == 0) != (b[i].id == 0) || a[i].enabled != b[i].enabled ||
             a[i].separator_after != b[i].separator_after ||
-            a[i].has_children != b[i].has_children || a[i].child != b[i].child ||
+            a[i].has_children != b[i].has_children || a[i].child != b[i].child || a[i].depth != b[i].depth ||
             a[i].mnemonic != b[i].mnemonic || a[i].verb != b[i].verb ||
             a[i].text != b[i].text || a[i].clsid != b[i].clsid || a[i].handler != b[i].handler)
             return false;
@@ -98,6 +100,21 @@ ShellMenuEntry ComEntry(const ops::ShellMenuItem& item, int command = 0) {
     entry.handler = item.handler;
     entry.icon = item.icon;
     return entry;
+}
+
+ui::FluentMenuItem ShellDisplayEntry(const ShellMenuEntry& entry) {
+    ui::FluentMenuItem row;
+    row.command = entry.command;
+    row.text = entry.text;
+    row.mnemonic = entry.mnemonic;
+    row.enabled = entry.enabled;
+    row.icon = entry.icon;
+    for (const auto& child : entry.children) {
+        if (child.text.empty() || (child.command == 0 && child.children.empty())) continue;
+        auto converted = ShellDisplayEntry(child);
+        if (child.children.empty() || !converted.children.empty()) row.children.push_back(std::move(converted));
+    }
+    return row;
 }
 
 } // namespace
@@ -121,23 +138,7 @@ void AppendShellSection(std::vector<ui::FluentMenuItem>& items,
         const std::wstring key = lower(e.text);
         if (!seen.insert(key).second) { diagnostic.Row(L"drop-duplicate-label", e.text); continue; }
         if (added == 0 && !items.empty()) items.back().separator_after = true;
-        ui::FluentMenuItem row;
-        row.command = e.command;
-        row.text = e.text;
-        row.mnemonic = e.mnemonic;
-        row.enabled = e.enabled;
-        row.icon = e.icon;
-        // Software-owned submenu: keep the hierarchy as a one-level flyout.
-        for (const auto& c : e.children) {
-            if (c.text.empty() || c.command == 0) continue;
-            ui::FluentMenuItem child;
-            child.command = c.command;
-            child.text = c.text;
-            child.mnemonic = c.mnemonic;
-            child.enabled = c.enabled;
-            child.icon = c.icon;
-            row.children.push_back(std::move(child));
-        }
+        ui::FluentMenuItem row = ShellDisplayEntry(e);
         if (header && row.children.empty()) continue;
         items.push_back(std::move(row));
         ++added;
@@ -515,7 +516,7 @@ bool ContextMenuController::ExecuteShellCommand(
     int command,
     const std::function<void()>& wait_until_ready,
     const std::function<void()>& refresh_folder) {
-    if (command >= CmdShellComBase) {
+    if (command >= CmdShellComBase && command <= CmdShellComLast) {
         const uint32_t clicked = static_cast<uint32_t>(command - CmdShellComBase);
         std::wstring text, verb;
         if (const auto* snapshot = FindComItemIn(menu_com_items_, clicked)) {
@@ -549,16 +550,26 @@ bool ContextMenuController::ExecuteShellCommand(
             };
             const auto live = std::find_if(static_verbs_.begin(), static_verbs_.end(),
                 [&](const StaticVerb& candidate) { return same(*verb, candidate); });
+            auto descendant = [](auto&& self, const StaticVerb& parent, int& ordinal) -> const StaticVerb* {
+                for (const auto& candidate : parent.children) {
+                    if (--ordinal == 0) return &candidate;
+                    if (const auto* found = self(self, candidate, ordinal)) return found;
+                }
+                return nullptr;
+            };
             if (child > 0) {
-                const size_t ci = static_cast<size_t>(child - 1);
-                if (ci < verb->children.size()) verb = &verb->children[ci];
-                else verb = nullptr;
+                int ordinal = child;
+                verb = descendant(descendant, *verb, ordinal);
             }
-            // An asynchronous refresh may reorder or remove the shown command.
-            // Keep its displayed identity; never reinterpret an old position.
+            auto contains = [&](auto&& self, const StaticVerb& parent) -> bool {
+                for (const auto& candidate : parent.children)
+                    if (same(*verb, candidate) || self(self, candidate)) return true;
+                return false;
+            };
+            // Never reinterpret a displayed command after an asynchronous refresh.
             if (live == static_verbs_.end()) verb = nullptr;
-            else if (verb && child > 0 && std::none_of(live->children.begin(), live->children.end(),
-                [&](const StaticVerb& candidate) { return same(*verb, candidate); })) verb = nullptr;
+            else if (verb && child > 0 && !contains(contains, *live)) verb = nullptr;
+            if (verb && !verb->children.empty()) verb = nullptr;
             constexpr size_t kMaxTargets = 16;
             if (verb) {
                 for (size_t i = 0; i < paths_.size() && i < kMaxTargets; ++i) {
@@ -839,45 +850,53 @@ std::vector<ShellMenuEntry> ContextMenuController::ComposeEntries(
         entry.mnemonic = verb.mnemonic;
         entry.verb = verb.verb;
         entry.icon = verb.icon_pixels;
-        if (!verb.children.empty()) {
-            entry.command = 0;
-            const size_t n = (std::min)(verb.children.size(),
-                                        static_cast<size_t>(ipc::kMaxSubmenuChildren));
-            for (size_t j = 0; j < n; ++j) {
-                ShellMenuEntry child;
-                child.command = CmdShellStaticBase +
-                    static_cast<int>(i) * ipc::kStaticVerbStride + static_cast<int>(j) + 1;
-                child.text = verb.children[j].display;
-                child.mnemonic = verb.children[j].mnemonic;
-                child.verb = verb.children[j].verb;
-                child.icon = verb.children[j].icon_pixels;
-                entry.children.push_back(std::move(child));
+        int ordinal = 0;
+        auto children = [&](auto&& self, const std::vector<StaticVerb>& source) -> std::vector<ShellMenuEntry> {
+            std::vector<ShellMenuEntry> rows;
+            for (const auto& child : source) {
+                if (ordinal >= ipc::kMaxSubmenuChildren) break;
+                const int slot = ++ordinal;
+                ShellMenuEntry row;
+                row.text = child.display;
+                row.mnemonic = child.mnemonic;
+                row.verb = child.verb;
+                row.icon = child.icon_pixels;
+                row.children = self(self, child.children);
+                if (!child.children.empty() && row.children.empty()) continue;
+                if (row.children.empty()) row.command = CmdShellStaticBase +
+                    static_cast<int>(i) * ipc::kStaticVerbStride + slot;
+                rows.push_back(std::move(row));
             }
-        } else {
-            entry.command = CmdShellStaticBase +
-                static_cast<int>(i) * ipc::kStaticVerbStride;
-        }
+            return rows;
+        };
+        entry.children = children(children, verb.children);
+        if (verb.children.empty()) entry.command = CmdShellStaticBase +
+            static_cast<int>(i) * ipc::kStaticVerbStride;
+        else if (entry.children.empty()) continue;
         entries.push_back(std::move(entry));
     }
-    for (size_t i = 0; i < com_items_.size(); ++i) {
-        const auto& item = com_items_[i];
-        if (item.child) continue;
-        if (item.has_children) {
-            ShellMenuEntry parent = ComEntry(item);
-            // It stands in for the static row, so the 打开方式 group switch
-            // governs it rather than the COM-sourced "open with" rows switch.
-            if (ipc::IsOpenWithSubmenuVerb(item.verb)) parent.from_com = false;
-            for (size_t j = i + 1; j < com_items_.size() && com_items_[j].child; ++j) {
-                if (com_items_[j].id > 0x7FFF) continue;
-                parent.children.push_back(ComEntry(com_items_[j],
-                    CmdShellComBase + static_cast<int>(com_items_[j].id)));
-            }
-            if (!parent.children.empty()) entries.push_back(std::move(parent));
-            continue;
+    auto row_depth = [](const ops::ShellMenuItem& row) -> size_t {
+        return row.depth ? row.depth : row.child ? 1 : 0;
+    };
+    auto compose = [&](auto&& self, size_t& index, size_t depth) -> std::vector<ShellMenuEntry> {
+        std::vector<ShellMenuEntry> rows;
+        while (index < com_items_.size() && row_depth(com_items_[index]) >= depth) {
+            const auto& item = com_items_[index++];
+            if (row_depth(item) != depth) continue;
+            ShellMenuEntry entry = ComEntry(item, item.has_children ? 0 :
+                CmdShellComBase + static_cast<int>(item.id));
+            if (item.has_children) {
+                entry.children = self(self, index, depth + 1);
+                if (depth == 0 && ipc::IsOpenWithSubmenuVerb(item.verb)) entry.from_com = false;
+                if (entry.children.empty()) continue;
+            } else if (item.id == 0 || item.id > 0x7FFF) continue;
+            rows.push_back(std::move(entry));
         }
-        if (item.id > 0x7FFF) continue;
-        entries.push_back(ComEntry(item, CmdShellComBase + static_cast<int>(item.id)));
-    }
+        return rows;
+    };
+    size_t com_index = 0;
+    auto com_entries = compose(compose, com_index, 0);
+    for (auto& entry : com_entries) entries.push_back(std::move(entry));
 
     prefs_changed = false;
     std::unordered_set<std::wstring> recorded_handlers;

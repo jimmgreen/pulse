@@ -124,7 +124,7 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
     auto nav_label = [](int page) -> std::wstring {
         if (page == 2 || page == 6) return std::wstring(sysctx_text::PageTitle());
         if (page == 7) return std::wstring(shortcuts_text::Title());
-        if (page == 8) return std::wstring(pack_text::PacksSection());
+        if (page == 8) return l10n::Get(l10n::StringId::StoreTitle);
         if (page == 0) return pulse::l10n::Get(pulse::l10n::StringId::SettingsAppearance);
         return page == 5 ? std::wstring(pack_text::Title()) : pulse::l10n::Get(kNav[page]);
     };
@@ -297,7 +297,7 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
     const std::wstring title = vm.settings_page == 2 || vm.settings_page == 6 ? std::wstring(sysctx_text::PageTitle())
         : vm.settings_page == 5 ? std::wstring(pack_text::Title())
         : vm.settings_page == 7 ? std::wstring(shortcuts_text::Title())
-        : vm.settings_page == 8 ? std::wstring(pack_text::PacksSection())
+        : vm.settings_page == 8 ? l10n::Get(l10n::StringId::StoreTitle)
         : vm.settings_page == kSettingsPageAi ? std::wstring(ai_text::Title())
         : vm.settings_page == kSettingsPageAssistant ? asst_text::Title() : l10n::Get(page_title_id);
     ComPtr<IDWriteTextLayout> title_layout;
@@ -313,7 +313,7 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
         painter_.DrawWrappedCaption(vm.settings_page == kSettingsPageNativeExtensions ? l10n::Get(l10n::StringId::NativeExtensionSettingsIntro).c_str()
                                     : vm.settings_page == kSettingsPageAssistant ? asst_text::Intro().c_str()
                                     : vm.settings_page == kSettingsPageAi ? ai_text::Intro()
-                                    : vm.settings_page == 8 ? pack_text::PacksIntro() : pack_text::Intro(),
+                                    : vm.settings_page == 8 ? (vm.settings_store_browse ? l10n::Get(l10n::StringId::StoreIntro).c_str() : vm.settings_store_installed ? l10n::Get(l10n::StringId::StoreInstalledIntro).c_str() : pack_text::PacksIntro()) : pack_text::Intro(),
             D2D1::Point2F(lay.content.left+pad, origin+60*scale_),
             lay.content.right-lay.content.left-2*pad, theme.text_secondary);
     if ((IsGeneralSettingsPage(vm.settings_page) && vm.settings_page != 11) || vm.settings_page == 1)
@@ -594,7 +594,7 @@ void MainRenderer::DrawSettings(const WindowViewModel& vm, const D2D1_RECT_F& re
                                                 art_top,
                                                 lay.index_exclude_empty.right - 16.0f * scale_,
                                                 art_bottom);
-            const float svg_opacity = theme.bg.r > 0.5f ? 0.68f : 1.0f;
+            const float svg_opacity = 1.0f;
             if (!DrawExcludeEmptySvg(art, svg_opacity)) {
                 fluent::EmptyStateSpec fallback;
                 fallback.bounds = art;

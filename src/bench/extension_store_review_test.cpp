@@ -1,0 +1,53 @@
+#include "../app/extension_store_review.h"
+#include <iostream>
+using namespace pulse;
+int main() {
+    using Kind = app::StoreReviewDecision::Kind;
+    namespace store = extensions::store;
+    int passed = 0, failed = 0;
+    const auto check = [&](bool ok, const char* name) { std::cout << (ok ? "[PASS] " : "[FAIL] ") << name << '\n'; ok ? ++passed : ++failed; };
+    auto review = std::make_shared<store::InstallReview>(); review->native_code = true; review->added_resources = {"files.read"};
+    store::InstallServiceSnapshot s; s.generation = 7; s.phase = store::InstallServicePhase::AwaitingInstall; s.install_review = review;
+    const std::vector<extensions::UiStateEntry> granted{{"native", "true"}, {"resources", "true"}};
+    check(app::EvaluateStoreReview(s, 6, false, 1, {}).kind == Kind::Ignore, "old cancel cannot cancel newer request");
+    check(app::EvaluateStoreReview(s, 6, false, 0, granted).kind == Kind::Ignore, "old approve cannot install newer request");
+    check(app::EvaluateStoreReview(s, 7, true, 0, {}).kind == Kind::Ignore, "trust response cannot authorize installation");
+    check(app::EvaluateStoreReview(s, 7, false, 1, {}).kind == Kind::Decline, "current cancel declines");
+    check(app::EvaluateStoreReview(s, 7, false, -1, {}).kind == Kind::Decline, "window close declines");
+    check(app::EvaluateStoreReview(s, 7, false, 0, {}).kind == Kind::MissingConsent, "no automatic native or resource grant");
+    check(app::EvaluateStoreReview(s, 7, false, 0, {{"native", "true"}}).kind == Kind::MissingConsent, "resources require separate approval");
+    check(app::EvaluateStoreReview(s, 7, false, 0, {{"resources", "true"}}).kind == Kind::MissingConsent, "native code requires separate approval");
+    check(app::EvaluateStoreReview(s, 7, false, 0, {{"native", "1"}, {"resources", "true"}}).kind == Kind::MissingConsent, "only actual checkbox true grants consent");
+    const auto disabled = app::EvaluateStoreReview(s, 7, false, 0, granted);
+    check(disabled.kind == Kind::Install && disabled.consent.approved && disabled.consent.native_execution && disabled.consent.added_resources && !disabled.consent.enable_new, "approved new package stays disabled by default");
+    auto enabled_states = granted; enabled_states.push_back({"enable", "true"});
+    check(app::EvaluateStoreReview(s, 7, false, 0, enabled_states).consent.enable_new, "enable requires explicit checkbox");
+    s.phase = store::InstallServicePhase::Committing;
+    check(app::EvaluateStoreReview(s, 7, false, 0, granted).kind == Kind::Ignore, "double response cannot repeat consumed review");
+    s.phase = store::InstallServicePhase::AwaitingPublisherTrust;
+    check(app::EvaluateStoreReview(s, 7, true, 0, {}).kind == Kind::Trust, "explicit publisher approval stays separate");
+    check(app::EvaluateStoreReview(s, 7, true, 1, {}).kind == Kind::Decline, "publisher refusal declines");
+    s.phase = store::InstallServicePhase::AwaitingInstall; s.install_review.reset();
+    check(app::EvaluateStoreReview(s, 7, false, 0, granted).kind == Kind::Ignore, "missing review is never authorized");
+    review->native_code = false; review->added_resources.clear(); s.install_review = review;
+    check(app::EvaluateStoreReview(s, 7, false, 0, {}).kind == Kind::Install, "no nonexistent permission checkboxes required");
+    using Change = app::StoreChangeDecision::Kind;
+    store::InstalledStoreServiceSnapshot management; management.generation = 9; management.phase = store::InstalledStorePhase::AwaitingConfirmation;
+    auto change_review = std::make_shared<store::StoreChangeReview>(); change_review->native_code = true; change_review->added_resources = {"settings.own"}; management.review = change_review;
+    check(app::EvaluateStoreChangeReview(management, 8, 1, {}).kind == Change::Ignore, "old management cancel cannot cancel newer request");
+    check(app::EvaluateStoreChangeReview(management, 8, 0, granted).kind == Change::Ignore, "old management approve ignored");
+    check(app::EvaluateStoreChangeReview(management, 9, -1, {}).kind == Change::Decline, "management window close declines");
+    check(app::EvaluateStoreChangeReview(management, 9, 0, {}).kind == Change::MissingConsent, "enable requires independent native and resources consent");
+    check(app::EvaluateStoreChangeReview(management, 9, 0, {{"native", "true"}}).kind == Change::MissingConsent, "native alone cannot grant management resources");
+    check(app::EvaluateStoreChangeReview(management, 9, 0, {{"resources", "true"}}).kind == Change::MissingConsent, "resources alone cannot grant native execution");
+    const auto approved = app::EvaluateStoreChangeReview(management, 9, 0, granted);
+    check(approved.kind == Change::Approve && approved.consent.approved && approved.consent.native_execution && approved.consent.added_resources, "explicit management checks produce bound consent");
+    management.phase = store::InstalledStorePhase::Committing;
+    check(app::EvaluateStoreChangeReview(management, 9, 0, granted).kind == Change::Ignore, "double management response ignored");
+    management.phase = store::InstalledStorePhase::AwaitingConfirmation; management.review.reset();
+    check(app::EvaluateStoreChangeReview(management, 9, 0, granted).kind == Change::Ignore, "missing management review is not authorized");
+    management.review = change_review; change_review->native_code = false; change_review->added_resources.clear();
+    const auto disabled_change = app::EvaluateStoreChangeReview(management, 9, 0, {});
+    check(disabled_change.kind == Change::Approve && !disabled_change.consent.native_execution && !disabled_change.consent.added_resources, "disable and uninstall do not grant execution");
+    std::cout << passed << " passed, " << failed << " failed\n"; return failed ? 1 : 0;
+}

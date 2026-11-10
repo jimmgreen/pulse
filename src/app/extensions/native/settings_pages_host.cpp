@@ -95,10 +95,12 @@ void SyncSettingsPagesHost(AppState& owner, const ui::WindowViewModel& vm) {
             host.selector.ShowDocked(window, bounds, std::move(spec), owner.darkMode, owner.accentColor, owner.scale);
         }
     }
-    const LONG header_bottom = std::min(bounds.bottom, bounds.top + static_cast<LONG>(104 * owner.scale));
+    // One settings page needs no "choose a package" header: the page gets the whole area.
+    const bool single = host.entries.size() == 1;
+    const LONG header_bottom = single ? bounds.top : std::min(bounds.bottom, bounds.top + static_cast<LONG>(104 * owner.scale));
     RECT header{bounds.left, bounds.top, bounds.right, header_bottom};
     host.selector.UpdateDocked(header, owner.darkMode, owner.accentColor, owner.scale);
-    ShowWindow(host.selector.Hwnd(), SW_SHOWNOACTIVATE);
+    ShowWindow(host.selector.Hwnd(), single ? SW_HIDE : SW_SHOWNOACTIVATE);
     for (size_t i = 0; i < PackageCount(); ++i)
         if (host.selected >= host.entries.size() || host.entries[host.selected].package != i || bounds.bottom <= header_bottom)
             if (auto* pages = PackageSettings(owner.hwnd, i)) pages->Hide();

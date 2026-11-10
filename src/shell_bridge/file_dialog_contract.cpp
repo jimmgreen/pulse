@@ -129,7 +129,7 @@ static ContractDecision PrepareMapping(DialogFactory factory, std::span<const Se
                 auto extension = std::u16string_view(call.text);
                 if (factory == DialogFactory::Save && policy == AccessPolicy::LocalSaveV1 &&
                     context.native_save_defaults_supported && extension.starts_with(u"*.")) extension.remove_prefix(2);
-                if (call.text.size() > 255 || extension.find_first_of(factory == DialogFactory::Save ? u".\\/:*?\"<>|; \t\r\n" : u"\\/:\"<>|\t\r\n") != extension.npos ||
+                if (call.text.size() > 255 || extension.find_first_of(factory == DialogFactory::Save ? u".\\/:*?\"<>|; \t\r\n" : u"\\/:\"<>\t\r\n") != extension.npos ||
                     (!call.text.empty() && extension.empty())) return Native(NativeReason::UnsupportedExtension, i);
             }
             if (factory == DialogFactory::Open) {

@@ -2302,6 +2302,7 @@ void OpsManager::PushUndo(const OpRequest& req, uint64_t task_id,
         existing->redo_cleared = existing->redo_cleared || e.redo_cleared;
     } else undo_.push_back(std::move(e));
     TrimUndoHistory(undo_);
+    ++undo_json_revision_;
 }
 
 std::vector<CompletedOperation> OpsManager::DrainCompletions() {
@@ -2418,6 +2419,7 @@ void OpsManager::RecordExternalCreate(const std::wstring& path, uint64_t group, 
         e.redo_cleared = std::exchange(redo_cleared_pending_, false);
         undo_.push_back(std::move(e));
         TrimUndoHistory(undo_);
+        ++undo_json_revision_;
     }
     NotifyStatusChanged();
 }
@@ -2426,6 +2428,14 @@ void OpsManager::ClearRedoLocked() {
     if (!redo_.empty()) redo_cleared_pending_ = true;
     redo_.clear();
     std::erase_if(history_progress_, [](const auto& item) { return item.first.second; });
+}
+
+UndoHistoryProgress OpsManager::HistoryProgress() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return {!undo_.empty() || !redo_.empty(),
+        history_replay_.has_value() || active_item_.has_value() || !queue_.empty(),
+        history_completed_sequence_, history_completed_steps_,
+        history_completed_redo_, history_completed_success_};
 }
 
 UndoHistorySnapshot OpsManager::UndoHistory() const {
@@ -2444,12 +2454,18 @@ UndoHistorySnapshot OpsManager::UndoHistory() const {
     return result;
 }
 
-std::vector<UndoHistorySummaryItem> OpsManager::UndoHistorySummary() const {
+std::vector<UndoHistorySummaryItem> OpsManager::UndoHistorySummary(bool include_rows) const {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<UndoHistorySummaryItem> result;
-    result.reserve(undo_.size() + redo_.size());
+    result.reserve(include_rows ? undo_.size() + redo_.size() : 1);
+    const UndoEntry* newest = nullptr;
+    if (!include_rows) {
+        for (const auto& entry : undo_)
+            if (entry.supported && (!newest || entry.task_id > newest->task_id)) newest = &entry;
+    }
     const auto append = [&](const auto& entries, bool undone) {
         for (const auto& entry : entries) {
+            if (!include_rows && &entry != newest) continue;
             UndoHistorySummaryItem item;
             item.type = entry.type;
             item.task_id = entry.task_id;
@@ -2466,11 +2482,16 @@ std::vector<UndoHistorySummaryItem> OpsManager::UndoHistorySummary() const {
         }
     };
     append(undo_, false);
-    append(redo_, true);
+    if (include_rows) append(redo_, true);
     std::stable_sort(result.begin(), result.end(), [](const auto& a, const auto& b) {
         return a.task_id > b.task_id;
     });
     return result;
+}
+
+size_t OpsManager::UndoHistoryCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return undo_.size() + redo_.size();
 }
 
 size_t OpsManager::QueuedTransferCount() const {
@@ -2659,6 +2680,7 @@ void OpsManager::FinishHistoryRequestLocked(uint64_t task_id, bool success) {
         const auto entry = std::find_if(from.begin(), from.end(), [&](const auto& value) { return value.task_id == original; });
         if (entry == from.end()) { history_replay_.reset(); return; }
         to.push_back(std::move(*entry)); from.erase(entry);
+        ++undo_json_revision_;
         history_progress_.erase({original, replay.redo});
         if (++replay.step == replay.steps.size()) {
             ++history_completed_sequence_;
@@ -2986,6 +3008,7 @@ void OpsManager::ConfigureShellCallbacks() {
             m.separator_after = it.separator_after;
             m.has_children = it.has_children;
             m.child = it.child;
+            m.depth = it.depth;
             m.verb = std::move(it.verb);
             m.text = std::move(it.text);
             m.clsid = std::move(it.clsid);
@@ -3173,6 +3196,9 @@ void OpsManager::WorkerThread() {
                 run_deferred_undo = true;
             }
         }
+        // Prepare the immutable persistence payload on the operation worker.
+        // A concurrent UI reader may also build it; publication keeps one identity.
+        (void)UndoJsonSnapshot();
         if (run_deferred_undo) Undo();
         if (notify_) notify_();
         PersistJournal();
@@ -6571,11 +6597,23 @@ bool OpsManager::WaitShellDone(uint32_t id, uint32_t& hr, bool& cancelled, std::
 // Undo stack JSON persistence (minimal parser, same style as StagingTray).
 // ---------------------------------------------------------------------------
 std::wstring OpsManager::UndoToJson() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    return *UndoJsonSnapshot();
+}
+
+std::shared_ptr<const std::wstring> OpsManager::UndoJsonSnapshot() const {
+    std::deque<UndoEntry> entries;
+    uint64_t revision;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (undo_json_cache_ && undo_json_cached_revision_ == undo_json_revision_)
+            return undo_json_cache_;
+        revision = undo_json_revision_;
+        entries = undo_;
+    }
     std::wstring out = L"[\n";
     bool first = true;
-    for (size_t i = 0; i < undo_.size(); ++i) {
-        const auto& e = undo_[i];
+    for (size_t i = 0; i < entries.size(); ++i) {
+        const auto& e = entries[i];
         if (e.generated_output) continue;
         if (!first) out += L",\n";
         first = false;
@@ -6604,7 +6642,17 @@ std::wstring OpsManager::UndoToJson() const {
         out += L"\n";
     }
     out += L"]";
-    return out;
+    auto snapshot = std::make_shared<const std::wstring>(std::move(out));
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (revision == undo_json_revision_) {
+            if (undo_json_cache_ && undo_json_cached_revision_ == revision)
+                return undo_json_cache_;
+            undo_json_cache_ = snapshot;
+            undo_json_cached_revision_ = revision;
+        }
+    }
+    return snapshot;
 }
 
 bool OpsManager::UndoFromJson(const std::wstring& in) {
@@ -6739,6 +6787,7 @@ bool OpsManager::UndoFromJson(const std::wstring& in) {
     redo_.clear();
     history_progress_.clear();
     TrimUndoHistory(undo_);
+    ++undo_json_revision_;
     return true;
 }
 

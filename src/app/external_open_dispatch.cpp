@@ -1,3 +1,4 @@
+#include "../common/runtime_log.h"
 #include "external_open_dispatch.h"
 #include <algorithm>
 #include "external_open_wait.h"
@@ -65,7 +66,13 @@ void DispatchQueuedExternalOpen(AppState& state) {
         else if (app::AdvanceOpenWait(request->ui_wait_deadline, now, false) == app::OpenWaitAction::Cancel)
             notice.TimedOut(false);
         else {
+            const auto dispatch_begin = GetTickCount64();
             const auto result = OpenExternalFolder(*target, request->path, request->reveal);
+            if (request->path == L"pulse:win-e") diagnostics::runtime::Event("win_e_dispatch_timing", {
+                {"dispatch_ms", GetTickCount64() - dispatch_begin},
+                {"status", static_cast<uint64_t>(result.status)},
+                {"visible", result.target && IsWindowVisible(result.target->hwnd)},
+                {"minimized", result.target && IsIconic(result.target->hwnd)}});
             if (result.status == ExternalOpenStatus::Deferred) {
                 defer = app::AdvanceOpenWait(request->ui_wait_deadline, now, true) == app::OpenWaitAction::Defer;
                 if (!defer) notice.TimedOut(false);

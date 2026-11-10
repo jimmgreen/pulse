@@ -182,6 +182,13 @@
                 "horizontal"
               ]
             },
+            "alignment": {
+              "enum": [
+                "left",
+                "center"
+              ],
+              "description": "Cross-axis placement of children in a horizontal stack."
+            },
             "enabledBinding": {
               "type": "string",
               "pattern": "^state\\.[A-Za-z0-9._-]+$"
@@ -356,6 +363,10 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 32
+            },
+            "bordered": {
+              "type": "boolean",
+              "description": "Draws the group as a card around its heading and children."
             },
             "enabledBinding": {
               "type": "string",
@@ -728,6 +739,12 @@
               "type": "string",
               "maxLength": 1024
             },
+            "kind": {
+              "enum": [
+                "text",
+                "password"
+              ]
+            },
             "enabledBinding": {
               "type": "string",
               "pattern": "^state\\.[A-Za-z0-9._-]+$"
@@ -746,7 +763,8 @@
             },
             "badgeText": {
               "type": "string",
-              "maxLength": 1024
+              "maxLength": 1024,
+              "description": "Trailing label; \"state.<key>\" shows that state value."
             },
             "validation": {
               "$ref": "#/$defs/uiValidation"
@@ -1544,6 +1562,17 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 63
+            },
+            "options": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 64,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "description": "Caption under each stop, in order."
             },
             "enabledBinding": {
               "type": "string",

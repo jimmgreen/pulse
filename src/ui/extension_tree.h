@@ -20,6 +20,8 @@ struct ExtensionTreeCallbacks {
     UiDataProvider request_data;
     std::function<void(uint64_t, const std::vector<ExtensionStateChange> &)> on_state_changed;
 };
+// Padding (physical px) the view keeps around its content on every side.
+constexpr int kExtensionTreeContentInset = 8;
 class ExtensionTreeView {
   public:
     ExtensionTreeView();
@@ -36,6 +38,8 @@ class ExtensionTreeView {
     bool SetState(const std::string &key, const std::string &value);
     uint64_t StateRevision() const;
     bool InputComposing() const;
+    // Height of the laid-out content in physical px, excluding the content inset.
+    int ContentHeight() const;
     std::vector<extensions::UiStateEntry> StateValues() const;
     bool SetStates(const std::vector<extensions::UiStateEntry> &changes);
     // Host-only patch entry point: replacement must first pass extensions::ParseUiTree.

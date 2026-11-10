@@ -17,8 +17,8 @@ namespace app { struct Pane; struct Tab; }
 namespace ops { struct CompletedOperation; struct FinishedTask; }
 
 // Arms the folder `pane` shows (null: the focused pane). `task_id` 0 means
-// no Pulse task: the arrival window is `settle_ms` from now, extended by each
-// arrival.
+// no Pulse task: allow at least a minute for an external tool's first result,
+// then settle after new arrivals. Known tasks select only reported outputs.
 void ArmArrivalSelection(AppState& s, const app::Pane* pane, uint64_t task_id, uint32_t settle_ms);
 // `path` will turn up in the armed folder (the archive 压缩 just wrote).
 void ExpectArrival(AppState& s, const std::wstring& path);
@@ -28,7 +28,6 @@ void NoteArrivalFinished(AppState& s, const ops::FinishedTask& finished);
 // False for shell verbs that only open, show or remove things; true for the
 // rest, unnamed handler commands (archivers) included.
 bool ShellVerbMayCreate(const std::wstring& verb);
-void CenterResultInPane(AppState& s, app::Pane& pane, app::Tab& tab, int index);
 void CenterResultInPane(AppState& s, app::Pane& pane, app::Tab& tab, int index);
 // After a listing update of `tab`; true when it changed the selection.
 bool ApplyArrivalSelection(AppState& s, app::Pane& pane, app::Tab& tab, bool focused);

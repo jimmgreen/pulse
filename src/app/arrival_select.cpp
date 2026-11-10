@@ -12,18 +12,14 @@
 namespace pulse {
 namespace {
 
-constexpr uint64_t kAfterTaskMs = 2500;      // the watcher's last events
+constexpr uint64_t kAfterTaskMs = 10000;     // allow the final listing to arrive
 constexpr uint64_t kAfterArrivalMs = 3000;   // shell verbs: more may follow
+constexpr uint64_t kShellFirstArrivalMs = 60000; // archive tools may first show a dialog
 constexpr uint64_t kHardCapMs = 10 * 60 * 1000;
 
 std::wstring Lower(std::wstring text) {
     for (auto& c : text) c = static_cast<wchar_t>(std::towlower(c));
     return text;
-}
-
-std::wstring Leaf(const std::wstring& path) {
-    const size_t slash = path.find_last_of(L"\\/");
-    return slash == std::wstring::npos ? path : path.substr(slash + 1);
 }
 
 bool SameDir(const std::wstring& a, const std::wstring& b) {
@@ -68,8 +64,16 @@ void CenterResultInPane(AppState& s, app::Pane& pane, app::Tab& tab, int index) 
 namespace {
 void AddExpected(AppState& window, const std::vector<std::wstring>& paths) {
     auto& a = window.arrivalSelect;
-    for (const auto& path : paths)
-        if (SameDir(fs::ParentPath(path), a.dir)) a.expected.insert(Lower(Leaf(path)));
+    if (a.dir.empty()) return;
+    std::wstring prefix = Lower(a.dir);
+    if (prefix.back() != L'\\') prefix += L'\\';
+    for (const auto& path : paths) {
+        const auto normalized = Lower(fs::NormalizePath(path));
+        if (!normalized.starts_with(prefix)) continue;
+        const auto end = normalized.find(L'\\', prefix.size());
+        const auto name = normalized.substr(prefix.size(), end - prefix.size());
+        if (!name.empty()) a.expected.insert(name);
+    }
 }
 
 } // namespace
@@ -93,21 +97,30 @@ void ArmArrivalSelection(AppState& s, const app::Pane* pane, uint64_t task_id, u
     auto& a = s.arrivalSelect;
     const std::wstring dir = fs::NormalizePath(tab->current_path);
     const uint64_t now = GetTickCount64();
+    const auto current = SelectedNames(*tab);
     // Two quick pastes into one folder: keep the first one's baseline, so
     // its items stay selected along with the second's.
-    const bool again = !a.dir.empty() && a.pane == pane && _wcsicmp(a.dir.c_str(), dir.c_str()) == 0 &&
-        (!a.until || now <= a.until);
+    const bool again = !a.dir.empty() && a.pane == pane && a.tab == tab &&
+        a.view_generation == tab->view_generation && _wcsicmp(a.dir.c_str(), dir.c_str()) == 0 &&
+        (!a.until || now <= a.until) && now - a.armed_at <= kHardCapMs &&
+        current == (a.chosen.empty() ? a.initial_selection : a.chosen);
     if (!again) {
         a = {};
         a.dir = dir;
         a.pane = pane;
+        a.tab = tab;
+        a.view_generation = tab->view_generation;
+        a.initial_selection = current;
+        a.expected_only = task_id != 0;
         if (tab->snapshot)
             for (size_t i = 0; i < tab->EntryCount(); ++i)
                 a.baseline.insert(Lower(std::wstring(tab->EntryAt(i).name)));
     }
+    if (!task_id) a.expected_only = false;
     a.armed_at = now;
-    a.task_id = task_id;
-    a.until = task_id ? 0 : now + settle_ms;
+    if (task_id) a.tasks.insert(task_id);
+    a.task_id = a.tasks.empty() ? 0 : *a.tasks.begin();
+    a.until = a.task_id ? 0 : now + (std::max)(uint64_t{settle_ms}, kShellFirstArrivalMs);
 }
 
 void ExpectArrival(AppState& s, const std::wstring& path) {
@@ -118,7 +131,7 @@ void ExpectArrival(AppState& s, const std::wstring& path) {
 void NoteArrivalCompletion(AppState& s, const ops::CompletedOperation& completed) {
     if (!completed.task_id) return;
     app::ForEachWindowSharingCore(s, [&](AppState& window) {
-        if (window.arrivalSelect.task_id == completed.task_id) AddExpected(window, completed.destinations);
+        if (window.arrivalSelect.tasks.contains(completed.task_id)) AddExpected(window, completed.destinations);
     });
 }
 
@@ -126,9 +139,9 @@ void NoteArrivalFinished(AppState& s, const ops::FinishedTask& finished) {
     if (!finished.task_id) return;
     app::ForEachWindowSharingCore(s, [&](AppState& window) {
         auto& a = window.arrivalSelect;
-        if (a.task_id != finished.task_id) return;
-        a.task_id = 0;
-        a.until = GetTickCount64() + kAfterTaskMs;
+        if (!a.tasks.erase(finished.task_id)) return;
+        a.task_id = a.tasks.empty() ? 0 : *a.tasks.begin();
+        if (!a.task_id) a.until = GetTickCount64() + kAfterTaskMs;
     });
 }
 
@@ -140,9 +153,14 @@ bool ApplyArrivalSelection(AppState& s, app::Pane& pane, app::Tab& tab, bool /*f
         a = {};
         return false;
     }
-    if (&pane != a.pane || !tab.snapshot || !SameDir(tab.current_path, a.dir)) return false;
+    if (&pane != a.pane) return false;
+    if (&tab != a.tab || tab.view_generation != a.view_generation || !SameDir(tab.current_path, a.dir)) {
+        a = {};
+        return false;
+    }
+    if (!tab.snapshot) return false;
     const std::vector<std::wstring> current = SelectedNames(tab);
-    if (!a.chosen.empty() && current != a.chosen) {
+    if (current != (a.chosen.empty() ? a.initial_selection : a.chosen)) {
         // Selected something else by hand: leave it be.
         a = {};
         return false;
@@ -160,11 +178,11 @@ bool ApplyArrivalSelection(AppState& s, app::Pane& pane, app::Tab& tab, bool /*f
     keys.reserve(pick.size());
     for (const auto& name : pick) keys.push_back(Lower(name));
     std::sort(keys.begin(), keys.end());
-    if (!a.task_id) a.until = std::max(a.until, now + kAfterArrivalMs);
     if (keys == current && !a.chosen.empty()) {
         a.chosen = std::move(keys);
         return false;
     }
+    if (!a.task_id) a.until = now + (a.expected_only ? kAfterTaskMs : kAfterArrivalMs);
     tab.RemapSelection(pick, pick.front(), false);
     a.chosen = SelectedNames(tab);
     if (tab.selected_index >= 0) CenterResultInPane(s, pane, tab, tab.selected_index);

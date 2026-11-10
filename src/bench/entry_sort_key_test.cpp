@@ -157,7 +157,7 @@ void GroupFolderOrders() {
                         for (const auto& e : rows) if (!is_folder(e)) last_file = &e;
                         unknown_last &= last_file && last_file->name == L"a-unknown.txt";
                     }
-                    if (group && !fixed && mode != FolderSortMode::Mixed) {
+                    if (group && !fixed && by != GroupBy::Tag && mode != FolderSortMode::Mixed) {
                         for (size_t i = 0; i < 3; ++i)
                             stable_key &= app::GroupKey(source[i], by, clock) == L"folders";
                     }
@@ -219,6 +219,55 @@ void GroupFolderOrders() {
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--tag-groups") {
+        auto catalog = std::make_shared<app::TagCatalogSnapshot>();
+        catalog->tags.resize(2);
+        catalog->paths = {{L"c:\\t\\alpha", 1}, {L"c:\\t\\beta", 0}, {L"c:\\t\\file.txt", 1}};
+        catalog->revision = 1;
+        app::PublishTagCatalog(catalog);
+        fs::DirEntry alpha{}, beta{}, file{}, untagged{}, shortcut{};
+        alpha.name = L"Alpha"; alpha.is_dir = true;
+        beta.name = L"Beta"; beta.is_dir = true;
+        file.name = L"file.txt";
+        untagged.name = L"Untagged"; untagged.is_dir = true;
+        shortcut.name = L"Alpha"; shortcut.link_target = L"C:\\Folder"; shortcut.link_target_is_dir = true;
+        bool ranks = true, order = true;
+        for (auto mode : {app::FolderSortMode::FoldersFirst, app::FolderSortMode::FoldersLast, app::FolderSortMode::Mixed}) {
+            app::GroupClock clock;
+            clock.folders = mode;
+            clock.tags = app::TagGroupsForFolder(L"C:\\t");
+            ranks &= app::GroupRank(alpha, app::GroupBy::Tag, clock) == 1 &&
+                app::GroupRank(beta, app::GroupBy::Tag, clock) == 0 &&
+                app::GroupRank(shortcut, app::GroupBy::Tag, clock) == 1 &&
+                app::GroupRank(untagged, app::GroupBy::Tag, clock) == 2;
+            app::ScopedFolderSortMode folders(mode);
+            app::ScopedEntryGrouping grouping(5, L"C:\\t");
+            for (auto direction : {ui::SortDirection::Asc, ui::SortDirection::Desc}) {
+                std::vector<fs::DirEntry> rows{alpha, untagged, file, beta};
+                app::SortEntries(rows, ui::SortColumn::Name, direction);
+                order &= rows.front().name == L"Beta" && rows.back().name == L"Untagged";
+            }
+        }
+        Check(ranks, "tag groups use folder and shortcut tags in every folder placement mode");
+        Check(order, "tag sort keeps primary tags contiguous and untagged folders last");
+        app::GroupClock clock;
+        clock.folders = app::FolderSortMode::Mixed;
+        clock.tags = app::TagGroupsForFolder(L"C:\\t");
+        alpha.full_path = L"C:\\one\\Alpha";
+        file.full_path = L"C:\\two\\file.txt";
+        Check(app::GroupKey(alpha, app::GroupBy::Tag, clock) == app::GroupKey(file, app::GroupBy::Tag, clock) &&
+            app::GroupKey(alpha, app::GroupBy::Location, clock) != app::GroupKey(file, app::GroupBy::Location, clock),
+            "tag identity differs from parent location identity");
+        auto updated = std::make_shared<app::TagCatalogSnapshot>(*catalog);
+        updated->paths[0].second = 0;
+        updated->revision = 2;
+        app::PublishTagCatalog(updated);
+        clock.tags = app::TagGroupsForFolder(L"C:\\t");
+        Check(app::GroupRank(alpha, app::GroupBy::Tag, clock) == 0,
+            "rebuilding tag groups reflects catalog refresh");
+        app::PublishTagCatalog({});
+        return failures ? 1 : 0;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--group-folders") {
         GroupFolderOrders();
         return failures ? 1 : 0;

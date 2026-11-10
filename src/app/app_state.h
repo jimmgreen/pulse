@@ -343,6 +343,11 @@ struct AppState : AppCoreOwner {
     bool paletteSearching = false;
 
     unsigned settingsExpanded = ui::kSettingsDefaultExpandedMask;
+    bool settings_store_browse = true;
+    bool settings_store_installed = false;
+    uint64_t store_manage_view_generation = 0, store_manage_ui_token = 0;
+    uint64_t store_view_generation = 0;
+    uint64_t store_ui_token = 0;
     float scale = 1.0f;
     bool maximized = false;
     bool backdropActive = true;
@@ -645,9 +650,13 @@ struct AppState : AppCoreOwner {
     struct ArrivalSelect {
         std::wstring dir;                          // fs::NormalizePath
         const app::Pane* pane = nullptr;
+        const app::Tab* tab = nullptr;
+        uint64_t view_generation = 0;
         std::unordered_set<std::wstring> baseline;  // listed when armed
         std::unordered_set<std::wstring> expected;  // reported by the operation
         std::vector<std::wstring> chosen;           // what it selected last
+        std::vector<std::wstring> initial_selection;
+        std::unordered_set<uint64_t> tasks;
         bool expected_only = false;                // explicit reveal: only actual task outputs
         uint64_t task_id = 0;
         uint64_t armed_at = 0;
@@ -673,6 +682,7 @@ struct AppState : AppCoreOwner {
     bool operationAutoShown = false;
     bool operationPinnedByUser = false;
     std::chrono::steady_clock::time_point operationStartedAt{};
+    std::chrono::steady_clock::time_point operationAutoShowFrom{};  // restarts while a modal prompt is open
     std::chrono::steady_clock::time_point operationFinishedAt{};
     HWND hwndRenameEdit = nullptr;
     int renameIndex = -1;

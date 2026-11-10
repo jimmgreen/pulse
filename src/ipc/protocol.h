@@ -140,15 +140,20 @@ enum CtxQueryFlags : uint32_t {
     CTXF_BACKGROUND = 2,  // paths[0] is a folder; build its background menu
 };
 
-// RSP_CTX_ITEMS per-item flags. Software-owned submenus keep one level of
-// hierarchy: a HAS_CHILDREN row is followed by its CHILD rows in order
-// (children never nest further; deeper levels are cut on the host).
+// RSP_CTX_ITEMS are preorder rows. Bits 8..15 preserve submenu depth.
+// Legacy CHILD rows without depth are immediate children (depth 1).
 enum CtxItemFlags : uint32_t {
     CTX_ITEM_ENABLED = 1,
     CTX_ITEM_SEPARATOR_AFTER = 2,
     CTX_ITEM_HAS_CHILDREN = 4,  // submenu header; item_id is not invokable
     CTX_ITEM_CHILD = 8,         // belongs to the nearest preceding header
 };
+inline constexpr uint32_t CTX_ITEM_DEPTH_SHIFT = 8;
+inline uint32_t PackCtxItemDepth(uint8_t depth) { return uint32_t(depth) << CTX_ITEM_DEPTH_SHIFT; }
+inline uint8_t UnpackCtxItemDepth(uint32_t flags) {
+    const auto depth = static_cast<uint8_t>((flags >> CTX_ITEM_DEPTH_SHIFT) & 0xFF);
+    return depth ? depth : (flags & CTX_ITEM_CHILD) ? 1 : 0;
+}
 // Bits 16..31 of the per-item flags carry the row's access key (UTF-16 code
 // unit of the raw label's "&X", upper-cased; 0 = none). Older readers only
 // test the low bits above, so the field is backward compatible both ways.

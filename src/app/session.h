@@ -4,6 +4,7 @@
 #include "window_identity.h"
 #include <array>
 #include <functional>
+#include <memory>
 #include <string>
 #include <windows.h>
 
@@ -81,6 +82,7 @@ struct SessionSnapshot {
     bool dark = false;
     std::wstring active_path;
     StagingTray tray;
+    std::shared_ptr<const std::wstring> undo_snapshot;
     std::wstring undo_json; // ops::OpsManager undo stack (serialized array)
     int sidebar_collapsed = 0; // bitmask indexed by SidebarSectionId
     int sidebar_hidden = 0;    // same ids; hidden sections are not drawn at all

@@ -26,6 +26,7 @@
 #include <deque>
 #include <functional>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <atomic>
 #include <optional>
@@ -181,6 +182,16 @@ struct UndoHistorySnapshot {
     bool completed_success = false;
 };
 
+// Frequent operation notifications need replay state, never the stored path batches.
+struct UndoHistoryProgress {
+    bool has_entries = false;
+    bool busy = false;
+    uint64_t completed_sequence = 0;
+    size_t completed_steps = 0;
+    bool completed_redo = false;
+    bool completed_success = false;
+};
+
 // Status rendering needs only counts and representative paths, not every file
 // in each operation. Keep this snapshot independent of operation batch size.
 struct UndoHistorySummaryItem {
@@ -332,6 +343,7 @@ struct ShellMenuItem {
     std::wstring handler;
     wchar_t mnemonic = 0;        // access key from the Explorer label, 0 = none
     common::MenuIconRef icon;    // the row's app icon, as Explorer shows it
+    uint8_t depth = 0;          // preorder tree depth; legacy child rows default to 1
 };
 
 // One handler of a context-menu answer, in menu order (ipc::CtxHandlerStatus).
@@ -500,7 +512,9 @@ public:
     bool CanUndoTask(uint64_t task_id) const;
     bool UndoTask(uint64_t task_id);
     UndoHistorySnapshot UndoHistory() const;
-    std::vector<UndoHistorySummaryItem> UndoHistorySummary() const;
+    UndoHistoryProgress HistoryProgress() const;
+    std::vector<UndoHistorySummaryItem> UndoHistorySummary(bool include_rows = true) const;
+    size_t UndoHistoryCount() const;
     // File operations waiting behind the running one (the status pill's "+N").
     size_t QueuedTransferCount() const;
     std::vector<std::wstring> UndoHistoryPreviewPaths(uint64_t task_id) const;
@@ -544,6 +558,7 @@ public:
 
     // Session persistence of the undo stack (JSON, same style as StagingTray).
     std::wstring UndoToJson() const;
+    std::shared_ptr<const std::wstring> UndoJsonSnapshot() const;
     bool UndoFromJson(const std::wstring& in);
 
 private:
@@ -690,6 +705,9 @@ private:
     std::wstring journal_path_;
     OpStatus status_;
     std::deque<UndoEntry> undo_;
+    uint64_t undo_json_revision_ = 0;
+    mutable uint64_t undo_json_cached_revision_ = UINT64_MAX;
+    mutable std::shared_ptr<const std::wstring> undo_json_cache_;
     std::deque<UndoEntry> redo_;
     struct HistoryReplay {
         bool redo = false;

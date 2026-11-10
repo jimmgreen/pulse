@@ -150,6 +150,8 @@ D2D1_RECT_F QuickPreviewWindow::FooterRect() const {
 }
 
 void QuickPreviewWindow::SetAccent(const D2D1_COLOR_F& accent) {
+    if (accent_.r == accent.r && accent_.g == accent.g && accent_.b == accent.b && accent_.a == 1.0f)
+        return;
     accent_ = accent;
     accent_.a = 1.0f;
     if (hwnd_ && visible()) InvalidateRect(hwnd_, nullptr, FALSE);

@@ -57,6 +57,7 @@ struct Script {
     uint32_t prominent_kind = 0;
     bool prominent_nested = false;
     bool no_test_save = false;
+    bool separators = false;
     bool client_places = false, cancel_before_accept = false, default_folder = false;
     bool metadata=false,metadata_cancel=false,metadata_caller=false,metadata_full=false;
     uint32_t title_index=0,keywords_index=0;
@@ -98,6 +99,12 @@ HRESULT WINAPI Validate(PulsePickerUiV2Session, const PulsePickerUiV2Config* con
         Check(config->native_options == script->expected_native_options, "complete original native options reach the UI config");
     if(script->prominent_kind){const auto& control=config->controls[script->prominent_nested?1:0];
         Check(control.kind==script->prominent_kind&&bool(control.state&PULSE_PICKER_UI_V2_CONTROL_PROMINENT)==(script->prominent_kind!=6&&script->prominent_kind!=8)&&bool(control.has_parent)==script->prominent_nested,"generic prominence preserves native layout policy and parent identity");}
+    if (script->separators) {
+        Check(config->control_count == 3 && config->controls[0].kind == PULSE_PICKER_UI_V2_CONTROL_SEPARATOR && config->controls[0].id == 2028 &&
+            config->controls[1].kind == PULSE_PICKER_UI_V2_CONTROL_SEPARATOR && config->controls[1].id == 2029 && config->controls[1].state == 2 &&
+            config->controls[2].id == 2024 && (config->controls[2].state & PULSE_PICKER_UI_V2_CONTROL_PROMINENT),
+            "save separators retain order, IDs, state and prominent button");
+    }
     if(script->no_test_save) Check((config->save_options&PULSE_PICKER_UI_V2_SAVE_NO_TEST_CREATE) &&
         !(config->save_options&PULSE_PICKER_UI_V2_SAVE_SKIP_ACCESS_VALIDATION) && config->default_extension.units==3 &&
         std::wstring(config->default_extension.data,config->default_extension.units)==L"pdf", "Save no-test-create keeps separate access policy and PDF extension");
@@ -157,7 +164,7 @@ HRESULT WINAPI Validate(PulsePickerUiV2Session, const PulsePickerUiV2Config* con
         }
         if (hr != S_OK) return hr;
     }
-    return config->required_capabilities == 0 && config->access_policy == (script->folder_mode ? PULSE_PICKER_UI_V2_ACCESS_FOLDER_V1 : (script->save || script->no_test_save) ? PULSE_PICKER_UI_V2_ACCESS_LOCAL_SAVE_V1 : PULSE_PICKER_UI_V2_ACCESS_LOCAL_OPEN_V1) ? S_OK : E_UNEXPECTED;
+    return config->required_capabilities == 0 && config->access_policy == (script->folder_mode ? PULSE_PICKER_UI_V2_ACCESS_FOLDER_V1 : (script->save || script->no_test_save || script->separators) ? PULSE_PICKER_UI_V2_ACCESS_LOCAL_SAVE_V1 : PULSE_PICKER_UI_V2_ACCESS_LOCAL_OPEN_V1) ? S_OK : E_UNEXPECTED;
 }
 HRESULT WINAPI Window(PulsePickerUiV2Session, uint64_t show, HWND* out) { *out = show == 1 ? script->window : nullptr; return *out ? S_OK : E_UNEXPECTED; }
 HRESULT WINAPI Close(PulsePickerUiV2Session, uint64_t show, HRESULT hr) {
@@ -165,7 +172,7 @@ HRESULT WINAPI Close(PulsePickerUiV2Session, uint64_t show, HRESULT hr) {
     if (!script->closed) { script->closed = true; script->close_hr = hr; } return S_OK;
 }
 HRESULT WINAPI UpdateControl(PulsePickerUiV2Session, uint64_t show, const PulsePickerUiV2Control* control) {
-    Check(show == 1 && control && (control->id == 71 || control->id == 72 || (script->combo && control->id == 1) || (script->menus && control->id==50) || (script->value_controls && control->id>=206 && control->id<=213)), "live update targets actual UI session/control");
+    Check(show == 1 && control && (control->id == 71 || control->id == 72 || (script->combo && control->id == 1) || (script->menus && control->id==50) || (script->separators && control->id == 2029) || (script->value_controls && control->id>=206 && control->id<=213)), "live update targets actual UI session/control");
     if (control->id == 72) { script->button_label.assign(control->label.data, control->label.units); script->button_state = control->state; }
     ++script->updates;
     if (script->fail_update) { script->fail_update = false; return E_ACCESSDENIED; }
@@ -724,7 +731,7 @@ void Case(const std::wstring& folder, int mode) {
     if (mode == 8) {
         ComPtr<IFileDialogCustomize> customize;
         const HRESULT custom_query = dialog.As(&customize);
-        const HRESULT added = customize ? customize->AddSeparator(9001) : E_NOINTERFACE;
+        const HRESULT added = customize ? customize->AddText(9001, L"Unsupported static text") : E_NOINTERFACE;
         Check(SUCCEEDED(custom_query) && customize && SUCCEEDED(added), "actual customization remains native");
         if (customize) {
             CDCONTROLSTATEF control_state{};
@@ -738,7 +745,7 @@ void Case(const std::wstring& folder, int mode) {
                         line.find(result) != std::string::npos && line.find(outcome) != std::string::npos) return true;
                 return false;
             };
-            Check(has("method=AddSeparator ", "kind=mutation", added, added == S_OK ? "outcome=mutation-ok" : "outcome=other-success") &&
+            Check(has("method=AddText ", "kind=mutation", added, added == S_OK ? "outcome=mutation-ok" : "outcome=other-success") &&
                 has("method=GetControlState ", "kind=read", read, read == S_OK ? "outcome=read-ok" : "outcome=other-success") &&
                 has("method=SetSelectedControlItem ", "kind=mutation", failed, "outcome=failed"),
                 "Customize diagnostics preserve exact static method, read/mutation and actual HRESULT outcome");
@@ -925,6 +932,8 @@ void OpenTrace(const std::wstring& folder, unsigned variant = 0) {
     Check(DeleteFileW(state.second.c_str()) != FALSE, "delete only second owned fixture");
 }
 
+#include "file_dialog_deferred_history_test.inc"
+
 void DefaultFolderTrace(const std::wstring& folder, unsigned variant) {
     const auto remembered_folder=folder+L"\\remembered";
     Check(CreateDirectoryW(remembered_folder.c_str(),nullptr)!=FALSE,"create owned remembered folder");
@@ -954,7 +963,7 @@ void DefaultFolderTrace(const std::wstring& folder, unsigned variant) {
 }
 
 void MetadataTrace(const std::wstring& folder,unsigned variant) {
-    Script state;script=&state;state.metadata=true;state.metadata_full=variant==6;state.metadata_cancel=variant==1 || variant==5;state.metadata_caller=variant>=3;state.save=true;state.folder=folder;state.file=folder+L"\\new-metadata.txt";
+    Script state;script=&state;state.metadata=true;state.metadata_full=variant==6;state.metadata_cancel=variant==1 || variant==5 || variant==8;state.metadata_caller=variant>=3;state.save=true;state.folder=folder;state.file=folder+L"\\new-metadata.txt";
     auto provider=std::make_shared<FileDialogInprocessProvider>();provider->module_lifetime=std::make_shared<int>(1);provider->allow_unverified_proof=true;
     auto& api=provider->api;api.size=sizeof(api);api.version=2;api.Initialize=Initialize;api.ValidateConfig=Validate;api.Show=Show;api.Query=Query;api.GetWindow=Window;api.Close=Close;api.Shutdown=Shutdown;api.UpdateControl=UpdateControl;
     api.implemented_features=variant==2?0u:PULSE_PICKER_UI_V2_FEATURE_PROPERTIES | (variant==6?(PULSE_PICKER_UI_V2_FEATURE_CUSTOM_RADIO|PULSE_PICKER_UI_V2_FEATURE_CUSTOM_CHECK|PULSE_PICKER_UI_V2_FEATURE_CUSTOM_EDIT|PULSE_PICKER_UI_V2_FEATURE_FILESYSTEM_PLACES|PULSE_PICKER_UI_V2_FEATURE_COMPUTER_PLACE|PULSE_PICKER_UI_V2_FEATURE_CUSTOM_LABELS):0u) | (variant>=3?PULSE_PICKER_UI_V2_FEATURE_SAVE_SKIP_ACCESS:0u);
@@ -970,6 +979,20 @@ void MetadataTrace(const std::wstring& folder,unsigned variant) {
         PropVariantClear(&keywords); InitPropVariantFromString(L"first; second", &keywords);
     }
     Check(store->SetValue(PKEY_Title,title)==S_OK && store->SetValue(PKEY_Keywords,keywords)==S_OK && store->Commit()==S_OK,"populate owned metadata store");PropVariantClear(&title);PropVariantClear(&keywords);
+    if (variant >= 7) {
+        PROPVARIANT extra{};
+        bool seeded = true;
+        for (DWORD i = 0; i < 256; ++i) {
+            PROPERTYKEY key = PKEY_Rating; key.pid = 10000 + i;
+            extra.vt = VT_UI4; extra.ulVal = i;
+            seeded = store->SetValue(key, extra) == S_OK && seeded;
+        }
+        Check(seeded, "seed 256 additional document properties");
+        BYTE thumbnail[] = {0, 1, 127, 255};
+        PROPERTYKEY key = PKEY_Rating; key.pid = 11000;
+        extra = {}; extra.vt = VT_BLOB; extra.blob.cbSize = sizeof(thumbnail); extra.blob.pBlobData = thumbnail;
+        Check(store->SetValue(key, extra) == S_OK, "seed opaque document thumbnail");
+    }
     ComPtr<IPropertySystem> system;CoCreateInstance(__uuidof(PropertySystem),nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&system));ComPtr<IPropertyDescriptionList> list;
     Check(system && system->GetPropertyDescriptionListFromString(variant==6?L"prop:System.Author;System.Keywords;System.Title;System.Subject;System.Document.Manager;System.Company;System.Category;System.Comment":L"prop:System.Title;System.Keywords",IID_PPV_ARGS(&list))==S_OK,"resolve requested metadata descriptions");if(!list)return;
     Check(save->SetProperties(store.Get())==S_OK && save->SetCollectedProperties(list.Get(),FALSE)==S_OK,"native store and collected properties accepted");
@@ -992,8 +1015,17 @@ void MetadataTrace(const std::wstring& folder,unsigned variant) {
     SinkState observed;observed.expected=state.file;ComPtr<IFileDialogEvents> sink;sink.Attach(new Sink(observed));save->Advise(sink.Get(),&observed.cookie);
     const auto shown=save->Show(nullptr);ComPtr<IPropertyStore> result;
     if(variant==2)Check(shown==E_UNEXPECTED && native_calls==1 && !state.initialized,"missing metadata feature falls back before UI initialization");
-    else if(variant==1 || variant==5)Check(shown==HRESULT_FROM_WIN32(ERROR_CANCELLED) && !native_calls && FAILED(save->GetProperties(&result)) && !result,"cancel never returns edited metadata as accepted result");
+    else if(variant==1 || variant==5 || variant==8)Check(shown==HRESULT_FROM_WIN32(ERROR_CANCELLED) && !native_calls && FAILED(save->GetProperties(&result)) && !result,"cancel never returns edited metadata as accepted result");
     else {Check(shown==S_OK && !native_calls && save->GetProperties(&result)==S_OK,"accepted Save exposes metadata snapshot");CheckMetadata(result.Get());}
+    if (variant == 7 && result) {
+        PROPERTYKEY key = PKEY_Rating; key.pid = 11000;
+        PROPVARIANT retained{}; result->GetValue(key, &retained);
+        const BYTE expected[] = {0, 1, 127, 255};
+        Check(retained.vt == VT_BLOB && retained.blob.cbSize == sizeof(expected) &&
+            memcmp(retained.blob.pBlobData, expected, sizeof(expected)) == 0,
+            "accepted Save preserves opaque document metadata exactly");
+        PropVariantClear(&retained);
+    }
     Check(GetFileAttributesW(state.file.c_str())==INVALID_FILE_ATTRIBUTES,"metadata fixture does not write caller target");
     save->Unadvise(observed.cookie);
 }
@@ -1183,6 +1215,65 @@ void NullExtension(const std::wstring& folder) {
             "null or empty clear is bridged; oversized value retains bounded native fallback");
     }
 }
+void SeparatorControls(const std::wstring& folder) {
+    for (unsigned variant = 0; variant < 3; ++variant) {
+        Script state; script = &state; state.folder = folder; state.file = folder + L"\\export.psd";
+        state.separators = true; state.cancel_before_accept = variant == 1;
+        auto provider = std::make_shared<FileDialogInprocessProvider>();
+        provider->module_lifetime = std::make_shared<int>(1); provider->allow_unverified_proof = true;
+        auto& api = provider->api; api.size = sizeof(api); api.version = 2;
+        api.Initialize = Initialize; api.ValidateConfig = Validate; api.Show = Show; api.Query = Query;
+        api.GetWindow = Window; api.Close = Close; api.Shutdown = Shutdown; api.UpdateControl = UpdateControl;
+        api.implemented_features = PULSE_PICKER_UI_V2_FEATURE_SAVE_NATIVE_DEFAULTS |
+            PULSE_PICKER_UI_V2_FEATURE_CUSTOM_LABELS | PULSE_PICKER_UI_V2_FEATURE_CUSTOM_PROMINENT_CONTROL |
+            (variant == 2 ? 0u : PULSE_PICKER_UI_V2_FEATURE_CUSTOM_SEPARATOR);
+        unsigned native_calls = 0;
+        FileDialogBridgeServices services; services.save_access_policy = AccessPolicy::LocalSaveV1;
+        services.inprocess_provider = provider;
+        services.validation_verified = [](const ContractDecision& d) { return d.validation_category == ValidationCategory::LocalSaveAccessV1; };
+        services.show_native = [&](IFileDialog*, HWND) { ++native_calls; return E_FAIL; };
+        ComPtr<IFileSaveDialog> save;
+        Check(CreateIsolatedDialog(DialogFactory::Save, services, IID_PPV_ARGS(&save)) == S_OK, "isolated separator Save");
+        if (!save) continue;
+        ComPtr<IShellItem> initial; SHCreateItemFromParsingName(folder.c_str(), nullptr, IID_PPV_ARGS(&initial));
+        const COMDLG_FILTERSPEC filter{L"PSD", L"*.PSD;*.PSB"};
+        Check(save->SetOptions(34826) == S_OK && save->SetFileTypes(1, &filter) == S_OK &&
+            save->SetFileTypeIndex(1) == S_OK && save->SetDefaultExtension(L"PSD") == S_OK &&
+            save->SetFileName(L"export.psd") == S_OK && save->SetTitle(L"Save") == S_OK &&
+            save->SetFolder(initial.Get()) == S_OK, "logged Save options and setters accepted");
+        ComPtr<IFileDialogCustomize> custom; save.As(&custom);
+        Check(custom && custom->AddSeparator(2028) == S_OK && custom->AddSeparator(2029) == S_OK &&
+            custom->AddPushButton(2024, L"Options") == S_OK && custom->MakeProminent(2024) == S_OK,
+            "logged separator calls and prominent control accepted");
+        CDCONTROLSTATEF control_state{};
+        Check(custom && custom->SetControlState(2029, CDCS_VISIBLE) == S_OK &&
+            custom->GetControlState(2029, &control_state) == S_OK && control_state == CDCS_VISIBLE,
+            "separator own state round-trips before Show");
+        show_action = [&] {
+            Check(custom->SetControlState(2029, static_cast<CDCONTROLSTATEF>(3)) == S_OK &&
+                custom->GetControlState(2029, &control_state) == S_OK && control_state == 3,
+                "separator live state update reaches UI and native mirror");
+            state.fail_update = true;
+            Check(custom->SetControlState(2029, CDCS_VISIBLE) == E_ACCESSDENIED &&
+                custom->GetControlState(2029, &control_state) == S_OK && control_state == 3,
+                "failed separator live update restores both backends");
+            Check(custom->AddSeparator(2030) == E_UNEXPECTED, "live separator insertion leaves structure unchanged");
+        };
+        const HRESULT shown = save->Show(nullptr);
+        show_action = {};
+        Check(variant == 2 ? shown == E_FAIL && native_calls == 1 && !state.shown :
+            shown == (variant == 1 ? HRESULT_FROM_WIN32(ERROR_CANCELLED) : S_OK) && !native_calls && state.shown == 1,
+            variant == 2 ? "older provider falls back before showing separator UI" : "separator Save stays in Pulse on accept and cancel");
+        ComPtr<IShellItem> result; const HRESULT got = save->GetResult(&result);
+        if (variant == 0) {
+            PWSTR path = nullptr;
+            Check(got == S_OK && result && result->GetDisplayName(SIGDN_FILESYSPATH, &path) == S_OK &&
+                path && state.file == path, "separator Save returns exact Shell path");
+            CoTaskMemFree(path);
+        } else Check(FAILED(got) && !result, "cancelled or native-fallback Save exposes no Pulse result");
+        Check(!std::filesystem::exists(state.file), "separator Save contract creates no user file");
+    }
+}
 void SaveNoTestCreate(const std::wstring& folder) {
     for(bool checkbox : {false,true})for(bool cancel : {false,true}){
         Script state;script=&state;state.folder=folder;state.file=folder+L"\\absent\\export.pdf";
@@ -1350,6 +1441,7 @@ void NativeOptions(const std::wstring& folder) {
     }
 }
 int wmain(int argc, wchar_t** argv) {
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED); if (FAILED(com)) return 2;
     const auto root = std::filesystem::absolute(std::filesystem::path(L"bench_data") / (L"inprocess-wrapper-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64())));
     std::filesystem::create_directories(root.parent_path()); if (!CreateDirectoryW(root.c_str(), nullptr)) { CoUninitialize(); return 2; }
@@ -1358,8 +1450,9 @@ int wmain(int argc, wchar_t** argv) {
     if (handle == INVALID_HANDLE_VALUE) { RemoveDirectoryW(root.c_str()); CoUninitialize(); return 2; } CloseHandle(handle);
     const bool real_metadata = argc == 3 && std::wstring_view(argv[1]) == L"--metadata-real-config";
     const bool real_default = argc == 3 && std::wstring_view(argv[1]) == L"--default-folder-real-config";
+    const bool real_separators = argc == 3 && std::wstring_view(argv[1]) == L"--separators-real-config";
     const bool real_values = argc == 3 && std::wstring_view(argv[1]) == L"--value-controls-real-config";
-    if (real_metadata || real_values || real_default) {
+    if (real_metadata || real_values || real_default || real_separators) {
         HMODULE module = std::filesystem::path(argv[2]).is_absolute() ? LoadLibraryExW(argv[2], nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32) : nullptr;
         using GetApi = HRESULT (WINAPI*)(uint32_t, uint32_t, PulsePickerUiV2Api*);
         const auto get = module ? reinterpret_cast<GetApi>(GetProcAddress(module, "PulsePickerUiGetApiV2")) : nullptr;
@@ -1367,7 +1460,14 @@ int wmain(int argc, wchar_t** argv) {
             Check(false, "load real UI validator"); DeleteFileW(file.c_str()); RemoveDirectoryW(root.c_str()); CoUninitialize(); return 1;
         }
     }
-    if (argc == 2 && std::wstring_view(argv[1]) == L"--native-options") { isolated_native = true; NativeOptions(root.wstring()); }
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--deferred-history") {
+        isolated_native = true;
+        DeferredHistoryTrace(root.wstring(), false);
+        DeferredHistoryTrace(root.wstring(), true);
+    }
+    else if (real_separators || (argc == 2 && std::wstring_view(argv[1]) == L"--separators")) { SeparatorControls(root.wstring()); }
+    else if (argc == 2 && std::wstring_view(argv[1]) == L"--customize-gates") { isolated_native = true; Case(root.wstring(), 8); }
+    else if (argc == 2 && std::wstring_view(argv[1]) == L"--native-options") { isolated_native = true; NativeOptions(root.wstring()); }
     else if (argc == 2 && std::wstring_view(argv[1]) == L"--null-extension") { NullExtension(root.wstring()); }
     else if (argc == 2 && std::wstring_view(argv[1]) == L"--prominent-controls") { ProminentControls(root.wstring()); }
     else if (argc == 2 && std::wstring_view(argv[1]) == L"--save-no-test-create") { SaveNoTestCreate(root.wstring()); }
@@ -1380,6 +1480,7 @@ int wmain(int argc, wchar_t** argv) {
     else if (real_default) { for(unsigned variant=0;variant<3;++variant)DefaultFolderTrace(root.wstring(),variant); }
     else if (real_metadata) { for(unsigned variant=0;variant<7;++variant)MetadataTrace(root.wstring(),variant); }
     else if (real_values) { ValueControlsTrace(root.wstring(),false); ValueControlsTrace(root.wstring(),true); }
+    else if (argc == 2 && std::wstring_view(argv[1]) == L"--rich-metadata") { MetadataTrace(root.wstring(), 7); MetadataTrace(root.wstring(), 8); }
     else if (argc == 2 && std::wstring_view(argv[1]) == L"--metadata-contract") { for(unsigned variant=0;variant<6;++variant)MetadataTrace(root.wstring(),variant); }
     else if (argc == 2 && std::wstring_view(argv[1]) == L"--value-controls-contract") { ValueControlsTrace(root.wstring(),false);ValueControlsTrace(root.wstring(),true); }
     else if (argc == 2 && std::wstring_view(argv[1]) == L"--computer-place-contract") { ComputerPlaceTrace(root.wstring(),false); ComputerPlaceTrace(root.wstring(),true); }

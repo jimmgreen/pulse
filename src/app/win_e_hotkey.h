@@ -7,11 +7,10 @@
 
 namespace pulse::app {
 class WinETrace;
-class WinEBrokerClient;
 // One instance belongs to AppCore; its hook runs on a dedicated message thread.
 class WinEHotkey {
 public:
-    WinEHotkey(SingleInstanceCoordinator& coordinator, HWND host, UINT wake, bool elevated_support = false);
+    WinEHotkey(SingleInstanceCoordinator& coordinator, HWND host, UINT wake);
     ~WinEHotkey();
     WinEHotkey(const WinEHotkey&) = delete;
     WinEHotkey& operator=(const WinEHotkey&) = delete;
@@ -41,8 +40,6 @@ private:
     std::vector<Delivery> deliveries_;
     WinEInputState input_;
     WinETrace* trace_ = nullptr;
-    WinEBrokerClient* broker_ = nullptr;
-    bool elevated_support_ = false, broker_mode_ = false;
     HWINEVENTHOOK foreground_hook_ = nullptr;
     HWND last_foreground_ = nullptr;
     uint64_t refresh_tick_ = 0, cycle_ = 0;

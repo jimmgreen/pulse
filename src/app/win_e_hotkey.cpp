@@ -1,7 +1,5 @@
 #include "win_e_hotkey.h"
 #include "win_e_trace.h"
-#include "win_e_broker_client.h"
-#include "../ipc/elevated_transfer_transport.h"
 #include "../common/runtime_log.h"
 #include <cstring>
 #include <objbase.h>
@@ -70,8 +68,8 @@ void WatchDelivery(const std::array<unsigned char, 16>& id,
     else CloseHandle(worker);
 }
 }
-WinEHotkey::WinEHotkey(SingleInstanceCoordinator& coordinator, HWND host, UINT wake, bool elevated_support)
-    : coordinator_(coordinator), host_(host), wake_(wake), elevated_support_(elevated_support) {
+WinEHotkey::WinEHotkey(SingleInstanceCoordinator& coordinator, HWND host, UINT wake)
+    : coordinator_(coordinator), host_(host), wake_(wake) {
     thread_ = CreateThread(nullptr, 0, Thread, this, 0, nullptr);
     if (!thread_) diagnostics::runtime::Event("win_e_hook", {{"enabled", 0}, {"error", GetLastError()}});
 }
@@ -154,12 +152,7 @@ DWORD WINAPI WinEHotkey::Thread(void* value) {
     self.active_ = self.hook_ != nullptr;
     diagnostics::runtime::Event("win_e_hook", {{"enabled", self.active_.load()},
         {"error", self.hook_ ? ERROR_SUCCESS : GetLastError()}});
-    std::unique_ptr<WinEBrokerClient> broker;
     if (self.hook_) {
-        if (self.elevated_support_ && !elevated::IsElevated(GetCurrentProcess())) {
-            try { broker = std::make_unique<WinEBrokerClient>(self.host_); self.broker_ = broker.get(); }
-            catch (...) { diagnostics::runtime::Event("win_e_broker_start", {{"success", 0}, {"error", ERROR_NOT_ENOUGH_MEMORY}}); }
-        }
         self.hook_generation_ = 1;
         self.last_foreground_ = GetForegroundWindow();
         self.foreground_hook_ = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
@@ -172,8 +165,6 @@ DWORD WINAPI WinEHotkey::Thread(void* value) {
                 self.FinishChord();
             } else if (!message.hwnd && message.message == WM_TIMER) {
                 self.FinishChord();
-                if (broker) broker->Poll(self.coordinator_, self.host_, self.wake_,
-                    !self.input_.chord.down && !Down('E') && !Down(VK_LWIN) && !Down(VK_RWIN));
                 self.RefreshHook(GetForegroundWindow(), 2);
                 std::erase_if(self.deliveries_, [](const Delivery& delivery) {
                     const auto state = delivery.state->load();
@@ -209,7 +200,6 @@ DWORD WINAPI WinEHotkey::Thread(void* value) {
         self.prepared_delivery_->compare_exchange_strong(queued, SingleInstanceCoordinator::OpenDeliveryState::Cancelled);
         WatchDelivery(self.request_.id, self.prepared_delivery_);
     }
-    self.broker_ = nullptr; broker.reset();
     self.trace_ = nullptr;
     self.active_ = false; current_ = nullptr;
     diagnostics::runtime::Event("win_e_hook", {{"enabled", 0}, {"error", 0}, {"reason", self.stopping_ ? 1u : 2u}});
@@ -222,22 +212,6 @@ LRESULT CALLBACK WinEHotkey::Keyboard(int code, WPARAM message, LPARAM data) {
     const bool pressed = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
     const bool released = message == WM_KEYUP || message == WM_SYSKEYUP;
     if (!pressed && !released) return CallNextHookEx(nullptr, code, message, data);
-    if (self->broker_) {
-        const bool active = self->broker_->Active();
-        if (!active && self->broker_mode_) {
-            const auto held = self->broker_->HeldFlags();
-            self->input_.chord.down = (held & 1) != 0;
-            self->input_.chord.accepted = (held & 2) != 0;
-        }
-        self->broker_mode_ = active;
-        if (active && !self->input_.chord.accepted) {
-            if (key.vkCode == 'E') {
-                if (released) self->input_.chord.Release();
-                else self->input_.chord.Press(false);
-            }
-            return CallNextHookEx(nullptr, code, message, data);
-        }
-    }
     const auto modifier = WinEInputState::Modifier(key.vkCode);
     if (modifier) self->input_.ObserveModifier(key.vkCode, pressed);
     const bool win = key.vkCode == VK_LWIN || key.vkCode == VK_RWIN;

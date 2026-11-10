@@ -14,7 +14,8 @@ namespace pulse::ui {
 // Hosts the system IPreviewHandler (Explorer Alt+P) in a WS_POPUP overlay.
 // All third-party COM calls and the overlay HWND live on a dedicated STA.
 // The overlay matches the details preview rect so Word/Excel keep their own
-// scrollbars inside the pane (Explorer behavior).
+// scrollbars inside the pane (Explorer behavior). Embedded hosts are clipped to
+// their ancestors and follow ancestor window events without global topmost.
 class PreviewHandlerHost {
 public:
     enum class State { Idle, Loading, Shown, Failed };
@@ -83,6 +84,8 @@ private:
     // the provider call they are inside returns, then unload and exit.
     std::vector<std::shared_ptr<WorkerState>> retired_;
     HWND notify_ = nullptr;
+    bool apartment_busy_ = false;
+    uint64_t admission_retry_ = 0;
     bool app_active_ = true;
     bool covered_ = false;
     std::wstring last_identity_;

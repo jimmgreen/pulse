@@ -6,15 +6,12 @@
 
 namespace pulse::app {
 
-// File Explorer keeps the rows on screen where they are while files change
-// underneath them (#13): a renamed or modified item stays in its row, and
-// only an explicit refresh, a new sort or reopening the folder puts the list
-// back in sort order. Unlike Explorer, a new item (pasted, extracted,
-// downloaded) goes straight to its sort position rather than the end.
-//
-// Grouping comes from the ScopedEntryGrouping active on this thread, as for
-// EntryLess. Held listings stay group-contiguous; an item whose group changes
-// moves to the end of its new group instead of staying in place.
+// Renamed rows retain their displayed position within their group. New rows
+// and metadata updates that change the active sort key use the comparator.
+
+// True when both entries have equivalent active sorting and grouping keys.
+bool SameEntrySortPosition(const fs::DirEntry& a, const fs::DirEntry& b,
+                           ui::SortColumn col, ui::SortDirection dir);
 
 // True when `a` and `b` fall in the same group (always true when ungrouped).
 bool SameEntryGroup(const fs::DirEntry& a, const fs::DirEntry& b,
@@ -41,7 +38,7 @@ struct EntryRename {
 };
 
 // Merges a freshly enumerated listing (`fresh`, in sort order) into the order
-// on screen (`shown`): rows still present keep their place with fresh
+// on screen (`shown`): rows with unchanged sort keys keep their place with fresh
 // metadata, a renamed row (`renames`) keeps its old row, removed rows drop
 // out, and new rows merge in at their sort position.
 std::vector<fs::DirEntry> KeepEntryOrder(const std::vector<fs::DirEntry>& shown,

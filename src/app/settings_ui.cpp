@@ -1,4 +1,5 @@
 #include "app_internal.h"
+#include "extension_store_ui.h"
 #include "dialog_management_ui.h"
 #include "dialog_management_controller.h"
 #include "picker_appearance.h"
@@ -517,6 +518,7 @@ bool HandleSettingsControl(AppState& s,const H& hit) {
     case H::SettingsAi: pulse::AiSettingsAction(s,hit.index);break;
     case H::SettingsAssistant: pulse::AssistantSettingsClick(s,hit.index);break;
     case H::SettingsPackAction: {
+        if (ExtensionStoreAction(s, hit.index)) return true;
         bool refresh=false;
         switch(static_cast<ui::PackAction>(hit.index)) {
         case ui::PackAction::Install: refresh=s.settings.InstallMediaPack(s.hwnd);break;
@@ -543,7 +545,7 @@ bool HandleSettingsControl(AppState& s,const H& hit) {
             break;
         }
         case ui::PackAction::NativeSettings: OpenSettingsTab(s,ui::kSettingsPageNativeExtensions); return true;
-        case ui::PackAction::ManagePacks: OpenSettingsTab(s,8); return true;
+        case ui::PackAction::ManagePacks: s.settings_store_browse = false; s.settings_store_installed = false; OpenSettingsTab(s,8); return true;
         case ui::PackAction::ContentInstall: OfferContentPack(s); return true;
         case ui::PackAction::ContentManage: OpenSettingsTab(s,1); return true;
         case ui::PackAction::AiInstall: OfferAiPack(s); InvalidateRect(s.hwnd,nullptr,FALSE); return true;
@@ -654,7 +656,7 @@ bool HandleSettingsControl(AppState& s,const H& hit) {
             const I labels[]={I::EffectNone,I::EffectAcrylic,I::EffectMica,I::EffectMicaAlt};
             for(int i=0;i<ui::kWindowEffectCount;++i) {
                 auto item=Item(i+1,labels[i],s.appPrefs.window_effect==ui::WindowEffectId(static_cast<ui::WindowEffect>(i)));
-                item.enabled=i==0 || compat::ModernWindows();items.push_back(std::move(item));
+                item.enabled=ui::WindowEffectSupported(static_cast<ui::WindowEffect>(i));items.push_back(std::move(item));
             }
             int command=Dropdown(s,hit.index,std::move(items));if(command>=1 && command<=ui::kWindowEffectCount) s.settings.WindowEffect(ui::WindowEffectId(static_cast<ui::WindowEffect>(command-1)));
         } else {

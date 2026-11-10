@@ -43,6 +43,9 @@ void IdentifyLoadedModules(FileLockReport& report, const std::vector<std::wstrin
     do {
         if (++process_count > process_limit || GetTickCount64() - started >= budget_ms) { report.module_scan_complete = false; return; }
         if (!process.th32ProcessID) continue;
+        FILETIME created{}, exited{}, kernel{}, user{};
+        HANDLE identity = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, process.th32ProcessID);
+        if (identity) { GetProcessTimes(identity, &created, &exited, &kernel, &user); CloseHandle(identity); }
         Snapshot modules;
         for (unsigned attempt = 0; attempt < 2; ++attempt) {
             modules.value = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, process.th32ProcessID);
@@ -74,7 +77,7 @@ void IdentifyLoadedModules(FileLockReport& report, const std::vector<std::wstrin
             }
         } while (Module32NextW(modules.value, &module));
         if (found && std::none_of(report.programs.begin(), report.programs.end(), [&](const auto& old) { return old.pid == process.th32ProcessID; }))
-            report.programs.push_back({process.th32ProcessID, process.szExeFile});
+            report.programs.push_back({process.th32ProcessID, process.szExeFile, created});
     } while (Process32NextW(processes.value, &process));
 }
 }
@@ -115,12 +118,29 @@ FileLockReport InspectReplacementLocks(const std::wstring& root, const std::vect
             processes.resize(needed);
         }
         if (error == ERROR_SUCCESS) for (UINT i = 0; i < count; ++i)
-            result.programs.push_back({processes[i].Process.dwProcessId, processes[i].strAppName});
+            result.programs.push_back({processes[i].Process.dwProcessId, processes[i].strAppName, processes[i].Process.ProcessStartTime});
     }
     result.identification_error = error;
     if (error != ERROR_SUCCESS || result.programs.empty()) IdentifyLoadedModules(result, candidates);
     return result;
 }
+DWORD EndLockedProgram(const LockedProgram& program) {
+    if (!program.CanEnd()) return ERROR_ACCESS_DENIED;
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE, FALSE, program.pid);
+    if (!process) { const DWORD error = GetLastError(); return error == ERROR_INVALID_PARAMETER ? ERROR_SUCCESS : error; }
+    struct Close { HANDLE handle; ~Close() { CloseHandle(handle); } } close{process};
+    if (WaitForSingleObject(process, 0) == WAIT_OBJECT_0) return ERROR_SUCCESS;
+    FILETIME started{}, exited{}, kernel{}, user{};
+    if (!GetProcessTimes(process, &started, &exited, &kernel, &user)) return GetLastError();
+    if (CompareFileTime(&started, &program.started) != 0) return ERROR_INVALID_DATA;
+    BOOL critical = FALSE;
+    if (!IsProcessCritical(process, &critical)) return GetLastError();
+    if (critical) return ERROR_ACCESS_DENIED;
+    if (!TerminateProcess(process, ERROR_PROCESS_ABORTED)) return GetLastError();
+    const DWORD waited = WaitForSingleObject(process, 5000);
+    return waited == WAIT_OBJECT_0 ? ERROR_SUCCESS : waited == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
+}
+
 std::wstring DescribeReplacementLocks(const FileLockReport& report) {
     std::wstring text;
     for (const auto& path : report.files) text += path + L"\n";

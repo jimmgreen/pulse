@@ -17,6 +17,65 @@
 #include <utility>
 #include <vector>
 
+namespace pulse::ui {
+struct FluentMenuTestPeer {
+    static void HoverAt(FluentMenu& menu, HWND hwnd, POINT point) {
+        auto* previous = menu.sub_;
+        menu.sub_ = &menu.first_sub_;
+        if (hwnd == menu.hwnd_) menu.OnMouse(point, false);
+        else {
+            for (const auto& state : menu.deeper_subs_)
+                if (state->hwnd == hwnd) menu.sub_ = state.get();
+            menu.OnSubMouse(point, false);
+        }
+        menu.sub_ = previous;
+    }
+    static void SaveCascade(FluentMenu& menu) {
+        std::vector<std::pair<const FluentMenu::Surface*, POINT>> surfaces = {
+            {&menu.surf_, {menu.base_x_, menu.base_y_}},
+            {&menu.first_sub_.surf, {menu.first_sub_.x, menu.first_sub_.y}}};
+        for (const auto& state : menu.deeper_subs_)
+            if (state->parent_row >= 0) surfaces.push_back({&state->surf, {state->x, state->y}});
+        RECT bounds{LONG_MAX, LONG_MAX, LONG_MIN, LONG_MIN};
+        for (const auto& [surface, point] : surfaces) {
+            bounds.left = (std::min)(bounds.left, point.x); bounds.top = (std::min)(bounds.top, point.y);
+            bounds.right = (std::max)(bounds.right, point.x + surface->w);
+            bounds.bottom = (std::max)(bounds.bottom, point.y + surface->h);
+        }
+        const int width = bounds.right - bounds.left, height = bounds.bottom - bounds.top;
+        if (width <= 0 || height <= 0) return;
+        std::vector<uint32_t> pixels(static_cast<size_t>(width) * height, 0xFFF0F0F0);
+        for (const auto& [surface, point] : surfaces) {
+            if (!surface->bits) continue;
+            const auto* source = static_cast<const uint32_t*>(surface->bits);
+            for (int y = 0; y < surface->h; ++y) for (int x = 0; x < surface->w; ++x) {
+                const uint32_t value = source[y * surface->w + x];
+                auto& dest = pixels[(y + point.y - bounds.top) * width + x + point.x - bounds.left];
+                const unsigned inverse = 255 - (value >> 24);
+                uint32_t mixed = 0xFF000000;
+                for (unsigned shift : {0u, 8u, 16u}) {
+                    const unsigned component = ((value >> shift) & 255) + (((dest >> shift) & 255) * inverse + 127) / 255;
+                    mixed |= (std::min)(component, 255u) << shift;
+                }
+                dest = mixed;
+            }
+        }
+        BITMAPFILEHEADER file{}; file.bfType = 0x4D42; file.bfOffBits = sizeof(file) + sizeof(BITMAPINFOHEADER);
+        file.bfSize = file.bfOffBits + static_cast<DWORD>(pixels.size() * 4);
+        BITMAPINFOHEADER info{sizeof(info)}; info.biWidth = width; info.biHeight = -height;
+        info.biPlanes = 1; info.biBitCount = 32;
+        HANDLE output = CreateFileW(L"bench_data/nested_menu_fix/cascade.bmp", GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
+        if (output != INVALID_HANDLE_VALUE) {
+            DWORD written = 0;
+            WriteFile(output, &file, sizeof(file), &written, nullptr);
+            WriteFile(output, &info, sizeof(info), &written, nullptr);
+            WriteFile(output, pixels.data(), static_cast<DWORD>(pixels.size() * 4), &written, nullptr);
+            CloseHandle(output);
+        }
+    }
+};
+}
+
 namespace {
 
 int failures = 0;
@@ -134,6 +193,20 @@ int g_owner_keys = 0;
 int g_ime_probe = -1; // 1 = owner had an input context while the menu was open
 constexpr UINT_PTR kWatchdog = 77;
 constexpr UINT kImeProbe = WM_APP + 77;
+constexpr UINT_PTR kMouseTreeTimer = 78;
+int g_mouse_stage = -1;
+int g_mouse_max_windows = 0;
+bool g_mouse_click = false;
+bool g_pointer_available = true;
+
+BOOL CALLBACK CollectMenuWindows(HWND hwnd, LPARAM data) {
+    wchar_t name[64]{};
+    GetClassNameW(hwnd, name, 64);
+    if (IsWindowVisible(hwnd) && std::wstring_view(name) == L"PulseFluentMenu")
+        reinterpret_cast<std::vector<HWND>*>(data)->push_back(hwnd);
+    return TRUE;
+}
+
 
 bool HasInputContext(HWND hwnd) {
     HIMC context = ImmGetContext(hwnd);
@@ -143,6 +216,35 @@ bool HasInputContext(HWND hwnd) {
 
 LRESULT CALLBACK OwnerProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN || msg == WM_CHAR || msg == WM_SYSCHAR) ++g_owner_keys;
+    if (msg == WM_TIMER && wparam == kMouseTreeTimer && g_mouse_stage >= 0) {
+        std::vector<HWND> windows;
+        EnumThreadWindows(GetCurrentThreadId(), CollectMenuWindows, reinterpret_cast<LPARAM>(&windows));
+        g_mouse_max_windows = (std::max)(g_mouse_max_windows, static_cast<int>(windows.size()));
+        if (windows.size() == static_cast<size_t>(g_mouse_stage + 1)) {
+            // Newly shown child is the topmost menu in this thread's z-order.
+            HWND target = windows.front();
+            if (g_mouse_stage == 0) {
+                for (HWND window : windows) {
+                    wchar_t title[32]{}; GetWindowTextW(window, title, 32);
+                    if (std::wstring_view(title) == L"PulseMenu") target = window;
+                }
+            }
+            const LPARAM point = MAKELPARAM(40, 38); // center of first 28-DIP row, including shadow
+            POINT screen_point{40, 38};
+            ClientToScreen(target, &screen_point);
+            const BOOL moved = SetCursorPos(screen_point.x, screen_point.y);
+            if (!moved) {
+                g_pointer_available = false;
+                pulse::ui::FluentMenuTestPeer::HoverAt(*g_menu, target, {40, 38});
+            } else {
+                PostMessageW(target, WM_MOUSEMOVE, 0, point);
+            }
+            if (g_mouse_stage == 3) pulse::ui::FluentMenuTestPeer::SaveCascade(*g_menu);
+            if (g_mouse_click || g_mouse_stage == 3) PostMessageW(target, WM_LBUTTONUP, 0, point);
+            ++g_mouse_stage;
+        }
+        return 0;
+    }
     if (msg == WM_TIMER && wparam == kWatchdog && g_menu) g_menu->Dismiss(); // never hang the test
     if (msg == kImeProbe) g_ime_probe = HasInputContext(hwnd) ? 1 : 0;
     return DefWindowProcW(hwnd, msg, wparam, lparam);
@@ -180,7 +282,7 @@ int Press(FluentMenu& menu, POINT at, std::initializer_list<std::pair<UINT, WPAR
     return command;
 }
 
-void GuiChecks() {
+void GuiChecks(bool nested_only = false, float scale = 1.0f, bool dark = false) {
     WNDCLASSW wc{};
     wc.lpfnWndProc = OwnerProc;
     wc.hInstance = GetModuleHandleW(nullptr);
@@ -193,9 +295,11 @@ void GuiChecks() {
         pulse::ui::Compositor compositor;
         Check(g_owner && compositor.Init(g_owner), "create menu test compositor");
         if (!compositor.DwriteFactory()) return;
+        compositor.RecreateTextFormats(scale);
         FluentMenu menu;
+        menu.SetTheme(dark, D2D1::ColorF(0.2f, 0.4f, 0.8f));
         g_menu = &menu;
-        Check(menu.Create(g_owner, &compositor, 1.0f), "create real Fluent menu");
+        Check(menu.Create(g_owner, &compositor, scale), "create real Fluent menu");
         // Open away from the cursor so a resting mouse cannot steal the hover.
         POINT cursor{};
         GetCursorPos(&cursor);
@@ -206,6 +310,49 @@ void GuiChecks() {
         const POINT at{ cursor.x < mid_x ? mi.rcWork.right - 420 : mi.rcWork.left + 40,
                         cursor.y < mid_y ? mi.rcWork.bottom - 480 : mi.rcWork.top + 40 };
 
+        if (nested_only) {
+            menu.SetTopmost(true);
+            auto leaf = Row(8123, L"Run", L'R');
+            auto third = Row(0, L"Third", L'T'); third.children = {leaf};
+            auto second = Row(0, L"Second", L'S'); second.children = {third, Row(8124, L"Sibling", L'B')};
+            auto root = Row(0, L"Vendor", L'V'); root.children = {second};
+            auto press_tree = [&](std::initializer_list<WPARAM> keys) {
+                for (auto key : keys) PostMessageW(g_owner, WM_KEYDOWN, key, 0);
+                SetTimer(g_owner, kWatchdog, 1000, nullptr);
+                const int command = menu.TrackPopup(at, {root});
+                KillTimer(g_owner, kWatchdog);
+                MSG left{};
+                while (PeekMessageW(&left, g_owner, WM_KEYFIRST, WM_KEYLAST, PM_REMOVE)) {}
+                while (PeekMessageW(&left, g_owner, WM_TIMER, WM_TIMER, PM_REMOVE)) {}
+                return command;
+            };
+            Check(press_tree({'V', 'S', 'T', 'R'}) == 8123, "four-level mnemonic cascade invokes exact leaf");
+            Check(press_tree({VK_RIGHT, VK_RIGHT, VK_RIGHT, VK_RETURN}) == 8123,
+                  "Right opens every nested level and Enter invokes the leaf");
+            Check(press_tree({'V', 'S', 'T', VK_LEFT, VK_DOWN, VK_RETURN}) == 8124,
+                  "Left closes one level and keeps parent sibling navigation");
+            Check(press_tree({'V', 'S', 'T', VK_ESCAPE, VK_DOWN, VK_RETURN}) == 8124,
+                  "Escape closes one level without dismissing the whole tree");
+            POINT original_cursor{};
+            GetCursorPos(&original_cursor);
+            for (bool click : {false, true}) {
+                g_mouse_stage = 0; g_mouse_max_windows = 0; g_mouse_click = click;
+                SetTimer(g_owner, kMouseTreeTimer, 180, nullptr);
+                SetTimer(g_owner, kWatchdog, 4000, nullptr);
+                const int command = menu.TrackPopup(at, {root});
+                KillTimer(g_owner, kMouseTreeTimer); KillTimer(g_owner, kWatchdog);
+                g_mouse_stage = -1;
+                SetCursorPos(original_cursor.x, original_cursor.y);
+                std::printf("[INFO] mouse cascade command=%d visible=%d click=%d\n", command, g_mouse_max_windows, click ? 1 : 0);
+                Check(command == 8123 && g_mouse_max_windows == 4,
+                      click ? "mouse clicks retain all ancestor windows and invoke fourth-level leaf"
+                            : "hover state machine and real dwell timer open four cards and invoke leaf");
+                MSG left{};
+                while (PeekMessageW(&left, g_owner, WM_TIMER, WM_TIMER, PM_REMOVE)) {}
+            }
+            if (!g_pointer_available) std::printf("[LIMIT] SetCursorPos failed: physical pointer hover not verified; direct OnMouse/OnSubMouse plus real modal timer verified\n");
+            g_menu = nullptr;
+        } else {
         Check(Press(menu, at, { { WM_KEYDOWN, VK_RETURN } }) == 1, "Enter still invokes the highlighted row");
         Check(Press(menu, at, { { WM_KEYDOWN, 'T' } }) == 2, "T invokes Cut from the icon strip");
         Check(Press(menu, at, { { WM_KEYDOWN, 'E' } }) == 8000, "E invokes the Explorer row labelled (E)");
@@ -261,6 +408,7 @@ void GuiChecks() {
         } else {
             std::printf("[INFO] no focusable input context in this session; IME checks skipped\n");
         }
+        }
         g_menu = nullptr;
     }
     DestroyWindow(g_owner);
@@ -270,10 +418,12 @@ void GuiChecks() {
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
-    PureChecks();
+    const bool nested_only = argc > 1 && std::wstring(argv[1]) == L"--nested-only";
+    if (!nested_only) PureChecks();
     if (argc > 1 && std::wstring(argv[1]) == L"--pure-only") return failures ? 1 : 0;
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-    GuiChecks();
+    GuiChecks(nested_only, argc > 2 ? static_cast<float>(_wtof(argv[2])) : 1.0f,
+              argc > 3 && std::wstring(argv[3]) == L"dark");
     CoUninitialize();
     return failures ? 1 : 0;
 }

@@ -1,9 +1,10 @@
-#include "../common/volume_path.h"
+﻿#include "../common/volume_path.h"
 // Keep MF header feature gates consistent with the Windows 8.1 app target.
 // The project NTDDI value is newer than WINVER in current Windows SDK headers.
 #undef NTDDI_VERSION
 #define NTDDI_VERSION 0x06030000
 #include "video_preview.h"
+#include "preview_resource_budget.h"
 #include "../common/runtime_log.h"
 #include "../common/path_utils.h"
 #include "../common/preview_packs.h"
@@ -305,6 +306,15 @@ LRESULT CALLBACK VideoPreview::VideoProc(HWND hwnd, UINT message, WPARAM wparam,
 
 void VideoPreview::Open(HWND owner, const std::wstring& path, bool card) {
     Reset();
+    auto lease = VideoWorkerBudget().TryAcquire();
+    if (!lease) {
+        state_ = std::make_shared<Shared>();
+        state_->path = path;
+        state_->snapshot.error = HRESULT_FROM_WIN32(ERROR_BUSY);
+        state_->finished = true;
+        state_->released.set_value();
+        return;
+    }
     static std::once_flag registered;
     std::call_once(registered, [] {
         WNDCLASSW wc{};
@@ -327,7 +337,9 @@ void VideoPreview::Open(HWND owner, const std::wstring& path, bool card) {
     SetWindowLongPtrW(child_, GWLP_USERDATA,
         reinterpret_cast<LONG_PTR>(new std::shared_ptr<Shared>(state_)));
     try {
-        std::thread(Run, state_, path).detach();
+        std::thread([state = state_, path, lease = std::move(lease)]() mutable {
+            Run(std::move(state), path);
+        }).detach();
     } catch (...) {
         state_->snapshot.error = E_OUTOFMEMORY;
         state_->finished.store(true);
@@ -488,6 +500,10 @@ void VideoPreview::Step() {
     state_->snapshot.control_error = S_OK;
 }
 
+#ifdef PULSE_VIDEO_PREVIEW_TESTING
+void (*g_video_preview_open_for_test)() = nullptr;
+#endif
+
 void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
     struct Finish {
         std::shared_ptr<Shared> state;
@@ -503,6 +519,9 @@ void VideoPreview::Run(std::shared_ptr<Shared> state, std::wstring path) {
                 PostMessageW(state->child, kRetireVideo, 0, reinterpret_cast<LPARAM>(state.get()));
         }
     } finish{state};
+#ifdef PULSE_VIDEO_PREVIEW_TESTING
+    if (g_video_preview_open_for_test) { g_video_preview_open_for_test(); return; }
+#endif
     const ULONGLONG opened_at = GetTickCount64();
     diagnostics::runtime::Event("playback_open", {{"session", state->session},
         {"remote", path.rfind(L"\\\\", 0) == 0}, {"card", state->card}});

@@ -29,6 +29,25 @@ bool NativeReasonIs(const ContractDecision& d, NativeReason reason) {
 }
 }
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--yjk-open-contract") {
+        for (const auto* pattern : {u"*.*", u"*.dwg", u"*.dwg;*.dxf||", u"*.dxf||;*.dwg"}) {
+            auto calls = Baseline();
+            calls.push_back(Text(Setting::DefaultExtension, u"dwg||"));
+            auto types = Types(); types.filters = {{u"Drawing", pattern}}; calls.push_back(types);
+            const auto decision = PrepareFileDialogContract(DialogFactory::Open, calls, Id(), AccessPolicy::LocalOpenV1);
+            Check(decision.request && RuntimeContractCertified(decision) && decision.open_default_extension == u"dwg||",
+                "Open preserves pipe default without truncation and certifies");
+            Check(decision.request && std::get<wire::Request>(decision.request->body).filters[0].pattern == pattern,
+                "Open keeps literal pipe filter instead of broadening it");
+        }
+        auto calls = Baseline(); calls.push_back(Text(Setting::DefaultExtension, u"dwg||"));
+        const auto decision = PrepareFileDialogContract(DialogFactory::Open, calls, Id(), AccessPolicy::LocalOpenV1);
+        Check(decision.request && decision.open_default_extension == u"dwg||", "pipe default without filters stays literal");
+        calls = Baseline(DialogFactory::Save); calls.push_back(Text(Setting::DefaultExtension, u"dwg||"));
+        Check(!PrepareFileDialogContract(DialogFactory::Save, calls, Id(), AccessPolicy::LocalSaveV1).request,
+            "Save pipe default stays outside the supported contract");
+        std::cout << "Checks=" << checks << " failures=" << failures << '\n'; return failures ? 1 : 0;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "--native-options") {
         PreparationContext context;
         context.native_options_supported = true;

@@ -5,6 +5,7 @@
 // offline files) are never opened: they read as unknown.
 #include "media_folder.h"
 #include <windows.h>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -30,6 +31,7 @@ struct Job {
     DWORD attrs = 0;
     Kind kind = Kind::None;
     const void* owner = nullptr;  // who asked (a tab); see Request
+    std::shared_ptr<std::atomic<bool>> cancelled; // owner request generation
 };
 
 // "SONY" + "ILCE-7M3" → "SONY ILCE-7M3"; "Canon" + "Canon EOS R5" → "Canon EOS R5".
@@ -42,6 +44,10 @@ Props ReadProps(const Job& job);
 // Replaces whatever `owner` still has queued (its folder changed) and reads
 // these first; paths whose cached values are current are skipped.
 void Request(const void* owner, std::vector<Job> jobs);
+// Stops queued work and rejects completion of this owner's in-flight read.
+void Cancel(const void* owner);
+// Only publications directly inside this folder invalidate its ordering.
+uint64_t Revision(const std::wstring& folder);
 // Bumped when a batch is stored (up to 32 files or 150 ms of reading); the window timer repaints and re-sorts
 // media-ordered listings when it moves (like CloudSyncProbe::Revision).
 uint64_t Revision();

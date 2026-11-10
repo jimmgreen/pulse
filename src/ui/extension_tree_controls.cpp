@@ -74,6 +74,8 @@ float MeasureExtensionControl(const UiNode &node, std::wstring_view text, float 
     height = std::max(height, MeasureExtensionExtraControl(node, width, scale, painter));
     if (node.type == UiNodeType::SplitPane)
         height = std::max(height, 240 * scale);
+    if (node.type == UiNodeType::Text && !node.min_height)
+        height = 0;  // text takes the height of its lines; a control's 32 DIP floor only padded it
     if (node.type == UiNodeType::Text)
         height = std::max(height, node.text_role == "caption"   ? painter.MeasureWrappedCaptionHeight(text, width)
                                   : node.text_role == "section" ? painter.MeasureWrappedSectionHeight(text, width)
@@ -87,7 +89,8 @@ float MeasureExtensionControl(const UiNode &node, std::wstring_view text, float 
     if (node.type == UiNodeType::EmptyState)
         height = std::max(height, 180 * scale);
     if (node.type == UiNodeType::Slider)
-        height = std::max(height, fluent::StepSliderHeight(scale));
+        height = std::max(height, fluent::StepSliderHeight(scale) +
+                                      (node.options.empty() ? 0.0f : painter.MeasureWrappedCaptionHeight(L"0", width)));
     return height;
 }
 int ExtensionControlPart(const UiNode &node, D2D1_RECT_F bounds, float x, float y, float scale,
@@ -204,7 +207,23 @@ bool DrawExtensionControl(const UiNode &node, const ExtensionControlVisual &valu
         spec.state = state;
         spec.stops = node.stops;
         spec.position = static_cast<float>(SendMessageW(value.window, TBM_GETPOS, 0, 0));
+        // Options name the stops: a caption under each one, the current stop in the text color.
+        if (!node.options.empty())
+            spec.bounds.bottom = std::min(bounds.bottom, bounds.top + fluent::StepSliderHeight(scale));
         painter.DrawStepSlider(spec);
+        const int stops = std::max(node.stops, 2);
+        const int current = static_cast<int>(std::lround(spec.position));
+        for (int index = 0; index < stops && index < static_cast<int>(node.options.size()); ++index) {
+            const float x = fluent::StepSliderStopX(spec.bounds, stops, static_cast<float>(index), scale);
+            const float half = 60 * scale;
+            auto cell = D2D1::RectF(x - half, spec.bounds.bottom, x + half, bounds.bottom);
+            auto align = fluent::HorizontalAlignment::Center;
+            if (index == 0) { cell.left = bounds.left; cell.right = bounds.left + 2 * half; align = fluent::HorizontalAlignment::Left; }
+            if (index + 1 == stops) { cell.right = bounds.right; cell.left = bounds.right - 2 * half; align = fluent::HorizontalAlignment::Right; }
+            painter.DrawText(Wide(node.options[static_cast<size_t>(index)]), cell, compositor.SmallFormat(),
+                             !state.enabled ? theme.text_disabled : index == current ? theme.text : theme.text_secondary,
+                             align);
+        }
         break;
     }
     case UiNodeType::Tabs:
@@ -366,12 +385,22 @@ bool DrawExtensionControl(const UiNode &node, const ExtensionControlVisual &valu
                              theme.text,
                              node.alignment == "center" ? fluent::HorizontalAlignment::Center
                                                         : fluent::HorizontalAlignment::Right);
-        } else if (node.text_role == "caption")
-            painter.DrawWrappedCaption(text, {bounds.left, bounds.top}, bounds.right - bounds.left, theme.text);
-        else if (node.text_role == "section")
-            painter.DrawWrappedSection(text, {bounds.left, bounds.top}, bounds.right - bounds.left, theme.text);
-        else
-            painter.DrawWrappedBody(text, {bounds.left, bounds.top}, bounds.right - bounds.left, theme.text);
+        } else {
+            // Text shorter than its control-height box is centred in it, so a label lines up with
+            // the field beside it in a grid row.
+            const float width = bounds.right - bounds.left;
+            const float measured = node.text_role == "caption"   ? painter.MeasureWrappedCaptionHeight(text, width)
+                                   : node.text_role == "section" ? painter.MeasureWrappedSectionHeight(text, width)
+                                                                 : painter.MeasureWrappedBodyHeight(text, width);
+            const D2D1_POINT_2F origin{bounds.left,
+                                       bounds.top + std::max(0.0f, (bounds.bottom - bounds.top - measured) / 2)};
+            if (node.text_role == "caption")
+                painter.DrawWrappedCaption(text, origin, width, theme.text);
+            else if (node.text_role == "section")
+                painter.DrawWrappedSection(text, origin, width, theme.text);
+            else
+                painter.DrawWrappedBody(text, origin, width, theme.text);
+        }
         break;
     case UiNodeType::SplitPane: {
         float ratio = static_cast<float>(SendMessageW(value.window, TBM_GETPOS, 0, 0)) / 100;
@@ -401,6 +430,17 @@ bool DrawExtensionControl(const UiNode &node, const ExtensionControlVisual &valu
     default:
         if (DrawExtensionExtraControl(node, effective, compositor, painter, theme))
             break;
+        if (node.type == UiNodeType::Group && node.bordered) {
+            // A settings card: the bounds cover the whole card (see ExtensionTreeLayout).
+            const float radius = 8 * scale;
+            painter.FillRoundedRect(bounds, radius, theme.surface_card);
+            painter.StrokeRoundedRect(bounds, radius, theme.stroke_card);
+            if (!text.empty())
+                painter.DrawText(text, D2D1::RectF(bounds.left + 16 * scale, bounds.top + 12 * scale,
+                                                   bounds.right - 16 * scale, bounds.top + 44 * scale),
+                                 compositor.HeaderFormat(), theme.text);
+            break;
+        }
         painter.DrawText(text, bounds,
                          node.type == UiNodeType::Group ? compositor.HeaderFormat() : compositor.TextFormat(),
                          theme.text);
