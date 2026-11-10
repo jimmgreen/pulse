@@ -69,7 +69,11 @@ class Author:
 
     def inside(self, value, exists=True):
         path = (self.workspace/value).resolve()
-        if not path.is_relative_to(self.workspace) or path == self.workspace:
+        try:
+            path.relative_to(self.workspace)
+        except ValueError as error:
+            raise AuthorError('path must remain inside the configured author workspace') from error
+        if path == self.workspace:
             raise AuthorError('path must remain inside the configured author workspace')
         if exists and not path.exists():
             raise AuthorError('workspace path does not exist: '+str(path))

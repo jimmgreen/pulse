@@ -24,7 +24,7 @@ def stop_and_confirm_host(pid):
     kernel.TerminateProcess.restype = wintypes.BOOL
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel.CloseHandle.restype = wintypes.BOOL
-    handle = kernel.OpenProcess(0x00100000, False, pid)
+    handle = kernel.OpenProcess(0x00100000 | 0x0001, False, pid)
     if not handle:
         error = ctypes.get_last_error()
         if error == 87:
@@ -46,6 +46,9 @@ def stop_and_confirm_host(pid):
         user.EnumWindows(close_window, 0)
         if kernel.WaitForSingleObject(handle, 10000) == 258:
             subprocess.run(['taskkill', '/PID', str(pid), '/T', '/F'], capture_output=True, timeout=15)
+        if kernel.WaitForSingleObject(handle, 10000) == 258:
+            if not kernel.TerminateProcess(handle, 1):
+                raise ctypes.WinError(ctypes.get_last_error())
         if kernel.WaitForSingleObject(handle, 10000) != 0:
             raise RuntimeError(f'isolated Pulse host PID {pid} did not signal exit')
     finally:

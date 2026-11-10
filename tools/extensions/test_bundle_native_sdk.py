@@ -6,6 +6,9 @@ import subprocess
 import sys
 import unittest
 import zipfile
+import shutil
+from unittest.mock import patch
+import generate_native_catalog
 import bundle_native_sdk
 import test_native_sdk
 
@@ -40,13 +43,45 @@ class NativeBundleTests(unittest.TestCase):
                          "tools/extensions/native_author_mcp.py", "examples/native/directory-workbench/plugin.cpp",
                          "examples/native/directory-workbench/manifest.json", "examples/native/directory-workbench/README.md"):
                 self.assertIn(name, manifest["files"])
-                self.assertEqual((extracted / name).read_bytes(), (bundle_native_sdk.ROOT / name).read_bytes())
+                self.assertEqual((extracted / name).read_bytes(), bundle_native_sdk.source_bytes(bundle_native_sdk.ROOT, name))
             result = subprocess.run([sys.executable, str(extracted / "tools/extensions/pulse_ext.py"), "--json", "native-manifest", "--help"],
                                     capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("--library", json.loads(result.stdout)["help"])
             with self.assertRaises(FileExistsError):
                 bundle_native_sdk.bundle(archive)
+
+    def test_catalog_and_bundle_header_contracts_ignore_checkout_line_endings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in bundle_native_sdk.FILES:
+                destination = root / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(bundle_native_sdk.ROOT / name, destination)
+            schemas = root / "schemas/extensions"
+            schemas.mkdir(parents=True, exist_ok=True)
+            for name in ("manifest.schema.json", "ui-model.schema.json"):
+                shutil.copyfile(bundle_native_sdk.ROOT / "schemas/extensions" / name, schemas / name)
+            expected = generate_native_catalog.outputs()
+            for path in (root / "sdk/native/include/pulse").iterdir():
+                data = path.read_bytes().replace(b"\r\n", b"\n")
+                path.write_bytes(data.replace(b"\n", b"\r\n"))
+            with patch.object(generate_native_catalog, "ROOT", root):
+                actual = generate_native_catalog.outputs()
+            for path, text in expected.items():
+                self.assertEqual(actual[root / path.relative_to(bundle_native_sdk.ROOT)], text)
+            manifest = bundle_native_sdk.bundle(root / "sdk.zip", root)
+            with zipfile.ZipFile(root / "sdk.zip") as archive:
+                catalog = json.loads(archive.read("sdk/native/api-catalog.json"))
+                for interface in catalog["interfaces"]:
+                    if "headerContract" not in interface:
+                        continue
+                    name = "sdk/native/" + interface["header"]
+                    data = archive.read(name)
+                    self.assertNotIn(b"\r\n", data)
+                    self.assertEqual(hashlib.sha256(data).hexdigest(), interface["headerContract"]["sha256"])
+                    self.assertEqual(data.decode("utf-8"), interface["headerContract"]["text"])
+                    self.assertEqual(manifest["files"][name], interface["headerContract"]["sha256"])
 
     def test_directory_transfer_manifest_uses_only_required_resources(self):
         path = bundle_native_sdk.ROOT / "examples/native/directory-transfer/manifest.json"
@@ -128,7 +163,7 @@ class NativeBundleTests(unittest.TestCase):
                 ("pulse.tasks", "tasks.h", ["create", "cancel", "get", "release"])):
             with self.subTest(interface=name):
                 interface = next(item for item in catalog["interfaces"] if item["name"] == name)
-                header = (bundle_native_sdk.ROOT / "sdk/native/include/pulse" / filename).read_bytes()
+                header = bundle_native_sdk.source_bytes(bundle_native_sdk.ROOT, "sdk/native/include/pulse/" + filename)
                 self.assertEqual(interface["headerContract"]["sha256"], hashlib.sha256(header).hexdigest())
                 self.assertEqual(interface["headerContract"]["text"], header.decode("utf-8"))
                 self.assertEqual(interface["operations"], operations)
@@ -184,7 +219,7 @@ class NativeBundleTests(unittest.TestCase):
     def test_native_data_discovery_matches_public_contract(self):
         catalog = bundle_native_sdk.catalog()
         data = next(item for item in catalog["interfaces"] if item["name"] == "pulse.ui.data")
-        header = (bundle_native_sdk.ROOT / "sdk/native/include/pulse/ui_data.h").read_bytes()
+        header = bundle_native_sdk.source_bytes(bundle_native_sdk.ROOT, "sdk/native/include/pulse/ui_data.h")
         self.assertEqual(data["headerContract"]["sha256"], hashlib.sha256(header).hexdigest())
         self.assertEqual(data["headerContract"]["text"], header.decode("utf-8"))
         self.assertEqual(data["version"], 1)

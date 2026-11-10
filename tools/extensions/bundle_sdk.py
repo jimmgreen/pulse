@@ -30,6 +30,7 @@ FIXED_FILES = (
     'schemas/extensions/action-exposure-policy.json',
     'docs/native-packages.md',
     'sdk/native/api-catalog.json',
+    'sdk/native/samples/archive/plugin.cpp',
     'sdk/native/ui-model.schema.json',
     'tools/extensions/package_signing.py',
     'tools/extensions/pulse_ext.py',

@@ -14,8 +14,7 @@ import pulse_ext
 
 class ContractComparisonTests(unittest.TestCase):
     def setUp(self):
-        self.api = generate_sdk.describe(generate_sdk.read_json(generate_sdk.SCHEMA),
-                                         generate_sdk.read_json(generate_sdk.METADATA))
+        self.api = generate_sdk.describe(generate_sdk.read_json(generate_sdk.SCHEMA))
 
     def changed(self):
         result = copy.deepcopy(self.api)
@@ -35,24 +34,35 @@ class ContractComparisonTests(unittest.TestCase):
         reordered = dict(reversed(list(self.api.items())))
         self.assertEqual(contract.fingerprint(self.api), contract.fingerprint(reordered))
 
-    def test_same_version_with_removed_capability_requires_review(self):
+    def test_same_version_with_removed_native_interface_requires_review(self):
         modified = self.changed()
-        modified['capabilities'].remove('workflow.run')
+        interfaces = modified['nativeSdk']['catalog']['interfaces']
+        interfaces[:] = [item for item in interfaces if item['name'] != 'pulse.commands']
         result = contract.compare(self.api, modified)
         self.assertEqual(result['status'], 'review-required')
-        self.assertEqual(result['capabilities']['removed'], ['workflow.run'])
+        self.assertIn('/nativeSdk/catalog/interfaces', {item['path'] for item in result['changes']})
+        self.assertEqual(result['capabilities']['removed'], [])
         self.assertEqual(result['baselineApiVersion'], result['currentApiVersion'])
 
-    def test_changed_resource_result_and_budget_are_not_hidden_by_same_version(self):
+    def test_removed_capability_and_binding_deltas_remain_explicit(self):
+        baseline = self.changed()
+        baseline['capabilities'] = ['legacy.capability']
+        baseline['bindings'] = ['legacy.binding']
+        result = contract.compare(baseline, self.api)
+        self.assertEqual(result['capabilities']['removed'], ['legacy.capability'])
+        self.assertEqual(result['bindings']['removed'], ['legacy.binding'])
+        self.assertEqual(result['status'], 'review-required')
+
+    def test_changed_native_budget_and_schema_are_not_hidden_by_same_version(self):
         modified = self.changed()
-        modified['resourceApi']['limits']['auditOwnRecords'] = 1
-        modified['resourceApi']['responseSchema']['additionalProperties'] = False
+        modified['nativeSdk']['catalog']['interfaces'][0]['limits']['pendingRequests'] = 1
+        modified['manifestSchema']['additionalProperties'] = True
         paths = {item['path'] for item in contract.compare(self.api, modified)['changes']}
-        self.assertIn('/resourceApi/limits/auditOwnRecords', paths)
-        self.assertIn('/resourceApi/responseSchema/additionalProperties', paths)
+        self.assertIn('/nativeSdk/catalog/interfaces', paths)
+        self.assertIn('/manifestSchema/additionalProperties', paths)
 
     def test_identity_is_not_trusted_if_content_tampered(self):
-        self.api['limits']['commands'] += 1
+        self.api['limits']['manifestBytes'] += 1
         with self.assertRaisesRegex(ValueError, 'identity'):
             contract.validate(self.api)
 
@@ -98,7 +108,7 @@ class ContractComparisonTests(unittest.TestCase):
             for changed, expected in ((False, 0), (True, 2)):
                 current = self.changed()
                 if changed:
-                    current['capabilities'].pop()
+                    current['nativeSdk']['abiVersion'] += 1
                 output = io.StringIO()
                 with patch.object(pulse_ext, 'host_call', return_value=current) as host, contextlib.redirect_stdout(output):
                     code = pulse_ext.main(['--json', 'compare-sdk', str(baseline), '--require-identical'])

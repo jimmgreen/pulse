@@ -35,7 +35,7 @@ class GenerationTests(unittest.TestCase):
         self.assertEqual(api["capabilities"], [])
         self.assertEqual(api["bindings"], [])
         self.assertEqual(api["nativeSdk"]["catalogPath"], "sdk/native/api-catalog.json")
-        self.assertEqual(api["nativeSdk"]["catalog"]["sdkPreview"], 2)
+        self.assertEqual(api["nativeSdk"]["catalog"]["sdkPreview"], 3)
         self.assertTrue(any(item["name"] == "pulse.commands" for item in api["nativeSdk"]["catalog"]["interfaces"]))
         self.assertEqual(api["templates"], list(template_catalog.names()))
 

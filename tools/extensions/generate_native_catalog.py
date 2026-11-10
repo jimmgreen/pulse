@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def header_interface(filename, name, table_name, interface_macro, version_macro, operations, version=1):
-    header = (ROOT / "sdk/native/include/pulse" / filename).read_bytes()
+    header = (ROOT / "sdk/native/include/pulse" / filename).read_bytes().replace(b"\r\n", b"\n")
     text = header.decode("utf-8")
     table = re.search(r"typedef struct " + table_name + r"\s*\{(.*?)\}\s*" + table_name + ";", text, re.S)
     if (not table or f'#define {interface_macro} "{name}"' not in text or
@@ -28,7 +28,7 @@ def header_interface(filename, name, table_name, interface_macro, version_macro,
 def outputs():
     path = ROOT / "sdk/native/api-catalog.json"
     catalog = json.loads(path.read_text(encoding="utf-8"))
-    header = (ROOT / "sdk/native/include/pulse/ui_model.h").read_bytes()
+    header = (ROOT / "sdk/native/include/pulse/ui_model.h").read_bytes().replace(b"\r\n", b"\n")
     text = header.decode("utf-8")
     node_types = [{"name": name, "value": int(value)} for name, value in
                   re.findall(r"(PULSE_UI_MODEL_[A-Z_]+)\s*=\s*(\d+)", text)
@@ -73,7 +73,7 @@ def outputs():
         "unavailable": ["non-null data_source", "context.* bindings", "non-null action.data_operation"],
         "validationStatus": "27 general-purpose types represented; does not assert every interaction or theme/DPI capture passed"
     }
-    data_header = (ROOT / "sdk/native/include/pulse/ui_data.h").read_bytes()
+    data_header = (ROOT / "sdk/native/include/pulse/ui_data.h").read_bytes().replace(b"\r\n", b"\n")
     data_text = data_header.decode("utf-8")
     data_table = re.search(r"typedef struct PulseUiDataV1 \{(.*?)\} PulseUiDataV1;", data_text, re.S)
     if (not data_table or '#define PULSE_UI_DATA_INTERFACE "pulse.ui.data"' not in data_text or

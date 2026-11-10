@@ -43,7 +43,11 @@ def validate(root):
         if (not name.startswith(allowed) and name not in authoring_files) or PurePosixPath(name).suffix.lower() in (".dll", ".exe", ".lib"):
             raise ValueError("Private or binary content in source SDK")
         path = (root / name).resolve()
-        if not path.is_relative_to(root) or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+        try:
+            path.relative_to(root)
+        except ValueError as error:
+            raise ValueError("SDK path escapes its root") from error
+        if hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             raise ValueError("SDK content mismatch")
     catalog = json.loads((root / "sdk/native/api-catalog.json").read_text(encoding="utf-8"))
     if any(item["name"] == "pulse.ui" for item in catalog["interfaces"]):

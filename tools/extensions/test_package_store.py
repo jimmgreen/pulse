@@ -1,3 +1,6 @@
+import ctypes
+import os
+import threading
 import hashlib
 import json
 from pathlib import Path
@@ -47,6 +50,57 @@ class StoreTests(unittest.TestCase):
         self.assertTrue(store.update(self.root, "sample", "uninstall")["immutableVersionsRetained"])
         self.assertEqual(store.listing(self.root)["packages"], [])
         self.assertEqual(len(list((self.root / "versions").glob("*.json"))), 2)
+
+    @unittest.skipUnless(os.name == "nt", "Windows replacement sharing semantics")
+    def test_registry_commit_waits_for_short_lived_target_reader(self):
+        self.root.mkdir()
+        target = self.root / "registry.json"
+        target.write_bytes(b"original")
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32,
+                                      ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+        kernel.CreateFileW.restype = ctypes.c_void_p
+        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+        handle = kernel.CreateFileW(str(target), 0x80000000, 5, None, 3, 0x200000, None)
+        self.assertNotEqual(handle, ctypes.c_void_p(-1).value)
+        release = threading.Timer(.12, lambda: kernel.CloseHandle(handle))
+        release.start()
+        registry = {"formatVersion": 1, "packages": []}
+        try:
+            store.save(self.root, registry)
+        finally:
+            release.join()
+        self.assertEqual(json.loads(target.read_bytes()), registry)
+        self.assertEqual(list(self.root.glob(".registry-*")), [])
+
+    def test_registry_commit_retry_budget_preserves_original(self):
+        self.root.mkdir()
+        target = self.root / "registry.json"
+        target.write_bytes(b"original")
+        registry = {"formatVersion": 1, "packages": []}
+        for code in (5, 32, 33):
+            blocked = OSError("injected Windows replacement failure")
+            blocked.winerror = code
+            with self.subTest(winerror=code), patch.object(store.os, "replace", side_effect=blocked) as replace, \
+                    patch.object(store.time, "sleep") as sleep:
+                with self.assertRaises(OSError) as error:
+                    store.save(self.root, registry)
+                self.assertIs(error.exception, blocked)
+                self.assertEqual(replace.call_count, 50)
+                self.assertEqual(sleep.call_count, 49)
+                self.assertTrue(all(call.args == (.01,) for call in sleep.call_args_list))
+            self.assertEqual(target.read_bytes(), b"original")
+            self.assertEqual(list(self.root.glob(".registry-*")), [])
+        unrelated = OSError("injected invalid parameter")
+        unrelated.winerror = 87
+        with patch.object(store.os, "replace", side_effect=unrelated) as replace, patch.object(store.time, "sleep") as sleep:
+            with self.assertRaises(OSError) as error:
+                store.save(self.root, registry)
+            self.assertIs(error.exception, unrelated)
+            self.assertEqual(replace.call_count, 1)
+            sleep.assert_not_called()
+        self.assertEqual(target.read_bytes(), b"original")
+        self.assertEqual(list(self.root.glob(".registry-*")), [])
 
     def test_resource_permission_upgrade_requires_acceptance(self):
         store.install(self.root, manifest())

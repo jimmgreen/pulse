@@ -225,7 +225,7 @@ class NativeStoreTests(unittest.TestCase):
     def test_run_revalidates_enabled_binary_without_new_execution_switch(self):
         self.install()
         store.update(self.root, "sample.native", "enable", allow_native=True)
-        with patch.object(cli, "host_call", return_value={"developerFeatures": ["installedDeclarativePackages"]}), \
+        with patch.object(cli, "host_call", return_value={"developerFeatures": ["nativePackages"]}), \
                 patch.object(cli, "validate_bytes"), patch.object(cli.subprocess, "Popen") as popen:
             popen.return_value.pid = 123
             result = cli.run_store(Path("pulse.exe"), self.root, self.directory / "profile")

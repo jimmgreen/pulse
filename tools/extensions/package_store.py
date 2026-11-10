@@ -9,6 +9,7 @@ import stat
 import struct
 import shutil
 import tempfile
+import time
 if os.name == "nt":
     import ctypes
     import msvcrt
@@ -368,7 +369,16 @@ def save(root, registry):
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, root / "registry.json")
+        # A short-lived Windows reader can block atomic replacement. Keep the
+        # previous registry until commit, matching signature-policy publication.
+        for attempt in range(50):
+            try:
+                os.replace(temporary, root / "registry.json")
+                break
+            except OSError as error:
+                if getattr(error, "winerror", None) not in (5, 32, 33) or attempt == 49:
+                    raise
+                time.sleep(.01)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)

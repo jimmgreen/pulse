@@ -564,7 +564,7 @@ class CliTests(unittest.TestCase):
             quote = lambda path: "'" + str(path).replace("'", "''") + "'"
             readme = (destination / "README.md").read_text(encoding="utf-8")
             manifest = destination / "manifest.json"
-            self.assertIn(f"python {quote(script)} --pulse {quote(host)} validate {quote(manifest)}", readme)
+            self.assertIn(f"python {quote(script.resolve())} --pulse {quote(host)} validate {quote(manifest)}", readme)
             self.assertIn(f"& {quote(host)} --extension-manifest {quote(manifest)}", readme)
             self.assertIn("native-manifest", readme)
 
