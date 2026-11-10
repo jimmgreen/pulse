@@ -73,41 +73,46 @@ exit /b %errorlevel%
 & $batch
 if ($LASTEXITCODE -ne 0) { throw 'Release compilation failed' }
 if (-not $SkipTests) {
+    $releaseTestFailures = [System.Collections.Generic.List[string]]::new()
+    function Record-ReleaseTestFailure([string]$message) {
+        $releaseTestFailures.Add($message)
+        Write-Output "[FAIL] $message"
+    }
     foreach ($testName in $testNames) {
         & (Join-Path $build "$testName.exe")
-        if ($LASTEXITCODE -ne 0) { throw "$testName failed" }
+        if ($LASTEXITCODE -ne 0) { Record-ReleaseTestFailure "$testName failed" }
     }
     & (Join-Path $build 'pulse_ops_test.exe') --update-shutdown
-    if ($LASTEXITCODE -ne 0) { throw 'Update shutdown and automatic wait regression failed' }
+    if ($LASTEXITCODE -ne 0) { Record-ReleaseTestFailure 'Update shutdown and automatic wait regression failed' }
     & (Join-Path $build 'pulse_ops_test.exe') --delete-progress-only
-    if ($LASTEXITCODE -ne 0) { throw 'Delete progress rate and remaining-time regression failed' }
+    if ($LASTEXITCODE -ne 0) { Record-ReleaseTestFailure 'Delete progress rate and remaining-time regression failed' }
     & (Join-Path $build 'pulse_playback_controls_test.exe') --timeline-only
-    if ($LASTEXITCODE -ne 0) { throw 'Playback timeline regression failed' }
+    if ($LASTEXITCODE -ne 0) { Record-ReleaseTestFailure 'Playback timeline regression failed' }
     & (Join-Path $build 'pulse_preview_test.exe') --vector-only
-    if ($LASTEXITCODE -ne 0) { throw 'Vector preview regression failed' }
+    if ($LASTEXITCODE -ne 0) { Record-ReleaseTestFailure 'Vector preview regression failed' }
     & (Join-Path $build 'pulse_preview_handler_probe.exe') --cooldown-test
-    if ($LASTEXITCODE -ne 0) { throw 'Preview provider cooldown regression failed' }
+    if ($LASTEXITCODE -ne 0) { Record-ReleaseTestFailure 'Preview provider cooldown regression failed' }
     foreach ($mode in @('--startup-stop', '--shell-roundtrip')) {
         & (Join-Path $build 'pulse_rename_ops_test.exe') $mode
-        if ($LASTEXITCODE -ne 0) { throw "Rename lifecycle check $mode failed" }
+        if ($LASTEXITCODE -ne 0) { Record-ReleaseTestFailure "Rename lifecycle check $mode failed" }
     }
     $env:PULSE_SELFTEST_NO_SCREENSHOTS = '1'
     foreach ($mode in @('--parent-cycle-only', '--quiet-maintenance-only', '--name-pool-only',
         '--maintenance-only', '--usn-only', '--feed-only', '--folder-sizes-only', '--hierarchy-only', '--visibility-cache-only')) {
         & (Join-Path $build 'pulse_index_engine_test.exe') $mode
-        if ($LASTEXITCODE -ne 0) { throw "Index regression $mode failed" }
+        if ($LASTEXITCODE -ne 0) { Record-ReleaseTestFailure "Index regression $mode failed" }
     }
     & (Join-Path $build 'pulse_app_controllers_test.exe') --layout-search-prefs
-    if ($LASTEXITCODE -ne 0) { throw 'Panel layout/preferences regression failed' }
+    if ($LASTEXITCODE -ne 0) { Record-ReleaseTestFailure 'Panel layout/preferences regression failed' }
     foreach ($mode in @('--layout-active-pane', '--network-locations-view')) {
         & (Join-Path $build 'pulse_app_controllers_test.exe') $mode
-        if ($LASTEXITCODE -ne 0) { throw "Panel/network navigation regression $mode failed" }
+        if ($LASTEXITCODE -ne 0) { Record-ReleaseTestFailure "Panel/network navigation regression $mode failed" }
     }
     & (Join-Path $build 'pulse_change_feed_memory_test.exe') --probe
-    if ($LASTEXITCODE -ne 0) { throw 'Opt-in memory probe regression failed' }
+    if ($LASTEXITCODE -ne 0) { Record-ReleaseTestFailure 'Opt-in memory probe regression failed' }
     foreach ($mode in @('--service-start-only', '--shutdown-only', '--live-dedup-only', '--folder-sizes-only')) {
         & (Join-Path $build 'pulse_index_host_stress.exe') $mode
-        if ($LASTEXITCODE -ne 0) { throw "Index lifecycle check $mode failed" }
+        if ($LASTEXITCODE -ne 0) { Record-ReleaseTestFailure "Index lifecycle check $mode failed" }
     }
     $selftestCases = @('rename-editor', 'rename-editor-native', 'operation-toast',
         'filter-controls', 'rename-outside', 'address-editor', 'address-editor-native', 'release-panels-hidden', 'pr-shell', 'pin-reorder', 'snapshot-patch', 'list-columns',
@@ -133,10 +138,10 @@ if (-not $SkipTests) {
         $caseLog = Join-Path $build "selftest-$testCase.log"
         $sourceLog = if ($selftestLogs.ContainsKey($testCase)) { $selftestLogs[$testCase] } else { 'bench_data/selftest_1b2_last.log' }
         Copy-Item $sourceLog $caseLog -ErrorAction SilentlyContinue
-        if (-not $finished) { throw "Selftest $testCase timed out" }
+        if (-not $finished) { Record-ReleaseTestFailure "Selftest $testCase timed out"; continue }
         if ($selftest.ExitCode -ne 0) {
             Get-Content $caseLog -ErrorAction SilentlyContinue | Select-String '\[FAIL\]'
-            throw "Selftest $testCase failed: $($selftest.ExitCode)"
+            Record-ReleaseTestFailure "Selftest $testCase failed: $($selftest.ExitCode)"
         }
     }
     Remove-Item Env:PULSE_SELFTEST_CASE
@@ -151,9 +156,13 @@ if (-not $SkipTests) {
     Remove-Item Env:PULSE_TEST_SEARCH_FLOW, Env:PULSE_TEST_CONTENT_LIVE_SELECTION
     if (-not $liveDone -or $live.ExitCode -ne 0) {
         Get-Content $liveLog -ErrorAction SilentlyContinue
-        throw 'Live content selection regression failed'
+        Record-ReleaseTestFailure 'Live content selection regression failed'
     }
     Remove-Item Env:PULSE_LUMATEXT
+    if ($releaseTestFailures.Count -ne 0) {
+        throw ("Release verification failed ({0}): {1}" -f $releaseTestFailures.Count,
+            ($releaseTestFailures -join '; '))
+    }
     # Strip the embedded test suite and GUI probes from the shipped executable after verification.
     (Get-Content -LiteralPath $batch -Raw).Replace('-DPULSE_WITH_SELFTEST=ON', '-DPULSE_WITH_SELFTEST=OFF -DPULSE_WITH_TEST_HOOKS=OFF').Replace("--target $testTargets", '--target pulse') |
         Set-Content -LiteralPath $batch -Encoding ascii
